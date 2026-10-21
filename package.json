@@ -1,0 +1,15 @@
+{
+  "name": "sentry-six-manager",
+  "version": "0.2.0",
+  "description": "Sentry Six Manager - Sentry Studio viewer and converter as a self-hosted web app with footage management",
+  "private": true,
+  "license": "MIT",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning server/index.js",
+    "test": "node --disable-warning=ExperimentalWarning --test \"test/**/*.test.js\""
+  }
+}

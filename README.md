@@ -1,1 +1,302 @@
-# Sentry-Manager
+# Sentry Six Manager
+
+Watch, convert and look after your Tesla's dashcam archive from any browser.
+Sentry Six Manager runs on your NAS or home server in Docker. It brings the
+[Sentry Studio](https://github.com/ChadR23/Sentry-Six) viewer and converter to
+the web, and adds what an always-on archive needs: vehicles on SMB shares, a
+Recycle Bin, retention policies, jobs and notifications.
+
+![The Viewer: six cameras with the telemetry dashboard](docs/images/viewer.png)
+
+*Screenshots use generated demo footage.*
+
+- **Viewer.** All six cameras in sync, with the telemetry dashboard (speed,
+  gear, Autopilot, blinkers, steering, G-force) and the map.
+- **Encoder.** Converts footage to H.265 or AV1 on the GPU (NVIDIA, AMD
+  including APUs, Intel) or the CPU. Tesla's per-frame telemetry is copied
+  into every converted file and verified, and nothing is converted twice.
+- **Footage.** Every recording per vehicle, filtered by category and date,
+  with Play, Protect and Move to trash.
+- **Recycle Bin and policies.** Old recordings move to the Recycle Bin on a
+  schedule. Nothing is ever deleted unless you empty it yourself.
+- **Secure by default.** HTTPS with its own certificate authority, SMB 3
+  shares that are always signed and encrypted, and a web app that never runs
+  as root.
+- **Phones and tablets.** iPhone 14 and newer, Galaxy S22 and newer, and
+  iPads from 2022 on.
+
+## Install
+
+You need Docker with the Compose plugin.
+
+```bash
+mkdir sentry-six-manager && cd sentry-six-manager
+curl -fsSLO https://raw.githubusercontent.com/skittles-fivem/Sentry-Manager/main/docker-compose.yml
+docker compose up -d
+docker logs sentry-six-manager
+```
+
+The log shows two things you need once:
+
+- the **setup code**. Open `https://<server>:9000`, enter the code and choose
+  your user name and password. Without the code nobody can create the
+  account, not even someone who reaches the page before you.
+- the **fingerprint** of Sentry Six Manager's certificate authority. Install
+  the certificate authority on your devices so browsers trust the page (see
+  [Security](#security)).
+
+Then go to **Settings → Add vehicle**. Everything else is set up in the web
+page; an optional `.env` file (see [`.env.example`](.env.example)) can create
+the account or a first vehicle up front, and set the time zone.
+
+To use a GPU, uncomment its block in `docker-compose.yml` (see [GPU](#gpu)).
+
+## Overview and Footage
+
+![Overview](docs/images/overview.png)
+
+The overview shows each vehicle's archive, the free space on its share and
+the Recycle Bin.
+
+![Footage](docs/images/footage.png)
+
+**Footage** lists every recording: Recent, Sentry and Saved clips, grouped
+into drives and events, by capture date in the vehicle's time zone. Play a
+recording, show its files, protect it, or move it to the Recycle Bin.
+**Select shown** picks up to 100 recordings at once.
+
+## Encoder
+
+![Encoder](docs/images/encoder.png)
+
+The Encoder is Sentry Studio's converter, unchanged.
+
+- **Telemetry is always kept.** Tesla stores speed, GPS, gear, Autopilot and
+  more in every video frame. The converter copies that into the H.265 or AV1
+  file and checks it before it saves anything. Verification cannot be turned
+  off.
+- **Never converted twice.** Clips that are already H.265 or AV1 are skipped,
+  so re-runs and automatic conversion never re-encode footage.
+- **Safe replacement.** In replace mode an original is only removed after its
+  converted copy is verified, and only if it is still exactly the file that
+  was converted (device, inode, size and SHA-256 are checked). The copy is
+  moved in with a no-replace rename, which also holds on SMB.
+- Converted copies can also go to a separate folder (`/data/converted`, or
+  any folder under a vehicle).
+
+### GPU
+
+The converter tries every encoder with a real test encode and uses the
+fastest one that works. In `docker-compose.yml`, uncomment:
+
+| GPU | Encoders | What to uncomment |
+| --- | --- | --- |
+| NVIDIA | `hevc_nvenc`, `av1_nvenc` | the `deploy:` block (needs the NVIDIA Container Toolkit) |
+| AMD card or APU | `hevc_vaapi`, `av1_vaapi` | `devices: - /dev/dri:/dev/dri` |
+| Intel iGPU or Arc | `hevc_qsv`, `av1_qsv`, VA-API | `devices: - /dev/dri:/dev/dri` |
+| none | `libx265`, `libsvtav1` | nothing |
+
+ffmpeg is [jellyfin-ffmpeg](https://github.com/jellyfin/jellyfin-ffmpeg),
+which the Jellyfin team keeps on the current FFmpeg release with its own
+VA-API drivers. AMD's AMF encoder needs AMD's proprietary driver, which
+containers don't have, so AMD cards and APUs use VA-API; AV1 needs RDNA3 or
+newer. VA-API uses `/dev/dri/renderD128`; with several GPUs, map the one you
+want to that name (`- /dev/dri/renderD129:/dev/dri/renderD128`).
+**Settings → System** lists the GPUs the container can see.
+
+## Recycle Bin and policies
+
+![Recycle Bin](docs/images/recycle-bin.png)
+
+**Move to trash** moves a recording into `.sentry-recycle-bin` on the same
+share. That is a rename, so it is instant. From the Recycle Bin you restore a
+recording to exactly where it was, or delete it for good, which always asks
+you to confirm (and for your password, unless you entered it in the last 10
+minutes). Protected recordings, and recordings the converter is working on,
+can't be trashed.
+
+![Policies](docs/images/policies.png)
+
+A **policy** keeps a number of days per category (Recent, Sentry, Saved,
+Other) and moves older recordings to the Recycle Bin once a day. It previews
+what the next run would move. Protected recordings are always skipped, and a
+policy never deletes anything.
+
+## Vehicles and SMB shares
+
+Each vehicle has one footage source:
+
+- an **SMB share** (`//nas/TeslaCam`, user name and password), which Sentry
+  Six Manager mounts itself, or
+- a **folder** you mount into the container yourself, below `/footage` (for
+  example `- /volume1/TeslaCam:/footage/car`).
+
+Shares are protected against anyone on your network, with no settings that
+can weaken it:
+
+- **SMB 3 only** (3.1.1 by default, or 3.02 / 3.0 for older NAS). SMB 1 and 2
+  are refused.
+- **Signed always, encrypted by default.** Nobody without the password can
+  change the footage or pose as your NAS. If your NAS can't encrypt, you can
+  turn encryption off for that vehicle; signing stays on.
+- **A real account.** Guest access is not allowed. Use a NAS user that can
+  only reach the TeslaCam share.
+- **Nothing on a share can run.** Shares are mounted `nosuid,nodev,noexec`,
+  and symlinks never lead out of a share.
+- **No password on a command line.** For mounting, it goes in a file only
+  root can read, and the web page never shows a saved password.
+
+The manager checks each share every 30 seconds, remounts it if the NAS drops
+out, tests that it can still write, and explains mount errors (wrong
+password, no SMB 3 encryption on the NAS, and so on).
+
+To turn on SMB 3 encryption: Synology *Control Panel → File Services → SMB →
+Advanced* (minimum SMB 3, encryption on); Samba, TrueNAS and Unraid
+`server min protocol = SMB3` and `server smb encrypt = desired`; Windows
+`Set-SmbServerConfiguration -EncryptData $true`. The Docker host needs the
+CIFS kernel module (`sudo modprobe cifs`); Synology, Unraid, TrueNAS and most
+Linux distributions have it.
+
+## Phones and tablets
+
+![On an iPhone: Overview, Footage and Settings](docs/images/phones.png)
+
+Works in Safari on iPhone 14 and newer (iOS 16 or later) and on iPads from
+2022 on (iPad 10th gen, Air 5, Pro M2, mini 6 and newer), and in Chrome or
+Samsung Internet 22+ on Galaxy S22 and newer phones, Folds and Tabs, in
+portrait and landscape.
+
+![The Viewer on an iPad in landscape](docs/images/ipad-viewer.png)
+
+- The dashboard and map panels move with a finger; the timeline is a normal
+  slider. On phones the Viewer is shrunk to fit, so turn the phone sideways
+  for a bigger picture.
+- The Viewer pauses when you switch to another page, so it doesn't drain
+  your battery in the background.
+- H.264 (the car's own recordings) and H.265 play everywhere. AV1 plays in
+  Safari only on iPhone 15 Pro and newer and on iPads with an M3, M4 or A17
+  Pro chip. If you watch on older iPhones or iPads, convert to H.265.
+
+## Updates
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+Your account, settings, footage and Recycle Bin stay as they are.
+**Settings → Updates** shows the version you run and checks twice a day
+whether a newer image is out. It only tells you and never installs anything
+(`UPDATE_CHECK=off` turns the check off). For automatic updates, use a tool
+such as [Watchtower](https://containrrr.dev/watchtower/).
+
+Images are built by GitHub Actions for amd64 and arm64
+([`image.yml`](.github/workflows/image.yml)) and published to
+`ghcr.io/skittles-fivem/sentry-manager`. `latest` follows `main`, every
+commit also gets a `sha-<commit>` tag you can pin with `SENTRY_TAG`, and
+every image is rebuilt weekly so Debian, Node and ffmpeg security fixes
+arrive without a code change.
+
+## Security
+
+![Settings → Security](docs/images/security.png)
+
+**HTTPS.** Port 9000 speaks HTTPS; plain HTTP there only redirects to it.
+Sentry Six Manager is its own small certificate authority. Install it once on
+each phone and computer, and nobody on your network can read your password,
+change the page or pose as the server:
+
+1. Download it in **Settings → Security** (or copy `data/tls/ca.crt`).
+2. Check that its fingerprint matches the one in
+   `docker logs sentry-six-manager`.
+3. Install it; the steps for iPhone, Android, Windows, macOS and Firefox are
+   on that page.
+4. Add the address you type in the browser under **Settings → Security** so
+   the certificate covers it.
+
+The certificate authority can only vouch for local names (`.local`, `.lan`,
+...), private IP addresses and names you add, so even a stolen key could not
+be used against other websites. Its key never leaves the root-only folder
+`data/tls`. Behind your own reverse proxy, set `TLS_MODE=off` and
+`TRUST_PROXY=true`, or bring your own certificate with `TLS_CERT_FILE` and
+`TLS_KEY_FILE`.
+
+**Signing in.** The first account needs the one-time setup code. Repeated
+wrong passwords slow down further attempts. Cookies are HttpOnly,
+SameSite=Strict, Secure and `__Host-` prefixed, every change must come from
+the page itself, and every page runs under a strict Content-Security-Policy.
+
+**Your password again** is needed for changes that could hand someone your
+shares or the server: adding a vehicle or changing its footage source, the
+certificate names, and deleting from the Recycle Bin for good.
+
+**No root for the web app.** Only a small supervisor runs as root, to mount
+shares and keep the certificate authority, and it never loads anything from
+`/data`. The web app and ffmpeg run as `PUID:PGID` with no capabilities and
+`no_new_privs`. The image has no setuid programs, and the compose file drops
+every capability except the few the supervisor needs. A bug in the web app or
+a malicious video on a share cannot become root or read the certificate
+authority's key.
+
+**An audit trail.** Sign-ins, password confirmations, vehicle changes,
+certificate names and permanent deletions are logged with who did them and
+from which address, never with a password. Look for `[audit]` in
+`docker logs sentry-six-manager`.
+
+## Settings
+
+All optional; put them in `.env` next to `docker-compose.yml`.
+
+| Variable | Default | |
+| --- | --- | --- |
+| `TZ` | `UTC` | Server time zone (logs, policy run times) |
+| `UI_USERNAME` / `UI_PASSWORD` | | Create the account on first start instead of with the setup code |
+| `VEHICLE_NAME`, `SMB_SHARE`, `SMB_USERNAME`, `SMB_PASSWORD`, `SMB_DOMAIN`, `SMB_VERSION`, `SMB_ENCRYPT`, `SMB_PORT` | | Create a first SMB vehicle on first start |
+| `FOOTAGE_PATH` | | Create a first folder vehicle instead |
+| `FOLDER_ROOTS` | | More folders (`:`-separated) folder vehicles may be in, besides `/footage` |
+| `PUID` / `PGID` | `1000` | The user the web app runs as; it owns `/data` and the files on the shares |
+| `TLS_HOSTNAMES` | | Names and IP addresses the certificate covers (more in Settings → Security) |
+| `TLS_CERT_FILE` / `TLS_KEY_FILE` | | Your own certificate instead of the built-in certificate authority |
+| `TLS_MODE` | `auto` | `off` = plain HTTP, only behind a reverse proxy that does HTTPS |
+| `TRUST_PROXY` | `false` | Trust `X-Forwarded-Proto` / `-Host` from that reverse proxy |
+| `TRUSTED_HOSTS` | | If set, refuse requests for any other host name |
+| `SENTRY_TAG` | `latest` | Which image to follow |
+| `UPDATE_CHECK` | `on` | `off` = don't check for newer images |
+| `EXTRA_ROOTS` | | More container folders the converter may write to (`:`-separated) |
+| `SCAN_INTERVAL_MINUTES` | `15` | How often every vehicle is re-scanned |
+| `PORT`, `DATA_PATH`, `LOG_LEVEL` | `9000`, `/data`, `info` | |
+
+`./data` holds the account, settings, job history, thumbnails, the
+converter's work folder and the certificate authority. Keep it on a local
+disk, not on a share.
+
+## Not in the web version (yet)
+
+- Export, clip sharing and the SentryUSB drive tools from the desktop app;
+  the Viewer shows them as not available.
+- Desktop-only converter options (keep running when closed, start with
+  Windows).
+
+## Development
+
+Node.js 22.13 or newer (the server uses only Node's built-in modules,
+including `node:sqlite`) and ffmpeg.
+
+```bash
+mkdir -p build && gcc -O2 -o build/noreplace-rename native/noreplace-rename.c
+npm test
+DATA_PATH=./data FOOTAGE_PATH=/path/to/TeslaCam SENTRY_NOREPLACE_RENAME=build/noreplace-rename npm start
+docker build -t ghcr.io/skittles-fivem/sentry-manager:latest .
+```
+
+| Folder | |
+| --- | --- |
+| `server/` | The web server, the root supervisor, shares, Recycle Bin, policies, jobs |
+| `web/` | The web pages, and the shim that runs Sentry Studio in the browser |
+| `src/` | Sentry Studio's viewer (`renderer`, `shared`) and converter (`main/converter`), unchanged |
+| `native/` | The no-replace rename helper for safe replacement |
+| `test/` | Tests (`node --test`), including real conversions with telemetry checks |
+
+## Credits and license
+
+The viewer and converter are [Sentry Studio](https://github.com/ChadR23/Sentry-Six)
+by Chad and Scott Vandereems. Released under the [MIT License](LICENSE).

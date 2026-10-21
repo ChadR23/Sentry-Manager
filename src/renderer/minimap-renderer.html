@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Minimap Renderer</title>
+    <link rel="stylesheet" href="vendor/leaflet/leaflet.css" />
+    <script src="vendor/leaflet/leaflet.js"></script>
+    <script src="../shared/mapProviders.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        html, body {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: transparent;
+        }
+        #minimapContainer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            border-radius: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            box-shadow: 
+                0 4px 16px rgba(0, 0, 0, 0.3),
+                0 2px 4px rgba(0, 0, 0, 0.2);
+            overflow: hidden;
+        }
+        #minimap {
+            width: 100%;
+            height: 100%;
+            border-radius: 12px;
+            transform-origin: center center;
+            will-change: transform;
+        }
+        .leaflet-container {
+            background: #e0e0e0 !important;
+        }
+        /* Dark mode: invert tiles then rotate hue back to natural colors */
+        .dark-mode .leaflet-tile-pane {
+            filter: invert(100%) hue-rotate(180deg) brightness(0.85) contrast(1.2);
+        }
+        .dark-mode .leaflet-container {
+            background: #1a1a1a !important;
+        }
+        .leaflet-marker-icon {
+            filter: none !important;
+        }
+        .arrow-marker-icon {
+            background: transparent !important;
+            border: none !important;
+            will-change: transform;
+            transition: none;
+        }
+        .arrow-marker-icon img {
+            will-change: transform;
+        }
+    </style>
+</head>
+<body>
+    <div id="minimapContainer">
+        <div id="minimap"></div>
+    </div>
+    
+    <script>
+        let map = null;
+        let mapMarker = null;
+        let mapPolyline = null;
+        let tileLayer = null;
+        let tileProviderId = (window.MapProviders && window.MapProviders.DEFAULT_PROVIDER_ID) || 'google';
+        let labelsEnabled = window.MapProviders ? window.MapProviders.DEFAULT_LABELS_ENABLED : false;
+        let darkEnabled = false;
+
+        // Arrow size as percentage of minimap size
+        const ARROW_SIZE_PERCENT = 0.30;  // 18% of minimap width
+        let arrowSize = 80;  // Will be calculated based on container size
+        
+        // Smoothing state
+        let smoothedLat = null;
+        let smoothedLon = null;
+        let smoothedHeading = null;
+        const POSITION_SMOOTHING = 0.3;
+        const HEADING_SMOOTHING = 0.25;
+
+        // Heading-up mode: map rotates, arrow always points up
+        let currentMapBearing = 0;
+        
+        // Interpolation data
+        let gpsData = [];
+        const mapZoom = 17;
+        
+        // IPC setup
+        let ipcRenderer;
+        try {
+            if (typeof require !== 'undefined') {
+                ipcRenderer = require('electron').ipcRenderer;
+            } else {
+                ipcRenderer = { send: () => {}, on: () => {} };
+            }
+        } catch (err) {
+            ipcRenderer = { send: () => {}, on: () => {} };
+        }
+        
+        // Calculate arrow size based on container
+        function calculateArrowSize() {
+            const container = document.getElementById('minimapContainer');
+            const size = Math.min(container.offsetWidth, container.offsetHeight);
+            arrowSize = Math.round(size * ARROW_SIZE_PERCENT);
+            console.log('[MINIMAP] Arrow size:', arrowSize, 'px (container:', size, 'px)');
+            return arrowSize;
+        }
+        
+        // Smooth step function
+        function smoothstep(t) {
+            return t * t * (3 - 2 * t);
+        }
+        
+        // Catmull-Rom spline interpolation
+        function catmullRom(p0, p1, p2, p3, t) {
+            const t2 = t * t;
+            const t3 = t2 * t;
+            return 0.5 * (
+                (2 * p1) +
+                (-p0 + p2) * t +
+                (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 +
+                (-p0 + 3 * p1 - 3 * p2 + p3) * t3
+            );
+        }
+        
+        function normalizeAngle(angle) {
+            while (angle > 180) angle -= 360;
+            while (angle < -180) angle += 360;
+            return angle;
+        }
+        
+        function lerpAngle(a, b, t) {
+            let delta = normalizeAngle(b - a);
+            return a + delta * smoothstep(t);
+        }
+        
+        function getInterpolatedPosition(timestampMs) {
+            if (gpsData.length === 0) return null;
+            if (gpsData.length === 1) {
+                return { lat: gpsData[0].lat, lon: gpsData[0].lon, heading: gpsData[0].heading };
+            }
+            
+            let idx = 0;
+            for (let i = 0; i < gpsData.length - 1; i++) {
+                if (timestampMs >= gpsData[i].t && timestampMs <= gpsData[i + 1].t) {
+                    idx = i;
+                    break;
+                }
+                if (timestampMs > gpsData[i + 1].t) {
+                    idx = i + 1;
+                }
+            }
+            
+            if (timestampMs <= gpsData[0].t) {
+                return { lat: gpsData[0].lat, lon: gpsData[0].lon, heading: gpsData[0].heading };
+            }
+            if (timestampMs >= gpsData[gpsData.length - 1].t) {
+                const last = gpsData[gpsData.length - 1];
+                return { lat: last.lat, lon: last.lon, heading: last.heading };
+            }
+            
+            const i1 = idx;
+            const i2 = Math.min(idx + 1, gpsData.length - 1);
+            const i0 = Math.max(idx - 1, 0);
+            const i3 = Math.min(idx + 2, gpsData.length - 1);
+            
+            const p0 = gpsData[i0];
+            const p1 = gpsData[i1];
+            const p2 = gpsData[i2];
+            const p3 = gpsData[i3];
+            
+            const segmentDuration = p2.t - p1.t;
+            const t = segmentDuration > 0 ? (timestampMs - p1.t) / segmentDuration : 0;
+            const smoothT = smoothstep(t);
+            
+            const lat = catmullRom(p0.lat, p1.lat, p2.lat, p3.lat, smoothT);
+            const lon = catmullRom(p0.lon, p1.lon, p2.lon, p3.lon, smoothT);
+            const heading = lerpAngle(p1.heading, p2.heading, t);
+            
+            return { lat, lon, heading };
+        }
+        
+        function applySmoothing(target, current, factor) {
+            if (current === null) return target;
+            return current + (target - current) * factor;
+        }
+        
+        function applySmoothingAngle(target, current, factor) {
+            if (current === null) return target;
+            let delta = normalizeAngle(target - current);
+            return current + delta * factor;
+        }
+        
+        // Tile layer from the shared provider registry (Google by default,
+        // OSM fallback) — see src/shared/mapProviders.js.
+        function buildTileLayer() {
+            const layerOptions = {
+                updateWhenIdle: false,
+                updateWhenZooming: false,
+                keepBuffer: 8
+            };
+            if (!window.MapProviders) {
+                // Registry script failed to load — keep the old OSM behavior.
+                return L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                    maxZoom: 19, subdomains: 'abc', ...layerOptions
+                });
+            }
+            const provider = window.MapProviders.getProvider(tileProviderId);
+            const url = window.MapProviders.getUrlTemplate(tileProviderId, { labels: labelsEnabled, dark: darkEnabled });
+            const layer = L.tileLayer(url, {
+                maxZoom: Math.min(provider.maxZoom, 19),
+                subdomains: provider.subdomains,
+                ...layerOptions
+            });
+            // Google's key-less tile endpoint is unofficial: if its tiles fail
+            // before any succeed, fall back to OSM and tell the main process
+            // so the rest of the export follows.
+            if (window.MapProviders.isGoogleProvider(tileProviderId)) {
+                let errors = 0;
+                let loaded = false;
+                layer.on('tileload', () => { loaded = true; });
+                layer.on('tileerror', () => {
+                    if (loaded || ++errors < 3) return;
+                    console.warn('[MINIMAP] Google tiles failing — falling back to OpenStreetMap');
+                    if (ipcRenderer?.send) ipcRenderer.send('map:provider-fallback');
+                    setTileProvider('osm');
+                });
+            }
+            return layer;
+        }
+
+        function rebuildTiles() {
+            if (!map) return;
+            if (tileLayer) map.removeLayer(tileLayer);
+            tileLayer = buildTileLayer().addTo(map);
+        }
+
+        // Native-dark providers (Google night palette) bake darkness into the
+        // tiles and photographic imagery (satellite) must never be inverted;
+        // only drawn maps with no native dark style (OSM) need the CSS invert.
+        function updateDarkClass() {
+            const wantsFilter = window.MapProviders
+                ? window.MapProviders.wantsDarkFilter(tileProviderId)
+                : true;
+            document.getElementById('minimapContainer')
+                .classList.toggle('dark-mode', darkEnabled && wantsFilter);
+        }
+
+        function setTileProvider(providerId) {
+            tileProviderId = window.MapProviders
+                ? window.MapProviders.getProvider(providerId).id
+                : providerId;
+            rebuildTiles();
+            updateDarkClass();
+        }
+
+        function setTileLabels(enabled) {
+            labelsEnabled = !!enabled;
+            rebuildTiles();
+        }
+
+        function setTileDark(enabled) {
+            darkEnabled = !!enabled;
+            rebuildTiles();
+            updateDarkClass();
+        }
+
+        function initMap() {
+            if (map) return;
+
+            // Calculate arrow size before creating map
+            calculateArrowSize();
+
+            map = L.map('minimap', {
+                zoomControl: false,
+                attributionControl: false,
+                dragging: false,
+                touchZoom: false,
+                scrollWheelZoom: false,
+                doubleClickZoom: false,
+                boxZoom: false,
+                keyboard: false,
+                fadeAnimation: false,
+                zoomAnimation: false,
+                markerZoomAnimation: false
+            }).setView([0, 0], mapZoom);
+
+            tileLayer = buildTileLayer().addTo(map);
+        }
+        
+        // Subdivide a path using Catmull-Rom spline for smoother curves
+        function smoothPath(coords, subdivisions = 4) {
+            if (coords.length < 3) return coords;
+            
+            const result = [];
+            
+            for (let i = 0; i < coords.length - 1; i++) {
+                const i0 = Math.max(i - 1, 0);
+                const i1 = i;
+                const i2 = i + 1;
+                const i3 = Math.min(i + 2, coords.length - 1);
+                
+                const p0 = coords[i0];
+                const p1 = coords[i1];
+                const p2 = coords[i2];
+                const p3 = coords[i3];
+                
+                for (let s = 0; s < subdivisions; s++) {
+                    const t = s / subdivisions;
+                    const lat = catmullRom(p0[0], p1[0], p2[0], p3[0], t);
+                    const lon = catmullRom(p0[1], p1[1], p2[1], p3[1], t);
+                    result.push([lat, lon]);
+                }
+            }
+            
+            // Add the final point
+            result.push(coords[coords.length - 1]);
+            
+            return result;
+        }
+        
+        function initMapPath(pathData) {
+            if (!map || !pathData || !pathData.length) return;
+            
+            const validPath = pathData.filter(coord => {
+                const [lat, lon] = coord;
+                return lat !== undefined && lon !== undefined &&
+                       Number.isFinite(lat) && Number.isFinite(lon) &&
+                       !(Math.abs(lat) < 0.001 && Math.abs(lon) < 0.001);
+            });
+            
+            if (validPath.length < 2) return;
+            
+            // Smooth the path with Catmull-Rom interpolation for a cleaner curve
+            const smoothed = smoothPath(validPath, 8);
+            
+            mapPolyline = L.polyline(smoothed, {
+                color: '#0072ff',
+                weight: 5,
+                opacity: 0.8,
+                lineJoin: 'round',
+                lineCap: 'round',
+                smoothFactor: 0
+            }).addTo(map);
+            
+            map.setView(validPath[0], mapZoom, { animate: false });
+        }
+        
+        function setGpsData(data) {
+            gpsData = data.filter(d => 
+                d.lat !== undefined && d.lon !== undefined &&
+                Number.isFinite(d.lat) && Number.isFinite(d.lon) &&
+                !(Math.abs(d.lat) < 0.001 && Math.abs(d.lon) < 0.001)
+            );
+            smoothedLat = null;
+            smoothedLon = null;
+            smoothedHeading = null;
+            console.log('[MINIMAP] Loaded', gpsData.length, 'GPS points for interpolation');
+        }
+        
+        function updateMarker(lat, lon, heading) {
+            if (!map) initMap();
+
+            smoothedLat = applySmoothing(lat, smoothedLat, POSITION_SMOOTHING);
+            smoothedLon = applySmoothing(lon, smoothedLon, POSITION_SMOOTHING);
+            smoothedHeading = applySmoothingAngle(heading || 0, smoothedHeading, HEADING_SMOOTHING);
+
+            const latlng = L.latLng(smoothedLat, smoothedLon);
+            const halfArrow = Math.round(arrowSize / 2);
+
+            // Heading-up mode: smooth the bearing transition
+            const targetHeading = ((smoothedHeading % 360) + 360) % 360;
+            let bearingDelta = targetHeading - (currentMapBearing % 360);
+            if (bearingDelta > 180) bearingDelta -= 360;
+            if (bearingDelta < -180) bearingDelta += 360;
+            currentMapBearing += bearingDelta;
+
+            // Rotate the map so heading is always "up"
+            const minimapEl = document.getElementById('minimap');
+            if (minimapEl) {
+                minimapEl.style.transition = 'transform 0.15s ease-out';
+                minimapEl.style.transform = 'rotate(' + (-currentMapBearing) + 'deg) scale(1.42)';
+                minimapEl.style.transformOrigin = 'center center';
+            }
+
+            if (!mapMarker) {
+                // Counter-rotate arrow by +bearing to cancel the map's -bearing rotation
+                const arrowIcon = L.divIcon({
+                    className: 'arrow-marker-icon',
+                    html: '<img src="../../assets/arrow.png" style="width: ' + arrowSize + 'px; height: ' + arrowSize + 'px; transform: rotate(' + currentMapBearing + 'deg); transform-origin: center center; display: block;" />',
+                    iconSize: [arrowSize, arrowSize],
+                    iconAnchor: [halfArrow, halfArrow]
+                });
+
+                mapMarker = L.marker(latlng, { icon: arrowIcon }).addTo(map);
+            } else {
+                mapMarker.setLatLng(latlng);
+                // Update arrow counter-rotation
+                var iconEl = mapMarker._icon;
+                if (iconEl) {
+                    var img = iconEl.querySelector('img');
+                    if (img) {
+                        img.style.transform = 'rotate(' + currentMapBearing + 'deg)';
+                    }
+                }
+            }
+
+            map.setView(latlng, mapZoom, { animate: false });
+        }
+        
+        function updateMarkerByTime(timestampMs) {
+            const pos = getInterpolatedPosition(timestampMs);
+            if (pos) {
+                updateMarker(pos.lat, pos.lon, pos.heading);
+            }
+        }
+        
+        let isReady = false;
+        
+        window.addEventListener('DOMContentLoaded', () => {
+            initMap();
+            isReady = true;
+            
+            setTimeout(() => {
+                if (ipcRenderer?.send) ipcRenderer.send('minimap:ready');
+            }, 500);
+        });
+        
+        if (ipcRenderer && ipcRenderer.on) {
+            ipcRenderer.on('minimap:init', (event, pathData) => {
+                console.log('Minimap received path:', pathData?.length || 0, 'points');
+                initMapPath(pathData);
+                setTimeout(() => {
+                    if (ipcRenderer?.send) ipcRenderer.send('minimap:ready');
+                }, 300);
+            });
+            
+            ipcRenderer.on('minimap:setGpsData', (event, data) => {
+                setGpsData(data);
+                if (ipcRenderer?.send) ipcRenderer.send('minimap:ready');
+            });
+            
+            ipcRenderer.on('minimap:setLabels', (event, enabled) => {
+                console.log('[MINIMAP] Labels:', enabled);
+                setTileLabels(enabled);
+            });
+
+            ipcRenderer.on('minimap:setProvider', (event, providerId) => {
+                console.log('[MINIMAP] Tile provider:', providerId);
+                setTileProvider(providerId);
+            });
+
+            ipcRenderer.on('minimap:setDarkMode', (event, enabled) => {
+                console.log('[MINIMAP] Dark mode:', enabled);
+                setTileDark(enabled);
+                if (ipcRenderer?.send) ipcRenderer.send('minimap:ready');
+            });
+            
+            ipcRenderer.on('minimap:updateByTime', (event, timestampMs) => {
+                updateMarkerByTime(timestampMs);
+                requestAnimationFrame(() => {
+                    if (isReady && ipcRenderer?.send) ipcRenderer.send('minimap:ready');
+                });
+            });
+            
+            ipcRenderer.on('minimap:update', (event, lat, lon, heading) => {
+                updateMarker(lat, lon, heading);
+                requestAnimationFrame(() => {
+                    if (isReady && ipcRenderer?.send) ipcRenderer.send('minimap:ready');
+                });
+            });
+        }
+    </script>
+</body>
+</html>

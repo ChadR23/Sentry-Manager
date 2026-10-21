@@ -1,0 +1,11 @@
+# Docker build context: only what the image needs
+.git
+.github
+docs
+test
+build
+data
+node_modules
+.env
+README.md
+**/.DS_Store
