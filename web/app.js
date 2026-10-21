@@ -37,7 +37,13 @@
       init.headers['Content-Type'] = 'application/json';
       init.body = JSON.stringify(opts.body);
     }
-    const res = await fetch(path, init);
+    let res;
+    try {
+      res = await fetch(path, init);
+    } catch {
+      // the server is down, or its certificate changed and the browser no longer accepts it
+      throw new Error('Can\'t reach Sentry Six Manager. Reload the page; if the browser warns about the certificate, install the certificate authority (Settings → Security) so it trusts the page for good.');
+    }
     if (res.status === 401 && !path.startsWith('/api/auth/')) {
       location.href = `/login?next=${encodeURIComponent(location.pathname + location.hash)}`;
       throw new Error('Signed out');
@@ -711,8 +717,10 @@
     const save = async (names) => {
       try {
         const out = await api('/api/security/hostnames', { method: 'PUT', body: { hostnames: names } });
-        toast(out.caReplaced ? 'Saved. The certificate authority was replaced: install the new one on your devices.' : 'Saved. The certificate now covers those names.');
-        render();
+        toast(`${out.caReplaced ? 'Saved. The certificate authority was replaced: install the new one on your devices.' : 'Saved. The certificate now covers those names.'} Reloading the page for the new certificate…`);
+        // the browser has to pick up the new certificate; a page that clicked
+        // past a warning would otherwise fail every request from now on
+        setTimeout(() => location.reload(), 2500);
       } catch (err) {
         toast(err.message, true);
       }
