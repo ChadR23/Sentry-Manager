@@ -381,14 +381,12 @@
 
   // ---------- embedded Studio (Viewer / Encoder) ----------
   const frames = {};
-  // The Viewer shows the selected vehicle's footage; the Encoder converts it
-  // (and suggests that vehicle's folder under /data/converted for the copies).
+  // The Viewer shows the selected vehicle's footage; the Encoder converts it.
   function studioUrl(kind, extra = {}) {
     const v = current();
     const q = new URLSearchParams({
       embed: kind,
       ...(v ? { root: v.studioRoot || v.root, vehicle: v.id } : {}),
-      ...(v && kind === 'encoder' && v.convertedRoot ? { output: v.convertedRoot } : {}),
       ...extra
     });
     return `/studio/index.html?${q}`;

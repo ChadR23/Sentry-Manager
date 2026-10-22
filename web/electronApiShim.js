@@ -9,7 +9,6 @@
 //                          the encoder's source
 //   folder=/footage/<car>/TeslaCam/SentryClips/<event>   open this folder instead
 //   vehicle=<id>           the vehicle shown (picked in the shell)
-//   output=/data/converted/<car>   the encoder's default destination
 (function () {
   'use strict';
 
@@ -420,8 +419,9 @@
 
   // Encoder tab: open the Converter panel as soon as the Studio UI is built.
   // The source is a vehicle's footage (picked from the vehicles, not a
-  // folder); converted copies go to its folder under /data/converted unless
-  // another destination is chosen.
+  // folder). Converting is for saving space on the share, so a new setup
+  // replaces the originals after verification when the share allows it; a
+  // separate destination is chosen by hand.
   if (embed === 'encoder') {
     const fill = (id, value) => {
       const input = document.getElementById(id);
@@ -452,10 +452,22 @@
         });
         document.getElementById('converterChooseSource')?.before(select);
       }
-      if (!(await busy())) {
-        if (!input.value && current) fill('converterSourcePath', params.get('source') || footageOf(current));
-        if (!document.getElementById('converterDestinationPath')?.value) fill('converterDestinationPath', params.get('output'));
+      // a restored setup (the last job's folders and output) stays as it was
+      if (!input.value && !(await busy())) {
+        if (current) fill('converterSourcePath', params.get('source') || footageOf(current));
+        preferReplace();
       }
+    };
+    // The share's capabilities arrive a moment later ("Checking system
+    // capability…"); pick Replace once it is offered, else leave Separate.
+    const preferReplace = (tries = 40) => {
+      const replace = document.getElementById('converterOutputReplace');
+      if (!replace) return;
+      if (replace.disabled) {
+        if (tries > 0) setTimeout(() => preferReplace(tries - 1), 250);
+        return;
+      }
+      if (!replace.checked) replace.click();
     };
     const open = () => {
       const tab = document.querySelector('[data-panel="converter"]');

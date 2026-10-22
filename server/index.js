@@ -260,7 +260,6 @@ async function main() {
   };
   const vehicleSummary = (v) => ({
     ...vehicles.publicView(v),
-    convertedRoot: path.join(DATA, 'converted', v.id), // the Encoder's suggested destination
     security: v.source.type === 'smb' ? securitySummary({ encrypt: v.source.encrypt !== false, version: v.source.version }) : null,
     inventory: inventory.totals(v.id),
     scanning: Boolean(inventory.get(v.id)?.scanning),

@@ -69,7 +69,12 @@ recording, show its files, protect it, or move it to the Recycle Bin.
 
 ![Encoder](docs/images/encoder.png)
 
-The Encoder is Sentry Studio's converter, unchanged.
+The Encoder is Sentry Studio's converter, unchanged. It converts the
+selected vehicle's footage straight on its share to save space, so more
+fits before old recordings have to go: by default each original is replaced
+by its verified H.265 or AV1 version (when the share supports a safe
+replacement; see below). Keeping the originals and writing the converted
+copies somewhere else is a choice you make in the Output section.
 
 - **Telemetry is always kept.** Tesla stores speed, GPS, gear, Autopilot and
   more in every video frame. The converter copies that into the H.265 or AV1
@@ -81,8 +86,10 @@ The Encoder is Sentry Studio's converter, unchanged.
   converted copy is verified, and only if it is still exactly the file that
   was converted (device, inode, size and SHA-256 are checked). The copy is
   moved in with a no-replace rename, which also holds on SMB.
-- Converted copies can also go to a separate folder (`/data/converted`, or
-  any folder under a vehicle).
+- **Separate destination**, if you pick it: the originals stay and the
+  converted copies go to a folder you choose (under `/data/converted` or a
+  vehicle's share). If the share cannot guarantee a safe replacement, this
+  is the only option offered.
 
 ### GPU
 
