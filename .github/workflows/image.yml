@@ -99,7 +99,9 @@ jobs:
             grep -q " $e " encoders.txt || { echo "::error::ffmpeg has no $e encoder"; exit 1; }
           done
           # the web app: uid 1000, no capabilities, no_new_privs
-          docker exec check sh -c 'for p in /proc/[0-9]*; do tr "\0" " " < $p/cmdline 2>/dev/null | grep -q "server/index.js" && grep -E "^(Uid|CapEff|NoNewPrivs):" $p/status; done' | tee app.txt
+          # (only node processes: this checking shell's own command line names the file too)
+          docker exec check sh -c 'for p in /proc/[0-9]*; do tr "\0" " " < $p/cmdline 2>/dev/null | grep -qE "^[^ ]*node .*server/index\.js" && grep -E "^(Uid|CapEff|NoNewPrivs):" $p/status; done; true' | tee app.txt
+          test "$(grep -c '^Uid:' app.txt)" -eq 1
           grep -Eq '^Uid:\s+1000\s' app.txt && grep -Eq '^CapEff:\s+0+$' app.txt && grep -Eq '^NoNewPrivs:\s+1$' app.txt
           docker rm -f check
 
