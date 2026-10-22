@@ -94,6 +94,9 @@ copies somewhere else is a choice you make in the Output section.
   off.
 - **Never converted twice.** Clips that are already H.265 or AV1 are skipped,
   so re-runs and automatic conversion never re-encode footage.
+- **Benchmark.** Runs the real converter on copies of a few of your clips
+  at 1, 2, 4, 6 and 8 at once, on the server, and suggests the lightest
+  setting within 5% of the fastest. Your footage is only read.
 - **Safe replacement.** In replace mode an original is only removed after its
   converted copy is verified, and only if it is still exactly the file that
   was converted (device, inode, size and SHA-256 are checked). The copy is
@@ -242,8 +245,12 @@ portrait and landscape.
 docker compose pull && docker compose up -d
 ```
 
-Your account, settings, footage and Recycle Bin stay as they are.
-**Settings → Updates** shows the version you run and checks twice a day
+Your account, settings, footage and Recycle Bin stay as they are. Updating
+in the middle of a conversion is fine: the converter stops cleanly (Docker
+gives it a minute, `stop_grace_period` in `docker-compose.yml`) and carries
+on by itself after the update. Finished clips stay finished; a clip that was
+being encoded starts over, and one that was being swapped in is completed
+or put back from its backup. **Settings → Updates** shows the version you run and checks twice a day
 whether a newer image is out. It only tells you and never installs anything
 (`UPDATE_CHECK=off` turns the check off). For automatic updates, use a tool
 such as [Watchtower](https://containrrr.dev/watchtower/).

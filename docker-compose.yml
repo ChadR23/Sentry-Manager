@@ -15,6 +15,9 @@ services:
     image: ghcr.io/skittles-fivem/sentry-manager:${SENTRY_TAG:-latest}
     container_name: sentry-six-manager
     restart: unless-stopped
+    # Room to stop cleanly when updating mid-conversion: the converter stops
+    # ffmpeg and saves where it was, then carries on after the update.
+    stop_grace_period: 1m
     ports:
       - "9000:9000"
     env_file:

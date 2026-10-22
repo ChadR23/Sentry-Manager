@@ -2,8 +2,10 @@
 
 // Real-pipeline benchmark: runs the actual converter (telemetry extraction and
 // injection, full verification, staging and saving) on copies of real clips at
-// several parallel-conversion levels, and reports files per minute. The
-// user's footage is only read; every run writes into a temporary folder.
+// every parallel-conversion level (1, 2, 4, 6, 8), and reports files per
+// minute. With fewer sample clips than a level needs, clips are reused under
+// other names so every slot has work. The user's footage is only read; every
+// run writes into a temporary folder.
 
 const nodeFs = require('fs');
 const nodePath = require('path');
@@ -11,8 +13,7 @@ const { CONCURRENCY } = require('./contracts');
 
 const LEVELS = Object.freeze([1, 2, 4, 6, 8]);
 const MAX_CLIPS = 8;
-// Stop raising concurrency once another step adds less than this much speed.
-const MIN_GAIN = 1.05;
+const TESLA_STAMP = /^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}/;
 
 function benchmarkError(code) {
   return Object.assign(new Error(code), { code });
@@ -65,7 +66,12 @@ async function runConverterBenchmark(options = {}) {
       const sourceRoot = pathApi.join(levelRoot, 'source');
       const clipDir = pathApi.join(sourceRoot, 'RecentClips');
       await fs.mkdir(clipDir, { recursive: true });
-      for (const sample of batch) await placeClip(fs, sample.path, pathApi.join(clipDir, sample.name));
+      for (const sample of batch) {
+        const target = pathApi.join(clipDir, sample.name);
+        // a reused clip gets its own file: the converter tells clips apart by file identity
+        if (sample.reused) await fs.copyFile(sample.path, target);
+        else await placeClip(fs, sample.path, target);
+      }
 
       const started = now();
       const job = await runLevel({ level, sourceRoot, workRoot: levelRoot, signal, ...variant });
@@ -104,21 +110,26 @@ async function runConverterBenchmark(options = {}) {
         ok: completed.length === batch.length
       };
     }
-    // Give every parallel slot real work: at least two clips, else one per slot.
-    const batchFor = (level) => samples.slice(0, Math.min(samples.length, Math.max(level, 2)));
+    // Give every parallel slot real work: at least two clips, else one per
+    // slot, reusing the samples under new (still Tesla-style) names.
+    const batchFor = (level) => Array.from({ length: Math.max(level, 2) }, (_, i) => {
+      const sample = samples[i % samples.length];
+      if (i < samples.length) return sample;
+      const stamp = `2000-01-01_00-${String(i).padStart(2, '0')}-00`;
+      const name = TESLA_STAMP.test(sample.name) ? sample.name.replace(TESLA_STAMP, stamp) : `${stamp}-${sample.name}`;
+      return { ...sample, name, reused: true };
+    });
 
-    const levels = LEVELS.filter((level) => level <= CONCURRENCY.max && level <= samples.length);
+    const levels = LEVELS.filter((level) => level <= CONCURRENCY.max);
     const results = [];
-    let previous = 0;
     for (const [index, level] of levels.entries()) {
       checkAborted();
       onProgress({ step: 'run', level, index: index + 1, total: levels.length, encoder: encoder?.codec, hardware: encoder?.hardware === true });
       const result = await measure(level, batchFor(level), `level-${level}`);
       results.push(result);
       // A failing level usually means the hardware refused another session;
-      // a level that barely helps means the machine is saturated.
-      if (!result.ok || (previous > 0 && result.filesPerMinute < previous * MIN_GAIN)) break;
-      previous = result.filesPerMinute;
+      // higher ones would only fail the same way.
+      if (!result.ok) break;
     }
     // Recommend the lightest setting within 5% of the fastest.
     const successful = results.filter((entry) => entry.ok);
