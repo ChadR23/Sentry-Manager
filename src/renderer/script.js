@@ -3471,6 +3471,7 @@ function selectSentryCollection(collectionId) {
         loadToken: 0
     };
     highlightSelectedClip();
+    autoTeslaHardware(c.groups);
 
     // Configure progress bar as millisecond timeline.
     progressBar.min = 0;
@@ -3537,6 +3538,8 @@ function selectDayCollection(dayKey) {
         localStorage.setItem(MULTI_ENABLED_KEY, '1');
     }
     
+    autoTeslaHardware(coll.groups);
+
     // Ensure layout is applied to grid
     const layoutId = multi.layoutId || DEFAULT_MULTI_LAYOUT;
     const layout = MULTI_LAYOUTS[layoutId];
@@ -5271,6 +5274,19 @@ initWelcomeScreen();
 // Auto-Update System (disabled in Mac App Store builds)
 if (!window.electronAPI?.isMas) {
     initAutoUpdate();
+}
+
+// Sentry Six Manager: the HW3 / HW4 layout follows the footage itself (only
+// HW4 cars record the pillar cameras), so nobody has to pick it, least of all
+// on a phone. The buttons still switch it for the footage on screen.
+function autoTeslaHardware(groups) {
+    if ((library.profileId || 'tesla') !== 'tesla' || !Array.isArray(groups) || !groups.length) return;
+    const pillars = groups.some(g => g?.filesByCamera?.has('left_pillar') || g?.filesByCamera?.has('right_pillar'));
+    const mode = pillars ? 'hw4' : 'hw3';
+    if (mode === getTeslaHardware() && multi.layoutId === teslaLayoutId(mode)) return;
+    setTeslaHardware(mode);
+    updateHardwareToggle();
+    setMultiLayout(teslaLayoutId(mode), { persist: false, reloadActive: false });
 }
 
 function updateHardwareToggle() {

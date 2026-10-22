@@ -15,6 +15,8 @@ Recycle Bin, retention policies, jobs and notifications.
   stream over one HTTP/2 connection and keep pace with each other (a camera
   that falls behind on a slow network catches up), and the server reads the
   telemetry from the share, so the browser never downloads a clip twice.
+  It picks the HW3 (four cameras) or HW4 (six cameras) layout from the
+  footage itself, so there is nothing to set.
 - **Encoder.** Converts footage to H.265 or AV1 on the GPU (NVIDIA, AMD
   including APUs, Intel) or the CPU. Tesla's per-frame telemetry is copied
   into every converted file and verified, and nothing is converted twice.
@@ -380,7 +382,7 @@ docker build -t ghcr.io/skittles-fivem/sentry-manager:latest .
 | --- | --- |
 | `server/` | The web server, the root supervisor, shares, Recycle Bin, policies, jobs |
 | `web/` | The web pages, and the shim that runs Sentry Studio in the browser |
-| `src/` | Sentry Studio's viewer (`renderer`, `shared`) and converter (`main/converter`); the few web-version changes are commented where they are (telemetry from the server, keeping the cameras together, the benchmark's levels) |
+| `src/` | Sentry Studio's viewer (`renderer`, `shared`) and converter (`main/converter`); the few web-version changes are commented where they are (telemetry from the server, keeping the cameras together, the HW3 / HW4 layout, the benchmark's levels) |
 | `native/` | The no-replace rename helper for safe replacement |
 | `test/` | Tests (`node --test`), including real conversions with telemetry checks |
 

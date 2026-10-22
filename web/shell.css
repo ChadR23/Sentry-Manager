@@ -250,12 +250,14 @@ html.reduce-effects *, html.reduce-effects *::before { transition: none !importa
 @media (max-width: 760px) {
   .app, .app.collapsed { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; }
   .side { position: static; height: auto; padding: 12px 12px 0; }
-  .side-card { flex-direction: row; align-items: center; padding: 10px; border-radius: 16px; overflow-x: auto; }
-  .brand { padding: 0 8px 0 4px; }
+  /* one compact bar on every page, collapsed or not (the Viewer and Encoder
+     collapse the sidebar): the shield and the sections, spread to fit */
+  .side-card { flex-direction: row; align-items: center; gap: 4px; padding: 6px 8px; border-radius: 16px; overflow-x: auto; }
+  .brand, .app.collapsed .brand { padding: 0 4px; }
   .page-head { flex-wrap: wrap; }
-  .brand-name span, .collapse { display: none; }
-  .nav { flex-direction: row; }
-  .nav a { padding: 9px 11px; }
+  .brand-name, .collapse { display: none; }
+  .nav { flex: 1; flex-direction: row; gap: 2px; }
+  .nav a, .app.collapsed .nav a { flex: 1 1 0; justify-content: center; padding: 10px 0; }
   .nav a span, .nav .count { display: none; }
   .main { padding: 16px 16px 64px; }
   .topbar { margin-bottom: 20px; }
@@ -264,7 +266,7 @@ html.reduce-effects *, html.reduce-effects *::before { transition: none !importa
   .card { padding: 20px; }
   .card.row { flex-direction: column; align-items: flex-start; }
   .big { font-size: 26px; }
-  .frame-wrap { margin: -16px -16px -64px; height: calc(100vh - 80px); height: calc(100dvh - 80px); }
+  .frame-wrap { margin: -16px -16px -64px; height: calc(100vh - 66px); height: calc(100dvh - 66px); }
   .kv { grid-template-columns: minmax(0, 1fr); }
   .table, .table tbody, .table tr, .table td { display: block; }
   .table thead { display: none; }
@@ -288,6 +290,10 @@ html.reduce-effects *, html.reduce-effects *::before { transition: none !importa
   .day .rec-top { grid-template-columns: 22px minmax(0, 1fr); gap: 10px 12px; align-items: start; }
   .day .rec-top .thumb { width: 100%; max-width: 260px; height: auto; aspect-ratio: 16 / 10; }
   .day .rec-top .rec-info, .day .rec-top .rec-actions { grid-column: 2; }
+}
+@media (max-width: 374px) {
+  /* narrow phones: the sections get the shield's room */
+  .brand { display: none; }
 }
 @media (max-width: 359px) {
   .set-tabs button { padding: 11px 4px; font-size: 12px; }
