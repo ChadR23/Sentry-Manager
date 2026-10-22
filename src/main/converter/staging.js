@@ -1571,6 +1571,12 @@ function createFileTransaction(options = {}) {
         ownedArtifacts.replacementCandidate.nonce, 'owned', copied.stat, copied.sha256, copied.size,
         ownedArtifacts.replacementCandidate.journal);
       await validateReadable(ownedPaths.replacementCandidate, artifact, operation.verifyReadable, 'FINAL_VALIDATION_FAILED');
+      // Sentry Six Manager: the candidate was created private (0600); the
+      // replacement keeps the original's permissions, so whatever else reads
+      // the footage folder (a share, a media server) still can
+      if (typeof pfs.chmod === 'function' && typeof originalIdentity?.mode === 'bigint') {
+        await pfs.chmod(ownedPaths.replacementCandidate, Number(originalIdentity.mode & 0o777n)).catch(() => {});
+      }
       await persist(operation, transactionSnapshot({ phase: 'candidate-written', ownedPaths, ownedArtifacts,
         publicationArtifact: artifact }));
       abortIfRequested(operation.signal);
