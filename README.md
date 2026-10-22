@@ -11,12 +11,16 @@ Recycle Bin, retention policies, jobs and notifications.
 *Screenshots use generated demo footage.*
 
 - **Viewer.** All six cameras in sync, with the telemetry dashboard (speed,
-  gear, Autopilot, blinkers, steering, G-force) and the map.
+  gear, Autopilot, blinkers, steering, G-force) and the map. The cameras
+  stream over one HTTP/2 connection and keep pace with each other (a camera
+  that falls behind on a slow network catches up), and the server reads the
+  telemetry from the share, so the browser never downloads a clip twice.
 - **Encoder.** Converts footage to H.265 or AV1 on the GPU (NVIDIA, AMD
   including APUs, Intel) or the CPU. Tesla's per-frame telemetry is copied
   into every converted file and verified, and nothing is converted twice.
-- **Footage.** Every recording per vehicle, filtered by category and date,
-  with Play, Protect and Move to trash.
+- **Footage.** Every recording per vehicle, by day, with a blue badge for
+  what is already encoded, filtered by category and date, with Play, Protect
+  and Move to trash.
 - **Recycle Bin and policies.** Old recordings move to the Recycle Bin on a
   schedule. Nothing is ever deleted unless you empty it yourself.
 - **Secure by default.** HTTPS with its own certificate authority, SMB 3
@@ -81,7 +85,7 @@ recordings.
 
 ![Encoder](docs/images/encoder.png)
 
-The Encoder is Sentry Studio's converter, unchanged. It converts the
+The Encoder is Sentry Studio's converter. It converts the
 selected vehicle's footage straight on its share to save space, so more
 fits before old recordings have to go: by default each original is replaced
 by its verified H.265 or AV1 version (when the share supports a safe
@@ -338,7 +342,7 @@ disk, not on a share.
 ## Not in the web version (yet)
 
 - Export, clip sharing and the SentryUSB drive tools from the desktop app;
-  the Viewer shows them as not available.
+  the Viewer leaves them out.
 - Desktop-only converter options (keep running when closed, start with
   Windows).
 
@@ -358,7 +362,7 @@ docker build -t ghcr.io/skittles-fivem/sentry-manager:latest .
 | --- | --- |
 | `server/` | The web server, the root supervisor, shares, Recycle Bin, policies, jobs |
 | `web/` | The web pages, and the shim that runs Sentry Studio in the browser |
-| `src/` | Sentry Studio's viewer (`renderer`, `shared`) and converter (`main/converter`), unchanged |
+| `src/` | Sentry Studio's viewer (`renderer`, `shared`) and converter (`main/converter`); the few web-version changes are commented where they are (telemetry from the server, keeping the cameras together, the benchmark's levels) |
 | `native/` | The no-replace rename helper for safe replacement |
 | `test/` | Tests (`node --test`), including real conversions with telemetry checks |
 

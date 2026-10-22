@@ -5060,11 +5060,47 @@ function playNative() {
             }
         });
     }
+    startFollowingMaster();
+}
+
+// Keep the other cameras with the master while playing. Over a network
+// (Sentry Six Manager's web viewer) a camera can wait for data while the
+// rest play on, or be paused by the browser, and timeupdate-based syncing
+// never brings it back: here they wait while the master waits, a camera more
+// than half a second off is moved to the master's time, and one that stopped
+// is started again.
+let followTimer = null;
+let masterWaitingTicks = 0;
+function startFollowingMaster() {
+    masterWaitingTicks = 0;
+    if (!followTimer) followTimer = setInterval(followMaster, 500);
+}
+function stopFollowingMaster() {
+    clearInterval(followTimer);
+    followTimer = null;
+}
+function followMaster() {
+    const master = nativeVideo.master;
+    if (!nativeVideo.playing || !multi.enabled || !master?.src) return;
+    const others = Object.values(videoBySlot).filter(vid => vid && vid !== master && vid.src && vid.readyState >= 1 && !vid.ended);
+    // waiting for data for a moment (two checks in a row): hold the others
+    masterWaitingTicks = master.readyState < 3 || master.seeking ? masterWaitingTicks + 1 : 0;
+    if (masterWaitingTicks >= 2) {
+        others.forEach(vid => { if (!vid.paused) vid.pause(); });
+        return;
+    }
+    if (master.paused || master.ended) return;
+    const t = master.currentTime;
+    others.forEach(vid => {
+        if (Math.abs(vid.currentTime - t) > 0.5) vid.currentTime = t;
+        if (vid.paused) vid.play().catch(() => {});
+    });
 }
 
 function pauseNative() {
     nativeVideo.playing = false;
     player.playing = false;
+    stopFollowingMaster();
     updatePlayButton();
     
     // Pause all videos

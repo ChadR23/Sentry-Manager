@@ -22,9 +22,10 @@ process.umask(0o027);
 
 const fs = require('fs');
 const http = require('http');
-const https = require('https');
+const http2 = require('http2');
 const net = require('net');
 const path = require('path');
+const zlib = require('zlib');
 const { spawn } = require('child_process');
 const { Logger } = require('./log');
 const { ManagerDB } = require('./db');
@@ -45,6 +46,7 @@ const { createLocalMounter, createIpcMounter } = require('./mounter');
 const { VERSIONS, DEFAULT_VERSION, securitySummary } = require('./mountSpec');
 const { TlsManager, localTlsSource, supervisorTlsSource, parseHostnames } = require('./tls');
 const { Router, HttpError, sendJson, readJson, serveFile } = require('./http');
+const { Telemetry } = require('./telemetry');
 
 const APP_ROOT = path.resolve(process.env.APP_ROOT || path.join(__dirname, '..'));
 const SRC = path.join(APP_ROOT, 'src');
@@ -108,7 +110,8 @@ function isSecure(req) {
 
 /** The Host header, if it is a plain host[:port] (and trusted, when TRUSTED_HOSTS is set). */
 function cleanHost(req) {
-  const raw = String((TRUST_PROXY && req.headers['x-forwarded-host']) || req.headers.host || '').split(',')[0].trim();
+  // HTTP/2 sends the host as :authority
+  const raw = String((TRUST_PROXY && req.headers['x-forwarded-host']) || req.headers.host || req.headers[':authority'] || '').split(',')[0].trim();
   if (!/^[A-Za-z0-9.\-[\]:]{1,300}$/.test(raw)) return null;
   if (TRUSTED_HOSTS.length) {
     const name = raw.replace(/:\d+$/, '').replace(/^\[|\]$/g, '').toLowerCase();
@@ -157,6 +160,7 @@ async function main() {
   vehicles.bootstrapFromEnv();
   const inventory = new Inventory({ vehicles, db, log: logger.scope('inventory'), onChange: () => announce('inventory') });
   const thumbs = new Thumbnails({ dir: path.join(DATA, 'thumbnails'), ffmpegPath: FFMPEG });
+  const telemetry = new Telemetry({ srcRoot: SRC, cacheDir: path.join(DATA, 'telemetry'), log: logger.scope('telemetry') });
 
   // ---- paths
   // Default place for converted copies ("keep originals" mode); EXTRA_ROOTS adds more.
@@ -479,6 +483,23 @@ async function main() {
       recordings: list.slice(offset, offset + limit).map(publicRecording)
     };
   });
+  // a clip's telemetry records for the viewer (server/telemetry.js)
+  r.add('GET', '/api/telemetry', async (req, res, { query }) => {
+    const real = await studioReadable.resolve(String(query.path || ''));
+    if (!real || hiddenPath(real)) throw new HttpError(403, 'Outside the vehicle shares.');
+    const { key, body } = await telemetry.forFile(real);
+    const etag = `"${key}"`;
+    const headers = { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'private, no-cache', ETag: etag, Vary: 'Accept-Encoding' };
+    if (req.headers['if-none-match'] === etag) {
+      res.writeHead(304, headers);
+      res.end();
+      return undefined;
+    }
+    const gzip = /\bgzip\b/.test(String(req.headers['accept-encoding'] || ''));
+    res.writeHead(200, { ...headers, ...(gzip ? { 'Content-Encoding': 'gzip' } : {}) });
+    res.end(gzip ? zlib.gzipSync(body) : body);
+    return undefined;
+  });
   r.add('GET', '/api/vehicles/:id/recordings/:rid', async (req, res, { params }) => {
     const v = vehicleOr404(params.id);
     const rec = inventory.recording(v.id, params.rid);
@@ -716,7 +737,7 @@ async function main() {
           }
         }
         if (p === '/api/events') {
-          res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+          res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
           res.write('event: hello\ndata: {}\n\n');
           clients.add(res);
           const ping = setInterval(() => res.write(': ping\n\n'), 20000);
@@ -728,7 +749,7 @@ async function main() {
         }
         if (p === '/api/converter/events') {
           if (!bridge) return sendJson(res, 503, { error: 'Converter is starting' });
-          res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+          res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
           res.write('event: hello\ndata: {}\n\n');
           bridge.attachEvents(String(url.searchParams.get('client') || '').slice(0, 64), res);
           return undefined;
@@ -786,7 +807,10 @@ async function main() {
     server.listen(PORT, HOST, () => log.warn(`Sentry Six Manager on http://${HOST}:${PORT} WITHOUT HTTPS (TLS_MODE=off): only use this behind a reverse proxy that does HTTPS.`));
   } else {
     const material = await tlsSource.load();
-    httpsServer = https.createServer({ key: material.key, cert: material.cert, minVersion: 'TLSv1.2' }, handler);
+    // HTTP/2: the Viewer plays six cameras at once next to live updates and
+    // telemetry; over HTTP/1.1 browsers allow only six connections per
+    // server, so some cameras waited for a free one and fell behind.
+    httpsServer = http2.createSecureServer({ key: material.key, cert: material.cert, minVersion: 'TLSv1.2', allowHTTP1: true }, handler);
     const redirect = http.createServer((req, res) => {
       if (String(req.url).split('?')[0] === '/healthz') {
         res.writeHead(200, { 'Content-Type': 'text/plain' });

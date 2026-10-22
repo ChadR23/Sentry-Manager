@@ -38,8 +38,11 @@ async function extractSeiFromBuffer(buffer) {
     
     const { SeiMetadata } = await window.DashcamHelpers.initProtobuf();
     const mp4 = new window.DashcamMP4(buffer);
-    const frames = mp4.parseFrames(SeiMetadata);
-    
+    return collectSei(mp4.parseFrames(SeiMetadata));
+}
+
+/** seiData and mapPath from parsed frames ({ timestamp, sei }). */
+function collectSei(frames) {
     const seiData = [];
     const mapPath = [];
     for (const frame of frames) {
@@ -59,6 +62,31 @@ async function extractSeiFromBuffer(buffer) {
     seiData.sort((a, b) => a.timestampMs - b.timestampMs);
     mapPath.sort((a, b) => a.timestampMs - b.timestampMs);
     return { seiData, mapPath };
+}
+
+/**
+ * Web version (Sentry Six Manager): the server reads the clip from the share
+ * and sends each frame's timestamp and raw telemetry record, so the browser
+ * does not download the whole file a second time next to the video. The
+ * records are decoded here exactly as extractSeiFromBuffer decodes them.
+ * @param {string} filePath - Path of the clip on the server
+ */
+async function extractSeiFromServer(filePath, signal) {
+    if (!window.DashcamHelpers) return { seiData: [], mapPath: [] };
+    const { SeiMetadata } = await window.DashcamHelpers.initProtobuf();
+    const response = await fetch(`/api/telemetry?path=${encodeURIComponent(filePath)}`, { credentials: 'same-origin', signal });
+    if (!response.ok) throw new Error(`telemetry request failed (${response.status})`);
+    const { frames } = await response.json();
+    return collectSei((frames || []).map(([timestamp, record]) => {
+        const bytes = Uint8Array.from(atob(record), (c) => c.charCodeAt(0));
+        let sei = null;
+        try {
+            sei = SeiMetadata.decode(bytes);
+        } catch {
+            // undecodable record: the frame shows no telemetry, as in the desktop app
+        }
+        return { timestamp, sei };
+    }));
 }
 
 /**
@@ -118,8 +146,16 @@ export async function extractSeiFromEntry(entry, seiType, { signal } = {}) {
 
         let result = { seiData: [], mapPath: [] };
 
-        // If it's an Electron file with path, fetch via file:// protocol
-        if (entry.file?.isElectronFile && entry.file?.path) {
+        if (globalThis.__SENTRY_WEB__ && entry.file?.isElectronFile && entry.file?.path) {
+          try {
+            result = await extractSeiFromServer(entry.file.path, signal);
+          } catch (err) {
+            if (err?.name === 'AbortError') throw err;
+            console.warn('Failed to get telemetry from the server:', err);
+            return { seiData: [], mapPath: [] }; // don't cache transient read failures
+          }
+        } else if (entry.file?.isElectronFile && entry.file?.path) {
+          // If it's an Electron file with path, fetch via file:// protocol
           try {
             const fileUrl = filePathToUrl(entry.file.path);
             const response = await fetch(fileUrl);

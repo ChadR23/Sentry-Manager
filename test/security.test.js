@@ -10,6 +10,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const fsp = require('fs/promises');
 const https = require('https');
+const http2 = require('http2');
 const net = require('net');
 const os = require('os');
 const path = require('path');
@@ -111,6 +112,26 @@ test('HTTPS, the setup code, cookies and password confirmation', { skip: !hasOpe
     assert.deepEqual([me.data.needsSetup, me.data.secure], [true, true]);
     assert.match(me.headers['strict-transport-security'], /max-age=/);
 
+    // HTTP/2 (all six cameras share one connection): pages, the API and the
+    // live-update stream answer over it too
+    const h2 = http2.connect(`https://127.0.0.1:${s.port}`, { ca, servername: 'localhost' });
+    const h2get = (p) => new Promise((resolve, reject) => {
+      const rq = h2.request({ ':path': p });
+      let body = '';
+      let head = null;
+      rq.on('response', (h) => { head = h; if (/event-stream/.test(h['content-type'] || '')) { rq.close(); resolve({ head, body }); } });
+      rq.setEncoding('utf8');
+      rq.on('data', (c) => { body += c; });
+      rq.on('end', () => resolve({ head, body }));
+      rq.on('error', reject);
+    });
+    const h2me = await h2get('/api/auth/me');
+    assert.equal(h2me.head[':status'], 200);
+    assert.equal(JSON.parse(h2me.body).secure, true);
+    assert.equal((await h2get('/login')).head[':status'], 200);
+    assert.equal((await h2get('/api/events')).head[':status'], 401, 'the event stream needs a session over HTTP/2 too');
+    h2.close();
+
     // whoever reaches the page first cannot claim it without the code
     assert.equal((await httpsCall(s.port, ca, 'POST', '/api/auth/setup', { body: { username: 'mallory', password: 'attackerpass1' } })).status, 403);
     assert.equal((await httpsCall(s.port, ca, 'POST', '/api/auth/setup', { body: { username: 'mallory', password: 'attackerpass1', code: 'AAAAA-BBBBB-CCCCC' } })).status, 403);
@@ -124,6 +145,15 @@ test('HTTPS, the setup code, cookies and password confirmation', { skip: !hasOpe
     assert.match(s.output(), /\[audit\] Account setup with a wrong setup code from /);
     assert.match(s.output(), /\[audit\] Account "admin" created with the setup code: admin from /);
     assert.equal((await httpsCall(s.port, ca, 'POST', '/api/auth/setup', { body: { username: 'x', password: 'whatever123', code } })).status, 409);
+    // the live-update stream over HTTP/2 (no HTTP/1-only headers such as Connection)
+    const h2s = http2.connect(`https://127.0.0.1:${s.port}`, { ca, servername: 'localhost' });
+    const sse = await new Promise((resolve, reject) => {
+      const rq = h2s.request({ ':path': '/api/events', cookie });
+      rq.on('response', (h) => { rq.close(); resolve(h); });
+      rq.on('error', reject);
+    });
+    h2s.close();
+    assert.deepEqual([sse[':status'], sse['content-type']], [200, 'text/event-stream']);
     // a plain cookie of the same name (planted over HTTP) is not accepted over HTTPS
     assert.equal((await httpsCall(s.port, ca, 'GET', '/api/vehicles', { cookie: cookie.replace('__Host-', '') })).status, 401);
 
