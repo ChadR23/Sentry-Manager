@@ -5,8 +5,11 @@
 //
 // URL parameters (set by the manager shell):
 //   embed=encoder|viewer   encoder: open the Converter panel, hide the rest
-//   root=/footage/<car>    folder the viewer loads on start
+//   root=/footage/<car>    the vehicle's footage: what the viewer opens, and
+//                          the encoder's source
 //   folder=/footage/<car>/TeslaCam/SentryClips/<event>   open this folder instead
+//   vehicle=<id>           the vehicle shown (picked in the shell)
+//   output=/data/converted/<car>   the encoder's default destination
 (function () {
   'use strict';
 
@@ -148,6 +151,7 @@
   };
 
   const listeners = new Map();
+  const reads = { active: 0, at: 0, error: null }; // folder reads, for the viewer's status line
   window.electronAPI = {
     openFolder: (startPath) => picker({ title: 'Choose a folder', startPath }),
     openFile: (filters) => picker({ title: 'Choose a file', files: true, extensions: (filters || []).flatMap((f) => f.extensions || []) }),
@@ -155,7 +159,16 @@
       window.open(url, '_blank', 'noopener');
       return Promise.resolve();
     },
-    readDir: (dirPath) => post('/api/studio/readDir', { path: dirPath }).catch(() => []),
+    readDir: (dirPath) => {
+      reads.active++;
+      return post('/api/studio/readDir', { path: dirPath }).catch((err) => {
+        reads.error = err;
+        return [];
+      }).finally(() => {
+        reads.active--;
+        reads.at = Date.now();
+      });
+    },
     readFile: async (filePath) => (await post('/api/studio/readFile', { path: filePath })).text,
     exists: (filePath) => post('/api/studio/exists', { path: filePath }).catch(() => false),
     stat: (filePath) => post('/api/studio/stat', { path: filePath }).catch(() => null),
@@ -329,23 +342,130 @@
     document.addEventListener('play', () => { if (away) setTimeout(pause, 0); }, true);
   }
 
+  // The vehicles, for the pickers below (one request per page).
+  let vehiclesPromise = null;
+  const vehicleList = () => (vehiclesPromise ||= fetch('/api/vehicles', { credentials: 'same-origin' })
+    .then((r) => (r.ok ? r.json() : { vehicles: [] })).then((d) => d.vehicles || []).catch(() => []));
+  const footageOf = (v) => v.studioRoot || v.root;
+  /** A <select> of the vehicles; null with fewer than two. */
+  async function vehicleSelect(selectedId, label) {
+    const list = await vehicleList();
+    if (list.length < 2) return null;
+    const select = document.createElement('select');
+    select.className = 'sm-vehicle-select';
+    select.setAttribute('aria-label', label);
+    for (const v of list) select.append(new Option(v.name, v.id, false, v.id === selectedId));
+    return select;
+  }
+
+  // Viewer tab: the selected vehicle's footage, straight from its share.
+  // There is no folder to choose (the vehicle is picked in the clip list's
+  // header), so the empty screen only says what is happening.
+  if (embed === 'viewer') {
+    const vehicleId = params.get('vehicle');
+    const say = (text, retry = false) => {
+      const box = document.querySelector('#dropOverlay .drop-message');
+      const p = box?.querySelector('p');
+      if (!p) return;
+      p.removeAttribute('data-i18n'); // Studio's translations would put "Select your folder" back
+      p.textContent = text;
+      const actions = box.querySelector('.drop-actions');
+      actions.replaceChildren();
+      if (retry) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'mini-btn sm-retry';
+        b.textContent = 'Try again';
+        b.addEventListener('click', () => location.reload());
+        actions.append(b);
+      }
+    };
+    // the empty screen and the folder button open nothing here
+    document.addEventListener('click', (e) => {
+      if (e.target.closest?.('#dropOverlay') && !e.target.closest('.sm-retry')) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+      }
+    }, true);
+    for (const type of ['dragover', 'drop']) document.addEventListener(type, (e) => e.preventDefault(), true);
+    window.addEventListener('DOMContentLoaded', async () => {
+      const name = (await vehicleList()).find((v) => v.id === vehicleId)?.name;
+      if (!startFolder) {
+        say('Add a vehicle in Settings to see its footage here.');
+        return;
+      }
+      say(`Opening ${name ? `${name}'s` : 'the'} footage…`);
+      // the vehicle picker replaces the folder button
+      const select = await vehicleSelect(vehicleId, 'Vehicle');
+      if (select) {
+        select.addEventListener('change', () => toShell({ type: 'select-vehicle', id: select.value }));
+        document.getElementById('chooseFolderBtn')?.before(select);
+      }
+      // Studio reads the folders in the background; once that has gone
+      // quiet without clips, say why
+      const started = Date.now();
+      const timer = setInterval(() => {
+        const overlay = document.getElementById('dropOverlay');
+        if (!overlay || overlay.classList.contains('hidden')) return clearInterval(timer);
+        if (reads.active || !reads.at || Date.now() - reads.at < 2000) {
+          if (Date.now() - started < 180000) return undefined;
+        }
+        clearInterval(timer);
+        if (reads.error) say(`Can't open the footage: ${reads.error.message}`, true);
+        else say(`No dashcam clips found in ${startFolder}. Footage appears here once the car has recorded some.`, true);
+        return undefined;
+      }, 500);
+    });
+  }
+
   // Encoder tab: open the Converter panel as soon as the Studio UI is built.
+  // The source is a vehicle's footage (picked from the vehicles, not a
+  // folder); converted copies go to its folder under /data/converted unless
+  // another destination is chosen.
   if (embed === 'encoder') {
-    // "Review conversion" in Footage hands over that vehicle's folder as the source.
-    const useSource = (folder) => {
-      const input = document.getElementById('converterSourcePath');
-      const busy = document.getElementById('converterChooseSource')?.hidden;
-      if (!input || !folder || busy) return;
-      input.value = folder;
+    const fill = (id, value) => {
+      const input = document.getElementById(id);
+      if (!input || !value) return;
+      input.value = value;
       input.dispatchEvent(new Event('input', { bubbles: true }));
       input.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+    // a running or paused job keeps its folders
+    const ACTIVE = ['discovering', 'waiting', 'staging', 'encoding', 'writing-telemetry', 'verifying', 'copying', 'replacing', 'paused', 'paused_network'];
+    const busy = async () => ACTIVE.includes((await invoke('getCurrent'))?.value?.state);
+    // "Review conversion" in Footage hands over that vehicle's folder as the source.
+    const useSource = async (folder) => {
+      if (!(await busy())) fill('converterSourcePath', folder);
+    };
+    const pickVehicle = async () => {
+      const input = document.getElementById('converterSourcePath');
+      const list = await vehicleList();
+      const current = list.find((v) => footageOf(v) === input?.value) || list.find((v) => v.id === params.get('vehicle')) || list[0];
+      if (!input) return;
+      input.placeholder = list.length ? '' : 'Add a vehicle in Settings first';
+      // the vehicle picker replaces the folder button (hidden in studioEmbed.css)
+      const select = await vehicleSelect(current?.id, 'Vehicle to convert');
+      if (select) {
+        select.addEventListener('change', () => {
+          const v = list.find((x) => x.id === select.value);
+          if (v) useSource(footageOf(v));
+        });
+        document.getElementById('converterChooseSource')?.before(select);
+      }
+      if (!(await busy())) {
+        if (!input.value && current) fill('converterSourcePath', params.get('source') || footageOf(current));
+        if (!document.getElementById('converterDestinationPath')?.value) fill('converterDestinationPath', params.get('output'));
+      }
     };
     const open = () => {
       const tab = document.querySelector('[data-panel="converter"]');
       if (!tab) return setTimeout(open, 100);
       tab.click();
       // after the converter has shown its last job's folders
-      if (params.get('source')) setTimeout(() => useSource(params.get('source')), 1500);
+      setTimeout(() => {
+        if (params.get('source')) useSource(params.get('source'));
+        pickVehicle();
+      }, 1500);
       return undefined;
     };
     window.addEventListener('DOMContentLoaded', () => setTimeout(open, 0));

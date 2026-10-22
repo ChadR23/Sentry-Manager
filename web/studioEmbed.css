@@ -4,6 +4,38 @@ html[data-embed="encoder"] #clipBrowser {
   display: none !important;
 }
 
+/* Viewer tab: viewing only. It shows the vehicle picked in the manager, so
+   there is no folder to choose; the Converter has its own tab. */
+html[data-embed="viewer"] #chooseFolderBtn,
+html[data-embed="viewer"] #clipDriveTabBar,
+html[data-embed="viewer"] #folderInput,
+html[data-embed="viewer"] #dropOverlay .drop-actions:empty {
+  display: none !important;
+}
+html[data-embed="viewer"] #dropOverlay { cursor: default; }
+
+/* Encoder tab: the source is a vehicle's footage, picked from the vehicles
+   (electronApiShim.js), not a folder. */
+html[data-embed="encoder"] #converterChooseSource {
+  display: none !important;
+}
+
+/* Desktop-app features with no web counterpart: video export (and its
+   start / end markers), shared links, support chat, the default TeslaCam
+   folder and SentryUSB drive data. */
+#setStartMarkerBtn, #setEndMarkerBtn, #exportBtn, #mySharedClipsBtn, #supportChatBtn,
+.settings-accordion:has(#defaultFolderPath),
+.settings-accordion:has(#driveDataFilePath) {
+  display: none !important;
+}
+
+.sm-vehicle-select {
+  max-width: 180px; min-height: 32px; padding: 4px 28px 4px 10px; border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14); background-color: #151b25; color: #e6e9ef;
+  font: 600 13px/1.2 Inter, system-ui, sans-serif; cursor: pointer;
+}
+.converter-path-control .sm-vehicle-select { flex: none; margin-left: 8px; }
+
 /* Verification can never be Off in Sentry Six Manager (insurance); the shim
    removes the option and the server upgrades Off to Quick. */
 #converterVerifyMode option[value="off"] {

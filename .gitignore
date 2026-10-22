@@ -1,5 +1,6 @@
+# anchored to the repository root: src/renderer/scripts/data/ is source code
 node_modules/
-build/
-data/
-.env
+/build/
+/data/
+/.env
 .DS_Store

@@ -16,6 +16,37 @@ const path = require('path');
 const { ShareManager } = require('./share');
 const { normalizeSmb } = require('./mountSpec');
 const { isInside } = require('./safePath');
+const { shouldSkipDir } = require('./footage');
+
+const CLIP_FOLDER = /^(recentclips|sentryclips|savedclips)$/i;
+
+/**
+ * The shallowest folder below `root` (itself included, at most `maxDepth`
+ * levels down) that has clip folders inside, or null. Bounded, since every
+ * directory read on a share is a network round trip.
+ */
+function findClipRoot(root, { maxDepth = 3, maxDirs = 200 } = {}) {
+  let level = [root];
+  let read = 0;
+  for (let depth = 0; depth <= maxDepth && level.length; depth++) {
+    const hits = [];
+    const next = [];
+    for (const dir of level) {
+      if (read++ >= maxDirs) return null;
+      let entries;
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch {
+        continue; // share not reachable right now, or no permission
+      }
+      if (entries.some((e) => e.isDirectory() && CLIP_FOLDER.test(e.name))) hits.push(dir);
+      else for (const e of entries) if (e.isDirectory() && !shouldSkipDir(e.name)) next.push(path.join(dir, e.name));
+    }
+    if (hits.length) return hits.find((d) => /^teslacam$/i.test(path.basename(d))) || hits.sort()[0];
+    level = next.sort();
+  }
+  return null;
+}
 
 const SYSTEM_DIRS = ['/proc', '/sys', '/dev', '/etc', '/root', '/run', '/boot'];
 
@@ -219,24 +250,18 @@ class VehicleManager extends EventEmitter {
   }
 
   /**
-   * The folder Sentry Studio opens for this vehicle: the TeslaCam folder when
-   * the share has one (Studio expects RecentClips/SentryClips/SavedClips
-   * directly inside), else the share root.
+   * The folder Sentry Studio opens for this vehicle. Studio expects
+   * RecentClips / SentryClips / SavedClips directly inside it, while the
+   * Footage scan finds clips at any depth, so look for the shallowest folder
+   * that holds them (a few levels down, e.g. Archive/TeslaCam), preferring one
+   * called TeslaCam; else the share root.
    */
   studioRoot(vehicle) {
     const root = this.rootOf(vehicle);
     this.studioRoots = this.studioRoots || new Map();
     const cached = this.studioRoots.get(vehicle.id);
     if (cached && cached.root === root && Date.now() - cached.at < 60000) return cached.value;
-    let value = root;
-    try {
-      const names = fs.readdirSync(root);
-      const hasClipFolders = names.some((n) => /^(recentclips|sentryclips|savedclips)$/i.test(n));
-      const tesla = names.find((n) => /^teslacam$/i.test(n));
-      if (!hasClipFolders && tesla) value = path.join(root, tesla);
-    } catch {
-      // share not reachable right now
-    }
+    const value = findClipRoot(root) || root;
     this.studioRoots.set(vehicle.id, { root, value, at: Date.now() });
     return value;
   }
@@ -283,4 +308,4 @@ function realOr(p) {
   }
 }
 
-module.exports = { VehicleManager, normalizeVehicle, slug };
+module.exports = { VehicleManager, normalizeVehicle, slug, findClipRoot };

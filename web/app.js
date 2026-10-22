@@ -381,9 +381,16 @@
 
   // ---------- embedded Studio (Viewer / Encoder) ----------
   const frames = {};
+  // The Viewer shows the selected vehicle's footage; the Encoder converts it
+  // (and suggests that vehicle's folder under /data/converted for the copies).
   function studioUrl(kind, extra = {}) {
     const v = current();
-    const q = new URLSearchParams({ embed: kind, ...(v ? { root: v.studioRoot || v.root } : {}), ...extra });
+    const q = new URLSearchParams({
+      embed: kind,
+      ...(v ? { root: v.studioRoot || v.root, vehicle: v.id } : {}),
+      ...(v && kind === 'encoder' && v.convertedRoot ? { output: v.convertedRoot } : {}),
+      ...extra
+    });
     return `/studio/index.html?${q}`;
   }
   function openStudio(kind, extra = {}) {
@@ -402,13 +409,16 @@
     return undefined;
   }
   function showFrame(kind) {
-    const url = pendingFrame[kind] || frames[kind]?.dataset.src || studioUrl(kind);
+    // a tab opened for another vehicle than the selected one starts over
+    const same = frames[kind] && frames[kind].dataset.vehicle === String(current()?.id || '');
+    const url = pendingFrame[kind] || (same ? frames[kind].dataset.src : studioUrl(kind));
     delete pendingFrame[kind];
     if (!frames[kind] || frames[kind].dataset.src !== url) {
       frames[kind]?.remove();
       const wrap = document.createElement('div');
       wrap.className = 'frame-wrap';
       wrap.dataset.src = url;
+      wrap.dataset.vehicle = String(current()?.id || '');
       wrap.innerHTML = `<iframe title="Sentry Studio ${kind}" src="${esc(url)}" allow="fullscreen; clipboard-write"></iframe>`;
       $('frames').append(wrap);
       frames[kind] = wrap;
@@ -458,6 +468,14 @@
     if (e.data.type === 'showInFolder') {
       state.footage.category = 'all';
       location.hash = '#/footage';
+    }
+    // the Viewer's vehicle picker
+    if (e.data.type === 'select-vehicle' && state.vehicles.some((v) => v.id === e.data.id)) {
+      state.vehicleId = e.data.id;
+      store.set('vehicle', state.vehicleId);
+      state.footage.offset = 0;
+      state.footage.selected.clear();
+      openStudio('viewer');
     }
   });
 
