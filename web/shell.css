@@ -155,6 +155,27 @@ details.more summary { cursor: pointer; color: var(--text-2); font-size: 15px; p
 details.more p { margin-top: 10px; color: var(--text-2); max-width: 760px; }
 .selrow { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
 .recs { display: flex; flex-direction: column; gap: 12px; }
+.chip.blue { color: var(--info); border-color: rgba(96, 165, 250, 0.55); background: rgba(96, 165, 250, 0.12); }
+.chip .cdot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+/* Footage by day */
+.days { display: flex; flex-direction: column; gap: 16px; }
+.day { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px; }
+.day.open { border-color: var(--border-strong); }
+.day-top { display: grid; grid-template-columns: 26px 168px minmax(0, 1fr) auto; gap: 20px; align-items: center; }
+.day-top input[type=checkbox] { width: 20px; height: 20px; margin: 0; accent-color: var(--accent); }
+.day-thumb { position: relative; width: 168px; height: 100px; border-radius: 12px; overflow: hidden; border: 1px solid var(--border); background: var(--panel-3); display: grid; place-items: center; color: var(--muted); font-size: 12px; }
+.day-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.day-thumb .count { position: absolute; right: 6px; bottom: 6px; background: rgba(0, 0, 0, 0.72); color: #fff; border-radius: 6px; padding: 1px 7px; font-size: 11.5px; font-weight: 600; }
+.day-info { min-width: 0; display: flex; flex-direction: column; gap: 9px; }
+.day-info .date { font-size: 18px; font-weight: 700; letter-spacing: -0.01em; }
+.day-info .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.day-info .meta { color: var(--text-2); font-size: 13px; }
+.day-actions { display: flex; flex-direction: column; gap: 10px; }
+.day-actions .btn { justify-content: center; }
+.day-toggle { all: unset; box-sizing: border-box; display: block; width: 100%; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); color: var(--text); font-size: 13px; font-weight: 600; cursor: pointer; }
+.day-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.day .recs { margin-top: 14px; padding-left: 46px; }
+.day .recs .rec { background: var(--panel-2); }
 .rec { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 18px 16px; }
 .rec.selected { border-color: var(--accent-border); }
 .rec-top { display: grid; grid-template-columns: 26px 128px minmax(0, 1fr) auto; gap: 20px; align-items: center; }
@@ -222,6 +243,9 @@ html.reduce-effects *, html.reduce-effects *::before { transition: none !importa
   .rec-actions { grid-column: 2 / -1; justify-content: flex-start; }
   .thumb { width: 110px; height: 66px; }
   .keep { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .day-top { grid-template-columns: 26px 140px minmax(0, 1fr); }
+  .day-thumb { width: 140px; height: 84px; }
+  .day-actions { grid-column: 2 / -1; flex-direction: row; flex-wrap: wrap; }
 }
 @media (max-width: 760px) {
   .app, .app.collapsed { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; }
@@ -253,6 +277,17 @@ html.reduce-effects *, html.reduce-effects *::before { transition: none !importa
   .set-tabs button { flex: 1 0 auto; border: 0; background: none; padding: 11px 6px; color: var(--text-2); font-size: 13px; font-weight: 600; white-space: nowrap; cursor: pointer; }
   .set-tabs button.on { background: var(--accent-bg); color: var(--accent); }
   .card[data-section]:not(.on) { display: none; }
+  .day { padding: 14px; }
+  .day-top { grid-template-columns: 22px 112px minmax(0, 1fr); gap: 12px; align-items: start; }
+  .day-thumb { width: 112px; height: 68px; }
+  .day-info .date { font-size: 16px; }
+  .day-actions { grid-column: 1 / -1; flex-direction: row; flex-wrap: wrap; }
+  .day-actions .btn { flex: 1 1 auto; }
+  .day .recs { padding-left: 0; }
+  .day .rec { padding: 12px; }
+  .day .rec-top { grid-template-columns: 22px minmax(0, 1fr); gap: 10px 12px; align-items: start; }
+  .day .rec-top .thumb { width: 100%; max-width: 260px; height: auto; aspect-ratio: 16 / 10; }
+  .day .rec-top .rec-info, .day .rec-top .rec-actions { grid-column: 2; }
 }
 @media (max-width: 359px) {
   .set-tabs button { padding: 11px 4px; font-size: 12px; }

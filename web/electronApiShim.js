@@ -9,6 +9,7 @@
 //                          the encoder's source
 //   folder=/footage/<car>/TeslaCam/SentryClips/<event>   open this folder instead
 //   vehicle=<id>           the vehicle shown (picked in the shell)
+//   date=YYYY-MM-DD        the viewer opens on this day (Footage > Play day)
 (function () {
   'use strict';
 
@@ -399,6 +400,23 @@
       if (select) {
         select.addEventListener('change', () => toShell({ type: 'select-vehicle', id: select.value }));
         document.getElementById('chooseFolderBtn')?.before(select);
+      }
+      // Footage > Play day: pick that day once Studio has listed the days
+      const wantDay = params.get('date');
+      if (wantDay) {
+        const since = Date.now();
+        const pickDay = setInterval(() => {
+          const days = document.getElementById('dayFilter');
+          if (!days || ![...days.options].some((o) => o.value === wantDay)) {
+            if (Date.now() - since > 180000) clearInterval(pickDay);
+            return;
+          }
+          clearInterval(pickDay);
+          if (days.value !== wantDay) {
+            days.value = wantDay;
+            days.dispatchEvent(new Event('change'));
+          }
+        }, 300);
       }
       // Studio reads the folders in the background; once that has gone
       // quiet without clips, say why

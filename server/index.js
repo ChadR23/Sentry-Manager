@@ -155,7 +155,7 @@ async function main() {
   const protectedDirs = [DATA, APP_ROOT, RUN_DIR];
   const vehicles = new VehicleManager({ db, footageRoot: FOOTAGE_ROOT, folderRoots, protectedDirs, logger, mounter });
   vehicles.bootstrapFromEnv();
-  const inventory = new Inventory({ vehicles, db, log: logger.scope('inventory') });
+  const inventory = new Inventory({ vehicles, db, log: logger.scope('inventory'), onChange: () => announce('inventory') });
   const thumbs = new Thumbnails({ dir: path.join(DATA, 'thumbnails'), ffmpegPath: FFMPEG });
 
   // ---- paths
@@ -421,15 +421,55 @@ async function main() {
   });
 
   const publicRecording = (rec) => {
-    const { files, ...rest } = rec;
-    return rest;
+    const { files, clipRels, ...rest } = rec;
+    return { ...rest, encoded: inventory.encoded(rec.vehicleId, rec) };
   };
+  const filtered = (vehicleId, query) => {
+    let list = inventory.get(vehicleId)?.recordings || [];
+    if (query.category && query.category !== 'all') list = list.filter((x) => x.category === query.category);
+    if (query.date) list = list.filter((x) => x.day === query.date);
+    return list;
+  };
+  // Footage by day: the day cards (their recordings come from /recordings?date=)
+  r.add('GET', '/api/vehicles/:id/days', (req, res, { params, query }) => {
+    vehicleOr404(params.id);
+    const inv = inventory.get(params.id);
+    const days = inventory.days(params.id, filtered(params.id, query));
+    const offset = Math.max(0, Number(query.offset) || 0);
+    const limit = Math.min(100, Math.max(1, Number(query.limit) || 30));
+    return {
+      total: days.length, recordings: days.reduce((n, d) => n + d.recordings, 0), offset, limit,
+      scannedAt: inv?.scannedAt || null, scanning: Boolean(inv?.scanning), error: inv?.lastError || null,
+      dates: [...new Set((inv?.recordings || []).map((x) => x.day))].sort().reverse(),
+      days: days.slice(offset, offset + limit)
+    };
+  });
+  // "Delete this day" / "Delete through this date": the recordings of that day
+  // (or that day and every older one) go to the Recycle Bin, protected ones
+  // stay. preview: true only counts them for the confirmation.
+  r.add('POST', '/api/vehicles/:id/trash-days', async (req, res, { params, body }) => {
+    const v = vehicleOr404(params.id);
+    const day = String(body?.day || '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new HttpError(400, 'Choose a day.');
+    const list = filtered(v.id, { category: body?.category }).filter((x) => (body?.through ? x.day <= day : x.day === day));
+    const movable = list.filter((x) => !x.protected);
+    const summary = {
+      recordings: movable.length, bytes: movable.reduce((n, x) => n + x.bytes, 0), protected: list.length - movable.length,
+      days: new Set(movable.map((x) => x.day)).size, oldest: movable.length ? movable.reduce((a, x) => (x.day < a ? x.day : a), day) : null
+    };
+    if (body?.preview === true || !movable.length) return { ...summary, started: false };
+    // a big batch takes a while on a share: it runs as a job (bin.trash starts one)
+    bin.trash(v.id, movable.map((x) => x.id)).catch((err) => log.warn(`Moving ${v.name}'s footage to the Recycle Bin failed: ${err.message}`))
+      .finally(() => {
+        announce('inventory');
+        announce('bin');
+      });
+    return { ...summary, started: true };
+  });
   r.add('GET', '/api/vehicles/:id/recordings', (req, res, { params, query }) => {
     vehicleOr404(params.id);
     const inv = inventory.get(params.id);
-    let list = inv?.recordings || [];
-    if (query.category && query.category !== 'all') list = list.filter((x) => x.category === query.category);
-    if (query.date) list = list.filter((x) => x.day === query.date);
+    let list = filtered(params.id, query);
     if (query.protected === '1') list = list.filter((x) => x.protected);
     const offset = Math.max(0, Number(query.offset) || 0);
     const limit = Math.min(500, Math.max(1, Number(query.limit) || 100));

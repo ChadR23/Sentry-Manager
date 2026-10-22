@@ -60,10 +60,22 @@ the Recycle Bin.
 
 ![Footage](docs/images/footage.png)
 
-**Footage** lists every recording: Recent, Sentry and Saved clips, grouped
-into drives and events, by capture date in the vehicle's time zone. Play a
-recording, show its files, protect it, or move it to the Recycle Bin.
-**Select shown** picks up to 100 recordings at once.
+**Footage** shows one card per day, newest first, with the newest day
+open: a thumbnail (the day's first Sentry or Saved event, else its first
+drive), its drives and events, how long and how big it is, and a blue
+**Encoded** badge once its recordings are converted to H.265 or AV1
+(*Encoded 1/4* while only some are; the codec is read from each clip's MP4
+header). For the whole day:
+
+- **Play day** opens the Viewer on that day.
+- **Delete this day** and **Delete through this date** (that day and every
+  older one) move its recordings to the Recycle Bin. You see how many and
+  how big first; protected recordings stay, and nothing is deleted for good
+  until you empty the Recycle Bin.
+
+Open a day to see its recordings: play one, show its files, protect it, or
+move it to the Recycle Bin. The checkbox on a day selects all of its
+recordings.
 
 ## Encoder
 

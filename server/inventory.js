@@ -4,16 +4,21 @@
 //   - each Sentry / Saved event folder is one recording;
 //   - Recent (and other) clips are grouped into continuous sessions: a gap
 //     of more than ~90 s between one-minute clips starts a new recording.
+// After each scan the clips' video codecs are read from their MP4 headers
+// in the background (remembered per file size and time, so only new or
+// changed clips are read), which tells encoded recordings from originals.
 
 const crypto = require('crypto');
 const fsp = require('fs/promises');
 const path = require('path');
-const { scanFootage } = require('./scanner');
+const { scanFootage, limiter } = require('./scanner');
 const { safeJoin } = require('./footage');
+const { videoCodec } = require('./mp4codec');
 
 const TS_RE = /(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})-(\d{2})/;
 const CATEGORY = { RecentClips: 'Recent', SentryClips: 'Sentry', SavedClips: 'Saved', Other: 'Other' };
 const SESSION_GAP_S = 90;
+const ENCODED = new Set(['h265', 'av1']);
 
 function tsFrom(name) {
   const m = String(name).match(TS_RE);
@@ -70,6 +75,8 @@ function buildRecordings(files, { vehicleId, protectedRels = new Set() } = {}) {
       files: rels,
       fileCount: rels.length,
       clipCount: clips.length,
+      minutes: new Set(stamps).size, // Tesla clips are one minute each
+      clipRels: clips.map((f) => f.rel),
       bytes: list.reduce((n, f) => n + f.size, 0),
       cameras,
       thumbRel: thumb ? thumb.rel : null,
@@ -104,13 +111,123 @@ function buildRecordings(files, { vehicleId, protectedRels = new Set() } = {}) {
   return recordings;
 }
 
+/** How many of a recording's clips are encoded, by codec map (rel -> codec). */
+function encodedOf(rec, codecs) {
+  const out = { clips: rec.clipRels.length, encoded: 0, unknown: 0, codecs: [] };
+  const seen = new Set();
+  for (const rel of rec.clipRels) {
+    const codec = codecs?.get(rel)?.codec;
+    if (codec === undefined) out.unknown++;
+    else if (ENCODED.has(codec)) {
+      out.encoded++;
+      seen.add(codec);
+    }
+  }
+  out.codecs = [...seen].sort();
+  return out;
+}
+
+/**
+ * One entry per capture day (newest first): counts per category, size,
+ * minutes, encoded clips, and the recording whose thumbnail stands for the
+ * day (its first Sentry or Saved event, else its first drive).
+ */
+function summarizeDays(recordings, codecs) {
+  const days = new Map();
+  for (const rec of recordings) {
+    if (!days.has(rec.day)) {
+      days.set(rec.day, { day: rec.day, recordings: 0, byCategory: {}, bytes: 0, minutes: 0, clips: 0, encoded: 0, encodedRecordings: 0, unknown: 0, codecs: new Set(), cameras: 0, protected: 0, list: [] });
+    }
+    const d = days.get(rec.day);
+    const enc = encodedOf(rec, codecs);
+    d.recordings++;
+    d.byCategory[rec.category] = (d.byCategory[rec.category] || 0) + 1;
+    d.bytes += rec.bytes;
+    d.minutes += rec.minutes;
+    d.clips += enc.clips;
+    d.encoded += enc.encoded;
+    if (enc.clips > 0 && enc.encoded === enc.clips) d.encodedRecordings++;
+    d.unknown += enc.unknown;
+    enc.codecs.forEach((c) => d.codecs.add(c));
+    d.cameras = Math.max(d.cameras, rec.cameras.length);
+    if (rec.protected) d.protected++;
+    d.list.push(rec);
+  }
+  return [...days.values()].sort((a, b) => b.day.localeCompare(a.day)).map(({ list, codecs: used, ...d }) => {
+    const byTime = [...list].sort((a, b) => String(a.startKey).localeCompare(String(b.startKey)));
+    const thumb = byTime.find((r) => r.category === 'Sentry' || r.category === 'Saved') || byTime[0];
+    return { ...d, codecs: [...used].sort(), thumbId: thumb?.id || null };
+  });
+}
+
 class Inventory {
-  constructor({ vehicles, db, log }) {
+  constructor({ vehicles, db, log, onChange = () => {} }) {
     this.vehicles = vehicles;
     this.db = db;
     this.log = log;
+    this.onChange = onChange;
     this.state = new Map(); // vehicleId -> { files, recordings, scannedAt, durationMs, errors, scanning }
     this.scans = new Map();
+    this.codecMaps = new Map(); // vehicleId -> Map(rel -> { size, mtimeMs, codec })
+    this.probing = new Map();
+  }
+
+  /** The vehicle's clip codecs read so far (rel -> { size, mtimeMs, codec }). */
+  codecs(vehicleId) {
+    if (!this.codecMaps.has(vehicleId)) {
+      const saved = this.db.get(`codecs:${vehicleId}`, {});
+      const map = new Map();
+      for (const [rel, v] of Object.entries(saved || {})) {
+        if (Array.isArray(v) && v.length === 3) map.set(rel, { size: v[0], mtimeMs: v[1], codec: v[2] });
+      }
+      this.codecMaps.set(vehicleId, map);
+    }
+    return this.codecMaps.get(vehicleId);
+  }
+
+  /**
+   * Read the codec of every clip that is new or changed since it was last
+   * read; forget clips that are gone. Runs in the background after a scan.
+   */
+  probeCodecs(vehicleId) {
+    if (this.probing.has(vehicleId)) return this.probing.get(vehicleId);
+    const p = (async () => {
+      const entry = this.state.get(vehicleId);
+      const vehicle = this.vehicles.get(vehicleId);
+      if (!entry?.files || !vehicle) return 0;
+      const root = this.vehicles.rootOf(vehicle);
+      const map = this.codecs(vehicleId);
+      for (const rel of map.keys()) if (!entry.files.has(rel)) map.delete(rel);
+      const todo = [...entry.files.values()].filter((f) => f.kind === 'clip' && /\.mp4$/i.test(f.rel)
+        && !(map.get(f.rel)?.size === f.size && map.get(f.rel)?.mtimeMs === f.mtimeMs));
+      const limit = limiter(8);
+      let read = 0;
+      await Promise.all(todo.map((f) => limit(async () => {
+        try {
+          const codec = await videoCodec(safeJoin(root, f.rel));
+          map.set(f.rel, { size: f.size, mtimeMs: f.mtimeMs, codec });
+          read++;
+        } catch {
+          // unreadable right now (share dropped, file being replaced): next scan
+        }
+      })));
+      this.db.set(`codecs:${vehicleId}`, Object.fromEntries([...map].map(([rel, v]) => [rel, [v.size, v.mtimeMs, v.codec]])));
+      if (read) this.onChange(vehicleId);
+      return read;
+    })().catch((err) => {
+      this.log.warn(`Reading clip codecs failed: ${err.message}`);
+      return 0;
+    }).finally(() => this.probing.delete(vehicleId));
+    this.probing.set(vehicleId, p);
+    return p;
+  }
+
+  encoded(vehicleId, rec) {
+    return encodedOf(rec, this.codecs(vehicleId));
+  }
+
+  days(vehicleId, recordings) {
+    return summarizeDays(recordings, this.codecs(vehicleId));
   }
 
   get(vehicleId) {
@@ -139,6 +256,7 @@ class Inventory {
         entry.recordings = buildRecordings(res.files, { vehicleId, protectedRels: this.db.protectedSet(vehicleId) });
         this.state.set(vehicleId, entry);
         this.log.info(`${vehicle.name}: ${entry.recordings.length} recordings, ${res.files.size} files (${(res.durationMs / 1000).toFixed(1)}s)`);
+        this.probeCodecs(vehicleId);
         return entry;
       } catch (err) {
         this.state.set(vehicleId, { ...(prev || {}), scanning: false, lastError: err.message });
@@ -202,4 +320,4 @@ class Inventory {
   }
 }
 
-module.exports = { Inventory, buildRecordings, tsFrom };
+module.exports = { Inventory, buildRecordings, summarizeDays, encodedOf, tsFrom };

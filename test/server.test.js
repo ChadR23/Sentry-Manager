@@ -184,6 +184,38 @@ test('footage, protect, Recycle Bin and policies never lose files', { timeout: 1
     const detail = await s.call('GET', `/api/vehicles/daily-driver/recordings/${by['Sentry 2020-01-02 12:29:00'].id}`);
     assert.equal(detail.data.event.city, 'Austin');
 
+    // footage by day: newest first, what each day holds, the day's thumbnail
+    // (its first event, else its first drive), codecs read from the clips
+    const daysOf = async () => (await s.call('GET', '/api/vehicles/daily-driver/days')).data;
+    const days = await waitFor(async () => {
+      const d = await daysOf();
+      return d.days.length === 3 && d.days.every((x) => x.unknown === 0) ? d : null;
+    });
+    assert.deepEqual(days.days.map((d) => d.day), ['2020-01-03', '2020-01-02', '2020-01-01']);
+    const jan1 = days.days[2];
+    assert.deepEqual([jan1.recordings, jan1.byCategory, jan1.minutes, jan1.encodedRecordings], [2, { Recent: 2 }, 3, 0]);
+    assert.equal(jan1.thumbId, by['Recent 2020-01-01 08:00:00'].id);
+    assert.equal(days.days[1].thumbId, by['Sentry 2020-01-02 12:29:00'].id);
+    if (hasFfmpeg && /libx265/.test(execFileSync('ffmpeg', ['-hide_banner', '-encoders']).toString())) {
+      // a clip converted to H.265 shows as encoded once the share is scanned again
+      execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc=size=160x120:rate=10', '-t', '1', '-c:v', 'libx265', '-x265-params', 'log-level=error',
+        '-pix_fmt', 'yuv420p', '-f', 'mp4', path.join(root, 'TeslaCam/RecentClips/2020-01-01_09-30-00-front.mp4')]);
+      await s.call('POST', '/api/vehicles/daily-driver/scan', {});
+      const enc = await waitFor(async () => {
+        const d = (await daysOf()).days.find((x) => x.day === '2020-01-01');
+        return d && d.encodedRecordings === 1 && d.unknown === 0 ? d : null;
+      });
+      assert.deepEqual([enc.encodedRecordings, enc.codecs], [1, ['h265']]);
+      const drive = (await s.call('GET', '/api/vehicles/daily-driver/recordings?date=2020-01-01')).data.recordings.find((x) => x.start === '2020-01-01 09:30:00');
+      assert.deepEqual(drive.encoded, { clips: 1, encoded: 1, unknown: 0, codecs: ['h265'] });
+    }
+    // "Delete through this date": counted first, protected recordings stay
+    await s.call('POST', '/api/vehicles/daily-driver/protect', { ids: [by['Recent 2020-01-01 09:30:00'].id], protected: true });
+    const preview = await s.call('POST', '/api/vehicles/daily-driver/trash-days', { day: '2020-01-02', through: true, preview: true });
+    assert.deepEqual([preview.data.recordings, preview.data.protected, preview.data.days, preview.data.started], [2, 1, 2, false]);
+    await s.call('POST', '/api/vehicles/daily-driver/protect', { ids: [by['Recent 2020-01-01 09:30:00'].id], protected: false });
+    assert.equal((await s.call('POST', '/api/vehicles/daily-driver/trash-days', { day: 'yesterday' })).status, 400);
+
     if (hasFfmpeg) {
       const thumb = await s.call('GET', `/api/vehicles/daily-driver/recordings/${by['Recent 2020-01-01 08:00:00'].id}/thumbnail`, undefined, { raw: true });
       assert.equal(thumb.status, 200);
@@ -225,8 +257,16 @@ test('footage, protect, Recycle Bin and policies never lose files', { timeout: 1
     assert.equal((await s.call('GET', '/api/bin')).data.items.length, 0);
 
     // policies only move to the bin, and skip protected
-    const all = await waitFor(async () => ((await s.call('GET', '/api/vehicles/daily-driver/recordings')).data.total === 4 ? true : null));
-    assert.ok(all);
+    const allBack = async () => waitFor(async () => ((await s.call('GET', '/api/vehicles/daily-driver/recordings')).data.total === 4 ? true : null));
+    assert.ok(await allBack());
+
+    // "Delete this day" moves that day to the bin (as a job); restore it again
+    r = await s.call('POST', '/api/vehicles/daily-driver/trash-days', { day: '2020-01-02' });
+    assert.deepEqual([r.data.recordings, r.data.started], [1, true]);
+    const dayItem = await waitFor(async () => (await s.call('GET', '/api/bin')).data.items[0] || null);
+    assert.equal(dayItem.category, 'Sentry');
+    assert.equal((await s.call('POST', `/api/bin/${dayItem.id}/restore`, {})).status, 200);
+    assert.ok(await allBack());
     const saved = (await s.call('GET', '/api/vehicles/daily-driver/recordings?category=Saved')).data.recordings[0];
     await s.call('POST', '/api/vehicles/daily-driver/protect', { ids: [saved.id], protected: true });
     const pol = await s.call('PUT', '/api/vehicles/daily-driver/policy', { enabled: false, keepDays: { Recent: 30, Sentry: 30, Saved: 30 } });

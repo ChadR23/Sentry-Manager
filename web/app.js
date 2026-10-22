@@ -111,7 +111,7 @@
     vehicles: [],
     vehicleId: store.get('vehicle', null),
     notes: [],
-    footage: { category: 'all', date: '', offset: 0, data: null, selected: new Set(), expanded: new Set() },
+    footage: { category: 'all', date: '', offset: 0, data: null, selected: new Set(), expanded: new Set(), open: new Set(), opened: false, vehicleId: null, dayRecs: new Map() },
     system: null
   };
   const current = () => state.vehicles.find((v) => v.id === state.vehicleId) || state.vehicles[0] || null;
@@ -233,6 +233,9 @@
     $('refresh-alerts').onclick = () => loadNotes().then(render);
   };
 
+  // Footage, one card per capture day (newest first, the newest one open):
+  // a thumbnail, what the day holds, how much of it is encoded, and actions
+  // for the whole day. An open day lists its recordings as before.
   pages.footage = async () => {
     const v = current();
     const f = state.footage;
@@ -241,61 +244,79 @@
       page.innerHTML = `${html}<div class="empty">Add a vehicle in Settings first.</div>`;
       return;
     }
-    const q = new URLSearchParams({ category: f.category, offset: String(f.offset), limit: '100' });
+    if (f.vehicleId !== v.id) Object.assign(f, { vehicleId: v.id, open: new Set(), opened: false, offset: 0 });
+    const q = new URLSearchParams({ category: f.category, offset: String(f.offset), limit: String(DAYS_PER_PAGE) });
     if (f.date) q.set('date', f.date);
     let data;
     try {
-      data = await api(`/api/vehicles/${v.id}/recordings?${q}`);
+      data = await api(`/api/vehicles/${v.id}/days?${q}`);
     } catch (err) {
       page.innerHTML = `${html}<div class="empty">${esc(err.message)}</div>`;
       return;
     }
-    f.data = data;
-    const shown = data.recordings;
+    if (!f.opened && data.days.length) {
+      f.open.add(data.days[0].day);
+      f.opened = true;
+    }
+    // the recordings of the open days
+    const recQ = (day) => new URLSearchParams({ category: f.category, date: day, limit: '500' });
+    const loaded = await Promise.all(data.days.filter((d) => f.open.has(d.day))
+      .map((d) => api(`/api/vehicles/${v.id}/recordings?${recQ(d.day)}`).then((x) => [d.day, x.recordings], () => [d.day, []])));
+    f.dayRecs = new Map(loaded);
+    f.data = { recordings: loaded.flatMap(([, list]) => list) };
     const sel = [...f.selected];
-    const selRecs = shown.filter((r) => f.selected.has(r.id));
+    const selRecs = f.data.recordings.filter((r) => f.selected.has(r.id));
     html += `<div class="filters">
         <label class="field">Category<select class="input" id="f-cat">
           ${['all', 'Recent', 'Sentry', 'Saved', 'Other'].map((c) => `<option value="${c}"${f.category === c ? ' selected' : ''}>${c === 'all' ? 'All categories' : `${c}`}</option>`).join('')}</select></label>
         <label class="field">Capture date<input class="input" type="date" id="f-date" value="${esc(f.date)}"${data.dates.length ? ` min="${data.dates[data.dates.length - 1]}" max="${data.dates[0]}"` : ''}></label>
         ${f.date ? '<button class="btn ghost" id="f-clear">Clear date</button>' : ''}
       </div>
-      <p class="hint">${plural(data.total, 'recording')} shown${data.scanning ? ' · scanning…' : ''} · capture times use the vehicle timezone${data.scannedAt ? ` · inventory ${ago(data.scannedAt)}` : ''}</p>
+      <p class="hint">${plural(data.total, 'day')} · ${plural(data.recordings, 'recording')}${data.scanning ? ' · scanning…' : ''} · capture times use the vehicle timezone${data.scannedAt ? ` · inventory ${ago(data.scannedAt)}` : ''}</p>
       <div class="selpanel"><div class="row">
         <b class="count">${sel.length} selected</b>
         <button class="btn" id="sel-trash"${sel.length ? '' : ' disabled'}>Move to trash</button>
         <button class="btn green" id="sel-protect"${sel.length ? '' : ' disabled'}>Protect</button>
         <button class="btn" id="sel-unprotect"${selRecs.some((r) => r.protected) ? '' : ' disabled'}>Unprotect</button>
+        <button class="btn" id="sel-clear"${sel.length ? '' : ' disabled'}>Clear selection</button>
         <button class="btn green" id="sel-review" type="button">Review conversion</button>
-      </div>
-      <details class="more"><summary>Conversion options</summary>
-        <p>Conversion runs folder by folder in the Encoder tab: choose this vehicle's folder there, pick H.265 or AV1 and the profile, and keep originals or replace them. Tesla telemetry is copied byte-for-byte into every frame and checked (Quick or Full verification) before anything is replaced. Protected recordings can still be converted; they are only protected from the Recycle Bin and policies.</p>
-      </details></div>
-      <div class="selrow"><button class="btn" id="sel-all"${shown.length ? '' : ' disabled'}>Select shown (up to 100)</button><button class="btn" id="sel-clear"${sel.length ? '' : ' disabled'}>Clear selection</button></div>`;
-    if (!shown.length) {
+      </div></div>`;
+    if (!data.days.length) {
       html += `<div class="empty">${data.error ? esc(data.error) : data.scanning ? 'Scanning the share…' : 'No recordings match. Try another category or date, or refresh the inventory.'}</div>`;
     } else {
-      html += `<div class="recs">${shown.map((r) => recCard(v, r)).join('')}</div>`;
-      if (data.total > data.offset + shown.length || data.offset > 0) {
+      html += `<div class="days">${data.days.map((d) => dayCard(v, d)).join('')}</div>`;
+      if (data.total > data.offset + data.days.length || data.offset > 0) {
         html += `<div class="form-actions" style="justify-content:center">
-          <button class="btn" id="pg-prev"${data.offset ? '' : ' disabled'}>Previous</button>
-          <span class="muted" style="align-self:center">${data.offset + 1}–${data.offset + shown.length} of ${data.total}</span>
-          <button class="btn" id="pg-next"${data.total > data.offset + shown.length ? '' : ' disabled'}>Next</button></div>`;
+          <button class="btn" id="pg-prev"${data.offset ? '' : ' disabled'}>Newer days</button>
+          <span class="muted" style="align-self:center">days ${data.offset + 1}–${data.offset + data.days.length} of ${data.total}</span>
+          <button class="btn" id="pg-next"${data.total > data.offset + data.days.length ? '' : ' disabled'}>Older days</button></div>`;
       }
     }
     page.innerHTML = html;
 
     $('f-cat').onchange = (e) => { f.category = e.target.value; f.offset = 0; render(); };
-    $('f-date').onchange = (e) => { f.date = e.target.value; f.offset = 0; render(); };
+    $('f-date').onchange = (e) => { f.date = e.target.value; f.offset = 0; if (f.date) f.open.add(f.date); render(); };
     if ($('f-clear')) $('f-clear').onclick = () => { f.date = ''; f.offset = 0; render(); };
-    if ($('pg-prev')) $('pg-prev').onclick = () => { f.offset = Math.max(0, f.offset - 100); render(); };
-    if ($('pg-next')) $('pg-next').onclick = () => { f.offset += 100; render(); };
-    $('sel-all').onclick = () => { shown.forEach((r) => f.selected.add(r.id)); render(); };
+    if ($('pg-prev')) $('pg-prev').onclick = () => { f.offset = Math.max(0, f.offset - DAYS_PER_PAGE); render(); };
+    if ($('pg-next')) $('pg-next').onclick = () => { f.offset += DAYS_PER_PAGE; render(); };
     $('sel-clear').onclick = () => { f.selected.clear(); render(); };
     $('sel-trash').onclick = () => trash(v, [...f.selected]);
     $('sel-protect').onclick = () => protect(v, [...f.selected], true);
     $('sel-unprotect').onclick = () => protect(v, [...f.selected], false);
     $('sel-review').onclick = () => reviewConversion(v);
+    page.querySelectorAll('.day').forEach((el) => {
+      const day = el.dataset.day;
+      el.querySelector('[data-toggle]').onclick = () => { if (f.open.has(day)) f.open.delete(day); else f.open.add(day); render(); };
+      el.querySelector('[data-play-day]').onclick = () => openStudio('viewer', { date: day });
+      el.querySelector('[data-delete-day]').onclick = () => deleteDays(v, day, false);
+      el.querySelector('[data-delete-through]').onclick = () => deleteDays(v, day, true);
+      el.querySelector('[data-select-day]').onchange = async (e) => {
+        const on = e.target.checked;
+        const list = f.dayRecs.get(day) || await api(`/api/vehicles/${v.id}/recordings?${recQ(day)}`).then((x) => x.recordings, () => []);
+        list.forEach((r) => (on ? f.selected.add(r.id) : f.selected.delete(r.id)));
+        render();
+      };
+    });
     page.querySelectorAll('.rec').forEach((el) => {
       const id = el.dataset.id;
       el.querySelector('input[type=checkbox]').onchange = (e) => { if (e.target.checked) f.selected.add(id); else f.selected.delete(id); render(); };
@@ -306,6 +327,90 @@
     });
     for (const id of f.expanded) loadFiles(v, id);
   };
+
+  const DAYS_PER_PAGE = 30;
+  const CODEC_NAMES = { h265: 'H.265', av1: 'AV1' };
+  const minutesText = (m) => (m >= 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m} min`);
+  const dayTitle = (day) => new Date(`${day}T12:00:00`).toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'short', day: 'numeric' });
+
+  /** The blue "Encoded" badge of a day: every recording, or how many of them. */
+  function dayEncodedChip(d) {
+    if (!d.encodedRecordings) return '';
+    const label = d.encodedRecordings === d.recordings ? 'Encoded' : `Encoded ${d.encodedRecordings}/${d.recordings}`;
+    return `<span class="chip blue" title="${esc(`${d.encoded} of ${d.clips} clips are H.265 or AV1`)}"><span class="cdot"></span>${label}</span>`;
+  }
+
+  function dayCard(v, d) {
+    const f = state.footage;
+    const open = f.open.has(d.day);
+    const recs = f.dayRecs.get(d.day) || [];
+    const allSelected = recs.length > 0 && recs.every((r) => f.selected.has(r.id));
+    const cat = (name, chip, word) => (d.byCategory[name] ? `<span class="chip ${chip}">${plural(d.byCategory[name], word)}</span>` : '');
+    const thumb = d.thumbId
+      ? `<img loading="lazy" alt="" data-fallback="${esc(d.day)}" src="/api/vehicles/${encodeURIComponent(v.id)}/recordings/${encodeURIComponent(d.thumbId)}/thumbnail">`
+      : '';
+    return `<article class="day${open ? ' open' : ''}" data-day="${esc(d.day)}">
+      <div class="day-top">
+        <input type="checkbox" data-select-day aria-label="Select every recording of ${esc(d.day)}"${allSelected ? ' checked' : ''}>
+        <div class="day-thumb">${thumb}<span class="count">${plural(d.recordings, 'recording')}</span></div>
+        <div class="day-info">
+          <span class="date">${esc(dayTitle(d.day))}</span>
+          <span class="row">${cat('Recent', '', 'drive')}${cat('Sentry', 'amber', 'Sentry event')}${cat('Saved', 'green', 'Saved event')}${cat('Other', '', 'other')}${dayEncodedChip(d)}${d.protected ? `<span class="chip green">${d.protected} protected</span>` : ''}</span>
+          <span class="meta">${minutesText(d.minutes)}${d.cameras ? ` · ${plural(d.cameras, 'camera')}` : ''} · ${bytes(d.bytes)}${d.unknown ? ' · checking which clips are encoded…' : ''}</span>
+        </div>
+        <div class="day-actions">
+          <button class="btn solid" data-play-day>Play day</button>
+          <button class="btn" data-delete-day>Delete this day</button>
+          <button class="btn" data-delete-through>Delete through this date</button>
+        </div>
+      </div>
+      <button class="day-toggle" type="button" data-toggle aria-expanded="${open}">${open ? '▾ Hide recordings' : `▸ Show ${plural(d.recordings, 'recording')}`}</button>
+      ${open ? `<div class="recs">${recs.map((r) => recCard(v, r)).join('') || '<p class="muted">No recordings.</p>'}</div>` : ''}
+    </article>`;
+  }
+
+  // "Delete this day" / "Delete through this date": everything that day (or
+  // that day and older) goes to the Recycle Bin; protected recordings stay.
+  async function deleteDays(v, day, through) {
+    const f = state.footage;
+    const body = { day, through, category: f.category };
+    let preview;
+    try {
+      preview = await api(`/api/vehicles/${v.id}/trash-days`, { body: { ...body, preview: true } });
+    } catch (err) {
+      toast(err.message, true);
+      return;
+    }
+    const what = through ? `${esc(dayTitle(day))} and every older day` : esc(dayTitle(day));
+    const scope = f.category === 'all' ? '' : ` (${esc(f.category)} only, as filtered)`;
+    if (!preview.recordings) {
+      toast(preview.protected ? 'Everything there is protected: nothing to move.' : 'Nothing to move.');
+      return;
+    }
+    const ok = await confirmDialog({
+      title: through ? 'Delete through this date?' : 'Delete this day?',
+      body: `<p>${plural(preview.recordings, 'recording')} from ${what}${scope}, ${bytes(preview.bytes)}${through && preview.days > 1 ? ` over ${plural(preview.days, 'day')}` : ''}, move to the Recycle Bin.</p>
+        <p>Nothing is deleted for good until you empty the Recycle Bin; you can restore it until then.${preview.protected ? ` ${plural(preview.protected, 'protected recording')} stay${preview.protected === 1 ? 's' : ''}.` : ''}</p>`,
+      ok: through ? 'Delete through this date' : 'Delete this day',
+      danger: true
+    });
+    if (!ok) return;
+    try {
+      const out = await api(`/api/vehicles/${v.id}/trash-days`, { body });
+      toast(`Moving ${plural(out.recordings, 'recording')} (${bytes(out.bytes)}) to the Recycle Bin. Jobs shows the progress.`);
+      f.selected.clear();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  }
+
+  /** "Encoded H.265" when every clip is encoded, "Encoded 3/6 clips" when some are. */
+  function recEncodedChip(r) {
+    const e = r.encoded;
+    if (!e || !e.clips || !e.encoded) return '';
+    const name = e.codecs.map((c) => CODEC_NAMES[c] || c).join(' + ');
+    return `<span class="chip blue"><span class="cdot"></span>${e.encoded === e.clips ? `Encoded ${esc(name)}` : `Encoded ${e.encoded}/${e.clips} clips`}</span>`;
+  }
 
   function recCard(v, r) {
     const f = state.footage;
@@ -319,7 +424,7 @@
         <input type="checkbox" aria-label="Select ${esc(r.start)}"${f.selected.has(r.id) ? ' checked' : ''}>
         <div class="thumb">${thumb}</div>
         <div class="rec-info"><span class="when">${esc(r.start || r.day)}${range}</span>
-          <span class="meta"><span class="chip ${chip}">${esc(r.category)}</span><span>${plural(r.fileCount, 'file')}</span><span>${bytes(r.bytes)}</span>${r.eventAt ? `<span>event ${esc(r.eventAt.slice(11))}</span>` : ''}${r.cameras.length ? `<span>${plural(r.cameras.length, 'camera')}</span>` : ''}${r.protected ? '<span class="chip green">Protected</span>' : ''}</span>
+          <span class="meta"><span class="chip ${chip}">${esc(r.category)}</span>${recEncodedChip(r)}<span>${plural(r.fileCount, 'file')}</span><span>${bytes(r.bytes)}</span>${r.eventAt ? `<span>event ${esc(r.eventAt.slice(11))}</span>` : ''}${r.cameras.length ? `<span>${plural(r.cameras.length, 'camera')}</span>` : ''}${r.protected ? '<span class="chip green">Protected</span>' : ''}</span>
           <span class="orig">Original capture: ${esc(r.startKey ? `${r.startKey.slice(0, 10)}T${r.startKey.slice(11).replace(/-/g, ':')}` : r.day)} · ${esc(r.folder)}</span></div>
         <div class="rec-actions"><button class="btn" data-play>Play recording</button><button class="btn" data-files>${f.expanded.has(r.id) ? 'Hide files' : 'Show files'}</button></div>
       </div>
