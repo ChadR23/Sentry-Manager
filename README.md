@@ -93,8 +93,11 @@ copies somewhere else is a choice you make in the Output section.
 
 ### GPU
 
-The converter tries every encoder with a real test encode and uses the
-fastest one that works. In `docker-compose.yml`, uncomment:
+The converter uses the first GPU encoder that passes a real test encode,
+in this order: NVIDIA (NVENC), Intel (QSV), AMD (AMF), then VA-API. Without
+a working GPU encoder it encodes on the CPU (libx265 for H.265, SVT-AV1 for
+AV1), and a clip the GPU fails on is redone on the CPU. With a GPU, the
+original is decoded on the GPU too. In `docker-compose.yml`, uncomment:
 
 | GPU | Encoders | What to uncomment |
 | --- | --- | --- |
@@ -163,6 +166,43 @@ Advanced* (minimum SMB 3, encryption on); Samba, TrueNAS and Unraid
 `Set-SmbServerConfiguration -EncryptData $true`. The Docker host needs the
 CIFS kernel module (`sudo modprobe cifs`); Synology, Unraid, TrueNAS and most
 Linux distributions have it.
+
+### Footage on the same machine
+
+If the footage is on the server that runs Sentry Six Manager, no SMB share
+is needed: mount the folder into the container and add it as a **folder**
+vehicle. The Viewer, Footage, the Encoder (replacing originals included),
+the Recycle Bin and policies work the same as with a share.
+
+1. Add the folder (the one that holds `TeslaCam`, or `RecentClips` /
+   `SentryClips` / `SavedClips` directly) to `volumes:` in
+   `docker-compose.yml`, below `/footage`, and recreate the container with
+   `docker compose up -d`:
+
+   ```yaml
+       volumes:
+         - ./data:/data
+         - /mnt/tesla:/footage/my-car
+   ```
+
+2. In **Settings → Add vehicle**, choose **Folder in the container** and
+   enter `/footage/my-car`. Or, for the first vehicle, put
+   `FOOTAGE_PATH=/footage/my-car` and `VEHICLE_NAME=My Car` in `.env`.
+
+Two things to check:
+
+- **Permissions.** The web app runs as user `1000:1000`. If the footage
+  belongs to another user on the server, set `PUID` and `PGID` in `.env` to
+  that user's numbers (`id <user>` shows them). Otherwise the vehicle shows
+  as read-only and nothing can be converted or moved to the Recycle Bin.
+- **Replacing originals** needs a filesystem that can rename a file without
+  ever overwriting another one. Local disks with ext4, XFS or Btrfs can.
+  Sentry Six Manager tests this when it opens the folder; where it can't
+  (for example Unraid's pooled `/mnt/user` shares), *Replace originals* is
+  greyed out and only a separate destination is offered. On Unraid, use the
+  disk or cache path (`/mnt/disk1/...`, `/mnt/cache/...`) instead.
+
+Keep `/data` in its own folder, not inside the footage folder.
 
 ## Phones and tablets
 
