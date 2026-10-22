@@ -17,6 +17,10 @@
   const me = await fetch('/api/auth/me').then((r) => r.json()).catch(() => ({}));
   if (me.user) return location.replace(safeNext);
   if (location.protocol !== 'https:') $('insecure').hidden = false;
+  if (me.fingerprint) {
+    $('fingerprint').querySelector('.mono').textContent = me.fingerprint;
+    $('fingerprint').hidden = false;
+  }
   const setup = me.needsSetup;
   if (setup) {
     $('title').textContent = 'Create your account';

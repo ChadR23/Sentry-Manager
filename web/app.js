@@ -812,12 +812,14 @@
     } else if (tls.error) {
       body += `<dt>Certificate</dt><dd>${esc(tls.error)}</dd></dl>`;
     } else {
-      body += `<dt>Certificate authority</dt><dd>Sentry Six Manager's own · valid until ${esc(ca?.validTo || '?')}</dd>
-        <dt>CA fingerprint (SHA-256)</dt><dd class="mono small" style="word-break:break-all">${esc(ca?.fingerprint || '?')}</dd>
-        <dt>Certificate covers</dt><dd>${esc((tls.hostnames || []).join(', '))} · renews by itself before ${esc(tls.certificate?.validTo || '?')}</dd></dl>
-        ${covered ? '' : `<div class="note amber">You opened this page as <b>${esc(host)}</b>, which the certificate does not cover yet, so browsers warn even when they trust the CA. <button class="btn sm" type="button" id="sec-add-host" data-host="${esc(host)}">Add ${esc(host)}</button></div>`}
-        <p style="margin-top:14px">To stop browser warnings, and so nobody can pose as this server, install the certificate authority on each phone and computer you use: download it, then compare the fingerprint above with the one in the container log (<code>docker logs sentry-six-manager</code>) before trusting it. It can only vouch for local names and private IP addresses.</p>
-        <details class="more" style="margin-top:10px"><summary>How to install it</summary>
+      body += `<dt>Certificate fingerprint (SHA-256)</dt><dd class="mono small" style="word-break:break-all">${esc(tls.certificate?.fingerprint || '?')}</dd>
+        <dt>Certificate</dt><dd>Sentry Six Manager's own · stays the same until ${esc(tls.certificate?.validTo || '?')}, then renews by itself</dd>
+        <dt>Certificate covers</dt><dd>${esc((tls.hostnames || []).join(', '))}</dd>
+        <dt>Certificate authority</dt><dd>valid until ${esc(ca?.validTo || '?')} · fingerprint <span class="mono small" style="word-break:break-all">${esc(ca?.fingerprint || '?')}</span></dd></dl>
+        <p style="margin-top:14px">Every phone, tablet and computer shows the browser's certificate warning once; continue past it (Advanced, then Proceed / visit this website / Accept the Risk) and the device remembers. To be sure it is this server, compare the certificate fingerprint above with the one in the browser's certificate details or the container log (<code>docker logs sentry-six-manager</code>). If a device that continued before warns again and you changed nothing here, don't continue.</p>
+        <p style="margin-top:10px">No warning at all: install the certificate authority on a device instead (download it below and compare its fingerprint before trusting it). It can only vouch for local names and private IP addresses.</p>
+        ${covered ? '' : `<div class="note amber">You opened this page as <b>${esc(host)}</b>, which the certificate does not cover, so it warns even on devices with the certificate authority installed. <button class="btn sm" type="button" id="sec-add-host" data-host="${esc(host)}">Add ${esc(host)}</button></div>`}
+        <details class="more" style="margin-top:10px"><summary>How to install the certificate authority</summary>
           <ul class="small" style="margin:10px 0 0 18px;display:grid;gap:6px">
             <li><b>iPhone / iPad:</b> open the download in Safari, then Settings &gt; General &gt; VPN &amp; Device Management to install it, and Settings &gt; General &gt; About &gt; Certificate Trust Settings to turn on full trust.</li>
             <li><b>Android:</b> Settings &gt; Security &gt; Encryption &amp; credentials &gt; Install a certificate &gt; CA certificate.</li>
@@ -827,7 +829,7 @@
           </ul></details>
         <form id="sec-hosts" class="form" style="margin-top:16px">
           <label class="field full">Extra names and addresses for the certificate<input class="input" name="hostnames" value="${esc((tls.editable || []).join(', '))}" placeholder="192.168.1.20, nas.local"></label>
-          <p class="muted small full">The IP address or name you type in the browser to reach this server. Names from TLS_HOSTNAMES: ${esc((tls.fromEnv || []).join(', ') || 'none')}.</p>
+          <p class="muted small full">The IP addresses or names you type in the browser to reach this server; only devices with the certificate authority installed need them. Saving makes a new certificate, so devices that continued past the warning see it once more. Names from TLS_HOSTNAMES: ${esc((tls.fromEnv || []).join(', ') || 'none')}.</p>
           <div class="full form-actions" style="margin-top:0"><a class="btn" href="/api/security/ca.crt" download>Download certificate authority</a><button class="btn solid" type="submit">Save names</button></div>
         </form>`;
     }
@@ -836,6 +838,12 @@
 
   function wireSecurity(sec) {
     const save = async (names) => {
+      const ok = await confirmDialog({
+        title: 'Make a new certificate?',
+        body: '<p>The certificate will cover the new names. Every phone, tablet and computer that continued past the browser\'s warning before will see it once more; devices with the certificate authority installed won\'t.</p>',
+        ok: 'Save names'
+      });
+      if (!ok) return;
       try {
         const out = await api('/api/security/hostnames', { method: 'PUT', body: { hostnames: names } });
         toast(`${out.caReplaced ? 'Saved. The certificate authority was replaced: install the new one on your devices.' : 'Saved. The certificate now covers those names.'} Reloading the page for the new certificate…`);

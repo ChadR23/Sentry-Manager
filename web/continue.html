@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Continue to Sentry Six Manager</title>
+  <link rel="icon" href="/web/icon.png">
+  <link rel="stylesheet" href="/web/shell.css">
+  <style>
+    body { display: grid; place-items: center; min-height: 100vh; padding: 16px; }
+    .login { width: min(560px, 100%); background: var(--panel); border: 1px solid var(--border); border-radius: 22px; padding: 32px; }
+    .login .brand { padding: 0 0 26px; }
+    .login .btn { display: flex; width: 100%; }
+    @media (max-width: 480px) { .login { padding: 22px; } }
+  </style>
+</head>
+<body>
+  <main class="login continue">
+    <div class="brand">
+      <svg class="i" viewBox="0 0 24 24" aria-hidden="true" style="width:30px;height:30px;color:var(--accent);stroke-width:2"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/></svg>
+      <div class="brand-name"><b>Sentry Six</b><span>Manager</span></div>
+    </div>
+    <h2>One step before you sign in</h2>
+    <p id="checking" class="muted small">Checking whether this device already trusts the secure page…</p>
+    <p style="margin-top:12px">Sentry Six Manager only works over an encrypted connection, so your password and footage can't be read on the network. It encrypts with its own certificate, which browsers don't know, so <b>the first time on each phone, tablet or computer the browser shows a warning</b>. That is expected for a server at home.</p>
+    <div class="note" style="margin-top:16px">
+      <b>To continue on this device</b>
+      <ul class="small" style="margin:8px 0 0;padding-left:20px;display:grid;gap:6px">
+        <li><b>Chrome, Edge, Samsung Internet:</b> Advanced, then <i>Proceed to … (unsafe)</i>.</li>
+        <li><b>Safari on iPhone, iPad or Mac:</b> Show Details, then <i>visit this website</i>, then Visit Website.</li>
+        <li><b>Firefox:</b> Advanced…, then <i>Accept the Risk and Continue</i>.</li>
+      </ul>
+    </div>
+    <p class="small" style="margin-top:14px">To be sure it is your server, compare the certificate's SHA-256 fingerprint in the browser's certificate details with this one, which is also in the container log (<code>docker logs sentry-six-manager</code>):</p>
+    <p class="mono small" style="word-break:break-all;margin-top:6px">{{FINGERPRINT}}</p>
+    <p class="small muted" style="margin-top:12px">Once a device has continued, it is not asked again (Chrome may ask again after a while). If a device that continued before suddenly warns again and you didn't change anything, don't continue: compare the fingerprint first.</p>
+    <a class="btn solid" id="go" href="{{HTTPS_URL}}" style="margin-top:20px;justify-content:center">Continue to the secure page</a>
+  </main>
+  <script src="/web/continue.js"></script>
+</body>
+</html>

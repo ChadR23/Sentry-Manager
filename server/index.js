@@ -131,6 +131,8 @@ function securityHeaders(req, res, pathname = '') {
   if (isSecure(req)) res.setHeader('Strict-Transport-Security', 'max-age=31536000');
 }
 
+const escHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+
 function confirmRequired() {
   return Object.assign(new HttpError(403, 'Enter your password to confirm this change.'), { code: 'CONFIRM_PASSWORD', expose: true });
 }
@@ -277,7 +279,15 @@ async function main() {
   const by = (req, user) => `${user || 'someone'} from ${clientKey(req)}`;
   const describeSource = (src) => (src?.type === 'path' ? `folder ${src.path}` : `SMB ${src?.share} as ${src?.username} (SMB ${src?.version}, ${src?.encrypt === false ? 'signed only' : 'encrypted'})`);
 
-  r.add('GET', '/api/auth/me', (req) => ({ user: auth.user(req), needsSetup: auth.needsSetup(), secure: isSecure(req) }), { public: true });
+  // the certificate's fingerprint lets the sign-in page show it (to compare with the log)
+  const certFingerprint = () => {
+    try {
+      return tlsSource?.status()?.certificate?.fingerprint || null;
+    } catch {
+      return null;
+    }
+  };
+  r.add('GET', '/api/auth/me', (req) => ({ user: auth.user(req), needsSetup: auth.needsSetup(), secure: isSecure(req), fingerprint: req.socket?.encrypted ? certFingerprint() : null }), { public: true });
   r.add('POST', '/api/auth/login', async (req, res, { body }) => {
     const keys = [clientKey(req), `user:${String(body?.username || '').toLowerCase()}`];
     const wait = Math.max(...keys.map((k) => auth.throttled(k)));
@@ -701,7 +711,8 @@ async function main() {
     try {
       securityHeaders(req, res, rawPath);
       if (rawPath === '/healthz') {
-        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        // readable cross-origin: the plain-HTTP page checks with it whether this device trusts the certificate
+        res.writeHead(200, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store', 'Cross-Origin-Resource-Policy': 'cross-origin' });
         return res.end('ok');
       }
       const reqHost = cleanHost(req);
@@ -798,7 +809,11 @@ async function main() {
     sendJson(res, 404, { error: 'Not found' });
   }
 
-  // ---- listen: HTTPS, with plain HTTP on the same port answering only with a redirect
+  // ---- listen: HTTPS, with plain HTTP on the same port. Plain HTTP never
+  // shows the app, so no password or footage ever goes over it: a browser
+  // gets a short page (web/continue.html) that explains the certificate
+  // warning it will see once and moves on by itself when the device already
+  // trusts the certificate; anything else is redirected.
   let httpsServer = null;
   const servers = [];
   if (!tlsSource) {
@@ -811,21 +826,42 @@ async function main() {
     // telemetry; over HTTP/1.1 browsers allow only six connections per
     // server, so some cameras waited for a free one and fell behind.
     httpsServer = http2.createSecureServer({ key: material.key, cert: material.cert, minVersion: 'TLSv1.2', allowHTTP1: true }, handler);
-    const redirect = http.createServer((req, res) => {
-      if (String(req.url).split('?')[0] === '/healthz') {
+    const continuePage = fs.readFileSync(path.join(WEB, 'continue.html'), 'utf8');
+    const CONTINUE_FILES = new Set(['/web/continue.js', '/web/shell.css', '/web/icon.png']);
+    const redirect = http.createServer(async (req, res) => {
+      let u;
+      try {
+        u = new URL(req.url, 'http://localhost');
+      } catch {
+        u = new URL('http://localhost/');
+      }
+      if (u.pathname === '/healthz') {
         res.writeHead(200, { 'Content-Type': 'text/plain' });
         return res.end('ok');
       }
       const target = cleanHost(req) || `localhost:${PORT}`;
-      let pathAndQuery = '/';
-      try {
-        const u = new URL(req.url, 'http://localhost');
-        pathAndQuery = u.pathname + u.search;
-      } catch {
-        // keep "/"
+      const httpsUrl = `https://${target}${u.pathname}${u.search}`;
+      if (req.method === 'GET' && (CONTINUE_FILES.has(u.pathname) || (u.pathname.startsWith('/web/fonts/') && !u.pathname.slice(11).includes('/')))) {
+        if (!(await serveFile(req, res, WEB, u.pathname.slice(5)))) notFound(res);
+        return undefined;
       }
-      res.writeHead(308, { Location: `https://${target}${pathAndQuery}`, 'Cache-Control': 'no-store' });
-      return res.end();
+      if (req.method !== 'GET' || !/text\/html/.test(String(req.headers.accept || ''))) {
+        res.writeHead(308, { Location: httpsUrl, 'Cache-Control': 'no-store' });
+        return res.end();
+      }
+      let fingerprint = '';
+      try {
+        fingerprint = tlsSource.status().certificate?.fingerprint || '';
+      } catch {
+        // shown in the container log instead
+      }
+      const page = continuePage.replace('{{FINGERPRINT}}', escHtml(fingerprint || 'shown in the container log')).replace('{{HTTPS_URL}}', escHtml(httpsUrl));
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
+        'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'DENY',
+        'Content-Security-Policy': `default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; font-src 'self'; connect-src https://${target}; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`
+      });
+      return res.end(page);
     });
     const front = net.createServer((socket) => {
       socket.setTimeout(15000, () => socket.destroy());

@@ -23,9 +23,9 @@ Recycle Bin, retention policies, jobs and notifications.
   and Move to trash.
 - **Recycle Bin and policies.** Old recordings move to the Recycle Bin on a
   schedule. Nothing is ever deleted unless you empty it yourself.
-- **Secure by default.** HTTPS with its own certificate authority, SMB 3
-  shares that are always signed and encrypted, and a web app that never runs
-  as root.
+- **Secure by default.** HTTPS only, with its own certificate (nothing to
+  install on your devices), SMB 3 shares that are always signed and
+  encrypted, and a web app that never runs as root.
 - **Phones and tablets.** iPhone 14 and newer, Galaxy S22 and newer, and
   iPads from 2022 on.
 
@@ -42,12 +42,15 @@ docker logs sentry-six-manager
 
 The log shows two things you need once:
 
-- the **setup code**. Open `https://<server>:9000`, enter the code and choose
-  your user name and password. Without the code nobody can create the
-  account, not even someone who reaches the page before you.
-- the **fingerprint** of Sentry Six Manager's certificate authority. Install
-  the certificate authority on your devices so browsers trust the page (see
-  [Security](#security)).
+- the **setup code**. Open `http://<server>:9000` (or `https://`), enter the
+  code and choose your user name and password. Without the code nobody can
+  create the account, not even someone who reaches the page before you.
+- the **certificate fingerprint**. Everything goes over HTTPS with Sentry
+  Six Manager's own certificate, so the first time on each phone, tablet or
+  computer the browser shows a warning: continue past it once (the page at
+  `http://<server>:9000` shows how for each browser), and compare the
+  fingerprint if you want to be sure it is your server. Nothing needs to be
+  installed on the devices (see [Security](#security)).
 
 Then go to **Settings → Add vehicle**. Everything else is set up in the web
 page; an optional `.env` file (see [`.env.example`](.env.example)) can create
@@ -270,18 +273,33 @@ arrive without a code change.
 
 ![Settings → Security](docs/images/security.png)
 
-**HTTPS.** Port 9000 speaks HTTPS; plain HTTP there only redirects to it.
-Sentry Six Manager is its own small certificate authority. Install it once on
-each phone and computer, and nobody on your network can read your password,
-change the page or pose as the server:
+**HTTPS only.** Port 9000 speaks HTTPS (HTTP/2), so nobody on your network
+can read your password or footage, or change the page. Plain HTTP on the
+same port never shows the app: a browser gets a short page explaining the
+one-time certificate warning (it moves on by itself on devices that already
+trust the certificate), anything else is redirected.
 
-1. Download it in **Settings → Security** (or copy `data/tls/ca.crt`).
-2. Check that its fingerprint matches the one in
-   `docker logs sentry-six-manager`.
-3. Install it; the steps for iPhone, Android, Windows, macOS and Firefox are
-   on that page.
-4. Add the address you type in the browser under **Settings → Security** so
-   the certificate covers it.
+Sentry Six Manager makes its own certificate, so browsers don't know it:
+
+- **Continue once per device.** The first time, each phone, tablet and
+  computer shows a warning; continue past it (Chrome, Edge, Samsung
+  Internet: Advanced, Proceed; Safari: Show Details, visit this website;
+  Firefox: Accept the Risk) and the device remembers it (Chrome may ask
+  again after a while). The certificate stays the same for over two years,
+  so devices are not asked again on every update.
+- **Check it is your server.** The certificate's SHA-256 fingerprint is in
+  `docker logs sentry-six-manager`, on the sign-in page and in
+  **Settings → Security**; compare it with the browser's certificate
+  details. If a device that continued before warns again and you changed
+  nothing, don't continue.
+- **No warning at all (optional):** install Sentry Six Manager's
+  certificate authority on a device. Download it in **Settings → Security**
+  (or copy `data/tls/ca.crt`), compare its fingerprint with the log, and
+  install it (the steps for iPhone, Android, Windows, macOS and Firefox are
+  on that page). For those devices, add the address you type in the
+  browser under **Settings → Security** so the certificate covers it;
+  saving new names makes a new certificate, so devices that only continued
+  past the warning are asked once more.
 
 The certificate authority can only vouch for local names (`.local`, `.lan`,
 ...), private IP addresses and names you add, so even a stolen key could not

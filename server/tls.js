@@ -26,7 +26,12 @@ const os = require('os');
 const path = require('path');
 const { run, tail } = require('./proc');
 
-const LEAF_DAYS = 397; // browsers refuse longer-lived server certificates
+// The certificate stays the same for over two years: a device that tapped
+// "Continue" past the browser's warning trusts exactly this certificate, so
+// every new one means a new warning everywhere. 825 days is the longest
+// Apple accepts on devices that install the certificate authority (the
+// 398-day rule only applies to publicly trusted certificates).
+const LEAF_DAYS = 825;
 const RENEW_BEFORE_MS = 30 * 24 * 3600 * 1000;
 const LOCAL_DNS = ['localhost', 'local', 'lan', 'home', 'home.arpa', 'internal', 'localdomain'];
 const PRIVATE_V4 = [
@@ -141,6 +146,7 @@ class TlsManager {
       || !this.signedByCa();
     if (stale) await this.issueLeaf(want);
     const caPem = await fsp.readFile(this.files.caCrt, 'utf8');
+    this.log?.info(`HTTPS certificate fingerprint (SHA-256), as browsers show it: ${fingerprint(await fsp.readFile(this.files.crt, 'utf8'))}`);
     this.log?.info(`HTTPS certificate authority fingerprint (SHA-256): ${fingerprint(caPem)}`);
     return { key: await fsp.readFile(this.files.key), cert: await fsp.readFile(this.files.crt), own: false };
   }

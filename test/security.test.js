@@ -101,10 +101,21 @@ test('HTTPS, the setup code, cookies and password confirmation', { skip: !hasOpe
     const code = s.output().match(/setup code ([A-Z0-9-]+)/)?.[1];
     assert.ok(code, 'the setup code is printed in the log');
 
-    // plain HTTP only redirects (health checks still answer)
+    // plain HTTP never serves the app: requests are redirected to HTTPS...
     const plain = await fetch(`http://127.0.0.1:${s.port}/settings?x=1`, { redirect: 'manual' });
     assert.equal(plain.status, 308);
     assert.equal(plain.headers.get('location'), `https://127.0.0.1:${s.port}/settings?x=1`);
+    assert.equal((await fetch(`http://127.0.0.1:${s.port}/web/app.js`, { redirect: 'manual' })).status, 308, 'no app code over plain HTTP');
+    // ...and a browser gets the page that explains the one-time certificate warning
+    const intro = await fetch(`http://127.0.0.1:${s.port}/settings?x=1`, { headers: { Accept: 'text/html' }, redirect: 'manual' });
+    assert.equal(intro.status, 200);
+    const introHtml = await intro.text();
+    const leafFp = new (require('crypto').X509Certificate)(fs.readFileSync(path.join(dir, 'data/tls/server.crt'))).fingerprint256;
+    assert.ok(introHtml.includes(leafFp), 'the certificate fingerprint to compare');
+    assert.ok(introHtml.includes(`href="https://127.0.0.1:${s.port}/settings?x=1"`));
+    assert.doesNotMatch(introHtml, /<form|<input/i, 'nothing to type on plain HTTP');
+    assert.match(intro.headers.get('content-security-policy'), new RegExp(`connect-src https://127\\.0\\.0\\.1:${s.port};`));
+    assert.equal((await fetch(`http://127.0.0.1:${s.port}/web/continue.js`)).status, 200);
 
     // the certificate verifies against our CA (no -k anywhere)
     const me = await httpsCall(s.port, ca, 'GET', '/api/auth/me');
@@ -127,7 +138,8 @@ test('HTTPS, the setup code, cookies and password confirmation', { skip: !hasOpe
     });
     const h2me = await h2get('/api/auth/me');
     assert.equal(h2me.head[':status'], 200);
-    assert.equal(JSON.parse(h2me.body).secure, true);
+    assert.deepEqual([JSON.parse(h2me.body).secure, JSON.parse(h2me.body).fingerprint], [true, leafFp], 'the sign-in page shows the fingerprint');
+    assert.equal((await h2get('/healthz')).head['cross-origin-resource-policy'], 'cross-origin', 'the plain-HTTP page may check it');
     assert.equal((await h2get('/login')).head[':status'], 200);
     assert.equal((await h2get('/api/events')).head[':status'], 401, 'the event stream needs a session over HTTP/2 too');
     h2.close();
