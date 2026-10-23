@@ -51,17 +51,12 @@ test('a restart right after the converted file took the original\'s name finishe
   }
 });
 
-test('a restart right before it moves the file in, and Resume finishes the clip', { skip, timeout: 180_000 }, async () => {
+test('a restart right before it moves the file in finishes the clip by itself (no Resume)', { skip, timeout: 180_000 }, async () => {
   const { base, folder, env, jobId } = await crashThenRestart('before');
   try {
-    let job = await env.runtime.service.get(jobId);
-    // recovery took the step it could take alone and waits for a decision
-    assert.strictEqual(job.state, 'paused');
-    assert.strictEqual(job.recovery?.fromState, 'replacing');
-    assert.ok(fs.readdirSync(folder).includes(CLIP), 'the clip is in place');
-    await env.runtime.service.resume(jobId);
-    job = await settled(env, jobId);
+    const job = await settled(env, jobId);
     assert.strictEqual(job.state, 'completed');
+    assert.strictEqual(job.recovery ?? null, null);
     assert.strictEqual(job.items[0].resultCode, 'converted');
     assert.deepStrictEqual(fs.readdirSync(folder), [CLIP]);
     assert.strictEqual(codec(path.join(folder, CLIP)), 'hevc');
@@ -71,16 +66,27 @@ test('a restart right before it moves the file in, and Resume finishes the clip'
   }
 });
 
-test('after such a restart Cancel works too and keeps the converted clip', { skip, timeout: 180_000 }, async () => {
-  const { base, folder, env, jobId } = await crashThenRestart('before');
+test('a job an earlier version left waiting for Resume mid-replacement finishes when the converter starts', { skip, timeout: 180_000 }, async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'sm-recover-'));
+  let env;
   try {
-    await env.runtime.service.cancel(jobId);
-    const job = await env.runtime.service.get(jobId);
-    assert.strictEqual(job.state, 'cancelled');
+    const folder = await makeBase(base);
+    const child = spawnSync(process.execPath, [path.join(__dirname, 'fixtures', 'replaceCrash.js')], { env: { ...process.env, BASE: base, KILL: 'before' }, timeout: 90_000 });
+    assert.strictEqual(child.signal, 'SIGKILL');
+    env = await open(base);
+    // what earlier versions saved after taking one step of the recovery
+    const [stopped] = await env.runtime.store.list();
+    await env.runtime.store.transition(stopped.id, {
+      state: 'paused', recovery: { fromState: 'replacing', phase: stopped.replacementPhase, action: 'manual-intervention' }
+    });
+    await env.runtime.start();
+    const job = await settled(env, stopped.id);
+    assert.strictEqual(job.state, 'completed');
+    assert.strictEqual(job.items[0].resultCode, 'converted');
     assert.deepStrictEqual(fs.readdirSync(folder), [CLIP]);
     assert.strictEqual(codec(path.join(folder, CLIP)), 'hevc');
   } finally {
-    await env.runtime.shutdown().catch(() => {});
+    await env?.runtime.shutdown().catch(() => {});
     fs.rmSync(base, { recursive: true, force: true });
   }
 });

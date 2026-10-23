@@ -359,13 +359,16 @@ function createRecoveryInspector({ fs, pathApi }) {
     const item = (manifest.items || []).find((entry) => entry.id === manifest.activeItemId) || {};
     const owned = item.ownedPaths || manifest.ownedPaths || {};
     const artifact = item.publicationArtifact || manifest.publicationArtifact;
+    const signal = options.signal;
+    const replacing = manifest.state === 'replacing' || manifest.recovery?.fromState === 'replacing';
+    // Replacing originals, the original at its own name is the "final" only
+    // once the swap began ('replacing'); before that it is simply the
+    // original, which a restart leaves where it is.
     const finalPath = manifest.config?.outputMode === 'replace'
-      ? item.sourcePath
+      ? (replacing ? item.sourcePath : null)
       : manifest.config?.destinationRoot && item.relativePath
         ? pathApi.resolve(manifest.config.destinationRoot, ...item.relativePath.split('/'))
         : null;
-    const signal = options.signal;
-    const replacing = manifest.state === 'replacing' || manifest.recovery?.fromState === 'replacing';
     const copying = manifest.state === 'copying' || manifest.recovery?.fromState === 'copying';
     const [candidateExists, partialExists, finalExists, sourceExists, backupExists] = await Promise.all([
       exists(replacing ? owned.replacementCandidate : copying ? null : owned.encodedCandidate, signal),
@@ -531,7 +534,10 @@ async function createConverterRuntime(options = {}) {
     platform,
     validatePublicationArtifact: snapshotRegistry.validate,
     removeOwned,
-    renameExclusive
+    renameExclusive,
+    // The converter's own work files are removed by exact name and identity
+    // (see staging) where the host says its temp folder is private to it.
+    ...(options.privateTempIdentityCleanup === true ? { privateTempCleanup: 'identity' } : {})
   };
   const stagingManager = factories.createFileTransaction({ ...stagingOptions, tempRoot });
   const planner = factories.createEncoderPlanner({
@@ -696,6 +702,15 @@ async function createConverterRuntime(options = {}) {
     // stat that records a newly converted clip in the index.
     readVideoCodec: (source, readOptions = {}) => readMp4VideoCodec(source, { ...readOptions, fs: pfs }),
     statFile: (target) => pfs.stat(target),
+    pathExists: async (target) => {
+      try {
+        await pfs.lstat(target);
+        return true;
+      } catch (error) {
+        if (error?.code === 'ENOENT') return false;
+        throw error;
+      }
+    },
     ensureDestinationParent: ({ destinationRoot, destination }) => ensureContainedDestinationParent({
       destinationRoot, destination, fs: pfs, pathApi, platform
     })
@@ -757,6 +772,44 @@ async function createConverterRuntime(options = {}) {
         } catch (_) { /* in use or already gone */ }
       }
       if (removed) console.log(`[CONVERTER] Removed ${removed} partial encode(s) left from an earlier stop`);
+      return removed;
+    } catch (_) { return 0; }
+  }
+
+  // At startup nothing converts yet, so a snapshot folder no saved job
+  // records (a stop between a clip's verification and the record of its
+  // snapshot) can only be a leftover, whatever its age.
+  async function sweepUnreferencedSnapshotFolders(jobs) {
+    try {
+      const owned = [];
+      const collect = (paths) => { for (const value of Object.values(paths || {})) if (typeof value === 'string') owned.push(pathApi.resolve(value)); };
+      const collectArtifacts = (artifacts) => { for (const value of Object.values(artifacts || {})) if (typeof value?.path === 'string') owned.push(pathApi.resolve(value.path)); };
+      for (const job of jobs) {
+        collect(job.ownedPaths);
+        collectArtifacts(job.ownedArtifacts);
+        if (job.publicationArtifact?.path) owned.push(pathApi.resolve(job.publicationArtifact.path));
+        for (const item of job.items || []) {
+          collect(item.ownedPaths);
+          collectArtifacts(item.ownedArtifacts);
+          if (item.publicationArtifact?.path) owned.push(pathApi.resolve(item.publicationArtifact.path));
+        }
+      }
+      const names = await pfs.readdir(tempPath);
+      let removed = 0;
+      for (const name of names) {
+        if (!name.startsWith(SNAPSHOT_DIRECTORY_PREFIX)) continue;
+        const folder = pathApi.join(tempPath, name);
+        const stat = await pfs.lstat(folder).catch(() => null);
+        if (!stat?.isDirectory() || stat.isSymbolicLink?.()) continue;
+        const inside = pathApi.resolve(folder) + pathApi.sep;
+        if (owned.some((entry) => entry === pathApi.resolve(folder) || entry.startsWith(inside))) continue;
+        try {
+          if (typeof pfs.rm === 'function') await pfs.rm(folder, { recursive: true, force: true });
+          else await pfs.rmdir(folder);
+          removed += 1;
+        } catch (_) { /* already gone */ }
+      }
+      if (removed) console.log(`[CONVERTER] Removed ${removed} leftover verification folder(s) from before the restart`);
       return removed;
     } catch (_) { return 0; }
   }
@@ -1083,6 +1136,7 @@ async function createConverterRuntime(options = {}) {
       if (!startPromise) {
         const attempt = (async () => {
           const manifests = await store.list();
+          if (options.sweepLeftoversOnStart !== false) await sweepUnreferencedSnapshotFolders(manifests);
           const recovered = [];
           for (const manifest of manifests) {
             if (shutdownPromise) throw runtimeError('SERVICE_SHUTDOWN');

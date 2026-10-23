@@ -82,6 +82,8 @@ function createConverterHost({ dataDir, tempDir, ffmpegPath = 'ffmpeg', ffprobeP
         platform: process.platform,
         removeOwned: owned.removeOwned,
         renameExclusive: owned.renameExclusive,
+        // tempDir is the container's own: no footage, nobody else writes there
+        privateTempIdentityCleanup: true,
         network: createNetwork(),
         deviceNameOf: createDeviceNameOf(),
         // Probing, verifying and writing telemetry for a Tesla clip take

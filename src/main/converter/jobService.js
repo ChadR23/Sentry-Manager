@@ -14,6 +14,7 @@ const {
   hasSizeTarget,
   effectiveVerifyMode
 } = require('./contracts');
+const { replacementAction } = require('./jobStore');
 const {
   SAFE_VIDEO_BITRATE_FLOORS,
   buildEncodeArgs,
@@ -126,7 +127,8 @@ function deepFreeze(value) {
 function composeOwnership(base = {}, incoming = {}, clearKeys = []) {
   const ownedPaths = { ...(base.ownedPaths || {}) };
   const ownedArtifacts = { ...(base.ownedArtifacts || {}) };
-  for (const key of clearKeys) {
+  const incomingClears = Array.isArray(incoming.clearOwnedKeys) ? incoming.clearOwnedKeys : [];
+  for (const key of [...clearKeys, ...incomingClears]) {
     if (!OWNED_KEYS.has(key)) continue;
     delete ownedPaths[key];
     delete ownedArtifacts[key];
@@ -660,22 +662,30 @@ function createConverterJobService(deps) {
     return next;
   }
 
-  function transactionPersistence(runtime, itemId) {
+  // Records a file transaction step. scope 'item': on the clip only, never in
+  // the job-level fields, whoever leads (a clip's files outside the save
+  // slot, and the cleanup of clips other than the job's active one).
+  // Replacement phases always go to the job: only the save slot holder
+  // writes them, and recovery finds that clip by the job's activeItemId.
+  function transactionPersistence(runtime, itemId, { scope = 'lead' } = {}) {
     return async (snapshot) => {
       const clearKeys = Array.isArray(snapshot.clearOwnedKeys) ? snapshot.clearOwnedKeys : [];
       let combined;
       const jobChanges = {};
-      if (snapshot.phase && REPLACEMENT_PHASES.has(snapshot.phase)) {
-        jobChanges.replacementPhase = snapshot.phase;
+      const phase = snapshot.phase && REPLACEMENT_PHASES.has(snapshot.phase) ? snapshot.phase : null;
+      if (phase) {
+        jobChanges.replacementPhase = phase;
         jobChanges.state = 'replacing';
+        jobChanges.activeItemId = itemId;
       }
       await update(runtime, (current) => {
         const item = current.items.find((entry) => entry.id === itemId);
         combined = composeOwnership(item || current, snapshot, clearKeys);
         const itemChanges = { ...item, ...combined };
         if (!combined.publicationArtifact) delete itemChanges.publicationArtifact;
-        if (snapshot.phase && REPLACEMENT_PHASES.has(snapshot.phase)) itemChanges.replacementPhase = snapshot.phase;
-        if (!isLead(runtime, itemId)) {
+        if (phase) itemChanges.replacementPhase = phase;
+        if (snapshot.itemFields?.expectedSource) itemChanges.expectedSource = snapshot.itemFields.expectedSource;
+        if (!phase && (scope === 'item' || !isLead(runtime, itemId))) {
           return { items: current.items.map((entry) => entry.id === itemId ? itemChanges : entry) };
         }
         return {
@@ -1213,11 +1223,14 @@ function createConverterJobService(deps) {
     });
   }
 
-  async function cleanupOwnership(runtime, itemId, ownership, signal = runtime.abortController.signal) {
+  async function cleanupOwnership(runtime, itemId, ownership, signal = runtime.abortController.signal, { scope = 'lead' } = {}) {
     if (!ownership?.ownedPaths || !ownership?.ownedArtifacts) return { cleaned: true };
+    if (Object.keys(ownership.ownedPaths).length === 0) return { cleaned: true };
     // Any retained original requires replacement-specific reconciliation. Never
-    // hand the backup or its recovery companions to generic cleanup.
-    if (ownership.ownedPaths.replacementBackup) return {
+    // hand the backup or its recovery companions to generic cleanup. (A
+    // backup only announced is no original: generic cleanup forgets it when
+    // nothing is there, and keeps it otherwise.)
+    if (ownership.ownedPaths.replacementBackup && ownership.ownedArtifacts.replacementBackup?.state !== 'intent') return {
       cleaned: false, recoveryRequired: true, cleanupPending: Object.keys(ownership.ownedPaths), ...ownership
     };
     try {
@@ -1231,8 +1244,9 @@ function createConverterJobService(deps) {
         ownedArtifacts: ownership.ownedArtifacts,
         publicationArtifact: ownership.publicationArtifact,
         signal,
-        persistTransaction: transactionPersistence(runtime, itemId)
+        persistTransaction: transactionPersistence(runtime, itemId, { scope })
       });
+      if (result.cleaned !== true && result.cleanupPending?.includes('replacementBackup')) result.recoveryRequired = true;
       if (result.cleaned === true) {
         setOwnership(runtime, itemId, composeOwnership(ownershipFor(runtime, itemId) || ownership, {}, Object.keys(ownership.ownedPaths)));
       } else {
@@ -1244,10 +1258,10 @@ function createConverterJobService(deps) {
     }
   }
 
-  async function reconcileItemOwnership(runtime, itemId, ownership) {
+  async function reconcileItemOwnership(runtime, itemId, ownership, { scope = 'lead' } = {}) {
     if (!ownership || Object.keys(ownership.ownedPaths || {}).length === 0) return true;
     setOwnership(runtime, itemId, ownershipOf(ownership));
-    const cleanup = await cleanupOwnership(runtime, itemId, ownershipFor(runtime, itemId));
+    const cleanup = await cleanupOwnership(runtime, itemId, ownershipFor(runtime, itemId), runtime.abortController.signal, { scope });
     if (cleanup.cleaned === true) {
       await itemPatch(runtime, itemId, {
         ownedPaths: {}, ownedArtifacts: {}, publicationArtifact: undefined, replacementPhase: undefined
@@ -1256,12 +1270,13 @@ function createConverterJobService(deps) {
       return true;
     }
     const retained = composeOwnership(ownership, cleanup);
+    if (!retained.ownedPaths.publicationSnapshot) delete retained.publicationArtifact;
     await itemPatch(runtime, itemId, {
       ownedPaths: retained.ownedPaths,
       ownedArtifacts: retained.ownedArtifacts,
       publicationArtifact: retained.publicationArtifact,
       resultCode: 'cleanup-pending'
-    }, {
+    }, scope === 'item' ? {} : {
       ownedPaths: retained.ownedPaths,
       ownedArtifacts: retained.ownedArtifacts,
       publicationArtifact: retained.publicationArtifact || null
@@ -2006,15 +2021,19 @@ function createConverterJobService(deps) {
     if (runtime.stopRequested) {
       await update(runtime, (current) => {
         const unresolved = current.items.find((item) => Object.keys(item.ownedPaths || {}).length > 0);
-        const interrupted = current.items.find((item) => item.id === runtime.stopItemId
+        // (a clip that finished its save while the stop came is done: only
+        // its private work files may be left, which the restart removes)
+        const interrupted = current.items.find((item) => item.id === runtime.stopItemId && item.state === 'processing'
           && Object.keys(item.ownedPaths || {}).length > 0);
         const mappedPhase = runtime.stopPhase === 'copying' || runtime.stopPhase === 'replacing'
           ? runtime.stopPhase : 'encoding';
         // Stopped while running with no clip half done (an update between
-        // clips): marked so the restart carries on by itself. A bare
-        // "restart-encoding" without a clip, as earlier versions saved it
-        // for paused jobs too, stays paused.
-        const nothingHalfDone = !interrupted && mappedPhase !== 'replacing' && !current.items.some(ownsInFlight);
+        // clips, or the save in progress finished first): marked so the
+        // restart carries on by itself. A bare "restart-encoding" without a
+        // clip, as earlier versions saved it for paused jobs too, stays
+        // paused.
+        const replacingNow = mappedPhase === 'replacing' && Boolean(current.replacementPhase);
+        const nothingHalfDone = !interrupted && !replacingNow && !current.items.some(ownsInFlight);
         const recovery = nothingHalfDone
           ? { fromState: 'waiting', action: current.discoveryComplete === false ? 'resume-discovery' : 'resume-queue' }
           : mappedPhase === 'copying'
@@ -2259,24 +2278,34 @@ function createConverterJobService(deps) {
   // A job stopped while saving a clip (the computer crashed, lost power or
   // was shut down mid-save) waits for a decision before it continues: its
   // workers show as busy, Resume answered RECOVERY_REQUIRED and Cancel did
-  // nothing, so the job could not be ended from the app. With a separate
-  // destination no original is at risk: the interrupted clips' leftover
-  // working files are removed (a record is kept of any that cannot be) and
-  // the clips go back in the queue, so Resume converts them again and Cancel
-  // cancels them. Replacing originals keeps its stricter recovery.
-  async function releaseInterruptedSave(runtime) {
+  // nothing, so the job could not be ended from the app. Unless an original
+  // already moved to its backup name (the job then says 'replacing' and has
+  // its own recovery), no original is at risk: the interrupted clips'
+  // leftover working files are removed (a record is kept of any that cannot
+  // be) and the clips go back in the queue. Recovery does this by itself
+  // after a restart (resume: the job carries on); Resume and Cancel do it
+  // for a job that still waits.
+  async function releaseInterruptedSave(runtime, { resume = false } = {}) {
     const recovery = runtime.manifest.recovery;
     if (recovery?.action !== 'manual-intervention' || recovery.fromState === 'replacing'
-        || runtime.manifest.config.outputMode === 'replace' || runtime.runPromise) return false;
+        || runtime.manifest.replacementPhase || (runtime.runPromise && runtime.runKind !== 'recovery')) return false;
     const interrupted = runtime.manifest.items.filter((item) => item.state === 'processing');
-    if (interrupted.some((item) => item.ownedPaths?.replacementBackup)) return false;
+    for (const item of interrupted) {
+      const backup = item.ownedPaths?.replacementBackup;
+      if (!backup) continue;
+      if (item.ownedArtifacts?.replacementBackup?.state !== 'intent') return false;
+      if (typeof deps.pathExists !== 'function') return false;
+      try {
+        if (await deps.pathExists(backup)) return false;
+      } catch (_) { return false; }
+    }
     const pending = new Set();
     for (const item of interrupted) {
       if (Object.keys(item.ownedPaths || {}).length === 0) continue;
-      if (!await reconcileItemOwnership(runtime, item.id, ownershipOf(item))) pending.add(item.id);
+      if (!await reconcileItemOwnership(runtime, item.id, ownershipOf(item), { scope: 'item' })) pending.add(item.id);
     }
     await update(runtime, (current) => ({
-      state: 'paused', activeItemId: null, recovery: null, replacementPhase: null,
+      state: resume ? 'waiting' : 'paused', activeItemId: null, recovery: null, replacementPhase: null,
       ownedPaths: {}, ownedArtifacts: {}, publicationArtifact: null, failure: null,
       items: current.items.map((entry) => {
         if (entry.state !== 'processing') return entry;
@@ -2371,6 +2400,27 @@ function createConverterJobService(deps) {
     return publicSnapshot(runtime.manifest);
   }
 
+  // Clips that finished (or failed) while their private work files were still
+  // being removed: a stop right after the clip's result was recorded. Those
+  // files are removed now and the records cleared.
+  const PRIVATE_KEYS = new Set(['stagedSource', 'encodedCandidate', 'publicationSnapshot']);
+  async function sweepFinishedLeftovers(runtime) {
+    const finished = runtime.manifest.items.filter((entry) => TERMINAL_STATES.has(entry.state)
+      && Object.keys(entry.ownedPaths || {}).length > 0
+      && Object.keys(entry.ownedPaths).every((key) => PRIVATE_KEYS.has(key)));
+    for (const item of finished) {
+      const ownership = ownershipOf(item);
+      const cleanup = await cleanupOwnership(runtime, item.id, ownership, runtime.abortController.signal, { scope: 'item' });
+      if (cleanup.cleaned === true) {
+        await itemPatch(runtime, item.id, {
+          ownedPaths: {}, ownedArtifacts: {}, publicationArtifact: undefined,
+          ...(item.resultCode === 'completed-cleanup-pending' ? { resultCode: item.eligibleVideo === false ? 'copied' : 'converted' } : {})
+        });
+      }
+      setOwnership(runtime, item.id, null);
+    }
+  }
+
   // With several workers, items other than the job-level active item may have
   // been mid-encode when the app stopped. They never entered the exclusive
   // publish/replace phase, so their owned artifacts are temporary encode
@@ -2379,7 +2429,7 @@ function createConverterJobService(deps) {
     const interrupted = runtime.manifest.items.filter((entry) => entry.state === 'processing' && entry.id !== keepItemId);
     for (const item of interrupted) {
       if (Object.keys(item.ownedPaths || {}).length === 0) continue;
-      if (!await reconcileItemOwnership(runtime, item.id, item)) return false;
+      if (!await reconcileItemOwnership(runtime, item.id, item, { scope: 'item' })) return false;
     }
     if (interrupted.length === 0) return true;
     const ids = new Set(interrupted.map((entry) => entry.id));
@@ -2390,12 +2440,57 @@ function createConverterJobService(deps) {
     return true;
   }
 
+  async function relaunch(runtime) {
+    runtime.queue = new BoundedQueue(queueLimit);
+    await launch(runtime, {
+      discover: runtime.manifest.discoveryComplete === false,
+      itemIds: runtime.manifest.items.filter((entry) => entry.state === 'queued').map((entry) => entry.id)
+    });
+  }
+
+  // The interrupted clip starts over: its files are removed and it goes back
+  // in the queue. One whose files cannot all be removed (still recorded for
+  // a later attempt) is failed instead and the job carries on; false only
+  // when a backup of an original is among them (that needs a decision).
+  async function requeueRecovered(runtime, item, ownership) {
+    let retained = null;
+    if (Object.keys(ownership?.ownedPaths || {}).length > 0) {
+      const cleanup = await cleanupOwnership(runtime, item.id, ownership);
+      if (cleanup.recoveryRequired) return false;
+      if (cleanup.cleaned === false) retained = composeOwnership(ownership, cleanup);
+    }
+    const jobChanges = {
+      state: 'waiting', activeItemId: null, recovery: null, replacementPhase: null,
+      ownedPaths: {}, ownedArtifacts: {}, publicationArtifact: null
+    };
+    if (retained) {
+      await itemPatch(runtime, item.id, {
+        state: 'failed', failure: { code: 'interrupted', retryable: false }, resultCode: 'cleanup-pending',
+        ownedPaths: retained.ownedPaths, ownedArtifacts: retained.ownedArtifacts,
+        publicationArtifact: retained.ownedPaths.publicationSnapshot ? retained.publicationArtifact : undefined,
+        replacementPhase: undefined
+      }, jobChanges);
+    } else {
+      await itemPatch(runtime, item.id, {
+        state: 'queued', failure: undefined, resultCode: undefined,
+        ownedPaths: {}, ownedArtifacts: {}, publicationArtifact: undefined, replacementPhase: undefined
+      }, jobChanges);
+    }
+    setOwnership(runtime, item.id, null);
+    return true;
+  }
+
   async function performRecovery(runtime, id, inspectWithSignal, recovered) {
     let recovery = recovered.recovery;
-    if (concurrencyOf(recovered) > 1 && recovery?.action !== 'manual-intervention'
+    // Clips other than the job's active one never reached the save slot (at
+    // most one clip is ever in it): their files are removed and they go back
+    // in the queue. This holds for any number at once, also a job lowered to
+    // one conversion at once while several clips were under way.
+    if (recovery?.action !== 'manual-intervention'
         && !await releaseInterruptedItems(runtime, recovered.activeItemId)) {
       return publicSnapshot(runtime.manifest);
     }
+    await sweepFinishedLeftovers(runtime);
     if (recovery?.action === 'resume-network') {
       const interrupted = currentItem(runtime, recovered.activeItemId);
       const target = recovery.pathRole === 'destination' && interrupted
@@ -2456,6 +2551,15 @@ function createConverterJobService(deps) {
         discover: runtime.manifest.discoveryComplete === false,
         itemIds: runtime.manifest.items.filter((entry) => entry.state === 'queued').map((entry) => entry.id)
       });
+      emit(runtime, 'recovered');
+      return publicSnapshot(runtime.manifest);
+    }
+    // Parked mid-save by an earlier version (or before the clip's original
+    // ever moved): nothing of the footage is at risk when no backup of an
+    // original is on disk, so the clips' leftovers go and they start over.
+    if (recovery?.action === 'manual-intervention' && recovery.fromState !== 'replacing') {
+      if (!await releaseInterruptedSave(runtime, { resume: true })) return publicSnapshot(runtime.manifest);
+      await relaunch(runtime);
       emit(runtime, 'recovered');
       return publicSnapshot(runtime.manifest);
     }
@@ -2581,6 +2685,16 @@ function createConverterJobService(deps) {
         return publicSnapshot(runtime.manifest);
       }
       const publicationArtifact = item.publicationArtifact || recovered.publicationArtifact;
+      // Nothing (or only part) was copied yet: the clip's files go and it is
+      // converted again (its verified snapshot cannot be published by a later
+      // run).
+      if (recovery.action === 'restart-copy' || (recovery.action === 'resume-copy'
+          && (item.ownedArtifacts || recovered.ownedArtifacts)?.destinationPartial?.state !== 'owned')) {
+        if (!await requeueRecovered(runtime, item, ownershipOf(item))) return publicSnapshot(runtime.manifest);
+        await relaunch(runtime);
+        emit(runtime, 'recovered');
+        return publicSnapshot(runtime.manifest);
+      }
       await prepareDestination(recovered.config, destination);
       let result = await staging.recoverCopy({
         action: recovery.action,
@@ -2623,66 +2737,104 @@ function createConverterJobService(deps) {
         replacementPhase: recovery.phase || recovered.replacementPhase,
         recovery: null
       });
-      let result;
-      try {
-        result = await staging.recoverReplacement({
-          codec: recovered.config.codec,
-          action: recovery.action,
-          source: item.sourcePath,
-          expectedSource: item.expectedSource,
-          sourceRoot: recovered.config.sourceRoot,
-          publicationArtifact: item.publicationArtifact || recovered.publicationArtifact,
-          ownedPaths: item.ownedPaths || recovered.ownedPaths,
-          ownedArtifacts: item.ownedArtifacts || recovered.ownedArtifacts,
-          jobId: recovered.id,
-          itemId: item.id,
-          signal: runtime.abortController.signal,
-          persistTransaction: transactionPersistence(runtime, item.id)
+      const park = (phase) => update(runtime, (current) => ({
+        state: 'paused',
+        activeItemId: item.id,
+        replacementPhase: phase || current.replacementPhase || recovery.phase,
+        recovery: { fromState: 'replacing', phase: phase || current.replacementPhase || recovery.phase, action: 'manual-intervention' }
+      }));
+      // Step by step until the clip is finished or its original is back:
+      // after each step the files on disk decide the next one, so a restart
+      // in the middle of a swap needs nobody to press Resume. Only a state
+      // that is not clear (files changed by something else) waits for a
+      // decision.
+      let action = recovery.action;
+      // Stopped after the backup was removed and the snapshot cleaned up but
+      // before the clip was recorded (earlier versions wrote that last step
+      // on its own): only the record is missing.
+      if (!publicationArtifact) {
+        const phase = recovery.phase || recovered.replacementPhase;
+        let stat = null;
+        if (phase === 'backup-deleted' && action === 'finish-replacement' && typeof deps.statFile === 'function') {
+          stat = await deps.statFile(item.sourcePath).catch(() => null);
+        }
+        if (!stat || !Number.isSafeInteger(Number(stat.size)) || Number(stat.size) <= 0) {
+          await park(phase);
+          return publicSnapshot(runtime.manifest);
+        }
+        await completeRecovered(item.sourcePath, Number(stat.size), {
+          ownedPaths: item.ownedPaths || {}, ownedArtifacts: item.ownedArtifacts || {}
         });
-        if (result.action === 'restart-replacement') {
-          result = await staging.replaceOriginal({
+        emit(runtime, 'recovered');
+        return publicSnapshot(runtime.manifest);
+      }
+      let ownership = {
+        ownedPaths: item.ownedPaths || recovered.ownedPaths || {},
+        ownedArtifacts: item.ownedArtifacts || recovered.ownedArtifacts || {}
+      };
+      let result = null;
+      let outcome = null;
+      for (let step = 0; step < 6 && !outcome; step += 1) {
+        if (action === 'manual-intervention') {
+          outcome = 'park';
+          break;
+        }
+        try {
+          result = await staging.recoverReplacement({
             codec: recovered.config.codec,
-            publicationArtifact,
+            action,
             source: item.sourcePath,
             expectedSource: item.expectedSource,
             sourceRoot: recovered.config.sourceRoot,
+            publicationArtifact,
+            ownedPaths: ownership.ownedPaths,
+            ownedArtifacts: ownership.ownedArtifacts,
             jobId: recovered.id,
             itemId: item.id,
             signal: runtime.abortController.signal,
             persistTransaction: transactionPersistence(runtime, item.id)
           });
+        } catch (error) {
+          // The original changed after it was converted: it stays as it is
+          // and the clip is converted again from what it holds now.
+          if (action === 'backup-original' && error?.code === 'SOURCE_CHANGED') {
+            action = 'restart-replacement';
+            continue;
+          }
+          await park().catch(() => undefined);
+          throw error;
         }
-      } catch (error) {
-        await update(runtime, (current) => ({
-          state: 'paused',
-          activeItemId: item.id,
-          recovery: { fromState: 'replacing', phase: current.replacementPhase || recovery.phase, action: 'manual-intervention' }
-        })).catch(() => undefined);
-        throw error;
+        ownership = { ownedPaths: result.ownedPaths || {}, ownedArtifacts: result.ownedArtifacts || {} };
+        if (result.action === 'restart-replacement') outcome = 'requeue';
+        else if (result.phase === 'backup-deleted') outcome = 'complete';
+        else if (result.phase === 'backup-restored') outcome = 'requeue';
+        else {
+          let facts;
+          try {
+            facts = await inspectWithSignal(clone({ ...runtime.manifest, state: 'replacing', replacementPhase: result.phase }));
+          } catch (error) {
+            await park(result.phase).catch(() => undefined);
+            throw error;
+          }
+          action = replacementAction({ ...runtime.manifest, replacementPhase: result.phase }, facts);
+        }
       }
-      if (result.phase === 'backup-deleted') {
+      if (outcome === 'complete') {
         await completeRecovered(item.sourcePath, publicationArtifact.size, result);
-      } else if (result.phase === 'backup-restored') {
-        await itemPatch(runtime, item.id, { state: 'queued', failure: undefined }, {
-          state: 'waiting', activeItemId: null, recovery: null, replacementPhase: null
-        });
-        runtime.queue = new BoundedQueue(queueLimit);
-        await launch(runtime, {
-          discover: runtime.manifest.discoveryComplete === false,
-          itemIds: runtime.manifest.items.filter((entry) => entry.state === 'queued').map((entry) => entry.id)
-        });
+      } else if (outcome === 'requeue') {
+        if (!await requeueRecovered(runtime, item, { ...ownership, publicationArtifact: result?.publicationArtifact || publicationArtifact })) {
+          await park(result?.phase);
+          return publicSnapshot(runtime.manifest);
+        }
+        await relaunch(runtime);
       } else {
-        await update(runtime, {
-          state: 'paused',
-          activeItemId: item.id,
-          recovery: { fromState: 'replacing', phase: result.phase, action: 'manual-intervention' },
-          replacementPhase: result.phase
-        });
+        await park(result?.phase);
+        return publicSnapshot(runtime.manifest);
       }
     } else {
       if (recovery.action === 'cleanup-and-restart-encoding') {
         let interruptedOwnership = item;
-        if (item.ownedArtifacts?.encodedCandidate?.state === 'intent') {
+        if (item.ownedArtifacts?.encodedCandidate?.state === 'intent' && staging.capabilities?.privateTempCleanup !== 'identity') {
           try {
             interruptedOwnership = await staging.adoptEncodeOutput({
               jobId: recovered.id,
@@ -2696,17 +2848,13 @@ function createConverterJobService(deps) {
             return publicSnapshot(runtime.manifest);
           }
         }
-        const cleanup = await cleanupOwnership(runtime, item.id, interruptedOwnership);
-        if (cleanup.cleaned === false) return publicSnapshot(runtime.manifest);
+        if (!await requeueRecovered(runtime, item, ownershipOf(interruptedOwnership))) return publicSnapshot(runtime.manifest);
+      } else {
+        await itemPatch(runtime, item.id, { state: 'queued', failure: undefined }, {
+          state: 'waiting', activeItemId: null, recovery: null
+        });
       }
-      await itemPatch(runtime, item.id, { state: 'queued', failure: undefined }, {
-        state: 'waiting', activeItemId: null, recovery: null
-      });
-      runtime.queue = new BoundedQueue(queueLimit);
-      await launch(runtime, {
-        discover: runtime.manifest.discoveryComplete === false,
-        itemIds: runtime.manifest.items.filter((entry) => entry.state === 'queued').map((entry) => entry.id)
-      });
+      await relaunch(runtime);
     }
     emit(runtime, 'recovered');
     return publicSnapshot(runtime.manifest);
@@ -2736,7 +2884,10 @@ function createConverterJobService(deps) {
       let tracked;
       const operation = (async () => {
         try {
-          const recovered = await store.recover(id, inspectWithSignal);
+          // A job parked mid-replacement is looked at again on every start:
+          // the files may show by now how to finish that clip or put its
+          // original back.
+          const recovered = await store.recover(id, inspectWithSignal, { reinspectReplacement: true });
           runtime.manifest = recovered;
           if (runtime.stopRequested || runtime.cancelRequested) throw serviceError('CANCELLED');
           reconciled(publicSnapshot(recovered));

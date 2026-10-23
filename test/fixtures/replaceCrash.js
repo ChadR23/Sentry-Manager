@@ -51,6 +51,7 @@ async function open(base, { onPromote, afterPromote, ffprobePath = 'ffprobe', ff
     tempPath: fs.realpathSync(path.join(base, 'temp')),
     ffmpegPath, ffprobePath, spawn, fs, pathApi: path, platform: process.platform,
     removeOwned: owned.removeOwned, renameExclusive, network, autoConvert: false, gpuDecode: false,
+    privateTempIdentityCleanup: true,
     networkBackoff: { initialMs: 50, maximumMs: 200 }
   });
   const config = {

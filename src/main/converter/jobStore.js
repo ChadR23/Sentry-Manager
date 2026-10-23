@@ -119,9 +119,12 @@ const REPLACEMENT_TRUTH_TABLES = Object.freeze({
     '0111': 'delete-backup', '0101': 'finish-replacement',
     '0010': 'restore-backup'
   }),
+  // (the backup is only removed once the final was proven: with the verified
+  // snapshot already cleaned up, the final cannot be checked again and the
+  // clip only has to be recorded as converted)
   'backup-deleted': Object.freeze({
     '0111': 'delete-backup', '0101': 'finish-replacement',
-    '0010': 'restore-backup'
+    '0100': 'finish-replacement', '0010': 'restore-backup'
   }),
   // A rollback stopped before the original was back (a share hiccup while
   // moving it, a crash): the converted candidate is still there and the
@@ -737,6 +740,47 @@ function cloneManifest(manifest) {
   return JSON.parse(JSON.stringify(manifest));
 }
 
+const FACT_NAMES = Object.freeze([
+  'candidateExists', 'partialExists', 'finalExists',
+  'sourceExists', 'backupExists', 'finalValid', 'partialFinalSameIdentity'
+]);
+
+// What the recovery inspector reported, as plain booleans ({ valid: false }
+// for anything else).
+function normalizeFacts(value) {
+  const known = new Set(FACT_NAMES);
+  if (!isPlainObject(value)) return { valid: false };
+  const keys = Reflect.ownKeys(value);
+  if (keys.some((key) => typeof key !== 'string' || !known.has(key))) return { valid: false };
+  const result = { valid: true };
+  for (const key of known) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor) {
+      result[key] = false;
+      continue;
+    }
+    const localValue = descriptor.get ? descriptor.get.call(value) : descriptor.value;
+    if (typeof localValue !== 'boolean' || descriptor.get || descriptor.set) return { valid: false };
+    result[key] = localValue;
+  }
+  return result;
+}
+
+// The next step of an interrupted replacement, from the files on disk and the
+// last phase the job file recorded. Recovery takes it after a restart and
+// again after each step it completes, until the clip is finished or put back.
+function replacementAction(manifest, rawFacts) {
+  const facts = rawFacts && rawFacts.valid === true ? rawFacts : normalizeFacts(rawFacts);
+  if (!facts.valid) return 'manual-intervention';
+  const item = (manifest.items || []).find((entry) => entry.id === manifest.activeItemId);
+  if (!item?.expectedSource) return 'manual-intervention';
+  if (facts.partialExists || facts.finalExists) return 'manual-intervention';
+  const table = REPLACEMENT_TRUTH_TABLES[manifest.replacementPhase];
+  if (!table) return 'manual-intervention';
+  const key = `${Number(facts.candidateExists)}${Number(facts.sourceExists)}${Number(facts.backupExists)}${Number(facts.finalValid)}`;
+  return table[key] || 'manual-intervention';
+}
+
 function createJobStore(options) {
   if (!options || typeof options.rootDir !== 'string' || !path.isAbsolute(options.rootDir)) {
     throw new TypeError('rootDir must be an absolute path');
@@ -1290,35 +1334,19 @@ function createJobStore(options) {
     });
   }
 
-  function normalizeFacts(value) {
-    const known = new Set([
-      'candidateExists', 'partialExists', 'finalExists',
-      'sourceExists', 'backupExists', 'finalValid', 'partialFinalSameIdentity'
-    ]);
-    if (!isPlainObject(value)) return { valid: false };
-    const keys = Reflect.ownKeys(value);
-    if (keys.some((key) => typeof key !== 'string' || !known.has(key))) return { valid: false };
-    const result = { valid: true };
-    for (const key of known) {
-      const descriptor = Object.getOwnPropertyDescriptor(value, key);
-      if (!descriptor) {
-        result[key] = false;
-        continue;
-      }
-      const localValue = descriptor.get ? descriptor.get.call(value) : descriptor.value;
-      if (typeof localValue !== 'boolean' || descriptor.get || descriptor.set) return { valid: false };
-      result[key] = localValue;
-    }
-    return result;
-  }
-
   function recoveryAction(current, facts) {
     if (ENCODING_RECOVERY_STATES.has(current.state)) {
-      if (facts.partialExists || facts.finalExists || facts.sourceExists || facts.backupExists || facts.finalValid) {
-        return 'manual-intervention';
-      }
-      return facts.candidateExists || Object.keys(current.ownedPaths || {}).length > 0
-        ? 'cleanup-and-restart-encoding' : 'restart-encoding';
+      // Before a clip's save slot nothing of the footage has moved: only a
+      // backup of an original, or a verified final the job did not record,
+      // needs a decision. Files the clip owns (its private work files, a
+      // partial copy on the share) are cleaned up by their exact records and
+      // the clip starts over; a destination that was already there is never
+      // touched. (In replace mode the original at its own name is no "final"
+      // here: the recovery inspector does not report it outside 'replacing'.)
+      if (facts.backupExists || facts.finalValid) return 'manual-intervention';
+      const item = current.items.find((entry) => entry.id === current.activeItemId);
+      const owns = Object.keys(current.ownedPaths || {}).length > 0 || Object.keys(item?.ownedPaths || {}).length > 0;
+      return facts.candidateExists || facts.partialExists || owns ? 'cleanup-and-restart-encoding' : 'restart-encoding';
     }
     if (current.state === 'waiting') return current.discoveryComplete === false ? 'resume-discovery' : 'resume-queue';
     if (PASSIVE_RECOVERY_ACTIONS[current.state]) return PASSIVE_RECOVERY_ACTIONS[current.state];
@@ -1330,13 +1358,7 @@ function createJobStore(options) {
       const key = `${Number(facts.partialExists)}${Number(facts.finalExists)}${Number(facts.finalValid)}`;
       return COPY_TRUTH_TABLE[key] || 'manual-intervention';
     }
-    if (current.state === 'replacing') {
-      const item = current.items.find((entry) => entry.id === current.activeItemId);
-      if (!item?.expectedSource) return 'manual-intervention';
-      if (facts.partialExists || facts.finalExists) return 'manual-intervention';
-      const key = `${Number(facts.candidateExists)}${Number(facts.sourceExists)}${Number(facts.backupExists)}${Number(facts.finalValid)}`;
-      return REPLACEMENT_TRUTH_TABLES[current.replacementPhase][key] || 'manual-intervention';
-    }
+    if (current.state === 'replacing') return replacementAction(current, facts);
     return 'manual-intervention';
   }
 
@@ -1370,9 +1392,13 @@ function createJobStore(options) {
       if (!reinspect && stored.state === 'paused' && !stored.recovery && !jobOwns && !stored.items.some(ownsFiles)) {
         return cloneManifest(stored);
       }
-      // ...and one that still owns files is recovered like an interrupted encode
+      // ...and one that still owns files is recovered like an interrupted encode.
+      // So is a replace job stopped while it copied a clip's conversion
+      // beside the original: nothing of the original moves before the job
+      // says 'replacing', so that clip's files are removed and it starts over.
       const current = reinspect ? { ...stored, state: 'replacing', replacementPhase: phase, recovery: null }
-        : stored.state === 'paused' && !stored.recovery ? { ...stored, state: 'encoding' } : stored;
+        : (stored.state === 'paused' && !stored.recovery)
+          || (stored.state === 'copying' && stored.config.outputMode === 'replace') ? { ...stored, state: 'encoding' } : stored;
       let facts;
       try {
         const inspected = await inspectPaths(cloneManifest(current));
@@ -1406,5 +1432,7 @@ module.exports = {
   JOB_STATES,
   REPLACEMENT_PHASES,
   JobStoreError,
-  createJobStore
+  createJobStore,
+  normalizeFacts,
+  replacementAction
 };

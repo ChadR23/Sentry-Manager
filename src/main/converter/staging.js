@@ -214,12 +214,24 @@ function createFileTransaction(options = {}) {
     && options.removeOwned?.guardedRemoval === true
     && separatePromotionAvailable
     && options.renameExclusive?.atomicExpectedOwnership === true;
+  // The converter's own work files (staged source, encode output, private
+  // verification snapshot) never hold footage anyone else owns. With
+  // 'identity' they are removed by their exact name (job, clip and random
+  // nonce), folder and file identity instead of a content hash: the
+  // telemetry writer rewrites the encode output in place, so a stop in the
+  // middle left a file no recorded hash matched and the clip could never be
+  // cleaned up.
+  if (options.privateTempCleanup !== undefined && !['hash', 'identity'].includes(options.privateTempCleanup)) {
+    throw transactionError('INVALID_TRANSACTION_INPUT');
+  }
+  const privateIdentity = options.privateTempCleanup === 'identity';
   const capabilities = Object.freeze({
     separatePublication: separatePromotionAvailable
       ? ownershipCleanupAvailable ? 'native-atomic' : 'hardlink-cleanup-pending'
       : options.renameExclusive === undefined ? 'hardlink-cleanup-pending' : 'unavailable',
     ownershipCleanup: ownershipCleanupAvailable ? 'atomic-expected-ownership' : 'unavailable',
-    replacement: replacementAvailable ? 'available' : 'unavailable'
+    replacement: replacementAvailable ? 'available' : 'unavailable',
+    privateTempCleanup: privateIdentity ? 'identity' : 'hash'
   });
   const chunkSize = validSafeInteger(options.chunkSize, { positive: true }) ? options.chunkSize : 1024 * 1024;
   const ownedIdentities = new Map();
@@ -576,6 +588,16 @@ function createFileTransaction(options = {}) {
   async function cleanupPublicationArtifact(value, metadata) {
     if (!value) return { cleaned: true };
     const artifact = normalizeArtifact(value);
+    if (privateIdentity) {
+      try {
+        return await removePrivateSnapshot(artifact, metadata);
+      } catch (error) {
+        if (error instanceof FileTransactionError && error.code === 'OWNED_CLEANUP_FAILED') {
+          return { cleaned: false, code: 'publication-cleanup-failed' };
+        }
+        throw error;
+      }
+    }
     const stat = await lstatOrNull(artifact.path);
     if (!stat) return { cleaned: true };
     if (!metadata || !isRegularFile(stat) || !metadataMatchesStat(metadata, stat)) {
@@ -674,6 +696,16 @@ function createFileTransaction(options = {}) {
     } catch (_error) {
       throw transactionError('TRANSACTION_STATE_PERSIST_FAILED');
     }
+  }
+
+  // Records passed in may be the job file's own (frozen) objects: worked on
+  // as copies.
+  function copyArtifacts(value) {
+    return Object.fromEntries(Object.entries(value || {}).map(([key, metadata]) => [key,
+      metadata && typeof metadata === 'object' ? { ...metadata, ...(metadata.journal ? { journal: {
+        committed: metadata.journal.committed ? { ...metadata.journal.committed } : metadata.journal.committed,
+        pending: metadata.journal.pending ? { ...metadata.journal.pending } : metadata.journal.pending
+      } } : {}) } : metadata]));
   }
 
   function newNonce() {
@@ -805,6 +837,157 @@ function createFileTransaction(options = {}) {
       device: String(stat.dev), inode: String(stat.ino), size: artifact.size, sha256: artifact.sha256
     } };
     return removeExactOwned(backup, metadata, { allowMissing: false, guard });
+  }
+
+  function singleLink(stat) {
+    return typeof stat.nlink === 'bigint' ? stat.nlink === 1n : stat.nlink === 1;
+  }
+
+  async function unlinkPrivate(target) {
+    try {
+      await pfs.unlink(target);
+    } catch (error) {
+      if (error?.code === 'ENOENT') return;
+      throw transactionError('OWNED_CLEANUP_FAILED');
+    }
+  }
+
+  // A private work file (staged source or encode output) by the identity
+  // rule: a plain single-link file at its exact recorded name in the
+  // converter's own temp folder, with the recorded device and inode when the
+  // record has them. No content hash: these files never hold anyone's footage
+  // and the telemetry writer changes the encode output after it is recorded.
+  async function removePrivateFile(target, metadata, realTempRoot) {
+    const stat = await lstatOrNull(target);
+    if (!stat) {
+      forgetOwned(target);
+      return false;
+    }
+    if (!isRegularFile(stat) || !singleLink(stat)) throw transactionError('UNSAFE_OWNED_PATH');
+    const folder = await canonicalExisting(pathApi.dirname(target)).catch(() => null);
+    if (!folder || !samePath(folder, realTempRoot, pathApi, platform)) throw transactionError('UNSAFE_OWNED_PATH');
+    if (metadata.state !== 'intent' && !metadataMatchesIdentity(metadata, stat)) throw transactionError('UNSAFE_OWNED_PATH');
+    await unlinkPrivate(target);
+    forgetOwned(target);
+    return true;
+  }
+
+  // The private verification snapshot (structurally checked by the caller:
+  // <temp>/sentry-six-verification-*/<token>.mp4) and its folder.
+  async function removePrivateSnapshot(artifact, metadata) {
+    const folder = pathApi.dirname(artifact.path);
+    const stat = await lstatOrNull(artifact.path);
+    if (stat) {
+      if (!isRegularFile(stat) || !singleLink(stat)) throw transactionError('UNSAFE_OWNED_PATH');
+      if (metadata && metadata.state !== 'intent' && !metadataMatchesIdentity(metadata, stat)) {
+        throw transactionError('UNSAFE_OWNED_PATH');
+      }
+      const realFolder = await canonicalExisting(folder).catch(() => null);
+      if (!realFolder || !samePath(realFolder, folder, pathApi, platform)) throw transactionError('UNSAFE_OWNED_PATH');
+      await unlinkPrivate(artifact.path);
+    }
+    await pfs.rmdir(folder).catch(() => {});
+    return { cleaned: true };
+  }
+
+  // SHA-256 of the first `size` bytes of a file (the verified snapshot): what
+  // an interrupted copy of it holds, whatever chunk the stop came in.
+  async function hashFilePrefix(file, size) {
+    let handle;
+    try {
+      handle = await pfs.open(file, 'r');
+      const hash = crypto.createHash('sha256');
+      const buffer = Buffer.allocUnsafe(Math.min(chunkSize, Math.max(1, size)));
+      let offset = 0;
+      while (offset < size) {
+        const request = Math.min(buffer.length, size - offset);
+        const { bytesRead } = await handle.read(buffer, 0, request, offset);
+        if (bytesRead !== request) throw new Error('short read');
+        hash.update(buffer.subarray(0, bytesRead));
+        offset += bytesRead;
+      }
+      return hash.digest('hex');
+    } finally {
+      if (handle) await handle.close().catch(() => {});
+    }
+  }
+
+  async function adapterRemove(target, expected, guard) {
+    if (!ownershipCleanupAvailable) throw transactionError('OWNED_CLEANUP_FAILED');
+    let result;
+    try {
+      result = await options.removeOwned.remove({ target, expected: { ...expected }, ...(guard ? { guard } : {}) });
+    } catch (_error) {
+      throw transactionError('OWNED_CLEANUP_FAILED');
+    }
+    if (result?.ownershipMismatch) throw transactionError('UNSAFE_OWNED_PATH');
+    if (!result || result.failed || (!result.removed && !result.missing)) throw transactionError('OWNED_CLEANUP_FAILED');
+    await syncDirectory(pathApi.dirname(target)).catch(() => {});
+    return result.removed === true;
+  }
+
+  // A removal stopped between its quarantine rename and the unlink leaves the
+  // file as .sentry-owned-remove-<hex> beside where it was. Found by the
+  // recorded identity, it is removed with the same full check.
+  async function removeQuarantined(target, metadata, guard) {
+    if (!ownershipCleanupAvailable || !metadata || metadata.state === 'intent') return false;
+    const folder = pathApi.dirname(target);
+    let names;
+    try { names = await pfs.readdir(folder); } catch (_error) { return false; }
+    for (const name of names) {
+      if (!/^\.sentry-owned-remove-[0-9a-f]{16}$/.test(name)) continue;
+      const leftover = pathApi.join(folder, name);
+      const stat = await lstatOrNull(leftover).catch(() => null);
+      if (!stat || !isRegularFile(stat) || !metadataMatchesStat(metadata, stat)) continue;
+      try {
+        if (await adapterRemove(leftover, metadata, guard)) return true;
+      } catch (_error) { /* not provably ours: left alone */ }
+    }
+    return false;
+  }
+
+  // A copy of the verified snapshot on the share (a TEMP- replacement
+  // candidate or a .partial beside the destination) that a stop interrupted.
+  //  - 'intent': it may not have been created; one that was is accepted only
+  //    while still empty.
+  //  - 'writing': its recorded identity, no larger than the snapshot, and its
+  //    bytes exactly the snapshot's first bytes (whatever chunk the stop came
+  //    in); the adapter checks that content again with the file held open.
+  //  - 'owned' / 'cleanup-pending': the recorded size and hash, as before.
+  async function removeShareCopy(target, metadata, artifact) {
+    const stat = await lstatOrNull(target);
+    if (!stat) {
+      if (metadata.state !== 'intent') await removeQuarantined(target, metadata);
+      forgetOwned(target);
+      return false;
+    }
+    if (!isRegularFile(stat)) throw transactionError('UNSAFE_OWNED_PATH');
+    if (metadata.state === 'intent' || metadata.state === 'writing') {
+      if (!singleLink(stat)) throw transactionError('UNSAFE_OWNED_PATH');
+      const real = await canonicalExisting(target).catch(() => null);
+      if (!real || !samePath(real, target, pathApi, platform)) throw transactionError('UNSAFE_OWNED_PATH');
+      const size = statSize(stat);
+      let sha;
+      if (metadata.state === 'intent') {
+        if (size !== 0) throw transactionError('UNSAFE_OWNED_PATH');
+        sha = sha256(Buffer.alloc(0));
+      } else {
+        if (!metadataMatchesIdentity(metadata, stat) || !artifact || size > artifact.size) {
+          throw transactionError('UNSAFE_OWNED_PATH');
+        }
+        try { sha = await hashFilePrefix(artifact.path, size); } catch (_error) {
+          // The snapshot is gone (only after a power cut): nothing proves
+          // this copy is ours, so it stays recorded for a later attempt.
+          throw transactionError('OWNED_CLEANUP_FAILED');
+        }
+      }
+      const removed = await adapterRemove(target, {
+        device: safeStatPart(stat.dev), inode: safeStatPart(stat.ino), size, sha256: sha
+      });
+      forgetOwned(target);
+      return removed;
+    }
+    return removeExactOwned(target, metadata);
   }
 
   async function assertReplacementSpace(source, bytes) {
@@ -1070,7 +1253,7 @@ function createFileTransaction(options = {}) {
     const jobId = validateId(operation.jobId);
     const itemId = validateId(operation.itemId);
     const ownedPaths = { ...(operation.ownedPaths || {}) };
-    const ownedArtifacts = { ...(operation.ownedArtifacts || {}) };
+    const ownedArtifacts = copyArtifacts(operation.ownedArtifacts);
     const metadata = ownedArtifacts.encodedCandidate;
     const target = validateAbsolutePath(ownedPaths.encodedCandidate, pathApi);
     if (!metadata || !['intent', 'owned'].includes(metadata.state) || metadata.path !== target || !metadata.nonce
@@ -1376,7 +1559,7 @@ function createFileTransaction(options = {}) {
     const { source, sourceRoot } = await assertSourceOrMissingContained(operation.source, operation.sourceRoot);
     const artifact = normalizeArtifact(operation.publicationArtifact);
     const ownedPaths = { ...(operation.ownedPaths || {}) };
-    const ownedArtifacts = { ...(operation.ownedArtifacts || {}) };
+    const ownedArtifacts = copyArtifacts(operation.ownedArtifacts);
     const candidate = validateAbsolutePath(ownedPaths.replacementCandidate, pathApi);
     const backup = validateAbsolutePath(ownedPaths.replacementBackup, pathApi);
     const persistedArtifact = ownedPaths.publicationSnapshot
@@ -1730,7 +1913,7 @@ function createFileTransaction(options = {}) {
     const sourceInfo = await assertSourceOrMissingContained(operation.source, operation.sourceRoot);
     const artifact = normalizeArtifact(operation.publicationArtifact);
     const ownedPaths = { ...(operation.ownedPaths || {}) };
-    const ownedArtifacts = { ...(operation.ownedArtifacts || {}) };
+    const ownedArtifacts = copyArtifacts(operation.ownedArtifacts);
     const jobId = validateId(operation.jobId);
     const itemId = validateId(operation.itemId);
     const expectedRecoveryPaths = recordedReplacementPaths(sourceInfo.source, jobId, itemId, ownedArtifacts, operation.codec);
@@ -1741,6 +1924,24 @@ function createFileTransaction(options = {}) {
     assertReplacementNames(sourceInfo.source, candidate, backup, jobId, itemId, ownedArtifacts, operation.codec);
     if (persistedArtifact && !ownedArtifacts.publicationSnapshot) throw transactionError('INVALID_PUBLICATION_ARTIFACT');
     await validatePublicationCapability(artifact, 'reconcile', artifact);
+
+    // A stop between moving the original to its backup name and recording
+    // it: the backup is still only announced. The file there is the
+    // original exactly when it has the original's identity and size; it is
+    // recorded as the backup then (its content is checked again, with the
+    // file held open, before it is ever removed or moved back).
+    if (action !== 'backup-original' && ownedArtifacts.replacementBackup?.state === 'intent') {
+      const backupStat = await lstatOrNull(backup);
+      if (backupStat) {
+        if (!isRegularFile(backupStat) || !singleLink(backupStat)
+            || safeStatPart(backupStat.dev) !== expectedSource.device || safeStatPart(backupStat.ino) !== expectedSource.inode
+            || statSize(backupStat) !== expectedSource.size) throw transactionError('MANUAL_INTERVENTION');
+        ownedArtifacts.replacementBackup = artifactMetadata(backup, ownedArtifacts.replacementBackup.nonce, 'owned',
+          backupStat, expectedSource.sha256, expectedSource.size);
+        await persist(operation, transactionSnapshot({ step: 'recovery-backup-adopted', ownedPaths, ownedArtifacts,
+          publicationArtifact: persistedArtifact }));
+      }
+    }
 
     if (action === 'backup-original') {
       await assertSourceAuthority(sourceInfo.source, expectedSource, operation.signal);
@@ -1922,6 +2123,11 @@ function createFileTransaction(options = {}) {
           cleanupPending.push('replacementBackup');
         }
       } else {
+        // removed but for its last step (still under a quarantine name)
+        const finalStat = await exactLstat(sourceInfo.source);
+        await removeQuarantined(backup, ownedArtifacts.replacementBackup, { target: sourceInfo.source, expected: {
+          device: String(finalStat.dev), inode: String(finalStat.ino), size: artifact.size, sha256: artifact.sha256
+        } });
         delete ownedPaths.replacementBackup;
         delete ownedArtifacts.replacementBackup;
       }
@@ -1983,7 +2189,7 @@ function createFileTransaction(options = {}) {
     const itemId = validateId(operation.itemId);
     const artifact = normalizeArtifact(operation.publicationArtifact);
     const ownedPaths = { ...(operation.ownedPaths || {}) };
-    const ownedArtifacts = { ...(operation.ownedArtifacts || {}) };
+    const ownedArtifacts = copyArtifacts(operation.ownedArtifacts);
     const expectedPartial = publicationPaths(destination, jobId, itemId,
       ownedArtifacts.destinationPartial?.nonce).destinationPartial;
     if (!samePath(ownedPaths.destinationPartial, expectedPartial, pathApi, platform)
@@ -2024,6 +2230,8 @@ function createFileTransaction(options = {}) {
       if (partialStat) {
         const finalStat = await exactLstat(destination);
         if (!sameIdentity(partialStat, finalStat)) throw transactionError('MANUAL_INTERVENTION');
+        // the partial name is a second link of the verified destination
+        ownedArtifacts.destinationPartial.state = 'cleanup-pending';
       }
     }
     try {
@@ -2101,15 +2309,20 @@ function createFileTransaction(options = {}) {
   async function cleanupOwnedArtifacts(operation = {}) {
     const jobId = validateId(operation.jobId);
     const itemId = validateId(operation.itemId);
-    const ownedPaths = operation.ownedPaths;
-    const ownedArtifacts = operation.ownedArtifacts;
-    if (!ownedPaths || typeof ownedPaths !== 'object' || Array.isArray(ownedPaths)
-        || !ownedArtifacts || typeof ownedArtifacts !== 'object' || Array.isArray(ownedArtifacts)
-        || Object.keys(ownedPaths).some((key) => !OWNED_PATH_FIELDS.has(key))
-        || Object.keys(ownedArtifacts).some((key) => !OWNED_PATH_FIELDS.has(key))
-        || Object.keys(ownedPaths).some((key) => !ownedArtifacts[key] || ownedArtifacts[key].path !== ownedPaths[key])) {
+    const givenPaths = operation.ownedPaths;
+    const givenArtifacts = operation.ownedArtifacts;
+    if (!givenPaths || typeof givenPaths !== 'object' || Array.isArray(givenPaths)
+        || !givenArtifacts || typeof givenArtifacts !== 'object' || Array.isArray(givenArtifacts)
+        || Object.keys(givenPaths).some((key) => !OWNED_PATH_FIELDS.has(key))
+        || Object.keys(givenArtifacts).some((key) => !OWNED_PATH_FIELDS.has(key))
+        || Object.keys(givenPaths).some((key) => !givenArtifacts[key] || givenArtifacts[key].path !== givenPaths[key])) {
       throw transactionError('INVALID_TRANSACTION_INPUT');
     }
+    // Worked on as copies: the caller's records change only through the result.
+    const ownedPaths = { ...givenPaths };
+    const ownedArtifacts = Object.fromEntries(Object.entries(givenArtifacts)
+      .map(([key, metadata]) => [key, metadata && typeof metadata === 'object' ? { ...metadata } : metadata]));
+    const givenKeys = Object.keys(givenPaths);
     const artifact = operation.publicationArtifact ? normalizeArtifact(operation.publicationArtifact) : null;
     const source = operation.source ? validateAbsolutePath(operation.source, pathApi) : null;
     const sourceRoot = operation.sourceRoot ? validateAbsolutePath(operation.sourceRoot, pathApi) : null;
@@ -2132,10 +2345,24 @@ function createFileTransaction(options = {}) {
       publicationArtifact: artifact }));
 
     const cleanupPending = [];
-    for (const [field, rawTarget] of Object.entries(ownedPaths)) {
+    // Copies on the share first: an interrupted one is proven against the
+    // verified snapshot, which therefore goes after them.
+    const order = ['destinationPartial', 'replacementCandidate', 'encodedCandidate', 'stagedSource',
+      'publicationSnapshot', 'replacementBackup'];
+    for (const field of order) {
+      if (!Object.prototype.hasOwnProperty.call(ownedPaths, field)) continue;
+      const rawTarget = ownedPaths[field];
       // The backup may be the last original. Only replacement-specific
       // recovery may remove it after proving a validated final or restoration.
+      // A backup that was only announced (the original never moved there) is
+      // simply forgotten.
       if (field === 'replacementBackup') {
+        const target = validateAbsolutePath(rawTarget, pathApi);
+        if (ownedArtifacts[field]?.state === 'intent' && !await lstatOrNull(target)) {
+          delete ownedPaths[field];
+          delete ownedArtifacts[field];
+          continue;
+        }
         cleanupPending.push(field);
         continue;
       }
@@ -2156,6 +2383,16 @@ function createFileTransaction(options = {}) {
         if (!isContained(realTempRoot, canonical, pathApi, platform) || !pathApi.basename(target).startsWith(expectedPrefix)) {
           throw transactionError('UNSAFE_OWNED_PATH');
         }
+        if (privateIdentity) {
+          try {
+            await removePrivateFile(target, ownedArtifacts[field], realTempRoot);
+          } catch (cleanupError) {
+            if (!(cleanupError instanceof FileTransactionError) || cleanupError.code !== 'OWNED_CLEANUP_FAILED') throw cleanupError;
+            ownedArtifacts[field].state = 'cleanup-pending';
+            cleanupPending.push(field);
+          }
+          continue;
+        }
       } else if (field === 'destinationPartial') {
         const suffix = `.sentry-six-${jobId}-${itemId}-${ownedArtifacts[field].nonce}.partial`;
         if (!target.endsWith(suffix)) throw transactionError('UNSAFE_OWNED_PATH');
@@ -2169,7 +2406,11 @@ function createFileTransaction(options = {}) {
         if (!expected || !samePath(expected, target, pathApi, platform)) throw transactionError('UNSAFE_OWNED_PATH');
       }
       try {
-        await removeExactOwned(target, ownedArtifacts[field]);
+        if (field === 'destinationPartial' || field === 'replacementCandidate') {
+          await removeShareCopy(target, ownedArtifacts[field], artifact);
+        } else {
+          await removeExactOwned(target, ownedArtifacts[field]);
+        }
       } catch (cleanupError) {
         if (!(cleanupError instanceof FileTransactionError) || cleanupError.code !== 'OWNED_CLEANUP_FAILED') throw cleanupError;
         ownedArtifacts[field].state = 'cleanup-pending';
@@ -2177,15 +2418,24 @@ function createFileTransaction(options = {}) {
       }
     }
     if (cleanupPending.length) {
+      // What was removed (or only announced and never there) is cleared from
+      // the records; what remains is kept with its cleanup-pending state.
+      for (const field of givenKeys) {
+        if (cleanupPending.includes(field) || !ownedPaths[field]) continue;
+        delete ownedPaths[field];
+        delete ownedArtifacts[field];
+      }
+      const clearOwnedKeys = givenKeys.filter((key) => !ownedPaths[key]);
       await persist(operation, transactionSnapshot({ step: 'owned-cleanup-pending', ownedPaths, ownedArtifacts,
-        publicationArtifact: artifact, cleanupPending }));
+        publicationArtifact: ownedPaths.publicationSnapshot ? artifact : null, cleanupPending, clearOwnedKeys }));
       for (const field of cleanupPending) {
         if (field === 'stagedSource' || field === 'encodedCandidate') releaseOwnedLease(ownedPaths[field]);
       }
-      return { cleaned: false, cleanupPending, ownedPaths, ownedArtifacts };
+      return { cleaned: false, cleanupPending, ownedPaths, ownedArtifacts, clearOwnedKeys,
+        ...(ownedPaths.publicationSnapshot && artifact ? { publicationArtifact: artifact } : {}) };
     }
     await persist(operation, transactionSnapshot({
-      step: 'owned-cleanup-complete', ownedPaths: {}, ownedArtifacts: {}, clearOwnedKeys: Object.keys(ownedPaths)
+      step: 'owned-cleanup-complete', ownedPaths: {}, ownedArtifacts: {}, clearOwnedKeys: givenKeys
     }));
     return { cleaned: true };
   }
