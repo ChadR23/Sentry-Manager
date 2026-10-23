@@ -1,0 +1,216 @@
+{
+  "at": 1792505520000,
+  "intervalMs": 2000,
+  "host": {
+    "hostname": "pi4",
+    "os": "Debian GNU/Linux 12 (bookworm)",
+    "kernel": "6.6.51+rpt-rpi-v8",
+    "arch": "arm64",
+    "uptimeS": 5400,
+    "appUptimeS": 5300,
+    "version": "98d4861",
+    "node": "v24.10.0",
+    "ffmpeg": null
+  },
+  "cpu": {
+    "model": "Raspberry Pi 4 Model B Rev 1.4",
+    "cores": 4,
+    "threads": 4,
+    "usage": 6.1,
+    "perCore": [
+      7,
+      5,
+      8,
+      4
+    ],
+    "freqMHz": 1500,
+    "tempC": 52.1,
+    "load": [
+      0.31,
+      0.22,
+      0.18
+    ],
+    "app": {
+      "usage": 1.2,
+      "ffmpegUsage": 0,
+      "ffmpegCount": 0
+    },
+    "throttling": false
+  },
+  "memory": {
+    "totalB": 3972844748.8,
+    "usedB": 644245094.4,
+    "availableB": 3328599654.4,
+    "cacheB": 1503238553.6,
+    "swapTotalB": 107374182.4,
+    "swapUsedB": 0,
+    "appB": 100663296
+  },
+  "gpus": [
+    {
+      "id": "vc4",
+      "name": "vc4",
+      "vendor": "other",
+      "driver": "vc4",
+      "node": "renderD128",
+      "busy": null,
+      "video": null,
+      "vramUsedB": null,
+      "vramTotalB": null,
+      "clockMHz": null,
+      "tempC": null,
+      "powerW": null,
+      "clients": null
+    }
+  ],
+  "power": {
+    "totalW": null,
+    "cpuW": null,
+    "gpuW": null,
+    "todayWh": null,
+    "weekWh": null,
+    "cpuSource": null,
+    "gpuSource": null,
+    "todayCost": null,
+    "weekCost": null,
+    "priceNow": null
+  },
+  "disks": [],
+  "filesystems": [
+    {
+      "label": "Data volume",
+      "path": "/data",
+      "totalB": 62277025792,
+      "usedB": 9878424780.8,
+      "latencyMs": 0.8,
+      "reachable": true
+    }
+  ],
+  "network": {
+    "scope": "container",
+    "interfaces": []
+  },
+  "sensors": [
+    {
+      "chip": "cpu_thermal",
+      "label": "cpu-thermal",
+      "kind": "temp",
+      "value": 52.1
+    }
+  ],
+  "processes": {
+    "scope": "container",
+    "top": []
+  },
+  "alerts": [],
+  "unlock": [
+    {
+      "key": "cpu-power",
+      "adds": "CPU power in watts and kWh (a read-only energy counter)",
+      "compose": "- /sys/devices/virtual/powercap:/sys/devices/virtual/powercap:ro"
+    },
+    {
+      "key": "host-view",
+      "adds": "Processes and network of the whole server, not only this container",
+      "compose": "pid: host"
+    }
+  ],
+  "sparks": {
+    "cpu": [
+      7.2,
+      7.6,
+      4.1,
+      5.6,
+      5.7,
+      5.7,
+      3.2,
+      3.7,
+      6.4,
+      6,
+      3.3,
+      4,
+      3.5,
+      6.3,
+      4.2,
+      5.5,
+      6.2,
+      4.5,
+      5.4,
+      4.7,
+      6.6,
+      5.1,
+      7.3,
+      8,
+      5.9,
+      7.7,
+      6.3,
+      5.5,
+      7.4,
+      7.2,
+      5.5,
+      8.1,
+      8.2,
+      7.5,
+      7.2,
+      7,
+      5.1,
+      6.6,
+      5.2,
+      8.1,
+      8,
+      4.6,
+      6.3,
+      5,
+      7,
+      5.2,
+      7.5,
+      6,
+      6.8,
+      5.1,
+      3.5,
+      4.8,
+      3.7,
+      5.1,
+      4.8,
+      5,
+      4.7,
+      4.6,
+      6.5,
+      3.7,
+      5.8,
+      6,
+      4,
+      6,
+      5.1,
+      6.9,
+      6.8,
+      5.3,
+      6.2,
+      5.8,
+      8.2,
+      7.4,
+      8.6,
+      7.3,
+      8,
+      8.7,
+      8.4,
+      5.8,
+      7.8,
+      9,
+      6.4,
+      7.6,
+      6.9,
+      7.4,
+      5.7,
+      7.7,
+      6.7,
+      4,
+      5.3,
+      5.9
+    ],
+    "gpuVideo": [],
+    "rxBps": []
+  },
+  "price": null,
+  "encoder": null
+}

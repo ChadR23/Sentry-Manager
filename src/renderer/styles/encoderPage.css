@@ -794,6 +794,205 @@ select.converter-select {
 }
 
 /* --------------------------------------------------------------------------
+   Hardware (scripts/features/hardwarePanel.js): what the run uses and what
+   holds it back; the approved mockup, docs/plans/server-monitor-mock.js
+   -------------------------------------------------------------------------- */
+.nd-hw {
+    margin: 0 0 16px;
+    padding: 18px;
+    border: 1px solid var(--fd-border);
+    border-radius: 14px;
+    background: var(--fd-inner);
+}
+
+.nd-hw[hidden] { display: none; }
+
+.nd-hw-head {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.nd-hw-head h3 {
+    margin: 0 8px 0 0;
+    color: var(--text-color);
+    font-size: 16px;
+    font-weight: 600;
+}
+
+/* nothing converting: one line */
+.nd-hw:has(.nd-hw-idle) { padding: 12px 16px; }
+.nd-hw-idle h3 { font-size: 14px; }
+
+.nd-state {
+    color: var(--text-muted);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+
+.nd-chip {
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    padding: 4px 10px;
+    border: 1px solid var(--fd-border-strong);
+    border-radius: 99px;
+    color: var(--text-secondary);
+    font: 600 12px/1.4 var(--font-mono);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.nd-hw-tiles {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: 10px;
+    margin-top: 14px;
+}
+
+.nd-hw-tiles > div {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+    padding: 12px;
+    border: 1px solid var(--fd-border);
+    border-radius: 12px;
+    background: var(--fd-card);
+}
+
+.nd-hw-tiles span {
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+
+.nd-hw-tiles b {
+    color: var(--text-color);
+    font-size: 22px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.nd-hw-tiles small {
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.nd-hw-tiles > .hot b { color: var(--fd-warn); }
+
+.nd-hw .nd-bar {
+    height: 5px;
+    margin-top: 4px;
+    overflow: hidden;
+    border-radius: 99px;
+    background: var(--fd-track);
+}
+
+.nd-hw .nd-bar span {
+    display: block;
+    height: 100%;
+    border-radius: 99px;
+    background: var(--accent-color);
+}
+
+.nd-hw .nd-bar.hot span { background: var(--fd-warn); }
+
+.nd-hint {
+    margin-top: 12px;
+    padding: 10px 12px;
+    border: 1px solid rgba(90, 209, 242, 0.4);
+    border-radius: 10px;
+    background: rgba(90, 209, 242, 0.08);
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.nd-hint b { color: var(--fd-info); }
+
+/* nothing maxed out: the same hint, quieter */
+.nd-hint.calm {
+    border-color: var(--fd-border);
+    background: none;
+}
+
+.nd-hint.calm b { color: var(--text-color); }
+
+.nd-eff {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 10px;
+    margin-top: 12px;
+}
+
+.nd-eff div {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.nd-eff span {
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.nd-eff b {
+    color: var(--text-color);
+    font-size: 16px;
+    font-variant-numeric: tabular-nums;
+}
+
+/* (a long clip name never widens the panel: Safari sizes grid tracks to it) */
+.nd-workers {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+    margin-top: 14px;
+}
+
+.nd-w {
+    min-width: 0;
+    padding-top: 10px;
+    border-top: 1px solid var(--fd-border);
+    font-size: 13px;
+}
+
+.nd-w-top {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    color: var(--text-color);
+    font-variant-numeric: tabular-nums;
+}
+
+.nd-w .nd-clip {
+    min-width: 0;
+    overflow: hidden;
+    font: 12px var(--font-mono);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.nd-w-meta,
+.nd-w-more {
+    margin: 6px 0 0;
+    color: var(--text-muted);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+}
+
+.nd-hw .nd-warn {
+    color: var(--fd-warn);
+    font-weight: 600;
+}
+
+/* --------------------------------------------------------------------------
    Benchmark dialog, folder picker and toasts
    -------------------------------------------------------------------------- */
 .converter-benchmark-dialog {
@@ -842,6 +1041,28 @@ select.converter-select {
 }
 
 .converter-benchmark-verify td:first-child { font-family: var(--font-sans); }
+
+/* with energy (W, files per kWh: up to 11 columns) the dialog gets wider,
+   every column takes what it needs, and what still does not fit scrolls */
+.converter-benchmark-dialog:has(.converter-benchmark-table.has-energy:not([hidden])) {
+    width: min(900px, calc(100vw - 32px));
+    max-width: min(900px, calc(100vw - 32px));
+}
+
+@media (max-width: 940px) {
+    .converter-benchmark-table.has-energy:not([hidden]) {
+        display: block;
+        overflow-x: auto;
+    }
+}
+
+.converter-benchmark-table.has-energy th:last-child,
+.converter-benchmark-table.has-energy td:last-child { width: auto; }
+
+.converter-benchmark-table td.is-efficient {
+    color: var(--fd-info);
+    font-weight: 600;
+}
 
 .converter-benchmark-table th,
 .converter-benchmark-table td {

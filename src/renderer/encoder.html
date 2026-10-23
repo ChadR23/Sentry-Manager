@@ -32,6 +32,7 @@
     <link rel="modulepreload" href="scripts/features/footageConverter.js">
     <link rel="modulepreload" href="scripts/ui/notifications.js">
     <script type="module" src="encoder.js"></script>
+    <script type="module" src="scripts/features/hardwarePanel.js"></script>
 </head>
 
 <body>
@@ -379,6 +380,10 @@
                         </div>
                         <span id="converterElapsed" class="converter-elapsed">00:00</span>
                     </div>
+
+                    <!-- Hardware: what the run uses and what holds it back, filled
+                         from GET /api/stats by scripts/features/hardwarePanel.js -->
+                    <section id="converterHardware" class="nd-hw" aria-label="Hardware" aria-live="off" hidden></section>
 
                     <div id="converterReconnectBanner" class="converter-banner converter-banner-warning" role="status" hidden data-i18n="ui.converter.reconnect">
                         Waiting for the affected source or destination to reconnect. This job will resume without rescanning the archive.
