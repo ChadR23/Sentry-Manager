@@ -85,10 +85,14 @@ what the machine is doing, live, so you don't need Glances or another tool:
 
 It only measures while a page shows it or a conversion runs, and every
 number stays on the server. A tile appears only when the server provides its
-numbers; two optional lines in `docker-compose.yml` add more: CPU watts
-(the CPU's energy counters, read-only) and the whole server's processes and
-network (`pid: host`). `pid: host` also lets the container see and signal
-the server's processes, so use it only with a PUID/PGID of its own.
+numbers. CPU watts come from the CPU's energy counters, which
+`docker-compose.yml` passes in read-only by default
+(`- /sys/devices/virtual/powercap:/host/powercap:ro`; an older compose file
+needs that line added, and a Raspberry Pi has no such counters, so delete
+the line there if Docker says the path does not exist). One optional line
+adds the whole server's processes and network (`pid: host`); it also lets
+the container see and signal the server's processes, so use it only with a
+PUID/PGID of its own.
 
 ![Footage](docs/images/footage.png)
 
