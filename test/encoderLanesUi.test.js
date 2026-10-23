@@ -543,6 +543,12 @@ test('Hardware panel: one line per device when several convert; one device is un
   const one = sample();
   one.encoder.devices = [{ id: ARC.id, name: 'Intel Arc A380', node: '/dev/dri/renderD128', encoder: 'hevc_vaapi', hardware: true, workers: 4, video: 94, busy: 12 }];
   assert.equal(renderHardware(one), before, 'one device: exactly as before');
+  const noLanes = sample();
+  noLanes.encoder.devices = [
+    { id: null, name: 'Intel Arc A380', node: '/dev/dri/renderD128', encoder: 'hevc_vaapi', hardware: true, workers: 3, video: 94, busy: 12 },
+    { id: null, name: 'CPU', node: null, encoder: 'libx265', hardware: false, workers: 1, video: null, busy: null }
+  ];
+  assert.equal(renderHardware(noLanes), before, 'entries without lanes (a job without lanes): as before');
   const two = sample();
   two.encoder.devices = [
     { id: ARC.id, name: 'Intel Arc A380', node: '/dev/dri/renderD128', encoder: 'hevc_qsv', hardware: true, workers: 3, video: 72, busy: 10 },

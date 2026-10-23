@@ -46,3 +46,40 @@ test('the block names the running job, its GPU, energy and saved space', () => {
 test('no job and nothing running: no block', () => {
   assert.equal(encoderBlock({ snapshot: {}, jobs: new Map([['x', { id: 'x', state: 'completed' }]]) }), null);
 });
+
+test('one GPU, no lanes: a clip decoded or redone on the CPU keeps the panel as it always was', async () => {
+  const path = require('path');
+  const { pathToFileURL } = require('url');
+  const { renderHardware } = await import(pathToFileURL(path.join(__dirname, '..', 'src/renderer/scripts/features/hardwarePanel.js')).href);
+  const jobs = new Map([['j1', { id: 'j1', state: 'encoding', items: [], counters: {} }]]);
+  const snapshot = { cpu: { usage: 30 }, gpus: [{ name: 'Intel Arc A380', node: 'renderD128', video: 95, busy: 20 }], filesystems: [] };
+  const page = (workers) => {
+    const encoder = encoderBlock({ snapshot, jobs, workers });
+    return { encoder, html: renderHardware({ ...snapshot, encoder }) };
+  };
+  const qsv = (over) => worker({ encoder: 'hevc_qsv', deviceId: null, ...over });
+  // QSV decoding on the GPU names renderD128; a clip decoded on the CPU names no node
+  const cpuDecode = page([qsv({ itemId: 'a' }), qsv({ itemId: 'b' }), qsv({ itemId: 'c', device: null, decode: 'cpu' })]);
+  // a clip redone with the CPU encoder after a failed GPU encode
+  const redone = page([worker({ itemId: 'a', deviceId: null }), worker({ itemId: 'b', deviceId: null, encoder: 'libx265', hardware: false, decode: 'cpu', device: null })]);
+  for (const { encoder, html } of [cpuDecode, redone]) {
+    assert.equal(encoder.devices.length, 1, 'one device: the GPU the job uses');
+    assert.doesNotMatch(html, /nd-devices/, 'no line per device');
+    assert.match(html, /<span>Video engine<\/span>/);
+  }
+  assert.match(cpuDecode.html, /hevc_qsv · Intel Arc A380 · renderD128/, 'the encoder chip stays');
+  assert.match(redone.html, /hevc_vaapi · Intel Arc A380 · renderD128/);
+  assert.equal(cpuDecode.encoder.bottleneck.message, "The GPU's video engine is 95% busy, so more conversions at once won't go faster.");
+});
+
+test('a GPU lane next to the CPU lane: its busy video engine is named whichever clip is listed first', () => {
+  const jobs = new Map([['j1', { id: 'j1', state: 'encoding', items: [], counters: {} }]]);
+  const snapshot = { cpu: { usage: 30 }, gpus: [{ name: 'Intel Arc A380', node: 'renderD128', video: 97 }, { name: 'NVIDIA T400', node: 'nvidia0', video: 0 }], filesystems: [] };
+  const arc = (itemId) => worker({ itemId, encoder: 'hevc_qsv', deviceId: 'pci:0000:03:00.0' });
+  const cpu = worker({ itemId: 'c', encoder: 'libx265', hardware: false, decode: 'cpu', device: null, deviceId: 'cpu' });
+  for (const workers of [[cpu, arc('a'), arc('b')], [arc('a'), cpu, arc('b')]]) {
+    const out = encoderBlock({ snapshot, jobs, workers });
+    assert.equal(out.bottleneck.kind, 'gpu-video', workers.map((w) => w.itemId).join());
+    assert.match(out.bottleneck.message, /97% busy/);
+  }
+});

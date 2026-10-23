@@ -104,9 +104,10 @@ export function renderHardware(stats) {
         return `<div class="nd-hw-head nd-hw-idle"><h3>Hardware</h3><span class="nd-state">${state}</span>${chips.join('')}</div>`;
     }
 
-    // several devices converting at once (one GPU or none: as always)
+    // several devices converting at once, each a lane of its own (one GPU
+    // or none, or a job without lanes: as always)
     const devices = Array.isArray(enc.devices) ? enc.devices.filter(Boolean) : [];
-    const several = devices.length > 1;
+    const several = devices.filter((d) => d.id !== null && d.id !== undefined).length > 1;
     const gpu = device?.hardware && !several ? gpuFor(gpus, device) : null;
     const cpu = stats.cpu || {};
     const power = stats.power || {};

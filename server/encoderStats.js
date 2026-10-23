@@ -66,20 +66,23 @@ function bottleneck({ workers, cpu, gpu, filesystems, gpus = null }) {
 }
 
 /**
- * One entry per device the job's running clips use (one per GPU set in the
- * Encoder, else the one the job uses), grouped by lane, else by node.
+ * One entry per device the job's running clips use: one per GPU set in the
+ * Encoder (grouped by lane), else just the one a job without lanes uses,
+ * however its clips decode (a clip decoded or redone on the CPU names no
+ * GPU, and is still that job's).
  */
 function deviceEntries(workers, gpus) {
+  const lanes = workers.some((w) => w.deviceId !== null && w.deviceId !== undefined);
   const groups = new Map();
   for (const w of workers) {
-    const key = w.deviceId ?? w.device ?? null;
+    const key = lanes ? w.deviceId ?? null : null;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(w);
   }
   const entries = [];
   for (const [id, list] of groups) {
     // the clip that names its GPU (one redone on the CPU names none)
-    const first = list.find((w) => w.hardware && w.device) || list[0];
+    const first = list.find((w) => w.hardware && w.device) || list.find((w) => w.hardware) || list[0];
     const gpu = first.hardware ? gpuFor(gpus, first.device) : null;
     entries.push({
       id,
@@ -117,6 +120,10 @@ function encoderBlock({ snapshot, jobs, workers = [], energy = null }) {
   // the GPUs in use, when the job runs on more than one
   const used = devices.filter((d) => d.hardware && d.name);
   const usedGpus = used.length > 1 ? used.map((d) => ({ name: d.name, video: d.video, busy: d.busy })) : null;
+  // the GPU whose engine limits the clips: the one a GPU clip names (the
+  // first clip may be one on the CPU, a CPU lane's or one redone there)
+  const encoding = mine.find((w) => w.hardware && w.device) || mine.find((w) => w.hardware) || first;
+  const engine = encoding === first ? gpu : gpuFor(snapshot?.gpus, encoding?.device);
   return {
     jobId: job?.id || null,
     state: job?.state || null,
@@ -138,7 +145,7 @@ function encoderBlock({ snapshot, jobs, workers = [], energy = null }) {
       savedB: Number(job.counters?.savedBytes) || 0,
       startedAt: job.startedAt || job.createdAt || null
     } : null,
-    bottleneck: bottleneck({ workers: mine, cpu: snapshot?.cpu, gpu, filesystems: snapshot?.filesystems, ...(usedGpus ? { gpus: usedGpus } : {}) })
+    bottleneck: bottleneck({ workers: mine, cpu: snapshot?.cpu, gpu: engine, filesystems: snapshot?.filesystems, ...(usedGpus ? { gpus: usedGpus } : {}) })
   };
 }
 
