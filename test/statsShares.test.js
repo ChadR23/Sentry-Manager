@@ -35,9 +35,11 @@ test('a network share that is not mounted shows as not connected, never with the
     await settle();
     let [data, car] = p.sample(t);
     assert.equal(data.reachable, true);
+    assert.deepEqual([data.checkedAt, data.checkEveryMs, data.answeredAt], [t, 10000, t], 'the heartbeat');
     assert.equal(data.totalB, 1.8e12);
     assert.equal(data.mounted, null, 'a local folder: nothing to mount');
     assert.deepEqual([car.mounted, car.reachable, car.totalB, car.latencyMs], [false, false, null, null]);
+    assert.deepEqual([car.checkedAt, car.answeredAt], [t, null], 'checked, never answered');
 
     // the share comes back: within one check
     mountinfo([ROOT, SHARE]);
@@ -46,12 +48,27 @@ test('a network share that is not mounted shows as not connected, never with the
     await settle();
     [, car] = p.sample(t);
     assert.deepEqual([car.mounted, car.reachable, car.fsType, car.smbVersion], [true, true, 'cifs', '3.1.1']);
+    const answered = t;
+    assert.equal(car.answeredAt, answered);
 
     // and goes away again: what was measured is not the share's any more
     mountinfo([ROOT]);
     t += 10000;
     [, car] = p.sample(t);
     assert.deepEqual([car.mounted, car.reachable, car.totalB, car.latencyMs], [false, false, null, null]);
+    assert.deepEqual([car.checkedAt, car.answeredAt], [t, answered], 'still checked; the last answer stays');
+
+    // after a restart (an update), the last answer comes back with the saved history
+    const saved = JSON.parse(JSON.stringify(p.toJSON()));
+    const after = new FilesystemsProvider({
+      procRoot, sysRoot: '/nonexistent', appPid: 7, fsp, now: () => t,
+      readShares: () => [{ label: 'BingBong', path: '/footage/bingbong', vehicle: true, network: true }]
+    });
+    after.load(saved);
+    after.load({ '/footage/x': t + 60000, relative: 1, '/footage/y': 'soon' }); // from the future, not a path, not a time
+    assert.deepEqual(after.toJSON(), { '/data': answered, '/footage/bingbong': answered });
+    [car] = after.sample(t);
+    assert.deepEqual([car.mounted, car.answeredAt], [false, answered]);
   } finally {
     fs.rmSync(procRoot, { recursive: true, force: true });
   }

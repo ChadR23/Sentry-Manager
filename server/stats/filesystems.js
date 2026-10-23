@@ -6,7 +6,8 @@
 // 2 s shows as slow (its time keeps growing), after 15 s as unreachable.
 // A network share that is not mounted is only an empty folder on the
 // server's own disk: it shows as not connected, never with that disk's space
-// and answer time.
+// and answer time. Each share also tells when it was last checked and when it
+// last answered (kept across restarts with the stats history).
 
 const path = require('path');
 const { readText, realPath, exists, join } = require('./util');
@@ -52,6 +53,7 @@ class FilesystemsProvider {
     this.now = now;
     this.log = log;
     this.shares = new Map(); // path -> state
+    this.answered = new Map(); // path -> when it last answered, from the saved history
     this.listedAt = null;
     this.mounts = [];
     this.mountsAt = null;
@@ -78,7 +80,8 @@ class FilesystemsProvider {
       const p = path.resolve(s.path);
       const label = String(s.label || p).slice(0, 100);
       const state = this.shares.get(p) || {
-        path: p, totalB: null, usedB: null, freeB: null, latencyMs: null, reachable: null, pendingSince: null, lastCheck: null
+        path: p, totalB: null, usedB: null, freeB: null, latencyMs: null, reachable: null, pendingSince: null, lastCheck: null,
+        checkedAt: null, answeredAt: this.answered.get(p) ?? null
       };
       state.label = label;
       state.vehicle = s.vehicle === true;
@@ -108,6 +111,7 @@ class FilesystemsProvider {
   }
 
   check(s) {
+    s.checkedAt = this.now();
     if (s.mounted === false) {
       s.lastCheck = this.now();
       return;
@@ -128,6 +132,8 @@ class FilesystemsProvider {
     })().then(({ latency, sfs }) => {
       if (s.mounted === false) return; // lost while checking: the folder under it answered
       s.reachable = true;
+      s.answeredAt = this.now();
+      this.answered.set(s.path, s.answeredAt);
       s.latencyMs = Math.max(0, Math.round(latency));
       if (sfs) {
         const bs = Number(sfs.bsize);
@@ -161,10 +167,28 @@ class FilesystemsProvider {
       out.push({
         label: s.label, path: s.path, vehicle: s.vehicle === true, totalB: s.totalB, usedB: s.usedB, freeB: s.freeB, latencyMs, reachable,
         fsType: s.fsType || null, source: s.source || null, disk: s.disk || null, smbVersion: s.smbVersion || null,
-        mounted: s.mounted ?? null
+        mounted: s.mounted ?? null,
+        // the heartbeat: when the last check began, how often, and the last answer
+        checkedAt: s.checkedAt ?? null, checkEveryMs: CHECK_EVERY_MS, answeredAt: s.answeredAt ?? null
       });
     }
     return out;
+  }
+
+  /** When each share last answered, for the saved history. */
+  toJSON() {
+    return Object.fromEntries([...this.answered].slice(-32));
+  }
+
+  load(data) {
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return;
+    const t = this.now();
+    for (const [p, at] of Object.entries(data).slice(0, 32)) {
+      if (!path.isAbsolute(p) || !Number.isFinite(at) || at <= 0 || at > t) continue;
+      this.answered.set(p, at);
+      const s = this.shares.get(p);
+      if (s && !(s.answeredAt >= at)) s.answeredAt = at;
+    }
   }
 }
 

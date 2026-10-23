@@ -149,6 +149,7 @@ function createStats(options = {}) {
       history.load(data.history, now());
       energy.load(data.energy);
       traffic.load(data.traffic);
+      filesystems.load(data.shares);
     } catch (err) {
       if (err.code !== 'ENOENT') warnOnce('load', `Server stats: could not read ${file} (${err.message}); starting a new history.`);
     }
@@ -159,7 +160,7 @@ function createStats(options = {}) {
     const tmp = `${file}.${process.pid}.tmp`;
     try {
       fs.mkdirSync(dataDir, { recursive: true });
-      fs.writeFileSync(tmp, JSON.stringify({ v: 1, savedAt: now(), history: history.toJSON(), energy: energy.toJSON(), traffic: traffic.toJSON() }), { mode: 0o600 });
+      fs.writeFileSync(tmp, JSON.stringify({ v: 1, savedAt: now(), history: history.toJSON(), energy: energy.toJSON(), traffic: traffic.toJSON(), shares: filesystems.toJSON() }), { mode: 0o600 });
       fs.renameSync(tmp, file);
       dirty = false;
     } catch (err) {

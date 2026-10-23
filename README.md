@@ -80,7 +80,9 @@ what the machine is doing, live, so you don't need Glances or another tool:
   Radeon 780M) is part of the CPU chip, so the CPU and that GPU show as one
   figure, *whole chip*; a graphics card besides it gets its own bar.
 - **Memory, storage** (each disk's reads, writes and temperature; space and
-  answer time of the data volume and every footage share), **network** (live
+  answer time of the data volume and every footage share, checked every 10 s,
+  with when it was last checked; a share that is offline shows *not
+  connected* and when it last answered, kept across restarts), **network** (live
   speed, and the data used today, this week and this month) and every
   **sensor** and fan the server reports.
 - **Alerts** for a hot CPU, GPU or disk, a disk almost full, a slow or

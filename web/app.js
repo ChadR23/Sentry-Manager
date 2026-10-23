@@ -499,18 +499,25 @@
   const diskHot = (d) => fin(d.tempC) && d.tempC >= (d.kind === 'hdd' ? 55 : 70);
   const DISKS_SHOWN = 8;
 
-  function storageTile(fss, disks, all) {
+  // how long ago, by the server's clock (`at`, the sample's time)
+  const sinceText = (ts, at) => (ts > 0 ? (at - ts < 1000 ? 'just now' : `${span((at - ts) / 1000)} ago`) : '');
+
+  function storageTile(fss, disks, all, at = Date.now()) {
     const rows = [];
     for (const f of Array.isArray(fss) ? fss : []) {
       if (!f) continue;
       const known = fin(f.totalB) && f.totalB > 0 && fin(f.usedB);
       const used = known ? (f.usedB / f.totalB) * 100 : 0;
       const bits = [known ? sizeOf(f.usedB, f.totalB) : ''];
+      const down = f.mounted === false || f.reachable === false;
       // a share that is not mounted: its folder is on this server's disk, not the share
       if (f.mounted === false) bits.push('<span class="nd-bad">not connected</span>');
       else if (f.reachable === false) bits.push('<span class="nd-bad">not reachable</span>');
       else if (fin(f.latencyMs)) bits.push(f.latencyMs > 2000 ? `<span class="nd-warn">answers in ${answer(f.latencyMs)}</span>` : `answers in ${answer(f.latencyMs)}`);
-      rows.push(`<div class="nd-disk"><div><b>${esc(f.label || f.path)}</b><span class="muted small">${esc(f.path || '')}</span></div>${known ? ndBar(used, used >= 90) : ''}<span class="small">${bits.filter(Boolean).join(' · ')}</span></div>`);
+      if (down && f.answeredAt > 0) bits.push(`last answered ${sinceText(f.answeredAt, at)}`);
+      // the heartbeat: when it was last checked, and how often
+      const beat = [f.checkedAt > 0 && `checked ${sinceText(f.checkedAt, at)}`, fin(f.checkEveryMs) && f.checkEveryMs > 0 && `every ${span(f.checkEveryMs / 1000)}`].filter(Boolean).join(' · ');
+      rows.push(`<div class="nd-disk"><div><b>${esc(f.label || f.path)}</b><span class="muted small">${esc(f.path || '')}</span></div>${known ? ndBar(used, used >= 90) : ''}<span class="small">${bits.filter(Boolean).join(' · ')}</span>${beat ? `<span class="small muted nd-beat">${esc(beat)}</span>` : ''}</div>`);
     }
     const list = (Array.isArray(disks) ? disks : []).filter((d) => d && d.name);
     for (const d of all ? list : list.slice(0, DISKS_SHOWN)) {
@@ -677,7 +684,7 @@
     if (shown) seen.set('gpus', shown);
     const tiles = [
       cpuTile(s.cpu, pts.cpu, Boolean(day), seen), gpus, powerTile(s.power, s.encoder, s.price, currency, seen), memoryTile(s.memory, seen),
-      storageTile(s.filesystems, s.disks, more.disks), networkTile(s.network, pts.rx, Boolean(day)),
+      storageTile(s.filesystems, s.disks, more.disks, fin(s.at) ? s.at : Date.now()), networkTile(s.network, pts.rx, Boolean(day)),
       sensorsTile(s.sensors, more.sensors, Number(s.cpu?.sockets) || 1, seen), processTile(s.processes, s.encoder, list.length > 0)
     ].join('');
     const alerts = (Array.isArray(s.alerts) ? s.alerts : []).filter((a) => a && a.message).map((a) => `<div class="nd-alert${a.level === 'error' ? ' bad' : ''}"><b>${a.level === 'error' ? 'Problem' : 'Warning'}</b>${esc(a.message)} · <a href="#/settings/logs">Logs</a></div>`).join('');

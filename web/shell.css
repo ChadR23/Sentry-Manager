@@ -290,6 +290,7 @@ details.more p { margin-top: 10px; color: var(--text-2); max-width: 760px; }
 .nd-disk > div b { overflow-wrap: anywhere; }
 .nd-disk > div .muted { overflow-wrap: anywhere; }
 .nd-disk .small { display: block; margin-top: 6px; color: var(--text-2); }
+.nd-disk .small.nd-beat { margin-top: 2px; color: var(--muted); }
 .nd-warn { color: var(--warn) !important; font-weight: 600; }
 .nd-bad { color: var(--danger) !important; font-weight: 600; }
 .nd-procs { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; }

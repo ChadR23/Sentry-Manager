@@ -83,9 +83,12 @@ test('Intel desktop with an Arc A380 (xe): CPU, memory, GPUs, power, disks, netw
     ], 'loop, dm and partitions are not disks');
 
     const [share, data] = snap.filesystems;
+    const START = new Date(2026, 9, 23, 10, 0, 0).getTime(); // the fake clock's start
     assert.deepEqual(share, {
       label: 'Footage share', path: '/footage/tesla', vehicle: false, totalB: 2e9 * 4096, usedB: 1.5e9 * 4096, freeB: 5e8 * 4096,
-      latencyMs: 3, reachable: true, fsType: 'cifs', source: '//nas/teslacam', disk: null, smbVersion: '3.1.1', mounted: null
+      latencyMs: 3, reachable: true, fsType: 'cifs', source: '//nas/teslacam', disk: null, smbVersion: '3.1.1', mounted: null,
+      // checked at the first sample, every 10 s; it answered 3 ms later
+      checkedAt: START, checkEveryMs: 10000, answeredAt: START + 3
     });
     assert.equal(data.disk, 'nvme0n1', 'the data folder lives on a partition of the NVMe');
     assert.equal(data.fsType, 'ext4');

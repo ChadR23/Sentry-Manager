@@ -100,6 +100,26 @@ test('Overview: a built-in GPU (APU) and the CPU are one figure, the whole chip'
   assert.match(both, /<span>Whole chip<\/span>.*<span>GPU<\/span>.*<b>85 W<\/b>/);
 });
 
+test('Overview: Storage shows each share\'s heartbeat, and when an offline share last answered', () => {
+  const { serverBody } = overview();
+  const s = sample('amd');
+  const at = Date.UTC(2026, 9, 23, 23, 40);
+  s.at = at;
+  s.filesystems = [
+    { label: 'Data volume', path: '/data', totalB: 1.8e12, usedB: 0.7e12, latencyMs: 0.2, reachable: true, mounted: null, checkedAt: at - 4000, checkEveryMs: 10000, answeredAt: at - 4000 },
+    { label: 'BingBong', path: '/footage/bingbong', vehicle: true, totalB: null, usedB: null, latencyMs: null, reachable: false, mounted: false,
+      checkedAt: at - 300, checkEveryMs: 10000, answeredAt: at - (2 * 3600 + 14 * 60) * 1000 }
+  ];
+  const html = serverBody(s);
+  const tile = html.slice(html.indexOf('<span>Storage</span>'));
+  assert.match(tile, /<b>Data volume<\/b>.*answers in under 1 ms<\/span><span class="small muted nd-beat">checked 4 s ago · every 10 s<\/span>/);
+  assert.match(tile, /<b>BingBong<\/b>.*<span class="nd-bad">not connected<\/span> · last answered 2 h 14 m ago<\/span><span class="small muted nd-beat">checked just now · every 10 s<\/span>/);
+  // a server from before the heartbeat: no line
+  delete s.filesystems[0].checkedAt;
+  delete s.filesystems[0].checkEveryMs;
+  assert.doesNotMatch(serverBody(s).split('<b>BingBong</b>')[0], /nd-beat/);
+});
+
 // the owner's server between two polls: Ryzen 7 8700G, Radeon 780M, no RAPL
 function ownerPoll(i) {
   const s = sample('amd');
