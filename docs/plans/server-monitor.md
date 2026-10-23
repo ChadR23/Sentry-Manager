@@ -2,11 +2,8 @@
 
 Status: approved by the owner (mockup below), not built yet.
 
-**Owner's rule for this update:** build the whole plan (all steps), but do
-NOT push it to main until the owner has seen it. Work on a branch (e.g.
-`release/server-monitor`), send desktop and phone screenshots of every page
-it touches, and wait for an explicit OK, so the look does not change
-without their check.
+**Owner's rule:** build the whole plan (all steps) for `main`, but push it
+to `main` only after the owner has checked the look (see `CLAUDE.md`).
 
 Goal: one place in the app that shows what the server is doing, on any
 hardware, so nobody needs Glances, Netdata or other tools. Everything stays
