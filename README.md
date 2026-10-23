@@ -269,7 +269,10 @@ in the middle of a conversion is fine: the converter stops cleanly (Docker
 gives it a minute, `stop_grace_period` in `docker-compose.yml`) and carries
 on by itself after the update. Finished clips stay finished; a clip that was
 being encoded starts over, and one that was being swapped in is completed
-or put back from its backup. **Settings → Updates** shows the version you run and checks twice a day
+or put back from its backup. If the stop came at the very moment a clip
+took its original's place, the job waits paused afterwards: press Resume
+and it finishes that clip and carries on. **Settings → Updates** shows the
+version you run and checks twice a day
 whether a newer image is out. It only tells you and never installs anything
 (`UPDATE_CHECK=off` turns the check off). For automatic updates, use a tool
 such as [Watchtower](https://containrrr.dev/watchtower/).
