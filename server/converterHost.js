@@ -47,7 +47,7 @@ function createNetwork() {
  * @param {string} o.tempDir   persistent local dir for staging / verification
  * @param {(runtime) => void} [o.onReady]
  */
-function createConverterHost({ dataDir, tempDir, ffmpegPath = 'ffmpeg', ffprobePath = 'ffprobe', log, onClipConverted, owned = createPosixOwnedFs(), powerMeter = null }) {
+function createConverterHost({ dataDir, tempDir, ffmpegPath = 'ffmpeg', ffprobePath = 'ffprobe', log, onClipConverted, owned = createPosixOwnedFs(), powerMeter = null, isCheapNow = null }) {
   fs.mkdirSync(dataDir, { recursive: true });
   fs.mkdirSync(tempDir, { recursive: true });
   let runtime = null;
@@ -74,6 +74,7 @@ function createConverterHost({ dataDir, tempDir, ffmpegPath = 'ffmpeg', ffprobeP
         // instead of holding a worker.
         processTimeoutMs: 30 * 60_000,
         powerMeter,
+        ...(isCheapNow ? { isCheapNow } : {}),
         onClipConverted: (outputPath) => onClipConverted?.(outputPath),
         onError: (error) => log?.error(`Converter recovery failed: ${error?.code || error?.message || 'RECOVERY_FAILED'}`)
       });

@@ -187,6 +187,8 @@ function collectElements(root) {
         autoWindowEnabled: byId('converterAutoWindowEnabled'),
         autoStart: byId('converterAutoStart'),
         autoEnd: byId('converterAutoEnd'),
+        autoOffPeak: byId('converterAutoOffPeak'),
+        autoHoldManual: byId('converterAutoHoldManual'),
         autoKeepRunning: byId('converterAutoKeepRunning'),
         autoLogin: byId('converterAutoLogin'),
         autoStatus: byId('converterAutoStatus'),
@@ -608,7 +610,10 @@ function createFootageConverterController(options = {}) {
         setText(elements.countFailed, stateCount('failed'));
         setText(elements.countWaiting, stateCount('queued'));
         setText(elements.processedBytes, renderBytes(counters.sourceVideoBytes || 0));
-        const finished = stateCount('completed') + stateCount('skipped') + stateCount('failed');
+        // Speed and time remaining count converted (or failed) clips only:
+        // already-converted clips are skipped in bursts while the scan runs,
+        // and counting them made the speed jump and the time remaining shrink.
+        const finished = stateCount('completed') + stateCount('failed');
         const remaining = stateCount('queued') + converting;
         // A pause starts the recent-speed window over (paused time is not speed).
         if (PAUSED_STATES.has(snapshot?.state)) speedSamples = [];
@@ -955,14 +960,18 @@ function createFootageConverterController(options = {}) {
         if (!settings) return;
         if (elements.autoEnabled) elements.autoEnabled.checked = settings.enabled === true;
         if (elements.autoInterval) elements.autoInterval.value = String(settings.intervalMinutes || 60);
-        if (elements.autoWindowEnabled) elements.autoWindowEnabled.checked = Boolean(settings.window);
-        if (settings.window) {
+        const offPeak = settings.window?.follow === 'off-peak';
+        if (elements.autoWindowEnabled) elements.autoWindowEnabled.checked = Boolean(settings.window) && !offPeak;
+        if (elements.autoOffPeak) elements.autoOffPeak.checked = offPeak;
+        if (elements.autoHoldManual) elements.autoHoldManual.checked = settings.holdManual === true;
+        setDisabled(elements.autoHoldManual, !settings.window);
+        if (settings.window && !offPeak) {
             if (elements.autoStart) elements.autoStart.value = String(settings.window.startHour);
             if (elements.autoEnd) elements.autoEnd.value = String(settings.window.endHour);
         }
         if (elements.autoKeepRunning) elements.autoKeepRunning.checked = settings.keepRunning === true;
         if (elements.autoLogin) elements.autoLogin.checked = settings.openAtLogin === true;
-        for (const control of [elements.autoStart, elements.autoEnd]) setDisabled(control, !settings.window);
+        for (const control of [elements.autoStart, elements.autoEnd]) setDisabled(control, !settings.window || offPeak);
         setDisabled(elements.autoCheckNow, !settings.enabled || status.checking === true);
         renderAutoStatus();
     }
@@ -975,7 +984,9 @@ function createFootageConverterController(options = {}) {
         let text;
         if (!settings.enabled) text = message('autoOff', 'Off');
         else if (status.checking) text = message('autoChecking', 'Checking for new clips…');
-        else if (status.activeJobId && status.pausedForWindow) {
+        else if (status.activeJobId && status.pausedForWindow && settings.window?.follow === 'off-peak') {
+            text = message('autoPausedPeak', 'Paused while electricity costs more — resumes when off-peak starts');
+        } else if (status.activeJobId && status.pausedForWindow) {
             text = message('autoPausedWindow', 'Paused outside the time window — resumes at {time}', {
                 time: clockTime(new Date().setHours(settings.window?.startHour ?? 0, 0, 0, 0))
             });
@@ -1016,12 +1027,14 @@ function createFootageConverterController(options = {}) {
         const enabled = elements.autoEnabled?.checked === true;
         try {
             const windowOn = elements.autoWindowEnabled?.checked === true;
-            const window = windowOn ? { startHour: hourValue(elements.autoStart, 1), endHour: hourValue(elements.autoEnd, 6) } : null;
+            const window = elements.autoOffPeak?.checked === true ? { follow: 'off-peak' }
+                : windowOn ? { startHour: hourValue(elements.autoStart, 1), endHour: hourValue(elements.autoEnd, 6) } : null;
             if (window && window.startHour === window.endHour) throw apiError('AUTO_WINDOW_INVALID');
             const settings = {
                 enabled,
                 intervalMinutes: Number(elements.autoInterval?.value) || 60,
                 window,
+                holdManual: Boolean(window) && elements.autoHoldManual?.checked === true,
                 keepRunning: elements.autoKeepRunning?.checked === true,
                 openAtLogin: elements.autoLogin?.checked === true,
                 // Turning it on (or changing an option while on) saves the
@@ -1253,8 +1266,15 @@ function createFootageConverterController(options = {}) {
         elements.dismissButton?.addEventListener('click', () => command('dismissConverterSummary'));
         if (elements.autoStart && !elements.autoStart.value) elements.autoStart.value = '1';
         if (elements.autoEnd && (!elements.autoEnd.value || elements.autoEnd.value === '0')) elements.autoEnd.value = '6';
-        for (const control of [elements.autoEnabled, elements.autoInterval, elements.autoWindowEnabled,
-            elements.autoStart, elements.autoEnd, elements.autoKeepRunning, elements.autoLogin]) {
+        // Fixed hours and off-peak are one choice or the other
+        elements.autoWindowEnabled?.addEventListener?.('change', () => {
+            if (elements.autoWindowEnabled.checked && elements.autoOffPeak) elements.autoOffPeak.checked = false;
+        });
+        elements.autoOffPeak?.addEventListener?.('change', () => {
+            if (elements.autoOffPeak.checked && elements.autoWindowEnabled) elements.autoWindowEnabled.checked = false;
+        });
+        for (const control of [elements.autoEnabled, elements.autoInterval, elements.autoWindowEnabled, elements.autoOffPeak,
+            elements.autoHoldManual, elements.autoStart, elements.autoEnd, elements.autoKeepRunning, elements.autoLogin]) {
             control?.addEventListener?.('change', () => saveAuto());
         }
         elements.autoCheckNow?.addEventListener?.('click', () => checkAutoNow());

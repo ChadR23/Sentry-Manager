@@ -527,13 +527,16 @@ function registerConverterIpc(options = {}) {
     'converter:setAuto': wrapped(async (_event, payload) => {
       if (typeof options.auto?.configure !== 'function') fail('AUTO_UNAVAILABLE');
       if (!isPlainObject(payload) || Object.keys(payload)
-        .some((key) => !['enabled', 'intervalMinutes', 'window', 'keepRunning', 'openAtLogin', 'config'].includes(key))) {
+        .some((key) => !['enabled', 'intervalMinutes', 'window', 'holdManual', 'keepRunning', 'openAtLogin', 'config'].includes(key))) {
         fail('INVALID_REQUEST');
       }
       if (typeof payload.enabled !== 'boolean' || !AUTO_INTERVALS.has(payload.intervalMinutes)
           || typeof payload.keepRunning !== 'boolean' || typeof payload.openAtLogin !== 'boolean') fail('INVALID_REQUEST');
+      if (payload.holdManual !== undefined && typeof payload.holdManual !== 'boolean') fail('INVALID_REQUEST');
       let window = null;
-      if (payload.window !== null && payload.window !== undefined) {
+      if (isPlainObject(payload.window) && payload.window.follow === 'off-peak' && Object.keys(payload.window).length === 1) {
+        window = { follow: 'off-peak' };
+      } else if (payload.window !== null && payload.window !== undefined) {
         const { startHour, endHour } = isPlainObject(payload.window) ? payload.window : {};
         if (![startHour, endHour].every((hour) => Number.isSafeInteger(hour) && hour >= 0 && hour <= 23)
             || startHour === endHour) fail('INVALID_AUTO_WINDOW');
@@ -546,7 +549,7 @@ function registerConverterIpc(options = {}) {
         ? null : await validateStartConfig(payload.config, dependencies, capabilities);
       if (payload.enabled && !config) fail('AUTO_CONFIG_REQUIRED');
       return boundedJsonValue(await options.auto.configure({
-        enabled: payload.enabled, intervalMinutes: payload.intervalMinutes, window,
+        enabled: payload.enabled, intervalMinutes: payload.intervalMinutes, window, holdManual: payload.holdManual === true,
         keepRunning: payload.keepRunning, openAtLogin: payload.openAtLogin, config
       }), MAX_PAYLOAD_BYTES, { finiteNumbers: true });
     }),

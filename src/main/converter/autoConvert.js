@@ -24,7 +24,11 @@ const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 const DEFAULT_SETTINGS = Object.freeze({
   enabled: false,
   intervalMinutes: 60,
+  // null (any time), { startHour, endHour }, or { follow: 'off-peak' }: the
+  // cheapest rate of the electricity plan in Settings
   window: null,
+  // outside the window, also pause conversions the owner started
+  holdManual: false,
   keepRunning: false,
   openAtLogin: false,
   config: null
@@ -44,11 +48,14 @@ function normalizeSettings(value) {
     enabled: value.enabled === true,
     intervalMinutes: INTERVAL_MINUTES.includes(value.intervalMinutes) ? value.intervalMinutes : DEFAULT_SETTINGS.intervalMinutes,
     window: null,
+    holdManual: value.holdManual === true,
     keepRunning: value.keepRunning === true,
     openAtLogin: value.openAtLogin === true,
     config: value.config && typeof value.config === 'object' && !Array.isArray(value.config) ? { ...value.config } : null
   };
-  if (value.window !== null && value.window !== undefined) {
+  if (value.window?.follow === 'off-peak') {
+    settings.window = { follow: 'off-peak' };
+  } else if (value.window !== null && value.window !== undefined) {
     if (!isHour(value.window.startHour) || !isHour(value.window.endHour)
         || value.window.startHour === value.window.endHour) throw autoError('INVALID_AUTO_WINDOW');
     settings.window = { startHour: value.window.startHour, endHour: value.window.endHour };
@@ -80,6 +87,9 @@ function createAutoConverter(options = {}) {
   const tickMs = options.tickMs || 30_000;
   const timers = options.timers || { setInterval, clearInterval };
   const onChange = options.onChange || (() => {});
+  // true while the cheapest electricity rate is in force, false otherwise,
+  // null without a time-of-use plan (then any time is off-peak)
+  const isCheapNow = options.isCheapNow || (() => null);
   if (!service || typeof scanner !== 'function' || !fs || typeof directory !== 'string') {
     throw new TypeError('service, scanner, fs and directory are required');
   }
@@ -87,7 +97,10 @@ function createAutoConverter(options = {}) {
   let settings = { ...DEFAULT_SETTINGS };
   const status = {
     lastCheckAt: null, nextCheckAt: null, lastNewFiles: null, lastJobId: null,
-    activeJobId: null, pausedForWindow: false, checking: false, error: null
+    activeJobId: null, pausedForWindow: false, checking: false, error: null,
+    // manual jobs this paused outside the window, and every manual job it
+    // has handled since the window closed (one the owner resumes stays running)
+    heldManual: [], handledManual: []
   };
   const indexes = new Map(); // setup key -> { files: Map, failures: Map, dirty }
   let timer = null;
@@ -205,7 +218,7 @@ function createAutoConverter(options = {}) {
 
   async function setPausedForWindow(jobId) {
     status.pausedForWindow = Boolean(jobId);
-    try { await writeJson(STATE_FILE, { pausedForWindowJobId: jobId || null }); } catch (_) { /* best effort */ }
+    await saveState(jobId);
   }
 
   function changed() {
@@ -246,9 +259,60 @@ function createAutoConverter(options = {}) {
     }
   }
 
+  async function saveState(pausedJobId = status.pausedForWindow ? status.activeJobId : null) {
+    try {
+      await writeJson(STATE_FILE, { pausedForWindowJobId: pausedJobId || null, heldManual: status.heldManual, handledManual: status.handledManual });
+    } catch (_) { /* best effort */ }
+  }
+
+  function insideWindowAt(time) {
+    if (settings.window?.follow === 'off-peak') {
+      let cheap = null;
+      try { cheap = isCheapNow(time); } catch (_) { cheap = null; }
+      return cheap !== false;
+    }
+    return inWindow(settings.window, hourOf(time));
+  }
+
+  // "Also pause conversions I start myself": outside the window a running
+  // manual job is paused (once; if the owner resumes it, it is left alone),
+  // and when the window opens the ones paused here are resumed.
+  async function holdManualJobs(insideWindow) {
+    const active = Boolean(settings.window) && settings.holdManual;
+    if (insideWindow || !active) {
+      if (!status.heldManual.length && !status.handledManual.length) return;
+      for (const id of status.heldManual) {
+        try { await service.resume(id); } catch (_) { /* finished, cancelled or already running */ }
+      }
+      status.heldManual = [];
+      status.handledManual = [];
+      await saveState();
+      changed();
+      return;
+    }
+    let jobs;
+    try { jobs = await service.list(); } catch (_) { return; }
+    let paused = false;
+    for (const job of jobs) {
+      if (job.config?.autoConvert === true || TERMINAL.has(job.state) || job.state === 'paused' || job.state === 'paused_network') continue;
+      if (status.handledManual.includes(job.id)) continue;
+      try {
+        await service.pause(job.id);
+        status.heldManual.push(job.id);
+        status.handledManual.push(job.id);
+        paused = true;
+      } catch (_) { /* it ended meanwhile */ }
+    }
+    if (paused) {
+      await saveState();
+      changed();
+    }
+  }
+
   async function tickOnce() {
     const time = now();
-    const insideWindow = inWindow(settings.window, hourOf(time));
+    const insideWindow = insideWindowAt(time);
+    await holdManualJobs(insideWindow);
     if (status.activeJobId) {
       await followActiveJob(insideWindow);
       if (status.activeJobId) return;
@@ -321,6 +385,14 @@ function createAutoConverter(options = {}) {
           status.pausedForWindow = running.state === 'paused' && saved?.pausedForWindowJobId === running.id;
         }
       } catch (_) { /* nothing to adopt */ }
+      // manual jobs paused for the window before a restart
+      try {
+        const saved = await readJson(STATE_FILE);
+        const ids = (list) => (Array.isArray(list) ? list.filter((id) => typeof id === 'string').slice(0, 64) : []);
+        // (kept together with any already noted in this run)
+        status.heldManual = [...new Set([...status.heldManual, ...ids(saved?.heldManual)])];
+        status.handledManual = [...new Set([...status.handledManual, ...ids(saved?.handledManual)])];
+      } catch (_) { /* none */ }
       if (!timer) {
         timer = timers.setInterval(() => { void tick(); }, tickMs);
         timer?.unref?.(); // never keeps the app (or a test) alive on its own

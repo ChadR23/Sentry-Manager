@@ -34,12 +34,12 @@ test('the block names the running job, its GPU, energy and saved space', () => {
       items: [{ kind: 'video', state: 'completed' }, { kind: 'video', state: 'completed', eligibleVideo: false }, { kind: 'video', state: 'waiting' }] }]
   ]);
   const snapshot = { cpu: { usage: 25 }, gpus: [{ name: 'Intel Arc A380', node: 'renderD128', video: 94 }], filesystems: [] };
-  const out = encoderBlock({ snapshot, jobs, workers: [worker(), worker({ jobId: 'other' })], energy: { byJob: { j1: { wh: 312.44, avgW: 67.6, seconds: 16000 } } } });
+  const out = encoderBlock({ snapshot, jobs, workers: [worker(), worker({ jobId: 'other' })], energy: { byJob: { j1: { wh: 312.44, avgW: 67.6, seconds: 16000, cost: 0.041 } } } });
   assert.equal(out.jobId, 'j1');
   assert.equal(out.running, true);
   assert.equal(out.workers.length, 1, 'only this job\'s clips');
   assert.deepEqual(out.device, { encoder: 'hevc_vaapi', hardware: true, gpuName: 'Intel Arc A380', node: '/dev/dri/renderD128', decode: 'gpu' });
-  assert.deepEqual(out.run, { wh: 312.4, avgW: 68, clips: 1, savedB: 5e9, startedAt: 1000 });
+  assert.deepEqual(out.run, { wh: 312.4, avgW: 68, cost: 0.041, clips: 1, savedB: 5e9, startedAt: 1000 });
   assert.equal(out.bottleneck.kind, 'gpu-video');
 });
 

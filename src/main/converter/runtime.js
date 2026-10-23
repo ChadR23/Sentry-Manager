@@ -700,6 +700,7 @@ async function createConverterRuntime(options = {}) {
     pathApi,
     directory: pathApi.join(options.userDataPath, 'converter-auto'),
     isBusy: async () => benchmarkController !== null || await hasActiveJob(),
+    ...(typeof options.isCheapNow === 'function' ? { isCheapNow: options.isCheapNow } : {}),
     onChange: (state) => { for (const listener of autoListeners) { try { listener(state); } catch (_) { /* isolated */ } } },
     ...(options.autoTimers ? { timers: options.autoTimers } : {}),
     ...(options.autoClock ? { now: options.autoClock.now, hourOf: options.autoClock.hourOf } : {})

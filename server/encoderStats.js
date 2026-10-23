@@ -73,6 +73,7 @@ function encoderBlock({ snapshot, jobs, workers = [], energy = null }) {
     run: job ? {
       wh: run ? Math.round(run.wh * 10) / 10 : null,
       avgW: run ? Math.round(run.avgW) : null,
+      cost: run?.cost ?? null,
       clips,
       savedB: Number(job.counters?.savedBytes) || 0,
       startedAt: job.startedAt || job.createdAt || null

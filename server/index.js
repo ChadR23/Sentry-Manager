@@ -41,7 +41,7 @@ const { detectGpus } = require('./gpu');
 const { createConverterHost } = require('./converterHost');
 const { createStats } = require('./stats');
 const { encoderBlock, RUNNING: CONVERTER_RUNNING } = require('./encoderStats');
-const { parsePowerSettings, priceAt, rateNameAt, PriceError } = require('./powerPrice');
+const { parsePowerSettings, priceAt, rateNameAt, isCheapest, PriceError } = require('./powerPrice');
 const { createConverterBridge } = require('./converterBridge');
 const { hiddenPath, readDir, stat, sendMedia, readTextConfined } = require('./studioApi');
 const { createRealGuard, isInside } = require('./safePath');
@@ -232,19 +232,22 @@ async function main() {
     dataDir: DATA,
     isBusy: () => converterRunning() || benchmarking !== null,
     readShares: () => [{ label: 'Data volume', path: DATA }, ...vehicles.list().map((v) => ({ label: v.name, path: vehicles.rootOf(v) }))],
+    // every running ffmpeg (a benchmark's too), to name processes and GPU clients
     activeEncodes: () => host.runtime?.activeEncodes?.() || [],
+    ffmpegPath: FFMPEG,
     // costs are summed at the price of each moment (time-of-use plans)
     priceAt: (ms) => priceAt(db.get('power', null), ms),
     log: logger.scope('stats'),
     onAlert: ({ key, level, message }) => notes.raise({
       kind: 'server', level: level === 'error' ? 'critical' : 'warning', dedupeKey: `server:${key}`,
       title: message, message: 'Overview > Server shows the live numbers.'
-    })
+    }),
+    onAlertClear: ({ key }) => notes.resolve(`server:${key}`)
   });
   // CPU power: the root supervisor reads the energy counters while asked
   let statsAskedAt = 0;
   const raplKeepalive = setInterval(() => {
-    if (SUPERVISED && process.connected && (Date.now() - statsAskedAt < 20_000 || converterRunning())) process.send({ type: 'rapl', on: true }, () => {});
+    if (SUPERVISED && process.connected && (stats.sampling || Date.now() - statsAskedAt < 20_000)) process.send({ type: 'rapl', on: true }, () => {});
   }, 10_000);
   raplKeepalive.unref();
   let statsJob = null;
@@ -256,11 +259,16 @@ async function main() {
     ffmpegPath: FFMPEG,
     ffprobePath: FFPROBE,
     log: logger.scope('converter'),
+    // automatic conversion "off-peak only" follows the plan in Settings
+    isCheapNow: (ms) => isCheapest(db.get('power', null), ms),
     // the benchmark measures energy per setting with the stats engine
+    // (one energy account, 'benchmark', measured as the difference across
+    // each level, so benchmarks never pile up entries)
     powerMeter: {
       start: () => {
-        benchmarking = `benchmark-${Date.now()}`;
-        stats.markJob(benchmarking);
+        const before = stats.energy().byJob?.benchmark || { wh: 0, seconds: 0 };
+        benchmarking = { wh: before.wh, seconds: before.seconds };
+        stats.markJob('benchmark');
         return benchmarking;
       },
       stop: (token) => {
@@ -268,8 +276,10 @@ async function main() {
           stats.markJob(null);
           benchmarking = null;
         }
-        const e = stats.energy().byJob?.[token];
-        return e && e.wh > 0 ? { wh: e.wh, avgW: e.avgW } : null;
+        const after = stats.energy().byJob?.benchmark;
+        const wh = after ? after.wh - token.wh : 0;
+        const seconds = after ? after.seconds - token.seconds : 0;
+        return wh > 0 && seconds > 0 ? { wh, avgW: (wh * 3600) / seconds } : null;
       }
     }
   });
@@ -668,7 +678,7 @@ async function main() {
 
   r.add('GET', '/api/jobs', (req, res, { query }) => ({
     jobs: jobs.list({ vehicleId: query.vehicle || undefined, limit: Math.min(500, Number(query.limit) || 200) })
-      .map((j) => (j.result?.energy ? { ...j, energy: { wh: j.result.energy.wh, avgW: j.result.energy.avgW } } : j))
+      .map((j) => (j.result?.energy ? { ...j, energy: { wh: j.result.energy.wh, avgW: j.result.energy.avgW, cost: j.result.energy.cost ?? null } } : j))
   }));
 
   // Overview > Server and the Encoder's Hardware panel
@@ -682,7 +692,8 @@ async function main() {
     return {
       ...snapshot,
       price: priceNow === null ? null : { currency: power.currency, mode: power.mode, now: priceNow, rate: rateNameAt(power, now) },
-      encoder: encoderBlock({ snapshot, jobs: converterJobs, workers: host.runtime?.activeEncodes?.() || [], energy: stats.energy() })
+      // the job's own clips (a running benchmark's are left out)
+      encoder: encoderBlock({ snapshot, jobs: converterJobs, workers: host.runtime?.service?.activeEncodes?.() || [], energy: stats.energy() })
     };
   });
   r.add('GET', '/api/stats/history', (req, res, { query }) => {
