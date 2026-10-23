@@ -961,12 +961,29 @@ select.converter-select {
     white-space: nowrap;
 }
 
+/* the run's state ("3 at once", "saving…"): every wording in one cell, the
+   hidden ones only holding the chip's width */
+.nd-chip-fit {
+    display: inline-grid;
+    justify-items: center;
+}
+
+.nd-chip-fit > span {
+    grid-area: 1 / 1;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.nd-chip-fit > span + span { visibility: hidden; }
+
 .nd-hw-tiles {
     display: grid;
     /* two by two: the Live run column is narrow beside the settings */
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 10px;
     margin-top: 14px;
+    container-type: inline-size;
 }
 
 .nd-hw-tiles > div {
@@ -998,6 +1015,13 @@ select.converter-select {
 .nd-hw-tiles small {
     color: var(--text-muted);
     font-size: 12px;
+    line-height: 17px;
+}
+
+/* narrow tiles (phones): "GPU 59 · CPU 62" takes two lines or one depending
+   on the digits, so every small line keeps room for two */
+@container (max-width: 280px) {
+    .nd-hw-tiles small { min-height: 34px; }
 }
 
 .nd-hw-tiles > .hot b { color: var(--fd-warn); }

@@ -252,12 +252,17 @@ test('a lane whose GPU is not in the container is skipped and logged; with none 
     await sleep(30);
     assert.deepEqual(h.running(), { [ARC.id]: 1 });
     assert.ok(warnings.includes(`[CONVERTER] Encoding device ${MISSING} is not in the container; its 3 conversions at once are not started.`), warnings.join('\n'));
+    // the Hardware panel keeps a row only for the conversions that run
+    assert.equal((await h.service.get(id)).config.concurrency, 4);
+    assert.equal(h.service.slotsOf(id), 1);
+    assert.equal(h.service.slotsOf('no-such-job'), null);
     // only GPUs that are gone: the default workers run the whole job, never stalls
     await h.service.setLanes(id, [{ device: MISSING, concurrency: 2 }]);
     for (const entry of h.held()) entry.finish(0);
     assert.ok(await until(() => h.held().length === 2));
     await sleep(30);
     assert.deepEqual(h.running(), { default: 2 });
+    assert.equal(h.service.slotsOf(id), 2, 'the default workers');
     assert.ok(h.held().every((entry) => entry.gpu === null), 'planner.select, no GPU named');
     assert.equal((await h.finishJob(id)).state, 'completed');
 

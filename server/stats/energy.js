@@ -12,7 +12,9 @@
 // before then), so clips and space per kWh count only what was converted
 // while the energy was measured. A job that ran before measuring began (or
 // before a restart into a version that measures) would otherwise divide all
-// of its clips by a few minutes of energy.
+// of its clips by a few minutes of energy. Time the job's energy is not
+// counted (no power reading, a gap, a benchmark in between) moves the
+// baseline on by what the job converted meanwhile, for the same reason.
 
 const DAYS_KEPT = 62;
 const JOBS_KEPT = 200;
@@ -39,8 +41,8 @@ function cleanBase(base, maxWh = Infinity) {
 class Energy {
   /**
    * `progressOf(jobId)` says where a job stands now ({ clips, savedB }, or
-   * null when it is not known): asked once per job, when its energy starts
-   * being counted.
+   * null when it is not known): asked at each sample while the job is
+   * counted.
    */
   constructor({ intervalMs, progressOf = null }) {
     this.maxGapMs = Math.max(3 * intervalMs, 10000);
@@ -51,6 +53,10 @@ class Energy {
     this.jobs = Object.create(null); // jobId -> { wh, seconds, at, cost, base }
     this.job = null;
     this.progressOf = typeof progressOf === 'function' ? progressOf : null;
+    // where each job stood at its last sample (not saved), and whether the
+    // job was just marked again (the time in between was not its own)
+    this.seen = Object.create(null);
+    this.marked = false;
   }
 
   /** The job's clips and saved bytes now, or null. */
@@ -72,9 +78,14 @@ class Energy {
     const w = finite(watts) ? watts : null;
     const prev = this.last;
     this.last = w === null ? null : { t, w };
-    if (!prev || w === null) return;
-    const ms = t - prev.t;
-    if (!(ms > 0) || ms > this.maxGapMs) return;
+    const ms = prev && w !== null ? t - prev.t : NaN;
+    const counted = ms > 0 && ms <= this.maxGapMs;
+    // where the job stands now, and what it converted since its last sample
+    // while its energy was not counted
+    const now = this.job !== null ? this.progress(this.job) : null;
+    if (this.job !== null) this.follow(now, !counted || this.marked);
+    this.marked = false;
+    if (!counted) return;
     const wh = ((prev.w + w) / 2) * (ms / 3600000);
     const cost = finite(pricePerKwh) ? (wh / 1000) * pricePerKwh : null;
     const key = dayKey(t);
@@ -84,10 +95,7 @@ class Energy {
       const j = this.jobs[this.job] || (this.jobs[this.job] = { wh: 0, seconds: 0, at: t, cost: null, base: null });
       // measuring starts for this job (or for one saved before baselines
       // were kept): from here on its clips count against its energy
-      if (!j.base) {
-        const now = this.progress(this.job);
-        if (now) j.base = { clips: now.clips, savedB: now.savedB, wh: j.wh };
-      }
+      if (!j.base && now) j.base = { clips: now.clips, savedB: now.savedB, wh: j.wh };
       j.wh += wh;
       j.seconds += ms / 1000;
       j.at = t;
@@ -95,8 +103,25 @@ class Energy {
     }
   }
 
+  /**
+   * The current job's progress at a sample (`now`); `skipped`: the time
+   * since its last sample was not counted, so what it converted meanwhile
+   * moves its baseline on (it is not divided by energy that was not
+   * measured).
+   */
+  follow(now, skipped) {
+    const j = this.jobs[this.job];
+    const seen = this.seen[this.job];
+    if (skipped && j?.base && seen && now) {
+      j.base = { clips: Math.max(0, j.base.clips + now.clips - seen.clips), savedB: j.base.savedB + now.savedB - seen.savedB, wh: j.base.wh };
+    }
+    if (now) this.seen[this.job] = { clips: now.clips, savedB: now.savedB };
+  }
+
   markJob(jobId) {
-    this.job = jobId === null || jobId === undefined ? null : String(jobId);
+    const job = jobId === null || jobId === undefined ? null : String(jobId);
+    if (job !== this.job) this.marked = true;
+    this.job = job;
   }
 
   /** A job needs power samples to keep coming. */
@@ -134,6 +159,7 @@ class Energy {
     }
     const jobs = Object.entries(this.jobs).sort((a, b) => a[1].at - b[1].at);
     for (const [id] of jobs.slice(0, Math.max(0, jobs.length - JOBS_KEPT))) if (id !== this.job) delete this.jobs[id];
+    for (const id of Object.keys(this.seen)) if (!this.jobs[id] && id !== this.job) delete this.seen[id];
   }
 
   toJSON() {

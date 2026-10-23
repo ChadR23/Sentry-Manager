@@ -247,6 +247,8 @@ details.more p { margin-top: 10px; color: var(--text-2); max-width: 760px; }
 .nd-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
 .nd-head > div:first-child { min-width: 0; }
 .nd-sub { overflow-wrap: anywhere; }
+/* "Not updating right now" keeps its room while the numbers are fresh */
+.nd-stale.off { visibility: hidden; }
 .nd-head-right { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .nd-chipbox:empty { display: none; }
 .nd-range button { padding: 6px 11px; font-size: 12.5px; }
@@ -294,6 +296,12 @@ details.more p { margin-top: 10px; color: var(--text-2); max-width: 760px; }
 .nd-procs th { text-align: left; color: var(--muted); font-weight: 600; font-size: 12px; padding: 6px 0; }
 .nd-procs td { padding: 7px 0; border-top: 1px solid var(--border); overflow-wrap: anywhere; }
 .nd-procs td + td, .nd-procs th + th { text-align: right; padding-left: 12px; white-space: nowrap; }
+/* a process on one line, so a row is always one line tall: a long name ends
+   in … before its count (×3); the cell's title has it all */
+.nd-procs td:first-child { width: 100%; max-width: 0; }
+.nd-pname { display: flex; min-width: 0; }
+.nd-pname > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nd-pname > span + span { flex: none; margin-left: 0.3em; white-space: nowrap; }
 /* the rows kept for processes that come and go: room, without lines */
 .nd-procs tr.nd-pad td { border-top-color: transparent; }
 .nd-more { all: unset; box-sizing: border-box; margin-top: 10px; color: var(--accent); font-size: 12.5px; font-weight: 600; cursor: pointer; }

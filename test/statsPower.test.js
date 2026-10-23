@@ -121,7 +121,7 @@ test('energy per job: where the job stood when measuring began is kept with its 
   let t = new Date(2026, 9, 23, 12, 0, 0).getTime();
   e.markJob('job-1');
   e.add(t, 30);
-  assert.deepEqual(asked, [], 'no energy counted yet: no baseline yet');
+  assert.equal(e.summary(t).byJob['job-1'], undefined, 'no energy counted yet: no baseline yet');
   t += 2000;
   e.add(t, 30);
   assert.deepEqual(e.summary(t).byJob['job-1'].base, { clips: 10412, savedB: 211e9, wh: 0 }, 'taken when its first Wh is counted');
@@ -138,7 +138,7 @@ test('energy per job: where the job stood when measuring began is kept with its 
   const s = e.summary(t);
   assert.deepEqual(s.byJob['job-1'].base, { clips: 10412, savedB: 211e9, wh: 0 }, 'one baseline per job');
   assert.equal(s.byJob.benchmark.base, null, 'the benchmark is no job');
-  assert.equal(asked.filter((id) => id === 'job-1').length, 1, 'asked once');
+  assert.equal(asked.filter((id) => id === 'job-1').length, 9, 'asked at each of its samples');
   // a job nobody knows yet gets its baseline as soon as it is known
   const late = new Energy({ intervalMs: 2000, progressOf: () => late.known || null });
   late.markJob('j');
@@ -197,6 +197,56 @@ test('energy per job: the baseline is saved and read back with it; an older reco
     d.load({ jobs: { j: { wh: 1, seconds: 10, at: t, cost: null, base } } });
     assert.equal(d.summary(t).byJob.j.base, null, JSON.stringify(base));
   }
+});
+
+test('energy per job: what the job converts while its energy is not counted moves its baseline on', () => {
+  const now = { clips: 100, savedB: 10e9 };
+  const progressOf = (id) => (id === 'j' ? { ...now } : null);
+  const e = new Energy({ intervalMs: 2000, progressOf });
+  let t = new Date(2026, 9, 23, 12, 0, 0).getTime();
+  const step = (w = 33, clips = 0) => {
+    now.clips += clips;
+    now.savedB += clips * 1e8;
+    e.add((t += 2000), w);
+  };
+  // since measuring began: clips and bytes over the Wh counted, as encoderStats divides them
+  const since = () => {
+    const j = e.summary(t).byJob.j;
+    return { clips: now.clips - j.base.clips, savedB: now.savedB - j.base.savedB, wh: Math.round((j.wh - j.base.wh) * 1000) / 1000 };
+  };
+  e.markJob('j');
+  step();
+  step(33, 0);
+  assert.deepEqual(e.summary(t).byJob.j.base, { clips: 100, savedB: 10e9, wh: 0 });
+  for (let i = 0; i < 10; i++) step(33, 1);
+  assert.deepEqual(since(), { clips: 10, savedB: 10e8, wh: Math.round(33 * 22 / 3600 * 1000) / 1000 });
+  const before = since();
+  // one sample without a power reading: the two intervals around it are not
+  // counted, nor are the clips that finished in them
+  step(null, 2);
+  step(33, 1);
+  assert.deepEqual(since(), before, 'no Wh and no clips from the time not counted');
+  step(33, 1);
+  assert.equal(since().clips, before.clips + 1, 'counted again from there');
+  // the sampler stalls for a minute while ffmpeg keeps converting
+  const stalled = since();
+  t += 60000;
+  step(33, 25);
+  assert.deepEqual(since(), stalled, 'a gap: its clips are not divided by energy that was not measured');
+  // a benchmark measures its own energy in between; the job's clips meanwhile do not count
+  e.markJob('benchmark');
+  step(60, 4);
+  step(60, 4);
+  e.markJob('j');
+  step(33, 1);
+  assert.deepEqual([since().clips, since().savedB], [stalled.clips, stalled.savedB], 'the clips of the first sample back are not the job\'s either');
+  step(33, 1);
+  assert.equal(since().clips, stalled.clips + 1);
+  assert.ok(since().clips / (since().wh / 1000) < 60000, 'a steady ratio, not inflated by the clips from uncounted time');
+  // saved and read back with the baseline it has moved to
+  const again = new Energy({ intervalMs: 2000, progressOf });
+  again.load(JSON.parse(JSON.stringify(e.toJSON())));
+  assert.deepEqual(again.summary(t).byJob.j.base, e.summary(t).byJob.j.base);
 });
 
 test('the engine: markJob counts a job\'s energy, keeps sampling and shows it on the snapshot', async () => {

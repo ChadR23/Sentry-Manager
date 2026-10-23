@@ -10,6 +10,11 @@ const RUNNING = new Set(['discovering', 'waiting', 'staging', 'encoding', 'writi
 // while a clip is verified or saved (no ffmpeg runs then).
 const lastDevice = new Map();
 
+// Whether a job's energy includes the CPU's, as last known: a sample with
+// no power reading cannot tell, and once the CPU has been measured a stale
+// reading does not make the run GPU only for a poll.
+const cpuKnown = new Map();
+
 /** The GPU a render node belongs to, or the only GPU there is. */
 function gpuFor(gpus, node) {
   if (!Array.isArray(gpus) || !gpus.length) return null;
@@ -25,8 +30,13 @@ function jobProgress(job) {
 
 const r1 = (n) => Math.round(n * 10) / 10;
 
-/** How many clips the job converts at once (its concurrency, else its lanes together), or null. */
-function concurrencyOf(job) {
+/**
+ * How many clips the job converts at once, or null: as the converter runs it
+ * (`slots`, which leaves out a lane whose GPU is not in the container), else
+ * its concurrency, else its lanes together.
+ */
+function concurrencyOf(job, slots = null) {
+  if (Number.isSafeInteger(slots) && slots > 0) return slots;
   const config = job?.config;
   const n = Number(config?.concurrency);
   if (Number.isSafeInteger(n) && n > 0) return n;
@@ -71,14 +81,15 @@ function deviceEntries(workers, gpus) {
 
 /**
  * The `encoder` block of GET /api/stats, or null when no conversion job is
- * known. `jobs` is the server's map of converter job snapshots.
+ * known. `jobs` is the server's map of converter job snapshots; `slotsOf(id)`
+ * (optional) says how many clips the converter runs at once for a job.
  */
-function encoderBlock({ snapshot, jobs, workers = [], energy = null }) {
+function encoderBlock({ snapshot, jobs, workers = [], energy = null, slotsOf = null }) {
   const list = [...(jobs?.values?.() || [])];
   const job = list.find((s) => RUNNING.has(s.state)) || list.find((s) => s.state === 'paused' || s.state === 'paused_network');
   if (!job && !workers.length) return null;
   const mine = job ? workers.filter((w) => w.jobId === job.id) : workers;
-  for (const id of lastDevice.keys()) if (!job || id !== job.id) lastDevice.delete(id);
+  for (const known of [lastDevice, cpuKnown]) for (const id of known.keys()) if (!job || id !== job.id) known.delete(id);
   if (job && mine[0]) lastDevice.set(job.id, mine[0]);
   const first = mine[0] || (job && RUNNING.has(job.state) ? lastDevice.get(job.id) : null) || null;
   const gpu = gpuFor(snapshot?.gpus, first?.device);
@@ -90,6 +101,16 @@ function encoderBlock({ snapshot, jobs, workers = [], energy = null }) {
   // the job's own totals, as there is nothing to divide.
   const base = run?.base || null;
   const power = snapshot?.power || null;
+  // without the CPU's power, the energy is the GPU's alone
+  const measured = power?.cpuSource ? true : power?.gpuSource ? false : null;
+  if (job && measured !== null && cpuKnown.get(job.id) !== true) cpuKnown.set(job.id, measured);
+  const cpuMeasured = job ? cpuKnown.get(job.id) ?? null : measured;
+  let slots = null;
+  try {
+    slots = job && typeof slotsOf === 'function' ? slotsOf(job.id) : null;
+  } catch {
+    slots = null;
+  }
   const devices = deviceEntries(mine, snapshot?.gpus);
   return {
     jobId: job?.id || null,
@@ -97,7 +118,7 @@ function encoderBlock({ snapshot, jobs, workers = [], energy = null }) {
     running: Boolean(job && RUNNING.has(job.state)),
     workers: mine,
     // the Hardware panel keeps a row for each, a clip in it or not
-    concurrency: concurrencyOf(job),
+    concurrency: concurrencyOf(job, slots),
     device: first ? {
       encoder: first.encoder || null,
       hardware: first.hardware === true,
@@ -114,8 +135,7 @@ function encoderBlock({ snapshot, jobs, workers = [], energy = null }) {
       savedB: run ? (base ? Math.max(0, now.savedB - base.savedB) : 0) : now.savedB,
       // the energy the clips above were converted with
       sinceWh: run ? (base ? r1(Math.max(0, run.wh - base.wh)) : 0) : null,
-      // without the CPU's power, the energy is the GPU's alone
-      cpuMeasured: power?.cpuSource ? true : power?.gpuSource ? false : null,
+      cpuMeasured,
       startedAt: job.startedAt || job.createdAt || null
     } : null
   };

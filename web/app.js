@@ -291,11 +291,12 @@
   const watts = (w) => `${w >= 10 ? Math.round(w) : w.toFixed(1).replace(/\.0$/, '')} W`;
   const temp = (c) => `${Math.round(c)} °C`;
   const clock = (mhz) => (mhz >= 1000 ? `${Number((mhz / 1000).toFixed(2))} GHz` : `${Math.round(mhz)} MHz`);
-  // "12.4 Wh" below 1 kWh, so a run's first minutes visibly count up; then "5.2 kWh"
+  // "12.4 Wh" below 100 Wh, so a run's first minutes visibly count up; "412 Wh"; then "5.2 kWh"
   const energyText = (wh) => {
-    if (Math.round(wh * 10) / 10 < 1000) return `${(Math.round(wh * 10) / 10).toFixed(1)} Wh`;
+    if (Math.round(wh * 10) / 10 < 100) return `${(Math.round(wh * 10) / 10).toFixed(1)} Wh`;
+    if (Math.round(wh) < 1000) return `${Math.round(wh)} Wh`;
     const k = wh / 1000;
-    return `${k < 100 ? k.toFixed(1) : Math.round(k).toLocaleString()} kWh`;
+    return `${Math.round(k * 10) / 10 < 100 ? k.toFixed(1) : Math.round(k).toLocaleString()} kWh`;
   };
   // $0.14 but 1.20 kr
   const inCurrency = (n, cur) => {
@@ -355,24 +356,31 @@
    * keeps its place, with '—' (or the row's own placeholder, row[3]), while
    * the server has no value for it or leaves it out for a moment, so the
    * page does not jump with every poll. `seen` (the caller's, kept between
-   * polls) maps a tile to the labels it has shown, in order; rows that never
-   * had a value are left out as before.
+   * polls) maps a tile to the rows it has shown, in order; rows that never
+   * had a value are left out as before. A label that comes twice (two NVMe
+   * drives are both "NVMe") is two rows, told apart by their order.
    */
   function steady(seen, tile, rows) {
     const list = rows.filter((row) => row && row[0]);
     if (!seen) return list;
+    // "2:NVMe" is the second row called NVMe
+    const times = new Map();
+    const keyed = list.map((row) => {
+      times.set(row[0], (times.get(row[0]) || 0) + 1);
+      return [`${times.get(row[0])}:${row[0]}`, row];
+    });
     const order = [...(seen.get(tile) || [])];
     let at = -1;
-    for (const row of list) {
-      const i = order.indexOf(row[0]);
+    for (const [key, row] of keyed) {
+      const i = order.indexOf(key);
       if (i >= 0) at = i;
-      else if (row[1]) order.splice(++at, 0, row[0]);
+      else if (row[1]) order.splice(++at, 0, key);
     }
     seen.set(tile, order);
-    const now = new Map(list.map((row) => [row[0], row]));
-    return order.map((label) => {
-      const row = now.get(label);
-      return row && row[1] ? row : [label, row?.[3] ?? '—'];
+    const now = new Map(keyed);
+    return order.map((key) => {
+      const row = now.get(key);
+      return row && row[1] ? row : [key.slice(key.indexOf(':') + 1), row?.[3] ?? '—'];
     });
   }
   const ndTile = (title, sub, body, wide = false) => `<div class="nd-tile${wide ? ' nd-wide' : ''}"><div class="nd-title"><span>${esc(title)}</span>${sub ? `<span class="muted" title="${esc(sub)}">${esc(sub)}</span>` : ''}</div>${body}</div>`;
@@ -418,13 +426,16 @@
   // has a client open; their rows stay in place (with '—') in between
   const VIDEO_VENDORS = new Set(['amd', 'intel', 'nvidia']);
   const reportsVideo = (g) => Boolean(g) && VIDEO_VENDORS.has(g.vendor);
+  // what a GPU's tile needs to be drawn again while a sample leaves it out
+  const GPU_NAMES = ['id', 'name', 'vendor', 'driver', 'node', 'vramTotalB', 'integrated'];
 
+  // (`g.held`: a GPU the page has shown that this sample left out, drawn with '—')
   function gpuTile(g, points, day, seen = null, key = 'gpu') {
     const steadyRows = reportsVideo(g);
-    if (!g || (!steadyRows && !['busy', 'video', 'vramUsedB', 'clockMHz', 'tempC', 'powerW'].some((k) => fin(g[k])))) return '';
+    if (!g || (!steadyRows && !g.held && !['busy', 'video', 'vramUsedB', 'clockMHz', 'tempC', 'powerW'].some((k) => fin(g[k])))) return '';
     const dash = (n) => (fin(n) ? pct(n) : '—');
     const big = steadyRows ? ndBig(dash(g.video), 'video engine')
-      : fin(g.video) ? ndBig(pct(g.video), 'video engine') : fin(g.busy) ? ndBig(pct(g.busy), 'busy') : '';
+      : fin(g.video) ? ndBig(pct(g.video), 'video engine') : fin(g.busy) ? ndBig(pct(g.busy), 'busy') : g.held ? ndBig('—', 'busy') : '';
     const vram = fin(g.vramTotalB) && g.vramTotalB > 0;
     const rows = [
       (steadyRows || fin(g.busy)) && `<div><span>Render / 3D</span>${ndBar(g.busy, g.busy >= 90)}<b>${dash(g.busy)}</b></div>`,
@@ -600,9 +611,12 @@
     // rows come and go (ffprobe, a mount): empty ones keep the table's height
     const pad = `<tr class="nd-pad" aria-hidden="true"><td>&nbsp;</td><td></td><td></td>${gpuCol ? '<td></td>' : ''}</tr>`.repeat(PROCESS_ROWS - rows.length);
     const encoder = enc?.running ? enc.device?.encoder : null;
-    const name = (r) => `${esc(r.name)}${r.name === 'ffmpeg' && encoder ? ` · ${esc(encoder)}` : ''}${r.n > 1 ? ` ×${r.n}` : ''}`;
+    // one line each, so a row is as tall with ffmpeg ×3 as with one ffmpeg:
+    // a long name ends in … before its count (its title has it all)
+    const name = (r) => `${r.name}${r.name === 'ffmpeg' && encoder ? ` · ${encoder}` : ''}`;
+    const nameCell = (r) => `<td title="${esc(`${name(r)}${r.n > 1 ? ` ×${r.n}` : ''}`)}"><span class="nd-pname"><span>${esc(name(r))}</span>${r.n > 1 ? `<span>×${r.n}</span>` : ''}</span></td>`;
     return ndTile('Top processes', procs.scope === 'host' ? 'whole server' : 'this container',
-      `<table class="nd-procs"><thead><tr><th>Process</th><th>CPU</th><th>Memory</th>${gpuCol ? '<th>GPU</th>' : ''}</tr></thead><tbody>${rows.map((r) => `<tr><td>${name(r)}</td><td>${pct(r.cpu)}</td><td>${size(r.memB)}</td>${gpuCol ? `<td>${r.gpu !== null ? `${pct(r.gpu)} video` : '—'}</td>` : ''}</tr>`).join('')}${pad}</tbody></table>`, true);
+      `<table class="nd-procs"><thead><tr><th>Process</th><th>CPU</th><th>Memory</th>${gpuCol ? '<th>GPU</th>' : ''}</tr></thead><tbody>${rows.map((r) => `<tr>${nameCell(r)}<td>${pct(r.cpu)}</td><td>${size(r.memB)}</td>${gpuCol ? `<td>${r.gpu !== null ? `${pct(r.gpu)} video` : '—'}</td>` : ''}</tr>`).join('')}${pad}</tbody></table>`, true);
   }
 
   function hostLine(h) {
@@ -631,12 +645,26 @@
       gpu: day ? (usable(day.gpuVideo) ? day.gpuVideo : day.gpuBusy) : s.sparks?.gpuVideo,
       rx: day ? day.rxBps : s.sparks?.rxBps
     };
+    // A GPU the page has shown keeps its tile, in its place, while a sample
+    // leaves it out (its reading failed for a moment), so the tiles after it
+    // stay put. `seen` holds their names (no numbers) by key.
+    const sampled = (Array.isArray(s.gpus) ? s.gpus : []).filter(Boolean);
+    const gpuKey = (g, i) => `gpu:${g.id || g.node || i}`;
+    const shown = seen ? seen.get('gpus') || new Map() : null;
+    const here = new Map(sampled.map((g, i) => [gpuKey(g, i), g]));
+    const list = shown
+      ? [...[...shown].map(([k, g]) => [k, here.get(k) || { ...g, held: true }]), ...[...here].filter(([k]) => !shown.has(k))]
+      : [...here];
     // one sparkline series for the GPUs: on the first that can report its
     // video engine (it stays there while the engine's use is unknown), else
     // on the first that encodes
-    const list = (Array.isArray(s.gpus) ? s.gpus : []).filter(Boolean);
-    const sparkOn = list.find(reportsVideo) || list.find((g) => fin(g.video)) || null;
-    const gpus = list.map((g, i) => gpuTile(g, g === sparkOn ? pts.gpu : null, Boolean(day), seen, `gpu:${g.id || g.node || i}`)).join('');
+    const sparkOn = list.map(([, g]) => g).find(reportsVideo) || list.map(([, g]) => g).find((g) => fin(g.video)) || null;
+    const gpus = list.map(([k, g]) => {
+      const html = gpuTile(g, g === sparkOn ? pts.gpu : null, Boolean(day), seen, k);
+      if (html && shown && !g.held) shown.set(k, Object.fromEntries(GPU_NAMES.filter((n) => g[n] !== undefined).map((n) => [n, g[n]])));
+      return html;
+    }).join('');
+    if (shown) seen.set('gpus', shown);
     const tiles = [
       cpuTile(s.cpu, pts.cpu, Boolean(day), seen), gpus, powerTile(s.power, s.encoder, s.price, currency, seen), memoryTile(s.memory, seen),
       storageTile(s.filesystems, s.disks, more.disks), networkTile(s.network, pts.rx, Boolean(day)),
@@ -688,9 +716,15 @@
       b.classList.toggle('on', b.dataset.range === monitor.range);
       b.setAttribute('aria-pressed', String(b.dataset.range === monitor.range));
     });
-    const stale = monitor.error ? `<span class="nd-warn">${s ? 'Not updating right now' : `Can't show the server's numbers: ${esc(monitor.error)}`}</span>` : '';
+    // With numbers on screen, the line always holds room for "Not updating
+    // right now" (hidden until a poll fails), so one failed poll does not
+    // push the tiles down and back up.
+    const host = s ? hostLine(s.host) : '';
+    const sub = s
+      ? `${host}<span class="nd-nb nd-stale${monitor.error ? '' : ' off'}"${monitor.error ? '' : ' aria-hidden="true"'}>${host ? ' · ' : ''}<span class="nd-warn">Not updating right now</span></span>`
+      : monitor.error ? `<span class="nd-warn">Can't show the server's numbers: ${esc(monitor.error)}</span>` : 'Loading…';
     keepScroll(() => {
-      root.querySelector('.nd-sub').innerHTML = [s ? hostLine(s.host) : monitor.error ? '' : 'Loading…', stale].filter(Boolean).join(' · ');
+      root.querySelector('.nd-sub').innerHTML = sub;
       root.querySelector('.nd-chipbox').innerHTML = s ? alertChip(s.alerts) : '';
       body.innerHTML = s ? serverBody(s, {
         range: monitor.range, hist: monitor.hist, more: monitor.more, seen: monitor.seen,

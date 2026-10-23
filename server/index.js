@@ -241,8 +241,8 @@ async function main() {
     ffmpegPath: FFMPEG,
     // costs are summed at the price of each moment (time-of-use plans)
     priceAt: (ms) => priceAt(db.get('power', null), ms),
-    // where a job stands when its energy starts being counted (clips and
-    // space per kWh count from there)
+    // where a job stands at each sample while its energy is counted (clips
+    // and space per kWh count from where measuring began)
     jobProgress: (jobId) => (converterJobs.has(jobId) ? jobProgress(converterJobs.get(jobId)) : null),
     log: statsLog,
     onAlert: ({ key, level, message }) => {
@@ -715,7 +715,11 @@ async function main() {
       ...snapshot,
       price: priceNow === null ? null : { currency: power.currency, mode: power.mode, now: priceNow, rate: rateNameAt(power, now) },
       // the job's own clips (a running benchmark's are left out)
-      encoder: encoderBlock({ snapshot, jobs: converterJobs, workers: host.runtime?.service?.activeEncodes?.() || [], energy: stats.energy() })
+      encoder: encoderBlock({
+        snapshot, jobs: converterJobs, workers: host.runtime?.service?.activeEncodes?.() || [], energy: stats.energy(),
+        // (a lane whose GPU is not in the container starts no conversions)
+        slotsOf: (jobId) => host.runtime?.service?.slotsOf?.(jobId) ?? null
+      })
     };
   });
   r.add('GET', '/api/stats/history', (req, res, { query }) => {

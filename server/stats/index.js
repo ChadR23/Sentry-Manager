@@ -72,7 +72,7 @@ function createStats(options = {}) {
   const timers = opt('timers', { setTimeout, clearTimeout });
   const fsp = opt('fsp', fs.promises);
   const priceAt = opt('priceAt', () => null);
-  // where a conversion job stands ({ clips, savedB }) when its energy starts being counted
+  // where a conversion job stands ({ clips, savedB }), asked at each sample while its energy is counted
   const jobProgress = opt('jobProgress', () => null);
 
   const reads = new BackgroundReads({ now, readFile: typeof fsp.readFile === 'function' ? fsp.readFile.bind(fsp) : fs.promises.readFile });

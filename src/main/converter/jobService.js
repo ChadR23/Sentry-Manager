@@ -2792,6 +2792,17 @@ function createConverterJobService(deps) {
     return encodes;
   }
 
+  // How many clips a job converts at once as it runs now: the lanes whose
+  // GPU was found (one missing from the container starts none), else its
+  // own number; null for a job this process does not hold.
+  function slotsOf(id) {
+    const runtime = jobs.get(id);
+    if (!runtime) return null;
+    const plan = runtime.lanePlan;
+    if (plan && !plan.fallback) return [...plan.limits.values()].reduce((sum, n) => sum + n, 0);
+    return concurrencyOf(runtime.manifest);
+  }
+
   async function shutdown() {
     if (shuttingDown) {
       await Promise.all([...jobs.values()].map((runtime) => runtime.runPromise).filter(Boolean));
@@ -2843,7 +2854,8 @@ function createConverterJobService(deps) {
     shutdown: (...args) => serializeCommand(() => shutdown(...args)),
     subscribe,
     whenIdle,
-    activeEncodes
+    activeEncodes,
+    slotsOf
   });
 }
 

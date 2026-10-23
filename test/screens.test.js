@@ -44,9 +44,9 @@ test('Overview: an Intel + Arc server mid-conversion shows every tile, like the 
   assert.match(html, /1\.1 \/ 6 GB/);
   assert.match(html, /4 × ffmpeg/);
   assert.match(html, /<b>65 W<\/b><span class="muted small">CPU \+ GPU/);
-  assert.match(html, /940\.0 Wh · ≈ \$0\.14/, 'below 1 kWh in Wh');
+  assert.match(html, /940 Wh · ≈ \$0\.14/, 'below 1 kWh in Wh');
   assert.match(html, /5\.2 kWh · ≈ \$0\.78/);
-  assert.match(html, /310\.0 Wh this run/);
+  assert.match(html, /310 Wh this run/);
   assert.match(html, /18\.2 GB/);
   assert.match(html, /112 of 476 GB/);
   assert.match(html, /6\.1 of 8 TB/);
@@ -129,6 +129,60 @@ test('Overview: steady() keeps rows a tile has shown, in their order, and nothin
   assert.deepEqual(steady(seen, 't', [['A', '', false, 'no']]), [['A', 'no'], ['B', '—'], ['C', '—']], "a row's own placeholder");
   assert.deepEqual(steady(seen, 'other', [['A', '']]), [], 'per tile');
   assert.deepEqual(steady(null, 't', [['A', '1'], null]), [['A', '1']], 'no memory: as given');
+  // the same label twice is two rows, in their order
+  const twice = new Map();
+  assert.deepEqual(steady(twice, 's', [['NVMe', '78 °C', true], ['NVMe', '41 °C'], ['GPU', '50 °C']]), [['NVMe', '78 °C', true], ['NVMe', '41 °C'], ['GPU', '50 °C']]);
+  assert.deepEqual(steady(twice, 's', [['NVMe', ''], ['NVMe', '42 °C'], ['GPU', '51 °C']]), [['NVMe', '—'], ['NVMe', '42 °C'], ['GPU', '51 °C']]);
+  assert.deepEqual(steady(twice, 's', [['GPU', '52 °C']]), [['NVMe', '—'], ['NVMe', '—'], ['GPU', '52 °C']]);
+  assert.deepEqual(steady(twice, 's', [['1:x', 'a:b']])[0], ['1:x', 'a:b'], 'a label with a colon in it');
+  assert.deepEqual(steady(twice, 's', [])[0], ['1:x', '—']);
+});
+
+test('Overview: two drives (or GPUs) with the same sensor name each keep their row; a hot one stays marked', () => {
+  const { serverBody } = overview();
+  const s = sample('amd');
+  s.sensors = [
+    { chip: 'nvme', label: 'Composite', kind: 'temp', value: 78 },
+    { chip: 'nvme', label: 'Composite', kind: 'temp', value: 41 },
+    { chip: 'amdgpu', label: 'edge', kind: 'temp', value: 50 },
+    { chip: 'amdgpu', label: 'edge', kind: 'temp', value: 66 }
+  ];
+  const sensors = (html) => [...html.slice(html.indexOf('nd-sensors')).matchAll(/<dt>([^<]+)<\/dt><dd( class="nd-warn")?>([^<]+)<\/dd>/g)].map((m) => `${m[1]}=${m[3]}${m[2] ? ' (hot)' : ''}`);
+  const want = ['NVMe=78 °C (hot)', 'NVMe=41 °C', 'GPU=50 °C', 'GPU=66 °C'];
+  assert.deepEqual(sensors(serverBody(s)), want, 'without memory');
+  const seen = new Map();
+  assert.deepEqual(sensors(serverBody(s, { seen })), want, 'with memory');
+  s.sensors[1] = { ...s.sensors[1], value: null };
+  assert.deepEqual(sensors(serverBody(s, { seen })), ['NVMe=78 °C (hot)', 'NVMe=—', 'GPU=50 °C', 'GPU=66 °C']);
+});
+
+test('Overview: a GPU left out of one sample keeps its tile and place; processes stay one line', () => {
+  const { serverBody } = overview();
+  const seen = new Map();
+  const full = sample();
+  const titles = (html) => tileTitles(html).join(',');
+  const a = serverBody(full, { seen });
+  const gone = sample();
+  gone.gpus = []; // the GPU read failed outright for a moment
+  const b = serverBody(gone, { seen });
+  assert.equal(titles(b), titles(a), 'the same tiles in the same order');
+  assert.match(b, /Intel Arc A380 · xe · renderD128/, 'named as before');
+  assert.match(b, /<b>—<\/b><span class="muted small">video engine<\/span>/);
+  assert.match(b, /<th>GPU<\/th>/, 'the processes keep their GPU column');
+  const shape = (html) => html.replace(/>[^<]*</g, '><').replace(/(style|title)="[^"]*"/g, '').replace(/ hot"/g, '"');
+  const gpuPart = (html) => html.slice(html.indexOf('<div class="nd-tile"><div class="nd-title"><span>GPU'), html.indexOf('<div class="nd-tile"><div class="nd-title"><span>Power'));
+  assert.equal(shape(gpuPart(b)), shape(gpuPart(a)), 'the GPU tiles have the same rows');
+  assert.equal(titles(serverBody(gone)), titles(a).replace(/GPU,/g, ''), 'without memory: only what the sample has');
+  // the process name: one line, its count kept outside the part that is cut short
+  assert.match(a, /<td title="ffmpeg · hevc_vaapi ×4"><span class="nd-pname"><span>ffmpeg · hevc_vaapi<\/span><span>×4<\/span><\/span><\/td>/);
+  const css = fs.readFileSync(path.join(REPO, 'web/shell.css'), 'utf8');
+  assert.match(css, /\.nd-pname > span:first-child \{[^}]*text-overflow: ellipsis;[^}]*white-space: nowrap;/);
+});
+
+test('Overview: "Not updating right now" keeps its room in the head while the numbers are fresh', () => {
+  const app = fs.readFileSync(path.join(REPO, 'web/app.js'), 'utf8');
+  assert.match(app, /<span class="nd-nb nd-stale\$\{monitor\.error \? '' : ' off'\}"/);
+  assert.match(fs.readFileSync(path.join(REPO, 'web/shell.css'), 'utf8'), /\.nd-stale\.off \{ visibility: hidden; \}/);
 });
 
 test('Overview: a Raspberry Pi shows only what it has', () => {
@@ -238,12 +292,15 @@ test('Overview: units read like the mockup', () => {
   assert.equal(rate(0), '0 MB/s');
   assert.equal(rate(300 * 1024), '300 KB/s');
   assert.equal(rate(2.5 * G), '2.5 GB/s');
-  // below 1 kWh in Wh with one decimal, so a run's first minutes visibly count up
+  // below 1 kWh in Wh (one decimal below 100), so a run's first minutes visibly count up
   assert.equal(energyText(0), '0.0 Wh');
   assert.equal(energyText(12.44), '12.4 Wh');
-  assert.equal(energyText(940), '940.0 Wh');
+  assert.equal(energyText(99.96), '100 Wh');
+  assert.equal(energyText(412), '412 Wh');
+  assert.equal(energyText(940), '940 Wh');
   assert.equal(energyText(999.96), '1.0 kWh');
   assert.equal(energyText(5200), '5.2 kWh');
+  assert.equal(energyText(99960), '100 kWh');
   assert.equal(energyText(250000), '250 kWh');
   assert.equal(money(0.141, '$'), '≈ $0.14');
   assert.equal(money(1.2, 'kr'), '≈ 1.20 kr');
@@ -256,13 +313,13 @@ test('Overview: units read like the mockup', () => {
 test('Hardware panel: four clips on the Arc, with efficiency and cost', async () => {
   const { renderHardware } = await hardware();
   const html = renderHardware(sample());
-  assert.match(html, /<span class="nd-chip" title="hevc_vaapi · Intel Arc A380 · renderD128">hevc_vaapi · Intel Arc A380 · renderD128<\/span><span class="nd-chip">decode: GPU<\/span><span class="nd-chip">4 at once<\/span>/);
+  assert.match(html, /<span class="nd-chip" title="hevc_vaapi · Intel Arc A380 · renderD128">hevc_vaapi · Intel Arc A380 · renderD128<\/span><span class="nd-chip">decode: GPU<\/span><span class="nd-chip nd-chip-fit"><span>4 at once<\/span>/);
   assert.match(html, /<span>Video engine<\/span><b>94%<\/b><div class="nd-bar hot">/);
   assert.match(html, /<span>CPU \(conversions\)<\/span><b>18%<\/b>/);
   assert.match(html, /<b>65 W<\/b><small>CPU 41 · GPU 24<\/small>/);
   assert.match(html, /<b>61 °C<\/b><small>GPU 61 · CPU 58<\/small>/);
   assert.doesNotMatch(html, /Bottleneck|Room to spare|nd-hint/, 'no sentence about what limits the run');
-  assert.match(html, /This run<\/span><b>310\.0 Wh/);
+  assert.match(html, /This run<\/span><b>310 Wh/);
   assert.match(html, /Clips per kWh<\/span><b>1,329/);
   assert.match(html, /Space saved per kWh<\/span><b>125 GB/);
   assert.doesNotMatch(html, /GPU only/, 'the CPU is measured on this server');
@@ -351,7 +408,18 @@ test('Hardware panel: one row per conversion at once; a clip keeps its row, a fr
   assert.equal((four.match(/class="nd-w[ "]/g) || []).length, (one.match(/class="nd-w[ "]/g) || []).length, 'the same number of rows');
   const none = renderHardware(body(0), memo);
   assert.equal((none.match(/nd-w-idle/g) || []).length, 4, 'checking and saving: four rows still');
-  assert.match(none, /checking and saving…/);
+  // the state chip holds every wording it can show, so its width (and the
+  // head's lines) stay put: "4 at once", "saving…" between clips, "scanning…"
+  const chipOf = (html) => html.match(/<span class="nd-chip nd-chip-fit">(.*?)<\/span><\/div>/)[1];
+  const wordings = (html) => [...chipOf(html).matchAll(/<span[^>]*>([^<]+)<\/span>/g)].map((m) => m[1]);
+  assert.deepEqual(wordings(four), ['4 at once', 'scanning…', 'saving…']);
+  assert.deepEqual(wordings(one), ['1 at once', '4 at once', 'scanning…', 'saving…']);
+  assert.deepEqual(wordings(none), ['saving…', '4 at once', 'scanning…']);
+  assert.match(chipOf(none), /^<span>saving…<\/span><span aria-hidden="true">4 at once<\/span>/, 'the one shown comes first; the others only hold the width');
+  const scanning = body(0);
+  scanning.encoder.state = 'discovering';
+  assert.deepEqual(wordings(renderHardware(scanning, memo)), ['scanning…', '4 at once', 'saving…']);
+  assert.doesNotMatch(none, /checking and saving|finding clips/, 'no wording wider than "4 at once"');
 });
 
 test('Hardware panel: tiles and device lines keep their place while a number is missing; another job starts over', async () => {
@@ -394,6 +462,30 @@ test('Hardware panel: tiles and device lines keep their place while a number is 
   assert.match(one, />Intel UHD Graphics 770 · hevc_qsv · 0 converting</);
   assert.doesNotMatch(one, /hevc_vaapi · Intel Arc A380 · renderD128/, 'still the several-GPU view');
   assert.equal(renderHardware(lanes).includes('nd-devices'), false, 'without memory: as before');
+});
+
+test('Hardware panel: a sample without the GPU or its power reading changes no line of it', async () => {
+  const { renderHardware, panelMemory } = await hardware();
+  const memo = panelMemory();
+  // a GPU whose power is read some of the time, and no CPU power (as on the owner's server)
+  const poll = (over) => {
+    const s = sample();
+    s.encoder.run = { ...s.encoder.run, cpuMeasured: false };
+    over(s);
+    return renderHardware(s, memo);
+  };
+  const shape = (html) => html.replace(/>[^<]*</g, '><').replace(/(style|title)="[^"]*"/g, '').replace(/ (hot|nd-w-idle)"/g, '"').replace(/<span aria-hidden="true"><\/span>/g, '');
+  const first = poll(() => {});
+  assert.match(first, /<span>Video engine<\/span>/);
+  assert.match(first, /nd-eff-note/);
+  // no power reading this time: the server cannot tell whether the CPU was measured
+  const noPower = poll((s) => { s.encoder.run.cpuMeasured = null; s.power.totalW = null; s.gpus[0].powerW = null; });
+  assert.match(noPower, /nd-eff-note/, 'the GPU only line stays');
+  // the GPU read failed outright: the tile keeps its name
+  const noGpu = poll((s) => { s.gpus = []; });
+  assert.match(noGpu, /<span>Video engine<\/span><b>—<\/b>/);
+  assert.equal(shape(noPower), shape(first));
+  assert.equal(shape(noGpu), shape(first));
 });
 
 test('Hardware panel: never shorter while a job runs; back to its own height when the job changes or the Encoder is shown again', async (t) => {

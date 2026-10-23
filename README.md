@@ -141,11 +141,12 @@ copies somewhere else is a choice you make in the Output section.
   and GPU in use, video-engine and CPU load, watts and temperatures, each
   clip's speed and progress, and the energy used so far (Wh or kWh, clips and
   GB saved per kWh, cost). Clips and GB per kWh count only what was converted
-  while the energy was measured, so they start at 0 and rise as clips finish
-  (a job that was already running when measuring began, for example before a
-  restart, is not divided by a few minutes of energy). When the server
-  reports the GPU's power but not the CPU's, they count the GPU alone and say
-  *GPU only*.
+  while the energy was measured, so they start at 0 and count up as clips
+  finish: until 10 Wh have been measured they are divided by 10 Wh, so a clip
+  or two never reads as a huge number (a job that was already running when
+  measuring began, for example before a restart, is not divided by a few
+  minutes of energy either). When the server reports the GPU's power but not
+  the CPU's, they count the GPU alone and say *GPU only*.
 - **Benchmark.** Runs the real converter on copies of a few of your clips
   at 1, 2, 4, 6 and 8 at once, on the server, and suggests the lightest
   setting within 5% of the fastest, and, when the server reports its power,

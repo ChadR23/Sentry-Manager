@@ -18,16 +18,19 @@ const watts = (w) => `${w >= 10 ? Math.round(w) : w.toFixed(1).replace(/\.0$/, '
 const base = (p) => String(p || '').split(/[\\/]/).pop();
 const group = (n) => Math.round(n).toLocaleString('en-US');
 
-// Clips and space per kWh need at least this much energy measured first: a
-// fraction of a Wh would turn a clip or two into an absurd ratio.
-const MIN_WH = 1;
+// Clips and space per kWh are divided by at least this much energy: they
+// start at 0 and count up with each clip until it has been measured, then
+// follow the real ratio, with no jump in between (a fraction of a Wh would
+// turn a clip or two into an absurd number).
+const FLOOR_WH = 10;
 
-/** "12.4 Wh" below 1 kWh, so a run's first minutes visibly count up; then "5.2 kWh". */
+/** "12.4 Wh" below 100 Wh, so a run's first minutes visibly count up; "412 Wh"; then "5.2 kWh". */
 export function energyText(wh) {
     const w = Math.round(wh * 10) / 10;
-    if (w < 1000) return `${w.toFixed(1)} Wh`;
+    if (w < 100) return `${w.toFixed(1)} Wh`;
+    if (Math.round(wh) < 1000) return `${Math.round(wh)} Wh`;
     const k = wh / 1000;
-    return `${k < 100 ? k.toFixed(1) : group(k)} kWh`;
+    return `${Math.round(k * 10) / 10 < 100 ? k.toFixed(1) : group(k)} kWh`;
 }
 
 // binary sizes, labelled like the rest of the manager's server numbers
@@ -48,6 +51,9 @@ function money(value, currency) {
 
 const bar = (value, hot = false) => `<div class="nd-bar${hot ? ' hot' : ''}"><span style="width:${clampPct(value)}%"></span></div>`;
 const chip = (text, title) => `<span class="nd-chip"${title ? ` title="${esc(title)}"` : ''}>${esc(text)}</span>`;
+// A chip as wide as the longest of its wordings, whichever it shows, so the
+// head never wraps differently from one poll to the next.
+const fitChip = (text, wordings) => `<span class="nd-chip nd-chip-fit"><span>${esc(text)}</span>${wordings.filter((w) => w !== text).map((w) => `<span aria-hidden="true">${esc(w)}</span>`).join('')}</span>`;
 
 /** The GPU a render node (or a GPU name) belongs to, or the only GPU there is. */
 export function gpuFor(gpus, device) {
@@ -126,17 +132,18 @@ export function clipRows(workers, slots, previous = []) {
 
 /**
  * What the panel keeps between polls while the page stays open, so it
- * does not jump: the tiles it has shown, the devices it has listed and the
- * row of each running clip. Another job, or the panel going idle, starts
- * it over (`fresh` tells the poller to let the panel's height go too).
+ * does not jump: the tiles it has shown, the devices it has listed, the
+ * row of each running clip, whether the CPU's power is measured and what
+ * the GPU tile is called. Another job, or the panel going idle, starts it
+ * over (`fresh` tells the poller to let the panel's height go too).
  */
 export function panelMemory() {
-    return { view: null, tiles: new Set(), devices: new Map(), clips: [], fresh: false };
+    return { view: null, tiles: new Set(), devices: new Map(), clips: [], cpuMeasured: null, videoLabel: null, fresh: false };
 }
 
 function remember(memo, view) {
     if (!memo || memo.view === view) return;
-    Object.assign(memo, { view, tiles: new Set(), devices: new Map(), clips: [], fresh: true });
+    Object.assign(memo, { view, tiles: new Set(), devices: new Map(), clips: [], cpuMeasured: null, videoLabel: null, fresh: true });
 }
 
 /**
@@ -188,8 +195,12 @@ export function renderHardware(stats, memo = null) {
         chips.push(chip(what, what)); // (cut short on phones; the whole of it on hover)
     }
     if (device?.decode) chips.push(chip(`decode: ${device.decode === 'gpu' ? 'GPU' : 'CPU'}`));
-    const finding = !enc?.state || enc.state === 'discovering' || enc.state === 'waiting';
-    chips.push(chip(workers.length ? `${workers.length} at once` : finding ? 'finding clips…' : 'checking and saving…'));
+    // no ffmpeg running: still scanning the folders for clips, or between
+    // clips (each one is checked and saved before the next takes its row);
+    // short words, so the chip is no wider than "3 at once"
+    const scanning = !enc?.state || enc.state === 'discovering';
+    const atOnce = `${Math.max(workers.length, fin(enc.concurrency) ? enc.concurrency : 0)} at once`;
+    chips.push(fitChip(workers.length ? `${workers.length} at once` : scanning ? 'scanning…' : 'saving…', [atOnce, 'scanning…', 'saving…']));
 
     // A tile shows its number, or keeps its place with '—' once it has been
     // shown (the video engine of a GPU that reports one: always).
@@ -202,7 +213,10 @@ export function renderHardware(stats, memo = null) {
     };
     const engine = gpu && VIDEO_VENDORS.has(gpu.vendor);
     const video = gpu ? (fin(gpu.video) ? gpu.video : !engine && fin(gpu.busy) ? gpu.busy : null) : null;
-    const videoLabel = engine || fin(gpu?.video) ? 'Video engine' : 'GPU';
+    // (a sample that leaves the GPU out keeps the tile's name)
+    let videoLabel = engine || fin(gpu?.video) ? 'Video engine' : 'GPU';
+    if (memo && gpu) memo.videoLabel = videoLabel;
+    else if (memo?.videoLabel) videoLabel = memo.videoLabel;
     tile('video', fin(video) && `<div><span>${videoLabel}</span><b>${pct(video)}</b>${bar(video, video >= 90)}</div>`,
         `<div><span>${videoLabel}</span><b>—</b>${bar(0)}</div>`, engine);
     const convCpu = fin(cpu.app?.ffmpegUsage) ? cpu.app.ffmpegUsage : fin(cpu.app?.usage) ? cpu.app.usage : null;
@@ -222,18 +236,21 @@ export function renderHardware(stats, memo = null) {
 
     // energy per clip and per GB saved, when the server could measure power:
     // the clips and space since measuring began against the energy measured
-    // since, so they start at 0 and rise as clips finish
+    // since (at least FLOOR_WH), so they start at 0 and count up as clips
+    // finish
     const run = enc.run || {};
     const eff = [];
     let note = '';
     if (fin(run.wh)) {
-        const since = fin(run.sinceWh) && run.sinceWh >= MIN_WH ? run.sinceWh : null;
+        const since = fin(run.sinceWh) ? Math.max(run.sinceWh, FLOOR_WH) : null;
         const perKwh = (n) => (since !== null && fin(n) && n > 0 ? n / (since / 1000) : 0);
         eff.push(['This run', energyText(run.wh)]);
         eff.push(['Clips per kWh', group(perKwh(run.clips))]);
         eff.push(['Space saved per kWh', gb(perKwh(run.savedB))]);
-        // the server measures the GPU's power but not the CPU's
-        if (run.cpuMeasured === false) note = 'GPU only (CPU not measured)';
+        // the server measures the GPU's power but not the CPU's (as last
+        // known while a sample has no power reading to tell)
+        if (memo && typeof run.cpuMeasured === 'boolean') memo.cpuMeasured = run.cpuMeasured;
+        if ((typeof run.cpuMeasured === 'boolean' ? run.cpuMeasured : memo?.cpuMeasured) === false) note = 'GPU only (CPU not measured)';
     } else {
         if (fin(run.clips)) eff.push(['Clips this run', group(run.clips)]);
         if (fin(run.savedB) && run.savedB > 0) eff.push(['Space saved', gb(run.savedB)]);
