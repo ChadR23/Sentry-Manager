@@ -101,7 +101,12 @@ async function setup({ concurrency = 2, outputMode = 'replace', events = 2, ffmp
 
 // Resolves with the job once it ends on its own; fails the test if it does not.
 async function settle(runtime, jobId, ms = 60_000) {
-  const ended = await Promise.race([runtime.service.whenIdle(jobId).then(() => true), sleep(ms).then(() => false)]);
+  let timer;
+  const ended = await Promise.race([
+    runtime.service.whenIdle(jobId).then(() => true),
+    new Promise((resolve) => { timer = setTimeout(() => resolve(false), ms); })
+  ]);
+  clearTimeout(timer);
   const job = await runtime.service.get(jobId);
   if (!ended) {
     await runtime.service.cancel(jobId).catch(() => {});
