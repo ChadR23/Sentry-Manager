@@ -141,3 +141,33 @@ test('a crash while a job is paused: the converter still starts and the job stay
     fs.rmSync(base, { recursive: true, force: true });
   }
 });
+
+test('a pause saved by an earlier version stays paused after the update', { skip, timeout: 180_000 }, async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'sm-restart-'));
+  let env;
+  try {
+    await footage(base);
+    env = await open(base, { ffprobePath: holdingProbe(base) });
+    await env.runtime.start();
+    const id = await env.runtime.service.start({ ...env.config, concurrency: 1 });
+    assert.ok(await until(() => fs.existsSync(path.join(base, 'reached'))));
+    await env.runtime.service.pause(id);
+    fs.writeFileSync(path.join(base, 'released'), '');
+    assert.ok(await until(async () => (await env.runtime.service.get(id)).state === 'paused'));
+    await env.runtime.shutdown();
+    // what earlier versions saved for every job on a stop, paused ones too
+    env = await open(base);
+    await env.runtime.store.transition(id, { state: 'paused', activeItemId: null, recovery: { fromState: 'encoding', action: 'restart-encoding' } });
+    await env.runtime.start();
+    await sleep(1500);
+    let job = await env.runtime.service.get(id);
+    assert.equal(job.state, 'paused', 'not resumed by itself');
+    await env.runtime.service.resume(id);
+    await Promise.race([env.runtime.service.whenIdle(id), sleep(60_000)]);
+    job = await env.runtime.service.get(id);
+    assert.equal(job.state, 'completed', 'Resume still finishes it');
+  } finally {
+    await env?.runtime.shutdown().catch(() => {});
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});

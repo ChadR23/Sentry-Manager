@@ -193,7 +193,9 @@ class NvidiaSmi {
     const end = (err) => {
       if (done) return;
       done = true;
-      if (this.child === child) this.child = null;
+      // a child stopped or replaced meanwhile must not start another one
+      if (this.child !== child) return;
+      this.child = null;
       this.ended(err, startedAt);
     };
     child.on('error', end);

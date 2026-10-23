@@ -377,7 +377,8 @@
     if (!p) return '';
     const parts = [['CPU package', p.cpuW], ['GPU', p.gpuW]].filter(([, w]) => fin(w));
     const total = fin(p.totalW) ? p.totalW : parts.length ? parts.reduce((n, [, w]) => n + w, 0) : null;
-    if (!fin(total) && !fin(p.todayWh) && !fin(p.weekWh)) return '';
+    // no power reading at all (and nothing measured earlier this week): no tile
+    if (!fin(total) && !p.cpuSource && !p.gpuSource && !(p.todayWh > 0) && !(p.weekWh > 0)) return '';
     const label = parts.length === 2 ? 'CPU + GPU' : parts.length ? (parts[0][0] === 'GPU' ? 'GPU (CPU not measured)' : 'CPU package') : '';
     const energy = (wh, c) => (fin(wh) ? esc(`${kwh(wh)}${fin(c) ? ` · ${money(c, currency)}` : ''}`) : '');
     const priceNow = fin(price?.now) ? `${esc(inCurrency(price.now.toFixed(price.now < 1 ? 3 : 2).replace(/(\.\d\d)0$/, '$1'), price.currency || currency))} per kWh${price.rate ? ` · ${esc(price.rate)}` : ''}` : '';

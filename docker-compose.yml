@@ -52,7 +52,9 @@ services:
       # - label=disable          # SELinux hosts (Fedora/RHEL)
 
     # ---- Optional, Overview > Server: the whole server (every process and
-    # the host's network), not only this container. Uncomment:
+    # the host's network), not only this container. It also lets this
+    # container see and signal the server's processes: use it only with a
+    # PUID/PGID of its own (not your login user or another container's).
     # pid: host
 
     # ---- AMD (dGPU or APU) / Intel GPU: uncomment

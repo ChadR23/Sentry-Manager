@@ -8,6 +8,10 @@ const RUNNING = new Set(['discovering', 'waiting', 'staging', 'encoding', 'writi
 
 const pct = (n) => (Number.isFinite(n) ? Math.round(n) : null);
 
+// The device of a running job's last encode, so the panel keeps naming it
+// while a clip is verified or saved (no ffmpeg runs then).
+const lastDevice = new Map();
+
 /** The GPU a render node belongs to, or the only GPU there is. */
 function gpuFor(gpus, node) {
   if (!Array.isArray(gpus) || !gpus.length) return null;
@@ -38,9 +42,16 @@ function bottleneck({ workers, cpu, gpu, filesystems }) {
   if (slowShare) {
     return { kind: 'source-read', message: `The footage share takes ${Math.round(slowShare.latencyMs)} ms to answer, so clips wait on the NAS.` };
   }
-  const roomy = (video < 0 || video < 60) && (cpuUse < 0 || cpuUse < 70);
-  if (roomy && workers.length > 0) {
-    return { kind: 'none', message: 'Nothing is maxed out: the GPU and CPU have room, so more conversions at once may go faster (try the benchmark).' };
+  // only claimed when the numbers are known
+  const cpuKnown = cpuUse >= 0;
+  const gpuKnown = !hardware || video >= 0;
+  if (cpuKnown && gpuKnown && cpuUse < 70 && (!hardware || video < 60) && workers.length > 0) {
+    return {
+      kind: 'none',
+      message: hardware
+        ? 'Nothing is maxed out: the GPU and CPU have room, so more conversions at once may go faster (try the benchmark).'
+        : 'Nothing is maxed out: the CPU has room, so more conversions at once may go faster (try the benchmark).'
+    };
   }
   return { kind: 'none', message: null };
 }
@@ -54,13 +65,16 @@ function encoderBlock({ snapshot, jobs, workers = [], energy = null }) {
   const job = list.find((s) => RUNNING.has(s.state)) || list.find((s) => s.state === 'paused' || s.state === 'paused_network');
   if (!job && !workers.length) return null;
   const mine = job ? workers.filter((w) => w.jobId === job.id) : workers;
-  const first = mine[0] || null;
+  for (const id of lastDevice.keys()) if (!job || id !== job.id) lastDevice.delete(id);
+  if (job && mine[0]) lastDevice.set(job.id, mine[0]);
+  const first = mine[0] || (job && RUNNING.has(job.state) ? lastDevice.get(job.id) : null) || null;
   const gpu = gpuFor(snapshot?.gpus, first?.device);
   let clips = 0;
   for (const item of job?.items || []) if (item?.kind === 'video' && item.state === 'completed' && item.eligibleVideo !== false) clips++;
   const run = job ? energy?.byJob?.[job.id] || null : null;
   return {
     jobId: job?.id || null,
+    state: job?.state || null,
     running: Boolean(job && RUNNING.has(job.state)),
     workers: mine,
     device: first ? {

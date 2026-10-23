@@ -46,7 +46,7 @@ const UNLOCK = {
     compose: '- /sys/devices/virtual/powercap:/host/powercap:ro'
   },
   'host-view': {
-    adds: 'Processes and network of the whole server, not only this container',
+    adds: 'Processes and network of the whole server, not only this container. It also lets this container see and signal the server\'s processes, so use it only with a PUID/PGID of its own (not your login user)',
     compose: 'pid: host'
   }
 };

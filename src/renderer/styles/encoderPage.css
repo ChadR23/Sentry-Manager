@@ -848,7 +848,8 @@ select.converter-select {
 
 .nd-hw-tiles {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    /* two by two: the Live run column is narrow beside the settings */
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 10px;
     margin-top: 14px;
 }

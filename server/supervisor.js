@@ -90,6 +90,7 @@ function readRapl() {
 // Each { type: 'rapl', on: true } from the app keeps the readings coming for
 // 30 s; without another one they stop by themselves.
 let raplUntil = 0;
+let raplReadAt = 0;
 function rapl(on) {
   raplUntil = on ? Date.now() + 30_000 : 0;
   if (!on) {
@@ -100,6 +101,8 @@ function rapl(on) {
   if (raplTimer) return;
   const send = () => {
     if (!child?.connected || Date.now() > raplUntil) return rapl(false);
+    if (Date.now() - raplReadAt < 1900) return; // never more than every 2 s
+    raplReadAt = Date.now();
     const packages = readRapl();
     child.send({ type: 'rapl-reading', at: Date.now(), packages }, () => {});
     if (!packages.length) rapl(false); // nothing to read: stop asking the kernel
@@ -323,7 +326,11 @@ function launch() {
     serveMountRequests(child, createLocalMounter({ footageRoot: FOOTAGE_ROOT, credDir: ROOT_RUN, uid: separate ? PUID : 0, gid: separate ? PGID : 0 }),
       { log: (m) => log(String(m).replace(/^\[supervisor\]\s*/, '')), error: (m) => warn(String(m).replace(/^\[supervisor\]\s*/, '')) });
     child.on('message', (msg) => {
-      if (msg?.type === 'rapl') return rapl(msg.on === true);
+      // the app can only ask for readings (they stop by themselves)
+      if (msg?.type === 'rapl') {
+        if (msg.on === true) rapl(true);
+        return;
+      }
       if (!msg || msg.type !== 'tls-hostnames' || typeof msg.requestId !== 'string' || !tls) return;
       (async () => {
         const names = parseHostnames((Array.isArray(msg.hostnames) ? msg.hostnames : []).slice(0, 20).map(String).join(','));

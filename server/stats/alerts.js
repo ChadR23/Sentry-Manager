@@ -43,12 +43,15 @@ function rules(body) {
     });
   }
   for (const f of body.filesystems || []) {
-    const pct = pctUsed(f);
-    out.push({ key: `fs-full:${f.label}`, level: 'warn', value: pct, raise: 90, clear: 88, above: true, message: () => `${f.label} is ${round(pct, 0)}% full` });
-    out.push({
-      key: `share-down:${f.label}`, level: 'error', value: f.reachable === false ? 1 : f.reachable === true ? 0 : null, raise: 1, clear: 1, above: true,
-      message: () => `${f.label} is not reachable`
-    });
+    // a vehicle's share already has its own notifications for full and offline
+    if (!f.vehicle) {
+      const pct = pctUsed(f);
+      out.push({ key: `fs-full:${f.label}`, level: 'warn', value: pct, raise: 90, clear: 88, above: true, message: () => `${f.label} is ${round(pct, 0)}% full` });
+      out.push({
+        key: `share-down:${f.label}`, level: 'error', value: f.reachable === false ? 1 : f.reachable === true ? 0 : null, raise: 1, clear: 1, above: true,
+        message: () => `${f.label} is not reachable`
+      });
+    }
     out.push({
       key: `share-slow:${f.label}`, level: 'warn', value: f.reachable === false ? null : f.latencyMs, raise: 2000.001, clear: 1500, above: true,
       message: () => `${f.label} answers slowly (${round(f.latencyMs / 1000, 1)} s)`

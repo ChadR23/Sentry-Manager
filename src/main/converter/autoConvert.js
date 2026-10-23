@@ -291,19 +291,28 @@ function createAutoConverter(options = {}) {
       return;
     }
     let jobs;
-    try { jobs = await service.list(); } catch (_) { return; }
-    let paused = false;
+    try { jobs = typeof service.liveJobs === 'function' ? service.liveJobs() : await service.list(); } catch (_) { return; }
+    let changedHold = false;
+    // one this paused that runs again was resumed by the owner: it is no
+    // longer held, so a pause the owner makes later is never undone
+    const running = new Set(jobs.filter((job) => job.state !== 'paused' && !TERMINAL.has(job.state)).map((job) => job.id));
+    const stillHeld = status.heldManual.filter((id) => !running.has(id));
+    if (stillHeld.length !== status.heldManual.length) {
+      status.heldManual = stillHeld;
+      changedHold = true;
+    }
     for (const job of jobs) {
-      if (job.config?.autoConvert === true || TERMINAL.has(job.state) || job.state === 'paused' || job.state === 'paused_network') continue;
+      const automatic = job.autoConvert === true || job.config?.autoConvert === true;
+      if (automatic || TERMINAL.has(job.state) || job.state === 'paused' || job.state === 'paused_network') continue;
       if (status.handledManual.includes(job.id)) continue;
       try {
         await service.pause(job.id);
         status.heldManual.push(job.id);
         status.handledManual.push(job.id);
-        paused = true;
+        changedHold = true;
       } catch (_) { /* it ended meanwhile */ }
     }
-    if (paused) {
+    if (changedHold) {
       await saveState();
       changed();
     }
@@ -410,6 +419,15 @@ function createAutoConverter(options = {}) {
       changed();
       void tick();
       return getState();
+    },
+    // The owner resumed a job by hand: if this had paused it outside the
+    // window, it no longer counts as held here, so the window opening later
+    // never undoes a pause the owner makes afterwards.
+    async ownerResumed(jobId) {
+      if (!status.heldManual.includes(jobId)) return;
+      status.heldManual = status.heldManual.filter((id) => id !== jobId);
+      await saveState();
+      changed();
     },
     // Parallel conversions changed on the running automatic job: later
     // automatic jobs use the same number.

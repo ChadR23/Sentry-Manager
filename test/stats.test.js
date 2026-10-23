@@ -84,7 +84,7 @@ test('Intel desktop with an Arc A380 (xe): CPU, memory, GPUs, power, disks, netw
 
     const [share, data] = snap.filesystems;
     assert.deepEqual(share, {
-      label: 'Footage share', path: '/footage/tesla', totalB: 2e9 * 4096, usedB: 1.5e9 * 4096, freeB: 5e8 * 4096,
+      label: 'Footage share', path: '/footage/tesla', vehicle: false, totalB: 2e9 * 4096, usedB: 1.5e9 * 4096, freeB: 5e8 * 4096,
       latencyMs: 3, reachable: true, fsType: 'cifs', source: '//nas/teslacam', disk: null, smbVersion: '3.1.1'
     });
     assert.equal(data.disk, 'nvme0n1', 'the data folder lives on a partition of the NVMe');

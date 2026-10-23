@@ -219,6 +219,12 @@ class ManagerDB {
     this.q('UPDATE notifications SET resolved_at = ? WHERE dedupe_key = ? AND resolved_at IS NULL').run(Date.now(), dedupeKey);
   }
 
+  /** Close every open notification whose key starts with `prefix`. */
+  resolvePrefix(prefix) {
+    const like = `${String(prefix).replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+    this.q("UPDATE notifications SET resolved_at = ? WHERE resolved_at IS NULL AND dedupe_key LIKE ? ESCAPE '\\'").run(Date.now(), like);
+  }
+
   resolveId(id) {
     this.q('UPDATE notifications SET resolved_at = COALESCE(resolved_at, ?), read_at = COALESCE(read_at, ?) WHERE id = ?').run(Date.now(), Date.now(), id);
   }

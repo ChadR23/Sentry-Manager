@@ -450,6 +450,8 @@ function createFootageConverterController(options = {}) {
         for (const entry of optionsList) entry.checked = entry.dataset?.[dataKey] === value;
     }
 
+    let syncedConcurrency = null;
+
     function syncConfig(config) {
         if (!config) return;
         if (elements.sourcePath) elements.sourcePath.value = config.sourceRoot || '';
@@ -473,8 +475,15 @@ function createFootageConverterController(options = {}) {
             ? [...config.groupOrder]
             : [...DEFAULT_GROUP_ORDER];
         if (elements.replacementConfirmation) elements.replacementConfirmation.checked = config.replacementConfirmed === true;
+        // Only when the job's number changes: snapshots come with every clip,
+        // and rewriting the control wiped a number being typed into it.
         const concurrency = normalizeConcurrency(config.concurrency);
-        if (concurrency !== null) setConcurrency(concurrency);
+        const typing = [elements.concurrency, elements.concurrencyCustom]
+            .some((control) => control && control.ownerDocument?.activeElement === control);
+        if (concurrency !== null && concurrency !== syncedConcurrency && !typing) {
+            syncedConcurrency = concurrency;
+            setConcurrency(concurrency);
+        }
         updateOutputMode();
     }
 
@@ -1029,7 +1038,7 @@ function createFootageConverterController(options = {}) {
             const windowOn = elements.autoWindowEnabled?.checked === true;
             const window = elements.autoOffPeak?.checked === true ? { follow: 'off-peak' }
                 : windowOn ? { startHour: hourValue(elements.autoStart, 1), endHour: hourValue(elements.autoEnd, 6) } : null;
-            if (window && window.startHour === window.endHour) throw apiError('AUTO_WINDOW_INVALID');
+            if (window && !window.follow && window.startHour === window.endHour) throw apiError('AUTO_WINDOW_INVALID');
             const settings = {
                 enabled,
                 intervalMinutes: Number(elements.autoInterval?.value) || 60,
@@ -1218,24 +1227,39 @@ function createFootageConverterController(options = {}) {
         // During a run the new number applies to the running job right away:
         // more starts new conversions now, fewer lets the extra ones finish
         // their clip first. No cancel needed (also for automatic jobs).
-        async function liveConcurrency(value) {
+        // Changes are sent one after another, so the last choice always wins.
+        let requestedConcurrency = null;
+        let concurrencyChain = Promise.resolve();
+        function liveConcurrency(value) {
             if (!snapshot?.id || !ACTIVE_STATES.has(snapshot.state) || typeof api.setConverterConcurrency !== 'function') return;
-            if (Number(snapshot.config?.concurrency) === value) return;
-            try {
-                const next = unwrap(await api.setConverterConcurrency(snapshot.id, value));
-                if (next) applySnapshot(next, next.revision);
-                notify(message('concurrencyLive', 'Now {count} at once. Clips already converting finish first.', { count: value }));
-            } catch (error) {
-                notify(describeError(error), { type: 'error' });
-            }
+            if (value === (requestedConcurrency ?? Number(snapshot.config?.concurrency))) return;
+            requestedConcurrency = value;
+            const jobId = snapshot.id;
+            concurrencyChain = concurrencyChain.then(async () => {
+                try {
+                    const next = unwrap(await api.setConverterConcurrency(jobId, value));
+                    if (next) applySnapshot(next, next.revision);
+                    if (requestedConcurrency === value) notify(message('concurrencyLive', 'Now {count} at once. Clips already converting finish first.', { count: value }));
+                } catch (error) {
+                    notify(describeError(error), { type: 'error' });
+                    if (requestedConcurrency === value && snapshot?.config) {
+                        syncedConcurrency = null;
+                        syncConfig(snapshot.config);
+                    }
+                } finally {
+                    if (requestedConcurrency === value) requestedConcurrency = null;
+                }
+            });
         }
         elements.concurrency?.addEventListener?.('change', () => {
             updateConcurrencyCustomVisibility();
             if (customConcurrencySelected()) elements.concurrencyCustom?.focus?.();
+            // Custom… only opens the box; the number typed there is what counts
+            if (customConcurrencySelected()) return;
             const value = selectedConcurrency();
-            if (normalizeConcurrency(customConcurrencySelected() ? elements.concurrencyCustom?.value : elements.concurrency.value) !== null) {
+            if (normalizeConcurrency(elements.concurrency.value) !== null) {
                 rememberConcurrency(value);
-                void liveConcurrency(value);
+                liveConcurrency(value);
             }
         });
         elements.concurrencyCustom?.addEventListener?.('change', () => {
@@ -1244,10 +1268,10 @@ function createFootageConverterController(options = {}) {
                 const clamped = Math.min(MAX_CONCURRENCY, Math.max(MIN_CONCURRENCY, Math.round(Number(elements.concurrencyCustom.value)) || DEFAULT_CONCURRENCY));
                 elements.concurrencyCustom.value = String(clamped);
                 rememberConcurrency(clamped);
-                void liveConcurrency(clamped);
+                liveConcurrency(clamped);
             } else {
                 rememberConcurrency(value);
-                void liveConcurrency(value);
+                liveConcurrency(value);
             }
         });
         elements.benchmarkButton?.addEventListener?.('click', () => elements.benchmarkDialog?.showModal?.());

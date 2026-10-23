@@ -655,6 +655,36 @@ async function createConverterRuntime(options = {}) {
   // still hold a partial copy, which the empty-folder sweep above never
   // removes. When no job is unfinished at all (so nothing can resume into
   // them), delete leftovers older than an hour.
+  // Partial encodes left by earlier versions when a stop came while several
+  // clips were converting (only one worker's was cleaned up). An encode never
+  // runs an hour, and a file any saved job still names is kept.
+  async function sweepLeftoverEncodes(knownJobs) {
+    try {
+      const owned = new Set();
+      const collect = (paths) => { for (const value of Object.values(paths || {})) if (typeof value === 'string') owned.add(pathApi.resolve(value)); };
+      for (const job of knownJobs || []) {
+        collect(job.ownedPaths);
+        for (const item of job.items || []) collect(item.ownedPaths);
+      }
+      const names = await pfs.readdir(tempRoot).catch(() => []);
+      const cutoff = Date.now() - 60 * 60_000;
+      let removed = 0;
+      for (const name of names) {
+        if (!/-encoded\.(mp4|mkv|mov)$/i.test(name)) continue;
+        const file = pathApi.join(tempRoot, name);
+        if (owned.has(pathApi.resolve(file))) continue;
+        const stat = await pfs.lstat(file).catch(() => null);
+        if (!stat?.isFile() || stat.mtimeMs > cutoff) continue;
+        try {
+          await pfs.unlink(file);
+          removed += 1;
+        } catch (_) { /* in use or already gone */ }
+      }
+      if (removed) console.log(`[CONVERTER] Removed ${removed} partial encode(s) left from an earlier stop`);
+      return removed;
+    } catch (_) { return 0; }
+  }
+
   async function sweepLeftoverSnapshotFolders(knownJobs = null) {
     try {
       const jobs = knownJobs || await store.list();
@@ -911,7 +941,10 @@ async function createConverterRuntime(options = {}) {
           // recovered automatic job resumes discovering files.
           if (options.autoConvert !== false) await auto.start().catch(() => undefined);
           void sweepEmptySnapshotFolders();
-          if (options.sweepLeftoversOnStart !== false) void sweepLeftoverSnapshotFolders(manifests);
+          if (options.sweepLeftoversOnStart !== false) {
+            void sweepLeftoverSnapshotFolders(manifests);
+            void sweepLeftoverEncodes(manifests);
+          }
           // No queue or reconnect starts until every manifest safely reconciles.
           // Serial execution preserves the singleton worker across saved jobs.
           recoveryPromise = (async () => {
@@ -939,6 +972,7 @@ async function createConverterRuntime(options = {}) {
       configure: (settings) => auto.configure(settings),
       checkNow: () => auto.checkNow(),
       setConcurrency: (value) => auto.setConcurrency(value),
+      ownerResumed: (jobId) => auto.ownerResumed(jobId),
       subscribe: (listener) => { autoListeners.add(listener); return () => autoListeners.delete(listener); }
     }),
     shutdown() {

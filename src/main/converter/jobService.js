@@ -224,6 +224,16 @@ class BoundedQueue {
     return new Promise((resolve) => this.shiftWaiters.push(resolve));
   }
 
+  // A value taken by a worker that then stops (fewer at once) goes back to
+  // the front, to another waiting worker first.
+  unshift(value) {
+    if (this.shiftWaiters.length) {
+      this.shiftWaiters.shift()({ value, done: false });
+      return;
+    }
+    this.values.unshift(value);
+  }
+
   close() {
     if (this.closed) return;
     this.closed = true;
@@ -1084,7 +1094,7 @@ function createConverterJobService(deps) {
     });
   }
 
-  async function cleanupOwnership(runtime, itemId, ownership) {
+  async function cleanupOwnership(runtime, itemId, ownership, signal = runtime.abortController.signal) {
     if (!ownership?.ownedPaths || !ownership?.ownedArtifacts) return { cleaned: true };
     // Any retained original requires replacement-specific reconciliation. Never
     // hand the backup or its recovery companions to generic cleanup.
@@ -1101,7 +1111,7 @@ function createConverterJobService(deps) {
         ownedPaths: ownership.ownedPaths,
         ownedArtifacts: ownership.ownedArtifacts,
         publicationArtifact: ownership.publicationArtifact,
-        signal: runtime.abortController.signal,
+        signal,
         persistTransaction: transactionPersistence(runtime, itemId)
       });
       if (result.cleaned === true) {
@@ -1328,19 +1338,23 @@ function createConverterJobService(deps) {
       timing.mark('encode');
       if (!encoded.ok) {
         let failedOwnership = reserved;
+        // Stopped or cancelled: ffmpeg has exited, so its partial output is
+        // final and is cleaned up now. With the job's own (aborted) signal
+        // this failed, and every worker but one left its partial file behind.
+        const settleSignal = encoded.code === 'cancelled' ? AbortSignal.timeout(15_000) : runtime.abortController.signal;
         try {
           failedOwnership = await staging.adoptEncodeOutput({
             jobId: runtime.manifest.id,
             itemId: item.id,
             ownedPaths: reserved.ownedPaths,
             ownedArtifacts: reserved.ownedArtifacts,
-            signal: runtime.abortController.signal,
+            signal: settleSignal,
             persistTransaction: transactionPersistence(runtime, item.id)
           });
           latestOwnership = failedOwnership;
           setOwnership(runtime, item.id, composeOwnership(ownershipFor(runtime, item.id), failedOwnership));
         } catch (_) { /* an absent output remains a safe missing-intent cleanup */ }
-        const cleanup = await cleanupOwnership(runtime, item.id, failedOwnership);
+        const cleanup = await cleanupOwnership(runtime, item.id, failedOwnership, settleSignal);
         if (cleanup.cleaned === false) {
           setOwnership(runtime, item.id, composeOwnership(ownershipFor(runtime, item.id), failedOwnership));
           throw Object.assign(new Error('cleanup pending'), { code: 'OWNED_CLEANUP_FAILED' });
@@ -1682,6 +1696,17 @@ function createConverterJobService(deps) {
         }
         const next = await runtime.queue.shift();
         if (next.done) break;
+        // A worker that waited for discovery to find a clip: a pause, a
+        // stop or fewer at once may have come meanwhile; the clip is still
+        // queued in the job file, so nothing is lost.
+        if (runtime.pauseRequested) await waitWhilePaused(runtime);
+        if (runtime.cancelRequested || runtime.stopRequested || runtime.recoveryRequired) break;
+        if (runtime.liveWorkers - runtime.retiringWorkers > concurrencyOf(runtime.manifest)) {
+          runtime.queue.unshift(next.value);
+          runtime.retiringWorkers += 1;
+          retired = true;
+          break;
+        }
         const item = currentItem(runtime, next.value);
         if (!item || item.state !== 'queued') continue;
         beginItem(runtime, item);
@@ -1763,8 +1788,11 @@ function createConverterJobService(deps) {
       emit(runtime, 'cancelled');
       return;
     }
-    if (runtime.stopRequested && runtime.stopWhilePaused
-        && !runtime.manifest.items.some((item) => Object.keys(item.ownedPaths || {}).length > 0)) {
+    // Files owned by a clip still to do or in progress; leftovers of a
+    // finished clip whose cleanup is pending are not unfinished work.
+    const ownsInFlight = (item) => (item.state === 'queued' || item.state === 'processing')
+      && Object.keys(item.ownedPaths || {}).length > 0;
+    if (runtime.stopRequested && runtime.stopWhilePaused && !runtime.manifest.items.some(ownsInFlight)) {
       await update(runtime, (current) => ({
         state: 'paused', activeItemId: null, recovery: null,
         items: current.items.map((item) => item.state === 'processing' ? mergeItem(item, { state: 'queued', failure: undefined }) : item)
@@ -1779,14 +1807,21 @@ function createConverterJobService(deps) {
           && Object.keys(item.ownedPaths || {}).length > 0);
         const mappedPhase = runtime.stopPhase === 'copying' || runtime.stopPhase === 'replacing'
           ? runtime.stopPhase : 'encoding';
-        const recovery = mappedPhase === 'copying'
-          ? { fromState: 'copying', action: interrupted ? 'manual-intervention' : 'restart-copy' }
-          : mappedPhase === 'replacing' && current.replacementPhase
-            ? { fromState: 'replacing', phase: current.replacementPhase, action: 'manual-intervention' }
-            : {
-              fromState: 'encoding',
-              action: interrupted ? 'cleanup-and-restart-encoding' : 'restart-encoding'
-            };
+        // Stopped while running with no clip half done (an update between
+        // clips): marked so the restart carries on by itself. A bare
+        // "restart-encoding" without a clip, as earlier versions saved it
+        // for paused jobs too, stays paused.
+        const nothingHalfDone = !interrupted && mappedPhase !== 'replacing' && !current.items.some(ownsInFlight);
+        const recovery = nothingHalfDone
+          ? { fromState: 'waiting', action: current.discoveryComplete === false ? 'resume-discovery' : 'resume-queue' }
+          : mappedPhase === 'copying'
+            ? { fromState: 'copying', action: interrupted ? 'manual-intervention' : 'restart-copy' }
+            : mappedPhase === 'replacing' && current.replacementPhase
+              ? { fromState: 'replacing', phase: current.replacementPhase, action: 'manual-intervention' }
+              : {
+                fromState: 'encoding',
+                action: interrupted ? 'cleanup-and-restart-encoding' : 'restart-encoding'
+              };
         return {
           state: 'paused',
           activeItemId: interrupted?.id || null,
@@ -2204,23 +2239,6 @@ function createConverterJobService(deps) {
       emit(runtime, 'recovered');
       return publicSnapshot(runtime.manifest);
     }
-    // Stopped between clips (an update, docker compose down): nothing was
-    // half done, so the job carries on by itself. It used to stay paused
-    // with nothing to resume from, until the owner cancelled it.
-    if (!item && (recovery?.action === 'restart-encoding' || recovery?.action === 'restart-copy')) {
-      await update(runtime, (current) => ({
-        state: 'waiting', activeItemId: null, recovery: null,
-        items: current.items.map((entry) => entry.state === 'processing'
-          ? mergeItem(entry, { state: 'queued', failure: undefined }) : entry)
-      }));
-      runtime.queue = new BoundedQueue(queueLimit);
-      await launch(runtime, {
-        discover: runtime.manifest.discoveryComplete === false,
-        itemIds: runtime.manifest.items.filter((entry) => entry.state === 'queued').map((entry) => entry.id)
-      });
-      emit(runtime, 'recovered');
-      return publicSnapshot(runtime.manifest);
-    }
     if (!item || !recovery || recovery.action === 'manual-intervention') return publicSnapshot(recovered);
 
     async function completeRecovered(finalPath, outputBytes, transactionResult = {}) {
@@ -2568,7 +2586,7 @@ function createConverterJobService(deps) {
       runtime.stopItemId = runtime.manifest.activeItemId || leadItemId(runtime);
       // paused by the owner (or the automatic window): it stays paused after
       // the restart; a job that was running carries on by itself
-      runtime.stopWhilePaused = runtime.manifest.state === 'paused' && !runtime.manifest.recovery;
+      runtime.stopWhilePaused = runtime.pauseRequested || (runtime.manifest.state === 'paused' && !runtime.manifest.recovery);
       runtime.stopRequested = true;
       runtime.abortController.abort();
       runtime.queue.close();
@@ -2579,10 +2597,19 @@ function createConverterJobService(deps) {
     }));
   }
 
+  // The jobs this process holds, from memory (no job file is read): every
+  // job that is not finished has one since start() or startup recovery.
+  function liveJobs() {
+    return [...jobs.values()].map((runtime) => ({
+      id: runtime.manifest.id, state: runtime.manifest.state, autoConvert: runtime.manifest.config?.autoConvert === true
+    }));
+  }
+
   return Object.freeze({
     start,
     get,
     list,
+    liveJobs,
     pause: (...args) => serializeCommand(() => pause(...args)),
     setConcurrency: (...args) => serializeCommand(() => setConcurrency(...args)),
     resume: (...args) => serializeCommand(() => resume(...args)),

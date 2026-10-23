@@ -454,7 +454,13 @@ function registerConverterIpc(options = {}) {
       }
       return sanitizeSnapshot(snapshot);
     }),
-    'converter:resume': wrapped(async (_event, payload) => sanitizeSnapshot(await options.service.resume(validateJobId(payload)))),
+    'converter:resume': wrapped(async (_event, payload) => {
+      const jobId = validateJobId(payload);
+      const snapshot = await options.service.resume(jobId);
+      // resumed by the owner: "pause my own conversions" leaves it alone now
+      try { await options.auto?.ownerResumed?.(jobId); } catch (_) { /* advisory */ }
+      return sanitizeSnapshot(snapshot);
+    }),
     'converter:cancel': wrapped(async (_event, payload) => sanitizeSnapshot(await options.service.cancel(validateJobId(payload)))),
     // Sets aside a job that cannot be cancelled; answers with the job now current (or null).
     'converter:discard': wrapped(async (_event, payload) => {

@@ -78,6 +78,7 @@ class FilesystemsProvider {
         path: p, totalB: null, usedB: null, freeB: null, latencyMs: null, reachable: null, pendingSince: null, lastCheck: null
       };
       state.label = label;
+      state.vehicle = s.vehicle === true;
       next.set(p, state);
     }
     const changed = [...next.keys()].join('\n') !== [...this.shares.keys()].join('\n');
@@ -143,7 +144,7 @@ class FilesystemsProvider {
         if (waited > UNREACHABLE_MS) reachable = false;
       }
       out.push({
-        label: s.label, path: s.path, totalB: s.totalB, usedB: s.usedB, freeB: s.freeB, latencyMs, reachable,
+        label: s.label, path: s.path, vehicle: s.vehicle === true, totalB: s.totalB, usedB: s.usedB, freeB: s.freeB, latencyMs, reachable,
         fsType: s.fsType || null, source: s.source || null, disk: s.disk || null, smbVersion: s.smbVersion || null
       });
     }

@@ -176,3 +176,14 @@ test('low memory on a real sample stream (NVIDIA machine: 3.75 % available)', as
     s.done();
   }
 });
+
+test('a vehicle share gets no full / offline alert here (the share has its own notifications)', () => {
+  const { rules } = require('../server/stats/alerts');
+  const keys = rules({ filesystems: [
+    { label: 'Data volume', totalB: 100, usedB: 95, reachable: true },
+    { label: 'Model 3', vehicle: true, totalB: 100, usedB: 95, reachable: false, latencyMs: 3000 }
+  ] }).map((r) => r.key);
+  assert.ok(keys.includes('fs-full:Data volume') && keys.includes('share-down:Data volume'));
+  assert.ok(!keys.includes('fs-full:Model 3') && !keys.includes('share-down:Model 3'));
+  assert.ok(keys.includes('share-slow:Model 3'), 'a slow share is still new information');
+});

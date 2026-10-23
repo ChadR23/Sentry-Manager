@@ -1348,8 +1348,12 @@ function createJobStore(options) {
       // Paused by the owner (or the automatic window) with nothing half done:
       // it stays paused. Recovering it as a "paused" step was refused by the
       // job file's own rules and stopped the converter from starting at all.
-      const ownsFiles = (entry) => Object.keys(entry?.ownedPaths || {}).length > 0;
-      if (!reinspect && stored.state === 'paused' && !stored.recovery && !ownsFiles(stored) && !stored.items.some(ownsFiles)) {
+      // (leftovers of finished clips whose cleanup is pending do not count;
+      // the job keeps a copy of them only while a clip is active)
+      const ownsFiles = (entry) => (entry.state === 'queued' || entry.state === 'processing')
+        && Object.keys(entry?.ownedPaths || {}).length > 0;
+      const jobOwns = Boolean(stored.activeItemId) && Object.keys(stored.ownedPaths || {}).length > 0;
+      if (!reinspect && stored.state === 'paused' && !stored.recovery && !jobOwns && !stored.items.some(ownsFiles)) {
         return cloneManifest(stored);
       }
       // ...and one that still owns files is recovered like an interrupted encode

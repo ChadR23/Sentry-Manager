@@ -228,21 +228,35 @@ async function main() {
   // sampled only while a page asks or a conversion runs
   const converterRunning = () => [...converterJobs.values()].some((s) => CONVERTER_RUNNING.has(s.state));
   let benchmarking = null; // the benchmark's energy token while it runs
+  // Server alerts from before a restart: the new run raises them again if
+  // they still hold (a stale one could otherwise never be cleared)
+  db.resolvePrefix('server:');
+  const statsLog = logger.scope('stats');
   const stats = createStats({
     dataDir: DATA,
     isBusy: () => converterRunning() || benchmarking !== null,
-    readShares: () => [{ label: 'Data volume', path: DATA }, ...vehicles.list().map((v) => ({ label: v.name, path: vehicles.rootOf(v) }))],
+    readShares: () => [{ label: 'Data volume', path: DATA }, ...vehicles.list().map((v) => ({ label: v.name, path: vehicles.rootOf(v), vehicle: true }))],
     // every running ffmpeg (a benchmark's too), to name processes and GPU clients
     activeEncodes: () => host.runtime?.activeEncodes?.() || [],
     ffmpegPath: FFMPEG,
     // costs are summed at the price of each moment (time-of-use plans)
     priceAt: (ms) => priceAt(db.get('power', null), ms),
-    log: logger.scope('stats'),
-    onAlert: ({ key, level, message }) => notes.raise({
-      kind: 'server', level: level === 'error' ? 'critical' : 'warning', dedupeKey: `server:${key}`,
-      title: message, message: 'Overview > Server shows the live numbers.'
-    }),
-    onAlertClear: ({ key }) => notes.resolve(`server:${key}`)
+    log: statsLog,
+    onAlert: ({ key, level, message }) => {
+      statsLog[level === 'error' ? 'error' : 'warn'](message);
+      notes.raise({
+        kind: 'server', level: level === 'error' ? 'critical' : 'warning', dedupeKey: `server:${key}`,
+        title: message, message: 'Overview > Server shows the live numbers.'
+      });
+    },
+    onAlertClear: ({ key }) => {
+      statsLog.info(`Back to normal: ${key}`);
+      notes.resolve(`server:${key}`);
+    },
+    // CPU power right away when sampling starts (the keepalive below follows)
+    onSampling: (on) => {
+      if (on && SUPERVISED && process.connected) process.send({ type: 'rapl', on: true }, () => {});
+    }
   });
   // CPU power: the root supervisor reads the energy counters while asked
   let statsAskedAt = 0;
@@ -267,19 +281,24 @@ async function main() {
     powerMeter: {
       start: () => {
         const before = stats.energy().byJob?.benchmark || { wh: 0, seconds: 0 };
-        benchmarking = { wh: before.wh, seconds: before.seconds };
+        benchmarking = { wh: before.wh, seconds: before.seconds, at: Date.now() };
         stats.markJob('benchmark');
         return benchmarking;
       },
       stop: (token) => {
         if (benchmarking === token) {
-          stats.markJob(null);
+          stats.markJob(statsJob); // a conversion's own count carries on
           benchmarking = null;
         }
+        // the account's average watts over the level's own time (its energy
+        // steps with the 2 s samples, coarse for a level of a few seconds)
         const after = stats.energy().byJob?.benchmark;
         const wh = after ? after.wh - token.wh : 0;
         const seconds = after ? after.seconds - token.seconds : 0;
-        return wh > 0 && seconds > 0 ? { wh, avgW: (wh * 3600) / seconds } : null;
+        if (!(wh > 0 && seconds > 0)) return null;
+        const avgW = (wh * 3600) / seconds;
+        const elapsed = (Date.now() - token.at) / 1000;
+        return { wh: elapsed > 0 ? (avgW * elapsed) / 3600 : wh, avgW };
       }
     }
   });
@@ -1033,9 +1052,17 @@ async function main() {
     runtime.service.subscribe((event) => {
       if (event?.type !== 'snapshot' || !event.snapshot) return;
       converterJobs.set(event.snapshot.id, event.snapshot);
+      // (while a benchmark measures, its own account is marked; the job's
+      // mark comes back when it stops)
       if (CONVERTER_RUNNING.has(event.snapshot.state)) {
-        if (statsJob !== event.snapshot.id) stats.markJob(statsJob = event.snapshot.id);
-      } else if (statsJob === event.snapshot.id) stats.markJob(statsJob = null);
+        if (statsJob !== event.snapshot.id) {
+          statsJob = event.snapshot.id;
+          if (benchmarking === null) stats.markJob(statsJob);
+        }
+      } else if (statsJob === event.snapshot.id) {
+        statsJob = null;
+        if (benchmarking === null) stats.markJob(null);
+      }
       mirrorConverterJob(event.snapshot);
     });
     // jobs from before a restart (a paused one still owns its clips)

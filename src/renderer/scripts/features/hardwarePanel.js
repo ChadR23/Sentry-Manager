@@ -100,7 +100,8 @@ export function renderHardware(stats) {
         chips.push(chip(what, what)); // (cut short on phones; the whole of it on hover)
     }
     if (device?.decode) chips.push(chip(`decode: ${device.decode === 'gpu' ? 'GPU' : 'CPU'}`));
-    chips.push(chip(workers.length ? `${workers.length} at once` : 'finding clips…'));
+    const finding = !enc?.state || enc.state === 'discovering' || enc.state === 'waiting';
+    chips.push(chip(workers.length ? `${workers.length} at once` : finding ? 'finding clips…' : 'checking and saving…'));
 
     const tiles = [];
     const video = gpu ? (fin(gpu.video) ? gpu.video : fin(gpu.busy) ? gpu.busy : null) : null;
@@ -221,7 +222,12 @@ export function startHardwarePanel({ doc = document, win = window, fetchImpl = (
     }
     const start = doc.getElementById('converterStart');
     if (start && typeof win.MutationObserver === 'function') {
+        // only when a job really starts or ends: the converter rewrites the
+        // attribute on every redraw, which polled several times a second
+        let wasDisabled = start.disabled;
         new win.MutationObserver(() => {
+            if (start.disabled === wasDisabled) return;
+            wasDisabled = start.disabled;
             stop();
             resume();
         }).observe(start, { attributes: true, attributeFilter: ['disabled'] });
