@@ -151,12 +151,22 @@ function ownershipOf(value) {
 
 const PRIVATE_SNAPSHOT_KEYS = ['ownedPaths', 'ownedArtifacts', 'publicationArtifact'];
 
+// A finished clip keeps empty ownership ({}): that holds nothing private.
+function carriesPrivate(item, key) {
+  if (!Object.prototype.hasOwnProperty.call(item, key)) return false;
+  const value = item[key];
+  if (value === null || value === undefined) return false;
+  return typeof value !== 'object' || Object.keys(value).length > 0;
+}
+
 // Frozen items (the job store's own validated copies) cannot change, so the
 // snapshot reuses them when they carry nothing private instead of copying
-// every item of a large job on each update.
+// every item of a large job on each update. Without the empty-ownership case
+// every converted clip was copied again on each of the ~40 updates per clip,
+// and a 30,000-clip job got slower the further it went.
 function publicItem(item) {
   if (Object.isFrozen(item) && item && typeof item === 'object'
-      && !PRIVATE_SNAPSHOT_KEYS.some((key) => Object.prototype.hasOwnProperty.call(item, key))) return item;
+      && !PRIVATE_SNAPSHOT_KEYS.some((key) => carriesPrivate(item, key))) return item;
   const safeItem = clone(item);
   for (const key of PRIVATE_SNAPSHOT_KEYS) delete safeItem[key];
   return safeItem;
@@ -2763,5 +2773,6 @@ function createConverterJobService(deps) {
 
 module.exports = {
   ConverterJobServiceError,
-  createConverterJobService
+  createConverterJobService,
+  publicSnapshot
 };
