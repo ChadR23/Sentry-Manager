@@ -5,6 +5,7 @@
 // quick read of their MP4 header, never by a worker with ffprobe (that took
 // ~3 s per clip and an encode slot on the owner's 44,000-clip share). Waiting
 // and the time remaining then count only clips that will really be converted.
+// Also: the live numbers of each running ffmpeg (activeEncodes).
 
 const test = require('node:test');
 const assert = require('node:assert');
@@ -198,6 +199,56 @@ test('converted clips are remembered: the next run skips every clip without open
     const seen = touches(env.record, [...originals, ...convertedClips]);
     assert.strictEqual(seen.spawned.length, 0, 'no process at all for a known clip');
     assert.deepStrictEqual(seen.opened, [changed], 'only the clip that changed was opened (its header)');
+  } finally {
+    await env.runtime.shutdown().catch(() => {});
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('activeEncodes reports each running ffmpeg with its live numbers', { skip, timeout: 120_000 }, async () => {
+  const { base, root } = makeBase();
+  const { original } = await sampleClips();
+  const clip = path.join(root, 'RecentClips', `${stamp(0)}-front.mp4`);
+  fs.copyFileSync(original, clip);
+  // An encode at the clip's own pace that reports often, so it can be watched.
+  const wrapper = path.join(base, 'ffmpeg');
+  fs.writeFileSync(wrapper, '#!/bin/sh\ncase "$*" in *"pipe:1 -nostats -f mp4"*) exec ffmpeg -re -stats_period 0.2 "$@";; esac\nexec ffmpeg "$@"\n', { mode: 0o755 });
+  const env = await openRuntime(base, { ffmpegPath: wrapper });
+  try {
+    assert.deepStrictEqual(env.runtime.activeEncodes(), []);
+    const jobId = await env.runtime.service.start(jobConfig(root));
+    let live = null;
+    for (let i = 0; i < 600 && !live; i += 1) {
+      live = env.runtime.activeEncodes().find((entry) => entry.frame > 0 && entry.outTimeUs > 0 && entry.fps !== null) || null;
+      if (!live) await sleep(50);
+    }
+    assert.ok(live, 'a running encode showed its progress');
+    assert.deepStrictEqual(Object.keys(live).sort(), [
+      'bitrateKbps', 'decode', 'device', 'dropFrames', 'dupFrames', 'durationUs', 'encoder', 'fps', 'frame',
+      'hardware', 'itemId', 'jobId', 'outTimeUs', 'pid', 'relativePath', 'speed', 'totalSizeB'
+    ]);
+    const job = await env.runtime.service.get(jobId);
+    assert.strictEqual(live.jobId, jobId);
+    assert.strictEqual(live.itemId, job.items[0].id);
+    assert.strictEqual(live.relativePath, `RecentClips/${stamp(0)}-front.mp4`);
+    assert.strictEqual(typeof live.encoder, 'string');
+    assert.strictEqual(live.hardware, live.encoder !== 'libx265');
+    assert.strictEqual(live.decode, 'cpu', 'GPU decoding is off here');
+    assert.ok(live.device === null || live.device.startsWith('/dev/'));
+    const encodes = env.record.spawned.filter((entry) => entry.args.includes('pipe:1') && entry.args.includes('mp4'));
+    assert.ok(encodes.some((entry) => entry.pid === live.pid), 'pid of the ffmpeg that encodes it');
+    assert.ok(Math.abs(live.durationUs - 4_000_000) < 500_000, `duration ${live.durationUs}`);
+    assert.ok(Number.isSafeInteger(live.frame) && live.frame <= 48);
+    assert.ok(live.speed === null || (live.speed > 0 && live.speed < 50), `speed ${live.speed}`);
+    assert.ok(live.bitrateKbps === null || live.bitrateKbps >= 0);
+    assert.ok(Number.isSafeInteger(live.dropFrames) && Number.isSafeInteger(live.dupFrames));
+    assert.ok(live.totalSizeB === null || Number.isSafeInteger(live.totalSizeB));
+    // a copy: changing it changes nothing inside the converter
+    live.fps = -1;
+    assert.notStrictEqual(env.runtime.service.activeEncodes()[0]?.fps, -1);
+    const done = await settle(env.runtime, jobId);
+    assert.strictEqual(done.items[0].resultCode, 'converted');
+    assert.deepStrictEqual(env.runtime.activeEncodes(), [], 'nothing listed once ffmpeg is done');
   } finally {
     await env.runtime.shutdown().catch(() => {});
     fs.rmSync(base, { recursive: true, force: true });

@@ -55,6 +55,31 @@ function serviceError(code) {
   return new ConverterJobServiceError(code);
 }
 
+// ffmpeg -progress keys reported per running clip (see activeEncodes).
+const LIVE_COUNTERS = Object.freeze({
+  frame: 'frame', drop_frames: 'dropFrames', dup_frames: 'dupFrames', total_size: 'totalSizeB'
+});
+
+function progressCount(value) {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+// "1.23x" or "1234.5kbits/s"; "N/A" until ffmpeg knows.
+function progressRate(value, scale) {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.round(parsed * scale) / scale : null;
+}
+
+// The GPU render node an encode uses, when its arguments name one (VA-API).
+function renderDevice(args) {
+  for (let index = 0; index < args.length - 1; index += 1) {
+    if ((args[index] === '-vaapi_device' || args[index] === '-hwaccel_device')
+        && typeof args[index + 1] === 'string' && args[index + 1].startsWith('/dev/')) return args[index + 1];
+  }
+  return null;
+}
+
 // Only read-only waits may be detached on abort. Their late results are observed,
 // but cannot continue recovery or start a transaction after shutdown.
 function abortableRead(operation, signal) {
@@ -351,6 +376,8 @@ function createConverterJobService(deps) {
       // which reproduces the original single-worker pipeline exactly.
       children: new Map(),
       encodeFps: new Map(),
+      // Live numbers of each running ffmpeg, for activeEncodes().
+      encodes: new Map(),
       ownerships: new Map(),
       inFlight: new Set(),
       leadItemId: null,
@@ -919,13 +946,14 @@ function createConverterJobService(deps) {
       : pathApi.resolve(config.destinationRoot, ...item.relativePath.split('/'));
   }
 
-  async function runChild(runtime, itemId, source, target, codec, encoder, { bitrate, quality = null }, decodeAccel = null) {
+  async function runChild(runtime, itemId, source, target, codec, encoder, { bitrate, quality = null, durationUs = null }, decodeAccel = null) {
     const hwFrames = Array.isArray(decodeAccel) && decodeAccel.includes('-hwaccel_output_format');
+    const encodeArgs = buildEncodeArgs({ codec, encoder: encoder.codec, bitrate, quality, hwFrames });
     const args = [
       '-nostdin', '-hide_banner', '-loglevel', 'error', '-n',
       ...(decodeAccel || []),
       '-i', source,
-      ...buildEncodeArgs({ codec, encoder: encoder.codec, bitrate, quality, hwFrames }),
+      ...encodeArgs,
       '-an', '-sn', '-dn',
       '-progress', 'pipe:1', '-nostats',
       '-f', 'mp4', target
@@ -945,6 +973,26 @@ function createConverterJobService(deps) {
     }
     const entry = { child, terminationRequested: false };
     runtime.children.set(itemId, entry);
+    const live = {
+      jobId: runtime.manifest.id,
+      itemId,
+      relativePath: currentItem(runtime, itemId)?.relativePath || null,
+      encoder: encoder.codec,
+      hardware: encoder.hardware === true,
+      decode: Array.isArray(decodeAccel) && decodeAccel.length > 0 ? 'gpu' : 'cpu',
+      device: renderDevice([...(decodeAccel || []), ...encodeArgs]),
+      pid: Number.isSafeInteger(child.pid) ? child.pid : null,
+      fps: null,
+      speed: null,
+      bitrateKbps: null,
+      frame: null,
+      outTimeUs: null,
+      durationUs: Number.isSafeInteger(durationUs) && durationUs > 0 ? durationUs : null,
+      dropFrames: null,
+      dupFrames: null,
+      totalSizeB: null
+    };
+    runtime.encodes.set(itemId, live);
     // A cancel/stop issued while this item was starting must still stop it.
     if (runtime.cancelRequested || runtime.stopRequested || runtime.recoveryRequired) {
       entry.terminationRequested = true;
@@ -981,13 +1029,25 @@ function createConverterJobService(deps) {
         const separator = line.indexOf('=');
         if (separator < 1) continue;
         const key = line.slice(0, separator);
-        const value = line.slice(separator + 1);
+        const value = line.slice(separator + 1).trim();
         if (key === 'out_time_ms' || key === 'out_time_us') {
           const parsed = Number(value);
-          if (Number.isSafeInteger(parsed) && parsed >= 0) progress.outTimeUs = parsed;
+          if (Number.isSafeInteger(parsed) && parsed >= 0) {
+            progress.outTimeUs = parsed;
+            live.outTimeUs = parsed;
+          }
         } else if (key === 'fps') {
           const parsed = Number(value);
-          if (Number.isFinite(parsed) && parsed >= 0) runtime.encodeFps.set(itemId, parsed);
+          if (Number.isFinite(parsed) && parsed >= 0) {
+            runtime.encodeFps.set(itemId, parsed);
+            live.fps = Math.round(parsed * 10) / 10;
+          }
+        } else if (Object.prototype.hasOwnProperty.call(LIVE_COUNTERS, key)) {
+          live[LIVE_COUNTERS[key]] = progressCount(value);
+        } else if (key === 'speed') {
+          live.speed = progressRate(value, 100);
+        } else if (key === 'bitrate') {
+          live.bitrateKbps = progressRate(value, 10);
         } else if (key === 'progress' && (value === 'continue' || value === 'end')) {
           progress.phase = value;
           // The UI shows one live progress line: the lead item's, plus the
@@ -1007,6 +1067,7 @@ function createConverterJobService(deps) {
         settled = true;
         clearTimeout(stallTimer);
         if (runtime.children.get(itemId) === entry) runtime.children.delete(itemId);
+        if (runtime.encodes.get(itemId) === live) runtime.encodes.delete(itemId);
         runtime.encodeFps.delete(itemId);
         resolve(result);
       };
@@ -1259,7 +1320,8 @@ function createConverterJobService(deps) {
       latestOwnership = reserved;
       setOwnership(runtime, item.id, composeOwnership(ownershipFor(runtime, item.id), reserved));
       const usedTier = encodeTiers[0] || null;
-      const encoded = await runChild(runtime, item.id, staged.source, reserved.path, codec, selected, { bitrate, quality }, usedTier?.args || null);
+      const durationUs = Math.round((inspected.durationSeconds || 0) * 1_000_000) || null;
+      const encoded = await runChild(runtime, item.id, staged.source, reserved.path, codec, selected, { bitrate, quality, durationUs }, usedTier?.args || null);
       timing.mark('encode');
       if (!encoded.ok) {
         let failedOwnership = reserved;
@@ -2419,6 +2481,17 @@ function createConverterJobService(deps) {
     return publicSnapshot(runtime.manifest);
   }
 
+  // One entry per ffmpeg encoding right now, with its latest -progress numbers
+  // (null until ffmpeg reports them). Synchronous and cheap: the server reads
+  // it every couple of seconds while a page shows it.
+  function activeEncodes() {
+    const encodes = [];
+    for (const runtime of jobs.values()) {
+      for (const live of runtime.encodes.values()) encodes.push({ ...live });
+    }
+    return encodes;
+  }
+
   async function shutdown() {
     if (shuttingDown) {
       await Promise.all([...jobs.values()].map((runtime) => runtime.runPromise).filter(Boolean));
@@ -2455,7 +2528,8 @@ function createConverterJobService(deps) {
     continueRecovery,
     shutdown: (...args) => serializeCommand(() => shutdown(...args)),
     subscribe,
-    whenIdle
+    whenIdle,
+    activeEncodes
   });
 }
 

@@ -754,6 +754,7 @@ async function createConverterRuntime(options = {}) {
   // be meaningless and the encoders shared). It runs the real converter in an
   // isolated temporary job store, staging area and output folder.
   let benchmarkController = null;
+  const benchmarkServices = new Set();
   async function findBenchmarkClips(sourceRoot, signal) {
     if (typeof sourceRoot !== 'string' || sourceRoot.length === 0) return [];
     // In an archive that is partly converted the first folders hold mostly
@@ -804,6 +805,7 @@ async function createConverterRuntime(options = {}) {
         store: factories.createJobStore({ rootDir: pathApi.join(workRoot, 'jobs'), fs: pfs }),
         stagingManager: factories.createFileTransaction({ ...stagingOptions, tempRoot: stagingRoot })
       });
+      benchmarkServices.add(benchService);
       const jobId = await benchService.start({
         sourceRoot,
         destinationRoot: pathApi.join(workRoot, 'output'),
@@ -825,6 +827,7 @@ async function createConverterRuntime(options = {}) {
       } finally {
         signal?.removeEventListener('abort', abort);
         await benchService.shutdown().catch(() => {});
+        benchmarkServices.delete(benchService);
       }
     };
   }
@@ -878,6 +881,16 @@ async function createConverterRuntime(options = {}) {
     },
     cancelBenchmark() {
       benchmarkController?.abort();
+    },
+    // Every ffmpeg encoding right now, a benchmark's included (those carry
+    // benchmark: true and a temporary job id).
+    activeEncodes() {
+      const encodes = typeof service.activeEncodes === 'function' ? service.activeEncodes() : [];
+      for (const benchService of benchmarkServices) {
+        if (typeof benchService.activeEncodes !== 'function') continue;
+        for (const entry of benchService.activeEncodes()) encodes.push({ ...entry, benchmark: true });
+      }
+      return encodes;
     },
     start() {
       if (shutdownPromise) return Promise.reject(runtimeError('SERVICE_SHUTDOWN'));
