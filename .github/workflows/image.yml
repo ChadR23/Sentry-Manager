@@ -44,9 +44,21 @@ jobs:
         with:
           node-version: 24
 
+      # The ffmpeg packages the tests need (63 MB) are kept between runs: the
+      # Ubuntu mirror once took 21 minutes to send them.
+      - name: Cache ffmpeg packages
+        uses: actions/cache@v4
+        with:
+          path: ~/apt-archives
+          key: apt-ffmpeg-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: apt-ffmpeg-${{ runner.os }}-
+
       - name: Tests
         run: |
-          sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends ffmpeg
+          mkdir -p ~/apt-archives/partial
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends -o Dir::Cache::Archives="$HOME/apt-archives" ffmpeg
+          sudo chown -R "$(id -u):$(id -g)" ~/apt-archives
           mkdir -p build && gcc -O2 -Wall -o build/noreplace-rename native/noreplace-rename.c
           npm test
 
