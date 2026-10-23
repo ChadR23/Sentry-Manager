@@ -4,10 +4,11 @@
 // thermal zones when no hwmon chip covers the CPU (Raspberry Pi and other
 // ARM boards). Sensor reads go through BackgroundReads: some ask the device
 // itself (drivetemp sends the disk a command), and the CPU's are read every
-// sample while the rest are read every 10-30 s.
+// sample while the rest are read every 10-30 s. A server with two CPU
+// sockets has a CPU chip per socket (coretemp, k10temp); all of them count.
 
 const path = require('path');
-const { readLine, listDir, realPath, num, join } = require('./util');
+const { readLine, listDir, realPath, num, maxOf, join } = require('./util');
 
 const CPU_CHIP = /^(coretemp|k10temp|zenpower|cpu[_-]?thermal|cpu\d*[_-]thermal|soc[_-]?thermal)$/;
 const CPU_ZONE = /x86_pkg_temp|cpu|soc/i;
@@ -44,6 +45,7 @@ class SensorsProvider {
     this.chips = [];
     this.zones = [];
     this.cpuChip = null;
+    this.cpuChips = [];
     this.cpuZone = null;
     this.fansSeen = new Set();
   }
@@ -70,7 +72,8 @@ class SensorsProvider {
       }
       this.chips.push(chip);
     }
-    this.cpuChip = this.chips.find((c) => c.role === 'cpu' && c.temps.length) || null;
+    this.cpuChips = this.chips.filter((c) => c.role === 'cpu' && c.temps.length);
+    this.cpuChip = this.cpuChips[0] || null;
     const zoneDir = join(this.sysRoot, 'class', 'thermal');
     this.zones = listDir(zoneDir).filter((n) => /^thermal_zone\d+$/.test(n))
       .sort((a, b) => Number(a.slice(12)) - Number(b.slice(12)))
@@ -91,25 +94,50 @@ class SensorsProvider {
     return tempC(this.value(t.file, chip.role));
   }
 
-  /** CPU temperature: coretemp package, k10temp Tdie/Tctl, or the CPU thermal zone. */
+  /** The readings of a CPU chip that stand for the CPU: coretemp package, k10temp Tdie/Tctl, else the cores. */
+  cpuInputs(c) {
+    const pick = (re) => c.temps.filter((t) => t.label && re.test(t.label));
+    let list = pick(/^Package id \d+$/);
+    if (!list.length) list = pick(/^Tdie$/);
+    if (!list.length) list = pick(/^Tctl$/);
+    if (!list.length) list = pick(/^Core \d+$/);
+    if (!list.length) list = c.temps.slice(0, 1);
+    return list;
+  }
+
+  /** The hottest of those readings on one chip. */
+  chipCpuTemp(c) {
+    return maxOf(this.cpuInputs(c).map((t) => this.chipTemp(c, t)));
+  }
+
+  /** CPU temperature: the hottest CPU chip (one per socket), or the CPU thermal zone. */
   cpuTemp() {
-    const c = this.cpuChip;
-    if (c) {
-      const pick = (re) => c.temps.filter((t) => t.label && re.test(t.label));
-      let list = pick(/^Package id \d+$/);
-      if (!list.length) list = pick(/^Tdie$/);
-      if (!list.length) list = pick(/^Tctl$/);
-      if (!list.length) list = pick(/^Core \d+$/);
-      if (!list.length) list = c.temps.slice(0, 1);
-      let best = null;
-      for (const t of list) {
-        const v = this.chipTemp(c, t);
-        if (v !== null && (best === null || v > best)) best = v;
-      }
-      return best;
-    }
+    if (this.cpuChips.length) return maxOf(this.cpuChips.map((c) => this.chipCpuTemp(c)));
     if (this.cpuZone) return tempC(this.value(this.cpuZone.file, 'cpu'));
     return null;
+  }
+
+  /**
+   * Each socket's temperature, in the order of `sockets` (physical ids):
+   * coretemp names its package ("Package id 1"); k10temp has one chip per
+   * socket, in the order of their devices. null when that cannot be told.
+   */
+  socketTemps(sockets) {
+    const out = new Map();
+    const unnamed = [];
+    for (const c of this.cpuChips) {
+      const pkgs = c.temps.filter((t) => t.label && /^Package id \d+$/.test(t.label));
+      if (!pkgs.length) unnamed.push(c);
+      for (const t of pkgs) {
+        const n = Number(t.label.slice(11));
+        out.set(n, maxOf([out.get(n), this.chipTemp(c, t)]));
+      }
+    }
+    if (!out.size && unnamed.length === sockets.length) {
+      const byDevice = [...unnamed].sort((a, b) => (String(a.dev) < String(b.dev) ? -1 : String(a.dev) > String(b.dev) ? 1 : 0));
+      byDevice.forEach((c, i) => out.set(sockets[i], this.chipCpuTemp(c)));
+    }
+    return sockets.map((s) => out.get(s) ?? null);
   }
 
   /** Temperature of a disk's own sensor, by disk name. */

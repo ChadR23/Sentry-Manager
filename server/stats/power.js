@@ -4,7 +4,8 @@
 // here when the app may read them, otherwise sent by the root supervisor
 // (setRapl), since kernels after 5.10 let only root read them. The GPUs
 // report their own (gpu.js). W = energy used / time between two readings,
-// across the counter's wrap-around.
+// across the counter's wrap-around. A server with two CPU sockets has a
+// package zone per socket: summed for the CPU, and also shown per socket.
 
 const { readLine, readNum, listDir, round, sumOf, join } = require('./util');
 
@@ -23,26 +24,48 @@ function energyDelta(prevUj, curUj, maxUj) {
 }
 
 /**
- * CPU package watts between two readings ({ at, packages: [{ name, energyUj,
- * maxEnergyUj }] }). Longer than a minute apart, a counter could have wrapped
- * more than once, so that is no answer.
+ * Watts of each package zone between two readings ({ at, packages: [{ name,
+ * energyUj, maxEnergyUj }] }), as [{ name, w }], or null. Longer than a
+ * minute apart, a counter could have wrapped more than once, so that is no
+ * answer.
  */
-function packageWatts(prev, cur) {
+function zoneWatts(prev, cur) {
   if (!prev || !cur) return null;
   const dt = (cur.at - prev.at) / 1000;
   if (!(dt > 0) || dt > 60) return null;
-  let total = null;
+  const out = [];
   for (const p of cur.packages) {
     if (!PACKAGE.test(p.name)) continue;
     const before = prev.packages.find((x) => x.name === p.name);
     if (!before) continue;
     const d = energyDelta(before.energyUj, p.energyUj, p.maxEnergyUj || before.maxEnergyUj);
     if (d === null) continue;
-    const w = d / 1e6 / dt;
+    out.push({ name: p.name, w: d / 1e6 / dt });
+  }
+  return out;
+}
+
+/** CPU package watts between two readings: every package (socket) together. */
+function packageWatts(prev, cur) {
+  const zones = zoneWatts(prev, cur);
+  if (!zones) return null;
+  let total = null;
+  for (const { w } of zones) {
     if (w > 1000) return null; // not a real reading
     total = (total || 0) + w;
   }
   return total;
+}
+
+/** W per socket: "package-1" is socket 1 (with its dies, "package-1-die-0", together). */
+function socketWatts(prev, cur) {
+  const out = new Map();
+  if (packageWatts(prev, cur) === null) return out;
+  for (const { name, w } of zoneWatts(prev, cur)) {
+    const m = /^package-(\d+)(?:-die-\d+)?$/.exec(name);
+    if (m) out.set(Number(m[1]), (out.get(Number(m[1])) || 0) + w);
+  }
+  return out;
 }
 
 function cleanReading(reading) {
@@ -62,6 +85,7 @@ class PowerProvider {
     this.direct = false;
     this.readings = { prev: null, cur: null }; // read here
     this.sent = { prev: null, cur: null }; // from the supervisor
+    this.used = { prev: null, cur: null }; // the two readings the last cpu() answer came from
   }
 
   probe() {
@@ -87,11 +111,21 @@ class PowerProvider {
     if (this.direct) {
       const r = { at: t, packages: this.zones.map((z) => ({ name: z.name, energyUj: readNum(z.energy), maxEnergyUj: z.max })) };
       if (r.packages.every((p) => p.energyUj !== null)) this.readings = { prev: this.readings.cur, cur: r };
+      this.used = this.readings;
       return packageWatts(this.readings.prev, this.readings.cur);
     }
     const { prev, cur } = this.sent;
-    if (!cur || t - cur.at > Math.max(3 * this.intervalMs, 10000)) return null;
+    if (!cur || t - cur.at > Math.max(3 * this.intervalMs, 10000)) {
+      this.used = { prev: null, cur: null };
+      return null;
+    }
+    this.used = this.sent;
     return packageWatts(prev, cur);
+  }
+
+  /** W per socket (Map physical id -> W) from the readings of the last sample. */
+  socketWatts() {
+    return socketWatts(this.used.prev, this.used.cur);
   }
 
   hasRapl(t) {
@@ -118,4 +152,4 @@ class PowerProvider {
   }
 }
 
-module.exports = { PowerProvider, energyDelta, packageWatts, cleanReading };
+module.exports = { PowerProvider, energyDelta, packageWatts, socketWatts, cleanReading };
