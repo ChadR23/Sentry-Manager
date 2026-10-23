@@ -186,9 +186,17 @@ encoder: {
 }
 ```
 
-c) **Settings > System**: "Electricity price" (number + currency symbol,
-stored with `PUT /api/settings/power` `{ pricePerKwh, currency }`), shown
-next to the System facts. **Jobs page**: kWh and average W on finished
+c) **Settings > System**: "Electricity price", either one price or a
+time-of-use plan (owner's request: multi-rate plans). Stored with
+`PUT /api/settings/power`:
+`{ currency, mode: 'flat'|'tou', pricePerKwh, defaultPrice, rates: [{ label, price, days: [0..6], from: 'HH:MM', to: 'HH:MM' }] }`
+(up to 12 rates; a window may wrap midnight; the first matching rate wins,
+else `defaultPrice`; days 0 = Sunday, server time zone). Costs are summed
+per sample at the price of that moment by the stats engine
+(`options.priceAt(ms)`), so a run across peak and off-peak hours costs what
+it really cost: `power.todayCost`, `power.weekCost`, `power.priceNow`,
+`encoder.run.cost`, jobs' `energy.cost`. Screens show cost only from these
+fields (never kWh x one price). **Jobs page**: kWh and average W on finished
 conversion jobs when known. **Benchmark dialog**: a W / files-per-kWh column
 and "Most efficient" next to "Fastest" when energy is known.
 
