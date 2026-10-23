@@ -14,6 +14,10 @@ const PCI_SLOT = /^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$/i;
 const DRI_VENDORS = Object.freeze({ '0x8086': 'intel', '0x1002': 'amd' });
 const VENDOR_LABELS = Object.freeze({ intel: 'Intel', amd: 'AMD', nvidia: 'NVIDIA' });
 const NVIDIA_TIMEOUT_MS = 10_000;
+// The runner stops nvidia-smi at its timeout but answers only once it has
+// exited, which one stuck in a wedged driver never does: the list does not
+// wait for it past this.
+const NVIDIA_DEADLINE_MS = NVIDIA_TIMEOUT_MS + 2_000;
 const CPU_DEVICE = Object.freeze({
   id: 'cpu', kind: 'cpu', vendor: null, name: 'CPU (software encoder)', node: null, index: null, pci: null
 });
@@ -45,7 +49,8 @@ function createDeviceDiscovery({
   sysRoot = '/sys',
   runCommand,
   statRdev,
-  nameOf
+  nameOf,
+  nvidiaDeadlineMs = NVIDIA_DEADLINE_MS
 } = {}) {
   const pfs = fs.promises || fs;
   const rdevOf = statRdev === undefined ? defaultStatRdev(fs) : statRdev;
@@ -116,14 +121,24 @@ function createDeviceDiscovery({
     return devices;
   }
 
+  // an nvidia-smi still stuck past its deadline: no other one is started
+  let stuck = null;
   async function nvidiaDevices() {
-    if (typeof runCommand !== 'function') return [];
+    if (typeof runCommand !== 'function' || stuck) return [];
     let result;
+    let timer;
     try {
-      result = await runCommand('nvidia-smi', ['--query-gpu=index,pci.bus_id,name', '--format=csv,noheader'], {
+      const running = Promise.resolve().then(() => runCommand('nvidia-smi', ['--query-gpu=index,pci.bus_id,name', '--format=csv,noheader'], {
         timeoutMs: NVIDIA_TIMEOUT_MS, windowsHide: true, shell: false
-      });
-    } catch (_) { return []; }
+      }));
+      const late = {};
+      result = await Promise.race([running, new Promise((resolve) => { timer = setTimeout(() => resolve(late), nvidiaDeadlineMs); })]);
+      if (result === late) {
+        stuck = running;
+        running.catch(() => {}).finally(() => { if (stuck === running) stuck = null; });
+        return [];
+      }
+    } catch (_) { return []; } finally { clearTimeout(timer); }
     if (!result || result.status !== 0 || result.error || result.timedOut) return [];
     const devices = [];
     for (const line of String(result.stdout || '').split(/\r?\n/)) {

@@ -347,16 +347,21 @@ function createEncoderPlanner({
 
   // The encoder for one chosen GPU, proven with that GPU's own arguments. A
   // GPU that cannot encode the family converts its clips on the CPU encoder.
+  // With `probe: false` only an answer known already is given (null when
+  // there is none), so a GPU that is converting right now is not tested:
+  // a test encode it fails only for being busy would rule it out for good.
   const cpuWarned = new Set();
-  async function selectFor(family, device) {
+  async function selectFor(family, device, { probe = true } = {}) {
     requireFamily(family);
     if (!device || typeof device.id !== 'string') throw new TypeError('device is required');
     if (device.kind === 'cpu') {
+      if (!probe && !selectionCache.has(`${family}:cpu`)) return null;
       const cpu = await selectCpuFallback(family);
       return Object.freeze({ family, codec: cpu.codec, hardware: false, device: Object.freeze({ id: 'cpu', kind: 'cpu' }) });
     }
     const cacheKey = `${family}:device:${device.id}`;
     if (selectionCache.has(cacheKey)) return selectionCache.get(cacheKey);
+    if (!probe) return null;
     const chosen = Object.freeze({
       id: device.id, kind: device.kind, node: device.node ?? null, index: device.index ?? null
     });
@@ -373,19 +378,24 @@ function createEncoderPlanner({
       if (proof.reason === 'timeout') timedOut = true;
     }
     const cpu = await selectCpuFallback(family);
+    // A probe that only ran out of time proves nothing: this time the CPU
+    // encodes (timedOut says why), the GPU is tried again next time and is
+    // not said to be unable.
+    if (timedOut) return Object.freeze({ family, codec: cpu.codec, hardware: false, device: chosen, timedOut: true });
     if (!cpuWarned.has(cacheKey)) {
       cpuWarned.add(cacheKey);
       console.warn(`[CONVERTER] ${device.name || device.id} cannot encode ${FAMILY_LABELS[family]}; its conversions use the CPU encoder.`);
     }
     const selected = Object.freeze({ family, codec: cpu.codec, hardware: false, device: chosen });
-    // a probe that only ran out of time is tried again next time
-    if (!timedOut) selectionCache.set(cacheKey, selected);
+    selectionCache.set(cacheKey, selected);
     return selected;
   }
 
   return Object.freeze({
-    select(family) {
+    // `probe: false`: only a choice made already, else null (see selectFor)
+    select(family, { probe = true } = {}) {
       requireFamily(family);
+      if (!probe) return Promise.resolve(selectionCache.get(`${family}:preferred`) || null);
       return selectFrom(family, platformCandidates(family, platform), `${family}:preferred`);
     },
     selectFor,

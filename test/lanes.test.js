@@ -14,7 +14,7 @@ const path = require('path');
 const { normalizeLanes, lanesTotal, DEVICE_ID, LANES } = require('../src/main/converter/contracts');
 const { createJobStore } = require('../src/main/converter/jobStore');
 const { createEncoderPlanner } = require('../src/main/converter/encoderPlanner');
-const { createHarness, fakeProbe, desktopWorks, until, sleep, recoveryFacts, ARC, UHD, T400, CPU } = require('./fixtures/lanesHarness');
+const { createHarness, fakeProbe, desktopWorks, gpuOf, until, sleep, recoveryFacts, ARC, UHD, T400, CPU } = require('./fixtures/lanesHarness');
 
 const hold = (args) => (args.includes('pipe:1') ? 'hold' : undefined);
 const TAIL = ['-tag:v', 'hvc1', '-fps_mode', 'passthrough', '-start_at_zero', '-avoid_negative_ts', 'make_zero', '-use_editlist', '0'];
@@ -366,18 +366,25 @@ function fakeServiceFactory(record) {
   };
 }
 
-async function openRuntime(dir, { devices, works = desktopWorks, service = null } = {}) {
+async function openRuntime(dir, { devices, works = desktopWorks, service = null, listMs = 0 } = {}) {
   const { createConverterRuntime } = require('../src/main/converter/runtime');
   const { spawn } = require('child_process');
   const probe = fakeProbe(works);
-  const discovery = { calls: 0 };
+  // (ms: how long one lookup takes)
+  const discovery = { calls: 0, ms: listMs };
   for (const name of ['data', 'temp']) fs.mkdirSync(path.join(dir, name), { recursive: true });
   const runtime = await createConverterRuntime({
     userDataPath: fs.realpathSync(path.join(dir, 'data')), tempPath: fs.realpathSync(path.join(dir, 'temp')),
     ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe', spawn, autoConvert: false,
     factories: {
       createEncoderPlanner: () => createEncoderPlanner({ runProbe: probe.runProbe, platform: 'linux' }),
-      createDeviceDiscovery: () => ({ list: async () => { discovery.calls += 1; return devices; } }),
+      createDeviceDiscovery: () => ({
+        list: async () => {
+          discovery.calls += 1;
+          if (discovery.ms) await sleep(discovery.ms);
+          return devices;
+        }
+      }),
       ...(service ? { createConverterJobService: service } : {})
     }
   });
@@ -390,7 +397,7 @@ test('devices() lists each device with the encoder it proved, and the default de
   delete process.env.CUDA_DEVICE_ORDER;
   try {
     const { runtime, probe, discovery } = await openRuntime(dir, { devices: [UHD, ARC, T400, CPU] });
-    assert.equal(process.env.CUDA_DEVICE_ORDER, 'PCI_BUS_ID', 'NVIDIA indexes in nvidia-smi\'s order');
+    assert.equal(process.env.CUDA_DEVICE_ORDER, undefined, 'CUDA keeps its own order for every ffmpeg that names no GPU');
     await runtime.start();
     assert.equal(probe.calls.length, 0, 'nothing is probed until something asks');
     assert.equal(discovery.calls, 0);
@@ -403,6 +410,7 @@ test('devices() lists each device with the encoder it proved, and the default de
     ]);
     assert.equal(out.devices[1].node, ARC.node);
     assert.equal(out.defaultDevice, UHD.id, 'QSV without a device runs on renderD128');
+    assert.deepEqual(out.defaultDevices, { h265: UHD.id, av1: 'cpu' }, 'per codec: no GPU here does AV1 without a device');
     const probed = probe.calls.length;
     await runtime.devices();
     assert.equal(probe.calls.length, probed, 'later calls are instant');
@@ -418,11 +426,158 @@ test('devices() lists each device with the encoder it proved, and the default de
     assert.equal((await nvidia.runtime.devices()).defaultDevice, T400.id, 'NVENC without a device is index 0');
     await nvidia.runtime.shutdown();
     const cpuOnly = await openRuntime(fs.mkdtempSync(path.join(dir, 'cpu-')), { devices: [CPU], works: (encoder) => encoder.startsWith('lib') });
-    assert.deepEqual(await cpuOnly.runtime.devices(), { devices: [{ ...CPU, encoders: { h265: 'libx265', av1: 'libsvtav1' } }], defaultDevice: 'cpu' });
+    assert.deepEqual(await cpuOnly.runtime.devices(), { devices: [{ ...CPU, encoders: null }], defaultDevice: null, defaultDevices: null });
+    assert.equal(cpuOnly.probe.calls.length, 0, 'no GPU: nothing is tested');
     await cpuOnly.runtime.shutdown();
   } finally {
     if (previousOrder === undefined) delete process.env.CUDA_DEVICE_ORDER;
     else process.env.CUDA_DEVICE_ORDER = previousOrder;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('devices(): one GPU tests nothing and logs nothing; a GPU converting now, or a test that ran out of time, is not ruled out', async (t) => {
+  const warnings = captureWarnings(t);
+  const said = () => warnings.filter((line) => /cannot encode/.test(line));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sm-lanes-rt-'));
+  try {
+    // one GPU without AV1 (a UHD 770): the page keeps its single number
+    const one = await openRuntime(fs.mkdtempSync(path.join(dir, 'one-')), { devices: [UHD, CPU] });
+    assert.deepEqual(await one.runtime.devices(), {
+      devices: [{ ...UHD, encoders: null }, { ...CPU, encoders: null }], defaultDevice: null, defaultDevices: null
+    });
+    assert.equal(one.probe.calls.length, 0, 'no test encodes');
+    assert.deepEqual(said(), [], 'and nothing new in the log');
+    await one.runtime.shutdown();
+
+    // two GPUs while a job converts: only what is known already
+    let encoding = [{ jobId: 'job-1', encoder: 'hevc_qsv' }];
+    const busy = await openRuntime(fs.mkdtempSync(path.join(dir, 'busy-')), {
+      devices: [UHD, ARC, CPU], service: () => ({ ...fakeServiceFactory([])(), activeEncodes: () => encoding })
+    });
+    let out = await busy.runtime.devices();
+    assert.equal(busy.probe.calls.length, 0, 'a GPU converting now is not tested');
+    assert.deepEqual(out.devices.map((d) => d.encoders), [{}, {}, {}], 'not known yet: left out, not "can\'t"');
+    assert.deepEqual(out.defaultDevices, { h265: null, av1: null });
+    encoding = [];
+    out = await busy.runtime.devices();
+    assert.deepEqual(out.devices.map((d) => d.encoders), [
+      { h265: 'hevc_qsv', av1: null }, { h265: 'hevc_qsv', av1: 'av1_qsv' }, { h265: 'libx265', av1: 'libsvtav1' }
+    ]);
+    await busy.runtime.shutdown();
+
+    // a test encode that only ran out of time: not "can't", tried again next time
+    let slow = true;
+    const timing = await openRuntime(fs.mkdtempSync(path.join(dir, 'slow-')), {
+      devices: [UHD, ARC, CPU],
+      works: (encoder, args) => (slow && encoder === 'hevc_qsv' && args.includes(`qsv=qsvenc:hw_any,child_device=${ARC.node}`)
+        ? 'timeout' : desktopWorks(encoder, args))
+    });
+    out = await timing.runtime.devices();
+    assert.deepEqual(out.devices[1].encoders, { av1: 'av1_qsv' }, 'H.265 on the Arc: not known yet');
+    assert.equal(said().some((line) => /Arc A380 cannot encode H\.265/.test(line)), false);
+    slow = false;
+    out = await timing.runtime.devices();
+    assert.deepEqual(out.devices[1].encoders, { h265: 'hevc_qsv', av1: 'av1_qsv' });
+    await timing.runtime.shutdown();
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the default device per codec: AV1 may use another GPU than H.265; NVENC only when one NVIDIA GPU can', async (t) => {
+  captureWarnings(t);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sm-lanes-rt-'));
+  const open = (devices, works) => openRuntime(fs.mkdtempSync(path.join(dir, 'rt-')), { devices, works });
+  const RTX = { ...T400, id: 'pci:0000:02:00.0', pci: '0000:02:00.0', name: 'NVIDIA GeForce RTX 3060', index: 1 };
+  try {
+    // an Arc A380 on renderD128 next to a T400 (NVENC H.265, no AV1)
+    const arc = { ...ARC, node: '/dev/dri/renderD128' };
+    const mixed = await open([arc, T400, CPU], (encoder, args) => {
+      if (encoder.startsWith('lib')) return true;
+      const gpu = gpuOf(args);
+      if (encoder.endsWith('_qsv')) return gpu === null || gpu === arc.node;
+      return encoder === 'hevc_nvenc' && (gpu === null || gpu === 'nvidia0');
+    });
+    const out = await mixed.runtime.devices();
+    assert.deepEqual(out.defaultDevices, { h265: T400.id, av1: arc.id }, 'AV1 without lanes runs on the Arc');
+    assert.equal(out.defaultDevice, T400.id, 'H.265\'s, for pages that know one');
+    await mixed.runtime.shutdown();
+
+    // two NVIDIA GPUs that can: CUDA's own order picks, which the list cannot tell
+    const both = await open([T400, RTX, CPU], (encoder) => encoder.startsWith('lib') || encoder === 'hevc_nvenc');
+    assert.equal((await both.runtime.devices()).defaultDevices.h265, null);
+    await both.runtime.shutdown();
+    // a card without NVENC (index 0) next to one with it: the one that can
+    const GT = { ...T400, name: 'NVIDIA GeForce GT 1030' };
+    const one = await open([GT, RTX, CPU], (encoder, args) => encoder.startsWith('lib') || (encoder === 'hevc_nvenc' && gpuOf(args) !== 'nvidia0'));
+    assert.equal((await one.runtime.devices()).defaultDevices.h265, RTX.id);
+    await one.runtime.shutdown();
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a job\'s lanes find their GPUs with one device lookup, however long it takes; callers at the same time share it', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sm-lanes-rt-'));
+  try {
+    // one lookup takes longer than an answer is reused for (2 s)
+    const { runtime, discovery } = await openRuntime(dir, { devices: [UHD, ARC, CPU], works: (encoder) => encoder.startsWith('lib'), listMs: 2_200 });
+    const found = [];
+    for (const id of [UHD.id, ARC.id, 'cpu']) found.push(await runtime.resolveDevice(id));
+    assert.deepEqual(found, [UHD, ARC, CPU]);
+    assert.equal(discovery.calls, 1, 'one lookup for the three lanes');
+    discovery.ms = 0;
+    discovery.calls = 0;
+    await Promise.all([runtime.devices(), runtime.devices(), runtime.resolveDevice(ARC.id)]);
+    assert.equal(discovery.calls, 1, 'one lookup at a time');
+    await runtime.shutdown();
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('only an ffmpeg that names an NVIDIA GPU by index numbers them in PCI order; the rest keep CUDA\'s own order', async () => {
+  const { createBoundedProcessRunner, createConverterRuntime } = require('../src/main/converter/runtime');
+  const { EventEmitter } = require('events');
+  const seen = [];
+  const spawn = (_command, _args, options) => {
+    seen.push(options);
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = () => {};
+    setImmediate(() => child.emit('close', 0, null));
+    return child;
+  };
+  const run = createBoundedProcessRunner({ spawn });
+  await run('ffmpeg', ['-c:v', 'hevc_nvenc', '-gpu', '1']);
+  await run('ffmpeg', ['-hwaccel', 'cuda', '-hwaccel_device', '0', '-i', 'clip.mp4']);
+  await run('ffmpeg', ['-hwaccel', 'vaapi', '-hwaccel_device', '/dev/dri/renderD128']);
+  await run('ffmpeg', ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda', '-i', 'clip.mp4', '-c:v', 'hevc_nvenc']);
+  assert.deepEqual(seen.map((options) => options.env?.CUDA_DEVICE_ORDER ?? null), ['PCI_BUS_ID', 'PCI_BUS_ID', null, null]);
+  assert.equal('env' in seen[3], false, 'a job without lanes: the server\'s own environment, as always');
+  assert.equal(seen[0].env.PATH, process.env.PATH, 'the rest of the environment is kept');
+
+  // the converter's encodes too
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sm-lanes-rt-'));
+  try {
+    for (const name of ['data', 'temp']) fs.mkdirSync(path.join(dir, name));
+    let deps;
+    const runtime = await createConverterRuntime({
+      userDataPath: fs.realpathSync(path.join(dir, 'data')), tempPath: fs.realpathSync(path.join(dir, 'temp')),
+      ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe', spawn, autoConvert: false,
+      factories: {
+        createConverterJobService: (given) => { deps = deps || given; return fakeServiceFactory([])(); },
+        createDeviceDiscovery: () => ({ list: async () => [CPU] })
+      }
+    });
+    seen.length = 0;
+    deps.spawnProcess('ffmpeg', ['-c:v', 'hevc_nvenc', '-gpu', '0'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    deps.spawnProcess('ffmpeg', ['-c:v', 'hevc_nvenc'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    assert.deepEqual(seen.map((options) => options.env?.CUDA_DEVICE_ORDER ?? null), ['PCI_BUS_ID', null]);
+    await runtime.shutdown();
+  } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });

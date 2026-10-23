@@ -147,6 +147,33 @@ test('NVIDIA GPUs come from nvidia-smi, bus ids normalised, ordered by index aft
   }
 });
 
+test('an nvidia-smi that never exits (a wedged driver) does not hold up the list, and no second one is started', async () => {
+  const m = machine();
+  try {
+    fs.writeFileSync(m.node('renderD129'), '');
+    let started = 0;
+    let exit;
+    // stopped at its timeout, it never closes (stuck in the kernel)
+    const runCommand = () => { started += 1; return new Promise((resolve) => { exit = resolve; }); };
+    const discovery = createDeviceDiscovery({ devRoot: m.dev, sysRoot: m.sys, platform: 'linux', runCommand, statRdev: null, nvidiaDeadlineMs: 50 });
+    const begun = Date.now();
+    assert.deepEqual((await discovery.list()).map((d) => d.id), ['pci:0000:03:00.0', 'cpu'], 'the Intel GPU and the CPU, without waiting');
+    assert.ok(Date.now() - begun < 2_000);
+    assert.deepEqual((await discovery.list()).map((d) => d.id), ['pci:0000:03:00.0', 'cpu']);
+    assert.equal(started, 1, 'the stuck one is not joined by another');
+    // once it has gone, nvidia-smi is asked again
+    exit({ status: null, signal: 'SIGTERM', timedOut: true, stdout: '', stderr: '' });
+    await new Promise((resolve) => setImmediate(resolve));
+    const next = discovery.list();
+    while (started < 2) await new Promise((resolve) => setImmediate(resolve));
+    exit({ status: 0, stdout: '0, 00000000:01:00.0, NVIDIA T400\n', stderr: '' });
+    assert.deepEqual((await next).map((d) => d.id), ['pci:0000:03:00.0', 'pci:0000:01:00.0', 'cpu']);
+    assert.equal(started, 2);
+  } finally {
+    fs.rmSync(m.root, { recursive: true, force: true });
+  }
+});
+
 test('other systems and a container without GPUs have only the CPU', async () => {
   const m = machine();
   try {

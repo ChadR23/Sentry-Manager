@@ -150,6 +150,15 @@ function validateProcessRequest(command, args, options) {
       || options?.shell === true) throw runtimeError('INVALID_PROCESS_REQUEST');
 }
 
+// An ffmpeg that picks an NVIDIA GPU by its index (-gpu N, -hwaccel_device N)
+// numbers the GPUs as nvidia-smi does, in PCI order. Everything else keeps
+// CUDA's own order ("fastest first"), so a job without lanes encodes on the
+// GPU it always did.
+function cudaOrderOptions(args, spawnOptions = {}) {
+  const byIndex = args.some((arg, index) => (arg === '-gpu' || arg === '-hwaccel_device') && /^\d+$/.test(args[index + 1] || ''));
+  return byIndex ? { env: { ...(spawnOptions.env || process.env), CUDA_DEVICE_ORDER: 'PCI_BUS_ID' } } : {};
+}
+
 function createBoundedProcessRunner(options = {}) {
   if (typeof options.spawn !== 'function') throw new TypeError('spawn is required');
   const defaultTimeoutMs = positiveInteger(options.timeoutMs, 30_000);
@@ -218,7 +227,8 @@ function createBoundedProcessRunner(options = {}) {
           cwd: requestOptions.cwd,
           windowsHide: true,
           shell: false,
-          stdio: ['ignore', 'pipe', 'pipe']
+          stdio: ['ignore', 'pipe', 'pipe'],
+          ...cudaOrderOptions(args)
         });
       } catch (_error) {
         finish({ status: null, signal: null, error: { code: 'PROCESS_START_FAILED' } });
@@ -472,9 +482,6 @@ async function createConverterRuntime(options = {}) {
     throw runtimeError('CONVERTER_TOOLS_UNAVAILABLE');
   }
   if (typeof options.spawn !== 'function') throw new TypeError('spawn is required');
-  // NVIDIA GPUs chosen by index (-gpu N, -hwaccel_device N) must be numbered
-  // as nvidia-smi numbers them; CUDA's own order is "fastest first".
-  process.env.CUDA_DEVICE_ORDER ||= 'PCI_BUS_ID';
 
   const jobsRoot = pathApi.join(options.userDataPath, 'converter-jobs');
   // Clips known to be converted already, so a run skips them while it
@@ -543,6 +550,8 @@ async function createConverterRuntime(options = {}) {
     ...(typeof options.deviceNameOf === 'function' ? { nameOf: options.deviceNameOf } : {}),
     ...(options.deviceDiscovery || {})
   });
+  // One lookup at a time: callers while it runs share it, and its answer
+  // is reused for DEVICE_LIST_TTL_MS after it arrives.
   let deviceList = null;
   async function listDevices() {
     try {
@@ -550,9 +559,16 @@ async function createConverterRuntime(options = {}) {
       return Array.isArray(list) && list.length > 0 ? list : [CPU_DEVICE];
     } catch (_) { return [CPU_DEVICE]; }
   }
+  function lookUpDevices() {
+    if (deviceList && deviceList.at === null) return deviceList.list;
+    const entry = { at: null, list: null };
+    entry.list = listDevices().finally(() => { entry.at = Date.now(); });
+    deviceList = entry;
+    return entry.list;
+  }
   function recentDevices() {
-    if (!deviceList || Date.now() - deviceList.at > DEVICE_LIST_TTL_MS) deviceList = { at: Date.now(), list: listDevices() };
-    return deviceList.list;
+    if (deviceList && (deviceList.at === null || Date.now() - deviceList.at <= DEVICE_LIST_TTL_MS)) return deviceList.list;
+    return lookUpDevices();
   }
   // A lane's device id from a saved job or the browser, looked up only in
   // this list: node paths and NVIDIA indexes always come from here.
@@ -560,12 +576,20 @@ async function createConverterRuntime(options = {}) {
     if (typeof id !== 'string' || !DEVICE_ID.test(id)) return null;
     return (await recentDevices()).find((device) => device.id === id) || null;
   }
-  // The device a job without lanes encodes on (planner.select's choice).
-  async function defaultDeviceOf(list) {
+  // The device a job without lanes encodes a codec on (planner.select's
+  // choice). NVENC without -gpu takes the first NVIDIA GPU that can, in
+  // CUDA's own order, which the list can only tell when one NVIDIA GPU can
+  // (`able` says which can; unknown counts as able). `probe: false`: only a
+  // choice made already, else null.
+  async function defaultDeviceOf(list, family, { able = () => true, probe = true } = {}) {
     let selected;
-    try { selected = await planner.select('h265'); } catch (_) { return null; }
+    try { selected = await planner.select(family, { probe }); } catch (_) { return null; }
+    if (!selected) return null;
     if (selected.hardware !== true) return 'cpu';
-    if (selected.codec.endsWith('_nvenc')) return list.find((device) => device.kind === 'nvidia' && device.index === 0)?.id || null;
+    if (selected.codec.endsWith('_nvenc')) {
+      const nvidia = list.filter((device) => device.kind === 'nvidia' && able(device));
+      return nvidia.length === 1 ? nvidia[0].id : null;
+    }
     return list.find((device) => device.kind === 'dri' && pathApi.basename(device.node || '') === 'renderD128')?.id || null;
   }
   const adapters = factories.createConverterAdapters({
@@ -627,7 +651,7 @@ async function createConverterRuntime(options = {}) {
   };
   const spawnProcess = (command, args, spawnOptions = {}) => {
     validateProcessRequest(command, args, spawnOptions);
-    return options.spawn(command, args, { ...spawnOptions, shell: false, windowsHide: true });
+    return options.spawn(command, args, { ...spawnOptions, ...cudaOrderOptions(args, spawnOptions), shell: false, windowsHide: true });
   };
   // Everything a converter service needs besides its job store and staging
   // area; the benchmark builds an identical, isolated service from this.
@@ -646,6 +670,9 @@ async function createConverterRuntime(options = {}) {
     }),
     // A lane's GPU, from the devices this container has now.
     resolveDevice,
+    // The device a job without lanes encodes on: its workers and that
+    // device's lane share it while a job switches between the two.
+    defaultDevice: async (codec) => defaultDeviceOf(await recentDevices(), codec),
     pathApi,
     network,
     classifyPath: (target) => classifyPath(target, { pathApi, platform, volumeInfo }),
@@ -835,6 +862,11 @@ async function createConverterRuntime(options = {}) {
   // isolated temporary job store, staging area and output folder.
   let benchmarkController = null;
   const benchmarkServices = new Set();
+  // ffmpeg converting right now (a job's or the benchmark's)
+  function encodingNow() {
+    if (benchmarkController) return true;
+    return typeof service.activeEncodes === 'function' && service.activeEncodes().length > 0;
+  }
   async function findBenchmarkClips(sourceRoot, signal) {
     if (typeof sourceRoot !== 'string' || sourceRoot.length === 0) return [];
     // In an archive that is partly converted the first folders hold mostly
@@ -969,7 +1001,8 @@ async function createConverterRuntime(options = {}) {
           }
           return runs;
         };
-        const gpus = (await listDevices()).filter((device) => device.kind !== 'cpu');
+        const gpus = (await lookUpDevices()).filter((device) => device.kind !== 'cpu');
+        if (controller.signal.aborted) throw runtimeError('CANCELLED');
         if (gpus.length < 2 || typeof planner.selectFor !== 'function') {
           const runs = await runCodecs({ select: (current) => planner.select(current) });
           // Single-codec shape kept for older callers; codecs[] holds every run.
@@ -999,23 +1032,40 @@ async function createConverterRuntime(options = {}) {
       benchmarkController?.abort();
     },
     // The devices conversions can be set to use, each with the encoder it
-    // proved for H.265 and AV1 (null: that GPU can only do it on the CPU),
-    // and the one a job without lanes uses. Proofs are kept, so only the
-    // first call runs test encodes.
+    // proved for H.265 and AV1 (null: that GPU can only do it on the CPU;
+    // left out: not known yet), and the one a job without lanes uses for
+    // each codec. Proofs are kept, so only the first call runs test encodes.
+    // With fewer than two GPUs the Encoder page keeps its single number:
+    // nothing is tested or logged then (encoders null), as before lanes.
+    // While something converts, a GPU is not tested either (a test encode
+    // it fails only for being busy would rule it out); what is known
+    // already is given.
     async devices() {
-      const list = await listDevices();
-      deviceList = { at: Date.now(), list: Promise.resolve(list) };
+      const list = await lookUpDevices();
+      if (list.filter((device) => device.kind !== 'cpu').length < 2) {
+        return { devices: list.map((device) => ({ ...device, encoders: null })), defaultDevice: null, defaultDevices: null };
+      }
+      const probe = !encodingNow();
       const encoderFor = async (family, device) => {
         try {
-          const chosen = await planner.selectFor(family, device);
+          const chosen = await planner.selectFor(family, device, { probe });
+          if (!chosen || chosen.timedOut === true) return undefined;
           return chosen.hardware === true || device.kind === 'cpu' ? chosen.codec : null;
         } catch (_) { return null; }
       };
       const devices = await Promise.all(list.map(async (device) => {
         const [h265, av1] = await Promise.all([encoderFor('h265', device), encoderFor('av1', device)]);
-        return { ...device, encoders: { h265, av1 } };
+        const encoders = {};
+        if (h265 !== undefined) encoders.h265 = h265;
+        if (av1 !== undefined) encoders.av1 = av1;
+        return { ...device, encoders };
       }));
-      return { devices, defaultDevice: await defaultDeviceOf(list) };
+      const defaultFor = (family) => defaultDeviceOf(list, family, {
+        probe, able: (device) => devices.find((entry) => entry.id === device.id)?.encoders[family] !== null
+      });
+      const defaultDevices = { h265: await defaultFor('h265'), av1: await defaultFor('av1') };
+      // (defaultDevice: H.265's, for pages that know only the one)
+      return { devices, defaultDevice: defaultDevices.h265, defaultDevices };
     },
     resolveDevice,
     // Every ffmpeg encoding right now, a benchmark's included (those carry
