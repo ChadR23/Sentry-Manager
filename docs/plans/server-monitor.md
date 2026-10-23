@@ -59,6 +59,30 @@ thermal zone only for the GPU).
 3. Power: GPU W, CPU W via supervisor + optional compose line, kWh/cost per run, benchmark files per kWh, Jobs energy.
 4. Optional: 24 h history graphs, per-core heat strip, CSV export.
 
+## Also in the next update: already-converted clips skip instantly
+
+Reported by the owner: after deleting footage and updating, a new run skipped
+already-converted clips slowly (23 skipped in 78 s with 21,791 waiting, ETA
+20 h). Cause: the skip check is inside `processVideoOnce`
+(`src/main/converter/jobService.js`): each clip waits for a free encode slot,
+then ffprobe reads it over SMB, and only then is it marked
+`already-converted`. Skips are throttled by encoding, and the ETA counts
+clips that will only be skipped. Nothing remembers what was converted.
+
+Plan:
+1. A converted-clips index in /data (path + size + mtime + inode -> codec),
+   written when a clip is converted or a probe finds H.265/AV1. Discovery
+   already stats every file, so a matching entry is skipped at once without
+   opening the file (the "tags" the owner expected, kept in the app instead
+   of in the files).
+2. For clips not in the index: a separate fast check during discovery (read
+   the MP4 sample entry, `avc1` vs `hvc1`/`hev1`/`av01`, from the moov box,
+   first/last few hundred KB) with its own concurrency, so skips never take
+   an encode slot.
+3. Waiting / time remaining count only clips that will really be encoded.
+4. Test: 20,000 converted + 100 original clips -> all skips done within
+   seconds, encode slots only see originals.
+
 ## Also open from this session
 
 - Owner to check on a real iPhone that all 6 Viewer cameras play (WebKit 27.2 on the PC stalled 4 of 6; WebKit 26 here played all 6).
