@@ -99,6 +99,7 @@ function validateOptions(options) {
   if (options.stat !== undefined && typeof options.stat !== 'function') throw new TypeError('stat must be a function');
   if (options.readFile !== undefined && typeof options.readFile !== 'function') throw new TypeError('readFile must be a function');
   if (options.createSnapshot !== undefined && typeof options.createSnapshot !== 'function') throw new TypeError('createSnapshot must be a function');
+  if (options.trustedSnapshot !== undefined && typeof options.trustedSnapshot !== 'boolean') throw new TypeError('trustedSnapshot must be a boolean');
   if (options.decodeAccel !== undefined && (!Array.isArray(options.decodeAccel) || options.decodeAccel.length > 8
       || !options.decodeAccel.every((arg) => typeof arg === 'string' && arg.length > 0 && arg.length < 256))) {
     throw new TypeError('decodeAccel must be a short argument list');
@@ -671,12 +672,14 @@ function normalizeSnapshotContract(snapshot, options, outputBytes, outputSha256)
   }
 }
 
-async function readExactSnapshot(snapshot, outputBytes, outputSha256) {
+// trusted: the snapshot's own read() already compared these bytes with the
+// digest (one read, one hash).
+async function readExactSnapshot(snapshot, outputBytes, outputSha256, trusted = false) {
   const bytes = await Promise.resolve(snapshot.read());
-  if (!Buffer.isBuffer(bytes) || bytes.length !== outputBytes || bytesSha256(bytes) !== outputSha256) {
+  if (!Buffer.isBuffer(bytes) || bytes.length !== outputBytes || (!trusted && bytesSha256(bytes) !== outputSha256)) {
     throw new Error('Snapshot integrity failed');
   }
-  return Buffer.from(bytes);
+  return trusted ? bytes : Buffer.from(bytes);
 }
 
 async function cleanupFailure(snapshot, result) {
@@ -763,7 +766,7 @@ async function readSourceAuthority(options, readFile, sourceBytes, outputBytes) 
 // inspected.
 async function verifyIntegrityOnly({ options, profileId, sourceBytes, outputBytes, outputSha256, snapshot }) {
   try {
-    await readExactSnapshot(snapshot, outputBytes, outputSha256);
+    await readExactSnapshot(snapshot, outputBytes, outputSha256, options.trustedSnapshot === true);
   } catch (_error) {
     return failure(VERIFICATION_REASONS.SNAPSHOT_FAILED, sourceBytes, outputBytes, { kind: 'integrity-failed' });
   }
@@ -812,7 +815,7 @@ async function verifyOwnedSnapshot({ options, profileId, sourceBytes, outputByte
 
   let candidateSnapshotBytes;
   try {
-    candidateSnapshotBytes = await readExactSnapshot(snapshot, outputBytes, outputSha256);
+    candidateSnapshotBytes = await readExactSnapshot(snapshot, outputBytes, outputSha256, options.trustedSnapshot === true);
   } catch (_error) {
     return failure(VERIFICATION_REASONS.SNAPSHOT_FAILED, sourceBytes, outputBytes, { kind: 'integrity-failed' });
   }
@@ -1020,7 +1023,8 @@ async function verifyCandidate(options) {
       bytes: candidateBytes,
       size: outputBytes,
       sha256: outputSha256,
-      ...(options.adoptCandidate === true ? { adoptPath: options.candidate } : {})
+      ...(options.adoptCandidate === true ? { adoptPath: options.candidate } : {}),
+      ...(options.trustedSnapshot === true ? { trusted: true } : {})
     }));
   } catch (_error) {
     return failure(VERIFICATION_REASONS.SNAPSHOT_FAILED, sourceBytes, outputBytes, { kind: 'create-failed' });
@@ -1048,10 +1052,14 @@ async function verifyCandidate(options) {
   }
   if (!verified.ok) return cleanupFailure(ownedSnapshot, verified);
 
-  try {
-    await readExactSnapshot(ownedSnapshot, outputBytes, outputSha256);
-  } catch (_error) {
-    return cleanupFailure(ownedSnapshot, failure(VERIFICATION_REASONS.SNAPSHOT_FAILED, sourceBytes, outputBytes, { kind: 'integrity-failed' }));
+  // Read once more after the checks (a private snapshot the converter owns is
+  // compared with the digest again as it is copied out for publication).
+  if (options.trustedSnapshot !== true) {
+    try {
+      await readExactSnapshot(ownedSnapshot, outputBytes, outputSha256);
+    } catch (_error) {
+      return cleanupFailure(ownedSnapshot, failure(VERIFICATION_REASONS.SNAPSHOT_FAILED, sourceBytes, outputBytes, { kind: 'integrity-failed' }));
+    }
   }
 
   let transferred;

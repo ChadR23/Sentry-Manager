@@ -55,10 +55,16 @@ async function adoptIntoSnapshot(adoptPath, snapshotPath, size) {
   return true;
 }
 
-async function createVerificationSnapshot({ bytes, size = bytes?.length, sha256: expectedSha256 = bytes && sha256(bytes), tempRoot = os.tmpdir(), adoptPath } = {}) {
+// trusted: the caller hashed these very bytes (verification's own read) and
+// passes that digest; it is not computed again here, and transfer() does not
+// read the snapshot once more (its bytes are compared with the digest as they
+// are copied out for publication).
+async function createVerificationSnapshot({ bytes, size = bytes?.length, sha256: expectedSha256 = bytes && sha256(bytes), tempRoot = os.tmpdir(), adoptPath, trusted = false } = {}) {
   if (!Buffer.isBuffer(bytes) || bytes.length === 0) throw new TypeError('Snapshot bytes must be a non-empty Buffer');
   if (!Number.isSafeInteger(size) || size !== bytes.length) throw new TypeError('Snapshot size must match its bytes');
-  if (!validDigest(expectedSha256) || expectedSha256 !== sha256(bytes)) throw new TypeError('Snapshot digest must match its bytes');
+  if (!validDigest(expectedSha256) || (trusted !== true && expectedSha256 !== sha256(bytes))) {
+    throw new TypeError('Snapshot digest must match its bytes');
+  }
   if (typeof tempRoot !== 'string' || !path.isAbsolute(tempRoot)) throw new TypeError('Snapshot temporary root must be absolute');
 
   const token = crypto.randomUUID();
@@ -105,7 +111,12 @@ async function createVerificationSnapshot({ bytes, size = bytes?.length, sha256:
   };
   const transfer = async () => {
     if (cleaned) throw new Error('Snapshot is no longer available');
-    await read();
+    if (trusted === true) {
+      const stat = await fs.promises.lstat(snapshotPath);
+      if (!stat.isFile() || stat.nlink !== 1 || stat.size !== size) throw new Error('Snapshot integrity check failed');
+    } else {
+      await read();
+    }
     transferred = true;
     return Object.freeze({ path: snapshotPath, token });
   };

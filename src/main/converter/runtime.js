@@ -608,7 +608,10 @@ async function createConverterRuntime(options = {}) {
       createSnapshot: snapshotRegistry.createSnapshot,
       // The candidate is a private temp file: move it into the snapshot
       // instead of writing a second full copy of every converted clip.
-      adoptCandidate: true
+      adoptCandidate: true,
+      // and that private snapshot is hashed once where it is analysed (the
+      // copy that publishes it compares its bytes with that hash again)
+      ...(options.privateTempIdentityCleanup === true ? { trustedSnapshot: true } : {})
     }
   });
 

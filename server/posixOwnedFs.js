@@ -115,9 +115,14 @@ function createPosixOwnedFs(options = {}) {
     await fsp.unlink(from);
   }
 
+  // verifiesContent: remove() and promote({ removeSource: true }) hash the
+  // whole file, with it held open, against the recorded SHA-256 right before
+  // they act (promote with a link, removeSource false, checks identity only),
+  // so the converter need not read it once more beforehand.
   const removeOwned = Object.freeze({
     atomicOwnershipCheck: true,
     guardedRemoval: true,
+    verifiesContent: true,
     async remove({ target, expected, guard } = {}) {
       if (!validPath(target) || !validExpected(expected)
           || (guard !== undefined && (!guard || !validPath(guard.target) || !validExpected(guard.expected)))) {
@@ -162,6 +167,7 @@ function createPosixOwnedFs(options = {}) {
   const renameExclusive = Object.freeze({
     atomicNoReplace: true,
     atomicExpectedOwnership: true,
+    verifiesContent: true,
     async promote({ from, to, expectedSource, removeSource = false } = {}) {
       if (!validPath(from) || !validPath(to) || path.resolve(from) === path.resolve(to)) {
         throw errorWithCode('Promotion requires two distinct absolute paths.', 'ENOTSUP');

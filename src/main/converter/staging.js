@@ -225,6 +225,13 @@ function createFileTransaction(options = {}) {
     throw transactionError('INVALID_TRANSACTION_INPUT');
   }
   const privateIdentity = options.privateTempCleanup === 'identity';
+  // The adapters prove a file's whole content (held open) right before they
+  // move or remove it: the converter's own read of it just before is then a
+  // second read of the same bytes (over the network for the share) and is
+  // left out. Without that promise (the desktop's default adapters) every
+  // check stays as it was.
+  const adapterVerifies = options.removeOwned?.verifiesContent === true
+    && options.renameExclusive?.verifiesContent === true;
   const capabilities = Object.freeze({
     separatePublication: separatePromotionAvailable
       ? ownershipCleanupAvailable ? 'native-atomic' : 'hardlink-cleanup-pending'
@@ -536,8 +543,12 @@ function createFileTransaction(options = {}) {
         const { bytesRead } = await sourceHandle.read(buffer, 0, buffer.length, null);
         if (bytesRead === 0) break;
         const nextSize = size + bytesRead;
-        const nextSha256 = hash.copy().update(buffer.subarray(0, bytesRead)).digest('hex');
         if (!Number.isSafeInteger(nextSize)) throw transactionError(failureCode);
+        // Each byte is hashed once; a chunk's running digest is taken only
+        // when a journal records it.
+        hash.update(buffer.subarray(0, bytesRead));
+        const journaled = Boolean(onChunkPending || onChunkCommitted);
+        const nextSha256 = journaled ? hash.copy().digest('hex') : null;
         if (onChunkPending) await onChunkPending({ size: nextSize, sha256: nextSha256, stat: targetBefore });
         let offset = 0;
         while (offset < bytesRead) {
@@ -546,12 +557,15 @@ function createFileTransaction(options = {}) {
           if (!Number.isSafeInteger(bytesWritten) || bytesWritten <= 0) throw transactionError(failureCode);
           offset += bytesWritten;
         }
-        await targetHandle.sync();
-        const progressStat = await exactHandleStat(targetHandle);
-        if (!sameIdentity(targetBefore, progressStat) || statSize(progressStat) !== nextSize) throw transactionError(failureCode);
-        hash.update(buffer.subarray(0, bytesRead));
         size = nextSize;
-        if (onChunkCommitted) await onChunkCommitted({ size, sha256: nextSha256, stat: progressStat });
+        // A chunk is synced on its own only when the journal records it as
+        // durable; otherwise once at the end.
+        if (onChunkCommitted) {
+          await targetHandle.sync();
+          const progressStat = await exactHandleStat(targetHandle);
+          if (!sameIdentity(targetBefore, progressStat) || statSize(progressStat) !== nextSize) throw transactionError(failureCode);
+          await onChunkCommitted({ size, sha256: nextSha256, stat: progressStat });
+        }
       }
       await targetHandle.sync();
       const sourceAfter = await exactHandleStat(sourceHandle);
@@ -782,6 +796,27 @@ function createFileTransaction(options = {}) {
       device: String(observed.stat.dev), inode: String(observed.stat.ino) };
   }
 
+  // The original by its identity only (no read): a plain single-link file at
+  // its real path with the device, inode and size of the version that was
+  // converted. The full content check comes from the adapter, with the file
+  // held open, right before the original is moved.
+  async function assertSourceIdentity(source, expected) {
+    validateSourceAuthority(expected);
+    let stat;
+    try {
+      stat = await exactLstat(source);
+      const real = await canonicalExisting(source);
+      if (!samePath(real, source, pathApi, platform)) throw new Error('aliased');
+    } catch (_error) {
+      throw transactionError('SOURCE_CHANGED');
+    }
+    if (!isRegularFile(stat) || !singleLink(stat) || safeStatPart(stat.dev) !== expected.device
+        || safeStatPart(stat.ino) !== expected.inode || statSize(stat) !== expected.size) {
+      throw transactionError('SOURCE_CHANGED');
+    }
+    return stat;
+  }
+
   async function assertSourceAuthority(source, expected, signal) {
     validateSourceAuthority(expected);
     const observed = await captureSource({ source, signal });
@@ -806,7 +841,14 @@ function createFileTransaction(options = {}) {
           && metadata.state !== 'cleanup-pending')) {
       throw transactionError('UNSAFE_OWNED_PATH');
     }
-    await readExactFile(target, metadata, 'UNSAFE_OWNED_PATH');
+    if (adapterVerifies) {
+      // the adapter hashes it (held open) against the record; the path
+      // itself must still be the file's real path (no linked folder)
+      const real = await canonicalExisting(target).catch(() => null);
+      if (!real || !samePath(real, target, pathApi, platform)) throw transactionError('UNSAFE_OWNED_PATH');
+    } else {
+      await readExactFile(target, metadata, 'UNSAFE_OWNED_PATH');
+    }
     if (!ownershipCleanupAvailable) throw transactionError('OWNED_CLEANUP_FAILED');
     try {
       const result = await options.removeOwned.remove({
@@ -827,10 +869,41 @@ function createFileTransaction(options = {}) {
     }
   }
 
-  async function removeReplacementBackup(backup, metadata, finalPath, artifact) {
+  // The original to its backup name. The adapter hashes it (held open)
+  // against the converted version first; a mismatch there means the
+  // original changed.
+  async function promoteBackup(source, backup, expectedSource) {
+    try {
+      return await promoteNoReplace(source, backup, 'REPLACEMENT_COLLISION', { expectedSource, removeSource: true });
+    } catch (error) {
+      if (error instanceof FileTransactionError && error.code === 'UNSAFE_OWNED_PATH') throw transactionError('SOURCE_CHANGED');
+      throw error;
+    }
+  }
+
+  // The backup's record: the inode just moved there is the original the
+  // adapter verified, so its hash is the converted version's (no read);
+  // without such an adapter it is read back as before.
+  async function backupRecord(backup, nonce, promotion, expectedSource, signal) {
+    const state = promotion.sourceRemoved ? 'owned' : 'cleanup-pending';
+    if (adapterVerifies) {
+      const stat = await exactLstat(backup).catch(() => null);
+      if (!stat || !isRegularFile(stat) || safeStatPart(stat.dev) !== expectedSource.device
+          || safeStatPart(stat.ino) !== expectedSource.inode || statSize(stat) !== expectedSource.size) {
+        throw transactionError('REPLACEMENT_FAILED');
+      }
+      return artifactMetadata(backup, nonce, state, stat, expectedSource.sha256, expectedSource.size);
+    }
+    const observed = await inspectExactFile(backup, signal, 'REPLACEMENT_FAILED');
+    return artifactMetadata(backup, nonce, state, observed.stat, observed.sha256, observed.size);
+  }
+
+  async function removeReplacementBackup(backup, metadata, finalPath, artifact, expectedFinal = null) {
     if (options.removeOwned?.guardedRemoval !== true) throw transactionError('ATOMIC_PROMOTION_UNSUPPORTED');
     const stat = await exactLstat(finalPath);
     if (!isRegularFile(stat)) throw transactionError('FINAL_VALIDATION_FAILED');
+    // the final is the candidate the swap moved there (same inode)
+    if (expectedFinal && !metadataMatchesIdentity(expectedFinal, stat)) throw transactionError('FINAL_VALIDATION_FAILED');
     // The native adapter verifies and locks this exact final while removing
     // the backup. A prior path-based read alone cannot authorize that removal.
     const guard = { target: finalPath, expected: {
@@ -1011,7 +1084,14 @@ function createFileTransaction(options = {}) {
     }
     const metadata = artifactMetadata(artifact.path, persistedMetadata?.nonce || newNonce(),
       persistedMetadata?.state || 'owned', stat, artifact.sha256, artifact.size);
-    await readExactFile(artifact.path, metadata, 'PUBLICATION_ARTIFACT_CHANGED', operation.signal);
+    if (privateIdentity) {
+      // The private snapshot verification just hashed: its size and identity
+      // here, its bytes again as they are copied to the share (each copy is
+      // compared with the verified hash).
+      if (statSize(stat) !== artifact.size) throw transactionError('PUBLICATION_ARTIFACT_CHANGED');
+    } else {
+      await readExactFile(artifact.path, metadata, 'PUBLICATION_ARTIFACT_CHANGED', operation.signal);
+    }
     await validatePublicationCapability(artifact, mode, persistedMetadata);
     return metadata;
   }
@@ -1262,6 +1342,13 @@ function createFileTransaction(options = {}) {
     }
     const expected = encodedPath(jobId, itemId, metadata.nonce, pathApi.extname(target));
     if (!samePath(expected, target, pathApi, platform)) throw transactionError('UNSAFE_OWNED_PATH');
+    if (privateIdentity) {
+      // Its exact name, folder and identity are what removes it later; its
+      // content is hashed once, by verification. Nothing new to record.
+      const stat = await rememberOwned(target);
+      if (!leased(activeEncodedPaths, target)) activeEncodedPaths.push(target);
+      return { path: target, outputBytes: statSize(stat), ownedPaths, ownedArtifacts };
+    }
     const observed = await inspectExactFile(target, operation.signal, 'UNSAFE_OWNED_PATH');
     if (metadata.state === 'owned' && !metadataMatchesIdentity(metadata, observed.stat)) {
       throw transactionError('UNSAFE_OWNED_PATH');
@@ -1692,7 +1779,8 @@ function createFileTransaction(options = {}) {
     }
     const expectedSource = validateSourceAuthority(operation.expectedSource);
     await assertSourceContained(operation.source, operation.sourceRoot);
-    await assertSourceAuthority(operation.source, expectedSource, operation.signal);
+    if (adapterVerifies) await assertSourceIdentity(operation.source, expectedSource);
+    else await assertSourceAuthority(operation.source, expectedSource, operation.signal);
     let sourceInfo;
     let ownedPaths;
     let originalIdentity;
@@ -1753,7 +1841,11 @@ function createFileTransaction(options = {}) {
       ownedArtifacts.replacementCandidate = artifactMetadata(ownedPaths.replacementCandidate,
         ownedArtifacts.replacementCandidate.nonce, 'owned', copied.stat, copied.sha256, copied.size,
         ownedArtifacts.replacementCandidate.journal);
-      await validateReadable(ownedPaths.replacementCandidate, artifact, operation.verifyReadable, 'FINAL_VALIDATION_FAILED');
+      // (the copy compared every byte it wrote with the verified hash; the
+      // adapter hashes the candidate again, held open, before it moves)
+      if (!adapterVerifies || operation.verifyReadable) {
+        await validateReadable(ownedPaths.replacementCandidate, artifact, operation.verifyReadable, 'FINAL_VALIDATION_FAILED');
+      }
       // Sentry Six Manager: the candidate was created private (0600); the
       // replacement keeps the original's permissions, so whatever else reads
       // the footage folder (a share, a media server) still can
@@ -1766,24 +1858,21 @@ function createFileTransaction(options = {}) {
 
       const currentOriginal = await assertRegularUnaliased(sourceInfo.source, 'SOURCE_OUTSIDE_ROOT');
       if (!sameIdentity(originalIdentity, currentOriginal)) throw transactionError('SOURCE_OUTSIDE_ROOT');
-      await readExactFile(ownedPaths.replacementCandidate, artifact, 'PUBLICATION_ARTIFACT_CHANGED');
+      if (!adapterVerifies) await readExactFile(ownedPaths.replacementCandidate, artifact, 'PUBLICATION_ARTIFACT_CHANGED');
       await persist(operation, transactionSnapshot({ step: 'replacement-backup-intent', ownedPaths, ownedArtifacts,
         publicationArtifact: artifact }));
-      await assertSourceAuthority(sourceInfo.source, expectedSource, operation.signal);
-      const backupPromotion = await promoteNoReplace(sourceInfo.source, ownedPaths.replacementBackup, 'REPLACEMENT_COLLISION', {
-        expectedSource, removeSource: true
-      });
+      if (adapterVerifies) await assertSourceIdentity(sourceInfo.source, expectedSource);
+      else await assertSourceAuthority(sourceInfo.source, expectedSource, operation.signal);
+      const backupPromotion = await promoteBackup(sourceInfo.source, ownedPaths.replacementBackup, expectedSource);
       replacementStarted = true;
-      const backupObserved = await inspectExactFile(ownedPaths.replacementBackup, operation.signal, 'REPLACEMENT_FAILED');
-      ownedArtifacts.replacementBackup = artifactMetadata(ownedPaths.replacementBackup,
-        ownedArtifacts.replacementBackup.nonce, backupPromotion.sourceRemoved ? 'owned' : 'cleanup-pending',
-        backupObserved.stat, backupObserved.sha256, backupObserved.size);
+      ownedArtifacts.replacementBackup = await backupRecord(ownedPaths.replacementBackup,
+        ownedArtifacts.replacementBackup.nonce, backupPromotion, expectedSource, operation.signal);
       await persist(operation, transactionSnapshot({ phase: 'original-backed-up', ownedPaths, ownedArtifacts,
         publicationArtifact: artifact, cleanupPending: backupPromotion.sourceRemoved ? [] : ['replacementBackup'] }));
       if (!backupPromotion.sourceRemoved) throw transactionError('REPLACEMENT_FAILED');
       abortIfRequested(operation.signal);
 
-      await readExactFile(ownedPaths.replacementCandidate, artifact, 'PUBLICATION_ARTIFACT_CHANGED');
+      if (!adapterVerifies) await readExactFile(ownedPaths.replacementCandidate, artifact, 'PUBLICATION_ARTIFACT_CHANGED');
       await persist(operation, transactionSnapshot({ step: 'replacement-promotion-intent', ownedPaths, ownedArtifacts,
         publicationArtifact: artifact }));
       const candidatePromotion = await promoteNoReplace(ownedPaths.replacementCandidate, sourceInfo.source, 'REPLACEMENT_COLLISION', {
@@ -1794,11 +1883,15 @@ function createFileTransaction(options = {}) {
         publicationArtifact: artifact, cleanupPending: candidatePromotion.sourceRemoved ? [] : ['replacementCandidate'] }));
       abortIfRequested(operation.signal);
 
-      await validateReadable(sourceInfo.source, artifact, operation.verifyReadable, 'FINAL_VALIDATION_FAILED');
+      // (with an adapter that verifies content, removing the backup hashes
+      // this final, held open, first: the same proof, one read)
+      if (!adapterVerifies || operation.verifyReadable) {
+        await validateReadable(sourceInfo.source, artifact, operation.verifyReadable, 'FINAL_VALIDATION_FAILED');
+      }
       await persist(operation, transactionSnapshot({ phase: 'final-validated', ownedPaths, ownedArtifacts,
         publicationArtifact: artifact }));
       abortIfRequested(operation.signal);
-      await validateReadable(sourceInfo.source, artifact, null, 'FINAL_VALIDATION_FAILED');
+      if (!adapterVerifies) await validateReadable(sourceInfo.source, artifact, null, 'FINAL_VALIDATION_FAILED');
       await removeReplacementBackup(ownedPaths.replacementBackup, ownedArtifacts.replacementBackup, sourceInfo.source, artifact);
       delete ownedPaths.replacementBackup;
       delete ownedArtifacts.replacementBackup;
