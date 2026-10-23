@@ -220,3 +220,14 @@ cheapest rate of the time-of-use plan is in force
 `isCheapNow(ms) -> true|false|null`; null = no plan = any time). Stored as
 `window: { follow: 'off-peak' }`. Pauses and resumes exactly like the fixed
 window does. Settings UI in the automatic conversion section of the Encoder.
+
+Owner: "make sure it pauses when the off-peak limits are reached". So:
+- when off-peak ends, the automatic job is paused at the next check (every
+  30 s); clips already being converted finish first (about a minute), no new
+  clip starts; it resumes on its own when off-peak comes back;
+- an option "Also pause conversions I start myself when off-peak ends"
+  (default off) does the same for manual jobs, and resumes only the ones it
+  paused;
+- tests at the exact boundary (06:59:30 runs, 07:00:30 paused, 23:00:30
+  resumed), across midnight and a restart in the middle (the pause is
+  remembered, like the fixed window's).
