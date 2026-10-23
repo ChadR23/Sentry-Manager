@@ -37,10 +37,16 @@
       init.headers['Content-Type'] = 'application/json';
       init.body = JSON.stringify(opts.body);
     }
+    // requests repeated on a timer give up instead of piling up behind a stuck one
+    const ctrl = opts.timeoutMs ? new AbortController() : null;
+    const timer = ctrl ? setTimeout(() => ctrl.abort(), opts.timeoutMs) : null;
+    if (ctrl) init.signal = ctrl.signal;
     let res;
     try {
       res = await fetch(path, init);
     } catch {
+      clearTimeout(timer);
+      if (ctrl?.signal.aborted) throw new Error('The server took too long to answer.');
       // the server is down, or its certificate changed and the browser no longer accepts it
       throw new Error('Can\'t reach Sentry Six Manager. Reload the page; if the browser warns about the certificate, install the certificate authority (Settings → Security) so it trusts the page for good.');
     }
@@ -49,6 +55,8 @@
       throw new Error('Signed out');
     }
     const data = await res.json().catch(() => ({}));
+    clearTimeout(timer);
+    if (ctrl?.signal.aborted) throw new Error('The server took too long to answer.');
     if (res.status === 403 && data.code === 'CONFIRM_PASSWORD' && !retried) {
       // changes that could hand someone the shares or the server need the password again
       await confirmPassword();
@@ -200,7 +208,8 @@
     let html = head('Your archive workspace', 'Overview') + pills();
     if (!v) {
       html += `<div class="card"><h2>Add a vehicle</h2><p>Each vehicle has its own footage share (SMB) or folder. Add one in Settings to start.</p><div class="form-actions" style="justify-content:flex-start"><a class="btn solid" href="#/settings">Open settings</a></div></div>`;
-      page.innerHTML = html;
+      page.innerHTML = html + serverSection();
+      mountMonitor();
       return;
     }
     const s = v.share || {};
@@ -228,10 +237,422 @@
       ${notes.length ? `<ul class="alerts">${notes.slice(0, 5).map((n) => `<li class="alert-item"><span class="dot ${n.level === 'critical' ? 'bad' : n.level === 'info' ? 'ok' : 'warn'}"></span><div><b>${esc(n.title)}</b><span>${esc(n.message || '')}</span></div><span class="muted small">${ago(n.updatedAt)}</span></li>`).join('')}</ul>`
         : '<p style="margin:14px 0 18px">No unresolved storage or source incidents reported.</p>'}
       <a class="btn" href="#/notifications">Open notifications</a></div>`;
-    page.innerHTML = html;
+    page.innerHTML = html + serverSection();
     $('refresh-inv').onclick = () => api(`/api/vehicles/${v.id}/scan`, { body: {} }).then(() => toast('Refreshing the inventory…'), (err) => toast(err.message, true));
     $('refresh-alerts').onclick = () => loadNotes().then(render);
+    mountMonitor();
   };
+
+  // ---------- Overview > Server ("nerd stats") ----------
+  // What the server is doing, from GET /api/stats every 2 s while the
+  // Overview is on screen and the tab is visible, behind a switch this
+  // browser remembers. Only tiles the server has numbers for are drawn.
+  // Names, models and labels come from the machine, so all of it goes
+  // through esc().
+
+  // ---- server monitor: drawing (no DOM here; test/screens.test.js runs it) ----
+  const fin = (n) => typeof n === 'number' && Number.isFinite(n);
+  const clampPct = (n) => Math.max(0, Math.min(100, Math.round((fin(n) ? n : 0) * 10) / 10));
+  const SIZE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+  const sizeUnit = (b) => {
+    let i = 0;
+    for (let v = Math.abs(b); v >= 1024 && i < SIZE_UNITS.length - 1; v /= 1024) i++;
+    return i;
+  };
+  const sizeNum = (b, i) => {
+    const v = b / 1024 ** i;
+    return v >= 100 || i === 0 ? String(Math.round(v)) : v.toFixed(1).replace(/\.0$/, '');
+  };
+  // like the mockup: 18.2 GB, 640 MB, "112 of 476 GB", "1.1 / 6 GB"
+  const size = (b) => (fin(b) ? `${sizeNum(b, sizeUnit(b))} ${SIZE_UNITS[sizeUnit(b)]}` : '—');
+  const sizeOf = (used, total, sep = ' of ') => `${sizeNum(used, sizeUnit(total))}${sep}${sizeNum(total, sizeUnit(total))} ${SIZE_UNITS[sizeUnit(total)]}`;
+  const rate = (bps) => {
+    if (!fin(bps)) return '—';
+    if (bps > 0 && bps < 1024 ** 2) return `${Math.max(1, Math.round(bps / 1024))} KB/s`;
+    const i = Math.max(2, sizeUnit(bps));
+    return `${sizeNum(bps, i)} ${SIZE_UNITS[i]}/s`;
+  };
+  const pct = (n) => `${Math.round(n)}%`;
+  const watts = (w) => `${w >= 10 ? Math.round(w) : w.toFixed(1).replace(/\.0$/, '')} W`;
+  const temp = (c) => `${Math.round(c)} °C`;
+  const clock = (mhz) => (mhz >= 1000 ? `${Number((mhz / 1000).toFixed(2))} GHz` : `${Math.round(mhz)} MHz`);
+  const kwh = (wh) => {
+    const k = wh / 1000;
+    return `${k < 1 ? k.toFixed(2) : k < 100 ? k.toFixed(1) : Math.round(k).toLocaleString()} kWh`;
+  };
+  // $0.14 but 1.20 kr
+  const inCurrency = (n, cur) => {
+    const c = String(cur || '$');
+    return /^[a-z]+$/i.test(c) ? `${n} ${c}` : `${c}${n}`;
+  };
+  /** "≈ $0.14"; costs come summed by the server (time-of-use plans), never kWh × one price. */
+  const money = (v, cur) => `≈ ${inCurrency(v >= 100 ? Math.round(v).toLocaleString() : v.toFixed(2), cur)}`;
+  const span = (s) => {
+    const d = Math.floor(s / 86400);
+    const h = Math.floor((s % 86400) / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    return d ? `${d} d ${h} h` : h ? `${h} h ${m} m` : m ? `${m} m` : `${Math.max(0, Math.round(s))} s`;
+  };
+  const answer = (ms) => (ms < 1 ? 'under 1 ms' : ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1).replace(/\.0$/, '')} s`);
+  const linkSpeed = (mbps) => (!fin(mbps) || mbps <= 0 ? '' : mbps >= 1000 ? `${Number((mbps / 1000).toFixed(1))} Gbit/s` : `${Math.round(mbps)} Mbit/s`);
+  const cpuName = (m) => String(m || '').replace(/\((R|TM)\)/gi, '').replace(/\s+CPU\s+@.*$/i, '').replace(/\s+with\s+Radeon.*$/i, '').replace(/\s+/g, ' ').trim();
+
+  /** A sparkline, 0 at the bottom; null points are gaps (no sample then). */
+  function spark(points, color, floor) {
+    const vals = (Array.isArray(points) ? points : []).map((p) => (fin(p) ? Math.max(0, p) : null));
+    const known = vals.filter((v) => v !== null);
+    if (known.length < 2) return '';
+    const w = 220;
+    const h = 40;
+    const top = Math.max(floor, Math.max(...known) * 1.15);
+    const x = (i) => ((i / (vals.length - 1)) * w).toFixed(1);
+    const segs = [];
+    let seg = [];
+    vals.forEach((v, i) => {
+      if (v === null) {
+        if (seg.length) segs.push(seg);
+        seg = [];
+      } else {
+        seg.push([x(i), (h - 3 - (v / top) * (h - 6)).toFixed(1)]);
+      }
+    });
+    if (seg.length) segs.push(seg);
+    const lines = segs.filter((s) => s.length > 1).map((s) => {
+      const pts = s.map((p) => p.join(',')).join(' ');
+      return `<polyline points="${s[0][0]},${h} ${pts} ${s[s.length - 1][0]},${h}" fill="${color}" opacity="0.08" stroke="none"/><polyline points="${pts}" fill="none" stroke="${color}" stroke-width="2" vector-effect="non-scaling-stroke"/>`;
+    });
+    return `<svg class="nd-spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true">${lines.join('')}</svg>`;
+  }
+  const sparkBlock = (svg, day) => (svg && day ? `${svg}<div class="nd-axis"><span>24 h ago</span><span>now</span></div>` : svg);
+  const ndBar = (value, hot = false) => `<div class="nd-bar${hot ? ' hot' : ''}"><span style="width:${clampPct(value)}%"></span></div>`;
+  const ndBig = (value, label) => `<div class="nd-big"><b>${value}</b>${label ? `<span class="muted small">${label}</span>` : ''}</div>`;
+  /** key/value rows; values are HTML already escaped by the caller, rows without a value are left out */
+  const ndKv = (rows, cls = '') => {
+    const r = rows.filter((row) => row && row[1]);
+    return r.length ? `<dl class="nd-kv${cls}">${r.map(([k, v, hot]) => `<dt>${esc(k)}</dt><dd${hot ? ' class="nd-warn"' : ''}>${v}</dd>`).join('')}</dl>` : '';
+  };
+  const ndTile = (title, sub, body, wide = false) => `<div class="nd-tile${wide ? ' nd-wide' : ''}"><div class="nd-title"><span>${esc(title)}</span>${sub ? `<span class="muted" title="${esc(sub)}">${esc(sub)}</span>` : ''}</div>${body}</div>`;
+  const moreButton = (key, shown, total, open) => (total > shown || open ? `<button type="button" class="nd-more" data-nd-more="${key}">${open ? 'Show fewer' : `Show all ${total}`}</button>` : '');
+
+  function cpuTile(cpu, points, day) {
+    if (!cpu || !fin(cpu.usage)) return '';
+    const counts = fin(cpu.cores) ? (fin(cpu.threads) && cpu.threads !== cpu.cores ? `${cpu.cores} cores / ${cpu.threads} threads` : plural(cpu.cores, 'core')) : '';
+    const per = (Array.isArray(cpu.perCore) ? cpu.perCore : []).filter(fin);
+    // one bar per thread; big machines get rows of 16 (or 32) thinner bars
+    const cols = per.length <= 16 ? per.length : per.length <= 64 ? 16 : 32;
+    const cores = per.length > 1 ? `<div class="nd-cores${per.length > 16 ? ' dense' : ''}" style="--cols:${cols}">${per.map((c, i) => `<i style="--v:${clampPct(c)}%" title="CPU ${i}: ${pct(c)}"></i>`).join('')}</div>` : '';
+    const app = cpu.app || {};
+    const appText = fin(app.usage) ? `${pct(app.usage)}${app.ffmpegCount > 0 && fin(app.ffmpegUsage) ? ` (ffmpeg ×${app.ffmpegCount}: ${pct(app.ffmpegUsage)})` : ''}` : '';
+    return ndTile('CPU', [cpuName(cpu.model), counts].filter(Boolean).join(' · '), ndBig(pct(cpu.usage), 'whole server')
+      + sparkBlock(spark(points, 'var(--accent)', 10), day) + cores
+      + ndKv([
+        ['Clock', fin(cpu.freqMHz) ? clock(cpu.freqMHz) : ''],
+        ['Temp', fin(cpu.tempC) ? temp(cpu.tempC) : '', cpu.tempC >= 90],
+        ['Load', Array.isArray(cpu.load) && cpu.load.some(fin) ? cpu.load.map((l) => (fin(l) ? l.toFixed(1) : '—')).join(' · ') : ''],
+        ['This app', appText],
+        ['Throttling', cpu.throttling ? 'yes: too hot, running slower' : '', true]
+      ]));
+  }
+
+  function gpuTile(g, points, day) {
+    if (!g || !['busy', 'video', 'vramUsedB', 'clockMHz', 'tempC', 'powerW'].some((k) => fin(g[k]))) return '';
+    const big = fin(g.video) ? ndBig(pct(g.video), 'video engine') : fin(g.busy) ? ndBig(pct(g.busy), 'busy') : '';
+    const rows = [
+      fin(g.busy) && `<div><span>Render / 3D</span>${ndBar(g.busy, g.busy >= 90)}<b>${pct(g.busy)}</b></div>`,
+      fin(g.video) && `<div><span>Video</span>${ndBar(g.video, g.video >= 90)}<b>${pct(g.video)}</b></div>`,
+      fin(g.vramUsedB) && fin(g.vramTotalB) && g.vramTotalB > 0 && `<div><span>VRAM</span>${ndBar((g.vramUsedB / g.vramTotalB) * 100)}<b>${sizeOf(g.vramUsedB, g.vramTotalB, ' / ')}</b></div>`
+    ].filter(Boolean);
+    return ndTile('GPU', [g.name, g.driver, g.node].filter(Boolean).join(' · '), big
+      + sparkBlock(points ? spark(points, 'var(--info)', 10) : '', day)
+      + (rows.length ? `<div class="nd-rows">${rows.join('')}</div>` : '')
+      + ndKv([
+        ['Clock', fin(g.clockMHz) ? clock(g.clockMHz) : ''],
+        ['Temp', fin(g.tempC) ? temp(g.tempC) : '', g.tempC >= 90],
+        ['Power', fin(g.powerW) ? watts(g.powerW) : ''],
+        ['Clients', g.clients > 0 ? `${g.clients} × ffmpeg` : '']
+      ]));
+  }
+
+  function powerTile(p, enc, price, currency) {
+    if (!p) return '';
+    const parts = [['CPU package', p.cpuW], ['GPU', p.gpuW]].filter(([, w]) => fin(w));
+    const total = fin(p.totalW) ? p.totalW : parts.length ? parts.reduce((n, [, w]) => n + w, 0) : null;
+    if (!fin(total) && !fin(p.todayWh) && !fin(p.weekWh)) return '';
+    const label = parts.length === 2 ? 'CPU + GPU' : parts.length ? (parts[0][0] === 'GPU' ? 'GPU (CPU not measured)' : 'CPU package') : '';
+    const energy = (wh, c) => (fin(wh) ? esc(`${kwh(wh)}${fin(c) ? ` · ${money(c, currency)}` : ''}`) : '');
+    const priceNow = fin(price?.now) ? `${esc(inCurrency(price.now.toFixed(price.now < 1 ? 3 : 2).replace(/(\.\d\d)0$/, '$1'), price.currency || currency))} per kWh${price.rate ? ` · ${esc(price.rate)}` : ''}` : '';
+    return ndTile('Power', 'measured, not estimated', (fin(total) ? ndBig(watts(total), label) : '')
+      + (parts.length ? `<div class="nd-rows">${parts.map(([name, w]) => `<div><span>${name}</span>${ndBar(total > 0 ? (w / total) * 100 : 0)}<b>${watts(w)}</b></div>`).join('')}</div>` : '')
+      + ndKv([
+        ['Today', energy(p.todayWh, p.todayCost)],
+        ['This week', energy(p.weekWh, p.weekCost)],
+        ['Converting', enc?.running && fin(enc.run?.wh) ? `${kwh(enc.run.wh)} this run` : ''],
+        ['Price now', priceNow]
+      ]));
+  }
+
+  function memoryTile(m) {
+    if (!m || !fin(m.totalB) || !fin(m.usedB) || m.totalB <= 0) return '';
+    const used = (m.usedB / m.totalB) * 100;
+    return ndTile('Memory', size(m.totalB), ndBig(size(m.usedB), `used (${pct(used)})`) + ndBar(used, used >= 95)
+      + ndKv([
+        ['This app', fin(m.appB) ? size(m.appB) : ''],
+        ['Cache', fin(m.cacheB) ? size(m.cacheB) : ''],
+        ['Swap', fin(m.swapTotalB) ? (m.swapTotalB > 0 ? sizeOf(m.swapUsedB || 0, m.swapTotalB, ' / ') : 'none') : '']
+      ]));
+  }
+
+  const DISK_KIND = { nvme: 'NVMe', ssd: 'SSD', hdd: 'hard disk' };
+  // the temperatures the server's alerts use
+  const diskHot = (d) => fin(d.tempC) && d.tempC >= (d.kind === 'hdd' ? 55 : 70);
+  const DISKS_SHOWN = 8;
+
+  function storageTile(fss, disks, all) {
+    const rows = [];
+    for (const f of Array.isArray(fss) ? fss : []) {
+      if (!f) continue;
+      const known = fin(f.totalB) && f.totalB > 0 && fin(f.usedB);
+      const used = known ? (f.usedB / f.totalB) * 100 : 0;
+      const bits = [known ? sizeOf(f.usedB, f.totalB) : ''];
+      if (f.reachable === false) bits.push('<span class="nd-bad">not reachable</span>');
+      else if (fin(f.latencyMs)) bits.push(f.latencyMs > 2000 ? `<span class="nd-warn">answers in ${answer(f.latencyMs)}</span>` : `answers in ${answer(f.latencyMs)}`);
+      rows.push(`<div class="nd-disk"><div><b>${esc(f.label || f.path)}</b><span class="muted small">${esc(f.path || '')}</span></div>${known ? ndBar(used, used >= 90) : ''}<span class="small">${bits.filter(Boolean).join(' · ')}</span></div>`);
+    }
+    const list = (Array.isArray(disks) ? disks : []).filter((d) => d && d.name);
+    for (const d of all ? list : list.slice(0, DISKS_SHOWN)) {
+      const bits = [`read ${rate(d.readBps)}`, `write ${rate(d.writeBps)}`];
+      if (fin(d.tempC)) bits.push(diskHot(d) ? `<span class="nd-warn">${temp(d.tempC)}</span>` : temp(d.tempC));
+      rows.push(`<div class="nd-disk"><div><b>${esc(d.name)}</b><span class="muted small">${esc([d.model, DISK_KIND[d.kind]].filter(Boolean).join(' · '))}</span></div><span class="small">${bits.join(' · ')}</span></div>`);
+    }
+    if (!rows.length) return '';
+    return ndTile('Storage', 'disks and shares', `<div class="nd-disks">${rows.join('')}</div>${moreButton('disks', DISKS_SHOWN, list.length, all)}`, true);
+  }
+
+  function networkTile(net, points, day) {
+    const ifs = (Array.isArray(net?.interfaces) ? net.interfaces : []).filter((i) => i && (fin(i.rxBps) || fin(i.txBps)));
+    if (!ifs.length) return '';
+    const sum = (k) => ifs.reduce((n, i) => n + (fin(i[k]) ? i[k] : 0), 0);
+    const one = ifs.length === 1 ? ifs[0] : null;
+    return ndTile('Network', one ? [one.name, linkSpeed(one.speedMbps)].filter(Boolean).join(' · ') : `${ifs.length} interfaces`,
+      ndBig(`↓ ${rate(sum('rxBps'))}`, `↑ ${rate(sum('txBps'))}`) + sparkBlock(spark(points, 'var(--info)', 64 * 1024), day)
+      + ndKv([
+        ...(one ? [] : ifs.map((i) => [[i.name, linkSpeed(i.speedMbps)].filter(Boolean).join(' · '), `↓ ${rate(i.rxBps)} · ↑ ${rate(i.txBps)}`])),
+        ['Counted for', net.scope === 'host' ? 'the whole server' : 'this container']
+      ]));
+  }
+
+  // hwmon names, in words (anything else shows as the server reports it)
+  function sensorName(s) {
+    const chip = String(s.chip || '');
+    const label = String(s.label || '');
+    let m;
+    if (chip === 'coretemp' && (m = /^Package id (\d+)$/.exec(label))) return m[1] === '0' ? 'CPU package' : `CPU package ${m[1]}`;
+    if (chip === 'k10temp' && /^T(ctl|die)$/.test(label)) return `CPU (${label})`;
+    if (chip === 'k10temp' && (m = /^Tccd(\d+)$/.exec(label))) return `CPU die ${m[1]}`;
+    if (/^cpu[-_]thermal$/.test(chip) || /^cpu[-_]thermal$/.test(label)) return 'CPU';
+    if (chip === 'nvme') return label === 'Composite' || !label ? 'NVMe' : `NVMe ${label.toLowerCase()}`;
+    if (/^(amdgpu|i915|xe|nouveau|radeon)$/.test(chip)) {
+      if (s.kind === 'fan') return 'GPU fan';
+      return { edge: 'GPU', pkg: 'GPU', junction: 'GPU hotspot', mem: 'GPU memory', vram: 'GPU memory' }[label] || `GPU ${label}`;
+    }
+    if ((m = /^fan(\d+)$/.exec(label))) return `Fan ${m[1]}`;
+    if ((m = /^temp(\d+)$/.exec(label))) return `${chip} ${m[1]}`;
+    return label || chip || 'Sensor';
+  }
+  const sensorHot = (s, name) => s.kind === 'temp' && s.value >= (s.chip === 'drivetemp' ? 55 : s.chip === 'nvme' ? 70 : /^(CPU|GPU)/.test(name) ? 90 : 85);
+  const SENSORS_SHOWN = 10;
+
+  function sensorsTile(sensors, all) {
+    const rows = [];
+    const coreMax = new Map(); // "Core 0" … "Core 11" of a chip: one "Core max" row
+    for (const s of Array.isArray(sensors) ? sensors : []) {
+      if (!s || !fin(s.value)) continue;
+      if (s.kind === 'temp' && /^Core \d+$/.test(s.label || '')) {
+        const row = coreMax.get(s.chip);
+        if (row) row.value = Math.max(row.value, s.value);
+        else {
+          const fresh = { name: 'Core max', kind: 'temp', chip: s.chip, value: s.value };
+          coreMax.set(s.chip, fresh);
+          rows.push(fresh);
+        }
+        continue;
+      }
+      rows.push({ ...s, name: sensorName(s) });
+    }
+    if (!rows.length) return '';
+    const shown = all ? rows : rows.slice(0, SENSORS_SHOWN);
+    return ndTile('Sensors', 'every one the server reports', ndKv(shown.map((s) => [s.name,
+      s.kind === 'fan' ? `${Math.round(s.value).toLocaleString()} rpm` : temp(s.value), sensorHot(s, s.name)]), ' nd-sensors')
+      + moreButton('sensors', SENSORS_SHOWN, rows.length, all));
+  }
+
+  function processTile(procs, enc) {
+    const top = (Array.isArray(procs?.top) ? procs.top : []).filter((p) => p && p.name);
+    if (!top.length) return '';
+    // the same program several times (ffmpeg ×4) is one row
+    const groups = new Map();
+    for (const p of top) {
+      const g = groups.get(p.name) || { name: p.name, n: 0, cpu: 0, memB: 0, gpu: null };
+      g.n++;
+      g.cpu += fin(p.cpu) ? p.cpu : 0;
+      g.memB += fin(p.memB) ? p.memB : 0;
+      if (fin(p.gpuVideo)) g.gpu = (g.gpu || 0) + p.gpuVideo;
+      groups.set(p.name, g);
+    }
+    const rows = [...groups.values()].sort((a, b) => b.cpu - a.cpu).slice(0, 8);
+    const gpuCol = rows.some((r) => r.gpu !== null);
+    const encoder = enc?.running ? enc.device?.encoder : null;
+    const name = (r) => `${esc(r.name)}${r.name === 'ffmpeg' && encoder ? ` · ${esc(encoder)}` : ''}${r.n > 1 ? ` ×${r.n}` : ''}`;
+    return ndTile('Top processes', procs.scope === 'host' ? 'whole server' : 'this container',
+      `<table class="nd-procs"><thead><tr><th>Process</th><th>CPU</th><th>Memory</th>${gpuCol ? '<th>GPU</th>' : ''}</tr></thead><tbody>${rows.map((r) => `<tr><td>${name(r)}</td><td>${pct(r.cpu)}</td><td>${size(r.memB)}</td>${gpuCol ? `<td>${r.gpu !== null ? `${pct(r.gpu)} video` : '—'}</td>` : ''}</tr>`).join('')}</tbody></table>`, true);
+  }
+
+  function hostLine(h) {
+    if (!h) return '';
+    return [h.hostname, h.os, h.kernel && `kernel ${h.kernel}`, fin(h.uptimeS) && `up ${span(h.uptimeS)}`,
+      fin(h.appUptimeS) && `app up ${span(h.appUptimeS)}`, h.version && `version ${h.version}`].filter(Boolean).map((part) => `<span class="nd-nb">${esc(part)}</span>`).join(' · ');
+  }
+
+  function alertChip(alerts) {
+    const n = Array.isArray(alerts) ? alerts.length : 0;
+    if (!n) return '';
+    const bad = alerts.some((a) => a.level === 'error');
+    return `<span class="chip ${bad ? 'red' : 'amber'}"><span class="cdot"></span>${bad ? plural(n, 'problem') : plural(n, 'warning')}</span>`;
+  }
+
+  /** Everything under the section's head: alerts, tiles, and what optional compose lines would add. */
+  function serverBody(s, { range = '15m', hist = null, currency = '$', more = {} } = {}) {
+    const day = range === '24h' && hist?.series ? hist.series : null;
+    const usable = (pts) => Array.isArray(pts) && pts.filter(fin).length > 1;
+    const pts = {
+      cpu: day ? day.cpu : s.sparks?.cpu,
+      gpu: day ? (usable(day.gpuVideo) ? day.gpuVideo : day.gpuBusy) : s.sparks?.gpuVideo,
+      rx: day ? day.rxBps : s.sparks?.rxBps
+    };
+    let gpuSpark = false; // one sparkline series for the GPUs: on the first that encodes
+    const gpus = (Array.isArray(s.gpus) ? s.gpus : []).map((g) => {
+      const mine = !gpuSpark && g && fin(g.video);
+      if (mine) gpuSpark = true;
+      return gpuTile(g, mine ? pts.gpu : null, Boolean(day));
+    }).join('');
+    const tiles = [
+      cpuTile(s.cpu, pts.cpu, Boolean(day)), gpus, powerTile(s.power, s.encoder, s.price, currency), memoryTile(s.memory),
+      storageTile(s.filesystems, s.disks, more.disks), networkTile(s.network, pts.rx, Boolean(day)),
+      sensorsTile(s.sensors, more.sensors), processTile(s.processes, s.encoder)
+    ].join('');
+    const alerts = (Array.isArray(s.alerts) ? s.alerts : []).filter((a) => a && a.message).map((a) => `<div class="nd-alert${a.level === 'error' ? ' bad' : ''}"><b>${a.level === 'error' ? 'Problem' : 'Warning'}</b>${esc(a.message)} · <a href="#/settings/logs">Logs</a></div>`).join('');
+    const unlock = (Array.isArray(s.unlock) ? s.unlock : []).filter((u) => u && u.adds);
+    const foot = unlock.length
+      ? `<p>Shown only when the server provides it. More with one optional line each in <code>docker-compose.yml</code>:</p>
+        <ul>${unlock.map((u) => `<li>${esc(u.adds)}${u.compose ? `: <code>${esc(u.compose)}</code>` : ''}</li>`).join('')}</ul><p>Every number stays on this server.</p>`
+      : '<p>Shown only when the server provides it. Every number stays on this server.</p>';
+    return `${alerts}${tiles ? `<div class="nd-grid">${tiles}</div>` : '<p class="muted nd-none">The server has no numbers to show here.</p>'}<div class="muted small nd-foot">${foot}</div>`;
+  }
+  // ---- server monitor: end of drawing ----
+
+  const monitor = {
+    snap: null, error: null, timer: null, gen: 0, active: false,
+    range: store.get('statsRange', '15m') === '24h' ? '24h' : '15m', hist: null, histAt: 0, more: {}
+  };
+  const nerdStats = () => store.get('nerdStats', true) !== false;
+
+  function serverSection() {
+    const on = nerdStats();
+    return `<section class="card nd-server" id="nd-server" aria-labelledby="nd-title">
+      <div class="nd-head"><div><h2 id="nd-title">Server</h2><p class="muted small nd-sub">${on ? '' : 'Nerd stats are off. Turn them on to see what the server is doing: CPU, GPU, power, disks, network and temperatures.'}</p></div>
+        <div class="nd-head-right"><span class="nd-chipbox"></span>
+          ${on ? `<div class="seg nd-range" role="group" aria-label="Graphs over"><button type="button" data-range="15m">15 min</button><button type="button" data-range="24h">24 h</button></div>
+          <a class="btn sm" href="/api/stats/export.csv?range=24h" download title="The last 24 hours as a spreadsheet">CSV</a>` : ''}
+          <label class="check small"><input type="checkbox" id="nd-toggle"${on ? ' checked' : ''}> Nerd stats</label></div></div>
+      ${on ? '<div class="nd-body"></div>' : ''}</section>`;
+  }
+
+  function drawMonitor() {
+    const root = $('nd-server');
+    const body = root?.querySelector('.nd-body');
+    if (!body) return;
+    const s = monitor.snap;
+    root.querySelectorAll('[data-range]').forEach((b) => {
+      b.classList.toggle('on', b.dataset.range === monitor.range);
+      b.setAttribute('aria-pressed', String(b.dataset.range === monitor.range));
+    });
+    const stale = monitor.error ? `<span class="nd-warn">${s ? 'Not updating right now' : `Can't show the server's numbers: ${esc(monitor.error)}`}</span>` : '';
+    root.querySelector('.nd-sub').innerHTML = [s ? hostLine(s.host) : monitor.error ? '' : 'Loading…', stale].filter(Boolean).join(' · ');
+    root.querySelector('.nd-chipbox').innerHTML = s ? alertChip(s.alerts) : '';
+    body.innerHTML = s ? serverBody(s, {
+      range: monitor.range, hist: monitor.hist, more: monitor.more,
+      currency: s.price?.currency || state.power?.currency || '$'
+    }) : '';
+  }
+
+  /** Polls while wanted; a new Overview render draws the last sample at once. */
+  function mountMonitor() {
+    const root = $('nd-server');
+    if (!root) return;
+    $('nd-toggle').onchange = (e) => {
+      store.set('nerdStats', e.target.checked);
+      root.outerHTML = serverSection();
+      mountMonitor();
+    };
+    root.querySelectorAll('[data-range]').forEach((b) => {
+      b.onclick = () => {
+        monitor.range = b.dataset.range;
+        store.set('statsRange', monitor.range);
+        monitor.histAt = 0;
+        drawMonitor();
+        stopMonitor();
+        startMonitor();
+      };
+    });
+    root.addEventListener('click', (e) => {
+      const more = e.target.closest('[data-nd-more]');
+      if (!more) return;
+      monitor.more[more.dataset.ndMore] = !monitor.more[more.dataset.ndMore];
+      drawMonitor();
+    });
+    drawMonitor();
+    if (nerdStats()) startMonitor();
+    else stopMonitor();
+  }
+
+  const monitorWanted = () => state.route === 'overview' && nerdStats() && document.visibilityState === 'visible' && Boolean($('nd-server'));
+  function stopMonitor() {
+    monitor.gen++;
+    monitor.active = false;
+    clearTimeout(monitor.timer);
+    monitor.timer = null;
+  }
+  function startMonitor() {
+    if (!monitorWanted()) return stopMonitor();
+    if (monitor.active) return undefined; // already polling: the next sample lands in the new section
+    monitor.active = true;
+    return pollMonitor(++monitor.gen);
+  }
+  async function pollMonitor(gen) {
+    try {
+      // the 24 h graphs change once a minute
+      const day = monitor.range === '24h' && Date.now() - monitor.histAt > 60000;
+      const [snap, hist] = await Promise.all([
+        api('/api/stats', { timeoutMs: 10000 }),
+        day ? api('/api/stats/history?range=24h', { timeoutMs: 15000 }).catch(() => null) : null
+      ]);
+      if (gen !== monitor.gen) return;
+      monitor.snap = snap;
+      monitor.error = null;
+      if (hist) Object.assign(monitor, { hist, histAt: Date.now() });
+    } catch (err) {
+      if (gen !== monitor.gen) return;
+      monitor.error = err.message;
+    }
+    drawMonitor();
+    if (gen === monitor.gen && monitorWanted()) monitor.timer = setTimeout(() => pollMonitor(gen), 2000);
+    else if (gen === monitor.gen) monitor.active = false;
+  }
+  // a hidden tab asks nothing; it catches up when shown again
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') startMonitor();
+    else stopMonitor();
+  });
 
   // Footage, one card per capture day (newest first, the newest one open):
   // a thumbnail, what the day holds, how much of it is encoded, and actions
@@ -652,10 +1073,13 @@
     const running = jobs.filter((j) => j.status === 'running').length;
     setBadge('badge-jobs', running ? String(running) : '', 'busy');
     const chip = (s) => `<span class="chip ${s === 'done' ? 'green' : s === 'failed' ? 'red' : s === 'running' ? 'amber' : ''}">${esc(s)}</span>`;
+    // conversions the server measured: energy, average power and (with a price) cost
+    const withEnergy = jobs.some((j) => fin(j.energy?.wh));
+    const energy = (e) => (fin(e?.wh) ? `${kwh(e.wh)}${fin(e.avgW) ? ` · avg ${watts(e.avgW)}` : ''}${fin(e.cost) ? ` · ${money(e.cost, state.power?.currency)}` : ''}` : '');
     page.innerHTML = head('Your archive workspace', 'Jobs') + pills() + `<div class="card">
-      ${jobs.length ? `<table class="table"><thead><tr><th>Job</th><th>Status</th><th>Details</th><th>Started</th><th>Took</th></tr></thead><tbody>
+      ${jobs.length ? `<table class="table"><thead><tr><th>Job</th><th>Status</th><th>Details</th><th>Started</th><th>Took</th>${withEnergy ? '<th>Energy</th>' : ''}</tr></thead><tbody>
         ${jobs.map((j) => `<tr><td><b>${esc(j.title)}</b><br><span class="muted small">${esc(j.type)}</span></td><td>${chip(j.status)}</td><td class="small">${esc(j.detail || '')}</td><td class="small">${when(j.startedAt)}</td>
-          <td class="small mono">${j.finishedAt ? `${Math.max(0, Math.round((j.finishedAt - j.startedAt) / 1000))} s` : '…'}</td></tr>`).join('')}</tbody></table>`
+          <td class="small mono">${j.finishedAt ? `${Math.max(0, Math.round((j.finishedAt - j.startedAt) / 1000))} s` : '…'}</td>${withEnergy ? `<td class="small mono energy">${esc(energy(j.energy))}</td>` : ''}</tr>`).join('')}</tbody></table>`
         : '<p>No jobs yet. Scans, conversions, Recycle Bin actions and policy runs show up here.</p>'}</div>`;
   };
 
@@ -732,7 +1156,8 @@
     const [settings, upd, sys, sec] = await Promise.all([api('/api/settings'), api('/api/updates'), api('/api/system').catch(() => null), api('/api/security').catch(() => null)]);
     if (seq !== renderSeq) return; // the user moved on while this loaded
     state.system = sys || state.system;
-    const sections = [['vehicles', 'Vehicles'], ['updates', 'Updates'], ['account', 'Account'], sec && ['security', 'Security'], sys && ['system', 'System'], ['logs', 'Logs']].filter(Boolean);
+    state.power = settings.power || state.power || null;
+    const sections = [['vehicles', 'Vehicles'], ['updates', 'Updates'], ['account', 'Account'], sec && ['security', 'Security'], (sys || settings.power) && ['system', 'System'], ['logs', 'Logs']].filter(Boolean);
     const show = editing || !sections.some(([k]) => k === sub) ? 'vehicles' : sub;
     let html = head('Your archive workspace', 'Settings');
     html += `<nav class="set-tabs" aria-label="Settings sections">${sections.map(([k, label]) => `<button type="button" data-tab="${k}">${label}</button>`).join('')}</nav>`;
@@ -763,6 +1188,7 @@
         <dt>Data volume free</dt><dd>${bytes(sys.dataFree)}</dd>
         <dt>Server time zone</dt><dd>${esc(sys.timezone)}</dd></dl></div>`;
     }
+    if (settings.power) html += powerCard(settings.power, sys?.timezone);
     html += `<div class="card" data-section="logs"><div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap"><h2>Logs</h2>
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><label class="check small"><input type="checkbox" id="log-all"> Everything</label>
       <button type="button" class="btn sm" id="log-refresh">Refresh</button><a class="btn sm" href="/api/logs/download" download>Download</a></div></div>
@@ -772,8 +1198,106 @@
     wireSettingsTabs(show, editing ? `#/settings/${sub}` : '#/settings', seq);
     wireSettings(editing);
     if (sec) wireSecurity(sec);
+    if (settings.power) wirePower(settings.power);
     wireLogs(seq);
   };
+
+  // Settings > System: the electricity price behind every cost shown with
+  // energy. One price, or a time-of-use plan (peak, off-peak, weekends): the
+  // server sums costs at the price of each moment, and the first rate whose
+  // days and hours match wins.
+  const WEEK = [[1, 'Mon'], [2, 'Tue'], [3, 'Wed'], [4, 'Thu'], [5, 'Fri'], [6, 'Sat'], [0, 'Sun']];
+  const MAX_RATES = 12;
+  const priceValue = (n) => (fin(n) ? String(n) : '');
+
+  function rateRow(r = {}) {
+    const days = new Set(Array.isArray(r.days) ? r.days : [0, 1, 2, 3, 4, 5, 6]);
+    return `<div class="rate" data-rate>
+      <label class="field">Name<input class="input" data-k="label" maxlength="24" value="${esc(r.label || '')}" placeholder="Off-peak"></label>
+      <label class="field">Price per kWh<input class="input" data-k="price" inputmode="decimal" value="${esc(priceValue(r.price))}" placeholder="0.12"></label>
+      <label class="field">From<input class="input" type="time" step="60" data-k="from" value="${esc(r.from || '23:00')}"></label>
+      <label class="field">To<input class="input" type="time" step="60" data-k="to" value="${esc(r.to || '07:00')}"></label>
+      <div class="field rate-days">Days<div class="days-pick">${WEEK.map(([d, name]) => `<label><input type="checkbox" value="${d}"${days.has(d) ? ' checked' : ''}><span>${name}</span></label>`).join('')}</div></div>
+      <button type="button" class="btn sm ghost rate-del" data-rate-del aria-label="Remove this rate">Remove</button>
+    </div>`;
+  }
+
+  function powerCard(p, timezone) {
+    const tou = p.mode === 'tou';
+    return `<div class="card" data-section="system"><h2>Electricity price</h2>
+      <p>For the cost next to energy on the Overview, the Encoder and Jobs. Leave it empty to show energy only.</p>
+      <form id="power-form" class="form" style="margin-top:18px" novalidate>
+        <div class="field full">Plan<div class="seg" id="power-mode" role="group" aria-label="Plan">
+          <button type="button" data-mode="flat" class="${tou ? '' : 'on'}" aria-pressed="${!tou}">One price</button><button type="button" data-mode="tou" class="${tou ? 'on' : ''}" aria-pressed="${tou}">Time of use</button></div></div>
+        <label class="field">Currency<input class="input" name="currency" maxlength="3" value="${esc(p.currency || '$')}" placeholder="$"></label>
+        <label class="field" data-plan="flat"${tou ? ' hidden' : ''}>Price per kWh<input class="input" name="pricePerKwh" inputmode="decimal" value="${esc(priceValue(p.pricePerKwh))}" placeholder="0.15"></label>
+        <label class="field" data-plan="tou"${tou ? '' : ' hidden'}>Other hours (per kWh)<input class="input" name="defaultPrice" inputmode="decimal" value="${esc(priceValue(p.defaultPrice))}" placeholder="0.25"></label>
+        <div class="full" data-plan="tou"${tou ? '' : ' hidden'}>
+          <p class="muted small">Rates in order: the first one whose days and hours match is used, otherwise the price for other hours. A rate from 23:00 to 07:00 runs over midnight and belongs to the day it starts. Times are the server's${timezone ? ` (${esc(timezone)})` : ''}.</p>
+          <div class="rates" id="power-rates">${(p.rates || []).map(rateRow).join('')}</div>
+          <button type="button" class="btn sm" id="power-add"${(p.rates || []).length >= MAX_RATES ? ' disabled' : ''}>${icon('plus')} Add a rate</button>
+        </div>
+        <div class="full form-actions" style="margin-top:0"><button class="btn solid" type="submit">Save price</button></div>
+      </form></div>`;
+  }
+
+  function wirePower(saved) {
+    const form = $('power-form');
+    if (!form) return;
+    let mode = saved.mode === 'tou' ? 'tou' : 'flat';
+    const list = $('power-rates');
+    const add = $('power-add');
+    const count = () => list.querySelectorAll('[data-rate]').length;
+    form.querySelectorAll('#power-mode button').forEach((b) => {
+      b.onclick = () => {
+        mode = b.dataset.mode;
+        form.querySelectorAll('#power-mode button').forEach((x) => {
+          x.classList.toggle('on', x === b);
+          x.setAttribute('aria-pressed', String(x === b));
+        });
+        form.querySelectorAll('[data-plan]').forEach((x) => { x.hidden = x.dataset.plan !== mode; });
+        if (mode === 'tou' && !count()) list.insertAdjacentHTML('beforeend', rateRow({ label: 'Off-peak' }));
+        add.disabled = count() >= MAX_RATES;
+      };
+    });
+    add.onclick = () => {
+      if (count() >= MAX_RATES) return;
+      list.insertAdjacentHTML('beforeend', rateRow(count() ? { label: 'Peak', from: '16:00', to: '21:00', days: [1, 2, 3, 4, 5] } : { label: 'Off-peak' }));
+      add.disabled = count() >= MAX_RATES;
+      list.lastElementChild.querySelector('input')?.focus();
+    };
+    list.onclick = (e) => {
+      const del = e.target.closest('[data-rate-del]');
+      if (!del) return;
+      del.closest('[data-rate]').remove();
+      add.disabled = count() >= MAX_RATES;
+    };
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      const fd = new FormData(form);
+      const num = (v) => (String(v ?? '').trim() === '' ? null : Number(String(v).replace(',', '.')));
+      const rates = [...list.querySelectorAll('[data-rate]')].map((row) => {
+        const v = (k) => row.querySelector(`[data-k="${k}"]`).value;
+        return { label: v('label').trim(), price: num(v('price')), from: v('from'), to: v('to'), days: [...row.querySelectorAll('.days-pick input:checked')].map((x) => Number(x.value)) };
+      });
+      const prices = mode === 'tou' ? [num(fd.get('defaultPrice')), ...rates.map((r) => r.price)] : [num(fd.get('pricePerKwh'))];
+      if (prices.some(Number.isNaN)) return toast('Enter prices as numbers, like 0.15.', true);
+      const body = {
+        currency: String(fd.get('currency') || '').trim() || '$', mode,
+        pricePerKwh: num(fd.get('pricePerKwh')), defaultPrice: num(fd.get('defaultPrice')),
+        // one price keeps the saved plan for later; a plan sends what is on screen
+        rates: mode === 'tou' ? rates : (saved.rates || [])
+      };
+      try {
+        const next = await api('/api/settings/power', { method: 'PUT', body });
+        state.power = next;
+        Object.assign(saved, next);
+        toast(mode === 'tou' ? 'Saved. Costs follow the plan from now on.' : body.pricePerKwh === null ? 'Saved. Energy is shown without a cost.' : 'Saved. Costs use this price from now on.');
+      } catch (err) {
+        toast(err.message, true);
+      }
+    };
+  }
 
   function wireLogs(seq) {
     const list = page.querySelector('#log-list');
@@ -1017,6 +1541,8 @@
     delete document.documentElement.dataset.boot;
     const [route, ...rest] = (location.hash.replace(/^#\/?/, '') || 'overview').split('/');
     state.route = pages[route] ? route : 'overview';
+    // the server's numbers are only asked for while the Overview shows them
+    if (state.route !== 'overview') stopMonitor();
     document.querySelectorAll('#nav a').forEach((a) => a.classList.toggle('active', a.dataset.route === state.route));
     const label = document.querySelector(`#nav a[data-route="${state.route}"] span`)?.textContent || '';
     $('crumb').textContent = `Sentry Six Manager${label ? ` / ${label}` : ''}`;
@@ -1066,6 +1592,7 @@
     if (encoderFirst) render();
     try {
       const s = await api('/api/settings');
+      state.power = s.power || null;
       $('reduce-effects').checked = Boolean(s.appearance?.reduceEffects);
       document.documentElement.classList.toggle('reduce-effects', Boolean(s.appearance?.reduceEffects));
       await Promise.all([loadVehicles(), loadNotes()]);

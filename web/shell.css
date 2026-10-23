@@ -242,6 +242,83 @@ details.more p { margin-top: 10px; color: var(--text-2); max-width: 760px; }
 .logscope { color: var(--info); font-family: var(--mono); font-size: 12px; }
 .logmsg { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
 
+/* Overview > Server ("nerd stats"): the approved mockup, docs/plans/server-monitor-mock.js */
+.nd-server { container-type: inline-size; }
+.nd-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+.nd-head > div:first-child { min-width: 0; }
+.nd-sub { overflow-wrap: anywhere; }
+.nd-head-right { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.nd-chipbox:empty { display: none; }
+.nd-range button { padding: 6px 11px; font-size: 12.5px; }
+.nd-head-right .btn.sm { min-height: 32px; }
+.nd-alert { margin-top: 14px; padding: 10px 14px; border-radius: 12px; border: 1px solid rgba(255, 159, 90, 0.45); background: rgba(255, 159, 90, 0.1); font-size: 14px; overflow-wrap: anywhere; }
+.nd-alert b { color: var(--warn); margin-right: 8px; }
+.nd-alert.bad { border-color: rgba(248, 113, 113, 0.5); background: var(--danger-bg); }
+.nd-alert.bad b { color: var(--danger); }
+.nd-grid { display: grid; grid-auto-flow: row dense; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 14px; margin-top: 16px; }
+.nd-tile { background: var(--panel-2); border: 1px solid var(--border); border-radius: 14px; padding: 16px; min-width: 0; }
+.nd-wide { grid-column: span 2; }
+.nd-title { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 700; }
+.nd-title > span:first-child { flex: none; }
+.nd-title .muted { min-width: 0; text-transform: none; letter-spacing: 0; font-weight: 500; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nd-big { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 8px; margin-top: 10px; }
+.nd-big b { font-size: 30px; font-weight: 700; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.nd-spark { width: 100%; height: 40px; display: block; margin-top: 8px; }
+.nd-axis { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; margin-top: 2px; }
+.nd-cores { display: grid; grid-template-columns: repeat(var(--cols, 12), minmax(0, 1fr)); grid-auto-rows: 26px; gap: 3px; margin-top: 10px; }
+.nd-cores.dense { grid-auto-rows: 12px; gap: 2px; }
+.nd-cores i { background: linear-gradient(to top, var(--accent) var(--v), rgba(255, 255, 255, 0.06) var(--v)); border-radius: 3px; }
+.nd-kv { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 12px; margin: 12px 0 0; font-size: 13px; }
+.nd-kv dt { color: var(--muted); }
+.nd-kv dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.nd-rows { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; margin-top: 12px; font-size: 13px; }
+.nd-rows > div { display: grid; grid-template-columns: 92px minmax(0, 1fr) auto; align-items: center; gap: 10px; }
+.nd-rows b { font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.nd-bar { height: 6px; border-radius: 99px; background: rgba(255, 255, 255, 0.07); overflow: hidden; margin-top: 8px; }
+.nd-rows .nd-bar { margin-top: 0; }
+.nd-bar span { display: block; height: 100%; background: var(--accent); border-radius: 99px; }
+.nd-bar.hot span { background: var(--warn); }
+.nd-disks { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; margin-top: 12px; }
+.nd-disk > div { display: flex; justify-content: space-between; align-items: baseline; gap: 4px 10px; flex-wrap: wrap; }
+.nd-disk > div b { overflow-wrap: anywhere; }
+.nd-disk > div .muted { overflow-wrap: anywhere; }
+.nd-disk .small { display: block; margin-top: 6px; color: var(--text-2); }
+.nd-warn { color: var(--warn) !important; font-weight: 600; }
+.nd-bad { color: var(--danger) !important; font-weight: 600; }
+.nd-procs { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; }
+.nd-procs th { text-align: left; color: var(--muted); font-weight: 600; font-size: 12px; padding: 6px 0; }
+.nd-procs td { padding: 7px 0; border-top: 1px solid var(--border); overflow-wrap: anywhere; }
+.nd-procs td + td, .nd-procs th + th { text-align: right; padding-left: 12px; white-space: nowrap; }
+.nd-more { all: unset; box-sizing: border-box; margin-top: 10px; color: var(--accent); font-size: 12.5px; font-weight: 600; cursor: pointer; }
+.nd-more:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.nd-none { margin-top: 14px; }
+.nd-foot { margin-top: 14px; overflow-wrap: anywhere; }
+.nd-foot p { color: var(--muted); }
+.nd-foot ul { margin: 4px 0; padding-left: 18px; }
+/* a compose line stays whole when it fits a line, and wraps only when it is longer */
+.nd-foot code { display: inline-block; max-width: 100%; font-family: var(--mono); font-size: 12px; color: var(--text-2); }
+.nd-nb { white-space: nowrap; }
+/* one column: the wide tiles too (no implicit second column) */
+@container (max-width: 553px) { .nd-wide { grid-column: auto; } }
+/* browsers without container queries (Safari 15): no wide tiles below desktop widths */
+@supports not (container-type: inline-size) {
+  @media (max-width: 1100px) { .nd-wide { grid-column: auto; } }
+}
+
+/* Settings > System: electricity price */
+.rates { display: grid; gap: 12px; margin: 14px 0 12px; }
+.rates:empty { display: none; }
+.rate { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) minmax(0, 0.9fr) minmax(0, 0.9fr); gap: 12px 14px; padding: 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel-2); }
+.rate .input { width: 100%; min-width: 0; }
+.rate-days { grid-column: 1 / -2; }
+.rate-del { grid-column: -2 / -1; align-self: end; justify-self: end; }
+.days-pick { display: flex; flex-wrap: wrap; gap: 6px; }
+.days-pick label { position: relative; cursor: pointer; }
+.days-pick input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.days-pick span { display: inline-flex; align-items: center; justify-content: center; min-width: 46px; min-height: 34px; padding: 0 8px; border: 1px solid var(--border-strong); border-radius: 9px; background: var(--panel); color: var(--text-2); font-size: 12.5px; font-weight: 600; }
+.days-pick input:checked + span { color: var(--accent); border-color: var(--accent-border); background: var(--accent-bg); }
+.days-pick input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
+
 /* embedded Studio */
 .frame-wrap { position: relative; margin: -22px -32px -64px -48px; height: 100vh; height: 100dvh; }
 .frame-wrap { overflow: hidden; }
@@ -323,6 +400,17 @@ html.reduce-effects *, html.reduce-effects *::before { transition: none !importa
   .day .rec-top { grid-template-columns: 22px minmax(0, 1fr); gap: 10px 12px; align-items: start; }
   .day .rec-top .thumb { width: 100%; max-width: 260px; height: auto; aspect-ratio: 16 / 10; }
   .day .rec-top .rec-info, .day .rec-top .rec-actions { grid-column: 2; }
+  .table td.energy:empty { display: none; } /* jobs without a measurement */
+  .nd-wide { grid-column: auto; }
+  .nd-grid { grid-template-columns: minmax(0, 1fr); }
+  .nd-big b { font-size: 26px; }
+  .nd-procs th:nth-child(3), .nd-procs td:nth-child(3) { display: none; }
+  .rate { grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 12px; }
+  .rate-days { grid-column: 1 / -1; }
+  .rate-del { grid-column: 1 / -1; justify-self: start; }
+  /* the week on one row */
+  .days-pick { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; }
+  .days-pick span { display: flex; min-width: 0; padding: 0; }
 }
 @media (max-width: 374px) {
   /* narrow phones: the sections get the shield's room */
@@ -335,4 +423,6 @@ html.reduce-effects *, html.reduce-effects *::before { transition: none !importa
 /* touch screens: iPhones zoom into fields with text under 16px, so keep it at 16px */
 @media (pointer: coarse) {
   input, select, textarea { font-size: max(16px, 1em); }
+  .nd-range button, .nd-head-right .btn.sm, .days-pick span { min-height: 40px; }
+  .nd-more { padding: 8px 0; }
 }
