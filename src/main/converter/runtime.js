@@ -21,6 +21,8 @@ const {
   createFileTransaction
 } = require('./staging');
 const { createConverterJobService } = require('./jobService');
+const { createConvertedIndex } = require('./convertedIndex');
+const { readMp4VideoCodec } = require('./mp4Header');
 
 const ACTIVE_RECOVERY_STATES = new Set([
   'discovering', 'waiting', 'staging', 'encoding', 'writing-telemetry',
@@ -466,6 +468,14 @@ async function createConverterRuntime(options = {}) {
   if (typeof options.spawn !== 'function') throw new TypeError('spawn is required');
 
   const jobsRoot = pathApi.join(options.userDataPath, 'converter-jobs');
+  // Clips known to be converted already, so a run skips them while it
+  // discovers files (an optimisation only: losing it costs speed, not results).
+  const convertedIndex = createConvertedIndex({
+    file: pathApi.join(options.userDataPath, 'converter-index', 'converted-clips.json'),
+    fs: pfs,
+    pathApi
+  });
+  await convertedIndex.load();
   // Staging refuses any owned file whose real path differs from the path it
   // was given, so the temp folder is resolved to its real location first:
   // macOS reaches it through a link (/var -> /private/var) and Windows may
@@ -606,11 +616,17 @@ async function createConverterRuntime(options = {}) {
     // How long ffmpeg may go without reporting progress before it counts
     // as stuck (jobService's default when unset).
     encodeStallMs: options.encodeStallMs,
+    // The MP4 header check discovery uses to skip converted clips, and the
+    // stat that records a newly converted clip in the index.
+    readVideoCodec: (source, readOptions = {}) => readMp4VideoCodec(source, { ...readOptions, fs: pfs }),
+    statFile: (target) => pfs.stat(target),
     ensureDestinationParent: ({ destinationRoot, destination }) => ensureContainedDestinationParent({
       destinationRoot, destination, fs: pfs, pathApi, platform
     })
   };
-  const service = factories.createConverterJobService({ ...serviceDeps, store, stagingManager });
+  // Only the real service records clips in the index: the benchmark converts
+  // temporary copies.
+  const service = factories.createConverterJobService({ ...serviceDeps, store, stagingManager, convertedIndex });
 
   // Each verified clip leaves its (now empty) private snapshot folder behind
   // once the snapshot is published. Remove empty ones while nothing is
@@ -912,6 +928,7 @@ async function createConverterRuntime(options = {}) {
       auto.stop();
       if (!shutdownPromise) shutdownPromise = (async () => {
         const results = await Promise.allSettled([Promise.resolve().then(() => service.shutdown()), recoveryPromise]);
+        await convertedIndex.close();
         const rejected = results.find(result => result.status === 'rejected');
         if (rejected) throw rejected.reason;
       })();

@@ -1,0 +1,207 @@
+'use strict';
+
+// Clips that are already H.265 / AV1 are skipped while the job discovers
+// files, from the converted-clips index without opening them or else from a
+// quick read of their MP4 header, never by a worker with ffprobe (that took
+// ~3 s per clip and an encode slot on the owner's 44,000-clip share). Waiting
+// and the time remaining then count only clips that will really be converted.
+
+const test = require('node:test');
+const assert = require('node:assert');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { spawn, spawnSync } = require('child_process');
+
+const REPO = path.join(__dirname, '..');
+const { createConverterRuntime } = require(path.join(REPO, 'src/main/converter/runtime'));
+const { sanitizeSnapshot } = require(path.join(REPO, 'src/main/converter/ipc'));
+const { createPosixOwnedFs } = require(path.join(REPO, 'server/posixOwnedFs'));
+const { RETRYABLE } = require(path.join(REPO, 'server/converterHost'));
+const { createTeslaH264Fixture } = require('./fixtures/ffmpegFixtures');
+
+const HELPER = path.join(REPO, 'build', 'noreplace-rename');
+const encoders = spawnSync('ffmpeg', ['-hide_banner', '-encoders']).stdout?.toString() || '';
+const skip = /\slibx265\s/.test(encoders) && fs.existsSync(HELPER) ? false : 'needs ffmpeg with libx265 and build/noreplace-rename';
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// One original (Tesla-style H.264) and one converted clip (H.265, as the
+// converter writes it: hvc1, moov at the end), copied as often as needed.
+let samples = null;
+async function sampleClips() {
+  if (samples) return samples;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sm-skip-fx-'));
+  const original = path.join(dir, 'original.mp4');
+  await createTeslaH264Fixture({
+    ffmpegPath: 'ffmpeg', outputPath: original, durationSeconds: 4, frameRate: 12, size: '320x240', spatialNoise: 4,
+    telemetryPattern: Array.from({ length: 48 }, (_, n) => Buffer.from([0x20, n]))
+  });
+  const converted = path.join(dir, 'converted.mp4');
+  const made = spawnSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=size=160x120:rate=12:duration=1',
+    '-c:v', 'libx265', '-preset', 'ultrafast', '-x265-params', 'log-level=error', '-pix_fmt', 'yuv420p', '-tag:v', 'hvc1', converted]);
+  assert.strictEqual(made.status, 0, made.stderr?.toString());
+  samples = { dir, original, converted };
+  return samples;
+}
+
+const stamp = (n) => new Date(Date.UTC(2025, 0, 1) + n * 60_000).toISOString().slice(0, 19).replace('T', '_').replace(/:/g, '-');
+
+// The runtime as server/converterHost.js composes it, with every spawned
+// process and every file opened recorded.
+async function openRuntime(base, { ffmpegPath = 'ffmpeg' } = {}) {
+  const record = { spawned: [], opened: [] };
+  const pfs = Object.create(fs.promises);
+  pfs.open = async (p, ...rest) => { record.opened.push(String(p)); return fs.promises.open(p, ...rest); };
+  const wrappedFs = Object.create(fs);
+  Object.defineProperty(wrappedFs, 'promises', { value: pfs });
+  process.env.SENTRY_NOREPLACE_RENAME = HELPER;
+  const owned = createPosixOwnedFs();
+  const runtime = await createConverterRuntime({
+    userDataPath: fs.realpathSync(path.join(base, 'data')),
+    tempPath: fs.realpathSync(path.join(base, 'temp')),
+    ffmpegPath, ffprobePath: 'ffprobe', fs: wrappedFs, pathApi: path, platform: process.platform,
+    spawn: (command, args, options) => {
+      const child = spawn(command, args, options);
+      record.spawned.push({ command, args, pid: child.pid });
+      return child;
+    },
+    removeOwned: owned.removeOwned, renameExclusive: owned.renameExclusive, autoConvert: false, gpuDecode: false,
+    network: {
+      isRetryable: (error) => RETRYABLE.has(error?.code),
+      checkPath: async (target) => fs.promises.access(target).then(() => true, () => false)
+    }
+  });
+  await runtime.start();
+  return { runtime, record };
+}
+
+function makeBase() {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'sm-skip-'));
+  for (const dir of ['data', 'temp', 'footage/TeslaCam/RecentClips']) fs.mkdirSync(path.join(base, dir), { recursive: true });
+  return { base, root: fs.realpathSync(path.join(base, 'footage', 'TeslaCam')) };
+}
+
+function jobConfig(root, { outputMode = 'replace', concurrency = 1, destinationRoot = null } = {}) {
+  return {
+    sourceRoot: root, destinationRoot: outputMode === 'replace' ? null : destinationRoot,
+    codec: 'h265', profileId: 'custom', bitrateKbps: 250, networkMode: 'direct', outputMode,
+    includedGroups: ['RecentClips', 'SavedClips', 'SentryClips'], groupOrder: ['SavedClips', 'SentryClips', 'RecentClips'],
+    replacementConfirmed: outputMode === 'replace', concurrency, verifyMode: 'quick'
+  };
+}
+
+async function settle(runtime, jobId, ms = 120_000) {
+  let timer;
+  const ended = await Promise.race([
+    runtime.service.whenIdle(jobId).then(() => true),
+    new Promise((resolve) => { timer = setTimeout(() => resolve(false), ms); })
+  ]);
+  clearTimeout(timer);
+  const job = await runtime.service.get(jobId);
+  if (!ended) {
+    await runtime.service.cancel(jobId).catch(() => {});
+    assert.fail(`job did not end on its own: ${job.state}`);
+  }
+  return job;
+}
+
+const touches = (record, paths) => {
+  const set = new Set(paths);
+  return {
+    spawned: record.spawned.filter((entry) => entry.args.some((arg) => set.has(arg))),
+    opened: record.opened.filter((entry) => set.has(entry))
+  };
+};
+
+test('20,000 converted clips and 100 originals: every skip happens while discovering, the encode slot only sees originals', { skip, timeout: 300_000 }, async () => {
+  const { base, root } = makeBase();
+  const { original, converted } = await sampleClips();
+  const recent = path.join(root, 'RecentClips');
+  const originals = [];
+  const convertedClips = [];
+  for (let n = 0; n < 20_100; n += 1) {
+    const file = path.join(recent, `${stamp(n)}-front.mp4`);
+    // the originals are spread through the converted ones, as after a run that was stopped
+    if (n % 201 === 100) { fs.copyFileSync(original, file); originals.push(file); } else { fs.copyFileSync(converted, file); convertedClips.push(file); }
+  }
+  const env = await openRuntime(base);
+  try {
+    const started = Date.now();
+    const jobId = await env.runtime.service.start(jobConfig(root, { outputMode: 'separate', destinationRoot: path.join(base, 'out') }));
+    // The worker parks after at most one clip; discovery goes on.
+    await env.runtime.service.pause(jobId);
+    let job;
+    for (let i = 0; i < 2400; i += 1) {
+      job = await env.runtime.service.get(jobId);
+      if (job.discoveryComplete) break;
+      await sleep(100);
+    }
+    const seconds = (Date.now() - started) / 1000;
+    assert.strictEqual(job.discoveryComplete, true, `discovery stopped at ${job.items.length} clips`);
+    assert.ok(seconds < 120, `discovery took ${seconds} s`);
+    const skipped = job.items.filter((item) => item.state === 'skipped');
+    assert.strictEqual(skipped.length, convertedClips.length);
+    assert.ok(skipped.every((item) => item.resultCode === 'already-converted' && item.eligibleVideo === false));
+    assert.deepStrictEqual(new Set(skipped.map((item) => item.sourcePath)), new Set(convertedClips));
+    const toConvert = job.items.filter((item) => item.state !== 'skipped');
+    assert.deepStrictEqual(toConvert.map((item) => item.sourcePath).sort(), [...originals].sort());
+    assert.ok(job.items.every((item) => !('ino' in item)), 'the job file keeps no inode');
+    // What the Encoder page shows: waiting counts only the originals.
+    const counts = sanitizeSnapshot(job).itemStateCounts;
+    assert.strictEqual(counts.skipped, convertedClips.length);
+    assert.strictEqual(counts.queued + counts.active + counts.completed + counts.failed, originals.length);
+    assert.ok(counts.queued >= originals.length - 1, `waiting ${counts.queued}`);
+    // No ffprobe or ffmpeg ever saw a converted clip; each was opened once,
+    // for its header.
+    const seen = touches(env.record, convertedClips);
+    assert.strictEqual(seen.spawned.length, 0, 'no process for a converted clip');
+    assert.strictEqual(seen.opened.length, convertedClips.length);
+    await env.runtime.service.cancel(jobId);
+  } finally {
+    await env.runtime.shutdown().catch(() => {});
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('converted clips are remembered: the next run skips every clip without opening one', { skip, timeout: 300_000 }, async () => {
+  const { base, root } = makeBase();
+  const { original, converted } = await sampleClips();
+  const recent = path.join(root, 'RecentClips');
+  const originals = [];
+  const convertedClips = [];
+  for (let n = 0; n < 33; n += 1) {
+    const file = path.join(recent, `${stamp(n)}-front.mp4`);
+    if (n % 11 === 5) { fs.copyFileSync(original, file); originals.push(file); } else { fs.copyFileSync(converted, file); convertedClips.push(file); }
+  }
+  let env = await openRuntime(base);
+  try {
+    let jobId = await env.runtime.service.start(jobConfig(root, { concurrency: 2 }));
+    let job = await settle(env.runtime, jobId);
+    assert.strictEqual(job.state, 'completed');
+    assert.deepStrictEqual(job.items.filter((item) => item.resultCode === 'converted').map((item) => item.sourcePath).sort(), [...originals].sort());
+    assert.strictEqual(job.items.filter((item) => item.resultCode === 'already-converted').length, convertedClips.length);
+    assert.strictEqual(touches(env.record, convertedClips).spawned.length, 0, 'no ffprobe for a converted clip');
+    assert.ok(fs.existsSync(path.join(base, 'data', 'converter-index', 'converted-clips.json')));
+
+    // An app restart (an update), then a new run over the same footage. One
+    // converted clip was touched since: it alone is looked at again.
+    await env.runtime.shutdown();
+    const changed = convertedClips[3];
+    fs.utimesSync(changed, new Date(), new Date(Date.UTC(2026, 0, 1)));
+    env = await openRuntime(base);
+    jobId = await env.runtime.service.start(jobConfig(root, { concurrency: 2 }));
+    job = await settle(env.runtime, jobId);
+    assert.strictEqual(job.state, 'completed');
+    assert.strictEqual(job.items.length, originals.length + convertedClips.length);
+    assert.ok(job.items.every((item) => item.state === 'skipped' && item.resultCode === 'already-converted'),
+      'the clips converted by the first run are known as converted too');
+    const seen = touches(env.record, [...originals, ...convertedClips]);
+    assert.strictEqual(seen.spawned.length, 0, 'no process at all for a known clip');
+    assert.deepStrictEqual(seen.opened, [changed], 'only the clip that changed was opened (its header)');
+  } finally {
+    await env.runtime.shutdown().catch(() => {});
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test.after(() => { if (samples) fs.rmSync(samples.dir, { recursive: true, force: true }); });
