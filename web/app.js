@@ -1143,6 +1143,20 @@
     }
   };
 
+  // Multi-node is not built yet: this server is the only node. The page is
+  // here so the place for it exists; nothing is set up or sent anywhere.
+  pages.nodes = async () => {
+    page.innerHTML = head('Your servers', 'Nodes', `<button class="btn" disabled title="Coming soon">${icon('plus')} Add node</button>`) + `
+      <div class="note green" style="margin:0 0 20px">Multi-node support is coming. Later you will be able to add other servers running Sentry Six Manager here and see their status, hardware and conversions in one place. Nothing changes yet: this server keeps working on its own.</div>
+      <div class="card"><h2>Nodes</h2>
+        <table class="table" style="margin-top:12px"><thead><tr><th>Node</th><th>Role</th><th>Status</th></tr></thead><tbody>
+          <tr><td><b>This server</b><br><span class="muted small">${esc(location.host)}</span></td><td class="small">Main</td>
+            <td><span class="chip green"><span class="dot ok"></span>Online</span></td></tr>
+        </tbody></table>
+        <p class="muted small" style="margin-top:14px">Add node: coming soon.</p>
+      </div>`;
+  };
+
   pages.notifications = async () => {
     const { notifications } = await api('/api/notifications');
     page.innerHTML = head('Your archive workspace', 'Notifications') + `<div class="card">
