@@ -105,11 +105,6 @@
   "alerts": [],
   "unlock": [
     {
-      "key": "cpu-power",
-      "adds": "CPU power in watts and kWh (a read-only energy counter)",
-      "compose": "- /sys/devices/virtual/powercap:/sys/devices/virtual/powercap:ro"
-    },
-    {
       "key": "host-view",
       "adds": "Processes and network of the whole server, not only this container",
       "compose": "pid: host"

@@ -284,7 +284,7 @@
     {
       "key": "cpu-power",
       "adds": "CPU power in watts and kWh (a read-only energy counter)",
-      "compose": "- /sys/devices/virtual/powercap:/sys/devices/virtual/powercap:ro"
+      "compose": "- /sys/devices/virtual/powercap:/host/powercap:ro"
     }
   ],
   "sparks": {
@@ -566,7 +566,7 @@
     ]
   },
   "price": {
-    "currency": "€",
+    "currency": "\u20ac",
     "mode": "tou",
     "now": 0.29,
     "rate": "Peak"

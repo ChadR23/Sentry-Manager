@@ -19,6 +19,13 @@
   }
   const plural = (n, w) => `${Number(n || 0).toLocaleString()} ${w}${n === 1 ? '' : 's'}`;
   const when = (ts) => (ts ? new Date(ts).toLocaleString() : '—');
+  // how long a job took: 42 s, 12 m 5 s, 8 h 0 m
+  function took(ms) {
+    const s = Math.max(0, Math.round(ms / 1000));
+    if (s < 60) return `${s} s`;
+    if (s < 3600) return `${Math.floor(s / 60)} m ${s % 60} s`;
+    return `${Math.floor(s / 3600)} h ${Math.floor((s % 3600) / 60)} m`;
+  }
   function ago(ts) {
     if (!ts) return 'never';
     const s = Math.round((Date.now() - ts) / 1000);
@@ -1080,7 +1087,7 @@
     page.innerHTML = head('Your archive workspace', 'Jobs') + pills() + `<div class="card">
       ${jobs.length ? `<table class="table"><thead><tr><th>Job</th><th>Status</th><th>Details</th><th>Started</th><th>Took</th>${withEnergy ? '<th>Energy</th>' : ''}</tr></thead><tbody>
         ${jobs.map((j) => `<tr><td><b>${esc(j.title)}</b><br><span class="muted small">${esc(j.type)}</span></td><td>${chip(j.status)}</td><td class="small">${esc(j.detail || '')}</td><td class="small">${when(j.startedAt)}</td>
-          <td class="small mono">${j.finishedAt ? `${Math.max(0, Math.round((j.finishedAt - j.startedAt) / 1000))} s` : '…'}</td>${withEnergy ? `<td class="small mono energy">${esc(energy(j.energy))}</td>` : ''}</tr>`).join('')}</tbody></table>`
+          <td class="small mono">${j.finishedAt ? took(j.finishedAt - j.startedAt) : '…'}</td>${withEnergy ? `<td class="small mono energy">${esc(energy(j.energy))}</td>` : ''}</tr>`).join('')}</tbody></table>`
         : '<p>No jobs yet. Scans, conversions, Recycle Bin actions and policy runs show up here.</p>'}</div>`;
   };
 

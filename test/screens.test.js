@@ -69,7 +69,9 @@ test('Overview: a Raspberry Pi shows only what it has', () => {
   assert.doesNotMatch(html, /nd-alert/);
   assert.match(html, /Raspberry Pi 4 Model B Rev 1\.4 · 4 cores/);
   assert.match(html, /<dt>CPU<\/dt><dd>52 °C<\/dd>/);
-  assert.match(html, /CPU power in watts/, 'what the optional compose lines would add');
+  // an ARM board has no CPU energy counter to offer; the whole-server view is still offered
+  assert.doesNotMatch(html, /CPU power in watts/);
+  assert.match(html, /pid: host/, 'what the optional compose line would add');
 });
 
 test('Overview: AMD and NVIDIA servers, time-of-use price, errors before warnings', () => {
