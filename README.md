@@ -194,6 +194,10 @@ once. GPUs are told apart by their PCI slot, so a reboot that numbers them
 differently changes nothing; the old trick of mapping one GPU to
 `/dev/dri/renderD128` still works but is no longer needed.
 
+Several CPUs: on a server with two or more CPU sockets, **Overview → Server**
+shows "2 × <CPU model>" and each socket's use, temperature and package power
+(CPU 1, CPU 2, …); the CPU temperature is the hottest socket.
+
 ## Recycle Bin and policies
 
 ![Recycle Bin](docs/images/recycle-bin.png)
