@@ -74,8 +74,9 @@ what the machine is doing, live, so you don't need Glances or another tool:
   and how much of it this app and its conversions use.
 - **GPU** (Intel, AMD and NVIDIA, one tile each): busy and video-engine use,
   memory, clock, temperature, watts.
-- **Power**: CPU and GPU watts, kWh today and this week, and the cost when
-  you enter your electricity price in Settings → System.
+- **Power**: CPU and GPU watts, the energy used today and this week (in Wh
+  below 1 kWh), and the cost when you enter your electricity price in
+  Settings → System.
 - **Memory, storage** (each disk's reads, writes and temperature; space and
   answer time of the data volume and every footage share), **network** (live
   speed, and the data used today, this week and this month) and every
@@ -138,8 +139,13 @@ copies somewhere else is a choice you make in the Output section.
   converted.
 - **Hardware panel.** While a conversion runs, Live run shows the encoder
   and GPU in use, video-engine and CPU load, watts and temperatures, each
-  clip's speed and progress, and the energy used so far (kWh, clips and GB
-  saved per kWh, cost).
+  clip's speed and progress, and the energy used so far (Wh or kWh, clips and
+  GB saved per kWh, cost). Clips and GB per kWh count only what was converted
+  while the energy was measured, so they start at 0 and rise as clips finish
+  (a job that was already running when measuring began, for example before a
+  restart, is not divided by a few minutes of energy). When the server
+  reports the GPU's power but not the CPU's, they count the GPU alone and say
+  *GPU only*.
 - **Benchmark.** Runs the real converter on copies of a few of your clips
   at 1, 2, 4, 6 and 8 at once, on the server, and suggests the lightest
   setting within 5% of the fastest, and, when the server reports its power,

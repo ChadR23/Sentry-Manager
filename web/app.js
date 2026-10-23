@@ -273,9 +273,11 @@
   const watts = (w) => `${w >= 10 ? Math.round(w) : w.toFixed(1).replace(/\.0$/, '')} W`;
   const temp = (c) => `${Math.round(c)} °C`;
   const clock = (mhz) => (mhz >= 1000 ? `${Number((mhz / 1000).toFixed(2))} GHz` : `${Math.round(mhz)} MHz`);
-  const kwh = (wh) => {
+  // "12.4 Wh" below 1 kWh, so a run's first minutes visibly count up; then "5.2 kWh"
+  const energyText = (wh) => {
+    if (Math.round(wh * 10) / 10 < 1000) return `${(Math.round(wh * 10) / 10).toFixed(1)} Wh`;
     const k = wh / 1000;
-    return `${k < 1 ? k.toFixed(2) : k < 100 ? k.toFixed(1) : Math.round(k).toLocaleString()} kWh`;
+    return `${k < 100 ? k.toFixed(1) : Math.round(k).toLocaleString()} kWh`;
   };
   // $0.14 but 1.20 kr
   const inCurrency = (n, cur) => {
@@ -393,14 +395,14 @@
     // no power reading at all (and nothing measured earlier this week): no tile
     if (!fin(total) && !p.cpuSource && !p.gpuSource && !(p.todayWh > 0) && !(p.weekWh > 0)) return '';
     const label = parts.length === 2 ? 'CPU + GPU' : parts.length ? (parts[0][0] === 'GPU' ? 'GPU (CPU not measured)' : 'CPU package') : '';
-    const energy = (wh, c) => (fin(wh) ? esc(`${kwh(wh)}${fin(c) ? ` · ${money(c, currency)}` : ''}`) : '');
+    const energy = (wh, c) => (fin(wh) ? esc(`${energyText(wh)}${fin(c) ? ` · ${money(c, currency)}` : ''}`) : '');
     const priceNow = fin(price?.now) ? `${esc(inCurrency(price.now.toFixed(price.now < 1 ? 3 : 2).replace(/(\.\d\d)0$/, '$1'), price.currency || currency))} per kWh${price.rate ? ` · ${esc(price.rate)}` : ''}` : '';
     return ndTile('Power', 'measured, not estimated', (fin(total) ? ndBig(watts(total), label) : '')
       + (parts.length ? `<div class="nd-rows">${parts.map(([name, w]) => `<div><span>${name}</span>${ndBar(total > 0 ? (w / total) * 100 : 0)}<b>${watts(w)}</b></div>`).join('')}</div>` : '')
       + ndKv([
         ['Today', energy(p.todayWh, p.todayCost)],
         ['This week', energy(p.weekWh, p.weekCost)],
-        ['Converting', enc?.running && fin(enc.run?.wh) ? `${kwh(enc.run.wh)} this run` : ''],
+        ['Converting', enc?.running && fin(enc.run?.wh) ? `${energyText(enc.run.wh)} this run` : ''],
         ['Price now', priceNow]
       ]));
   }
@@ -1102,7 +1104,7 @@
     const chip = (s) => `<span class="chip ${s === 'done' ? 'green' : s === 'failed' ? 'red' : s === 'running' ? 'amber' : ''}">${esc(s)}</span>`;
     // conversions the server measured: energy, average power and (with a price) cost
     const withEnergy = jobs.some((j) => fin(j.energy?.wh));
-    const energy = (e) => (fin(e?.wh) ? `${kwh(e.wh)}${fin(e.avgW) ? ` · avg ${watts(e.avgW)}` : ''}${fin(e.cost) ? ` · ${money(e.cost, state.power?.currency)}` : ''}` : '');
+    const energy = (e) => (fin(e?.wh) ? `${energyText(e.wh)}${fin(e.avgW) ? ` · avg ${watts(e.avgW)}` : ''}${fin(e.cost) ? ` · ${money(e.cost, state.power?.currency)}` : ''}` : '');
     page.innerHTML = head('Your archive workspace', 'Jobs') + pills() + `<div class="card">
       ${jobs.length ? `<table class="table"><thead><tr><th>Job</th><th>Status</th><th>Details</th><th>Started</th><th>Took</th>${withEnergy ? '<th>Energy</th>' : ''}</tr></thead><tbody>
         ${jobs.map((j) => `<tr><td><b>${esc(j.title)}</b><br><span class="muted small">${esc(j.type)}</span></td><td>${chip(j.status)}</td><td class="small">${esc(j.detail || '')}</td><td class="small">${when(j.startedAt)}</td>

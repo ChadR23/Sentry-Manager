@@ -16,6 +16,15 @@ function gpuFor(gpus, node) {
   return gpus.find((g) => node && g.node && (g.node === node || String(node).endsWith(`/${g.node}`) || String(g.node).endsWith(`/${node}`))) || (gpus.length === 1 ? gpus[0] : null);
 }
 
+/** A job's clips converted so far and the bytes they saved. */
+function jobProgress(job) {
+  let clips = 0;
+  for (const item of job?.items || []) if (item?.kind === 'video' && item.state === 'completed' && item.eligibleVideo !== false) clips++;
+  return { clips, savedB: Number(job?.counters?.savedBytes) || 0 };
+}
+
+const r1 = (n) => Math.round(n * 10) / 10;
+
 /**
  * One entry per device the job's running clips use: one per GPU set in the
  * Encoder (grouped by lane), else just the one a job without lanes uses,
@@ -64,9 +73,14 @@ function encoderBlock({ snapshot, jobs, workers = [], energy = null }) {
   if (job && mine[0]) lastDevice.set(job.id, mine[0]);
   const first = mine[0] || (job && RUNNING.has(job.state) ? lastDevice.get(job.id) : null) || null;
   const gpu = gpuFor(snapshot?.gpus, first?.device);
-  let clips = 0;
-  for (const item of job?.items || []) if (item?.kind === 'video' && item.state === 'completed' && item.eligibleVideo !== false) clips++;
+  const now = jobProgress(job);
   const run = job ? energy?.byJob?.[job.id] || null : null;
+  // With the energy measured, clips and space count from where the job
+  // stood when measuring began (its baseline), against the energy measured
+  // since: clips per kWh start at 0 and rise as clips finish. Not measured:
+  // the job's own totals, as there is nothing to divide.
+  const base = run?.base || null;
+  const power = snapshot?.power || null;
   const devices = deviceEntries(mine, snapshot?.gpus);
   return {
     jobId: job?.id || null,
@@ -82,14 +96,18 @@ function encoderBlock({ snapshot, jobs, workers = [], energy = null }) {
     } : null,
     devices,
     run: job ? {
-      wh: run ? Math.round(run.wh * 10) / 10 : null,
+      wh: run ? r1(run.wh) : null,
       avgW: run ? Math.round(run.avgW) : null,
       cost: run?.cost ?? null,
-      clips,
-      savedB: Number(job.counters?.savedBytes) || 0,
+      clips: run ? (base ? Math.max(0, now.clips - base.clips) : 0) : now.clips,
+      savedB: run ? (base ? Math.max(0, now.savedB - base.savedB) : 0) : now.savedB,
+      // the energy the clips above were converted with
+      sinceWh: run ? (base ? r1(Math.max(0, run.wh - base.wh)) : 0) : null,
+      // without the CPU's power, the energy is the GPU's alone
+      cpuMeasured: power?.cpuSource ? true : power?.gpuSource ? false : null,
       startedAt: job.startedAt || job.createdAt || null
     } : null
   };
 }
 
-module.exports = { encoderBlock, gpuFor, RUNNING };
+module.exports = { encoderBlock, gpuFor, jobProgress, RUNNING };

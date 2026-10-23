@@ -25,7 +25,7 @@ function overview() {
   assert.ok(start > 0 && end > start, 'the drawing block is marked in app.js');
   const helpers = ['esc', 'plural'].map((name) => app.match(new RegExp(`\\n  const ${name} = .*;\\n`))[0]).join('');
   return new Function(`${helpers}${app.slice(start, end)}
-    return { serverBody, hostLine, alertChip, spark, size, sizeOf, rate, kwh, money, sensorName, cpuName };`)();
+    return { serverBody, hostLine, alertChip, spark, size, sizeOf, rate, energyText, money, sensorName, cpuName };`)();
 }
 
 const HOSTILE = '<img src=x onerror=alert(1)>';
@@ -44,9 +44,9 @@ test('Overview: an Intel + Arc server mid-conversion shows every tile, like the 
   assert.match(html, /1\.1 \/ 6 GB/);
   assert.match(html, /4 × ffmpeg/);
   assert.match(html, /<b>65 W<\/b><span class="muted small">CPU \+ GPU/);
-  assert.match(html, /0\.94 kWh · ≈ \$0\.14/);
+  assert.match(html, /940\.0 Wh · ≈ \$0\.14/, 'below 1 kWh in Wh');
   assert.match(html, /5\.2 kWh · ≈ \$0\.78/);
-  assert.match(html, /0\.31 kWh this run/);
+  assert.match(html, /310\.0 Wh this run/);
   assert.match(html, /18\.2 GB/);
   assert.match(html, /112 of 476 GB/);
   assert.match(html, /6\.1 of 8 TB/);
@@ -60,6 +60,19 @@ test('Overview: an Intel + Arc server mid-conversion shows every tile, like the 
   assert.equal((html.match(/<svg class="nd-spark"/g) || []).length, 3, 'CPU, the GPU that encodes, network');
   assert.match(hostLine(s.host), /nas-box.*kernel 6\.8\.0-45-generic.*up 12 d 4 h.*app up 3 h 12 m.*version 98d4861/);
   assert.match(alertChip(s.alerts), /chip amber.*1 warning/);
+});
+
+test('Overview: the Power tile and the Jobs page show energy below 1 kWh in Wh', () => {
+  const { serverBody } = overview();
+  const owner = sample('amd');
+  Object.assign(owner.power, { todayWh: 12.44, weekWh: 0.8, todayCost: null, weekCost: null });
+  owner.encoder.run = { ...owner.encoder.run, wh: 0.8 };
+  const html = serverBody(owner, { currency: '€' });
+  assert.match(html, /<dt>Today<\/dt><dd>12\.4 Wh<\/dd><dt>This week<\/dt><dd>0\.8 Wh<\/dd><dt>Converting<\/dt><dd>0\.8 Wh this run<\/dd>/);
+  // the Jobs page's energy column uses the same words
+  const app = fs.readFileSync(path.join(REPO, 'web/app.js'), 'utf8');
+  assert.match(app, /const energy = \(e\) => \(fin\(e\?\.wh\) \? `\$\{energyText\(e\.wh\)\}/);
+  assert.doesNotMatch(app, /\bkwh\(/, 'one energy format everywhere');
 });
 
 test('Overview: a Raspberry Pi shows only what it has', () => {
@@ -158,7 +171,7 @@ test('Overview: the 24 h graphs come from history, with gaps where the server wa
 });
 
 test('Overview: units read like the mockup', () => {
-  const { size, sizeOf, rate, kwh, money, cpuName, sensorName } = overview();
+  const { size, sizeOf, rate, energyText, money, cpuName, sensorName } = overview();
   const G = 1024 ** 3;
   assert.equal(size(31.3 * G), '31.3 GB');
   assert.equal(size(640 * 1024 ** 2), '640 MB');
@@ -169,9 +182,13 @@ test('Overview: units read like the mockup', () => {
   assert.equal(rate(0), '0 MB/s');
   assert.equal(rate(300 * 1024), '300 KB/s');
   assert.equal(rate(2.5 * G), '2.5 GB/s');
-  assert.equal(kwh(940), '0.94 kWh');
-  assert.equal(kwh(5200), '5.2 kWh');
-  assert.equal(kwh(250000), '250 kWh');
+  // below 1 kWh in Wh with one decimal, so a run's first minutes visibly count up
+  assert.equal(energyText(0), '0.0 Wh');
+  assert.equal(energyText(12.44), '12.4 Wh');
+  assert.equal(energyText(940), '940.0 Wh');
+  assert.equal(energyText(999.96), '1.0 kWh');
+  assert.equal(energyText(5200), '5.2 kWh');
+  assert.equal(energyText(250000), '250 kWh');
   assert.equal(money(0.141, '$'), '≈ $0.14');
   assert.equal(money(1.2, 'kr'), '≈ 1.20 kr');
   assert.equal(cpuName('Intel(R) Core(TM) i7-10700 CPU @ 2.90GHz'), 'Intel Core i7-10700');
@@ -189,9 +206,10 @@ test('Hardware panel: four clips on the Arc, with efficiency and cost', async ()
   assert.match(html, /<b>65 W<\/b><small>CPU 41 · GPU 24<\/small>/);
   assert.match(html, /<b>61 °C<\/b><small>GPU 61 · CPU 58<\/small>/);
   assert.doesNotMatch(html, /Bottleneck|Room to spare|nd-hint/, 'no sentence about what limits the run');
-  assert.match(html, /This run<\/span><b>0\.31 kWh/);
+  assert.match(html, /This run<\/span><b>310\.0 Wh/);
   assert.match(html, /Clips per kWh<\/span><b>1,329/);
   assert.match(html, /Space saved per kWh<\/span><b>125 GB/);
+  assert.doesNotMatch(html, /GPU only/, 'the CPU is measured on this server');
   assert.match(html, /Cost so far<\/span><b>≈ \$0\.05/);
   assert.equal((html.match(/class="nd-w"/g) || []).length, 4);
   assert.match(html, /2026-10-20_07-38-45-front\.mp4<\/span><span>71%/);
@@ -205,6 +223,8 @@ test('Hardware panel: software encoding, NVIDIA, dropped frames, idle and paused
   assert.doesNotMatch(amd, /Video engine/, 'no GPU in use: no video engine tile');
   assert.match(amd, /<span class="nd-warn">2 duplicated<\/span>/);
   assert.match(amd, /≈ €0\.52/);
+  assert.match(amd, /This run<\/span><b>1\.8 kWh/);
+  assert.match(amd, /<p class="nd-eff-note">GPU only \(CPU not measured\)<\/p>/, 'no RAPL: the per-kWh numbers are the GPU\'s alone');
   const nv = renderHardware(sample('nvidia'));
   assert.match(nv, /hevc_nvenc · NVIDIA GeForce RTX 3060/);
   assert.match(nv, /Video engine<\/span><b>41%/, 'the GPU found by name (NVIDIA has no render node)');

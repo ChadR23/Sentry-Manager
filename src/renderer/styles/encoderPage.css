@@ -1064,6 +1064,13 @@ select.converter-select {
     font-variant-numeric: tabular-nums;
 }
 
+/* the per-kWh numbers count only the GPU's energy */
+.nd-eff-note {
+    margin: 6px 0 0;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
 /* (a long clip name never widens the panel: Safari sizes grid tracks to it) */
 .nd-workers {
     display: grid;

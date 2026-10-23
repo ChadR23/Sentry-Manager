@@ -40,7 +40,7 @@ const { Thumbnails } = require('./thumbnails');
 const { detectGpus } = require('./gpu');
 const { createConverterHost } = require('./converterHost');
 const { createStats } = require('./stats');
-const { encoderBlock, RUNNING: CONVERTER_RUNNING } = require('./encoderStats');
+const { encoderBlock, jobProgress, RUNNING: CONVERTER_RUNNING } = require('./encoderStats');
 const { parsePowerSettings, priceAt, rateNameAt, isCheapest, PriceError } = require('./powerPrice');
 const { createConverterBridge } = require('./converterBridge');
 const { hiddenPath, readDir, stat, sendMedia, readTextConfined } = require('./studioApi');
@@ -241,6 +241,9 @@ async function main() {
     ffmpegPath: FFMPEG,
     // costs are summed at the price of each moment (time-of-use plans)
     priceAt: (ms) => priceAt(db.get('power', null), ms),
+    // where a job stands when its energy starts being counted (clips and
+    // space per kWh count from there)
+    jobProgress: (jobId) => (converterJobs.has(jobId) ? jobProgress(converterJobs.get(jobId)) : null),
     log: statsLog,
     onAlert: ({ key, level, message }) => {
       statsLog[level === 'error' ? 'error' : 'warn'](message);
@@ -1093,7 +1096,9 @@ async function main() {
     const terminal = !CONVERTER_ACTIVE.has(s.state);
     const existing = db.jobByExternal(externalId);
     if (terminal && existing?.status === 'running') {
-      const energy = stats.energy().byJob?.[s.id] || null;
+      const measured = stats.energy().byJob?.[s.id] || null;
+      // (its baseline stays with the stats engine)
+      const energy = measured ? { wh: measured.wh, avgW: measured.avgW, seconds: measured.seconds, cost: measured.cost } : null;
       jobs.finish(jobId, { status: c.failed > 0 || s.state === 'failed' ? 'failed' : s.state === 'cancelled' ? 'cancelled' : 'done', detail, ...(energy ? { result: { energy } } : {}) });
       if (c.failed > 0) {
         notes.raise({ kind: 'conversion', level: 'warning', vehicleId: v?.id || null, dedupeKey: `conversion-failed:${s.id}`,

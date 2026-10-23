@@ -72,6 +72,8 @@ function createStats(options = {}) {
   const timers = opt('timers', { setTimeout, clearTimeout });
   const fsp = opt('fsp', fs.promises);
   const priceAt = opt('priceAt', () => null);
+  // where a conversion job stands ({ clips, savedB }) when its energy starts being counted
+  const jobProgress = opt('jobProgress', () => null);
 
   const reads = new BackgroundReads({ now, readFile: typeof fsp.readFile === 'function' ? fsp.readFile.bind(fsp) : fs.promises.readFile });
   const procs = new ProcessTable({ procRoot, appPid });
@@ -88,7 +90,7 @@ function createStats(options = {}) {
   const filesystems = new FilesystemsProvider({ procRoot, sysRoot, appPid, readShares, fsp, now, log });
   const host = new HostInfo({ procRoot, version: options.version });
   const history = new History({ intervalMs });
-  const energy = new Energy({ intervalMs });
+  const energy = new Energy({ intervalMs, progressOf: (jobId) => callSafe(jobProgress, jobId) || null });
   const traffic = new Traffic();
   const alerts = new Alerts({ onAlert: options.onAlert, onAlertClear: options.onAlertClear, log });
   const file = dataDir ? path.join(dataDir, 'stats-history.json') : null;
@@ -392,7 +394,10 @@ function createStats(options = {}) {
       return history.csv(range === '24h' ? '24h' : '15m', now());
     },
 
-    /** { todayWh, weekWh, todayCost, weekCost, byJob: { [jobId]: { wh, avgW, seconds, cost } } } */
+    /**
+     * { todayWh, weekWh, todayCost, weekCost, byJob: { [jobId]: { wh, avgW, seconds, cost, base } } };
+     * `base` is where the job stood when its energy began to be counted ({ clips, savedB, wh }) or null
+     */
     energy() {
       return energy.summary(now());
     },

@@ -16,13 +16,62 @@ test('the block names the running job, its GPU, energy and saved space', () => {
       items: [{ kind: 'video', state: 'completed' }, { kind: 'video', state: 'completed', eligibleVideo: false }, { kind: 'video', state: 'waiting' }] }]
   ]);
   const snapshot = { cpu: { usage: 25 }, gpus: [{ name: 'Intel Arc A380', node: 'renderD128', video: 94 }], filesystems: [] };
-  const out = encoderBlock({ snapshot, jobs, workers: [worker(), worker({ jobId: 'other' })], energy: { byJob: { j1: { wh: 312.44, avgW: 67.6, seconds: 16000, cost: 0.041 } } } });
+  const energy = { byJob: { j1: { wh: 312.44, avgW: 67.6, seconds: 16000, cost: 0.041, base: { clips: 0, savedB: 1e9, wh: 12.44 } } } };
+  const out = encoderBlock({ snapshot, jobs, workers: [worker(), worker({ jobId: 'other' })], energy });
   assert.equal(out.jobId, 'j1');
   assert.equal(out.running, true);
   assert.equal(out.workers.length, 1, 'only this job\'s clips');
   assert.deepEqual(out.device, { encoder: 'hevc_vaapi', hardware: true, gpuName: 'Intel Arc A380', node: '/dev/dri/renderD128', decode: 'gpu' });
-  assert.deepEqual(out.run, { wh: 312.4, avgW: 68, cost: 0.041, clips: 1, savedB: 5e9, startedAt: 1000 });
+  assert.deepEqual(out.run, { wh: 312.4, avgW: 68, cost: 0.041, clips: 1, savedB: 4e9, sinceWh: 300, cpuMeasured: null, startedAt: 1000 });
   assert.equal('bottleneck' in out, false, 'no bottleneck or room-to-spare sentence');
+});
+
+test('clips and space per kWh count from where the job stood when its energy began to be measured', () => {
+  // the owner's run: 10,412 clips in when the container was restarted, energy measured since then
+  const items = (n) => Array.from({ length: n }, () => ({ kind: 'video', state: 'completed' }));
+  const job = (done, saved) => new Map([['j1', { id: 'j1', state: 'encoding', items: items(done), counters: { savedBytes: saved } }]]);
+  const gpuOnly = { power: { totalW: 31, cpuW: null, gpuW: 31, cpuSource: null, gpuSource: 'hwmon' }, gpus: [] };
+  const base = { clips: 10412, savedB: 211e12, wh: 0 };
+  const block = (done, saved, wh, b = base, snapshot = gpuOnly) => encoderBlock({ snapshot, jobs: job(done, saved), workers: [worker()], energy: { byJob: { j1: { wh, avgW: 31, seconds: 90, cost: null, base: b } } } }).run;
+  const start = block(10412, 211e12, 0.8);
+  assert.deepEqual([start.wh, start.clips, start.savedB, start.sinceWh, start.cpuMeasured], [0.8, 0, 0, 0.8, false], 'nothing finished since measuring began');
+  const later = block(10442, 211e12 + 6e9, 15.04);
+  assert.deepEqual([later.wh, later.clips, later.savedB, later.sinceWh], [15, 30, 6e9, 15]);
+  // a record saved before baselines were kept: measured on from its baseline's Wh
+  const old = block(10442, 211e12 + 6e9, 15.04, { ...base, wh: 10 });
+  assert.equal(old.sinceWh, 5);
+  // no baseline yet (the job was not known when its energy began): nothing to divide yet
+  assert.deepEqual(['clips', 'savedB', 'sinceWh'].map((k) => block(10442, 1, 3, null)[k]), [0, 0, 0]);
+  // never negative (a retried clip, a smaller saving)
+  assert.deepEqual(['clips', 'savedB'].map((k) => block(10400, 200e12, 3)[k]), [0, 0]);
+  // the power block says whether the CPU was measured
+  assert.equal(block(1, 1, 3, base, { power: { cpuSource: 'rapl', gpuSource: 'hwmon' } }).cpuMeasured, true);
+  assert.equal(block(1, 1, 3, base, { power: { cpuSource: null, gpuSource: null } }).cpuMeasured, null);
+  // no power reading at all: the job's own totals, with no energy to divide by
+  const none = encoderBlock({ snapshot: {}, jobs: job(12, 5e9), workers: [worker()], energy: { byJob: {} } }).run;
+  assert.deepEqual([none.wh, none.clips, none.savedB, none.sinceWh], [null, 12, 5e9, null]);
+});
+
+test('the Hardware panel: per kWh from 0, rising as clips finish; Wh below 1 kWh; GPU only when the CPU is not measured', async () => {
+  const path = require('path');
+  const { pathToFileURL } = require('url');
+  const { renderHardware, energyText } = await import(pathToFileURL(path.join(__dirname, '..', 'src/renderer/scripts/features/hardwarePanel.js')).href);
+  const panel = (run) => renderHardware({ encoder: { running: true, state: 'encoding', workers: [worker()], device: { encoder: 'hevc_vaapi', hardware: true }, run } });
+  const eff = (html) => Object.fromEntries([...html.matchAll(/<div><span>([^<]+)<\/span><b>([^<]+)<\/b><\/div>/g)].map((m) => [m[1], m[2]]));
+  // the owner's screen after the restart: 0.8 Wh measured, nothing finished since
+  const start = panel({ wh: 0.8, clips: 0, savedB: 0, sinceWh: 0.8, cpuMeasured: false });
+  assert.deepEqual(eff(start), { 'This run': '0.8 Wh', 'Clips per kWh': '0', 'Space saved per kWh': '0 GB' });
+  assert.match(start, /<p class="nd-eff-note">GPU only \(CPU not measured\)<\/p>/);
+  // under 1 Wh measured since, a finished clip is no ratio yet
+  assert.deepEqual(eff(panel({ wh: 0.9, clips: 2, savedB: 4e8, sinceWh: 0.9, cpuMeasured: false })), { 'This run': '0.9 Wh', 'Clips per kWh': '0', 'Space saved per kWh': '0 GB' });
+  const later = eff(panel({ wh: 12.4, clips: 30, savedB: 6 * 1024 ** 3, sinceWh: 12, cpuMeasured: true }));
+  assert.deepEqual(later, { 'This run': '12.4 Wh', 'Clips per kWh': '2,500', 'Space saved per kWh': '500 GB' });
+  assert.doesNotMatch(panel({ wh: 12.4, clips: 30, savedB: 1, sinceWh: 12, cpuMeasured: true }), /GPU only/);
+  assert.equal(eff(panel({ wh: 1840, clips: 96, savedB: 1, sinceWh: 1840 }))['This run'], '1.8 kWh');
+  assert.equal(energyText(12.44), '12.4 Wh');
+  assert.equal(energyText(0), '0.0 Wh');
+  assert.equal(energyText(999.96), '1.0 kWh');
+  assert.equal(energyText(250000), '250 kWh');
 });
 
 test('no job and nothing running: no block', () => {

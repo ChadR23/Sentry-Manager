@@ -18,13 +18,21 @@ const watts = (w) => `${w >= 10 ? Math.round(w) : w.toFixed(1).replace(/\.0$/, '
 const base = (p) => String(p || '').split(/[\\/]/).pop();
 const group = (n) => Math.round(n).toLocaleString('en-US');
 
-function kwh(wh) {
+// Clips and space per kWh need at least this much energy measured first: a
+// fraction of a Wh would turn a clip or two into an absurd ratio.
+const MIN_WH = 1;
+
+/** "12.4 Wh" below 1 kWh, so a run's first minutes visibly count up; then "5.2 kWh". */
+export function energyText(wh) {
+    const w = Math.round(wh * 10) / 10;
+    if (w < 1000) return `${w.toFixed(1)} Wh`;
     const k = wh / 1000;
-    return `${k < 1 ? k.toFixed(2) : k < 100 ? k.toFixed(1) : group(k)} kWh`;
+    return `${k < 100 ? k.toFixed(1) : group(k)} kWh`;
 }
 
 // binary sizes, labelled like the rest of the manager's server numbers
 function gb(bytes) {
+    if (!(bytes > 0)) return '0 GB';
     const g = bytes / 1024 ** 3;
     if (g >= 1024) return `${(g / 1024).toFixed(1).replace(/\.0$/, '')} TB`;
     if (g >= 1) return `${g >= 100 ? group(g) : g.toFixed(1).replace(/\.0$/, '')} GB`;
@@ -139,13 +147,20 @@ export function renderHardware(stats) {
         tiles.push(`<div${hot >= 90 ? ' class="hot"' : ''}><span>Temperatures</span><b>${temp(temps[0][1])}</b><small>${temps.map(([k, t]) => `${k} ${Math.round(t)}`).join(' · ')}</small></div>`);
     }
 
-    // energy per clip and per GB saved, when the server could measure power
+    // energy per clip and per GB saved, when the server could measure power:
+    // the clips and space since measuring began against the energy measured
+    // since, so they start at 0 and rise as clips finish
     const run = enc.run || {};
     const eff = [];
-    if (fin(run.wh) && run.wh > 0) {
-        eff.push(['This run', kwh(run.wh)]);
-        if (fin(run.clips) && run.clips > 0) eff.push(['Clips per kWh', group(run.clips / (run.wh / 1000))]);
-        if (fin(run.savedB) && run.savedB > 0) eff.push(['Space saved per kWh', gb(run.savedB / (run.wh / 1000))]);
+    let note = '';
+    if (fin(run.wh)) {
+        const since = fin(run.sinceWh) && run.sinceWh >= MIN_WH ? run.sinceWh : null;
+        const perKwh = (n) => (since !== null && fin(n) && n > 0 ? n / (since / 1000) : 0);
+        eff.push(['This run', energyText(run.wh)]);
+        eff.push(['Clips per kWh', group(perKwh(run.clips))]);
+        eff.push(['Space saved per kWh', gb(perKwh(run.savedB))]);
+        // the server measures the GPU's power but not the CPU's
+        if (run.cpuMeasured === false) note = 'GPU only (CPU not measured)';
     } else {
         if (fin(run.clips)) eff.push(['Clips this run', group(run.clips)]);
         if (fin(run.savedB) && run.savedB > 0) eff.push(['Space saved', gb(run.savedB)]);
@@ -163,6 +178,7 @@ export function renderHardware(stats) {
         + (lines ? `<div class="nd-devices">${lines}</div>` : '')
         + (tiles.length ? `<div class="nd-hw-tiles">${tiles.join('')}</div>` : '')
         + (eff.length ? `<div class="nd-eff">${eff.map(([k, v]) => `<div><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join('')}</div>` : '')
+        + (note ? `<p class="nd-eff-note">${esc(note)}</p>` : '')
         + (rows ? `<div class="nd-workers">${rows}</div>` : '');
 }
 

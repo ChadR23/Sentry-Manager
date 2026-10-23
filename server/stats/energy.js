@@ -6,6 +6,13 @@
 // Only time that was sampled counts (a gap longer than a few intervals, when
 // nobody watched and nothing converted, is not guessed), so "today" means
 // "measured today".
+//
+// A job's record also keeps where the job stood when its energy began to be
+// measured (its baseline: clips converted, bytes saved and the Wh counted
+// before then), so clips and space per kWh count only what was converted
+// while the energy was measured. A job that ran before measuring began (or
+// before a restart into a version that measures) would otherwise divide all
+// of its clips by a few minutes of energy.
 
 const DAYS_KEPT = 62;
 const JOBS_KEPT = 200;
@@ -21,15 +28,40 @@ const r3 = (n) => Math.round(n * 1000) / 1000;
 const money = (n) => (n === null || n === undefined ? null : Math.round(n * 1e6) / 1e6);
 const finite = (n) => typeof n === 'number' && Number.isFinite(n) && n >= 0;
 
+/** A saved or reported baseline ({ clips, savedB, wh }), or null. */
+function cleanBase(base, maxWh = Infinity) {
+  if (!base || typeof base !== 'object') return null;
+  const { clips, savedB, wh } = base;
+  if (!Number.isSafeInteger(clips) || clips < 0 || typeof savedB !== 'number' || !Number.isFinite(savedB) || !finite(wh) || wh > maxWh) return null;
+  return { clips, savedB, wh };
+}
+
 class Energy {
-  constructor({ intervalMs }) {
+  /**
+   * `progressOf(jobId)` says where a job stands now ({ clips, savedB }, or
+   * null when it is not known): asked once per job, when its energy starts
+   * being counted.
+   */
+  constructor({ intervalMs, progressOf = null }) {
     this.maxGapMs = Math.max(3 * intervalMs, 10000);
     this.last = null; // { t, w }
     // no prototype: a job id is data and must never reach Object.prototype
     this.days = Object.create(null); // 'YYYY-MM-DD' -> Wh
     this.costs = Object.create(null); // 'YYYY-MM-DD' -> cost of the priced part of that day
-    this.jobs = Object.create(null); // jobId -> { wh, seconds, at, cost }
+    this.jobs = Object.create(null); // jobId -> { wh, seconds, at, cost, base }
     this.job = null;
+    this.progressOf = typeof progressOf === 'function' ? progressOf : null;
+  }
+
+  /** The job's clips and saved bytes now, or null. */
+  progress(jobId) {
+    if (!this.progressOf) return null;
+    try {
+      const p = this.progressOf(jobId);
+      return p ? cleanBase({ clips: p.clips, savedB: p.savedB, wh: 0 }) : null;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -49,7 +81,13 @@ class Energy {
     this.days[key] = (this.days[key] || 0) + wh;
     if (cost !== null) this.costs[key] = (this.costs[key] || 0) + cost;
     if (this.job !== null) {
-      const j = this.jobs[this.job] || (this.jobs[this.job] = { wh: 0, seconds: 0, at: t, cost: null });
+      const j = this.jobs[this.job] || (this.jobs[this.job] = { wh: 0, seconds: 0, at: t, cost: null, base: null });
+      // measuring starts for this job (or for one saved before baselines
+      // were kept): from here on its clips count against its energy
+      if (!j.base) {
+        const now = this.progress(this.job);
+        if (now) j.base = { clips: now.clips, savedB: now.savedB, wh: j.wh };
+      }
       j.wh += wh;
       j.seconds += ms / 1000;
       j.at = t;
@@ -80,7 +118,8 @@ class Energy {
     }
     // fromEntries defines own properties, so even a job called "__proto__" is just a key
     const byJob = Object.fromEntries(Object.entries(this.jobs).map(([id, j]) => [id, {
-      wh: r3(j.wh), avgW: j.seconds > 0 ? Math.round((j.wh * 3600 / j.seconds) * 10) / 10 : null, seconds: Math.round(j.seconds), cost: money(j.cost)
+      wh: r3(j.wh), avgW: j.seconds > 0 ? Math.round((j.wh * 3600 / j.seconds) * 10) / 10 : null, seconds: Math.round(j.seconds), cost: money(j.cost),
+      base: j.base ? { clips: j.base.clips, savedB: j.base.savedB, wh: r3(j.base.wh) } : null
     }]));
     return {
       todayWh: r3(this.days[today] || 0), weekWh: r3(week),
@@ -111,7 +150,10 @@ class Energy {
     };
     const jobs = Object.create(null);
     for (const [k, j] of Object.entries(data.jobs && typeof data.jobs === 'object' ? data.jobs : {})) {
-      if (k.length <= 200 && j && finite(j.wh) && finite(j.seconds)) jobs[k] = { wh: j.wh, seconds: j.seconds, at: Number(j.at) || 0, cost: finite(j.cost) ? j.cost : null };
+      if (k.length <= 200 && j && finite(j.wh) && finite(j.seconds)) {
+        // a record saved without a baseline gets one when it is counted next
+        jobs[k] = { wh: j.wh, seconds: j.seconds, at: Number(j.at) || 0, cost: finite(j.cost) ? j.cost : null, base: cleanBase(j.base, j.wh) };
+      }
     }
     this.days = perDay(data.days);
     this.costs = perDay(data.costs);

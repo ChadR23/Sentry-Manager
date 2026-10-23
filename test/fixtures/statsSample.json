@@ -659,6 +659,8 @@
       "avgW": 68,
       "clips": 412,
       "savedB": 41553808588.8,
+      "sinceWh": 310,
+      "cpuMeasured": true,
       "startedAt": 1792488960000,
       "cost": 0.047
     }
