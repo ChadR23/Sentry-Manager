@@ -67,6 +67,19 @@ function workerRow(w) {
     return `<div class="nd-w"><div class="nd-w-top"><span class="nd-clip" title="${esc(w.relativePath)}">${esc(base(w.relativePath) || w.itemId || 'clip')}</span><span>${done === null ? '' : pct(done)}</span></div>${bar(done ?? 0)}<div class="nd-w-meta">${meta.join(' · ')}</div></div>`;
 }
 
+// A device of `encoder.devices` (several GPUs converting): its name, encoder,
+// how many clips it has and how busy its video engine is.
+function deviceLine(d) {
+    const converting = Array.isArray(d.workers) ? d.workers.length : fin(d.workers) ? d.workers : null;
+    const parts = [d.name || (d.hardware ? base(d.node) : 'CPU') || d.id, d.encoder];
+    if (converting !== null) parts.push(`${group(converting)} converting`);
+    if (fin(d.video)) parts.push(`video ${pct(d.video)}`);
+    else if (fin(d.busy)) parts.push(`GPU ${pct(d.busy)}`);
+    const text = parts.filter(Boolean).join(' · ');
+    const hot = fin(d.video) ? d.video >= 90 : fin(d.busy) && d.busy >= 90;
+    return `<div class="nd-dev${hot ? ' hot' : ''}" title="${esc(text)}">${esc(text)}</div>`;
+}
+
 /**
  * The panel's inner HTML for a GET /api/stats body, or '' when there is
  * nothing to show (no numbers at all).
@@ -91,11 +104,14 @@ export function renderHardware(stats) {
         return `<div class="nd-hw-head nd-hw-idle"><h3>Hardware</h3><span class="nd-state">${state}</span>${chips.join('')}</div>`;
     }
 
-    const gpu = device?.hardware ? gpuFor(gpus, device) : null;
+    // several devices converting at once (one GPU or none: as always)
+    const devices = Array.isArray(enc.devices) ? enc.devices.filter(Boolean) : [];
+    const several = devices.length > 1;
+    const gpu = device?.hardware && !several ? gpuFor(gpus, device) : null;
     const cpu = stats.cpu || {};
     const power = stats.power || {};
     const chips = [];
-    if (device?.encoder) {
+    if (device?.encoder && !several) {
         const what = [device.encoder, device.gpuName || (device.hardware ? gpu?.name : 'CPU'), base(device.node)].filter(Boolean).join(' · ');
         chips.push(chip(what, what)); // (cut short on phones; the whole of it on hover)
     }
@@ -113,7 +129,10 @@ export function renderHardware(stats) {
         const parts = [fin(power.cpuW) && `CPU ${Math.round(power.cpuW)}`, fin(power.gpuW) && `GPU ${Math.round(power.gpuW)}`].filter(Boolean);
         tiles.push(`<div><span>Power</span><b>${watts(total)}</b>${parts.length ? `<small>${parts.join(' · ')}</small>` : ''}</div>`);
     }
-    const temps = [fin(gpu?.tempC) && ['GPU', gpu.tempC], fin(cpu.tempC) && ['CPU', cpu.tempC]].filter(Boolean);
+    // with several GPUs, the hottest of the ones converting
+    const gpuTemps = (several ? devices.filter((d) => d.hardware).map((d) => gpuFor(gpus, { node: d.node, gpuName: d.name })) : [gpu])
+        .map((g) => g?.tempC).filter(fin);
+    const temps = [gpuTemps.length && ['GPU', Math.max(...gpuTemps)], fin(cpu.tempC) && ['CPU', cpu.tempC]].filter(Boolean);
     if (temps.length) {
         const hot = Math.max(...temps.map(([, t]) => t));
         tiles.push(`<div${hot >= 90 ? ' class="hot"' : ''}><span>Temperatures</span><b>${temp(temps[0][1])}</b><small>${temps.map(([k, t]) => `${k} ${Math.round(t)}`).join(' · ')}</small></div>`);
@@ -142,7 +161,11 @@ export function renderHardware(stats) {
     const rows = shown.map(workerRow).join('')
         + (workers.length > shown.length ? `<p class="nd-w-more">and ${workers.length - shown.length} more</p>` : '');
 
+    // one line per device: Intel Arc A380 · hevc_qsv · 3 converting · video 72%
+    const lines = several ? devices.map(deviceLine).join('') : '';
+
     return `<div class="nd-hw-head"><h3>Hardware</h3>${chips.join('')}</div>`
+        + (lines ? `<div class="nd-devices">${lines}</div>` : '')
         + (tiles.length ? `<div class="nd-hw-tiles">${tiles.join('')}</div>` : '')
         + hint
         + (eff.length ? `<div class="nd-eff">${eff.map(([k, v]) => `<div><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join('')}</div>` : '')

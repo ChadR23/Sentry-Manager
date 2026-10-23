@@ -12,8 +12,16 @@ const MAX_CONCURRENCY = 64;
 const LISTED_CONCURRENCY = 10; // higher values use the Custom box
 const DEFAULT_CONCURRENCY = 5;
 const CONCURRENCY_STORAGE_KEY = 'converterConcurrency';
+// With several GPUs: how many at once on each device (id -> count, 0 = Off)
+const LANES_STORAGE_KEY = 'converterLanes';
 const VERIFY_STORAGE_KEY = 'converterVerifyMode';
 const VERIFY_MODES = ['off', 'quick', 'full'];
+// The benchmark times these; Off stays a setting but is not compared
+const COMPARED_VERIFY_MODES = ['quick', 'full'];
+const CODEC_LABELS = { h265: 'H.265', av1: 'AV1' };
+// The benchmark dialog's introduction with several GPUs (encoder.html has the
+// one-GPU text)
+const BENCHMARK_INTRO_LANES = 'Runs real conversions — telemetry, verification and saving — on copies of up to 8 clips from your source folder on each GPU in turn, with H.265 and then AV1 (when that GPU can encode it), at 1–8 parallel conversions with the compression selected above, then repeats each GPU\'s fastest setting with each verification mode (Quick, Full). Each GPU is tested alone, so its results are its own. Your footage is only read; results go to a temporary folder. Takes several minutes for each GPU; close other heavy apps for accurate results.';
 
 const PAUSED_STATES = new Set(['paused', 'paused_network']);
 
@@ -100,16 +108,55 @@ const TIMING_LABELS = Object.freeze({
 const SPEED_WINDOW_MS = 3 * 60 * 1000;
 const SPEED_MIN_SPAN_MS = 10 * 1000;
 
-function apiError(code) {
-    return Object.assign(new Error(code || 'OPERATION_FAILED'), { code: code || 'OPERATION_FAILED' });
+// details: what the server adds to some errors (DEVICE_UNSUPPORTED names the GPU)
+function apiError(code, details) {
+    const error = Object.assign(new Error(code || 'OPERATION_FAILED'), { code: code || 'OPERATION_FAILED' });
+    if (details && typeof details === 'object') error.details = details;
+    return error;
 }
 
 function unwrap(result) {
     if (result && typeof result === 'object' && Object.prototype.hasOwnProperty.call(result, 'ok')) {
         if (result.ok === true) return result.value;
-        throw apiError(result.error?.code);
+        throw apiError(result.error?.code, result.error?.details);
     }
     return result;
+}
+
+// The encoder a device uses for a codec: a name, or null when it can't
+// (undefined: not reported, so not ruled out)
+function deviceEncoder(device, codec) {
+    const value = device?.encoders?.[codec];
+    if (value && typeof value === 'object') return typeof value.codec === 'string' ? value.codec : null;
+    return value;
+}
+
+// A GPU's name for the lanes and the benchmark. Two cards of the same model
+// get their render node (or NVIDIA index, or PCI slot) after the name, so
+// their rows and results are never mistaken for each other.
+function deviceLabels(devices) {
+    const named = new Map();
+    for (const device of devices) named.set(device.name, (named.get(device.name) || 0) + 1);
+    return devices.map((device) => {
+        if (named.get(device.name) < 2) return device.name;
+        const node = typeof device.node === 'string' && device.node ? device.node.split('/').pop() : null;
+        const slot = typeof device.pci === 'string' && device.pci ? device.pci
+            : String(device.id || '').replace(/^pci:/, '');
+        const where = node || (Number.isSafeInteger(device.index) ? `GPU ${device.index}` : slot.replace(/^0000:/, ''));
+        return where ? `${device.name} (${where})` : device.name;
+    });
+}
+
+// "Intel Arc A380" -> "Arc A380", "Intel UHD Graphics 770" -> "UHD 770"
+function shortDeviceName(label) {
+    const short = String(label || '').replace(/^(Intel|AMD|NVIDIA)\s+/i, '').replace(/\bGraphics\s+/, '').trim();
+    return short || String(label || '');
+}
+
+// "A", "A and B", "A, B and C"
+function joinList(parts, and) {
+    if (parts.length < 2) return parts.join('');
+    return `${parts.slice(0, -1).join(', ')} ${and} ${parts[parts.length - 1]}`;
 }
 
 function selected(options, dataKey, fallback) {
@@ -196,6 +243,8 @@ function collectElements(root) {
         concurrency: byId('converterConcurrency'),
         concurrencyCustom: byId('converterConcurrencyCustom'),
         concurrencyCustomRow: byId('converterConcurrencyCustomRow'),
+        lanes: byId('converterLanes'),
+        lanesTotal: byId('converterLanesTotal'),
         outputOptions: all('[data-converter-output]'),
         replaceOption: byId('converterReplaceOption'),
         replaceInput: byId('converterOutputReplace'),
@@ -225,7 +274,9 @@ function collectElements(root) {
         fps: byId('converterFps'),
         benchmarkButton: byId('converterBenchmarkBtn'),
         benchmarkDialog: byId('converterBenchmarkDialog'),
+        benchmarkIntro: byId('converterBenchmarkIntro'),
         benchmarkStatus: byId('converterBenchmarkStatus'),
+        benchmarkDevices: byId('converterBenchmarkDevices'),
         benchmarkTable: byId('converterBenchmarkTable'),
         benchmarkRows: byId('converterBenchmarkRows'),
         benchmarkBest: byId('converterBenchmarkBest'),
@@ -427,7 +478,7 @@ function createFootageConverterController(options = {}) {
     }
 
     function updateConcurrencyCustomVisibility() {
-        setHidden(elements.concurrencyCustomRow, !customConcurrencySelected());
+        setHidden(elements.concurrencyCustomRow, lanesMode() || !customConcurrencySelected());
     }
 
     function setConcurrency(value) {
@@ -437,6 +488,274 @@ function createFootageConverterController(options = {}) {
             if (custom) elements.concurrencyCustom.value = String(value);
         }
         updateConcurrencyCustomVisibility();
+    }
+
+    // ---- Several GPUs: how many at once on each ----------------------------
+    // With two or more GPUs (getConverterDevices) the single number becomes
+    // one row per GPU plus the CPU, each with its own − [n] + (0 is Off).
+    // Until that answer arrives, or with one GPU, the page is as it always
+    // was. A job only gets `lanes` when it uses more than the GPU the single
+    // number would use (defaultDevice), so that path stays exactly the same.
+    let laneDevices = null; // [{ id, kind, name, label, encoders, ... }], CPU last
+    let defaultDevice = null;
+    const laneCounts = new Map(); // device id -> the owner's number (0 = Off)
+    const laneRows = new Map(); // device id -> { row, output, minus, plus, note }
+    let syncedLanes = null;
+    let requestedLanes = null;
+    // live changes to the running job go one after another, the last one wins
+    let requestedConcurrency = null;
+    let liveChain = Promise.resolve();
+
+    function lanesMode() {
+        return laneDevices !== null;
+    }
+
+    function selectedCodec() {
+        return selected(elements.codecOptions, 'converterCodec', 'h265');
+    }
+
+    function laneLabel(id) {
+        return laneDevices?.find((device) => device.id === id)?.label || id;
+    }
+
+    // What a row really sends: 0 while its device can't encode the codec
+    function laneCount(device) {
+        return deviceEncoder(device, selectedCodec()) === null ? 0 : laneCounts.get(device.id) ?? 0;
+    }
+
+    function activeLanes() {
+        return (laneDevices || []).map((device) => ({ device: device.id, concurrency: laneCount(device) }))
+            .filter((lane) => lane.concurrency > 0);
+    }
+
+    function lanesSum(lanes) {
+        return lanes.reduce((sum, lane) => sum + lane.concurrency, 0);
+    }
+
+    // The same lanes in any order give the same key
+    function lanesKey(lanes) {
+        return lanes.filter((lane) => lane.concurrency > 0).map((lane) => `${lane.device}=${lane.concurrency}`).sort().join(',');
+    }
+
+    function validLanes(value) {
+        return Array.isArray(value)
+            ? value.filter((lane) => lane && typeof lane.device === 'string' && Number.isSafeInteger(lane.concurrency)
+                && lane.concurrency > 0 && lane.concurrency <= MAX_CONCURRENCY)
+            : [];
+    }
+
+    // A job's numbers per device: its lanes, or the single number on the
+    // default GPU (what a job without lanes runs on)
+    function lanesOfConfig(config) {
+        const known = validLanes(config?.lanes).filter((lane) => laneDevices?.some((device) => device.id === lane.device));
+        if (known.length) return known.map((lane) => ({ device: lane.device, concurrency: lane.concurrency }));
+        const concurrency = normalizeConcurrency(config?.concurrency);
+        return concurrency !== null && defaultDevice ? [{ device: defaultDevice, concurrency }] : null;
+    }
+
+    // Sent with Start and the automatic settings: `lanes` only when the rows
+    // above Off are not just the default GPU's; otherwise the plain number.
+    function lanesConfig() {
+        const lanes = activeLanes();
+        const concurrency = lanesSum(lanes);
+        if (concurrency === 0) throw apiError('LANES_EMPTY');
+        if (concurrency > MAX_CONCURRENCY) throw apiError('LANES_TOO_MANY');
+        if (lanes.length === 1 && lanes[0].device === defaultDevice) return { concurrency };
+        return { concurrency, lanes };
+    }
+
+    function storedLanes() {
+        try {
+            const parsed = JSON.parse(storage?.getItem?.(LANES_STORAGE_KEY) || 'null');
+            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+            const counts = new Map();
+            for (const [id, count] of Object.entries(parsed)) {
+                if (Number.isSafeInteger(count) && count >= 0 && count <= MAX_CONCURRENCY) counts.set(id, count);
+            }
+            return counts;
+        } catch (_) { return null; }
+    }
+
+    function rememberLanes() {
+        try {
+            const kept = Object.fromEntries(storedLanes() || []);
+            storage?.setItem?.(LANES_STORAGE_KEY, JSON.stringify({ ...kept, ...Object.fromEntries(laneCounts) }));
+        } catch (_) { /* preference only */ }
+    }
+
+    function encoderSummary(device) {
+        if (device.kind === 'cpu') return message('laneCpuHint', "Uses the server's CPU cores; slower than a GPU");
+        return Object.keys(CODEC_LABELS).map((codec) => [codec, deviceEncoder(device, codec)])
+            .filter(([, encoder]) => typeof encoder === 'string' && encoder)
+            .map(([codec, encoder]) => `${CODEC_LABELS[codec]}: ${encoder}`).join(' · ');
+    }
+
+    function renderLanes() {
+        if (!lanesMode()) return;
+        const codec = selectedCodec();
+        const total = lanesSum(activeLanes());
+        for (const device of laneDevices) {
+            const parts = laneRows.get(device.id);
+            if (!parts) continue;
+            const supported = deviceEncoder(device, codec) !== null;
+            const count = laneCount(device);
+            setText(parts.output, count === 0 ? message('laneOff', 'Off') : String(count));
+            setText(parts.note, supported ? encoderSummary(device)
+                : message('laneCantEncode', "Can't encode {codec}", { codec: CODEC_LABELS[codec] || codec }));
+            parts.row.classList?.toggle('is-off', count === 0);
+            parts.row.classList?.toggle('is-unsupported', !supported);
+            // the total never drops to nothing or goes past the limit
+            setDisabled(parts.minus, !supported || count === 0 || total <= 1);
+            setDisabled(parts.plus, !supported || count >= MAX_CONCURRENCY || total >= MAX_CONCURRENCY);
+        }
+        setText(elements.lanesTotal, total > 0
+            ? message('lanesTotal', '{count} at once in total. Each GPU takes its next clip when it is free, so a faster one converts more of them.', { count: total })
+            : message('lanesNone', 'Nothing is set to convert: turn on a GPU or the CPU.'));
+    }
+
+    function buildLanes() {
+        const doc = elements.lanes.ownerDocument || globalThis.document;
+        laneRows.clear();
+        const rows = laneDevices.map((device) => {
+            const row = doc.createElement('div');
+            row.className = 'converter-lane';
+            row.setAttribute('data-device', device.id);
+            const name = doc.createElement('span');
+            name.className = 'converter-lane-name';
+            const title = doc.createElement('strong');
+            title.textContent = device.label;
+            title.title = device.label;
+            const note = doc.createElement('small');
+            name.append(title, note);
+            const stepper = doc.createElement('div');
+            stepper.className = 'converter-stepper';
+            stepper.setAttribute('role', 'group');
+            stepper.setAttribute('aria-label', message('laneStepperLabel', '{device}: conversions at once', { device: device.label }));
+            const step = (delta, text, label) => {
+                const button = doc.createElement('button');
+                button.type = 'button';
+                button.setAttribute('data-step', String(delta));
+                button.setAttribute('aria-label', label);
+                button.textContent = text;
+                button.addEventListener('click', () => stepLane(device.id, delta));
+                return button;
+            };
+            const minus = step(-1, '−', message('laneFewer', 'Fewer'));
+            const output = doc.createElement('output');
+            const plus = step(1, '+', message('laneMore', 'More'));
+            stepper.append(minus, output, plus);
+            row.append(name, stepper);
+            laneRows.set(device.id, { row, output, minus, plus, note });
+            return row;
+        });
+        elements.lanes.replaceChildren(...rows, ...(elements.lanesTotal ? [elements.lanesTotal] : []));
+    }
+
+    function stepLane(id, delta) {
+        const device = laneDevices?.find((entry) => entry.id === id);
+        if (!device || deviceEncoder(device, selectedCodec()) === null) return;
+        const current = laneCount(device);
+        const total = lanesSum(activeLanes());
+        const next = Math.min(MAX_CONCURRENCY, Math.max(0, current + delta));
+        if (next === current || (delta > 0 && total >= MAX_CONCURRENCY) || (delta < 0 && total <= 1)) return;
+        laneCounts.set(id, next);
+        rememberLanes();
+        renderLanes();
+        liveLanes();
+    }
+
+    function stepperFocused() {
+        const active = elements.lanes?.ownerDocument?.activeElement;
+        return Boolean(active) && [...laneRows.values()].some((parts) => parts.minus === active || parts.plus === active);
+    }
+
+    // Rows follow the job (its lanes, or its number on the default GPU), only
+    // when that changes and not while the owner is changing them.
+    function syncLanes(config, { force = false } = {}) {
+        if (!lanesMode()) return;
+        const lanes = lanesOfConfig(config);
+        if (!lanes) return;
+        const key = lanesKey(lanes);
+        if (!force && (key === syncedLanes || requestedLanes !== null || requestedConcurrency !== null || stepperFocused())) return;
+        syncedLanes = key;
+        for (const device of laneDevices) laneCounts.set(device.id, lanes.find((lane) => lane.device === device.id)?.concurrency ?? 0);
+        renderLanes();
+    }
+
+    function lanesNotice(lanes) {
+        const parts = lanes.map((lane) => message('lanesLiveEntry', '{count} on {device}', { count: lane.concurrency, device: laneLabel(lane.device) }));
+        return message('lanesLive', 'Now {lanes}. Clips already converting finish first.', { lanes: joinList(parts, message('lanesAnd', 'and')) });
+    }
+
+    // During a run, the rows apply to the running job right away, like the
+    // single number (see liveConcurrency). A job without lanes that still
+    // only uses the default GPU keeps getting a plain number.
+    function liveLanes() {
+        if (!snapshot?.id || !ACTIVE_STATES.has(snapshot.state)) return;
+        const lanes = activeLanes();
+        const total = lanesSum(lanes);
+        if (total === 0 || total > MAX_CONCURRENCY) return;
+        const key = lanesKey(lanes);
+        if (key === (requestedLanes ?? lanesKey(lanesOfConfig(snapshot.config) || []))) return;
+        requestedLanes = key;
+        const jobId = snapshot.id;
+        liveChain = liveChain.then(async () => {
+            try {
+                // decided now, after the changes before it have landed
+                const jobLanes = snapshot?.id === jobId && validLanes(snapshot.config?.lanes).length > 0;
+                const plain = !jobLanes && lanes.length === 1 && lanes[0].device === defaultDevice;
+                let next;
+                if (plain && typeof api.setConverterConcurrency === 'function') next = unwrap(await api.setConverterConcurrency(jobId, total));
+                else if (typeof api.setConverterLanes === 'function') next = unwrap(await api.setConverterLanes(jobId, lanes));
+                else return;
+                if (next) applySnapshot(next, next.revision);
+                if (requestedLanes === key) notify(lanesNotice(lanes));
+            } catch (error) {
+                notify(describeError(error), { type: 'error' });
+                if (requestedLanes === key && snapshot?.config) syncLanes(snapshot.config, { force: true });
+            } finally {
+                if (requestedLanes === key) requestedLanes = null;
+            }
+        });
+    }
+
+    // Asked once at start, without holding up the page: with two or more
+    // GPUs the rows replace the single number.
+    async function loadDevices() {
+        if (typeof api.getConverterDevices !== 'function' || !elements.lanes) return;
+        let answer;
+        try {
+            answer = unwrap(await api.getConverterDevices());
+        } catch (_) { return; }
+        const listed = (Array.isArray(answer?.devices) ? answer.devices : [])
+            .filter((device) => device && typeof device.id === 'string' && device.id)
+            .map((device) => ({ ...device, name: typeof device.name === 'string' && device.name.trim() ? device.name.trim() : device.id }));
+        const gpus = listed.filter((device) => device.kind !== 'cpu' && device.id !== 'cpu');
+        if (gpus.length < 2) return;
+        // the CPU row is always there, last
+        const cpu = listed.find((device) => device.id === 'cpu') || { id: 'cpu', kind: 'cpu', name: 'CPU (software encoder)', encoders: {} };
+        const devices = [...gpus, cpu];
+        const labels = deviceLabels(devices);
+        laneDevices = devices.map((device, index) => ({ ...device, label: labels[index] }));
+        defaultDevice = laneDevices.some((device) => device.id === answer.defaultDevice) ? answer.defaultDevice : null;
+        // first time: the default GPU gets the single number, the rest Off
+        const stored = storedLanes();
+        const remembered = stored && laneDevices.some((device) => stored.has(device.id));
+        const first = defaultDevice ?? gpus[0].id;
+        for (const device of laneDevices) {
+            laneCounts.set(device.id, remembered ? stored.get(device.id) ?? 0
+                : device.id === first ? storedConcurrency() ?? DEFAULT_CONCURRENCY : 0);
+        }
+        buildLanes();
+        setHidden(elements.concurrency, true);
+        updateConcurrencyCustomVisibility();
+        setHidden(elements.lanes, false);
+        if (elements.benchmarkIntro) {
+            elements.benchmarkIntro.setAttribute?.('data-i18n', 'ui.converter.benchmarkIntroLanes');
+            setText(elements.benchmarkIntro, message('benchmarkIntroLanes', BENCHMARK_INTRO_LANES));
+        }
+        renderLanes();
+        if (snapshot?.config) syncLanes(snapshot.config);
     }
 
     function message(key, fallback, params) {
@@ -484,6 +803,9 @@ function createFootageConverterController(options = {}) {
             syncedConcurrency = concurrency;
             setConcurrency(concurrency);
         }
+        syncLanes(config);
+        // (the codec may have changed: which rows can encode it)
+        renderLanes();
         updateOutputMode();
     }
 
@@ -692,25 +1014,25 @@ function createFootageConverterController(options = {}) {
     // the benchmark reports files per Wh; per kWh reads like the rest of the app
     const filesPerKwh = (perWh) => (Number.isFinite(perWh) && perWh > 0 ? String(Math.round(perWh * 1000)) : '—');
 
-    const CODEC_LABELS = { h265: 'H.265', av1: 'AV1' };
     const verifyLabel = (mode) => ({
         off: message('verifyLabelOff', 'Off'), quick: message('verifyLabelQuick', 'Quick'), full: message('verifyLabelFull', 'Full')
     })[mode] || mode;
 
-    // Off / Quick / Full at each codec's recommended setting.
-    function renderVerifyComparison(runs, doc, cell) {
+    // Quick / Full at each codec's recommended setting, into target's
+    // verification table (the dialog's own, or a GPU's section).
+    function renderVerifyComparison(target, runs, doc, cell) {
         const compared = runs.filter((run) => Array.isArray(run.verifyComparison) && run.verifyComparison.length);
-        if (elements.benchmarkVerifyHead) {
+        if (target.verifyHead) {
             const head = doc.createElement('tr');
             head.append(cell('th', message('verification', 'Verification')),
-                ...VERIFY_MODES.map((mode) => cell('th', verifyLabel(mode))));
-            elements.benchmarkVerifyHead.replaceChildren(head);
+                ...COMPARED_VERIFY_MODES.map((mode) => cell('th', verifyLabel(mode))));
+            target.verifyHead.replaceChildren(head);
         }
         const rows = compared.map((run) => {
             const row = doc.createElement('tr');
             row.append(cell('td', message('benchmarkVerifyTitle', '{codec} · {count} at once',
                 { codec: CODEC_LABELS[run.codec] || run.codec, count: run.best?.level ?? '—' })));
-            for (const mode of VERIFY_MODES) {
+            for (const mode of COMPARED_VERIFY_MODES) {
                 const entry = run.verifyComparison.find((candidate) => candidate.verifyMode === mode);
                 if (!entry) row.append(cell('td', '—'));
                 else if (!entry.ok) {
@@ -726,10 +1048,12 @@ function createFootageConverterController(options = {}) {
             }
             return row;
         });
-        elements.benchmarkVerifyRows?.replaceChildren(...rows);
-        setHidden(elements.benchmarkVerifyTable, rows.length === 0);
+        target.verifyRows?.replaceChildren(...rows);
+        setHidden(target.verifyTable, rows.length === 0);
     }
     let benchmarkPicks = [];
+    // a { devices } result: per GPU { id, name, runs, lines, picks }
+    let benchmarkGpus = [];
 
     // One entry per codec tested; older single-codec results become one run.
     function benchmarkRuns(result) {
@@ -738,20 +1062,14 @@ function createFootageConverterController(options = {}) {
         return [{ codec: selected(elements.codecOptions, 'converterCodec', 'h265'), ...result }];
     }
 
-    function renderBenchmark(result) {
-        const runs = benchmarkRuns(result);
-        const doc = elements.benchmarkRows?.ownerDocument || globalThis.document;
-        const cell = (tag, text, className) => {
-            const node = doc.createElement(tag);
-            node.textContent = text;
-            if (className) node.className = className;
-            return node;
-        };
+    // At once | per codec: Files/min, FPS, Saved (, W, Files/kWh), into
+    // target's results table (the dialog's own, or a GPU's section).
+    function renderResultsTable(target, runs, doc, cell) {
         const tested = runs.filter((run) => !run.error && Array.isArray(run.results) && run.results.length);
         // the server measured power during the run: W and files per kWh per level
         const measured = (run) => run.results.some((entry) => entry.ok && (Number.isFinite(entry.avgW) || Number.isFinite(entry.filesPerWh)));
         // Header: At once | per codec: Files/min, FPS, Saved (, W, Files/kWh)
-        if (elements.benchmarkHead) {
+        if (target.head) {
             const head = doc.createElement('tr');
             head.append(cell('th', message('benchmarkParallel', 'At once')));
             for (const run of tested) {
@@ -760,7 +1078,7 @@ function createFootageConverterController(options = {}) {
                     cell('th', message('benchmarkFps', 'FPS')), cell('th', message('benchmarkSaved', 'Saved')));
                 if (measured(run)) head.append(cell('th', message('benchmarkWatts', 'W')), cell('th', message('benchmarkFilesPerKwh', 'Files/kWh')));
             }
-            elements.benchmarkHead.replaceChildren(head);
+            target.head.replaceChildren(head);
         }
         const levels = [...new Set(tested.flatMap((run) => run.results.map((entry) => entry.level)))].sort((a, b) => a - b);
         const rows = levels.map((level) => {
@@ -791,57 +1109,181 @@ function createFootageConverterController(options = {}) {
             }
             return row;
         });
-        elements.benchmarkRows?.replaceChildren(...rows);
-        elements.benchmarkTable?.classList?.toggle('has-energy', tested.some(measured));
-        setHidden(elements.benchmarkTable, rows.length === 0);
-        renderVerifyComparison(runs, doc, cell);
+        target.rows?.replaceChildren(...rows);
+        target.table?.classList?.toggle('has-energy', tested.some(measured));
+        setHidden(target.table, rows.length === 0);
+    }
 
+    // The best / efficient / failed / skipped lines and the settings worth a
+    // Use button. For one GPU of several, every line starts with its name.
+    function benchmarkLines(runs, deviceName = null) {
         const lines = [];
-        benchmarkPicks = [];
+        const picks = [];
+        const add = (line) => lines.push(deviceName ? message('benchmarkDeviceLine', '{device} · {line}', { device: deviceName, line }) : line);
         for (const run of runs) {
             const codec = CODEC_LABELS[run.codec] || run.codec;
-            if (run.error === 'UNSUPPORTED') lines.push(message('benchmarkCodecUnsupported', '{codec}: not supported on this computer', { codec }));
-            else if (run.error) lines.push(message('benchmarkCodecFailed', '{codec}: benchmark failed ({code})', { codec, code: run.error }));
+            if (run.error === 'UNSUPPORTED') {
+                add(deviceName
+                    ? message('benchmarkDeviceCodecUnsupported', "{codec}: this GPU can't encode it, so it was not tested", { codec })
+                    : message('benchmarkCodecUnsupported', '{codec}: not supported on this computer', { codec }));
+            } else if (run.error) add(message('benchmarkCodecFailed', '{codec}: benchmark failed ({code})', { codec, code: run.error }));
             else if (run.best) {
                 const saved = run.results.find((entry) => entry.level === run.best.level)?.savedPercent;
-                lines.push(message('benchmarkCodecBest', '{codec}: fastest at {count} at once — {rate} files/min, saves {saved}', {
+                add(message('benchmarkCodecBest', '{codec}: fastest at {count} at once — {rate} files/min, saves {saved}', {
                     codec, count: run.best.level, rate: formatRate(run.best.filesPerMinute),
                     saved: Number.isFinite(saved) ? `${saved}%` : '—'
                 }));
-                benchmarkPicks.push({ codec: run.codec, level: run.best.level });
+                picks.push({ codec: run.codec, level: run.best.level });
                 if (run.efficient && Number.isFinite(run.efficient.filesPerWh)) {
-                    lines.push(message('benchmarkCodecEfficient', '{codec}: most efficient at {count} at once — {rate} files per kWh at {watts} W', {
+                    add(message('benchmarkCodecEfficient', '{codec}: most efficient at {count} at once — {rate} files per kWh at {watts} W', {
                         codec, count: run.efficient.level, rate: filesPerKwh(run.efficient.filesPerWh),
                         watts: Number.isFinite(run.efficient.avgW) ? Math.round(run.efficient.avgW) : '—'
                     }));
                 }
             } else if (Array.isArray(run.results) && run.results.length) {
                 const codes = [...new Set(run.results.flatMap((entry) => entry.failures || []))];
-                lines.push(message('benchmarkCodecAllFailed', '{codec}: no setting finished ({codes})', { codec, codes: codes.join(', ') || '—' }));
+                add(message('benchmarkCodecAllFailed', '{codec}: no setting finished ({codes})', { codec, codes: codes.join(', ') || '—' }));
             }
             if (Array.isArray(run.skipped) && run.skipped.length) {
-                lines.push(message('benchmarkCodecSkipped', '{codec}: left out {count} clip(s) that fail on their own: {clips}', {
+                add(message('benchmarkCodecSkipped', '{codec}: left out {count} clip(s) that fail on their own: {clips}', {
                     codec, count: run.skipped.length,
                     clips: run.skipped.map((entry) => `${entry.name} (${entry.code})`).join(', ')
                 }));
             }
         }
+        return { lines, picks };
+    }
+
+    function useLabel(pick) {
+        return message('benchmarkUseCodec', 'Use {codec} · {count} at once',
+            { codec: CODEC_LABELS[pick.codec] || pick.codec, count: pick.level });
+    }
+
+    function benchmarkEncoders(runs) {
+        return runs.filter((run) => !run.error && run.encoder)
+            .map((run) => message('benchmarkCodecEncoder', '{codec} on {encoder}', { codec: CODEC_LABELS[run.codec] || run.codec, encoder: encoderLabel(run.encoder) }));
+    }
+
+    function renderBenchmark(result) {
+        const doc = elements.benchmarkRows?.ownerDocument || elements.benchmarkDevices?.ownerDocument || globalThis.document;
+        const cell = (tag, text, className) => {
+            const node = doc.createElement(tag);
+            node.textContent = text;
+            if (className) node.className = className;
+            return node;
+        };
+        if (Array.isArray(result?.devices)) {
+            renderDeviceBenchmark(result.devices, doc, cell);
+            return;
+        }
+        benchmarkGpus = [];
+        elements.benchmarkDevices?.replaceChildren?.();
+        setHidden(elements.benchmarkDevices, true);
+        const runs = benchmarkRuns(result);
+        const target = {
+            head: elements.benchmarkHead, rows: elements.benchmarkRows, table: elements.benchmarkTable,
+            verifyHead: elements.benchmarkVerifyHead, verifyRows: elements.benchmarkVerifyRows, verifyTable: elements.benchmarkVerifyTable
+        };
+        renderResultsTable(target, runs, doc, cell);
+        renderVerifyComparison(target, runs, doc, cell);
+
+        const { lines, picks } = benchmarkLines(runs);
+        benchmarkPicks = picks;
         benchmarkBest = benchmarkPicks[0] || null;
         setText(elements.benchmarkBest, lines.join('\n'));
         setHidden(elements.benchmarkBest, lines.length === 0);
         [elements.benchmarkApply, elements.benchmarkApplyAlt].forEach((button, index) => {
             const pick = benchmarkPicks[index];
             setHidden(button, !pick);
-            if (pick) {
-                setText(button, message('benchmarkUseCodec', 'Use {codec} · {count} at once',
-                    { codec: CODEC_LABELS[pick.codec] || pick.codec, count: pick.level }));
-            }
+            if (pick) setText(button, useLabel(pick));
         });
-        const encoders = runs.filter((run) => !run.error && run.encoder)
-            .map((run) => message('benchmarkCodecEncoder', '{codec} on {encoder}', { codec: CODEC_LABELS[run.codec] || run.codec, encoder: encoderLabel(run.encoder) }));
+        const encoders = benchmarkEncoders(runs);
         const clips = Math.max(0, ...runs.map((run) => run.clips || 0));
         setText(elements.benchmarkStatus, message('benchmarkDone', 'Done — {clips} real clips converted with {encoder}.',
             { clips, encoder: encoders.join(', ') || '—' }));
+    }
+
+    // A { devices } result: every GPU was benchmarked alone, one after
+    // another, so each gets a section of its own (its tables, its lines and
+    // Use buttons that set its row), in place of the dialog's single tables.
+    function renderDeviceBenchmark(entries, doc, cell) {
+        for (const element of [elements.benchmarkTable, elements.benchmarkVerifyTable, elements.benchmarkBest,
+            elements.benchmarkApply, elements.benchmarkApplyAlt]) setHidden(element, true);
+        benchmarkPicks = [];
+        benchmarkBest = null;
+        const listed = entries.filter((entry) => entry?.device && typeof entry.device.id === 'string' && entry.device.id);
+        const names = deviceLabels(listed.map((entry) => ({ ...entry.device, name: String(entry.device.name || entry.device.id) })));
+        benchmarkGpus = listed.map((entry, index) => {
+            const id = entry.device.id;
+            // the same name as its row in Parallel conversions
+            const name = laneDevices?.find((device) => device.id === id)?.label || names[index];
+            const runs = Array.isArray(entry.codecs) ? entry.codecs.filter(Boolean) : [];
+            return { id, name, runs, ...benchmarkLines(runs, name) };
+        });
+        const sections = benchmarkGpus.map(({ id, name, runs, lines, picks }) => {
+            const section = doc.createElement('section');
+            section.className = 'converter-benchmark-device';
+            section.setAttribute('data-device', id);
+            section.append(cell('h4', name));
+            const encoders = benchmarkEncoders(runs);
+            if (encoders.length) section.append(cell('p', encoders.join(', '), 'converter-disclosure'));
+            const table = cell('table', '', 'converter-benchmark-table');
+            const head = doc.createElement('thead');
+            const rows = doc.createElement('tbody');
+            table.append(head, rows);
+            const verifyTable = cell('table', '', 'converter-benchmark-table converter-benchmark-verify');
+            const verifyHead = doc.createElement('thead');
+            const verifyRows = doc.createElement('tbody');
+            verifyTable.append(cell('caption', message('benchmarkVerifyCaption', "Verification modes at each codec's fastest setting: files per minute (verification time per clip)")),
+                verifyHead, verifyRows);
+            const target = { head, rows, table, verifyHead, verifyRows, verifyTable };
+            renderResultsTable(target, runs, doc, cell);
+            renderVerifyComparison(target, runs, doc, cell);
+            section.append(table, verifyTable);
+            if (lines.length) section.append(cell('p', lines.join('\n'), 'converter-benchmark-best'));
+            // a GPU without a row in Parallel conversions has nothing to set
+            if (laneRows.has(id) && picks.length) {
+                const actions = cell('div', '', 'converter-benchmark-actions');
+                actions.append(...picks.map((pick) => {
+                    const button = cell('button', useLabel(pick), 'converter-benchmark-action');
+                    button.type = 'button';
+                    button.setAttribute('aria-label', message('benchmarkUseCodecOn', 'Use {codec} · {count} at once on {device}',
+                        { codec: CODEC_LABELS[pick.codec] || pick.codec, count: pick.level, device: name }));
+                    button.addEventListener('click', () => applyDeviceBenchmark(id, pick));
+                    return button;
+                }));
+                section.append(actions);
+            }
+            return section;
+        });
+        // The same codec on every GPU at once, each at its own best
+        const together = Object.keys(CODEC_LABELS).map((codec) => ({
+            codec,
+            levels: benchmarkGpus.filter((entry) => laneRows.has(entry.id))
+                .map((entry) => ({ name: entry.name, level: entry.picks.find((pick) => pick.codec === codec)?.level }))
+                .filter((entry) => Number.isSafeInteger(entry.level))
+        })).filter((entry) => entry.levels.length >= 2);
+        if (together.length) {
+            const block = cell('div', '', 'converter-benchmark-combined');
+            const actions = cell('div', '', 'converter-benchmark-actions');
+            actions.append(...together.map(({ codec, levels }) => {
+                const button = cell('button', message('benchmarkUseEveryGpu', 'Use {codec} on every GPU ({levels})', {
+                    codec: CODEC_LABELS[codec],
+                    levels: levels.map((entry) => `${shortDeviceName(entry.name)}: ${entry.level}`).join(' · ')
+                }), 'converter-benchmark-action');
+                button.type = 'button';
+                button.addEventListener('click', () => applyEveryGpu(codec));
+                return button;
+            }));
+            block.append(actions, cell('p', message('benchmarkEveryGpuNote',
+                'Each GPU was tested alone; together they share the CPU and drives, so the total can be a little lower.'), 'converter-disclosure'));
+            sections.push(block);
+        }
+        elements.benchmarkDevices?.replaceChildren?.(...sections);
+        setHidden(elements.benchmarkDevices, sections.length === 0);
+        const clips = Math.max(0, ...benchmarkGpus.flatMap((entry) => entry.runs.map((run) => run.clips || 0)));
+        setText(elements.benchmarkStatus, message('benchmarkDoneDevices', 'Done — {clips} real clips converted on each of {count} GPUs, one GPU at a time.',
+            { clips, count: benchmarkGpus.length }));
     }
 
     async function runBenchmark() {
@@ -853,6 +1295,7 @@ function createFootageConverterController(options = {}) {
         setHidden(elements.benchmarkApplyAlt, true);
         setHidden(elements.benchmarkVerifyTable, true);
         setHidden(elements.benchmarkBest, true);
+        setHidden(elements.benchmarkDevices, true);
         setText(elements.benchmarkStatus, message('benchmarkScanning', 'Finding sample clips in your source folder…'));
         try {
             const profileId = selectedProfile();
@@ -866,24 +1309,34 @@ function createFootageConverterController(options = {}) {
                 sourceRoot: elements.sourcePath?.value?.trim() || null
             };
             const result = unwrap(await api.runConverterBenchmark(request, (progress) => {
+                let text = null;
                 if (progress?.step === 'copy') {
-                    setText(elements.benchmarkStatus, message('benchmarkCopying', 'Copying sample clip {index} of {total}…',
-                        { index: progress.index, total: progress.total }));
+                    text = message('benchmarkCopying', 'Copying sample clip {index} of {total}…',
+                        { index: progress.index, total: progress.total });
                 } else if (progress?.step === 'verify') {
-                    setText(elements.benchmarkStatus, message('benchmarkVerifyProgress',
+                    text = message('benchmarkVerifyProgress',
                         '{codec}: timing verification {mode} at {count} at once… ({index} of {total})',
                         { codec: CODEC_LABELS[progress.codec] || progress.codec || '', mode: verifyLabel(progress.verifyMode),
-                            count: progress.level, index: progress.index, total: progress.total }));
+                            count: progress.level, index: progress.index, total: progress.total });
                 } else if (progress?.step === 'run' && progress.codec) {
-                    setText(elements.benchmarkStatus, message('benchmarkCodecProgress',
+                    text = message('benchmarkCodecProgress',
                         '{codec} ({codecIndex} of {codecTotal}): converting with {count} at once… ({index} of {total})',
                         { codec: CODEC_LABELS[progress.codec] || progress.codec, codecIndex: progress.codecIndex, codecTotal: progress.codecTotal,
-                            count: progress.level, index: progress.index, total: progress.total }));
+                            count: progress.level, index: progress.index, total: progress.total });
                 } else if (progress?.step === 'run') {
-                    setText(elements.benchmarkStatus, message('benchmarkTestingLevel',
+                    text = message('benchmarkTestingLevel',
                         'Converting with {count} at once… ({index} of {total})',
-                        { count: progress.level, index: progress.index, total: progress.total }));
+                        { count: progress.level, index: progress.index, total: progress.total });
                 }
+                if (text === null) return;
+                // several GPUs are tested one after another: which one now
+                if (progress.device && typeof progress.device === 'object') {
+                    text = message('benchmarkDeviceProgress', '{device} ({index} of {total}) · {step}', {
+                        device: laneDevices?.find((device) => device.id === progress.device.id)?.label || progress.device.name || progress.device.id,
+                        index: progress.deviceIndex, total: progress.deviceTotal, step: text
+                    });
+                }
+                setText(elements.benchmarkStatus, text);
             }));
             renderBenchmark(result);
         } catch (error) {
@@ -900,14 +1353,54 @@ function createFootageConverterController(options = {}) {
         elements.benchmarkDialog?.close?.();
     }
 
+    function selectCodec(codec) {
+        for (const option of elements.codecOptions || []) option.checked = option.dataset?.converterCodec === codec;
+        renderLanes();
+    }
+
     function applyBenchmark(index = 0) {
         const pick = benchmarkPicks[index];
         if (!pick) return;
         setConcurrency(pick.level);
         rememberConcurrency(pick.level);
-        for (const option of elements.codecOptions || []) option.checked = option.dataset?.converterCodec === pick.codec;
+        // one GPU's result with rows per GPU: it was measured on the default GPU
+        if (lanesMode()) {
+            const target = defaultDevice ?? laneDevices[0].id;
+            for (const device of laneDevices) laneCounts.set(device.id, device.id === target ? pick.level : 0);
+            rememberLanes();
+        }
+        selectCodec(pick.codec);
         notify(message('benchmarkAppliedCodec', 'Set to {codec} with {count} parallel conversions.',
             { codec: CODEC_LABELS[pick.codec] || pick.codec, count: pick.level }), { type: 'info' });
+        elements.benchmarkDialog?.close?.();
+    }
+
+    // A GPU section's Use button: that GPU's row only
+    function applyDeviceBenchmark(id, pick) {
+        if (!laneRows.has(id)) return;
+        laneCounts.set(id, pick.level);
+        rememberLanes();
+        selectCodec(pick.codec);
+        notify(message('benchmarkAppliedDevice', 'Set {device} to {count} at once with {codec}.',
+            { device: laneLabel(id), count: pick.level, codec: CODEC_LABELS[pick.codec] || pick.codec }), { type: 'info' });
+        elements.benchmarkDialog?.close?.();
+    }
+
+    // Use <codec> on every GPU: each GPU at its own best for it (a GPU
+    // without one is Off), the CPU Off
+    function applyEveryGpu(codec) {
+        const levels = [];
+        for (const entry of benchmarkGpus) {
+            if (!laneRows.has(entry.id)) continue;
+            const level = entry.picks.find((pick) => pick.codec === codec)?.level ?? 0;
+            laneCounts.set(entry.id, level);
+            if (level > 0) levels.push(message('lanesLiveEntry', '{count} on {device}', { count: level, device: entry.name }));
+        }
+        for (const device of laneDevices || []) if (device.kind === 'cpu' || device.id === 'cpu') laneCounts.set(device.id, 0);
+        rememberLanes();
+        selectCodec(codec);
+        notify(message('benchmarkAppliedEveryGpu', 'Set to {codec} with {levels}.',
+            { codec: CODEC_LABELS[codec] || codec, levels: joinList(levels, message('lanesAnd', 'and')) }), { type: 'info' });
         elements.benchmarkDialog?.close?.();
     }
 
@@ -1104,6 +1597,8 @@ function createFootageConverterController(options = {}) {
         }
         const profileId = selectedProfile();
         if (profileId === 'custom' && customBitrateKbps() === null) throw apiError('BITRATE_INVALID');
+        // { concurrency } as always, or with several GPUs { concurrency, lanes }
+        const parallel = lanesMode() ? lanesConfig() : { concurrency: selectedConcurrency() };
         return {
             sourceRoot,
             destinationRoot: outputMode === 'replace' ? null : destinationRoot,
@@ -1115,7 +1610,7 @@ function createFootageConverterController(options = {}) {
             includedGroups,
             groupOrder: [...groupOrder],
             replacementConfirmed: outputMode === 'replace',
-            concurrency: selectedConcurrency(),
+            ...parallel,
             verifyMode: selectedVerifyMode()
         };
     }
@@ -1130,8 +1625,19 @@ function createFootageConverterController(options = {}) {
             REPLACEMENT_UNAVAILABLE: ['errorReplacementUnavailable', 'Replace originals is not available on this system.'],
             AUTO_WINDOW_INVALID: ['errorAutoWindow', 'Choose different start and end hours for the time window.'],
             RECOVERY_REQUIRED: ['errorRecoveryRequired', 'This job stopped in the middle of replacing an original. Resume it to finish safely.'],
-            INVALID_MANIFEST: ['errorInvalidManifest', "This job's saved record couldn't be updated. Use Cancel to set it aside."]
+            INVALID_MANIFEST: ['errorInvalidManifest', "This job's saved record couldn't be updated. Use Cancel to set it aside."],
+            LANES_EMPTY: ['errorLanesEmpty', 'Turn on a GPU or the CPU under Parallel conversions first.'],
+            LANES_TOO_MANY: ['errorLanesTooMany', 'Up to {max} conversions at once in total.'],
+            INVALID_LANES: ['errorInvalidLanes', "These GPU settings can't be used. Reload the page and set them again."]
         };
+        if (error?.code === 'DEVICE_UNSUPPORTED') {
+            const codec = error.details?.codec || selectedCodec();
+            return message('errorDeviceUnsupported', "{device} can't encode {codec}. Set it to Off or pick another codec.", {
+                device: error.details?.device || message('errorDeviceUnknown', 'One of the GPUs'),
+                codec: CODEC_LABELS[codec] || codec
+            });
+        }
+        if (error?.code === 'LANES_TOO_MANY') return message(...labels.LANES_TOO_MANY, { max: MAX_CONCURRENCY });
         return labels[error?.code]
             ? message(...labels[error.code])
             : message('errorActionFailed', 'Converter action failed: {code}', { code: error?.code || 'OPERATION_FAILED' });
@@ -1228,14 +1734,12 @@ function createFootageConverterController(options = {}) {
         // more starts new conversions now, fewer lets the extra ones finish
         // their clip first. No cancel needed (also for automatic jobs).
         // Changes are sent one after another, so the last choice always wins.
-        let requestedConcurrency = null;
-        let concurrencyChain = Promise.resolve();
         function liveConcurrency(value) {
             if (!snapshot?.id || !ACTIVE_STATES.has(snapshot.state) || typeof api.setConverterConcurrency !== 'function') return;
             if (value === (requestedConcurrency ?? Number(snapshot.config?.concurrency))) return;
             requestedConcurrency = value;
             const jobId = snapshot.id;
-            concurrencyChain = concurrencyChain.then(async () => {
+            liveChain = liveChain.then(async () => {
                 try {
                     const next = unwrap(await api.setConverterConcurrency(jobId, value));
                     if (next) applySnapshot(next, next.revision);
@@ -1251,6 +1755,8 @@ function createFootageConverterController(options = {}) {
                 }
             });
         }
+        // which GPUs can encode the codec decides which rows can be set
+        for (const option of elements.codecOptions || []) option.addEventListener?.('change', renderLanes);
         elements.concurrency?.addEventListener?.('change', () => {
             updateConcurrencyCustomVisibility();
             if (customConcurrencySelected()) elements.concurrencyCustom?.focus?.();
@@ -1308,10 +1814,14 @@ function createFootageConverterController(options = {}) {
         if (initialized) return controller;
         initialized = true;
         bind();
+        // not awaited: the page is drawn as usual and switches to one row per
+        // GPU when (and if) the answer says there are several
+        void loadDevices().catch(() => {});
         if (typeof api.onConverterProgress === 'function') unsubscribe = api.onConverterProgress(handleProgress);
         if (subscribeLanguage) {
             unsubscribeLanguage = subscribeLanguage(() => {
                 updateOutputMode();
+                renderLanes();
                 render();
             });
         }
