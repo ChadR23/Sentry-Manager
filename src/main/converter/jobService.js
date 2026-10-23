@@ -55,6 +55,31 @@ function serviceError(code) {
   return new ConverterJobServiceError(code);
 }
 
+// ffmpeg -progress keys reported per running clip (see activeEncodes).
+const LIVE_COUNTERS = Object.freeze({
+  frame: 'frame', drop_frames: 'dropFrames', dup_frames: 'dupFrames', total_size: 'totalSizeB'
+});
+
+function progressCount(value) {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+// "1.23x" or "1234.5kbits/s"; "N/A" until ffmpeg knows.
+function progressRate(value, scale) {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.round(parsed * scale) / scale : null;
+}
+
+// The GPU render node an encode uses, when its arguments name one (VA-API).
+function renderDevice(args) {
+  for (let index = 0; index < args.length - 1; index += 1) {
+    if ((args[index] === '-vaapi_device' || args[index] === '-hwaccel_device')
+        && typeof args[index + 1] === 'string' && args[index + 1].startsWith('/dev/')) return args[index + 1];
+  }
+  return null;
+}
+
 // Only read-only waits may be detached on abort. Their late results are observed,
 // but cannot continue recovery or start a transaction after shutdown.
 function abortableRead(operation, signal) {
@@ -279,6 +304,20 @@ function createConverterJobService(deps) {
     };
   }
   const queueLimit = deps.queueLimit || 4;
+  // Clips already converted are skipped while discovering: from the
+  // converted-clips index without opening the file, or from a quick read of
+  // the MP4 header, a few at a time and never in an encode slot.
+  const convertedIndex = typeof deps.convertedIndex?.has === 'function' && typeof deps.convertedIndex?.add === 'function'
+    ? deps.convertedIndex : null;
+  const headerCheckConcurrency = deps.headerCheckConcurrency || 8;
+  const headerCheckTimeoutMs = deps.headerCheckTimeoutMs || 20_000;
+  if (!Number.isSafeInteger(headerCheckConcurrency) || headerCheckConcurrency < 1
+      || !Number.isSafeInteger(headerCheckTimeoutMs) || headerCheckTimeoutMs < 1) {
+    throw new RangeError('header checks must use positive bounded integers');
+  }
+  // Index entries for clips that just finished converting (one stat each),
+  // written before the job's end flushes the index.
+  const indexWrites = new Set();
   // Discovery persists newly found items in batches. 1 keeps the original
   // persist-each-item-before-enqueue cadence; larger values avoid rewriting the
   // whole manifest once per discovered file.
@@ -337,6 +376,8 @@ function createConverterJobService(deps) {
       // which reproduces the original single-worker pipeline exactly.
       children: new Map(),
       encodeFps: new Map(),
+      // Live numbers of each running ffmpeg, for activeEncodes().
+      encodes: new Map(),
       ownerships: new Map(),
       inFlight: new Set(),
       leadItemId: null,
@@ -528,24 +569,92 @@ function createConverterJobService(deps) {
     return `item-${String(runtime.itemSequence).padStart(6, '0')}`;
   }
 
-  function createQueueItem(runtime, discovered) {
-    return {
+  function createQueueItem(runtime, discovered, changes = {}) {
+    const item = {
       ...clone(discovered),
       id: nextItemId(runtime),
       state: 'queued',
-      attempts: 0
+      attempts: 0,
+      ...changes
     };
+    // The inode only identifies the clip in the converted-clips index; the
+    // job file has no field for it.
+    delete item.ino;
+    return item;
   }
 
   // Adding clips rewrites the whole job file. With batching on, a batch grows
   // with the job (a quarter of what it already holds), so finding 50,000
   // clips writes the file a few dozen times instead of hundreds; short of
-  // that, a batch goes out on time only while the workers run short of clips.
-  function discoveryDue(runtime, pendingCount, lastFlush) {
+  // that, a batch goes out on time only while the workers run short of clips
+  // and it holds a clip for them (skipped clips give them nothing to do).
+  function discoveryDue(runtime, pendingCount, lastFlush, pendingWork = pendingCount) {
     if (discoveryBatchSize === 1) return true;
     if (pendingCount >= Math.max(discoveryBatchSize, Math.floor(runtime.manifest.items.length / 4))) return true;
+    if (pendingWork === 0) return false;
     const short = runtime.queue.values.length < concurrencyOf(runtime.manifest) * 2;
     return short && clock.now() - lastFlush >= discoveryFlushMs;
+  }
+
+  function withTimeout(promise, milliseconds, code) {
+    let timer;
+    return Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(serviceError(code)), milliseconds);
+        timer.unref?.();
+      })
+    ]).finally(() => clearTimeout(timer));
+  }
+
+  // 'h265' / 'av1' for a discovered clip that is already converted, from the
+  // index (no file access at all) or else from its MP4 header; null leaves it
+  // to the normal path (ffprobe in a worker), as does anything unexpected. A
+  // share that drops meanwhile is waited for like any other discovery read.
+  async function convertedCodecOf(runtime, discovered) {
+    try {
+      if (discovered?.kind !== 'video') return null;
+      const recorded = convertedIndex ? convertedIndex.has(discovered) : null;
+      if (recorded) return recorded;
+      if (typeof deps.readVideoCodec !== 'function') return null;
+      const signal = runtime.abortController.signal;
+      const codec = await retryAffectedOperation(runtime, discovered.sourcePath, () => withTimeout(
+        abortableRead(() => deps.readVideoCodec(discovered.sourcePath, { size: discovered.sourceBytes, signal }), signal),
+        headerCheckTimeoutMs, 'HEADER_CHECK_TIMEOUT'
+      ));
+      if (codec !== 'h265' && codec !== 'av1') return null;
+      convertedIndex?.add(discovered, codec);
+      return codec;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // A converted clip's new file (the original's path when replacing, else the
+  // copy in the destination) goes into the index, so the next run skips it.
+  // Best effort and off the worker's path: one stat, which a slow share must
+  // not turn into a held worker.
+  function rememberConverted(target, codec) {
+    if (!convertedIndex || typeof deps.statFile !== 'function' || typeof target !== 'string') return;
+    const pending = Promise.resolve().then(() => deps.statFile(target)).then((stat) => {
+      if (!stat || (typeof stat.isFile === 'function' && !stat.isFile())) return;
+      convertedIndex.add({ sourcePath: target, sourceBytes: Number(stat.size), mtimeMs: Number(stat.mtimeMs), ino: stat.ino }, codec);
+    }).catch(() => undefined);
+    indexWrites.add(pending);
+    pending.finally(() => indexWrites.delete(pending));
+  }
+
+  async function flushConvertedIndex() {
+    if (!convertedIndex) return;
+    if (indexWrites.size > 0) {
+      let timer;
+      await Promise.race([
+        Promise.allSettled([...indexWrites]),
+        new Promise((resolve) => { timer = setTimeout(resolve, 10_000); timer.unref?.(); })
+      ]);
+      clearTimeout(timer);
+    }
+    try { await convertedIndex.flush?.(); } catch (_) { /* the index is an optimisation only */ }
   }
 
   async function produce(runtime) {
@@ -553,34 +662,58 @@ function createConverterJobService(deps) {
     const identity = (item) => `${item.relativePath}\u0000${item.sourcePath}`;
     const known = new Set(runtime.manifest.items.map(identity));
     let pending = [];
+    let pendingWork = 0;
     let lastFlush = -Infinity;
+    const stopped = () => runtime.cancelRequested || runtime.stopRequested;
     // Items are always persisted before they are enqueued; batching only changes
-    // how many share one manifest write.
+    // how many share one manifest write. Skipped clips are persisted only.
     const flush = async () => {
       if (pending.length === 0) return;
       const batch = pending;
       pending = [];
+      pendingWork = 0;
       await update(runtime, (current) => ({ items: [...current.items, ...batch] }));
       if (discoveryBatchSize > 1) lastFlush = clock.now();
-      for (const item of batch) await runtime.queue.push(item.id);
+      for (const item of batch) {
+        if (item.state === 'queued') await runtime.queue.push(item.id);
+      }
+    };
+    // Header checks run ahead of the scan, a few at a time, while clips still
+    // join the job in the order the scan found them.
+    const checking = [];
+    const settleNext = async () => {
+      const { discovered, verdict } = checking.shift();
+      const converted = await verdict;
+      if (stopped()) return;
+      if (converted) {
+        pending.push(createQueueItem(runtime, discovered, {
+          state: 'skipped', eligibleVideo: false, resultCode: 'already-converted'
+        }));
+      } else {
+        pending.push(createQueueItem(runtime, discovered));
+        pendingWork += 1;
+      }
+      if (discoveryDue(runtime, pending.length, lastFlush, pendingWork)) await flush();
     };
     try {
       for await (const discovered of scanner(runtime.manifest.config, {
         signal: runtime.abortController.signal,
         retryOperation: ({ path: affectedPath, operation }) => retryAffectedOperation(runtime, affectedPath, operation)
       })) {
-        if (runtime.cancelRequested || runtime.stopRequested) break;
+        if (stopped()) break;
         const key = identity(discovered);
         if (known.has(key)) continue;
         // Automatic jobs skip clips an earlier automatic run already handled.
         if (typeof deps.skipDiscovered === 'function' && deps.skipDiscovered(runtime.manifest.config, discovered)) continue;
         known.add(key);
-        pending.push(createQueueItem(runtime, discovered));
-        if (discoveryDue(runtime, pending.length, lastFlush)) await flush();
+        checking.push({ discovered, verdict: convertedCodecOf(runtime, discovered) });
+        while (checking.length >= headerCheckConcurrency && !stopped()) await settleNext();
       }
-      if (!runtime.cancelRequested && !runtime.stopRequested) {
+      while (checking.length > 0 && !stopped()) await settleNext();
+      if (!stopped()) {
         await flush();
         await update(runtime, { discoveryComplete: true });
+        void convertedIndex?.flush?.();
       }
       runtime.producerDone = true;
       runtime.queue.close();
@@ -816,13 +949,14 @@ function createConverterJobService(deps) {
       : pathApi.resolve(config.destinationRoot, ...item.relativePath.split('/'));
   }
 
-  async function runChild(runtime, itemId, source, target, codec, encoder, { bitrate, quality = null }, decodeAccel = null) {
+  async function runChild(runtime, itemId, source, target, codec, encoder, { bitrate, quality = null, durationUs = null }, decodeAccel = null) {
     const hwFrames = Array.isArray(decodeAccel) && decodeAccel.includes('-hwaccel_output_format');
+    const encodeArgs = buildEncodeArgs({ codec, encoder: encoder.codec, bitrate, quality, hwFrames });
     const args = [
       '-nostdin', '-hide_banner', '-loglevel', 'error', '-n',
       ...(decodeAccel || []),
       '-i', source,
-      ...buildEncodeArgs({ codec, encoder: encoder.codec, bitrate, quality, hwFrames }),
+      ...encodeArgs,
       '-an', '-sn', '-dn',
       '-progress', 'pipe:1', '-nostats',
       '-f', 'mp4', target
@@ -842,6 +976,26 @@ function createConverterJobService(deps) {
     }
     const entry = { child, terminationRequested: false };
     runtime.children.set(itemId, entry);
+    const live = {
+      jobId: runtime.manifest.id,
+      itemId,
+      relativePath: currentItem(runtime, itemId)?.relativePath || null,
+      encoder: encoder.codec,
+      hardware: encoder.hardware === true,
+      decode: Array.isArray(decodeAccel) && decodeAccel.length > 0 ? 'gpu' : 'cpu',
+      device: renderDevice([...(decodeAccel || []), ...encodeArgs]),
+      pid: Number.isSafeInteger(child.pid) ? child.pid : null,
+      fps: null,
+      speed: null,
+      bitrateKbps: null,
+      frame: null,
+      outTimeUs: null,
+      durationUs: Number.isSafeInteger(durationUs) && durationUs > 0 ? durationUs : null,
+      dropFrames: null,
+      dupFrames: null,
+      totalSizeB: null
+    };
+    runtime.encodes.set(itemId, live);
     // A cancel/stop issued while this item was starting must still stop it.
     if (runtime.cancelRequested || runtime.stopRequested || runtime.recoveryRequired) {
       entry.terminationRequested = true;
@@ -878,13 +1032,25 @@ function createConverterJobService(deps) {
         const separator = line.indexOf('=');
         if (separator < 1) continue;
         const key = line.slice(0, separator);
-        const value = line.slice(separator + 1);
+        const value = line.slice(separator + 1).trim();
         if (key === 'out_time_ms' || key === 'out_time_us') {
           const parsed = Number(value);
-          if (Number.isSafeInteger(parsed) && parsed >= 0) progress.outTimeUs = parsed;
+          if (Number.isSafeInteger(parsed) && parsed >= 0) {
+            progress.outTimeUs = parsed;
+            live.outTimeUs = parsed;
+          }
         } else if (key === 'fps') {
           const parsed = Number(value);
-          if (Number.isFinite(parsed) && parsed >= 0) runtime.encodeFps.set(itemId, parsed);
+          if (Number.isFinite(parsed) && parsed >= 0) {
+            runtime.encodeFps.set(itemId, parsed);
+            live.fps = Math.round(parsed * 10) / 10;
+          }
+        } else if (Object.prototype.hasOwnProperty.call(LIVE_COUNTERS, key)) {
+          live[LIVE_COUNTERS[key]] = progressCount(value);
+        } else if (key === 'speed') {
+          live.speed = progressRate(value, 100);
+        } else if (key === 'bitrate') {
+          live.bitrateKbps = progressRate(value, 10);
         } else if (key === 'progress' && (value === 'continue' || value === 'end')) {
           progress.phase = value;
           // The UI shows one live progress line: the lead item's, plus the
@@ -904,6 +1070,7 @@ function createConverterJobService(deps) {
         settled = true;
         clearTimeout(stallTimer);
         if (runtime.children.get(itemId) === entry) runtime.children.delete(itemId);
+        if (runtime.encodes.get(itemId) === live) runtime.encodes.delete(itemId);
         runtime.encodeFps.delete(itemId);
         resolve(result);
       };
@@ -1092,6 +1259,9 @@ function createConverterJobService(deps) {
     const inspected = await deps.inspectVideo(item, item.sourcePath, signal);
     timing.mark('inspect');
     if (inspected.codec === 'h265' || inspected.codec === 'av1') {
+      // Its header could not tell (or it was found before this version):
+      // remembered now, the next run skips it while discovering.
+      convertedIndex?.add(item, inspected.codec);
       await itemPatch(runtime, item.id, {
         state: 'skipped', eligibleVideo: false, resultCode: 'already-converted'
       }, { state: 'waiting', activeItemId: null });
@@ -1153,7 +1323,8 @@ function createConverterJobService(deps) {
       latestOwnership = reserved;
       setOwnership(runtime, item.id, composeOwnership(ownershipFor(runtime, item.id), reserved));
       const usedTier = encodeTiers[0] || null;
-      const encoded = await runChild(runtime, item.id, staged.source, reserved.path, codec, selected, { bitrate, quality }, usedTier?.args || null);
+      const durationUs = Math.round((inspected.durationSeconds || 0) * 1_000_000) || null;
+      const encoded = await runChild(runtime, item.id, staged.source, reserved.path, codec, selected, { bitrate, quality, durationUs }, usedTier?.args || null);
       timing.mark('encode');
       if (!encoded.ok) {
         let failedOwnership = reserved;
@@ -1393,6 +1564,7 @@ function createConverterJobService(deps) {
           timings: addItemTimings(current.timings, itemTiming.phases)
         };
       });
+      rememberConverted(published.finalPath, codec);
       emit(runtime, 'item_timing', {
         itemId: item.id, relativePath: item.relativePath, encoder: selected.codec, outputPath: published.finalPath,
         sourceBytes: item.sourceBytes, outputBytes: verification.outputBytes, attempts, ...itemTiming
@@ -1689,7 +1861,9 @@ function createConverterJobService(deps) {
           return;
         }
         await finalize(runtime);
-      });
+      })
+      // What this run learned about converted clips is on disk once it ends.
+      .finally(() => flushConvertedIndex());
     const tracked = jobPromise.finally(() => {
       if (runtime.runPromise === tracked) {
         runtime.runPromise = null;
@@ -2095,6 +2269,7 @@ function createConverterJobService(deps) {
           replacementPhase: null
         };
       });
+      rememberConverted(finalPath, recovered.config.codec);
       runtime.queue = new BoundedQueue(queueLimit);
       await launch(runtime, {
         discover: runtime.manifest.discoveryComplete === false,
@@ -2368,6 +2543,17 @@ function createConverterJobService(deps) {
     return publicSnapshot(runtime.manifest);
   }
 
+  // One entry per ffmpeg encoding right now, with its latest -progress numbers
+  // (null until ffmpeg reports them). Synchronous and cheap: the server reads
+  // it every couple of seconds while a page shows it.
+  function activeEncodes() {
+    const encodes = [];
+    for (const runtime of jobs.values()) {
+      for (const live of runtime.encodes.values()) encodes.push({ ...live });
+    }
+    return encodes;
+  }
+
   async function shutdown() {
     if (shuttingDown) {
       await Promise.all([...jobs.values()].map((runtime) => runtime.runPromise).filter(Boolean));
@@ -2408,7 +2594,8 @@ function createConverterJobService(deps) {
     continueRecovery,
     shutdown: (...args) => serializeCommand(() => shutdown(...args)),
     subscribe,
-    whenIdle
+    whenIdle,
+    activeEncodes
   });
 }
 

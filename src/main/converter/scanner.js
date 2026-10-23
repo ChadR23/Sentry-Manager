@@ -332,7 +332,9 @@ async function* scanTeslaFootage(config = {}, adapterOverrides = {}) {
         relativePath: toRelativePath(childRelativeParts),
         sourcePath: childPath,
         sourceBytes: fileStat.size,
-        mtimeMs: fileStat.mtimeMs
+        mtimeMs: fileStat.mtimeMs,
+        // identifies the file in the converted-clips index (not kept in jobs)
+        ino: fileStat.ino
       };
 
       if (parsedFilename) {
@@ -468,7 +470,8 @@ async function* scanTeslaFootage(config = {}, adapterOverrides = {}) {
         relativePath: toRelativePath(childRelativeParts),
         sourcePath: childPath,
         sourceBytes: fileStat.size,
-        mtimeMs: fileStat.mtimeMs
+        mtimeMs: fileStat.mtimeMs,
+        ino: fileStat.ino
       };
       if (parsedFilename) {
         item.timestampKey = parsedFilename.timestampKey;

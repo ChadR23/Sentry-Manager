@@ -21,6 +21,8 @@ const {
   createFileTransaction
 } = require('./staging');
 const { createConverterJobService } = require('./jobService');
+const { createConvertedIndex } = require('./convertedIndex');
+const { readMp4VideoCodec } = require('./mp4Header');
 
 const ACTIVE_RECOVERY_STATES = new Set([
   'discovering', 'waiting', 'staging', 'encoding', 'writing-telemetry',
@@ -466,6 +468,14 @@ async function createConverterRuntime(options = {}) {
   if (typeof options.spawn !== 'function') throw new TypeError('spawn is required');
 
   const jobsRoot = pathApi.join(options.userDataPath, 'converter-jobs');
+  // Clips known to be converted already, so a run skips them while it
+  // discovers files (an optimisation only: losing it costs speed, not results).
+  const convertedIndex = createConvertedIndex({
+    file: pathApi.join(options.userDataPath, 'converter-index', 'converted-clips.json'),
+    fs: pfs,
+    pathApi
+  });
+  await convertedIndex.load();
   // Staging refuses any owned file whose real path differs from the path it
   // was given, so the temp folder is resolved to its real location first:
   // macOS reaches it through a link (/var -> /private/var) and Windows may
@@ -606,11 +616,17 @@ async function createConverterRuntime(options = {}) {
     // How long ffmpeg may go without reporting progress before it counts
     // as stuck (jobService's default when unset).
     encodeStallMs: options.encodeStallMs,
+    // The MP4 header check discovery uses to skip converted clips, and the
+    // stat that records a newly converted clip in the index.
+    readVideoCodec: (source, readOptions = {}) => readMp4VideoCodec(source, { ...readOptions, fs: pfs }),
+    statFile: (target) => pfs.stat(target),
     ensureDestinationParent: ({ destinationRoot, destination }) => ensureContainedDestinationParent({
       destinationRoot, destination, fs: pfs, pathApi, platform
     })
   };
-  const service = factories.createConverterJobService({ ...serviceDeps, store, stagingManager });
+  // Only the real service records clips in the index: the benchmark converts
+  // temporary copies.
+  const service = factories.createConverterJobService({ ...serviceDeps, store, stagingManager, convertedIndex });
 
   // Each verified clip leaves its (now empty) private snapshot folder behind
   // once the snapshot is published. Remove empty ones while nothing is
@@ -738,6 +754,7 @@ async function createConverterRuntime(options = {}) {
   // be meaningless and the encoders shared). It runs the real converter in an
   // isolated temporary job store, staging area and output folder.
   let benchmarkController = null;
+  const benchmarkServices = new Set();
   async function findBenchmarkClips(sourceRoot, signal) {
     if (typeof sourceRoot !== 'string' || sourceRoot.length === 0) return [];
     // In an archive that is partly converted the first folders hold mostly
@@ -788,6 +805,7 @@ async function createConverterRuntime(options = {}) {
         store: factories.createJobStore({ rootDir: pathApi.join(workRoot, 'jobs'), fs: pfs }),
         stagingManager: factories.createFileTransaction({ ...stagingOptions, tempRoot: stagingRoot })
       });
+      benchmarkServices.add(benchService);
       const jobId = await benchService.start({
         sourceRoot,
         destinationRoot: pathApi.join(workRoot, 'output'),
@@ -809,6 +827,7 @@ async function createConverterRuntime(options = {}) {
       } finally {
         signal?.removeEventListener('abort', abort);
         await benchService.shutdown().catch(() => {});
+        benchmarkServices.delete(benchService);
       }
     };
   }
@@ -843,6 +862,8 @@ async function createConverterRuntime(options = {}) {
             const result = await runConverterBenchmark({
               clips, countFrames, encoder, tempRoot, signal: controller.signal, pathApi, fs: pfs,
               verifyMode, compareVerifyModes: ['off', 'quick', 'full'],
+              // Energy per level when the server can measure it (files per Wh).
+              powerMeter: options.powerMeter,
               onProgress: (progress) => onProgress?.({ ...progress, codec: current, codecIndex: index + 1, codecTotal: requested.length }),
               runLevel: benchmarkLevelRunner({ codec: current, profileId, bitrateKbps, qualityLevel, verifyMode })
             });
@@ -862,6 +883,16 @@ async function createConverterRuntime(options = {}) {
     },
     cancelBenchmark() {
       benchmarkController?.abort();
+    },
+    // Every ffmpeg encoding right now, a benchmark's included (those carry
+    // benchmark: true and a temporary job id).
+    activeEncodes() {
+      const encodes = typeof service.activeEncodes === 'function' ? service.activeEncodes() : [];
+      for (const benchService of benchmarkServices) {
+        if (typeof benchService.activeEncodes !== 'function') continue;
+        for (const entry of benchService.activeEncodes()) encodes.push({ ...entry, benchmark: true });
+      }
+      return encodes;
     },
     start() {
       if (shutdownPromise) return Promise.reject(runtimeError('SERVICE_SHUTDOWN'));
@@ -913,6 +944,7 @@ async function createConverterRuntime(options = {}) {
       auto.stop();
       if (!shutdownPromise) shutdownPromise = (async () => {
         const results = await Promise.allSettled([Promise.resolve().then(() => service.shutdown()), recoveryPromise]);
+        await convertedIndex.close();
         const rejected = results.find(result => result.status === 'rejected');
         if (rejected) throw rejected.reason;
       })();
