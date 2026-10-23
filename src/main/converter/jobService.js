@@ -435,6 +435,9 @@ function createConverterJobService(deps) {
       laneCounters: new Map(),
       // The lanes whose GPUs were found, while the job runs with lanes.
       lanePlan: null,
+      // The device a job without lanes encodes on, once a switch between
+      // no lanes and lanes needed it (see deviceActive).
+      defaultLane: undefined,
       addWorker: null
     };
   }
@@ -535,15 +538,44 @@ function createConverterJobService(deps) {
     return { fallback: devices.size === 0, limits, devices };
   }
 
-  // The workers each lane is missing (more at once, or a lane just added).
+  // A lane's workers that are not on their way out.
+  function laneActive(runtime, laneId) {
+    const counters = laneCounters(runtime, laneId);
+    return counters.live - counters.retiring;
+  }
+
+  // The workers converting on a lane's device. A job switching between no
+  // lanes and lanes runs the default lane and the lanes side by side until
+  // the old workers finish their clip; the default lane encodes on the
+  // device a job without lanes uses (runtime.defaultLane), so the two count
+  // together there and that GPU never runs more at once than it was set to.
+  function deviceActive(runtime, laneId) {
+    const shared = runtime.defaultLane;
+    if (laneId === null) return laneActive(runtime, null) + (shared ? laneActive(runtime, shared) : 0);
+    return laneActive(runtime, laneId) + (shared && laneId === shared ? laneActive(runtime, null) : 0);
+  }
+
+  // Before switching between no lanes and lanes: the device a job without
+  // lanes encodes on (looked up once; null when it cannot be told).
+  async function noteDefaultLane(runtime, toLanes) {
+    const fromLanes = Boolean(runtime.lanePlan && !runtime.lanePlan.fallback);
+    if (fromLanes === toLanes || runtime.defaultLane !== undefined) return;
+    let id = null;
+    try {
+      if (typeof deps.defaultDevice === 'function') id = await deps.defaultDevice(runtime.manifest.config.codec);
+    } catch (_) { id = null; }
+    if (runtime.defaultLane === undefined) runtime.defaultLane = typeof id === 'string' && id ? id : null;
+  }
+
+  // The workers each lane is missing (more at once, a lane just added, or
+  // old workers on the same GPU that have finished their clip).
   function startMissingWorkers(runtime) {
     if (typeof runtime.addWorker !== 'function' || runtime.cancelRequested || runtime.stopRequested) return;
     const plan = runtime.lanePlan;
     const lanes = !plan || plan.fallback ? [null] : [...plan.devices].map(([id, device]) => ({ id, device }));
     for (const lane of lanes) {
       const laneId = lane ? lane.id : null;
-      const counters = laneCounters(runtime, laneId);
-      for (let missing = laneLimit(runtime, laneId) - (counters.live - counters.retiring); missing > 0; missing -= 1) {
+      for (let missing = laneLimit(runtime, laneId) - deviceActive(runtime, laneId); missing > 0; missing -= 1) {
         runtime.addWorker(lane);
       }
     }
@@ -1823,7 +1855,11 @@ function createConverterJobService(deps) {
     } finally {
       runtime.liveWorkers -= 1;
       counters.live -= 1;
-      if (retired) counters.retiring -= 1;
+      if (retired) {
+        counters.retiring -= 1;
+        // its GPU may be waiting for it (a switch to or from lanes)
+        startMissingWorkers(runtime);
+      }
       // The remaining workers may all be parked on a pause already.
       await persistPauseWhenParked(runtime).catch(() => undefined);
     }
@@ -1872,13 +1908,35 @@ function createConverterJobService(deps) {
     if (!isValidConcurrency(value)) throw serviceError('INVALID_CONCURRENCY');
     const runtime = await ensureRuntime(id);
     if (TERMINAL_STATES.has(runtime.manifest.state)) throw serviceError('JOB_NOT_ACTIVE');
-    // A job with a number per GPU changes through setLanes.
-    if (lanesOf(runtime.manifest)) throw serviceError('INVALID_CONCURRENCY');
+    const lanes = lanesOf(runtime.manifest);
+    if (lanes) {
+      // One number for a job with a number per GPU: the Encoder page shows
+      // the single number when it lists fewer than two GPUs (one went away,
+      // or the list has not come yet). It goes to the one GPU the job still
+      // has; otherwise the job carries on without lanes.
+      const plan = runtime.lanePlan;
+      const kept = plan ? (plan.fallback ? [] : [...plan.devices.keys()]) : lanes.map((lane) => lane.device);
+      if (kept.length === 1) return setLanes(id, [{ device: kept[0], concurrency: value }]);
+      return dropLanes(runtime, value);
+    }
     if (concurrencyOf(runtime.manifest) === value) return publicSnapshot(runtime.manifest);
     await update(runtime, (current) => ({ config: { ...current.config, concurrency: value } }));
-    if (typeof runtime.addWorker === 'function' && !runtime.cancelRequested && !runtime.stopRequested) {
-      const counters = laneCounters(runtime, null);
-      for (let missing = value - (counters.live - counters.retiring); missing > 0; missing -= 1) runtime.addWorker();
+    startMissingWorkers(runtime);
+    return publicSnapshot(runtime.manifest);
+  }
+
+  // A lanes job becomes a job without lanes (the default device's workers
+  // take over as the lanes' workers finish their clip).
+  async function dropLanes(runtime, value) {
+    const running = () => typeof runtime.addWorker === 'function' && !runtime.cancelRequested && !runtime.stopRequested;
+    if (running()) await noteDefaultLane(runtime, false);
+    await update(runtime, (current) => {
+      const { lanes: _lanes, ...config } = current.config;
+      return { config: { ...config, concurrency: value } };
+    });
+    if (running()) {
+      runtime.lanePlan = null;
+      startMissingWorkers(runtime);
     }
     return publicSnapshot(runtime.manifest);
   }
@@ -1902,6 +1960,7 @@ function createConverterJobService(deps) {
     // (a run that started meanwhile with the old lanes takes the new ones too)
     if (running()) {
       const plan = found || await resolveLanes(lanes);
+      if (running()) await noteDefaultLane(runtime, !plan.fallback);
       if (running()) {
         runtime.lanePlan = plan;
         startMissingWorkers(runtime);

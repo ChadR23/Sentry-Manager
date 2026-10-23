@@ -77,6 +77,7 @@ function clipName(index) {
  * options:
  *   clips          how many clips the scan finds
  *   devices        what resolveDevice finds (by id)
+ *   defaultDevice  the id a job without lanes encodes on (the UHD when listed)
  *   works          probe results (see desktopWorks)
  *   behave(args)   'hold' (until released), a number (exit code) or undefined (0 at once)
  *   dir, store     reuse a previous harness's folder (a restart)
@@ -156,6 +157,10 @@ function createHarness(options = {}) {
       resolved.push(id);
       return devices.find((device) => device.id === id) || null;
     },
+    // the GPU a job without lanes encodes on: QSV without a device opens
+    // renderD128, the UHD 770 here
+    defaultDevice: async () => (options.defaultDevice !== undefined ? options.defaultDevice
+      : devices.some((device) => device.id === UHD.id) ? UHD.id : null),
     encodeStallMs: 60_000
   };
   const service = createConverterJobService(deps);

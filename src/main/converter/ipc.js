@@ -493,8 +493,13 @@ function registerConverterIpc(options = {}) {
       if (!isPlainObject(payload) || Object.keys(payload).length !== 2 || !isValidConcurrency(payload.concurrency)) fail('INVALID_CONCURRENCY');
       if (typeof options.service.setConcurrency !== 'function') fail('OPERATION_FAILED');
       const snapshot = await options.service.setConcurrency(validateSafeJobId(payload.jobId), payload.concurrency);
-      if (snapshot?.config?.autoConvert === true && typeof options.auto?.setConcurrency === 'function') {
-        try { await options.auto.setConcurrency(payload.concurrency); } catch (_) { /* the job itself changed; settings follow next time */ }
+      if (snapshot?.config?.autoConvert === true) {
+        // (a job with lanes may keep its one GPU still here: the settings keep it too)
+        const lanes = Array.isArray(snapshot.config.lanes) && snapshot.config.lanes.length > 0 ? snapshot.config.lanes : null;
+        try {
+          if (lanes && typeof options.auto?.setLanes === 'function') await options.auto.setLanes(lanes);
+          else if (!lanes && typeof options.auto?.setConcurrency === 'function') await options.auto.setConcurrency(payload.concurrency);
+        } catch (_) { /* the job itself changed; settings follow next time */ }
       }
       return sanitizeSnapshot(snapshot);
     }),

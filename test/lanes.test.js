@@ -79,7 +79,7 @@ test('a job keeps its lanes with the total as its concurrency; a malformed saved
   }
 });
 
-test('each lane gets its own workers on its own GPU; setConcurrency is refused on a lanes job', async () => {
+test('each lane gets its own workers on its own GPU', async () => {
   const h = createHarness({ clips: 12, behave: hold });
   try {
     const id = await h.service.start(h.config({ lanes: [{ device: ARC.id, concurrency: 3 }, { device: UHD.id, concurrency: 1 }] }));
@@ -100,7 +100,7 @@ test('each lane gets its own workers on its own GPU; setConcurrency is refused o
     assert.ok(live.filter((entry) => entry.deviceId === UHD.id).every((entry) => entry.device === UHD.node));
     const job = await h.service.get(id);
     assert.equal(job.config.concurrency, 4);
-    await assert.rejects(h.service.setConcurrency(id, 2), { code: 'INVALID_CONCURRENCY' });
+    await assert.rejects(h.service.setConcurrency(id, 0), { code: 'INVALID_CONCURRENCY' });
     await assert.rejects(h.service.setLanes(id, [{ device: '/dev/dri/renderD128', concurrency: 1 }]), { code: 'INVALID_LANES' });
     const done = await h.finishJob(id);
     assert.equal(done.state, 'completed');
@@ -171,6 +171,75 @@ test('setLanes on a job without lanes: the default workers finish their clip, la
     assert.deepEqual(done.config.lanes, [{ device: ARC.id, concurrency: 2 }]);
   } finally {
     await h.close();
+  }
+});
+
+test('lanes for the GPU a job without lanes runs on: that GPU never runs more at once than it was set to', async () => {
+  const h = createHarness({ clips: 20, behave: hold });
+  // encodes on the UHD 770: the default path (no GPU named) or its lane
+  const onUhd = () => h.held().filter((entry) => entry.gpu === null || entry.gpu === UHD.node).length;
+  try {
+    const id = await h.service.start(h.config({ concurrency: 3 }));
+    assert.ok(await until(() => h.held().length === 3));
+    await h.service.setLanes(id, [{ device: UHD.id, concurrency: 3 }, { device: ARC.id, concurrency: 1 }]);
+    assert.ok(await until(() => h.held().length === 4), 'the Arc, a GPU added, starts at once');
+    await sleep(30);
+    assert.deepEqual(h.running(), { default: 3, [ARC.id]: 1 });
+    assert.equal(onUhd(), 3, 'the UHD lane waits for the clips already on the UHD');
+    // each old clip done: a UHD lane worker takes its place
+    for (let lane = 1; lane <= 3; lane += 1) {
+      h.held().find((entry) => entry.gpu === null).finish(0);
+      assert.ok(await until(() => (h.running()[UHD.id] || 0) === lane), `${lane} on the UHD lane`);
+      await sleep(20);
+      assert.equal(onUhd(), 3, 'never more than 3 on the UHD');
+    }
+    assert.deepEqual(h.running(), { [UHD.id]: 3, [ARC.id]: 1 });
+    const done = await h.finishJob(id);
+    assert.equal(done.state, 'completed');
+    assert.equal(done.items.filter((item) => item.state === 'completed').length, 20);
+  } finally {
+    await h.close();
+  }
+});
+
+test('one number for a job with lanes: its one GPU still here takes it, else the job carries on without lanes', async (t) => {
+  captureWarnings(t);
+  // the T400 is gone: the Arc's lane gets the number
+  const h = createHarness({ clips: 12, behave: hold });
+  try {
+    const id = await h.service.start(h.config({ lanes: [{ device: ARC.id, concurrency: 2 }, { device: T400.id, concurrency: 2 }] }));
+    assert.ok(await until(() => h.held().length === 2));
+    const job = await h.service.setConcurrency(id, 3);
+    assert.deepEqual(job.config.lanes, [{ device: ARC.id, concurrency: 3 }]);
+    assert.equal(job.config.concurrency, 3);
+    assert.ok(await until(() => h.held().length === 3));
+    assert.deepEqual(h.running(), { [ARC.id]: 3 });
+    assert.equal((await h.finishJob(id)).state, 'completed');
+  } finally {
+    await h.close();
+  }
+  // both GPUs here: no lanes, on the GPU the single number always used;
+  // the UHD lane's clip there counts, so the UHD never runs more than 2
+  const two = createHarness({ clips: 12, behave: hold });
+  const onUhd = () => two.held().filter((entry) => entry.gpu === null || entry.gpu === UHD.node).length;
+  try {
+    const id = await two.service.start(two.config({ lanes: [{ device: UHD.id, concurrency: 1 }, { device: ARC.id, concurrency: 2 }] }));
+    assert.ok(await until(() => two.held().length === 3));
+    const job = await two.service.setConcurrency(id, 2);
+    assert.equal('lanes' in job.config, false);
+    assert.equal(job.config.concurrency, 2);
+    assert.ok(await until(() => two.held().length === 4));
+    await sleep(30);
+    assert.deepEqual(two.running(), { [UHD.id]: 1, [ARC.id]: 2, default: 1 });
+    assert.equal(onUhd(), 2);
+    for (const entry of two.held().filter((e) => e.gpu !== null)) entry.finish(0);
+    assert.ok(await until(() => JSON.stringify(two.running()) === JSON.stringify({ default: 2 })), JSON.stringify(two.running()));
+    const done = await two.finishJob(id);
+    assert.equal(done.state, 'completed');
+    assert.equal(done.items.filter((item) => item.state === 'completed').length, 12);
+    assert.equal('lanes' in done.config, false);
+  } finally {
+    await two.close();
   }
 });
 
@@ -657,7 +726,7 @@ function ipcHarness(overrides = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sm-lanes-ipc-'));
   for (const name of ['source', 'out']) fs.mkdirSync(path.join(dir, name));
   const handlers = new Map();
-  const calls = { start: [], setLanes: [], autoLanes: [], configure: [] };
+  const calls = { start: [], setLanes: [], autoLanes: [], autoConcurrency: [], configure: [] };
   const ipcMain = { handle: (channel, fn) => handlers.set(channel, fn), removeHandler: (channel) => handlers.delete(channel) };
   const service = {
     subscribe: () => () => {},
@@ -666,6 +735,11 @@ function ipcHarness(overrides = {}) {
       calls.setLanes.push([jobId, lanes]);
       return { id: jobId, state: 'encoding', config: { autoConvert: overrides.autoJob === true, lanes, concurrency: lanesTotal(lanes) }, items: [] };
     },
+    // (keptLane: the job had lanes and keeps that one GPU)
+    setConcurrency: async (jobId, concurrency) => ({
+      id: jobId, state: 'encoding', items: [],
+      config: { autoConvert: overrides.autoJob === true, concurrency, ...(overrides.keptLane ? { lanes: [{ device: overrides.keptLane, concurrency }] } : {}) }
+    }),
     list: async () => []
   };
   const registration = registerConverterIpc({
@@ -673,6 +747,7 @@ function ipcHarness(overrides = {}) {
     capabilities: { replacement: 'available' },
     auto: {
       setLanes: async (lanes) => { calls.autoLanes.push(lanes); },
+      setConcurrency: async (value) => { calls.autoConcurrency.push(value); },
       configure: async (settings) => { calls.configure.push(settings); return { settings }; }
     },
     devices: async () => ({
@@ -736,6 +811,20 @@ test('IPC: devices, start and automatic settings with lanes, DEVICE_UNSUPPORTED,
     assert.deepEqual(snapshot.config.lanes, [{ device: ARC.id, concurrency: 2 }]);
   } finally {
     h.close();
+  }
+});
+
+test('IPC: one number on an automatic job with lanes: the saved settings follow what the job kept', async () => {
+  for (const [keptLane, lanes, numbers] of [[ARC.id, [[{ device: ARC.id, concurrency: 3 }]], []], [null, [], [3]]]) {
+    const h = ipcHarness({ autoJob: true, keptLane });
+    try {
+      const out = await h.invoke('setConcurrency', { jobId: 'job-1', concurrency: 3 });
+      assert.equal(out.ok, true, JSON.stringify(out));
+      assert.deepEqual(h.calls.autoLanes, lanes, 'its one GPU kept: the settings keep it too');
+      assert.deepEqual(h.calls.autoConcurrency, numbers, 'no lanes left: the plain number');
+    } finally {
+      h.close();
+    }
   }
 });
 
