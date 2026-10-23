@@ -233,11 +233,9 @@ jobService:
   with lanes that is one entry per lane with running workers, grouped by `deviceId`,
   with the GPU matched by node as today. A job without lanes has one entry, however
   its clips decode (a clip decoded or redone on the CPU names no GPU). `device` (the
-  first) stays. The single-GPU bottleneck reads the GPU a GPU clip names, not the
-  first clip's. `bottleneck` with several devices:
-  - "gpu-video" names the busiest GPU: `The Intel Arc A380's video engine is 95% busy,
-    so more at once on it won't go faster.`
-  - The "room" message needs every used GPU below 60%.
+  first) stays. (The `bottleneck` / room-to-spare sentence planned here was
+  removed later at the owner's request: it flipped between the two from one
+  poll to the next. The block has no `bottleneck` field.)
 
 ## 5. Encoder page UI (`encoder.html`, `footageConverter.js`, `hardwarePanel.js`)
 

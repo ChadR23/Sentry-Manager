@@ -910,7 +910,7 @@ select.converter-select {
 
 /* --------------------------------------------------------------------------
    Hardware (scripts/features/hardwarePanel.js): what the run uses and what
-   holds it back; the approved mockup, docs/plans/server-monitor-mock.js
+   it costs; the approved mockup, docs/plans/server-monitor-mock.js
    -------------------------------------------------------------------------- */
 .nd-hw {
     margin: 0 0 16px;
@@ -1018,27 +1018,6 @@ select.converter-select {
 }
 
 .nd-hw .nd-bar.hot span { background: var(--fd-warn); }
-
-.nd-hint {
-    margin-top: 12px;
-    padding: 10px 12px;
-    border: 1px solid rgba(90, 209, 242, 0.4);
-    border-radius: 10px;
-    background: rgba(90, 209, 242, 0.08);
-    color: var(--text-secondary);
-    font-size: 13px;
-    line-height: 1.5;
-}
-
-.nd-hint b { color: var(--fd-info); }
-
-/* nothing maxed out: the same hint, quieter */
-.nd-hint.calm {
-    border-color: var(--fd-border);
-    background: none;
-}
-
-.nd-hint.calm b { color: var(--text-color); }
 
 /* several GPUs converting: one line per device */
 .nd-devices {

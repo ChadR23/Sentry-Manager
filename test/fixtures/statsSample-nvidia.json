@@ -647,10 +647,6 @@
       "savedB": 2362232012.8,
       "startedAt": 1792501200000,
       "cost": null
-    },
-    "bottleneck": {
-      "kind": "source-read",
-      "message": "The footage share takes 2300 ms to answer, so clips wait on the NAS."
     }
   }
 }

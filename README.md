@@ -138,8 +138,8 @@ copies somewhere else is a choice you make in the Output section.
   converted.
 - **Hardware panel.** While a conversion runs, Live run shows the encoder
   and GPU in use, video-engine and CPU load, watts and temperatures, each
-  clip's speed and progress, the energy used so far (kWh, clips and GB saved
-  per kWh, cost) and what limits the speed (the GPU, the CPU or the share).
+  clip's speed and progress, and the energy used so far (kWh, clips and GB
+  saved per kWh, cost).
 - **Benchmark.** Runs the real converter on copies of a few of your clips
   at 1, 2, 4, 6 and 8 at once, on the server, and suggests the lightest
   setting within 5% of the fastest, and, when the server reports its power,

@@ -171,7 +171,7 @@ inside Live run, under the heading, shown while a conversion runs (and a
 compact idle line otherwise: encoder + device). Polls `GET /api/stats`
 (same origin, cookies) every 2 s while visible; uses `encoder` below.
 Chips (encoder · GPU · device, decode, N at once), tiles (video engine %,
-CPU used by conversions, W, temps), bottleneck hint, efficiency row (kWh this
+CPU used by conversions, W, temps), efficiency row (kWh this
 run, clips per kWh, GB saved per kWh, ≈ cost), one row per running clip
 (name, progress bar, fps, speed, bitrate, dropped/duplicated frames).
 
@@ -181,9 +181,11 @@ run, clips per kWh, GB saved per kWh, ≈ cost), one row per running clip
 encoder: {
   jobId, running: bool, workers: [ /* service.activeEncodes() entries */ ],
   device: { encoder, hardware, gpuName, node, decode },
-  run: { wh, avgW, clips, savedB, startedAt },
-  bottleneck: { kind: 'gpu-video'|'cpu'|'source-read'|'destination-write'|'none', message }
+  run: { wh, avgW, clips, savedB, startedAt }
 }
+// (a `bottleneck` sentence was planned here too; it was removed at the
+// owner's request because it flipped between "bottleneck" and "room to
+// spare" from one poll to the next)
 ```
 
 c) **Settings > System**: "Electricity price", either one price or a

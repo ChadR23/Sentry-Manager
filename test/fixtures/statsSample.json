@@ -661,10 +661,6 @@
       "savedB": 41553808588.8,
       "startedAt": 1792488960000,
       "cost": 0.047
-    },
-    "bottleneck": {
-      "kind": "gpu-video",
-      "message": "The GPU's video engine is 94% busy, so more conversions at once won't go faster."
     }
   }
 }

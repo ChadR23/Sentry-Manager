@@ -1,31 +1,13 @@
 'use strict';
 
-// The Encoder's Hardware panel: the bottleneck is only claimed when the
-// numbers show it, and the run's energy and device come from the right job.
+// The Encoder's Hardware panel: the run's energy and device come from the
+// right job, and no sentence about what limits the run is made up.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { encoderBlock, bottleneck } = require('../server/encoderStats');
+const { encoderBlock } = require('../server/encoderStats');
 
 const worker = (over = {}) => ({ jobId: 'j1', itemId: 'i1', relativePath: 'RecentClips/a-front.mp4', encoder: 'hevc_vaapi', hardware: true, decode: 'gpu', device: '/dev/dri/renderD128', fps: 400, ...over });
-
-test('a busy video engine is the bottleneck of a GPU run', () => {
-  const b = bottleneck({ workers: [worker()], cpu: { usage: 30 }, gpu: { video: 96, busy: 20 }, filesystems: [] });
-  assert.equal(b.kind, 'gpu-video');
-  assert.match(b.message, /96% busy/);
-});
-
-test('a busy CPU is named for software runs, a slow share when nothing else is maxed', () => {
-  assert.equal(bottleneck({ workers: [worker({ hardware: false, encoder: 'libx265' })], cpu: { usage: 97 }, gpu: null, filesystems: [] }).kind, 'cpu');
-  const share = bottleneck({ workers: [worker()], cpu: { usage: 20 }, gpu: { video: 30 }, filesystems: [{ latencyMs: 1800, reachable: true }] });
-  assert.equal(share.kind, 'source-read');
-  assert.match(share.message, /1800 ms/);
-});
-
-test('no bottleneck is claimed without numbers', () => {
-  assert.deepEqual(bottleneck({ workers: [], cpu: null, gpu: null }), { kind: 'none', message: null });
-  assert.equal(bottleneck({ workers: [worker()], cpu: { usage: 75 }, gpu: { video: 70 } }).message, null);
-});
 
 test('the block names the running job, its GPU, energy and saved space', () => {
   const jobs = new Map([
@@ -40,7 +22,7 @@ test('the block names the running job, its GPU, energy and saved space', () => {
   assert.equal(out.workers.length, 1, 'only this job\'s clips');
   assert.deepEqual(out.device, { encoder: 'hevc_vaapi', hardware: true, gpuName: 'Intel Arc A380', node: '/dev/dri/renderD128', decode: 'gpu' });
   assert.deepEqual(out.run, { wh: 312.4, avgW: 68, cost: 0.041, clips: 1, savedB: 5e9, startedAt: 1000 });
-  assert.equal(out.bottleneck.kind, 'gpu-video');
+  assert.equal('bottleneck' in out, false, 'no bottleneck or room-to-spare sentence');
 });
 
 test('no job and nothing running: no block', () => {
@@ -69,17 +51,16 @@ test('one GPU, no lanes: a clip decoded or redone on the CPU keeps the panel as 
   }
   assert.match(cpuDecode.html, /hevc_qsv · Intel Arc A380 · renderD128/, 'the encoder chip stays');
   assert.match(redone.html, /hevc_vaapi · Intel Arc A380 · renderD128/);
-  assert.equal(cpuDecode.encoder.bottleneck.message, "The GPU's video engine is 95% busy, so more conversions at once won't go faster.");
 });
 
-test('a GPU lane next to the CPU lane: its busy video engine is named whichever clip is listed first', () => {
+test('a GPU lane next to the CPU lane: the GPU comes first whichever clip is listed first', () => {
   const jobs = new Map([['j1', { id: 'j1', state: 'encoding', items: [], counters: {} }]]);
   const snapshot = { cpu: { usage: 30 }, gpus: [{ name: 'Intel Arc A380', node: 'renderD128', video: 97 }, { name: 'NVIDIA T400', node: 'nvidia0', video: 0 }], filesystems: [] };
   const arc = (itemId) => worker({ itemId, encoder: 'hevc_qsv', deviceId: 'pci:0000:03:00.0' });
   const cpu = worker({ itemId: 'c', encoder: 'libx265', hardware: false, decode: 'cpu', device: null, deviceId: 'cpu' });
   for (const workers of [[cpu, arc('a'), arc('b')], [arc('a'), cpu, arc('b')]]) {
     const out = encoderBlock({ snapshot, jobs, workers });
-    assert.equal(out.bottleneck.kind, 'gpu-video', workers.map((w) => w.itemId).join());
-    assert.match(out.bottleneck.message, /97% busy/);
+    assert.deepEqual(out.devices.map((d) => [d.id, d.name, d.workers, d.video]), [['pci:0000:03:00.0', 'Intel Arc A380', 2, 97], ['cpu', 'CPU', 1, null]], workers.map((w) => w.itemId).join());
+    assert.equal('bottleneck' in out, false);
   }
 });

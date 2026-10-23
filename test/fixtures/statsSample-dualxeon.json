@@ -806,10 +806,6 @@
       "savedB": 127345780326.4,
       "startedAt": 1792734400000,
       "cost": 0.096
-    },
-    "bottleneck": {
-      "kind": "gpu-video",
-      "message": "The Intel Arc A380's video engine is 93% busy, so more at once on it won't go faster."
     }
   }
 }

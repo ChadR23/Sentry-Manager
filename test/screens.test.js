@@ -180,7 +180,7 @@ test('Overview: units read like the mockup', () => {
   assert.equal(sensorName({ chip: 'it8689', label: 'temp2', kind: 'temp' }), 'it8689 2');
 });
 
-test('Hardware panel: four clips on the Arc, with the bottleneck, efficiency and cost', async () => {
+test('Hardware panel: four clips on the Arc, with efficiency and cost', async () => {
   const { renderHardware } = await hardware();
   const html = renderHardware(sample());
   assert.match(html, /<span class="nd-chip" title="hevc_vaapi · Intel Arc A380 · renderD128">hevc_vaapi · Intel Arc A380 · renderD128<\/span><span class="nd-chip">decode: GPU<\/span><span class="nd-chip">4 at once<\/span>/);
@@ -188,7 +188,7 @@ test('Hardware panel: four clips on the Arc, with the bottleneck, efficiency and
   assert.match(html, /<span>CPU \(conversions\)<\/span><b>18%<\/b>/);
   assert.match(html, /<b>65 W<\/b><small>CPU 41 · GPU 24<\/small>/);
   assert.match(html, /<b>61 °C<\/b><small>GPU 61 · CPU 58<\/small>/);
-  assert.match(html, /<b>Bottleneck:<\/b> The GPU&#39;s video engine is 94% busy/);
+  assert.doesNotMatch(html, /Bottleneck|Room to spare|nd-hint/, 'no sentence about what limits the run');
   assert.match(html, /This run<\/span><b>0\.31 kWh/);
   assert.match(html, /Clips per kWh<\/span><b>1,329/);
   assert.match(html, /Space saved per kWh<\/span><b>125 GB/);
@@ -205,7 +205,6 @@ test('Hardware panel: software encoding, NVIDIA, dropped frames, idle and paused
   assert.doesNotMatch(amd, /Video engine/, 'no GPU in use: no video engine tile');
   assert.match(amd, /<span class="nd-warn">2 duplicated<\/span>/);
   assert.match(amd, /≈ €0\.52/);
-  assert.match(amd, /<b>Bottleneck:<\/b> The CPU is 93% busy/);
   const nv = renderHardware(sample('nvidia'));
   assert.match(nv, /hevc_nvenc · NVIDIA GeForce RTX 3060/);
   assert.match(nv, /Video engine<\/span><b>41%/, 'the GPU found by name (NVIDIA has no render node)');
@@ -228,11 +227,13 @@ test('Hardware panel: escapes names, survives odd bodies, folds long worker list
   evil.encoder.workers[0].relativePath = `SentryClips/${HOSTILE}.mp4`;
   evil.encoder.device.gpuName = HOSTILE;
   evil.encoder.device.encoder = '"><script>x</script>';
-  evil.encoder.bottleneck.message = HOSTILE;
+  // a server from before the hint was removed still sends one: never shown
+  evil.encoder.bottleneck = { kind: 'cpu', message: HOSTILE };
   const html = renderHardware(evil);
   assert.doesNotMatch(html, /<img|<script/);
+  assert.doesNotMatch(html, /Bottleneck|Room to spare|nd-hint/);
   assert.equal(renderHardware(null), '');
-  assert.doesNotThrow(() => renderHardware({ encoder: { running: true, workers: null, run: null, bottleneck: null }, gpus: 'x', cpu: null, power: null }));
+  assert.doesNotThrow(() => renderHardware({ encoder: { running: true, workers: null, run: null }, gpus: 'x', cpu: null, power: null }));
   assert.doesNotMatch(renderHardware({ encoder: { running: true, workers: [{}], run: { wh: 0, clips: 0 } } }), /NaN|undefined|Infinity/);
   const many = sample();
   many.encoder.workers = Array.from({ length: 64 }, (_, i) => ({ ...many.encoder.workers[0], itemId: `i${i}` }));

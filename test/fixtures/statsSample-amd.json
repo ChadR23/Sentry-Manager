@@ -626,10 +626,6 @@
       "savedB": 6871947673.6,
       "startedAt": 1792498320000,
       "cost": 0.52
-    },
-    "bottleneck": {
-      "kind": "cpu",
-      "message": "The CPU is 93% busy encoding; a GPU encoder or fewer conversions at once would help."
     }
   }
 }

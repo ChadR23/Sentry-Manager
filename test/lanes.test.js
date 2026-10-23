@@ -881,8 +881,8 @@ test('automatic conversion: setLanes saves the lanes and their total; a bad save
 
 // ---- the Encoder's Hardware panel
 
-test('the encoder block has one entry per device in use; the bottleneck names the busiest GPU', () => {
-  const { encoderBlock, bottleneck } = require('../server/encoderStats');
+test('the encoder block has one entry per device in use', () => {
+  const { encoderBlock } = require('../server/encoderStats');
   const worker = (over) => ({ jobId: 'j1', itemId: 'i', encoder: 'hevc_qsv', hardware: true, decode: 'gpu', fps: 300, ...over });
   const jobs = new Map([['j1', { id: 'j1', state: 'encoding', items: [], counters: {} }]]);
   const gpus = [{ name: 'Intel UHD Graphics 770', node: 'renderD128', video: 40, busy: 20 }, { name: 'Intel Arc A380', node: 'renderD129', video: 95, busy: 30 }];
@@ -900,19 +900,13 @@ test('the encoder block has one entry per device in use; the bottleneck names th
     { id: 'cpu', name: 'CPU', node: null, encoder: 'libx265', hardware: false, workers: 1, video: null, busy: null }
   ]);
   assert.equal(out.device.encoder, 'hevc_qsv', 'the first device stays');
-  assert.deepEqual(out.bottleneck, { kind: 'gpu-video', message: 'The Intel Arc A380\'s video engine is 95% busy, so more at once on it won\'t go faster.' });
-
-  // room only when every GPU in use is below 60%
-  const calm = [{ ...gpus[0], video: 30 }, { ...gpus[1], video: 65 }];
-  assert.equal(bottleneck({ workers, cpu: { usage: 20 }, gpu: calm[0], gpus: calm, filesystems: [] }).message, null);
-  assert.match(bottleneck({ workers, cpu: { usage: 20 }, gpu: calm[0], gpus: [calm[0], { ...calm[1], video: 50 }], filesystems: [] }).message, /^Nothing is maxed out/);
+  assert.equal('bottleneck' in out, false, 'no sentence about what limits the run');
 
   // one GPU, no lanes: as before
   const single = encoderBlock({ snapshot: { cpu: { usage: 30 }, gpus: [gpus[1]], filesystems: [] }, jobs,
     workers: [worker({ deviceId: null, device: '/dev/dri/renderD128' }), worker({ itemId: 'e', deviceId: null, device: '/dev/dri/renderD128' })] });
   assert.equal(single.devices.length, 1);
   assert.equal(single.devices[0].workers, 2);
-  assert.equal(single.bottleneck.message, 'The GPU\'s video engine is 95% busy, so more conversions at once won\'t go faster.');
 });
 
 // ---- end to end: the real runtime and converter, two (pretend) GPUs

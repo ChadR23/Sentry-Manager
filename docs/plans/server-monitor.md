@@ -39,7 +39,7 @@ thermal zone only for the GPU).
 
 - Chips: encoder + device (e.g. `hevc_vaapi · Intel Arc A380 · renderD128`), decode GPU/CPU, N at once.
 - Tiles: video engine %, CPU used by conversions, watts (CPU / GPU), temperatures.
-- Bottleneck hint: video engine saturated / NAS throughput / CPU, with what to change.
+- (Bottleneck hint: removed later at the owner's request; it flipped between "bottleneck" and "room to spare".)
 - Efficiency: kWh this run, clips per kWh, GB saved per kWh, cost so far.
 - One row per running clip: progress bar, fps, speed x realtime, bitrate, dropped/duplicated frames (from the ffmpeg `-progress` output jobService already reads).
 - Benchmark: watts per level and a "most efficient" pick next to "fastest".
@@ -54,7 +54,7 @@ thermal zone only for the GPU).
 
 ## Build order (each step: tests + phone and desktop screenshots before main)
 
-1. CPU, memory, sensors, storage, alerts; Encoder per-clip rows + bottleneck hint.
+1. CPU, memory, sensors, storage, alerts; Encoder per-clip rows.
 2. Live GPU numbers (AMD sysfs, NVIDIA nvidia-smi stream, Intel/AMD fdinfo).
 3. Power: GPU W, CPU W via supervisor + optional compose line, kWh/cost per run, benchmark files per kWh, Jobs energy.
 4. Optional: 24 h history graphs, per-core heat strip, CSV export.

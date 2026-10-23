@@ -1,9 +1,9 @@
 // The Encoder's Hardware panel, inside Live run: what the running conversion
-// uses (encoder, GPU, decoding), what it costs and what holds it back, one row
-// per clip being converted. From GET /api/stats (the `encoder` block) every
-// 2 s while the page is on screen; with no conversion running, one compact
-// line with the device instead. Names, paths and models come from the
-// machine, so every value is escaped.
+// uses (encoder, GPU, decoding) and what it costs, one row per clip being
+// converted. From GET /api/stats (the `encoder` block) every 2 s while the
+// page is on screen; with no conversion running, one compact line with the
+// device instead. Names, paths and models come from the machine, so every
+// value is escaped.
 
 const POLL_MS = 2000;
 const TIMEOUT_MS = 10000;
@@ -139,12 +139,6 @@ export function renderHardware(stats) {
         tiles.push(`<div${hot >= 90 ? ' class="hot"' : ''}><span>Temperatures</span><b>${temp(temps[0][1])}</b><small>${temps.map(([k, t]) => `${k} ${Math.round(t)}`).join(' · ')}</small></div>`);
     }
 
-    // the server's sentence says what is maxed out and what to change
-    const b = enc.bottleneck;
-    const hint = b?.message
-        ? `<div class="nd-hint${b.kind === 'none' ? ' calm' : ''}"><b>${b.kind === 'none' ? 'Room to spare:' : 'Bottleneck:'}</b> ${esc(b.message)}</div>`
-        : '';
-
     // energy per clip and per GB saved, when the server could measure power
     const run = enc.run || {};
     const eff = [];
@@ -168,7 +162,6 @@ export function renderHardware(stats) {
     return `<div class="nd-hw-head"><h3>Hardware</h3>${chips.join('')}</div>`
         + (lines ? `<div class="nd-devices">${lines}</div>` : '')
         + (tiles.length ? `<div class="nd-hw-tiles">${tiles.join('')}</div>` : '')
-        + hint
         + (eff.length ? `<div class="nd-eff">${eff.map(([k, v]) => `<div><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join('')}</div>` : '')
         + (rows ? `<div class="nd-workers">${rows}</div>` : '');
 }
