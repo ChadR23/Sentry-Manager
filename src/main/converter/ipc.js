@@ -442,6 +442,8 @@ function registerConverterIpc(options = {}) {
 
   const unsubscribeService = options.service.subscribe((event) => {
     if (!event || !['snapshot', 'progress'].includes(event.type)) return;
+    // no window listens: nothing to prepare
+    if (senders.size === 0) return;
     let payload;
     try {
       if (typeof event.jobId !== 'string' || !SAFE_ID.test(event.jobId) || WINDOWS_RESERVED_NAME.test(event.jobId)

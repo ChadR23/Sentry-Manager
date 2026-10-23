@@ -366,6 +366,13 @@ function createConverterJobService(deps) {
   }
   const jobs = new Map();
   const listeners = new Set();
+  // Live job snapshots go out at most this often while a job works (the
+  // latest one wins); entering or leaving a pause, an outage, the end, and
+  // any recovery, failure or summary change go out at once. 0: every change.
+  const snapshotIntervalMs = deps.snapshotIntervalMs ?? 250;
+  if (!Number.isSafeInteger(snapshotIntervalMs) || snapshotIntervalMs < 0) {
+    throw new RangeError('snapshotIntervalMs must be a non-negative integer');
+  }
   let shuttingDown = false;
   let commandChain = Promise.resolve();
 
@@ -427,6 +434,7 @@ function createConverterJobService(deps) {
       runPromise: null,
       runKind: null,
       persistChain: Promise.resolve(),
+      snapshotTimer: null,
       scannerStarted: false,
       itemSequence: manifest.items.length,
       stopPhase: null,
@@ -472,8 +480,9 @@ function createConverterJobService(deps) {
           patch.pausedMs = (Number.isSafeInteger(previous.pausedMs) ? previous.pausedMs : 0) + (at - previous.updatedAt);
         }
       }
+      const previous = runtime.manifest;
       runtime.manifest = await store.transition(runtime.manifest.id, patch);
-      if (listeners.size > 0) emit(runtime, 'snapshot', { snapshot: publicSnapshot(runtime.manifest) });
+      queueSnapshot(runtime, snapshotUrgent(previous, runtime.manifest));
       return runtime.manifest;
     });
     runtime.persistChain = operation;
@@ -483,6 +492,34 @@ function createConverterJobService(deps) {
   // jobChanges apply only while the clip leads; a clip that does not lead and
   // has nothing of its own to change writes nothing (with six at once most
   // state updates were exactly that: an unchanged clip written again).
+  // With six clips at once the job-level state changes on almost every write
+  // (encoding, verifying, replacing...): those wait for the next snapshot.
+  function snapshotUrgent(previous, next) {
+    if (previous.state !== next.state && (IDLE_JOB_STATES.has(previous.state) || IDLE_JOB_STATES.has(next.state))) return true;
+    const same = (key) => previous[key] === next[key] || JSON.stringify(previous[key] ?? null) === JSON.stringify(next[key] ?? null);
+    return !same('recovery') || !same('failure') || !same('summary') || previous.summaryDismissed !== next.summaryDismissed;
+  }
+
+  // Nothing is built while nobody listens; otherwise the snapshot is built
+  // when it goes out, from the job as it is then.
+  function queueSnapshot(runtime, urgent) {
+    if (listeners.size === 0) return;
+    if (urgent || snapshotIntervalMs === 0) {
+      if (runtime.snapshotTimer) {
+        clearTimeout(runtime.snapshotTimer);
+        runtime.snapshotTimer = null;
+      }
+      emit(runtime, 'snapshot', { snapshot: publicSnapshot(runtime.manifest) });
+      return;
+    }
+    if (runtime.snapshotTimer) return;
+    runtime.snapshotTimer = setTimeout(() => {
+      runtime.snapshotTimer = null;
+      if (listeners.size > 0) emit(runtime, 'snapshot', { snapshot: publicSnapshot(runtime.manifest) });
+    }, snapshotIntervalMs);
+    runtime.snapshotTimer.unref?.();
+  }
+
   function itemPatch(runtime, itemId, changes, jobChanges = {}) {
     return update(runtime, (current) => {
       const lead = isLead(runtime, itemId);

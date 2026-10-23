@@ -1164,6 +1164,7 @@ async function main() {
     return out;
   }
 
+  const mirroredLines = new Map();
   function mirrorConverterJob(s) {
     const externalId = `converter:${s.id}`;
     const src = s.config?.sourceRoot || '';
@@ -1188,8 +1189,14 @@ async function main() {
           title: `${c.failed} clip(s) could not be converted`, message: 'The originals were kept. Open the Encoder tab for details and Retry failed.' });
       }
     } else if (!terminal) {
-      jobs.update(jobId, { detail: `${s.state}: ${detail}` });
+      // (the Jobs list and every open page hear of it only when its line changes)
+      const line = `${s.state}: ${detail}`;
+      if (mirroredLines.get(jobId) !== line) {
+        mirroredLines.set(jobId, line);
+        jobs.update(jobId, { detail: line });
+      }
     }
+    if (terminal) mirroredLines.delete(jobId);
   }
 
   // housekeeping
