@@ -451,7 +451,11 @@
       ndBig(`↓ ${rate(sum('rxBps'))}`, `↑ ${rate(sum('txBps'))}`) + sparkBlock(spark(points, 'var(--info)', 64 * 1024), day)
       + ndKv([
         ...(one ? [] : ifs.map((i) => [[i.name, linkSpeed(i.speedMbps)].filter(Boolean).join(' · '), `↓ ${rate(i.rxBps)} · ↑ ${rate(i.txBps)}`])),
-        ['Counted for', net.scope === 'host' ? 'the whole server' : 'this container']
+        ['Counted for', net.scope === 'host' ? 'the whole server' : 'this container'],
+        // data used, always shown (0 B too) so the tile keeps its height between polls;
+        // a narrow tile wraps it at the dot, never inside "↓ 12.4 GB"
+        ...[['Today', net.today], ['This week', net.week], ['This month', net.month]]
+          .map(([k, u]) => [k, [['↓', u?.rxB], ['↑', u?.txB]].map(([arrow, b]) => `${arrow} ${size(b)}`.replace(/ /g, '\u00a0')).join(' · ')])
       ]));
   }
 

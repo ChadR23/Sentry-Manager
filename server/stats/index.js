@@ -29,6 +29,7 @@ const { HostInfo, probeFfmpeg } = require('./host');
 const { Alerts } = require('./alerts');
 const { History, SERIES } = require('./history');
 const { Energy } = require('./energy');
+const { Traffic } = require('./traffic');
 
 const WATCH_MS = 15000; // a page counts as watching this long after its last request
 const FIRST_FOLLOW_UP_MS = 500; // the first numbers need two samples; don't make the page wait 2 s
@@ -86,6 +87,7 @@ function createStats(options = {}) {
   const host = new HostInfo({ procRoot, version: options.version });
   const history = new History({ intervalMs });
   const energy = new Energy({ intervalMs });
+  const traffic = new Traffic();
   const alerts = new Alerts({ onAlert: options.onAlert, onAlertClear: options.onAlertClear, log });
   const file = dataDir ? path.join(dataDir, 'stats-history.json') : null;
 
@@ -132,7 +134,7 @@ function createStats(options = {}) {
     return typeof p === 'number' && Number.isFinite(p) && p >= 0 ? p : null;
   };
 
-  // ---- saved history (graphs and energy survive a restart)
+  // ---- saved history (graphs, energy and data used survive a restart)
   function load() {
     if (!file) return;
     try {
@@ -141,6 +143,7 @@ function createStats(options = {}) {
       if (data?.v !== 1) return;
       history.load(data.history, now());
       energy.load(data.energy);
+      traffic.load(data.traffic);
     } catch (err) {
       if (err.code !== 'ENOENT') warnOnce('load', `Server stats: could not read ${file} (${err.message}); starting a new history.`);
     }
@@ -151,7 +154,7 @@ function createStats(options = {}) {
     const tmp = `${file}.${process.pid}.tmp`;
     try {
       fs.mkdirSync(dataDir, { recursive: true });
-      fs.writeFileSync(tmp, JSON.stringify({ v: 1, savedAt: now(), history: history.toJSON(), energy: energy.toJSON() }), { mode: 0o600 });
+      fs.writeFileSync(tmp, JSON.stringify({ v: 1, savedAt: now(), history: history.toJSON(), energy: energy.toJSON(), traffic: traffic.toJSON() }), { mode: 0o600 });
       fs.renameSync(tmp, file);
       dirty = false;
     } catch (err) {
@@ -237,7 +240,7 @@ function createStats(options = {}) {
       power: { totalW: null, cpuW: null, gpuW: null, todayWh: null, weekWh: null, todayCost: null, weekCost: null, priceNow: null, cpuSource: null, gpuSource: null },
       disks: [],
       filesystems: [],
-      network: { scope: 'container', interfaces: [] },
+      network: { scope: 'container', interfaces: [], today: null, week: null, month: null },
       sensors: [],
       processes: { scope: 'container', top: [] },
       alerts: [],
@@ -269,6 +272,9 @@ function createStats(options = {}) {
     const es = energy.summary(t);
     const diskList = guard('disks', () => disks.sample(), []);
     const net = guard('network', () => network.sample(), { scope: network.scope, interfaces: [] });
+    // data used: the same counters, per day (a gap between samples loses nothing)
+    guard('traffic', () => traffic.add(network.readAt, network.counters, network.where(), (name) => network.ifindex(name)));
+    const used = guard('traffic', () => traffic.summary(t), { today: null, week: null, month: null });
     const fsList = guard('filesystems', () => filesystems.sample(t), []);
     const { sensors: sensorList, cpuTempC: cpuTemp } = guard('sensors', () => sensors.sample(), { sensors: [], cpuTempC: null });
 
@@ -286,7 +292,7 @@ function createStats(options = {}) {
       power: { ...pw, todayWh: es.todayWh, weekWh: es.weekWh, todayCost: es.todayCost, weekCost: es.weekCost, priceNow },
       disks: diskList,
       filesystems: fsList,
-      network: net,
+      network: { ...net, today: used.today, week: used.week, month: used.month },
       sensors: sensorList,
       processes: { scope: procs.scope, top: guard('top', () => topProcesses(encoders), []) },
       alerts: [],
@@ -386,6 +392,11 @@ function createStats(options = {}) {
     /** { todayWh, weekWh, todayCost, weekCost, byJob: { [jobId]: { wh, avgW, seconds, cost } } } */
     energy() {
       return energy.summary(now());
+    },
+
+    /** Data used: { today, week, month }, each { rxB, txB } or null (not measured yet). */
+    traffic() {
+      return traffic.summary(now());
     },
 
     /** Energy from now on also counts for this job (null: no job). A job keeps sampling running. */

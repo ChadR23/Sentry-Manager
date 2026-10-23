@@ -77,8 +77,9 @@ what the machine is doing, live, so you don't need Glances or another tool:
 - **Power**: CPU and GPU watts, kWh today and this week, and the cost when
   you enter your electricity price in Settings → System.
 - **Memory, storage** (each disk's reads, writes and temperature; space and
-  answer time of the data volume and every footage share), **network** and
-  every **sensor** and fan the server reports.
+  answer time of the data volume and every footage share), **network** (live
+  speed, and the data used today, this week and this month) and every
+  **sensor** and fan the server reports.
 - **Alerts** for a hot CPU, GPU or disk, a disk almost full, a slow or
   unreachable share, and low memory; they also go to Notifications.
 - **History**: the last 24 hours, and a CSV download.

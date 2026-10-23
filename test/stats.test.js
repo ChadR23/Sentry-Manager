@@ -91,7 +91,9 @@ test('Intel desktop with an Arc A380 (xe): CPU, memory, GPUs, power, disks, netw
     assert.equal(data.fsType, 'ext4');
 
     // pid: host: the host's NIC, without docker0 / veth / lo
-    assert.deepEqual(snap.network, { scope: 'host', interfaces: [{ name: 'enp3s0', speedMbps: 2500, rxBps: 112 * MiB, txBps: 44 * MiB }] });
+    // and the data used since the first sample (two 2 s steps)
+    const used = { rxB: 2 * 2 * 112 * MiB, txB: 2 * 2 * 44 * MiB };
+    assert.deepEqual(snap.network, { scope: 'host', interfaces: [{ name: 'enp3s0', speedMbps: 2500, rxBps: 112 * MiB, txBps: 44 * MiB }], today: used, week: used, month: used });
 
     const temps = Object.fromEntries(snap.sensors.map((x) => [`${x.chip}/${x.label}`, x.value]));
     assert.deepEqual(temps, {

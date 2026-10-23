@@ -2,9 +2,10 @@
 
 // Network traffic from /proc/net/dev: the container's own interfaces, or the
 // whole server's when the container runs with `pid: host` (then pid 1 is the
-// host's init and /proc/1/net/dev shows the host's interfaces).
+// host's init and /proc/1/net/dev shows the host's interfaces). The same
+// counters feed the data used per day (traffic.js).
 
-const { readText, readNum, exists, join } = require('./util');
+const { readText, readLine, readNum, readLink, exists, join } = require('./util');
 
 // loopback, container and VM plumbing and other virtual links: their
 // traffic is already counted on the real interface
@@ -34,6 +35,11 @@ class NetworkProvider {
     this.prev = null;
     this.prevAt = null;
     this.speeds = new Map();
+    this.counters = null; // the last reading's counted interfaces: name -> { rx, tx, speedMbps }
+    this.readAt = null;
+    this.ownNetns = true;
+    this.boot = null;
+    this.netns = null;
   }
 
   probe() {
@@ -41,10 +47,29 @@ class NetworkProvider {
     const init = parseNetDev(readText(join(this.procRoot, '1', 'net', 'dev')));
     const names = (m) => [...m.keys()].sort().join(',');
     this.scope = init.size && names(init) !== names(own) ? 'host' : 'container';
+    // the same links as our own: the app's network namespace (and its sysfs)
+    this.ownNetns = this.scope === 'container';
     // with network_mode: host the container already sees the host's links
     if (this.scope === 'container' && [...own.keys()].some((n) => /^(docker0|veth)/.test(n))) this.scope = 'host';
     this.file = this.scope === 'host' && init.size ? join(this.procRoot, '1', 'net', 'dev') : join(this.procRoot, 'net', 'dev');
     this.prev = null;
+    // which counters these are, so a restart of the app alone can count on
+    // from the saved readings; the host's links (pid: host) are in a
+    // namespace the app cannot name, and there a restart starts a new count
+    this.boot = readLine(join(this.procRoot, 'sys', 'kernel', 'random', 'boot_id'));
+    this.netns = this.ownNetns ? readLink(join(this.procRoot, 'self', 'ns', 'net')) : null;
+  }
+
+  /** What the counters belong to: { scope, boot, netns }, null where unknown. */
+  where() {
+    return { scope: this.scope, boot: this.boot, netns: this.netns };
+  }
+
+  /** An interface's index (sysfs shows only our own namespace's links), or null. */
+  ifindex(name) {
+    if (!this.ownNetns) return null;
+    const v = readNum(join(this.sysRoot, 'class', 'net', name, 'ifindex'));
+    return Number.isInteger(v) && v > 0 ? v : null;
   }
 
   /** Link speed in Mbit/s; virtual links (a container's veth) report a made-up 10000. */
@@ -70,24 +95,30 @@ class NetworkProvider {
 
   sample() {
     const t = this.now();
+    this.counters = null;
     const cur = parseNetDev(readText(this.file));
     const dt = this.prevAt === null ? 0 : (t - this.prevAt) / 1000;
     const interfaces = [];
     const keep = new Set(this.topLevel([...cur.keys()].filter((n) => !SKIP.test(n))));
+    const counters = new Map();
     for (const [name, c] of cur) {
       if (!keep.has(name)) continue;
       const before = this.prev?.get(name);
       const ok = before && dt > 0 && c.rx >= before.rx && c.tx >= before.tx;
+      const speedMbps = this.speedCache(name);
       interfaces.push({
         name,
-        speedMbps: this.speedCache(name),
+        speedMbps,
         rxBps: ok ? Math.round((c.rx - before.rx) / dt) : null,
         txBps: ok ? Math.round((c.tx - before.tx) / dt) : null
       });
+      counters.set(name, { rx: c.rx, tx: c.tx, speedMbps });
     }
     if (cur.size) {
       this.prev = cur;
       this.prevAt = t;
+      this.counters = counters;
+      this.readAt = t;
     }
     return { scope: this.scope, interfaces };
   }
