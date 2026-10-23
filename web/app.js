@@ -350,8 +350,24 @@
     const cores = per.length > 1 ? `<div class="nd-cores${per.length > 16 ? ' dense' : ''}" style="--cols:${cols}">${per.map((c, i) => `<i style="--v:${clampPct(c)}%" title="CPU ${i}: ${pct(c)}"></i>`).join('')}</div>` : '';
     const app = cpu.app || {};
     const appText = fin(app.usage) ? `${pct(app.usage)}${app.ffmpegCount > 0 && fin(app.ffmpegUsage) ? ` (ffmpeg ×${app.ffmpegCount}: ${pct(app.ffmpegUsage)})` : ''}` : '';
-    return ndTile('CPU', [cpuName(cpu.model), counts].filter(Boolean).join(' · '), ndBig(pct(cpu.usage), 'whole server')
+    // two or more sockets: "2 × <model>" (the counts are totals) and a short line per socket
+    const multi = fin(cpu.sockets) && cpu.sockets > 1;
+    const name = multi ? (cpuName(cpu.model) ? `${cpu.sockets} × ${cpuName(cpu.model)}` : `${cpu.sockets} CPUs`) : cpuName(cpu.model);
+    const socketLines = (multi && Array.isArray(cpu.perSocket) ? cpu.perSocket : []).map((s, i) => {
+      if (!s) return '';
+      const bits = [
+        fin(s.usage) && pct(s.usage),
+        fin(s.tempC) && (s.tempC >= 90 ? `<span class="nd-warn">${temp(s.tempC)}</span>` : temp(s.tempC)),
+        fin(s.powerW) && watts(s.powerW)
+      ].filter(Boolean);
+      const own = fin(s.cores) ? (fin(s.threads) && s.threads !== s.cores ? `${s.cores} cores / ${s.threads} threads` : plural(s.cores, 'core')) : '';
+      // numbered from 1 by the kernel's physical id, as the Sensors tile names the packages
+      const n = Number.isInteger(s.socket) && s.socket >= 0 && s.socket < 1024 ? s.socket + 1 : i + 1;
+      return bits.length ? `<div${own ? ` title="${esc(own)}"` : ''}><span>CPU ${n}</span>${bits.map((b) => `<span>${b}</span>`).join('')}</div>` : '';
+    }).join('');
+    return ndTile('CPU', [name, counts].filter(Boolean).join(' · '), ndBig(pct(cpu.usage), 'whole server')
       + sparkBlock(spark(points, 'var(--accent)', 10), day) + cores
+      + (socketLines ? `<div class="nd-sockets">${socketLines}</div>` : '')
       + ndKv([
         ['Clock', fin(cpu.freqMHz) ? clock(cpu.freqMHz) : ''],
         ['Temp', fin(cpu.tempC) ? temp(cpu.tempC) : '', cpu.tempC >= 90],
@@ -449,12 +465,16 @@
       ]));
   }
 
-  // hwmon names, in words (anything else shows as the server reports it)
-  function sensorName(s) {
+  // hwmon names, in words (anything else shows as the server reports it);
+  // with several CPU sockets the packages go by the CPU tile's numbers
+  function sensorName(s, multiSocket = false) {
     const chip = String(s.chip || '');
     const label = String(s.label || '');
     let m;
-    if (chip === 'coretemp' && (m = /^Package id (\d+)$/.exec(label))) return m[1] === '0' ? 'CPU package' : `CPU package ${m[1]}`;
+    if (chip === 'coretemp' && (m = /^Package id (\d+)$/.exec(label))) {
+      if (multiSocket) return `CPU ${Number(m[1]) + 1} package`;
+      return m[1] === '0' ? 'CPU package' : `CPU package ${m[1]}`;
+    }
     if (chip === 'k10temp' && /^T(ctl|die)$/.test(label)) return `CPU (${label})`;
     if (chip === 'k10temp' && (m = /^Tccd(\d+)$/.exec(label))) return `CPU die ${m[1]}`;
     if (/^cpu[-_]thermal$/.test(chip) || /^cpu[-_]thermal$/.test(label)) return 'CPU';
@@ -473,6 +493,7 @@
   function sensorsTile(sensors, all) {
     const rows = [];
     const coreMax = new Map(); // "Core 0" … "Core 11" of a chip: one "Core max" row
+    const multiSocket = (Array.isArray(sensors) ? sensors : []).some((s) => s && s.chip === 'coretemp' && /^Package id [1-9]\d*$/.test(s.label || ''));
     for (const s of Array.isArray(sensors) ? sensors : []) {
       if (!s || !fin(s.value)) continue;
       if (s.kind === 'temp' && /^Core \d+$/.test(s.label || '')) {
@@ -485,7 +506,7 @@
         }
         continue;
       }
-      rows.push({ ...s, name: sensorName(s) });
+      rows.push({ ...s, name: sensorName(s, multiSocket) });
     }
     if (!rows.length) return '';
     const shown = all ? rows : rows.slice(0, SENSORS_SHOWN);
