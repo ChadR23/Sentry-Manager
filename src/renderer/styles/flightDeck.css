@@ -1,0 +1,70 @@
+/* ==========================================================================
+   Flight Deck theme
+   Loaded after every other stylesheet. The app is already driven by the
+   tokens in style.css :root, so the theme is almost entirely a token swap:
+   flat graphite surfaces, crisp 1px borders and a single lime accent.
+   From the ci/flight-deck-ui branch of Sentry-Sixbeta, without its seasonal
+   themes. Its relative oklch(from ...) colours are written out as rgba()
+   here and in style.css: Safari before iOS 16.4 drops them.
+   ========================================================================== */
+
+:root {
+    --fd-bg: #0B0E13;
+    --fd-card: #12161D;
+    --fd-inner: #0F1318;
+    --fd-raised: #171C24;
+    --fd-border: #1F2530;
+    --fd-border-strong: #2A313D;
+    --fd-track: #1C222C;
+    --fd-info: #5AD1F2;
+    --fd-warn: #FF9F5A;
+
+    --bg-color: var(--fd-bg);
+    --bg-gradient: var(--fd-bg);
+    --accent-color: #C8F25A;
+    --accent-solid-hover: #D8FA82;
+    --accent-deep: #8FB33A;
+    --accent-glow: rgba(200, 242, 90, 0.35);
+    --accent-hover: rgba(200, 242, 90, 0.12);
+    --accent-bg: rgba(200, 242, 90, 0.10);
+
+    --text-color: #E6EAF0;
+    --text-secondary: #C3CAD5;
+    --text-muted: #8A94A6;
+    --text-faint: #7D8798;
+
+    --panel-bg: rgba(18, 22, 29, 0.94);
+    --panel-bg-solid: var(--fd-card);
+    --panel-bg-gradient: var(--fd-card);
+    --glass-bg: rgba(18, 22, 29, 0.9);
+    --glass-border: var(--fd-border);
+    --card-gradient: var(--fd-card);
+    --card-gradient-hover: var(--fd-raised);
+    --card-bg: var(--fd-card);
+    --card-hover-bg: var(--fd-raised);
+    --card-shadow: 0 1px 0 rgba(255, 255, 255, 0.03), 0 10px 28px rgba(0, 0, 0, 0.35);
+    --card-border: var(--fd-border);
+    --border-color: var(--fd-border);
+    --border-subtle: rgba(31, 37, 48, 0.7);
+    --border-strong: var(--fd-border-strong);
+    --surface-hover: var(--fd-raised);
+    --surface-active: #1D232D;
+    --surface-raised: var(--fd-inner);
+    --input-bg: var(--fd-inner);
+    --input-border: var(--fd-border-strong);
+    --modal-bg: var(--fd-card);
+    --modal-header-bg: var(--fd-inner);
+    --toast-bg: rgba(18, 22, 29, 0.96);
+    --tooltip-bg: rgba(15, 19, 24, 0.97);
+    --info-color: var(--fd-info);
+    --sky-color: var(--fd-info);
+    --inset-highlight: rgba(255, 255, 255, 0.03);
+}
+
+/* Numbers read as instruments: tabular mono figures on the converter. */
+.converter-counters dd,
+.converter-current-progress,
+.converter-timing-rows {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+}

@@ -1,8 +1,6 @@
-/* Sentry Studio running inside Sentry Six Manager.
-   Encoder tab: only the Converter page, exactly as in the desktop app. */
-html[data-embed="encoder"] #clipBrowser {
-  display: none !important;
-}
+/* Sentry Studio running inside Sentry Six Manager: the Viewer tab (Studio's
+   index.html) and the Encoder tab (encoder.html, the converter on its own;
+   its look is in src/renderer/styles/encoderPage.css). */
 
 /* Viewer tab: viewing only. It shows the vehicle picked in the manager, so
    there is no folder to choose; the Converter has its own tab. */
