@@ -334,16 +334,6 @@ commit also gets a `sha-<commit>` tag you can pin with `SENTRY_TAG`, and
 every image is rebuilt weekly so Debian, Node and ffmpeg security fixes
 arrive without a code change.
 
-**Testing the next update.** The next update is built on the
-`release/next-update` branch before it reaches `main`, and every push there
-publishes the image tag `release-next-update`. To try it, set
-`SENTRY_TAG=release-next-update` (in `.env` next to `docker-compose.yml`, or
-in your environment) and run `docker compose pull && docker compose up -d`.
-Set it back to `latest` to return to the released version; finish or cancel
-any conversion first, since the released version may not read a job saved
-by a newer one. It is work in progress: back up `./data` first, and expect
-it to change often.
-
 ## Security
 
 ![Settings → Security](docs/images/security.png)

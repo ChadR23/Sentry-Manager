@@ -12,8 +12,8 @@
 Only these branches exist on GitHub:
 
 - `main`: what goes live.
-- `release/next-update`: work in progress for the next update. It is pushed
-  here so people can test it before it goes to `main`.
+- `release/next-update`: work in progress for the next update (no image is
+  built from it; the owner turned the testers' image off).
 - `wip`: the update after that, built while `release/next-update` waits for
   the owner's OK.
 
