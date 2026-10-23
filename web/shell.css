@@ -1,25 +1,28 @@
 @font-face { font-family: 'Inter'; src: url('fonts/inter-latin.woff2') format('woff2'); font-weight: 100 900; font-display: swap; }
 @font-face { font-family: 'JetBrains Mono'; src: url('fonts/jetbrains-mono-latin.woff2') format('woff2'); font-weight: 100 800; font-display: swap; }
 
+/* Flight Deck: flat graphite surfaces, 1px borders, one lime accent (the
+   same tokens as the Encoder page, styles/encoderPage.css, and the Viewer,
+   styles/flightDeck.css). */
 :root {
-  --bg: #0b0c0e;
-  --panel: #121418;
-  --panel-2: #171a1f;
-  --panel-3: #1d2128;
-  --border: rgba(255, 255, 255, 0.09);
-  --border-strong: rgba(255, 255, 255, 0.16);
-  --text: #f1f3f6;
-  --text-2: #c3c8d2;
-  --muted: #8b93a1;
-  --accent: #4ade80;
-  --accent-ink: #062b14;
-  --accent-bg: rgba(74, 222, 128, 0.12);
-  --accent-border: rgba(74, 222, 128, 0.55);
+  --bg: #0b0e13;
+  --panel: #12161d;
+  --panel-2: #171c24;
+  --panel-3: #1d232d;
+  --border: #1f2530;
+  --border-strong: #2a313d;
+  --text: #e6eaf0;
+  --text-2: #c3cad5;
+  --muted: #8a94a6;
+  --accent: #c8f25a;
+  --accent-ink: #0b0e13;
+  --accent-bg: rgba(200, 242, 90, 0.10);
+  --accent-border: rgba(200, 242, 90, 0.55);
   --danger: #f87171;
   --danger-bg: rgba(248, 113, 113, 0.12);
-  --warn: #fbbf24;
-  --warn-bg: rgba(251, 191, 36, 0.12);
-  --info: #60a5fa;
+  --warn: #ff9f5a;
+  --warn-bg: rgba(255, 159, 90, 0.12);
+  --info: #5ad1f2;
   --radius: 16px;
   --font: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -100,9 +103,9 @@ p { margin: 0; }
 .chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 7px; border: 1px solid var(--border-strong); font-size: 12.5px; font-weight: 600; background: var(--panel-2); white-space: nowrap; }
 .chip.green { color: var(--accent); border-color: var(--accent-border); }
 .chip.red { color: var(--danger); border-color: rgba(248, 113, 113, 0.5); }
-.chip.amber { color: var(--warn); border-color: rgba(251, 191, 36, 0.5); }
+.chip.amber { color: var(--warn); border-color: rgba(255, 159, 90, 0.5); }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
-.dot.ok { background: var(--accent); box-shadow: 0 0 8px rgba(74, 222, 128, 0.6); }
+.dot.ok { background: var(--accent); box-shadow: 0 0 8px var(--accent-border); }
 .dot.bad { background: var(--danger); }
 .dot.warn { background: var(--warn); }
 
@@ -114,7 +117,7 @@ p { margin: 0; }
 }
 .pill .row { display: flex; align-items: center; gap: 12px; font-size: 16px; font-weight: 600; }
 .pill .sub { padding-left: 20px; font-size: 12px; color: var(--muted); }
-.pill.active { border-color: var(--accent-border); box-shadow: inset 0 0 0 1px var(--accent-border); background: linear-gradient(180deg, rgba(74, 222, 128, 0.06), transparent); }
+.pill.active { border-color: var(--accent-border); box-shadow: inset 0 0 0 1px var(--accent-border); background: linear-gradient(180deg, var(--accent-bg), transparent); }
 .pill.add { justify-content: center; align-items: center; flex-direction: row; gap: 8px; color: var(--text-2); min-width: auto; border-style: dashed; }
 
 .toolbar { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; margin-bottom: 26px; flex-wrap: wrap; }
@@ -155,7 +158,7 @@ details.more summary { cursor: pointer; color: var(--text-2); font-size: 15px; p
 details.more p { margin-top: 10px; color: var(--text-2); max-width: 760px; }
 .selrow { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
 .recs { display: flex; flex-direction: column; gap: 12px; }
-.chip.blue { color: var(--info); border-color: rgba(96, 165, 250, 0.55); background: rgba(96, 165, 250, 0.12); }
+.chip.blue { color: var(--info); border-color: rgba(90, 209, 242, 0.55); background: rgba(90, 209, 242, 0.12); }
 .chip .cdot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 /* Footage by day */
 .days { display: flex; flex-direction: column; gap: 16px; }
@@ -214,7 +217,7 @@ details.more p { margin-top: 10px; color: var(--text-2); max-width: 760px; }
 .keep { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
 .note { padding: 14px 16px; border-radius: 12px; background: var(--panel-2); border: 1px solid var(--border); color: var(--text-2); font-size: 13.5px; margin-top: 14px; }
 .note.green { border-color: var(--accent-border); background: var(--accent-bg); color: var(--text); }
-.note.amber { border-color: rgba(251, 191, 36, 0.45); background: var(--warn-bg); color: var(--text); }
+.note.amber { border-color: rgba(255, 159, 90, 0.45); background: var(--warn-bg); color: var(--text); }
 .note.red { border-color: rgba(248, 113, 113, 0.45); background: var(--danger-bg); color: var(--text); }
 .kv { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 8px 18px; font-size: 13.5px; }
 .kv dt { color: var(--muted); }
