@@ -517,6 +517,9 @@ select.converter-select {
 .converter-lane-name small {
     color: var(--text-muted);
     font: 11.5px/1.4 var(--font-mono);
+    /* encoders and hints wrap rather than being cut off on phones */
+    white-space: normal;
+    overflow-wrap: anywhere;
 }
 
 /* the CPU's hint and "Can't encode AV1" are words, not encoder names */
