@@ -447,6 +447,8 @@ function createConverterJobService(deps) {
   function update(runtime, buildPatch) {
     const operation = runtime.persistChain.catch(() => undefined).then(async () => {
       let patch = typeof buildPatch === 'function' ? buildPatch(runtime.manifest) : buildPatch;
+      // nothing to change: no write
+      if (patch === null) return runtime.manifest;
       // A network wait recorded by one worker describes that worker's item.
       // When another worker's progress takes over the job-level state (it
       // holds the save slot now), that record goes with it: the job file
@@ -478,11 +480,18 @@ function createConverterJobService(deps) {
     return operation;
   }
 
+  // jobChanges apply only while the clip leads; a clip that does not lead and
+  // has nothing of its own to change writes nothing (with six at once most
+  // state updates were exactly that: an unchanged clip written again).
   function itemPatch(runtime, itemId, changes, jobChanges = {}) {
-    return update(runtime, (current) => ({
-      ...(isLead(runtime, itemId) ? jobChanges : {}),
-      items: current.items.map((item) => item.id === itemId ? mergeItem(item, changes) : item)
-    }));
+    return update(runtime, (current) => {
+      const lead = isLead(runtime, itemId);
+      if (!lead && Object.keys(changes).length === 0) return null;
+      return {
+        ...(lead ? jobChanges : {}),
+        items: current.items.map((item) => item.id === itemId ? mergeItem(item, changes) : item)
+      };
+    });
   }
 
   function ownershipFor(runtime, itemId) {
@@ -1343,7 +1352,27 @@ function createConverterJobService(deps) {
     });
   }
 
-  async function videoSource(runtime, item) {
+  // Read directly or through local staging (networkMode, or for 'auto' the
+  // kind of volume and the free space).
+  async function sourceMode(runtime, item) {
+    let mode = runtime.manifest.config.networkMode;
+    let space;
+    if (mode === 'auto') {
+      if (typeof deps.classifyPath !== 'function' || typeof deps.chooseStagingMode !== 'function'
+          || typeof deps.checkStagingSpace !== 'function') throw serviceError('STAGING_POLICY_UNAVAILABLE');
+      const classification = await deps.classifyPath(item.sourcePath);
+      space = await deps.checkStagingSpace({ sourceBytes: item.sourceBytes, outputBytes: item.sourceBytes });
+      mode = deps.chooseStagingMode({ networkMode: 'auto', classification, space });
+    }
+    if (mode === 'staging' && !space) {
+      if (typeof deps.checkStagingSpace !== 'function') throw serviceError('STAGING_POLICY_UNAVAILABLE');
+      space = await deps.checkStagingSpace({ sourceBytes: item.sourceBytes, outputBytes: item.sourceBytes });
+      if (space?.sufficient !== true) throw serviceError('INSUFFICIENT_STAGING_SPACE');
+    }
+    return mode;
+  }
+
+  async function videoSource(runtime, item, mode) {
     let expectedSource;
     const replacing = runtime.manifest.config.outputMode === 'replace';
     if (replacing) {
@@ -1357,38 +1386,29 @@ function createConverterJobService(deps) {
       expectedSource = await staging.captureSource({ source: item.sourcePath, signal: runtime.abortController.signal });
       await itemPatch(runtime, item.id, { expectedSource });
     };
-    let mode = runtime.manifest.config.networkMode;
-    let space;
-    if (mode === 'auto') {
-      if (typeof deps.classifyPath !== 'function' || typeof deps.chooseStagingMode !== 'function'
-          || typeof deps.checkStagingSpace !== 'function') throw serviceError('STAGING_POLICY_UNAVAILABLE');
-      const classification = await deps.classifyPath(item.sourcePath);
-      space = await deps.checkStagingSpace({ sourceBytes: item.sourceBytes, outputBytes: item.sourceBytes });
-      mode = deps.chooseStagingMode({ networkMode: 'auto', classification, space });
-    }
     if (mode !== 'staging') {
       if (replacing) await captureAuthority();
       return { source: item.sourcePath, ownership: null, expectedSource };
     }
-    if (!space) {
-      if (typeof deps.checkStagingSpace !== 'function') throw serviceError('STAGING_POLICY_UNAVAILABLE');
-      space = await deps.checkStagingSpace({ sourceBytes: item.sourceBytes, outputBytes: item.sourceBytes });
-      if (space?.sufficient !== true) throw serviceError('INSUFFICIENT_STAGING_SPACE');
-    }
-    await itemPatch(runtime, item.id, { state: 'processing' }, { state: 'staging', activeItemId: item.id });
     const result = await staging.stageSource({
       source: item.sourcePath,
       expectedSource,
       jobId: runtime.manifest.id,
       itemId: item.id,
       signal: runtime.abortController.signal,
+      // replacing: the original's fingerprint is recorded with the staged copy
+      recordExpectedSource: replacing,
       persistTransaction: transactionPersistence(runtime, item.id)
     });
     const stagedAuthority = result.expectedSource || expectedSource;
     if (replacing) {
       // Replacement and its crash recovery both require this fingerprint.
       if (!stagedAuthority) throw serviceError('SOURCE_AUTHORITY_REQUIRED');
-      await itemPatch(runtime, item.id, { expectedSource: stagedAuthority });
+      const recorded = currentItem(runtime, item.id)?.expectedSource;
+      const same = (left, right) => ['size', 'sha256', 'device', 'inode'].every((key) => String(left?.[key]) === String(right?.[key]));
+      if (!same(recorded, stagedAuthority)) {
+        await itemPatch(runtime, item.id, { expectedSource: stagedAuthority });
+      }
     }
     return {
       source: result.stagedSource || result.path,
@@ -1412,10 +1432,11 @@ function createConverterJobService(deps) {
       return;
     }
     if (inspected.codec !== 'h264') throw Object.assign(new Error('unsupported'), { code: 'UNSUPPORTED_CODEC' });
+    const mode = await sourceMode(runtime, item);
     await itemPatch(runtime, item.id, { state: 'processing', eligibleVideo: true }, {
-      state: 'waiting', activeItemId: item.id
+      state: mode === 'staging' ? 'staging' : 'waiting', activeItemId: item.id
     });
-    const staged = await videoSource(runtime, item);
+    const staged = await videoSource(runtime, item, mode);
     timing.mark('source');
     try {
     const timeline = await deps.readTimeline({ source: staged.source, item, signal });

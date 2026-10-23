@@ -741,9 +741,10 @@ function createFileTransaction(options = {}) {
   }
 
   function transactionSnapshot({ step, phase, ownedPaths, ownedArtifacts, publicationArtifact, cleanupPending,
-    clearOwnedKeys = [] }) {
+    clearOwnedKeys = [], itemFields }) {
     const snapshot = { ownedPaths: { ...ownedPaths }, ownedArtifacts: { ...ownedArtifacts } };
     if (step) snapshot.step = step;
+    if (itemFields) snapshot.itemFields = { ...itemFields };
     if (phase) snapshot.phase = phase;
     if (publicationArtifact && ownedPaths.publicationSnapshot) snapshot.publicationArtifact = publicationArtifact;
     if (cleanupPending?.length) snapshot.cleanupPending = [...cleanupPending];
@@ -1243,7 +1244,11 @@ function createFileTransaction(options = {}) {
       } else {
         await persist(operation, transactionSnapshot({ step: 'staged-source-intent', ownedPaths, ownedArtifacts }));
       }
-      const copied = await copyExclusive(source, destination, {
+      // Nothing ever resumes a staged copy: with the identity rule a stop
+      // mid-copy is cleaned up by the exact name recorded above, so the copy
+      // records no progress of its own (it was 9 job-file writes per clip).
+      const journaled = Boolean(resumeCopy) || !privateIdentity;
+      const copied = await copyExclusive(source, destination, journaled ? {
         expected: expectedSource,
         signal: operation.signal,
         collisionCode: 'PARTIAL_COLLISION',
@@ -1282,10 +1287,18 @@ function createFileTransaction(options = {}) {
             ownedArtifacts: { ...ownedArtifacts, stagedSource: proposed } }));
           ownedArtifacts.stagedSource = proposed;
         }
+      } : {
+        expected: expectedSource,
+        signal: operation.signal,
+        collisionCode: 'PARTIAL_COLLISION',
+        failureCode: 'STAGING_FAILED'
       });
       ownedArtifacts.stagedSource = artifactMetadata(destination, ownedArtifacts.stagedSource.nonce,
         'owned', copied.stat, copied.sha256, copied.size, ownedArtifacts.stagedSource.journal);
-      await persist(operation, transactionSnapshot({ step: 'staged-source-owned', ownedPaths, ownedArtifacts }));
+      // The original's fingerprint (its identity and the hash the copy just
+      // took) goes into the same record when the caller needs it.
+      await persist(operation, transactionSnapshot({ step: 'staged-source-owned', ownedPaths, ownedArtifacts,
+        ...(operation.recordExpectedSource === true ? { itemFields: { expectedSource: copied.expectedSource } } : {}) }));
       abortIfRequested(operation.signal);
       return { stagedSource: destination, ownedPaths, ownedArtifacts, sourceBytes: copied.size, expectedSource: copied.expectedSource };
     } catch (error) {
@@ -1858,9 +1871,11 @@ function createFileTransaction(options = {}) {
 
       const currentOriginal = await assertRegularUnaliased(sourceInfo.source, 'SOURCE_OUTSIDE_ROOT');
       if (!sameIdentity(originalIdentity, currentOriginal)) throw transactionError('SOURCE_OUTSIDE_ROOT');
-      if (!adapterVerifies) await readExactFile(ownedPaths.replacementCandidate, artifact, 'PUBLICATION_ARTIFACT_CHANGED');
-      await persist(operation, transactionSnapshot({ step: 'replacement-backup-intent', ownedPaths, ownedArtifacts,
-        publicationArtifact: artifact }));
+      if (!adapterVerifies) {
+        await readExactFile(ownedPaths.replacementCandidate, artifact, 'PUBLICATION_ARTIFACT_CHANGED');
+        await persist(operation, transactionSnapshot({ step: 'replacement-backup-intent', ownedPaths, ownedArtifacts,
+          publicationArtifact: artifact }));
+      }
       if (adapterVerifies) await assertSourceIdentity(sourceInfo.source, expectedSource);
       else await assertSourceAuthority(sourceInfo.source, expectedSource, operation.signal);
       const backupPromotion = await promoteBackup(sourceInfo.source, ownedPaths.replacementBackup, expectedSource);
@@ -1872,9 +1887,11 @@ function createFileTransaction(options = {}) {
       if (!backupPromotion.sourceRemoved) throw transactionError('REPLACEMENT_FAILED');
       abortIfRequested(operation.signal);
 
-      if (!adapterVerifies) await readExactFile(ownedPaths.replacementCandidate, artifact, 'PUBLICATION_ARTIFACT_CHANGED');
-      await persist(operation, transactionSnapshot({ step: 'replacement-promotion-intent', ownedPaths, ownedArtifacts,
-        publicationArtifact: artifact }));
+      if (!adapterVerifies) {
+        await readExactFile(ownedPaths.replacementCandidate, artifact, 'PUBLICATION_ARTIFACT_CHANGED');
+        await persist(operation, transactionSnapshot({ step: 'replacement-promotion-intent', ownedPaths, ownedArtifacts,
+          publicationArtifact: artifact }));
+      }
       const candidatePromotion = await promoteNoReplace(ownedPaths.replacementCandidate, sourceInfo.source, 'REPLACEMENT_COLLISION', {
         expectedSource: ownedArtifacts.replacementCandidate, removeSource: true
       });
@@ -1887,9 +1904,9 @@ function createFileTransaction(options = {}) {
       // this final, held open, first: the same proof, one read)
       if (!adapterVerifies || operation.verifyReadable) {
         await validateReadable(sourceInfo.source, artifact, operation.verifyReadable, 'FINAL_VALIDATION_FAILED');
+        await persist(operation, transactionSnapshot({ phase: 'final-validated', ownedPaths, ownedArtifacts,
+          publicationArtifact: artifact }));
       }
-      await persist(operation, transactionSnapshot({ phase: 'final-validated', ownedPaths, ownedArtifacts,
-        publicationArtifact: artifact }));
       abortIfRequested(operation.signal);
       if (!adapterVerifies) await validateReadable(sourceInfo.source, artifact, null, 'FINAL_VALIDATION_FAILED');
       await removeReplacementBackup(ownedPaths.replacementBackup, ownedArtifacts.replacementBackup, sourceInfo.source, artifact);
@@ -2434,9 +2451,9 @@ function createFileTransaction(options = {}) {
       if (ownedPaths[field]) releaseOwnedLease(ownedPaths[field]);
     }
 
-    await persist(operation, transactionSnapshot({ step: 'owned-cleanup-intent', ownedPaths, ownedArtifacts,
-      publicationArtifact: artifact }));
-
+    // Nothing is recorded before or after: these records are already in the
+    // job file, and the caller writes the cleared ones with its own next
+    // change (a stop in between finds the files gone and forgets them).
     const cleanupPending = [];
     // Copies on the share first: an interrupted one is proven against the
     // verified snapshot, which therefore goes after them.
@@ -2527,9 +2544,6 @@ function createFileTransaction(options = {}) {
       return { cleaned: false, cleanupPending, ownedPaths, ownedArtifacts, clearOwnedKeys,
         ...(ownedPaths.publicationSnapshot && artifact ? { publicationArtifact: artifact } : {}) };
     }
-    await persist(operation, transactionSnapshot({
-      step: 'owned-cleanup-complete', ownedPaths: {}, ownedArtifacts: {}, clearOwnedKeys: givenKeys
-    }));
     return { cleaned: true };
   }
 

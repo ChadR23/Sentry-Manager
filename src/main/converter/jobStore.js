@@ -10,8 +10,11 @@ const TEMPORARY_MANIFEST_NAME = 'job.json.tmp';
 // Per-clip progress is appended here (one small JSON line per change) instead
 // of rewriting the whole manifest; job.json is rewritten every JOURNAL_LIMIT
 // changes or whenever clips are added. Loading replays the journal on top.
+// A record is a few KB, so 1,000 stay well inside the byte limit; a large
+// job's file (tens of MB) is then rewritten five times less often, for a
+// fraction of a second more when a job is opened.
 const JOURNAL_NAME = 'job.journal';
-const JOURNAL_LIMIT = Object.freeze({ records: 200, bytes: 16 * 1024 * 1024 });
+const JOURNAL_LIMIT = Object.freeze({ records: 1000, bytes: 16 * 1024 * 1024 });
 const SAFE_JOB_ID = /^[a-z0-9][a-z0-9_-]{0,127}$/;
 const WINDOWS_RESERVED_NAME = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$/;
 // Sized for a full Tesla archive: a real 6,835-clip SMB job (long UNC paths)
