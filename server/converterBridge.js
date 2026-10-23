@@ -8,7 +8,7 @@
 // Two server-side rules on top of the desktop behaviour:
 //   - verification is never Off for a real conversion: telemetry checks are
 //     an insurance requirement, so 'off' becomes 'quick' (the benchmark, which
-//     only works on copies, keeps its Off/Quick/Full comparison);
+//     only works on copies, compares Quick and Full);
 //   - folders must be inside the allowed roots (vehicle shares, output dirs)
 //     after following symlinks; the converter is handed the real path, so a
 //     symlink on a share can never point it at a folder outside them.
@@ -49,7 +49,8 @@ function createConverterBridge({ runtime, resolvePath, log }) {
     service: runtime.service,
     capabilities: runtime.capabilities,
     benchmark: { run: (request) => runtime.runBenchmark(request), cancel: () => runtime.cancelBenchmark() },
-    auto: runtime.auto
+    auto: runtime.auto,
+    ...(typeof runtime.devices === 'function' ? { devices: () => runtime.devices() } : {})
   });
 
   const channels = new Set(CHANNELS || [...handlers.keys()]);

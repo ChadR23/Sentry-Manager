@@ -54,6 +54,27 @@ function lookupPciIds(text, vendorId, deviceId, vendor) {
   return null;
 }
 
+/**
+ * A GPU's display name: the product name amdgpu reports, else pci.ids, else
+ * the cards in KNOWN, else "Intel graphics" / "AMD graphics" (SoC GPUs by
+ * their driver). Also names the converter's encoding devices.
+ */
+function gpuDisplayName({ dev, driver, kind, vendor, vendorId, deviceId, pciIdsFiles = PCI_IDS }) {
+  const family = kind || (driver === 'amdgpu' ? 'amd' : driver === 'i915' || driver === 'xe' ? 'intel' : 'other');
+  const maker = family !== 'other' ? family : vendor || VENDORS[vendorId] || 'other';
+  let name = null;
+  if (family === 'amd' && dev) name = readLine(join(dev, 'product_name'));
+  if (!name && vendorId && deviceId && VENDORS[vendorId]) {
+    for (const f of pciIdsFiles) {
+      name = lookupPciIds(readText(f), vendorId, deviceId, maker);
+      if (name) break;
+    }
+  }
+  name = name || KNOWN[`${vendorId}:${deviceId}`] || null;
+  if (!name) name = family === 'other' ? OTHER_NAMES[driver] || driver || 'GPU' : `${VENDOR_NAMES[maker] || 'Unknown'} graphics`;
+  return name;
+}
+
 /** One fdinfo file of a DRM client. */
 function parseFdinfo(text) {
   if (!text) return null;
@@ -328,16 +349,7 @@ class GpuProvider {
   nameOf({ dev, driver, kind, vendor, vendorId, deviceId }) {
     const key = `${vendorId}:${deviceId}:${driver}`; // SoC GPUs have no PCI ids at all
     if (this.names.has(key)) return this.names.get(key);
-    let name = null;
-    if (kind === 'amd') name = readLine(join(dev, 'product_name'));
-    if (!name && vendorId && deviceId && VENDORS[vendorId]) {
-      for (const f of this.pciIdsFiles) {
-        name = lookupPciIds(readText(f), vendorId, deviceId, vendor);
-        if (name) break;
-      }
-    }
-    name = name || KNOWN[`${vendorId}:${deviceId}`] || null;
-    if (!name) name = kind === 'other' ? OTHER_NAMES[driver] || driver || 'GPU' : `${VENDOR_NAMES[vendor] || 'Unknown'} graphics`;
+    const name = gpuDisplayName({ dev, driver, kind, vendor, vendorId, deviceId, pciIdsFiles: this.pciIdsFiles });
     this.names.set(key, name);
     return name;
   }
@@ -483,4 +495,4 @@ class GpuProvider {
   }
 }
 
-module.exports = { GpuProvider, NvidiaSmi, parseFdinfo, engineUse, parseNvidiaLine, lookupPciIds, currentClock, VIDEO_ENGINE, RENDER_ENGINE, NVIDIA_QUERY };
+module.exports = { GpuProvider, NvidiaSmi, gpuDisplayName, parseFdinfo, engineUse, parseNvidiaLine, lookupPciIds, currentClock, VIDEO_ENGINE, RENDER_ENGINE, NVIDIA_QUERY };

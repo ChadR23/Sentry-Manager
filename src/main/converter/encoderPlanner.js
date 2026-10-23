@@ -97,7 +97,20 @@ function qualityRateArgs(codec, encoder, level) {
   return ['-crf', pick('av1crf')]; // libsvtav1
 }
 
-function buildEncodeArgs({ codec, encoder, bitrate, quality = null, vaapiDevice = '/dev/dri/renderD128', hwFrames = false }) {
+// A render node (Intel/AMD) or a CUDA index (NVIDIA) of an encoding device
+// chosen per GPU; without one, every argument is what it always was.
+function deviceNode(device) {
+  const node = device?.node;
+  if (typeof node !== 'string' || node.length === 0) throw new RangeError('device.node must be a non-empty path');
+  return node;
+}
+
+function deviceIndex(device) {
+  if (!Number.isSafeInteger(device?.index) || device.index < 0) throw new RangeError('device.index must be a non-negative integer');
+  return String(device.index);
+}
+
+function buildEncodeArgs({ codec, encoder, bitrate, quality = null, vaapiDevice = '/dev/dri/renderD128', hwFrames = false, device = null }) {
   requireFamily(codec);
   if (quality === null) requirePositive('bitrate', bitrate);
   if (typeof encoder !== 'string' || !encoderBelongsToFamily(codec, encoder)) {
@@ -106,11 +119,15 @@ function buildEncodeArgs({ codec, encoder, bitrate, quality = null, vaapiDevice 
 
   const args = [];
   if (encoder.endsWith('_vaapi')) {
-    if (typeof vaapiDevice !== 'string' || vaapiDevice.length === 0) throw new RangeError('vaapiDevice must be a non-empty path');
-    args.push('-vaapi_device', vaapiDevice, '-vf', 'format=nv12,hwupload');
+    const node = device ? deviceNode(device) : vaapiDevice;
+    if (typeof node !== 'string' || node.length === 0) throw new RangeError('vaapiDevice must be a non-empty path');
+    args.push('-vaapi_device', node, '-vf', 'format=nv12,hwupload');
   }
+  // A global option: the QSV session opens on this GPU's render node.
+  if (device && encoder.endsWith('_qsv')) args.push('-init_hw_device', `qsv=qsvenc:hw_any,child_device=${deviceNode(device)}`);
 
   args.push('-c:v', encoder);
+  if (device && encoder.endsWith('_nvenc')) args.push('-gpu', deviceIndex(device));
   if (quality !== null) args.push(...qualityRateArgs(codec, encoder, quality));
   else args.push('-b:v', String(Math.round(bitrate)));
 
@@ -141,17 +158,19 @@ function buildEncodeArgs({ codec, encoder, bitrate, quality = null, vaapiDevice 
  * Decoded frames are copied back to system memory, so the encode arguments
  * stay identical with or without them. CPU encoders get no GPU decode.
  */
-function decodeAccelArgs(encoder, { platform = process.platform, vaapiDevice = '/dev/dri/renderD128', zeroCopy = false } = {}) {
+function decodeAccelArgs(encoder, { platform = process.platform, vaapiDevice = '/dev/dri/renderD128', zeroCopy = false, device = null } = {}) {
   if (typeof encoder !== 'string') return null;
+  // With a device, the GPU that encodes also decodes.
+  const cudaDevice = () => (device ? ['-hwaccel_device', deviceIndex(device)] : []);
   // Zero-copy: NVDEC frames stay in GPU memory and go straight into NVENC.
-  if (zeroCopy) return encoder.endsWith('_nvenc') ? ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda'] : null;
-  const vaapi = ['-hwaccel', 'vaapi', '-hwaccel_device', vaapiDevice];
-  if (encoder.endsWith('_nvenc')) return ['-hwaccel', 'cuda'];
+  if (zeroCopy) return encoder.endsWith('_nvenc') ? ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda', ...cudaDevice()] : null;
+  const vaapi = () => ['-hwaccel', 'vaapi', '-hwaccel_device', device ? deviceNode(device) : vaapiDevice];
+  if (encoder.endsWith('_nvenc')) return ['-hwaccel', 'cuda', ...cudaDevice()];
   if (encoder.endsWith('_videotoolbox')) return ['-hwaccel', 'videotoolbox'];
-  if (encoder.endsWith('_vaapi')) return vaapi;
+  if (encoder.endsWith('_vaapi')) return vaapi();
   if (encoder.endsWith('_qsv') || encoder.endsWith('_amf')) {
     if (platform === 'win32') return ['-hwaccel', 'd3d11va'];
-    if (platform === 'linux') return vaapi;
+    if (platform === 'linux') return vaapi();
   }
   return null;
 }
@@ -179,7 +198,8 @@ async function probeCandidate({
   candidate,
   bitrate = DEFAULT_PROBE_BITRATE,
   timeoutMs = DEFAULT_PROBE_TIMEOUT_MS,
-  vaapiDevice = '/dev/dri/renderD128'
+  vaapiDevice = '/dev/dri/renderD128',
+  device = null
 }) {
   if (typeof runProbe !== 'function') throw new TypeError('runProbe must be a function');
   requireFamily(family);
@@ -187,7 +207,13 @@ async function probeCandidate({
   const normalized = typeof candidate === 'string'
     ? { codec: candidate, hardware: !CANDIDATES[family].cpu.includes(candidate) }
     : { ...candidate };
-  const encodeArgs = buildEncodeArgs({ codec: family, encoder: normalized.codec, bitrate, vaapiDevice });
+  let encodeArgs;
+  try {
+    encodeArgs = buildEncodeArgs({ codec: family, encoder: normalized.codec, bitrate, vaapiDevice, ...(device ? { device } : {}) });
+  } catch (error) {
+    if (!device) throw error;
+    return failedProof(normalized, 'invalid device', error.message);
+  }
   const outputPath = platform === 'win32' ? 'NUL' : '/dev/null';
   const args = [
     '-hide_banner', '-loglevel', 'error', '-y',
@@ -214,6 +240,20 @@ async function probeCandidate({
 function encoderIsAdvertised(output, codec) {
   const escaped = codec.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return new RegExp(`(^|\\s)${escaped}(?=\\s|$)`, 'm').test(output);
+}
+
+const FAMILY_LABELS = Object.freeze({ h265: 'H.265', av1: 'AV1' });
+const ENCODER_PREFIX = Object.freeze({ h265: 'hevc', av1: 'av1' });
+
+// Hardware encoders worth trying on one GPU (Linux only; other systems have
+// no per-GPU choice): QSV then VA-API on Intel, VA-API on AMD, NVENC on NVIDIA.
+function deviceCandidates(family, device, platform) {
+  if (platform !== 'linux') return [];
+  const prefix = ENCODER_PREFIX[family];
+  if (device.kind === 'dri' && device.vendor === 'intel') return [`${prefix}_qsv`, `${prefix}_vaapi`];
+  if (device.kind === 'dri' && device.vendor === 'amd') return [`${prefix}_vaapi`];
+  if (device.kind === 'nvidia') return [`${prefix}_nvenc`];
+  return [];
 }
 
 function platformCandidates(family, platform) {
@@ -257,8 +297,8 @@ function createEncoderPlanner({
     return advertisedPromise;
   }
 
-  async function prove(family, candidate) {
-    const key = `${family}:${candidate.codec}`;
+  async function prove(family, candidate, device = null) {
+    const key = device ? `${family}:${candidate.codec}:${device.id}` : `${family}:${candidate.codec}`;
     if (!proofCache.has(key)) {
       const pending = probeCandidate({
         runProbe,
@@ -267,7 +307,8 @@ function createEncoderPlanner({
         family,
         candidate,
         timeoutMs: candidate.hardware === false ? Math.max(timeoutMs, CPU_PROBE_TIMEOUT_MS) : timeoutMs,
-        vaapiDevice
+        vaapiDevice,
+        ...(device ? { device } : {})
       });
       proofCache.set(key, pending);
       // A probe that only ran out of time is tried again next time instead of
@@ -295,19 +336,60 @@ function createEncoderPlanner({
     throw new Error(`No proven ${family} encoder is available`);
   }
 
+  function selectCpuFallback(family) {
+    requireFamily(family);
+    return selectFrom(
+      family,
+      CANDIDATES[family].cpu.map((codec) => ({ codec, hardware: false })),
+      `${family}:cpu`
+    );
+  }
+
+  // The encoder for one chosen GPU, proven with that GPU's own arguments. A
+  // GPU that cannot encode the family converts its clips on the CPU encoder.
+  const cpuWarned = new Set();
+  async function selectFor(family, device) {
+    requireFamily(family);
+    if (!device || typeof device.id !== 'string') throw new TypeError('device is required');
+    if (device.kind === 'cpu') {
+      const cpu = await selectCpuFallback(family);
+      return Object.freeze({ family, codec: cpu.codec, hardware: false, device: Object.freeze({ id: 'cpu', kind: 'cpu' }) });
+    }
+    const cacheKey = `${family}:device:${device.id}`;
+    if (selectionCache.has(cacheKey)) return selectionCache.get(cacheKey);
+    const chosen = Object.freeze({
+      id: device.id, kind: device.kind, node: device.node ?? null, index: device.index ?? null
+    });
+    const output = await advertisedEncoders();
+    let timedOut = false;
+    for (const codec of deviceCandidates(family, device, platform)) {
+      if (!encoderIsAdvertised(output, codec)) continue;
+      const proof = await prove(family, { codec, hardware: true }, chosen);
+      if (proof.usable) {
+        const selected = Object.freeze({ family, codec, hardware: true, device: chosen });
+        selectionCache.set(cacheKey, selected);
+        return selected;
+      }
+      if (proof.reason === 'timeout') timedOut = true;
+    }
+    const cpu = await selectCpuFallback(family);
+    if (!cpuWarned.has(cacheKey)) {
+      cpuWarned.add(cacheKey);
+      console.warn(`[CONVERTER] ${device.name || device.id} cannot encode ${FAMILY_LABELS[family]}; its conversions use the CPU encoder.`);
+    }
+    const selected = Object.freeze({ family, codec: cpu.codec, hardware: false, device: chosen });
+    // a probe that only ran out of time is tried again next time
+    if (!timedOut) selectionCache.set(cacheKey, selected);
+    return selected;
+  }
+
   return Object.freeze({
     select(family) {
       requireFamily(family);
       return selectFrom(family, platformCandidates(family, platform), `${family}:preferred`);
     },
-    selectCpuFallback(family) {
-      requireFamily(family);
-      return selectFrom(
-        family,
-        CANDIDATES[family].cpu.map((codec) => ({ codec, hardware: false })),
-        `${family}:cpu`
-      );
-    }
+    selectFor,
+    selectCpuFallback
   });
 }
 

@@ -5,6 +5,8 @@ const {
   TIMING_PHASES,
   addItemTimings,
   isValidConcurrency,
+  normalizeLanes,
+  lanesTotal,
   createEmptyCounters,
   addCompletedFile,
   serializeSummary,
@@ -71,11 +73,19 @@ function progressRate(value, scale) {
   return Number.isFinite(parsed) && parsed >= 0 ? Math.round(parsed * scale) / scale : null;
 }
 
-// The GPU render node an encode uses, when its arguments name one (VA-API).
+// The GPU an encode uses, when its arguments name one: a render node
+// (VA-API, or QSV opened on a chosen GPU) or an NVIDIA GPU chosen by index
+// ("nvidia1", as the stats engine names it).
 function renderDevice(args) {
   for (let index = 0; index < args.length - 1; index += 1) {
-    if ((args[index] === '-vaapi_device' || args[index] === '-hwaccel_device')
-        && typeof args[index + 1] === 'string' && args[index + 1].startsWith('/dev/')) return args[index + 1];
+    const value = args[index + 1];
+    if (typeof value !== 'string') continue;
+    if ((args[index] === '-vaapi_device' || args[index] === '-hwaccel_device') && value.startsWith('/dev/')) return value;
+    if (args[index] === '-gpu' && /^\d+$/.test(value)) return `nvidia${value}`;
+    if (args[index] === '-init_hw_device') {
+      const child = /(?:^|,)child_device=(\/dev\/[^,]+)/.exec(value);
+      if (child) return child[1];
+    }
   }
   return null;
 }
@@ -250,18 +260,23 @@ function createConverterJobService(deps) {
   const staging = deps.stagingManager;
   // GPU decoding is an optimisation only. An encoder whose GPU decode proved
   // unusable is not offered it again; verify stops after repeated fallbacks.
+  // With a GPU chosen per lane the records are per GPU: one GPU's broken
+  // decode does not turn it off on another.
   const encodeDecodeBroken = new Set();
   const verifyDecodeFallbacks = new Map();
   const VERIFY_DECODE_FALLBACK_LIMIT = 3;
+  const laneDevice = (encoder) => (encoder?.device && encoder.device.kind !== 'cpu' ? encoder.device : null);
+  const decodeKey = (encoder) => `${laneDevice(encoder) ? `${laneDevice(encoder).id}|` : ''}${encoder.codec}`;
   function accelArgs(encoder, options) {
     try {
-      const args = deps.decodeAccel(encoder.codec, options);
+      const device = laneDevice(encoder);
+      const args = deps.decodeAccel(encoder.codec, device ? { ...(options || {}), device } : options);
       return Array.isArray(args) && args.length > 0 ? args : null;
     } catch (_) { return null; }
   }
   function decodeAccelFor(encoder, purpose) {
     if (encoder?.hardware !== true || typeof deps.decodeAccel !== 'function') return null;
-    if (purpose === 'verify' && (verifyDecodeFallbacks.get(encoder.codec) || 0) >= VERIFY_DECODE_FALLBACK_LIMIT) return null;
+    if (purpose === 'verify' && (verifyDecodeFallbacks.get(decodeKey(encoder)) || 0) >= VERIFY_DECODE_FALLBACK_LIMIT) return null;
     return accelArgs(encoder);
   }
   // Encode decode tiers, fastest first: GPU frames kept on the GPU (zero-copy),
@@ -269,8 +284,8 @@ function createConverterJobService(deps) {
   function encodeDecodeTiers(encoder) {
     if (encoder?.hardware !== true || typeof deps.decodeAccel !== 'function') return [];
     return [
-      { key: `${encoder.codec}:zero-copy`, args: accelArgs(encoder, { zeroCopy: true }) },
-      { key: `${encoder.codec}:gpu`, args: accelArgs(encoder) }
+      { key: `${decodeKey(encoder)}:zero-copy`, args: accelArgs(encoder, { zeroCopy: true }) },
+      { key: `${decodeKey(encoder)}:gpu`, args: accelArgs(encoder) }
     ].filter((tier) => tier.args && !encodeDecodeBroken.has(tier.key));
   }
   const pathApi = deps.pathApi || require('path');
@@ -405,7 +420,11 @@ function createConverterJobService(deps) {
       stopPhase: null,
       stopItemId: null,
       stopWhilePaused: false,
-      retiringWorkers: 0,
+      // Workers per lane (one lane per chosen GPU; null is the default lane
+      // of a job without lanes): { live, retiring }.
+      laneCounters: new Map(),
+      // The lanes whose GPUs were found, while the job runs with lanes.
+      lanePlan: null,
       addWorker: null
     };
   }
@@ -463,6 +482,61 @@ function createConverterJobService(deps) {
   function concurrencyOf(manifest) {
     const value = manifest?.config?.concurrency;
     return isValidConcurrency(value) ? value : CONCURRENCY.fallback;
+  }
+
+  // Several GPUs, each set by hand: a lane per GPU with its own number of
+  // conversions at once. Every worker belongs to one lane (null is the
+  // default lane, the only one of a job without lanes) and takes the next
+  // queued clip whenever it is free, so a faster GPU simply converts more.
+  function lanesOf(manifest) {
+    const lanes = manifest?.config?.lanes;
+    return Array.isArray(lanes) && lanes.length > 0 ? lanes : null;
+  }
+
+  function laneCounters(runtime, laneId) {
+    if (!runtime.laneCounters.has(laneId)) runtime.laneCounters.set(laneId, { live: 0, retiring: 0 });
+    return runtime.laneCounters.get(laneId);
+  }
+
+  // How many workers a lane may have now. Without lanes, or when none of the
+  // job's GPUs is in the container, the default lane runs the whole job.
+  function laneLimit(runtime, laneId) {
+    const plan = runtime.lanePlan;
+    if (!plan || plan.fallback) return laneId === null ? concurrencyOf(runtime.manifest) : 0;
+    return laneId === null ? 0 : plan.limits.get(laneId) || 0;
+  }
+
+  // Finds each lane's GPU among the devices this container has now.
+  async function resolveLanes(lanes) {
+    const limits = new Map();
+    const devices = new Map();
+    for (const lane of lanes) {
+      let device = null;
+      try {
+        device = typeof deps.resolveDevice === 'function' ? await deps.resolveDevice(lane.device) : null;
+      } catch (_) { device = null; }
+      if (device && device.id === lane.device) {
+        limits.set(lane.device, lane.concurrency);
+        devices.set(lane.device, device);
+      } else {
+        console.warn(`[CONVERTER] Encoding device ${lane.device} is not in the container; its ${lane.concurrency} conversions at once are not started.`);
+      }
+    }
+    return { fallback: devices.size === 0, limits, devices };
+  }
+
+  // The workers each lane is missing (more at once, or a lane just added).
+  function startMissingWorkers(runtime) {
+    if (typeof runtime.addWorker !== 'function' || runtime.cancelRequested || runtime.stopRequested) return;
+    const plan = runtime.lanePlan;
+    const lanes = !plan || plan.fallback ? [null] : [...plan.devices].map(([id, device]) => ({ id, device }));
+    for (const lane of lanes) {
+      const laneId = lane ? lane.id : null;
+      const counters = laneCounters(runtime, laneId);
+      for (let missing = laneLimit(runtime, laneId) - (counters.live - counters.retiring); missing > 0; missing -= 1) {
+        runtime.addWorker(lane);
+      }
+    }
   }
 
   // The job-level recovery fields (state, activeItemId, ownedPaths,
@@ -959,9 +1033,10 @@ function createConverterJobService(deps) {
       : pathApi.resolve(config.destinationRoot, ...item.relativePath.split('/'));
   }
 
-  async function runChild(runtime, itemId, source, target, codec, encoder, { bitrate, quality = null, durationUs = null }, decodeAccel = null) {
+  async function runChild(runtime, itemId, source, target, codec, encoder, { bitrate, quality = null, durationUs = null, laneId = null }, decodeAccel = null) {
     const hwFrames = Array.isArray(decodeAccel) && decodeAccel.includes('-hwaccel_output_format');
-    const encodeArgs = buildEncodeArgs({ codec, encoder: encoder.codec, bitrate, quality, hwFrames });
+    const device = encoder.hardware === true ? laneDevice(encoder) : null;
+    const encodeArgs = buildEncodeArgs({ codec, encoder: encoder.codec, bitrate, quality, hwFrames, ...(device ? { device } : {}) });
     const args = [
       '-nostdin', '-hide_banner', '-loglevel', 'error', '-n',
       ...(decodeAccel || []),
@@ -994,6 +1069,8 @@ function createConverterJobService(deps) {
       hardware: encoder.hardware === true,
       decode: Array.isArray(decodeAccel) && decodeAccel.length > 0 ? 'gpu' : 'cpu',
       device: renderDevice([...(decodeAccel || []), ...encodeArgs]),
+      // the lane (chosen GPU) this clip runs on; null without lanes
+      deviceId: laneId,
       pid: Number.isSafeInteger(child.pid) ? child.pid : null,
       fps: null,
       speed: null,
@@ -1263,7 +1340,7 @@ function createConverterJobService(deps) {
     };
   }
 
-  async function processVideoOnce(runtime, item) {
+  async function processVideoOnce(runtime, item, lane = null) {
     const signal = runtime.abortController.signal;
     const timing = createItemTiming();
     const inspected = await deps.inspectVideo(item, item.sourcePath, signal);
@@ -1300,7 +1377,9 @@ function createConverterJobService(deps) {
       containerReserveBytes: inspected.containerReserveBytes || 0,
       telemetryReserveBytes: inspected.telemetryReserveBytes || 0
     });
-    let selected = await planner.select(codec);
+    let selected = lane && typeof planner.selectFor === 'function'
+      ? await planner.selectFor(codec, lane.device)
+      : await planner.select(codec);
     let usedCpuFallback = selected.hardware !== true;
     // Hardware rate-control backends commonly overshoot a byte target on
     // variable-frame-rate Tesla clips. Leave a small headroom so the first
@@ -1334,7 +1413,8 @@ function createConverterJobService(deps) {
       setOwnership(runtime, item.id, composeOwnership(ownershipFor(runtime, item.id), reserved));
       const usedTier = encodeTiers[0] || null;
       const durationUs = Math.round((inspected.durationSeconds || 0) * 1_000_000) || null;
-      const encoded = await runChild(runtime, item.id, staged.source, reserved.path, codec, selected, { bitrate, quality, durationUs }, usedTier?.args || null);
+      const encoded = await runChild(runtime, item.id, staged.source, reserved.path, codec, selected,
+        { bitrate, quality, durationUs, laneId: lane ? lane.id : null }, usedTier?.args || null);
       timing.mark('encode');
       if (!encoded.ok) {
         let failedOwnership = reserved;
@@ -1376,7 +1456,7 @@ function createConverterJobService(deps) {
       }
       // A slower decode tier fixed what a faster one broke: stop offering those.
       for (const key of failedTiers.splice(0)) {
-        if (key.startsWith(`${selected.codec}:`)) encodeDecodeBroken.add(key);
+        if (key.startsWith(`${decodeKey(selected)}:`)) encodeDecodeBroken.add(key);
       }
       let adopted = await staging.adoptEncodeOutput({
         jobId: runtime.manifest.id,
@@ -1424,7 +1504,7 @@ function createConverterJobService(deps) {
       timing.mark('metadata');
       await itemPatch(runtime, item.id, {}, { state: 'verifying', activeItemId: item.id });
       const verifyAccel = decodeAccelFor(selected, 'verify');
-      const verifiedEncoder = selected.codec;
+      const verifiedEncoder = decodeKey(selected);
       const verification = await deps.verifier({
         source: staged.source,
         candidate: adopted.path,
@@ -1603,11 +1683,11 @@ function createConverterJobService(deps) {
     }
   }
 
-  async function processVideo(runtime, item) {
+  async function processVideo(runtime, item, lane = null) {
     let quickRetries = 0;
     while (!runtime.cancelRequested && !runtime.stopRequested) {
       try {
-        return await processVideoOnce(runtime, currentItem(runtime, item.id));
+        return await processVideoOnce(runtime, currentItem(runtime, item.id), lane);
       } catch (error) {
         const affectedPath = typeof error.path === 'string' ? error.path : item.sourcePath;
         if (!isRetryableNetwork(error, affectedPath)) throw error;
@@ -1680,17 +1760,21 @@ function createConverterJobService(deps) {
     });
   }
 
-  async function work(runtime) {
+  async function work(runtime, lane = null) {
+    const laneId = lane ? lane.id : null;
+    const counters = laneCounters(runtime, laneId);
     runtime.liveWorkers += 1;
+    counters.live += 1;
     let retired = false;
     try {
       while (!runtime.cancelRequested && !runtime.stopRequested && !runtime.recoveryRequired) {
         await waitWhilePaused(runtime);
         if (runtime.cancelRequested || runtime.stopRequested) break;
-        // Fewer at once (Parallel conversions lowered mid-run): this worker
-        // stops after its clip instead of taking another.
-        if (runtime.liveWorkers - runtime.retiringWorkers > concurrencyOf(runtime.manifest)) {
-          runtime.retiringWorkers += 1;
+        // Fewer at once (Parallel conversions lowered mid-run, or this GPU
+        // set lower or off): this worker stops after its clip instead of
+        // taking another.
+        if (counters.live - counters.retiring > laneLimit(runtime, laneId)) {
+          counters.retiring += 1;
           retired = true;
           break;
         }
@@ -1701,9 +1785,9 @@ function createConverterJobService(deps) {
         // queued in the job file, so nothing is lost.
         if (runtime.pauseRequested) await waitWhilePaused(runtime);
         if (runtime.cancelRequested || runtime.stopRequested || runtime.recoveryRequired) break;
-        if (runtime.liveWorkers - runtime.retiringWorkers > concurrencyOf(runtime.manifest)) {
+        if (counters.live - counters.retiring > laneLimit(runtime, laneId)) {
           runtime.queue.unshift(next.value);
-          runtime.retiringWorkers += 1;
+          counters.retiring += 1;
           retired = true;
           break;
         }
@@ -1712,7 +1796,7 @@ function createConverterJobService(deps) {
         beginItem(runtime, item);
         try {
           if (item.kind === 'asset') await processAsset(runtime, item);
-          else await keepOriginalWhenNoSavings(runtime, item, () => processVideo(runtime, item));
+          else await keepOriginalWhenNoSavings(runtime, item, () => processVideo(runtime, item, lane));
         } catch (error) {
           await failItem(runtime, item.id, error);
         } finally {
@@ -1728,18 +1812,38 @@ function createConverterJobService(deps) {
       throw error;
     } finally {
       runtime.liveWorkers -= 1;
-      if (retired) runtime.retiringWorkers -= 1;
+      counters.live -= 1;
+      if (retired) counters.retiring -= 1;
       // The remaining workers may all be parked on a pause already.
       await persistPauseWhenParked(runtime).catch(() => undefined);
     }
   }
 
   async function consume(runtime) {
+    // A job with lanes first finds its GPUs (again when the lanes changed
+    // meanwhile). Without lanes nothing waits: the workers start at once.
+    let plan = null;
+    for (let lanes = lanesOf(runtime.manifest); lanes;) {
+      const resolved = await resolveLanes(lanes);
+      const latest = lanesOf(runtime.manifest);
+      if (JSON.stringify(latest) === JSON.stringify(lanes)) {
+        plan = resolved;
+        break;
+      }
+      lanes = latest;
+    }
+    runtime.lanePlan = plan;
     // Workers added while the job runs (Parallel conversions raised) are
     // waited for too.
     const workers = [];
-    runtime.addWorker = () => workers.push(work(runtime));
-    for (let index = 0; index < concurrencyOf(runtime.manifest); index += 1) runtime.addWorker();
+    runtime.addWorker = (lane = null) => workers.push(work(runtime, lane));
+    if (!plan || plan.fallback) {
+      for (let index = 0; index < concurrencyOf(runtime.manifest); index += 1) runtime.addWorker();
+    } else {
+      for (const [id, device] of plan.devices) {
+        for (let index = 0; index < plan.limits.get(id); index += 1) runtime.addWorker({ id, device });
+      }
+    }
     const results = [];
     try {
       while (results.length < workers.length) results.push(...await Promise.allSettled(workers.slice(results.length)));
@@ -1758,10 +1862,40 @@ function createConverterJobService(deps) {
     if (!isValidConcurrency(value)) throw serviceError('INVALID_CONCURRENCY');
     const runtime = await ensureRuntime(id);
     if (TERMINAL_STATES.has(runtime.manifest.state)) throw serviceError('JOB_NOT_ACTIVE');
+    // A job with a number per GPU changes through setLanes.
+    if (lanesOf(runtime.manifest)) throw serviceError('INVALID_CONCURRENCY');
     if (concurrencyOf(runtime.manifest) === value) return publicSnapshot(runtime.manifest);
     await update(runtime, (current) => ({ config: { ...current.config, concurrency: value } }));
     if (typeof runtime.addWorker === 'function' && !runtime.cancelRequested && !runtime.stopRequested) {
-      for (let missing = value - (runtime.liveWorkers - runtime.retiringWorkers); missing > 0; missing -= 1) runtime.addWorker();
+      const counters = laneCounters(runtime, null);
+      for (let missing = value - (counters.live - counters.retiring); missing > 0; missing -= 1) runtime.addWorker();
+    }
+    return publicSnapshot(runtime.manifest);
+  }
+
+  // Conversions at once per GPU changed while the job runs; saved with the
+  // job like Parallel conversions. A GPU set higher (or added) starts its
+  // workers now; one set lower or removed finishes its clips first. The
+  // workers follow the lanes found in memory, not the saved ones, so the
+  // workers of a lane that goes away keep going until the new ones start.
+  async function setLanes(id, value) {
+    let lanes;
+    try { lanes = normalizeLanes(value); } catch (_) { lanes = null; }
+    if (!lanes) throw serviceError('INVALID_LANES');
+    const runtime = await ensureRuntime(id);
+    if (TERMINAL_STATES.has(runtime.manifest.state)) throw serviceError('JOB_NOT_ACTIVE');
+    if (JSON.stringify(lanesOf(runtime.manifest)) === JSON.stringify(lanes)) return publicSnapshot(runtime.manifest);
+    const running = () => typeof runtime.addWorker === 'function' && !runtime.cancelRequested && !runtime.stopRequested;
+    // the GPUs are looked up first, so the new lanes start as they are saved
+    const found = running() ? await resolveLanes(lanes) : null;
+    await update(runtime, (current) => ({ config: { ...current.config, lanes, concurrency: lanesTotal(lanes) } }));
+    // (a run that started meanwhile with the old lanes takes the new ones too)
+    if (running()) {
+      const plan = found || await resolveLanes(lanes);
+      if (running()) {
+        runtime.lanePlan = plan;
+        startMissingWorkers(runtime);
+      }
     }
     return publicSnapshot(runtime.manifest);
   }
@@ -2612,6 +2746,7 @@ function createConverterJobService(deps) {
     liveJobs,
     pause: (...args) => serializeCommand(() => pause(...args)),
     setConcurrency: (...args) => serializeCommand(() => setConcurrency(...args)),
+    setLanes: (...args) => serializeCommand(() => setLanes(...args)),
     resume: (...args) => serializeCommand(() => resume(...args)),
     cancel: (...args) => serializeCommand(() => cancel(...args)),
     discard: (...args) => serializeCommand(() => discard(...args)),

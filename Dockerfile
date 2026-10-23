@@ -58,7 +58,8 @@ ENV NODE_ENV=production \
     DATA_PATH=/data \
     FOOTAGE_ROOT=/footage \
     UV_THREADPOOL_SIZE=16 \
-    NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+    NVIDIA_DRIVER_CAPABILITIES=compute,video,utility \
+    CUDA_DEVICE_ORDER=PCI_BUS_ID
 
 WORKDIR /app
 COPY version.json ./

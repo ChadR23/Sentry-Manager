@@ -2,7 +2,7 @@
 
 const nodeFs = require('fs');
 const nodePath = require('path');
-const { isValidConcurrency, isValidCustomBitrate, isValidQualityLevel, isValidVerifyMode } = require('./contracts');
+const { isValidConcurrency, isValidCustomBitrate, isValidQualityLevel, isValidVerifyMode, normalizeLanes, lanesTotal } = require('./contracts');
 
 const PROFILE_IDS = Object.freeze(['conservative', 'balanced', 'aggressive', 'custom', 'quality']);
 
@@ -24,7 +24,9 @@ const CHANNELS = Object.freeze([
   'converter:cancelBenchmark',
   'converter:getAuto',
   'converter:setAuto',
-  'converter:checkAutoNow'
+  'converter:checkAutoNow',
+  'converter:devices',
+  'converter:setLanes'
 ]);
 const AUTO_INTERVALS = new Set([15, 30, 60, 180, 360, 720, 1440]);
 const GROUPS = new Set(['RecentClips', 'SavedClips', 'SentryClips']);
@@ -43,15 +45,16 @@ const MAX_SNAPSHOT_BYTES = 512 * 1024;
 const registrations = new WeakMap();
 
 class ConverterIpcError extends Error {
-  constructor(code) {
+  constructor(code, details) {
     super(code);
     this.name = 'ConverterIpcError';
     this.code = code;
+    if (details) this.details = details;
   }
 }
 
-function fail(code) {
-  throw new ConverterIpcError(code);
+function fail(code, details) {
+  throw new ConverterIpcError(code, details);
 }
 
 function isPlainObject(value) {
@@ -188,7 +191,13 @@ function sanitizeLiveProgress(progress) {
 function responseError(error) {
   const raw = typeof error?.code === 'string' ? error.code.toUpperCase().replace(/-/g, '_') : '';
   const code = SAFE_ERROR_CODE.test(raw) ? raw : 'OPERATION_FAILED';
-  return { ok: false, error: { code, retryable: error?.retryable === true } };
+  const response = { ok: false, error: { code, retryable: error?.retryable === true } };
+  // What the window shows with the error (DEVICE_UNSUPPORTED: which GPU and
+  // codec); only this module's own errors carry any.
+  if (error instanceof ConverterIpcError && isPlainObject(error.details)) {
+    try { response.error.details = boundedJsonValue(error.details, 4096); } catch (_) { /* the code is enough */ }
+  }
+  return response;
 }
 
 function wrapped(handler) {
@@ -290,14 +299,24 @@ async function validateStartConfig(payload, dependencies, capabilities) {
   const hasBitrate = isPlainObject(payload) && Object.prototype.hasOwnProperty.call(payload, 'bitrateKbps');
   const hasQuality = isPlainObject(payload) && Object.prototype.hasOwnProperty.call(payload, 'qualityLevel');
   const hasVerify = isPlainObject(payload) && Object.prototype.hasOwnProperty.call(payload, 'verifyMode');
+  const hasLanes = isPlainObject(payload) && Object.prototype.hasOwnProperty.call(payload, 'lanes');
   const expectedKeys = [...keys, ...(hasGroupOrder ? ['groupOrder'] : []), ...(hasConcurrency ? ['concurrency'] : []),
-    ...(hasBitrate ? ['bitrateKbps'] : []), ...(hasQuality ? ['qualityLevel'] : []), ...(hasVerify ? ['verifyMode'] : [])];
+    ...(hasBitrate ? ['bitrateKbps'] : []), ...(hasQuality ? ['qualityLevel'] : []), ...(hasVerify ? ['verifyMode'] : []),
+    ...(hasLanes ? ['lanes'] : [])];
   if (!exactKeys(payload, expectedKeys)) fail('INVALID_REQUEST');
   // Custom profile: an explicit bitrate is required; size profiles take none.
   if (payload.profileId === 'custom' ? !isValidCustomBitrate(payload.bitrateKbps) : hasBitrate) fail('INVALID_BITRATE');
   // Constant quality: a named level is required; other profiles take none.
   if (payload.profileId === 'quality' ? !isValidQualityLevel(payload.qualityLevel) : hasQuality) fail('INVALID_QUALITY');
   if (hasConcurrency && !isValidConcurrency(payload.concurrency)) fail('INVALID_CONCURRENCY');
+  // Conversions at once per GPU. A device id that is not in the container
+  // now is kept (a saved automatic setting can outlive a GPU); the job skips
+  // that lane and says so in the log.
+  let lanes = null;
+  if (hasLanes) {
+    try { lanes = normalizeLanes(payload.lanes); } catch (_) { fail('INVALID_LANES'); }
+  }
+  const laneFields = lanes ? { lanes, concurrency: lanesTotal(lanes) } : {};
   if (hasVerify && !isValidVerifyMode(payload.verifyMode)) fail('INVALID_VERIFY_MODE');
   if (!['h265', 'av1'].includes(payload.codec)) fail('INVALID_CODEC');
   if (!PROFILE_IDS.includes(payload.profileId)) fail('INVALID_PROFILE');
@@ -317,7 +336,7 @@ async function validateStartConfig(payload, dependencies, capabilities) {
     if (capabilities.replacement !== 'available') fail('REPLACEMENT_UNAVAILABLE');
     // Originals are replaced: never without at least the quick checks.
     const verifyMode = hasVerify && payload.verifyMode === 'off' ? { verifyMode: 'quick' } : {};
-    return { ...payload, ...verifyMode, sourceRoot: source.real };
+    return withLanes({ ...payload, ...verifyMode, sourceRoot: source.real }, laneFields);
   }
   if (payload.replacementConfirmed !== false) fail('INVALID_REPLACEMENT_CONFIRMATION');
   const destination = await canonicalFutureDirectory(payload.destinationRoot, dependencies);
@@ -326,7 +345,30 @@ async function validateStartConfig(payload, dependencies, capabilities) {
       if (overlaps(sourcePath, destinationPath, dependencies.pathApi, dependencies.platform)) fail('PATH_OVERLAP');
     }
   }
-  return { ...payload, sourceRoot: source.real, destinationRoot: destination.real };
+  return withLanes({ ...payload, sourceRoot: source.real, destinationRoot: destination.real }, laneFields);
+}
+
+// "lanes: null" means no lanes: the key is left out, as without it.
+function withLanes(config, laneFields) {
+  const result = { ...config, ...laneFields };
+  if (!laneFields.lanes) delete result.lanes;
+  return result;
+}
+
+// A start whose lanes include a GPU that cannot encode the chosen codec
+// (AV1 on a UHD 770): refused, so the owner sets it to Off or picks another
+// codec. Lanes whose device is not here are left to the job (it skips
+// them). Automatic and resumed jobs never ask; they use the CPU encoder.
+async function checkLaneEncoders(config, devices) {
+  if (!Array.isArray(config.lanes) || typeof devices !== 'function') return;
+  let known;
+  try { known = await devices(); } catch (_) { return; /* the job itself handles what it finds */ }
+  for (const lane of config.lanes) {
+    const device = (Array.isArray(known?.devices) ? known.devices : []).find((entry) => entry?.id === lane.device);
+    if (device && lane.concurrency > 0 && device.encoders?.[config.codec] === null) {
+      fail('DEVICE_UNSUPPORTED', { device: String(device.name || device.id).slice(0, 128), codec: config.codec });
+    }
+  }
 }
 
 function chooseCurrent(snapshots) {
@@ -435,9 +477,11 @@ function registerConverterIpc(options = {}) {
       if (result?.canceled || !Array.isArray(result?.filePaths) || result.filePaths.length === 0) return null;
       return (await canonicalDirectory(result.filePaths[0], dependencies)).real;
     }),
-    'converter:start': wrapped(async (_event, payload) => ({
-      jobId: validateSafeJobId(await options.service.start(await validateStartConfig(payload, dependencies, capabilities)))
-    })),
+    'converter:start': wrapped(async (_event, payload) => {
+      const config = await validateStartConfig(payload, dependencies, capabilities);
+      await checkLaneEncoders(config, options.devices);
+      return { jobId: validateSafeJobId(await options.service.start(config)) };
+    }),
     'converter:getCurrent': wrapped(async (_event, payload) => {
       validateNoPayload(payload);
       return chooseCurrent(await options.service.list());
@@ -453,6 +497,26 @@ function registerConverterIpc(options = {}) {
         try { await options.auto.setConcurrency(payload.concurrency); } catch (_) { /* the job itself changed; settings follow next time */ }
       }
       return sanitizeSnapshot(snapshot);
+    }),
+    // Conversions at once per GPU changed mid-run; for an automatic job the
+    // saved settings follow, as with Parallel conversions.
+    'converter:setLanes': wrapped(async (_event, payload) => {
+      if (!isPlainObject(payload) || !exactKeys(payload, ['jobId', 'lanes'])) fail('INVALID_REQUEST');
+      let lanes;
+      try { lanes = normalizeLanes(payload.lanes); } catch (_) { fail('INVALID_LANES'); }
+      if (!lanes) fail('INVALID_LANES');
+      if (typeof options.service.setLanes !== 'function') fail('OPERATION_FAILED');
+      const snapshot = await options.service.setLanes(validateSafeJobId(payload.jobId), lanes);
+      if (snapshot?.config?.autoConvert === true && typeof options.auto?.setLanes === 'function') {
+        try { await options.auto.setLanes(lanes); } catch (_) { /* the job itself changed; settings follow next time */ }
+      }
+      return sanitizeSnapshot(snapshot);
+    }),
+    // The GPUs (and the CPU) a conversion can be set to use.
+    'converter:devices': wrapped(async (_event, payload) => {
+      validateNoPayload(payload);
+      if (typeof options.devices !== 'function') fail('DEVICES_UNAVAILABLE');
+      return boundedJsonValue(await options.devices(), MAX_PAYLOAD_BYTES, { finiteNumbers: true });
     }),
     'converter:resume': wrapped(async (_event, payload) => {
       const jobId = validateJobId(payload);

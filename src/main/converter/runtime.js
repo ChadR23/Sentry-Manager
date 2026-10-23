@@ -4,12 +4,13 @@ const crypto = require('crypto');
 const nodeFs = require('fs');
 const nodePath = require('path');
 
-const { CONCURRENCY } = require('./contracts');
+const { CONCURRENCY, DEVICE_ID } = require('./contracts');
 const { createJobStore } = require('./jobStore');
 const { createFilesystemTransactionAdapters } = require('./filesystemTransactions');
 const { scanTeslaFootage } = require('./scanner');
 const { runConverterBenchmark } = require('./benchmark');
 const { createEncoderPlanner, decodeAccelArgs } = require('./encoderPlanner');
+const { createDeviceDiscovery, CPU_DEVICE } = require('./encodeDevices');
 const { createAutoConverter } = require('./autoConvert');
 const { extractH264TelemetryTimeline } = require('./telemetryTimeline');
 const { createConverterAdapters } = require('./converterAdapters');
@@ -438,9 +439,14 @@ function defaultFactories() {
     createFileTransaction,
     createEncoderPlanner,
     createConverterAdapters,
-    createConverterJobService
+    createConverterJobService,
+    createDeviceDiscovery
   };
 }
+
+// The encoding devices are looked up again at most this often while a job
+// finds its lanes' GPUs (once per lane otherwise).
+const DEVICE_LIST_TTL_MS = 2_000;
 
 async function realTempPath(pfs, pathApi, target) {
   if (typeof pfs.realpath !== 'function') return target;
@@ -466,6 +472,9 @@ async function createConverterRuntime(options = {}) {
     throw runtimeError('CONVERTER_TOOLS_UNAVAILABLE');
   }
   if (typeof options.spawn !== 'function') throw new TypeError('spawn is required');
+  // NVIDIA GPUs chosen by index (-gpu N, -hwaccel_device N) must be numbered
+  // as nvidia-smi numbers them; CUDA's own order is "fastest first".
+  process.env.CUDA_DEVICE_ORDER ||= 'PCI_BUS_ID';
 
   const jobsRoot = pathApi.join(options.userDataPath, 'converter-jobs');
   // Clips known to be converted already, so a run skips them while it
@@ -523,6 +532,42 @@ async function createConverterRuntime(options = {}) {
     platform,
     ffmpegPath: options.ffmpegPath
   });
+  // The GPUs (and the CPU) a conversion can be set to use, one by one. Only
+  // read when something asks: the Encoder page, a job with lanes, the
+  // benchmark.
+  const discovery = factories.createDeviceDiscovery({
+    fs: fileSystem,
+    pathApi,
+    platform,
+    runCommand: processRunner,
+    ...(typeof options.deviceNameOf === 'function' ? { nameOf: options.deviceNameOf } : {}),
+    ...(options.deviceDiscovery || {})
+  });
+  let deviceList = null;
+  async function listDevices() {
+    try {
+      const list = await discovery.list();
+      return Array.isArray(list) && list.length > 0 ? list : [CPU_DEVICE];
+    } catch (_) { return [CPU_DEVICE]; }
+  }
+  function recentDevices() {
+    if (!deviceList || Date.now() - deviceList.at > DEVICE_LIST_TTL_MS) deviceList = { at: Date.now(), list: listDevices() };
+    return deviceList.list;
+  }
+  // A lane's device id from a saved job or the browser, looked up only in
+  // this list: node paths and NVIDIA indexes always come from here.
+  async function resolveDevice(id) {
+    if (typeof id !== 'string' || !DEVICE_ID.test(id)) return null;
+    return (await recentDevices()).find((device) => device.id === id) || null;
+  }
+  // The device a job without lanes encodes on (planner.select's choice).
+  async function defaultDeviceOf(list) {
+    let selected;
+    try { selected = await planner.select('h265'); } catch (_) { return null; }
+    if (selected.hardware !== true) return 'cpu';
+    if (selected.codec.endsWith('_nvenc')) return list.find((device) => device.kind === 'nvidia' && device.index === 0)?.id || null;
+    return list.find((device) => device.kind === 'dri' && pathApi.basename(device.node || '') === 'renderD128')?.id || null;
+  }
   const adapters = factories.createConverterAdapters({
     fs: pfs,
     runFfprobe: processRunner,
@@ -596,7 +641,11 @@ async function createConverterRuntime(options = {}) {
     spawnProcess,
     ffmpegPath: options.ffmpegPath,
     // Decode on the encoder's GPU (falls back to CPU decoding automatically).
-    decodeAccel: options.gpuDecode === false ? undefined : (encoder, accel = {}) => decodeAccelArgs(encoder, { platform, zeroCopy: accel.zeroCopy === true }),
+    decodeAccel: options.gpuDecode === false ? undefined : (encoder, accel = {}) => decodeAccelArgs(encoder, {
+      platform, zeroCopy: accel.zeroCopy === true, ...(accel.device ? { device: accel.device } : {})
+    }),
+    // A lane's GPU, from the devices this container has now.
+    resolveDevice,
     pathApi,
     network,
     classifyPath: (target) => classifyPath(target, { pathApi, platform, volumeInfo }),
@@ -827,12 +876,16 @@ async function createConverterRuntime(options = {}) {
   }
 
   function benchmarkLevelRunner(config) {
+    // With a device, the level runs on that GPU alone (a lane of its own).
+    const lanes = (level) => (config.device ? { lanes: [{ device: config.device.id, concurrency: level }] } : {});
     return async ({ level, sourceRoot, workRoot, signal, verifyMode }) => {
       const stagingRoot = pathApi.join(workRoot, 'staging');
       await pfs.mkdir(stagingRoot, { recursive: true });
       await pfs.mkdir(pathApi.join(workRoot, 'output'), { recursive: true });
       const benchService = factories.createConverterJobService({
         ...serviceDeps,
+        // the GPU under test and no other (never a fallback to another one)
+        ...(config.device ? { resolveDevice: async (id) => (id === config.device.id ? config.device : null) } : {}),
         store: factories.createJobStore({ rootDir: pathApi.join(workRoot, 'jobs'), fs: pfs }),
         stagingManager: factories.createFileTransaction({ ...stagingOptions, tempRoot: stagingRoot })
       });
@@ -849,7 +902,8 @@ async function createConverterRuntime(options = {}) {
         outputMode: 'separate',
         includedGroups: ['RecentClips', 'SavedClips', 'SentryClips'],
         replacementConfirmed: false,
-        concurrency: level
+        concurrency: level,
+        ...lanes(level)
       });
       const abort = () => { void benchService.cancel(jobId).catch(() => {}); };
       signal?.addEventListener('abort', abort, { once: true });
@@ -871,6 +925,8 @@ async function createConverterRuntime(options = {}) {
     // Runs the benchmark for each requested codec in turn (H.265 then AV1 by
     // default) so the results can be compared side by side. A codec this
     // computer cannot encode is reported as unsupported instead of failing.
+    // With two or more GPUs, every GPU is benchmarked by itself in turn (the
+    // others stay idle) and gets results of its own.
     async runBenchmark({ codec, codecs, profileId = 'balanced', bitrateKbps, qualityLevel, verifyMode = 'quick', sourceRoot = null, onProgress } = {}) {
       const requested = Array.isArray(codecs) && codecs.length > 0 ? codecs : [codec || 'h265'];
       if (shutdownPromise) throw runtimeError('SERVICE_SHUTDOWN');
@@ -882,32 +938,59 @@ async function createConverterRuntime(options = {}) {
         onProgress?.({ step: 'scan' });
         const clips = await findBenchmarkClips(sourceRoot, controller.signal);
         if (clips.length === 0) throw runtimeError('BENCHMARK_SOURCE_REQUIRED');
-        const runs = [];
-        for (const [index, current] of requested.entries()) {
-          let encoder;
-          try { encoder = await planner.select(current); } catch (_) {
-            runs.push({ codec: current, error: 'UNSUPPORTED', encoder: null, results: [], best: null, clips: 0 });
-            continue;
+        const settings = { profileId, bitrateKbps, qualityLevel, verifyMode };
+        // Off only checks the file's hash and size: the comparison times the
+        // two modes that verify a conversion, Quick and Full.
+        const runCodecs = async ({ select, device = null, progress = {} }) => {
+          const runs = [];
+          for (const [index, current] of requested.entries()) {
+            let encoder;
+            try { encoder = await select(current); } catch (_) { encoder = null; }
+            if (!encoder || (device && encoder.hardware !== true)) {
+              runs.push({ codec: current, error: 'UNSUPPORTED', encoder: null, results: [], best: null, clips: 0 });
+              continue;
+            }
+            const shown = Object.freeze({ family: encoder.family, codec: encoder.codec, hardware: encoder.hardware });
+            try {
+              const result = await runConverterBenchmark({
+                clips, countFrames, encoder: shown, tempRoot, signal: controller.signal, pathApi, fs: pfs,
+                verifyMode, compareVerifyModes: ['quick', 'full'],
+                // Energy per level when the server can measure it (files per Wh).
+                powerMeter: options.powerMeter,
+                onProgress: (step) => onProgress?.({ ...step, codec: current, codecIndex: index + 1, codecTotal: requested.length, ...progress }),
+                runLevel: benchmarkLevelRunner({ codec: current, ...settings, ...(device ? { device } : {}) })
+              });
+              runs.push({ codec: current, ...result });
+            } catch (error) {
+              if (error?.code === 'CANCELLED' || controller.signal.aborted) throw error;
+              runs.push({ codec: current, error: typeof error?.code === 'string' ? error.code : 'BENCHMARK_FAILED',
+                encoder: shown, results: [], best: null, clips: 0 });
+            }
           }
-          try {
-            const result = await runConverterBenchmark({
-              clips, countFrames, encoder, tempRoot, signal: controller.signal, pathApi, fs: pfs,
-              verifyMode, compareVerifyModes: ['off', 'quick', 'full'],
-              // Energy per level when the server can measure it (files per Wh).
-              powerMeter: options.powerMeter,
-              onProgress: (progress) => onProgress?.({ ...progress, codec: current, codecIndex: index + 1, codecTotal: requested.length }),
-              runLevel: benchmarkLevelRunner({ codec: current, profileId, bitrateKbps, qualityLevel, verifyMode })
-            });
-            runs.push({ codec: current, ...result });
-          } catch (error) {
-            if (error?.code === 'CANCELLED' || controller.signal.aborted) throw error;
-            runs.push({ codec: current, error: typeof error?.code === 'string' ? error.code : 'BENCHMARK_FAILED',
-              encoder, results: [], best: null, clips: 0 });
-          }
+          return runs;
+        };
+        const gpus = (await listDevices()).filter((device) => device.kind !== 'cpu');
+        if (gpus.length < 2 || typeof planner.selectFor !== 'function') {
+          const runs = await runCodecs({ select: (current) => planner.select(current) });
+          // Single-codec shape kept for older callers; codecs[] holds every run.
+          const first = runs.find((run) => !run.error) || runs[0];
+          return { ...first, codecs: runs };
         }
-        // Single-codec shape kept for older callers; codecs[] holds every run.
-        const first = runs.find((run) => !run.error) || runs[0];
-        return { ...first, codecs: runs };
+        // A codec a GPU cannot encode is unsupported on that GPU; it is never
+        // measured on the CPU instead. The same sample clips serve every GPU.
+        const devices = [];
+        for (const [deviceIndex, gpu] of gpus.entries()) {
+          const named = Object.freeze({ id: gpu.id, name: gpu.name });
+          devices.push({
+            device: named,
+            codecs: await runCodecs({
+              select: (current) => planner.selectFor(current, gpu),
+              device: gpu,
+              progress: { device: named, deviceIndex: deviceIndex + 1, deviceTotal: gpus.length }
+            })
+          });
+        }
+        return { devices };
       } finally {
         if (benchmarkController === controller) benchmarkController = null;
       }
@@ -915,6 +998,26 @@ async function createConverterRuntime(options = {}) {
     cancelBenchmark() {
       benchmarkController?.abort();
     },
+    // The devices conversions can be set to use, each with the encoder it
+    // proved for H.265 and AV1 (null: that GPU can only do it on the CPU),
+    // and the one a job without lanes uses. Proofs are kept, so only the
+    // first call runs test encodes.
+    async devices() {
+      const list = await listDevices();
+      deviceList = { at: Date.now(), list: Promise.resolve(list) };
+      const encoderFor = async (family, device) => {
+        try {
+          const chosen = await planner.selectFor(family, device);
+          return chosen.hardware === true || device.kind === 'cpu' ? chosen.codec : null;
+        } catch (_) { return null; }
+      };
+      const devices = await Promise.all(list.map(async (device) => {
+        const [h265, av1] = await Promise.all([encoderFor('h265', device), encoderFor('av1', device)]);
+        return { ...device, encoders: { h265, av1 } };
+      }));
+      return { devices, defaultDevice: await defaultDeviceOf(list) };
+    },
+    resolveDevice,
     // Every ffmpeg encoding right now, a benchmark's included (those carry
     // benchmark: true and a temporary job id).
     activeEncodes() {
@@ -972,6 +1075,7 @@ async function createConverterRuntime(options = {}) {
       configure: (settings) => auto.configure(settings),
       checkNow: () => auto.checkNow(),
       setConcurrency: (value) => auto.setConcurrency(value),
+      setLanes: (lanes) => auto.setLanes(lanes),
       ownerResumed: (jobId) => auto.ownerResumed(jobId),
       subscribe: (listener) => { autoListeners.add(listener); return () => autoListeners.delete(listener); }
     }),

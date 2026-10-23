@@ -87,6 +87,43 @@ function isValidConcurrency(value) {
   return Number.isSafeInteger(value) && value >= CONCURRENCY.min && value <= CONCURRENCY.max;
 }
 
+// Conversions at once per encoding device (several GPUs, set by hand per GPU):
+// `lanes` = [{ device, concurrency }]. A device is named by its PCI slot,
+// which stays the same when the kernel numbers the render nodes differently,
+// or 'cpu' for the software encoder. A job without lanes runs as before.
+const DEVICE_ID = /^(pci:[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]|cpu)$/;
+const LANES = deepFreeze({ maxEntries: 16 });
+
+function lanesError() {
+  return Object.assign(new Error('INVALID_LANES'), { code: 'INVALID_LANES' });
+}
+
+// null when there are no lanes; otherwise the lanes without the devices set
+// to 0. Throws INVALID_LANES on anything else.
+function normalizeLanes(value) {
+  if (value === undefined || value === null) return null;
+  if (!Array.isArray(value) || value.length < 1 || value.length > LANES.maxEntries) throw lanesError();
+  const seen = new Set();
+  const lanes = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw lanesError();
+    const keys = Object.keys(entry);
+    if (keys.length !== 2 || !keys.includes('device') || !keys.includes('concurrency')) throw lanesError();
+    const { device, concurrency } = entry;
+    if (typeof device !== 'string' || !DEVICE_ID.test(device) || seen.has(device)) throw lanesError();
+    if (!Number.isSafeInteger(concurrency) || concurrency < 0 || concurrency > CONCURRENCY.max) throw lanesError();
+    seen.add(device);
+    if (concurrency > 0) lanes.push({ device, concurrency });
+  }
+  const total = lanesTotal(lanes);
+  if (lanes.length === 0 || total < CONCURRENCY.min || total > CONCURRENCY.max) throw lanesError();
+  return lanes;
+}
+
+function lanesTotal(lanes) {
+  return Array.isArray(lanes) ? lanes.reduce((sum, lane) => sum + (Number(lane?.concurrency) || 0), 0) : 0;
+}
+
 function profile(name) {
   if (!PROFILES[name]) throw new RangeError(`Unknown conversion profile: ${name}`);
   return PROFILES[name];
@@ -173,4 +210,4 @@ function serializeSummary(counters) {
   };
 }
 
-module.exports = { PROFILES, CODECS, NETWORK_MODES, OUTPUT_MODES, ITEM_STATES, CONCURRENCY, TIMING_PHASES, addItemTimings, isValidConcurrency, CUSTOM_PROFILE_ID, CUSTOM_BITRATE_KBPS, isValidCustomBitrate, QUALITY_PROFILE_ID, QUALITY_LEVELS, isValidQualityLevel, hasSizeTarget, VERIFY_MODES, DEFAULT_VERIFY_MODE, isValidVerifyMode, effectiveVerifyMode, createEmptyCounters, targetOutputBytes, isWithinProfile, addCompletedFile, formatBytes, isTerminalState, serializeSummary };
+module.exports = { PROFILES, CODECS, NETWORK_MODES, OUTPUT_MODES, ITEM_STATES, CONCURRENCY, TIMING_PHASES, addItemTimings, isValidConcurrency, DEVICE_ID, LANES, normalizeLanes, lanesTotal, CUSTOM_PROFILE_ID, CUSTOM_BITRATE_KBPS, isValidCustomBitrate, QUALITY_PROFILE_ID, QUALITY_LEVELS, isValidQualityLevel, hasSizeTarget, VERIFY_MODES, DEFAULT_VERIFY_MODE, isValidVerifyMode, effectiveVerifyMode, createEmptyCounters, targetOutputBytes, isWithinProfile, addCompletedFile, formatBytes, isTerminalState, serializeSummary };
