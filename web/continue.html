@@ -33,7 +33,7 @@
       </ul>
     </div>
     <p class="small" style="margin-top:14px">To be sure it is your server, compare the certificate's SHA-256 fingerprint in the browser's certificate details with this one, which is also in the container log (<code>docker logs sentry-six-manager</code>):</p>
-    <p class="mono small" style="word-break:break-all;margin-top:6px">{{FINGERPRINT}}</p>
+    <p class="mono small" style="margin-top:6px">{{FINGERPRINT}}</p>
     <p class="small muted" style="margin-top:12px">Once a device has continued, it is not asked again (Chrome may ask again after a while). If a device that continued before suddenly warns again and you didn't change anything, don't continue: compare the fingerprint first.</p>
     <a class="btn solid" id="go" href="{{HTTPS_URL}}" style="margin-top:20px;justify-content:center">Continue to the secure page</a>
   </main>

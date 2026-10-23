@@ -267,7 +267,7 @@ html.reduce-effects *, html.reduce-effects *::before { transition: none !importa
   .side-card { flex-direction: row; align-items: center; gap: 4px; padding: 6px 8px; border-radius: 16px; overflow-x: auto; }
   .brand, .app.collapsed .brand { padding: 0 4px; }
   .page-head { flex-wrap: wrap; }
-  .brand-name, .collapse { display: none; }
+  .side .brand-name, .collapse { display: none; }
   .nav { flex: 1; flex-direction: row; gap: 2px; }
   .nav a, .app.collapsed .nav a { flex: 1 1 0; justify-content: center; padding: 10px 0; }
   .nav a span, .nav .count { display: none; }

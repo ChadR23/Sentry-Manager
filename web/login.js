@@ -18,7 +18,8 @@
   if (me.user) return location.replace(safeNext);
   if (location.protocol !== 'https:') $('insecure').hidden = false;
   if (me.fingerprint) {
-    $('fingerprint').querySelector('.mono').textContent = me.fingerprint;
+    // a line may break after each colon, never inside a byte
+    $('fingerprint').querySelector('.mono').replaceChildren(...me.fingerprint.split(':').flatMap((part, n) => (n ? [':', document.createElement('wbr'), part] : [part])));
     $('fingerprint').hidden = false;
   }
   const setup = me.needsSetup;

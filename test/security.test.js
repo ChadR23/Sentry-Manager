@@ -111,7 +111,8 @@ test('HTTPS, the setup code, cookies and password confirmation', { skip: !hasOpe
     assert.equal(intro.status, 200);
     const introHtml = await intro.text();
     const leafFp = new (require('crypto').X509Certificate)(fs.readFileSync(path.join(dir, 'data/tls/server.crt'))).fingerprint256;
-    assert.ok(introHtml.includes(leafFp), 'the certificate fingerprint to compare');
+    assert.ok(introHtml.replace(/<wbr>/g, '').includes(leafFp), 'the certificate fingerprint to compare');
+    assert.ok(!/word-break:\s*break-all/.test(introHtml), 'the fingerprint breaks between bytes, not inside one');
     assert.ok(introHtml.includes(`href="https://127.0.0.1:${s.port}/settings?x=1"`));
     assert.doesNotMatch(introHtml, /<form|<input/i, 'nothing to type on plain HTTP');
     assert.match(intro.headers.get('content-security-policy'), new RegExp(`connect-src https://127\\.0\\.0\\.1:${s.port};`));

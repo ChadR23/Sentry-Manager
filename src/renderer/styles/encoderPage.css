@@ -971,7 +971,7 @@ select.converter-select {
         margin: 0;
         padding: 12px max(20px, calc((100% - 760px) / 2)) calc(12px + env(safe-area-inset-bottom));
         border-radius: 0;
-        background: rgba(18, 22, 29, 0.97);
+        background: var(--fd-card, #12161d);
         box-shadow: 0 -12px 28px rgba(0, 0, 0, 0.35);
     }
 

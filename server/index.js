@@ -883,7 +883,7 @@ async function main() {
       } catch {
         // shown in the container log instead
       }
-      const page = continuePage.replace('{{FINGERPRINT}}', escHtml(fingerprint || 'shown in the container log')).replace('{{HTTPS_URL}}', escHtml(httpsUrl));
+      const page = continuePage.replace('{{FINGERPRINT}}', escHtml(fingerprint || 'shown in the container log').replace(/:/g, ':<wbr>')).replace('{{HTTPS_URL}}', escHtml(httpsUrl));
       res.writeHead(200, {
         'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
         'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'DENY',

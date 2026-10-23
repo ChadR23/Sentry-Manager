@@ -740,7 +740,7 @@
       ${state.vehicles.length ? `<table class="table" style="margin-top:14px"><thead><tr><th>Name</th><th>Footage</th><th>Status</th><th></th></tr></thead><tbody>
       ${state.vehicles.map((v) => `<tr><td><b>${esc(v.name)}</b><br><span class="muted small">${esc(v.timezone)}</span></td>
         <td class="small"><span class="mono">${esc(v.source.type === 'smb' ? v.source.share : v.source.path)}</span>${v.security ? `<br><span class="muted">${esc(v.security)}</span>` : ''}</td>
-        <td class="small">${v.share?.healthy ? (v.share.writable === false ? 'Read-only' : 'Connected') : esc(v.share?.lastError || 'Unavailable')}</td>
+        <td class="small"${v.share?.healthy || !v.share?.lastError ? ' style="white-space:nowrap"' : ''}>${v.share?.healthy ? (v.share.writable === false ? 'Read-only' : 'Connected') : esc(v.share?.lastError || 'Unavailable')}</td>
         <td class="actions"><a class="btn sm" href="#/settings/vehicle/${esc(v.id)}">Edit</a></td></tr>`).join('')}</tbody></table>` : '<p style="margin-top:12px">No vehicles yet.</p>'}
       ${editing ? vehicleForm(editing === 'new' ? null : state.vehicles.find((v) => v.id === editing)) : ''}</div>`;
 
@@ -827,10 +827,10 @@
     } else if (tls.error) {
       body += `<dt>Certificate</dt><dd>${esc(tls.error)}</dd></dl>`;
     } else {
-      body += `<dt>Certificate fingerprint (SHA-256)</dt><dd class="mono small" style="word-break:break-all">${esc(tls.certificate?.fingerprint || '?')}</dd>
+      body += `<dt>Certificate fingerprint (SHA-256)</dt><dd class="mono small">${esc(tls.certificate?.fingerprint || '?').replace(/:/g, ':<wbr>')}</dd>
         <dt>Certificate</dt><dd>Sentry Six Manager's own · stays the same until ${esc(tls.certificate?.validTo || '?')}, then renews by itself</dd>
         <dt>Certificate covers</dt><dd>${esc((tls.hostnames || []).join(', '))}</dd>
-        <dt>Certificate authority</dt><dd>valid until ${esc(ca?.validTo || '?')} · fingerprint <span class="mono small" style="word-break:break-all">${esc(ca?.fingerprint || '?')}</span></dd></dl>
+        <dt>Certificate authority</dt><dd>valid until ${esc(ca?.validTo || '?')} · fingerprint <span class="mono small">${esc(ca?.fingerprint || '?').replace(/:/g, ':<wbr>')}</span></dd></dl>
         <p style="margin-top:14px">Every phone, tablet and computer shows the browser's certificate warning once; continue past it (Advanced, then Proceed / visit this website / Accept the Risk) and the device remembers. To be sure it is this server, compare the certificate fingerprint above with the one in the browser's certificate details or the container log (<code>docker logs sentry-six-manager</code>). If a device that continued before warns again and you changed nothing here, don't continue.</p>
         <p style="margin-top:10px">No warning at all: install the certificate authority on a device instead (download it below and compare its fingerprint before trusting it). It can only vouch for local names and private IP addresses.</p>
         ${covered ? '' : `<div class="note amber">You opened this page as <b>${esc(host)}</b>, which the certificate does not cover, so it warns even on devices with the certificate authority installed. <button class="btn sm" type="button" id="sec-add-host" data-host="${esc(host)}">Add ${esc(host)}</button></div>`}
