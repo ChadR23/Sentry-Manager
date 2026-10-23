@@ -1,27 +1,30 @@
 'use strict';
 
 // Server monitor, data used: bytes per day from the cumulative network
-// counters (gaps lose nothing, a span over midnight is split by time),
-// counter resets and bogus jumps never counted, the saved readings that let
-// a restart of the app alone count on, and the network block of GET
-// /api/stats with today, this week and this month.
+// counters (gaps lose nothing, a span over midnight is split by time, and a
+// reading once a day puts each day's bytes in that day), counter resets and
+// bogus jumps never counted, the days of this container and of the whole
+// server kept apart, the saved readings that let a restart of the app alone
+// count on, the links counted (no tunnel over a counted link), and the
+// network block of GET /api/stats with today, this week and this month.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { Traffic, MAX_DELTA_B } = require('../server/stats/traffic');
+const { Traffic, MAX_BPS } = require('../server/stats/traffic');
+const { NetworkProvider } = require('../server/stats/network');
 const { dayKey } = require('../server/stats/energy');
 const M = require('./fixtures/stats/machines');
-const { setup, fakeClock } = require('./fixtures/stats/helpers');
+const { setup, fakeClock, trackedTimers } = require('./fixtures/stats/helpers');
 
 const MiB = 1048576;
 const H = 3600000;
 const DAY = 24 * H;
 // June: no clock change in any common time zone, so the hours below are real hours
 const at = (d, h = 12, min = 0) => new Date(2026, 5, d, h, min).getTime();
-const read = (ifs) => new Map(Object.entries(ifs).map(([name, [rx, tx, speedMbps = null]]) => [name, { rx, tx, speedMbps }]));
+const read = (ifs) => new Map(Object.entries(ifs).map(([name, [rx, tx]]) => [name, { rx, tx }]));
 const HERE = { scope: 'container', boot: 'b0a3c1d2-0000-4000-8000-000000000001', netns: 'net:[4026532001]' };
 const index = (map) => (name) => map[name] ?? null;
 const day = (tr, t) => tr.summary(t).today;
@@ -68,7 +71,7 @@ test('a span over midnight, or over several days, is split by time and adds up t
   const odd = new Traffic();
   odd.add(at(1, 7, 13), read({ eth0: [0, 0] }), HERE);
   odd.add(at(9, 16, 41), read({ eth0: [987654321, 123456789] }), HERE);
-  const all = Object.values(odd.toJSON().days);
+  const all = Object.values(odd.toJSON().days.container);
   assert.equal(all.length, 9);
   assert.equal(all.reduce((n, v) => n + v.rx, 0), 987654321);
   assert.equal(all.reduce((n, v) => n + v.tx, 0), 123456789);
@@ -78,7 +81,7 @@ test('a span over midnight, or over several days, is split by time and adds up t
   const long = new Traffic();
   long.add(at(1) - 400 * DAY, read({ eth0: [0, 0] }), HERE);
   long.add(at(1), read({ eth0: [400e6, 0] }), HERE);
-  const kept = long.toJSON().days;
+  const kept = long.toJSON().days.container;
   assert.equal(Object.keys(kept).length, 62);
   assert.equal(kept[dayKey(at(1))].rx, 0.5e6, 'midnight to noon of a 400-day span');
 });
@@ -87,8 +90,10 @@ test('week and month: the 7 calendar days ending today and the current calendar 
   const tr = new Traffic();
   tr.load({
     days: {
-      '2026-05-27': { rx: 1, tx: 10 }, '2026-05-28': { rx: 2, tx: 20 }, '2026-05-31': { rx: 4, tx: 40 },
-      '2026-06-01': { rx: 8, tx: 80 }, '2026-06-03': { rx: 16, tx: 160 }, '2026-06-04': { rx: 32, tx: 320 }
+      container: {
+        '2026-05-27': { rx: 1, tx: 10 }, '2026-05-28': { rx: 2, tx: 20 }, '2026-05-31': { rx: 4, tx: 40 },
+        '2026-06-01': { rx: 8, tx: 80 }, '2026-06-03': { rx: 16, tx: 160 }, '2026-06-04': { rx: 32, tx: 320 }
+      }
     }
   });
   assert.deepEqual(tr.summary(at(3)), {
@@ -129,35 +134,75 @@ test('a counter that went down starts a new count: reset, recreated link, 32-bit
   assert.deepEqual(back.summary(t), { today: null, week: null, month: null });
 });
 
-test('a jump bigger than the link could carry, or than 10 TB, is dropped', () => {
+test('a jump faster than any link is dropped; the speed a link reports is no limit, nor is a long gap', () => {
   const t = at(10);
-  const tr = new Traffic();
-  tr.add(t, read({ eth0: [0, 0, 1000] }), HERE);
-  // 1 Gbit/s moves 250 MB in 2 s, never 1 GB
-  tr.add(t + 2000, read({ eth0: [1e9, 1000, 1000] }), HERE);
-  assert.equal(day(tr, t), null);
-  tr.add(t + 4000, read({ eth0: [1e9 + 240e6, 2000, 1000] }), HERE);
-  assert.deepEqual(day(tr, t), { rxB: 240e6, txB: 1000 }, 'a full link is fine, and counted from the dropped reading on');
-  // the same full link for ten hours without watching: counted
-  tr.add(t + 4000 + 10 * H, read({ eth0: [1e9 + 240e6 + 4e12, 2000, 1000] }), HERE);
-  assert.equal(day(tr, t + 4000 + 10 * H).rxB, 240e6 + 4e12);
-  // a link that does not say its speed: still never more than 10 TB
-  const big = new Traffic();
-  big.add(t - 30 * DAY, read({ wg0: [0, 0] }), HERE);
-  big.add(t, read({ wg0: [MAX_DELTA_B + 1, 5] }), HERE);
-  assert.deepEqual(big.summary(t), { today: null, week: null, month: null });
-  big.add(t + 2000, read({ wg0: [MAX_DELTA_B + 1 + 64, 6] }), HERE);
-  assert.deepEqual(day(big, t), { rxB: 64, txB: 1 });
-  // nor 400 Gbit/s worth in 2 s
+  // 400 Gbit/s is 100 GB in 2 s: 200 GB is a bogus number, never a day's
   const fast = new Traffic();
-  fast.add(t, read({ veth: [0, 0] }), HERE);
-  fast.add(t + 2000, read({ veth: [200e9, 0] }), HERE);
+  fast.add(t, read({ eth0: [0, 0] }), HERE);
+  fast.add(t + 2000, read({ eth0: [200e9, 0] }), HERE);
   assert.equal(day(fast, t), null);
+  fast.add(t + 4000, read({ eth0: [200e9 + 64, 1] }), HERE);
+  assert.deepEqual(day(fast, t), { rxB: 64, txB: 1 }, 'counted from the dropped reading on');
+  assert.equal(MAX_BPS, 50e9);
+
+  // a virtual machine's emulated NIC says 1 Gbit/s and carries 300 MB/s for a
+  // minute, read every 2 s: every byte counts (the speed is not passed at all)
+  const vm = new Traffic();
+  vm.add(t, read({ eth0: [0, 0] }), HERE);
+  for (let i = 1; i <= 30; i++) vm.add(t + i * 2000, read({ eth0: [i * 600 * MiB, 0] }), HERE);
+  assert.deepEqual(day(vm, t), { rxB: 30 * 600 * MiB, txB: 0 });
+
+  // a busy server nobody looked at for a week: 10.6 TB (140 Mbit/s on average) is all counted
+  const week = new Traffic();
+  const fri = new Date(2026, 5, 5, 9).getTime();
+  week.add(fri, read({ enp3s0: [0, 0] }), HERE);
+  week.add(fri + 7 * DAY, read({ enp3s0: [10.6e12, 1e12] }), HERE);
+  assert.deepEqual(week.summary(fri + 7 * DAY).month, { rxB: 10.6e12, txB: 1e12 }, 'June 5 to 12');
+  // ...but never more than a link could carry in that time
+  const most = MAX_BPS * 7 * 86400 * 1.1;
+  week.add(fri + 14 * DAY, read({ enp3s0: [10.6e12 + most * 1.01, 1e12] }), HERE);
+  assert.deepEqual(week.summary(fri + 14 * DAY).month, { rxB: 10.6e12, txB: 1e12 });
+
   // NaN, negative and missing counters are no reading for that link
   const odd = new Traffic();
   odd.add(t, new Map([['a', { rx: NaN, tx: 1 }], ['b', { rx: -5, tx: 1 }], ['c', null], ['d', { rx: 1, tx: 1 }]]), HERE);
   odd.add(t + 2000, new Map([['a', { rx: 9, tx: 9 }], ['b', { rx: 9, tx: 9 }], ['c', { rx: 9, tx: 9 }], ['d', { rx: 2, tx: 2 }]]), HERE);
   assert.deepEqual(day(odd, t), { rxB: 1, txB: 1 }, 'only d had a reading to count from');
+});
+
+test('this container and the whole server (pid: host) keep their own days; the scope read last is shown', () => {
+  const t = at(10);
+  const HOST = { scope: 'host', boot: HERE.boot, netns: null };
+  const tr = new Traffic();
+  tr.add(t - H, read({ eth0: [0, 0] }), HERE);
+  tr.add(t, read({ eth0: [5e9, 1e9] }), HERE);
+  assert.deepEqual(day(tr, t), { rxB: 5e9, txB: 1e9 });
+  // the owner adds pid: host: the server's NIC, with its own count from its first reading
+  tr.add(t + 60000, read({ enp3s0: [9e11, 9e11] }), HOST);
+  assert.equal(tr.summary(t + 60000).today, null, 'nothing of the server measured yet; never the container\'s bytes');
+  tr.add(t + 62000, read({ enp3s0: [9e11 + 2e6, 9e11 + 1e6] }), HOST);
+  assert.deepEqual(tr.summary(t + 62000), { today: { rxB: 2e6, txB: 1e6 }, week: { rxB: 2e6, txB: 1e6 }, month: { rxB: 2e6, txB: 1e6 } });
+
+  // saved and loaded: both scopes, and which one is shown (with pid: host no
+  // readings can be saved, so the scope is kept on its own)
+  const json = JSON.parse(JSON.stringify(tr));
+  assert.equal(json.scope, 'host');
+  assert.equal(json.last, null);
+  assert.deepEqual(json.days, { container: { [dayKey(t)]: { rx: 5e9, tx: 1e9 } }, host: { [dayKey(t)]: { rx: 2e6, tx: 1e6 } } });
+  const again = new Traffic();
+  again.load(json);
+  assert.deepEqual(again.summary(t).today, { rxB: 2e6, txB: 1e6 });
+
+  // and back to this container: its own days again, counted on from a new start
+  again.add(t + 120000, read({ eth0: [100, 100] }), HERE);
+  again.add(t + 122000, read({ eth0: [300, 200] }), HERE);
+  assert.deepEqual(again.summary(t + 122000).today, { rxB: 5e9 + 200, txB: 1e9 + 100 });
+
+  // a scope that is neither (a damaged file) is shown as this container
+  const odd = new Traffic();
+  odd.load({ scope: 'mars', days: { mars: { [dayKey(t)]: { rx: 1, tx: 1 } }, ['__proto__']: { [dayKey(t)]: { rx: 1, tx: 1 } } } });
+  assert.deepEqual(JSON.parse(JSON.stringify(odd)), { scope: 'container', days: { container: {}, host: {} }, last: null });
+  assert.equal(Object.prototype[dayKey(t)], undefined);
 });
 
 test('interfaces that come and go are counted each on its own', () => {
@@ -178,9 +223,11 @@ test('interfaces that come and go are counted each on its own', () => {
   assert.deepEqual(day(tr, t), { rxB: 500 + 1000, txB: 50 + 500 });
   tr.add(t + 12000, read({ eth0: [600, 60], wg0: [9100, 9010] }), HERE);
   assert.deepEqual(day(tr, t), { rxB: 600 + 1100, txB: 60 + 510 });
-  // another namespace or scope (the reprobe found the host's links): every link starts again
-  tr.add(t + 14000, read({ eth0: [700, 70], wg0: [9200, 9020] }), { ...HERE, scope: 'host' });
+  // another namespace (or scope, see below): every link starts again
+  tr.add(t + 14000, read({ eth0: [700, 70], wg0: [9200, 9020] }), { ...HERE, netns: 'net:[4026532999]' });
   assert.deepEqual(day(tr, t), { rxB: 600 + 1100, txB: 60 + 510 });
+  tr.add(t + 16000, read({ eth0: [800, 80], wg0: [9300, 9030] }), { ...HERE, netns: 'net:[4026532999]' });
+  assert.deepEqual(day(tr, t), { rxB: 700 + 1200, txB: 70 + 520 });
 });
 
 test('saved and loaded: the days and the last readings come back, damaged entries do not', () => {
@@ -199,20 +246,22 @@ test('saved and loaded: the days and the last readings come back, damaged entrie
   const many = new Traffic();
   const daysIn = {};
   for (let i = 0; i < 80; i++) daysIn[dayKey(t - i * DAY)] = { rx: i, tx: i };
-  many.load({ days: daysIn });
-  assert.equal(Object.keys(many.toJSON().days).length, 62);
+  many.load({ days: { container: daysIn, host: daysIn } });
+  assert.equal(Object.keys(many.toJSON().days.container).length, 62);
+  assert.equal(Object.keys(many.toJSON().days.host).length, 62);
   assert.deepEqual(many.summary(t).today, { rxB: 0, txB: 0 });
 
   // garbage from a damaged or hand-edited file
   const bad = new Traffic();
   bad.load({
-    days: { bad: { rx: 1, tx: 1 }, '2026-06-10': { rx: -1, tx: 1 }, '2026-06-09': 'x', ['__proto__']: { rx: 1, tx: 1 }, '2026-06-08': { rx: 5, tx: 6 } },
+    days: { container: { bad: { rx: 1, tx: 1 }, '2026-06-10': { rx: -1, tx: 1 }, '2026-06-09': 'x', ['__proto__']: { rx: 1, tx: 1 }, '2026-06-08': { rx: 5, tx: 6 } }, host: 'x' },
     last: { ...HERE, ifaces: { 'a/b': { rx: 1, tx: 1, t, ifindex: 2 }, eth0: { rx: 1, tx: 1, t, ifindex: 0 }, wg0: { rx: 'x', tx: 1, t, ifindex: 3 }, ok0: { rx: 1, tx: 1, t, ifindex: 4 } } }
   });
-  assert.deepEqual(Object.keys(bad.toJSON().days), ['2026-06-08']);
+  assert.deepEqual(Object.keys(bad.toJSON().days.container), ['2026-06-08']);
+  assert.deepEqual(Object.keys(bad.toJSON().days.host), []);
   assert.deepEqual(Object.keys(bad.toJSON().last.ifaces), ['ok0']);
   assert.equal(Object.prototype.rx, undefined);
-  for (const junk of [null, 'x', 5, [], { days: 'x', last: 'y' }, { last: { boot: 1, netns: 'n', ifaces: {} } }]) {
+  for (const junk of [null, 'x', 5, [], { days: 'x', last: 'y' }, { days: { container: [1, 2] } }, { last: { boot: 1, netns: 'n', ifaces: {} } }]) {
     const j = new Traffic();
     assert.doesNotThrow(() => j.load(junk));
     assert.deepEqual(j.summary(t), { today: null, week: null, month: null });
@@ -326,7 +375,8 @@ test('the engine saves the data used with the history; an app restart loses noth
     await first.run(2);
     first.done();
     const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
-    assert.deepEqual(saved.traffic.days, { [dayKey(clock.t)]: { rx: 4e6, tx: 4e5 } });
+    assert.deepEqual(saved.traffic.days, { container: { [dayKey(clock.t)]: { rx: 4e6, tx: 4e5 } }, host: {} });
+    assert.equal(saved.traffic.scope, 'container');
     assert.deepEqual(saved.traffic.last, {
       scope: 'container', boot: HERE.boot, netns: HERE.netns, ifaces: { eth0: { rx: 1000 + 2 * 2e6, tx: 1000 + 2 * 2e5, t: clock.t, ifindex: 17 } }
     });
@@ -370,6 +420,138 @@ test('the engine saves the data used with the history; an app restart loses noth
   }
 });
 
+test('tick(): one reading a day with no page open, so each day holds its own bytes; no timer, no sampling', () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sm-stats-tick-'));
+  const file = path.join(dataDir, 'stats-history.json');
+  const clock = fakeClock(new Date(2026, 9, 19, 9).getTime()); // Monday 09:00
+  const set = (d, h, min = 0, sec = 0) => { clock.t = new Date(2026, 9, d, h, min, sec).getTime(); };
+  const GB = 1024 ** 3;
+  const timers = trackedTimers();
+  const engine = () => setup(known(), { appPid: 8, clock, dataDir, timers });
+  let s = engine();
+  const eth0 = (rx, tx) => {
+    s.m.file('proc/net/dev', M.netDev({ lo: [1, 1], eth0: [rx, tx] }));
+    s.m.file('proc/1/net/dev', M.netDev({ lo: [1, 1], eth0: [rx, tx] }));
+  };
+  const days = () => JSON.parse(fs.readFileSync(file, 'utf8')).traffic.days.container;
+  try {
+    eth0(0, 0);
+    s.stats.tick();
+    assert.equal(s.stats.sampling, false);
+    assert.equal(timers.live.size, 0, 'no timer, and nothing sampled');
+    assert.equal(s.stats.snapshot().at, null);
+    assert.deepEqual(s.stats.traffic(), { today: null, week: null, month: null }, 'the first reading starts the count');
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).traffic.last.ifaces, { eth0: { rx: 0, tx: 0, t: clock.t, ifindex: 17 } }, 'and is saved');
+
+    // 40 GB on Monday night; the calls during the day read nothing more
+    set(19, 23, 59);
+    eth0(40 * GB, GB);
+    s.stats.tick();
+    assert.equal(s.stats.traffic().today, null);
+    // the housekeeping's call in the minute after each midnight reads them once
+    for (const d of [20, 21, 22, 23]) {
+      set(d, 0, 0, 30);
+      s.stats.tick();
+      set(d, 0, 1, 30);
+      s.stats.tick();
+    }
+    assert.equal(timers.live.size, 0);
+    // Friday 09:00: a page opens
+    set(23, 9);
+    s.stats.sampleNow();
+    const monRx = Math.round(40 * GB * (15 * H) / (15 * H + 30000));
+    const monTx = Math.round(GB * (15 * H) / (15 * H + 30000));
+    assert.deepEqual(days(), {
+      '2026-10-19': { rx: monRx, tx: monTx },
+      '2026-10-20': { rx: 40 * GB - monRx, tx: GB - monTx }, // its first 30 s, a 1800th of the span
+      '2026-10-21': { rx: 0, tx: 0 }, '2026-10-22': { rx: 0, tx: 0 }, '2026-10-23': { rx: 0, tx: 0 }
+    }, 'read and saved at each midnight');
+    const net = s.stats.snapshot().network;
+    assert.deepEqual(net.today, { rxB: 0, txB: 0 }, 'nothing moved on Friday, and Friday says so');
+    assert.deepEqual(net.week, { rxB: 40 * GB, txB: GB });
+
+    // a sample read them today already: the next day's first call is the next reading
+    set(23, 10);
+    eth0(40 * GB + 5e6, GB);
+    s.stats.tick();
+    assert.deepEqual(s.stats.traffic().today, { rxB: 0, txB: 0 });
+    s.stats.stop();
+    // stopped: nothing more
+    set(24, 0, 0, 30);
+    s.stats.tick();
+    assert.equal(days()['2026-10-24'], undefined);
+    s.m.cleanup();
+
+    // the app restarted (the same boot and namespace): its first call counts on from the saved reading
+    s = engine();
+    eth0(40 * GB + 8e6, GB + 1e6);
+    set(24, 0, 0, 40);
+    s.stats.tick();
+    // from Friday's 09:00 sample: 15 h on Friday, 40 s on Saturday
+    const share = (b) => b - Math.round(b * (15 * H) / (15 * H + 40000));
+    assert.deepEqual(s.stats.traffic().today, { rxB: share(8e6), txB: share(1e6) });
+    assert.deepEqual(days()['2026-10-23'], { rx: 8e6 - share(8e6), tx: 1e6 - share(1e6) });
+    assert.equal(timers.live.size, 0);
+  } finally {
+    s.done();
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('the links counted: a VPN or tunnel only when no link that carries it is there', () => {
+  const links = (spec, fn) => {
+    const m = M.build(spec);
+    try {
+      let t = 0;
+      const n = new NetworkProvider({ procRoot: m.proc, sysRoot: m.sys, now: () => t });
+      n.probe();
+      return fn(n, m, (ms) => { t += ms; });
+    } finally {
+      m.cleanup();
+    }
+  };
+  const names = (n) => n.sample().interfaces.map((i) => i.name);
+  // pid: host on a server with Tailscale, WireGuard, ZeroTier and PPPoE: only
+  // the NIC (the tunnels' bytes cross it as well), for the rates and the data used
+  links({
+    'proc/net/dev': M.netDev({ lo: [1, 1], eth0: [1, 1] }),
+    'proc/1/net/dev': M.netDev({ lo: [1, 1], enp3s0: [1e9, 1e9], tailscale0: [5e8, 5e8], wg0: [1e8, 1e8], zt5u4y6abc: [1, 1], ppp0: [1, 1], docker0: [1, 1] })
+  }, (n) => {
+    assert.equal(n.scope, 'host');
+    assert.deepEqual(names(n), ['enp3s0']);
+    assert.deepEqual([...n.counters.keys()], ['enp3s0']);
+  });
+  // its own links (network_mode: host, or a VPN container's network): sysfs
+  // tells a WireGuard or tun link by any name
+  const own = M.netDev({ lo: [1, 1], eth0: [1, 1], mullvad: [1, 1], office: [1, 1] });
+  links({
+    'proc/net/dev': own, 'proc/1/net/dev': own,
+    'sys/class/net/eth0/type': '1\n', 'sys/class/net/mullvad/type': '65534\n', 'sys/class/net/office/type': '1\n', 'sys/class/net/office/tun_flags': '0x1002\n'
+  }, (n) => assert.deepEqual(names(n), ['eth0']));
+  // a modem's ppp0 is the only way out: counted
+  const modem = M.netDev({ lo: [1, 1], ppp0: [5, 5] });
+  links({ 'proc/net/dev': modem, 'proc/1/net/dev': modem }, (n) => assert.deepEqual(names(n), ['ppp0']));
+
+  // the daily reading counts the same links and leaves the live rates alone
+  const dev = (rx) => M.netDev({ lo: [1, 1], eth0: [rx, 0], wg0: [rx, 0] });
+  links({ 'proc/net/dev': dev(0), 'proc/1/net/dev': dev(0) }, (n, m, advance) => {
+    n.sample();
+    advance(1000);
+    m.file('proc/net/dev', dev(5000));
+    n.read();
+    assert.deepEqual([...n.counters], [['eth0', { rx: 5000, tx: 0 }]]);
+    assert.equal(n.readAt, 1000);
+    advance(1000);
+    m.file('proc/net/dev', dev(8000));
+    assert.deepEqual(n.sample().interfaces, [{ name: 'eth0', speedMbps: null, rxBps: 4000, txBps: 0 }], 'over the 2 s since the last sample');
+    // nothing readable: no counters, the last reading's time is kept
+    m.remove('proc/net/dev');
+    n.read();
+    assert.equal(n.counters, null);
+    assert.equal(n.readAt, 2000);
+  });
+});
+
 // ---- the Network tile (web/app.js's drawing block, as test/screens.test.js runs it)
 
 function serverBody() {
@@ -406,4 +588,10 @@ test('the Network tile shows today, this week and this month under the live rows
   }
   assert.equal(rows(zero).length, rows(used).length);
   assert.ok(used.includes('↓\u00a012.4\u00a0GB · ↑\u00a01.1\u00a0GB'), 'a narrow tile wraps at the dot only');
+  // one interface: one list; two or more: theirs, then the totals in a list of
+  // their own, so a long interface name never narrows (and wraps) their values
+  const lists = (html) => [...html.matchAll(/<dl class="nd-kv">(.*?)<\/dl>/g)].map((m) => rows(m[1]).map((r) => r[0]));
+  assert.deepEqual(lists(used), [['Counted for', 'Today', 'This week', 'This month']]);
+  const two = tile({ interfaces: [{ name: 'eth0', speedMbps: null, rxBps: 4096, txBps: 4096 }, { name: 'enp3s0', speedMbps: 2500, rxBps: 4096, txBps: 4096 }], today: null });
+  assert.deepEqual(lists(two), [['eth0', 'enp3s0 · 2.5 Gbit/s'], ['Counted for', 'Today', 'This week', 'This month']]);
 });

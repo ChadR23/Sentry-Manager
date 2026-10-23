@@ -2,7 +2,9 @@
 
 // Server monitor ("nerd stats"). Samples the machine every 2 s while a page
 // is watching (touch) or something needs it (a conversion or a benchmark:
-// isBusy / markJob), and runs no timers at all otherwise.
+// isBusy / markJob), and runs no timers at all otherwise. The app's own
+// once-a-minute housekeeping calls tick(), which reads the network counters
+// once a day, so the data used lands on the right day with nobody watching.
 // Everything comes from this machine's /proc and /sys (plus nvidia-smi on an
 // NVIDIA host); nothing leaves the server.
 //
@@ -28,7 +30,7 @@ const { FilesystemsProvider } = require('./filesystems');
 const { HostInfo, probeFfmpeg } = require('./host');
 const { Alerts } = require('./alerts');
 const { History, SERIES } = require('./history');
-const { Energy } = require('./energy');
+const { Energy, dayKey } = require('./energy');
 const { Traffic } = require('./traffic');
 
 const WATCH_MS = 15000; // a page counts as watching this long after its last request
@@ -99,6 +101,7 @@ function createStats(options = {}) {
   let probedAt = null;
   let lastSave = now();
   let dirty = false;
+  let tickedDay = null;
   let ffmpegVersion = options.ffmpegVersion === undefined ? null : options.ffmpegVersion;
   let ffmpegAsked = options.ffmpegVersion !== undefined;
   const warned = new Set();
@@ -397,6 +400,29 @@ function createStats(options = {}) {
     /** Data used: { today, week, month }, each { rxB, txB } or null (not measured yet). */
     traffic() {
       return traffic.summary(now());
+    },
+
+    /**
+     * Called once a minute by the app's housekeeping (the engine runs no
+     * timer of its own). On the first call of a day, while nothing samples,
+     * the network counters are read once and saved: a day nobody watched
+     * gets its own bytes, not a share of a gap over several days. The very
+     * first call starts the count.
+     */
+    tick() {
+      if (stopped || sampling) return;
+      const t = now();
+      const day = dayKey(t);
+      if (day === tickedDay) return;
+      tickedDay = day;
+      // a sample read them today already
+      if (network.readAt !== null && dayKey(network.readAt) === day) return;
+      if (probedAt === null) guard('network', () => network.probe());
+      guard('network', () => network.read());
+      if (!network.counters) return;
+      guard('traffic', () => traffic.add(network.readAt, network.counters, network.where(), (name) => network.ifindex(name)));
+      dirty = true;
+      save();
     },
 
     /** Energy from now on also counts for this job (null: no job). A job keeps sampling running. */

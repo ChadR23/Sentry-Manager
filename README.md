@@ -84,8 +84,9 @@ what the machine is doing, live, so you don't need Glances or another tool:
   unreachable share, and low memory; they also go to Notifications.
 - **History**: the last 24 hours, and a CSV download.
 
-It only measures while a page shows it or a conversion runs, and every
-number stays on the server. A tile appears only when the server provides its
+It only measures while a page shows it or a conversion runs (and reads the
+network's byte counters once a day, so the data used lands on the right
+day), and every number stays on the server. A tile appears only when the server provides its
 numbers. CPU watts come from the CPU's energy counters, which
 `docker-compose.yml` passes in read-only by default
 (`- /sys/devices/virtual/powercap:/host/powercap:ro`; an older compose file

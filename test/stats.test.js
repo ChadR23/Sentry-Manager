@@ -339,7 +339,8 @@ test('a bridge, its bond and its port carry the same bytes: counted once', async
   try {
     const snap = await s.run(1);
     assert.equal(snap.network.scope, 'host');
-    assert.deepEqual(snap.network.interfaces.map((i) => [i.name, i.rxBps]), [['br0', 1e6], ['wg0', 0]]);
+    // wg0's bytes cross br0 as well
+    assert.deepEqual(snap.network.interfaces.map((i) => [i.name, i.rxBps]), [['br0', 1e6]]);
   } finally {
     s.done();
   }

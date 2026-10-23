@@ -1109,6 +1109,8 @@ async function main() {
     policies.tick().then(() => announce('bin')).catch(() => {});
     updates.tick().catch(() => {});
     db.pruneSessions();
+    // data used: the network counters once a day, with no page open too
+    stats.tick();
   }, 60 * 1000).unref();
   setInterval(() => {
     for (const v of vehicles.list()) if (vehicles.share(v.id)?.isHealthy()) inventory.scan(v.id).then(() => announce('inventory')).catch(() => {});

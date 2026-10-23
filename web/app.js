@@ -449,11 +449,12 @@
     const one = ifs.length === 1 ? ifs[0] : null;
     return ndTile('Network', one ? [one.name, linkSpeed(one.speedMbps)].filter(Boolean).join(' · ') : `${ifs.length} interfaces`,
       ndBig(`↓ ${rate(sum('rxBps'))}`, `↑ ${rate(sum('txBps'))}`) + sparkBlock(spark(points, 'var(--info)', 64 * 1024), day)
+      + ndKv(one ? [] : ifs.map((i) => [[i.name, linkSpeed(i.speedMbps)].filter(Boolean).join(' · '), `↓ ${rate(i.rxBps)} · ↑ ${rate(i.txBps)}`]))
+      // a list of its own, so long interface names never narrow its values;
+      // the data used is always shown (0 B too) so the tile keeps its height
+      // between polls, and a narrow tile wraps it at the dot only
       + ndKv([
-        ...(one ? [] : ifs.map((i) => [[i.name, linkSpeed(i.speedMbps)].filter(Boolean).join(' · '), `↓ ${rate(i.rxBps)} · ↑ ${rate(i.txBps)}`])),
         ['Counted for', net.scope === 'host' ? 'the whole server' : 'this container'],
-        // data used, always shown (0 B too) so the tile keeps its height between polls;
-        // a narrow tile wraps it at the dot, never inside "↓ 12.4 GB"
         ...[['Today', net.today], ['This week', net.week], ['This month', net.month]]
           .map(([k, u]) => [k, [['↓', u?.rxB], ['↑', u?.txB]].map(([arrow, b]) => `${arrow} ${size(b)}`.replace(/ /g, '\u00a0')).join(' · ')])
       ]));
