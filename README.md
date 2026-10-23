@@ -67,6 +67,28 @@ To use a GPU, uncomment its block in `docker-compose.yml` (see [GPU](#gpu)).
 The overview shows each vehicle's archive, the free space on its share and
 the Recycle Bin.
 
+**Server** (under the vehicle cards, behind the *Nerd stats* switch) shows
+what the machine is doing, live, so you don't need Glances or another tool:
+
+- **CPU**: model, cores, total and per-core use, clock, temperature, load,
+  and how much of it this app and its conversions use.
+- **GPU** (Intel, AMD and NVIDIA, one tile each): busy and video-engine use,
+  memory, clock, temperature, watts.
+- **Power**: CPU and GPU watts, kWh today and this week, and the cost when
+  you enter your electricity price in Settings → System.
+- **Memory, storage** (each disk's reads, writes and temperature; space and
+  answer time of the data volume and every footage share), **network** and
+  every **sensor** and fan the server reports.
+- **Alerts** for a hot CPU, GPU or disk, a disk almost full, a slow or
+  unreachable share, and low memory; they also go to Notifications.
+- **History**: the last 24 hours, and a CSV download.
+
+It only measures while a page shows it or a conversion runs, and every
+number stays on the server. A tile appears only when the server provides its
+numbers; two optional lines in `docker-compose.yml` add more: CPU watts
+(the CPU's energy counters, read-only) and the whole server's processes and
+network (`pid: host`).
+
 ![Footage](docs/images/footage.png)
 
 **Footage** shows one card per day, newest first, with the newest day
@@ -101,11 +123,20 @@ copies somewhere else is a choice you make in the Output section.
   more in every video frame. The converter copies that into the H.265 or AV1
   file and checks it before it saves anything. Verification cannot be turned
   off.
-- **Never converted twice.** Clips that are already H.265 or AV1 are skipped,
-  so re-runs and automatic conversion never re-encode footage.
+- **Never converted twice, and skipped at once.** The app remembers every
+  clip it converted (name, size and date in the data folder), and checks
+  other clips' MP4 header while it scans the folders, so clips that are
+  already H.265 or AV1 are skipped right away and never wait for a
+  conversion slot. Waiting and time remaining count only clips that will be
+  converted.
+- **Hardware panel.** While a conversion runs, Live run shows the encoder
+  and GPU in use, video-engine and CPU load, watts and temperatures, each
+  clip's speed and progress, the energy used so far (kWh, clips and GB saved
+  per kWh, cost) and what limits the speed (the GPU, the CPU or the share).
 - **Benchmark.** Runs the real converter on copies of a few of your clips
   at 1, 2, 4, 6 and 8 at once, on the server, and suggests the lightest
-  setting within 5% of the fastest. Your footage is only read.
+  setting within 5% of the fastest, and, when the server reports its power,
+  the most efficient one (files per kWh). Your footage is only read.
 - **Safe replacement.** In replace mode an original is only removed after its
   converted copy is verified, and only if it is still exactly the file that
   was converted (device, inode, size and SHA-256 are checked). The copy is
