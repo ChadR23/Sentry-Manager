@@ -10,6 +10,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 const { createPosixOwnedFs } = require('./posixOwnedFs');
+const { gpuDisplayName } = require('./stats/gpu');
 
 const SRC = path.join(__dirname, '..', 'src');
 const { createConverterLifecycle, createConverterRuntime } = require(path.join(SRC, 'main/converter/runtime'));
@@ -18,6 +19,20 @@ const RETRYABLE = new Set([
   'ENOENT', 'ENOTCONN', 'ENETDOWN', 'EHOSTUNREACH', 'ECONNRESET', 'ETIMEDOUT', 'EIO',
   'EHOSTDOWN', 'ESTALE', 'EAGAIN', 'ECONNABORTED', 'ENETUNREACH'
 ]);
+
+// Names the converter's encoding devices as Overview > Server names the GPUs
+// (the converter itself never reads server code).
+function createDeviceNameOf() {
+  const names = new Map();
+  return ({ vendor, vendorId, deviceId, driver, sysDevice }) => {
+    const key = `${vendorId}:${deviceId}:${driver}:${sysDevice}`;
+    if (!names.has(key)) {
+      if (names.size > 64) names.clear();
+      names.set(key, gpuDisplayName({ dev: sysDevice, driver, kind: vendor, vendor, vendorId, deviceId }));
+    }
+    return names.get(key);
+  };
+}
 
 function createNetwork() {
   return {
@@ -68,6 +83,7 @@ function createConverterHost({ dataDir, tempDir, ffmpegPath = 'ffmpeg', ffprobeP
         removeOwned: owned.removeOwned,
         renameExclusive: owned.renameExclusive,
         network: createNetwork(),
+        deviceNameOf: createDeviceNameOf(),
         // Probing, verifying and writing telemetry for a Tesla clip take
         // seconds to a few minutes; one still running after 30 minutes is
         // stuck (the converter's own limit is 12 hours) and fails its clip

@@ -12,6 +12,7 @@
 
 const crypto = require('crypto');
 const nodePath = require('path');
+const { normalizeLanes, lanesTotal } = require('./contracts');
 
 const INTERVAL_MINUTES = Object.freeze([15, 30, 60, 180, 360, 720, 1440]);
 const SETTINGS_FILE = 'settings.json';
@@ -42,6 +43,20 @@ function isHour(value) {
   return Number.isSafeInteger(value) && value >= 0 && value <= 23;
 }
 
+// Saved job settings with conversions at once per GPU: the total is the
+// concurrency; lanes that are not valid are left out (plain concurrency).
+function withValidLanes(config) {
+  if (!config || config.lanes === undefined) return config;
+  let lanes = null;
+  try { lanes = normalizeLanes(config.lanes); } catch (_) { lanes = null; }
+  const result = { ...config };
+  if (lanes) {
+    result.lanes = lanes;
+    result.concurrency = lanesTotal(lanes);
+  } else delete result.lanes;
+  return result;
+}
+
 function normalizeSettings(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw autoError('INVALID_AUTO_SETTINGS');
   const settings = {
@@ -51,7 +66,7 @@ function normalizeSettings(value) {
     holdManual: value.holdManual === true,
     keepRunning: value.keepRunning === true,
     openAtLogin: value.openAtLogin === true,
-    config: value.config && typeof value.config === 'object' && !Array.isArray(value.config) ? { ...value.config } : null
+    config: value.config && typeof value.config === 'object' && !Array.isArray(value.config) ? withValidLanes({ ...value.config }) : null
   };
   if (value.window?.follow === 'off-peak') {
     settings.window = { follow: 'off-peak' };
@@ -432,8 +447,20 @@ function createAutoConverter(options = {}) {
     // Parallel conversions changed on the running automatic job: later
     // automatic jobs use the same number.
     async setConcurrency(value) {
-      if (!settings.config || settings.config.concurrency === value) return getState();
-      settings = { ...settings, config: { ...settings.config, concurrency: value } };
+      if (!settings.config || (settings.config.concurrency === value && !settings.config.lanes)) return getState();
+      // the running job has one number for all; the saved setting follows it
+      const { lanes: _lanes, ...config } = settings.config;
+      settings = { ...settings, config: { ...config, concurrency: value } };
+      await writeJson(SETTINGS_FILE, settings);
+      changed();
+      return getState();
+    },
+    // Conversions at once per GPU changed on the running automatic job.
+    async setLanes(value) {
+      const lanes = normalizeLanes(value);
+      if (!settings.config || !lanes) return getState();
+      if (JSON.stringify(settings.config.lanes || null) === JSON.stringify(lanes)) return getState();
+      settings = { ...settings, config: { ...settings.config, lanes, concurrency: lanesTotal(lanes) } };
       await writeJson(SETTINGS_FILE, settings);
       changed();
       return getState();
