@@ -24,7 +24,7 @@ no model names in code or commits, `npm test` passes.
 
 ```js
 createDeviceDiscovery({ fs, pathApi, platform, devRoot = '/dev', sysRoot = '/sys',
-  runCommand, statRdev, nameOf }) -> { list(): Promise<Device[]> }
+  runCommand, statRdev, nameOf, nvidiaDeadlineMs = 12_000 }) -> { list(): Promise<Device[]> }
 ```
 
 ```js
@@ -53,6 +53,9 @@ Device = {
 - **NVIDIA:** `nvidia-smi --query-gpu=index,pci.bus_id,name --format=csv,noheader`
   (10 s timeout; a missing binary or a non-zero exit means no NVIDIA devices).
   `00000000:01:00.0` normalises to `0000:01:00.0` (lower case, last 12 chars).
+  The runner answers only once nvidia-smi has exited, which one stuck in a wedged
+  driver never does: the list never waits past `nvidiaDeadlineMs` (12 s) and then
+  has no NVIDIA devices, and no other nvidia-smi starts until the stuck one exits.
 - **CPU:** always last: `{ id: 'cpu', kind: 'cpu', name: 'CPU (software encoder)' }`.
 - Order: DRI by node name, then NVIDIA by index, then CPU. On a platform other than
   linux the list is just `[cpu]`.
@@ -78,6 +81,13 @@ Device = {
 - No hardware candidate works on that device -> it returns the CPU encoder
   (`hardware: false`) and logs one warning per device and family:
   `[CONVERTER] <name> cannot encode <H.265|AV1>; its conversions use the CPU encoder.`
+- A candidate whose probe only timed out proves nothing: that call returns the CPU
+  encoder with `timedOut: true`, caches nothing and logs no warning; the next call
+  probes again.
+- `selectFor(family, device, { probe: false })` only gives a choice made already
+  (null otherwise), and `select(family, { probe: false })` likewise. They are for
+  the device list while something converts: a probe a busy GPU fails (NVENC
+  sessions used up) would otherwise rule it out until a restart.
 - `planner.select(family)` (no device) stays exactly as it is today.
 
 Device arguments. With a `device`, `buildEncodeArgs` and `decodeAccelArgs` take
@@ -91,9 +101,12 @@ Device arguments. With a `device`, `buildEncodeArgs` and `decodeAccelArgs` take
 
 Without a device, all three produce exactly today's arguments (tests pin this).
 
-The CUDA index must match nvidia-smi's order. Add `CUDA_DEVICE_ORDER=PCI_BUS_ID` to
-the Dockerfile `ENV`, and have the runtime set `process.env.CUDA_DEVICE_ORDER ||= 'PCI_BUS_ID'`
-before spawning ffmpeg, for runs outside the image.
+The CUDA index must match nvidia-smi's order: the runtime spawns every process whose
+arguments name an NVIDIA GPU by index (`-gpu N`, `-hwaccel_device N`) with
+`CUDA_DEVICE_ORDER=PCI_BUS_ID`. Every other process keeps the server's environment
+(CUDA's own "fastest first" order), so a job without lanes on a server with two
+NVIDIA cards encodes on the card it always did. Nothing sets it for the whole
+container.
 
 ## 3. Lanes in the job (`contracts.js`, `jobService.js`, `jobStore.js`)
 
@@ -130,8 +143,21 @@ jobService:
   workers per lane (resolving the devices). Workers on lanes that are now smaller or
   gone retire after their clip, as today. Calling it on a no-lanes job is allowed: the
   default workers retire and lane workers start.
-- `setConcurrency(id, n)` on a job **with** lanes -> `INVALID_CONCURRENCY` (the UI uses
-  setLanes then). On a no-lanes job it is unchanged.
+- Switching between no lanes and lanes (setLanes on a job without lanes or on one
+  whose lanes all fell back, or the reverse): the default lane's workers run on the
+  device a job without lanes uses (`deps.defaultDevice(codec) -> id | null`, looked up
+  once), so they count together with that device's lane. That GPU never runs more
+  at once than it was set to: its lane's workers start as the old ones finish their
+  clip (a worker that retires starts the missing ones). Another GPU's lane starts at
+  once.
+- `setConcurrency(id, n)` on a job **with** lanes (the page shows the single number
+  when it lists fewer than two GPUs: one went away, or the list has not come yet):
+  the job keeps its one GPU still found (`lanes: [{ device, concurrency: n }]`);
+  otherwise (none found, or several) it drops its lanes and runs `n` without lanes.
+  For an automatic job the saved settings follow what the job kept (`auto.setLanes`
+  or `auto.setConcurrency`). On a no-lanes job it is unchanged.
+- One device lookup serves all of a job's lanes: a lookup in progress is shared,
+  and its answer is reused for 2 s after it arrives.
 - processVideo uses `lane ? planner.selectFor(codec, lane.device) : planner.select(codec)`.
   The CPU fallback after a failed GPU encode, size retries and decode tiers work as
   today. The keys of `encodeDecodeBroken` and `verifyDecodeFallbacks` include the
@@ -144,15 +170,22 @@ jobService:
 
 ## 4. Runtime, IPC, auto, benchmark
 
-- `runtime.devices()` -> `{ devices: [Device & { encoders: { h265: codec|null, av1: codec|null } }],
-  defaultDevice: id|null }`.
+- `runtime.devices()` -> `{ devices: [Device & { encoders: { h265?: codec|null, av1?: codec|null } | null }],
+  defaultDevice: id|null, defaultDevices: { h265: id|null, av1: id|null } | null }`.
+  - Fewer than two non-CPU devices: nothing is probed or logged (the page keeps its
+    single number): every `encoders` is null, `defaultDevice` and `defaultDevices`
+    are null.
   - `encoders` comes from `selectFor` per family. Probes are cached, so later calls are
     instant. A family the device can only do on the CPU fallback is `null`, except for
-    the cpu device itself.
-  - `defaultDevice` is the device today's path uses: `planner.select('h265')` ->
-    nvenc -> NVIDIA index 0; qsv/vaapi/amf -> the DRI device whose node is
-    `/dev/dri/renderD128`; CPU -> `'cpu'`.
-  - Discovery runs again on each call (sysfs is cheap).
+    the cpu device itself. A family not known yet (its probe timed out, or something
+    is converting, when nothing is probed) is left out: not ruled out.
+  - `defaultDevices[family]` is the device today's path uses for that codec:
+    `planner.select(family)` -> qsv/vaapi/amf -> the DRI device whose node is
+    `/dev/dri/renderD128`; CPU -> `'cpu'`; nvenc -> the one NVIDIA device that can
+    encode the family (NVENC without `-gpu` takes the first that can in CUDA's own
+    order, which the list cannot tell when several can: null then).
+    `defaultDevice` is `defaultDevices.h265`.
+  - Discovery runs again on each call (sysfs is cheap); a lookup in progress is shared.
 - IPC (`ipc.js`, added to `CHANNELS` so the web bridge allows them):
   - `converter:devices` (no payload) -> the object above.
   - `converter:setLanes` `{ jobId, lanes }` -> sanitized snapshot. For an automatic job,
@@ -196,10 +229,12 @@ jobService:
   `setConverterLanes(jobId, lanes)` -> invoke('setLanes', { jobId, lanes }).
   `runConverterBenchmark` is unchanged.
 - `server/encoderStats.js`: the encoder block gains
-  `devices: [{ id, name, node, encoder, hardware, workers, video, busy }]`. That is one
-  entry per device with running workers, grouped by `deviceId ?? device`, with the GPU
-  matched by node as today. `device` (the first) stays. `bottleneck` with several
-  devices:
+  `devices: [{ id, name, node, encoder, hardware, workers, video, busy }]`. For a job
+  with lanes that is one entry per lane with running workers, grouped by `deviceId`,
+  with the GPU matched by node as today. A job without lanes has one entry, however
+  its clips decode (a clip decoded or redone on the CPU names no GPU). `device` (the
+  first) stays. The single-GPU bottleneck reads the GPU a GPU clip names, not the
+  first clip's. `bottleneck` with several devices:
   - "gpu-video" names the busiest GPU: `The Intel Arc A380's video engine is 95% busy,
     so more at once on it won't go faster.`
   - The "room" message needs every used GPU below 60%.
@@ -234,19 +269,27 @@ as today first and switches when the answer arrives.
   - The CPU row is always present, defaults to 0, and has the hint "Uses the server's
     CPU cores; slower than a GPU".
   - Buttons are at least 40 px on phones, and nothing overflows at 360 px.
-- Defaults (first time): `defaultDevice` gets the stored concurrency (or 5); every
-  other row gets 0. The rows are remembered in localStorage `converterLanes`
-  (id -> count).
+- The default GPU is per codec: `defaultDevices[codec]` (or `defaultDevice` from a
+  server that sends only that).
+- Defaults (first time): the selected codec's default GPU gets the stored concurrency
+  (or 5); every other row gets 0. A default that can't encode the codec (or none)
+  gives way to the first GPU that can. Until a row is set (or follows a job), a
+  codec change moves the number to that codec's default. The rows are remembered in
+  localStorage `converterLanes` (id -> count).
 - Sent with start / auto settings: `lanes` (the non-zero rows) **only when** the set of
-  rows above 0 is not exactly `{ defaultDevice }`. Otherwise send plain
-  `concurrency` = that row's count. This keeps today's exact path for a multi-GPU
-  owner who only ever uses the default GPU.
+  rows above 0 is not exactly `{ default GPU of the selected codec }`. Otherwise send
+  plain `concurrency` = that row's count. This keeps today's exact path for a
+  multi-GPU owner who only ever uses the default GPU.
 - Live during a run: the same chaining as `liveConcurrency`, through
   `setConverterLanes`. If the job has no lanes and only the default row changed, call
   `setConverterConcurrency`. Notice: `Now 3 on Intel Arc A380 and 1 on Intel UHD
   Graphics 770. Clips already converting finish first.` `syncConfig` updates the rows
   from `config.lanes` (or `concurrency` on the default row) unless a stepper has focus
   or a change is in flight.
+- While a job is active the rows are for **its** codec, not the codec radios (which
+  are for the next job), and a row the job converts on is never Off or disabled
+  because the device list says it can't encode: nothing it runs is dropped from a
+  live change.
 - Start error `DEVICE_UNSUPPORTED` -> `{device} can't encode {codec}. Set it to Off or
   pick another codec.`
 - Benchmark dialog:
@@ -276,8 +319,9 @@ as today first and switches when the answer arrives.
       does, and the page itself never does.
     - Progress line: `Intel Arc A380 (1 of 2) · H.265 (1 of 2): converting with 4 at
       once… (3 of 5)`.
-- Hardware panel: with `encoder.devices.length > 1`, one line per device:
-  `Intel Arc A380 · hevc_qsv · 3 converting · video 72%`. Otherwise it is unchanged.
+- Hardware panel: with two or more `encoder.devices` entries that carry a lane id,
+  one line per device: `Intel Arc A380 · hevc_qsv · 3 converting · video 72%`.
+  Otherwise it is unchanged.
 
 ## 6. Server page per socket (`server/stats/*`, `web/app.js`)
 
@@ -289,7 +333,10 @@ as today first and switches when the answer arrives.
   - `socket` is the kernel's `physical id`.
   - `usage` comes from the per-CPU /proc/stat deltas of the CPUs in that socket.
   - `tempC` is the hottest reading on that socket: coretemp `Package id N`, or the
-    k10temp chips in device-path order, one per socket.
+    k10temp chips in device-path order, one per socket. coretemp numbers its chips by
+    the kernel's die number: they count only when there is one per socket (in the
+    same order); with several dies per socket (Xeon 9200) the socket temperatures
+    are null, and the Sensors tile keeps the dies' own numbers.
   - `powerW` is the RAPL `package-N` zone.
 
 Fields that cannot be read are null. The rest of the snapshot is unchanged:
@@ -330,8 +377,8 @@ Tests go in new files where possible, to keep merges simple:
   a device.
 - `test/lanes.test.js`:
   - normalizeLanes rules.
-  - Workers per lane, live setLanes up and down, and setConcurrency rejected on a lanes
-    job.
+  - Workers per lane, live setLanes up and down, and setConcurrency on a lanes job (its
+    one GPU kept, else no lanes).
   - Unresolved lanes fall back.
   - A malformed saved lanes value still loads.
   - Restart keeps lanes.
