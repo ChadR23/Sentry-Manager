@@ -1643,6 +1643,12 @@ function createConverterJobService(deps) {
         signal: runtime.abortController.signal,
         persistTransaction: transactionPersistence(runtime, item.id)
       };
+      if (staging.capabilities?.splitSave === true) {
+        await saveSplit(runtime, item, {
+          publicationArtifact, destination, common, timing, staged, codec, verification, selected, attempts
+        });
+        return;
+      }
       await acquireCommit(runtime, item.id);
       timing.mark('saveWait');
       await itemPatch(runtime, item.id, {}, {
@@ -1750,6 +1756,160 @@ function createConverterJobService(deps) {
       if (cleanup.cleaned === false) setOwnership(runtime, item.id, composeOwnership(ownershipFor(runtime, item.id), staged.ownership));
       throw error;
     }
+  }
+
+  // Network errors while saving go to the path the job waits for.
+  function publicationError(runtime, error, destination) {
+    if (!isRetryableNetwork(error, destination)) return error;
+    const replace = runtime.manifest.config.outputMode === 'replace';
+    return Object.assign(new Error('publication path unavailable'), {
+      code: error.code,
+      path: destination,
+      networkProbePath: replace ? runtime.manifest.config.sourceRoot : runtime.manifest.config.destinationRoot,
+      pathRole: replace ? 'source' : 'destination',
+      cause: error,
+      retryable: true
+    });
+  }
+
+  // The save, split around the one-clip-at-a-time slot:
+  //  - before it, at the same time as other clips: the verified conversion
+  //    is copied to the share beside its original (or destination), recorded
+  //    on the clip only;
+  //  - in it: the renames that put the copy in place (and, replacing, the
+  //    removal of the original's backup), then the clip's result;
+  //  - after it: the clip's private work files are removed.
+  // The slot is held only for the renames, a few metadata round trips and
+  // the full checks before each of them, not for the copy or the cleanup.
+  async function saveSplit(runtime, item, { publicationArtifact, destination, common, timing, staged, codec, verification, selected, attempts }) {
+    const config = runtime.manifest.config;
+    const replace = config.outputMode === 'replace';
+    const outside = { ...common, persistTransaction: transactionPersistence(runtime, item.id, { scope: 'item' }) };
+    let prepared;
+    try {
+      if (replace) {
+        prepared = await staging.prepareReplacement({
+          ...outside, codec: config.codec, source: item.sourcePath, expectedSource: staged.expectedSource, sourceRoot: config.sourceRoot
+        });
+      } else {
+        await prepareDestination(config, destination);
+        prepared = await staging.preparePublication({ ...outside, destination });
+      }
+    } catch (error) {
+      throw publicationError(runtime, error, destination);
+    }
+    timing.mark('save');
+    await acquireCommit(runtime, item.id);
+    timing.mark('saveWait');
+    const slotStarted = timingNow();
+    let published;
+    try {
+      if (replace) {
+        // (no abort signal: a stop lets the swap finish, or roll back)
+        published = await staging.swapReplacement({ prepared, persistTransaction: common.persistTransaction });
+      } else {
+        await update(runtime, (current) => {
+          const entry = current.items.find((candidate) => candidate.id === item.id);
+          return {
+            state: 'copying',
+            activeItemId: item.id,
+            ownedPaths: entry?.ownedPaths || {},
+            ownedArtifacts: entry?.ownedArtifacts || {},
+            publicationArtifact: entry?.publicationArtifact || null
+          };
+        });
+        await prepareDestination(config, destination);
+        published = await staging.commitPublication({ prepared, persistTransaction: common.persistTransaction });
+      }
+    } catch (error) {
+      if (!error?.validFinal?.finalPath || !Number.isSafeInteger(error.validFinal.outputBytes)) {
+        throw publicationError(runtime, error, destination);
+      }
+      published = error.validFinal;
+    }
+    // The clip's result, still in the slot. What remains of it are its
+    // private work files (and the verified snapshot): removed below, once
+    // the slot is free.
+    const memory = ownershipFor(runtime, item.id) || { ownedPaths: {}, ownedArtifacts: {} };
+    const leftover = { ownedPaths: {}, ownedArtifacts: {} };
+    for (const key of ['stagedSource', 'encodedCandidate']) {
+      if (!memory.ownedPaths?.[key] || !memory.ownedArtifacts?.[key]) continue;
+      leftover.ownedPaths[key] = memory.ownedPaths[key];
+      leftover.ownedArtifacts[key] = memory.ownedArtifacts[key];
+    }
+    Object.assign(leftover.ownedPaths, published.ownedPaths || {});
+    Object.assign(leftover.ownedArtifacts, published.ownedArtifacts || {});
+    if (leftover.ownedPaths.publicationSnapshot) leftover.publicationArtifact = publicationArtifact;
+    const completed = {
+      state: 'completed',
+      eligibleVideo: true,
+      outputPath: published.finalPath,
+      outputBytes: verification.outputBytes,
+      attempts,
+      encoder: selected.codec,
+      resultCode: published.cleanupPending?.length ? 'completed-cleanup-pending' : 'converted',
+      ownedPaths: leftover.ownedPaths,
+      ownedArtifacts: leftover.ownedArtifacts
+    };
+    await update(runtime, (current) => {
+      const finished = { ...current.items.find((entry) => entry.id === item.id), ...completed };
+      if (leftover.publicationArtifact) finished.publicationArtifact = leftover.publicationArtifact;
+      else delete finished.publicationArtifact;
+      delete finished.replacementPhase;
+      delete finished.failure;
+      return {
+        state: 'waiting',
+        activeItemId: null,
+        ownedPaths: null,
+        ownedArtifacts: null,
+        publicationArtifact: null,
+        replacementPhase: null,
+        items: current.items.map((entry) => entry.id === item.id ? finished : entry),
+        counters: addCompletedFile(current.counters, finished)
+      };
+    });
+    setOwnership(runtime, item.id, leftover);
+    timing.mark('save');
+    const slotMs = Math.round(timingNow() - slotStarted);
+    releaseCommit(runtime, item.id);
+    // From here on the clip is converted; a problem with its leftovers only
+    // leaves it marked for a later cleanup (never failed).
+    let retained = null;
+    try {
+      const cleanup = await cleanupOwnership(runtime, item.id, leftover, AbortSignal.timeout(15_000), { scope: 'item' });
+      if (cleanup.cleaned === false) retained = composeOwnership(leftover, cleanup);
+    } catch (_) {
+      retained = leftover;
+    }
+    timing.mark('cleanup');
+    const itemTiming = timing.result();
+    try {
+      await update(runtime, (current) => {
+        const entry = current.items.find((candidate) => candidate.id === item.id);
+        const finished = { ...entry };
+        if (retained) {
+          finished.ownedPaths = retained.ownedPaths;
+          finished.ownedArtifacts = retained.ownedArtifacts;
+          if (retained.ownedPaths.publicationSnapshot && leftover.publicationArtifact) finished.publicationArtifact = leftover.publicationArtifact;
+          else delete finished.publicationArtifact;
+          finished.resultCode = 'completed-cleanup-pending';
+        } else {
+          finished.ownedPaths = {};
+          finished.ownedArtifacts = {};
+          delete finished.publicationArtifact;
+        }
+        return {
+          items: current.items.map((candidate) => candidate.id === item.id ? finished : candidate),
+          timings: addItemTimings(current.timings, itemTiming.phases)
+        };
+      });
+    } catch (_) { /* the clip is converted; a restart removes what is left */ }
+    setOwnership(runtime, item.id, retained);
+    rememberConverted(published.finalPath, codec);
+    emit(runtime, 'item_timing', {
+      itemId: item.id, relativePath: item.relativePath, encoder: selected.codec, outputPath: published.finalPath,
+      sourceBytes: item.sourceBytes, outputBytes: verification.outputBytes, attempts, slotMs, ...itemTiming
+    });
   }
 
   async function keepOriginalWhenNoSavings(runtime, item, operation) {

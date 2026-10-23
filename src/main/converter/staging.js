@@ -238,7 +238,9 @@ function createFileTransaction(options = {}) {
       : options.renameExclusive === undefined ? 'hardlink-cleanup-pending' : 'unavailable',
     ownershipCleanup: ownershipCleanupAvailable ? 'atomic-expected-ownership' : 'unavailable',
     replacement: replacementAvailable ? 'available' : 'unavailable',
-    privateTempCleanup: privateIdentity ? 'identity' : 'hash'
+    privateTempCleanup: privateIdentity ? 'identity' : 'hash',
+    // prepare (outside the save slot) and swap / commit (inside it)
+    splitSave: true
   });
   const chunkSize = validSafeInteger(options.chunkSize, { positive: true }) ? options.chunkSize : 1024 * 1024;
   const ownedIdentities = new Map();
@@ -1780,232 +1782,344 @@ function createFileTransaction(options = {}) {
     }
   }
 
-  async function replaceOriginal(operation = {}) {
-    const jobId = validateId(operation.jobId);
-    const itemId = validateId(operation.itemId);
-    const artifact = normalizeArtifact(operation.publicationArtifact);
+  function assertReplacementCapable() {
     if (!replacementAvailable || !options.renameExclusive || options.renameExclusive.atomicNoReplace !== true
         || options.renameExclusive.atomicExpectedOwnership !== true
         || !ownershipCleanupAvailable
         || typeof options.renameExclusive.promote !== 'function') {
       throw transactionError('ATOMIC_PROMOTION_UNSUPPORTED');
     }
-    const expectedSource = validateSourceAuthority(operation.expectedSource);
-    await assertSourceContained(operation.source, operation.sourceRoot);
-    if (adapterVerifies) await assertSourceIdentity(operation.source, expectedSource);
-    else await assertSourceAuthority(operation.source, expectedSource, operation.signal);
-    let sourceInfo;
-    let ownedPaths;
-    let originalIdentity;
-    const ownedArtifacts = {};
-    let trusted = false;
-    let replacementStarted = false;
-    let rollbackCompleted = false;
-    let backupDeleted = false;
-    try {
-      sourceInfo = await assertSourceContained(operation.source, operation.sourceRoot);
-      originalIdentity = await exactLstat(sourceInfo.source);
-      const candidateNonce = newNonce();
-      const backupNonce = newNonce();
-      const proposedPaths = replacementPaths(sourceInfo.source, jobId, itemId, candidateNonce, backupNonce, operation.codec);
-      if (await lstatOrNull(proposedPaths.replacementCandidate) || await lstatOrNull(proposedPaths.replacementBackup)) {
-        throw transactionError('REPLACEMENT_COLLISION');
+  }
+
+  // Saving a clip is split in two: the copy of its verified conversion to the
+  // share, which any number of clips may do at once (prepare), and the few
+  // renames that put it in place, one clip at a time (swap / commit). What a
+  // prepare step leaves on the share is recorded on the clip only and is a
+  // copy of the snapshot, removable by the prefix rule after any stop.
+  const preparedSaves = new WeakSet();
+
+  function preparedSave(value, kind) {
+    if (!value || typeof value !== 'object' || !preparedSaves.has(value) || value.kind !== kind) {
+      throw transactionError('INVALID_TRANSACTION_INPUT');
+    }
+    return value;
+  }
+
+  // A copy that prepare could not finish: removed now if it provably is the
+  // snapshot's prefix (else left recorded for the clip's cleanup).
+  async function dropUnfinishedCopy(operation, target, field, ownedPaths, ownedArtifacts, artifact, error) {
+    if (ownedArtifacts[field]?.state === 'intent' && !await lstatOrNull(target).catch(() => null)) {
+      delete ownedPaths[field];
+      delete ownedArtifacts[field];
+    } else {
+      try {
+        await removeShareCopy(target, ownedArtifacts[field], artifact);
+        delete ownedPaths[field];
+        delete ownedArtifacts[field];
+      } catch (_cleanupError) {
+        ownedArtifacts[field] = { ...ownedArtifacts[field], state: ownedArtifacts[field].state === 'owned' ? 'cleanup-pending' : ownedArtifacts[field].state };
+        if (error instanceof FileTransactionError) error.cleanupPending = [field];
+        return;
       }
-      await assertReplacementSpace(sourceInfo.source, artifact.size);
-      ownedPaths = proposedPaths;
-      ownedPaths.publicationSnapshot = artifact.path;
-      ownedArtifacts.publicationSnapshot = await capturePublication(operation, artifact, 'consume');
-      ownedArtifacts.replacementBackup = artifactMetadata(ownedPaths.replacementBackup, backupNonce, 'intent');
-      trusted = true;
-      await persist(operation, transactionSnapshot({ step: 'replacement-snapshot-owned', ownedPaths, ownedArtifacts,
-        publicationArtifact: artifact }));
-      const canonicalCandidate = await canonicalForNew(ownedPaths.replacementCandidate);
-      const canonicalBackup = await canonicalForNew(ownedPaths.replacementBackup);
-      if (!isContained(sourceInfo.realRoot, canonicalCandidate, pathApi, platform)
-          || !isContained(sourceInfo.realRoot, canonicalBackup, pathApi, platform)) throw transactionError('SOURCE_OUTSIDE_ROOT');
-      ownedArtifacts.replacementCandidate = artifactMetadata(ownedPaths.replacementCandidate, candidateNonce, 'intent');
-      await persist(operation, transactionSnapshot({ step: 'replacement-candidate-intent', ownedPaths, ownedArtifacts,
-        publicationArtifact: artifact }));
-      const copied = await copyExclusive(artifact.path, ownedPaths.replacementCandidate, {
+    }
+    try {
+      await persist(operation, transactionSnapshot({ step: field === 'replacementCandidate' ? 'replacement-prepare-failed' : 'separate-prepare-failed',
+        ownedPaths, ownedArtifacts, publicationArtifact: artifact, clearOwnedKeys: [field] }));
+    } catch (_persistError) { /* the clip's cleanup finds the copy gone */ }
+  }
+
+  // Replace mode, before the save slot: the original is checked by identity,
+  // the snapshot is recorded and copied beside it as TEMP-<codec>-<name>.
+  // Nothing of the original is touched; every record goes on the clip only.
+  async function prepareReplacement(operation = {}) {
+    const jobId = validateId(operation.jobId);
+    const itemId = validateId(operation.itemId);
+    const artifact = normalizeArtifact(operation.publicationArtifact);
+    assertReplacementCapable();
+    const expectedSource = validateSourceAuthority(operation.expectedSource);
+    const sourceInfo = await assertSourceContained(operation.source, operation.sourceRoot);
+    let originalStat;
+    if (adapterVerifies) originalStat = await assertSourceIdentity(sourceInfo.source, expectedSource);
+    else {
+      await assertSourceAuthority(sourceInfo.source, expectedSource, operation.signal);
+      originalStat = await exactLstat(sourceInfo.source);
+    }
+    const candidateNonce = newNonce();
+    const backupNonce = newNonce();
+    const paths = replacementPaths(sourceInfo.source, jobId, itemId, candidateNonce, backupNonce, operation.codec);
+    if (await lstatOrNull(paths.replacementCandidate) || await lstatOrNull(paths.replacementBackup)) {
+      throw transactionError('REPLACEMENT_COLLISION');
+    }
+    const canonicalCandidate = await canonicalForNew(paths.replacementCandidate);
+    const canonicalBackup = await canonicalForNew(paths.replacementBackup);
+    if (!isContained(sourceInfo.realRoot, canonicalCandidate, pathApi, platform)
+        || !isContained(sourceInfo.realRoot, canonicalBackup, pathApi, platform)) throw transactionError('SOURCE_OUTSIDE_ROOT');
+    await assertReplacementSpace(sourceInfo.source, artifact.size);
+    const candidate = paths.replacementCandidate;
+    const ownedPaths = { publicationSnapshot: artifact.path, replacementCandidate: candidate };
+    const ownedArtifacts = {
+      publicationSnapshot: await capturePublication(operation, artifact, 'consume'),
+      replacementCandidate: artifactMetadata(candidate, candidateNonce, 'intent')
+    };
+    await persist(operation, transactionSnapshot({ step: 'replacement-prepare', ownedPaths, ownedArtifacts,
+      publicationArtifact: artifact }));
+    try {
+      const copied = await copyExclusive(artifact.path, candidate, {
         expected: artifact,
         signal: operation.signal,
         collisionCode: 'REPLACEMENT_COLLISION',
         failureCode: 'PUBLICATION_ARTIFACT_CHANGED',
         onCreated: async (progress) => {
-          const journal = { committed: { size: 0, sha256: progress.sha256 }, pending: null };
-          ownedArtifacts.replacementCandidate = artifactMetadata(ownedPaths.replacementCandidate,
-            ownedArtifacts.replacementCandidate.nonce, 'writing', progress.stat, progress.sha256, progress.size, journal);
+          ownedArtifacts.replacementCandidate = artifactMetadata(candidate, candidateNonce, 'writing', progress.stat,
+            progress.sha256, 0, { committed: { size: 0, sha256: progress.sha256 }, pending: null });
           await persist(operation, transactionSnapshot({ step: 'replacement-candidate-writing', ownedPaths, ownedArtifacts,
             publicationArtifact: artifact }));
-        },
-        onChunkPending: async (progress) => {
-          ownedArtifacts.replacementCandidate.journal.pending = { size: progress.size, sha256: progress.sha256 };
-          await persist(operation, transactionSnapshot({ step: 'replacement-candidate-chunk-pending', ownedPaths,
-            ownedArtifacts, publicationArtifact: artifact }));
-        },
-        onChunkCommitted: async (progress) => {
-          const proposed = { ...ownedArtifacts.replacementCandidate, size: progress.size, sha256: progress.sha256,
-            journal: { committed: { size: progress.size, sha256: progress.sha256 }, pending: null } };
-          await persist(operation, transactionSnapshot({ step: 'replacement-candidate-chunk-committed', ownedPaths,
-            ownedArtifacts: { ...ownedArtifacts, replacementCandidate: proposed }, publicationArtifact: artifact }));
-          ownedArtifacts.replacementCandidate = proposed;
         }
       });
-      ownedArtifacts.replacementCandidate = artifactMetadata(ownedPaths.replacementCandidate,
-        ownedArtifacts.replacementCandidate.nonce, 'owned', copied.stat, copied.sha256, copied.size,
-        ownedArtifacts.replacementCandidate.journal);
-      // (the copy compared every byte it wrote with the verified hash; the
-      // adapter hashes the candidate again, held open, before it moves)
-      if (!adapterVerifies || operation.verifyReadable) {
-        await validateReadable(ownedPaths.replacementCandidate, artifact, operation.verifyReadable, 'FINAL_VALIDATION_FAILED');
-      }
       // Sentry Six Manager: the candidate was created private (0600); the
       // replacement keeps the original's permissions, so whatever else reads
       // the footage folder (a share, a media server) still can
-      if (typeof pfs.chmod === 'function' && typeof originalIdentity?.mode === 'bigint') {
-        await pfs.chmod(ownedPaths.replacementCandidate, Number(originalIdentity.mode & 0o777n)).catch(() => {});
+      if (typeof pfs.chmod === 'function' && typeof originalStat?.mode === 'bigint') {
+        await pfs.chmod(candidate, Number(originalStat.mode & 0o777n)).catch(() => {});
       }
-      await persist(operation, transactionSnapshot({ phase: 'candidate-written', ownedPaths, ownedArtifacts,
+      ownedArtifacts.replacementCandidate = artifactMetadata(candidate, candidateNonce, 'owned', copied.stat,
+        artifact.sha256, artifact.size);
+      await persist(operation, transactionSnapshot({ step: 'replacement-candidate-owned', ownedPaths, ownedArtifacts,
         publicationArtifact: artifact }));
-      abortIfRequested(operation.signal);
+    } catch (error) {
+      await dropUnfinishedCopy(operation, candidate, 'replacementCandidate', ownedPaths, ownedArtifacts, artifact, error);
+      if (error instanceof FileTransactionError) throw error;
+      throw transactionError('REPLACEMENT_FAILED');
+    }
+    const prepared = Object.freeze({
+      kind: 'replacement', jobId, itemId, codec: operation.codec, artifact, expectedSource,
+      source: sourceInfo.source, sourceRoot: sourceInfo.sourceRoot, backup: paths.replacementBackup, backupNonce,
+      ownedPaths: Object.freeze({ ...ownedPaths }), ownedArtifacts: Object.freeze(copyArtifacts(ownedArtifacts))
+    });
+    preparedSaves.add(prepared);
+    return prepared;
+  }
 
-      const currentOriginal = await assertRegularUnaliased(sourceInfo.source, 'SOURCE_OUTSIDE_ROOT');
-      if (!sameIdentity(originalIdentity, currentOriginal)) throw transactionError('SOURCE_OUTSIDE_ROOT');
-      if (!adapterVerifies) {
-        await readExactFile(ownedPaths.replacementCandidate, artifact, 'PUBLICATION_ARTIFACT_CHANGED');
-        await persist(operation, transactionSnapshot({ step: 'replacement-backup-intent', ownedPaths, ownedArtifacts,
-          publicationArtifact: artifact }));
+  // Replace mode, in the save slot: the original becomes BACKUP-<name>, the
+  // prepared copy takes its name, and the backup is removed. Each move and
+  // the removal is preceded by a full check of the file it moves or keeps
+  // (with an adapter that verifies content: by the adapter, file held open).
+  // Once begun it does not stop for the job's own abort (a docker stop lets
+  // it finish); a failure before the backup is gone puts the original back.
+  async function swapReplacement(operation = {}) {
+    const prepared = preparedSave(operation.prepared, 'replacement');
+    const { jobId, itemId, artifact, expectedSource, source, sourceRoot, backup } = prepared;
+    const candidate = prepared.ownedPaths.replacementCandidate;
+    const ownedPaths = { ...prepared.ownedPaths, replacementBackup: backup };
+    const ownedArtifacts = { ...copyArtifacts(prepared.ownedArtifacts),
+      replacementBackup: artifactMetadata(backup, prepared.backupNonce, 'intent') };
+    await persist(operation, transactionSnapshot({ phase: 'candidate-written', ownedPaths, ownedArtifacts,
+      publicationArtifact: artifact }));
+    let backupDeleted = false;
+    try {
+      // still the same original, and the same complete copy beside it
+      await assertSourceContained(source, sourceRoot);
+      if (adapterVerifies) await assertSourceIdentity(source, expectedSource);
+      else await assertSourceAuthority(source, expectedSource);
+      const candidateStat = await lstatOrNull(candidate);
+      if (!candidateStat || !isRegularFile(candidateStat) || !metadataMatchesStat(ownedArtifacts.replacementCandidate, candidateStat)) {
+        throw transactionError('PUBLICATION_ARTIFACT_CHANGED');
       }
-      if (adapterVerifies) await assertSourceIdentity(sourceInfo.source, expectedSource);
-      else await assertSourceAuthority(sourceInfo.source, expectedSource, operation.signal);
-      const backupPromotion = await promoteBackup(sourceInfo.source, ownedPaths.replacementBackup, expectedSource);
-      replacementStarted = true;
-      ownedArtifacts.replacementBackup = await backupRecord(ownedPaths.replacementBackup,
-        ownedArtifacts.replacementBackup.nonce, backupPromotion, expectedSource, operation.signal);
+      if (!adapterVerifies) await readExactFile(candidate, artifact, 'PUBLICATION_ARTIFACT_CHANGED');
+
+      const backupPromotion = await promoteBackup(source, backup, expectedSource);
+      ownedArtifacts.replacementBackup = await backupRecord(backup, prepared.backupNonce, backupPromotion, expectedSource);
       await persist(operation, transactionSnapshot({ phase: 'original-backed-up', ownedPaths, ownedArtifacts,
         publicationArtifact: artifact, cleanupPending: backupPromotion.sourceRemoved ? [] : ['replacementBackup'] }));
       if (!backupPromotion.sourceRemoved) throw transactionError('REPLACEMENT_FAILED');
-      abortIfRequested(operation.signal);
 
-      if (!adapterVerifies) {
-        await readExactFile(ownedPaths.replacementCandidate, artifact, 'PUBLICATION_ARTIFACT_CHANGED');
-        await persist(operation, transactionSnapshot({ step: 'replacement-promotion-intent', ownedPaths, ownedArtifacts,
-          publicationArtifact: artifact }));
-      }
-      const candidatePromotion = await promoteNoReplace(ownedPaths.replacementCandidate, sourceInfo.source, 'REPLACEMENT_COLLISION', {
+      const candidatePromotion = await promoteNoReplace(candidate, source, 'REPLACEMENT_COLLISION', {
         expectedSource: ownedArtifacts.replacementCandidate, removeSource: true
       });
       if (!candidatePromotion.sourceRemoved) ownedArtifacts.replacementCandidate.state = 'cleanup-pending';
       await persist(operation, transactionSnapshot({ phase: 'candidate-promoted', ownedPaths, ownedArtifacts,
         publicationArtifact: artifact, cleanupPending: candidatePromotion.sourceRemoved ? [] : ['replacementCandidate'] }));
-      abortIfRequested(operation.signal);
 
-      // (with an adapter that verifies content, removing the backup hashes
-      // this final, held open, first: the same proof, one read)
       if (!adapterVerifies || operation.verifyReadable) {
-        await validateReadable(sourceInfo.source, artifact, operation.verifyReadable, 'FINAL_VALIDATION_FAILED');
+        await validateReadable(source, artifact, operation.verifyReadable, 'FINAL_VALIDATION_FAILED');
         await persist(operation, transactionSnapshot({ phase: 'final-validated', ownedPaths, ownedArtifacts,
           publicationArtifact: artifact }));
+        if (!adapterVerifies) await validateReadable(source, artifact, null, 'FINAL_VALIDATION_FAILED');
       }
-      abortIfRequested(operation.signal);
-      if (!adapterVerifies) await validateReadable(sourceInfo.source, artifact, null, 'FINAL_VALIDATION_FAILED');
-      await removeReplacementBackup(ownedPaths.replacementBackup, ownedArtifacts.replacementBackup, sourceInfo.source, artifact);
+      await removeReplacementBackup(backup, ownedArtifacts.replacementBackup, source, artifact,
+        candidatePromotion.sourceRemoved ? ownedArtifacts.replacementCandidate : null);
       delete ownedPaths.replacementBackup;
       delete ownedArtifacts.replacementBackup;
       backupDeleted = true;
       const cleanupPending = [];
-      if (ownedArtifacts.replacementCandidate?.state !== 'cleanup-pending') {
+      if (ownedArtifacts.replacementCandidate?.state === 'cleanup-pending') cleanupPending.push('replacementCandidate');
+      else {
         delete ownedPaths.replacementCandidate;
         delete ownedArtifacts.replacementCandidate;
       }
-      const snapshotCleanup = await cleanupPublicationArtifact(artifact, ownedArtifacts.publicationSnapshot);
-      if (snapshotCleanup.cleaned) {
+      return { finalPath: source, outputBytes: artifact.size, phase: 'backup-deleted', ownedPaths, ownedArtifacts, cleanupPending };
+    } catch (error) {
+      if (!backupDeleted) {
+        let rollbackResult;
+        try {
+          rollbackResult = await rollbackReplacement({
+            codec: prepared.codec, source, sourceRoot, jobId, itemId, ownedPaths, ownedArtifacts,
+            publicationArtifact: artifact, persistPhase: operation.persistPhase,
+            persistTransaction: operation.persistTransaction, verifyReadable: operation.verifyReadable
+          });
+        } catch (rollbackError) {
+          if (rollbackError instanceof FileTransactionError && rollbackError.code === 'ROLLBACK_FAILED') throw rollbackError;
+          const failure = transactionError('ROLLBACK_FAILED');
+          failure.cleanupPending = [];
+          throw failure;
+        }
+        const failure = error instanceof FileTransactionError ? error : transactionError('REPLACEMENT_FAILED');
+        failure.cleanupPending = rollbackResult.cleanupPending;
+        failure.rolledBack = { ownedPaths: rollbackResult.ownedPaths, ownedArtifacts: rollbackResult.ownedArtifacts };
+        throw failure;
+      }
+      const failure = error instanceof FileTransactionError ? error : transactionError('REPLACEMENT_FAILED');
+      failure.validFinal = {
+        finalPath: source, outputBytes: artifact.size, phase: 'backup-deleted',
+        ownedPaths: { ...ownedPaths }, ownedArtifacts: { ...ownedArtifacts },
+        cleanupPending: Object.entries(ownedArtifacts).filter(([, metadata]) => metadata.state === 'cleanup-pending').map(([key]) => key)
+      };
+      throw failure;
+    }
+  }
+
+  // The whole replacement in one call (prepare, swap, the final record and
+  // the snapshot's removal), for callers without a save slot of their own.
+  async function replaceOriginal(operation = {}) {
+    const prepared = await prepareReplacement(operation);
+    let result;
+    try {
+      result = await swapReplacement({ ...operation, prepared });
+    } catch (error) {
+      if (!error?.validFinal) throw error;
+      result = error.validFinal;
+    }
+    const { ownedPaths, ownedArtifacts } = result;
+    const cleanupPending = [...(result.cleanupPending || [])];
+    if (ownedPaths.publicationSnapshot) {
+      const cleaned = await cleanupPublicationArtifact(prepared.artifact, ownedArtifacts.publicationSnapshot);
+      if (cleaned.cleaned) {
         delete ownedPaths.publicationSnapshot;
         delete ownedArtifacts.publicationSnapshot;
       } else {
         ownedArtifacts.publicationSnapshot.state = 'cleanup-pending';
         cleanupPending.push('publicationSnapshot');
       }
-      if (ownedArtifacts.replacementCandidate) cleanupPending.push('replacementCandidate');
-      await persist(operation, transactionSnapshot({ phase: 'backup-deleted', ownedPaths, ownedArtifacts,
-        publicationArtifact: artifact, cleanupPending }));
-      return { finalPath: sourceInfo.source, outputBytes: artifact.size, phase: 'backup-deleted',
-        ownedPaths, ownedArtifacts, cleanupPending };
+    }
+    await persist(operation, transactionSnapshot({ phase: 'backup-deleted', ownedPaths, ownedArtifacts,
+      publicationArtifact: prepared.artifact, cleanupPending }));
+    return { finalPath: result.finalPath, outputBytes: result.outputBytes, phase: 'backup-deleted',
+      ownedPaths, ownedArtifacts, cleanupPending };
+  }
+
+  // Separate output folder, before the save slot: the snapshot is copied to
+  // <destination>.sentry-six-<job>-<clip>-<nonce>.partial beside where it
+  // goes. Records on the clip only.
+  async function preparePublication(operation = {}) {
+    const jobId = validateId(operation.jobId);
+    const itemId = validateId(operation.itemId);
+    const destination = validateAbsolutePath(operation.destination, pathApi);
+    const artifact = normalizeArtifact(operation.publicationArtifact);
+    if (await lstatOrNull(destination)) throw transactionError('DESTINATION_COLLISION');
+    const partialNonce = newNonce();
+    const partial = publicationPaths(destination, jobId, itemId, partialNonce).destinationPartial;
+    const canonicalPartial = await canonicalForNew(partial);
+    const canonicalDestination = await canonicalForNew(destination);
+    if (!samePath(pathApi.dirname(canonicalPartial), pathApi.dirname(canonicalDestination), pathApi, platform)) {
+      throw transactionError('UNSAFE_OWNED_PATH');
+    }
+    const ownedPaths = { publicationSnapshot: artifact.path, destinationPartial: partial };
+    const ownedArtifacts = {
+      publicationSnapshot: await capturePublication(operation, artifact, 'consume'),
+      destinationPartial: artifactMetadata(partial, partialNonce, 'intent')
+    };
+    await persist(operation, transactionSnapshot({ step: 'separate-prepare', ownedPaths, ownedArtifacts,
+      publicationArtifact: artifact }));
+    try {
+      const copied = await copyExclusive(artifact.path, partial, {
+        expected: artifact,
+        signal: operation.signal,
+        collisionCode: 'PARTIAL_COLLISION',
+        failureCode: 'PUBLICATION_ARTIFACT_CHANGED',
+        onCreated: async (progress) => {
+          ownedArtifacts.destinationPartial = artifactMetadata(partial, partialNonce, 'writing', progress.stat,
+            progress.sha256, 0, { committed: { size: 0, sha256: progress.sha256 }, pending: null });
+          await persist(operation, transactionSnapshot({ step: 'separate-partial-writing', ownedPaths, ownedArtifacts,
+            publicationArtifact: artifact }));
+        }
+      });
+      ownedArtifacts.destinationPartial = artifactMetadata(partial, partialNonce, 'owned', copied.stat,
+        artifact.sha256, artifact.size);
+      await persist(operation, transactionSnapshot({ step: 'separate-partial-owned', ownedPaths, ownedArtifacts,
+        publicationArtifact: artifact }));
     } catch (error) {
-      const failureCleanupPending = new Set();
-      if (sourceInfo && ownedPaths && !backupDeleted) {
+      await dropUnfinishedCopy(operation, partial, 'destinationPartial', ownedPaths, ownedArtifacts, artifact, error);
+      if (error instanceof FileTransactionError) throw error;
+      throw transactionError('DESTINATION_WRITE_FAILED');
+    }
+    const prepared = Object.freeze({
+      kind: 'separate', jobId, itemId, artifact, destination, partial,
+      ownedPaths: Object.freeze({ ...ownedPaths }), ownedArtifacts: Object.freeze(copyArtifacts(ownedArtifacts))
+    });
+    preparedSaves.add(prepared);
+    return prepared;
+  }
+
+  // Separate output folder, in the save slot: the prepared copy takes the
+  // destination's name. With an adapter that verifies content it is moved
+  // there (the adapter hashes it, held open, and never replaces a file);
+  // otherwise it is linked there and read back, as before.
+  async function commitPublication(operation = {}) {
+    const prepared = preparedSave(operation.prepared, 'separate');
+    const { artifact, destination, partial } = prepared;
+    const ownedPaths = { ...prepared.ownedPaths };
+    const ownedArtifacts = copyArtifacts(prepared.ownedArtifacts);
+    const cleanupPending = [];
+    if (adapterVerifies && options.renameExclusive?.atomicExpectedOwnership === true) {
+      const promotion = await promoteNoReplace(partial, destination, 'DESTINATION_COLLISION', {
+        expectedSource: ownedArtifacts.destinationPartial, removeSource: true
+      });
+      if (promotion.sourceRemoved) {
+        delete ownedPaths.destinationPartial;
+        delete ownedArtifacts.destinationPartial;
+      } else {
+        ownedArtifacts.destinationPartial.state = 'cleanup-pending';
+        cleanupPending.push('destinationPartial');
+      }
+      return { finalPath: destination, outputBytes: artifact.size, ownedPaths, ownedArtifacts, cleanupPending };
+    }
+    let finalCreated = false;
+    try {
+      await validateReadable(partial, artifact, operation.verifyReadable, 'DESTINATION_VALIDATION_FAILED');
+      const promotion = await promoteNoReplace(partial, destination, 'DESTINATION_COLLISION', {
+        expectedSource: ownedArtifacts.destinationPartial
+      });
+      finalCreated = true;
+      if (!promotion.sourceRemoved) {
+        ownedArtifacts.destinationPartial.state = 'cleanup-pending';
+        cleanupPending.push('destinationPartial');
+      } else {
+        delete ownedPaths.destinationPartial;
+        delete ownedArtifacts.destinationPartial;
+      }
+      await validateReadable(destination, artifact, operation.verifyReadable, 'DESTINATION_VALIDATION_FAILED');
+      return { finalPath: destination, outputBytes: artifact.size, ownedPaths, ownedArtifacts, cleanupPending };
+    } catch (error) {
+      if (finalCreated && ownedArtifacts.destinationPartial) {
         try {
-          const rollbackResult = await rollbackReplacement({
-            codec: operation.codec,
-            source: sourceInfo.source,
-            sourceRoot: sourceInfo.sourceRoot,
-            jobId,
-            itemId,
-            ownedPaths,
-            ownedArtifacts,
-            publicationArtifact: artifact,
-            persistPhase: operation.persistPhase,
-            persistTransaction: operation.persistTransaction,
-            verifyReadable: operation.verifyReadable
-          });
-          if (error instanceof FileTransactionError) error.cleanupPending = rollbackResult.cleanupPending;
-          rollbackCompleted = true;
-        } catch (rollbackError) {
-          if (rollbackError instanceof FileTransactionError && rollbackError.code === 'ROLLBACK_FAILED') {
-            throw rollbackError;
-          }
-          const failure = transactionError('ROLLBACK_FAILED');
-          failure.cleanupPending = [];
-          throw failure;
-        }
-      } else if (ownedPaths && ownedArtifacts.replacementCandidate
-          && ownedArtifacts.replacementCandidate.state !== 'intent') {
-        try {
-          await removeExactOwned(ownedPaths.replacementCandidate, ownedArtifacts.replacementCandidate);
-          delete ownedPaths.replacementCandidate;
-          delete ownedArtifacts.replacementCandidate;
+          await removeExactOwned(destination, { ...ownedArtifacts.destinationPartial, state: 'cleanup-pending' }, { allowIdentityAlias: true });
         } catch (_cleanupError) {
-          ownedArtifacts.replacementCandidate.state = 'cleanup-pending';
-          failureCleanupPending.add('replacementCandidate');
+          ownedArtifacts.destinationPartial.state = 'cleanup-pending';
+          if (error instanceof FileTransactionError) error.cleanupPending = ['destinationPartial'];
         }
-      }
-      if (trusted && !replacementStarted && !rollbackCompleted && ownedArtifacts.publicationSnapshot) {
-        const cleaned = await cleanupPublicationArtifact(artifact, ownedArtifacts.publicationSnapshot);
-        if (cleaned.cleaned) {
-          delete ownedPaths.publicationSnapshot;
-          delete ownedArtifacts.publicationSnapshot;
-        } else {
-          ownedArtifacts.publicationSnapshot.state = 'cleanup-pending';
-          failureCleanupPending.add('publicationSnapshot');
-        }
-      }
-      if (failureCleanupPending.size) {
-        const pending = [...failureCleanupPending];
-        try {
-          await persist(operation, transactionSnapshot({ step: 'replacement-failed-cleanup-pending', ownedPaths,
-            ownedArtifacts, publicationArtifact: artifact, cleanupPending: pending }));
-        } catch (_persistError) { /* primary error remains bounded */ }
-        if (error instanceof FileTransactionError) {
-          error.cleanupPending = pending;
-        }
-      }
-      if (backupDeleted && sourceInfo && error instanceof FileTransactionError) {
-        const pending = [...new Set([
-          ...failureCleanupPending,
-          ...Object.entries(ownedArtifacts).filter(([, metadata]) => metadata.state === 'cleanup-pending')
-            .map(([key]) => key)
-        ])];
-        error.validFinal = {
-          finalPath: sourceInfo.source,
-          outputBytes: artifact.size,
-          phase: 'backup-deleted',
-          ownedPaths: { ...(ownedPaths || {}) },
-          ownedArtifacts: { ...ownedArtifacts },
-          cleanupPending: pending
-        };
       }
       if (error instanceof FileTransactionError) throw error;
-      throw transactionError('REPLACEMENT_FAILED');
+      throw transactionError('DESTINATION_WRITE_FAILED');
     }
   }
 
@@ -2556,6 +2670,10 @@ function createFileTransaction(options = {}) {
     copyAsset,
     stageSource,
     publishSeparate,
+    preparePublication,
+    commitPublication,
+    prepareReplacement,
+    swapReplacement,
     replaceOriginal,
     rollbackReplacement,
     recoverReplacement,

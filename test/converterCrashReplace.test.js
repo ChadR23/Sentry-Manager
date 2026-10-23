@@ -18,9 +18,12 @@ const CASES = [
   ['the encode', 'encode'],
   ['the telemetry writer (it had just emptied the encoded file)', 'writer'],
   ['the verification', 'verify'],
+  ['the verified snapshot was about to be recorded for the save', 'snapshot-unrecorded'],
+  ['the save was recorded, its copy not yet created', 'save-recorded'],
   ['the conversion\'s copy beside the original was just created', 'temp-created'],
   ['that copy was half written', 'temp-torn'],
   ['that copy was complete', 'temp-complete'],
+  ['that copy was recorded and the clip waited for the save slot', 'copy-recorded'],
   // in the save slot
   ['the clip entered the save slot', 'slot-entered'],
   ['the original was just moved to its backup name (not yet recorded)', 'backup-renamed'],
@@ -30,7 +33,9 @@ const CASES = [
   ['that was recorded', 'final-recorded'],
   ['the backup was half removed (renamed for removal, not yet unlinked)', 'quarantined'],
   ['the backup was removed and the clip\'s result was about to be written', 'before-result'],
-  ['the clip\'s result was written', 'after-result']
+  ['the clip\'s result was written', 'after-result'],
+  // after the save slot
+  ['the clip\'s private files were being removed', 'cleanup-unrecorded']
 ];
 
 for (const [label, point] of CASES) {

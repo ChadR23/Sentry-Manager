@@ -73,6 +73,7 @@ const isTemp = (file) => /^TEMP-H265-/.test(path.basename(file));
 const isPartial = (file) => /\.partial$/.test(file);
 const isStaged = (file) => /-source\.mp4$/.test(file);
 const itemsOf = (value) => Array.isArray(value?.items) ? value.items : [];
+const copyField = (item) => (item.ownedPaths?.destinationPartial ? 'destinationPartial' : 'replacementCandidate');
 const anyItem = (value, predicate) => itemsOf(value).some(predicate);
 
 function halfWrite(handle) {
@@ -109,6 +110,15 @@ const POINTS = {
       return handle;
     }
   },
+  // the verified snapshot is about to be recorded for the save (it exists,
+  // nothing records it yet), and just was (the copy not yet created)
+  'snapshot-unrecorded': {
+    beforeWrite: (patch, current) => anyItem(patch, (item) => item.ownedArtifacts?.[copyField(item)]?.state === 'intent'
+      && !current.items.find((entry) => entry.id === item.id)?.ownedArtifacts?.[copyField(item)])
+  },
+  'save-recorded': {
+    afterWrite: (manifest) => anyItem(manifest, (item) => item.ownedArtifacts?.[copyField(item)]?.state === 'intent' && !item.replacementPhase)
+  },
   // the clip's copy beside its original (or destination) is recorded as
   // complete: the clip waits for (or is about to take) the save slot
   'copy-recorded': {
@@ -127,6 +137,13 @@ const POINTS = {
   'before-result': {
     beforeWrite: (patch, current) => anyItem(patch, (item) => item.state === 'completed'
       && !current.items.find((entry) => entry.id === item.id && entry.state === 'completed'))
+  },
+  // the clip is recorded as converted; its private files are being removed
+  'cleanup-unrecorded': {
+    beforeWrite: (patch, current) => anyItem(patch, (item) => item.state === 'completed'
+      && current.items.find((entry) => entry.id === item.id && entry.state === 'completed'
+        && Object.keys(entry.ownedPaths || {}).length > 0)
+      && Object.keys(item.ownedPaths || {}).length === 0)
   },
   'after-result': {
     afterWrite: (manifest, previous) => anyItem(manifest, (item) => item.state === 'completed'
@@ -218,7 +235,7 @@ async function open(base, { point = null, concurrency = 1, mode = 'replace', net
     includedGroups: ['RecentClips', 'SavedClips', 'SentryClips'], groupOrder: ['SavedClips', 'SentryClips', 'RecentClips'],
     replacementConfirmed: mode === 'replace', concurrency, verifyMode: 'quick'
   };
-  return { runtime, config };
+  return { runtime, config, renameExclusive };
 }
 
 // Runs a job in a child process (a process group of its own) that dies at the

@@ -886,7 +886,9 @@ async function createConverterRuntime(options = {}) {
     }
     const phases = Object.entries(event.phases || {}).filter(([, ms]) => ms > 0)
       .map(([phase, ms]) => `${phase}=${seconds(ms)}`).join(' ');
-    const line = `${new Date().toISOString()} ${event.relativePath} total=${seconds(event.totalMs || 0)} ${phases}`
+    // slot: how long the clip held the one-at-a-time save slot
+    const slot = Number.isFinite(event.slotMs) ? ` slot=${seconds(event.slotMs)}` : '';
+    const line = `${new Date().toISOString()} ${event.relativePath} total=${seconds(event.totalMs || 0)} ${phases}${slot}`
       + ` encoder=${event.encoder} attempts=${event.attempts} bytes=${event.sourceBytes}->${event.outputBytes}\n`;
     timingLogChain = timingLogChain
       .then(() => pfs.mkdir(timingLogRoot, { recursive: true }))
