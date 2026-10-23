@@ -7,6 +7,8 @@
   <title>Sentry Six Manager</title>
   <link rel="icon" type="image/png" href="/web/icon.png">
   <link rel="stylesheet" href="/web/shell.css">
+  <link rel="stylesheet" href="/web/encoderSkeleton.css">
+  <script src="/web/boot.js"></script>
 </head>
 <body>
   <svg width="0" height="0" style="position:absolute" aria-hidden="true">
@@ -52,7 +54,41 @@
         <label class="check"><input type="checkbox" id="reduce-effects"> Reduce visual effects</label>
       </div>
       <div id="page"></div>
-      <div id="frames"></div>
+      <div id="frames">
+        <!-- The Encoder's loading skeleton (the same as in src/renderer/encoder.html,
+             styled by encoderSkeleton.css): shown when the shell opens on the
+             Encoder tab (boot.js), and app.js draws it behind the Encoder's frame. -->
+        <div class="frame-wrap boot-frame" id="encoder-skeleton"><div class="enc-skeleton" aria-hidden="true">
+          <div class="enc-sk-bay" aria-hidden="true">
+            <div class="enc-sk-header">
+              <div class="enc-sk-stack">
+                <span class="enc-sk-bar enc-sk-title"></span>
+                <span class="enc-sk-bar enc-sk-line enc-sk-w60"></span>
+              </div>
+              <span class="enc-sk-chip"></span>
+            </div>
+            <div class="enc-sk-pipeline"><span></span><span></span><span></span><span></span></div>
+            <div class="enc-sk-grid">
+              <div class="enc-sk-card">
+                <div class="enc-sk-heading"><span class="enc-sk-icon"></span><span class="enc-sk-stack"><span class="enc-sk-bar enc-sk-h2"></span><span class="enc-sk-bar enc-sk-line enc-sk-w80"></span></span></div>
+                <span class="enc-sk-bar enc-sk-label"></span>
+                <span class="enc-sk-field"></span>
+                <span class="enc-sk-bar enc-sk-label"></span>
+                <span class="enc-sk-field"></span>
+                <span class="enc-sk-bar enc-sk-label"></span>
+                <div class="enc-sk-row"><span class="enc-sk-field"></span><span class="enc-sk-field"></span><span class="enc-sk-field"></span></div>
+                <span class="enc-sk-bar enc-sk-label"></span>
+                <span class="enc-sk-field enc-sk-tall"></span>
+              </div>
+              <div class="enc-sk-card">
+                <div class="enc-sk-heading"><span class="enc-sk-icon"></span><span class="enc-sk-stack"><span class="enc-sk-bar enc-sk-h2"></span><span class="enc-sk-bar enc-sk-line enc-sk-w70"></span></span></div>
+                <span class="enc-sk-field enc-sk-tall"></span>
+                <div class="enc-sk-counters"><span></span><span></span><span></span><span></span><span></span><span></span></div>
+              </div>
+            </div>
+          </div>
+        </div></div>
+      </div>
     </main>
   </div>
 

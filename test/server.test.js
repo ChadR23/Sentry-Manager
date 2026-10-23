@@ -337,6 +337,50 @@ test('Studio is served with the web shim; converter bridge enforces Quick and al
   }
 });
 
+test('the Encoder tab is a page of its own: the converter with the shim, its skeleton painted first', async () => {
+  const dir = await tmp();
+  const s = await startServer(dir);
+  try {
+    await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
+    const res = await s.call('GET', '/studio/encoder.html?embed=encoder&vehicle=daily-driver', undefined, { raw: true });
+    assert.equal(res.status, 200);
+    assert.doesNotMatch(res.headers.get('content-security-policy'), /unsafe-eval|openstreetmap/, 'only the converter: no eval, no map tiles');
+    const html = await res.text();
+    const head = html.split('</head>')[0];
+    assert.match(head, /<script src="\/web\/webFlag\.js" defer><\/script>\s*<script src="\/web\/electronApiShim\.js" defer><\/script>/, 'the shim is injected');
+    assert.ok(head.indexOf('electronApiShim.js') < head.indexOf('src="encoder.js"'), 'and runs before the page script');
+    assert.match(head, /<link rel="preload" href="\/web\/studioEmbed\.css" as="style">/);
+    // nothing holds up the first paint (the skeleton): no blocking script or
+    // stylesheet, the skeleton's styles inline
+    assert.doesNotMatch(head, /<script\b(?![^>]*\b(?:defer|async|type="module"))[^>]*>/, 'no blocking script');
+    assert.doesNotMatch(head, /<link rel="stylesheet"/, 'no blocking stylesheet');
+    assert.match(head, /<style>[^<]*\.enc-sk-bay/, 'the skeleton is styled inline');
+    assert.ok(html.indexOf('class="enc-skeleton"') < html.indexOf('id="converterWorkspace"'), 'and comes first');
+    assert.doesNotMatch(html, /id="(clipBrowser|dropOverlay|clipDriveTabBar|videoContainer|chooseFolderBtn)"|script\.js/, 'none of the viewer');
+    // an old Encoder link opens the new page; the Viewer keeps Studio's
+    const old = await s.call('GET', '/studio/index.html?embed=encoder&vehicle=daily-driver', undefined, { raw: true });
+    assert.equal(old.status, 302);
+    assert.equal(old.headers.get('location'), '/studio/encoder.html?embed=encoder&vehicle=daily-driver');
+    const viewer = await s.call('GET', '/studio/index.html?embed=viewer', undefined, { raw: true });
+    assert.equal(viewer.status, 200);
+    assert.match(await viewer.text(), /electronApiShim\.js/);
+    // the shell paints the same skeleton before its script arrives
+    const shell = await (await s.call('GET', '/', undefined, { raw: true })).text();
+    assert.match(shell, /<script src="\/web\/boot\.js"><\/script>[\s\S]*id="encoder-skeleton"/);
+  } finally {
+    await s.stop();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+  // the shell's Encoder tab opens that page (with the vehicle), the Viewer Studio's
+  const app = fs.readFileSync(path.join(REPO, 'web', 'app.js'), 'utf8');
+  const src = app.match(/\n {2}function studioUrl\([\s\S]*?\n {2}\}\n/)[0];
+  const studioUrl = new Function('current', 'state', `${src}; return studioUrl;`)(() => ({ id: 'car', root: '/footage/car', studioRoot: '/footage/car/TeslaCam' }), { vehicleId: 'car' });
+  const encoder = new URL(studioUrl('encoder', { source: '/footage/car/TeslaCam' }), 'http://x');
+  assert.equal(encoder.pathname, '/studio/encoder.html');
+  assert.deepEqual([encoder.searchParams.get('vehicle'), encoder.searchParams.get('source')], ['car', '/footage/car/TeslaCam']);
+  assert.equal(new URL(studioUrl('viewer'), 'http://x').pathname, '/studio/index.html');
+});
+
 test('the supervisor only runs the app from the image, never code left in /data', { timeout: 120000 }, async () => {
   const dir = await tmp();
   await makeFootage(path.join(dir, 'footage'));

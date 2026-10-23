@@ -1,0 +1,95 @@
+/* The Encoder tab's loading skeleton (Flight Deck colors). One stylesheet for
+   both places it shows: encoder.html, inlined by the server so it paints with
+   the page's first bytes, and the shell (index.html has the same markup),
+   behind the Encoder's frame until the page paints over it. Sized by
+   container queries, so both draw it the same at the frame's width. */
+.enc-skeleton {
+    container-type: inline-size;
+    height: 100vh;
+    overflow: hidden;
+    background: #0B0E13;
+}
+
+.enc-sk-bay { width: min(1240px, calc(100% - 48px)); margin: 0 auto; padding: 24px 0 40px; }
+.enc-sk-header { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding-bottom: 20px; border-bottom: 1px solid #1F2530; }
+.enc-sk-stack { flex: 1; min-width: 0; display: grid; gap: 10px; }
+
+.enc-sk-bar, .enc-sk-chip, .enc-sk-icon, .enc-sk-pipeline span::after {
+    display: block;
+    border-radius: 6px;
+    background: linear-gradient(90deg, #1C222C 30%, #262D39 50%, #1C222C 70%) 0 0 / 300% 100%;
+    animation: enc-shimmer 1.6s linear infinite;
+}
+
+@keyframes enc-shimmer {
+    from { background-position: 100% 0; }
+    to { background-position: 0 0; }
+}
+
+.enc-sk-title { width: 170px; height: 24px; }
+.enc-sk-h2 { width: 110px; height: 15px; }
+.enc-sk-line { height: 12px; max-width: 520px; }
+.enc-sk-w60 { width: 60%; }
+.enc-sk-w70 { width: 70%; }
+.enc-sk-w80 { width: 80%; }
+.enc-sk-label { width: 96px; height: 10px; margin-top: 10px; }
+.enc-sk-chip { flex: none; width: 150px; height: 32px; border-radius: 999px; }
+.enc-sk-icon { flex: none; width: 32px; height: 32px; border-radius: 9px; }
+
+.enc-sk-pipeline { position: relative; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); justify-items: center; margin: 22px 0 24px; padding-bottom: 26px; }
+.enc-sk-pipeline::before { content: ''; position: absolute; top: 15px; left: 12.5%; right: 12.5%; height: 1px; background: #2A313D; }
+.enc-sk-pipeline span { position: relative; width: 30px; height: 30px; border: 1px solid #2A313D; border-radius: 50%; background: #0B0E13; }
+.enc-sk-pipeline span::after { content: ''; position: absolute; top: 40px; left: 50%; width: 54px; height: 10px; margin-left: -27px; }
+
+.enc-sk-grid { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr); gap: 16px; align-items: start; }
+.enc-sk-card { display: grid; gap: 10px; padding: 22px; border: 1px solid #1F2530; border-radius: 14px; background: #12161D; }
+.enc-sk-heading { display: flex; gap: 12px; margin-bottom: 10px; }
+.enc-sk-field { display: block; height: 40px; border: 1px solid #1F2530; border-radius: 10px; background: #0F1318; }
+.enc-sk-tall { height: 100px; }
+.enc-sk-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.enc-sk-counters { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; margin-top: 6px; overflow: hidden; border: 1px solid #1F2530; border-radius: 12px; background: #1F2530; }
+.enc-sk-counters span { height: 76px; background: #12161D; }
+
+/* Only if loading takes unusually long (shown without any script). */
+.enc-sk-slow {
+    position: fixed;
+    left: 50%;
+    bottom: 24px;
+    width: max-content;
+    max-width: calc(100% - 32px);
+    margin: 0;
+    transform: translateX(-50%);
+    padding: 10px 16px;
+    border: 1px solid #2A313D;
+    border-radius: 12px;
+    background: #171C24;
+    color: #C3CAD5;
+    font: 13px/1.45 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+    text-align: center;
+    visibility: hidden;
+    animation: enc-appear 0s linear 15s forwards;
+}
+
+.enc-sk-slow a { color: #C8F25A; font-weight: 600; }
+
+@keyframes enc-appear {
+    to { visibility: visible; }
+}
+
+/* the same breakpoints as the converter (encoderPage.css) */
+@container (max-width: 980px) {
+    .enc-sk-bay { width: min(760px, calc(100% - 40px)); padding-top: 22px; }
+    .enc-sk-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+@container (max-width: 640px) {
+    .enc-sk-bay { width: calc(100% - 32px); padding: 18px 0 28px; }
+    .enc-sk-header { flex-direction: column; align-items: flex-start; gap: 14px; }
+    .enc-sk-stack { width: 100%; }
+    .enc-sk-pipeline { margin: 20px 0 22px; }
+    .enc-sk-card { padding: 16px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .enc-sk-bar, .enc-sk-chip, .enc-sk-icon, .enc-sk-pipeline span::after { animation: none; }
+}

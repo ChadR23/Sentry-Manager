@@ -88,6 +88,9 @@ const cspWith = ({ script = "'self'", img = "'self' data: blob:" }) => [
 ].join('; ');
 const CSP = cspWith({});
 const STUDIO_CSP = cspWith({ script: "'self' 'unsafe-eval'", img: "'self' data: blob: https://*.google.com https://*.tile.openstreetmap.org" });
+// The Encoder tab's page: the converter only (no telemetry decoder, no map),
+// so it gets the plain policy.
+const ENCODER_PAGE = '/studio/encoder.html';
 
 function readBuildInfo() {
   try {
@@ -101,6 +104,23 @@ function studioHtml(html) {
   // Runs before any Studio script: marks web mode and installs window.electronAPI.
   const inject = '<meta name="color-scheme" content="dark">\n<script src="/web/webFlag.js"></script>\n<script src="/web/electronApiShim.js"></script>\n<script src="/web/studioTouch.js"></script>\n<link rel="stylesheet" href="/web/studioEmbed.css">';
   return html.replace(/<head([^>]*)>/i, (m) => `${m}\n${inject}`);
+}
+
+function encoderHtml(html) {
+  // The same, without holding up the page's first paint (its loading
+  // skeleton): the scripts are deferred (they still run before encoder.js, in
+  // order) and the stylesheet is preloaded, then applied by encoder.js with
+  // the page's own. No touch drags on this page.
+  const inject = '<meta name="color-scheme" content="dark">\n<script src="/web/webFlag.js" defer></script>\n<script src="/web/electronApiShim.js" defer></script>\n<link rel="preload" href="/web/studioEmbed.css" as="style">';
+  // The skeleton's stylesheet goes inline: it paints with the first bytes.
+  let skeleton = null;
+  try {
+    skeleton = fs.readFileSync(path.join(WEB, 'encoderSkeleton.css'), 'utf8');
+  } catch {
+    // left as a link
+  }
+  return html.replace(/<head([^>]*)>/i, (m) => `${m}\n${inject}`)
+    .replace('<link rel="stylesheet" href="/web/encoderSkeleton.css">', (link) => (skeleton === null || skeleton.includes('</') ? link : `<style>\n${skeleton}</style>`));
 }
 
 function isSecure(req) {
@@ -127,7 +147,7 @@ function securityHeaders(req, res, pathname = '') {
   res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
   res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), usb=(), serial=(), payment=(), fullscreen=(self)');
-  res.setHeader('Content-Security-Policy', pathname.startsWith('/studio/') ? STUDIO_CSP : CSP);
+  res.setHeader('Content-Security-Policy', pathname.startsWith('/studio/') && pathname !== ENCODER_PAGE ? STUDIO_CSP : CSP);
   if (isSecure(req)) res.setHeader('Strict-Transport-Security', 'max-age=31536000');
 }
 
@@ -790,9 +810,17 @@ async function main() {
         res.writeHead(302, { Location: `/studio/index.html${url.search}` });
         return res.end();
       }
+      // The Encoder tab has a page of its own: an old Encoder link never
+      // shows the whole Studio app.
+      if (p === '/studio/index.html' && url.searchParams.get('embed') === 'encoder') {
+        res.writeHead(302, { Location: `${ENCODER_PAGE}${url.search}` });
+        return res.end();
+      }
       if (p.startsWith('/studio/')) {
         const rel = p.slice('/studio/'.length);
-        return serve(path.join(SRC, 'renderer'), rel, rel === 'index.html' ? { transform: studioHtml } : {});
+        const opts = rel === 'index.html' ? { transform: studioHtml } : rel === 'encoder.html' ? { transform: encoderHtml } : {};
+        if (rel.startsWith('fonts/')) opts.cache = 'public, max-age=604800';
+        return serve(path.join(SRC, 'renderer'), rel, opts);
       }
       if (p.startsWith('/shared/')) return serve(path.join(SRC, 'shared'), p.slice(8));
       if (p.startsWith('/assets/')) return serve(path.join(APP_ROOT, 'assets'), p.slice(8));

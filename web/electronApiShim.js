@@ -3,18 +3,21 @@
 // src/preload.js; calls go to the Sentry Six Manager server over HTTP, and
 // converter progress arrives over Server-Sent Events.
 //
+// Two pages load it: Studio's index.html (the Viewer tab) and encoder.html
+// (the Encoder tab: the converter on its own, started by encoder.js).
+//
 // URL parameters (set by the manager shell):
-//   embed=encoder|viewer   encoder: open the Converter panel, hide the rest
-//   root=/footage/<car>    the vehicle's footage: what the viewer opens, and
-//                          the encoder's source
+//   embed=encoder|viewer   which tab (the encoder page is always 'encoder')
+//   root=/footage/<car>    the vehicle's footage: what the viewer opens
 //   folder=/footage/<car>/TeslaCam/SentryClips/<event>   open this folder instead
 //   vehicle=<id>           the vehicle shown (picked in the shell)
+//   source=/footage/<car>  the encoder's source (Footage > Review conversion)
 //   date=YYYY-MM-DD        the viewer opens on this day (Footage > Play day)
 (function () {
   'use strict';
 
   const params = new URLSearchParams(location.search);
-  const embed = params.get('embed') || 'viewer';
+  const embed = /\/encoder\.html$/.test(location.pathname) ? 'encoder' : params.get('embed') || 'viewer';
   const startFolder = params.get('folder') || params.get('root') || null;
   document.documentElement.dataset.embed = embed;
 
@@ -435,70 +438,85 @@
     });
   }
 
-  // Encoder tab: open the Converter panel as soon as the Studio UI is built.
-  // The source is a vehicle's footage (picked from the vehicles, not a
-  // folder). Converting is for saving space on the share, so a new setup
-  // replaces the originals after verification when the share allows it; a
-  // separate destination is chosen by hand.
+  // Encoder tab (encoder.html). The source is a vehicle's footage (picked
+  // from the vehicles, not a folder). Converting is for saving space on the
+  // share, so a new setup replaces the originals after verification when the
+  // share allows it; a separate destination is chosen by hand. encoder.js
+  // announces the converter (sentry:converter-ready) once it shows the last
+  // job's settings, and keeps its loading skeleton up until this is done.
   if (embed === 'encoder') {
-    const fill = (id, value) => {
-      const input = document.getElementById(id);
-      if (!input || !value) return;
-      input.value = value;
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      input.dispatchEvent(new Event('change', { bubbles: true }));
-    };
+    vehicleList(); // asked for now, so the picker is ready with the converter
     // a running or paused job keeps its folders
     const ACTIVE = ['discovering', 'waiting', 'staging', 'encoding', 'writing-telemetry', 'verifying', 'copying', 'replacing', 'paused', 'paused_network'];
-    const busy = async () => ACTIVE.includes((await invoke('getCurrent'))?.value?.state);
-    // "Review conversion" in Footage hands over that vehicle's folder as the source.
+    let jobState = async () => (await invoke('getCurrent'))?.value?.state;
+    const busy = async () => ACTIVE.includes(await jobState());
+    let ready = false;
+    let handedOver = params.get('source'); // Footage > Review conversion
+    let picker = null;
+    let vehicles = [];
+    const sourceInput = () => document.getElementById('converterSourcePath');
+    const setSource = (folder) => {
+      const input = sourceInput();
+      if (!input || !folder) return;
+      input.value = folder;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      // the replace warning names the source
+      document.querySelector('[data-converter-output]:checked')?.dispatchEvent(new Event('change', { bubbles: true }));
+      const v = vehicles.find((x) => footageOf(x) === folder);
+      if (picker && v) picker.value = v.id;
+    };
     const useSource = async (folder) => {
-      if (!(await busy())) fill('converterSourcePath', folder);
-    };
-    const pickVehicle = async () => {
-      const input = document.getElementById('converterSourcePath');
-      const list = await vehicleList();
-      const current = list.find((v) => footageOf(v) === input?.value) || list.find((v) => v.id === params.get('vehicle')) || list[0];
-      if (!input) return;
-      input.placeholder = list.length ? '' : 'Add a vehicle in Settings first';
-      // the vehicle picker replaces the folder button (hidden in studioEmbed.css)
-      const select = await vehicleSelect(current?.id, 'Vehicle to convert');
-      if (select) {
-        select.addEventListener('change', () => {
-          const v = list.find((x) => x.id === select.value);
-          if (v) useSource(footageOf(v));
-        });
-        document.getElementById('converterChooseSource')?.before(select);
-      }
-      // a restored setup (the last job's folders and output) stays as it was
-      if (!input.value && !(await busy())) {
-        if (current) fill('converterSourcePath', params.get('source') || footageOf(current));
-        preferReplace();
-      }
-    };
-    // The share's capabilities arrive a moment later ("Checking system
-    // capability…"); pick Replace once it is offered, else leave Separate.
-    const preferReplace = (tries = 40) => {
-      const replace = document.getElementById('converterOutputReplace');
-      if (!replace) return;
-      if (replace.disabled) {
-        if (tries > 0) setTimeout(() => preferReplace(tries - 1), 250);
+      if (!ready) {
+        handedOver = folder;
         return;
       }
-      if (!replace.checked) replace.click();
+      if (!(await busy())) setSource(folder);
     };
-    const open = () => {
-      const tab = document.querySelector('[data-panel="converter"]');
-      if (!tab) return setTimeout(open, 100);
-      tab.click();
-      // after the converter has shown its last job's folders
-      setTimeout(() => {
-        if (params.get('source')) useSource(params.get('source'));
-        pickVehicle();
-      }, 1500);
-      return undefined;
+    // Replace when the share allows it (the converter has its capabilities by
+    // now), else Separate stays.
+    const preferReplace = () => {
+      const replace = document.getElementById('converterOutputReplace');
+      if (replace && !replace.disabled && !replace.checked) replace.click();
     };
-    window.addEventListener('DOMContentLoaded', () => setTimeout(open, 0));
+    async function setup() {
+      const input = sourceInput();
+      if (!input) return;
+      vehicles = await vehicleList();
+      const isBusy = await busy();
+      // the last job's folders and output, restored by the converter
+      const restored = Boolean(input.value);
+      if (handedOver && !isBusy) setSource(handedOver);
+      const current = vehicles.find((v) => footageOf(v) === input.value) || vehicles.find((v) => v.id === params.get('vehicle')) || vehicles[0];
+      input.removeAttribute('data-i18n-placeholder'); // Studio's translations would put "Choose a TeslaCam folder" back
+      input.placeholder = vehicles.length ? '' : 'Add a vehicle in Settings first';
+      // the vehicle picker replaces the folder button (hidden in studioEmbed.css)
+      picker = await vehicleSelect(current?.id, 'Vehicle to convert');
+      if (picker) {
+        picker.addEventListener('change', () => {
+          const v = vehicles.find((x) => x.id === picker.value);
+          if (v) useSource(footageOf(v));
+        });
+        document.getElementById('converterChooseSource')?.before(picker);
+        // like the folder it stands for, it stays put while a job runs
+        const startButton = document.getElementById('converterStart');
+        if (startButton) {
+          const lock = () => { picker.disabled = startButton.disabled; };
+          new MutationObserver(lock).observe(startButton, { attributes: true, attributeFilter: ['disabled'] });
+          lock();
+        }
+      }
+      // a restored setup stays as it was
+      if (!restored && !isBusy) {
+        if (!input.value && current) setSource(footageOf(current));
+        preferReplace();
+      }
+    }
+    window.addEventListener('sentry:converter-ready', (e) => {
+      if (typeof e.detail?.jobState === 'function') jobState = async () => e.detail.jobState();
+      ready = true;
+      e.detail?.waitUntil?.(setup().catch(() => {}));
+    }, { once: true });
     window.addEventListener('message', (e) => {
       if (e.origin === location.origin && e.source === window.parent && e.data?.type === 'use-source') useSource(e.data.folder);
     });

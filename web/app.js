@@ -486,15 +486,22 @@
 
   // ---------- embedded Studio (Viewer / Encoder) ----------
   const frames = {};
-  // The Viewer shows the selected vehicle's footage; the Encoder converts it.
+  // The Encoder page's loading skeleton (index.html, the same as the page's
+  // own): drawn behind its frame, so the tab shows it from the moment it
+  // opens until the page has arrived and painted the same skeleton over it.
+  const bootFrame = $('encoder-skeleton');
+  const ENCODER_SKELETON = bootFrame?.innerHTML || '';
+  // The Viewer shows the selected vehicle's footage (Studio's page); the
+  // Encoder converts it (a page with only the converter: encoder.html).
   function studioUrl(kind, extra = {}) {
     const v = current();
     const q = new URLSearchParams({
       embed: kind,
-      ...(v ? { root: v.studioRoot || v.root, vehicle: v.id } : {}),
+      // (before the vehicles have loaded: the one picked last time)
+      ...(v ? { root: v.studioRoot || v.root, vehicle: v.id } : state.vehicleId ? { vehicle: state.vehicleId } : {}),
       ...extra
     });
-    return `/studio/index.html?${q}`;
+    return `/studio/${kind === 'encoder' ? 'encoder' : 'index'}.html?${q}`;
   }
   function openStudio(kind, extra = {}) {
     pendingFrame[kind] = studioUrl(kind, extra);
@@ -523,6 +530,14 @@
       wrap.dataset.src = url;
       wrap.dataset.vehicle = String(current()?.id || '');
       wrap.innerHTML = `<iframe title="Sentry Studio ${kind}" src="${esc(url)}" allow="fullscreen; clipboard-write"></iframe>`;
+      if (kind === 'encoder') {
+        wrap.classList.add('frame-loading');
+        wrap.insertAdjacentHTML('afterbegin', ENCODER_SKELETON);
+        wrap.querySelector('iframe').addEventListener('load', () => {
+          wrap.classList.remove('frame-loading');
+          wrap.querySelector('.enc-skeleton')?.remove();
+        }, { once: true });
+      }
       $('frames').append(wrap);
       frames[kind] = wrap;
     }
@@ -975,6 +990,9 @@
   let renderSeq = 0;
   async function render() {
     const seq = ++renderSeq;
+    // the shell's opening state (boot.js, index.html) ends here
+    bootFrame?.remove();
+    delete document.documentElement.dataset.boot;
     const [route, ...rest] = (location.hash.replace(/^#\/?/, '') || 'overview').split('/');
     state.route = pages[route] ? route : 'overview';
     document.querySelectorAll('#nav a').forEach((a) => a.classList.toggle('active', a.dataset.route === state.route));
@@ -1019,6 +1037,11 @@
   }
 
   (async () => {
+    // Started on the Encoder tab: it starts loading now instead of after the
+    // settings and vehicles (it shows the vehicle picked last time, else the
+    // first one, as the shell will).
+    const encoderFirst = /^#\/?encoder\/?$/.test(location.hash);
+    if (encoderFirst) render();
     try {
       const s = await api('/api/settings');
       $('reduce-effects').checked = Boolean(s.appearance?.reduceEffects);
@@ -1027,6 +1050,8 @@
     } catch {
       // shown by render
     }
+    // that frame is the selected vehicle's, so it stays
+    if (encoderFirst && frames.encoder && !state.vehicles.some((v) => String(v.id) === frames.encoder.dataset.vehicle)) frames.encoder.dataset.vehicle = String(current()?.id || '');
     render();
     connect();
   })();
