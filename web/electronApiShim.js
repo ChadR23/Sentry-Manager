@@ -220,6 +220,9 @@
     getCurrentConverterJob: () => invoke('getCurrent'),
     pauseConverter: (jobId) => invoke('pause', { jobId }),
     setConverterConcurrency: (jobId, concurrency) => invoke('setConcurrency', { jobId, concurrency }),
+    // several GPUs: the encoding devices, and how many at once on each
+    getConverterDevices: () => invoke('devices'),
+    setConverterLanes: (jobId, lanes) => invoke('setLanes', { jobId, lanes }),
     resumeConverter: (jobId) => invoke('resume', { jobId }),
     cancelConverter: (jobId) => invoke('cancel', { jobId }),
     discardConverterJob: (jobId) => invoke('discard', { jobId }),

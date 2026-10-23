@@ -465,6 +465,118 @@ select.converter-select {
 
 .converter-segments input:checked + span strong { color: var(--accent-color); }
 
+/* Parallel conversions with several GPUs: one row per GPU and the CPU
+   (footageConverter.js builds them), each with − [n] +. A row that converts
+   is marked like a chosen option; the name is cut short, never the stepper. */
+.converter-lanes {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+}
+
+.converter-lane {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 12px;
+    min-height: 52px;
+    padding: 6px 6px 6px 14px;
+    border: 1px solid var(--fd-border-strong);
+    border-radius: 10px;
+    background: var(--fd-inner);
+    transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.converter-lane:not(.is-off) {
+    border-color: var(--accent-line);
+    background: var(--accent-bg);
+}
+
+.converter-lane-name {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.converter-lane-name strong,
+.converter-lane-name small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.converter-lane-name strong {
+    color: var(--text-color);
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.converter-lane:not(.is-off) .converter-lane-name strong { color: var(--accent-color); }
+
+.converter-lane-name small {
+    color: var(--text-muted);
+    font: 11.5px/1.4 var(--font-mono);
+}
+
+/* the CPU's hint and "Can't encode AV1" are words, not encoder names */
+.converter-lane[data-device="cpu"] .converter-lane-name small,
+.converter-lane.is-unsupported .converter-lane-name small { font-family: var(--font-sans); }
+
+.converter-lane.is-unsupported .converter-lane-name small { color: var(--fd-warn); }
+
+.converter-stepper {
+    display: inline-flex;
+    align-items: center;
+    overflow: hidden;
+    border: 1px solid var(--fd-border-strong);
+    border-radius: 9px;
+    background: var(--fd-raised);
+}
+
+.converter-stepper button {
+    display: inline-grid;
+    place-items: center;
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--text-secondary);
+    font: 600 18px/1 var(--font-sans);
+    cursor: pointer;
+}
+
+.converter-stepper button:hover:not(:disabled) {
+    color: var(--accent-color);
+    background: var(--fd-hover);
+}
+
+.converter-stepper button:focus-visible {
+    outline: 2px solid var(--accent-color);
+    outline-offset: -2px;
+}
+
+.converter-stepper button:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
+.converter-stepper output {
+    min-width: 44px;
+    color: var(--text-color);
+    font: 600 13px/1 var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    text-align: center;
+}
+
+.converter-lane.is-off .converter-stepper output {
+    color: var(--text-muted);
+    font-family: var(--font-sans);
+}
+
+.converter-lanes > .converter-disclosure { margin-top: 4px; }
+
 /* Output: two cards with a radio mark */
 .converter-output-options { gap: 8px; }
 
@@ -925,6 +1037,27 @@ select.converter-select {
 
 .nd-hint.calm b { color: var(--text-color); }
 
+/* several GPUs converting: one line per device */
+.nd-devices {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+    margin-top: 12px;
+}
+
+.nd-dev {
+    min-width: 0;
+    padding: 8px 12px;
+    border: 1px solid var(--fd-border);
+    border-radius: 10px;
+    background: var(--fd-card);
+    color: var(--text-secondary);
+    font: 600 12px/1.45 var(--font-mono);
+    overflow-wrap: anywhere;
+}
+
+.nd-dev.hot { border-color: rgba(255, 159, 90, 0.45); }
+
 .nd-eff {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
@@ -1108,6 +1241,42 @@ select.converter-select {
     outline-offset: 2px;
 }
 
+/* Several GPUs: a section per GPU (no side padding, so its tables scroll
+   inside it on phones exactly like the single table), then the buttons
+   that use one codec on every GPU */
+.converter-benchmark-device,
+.converter-benchmark-combined {
+    min-width: 0;
+    margin-top: 16px;
+    padding-top: 14px;
+    border-top: 1px solid var(--fd-border);
+}
+
+.converter-benchmark-combined { border-top-color: var(--fd-border-strong); }
+
+.converter-benchmark-device h4 {
+    margin: 0;
+    color: var(--text-color);
+    font-size: 14px;
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+
+.converter-benchmark-dialog .converter-benchmark-device > .converter-disclosure {
+    margin: 2px 0 0;
+    font: 11.5px/1.45 var(--font-mono);
+    overflow-wrap: anywhere;
+}
+
+.converter-benchmark-device .converter-benchmark-actions,
+.converter-benchmark-combined .converter-benchmark-actions {
+    justify-content: flex-start;
+    margin-top: 10px;
+}
+
+.converter-benchmark-combined .converter-benchmark-actions { margin-top: 0; }
+.converter-benchmark-dialog .converter-benchmark-combined .converter-disclosure { margin: 8px 0 0; }
+
 .sm-picker {
     background: rgba(5, 7, 10, 0.72);
     color: var(--text-color);
@@ -1273,6 +1442,25 @@ select.converter-select {
 
     .converter-benchmark-actions .converter-benchmark-action { flex: 1 1 auto; }
 
+    /* a long "Use H.265 on every GPU (…)" wraps instead of widening the dialog */
+    .converter-benchmark-combined .converter-benchmark-action {
+        min-width: 0;
+        padding-block: 8px;
+        line-height: 1.35;
+        white-space: normal;
+    }
+
+    /* the steppers keep their size; the device name gives way */
+    .converter-lane {
+        gap: 8px;
+        padding-left: 12px;
+    }
+
+    .converter-stepper button {
+        width: 40px;
+        height: 40px;
+    }
+
     .toast-container { right: 16px; }
 }
 
@@ -1288,6 +1476,13 @@ select.converter-select {
     .converter-order-button {
         width: 40px;
         height: 40px;
+    }
+
+    .converter-lane { min-height: 56px; }
+
+    .converter-stepper button {
+        width: 44px;
+        height: 44px;
     }
 
     .converter-select,

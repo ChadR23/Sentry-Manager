@@ -120,7 +120,7 @@
                     </div>
                     <dialog id="converterBenchmarkDialog" class="converter-benchmark-dialog" aria-labelledby="converterBenchmarkTitle">
                         <h3 id="converterBenchmarkTitle" data-i18n="ui.converter.benchmarkTitle">Encoding benchmark</h3>
-                        <p class="converter-disclosure" data-i18n="ui.converter.benchmarkIntro">Runs real conversions — telemetry, verification and saving — on copies of up to 8 clips from your source folder with H.265 and then AV1 (when this computer can encode it), at 1–8 parallel conversions with the compression selected above, then repeats the fastest setting with each verification mode (Off, Quick, Full), so you can compare everything side by side. Your footage is only read; results go to a temporary folder. Takes several minutes; close other heavy apps for accurate results.</p>
+                        <p id="converterBenchmarkIntro" class="converter-disclosure" data-i18n="ui.converter.benchmarkIntro">Runs real conversions — telemetry, verification and saving — on copies of up to 8 clips from your source folder with H.265 and then AV1 (when this computer can encode it), at 1–8 parallel conversions with the compression selected above, then repeats the fastest setting with each verification mode (Quick, Full), so you can compare everything side by side. Your footage is only read; results go to a temporary folder. Takes several minutes; close other heavy apps for accurate results.</p>
                         <p id="converterBenchmarkStatus" class="converter-benchmark-status" role="status" aria-live="polite"></p>
                         <table id="converterBenchmarkTable" class="converter-benchmark-table" hidden>
                             <thead id="converterBenchmarkHead"><tr><th data-i18n="ui.converter.benchmarkParallel">At once</th><th data-i18n="ui.converter.benchmarkFilesPerMinute">Files/min</th><th data-i18n="ui.converter.benchmarkFps">FPS</th></tr></thead>
@@ -132,6 +132,9 @@
                             <tbody id="converterBenchmarkVerifyRows"></tbody>
                         </table>
                         <p id="converterBenchmarkBest" class="converter-benchmark-best" hidden></p>
+                        <!-- several GPUs: one section per GPU, each benchmarked alone
+                             (built by footageConverter.js in place of the tables above) -->
+                        <div id="converterBenchmarkDevices" class="converter-benchmark-devices" hidden></div>
                         <div class="converter-benchmark-actions">
                             <button type="button" id="converterBenchmarkRun" class="converter-benchmark-action primary" data-i18n="ui.converter.benchmarkRun">Run benchmark</button>
                             <button type="button" id="converterBenchmarkApply" class="converter-benchmark-action" hidden></button>
@@ -233,6 +236,12 @@
                             <input id="converterConcurrencyCustom" class="converter-select" type="number" min="1" max="64" step="1" value="12" inputmode="numeric">
                             <small class="converter-disclosure" data-i18n="ui.converter.parallelCustomHint">More than your graphics card or drive can handle makes conversion slower, not faster. The benchmark finds the best number for this PC.</small>
                         </label>
+                        <!-- with two or more GPUs, in place of the number above: one
+                             row per GPU and the CPU, each − [n] + (built by
+                             footageConverter.js) -->
+                        <div id="converterLanes" class="converter-lanes" hidden>
+                            <p id="converterLanesTotal" class="converter-disclosure"></p>
+                        </div>
                         <p id="converterConcurrencyHint" class="converter-disclosure" data-i18n="ui.converter.parallelConversionsHint">How many clips are converted at the same time. Hardware encoders may limit simultaneous sessions; software encoding uses more CPU and memory.</p>
                     </fieldset>
 
