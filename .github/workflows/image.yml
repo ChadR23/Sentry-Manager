@@ -4,6 +4,9 @@ name: Image
 # registry, ghcr.io/<owner>/<repo>, for amd64 and arm64.
 #   - A push to main publishes `latest` and `sha-<commit>` (pin a `sha-` tag
 #     with SENTRY_TAG to stay on, or go back to, a version).
+#   - A push to release/next-update publishes `release-next-update` (and its
+#     `sha-<commit>`) for people who test the next update before it reaches
+#     main: SENTRY_TAG=release-next-update.
 #   - Running it by hand for another branch (Actions > Image > Run workflow)
 #     publishes an image tagged with that branch's name.
 #   - Every Monday it rebuilds `latest` so Debian, Node and ffmpeg security
@@ -15,7 +18,7 @@ name: Image
 
 on:
   push:
-    branches: [main]
+    branches: [main, release/next-update]
     paths-ignore: ['README.md', 'docs/**']
   schedule:
     - cron: '17 5 * * 1'
@@ -27,7 +30,9 @@ permissions:
 
 concurrency:
   group: image-${{ github.ref }}
-  cancel-in-progress: false
+  # a newer push to the test branch replaces a build still running; main
+  # always finishes
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 defaults:
   run:
