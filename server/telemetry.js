@@ -14,12 +14,17 @@
 //
 // Results are cached under /data/telemetry by file, size and modification
 // time; a converted clip (new size and time) is read again.
+//
+// Reading a clip is a second or more of solid work, so it runs in a worker
+// thread: on the server's own thread it held up every other request while
+// the viewer opened new clips (a page could take 15 s to appear).
 
 const crypto = require('crypto');
 const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
 const vm = require('vm');
+const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
 const { limiter } = require('./scanner');
 
 const MAX_FILE = 1024 * 1024 * 1024;
@@ -39,9 +44,45 @@ function loadParser(srcRoot) {
   };
 }
 
+/** Read the clip and list [timestampMs, base64 record] for frames with telemetry. */
+async function readRecords(Reader, real, size) {
+  const bytes = new Uint8Array(new ArrayBuffer(size));
+  const fh = await fsp.open(real, 'r');
+  try {
+    let at = 0;
+    while (at < size) {
+      const { bytesRead } = await fh.read(bytes, at, Math.min(16 * 1024 * 1024, size - at), at);
+      if (!bytesRead) break;
+      at += bytesRead;
+    }
+    if (at !== size) throw new Error('The clip changed while it was read');
+  } finally {
+    await fh.close();
+  }
+  let frames = [];
+  let note = null;
+  try {
+    frames = new Reader(bytes.buffer).parseFrames(null);
+  } catch (err) {
+    // not a Tesla clip (or a damaged one): no telemetry, like the desktop viewer
+    note = `No telemetry in ${path.basename(real)}: ${err.message}`;
+  }
+  const records = [];
+  for (const f of frames) if (f.sei) records.push([f.timestamp, Buffer.from(f.sei).toString('base64')]);
+  return { body: JSON.stringify({ v: 1, frames: records }), note };
+}
+
+// The worker thread: one clip, then it ends (and its memory goes with it).
+if (!isMainThread && workerData?.telemetryClip) {
+  const { srcRoot, real, size } = workerData;
+  readRecords(loadParser(srcRoot), real, size)
+    .then((out) => parentPort.postMessage(out), (err) => parentPort.postMessage({ error: err.message }));
+}
+
 class Telemetry {
   constructor({ srcRoot, cacheDir, log }) {
-    this.Reader = loadParser(srcRoot);
+    loadParser(srcRoot); // fail at start-up, not on the first clip
+    this.srcRoot = srcRoot;
     this.cacheDir = cacheDir;
     this.log = log;
     this.limit = limiter(2); // each read holds one clip in memory
@@ -77,31 +118,22 @@ class Telemetry {
     return this.pending.get(key);
   }
 
-  /** Read the clip and list [timestampMs, base64 record] for frames with telemetry. */
-  async read(real, size) {
-    const bytes = new Uint8Array(new ArrayBuffer(size));
-    const fh = await fsp.open(real, 'r');
-    try {
-      let at = 0;
-      while (at < size) {
-        const { bytesRead } = await fh.read(bytes, at, Math.min(16 * 1024 * 1024, size - at), at);
-        if (!bytesRead) break;
-        at += bytesRead;
-      }
-      if (at !== size) throw new Error('The clip changed while it was read');
-    } finally {
-      await fh.close();
-    }
-    let frames = [];
-    try {
-      frames = new this.Reader(bytes.buffer).parseFrames(null);
-    } catch (err) {
-      // not a Tesla clip (or a damaged one): no telemetry, like the desktop viewer
-      this.log?.info(`No telemetry in ${path.basename(real)}: ${err.message}`);
-    }
-    const records = [];
-    for (const f of frames) if (f.sei) records.push([f.timestamp, Buffer.from(f.sei).toString('base64')]);
-    return JSON.stringify({ v: 1, frames: records });
+  /** The clip's telemetry as JSON text, read in a worker thread. */
+  read(real, size) {
+    return new Promise((resolve, reject) => {
+      const worker = new Worker(__filename, { workerData: { telemetryClip: true, srcRoot: this.srcRoot, real, size } });
+      let answered = false;
+      worker.once('message', (out) => {
+        answered = true;
+        if (out.note) this.log?.info(out.note);
+        if (out.error) reject(new Error(out.error));
+        else resolve(out.body);
+      });
+      worker.once('error', reject);
+      worker.once('exit', (code) => {
+        if (!answered) reject(new Error(`The telemetry reader stopped (${code})`));
+      });
+    });
   }
 
   /** Keep the cache to the newest MAX_CACHE_FILES results. */

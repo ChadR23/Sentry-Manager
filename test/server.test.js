@@ -227,6 +227,16 @@ test('footage, protect, Recycle Bin and policies never lose files', { timeout: 1
     const part = await s.call('GET', `/api/media?path=${encodeURIComponent(clip)}`, undefined, { raw: true, headers: { Range: 'bytes=10-19' } });
     assert.equal(part.status, 206);
     assert.equal((await part.arrayBuffer()).byteLength, 10);
+    // an open-ended range (what a video asks for) is answered in parts of at most 2 MiB
+    const big = path.join(root, 'TeslaCam/RecentClips/2020-01-01_08-02-00-front.mp4');
+    await fsp.writeFile(big, crypto.randomBytes(5 * 1024 * 1024));
+    const head = await s.call('GET', `/api/media?path=${encodeURIComponent(big)}`, undefined, { raw: true, headers: { Range: 'bytes=0-' } });
+    assert.equal(head.status, 206);
+    assert.equal(head.headers.get('content-range'), `bytes 0-${2 * 1024 * 1024 - 1}/${5 * 1024 * 1024}`);
+    assert.equal((await head.arrayBuffer()).byteLength, 2 * 1024 * 1024);
+    const tail = await s.call('GET', `/api/media?path=${encodeURIComponent(big)}`, undefined, { raw: true, headers: { Range: `bytes=${4 * 1024 * 1024}-` } });
+    assert.equal(tail.headers.get('content-range'), `bytes ${4 * 1024 * 1024}-${5 * 1024 * 1024 - 1}/${5 * 1024 * 1024}`);
+    assert.equal((await tail.arrayBuffer()).byteLength, 1024 * 1024);
     assert.equal((await s.call('GET', `/api/media?path=${encodeURIComponent('/etc/passwd')}`, undefined, { raw: true })).status, 403);
     assert.equal((await s.call('POST', '/api/studio/readDir', { path: '/etc' })).status, 403);
 
@@ -331,6 +341,36 @@ test('Studio is served with the web shim; converter bridge enforces Quick and al
     }, 120000);
     const jobs = (await s.call('GET', '/api/jobs')).data.jobs;
     assert.ok(jobs.some((j) => j.type === 'conversion' && j.status !== 'running'), 'conversion mirrored into Jobs');
+  } finally {
+    await s.stop();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('the viewer gets a clip\'s telemetry from the server, read off the main thread', { skip: !hasFfmpeg && 'ffmpeg missing', timeout: 120000 }, async () => {
+  const dir = await tmp();
+  const root = path.join(dir, 'footage');
+  await makeFootage(root);
+  const s = await startServer(dir);
+  try {
+    await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
+    const clip = path.join(root, 'TeslaCam/RecentClips/2020-01-01_08-00-00-front.mp4');
+    const url = `/api/telemetry?path=${encodeURIComponent(clip)}`;
+    const res = await s.call('GET', url);
+    assert.equal(res.status, 200, JSON.stringify(res.data));
+    assert.equal(res.data.v, 1);
+    assert.equal(res.data.frames.length, 24, 'one record per frame of the 2 s, 12 fps clip');
+    assert.ok(res.data.frames.every(([ms, rec]) => Number.isFinite(ms) && typeof rec === 'string' && rec.length > 0));
+    // cached by file, size and time: the second answer is a 304 for the same ETag
+    const first = await s.call('GET', url, undefined, { raw: true });
+    const etag = first.headers.get('etag');
+    assert.equal((await s.call('GET', url, undefined, { raw: true, headers: { 'If-None-Match': etag } })).status, 304);
+    // a file that is not a Tesla clip has no telemetry, like the desktop viewer
+    const junk = path.join(root, 'TeslaCam/RecentClips/2020-01-01_08-00-00-back.mp4');
+    const none = await s.call('GET', `/api/telemetry?path=${encodeURIComponent(junk)}`);
+    assert.equal(none.status, 200);
+    assert.deepEqual(none.data.frames, []);
+    assert.equal((await s.call('GET', `/api/telemetry?path=${encodeURIComponent('/etc/passwd')}`)).status, 403);
   } finally {
     await s.stop();
     await fsp.rm(dir, { recursive: true, force: true });

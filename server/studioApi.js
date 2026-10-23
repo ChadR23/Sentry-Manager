@@ -75,6 +75,15 @@ async function readTextConfined(abs, fdInside, maxBytes) {
 }
 
 /** Stream a file with Range support. Converted files are replaced in place, so never cache. */
+// A video asks for "bytes=N-", the rest of the file (a minute of a camera is
+// 20-80 MB). Over HTTP/2 every request shares one connection, and the
+// browser only lets so much unread data pile up on it: the viewer's six
+// cameras, buffered ahead or paused in a hidden tab, could hold all of it,
+// so every other request (another page, the API) waited until those video
+// downloads were cancelled, 15 s or more. Each answer is now at most a few
+// MB; the video simply asks for the next part, as with any media server.
+const MEDIA_CHUNK = 2 * 1024 * 1024;
+
 async function sendMedia(req, res, abs, fdInside = async () => true) {
   const opened = await openConfined(abs, fdInside);
   if (!opened) {
@@ -108,6 +117,7 @@ async function sendMedia(req, res, abs, fdInside = async () => true) {
       res.writeHead(416, { 'Content-Range': `bytes */${st.size}` });
       return res.end();
     }
+    end = Math.min(end, start + MEDIA_CHUNK - 1);
     status = 206;
     headers['Content-Range'] = `bytes ${start}-${end}/${st.size}`;
   }
@@ -125,4 +135,4 @@ async function sendMedia(req, res, abs, fdInside = async () => true) {
   return undefined;
 }
 
-module.exports = { hiddenPath, readDir, stat, sendMedia, openConfined, readTextConfined, MIME };
+module.exports = { hiddenPath, readDir, stat, sendMedia, openConfined, readTextConfined, MIME, MEDIA_CHUNK };
