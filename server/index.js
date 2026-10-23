@@ -41,6 +41,7 @@ const { detectGpus } = require('./gpu');
 const { createConverterHost } = require('./converterHost');
 const { createStats } = require('./stats');
 const { encoderBlock, RUNNING: CONVERTER_RUNNING } = require('./encoderStats');
+const { parsePowerSettings, priceAt, rateNameAt, PriceError } = require('./powerPrice');
 const { createConverterBridge } = require('./converterBridge');
 const { hiddenPath, readDir, stat, sendMedia, readTextConfined } = require('./studioApi');
 const { createRealGuard, isInside } = require('./safePath');
@@ -232,6 +233,8 @@ async function main() {
     isBusy: () => converterRunning() || benchmarking !== null,
     readShares: () => [{ label: 'Data volume', path: DATA }, ...vehicles.list().map((v) => ({ label: v.name, path: vehicles.rootOf(v) }))],
     activeEncodes: () => host.runtime?.activeEncodes?.() || [],
+    // costs are summed at the price of each moment (time-of-use plans)
+    priceAt: (ms) => priceAt(db.get('power', null), ms),
     log: logger.scope('stats'),
     onAlert: ({ key, level, message }) => notes.raise({
       kind: 'server', level: level === 'error' ? 'critical' : 'warning', dedupeKey: `server:${key}`,
@@ -673,10 +676,12 @@ async function main() {
     statsAskedAt = Date.now();
     stats.touch();
     const snapshot = stats.snapshot();
-    const price = db.get('power', null);
+    const power = db.get('power', null);
+    const now = Date.now();
+    const priceNow = priceAt(power, now);
     return {
       ...snapshot,
-      price: price && Number(price.pricePerKwh) > 0 ? price : null,
+      price: priceNow === null ? null : { currency: power.currency, mode: power.mode, now: priceNow, rate: rateNameAt(power, now) },
       encoder: encoderBlock({ snapshot, jobs: converterJobs, workers: host.runtime?.activeEncodes?.() || [], energy: stats.energy() })
     };
   });
@@ -703,15 +708,20 @@ async function main() {
     return { ok: true };
   });
 
-  r.add('GET', '/api/settings', () => ({ appearance: db.get('appearance', { reduceEffects: false }), power: db.get('power', { pricePerKwh: null, currency: '$' }) }));
-  // electricity price for the cost shown next to energy (Settings > System)
+  r.add('GET', '/api/settings', () => ({
+    appearance: db.get('appearance', { reduceEffects: false }),
+    power: db.get('power', { currency: '$', mode: 'flat', pricePerKwh: null, defaultPrice: null, rates: [] })
+  }));
+  // electricity price (one price or a time-of-use plan) for the costs shown
+  // next to energy; Settings > System
   r.add('PUT', '/api/settings/power', (req, res, { body }) => {
-    const raw = body?.pricePerKwh;
-    const price = raw === null || raw === '' || raw === undefined ? null : Number(raw);
-    if (price !== null && !(Number.isFinite(price) && price >= 0 && price <= 10)) throw new HttpError(400, 'Enter a price per kWh between 0 and 10.');
-    const currency = String(body?.currency ?? '$').trim().slice(0, 3) || '$';
-    if (/[<>&"'`]/.test(currency)) throw new HttpError(400, 'Use a currency symbol like $, €, £ or kr.');
-    const next = { pricePerKwh: price, currency };
+    let next;
+    try {
+      next = parsePowerSettings(body || {});
+    } catch (err) {
+      if (err instanceof PriceError) throw Object.assign(new HttpError(400, err.message), { expose: true });
+      throw err;
+    }
     db.set('power', next);
     return next;
   });
