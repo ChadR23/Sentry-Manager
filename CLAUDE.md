@@ -16,7 +16,6 @@ Only these branches exist on GitHub:
   here so people can test it before it goes to `main`.
 - `wip`: the update after that, built while `release/next-update` waits for
   the owner's OK.
-- `backup/pre-flight-deck`: kept by the owner.
 
 Never create another branch for a feature. Helper agents work in git
 worktrees on a detached HEAD (`git worktree add --detach`), and their
