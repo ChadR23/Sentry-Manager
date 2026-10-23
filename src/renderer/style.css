@@ -221,6 +221,24 @@ canvas,
     /* Prevent native video click behavior (pause/play) */
 }
 
+/* Next-minute preload: videos loading the next segment, out of sight until
+   they take the place of the shown ones */
+.standby-videos {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    opacity: 0;
+    pointer-events: none;
+}
+
+.standby-videos video {
+    width: 1px;
+    height: 1px;
+}
+
 /* Time display */
 .time-display {
     display: flex;

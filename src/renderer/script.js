@@ -36,6 +36,7 @@ import { initMapVisualization, updateMapVisibility, updateMapMarker, clearMapMar
 import { attachTileLayer, refreshTileLayers, getEffectiveProviderId } from './scripts/ui/mapTiles.js';
 import { initDashboardVisibility, updateDashboardVisibility, setDashboardParked, resetDashboardParkedState } from './scripts/ui/dashboardVisibility.js';
 import { hasValidGps, extractSeiFromEntry, findSeiAtTime } from './scripts/core/seiExtractor.js';
+import { createSegmentPreloader, planKey, planSegment, preloadAllowed, shouldStartPreload, RETIRE_DELAY_MS } from './scripts/core/segmentPreload.js';
 import { 
     getRootFolderNameFromWebkitRelativePath, cameraLabel, buildTeslaCamIndex, buildDayCollections
 } from './scripts/core/teslaCamIndex.js';
@@ -115,8 +116,9 @@ const loadingOverlay = $('loadingOverlay');
 const loadingText = $('loadingText');
 const loadingProgress = $('loadingProgress');
 const loadingBar = $('loadingBar');
-// Main video element (for single camera mode)
-const videoMain = $('videoMain');
+// Main video element (for single camera mode). The next-minute preload swaps
+// in another element (with this id) at each segment, so it is a let.
+let videoMain = $('videoMain');
 const progressBar = $('progressBar');
 const playBtn = $('playBtn');
 const skipBackBtn = $('skipBackBtn');
@@ -154,7 +156,8 @@ const videoBL = $('videoBL');
 const videoBC = $('videoBC');
 const videoBR = $('videoBR');
 
-// Video element map by slot
+// Video element map by slot (the next-minute preload replaces the elements,
+// so look them up here each time rather than keeping a reference)
 const videoBySlot = {
     tl: videoTL, tc: videoTC, tr: videoTR,
     bl: videoBL, bc: videoBC, br: videoBR
@@ -1298,6 +1301,7 @@ function setMode(nextMode) {
 
     // Stop playback timers and prevent overlapping loops across transitions.
     pause();
+    segmentPreloader.cancel();
 
     // Close transient UI.
     clearMultiFocus();
@@ -1381,6 +1385,7 @@ function applyDashcamProfile(profileId = 'tesla', sourceKind = 'tesla') {
 
     // A profile switch must not leak Tesla SEI/GPS state into footage that
     // cannot provide it.
+    segmentPreloader.cancel();
     stopTelemetryLoop();
     nativeVideo.telemetryAbortController?.abort();
     nativeVideo.telemetryAbortController = null;
@@ -1463,6 +1468,9 @@ function handleClipDeleted(collectionId, folderPath, unloadOnly = false) {
         // Force release file handles by removing and recreating video elements
         // Chromium's video decoder holds file handles even after clearing src
         if (nativeVideo) {
+            // The next minute's preloaded elements hold the files open as well
+            segmentPreloader.dispose();
+
             // Clean up URL object references (revoke blob URLs)
             videoUrls.forEach((url, vid) => {
                 if (url && url.startsWith('blob:')) {
@@ -3508,6 +3516,7 @@ function selectDayCollection(dayKey) {
     setMode('collection');
     pause();
     pauseNative();
+    segmentPreloader.cancel();
 
     // Reset dashboard and map when switching clips (clears stale SEI data)
     resetDashboardAndMap();
@@ -4330,6 +4339,167 @@ const nativeVideo = {
     durationProbeToken: 0   // Invalidates metadata probes from a previous collection/root
 };
 
+// A segment file's URL (handles both File objects and Electron/server paths)
+function segmentVideoUrl(entry) {
+    if (!entry) return null;
+
+    // If it's an Electron file with path, use file:// protocol (the server's media URL on the web)
+    if (entry.file?.isElectronFile && entry.file?.path) {
+        const fileUrl = filePathToUrl(entry.file.path);
+        return { url: fileUrl, isBlob: false };
+    }
+
+    // Regular File object - create blob URL
+    if (entry.file && entry.file instanceof File) {
+        const url = URL.createObjectURL(entry.file);
+        return { url, isBlob: true };
+    }
+
+    return null;
+}
+
+// Next-minute preload (see scripts/core/segmentPreload.js): standby video
+// elements wait here, out of sight, while they load the next segment.
+const standbyStage = document.createElement('div');
+standbyStage.className = 'standby-videos';
+standbyStage.setAttribute('aria-hidden', 'true');
+videoContainer?.append(standbyStage);
+
+function createStandbyVideo() {
+    const vid = document.createElement('video');
+    vid.muted = true;
+    vid.defaultMuted = true;
+    vid.playsInline = true;
+    vid.setAttribute('muted', '');
+    vid.setAttribute('playsinline', '');
+    attachNativeVideoListeners(vid);
+    return vid;
+}
+
+const segmentPreloader = createSegmentPreloader({
+    createVideo: createStandbyVideo,
+    stage: standbyStage,
+    urlFor: segmentVideoUrl,
+    revokeUrl: url => URL.revokeObjectURL(url),
+    detach: detachMediaElement
+});
+
+// What segment segIdx shows in the current view (grid layout and camera order,
+// or the single camera).
+function getSegmentPlan(segIdx) {
+    const group = state.collection.active?.groups?.[segIdx];
+    return planSegment(group, {
+        multiEnabled: multi.enabled,
+        slots: multi.enabled ? getEffectiveSlots() : [],
+        masterCamera: multi.masterCamera || 'front',
+        selectedCamera: selection.selectedCamera || 'front'
+    });
+}
+
+// A preload only counts for the day, library and profile it was made for.
+function preloadContext() {
+    const coll = state.collection.active;
+    return `${libraryGeneration}|${library.profileId}|${coll?.id ?? ''}|${coll?.groups?.length ?? 0}`;
+}
+
+// The camera whose telemetry (SEI) the dashboard and map show for a segment
+function telemetryEntryFor(group) {
+    const masterCam = multi.masterCamera || 'front';
+    return group.filesByCamera.get(masterCam) || group.filesByCamera.values().next().value;
+}
+
+// Called as the master plays: once the segment is close to its end, load the
+// next one (videos, and its telemetry into the cache) so it starts at once.
+function maybePreloadNextSegment() {
+    const coll = state.collection.active;
+    const segIdx = nativeVideo.currentSegmentIdx;
+    const nextIdx = segIdx + 1;
+    if (!coll || !state.ui.nativeVideoMode || segIdx < 0 || nextIdx >= (coll.groups?.length || 0) || !preloadAllowed()) {
+        segmentPreloader.cancel();
+        return;
+    }
+    if (nativeVideo.isTransitioning || nativeVideo.isSeeking) return;
+    const vid = nativeVideo.master;
+    if (!vid?.src) return;
+    const duration = Number.isFinite(vid.duration) && vid.duration > 0
+        ? vid.duration
+        : nativeVideo.segmentDurations?.[segIdx];
+    if (!shouldStartPreload({ currentTime: vid.currentTime, duration, playbackRate: state.ui.playbackRate })) return;
+
+    const plan = getSegmentPlan(nextIdx);
+    const started = segmentPreloader.start({
+        segIdx: nextIdx,
+        key: planKey(plan, mediaSourceKey),
+        context: preloadContext(),
+        plan
+    });
+    if (!started) return;
+    console.log('[preload] Loading segment', nextIdx, 'ahead');
+    // Its telemetry lands in the SEI cache, where the switch finds it. Not
+    // tied to the preload's lifetime: an extraction shared with the switch
+    // must not be aborted by a cancel.
+    const group = coll.groups[nextIdx];
+    if (library.capabilities?.telemetry !== false && seiType && group) {
+        const entry = telemetryEntryFor(group);
+        if (entry) extractSeiFromEntry(entry, seiType).catch(() => {});
+    }
+}
+
+// Put a preloaded element in the place of the shown one: same id, classes and
+// inline style (mirror, zoom and pan), so the rest of the page sees no change.
+function swapInVideo(current, next) {
+    if (!current || !next) return;
+    next.id = current.id;
+    current.removeAttribute('id');
+    next.className = current.className;
+    next.style.cssText = current.style.cssText;
+    next.playbackRate = current.playbackRate;
+    current.replaceWith(next);
+}
+
+// A preloaded segment goes on screen: each preloaded element replaces the
+// shown one in its place (which becomes a spare standby element), and a
+// place without a preloaded file is emptied as a normal load would.
+function showPreloadedVideos(plan, preloaded) {
+    const used = new Set();
+    const showIn = (current, slot) => {
+        const item = preloaded.get(slot);
+        if (!item || !current) {
+            detachMediaElement(current);
+            return current;
+        }
+        swapInVideo(current, item.video);
+        videoUrls.set(item.video, item.url);
+        used.add(slot);
+        // (paused and off the page; its player is torn down once the next minute plays)
+        segmentPreloader.recycle(current, { delayMs: RETIRE_DELAY_MS });
+        return item.video;
+    };
+    if (plan.multi) {
+        detachMediaElement(videoMain);
+        for (const slot of Object.keys(videoBySlot)) {
+            videoBySlot[slot] = showIn(videoBySlot[slot], slot);
+        }
+    } else {
+        Object.values(videoBySlot).forEach(detachMediaElement);
+        videoMain = showIn(videoMain, 'main');
+    }
+    // (a preloaded element with no place to go is let go)
+    for (const [slot, { video, url, isBlob }] of preloaded) {
+        if (used.has(slot)) continue;
+        segmentPreloader.recycle(video);
+        if (isBlob) URL.revokeObjectURL(url);
+    }
+}
+
+// Leaving the page, or (Sentry Six Manager) putting the Viewer tab away: the
+// shell pauses playback then, so the preloaded minute is let go.
+window.addEventListener('pagehide', () => segmentPreloader.dispose());
+window.addEventListener('message', (e) => {
+    if (window.parent === window || e.source !== window.parent || e.origin !== location.origin) return;
+    if (e.data?.type === 'pause') segmentPreloader.cancel();
+});
+
 /**
  * Probe video durations for all segments upfront to enable accurate seek positioning.
  * Uses temporary video elements to get actual durations without full loading.
@@ -4442,35 +4612,41 @@ function initNativeVideoPlayback() {
     // Master events will only fire when that element is actually the master
     const allVideos = [videoMain, ...Object.values(videoBySlot)].filter(Boolean);
     console.log('All videos:', allVideos.length, 'elements');
-    
-    allVideos.forEach(vid => {
-        vid.addEventListener('timeupdate', () => {
-            if (vid === nativeVideo.master) onMasterTimeUpdate();
-        });
-        vid.addEventListener('ended', () => {
-            if (vid === nativeVideo.master) onMasterEnded();
-        });
-        vid.addEventListener('loadedmetadata', () => {
-            if (vid === nativeVideo.master) onMasterLoaded();
-            // Sync non-master videos to master time
-            else if (nativeVideo.master && nativeVideo.master !== vid) {
-                vid.currentTime = nativeVideo.master.currentTime;
-            }
-        });
-        vid.addEventListener('play', () => {
-            if (vid === nativeVideo.master) {
-                nativeVideo.playing = true;
-                updatePlayButton();
-                startTelemetryLoop();
-            }
-        });
-        vid.addEventListener('pause', () => {
-            if (vid === nativeVideo.master) {
-                nativeVideo.playing = false;
-                updatePlayButton();
-                stopTelemetryLoop();
-            }
-        });
+
+    allVideos.forEach(attachNativeVideoListeners);
+}
+
+// The page's video elements (and the standby ones of the next-minute preload,
+// which later take their place) all get these; master events only count from
+// the element that is the master at the time.
+function attachNativeVideoListeners(vid) {
+    vid.addEventListener('timeupdate', () => {
+        if (vid === nativeVideo.master) onMasterTimeUpdate();
+    });
+    vid.addEventListener('ended', () => {
+        if (vid === nativeVideo.master) onMasterEnded();
+    });
+    vid.addEventListener('loadedmetadata', () => {
+        if (vid === nativeVideo.master) onMasterLoaded();
+        // Sync non-master videos to master time (not a preloaded next
+        // segment: that one waits at its start)
+        else if (nativeVideo.master && nativeVideo.master !== vid && !segmentPreloader.isStandby(vid)) {
+            vid.currentTime = nativeVideo.master.currentTime;
+        }
+    });
+    vid.addEventListener('play', () => {
+        if (vid === nativeVideo.master) {
+            nativeVideo.playing = true;
+            updatePlayButton();
+            startTelemetryLoop();
+        }
+    });
+    vid.addEventListener('pause', () => {
+        if (vid === nativeVideo.master) {
+            nativeVideo.playing = false;
+            updatePlayButton();
+            stopTelemetryLoop();
+        }
     });
 }
 
@@ -4571,6 +4747,9 @@ function onMasterTimeUpdate() {
             const pct = (currentSec / totalSec) * 100;
             progressBar.value = Math.min(100, pct);
         }
+
+        // Near the end of the segment: load the next one now
+        maybePreloadNextSegment();
         return;
     }
     
@@ -4670,7 +4849,9 @@ function onMasterEnded() {
     updatePlayButton();
 }
 
-// Load a segment using native video elements (fast, GPU-accelerated)
+// Load a segment using native video elements (fast, GPU-accelerated). When
+// the next-minute preload holds this segment for the current view, its
+// elements are swapped in and nothing has to load.
 async function loadNativeSegment(segIdx) {
     if (!state.collection.active) return;
     
@@ -4680,7 +4861,11 @@ async function loadNativeSegment(segIdx) {
         return;
     }
     
-    console.log('Loading native segment', segIdx, 'group:', group.id, 'cameras:', Array.from(group.filesByCamera.keys()));
+    // What this segment shows; a preload of anything else is cancelled here
+    const plan = getSegmentPlan(segIdx);
+    const preloaded = segmentPreloader.take(segIdx, planKey(plan, mediaSourceKey), preloadContext());
+    
+    console.log('Loading native segment', segIdx, 'group:', group.id, 'cameras:', Array.from(group.filesByCamera.keys()), preloaded ? '(preloaded)' : '');
     
     // Pause all videos before changing sources to prevent race conditions
     if (nativeVideo.master) {
@@ -4689,6 +4874,11 @@ async function loadNativeSegment(segIdx) {
     Object.values(videoBySlot).forEach(vid => {
         if (vid && vid.src) vid.pause();
     });
+    if (preloaded) {
+        // (the old master's pause event no longer counts: it is not the master then)
+        nativeVideo.playing = false;
+        updatePlayButton();
+    }
     
     nativeVideo.currentSegmentIdx = segIdx;
     state.collection.active.currentSegmentIdx = segIdx;
@@ -4712,36 +4902,18 @@ async function loadNativeSegment(segIdx) {
         }
     });
     videoUrls.clear();
-    detachMediaElement(videoMain);
-    Object.values(videoBySlot).forEach(detachMediaElement);
+    if (preloaded) {
+        showPreloadedVideos(plan, preloaded);
+    } else {
+        detachMediaElement(videoMain);
+        Object.values(videoBySlot).forEach(detachMediaElement);
+    }
     
-    // Helper to get video URL from entry (handles both File objects and Electron paths)
-    const getVideoUrl = (entry) => {
-        if (!entry) return null;
-        
-        // If it's an Electron file with path, use file:// protocol
-        if (entry.file?.isElectronFile && entry.file?.path) {
-            const fileUrl = filePathToUrl(entry.file.path);
-            return { url: fileUrl, isBlob: false };
-        }
-        
-        // Regular File object - create blob URL
-        if (entry.file && entry.file instanceof File) {
-            const url = URL.createObjectURL(entry.file);
-            return { url, isBlob: true };
-        }
-        
-        return null;
-    };
-    
-    if (multi.enabled) {
+    if (plan.multi) {
         // Load all cameras (use custom order if set)
-        const slotsArr = getEffectiveSlots();
+        console.log('Multi-cam layout:', multi.layoutId, 'slots:', plan.targets.map(({ slot, camera }) => ({ slot, camera })), 'custom:', !!getCustomCameraOrder());
         
-        console.log('Multi-cam layout:', multi.layoutId, 'slots:', slotsArr, 'custom:', !!getCustomCameraOrder());
-        
-        for (const slotDef of slotsArr) {
-            const { slot, camera } = slotDef;
+        for (const { slot, camera, entry } of plan.targets) {
             const vid = videoBySlot[slot];
             if (!vid) {
                 console.warn('No video element for slot:', slot);
@@ -4749,11 +4921,10 @@ async function loadNativeSegment(segIdx) {
             }
 
             const tile = multiCamGrid?.querySelector(`.multi-tile[data-slot="${slot}"]`);
-            const hasCamera = !!camera && group.filesByCamera.has(camera);
-            tile?.classList.toggle('empty-camera-slot', !hasCamera);
+            tile?.classList.toggle('empty-camera-slot', !entry);
+            if (preloaded) continue; // its element (or none) is in place already
             
-            const entry = group.filesByCamera.get(camera);
-            const urlData = getVideoUrl(entry);
+            const urlData = segmentVideoUrl(entry);
             if (urlData) {
                 videoUrls.set(vid, urlData.url);
                 vid.src = urlData.url;
@@ -4766,20 +4937,14 @@ async function loadNativeSegment(segIdx) {
             }
         }
         
-        // Set master to front camera — fall back to first camera that has a file
+        // Master: the master camera's slot, or the first slot that has a file
+        // when that camera has none in this segment (see planSegment)
         const masterCam = multi.masterCamera || 'front';
-        let masterSlotDef = slotsArr.find(s => s.camera === masterCam);
-        
-        // If the preferred master camera has no file for this segment, pick the first slot that does
-        if (!group.filesByCamera.has(masterSlotDef?.camera)) {
-            const fallback = slotsArr.find(s => group.filesByCamera.has(s.camera));
-            if (fallback) {
-                console.warn('Master camera', masterCam, 'missing for segment, falling back to', fallback.camera);
-                masterSlotDef = fallback;
-            }
+        const masterSlot = plan.masterSlot;
+        const masterTarget = plan.targets.find(t => t.slot === masterSlot);
+        if (masterTarget?.entry && masterTarget.camera !== masterCam) {
+            console.warn('Master camera', masterCam, 'missing for segment, falling back to', masterTarget.camera);
         }
-        
-        const masterSlot = masterSlotDef?.slot;
         nativeVideo.master = masterSlot ? videoBySlot[masterSlot] : videoMain;
         
         console.log('Master camera:', masterCam, 'slot:', masterSlot, 'video:', nativeVideo.master?.id);
@@ -4795,21 +4960,24 @@ async function loadNativeSegment(segIdx) {
     } else {
         // Single camera
         const cam = selection.selectedCamera || 'front';
-        const entry = group.filesByCamera.get(cam) || group.filesByCamera.values().next().value;
-        
-        const urlData = getVideoUrl(entry);
-        if (urlData) {
-            videoUrls.set(videoMain, urlData.url);
-            videoMain.src = urlData.url;
-            videoMain.load();
-            console.log('Loaded single camera', cam, urlData.isBlob ? '(blob)' : '(file://)');
-        } else {
-            console.error('No file found for camera', cam);
+        if (!preloaded) {
+            const urlData = segmentVideoUrl(plan.targets[0]?.entry);
+            if (urlData) {
+                videoUrls.set(videoMain, urlData.url);
+                videoMain.src = urlData.url;
+                videoMain.load();
+                console.log('Loaded single camera', cam, urlData.isBlob ? '(blob)' : '(file://)');
+            } else {
+                console.error('No file found for camera', cam);
+            }
         }
         
         nativeVideo.master = videoMain;
         setMultiCamGridVisible(false);
     }
+    
+    // A preloaded master had its metadata before it was the master
+    if (preloaded && nativeVideo.master?.readyState >= 1) onMasterLoaded();
     
     // Show dashboard and map panels
     dashboardVis.classList.add('visible');
@@ -4817,9 +4985,9 @@ async function loadNativeSegment(segIdx) {
     updateDashboardVisibility();
     updateMapVisibility();
     
-    // Pre-extract SEI telemetry from master camera file (runs in background)
-    const masterCam = multi.masterCamera || 'front';
-    const masterEntry = group.filesByCamera.get(masterCam) || group.filesByCamera.values().next().value;
+    // Pre-extract SEI telemetry from master camera file (runs in background;
+    // after a preload it is in the cache already)
+    const masterEntry = telemetryEntryFor(group);
     if (library.capabilities?.telemetry !== false && masterEntry && seiType) {
         extractSeiFromEntry(masterEntry, seiType, { signal: telemetrySignal }).then(({ seiData, mapPath }) => {
             if (
@@ -4935,8 +5103,14 @@ async function loadNativeSegment(segIdx) {
     
     console.log('Waiting for master video to load, current readyState:', nativeVideo.master.readyState, 'src:', nativeVideo.master.src?.substring(0, 60));
     
-    // Wait for video to be ready
-    await new Promise((resolve, reject) => {
+    // A preloaded master that failed to load fails the segment as an error event would
+    if (preloaded && nativeVideo.master.error) {
+        throw new Error(describeMediaError(nativeVideo.master));
+    }
+    
+    // Wait for video to be ready (a preloaded master that can play already
+    // needs no wait: its readyState is its own source's, never a stale one)
+    if (!(preloaded && nativeVideo.master.readyState >= 3)) await new Promise((resolve, reject) => {
         const vid = nativeVideo.master;
         let resolved = false;
         
@@ -5015,8 +5189,9 @@ async function loadNativeSegment(segIdx) {
         }
     }
     
-    // Reset ALL videos to start (ensure clean state after loading new segment)
-    if (nativeVideo.master) {
+    // Reset ALL videos to start (ensure clean state after loading new segment;
+    // a preloaded one waits at its start, and a seek would only cost time)
+    if (nativeVideo.master && !(preloaded && nativeVideo.master.currentTime === 0)) {
         nativeVideo.master.currentTime = 0;
     }
     // Sync non-master videos to time 0 so all cameras start at the same position
