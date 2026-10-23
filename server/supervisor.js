@@ -55,6 +55,60 @@ function forward(level, msg) {
 const log = (msg) => { console.log(`[supervisor] ${msg}`); forward('info', msg); };
 const warn = (msg) => { console.error(`[supervisor] ${msg}`); forward('warn', msg); };
 
+// CPU power for Overview > Server: the RAPL energy counters are readable by
+// root only, so the supervisor reads them (fixed paths, read only) while the
+// app asks, and hands the counters over. Docker hides them by default; the
+// owner can bind the host's /sys/devices/virtual/powercap read-only to
+// /host/powercap (docker-compose.yml shows the line).
+const RAPL_ROOTS = ['/host/powercap/intel-rapl', '/host/powercap', '/sys/class/powercap'];
+let raplTimer = null;
+
+function readRapl() {
+  for (const root of RAPL_ROOTS) {
+    let names;
+    try {
+      names = fs.readdirSync(root).filter((n) => /^intel-rapl:\d+$/.test(n)).sort();
+    } catch {
+      continue;
+    }
+    const packages = [];
+    for (const n of names) {
+      try {
+        const read = (f) => fs.readFileSync(path.join(root, n, f), 'utf8').trim();
+        const energyUj = Number(read('energy_uj'));
+        const maxEnergyUj = Number(read('max_energy_range_uj'));
+        if (Number.isFinite(energyUj)) packages.push({ name: read('name') || n, energyUj, maxEnergyUj: Number.isFinite(maxEnergyUj) ? maxEnergyUj : null });
+      } catch {
+        // a package without counters (or masked) is left out
+      }
+    }
+    if (packages.length) return packages;
+  }
+  return [];
+}
+
+// Each { type: 'rapl', on: true } from the app keeps the readings coming for
+// 30 s; without another one they stop by themselves.
+let raplUntil = 0;
+function rapl(on) {
+  raplUntil = on ? Date.now() + 30_000 : 0;
+  if (!on) {
+    clearInterval(raplTimer);
+    raplTimer = null;
+    return;
+  }
+  if (raplTimer) return;
+  const send = () => {
+    if (!child?.connected || Date.now() > raplUntil) return rapl(false);
+    const packages = readRapl();
+    child.send({ type: 'rapl-reading', at: Date.now(), packages }, () => {});
+    if (!packages.length) rapl(false); // nothing to read: stop asking the kernel
+  };
+  raplTimer = setInterval(send, 2000);
+  raplTimer.unref?.();
+  send();
+}
+
 /** Real directory (not a symlink) at exactly this path? */
 function isPlainDir(p) {
   try {
@@ -269,6 +323,7 @@ function launch() {
     serveMountRequests(child, createLocalMounter({ footageRoot: FOOTAGE_ROOT, credDir: ROOT_RUN, uid: separate ? PUID : 0, gid: separate ? PGID : 0 }),
       { log: (m) => log(String(m).replace(/^\[supervisor\]\s*/, '')), error: (m) => warn(String(m).replace(/^\[supervisor\]\s*/, '')) });
     child.on('message', (msg) => {
+      if (msg?.type === 'rapl') return rapl(msg.on === true);
       if (!msg || msg.type !== 'tls-hostnames' || typeof msg.requestId !== 'string' || !tls) return;
       (async () => {
         const names = parseHostnames((Array.isArray(msg.hostnames) ? msg.hostnames : []).slice(0, 20).map(String).join(','));
@@ -283,6 +338,7 @@ function launch() {
   }
   child.on('exit', (code, signal) => {
     child = null;
+    rapl(false);
     if (stopping) process.exit(code ?? 0);
     warn(`server exited (${code ?? signal}); restarting in 5 s`);
     setTimeout(launch, 5000);

@@ -39,6 +39,8 @@ const { ImageUpdates } = require('./imageUpdates');
 const { Thumbnails } = require('./thumbnails');
 const { detectGpus } = require('./gpu');
 const { createConverterHost } = require('./converterHost');
+const { createStats } = require('./stats');
+const { encoderBlock, RUNNING: CONVERTER_RUNNING } = require('./encoderStats');
 const { createConverterBridge } = require('./converterBridge');
 const { hiddenPath, readDir, stat, sendMedia, readTextConfined } = require('./studioApi');
 const { createRealGuard, isInside } = require('./safePath');
@@ -220,6 +222,29 @@ async function main() {
     return false;
   };
   const bin = new RecycleBin({ db, vehicles, inventory, jobs, log: logger.scope('bin'), isBusy });
+
+  // ---- server stats (Overview > Server, the Encoder's Hardware panel):
+  // sampled only while a page asks or a conversion runs
+  const converterRunning = () => [...converterJobs.values()].some((s) => CONVERTER_RUNNING.has(s.state));
+  let benchmarking = null; // the benchmark's energy token while it runs
+  const stats = createStats({
+    dataDir: DATA,
+    isBusy: () => converterRunning() || benchmarking !== null,
+    readShares: () => [{ label: 'Data volume', path: DATA }, ...vehicles.list().map((v) => ({ label: v.name, path: vehicles.rootOf(v) }))],
+    activeEncodes: () => host.runtime?.activeEncodes?.() || [],
+    log: logger.scope('stats'),
+    onAlert: ({ key, level, message }) => notes.raise({
+      kind: 'server', level: level === 'error' ? 'critical' : 'warning', dedupeKey: `server:${key}`,
+      title: message, message: 'Overview > Server shows the live numbers.'
+    })
+  });
+  // CPU power: the root supervisor reads the energy counters while asked
+  let statsAskedAt = 0;
+  const raplKeepalive = setInterval(() => {
+    if (SUPERVISED && process.connected && (Date.now() - statsAskedAt < 20_000 || converterRunning())) process.send({ type: 'rapl', on: true }, () => {});
+  }, 10_000);
+  raplKeepalive.unref();
+  let statsJob = null;
   const policies = new Policies({ db, vehicles, inventory, bin, log: logger.scope('policies') });
 
   const host = createConverterHost({
@@ -227,7 +252,23 @@ async function main() {
     tempDir: path.join(DATA, 'converter-temp'),
     ffmpegPath: FFMPEG,
     ffprobePath: FFPROBE,
-    log: logger.scope('converter')
+    log: logger.scope('converter'),
+    // the benchmark measures energy per setting with the stats engine
+    powerMeter: {
+      start: () => {
+        benchmarking = `benchmark-${Date.now()}`;
+        stats.markJob(benchmarking);
+        return benchmarking;
+      },
+      stop: (token) => {
+        if (benchmarking === token) {
+          stats.markJob(null);
+          benchmarking = null;
+        }
+        const e = stats.energy().byJob?.[token];
+        return e && e.wh > 0 ? { wh: e.wh, avgW: e.avgW } : null;
+      }
+    }
   });
   let bridge = null;
   let clipThumbs = null;
@@ -622,7 +663,36 @@ async function main() {
     return out;
   });
 
-  r.add('GET', '/api/jobs', (req, res, { query }) => ({ jobs: jobs.list({ vehicleId: query.vehicle || undefined, limit: Math.min(500, Number(query.limit) || 200) }) }));
+  r.add('GET', '/api/jobs', (req, res, { query }) => ({
+    jobs: jobs.list({ vehicleId: query.vehicle || undefined, limit: Math.min(500, Number(query.limit) || 200) })
+      .map((j) => (j.result?.energy ? { ...j, energy: { wh: j.result.energy.wh, avgW: j.result.energy.avgW } } : j))
+  }));
+
+  // Overview > Server and the Encoder's Hardware panel
+  r.add('GET', '/api/stats', () => {
+    statsAskedAt = Date.now();
+    stats.touch();
+    const snapshot = stats.snapshot();
+    const price = db.get('power', null);
+    return {
+      ...snapshot,
+      price: price && Number(price.pricePerKwh) > 0 ? price : null,
+      encoder: encoderBlock({ snapshot, jobs: converterJobs, workers: host.runtime?.activeEncodes?.() || [], energy: stats.energy() })
+    };
+  });
+  r.add('GET', '/api/stats/history', (req, res, { query }) => {
+    stats.touch();
+    return stats.history(query.range === '24h' ? '24h' : '15m');
+  });
+  r.add('GET', '/api/stats/export.csv', (req, res, { query }) => {
+    const range = query.range === '15m' ? '15m' : '24h';
+    res.writeHead(200, {
+      'Content-Type': 'text/csv; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
+      'Content-Disposition': `attachment; filename="sentry-six-manager-stats-${range}.csv"`
+    });
+    res.end(stats.csv(range));
+    return undefined;
+  });
   r.add('GET', '/api/notifications', (req, res, { query }) => ({ notifications: notes.list({ open: query.open === '1' ? true : undefined, vehicleId: query.vehicle || undefined }) }));
   r.add('POST', '/api/notifications/:id/dismiss', (req, res, { params }) => {
     notes.dismiss(Number(params.id));
@@ -633,7 +703,18 @@ async function main() {
     return { ok: true };
   });
 
-  r.add('GET', '/api/settings', () => ({ appearance: db.get('appearance', { reduceEffects: false }) }));
+  r.add('GET', '/api/settings', () => ({ appearance: db.get('appearance', { reduceEffects: false }), power: db.get('power', { pricePerKwh: null, currency: '$' }) }));
+  // electricity price for the cost shown next to energy (Settings > System)
+  r.add('PUT', '/api/settings/power', (req, res, { body }) => {
+    const raw = body?.pricePerKwh;
+    const price = raw === null || raw === '' || raw === undefined ? null : Number(raw);
+    if (price !== null && !(Number.isFinite(price) && price >= 0 && price <= 10)) throw new HttpError(400, 'Enter a price per kWh between 0 and 10.');
+    const currency = String(body?.currency ?? '$').trim().slice(0, 3) || '$';
+    if (/[<>&"'`]/.test(currency)) throw new HttpError(400, 'Use a currency symbol like $, €, £ or kr.');
+    const next = { pricePerKwh: price, currency };
+    db.set('power', next);
+    return next;
+  });
   r.add('PUT', '/api/settings/appearance', (req, res, { body }) => {
     const next = { reduceEffects: Boolean(body?.reduceEffects) };
     db.set('appearance', next);
@@ -931,6 +1012,9 @@ async function main() {
     runtime.service.subscribe((event) => {
       if (event?.type !== 'snapshot' || !event.snapshot) return;
       converterJobs.set(event.snapshot.id, event.snapshot);
+      if (CONVERTER_RUNNING.has(event.snapshot.state)) {
+        if (statsJob !== event.snapshot.id) stats.markJob(statsJob = event.snapshot.id);
+      } else if (statsJob === event.snapshot.id) stats.markJob(statsJob = null);
       mirrorConverterJob(event.snapshot);
     });
     // jobs from before a restart (a paused one still owns its clips)
@@ -961,7 +1045,8 @@ async function main() {
     const terminal = !CONVERTER_ACTIVE.has(s.state);
     const existing = db.jobByExternal(externalId);
     if (terminal && existing?.status === 'running') {
-      jobs.finish(jobId, { status: c.failed > 0 || s.state === 'failed' ? 'failed' : s.state === 'cancelled' ? 'cancelled' : 'done', detail });
+      const energy = stats.energy().byJob?.[s.id] || null;
+      jobs.finish(jobId, { status: c.failed > 0 || s.state === 'failed' ? 'failed' : s.state === 'cancelled' ? 'cancelled' : 'done', detail, ...(energy ? { result: { energy } } : {}) });
       if (c.failed > 0) {
         notes.raise({ kind: 'conversion', level: 'warning', vehicleId: v?.id || null, dedupeKey: `conversion-failed:${s.id}`,
           title: `${c.failed} clip(s) could not be converted`, message: 'The originals were kept. Open the Encoder tab for details and Retry failed.' });
@@ -999,6 +1084,7 @@ async function main() {
     log.info(`${signal}: shutting down`);
     for (const res of clients) res.end();
     for (const s of servers) s.close();
+    try { stats.stop(); } catch { /* history is saved on a best-effort basis */ }
     await host.stop().catch(() => {});
     await vehicles.stopAll();
     db.close();
@@ -1012,6 +1098,7 @@ async function main() {
     // the supervisor renewed the certificate
     process.on('message', (m) => {
       if (m?.type === 'shutdown') return shutdown('supervisor asked');
+      if (m?.type === 'rapl-reading') return stats.setRapl(m);
       if (m?.type === 'supervisor-log') return logger.write(m.level === 'warn' || m.level === 'error' ? m.level : 'info', 'supervisor', String(m.message || '').slice(0, 4000), { echo: false });
       if (m?.type !== 'tls-updated' || !tlsSource || !httpsServer) return;
       tlsSource.load().then((x) => httpsServer.setSecureContext({ key: x.key, cert: x.cert }), (err) => log.warn(`Reloading the certificate failed: ${err.message}`));

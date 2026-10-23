@@ -27,6 +27,9 @@ services:
       # Accounts, settings, job journals, thumbnails, converter staging and
       # the default output folder. Keep it on local disk, not on a share.
       - ./data:/data
+      # Optional, Overview > Server: CPU power in watts. Docker hides the
+      # CPU's energy counters; this shows them, read-only, to the supervisor.
+      # - /sys/devices/virtual/powercap:/host/powercap:ro
     # Only the small root supervisor keeps these; the web app and ffmpeg run
     # as PUID:PGID with no capabilities at all.
     #   SYS_ADMIN, DAC_READ_SEARCH, DAC_OVERRIDE  mount.cifs (SMB shares)
@@ -47,6 +50,10 @@ services:
       - no-new-privileges:true
       - apparmor:unconfined      # Docker's default AppArmor profile forbids mount
       # - label=disable          # SELinux hosts (Fedora/RHEL)
+
+    # ---- Optional, Overview > Server: the whole server (every process and
+    # the host's network), not only this container. Uncomment:
+    # pid: host
 
     # ---- AMD (dGPU or APU) / Intel GPU: uncomment
     # devices:
