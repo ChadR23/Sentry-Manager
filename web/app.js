@@ -233,20 +233,10 @@
       <div class="card"><p class="card-label">Last observed free on ${esc(v.name)}</p><div class="big">${bytes(s.freeBytes)}</div>
         <p>${s.totalBytes ? `${bytes(s.totalBytes)} volume capacity · ${Math.round(used * 100)}% used${v.binBytes ? ` · ${bytes(v.binBytes)} in the Recycle Bin` : ''}` : 'Capacity unknown'}</p>
         ${used !== null ? `<div class="meter"><span class="${used > 0.95 ? 'bad' : used > 0.85 ? 'warn' : ''}" style="width:${Math.round(used * 100)}%"></span></div>` : ''}</div>
-    </div>
-    <div class="card row"><div><h2>Browse your archive</h2><p>Explore recordings by category and capture date. Files and existing event thumbnails are available in Footage.</p></div>
-      <div style="display:flex;gap:12px;flex-wrap:wrap"><a class="btn" href="#/viewer">Open viewer</a><a class="btn" href="#/footage">Open footage</a></div></div>
-    <div class="card row"><div><h2>Encoder</h2><p id="enc-line">Convert footage to H.265 or AV1 with the Sentry Studio converter. Telemetry is copied into every frame and verified before an original is replaced.</p></div>
-      <a class="btn" href="#/encoder">Open encoder</a></div>`;
-    const notes = state.notes.filter((n) => !n.vehicleId || n.vehicleId === v.id);
-    html += `<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap"><h2>Current archive alerts</h2><button class="btn" id="refresh-alerts">Refresh current alerts</button></div>
-      <p class="muted small" style="margin-top:12px">${plural(notes.length, 'unresolved alert')}. Resolved alerts stay in Notifications.</p>
-      ${notes.length ? `<ul class="alerts">${notes.slice(0, 5).map((n) => `<li class="alert-item"><span class="dot ${n.level === 'critical' ? 'bad' : n.level === 'info' ? 'ok' : 'warn'}"></span><div><b>${esc(n.title)}</b><span>${esc(n.message || '')}</span></div><span class="muted small">${ago(n.updatedAt)}</span></li>`).join('')}</ul>`
-        : '<p style="margin:14px 0 18px">No unresolved storage or source incidents reported.</p>'}
-      <a class="btn" href="#/notifications">Open notifications</a></div>`;
+    </div>`;
+    // Viewer, Footage, Encoder and the alerts (Notifications) are tabs of their own.
     page.innerHTML = html + serverSection();
     $('refresh-inv').onclick = () => api(`/api/vehicles/${v.id}/scan`, { body: {} }).then(() => toast('Refreshing the inventory…'), (err) => toast(err.message, true));
-    $('refresh-alerts').onclick = () => loadNotes().then(render);
     mountMonitor();
   };
 
