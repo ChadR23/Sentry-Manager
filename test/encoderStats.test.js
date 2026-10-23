@@ -65,6 +65,8 @@ test('whether the CPU was measured stays put for the job while a sample cannot t
   assert.equal(measured('rapl', none), true);
   // another job starts over
   assert.equal(measured('next', gpuOnly), false);
+  // a built-in GPU's reading is the whole chip's, CPU included: not GPU only
+  assert.equal(measured('chip', { cpuSource: null, gpuSource: 'hwmon', chipW: 31 }), true);
 });
 
 test('the Hardware panel: per kWh from 0, counting up as clips finish; Wh below 1 kWh; GPU only when the CPU is not measured', async () => {

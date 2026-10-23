@@ -448,21 +448,29 @@
       + ndKv(steady(seen, key, [
         ['Clock', fin(g.clockMHz) ? clock(g.clockMHz) : ''],
         ['Temp', fin(g.tempC) ? temp(g.tempC) : '', g.tempC >= 90],
-        ['Power', fin(g.powerW) ? watts(g.powerW) : ''],
+        // a built-in GPU's reading is the whole chip's, CPU included
+        ['Power', fin(g.powerW) ? `${watts(g.powerW)}${g.integrated ? ' · whole chip' : ''}` : ''],
         ['Clients', g.clients > 0 ? `${g.clients} × ffmpeg` : '', false, g.clients === 0 ? 'none' : '—']
       ])));
   }
 
   function powerTile(p, enc, price, currency, seen = null) {
     if (!p) return '';
-    const parts = [['CPU package', p.cpuW], ['GPU', p.gpuW]].filter(([, w]) => fin(w));
+    // A built-in GPU (an APU such as the Ryzen 8700G's 780M) is part of the
+    // CPU chip: its reading and the CPU package's are the same power, so the
+    // chip is one figure, and only other GPUs are added to it. Once shown,
+    // it stays one figure while a sample has no reading.
+    if (fin(p.chipW) && seen) seen.set('power-whole-chip', true);
+    const chip = fin(p.chipW) || Boolean(seen?.get('power-whole-chip'));
+    const partW = chip ? { 'Whole chip': p.chipW, GPU: p.discreteW } : { 'CPU package': p.cpuW, GPU: p.gpuW };
+    const parts = Object.entries(partW).filter(([, w]) => fin(w));
     // a part seen before keeps its bar while its reading is missing for a moment
-    const partW = { 'CPU package': p.cpuW, GPU: p.gpuW };
-    const bars = steady(seen, 'power-parts', Object.entries(partW).map(([name, w]) => [name, fin(w) ? watts(w) : ''])).filter((row) => row[1]);
+    const bars = steady(seen, chip ? 'power-chip' : 'power-parts', Object.entries(partW).map(([name, w]) => [name, fin(w) ? watts(w) : ''])).filter((row) => row[1]);
     const total = fin(p.totalW) ? p.totalW : parts.length ? parts.reduce((n, [, w]) => n + w, 0) : null;
     // no power reading at all (and nothing measured earlier this week): no tile
     if (!fin(total) && !p.cpuSource && !p.gpuSource && !(p.todayWh > 0) && !(p.weekWh > 0)) return '';
-    const label = parts.length === 2 ? 'CPU + GPU' : parts.length ? (parts[0][0] === 'GPU' ? 'GPU (CPU not measured)' : 'CPU package') : '';
+    const label = chip ? (fin(p.discreteW) || bars.length === 2 ? 'whole chip + GPU' : 'whole chip (CPU + built-in GPU)')
+      : parts.length === 2 ? 'CPU + GPU' : parts.length ? (parts[0][0] === 'GPU' ? 'GPU (CPU not measured)' : 'CPU package') : '';
     const energy = (wh, c) => (fin(wh) ? esc(`${energyText(wh)}${fin(c) ? ` · ${money(c, currency)}` : ''}`) : '');
     const priceNow = fin(price?.now) ? `${esc(inCurrency(price.now.toFixed(price.now < 1 ? 3 : 2).replace(/(\.\d\d)0$/, '$1'), price.currency || currency))} per kWh${price.rate ? ` · ${esc(price.rate)}` : ''}` : '';
     return ndTile('Power', 'measured, not estimated', (fin(total) ? ndBig(watts(total), label) : bars.length ? ndBig('—', label) : '')

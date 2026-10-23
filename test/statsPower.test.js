@@ -54,6 +54,25 @@ test('RAPL from the supervisor: fresh readings only, out-of-order and malformed 
   assert.equal(p.cpu(t), null);
 });
 
+test('a built-in GPU (APU): one figure for the whole chip, other GPUs added to it', () => {
+  const t = 100000;
+  const p = new PowerProvider({ sysRoot: '/nonexistent', now: () => t, intervalMs: 2000 });
+  p.probe();
+  const apu = { powerW: 31.4, integrated: true, powerSource: 'hwmon' };
+  // no RAPL: the built-in GPU's reading is the chip's
+  assert.deepEqual(pick(p.sample(t, [apu])), { totalW: 31.4, cpuW: null, gpuW: 31.4, chipW: 31.4, discreteW: null });
+  // RAPL too (the owner's 8700G): both read the same power, not 60 W
+  p.setRapl(reading(t - 2000, 0));
+  p.setRapl(reading(t, 60e6));
+  assert.deepEqual(pick(p.sample(t, [apu])), { totalW: 31.4, cpuW: 30, gpuW: 31.4, chipW: 31.4, discreteW: null });
+  // and a graphics card besides: the chip plus the card
+  const card = { powerW: 85, integrated: false, powerSource: 'hwmon' };
+  assert.deepEqual(pick(p.sample(t, [apu, card])), { totalW: 116.4, cpuW: 30, gpuW: 116.4, chipW: 31.4, discreteW: 85 });
+  // no built-in GPU: as before
+  assert.deepEqual(pick(p.sample(t, [card])), { totalW: 115, cpuW: 30, gpuW: 85, chipW: null, discreteW: null });
+});
+const pick = ({ totalW, cpuW, gpuW, chipW, discreteW }) => ({ totalW, cpuW, gpuW, chipW, discreteW });
+
 test('energy: Wh integrated from samples, gaps not guessed, per day in local time', () => {
   const e = new Energy({ intervalMs: 2000 });
   const r = (n) => Math.round(n * 1000) / 1000;

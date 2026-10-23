@@ -75,6 +75,31 @@ test('Overview: the Power tile and the Jobs page show energy below 1 kWh in Wh',
   assert.doesNotMatch(app, /\bkwh\(/, 'one energy format everywhere');
 });
 
+test('Overview: a built-in GPU (APU) and the CPU are one figure, the whole chip', () => {
+  const { serverBody } = overview();
+  const powerOf = (html) => {
+    const at = html.indexOf('<span>Power</span>');
+    return html.slice(at, html.indexOf('<div class="nd-tile', at));
+  };
+  const owner = sample('amd');
+  owner.gpus = [{ ...owner.gpus[0], name: 'AMD Radeon 780M', integrated: true, powerW: 31.4 }];
+  Object.assign(owner.power, { totalW: 31.4, cpuW: 30, gpuW: 31.4, chipW: 31.4, discreteW: null });
+  const seen = new Map();
+  const html = serverBody(owner, { seen });
+  assert.match(powerOf(html), /31 W<\/b><span class="muted small">whole chip \(CPU \+ built-in GPU\)<\/span>/);
+  assert.match(powerOf(html), /<span>Whole chip<\/span>.*<b>31 W<\/b>/);
+  assert.doesNotMatch(powerOf(html), /CPU package|<span>GPU<\/span>/, 'no CPU and GPU bars that look like they add up');
+  assert.match(html, /<dt>Power<\/dt><dd>31 W · whole chip<\/dd>/, 'the GPU tile says so too');
+  // a sample without the GPU's reading keeps the one figure
+  Object.assign(owner.power, { totalW: 30, gpuW: null, chipW: null });
+  assert.match(powerOf(serverBody(owner, { seen })), /whole chip \(CPU \+ built-in GPU\).*<span>Whole chip<\/span>.*<b>—<\/b>/);
+  // with a graphics card besides, the card gets its own bar
+  Object.assign(owner.power, { totalW: 116.4, gpuW: 116.4, chipW: 31.4, discreteW: 85 });
+  const both = powerOf(serverBody(owner, { seen: new Map() }));
+  assert.match(both, /116 W<\/b><span class="muted small">whole chip \+ GPU<\/span>/);
+  assert.match(both, /<span>Whole chip<\/span>.*<span>GPU<\/span>.*<b>85 W<\/b>/);
+});
+
 // the owner's server between two polls: Ryzen 7 8700G, Radeon 780M, no RAPL
 function ownerPoll(i) {
   const s = sample('amd');
@@ -99,8 +124,8 @@ test('Overview: rows and columns stay in place between polls, with — while the
   };
   const a = serverBody(ownerPoll(0), { seen });
   const b = serverBody(ownerPoll(1), { seen });
-  assert.deepEqual(rowsOf(a, 'GPU'), ['Render / 3D=31%', 'Video=72%', 'VRAM=0.9 / 8 GB', 'Clock=2.7 GHz', 'Temp=54 °C', 'Power=39 W', 'Clients=4 × ffmpeg']);
-  assert.deepEqual(rowsOf(b, 'GPU'), ['Render / 3D=31%', 'Video=—', 'VRAM=0.9 / 8 GB', 'Clock=—', 'Temp=54 °C', 'Power=39 W', 'Clients=none'], 'the Video row stays while a new clip starts');
+  assert.deepEqual(rowsOf(a, 'GPU'), ['Render / 3D=31%', 'Video=72%', 'VRAM=0.9 / 8 GB', 'Clock=2.7 GHz', 'Temp=54 °C', 'Power=39 W · whole chip', 'Clients=4 × ffmpeg']);
+  assert.deepEqual(rowsOf(b, 'GPU'), ['Render / 3D=31%', 'Video=—', 'VRAM=0.9 / 8 GB', 'Clock=—', 'Temp=54 °C', 'Power=39 W · whole chip', 'Clients=none'], 'the Video row stays while a new clip starts');
   assert.match(b, /<b>—<\/b><span class="muted small">video engine<\/span>/, 'the big number keeps its label');
   assert.deepEqual(rowsOf(b, 'CPU').filter((r) => r.startsWith('Temp')), ['Temp=—']);
   assert.match(b, /<dt>GPU<\/dt><dd>—<\/dd>/, 'a sensor without a reading keeps its row');
@@ -338,6 +363,10 @@ test('Hardware panel: software encoding, NVIDIA, dropped frames, idle and paused
   assert.match(amd, /≈ €0\.52/);
   assert.match(amd, /This run<\/span><b>1\.8 kWh/);
   assert.match(amd, /<p class="nd-eff-note">GPU only \(CPU not measured\)<\/p>/, 'no RAPL: the per-kWh numbers are the GPU\'s alone');
+  // a built-in GPU (APU): its reading is the whole chip's
+  const apu = sample('amd');
+  Object.assign(apu.power, { totalW: 31, cpuW: 30, gpuW: 31, chipW: 31, discreteW: null });
+  assert.match(renderHardware(apu), /<span>Power<\/span><b>31 W<\/b><small>whole chip<\/small>/);
   const nv = renderHardware(sample('nvidia'));
   assert.match(nv, /hevc_nvenc · NVIDIA GeForce RTX 3060/);
   assert.match(nv, /Video engine<\/span><b>41%/, 'the GPU found by name (NVIDIA has no render node)');

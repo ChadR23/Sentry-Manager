@@ -101,8 +101,9 @@ function encoderBlock({ snapshot, jobs, workers = [], energy = null, slotsOf = n
   // the job's own totals, as there is nothing to divide.
   const base = run?.base || null;
   const power = snapshot?.power || null;
-  // without the CPU's power, the energy is the GPU's alone
-  const measured = power?.cpuSource ? true : power?.gpuSource ? false : null;
+  // without the CPU's power, the energy is the GPU's alone (a built-in GPU's
+  // reading is the whole chip's, CPU included)
+  const measured = power?.cpuSource || Number.isFinite(power?.chipW) ? true : power?.gpuSource ? false : null;
   if (job && measured !== null && cpuKnown.get(job.id) !== true) cpuKnown.set(job.id, measured);
   const cpuMeasured = job ? cpuKnown.get(job.id) ?? null : measured;
   let slots = null;

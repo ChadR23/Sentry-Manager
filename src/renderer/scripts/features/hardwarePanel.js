@@ -223,7 +223,10 @@ export function renderHardware(stats, memo = null) {
     tile('cpu', fin(convCpu) && `<div><span>CPU (conversions)</span><b>${pct(convCpu)}</b>${bar(convCpu, convCpu >= 90)}</div>`,
         `<div><span>CPU (conversions)</span><b>—</b>${bar(0)}</div>`);
     const total = fin(power.totalW) ? power.totalW : null;
-    const parts = [fin(power.cpuW) && `CPU ${Math.round(power.cpuW)}`, fin(power.gpuW) && `GPU ${Math.round(power.gpuW)}`].filter(Boolean);
+    // a built-in GPU is part of the CPU chip: one figure for both
+    const parts = fin(power.chipW)
+        ? [fin(power.discreteW) ? `chip ${Math.round(power.chipW)} · GPU ${Math.round(power.discreteW)}` : 'whole chip']
+        : [fin(power.cpuW) && `CPU ${Math.round(power.cpuW)}`, fin(power.gpuW) && `GPU ${Math.round(power.gpuW)}`].filter(Boolean);
     tile('power', fin(total) && `<div><span>Power</span><b>${watts(total)}</b><small>${parts.length ? parts.join(' · ') : '&nbsp;'}</small></div>`,
         '<div><span>Power</span><b>—</b><small>&nbsp;</small></div>');
     // with several GPUs, the hottest of the ones converting

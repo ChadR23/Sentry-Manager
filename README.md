@@ -76,7 +76,9 @@ what the machine is doing, live, so you don't need Glances or another tool:
   memory, clock, temperature, watts.
 - **Power**: CPU and GPU watts, the energy used today and this week (in Wh
   below 1 kWh), and the cost when you enter your electricity price in
-  Settings → System.
+  Settings → System. A built-in GPU (an APU such as the Ryzen 8700G's
+  Radeon 780M) is part of the CPU chip, so the CPU and that GPU show as one
+  figure, *whole chip*; a graphics card besides it gets its own bar.
 - **Memory, storage** (each disk's reads, writes and temperature; space and
   answer time of the data volume and every footage share), **network** (live
   speed, and the data used today, this week and this month) and every
@@ -146,7 +148,8 @@ copies somewhere else is a choice you make in the Output section.
   or two never reads as a huge number (a job that was already running when
   measuring began, for example before a restart, is not divided by a few
   minutes of energy either). When the server reports the GPU's power but not
-  the CPU's, they count the GPU alone and say *GPU only*.
+  the CPU's, they count the GPU alone and say *GPU only* (not with a built-in
+  GPU, whose reading is the whole chip's).
 - **Benchmark.** Runs the real converter on copies of a few of your clips
   at 1, 2, 4, 6 and 8 at once, on the server, and suggests the lightest
   setting within 5% of the fastest, and, when the server reports its power,

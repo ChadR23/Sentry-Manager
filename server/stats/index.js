@@ -242,7 +242,7 @@ function createStats(options = {}) {
       cpu: { model: null, cores: null, threads: null, usage: null, perCore: [], freqMHz: null, tempC: null, load: null, app: { usage: null, ffmpegUsage: null, ffmpegCount: null }, throttling: false, sockets: 1, perSocket: null },
       memory: { totalB: null, usedB: null, availableB: null, cacheB: null, swapTotalB: null, swapUsedB: null, appB: null },
       gpus: [],
-      power: { totalW: null, cpuW: null, gpuW: null, todayWh: null, weekWh: null, todayCost: null, weekCost: null, priceNow: null, cpuSource: null, gpuSource: null },
+      power: { totalW: null, cpuW: null, gpuW: null, chipW: null, discreteW: null, todayWh: null, weekWh: null, todayCost: null, weekCost: null, priceNow: null, cpuSource: null, gpuSource: null },
       disks: [],
       filesystems: [],
       network: { scope: 'container', interfaces: [], today: null, week: null, month: null },

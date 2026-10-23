@@ -140,12 +140,16 @@ class PowerProvider {
     // CPU package would count the CPU twice.
     const discrete = sumOf(withPower.filter((g) => !g.integrated).map((g) => g.powerW));
     const integrated = sumOf(withPower.filter((g) => g.integrated).map((g) => g.powerW));
+    // the whole chip (CPU and built-in GPU): the larger of the two readings
+    const chipW = integrated !== null ? Math.max(integrated, cpuW ?? 0) : null;
     let totalW = null;
-    if (cpuW !== null) totalW = cpuW + (discrete || 0);
+    if (chipW !== null) totalW = chipW + (discrete || 0);
+    else if (cpuW !== null) totalW = cpuW + (discrete || 0);
     else if (gpuW !== null) totalW = gpuW;
-    if (cpuW !== null && integrated !== null && integrated > cpuW && !discrete) totalW = integrated;
     return {
       totalW: round(totalW, 1), cpuW: round(cpuW, 1), gpuW: round(gpuW, 1),
+      // with a built-in GPU: one figure for the chip, the other GPUs apart
+      chipW: round(chipW, 1), discreteW: chipW !== null ? round(discrete, 1) : null,
       cpuSource: cpuW !== null ? 'rapl' : null,
       gpuSource: withPower[0]?.powerSource || null
     };
