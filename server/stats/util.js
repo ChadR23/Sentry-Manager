@@ -191,6 +191,6 @@ class BackgroundReads {
 const num = (text) => toNum(text === null || text === undefined ? null : String(text).split('\n', 1)[0]);
 
 module.exports = {
-  readText, readLine, readNum, toNum, num, listDir, readLink, realPath, exists,
+  readText, readLine, readNum, num, listDir, readLink, realPath, exists,
   parseKeyValues, parseUevent, round, clampPct, maxOf, sumOf, BackgroundReads, join: path.join
 };

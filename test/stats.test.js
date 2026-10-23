@@ -148,6 +148,8 @@ test('AMD desktop: k10temp, amdgpu sysfs and per-process video engine from fdinf
     assert.equal(snap.cpu.tempC, 65.3, 'Tctl when there is no Tdie');
     assert.deepEqual(snap.cpu.app, { usage: 12, ffmpegUsage: 10, ffmpegCount: 1 });
     assert.equal(snap.host.os, 'Debian');
+    assert.deepEqual(snap.sensors.filter((x) => /acpitz|iwlwifi/.test(x.chip)).map((x) => [x.chip, x.label, x.value]),
+      [['acpitz', 'acpitz', 27.8], ['iwlwifi_1', 'iwlwifi_1 1', 41], ['iwlwifi_1', 'iwlwifi_1 2', 42]]);
     assert.deepEqual(snap.gpus, [{
       id: 'card0', name: 'AMD graphics', vendor: 'amd', driver: 'amdgpu', node: 'renderD128', busy: 37, video: 60,
       vramUsedB: 1073741824, vramTotalB: 8573157376, clockMHz: 2044, tempC: 61, powerW: 85, clients: 1, integrated: false

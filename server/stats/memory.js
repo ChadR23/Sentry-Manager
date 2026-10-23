@@ -24,4 +24,25 @@ function readMemory(procRoot) {
   };
 }
 
-module.exports = { readMemory };
+class MemoryProvider {
+  constructor({ procRoot }) {
+    this.procRoot = procRoot;
+  }
+
+  probe() {
+    // nothing to find out: /proc/meminfo is there or it is not
+  }
+
+  /** The whole server's memory, and the resident size of the app and its children. */
+  sample(procs) {
+    const m = readMemory(this.procRoot);
+    let appB = null;
+    for (const pid of procs?.app || []) {
+      const b = procs.byPid.get(pid)?.memB;
+      if (Number.isFinite(b)) appB = (appB || 0) + b;
+    }
+    return { ...m, appB };
+  }
+}
+
+module.exports = { MemoryProvider, readMemory };

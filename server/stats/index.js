@@ -18,7 +18,7 @@ const path = require('path');
 const { BackgroundReads, round, maxOf, sumOf } = require('./util');
 const { ProcessTable } = require('./procs');
 const { CpuProvider } = require('./cpu');
-const { readMemory } = require('./memory');
+const { MemoryProvider } = require('./memory');
 const { SensorsProvider } = require('./sensors');
 const { DisksProvider } = require('./disks');
 const { NetworkProvider } = require('./network');
@@ -73,6 +73,7 @@ function createStats(options = {}) {
   const reads = new BackgroundReads({ now, readFile: typeof fsp.readFile === 'function' ? fsp.readFile.bind(fsp) : fs.promises.readFile });
   const procs = new ProcessTable({ procRoot, appPid });
   const cpu = new CpuProvider({ procRoot, sysRoot, now });
+  const memoryProvider = new MemoryProvider({ procRoot });
   const sensors = new SensorsProvider({ sysRoot, reads });
   const disks = new DisksProvider({ procRoot, sysRoot, now, sensors });
   const network = new NetworkProvider({ procRoot, sysRoot, now });
@@ -170,6 +171,7 @@ function createStats(options = {}) {
     guard('sensors', () => sensors.probe());
     guard('cpu', () => cpu.probe());
     guard('processes', () => procs.probe());
+    guard('memory', () => memoryProvider.probe());
     guard('disks', () => disks.probe());
     guard('network', () => network.probe());
     guard('gpus', () => gpu.probe());
@@ -249,8 +251,7 @@ function createStats(options = {}) {
     guard('processes', () => procs.sample(c?.totalTicks ?? null));
     const encodes = list(activeEncodes);
     const encoders = new Map(encodes.filter((e) => e && Number.isInteger(e.pid)).map((e) => [e.pid, e]));
-    const memory = guard('memory', () => readMemory(procRoot), skeleton().memory);
-    memory.appB = procs.app.size ? sumOf([...procs.app].map((pid) => procs.byPid.get(pid)?.memB ?? null)) : null;
+    const memory = guard('memory', () => memoryProvider.sample(procs), skeleton().memory);
     const gpus = guard('gpus', () => gpu.sample(t, procs), []);
     const pw = guard('power', () => power.sample(t, gpus), skeleton().power);
     // costs are summed at the price of each moment (time-of-use plans)
@@ -260,8 +261,7 @@ function createStats(options = {}) {
     const diskList = guard('disks', () => disks.sample(), []);
     const net = guard('network', () => network.sample(), { scope: network.scope, interfaces: [] });
     const fsList = guard('filesystems', () => filesystems.sample(t), []);
-    const sensorList = guard('sensors', () => sensors.list(), []);
-    const cpuTemp = guard('sensors', () => sensors.cpuTemp(), null);
+    const { sensors: sensorList, cpuTempC: cpuTemp } = guard('sensors', () => sensors.sample(), { sensors: [], cpuTempC: null });
 
     const next = {
       at: t, intervalMs,

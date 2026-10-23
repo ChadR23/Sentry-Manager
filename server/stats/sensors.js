@@ -121,6 +121,11 @@ class SensorsProvider {
     return this.chipTemp(c, t);
   }
 
+  /** { sensors, cpuTempC } as they stand (values from the last background reads). */
+  sample() {
+    return { sensors: this.list(), cpuTempC: this.cpuTemp() };
+  }
+
   /** The hwmon chip of a device (a GPU), if any. */
   chipOf(devReal) {
     return devReal ? this.chips.find((c) => c.dev === devReal) || null : null;
@@ -133,7 +138,8 @@ class SensorsProvider {
       for (const t of c.temps) {
         const value = this.chipTemp(c, t);
         if (value === null) continue;
-        let label = t.label || `temp${t.n}`;
+        // unlabelled inputs go by the chip's name (numbered when it has several)
+        let label = t.label || (c.temps.length > 1 ? `${c.name} ${t.n}` : c.name);
         if (c.disk) label = t.label && t.label !== 'Composite' ? `${c.disk} ${t.label}` : c.disk;
         out.push({ chip: c.name, label, kind: 'temp', value });
       }

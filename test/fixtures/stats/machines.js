@@ -355,6 +355,9 @@ function amd(phase = 0) {
       }
     }),
     ...platformHwmon('k10temp', 'hwmon1', { name: 'k10temp\n', temp1_input: '65250\n', temp1_label: 'Tctl\n', temp3_input: '58000\n', temp3_label: 'Tccd1\n' }),
+    // inputs without labels: named after their chip
+    ...platformHwmon('LNXTHERM:00', 'hwmon0', { name: 'acpitz\n', temp1_input: '27800\n' }),
+    ...platformHwmon('iwlwifi', 'hwmon3', { name: 'iwlwifi_1\n', temp1_input: '41000\n', temp2_input: '42000\n' }),
     'sys/devices/pci0000:00/0000:00:08.1/ata2/host1/target1:0:0/1:0:0:0/model': 'Samsung SSD 870\n',
     'sys/devices/pci0000:00/0000:00:08.1/ata2/host1/target1:0:0/1:0:0:0/block/sdb/size': '1953525168\n',
     'sys/devices/pci0000:00/0000:00:08.1/ata2/host1/target1:0:0/1:0:0:0/block/sdb/queue/rotational': '0\n',
