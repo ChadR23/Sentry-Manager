@@ -8,6 +8,8 @@ not split automatically.
 2. How many conversions at once **per GPU** (plus an optional CPU row), live-changeable
    during a run like today's single number.
 3. Server page: "2 × <CPU model>" and use / temperature / power per socket.
+4. Benchmark: every GPU is tested, and each gets its own results. The verification
+   comparison drops Off (Quick and Full only).
 
 Hard rule: **a server with one GPU (or none) behaves and looks exactly as today.** No
 `lanes` in its jobs, the single "Parallel conversions" select, the same ffmpeg
@@ -158,7 +160,8 @@ jobService:
   - `converter:start` and `converter:setAuto` config accept optional `lanes`
     (validated with `normalizeLanes`, unknown device ids allowed, since a saved auto
     setting can outlive a GPU).
-  - `converter:runBenchmark` accepts optional `device` (a `DEVICE_ID`).
+  - `converter:runBenchmark`'s payload is unchanged (no device field). With two or
+    more GPUs it tests every GPU by itself (see Benchmark below).
   - `sanitizeSnapshot` passes `config.lanes` through.
 - Start check: `converter:start` with lanes whose devices all resolve, but where a lane
   with concurrency > 0 has `encoders[codec] === null` (e.g. AV1 on a UHD 770), is
@@ -166,12 +169,32 @@ jobService:
   jobs and resumed jobs never get this error; they take the CPU fallback per clip.
 - autoConvert: `setLanes(lanes)` updates the saved config (lanes and concurrency).
   `start` passes lanes on.
-- Benchmark: `runBenchmark({ ..., device })` encodes on that device
-  (`selectFor`, with the service job `lanes: [{ device, concurrency: level }]`).
-  The result carries `device: { id, name }`. Without `device` it is unchanged.
+- **Benchmark** (owner's request: every GPU is tested, each with its own results, and
+  the verification comparison no longer includes Off):
+  - Verification comparison: always `compareVerifyModes: ['quick', 'full']`, with one
+  GPU too. Off is no longer timed. Off stays a normal setting for conversions.
+  - Fewer than two non-CPU devices: exactly today's benchmark (`planner.select`, the
+    result `{ codecs: [...] }`), apart from the comparison change above.
+  - Two or more non-CPU devices:
+    - Every GPU is benchmarked **by itself**, one after another, in device-list order,
+      while the other GPUs stay idle, so each GPU's numbers are its own. For each GPU,
+      the requested codecs run in turn.
+    - A GPU's encoder is `selectFor(codec, gpu)`. If that returns the CPU encoder
+      (the GPU can't encode the codec), that codec is reported as
+      `{ codec, error: 'UNSUPPORTED' }` for the GPU and is **not** benchmarked on the
+      CPU.
+    - Each level runs as a service job with `lanes: [{ device: gpu.id, concurrency:
+      level }]`.
+    - The CPU device is not benchmarked. The same sample clips are used for every GPU.
+    - Result: `{ devices: [{ device: { id, name }, codecs: [run, ...] }] }` with each
+      `run` shaped exactly like today's entries of `codecs`
+      (`{ codec, encoder, clips, results, best, efficient, verifyComparison, skipped }`,
+      or `{ codec, error }`).
+    - Progress events add `device: { id, name }`, `deviceIndex`, `deviceTotal`.
+    - Cancelling stops the whole run, as today.
 - Web shim (`web/electronApiShim.js`): `getConverterDevices()` -> invoke('devices');
-  `setConverterLanes(jobId, lanes)` -> invoke('setLanes', { jobId, lanes });
-  `runConverterBenchmark(request)` passes `request.device` through.
+  `setConverterLanes(jobId, lanes)` -> invoke('setLanes', { jobId, lanes }).
+  `runConverterBenchmark` is unchanged.
 - `server/encoderStats.js`: the encoder block gains
   `devices: [{ id, name, node, encoder, hardware, workers, video, busy }]`. That is one
   entry per device with running workers, grouped by `deviceId ?? device`, with the GPU
@@ -226,9 +249,33 @@ as today first and switches when the answer arrives.
   or a change is in flight.
 - Start error `DEVICE_UNSUPPORTED` -> `{device} can't encode {codec}. Set it to Off or
   pick another codec.`
-- Benchmark dialog: in lanes mode a `GPU` select (`#converterBenchmarkDevice`, listing
-  the devices, defaulting to `defaultDevice`) is sent as `device`. "Use this" sets
-  that row only.
+- Benchmark dialog:
+  - **Verification comparison:** shows Quick and Full only, with one GPU too. The Off
+    column is gone. The intro text says "(Quick, Full)", and in lanes mode "on each GPU
+    in turn".
+  - **One GPU:** a `{ codecs }` result renders exactly as today.
+  - **A `{ devices }` result:**
+    - The single tables, best line and two apply buttons are hidden.
+    - `#converterBenchmarkDevices` (new, in the dialog) gets one
+      `<section class="converter-benchmark-device">` per GPU. Each section has:
+      - an `<h4>` with the GPU's name;
+      - its own results table (same columns as today: At once | per codec Files/min,
+        FPS, Saved, W, Files/kWh);
+      - its own verification table (Quick | Full at that GPU's fastest setting);
+      - its own best / efficient / skipped / unsupported lines, every line starting
+        with the GPU's name;
+      - its own "Use H.265 · 4 at once" / "Use AV1 · 3 at once" buttons. Applying
+        one sets **that GPU's row** to the level and selects the codec. Other rows
+        are unchanged.
+    - Under the sections, when two or more GPUs have a best for a codec: a button
+      `Use H.265 on every GPU (Arc A380: 4 · UHD 770: 2)`, likewise for AV1. It sets
+      each GPU's row to its own best for that codec, sets CPU to 0, and selects the
+      codec. Next to it, the note: `Each GPU was tested alone; together they share
+      the CPU and drives, so the total can be a little lower.`
+    - The tables scroll sideways inside their section on phones, as today's table
+      does, and the page itself never does.
+    - Progress line: `Intel Arc A380 (1 of 2) · H.265 (1 of 2): converting with 4 at
+      once… (3 of 5)`.
 - Hardware panel: with `encoder.devices.length > 1`, one line per device:
   `Intel Arc A380 · hevc_qsv · 3 converting · video 72%`. Otherwise it is unchanged.
 
@@ -290,7 +337,11 @@ Tests go in new files where possible, to keep merges simple:
   - Restart keeps lanes.
   - selectFor falls back to the CPU.
   - Broken-decode keys per device.
+  - Benchmark: each GPU runs alone with its own lanes, in order. A codec a GPU can't
+    encode is UNSUPPORTED and is not run on the CPU. Compare modes are only quick and
+    full, and the one-GPU result shape is unchanged.
 - `test/encoderLanesUi.test.js`: lanes mode only with ≥ 2 GPUs, default send rule,
-  live chaining, the unsupported row, the benchmark device.
+  live chaining, the unsupported row. Benchmark: a section per GPU, per-GPU "Use"
+  sets only that row, "every GPU" sets each row, and there is no Off column.
 - `test/statsSockets.test.js`: dualXeon per-socket numbers, max temp across chips,
   the single-socket body unchanged.
