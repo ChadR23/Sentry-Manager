@@ -57,3 +57,69 @@ test('a level that fails ends the sweep there', async () => {
     await fsp.rm(dir, { recursive: true, force: true });
   }
 });
+
+test('a clip that fails verification on its own is left out, not the whole benchmark', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sm-bench-'));
+  const clips = [];
+  for (const cam of ['front', 'back', 'left_repeater']) {
+    const clip = path.join(dir, `2026-10-20_17-00-00-${cam}.mp4`);
+    await fsp.writeFile(clip, cam);
+    clips.push({ sourcePath: clip, name: path.basename(clip) });
+  }
+  try {
+    const out = await runConverterBenchmark({
+      clips, tempRoot: dir, countFrames: async () => 100,
+      runLevel: async ({ sourceRoot }) => ({
+        // the back camera clip (and copies made from it) never verifies
+        items: fs.readdirSync(path.join(sourceRoot, 'RecentClips')).map((n) => {
+          const back = fs.readFileSync(path.join(sourceRoot, 'RecentClips', n), 'utf8') === 'back';
+          return back
+            ? { state: 'failed', relativePath: `RecentClips/${n}`, failure: { code: 'duration-mismatch' } }
+            : { state: 'completed', relativePath: `RecentClips/${n}` };
+        })
+      })
+    });
+    assert.deepEqual(out.results.map((r) => [r.level, r.ok]), [[1, true], [2, true], [4, true], [6, true], [8, true]]);
+    assert.deepEqual(out.skipped, [{ name: '2026-10-20_17-00-00-back.mp4', code: 'duration-mismatch' }]);
+    assert.equal(out.clips, 2);
+    assert.ok(out.best, 'a recommendation from the clips that work');
+    assert.ok(out.results.every((r) => !('failedItems' in r)), 'internal bookkeeping stays inside');
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('when the only clip fails on its own, the benchmark says why', async () => {
+  const { dir, clips } = await setup();
+  try {
+    const out = await runConverterBenchmark({
+      clips, tempRoot: dir, countFrames: async () => 100,
+      runLevel: async ({ sourceRoot }) => ({
+        items: fs.readdirSync(path.join(sourceRoot, 'RecentClips')).map((n) => ({ state: 'failed', relativePath: `RecentClips/${n}`, failure: { code: 'duration-mismatch' } }))
+      })
+    });
+    assert.deepEqual(out.results.map((r) => [r.level, r.ok, r.failures]), [[1, false, ['duration-mismatch']]]);
+    assert.equal(out.best, null);
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a clip that only fails when many run at once is kept: the level is the limit', async () => {
+  const { dir, clips } = await setup();
+  try {
+    const out = await runConverterBenchmark({
+      clips, tempRoot: dir, countFrames: async () => 100,
+      runLevel: async ({ level, sourceRoot }) => ({
+        items: fs.readdirSync(path.join(sourceRoot, 'RecentClips')).map((n) => (level >= 6
+          ? { state: 'failed', relativePath: `RecentClips/${n}`, failure: { code: 'decode-failed' } }
+          : { state: 'completed', relativePath: `RecentClips/${n}` }))
+      })
+    });
+    assert.deepEqual(out.results.map((r) => [r.level, r.ok]), [[1, true], [2, true], [4, true], [6, false]]);
+    assert.deepEqual(out.skipped, []);
+    assert.equal(out.clips, 1);
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});

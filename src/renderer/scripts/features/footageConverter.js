@@ -779,6 +779,15 @@ function createFootageConverterController(options = {}) {
                     saved: Number.isFinite(saved) ? `${saved}%` : '—'
                 }));
                 benchmarkPicks.push({ codec: run.codec, level: run.best.level });
+            } else if (Array.isArray(run.results) && run.results.length) {
+                const codes = [...new Set(run.results.flatMap((entry) => entry.failures || []))];
+                lines.push(message('benchmarkCodecAllFailed', '{codec}: no setting finished ({codes})', { codec, codes: codes.join(', ') || '—' }));
+            }
+            if (Array.isArray(run.skipped) && run.skipped.length) {
+                lines.push(message('benchmarkCodecSkipped', '{codec}: left out {count} clip(s) that fail on their own: {clips}', {
+                    codec, count: run.skipped.length,
+                    clips: run.skipped.map((entry) => `${entry.name} (${entry.code})`).join(', ')
+                }));
             }
         }
         benchmarkBest = benchmarkPicks[0] || null;

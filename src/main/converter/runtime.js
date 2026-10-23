@@ -740,19 +740,25 @@ async function createConverterRuntime(options = {}) {
   let benchmarkController = null;
   async function findBenchmarkClips(sourceRoot, signal) {
     if (typeof sourceRoot !== 'string' || sourceRoot.length === 0) return [];
+    // In an archive that is partly converted the first folders hold mostly
+    // converted clips (and the odd original that failed before), so look
+    // through a few thousand files. Converted clips are far smaller than the
+    // originals, so the largest are tried first; at most 64 are inspected.
     const found = [];
     try {
       for await (const item of scanTeslaFootage({ sourceRoot }, { signal, path: pathApi, platform, concurrency: 16 })) {
         if (item.kind === 'video') found.push(item);
-        if (found.length >= 80) break;
+        if (found.length >= 4000) break;
       }
     } catch (_) { return []; }
-    // Prefer full-size clips, and only originals: converted clips are skipped.
     const clips = [];
     const names = new Set();
+    let inspected = 0;
     for (const item of found.sort((left, right) => right.sourceBytes - left.sourceBytes)) {
       const name = pathApi.basename(item.sourcePath);
       if (names.has(name)) continue;
+      if (inspected >= 64) break;
+      inspected += 1;
       try {
         if ((await inspectVideo(item, item.sourcePath, signal)).codec !== 'h264') continue;
       } catch (_) { continue; }

@@ -4,12 +4,21 @@
 // injection, full verification, staging and saving) on copies of real clips at
 // every parallel-conversion level (1, 2, 4, 6, 8), and reports files per
 // minute. With fewer sample clips than a level needs, clips are reused under
-// other names so every slot has work. The user's footage is only read; every
-// run writes into a temporary folder.
+// other names so every slot has work. A clip that fails verification on its
+// own (a damaged or odd recording) is left out and the level run again, so
+// one bad clip does not fail the whole benchmark. The user's footage is only
+// read; every run writes into a temporary folder.
 
 const nodeFs = require('fs');
 const nodePath = require('path');
 const { CONCURRENCY } = require('./contracts');
+
+// Failures that belong to the clip, not to the encoder or the setting: the
+// clip is left out and the level measured again without it.
+const CLIP_FAILURES = new Set([
+  'duration-mismatch', 'frame-count-mismatch', 'dimension-mismatch', 'container-invalid',
+  'decode-failed', 'probe-failed', 'telemetry-invalid', 'telemetry-mismatch', 'not-smaller'
+]);
 
 const LEVELS = Object.freeze([1, 2, 4, 6, 8]);
 const MAX_CLIPS = 8;
@@ -30,7 +39,7 @@ async function placeClip(fs, from, to) {
  *   countFrames(path) → frames in a clip
  *   encoder: { codec, hardware } the converter will use
  * Returns { encoder, clips, results: [{ level, clips, completed, failed, failures, seconds,
- *   filesPerMinute, fps, ok }], best }.
+ *   filesPerMinute, fps, ok }], best, skipped: [{ name, code }] }.
  */
 async function runConverterBenchmark(options = {}) {
   const {
@@ -57,7 +66,7 @@ async function runConverterBenchmark(options = {}) {
       onProgress({ step: 'copy', index: index + 1, total: chosen.length });
       const target = pathApi.join(library, clip.name);
       await fs.copyFile(clip.sourcePath, target);
-      samples.push({ name: clip.name, path: target, frames: await countFrames(target) });
+      samples.push({ name: clip.name, origin: clip.name, path: target, frames: await countFrames(target) });
     }
 
     // One real conversion run of `batch` at `level` parallel conversions.
@@ -79,8 +88,11 @@ async function runConverterBenchmark(options = {}) {
       checkAborted();
       const items = Array.isArray(job?.items) ? job.items : [];
       const completed = items.filter((item) => item.state === 'completed');
-      const failures = [...new Set(items.filter((item) => item.state === 'failed')
-        .map((item) => item.failure?.code || item.resultCode || 'failed'))];
+      const failedItems = items.filter((item) => item.state === 'failed').map((item) => ({
+        origin: batch.find((entry) => item.relativePath?.endsWith(entry.name))?.origin,
+        code: item.failure?.code || item.resultCode || 'failed'
+      }));
+      const failures = [...new Set(failedItems.map((entry) => entry.code))];
       const frames = completed.reduce((sum, item) => {
         const sample = batch.find((entry) => item.relativePath?.endsWith(entry.name));
         return sum + (sample?.frames || 0);
@@ -107,7 +119,8 @@ async function runConverterBenchmark(options = {}) {
         savedPercent,
         verifySecondsPerClip,
         fps: Math.round((frames / seconds) * 10) / 10,
-        ok: completed.length === batch.length
+        ok: completed.length === batch.length,
+        failedItems
       };
     }
     // Give every parallel slot real work: at least two clips, else one per
@@ -120,13 +133,40 @@ async function runConverterBenchmark(options = {}) {
       return { ...sample, name, reused: true };
     });
 
+    // Leaves out the sample clips that fail on their own; true when the level
+    // is worth measuring again with the ones left. At one conversion at a time
+    // a failure is the clip's; at more, the clips are first tried again one
+    // at a time, since a busy encoder can fail a clip that is fine.
+    const skipped = [];
+    async function leaveOutBadClips(result, level) {
+      if (result.ok || !result.failedItems.length || !result.failedItems.every((entry) => CLIP_FAILURES.has(entry.code) && entry.origin)) return false;
+      let bad = result.failedItems;
+      if (level > 1) {
+        const suspects = samples.filter((sample) => bad.some((entry) => entry.origin === sample.origin));
+        checkAborted();
+        bad = (await measure(1, suspects, `check-${level}`)).failedItems;
+      }
+      for (const entry of bad) {
+        const index = samples.findIndex((sample) => sample.origin === entry.origin);
+        if (index === -1 || !CLIP_FAILURES.has(entry.code)) continue;
+        skipped.push({ name: entry.origin, code: entry.code });
+        samples.splice(index, 1);
+      }
+      return bad.length > 0 && samples.length > 0;
+    }
+    const publicResult = ({ failedItems, ...result }) => result;
+
     const levels = LEVELS.filter((level) => level <= CONCURRENCY.max);
     const results = [];
     for (const [index, level] of levels.entries()) {
       checkAborted();
       onProgress({ step: 'run', level, index: index + 1, total: levels.length, encoder: encoder?.codec, hardware: encoder?.hardware === true });
-      const result = await measure(level, batchFor(level), `level-${level}`);
-      results.push(result);
+      let result = await measure(level, batchFor(level), `level-${level}`);
+      if (await leaveOutBadClips(result, level)) {
+        checkAborted();
+        result = await measure(level, batchFor(level), `level-${level}-again`);
+      }
+      results.push(publicResult(result));
       // A failing level usually means the hardware refused another session;
       // higher ones would only fail the same way.
       if (!result.ok) break;
@@ -146,10 +186,10 @@ async function runConverterBenchmark(options = {}) {
       for (const [index, mode] of compareModes.entries()) {
         checkAborted();
         onProgress({ step: 'verify', verifyMode: mode, level: best.level, index: index + 1, total: compareModes.length });
-        verifyComparison.push({ verifyMode: mode, ...await measure(best.level, samples, `verify-${mode}`, { verifyMode: mode }) });
+        verifyComparison.push({ verifyMode: mode, ...publicResult(await measure(best.level, samples, `verify-${mode}`, { verifyMode: mode })) });
       }
     }
-    return { encoder, clips: samples.length, results, best, verifyComparison };
+    return { encoder, clips: samples.length, results, best, verifyComparison, skipped };
   } finally {
     await fs.rm(workRoot, { recursive: true, force: true }).catch(() => {});
   }

@@ -1278,6 +1278,10 @@ function createConverterJobService(deps) {
           continue;
         }
         if (noTarget && verification?.reason === 'not-smaller') throw serviceError('KEEP_ORIGINAL');
+        // the reason alone ("duration-mismatch") cannot tell a damaged clip
+        // from a converter problem; the measurements can
+        console.warn('[CONVERTER] Verification failed:', item.relativePath, verification?.reason || 'unknown',
+          JSON.stringify(verification?.details || {}).slice(0, 600));
         const error = Object.assign(new Error('verification failed'), {
           code: verification?.reason || 'VERIFICATION_FAILED',
           retryable: verification?.retryable === true
