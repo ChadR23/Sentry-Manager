@@ -1716,6 +1716,15 @@ function createConverterJobService(deps) {
   async function resume(id) {
     const runtime = await ensureRuntime(id);
     if (runtime.manifest.state !== 'paused' && !runtime.pauseRequested) throw serviceError('JOB_NOT_PAUSED');
+    // A replacement interrupted by a restart (an update of the container, a
+    // power cut) that recovery parked for a decision: Resume re-reads the
+    // files like Cancel does, finishes or rolls back that one clip, and the
+    // job carries on with the rest. Only an ambiguous state still needs one.
+    if (runtime.manifest.recovery?.fromState === 'replacing' && !runtime.runPromise) {
+      await resolveReplacementBeforeCancel(runtime, id, { relaunch: true });
+      emit(runtime, 'resumed');
+      return publicSnapshot(runtime.manifest);
+    }
     // A pause that has not taken effect (a worker is still on its clip, maybe
     // mid-replacement or waiting out an outage) is simply called off: the job
     // state belongs to that worker, and writing 'waiting' over it was
@@ -1749,13 +1758,13 @@ function createConverterJobService(deps) {
   // replacement truth tables; if they show an unambiguous state, finish or roll
   // back that one item through the normal recovery path, then cancel. Ambiguous
   // states keep RECOVERY_REQUIRED.
-  async function resolveReplacementBeforeCancel(runtime, id) {
+  async function resolveReplacementBeforeCancel(runtime, id, { relaunch = false } = {}) {
     if (runtime.runPromise || typeof deps.inspectRecovery !== 'function') throw serviceError('RECOVERY_REQUIRED');
     const signal = runtime.abortController.signal;
     const inspectWithSignal = (manifest) => abortableRead(() => deps.inspectRecovery(manifest, { signal }), signal);
     // The recovery path normally relaunches the queue; for a cancel it must
     // only settle the interrupted item, and the cancel then finalizes the rest.
-    runtime.suppressLaunch = true;
+    runtime.suppressLaunch = !relaunch;
     try {
       const recovered = await store.recover(id, inspectWithSignal, { reinspectReplacement: true });
       runtime.manifest = recovered;
@@ -2123,32 +2132,54 @@ function createConverterJobService(deps) {
         await update(runtime, { state: 'paused', recovery: { ...recovery, action: 'manual-intervention' } });
         return publicSnapshot(runtime.manifest);
       }
-      let result = await staging.recoverReplacement({
-        codec: recovered.config.codec,
-        action: recovery.action,
-        source: item.sourcePath,
-        expectedSource: item.expectedSource,
-        sourceRoot: recovered.config.sourceRoot,
-        publicationArtifact: item.publicationArtifact || recovered.publicationArtifact,
-        ownedPaths: item.ownedPaths || recovered.ownedPaths,
-        ownedArtifacts: item.ownedArtifacts || recovered.ownedArtifacts,
-        jobId: recovered.id,
-        itemId: item.id,
-        signal: runtime.abortController.signal,
-        persistTransaction: transactionPersistence(runtime, item.id)
+      // Each step of the recovery records its phase as a 'replacing' job,
+      // which the job file only accepts without the recovery note: with the
+      // note left on, the first phase write failed and a replacement
+      // interrupted by a restart could never finish (nor be cancelled). The
+      // job goes back to exactly what a crash mid-replacement leaves; if the
+      // recovery fails, it parks again for a decision, files untouched.
+      await update(runtime, {
+        state: 'replacing',
+        activeItemId: item.id,
+        replacementPhase: recovery.phase || recovered.replacementPhase,
+        recovery: null
       });
-      if (result.action === 'restart-replacement') {
-        result = await staging.replaceOriginal({
+      let result;
+      try {
+        result = await staging.recoverReplacement({
           codec: recovered.config.codec,
-          publicationArtifact,
+          action: recovery.action,
           source: item.sourcePath,
           expectedSource: item.expectedSource,
           sourceRoot: recovered.config.sourceRoot,
+          publicationArtifact: item.publicationArtifact || recovered.publicationArtifact,
+          ownedPaths: item.ownedPaths || recovered.ownedPaths,
+          ownedArtifacts: item.ownedArtifacts || recovered.ownedArtifacts,
           jobId: recovered.id,
           itemId: item.id,
           signal: runtime.abortController.signal,
           persistTransaction: transactionPersistence(runtime, item.id)
         });
+        if (result.action === 'restart-replacement') {
+          result = await staging.replaceOriginal({
+            codec: recovered.config.codec,
+            publicationArtifact,
+            source: item.sourcePath,
+            expectedSource: item.expectedSource,
+            sourceRoot: recovered.config.sourceRoot,
+            jobId: recovered.id,
+            itemId: item.id,
+            signal: runtime.abortController.signal,
+            persistTransaction: transactionPersistence(runtime, item.id)
+          });
+        }
+      } catch (error) {
+        await update(runtime, (current) => ({
+          state: 'paused',
+          activeItemId: item.id,
+          recovery: { fromState: 'replacing', phase: current.replacementPhase || recovery.phase, action: 'manual-intervention' }
+        })).catch(() => undefined);
+        throw error;
       }
       if (result.phase === 'backup-deleted') {
         await completeRecovered(item.sourcePath, publicationArtifact.size, result);
