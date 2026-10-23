@@ -1,0 +1,237 @@
+// The Encoder's Hardware panel, inside Live run: what the running conversion
+// uses (encoder, GPU, decoding), what it costs and what holds it back, one row
+// per clip being converted. From GET /api/stats (the `encoder` block) every
+// 2 s while the page is on screen; with no conversion running, one compact
+// line with the device instead. Names, paths and models come from the
+// machine, so every value is escaped.
+
+const POLL_MS = 2000;
+const TIMEOUT_MS = 10000;
+const WORKERS_SHOWN = 16;
+
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const fin = (n) => typeof n === 'number' && Number.isFinite(n);
+const clampPct = (n) => Math.max(0, Math.min(100, Math.round((fin(n) ? n : 0) * 10) / 10));
+const pct = (n) => `${Math.round(n)}%`;
+const temp = (c) => `${Math.round(c)} °C`;
+const watts = (w) => `${w >= 10 ? Math.round(w) : w.toFixed(1).replace(/\.0$/, '')} W`;
+const base = (p) => String(p || '').split(/[\\/]/).pop();
+const group = (n) => Math.round(n).toLocaleString('en-US');
+
+function kwh(wh) {
+    const k = wh / 1000;
+    return `${k < 1 ? k.toFixed(2) : k < 100 ? k.toFixed(1) : group(k)} kWh`;
+}
+
+// binary sizes, labelled like the rest of the manager's server numbers
+function gb(bytes) {
+    const g = bytes / 1024 ** 3;
+    if (g >= 1024) return `${(g / 1024).toFixed(1).replace(/\.0$/, '')} TB`;
+    if (g >= 1) return `${g >= 100 ? group(g) : g.toFixed(1).replace(/\.0$/, '')} GB`;
+    return `${Math.round(bytes / 1024 ** 2)} MB`;
+}
+
+// $0.05 but 1.20 kr; costs are summed by the server at each moment's price
+function money(value, currency) {
+    const n = value >= 100 ? group(value) : value.toFixed(2);
+    const c = String(currency || '$');
+    return `≈ ${/^[a-z]+$/i.test(c) ? `${n} ${c}` : `${c}${n}`}`;
+}
+
+const bar = (value, hot = false) => `<div class="nd-bar${hot ? ' hot' : ''}"><span style="width:${clampPct(value)}%"></span></div>`;
+const chip = (text, title) => `<span class="nd-chip"${title ? ` title="${esc(title)}"` : ''}>${esc(text)}</span>`;
+
+/** The GPU a render node (or a GPU name) belongs to, or the only GPU there is. */
+export function gpuFor(gpus, device) {
+    const list = Array.isArray(gpus) ? gpus.filter(Boolean) : [];
+    if (!list.length || !device) return null;
+    const node = base(device.node);
+    return list.find((g) => node && base(g.node) === node)
+        || list.find((g) => device.gpuName && g.name === device.gpuName)
+        || (list.length === 1 ? list[0] : null);
+}
+
+
+function workerRow(w) {
+    const done = fin(w.outTimeUs) && fin(w.durationUs) && w.durationUs > 0 ? Math.min(100, (w.outTimeUs / w.durationUs) * 100) : null;
+    // numbers only, so the meta line needs no escaping
+    const meta = [];
+    if (fin(w.fps) && w.fps > 0) meta.push(`${group(w.fps)} fps`);
+    if (fin(w.speed) && w.speed > 0) meta.push(`${w.speed.toFixed(1)}× realtime`);
+    if (fin(w.bitrateKbps) && w.bitrateKbps > 0) meta.push(`${(w.bitrateKbps / 1000).toFixed(1)} Mb/s`);
+    const drop = fin(w.dropFrames) ? w.dropFrames : 0;
+    const dup = fin(w.dupFrames) ? w.dupFrames : 0;
+    if (!meta.length) meta.push('starting…');
+    else if (drop || dup) meta.push(`<span class="nd-warn">${[drop && `${group(drop)} dropped`, dup && `${group(dup)} duplicated`].filter(Boolean).join(' · ')}</span>`);
+    else meta.push('no dropped frames');
+    return `<div class="nd-w"><div class="nd-w-top"><span class="nd-clip" title="${esc(w.relativePath)}">${esc(base(w.relativePath) || w.itemId || 'clip')}</span><span>${done === null ? '' : pct(done)}</span></div>${bar(done ?? 0)}<div class="nd-w-meta">${meta.join(' · ')}</div></div>`;
+}
+
+/**
+ * The panel's inner HTML for a GET /api/stats body, or '' when there is
+ * nothing to show (no numbers at all).
+ */
+export function renderHardware(stats) {
+    if (!stats || typeof stats !== 'object') return '';
+    const enc = stats.encoder && typeof stats.encoder === 'object' ? stats.encoder : null;
+    const gpus = Array.isArray(stats.gpus) ? stats.gpus.filter(Boolean) : [];
+    const workers = Array.isArray(enc?.workers) ? enc.workers.filter(Boolean) : [];
+    const device = enc?.device || null;
+
+    // idle (or paused): one line with the device the conversions use
+    if (!enc || (!enc.running && !workers.length)) {
+        const chips = [];
+        if (device?.encoder) chips.push(chip([device.encoder, device.gpuName, base(device.node)].filter(Boolean).join(' · ')));
+        else {
+            const named = gpus.filter((g) => g.name && g.vendor !== 'other').slice(0, 2);
+            for (const g of named) chips.push(chip([g.name, g.node].filter(Boolean).join(' · ')));
+            if (!named.length) chips.push(chip('CPU encoding (no GPU encoder seen)'));
+        }
+        const state = enc && !enc.running ? 'Paused' : 'Idle';
+        return `<div class="nd-hw-head nd-hw-idle"><h3>Hardware</h3><span class="nd-state">${state}</span>${chips.join('')}</div>`;
+    }
+
+    const gpu = device?.hardware ? gpuFor(gpus, device) : null;
+    const cpu = stats.cpu || {};
+    const power = stats.power || {};
+    const chips = [];
+    if (device?.encoder) {
+        const what = [device.encoder, device.gpuName || (device.hardware ? gpu?.name : 'CPU'), base(device.node)].filter(Boolean).join(' · ');
+        chips.push(chip(what, what)); // (cut short on phones; the whole of it on hover)
+    }
+    if (device?.decode) chips.push(chip(`decode: ${device.decode === 'gpu' ? 'GPU' : 'CPU'}`));
+    chips.push(chip(workers.length ? `${workers.length} at once` : 'finding clips…'));
+
+    const tiles = [];
+    const video = gpu ? (fin(gpu.video) ? gpu.video : fin(gpu.busy) ? gpu.busy : null) : null;
+    if (fin(video)) tiles.push(`<div><span>${fin(gpu.video) ? 'Video engine' : 'GPU'}</span><b>${pct(video)}</b>${bar(video, video >= 90)}</div>`);
+    const convCpu = fin(cpu.app?.ffmpegUsage) ? cpu.app.ffmpegUsage : fin(cpu.app?.usage) ? cpu.app.usage : null;
+    if (fin(convCpu)) tiles.push(`<div><span>CPU (conversions)</span><b>${pct(convCpu)}</b>${bar(convCpu, convCpu >= 90)}</div>`);
+    const total = fin(power.totalW) ? power.totalW : null;
+    if (fin(total)) {
+        const parts = [fin(power.cpuW) && `CPU ${Math.round(power.cpuW)}`, fin(power.gpuW) && `GPU ${Math.round(power.gpuW)}`].filter(Boolean);
+        tiles.push(`<div><span>Power</span><b>${watts(total)}</b>${parts.length ? `<small>${parts.join(' · ')}</small>` : ''}</div>`);
+    }
+    const temps = [fin(gpu?.tempC) && ['GPU', gpu.tempC], fin(cpu.tempC) && ['CPU', cpu.tempC]].filter(Boolean);
+    if (temps.length) {
+        const hot = Math.max(...temps.map(([, t]) => t));
+        tiles.push(`<div${hot >= 90 ? ' class="hot"' : ''}><span>Temperatures</span><b>${temp(temps[0][1])}</b><small>${temps.map(([k, t]) => `${k} ${Math.round(t)}`).join(' · ')}</small></div>`);
+    }
+
+    // the server's sentence says what is maxed out and what to change
+    const b = enc.bottleneck;
+    const hint = b?.message
+        ? `<div class="nd-hint${b.kind === 'none' ? ' calm' : ''}"><b>${b.kind === 'none' ? 'Room to spare:' : 'Bottleneck:'}</b> ${esc(b.message)}</div>`
+        : '';
+
+    // energy per clip and per GB saved, when the server could measure power
+    const run = enc.run || {};
+    const eff = [];
+    if (fin(run.wh) && run.wh > 0) {
+        eff.push(['This run', kwh(run.wh)]);
+        if (fin(run.clips) && run.clips > 0) eff.push(['Clips per kWh', group(run.clips / (run.wh / 1000))]);
+        if (fin(run.savedB) && run.savedB > 0) eff.push(['Space saved per kWh', gb(run.savedB / (run.wh / 1000))]);
+    } else {
+        if (fin(run.clips)) eff.push(['Clips this run', group(run.clips)]);
+        if (fin(run.savedB) && run.savedB > 0) eff.push(['Space saved', gb(run.savedB)]);
+    }
+    if (fin(run.cost)) eff.push(['Cost so far', money(run.cost, stats.price?.currency)]);
+
+    const shown = workers.slice(0, WORKERS_SHOWN);
+    const rows = shown.map(workerRow).join('')
+        + (workers.length > shown.length ? `<p class="nd-w-more">and ${workers.length - shown.length} more</p>` : '');
+
+    return `<div class="nd-hw-head"><h3>Hardware</h3>${chips.join('')}</div>`
+        + (tiles.length ? `<div class="nd-hw-tiles">${tiles.join('')}</div>` : '')
+        + hint
+        + (eff.length ? `<div class="nd-eff">${eff.map(([k, v]) => `<div><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join('')}</div>` : '')
+        + (rows ? `<div class="nd-workers">${rows}</div>` : '');
+}
+
+/**
+ * Polls while the panel can be seen: the tab is visible, the manager has not
+ * put the Encoder away (it posts "pause" / "shown"), and Live run is on
+ * screen. A job starting (Start turns disabled) asks at once.
+ */
+export function startHardwarePanel({ doc = document, win = window, fetchImpl = (...args) => win.fetch(...args) } = {}) {
+    const panel = doc.getElementById('converterHardware');
+    if (!panel) return null;
+    let timer = null;
+    let busy = false;
+    let shownByShell = true;
+    let onScreen = true;
+    let last = '';
+
+    const wanted = () => doc.visibilityState !== 'hidden' && shownByShell && onScreen;
+
+    async function poll() {
+        clearTimeout(timer);
+        timer = null;
+        if (busy || !wanted()) return;
+        busy = true;
+        const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+        const giveUp = setTimeout(() => ctrl?.abort(), TIMEOUT_MS);
+        try {
+            const res = await fetchImpl('/api/stats', { credentials: 'same-origin', headers: { 'X-Requested-With': 'sentry-six-manager' }, signal: ctrl?.signal });
+            if (res.ok) {
+                const html = renderHardware(await res.json());
+                // unchanged numbers leave the DOM (and a hovered title) alone
+                if (html !== last) {
+                    panel.innerHTML = html;
+                    last = html;
+                }
+                panel.hidden = !html;
+            }
+        } catch {
+            // the next poll tries again; the panel keeps its last numbers
+        } finally {
+            clearTimeout(giveUp);
+            busy = false;
+        }
+        if (wanted()) timer = setTimeout(poll, POLL_MS);
+    }
+
+    const stop = () => {
+        clearTimeout(timer);
+        timer = null;
+    };
+    const resume = () => {
+        if (wanted() && !timer && !busy) poll();
+    };
+
+    doc.addEventListener('visibilitychange', () => (doc.visibilityState === 'hidden' ? stop() : resume()));
+    win.addEventListener('message', (event) => {
+        if (event.origin !== win.location.origin) return;
+        if (event.data?.type === 'pause') {
+            shownByShell = false;
+            stop();
+        } else if (event.data?.type === 'shown') {
+            shownByShell = true;
+            resume();
+        }
+    });
+    // Live run scrolled out of view (one column on phones): nothing to update
+    const live = panel.closest('.converter-operations') || panel.parentElement;
+    if (live && typeof win.IntersectionObserver === 'function') {
+        new win.IntersectionObserver((entries) => {
+            onScreen = entries.some((entry) => entry.isIntersecting);
+            if (onScreen) resume();
+            else stop();
+        }).observe(live);
+    }
+    const start = doc.getElementById('converterStart');
+    if (start && typeof win.MutationObserver === 'function') {
+        new win.MutationObserver(() => {
+            stop();
+            resume();
+        }).observe(start, { attributes: true, attributeFilter: ['disabled'] });
+    }
+    poll();
+    return { poll, stop };
+}
+
+if (typeof document !== 'undefined' && typeof window !== 'undefined') {
+    const run = () => startHardwarePanel();
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', run, { once: true });
+    else run();
+}

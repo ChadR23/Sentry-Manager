@@ -673,6 +673,8 @@ function createFootageConverterController(options = {}) {
     }
 
     const formatRate = (value) => String(value >= 100 ? Math.round(value) : value);
+    // the benchmark reports files per Wh; per kWh reads like the rest of the app
+    const filesPerKwh = (perWh) => (Number.isFinite(perWh) && perWh > 0 ? String(Math.round(perWh * 1000)) : '—');
 
     const CODEC_LABELS = { h265: 'H.265', av1: 'AV1' };
     const verifyLabel = (mode) => ({
@@ -730,7 +732,9 @@ function createFootageConverterController(options = {}) {
             return node;
         };
         const tested = runs.filter((run) => !run.error && Array.isArray(run.results) && run.results.length);
-        // Header: At once | per codec: Files/min, FPS, Saved
+        // the server measured power during the run: W and files per kWh per level
+        const measured = (run) => run.results.some((entry) => entry.ok && (Number.isFinite(entry.avgW) || Number.isFinite(entry.filesPerWh)));
+        // Header: At once | per codec: Files/min, FPS, Saved (, W, Files/kWh)
         if (elements.benchmarkHead) {
             const head = doc.createElement('tr');
             head.append(cell('th', message('benchmarkParallel', 'At once')));
@@ -738,6 +742,7 @@ function createFootageConverterController(options = {}) {
                 const label = CODEC_LABELS[run.codec] || run.codec;
                 head.append(cell('th', `${label} ${message('benchmarkFilesPerMinute', 'Files/min')}`, 'codec-start'),
                     cell('th', message('benchmarkFps', 'FPS')), cell('th', message('benchmarkSaved', 'Saved')));
+                if (measured(run)) head.append(cell('th', message('benchmarkWatts', 'W')), cell('th', message('benchmarkFilesPerKwh', 'Files/kWh')));
             }
             elements.benchmarkHead.replaceChildren(head);
         }
@@ -748,21 +753,30 @@ function createFootageConverterController(options = {}) {
             for (const run of tested) {
                 const entry = run.results.find((candidate) => candidate.level === level);
                 const best = run.best && run.best.level === level;
+                const efficient = run.efficient && run.efficient.level === level;
+                const energy = measured(run);
                 if (!entry) {
                     row.append(cell('td', '—', 'codec-start'), cell('td', '—'), cell('td', '—'));
+                    if (energy) row.append(cell('td', '—'), cell('td', '—'));
                 } else if (!entry.ok) {
                     const failedCell = cell('td', message('benchmarkFailedRun', 'failed'), 'codec-start');
                     if (entry.failures?.length) failedCell.title = entry.failures.join(', ');
                     row.append(failedCell, cell('td', '—'), cell('td', '—'));
+                    if (energy) row.append(cell('td', '—'), cell('td', '—'));
                 } else {
                     row.append(cell('td', formatRate(entry.filesPerMinute), `codec-start${best ? ' is-best' : ''}`),
                         cell('td', formatRate(entry.fps), best ? 'is-best' : ''),
                         cell('td', Number.isFinite(entry.savedPercent) ? `${entry.savedPercent}%` : '—', best ? 'is-best' : ''));
+                    if (energy) {
+                        row.append(cell('td', Number.isFinite(entry.avgW) ? String(Math.round(entry.avgW)) : '—', efficient ? 'is-efficient' : ''),
+                            cell('td', filesPerKwh(entry.filesPerWh), efficient ? 'is-efficient' : ''));
+                    }
                 }
             }
             return row;
         });
         elements.benchmarkRows?.replaceChildren(...rows);
+        elements.benchmarkTable?.classList?.toggle('has-energy', tested.some(measured));
         setHidden(elements.benchmarkTable, rows.length === 0);
         renderVerifyComparison(runs, doc, cell);
 
@@ -779,6 +793,12 @@ function createFootageConverterController(options = {}) {
                     saved: Number.isFinite(saved) ? `${saved}%` : '—'
                 }));
                 benchmarkPicks.push({ codec: run.codec, level: run.best.level });
+                if (run.efficient && Number.isFinite(run.efficient.filesPerWh)) {
+                    lines.push(message('benchmarkCodecEfficient', '{codec}: most efficient at {count} at once — {rate} files per kWh at {watts} W', {
+                        codec, count: run.efficient.level, rate: filesPerKwh(run.efficient.filesPerWh),
+                        watts: Number.isFinite(run.efficient.avgW) ? Math.round(run.efficient.avgW) : '—'
+                    }));
+                }
             } else if (Array.isArray(run.results) && run.results.length) {
                 const codes = [...new Set(run.results.flatMap((entry) => entry.failures || []))];
                 lines.push(message('benchmarkCodecAllFailed', '{codec}: no setting finished ({codes})', { codec, codes: codes.join(', ') || '—' }));
