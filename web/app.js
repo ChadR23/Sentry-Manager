@@ -490,10 +490,13 @@
   const sensorHot = (s, name) => s.kind === 'temp' && s.value >= (s.chip === 'drivetemp' ? 55 : s.chip === 'nvme' ? 70 : /^(CPU|GPU)/.test(name) ? 90 : 85);
   const SENSORS_SHOWN = 10;
 
-  function sensorsTile(sensors, all) {
+  function sensorsTile(sensors, all, sockets = 1) {
     const rows = [];
     const coreMax = new Map(); // "Core 0" … "Core 11" of a chip: one "Core max" row
-    const multiSocket = (Array.isArray(sensors) ? sensors : []).some((s) => s && s.chip === 'coretemp' && /^Package id [1-9]\d*$/.test(s.label || ''));
+    // the packages go by the CPU tile's numbers when there is one per socket
+    // (a CPU with several dies per socket has more: they keep their numbers)
+    const packages = new Set((Array.isArray(sensors) ? sensors : []).filter((s) => s && s.chip === 'coretemp' && /^Package id \d+$/.test(s.label || '')).map((s) => s.label));
+    const multiSocket = packages.size > 1 && packages.size === sockets;
     for (const s of Array.isArray(sensors) ? sensors : []) {
       if (!s || !fin(s.value)) continue;
       if (s.kind === 'temp' && /^Core \d+$/.test(s.label || '')) {
@@ -567,7 +570,7 @@
     const tiles = [
       cpuTile(s.cpu, pts.cpu, Boolean(day)), gpus, powerTile(s.power, s.encoder, s.price, currency), memoryTile(s.memory),
       storageTile(s.filesystems, s.disks, more.disks), networkTile(s.network, pts.rx, Boolean(day)),
-      sensorsTile(s.sensors, more.sensors), processTile(s.processes, s.encoder)
+      sensorsTile(s.sensors, more.sensors, Number(s.cpu?.sockets) || 1), processTile(s.processes, s.encoder)
     ].join('');
     const alerts = (Array.isArray(s.alerts) ? s.alerts : []).filter((a) => a && a.message).map((a) => `<div class="nd-alert${a.level === 'error' ? ' bad' : ''}"><b>${a.level === 'error' ? 'Problem' : 'Warning'}</b>${esc(a.message)} · <a href="#/settings/logs">Logs</a></div>`).join('');
     const unlock = (Array.isArray(s.unlock) ? s.unlock : []).filter((u) => u && u.adds);

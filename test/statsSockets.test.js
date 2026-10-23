@@ -133,6 +133,27 @@ test('coretemp chips go by the package they name, not by their hwmon number', as
   }
 });
 
+test('two dies per socket (Xeon 9200): coretemp numbers its chips by die, so no socket is given another one\'s temperature', async () => {
+  const chip = (n, hwmon, milli) => M.platformHwmon(`coretemp.${n}`, hwmon, { name: 'coretemp\n', temp1_input: `${milli}\n`, temp1_label: `Package id ${n}\n` });
+  const machine = (phase) => ({
+    ...without(M.dualXeon(phase), /coretemp\.[01]|sys\/class\/hwmon\/hwmon[12]$/),
+    ...chip(0, 'hwmon1', 50000), ...chip(1, 'hwmon2', 74000), ...chip(2, 'hwmon5', 55000), ...chip(3, 'hwmon6', 58000)
+  });
+  const s = setup(machine);
+  try {
+    const snap = await s.run(1);
+    assert.deepEqual(snap.cpu.perSocket.map((x) => [x.socket, x.tempC]), [[0, null], [1, null]], 'which die is on which socket cannot be told');
+    assert.equal(snap.cpu.tempC, 74, 'the hottest die of all');
+    // the Sensors tile keeps the dies' own numbers instead of calling them CPU 1 to 4
+    const { serverBody } = overview();
+    const page = serverBody({ ...sample('dualxeon'), sensors: snap.sensors }, { currency: '$' });
+    assert.match(page, /<dt>CPU package 3<\/dt><dd>58 °C<\/dd>/);
+    assert.doesNotMatch(page, /CPU [34] package/);
+  } finally {
+    s.done();
+  }
+});
+
 test('dual EPYC: a k10temp chip per socket in device order, RAPL per package from the supervisor', async () => {
   const machine = (phase) => ({
     ...without(M.dualXeon(phase), /coretemp\.[01]|sys\/class\/hwmon\/hwmon[12]$|powercap/),

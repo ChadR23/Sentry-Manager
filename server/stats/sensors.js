@@ -121,19 +121,28 @@ class SensorsProvider {
    * Each socket's temperature, in the order of `sockets` (physical ids):
    * coretemp names its package ("Package id 1"); k10temp has one chip per
    * socket, in the order of their devices. null when that cannot be told.
+   * coretemp's number is the kernel's die number, not the physical id: on a
+   * CPU with several dies per socket (Xeon 9200) there are more of them
+   * than sockets and which die sits on which socket cannot be told, so the
+   * packages count only when there is one per socket (in the same order).
    */
   socketTemps(sockets) {
     const out = new Map();
     const unnamed = [];
+    const packages = new Map();
     for (const c of this.cpuChips) {
       const pkgs = c.temps.filter((t) => t.label && /^Package id \d+$/.test(t.label));
       if (!pkgs.length) unnamed.push(c);
       for (const t of pkgs) {
         const n = Number(t.label.slice(11));
-        out.set(n, maxOf([out.get(n), this.chipTemp(c, t)]));
+        packages.set(n, maxOf([packages.get(n), this.chipTemp(c, t)]));
       }
     }
-    if (!out.size && unnamed.length === sockets.length) {
+    if (packages.size === sockets.length) {
+      const order = [...sockets].sort((a, b) => a - b);
+      [...packages.keys()].sort((a, b) => a - b).forEach((n, i) => out.set(order[i], packages.get(n)));
+    }
+    if (!packages.size && unnamed.length === sockets.length) {
       const byDevice = [...unnamed].sort((a, b) => (String(a.dev) < String(b.dev) ? -1 : String(a.dev) > String(b.dev) ? 1 : 0));
       byDevice.forEach((c, i) => out.set(sockets[i], this.chipCpuTemp(c)));
     }
