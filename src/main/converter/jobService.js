@@ -534,6 +534,17 @@ function createConverterJobService(deps) {
     };
   }
 
+  // Adding clips rewrites the whole job file. With batching on, a batch grows
+  // with the job (a quarter of what it already holds), so finding 50,000
+  // clips writes the file a few dozen times instead of hundreds; short of
+  // that, a batch goes out on time only while the workers run short of clips.
+  function discoveryDue(runtime, pendingCount, lastFlush) {
+    if (discoveryBatchSize === 1) return true;
+    if (pendingCount >= Math.max(discoveryBatchSize, Math.floor(runtime.manifest.items.length / 4))) return true;
+    const short = runtime.queue.values.length < concurrencyOf(runtime.manifest) * 2;
+    return short && clock.now() - lastFlush >= discoveryFlushMs;
+  }
+
   async function produce(runtime) {
     runtime.scannerStarted = true;
     const identity = (item) => `${item.relativePath}\u0000${item.sourcePath}`;
@@ -562,7 +573,7 @@ function createConverterJobService(deps) {
         if (typeof deps.skipDiscovered === 'function' && deps.skipDiscovered(runtime.manifest.config, discovered)) continue;
         known.add(key);
         pending.push(createQueueItem(runtime, discovered));
-        if (pending.length >= discoveryBatchSize || clock.now() - lastFlush >= discoveryFlushMs) await flush();
+        if (discoveryDue(runtime, pending.length, lastFlush)) await flush();
       }
       if (!runtime.cancelRequested && !runtime.stopRequested) {
         await flush();

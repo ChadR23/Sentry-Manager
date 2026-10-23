@@ -46,6 +46,7 @@ async function setup({ concurrency = 2, outputMode = 'replace', events = 2, ffmp
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'sm-stall-'));
   const root = path.join(base, 'footage', 'TeslaCam');
   const clips = [];
+  fs.mkdirSync(root, { recursive: true });
   const base0 = await fixtureClips();
   for (let e = 0; e < events; e++) {
     const event = path.join(root, 'SentryClips', `2026-10-20_07-${44 + e}-14`);
@@ -212,6 +213,33 @@ test('a frozen encode is stopped and the job goes on', { skip, timeout: 120_000 
     await env.runtime.shutdown().catch(() => {});
     fs.rmSync(env.base, { recursive: true, force: true });
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('discovery finds every clip past 10,000, so the time remaining covers them all', { skip, timeout: 180_000 }, async () => {
+  const env = await setup({ concurrency: 1, outputMode: 'separate', events: 0 });
+  try {
+    const recent = path.join(env.sourceRoot, 'RecentClips');
+    fs.mkdirSync(recent, { recursive: true });
+    const total = 10_050;
+    for (let n = 0; n < total; n++) {
+      const stamp = new Date(Date.UTC(2026, 9, 1) + n * 60_000).toISOString().slice(0, 19).replace('T', '_').replace(/:/g, '-');
+      fs.writeFileSync(path.join(recent, `${stamp}-front.mp4`), 'x');
+    }
+    const jobId = await env.runtime.service.start(env.config);
+    await env.runtime.service.pause(jobId); // the workers stop; discovery must not
+    let job;
+    for (let i = 0; i < 600; i++) {
+      job = await env.runtime.service.get(jobId);
+      if (job.discoveryComplete) break;
+      await sleep(100);
+    }
+    assert.strictEqual(job.discoveryComplete, true, `discovery stopped at ${job.items.length} clips`);
+    assert.strictEqual(job.items.length, total);
+    await env.runtime.service.cancel(jobId);
+  } finally {
+    await env.runtime.shutdown().catch(() => {});
+    fs.rmSync(env.base, { recursive: true, force: true });
   }
 });
 

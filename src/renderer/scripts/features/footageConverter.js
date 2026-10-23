@@ -237,6 +237,7 @@ function collectElements(root) {
         timingRows: byId('converterTimingRows'),
         reconnectBanner: byId('converterReconnectBanner'),
         cleanupBanner: byId('converterCleanupBanner'),
+        scanNotice: byId('converterScanNotice'),
         errorRows: byId('converterErrorRows'),
         pipeline: byId('converterPipeline'),
         pipelineStages: all('[data-converter-phase]'),
@@ -595,7 +596,13 @@ function createFootageConverterController(options = {}) {
             : activeItem ? message('progressWorking', 'Working on current file') : '—');
         elements.currentProgressFill?.classList?.toggle('is-live', Boolean(activeItem && active));
         setText(elements.elapsed, snapshot ? formatDuration(workingMs(snapshot, now())) : '00:00');
-        setText(elements.countDiscovered, snapshot?.itemCount ?? items.length);
+        // Until the scan reaches the end of the folder, Discovered is a running
+        // total and the time remaining a minimum; say so instead of looking
+        // final.
+        const scanning = active && snapshot?.discoveryComplete === false;
+        const discoveredCount = snapshot?.itemCount ?? items.length;
+        setText(elements.countDiscovered, scanning ? `${discoveredCount}+` : discoveredCount);
+        setHidden(elements.scanNotice, !scanning);
         setText(elements.countCompleted, stateCount('completed'));
         setText(elements.countSkipped, stateCount('skipped'));
         setText(elements.countFailed, stateCount('failed'));
@@ -619,7 +626,8 @@ function createFootageConverterController(options = {}) {
         setText(elements.fps, active && !paused && Number.isFinite(fps) && fps > 0
             ? message('fpsValue', '{fps} fps', { fps: fps >= 100 ? Math.round(fps) : fps.toFixed(1) }) : '—');
         setText(elements.eta, pace.remainingMs === null || snapshot?.discoveryComplete === false && remaining === 0 ? '—'
-            : formatRemaining(pace.remainingMs));
+            : scanning ? message('etaAtLeast', 'at least {time}', { time: formatRemaining(pace.remainingMs) })
+                : formatRemaining(pace.remainingMs));
         renderTimings();
         setHidden(elements.reconnectBanner, snapshot?.state !== 'paused_network');
         setHidden(elements.cleanupBanner, cleanupPendingCount === 0);

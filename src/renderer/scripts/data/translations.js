@@ -209,6 +209,8 @@ const converterEnglish = Object.freeze({
     cleanupPending: "{count} {file} with cleanup pending. Retained artifacts still consume space; hardlinks share disk allocation.",
     cleanupFileSingular: "file",
     cleanupFilePlural: "files",
+    etaAtLeast: "at least {time}",
+    scanNotice: "Still finding clips. Discovered and time remaining keep rising until the scan reaches the end of the folder.",
     summaryGroup: "{count} files · {bytes} video size reduction",
     folderSelectionFailed: "Folder selection failed: {code}",
     errorSourceRequired: "Choose a source folder before starting.",

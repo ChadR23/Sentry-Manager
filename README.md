@@ -114,6 +114,10 @@ copies somewhere else is a choice you make in the Output section.
   converted copies go to a folder you choose (under `/data/converted` or a
   vehicle's share). If the share cannot guarantee a safe replacement, this
   is the only option offered.
+- **Time remaining covers every clip.** The scan finds the whole archive
+  (up to 50,000 clips per job) while the first clips convert; until it
+  reaches the end, Discovered shows a `+` and the time remaining reads
+  "at least".
 - **Long runs don't stall.** A clip that is moved or deleted while a job
   runs (the Recycle Bin, a policy, the car) fails as `source-missing` and
   the job goes on. A share that stops answering pauses the job until it is

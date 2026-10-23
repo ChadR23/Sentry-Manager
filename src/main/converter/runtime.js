@@ -599,7 +599,10 @@ async function createConverterRuntime(options = {}) {
     skipDiscovered: (config, discovered) => auto.isKnown(config, discovered),
     discoveryBatchSize: 200,
     discoveryFlushMs: 250,
-    queueLimit: 10_000,
+    // As many as a job can hold (jobStore's item limit), so discovery is
+    // never held back by the queue: the job knows every clip early and the
+    // time remaining covers the whole archive, not the first 10,000 clips.
+    queueLimit: 50_000,
     // How long ffmpeg may go without reporting progress before it counts
     // as stuck (jobService's default when unset).
     encodeStallMs: options.encodeStallMs,
