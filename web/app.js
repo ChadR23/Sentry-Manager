@@ -506,7 +506,9 @@
       const known = fin(f.totalB) && f.totalB > 0 && fin(f.usedB);
       const used = known ? (f.usedB / f.totalB) * 100 : 0;
       const bits = [known ? sizeOf(f.usedB, f.totalB) : ''];
-      if (f.reachable === false) bits.push('<span class="nd-bad">not reachable</span>');
+      // a share that is not mounted: its folder is on this server's disk, not the share
+      if (f.mounted === false) bits.push('<span class="nd-bad">not connected</span>');
+      else if (f.reachable === false) bits.push('<span class="nd-bad">not reachable</span>');
       else if (fin(f.latencyMs)) bits.push(f.latencyMs > 2000 ? `<span class="nd-warn">answers in ${answer(f.latencyMs)}</span>` : `answers in ${answer(f.latencyMs)}`);
       rows.push(`<div class="nd-disk"><div><b>${esc(f.label || f.path)}</b><span class="muted small">${esc(f.path || '')}</span></div>${known ? ndBar(used, used >= 90) : ''}<span class="small">${bits.filter(Boolean).join(' · ')}</span></div>`);
     }

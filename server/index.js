@@ -235,7 +235,7 @@ async function main() {
   const stats = createStats({
     dataDir: DATA,
     isBusy: () => converterRunning() || benchmarking !== null,
-    readShares: () => [{ label: 'Data volume', path: DATA }, ...vehicles.list().map((v) => ({ label: v.name, path: vehicles.rootOf(v), vehicle: true }))],
+    readShares: () => [{ label: 'Data volume', path: DATA }, ...vehicles.list().map((v) => ({ label: v.name, path: vehicles.rootOf(v), vehicle: true, network: v.source?.type === 'smb' }))],
     // every running ffmpeg (a benchmark's too), to name processes and GPU clients
     activeEncodes: () => host.runtime?.activeEncodes?.() || [],
     ffmpegPath: FFMPEG,

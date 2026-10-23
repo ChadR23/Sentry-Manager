@@ -4,6 +4,9 @@
 // that hangs must never hold up the server: checks are asynchronous, one at
 // a time per share, at most every 10 s. A check that has not answered after
 // 2 s shows as slow (its time keeps growing), after 15 s as unreachable.
+// A network share that is not mounted is only an empty folder on the
+// server's own disk: it shows as not connected, never with that disk's space
+// and answer time.
 
 const path = require('path');
 const { readText, realPath, exists, join } = require('./util');
@@ -79,12 +82,15 @@ class FilesystemsProvider {
       };
       state.label = label;
       state.vehicle = s.vehicle === true;
+      state.network = s.network === true;
       next.set(p, state);
     }
     const changed = [...next.keys()].join('\n') !== [...this.shares.keys()].join('\n');
     this.shares = next;
     this.listedAt = t;
-    if (changed || this.mountsAt === null || t - this.mountsAt >= MOUNTS_EVERY_MS) {
+    // with a network share, at every check: a share mounted or lost shows within 10 s
+    const every = [...this.shares.values()].some((s) => s.network) ? CHECK_EVERY_MS : MOUNTS_EVERY_MS;
+    if (changed || this.mountsAt === null || t - this.mountsAt >= every) {
       this.mounts = parseMountinfo(readText(join(this.procRoot, String(this.appPid), 'mountinfo')));
       this.mountsAt = t;
       for (const s of this.shares.values()) {
@@ -93,11 +99,19 @@ class FilesystemsProvider {
         s.source = m && m.source !== 'none' ? m.source : null;
         s.disk = m ? this.diskOf(m.majmin) : null;
         s.smbVersion = m && /^(cifs|smb3)$/.test(m.fsType) ? (/(?:^|,)vers=([\d.]+)/.exec(m.superOpts) || [])[1] || null : null;
+        const mounted = s.network ? Boolean(m && /^(cifs|smb3)$/.test(m.fsType)) : null;
+        // not mounted (any more): nothing measured so far is the share's
+        if (mounted === false && s.mounted !== false) Object.assign(s, { totalB: null, usedB: null, freeB: null, latencyMs: null, reachable: false });
+        s.mounted = mounted;
       }
     }
   }
 
   check(s) {
+    if (s.mounted === false) {
+      s.lastCheck = this.now();
+      return;
+    }
     s.pendingSince = this.now();
     const target = s.path;
     (async () => {
@@ -112,6 +126,7 @@ class FilesystemsProvider {
       }
       return { latency, sfs };
     })().then(({ latency, sfs }) => {
+      if (s.mounted === false) return; // lost while checking: the folder under it answered
       s.reachable = true;
       s.latencyMs = Math.max(0, Math.round(latency));
       if (sfs) {
@@ -145,7 +160,8 @@ class FilesystemsProvider {
       }
       out.push({
         label: s.label, path: s.path, vehicle: s.vehicle === true, totalB: s.totalB, usedB: s.usedB, freeB: s.freeB, latencyMs, reachable,
-        fsType: s.fsType || null, source: s.source || null, disk: s.disk || null, smbVersion: s.smbVersion || null
+        fsType: s.fsType || null, source: s.source || null, disk: s.disk || null, smbVersion: s.smbVersion || null,
+        mounted: s.mounted ?? null
       });
     }
     return out;
