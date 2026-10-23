@@ -158,7 +158,8 @@ function confirmRequired() {
 }
 
 async function main() {
-  const logger = new Logger({ level: process.env.LOG_LEVEL || 'info' });
+  const logger = new Logger({ level: process.env.LOG_LEVEL || 'info', file: path.join(DATA, 'logs', 'manager.log') });
+  logger.captureConsole();
   const log = logger.scope('server');
   fs.mkdirSync(DATA, { recursive: true });
   const buildInfo = readBuildInfo();
@@ -409,6 +410,20 @@ async function main() {
     if (!pem) throw new HttpError(404, 'This server uses its own certificate; there is no local certificate authority.');
     res.writeHead(200, { 'Content-Type': 'application/x-x509-ca-cert', 'Content-Disposition': 'attachment; filename="sentry-six-manager-ca.crt"', 'Cache-Control': 'no-store' });
     res.end(pem);
+    return undefined;
+  });
+
+  // Settings > Logs: the newest lines first; problems (warnings and errors)
+  // unless everything is asked for. The download is the whole kept file.
+  r.add('GET', '/api/logs', (req, res, { query }) => ({
+    lines: logger.recent(Math.min(1000, Number(query.limit) || 300), { minLevel: query.level === 'all' ? 'debug' : 'warn' }).reverse()
+  }));
+  r.add('GET', '/api/logs/download', (req, res) => {
+    res.writeHead(200, {
+      'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
+      'Content-Disposition': `attachment; filename="sentry-six-manager-${new Date().toISOString().slice(0, 10)}.log"`
+    });
+    res.end(logger.fileText());
     return undefined;
   });
 
@@ -997,6 +1012,7 @@ async function main() {
     // the supervisor renewed the certificate
     process.on('message', (m) => {
       if (m?.type === 'shutdown') return shutdown('supervisor asked');
+      if (m?.type === 'supervisor-log') return logger.write(m.level === 'warn' || m.level === 'error' ? m.level : 'info', 'supervisor', String(m.message || '').slice(0, 4000), { echo: false });
       if (m?.type !== 'tls-updated' || !tlsSource || !httpsServer) return;
       tlsSource.load().then((x) => httpsServer.setSecureContext({ key: x.key, cert: x.cert }), (err) => log.warn(`Reloading the certificate failed: ${err.message}`));
     });

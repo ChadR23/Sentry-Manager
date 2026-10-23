@@ -473,3 +473,28 @@ test('Settings > Updates: a build without an image to check says so and checks n
     await fsp.rm(dir, { recursive: true, force: true });
   }
 });
+
+test('Settings > Logs: problems are kept in the data folder and shown and downloaded only after sign-in', async () => {
+  const dir = await tmp();
+  await makeFootage(path.join(dir, 'footage'));
+  // a problem from before this start (a crash, an update)
+  fs.mkdirSync(path.join(dir, 'data', 'logs'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'data', 'logs', 'manager.log'), '2026-10-23T01:00:00.000Z WARN  [converter] Verification failed: SentryClips/a/back.mp4 duration-mismatch {"deltaUs":41000}\n');
+  const s = await startServer(dir);
+  try {
+    assert.equal((await s.call('GET', '/api/logs')).status, 401);
+    assert.equal((await s.call('GET', '/api/logs/download')).status, 401);
+    await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
+    const problems = (await s.call('GET', '/api/logs')).data.lines;
+    assert.ok(problems.some((l) => l.scope === 'converter' && l.level === 'warn' && /duration-mismatch/.test(l.message)), 'the earlier problem is listed');
+    assert.ok(problems.every((l) => l.level === 'warn' || l.level === 'error'), 'problems only');
+    const res = await s.call('GET', '/api/logs/download', undefined, { raw: true });
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get('content-type'), /^text\/plain/);
+    assert.match(res.headers.get('content-disposition'), /^attachment; filename="sentry-six-manager-\d{4}-\d{2}-\d{2}\.log"$/);
+    assert.match(await res.text(), /Verification failed: SentryClips\/a\/back\.mp4/);
+  } finally {
+    await s.stop();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});

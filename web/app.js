@@ -732,7 +732,7 @@
     const [settings, upd, sys, sec] = await Promise.all([api('/api/settings'), api('/api/updates'), api('/api/system').catch(() => null), api('/api/security').catch(() => null)]);
     if (seq !== renderSeq) return; // the user moved on while this loaded
     state.system = sys || state.system;
-    const sections = [['vehicles', 'Vehicles'], ['updates', 'Updates'], ['account', 'Account'], sec && ['security', 'Security'], sys && ['system', 'System']].filter(Boolean);
+    const sections = [['vehicles', 'Vehicles'], ['updates', 'Updates'], ['account', 'Account'], sec && ['security', 'Security'], sys && ['system', 'System'], ['logs', 'Logs']].filter(Boolean);
     const show = editing || !sections.some(([k]) => k === sub) ? 'vehicles' : sub;
     let html = head('Your archive workspace', 'Settings');
     html += `<nav class="set-tabs" aria-label="Settings sections">${sections.map(([k, label]) => `<button type="button" data-tab="${k}">${label}</button>`).join('')}</nav>`;
@@ -763,11 +763,33 @@
         <dt>Data volume free</dt><dd>${bytes(sys.dataFree)}</dd>
         <dt>Server time zone</dt><dd>${esc(sys.timezone)}</dd></dl></div>`;
     }
+    html += `<div class="card" data-section="logs"><div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap"><h2>Logs</h2>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><label class="check small"><input type="checkbox" id="log-all"> Everything</label>
+      <button type="button" class="btn sm" id="log-refresh">Refresh</button><a class="btn sm" href="/api/logs/download" download>Download</a></div></div>
+      <p class="muted small" style="margin-top:8px">Warnings and errors from the server, the converter and the container, newest first. Kept in the data folder (<code>logs/manager.log</code>), so nothing needs a shell on the server.</p>
+      <div class="logbox" id="log-list" aria-live="polite"><p class="muted small">Loading…</p></div></div>`;
     page.innerHTML = html;
     wireSettingsTabs(show, editing ? `#/settings/${sub}` : '#/settings', seq);
     wireSettings(editing);
     if (sec) wireSecurity(sec);
+    wireLogs(seq);
   };
+
+  function wireLogs(seq) {
+    const list = page.querySelector('#log-list');
+    const all = page.querySelector('#log-all');
+    const load = async () => {
+      const out = await api(`/api/logs?level=${all.checked ? 'all' : 'problems'}`).catch((err) => ({ error: err.message }));
+      if (seq !== renderSeq) return;
+      if (out.error) { list.innerHTML = `<p class="muted small">Could not load the log: ${esc(out.error)}</p>`; return; }
+      list.innerHTML = out.lines.length
+        ? out.lines.map((l) => `<div class="logline ${esc(l.level)}"><span class="logwhen">${esc(when(l.at))}</span><span class="loglevel">${esc(l.level)}</span><span class="logscope">${esc(l.scope)}</span><span class="logmsg">${esc(l.message)}</span></div>`).join('')
+        : `<p class="muted small">${all.checked ? 'Nothing logged yet.' : 'No warnings or errors. Tick Everything to see all activity.'}</p>`;
+    };
+    all.onchange = load;
+    page.querySelector('#log-refresh').onclick = load;
+    load();
+  }
 
   // Phones show one Settings section at a time, picked from the tabs (wider
   // screens hide the tabs and show every section). Switching keeps what was

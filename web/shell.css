@@ -230,6 +230,17 @@ details.more p { margin-top: 10px; color: var(--text-2); max-width: 760px; }
 .kv { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 8px 18px; font-size: 13.5px; }
 .kv dt { color: var(--muted); }
 .kv dd { margin: 0; word-break: break-word; }
+/* Settings > Logs */
+.logbox { margin-top: 14px; max-height: 480px; overflow: auto; border: 1px solid var(--border); border-radius: 12px; background: var(--panel-2); padding: 6px 0; }
+.logbox > p { padding: 10px 14px; }
+.logline { display: grid; grid-template-columns: auto auto auto minmax(0, 1fr); gap: 4px 12px; padding: 7px 14px; border-bottom: 1px solid var(--border); font-size: 13px; align-items: baseline; }
+.logline:last-child { border-bottom: 0; }
+.logwhen { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.loglevel { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-2); }
+.logline.warn .loglevel { color: var(--warn); }
+.logline.error .loglevel { color: var(--danger, #ff6b6b); }
+.logscope { color: var(--info); font-family: var(--mono); font-size: 12px; }
+.logmsg { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* embedded Studio */
 .frame-wrap { position: relative; margin: -22px -32px -64px -48px; height: 100vh; height: 100dvh; }
@@ -306,6 +317,8 @@ html.reduce-effects *, html.reduce-effects *::before { transition: none !importa
   .day-actions { grid-column: 1 / -1; flex-direction: row; flex-wrap: wrap; }
   .day-actions .btn { flex: 1 1 auto; }
   .day .recs { padding-left: 0; }
+  .logline { grid-template-columns: auto auto minmax(0, 1fr); }
+  .logmsg { grid-column: 1 / -1; }
   .day .rec { padding: 12px; }
   .day .rec-top { grid-template-columns: 22px minmax(0, 1fr); gap: 10px 12px; align-items: start; }
   .day .rec-top .thumb { width: 100%; max-width: 260px; height: auto; aspect-ratio: 16 / 10; }

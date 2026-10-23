@@ -44,8 +44,16 @@ let child = null;
 let stopping = false;
 let tls = null;
 
-const log = (msg) => console.log(`[supervisor] ${msg}`);
-const warn = (msg) => console.error(`[supervisor] ${msg}`);
+// Also handed to the app, so mount and certificate problems show in
+// Settings > Logs (lines from before the app started wait for it).
+const early = [];
+function forward(level, msg) {
+  const line = { type: 'supervisor-log', level, message: String(msg).slice(0, 4000) };
+  if (child?.connected) child.send(line, () => {});
+  else if (early.length < 100) early.push(line);
+}
+const log = (msg) => { console.log(`[supervisor] ${msg}`); forward('info', msg); };
+const warn = (msg) => { console.error(`[supervisor] ${msg}`); forward('warn', msg); };
 
 /** Real directory (not a symlink) at exactly this path? */
 function isPlainDir(p) {
@@ -256,8 +264,10 @@ function launch() {
     warn('PUID is 0: the app runs as root. Set PUID/PGID to a normal user id so a bug in the web app cannot become root.');
   }
   child = spawn(cmd, args, opts);
+  for (const line of early.splice(0)) child.send(line, () => {});
   if (isRoot) {
-    serveMountRequests(child, createLocalMounter({ footageRoot: FOOTAGE_ROOT, credDir: ROOT_RUN, uid: separate ? PUID : 0, gid: separate ? PGID : 0 }), console);
+    serveMountRequests(child, createLocalMounter({ footageRoot: FOOTAGE_ROOT, credDir: ROOT_RUN, uid: separate ? PUID : 0, gid: separate ? PGID : 0 }),
+      { log: (m) => log(String(m).replace(/^\[supervisor\]\s*/, '')), error: (m) => warn(String(m).replace(/^\[supervisor\]\s*/, '')) });
     child.on('message', (msg) => {
       if (!msg || msg.type !== 'tls-hostnames' || typeof msg.requestId !== 'string' || !tls) return;
       (async () => {

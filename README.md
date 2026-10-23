@@ -343,7 +343,14 @@ authority's key.
 **An audit trail.** Sign-ins, password confirmations, vehicle changes,
 certificate names and permanent deletions are logged with who did them and
 from which address, never with a password. Look for `[audit]` in
-`docker logs sentry-six-manager`.
+`docker logs sentry-six-manager` or in Settings > Logs.
+
+**Logs in the app.** Settings > Logs lists the warnings and errors from the
+server, the converter (a clip that fails verification, with what was
+measured) and the container's mount helper, newest first, with a Download
+button. They are kept in the data folder (`logs/manager.log`, at most about
+10 MB with the previous file), survive restarts, and anything that looks like
+a password is masked. No shell on the server is needed.
 
 ## Settings
 
