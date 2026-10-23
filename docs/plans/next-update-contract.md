@@ -210,3 +210,13 @@ on jobs. `server/supervisor.js`: reads RAPL every 2 s while the app asks
 only fixed paths under `/sys/class/powercap`, read-only. README +
 docker-compose.yml comments for the optional lines (RAPL read-only bind,
 `pid: host`).
+
+## 5. Automatic conversion at off-peak (owner's request, integrator)
+
+Automatic conversion's time window gains a choice: fixed hours (today) or
+"Off-peak, from your electricity plan": the window is open while the
+cheapest rate of the time-of-use plan is in force
+(`server/powerPrice.js isCheapest()`, passed down to `autoConvert.js` as
+`isCheapNow(ms) -> true|false|null`; null = no plan = any time). Stored as
+`window: { follow: 'off-peak' }`. Pauses and resumes exactly like the fixed
+window does. Settings UI in the automatic conversion section of the Encoder.

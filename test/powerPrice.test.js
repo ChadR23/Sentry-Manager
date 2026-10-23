@@ -5,7 +5,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { parsePowerSettings, priceAt, rateNameAt, PriceError } = require('../server/powerPrice');
+const { parsePowerSettings, priceAt, rateNameAt, isCheapest, PriceError } = require('../server/powerPrice');
 
 process.env.TZ = 'UTC';
 const at = (iso) => Date.parse(`${iso}Z`);
@@ -53,4 +53,11 @@ test('bad input is refused with a readable reason', () => {
   bad({ mode: 'tou', rates: [{ label: 'Peak', price: 0.4, days: [1], from: '07:00', to: '07:00' }] }, /same time/);
   bad({ mode: 'tou', rates: [] }, /Add a rate/);
   bad({ mode: 'tou', rates: Array.from({ length: 13 }, () => ({ price: 1, days: [1], from: '01:00', to: '02:00' })) }, /At most 12/);
+});
+
+test('off-peak only: true while the cheapest rate is in force, null without a plan', () => {
+  assert.equal(isCheapest(plan, at('2026-10-24T02:00:00')), true, 'overnight off-peak');
+  assert.equal(isCheapest(plan, at('2026-10-23T12:00:00')), false, 'other hours cost more');
+  assert.equal(isCheapest(plan, at('2026-10-23T17:00:00')), false, 'peak');
+  assert.equal(isCheapest(parsePowerSettings({ pricePerKwh: 0.2 }), at('2026-10-23T17:00:00')), null);
 });

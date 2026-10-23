@@ -79,4 +79,18 @@ function rateNameAt(settings, ms) {
   return rateAt(settings, ms)?.label || (Number.isFinite(settings.defaultPrice) ? 'Other hours' : null);
 }
 
-module.exports = { parsePowerSettings, priceAt, rateAt, rateNameAt, PriceError, MAX_RATES };
+/**
+ * True while the cheapest price of a time-of-use plan is in force (for
+ * automatic conversion "only at off-peak"); null without such a plan, so
+ * the caller can treat it as "any time".
+ */
+function isCheapest(settings, ms) {
+  if (settings?.mode !== 'tou') return null;
+  const prices = (settings.rates || []).map((r) => r.price);
+  if (Number.isFinite(settings.defaultPrice)) prices.push(settings.defaultPrice);
+  if (!prices.length) return null;
+  const now = priceAt(settings, ms);
+  return now !== null && now <= Math.min(...prices) + 1e-9;
+}
+
+module.exports = { parsePowerSettings, priceAt, rateAt, rateNameAt, isCheapest, PriceError, MAX_RATES };
