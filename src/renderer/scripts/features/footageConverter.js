@@ -498,6 +498,9 @@ function createFootageConverterController(options = {}) {
     // number would use (defaultDevice), so that path stays exactly the same.
     let laneDevices = null; // [{ id, kind, name, label, encoders, ... }], CPU last
     let defaultDevice = null;
+    let defaultDevices = null; // codec -> the device a job without lanes uses for it
+    // the rows are still the first-time ones (nothing remembered or set)
+    let lanesUntouched = false;
     const laneCounts = new Map(); // device id -> the owner's number (0 = Off)
     const laneRows = new Map(); // device id -> { row, output, minus, plus, note }
     let syncedLanes = null;
@@ -514,13 +517,38 @@ function createFootageConverterController(options = {}) {
         return selected(elements.codecOptions, 'converterCodec', 'h265');
     }
 
+    // The GPU a job without lanes encodes a codec on (AV1 may use another
+    // GPU than H.265); null when the server cannot tell
+    function defaultFor(codec) {
+        return defaultDevices && Object.prototype.hasOwnProperty.call(defaultDevices, codec) ? defaultDevices[codec] : defaultDevice;
+    }
+
+    function jobActive() {
+        return Boolean(snapshot?.id && ACTIVE_STATES.has(snapshot.state));
+    }
+
+    // The codec the rows are for: the running job's while there is one (the
+    // codec choice can be clicked meanwhile; it is for the next job)
+    function laneCodec() {
+        const codec = snapshot?.config?.codec;
+        return jobActive() && CODEC_LABELS[codec] ? codec : selectedCodec();
+    }
+
+    // A row can be set when its device can encode the codec, or when the
+    // running job converts on it already: it is never dropped from the job
+    // because a test encode said otherwise
+    function laneSupported(device) {
+        if (deviceEncoder(device, laneCodec()) !== null) return true;
+        return jobActive() && Boolean(lanesOfConfig(snapshot.config)?.some((lane) => lane.device === device.id));
+    }
+
     function laneLabel(id) {
         return laneDevices?.find((device) => device.id === id)?.label || id;
     }
 
     // What a row really sends: 0 while its device can't encode the codec
     function laneCount(device) {
-        return deviceEncoder(device, selectedCodec()) === null ? 0 : laneCounts.get(device.id) ?? 0;
+        return laneSupported(device) ? laneCounts.get(device.id) ?? 0 : 0;
     }
 
     function activeLanes() {
@@ -550,7 +578,8 @@ function createFootageConverterController(options = {}) {
         const known = validLanes(config?.lanes).filter((lane) => laneDevices?.some((device) => device.id === lane.device));
         if (known.length) return known.map((lane) => ({ device: lane.device, concurrency: lane.concurrency }));
         const concurrency = normalizeConcurrency(config?.concurrency);
-        return concurrency !== null && defaultDevice ? [{ device: defaultDevice, concurrency }] : null;
+        const device = defaultFor(CODEC_LABELS[config?.codec] ? config.codec : selectedCodec());
+        return concurrency !== null && device ? [{ device, concurrency }] : null;
     }
 
     // Sent with Start and the automatic settings: `lanes` only when the rows
@@ -560,8 +589,21 @@ function createFootageConverterController(options = {}) {
         const concurrency = lanesSum(lanes);
         if (concurrency === 0) throw apiError('LANES_EMPTY');
         if (concurrency > MAX_CONCURRENCY) throw apiError('LANES_TOO_MANY');
-        if (lanes.length === 1 && lanes[0].device === defaultDevice) return { concurrency };
+        if (lanes.length === 1 && lanes[0].device === defaultFor(selectedCodec())) return { concurrency };
         return { concurrency, lanes };
+    }
+
+    // First time (nothing remembered): the codec's default GPU gets the
+    // single number and the rest are Off. A default GPU that can't encode
+    // the codec (or none known) gives way to the first GPU that can.
+    function firstTimeLanes() {
+        const codec = selectedCodec();
+        const gpus = laneDevices.filter((device) => device.kind !== 'cpu' && device.id !== 'cpu');
+        const able = (id) => laneDevices.some((device) => device.id === id && deviceEncoder(device, codec) !== null);
+        const preferred = defaultFor(codec);
+        const first = preferred && able(preferred) ? preferred
+            : gpus.find((device) => deviceEncoder(device, codec) !== null)?.id ?? preferred ?? gpus[0].id;
+        for (const device of laneDevices) laneCounts.set(device.id, device.id === first ? storedConcurrency() ?? DEFAULT_CONCURRENCY : 0);
     }
 
     function storedLanes() {
@@ -577,6 +619,7 @@ function createFootageConverterController(options = {}) {
     }
 
     function rememberLanes() {
+        lanesUntouched = false;
         try {
             const kept = Object.fromEntries(storedLanes() || []);
             storage?.setItem?.(LANES_STORAGE_KEY, JSON.stringify({ ...kept, ...Object.fromEntries(laneCounts) }));
@@ -592,12 +635,12 @@ function createFootageConverterController(options = {}) {
 
     function renderLanes() {
         if (!lanesMode()) return;
-        const codec = selectedCodec();
+        const codec = laneCodec();
         const total = lanesSum(activeLanes());
         for (const device of laneDevices) {
             const parts = laneRows.get(device.id);
             if (!parts) continue;
-            const supported = deviceEncoder(device, codec) !== null;
+            const supported = laneSupported(device);
             const count = laneCount(device);
             setText(parts.output, count === 0 ? message('laneOff', 'Off') : String(count));
             setText(parts.note, supported ? encoderSummary(device)
@@ -653,7 +696,7 @@ function createFootageConverterController(options = {}) {
 
     function stepLane(id, delta) {
         const device = laneDevices?.find((entry) => entry.id === id);
-        if (!device || deviceEncoder(device, selectedCodec()) === null) return;
+        if (!device || !laneSupported(device)) return;
         const current = laneCount(device);
         const total = lanesSum(activeLanes());
         const next = Math.min(MAX_CONCURRENCY, Math.max(0, current + delta));
@@ -678,6 +721,7 @@ function createFootageConverterController(options = {}) {
         const key = lanesKey(lanes);
         if (!force && (key === syncedLanes || requestedLanes !== null || requestedConcurrency !== null || stepperFocused())) return;
         syncedLanes = key;
+        lanesUntouched = false;
         for (const device of laneDevices) laneCounts.set(device.id, lanes.find((lane) => lane.device === device.id)?.concurrency ?? 0);
         renderLanes();
     }
@@ -703,7 +747,7 @@ function createFootageConverterController(options = {}) {
             try {
                 // decided now, after the changes before it have landed
                 const jobLanes = snapshot?.id === jobId && validLanes(snapshot.config?.lanes).length > 0;
-                const plain = !jobLanes && lanes.length === 1 && lanes[0].device === defaultDevice;
+                const plain = !jobLanes && lanes.length === 1 && lanes[0].device === defaultFor(snapshot?.config?.codec);
                 let next;
                 if (plain && typeof api.setConverterConcurrency === 'function') next = unwrap(await api.setConverterConcurrency(jobId, total));
                 else if (typeof api.setConverterLanes === 'function') next = unwrap(await api.setConverterLanes(jobId, lanes));
@@ -737,15 +781,17 @@ function createFootageConverterController(options = {}) {
         const devices = [...gpus, cpu];
         const labels = deviceLabels(devices);
         laneDevices = devices.map((device, index) => ({ ...device, label: labels[index] }));
-        defaultDevice = laneDevices.some((device) => device.id === answer.defaultDevice) ? answer.defaultDevice : null;
+        const known = (id) => (laneDevices.some((device) => device.id === id) ? id : null);
+        defaultDevice = known(answer.defaultDevice);
+        defaultDevices = answer.defaultDevices && typeof answer.defaultDevices === 'object'
+            ? Object.fromEntries(Object.keys(CODEC_LABELS).map((codec) => [codec, known(answer.defaultDevices[codec])]))
+            : null;
         // first time: the default GPU gets the single number, the rest Off
         const stored = storedLanes();
         const remembered = stored && laneDevices.some((device) => stored.has(device.id));
-        const first = defaultDevice ?? gpus[0].id;
-        for (const device of laneDevices) {
-            laneCounts.set(device.id, remembered ? stored.get(device.id) ?? 0
-                : device.id === first ? storedConcurrency() ?? DEFAULT_CONCURRENCY : 0);
-        }
+        if (remembered) for (const device of laneDevices) laneCounts.set(device.id, stored.get(device.id) ?? 0);
+        else firstTimeLanes();
+        lanesUntouched = !remembered;
         buildLanes();
         setHidden(elements.concurrency, true);
         updateConcurrencyCustomVisibility();
@@ -1365,7 +1411,7 @@ function createFootageConverterController(options = {}) {
         rememberConcurrency(pick.level);
         // one GPU's result with rows per GPU: it was measured on the default GPU
         if (lanesMode()) {
-            const target = defaultDevice ?? laneDevices[0].id;
+            const target = defaultFor(pick.codec) ?? laneDevices[0].id;
             for (const device of laneDevices) laneCounts.set(device.id, device.id === target ? pick.level : 0);
             rememberLanes();
         }
@@ -1755,8 +1801,14 @@ function createFootageConverterController(options = {}) {
                 }
             });
         }
-        // which GPUs can encode the codec decides which rows can be set
-        for (const option of elements.codecOptions || []) option.addEventListener?.('change', renderLanes);
+        // which GPUs can encode the codec decides which rows can be set; rows
+        // nobody has set yet follow the codec's default GPU
+        for (const option of elements.codecOptions || []) {
+            option.addEventListener?.('change', () => {
+                if (lanesMode() && lanesUntouched && !jobActive()) firstTimeLanes();
+                renderLanes();
+            });
+        }
         elements.concurrency?.addEventListener?.('change', () => {
             updateConcurrencyCustomVisibility();
             if (customConcurrencySelected()) elements.concurrencyCustom?.focus?.();

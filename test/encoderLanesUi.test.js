@@ -324,6 +324,74 @@ test('a GPU that can\'t encode the codec says so, is Off and disabled, and is ne
   assert.ok(!('lanes' in config), 'the Arc alone again: the plain number');
 });
 
+test('during a run the rows are for the running job\'s codec, and a GPU it converts on is never dropped', async () => {
+  const lanes = [{ device: UHD.id, concurrency: 5 }, { device: ARC.id, concurrency: 3 }];
+  // an H.265 job on the UHD 770 and the Arc; AV1 clicked meanwhile (that is for the next job)
+  const p = await page({ job: running({ codec: 'h265', lanes, concurrency: 8 }) });
+  assert.deepEqual([p.lane(ARC.id).count, p.lane(UHD.id).count], ['3', '5']);
+  p.elements.codecOptions[0].checked = false;
+  p.elements.codecOptions[1].checked = true;
+  p.elements.codecOptions[1].fire('change');
+  assert.equal(p.lane(UHD.id).count, '5', 'still the running job\'s rows');
+  assert.equal(p.lane(UHD.id).plus.disabled, false);
+  p.lane('cpu').plus.click();
+  await settle();
+  assert.deepEqual(p.sent.lanes, [['job-1', [{ device: ARC.id, concurrency: 3 }, { device: UHD.id, concurrency: 5 }, { device: 'cpu', concurrency: 1 }]]],
+    'the UHD keeps its 5');
+
+  // the device list says the UHD can't (its test encode failed while it was busy), yet the job converts on it
+  const busy = { ...UHD, encoders: { h265: null, av1: null } };
+  const q = await page({ devices: { devices: [ARC, busy, CPU], defaultDevice: ARC.id }, job: running({ codec: 'h265', lanes, concurrency: 8 }) });
+  assert.equal(q.lane(UHD.id).count, '5');
+  q.lane(ARC.id).plus.click();
+  await settle();
+  assert.deepEqual(q.sent.lanes, [['job-1', [{ device: ARC.id, concurrency: 4 }, { device: UHD.id, concurrency: 5 }]]]);
+});
+
+test('the default GPU is per codec: AV1 goes to the GPU a job without lanes uses for AV1, sent as the plain number', async () => {
+  // an Arc A380 and a T400 (NVENC: H.265 only); without lanes H.265 runs on the T400 and AV1 on the Arc
+  const T400 = { id: 'pci:0000:01:00.0', kind: 'nvidia', vendor: 'nvidia', name: 'NVIDIA T400', node: null, index: 0, pci: '0000:01:00.0', encoders: { h265: 'hevc_nvenc', av1: null } };
+  const devices = { devices: [ARC, T400, CPU], defaultDevice: T400.id, defaultDevices: { h265: T400.id, av1: ARC.id } };
+  const pick = (p, index) => {
+    p.elements.codecOptions.forEach((option, i) => { option.checked = i === index; });
+    p.elements.codecOptions[index].fire('change');
+  };
+  const p = await page({ devices, storage: makeStorage({ converterConcurrency: '3' }) });
+  assert.deepEqual([p.lane(ARC.id).count, p.lane(T400.id).count], ['Off', '3'], 'H.265: the T400');
+  // nothing set by hand yet: the number follows the codec's default GPU
+  pick(p, 1);
+  assert.deepEqual([p.lane(ARC.id).count, p.lane(T400.id).count], ['3', 'Off'], 'AV1: the Arc');
+  let config = await p.start();
+  assert.equal(config.codec, 'av1');
+  assert.equal(config.concurrency, 3);
+  assert.ok(!('lanes' in config), 'today\'s path for AV1');
+  // set by hand: the rows stay as they are
+  const q = await page({ devices, storage: makeStorage({ converterConcurrency: '3' }) });
+  pick(q, 1);
+  q.lane('cpu').plus.click();
+  pick(q, 0);
+  assert.deepEqual([q.lane(ARC.id).count, q.lane(T400.id).count, q.lane('cpu').count], ['3', 'Off', '1']);
+  const h265 = await page({ devices, storage: makeStorage({ converterConcurrency: '3' }) });
+  assert.ok(!('lanes' in await h265.start()), 'H.265 on the T400 alone: the plain number');
+
+  // the last job was AV1 without lanes: its number is on the Arc
+  const lastConfig = { sourceRoot: '/footage/model3', destinationRoot: '/out', codec: 'av1', profileId: 'balanced', outputMode: 'separate',
+    includedGroups: ['RecentClips'], verifyMode: 'quick', concurrency: 4 };
+  const last = await page({ devices, job: { id: 'job-1', revision: 1, state: 'completed', config: lastConfig, items: [] } });
+  assert.deepEqual([last.lane(ARC.id).count, last.lane(T400.id).count], ['4', 'Off']);
+  config = await last.start();
+  assert.equal(config.codec, 'av1');
+  assert.ok(!('lanes' in config));
+  assert.equal(config.concurrency, 4);
+
+  // a default GPU that can't encode the codec (a GT 1030 without NVENC next to an RTX): the first one that can
+  const GT = { ...T400, name: 'NVIDIA GeForce GT 1030', encoders: { h265: null, av1: null } };
+  const RTX = { ...T400, id: 'pci:0000:02:00.0', pci: '0000:02:00.0', index: 1, name: 'NVIDIA GeForce RTX 3060', encoders: { h265: 'hevc_nvenc', av1: null } };
+  const nv = await page({ devices: { devices: [GT, RTX, CPU], defaultDevice: null, defaultDevices: { h265: null, av1: null } } });
+  assert.deepEqual([nv.lane(GT.id).count, nv.lane(RTX.id).count], ['Off', '5']);
+  assert.deepEqual((await nv.start()).lanes, [{ device: RTX.id, concurrency: 5 }]);
+});
+
 test('Start refused with DEVICE_UNSUPPORTED names the GPU and the codec', async () => {
   const p = await page({ startError: { code: 'DEVICE_UNSUPPORTED', details: { device: 'Intel UHD Graphics 770', codec: 'av1' } } });
   await p.start();
