@@ -60,8 +60,10 @@ services:
     # ---- AMD (dGPU or APU) / Intel GPU: uncomment
     # devices:
     #   - /dev/dri:/dev/dri
-    # The converter uses /dev/dri/renderD128. With several GPUs, map the one
-    # you want to that name instead, e.g. - /dev/dri/renderD129:/dev/dri/renderD128
+    # Pass all of /dev/dri. With several GPUs, Encoder > Parallel conversions
+    # shows one row per GPU (how many at once on each). Mapping one GPU to
+    # /dev/dri/renderD128 (- /dev/dri/renderD129:/dev/dri/renderD128) still
+    # works but is no longer needed.
 
     # ---- NVIDIA GPU (needs the NVIDIA Container Toolkit): uncomment
     # deploy:

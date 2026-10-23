@@ -176,9 +176,23 @@ ffmpeg is [jellyfin-ffmpeg](https://github.com/jellyfin/jellyfin-ffmpeg),
 which the Jellyfin team keeps on the current FFmpeg release with its own
 VA-API drivers. AMD's AMF encoder needs AMD's proprietary driver, which
 containers don't have, so AMD cards and APUs use VA-API; AV1 needs RDNA3 or
-newer. VA-API uses `/dev/dri/renderD128`; with several GPUs, map the one you
-want to that name (`- /dev/dri/renderD129:/dev/dri/renderD128`).
-**Settings → System** lists the GPUs the container can see.
+newer. **Settings → System** lists the GPUs the container can see.
+
+### Several GPUs or CPUs
+
+Pass the whole of `/dev/dri` (and, for NVIDIA, every GPU in the `deploy:`
+block). With two or more GPUs, **Parallel conversions** in the Encoder shows
+one row per GPU plus a CPU row: set how many clips each one converts at
+once, 0 for Off. Each GPU takes the next clip whenever it is free, so a
+faster card simply converts more of them, and the numbers can be changed
+while a job runs. A GPU that cannot encode the chosen codec (AV1 on an
+Intel UHD 770, say) shows "Can't encode AV1". With one GPU nothing changes.
+
+The benchmark tests every GPU on its own, one after another, and shows each
+GPU's results separately, with a button to use each GPU's best setting at
+once. GPUs are told apart by their PCI slot, so a reboot that numbers them
+differently changes nothing; the old trick of mapping one GPU to
+`/dev/dri/renderD128` still works but is no longer needed.
 
 ## Recycle Bin and policies
 
