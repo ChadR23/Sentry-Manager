@@ -210,13 +210,28 @@
   // ---------- pages ----------
   const pages = {};
 
+  /**
+   * Redraws part of the page without moving it. Safari (WebKit) shifts the
+   * scroll position when the content under it is replaced, even by the same
+   * content, so the Overview jumped at every poll and every live update;
+   * the position is put back before anything is painted.
+   */
+  function keepScroll(draw) {
+    const se = document.scrollingElement;
+    const top = se ? se.scrollTop : 0;
+    draw();
+    if (se && se.scrollTop !== top) se.scrollTop = top;
+  }
+
   pages.overview = async () => {
     const v = current();
     let html = head('Your archive workspace', 'Overview') + pills();
     if (!v) {
       html += `<div class="card"><h2>Add a vehicle</h2><p>Each vehicle has its own footage share (SMB) or folder. Add one in Settings to start.</p><div class="form-actions" style="justify-content:flex-start"><a class="btn solid" href="#/settings">Open settings</a></div></div>`;
-      page.innerHTML = html + serverSection();
-      mountMonitor();
+      keepScroll(() => {
+        page.innerHTML = html + serverSection();
+        mountMonitor();
+      });
       return;
     }
     const s = v.share || {};
@@ -235,9 +250,12 @@
         ${used !== null ? `<div class="meter"><span class="${used > 0.95 ? 'bad' : used > 0.85 ? 'warn' : ''}" style="width:${Math.round(used * 100)}%"></span></div>` : ''}</div>
     </div>`;
     // Viewer, Footage, Encoder and the alerts (Notifications) are tabs of their own.
-    page.innerHTML = html + serverSection();
-    $('refresh-inv').onclick = () => api(`/api/vehicles/${v.id}/scan`, { body: {} }).then(() => toast('Refreshing the inventory…'), (err) => toast(err.message, true));
-    mountMonitor();
+    // (a live update redraws it all: the reader stays where they were)
+    keepScroll(() => {
+      page.innerHTML = html + serverSection();
+      $('refresh-inv').onclick = () => api(`/api/vehicles/${v.id}/scan`, { body: {} }).then(() => toast('Refreshing the inventory…'), (err) => toast(err.message, true));
+      mountMonitor();
+    });
   };
 
   // ---------- Overview > Server ("nerd stats") ----------
@@ -323,6 +341,8 @@
     return `<svg class="nd-spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true">${lines.join('')}</svg>`;
   }
   const sparkBlock = (svg, day) => (svg && day ? `${svg}<div class="nd-axis"><span>24 h ago</span><span>now</span></div>` : svg);
+  // a tile's sparkline keeps its room while it has fewer than two points
+  const sparkOrRoom = (svg) => svg || '<svg class="nd-spark" viewBox="0 0 220 40" aria-hidden="true"></svg>';
   const ndBar = (value, hot = false) => `<div class="nd-bar${hot ? ' hot' : ''}"><span style="width:${clampPct(value)}%"></span></div>`;
   const ndBig = (value, label) => `<div class="nd-big"><b>${value}</b>${label ? `<span class="muted small">${label}</span>` : ''}</div>`;
   /** key/value rows; values are HTML already escaped by the caller, rows without a value are left out */
@@ -330,10 +350,35 @@
     const r = rows.filter((row) => row && row[1]);
     return r.length ? `<dl class="nd-kv${cls}">${r.map(([k, v, hot]) => `<dt>${esc(k)}</dt><dd${hot ? ' class="nd-warn"' : ''}>${v}</dd>`).join('')}</dl>` : '';
   };
+  /**
+   * A tile's rows, steady while the page is open: a row the tile has shown
+   * keeps its place, with '—' (or the row's own placeholder, row[3]), while
+   * the server has no value for it or leaves it out for a moment, so the
+   * page does not jump with every poll. `seen` (the caller's, kept between
+   * polls) maps a tile to the labels it has shown, in order; rows that never
+   * had a value are left out as before.
+   */
+  function steady(seen, tile, rows) {
+    const list = rows.filter((row) => row && row[0]);
+    if (!seen) return list;
+    const order = [...(seen.get(tile) || [])];
+    let at = -1;
+    for (const row of list) {
+      const i = order.indexOf(row[0]);
+      if (i >= 0) at = i;
+      else if (row[1]) order.splice(++at, 0, row[0]);
+    }
+    seen.set(tile, order);
+    const now = new Map(list.map((row) => [row[0], row]));
+    return order.map((label) => {
+      const row = now.get(label);
+      return row && row[1] ? row : [label, row?.[3] ?? '—'];
+    });
+  }
   const ndTile = (title, sub, body, wide = false) => `<div class="nd-tile${wide ? ' nd-wide' : ''}"><div class="nd-title"><span>${esc(title)}</span>${sub ? `<span class="muted" title="${esc(sub)}">${esc(sub)}</span>` : ''}</div>${body}</div>`;
   const moreButton = (key, shown, total, open) => (total > shown || open ? `<button type="button" class="nd-more" data-nd-more="${key}">${open ? 'Show fewer' : `Show all ${total}`}</button>` : '');
 
-  function cpuTile(cpu, points, day) {
+  function cpuTile(cpu, points, day, seen = null) {
     if (!cpu || !fin(cpu.usage)) return '';
     const counts = fin(cpu.cores) ? (fin(cpu.threads) && cpu.threads !== cpu.cores ? `${cpu.cores} cores / ${cpu.threads} threads` : plural(cpu.cores, 'core')) : '';
     const per = (Array.isArray(cpu.perCore) ? cpu.perCore : []).filter(fin);
@@ -358,64 +403,76 @@
       return bits.length ? `<div${own ? ` title="${esc(own)}"` : ''}><span>CPU ${n}</span>${bits.map((b) => `<span>${b}</span>`).join('')}</div>` : '';
     }).join('');
     return ndTile('CPU', [name, counts].filter(Boolean).join(' · '), ndBig(pct(cpu.usage), 'whole server')
-      + sparkBlock(spark(points, 'var(--accent)', 10), day) + cores
+      + sparkBlock(sparkOrRoom(spark(points, 'var(--accent)', 10)), day) + cores
       + (socketLines ? `<div class="nd-sockets">${socketLines}</div>` : '')
-      + ndKv([
+      + ndKv(steady(seen, 'cpu', [
         ['Clock', fin(cpu.freqMHz) ? clock(cpu.freqMHz) : ''],
         ['Temp', fin(cpu.tempC) ? temp(cpu.tempC) : '', cpu.tempC >= 90],
         ['Load', Array.isArray(cpu.load) && cpu.load.some(fin) ? cpu.load.map((l) => (fin(l) ? l.toFixed(1) : '—')).join(' · ') : ''],
         ['This app', appText],
-        ['Throttling', cpu.throttling ? 'yes: too hot, running slower' : '', true]
-      ]));
+        ['Throttling', cpu.throttling ? 'yes: too hot, running slower' : '', true, 'no']
+      ])));
   }
 
-  function gpuTile(g, points, day) {
-    if (!g || !['busy', 'video', 'vramUsedB', 'clockMHz', 'tempC', 'powerW'].some((k) => fin(g[k]))) return '';
-    const big = fin(g.video) ? ndBig(pct(g.video), 'video engine') : fin(g.busy) ? ndBig(pct(g.busy), 'busy') : '';
+  // these drivers report the video engine and render use whenever this app
+  // has a client open; their rows stay in place (with '—') in between
+  const VIDEO_VENDORS = new Set(['amd', 'intel', 'nvidia']);
+  const reportsVideo = (g) => Boolean(g) && VIDEO_VENDORS.has(g.vendor);
+
+  function gpuTile(g, points, day, seen = null, key = 'gpu') {
+    const steadyRows = reportsVideo(g);
+    if (!g || (!steadyRows && !['busy', 'video', 'vramUsedB', 'clockMHz', 'tempC', 'powerW'].some((k) => fin(g[k])))) return '';
+    const dash = (n) => (fin(n) ? pct(n) : '—');
+    const big = steadyRows ? ndBig(dash(g.video), 'video engine')
+      : fin(g.video) ? ndBig(pct(g.video), 'video engine') : fin(g.busy) ? ndBig(pct(g.busy), 'busy') : '';
+    const vram = fin(g.vramTotalB) && g.vramTotalB > 0;
     const rows = [
-      fin(g.busy) && `<div><span>Render / 3D</span>${ndBar(g.busy, g.busy >= 90)}<b>${pct(g.busy)}</b></div>`,
-      fin(g.video) && `<div><span>Video</span>${ndBar(g.video, g.video >= 90)}<b>${pct(g.video)}</b></div>`,
-      fin(g.vramUsedB) && fin(g.vramTotalB) && g.vramTotalB > 0 && `<div><span>VRAM</span>${ndBar((g.vramUsedB / g.vramTotalB) * 100)}<b>${sizeOf(g.vramUsedB, g.vramTotalB, ' / ')}</b></div>`
+      (steadyRows || fin(g.busy)) && `<div><span>Render / 3D</span>${ndBar(g.busy, g.busy >= 90)}<b>${dash(g.busy)}</b></div>`,
+      (steadyRows || fin(g.video)) && `<div><span>Video</span>${ndBar(g.video, g.video >= 90)}<b>${dash(g.video)}</b></div>`,
+      vram && `<div><span>VRAM</span>${ndBar(fin(g.vramUsedB) ? (g.vramUsedB / g.vramTotalB) * 100 : 0)}<b>${fin(g.vramUsedB) ? sizeOf(g.vramUsedB, g.vramTotalB, ' / ') : '—'}</b></div>`
     ].filter(Boolean);
     return ndTile('GPU', [g.name, g.driver, g.node].filter(Boolean).join(' · '), big
-      + sparkBlock(points ? spark(points, 'var(--info)', 10) : '', day)
+      + sparkBlock(points ? sparkOrRoom(spark(points, 'var(--info)', 10)) : '', day)
       + (rows.length ? `<div class="nd-rows">${rows.join('')}</div>` : '')
-      + ndKv([
+      + ndKv(steady(seen, key, [
         ['Clock', fin(g.clockMHz) ? clock(g.clockMHz) : ''],
         ['Temp', fin(g.tempC) ? temp(g.tempC) : '', g.tempC >= 90],
         ['Power', fin(g.powerW) ? watts(g.powerW) : ''],
-        ['Clients', g.clients > 0 ? `${g.clients} × ffmpeg` : '']
-      ]));
+        ['Clients', g.clients > 0 ? `${g.clients} × ffmpeg` : '', false, g.clients === 0 ? 'none' : '—']
+      ])));
   }
 
-  function powerTile(p, enc, price, currency) {
+  function powerTile(p, enc, price, currency, seen = null) {
     if (!p) return '';
     const parts = [['CPU package', p.cpuW], ['GPU', p.gpuW]].filter(([, w]) => fin(w));
+    // a part seen before keeps its bar while its reading is missing for a moment
+    const partW = { 'CPU package': p.cpuW, GPU: p.gpuW };
+    const bars = steady(seen, 'power-parts', Object.entries(partW).map(([name, w]) => [name, fin(w) ? watts(w) : ''])).filter((row) => row[1]);
     const total = fin(p.totalW) ? p.totalW : parts.length ? parts.reduce((n, [, w]) => n + w, 0) : null;
     // no power reading at all (and nothing measured earlier this week): no tile
     if (!fin(total) && !p.cpuSource && !p.gpuSource && !(p.todayWh > 0) && !(p.weekWh > 0)) return '';
     const label = parts.length === 2 ? 'CPU + GPU' : parts.length ? (parts[0][0] === 'GPU' ? 'GPU (CPU not measured)' : 'CPU package') : '';
     const energy = (wh, c) => (fin(wh) ? esc(`${energyText(wh)}${fin(c) ? ` · ${money(c, currency)}` : ''}`) : '');
     const priceNow = fin(price?.now) ? `${esc(inCurrency(price.now.toFixed(price.now < 1 ? 3 : 2).replace(/(\.\d\d)0$/, '$1'), price.currency || currency))} per kWh${price.rate ? ` · ${esc(price.rate)}` : ''}` : '';
-    return ndTile('Power', 'measured, not estimated', (fin(total) ? ndBig(watts(total), label) : '')
-      + (parts.length ? `<div class="nd-rows">${parts.map(([name, w]) => `<div><span>${name}</span>${ndBar(total > 0 ? (w / total) * 100 : 0)}<b>${watts(w)}</b></div>`).join('')}</div>` : '')
-      + ndKv([
+    return ndTile('Power', 'measured, not estimated', (fin(total) ? ndBig(watts(total), label) : bars.length ? ndBig('—', label) : '')
+      + (bars.length ? `<div class="nd-rows">${bars.map(([name, text]) => `<div><span>${name}</span>${ndBar(fin(partW[name]) && total > 0 ? (partW[name] / total) * 100 : 0)}<b>${text}</b></div>`).join('')}</div>` : '')
+      + ndKv(steady(seen, 'power', [
         ['Today', energy(p.todayWh, p.todayCost)],
         ['This week', energy(p.weekWh, p.weekCost)],
         ['Converting', enc?.running && fin(enc.run?.wh) ? `${energyText(enc.run.wh)} this run` : ''],
         ['Price now', priceNow]
-      ]));
+      ])));
   }
 
-  function memoryTile(m) {
+  function memoryTile(m, seen = null) {
     if (!m || !fin(m.totalB) || !fin(m.usedB) || m.totalB <= 0) return '';
     const used = (m.usedB / m.totalB) * 100;
     return ndTile('Memory', size(m.totalB), ndBig(size(m.usedB), `used (${pct(used)})`) + ndBar(used, used >= 95)
-      + ndKv([
+      + ndKv(steady(seen, 'memory', [
         ['This app', fin(m.appB) ? size(m.appB) : ''],
         ['Cache', fin(m.cacheB) ? size(m.cacheB) : ''],
         ['Swap', fin(m.swapTotalB) ? (m.swapTotalB > 0 ? sizeOf(m.swapUsedB || 0, m.swapTotalB, ' / ') : 'none') : '']
-      ]));
+      ])));
   }
 
   const DISK_KIND = { nvme: 'NVMe', ssd: 'SSD', hdd: 'hard disk' };
@@ -487,7 +544,7 @@
   const sensorHot = (s, name) => s.kind === 'temp' && s.value >= (s.chip === 'drivetemp' ? 55 : s.chip === 'nvme' ? 70 : /^(CPU|GPU)/.test(name) ? 90 : 85);
   const SENSORS_SHOWN = 10;
 
-  function sensorsTile(sensors, all, sockets = 1) {
+  function sensorsTile(sensors, all, sockets = 1, seen = null) {
     const rows = [];
     const coreMax = new Map(); // "Core 0" … "Core 11" of a chip: one "Core max" row
     // the packages go by the CPU tile's numbers when there is one per socket
@@ -495,7 +552,12 @@
     const packages = new Set((Array.isArray(sensors) ? sensors : []).filter((s) => s && s.chip === 'coretemp' && /^Package id \d+$/.test(s.label || '')).map((s) => s.label));
     const multiSocket = packages.size > 1 && packages.size === sockets;
     for (const s of Array.isArray(sensors) ? sensors : []) {
-      if (!s || !fin(s.value)) continue;
+      if (!s) continue;
+      // a sensor without a reading this time keeps its row once it has shown one
+      if (!fin(s.value)) {
+        if (!(s.kind === 'temp' && /^Core \d+$/.test(s.label || ''))) rows.push({ ...s, name: sensorName(s, multiSocket), value: null });
+        continue;
+      }
       if (s.kind === 'temp' && /^Core \d+$/.test(s.label || '')) {
         const row = coreMax.get(s.chip);
         if (row) row.value = Math.max(row.value, s.value);
@@ -508,14 +570,18 @@
       }
       rows.push({ ...s, name: sensorName(s, multiSocket) });
     }
-    if (!rows.length) return '';
-    const shown = all ? rows : rows.slice(0, SENSORS_SHOWN);
-    return ndTile('Sensors', 'every one the server reports', ndKv(shown.map((s) => [s.name,
-      s.kind === 'fan' ? `${Math.round(s.value).toLocaleString()} rpm` : temp(s.value), sensorHot(s, s.name)]), ' nd-sensors')
-      + moreButton('sensors', SENSORS_SHOWN, rows.length, all));
+    const list = steady(seen, 'sensors', rows.map((s) => [s.name,
+      !fin(s.value) ? '' : s.kind === 'fan' ? `${Math.round(s.value).toLocaleString()} rpm` : temp(s.value), fin(s.value) && sensorHot(s, s.name)])).filter((row) => row[1]);
+    if (!list.length) return '';
+    const shown = all ? list : list.slice(0, SENSORS_SHOWN);
+    return ndTile('Sensors', 'every one the server reports', ndKv(shown, ' nd-sensors')
+      + moreButton('sensors', SENSORS_SHOWN, list.length, all));
   }
 
-  function processTile(procs, enc) {
+  // the server sends its 8 busiest; the table keeps room for 8 rows
+  const PROCESS_ROWS = 8;
+
+  function processTile(procs, enc, hasGpu = false) {
     const top = (Array.isArray(procs?.top) ? procs.top : []).filter((p) => p && p.name);
     if (!top.length) return '';
     // the same program several times (ffmpeg ×4) is one row
@@ -528,12 +594,15 @@
       if (fin(p.gpuVideo)) g.gpu = (g.gpu || 0) + p.gpuVideo;
       groups.set(p.name, g);
     }
-    const rows = [...groups.values()].sort((a, b) => b.cpu - a.cpu).slice(0, 8);
-    const gpuCol = rows.some((r) => r.gpu !== null);
+    const rows = [...groups.values()].sort((a, b) => b.cpu - a.cpu).slice(0, PROCESS_ROWS);
+    // with a GPU, its column stays while no process uses it
+    const gpuCol = hasGpu || rows.some((r) => r.gpu !== null);
+    // rows come and go (ffprobe, a mount): empty ones keep the table's height
+    const pad = `<tr class="nd-pad" aria-hidden="true"><td>&nbsp;</td><td></td><td></td>${gpuCol ? '<td></td>' : ''}</tr>`.repeat(PROCESS_ROWS - rows.length);
     const encoder = enc?.running ? enc.device?.encoder : null;
     const name = (r) => `${esc(r.name)}${r.name === 'ffmpeg' && encoder ? ` · ${esc(encoder)}` : ''}${r.n > 1 ? ` ×${r.n}` : ''}`;
     return ndTile('Top processes', procs.scope === 'host' ? 'whole server' : 'this container',
-      `<table class="nd-procs"><thead><tr><th>Process</th><th>CPU</th><th>Memory</th>${gpuCol ? '<th>GPU</th>' : ''}</tr></thead><tbody>${rows.map((r) => `<tr><td>${name(r)}</td><td>${pct(r.cpu)}</td><td>${size(r.memB)}</td>${gpuCol ? `<td>${r.gpu !== null ? `${pct(r.gpu)} video` : '—'}</td>` : ''}</tr>`).join('')}</tbody></table>`, true);
+      `<table class="nd-procs"><thead><tr><th>Process</th><th>CPU</th><th>Memory</th>${gpuCol ? '<th>GPU</th>' : ''}</tr></thead><tbody>${rows.map((r) => `<tr><td>${name(r)}</td><td>${pct(r.cpu)}</td><td>${size(r.memB)}</td>${gpuCol ? `<td>${r.gpu !== null ? `${pct(r.gpu)} video` : '—'}</td>` : ''}</tr>`).join('')}${pad}</tbody></table>`, true);
   }
 
   function hostLine(h) {
@@ -550,7 +619,11 @@
   }
 
   /** Everything under the section's head: alerts, tiles, and what optional compose lines would add. */
-  function serverBody(s, { range = '15m', hist = null, currency = '$', more = {} } = {}) {
+  /**
+   * `seen` (optional, kept by the caller while the page is open) keeps rows
+   * that come and go in place; see steady().
+   */
+  function serverBody(s, { range = '15m', hist = null, currency = '$', more = {}, seen = null } = {}) {
     const day = range === '24h' && hist?.series ? hist.series : null;
     const usable = (pts) => Array.isArray(pts) && pts.filter(fin).length > 1;
     const pts = {
@@ -558,16 +631,16 @@
       gpu: day ? (usable(day.gpuVideo) ? day.gpuVideo : day.gpuBusy) : s.sparks?.gpuVideo,
       rx: day ? day.rxBps : s.sparks?.rxBps
     };
-    let gpuSpark = false; // one sparkline series for the GPUs: on the first that encodes
-    const gpus = (Array.isArray(s.gpus) ? s.gpus : []).map((g) => {
-      const mine = !gpuSpark && g && fin(g.video);
-      if (mine) gpuSpark = true;
-      return gpuTile(g, mine ? pts.gpu : null, Boolean(day));
-    }).join('');
+    // one sparkline series for the GPUs: on the first that can report its
+    // video engine (it stays there while the engine's use is unknown), else
+    // on the first that encodes
+    const list = (Array.isArray(s.gpus) ? s.gpus : []).filter(Boolean);
+    const sparkOn = list.find(reportsVideo) || list.find((g) => fin(g.video)) || null;
+    const gpus = list.map((g, i) => gpuTile(g, g === sparkOn ? pts.gpu : null, Boolean(day), seen, `gpu:${g.id || g.node || i}`)).join('');
     const tiles = [
-      cpuTile(s.cpu, pts.cpu, Boolean(day)), gpus, powerTile(s.power, s.encoder, s.price, currency), memoryTile(s.memory),
+      cpuTile(s.cpu, pts.cpu, Boolean(day), seen), gpus, powerTile(s.power, s.encoder, s.price, currency, seen), memoryTile(s.memory, seen),
       storageTile(s.filesystems, s.disks, more.disks), networkTile(s.network, pts.rx, Boolean(day)),
-      sensorsTile(s.sensors, more.sensors, Number(s.cpu?.sockets) || 1), processTile(s.processes, s.encoder)
+      sensorsTile(s.sensors, more.sensors, Number(s.cpu?.sockets) || 1, seen), processTile(s.processes, s.encoder, list.length > 0)
     ].join('');
     const alerts = (Array.isArray(s.alerts) ? s.alerts : []).filter((a) => a && a.message).map((a) => `<div class="nd-alert${a.level === 'error' ? ' bad' : ''}"><b>${a.level === 'error' ? 'Problem' : 'Warning'}</b>${esc(a.message)} · <a href="#/settings/logs">Logs</a></div>`).join('');
     const unlock = (Array.isArray(s.unlock) ? s.unlock : []).filter((u) => u && u.adds);
@@ -581,8 +654,18 @@
 
   const monitor = {
     snap: null, error: null, timer: null, gen: 0, active: false,
-    range: store.get('statsRange', '15m') === '24h' ? '24h' : '15m', hist: null, histAt: 0, more: {}
+    range: store.get('statsRange', '15m') === '24h' ? '24h' : '15m', hist: null, histAt: 0, more: {},
+    // while the page stays open: the rows each tile has shown (steady()) and
+    // the tallest the tiles have been, so a poll never makes the page jump
+    seen: new Map(), tallest: 0
   };
+  /** Back to the tiles' own height (a new visit, another range, a fold, a resize). */
+  function releaseMonitorHeight({ rows = false } = {}) {
+    monitor.tallest = 0;
+    if (rows) monitor.seen = new Map();
+    const body = $('nd-server')?.querySelector('.nd-body');
+    if (body) body.style.minHeight = '';
+  }
   const nerdStats = () => store.get('nerdStats', true) !== false;
 
   function serverSection() {
@@ -606,12 +689,22 @@
       b.setAttribute('aria-pressed', String(b.dataset.range === monitor.range));
     });
     const stale = monitor.error ? `<span class="nd-warn">${s ? 'Not updating right now' : `Can't show the server's numbers: ${esc(monitor.error)}`}</span>` : '';
-    root.querySelector('.nd-sub').innerHTML = [s ? hostLine(s.host) : monitor.error ? '' : 'Loading…', stale].filter(Boolean).join(' · ');
-    root.querySelector('.nd-chipbox').innerHTML = s ? alertChip(s.alerts) : '';
-    body.innerHTML = s ? serverBody(s, {
-      range: monitor.range, hist: monitor.hist, more: monitor.more,
-      currency: s.price?.currency || state.power?.currency || '$'
-    }) : '';
+    keepScroll(() => {
+      root.querySelector('.nd-sub').innerHTML = [s ? hostLine(s.host) : monitor.error ? '' : 'Loading…', stale].filter(Boolean).join(' · ');
+      root.querySelector('.nd-chipbox').innerHTML = s ? alertChip(s.alerts) : '';
+      body.innerHTML = s ? serverBody(s, {
+        range: monitor.range, hist: monitor.hist, more: monitor.more, seen: monitor.seen,
+        currency: s.price?.currency || state.power?.currency || '$'
+      }) : '';
+      // Rebuilt on every poll: a tile that grows for a moment would make the
+      // page jump back up when it shrinks again (at the bottom of the page the
+      // browser has to scroll). The tiles never get shorter while the page is
+      // open; leaving it, another range, a fold or a resize lets them.
+      if (s) {
+        monitor.tallest = Math.max(monitor.tallest, body.offsetHeight);
+        body.style.minHeight = `${monitor.tallest}px`;
+      }
+    });
   }
 
   /** Polls while wanted; a new Overview render draws the last sample at once. */
@@ -620,6 +713,7 @@
     if (!root) return;
     $('nd-toggle').onchange = (e) => {
       store.set('nerdStats', e.target.checked);
+      releaseMonitorHeight({ rows: true });
       root.outerHTML = serverSection();
       mountMonitor();
     };
@@ -628,6 +722,7 @@
         monitor.range = b.dataset.range;
         store.set('statsRange', monitor.range);
         monitor.histAt = 0;
+        releaseMonitorHeight();
         drawMonitor();
         stopMonitor();
         startMonitor();
@@ -637,6 +732,7 @@
       const more = e.target.closest('[data-nd-more]');
       if (!more) return;
       monitor.more[more.dataset.ndMore] = !monitor.more[more.dataset.ndMore];
+      releaseMonitorHeight();
       drawMonitor();
     });
     drawMonitor();
@@ -681,6 +777,14 @@
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') startMonitor();
     else stopMonitor();
+  });
+  // another width lays the tiles out anew (a phone turned, a window resized)
+  let monitorWidth = innerWidth;
+  window.addEventListener('resize', () => {
+    if (innerWidth === monitorWidth) return;
+    monitorWidth = innerWidth;
+    releaseMonitorHeight();
+    if (monitor.snap) drawMonitor();
   });
 
   // Footage, one card per capture day (newest first, the newest one open):
@@ -1583,7 +1687,10 @@
     bootFrame?.remove();
     delete document.documentElement.dataset.boot;
     const [route, ...rest] = (location.hash.replace(/^#\/?/, '') || 'overview').split('/');
+    const before = state.route;
     state.route = pages[route] ? route : 'overview';
+    // a new visit to the Overview starts with the tiles' own height and rows
+    if (state.route !== before) releaseMonitorHeight({ rows: true });
     // the server's numbers are only asked for while the Overview shows them
     if (state.route !== 'overview') stopMonitor();
     document.querySelectorAll('#nav a').forEach((a) => a.classList.toggle('active', a.dataset.route === state.route));

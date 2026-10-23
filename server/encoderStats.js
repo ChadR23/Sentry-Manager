@@ -25,6 +25,15 @@ function jobProgress(job) {
 
 const r1 = (n) => Math.round(n * 10) / 10;
 
+/** How many clips the job converts at once (its concurrency, else its lanes together), or null. */
+function concurrencyOf(job) {
+  const config = job?.config;
+  const n = Number(config?.concurrency);
+  if (Number.isSafeInteger(n) && n > 0) return n;
+  const lanes = Array.isArray(config?.lanes) ? config.lanes.reduce((sum, lane) => sum + (Number.isSafeInteger(lane?.concurrency) && lane.concurrency > 0 ? lane.concurrency : 0), 0) : 0;
+  return lanes > 0 ? lanes : null;
+}
+
 /**
  * One entry per device the job's running clips use: one per GPU set in the
  * Encoder (grouped by lane), else just the one a job without lanes uses,
@@ -87,6 +96,8 @@ function encoderBlock({ snapshot, jobs, workers = [], energy = null }) {
     state: job?.state || null,
     running: Boolean(job && RUNNING.has(job.state)),
     workers: mine,
+    // the Hardware panel keeps a row for each, a clip in it or not
+    concurrency: concurrencyOf(job),
     device: first ? {
       encoder: first.encoder || null,
       hardware: first.hardware === true,

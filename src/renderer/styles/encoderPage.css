@@ -1077,6 +1077,7 @@ select.converter-select {
     grid-template-columns: minmax(0, 1fr);
     gap: 10px;
     margin-top: 14px;
+    container-type: inline-size;
 }
 
 .nd-w {
@@ -1092,12 +1093,14 @@ select.converter-select {
     gap: 10px;
     color: var(--text-color);
     font-variant-numeric: tabular-nums;
+    /* the same height with or without the percentage (a clip starting, a free row) */
+    line-height: 18px;
 }
 
 .nd-w .nd-clip {
     min-width: 0;
     overflow: hidden;
-    font: 12px var(--font-mono);
+    font: 12px/18px var(--font-mono);
     text-overflow: ellipsis;
     white-space: nowrap;
 }
@@ -1107,7 +1110,14 @@ select.converter-select {
     margin: 6px 0 0;
     color: var(--text-muted);
     font-size: 12px;
+    line-height: 17px;
     font-variant-numeric: tabular-nums;
+}
+
+/* a clip's numbers take two lines on phones: every row keeps room for two,
+   so a clip starting ("starting…") or a free row does not close up */
+@container (max-width: 420px) {
+    .nd-w-meta { min-height: 34px; }
 }
 
 .nd-hw .nd-warn {

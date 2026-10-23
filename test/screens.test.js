@@ -25,7 +25,7 @@ function overview() {
   assert.ok(start > 0 && end > start, 'the drawing block is marked in app.js');
   const helpers = ['esc', 'plural'].map((name) => app.match(new RegExp(`\\n  const ${name} = .*;\\n`))[0]).join('');
   return new Function(`${helpers}${app.slice(start, end)}
-    return { serverBody, hostLine, alertChip, spark, size, sizeOf, rate, energyText, money, sensorName, cpuName };`)();
+    return { serverBody, hostLine, alertChip, spark, size, sizeOf, rate, energyText, money, sensorName, cpuName, steady };`)();
 }
 
 const HOSTILE = '<img src=x onerror=alert(1)>';
@@ -73,6 +73,62 @@ test('Overview: the Power tile and the Jobs page show energy below 1 kWh in Wh',
   const app = fs.readFileSync(path.join(REPO, 'web/app.js'), 'utf8');
   assert.match(app, /const energy = \(e\) => \(fin\(e\?\.wh\) \? `\$\{energyText\(e\.wh\)\}/);
   assert.doesNotMatch(app, /\bkwh\(/, 'one energy format everywhere');
+});
+
+// the owner's server between two polls: Ryzen 7 8700G, Radeon 780M, no RAPL
+function ownerPoll(i) {
+  const s = sample('amd');
+  s.gpus = [{ ...s.gpus[0], name: 'AMD Radeon 780M', integrated: true, video: i % 2 ? null : 72, clients: i % 2 ? 0 : 4, clockMHz: i % 2 ? null : 2700 }];
+  s.cpu.tempC = i % 2 ? null : 61;
+  s.processes.top = [
+    { pid: 41, name: 'ffmpeg', cpu: 4, memB: 1e8, gpuVideo: i % 2 ? null : 20 },
+    { pid: 7, name: 'node', cpu: 2, memB: 2e8, gpuVideo: null },
+    ...(i % 2 ? [] : [{ pid: 90, name: 'ffprobe', cpu: 1, memB: 3e7, gpuVideo: null }])
+  ];
+  s.sensors = [{ chip: 'k10temp', label: 'Tctl', kind: 'temp', value: 61 }, ...(i % 2 ? [{ chip: 'amdgpu', label: 'edge', kind: 'temp', value: null }] : [{ chip: 'amdgpu', label: 'edge', kind: 'temp', value: 58 }])];
+  return s;
+}
+
+test('Overview: rows and columns stay in place between polls, with — while there is no value', () => {
+  const { serverBody } = overview();
+  const seen = new Map();
+  const rowsOf = (html, tile) => {
+    const at = html.indexOf(`<span>${tile}</span>`);
+    const part = html.slice(at, html.indexOf('<div class="nd-tile', at + 1) === -1 ? undefined : html.indexOf('<div class="nd-tile', at + 1));
+    return [...part.matchAll(/<(?:dt|span)>([^<]+)<\/(?:dt|span)>(?:<div class="nd-bar[^"]*"><span[^>]*><\/span><\/div>)?<(?:dd|b)[^>]*>([^<]*)<\/(?:dd|b)>/g)].map((m) => `${m[1]}=${m[2]}`);
+  };
+  const a = serverBody(ownerPoll(0), { seen });
+  const b = serverBody(ownerPoll(1), { seen });
+  assert.deepEqual(rowsOf(a, 'GPU'), ['Render / 3D=31%', 'Video=72%', 'VRAM=0.9 / 8 GB', 'Clock=2.7 GHz', 'Temp=54 °C', 'Power=39 W', 'Clients=4 × ffmpeg']);
+  assert.deepEqual(rowsOf(b, 'GPU'), ['Render / 3D=31%', 'Video=—', 'VRAM=0.9 / 8 GB', 'Clock=—', 'Temp=54 °C', 'Power=39 W', 'Clients=none'], 'the Video row stays while a new clip starts');
+  assert.match(b, /<b>—<\/b><span class="muted small">video engine<\/span>/, 'the big number keeps its label');
+  assert.deepEqual(rowsOf(b, 'CPU').filter((r) => r.startsWith('Temp')), ['Temp=—']);
+  assert.match(b, /<dt>GPU<\/dt><dd>—<\/dd>/, 'a sensor without a reading keeps its row');
+  // the GPU column stays with a GPU in the server; 8 rows always
+  for (const html of [a, b]) {
+    const table = html.slice(html.indexOf('<table class="nd-procs">'), html.indexOf('</table>'));
+    assert.match(table, /<th>GPU<\/th>/);
+    assert.equal((table.match(/<tr/g) || []).length, 1 + 8, 'a header and 8 rows');
+    assert.equal((table.match(/<tr class="nd-pad" aria-hidden="true">/g) || []).length, 8 - (html === a ? 3 : 2));
+  }
+  // the same tiles, the same rows, in the same order
+  const shape = (html) => html.replace(/>[^<]*</g, '><').replace(/style="[^"]*"/g, '').replace(/ title="[^"]*"/g, '').replace(/<tr class="nd-pad"[^]*?<\/tr>|<tr><td>[^]*?<\/tr>/g, '<tr/>');
+  assert.equal(shape(b), shape(a));
+  // a page that has seen nothing keeps the old rule: rows only with values
+  const fresh = rowsOf(serverBody(ownerPoll(1)), 'GPU');
+  assert.ok(!fresh.some((r) => r.startsWith('Clock')), 'no Clock row it never had');
+  assert.ok(fresh.includes('Video=—'), 'a GPU that reports its video engine always has the row');
+});
+
+test('Overview: steady() keeps rows a tile has shown, in their order, and nothing it never showed', () => {
+  const { steady } = overview();
+  const seen = new Map();
+  assert.deepEqual(steady(seen, 't', [['A', '1'], ['B', ''], ['C', '3']]), [['A', '1'], ['C', '3']]);
+  assert.deepEqual(steady(seen, 't', [['A', ''], ['B', '2'], ['C', '4']]), [['A', '—'], ['B', '2'], ['C', '4']], 'B joins where the tile lists it; A keeps its place');
+  assert.deepEqual(steady(seen, 't', [['C', '5']]), [['A', '—'], ['B', '—'], ['C', '5']], 'rows left out keep their place too');
+  assert.deepEqual(steady(seen, 't', [['A', '', false, 'no']]), [['A', 'no'], ['B', '—'], ['C', '—']], "a row's own placeholder");
+  assert.deepEqual(steady(seen, 'other', [['A', '']]), [], 'per tile');
+  assert.deepEqual(steady(null, 't', [['A', '1'], null]), [['A', '1']], 'no memory: as given');
 });
 
 test('Overview: a Raspberry Pi shows only what it has', () => {
@@ -262,6 +318,127 @@ test('Hardware panel: escapes names, survives odd bodies, folds long worker list
   assert.match(big, /and 48 more/);
   assert.equal(gpuFor([{ name: 'a', node: 'renderD128' }, { name: 'b', node: 'renderD129' }], { node: '/dev/dri/renderD129' }).name, 'b');
   assert.equal(gpuFor([{ name: 'a' }, { name: 'b' }], { node: null, gpuName: 'zzz' }), null, 'never a guess between two GPUs');
+});
+
+test('Hardware panel: one row per conversion at once; a clip keeps its row, a free one waits for the next clip', async () => {
+  const { clipRows, renderHardware, panelMemory } = await hardware();
+  const w = (itemId) => ({ itemId, relativePath: `SentryClips/${itemId}.mp4`, fps: 300 });
+  const ids = (r) => r.rows.map((x) => x?.itemId ?? null);
+  let r = clipRows([w('a'), w('b'), w('c'), w('d')], 4);
+  assert.deepEqual(ids(r), ['a', 'b', 'c', 'd']);
+  // b finishes; e starts later: a, c, d stay where they were, e takes b's row
+  r = clipRows([w('a'), w('c'), w('d')], 4, r.keys);
+  assert.deepEqual(ids(r), ['a', null, 'c', 'd']);
+  r = clipRows([w('a'), w('c'), w('d'), w('e')], 4, r.keys);
+  assert.deepEqual(ids(r), ['a', 'e', 'c', 'd']);
+  assert.deepEqual(ids(clipRows([], 3)), [null, null, null], 'nothing running: the rows stay');
+  assert.deepEqual(ids(clipRows([w('x'), w('y')], 1)), ['x', 'y'], 'more running than set (lowered while running): a row each');
+  assert.deepEqual(ids(clipRows([w('x')], null)), ['x'], 'no concurrency known: as many as run');
+
+  const memo = panelMemory();
+  const body = (workers) => {
+    const s = sample();
+    s.encoder.concurrency = 4;
+    s.encoder.state = 'encoding';
+    s.encoder.workers = s.encoder.workers.slice(0, workers);
+    return s;
+  };
+  const four = renderHardware(body(4), memo);
+  const one = renderHardware(body(1), memo);
+  assert.equal((one.match(/class="nd-w"/g) || []).length, 1);
+  assert.equal((one.match(/class="nd-w nd-w-idle"/g) || []).length, 3);
+  assert.match(one, /<span class="nd-clip">Waiting for the next clip<\/span>/);
+  assert.equal((four.match(/class="nd-w[ "]/g) || []).length, (one.match(/class="nd-w[ "]/g) || []).length, 'the same number of rows');
+  const none = renderHardware(body(0), memo);
+  assert.equal((none.match(/nd-w-idle/g) || []).length, 4, 'checking and saving: four rows still');
+  assert.match(none, /checking and saving…/);
+});
+
+test('Hardware panel: tiles and device lines keep their place while a number is missing; another job starts over', async () => {
+  const { renderHardware, panelMemory } = await hardware();
+  const tilesOf = (html) => [...(html.split('<div class="nd-hw-tiles">')[1] || '').split('<div class="nd-eff">')[0].matchAll(/<div(?: class="hot")?><span>([^<]+)<\/span><b>([^<]+)<\/b>/g)].map((m) => `${m[1]}=${m[2]}`);
+  const memo = panelMemory();
+  const full = sample();
+  const gap = sample();
+  gap.gpus[0].video = null; // a new clip's ffmpeg: not measured yet
+  gap.cpu.app = { usage: null, ffmpegUsage: null, ffmpegCount: 4 };
+  gap.power.totalW = null;
+  gap.cpu.tempC = null;
+  gap.gpus[0].tempC = null;
+  assert.deepEqual(tilesOf(renderHardware(full, memo)), ['Video engine=94%', 'CPU (conversions)=18%', 'Power=65 W', 'Temperatures=61 °C']);
+  assert.deepEqual(tilesOf(renderHardware(gap, memo)), ['Video engine=—', 'CPU (conversions)=—', 'Power=—', 'Temperatures=—']);
+  assert.equal(memo.fresh, true, 'the first view of a job');
+  memo.fresh = false;
+  // never seen on this page: the video engine of a GPU that reports one, nothing else
+  assert.deepEqual(tilesOf(renderHardware(gap)), ['Video engine=—']);
+  // the same body for another job: the panel starts over
+  const next = sample();
+  next.encoder.jobId = 'conv-next';
+  Object.assign(next.power, { totalW: null });
+  assert.deepEqual(tilesOf(renderHardware(next, memo)).map((t) => t.split('=')[0]), ['Video engine', 'CPU (conversions)', 'Temperatures']);
+  assert.equal(memo.fresh, true);
+  // two GPUs converting: a lane without a running clip for a moment keeps its line
+  const ARC = 'pci:0000:03:00.0';
+  const UHD = 'pci:0000:00:02.0';
+  const lanes = sample();
+  lanes.encoder.devices = [
+    { id: UHD, name: 'Intel UHD Graphics 770', node: '/dev/dri/renderD129', encoder: 'hevc_qsv', hardware: true, workers: 1, video: 40, busy: 10 },
+    { id: ARC, name: 'Intel Arc A380', node: '/dev/dri/renderD128', encoder: 'hevc_qsv', hardware: true, workers: 3, video: 72, busy: 10 }
+  ];
+  const m2 = panelMemory();
+  const both = renderHardware(lanes, m2);
+  lanes.encoder.devices = [lanes.encoder.devices[1]];
+  const one = renderHardware(lanes, m2);
+  assert.equal((both.match(/class="nd-dev[ "]/g) || []).length, 2);
+  assert.equal((one.match(/class="nd-dev[ "]/g) || []).length, 2, 'still two lines');
+  assert.match(one, />Intel UHD Graphics 770 · hevc_qsv · 0 converting</);
+  assert.doesNotMatch(one, /hevc_vaapi · Intel Arc A380 · renderD128/, 'still the several-GPU view');
+  assert.equal(renderHardware(lanes).includes('nd-devices'), false, 'without memory: as before');
+});
+
+test('Hardware panel: never shorter while a job runs; back to its own height when the job changes or the Encoder is shown again', async (t) => {
+  const { startHardwarePanel } = await hardware();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const listeners = {};
+  const on = (target) => (type, fn) => { (listeners[`${target}:${type}`] ||= []).push(fn); };
+  let height = 600;
+  const panel = { hidden: true, innerHTML: '', style: { minHeight: '' }, closest: () => null, parentElement: null };
+  Object.defineProperty(panel, 'offsetHeight', { get: () => Math.max(height, parseFloat(panel.style.minHeight) || 0) });
+  const doc = { visibilityState: 'visible', getElementById: (id) => (id === 'converterHardware' ? panel : null), addEventListener: on('doc') };
+  const win = { location: { origin: 'https://nas' }, addEventListener: on('win'), innerWidth: 1440 };
+  let body = sample();
+  const fetchImpl = async () => ({ ok: true, json: async () => body });
+  const settle = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
+  const poll = async () => { t.mock.timers.tick(2000); await settle(); };
+  startHardwarePanel({ doc, win, fetchImpl });
+  await settle();
+  assert.equal(panel.style.minHeight, '600px');
+  height = 480; // a clip row and a tile went away
+  await poll();
+  assert.equal(panel.style.minHeight, '600px', 'kept');
+  height = 640;
+  await poll();
+  assert.equal(panel.style.minHeight, '640px', 'the tallest so far');
+  // another job: its own height
+  body = sample();
+  body.encoder.jobId = 'conv-other';
+  height = 500;
+  await poll();
+  assert.equal(panel.style.minHeight, '500px');
+  // put away and shown again
+  height = 420;
+  listeners['win:message'].forEach((fn) => fn({ origin: 'https://nas', data: { type: 'pause' } }));
+  listeners['win:message'].forEach((fn) => fn({ origin: 'https://nas', data: { type: 'shown' } }));
+  await settle();
+  assert.equal(panel.style.minHeight, '420px');
+  // a phone turned: laid out anew
+  height = 700;
+  win.innerWidth = 844;
+  listeners['win:resize'].forEach((fn) => fn());
+  assert.equal(panel.style.minHeight, '700px');
+  height = 650;
+  await poll();
+  assert.equal(panel.style.minHeight, '700px');
 });
 
 test('Hardware panel: asks every 2 s only while it can be seen', async (t) => {

@@ -294,6 +294,8 @@ details.more p { margin-top: 10px; color: var(--text-2); max-width: 760px; }
 .nd-procs th { text-align: left; color: var(--muted); font-weight: 600; font-size: 12px; padding: 6px 0; }
 .nd-procs td { padding: 7px 0; border-top: 1px solid var(--border); overflow-wrap: anywhere; }
 .nd-procs td + td, .nd-procs th + th { text-align: right; padding-left: 12px; white-space: nowrap; }
+/* the rows kept for processes that come and go: room, without lines */
+.nd-procs tr.nd-pad td { border-top-color: transparent; }
 .nd-more { all: unset; box-sizing: border-box; margin-top: 10px; color: var(--accent); font-size: 12.5px; font-weight: 600; cursor: pointer; }
 .nd-more:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
 .nd-none { margin-top: 14px; }
