@@ -80,6 +80,7 @@ jobs:
             echo "sha=$sha"
             echo "short=${sha:0:7}"
             echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "week=$(date -u +%G-W%V)"
           } >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-qemu-action@v4
@@ -98,6 +99,7 @@ jobs:
             BUILD_DATE=${{ steps.names.outputs.created }}
             IMAGE=${{ steps.names.outputs.image }}
             IMAGE_TAG=${{ steps.names.outputs.tag }}
+            APT_REFRESH=${{ steps.names.outputs.week }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -149,5 +151,6 @@ jobs:
             BUILD_DATE=${{ steps.names.outputs.created }}
             IMAGE=${{ steps.names.outputs.image }}
             IMAGE_TAG=${{ steps.names.outputs.tag }}
+            APT_REFRESH=${{ steps.names.outputs.week }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

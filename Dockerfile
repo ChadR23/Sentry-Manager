@@ -28,11 +28,15 @@ FROM debian:trixie-slim
 # openssl          the local HTTPS certificate authority
 # util-linux       setpriv: the app runs unprivileged (supervisor.js)
 COPY jellyfin.gpg /etc/apt/keyrings/jellyfin.gpg
+# The release build passes the week (like 2026-W43): a new week runs this step
+# again instead of reusing the build cache, so the weekly rebuild really
+# fetches the packages' latest security fixes.
+ARG APT_REFRESH=""
 RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive; \
+    echo "packages as of ${APT_REFRESH:-now}"; \
     apt-get update; \
-    # Debian security fixes released since the base image was published (the
-    # weekly rebuild then always has them)
+    # Debian security fixes released since the base image was published
     apt-get upgrade -y; \
     apt-get install -y --no-install-recommends ca-certificates; \
     printf 'Types: deb\nURIs: https://repo.jellyfin.org/debian\nSuites: trixie\nComponents: main\nSigned-By: /etc/apt/keyrings/jellyfin.gpg\n' \
