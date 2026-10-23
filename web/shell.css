@@ -148,6 +148,12 @@ p { margin: 0; }
 .input, select.input {
   min-height: 44px; padding: 0 14px; border-radius: 10px; border: 1px solid var(--border-strong); background: var(--panel); color: var(--text); min-width: 190px;
 }
+/* Safari draws its own grey box for a <select>; ours matches the other fields */
+select.input {
+  -webkit-appearance: none; appearance: none; padding-right: 40px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5l5 5 5-5' fill='none' stroke='%239aa3b2' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 15px center; background-size: 12px 8px;
+}
 textarea.input { padding: 10px 14px; min-height: 80px; }
 .hint { color: var(--muted); font-size: 13.5px; margin-bottom: 18px; }
 .selpanel { border: 1px solid var(--border-strong); border-radius: var(--radius); padding: 18px; margin-bottom: 18px; background: var(--panel); }
@@ -203,6 +209,8 @@ details.more p { margin-top: 10px; color: var(--text-2); max-width: 760px; }
 .table td { padding: 12px; border-bottom: 1px solid var(--border); vertical-align: top; overflow-wrap: anywhere; }
 .table tr:last-child td { border-bottom: 0; }
 .table .actions { text-align: right; white-space: nowrap; }
+/* short words (a name, a status) stay whole even beside a long path */
+.table td.words { overflow-wrap: break-word; }
 .table .actions .btn + .btn { margin-left: 8px; }
 
 /* forms */

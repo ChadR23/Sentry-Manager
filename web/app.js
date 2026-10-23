@@ -738,9 +738,9 @@
     html += `<nav class="set-tabs" aria-label="Settings sections">${sections.map(([k, label]) => `<button type="button" data-tab="${k}">${label}</button>`).join('')}</nav>`;
     html += `<div class="card" data-section="vehicles"><div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap"><h2>Vehicles</h2><a class="btn" href="#/settings/vehicle-new">${icon('plus')} Add vehicle</a></div>
       ${state.vehicles.length ? `<table class="table" style="margin-top:14px"><thead><tr><th>Name</th><th>Footage</th><th>Status</th><th></th></tr></thead><tbody>
-      ${state.vehicles.map((v) => `<tr><td><b>${esc(v.name)}</b><br><span class="muted small">${esc(v.timezone)}</span></td>
+      ${state.vehicles.map((v) => `<tr><td class="words"><b>${esc(v.name)}</b><br><span class="muted small">${esc(v.timezone)}</span></td>
         <td class="small"><span class="mono">${esc(v.source.type === 'smb' ? v.source.share : v.source.path)}</span>${v.security ? `<br><span class="muted">${esc(v.security)}</span>` : ''}</td>
-        <td class="small"${v.share?.healthy || !v.share?.lastError ? ' style="white-space:nowrap"' : ''}>${v.share?.healthy ? (v.share.writable === false ? 'Read-only' : 'Connected') : esc(v.share?.lastError || 'Unavailable')}</td>
+        <td class="small words">${v.share?.healthy ? (v.share.writable === false ? 'Read-only' : 'Connected') : esc(v.share?.lastError || 'Unavailable')}</td>
         <td class="actions"><a class="btn sm" href="#/settings/vehicle/${esc(v.id)}">Edit</a></td></tr>`).join('')}</tbody></table>` : '<p style="margin-top:12px">No vehicles yet.</p>'}
       ${editing ? vehicleForm(editing === 'new' ? null : state.vehicles.find((v) => v.id === editing)) : ''}</div>`;
 
