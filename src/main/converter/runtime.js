@@ -862,6 +862,8 @@ async function createConverterRuntime(options = {}) {
             const result = await runConverterBenchmark({
               clips, countFrames, encoder, tempRoot, signal: controller.signal, pathApi, fs: pfs,
               verifyMode, compareVerifyModes: ['off', 'quick', 'full'],
+              // Energy per level when the server can measure it (files per Wh).
+              powerMeter: options.powerMeter,
               onProgress: (progress) => onProgress?.({ ...progress, codec: current, codecIndex: index + 1, codecTotal: requested.length }),
               runLevel: benchmarkLevelRunner({ codec: current, profileId, bitrateKbps, qualityLevel, verifyMode })
             });

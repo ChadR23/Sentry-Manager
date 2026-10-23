@@ -123,3 +123,149 @@ test('a clip that only fails when many run at once is kept: the level is the lim
     await fsp.rm(dir, { recursive: true, force: true });
   }
 });
+
+// A power meter that reads the energy of each level run from a table, in the
+// order the levels run, the way the server's stats engine would report it.
+function fakeMeter(readings) {
+  const calls = { started: 0, stopped: [] };
+  return {
+    calls,
+    start: () => { calls.started += 1; return `token-${calls.started}`; },
+    stop: (token) => {
+      calls.stopped.push(token);
+      const reading = readings[Number(token.slice(6)) - 1];
+      if (reading instanceof Error) throw reading;
+      return reading === undefined ? null : reading;
+    }
+  };
+}
+
+// Level runs that take a set time each (a fake clock), all clips completed.
+function timedLevels(secondsByLevel) {
+  let clock = 0;
+  return {
+    now: () => clock,
+    runLevel: async ({ level, sourceRoot }) => {
+      clock += secondsByLevel[level] * 1000;
+      return { items: fs.readdirSync(path.join(sourceRoot, 'RecentClips')).map((n) => ({ state: 'completed', relativePath: `RecentClips/${n}` })) };
+    }
+  };
+}
+
+test('with a power meter every level shows its energy; the most efficient is picked beside the fastest', async () => {
+  const { dir, clips } = await setup();
+  try {
+    // files per minute 12, 24, 30, 40, 48: the fastest is 8 at once
+    const { now, runLevel } = timedLevels({ 1: 10, 2: 5, 4: 8, 6: 9, 8: 10 });
+    // files per Wh 10, 20, 25, 20, 16: the most efficient is 4 at once
+    const meter = fakeMeter([{ wh: 0.2, avgW: 72 }, { wh: 0.1, avgW: 72 }, { wh: 0.16, avgW: 72 }, { wh: 0.3, avgW: 120 }, { wh: 0.5, avgW: 180 }]);
+    const out = await runConverterBenchmark({ clips, tempRoot: dir, countFrames: async () => 100, now, runLevel, powerMeter: meter });
+    assert.deepEqual(out.results.map((r) => [r.level, r.wh, r.avgW, r.filesPerWh]), [
+      [1, 0.2, 72, 10], [2, 0.1, 72, 20], [4, 0.16, 72, 25], [6, 0.3, 120, 20], [8, 0.5, 180, 16]
+    ]);
+    assert.equal(out.best.level, 8, 'best stays the fastest');
+    assert.equal(out.efficient.level, 4);
+    assert.equal(meter.calls.started, 5);
+    assert.deepEqual(meter.calls.stopped, ['token-1', 'token-2', 'token-3', 'token-4', 'token-5']);
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('no efficient pick unless every level has energy; a meter that fails never fails the benchmark', async () => {
+  const { dir, clips } = await setup();
+  try {
+    const { now, runLevel } = timedLevels({ 1: 10, 2: 5, 4: 8, 6: 9, 8: 10 });
+    // level 6 could not be measured, level 8's reading failed
+    const meter = fakeMeter([{ wh: 0.2, avgW: 72 }, { wh: 0.1, avgW: 72 }, { wh: 0.16, avgW: 72 }, null, new Error('sensor gone')]);
+    const out = await runConverterBenchmark({ clips, tempRoot: dir, countFrames: async () => 100, now, runLevel, powerMeter: meter });
+    assert.deepEqual(out.results.map((r) => [r.level, r.ok, r.filesPerWh]), [[1, true, 10], [2, true, 20], [4, true, 25], [6, true, null], [8, true, null]]);
+    assert.equal(out.efficient, null);
+    assert.equal(out.best.level, 8);
+
+    // no meter at all: the same results as before, with empty energy fields
+    const plain = await runConverterBenchmark({ clips, tempRoot: dir, countFrames: async () => 100, ...timedLevels({ 1: 10, 2: 5, 4: 8, 6: 9, 8: 10 }) });
+    assert.ok(plain.results.every((r) => r.wh === null && r.avgW === null && r.filesPerWh === null));
+    assert.equal(plain.efficient, null);
+    // a meter whose start fails: no numbers either
+    const broken = await runConverterBenchmark({
+      clips, tempRoot: dir, countFrames: async () => 100, ...timedLevels({ 1: 10, 2: 5, 4: 8, 6: 9, 8: 10 }),
+      powerMeter: { start: () => { throw new Error('no RAPL'); }, stop: () => ({ wh: 1, avgW: 1 }) }
+    });
+    assert.equal(broken.results.length, 5);
+    assert.ok(broken.results.every((r) => r.wh === null));
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('the meter is stopped when a level is cancelled', async () => {
+  const { dir, clips } = await setup();
+  try {
+    const meter = fakeMeter([{ wh: 0.1, avgW: 50 }, { wh: 0.1, avgW: 50 }]);
+    await assert.rejects(runConverterBenchmark({
+      clips, tempRoot: dir, countFrames: async () => 100, powerMeter: meter,
+      runLevel: async ({ level, sourceRoot }) => {
+        if (level === 2) throw Object.assign(new Error('cancelled'), { code: 'CANCELLED' });
+        return { items: fs.readdirSync(path.join(sourceRoot, 'RecentClips')).map((n) => ({ state: 'completed', relativePath: `RecentClips/${n}` })) };
+      }
+    }), { code: 'CANCELLED' });
+    assert.deepEqual(meter.calls.stopped, ['token-1', 'token-2']);
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+const hasFfmpeg = require('child_process').spawnSync('ffmpeg', ['-version']).status === 0;
+
+test('the runtime hands its power meter to the benchmark', { skip: !hasFfmpeg && 'needs ffmpeg', timeout: 120_000 }, async () => {
+  const { createConverterRuntime } = require('../src/main/converter/runtime');
+  const { createTeslaH264Fixture } = require('./fixtures/ffmpegFixtures');
+  const { spawn } = require('child_process');
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sm-bench-rt-'));
+  try {
+    const footage = path.join(dir, 'footage', 'TeslaCam', 'RecentClips');
+    await fsp.mkdir(footage, { recursive: true });
+    for (const name of ['data', 'temp']) await fsp.mkdir(path.join(dir, name));
+    await createTeslaH264Fixture({
+      ffmpegPath: 'ffmpeg', outputPath: path.join(footage, '2026-10-20_17-00-00-front.mp4'), durationSeconds: 1, frameRate: 12,
+      size: '160x120', telemetryPattern: Array.from({ length: 12 }, (_, n) => Buffer.from([0x20, n]))
+    });
+    // Every level (and verification mode) "converts" its clips at once; the
+    // meter reads less energy per clip at 2 at once.
+    const fakeService = () => {
+      const started = new Map();
+      return {
+        start: async (config) => { const id = `job-${started.size + 1}`; started.set(id, config); return id; },
+        whenIdle: async (id) => ({
+          items: fs.readdirSync(path.join(started.get(id).sourceRoot, 'RecentClips'))
+            .map((n) => ({ state: 'completed', relativePath: `RecentClips/${n}`, sourceBytes: 100, outputBytes: 50 }))
+        }),
+        cancel: async () => {}, shutdown: async () => {}, list: async () => [], subscribe: () => () => {}, activeEncodes: () => []
+      };
+    };
+    let level = 0;
+    const perLevel = [0.2, 0.05, 0.4, 0.6, 0.8];
+    const powerMeter = {
+      start: () => level++,
+      stop: (token) => ({ wh: perLevel[token] ?? 0.1, avgW: 10 })
+    };
+    const runtime = await createConverterRuntime({
+      userDataPath: await fsp.realpath(path.join(dir, 'data')), tempPath: await fsp.realpath(path.join(dir, 'temp')),
+      ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe', spawn, autoConvert: false, powerMeter,
+      factories: { createConverterJobService: fakeService }
+    });
+    try {
+      const out = await runtime.runBenchmark({ codecs: ['h265'], sourceRoot: path.join(dir, 'footage', 'TeslaCam') });
+      const run = out.codecs[0];
+      assert.equal(run.error, undefined, `benchmark ran (${run.error})`);
+      assert.deepEqual(run.results.map((r) => [r.level, r.wh]), [[1, 0.2], [2, 0.05], [4, 0.4], [6, 0.6], [8, 0.8]]);
+      assert.equal(run.efficient.level, 2);
+      assert.ok(run.verifyComparison.every((r) => r.wh === 0.1), 'the verification comparison runs are metered too');
+    } finally {
+      await runtime.shutdown();
+    }
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});

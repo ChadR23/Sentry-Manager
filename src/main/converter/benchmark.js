@@ -28,6 +28,28 @@ function benchmarkError(code) {
   return Object.assign(new Error(code), { code });
 }
 
+// Energy over one level run; a meter that fails or cannot tell gives no
+// numbers instead of failing the benchmark.
+async function startMeter(powerMeter) {
+  if (typeof powerMeter?.start !== 'function' || typeof powerMeter.stop !== 'function') return null;
+  try { return { token: await powerMeter.start() }; } catch (_) { return null; }
+}
+
+async function stopMeter(powerMeter, started, completed) {
+  const none = { wh: null, avgW: null, filesPerWh: null };
+  if (!started) return none;
+  let reading;
+  try { reading = await powerMeter.stop(started.token); } catch (_) { return none; }
+  const wh = Number(reading?.wh);
+  const avgW = Number(reading?.avgW);
+  if (!Number.isFinite(wh) || wh <= 0) return none;
+  return {
+    wh: Math.round(wh * 10_000) / 10_000,
+    avgW: Number.isFinite(avgW) && avgW >= 0 ? Math.round(avgW * 10) / 10 : null,
+    filesPerWh: Math.round((completed / wh) * 100) / 100
+  };
+}
+
 async function placeClip(fs, from, to) {
   try { await fs.link(from, to); } catch (_) { await fs.copyFile(from, to); }
 }
@@ -38,13 +60,18 @@ async function placeClip(fs, from, to) {
  *   runLevel({ level, sourceRoot, workRoot, signal }) → job snapshot (runs the real converter)
  *   countFrames(path) → frames in a clip
  *   encoder: { codec, hardware } the converter will use
+ *   powerMeter (optional): { start() → token, stop(token) → { wh, avgW } | null }, the
+ *     server's energy reading over one level run
  * Returns { encoder, clips, results: [{ level, clips, completed, failed, failures, seconds,
- *   filesPerMinute, fps, ok }], best, skipped: [{ name, code }] }.
+ *   filesPerMinute, fps, ok, wh, avgW, filesPerWh }], best, efficient, skipped: [{ name, code }] }.
+ * best is the recommended setting for speed, as before (the lightest within 5%
+ * of the fastest); efficient the one with the most files per Wh (null unless
+ * every successful level has an energy reading).
  */
 async function runConverterBenchmark(options = {}) {
   const {
     clips, runLevel, countFrames, encoder = null, tempRoot,
-    signal, onProgress = () => {}, now = Date.now
+    signal, onProgress = () => {}, now = Date.now, powerMeter = null
   } = options;
   const fs = options.fs || nodeFs.promises;
   const pathApi = options.pathApi || nodePath;
@@ -82,12 +109,20 @@ async function runConverterBenchmark(options = {}) {
         else await placeClip(fs, sample.path, target);
       }
 
+      const meter = await startMeter(powerMeter);
       const started = now();
-      const job = await runLevel({ level, sourceRoot, workRoot: levelRoot, signal, ...variant });
+      let job;
+      try {
+        job = await runLevel({ level, sourceRoot, workRoot: levelRoot, signal, ...variant });
+      } catch (error) {
+        await stopMeter(powerMeter, meter, 0);
+        throw error;
+      }
       const seconds = Math.max(0.001, (now() - started) / 1000);
-      checkAborted();
       const items = Array.isArray(job?.items) ? job.items : [];
       const completed = items.filter((item) => item.state === 'completed');
+      const energy = await stopMeter(powerMeter, meter, completed.length);
+      checkAborted();
       const failedItems = items.filter((item) => item.state === 'failed').map((item) => ({
         origin: batch.find((entry) => item.relativePath?.endsWith(entry.name))?.origin,
         code: item.failure?.code || item.resultCode || 'failed'
@@ -120,6 +155,7 @@ async function runConverterBenchmark(options = {}) {
         verifySecondsPerClip,
         fps: Math.round((frames / seconds) * 10) / 10,
         ok: completed.length === batch.length,
+        ...energy,
         failedItems
       };
     }
@@ -176,6 +212,12 @@ async function runConverterBenchmark(options = {}) {
     const top = Math.max(0, ...successful.map((entry) => entry.filesPerMinute));
     const best = successful.filter((entry) => entry.filesPerMinute >= top * 0.95)
       .sort((left, right) => left.level - right.level)[0] || null;
+    // The most work per unit of energy, when every successful level was
+    // measured (a partial set could pick a level only because it is the one
+    // that was metered). Ties go to the lighter setting.
+    const efficient = successful.length > 0 && successful.every((entry) => entry.filesPerWh > 0)
+      ? [...successful].sort((left, right) => right.filesPerWh - left.filesPerWh || left.level - right.level)[0]
+      : null;
 
     // Verification modes side by side: all modes run back to back at the
     // recommended setting on the full set of sample clips, so the numbers are
@@ -189,7 +231,7 @@ async function runConverterBenchmark(options = {}) {
         verifyComparison.push({ verifyMode: mode, ...publicResult(await measure(best.level, samples, `verify-${mode}`, { verifyMode: mode })) });
       }
     }
-    return { encoder, clips: samples.length, results, best, verifyComparison, skipped };
+    return { encoder, clips: samples.length, results, best, efficient, verifyComparison, skipped };
   } finally {
     await fs.rm(workRoot, { recursive: true, force: true }).catch(() => {});
   }
