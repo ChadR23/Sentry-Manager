@@ -640,8 +640,10 @@ function createFootageConverterController(options = {}) {
         renderRows(elements.errorRows, failedItems.map((item) => [item.relativePath || item.id, item.failure?.code || 'operation-failed']));
         setHidden(elements.errorRows, failedItems.length === 0);
         setDisabled(elements.startButton, active);
-        setDisabled(elements.concurrency, active);
-        setDisabled(elements.concurrencyCustom, active);
+        // Parallel conversions stays open during a run: changing it applies
+        // to the running job (see liveConcurrency)
+        setDisabled(elements.concurrency, false);
+        setDisabled(elements.concurrencyCustom, false);
         setDisabled(elements.benchmarkButton, active);
         setDisabled(elements.profileSelect, active);
         setDisabled(elements.customBitrate, active);
@@ -1180,11 +1182,28 @@ function createFootageConverterController(options = {}) {
         updateVerifyOptions();
         elements.profileSelect?.addEventListener?.('change', updateCustomBitrateVisibility);
         updateCustomBitrateVisibility();
+        // During a run the new number applies to the running job right away:
+        // more starts new conversions now, fewer lets the extra ones finish
+        // their clip first. No cancel needed (also for automatic jobs).
+        async function liveConcurrency(value) {
+            if (!snapshot?.id || !ACTIVE_STATES.has(snapshot.state) || typeof api.setConverterConcurrency !== 'function') return;
+            if (Number(snapshot.config?.concurrency) === value) return;
+            try {
+                const next = unwrap(await api.setConverterConcurrency(snapshot.id, value));
+                if (next) applySnapshot(next, next.revision);
+                notify(message('concurrencyLive', 'Now {count} at once. Clips already converting finish first.', { count: value }));
+            } catch (error) {
+                notify(describeError(error), { type: 'error' });
+            }
+        }
         elements.concurrency?.addEventListener?.('change', () => {
             updateConcurrencyCustomVisibility();
             if (customConcurrencySelected()) elements.concurrencyCustom?.focus?.();
             const value = selectedConcurrency();
-            if (normalizeConcurrency(customConcurrencySelected() ? elements.concurrencyCustom?.value : elements.concurrency.value) !== null) rememberConcurrency(value);
+            if (normalizeConcurrency(customConcurrencySelected() ? elements.concurrencyCustom?.value : elements.concurrency.value) !== null) {
+                rememberConcurrency(value);
+                void liveConcurrency(value);
+            }
         });
         elements.concurrencyCustom?.addEventListener?.('change', () => {
             const value = normalizeConcurrency(elements.concurrencyCustom.value);
@@ -1192,7 +1211,11 @@ function createFootageConverterController(options = {}) {
                 const clamped = Math.min(MAX_CONCURRENCY, Math.max(MIN_CONCURRENCY, Math.round(Number(elements.concurrencyCustom.value)) || DEFAULT_CONCURRENCY));
                 elements.concurrencyCustom.value = String(clamped);
                 rememberConcurrency(clamped);
-            } else rememberConcurrency(value);
+                void liveConcurrency(clamped);
+            } else {
+                rememberConcurrency(value);
+                void liveConcurrency(value);
+            }
         });
         elements.benchmarkButton?.addEventListener?.('click', () => elements.benchmarkDialog?.showModal?.());
         elements.benchmarkRun?.addEventListener?.('click', runBenchmark);

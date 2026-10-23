@@ -210,6 +210,7 @@ const converterEnglish = Object.freeze({
     cleanupFileSingular: "file",
     cleanupFilePlural: "files",
     etaAtLeast: "at least {time}",
+    concurrencyLive: "Now {count} at once. Clips already converting finish first.",
     benchmarkCodecAllFailed: "{codec}: no setting finished ({codes})",
     benchmarkCodecSkipped: "{codec}: left out {count} clip(s) that fail on their own: {clips}",
     scanNotice: "Still finding clips. Discovered and time remaining keep rising until the scan reaches the end of the folder.",

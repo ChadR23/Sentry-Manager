@@ -11,6 +11,7 @@ const CHANNELS = Object.freeze([
   'converter:start',
   'converter:getCurrent',
   'converter:pause',
+  'converter:setConcurrency',
   'converter:resume',
   'converter:cancel',
   'converter:discard',
@@ -442,6 +443,17 @@ function registerConverterIpc(options = {}) {
       return chooseCurrent(await options.service.list());
     }),
     'converter:pause': wrapped(async (_event, payload) => sanitizeSnapshot(await options.service.pause(validateJobId(payload)))),
+    // Parallel conversions changed mid-run; an automatic job's saved settings
+    // follow, so the next automatic run uses the same number.
+    'converter:setConcurrency': wrapped(async (_event, payload) => {
+      if (!isPlainObject(payload) || Object.keys(payload).length !== 2 || !isValidConcurrency(payload.concurrency)) fail('INVALID_CONCURRENCY');
+      if (typeof options.service.setConcurrency !== 'function') fail('OPERATION_FAILED');
+      const snapshot = await options.service.setConcurrency(validateSafeJobId(payload.jobId), payload.concurrency);
+      if (snapshot?.config?.autoConvert === true && typeof options.auto?.setConcurrency === 'function') {
+        try { await options.auto.setConcurrency(payload.concurrency); } catch (_) { /* the job itself changed; settings follow next time */ }
+      }
+      return sanitizeSnapshot(snapshot);
+    }),
     'converter:resume': wrapped(async (_event, payload) => sanitizeSnapshot(await options.service.resume(validateJobId(payload)))),
     'converter:cancel': wrapped(async (_event, payload) => sanitizeSnapshot(await options.service.cancel(validateJobId(payload)))),
     // Sets aside a job that cannot be cancelled; answers with the job now current (or null).

@@ -219,6 +219,7 @@
     startConverter: (config) => invoke('start', config),
     getCurrentConverterJob: () => invoke('getCurrent'),
     pauseConverter: (jobId) => invoke('pause', { jobId }),
+    setConverterConcurrency: (jobId, concurrency) => invoke('setConcurrency', { jobId, concurrency }),
     resumeConverter: (jobId) => invoke('resume', { jobId }),
     cancelConverter: (jobId) => invoke('cancel', { jobId }),
     discardConverterJob: (jobId) => invoke('discard', { jobId }),

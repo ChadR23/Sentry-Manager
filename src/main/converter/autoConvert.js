@@ -339,6 +339,15 @@ function createAutoConverter(options = {}) {
       void tick();
       return getState();
     },
+    // Parallel conversions changed on the running automatic job: later
+    // automatic jobs use the same number.
+    async setConcurrency(value) {
+      if (!settings.config || settings.config.concurrency === value) return getState();
+      settings = { ...settings, config: { ...settings.config, concurrency: value } };
+      await writeJson(SETTINGS_FILE, settings);
+      changed();
+      return getState();
+    },
     async checkNow() {
       status.nextCheckAt = null;
       await tick();

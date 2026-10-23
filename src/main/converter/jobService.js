@@ -353,7 +353,9 @@ function createConverterJobService(deps) {
       itemSequence: manifest.items.length,
       stopPhase: null,
       stopItemId: null,
-      stopWhilePaused: false
+      stopWhilePaused: false,
+      retiringWorkers: 0,
+      addWorker: null
     };
   }
 
@@ -1494,10 +1496,18 @@ function createConverterJobService(deps) {
 
   async function work(runtime) {
     runtime.liveWorkers += 1;
+    let retired = false;
     try {
       while (!runtime.cancelRequested && !runtime.stopRequested && !runtime.recoveryRequired) {
         await waitWhilePaused(runtime);
         if (runtime.cancelRequested || runtime.stopRequested) break;
+        // Fewer at once (Parallel conversions lowered mid-run): this worker
+        // stops after its clip instead of taking another.
+        if (runtime.liveWorkers - runtime.retiringWorkers > concurrencyOf(runtime.manifest)) {
+          runtime.retiringWorkers += 1;
+          retired = true;
+          break;
+        }
         const next = await runtime.queue.shift();
         if (next.done) break;
         const item = currentItem(runtime, next.value);
@@ -1521,17 +1531,42 @@ function createConverterJobService(deps) {
       throw error;
     } finally {
       runtime.liveWorkers -= 1;
+      if (retired) runtime.retiringWorkers -= 1;
       // The remaining workers may all be parked on a pause already.
       await persistPauseWhenParked(runtime).catch(() => undefined);
     }
   }
 
   async function consume(runtime) {
+    // Workers added while the job runs (Parallel conversions raised) are
+    // waited for too.
     const workers = [];
-    for (let index = 0; index < concurrencyOf(runtime.manifest); index += 1) workers.push(work(runtime));
-    const results = await Promise.allSettled(workers);
+    runtime.addWorker = () => workers.push(work(runtime));
+    for (let index = 0; index < concurrencyOf(runtime.manifest); index += 1) runtime.addWorker();
+    const results = [];
+    try {
+      while (results.length < workers.length) results.push(...await Promise.allSettled(workers.slice(results.length)));
+    } finally {
+      runtime.addWorker = null;
+    }
     const rejected = results.find((result) => result.status === 'rejected');
     if (rejected) throw rejected.reason;
+  }
+
+  // Parallel conversions changed while the job runs (the GPU is needed
+  // elsewhere, or there is room for more): saved with the job, so a restart
+  // keeps it. Raising starts workers now; lowering lets the extra ones finish
+  // their clip and stop.
+  async function setConcurrency(id, value) {
+    if (!isValidConcurrency(value)) throw serviceError('INVALID_CONCURRENCY');
+    const runtime = await ensureRuntime(id);
+    if (TERMINAL_STATES.has(runtime.manifest.state)) throw serviceError('JOB_NOT_ACTIVE');
+    if (concurrencyOf(runtime.manifest) === value) return publicSnapshot(runtime.manifest);
+    await update(runtime, (current) => ({ config: { ...current.config, concurrency: value } }));
+    if (typeof runtime.addWorker === 'function' && !runtime.cancelRequested && !runtime.stopRequested) {
+      for (let missing = value - (runtime.liveWorkers - runtime.retiringWorkers); missing > 0; missing -= 1) runtime.addWorker();
+    }
+    return publicSnapshot(runtime.manifest);
   }
 
   async function finalize(runtime) {
@@ -2363,6 +2398,7 @@ function createConverterJobService(deps) {
     get,
     list,
     pause: (...args) => serializeCommand(() => pause(...args)),
+    setConcurrency: (...args) => serializeCommand(() => setConcurrency(...args)),
     resume: (...args) => serializeCommand(() => resume(...args)),
     cancel: (...args) => serializeCommand(() => cancel(...args)),
     discard: (...args) => serializeCommand(() => discard(...args)),

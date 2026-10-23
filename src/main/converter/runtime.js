@@ -906,6 +906,7 @@ async function createConverterRuntime(options = {}) {
       get: () => auto.getState(),
       configure: (settings) => auto.configure(settings),
       checkNow: () => auto.checkNow(),
+      setConcurrency: (value) => auto.setConcurrency(value),
       subscribe: (listener) => { autoListeners.add(listener); return () => autoListeners.delete(listener); }
     }),
     shutdown() {
