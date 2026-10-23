@@ -644,6 +644,14 @@ function createConverterJobService(deps) {
     for (let dir = pathApi.dirname(targetPath); dir !== rootPath && dir.length > rootPath.length; dir = pathApi.dirname(dir)) {
       if (await pathPresent(runtime, dir)) return true;
     }
+    // A clip directly in the footage folder has no folder in between: then
+    // other clips of this job still being there show the share answers (an
+    // unmounted share has none). A few spread over the job are enough.
+    const others = runtime.manifest.items.filter((entry) => entry.sourcePath
+      && pathApi.resolve(entry.sourcePath) !== targetPath);
+    for (const entry of [others[0], others[Math.floor(others.length / 2)], others[others.length - 1]]) {
+      if (entry && await pathPresent(runtime, entry.sourcePath)) return true;
+    }
     return false;
   }
 
@@ -700,21 +708,28 @@ function createConverterJobService(deps) {
     }
     emit(runtime, 'paused_network', { status: 'waiting' });
     let delay = backoff.initialMs;
-    while (!runtime.cancelRequested && !runtime.stopRequested) {
+    // Any abort ends the wait, including one for another clip that needs
+    // recovery (the job then stops all its workers); checking only cancel
+    // and stop kept this loop polling after such an abort, forever.
+    const ended = () => runtime.cancelRequested || runtime.stopRequested || runtime.abortController.signal.aborted;
+    while (!ended()) {
       let available = false;
       try {
         available = await abortableRead(() => network.checkPath(target, {
           allowAncestor: pathRole === 'destination', signal: runtime.abortController.signal
         }), runtime.abortController.signal) === true;
       } catch (_) { available = false; }
-      if (runtime.cancelRequested || runtime.stopRequested) throw serviceError('CANCELLED');
+      if (ended()) throw serviceError('CANCELLED');
       if (!available) {
         if (await goneWhileShareAnswers(runtime, target, pathRole)) available = true;
         else outage = true;
       }
       if (available) {
         if (persisted) {
-          await update(runtime, () => (stillLead() ? {
+          // Only while the job file still shows this wait: when another
+          // worker's progress took the job state over meanwhile, that state
+          // is newer, and writing the old one back could even be rejected.
+          await update(runtime, (current) => (stillLead() && current.state === 'paused_network' ? {
             state: resumeState,
             recovery: null,
             ...(resumeState === 'replacing' ? { replacementPhase: phase } : {})
@@ -726,6 +741,7 @@ function createConverterJobService(deps) {
       // The abort listener goes again after each sleep: the signal lives as
       // long as the job, and an outage can last all night.
       const signal = runtime.abortController.signal;
+      if (signal.aborted) throw serviceError('CANCELLED');
       let onAbort;
       try {
         await Promise.race([
@@ -1700,6 +1716,17 @@ function createConverterJobService(deps) {
   async function resume(id) {
     const runtime = await ensureRuntime(id);
     if (runtime.manifest.state !== 'paused' && !runtime.pauseRequested) throw serviceError('JOB_NOT_PAUSED');
+    // A pause that has not taken effect (a worker is still on its clip, maybe
+    // mid-replacement or waiting out an outage) is simply called off: the job
+    // state belongs to that worker, and writing 'waiting' over it was
+    // rejected mid-replacement, which left the parked workers parked.
+    if (runtime.manifest.state !== 'paused' && runtime.runPromise) {
+      runtime.pauseRequested = false;
+      runtime.pausePersisted = false;
+      for (const resolve of runtime.pauseWaiters.splice(0)) resolve();
+      emit(runtime, 'resumed');
+      return publicSnapshot(runtime.manifest);
+    }
     await releaseInterruptedSave(runtime);
     if (runtime.manifest.activeItemId && runtime.manifest.recovery) throw serviceError('RECOVERY_REQUIRED');
     runtime.pauseRequested = false;

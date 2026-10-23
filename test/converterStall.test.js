@@ -57,7 +57,7 @@ async function setup({ concurrency = 2, outputMode = 'replace', events = 2, ffmp
       clips.push(file);
     }
   }
-  const hooks = { readFile: null, access: null };
+  const hooks = { readFile: null, access: null, rename: null };
   const pfs = Object.create(fs.promises);
   pfs.readFile = async (p, ...a) => { await hooks.readFile?.(String(p)); return fs.promises.readFile(p, ...a); };
   pfs.access = async (p, ...a) => { await hooks.access?.(String(p)); return fs.promises.access(p, ...a); };
@@ -83,7 +83,11 @@ async function setup({ concurrency = 2, outputMode = 'replace', events = 2, ffmp
     userDataPath: fs.realpathSync(path.join(base, 'data')),
     tempPath: fs.realpathSync(path.join(base, 'temp')),
     ffmpegPath, ffprobePath: 'ffprobe', spawn, fs: wrappedFs, pathApi: path, platform: process.platform,
-    removeOwned: owned.removeOwned, renameExclusive: owned.renameExclusive, network, autoConvert: false,
+    removeOwned: owned.removeOwned, network, autoConvert: false,
+    // the same helper; a test can step in just before a clip replaces its original
+    renameExclusive: Object.assign((...args) => owned.renameExclusive(...args), owned.renameExclusive, {
+      promote: async (...args) => { await hooks.rename?.(...args); return owned.renameExclusive.promote(...args); }
+    }),
     gpuDecode: false, encodeStallMs,
     networkBackoff: { initialMs: 50, maximumMs: 200 }
   });
@@ -143,6 +147,31 @@ test('a clip moved away mid-job fails on its own while a pause settles', { skip,
     job = await settle(env.runtime, jobId);
     assert.strictEqual(job.state, 'completed');
     assert.strictEqual(count(job, 'completed'), env.clips.length - 1);
+  } finally {
+    await env.runtime.shutdown().catch(() => {});
+    fs.rmSync(env.base, { recursive: true, force: true });
+  }
+});
+
+test('the window reopening while a clip is being replaced resumes the job', { skip, timeout: 120_000 }, async () => {
+  const env = await setup({ concurrency: 2, events: 2 });
+  try {
+    let jobId;
+    let resumed = null;
+    // The automatic window closes and reopens while a clip is mid-replacement.
+    env.hooks.rename = async () => {
+      if (resumed) return;
+      resumed = (async () => {
+        await env.runtime.service.pause(jobId);
+        return env.runtime.service.resume(jobId);
+      })();
+      await resumed.catch(() => {});
+    };
+    jobId = await env.runtime.service.start(env.config);
+    const job = await settle(env.runtime, jobId);
+    await assert.doesNotReject(resumed, 'resume was accepted mid-replacement');
+    assert.strictEqual(job.state, 'completed');
+    assert.strictEqual(count(job, 'completed'), env.clips.length);
   } finally {
     await env.runtime.shutdown().catch(() => {});
     fs.rmSync(env.base, { recursive: true, force: true });
