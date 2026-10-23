@@ -352,7 +352,8 @@ function createConverterJobService(deps) {
       scannerStarted: false,
       itemSequence: manifest.items.length,
       stopPhase: null,
-      stopItemId: null
+      stopItemId: null,
+      stopWhilePaused: false
     };
   }
 
@@ -1555,6 +1556,15 @@ function createConverterJobService(deps) {
       emit(runtime, 'cancelled');
       return;
     }
+    if (runtime.stopRequested && runtime.stopWhilePaused
+        && !runtime.manifest.items.some((item) => Object.keys(item.ownedPaths || {}).length > 0)) {
+      await update(runtime, (current) => ({
+        state: 'paused', activeItemId: null, recovery: null,
+        items: current.items.map((item) => item.state === 'processing' ? mergeItem(item, { state: 'queued', failure: undefined }) : item)
+      }));
+      emit(runtime, 'paused');
+      return;
+    }
     if (runtime.stopRequested) {
       await update(runtime, (current) => {
         const unresolved = current.items.find((item) => Object.keys(item.ownedPaths || {}).length > 0);
@@ -1985,6 +1995,23 @@ function createConverterJobService(deps) {
       emit(runtime, 'recovered');
       return publicSnapshot(runtime.manifest);
     }
+    // Stopped between clips (an update, docker compose down): nothing was
+    // half done, so the job carries on by itself. It used to stay paused
+    // with nothing to resume from, until the owner cancelled it.
+    if (!item && (recovery?.action === 'restart-encoding' || recovery?.action === 'restart-copy')) {
+      await update(runtime, (current) => ({
+        state: 'waiting', activeItemId: null, recovery: null,
+        items: current.items.map((entry) => entry.state === 'processing'
+          ? mergeItem(entry, { state: 'queued', failure: undefined }) : entry)
+      }));
+      runtime.queue = new BoundedQueue(queueLimit);
+      await launch(runtime, {
+        discover: runtime.manifest.discoveryComplete === false,
+        itemIds: runtime.manifest.items.filter((entry) => entry.state === 'queued').map((entry) => entry.id)
+      });
+      emit(runtime, 'recovered');
+      return publicSnapshot(runtime.manifest);
+    }
     if (!item || !recovery || recovery.action === 'manual-intervention') return publicSnapshot(recovered);
 
     async function completeRecovered(finalPath, outputBytes, transactionResult = {}) {
@@ -2318,6 +2345,9 @@ function createConverterJobService(deps) {
         ? runtime.manifest.recovery?.resumeState
         : runtime.manifest.state === 'paused' ? runtime.manifest.recovery?.fromState : runtime.manifest.state;
       runtime.stopItemId = runtime.manifest.activeItemId || leadItemId(runtime);
+      // paused by the owner (or the automatic window): it stays paused after
+      // the restart; a job that was running carries on by itself
+      runtime.stopWhilePaused = runtime.manifest.state === 'paused' && !runtime.manifest.recovery;
       runtime.stopRequested = true;
       runtime.abortController.abort();
       runtime.queue.close();

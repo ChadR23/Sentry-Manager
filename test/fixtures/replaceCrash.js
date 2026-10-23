@@ -31,7 +31,7 @@ async function makeBase(base) {
 
 // The runtime as server/converterHost.js composes it; onPromote / afterPromote
 // run around each no-replace move.
-async function open(base, { onPromote, afterPromote } = {}) {
+async function open(base, { onPromote, afterPromote, ffprobePath = 'ffprobe' } = {}) {
   process.env.SENTRY_NOREPLACE_RENAME = HELPER;
   const owned = createPosixOwnedFs();
   const renameExclusive = Object.assign((...args) => owned.renameExclusive(...args), owned.renameExclusive, {
@@ -49,7 +49,7 @@ async function open(base, { onPromote, afterPromote } = {}) {
   const runtime = await createConverterRuntime({
     userDataPath: fs.realpathSync(path.join(base, 'data')),
     tempPath: fs.realpathSync(path.join(base, 'temp')),
-    ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe', spawn, fs, pathApi: path, platform: process.platform,
+    ffmpegPath: 'ffmpeg', ffprobePath, spawn, fs, pathApi: path, platform: process.platform,
     removeOwned: owned.removeOwned, renameExclusive, network, autoConvert: false, gpuDecode: false,
     networkBackoff: { initialMs: 50, maximumMs: 200 }
   });

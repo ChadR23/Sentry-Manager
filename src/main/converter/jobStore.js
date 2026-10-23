@@ -1345,7 +1345,16 @@ function createJobStore(options) {
           || ((stored.state === 'paused' || stored.state === 'paused_network') && stored.recovery))) {
         return cloneManifest(stored);
       }
-      const current = reinspect ? { ...stored, state: 'replacing', replacementPhase: phase, recovery: null } : stored;
+      // Paused by the owner (or the automatic window) with nothing half done:
+      // it stays paused. Recovering it as a "paused" step was refused by the
+      // job file's own rules and stopped the converter from starting at all.
+      const ownsFiles = (entry) => Object.keys(entry?.ownedPaths || {}).length > 0;
+      if (!reinspect && stored.state === 'paused' && !stored.recovery && !ownsFiles(stored) && !stored.items.some(ownsFiles)) {
+        return cloneManifest(stored);
+      }
+      // ...and one that still owns files is recovered like an interrupted encode
+      const current = reinspect ? { ...stored, state: 'replacing', replacementPhase: phase, recovery: null }
+        : stored.state === 'paused' && !stored.recovery ? { ...stored, state: 'encoding' } : stored;
       let facts;
       try {
         const inspected = await inspectPaths(cloneManifest(current));
