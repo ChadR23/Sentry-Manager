@@ -354,6 +354,10 @@ html.reduce-effects *, html.reduce-effects *::before { transition: none !importa
   .day-top { grid-template-columns: 26px 140px minmax(0, 1fr); }
   .day-thumb { width: 140px; height: 84px; }
   .day-actions { grid-column: 2 / -1; flex-direction: row; flex-wrap: wrap; }
+  /* a rate on two rows: name and price, then from and to */
+  .rate { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .rate-days { grid-column: 1 / -1; }
+  .rate-del { grid-column: 1 / -1; justify-self: start; }
 }
 @media (max-width: 760px) {
   .app, .app.collapsed { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; }
@@ -405,9 +409,7 @@ html.reduce-effects *, html.reduce-effects *::before { transition: none !importa
   .nd-grid { grid-template-columns: minmax(0, 1fr); }
   .nd-big b { font-size: 26px; }
   .nd-procs th:nth-child(3), .nd-procs td:nth-child(3) { display: none; }
-  .rate { grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 12px; }
-  .rate-days { grid-column: 1 / -1; }
-  .rate-del { grid-column: 1 / -1; justify-self: start; }
+  .rate { padding: 12px; }
   /* the week on one row */
   .days-pick { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; }
   .days-pick span { display: flex; min-width: 0; padding: 0; }
