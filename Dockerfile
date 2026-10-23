@@ -31,6 +31,9 @@ COPY jellyfin.gpg /etc/apt/keyrings/jellyfin.gpg
 RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive; \
     apt-get update; \
+    # Debian security fixes released since the base image was published (the
+    # weekly rebuild then always has them)
+    apt-get upgrade -y; \
     apt-get install -y --no-install-recommends ca-certificates; \
     printf 'Types: deb\nURIs: https://repo.jellyfin.org/debian\nSuites: trixie\nComponents: main\nSigned-By: /etc/apt/keyrings/jellyfin.gpg\n' \
       > /etc/apt/sources.list.d/jellyfin.sources; \

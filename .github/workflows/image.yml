@@ -38,16 +38,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
 
       # The ffmpeg packages the tests need (63 MB) are kept between runs: the
       # Ubuntu mirror once took 21 minutes to send them.
       - name: Cache ffmpeg packages
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/apt-archives
           key: apt-ffmpeg-${{ runner.os }}-${{ github.run_id }}
@@ -77,11 +77,11 @@ jobs:
             echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           } >> "$GITHUB_OUTPUT"
 
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
 
       - name: Build for checking (amd64)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64
@@ -117,14 +117,14 @@ jobs:
           grep -Eq '^Uid:\s+1000\s' app.txt && grep -Eq '^CapEff:\s+0+$' app.txt && grep -Eq '^NoNewPrivs:\s+1$' app.txt
           docker rm -f check
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and publish (amd64, arm64)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
