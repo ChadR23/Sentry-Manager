@@ -2,7 +2,7 @@
 
 const path = require('path');
 const { randomUUID } = require('crypto');
-const { createEmptyCounters, isValidConcurrency, isValidCustomBitrate, isValidQualityLevel, isValidVerifyMode, TIMING_PHASES } = require('./contracts');
+const { createEmptyCounters, isValidConcurrency, isValidCustomBitrate, isValidQualityLevel, isValidVerifyMode, normalizeLanes, lanesTotal, TIMING_PHASES } = require('./contracts');
 
 const MANIFEST_VERSION = 1;
 const MANIFEST_NAME = 'job.json';
@@ -56,7 +56,8 @@ const TOP_FIELDS = new Set([
 ]);
 const CONFIG_FIELDS = new Set([
   'sourceRoot', 'destinationRoot', 'codec', 'profileId', 'networkMode',
-  'outputMode', 'includedGroups', 'groupOrder', 'replacementConfirmed', 'concurrency', 'bitrateKbps', 'qualityLevel', 'autoConvert', 'verifyMode'
+  'outputMode', 'includedGroups', 'groupOrder', 'replacementConfirmed', 'concurrency', 'bitrateKbps', 'qualityLevel', 'autoConvert', 'verifyMode',
+  'lanes'
 ]);
 const ITEM_FIELDS = new Set([
   'id', 'state', 'kind', 'group', 'eventId', 'relativePath', 'sourcePath',
@@ -507,7 +508,15 @@ function normalizeConfig(value) {
     if (value.autoConvert !== true) throw storeError('INVALID_MANIFEST');
     result.autoConvert = true;
   }
-  if (value.concurrency !== undefined) {
+  // Conversions at once per GPU; the total is the job's concurrency. A lanes
+  // value that is not valid (saved by a newer or damaged version) is left
+  // out and the job runs with its plain concurrency instead of not loading.
+  let lanes = null;
+  try { lanes = normalizeLanes(value.lanes); } catch (_) { lanes = null; }
+  if (lanes) {
+    result.lanes = lanes;
+    result.concurrency = lanesTotal(lanes);
+  } else if (value.concurrency !== undefined) {
     if (!isValidConcurrency(value.concurrency)) throw storeError('INVALID_MANIFEST');
     result.concurrency = value.concurrency;
   }
