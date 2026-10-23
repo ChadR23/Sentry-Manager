@@ -123,14 +123,19 @@ const REPLACEMENT_TRUTH_TABLES = Object.freeze({
     '0111': 'delete-backup', '0101': 'finish-replacement',
     '0010': 'restore-backup'
   }),
+  // A rollback stopped before the original was back (a share hiccup while
+  // moving it, a crash): the converted candidate is still there and the
+  // original's bytes are only in the backup ('1010'). Restoring the backup is
+  // what the rollback was doing; it removes the candidate and checks the
+  // backup against the original's recorded identity first.
   'rollback-started': Object.freeze({
-    '0100': 'rollback-complete', '0010': 'restore-backup'
+    '0100': 'rollback-complete', '0010': 'restore-backup', '1010': 'restore-backup'
   }),
   'backup-restored': Object.freeze({
-    '0100': 'rollback-complete', '0010': 'restore-backup'
+    '0100': 'rollback-complete', '0010': 'restore-backup', '1010': 'restore-backup'
   }),
   'rollback-failed': Object.freeze({
-    '0100': 'rollback-complete', '0010': 'restore-backup'
+    '0100': 'rollback-complete', '0010': 'restore-backup', '1010': 'restore-backup'
   })
 });
 const REPLACEMENT_ACTIONS_BY_PHASE = Object.freeze(Object.fromEntries(
@@ -1372,7 +1377,10 @@ function createJobStore(options) {
       try {
         const inspected = await inspectPaths(cloneManifest(current));
         facts = normalizeFacts(inspected);
-      } catch (_) {
+      } catch (error) {
+        // the reason goes to Settings > Logs; the owner only saw the code
+        console.warn('[CONVERTER] The interrupted clip\'s files could not be checked:', error?.code || 'ERROR',
+          String(error?.message || error).slice(0, 300));
         throw storeError('INSPECTION_FAILED');
       }
       const recovery = {

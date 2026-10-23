@@ -2155,6 +2155,23 @@ function createConverterJobService(deps) {
     return runtime;
   }
 
+  // A run that stopped itself (a clip that could not be finished safely
+  // parks the job for recovery) leaves its runtime spent: the abort signal
+  // stays aborted and the stop flags stay set. Resume and Cancel then re-read
+  // the interrupted clip's files with that aborted signal (INSPECTION_FAILED)
+  // and a relaunched worker would stop at once, until the app restarted.
+  // Once that run has ended, the job carries on from a fresh runtime.
+  async function liveRuntime(id) {
+    const runtime = await ensureRuntime(id);
+    if (runtime.runPromise || shuttingDown) return runtime;
+    const spent = runtime.abortController.signal.aborted || runtime.recoveryRequired
+      || runtime.cancelRequested || runtime.halted;
+    if (!spent) return runtime;
+    const fresh = runtimeFor(runtime.manifest);
+    jobs.set(id, fresh);
+    return fresh;
+  }
+
   async function get(id) {
     const runtime = jobs.get(id);
     const manifest = runtime ? runtime.manifest : await store.load(id);
@@ -2175,7 +2192,7 @@ function createConverterJobService(deps) {
   }
 
   async function resume(id) {
-    const runtime = await ensureRuntime(id);
+    const runtime = await liveRuntime(id);
     if (runtime.manifest.state !== 'paused' && !runtime.pauseRequested) throw serviceError('JOB_NOT_PAUSED');
     // A replacement interrupted by a restart (an update of the container, a
     // power cut) that recovery parked for a decision: Resume re-reads the
@@ -2276,7 +2293,7 @@ function createConverterJobService(deps) {
   }
 
   async function cancel(id) {
-    const runtime = await ensureRuntime(id);
+    const runtime = await liveRuntime(id);
     if (runtime.manifest.recovery?.fromState === 'replacing') await resolveReplacementBeforeCancel(runtime, id);
     await releaseInterruptedSave(runtime);
     // Still waiting on a decision (an original may be at risk): say so instead
@@ -2321,7 +2338,7 @@ function createConverterJobService(deps) {
   }
 
   async function retryFailed(id) {
-    const runtime = await ensureRuntime(id);
+    const runtime = await liveRuntime(id);
     if (runtime.manifest.recovery?.fromState === 'replacing') throw serviceError('RECOVERY_REQUIRED');
     if (runtime.runPromise) throw serviceError('JOB_ACTIVE');
     if (!['completed', 'failed'].includes(runtime.manifest.state)) throw serviceError('JOB_NOT_RETRYABLE');
