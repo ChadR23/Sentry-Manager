@@ -128,4 +128,4 @@ function createConverterHost({ dataDir, tempDir, ffmpegPath = 'ffmpeg', ffprobeP
   };
 }
 
-module.exports = { createConverterHost, RETRYABLE };
+module.exports = { createConverterHost, createDeviceNameOf, RETRYABLE };

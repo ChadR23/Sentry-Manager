@@ -361,7 +361,8 @@ function withLanes(config, laneFields) {
 // them). Automatic and resumed jobs never ask; they use the CPU encoder.
 async function checkLaneEncoders(config, devices) {
   if (!Array.isArray(config.lanes) || typeof devices !== 'function') return;
-  const known = await devices();
+  let known;
+  try { known = await devices(); } catch (_) { return; /* the job itself handles what it finds */ }
   for (const lane of config.lanes) {
     const device = (Array.isArray(known?.devices) ? known.devices : []).find((entry) => entry?.id === lane.device);
     if (device && lane.concurrency > 0 && device.encoders?.[config.codec] === null) {

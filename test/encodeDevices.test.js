@@ -162,3 +162,24 @@ test('other systems and a container without GPUs have only the CPU', async () =>
     fs.rmSync(m.root, { recursive: true, force: true });
   }
 });
+
+test('the server names the devices as Overview > Server names its GPUs', () => {
+  const { gpuDisplayName } = require('../server/stats/gpu');
+  const { createDeviceNameOf } = require('../server/converterHost');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sm-devices-names-'));
+  try {
+    const amd = path.join(root, '0000:0c:00.0');
+    fs.mkdirSync(amd);
+    fs.writeFileSync(path.join(amd, 'product_name'), 'AMD Radeon RX 7600\n');
+    const none = { pciIdsFiles: [] };
+    assert.equal(gpuDisplayName({ ...none, driver: 'i915', vendorId: '0x8086', deviceId: '0x56a5' }), 'Intel Arc A380');
+    assert.equal(gpuDisplayName({ ...none, driver: 'i915', vendorId: '0x8086', deviceId: '0x4680' }), 'Intel graphics');
+    assert.equal(gpuDisplayName({ ...none, dev: amd, driver: 'amdgpu', vendorId: '0x1002', deviceId: '0x7480' }), 'AMD Radeon RX 7600');
+    assert.equal(gpuDisplayName({ ...none, driver: 'v3d', kind: 'other', vendor: 'other' }), 'Broadcom V3D');
+    const nameOf = createDeviceNameOf();
+    assert.equal(nameOf({ pci: '0000:0c:00.0', vendor: 'amd', vendorId: '0x1002', deviceId: '0x7480', driver: 'amdgpu', sysDevice: amd }), 'AMD Radeon RX 7600');
+    assert.equal(nameOf({ pci: '0000:03:00.0', vendor: 'intel', vendorId: '0x8086', deviceId: '0x56a5', driver: 'xe', sysDevice: path.join(root, 'x') }), 'Intel Arc A380');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
