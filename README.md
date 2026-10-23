@@ -114,6 +114,12 @@ copies somewhere else is a choice you make in the Output section.
   converted copies go to a folder you choose (under `/data/converted` or a
   vehicle's share). If the share cannot guarantee a safe replacement, this
   is the only option offered.
+- **Long runs don't stall.** A clip that is moved or deleted while a job
+  runs (the Recycle Bin, a policy, the car) fails as `source-missing` and
+  the job goes on. A share that stops answering pauses the job until it is
+  back. An encode that reports no progress for 10 minutes (a stuck GPU or
+  share) is stopped and redone the slower way, or fails. The automatic
+  window resumes its job even when the pause had not taken effect yet.
 
 ### GPU
 

@@ -164,6 +164,12 @@ function createLimiter(limit) {
   };
 }
 
+// A folder or clip moved or deleted while the scan runs (the Recycle Bin, a
+// retention policy, the car) is skipped; any other error still stops it.
+function vanished(error) {
+  return error?.code === 'ENOENT';
+}
+
 function cancelledError() {
   return Object.assign(new Error('cancelled'), { code: 'CANCELLED' });
 }
@@ -234,9 +240,15 @@ async function* scanTeslaFootage(config = {}, adapterOverrides = {}) {
 
   async function* walk(directoryPath, relativeParts, group, groupRelativeParts) {
     if (adapters.signal?.aborted) throw Object.assign(new Error('cancelled'), { code: 'CANCELLED' });
-    const directory = await adapters.retryOperation({
-      kind: 'opendir', path: directoryPath, operation: () => adapters.opendir(directoryPath)
-    });
+    let directory;
+    try {
+      directory = await adapters.retryOperation({
+        kind: 'opendir', path: directoryPath, operation: () => adapters.opendir(directoryPath)
+      });
+    } catch (error) {
+      if (vanished(error) && directoryPath !== sourceRoot) return;
+      throw error;
+    }
     const iterator = directory[Symbol.asyncIterator]();
     try {
       const entries = [];
@@ -269,7 +281,11 @@ async function* scanTeslaFootage(config = {}, adapterOverrides = {}) {
         const childGroup = group || canonicalGroup(entry.name);
         if (childGroup && !includedGroups.has(childGroup)) continue;
 
-        const childRealPath = await adapters.realpath(childPath);
+        let childRealPath;
+        try { childRealPath = await adapters.realpath(childPath); } catch (error) {
+          if (vanished(error)) continue;
+          throw error;
+        }
         if (!isSameOrDescendant(sourceRealPath, childRealPath, adapters.platform, pathApi)) continue;
 
         if (destination && (
@@ -294,10 +310,16 @@ async function* scanTeslaFootage(config = {}, adapterOverrides = {}) {
       const assetType = classifyEventAsset(entry.name, group, groupRelativeParts);
       if (!parsedFilename && !assetType) continue;
 
-      const realFilePath = await adapters.realpath(childPath);
-      if (!isSameOrDescendant(sourceRealPath, realFilePath, adapters.platform, pathApi)) continue;
-
-      const fileStat = await adapters.stat(childPath);
+      let realFilePath;
+      let fileStat;
+      try {
+        realFilePath = await adapters.realpath(childPath);
+        if (!isSameOrDescendant(sourceRealPath, realFilePath, adapters.platform, pathApi)) continue;
+        fileStat = await adapters.stat(childPath);
+      } catch (error) {
+        if (vanished(error)) continue;
+        throw error;
+      }
       if (!fileStat.isFile()) continue;
 
       const eventId = group && ['SavedClips', 'SentryClips'].includes(group) && groupRelativeParts.length > 0
@@ -395,7 +417,11 @@ async function* scanTeslaFootage(config = {}, adapterOverrides = {}) {
       const childGroup = group || canonicalGroup(entry.name);
       if (childGroup && !includedGroups.has(childGroup)) return null;
       return quiet((async () => {
-        const childRealPath = await limit(() => adapters.realpath(childPath));
+        let childRealPath;
+        try { childRealPath = await limit(() => adapters.realpath(childPath)); } catch (error) {
+          if (vanished(error)) return null;
+          throw error;
+        }
         if (!isSameOrDescendant(sourceRealPath, childRealPath, adapters.platform, pathApi)) return null;
         if (destination && (
           (destinationAbsoluteInsideSource &&
@@ -422,9 +448,15 @@ async function* scanTeslaFootage(config = {}, adapterOverrides = {}) {
     if (!parsedFilename && !assetType) return null;
 
     return quiet((async () => {
-      const realFilePath = await limit(() => adapters.realpath(childPath));
-      if (!isSameOrDescendant(sourceRealPath, realFilePath, adapters.platform, pathApi)) return null;
-      const fileStat = await limit(() => adapters.stat(childPath));
+      let fileStat;
+      try {
+        const realFilePath = await limit(() => adapters.realpath(childPath));
+        if (!isSameOrDescendant(sourceRealPath, realFilePath, adapters.platform, pathApi)) return null;
+        fileStat = await limit(() => adapters.stat(childPath));
+      } catch (error) {
+        if (vanished(error)) return null;
+        throw error;
+      }
       if (!fileStat.isFile()) return null;
       const eventId = group && ['SavedClips', 'SentryClips'].includes(group) && groupRelativeParts.length > 0
         ? groupRelativeParts[0]
@@ -450,7 +482,13 @@ async function* scanTeslaFootage(config = {}, adapterOverrides = {}) {
 
   async function* walkAhead(directoryPath, relativeParts, group, groupRelativeParts, listing) {
     if (adapters.signal?.aborted) throw cancelledError();
-    const entries = await (listing || limit(() => listDirectory(directoryPath)));
+    let entries;
+    try {
+      entries = await (listing || limit(() => listDirectory(directoryPath)));
+    } catch (error) {
+      if (vanished(error) && directoryPath !== sourceRoot) return;
+      throw error;
+    }
     const tasks = new Array(entries.length);
     let scheduled = 0;
     for (let index = 0; index < entries.length; index += 1) {

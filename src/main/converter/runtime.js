@@ -600,6 +600,9 @@ async function createConverterRuntime(options = {}) {
     discoveryBatchSize: 200,
     discoveryFlushMs: 250,
     queueLimit: 10_000,
+    // How long ffmpeg may go without reporting progress before it counts
+    // as stuck (jobService's default when unset).
+    encodeStallMs: options.encodeStallMs,
     ensureDestinationParent: ({ destinationRoot, destination }) => ensureContainedDestinationParent({
       destinationRoot, destination, fs: pfs, pathApi, platform
     })

@@ -68,6 +68,11 @@ function createConverterHost({ dataDir, tempDir, ffmpegPath = 'ffmpeg', ffprobeP
         removeOwned: owned.removeOwned,
         renameExclusive: owned.renameExclusive,
         network: createNetwork(),
+        // Probing, verifying and writing telemetry for a Tesla clip take
+        // seconds to a few minutes; one still running after 30 minutes is
+        // stuck (the converter's own limit is 12 hours) and fails its clip
+        // instead of holding a worker.
+        processTimeoutMs: 30 * 60_000,
         onClipConverted: (outputPath) => onClipConverted?.(outputPath),
         onError: (error) => log?.error(`Converter recovery failed: ${error?.code || error?.message || 'RECOVERY_FAILED'}`)
       });

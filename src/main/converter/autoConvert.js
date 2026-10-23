@@ -235,7 +235,12 @@ function createAutoConverter(options = {}) {
       await setPausedForWindow(job.id);
       changed();
     } else if (insideWindow && status.pausedForWindow) {
-      if (job.state === 'paused') await service.resume(job.id);
+      // A pause takes effect once every worker has finished its clip. Resume
+      // whether or not it already has: a pause still settling when the
+      // window opened again was never undone, and it held the job for good.
+      try { await service.resume(job.id); } catch (error) {
+        if (error?.code !== 'JOB_NOT_PAUSED') throw error;
+      }
       await setPausedForWindow(null);
       changed();
     }

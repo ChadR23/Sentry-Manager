@@ -44,6 +44,9 @@ class ConverterJobServiceError extends Error {
 }
 
 const MAX_RECORDED_ATTEMPTS = 3; // jobStore rejects more
+// Retries of an operation whose "network" error came while nothing was down
+// (see waitForNetwork) before it counts as a plain failure.
+const QUICK_RETRY_LIMIT = 2;
 // States in which a job is not working: time spent in them is left out of its
 // elapsed time and average speed (a retry restarts a finished job).
 const IDLE_JOB_STATES = new Set(['paused', 'paused_network', 'completed', 'skipped', 'failed', 'cancelled']);
@@ -252,6 +255,7 @@ function createConverterJobService(deps) {
     throw new RangeError('network backoff must use positive bounded integers');
   }
   const ffmpegPath = deps.ffmpegPath || 'ffmpeg';
+  const encodeStallMs = deps.encodeStallMs || 10 * 60_000;
   // Monotonic clock for per-phase timings (kept separate from deps.clock, which
   // stamps manifests).
   const timingNow = deps.timingNow || (() => performance.now());
@@ -355,6 +359,15 @@ function createConverterJobService(deps) {
   function update(runtime, buildPatch) {
     const operation = runtime.persistChain.catch(() => undefined).then(async () => {
       let patch = typeof buildPatch === 'function' ? buildPatch(runtime.manifest) : buildPatch;
+      // A network wait recorded by one worker describes that worker's item.
+      // When another worker's progress takes over the job-level state (it
+      // holds the save slot now), that record goes with it: the job file
+      // only accepts a recovery record on a paused job, and rejecting the
+      // write stopped every worker and even Cancel.
+      if (patch && typeof patch.state === 'string' && patch.state !== 'paused' && patch.state !== 'paused_network'
+          && !('recovery' in patch) && runtime.manifest.recovery?.fromState === 'paused_network') {
+        patch = { ...patch, recovery: null };
+      }
       // Stamp state changes so a finished job knows when it finished (elapsed
       // time and average speed after completion).
       if (patch && typeof patch.state === 'string' && patch.state !== runtime.manifest.state && !('updatedAt' in patch)) {
@@ -600,6 +613,41 @@ function createConverterJobService(deps) {
     }
   }
 
+  // A path that is missing while a folder above it inside the footage is
+  // still there (its event folder, SentryClips, ...) was moved or deleted
+  // (the Recycle Bin, a retention policy, the car): waiting cannot bring it
+  // back. When nothing between it and the footage's top folder is there, the
+  // share may have dropped (an unmounted share leaves its empty mount folder
+  // behind): that is an outage, as is the top folder itself and a
+  // destination (which may not exist yet).
+  async function goneWhileShareAnswers(runtime, target, pathRole) {
+    const root = runtime.manifest.config.sourceRoot;
+    if (pathRole === 'destination' || typeof root !== 'string') return false;
+    const rootPath = pathApi.resolve(root);
+    const targetPath = pathApi.resolve(target);
+    const relative = pathApi.relative(rootPath, targetPath);
+    if (relative === '') return false;
+    // Outside the footage (the converter's own working files): the share
+    // answering is enough.
+    if (relative.startsWith('..') || pathApi.isAbsolute(relative)) return pathPresent(runtime, rootPath);
+    for (let dir = pathApi.dirname(targetPath); dir !== rootPath && dir.length > rootPath.length; dir = pathApi.dirname(dir)) {
+      if (await pathPresent(runtime, dir)) return true;
+    }
+    return false;
+  }
+
+  async function pathPresent(runtime, target) {
+    const signal = runtime.abortController.signal;
+    try {
+      return await abortableRead(() => network.checkPath(target, { allowAncestor: false, signal }), signal) === true;
+    } catch (_) { return false; }
+  }
+
+  // Resolves true after a real outage (the path or its share did not answer
+  // for a while) and false when there was nothing to wait for: the path
+  // answers again right away, or it is gone while the share answers. The
+  // callers retry an operation a few times at most after a false, so an
+  // error that is not about the network cannot loop forever.
   async function waitForNetwork(runtime, target, options = {}) {
     // Only one wait persists the job-level paused_network state; concurrent
     // workers waiting on the same outage just poll their own path.
@@ -623,6 +671,7 @@ function createConverterJobService(deps) {
     // job-level state must not be overwritten.
     const stillLead = () => !options.itemId || isLead(runtime, options.itemId);
     let persisted = false;
+    let outage = false;
     try {
     if (persist) {
       await update(runtime, () => {
@@ -648,6 +697,10 @@ function createConverterJobService(deps) {
         }), runtime.abortController.signal) === true;
       } catch (_) { available = false; }
       if (runtime.cancelRequested || runtime.stopRequested) throw serviceError('CANCELLED');
+      if (!available) {
+        if (await goneWhileShareAnswers(runtime, target, pathRole)) available = true;
+        else outage = true;
+      }
       if (available) {
         if (persisted) {
           await update(runtime, () => (stillLead() ? {
@@ -657,13 +710,23 @@ function createConverterJobService(deps) {
           } : {}));
         }
         emit(runtime, 'network_reconnected', { status: 'resuming' });
-        return;
+        return outage;
       }
-      await Promise.race([
-        clock.sleep(delay),
-        new Promise((_, reject) => runtime.abortController.signal.addEventListener('abort',
-          () => reject(serviceError('CANCELLED')), { once: true }))
-      ]);
+      // The abort listener goes again after each sleep: the signal lives as
+      // long as the job, and an outage can last all night.
+      const signal = runtime.abortController.signal;
+      let onAbort;
+      try {
+        await Promise.race([
+          clock.sleep(delay),
+          new Promise((_, reject) => {
+            onAbort = () => reject(serviceError('CANCELLED'));
+            signal.addEventListener('abort', onAbort, { once: true });
+          })
+        ]);
+      } finally {
+        signal.removeEventListener('abort', onAbort);
+      }
       delay = Math.min(backoff.maximumMs, delay * 2);
     }
     throw serviceError('CANCELLED');
@@ -678,22 +741,26 @@ function createConverterJobService(deps) {
   }
 
   async function retryAffectedOperation(runtime, target, operation) {
+    let quickRetries = 0;
     while (true) {
       if (runtime.abortController.signal.aborted) throw serviceError('CANCELLED');
       try { return await operation(); } catch (error) {
         if (!isRetryableNetwork(error, target)) throw error;
-        await waitForNetwork(runtime, target, { persist: false });
+        if (await waitForNetwork(runtime, target, { persist: false })) quickRetries = 0;
+        else if (++quickRetries > QUICK_RETRY_LIMIT) throw error;
       }
     }
   }
 
   async function retryTransactionOperation(runtime, itemId, target, operation, networkProbePath = target) {
+    let quickRetries = 0;
     while (true) {
       try { return await operation(); } catch (error) {
         if (!isRetryableNetwork(error, target)) throw error;
         const reconciled = await reconcileItemOwnership(runtime, itemId, ownershipFor(runtime, itemId));
         if (!reconciled) throw Object.assign(new Error('cleanup pending'), { code: 'OWNED_CLEANUP_FAILED' });
-        await waitForNetwork(runtime, networkProbePath, { pathRole: 'destination', itemId });
+        if (await waitForNetwork(runtime, networkProbePath, { pathRole: 'destination', itemId })) quickRetries = 0;
+        else if (++quickRetries > QUICK_RETRY_LIMIT) throw error;
       }
     }
   }
@@ -751,9 +818,29 @@ function createConverterJobService(deps) {
       child.kill('SIGTERM');
     }
     child.stderr?.on?.('data', () => {});
+    // ffmpeg reports progress about twice a second. A GPU or a share that
+    // stops answering can leave it waiting forever without failing, which
+    // held the worker for good; after a long silence it is stopped and the
+    // clip goes on as a failed encode (slower decoding, the CPU encoder, or
+    // a failed clip).
+    let finishStalled = null;
+    let stallTimer = null;
+    const watchStall = () => {
+      clearTimeout(stallTimer);
+      stallTimer = setTimeout(() => {
+        entry.terminationRequested = true;
+        try { child.kill('SIGKILL'); } catch (_) { /* already gone */ }
+        // Not waiting for 'close': a process stuck in the kernel on a dead
+        // share may not exit until the share answers.
+        finishStalled?.();
+      }, encodeStallMs);
+      stallTimer.unref?.();
+    };
+    watchStall();
     let buffered = '';
     const progress = {};
     child.stdout.on('data', (chunk) => {
+      watchStall();
       buffered = `${buffered}${Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk)}`.slice(-8192);
       const lines = buffered.split(/\r?\n/);
       buffered = lines.pop() || '';
@@ -785,10 +872,12 @@ function createConverterJobService(deps) {
       const finish = (result) => {
         if (settled) return;
         settled = true;
+        clearTimeout(stallTimer);
         if (runtime.children.get(itemId) === entry) runtime.children.delete(itemId);
         runtime.encodeFps.delete(itemId);
         resolve(result);
       };
+      finishStalled = () => finish({ ok: false, code: 'encoder-stalled' });
       child.once('error', () => finish({ ok: false, code: 'encoder-start-failed' }));
       child.once('close', (code, signal) => {
         if (runtime.cancelRequested || runtime.stopRequested || runtime.recoveryRequired || signal) {
@@ -1295,6 +1384,7 @@ function createConverterJobService(deps) {
   }
 
   async function processVideo(runtime, item) {
+    let quickRetries = 0;
     while (!runtime.cancelRequested && !runtime.stopRequested) {
       try {
         return await processVideoOnce(runtime, currentItem(runtime, item.id));
@@ -1305,7 +1395,16 @@ function createConverterJobService(deps) {
           const reconciled = await reconcileItemOwnership(runtime, item.id, ownershipFor(runtime, item.id));
           if (!reconciled) throw Object.assign(new Error('cleanup pending'), { code: 'OWNED_CLEANUP_FAILED' });
         }
-        await waitForNetwork(runtime, error.networkProbePath || affectedPath, { pathRole: error.pathRole, itemId: item.id });
+        if (await waitForNetwork(runtime, error.networkProbePath || affectedPath, { pathRole: error.pathRole, itemId: item.id })) {
+          quickRetries = 0;
+          continue;
+        }
+        // No outage: a clip that is gone (moved to the Recycle Bin, deleted)
+        // fails now instead of holding its worker forever; any other error
+        // gets a few more tries, then fails, instead of converting the clip
+        // over and over.
+        if (!await pathPresent(runtime, item.sourcePath)) throw serviceError('SOURCE_MISSING');
+        if (++quickRetries > QUICK_RETRY_LIMIT) throw error;
       }
     }
     throw serviceError('CANCELLED');
