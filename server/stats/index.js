@@ -205,6 +205,15 @@ function createStats(options = {}) {
     });
   }
 
+  /** Two or more sockets: each one's use, with its own temperature and package power. */
+  function perSocket(list) {
+    if (!Array.isArray(list) || list.length < 2) return null;
+    const ids = list.map((s) => s.socket);
+    const temps = guard('sensors', () => sensors.socketTemps(ids), []);
+    const watts = guard('power', () => power.socketWatts(), new Map());
+    return list.map((s, i) => ({ ...s, tempC: temps[i] ?? null, powerW: round(watts.get(s.socket) ?? null, 1) }));
+  }
+
   function unlockHints(t, cpuW) {
     const out = [];
     // give the supervisor a few seconds to send its first RAPL reading; a
@@ -222,7 +231,7 @@ function createStats(options = {}) {
     return {
       at: null, intervalMs,
       host: { hostname: null, os: null, kernel: null, arch: null, uptimeS: null, appUptimeS: null, version: host.version ?? null, node: process.version, ffmpeg: ffmpegVersion },
-      cpu: { model: null, cores: null, threads: null, usage: null, perCore: [], freqMHz: null, tempC: null, load: null, app: { usage: null, ffmpegUsage: null, ffmpegCount: null }, throttling: false },
+      cpu: { model: null, cores: null, threads: null, usage: null, perCore: [], freqMHz: null, tempC: null, load: null, app: { usage: null, ffmpegUsage: null, ffmpegCount: null }, throttling: false, sockets: 1, perSocket: null },
       memory: { totalB: null, usedB: null, availableB: null, cacheB: null, swapTotalB: null, swapUsedB: null, appB: null },
       gpus: [],
       power: { totalW: null, cpuW: null, gpuW: null, todayWh: null, weekWh: null, todayCost: null, weekCost: null, priceNow: null, cpuSource: null, gpuSource: null },
@@ -269,7 +278,8 @@ function createStats(options = {}) {
       cpu: {
         model: c?.model ?? cpu.info.model ?? null, cores: c?.cores ?? null, threads: c?.threads ?? null,
         usage: c?.usage ?? null, perCore: c?.perCore ?? [], freqMHz: c?.freqMHz ?? null, tempC: cpuTemp,
-        load: c?.load ?? null, app: appUsage(), throttling: Boolean(c?.throttling)
+        load: c?.load ?? null, app: appUsage(), throttling: Boolean(c?.throttling),
+        sockets: c?.sockets ?? cpu.info.sockets ?? 1, perSocket: perSocket(c?.perSocket)
       },
       memory,
       gpus: gpus.map(({ powerSource, ...g }) => g),

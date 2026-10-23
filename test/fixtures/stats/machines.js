@@ -15,6 +15,9 @@
 //   (c) nvidia    Xeon + an NVIDIA card (stats come from a fake nvidia-smi)
 //   (d) pi        Raspberry Pi 4: ARM cpuinfo, thermal zone only, V3D GPU
 //   (e) bare      a container that can read almost nothing
+//   (f) dualXeon  2 × Xeon Gold 6130 (a coretemp chip and a RAPL package per
+//                 socket) + Intel Arc A380 (i915) + NVIDIA T400 (nvidia-smi),
+//                 converting on both GPUs
 
 const fs = require('fs');
 const os = require('os');
@@ -174,9 +177,9 @@ function xeFdinfo(client, { rcs, vcs, total }) {
   ].join('\n');
 }
 
-function i915Fdinfo(client, { render, video }) {
+function i915Fdinfo(client, { render, video, pdev = '0000:00:02.0' }) {
   return [
-    'pos:\t0', 'flags:\t02100002', 'mnt_id:\t26', 'ino:\t1049', 'drm-driver:\ti915', 'drm-pdev:\t0000:00:02.0', `drm-client-id:\t${client}`,
+    'pos:\t0', 'flags:\t02100002', 'mnt_id:\t26', 'ino:\t1049', 'drm-driver:\ti915', `drm-pdev:\t${pdev}`, `drm-client-id:\t${client}`,
     `drm-engine-render:\t${render} ns`, 'drm-engine-copy:\t0 ns', `drm-engine-video:\t${video} ns`, 'drm-engine-capacity-video:\t2',
     'drm-engine-video-enhance:\t0 ns', ''
   ].join('\n');
@@ -444,6 +447,107 @@ function bare() {
   };
 }
 
+// ---- (f) a dual-socket Xeon server with an Arc A380 and a T400, both converting
+/**
+ * /proc/cpuinfo of a server with several sockets, numbered as Linux does:
+ * the first thread of every core of every socket, then the second threads.
+ */
+function cpuinfoSockets({ sockets, coreIds, model, vendor }) {
+  const per = coreIds.length;
+  const blocks = [];
+  let n = 0;
+  for (let thread = 0; thread < 2; thread++) {
+    for (let s = 0; s < sockets; s++) {
+      for (const core of coreIds) {
+        blocks.push([
+          `processor\t: ${n++}`, `vendor_id\t: ${vendor}`, 'cpu family\t: 6', `model name\t: ${model}`, 'cpu MHz\t\t: 2100.000',
+          `physical id\t: ${s}`, `siblings\t: ${per * 2}`, `core id\t\t: ${core}`, `cpu cores\t: ${per}`, 'flags\t\t: fpu vme de pse'
+        ].join('\n'));
+      }
+    }
+  }
+  return `${blocks.join('\n\n')}\n\n`;
+}
+
+// 16 cores per socket, numbered with gaps as many Xeons do
+const XEON_CORE_IDS = [0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 16, 17, 18, 19];
+/** Socket of CPU n on dualXeon: 0-15 and 32-47 are socket 0, 16-31 and 48-63 socket 1. */
+const dualXeonSocket = (n) => Math.floor((n % 32) / 16);
+// socket 0: cores 62/48 %, their second threads 42/28 % (45 % on the whole);
+// socket 1: 40/30 % and 30/20 % (30 %); the server: 37.5 %
+const DUALXEON_LOADS = Array.from({ length: 64 }, (_, n) => {
+  const odd = n % 2 === 1;
+  const second = n >= 32;
+  if (dualXeonSocket(n) === 0) return second ? (odd ? 28 : 42) : (odd ? 48 : 62);
+  return second ? (odd ? 20 : 30) : (odd ? 30 : 40);
+});
+const XEON_RAPL_MAX = 262143328850;
+// the T400 encodes (74 % encoder, 38 % decoder); the Arc is busy with two clips
+const DUALXEON_NVIDIA_LINES = ['0, NVIDIA T400, 550.54.14, 11, 74, 38, 612, 4096, 63, 24.6, 1425'];
+
+function dualXeon(phase = 0) {
+  const cg = '0::/\n';
+  const arcBus = 'pci0000:00/0000:00:01.0/0000:01:00.0/0000:02:01.0';
+  const nvBus = 'pci0000:80/0000:80:02.0';
+  // two clients on the Arc: 42.5 % of its two video engines each, 10 % render each
+  const arc = (client, n) => i915Fdinfo(client, { pdev: '0000:03:00.0', render: 1e9 * n + phase * 2e8, video: 3e9 * n + phase * 1.7e9 });
+  const chip = (temps) => Object.fromEntries(temps.flatMap(([label, mc], i) => [[`temp${i + 1}_input`, `${mc}\n`], [`temp${i + 1}_label`, `${label}\n`]]));
+  return {
+    'proc/stat': procStat(loadedCpus(DUALXEON_LOADS, phase)),
+    'proc/cpuinfo': cpuinfoSockets({ sockets: 2, coreIds: XEON_CORE_IDS, model: 'Intel(R) Xeon(R) Gold 6130 CPU @ 2.10GHz', vendor: 'GenuineIntel' }),
+    'proc/loadavg': '24.10 22.85 20.40 9/1400 52000\n',
+    'proc/uptime': `${2600000 + phase * 2}.00 90000000.00\n`,
+    'proc/meminfo': meminfo({ total: 197000000, available: 151000000, cached: 98000000, buffers: 400000, reclaimable: 2100000 }),
+    'proc/version': 'Linux version 6.6.68-Unraid (root@Develop-70) (gcc (GCC) 12.2.0, GNU ld version 2.40-slack151) #1 SMP PREEMPT_DYNAMIC\n',
+    'proc/sys/kernel/hostname': 'xeon-box\n',
+    'proc/sys/kernel/osrelease': '6.6.68-Unraid\n',
+    'proc/sys/kernel/arch': 'x86_64\n',
+    'proc/driver/nvidia/version': 'NVRM version: NVIDIA UNIX x86_64 Kernel Module  550.54.14\n',
+    'proc/net/dev': netDev({ lo: [1, 1], eth0: [1000 + phase * 2 * 96 * MiB, 1000 + phase * 2 * 3 * MiB] }),
+    ...processFiles({ pid: 1, comm: 'tini', ppid: 0, rss: 100 }, { cgroup: cg }),
+    ...processFiles({ pid: 7, comm: 'node', ppid: 1, utime: 300, rss: 9000 }, { cgroup: cg }),
+    ...processFiles({ pid: 100, comm: 'node', ppid: 7, utime: 40000 + phase * 128, start: 600000, rss: 60000 }, { cgroup: cg }),
+    ...processFiles({ pid: 200, comm: 'ffmpeg', ppid: 100, utime: 9000 + phase * 640, start: 99000000, rss: 26000 },
+      { cgroup: cg, fds: { 0: '/dev/null', 5: '/dev/dri/renderD128' }, fdinfo: { 5: arc(31, 1) } }),
+    ...processFiles({ pid: 201, comm: 'ffmpeg', ppid: 100, utime: 9100 + phase * 640, start: 99000100, rss: 26000 },
+      { cgroup: cg, fds: { 0: '/dev/null', 5: '/dev/dri/renderD128' }, fdinfo: { 5: arc(32, 2) } }),
+    ...processFiles({ pid: 202, comm: 'ffmpeg', ppid: 100, utime: 4000 + phase * 320, start: 99000200, rss: 30000 },
+      { cgroup: cg, fds: { 0: '/dev/null', 4: '/dev/nvidiactl', 5: '/dev/nvidia0' } }),
+    ...cpufreq(64, (i) => (i === 4 ? 3700000 : 2800000)),
+    // Arc A380 on i915 (socket 0's PCIe), card energy in its hwmon, no temperature there
+    ...pciGpu({
+      bus: arcBus, bdf: '0000:03:00.0', vendor: '0x8086', device: '0x56a5', driver: 'i915', card: 'card0', render: 'renderD128',
+      files: { 'drm/card0/gt_act_freq_mhz': '2000\n' },
+      hwmon: { id: 'hwmon3', files: { name: 'i915\n', energy1_input: `${5000000000 + phase * 62000000}\n` } }
+    }),
+    // T400 on socket 1's PCIe: listed by nvidia-smi, not from its DRM nodes
+    ...pciGpu({ bus: nvBus, bdf: '0000:81:00.0', vendor: '0x10de', device: '0x1ff2', driver: 'nvidia', card: 'card1', render: 'renderD129' }),
+    [`sys/devices/${nvBus}/0000:81:00.0/drm/card1/dev`]: '226:1\n',
+    [`sys/devices/${nvBus}/0000:81:00.0/drm/renderD129/dev`]: '226:129\n',
+    'sys/dev/char/226:128': link(`../../devices/${arcBus}/0000:03:00.0/drm/renderD128`),
+    'sys/dev/char/226:129': link(`../../devices/${nvBus}/0000:81:00.0/drm/renderD129`),
+    // a coretemp chip per socket; socket 1 runs hotter
+    ...platformHwmon('coretemp.0', 'hwmon1', { name: 'coretemp\n', ...chip([['Package id 0', 61000], ['Core 0', 57000], ['Core 1', 59000], ['Core 8', 58000]]) }),
+    ...platformHwmon('coretemp.1', 'hwmon2', { name: 'coretemp\n', ...chip([['Package id 1', 66000], ['Core 0', 62000], ['Core 1', 64000], ['Core 8', 63000]]) }),
+    // RAPL, a package per socket (85 W and 62 W), with their DRAM parts
+    'sys/class/powercap/intel-rapl:0/name': 'package-0\n',
+    'sys/class/powercap/intel-rapl:0/energy_uj': `${(1e9 + phase * 170000000) % XEON_RAPL_MAX}\n`,
+    'sys/class/powercap/intel-rapl:0/max_energy_range_uj': `${XEON_RAPL_MAX}\n`,
+    'sys/class/powercap/intel-rapl:0:0/name': 'dram\n',
+    'sys/class/powercap/intel-rapl:0:0/energy_uj': `${1000 + phase * 18000000}\n`,
+    'sys/class/powercap/intel-rapl:1/name': 'package-1\n',
+    'sys/class/powercap/intel-rapl:1/energy_uj': `${(2e9 + phase * 124000000) % XEON_RAPL_MAX}\n`,
+    'sys/class/powercap/intel-rapl:1/max_energy_range_uj': `${XEON_RAPL_MAX}\n`,
+    'sys/class/powercap/intel-rapl:1:0/name': 'dram\n',
+    'sys/class/powercap/intel-rapl:1:0/energy_uj': `${1000 + phase * 16000000}\n`,
+    'sys/class/net/eth0/speed': '10000\n',
+    'dev/dri/renderD128': '',
+    'dev/dri/renderD129': '',
+    'dev/nvidia0': '',
+    'dev/nvidiactl': ''
+  };
+}
+
 /** Write a machine into a fresh temp folder. update() rewrites its files for another phase. */
 function build(spec) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sm-stats-'));
@@ -482,6 +586,6 @@ function isLink(p) {
 }
 
 module.exports = {
-  build, intelArc, amd, nvidia, pi, bare, NVIDIA_LINES, PCI_IDS, INTEL_LOADS, RAPL_MAX,
-  statLine, procStat, xeFdinfo, i915Fdinfo, amdFdinfo, netDev, diskLine, processFiles, MiB
+  build, intelArc, amd, nvidia, pi, bare, dualXeon, NVIDIA_LINES, DUALXEON_NVIDIA_LINES, PCI_IDS, INTEL_LOADS, DUALXEON_LOADS, RAPL_MAX,
+  statLine, procStat, xeFdinfo, i915Fdinfo, amdFdinfo, netDev, diskLine, processFiles, platformHwmon, cpuinfoSockets, dualXeonSocket, MiB
 };

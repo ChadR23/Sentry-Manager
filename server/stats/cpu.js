@@ -2,7 +2,8 @@
 
 // CPU: model, cores and threads, total and per-core use from /proc/stat
 // deltas, clock, load, thermal throttling, and how much of it is this app
-// (and its ffmpeg children).
+// (and its ffmpeg children). A server with two or more CPU sockets also
+// gets the use of each socket, from the CPUs /proc/cpuinfo puts in it.
 
 const { readText, readLine, readNum, listDir, round, clampPct, join } = require('./util');
 
@@ -44,6 +45,8 @@ function parseCpuinfo(text, dtModel) {
   let threads = 0;
   const coreKeys = new Set();
   const packages = new Map(); // physical id -> first cpu number
+  const socketOf = new Map(); // cpu number -> physical id
+  const perPackage = new Map(); // physical id -> { cores: Set of core ids, threads }
   let modelName = null;
   let hardware = null;
   let boardModel = null;
@@ -61,6 +64,13 @@ function parseCpuinfo(text, dtModel) {
       if (kv['core id'] !== undefined) coreKeys.add(`${kv['physical id'] || 0}:${kv['core id']}`);
       const pkg = kv['physical id'] || '0';
       if (!packages.has(pkg)) packages.set(pkg, Number(kv.processor));
+      if (/^\d+$/.test(pkg)) {
+        socketOf.set(Number(kv.processor), Number(pkg));
+        if (!perPackage.has(pkg)) perPackage.set(pkg, { cores: new Set(), threads: 0 });
+        const p = perPackage.get(pkg);
+        p.threads++;
+        if (kv['core id'] !== undefined) p.cores.add(kv['core id']);
+      }
     }
     modelName = modelName || kv['model name'] || null;
     vendor = vendor || kv.vendor_id || null;
@@ -74,9 +84,14 @@ function parseCpuinfo(text, dtModel) {
   if (modelName && !/^ARMv\d/i.test(modelName)) model = cleanModel(modelName);
   else model = boardModel || dtModel || hardware || (modelName ? cleanModel(modelName) : null);
   const arch = vendor ? 'x86' : implementer ? 'arm' : null;
+  // A virtual machine's sockets are however it was set up (often one per
+  // vCPU) and say nothing about the server's own, so a VM counts as one.
+  const sockets = virtual ? [] : [...perPackage].map(([id, p]) => ({ socket: Number(id), cores: p.cores.size || p.threads, threads: p.threads }))
+    .sort((a, b) => a.socket - b.socket);
   return {
     model, threads: threads || null, cores: coreKeys.size || threads || null,
-    packageCpus: [...packages.values()].sort((a, b) => a - b), x86: arch === 'x86', vendor, virtual
+    packageCpus: [...packages.values()].sort((a, b) => a - b), x86: arch === 'x86', vendor, virtual,
+    sockets: Math.max(1, sockets.length), socketList: sockets.length > 1 ? sockets : [], socketOf
   };
 }
 
@@ -86,7 +101,7 @@ class CpuProvider {
     this.sysRoot = sysRoot;
     this.now = now;
     this.prev = null;
-    this.info = { model: null, cores: null, threads: null, packageCpus: [], x86: false };
+    this.info = { model: null, cores: null, threads: null, packageCpus: [], x86: false, sockets: 1, socketList: [], socketOf: new Map() };
     this.freqFiles = [];
     this.throttleFiles = [];
     this.throttleCounts = null;
@@ -125,6 +140,8 @@ class CpuProvider {
     let usage = null;
     let perCore = [];
     let totalTicks = null;
+    const { socketList, socketOf } = this.info;
+    const bySocket = new Map(socketList.map((s) => [s.socket, { busy: 0, all: 0 }]));
     if (stat.total && this.prev?.total) {
       const all = stat.total.all - this.prev.total.all;
       const busy = stat.total.busy - this.prev.total.busy;
@@ -138,9 +155,19 @@ class CpuProvider {
         const a = before ? core.all - before.all : 0;
         const b = before ? core.busy - before.busy : -1;
         perCore.push(a > 0 && b >= 0 ? round(clampPct((b / a) * 100), 0) : null);
+        // a socket's use: the time its own CPUs worked over their time
+        const s = a > 0 && b >= 0 ? bySocket.get(socketOf.get(n)) : null;
+        if (s) {
+          s.busy += b;
+          s.all += a;
+        }
       }
     }
     if (stat.total) this.prev = stat;
+    const perSocket = socketList.length > 1 ? socketList.map((s) => {
+      const t = bySocket.get(s.socket);
+      return { socket: s.socket, cores: s.cores, threads: s.threads, usage: t.all > 0 ? round(clampPct((t.busy / t.all) * 100)) : null };
+    }) : null;
 
     // the fastest core: idle cores sit at their lowest clock and say little
     let freqMHz = null;
@@ -163,7 +190,7 @@ class CpuProvider {
       model: this.info.model, cores: this.info.cores, threads: this.info.threads,
       usage: round(usage), perCore, freqMHz: freqMHz === null ? null : Math.round(freqMHz),
       load: load.length === 3 && load.every(Number.isFinite) ? load : null,
-      throttling, totalTicks
+      throttling, totalTicks, sockets: this.info.sockets, perSocket
     };
   }
 }
