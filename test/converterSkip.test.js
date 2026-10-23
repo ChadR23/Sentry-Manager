@@ -17,6 +17,8 @@ const { spawn, spawnSync } = require('child_process');
 const REPO = path.join(__dirname, '..');
 const { createConverterRuntime } = require(path.join(REPO, 'src/main/converter/runtime'));
 const { sanitizeSnapshot } = require(path.join(REPO, 'src/main/converter/ipc'));
+const { createJobStore } = require(path.join(REPO, 'src/main/converter/jobStore'));
+const { scanTeslaFootage } = require(path.join(REPO, 'src/main/converter/scanner'));
 const { createPosixOwnedFs } = require(path.join(REPO, 'server/posixOwnedFs'));
 const { RETRYABLE } = require(path.join(REPO, 'server/converterHost'));
 const { createTeslaH264Fixture } = require('./fixtures/ffmpegFixtures');
@@ -201,6 +203,55 @@ test('converted clips are remembered: the next run skips every clip without open
     assert.deepStrictEqual(seen.opened, [changed], 'only the clip that changed was opened (its header)');
   } finally {
     await env.runtime.shutdown().catch(() => {});
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('a job saved mid-discovery before this update resumes; its old queued clips take the worker path and are remembered too', { skip, timeout: 300_000 }, async () => {
+  const { base, root } = makeBase();
+  const { original, converted } = await sampleClips();
+  const recent = path.join(root, 'RecentClips');
+  const originals = [];
+  const convertedClips = [];
+  for (let n = 0; n < 8; n += 1) {
+    const file = path.join(recent, `${stamp(n)}-front.mp4`);
+    if (n === 1 || n === 6) { fs.copyFileSync(original, file); originals.push(file); } else { fs.copyFileSync(converted, file); convertedClips.push(file); }
+  }
+  // The job file an older version left behind when it stopped half way
+  // through discovery: the first four clips found and queued as they were
+  // (converted or not), no inode, no index.
+  const found = [];
+  for await (const item of scanTeslaFootage({ sourceRoot: root })) found.push(item);
+  const config = jobConfig(root, { concurrency: 2 });
+  const store = createJobStore({ rootDir: path.join(base, 'data', 'converter-jobs'), fs: fs.promises });
+  const old = await store.create({
+    state: 'discovering', createdAt: Date.now() - 60_000, updatedAt: Date.now() - 60_000, config, discoveryComplete: false,
+    items: found.slice(0, 4).map(({ ino, ...item }, index) => ({ ...item, id: `item-${String(index + 1).padStart(6, '0')}`, state: 'queued', attempts: 0 }))
+  });
+  const oldClips = found.slice(0, 4).map((item) => item.sourcePath);
+  const env = await openRuntime(base);
+  let next = null;
+  try {
+    let job = await settle(env.runtime, old.id);
+    assert.strictEqual(job.state, 'completed');
+    assert.strictEqual(job.items.length, 8, 'discovery finished the other four');
+    assert.deepStrictEqual(job.items.filter((item) => item.resultCode === 'converted').map((item) => item.sourcePath).sort(), [...originals].sort());
+    assert.deepStrictEqual(job.items.filter((item) => item.resultCode === 'already-converted').map((item) => item.sourcePath).sort(), [...convertedClips].sort());
+    // the old queued converted clips were probed by a worker, as before; the
+    // ones found after the update were not
+    const probed = touches(env.record, convertedClips).spawned.map((entry) => entry.args.at(-1));
+    assert.deepStrictEqual(probed.sort(), convertedClips.filter((file) => oldClips.includes(file)).sort());
+    await env.runtime.shutdown();
+    // all of them are remembered now: a new run opens none
+    next = await openRuntime(base);
+    const jobId = await next.runtime.service.start(config);
+    job = await settle(next.runtime, jobId);
+    assert.ok(job.items.every((item) => item.resultCode === 'already-converted'));
+    const seen = touches(next.record, [...originals, ...convertedClips]);
+    assert.deepStrictEqual([seen.spawned.length, seen.opened.length], [0, 0]);
+  } finally {
+    await env.runtime.shutdown().catch(() => {});
+    await next?.runtime.shutdown().catch(() => {});
     fs.rmSync(base, { recursive: true, force: true });
   }
 });
