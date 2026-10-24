@@ -38,6 +38,7 @@ const { Jobs, Notifications } = require('./activity');
 const { ImageUpdates } = require('./imageUpdates');
 const { Thumbnails } = require('./thumbnails');
 const { detectGpus } = require('./gpu');
+const { createSupport, MAX_MEDIA_BYTES } = require('./support');
 const { createConverterHost } = require('./converterHost');
 const { createStats } = require('./stats');
 const { encoderBlock, jobProgress, RUNNING: CONVERTER_RUNNING } = require('./encoderStats');
@@ -48,7 +49,7 @@ const { createRealGuard, isInside } = require('./safePath');
 const { createLocalMounter, createIpcMounter } = require('./mounter');
 const { VERSIONS, DEFAULT_VERSION, securitySummary } = require('./mountSpec');
 const { TlsManager, localTlsSource, supervisorTlsSource, parseHostnames } = require('./tls');
-const { Router, HttpError, sendJson, readJson, serveFile } = require('./http');
+const { Router, HttpError, sendJson, readJson, readRaw, serveFile } = require('./http');
 const { Telemetry } = require('./telemetry');
 
 const APP_ROOT = path.resolve(process.env.APP_ROOT || path.join(__dirname, '..'));
@@ -509,6 +510,14 @@ async function main() {
   r.add('GET', '/api/logs', (req, res, { query }) => ({
     lines: logger.recent(Math.min(1000, Number(query.limit) || 300), { minLevel: query.level === 'all' ? 'debug' : 'warn' }).reverse()
   }));
+  // Settings > Support: the Sentry Six support chat, relayed (server/support.js)
+  const support = createSupport({ db, log: audit, buildInfo, detectGpus, recentLogs: () => logger.recent(150, { minLevel: 'warn' }) });
+  r.add('GET', '/api/support', () => support.status());
+  r.add('GET', '/api/support/messages', (req, res, { query }) => support.messages({ since: query.since }));
+  r.add('POST', '/api/support/message', (req, res, { body }) => support.send({ message: body?.message, includeDiagnostics: body?.includeDiagnostics === true }));
+  r.add('POST', '/api/support/read', () => support.read());
+  r.add('POST', '/api/support/close', () => support.close());
+  r.add('GET', '/api/support/attachment', (req, res, { query }) => support.attachment(res, query.u));
   r.add('GET', '/api/logs/download', async (req, res) => {
     const text = await logger.fileText();
     res.writeHead(200, {
@@ -962,7 +971,7 @@ async function main() {
 
       if (isApi) {
         const m = r.match(req.method, rawPath);
-        if (!m && p !== '/api/events' && p !== '/api/converter/events' && p !== '/api/media') return sendJson(res, 404, { error: 'Not found' });
+        if (!m && p !== '/api/events' && p !== '/api/converter/events' && p !== '/api/media' && p !== '/api/support/media') return sendJson(res, 404, { error: 'Not found' });
         if (!user && !(m && m.route.opts.public)) return sendJson(res, 401, { error: 'Sign in first.' });
         if (req.method !== 'GET' && req.method !== 'HEAD') {
           if (req.headers['x-requested-with'] !== 'sentry-six-manager') return sendJson(res, 403, { error: 'Missing X-Requested-With header.' });
@@ -1002,6 +1011,21 @@ async function main() {
           const real = await studioReadable.resolve(url.searchParams.get('path') || '');
           if (!real || hiddenPath(real)) return sendJson(res, 403, { error: 'Outside the vehicle shares.' });
           return sendMedia(req, res, real, studioReadable.fdInside);
+        }
+        if (p === '/api/support/media' && req.method === 'POST') {
+          // the file comes as the raw body (not JSON), its name and the message in headers
+          const bytes = await readRaw(req, MAX_MEDIA_BYTES);
+          const header = (k) => {
+            try {
+              return decodeURIComponent(String(req.headers[k] || ''));
+            } catch {
+              return '';
+            }
+          };
+          return sendJson(res, 200, await support.media({
+            bytes, fileName: header('x-file-name'), fileType: String(req.headers['content-type'] || ''),
+            message: header('x-message'), includeDiagnostics: req.headers['x-diagnostics'] === '1'
+          }));
         }
         const body = req.method === 'GET' ? undefined : await readJson(req, p.startsWith('/api/converter/') ? 256 * 1024 : 1024 * 1024);
         const out = await m.route.handler(req, res, { params: m.params, query: Object.fromEntries(url.searchParams), body, user });

@@ -687,41 +687,6 @@ export function initSettingsModal() {
         });
     }
 
-    // Support Chat button (in control bar)
-    const supportChatBtn = $('supportChatBtn');
-    if (supportChatBtn) {
-        supportChatBtn.onclick = async () => {
-            try {
-                const { toggleSupportChat, initSupportChat } = await import('./supportChat.js');
-                initSupportChat();
-                toggleSupportChat();
-            } catch (err) {
-                console.error('Failed to open support chat:', err);
-            }
-            supportChatBtn.blur();
-        };
-    }
-
-    // Support Chat button (in settings modal)
-    const openSupportChatFromSettings = $('openSupportChatFromSettings');
-    if (openSupportChatFromSettings) {
-        openSupportChatFromSettings.onclick = async () => {
-            try {
-                // Close settings modal
-                const settingsModal = $('settingsModal');
-                if (settingsModal) settingsModal.classList.add('hidden');
-
-                // Open support chat
-                const { showSupportChat, initSupportChat } = await import('./supportChat.js');
-                initSupportChat();
-                showSupportChat();
-            } catch (err) {
-                console.error('Failed to open support chat from settings:', err);
-            }
-            openSupportChatFromSettings.blur();
-        };
-    }
-
     // Privacy Policy & Terms of Service links
     const openPrivacyPolicy = $('openPrivacyPolicy');
     if (openPrivacyPolicy) {
@@ -741,16 +706,6 @@ export function initSettingsModal() {
             }
         };
     }
-
-    // Initialize support chat on startup (for message polling)
-    (async () => {
-        try {
-            const { checkForActiveTicket } = await import('./supportChat.js');
-            await checkForActiveTicket();
-        } catch (err) {
-            console.error('Failed to initialize support chat:', err);
-        }
-    })();
 
     // Advanced settings toggle
     const advancedSettingsToggle = $('advancedSettingsToggle');

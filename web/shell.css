@@ -221,6 +221,23 @@ details.more p { margin-top: 10px; color: var(--text-2); max-width: 760px; }
 .kv { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 8px 18px; font-size: 13.5px; }
 .kv dt { color: var(--muted); }
 .kv dd { margin: 0; word-break: break-word; }
+/* Settings > Support */
+.sup-log { margin-top: 16px; max-height: 420px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding: 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel-2); }
+.sup-log #sup-empty { margin: 0; }
+.sup-msg { max-width: min(560px, 92%); padding: 9px 12px; border-radius: 12px; border: 1px solid var(--border-strong); background: var(--panel-3); }
+.sup-msg.me { align-self: flex-end; background: var(--accent-bg); border-color: var(--accent-border); }
+.sup-who { font-size: 12px; font-weight: 600; color: var(--text-2); margin-bottom: 3px; }
+.sup-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.sup-files { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.sup-img { display: block; max-width: 240px; max-height: 180px; border-radius: 8px; border: 1px solid var(--border); }
+.sup-file { font-size: 13px; overflow-wrap: anywhere; }
+.sup-form { margin-top: 12px; display: flex; flex-direction: column; gap: 10px; }
+.sup-form textarea { width: 100%; resize: vertical; min-height: 72px; }
+.sup-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.sup-row .btn.solid { margin-left: auto; }
+.sup-check { display: flex; align-items: center; gap: 8px; flex: 1 1 260px; min-width: 0; }
+#sup-status { margin: 0; min-height: 1.5em; }
+#sup-status.bad { color: var(--danger); }
 /* Overview > Logs */
 .logbox { margin-top: 14px; max-height: 480px; overflow: auto; border: 1px solid var(--border); border-radius: 12px; background: var(--panel-2); padding: 6px 0; }
 .logbox > p { padding: 10px 14px; }

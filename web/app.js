@@ -1616,7 +1616,7 @@
     state.system = sys || state.system;
     state.power = settings.power || state.power || null;
     // (the Logs are on the Overview)
-    const sections = [['vehicles', 'Vehicles'], ['updates', 'Updates'], ['account', 'Account'], sec && ['security', 'Security'], (sys || settings.power) && ['system', 'System']].filter(Boolean);
+    const sections = [['vehicles', 'Vehicles'], ['updates', 'Updates'], ['account', 'Account'], sec && ['security', 'Security'], (sys || settings.power) && ['system', 'System'], ['support', 'Support']].filter(Boolean);
     const show = editing || !sections.some(([k]) => k === sub) ? 'vehicles' : sub;
     let html = head('Your archive workspace', 'Settings');
     html += `<nav class="set-tabs" aria-label="Settings sections">${sections.map(([k, label]) => `<button type="button" data-tab="${k}">${label}</button>`).join('')}</nav>`;
@@ -1648,12 +1648,175 @@
         <dt>Server time zone</dt><dd>${esc(sys.timezone)}</dd></dl></div>`;
     }
     if (settings.power) html += powerCard(settings.power, sys?.timezone);
+    html += supportCard();
     page.innerHTML = html;
     wireSettingsTabs(show, editing ? `#/settings/${sub}` : '#/settings', seq);
     wireSettings(editing);
     if (sec) wireSecurity(sec);
     if (settings.power) wirePower(settings.power);
+    wireSupport(seq);
   };
+
+  // Settings > Support: chat with Sentry Six support. This server relays it
+  // to the support server (server/support.js); the ticket stays on the server,
+  // so every signed-in browser sees the same conversation.
+  const SUPPORT_MAX_FILE = 50 * 1024 * 1024;
+
+  function supportCard() {
+    return `<div class="card" data-section="support"><div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap"><h2>Support</h2>
+        <button class="btn sm" type="button" id="sup-close" hidden>Close ticket</button></div>
+      <p>Ask the Sentry Six team for help. Messages go to the Sentry Six support server (api.sentry-six.com) and replies show up here.</p>
+      <div class="sup-log" id="sup-log" aria-live="polite"><p class="muted small" id="sup-empty">No open ticket. Your first message opens one.</p></div>
+      <form id="sup-form" class="sup-form">
+        <textarea class="input" id="sup-text" rows="3" maxlength="4000" placeholder="Describe the problem: what you did, what you expected, what happened"></textarea>
+        <div class="sup-row">
+          <label class="sup-check"><input type="checkbox" id="sup-diag"> Include diagnostics <span class="muted small">(version, OS, CPU/GPU, recent warnings; addresses and footage paths removed)</span></label>
+          <label class="btn sm" for="sup-file">${icon('plus')} Attach</label><input type="file" id="sup-file" hidden accept="image/*,video/*,.log,.txt,.json">
+          <span class="muted small" id="sup-file-name"></span>
+          <button class="btn solid" type="submit" id="sup-send">Send</button>
+        </div>
+        <p class="muted small" id="sup-status" role="status"></p>
+      </form></div>`;
+  }
+
+  function supportMessage(m) {
+    const user = m.sender === 'user';
+    const when = m.timestamp ? new Date(m.timestamp) : null;
+    const time = when && !Number.isNaN(when.getTime()) ? when.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+    const files = (m.attachments || []).map((a) => {
+      if (!a.url) return `<span class="sup-file">${esc(a.name)}</span>`;
+      if (a.type.startsWith('image/')) return `<a href="${esc(a.url)}" target="_blank" rel="noopener"><img class="sup-img" src="${esc(a.url)}" alt="${esc(a.name)}" loading="lazy"></a>`;
+      if (a.type.startsWith('video/')) return `<video class="sup-img" src="${esc(a.url)}" controls preload="metadata"></video>`;
+      return `<a class="sup-file" href="${esc(a.url)}" download>${esc(a.name)}</a>`;
+    }).join('');
+    return `<div class="sup-msg ${user ? 'me' : 'them'}"${m.id ? ` data-id="${esc(m.id)}"` : ''}>
+      <div class="sup-who">${user ? 'You' : esc(m.responder || 'Sentry Six support')}${time ? ` · <span class="muted">${esc(time)}</span>` : ''}</div>
+      ${m.content ? `<div class="sup-text">${esc(m.content)}</div>` : ''}${files ? `<div class="sup-files">${files}</div>` : ''}
+      ${m.hasDiagnostics ? '<div class="muted small">Diagnostics attached</div>' : ''}</div>`;
+  }
+
+  function wireSupport(seq) {
+    const form = $('sup-form');
+    if (!form) return;
+    const log = $('sup-log');
+    const text = $('sup-text');
+    const fileInput = $('sup-file');
+    const status = (msg, bad = false) => {
+      $('sup-status').textContent = msg || '';
+      $('sup-status').classList.toggle('bad', bad);
+    };
+    let open = false;
+    let since = null;
+    let timer = null;
+    let busy = false;
+    const alive = () => seq === renderSeq && document.body.contains(form);
+    const setOpen = (v) => {
+      open = v;
+      $('sup-close').hidden = !v;
+      $('sup-empty').hidden = v || log.querySelector('.sup-msg') !== null;
+    };
+    const visible = () => !document.hidden && form.closest('.card').offsetParent !== null;
+
+    async function poll() {
+      clearTimeout(timer);
+      if (!alive()) return;
+      if (open && visible() && !busy) {
+        busy = true;
+        try {
+          const out = await api(`/api/support/messages${since ? `?since=${encodeURIComponent(since)}` : ''}`, { timeoutMs: 20000 });
+          if (!alive()) return;
+          let fresh = false;
+          for (const m of out.messages || []) {
+            if (m.id && log.querySelector(`[data-id="${CSS.escape(m.id)}"]`)) continue;
+            log.insertAdjacentHTML('beforeend', supportMessage(m));
+            if (m.id) since = m.id;
+            if (m.sender !== 'user' && !m.read) fresh = true;
+          }
+          if ((out.messages || []).length) log.scrollTop = log.scrollHeight;
+          if (fresh) api('/api/support/read', { method: 'POST' }).catch(() => {});
+          if (out.closed) {
+            setOpen(false);
+            status('Support closed this ticket. A new message opens a new one.');
+          } else if (!out.open) setOpen(false);
+        } catch (err) {
+          status(err.message, true);
+        } finally {
+          busy = false;
+        }
+      }
+      timer = setTimeout(poll, 5000);
+    }
+
+    fileInput.onchange = () => {
+      const f = fileInput.files[0];
+      if (f && f.size > SUPPORT_MAX_FILE) {
+        fileInput.value = '';
+        status(`That file is ${bytes(f.size)}; the limit is ${bytes(SUPPORT_MAX_FILE)}.`, true);
+      }
+      $('sup-file-name').textContent = fileInput.files[0] ? fileInput.files[0].name : '';
+    };
+
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      const message = text.value.trim();
+      const file = fileInput.files[0] || null;
+      if (!message && !file) return status('Write a message or attach a file first.', true);
+      const btn = $('sup-send');
+      btn.disabled = true;
+      status(file ? 'Uploading…' : 'Sending…');
+      try {
+        const includeDiagnostics = $('sup-diag').checked;
+        if (file) {
+          const res = await fetch('/api/support/media', {
+            method: 'POST', credentials: 'same-origin', body: file,
+            headers: {
+              'X-Requested-With': 'sentry-six-manager', 'Content-Type': file.type || 'application/octet-stream',
+              'X-File-Name': encodeURIComponent(file.name), 'X-Message': encodeURIComponent(message), 'X-Diagnostics': includeDiagnostics ? '1' : '0'
+            }
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(data.error || `Upload failed (${res.status}).`);
+        } else {
+          await api('/api/support/message', { body: { message, includeDiagnostics } });
+        }
+        if (!alive()) return;
+        text.value = '';
+        fileInput.value = '';
+        $('sup-file-name').textContent = '';
+        $('sup-diag').checked = false;
+        status('Sent.');
+        setOpen(true);
+        poll();
+      } catch (err) {
+        status(err.message, true);
+      } finally {
+        btn.disabled = false;
+      }
+    };
+
+    $('sup-close').onclick = async () => {
+      if (!confirm('Close this support ticket? You can start a new one any time.')) return;
+      try {
+        await api('/api/support/close', { method: 'POST' });
+        if (!alive()) return;
+        setOpen(false);
+        since = null;
+        log.querySelectorAll('.sup-msg').forEach((n) => n.remove());
+        $('sup-empty').hidden = false;
+        status('Ticket closed.');
+      } catch (err) {
+        status(err.message, true);
+      }
+    };
+
+    // a Support tab opened later (phones) catches up at once
+    page.querySelectorAll('[data-tab]').forEach((b) => b.addEventListener('click', () => { if (b.dataset.tab === 'support') poll(); }));
+    api('/api/support').then((st) => {
+      if (!alive()) return;
+      setOpen(Boolean(st.open));
+      poll();
+    }).catch((err) => status(err.message, true));
+  }
 
   // Settings > System: the electricity price behind every cost shown with
   // energy. One price, or a time-of-use plan (peak, off-peak, weekends): the

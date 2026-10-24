@@ -41,6 +41,29 @@ function readBody(req, limit = 1024 * 1024) {
   });
 }
 
+/** The raw body as a Buffer, refused past `limit` bytes. */
+function readRaw(req, limit) {
+  return new Promise((resolve, reject) => {
+    const declared = Number(req.headers['content-length']);
+    if (Number.isFinite(declared) && declared > limit) {
+      reject(new HttpError(413, 'That file is too large.'));
+      req.resume();
+      return;
+    }
+    let size = 0;
+    const chunks = [];
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > limit) {
+        reject(new HttpError(413, 'That file is too large.'));
+        req.destroy();
+      } else chunks.push(c);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
 async function readJson(req, limit) {
   const text = await readBody(req, limit);
   if (!text.trim()) return undefined;
@@ -114,4 +137,4 @@ async function serveFile(req, res, root, rel, { transform, cache = 'no-cache', h
   return true;
 }
 
-module.exports = { Router, HttpError, sendJson, readJson, serveFile };
+module.exports = { Router, HttpError, sendJson, readJson, readRaw, serveFile };

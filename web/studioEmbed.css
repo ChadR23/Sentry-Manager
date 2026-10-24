@@ -19,9 +19,9 @@ html[data-embed="encoder"] #converterChooseSource {
 }
 
 /* Desktop-app features with no web counterpart: video export (and its
-   start / end markers), shared links, support chat, the default TeslaCam
+   start / end markers), shared links, the default TeslaCam
    folder and SentryUSB drive data. */
-#setStartMarkerBtn, #setEndMarkerBtn, #exportBtn, #mySharedClipsBtn, #supportChatBtn,
+#setStartMarkerBtn, #setEndMarkerBtn, #exportBtn, #mySharedClipsBtn,
 .settings-accordion:has(#defaultFolderPath),
 .settings-accordion:has(#driveDataFilePath) {
   display: none !important;
