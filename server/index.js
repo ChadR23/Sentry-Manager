@@ -330,6 +330,7 @@ async function main() {
   // ---- live events to the browser
   const clients = new Set();
   const MAX_EVENT_CLIENTS = 200;
+  let converterStreams = 0; // open /api/converter/events streams
   const pending = new Set();
   let flushTimer = null;
   const announce = (topic) => {
@@ -451,7 +452,17 @@ async function main() {
     return { ok: true };
   });
   r.add('POST', '/api/auth/password', async (req, res, { body, user }) => {
-    if (!(await auth.check(user, body?.current))) throw new HttpError(401, 'The current password is wrong.');
+    // the same throttle as confirmation: a stolen session must not guess the
+    // password here instead
+    const key = `confirm:${user}`;
+    const wait = auth.throttled(key);
+    if (wait) throw new HttpError(429, `Too many attempts. Try again in ${wait} s.`);
+    if (!(await auth.check(user, body?.current))) {
+      auth.noteFailure(key);
+      audit.warn(`Password change with a wrong current password: ${by(req, user)}`);
+      throw new HttpError(401, 'The current password is wrong.');
+    }
+    auth.noteSuccess(key);
     auth.setPassword(user, String(body?.next || ''));
     db.deleteSessionsFor(user);
     auth.forgetConfirmations();
@@ -1003,6 +1014,10 @@ async function main() {
         }
         if (p === '/api/converter/events') {
           if (!bridge) return sendJson(res, 503, { error: 'Converter is starting' });
+          // capped like /api/events
+          if (converterStreams >= MAX_EVENT_CLIENTS) return sendJson(res, 503, { error: 'Too many open connections.' });
+          converterStreams += 1;
+          req.on('close', () => { converterStreams -= 1; });
           res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
           res.write('event: hello\ndata: {}\n\n');
           bridge.attachEvents(String(url.searchParams.get('client') || '').slice(0, 64), res);

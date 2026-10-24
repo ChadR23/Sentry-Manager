@@ -647,3 +647,51 @@ test('Settings > Support: one file upload at a time, and the upload path answers
     await fsp.rm(dir, { recursive: true, force: true });
   }
 });
+
+test('the password change is throttled like confirmation, and converter event streams are capped like /api/events', { timeout: 120000 }, async () => {
+  const dir = await tmp();
+  await makeFootage(path.join(dir, 'footage'));
+  const s = await startServer(dir);
+  const http = require('http');
+  const streams = [];
+  try {
+    await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
+    for (let i = 0; i < 5; i++) assert.equal((await s.call('POST', '/api/auth/password', { current: `guess${i}`, next: 'another horse 1' })).status, 401);
+    assert.equal((await s.call('POST', '/api/auth/password', { current: 'correct horse', next: 'another horse 1' })).status, 429,
+      'a session cannot guess the current password without limit');
+
+    const { port } = new URL(s.base);
+    const agent = new http.Agent({ keepAlive: false, maxSockets: Infinity });
+    const openStream = (n) => new Promise((resolve, reject) => {
+      const req = http.get({ host: '127.0.0.1', port, agent, path: `/api/converter/events?client=c${n}`, headers: { Cookie: s.getCookie() } }, (res) => {
+        if (res.statusCode !== 200) res.resume();
+        resolve({ req, res });
+      });
+      req.on('error', reject);
+    });
+    // the converter may still be starting
+    await waitFor(async () => {
+      const one = await openStream('probe');
+      one.req.destroy();
+      return one.res.statusCode === 200;
+    }, 60000);
+    await new Promise((r) => setTimeout(r, 200));
+    for (let i = 0; i < 200; i++) {
+      const st = await openStream(i);
+      assert.equal(st.res.statusCode, 200, `stream ${i}`);
+      streams.push(st);
+    }
+    const over = await openStream('over');
+    assert.equal(over.res.statusCode, 503);
+    streams.pop().req.destroy();
+    await waitFor(async () => {
+      const again = await openStream('again');
+      if (again.res.statusCode === 200) streams.push(again);
+      return again.res.statusCode === 200;
+    }, 5000);
+  } finally {
+    for (const st of streams) st.req.destroy();
+    await s.stop();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
