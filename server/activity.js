@@ -32,6 +32,30 @@ class Jobs extends EventEmitter {
   list(opts) {
     return this.db.jobs(opts);
   }
+
+  /** How many finished jobs Clear jobs would take off the list (see clear). */
+  finished({ vehicleId = null, keepExternal = [] } = {}) {
+    return this.db.finishedJobs({ vehicleId, keepExternal }).length;
+  }
+
+  /**
+   * Clear jobs: the finished ones (done, failed, cancelled, interrupted) of
+   * a vehicle (and those of no vehicle) leave the list; running, waiting and
+   * paused ones stay. Only this list changes: the converter's own job files,
+   * which a paused or interrupted conversion resumes from, are not touched.
+   */
+  clear({ vehicleId = null, keepExternal = [] } = {}) {
+    const n = this.db.clearJobs({ vehicleId, keepExternal });
+    if (n) this.emit('changed');
+    return n;
+  }
+
+  /** At start: jobs a restart stopped are interrupted, not running (see ManagerDB.interruptJobs). */
+  interruptLeftovers() {
+    const n = this.db.interruptJobs();
+    if (n) this.emit('changed');
+    return n;
+  }
 }
 
 class Notifications extends EventEmitter {

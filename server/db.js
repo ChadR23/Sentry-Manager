@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 CREATE INDEX IF NOT EXISTS jobs_started ON jobs(started_at);
 CREATE UNIQUE INDEX IF NOT EXISTS jobs_external ON jobs(external_id) WHERE external_id IS NOT NULL;
+CREATE TABLE IF NOT EXISTS jobs_cleared (external_id TEXT PRIMARY KEY, cleared_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS notifications (
   id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, level TEXT NOT NULL, vehicle_id TEXT,
   title TEXT NOT NULL, message TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
@@ -36,6 +37,9 @@ CREATE TABLE IF NOT EXISTS notifications (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS notifications_open ON notifications(dedupe_key) WHERE resolved_at IS NULL AND dedupe_key IS NOT NULL;
 `;
+
+// conversions taken off Jobs by Clear jobs that are remembered (see clearJobs)
+const CLEARED_KEPT = 2000;
 
 const parse = (text, fallback) => {
   try {
@@ -169,6 +173,8 @@ class ManagerDB {
     if (externalId) {
       const existing = this.q('SELECT id FROM jobs WHERE external_id = ?').get(externalId);
       if (existing) return Number(existing.id);
+      // cleared before, running again: it is on the list once more
+      this.q('DELETE FROM jobs_cleared WHERE external_id = ?').run(externalId);
     }
     const r = this.q('INSERT INTO jobs (type, vehicle_id, status, title, detail, started_at, external_id) VALUES (?, ?, ?, ?, ?, ?, ?)')
       .run(type, vehicleId, 'running', title, detail, Date.now(), externalId);
@@ -197,6 +203,58 @@ class ManagerDB {
 
   trimJobs(keep = 2000) {
     this.q("DELETE FROM jobs WHERE status != 'running' AND id <= (SELECT MAX(id) FROM jobs) - ?").run(keep);
+  }
+
+  /**
+   * The jobs Clear jobs takes off the list: every finished one (done,
+   * failed, cancelled, interrupted; anything not running) of the vehicle and
+   * those of no vehicle, as the list shows them, or of every vehicle.
+   * `keepExternal` names the conversions the converter still has going
+   * (waiting, paused), which stay whatever their row says.
+   */
+  finishedJobs({ vehicleId = null, keepExternal = [] } = {}) {
+    const rows = vehicleId
+      ? this.q("SELECT id, external_id FROM jobs WHERE status != 'running' AND (vehicle_id = ? OR vehicle_id IS NULL)").all(vehicleId)
+      : this.q("SELECT id, external_id FROM jobs WHERE status != 'running'").all();
+    const keep = new Set(keepExternal);
+    return rows.filter((r) => !(r.external_id && keep.has(r.external_id))).map((r) => ({ id: Number(r.id), externalId: r.external_id }));
+  }
+
+  /**
+   * Clear jobs: only these rows go. A cleared conversion is remembered, so
+   * a later word from the converter about the same finished job (its
+   * summary dismissed) does not bring it back; running again does
+   * (startJob). Returns how many left the list.
+   */
+  clearJobs(opts) {
+    return this.tx(() => {
+      const gone = this.finishedJobs(opts);
+      const at = Date.now();
+      for (const job of gone) {
+        if (job.externalId) {
+          this.q('INSERT INTO jobs_cleared (external_id, cleared_at) VALUES (?, ?) ON CONFLICT(external_id) DO UPDATE SET cleared_at = excluded.cleared_at').run(job.externalId, at);
+        }
+        this.q('DELETE FROM jobs WHERE id = ?').run(job.id);
+      }
+      this.q('DELETE FROM jobs_cleared WHERE external_id NOT IN (SELECT external_id FROM jobs_cleared ORDER BY cleared_at DESC, rowid DESC LIMIT ?)').run(CLEARED_KEPT);
+      return gone.length;
+    });
+  }
+
+  jobCleared(externalId) {
+    return Boolean(this.q('SELECT 1 AS x FROM jobs_cleared WHERE external_id = ?').get(externalId));
+  }
+
+  /**
+   * At start: jobs of this process that a restart stopped (a scan, a move
+   * to the Recycle Bin) can never finish, so they are interrupted instead of
+   * running forever. Conversions are the converter's: it picks them up again
+   * (a paused or interrupted one resumes) and their rows follow it.
+   */
+  interruptJobs() {
+    return Number(this.q(`UPDATE jobs SET status = 'interrupted', finished_at = ?,
+      detail = CASE WHEN detail IS NULL OR detail = '' THEN 'stopped by a restart' ELSE detail || ' · stopped by a restart' END
+      WHERE status = 'running' AND type != 'conversion'`).run(Date.now()).changes);
   }
 
   // ---- notifications

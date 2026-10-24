@@ -1317,16 +1317,54 @@
     const { jobs } = await api(`/api/jobs${v ? `?vehicle=${encodeURIComponent(v.id)}` : ''}`);
     const running = jobs.filter((j) => j.status === 'running').length;
     setBadge('badge-jobs', running ? String(running) : '', 'busy');
+    // (cancelled and interrupted: grey)
     const chip = (s) => `<span class="chip ${s === 'done' ? 'green' : s === 'failed' ? 'red' : s === 'running' ? 'amber' : ''}">${esc(s)}</span>`;
     // conversions the server measured: energy, average power and (with a price) cost
     const withEnergy = jobs.some((j) => fin(j.energy?.wh));
     const energy = (e) => (fin(e?.wh) ? `${energyText(e.wh)}${fin(e.avgW) ? ` · avg ${watts(e.avgW)}` : ''}${fin(e.cost) ? ` · ${money(e.cost, state.power?.currency)}` : ''}` : '');
-    page.innerHTML = head('Your archive workspace', 'Jobs') + pills() + `<div class="card">
+    // Clear jobs takes the finished ones off the list (the server decides which)
+    const finished = jobs.some((j) => j.status !== 'running');
+    const clear = `<button class="btn" id="jobs-clear" type="button"${finished ? '' : ' disabled title="No finished jobs to clear"'}>Clear jobs</button>`;
+    page.innerHTML = head('Your archive workspace', 'Jobs', clear) + pills() + `<div class="card">
       ${jobs.length ? `<table class="table"><thead><tr><th>Job</th><th>Status</th><th>Details</th><th>Started</th><th>Took</th>${withEnergy ? '<th>Energy</th>' : ''}</tr></thead><tbody>
         ${jobs.map((j) => `<tr><td><b>${esc(j.title)}</b><br><span class="muted small">${esc(j.type)}</span></td><td>${chip(j.status)}</td><td class="small">${esc(j.detail || '')}</td><td class="small">${when(j.startedAt)}</td>
-          <td class="small mono">${j.finishedAt ? took(j.finishedAt - j.startedAt) : '…'}</td>${withEnergy ? `<td class="small mono energy">${esc(energy(j.energy))}</td>` : ''}</tr>`).join('')}</tbody></table>`
+          <td class="small mono">${j.status === 'interrupted' ? '—' : j.finishedAt ? took(j.finishedAt - j.startedAt) : '…'}</td>${withEnergy ? `<td class="small mono energy">${esc(energy(j.energy))}</td>` : ''}</tr>`).join('')}</tbody></table>`
         : '<p>No jobs yet. Scans, conversions, Recycle Bin actions and policy runs show up here.</p>'}</div>`;
+    $('jobs-clear').onclick = () => clearJobs(v);
   };
+
+  // Jobs > Clear jobs: the finished jobs (done, failed, cancelled,
+  // interrupted) of the vehicle shown leave the list, after a confirmation
+  // with how many; running, waiting and paused ones stay. Nothing else
+  // changes (footage, converted files, what a paused conversion needs).
+  async function clearJobs(v) {
+    const body = { vehicle: v?.id || null };
+    let preview;
+    try {
+      preview = await api('/api/jobs/clear', { body: { ...body, preview: true } });
+    } catch (err) {
+      toast(err.message, true);
+      return;
+    }
+    if (!preview.jobs) {
+      toast('Nothing to clear: running, waiting and paused jobs stay on the list.');
+      return;
+    }
+    const ok = await confirmDialog({
+      title: 'Clear finished jobs?',
+      body: `<p>${plural(preview.jobs, 'finished job')} (done, failed, cancelled or interrupted)${v && state.vehicles.length > 1 ? ` of ${esc(v.name)}` : ''} leave${preview.jobs === 1 ? 's' : ''} the list. Running, waiting and paused jobs stay.</p>
+        <p>Only the list is cleared: footage, converted files and what the Encoder needs to resume a conversion are not touched. New jobs show up as before.</p>`,
+      ok: 'Clear jobs'
+    });
+    if (!ok) return;
+    try {
+      const out = await api('/api/jobs/clear', { body });
+      toast(`Cleared ${plural(out.cleared, 'finished job')}.`);
+    } catch (err) {
+      toast(err.message, true);
+    }
+    render();
+  }
 
   pages.bin = async () => {
     const v = current();

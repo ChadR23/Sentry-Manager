@@ -239,6 +239,20 @@ Other) and moves older recordings to the Recycle Bin once a day. It previews
 what the next run would move. Protected recordings are always skipped, and a
 policy never deletes anything.
 
+## Jobs
+
+**Jobs** lists what Sentry Six Manager did and is doing for the selected
+vehicle: inventory scans, conversions (with the energy they used), moves to
+and from the Recycle Bin and policy runs, newest first, with how long each
+took. A job that a restart stopped (a scan, a move) shows as *interrupted*;
+a conversion carries on where it was.
+
+**Clear jobs** takes the finished ones (done, failed, cancelled and
+interrupted) off the list after you confirm how many, so what shows up next
+is what happened since. Running, waiting and paused jobs stay. Only the list
+is cleared: footage, converted files and what the Encoder needs to resume a
+conversion are not touched.
+
 ## Vehicles and SMB shares
 
 Each vehicle has one footage source:
@@ -414,7 +428,7 @@ a malicious video on a share cannot become root or read the certificate
 authority's key.
 
 **An audit trail.** Sign-ins, password confirmations, vehicle changes,
-certificate names and permanent deletions are logged with who did them and
+certificate names, permanent deletions and Clear jobs are logged with who did them and
 from which address, never with a password. Look for `[audit]` in
 `docker logs sentry-six-manager` or in Settings > Logs.
 

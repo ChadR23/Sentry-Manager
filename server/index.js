@@ -170,6 +170,9 @@ async function main() {
   const auth = new Auth({ db, log: logger.scope('auth'), isSecure, setupFile: path.join(DATA, 'setup-code.txt') });
   auth.bootstrap();
   const jobs = new Jobs({ db });
+  // a scan or a move to the Recycle Bin that a restart stopped: interrupted
+  const stoppedJobs = jobs.interruptLeftovers();
+  if (stoppedJobs) log.info(`${stoppedJobs} job(s) were stopped by the restart; Jobs shows them as interrupted`);
   const notes = new Notifications({ db });
 
   const mounter = SUPERVISED
@@ -489,7 +492,7 @@ async function main() {
     return undefined;
   });
 
-  // Settings > Logs: the newest lines first; problems (warnings and errors)
+  // Overview > Logs: the newest lines first; problems (warnings and errors)
   // unless everything is asked for. The download is the whole kept file.
   r.add('GET', '/api/logs', (req, res, { query }) => ({
     lines: logger.recent(Math.min(1000, Number(query.limit) || 300), { minLevel: query.level === 'all' ? 'debug' : 'warn' }).reverse()
@@ -702,6 +705,21 @@ async function main() {
     jobs: jobs.list({ vehicleId: query.vehicle || undefined, limit: Math.min(500, Number(query.limit) || 200) })
       .map((j) => (j.result?.energy ? { ...j, energy: { wh: j.result.energy.wh, avgW: j.result.energy.avgW, cost: j.result.energy.cost ?? null } } : j))
   }));
+  // Jobs > Clear jobs: the finished jobs (done, failed, cancelled,
+  // interrupted) of the vehicle the page shows, and those of no vehicle, as
+  // the list shows them, leave it. Running ones stay, and so does every
+  // conversion the converter still has going (waiting or paused) whatever
+  // its row says. Only the list changes: the converter's job files, which a
+  // paused or interrupted conversion resumes from, are never touched.
+  // preview: true only counts them, for the confirmation.
+  r.add('POST', '/api/jobs/clear', (req, res, { body, user }) => {
+    const vehicleId = body?.vehicle ? vehicleOr404(String(body.vehicle)).id : null;
+    const keepExternal = [...converterJobs.values()].filter((s) => CONVERTER_ACTIVE.has(s.state)).map((s) => `converter:${s.id}`);
+    if (body?.preview === true) return { jobs: jobs.finished({ vehicleId, keepExternal }) };
+    const cleared = jobs.clear({ vehicleId, keepExternal });
+    audit.info(`Jobs cleared: ${cleared} finished job(s)${vehicleId ? ` of ${vehicleId}` : ''}: ${by(req, user)}`);
+    return { cleared };
+  });
 
   // Overview > Server and the Encoder's Hardware panel
   r.add('GET', '/api/stats', () => {
@@ -1096,8 +1114,11 @@ async function main() {
     const saved = Number(s.counters?.savedBytes) || 0;
     const detail = [`${c.converted} converted`, `${c.skipped} skipped`, `${c.failed} failed`].join(', ') + (saved > 0 ? ` · ${formatBytes(saved)} saved` : '');
     let jobId = db.jobByExternal(externalId)?.id;
-    if (!jobId) jobId = jobs.start({ type: 'conversion', vehicleId: v?.id || null, title: `Convert ${v ? v.name : src} to ${String(s.config?.codec || '').toUpperCase()}`, externalId });
     const terminal = !CONVERTER_ACTIVE.has(s.state);
+    // a finished conversion taken off Jobs by Clear jobs stays off (its
+    // summary dismissed in the Encoder is no news); running again brings it back
+    if (!jobId && terminal && db.jobCleared(externalId)) return;
+    if (!jobId) jobId = jobs.start({ type: 'conversion', vehicleId: v?.id || null, title: `Convert ${v ? v.name : src} to ${String(s.config?.codec || '').toUpperCase()}`, externalId });
     const existing = db.jobByExternal(externalId);
     if (terminal && existing?.status === 'running') {
       const measured = stats.energy().byJob?.[s.id] || null;

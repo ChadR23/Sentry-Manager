@@ -341,6 +341,36 @@ test('Studio is served with the web shim; converter bridge enforces Quick and al
     }, 120000);
     const jobs = (await s.call('GET', '/api/jobs')).data.jobs;
     assert.ok(jobs.some((j) => j.type === 'conversion' && j.status !== 'running'), 'conversion mirrored into Jobs');
+
+    // Clear jobs takes the finished conversion off the list and touches
+    // nothing of the converter's: its job files stay as they were
+    const converterFiles = () => {
+      const out = {};
+      const walk = (d) => {
+        for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+          const p = path.join(d, e.name);
+          if (e.isDirectory()) walk(p);
+          else out[path.relative(dir, p)] = sha(p);
+        }
+      };
+      walk(path.join(dir, 'data', 'converter'));
+      return out;
+    };
+    const filesBefore = converterFiles();
+    assert.ok(Object.keys(filesBefore).length > 0, 'the converter keeps its job on disk');
+    const cleared = await s.call('POST', '/api/jobs/clear', { vehicle: 'daily-driver' });
+    assert.equal(cleared.status, 200, JSON.stringify(cleared.data));
+    assert.ok(cleared.data.cleared >= 1);
+    assert.ok(!(await s.call('GET', '/api/jobs?vehicle=daily-driver')).data.jobs.some((j) => j.type === 'conversion'), 'the conversion left the list');
+    assert.deepEqual(converterFiles(), filesBefore, 'the converter\'s job files are untouched');
+    const kept = await s.call('POST', '/api/converter/invoke/getCurrent');
+    assert.equal(kept.data.value?.id, cur.data.value.id, 'the Encoder still has its job');
+    // the converter's next word about the same finished job does not bring it back
+    assert.equal(kept.data.value.state, 'completed');
+    const dismissed = await s.call('POST', '/api/converter/invoke/dismissSummary', { jobId: kept.data.value.id });
+    assert.equal(dismissed.data.ok, true, JSON.stringify(dismissed.data));
+    await new Promise((r) => setTimeout(r, 300));
+    assert.ok(!(await s.call('GET', '/api/jobs')).data.jobs.some((j) => j.type === 'conversion'), 'a dismissed summary is no news');
   } finally {
     await s.stop();
     await fsp.rm(dir, { recursive: true, force: true });
@@ -468,6 +498,65 @@ test('Settings > Updates: a build without an image to check says so and checks n
     assert.equal(st.updateAvailable, false);
     assert.equal((await s.call('POST', '/api/updates/check', {})).data.enabled, false);
     for (const p of ['/api/updater', '/api/updater/branches']) assert.equal((await s.call('GET', p)).status, 404, `${p} is gone`);
+  } finally {
+    await s.stop();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('Jobs: Clear jobs takes finished jobs off the list after sign-in, from the page only; jobs a restart stopped are interrupted', async () => {
+  const dir = await tmp();
+  await makeFootage(path.join(dir, 'footage'));
+  // jobs from before this start: a scan the restart stopped, a conversion the converter resumes
+  const { ManagerDB } = require(path.join(REPO, 'server', 'db'));
+  const db = new ManagerDB(path.join(dir, 'data', 'manager.db'));
+  const stopped = db.startJob({ type: 'scan', vehicleId: 'daily-driver', title: 'Refresh inventory of Daily Driver' });
+  const paused = db.startJob({ type: 'conversion', vehicleId: 'daily-driver', title: 'Convert Daily Driver to H265', detail: 'paused: 3 converted', externalId: 'converter:paused-job' });
+  db.close();
+  // (info: the audit line)
+  const s = await startServer(dir, { LOG_LEVEL: 'info' });
+  try {
+    assert.equal((await s.call('POST', '/api/jobs/clear', { vehicle: 'daily-driver' })).status, 401, 'sign in first');
+    await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
+    let list = (await s.call('GET', '/api/jobs?vehicle=daily-driver')).data.jobs;
+    assert.equal(list.find((j) => j.id === stopped).status, 'interrupted', 'a scan stopped by the restart is not running forever');
+    assert.match(list.find((j) => j.id === stopped).detail, /stopped by a restart/);
+    assert.equal(list.find((j) => j.id === paused).status, 'running', 'conversions stay with the converter');
+
+    const scan = await s.call('POST', '/api/vehicles/daily-driver/scan', {});
+    await waitFor(async () => (await s.call('GET', '/api/jobs')).data.jobs.find((j) => j.id === scan.data.jobId)?.status === 'done');
+
+    // a mutating route like the others: the page's header, the same origin
+    assert.equal((await s.call('POST', '/api/jobs/clear', { vehicle: 'daily-driver' }, { headers: { 'X-Requested-With': 'nope' } })).status, 403);
+    assert.equal((await s.call('POST', '/api/jobs/clear', { vehicle: 'daily-driver' }, { headers: { Origin: 'https://evil.example' } })).status, 403);
+    assert.equal((await s.call('GET', '/api/jobs/clear')).status, 404, 'only POST');
+    assert.equal((await s.call('POST', '/api/jobs/clear', { vehicle: 'no-such-car' })).status, 404);
+    assert.equal((await s.call('GET', '/api/jobs')).data.jobs.length, list.length + 1, 'nothing cleared by refused requests');
+
+    const preview = await s.call('POST', '/api/jobs/clear', { vehicle: 'daily-driver', preview: true });
+    assert.equal(preview.status, 200);
+    const finished = (await s.call('GET', '/api/jobs?vehicle=daily-driver')).data.jobs.filter((j) => j.status !== 'running');
+    assert.equal(preview.data.jobs, finished.length, 'the confirmation counts what goes');
+    assert.deepEqual(finished.map((j) => j.status).sort(), ['done', 'interrupted'], 'the new scan and the one the restart stopped');
+    assert.equal((await s.call('GET', '/api/jobs')).data.jobs.filter((j) => j.status !== 'running').length, finished.length, 'a preview clears nothing');
+
+    // another open page hears about it
+    const events = await fetch(`${s.base}/api/events`, { headers: { Cookie: s.getCookie() } });
+    const reader = events.body.getReader();
+    await reader.read(); // hello
+    const cleared = await s.call('POST', '/api/jobs/clear', { vehicle: 'daily-driver' });
+    assert.deepEqual(cleared.data, { cleared: finished.length });
+    let seen = '';
+    const until = Date.now() + 10000;
+    while (!/"jobs"/.test(seen) && Date.now() < until) {
+      const chunk = await Promise.race([reader.read(), new Promise((r) => setTimeout(() => r({ value: new Uint8Array() }), 1000))]);
+      seen += new TextDecoder().decode(chunk.value || new Uint8Array());
+    }
+    await reader.cancel();
+    assert.match(seen, /"jobs"/, 'announced on the live updates');
+    list = (await s.call('GET', '/api/jobs?vehicle=daily-driver')).data.jobs;
+    assert.deepEqual(list.map((j) => [j.id, j.status]), [[paused, 'running']], 'running, waiting and paused jobs stay');
+    assert.match(fs.readFileSync(path.join(dir, 'data', 'logs', 'manager.log'), 'utf8'), /\[audit\] Jobs cleared: \d+ finished job\(s\) of daily-driver: admin from/);
   } finally {
     await s.stop();
     await fsp.rm(dir, { recursive: true, force: true });
