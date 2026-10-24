@@ -802,7 +802,7 @@
         <div class="nd-head-right"><span class="nd-chipbox"></span>
           ${on ? `<div class="seg nd-range" role="group" aria-label="Graphs over"><button type="button" data-range="15m">15 min</button><button type="button" data-range="24h">24 h</button></div>
           <a class="btn sm" href="/api/stats/export.csv?range=24h" download title="The last 24 hours as a spreadsheet">CSV</a>` : ''}
-          <label class="check small"><input type="checkbox" id="nd-toggle"${on ? ' checked' : ''}> Nerd stats</label></div></div>
+          <label class="check small"><input type="checkbox" id="nd-toggle" data-kept${on ? ' checked' : ''}> Nerd stats</label></div></div>
       ${vehicleTiles(current())}
       ${on ? '<div class="nd-body"></div>' : ''}
       ${logsPart()}</section>`;
@@ -867,6 +867,7 @@
       releaseMonitorHeight({ rows: true });
       root.outerHTML = serverSection();
       mountOverview();
+      $('nd-toggle')?.focus({ preventScroll: true });
     };
     root.querySelectorAll('[data-range]').forEach((b) => {
       b.onclick = () => {
@@ -960,7 +961,7 @@
     return `<div class="nd-tile nd-logs" id="ov-logs" role="region" aria-label="Logs">
       <div class="nd-title"><span>Logs</span><span class="muted">newest first</span></div>
       <div class="nd-logs-bar"><p class="muted small">Warnings and errors from the server, the converter and the container. Kept in the data folder (<code>logs/manager.log</code>), so nothing needs a shell on the server.</p>
-        <div class="nd-logs-actions"><label class="check small"><input type="checkbox" id="log-all"${logs.all ? ' checked' : ''}> Everything</label>
+        <div class="nd-logs-actions"><label class="check small"><input type="checkbox" id="log-all" data-kept${logs.all ? ' checked' : ''}> Everything</label>
           <button type="button" class="btn sm" id="log-refresh">Refresh</button><a class="btn sm" href="/api/logs/download" download>Download</a></div></div>
       <p class="sr-only" id="log-status" role="status"></p>
       <div class="logbox" id="log-list"${logs.tallest ? ` style="min-height:${logs.tallest}px"` : ''}>${logs.html || '<p class="muted small">Loading…</p>'}</div></div>`;
@@ -1990,12 +1991,27 @@
     if (embedded && innerWidth < 1200 && !app.classList.contains('collapsed')) app.classList.add('collapsed', 'auto-collapsed');
     if (!embedded && app.classList.contains('auto-collapsed')) app.classList.remove('collapsed', 'auto-collapsed');
     if (!embedded) for (const el of Object.values(frames)) hideFrame(el);
+    const focused = focusedControl();
     try {
       await pages[state.route](rest.join('/'));
       labelTableCells(page);
     } catch (err) {
       if (seq === renderSeq) page.innerHTML = `<div class="empty">${esc(err.message)}</div>`;
     }
+    if (seq === renderSeq) refocus(focused);
+  }
+
+  // A redraw replaces the button or checkbox that had the focus (a live
+  // update, Clear jobs, a switch): the new one of the same id gets it back,
+  // so a keyboard reader keeps their place. Fields that bring up a keyboard
+  // or a picker are left alone.
+  function focusedControl() {
+    const el = document.activeElement;
+    return el && el.id && page.contains(el) && el.matches('button, input[type="checkbox"], input[type="radio"]') ? el.id : '';
+  }
+  function refocus(id) {
+    if (!id || (document.activeElement && document.activeElement !== document.body)) return;
+    $(id)?.focus({ preventScroll: true });
   }
   window.addEventListener('hashchange', () => {
     if (LOGS_HASH.test(location.hash)) revealUntil = Date.now() + 5000;
@@ -2013,7 +2029,9 @@
         overview: ['vehicles', 'inventory', 'notifications', 'bin'], footage: ['inventory'], jobs: ['jobs'],
         bin: ['bin'], notifications: ['notifications'], policies: ['inventory']
       }[state.route] || [];
-      if (topics.some((t) => affects.includes(t)) && !document.querySelector('dialog[open]') && !document.activeElement?.matches('input, select, textarea')) {
+      // (not while the reader fills in a field: the redraw would take it
+      // away; a switch the page keeps itself, data-kept, is redrawn as it is)
+      if (topics.some((t) => affects.includes(t)) && !document.querySelector('dialog[open]') && !document.activeElement?.matches('input:not([data-kept]), select, textarea')) {
         // a highlight on the page: the update waits until it is gone
         if (selecting(page)) held.page = true;
         else render();

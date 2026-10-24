@@ -111,6 +111,22 @@ test('Logs: not a live region; a short status only after Refresh or Everything',
   assert.match(fn('sayLogs'), /status\.textContent = '';[\s\S]*status\.textContent = text;/, 'the same words are read out again');
 });
 
+test('Live updates redraw the Overview while one of its switches has the focus, and give the focus back', () => {
+  // the switches the page keeps itself
+  assert.match(fn('serverSection'), /<input type="checkbox" id="nd-toggle" data-kept\$\{on \? ' checked' : ''\}>/);
+  assert.match(fn('logsPart'), /<input type="checkbox" id="log-all" data-kept\$\{logs\.all \? ' checked' : ''\}>/);
+  // a field the reader fills in still holds the update; a kept switch does not
+  const connect = fn('connect');
+  assert.match(connect, /!document\.activeElement\?\.matches\('input:not\(\[data-kept\]\), select, textarea'\)/);
+  // the redraw gives the focus back to the control of the same id
+  const render = fn('render');
+  assert.ok(render.indexOf('const focused = focusedControl();') < render.indexOf('await pages[state.route]'));
+  assert.match(render, /if \(seq === renderSeq\) refocus\(focused\);\n {2}\}\n$/);
+  assert.match(fn('focusedControl'), /page\.contains\(el\) && el\.matches\('button, input\[type="checkbox"\], input\[type="radio"\]'\)/, 'not a field that brings up a keyboard');
+  assert.match(fn('refocus'), /if \(!id \|\| \(document\.activeElement && document\.activeElement !== document\.body\)\) return;\s*\$\(id\)\?\.focus\(\{ preventScroll: true \}\);/);
+  assert.match(fn('mountMonitor'), /root\.outerHTML = serverSection\(\);\s*mountOverview\(\);\s*\$\('nd-toggle'\)\?\.focus\(\{ preventScroll: true \}\);/);
+});
+
 test('Jobs: Clear jobs confirms in its request; the count does not', () => {
   const clear = fn('clearJobs');
   assert.match(clear, /api\('\/api\/jobs\/clear', \{ body: \{ \.\.\.body, preview: true \} \}\)/);
