@@ -1616,7 +1616,7 @@
     state.system = sys || state.system;
     state.power = settings.power || state.power || null;
     // (the Logs are on the Overview)
-    const sections = [['vehicles', 'Vehicles'], ['updates', 'Updates'], ['account', 'Account'], sec && ['security', 'Security'], (sys || settings.power) && ['system', 'System'], ['support', 'Support']].filter(Boolean);
+    const sections = [['vehicles', 'Vehicles'], ['updates', 'Updates'], ['account', 'Account'], sec && ['security', 'Security'], (sys || settings.power) && ['system', 'System']].filter(Boolean);
     const show = editing || !sections.some(([k]) => k === sub) ? 'vehicles' : sub;
     let html = head('Your archive workspace', 'Settings');
     html += `<nav class="set-tabs" aria-label="Settings sections">${sections.map(([k, label]) => `<button type="button" data-tab="${k}">${label}</button>`).join('')}</nav>`;
@@ -1648,22 +1648,25 @@
         <dt>Server time zone</dt><dd>${esc(sys.timezone)}</dd></dl></div>`;
     }
     if (settings.power) html += powerCard(settings.power, sys?.timezone);
-    html += supportCard();
     page.innerHTML = html;
     wireSettingsTabs(show, editing ? `#/settings/${sub}` : '#/settings', seq);
     wireSettings(editing);
     if (sec) wireSecurity(sec);
     if (settings.power) wirePower(settings.power);
-    wireSupport(seq);
   };
 
-  // Settings > Support: chat with Sentry Six support. This server relays it
+  pages.support = async () => {
+    page.innerHTML = head('Sentry Six team', 'Support') + supportCard();
+    wireSupport(renderSeq);
+  };
+
+  // Support: chat with Sentry Six support, a tab of its own. This server relays it
   // to the support server (server/support.js); the ticket stays on the server,
   // so every signed-in browser sees the same conversation.
   const SUPPORT_MAX_FILE = 50 * 1024 * 1024;
 
   function supportCard() {
-    return `<div class="card" data-section="support"><div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap"><h2>Support</h2>
+    return `<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap"><h2>Chat with the Sentry Six team</h2>
         <button class="btn sm" type="button" id="sup-close" hidden>Close ticket</button></div>
       <p>Ask the Sentry Six team for help. Messages go to the Sentry Six support server (api.sentry-six.com) and replies show up here.</p>
       <div class="sup-log" id="sup-log" aria-live="polite"><p class="muted small" id="sup-empty">No open ticket. Your first message opens one.</p></div>
@@ -1809,8 +1812,6 @@
       }
     };
 
-    // a Support tab opened later (phones) catches up at once
-    page.querySelectorAll('[data-tab]').forEach((b) => b.addEventListener('click', () => { if (b.dataset.tab === 'support') poll(); }));
     api('/api/support').then((st) => {
       if (!alive()) return;
       setOpen(Boolean(st.open));
