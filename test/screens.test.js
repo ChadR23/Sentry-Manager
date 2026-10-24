@@ -175,7 +175,8 @@ test('Overview: rows and columns stay in place between polls, with — while the
   const b = serverBody(ownerPoll(1), { seen });
   assert.deepEqual(rowsOf(a, 'GPU'), ['Render / 3D=31%', 'Video=72%', 'VRAM=0.9 / 8 GB', 'Clock=2.7 GHz', 'Temp=54 °C', 'Power=39 W · whole chip', 'Clients=4 × ffmpeg']);
   assert.deepEqual(rowsOf(b, 'GPU'), ['Render / 3D=31%', 'Video=—', 'VRAM=0.9 / 8 GB', 'Clock=—', 'Temp=54 °C', 'Power=39 W · whole chip', 'Clients=none'], 'the Video row stays while a new clip starts');
-  assert.match(b, /<b>—<\/b><span class="muted small">video engine<\/span>/, 'the big number keeps its label');
+  // an AMD GPU leads with the whole GPU's use (the driver's own reading), never —
+  assert.match(b, /<b>31%<\/b><span class="muted small">in use<\/span>/, 'the big number is the whole GPU in use');
   assert.deepEqual(rowsOf(b, 'CPU').filter((r) => r.startsWith('Temp')), ['Temp=—']);
   assert.match(b, /<dt>GPU<\/dt><dd>—<\/dd>/, 'a sensor without a reading keeps its row');
   // the GPU column stays with a GPU in the server; 8 rows always

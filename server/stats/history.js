@@ -112,6 +112,7 @@ class History {
     return {
       cpu: pick(SERIES.indexOf('cpu'), 1),
       gpuVideo: pick(SERIES.indexOf('gpuVideo'), 0),
+      gpuBusy: pick(SERIES.indexOf('gpuBusy'), 0),
       rxBps: pick(SERIES.indexOf('rxBps'), 0)
     };
   }

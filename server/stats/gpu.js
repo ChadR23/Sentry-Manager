@@ -465,6 +465,13 @@ class GpuProvider {
         if (c.kind !== 'amd') entry.busy = known ? (g ? pct(groupMax(g.engines, RENDER_ENGINE)) ?? 0 : 0) : null;
         entry.clients = g ? g.pids.size : 0;
       }
+      // Every clip starts a new ffmpeg, whose first reading cannot be measured
+      // yet: the last known numbers stand in for up to 10 s, so the tiles do
+      // not blink to unknown at each clip.
+      for (const k of ['video', 'busy']) {
+        if (entry[k] === null && c.held?.[k] && t - c.held[k].at < 10000) entry[k] = c.held[k].v;
+        else if (entry[k] !== null) (c.held ||= {})[k] = { v: entry[k], at: t };
+      }
       // asking a sleeping GPU anything wakes it up (and costs power)
       if (readLine(c.runtime) === 'suspended') {
         if (c.kind !== 'other') {

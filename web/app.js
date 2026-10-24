@@ -455,6 +455,11 @@
   // has a client open; their rows stay in place (with '—') in between
   const VIDEO_VENDORS = new Set(['amd', 'intel', 'nvidia']);
   const reportsVideo = (g) => Boolean(g) && VIDEO_VENDORS.has(g.vendor);
+  // AMD and NVIDIA drivers report the whole GPU's use (anything on the server,
+  // not only conversions): their tile leads with it, 0 % when idle. Intel only
+  // tells this app's own share, so its tile leads with the video engine.
+  const OVERALL_VENDORS = new Set(['amd', 'nvidia']);
+  const reportsOverall = (g) => Boolean(g) && OVERALL_VENDORS.has(g.vendor);
   // what a GPU's tile needs to be drawn again while a sample leaves it out
   const GPU_NAMES = ['id', 'name', 'vendor', 'driver', 'node', 'vramTotalB', 'integrated'];
 
@@ -463,7 +468,8 @@
     const steadyRows = reportsVideo(g);
     if (!g || (!steadyRows && !g.held && !['busy', 'video', 'vramUsedB', 'clockMHz', 'tempC', 'powerW'].some((k) => fin(g[k])))) return '';
     const dash = (n) => (fin(n) ? pct(n) : '—');
-    const big = steadyRows ? ndBig(dash(g.video), 'video engine')
+    const big = reportsOverall(g) ? ndBig(fin(g.busy) ? pct(g.busy) : g.held ? '—' : '0%', 'in use')
+      : steadyRows ? ndBig(dash(g.video), 'video engine')
       : fin(g.video) ? ndBig(pct(g.video), 'video engine') : fin(g.busy) ? ndBig(pct(g.busy), 'busy') : g.held ? ndBig('—', 'busy') : '';
     const vram = fin(g.vramTotalB) && g.vramTotalB > 0;
     const rows = [
@@ -738,6 +744,7 @@
     const pts = {
       cpu: day ? day.cpu : s.sparks?.cpu,
       gpu: day ? (usable(day.gpuVideo) ? day.gpuVideo : day.gpuBusy) : s.sparks?.gpuVideo,
+      gpuBusy: day ? day.gpuBusy : s.sparks?.gpuBusy,
       rx: day ? day.rxBps : s.sparks?.rxBps
     };
     // A GPU the page has shown keeps its tile, in its place, while a sample
@@ -755,7 +762,8 @@
     // on the first that encodes
     const sparkOn = list.map(([, g]) => g).find(reportsVideo) || list.map(([, g]) => g).find((g) => fin(g.video)) || null;
     const gpus = list.map(([k, g]) => {
-      const html = gpuTile(g, g === sparkOn ? pts.gpu : null, Boolean(day), seen, k);
+      // the sparkline follows the tile's big number: whole-GPU use or the video engine
+      const html = gpuTile(g, g === sparkOn ? (reportsOverall(g) ? pts.gpuBusy : pts.gpu) : null, Boolean(day), seen, k);
       if (html && shown && !g.held) shown.set(k, Object.fromEntries(GPU_NAMES.filter((n) => g[n] !== undefined).map((n) => [n, g[n]])));
       return html;
     }).join('');

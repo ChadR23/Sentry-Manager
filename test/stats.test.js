@@ -246,7 +246,7 @@ test('a container that can read almost nothing: every field empty, nothing throw
     assert.deepEqual(snap.sensors, []);
     assert.deepEqual(snap.processes.top, []);
     assert.equal(snap.power.totalW, null);
-    assert.deepEqual(snap.sparks, { cpu: [], gpuVideo: [], rxBps: [] });
+    assert.deepEqual(snap.sparks, { cpu: [], gpuVideo: [], gpuBusy: [], rxBps: [] });
     assert.equal(s.stats.history('15m').series.cpu.filter((v) => v !== null).length, 0);
     assert.match(s.stats.csv('15m'), /^time,cpu,memory,gpuBusy,gpuVideo,powerW,rxBps,txBps,tempMax\n/);
   } finally {

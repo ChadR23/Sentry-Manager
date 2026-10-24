@@ -94,7 +94,8 @@ test('right after a start, before the first conversion: the GPU is idle for us (
     s.stats.sampleNow();
     await s.stats.settle();
     [gpu] = s.stats.snapshot().gpus;
-    assert.deepEqual([gpu.video, gpu.clients], [null, 1], 'a client seen for the first time: not known yet');
+    // its first reading cannot be measured: the last known number (idle, 0 %) stands in
+    assert.deepEqual([gpu.video, gpu.clients], [0, 1], 'a new ffmpeg shows the last known number, not unknown');
     s.m.update(M.amd(3));
     s.clock.advance(2000);
     s.stats.sampleNow();
