@@ -120,6 +120,35 @@ test('Overview: Storage shows each share\'s heartbeat, and when an offline share
   assert.doesNotMatch(serverBody(s).split('<b>BingBong</b>')[0], /nd-beat/);
 });
 
+test('Overview: Top processes keep their places between polls, show all of them, and scroll past 8', () => {
+  const { serverBody } = overview();
+  const names = ['netdata', 'apps.plugin', 'containerd', 'dotnet', 'dockerd', 'go.d.plugin', 'containerd-shim', 'systemd', 'smbd', 'sshd', 'cron', 'tailscaled'];
+  const poll = (i, busy = {}) => {
+    const s = sample('amd');
+    s.processes = { scope: 'host', top: names.map((name, k) => ({ pid: 100 + k, name, cpu: busy[name] ?? ((k * 7 + i * 13) % 10) / 10, memB: (k + 1) * 9e6, gpuVideo: null })) };
+    return s;
+  };
+  const order = (html) => {
+    const table = html.slice(html.indexOf('<div class="nd-procs-box"'), html.indexOf('</table>'));
+    return [...table.matchAll(/<span class="nd-pname"><span>([^<]+)<\/span>/g)].map((m) => m[1]);
+  };
+  const seen = new Map();
+  const first = order(serverBody(poll(0), { seen }));
+  assert.equal(first.length, 12, 'every process, not only 8');
+  // the CPU of each moves between 0 and 0.9 % from poll to poll: nobody moves
+  for (let i = 1; i < 6; i++) assert.deepEqual(order(serverBody(poll(i), { seen })), first, `poll ${i}`);
+  // one gets busy: it goes to the top, the rest keep their order
+  const busy = order(serverBody(poll(6, { smbd: 30 }), { seen }));
+  assert.deepEqual(busy, ['smbd', ...first.filter((n) => n !== 'smbd')]);
+  // just over a band's edge and back: no flip back and forth
+  assert.deepEqual(order(serverBody(poll(7, { smbd: 29.4 }), { seen })), busy);
+  // the list scrolls inside the tile
+  assert.match(serverBody(poll(8), { seen }), /<div class="nd-procs-box" tabindex="0" aria-label="Processes, scroll for more"><table class="nd-procs">/);
+  // without memory: by CPU
+  const fresh = order(serverBody(poll(6, { smbd: 30, cron: 12 })));
+  assert.deepEqual(fresh.slice(0, 2), ['smbd', 'cron']);
+});
+
 // the owner's server between two polls: Ryzen 7 8700G, Radeon 780M, no RAPL
 function ownerPoll(i) {
   const s = sample('amd');
@@ -535,6 +564,37 @@ test('Hardware panel: a sample without the GPU or its power reading changes no l
   assert.match(noGpu, /<span>Video engine<\/span><b>—<\/b>/);
   assert.equal(shape(noPower), shape(first));
   assert.equal(shape(noGpu), shape(first));
+});
+
+test('Hardware panel: a highlight in it is not taken away by a poll; it catches up when the highlight is gone', async (t) => {
+  const { startHardwarePanel } = await hardware();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const listeners = {};
+  const on = (target) => (type, fn) => { (listeners[`${target}:${type}`] ||= []).push(fn); };
+  const inside = { inPanel: true };
+  const panel = { hidden: true, innerHTML: '', style: { minHeight: '' }, closest: () => null, parentElement: null, offsetHeight: 500, contains: (n) => n === inside };
+  let selection = { isCollapsed: true, rangeCount: 0 };
+  const doc = { visibilityState: 'visible', getElementById: (id) => (id === 'converterHardware' ? panel : null), addEventListener: on('doc'), getSelection: () => selection };
+  const win = { location: { origin: 'https://nas' }, addEventListener: on('win'), innerWidth: 1440 };
+  let body = sample();
+  const fetchImpl = async () => ({ ok: true, json: async () => body });
+  const settle = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
+  startHardwarePanel({ doc, win, fetchImpl });
+  await settle();
+  const before = panel.innerHTML;
+  assert.match(before, /Video engine/);
+  // the reader highlights a clip's name; the next poll has other numbers
+  selection = { isCollapsed: false, rangeCount: 1, getRangeAt: () => ({ commonAncestorContainer: inside }) };
+  body = sample();
+  body.gpus[0].video = 12;
+  t.mock.timers.tick(2000);
+  await settle();
+  assert.equal(panel.innerHTML, before, 'the highlight stays');
+  // the highlight is gone: the new numbers at once
+  selection = { isCollapsed: true, rangeCount: 0 };
+  listeners['doc:selectionchange'].forEach((fn) => fn());
+  assert.notEqual(panel.innerHTML, before);
+  assert.match(panel.innerHTML, /12%/);
 });
 
 test('Hardware panel: never shorter while a job runs; back to its own height when the job changes or the Encoder is shown again', async (t) => {

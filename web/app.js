@@ -223,6 +223,34 @@
     if (se && se.scrollTop !== top) se.scrollTop = top;
   }
 
+  // Text the reader is highlighting (or about to, with the button down) inside
+  // `el`: redrawing it would take the highlight away before it can be copied.
+  // Live updates wait until the highlight is gone, then catch up at once.
+  let pressing = null;
+  function selecting(el) {
+    if (!el) return false;
+    if (pressing && el.contains(pressing)) return true;
+    const sel = document.getSelection?.();
+    if (!sel || sel.isCollapsed || !sel.rangeCount) return false;
+    const range = sel.getRangeAt(0);
+    return el.contains(range.commonAncestorContainer) || range.intersectsNode?.(el) === true;
+  }
+  const held = { monitor: false, page: false };
+  function catchUp() {
+    if (held.monitor && !selecting($('nd-server'))) {
+      held.monitor = false;
+      drawMonitor();
+    }
+    if (held.page && !selecting(page)) {
+      held.page = false;
+      render();
+    }
+  }
+  document.addEventListener('pointerdown', (e) => { pressing = e.button === 0 ? e.target : null; }, true);
+  document.addEventListener('pointerup', () => { pressing = null; setTimeout(catchUp, 0); }, true);
+  document.addEventListener('pointercancel', () => { pressing = null; setTimeout(catchUp, 0); }, true);
+  document.addEventListener('selectionchange', () => { if (!pressing) catchUp(); });
+
   pages.overview = async () => {
     const v = current();
     let html = head('Your archive workspace', 'Overview') + pills();
@@ -609,7 +637,7 @@
   // the server sends its 8 busiest; the table keeps room for 8 rows
   const PROCESS_ROWS = 8;
 
-  function processTile(procs, enc, hasGpu = false) {
+  function processTile(procs, enc, hasGpu = false, seen = null) {
     const top = (Array.isArray(procs?.top) ? procs.top : []).filter((p) => p && p.name);
     if (!top.length) return '';
     // the same program several times (ffmpeg ×4) is one row
@@ -622,18 +650,31 @@
       if (fin(p.gpuVideo)) g.gpu = (g.gpu || 0) + p.gpuVideo;
       groups.set(p.name, g);
     }
-    const rows = [...groups.values()].sort((a, b) => b.cpu - a.cpu).slice(0, PROCESS_ROWS);
+    // Busy programs come first, by bands of 5 %; inside a band the rows keep
+    // their places from the last poll (`seen`), so the list does not reshuffle
+    // while most programs sit near 0 %. A row changes band only once it is a
+    // point past the band's edge.
+    const before = seen?.get('procs') || new Map(); // name -> { band, at }
+    const bandOf = (g) => {
+      const was = before.get(g.name)?.band;
+      if (was !== undefined && g.cpu >= was * 5 - 1 && g.cpu < (was + 1) * 5 + 1) return was;
+      return Math.floor(g.cpu / 5);
+    };
+    const rows = [...groups.values()].map((g) => ({ ...g, band: bandOf(g), at: before.get(g.name)?.at ?? Infinity }))
+      .sort((a, b) => b.band - a.band || a.at - b.at || b.cpu - a.cpu || b.memB - a.memB);
+    if (seen) seen.set('procs', new Map(rows.map((r, i) => [r.name, { band: r.band, at: i }])));
     // with a GPU, its column stays while no process uses it
     const gpuCol = hasGpu || rows.some((r) => r.gpu !== null);
-    // rows come and go (ffprobe, a mount): empty ones keep the table's height
-    const pad = `<tr class="nd-pad" aria-hidden="true"><td>&nbsp;</td><td></td><td></td>${gpuCol ? '<td></td>' : ''}</tr>`.repeat(PROCESS_ROWS - rows.length);
+    // rows come and go (ffprobe, a mount): empty ones keep the table's height;
+    // past PROCESS_ROWS the list scrolls inside the tile
+    const pad = `<tr class="nd-pad" aria-hidden="true"><td>&nbsp;</td><td></td><td></td>${gpuCol ? '<td></td>' : ''}</tr>`.repeat(Math.max(0, PROCESS_ROWS - rows.length));
     const encoder = enc?.running ? enc.device?.encoder : null;
     // one line each, so a row is as tall with ffmpeg ×3 as with one ffmpeg:
     // a long name ends in … before its count (its title has it all)
     const name = (r) => `${r.name}${r.name === 'ffmpeg' && encoder ? ` · ${encoder}` : ''}`;
     const nameCell = (r) => `<td title="${esc(`${name(r)}${r.n > 1 ? ` ×${r.n}` : ''}`)}"><span class="nd-pname"><span>${esc(name(r))}</span>${r.n > 1 ? `<span>×${r.n}</span>` : ''}</span></td>`;
     return ndTile('Top processes', procs.scope === 'host' ? 'whole server' : 'this container',
-      `<table class="nd-procs"><thead><tr><th>Process</th><th>CPU</th><th>Memory</th>${gpuCol ? '<th>GPU</th>' : ''}</tr></thead><tbody>${rows.map((r) => `<tr>${nameCell(r)}<td>${pct(r.cpu)}</td><td>${size(r.memB)}</td>${gpuCol ? `<td>${r.gpu !== null ? `${pct(r.gpu)} video` : '—'}</td>` : ''}</tr>`).join('')}${pad}</tbody></table>`, true);
+      `<div class="nd-procs-box" tabindex="0" aria-label="Processes, ${rows.length > PROCESS_ROWS ? 'scroll for more' : 'all shown'}"><table class="nd-procs"><thead><tr><th>Process</th><th>CPU</th><th>Memory</th>${gpuCol ? '<th>GPU</th>' : ''}</tr></thead><tbody>${rows.map((r) => `<tr>${nameCell(r)}<td>${pct(r.cpu)}</td><td>${size(r.memB)}</td>${gpuCol ? `<td>${r.gpu !== null ? `${pct(r.gpu)} video` : '—'}</td>` : ''}</tr>`).join('')}${pad}</tbody></table></div>`, true);
   }
 
   function hostLine(h) {
@@ -685,7 +726,7 @@
     const tiles = [
       cpuTile(s.cpu, pts.cpu, Boolean(day), seen), gpus, powerTile(s.power, s.encoder, s.price, currency, seen), memoryTile(s.memory, seen),
       storageTile(s.filesystems, s.disks, more.disks, fin(s.at) ? s.at : Date.now()), networkTile(s.network, pts.rx, Boolean(day)),
-      sensorsTile(s.sensors, more.sensors, Number(s.cpu?.sockets) || 1, seen), processTile(s.processes, s.encoder, list.length > 0)
+      sensorsTile(s.sensors, more.sensors, Number(s.cpu?.sockets) || 1, seen), processTile(s.processes, s.encoder, list.length > 0, seen)
     ].join('');
     const alerts = (Array.isArray(s.alerts) ? s.alerts : []).filter((a) => a && a.message).map((a) => `<div class="nd-alert${a.level === 'error' ? ' bad' : ''}"><b>${a.level === 'error' ? 'Problem' : 'Warning'}</b>${esc(a.message)} · <a href="#/settings/logs">Logs</a></div>`).join('');
     const unlock = (Array.isArray(s.unlock) ? s.unlock : []).filter((u) => u && u.adds);
@@ -702,12 +743,15 @@
     range: store.get('statsRange', '15m') === '24h' ? '24h' : '15m', hist: null, histAt: 0, more: {},
     // while the page stays open: the rows each tile has shown (steady()) and
     // the tallest the tiles have been, so a poll never makes the page jump
-    seen: new Map(), tallest: 0
+    seen: new Map(), tallest: 0, procScroll: 0
   };
   /** Back to the tiles' own height (a new visit, another range, a fold, a resize). */
   function releaseMonitorHeight({ rows = false } = {}) {
     monitor.tallest = 0;
-    if (rows) monitor.seen = new Map();
+    if (rows) {
+      monitor.seen = new Map();
+      monitor.procScroll = 0;
+    }
     const body = $('nd-server')?.querySelector('.nd-body');
     if (body) body.style.minHeight = '';
   }
@@ -728,6 +772,11 @@
     const root = $('nd-server');
     const body = root?.querySelector('.nd-body');
     if (!body) return;
+    // the reader is highlighting something in it: the numbers wait
+    if (selecting(root)) {
+      held.monitor = true;
+      return;
+    }
     const s = monitor.snap;
     root.querySelectorAll('[data-range]').forEach((b) => {
       b.classList.toggle('on', b.dataset.range === monitor.range);
@@ -747,6 +796,15 @@
         range: monitor.range, hist: monitor.hist, more: monitor.more, seen: monitor.seen,
         currency: s.price?.currency || state.power?.currency || '$'
       }) : '';
+      // the process list: 8 rows and half of the ninth (there is more below),
+      // and it stays where the reader scrolled it
+      const procs = body.querySelector('.nd-procs-box');
+      if (procs) {
+        const head = procs.querySelector('thead')?.getBoundingClientRect().height || 0;
+        const row = procs.querySelector('tbody tr')?.getBoundingClientRect().height || 0;
+        if (head && row) procs.style.maxHeight = `${Math.ceil(head + row * (PROCESS_ROWS + 0.5))}px`;
+        if (monitor.procScroll) procs.scrollTop = monitor.procScroll;
+      }
       // Rebuilt on every poll: a tile that grows for a moment would make the
       // page jump back up when it shrinks again (at the bottom of the page the
       // browser has to scroll). The tiles never get shorter while the page is
@@ -779,6 +837,9 @@
         startMonitor();
       };
     });
+    root.addEventListener('scroll', (e) => {
+      if (e.target.classList?.contains('nd-procs-box')) monitor.procScroll = e.target.scrollTop;
+    }, true);
     root.addEventListener('click', (e) => {
       const more = e.target.closest('[data-nd-more]');
       if (!more) return;
@@ -1734,6 +1795,7 @@
   let renderSeq = 0;
   async function render() {
     const seq = ++renderSeq;
+    held.page = false;
     // the shell's opening state (boot.js, index.html) ends here
     bootFrame?.remove();
     delete document.documentElement.dataset.boot;
@@ -1774,7 +1836,11 @@
         overview: ['vehicles', 'inventory', 'notifications', 'bin'], footage: ['inventory'], jobs: ['jobs'],
         bin: ['bin'], notifications: ['notifications'], policies: ['inventory']
       }[state.route] || [];
-      if (topics.some((t) => affects.includes(t)) && !document.querySelector('dialog[open]') && !document.activeElement?.matches('input, select, textarea')) render();
+      if (topics.some((t) => affects.includes(t)) && !document.querySelector('dialog[open]') && !document.activeElement?.matches('input, select, textarea')) {
+        // a highlight on the page: the update waits until it is gone
+        if (selecting(page)) held.page = true;
+        else render();
+      }
       if (topics.includes('jobs') && state.route !== 'jobs') {
         api('/api/jobs?limit=50').then(({ jobs }) => {
           const running = jobs.filter((j) => j.status === 'running');

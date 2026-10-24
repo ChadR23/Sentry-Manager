@@ -293,8 +293,12 @@ details.more p { margin-top: 10px; color: var(--text-2); max-width: 760px; }
 .nd-disk .small.nd-beat { margin-top: 2px; color: var(--muted); }
 .nd-warn { color: var(--warn) !important; font-weight: 600; }
 .nd-bad { color: var(--danger) !important; font-weight: 600; }
-.nd-procs { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; }
-.nd-procs th { text-align: left; color: var(--muted); font-weight: 600; font-size: 12px; padding: 6px 0; }
+/* the header, 8 rows and half of the ninth (set from the rows' real height);
+   the rest of the list scrolls inside the tile */
+.nd-procs-box { margin-top: 10px; max-height: 324px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.nd-procs-box:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.nd-procs { width: 100%; border-collapse: collapse; font-size: 13px; }
+.nd-procs th { text-align: left; color: var(--muted); font-weight: 600; font-size: 12px; padding: 6px 0; position: sticky; top: 0; z-index: 1; background: var(--panel-2); }
 .nd-procs td { padding: 7px 0; border-top: 1px solid var(--border); overflow-wrap: anywhere; }
 .nd-procs td + td, .nd-procs th + th { text-align: right; padding-left: 12px; white-space: nowrap; }
 /* a process on one line, so a row is always one line tall: a long name ends

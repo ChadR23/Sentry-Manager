@@ -85,6 +85,11 @@ what the machine is doing, live, so you don't need Glances or another tool:
   connected* and when it last answered, kept across restarts), **network** (live
   speed, and the data used today, this week and this month) and every
   **sensor** and fan the server reports.
+- **Top processes**: up to 40, eight at a time (scroll the list for the
+  rest). Busy ones come first; the others keep their places, so the list
+  does not reshuffle with every update.
+- The numbers update every 2 seconds without moving the page, and wait while
+  you highlight text in them, so it can be copied.
 - **Alerts** for a hot CPU, GPU or disk, a disk almost full, a slow or
   unreachable share, and low memory; they also go to Notifications.
 - **History**: the last 24 hours, and a CSV download.

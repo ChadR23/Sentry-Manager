@@ -310,6 +310,44 @@ export function startHardwarePanel({ doc = document, win = window, fetchImpl = (
 
     const wanted = () => doc.visibilityState !== 'hidden' && shownByShell && onScreen;
 
+    // Text being highlighted in the panel (or the button held down in it):
+    // the numbers wait, so the highlight is not taken away before it can be
+    // copied, and catch up as soon as it is gone.
+    let pressed = null;
+    let waiting = null;
+    const selecting = () => {
+        if (pressed && panel.contains?.(pressed)) return true;
+        const sel = doc.getSelection?.();
+        if (!sel || sel.isCollapsed || !sel.rangeCount) return false;
+        const range = sel.getRangeAt(0);
+        return panel.contains?.(range.commonAncestorContainer) === true || range.intersectsNode?.(panel) === true;
+    };
+    const show = (html) => {
+        if (selecting()) {
+            waiting = html;
+            return;
+        }
+        waiting = null;
+        // unchanged numbers leave the DOM (and a hovered title) alone
+        if (html !== last) {
+            panel.innerHTML = html;
+            last = html;
+        }
+        panel.hidden = !html;
+        if (html) hold();
+    };
+    const catchUp = () => {
+        if (waiting !== null && !selecting()) show(waiting);
+    };
+    doc.addEventListener('pointerdown', (e) => { pressed = e.button === 0 ? e.target : null; }, true);
+    for (const type of ['pointerup', 'pointercancel']) {
+        doc.addEventListener(type, () => {
+            pressed = null;
+            setTimeout(catchUp, 0);
+        }, true);
+    }
+    doc.addEventListener('selectionchange', () => { if (!pressed) catchUp(); });
+
     async function poll() {
         clearTimeout(timer);
         timer = null;
@@ -325,13 +363,7 @@ export function startHardwarePanel({ doc = document, win = window, fetchImpl = (
                     memo.fresh = false;
                     release();
                 }
-                // unchanged numbers leave the DOM (and a hovered title) alone
-                if (html !== last) {
-                    panel.innerHTML = html;
-                    last = html;
-                }
-                panel.hidden = !html;
-                if (html) hold();
+                show(html);
             }
         } catch {
             // the next poll tries again; the panel keeps its last numbers

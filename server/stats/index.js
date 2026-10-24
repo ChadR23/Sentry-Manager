@@ -39,7 +39,8 @@ const MIN_GAP_MS = 250;
 const SAVE_EVERY_MS = 5 * 60 * 1000;
 const REPROBE_MS = 10 * 60 * 1000;
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
-const TOP_PROCESSES = 8;
+// the Overview shows 8 rows and scrolls for the rest
+const TOP_PROCESSES = 40;
 
 // "Shown only when the server provides it": what one optional compose line adds
 const UNLOCK = {

@@ -107,7 +107,7 @@ test('Intel desktop with an Arc A380 (xe): CPU, memory, GPUs, power, disks, netw
 
     assert.equal(snap.processes.scope, 'host');
     const top = snap.processes.top;
-    assert.equal(top.length, 8);
+    assert.equal(top.length, 9, 'every process (up to 40): the Overview scrolls past 8');
     assert.deepEqual(top.slice(0, 5).map((p) => [p.pid, p.name, p.cpu, p.gpuVideo]), [
       [300, 'Plex Media Server', 9, null], [200, 'ffmpeg · hevc_vaapi', 9, 47], [201, 'ffmpeg · hevc_vaapi', 9, 47], [100, 'sentry-six-manager', 4, null], [202, 'ffmpeg', 2, 40]
     ], 'ffmpeg named by the encoder the converter says it runs');
@@ -300,7 +300,7 @@ test('this machine: a sample of the real /proc and /sys (no GPU here)', async ()
     assert.ok(snap.memory.appB > 0, 'this test process is the app');
     assert.ok(snap.host.kernel);
     assert.ok(Array.isArray(snap.disks) && Array.isArray(snap.gpus) && Array.isArray(snap.network.interfaces));
-    assert.ok(snap.processes.top.length <= 8);
+    assert.ok(snap.processes.top.length <= 40);
     assert.ok(snap.processes.top.every((p) => p.pid !== process.pid || p.name === 'sentry-six-manager'), 'the app is named, not "node"');
     assert.ok(snap.cpu.app.usage === null || snap.cpu.app.usage >= 0);
     const fsEntry = stats.snapshot().filesystems[0];
