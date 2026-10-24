@@ -163,8 +163,54 @@ function selected(options, dataKey, fallback) {
     return options.find((entry) => entry.checked)?.dataset?.[dataKey] || fallback;
 }
 
+// Text being highlighted (or about to be, with the button held down on it)
+// keeps its words: the run's counters change every second or two, and a new
+// value would take the highlight away before it could be copied. The new
+// value waits and shows as soon as the highlight is gone.
+const heldText = new Map();
+const watchedDocuments = new WeakSet();
+let pressedNode = null;
+
+function highlighted(element) {
+    if (pressedNode && element.contains?.(pressedNode) === true) return true;
+    const selection = element.ownerDocument?.getSelection?.();
+    if (!selection || selection.isCollapsed || !selection.rangeCount) return false;
+    const range = selection.getRangeAt(0);
+    return element.contains?.(range.commonAncestorContainer) === true || range.intersectsNode?.(element) === true;
+}
+
+function releaseHeldText() {
+    for (const [element, text] of heldText) {
+        if (highlighted(element)) continue;
+        heldText.delete(element);
+        if (element.textContent !== text) element.textContent = text;
+    }
+}
+
+function watchHighlights(documentApi) {
+    if (!documentApi?.addEventListener || watchedDocuments.has(documentApi)) return;
+    watchedDocuments.add(documentApi);
+    documentApi.addEventListener('pointerdown', (event) => { pressedNode = event.button === 0 ? event.target : null; }, true);
+    for (const type of ['pointerup', 'pointercancel']) {
+        documentApi.addEventListener(type, () => {
+            pressedNode = null;
+            setTimeout(releaseHeldText, 0);
+        }, true);
+    }
+    documentApi.addEventListener('selectionchange', () => { if (!pressedNode) releaseHeldText(); });
+}
+
 function setText(element, value) {
-    if (element) element.textContent = value == null ? '' : String(value);
+    if (!element) return;
+    const text = value == null ? '' : String(value);
+    watchHighlights(element.ownerDocument);
+    if (highlighted(element)) {
+        heldText.set(element, text);
+        return;
+    }
+    heldText.delete(element);
+    // the same words leave the text (and a highlight in it) alone
+    if (element.textContent !== text) element.textContent = text;
 }
 
 function setHidden(element, hidden) {

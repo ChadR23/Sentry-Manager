@@ -706,6 +706,57 @@ test('Hardware panel: never shorter while a job runs; back to its own height whe
   assert.equal(panel.style.minHeight, '700px');
 });
 
+test('Hardware panel: the server\'s numbers cannot be read: Live run gives its column to the progress until they can', async (t) => {
+  const { startHardwarePanel } = await hardware();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const classes = new Set();
+  const panel = { hidden: true, innerHTML: '', style: { minHeight: '' }, offsetHeight: 400, closest: () => null, parentElement: null, classList: { toggle: (name, on) => (on ? classes.add(name) : classes.delete(name)) } };
+  const doc = { visibilityState: 'visible', getElementById: (id) => (id === 'converterHardware' ? panel : null), addEventListener() {} };
+  const win = { location: { origin: 'https://nas' }, addEventListener() {}, innerWidth: 1440 };
+  let answer = { ok: false, status: 500 };
+  const fetchImpl = async () => {
+    if (answer === 'offline') throw new TypeError('Failed to fetch');
+    return answer;
+  };
+  const settle = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
+  const poll = async () => { t.mock.timers.tick(2000); await settle(); };
+  // before the first answer the column is kept for the panel
+  startHardwarePanel({ doc, win, fetchImpl });
+  assert.equal(classes.has('nd-hw-off'), false);
+  await settle();
+  assert.equal(panel.hidden, true);
+  assert.equal(classes.has('nd-hw-off'), true, 'a failed answer: the progress takes the width');
+  answer = 'offline';
+  await poll();
+  assert.equal(classes.has('nd-hw-off'), true);
+  // the numbers come back: the panel and its column with them
+  answer = { ok: true, json: async () => sample() };
+  await poll();
+  assert.equal(panel.hidden, false);
+  assert.equal(classes.has('nd-hw-off'), false);
+  // a failure later keeps the last numbers where they are
+  answer = { ok: false, status: 503 };
+  await poll();
+  assert.equal(panel.hidden, false);
+  assert.equal(classes.has('nd-hw-off'), false);
+  const css = fs.readFileSync(path.join(REPO, 'src/renderer/styles/encoderPage.css'), 'utf8');
+  assert.match(css, /@container live-run \(min-width: 620px\) \{[^@]*\.converter-live-split:has\(> \.nd-hw-off\[hidden\]\) \{ grid-template-columns: minmax\(0, 1fr\); \}/);
+});
+
+test('Encoder: after a run with failures the actions stay on one line; long options never widen a phone\'s page', () => {
+  const css = fs.readFileSync(path.join(REPO, 'src/renderer/styles/encoderPage.css'), 'utf8');
+  // Retry failed shows only after a run; where five buttons do not fit,
+  // the three that cannot be used then (Pause, Resume, Cancel) step aside
+  assert.match(css, /\n#converterRetry:disabled \{ display: none; \}/);
+  assert.match(css, /\n\.converter-actions \{ container: run-actions \/ inline-size; \}/);
+  assert.match(css, /@container run-actions \(max-width: 519px\) \{\s*\.converter-actions:has\(#converterRetry:not\(:disabled\)\) \.converter-button:disabled \{ display: none; \}/);
+  const page = fs.readFileSync(path.join(REPO, 'src/renderer/encoder.html'), 'utf8');
+  const actions = page.slice(page.indexOf('<div class="converter-actions">'), page.indexOf('</form>'));
+  for (const id of ['converterStart', 'converterPause', 'converterResume', 'converterCancel', 'converterRetry']) assert.match(actions, new RegExp(`id="${id}"`));
+  // Safari counts a long option's text as part of the page: the select clips it
+  assert.match(css, /\nselect\.converter-select \{[^}]*overflow: hidden;/);
+});
+
 test('Hardware panel: asks every 2 s only while it can be seen', async (t) => {
   const { startHardwarePanel } = await hardware();
   t.mock.timers.enable({ apis: ['setTimeout'] });

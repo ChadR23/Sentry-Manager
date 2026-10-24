@@ -275,8 +275,16 @@ export function startHardwarePanel({ doc = document, win = window, fetchImpl = (
             last = html;
         }
         panel.hidden = !html;
-        if (html) hold();
+        if (html) {
+            unavailable(false);
+            hold();
+        }
     };
+    // Live run keeps the panel's column while it waits for the first answer.
+    // An answer with nothing to show (the server's numbers cannot be read)
+    // gives the column back to the run's progress, until a later poll has
+    // numbers again (encoderPage.css: .nd-hw-off).
+    const unavailable = (on) => panel.classList?.toggle?.('nd-hw-off', on);
     const catchUp = () => {
         if (waiting !== null && !selecting()) show(waiting);
     };
@@ -312,6 +320,7 @@ export function startHardwarePanel({ doc = document, win = window, fetchImpl = (
             clearTimeout(giveUp);
             busy = false;
         }
+        if (panel.hidden && waiting === null) unavailable(true);
         if (wanted()) timer = setTimeout(poll, POLL_MS);
     }
 

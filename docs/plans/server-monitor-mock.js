@@ -1,4 +1,7 @@
 // Mockup only: injects sample "Server" and "Hardware" panels into the real pages.
+// The Hardware panel as first approved: the app's has no row per clip any more
+// (removed at the owner's request) and sits beside the run's progress
+// (docs/plans/server-monitor.md).
 const spark = (pts, w = 220, h = 40, color = 'var(--accent)') => {
   const max = Math.max(...pts), min = Math.min(...pts);
   const xy = pts.map((p, i) => `${(i / (pts.length - 1)) * w},${h - 3 - ((p - min) / (max - min || 1)) * (h - 6)}`).join(' ');

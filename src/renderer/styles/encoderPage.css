@@ -371,6 +371,10 @@ select.converter-select {
     text-overflow: ellipsis;
     appearance: none;
     cursor: pointer;
+    /* Safari counts a long option's text past the box ("Quick — checks
+       streams, length, …") as part of the page, which then scrolls sideways
+       on phones */
+    overflow: hidden;
 }
 
 .converter-select:hover:not(:disabled):not(:focus-visible) { border-color: var(--fd-border-hover); }
@@ -785,6 +789,16 @@ select.converter-select {
 /* Retry failed only when there is something to retry */
 #converterRetry:disabled { display: none; }
 
+/* Retry failed comes only after a run, when Pause, Resume and Cancel cannot
+   be used. Where all five do not fit on one line (the settings card beside
+   a wide Live run: about 480px of buttons), those three step aside for it,
+   so the bar keeps its one line and its height. */
+.converter-actions { container: run-actions / inline-size; }
+
+@container run-actions (max-width: 519px) {
+    .converter-actions:has(#converterRetry:not(:disabled)) .converter-button:disabled { display: none; }
+}
+
 .converter-button-quiet { min-height: 32px; }
 .converter-action-divider { height: 24px; background: var(--fd-border-strong); }
 
@@ -795,7 +809,9 @@ select.converter-select {
 /* The progress (current file and the counters) and the Hardware panel: side
    by side when Live run is wide enough, so what is left shows without
    scrolling; else one under the other, the progress first. Each column keeps
-   its place while the other is empty (the panel before its first numbers). */
+   its place while the other is empty (the panel before its first numbers);
+   when the server's numbers cannot be read (nd-hw-off, hardwarePanel.js),
+   the progress takes the whole width until they can. */
 .converter-live-split {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
@@ -806,6 +822,7 @@ select.converter-select {
 /* (the panel a little wider: its tiles are two to a row) */
 @container live-run (min-width: 620px) {
     .converter-live-split { grid-template-columns: minmax(0, 4fr) minmax(0, 5fr); }
+    .converter-live-split:has(> .nd-hw-off[hidden]) { grid-template-columns: minmax(0, 1fr); }
 }
 
 .converter-progress {
@@ -958,7 +975,9 @@ select.converter-select {
 
 /* --------------------------------------------------------------------------
    Hardware (scripts/features/hardwarePanel.js): what the run uses and what
-   it costs; the approved mockup, docs/plans/server-monitor-mock.js
+   it costs. Started from the approved mockup (docs/plans/server-monitor-mock.js);
+   since then, at the owner's request, it has no row per clip and sits beside
+   the run's progress instead of above it.
    -------------------------------------------------------------------------- */
 .nd-hw {
     min-width: 0;

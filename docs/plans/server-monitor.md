@@ -9,7 +9,9 @@ Goal: one place in the app that shows what the server is doing, on any
 hardware, so nobody needs Glances, Netdata or other tools. Everything stays
 inside the one container; nothing leaves the server; no extra services.
 
-Mockup (sample numbers; markup and CSS in `server-monitor-mock.js`):
+Mockup (sample numbers; markup and CSS in `server-monitor-mock.js`; the
+Encoder panel as first approved, see the notes under "Encoder" for what
+changed since):
 
 ![Overview: Server section](server-monitor-overview.png)
 ![Encoder: Hardware panel](server-monitor-encoder.png)
@@ -42,6 +44,7 @@ thermal zone only for the GPU).
 - (Bottleneck hint: removed later at the owner's request; it flipped between "bottleneck" and "room to spare".)
 - Efficiency: kWh this run, clips per kWh, GB saved per kWh, cost so far.
 - One row per running clip: progress bar, fps, speed x realtime, bitrate, dropped/duplicated frames (from the ffmpeg `-progress` output jobService already reads).
+- (One row per running clip: removed later at the owner's request; the clips came and went every few seconds. The panel now sits beside the run's progress (current file and counters) instead of above it, so how many are left shows without scrolling. The mockup above still shows the first version.)
 - Benchmark: watts per level and a "most efficient" pick next to "fastest".
 - Jobs page: kWh and average W per finished run.
 

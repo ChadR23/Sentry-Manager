@@ -20,13 +20,14 @@ function el(init = {}) {
   }, init);
 }
 
-async function controller({ jobConcurrency = 5 } = {}) {
+async function controller({ jobConcurrency = 5, extra = {} } = {}) {
   const { createFootageConverterController } = await import(MODULE);
   const elements = {
     groupOptions: [], codecOptions: [], profileOptions: [], outputOptions: [], pipelineStages: [], orderRows: [],
     autoEnabled: el(), autoInterval: el({ value: '60' }), autoWindowEnabled: el(), autoStart: el({ value: '1' }), autoEnd: el({ value: '6' }),
     autoOffPeak: el(), autoHoldManual: el(), autoKeepRunning: el(), autoLogin: el(), autoStatus: el(),
-    concurrency: el({ value: String(jobConcurrency) }), concurrencyCustom: el({ value: '12' }), concurrencyCustomRow: el(), startButton: el()
+    concurrency: el({ value: String(jobConcurrency) }), concurrencyCustom: el({ value: '12' }), concurrencyCustomRow: el(), startButton: el(),
+    ...extra
   };
   const sent = { auto: [], conc: [] };
   let autoState = { settings: { enabled: false, intervalMinutes: 60, window: null, holdManual: false, keepRunning: false, openAtLogin: false, config: null }, status: {} };
@@ -91,4 +92,43 @@ test('quick changes: the last choice is what the job ends with', async () => {
   elements.concurrency.fire('change');
   await settle(); await settle();
   assert.deepEqual(sent.conc.at(-1), ['job-1', 4]);
+});
+
+test('a highlighted counter keeps its number while the run goes on, and catches up once the highlight is gone', async () => {
+  const listeners = {};
+  let selection = { isCollapsed: true, rangeCount: 0 };
+  const doc = { addEventListener: (type, fn) => { (listeners[type] ||= []).push(fn); }, getSelection: () => selection };
+  const inside = { text: true };
+  let writes = 0;
+  let text = '0';
+  const waiting = el({ ownerDocument: doc, contains: (node) => node === inside });
+  Object.defineProperty(waiting, 'textContent', { get: () => text, set: (v) => { writes++; text = v; } });
+  const { snapshot, settle } = await controller({ extra: { countWaiting: waiting } });
+  const job = (revision, queued) => ({ jobId: 'job-1', revision, snapshot: { id: 'job-1', revision, state: 'encoding', config: { concurrency: 5 }, itemStateCounts: { queued }, items: [] } });
+  snapshot(job(20, 500));
+  await settle();
+  assert.equal(waiting.textContent, '500');
+  // the same number again: the text (and a highlight in it) is left alone
+  const before = writes;
+  snapshot(job(21, 500));
+  await settle();
+  assert.equal(writes, before, 'not rewritten');
+  // the reader highlights it; the next update has another number
+  selection = { isCollapsed: false, rangeCount: 1, getRangeAt: () => ({ commonAncestorContainer: inside }) };
+  snapshot(job(22, 480));
+  await settle();
+  assert.equal(waiting.textContent, '500', 'the highlight stays');
+  assert.equal(writes, before);
+  // the highlight is gone: the new number at once
+  selection = { isCollapsed: true, rangeCount: 0 };
+  listeners.selectionchange.forEach((fn) => fn());
+  assert.equal(waiting.textContent, '480', 'caught up at once');
+  // the mouse button held down on it (a highlight about to start)
+  listeners.pointerdown.forEach((fn) => fn({ button: 0, target: inside }));
+  snapshot(job(23, 470));
+  await settle();
+  assert.equal(waiting.textContent, '480');
+  listeners.pointerup.forEach((fn) => fn({}));
+  await settle();
+  assert.equal(waiting.textContent, '470');
 });
