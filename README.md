@@ -108,8 +108,8 @@ PUID/PGID of its own.
 
 ![Footage](docs/images/footage.png)
 
-**Footage** shows one card per day, newest first, with the newest day
-open: a thumbnail (the day's first Sentry or Saved event, else its first
+**Footage** shows one card per day, newest first, all closed until you open
+one: a thumbnail (the day's first Sentry or Saved event, else its first
 drive), its drives and events, how long and how big it is, and a blue
 **Encoded** badge once its recordings are converted to H.265 or AV1
 (*Encoded 1/4* while only some are; the codec is read from each clip's MP4
@@ -122,8 +122,9 @@ header). For the whole day:
   until you empty the Recycle Bin.
 
 Open a day to see its recordings: play one, show its files, protect it, or
-move it to the Recycle Bin. The checkbox on a day selects all of its
-recordings.
+move it to the Recycle Bin. A day stays open until you close it, and picking
+a date in the filter opens that day. The checkbox on a day selects all of
+its recordings.
 
 ## Encoder
 

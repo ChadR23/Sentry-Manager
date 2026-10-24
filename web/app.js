@@ -126,7 +126,8 @@
     vehicles: [],
     vehicleId: store.get('vehicle', null),
     notes: [],
-    footage: { category: 'all', date: '', offset: 0, data: null, selected: new Set(), expanded: new Set(), open: new Set(), opened: false, vehicleId: null, dayRecs: new Map() },
+    // open: the days the reader opened (none opens by itself)
+    footage: { category: 'all', date: '', offset: 0, data: null, selected: new Set(), expanded: new Set(), open: new Set(), vehicleId: null, dayRecs: new Map() },
     system: null
   };
   const current = () => state.vehicles.find((v) => v.id === state.vehicleId) || state.vehicles[0] || null;
@@ -899,9 +900,11 @@
     if (monitor.snap) drawMonitor();
   });
 
-  // Footage, one card per capture day (newest first, the newest one open):
-  // a thumbnail, what the day holds, how much of it is encoded, and actions
-  // for the whole day. An open day lists its recordings as before.
+  // Footage, one card per capture day (newest first, all closed): a
+  // thumbnail, what the day holds, how much of it is encoded, and actions
+  // for the whole day. A day the reader opens lists its recordings and stays
+  // open (live updates, filters, paging, coming back to the page) until they
+  // close it or pick another vehicle; picking a date in the filter opens it.
   pages.footage = async () => {
     const v = current();
     const f = state.footage;
@@ -910,7 +913,7 @@
       page.innerHTML = `${html}<div class="empty">Add a vehicle in Settings first.</div>`;
       return;
     }
-    if (f.vehicleId !== v.id) Object.assign(f, { vehicleId: v.id, open: new Set(), opened: false, offset: 0 });
+    if (f.vehicleId !== v.id) Object.assign(f, { vehicleId: v.id, open: new Set(), offset: 0 });
     const q = new URLSearchParams({ category: f.category, offset: String(f.offset), limit: String(DAYS_PER_PAGE) });
     if (f.date) q.set('date', f.date);
     let data;
@@ -919,10 +922,6 @@
     } catch (err) {
       page.innerHTML = `${html}<div class="empty">${esc(err.message)}</div>`;
       return;
-    }
-    if (!f.opened && data.days.length) {
-      f.open.add(data.days[0].day);
-      f.opened = true;
     }
     // the recordings of the open days
     const recQ = (day) => new URLSearchParams({ category: f.category, date: day, limit: '500' });
