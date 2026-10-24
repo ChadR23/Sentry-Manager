@@ -24,9 +24,14 @@ const MAX_ATTACHMENT_BYTES = 110 * 1024 * 1024;
 // percent-encoded dot, slash or backslash (a server that decodes them would
 // see "..", "//" or "\\" again), an optional plain query
 const ATTACHMENT_PATH = /^\/(?![/\\])(?!.*\.\.)(?!.*\/\/)(?!.*%(?:2[eEfF]|5[cC]))[A-Za-z0-9._~/%-]{1,512}(\?[A-Za-z0-9._~=&%-]{0,512})?$/;
+// Pictures the support team sends from Discord live on Discord's CDN; they are
+// fetched through this server too (the page may load only from this server),
+// without the support token.
+const CDN_HOSTS = new Set(['cdn.discordapp.com', 'media.discordapp.net']);
+const CDN_QUERY = /^\?[A-Za-z0-9._~=&%-]{0,1024}$/;
 const SHOWN_TYPES = /^(image\/(png|jpeg|gif|webp)|video\/(mp4|webm|quicktime))$/;
 
-function request({ method, path, token = null, body = null, timeoutMs = 30000, raw = false }) {
+function request({ host = HOST, method, path, token = null, body = null, timeoutMs = 30000, raw = false }) {
   return new Promise((resolve, reject) => {
     const headers = { Accept: raw ? '*/*' : 'application/json', 'User-Agent': 'SentrySixManager' };
     if (body !== null) {
@@ -34,7 +39,7 @@ function request({ method, path, token = null, body = null, timeoutMs = 30000, r
       headers['Content-Length'] = Buffer.byteLength(body);
     }
     if (token) headers['X-Auth-Token'] = token;
-    const req = https.request({ hostname: HOST, port: 443, path, method, headers, timeout: timeoutMs }, (res) => {
+    const req = https.request({ hostname: host, port: 443, path, method, headers, timeout: timeoutMs }, (res) => {
       if (raw) return resolve(res);
       const chunks = [];
       let size = 0;
@@ -70,18 +75,42 @@ function request({ method, path, token = null, body = null, timeoutMs = 30000, r
 
 const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
 
+// Where an attachment link may be fetched from: a path on the support server
+// (sent with the ticket's token), or a file on Discord's CDN (sent without it).
+// Anything else is null and is shown as a name only.
+function attachmentTarget(u) {
+  if (typeof u !== 'string' || u.length > 2048) return null;
+  if (u.startsWith(`https://${HOST}/`)) u = u.slice(`https://${HOST}`.length);
+  if (u.startsWith('/')) return ATTACHMENT_PATH.test(u) ? { host: HOST, path: u, withToken: true } : null;
+  let url;
+  try {
+    url = new URL(u);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'https:' || url.username || url.password || url.port || !CDN_HOSTS.has(url.hostname)) return null;
+  const pathPart = u.slice(`https://${url.hostname}`.length).split('?')[0];
+  const query = url.search;
+  if (!ATTACHMENT_PATH.test(pathPart) || (query && !CDN_QUERY.test(query))) return null;
+  return { host: url.hostname, path: pathPart + query, withToken: false };
+}
+
+const EXT_TYPES = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime' };
+
 // An attachment as the page may show it: our own relay URL, never the support
 // server's, and only a known picture/video type is shown inline.
 function publicAttachment(a) {
   if (typeof a === 'string') return { name: a.slice(0, 200) };
   if (!a || typeof a !== 'object') return null;
-  let p = typeof a.url === 'string' ? a.url : '';
-  if (p.startsWith(`https://${HOST}/`)) p = p.slice(`https://${HOST}`.length);
-  const type = str(a.type, 100);
+  const target = attachmentTarget(a.url);
+  const name = str(a.name, 200) || 'attachment';
+  // Discord does not always say the type: the file's extension does
+  const declared = str(a.type || a.contentType || a.content_type, 100).split(';')[0].trim().toLowerCase();
+  const type = SHOWN_TYPES.test(declared) ? declared : EXT_TYPES[(name.match(/\.(\w{2,4})$/) || [])[1]?.toLowerCase()] || '';
   return {
-    name: str(a.name, 200) || 'attachment',
-    type: SHOWN_TYPES.test(type) ? type : '',
-    url: ATTACHMENT_PATH.test(p) ? `/api/support/attachment?u=${encodeURIComponent(p)}` : null
+    name,
+    type,
+    url: target ? `/api/support/attachment?u=${encodeURIComponent(target.host === HOST ? target.path : a.url)}` : null
   };
 }
 
@@ -117,6 +146,7 @@ function createSupport({ db, log, buildInfo, detectGpus, recentLogs, requestImpl
   };
   const forget = () => db.set('supportTicket', null);
   let opening = null; // one ticket at a time, even from two tabs
+  const droppedHosts = new Set();
 
   async function diagnostics() {
     const gpus = await Promise.resolve().then(detectGpus).catch(() => null);
@@ -202,11 +232,13 @@ function createSupport({ db, log, buildInfo, detectGpus, recentLogs, requestImpl
       const text = cleanMessage(message);
       const diag = includeDiagnostics === true ? await diagnostics() : null;
       // a first message with only a file still opens the ticket
-      await open(text || `Attachment: ${name}`, diag, true);
+      const { created } = await open(text || `Attachment: ${name}`, diag, true);
+      // a ticket this upload just opened already carries the message and the
+      // diagnostics: the file goes alone, so neither arrives twice
       const uploadTimeout = Math.min(600000, 180000 + Math.floor(bytes.length / (50 * 1024 * 1024)) * 60000);
       await withTicket((t) => requestImpl({
         method: 'POST', path: `/chat/ticket/${t.ticketId}/media`, token: t.authToken, timeoutMs: uploadTimeout,
-        body: JSON.stringify({ mediaData: bytes.toString('base64'), fileName: name, fileType: type, fileSize: bytes.length, message: text, diagnostics: diag })
+        body: JSON.stringify({ mediaData: bytes.toString('base64'), fileName: name, fileType: type, fileSize: bytes.length, message: created ? '' : text, diagnostics: created ? null : diag })
       }));
       return { ok: true };
     },
@@ -220,7 +252,24 @@ function createSupport({ db, log, buildInfo, detectGpus, recentLogs, requestImpl
         forget();
         log.info('Support ticket closed by support');
       }
-      return { open: !closed, closed, messages: Array.isArray(out.messages) ? out.messages.slice(-500).map(publicMessage).filter(Boolean) : [] };
+      const list = Array.isArray(out.messages) ? out.messages.slice(-500) : [];
+      // an attachment link from somewhere new is shown as a name only: say once where it was
+      for (const m of list) {
+        for (const a of Array.isArray(m?.attachments) ? m.attachments : []) {
+          if (!a || typeof a.url !== 'string' || attachmentTarget(a.url)) continue;
+          let where = 'unreadable link';
+          try {
+            where = new URL(a.url, `https://${HOST}`).host;
+          } catch {
+            // keep the generic label
+          }
+          if (!droppedHosts.has(where)) {
+            droppedHosts.add(where);
+            log.warn(`Support attachment from ${where} not shown (not an allowed source)`);
+          }
+        }
+      }
+      return { open: !closed, closed, messages: list.map(publicMessage).filter(Boolean) };
     },
 
     async read() {
@@ -242,11 +291,13 @@ function createSupport({ db, log, buildInfo, detectGpus, recentLogs, requestImpl
 
     /** Stream one attachment of the open ticket from the support server. */
     async attachment(res, u) {
-      const p = typeof u === 'string' ? u : '';
-      if (!ATTACHMENT_PATH.test(p)) throw new HttpError(400, 'Not a support attachment.');
+      const target = attachmentTarget(u);
+      if (!target) throw new HttpError(400, 'Not a support attachment.');
       const t = ticket();
       if (!t) throw new HttpError(409, 'No open support ticket.');
-      const up = await requestImpl({ method: 'GET', path: p, token: t.authToken, raw: true, timeoutMs: 120000 });
+      const up = await requestImpl({
+        host: target.host, method: 'GET', path: target.path, token: target.withToken ? t.authToken : null, raw: true, timeoutMs: 120000
+      });
       if (up.statusCode !== 200) {
         up.resume();
         throw new HttpError(up.statusCode === 404 ? 404 : 502, 'The support server could not send that file.');
@@ -282,4 +333,4 @@ function createSupport({ db, log, buildInfo, detectGpus, recentLogs, requestImpl
   };
 }
 
-module.exports = { createSupport, publicMessage, publicAttachment, scrub, MAX_MEDIA_BYTES, ATTACHMENT_PATH };
+module.exports = { createSupport, publicMessage, publicAttachment, attachmentTarget, scrub, MAX_MEDIA_BYTES, ATTACHMENT_PATH };

@@ -176,3 +176,54 @@ test('attachments: a support server that stops mid-file ends the page\'s respons
   await new Promise((r) => setImmediate(r));
   assert.equal(res.destroyed, true, 'the page is not left waiting for the rest');
 });
+
+test('a file that opens the ticket sends the message and diagnostics once, not twice', async () => {
+  const { support, calls } = harness((req) => (req.path === '/chat/ticket' ? { ticketId: 'T1', authToken: 'tok' } : { success: true }));
+  await support.media({ bytes: Buffer.from('png'), fileName: 'a.png', fileType: 'image/png', message: 'look', includeDiagnostics: true });
+  const opened = JSON.parse(calls[0].body);
+  const upload = JSON.parse(calls[1].body);
+  assert.equal(opened.message, 'look');
+  assert.ok(opened.diagnostics);
+  assert.equal(upload.message, '');
+  assert.equal(upload.diagnostics, null);
+  // on a ticket that is already open, the file carries them itself
+  await support.media({ bytes: Buffer.from('png'), fileName: 'b.png', fileType: 'image/png', message: 'again', includeDiagnostics: true });
+  const second = JSON.parse(calls[2].body);
+  assert.equal(calls[2].path, '/chat/ticket/T1/media');
+  assert.equal(second.message, 'again');
+  assert.ok(second.diagnostics);
+});
+
+test('pictures the team sends from Discord are fetched through this server, without the ticket token', async () => {
+  const cdn = 'https://cdn.discordapp.com/attachments/111/222/IMG_5215.png?ex=6720a1b2&is=671f5032&hm=abc123&';
+  const { support, calls } = harness((req) => {
+    if (req.path === '/chat/ticket') return { ticketId: 'T1', authToken: 'tok' };
+    if (req.raw) {
+      const up = new PassThrough();
+      up.statusCode = 200;
+      up.headers = { 'content-type': 'image/png', 'content-length': '3' };
+      setImmediate(() => up.end('png'));
+      return up;
+    }
+    return { messages: [{ id: 'm1', sender: 'support', content: '', attachments: [
+      { name: 'IMG_5215.png', url: cdn },
+      { name: 'x.png', url: 'https://cdn.discordapp.com.evil.example/x.png' },
+      { name: 'y.png', url: 'http://cdn.discordapp.com/y.png' },
+      { name: 'z.png', url: 'https://cdn.discordapp.com:8443/z.png' },
+      { name: 'w.png', url: 'https://user:pw@cdn.discordapp.com/w.png' }
+    ] }] };
+  });
+  await support.send({ message: 'x' });
+  const [m] = (await support.messages({})).messages;
+  assert.equal(m.attachments[0].type, 'image/png', 'the type comes from the extension when none is given');
+  assert.equal(m.attachments[0].url, `/api/support/attachment?u=${encodeURIComponent(cdn)}`);
+  assert.deepEqual(m.attachments.slice(1).map((a) => a.url), [null, null, null, null]);
+  const res = new PassThrough();
+  res.writeHead = () => {};
+  await support.attachment(res, cdn);
+  const fetched = calls.at(-1);
+  assert.equal(fetched.host, 'cdn.discordapp.com');
+  assert.equal(fetched.path, '/attachments/111/222/IMG_5215.png?ex=6720a1b2&is=671f5032&hm=abc123&');
+  assert.equal(fetched.token, null, 'the support token never goes to Discord');
+  await assert.rejects(support.attachment(res, 'https://evil.example/x.png'), /Not a support attachment/);
+});
