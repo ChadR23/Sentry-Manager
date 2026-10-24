@@ -733,8 +733,11 @@ async function readSourceAuthority(options, readFile, sourceBytes, outputBytes) 
 
   let sourceTimeline;
   let sourceTiming;
+  let leadInFrames;
   try {
-    sourceTimeline = normalizeSourceTimeline(extractH264TelemetryTimeline(sourceFileBytes));
+    const extracted = extractH264TelemetryTimeline(sourceFileBytes);
+    sourceTimeline = normalizeSourceTimeline(extracted);
+    leadInFrames = Number.isSafeInteger(extracted.leadIn?.frames) ? extracted.leadIn.frames : 0;
     sourceTiming = readOutputTiming(sourceFileBytes);
     if (sourceTiming.samples.at(-1)?.durationUs === 0) sourceTiming = {
       ...sourceTiming,
@@ -757,7 +760,27 @@ async function readSourceAuthority(options, readFile, sourceBytes, outputBytes) 
       return { error: failure(VERIFICATION_REASONS.SOURCE_TIMELINE_MISMATCH, sourceBytes, outputBytes, { kind: 'cache-mismatch' }) };
     }
   }
-  return { sourceTimeline, sourceTiming };
+  return { sourceTimeline, sourceTiming, leadInFrames };
+}
+
+// The first frame whose timestamp or duration differs between the original
+// and the output (null when every frame matches exactly).
+function frameTimingMismatch(sourceSamples, outputSamples) {
+  const count = Math.max(sourceSamples.length, outputSamples.length);
+  for (let index = 0; index < count; index += 1) {
+    const source = sourceSamples[index];
+    const output = outputSamples[index];
+    if (!source || !output || source.ptsUs !== output.ptsUs || source.durationUs !== output.durationUs) {
+      return {
+        sampleIndex: index,
+        sourcePtsUs: source?.ptsUs ?? null,
+        outputPtsUs: output?.ptsUs ?? null,
+        sourceDurationUs: source?.durationUs ?? null,
+        outputDurationUs: output?.durationUs ?? null
+      };
+    }
+  }
+  return null;
 }
 
 // Verification off: the saved file must still be exactly the encoded file and
@@ -892,6 +915,25 @@ async function verifyOwnedSnapshot({ options, profileId, sourceBytes, outputByte
     });
   }
 
+  // An original that starts before its first keyframe is converted with
+  // those frames held on the first decodable picture and the original's own
+  // timing written back (leadIn.js). Such an output must match the original
+  // frame for frame: the same number of frames, and every frame at exactly
+  // its original timestamp with its original duration. Nothing is tolerated,
+  // so a lead-in clip is never replaced by a shifted or shortened file.
+  if (source.leadInFrames > 0) {
+    const mismatch = frameTimingMismatch(source.sourceTiming.samples, outputTiming.samples);
+    if (mismatch) {
+      return failure(VERIFICATION_REASONS.DURATION_MISMATCH, sourceBytes, outputBytes, {
+        kind: 'source-output-frame-timing',
+        leadInFrames: source.leadInFrames,
+        sourceFrames: source.sourceTiming.samples.length,
+        outputFrames: outputTiming.samples.length,
+        ...mismatch
+      });
+    }
+  }
+
   let inspected;
   try {
     inspected = expectedVideo.inspect(candidateSnapshotBytes);
@@ -966,6 +1008,7 @@ async function verifyOwnedSnapshot({ options, profileId, sourceBytes, outputByte
       frameCountTolerance,
       frameRateProof: safeFrameRateProof,
       ...(vfr ? { sampleTimingProof: vfrProof.sampleTimingProof } : {}),
+      ...(source.leadInFrames > 0 ? { leadInFrames: source.leadInFrames, frameTiming: 'exact' } : {}),
       telemetryEvents: mappedEventCount,
       telemetryTransitions: actualTransitions,
       telemetryGapRanges: actualGaps

@@ -110,18 +110,28 @@ function deviceIndex(device) {
   return String(device.index);
 }
 
-function buildEncodeArgs({ codec, encoder, bitrate, quality = null, vaapiDevice = '/dev/dri/renderD128', hwFrames = false, device = null }) {
+// holdFrames: a clip that starts before its first keyframe (see leadIn.js)
+// gets the first decodable frame repeated that many times in front, so the
+// encoded file has every frame of the original. tpad clones the frame it is
+// given, so it runs on system-memory frames before any upload; GPU-resident
+// (zero-copy) frames are not used for such clips (jobService).
+function buildEncodeArgs({ codec, encoder, bitrate, quality = null, vaapiDevice = '/dev/dri/renderD128', hwFrames = false, device = null, holdFrames = 0 }) {
   requireFamily(codec);
   if (quality === null) requirePositive('bitrate', bitrate);
   if (typeof encoder !== 'string' || !encoderBelongsToFamily(codec, encoder)) {
     throw new RangeError(`Encoder ${encoder} is not a ${codec} candidate`);
   }
+  if (!Number.isSafeInteger(holdFrames) || holdFrames < 0) throw new RangeError('holdFrames must be a non-negative integer');
+  if (holdFrames > 0 && hwFrames) throw new RangeError('Held lead-in frames need system-memory frames');
+  const hold = holdFrames > 0 ? [`tpad=start=${holdFrames}:start_mode=clone`] : [];
 
   const args = [];
   if (encoder.endsWith('_vaapi')) {
     const node = device ? deviceNode(device) : vaapiDevice;
     if (typeof node !== 'string' || node.length === 0) throw new RangeError('vaapiDevice must be a non-empty path');
-    args.push('-vaapi_device', node, '-vf', 'format=nv12,hwupload');
+    args.push('-vaapi_device', node, '-vf', [...hold, 'format=nv12,hwupload'].join(','));
+  } else if (hold.length > 0) {
+    args.push('-vf', hold.join(','));
   }
   // A global option: the QSV session opens on this GPU's render node.
   if (device && encoder.endsWith('_qsv')) args.push('-init_hw_device', `qsv=qsvenc:hw_any,child_device=${deviceNode(device)}`);

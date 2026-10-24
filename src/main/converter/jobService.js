@@ -21,6 +21,7 @@ const {
   calculateInitialBitrate,
   decideSizeRetry
 } = require('./encoderPlanner');
+const { leadInHoldFrames } = require('./leadIn');
 
 const ACTIVE_STATES = new Set([
   'discovering', 'waiting', 'staging', 'encoding', 'writing-telemetry',
@@ -292,11 +293,14 @@ function createConverterJobService(deps) {
     return accelArgs(encoder);
   }
   // Encode decode tiers, fastest first: GPU frames kept on the GPU (zero-copy),
-  // then GPU decode, then (implicitly, after the list) CPU decode.
-  function encodeDecodeTiers(encoder) {
+  // then GPU decode, then (implicitly, after the list) CPU decode. A clip
+  // whose lead-in frames are held (leadIn.js) skips zero-copy: the frame
+  // repeat runs on system-memory frames, and a failure there must not rule
+  // zero-copy out for the clips that start on a keyframe.
+  function encodeDecodeTiers(encoder, { zeroCopy = true } = {}) {
     if (encoder?.hardware !== true || typeof deps.decodeAccel !== 'function') return [];
     return [
-      { key: `${decodeKey(encoder)}:zero-copy`, args: accelArgs(encoder, { zeroCopy: true }) },
+      ...(zeroCopy ? [{ key: `${decodeKey(encoder)}:zero-copy`, args: accelArgs(encoder, { zeroCopy: true }) }] : []),
       { key: `${decodeKey(encoder)}:gpu`, args: accelArgs(encoder) }
     ].filter((tier) => tier.args && !encodeDecodeBroken.has(tier.key));
   }
@@ -1131,10 +1135,12 @@ function createConverterJobService(deps) {
       : pathApi.resolve(config.destinationRoot, ...item.relativePath.split('/'));
   }
 
-  async function runChild(runtime, itemId, source, target, codec, encoder, { bitrate, quality = null, durationUs = null, laneId = null }, decodeAccel = null) {
+  async function runChild(runtime, itemId, source, target, codec, encoder, { bitrate, quality = null, durationUs = null, laneId = null, holdFrames = 0 }, decodeAccel = null) {
     const hwFrames = Array.isArray(decodeAccel) && decodeAccel.includes('-hwaccel_output_format');
     const device = encoder.hardware === true ? laneDevice(encoder) : null;
-    const encodeArgs = buildEncodeArgs({ codec, encoder: encoder.codec, bitrate, quality, hwFrames, ...(device ? { device } : {}) });
+    const encodeArgs = buildEncodeArgs({
+      codec, encoder: encoder.codec, bitrate, quality, hwFrames, ...(device ? { device } : {}), ...(holdFrames > 0 ? { holdFrames } : {})
+    });
     const args = [
       '-nostdin', '-hide_banner', '-loglevel', 'error', '-n',
       ...(decodeAccel || []),
@@ -1478,6 +1484,10 @@ function createConverterJobService(deps) {
     try {
     const timeline = await deps.readTimeline({ source: staged.source, item, signal });
     timing.mark('timeline');
+    // Frames before the first keyframe are kept as repeats of the first
+    // decodable frame; the telemetry writer then gives the output this
+    // clip's own timing (leadIn.js). 0 for a clip that starts on a keyframe.
+    const holdFrames = leadInHoldFrames(timeline);
     const codec = runtime.manifest.config.codec;
     const profileId = runtime.manifest.config.profileId;
     const customBitrate = profileId === 'custom';
@@ -1504,7 +1514,7 @@ function createConverterJobService(deps) {
     let sizeRetryCount = 0;
     let attempts = currentItem(runtime, item.id)?.attempts || 0;
     let latestOwnership = staged.ownership;
-    let encodeTiers = encodeDecodeTiers(selected);
+    let encodeTiers = encodeDecodeTiers(selected, { zeroCopy: holdFrames === 0 });
     const failedTiers = [];
     let decodeTierRetry = false;
 
@@ -1529,7 +1539,7 @@ function createConverterJobService(deps) {
       const usedTier = encodeTiers[0] || null;
       const durationUs = Math.round((inspected.durationSeconds || 0) * 1_000_000) || null;
       const encoded = await runChild(runtime, item.id, staged.source, reserved.path, codec, selected,
-        { bitrate, quality, durationUs, laneId: lane ? lane.id : null }, usedTier?.args || null);
+        { bitrate, quality, durationUs, laneId: lane ? lane.id : null, holdFrames }, usedTier?.args || null);
       timing.mark('encode');
       if (!encoded.ok) {
         let failedOwnership = reserved;

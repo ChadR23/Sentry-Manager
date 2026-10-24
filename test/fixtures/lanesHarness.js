@@ -81,6 +81,7 @@ function clipName(index) {
  *   works          probe results (see desktopWorks)
  *   behave(args)   'hold' (until released), a number (exit code) or undefined (0 at once)
  *   dir, store     reuse a previous harness's folder (a restart)
+ *   timeline       what readTimeline returns for every clip
  */
 function createHarness(options = {}) {
   const dir = options.dir || fs.mkdtempSync(path.join(os.tmpdir(), 'sm-lanes-'));
@@ -145,7 +146,7 @@ function createHarness(options = {}) {
     stagingManager,
     ensureDestinationParent: async () => ({ revalidate: async () => {} }),
     inspectVideo: async () => ({ codec: 'h264', durationSeconds: 2, containerReserveBytes: 0, telemetryReserveBytes: 0 }),
-    readTimeline: async () => ({ frames: [] }),
+    readTimeline: async () => options.timeline || ({ frames: [] }),
     writers: { h265: async () => {}, av1: async () => {} },
     verifier: async () => ({ ok: true, outputBytes: 1_000_000, publicationArtifact: null }),
     spawnProcess,

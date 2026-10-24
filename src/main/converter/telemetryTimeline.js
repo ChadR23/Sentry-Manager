@@ -2,6 +2,7 @@
 
 const crypto = require('crypto');
 const { parseMp4, findBoxes, selectVideoTrack, buildSampleIndex } = require('./mp4');
+const { describeLeadIn } = require('./leadIn');
 
 function telemetryError(message, code = 'INVALID_H264') {
   const error = new Error(message);
@@ -206,7 +207,10 @@ function extractH264TelemetryTimeline(mp4Buffer) {
     for (const record of seiNals) events.push({ sourceSampleIndex: sample.index, sourcePtsUs: ptsUs, ...record });
   }
 
-  return { timescale, lengthSize, samples: timelineSamples, events };
+  // Frames before the first keyframe (see leadIn.js): the encoder repeats the
+  // first decodable frame for them and the output takes this clip's timing.
+  const leadIn = describeLeadIn(mp4Buffer, track, samples, timescale);
+  return { timescale, lengthSize, samples: timelineSamples, events, leadIn };
 }
 
 function outputTimingIndex(outputSamples) {
