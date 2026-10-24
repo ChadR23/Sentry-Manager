@@ -13,8 +13,13 @@
  * script.js creates the elements and swaps them in.
  */
 
-/** Seconds of playback left (at the current speed) when the preload starts. */
-export const PRELOAD_LEAD_SECONDS = 15;
+/**
+ * Seconds of playback left (at the current speed) when the preload starts.
+ * The preloaded elements wait paused, and Chrome suspends a player that has
+ * been paused for 15 s (it drops its decoders, and the switch then waits for
+ * them again), so they take over well before that.
+ */
+export const PRELOAD_LEAD_SECONDS = 12;
 
 /**
  * Seconds a segment plays before the preload may start (half a segment when
@@ -64,6 +69,20 @@ export function shouldStartPreload({
     if (position < Math.min(settleSeconds * rate, total / 2)) return false;
     const remaining = Math.max(0, total - position);
     return remaining / rate <= leadSeconds;
+}
+
+/**
+ * Whether the switch to a preloaded element waits for it to be able to play:
+ * only while it is still loading. One that can play needs no wait, and
+ * neither does one the browser stopped loading until it plays (iOS loads only
+ * metadata ahead on an element no tap has readied): waiting would only hold
+ * the minute back, and would take play() past the second after a tapped
+ * video ends in which WebKit still counts play() as the user's.
+ */
+export function preloadNeedsWait(video) {
+    if (!video || video.error) return false;
+    if (video.readyState >= 3) return false; // HAVE_FUTURE_DATA
+    return video.networkState === 2; // NETWORK_LOADING
 }
 
 /**
@@ -133,7 +152,16 @@ export function createSegmentPreloader({
     let pending = null; // { segIdx, key, context, videos: Map(slot -> { video, url, isBlob }) }
     const spare = [];
     const standby = new WeakSet();
+    const primed = new WeakSet();
     const retiring = new Map(); // video -> timer
+
+    // A spare element, one readied during a tap first (see prime)
+    const takeSpare = () => {
+        for (let i = spare.length - 1; i >= 0; i--) {
+            if (primed.has(spare[i])) return spare.splice(i, 1)[0];
+        }
+        return spare.pop() || null;
+    };
 
     const release = (video) => {
         standby.delete(video);
@@ -169,7 +197,7 @@ export function createSegmentPreloader({
             for (const target of plan.targets) {
                 const urlData = target.entry ? urlFor(target.entry) : null;
                 if (!urlData) continue;
-                const video = spare.pop() || createVideo();
+                const video = takeSpare() || createVideo();
                 standby.add(video);
                 stage.append(video);
                 video.preload = 'auto';
@@ -210,6 +238,45 @@ export function createSegmentPreloader({
         },
 
         /**
+         * Playback goes on after a pause: the preloaded elements seek to
+         * their start again. Chrome suspends paused players (drops their
+         * decoders) once more than eight in the page are paused (six cameras
+         * paused with six preloaded ones are twelve) or once one has been
+         * paused for 15 s, and the switch then waited for them as for a
+         * normal load. A seek wakes a suspended player; on one that is awake
+         * (paused at its start) Chrome skips it.
+         */
+        wake() {
+            if (!pending) return;
+            for (const { video } of pending.videos.values()) {
+                if (video.readyState >= 1 && !video.seeking) video.currentTime = 0;
+            }
+        },
+
+        /**
+         * Called during a tap or key press: up to `count` spare elements are
+         * made (or kept), and load() runs on each one not readied before.
+         * iOS loads a video ahead (beyond its metadata), and in Low Power
+         * Mode lets it play without a tap, only once load() or play() ran on
+         * that element during a user gesture. Standby elements are made by
+         * script, so they are readied here, before a preload needs them.
+         */
+        prime(count = MAX_SPARE_VIDEOS) {
+            const target = Math.min(count, MAX_SPARE_VIDEOS);
+            for (const video of spare) {
+                if (primed.has(video)) continue;
+                video.load();
+                primed.add(video);
+            }
+            while (spare.length < target) {
+                const video = createVideo();
+                video.load();
+                primed.add(video);
+                spare.push(video);
+            }
+        },
+
+        /**
          * An element that was shown and is no longer: kept (stopped) for a
          * later preload, after delayMs when given (it should be paused and
          * off the page by then).
@@ -243,6 +310,10 @@ export function createSegmentPreloader({
 
         get spareCount() {
             return spare.length;
+        },
+
+        get primedSpareCount() {
+            return spare.filter(video => primed.has(video)).length;
         },
 
         get retiringCount() {

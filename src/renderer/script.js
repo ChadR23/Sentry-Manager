@@ -36,7 +36,7 @@ import { initMapVisualization, updateMapVisibility, updateMapMarker, clearMapMar
 import { attachTileLayer, refreshTileLayers, getEffectiveProviderId } from './scripts/ui/mapTiles.js';
 import { initDashboardVisibility, updateDashboardVisibility, setDashboardParked, resetDashboardParkedState } from './scripts/ui/dashboardVisibility.js';
 import { hasValidGps, extractSeiFromEntry, findSeiAtTime } from './scripts/core/seiExtractor.js';
-import { createSegmentPreloader, planKey, planSegment, preloadAllowed, shouldStartPreload, RETIRE_DELAY_MS } from './scripts/core/segmentPreload.js';
+import { createSegmentPreloader, planKey, planSegment, preloadAllowed, preloadNeedsWait, shouldStartPreload, RETIRE_DELAY_MS } from './scripts/core/segmentPreload.js';
 import { 
     getRootFolderNameFromWebkitRelativePath, cameraLabel, buildTeslaCamIndex, buildDayCollections
 } from './scripts/core/teslaCamIndex.js';
@@ -4384,6 +4384,41 @@ const segmentPreloader = createSegmentPreloader({
     detach: detachMediaElement
 });
 
+// iOS lets a video element load ahead (beyond its metadata), and in Low Power
+// Mode play without a tap, only once load() or play() ran on it during a user
+// gesture. The page's own elements get that from the tap on Play; standby
+// elements are made by script, so taps and key presses ready them (see
+// segmentPreloader.prime) before a preload needs them. Shown videos that
+// started without a tap (a day opened from the shell plays at once) are
+// readied by play() while they play, which changes nothing on screen: they
+// are the standby elements of a later minute.
+const primeStandbyVideos = () => {
+    if (!preloadAllowed()) return;
+    segmentPreloader.prime();
+    for (const vid of [videoMain, ...Object.values(videoBySlot)]) {
+        if (vid?.src && !vid.paused && !vid.ended) vid.play().catch(() => {});
+    }
+};
+for (const type of ['pointerup', 'touchend', 'click', 'keydown']) {
+    document.addEventListener(type, primeStandbyVideos, { capture: true, passive: true });
+}
+
+// Set while the shell (Sentry Six Manager) has the Viewer tab put away
+let viewerAway = false;
+
+// A shown video the browser holds in picture-in-picture or fullscreen (the
+// video menu of Chrome and Safari offers both in the single view): another
+// element in its place would close that window, so it loads in place.
+function shownVideoHeldByBrowser() {
+    const held = [document.pictureInPictureElement, document.fullscreenElement, document.webkitFullscreenElement];
+    return [videoMain, ...Object.values(videoBySlot)].some(vid => vid && (
+        held.includes(vid) ||
+        vid.webkitPresentationMode === 'picture-in-picture' ||
+        vid.webkitPresentationMode === 'fullscreen' ||
+        vid.webkitDisplayingFullscreen === true
+    ));
+}
+
 // What segment segIdx shows in the current view (grid layout and camera order,
 // or the single camera).
 function getSegmentPlan(segIdx) {
@@ -4414,13 +4449,15 @@ function maybePreloadNextSegment() {
     const coll = state.collection.active;
     const segIdx = nativeVideo.currentSegmentIdx;
     const nextIdx = segIdx + 1;
-    if (!coll || !state.ui.nativeVideoMode || segIdx < 0 || nextIdx >= (coll.groups?.length || 0) || !preloadAllowed()) {
+    if (!coll || !state.ui.nativeVideoMode || segIdx < 0 || nextIdx >= (coll.groups?.length || 0) || !preloadAllowed() || viewerAway || shownVideoHeldByBrowser()) {
         segmentPreloader.cancel();
         return;
     }
     if (nativeVideo.isTransitioning || nativeVideo.isSeeking) return;
     const vid = nativeVideo.master;
-    if (!vid?.src) return;
+    // Only while it plays: a paused Viewer (paused by the user or by the
+    // shell, or scrubbed while paused) starts no preload
+    if (!vid?.src || vid.paused || !nativeVideo.playing) return;
     const duration = Number.isFinite(vid.duration) && vid.duration > 0
         ? vid.duration
         : nativeVideo.segmentDurations?.[segIdx];
@@ -4446,7 +4483,9 @@ function maybePreloadNextSegment() {
 }
 
 // Put a preloaded element in the place of the shown one: same id, classes and
-// inline style (mirror, zoom and pan), so the rest of the page sees no change.
+// inline style (mirror, zoom and pan), and what the browser's video menu or
+// controls set on it (Show controls, Loop, sound), so the rest of the page
+// sees no change.
 function swapInVideo(current, next) {
     if (!current || !next) return;
     next.id = current.id;
@@ -4454,6 +4493,10 @@ function swapInVideo(current, next) {
     next.className = current.className;
     next.style.cssText = current.style.cssText;
     next.playbackRate = current.playbackRate;
+    next.controls = current.controls;
+    next.loop = current.loop;
+    next.muted = current.muted;
+    next.volume = current.volume;
     current.replaceWith(next);
 }
 
@@ -4493,11 +4536,17 @@ function showPreloadedVideos(plan, preloaded) {
 }
 
 // Leaving the page, or (Sentry Six Manager) putting the Viewer tab away: the
-// shell pauses playback then, so the preloaded minute is let go.
+// shell pauses playback then, so the preloaded minute is let go, and none
+// starts until the shell shows the tab again.
 window.addEventListener('pagehide', () => segmentPreloader.dispose());
 window.addEventListener('message', (e) => {
     if (window.parent === window || e.source !== window.parent || e.origin !== location.origin) return;
-    if (e.data?.type === 'pause') segmentPreloader.cancel();
+    if (e.data?.type === 'pause') {
+        viewerAway = true;
+        segmentPreloader.cancel();
+    } else if (e.data?.type === 'shown') {
+        viewerAway = false;
+    }
 });
 
 /**
@@ -4861,9 +4910,13 @@ async function loadNativeSegment(segIdx) {
         return;
     }
     
-    // What this segment shows; a preload of anything else is cancelled here
+    // What this segment shows; a preload of anything else is cancelled here,
+    // and so is one that would replace a video the browser holds
+    // (picture-in-picture, fullscreen): that one loads in place
     const plan = getSegmentPlan(segIdx);
-    const preloaded = segmentPreloader.take(segIdx, planKey(plan, mediaSourceKey), preloadContext());
+    let preloaded = null;
+    if (shownVideoHeldByBrowser()) segmentPreloader.cancel();
+    else preloaded = segmentPreloader.take(segIdx, planKey(plan, mediaSourceKey), preloadContext());
     
     console.log('Loading native segment', segIdx, 'group:', group.id, 'cameras:', Array.from(group.filesByCamera.keys()), preloaded ? '(preloaded)' : '');
     
@@ -5108,9 +5161,11 @@ async function loadNativeSegment(segIdx) {
         throw new Error(describeMediaError(nativeVideo.master));
     }
     
-    // Wait for video to be ready (a preloaded master that can play already
-    // needs no wait: its readyState is its own source's, never a stale one)
-    if (!(preloaded && nativeVideo.master.readyState >= 3)) await new Promise((resolve, reject) => {
+    // Wait for video to be ready (a preloaded master waits only while it is
+    // still loading: its readyState is its own source's, never a stale one,
+    // and one the browser loads no further until it plays, as iOS does ahead
+    // of a tap, would only hold the minute back; see preloadNeedsWait)
+    if (!preloaded || preloadNeedsWait(nativeVideo.master)) await new Promise((resolve, reject) => {
         const vid = nativeVideo.master;
         let resolved = false;
         
@@ -5169,7 +5224,7 @@ async function loadNativeSegment(segIdx) {
             console.log('Waiting for', otherVids.length, 'non-master cameras to load...');
             await Promise.all(otherVids.map(({ slot, vid }) => 
                 new Promise(resolve => {
-                    if (vid.readyState >= 3) {
+                    if (vid.readyState >= 3 || (preloaded && !preloadNeedsWait(vid))) {
                         resolve();
                         return;
                     }
@@ -5221,11 +5276,21 @@ function playNative() {
     player.playing = true;
     updatePlayButton();
     
+    // Going on after a pause: wake the next minute's preloaded elements,
+    // which Chrome suspends while the page is paused (see wake)
+    segmentPreloader.wake();
+    
     // Play master
-    nativeVideo.master.play().then(() => {
+    const master = nativeVideo.master;
+    master.play().then(() => {
         console.log('Master video now playing');
     }).catch(err => {
         console.error('Failed to play master video:', err);
+        // Not allowed without a tap (iOS in Low Power Mode, Safari set to
+        // never auto-play): show the play button, so a tap starts it
+        if (err?.name === 'NotAllowedError' && master === nativeVideo.master && master.paused) {
+            pauseNative();
+        }
     });
     
     // Play all multi-cam videos

@@ -64,20 +64,23 @@ async function plan(minute, view = {}, cameras = ALL) {
   return { plan: pl, key: planKey(pl, sourceKey) };
 }
 
-test('the preload starts 15 s before the end of a minute, sooner at a higher speed', async () => {
+test('the preload starts 12 s before the end of a minute, sooner at a higher speed', async () => {
   const { shouldStartPreload, PRELOAD_LEAD_SECONDS } = await import(MODULE);
-  assert.equal(PRELOAD_LEAD_SECONDS, 15);
+  // the preloaded elements wait paused for at most the lead (counted in
+  // playing time at the current speed): well under the 15 s after which
+  // Chrome suspends a paused player
+  assert.equal(PRELOAD_LEAD_SECONDS, 12);
   assert.equal(shouldStartPreload({ currentTime: 30, duration: 60 }), false);
-  assert.equal(shouldStartPreload({ currentTime: 44.9, duration: 60 }), false);
-  assert.equal(shouldStartPreload({ currentTime: 45, duration: 60 }), true);
+  assert.equal(shouldStartPreload({ currentTime: 47.9, duration: 60 }), false);
+  assert.equal(shouldStartPreload({ currentTime: 48, duration: 60 }), true);
   assert.equal(shouldStartPreload({ currentTime: 59.9, duration: 60 }), true);
   assert.equal(shouldStartPreload({ currentTime: 60, duration: 60 }), true);
-  // at 2x the last 15 s of playing are 30 s of footage
-  assert.equal(shouldStartPreload({ currentTime: 29, duration: 60, playbackRate: 2 }), false);
-  assert.equal(shouldStartPreload({ currentTime: 31, duration: 60, playbackRate: 2 }), true);
+  // at 2x the last 12 s of playing are 24 s of footage
+  assert.equal(shouldStartPreload({ currentTime: 35, duration: 60, playbackRate: 2 }), false);
+  assert.equal(shouldStartPreload({ currentTime: 37, duration: 60, playbackRate: 2 }), true);
   // slow motion: later
-  assert.equal(shouldStartPreload({ currentTime: 50, duration: 60, playbackRate: 0.5 }), false);
-  assert.equal(shouldStartPreload({ currentTime: 53, duration: 60, playbackRate: 0.5 }), true);
+  assert.equal(shouldStartPreload({ currentTime: 53, duration: 60, playbackRate: 0.5 }), false);
+  assert.equal(shouldStartPreload({ currentTime: 54.5, duration: 60, playbackRate: 0.5 }), true);
 });
 
 test('a short segment preloads once it has settled, and an unknown length never', async () => {
@@ -94,7 +97,7 @@ test('a short segment preloads once it has settled, and an unknown length never'
     assert.equal(shouldStartPreload({ currentTime: 10, duration }), false, String(duration));
   }
   // a nonsense speed counts as 1x
-  assert.equal(shouldStartPreload({ currentTime: 46, duration: 60, playbackRate: 0 }), true);
+  assert.equal(shouldStartPreload({ currentTime: 49, duration: 60, playbackRate: 0 }), true);
   assert.equal(shouldStartPreload({ currentTime: 40, duration: 60, playbackRate: -2 }), false);
 });
 
@@ -244,21 +247,118 @@ test('replaced elements are torn down after the delay (or at once on dispose) an
   assert.equal(p.retiringCount, 0);
 });
 
+test('the switch waits for a preloaded element only while it is still loading', async () => {
+  const { preloadNeedsWait } = await import(MODULE);
+  const el = (readyState, networkState, error = null) => ({ readyState, networkState, error });
+  // can play: no wait
+  assert.equal(preloadNeedsWait(el(4, 1)), false);
+  assert.equal(preloadNeedsWait(el(3, 2)), false);
+  // still loading (a skip into a minute whose preload just started): wait
+  assert.equal(preloadNeedsWait(el(0, 2)), true);
+  assert.equal(preloadNeedsWait(el(1, 2)), true);
+  assert.equal(preloadNeedsWait(el(2, 2)), true);
+  // loaded no further until play() (iOS ahead of a tap: metadata, then idle): no wait
+  assert.equal(preloadNeedsWait(el(1, 1)), false);
+  assert.equal(preloadNeedsWait(el(0, 1)), false);
+  // failed, or nothing at all
+  assert.equal(preloadNeedsWait(el(0, 2, { code: 4 })), false);
+  assert.equal(preloadNeedsWait(null), false);
+});
+
+test('a tap readies seven standby elements once (load() on each), and the preload uses them first', async () => {
+  const { p, created } = await preloader();
+  p.prime();
+  assert.equal(created.length, 7);
+  assert.equal(created.every((v) => v.loads === 1 && !v.parent), true, 'load() once each, none in the page yet');
+  assert.equal(p.primedSpareCount, 7);
+  // later taps: nothing new, no second load()
+  p.prime();
+  p.prime(3);
+  assert.equal(created.length, 7);
+  assert.equal(created.every((v) => v.loads === 1), true);
+
+  // a shown element that comes back as a spare is readied at the next tap
+  const shown = fakeVideo();
+  p.cancel();
+  const { plan: pl, key } = await plan(1);
+  p.start({ segIdx: 1, key, context: 'day', plan: pl });
+  assert.equal(created.length, 7, 'the preload made no element: it took readied ones');
+  const taken = p.take(1, key, 'day');
+  assert.equal([...taken.values()].every(({ video }) => created.includes(video)), true);
+  p.recycle(shown);
+  assert.equal(p.spareCount, 2);
+  assert.equal(p.primedSpareCount, 1);
+  const loadsBefore = shown.loads;
+  p.prime();
+  assert.equal(shown.loads, loadsBefore + 1);
+  assert.equal(p.primedSpareCount, 7, 'topped up to seven, all readied');
+  assert.equal(created.length, 12);
+});
+
+test('going on after a pause, the preloaded elements seek to their start again (and nothing else does)', async () => {
+  const { p, created } = await preloader();
+  const seeks = [];
+  p.wake(); // no preload: nothing to do
+  const { plan: pl, key } = await plan(1, {}, ['front', 'back', 'left_repeater']);
+  p.start({ segIdx: 1, key, context: 'day', plan: pl });
+  created.forEach((v, i) => {
+    v.readyState = [4, 1, 0][i];
+    v.seeking = false;
+    Object.defineProperty(v, 'currentTime', { get: () => 0, set: (t) => seeks.push([i, t]) });
+  });
+  p.wake();
+  assert.deepEqual(seeks, [[0, 0], [1, 0]], 'the one with no metadata yet is still loading: left alone');
+  created[0].seeking = true;
+  seeks.length = 0;
+  p.wake();
+  assert.deepEqual(seeks, [[1, 0]], 'one already seeking is left alone');
+  p.take(1, key, 'day');
+  seeks.length = 0;
+  p.wake();
+  assert.deepEqual(seeks, [], 'taken elements are the page\'s, not the preload\'s');
+});
+
 test('the Viewer wires the preload in: listeners on standby elements, cancel paths, the swap', () => {
   const fs = require('fs');
   const script = fs.readFileSync(path.join(REPO, 'src/renderer/script.js'), 'utf8');
   // a preloaded element is never synced to the playing master's time
   assert.match(script, /nativeVideo\.master !== vid && !segmentPreloader\.isStandby\(vid\)/);
-  // every load goes through take(): a preload of anything else is cancelled there
-  assert.match(script, /const preloaded = segmentPreloader\.take\(segIdx, planKey\(plan, mediaSourceKey\), preloadContext\(\)\);/);
+  // every load goes through take(): a preload of anything else is cancelled
+  // there, and so is any preload while the browser holds a shown video
+  // (picture-in-picture, fullscreen), which then loads in place
+  assert.match(script, /if \(shownVideoHeldByBrowser\(\)\) segmentPreloader\.cancel\(\);\s*\n\s*else preloaded = segmentPreloader\.take\(segIdx, planKey\(plan, mediaSourceKey\), preloadContext\(\)\);/);
+  assert.match(script, /function shownVideoHeldByBrowser\(\) \{[\s\S]{0,200}document\.pictureInPictureElement, document\.fullscreenElement/);
   // day change, profile change, mode change, leaving the page, the shell's pause
-  for (const pattern of [/segmentPreloader\.cancel\(\);\s*\n\s*\n\s*\/\/ Reset dashboard and map when switching clips/, /cannot provide it\.\s*\n\s*segmentPreloader\.cancel\(\);/, /pause\(\);\s*\n\s*segmentPreloader\.cancel\(\);/, /'pagehide', \(\) => segmentPreloader\.dispose\(\)/, /e\.data\?\.type === 'pause'\) segmentPreloader\.cancel\(\)/]) {
+  for (const pattern of [/segmentPreloader\.cancel\(\);\s*\n\s*\n\s*\/\/ Reset dashboard and map when switching clips/, /cannot provide it\.\s*\n\s*segmentPreloader\.cancel\(\);/, /pause\(\);\s*\n\s*segmentPreloader\.cancel\(\);/, /'pagehide', \(\) => segmentPreloader\.dispose\(\)/, /e\.data\?\.type === 'pause'\) \{\s*\n\s*viewerAway = true;\s*\n\s*segmentPreloader\.cancel\(\);/]) {
     assert.match(script, pattern);
   }
+  // ... and until the shell shows the tab again, nothing starts, nor while paused
+  // (the shell pauses through the play button, whose pause fires a timeupdate)
+  assert.match(script, /e\.data\?\.type === 'shown'\) \{\s*\n\s*viewerAway = false;/);
+  const maybe = script.slice(script.indexOf('function maybePreloadNextSegment()'), script.indexOf('// Put a preloaded element in the place'));
+  assert.match(maybe, /!preloadAllowed\(\) \|\| viewerAway \|\| shownVideoHeldByBrowser\(\)\) \{\s*\n\s*segmentPreloader\.cancel\(\);/);
+  assert.match(maybe, /if \(!vid\?\.src \|\| vid\.paused \|\| !nativeVideo\.playing\) return;[\s\S]*segmentPreloader\.start\(/);
   // a deleted clip's files are let go at once (Windows keeps open files from being deleted)
   assert.match(script, /segmentPreloader\.dispose\(\);\s*\n\s*\n\s*\/\/ Clean up URL object references/);
-  // the swapped-in element keeps the id, classes and inline style of the one it replaces
+  // the swapped-in element keeps the id, classes and inline style of the one
+  // it replaces, and what the video menu or controls set (Show controls,
+  // Loop, sound)
   assert.match(script, /next\.id = current\.id;[\s\S]{0,120}next\.className = current\.className;\s*\n\s*next\.style\.cssText = current\.style\.cssText;/);
+  assert.match(script, /next\.controls = current\.controls;\s*\n\s*next\.loop = current\.loop;\s*\n\s*next\.muted = current\.muted;\s*\n\s*next\.volume = current\.volume;\s*\n\s*current\.replaceWith\(next\);/);
+  // taps and key presses ready the standby elements (iOS), and the shown
+  // videos that play (play() again, nothing else)
+  assert.match(script, /for \(const type of \['pointerup', 'touchend', 'click', 'keydown'\]\) \{\s*\n\s*document\.addEventListener\(type, primeStandbyVideos, \{ capture: true, passive: true \}\);/);
+  const prime = script.slice(script.indexOf('const primeStandbyVideos = () => {'), script.indexOf("for (const type of ['pointerup'"));
+  assert.match(prime, /if \(!preloadAllowed\(\)\) return;\s*\n\s*segmentPreloader\.prime\(\);/);
+  assert.match(prime, /if \(vid\?\.src && !vid\.paused && !vid\.ended\) vid\.play\(\)\.catch\(\(\) => \{\}\);/);
+  // the switch waits only on preloaded elements still loading, master and others
+  assert.match(script, /if \(!preloaded \|\| preloadNeedsWait\(nativeVideo\.master\)\) await new Promise/);
+  assert.match(script, /if \(vid\.readyState >= 3 \|\| \(preloaded && !preloadNeedsWait\(vid\)\)\) \{/);
+  // playing again wakes the preload before the page's videos play; a refused
+  // play() shows the play button
+  const playNative = script.slice(script.indexOf('function playNative()'), script.indexOf('// Keep the other cameras with the master'));
+  assert.match(playNative, /segmentPreloader\.wake\(\);[\s\S]*master\.play\(\)/);
+  assert.match(playNative, /err\?\.name === 'NotAllowedError' && master === nativeVideo\.master && master\.paused\) \{\s*\n\s*pauseNative\(\);/);
   const css = fs.readFileSync(path.join(REPO, 'src/renderer/style.css'), 'utf8');
   assert.match(css, /\.standby-videos \{[^}]*opacity: 0;[^}]*pointer-events: none;/);
 });
