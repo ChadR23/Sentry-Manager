@@ -1860,6 +1860,15 @@ function createConverterJobService(deps) {
       }
     } catch (error) {
       if (!error?.validFinal?.finalPath || !Number.isSafeInteger(error.validFinal.outputBytes)) {
+        // Put back: the original is at its name again. The job-level
+        // replacement record ends here (a network wait or a retry that
+        // follows must not find the job still 'replacing').
+        if (error?.rolledBack) {
+          await update(runtime, (current) => (current.activeItemId === item.id && current.replacementPhase ? {
+            state: 'waiting', activeItemId: null, replacementPhase: null,
+            ownedPaths: {}, ownedArtifacts: {}, publicationArtifact: null
+          } : null)).catch(() => undefined);
+        }
         throw publicationError(runtime, error, destination);
       }
       published = error.validFinal;
@@ -2914,7 +2923,7 @@ function createConverterJobService(deps) {
         return publicSnapshot(runtime.manifest);
       }
       await prepareDestination(recovered.config, destination);
-      let result = await staging.recoverCopy({
+      const result = await staging.recoverCopy({
         action: recovery.action,
         destination,
         publicationArtifact,
@@ -2925,17 +2934,6 @@ function createConverterJobService(deps) {
         signal: runtime.abortController.signal,
         persistTransaction: transactionPersistence(runtime, item.id)
       });
-      if (result.action === 'restart-copy') {
-        await prepareDestination(recovered.config, destination);
-        result = await staging.publishSeparate({
-          publicationArtifact,
-          destination,
-          jobId: recovered.id,
-          itemId: item.id,
-          signal: runtime.abortController.signal,
-          persistTransaction: transactionPersistence(runtime, item.id)
-        });
-      }
       await completeRecovered(result.finalPath, publicationArtifact.size, result);
     } else if (recovery.fromState === 'replacing') {
       const publicationArtifact = item.publicationArtifact || recovered.publicationArtifact;

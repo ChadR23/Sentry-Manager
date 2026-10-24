@@ -116,3 +116,44 @@ test('while one clip holds the save slot, the next clip\'s copy to the share is 
     fs.rmSync(base, { recursive: true, force: true });
   }
 });
+
+test('an original that changed after its copy was made beside it is kept, and the copy removed', { skip, timeout: 240_000 }, async () => {
+  const { base, folder } = await makeBase(2);
+  let env;
+  try {
+    let releaseSlot;
+    const slotHeld = new Promise((resolve) => { releaseSlot = resolve; });
+    let holding = null;
+    env = await open(base, { concurrency: 2, networkMode: 'staging' });
+    const realPromote = env.renameExclusive.promote;
+    env.renameExclusive.promote = async (request) => {
+      if (!holding && /^BACKUP-/.test(path.basename(request.to))) {
+        holding = path.basename(request.from);
+        await slotHeld;
+      }
+      return realPromote(request);
+    };
+    await env.runtime.start();
+    const id = await env.runtime.service.start(env.config);
+    const waiting = () => fs.readdirSync(folder).find((name) => name.startsWith('TEMP-') && !name.endsWith(holding));
+    const deadline = Date.now() + 120_000;
+    while (Date.now() < deadline && !(holding && waiting())) await sleep(20);
+    const changed = waiting().replace(/^TEMP-H265-/, '');
+    // the car (or someone) writes to the other original while it waits
+    fs.appendFileSync(path.join(folder, changed), Buffer.from('more'));
+    const kept = fs.readFileSync(path.join(folder, changed));
+    releaseSlot();
+    const job = await env.runtime.service.whenIdle(id);
+    assert.equal(job.state, 'completed');
+    const failed = job.items.find((item) => item.relativePath.endsWith(changed));
+    assert.equal(failed.state, 'failed');
+    assert.equal(failed.failure.code, 'source-changed');
+    assert.ok(Buffer.compare(fs.readFileSync(path.join(folder, changed)), kept) === 0, 'the changed original is untouched');
+    assert.equal(codecOf(path.join(folder, holding)), 'hevc', 'the clip that held the slot was converted');
+    assert.deepEqual(fs.readdirSync(folder).sort(), [clipName(0), clipName(1)], 'no copy or backup left');
+    assert.equal(job.replacementPhase ?? null, null);
+  } finally {
+    await env?.runtime.shutdown().catch(() => {});
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});

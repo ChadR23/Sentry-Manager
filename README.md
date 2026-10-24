@@ -175,7 +175,11 @@ copies somewhere else is a choice you make in the Output section.
 - **Safe replacement.** In replace mode an original is only removed after its
   converted copy is verified, and only if it is still exactly the file that
   was converted (device, inode, size and SHA-256 are checked). The copy is
-  moved in with a no-replace rename, which also holds on SMB.
+  moved in with a no-replace rename, which also holds on SMB. Clips copy
+  their conversions to the share at the same time; only the renames that
+  swap a clip in go one clip at a time, each right after a full check of the
+  file it moves (on the Encoder page, "Save / replace" includes the copy and
+  "Wait to save" is the wait for those renames).
 - **Separate destination**, if you pick it: the originals stay and the
   converted copies go to a folder you choose (under `/data/converted` or a
   vehicle's share). If the share cannot guarantee a safe replacement, this
@@ -367,9 +371,10 @@ in the middle of a conversion is fine: the converter stops cleanly (Docker
 gives it a minute, `stop_grace_period` in `docker-compose.yml`) and carries
 on by itself after the update. Finished clips stay finished; a clip that was
 being encoded starts over, and one that was being swapped in is completed
-or put back from its backup. If the stop came at the very moment a clip
-took its original's place, the job waits paused afterwards: press Resume
-and it finishes that clip and carries on. **Settings → Updates** shows the
+or put back from its backup. The same holds when the stop is not clean (a
+power cut, `docker kill`): whatever moment it came at, the job carries on by
+itself after the restart, with nothing to press. Only files that something
+else changed in the meantime make it wait for you. **Settings → Updates** shows the
 version you run and checks twice a day
 whether a newer image is out. It only tells you and never installs anything
 (`UPDATE_CHECK=off` turns the check off). For automatic updates, use a tool
