@@ -65,7 +65,7 @@ function describeLeadIn(buffer, track, samples, timescale) {
   if (syncNumbers === null) return none({});
   const syncIndexes = syncNumbers.filter((number) => number >= 1 && number <= samples.length).map((number) => number - 1);
   if (syncIndexes.length === 0) return none({ frames: null, syncSampleIndex: null, reason: 'no-keyframe' });
-  const first = Math.min(...syncIndexes);
+  const first = syncIndexes.reduce((low, index) => (index < low ? index : low), Infinity);
   if (first === 0) return none({});
   // A terminal zero-duration sample is container bookkeeping that decoders
   // leave out (see the verifier); the encoded track never has it.

@@ -259,6 +259,9 @@ function sampleSizes(tree, stbl) {
   if (payload.readUInt8(0) !== 0) throw mp4Error('Unsupported stsz version', 'UNSUPPORTED_CONTAINER');
   const defaultSize = payload.readUInt32BE(4);
   const count = payload.readUInt32BE(8);
+  // every sample must lie inside this file's media data: a count that cannot
+  // fit is refused before it becomes a multi-gigabyte array
+  if (defaultSize !== 0 && BigInt(count) * BigInt(defaultSize) > BigInt(tree.buffer.length)) throw mp4Error('stsz sample count exceeds the file');
   if (defaultSize !== 0) return Array.from({ length: count }, () => defaultSize);
   if (BigInt(payload.length) < 12n + BigInt(count) * 4n) throw mp4Error('Truncated stsz table');
   const sizes = [];
@@ -281,12 +284,10 @@ function decodeStsc(tree, stbl, chunkCount) {
   }
   if (entries[0].firstChunk !== 1) throw mp4Error('stsc must begin with chunk 1');
   const mapping = [];
+  let next = 0; // entries are strictly increasing: one pass, not one scan per chunk
   for (let chunk = 1; chunk <= chunkCount; chunk += 1) {
-    let entry = entries[0];
-    for (const candidate of entries) {
-      if (candidate.firstChunk > chunk) break;
-      entry = candidate;
-    }
+    while (next + 1 < entries.length && entries[next + 1].firstChunk <= chunk) next += 1;
+    const entry = entries[next];
     mapping.push({ samplesPerChunk: entry.samplesPerChunk, sampleDescriptionIndex: entry.sampleDescriptionIndex });
   }
   return mapping;
@@ -310,13 +311,31 @@ function decodeTimeTable(tree, stbl, type, signedOffsets = false) {
   return { values, total };
 }
 
+// mdat boxes never nest or overlap and findBoxes lists them in file order, so
+// the one that could hold `offset` is found by binary search (a file with many
+// mdat boxes must not cost samples x boxes).
+function mdatHolding(mdats, offset) {
+  let low = 0;
+  let high = mdats.length - 1;
+  let found = null;
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    if (mdats[mid].contentStart <= offset) {
+      found = mdats[mid];
+      low = mid + 1;
+    } else high = mid - 1;
+  }
+  return found;
+}
+
 function validateSampleExtents(tree, samples) {
   const mdats = findBoxes(tree, 'mdat');
   if (mdats.length === 0) throw mp4Error('Track samples require an mdat box');
   const extents = samples.map((sample) => {
     const end = sample.offset + BigInt(sample.size);
     if (end < sample.offset || end > UINT64_MAX) throw mp4Error('Sample extent is outside the unsigned 64-bit range');
-    if (!mdats.some((mdat) => sample.offset >= mdat.contentStart && end <= mdat.end)) throw mp4Error('Sample extent is outside mdat media data');
+    const mdat = mdatHolding(mdats, sample.offset);
+    if (!mdat || end > mdat.end) throw mp4Error('Sample extent is outside mdat media data');
     return { start: sample.offset, end };
   }).sort((left, right) => (left.start < right.start ? -1 : left.start > right.start ? 1 : 0));
   for (let index = 1; index < extents.length; index += 1) {
