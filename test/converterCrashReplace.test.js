@@ -23,6 +23,7 @@ const CASES = [
   ['the conversion\'s copy beside the original was just created', 'temp-created'],
   ['that copy was half written', 'temp-torn'],
   ['that copy was complete', 'temp-complete'],
+  ['that copy was being read back in full', 'temp-readback'],
   ['that copy was recorded and the clip waited for the save slot', 'copy-recorded'],
   // in the save slot
   ['the clip entered the save slot', 'slot-entered'],
@@ -32,6 +33,7 @@ const CASES = [
   ['the conversion had just taken the original\'s name', 'after-final'],
   ['that was recorded', 'final-recorded'],
   ['the backup was half removed (renamed for removal, not yet unlinked)', 'quarantined'],
+  ['the final rename failed and the original had just been put back', 'rolled-back'],
   ['the backup was removed and the clip\'s result was about to be written', 'before-result'],
   ['the clip\'s result was written', 'after-result'],
   // after the save slot

@@ -123,6 +123,52 @@ test('promote never replaces and only moves the verified source', { skip: !helpe
   }
 });
 
+test('identity-only checks: device, inode, size and the recorded modification time, no read; without the time the full check', { skip: !helperBuilt && 'no C compiler' }, async () => {
+  const dir = await tmp();
+  try {
+    const { removeOwned, renameExclusive } = adapters();
+    assert.equal(removeOwned.identityChecks, true);
+    assert.equal(renameExclusive.identityChecks, true);
+    const stamp = async (file) => String((await fsp.lstat(file, { bigint: true })).mtimeNs);
+    const from = path.join(dir, 'TEMP-H265-clip.mp4');
+    const to = path.join(dir, 'clip.mp4');
+    await fsp.writeFile(from, 'candidate');
+    const expected = await identity(from);
+    // a record whose hash is wrong passes only by identity and time
+    const quick = { ...expected, sha256: 'f'.repeat(64), mtimeNs: await stamp(from) };
+    assert.equal((await renameExclusive.promote({ from, to, expectedSource: { ...expected, sha256: 'f'.repeat(64) }, removeSource: true })).ownershipMismatch, true,
+      'without identityOnly: hashed');
+    assert.equal((await renameExclusive.promote({ from, to, expectedSource: { ...quick, mtimeNs: undefined }, removeSource: true, identityOnly: true })).ownershipMismatch, true,
+      'identityOnly without a time: hashed');
+    // rewritten in place (same inode, same size): its time moved
+    const later = new Date(Date.now() + 5000);
+    await fsp.writeFile(from, 'CANDIDATE');
+    await fsp.utimes(from, later, later);
+    assert.equal((await renameExclusive.promote({ from, to, expectedSource: quick, removeSource: true, identityOnly: true })).ownershipMismatch, true,
+      'a changed time is a mismatch');
+    assert.ok(fs.existsSync(from) && !fs.existsSync(to));
+    const now = { ...expected, sha256: 'f'.repeat(64), mtimeNs: await stamp(from) };
+    assert.deepEqual(await renameExclusive.promote({ from, to, expectedSource: now, removeSource: true, identityOnly: true }),
+      { atomicNoReplace: true, sourceRemoved: true });
+
+    const backup = path.join(dir, 'BACKUP-clip.mp4');
+    await fsp.writeFile(backup, 'old');
+    const b = { ...(await identity(backup)), mtimeNs: await stamp(backup) };
+    const finalQuick = { ...(await identity(to)), mtimeNs: await stamp(to) };
+    assert.deepEqual(await removeOwned.remove({ target: backup, expected: b, identityOnly: true,
+      guard: { target: to, expected: { ...finalQuick, mtimeNs: '1' }, identityOnly: true } }),
+    { removed: false, ownershipMismatch: true, guardMismatch: true }, 'the guard\'s time is checked');
+    assert.deepEqual(await removeOwned.remove({ target: backup, expected: { ...b, mtimeNs: '1' }, identityOnly: true,
+      guard: { target: to, expected: finalQuick, identityOnly: true } }),
+    { removed: false, ownershipMismatch: true }, 'the target\'s time is checked');
+    assert.deepEqual(await removeOwned.remove({ target: backup, expected: b, identityOnly: true,
+      guard: { target: to, expected: finalQuick, identityOnly: true } }), { removed: true });
+    assert.deepEqual(fs.readdirSync(dir).sort(), ['clip.mp4']);
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('without the helper, promotion falls back to link + unlink', async () => {
   const dir = await tmp();
   try {

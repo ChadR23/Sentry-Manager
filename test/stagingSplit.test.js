@@ -34,18 +34,20 @@ function setup() {
   const expectedSource = { size: original.length, sha256: sha(original), device: String(stat.dev), inode: String(stat.ino) };
   const writes = [];
   const owned = createPosixOwnedFs({ helperPath: HELPER });
+  // what the converter asks the adapter for (moves and removals)
+  const requests = [];
   const staging = createFileTransaction({
     tempRoot,
     validatePublicationArtifact: async () => true,
-    removeOwned: owned.removeOwned,
-    renameExclusive: owned.renameExclusive,
+    removeOwned: { ...owned.removeOwned, remove: (request) => { requests.push({ op: 'remove', ...request }); return owned.removeOwned.remove(request); } },
+    renameExclusive: { ...owned.renameExclusive, promote: (request) => { requests.push({ op: 'promote', ...request }); return owned.renameExclusive.promote(request); } },
     privateTempCleanup: 'identity'
   });
   const operation = {
     jobId: 'job-1', itemId: 'item-000001', codec: 'h265', source, sourceRoot: footage, expectedSource,
     publicationArtifact: artifact, persistTransaction: async (snapshot) => { writes.push(snapshot); }
   };
-  return { root, footage, source, original, conversion, artifact, staging, operation, writes,
+  return { root, footage, source, original, conversion, artifact, staging, operation, writes, requests,
     done: () => fs.rmSync(root, { recursive: true, force: true }) };
 }
 
@@ -71,6 +73,67 @@ test('prepare copies the conversion beside the original and records it on the wa
     assert.deepEqual(fs.readFileSync(env.source), env.conversion);
     assert.deepEqual(fs.readdirSync(env.footage), [path.basename(env.source)]);
     assert.deepEqual(Object.keys(result.ownedPaths), ['publicationSnapshot'], 'only the private snapshot is left to remove');
+    // in the slot only the original is read: the copy (read back by prepare)
+    // and the backup (just hashed as it was moved aside) by identity and time
+    const [backup, final, removal] = env.requests;
+    assert.equal(env.requests.length, 3);
+    assert.ok(/^BACKUP-/.test(path.basename(backup.to)) && !backup.identityOnly, 'the original: its full check');
+    assert.ok(/^TEMP-/.test(path.basename(final.from)) && final.identityOnly === true && /^\d+$/.test(final.expectedSource.mtimeNs));
+    assert.ok(removal.op === 'remove' && removal.identityOnly === true && removal.guard.identityOnly === true);
+  } finally {
+    env.done();
+  }
+});
+
+test('a copy rewritten in place after prepare (same file, same size) is read again and refused before the original is touched', { skip }, async () => {
+  const env = setup();
+  try {
+    const prepared = await env.staging.prepareReplacement(env.operation);
+    const temp = path.join(env.footage, `TEMP-H265-${path.basename(env.source)}`);
+    const rewritten = Buffer.from(env.conversion);
+    rewritten[999] ^= 0xff;
+    fs.writeFileSync(temp, rewritten);
+    const later = new Date(Date.now() + 5000);
+    fs.utimesSync(temp, later, later);
+    env.requests.length = 0;
+    // (the rewritten copy is no longer provably the converter's own: it is
+    // left as it is and the clip waits for a decision, as before)
+    await assert.rejects(env.staging.swapReplacement({ prepared, persistTransaction: env.operation.persistTransaction }),
+      (error) => ['PUBLICATION_ARTIFACT_CHANGED', 'ROLLBACK_FAILED'].includes(error.code));
+    assert.ok(!env.requests.some((request) => request.op === 'promote'), 'the original was never moved');
+    assert.deepEqual(fs.readFileSync(env.source), env.original);
+    assert.deepEqual(fs.readFileSync(temp), rewritten, 'the rewritten copy is not removed');
+  } finally {
+    env.done();
+  }
+});
+
+test('a separate output: the .partial is read back by prepare and moved into place by identity and time', { skip }, async () => {
+  const env = setup();
+  try {
+    const destination = path.join(env.root, 'out', 'clip.mp4');
+    fs.mkdirSync(path.dirname(destination));
+    const prepared = await env.staging.preparePublication({ ...env.operation, destination });
+    assert.match(prepared.partialMtimeNs, /^\d+$/);
+    const result = await env.staging.commitPublication({ prepared, persistTransaction: env.operation.persistTransaction });
+    assert.equal(result.finalPath, destination);
+    assert.deepEqual(fs.readFileSync(destination), env.conversion);
+    assert.equal(env.requests.at(-1).identityOnly, true);
+
+    // rewritten in place after prepare: hashed in full, refused
+    const other = path.join(env.root, 'out', 'other.mp4');
+    const env2 = setup();
+    try {
+      const again = await env2.staging.preparePublication({ ...env2.operation, destination: other });
+      const later = new Date(Date.now() + 5000);
+      fs.writeFileSync(again.partial, Buffer.alloc(env2.conversion.length, 7));
+      fs.utimesSync(again.partial, later, later);
+      await assert.rejects(env2.staging.commitPublication({ prepared: again, persistTransaction: env2.operation.persistTransaction }));
+      assert.equal(env2.requests.at(-1).identityOnly, undefined, 'a changed time: the full check');
+      assert.equal(fs.existsSync(other), false);
+    } finally {
+      env2.done();
+    }
   } finally {
     env.done();
   }

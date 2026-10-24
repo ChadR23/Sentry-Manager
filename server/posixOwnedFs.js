@@ -3,8 +3,10 @@
 // Linux stand-in for the converter's Windows-only owned-file operations
 // (src/main/converter/windowsOwnedCleanup.*). Same contract as that module:
 // a file is only removed or renamed after its device, inode, size and
-// SHA-256 match what the converter recorded, so a clip that was replaced or
-// edited in the meantime is never touched.
+// SHA-256 match what the converter recorded (or, for a file whose content
+// the converter has just proven, its device, inode, size and modification
+// time: identityOnly), so a clip that was replaced or edited in the
+// meantime is never touched.
 //
 // Linux has no "unlink if this is still the same file" call, so removal
 // first renames the verified file to a private quarantine name and checks
@@ -35,6 +37,15 @@ function sameIdentity(st, expected) {
   return String(st.dev) === String(expected.device) && String(st.ino) === String(expected.inode);
 }
 
+// An identity-only check is asked for a file whose whole content the caller
+// already proved (read back after writing it, or hashed by this adapter
+// moments before) and whose modification time it recorded then: device,
+// inode, size and that time must all be unchanged. Without the time the
+// full check runs.
+function identityOnlyFor(expected, requested) {
+  return requested === true && typeof expected?.mtimeNs === 'string' && /^\d+$/.test(expected.mtimeNs);
+}
+
 function errorWithCode(message, code) {
   return Object.assign(new Error(message), { code });
 }
@@ -56,7 +67,7 @@ async function hashHandle(fh, size) {
  * Open without following links and prove it is the expected file.
  * Resolves { status: 'verified', fh, stat } | { status: 'missing' } | { status: 'mismatch' }.
  */
-async function openVerified(target, expected) {
+async function openVerified(target, expected, { identityOnly = false } = {}) {
   let fh;
   try {
     fh = await fsp.open(target, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
@@ -70,6 +81,13 @@ async function openVerified(target, expected) {
     if (!stat.isFile() || !sameIdentity(stat, expected) || Number(stat.size) !== expected.size) {
       await fh.close();
       return { status: 'mismatch' };
+    }
+    if (identityOnly) {
+      if (String(stat.mtimeNs) !== expected.mtimeNs) {
+        await fh.close();
+        return { status: 'mismatch' };
+      }
+      return { status: 'verified', fh, stat };
     }
     const { digest, bytes } = await hashHandle(fh, expected.size);
     if (bytes !== expected.size || digest !== expected.sha256) {
@@ -119,11 +137,15 @@ function createPosixOwnedFs(options = {}) {
   // whole file, with it held open, against the recorded SHA-256 right before
   // they act (promote with a link, removeSource false, checks identity only),
   // so the converter need not read it once more beforehand.
+  // identityChecks: with identityOnly (remove: for the target, guard.identityOnly
+  // for the guard) and the recorded mtimeNs, they check device, inode, size
+  // and modification time instead of hashing (see identityOnlyFor).
   const removeOwned = Object.freeze({
     atomicOwnershipCheck: true,
     guardedRemoval: true,
     verifiesContent: true,
-    async remove({ target, expected, guard } = {}) {
+    identityChecks: true,
+    async remove({ target, expected, guard, identityOnly = false } = {}) {
       if (!validPath(target) || !validExpected(expected)
           || (guard !== undefined && (!guard || !validPath(guard.target) || !validExpected(guard.expected)))) {
         return { removed: false, ownershipMismatch: true };
@@ -132,11 +154,12 @@ function createPosixOwnedFs(options = {}) {
       let victim = null;
       try {
         if (guard) {
-          guarded = await openVerified(guard.target, guard.expected);
+          guarded = await openVerified(guard.target, guard.expected,
+            { identityOnly: identityOnlyFor(guard.expected, guard.identityOnly) });
           if (guarded.status !== 'verified') return { removed: false, ownershipMismatch: true, guardMismatch: true };
           await guarded.fh.sync();
         }
-        victim = await openVerified(target, expected);
+        victim = await openVerified(target, expected, { identityOnly: identityOnlyFor(expected, identityOnly) });
         if (victim.status === 'missing') return { removed: false, missing: true };
         if (victim.status !== 'verified') return { removed: false, ownershipMismatch: true };
 
@@ -168,7 +191,8 @@ function createPosixOwnedFs(options = {}) {
     atomicNoReplace: true,
     atomicExpectedOwnership: true,
     verifiesContent: true,
-    async promote({ from, to, expectedSource, removeSource = false } = {}) {
+    identityChecks: true,
+    async promote({ from, to, expectedSource, removeSource = false, identityOnly = false } = {}) {
       if (!validPath(from) || !validPath(to) || path.resolve(from) === path.resolve(to)) {
         throw errorWithCode('Promotion requires two distinct absolute paths.', 'ENOTSUP');
       }
@@ -182,7 +206,7 @@ function createPosixOwnedFs(options = {}) {
         return { atomicNoReplace: true, sourceRemoved: false };
       }
       if (!validExpected(expectedSource)) return { atomicNoReplace: true, sourceRemoved: false, ownershipMismatch: true };
-      const source = await openVerified(from, expectedSource);
+      const source = await openVerified(from, expectedSource, { identityOnly: identityOnlyFor(expectedSource, identityOnly) });
       if (source.status === 'missing') throw errorWithCode('Source is missing.', 'ENOENT');
       if (source.status !== 'verified') return { atomicNoReplace: true, sourceRemoved: false, ownershipMismatch: true };
       try {

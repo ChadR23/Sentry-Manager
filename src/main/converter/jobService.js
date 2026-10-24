@@ -1874,10 +1874,22 @@ function createConverterJobService(deps) {
         // replacement record ends here (a network wait or a retry that
         // follows must not find the job still 'replacing').
         if (error?.rolledBack) {
-          await update(runtime, (current) => (current.activeItemId === item.id && current.replacementPhase ? {
+          const clear = () => update(runtime, (current) => (current.activeItemId === item.id && current.replacementPhase ? {
             state: 'waiting', activeItemId: null, replacementPhase: null,
             ownedPaths: {}, ownedArtifacts: {}, publicationArtifact: null
-          } : null)).catch(() => undefined);
+          } : null));
+          let cleared = false;
+          for (let attempt = 0; attempt < 3 && !cleared; attempt += 1) {
+            if (attempt) await new Promise((resolve) => setTimeout(resolve, 100 * attempt));
+            cleared = await clear().then(() => true, () => false);
+          }
+          // The job file cannot be written: it still says this clip is
+          // mid-replacement (the original back at its name). No other clip
+          // may save or record anything as the job's active one meanwhile,
+          // so the job stops here as after a crash; recovery (on Resume or
+          // the next start) finds the original in place and queues the clip
+          // again.
+          if (!cleared) throw Object.assign(serviceError('REPLACEMENT_RECORD_STALE'), { replacementRecordStale: true, cause: error });
         }
         throw publicationError(runtime, error, destination);
       }
@@ -2013,7 +2025,7 @@ function createConverterJobService(deps) {
       console.error('[CONVERTER] Unexpected clip failure:', String(error?.stack || error).slice(0, 2000));
     }
     const ownership = ownershipFor(runtime, itemId);
-    if (ownership?.ownedPaths?.replacementBackup || error?.code === 'ROLLBACK_FAILED') {
+    if (ownership?.ownedPaths?.replacementBackup || error?.code === 'ROLLBACK_FAILED' || error?.replacementRecordStale === true) {
       if (!runtime.recoveryRequired) {
         runtime.recoveryRequired = true;
         runtime.recoveryItemId = itemId;
@@ -2980,6 +2992,19 @@ function createConverterJobService(deps) {
       // on its own): only the record is missing.
       if (!publicationArtifact) {
         const phase = recovery.phase || recovered.replacementPhase;
+        // A swap that was put back (the snapshot already removed with it),
+        // stopped before the job's record of it was cleared: the original
+        // is at its name again, nothing of the swap is left, and the clip
+        // is converted again.
+        if (action === 'rollback-complete') {
+          if (!await requeueRecovered(runtime, item, { ownedPaths: item.ownedPaths || recovered.ownedPaths || {}, ownedArtifacts: item.ownedArtifacts || recovered.ownedArtifacts || {} })) {
+            await park(phase);
+            return publicSnapshot(runtime.manifest);
+          }
+          await relaunch(runtime);
+          emit(runtime, 'recovered');
+          return publicSnapshot(runtime.manifest);
+        }
         let stat = null;
         if (phase === 'backup-deleted' && action === 'finish-replacement' && typeof deps.statFile === 'function') {
           stat = await deps.statFile(item.sourcePath).catch(() => null);

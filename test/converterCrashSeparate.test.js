@@ -17,6 +17,7 @@ for (const [label, point, networkMode = 'direct'] of [
   ['the .partial copy was just created', 'temp-created'],
   ['the .partial copy was half written', 'temp-torn'],
   ['the .partial copy was complete', 'temp-complete'],
+  ['the .partial copy was being read back in full', 'temp-readback'],
   ['that copy was recorded and the clip waited for the save slot', 'copy-recorded'],
   ['the clip entered the save slot', 'slot-entered'],
   ['the copy had just been published', 'after-final'],

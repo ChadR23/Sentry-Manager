@@ -232,6 +232,12 @@ function createFileTransaction(options = {}) {
   // check stays as it was.
   const adapterVerifies = options.removeOwned?.verifiesContent === true
     && options.renameExclusive?.verifiesContent === true;
+  // Adapters that can also check a file by identity and modification time
+  // alone (no read): a copy to the share is then read back in full when it
+  // is written, outside the save slot, and in the slot only that identity
+  // and time are checked again (any change to them: the full check).
+  const adapterIdentity = adapterVerifies && options.removeOwned?.identityChecks === true
+    && options.renameExclusive?.identityChecks === true;
   const capabilities = Object.freeze({
     separatePublication: separatePromotionAvailable
       ? ownershipCleanupAvailable ? 'native-atomic' : 'hardlink-cleanup-pending'
@@ -438,6 +444,17 @@ function createFileTransaction(options = {}) {
     return metadata && metadata.device === safeStatPart(stat.dev) && metadata.inode === safeStatPart(stat.ino);
   }
 
+  function mtimeStamp(stat) {
+    return typeof stat?.mtimeNs === 'bigint' && stat.mtimeNs > 0n ? stat.mtimeNs.toString() : null;
+  }
+
+  // An identity-only check for a file whose content was proven when its
+  // modification time was recorded: only while that time is unchanged.
+  function quickExpected(metadata, mtimeNs, stat) {
+    if (!adapterIdentity || !mtimeNs || !stat || mtimeStamp(stat) !== mtimeNs) return null;
+    return { ...metadata, mtimeNs };
+  }
+
   async function hashOpenHandle(handle, signal) {
     const hash = crypto.createHash('sha256');
     const buffer = Buffer.allocUnsafe(chunkSize);
@@ -475,6 +492,15 @@ function createFileTransaction(options = {}) {
     } finally {
       if (handle) await handle.close().catch(() => {});
     }
+  }
+
+  // A copy just written to the share, read back in full (the bytes the share
+  // holds are the verified conversion's) by the same file it was written as.
+  // Returns its modification time for the identity checks that follow.
+  async function proveCopy(target, artifact, written, failureCode) {
+    const proof = await readExactFile(target, artifact, failureCode);
+    if (!sameIdentity(written, proof.stat)) throw transactionError(failureCode);
+    return mtimeStamp(proof.stat);
   }
 
   async function copyExclusive(source, target, {
@@ -661,7 +687,7 @@ function createFileTransaction(options = {}) {
     }
   }
 
-  async function promoteNoReplace(from, to, collisionCode, { expectedSource, removeSource = false } = {}) {
+  async function promoteNoReplace(from, to, collisionCode, { expectedSource, removeSource = false, identityOnly = false } = {}) {
     let finalCreated = false;
     try {
       if (options.renameExclusive) {
@@ -671,7 +697,7 @@ function createFileTransaction(options = {}) {
           throw transactionError('ATOMIC_PROMOTION_UNSUPPORTED');
         }
         const result = await options.renameExclusive.promote({
-          from, to, expectedSource, removeSource
+          from, to, expectedSource, removeSource, ...(identityOnly ? { identityOnly: true } : {})
         });
         if (!result || result.atomicNoReplace !== true || typeof result.sourceRemoved !== 'boolean') {
           throw transactionError('ATOMIC_PROMOTION_UNSUPPORTED');
@@ -829,7 +855,7 @@ function createFileTransaction(options = {}) {
     return observed;
   }
 
-  async function removeExactOwned(target, metadata, { allowMissing = true, allowIdentityAlias = false, guard } = {}) {
+  async function removeExactOwned(target, metadata, { allowMissing = true, allowIdentityAlias = false, guard, mtimeNs } = {}) {
     const stat = await lstatOrNull(target);
     if (!stat) {
       if (allowMissing) {
@@ -853,11 +879,13 @@ function createFileTransaction(options = {}) {
       await readExactFile(target, metadata, 'UNSAFE_OWNED_PATH');
     }
     if (!ownershipCleanupAvailable) throw transactionError('OWNED_CLEANUP_FAILED');
+    const quick = quickExpected(metadata, mtimeNs, stat);
     try {
       const result = await options.removeOwned.remove({
         target,
-        expected: { ...metadata },
+        expected: quick || { ...metadata },
         allowIdentityAlias,
+        ...(quick ? { identityOnly: true } : {}),
         ...(guard ? { guard } : {})
       });
       if (result?.ownershipMismatch) throw transactionError('UNSAFE_OWNED_PATH');
@@ -887,7 +915,7 @@ function createFileTransaction(options = {}) {
   // The backup's record: the inode just moved there is the original the
   // adapter verified, so its hash is the converted version's (no read);
   // without such an adapter it is read back as before.
-  async function backupRecord(backup, nonce, promotion, expectedSource, signal) {
+  async function backupRecord(backup, nonce, promotion, expectedSource, signal, facts = {}) {
     const state = promotion.sourceRemoved ? 'owned' : 'cleanup-pending';
     if (adapterVerifies) {
       const stat = await exactLstat(backup).catch(() => null);
@@ -895,13 +923,19 @@ function createFileTransaction(options = {}) {
           || safeStatPart(stat.ino) !== expectedSource.inode || statSize(stat) !== expectedSource.size) {
         throw transactionError('REPLACEMENT_FAILED');
       }
+      // (its modification time as the adapter's full check just left it)
+      facts.mtimeNs = mtimeStamp(stat);
       return artifactMetadata(backup, nonce, state, stat, expectedSource.sha256, expectedSource.size);
     }
     const observed = await inspectExactFile(backup, signal, 'REPLACEMENT_FAILED');
     return artifactMetadata(backup, nonce, state, observed.stat, observed.sha256, observed.size);
   }
 
-  async function removeReplacementBackup(backup, metadata, finalPath, artifact, expectedFinal = null) {
+  // quick: { finalMtimeNs, backupMtimeNs }, the modification times at which
+  // the final's content (read back after it was written) and the backup's
+  // (hashed as it was moved aside) were proven; each is checked by identity
+  // and that time while it is unchanged, else hashed in full as before.
+  async function removeReplacementBackup(backup, metadata, finalPath, artifact, expectedFinal = null, quick = {}) {
     if (options.removeOwned?.guardedRemoval !== true) throw transactionError('ATOMIC_PROMOTION_UNSUPPORTED');
     const stat = await exactLstat(finalPath);
     if (!isRegularFile(stat)) throw transactionError('FINAL_VALIDATION_FAILED');
@@ -909,10 +943,13 @@ function createFileTransaction(options = {}) {
     if (expectedFinal && !metadataMatchesIdentity(expectedFinal, stat)) throw transactionError('FINAL_VALIDATION_FAILED');
     // The native adapter verifies and locks this exact final while removing
     // the backup. A prior path-based read alone cannot authorize that removal.
-    const guard = { target: finalPath, expected: {
+    const finalExpected = {
       device: String(stat.dev), inode: String(stat.ino), size: artifact.size, sha256: artifact.sha256
-    } };
-    return removeExactOwned(backup, metadata, { allowMissing: false, guard });
+    };
+    const finalQuick = expectedFinal ? quickExpected(finalExpected, quick.finalMtimeNs, stat) : null;
+    const guard = finalQuick ? { target: finalPath, expected: finalQuick, identityOnly: true }
+      : { target: finalPath, expected: finalExpected };
+    return removeExactOwned(backup, metadata, { allowMissing: false, guard, mtimeNs: quick.backupMtimeNs });
   }
 
   function singleLink(stat) {
@@ -1863,6 +1900,7 @@ function createFileTransaction(options = {}) {
     };
     await persist(operation, transactionSnapshot({ step: 'replacement-prepare', ownedPaths, ownedArtifacts,
       publicationArtifact: artifact }));
+    let candidateMtimeNs = null;
     try {
       const copied = await copyExclusive(artifact.path, candidate, {
         expected: artifact,
@@ -1882,6 +1920,7 @@ function createFileTransaction(options = {}) {
       if (typeof pfs.chmod === 'function' && typeof originalStat?.mode === 'bigint') {
         await pfs.chmod(candidate, Number(originalStat.mode & 0o777n)).catch(() => {});
       }
+      if (adapterIdentity) candidateMtimeNs = await proveCopy(candidate, artifact, copied.stat, 'PUBLICATION_ARTIFACT_CHANGED');
       ownedArtifacts.replacementCandidate = artifactMetadata(candidate, candidateNonce, 'owned', copied.stat,
         artifact.sha256, artifact.size);
       await persist(operation, transactionSnapshot({ step: 'replacement-candidate-owned', ownedPaths, ownedArtifacts,
@@ -1894,6 +1933,7 @@ function createFileTransaction(options = {}) {
     const prepared = Object.freeze({
       kind: 'replacement', jobId, itemId, codec: operation.codec, artifact, expectedSource,
       source: sourceInfo.source, sourceRoot: sourceInfo.sourceRoot, backup: paths.replacementBackup, backupNonce,
+      candidateMtimeNs,
       ownedPaths: Object.freeze({ ...ownedPaths }), ownedArtifacts: Object.freeze(copyArtifacts(ownedArtifacts))
     });
     preparedSaves.add(prepared);
@@ -1904,6 +1944,10 @@ function createFileTransaction(options = {}) {
   // prepared copy takes its name, and the backup is removed. Each move and
   // the removal is preceded by a full check of the file it moves or keeps
   // (with an adapter that verifies content: by the adapter, file held open).
+  // With an adapter that checks identities, the copy (read back in full by
+  // prepare) and the backup (hashed as it is moved aside) are checked by
+  // device, inode, size and modification time: the original is then read
+  // once in the slot, the copy not at all.
   // Once begun it does not stop for the job's own abort (a docker stop lets
   // it finish); a failure before the backup is gone puts the original back.
   async function swapReplacement(operation = {}) {
@@ -1926,15 +1970,26 @@ function createFileTransaction(options = {}) {
         throw transactionError('PUBLICATION_ARTIFACT_CHANGED');
       }
       if (!adapterVerifies) await readExactFile(candidate, artifact, 'PUBLICATION_ARTIFACT_CHANGED');
+      let candidateQuick = quickExpected(ownedArtifacts.replacementCandidate, prepared.candidateMtimeNs, candidateStat);
+      if (!candidateQuick && prepared.candidateMtimeNs) {
+        // changed since prepare read it back: read in full again, before
+        // the original is touched
+        const proof = await readExactFile(candidate, artifact, 'PUBLICATION_ARTIFACT_CHANGED');
+        if (!sameIdentity(candidateStat, proof.stat)) throw transactionError('PUBLICATION_ARTIFACT_CHANGED');
+        candidateQuick = quickExpected(ownedArtifacts.replacementCandidate, mtimeStamp(proof.stat), proof.stat);
+      }
 
       const backupPromotion = await promoteBackup(source, backup, expectedSource);
-      ownedArtifacts.replacementBackup = await backupRecord(backup, prepared.backupNonce, backupPromotion, expectedSource);
+      const backupFacts = {};
+      ownedArtifacts.replacementBackup = await backupRecord(backup, prepared.backupNonce, backupPromotion, expectedSource,
+        undefined, backupFacts);
       await persist(operation, transactionSnapshot({ phase: 'original-backed-up', ownedPaths, ownedArtifacts,
         publicationArtifact: artifact, cleanupPending: backupPromotion.sourceRemoved ? [] : ['replacementBackup'] }));
       if (!backupPromotion.sourceRemoved) throw transactionError('REPLACEMENT_FAILED');
 
       const candidatePromotion = await promoteNoReplace(candidate, source, 'REPLACEMENT_COLLISION', {
-        expectedSource: ownedArtifacts.replacementCandidate, removeSource: true
+        expectedSource: candidateQuick || ownedArtifacts.replacementCandidate, removeSource: true,
+        identityOnly: Boolean(candidateQuick)
       });
       if (!candidatePromotion.sourceRemoved) ownedArtifacts.replacementCandidate.state = 'cleanup-pending';
       await persist(operation, transactionSnapshot({ phase: 'candidate-promoted', ownedPaths, ownedArtifacts,
@@ -1947,7 +2002,8 @@ function createFileTransaction(options = {}) {
         if (!adapterVerifies) await validateReadable(source, artifact, null, 'FINAL_VALIDATION_FAILED');
       }
       await removeReplacementBackup(backup, ownedArtifacts.replacementBackup, source, artifact,
-        candidatePromotion.sourceRemoved ? ownedArtifacts.replacementCandidate : null);
+        candidatePromotion.sourceRemoved ? ownedArtifacts.replacementCandidate : null,
+        { finalMtimeNs: candidateQuick?.mtimeNs || null, backupMtimeNs: backupFacts.mtimeNs });
       delete ownedPaths.replacementBackup;
       delete ownedArtifacts.replacementBackup;
       backupDeleted = true;
@@ -2040,6 +2096,7 @@ function createFileTransaction(options = {}) {
     };
     await persist(operation, transactionSnapshot({ step: 'separate-prepare', ownedPaths, ownedArtifacts,
       publicationArtifact: artifact }));
+    let partialMtimeNs = null;
     try {
       const copied = await copyExclusive(artifact.path, partial, {
         expected: artifact,
@@ -2053,6 +2110,7 @@ function createFileTransaction(options = {}) {
             publicationArtifact: artifact }));
         }
       });
+      if (adapterIdentity) partialMtimeNs = await proveCopy(partial, artifact, copied.stat, 'PUBLICATION_ARTIFACT_CHANGED');
       ownedArtifacts.destinationPartial = artifactMetadata(partial, partialNonce, 'owned', copied.stat,
         artifact.sha256, artifact.size);
       await persist(operation, transactionSnapshot({ step: 'separate-partial-owned', ownedPaths, ownedArtifacts,
@@ -2063,7 +2121,7 @@ function createFileTransaction(options = {}) {
       throw transactionError('DESTINATION_WRITE_FAILED');
     }
     const prepared = Object.freeze({
-      kind: 'separate', jobId, itemId, artifact, destination, partial,
+      kind: 'separate', jobId, itemId, artifact, destination, partial, partialMtimeNs,
       ownedPaths: Object.freeze({ ...ownedPaths }), ownedArtifacts: Object.freeze(copyArtifacts(ownedArtifacts))
     });
     preparedSaves.add(prepared);
@@ -2081,8 +2139,11 @@ function createFileTransaction(options = {}) {
     const ownedArtifacts = copyArtifacts(prepared.ownedArtifacts);
     const cleanupPending = [];
     if (adapterVerifies && options.renameExclusive?.atomicExpectedOwnership === true) {
+      // read back in full by prepare: by identity and modification time here
+      const quick = prepared.partialMtimeNs
+        ? quickExpected(ownedArtifacts.destinationPartial, prepared.partialMtimeNs, await lstatOrNull(partial)) : null;
       const promotion = await promoteNoReplace(partial, destination, 'DESTINATION_COLLISION', {
-        expectedSource: ownedArtifacts.destinationPartial, removeSource: true
+        expectedSource: quick || ownedArtifacts.destinationPartial, removeSource: true, identityOnly: Boolean(quick)
       });
       if (promotion.sourceRemoved) {
         delete ownedPaths.destinationPartial;

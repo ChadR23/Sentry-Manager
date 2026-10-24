@@ -14,6 +14,7 @@ const skip = available() ? false : 'needs ffmpeg and build/noreplace-rename';
 for (const [label, point, mode = 'replace'] of [
   ['the first encode started', 'encode'],
   ['a copy beside its original was half written', 'temp-torn'],
+  ['a copy beside its original was being read back', 'temp-readback'],
   ['a complete copy waited for the save slot', 'copy-recorded'],
   ['a clip entered the save slot', 'slot-entered'],
   ['the original was moved to its backup name', 'backup-renamed'],
@@ -26,6 +27,8 @@ for (const [label, point, mode = 'replace'] of [
   ['a complete .partial copy waited for the save slot', 'copy-recorded', 'separate'],
   ['a clip entered the save slot', 'slot-entered', 'separate'],
   ['a copy had just been published', 'after-final', 'separate'],
+  ['a .partial copy was being read back', 'temp-readback', 'separate'],
+  ['a final rename failed and the original had just been put back', 'rolled-back'],
   ['a clip\'s result was written', 'after-result', 'separate']
 ]) {
   test(`six at once (${mode}), killed when ${label}: the job finishes by itself`, { skip, timeout: 240_000 }, async () => {

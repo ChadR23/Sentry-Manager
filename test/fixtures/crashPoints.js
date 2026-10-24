@@ -119,6 +119,20 @@ const POINTS = {
   'save-recorded': {
     afterWrite: (manifest) => anyItem(manifest, (item) => item.ownedArtifacts?.[copyField(item)]?.state === 'intent' && !item.replacementPhase)
   },
+  // that copy is being read back in full (it was written; not yet recorded
+  // as complete)
+  'temp-readback': {
+    fsOpen: (file, flags, handle) => {
+      if (flags !== 'r' || !(isTemp(file) || isPartial(file))) return handle;
+      const read = handle.read.bind(handle);
+      let reads = 0;
+      handle.read = async (...args) => {
+        if (++reads > 1) die();
+        return read(...args);
+      };
+      return handle;
+    }
+  },
   // the clip's copy beside its original (or destination) is recorded as
   // complete: the clip waits for (or is about to take) the save slot
   'copy-recorded': {
@@ -132,6 +146,13 @@ const POINTS = {
   'before-final': { onPromote: (request) => !/^BACKUP-/.test(path.basename(request.to)) && /front\.mp4$/.test(request.to) },
   'after-final': { afterPromote: (request) => !/^BACKUP-/.test(path.basename(request.to)) && /front\.mp4$/.test(request.to) },
   'final-recorded': { afterWrite: (manifest) => manifest.replacementPhase === 'candidate-promoted' },
+  // the final rename fails, the swap puts the original back, and the
+  // converter dies once that is recorded (before the job's record of the
+  // replacement is cleared)
+  'rolled-back': {
+    failPromote: (request) => isTemp(request.from) && /front\.mp4$/.test(request.to),
+    afterWrite: (manifest) => manifest.replacementPhase === 'backup-restored'
+  },
   quarantined: { onRename: (from, to) => /^\.sentry-owned-remove-/.test(path.basename(to)) && /^BACKUP-/.test(path.basename(from)) },
   // the backup is gone; the clip's result is about to be written
   'before-result': {
@@ -182,6 +203,7 @@ async function open(base, { point = null, concurrency = 1, mode = 'replace', net
   const renameExclusive = Object.assign({}, owned.renameExclusive, {
     promote: async (request) => {
       if (hooks.onPromote?.(request)) die();
+      if (hooks.failPromote?.(request)) throw Object.assign(new Error('refused'), { code: 'EPERM' });
       const out = await owned.renameExclusive.promote(request);
       if (hooks.afterPromote?.(request)) die();
       return out;
