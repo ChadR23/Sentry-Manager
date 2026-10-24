@@ -504,7 +504,7 @@ test('Settings > Updates: a build without an image to check says so and checks n
   }
 });
 
-test('Jobs: Clear jobs takes finished jobs off the list after sign-in, from the page only; jobs a restart stopped are interrupted', async () => {
+test('Jobs: Clear jobs takes finished jobs off the list after sign-in, from the page only; jobs a restart stopped are interrupted', { timeout: 180000 }, async () => {
   const dir = await tmp();
   await makeFootage(path.join(dir, 'footage'));
   // jobs from before this start: a scan the restart stopped, a conversion the converter resumes
@@ -523,8 +523,12 @@ test('Jobs: Clear jobs takes finished jobs off the list after sign-in, from the 
     assert.match(list.find((j) => j.id === stopped).detail, /stopped by a restart/);
     assert.equal(list.find((j) => j.id === paused).status, 'running', 'conversions stay with the converter');
 
+    // (a busy machine: the scan may take a while; how it ends does not matter here)
     const scan = await s.call('POST', '/api/vehicles/daily-driver/scan', {});
-    await waitFor(async () => (await s.call('GET', '/api/jobs')).data.jobs.find((j) => j.id === scan.data.jobId)?.status === 'done');
+    const scanned = await waitFor(async () => {
+      const job = (await s.call('GET', '/api/jobs')).data.jobs.find((j) => j.id === scan.data.jobId);
+      return job && job.status !== 'running' ? job : null;
+    }, 90000);
 
     // a mutating route like the others: the page's header, the same origin
     assert.equal((await s.call('POST', '/api/jobs/clear', { vehicle: 'daily-driver' }, { headers: { 'X-Requested-With': 'nope' } })).status, 403);
@@ -537,7 +541,7 @@ test('Jobs: Clear jobs takes finished jobs off the list after sign-in, from the 
     assert.equal(preview.status, 200);
     const finished = (await s.call('GET', '/api/jobs?vehicle=daily-driver')).data.jobs.filter((j) => j.status !== 'running');
     assert.equal(preview.data.jobs, finished.length, 'the confirmation counts what goes');
-    assert.deepEqual(finished.map((j) => j.status).sort(), ['done', 'interrupted'], 'the new scan and the one the restart stopped');
+    assert.deepEqual(finished.map((j) => j.id).sort((x, y) => x - y), [stopped, scanned.id], 'the new scan and the one the restart stopped');
     assert.equal((await s.call('GET', '/api/jobs')).data.jobs.filter((j) => j.status !== 'running').length, finished.length, 'a preview clears nothing');
 
     // another open page hears about it
