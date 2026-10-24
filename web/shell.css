@@ -221,7 +221,14 @@ details.more p { margin-top: 10px; color: var(--text-2); max-width: 760px; }
 .kv { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 8px 18px; font-size: 13.5px; }
 .kv dt { color: var(--muted); }
 .kv dd { margin: 0; word-break: break-word; }
-/* Settings > Support */
+/* Support: the Sentry Team 6 insignia above the chat (six taps answer) */
+.st6 { display: inline-flex; align-items: center; gap: 8px; margin: 0 0 12px; padding: 5px 12px 5px 9px; border: 1px dashed var(--border-strong); border-radius: 6px; background: none; color: var(--muted); font: 700 11.5px/1 var(--mono); letter-spacing: .22em; text-transform: uppercase; cursor: default; user-select: none; -webkit-tap-highlight-color: transparent; }
+.st6 .i { width: 15px; height: 15px; }
+.st6:hover { color: var(--text-2); border-color: var(--accent-border); }
+.st6.hooyah { color: var(--accent); border-color: var(--accent); border-style: solid; background: var(--accent-bg); transition: none; }
+@media (prefers-reduced-motion: no-preference) { .st6.hooyah .i { animation: st6-salute .6s ease-in-out 2; } }
+@keyframes st6-salute { 50% { transform: rotate(-14deg) scale(1.15); } }
+/* Support chat */
 .sup-log { margin-top: 16px; max-height: 420px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding: 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel-2); }
 .sup-log #sup-empty { margin: 0; }
 .sup-msg { max-width: min(560px, 92%); padding: 9px 12px; border-radius: 12px; border: 1px solid var(--border-strong); background: var(--panel-3); }

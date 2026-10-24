@@ -1656,7 +1656,17 @@
   };
 
   pages.support = async () => {
-    page.innerHTML = head('Sentry Six team', 'Support') + supportCard();
+    // Easter egg: the Sentry Six team, Seal Team 6 style. Six taps and it answers.
+    const insignia = `<button type="button" class="st6" id="st6" title="Sentry Team 6" aria-label="Sentry Team 6">
+      <svg class="i" aria-hidden="true"><use href="#i-shield"/></svg><span>Sentry Team 6</span></button>`;
+    page.innerHTML = head('Sentry Six team', 'Support') + insignia + supportCard();
+    let taps = 0;
+    $('st6').onclick = () => {
+      if (++taps % 6) return;
+      $('st6').classList.add('hooyah');
+      setTimeout(() => $('st6')?.classList.remove('hooyah'), 1200);
+      toast('Hooyah. Sentry Team 6 is on station. Brief us below.');
+    };
     wireSupport(renderSeq);
   };
 
