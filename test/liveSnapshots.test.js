@@ -19,14 +19,15 @@ test('a busy job sends at most one snapshot every 250 ms, and its end at once', 
   });
   try {
     const id = await h.service.start(h.config({ concurrency: 3 }));
-    // release the encodes a few at a time, over a second or so
+    // release the encodes one at a time, over about a second (the job must
+    // outlast a few 250 ms windows, also on a fast machine)
     const done = h.service.whenIdle(id);
     let finished = false;
     done.then(() => { finished = true; });
     while (!finished) {
       const [first] = h.held();
       if (first) first.finish(0);
-      await sleep(15);
+      await sleep(80);
     }
     const job = await h.service.get(id);
     assert.equal(job.state, 'completed');
