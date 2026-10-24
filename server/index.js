@@ -711,11 +711,20 @@ async function main() {
   // conversion the converter still has going (waiting or paused) whatever
   // its row says. Only the list changes: the converter's job files, which a
   // paused or interrupted conversion resumes from, are never touched.
-  // preview: true only counts them, for the confirmation.
+  // The page's request only: { vehicle, preview: true } counts them for the
+  // confirmation, { vehicle, confirm: true } clears them. vehicle is a
+  // vehicle's id, or null for every vehicle (a server with none yet, where
+  // the list shows them all); anything else is refused, never read as
+  // "every vehicle".
   r.add('POST', '/api/jobs/clear', (req, res, { body, user }) => {
-    const vehicleId = body?.vehicle ? vehicleOr404(String(body.vehicle)).id : null;
+    if (!body || typeof body !== 'object' || Array.isArray(body)) throw new HttpError(400, 'Say which jobs to clear.');
+    const { vehicle = null, preview = false } = body;
+    if (vehicle !== null && (typeof vehicle !== 'string' || !vehicle)) throw new HttpError(400, 'Choose a vehicle, or none for every vehicle.');
+    if (typeof preview !== 'boolean') throw new HttpError(400, 'preview is true or false.');
+    if (!preview && body.confirm !== true) throw new HttpError(400, 'Confirm clearing the finished jobs.');
+    const vehicleId = vehicle === null ? null : vehicleOr404(vehicle).id;
     const keepExternal = [...converterJobs.values()].filter((s) => CONVERTER_ACTIVE.has(s.state)).map((s) => `converter:${s.id}`);
-    if (body?.preview === true) return { jobs: jobs.finished({ vehicleId, keepExternal }) };
+    if (preview) return { jobs: jobs.finished({ vehicleId, keepExternal }) };
     const cleared = jobs.clear({ vehicleId, keepExternal });
     audit.info(`Jobs cleared: ${cleared} finished job(s)${vehicleId ? ` of ${vehicleId}` : ''}: ${by(req, user)}`);
     return { cleared };

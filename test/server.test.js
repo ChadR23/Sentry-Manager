@@ -358,7 +358,7 @@ test('Studio is served with the web shim; converter bridge enforces Quick and al
     };
     const filesBefore = converterFiles();
     assert.ok(Object.keys(filesBefore).length > 0, 'the converter keeps its job on disk');
-    const cleared = await s.call('POST', '/api/jobs/clear', { vehicle: 'daily-driver' });
+    const cleared = await s.call('POST', '/api/jobs/clear', { vehicle: 'daily-driver', confirm: true });
     assert.equal(cleared.status, 200, JSON.stringify(cleared.data));
     assert.ok(cleared.data.cleared >= 1);
     assert.ok(!(await s.call('GET', '/api/jobs?vehicle=daily-driver')).data.jobs.some((j) => j.type === 'conversion'), 'the conversion left the list');
@@ -516,7 +516,7 @@ test('Jobs: Clear jobs takes finished jobs off the list after sign-in, from the 
   // (info: the audit line)
   const s = await startServer(dir, { LOG_LEVEL: 'info' });
   try {
-    assert.equal((await s.call('POST', '/api/jobs/clear', { vehicle: 'daily-driver' })).status, 401, 'sign in first');
+    assert.equal((await s.call('POST', '/api/jobs/clear', { vehicle: 'daily-driver', confirm: true })).status, 401, 'sign in first');
     await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
     let list = (await s.call('GET', '/api/jobs?vehicle=daily-driver')).data.jobs;
     assert.equal(list.find((j) => j.id === stopped).status, 'interrupted', 'a scan stopped by the restart is not running forever');
@@ -531,10 +531,29 @@ test('Jobs: Clear jobs takes finished jobs off the list after sign-in, from the 
     }, 90000);
 
     // a mutating route like the others: the page's header, the same origin
-    assert.equal((await s.call('POST', '/api/jobs/clear', { vehicle: 'daily-driver' }, { headers: { 'X-Requested-With': 'nope' } })).status, 403);
-    assert.equal((await s.call('POST', '/api/jobs/clear', { vehicle: 'daily-driver' }, { headers: { Origin: 'https://evil.example' } })).status, 403);
+    assert.equal((await s.call('POST', '/api/jobs/clear', { vehicle: 'daily-driver', confirm: true }, { headers: { 'X-Requested-With': 'nope' } })).status, 403);
+    assert.equal((await s.call('POST', '/api/jobs/clear', { vehicle: 'daily-driver', confirm: true }, { headers: { Origin: 'https://evil.example' } })).status, 403);
     assert.equal((await s.call('GET', '/api/jobs/clear')).status, 404, 'only POST');
-    assert.equal((await s.call('POST', '/api/jobs/clear', { vehicle: 'no-such-car' })).status, 404);
+    assert.equal((await s.call('POST', '/api/jobs/clear', { vehicle: 'no-such-car', confirm: true })).status, 404);
+    assert.equal((await s.call('POST', '/api/jobs/clear', { vehicle: 'no-such-car', preview: true })).status, 404);
+    // only what the page sends: anything else is refused, never read as
+    // "clear every vehicle's jobs"
+    for (const body of [
+      undefined, 'x', null, [], {}, 1, true,
+      { vehicle: 'daily-driver' }, // no confirmation
+      { vehicle: 'daily-driver', confirm: 'true' },
+      { vehicle: '', preview: 'true' },
+      { vehicle: '', confirm: true },
+      { vehicle: 'daily-driver', preview: 'true' },
+      { vehicle: 'daily-driver', preview: 1 },
+      { vehicle: ['daily-driver'], confirm: true },
+      { vehicle: { id: 'daily-driver' }, confirm: true },
+      { vehicle: 7, confirm: true },
+      { vehicle: false, preview: true }
+    ]) {
+      const out = await s.call('POST', '/api/jobs/clear', body);
+      assert.equal(out.status, 400, `${JSON.stringify(body)} → ${out.status} ${JSON.stringify(out.data)}`);
+    }
     assert.equal((await s.call('GET', '/api/jobs')).data.jobs.length, list.length + 1, 'nothing cleared by refused requests');
 
     const preview = await s.call('POST', '/api/jobs/clear', { vehicle: 'daily-driver', preview: true });
@@ -548,7 +567,7 @@ test('Jobs: Clear jobs takes finished jobs off the list after sign-in, from the 
     const events = await fetch(`${s.base}/api/events`, { headers: { Cookie: s.getCookie() } });
     const reader = events.body.getReader();
     await reader.read(); // hello
-    const cleared = await s.call('POST', '/api/jobs/clear', { vehicle: 'daily-driver' });
+    const cleared = await s.call('POST', '/api/jobs/clear', { vehicle: 'daily-driver', confirm: true });
     assert.deepEqual(cleared.data, { cleared: finished.length });
     let seen = '';
     const until = Date.now() + 10000;

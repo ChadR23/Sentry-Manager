@@ -1493,7 +1493,7 @@
     });
     if (!ok) return;
     try {
-      const out = await api('/api/jobs/clear', { body });
+      const out = await api('/api/jobs/clear', { body: { ...body, confirm: true } });
       toast(`Cleared ${plural(out.cleared, 'finished job')}.`);
     } catch (err) {
       toast(err.message, true);

@@ -83,3 +83,10 @@ test('Jobs: a Clear jobs button, only with finished jobs, and a confirmation fir
   assert.match(clear, /if \(!ok\) return;/);
   assert.match(clear, /esc\(v\.name\)/);
 });
+
+test('Jobs: Clear jobs confirms in its request; the count does not', () => {
+  const clear = fn('clearJobs');
+  assert.match(clear, /api\('\/api\/jobs\/clear', \{ body: \{ \.\.\.body, preview: true \} \}\)/);
+  assert.match(clear, /api\('\/api\/jobs\/clear', \{ body: \{ \.\.\.body, confirm: true \} \}\)/);
+  assert.ok(clear.indexOf('if (!ok) return;') < clear.indexOf('confirm: true'));
+});
