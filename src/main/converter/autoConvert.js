@@ -20,6 +20,13 @@ const SETTINGS_FILE = 'settings.json';
 // job the user paused themselves is never resumed automatically).
 const STATE_FILE = 'state.json';
 const MAX_FAILED_SWEEPS = 3;
+// Clips the automatic job gave up on (failed MAX_FAILED_SWEEPS times, or kept
+// as the original because the encode was not smaller) are remembered with this
+// number. Raise it whenever encoding or verification changes in a way that
+// could let such clips convert now: each one is then tried once more.
+// 2: Tesla mid-GOP lead-in frames are kept (leadIn.js).
+const CONVERTER_REVISION = 2;
+const INDEX_VERSION = 2;
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 
 const DEFAULT_SETTINGS = Object.freeze({
@@ -117,7 +124,7 @@ function createAutoConverter(options = {}) {
     // has handled since the window closed (one the owner resumes stays running)
     heldManual: [], handledManual: []
   };
-  const indexes = new Map(); // setup key -> { files: Map, failures: Map, dirty }
+  const indexes = new Map(); // setup key -> { files: Map, gaveUp: Map, failures: Map, dirty }
   let timer = null;
   let ticking = null;
   let sweepAbort = null;
@@ -137,15 +144,27 @@ function createAutoConverter(options = {}) {
   async function loadIndex(config) {
     const key = setupKey(config);
     if (!indexes.has(key)) {
-      const stored = await readJson(`index-${key}.json`);
+      let stored = await readJson(`index-${key}.json`);
+      // A version 1 index mixed clips that converted with clips it gave up
+      // on, so the given-up ones could never be tried again. It starts over:
+      // converted clips are still skipped at once (the converted index), and
+      // every other clip is tried again with the current converter.
+      const fresh = Boolean(stored) && stored.v !== INDEX_VERSION;
+      if (fresh) stored = null;
       const files = new Map();
+      const gaveUp = new Map();
       if (stored && stored.files && typeof stored.files === 'object') {
         for (const [relativePath, entry] of Object.entries(stored.files)) {
           if (Array.isArray(entry) && entry.length === 2) files.set(relativePath, entry);
         }
       }
+      if (stored && stored.gaveUp && typeof stored.gaveUp === 'object') {
+        for (const [relativePath, entry] of Object.entries(stored.gaveUp)) {
+          if (Array.isArray(entry) && entry.length === 3) gaveUp.set(relativePath, entry);
+        }
+      }
       const failures = new Map(Object.entries(stored?.failures || {}).filter(([, count]) => Number.isSafeInteger(count)));
-      indexes.set(key, { key, files, failures, dirty: false });
+      indexes.set(key, { key, files, gaveUp, failures, dirty: fresh });
     }
     return indexes.get(key);
   }
@@ -153,20 +172,31 @@ function createAutoConverter(options = {}) {
   async function saveIndex(index) {
     if (!index.dirty) return;
     await writeJson(`index-${index.key}.json`, {
-      v: 1, files: Object.fromEntries(index.files), failures: Object.fromEntries(index.failures)
+      v: INDEX_VERSION, files: Object.fromEntries(index.files), gaveUp: Object.fromEntries(index.gaveUp), failures: Object.fromEntries(index.failures)
     });
     index.dirty = false;
   }
 
   function remember(index, relativePath, size, mtimeMs) {
     index.files.set(relativePath, [size, mtimeMs]);
+    index.gaveUp.delete(relativePath);
+    index.failures.delete(relativePath);
+    index.dirty = true;
+  }
+
+  // Not converted, and not tried again until the converter changes.
+  function giveUp(index, relativePath, size, mtimeMs) {
+    index.gaveUp.set(relativePath, [size, mtimeMs, CONVERTER_REVISION]);
+    index.files.delete(relativePath);
     index.failures.delete(relativePath);
     index.dirty = true;
   }
 
   function knownIn(index, discovered) {
     const entry = index.files.get(discovered.relativePath);
-    return Boolean(entry) && entry[0] === discovered.sourceBytes && entry[1] === discovered.mtimeMs;
+    if (entry) return entry[0] === discovered.sourceBytes && entry[1] === discovered.mtimeMs;
+    const given = index.gaveUp.get(discovered.relativePath);
+    return Boolean(given) && given[0] === discovered.sourceBytes && given[1] === discovered.mtimeMs && given[2] === CONVERTER_REVISION;
   }
 
   // Used by the job service while an automatic job discovers files.
@@ -211,7 +241,10 @@ function createAutoConverter(options = {}) {
   async function recordFinishedJob(job) {
     const index = await loadIndex(job.config);
     for (const item of job.items || []) {
-      if (item.state === 'completed' || item.state === 'skipped') {
+      if (item.state === 'skipped' && item.resultCode === 'no-savings') {
+        // kept as the original (the encode was not smaller): a later converter may do better
+        giveUp(index, item.relativePath, item.sourceBytes, item.mtimeMs);
+      } else if (item.state === 'completed' || item.state === 'skipped') {
         if (job.config.outputMode === 'replace' && item.state === 'completed') {
           // The original was replaced: remember the converted file now there.
           try {
@@ -224,7 +257,7 @@ function createAutoConverter(options = {}) {
       } else if (item.state === 'failed') {
         const count = (index.failures.get(item.relativePath) || 0) + 1;
         // Stop retrying a clip that keeps failing; it stays listed as failed.
-        if (count >= MAX_FAILED_SWEEPS) remember(index, item.relativePath, item.sourceBytes, item.mtimeMs);
+        if (count >= MAX_FAILED_SWEEPS) giveUp(index, item.relativePath, item.sourceBytes, item.mtimeMs);
         else { index.failures.set(item.relativePath, count); index.dirty = true; }
       }
     }
@@ -478,4 +511,4 @@ function createAutoConverter(options = {}) {
   });
 }
 
-module.exports = { createAutoConverter, INTERVAL_MINUTES, inWindow };
+module.exports = { createAutoConverter, INTERVAL_MINUTES, inWindow, CONVERTER_REVISION };
