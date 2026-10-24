@@ -84,6 +84,18 @@ test('Jobs: a Clear jobs button, only with finished jobs, and a confirmation fir
   assert.match(clear, /esc\(v\.name\)/);
 });
 
+test('Logs on phones: nothing is cut off and the box never scrolls sideways', () => {
+  const phone = css.slice(css.indexOf('@media (max-width: 760px)'), css.indexOf('@media (max-width: 374px)'));
+  // the time, level and scope wrap instead of sitting in fixed columns; a long scope breaks
+  assert.match(phone, /\.logline \{ display: flex; flex-wrap: wrap; column-gap: 8px; \}/);
+  assert.match(phone, /\.logscope \{ min-width: 0; overflow-wrap: anywhere; \}/);
+  assert.match(phone, /\.logmsg \{ flex: 1 1 100%; min-width: 0; \}/);
+  // the lines take the tile's whole width, as wide as Settings > Logs had them
+  assert.match(phone, /\.nd-logs \.logbox \{ margin: 14px -16px -16px; border-width: 1px 0 0; border-radius: 0 0 13px 13px; \}/);
+  assert.match(css, /\.nd-tile \{[^}]*padding: 16px;[^}]*border-radius: 14px|\.nd-tile \{[^}]*border-radius: 14px;[^}]*padding: 16px;/, 'the bleed matches the tile\'s padding and corners');
+  assert.match(css, /\.logwhen \{[^}]*white-space: nowrap;/);
+});
+
 test('Jobs: Clear jobs confirms in its request; the count does not', () => {
   const clear = fn('clearJobs');
   assert.match(clear, /api\('\/api\/jobs\/clear', \{ body: \{ \.\.\.body, preview: true \} \}\)/);

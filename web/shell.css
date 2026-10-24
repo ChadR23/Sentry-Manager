@@ -421,8 +421,16 @@ html.reduce-effects *, html.reduce-effects *::before { transition: none !importa
   .day-actions { grid-column: 1 / -1; flex-direction: row; flex-wrap: wrap; }
   .day-actions .btn { flex: 1 1 auto; }
   .day .recs { padding-left: 0; }
-  .logline { grid-template-columns: auto auto minmax(0, 1fr); }
-  .logmsg { grid-column: 1 / -1; }
+  /* a line's time, level and scope share a row while they fit (the scope
+     goes under them when it does not), the message gets the whole width:
+     nothing is cut off and the box never scrolls sideways */
+  .logline { display: flex; flex-wrap: wrap; column-gap: 8px; }
+  .logscope { min-width: 0; overflow-wrap: anywhere; }
+  .logmsg { flex: 1 1 100%; min-width: 0; }
+  /* Overview > Logs: the lines take the tile's whole width at its bottom,
+     as wide as Settings > Logs had them (a box inside the tile's padding
+     was 34 px narrower and cut the scope off) */
+  .nd-logs .logbox { margin: 14px -16px -16px; border-width: 1px 0 0; border-radius: 0 0 13px 13px; }
   .day .rec { padding: 12px; }
   .day .rec-top { grid-template-columns: 22px minmax(0, 1fr); gap: 10px 12px; align-items: start; }
   .day .rec-top .thumb { width: 100%; max-width: 260px; height: auto; aspect-ratio: 16 / 10; }
