@@ -78,7 +78,7 @@ body {
 }
 
 .converter-bay {
-    width: min(1240px, calc(100% - 48px));
+    width: min(1440px, calc(100% - 48px));
     padding: 24px 0 40px;
 }
 
@@ -185,10 +185,11 @@ html.enc-ready .converter-workspace { animation: enc-in 160ms ease-out; }
 
 /* --------------------------------------------------------------------------
    Two flat cards: settings, and the live run (which stays in view while the
-   settings scroll on wide screens)
+   settings scroll on wide screens, and is the wider of the two: its progress
+   and the Hardware panel sit side by side in it)
    -------------------------------------------------------------------------- */
 .converter-bay-grid {
-    grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+    grid-template-columns: minmax(460px, 2fr) minmax(0, 3fr);
     gap: 16px;
     align-items: start;
     overflow: visible;
@@ -205,6 +206,9 @@ html.enc-ready .converter-workspace { animation: enc-in 160ms ease-out; }
     border-radius: 14px;
     background: var(--fd-card);
 }
+
+/* (the run's progress and the Hardware panel go side by side by its width) */
+.converter-operations { container: live-run / inline-size; }
 
 @media (min-width: 981px) {
     .converter-operations {
@@ -735,6 +739,11 @@ select.converter-select {
     background: var(--fd-card);
 }
 
+/* (Start, Pause, Resume and Cancel on one line in the settings card beside
+   a wide Live run) */
+.converter-actions .converter-button { padding: 0 12px; }
+.converter-actions .converter-button-primary { min-width: 0; }
+
 .converter-button {
     min-height: 38px;
     padding: 0 16px;
@@ -782,6 +791,28 @@ select.converter-select {
 /* --------------------------------------------------------------------------
    Live run
    -------------------------------------------------------------------------- */
+
+/* The progress (current file and the counters) and the Hardware panel: side
+   by side when Live run is wide enough, so what is left shows without
+   scrolling; else one under the other, the progress first. Each column keeps
+   its place while the other is empty (the panel before its first numbers). */
+.converter-live-split {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+    align-items: start;
+}
+
+/* (the panel a little wider: its tiles are two to a row) */
+@container live-run (min-width: 620px) {
+    .converter-live-split { grid-template-columns: minmax(0, 4fr) minmax(0, 5fr); }
+}
+
+.converter-progress {
+    min-width: 0;
+    container: run-progress / inline-size;
+}
+
 .converter-banner {
     margin: 0 0 12px;
     padding: 11px 14px;
@@ -837,6 +868,12 @@ select.converter-select {
     background: var(--fd-card);
 }
 
+/* a narrow column (and phones): two counters a row, Encoding FPS across */
+@container run-progress (max-width: 399px) {
+    .converter-counters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .converter-counters > div:last-child { grid-column: 1 / -1; }
+}
+
 .converter-counters dt,
 .converter-summary-grid dt {
     color: var(--text-muted);
@@ -849,6 +886,17 @@ select.converter-select {
     font-size: 19px;
     line-height: 1.2;
     overflow-wrap: break-word;
+}
+
+/* Speed and Time remaining ("5.8 files/min", "at least 32h 45m") take one
+   line or two by their digits and the width: they keep room for two, the
+   text at the bottom like the others', so the counters keep their height */
+#converterSpeed,
+#converterEta {
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    min-height: 2.4em;
 }
 
 .converter-timings {
@@ -913,7 +961,8 @@ select.converter-select {
    it costs; the approved mockup, docs/plans/server-monitor-mock.js
    -------------------------------------------------------------------------- */
 .nd-hw {
-    margin: 0 0 16px;
+    min-width: 0;
+    margin: 0;
     padding: 18px;
     border: 1px solid var(--fd-border);
     border-radius: 14px;
@@ -979,17 +1028,22 @@ select.converter-select {
 
 .nd-hw-tiles {
     display: grid;
-    /* two by two: the Live run column is narrow beside the settings */
+    /* two by two: the panel is narrow beside the run's progress */
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 10px;
     margin-top: 14px;
     container-type: inline-size;
 }
 
+/* each tile's name, number and bar (or line) on rows shared with the tile
+   beside it, so a name that takes two lines in a narrow panel ("CPU
+   (conversions)") does not put its number lower than its neighbour's */
 .nd-hw-tiles > div {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
+    display: grid;
+    grid-row: span 3;
+    grid-template-rows: subgrid;
+    row-gap: 4px;
+    align-content: start;
     min-width: 0;
     padding: 12px;
     border: 1px solid var(--fd-border);
@@ -1389,9 +1443,6 @@ select.converter-select {
         flex: 1 1 0;
         min-width: 0;
     }
-
-    .converter-counters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .converter-counters > div:last-child { grid-column: 1 / -1; }
 
     .converter-benchmark-dialog { padding: 18px; }
 

@@ -10,7 +10,7 @@
     background: #0B0E13;
 }
 
-.enc-sk-bay { width: min(1240px, calc(100% - 48px)); margin: 0 auto; padding: 24px 0 40px; }
+.enc-sk-bay { width: min(1440px, calc(100% - 48px)); margin: 0 auto; padding: 24px 0 40px; }
 .enc-sk-header { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding-bottom: 20px; border-bottom: 1px solid #1F2530; }
 .enc-sk-stack { flex: 1; min-width: 0; display: grid; gap: 10px; }
 
@@ -41,7 +41,7 @@
 .enc-sk-pipeline span { position: relative; width: 30px; height: 30px; border: 1px solid #2A313D; border-radius: 50%; background: #0B0E13; }
 .enc-sk-pipeline span::after { content: ''; position: absolute; top: 40px; left: 50%; width: 54px; height: 10px; margin-left: -27px; }
 
-.enc-sk-grid { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr); gap: 16px; align-items: start; }
+.enc-sk-grid { display: grid; grid-template-columns: minmax(460px, 2fr) minmax(0, 3fr); gap: 16px; align-items: start; }
 .enc-sk-card { display: grid; gap: 10px; padding: 22px; border: 1px solid #1F2530; border-radius: 14px; background: #12161D; }
 .enc-sk-heading { display: flex; gap: 12px; margin-bottom: 10px; }
 .enc-sk-field { display: block; height: 40px; border: 1px solid #1F2530; border-radius: 10px; background: #0F1318; }
@@ -74,6 +74,18 @@
 
 @keyframes enc-appear {
     to { visibility: visible; }
+}
+
+/* Live run: the progress and the Hardware panel side by side wherever the
+   page puts them so (Live run at least 620px wide inside: on one column from
+   706px, on two from 1190px) */
+@container ((min-width: 706px) and (max-width: 980px)) or (min-width: 1190px) {
+    .enc-sk-card + .enc-sk-card { grid-template-columns: minmax(0, 4fr) minmax(0, 5fr); column-gap: 16px; align-content: start; }
+    .enc-sk-card + .enc-sk-card > .enc-sk-heading { grid-column: 1 / -1; }
+    .enc-sk-card + .enc-sk-card > .enc-sk-tall,
+    .enc-sk-card + .enc-sk-card > .enc-sk-counters { grid-column: 1; }
+    .enc-sk-card + .enc-sk-card > .enc-sk-counters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .enc-sk-card + .enc-sk-card::after { content: ''; grid-column: 2; grid-row: 2 / span 2; border: 1px solid #1F2530; border-radius: 14px; background: #0F1318; }
 }
 
 /* the same breakpoints as the converter (encoderPage.css) */

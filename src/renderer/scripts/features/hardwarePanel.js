@@ -1,5 +1,6 @@
-// The Encoder's Hardware panel, inside Live run: what the running
-// conversion uses (encoder, GPU, decoding) and what it costs. From GET /api/stats (the `encoder` block) every 2 s while the page
+// The Encoder's Hardware panel, inside Live run beside the run's progress:
+// what the running conversion uses (encoder, GPU, decoding) and what it
+// costs. From GET /api/stats (the `encoder` block) every 2 s while the page
 // is on screen; with no conversion running, one compact line with the device
 // instead. Names and models come from the machine, so every value is escaped.
 
@@ -233,8 +234,9 @@ export function startHardwarePanel({ doc = document, win = window, fetchImpl = (
     let last = '';
     let memo = panelMemory();
     // Rebuilt on every poll: the panel never gets shorter while the page is
-    // open and the job runs, so the counters and settings below it stay put
-    // when a tile, a device line or the energy row comes and goes. Another job, the panel going
+    // open and the job runs, so what is below it (the timings and the
+    // summary; on one column the settings) stays put when a tile, a device
+    // line or the energy row comes and goes. Another job, the panel going
     // idle, coming back to the Encoder or another width let it go.
     let tallest = 0;
     const release = () => {

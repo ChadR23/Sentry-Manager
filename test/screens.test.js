@@ -755,6 +755,33 @@ test('Hardware panel: asks every 2 s only while it can be seen', async (t) => {
 test('the Encoder page loads the Hardware panel without holding up its first paint', () => {
   const page = fs.readFileSync(path.join(REPO, 'src/renderer/encoder.html'), 'utf8');
   assert.match(page.split('</head>')[0], /<script type="module" src="scripts\/features\/hardwarePanel\.js"><\/script>/);
-  const live = page.slice(page.indexOf('id="converterRunTitle"'), page.indexOf('id="converterReconnectBanner"'));
-  assert.match(live, /<section id="converterHardware" class="nd-hw"[^>]* hidden><\/section>/, 'inside Live run, under its heading');
+  const live = page.slice(page.indexOf('id="converterRunTitle"'), page.indexOf('id="converterTimings"'));
+  assert.match(live, /<section id="converterHardware" class="nd-hw"[^>]* hidden><\/section>/, 'inside Live run');
+});
+
+test('Live run: the progress and the Hardware panel side by side when it is wide enough, else the progress first', () => {
+  const page = fs.readFileSync(path.join(REPO, 'src/renderer/encoder.html'), 'utf8');
+  const split = page.slice(page.indexOf('<div class="converter-live-split">'), page.indexOf('id="converterTimings"'));
+  const at = (needle) => split.indexOf(needle);
+  assert.ok(at('<div class="converter-progress">') > 0, 'one block for the progress');
+  // the progress first: on one column it is the first thing under the heading
+  assert.ok(at('class="converter-current-file"') < at('id="converterCountWaiting"'));
+  assert.ok(at('id="converterEta"') < at('id="converterHardware"'), 'the panel after the counters');
+  assert.ok(page.indexOf('id="converterScanNotice"') < page.indexOf('<div class="converter-live-split">'), 'the notices above both, across Live run');
+  const css = fs.readFileSync(path.join(REPO, 'src/renderer/styles/encoderPage.css'), 'utf8');
+  const rule = (selector) => (css.match(new RegExp(`\\n${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\{([^}]*)\\}`)) || [])[1] || '';
+  assert.match(css, /\n\.converter-operations \{ container: live-run \/ inline-size; \}/);
+  assert.match(rule('.converter-live-split'), /grid-template-columns: minmax\(0, 1fr\);/, 'one column by default (phones)');
+  assert.match(css, /@container live-run \(min-width: 620px\) \{\s*\.converter-live-split \{ grid-template-columns: minmax\(0, 4fr\) minmax\(0, 5fr\); \}/);
+  assert.match(rule('.converter-live-split'), /align-items: start;/, 'each column its own height (the panel keeps its tallest)');
+  assert.doesNotMatch(css, /\.converter-live-split[^{]*\{[^}]*order:/, 'never reordered: the markup has the progress first');
+  // the Live run column is the wider of the two beside the settings
+  assert.match(rule('.converter-bay-grid'), /grid-template-columns: minmax\(460px, 2fr\) minmax\(0, 3fr\);/);
+  // Speed and Time remaining keep room for two lines, so the counters keep their height
+  assert.match(css, /#converterSpeed,\s*#converterEta \{[^}]*min-height: 2\.4em;/);
+  // the loading skeleton has the same columns
+  const skeleton = fs.readFileSync(path.join(REPO, 'web/encoderSkeleton.css'), 'utf8');
+  assert.match(skeleton, /\.enc-sk-grid \{ display: grid; grid-template-columns: minmax\(460px, 2fr\) minmax\(0, 3fr\);/);
+  assert.match(skeleton, /\.enc-sk-bay \{ width: min\(1440px, calc\(100% - 48px\)\);/);
+  assert.match(css, /\.converter-bay \{\s*width: min\(1440px, calc\(100% - 48px\)\);/);
 });

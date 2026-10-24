@@ -398,10 +398,6 @@
                         <span id="converterElapsed" class="converter-elapsed">00:00</span>
                     </div>
 
-                    <!-- Hardware: what the run uses and what it costs, filled
-                         from GET /api/stats by scripts/features/hardwarePanel.js -->
-                    <section id="converterHardware" class="nd-hw" aria-label="Hardware" aria-live="off" hidden></section>
-
                     <div id="converterReconnectBanner" class="converter-banner converter-banner-warning" role="status" hidden data-i18n="ui.converter.reconnect">
                         Waiting for the affected source or destination to reconnect. This job will resume without rescanning the archive.
                     </div>
@@ -410,28 +406,39 @@
                         Still finding clips. Discovered and time remaining keep rising until the scan reaches the end of the folder.
                     </div>
 
-                    <div class="converter-current-file">
-                        <div class="converter-current-label" data-i18n="ui.converter.currentFile">Current file</div>
-                        <div id="converterCurrentFile" class="converter-current-path" data-i18n="ui.converter.noFileActive">No file active</div>
-                        <div class="converter-current-progress-row">
-                            <div class="converter-current-track" role="progressbar" aria-label="Current file activity" data-i18n="ui.converter.currentFileActivity" data-i18n-attr="aria-label">
-                                <span id="converterCurrentProgressFill"></span>
+                    <!-- The run's progress and the Hardware panel: side by side
+                         when Live run is wide enough, else one under the other
+                         with the progress first (encoderPage.css) -->
+                    <div class="converter-live-split">
+                        <div class="converter-progress">
+                            <div class="converter-current-file">
+                                <div class="converter-current-label" data-i18n="ui.converter.currentFile">Current file</div>
+                                <div id="converterCurrentFile" class="converter-current-path" data-i18n="ui.converter.noFileActive">No file active</div>
+                                <div class="converter-current-progress-row">
+                                    <div class="converter-current-track" role="progressbar" aria-label="Current file activity" data-i18n="ui.converter.currentFileActivity" data-i18n-attr="aria-label">
+                                        <span id="converterCurrentProgressFill"></span>
+                                    </div>
+                                    <span id="converterCurrentProgress" class="converter-current-progress">—</span>
+                                </div>
                             </div>
-                            <span id="converterCurrentProgress" class="converter-current-progress">—</span>
-                        </div>
-                    </div>
 
-                    <dl class="converter-counters">
-                        <div><dt data-i18n="ui.converter.discovered">Discovered</dt><dd id="converterCountDiscovered">0</dd></div>
-                        <div><dt data-i18n="ui.converter.completed">Completed</dt><dd id="converterCountCompleted">0</dd></div>
-                        <div><dt data-i18n="ui.converter.skipped">Skipped</dt><dd id="converterCountSkipped">0</dd></div>
-                        <div><dt data-i18n="ui.converter.failed">Failed</dt><dd id="converterCountFailed">0</dd></div>
-                        <div><dt data-i18n="ui.converter.waiting">Waiting</dt><dd id="converterCountWaiting">0</dd></div>
-                        <div class="converter-counter-wide"><dt data-i18n="ui.converter.processedBytes">Video processed so far</dt><dd id="converterProcessedBytes">0 B</dd></div>
-                        <div><dt data-i18n="ui.converter.speed">Speed</dt><dd id="converterSpeed">—</dd></div>
-                        <div><dt data-i18n="ui.converter.timeRemaining">Time remaining</dt><dd id="converterEta">—</dd></div>
-                        <div><dt data-i18n="ui.converter.encodeFps">Encoding FPS</dt><dd id="converterFps">—</dd></div>
-                    </dl>
+                            <dl class="converter-counters">
+                                <div><dt data-i18n="ui.converter.discovered">Discovered</dt><dd id="converterCountDiscovered">0</dd></div>
+                                <div><dt data-i18n="ui.converter.completed">Completed</dt><dd id="converterCountCompleted">0</dd></div>
+                                <div><dt data-i18n="ui.converter.skipped">Skipped</dt><dd id="converterCountSkipped">0</dd></div>
+                                <div><dt data-i18n="ui.converter.failed">Failed</dt><dd id="converterCountFailed">0</dd></div>
+                                <div><dt data-i18n="ui.converter.waiting">Waiting</dt><dd id="converterCountWaiting">0</dd></div>
+                                <div class="converter-counter-wide"><dt data-i18n="ui.converter.processedBytes">Video processed so far</dt><dd id="converterProcessedBytes">0 B</dd></div>
+                                <div><dt data-i18n="ui.converter.speed">Speed</dt><dd id="converterSpeed">—</dd></div>
+                                <div><dt data-i18n="ui.converter.timeRemaining">Time remaining</dt><dd id="converterEta">—</dd></div>
+                                <div><dt data-i18n="ui.converter.encodeFps">Encoding FPS</dt><dd id="converterFps">—</dd></div>
+                            </dl>
+                        </div>
+
+                        <!-- Hardware: what the run uses and what it costs, filled
+                             from GET /api/stats by scripts/features/hardwarePanel.js -->
+                        <section id="converterHardware" class="nd-hw" aria-label="Hardware" aria-live="off" hidden></section>
+                    </div>
 
                     <section id="converterTimings" class="converter-timings" aria-labelledby="converterTimingsTitle" hidden>
                         <h4 id="converterTimingsTitle" data-i18n="ui.converter.timingTitle">Where the time goes (average per converted file)</h4>
