@@ -1759,7 +1759,7 @@
     const time = when && !Number.isNaN(when.getTime()) ? when.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
     const files = (m.attachments || []).map((a) => {
       if (!a.url) return `<span class="sup-file">${esc(a.name)}</span>`;
-      if (a.type.startsWith('image/')) return `<a href="${esc(a.url)}" target="_blank" rel="noopener"><img class="sup-img" src="${esc(a.url)}" alt="${esc(a.name)}" loading="lazy"></a>`;
+      if (a.type.startsWith('image/')) return `<a href="${esc(a.url)}" data-lightbox><img class="sup-img" src="${esc(a.url)}" alt="${esc(a.name)}" loading="lazy"></a>`;
       if (a.type.startsWith('video/')) return `<video class="sup-img" src="${esc(a.url)}" controls preload="metadata"></video>`;
       return `<a class="sup-file" href="${esc(a.url)}" download>${esc(a.name)}</a>`;
     }).join('');
@@ -1769,10 +1769,35 @@
       ${m.hasDiagnostics ? '<div class="muted small">Diagnostics attached</div>' : ''}</div>`;
   }
 
+  // A picture in the chat opens over the page; a click, Esc or Close shuts it.
+  function openLightbox(src, name) {
+    const box = $('lightbox');
+    $('lightbox-img').src = src;
+    $('lightbox-img').alt = name || '';
+    $('lightbox-name').textContent = name || '';
+    $('lightbox-save').href = src;
+    if (!box.dataset.wired) {
+      box.dataset.wired = '1';
+      // the picture itself, or the dark area around it, closes it too
+      box.addEventListener('click', (e) => {
+        if (e.target === box || e.target.id === 'lightbox-img') box.close();
+      });
+      box.addEventListener('close', () => { $('lightbox-img').removeAttribute('src'); });
+    }
+    box.showModal();
+  }
+
   function wireSupport(seq) {
     const form = $('sup-form');
     if (!form) return;
     const log = $('sup-log');
+    log.addEventListener('click', (e) => {
+      const link = e.target.closest('a[data-lightbox]');
+      if (!link) return;
+      e.preventDefault();
+      const img = link.querySelector('img');
+      openLightbox(link.getAttribute('href'), img?.alt);
+    });
     const text = $('sup-text');
     const fileInput = $('sup-file');
     const status = (msg, bad = false) => {

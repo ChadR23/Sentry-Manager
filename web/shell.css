@@ -226,6 +226,14 @@ details.more p { margin-top: 10px; color: var(--text-2); max-width: 760px; }
 .kv { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 8px 18px; font-size: 13.5px; }
 .kv dt { color: var(--muted); }
 .kv dd { margin: 0; word-break: break-word; }
+/* Support: a picture opened over the page */
+.lightbox { padding: 0; border: 1px solid var(--border-strong); border-radius: 14px; background: var(--panel); color: var(--text); width: min(96vw, 1400px); height: min(94vh, 1000px); max-width: none; max-height: none; overflow: hidden; }
+.lightbox[open] { display: flex; flex-direction: column; }
+.lightbox::backdrop { background: rgba(0, 0, 0, 0.78); }
+.lightbox img { display: block; flex: 1; min-height: 0; width: 100%; object-fit: contain; background: #000; cursor: zoom-out; }
+.lightbox-bar { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-top: 1px solid var(--border); }
+.lightbox-bar span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--text-2); }
+.lightbox-bar form { margin: 0; }
 /* Overview > Logs: the cleared (archived) logs */
 .log-archive { margin-top: 10px; font-size: 13px; }
 .log-archive summary { cursor: pointer; color: var(--text-2); }
