@@ -187,7 +187,7 @@
   }
 
   function head(eyebrow, title, extra = '') {
-    return `<div class="page-head"><div><p class="eyebrow">${esc(eyebrow)}</p><h1>${esc(title)}</h1></div>
+    return `<div class="page-head"><div>${eyebrow ? `<p class="eyebrow">${esc(eyebrow)}</p>` : ''}<h1>${esc(title)}</h1></div>
       <div class="head-actions">${extra}<button class="btn" data-action="signout">Sign out</button></div></div>`;
   }
 
@@ -1659,7 +1659,7 @@
     // Easter egg: the Sentry Six team, Seal Team 6 style. Six taps and it answers.
     const insignia = `<button type="button" class="st6" id="st6" title="Sentry Team 6" aria-label="Sentry Team 6">
       <svg class="i" aria-hidden="true"><use href="#i-shield"/></svg><span>Sentry Team 6</span></button>`;
-    page.innerHTML = head('Sentry Six team', 'Support') + insignia + supportCard();
+    page.innerHTML = head('', 'Support') + insignia + supportCard();
     let taps = 0;
     $('st6').onclick = () => {
       if (++taps % 6) return;
