@@ -22,7 +22,7 @@ function redact(text) {
  * Console logger that also keeps the last lines for the web UI and, with
  * `file`, writes every line to that file in the data folder (one previous
  * file is kept when it grows past `maxBytes`), so problems can be read and
- * downloaded in Settings > Logs without a shell on the server.
+ * downloaded in the Overview's Logs without a shell on the server.
  */
 class Logger extends EventEmitter {
   constructor({ level = 'info', keep = 1000, silent = false, file = null, maxBytes = 5 * 1024 * 1024 } = {}) {
@@ -45,7 +45,7 @@ class Logger extends EventEmitter {
     }
   }
 
-  // After a restart (or a crash) Settings > Logs still shows what happened
+  // After a restart (or a crash) the Overview's Logs still show what happened
   // before it: the end of the file is read back in.
   loadTail(bytes = 256 * 1024) {
     let text = '';

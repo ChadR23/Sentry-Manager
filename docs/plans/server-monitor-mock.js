@@ -18,7 +18,7 @@ const serverHtml = `
     <div class="nd-head-right"><span class="chip amber"><span class="cdot"></span>1 warning</span>
       <label class="check small"><input type="checkbox" checked> Nerd stats</label></div>
   </div>
-  <div class="nd-alert"><b>Warning</b> NVMe data disk at 71 °C (throttles at 75 °C) · <a href="#/settings/logs">Logs</a></div>
+  <div class="nd-alert"><b>Warning</b> NVMe data disk at 71 °C (throttles at 75 °C) · <a href="#/overview/logs">Logs</a></div>
   <div class="nd-grid">
     <div class="nd-tile">
       <div class="nd-title"><span>CPU</span><span class="muted">Intel Core i5-12500 · 6 cores / 12 threads</span></div>

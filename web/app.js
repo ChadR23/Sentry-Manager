@@ -201,6 +201,12 @@
       state.footage.selected.clear();
       return render();
     }
+    // a Logs link while the address already is #/overview/logs: no hashchange
+    if (e.target.closest('a[href="#/overview/logs"]') && location.hash === '#/overview/logs') {
+      e.preventDefault();
+      $('ov-logs')?.scrollIntoView({ block: 'start' });
+      return undefined;
+    }
     const act = e.target.closest('[data-action]');
     if (act && act.dataset.action === 'signout') {
       await api('/api/auth/logout', { body: {} }).catch(() => {});
@@ -236,11 +242,18 @@
     const range = sel.getRangeAt(0);
     return el.contains(range.commonAncestorContainer) || range.intersectsNode?.(el) === true;
   }
-  const held = { monitor: false, page: false };
+  const held = { monitor: false, logs: false, page: false };
+  // what a poll redraws in Overview > Server: the head's line and chips, and
+  // the tiles (a highlight in the vehicle tiles or the logs holds no numbers)
+  const monitorSelecting = (root) => Boolean(root) && (selecting(root.querySelector('.nd-head')) || selecting(root.querySelector('.nd-body')));
   function catchUp() {
-    if (held.monitor && !selecting($('nd-server'))) {
+    if (held.monitor && !monitorSelecting($('nd-server'))) {
       held.monitor = false;
       drawMonitor();
+    }
+    if (held.logs && !selecting($('log-list'))) {
+      held.logs = false;
+      drawLogs();
     }
     if (held.page && !selecting(page)) {
       held.page = false;
@@ -262,6 +275,7 @@
       page.innerHTML = head('Your archive workspace', 'Overview') + pills() + serverSection();
       mountOverview();
     });
+    revealLogs();
   };
 
   /** Wires the Server section, drawn by the page or anew by the Nerd stats switch. */
@@ -270,6 +284,7 @@
     const refresh = $('refresh-inv');
     if (refresh && v) refresh.onclick = () => api(`/api/vehicles/${v.id}/scan`, { body: {} }).then(() => toast('Refreshing the inventory…'), (err) => toast(err.message, true));
     mountMonitor();
+    mountLogs();
   }
 
   // ---------- Overview > Server ("nerd stats") ----------
@@ -750,7 +765,8 @@
       storageTile(s.filesystems, s.disks, more.disks, fin(s.at) ? s.at : Date.now()), networkTile(s.network, pts.rx, Boolean(day)),
       sensorsTile(s.sensors, more.sensors, Number(s.cpu?.sockets) || 1, seen), processTile(s.processes, s.encoder, list.length > 0, seen)
     ].join('');
-    const alerts = (Array.isArray(s.alerts) ? s.alerts : []).filter((a) => a && a.message).map((a) => `<div class="nd-alert${a.level === 'error' ? ' bad' : ''}"><b>${a.level === 'error' ? 'Problem' : 'Warning'}</b>${esc(a.message)} · <a href="#/settings/logs">Logs</a></div>`).join('');
+    // (Logs: the last tile of the same section)
+    const alerts = (Array.isArray(s.alerts) ? s.alerts : []).filter((a) => a && a.message).map((a) => `<div class="nd-alert${a.level === 'error' ? ' bad' : ''}"><b>${a.level === 'error' ? 'Problem' : 'Warning'}</b>${esc(a.message)} · <a href="#/overview/logs">Logs</a></div>`).join('');
     const unlock = (Array.isArray(s.unlock) ? s.unlock : []).filter((u) => u && u.adds);
     const foot = unlock.length
       ? `<p>Shown only when the server provides it. More with one optional line each in <code>docker-compose.yml</code>:</p>
@@ -788,7 +804,8 @@
           <a class="btn sm" href="/api/stats/export.csv?range=24h" download title="The last 24 hours as a spreadsheet">CSV</a>` : ''}
           <label class="check small"><input type="checkbox" id="nd-toggle"${on ? ' checked' : ''}> Nerd stats</label></div></div>
       ${vehicleTiles(current())}
-      ${on ? '<div class="nd-body"></div>' : ''}</section>`;
+      ${on ? '<div class="nd-body"></div>' : ''}
+      ${logsPart()}</section>`;
   }
 
   function drawMonitor() {
@@ -796,7 +813,7 @@
     const body = root?.querySelector('.nd-body');
     if (!body) return;
     // the reader is highlighting something in it: the numbers wait
-    if (selecting(root)) {
+    if (monitorSelecting(root)) {
       held.monitor = true;
       return;
     }
@@ -837,6 +854,8 @@
         body.style.minHeight = `${monitor.tallest}px`;
       }
     });
+    // (the tiles above the logs have arrived: they stay in view)
+    if (s) revealLogs();
   }
 
   /** Polls while wanted; a new Overview render draws the last sample at once. */
@@ -919,8 +938,103 @@
     if (innerWidth === monitorWidth) return;
     monitorWidth = innerWidth;
     releaseMonitorHeight();
+    releaseLogsHeight();
     if (monitor.snap) drawMonitor();
   });
+
+  // ---------- Overview > Logs ----------
+  // The warnings and errors (or everything) the server keeps, newest first,
+  // as the last tile of the Server section. The lines are asked for after
+  // the page has shown, again whenever the page is redrawn and with Refresh;
+  // until they arrive the last ones stay, so a redraw never empties the box.
+  // While the page is open the box never gets shorter (a refresh with fewer
+  // lines would make the page jump), keeps where the reader scrolled it, and
+  // waits while they highlight in it. Every line from the server is escaped.
+  const logs = { all: false, html: '', gen: 0, tallest: 0, scroll: 0, drawn: null };
+  const logLine = (l) => `<div class="logline ${esc(l.level)}"><span class="logwhen">${esc(when(l.at))}</span><span class="loglevel">${esc(l.level)}</span><span class="logscope">${esc(l.scope)}</span><span class="logmsg">${esc(l.message)}</span></div>`;
+
+  function logsPart() {
+    return `<div class="nd-tile nd-logs" id="ov-logs" role="region" aria-label="Logs">
+      <div class="nd-title"><span>Logs</span><span class="muted">newest first</span></div>
+      <div class="nd-logs-bar"><p class="muted small">Warnings and errors from the server, the converter and the container. Kept in the data folder (<code>logs/manager.log</code>), so nothing needs a shell on the server.</p>
+        <div class="nd-logs-actions"><label class="check small"><input type="checkbox" id="log-all"${logs.all ? ' checked' : ''}> Everything</label>
+          <button type="button" class="btn sm" id="log-refresh">Refresh</button><a class="btn sm" href="/api/logs/download" download>Download</a></div></div>
+      <div class="logbox" id="log-list" aria-live="polite"${logs.tallest ? ` style="min-height:${logs.tallest}px"` : ''}>${logs.html || '<p class="muted small">Loading…</p>'}</div></div>`;
+  }
+
+  /** Back to the box's own height (a new visit, the other list, a resize). */
+  function releaseLogsHeight({ scroll = false } = {}) {
+    logs.tallest = 0;
+    if (scroll) logs.scroll = 0;
+    const box = $('log-list');
+    if (box) box.style.minHeight = '';
+  }
+
+  function mountLogs() {
+    const box = $('log-list');
+    if (!box) return;
+    logs.drawn = { box, html: logs.html };
+    if (logs.scroll) box.scrollTop = logs.scroll;
+    box.addEventListener('scroll', () => { logs.scroll = box.scrollTop; }, { passive: true });
+    $('log-all').onchange = (e) => {
+      logs.all = e.target.checked;
+      releaseLogsHeight({ scroll: true });
+      loadLogs();
+    };
+    $('log-refresh').onclick = () => loadLogs();
+    // the lines come after the page has shown
+    requestAnimationFrame(() => setTimeout(loadLogs, 0));
+  }
+
+  async function loadLogs() {
+    const gen = ++logs.gen;
+    const all = logs.all;
+    let html;
+    try {
+      const out = await api(`/api/logs?level=${all ? 'all' : 'problems'}`, { timeoutMs: 15000 });
+      const lines = Array.isArray(out.lines) ? out.lines : [];
+      html = lines.length ? lines.map(logLine).join('')
+        : `<p class="muted small">${all ? 'Nothing logged yet.' : 'No warnings or errors. Tick Everything to see all activity.'}</p>`;
+    } catch (err) {
+      html = `<p class="muted small">Could not load the log: ${esc(err.message)}</p>`;
+    }
+    if (gen !== logs.gen) return;
+    logs.html = html;
+    drawLogs();
+  }
+
+  function drawLogs() {
+    const box = $('log-list');
+    if (!box || state.route !== 'overview') return;
+    if (logs.drawn?.box !== box || logs.drawn.html !== logs.html) {
+      // the reader is highlighting a line: the new ones wait
+      if (selecting(box)) {
+        held.logs = true;
+        return;
+      }
+      keepScroll(() => {
+        box.innerHTML = logs.html;
+        box.scrollTop = logs.scroll;
+        logs.tallest = Math.max(logs.tallest, box.offsetHeight);
+        box.style.minHeight = `${logs.tallest}px`;
+      });
+      logs.drawn = { box, html: logs.html };
+    }
+    revealLogs();
+  }
+
+  // #/overview/logs (the alerts' Logs links; old #/settings/logs links land
+  // here too): the Overview with its Logs in view, kept there while the
+  // tiles above them arrive, until the reader scrolls or a few seconds pass.
+  const LOGS_HASH = /^#\/?(overview|settings)\/logs\/?$/;
+  let revealUntil = 0;
+  function revealLogs() {
+    if (Date.now() > revealUntil || state.route !== 'overview') return;
+    $('ov-logs')?.scrollIntoView({ block: 'start' });
+  }
+  for (const type of ['wheel', 'touchstart', 'keydown', 'pointerdown']) {
+    addEventListener(type, () => { revealUntil = 0; }, { capture: true, passive: true });
+  }
 
   // Footage, one card per capture day (newest first, all closed): a
   // thumbnail, what the day holds, how much of it is encoded, and actions
@@ -1475,7 +1589,8 @@
     if (seq !== renderSeq) return; // the user moved on while this loaded
     state.system = sys || state.system;
     state.power = settings.power || state.power || null;
-    const sections = [['vehicles', 'Vehicles'], ['updates', 'Updates'], ['account', 'Account'], sec && ['security', 'Security'], (sys || settings.power) && ['system', 'System'], ['logs', 'Logs']].filter(Boolean);
+    // (the Logs are on the Overview)
+    const sections = [['vehicles', 'Vehicles'], ['updates', 'Updates'], ['account', 'Account'], sec && ['security', 'Security'], (sys || settings.power) && ['system', 'System']].filter(Boolean);
     const show = editing || !sections.some(([k]) => k === sub) ? 'vehicles' : sub;
     let html = head('Your archive workspace', 'Settings');
     html += `<nav class="set-tabs" aria-label="Settings sections">${sections.map(([k, label]) => `<button type="button" data-tab="${k}">${label}</button>`).join('')}</nav>`;
@@ -1507,17 +1622,11 @@
         <dt>Server time zone</dt><dd>${esc(sys.timezone)}</dd></dl></div>`;
     }
     if (settings.power) html += powerCard(settings.power, sys?.timezone);
-    html += `<div class="card" data-section="logs"><div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap"><h2>Logs</h2>
-      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><label class="check small"><input type="checkbox" id="log-all"> Everything</label>
-      <button type="button" class="btn sm" id="log-refresh">Refresh</button><a class="btn sm" href="/api/logs/download" download>Download</a></div></div>
-      <p class="muted small" style="margin-top:8px">Warnings and errors from the server, the converter and the container, newest first. Kept in the data folder (<code>logs/manager.log</code>), so nothing needs a shell on the server.</p>
-      <div class="logbox" id="log-list" aria-live="polite"><p class="muted small">Loading…</p></div></div>`;
     page.innerHTML = html;
     wireSettingsTabs(show, editing ? `#/settings/${sub}` : '#/settings', seq);
     wireSettings(editing);
     if (sec) wireSecurity(sec);
     if (settings.power) wirePower(settings.power);
-    wireLogs(seq);
   };
 
   // Settings > System: the electricity price behind every cost shown with
@@ -1615,22 +1724,6 @@
         toast(err.message, true);
       }
     };
-  }
-
-  function wireLogs(seq) {
-    const list = page.querySelector('#log-list');
-    const all = page.querySelector('#log-all');
-    const load = async () => {
-      const out = await api(`/api/logs?level=${all.checked ? 'all' : 'problems'}`).catch((err) => ({ error: err.message }));
-      if (seq !== renderSeq) return;
-      if (out.error) { list.innerHTML = `<p class="muted small">Could not load the log: ${esc(out.error)}</p>`; return; }
-      list.innerHTML = out.lines.length
-        ? out.lines.map((l) => `<div class="logline ${esc(l.level)}"><span class="logwhen">${esc(when(l.at))}</span><span class="loglevel">${esc(l.level)}</span><span class="logscope">${esc(l.scope)}</span><span class="logmsg">${esc(l.message)}</span></div>`).join('')
-        : `<p class="muted small">${all.checked ? 'Nothing logged yet.' : 'No warnings or errors. Tick Everything to see all activity.'}</p>`;
-    };
-    all.onchange = load;
-    page.querySelector('#log-refresh').onclick = load;
-    load();
   }
 
   // Phones show one Settings section at a time, picked from the tabs (wider
@@ -1855,14 +1948,19 @@
   async function render() {
     const seq = ++renderSeq;
     held.page = false;
+    // the Logs moved from Settings to the Overview: old links land there
+    if (/^#\/?settings\/logs\/?$/.test(location.hash)) history.replaceState(null, '', '#/overview/logs');
     // the shell's opening state (boot.js, index.html) ends here
     bootFrame?.remove();
     delete document.documentElement.dataset.boot;
     const [route, ...rest] = (location.hash.replace(/^#\/?/, '') || 'overview').split('/');
     const before = state.route;
     state.route = pages[route] ? route : 'overview';
-    // a new visit to the Overview starts with the tiles' own height and rows
-    if (state.route !== before) releaseMonitorHeight({ rows: true });
+    // a new visit to the Overview starts with the tiles' (and the logs') own height and rows
+    if (state.route !== before) {
+      releaseMonitorHeight({ rows: true });
+      releaseLogsHeight({ scroll: true });
+    }
     // the server's numbers are only asked for while the Overview shows them
     if (state.route !== 'overview') stopMonitor();
     document.querySelectorAll('#nav a').forEach((a) => a.classList.toggle('active', a.dataset.route === state.route));
@@ -1882,7 +1980,10 @@
       if (seq === renderSeq) page.innerHTML = `<div class="empty">${esc(err.message)}</div>`;
     }
   }
-  window.addEventListener('hashchange', render);
+  window.addEventListener('hashchange', () => {
+    if (LOGS_HASH.test(location.hash)) revealUntil = Date.now() + 5000;
+    render();
+  });
 
   // ---------- live updates ----------
   function connect() {
@@ -1927,6 +2028,7 @@
     }
     // that frame is the selected vehicle's, so it stays
     if (encoderFirst && frames.encoder && !state.vehicles.some((v) => String(v.id) === frames.encoder.dataset.vehicle)) frames.encoder.dataset.vehicle = String(current()?.id || '');
+    if (LOGS_HASH.test(location.hash)) revealUntil = Date.now() + 8000;
     render();
     connect();
   })();

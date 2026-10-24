@@ -563,7 +563,7 @@ test('Jobs: Clear jobs takes finished jobs off the list after sign-in, from the 
   }
 });
 
-test('Settings > Logs: problems are kept in the data folder and shown and downloaded only after sign-in', async () => {
+test('Logs (Overview): problems are kept in the data folder and shown and downloaded only after sign-in', async () => {
   const dir = await tmp();
   await makeFootage(path.join(dir, 'footage'));
   // a problem from before this start (a crash, an update)

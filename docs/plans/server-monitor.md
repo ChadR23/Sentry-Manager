@@ -28,7 +28,7 @@ Header: host name, OS, kernel, uptime, app uptime, version; warning chip.
 | Network | rx/tx + sparkline, share of NAS traffic | `/proc/net/dev` (container namespace; whole server with `pid: host` via `/proc/1/net/dev`) |
 | Sensors | every temperature and fan the board reports | `/sys/class/hwmon`, `/sys/class/thermal` |
 | Top processes | CPU / memory / GPU per process | the container's processes; whole server only with optional `pid: host` |
-| Alerts | hot disk, throttling CPU/GPU, disk almost full, NAS slow/offline | thresholds -> Notifications + Settings > Logs |
+| Alerts | hot disk, throttling CPU/GPU, disk almost full, NAS slow/offline | thresholds -> Notifications + Overview > Logs |
 
 Rules: detect once what the machine provides and show only those tiles;
 "Shown only when the server provides it" footer lists the optional compose
@@ -86,7 +86,7 @@ Plan:
 ## Also open from this session
 
 - Owner to check on a real iPhone that all 6 Viewer cameras play (WebKit 27.2 on the PC stalled 4 of 6; WebKit 26 here played all 6).
-- Re-run the benchmark on 98d4861+ and read the `Verification failed` line in Settings > Logs for the duration-mismatch clip (damaged clip or converter issue?).
+- Re-run the benchmark on 98d4861+ and read the `Verification failed` line in Overview > Logs for the duration-mismatch clip (damaged clip or converter issue?).
 - The owner's archive (44,375 clips) is near the 50,000 items per job cap.
 - "Closing file descriptor N on garbage collection" warnings in the server log: not traced yet.
 - Delete the leftover branches (release/flight-deck, encoder-flight-deck, flight-deck-preview, pc-test/*); keep main and backup/pre-flight-deck.

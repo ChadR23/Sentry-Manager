@@ -45,7 +45,7 @@ let stopping = false;
 let tls = null;
 
 // Also handed to the app, so mount and certificate problems show in
-// Settings > Logs (lines from before the app started wait for it).
+// the Overview's Logs (lines from before the app started wait for it).
 const early = [];
 function forward(level, msg) {
   const line = { type: 'supervisor-log', level, message: String(msg).slice(0, 4000) };

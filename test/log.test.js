@@ -1,6 +1,6 @@
 'use strict';
 
-// Settings > Logs: every warning and error (the converter's too) is kept in
+// Overview > Logs: every warning and error (the converter's too) is kept in
 // the data folder, with secrets masked, and survives a restart.
 
 const test = require('node:test');

@@ -1378,7 +1378,7 @@ function createJobStore(options) {
         const inspected = await inspectPaths(cloneManifest(current));
         facts = normalizeFacts(inspected);
       } catch (error) {
-        // the reason goes to Settings > Logs; the owner only saw the code
+        // the reason goes to the Overview's Logs; the owner only saw the code
         console.warn('[CONVERTER] The interrupted clip\'s files could not be checked:', error?.code || 'ERROR',
           String(error?.message || error).slice(0, 300));
         throw storeError('INSPECTION_FAILED');

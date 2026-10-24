@@ -96,6 +96,9 @@ so you don't need Glances or another tool:
 - **Alerts** for a hot CPU, GPU or disk, a disk almost full, a slow or
   unreachable share, and low memory; they also go to Notifications.
 - **History**: the last 24 hours, and a CSV download.
+- **Logs** at the bottom, with Nerd stats on or off: the warnings and errors
+  the server keeps (see [Security](#security)); an alert's *Logs* link goes
+  there.
 
 It only measures while a page shows it or a conversion runs (and reads the
 network's byte counters once a day, so the data used lands on the right
@@ -432,16 +435,21 @@ a malicious video on a share cannot become root or read the certificate
 authority's key.
 
 **An audit trail.** Sign-ins, password confirmations, vehicle changes,
-certificate names, permanent deletions and Clear jobs are logged with who did them and
-from which address, never with a password. Look for `[audit]` in
-`docker logs sentry-six-manager` or in Settings > Logs.
+certificate names, permanent deletions and Clear jobs are logged with who did
+them and from which address, never with a password. Look for `[audit]` in
+`docker logs sentry-six-manager` or in the Overview's Logs (tick
+*Everything*).
 
-**Logs in the app.** Settings > Logs lists the warnings and errors from the
-server, the converter (a clip that fails verification, with what was
-measured) and the container's mount helper, newest first, with a Download
-button. They are kept in the data folder (`logs/manager.log`, at most about
-10 MB with the previous file), survive restarts, and anything that looks like
-a password is masked. No shell on the server is needed.
+**Logs in the app.** The Overview's **Logs**, the last part of its Server
+window, list the warnings and errors from the server, the converter (a clip
+that fails verification, with what was measured) and the container's mount
+helper, newest first, with *Everything* for all activity, *Refresh* and a
+*Download* button. The lines load after the page has shown, and a refresh
+never moves the page or takes away text you are highlighting. They are kept
+in the data folder (`logs/manager.log`, at most about 10 MB with the
+previous file), survive restarts, and anything that looks like a password is
+masked. No shell on the server is needed. (Old links to Settings > Logs,
+`#/settings/logs`, open them there.)
 
 ## Settings
 
