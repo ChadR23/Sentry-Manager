@@ -96,6 +96,21 @@ test('Logs on phones: nothing is cut off and the box never scrolls sideways', ()
   assert.match(css, /\.logwhen \{[^}]*white-space: nowrap;/);
 });
 
+test('Logs: not a live region; a short status only after Refresh or Everything', () => {
+  const part = fn('logsPart');
+  assert.doesNotMatch(part, /aria-live/, 'the 300-line box is not read out when a live update replaces it');
+  assert.match(part, /<p class="sr-only" id="log-status" role="status"><\/p>/);
+  assert.match(css, /\.sr-only \{ position: absolute; width: 1px; height: 1px;/);
+  const mount = fn('mountLogs');
+  assert.match(mount, /loadLogs\(\{ tell: true \}\);\s*\};\s*\$\('log-refresh'\)\.onclick = \(\) => loadLogs\(\{ tell: true \}\);/, 'Everything and Refresh tell');
+  assert.match(mount, /setTimeout\(loadLogs, 0\)/, 'the load of a redraw does not');
+  const load = fn('loadLogs');
+  assert.match(load, /async function loadLogs\(\{ tell = false \} = \{\}\)/);
+  assert.match(load, /if \(tell\) sayLogs\(said\);/);
+  assert.ok(load.indexOf('if (gen !== logs.gen) return;') < load.indexOf('sayLogs'), 'only the newest answer is told');
+  assert.match(fn('sayLogs'), /status\.textContent = '';[\s\S]*status\.textContent = text;/, 'the same words are read out again');
+});
+
 test('Jobs: Clear jobs confirms in its request; the count does not', () => {
   const clear = fn('clearJobs');
   assert.match(clear, /api\('\/api\/jobs\/clear', \{ body: \{ \.\.\.body, preview: true \} \}\)/);

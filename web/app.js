@@ -950,6 +950,9 @@
   // While the page is open the box never gets shorter (a refresh with fewer
   // lines would make the page jump), keeps where the reader scrolled it, and
   // waits while they highlight in it. Every line from the server is escaped.
+  // The box is not a live region: it is replaced by live updates too, and a
+  // screen reader would read out up to 300 lines nobody asked for. A short
+  // status says what arrived, only after Refresh or Everything.
   const logs = { all: false, html: '', gen: 0, tallest: 0, scroll: 0, drawn: null };
   const logLine = (l) => `<div class="logline ${esc(l.level)}"><span class="logwhen">${esc(when(l.at))}</span><span class="loglevel">${esc(l.level)}</span><span class="logscope">${esc(l.scope)}</span><span class="logmsg">${esc(l.message)}</span></div>`;
 
@@ -959,7 +962,8 @@
       <div class="nd-logs-bar"><p class="muted small">Warnings and errors from the server, the converter and the container. Kept in the data folder (<code>logs/manager.log</code>), so nothing needs a shell on the server.</p>
         <div class="nd-logs-actions"><label class="check small"><input type="checkbox" id="log-all"${logs.all ? ' checked' : ''}> Everything</label>
           <button type="button" class="btn sm" id="log-refresh">Refresh</button><a class="btn sm" href="/api/logs/download" download>Download</a></div></div>
-      <div class="logbox" id="log-list" aria-live="polite"${logs.tallest ? ` style="min-height:${logs.tallest}px"` : ''}>${logs.html || '<p class="muted small">Loading…</p>'}</div></div>`;
+      <p class="sr-only" id="log-status" role="status"></p>
+      <div class="logbox" id="log-list"${logs.tallest ? ` style="min-height:${logs.tallest}px"` : ''}>${logs.html || '<p class="muted small">Loading…</p>'}</div></div>`;
   }
 
   /** Back to the box's own height (a new visit, the other list, a resize). */
@@ -979,28 +983,41 @@
     $('log-all').onchange = (e) => {
       logs.all = e.target.checked;
       releaseLogsHeight({ scroll: true });
-      loadLogs();
+      loadLogs({ tell: true });
     };
-    $('log-refresh').onclick = () => loadLogs();
+    $('log-refresh').onclick = () => loadLogs({ tell: true });
     // the lines come after the page has shown
     requestAnimationFrame(() => setTimeout(loadLogs, 0));
   }
 
-  async function loadLogs() {
+  /** `tell`: the reader asked (Refresh, Everything), so the status says what arrived. */
+  async function loadLogs({ tell = false } = {}) {
     const gen = ++logs.gen;
     const all = logs.all;
     let html;
+    let said;
     try {
       const out = await api(`/api/logs?level=${all ? 'all' : 'problems'}`, { timeoutMs: 15000 });
       const lines = Array.isArray(out.lines) ? out.lines : [];
-      html = lines.length ? lines.map(logLine).join('')
-        : `<p class="muted small">${all ? 'Nothing logged yet.' : 'No warnings or errors. Tick Everything to see all activity.'}</p>`;
+      const empty = all ? 'Nothing logged yet.' : 'No warnings or errors. Tick Everything to see all activity.';
+      html = lines.length ? lines.map(logLine).join('') : `<p class="muted small">${empty}</p>`;
+      said = lines.length ? `${plural(lines.length, 'line')}${all ? '' : ' of warnings and errors'}, newest first.` : empty;
     } catch (err) {
       html = `<p class="muted small">Could not load the log: ${esc(err.message)}</p>`;
+      said = 'Could not load the log.';
     }
     if (gen !== logs.gen) return;
     logs.html = html;
     drawLogs();
+    if (tell) sayLogs(said);
+  }
+
+  /** The status line, emptied first so the same words are read out again. */
+  function sayLogs(text) {
+    const status = $('log-status');
+    if (!status) return;
+    status.textContent = '';
+    setTimeout(() => { if (status.isConnected) status.textContent = text; }, 100);
   }
 
   function drawLogs() {
