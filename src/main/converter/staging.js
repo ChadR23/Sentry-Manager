@@ -485,7 +485,7 @@ function createFileTransaction(options = {}) {
       if (!sameIdentity(before, after) || observed.size !== metadata.size
           || statSize(before) !== metadata.size || statSize(after) !== metadata.size
           || observed.sha256 !== metadata.sha256) throw transactionError(changedCode);
-      return { ...observed, stat: after };
+      return { ...observed, stat: after, statBefore: before };
     } catch (error) {
       if (error instanceof FileTransactionError) throw error;
       throw transactionError(changedCode);
@@ -500,7 +500,14 @@ function createFileTransaction(options = {}) {
   async function proveCopy(target, artifact, written, failureCode) {
     const proof = await readExactFile(target, artifact, failureCode);
     if (!sameIdentity(written, proof.stat)) throw transactionError(failureCode);
-    return mtimeStamp(proof.stat);
+    return provenMtime(proof);
+  }
+
+  // The time a full read proved: only when the file's time did not move while
+  // it was read (a write behind the read would otherwise pass as proven).
+  function provenMtime(proof) {
+    const before = mtimeStamp(proof.statBefore);
+    return before && before === mtimeStamp(proof.stat) ? before : null;
   }
 
   async function copyExclusive(source, target, {
@@ -923,8 +930,11 @@ function createFileTransaction(options = {}) {
           || safeStatPart(stat.ino) !== expectedSource.inode || statSize(stat) !== expectedSource.size) {
         throw transactionError('REPLACEMENT_FAILED');
       }
-      // (its modification time as the adapter's full check just left it)
-      facts.mtimeNs = mtimeStamp(stat);
+      // its modification time, for the quick check at its removal: only the
+      // time it had before the adapter's full check began (facts.provenMtimeNs),
+      // so a write during or after that check is not taken as proven
+      const mtimeNs = mtimeStamp(stat);
+      facts.mtimeNs = mtimeNs && mtimeNs === facts.provenMtimeNs ? mtimeNs : null;
       return artifactMetadata(backup, nonce, state, stat, expectedSource.sha256, expectedSource.size);
     }
     const observed = await inspectExactFile(backup, signal, 'REPLACEMENT_FAILED');
@@ -1976,11 +1986,11 @@ function createFileTransaction(options = {}) {
         // the original is touched
         const proof = await readExactFile(candidate, artifact, 'PUBLICATION_ARTIFACT_CHANGED');
         if (!sameIdentity(candidateStat, proof.stat)) throw transactionError('PUBLICATION_ARTIFACT_CHANGED');
-        candidateQuick = quickExpected(ownedArtifacts.replacementCandidate, mtimeStamp(proof.stat), proof.stat);
+        candidateQuick = quickExpected(ownedArtifacts.replacementCandidate, provenMtime(proof), proof.stat);
       }
 
+      const backupFacts = { provenMtimeNs: mtimeStamp(await lstatOrNull(source)) };
       const backupPromotion = await promoteBackup(source, backup, expectedSource);
-      const backupFacts = {};
       ownedArtifacts.replacementBackup = await backupRecord(backup, prepared.backupNonce, backupPromotion, expectedSource,
         undefined, backupFacts);
       await persist(operation, transactionSnapshot({ phase: 'original-backed-up', ownedPaths, ownedArtifacts,

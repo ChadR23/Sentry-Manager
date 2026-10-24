@@ -244,3 +244,37 @@ test('the real converter replaces originals in place with telemetry intact', { s
     await fsp.rm(root, { recursive: true, force: true });
   }
 });
+
+test('a file written to while the adapter hashes it is a mismatch, even if the bytes it read were right', { skip: !helperBuilt && 'no C compiler' }, async () => {
+  const dir = await tmp();
+  const originalOpen = fsp.open;
+  try {
+    const { removeOwned } = adapters();
+    const f = path.join(dir, 'BACKUP-clip.mp4');
+    await fsp.writeFile(f, Buffer.alloc(64, 1));
+    const expected = await identity(f);
+    fsp.open = async function patchedOpen(file, ...rest) {
+      const handle = await originalOpen.call(this, file, ...rest);
+      if (file === f) {
+        const read = handle.read.bind(handle);
+        handle.read = async (...args) => {
+          const result = await read(...args);
+          if (result.bytesRead > 0) {
+            // behind the read: the hash still matches what was recorded
+            fs.writeFileSync(f, Buffer.alloc(64, 2));
+            const later = new Date(Date.now() + 2000);
+            fs.utimesSync(f, later, later);
+          }
+          return result;
+        };
+      }
+      return handle;
+    };
+    assert.deepEqual(await removeOwned.remove({ target: f, expected }), { removed: false, ownershipMismatch: true });
+    fsp.open = originalOpen;
+    assert.ok(fs.existsSync(f), 'the edited file is kept');
+  } finally {
+    fsp.open = originalOpen;
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});

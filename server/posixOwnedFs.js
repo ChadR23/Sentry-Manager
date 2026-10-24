@@ -90,7 +90,10 @@ async function openVerified(target, expected, { identityOnly = false } = {}) {
       return { status: 'verified', fh, stat };
     }
     const { digest, bytes } = await hashHandle(fh, expected.size);
-    if (bytes !== expected.size || digest !== expected.sha256) {
+    // written to while it was hashed: the hash proves nothing about it now
+    const after = await fh.stat({ bigint: true });
+    if (bytes !== expected.size || digest !== expected.sha256
+        || after.mtimeNs !== stat.mtimeNs || after.size !== stat.size || !sameIdentity(after, expected)) {
       await fh.close();
       return { status: 'mismatch' };
     }
