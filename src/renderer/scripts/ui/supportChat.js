@@ -314,7 +314,7 @@ function updateAttachmentsList() {
     list.innerHTML = selectedFiles.map((file, idx) => `
         <div class="attachment-item" data-idx="${idx}">
             <span class="attachment-icon">${getFileIcon(file.type)}</span>
-            <span class="attachment-name">${file.name}</span>
+            <span class="attachment-name">${escapeHtml(file.name)}</span>
             <span class="attachment-size">${formatFileSize(file.size)}</span>
             <button class="attachment-remove" data-idx="${idx}" title="Remove">&times;</button>
         </div>
@@ -593,22 +593,23 @@ function addMessageToUI(msg) {
             <div class="message-attachments">
                 ${msg.attachments.map(a => {
                     if (typeof a === 'string') {
-                        return `<span class="attachment-badge">${a}</span>`;
+                        return `<span class="attachment-badge">${escapeHtml(a)}</span>`;
                     }
-                    // Construct absolute URL for attachments
-                    const attachmentUrl = a.url?.startsWith('http') 
-                        ? a.url 
-                        : `${SUPPORT_SERVER_URL}${a.url}`;
-                    
+                    // Construct absolute URL for attachments; only http(s) is linkable
+                    // (a message comes from the support server, which we do not fully trust)
+                    const rawUrl = a.url?.startsWith('http') ? a.url : `${SUPPORT_SERVER_URL}${a.url || ''}`;
+                    const safeUrl = /^https?:\/\//i.test(rawUrl) ? escapeHtml(rawUrl) : '#';
+                    const name = escapeHtml(a.name || '');
+
                     // If attachment is an object with URL
                     if (a.url && isImageOrVideo(a.type)) {
-                        return `<a href="${attachmentUrl}" target="_blank" class="attachment-preview" title="Click to view ${a.name}">
-                            ${a.type?.startsWith('image/') 
-                                ? `<img src="${attachmentUrl}" alt="${a.name}" />` 
-                                : `<video src="${attachmentUrl}" controls></video>`}
+                        return `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer" class="attachment-preview" title="Click to view ${name}">
+                            ${a.type?.startsWith('image/')
+                                ? `<img src="${safeUrl}" alt="${name}" />`
+                                : `<video src="${safeUrl}" controls></video>`}
                         </a>`;
                     }
-                    return `<a href="${attachmentUrl}" target="_blank" class="attachment-badge" title="Download ${a.name}">${a.name || a}</a>`;
+                    return `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer" class="attachment-badge" title="Download ${name}">${name || escapeHtml(String(a))}</a>`;
                 }).join('')}
             </div>
         `;
@@ -626,7 +627,7 @@ function addMessageToUI(msg) {
     msgRow.innerHTML = `
         ${!isUser ? `<div class="message-avatar ${avatarClass}">${avatarLabel}</div>` : ''}
         <div class="chat-message ${isUser ? 'user-message' : 'support-message'}">
-            ${!isUser ? `<div class="message-sender-name">${senderName}</div>` : ''}
+            ${!isUser ? `<div class="message-sender-name">${escapeHtml(senderName)}</div>` : ''}
             <div class="message-content">
                 ${msg.content ? `<p>${escapeHtml(msg.content)}</p>` : ''}
                 ${attachmentsHtml}

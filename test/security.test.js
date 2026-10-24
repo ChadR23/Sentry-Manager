@@ -526,3 +526,78 @@ test('the supervisor runs the app unprivileged and keeps mounts and the CA to it
     await fsp.rm(dir, { recursive: true, force: true });
   }
 });
+
+// A share is not trusted: between a "this folder is inside the share" check
+// and the rename/unlink/mkdir it guards, the share can swap a folder for a
+// symlink. safeFs walks down without following any symlink and acts on the
+// pinned folder, so there is no gap to race.
+test('Recycle Bin: a folder swapped for a symlink mid-move cannot redirect it out of the share', async () => {
+  const root = await tmp();
+  const outside = await tmp('sm-outside-');
+  const realMkdir = fsp.mkdir;
+  try {
+    const rel = 'TeslaCam/RecentClips/2020-01-01_08-00-00-front.mp4';
+    await fsp.mkdir(path.dirname(path.join(root, rel)), { recursive: true });
+    await fsp.writeFile(path.join(root, rel), 'clip');
+    await fsp.writeFile(path.join(outside, path.basename(rel)), 'NOT THE SHARE');
+    const { db, bin } = binFixture(root, [{ id: 'r1', category: 'Recent', start: '2020-01-01', files: [rel], protected: false }]);
+    // the swap lands right after the checks, while the bin folder is being made
+    let swapped = false;
+    fsp.mkdir = async (...args) => {
+      const out = await realMkdir.apply(fsp, args);
+      if (!swapped) {
+        swapped = true;
+        const dir = path.join(root, path.dirname(rel));
+        await fsp.rm(dir, { recursive: true, force: true });
+        await fsp.symlink(outside, dir);
+      }
+      return out;
+    };
+    const result = await bin.trash('car', ['r1']);
+    fsp.mkdir = realMkdir;
+    assert.ok(swapped, 'the swap happened mid-move');
+    assert.deepEqual(result.moved, [], 'nothing moved');
+    assert.equal(result.skipped[0]?.reason, 'error');
+    assert.equal(await fsp.readFile(path.join(outside, path.basename(rel)), 'utf8'), 'NOT THE SHARE', 'the file outside the share stays where it is');
+    assert.deepEqual(db.binItems('car'), [], 'no bin item left behind');
+  } finally {
+    fsp.mkdir = realMkdir;
+    await fsp.rm(root, { recursive: true, force: true });
+    await fsp.rm(outside, { recursive: true, force: true });
+  }
+});
+
+test('safeFs: rename, unlink, mkdir -p, rmdir and rm -r never follow a symlink out of their root', async () => {
+  const { renameInside, unlinkInside, mkdirpInside, rmdirInside, rmrfInside } = require('../server/safeFs');
+  const root = await tmp();
+  const outside = await tmp('sm-outside-');
+  try {
+    await fsp.writeFile(path.join(outside, 'secret'), 'SECRET');
+    await fsp.mkdir(path.join(root, 'a/b'), { recursive: true });
+    await fsp.writeFile(path.join(root, 'a/b/f.mp4'), 'clip');
+    // inside the share everything works as before
+    await mkdirpInside(root, path.join(root, 'bin/x'));
+    await renameInside(root, path.join(root, 'a/b/f.mp4'), path.join(root, 'bin/x/f.binned'));
+    assert.equal(await fsp.readFile(path.join(root, 'bin/x/f.binned'), 'utf8'), 'clip');
+    // a folder that is a symlink out of the share: every operation is refused
+    await fsp.symlink(outside, path.join(root, 'a/link'));
+    const escape = { code: 'ELINKESCAPE' };
+    await assert.rejects(renameInside(root, path.join(root, 'a/link/secret'), path.join(root, 'bin/x/stolen')), escape);
+    await assert.rejects(renameInside(root, path.join(root, 'bin/x/f.binned'), path.join(root, 'a/link/planted')), escape);
+    await assert.rejects(unlinkInside(root, path.join(root, 'a/link/secret')), escape);
+    await assert.rejects(mkdirpInside(root, path.join(root, 'a/link/new/deep')), escape);
+    await assert.rejects(rmdirInside(root, path.join(root, 'a/link/sub')), escape);
+    await rmrfInside(root, path.join(root, 'a/link/secret')); // refused quietly, like a missing file
+    await assert.rejects(renameInside(root, path.join(root, '../escape'), path.join(root, 'x')), escape);
+    assert.deepEqual(await fsp.readdir(outside), ['secret']);
+    assert.equal(await fsp.readFile(path.join(outside, 'secret'), 'utf8'), 'SECRET');
+    // rm -r of a tree holding a symlink removes the link, never what it points at
+    await fsp.symlink(outside, path.join(root, 'bin/x/inner-link'));
+    await rmrfInside(root, path.join(root, 'bin'));
+    assert.equal(fs.existsSync(path.join(root, 'bin')), false);
+    assert.equal(await fsp.readFile(path.join(outside, 'secret'), 'utf8'), 'SECRET');
+  } finally {
+    await fsp.rm(root, { recursive: true, force: true });
+    await fsp.rm(outside, { recursive: true, force: true });
+  }
+});

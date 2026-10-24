@@ -20,7 +20,7 @@ const crypto = require('crypto');
 const fsp = require('fs/promises');
 const path = require('path');
 const { safeJoin, TYPE_BY_FOLDER } = require('./footage');
-const { assertParentInside } = require('./safePath');
+const { renameInside, unlinkInside, rmdirInside, mkdirpInside, rmrfInside } = require('./safeFs');
 
 const BIN_DIR = '.sentry-recycle-bin';
 const JUNK_RE = /^(\._.+|\.DS_Store|Thumbs\.db|desktop\.ini)$/i;
@@ -41,10 +41,11 @@ async function removeEmptyDirs(root, rels, { keep = isKeptDir } = {}) {
     const abs = safeJoin(root, d);
     try {
       const names = await fsp.readdir(abs);
-      if (names.length && names.every((n) => JUNK_RE.test(n))) await Promise.all(names.map((n) => fsp.rm(path.join(abs, n), { force: true })));
-      await fsp.rmdir(abs);
+      // every file op follows no symlink out of the share (safeFs)
+      if (names.length && names.every((n) => JUNK_RE.test(n))) await Promise.all(names.map((n) => unlinkInside(root, path.join(abs, n)).catch(() => {})));
+      await rmdirInside(root, abs);
     } catch {
-      // not empty or already gone
+      // not empty, a planted symlink, or already gone
     }
   }
 }
@@ -119,25 +120,20 @@ class RecycleBin {
         this.db.addBinItem(record);
         const moved = [];
         try {
-          const checked = new Set();
           for (const f of planned) {
             const from = safeJoin(root, f.rel);
             const to = safeJoin(root, f.binRel);
-            for (const dir of [path.dirname(from), path.dirname(to)]) {
-              if (checked.has(dir)) continue;
-              await assertParentInside(root, path.join(dir, 'x'));
-              checked.add(dir);
-            }
-            await fsp.mkdir(path.dirname(to), { recursive: true });
-            await assertParentInside(root, to);
+            // safeFs creates the bin folder and moves the file following no
+            // symlink out of the share (a swapped directory is refused)
+            await mkdirpInside(root, path.dirname(to));
             const size = inv.files.get(f.rel)?.size ?? (await fsp.lstat(from)).size;
-            await fsp.rename(from, to);
+            await renameInside(root, from, to);
             moved.push({ rel: f.rel, binRel: f.binRel, size });
           }
         } catch (err) {
           // put back whatever moved so a recording is never split
-          for (const m of moved.reverse()) await fsp.rename(safeJoin(root, m.binRel), safeJoin(root, m.rel)).catch(() => {});
-          await fsp.rm(safeJoin(root, `${BIN_DIR}/${itemId}`), { recursive: true, force: true }).catch(() => {});
+          for (const m of moved.reverse()) await renameInside(root, safeJoin(root, m.binRel), safeJoin(root, m.rel)).catch(() => {});
+          await rmrfInside(root, safeJoin(root, `${BIN_DIR}/${itemId}`)).catch(() => {});
           this.db.removeBinItem(itemId);
           result.skipped.push({ id: rec.id, reason: err.code === 'ENOENT' ? 'missing' : 'error', message: err.message });
           return;
@@ -201,7 +197,7 @@ class RecycleBin {
         };
         await walk(`${BIN_DIR}/${ent.name}`);
         if (!files.length) {
-          await fsp.rm(safeJoin(root, `${BIN_DIR}/${ent.name}`), { recursive: true, force: true }).catch(() => {});
+          await rmrfInside(root, safeJoin(root, `${BIN_DIR}/${ent.name}`)).catch(() => {});
           continue;
         }
         const first = files[0].rel;
@@ -240,11 +236,9 @@ class RecycleBin {
         continue;
       }
       try {
-        await assertParentInside(root, from);
-        await assertParentInside(root, to);
-        await fsp.mkdir(path.dirname(to), { recursive: true });
-        await assertParentInside(root, to);
-        await fsp.rename(from, to);
+        // following no symlink out of the share (safeFs)
+        await mkdirpInside(root, path.dirname(to));
+        await renameInside(root, from, to);
       } catch (err) {
         this.log.warn(`Restore of ${f.rel} refused: ${err.message}`);
         left.push({ ...f, conflict: true });
@@ -277,14 +271,13 @@ class RecycleBin {
     for (const f of item.files) {
       try {
         const target = safeJoin(root, f.binRel);
-        await assertParentInside(root, target);
-        await fsp.unlink(target);
+        await unlinkInside(root, target);
         bytes += f.size;
       } catch (err) {
         if (err.code !== 'ENOENT') throw err;
       }
     }
-    await fsp.rm(safeJoin(root, `${BIN_DIR}/${itemId}`), { recursive: true, force: true });
+    await rmrfInside(root, safeJoin(root, `${BIN_DIR}/${itemId}`));
     this.db.removeBinItem(itemId);
     return { bytes };
   }

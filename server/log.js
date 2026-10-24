@@ -136,16 +136,11 @@ class Logger extends EventEmitter {
     return this.lines.filter((entry) => LEVELS[entry.level] >= min).slice(-limit);
   }
 
-  /** The kept file(s), oldest first, for download. */
-  fileText() {
+  /** The kept file(s), oldest first, for download — read off the event loop. */
+  async fileText() {
     if (!this.file) return '';
-    return [`${this.file}.1`, this.file].map((f) => {
-      try {
-        return fs.readFileSync(f, 'utf8');
-      } catch {
-        return '';
-      }
-    }).join('');
+    const parts = await Promise.all([`${this.file}.1`, this.file].map((f) => fs.promises.readFile(f, 'utf8').catch(() => '')));
+    return parts.join('');
   }
 }
 

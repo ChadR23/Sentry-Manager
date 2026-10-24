@@ -328,6 +328,7 @@ async function main() {
 
   // ---- live events to the browser
   const clients = new Set();
+  const MAX_EVENT_CLIENTS = 200;
   const pending = new Set();
   let flushTimer = null;
   const announce = (topic) => {
@@ -373,7 +374,18 @@ async function main() {
     binItems: db.binItems(v.id).length,
     policy: policies.get(v.id)
   });
-  const clientKey = (req) => req.socket.remoteAddress || '?';
+  // Who the throttle and the audit log count as the client. Behind a trusted
+  // reverse proxy every request arrives from the proxy's own address, so the
+  // real client is the first X-Forwarded-For hop (the proxy sets it); without
+  // TRUST_PROXY that header is attacker-controlled and ignored. Keying on the
+  // real client means one attacker cannot lock out everyone behind the proxy.
+  const clientKey = (req) => {
+    if (TRUST_PROXY) {
+      const fwd = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+      if (fwd) return fwd;
+    }
+    return req.socket.remoteAddress || '?';
+  };
   // who did what, for the log: security-relevant actions only, never secrets
   const audit = logger.scope('audit');
   const by = (req, user) => `${user || 'someone'} from ${clientKey(req)}`;
@@ -392,7 +404,7 @@ async function main() {
     const keys = [clientKey(req), `user:${String(body?.username || '').toLowerCase()}`];
     const wait = Math.max(...keys.map((k) => auth.throttled(k)));
     if (wait) throw new HttpError(429, `Too many attempts. Try again in ${wait} s.`);
-    if (!auth.check(body?.username, body?.password)) {
+    if (!(await auth.check(body?.username, body?.password))) {
       keys.forEach((k) => auth.noteFailure(k));
       audit.warn(`Sign-in failed for "${String(body?.username || '').slice(0, 64)}" from ${clientKey(req)}`);
       throw new HttpError(401, 'Wrong user name or password.');
@@ -424,11 +436,11 @@ async function main() {
     audit.info(`Signed out: ${by(req, user)}`);
     return { ok: true };
   });
-  r.add('POST', '/api/auth/confirm', (req, res, { body, user }) => {
+  r.add('POST', '/api/auth/confirm', async (req, res, { body, user }) => {
     const key = `confirm:${user}`;
     const wait = auth.throttled(key);
     if (wait) throw new HttpError(429, `Too many attempts. Try again in ${wait} s.`);
-    if (!auth.confirm(req, user, body?.password)) {
+    if (!(await auth.confirm(req, user, body?.password))) {
       auth.noteFailure(key);
       audit.warn(`Password confirmation failed: ${by(req, user)}`);
       throw new HttpError(401, 'That password is not right.');
@@ -437,8 +449,8 @@ async function main() {
     audit.info(`Password confirmed for sensitive changes: ${by(req, user)}`);
     return { ok: true };
   });
-  r.add('POST', '/api/auth/password', (req, res, { body, user }) => {
-    if (!auth.check(user, body?.current)) throw new HttpError(401, 'The current password is wrong.');
+  r.add('POST', '/api/auth/password', async (req, res, { body, user }) => {
+    if (!(await auth.check(user, body?.current))) throw new HttpError(401, 'The current password is wrong.');
     auth.setPassword(user, String(body?.next || ''));
     db.deleteSessionsFor(user);
     auth.forgetConfirmations();
@@ -497,12 +509,13 @@ async function main() {
   r.add('GET', '/api/logs', (req, res, { query }) => ({
     lines: logger.recent(Math.min(1000, Number(query.limit) || 300), { minLevel: query.level === 'all' ? 'debug' : 'warn' }).reverse()
   }));
-  r.add('GET', '/api/logs/download', (req, res) => {
+  r.add('GET', '/api/logs/download', async (req, res) => {
+    const text = await logger.fileText();
     res.writeHead(200, {
       'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
       'Content-Disposition': `attachment; filename="sentry-six-manager-${new Date().toISOString().slice(0, 10)}.log"`
     });
-    res.end(logger.fileText());
+    res.end(text);
     return undefined;
   });
 
@@ -938,6 +951,9 @@ async function main() {
           }
         }
         if (p === '/api/events') {
+          // a signed-in page may hold one; a cap stops a buggy or hostile
+          // client from piling up event streams and exhausting sockets
+          if (clients.size >= MAX_EVENT_CLIENTS) return sendJson(res, 503, { error: 'Too many open connections.' });
           res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
           res.write('event: hello\ndata: {}\n\n');
           clients.add(res);

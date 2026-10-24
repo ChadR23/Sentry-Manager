@@ -26,13 +26,13 @@ test('lines go to the file with secrets masked, and come back after a restart', 
   fs.rmSync(path.dirname(path.dirname(file)), { recursive: true, force: true });
 });
 
-test('the file is capped: one previous file is kept, and the download has both', () => {
+test('the file is capped: one previous file is kept, and the download has both', async () => {
   const file = tmpFile();
   const logger = new Logger({ silent: true, file, maxBytes: 400 });
   for (let i = 0; i < 30; i++) logger.scope('t').warn(`line ${i}`);
   assert.ok(fs.statSync(file).size <= 400);
   assert.ok(fs.existsSync(`${file}.1`));
-  const all = logger.fileText();
+  const all = await logger.fileText();
   assert.ok(all.includes('line 29'));
   assert.ok(all.indexOf(`line ${all.match(/line (\d+)/)[1]}`) < all.indexOf('line 29'), 'oldest first');
   fs.rmSync(path.dirname(path.dirname(file)), { recursive: true, force: true });

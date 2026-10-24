@@ -17,6 +17,9 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { promisify } = require('util');
+
+const scryptAsync = promisify(crypto.scrypt);
 
 const COOKIE = 'sm_session';
 const SECURE_COOKIE = `__Host-${COOKIE}`;
@@ -24,8 +27,17 @@ const SESSION_MS = 30 * 24 * 3600 * 1000;
 const CONFIRM_MS = 10 * 60 * 1000;
 const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
 
+const SCRYPT = { N: 16384, r: 8, p: 1 };
+
 function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
-  const hash = crypto.scryptSync(String(password), salt, 64, { N: 16384, r: 8, p: 1 }).toString('hex');
+  const hash = crypto.scryptSync(String(password), salt, 64, SCRYPT).toString('hex');
+  return { salt, hash };
+}
+
+// Same hash, off the event loop, so a burst of sign-ins cannot freeze the app
+// (scrypt is deliberately slow). Used on the sign-in hot path.
+async function hashPasswordAsync(password, salt = crypto.randomBytes(16).toString('hex')) {
+  const hash = (await scryptAsync(String(password), salt, 64, SCRYPT)).toString('hex');
   return { salt, hash };
 }
 
@@ -114,11 +126,11 @@ class Auth {
     this.db.putUser(username, salt, hash);
   }
 
-  check(username, password) {
+  async check(username, password) {
     if (typeof password !== 'string' || password.length > 1024) return false;
     const user = this.db.getUser(String(username || ''));
     // hash anyway so timing does not reveal whether the user exists
-    const { hash } = hashPassword(password, user?.salt || 'x'.repeat(32));
+    const { hash } = await hashPasswordAsync(password, user?.salt || 'x'.repeat(32));
     return Boolean(user) && crypto.timingSafeEqual(Buffer.from(hash, 'hex'), Buffer.from(user.hash, 'hex'));
   }
 
@@ -182,8 +194,8 @@ class Auth {
   }
 
   /** Confirm the password again; opens the short window for sensitive changes. */
-  confirm(req, username, password) {
-    if (!this.check(username, password)) return false;
+  async confirm(req, username, password) {
+    if (!(await this.check(username, password))) return false;
     const token = this.token(req);
     if (token) this.confirmed.set(sha256(token), Date.now() + CONFIRM_MS);
     return true;
