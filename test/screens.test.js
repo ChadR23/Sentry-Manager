@@ -25,7 +25,7 @@ function overview() {
   assert.ok(start > 0 && end > start, 'the drawing block is marked in app.js');
   const helpers = ['esc', 'plural'].map((name) => app.match(new RegExp(`\\n  const ${name} = .*;\\n`))[0]).join('');
   return new Function(`${helpers}${app.slice(start, end)}
-    return { serverBody, hostLine, alertChip, spark, size, sizeOf, rate, energyText, money, sensorName, cpuName, steady };`)();
+    return { serverBody, hostLine, alertChip, spark, size, sizeOf, rate, energyText, money, sensorName, cpuName, steady, vehicleTiles };`)();
 }
 
 const HOSTILE = '<img src=x onerror=alert(1)>';
@@ -352,6 +352,80 @@ test('Overview: the 24 h graphs come from history, with gaps where the server wa
   const flat = spark([1, 2, 1, 2], 'x', 10);
   const ys = [...flat.matchAll(/,(\d+(?:\.\d+)?)/g)].map((m) => Number(m[1])).filter((y) => y < 40);
   assert.ok(Math.min(...ys) > 25, 'low values stay low');
+});
+
+// a vehicle as GET /api/vehicles describes it
+const G = 1024 ** 3;
+const car = (over = {}) => ({
+  id: 'daily-driver', name: 'Daily Driver', timezone: 'America/Chicago', scanning: false, binBytes: 12 * G,
+  inventory: { bytes: 4.6 * 1024 * G, recordings: 12345, scannedAt: 1_000_000 - 5 * 60_000 },
+  share: { healthy: true, writable: true, totalBytes: 7.2 * 1024 * G, freeBytes: 2.6 * 1024 * G },
+  ...over
+});
+const kvRows = (html) => [...html.matchAll(/<dt>([^<]+)<\/dt><dd[^>]*>([^<]*)<\/dd>/g)].map((m) => [m[1], m[2]]);
+
+test('Overview: the vehicle\'s inventory and free space are the Server section\'s first tiles, with their buttons', () => {
+  const { vehicleTiles } = overview();
+  const html = vehicleTiles(car(), 1_000_000);
+  assert.deepEqual(tileTitles(html), ['Inventory', 'Free space']);
+  assert.match(html, /^<div class="nd-grid nd-vgrid">/);
+  assert.match(html, /<span class="muted" title="last discovered">/);
+  assert.match(html, /<span class="muted" title="last observed on Daily Driver">/);
+  assert.match(html, /<div class="nd-big"><b>4\.6 TB<\/b><span class="muted small">all categories<\/span><\/div>/);
+  assert.match(html, /<div class="nd-big"><b>2\.6 TB<\/b><span class="muted small">free<\/span><\/div>/);
+  assert.deepEqual(kvRows(html), [
+    ['Recordings', '12,345'], ['Scanned', '5 m ago'], ['Time zone', 'America/Chicago'],
+    ['Capacity', '7.2 TB'], ['Used', '64%'], ['Recycle Bin', '12 GB']
+  ]);
+  assert.match(html, /<div class="nd-bar"><span style="width:63\.9%"><\/span><\/div>/, 'the meter');
+  assert.match(html, /<button type="button" class="btn sm" id="refresh-inv">Refresh inventory<\/button>/);
+  assert.match(html, /<a class="btn sm" href="#\/settings\/vehicle\/daily-driver">Vehicle settings<\/a>/);
+  assert.doesNotMatch(html, /Management ready|chip/, 'a share that works needs no chip: if the page shows, it is ready');
+});
+
+test('Overview: only a share with a problem gets a chip; a nearly full share turns the meter amber, then red', () => {
+  const { vehicleTiles } = overview();
+  const ro = vehicleTiles(car({ share: { ...car().share, writable: false } }), 1_000_000);
+  assert.match(ro, /<b>2\.6 TB<\/b><span class="muted small">free<\/span><span class="chip amber">Read-only share<\/span>/);
+  const down = vehicleTiles(car({ share: { healthy: false, writable: null, totalBytes: null, freeBytes: null } }), 1_000_000);
+  assert.match(down, /<b>—<\/b><span class="muted small">free<\/span><span class="chip red">Share unavailable<\/span>/);
+  assert.deepEqual(kvRows(down).slice(3), [['Capacity', 'unknown'], ['Used', '—'], ['Recycle Bin', '12 GB']]);
+  assert.match(down, /<div class="nd-bar"><span style="width:0%"><\/span><\/div>/, 'an empty meter keeps the tile\'s height');
+  const total = 100 * G;
+  assert.match(vehicleTiles(car({ share: { healthy: true, writable: true, totalBytes: total, freeBytes: 0.1 * total } })), /<div class="nd-bar hot">/);
+  assert.match(vehicleTiles(car({ share: { healthy: true, writable: true, totalBytes: total, freeBytes: 0.03 * total } })), /<div class="nd-bar bad">/);
+  const css = fs.readFileSync(path.join(REPO, 'web/shell.css'), 'utf8');
+  assert.match(css, /\.nd-bar\.bad span \{ background: var\(--danger\); \}/);
+});
+
+test('Overview: the vehicle tiles keep their rows whatever the inventory, and escape what they show', () => {
+  const { vehicleTiles } = overview();
+  const rows = (v) => kvRows(vehicleTiles(v, 1_000_000)).map(([k]) => k);
+  const all = rows(car());
+  assert.deepEqual(rows(car({ inventory: null })), all, 'not scanned yet');
+  assert.deepEqual(rows(car({ inventory: null, scanning: true })), all, 'scanning');
+  assert.deepEqual(rows(car({ binBytes: 0 })), all, 'an empty Recycle Bin');
+  assert.deepEqual(kvRows(vehicleTiles(car({ inventory: null }), 1_000_000)).slice(0, 2), [['Recordings', '—'], ['Scanned', 'not yet']]);
+  assert.deepEqual(kvRows(vehicleTiles(car({ inventory: null, scanning: true }), 1_000_000))[1], ['Scanned', 'scanning…']);
+  assert.deepEqual(kvRows(vehicleTiles(car({ binBytes: 0 }), 1_000_000))[5], ['Recycle Bin', 'empty']);
+  const hostile = vehicleTiles(car({ id: '"><img src=x>', name: HOSTILE, timezone: HOSTILE }), 1_000_000);
+  assert.doesNotMatch(hostile, /<img/);
+  assert.match(hostile, /&lt;img src=x onerror=alert\(1\)&gt;/);
+  // no vehicle yet: where to add one
+  const none = vehicleTiles(null);
+  assert.deepEqual(tileTitles(none), ['Vehicles']);
+  assert.match(none, /<a class="btn sm solid" href="#\/settings">Open settings<\/a>/);
+});
+
+test('Overview: one window: the vehicle tiles sit at the top of the Server section, Nerd stats on or off', () => {
+  const app = fs.readFileSync(path.join(REPO, 'web/app.js'), 'utf8');
+  const section = app.match(/\n {2}function serverSection\(\) \{[\s\S]*?\n {2}\}\n/)[0];
+  assert.ok(section.indexOf('${vehicleTiles(current())}') > section.indexOf('class="nd-head"'), 'under the section\'s head');
+  assert.ok(section.indexOf('${vehicleTiles(current())}') < section.indexOf('nd-body'), 'above the server\'s tiles');
+  assert.doesNotMatch(section.slice(section.indexOf('${vehicleTiles')).split('\n')[0], /\bon\b/, 'whatever the switch says');
+  const overviewPage = app.match(/\n {2}pages\.overview = [\s\S]*?\n {2}\};\n/)[0];
+  assert.doesNotMatch(overviewPage, /class="(card|grid2|toolbar)"/, 'no cards of its own beside the section');
+  assert.doesNotMatch(app, /Management ready/);
 });
 
 test('Overview: units read like the mockup', () => {

@@ -120,22 +120,11 @@ p { margin: 0; }
 .pill.active { border-color: var(--accent-border); box-shadow: inset 0 0 0 1px var(--accent-border); background: linear-gradient(180deg, var(--accent-bg), transparent); }
 .pill.add { justify-content: center; align-items: center; flex-direction: row; gap: 8px; color: var(--text-2); min-width: auto; border-style: dashed; }
 
-.toolbar { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; margin-bottom: 26px; flex-wrap: wrap; }
-.toolbar .left { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
-.toolbar .right { display: flex; gap: 12px; flex-wrap: wrap; }
-
 /* cards */
-.grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; margin-bottom: 20px; }
 .card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 28px; margin-bottom: 20px; }
 .card.row { display: flex; justify-content: space-between; align-items: center; gap: 20px; }
-.card-label { color: var(--text-2); font-size: 13px; margin-bottom: 14px; }
-.big { font-family: var(--mono); font-size: 34px; font-weight: 600; letter-spacing: 0.01em; line-height: 1.1; margin-bottom: 14px; }
 .card p { color: var(--text-2); }
 .card h2 + p { margin-top: 12px; max-width: 560px; font-size: 15.5px; line-height: 1.6; color: var(--text); opacity: 0.88; }
-.meter { height: 6px; border-radius: 6px; background: var(--panel-3); overflow: hidden; margin-top: 14px; }
-.meter span { display: block; height: 100%; background: var(--accent); }
-.meter span.warn { background: var(--warn); }
-.meter span.bad { background: var(--danger); }
 .alerts { list-style: none; padding: 0; margin: 16px 0 18px; display: flex; flex-direction: column; gap: 8px; }
 .alert-item { display: grid; grid-template-columns: 10px 1fr auto; gap: 12px; align-items: start; padding: 12px 14px; border-radius: 12px; background: var(--panel-2); border: 1px solid var(--border); }
 .alert-item .dot { margin-top: 7px; }
@@ -285,6 +274,7 @@ details.more p { margin-top: 10px; color: var(--text-2); max-width: 760px; }
 .nd-rows .nd-bar { margin-top: 0; }
 .nd-bar span { display: block; height: 100%; background: var(--accent); border-radius: 99px; }
 .nd-bar.hot span { background: var(--warn); }
+.nd-bar.bad span { background: var(--danger); }
 .nd-disks { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; margin-top: 12px; }
 .nd-disk > div { display: flex; justify-content: space-between; align-items: baseline; gap: 4px 10px; flex-wrap: wrap; }
 .nd-disk > div b { overflow-wrap: anywhere; }
@@ -318,6 +308,14 @@ details.more p { margin-top: 10px; color: var(--text-2); max-width: 760px; }
 /* a compose line stays whole when it fits a line, and wraps only when it is longer */
 .nd-foot code { display: inline-block; max-width: 100%; font-family: var(--mono); font-size: 12px; color: var(--text-2); }
 .nd-nb { white-space: nowrap; }
+/* the selected vehicle's two tiles at the top of the section: side by side,
+   each half the width, their buttons on one line at the bottom */
+.nd-vgrid { grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); }
+.nd-vgrid .nd-tile { display: flex; flex-direction: column; }
+.nd-vgrid .nd-big .chip { align-self: center; }
+.nd-note { margin-top: 10px; font-size: 13.5px; }
+.nd-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: auto; padding-top: 14px; }
+.nd-actions .btn.sm { min-height: 34px; }
 /* one column: the wide tiles too (no implicit second column) */
 @container (max-width: 553px) { .nd-wide { grid-column: auto; } }
 /* browsers without container queries (Safari 15): no wide tiles below desktop widths */
@@ -366,7 +364,6 @@ dialog p { color: var(--text-2); margin-bottom: 8px; }
 html.reduce-effects *, html.reduce-effects *::before { transition: none !important; animation: none !important; -webkit-backdrop-filter: none !important; backdrop-filter: none !important; box-shadow: none !important; }
 
 @media (max-width: 1100px) {
-  .grid2 { grid-template-columns: minmax(0, 1fr); }
   .rec-top { grid-template-columns: 26px 110px minmax(0, 1fr); }
   .rec-actions { grid-column: 2 / -1; justify-content: flex-start; }
   .thumb { width: 110px; height: 66px; }
@@ -397,7 +394,6 @@ html.reduce-effects *, html.reduce-effects *::before { transition: none !importa
   .form, .keep { grid-template-columns: minmax(0, 1fr); }
   .card { padding: 20px; }
   .card.row { flex-direction: column; align-items: flex-start; }
-  .big { font-size: 26px; }
   .frame-wrap { margin: -16px -16px -64px; height: calc(100vh - 66px); height: calc(100dvh - 66px); }
   .kv { grid-template-columns: minmax(0, 1fr); }
   .table, .table tbody, .table tr, .table td { display: block; }
@@ -445,6 +441,6 @@ html.reduce-effects *, html.reduce-effects *::before { transition: none !importa
 /* touch screens: iPhones zoom into fields with text under 16px, so keep it at 16px */
 @media (pointer: coarse) {
   input, select, textarea { font-size: max(16px, 1em); }
-  .nd-range button, .nd-head-right .btn.sm, .days-pick span { min-height: 40px; }
+  .nd-range button, .nd-head-right .btn.sm, .nd-actions .btn.sm, .days-pick span { min-height: 40px; }
   .nd-more { padding: 8px 0; }
 }

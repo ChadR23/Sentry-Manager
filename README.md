@@ -64,11 +64,14 @@ To use a GPU, uncomment its block in `docker-compose.yml` (see [GPU](#gpu)).
 
 ![Overview](docs/images/overview.png)
 
-The overview shows each vehicle's archive, the free space on its share and
-the Recycle Bin.
+The overview is one window, **Server**. At its top, the selected vehicle's
+archive (its size, how many recordings, when it was last scanned, with
+*Refresh inventory*) and the free space on its share (capacity, how full it
+is, what the Recycle Bin holds, with *Vehicle settings*). A chip shows only
+when the share has a problem: *Read-only share* or *Share unavailable*.
 
-**Server** (under the vehicle cards, behind the *Nerd stats* switch) shows
-what the machine is doing, live, so you don't need Glances or another tool:
+Under them, behind the *Nerd stats* switch, what the machine is doing, live,
+so you don't need Glances or another tool:
 
 - **CPU**: model, cores, total and per-core use, clock, temperature, load,
   and how much of it this app and its conversions use.

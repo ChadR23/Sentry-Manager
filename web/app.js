@@ -252,40 +252,25 @@
   document.addEventListener('pointercancel', () => { pressing = null; setTimeout(catchUp, 0); }, true);
   document.addEventListener('selectionchange', () => { if (!pressing) catchUp(); });
 
+  // The Overview is one window, the Server section: the selected vehicle's
+  // archive and free space at its top (with Nerd stats off too), then what
+  // the server is doing. Viewer, Footage, Encoder and the alerts
+  // (Notifications) are tabs of their own.
   pages.overview = async () => {
-    const v = current();
-    let html = head('Your archive workspace', 'Overview') + pills();
-    if (!v) {
-      html += `<div class="card"><h2>Add a vehicle</h2><p>Each vehicle has its own footage share (SMB) or folder. Add one in Settings to start.</p><div class="form-actions" style="justify-content:flex-start"><a class="btn solid" href="#/settings">Open settings</a></div></div>`;
-      keepScroll(() => {
-        page.innerHTML = html + serverSection();
-        mountMonitor();
-      });
-      return;
-    }
-    const s = v.share || {};
-    const ready = s.healthy && s.writable !== false;
-    html += `<div class="toolbar"><div class="left">
-        <span class="chip ${ready ? '' : s.healthy ? 'amber' : 'red'}">${ready ? 'Management ready' : s.healthy ? 'Read-only share' : 'Share unavailable'}</span>
-        <span class="muted">${esc(v.timezone)}</span></div>
-      <div class="right"><a class="btn" href="#/settings/vehicle/${esc(v.id)}">Vehicle settings</a><button class="btn" id="refresh-inv">Refresh inventory</button></div></div>`;
-    const inv = v.inventory;
-    const used = s.totalBytes ? 1 - s.freeBytes / s.totalBytes : null;
-    html += `<div class="grid2">
-      <div class="card"><p class="card-label">Last discovered inventory</p><div class="big">${inv ? bytes(inv.bytes) : '—'}</div>
-        <p>${inv ? `${plural(inv.recordings, 'recording')} · all categories · ${ago(inv.scannedAt)}` : v.scanning ? 'Scanning…' : 'Not scanned yet'}</p></div>
-      <div class="card"><p class="card-label">Last observed free on ${esc(v.name)}</p><div class="big">${bytes(s.freeBytes)}</div>
-        <p>${s.totalBytes ? `${bytes(s.totalBytes)} volume capacity · ${Math.round(used * 100)}% used${v.binBytes ? ` · ${bytes(v.binBytes)} in the Recycle Bin` : ''}` : 'Capacity unknown'}</p>
-        ${used !== null ? `<div class="meter"><span class="${used > 0.95 ? 'bad' : used > 0.85 ? 'warn' : ''}" style="width:${Math.round(used * 100)}%"></span></div>` : ''}</div>
-    </div>`;
-    // Viewer, Footage, Encoder and the alerts (Notifications) are tabs of their own.
     // (a live update redraws it all: the reader stays where they were)
     keepScroll(() => {
-      page.innerHTML = html + serverSection();
-      $('refresh-inv').onclick = () => api(`/api/vehicles/${v.id}/scan`, { body: {} }).then(() => toast('Refreshing the inventory…'), (err) => toast(err.message, true));
-      mountMonitor();
+      page.innerHTML = head('Your archive workspace', 'Overview') + pills() + serverSection();
+      mountOverview();
     });
   };
+
+  /** Wires the Server section, drawn by the page or anew by the Nerd stats switch. */
+  function mountOverview() {
+    const v = current();
+    const refresh = $('refresh-inv');
+    if (refresh && v) refresh.onclick = () => api(`/api/vehicles/${v.id}/scan`, { body: {} }).then(() => toast('Refreshing the inventory…'), (err) => toast(err.message, true));
+    mountMonitor();
+  }
 
   // ---------- Overview > Server ("nerd stats") ----------
   // What the server is doing, from GET /api/stats every 2 s while the
@@ -373,7 +358,7 @@
   const sparkBlock = (svg, day) => (svg && day ? `${svg}<div class="nd-axis"><span>24 h ago</span><span>now</span></div>` : svg);
   // a tile's sparkline keeps its room while it has fewer than two points
   const sparkOrRoom = (svg) => svg || '<svg class="nd-spark" viewBox="0 0 220 40" aria-hidden="true"></svg>';
-  const ndBar = (value, hot = false) => `<div class="nd-bar${hot ? ' hot' : ''}"><span style="width:${clampPct(value)}%"></span></div>`;
+  const ndBar = (value, hot = false, bad = false) => `<div class="nd-bar${bad ? ' bad' : hot ? ' hot' : ''}"><span style="width:${clampPct(value)}%"></span></div>`;
   const ndBig = (value, label) => `<div class="nd-big"><b>${value}</b>${label ? `<span class="muted small">${label}</span>` : ''}</div>`;
   /** key/value rows; values are HTML already escaped by the caller, rows without a value are left out */
   const ndKv = (rows, cls = '') => {
@@ -691,6 +676,42 @@
     return `<span class="chip ${bad ? 'red' : 'amber'}"><span class="cdot"></span>${bad ? plural(n, 'problem') : plural(n, 'warning')}</span>`;
   }
 
+  /**
+   * The top of the Server section: the selected vehicle's last discovered
+   * inventory and the free space last observed on its share, in two tiles
+   * with their buttons. Drawn with the page (not with every poll), so they
+   * show with Nerd stats off too; each keeps its rows, so a live update does
+   * not change its height. Only a share with a problem gets a chip.
+   */
+  function vehicleTiles(v, at = Date.now()) {
+    if (!v) {
+      return `<div class="nd-grid nd-vgrid">${ndTile('Vehicles', 'none yet', '<p class="nd-note">Each vehicle has its own footage share (SMB) or folder. Add one in Settings to start.</p><div class="nd-actions"><a class="btn sm solid" href="#/settings">Open settings</a></div>')}</div>`;
+    }
+    const s = v.share || {};
+    const inv = v.inventory;
+    const known = fin(s.totalBytes) && s.totalBytes > 0 && fin(s.freeBytes);
+    const used = known ? (1 - s.freeBytes / s.totalBytes) * 100 : null;
+    const problem = !s.healthy ? '<span class="chip red">Share unavailable</span>' : s.writable === false ? '<span class="chip amber">Read-only share</span>' : '';
+    const scanned = v.scanning ? 'scanning…' : inv ? sinceText(inv.scannedAt, at) || '—' : 'not yet';
+    const inventory = ndTile('Inventory', 'last discovered', ndBig(inv && fin(inv.bytes) ? size(inv.bytes) : '—', 'all categories')
+      + ndKv([
+        ['Recordings', inv ? Number(inv.recordings || 0).toLocaleString() : '—'],
+        ['Scanned', esc(scanned)],
+        ['Time zone', esc(v.timezone || '—')]
+      ])
+      + '<div class="nd-actions"><button type="button" class="btn sm" id="refresh-inv">Refresh inventory</button></div>');
+    const free = ndTile('Free space', `last observed on ${v.name}`, `<div class="nd-big"><b>${fin(s.freeBytes) ? size(s.freeBytes) : '—'}</b><span class="muted small">free</span>${problem}</div>`
+      // (no capacity known: an empty meter keeps the tile's height)
+      + ndBar(used ?? 0, used > 85, used > 95)
+      + ndKv([
+        ['Capacity', known ? size(s.totalBytes) : 'unknown'],
+        ['Used', known ? pct(used) : '—'],
+        ['Recycle Bin', fin(v.binBytes) && v.binBytes > 0 ? size(v.binBytes) : 'empty']
+      ])
+      + `<div class="nd-actions"><a class="btn sm" href="#/settings/vehicle/${esc(v.id)}">Vehicle settings</a></div>`);
+    return `<div class="nd-grid nd-vgrid">${inventory}${free}</div>`;
+  }
+
   /** Everything under the section's head: alerts, tiles, and what optional compose lines would add. */
   /**
    * `seen` (optional, kept by the caller while the page is open) keeps rows
@@ -766,6 +787,7 @@
           ${on ? `<div class="seg nd-range" role="group" aria-label="Graphs over"><button type="button" data-range="15m">15 min</button><button type="button" data-range="24h">24 h</button></div>
           <a class="btn sm" href="/api/stats/export.csv?range=24h" download title="The last 24 hours as a spreadsheet">CSV</a>` : ''}
           <label class="check small"><input type="checkbox" id="nd-toggle"${on ? ' checked' : ''}> Nerd stats</label></div></div>
+      ${vehicleTiles(current())}
       ${on ? '<div class="nd-body"></div>' : ''}</section>`;
   }
 
@@ -825,7 +847,7 @@
       store.set('nerdStats', e.target.checked);
       releaseMonitorHeight({ rows: true });
       root.outerHTML = serverSection();
-      mountMonitor();
+      mountOverview();
     };
     root.querySelectorAll('[data-range]').forEach((b) => {
       b.onclick = () => {
