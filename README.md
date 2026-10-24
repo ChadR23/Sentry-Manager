@@ -154,16 +154,17 @@ copies somewhere else is a choice you make in the Output section.
   conversion slot. Waiting and time remaining count only clips that will be
   converted.
 - **Hardware panel.** While a conversion runs, Live run shows the encoder
-  and GPU in use, video-engine and CPU load, watts and temperatures, each
-  clip's speed and progress, and the energy used so far (Wh or kWh, clips and
-  GB saved per kWh, cost). Clips and GB per kWh count only what was converted
-  while the energy was measured, so they start at 0 and count up as clips
-  finish: until 10 Wh have been measured they are divided by 10 Wh, so a clip
-  or two never reads as a huge number (a job that was already running when
-  measuring began, for example before a restart, is not divided by a few
-  minutes of energy either). When the server reports the GPU's power but not
-  the CPU's, they count the GPU alone and say *GPU only* (not with a built-in
-  GPU, whose reading is the whole chip's).
+  and GPU in use, video-engine and CPU load, watts and temperatures, and the
+  energy used so far (Wh or kWh, clips and GB saved per kWh, cost). The clips
+  being converted are not listed one by one (they come and go every few
+  seconds). Clips and GB per kWh count only what was converted while the
+  energy was measured, so they start at 0 and count up as clips finish: until
+  10 Wh have been measured they are divided by 10 Wh, so a clip or two never
+  reads as a huge number (a job that was already running when measuring
+  began, for example before a restart, is not divided by a few minutes of
+  energy either). When the server reports the GPU's power but not the CPU's,
+  they count the GPU alone and say *GPU only* (not with a built-in GPU, whose
+  reading is the whole chip's).
 - **Benchmark.** Runs the real converter on copies of a few of your clips
   at 1, 2, 4, 6 and 8 at once, on the server, and suggests the lightest
   setting within 5% of the fastest, and, when the server reports its power,

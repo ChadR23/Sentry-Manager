@@ -458,7 +458,7 @@ test('Overview: units read like the mockup', () => {
   assert.equal(sensorName({ chip: 'it8689', label: 'temp2', kind: 'temp' }), 'it8689 2');
 });
 
-test('Hardware panel: four clips on the Arc, with efficiency and cost', async () => {
+test('Hardware panel: four clips on the Arc, with efficiency and cost; no row per clip', async () => {
   const { renderHardware } = await hardware();
   const html = renderHardware(sample());
   assert.match(html, /<span class="nd-chip" title="hevc_vaapi · Intel Arc A380 · renderD128">hevc_vaapi · Intel Arc A380 · renderD128<\/span><span class="nd-chip">decode: GPU<\/span><span class="nd-chip nd-chip-fit"><span>4 at once<\/span>/);
@@ -472,17 +472,18 @@ test('Hardware panel: four clips on the Arc, with efficiency and cost', async ()
   assert.match(html, /Space saved per kWh<\/span><b>125 GB/);
   assert.doesNotMatch(html, /GPU only/, 'the CPU is measured on this server');
   assert.match(html, /Cost so far<\/span><b>≈ \$0\.05/);
-  assert.equal((html.match(/class="nd-w"/g) || []).length, 4);
-  assert.match(html, /2026-10-20_07-38-45-front\.mp4<\/span><span>71%/);
-  assert.match(html, /412 fps · 6\.9× realtime · 4\.1 Mb\/s · no dropped frames/);
+  // the clips come and go every few seconds: none of them is listed
+  assert.doesNotMatch(html, /nd-workers|class="nd-w|nd-clip|Waiting for the next clip/);
+  assert.doesNotMatch(html, /front\.mp4|412 fps|realtime|Mb\/s|dropped frames|71%/);
+  assert.match(html, /<p class="nd-eff-note">|<\/div><\/div>$/, 'the energy row (and its note) is the last thing in it');
 });
 
-test('Hardware panel: software encoding, NVIDIA, dropped frames, idle and paused', async () => {
+test('Hardware panel: software encoding, NVIDIA, idle and paused', async () => {
   const { renderHardware } = await hardware();
   const amd = renderHardware(sample('amd'));
   assert.match(amd, /libx265 · CPU/);
   assert.doesNotMatch(amd, /Video engine/, 'no GPU in use: no video engine tile');
-  assert.match(amd, /<span class="nd-warn">2 duplicated<\/span>/);
+  assert.doesNotMatch(amd, /nd-warn|duplicated/, 'no line per clip');
   assert.match(amd, /≈ €0\.52/);
   assert.match(amd, /This run<\/span><b>1\.8 kWh/);
   assert.match(amd, /<p class="nd-eff-note">GPU only \(CPU not measured\)<\/p>/, 'no RAPL: the per-kWh numbers are the GPU\'s alone');
@@ -493,20 +494,19 @@ test('Hardware panel: software encoding, NVIDIA, dropped frames, idle and paused
   const nv = renderHardware(sample('nvidia'));
   assert.match(nv, /hevc_nvenc · NVIDIA GeForce RTX 3060/);
   assert.match(nv, /Video engine<\/span><b>41%/, 'the GPU found by name (NVIDIA has no render node)');
-  assert.match(nv, /3 dropped/);
-  assert.match(nv, /starting…/);
+  assert.doesNotMatch(nv, /dropped|starting…/, 'no line per clip');
   assert.doesNotMatch(nv, /Cost so far/, 'no price: no cost');
   const idle = renderHardware(sample('idle'));
   assert.match(idle, /nd-hw-idle/);
   assert.match(idle, /Idle<\/span><span class="nd-chip">Intel Arc A380 · renderD128/);
-  assert.doesNotMatch(idle, /nd-w"/);
+  assert.doesNotMatch(idle, /nd-w"|nd-workers/);
   assert.match(renderHardware(sample('pi')), /CPU encoding \(no GPU encoder seen\)/);
   const paused = sample();
   paused.encoder = { ...paused.encoder, running: false, workers: [] };
   assert.match(renderHardware(paused), /Paused<\/span><span class="nd-chip">hevc_vaapi · Intel Arc A380 · renderD128/);
 });
 
-test('Hardware panel: escapes names, survives odd bodies, folds long worker lists', async () => {
+test('Hardware panel: escapes names, survives odd bodies and long worker lists', async () => {
   const { renderHardware, gpuFor } = await hardware();
   const evil = sample();
   evil.encoder.workers[0].relativePath = `SentryClips/${HOSTILE}.mp4`;
@@ -523,27 +523,17 @@ test('Hardware panel: escapes names, survives odd bodies, folds long worker list
   const many = sample();
   many.encoder.workers = Array.from({ length: 64 }, (_, i) => ({ ...many.encoder.workers[0], itemId: `i${i}` }));
   const big = renderHardware(many);
-  assert.equal((big.match(/class="nd-w"/g) || []).length, 16);
-  assert.match(big, /and 48 more/);
+  assert.match(big, /<span class="nd-chip nd-chip-fit"><span>64 at once<\/span>/);
+  assert.doesNotMatch(big, /nd-w|more<\/p>/, 'no row per clip, and no "and N more"');
   assert.equal(gpuFor([{ name: 'a', node: 'renderD128' }, { name: 'b', node: 'renderD129' }], { node: '/dev/dri/renderD129' }).name, 'b');
   assert.equal(gpuFor([{ name: 'a' }, { name: 'b' }], { node: null, gpuName: 'zzz' }), null, 'never a guess between two GPUs');
 });
 
-test('Hardware panel: one row per conversion at once; a clip keeps its row, a free one waits for the next clip', async () => {
-  const { clipRows, renderHardware, panelMemory } = await hardware();
-  const w = (itemId) => ({ itemId, relativePath: `SentryClips/${itemId}.mp4`, fps: 300 });
-  const ids = (r) => r.rows.map((x) => x?.itemId ?? null);
-  let r = clipRows([w('a'), w('b'), w('c'), w('d')], 4);
-  assert.deepEqual(ids(r), ['a', 'b', 'c', 'd']);
-  // b finishes; e starts later: a, c, d stay where they were, e takes b's row
-  r = clipRows([w('a'), w('c'), w('d')], 4, r.keys);
-  assert.deepEqual(ids(r), ['a', null, 'c', 'd']);
-  r = clipRows([w('a'), w('c'), w('d'), w('e')], 4, r.keys);
-  assert.deepEqual(ids(r), ['a', 'e', 'c', 'd']);
-  assert.deepEqual(ids(clipRows([], 3)), [null, null, null], 'nothing running: the rows stay');
-  assert.deepEqual(ids(clipRows([w('x'), w('y')], 1)), ['x', 'y'], 'more running than set (lowered while running): a row each');
-  assert.deepEqual(ids(clipRows([w('x')], null)), ['x'], 'no concurrency known: as many as run');
-
+test('Hardware panel: no row per clip, whether four, one or none are running; the state chip keeps its width', async () => {
+  const mod = await hardware();
+  const { renderHardware, panelMemory } = mod;
+  assert.equal(mod.clipRows, undefined, 'the rows and their bookkeeping are gone');
+  assert.equal('clips' in panelMemory(), false);
   const memo = panelMemory();
   const body = (workers) => {
     const s = sample();
@@ -554,12 +544,12 @@ test('Hardware panel: one row per conversion at once; a clip keeps its row, a fr
   };
   const four = renderHardware(body(4), memo);
   const one = renderHardware(body(1), memo);
-  assert.equal((one.match(/class="nd-w"/g) || []).length, 1);
-  assert.equal((one.match(/class="nd-w nd-w-idle"/g) || []).length, 3);
-  assert.match(one, /<span class="nd-clip">Waiting for the next clip<\/span>/);
-  assert.equal((four.match(/class="nd-w[ "]/g) || []).length, (one.match(/class="nd-w[ "]/g) || []).length, 'the same number of rows');
   const none = renderHardware(body(0), memo);
-  assert.equal((none.match(/nd-w-idle/g) || []).length, 4, 'checking and saving: four rows still');
+  for (const html of [four, one, none]) assert.doesNotMatch(html, /nd-workers|nd-w|Waiting for the next clip|\.mp4/);
+  // the same lines whichever clips run: only the state chip's wording changes
+  const shape = (html) => html.replace(/<span class="nd-chip nd-chip-fit">.*?<\/span><\/div>/, '');
+  assert.equal(shape(one), shape(four));
+  assert.equal(shape(none), shape(four));
   // the state chip holds every wording it can show, so its width (and the
   // head's lines) stay put: "4 at once", "saving…" between clips, "scanning…"
   const chipOf = (html) => html.match(/<span class="nd-chip nd-chip-fit">(.*?)<\/span><\/div>/)[1];
@@ -626,7 +616,7 @@ test('Hardware panel: a sample without the GPU or its power reading changes no l
     over(s);
     return renderHardware(s, memo);
   };
-  const shape = (html) => html.replace(/>[^<]*</g, '><').replace(/(style|title)="[^"]*"/g, '').replace(/ (hot|nd-w-idle)"/g, '"').replace(/<span aria-hidden="true"><\/span>/g, '');
+  const shape = (html) => html.replace(/>[^<]*</g, '><').replace(/(style|title)="[^"]*"/g, '').replace(/ hot"/g, '"').replace(/<span aria-hidden="true"><\/span>/g, '');
   const first = poll(() => {});
   assert.match(first, /<span>Video engine<\/span>/);
   assert.match(first, /nd-eff-note/);
@@ -657,7 +647,7 @@ test('Hardware panel: a highlight in it is not taken away by a poll; it catches 
   await settle();
   const before = panel.innerHTML;
   assert.match(before, /Video engine/);
-  // the reader highlights a clip's name; the next poll has other numbers
+  // the reader highlights the encoder's name; the next poll has other numbers
   selection = { isCollapsed: false, rangeCount: 1, getRangeAt: () => ({ commonAncestorContainer: inside }) };
   body = sample();
   body.gpus[0].video = 12;
@@ -688,7 +678,7 @@ test('Hardware panel: never shorter while a job runs; back to its own height whe
   startHardwarePanel({ doc, win, fetchImpl });
   await settle();
   assert.equal(panel.style.minHeight, '600px');
-  height = 480; // a clip row and a tile went away
+  height = 480; // a tile and the energy row went away
   await poll();
   assert.equal(panel.style.minHeight, '600px', 'kept');
   height = 640;

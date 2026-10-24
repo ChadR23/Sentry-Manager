@@ -1,13 +1,10 @@
-// The Encoder's Hardware panel, inside Live run: what the running conversion
-// uses (encoder, GPU, decoding) and what it costs, one row per clip being
-// converted. From GET /api/stats (the `encoder` block) every 2 s while the
-// page is on screen; with no conversion running, one compact line with the
-// device instead. Names, paths and models come from the machine, so every
-// value is escaped.
+// The Encoder's Hardware panel, inside Live run: what the running
+// conversion uses (encoder, GPU, decoding) and what it costs. From GET /api/stats (the `encoder` block) every 2 s while the page
+// is on screen; with no conversion running, one compact line with the device
+// instead. Names and models come from the machine, so every value is escaped.
 
 const POLL_MS = 2000;
 const TIMEOUT_MS = 10000;
-const WORKERS_SHOWN = 16;
 
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const fin = (n) => typeof n === 'number' && Number.isFinite(n);
@@ -65,22 +62,6 @@ export function gpuFor(gpus, device) {
         || (list.length === 1 ? list[0] : null);
 }
 
-
-function workerRow(w) {
-    const done = fin(w.outTimeUs) && fin(w.durationUs) && w.durationUs > 0 ? Math.min(100, (w.outTimeUs / w.durationUs) * 100) : null;
-    // numbers only, so the meta line needs no escaping
-    const meta = [];
-    if (fin(w.fps) && w.fps > 0) meta.push(`${group(w.fps)} fps`);
-    if (fin(w.speed) && w.speed > 0) meta.push(`${w.speed.toFixed(1)}× realtime`);
-    if (fin(w.bitrateKbps) && w.bitrateKbps > 0) meta.push(`${(w.bitrateKbps / 1000).toFixed(1)} Mb/s`);
-    const drop = fin(w.dropFrames) ? w.dropFrames : 0;
-    const dup = fin(w.dupFrames) ? w.dupFrames : 0;
-    if (!meta.length) meta.push('starting…');
-    else if (drop || dup) meta.push(`<span class="nd-warn">${[drop && `${group(drop)} dropped`, dup && `${group(dup)} duplicated`].filter(Boolean).join(' · ')}</span>`);
-    else meta.push('no dropped frames');
-    return `<div class="nd-w"><div class="nd-w-top"><span class="nd-clip" title="${esc(w.relativePath)}">${esc(base(w.relativePath) || w.itemId || 'clip')}</span><span>${done === null ? '' : pct(done)}</span></div>${bar(done ?? 0)}<div class="nd-w-meta">${meta.join(' · ')}</div></div>`;
-}
-
 // A device of `encoder.devices` (several GPUs converting): its name, encoder,
 // how many clips it has and how busy its video engine is.
 function deviceLine(d) {
@@ -94,62 +75,29 @@ function deviceLine(d) {
     return `<div class="nd-dev${hot ? ' hot' : ''}" title="${esc(text)}">${esc(text)}</div>`;
 }
 
-// A row kept for a conversion slot with no ffmpeg running in it right now
-// (a clip finished, is being checked and saved, or the next one starts):
-// the same lines as a clip's row, so the list never closes up.
-const idleRow = () => `<div class="nd-w nd-w-idle"><div class="nd-w-top"><span class="nd-clip">Waiting for the next clip</span><span></span></div>${bar(0)}<div class="nd-w-meta">&nbsp;</div></div>`;
-
 // these drivers report the video engine's use whenever a clip runs
 const VIDEO_VENDORS = new Set(['amd', 'intel', 'nvidia']);
 
-const clipKey = (w, i) => String(w.itemId ?? w.pid ?? `#${i}`);
-
-/**
- * The clips in rows that stay put: one row per conversion the job runs at
- * once (`slots`, more when more are running), a running clip keeps the row
- * it had (`previous`: the keys of the last rows) and a new one takes the
- * first free row. Returns the rows (a worker or null) and their keys.
- */
-export function clipRows(workers, slots, previous = []) {
-    const list = Array.isArray(workers) ? workers.filter(Boolean) : [];
-    const size = Math.max(fin(slots) && slots > 0 ? Math.floor(slots) : 0, list.length);
-    const rows = new Array(size).fill(null);
-    const byKey = new Map(list.map((w, i) => [clipKey(w, i), w]));
-    const placed = new Set();
-    (Array.isArray(previous) ? previous : []).forEach((key, i) => {
-        if (i < size && key !== null && byKey.has(key) && !placed.has(key)) {
-            rows[i] = byKey.get(key);
-            placed.add(key);
-        }
-    });
-    for (const [key, w] of byKey) {
-        if (placed.has(key)) continue;
-        rows[rows.indexOf(null)] = w;
-        placed.add(key);
-    }
-    return { rows, keys: rows.map((w) => (w ? clipKey(w, list.indexOf(w)) : null)) };
-}
-
 /**
  * What the panel keeps between polls while the page stays open, so it
- * does not jump: the tiles it has shown, the devices it has listed, the
- * row of each running clip, whether the CPU's power is measured and what
- * the GPU tile is called. Another job, or the panel going idle, starts it
- * over (`fresh` tells the poller to let the panel's height go too).
+ * does not jump: the tiles it has shown, the devices it has listed, whether
+ * the CPU's power is measured and what the GPU tile is called. Another job,
+ * or the panel going idle, starts it over (`fresh` tells the poller to let
+ * the panel's height go too).
  */
 export function panelMemory() {
-    return { view: null, tiles: new Set(), devices: new Map(), clips: [], cpuMeasured: null, videoLabel: null, fresh: false };
+    return { view: null, tiles: new Set(), devices: new Map(), cpuMeasured: null, videoLabel: null, fresh: false };
 }
 
 function remember(memo, view) {
     if (!memo || memo.view === view) return;
-    Object.assign(memo, { view, tiles: new Set(), devices: new Map(), clips: [], cpuMeasured: null, videoLabel: null, fresh: true });
+    Object.assign(memo, { view, tiles: new Set(), devices: new Map(), cpuMeasured: null, videoLabel: null, fresh: true });
 }
 
 /**
  * The panel's inner HTML for a GET /api/stats body, or '' when there is
  * nothing to show (no numbers at all). With `memo` (panelMemory(), kept by
- * the caller), tiles, device lines and clip rows stay in place between polls.
+ * the caller), tiles and device lines stay in place between polls.
  */
 export function renderHardware(stats, memo = null) {
     if (!stats || typeof stats !== 'object') return '';
@@ -196,8 +144,8 @@ export function renderHardware(stats, memo = null) {
     }
     if (device?.decode) chips.push(chip(`decode: ${device.decode === 'gpu' ? 'GPU' : 'CPU'}`));
     // no ffmpeg running: still scanning the folders for clips, or between
-    // clips (each one is checked and saved before the next takes its row);
-    // short words, so the chip is no wider than "3 at once"
+    // clips (each one is checked and saved before the next starts); short
+    // words, so the chip is no wider than "3 at once"
     const scanning = !enc?.state || enc.state === 'discovering';
     const atOnce = `${Math.max(workers.length, fin(enc.concurrency) ? enc.concurrency : 0)} at once`;
     chips.push(fitChip(workers.length ? `${workers.length} at once` : scanning ? 'scanning…' : 'saving…', [atOnce, 'scanning…', 'saving…']));
@@ -260,14 +208,6 @@ export function renderHardware(stats, memo = null) {
     }
     if (fin(run.cost)) eff.push(['Cost so far', money(run.cost, stats.price?.currency)]);
 
-    // one row per conversion the job runs at once, a clip in each or not
-    const shown = workers.slice(0, WORKERS_SHOWN);
-    const slots = fin(enc.concurrency) ? Math.min(WORKERS_SHOWN, enc.concurrency) : 0;
-    const placed = clipRows(shown, slots, memo?.clips);
-    if (memo) memo.clips = placed.keys;
-    const rows = placed.rows.map((w) => (w ? workerRow(w) : idleRow())).join('')
-        + (workers.length > shown.length ? `<p class="nd-w-more">and ${workers.length - shown.length} more</p>` : '');
-
     // one line per device: Intel Arc A380 · hevc_qsv · 3 converting · video 72%
     const lines = several ? devices.map(deviceLine).join('') : '';
 
@@ -275,8 +215,7 @@ export function renderHardware(stats, memo = null) {
         + (lines ? `<div class="nd-devices">${lines}</div>` : '')
         + (tiles.length ? `<div class="nd-hw-tiles">${tiles.join('')}</div>` : '')
         + (eff.length ? `<div class="nd-eff">${eff.map(([k, v]) => `<div><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join('')}</div>` : '')
-        + (note ? `<p class="nd-eff-note">${esc(note)}</p>` : '')
-        + (rows ? `<div class="nd-workers">${rows}</div>` : '');
+        + (note ? `<p class="nd-eff-note">${esc(note)}</p>` : '');
 }
 
 /**
@@ -295,7 +234,7 @@ export function startHardwarePanel({ doc = document, win = window, fetchImpl = (
     let memo = panelMemory();
     // Rebuilt on every poll: the panel never gets shorter while the page is
     // open and the job runs, so the counters and settings below it stay put
-    // when a clip row or a tile comes and goes. Another job, the panel going
+    // when a tile, a device line or the energy row comes and goes. Another job, the panel going
     // idle, coming back to the Encoder or another width let it go.
     let tallest = 0;
     const release = () => {
@@ -389,7 +328,7 @@ export function startHardwarePanel({ doc = document, win = window, fetchImpl = (
             shownByShell = false;
             stop();
         } else if (event.data?.type === 'shown') {
-            // back on the Encoder: the panel starts from its own height and rows
+            // back on the Encoder: the panel starts from its own height
             shownByShell = true;
             memo = panelMemory();
             release();

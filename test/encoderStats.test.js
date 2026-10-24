@@ -109,7 +109,7 @@ test('the Hardware panel: per kWh from 0, counting up as clips finish; Wh below 
   assert.equal(energyText(250000), '250 kWh');
 });
 
-test('the block says how many clips the job converts at once (the panel keeps a row for each)', () => {
+test('the block says how many clips the job converts at once (the panel\'s "N at once")', () => {
   const block = (config, slotsOf = null) => encoderBlock({ snapshot: {}, jobs: new Map([['j1', { id: 'j1', state: 'encoding', items: [], counters: {}, config }]]), workers: [worker()], slotsOf });
   assert.equal(block({ concurrency: 4 }).concurrency, 4);
   assert.equal(block({ concurrency: 4, lanes: [{ device: 'pci:0000:03:00.0', concurrency: 3 }, { device: 'cpu', concurrency: 1 }] }).concurrency, 4);
