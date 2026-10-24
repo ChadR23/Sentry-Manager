@@ -736,12 +736,39 @@ async function main() {
     if (typeof preview !== 'boolean') throw new HttpError(400, 'preview is true or false.');
     if (!preview && body.confirm !== true) throw new HttpError(400, 'Confirm clearing the finished jobs.');
     const vehicleId = vehicle === null ? null : vehicleOr404(vehicle).id;
+    // rows of conversions the converter no longer runs get their real end first
+    settleConversionRows();
     const keepExternal = [...converterJobs.values()].filter((s) => CONVERTER_ACTIVE.has(s.state)).map((s) => `converter:${s.id}`);
     if (preview) return { jobs: jobs.finished({ vehicleId, keepExternal }) };
     const cleared = jobs.clear({ vehicleId, keepExternal });
     audit.info(`Jobs cleared: ${cleared} finished job(s)${vehicleId ? ` of ${vehicleId}` : ''}: ${by(req, user)}`);
     return { cleared };
   });
+
+  /**
+   * A conversion's row on Jobs follows the converter's job, but a job the
+   * converter no longer has (discarded, set aside, from an older version) or
+   * one that ended while its row was not told stayed "running" for good, and
+   * Clear jobs could never take it off. Once the converter has listed its
+   * jobs, such a row gets the job's real end, or "interrupted" when the
+   * converter no longer has it. Rows of jobs it still runs or holds paused
+   * are left alone.
+   */
+  let converterListed = false;
+  function settleConversionRows() {
+    if (!converterListed) return 0;
+    let n = 0;
+    for (const row of db.jobs({ limit: 500 })) {
+      if (row.type !== 'conversion' || row.status !== 'running' || !String(row.externalId || '').startsWith('converter:')) continue;
+      const s = converterJobs.get(row.externalId.slice('converter:'.length));
+      if (s && CONVERTER_ACTIVE.has(s.state)) continue;
+      if (s) mirrorConverterJob(s);
+      else jobs.finish(row.id, { status: 'interrupted', detail: `${row.detail ? `${row.detail} · ` : ''}the converter no longer has this job` });
+      n++;
+    }
+    if (n) log.info(`Jobs: ${n} conversion row(s) the converter no longer runs were settled`);
+    return n;
+  }
 
   // Overview > Server and the Encoder's Hardware panel
   r.add('GET', '/api/stats', () => {
@@ -1116,7 +1143,13 @@ async function main() {
       mirrorConverterJob(event.snapshot);
     });
     // jobs from before a restart (a paused one still owns its clips)
-    for (const s of await runtime.service.list().catch(() => [])) if (!converterJobs.has(s.id)) converterJobs.set(s.id, s);
+    // (only a list that loaded settles rows: a failed one would end them all)
+    const listed = await runtime.service.list().catch(() => null);
+    for (const s of listed || []) if (!converterJobs.has(s.id)) converterJobs.set(s.id, s);
+    if (Array.isArray(listed)) {
+      converterListed = true;
+      settleConversionRows();
+    }
   }).catch((err) => log.error(`Converter unavailable: ${err.code || err.message}`));
 
   // Clip results of a converter job (its counters only hold files and bytes).

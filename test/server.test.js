@@ -371,6 +371,7 @@ test('Studio is served with the web shim; converter bridge enforces Quick and al
     assert.equal(dismissed.data.ok, true, JSON.stringify(dismissed.data));
     await new Promise((r) => setTimeout(r, 300));
     assert.ok(!(await s.call('GET', '/api/jobs')).data.jobs.some((j) => j.type === 'conversion'), 'a dismissed summary is no news');
+
   } finally {
     await s.stop();
     await fsp.rm(dir, { recursive: true, force: true });
@@ -521,7 +522,15 @@ test('Jobs: Clear jobs takes finished jobs off the list after sign-in, from the 
     let list = (await s.call('GET', '/api/jobs?vehicle=daily-driver')).data.jobs;
     assert.equal(list.find((j) => j.id === stopped).status, 'interrupted', 'a scan stopped by the restart is not running forever');
     assert.match(list.find((j) => j.id === stopped).detail, /stopped by a restart/);
-    assert.equal(list.find((j) => j.id === paused).status, 'running', 'conversions stay with the converter');
+    // a conversion row whose job the converter no longer has (discarded, set
+    // aside, from an older version) is not "running" for good: once the
+    // converter has listed its jobs, the row is interrupted
+    const settled = await waitFor(async () => {
+      const row = (await s.call('GET', '/api/jobs?vehicle=daily-driver')).data.jobs.find((j) => j.id === paused);
+      return row?.status === 'interrupted' ? row : null;
+    }, 60000);
+    assert.match(settled.detail, /the converter no longer has this job/);
+    list = (await s.call('GET', '/api/jobs?vehicle=daily-driver')).data.jobs;
 
     // (a busy machine: the scan may take a while; how it ends does not matter here)
     const scan = await s.call('POST', '/api/vehicles/daily-driver/scan', {});
@@ -560,7 +569,7 @@ test('Jobs: Clear jobs takes finished jobs off the list after sign-in, from the 
     assert.equal(preview.status, 200);
     const finished = (await s.call('GET', '/api/jobs?vehicle=daily-driver')).data.jobs.filter((j) => j.status !== 'running');
     assert.equal(preview.data.jobs, finished.length, 'the confirmation counts what goes');
-    assert.deepEqual(finished.map((j) => j.id).sort((x, y) => x - y), [stopped, scanned.id], 'the new scan and the one the restart stopped');
+    assert.deepEqual(finished.map((j) => j.id).sort((x, y) => x - y), [stopped, paused, scanned.id].sort((x, y) => x - y), 'the new scan, the one the restart stopped and the orphaned conversion');
     assert.equal((await s.call('GET', '/api/jobs')).data.jobs.filter((j) => j.status !== 'running').length, finished.length, 'a preview clears nothing');
 
     // another open page hears about it
@@ -578,7 +587,7 @@ test('Jobs: Clear jobs takes finished jobs off the list after sign-in, from the 
     await reader.cancel();
     assert.match(seen, /"jobs"/, 'announced on the live updates');
     list = (await s.call('GET', '/api/jobs?vehicle=daily-driver')).data.jobs;
-    assert.deepEqual(list.map((j) => [j.id, j.status]), [[paused, 'running']], 'running, waiting and paused jobs stay');
+    assert.deepEqual(list.map((j) => [j.id, j.status]), [], 'everything finished is gone, the orphaned conversion row too');
     assert.match(fs.readFileSync(path.join(dir, 'data', 'logs', 'manager.log'), 'utf8'), /\[audit\] Jobs cleared: \d+ finished job\(s\) of daily-driver: admin from/);
   } finally {
     await s.stop();
