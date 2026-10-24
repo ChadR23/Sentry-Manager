@@ -285,6 +285,7 @@ class GpuProvider {
     this.fdCache = new Map(); // `${pid}:${start}` -> { at, fds }
     this.prevClients = new Map(); // `${pdev}|${client}` -> { t, info }
     this.perPid = new Map();
+    this.drmOpen = true;
     this.hasNvidia = false;
     this.nvidia = new NvidiaSmi({ spawn, timers, now, intervalMs, log });
   }
@@ -372,6 +373,7 @@ class GpuProvider {
     const seen = new Set();
     const next = new Map();
     const alive = new Set();
+    let drmOpen = !procs; // without the process list, nothing is known
     const gpuOf = (key) => {
       if (!byGpu.has(key)) byGpu.set(key, { engines: {}, pids: new Set(), measured: false });
       return byGpu.get(key);
@@ -385,6 +387,7 @@ class GpuProvider {
         cache = { at: t, fds: this.scanFds(p.pid) };
         this.fdCache.set(key, cache);
       }
+      if (cache.fds.length) drmOpen = true;
       for (const fd of cache.fds) {
         const text = readText(join(this.procRoot, String(p.pid), 'fdinfo', fd));
         if (text === null) {
@@ -418,6 +421,8 @@ class GpuProvider {
     }
     for (const k of this.fdCache.keys()) if (!alive.has(k)) this.fdCache.delete(k);
     this.prevClients = next;
+    // none of the app's processes has a GPU open: its use is 0 on every GPU
+    this.drmOpen = drmOpen;
     this.perPid = new Map([...perPid].map(([pid, engines]) => [pid, groupMax(engines, VIDEO_ENGINE)]));
     return byGpu;
   }
@@ -449,8 +454,12 @@ class GpuProvider {
         busy: null, video: null, vramUsedB: null, vramTotalB: c.vramTotalB, clockMHz: null, tempC: null, powerW: null,
         clients: null, integrated: Boolean(c.integrated), powerSource: null
       };
-      // no client of ours: idle for us; a client seen for the first time: not known yet
-      if (c.fdinfoSeen) {
+      // no client of ours: idle for us; a client seen for the first time: not known yet.
+      // Until this kernel's fdinfo has been seen to report clients, a GPU open
+      // by ffmpeg is unknown (kernels before 5.19 report none); with no GPU
+      // open by any of the app's processes, it is idle for us all the same
+      // (right after a start, before the first conversion).
+      if (c.fdinfoSeen || (!this.drmOpen && (c.kind === 'amd' || c.kind === 'intel'))) {
         const known = !g || g.measured;
         entry.video = known ? (g ? pct(groupMax(g.engines, VIDEO_ENGINE)) ?? 0 : 0) : null;
         if (c.kind !== 'amd') entry.busy = known ? (g ? pct(groupMax(g.engines, RENDER_ENGINE)) ?? 0 : 0) : null;

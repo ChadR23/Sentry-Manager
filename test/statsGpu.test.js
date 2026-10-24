@@ -76,6 +76,52 @@ test('a GPU client is counted once even through two fds, and only for the GPU it
   }
 });
 
+test('right after a start, before the first conversion: the GPU is idle for us (0 %), not unknown', async () => {
+  // the owner's server after an update: no ffmpeg yet, so no GPU client has been seen
+  const idle = (p) => {
+    const files = M.amd(p);
+    for (const k of Object.keys(files)) if (k.startsWith('proc/400/')) delete files[k];
+    return files;
+  };
+  const s = setup(idle, { appPid: 8 });
+  try {
+    let [gpu] = (await s.run(1)).gpus;
+    assert.deepEqual([gpu.video, gpu.clients, gpu.busy], [0, 0, 37], 'video engine 0 %, no clients; busy from the driver');
+    // the first conversion starts: unknown for its first sample, then measured
+    s.m.update(M.amd(2));
+    fs.symlinkSync('/dev/dri/renderD128', `${s.m.proc}/400/fd/7`); // update() writes files only
+    s.clock.advance(2000);
+    s.stats.sampleNow();
+    await s.stats.settle();
+    [gpu] = s.stats.snapshot().gpus;
+    assert.deepEqual([gpu.video, gpu.clients], [null, 1], 'a client seen for the first time: not known yet');
+    s.m.update(M.amd(3));
+    s.clock.advance(2000);
+    s.stats.sampleNow();
+    await s.stats.settle();
+    [gpu] = s.stats.snapshot().gpus;
+    assert.equal(gpu.clients, 1);
+    assert.ok(gpu.video > 0, 'measured');
+  } finally {
+    s.done();
+  }
+});
+
+test('a kernel that reports no GPU clients in fdinfo: with ffmpeg holding the GPU, its use stays unknown', async () => {
+  const old = (p) => {
+    const files = M.amd(p);
+    files['proc/400/fdinfo/7'] = 'pos:\t0\nflags:\t02100002\nmnt_id:\t26\n';
+    return files;
+  };
+  const s = setup(old, { appPid: 8 });
+  try {
+    const [gpu] = (await s.run(2)).gpus;
+    assert.deepEqual([gpu.video, gpu.clients], [null, null], 'not 0: ffmpeg has the GPU open and its use cannot be read');
+  } finally {
+    s.done();
+  }
+});
+
 test('a GPU in runtime suspend is not asked anything (that would wake it)', async () => {
   const asked = [];
   const fsp = { ...fs.promises, readFile: (file, enc) => { asked.push(file); return fs.promises.readFile(file, enc); } };
