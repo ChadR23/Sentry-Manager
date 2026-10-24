@@ -970,9 +970,10 @@
       <div class="nd-title"><span>Logs</span><span class="muted">newest first</span></div>
       <div class="nd-logs-bar"><p class="muted small">Warnings and errors from the server, the converter and the container. Kept in the data folder (<code>logs/manager.log</code>), so nothing needs a shell on the server.</p>
         <div class="nd-logs-actions"><label class="check small"><input type="checkbox" id="log-all" data-kept${logs.all ? ' checked' : ''}> Everything</label>
-          <button type="button" class="btn sm" id="log-refresh">Refresh</button><a class="btn sm" href="/api/logs/download" download>Download</a></div></div>
+          <button type="button" class="btn sm" id="log-refresh">Refresh</button><a class="btn sm" href="/api/logs/download" download>Download</a><button type="button" class="btn sm" id="log-clear">Clear</button></div></div>
       <p class="sr-only" id="log-status" role="status"></p>
-      <div class="logbox" id="log-list"${logs.tallest ? ` style="min-height:${logs.tallest}px"` : ''}>${logs.html || '<p class="muted small">Loading…</p>'}</div></div>`;
+      <div class="logbox" id="log-list"${logs.tallest ? ` style="min-height:${logs.tallest}px"` : ''}>${logs.html || '<p class="muted small">Loading…</p>'}</div>
+      <details class="log-archive" id="log-archive"${logs.archiveOpen ? ' open' : ''}><summary>Cleared logs</summary><div id="log-archive-list"><p class="muted small">Loading…</p></div></details></div>`;
   }
 
   /** Back to the box's own height (a new visit, the other list, a resize). */
@@ -995,8 +996,46 @@
       loadLogs({ tell: true });
     };
     $('log-refresh').onclick = () => loadLogs({ tell: true });
+    $('log-clear').onclick = async () => {
+      const ok = await confirmDialog({
+        title: 'Clear the logs?',
+        body: '<p>The logs start empty. Nothing is deleted: the current lines move to <code>logs/archive/</code> in the data folder, and you can download them under Cleared logs.</p>',
+        ok: 'Clear logs'
+      });
+      if (!ok) return;
+      try {
+        await api('/api/logs/clear', { method: 'POST' });
+        toast('Logs cleared. The earlier lines are under Cleared logs.');
+      } catch (err) {
+        toast(err.message, true);
+      }
+      releaseLogsHeight({ scroll: true });
+      loadLogs({ tell: true });
+      loadLogArchive();
+    };
+    $('log-archive').ontoggle = (e) => {
+      logs.archiveOpen = e.target.open;
+      if (e.target.open) loadLogArchive();
+    };
+    loadLogArchive();
     // the lines come after the page has shown
     requestAnimationFrame(() => setTimeout(loadLogs, 0));
+  }
+
+  async function loadLogArchive() {
+    const list = $('log-archive-list');
+    if (!list) return;
+    let html;
+    try {
+      const { archives = [] } = await api('/api/logs/archive', { timeoutMs: 15000 });
+      html = archives.length
+        ? `<ul>${archives.map((a) => `<li><a href="/api/logs/archive/${encodeURIComponent(a.name)}" download>${esc(when(a.at))}</a> <span class="muted small">${bytes(a.bytes)}</span></li>`).join('')}</ul>`
+        : '<p class="muted small">None yet. Clear moves the logs here instead of deleting them.</p>';
+    } catch (err) {
+      html = `<p class="muted small">Could not list them: ${esc(err.message)}</p>`;
+    }
+    const now = $('log-archive-list');
+    if (now) now.innerHTML = html;
   }
 
   /** `tell`: the reader asked (Refresh, Everything), so the status says what arrived. */

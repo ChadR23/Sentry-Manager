@@ -100,6 +100,78 @@ class Logger extends EventEmitter {
     }
   }
 
+  get archiveDir() {
+    return this.file ? path.join(path.dirname(this.file), 'archive') : null;
+  }
+
+  /**
+   * Clear the logs without losing them: the kept file(s) move into
+   * logs/archive/ as one file named for the moment, and the Logs start empty.
+   * Returns the archive's name (null when there was nothing to keep).
+   */
+  archive() {
+    this.lines = [];
+    if (!this.file) return null;
+    const parts = [`${this.file}.1`, this.file].map((f) => {
+      try {
+        return fs.readFileSync(f);
+      } catch {
+        return null;
+      }
+    }).filter((b) => b && b.length);
+    let name = null;
+    if (parts.length) {
+      fs.mkdirSync(this.archiveDir, { recursive: true, mode: 0o700 });
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      name = `manager-${stamp}.log`;
+      // wx: never over an existing file (two clears in the same millisecond)
+      fs.writeFileSync(path.join(this.archiveDir, name), Buffer.concat(parts), { mode: 0o600, flag: 'wx' });
+    }
+    for (const f of [`${this.file}.1`, this.file]) {
+      try {
+        fs.unlinkSync(f);
+      } catch {
+        // not there
+      }
+    }
+    this.fileBytes = 0;
+    return name;
+  }
+
+  /** The archived logs, newest first: { name, bytes, at }. */
+  archives() {
+    const dir = this.archiveDir;
+    if (!dir) return [];
+    let names = [];
+    try {
+      names = fs.readdirSync(dir).filter((n) => ARCHIVE_NAME.test(n));
+    } catch {
+      return [];
+    }
+    return names.map((name) => {
+      try {
+        const st = fs.lstatSync(path.join(dir, name));
+        return st.isFile() ? { name, bytes: st.size, at: st.mtimeMs } : null;
+      } catch {
+        return null;
+      }
+    }).filter(Boolean).sort((a, b) => b.name.localeCompare(a.name));
+  }
+
+  /** One archived log's text, or null (only names archive() makes, never a link). */
+  async archiveText(name) {
+    if (!this.archiveDir || typeof name !== 'string' || !ARCHIVE_NAME.test(name)) return null;
+    let fh;
+    try {
+      fh = await fs.promises.open(path.join(this.archiveDir, name), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+      return await fh.readFile('utf8');
+    } catch {
+      return null;
+    } finally {
+      await fh?.close();
+    }
+  }
+
   scope(name) {
     return {
       debug: (m) => this.write('debug', name, m),
@@ -143,5 +215,7 @@ class Logger extends EventEmitter {
     return parts.join('');
   }
 }
+
+const ARCHIVE_NAME = /^manager-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z\.log$/;
 
 module.exports = { Logger, redact, LEVELS };

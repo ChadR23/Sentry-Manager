@@ -530,6 +530,24 @@ async function main() {
   r.add('POST', '/api/support/read', () => support.read());
   r.add('POST', '/api/support/close', () => support.close());
   r.add('GET', '/api/support/attachment', (req, res, { query }) => support.attachment(res, query.u));
+  // Clear: the logs move into logs/archive/ (never deleted); each archive can
+  // be downloaded later.
+  r.add('POST', '/api/logs/clear', (req, res, { user }) => {
+    const name = logger.archive();
+    audit.info(`Logs cleared${name ? ` (earlier lines kept in logs/archive/${name})` : ''}: ${by(req, user)}`);
+    return { ok: true, archived: name };
+  });
+  r.add('GET', '/api/logs/archive', () => ({ archives: logger.archives() }));
+  r.add('GET', '/api/logs/archive/:name', async (req, res, { params }) => {
+    const text = await logger.archiveText(params.name);
+    if (text === null) throw new HttpError(404, 'No such archived log.');
+    res.writeHead(200, {
+      'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
+      'Content-Disposition': `attachment; filename="sentry-six-manager-${params.name.slice('manager-'.length)}"`
+    });
+    res.end(text);
+    return undefined;
+  });
   r.add('GET', '/api/logs/download', async (req, res) => {
     const text = await logger.fileText();
     res.writeHead(200, {

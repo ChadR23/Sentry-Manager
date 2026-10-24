@@ -221,6 +221,10 @@ details.more p { margin-top: 10px; color: var(--text-2); max-width: 760px; }
 .kv { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 8px 18px; font-size: 13.5px; }
 .kv dt { color: var(--muted); }
 .kv dd { margin: 0; word-break: break-word; }
+/* Overview > Logs: the cleared (archived) logs */
+.log-archive { margin-top: 10px; font-size: 13px; }
+.log-archive summary { cursor: pointer; color: var(--text-2); }
+.log-archive ul { margin: 8px 0 0; padding-left: 18px; display: grid; gap: 4px; }
 /* Support: the Sentry Team 6 insignia above the chat (six taps answer) */
 .st6 { display: inline-flex; align-items: center; gap: 8px; margin: 0 0 12px; padding: 5px 12px 5px 9px; border: 1px dashed var(--border-strong); border-radius: 6px; background: none; color: var(--muted); font: 700 11.5px/1 var(--mono); letter-spacing: .22em; text-transform: uppercase; cursor: default; user-select: none; -webkit-tap-highlight-color: transparent; }
 .st6 .i { width: 15px; height: 15px; }

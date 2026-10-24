@@ -57,3 +57,29 @@ test('console output from anywhere in the app is captured with its scope', () =>
   assert.match(error.message, /Error: boom/);
   fs.rmSync(path.dirname(path.dirname(file)), { recursive: true, force: true });
 });
+
+test('Clear moves the logs into logs/archive/ and loses nothing; only its own names can be read back', async () => {
+  const file = tmpFile();
+  const logger = new Logger({ silent: true, file, maxBytes: 200 });
+  for (let i = 0; i < 8; i++) logger.scope('t').warn(`line ${i} password=hunter2`);
+  assert.ok(fs.existsSync(`${file}.1`), 'the small limit rolled the file over');
+  const before = fs.readFileSync(`${file}.1`, 'utf8') + fs.readFileSync(file, 'utf8');
+  const name = logger.archive();
+  assert.match(name, /^manager-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z\.log$/);
+  assert.equal(logger.recent().length, 0, 'the Logs start empty');
+  assert.equal(fs.existsSync(file) || fs.existsSync(`${file}.1`), false);
+  const text = await logger.archiveText(name);
+  assert.equal(text, before, 'every line on disk at the moment of Clear is kept, in order');
+  assert.match(text, /line 7 /);
+  assert.equal(text.includes('hunter2'), false, 'still masked');
+  assert.equal((fs.statSync(path.join(path.dirname(file), 'archive', name)).mode & 0o777), 0o600);
+  assert.deepEqual(logger.archives().map((a) => a.name), [name]);
+  logger.scope('t').info('after');
+  assert.equal(logger.recent().length, 1);
+  for (const bad of ['../manager.log', 'manager.log', `${name}/../../x`, '/etc/passwd']) assert.equal(await logger.archiveText(bad), null, bad);
+  // a link planted under an archive name is not followed
+  const planted = 'manager-2020-01-01T00-00-00-000Z.log';
+  fs.symlinkSync('/etc/hostname', path.join(path.dirname(file), 'archive', planted));
+  assert.equal(await logger.archiveText(planted), null);
+  assert.equal(new Logger({ silent: true, file: tmpFile() }).archive(), null, 'nothing to keep: no empty archive');
+});
