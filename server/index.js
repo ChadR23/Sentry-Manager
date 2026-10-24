@@ -681,7 +681,13 @@ async function main() {
     const rec = inventory.recording(v.id, params.rid);
     if (!rec) throw new HttpError(404, 'Recording not found (it may have moved; refresh the inventory).');
     const root = vehicles.rootOf(v);
-    const files = rec.files.map((rel) => ({ rel, path: path.join(root, rel), size: inventory.get(v.id).files.get(rel)?.size ?? null }));
+    // codec per clip (h264 = not encoded yet, null = not checked yet), so the
+    // page can tell which clips of a recording still need converting
+    const codecs = inventory.codecs(v.id);
+    const files = rec.files.map((rel) => ({
+      rel, path: path.join(root, rel), size: inventory.get(v.id).files.get(rel)?.size ?? null,
+      ...(/\.mp4$/i.test(rel) ? { codec: codecs.get(rel)?.codec ?? null } : {})
+    }));
     return { ...publicRecording(rec), root, folderPath: path.join(root, rec.folder), files, event: await inventory.eventInfo(v.id, rec) };
   });
   r.add('GET', '/api/vehicles/:id/recordings/:rid/thumbnail', async (req, res, { params }) => {

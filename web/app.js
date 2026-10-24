@@ -1195,7 +1195,7 @@
   };
 
   const DAYS_PER_PAGE = 30;
-  const CODEC_NAMES = { h265: 'H.265', av1: 'AV1' };
+  const CODEC_NAMES = { h265: 'H.265', av1: 'AV1', h264: 'H.264' };
   const minutesText = (m) => (m >= 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m} min`);
   const dayTitle = (day) => new Date(`${day}T12:00:00`).toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'short', day: 'numeric' });
 
@@ -1300,13 +1300,35 @@
     </article>`;
   }
 
+  const ENCODED_CODECS = new Set(['h265', 'av1']);
+  /** A clip's codec: blue when encoded, amber when still the original H.264. */
+  function codecTag(f) {
+    if (!('codec' in f)) return '<span></span>';
+    if (!f.codec) return '<span class="ftag muted">checking</span>';
+    const name = CODEC_NAMES[f.codec] || f.codec.toUpperCase();
+    return ENCODED_CODECS.has(f.codec)
+      ? `<span class="ftag enc">${esc(name)}</span>`
+      : `<span class="ftag plain" title="Not encoded yet">${esc(name)}</span>`;
+  }
+
   async function loadFiles(v, id) {
     const el = document.getElementById(`files-${id}`);
     if (!el) return;
     try {
       const d = await api(`/api/vehicles/${v.id}/recordings/${id}`);
       const ev = d.event ? `<li><span>${esc([humanize(d.event.reason), d.event.city, d.event.street].filter(Boolean).join(' · ') || 'Event')}</span><span></span><span></span></li>` : '';
-      el.innerHTML = ev + d.files.map((f) => `<li><span title="${esc(f.rel)}">${esc(f.rel)}</span><span>${bytes(f.size)}</span><a href="/api/media?path=${encodeURIComponent(f.path)}" download>Download</a></li>`).join('');
+      const clips = d.files.filter((f) => 'codec' in f);
+      const plain = clips.filter((f) => f.codec && !ENCODED_CODECS.has(f.codec)).length;
+      const draw = (onlyPlain) => {
+        const shown = onlyPlain ? d.files.filter((f) => 'codec' in f && f.codec && !ENCODED_CODECS.has(f.codec)) : d.files;
+        const head = plain
+          ? `<li class="files-head"><span>${plural(plain, 'clip')} of ${clips.length} not encoded yet</span><label class="check small"><input type="checkbox" data-only-plain${onlyPlain ? ' checked' : ''}> Not encoded only</label></li>`
+          : '';
+        el.innerHTML = head + (onlyPlain ? '' : ev) + shown.map((f) => `<li><span title="${esc(f.rel)}">${esc(f.rel)}</span>${codecTag(f)}<span>${bytes(f.size)}</span><a href="/api/media?path=${encodeURIComponent(f.path)}" download>Download</a></li>`).join('');
+        const box = el.querySelector('[data-only-plain]');
+        if (box) box.onchange = () => draw(box.checked);
+      };
+      draw(false);
     } catch (err) {
       el.innerHTML = `<li><span>${esc(err.message)}</span></li>`;
     }

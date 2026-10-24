@@ -196,6 +196,13 @@ test('footage, protect, Recycle Bin and policies never lose files', { timeout: 1
     assert.deepEqual([jan1.recordings, jan1.byCategory, jan1.minutes, jan1.encodedRecordings], [2, { Recent: 2 }, 3, 0]);
     assert.equal(jan1.thumbId, by['Recent 2020-01-01 08:00:00'].id);
     assert.equal(days.days[1].thumbId, by['Sentry 2020-01-02 12:29:00'].id);
+    // the recording's file list says each clip's codec (non-clips carry none),
+    // so the page can show which clips still need converting
+    const filesOf = (await s.call('GET', `/api/vehicles/daily-driver/recordings/${by['Recent 2020-01-01 08:00:00'].id}`)).data.files;
+    for (const f of filesOf) {
+      if (/\.mp4$/i.test(f.rel)) assert.ok('codec' in f && (f.codec === null || typeof f.codec === 'string'), f.rel);
+      else assert.equal('codec' in f, false, f.rel);
+    }
     if (hasFfmpeg && /libx265/.test(execFileSync('ffmpeg', ['-hide_banner', '-encoders']).toString())) {
       // a clip converted to H.265 shows as encoded once the share is scanned again
       execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc=size=160x120:rate=10', '-t', '1', '-c:v', 'libx265', '-x265-params', 'log-level=error',
