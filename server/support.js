@@ -9,6 +9,7 @@
 
 const https = require('https');
 const os = require('os');
+const { pipeline } = require('stream');
 const { HttpError } = require('./http');
 const { redact } = require('./log');
 
@@ -19,8 +20,10 @@ const MAX_MESSAGE = 4000;
 const MAX_REPLY_BYTES = 5 * 1024 * 1024;
 const MAX_MEDIA_BYTES = 50 * 1024 * 1024; // the file itself; sent base64 (~67 MB)
 const MAX_ATTACHMENT_BYTES = 110 * 1024 * 1024;
-// an attachment path on the support server: plain characters, no "..", an optional plain query
-const ATTACHMENT_PATH = /^\/(?![/\\])(?!.*\.\.)(?!.*\/\/)[A-Za-z0-9._~/%-]{1,512}(\?[A-Za-z0-9._~=&%-]{0,512})?$/;
+// an attachment path on the support server: plain characters, no "..", no
+// percent-encoded dot, slash or backslash (a server that decodes them would
+// see "..", "//" or "\\" again), an optional plain query
+const ATTACHMENT_PATH = /^\/(?![/\\])(?!.*\.\.)(?!.*\/\/)(?!.*%(?:2[eEfF]|5[cC]))[A-Za-z0-9._~/%-]{1,512}(\?[A-Za-z0-9._~=&%-]{0,512})?$/;
 const SHOWN_TYPES = /^(image\/(png|jpeg|gif|webp)|video\/(mp4|webm|quicktime))$/;
 
 function request({ method, path, token = null, body = null, timeoutMs = 30000, raw = false }) {
@@ -271,7 +274,9 @@ function createSupport({ db, log, buildInfo, detectGpus, recentLogs, requestImpl
           res.destroy();
         }
       });
-      up.pipe(res);
+      // a support server that stops mid-file, or a page that goes away, ends
+      // both sides (a plain pipe left the page's response open)
+      pipeline(up, res, () => {});
       return undefined;
     }
   };

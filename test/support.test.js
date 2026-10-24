@@ -133,7 +133,8 @@ test('attachments: only support-server paths, streamed with a safe type', async 
     return up;
   });
   await support.send({ message: 'x' });
-  for (const bad of ['https://evil.example/x', '//evil.example/x', '/a/../b', 'chat/x', '/a b']) {
+  for (const bad of ['https://evil.example/x', '//evil.example/x', '/a/../b', 'chat/x', '/a b',
+    '/chat/%2e%2e/admin', '/chat/%2E%2E/admin', '/chat/.%2e/x', '/%2fevil.example/x', '/a%2F%2Fb', '/a%5c..%5cb']) {
     await assert.rejects(support.attachment({}, bad), /Not a support attachment/, bad);
   }
   const res = new PassThrough();
@@ -155,4 +156,23 @@ test('media: a file with no ticket yet opens one, then uploads to it', async () 
   assert.equal(body.fileName, '.._x.png');
   assert.equal(Buffer.from(body.mediaData, 'base64').toString(), 'png');
   await assert.rejects(support.send({ message: 'x'.repeat(4001) }), /under 4000/);
+});
+
+test('attachments: a support server that stops mid-file ends the page\'s response too', async () => {
+  let up;
+  const { support } = harness((req) => {
+    if (req.path === '/chat/ticket') return { ticketId: 'T1', authToken: 'tok' };
+    up = new PassThrough();
+    up.statusCode = 200;
+    up.headers = { 'content-type': 'image/png', 'content-length': '1000' };
+    return up;
+  });
+  await support.send({ message: 'x' });
+  const res = new PassThrough();
+  res.writeHead = () => {};
+  await support.attachment(res, '/chat/media/T1/a.png');
+  up.write('abc');
+  up.destroy(new Error('socket hang up'));
+  await new Promise((r) => setImmediate(r));
+  assert.equal(res.destroyed, true, 'the page is not left waiting for the rest');
 });

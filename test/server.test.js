@@ -619,3 +619,31 @@ test('Logs (Overview): problems are kept in the data folder and shown and downlo
     await fsp.rm(dir, { recursive: true, force: true });
   }
 });
+
+test('Settings > Support: one file upload at a time, and the upload path answers only POST', async () => {
+  const dir = await tmp();
+  await makeFootage(path.join(dir, 'footage'));
+  const s = await startServer(dir);
+  try {
+    await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
+    assert.equal((await s.call('GET', '/api/support/media')).status, 405);
+    assert.equal(s.output().includes('Internal error') || /TypeError/.test(s.output()), false);
+    // a first upload still coming in holds the slot
+    const http = require('http');
+    const { port } = new URL(s.base);
+    const first = http.request({ host: '127.0.0.1', port, path: '/api/support/media', method: 'POST',
+      headers: { 'X-Requested-With': 'sentry-six-manager', Cookie: s.getCookie(), 'Content-Type': 'image/png', 'Content-Length': 1024 * 1024 } });
+    first.on('error', () => {});
+    first.write(Buffer.alloc(1024));
+    await new Promise((r) => setTimeout(r, 300));
+    const second = await s.call('POST', '/api/support/media', undefined, { headers: { 'Content-Type': 'image/png' } });
+    assert.equal(second.status, 429);
+    first.destroy();
+    // released when the first goes away: the next one gets as far as reading
+    // its body (empty here, so refused for that)
+    await waitFor(async () => (await s.call('POST', '/api/support/media', undefined, { headers: { 'Content-Type': 'image/png' } })).status === 400, 5000);
+  } finally {
+    await s.stop();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});

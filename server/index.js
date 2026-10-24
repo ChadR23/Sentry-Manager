@@ -511,6 +511,7 @@ async function main() {
     lines: logger.recent(Math.min(1000, Number(query.limit) || 300), { minLevel: query.level === 'all' ? 'debug' : 'warn' }).reverse()
   }));
   // Settings > Support: the Sentry Six support chat, relayed (server/support.js)
+  let supportUploading = false;
   const support = createSupport({ db, log: audit, buildInfo, detectGpus, recentLogs: () => logger.recent(150, { minLevel: 'warn' }) });
   r.add('GET', '/api/support', () => support.status());
   r.add('GET', '/api/support/messages', (req, res, { query }) => support.messages({ since: query.since }));
@@ -1012,7 +1013,13 @@ async function main() {
           if (!real || hiddenPath(real)) return sendJson(res, 403, { error: 'Outside the vehicle shares.' });
           return sendMedia(req, res, real, studioReadable.fdInside);
         }
-        if (p === '/api/support/media' && req.method === 'POST') {
+        if (p === '/api/support/media') {
+          if (req.method !== 'POST') return sendJson(res, 405, { error: 'Use POST.' });
+          // one upload at a time: each holds up to ~4x the file in memory
+          // (the body, base64 and the JSON sent on)
+          if (supportUploading) return sendJson(res, 429, { error: 'Another file is being sent to support. Try again when it is done.' });
+          supportUploading = true;
+          res.on('close', () => { supportUploading = false; });
           // the file comes as the raw body (not JSON), its name and the message in headers
           const bytes = await readRaw(req, MAX_MEDIA_BYTES);
           const header = (k) => {
