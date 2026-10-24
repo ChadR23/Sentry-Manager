@@ -498,7 +498,9 @@ test('real clips (opt-in): every frame kept at its original time, verified, repl
       }
       t.diagnostic(JSON.stringify(report));
       console.log(`LEADIN ${JSON.stringify(report)}`);
-      if (timeline?.leadIn.hold > 0) assert.strictEqual(item?.resultCode, 'converted', `${clip.source}: ${JSON.stringify(item?.failure)}`);
+      // A lead-in clip converts, or stays the original when the encode is
+      // not smaller (a size decision, not a lead-in failure).
+      if (timeline?.leadIn.hold > 0) assert.ok(['converted', 'no-savings'].includes(item?.resultCode), `${clip.source}: ${item?.resultCode} ${JSON.stringify(item?.failure)}`);
     }
   } finally {
     await env.runtime.shutdown().catch(() => {});
