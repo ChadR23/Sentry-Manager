@@ -177,9 +177,12 @@ copies somewhere else is a choice you make in the Output section.
   was converted (device, inode, size and SHA-256 are checked). The copy is
   moved in with a no-replace rename, which also holds on SMB. Clips copy
   their conversions to the share at the same time; only the renames that
-  swap a clip in go one clip at a time, each right after a full check of the
-  file it moves (on the Encoder page, "Save / replace" includes the copy and
-  "Wait to save" is the wait for those renames).
+  swap a clip in go one clip at a time. Each copy is read back in full right
+  after it is written; in the swap the original gets a full check right
+  before it is moved aside, and the copy and the moved original are then
+  checked by device, inode, size and modification time (fully again if any
+  of those changed). On the Encoder page, "Save / replace" includes the copy
+  and "Wait to save" is the wait for those renames.
 - **Separate destination**, if you pick it: the originals stay and the
   converted copies go to a folder you choose (under `/data/converted` or a
   vehicle's share). If the share cannot guarantee a safe replacement, this
