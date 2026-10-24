@@ -185,6 +185,9 @@ function releaseHeldText() {
         heldText.delete(element);
         if (element.textContent !== text) element.textContent = text;
     }
+    for (const [container, rows] of heldRows) {
+        if (!highlighted(container)) renderRows(container, rows);
+    }
 }
 
 function watchHighlights(documentApi) {
@@ -239,11 +242,28 @@ function createRow(container, primary, secondary = '') {
     return row;
 }
 
+// A list (the clips that failed) is redrawn only when it changed, keeps the
+// place it was scrolled to, and waits while text in it is highlighted.
+const heldRows = new Map();
+
 function renderRows(container, rows) {
     if (!container) return;
-    container.textContent = rows.map(([primary, secondary]) => `${primary}${secondary ? ` — ${secondary}` : ''}`).join('\n');
-    const rendered = rows.map(([primary, secondary]) => createRow(container, primary, secondary)).filter(Boolean);
-    if (typeof container.replaceChildren === 'function' && rendered.length) container.replaceChildren(...rendered);
+    const text = rows.map(([primary, secondary]) => `${primary}${secondary ? ` — ${secondary}` : ''}`).join('\n');
+    watchHighlights(container.ownerDocument);
+    if (highlighted(container)) {
+        heldRows.set(container, rows);
+        return;
+    }
+    heldRows.delete(container);
+    if (container.dataset && container.dataset.rendered === text) return;
+    if (typeof container.replaceChildren === 'function') {
+        const top = container.scrollTop;
+        container.replaceChildren(...rows.map(([primary, secondary]) => createRow(container, primary, secondary)).filter(Boolean));
+        if (top) container.scrollTop = top;
+    } else {
+        container.textContent = text;
+    }
+    if (container.dataset) container.dataset.rendered = text;
 }
 
 function collectElements(root) {
@@ -1018,7 +1038,7 @@ function createFootageConverterController(options = {}) {
             : activeItem?.relativePath || message('noFileActive', 'No file active'));
         setText(elements.currentProgress, progress?.outTimeUs !== undefined
             ? message('progressEncoded', '{duration} encoded', { duration: formatDuration(progress.outTimeUs / 1000) })
-            : activeItem ? message('progressWorking', 'Working on current file') : '—');
+            : activeItem ? message('progressWorking', 'Working on current file') : '');
         elements.currentProgressFill?.classList?.toggle('is-live', Boolean(activeItem && active));
         setText(elements.elapsed, snapshot ? formatDuration(workingMs(snapshot, now())) : '00:00');
         // Until the scan reaches the end of the folder, Discovered is a running

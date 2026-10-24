@@ -860,7 +860,6 @@ select.converter-select {
 .converter-current-track { background: var(--fd-track); }
 
 .converter-current-progress {
-    min-width: 96px;
     font-size: 11px;
 }
 
@@ -929,6 +928,17 @@ select.converter-select {
 
 .converter-error-rows,
 .converter-summary-groups { margin-top: 16px; }
+
+/* the clips that failed: about ten rows, the rest scroll inside the box */
+.converter-error-rows {
+    max-height: 400px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+    border: 1px solid var(--fd-border);
+    border-radius: 10px;
+    padding: 0 10px;
+}
 
 .converter-row {
     padding: 10px 2px;

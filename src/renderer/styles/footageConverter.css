@@ -641,11 +641,12 @@ body.converter-mode #driveList {
     user-select: text;
 }
 
+/* the bar runs the full width; what it measures sits on its own line below
+   (the line is kept while empty, so nothing moves when a clip starts) */
 .converter-current-progress-row {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    align-items: center;
-    gap: 12px;
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: 6px;
     margin-top: 14px;
 }
 
@@ -671,7 +672,7 @@ body.converter-mode #driveList {
 }
 
 .converter-current-progress {
-    min-width: 88px;
+    min-height: 1.5em;
     color: var(--text-muted);
     font-family: var(--font-mono);
     font-size: 9px;
