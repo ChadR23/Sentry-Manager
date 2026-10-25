@@ -48,6 +48,9 @@ class ConverterJobServiceError extends Error {
 }
 
 const MAX_RECORDED_ATTEMPTS = 3; // jobStore rejects more
+// Not smaller with a quality level or custom bitrate: encode again at these
+// shares of the original's size before keeping the original.
+const UNDER_SOURCE_SHARES = Object.freeze([0.85, 0.6]);
 // Retries of an operation whose "network" error came while nothing was down
 // (see waitForNetwork) before it counts as a plain failure.
 const QUICK_RETRY_LIMIT = 2;
@@ -1492,7 +1495,7 @@ function createConverterJobService(deps) {
     const profileId = runtime.manifest.config.profileId;
     const customBitrate = profileId === 'custom';
     // Constant quality: the encoder holds a quality level; no bitrate or target.
-    const quality = profileId === 'quality' ? runtime.manifest.config.qualityLevel : null;
+    let quality = profileId === 'quality' ? runtime.manifest.config.qualityLevel : null;
     const noTarget = !hasSizeTarget(profileId);
     const targetBytes = noTarget ? null : targetOutputBytes(item.sourceBytes, profileId);
     let bitrate = quality ? null : customBitrate ? runtime.manifest.config.bitrateKbps * 1000 : calculateInitialBitrate({
@@ -1512,6 +1515,7 @@ function createConverterJobService(deps) {
     // remains available for encoders that still miss.
     if (selected.hardware === true && !noTarget) bitrate = Math.max(SAFE_VIDEO_BITRATE_FLOORS[codec], Math.floor(bitrate * 0.93));
     let sizeRetryCount = 0;
+    let underSourceCount = 0;
     let attempts = currentItem(runtime, item.id)?.attempts || 0;
     let latestOwnership = staged.ownership;
     let encodeTiers = encodeDecodeTiers(selected, { zeroCopy: holdFrames === 0 });
@@ -1670,7 +1674,28 @@ function createConverterJobService(deps) {
           bitrate = retry.bitrate;
           continue;
         }
-        if (noTarget && verification?.reason === 'not-smaller') throw serviceError('KEEP_ORIGINAL');
+        if (noTarget && verification?.reason === 'not-smaller') {
+          // The Encoder is there to get every clip into the chosen codec: a
+          // clip the quality level (or the custom bitrate) cannot make
+          // smaller, such as busy repeater footage, is encoded again at a
+          // bitrate under the original's (85%, then 60%) instead of staying
+          // H.264. Only if that is still not smaller is the original kept.
+          if (underSourceCount < UNDER_SOURCE_SHARES.length) {
+            const share = UNDER_SOURCE_SHARES[underSourceCount];
+            underSourceCount += 1;
+            quality = null;
+            bitrate = calculateInitialBitrate({
+              codec,
+              targetBytes: Math.floor(item.sourceBytes * share),
+              durationSeconds: inspected.durationSeconds,
+              containerReserveBytes: inspected.containerReserveBytes || 0,
+              telemetryReserveBytes: inspected.telemetryReserveBytes || 0
+            });
+            if (selected.hardware === true) bitrate = Math.max(SAFE_VIDEO_BITRATE_FLOORS[codec], Math.floor(bitrate * 0.93));
+            continue;
+          }
+          throw serviceError('KEEP_ORIGINAL');
+        }
         // the reason alone ("duration-mismatch") cannot tell a damaged clip
         // from a converter problem; the measurements can
         console.warn('[CONVERTER] Verification failed:', item.relativePath, verification?.reason || 'unknown',

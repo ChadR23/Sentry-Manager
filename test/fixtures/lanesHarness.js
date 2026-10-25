@@ -82,6 +82,8 @@ function clipName(index) {
  *   behave(args)   'hold' (until released), a number (exit code) or undefined (0 at once)
  *   dir, store     reuse a previous harness's folder (a restart)
  *   timeline       what readTimeline returns for every clip
+ *   verifier       replaces the verifier (default: every candidate passes)
+ *   copyAsset      replaces the staging copy of a kept original (default: refused)
  */
 function createHarness(options = {}) {
   const dir = options.dir || fs.mkdtempSync(path.join(os.tmpdir(), 'sm-lanes-'));
@@ -133,7 +135,7 @@ function createHarness(options = {}) {
   const stagingManager = {
     reserveEncodeOutput: async ({ itemId }) => ({ path: path.join(dir, 'work', `${itemId}-encoded.mp4`), ...owned }),
     adoptEncodeOutput: async ({ itemId }) => ({ path: path.join(dir, 'work', `${itemId}-encoded.mp4`), ...owned }),
-    copyAsset: async () => { throw Object.assign(new Error('no assets here'), { code: 'UNEXPECTED' }); },
+    copyAsset: options.copyAsset || (async () => { throw Object.assign(new Error('no assets here'), { code: 'UNEXPECTED' }); }),
     publishSeparate: async ({ destination }) => ({ finalPath: destination, outputBytes: 1_000_000, ...owned }),
     replaceOriginal: async () => { throw Object.assign(new Error('no replace here'), { code: 'UNEXPECTED' }); },
     cleanupOwnedArtifacts: async () => ({ cleaned: true })
@@ -148,7 +150,7 @@ function createHarness(options = {}) {
     inspectVideo: async () => ({ codec: 'h264', durationSeconds: 2, containerReserveBytes: 0, telemetryReserveBytes: 0 }),
     readTimeline: async () => options.timeline || ({ frames: [] }),
     writers: { h265: async () => {}, av1: async () => {} },
-    verifier: async () => ({ ok: true, outputBytes: 1_000_000, publicationArtifact: null }),
+    verifier: options.verifier || (async () => ({ ok: true, outputBytes: 1_000_000, publicationArtifact: null })),
     spawnProcess,
     ffmpegPath: 'ffmpeg',
     decodeAccel: options.gpuDecode === false ? undefined : (encoder, accel = {}) => decodeAccelArgs(encoder, {

@@ -26,7 +26,8 @@ const MAX_FAILED_SWEEPS = 3;
 // could let such clips convert now: each one is then tried once more.
 // 2: Tesla mid-GOP lead-in frames are kept (leadIn.js).
 // 3: a frame Tesla's encoder skipped no longer fails the clip (frameNumGaps.js).
-const CONVERTER_REVISION = 3;
+// 4: a clip that is not smaller is encoded again under the original's bitrate.
+const CONVERTER_REVISION = 4;
 const INDEX_VERSION = 2;
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 

@@ -622,7 +622,7 @@
                                         <option value="balanced" selected data-i18n="ui.converter.qualityBalanced">Balanced (recommended)</option>
                                         <option value="small" data-i18n="ui.converter.qualitySmall">Small — smallest files</option>
                                     </select>
-                                    <small class="converter-disclosure" data-i18n="ui.converter.qualityHint">Instead of a size target, each clip is encoded to the same visual quality: parked and still scenes shrink far more, busy driving keeps its detail. A clip that would not get smaller keeps its original.</small>
+                                    <small class="converter-disclosure" data-i18n="ui.converter.qualityHint">Instead of a size target, each clip is encoded to the same visual quality: parked and still scenes shrink far more, busy driving keeps its detail. A clip that would not get smaller is encoded again under its original bitrate, so every clip ends up in the chosen codec.</small>
                                 </label>
                                 <p class="converter-disclosure" data-i18n="ui.converter.lossyDisclosure">Conversion re-encodes video using lossy compression. Every profile may discard some image detail.</p>
                             </fieldset>

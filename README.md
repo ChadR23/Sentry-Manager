@@ -209,6 +209,11 @@ copies somewhere else is a choice you make in the Output section.
   group of frames, or have a frame Tesla's encoder skipped; both convert
   with every frame at its original time and the telemetry intact, and are
   verified like any other clip.
+- **Every clip ends up in one codec.** With *Constant quality* or a custom
+  bitrate, a clip that does not come out smaller (busy repeater footage,
+  night, rain) is encoded again at 85% of its original bitrate, then 60%,
+  instead of staying H.264. Only if even that is not smaller is the
+  original kept.
 - **Gave up is not forever.** The automatic window stops retrying a clip
   after it fails three times, or when converting it would not save space.
   When an update changes the converter, those clips are tried again once.
