@@ -33,7 +33,8 @@ const { QUALITY_LEVELS } = require('../src/main/converter/contracts');
 
 const SETTINGS_KEY = 'nodeWorker';
 const PAIR_TTL_MS = 10 * 60_000;
-const PAIR_TRIES = 5;
+const PAIR_TRIES = 20; // wrong codes in all before the code is cancelled
+const PAIR_TRIES_PER_ADDRESS = 3; // and from one address (it is refused then)
 const MAX_CLIP_BYTES = 1024 * 1024 * 1024;
 const MAX_SLOTS = 8;
 const DEFAULT_SLOTS = 2;
@@ -43,6 +44,8 @@ const BAD_TOKEN_LIMIT = 20;
 const BAD_TOKEN_WINDOW_MS = 10 * 60_000;
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O, 1/I
 
+// a peer's name, safe for the log and the page: no control characters
+const cleanName = (value) => String(value || '').replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').trim().slice(0, 64);
 const sha256 = (value) => crypto.createHash('sha256').update(value).digest('hex');
 const hmac = (key, text) => crypto.createHmac('sha256', key).update(text).digest('hex');
 const sameHex = (a, b) => typeof a === 'string' && typeof b === 'string' && a.length === b.length
@@ -91,7 +94,7 @@ function parseJobSettings(raw) {
  * (selectEncoder, cpuEncoder), name, now }
  */
 function createNodeWorker({ db, log, audit = log, authority = () => null, workDir, ffmpegPath = 'ffmpeg', spawn = require('child_process').spawn, runtime, name = os.hostname(), platform = process.platform, now = Date.now }) {
-  let pairing = null; // { code, expiresAt, tries }
+  let pairing = null; // { code, expiresAt, tries, byAddress }
   const jobs = new Map(); // id -> job
   const badTokens = new Map(); // address -> [times]
 
@@ -142,7 +145,7 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
   function startPairing() {
     const s = settings();
     if (!s.enabled) save({ ...s, enabled: true });
-    pairing = { code: newPairingCode(), expiresAt: now() + PAIR_TTL_MS, tries: 0 };
+    pairing = { code: newPairingCode(), expiresAt: now() + PAIR_TTL_MS, tries: 0, byAddress: new Map() };
     return status();
   }
 
@@ -215,13 +218,17 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
       pairing = null;
       return send(res, 403, { error: 'This server is not waiting to be paired. Show a pairing code under Nodes first.' });
     }
+    // one address cannot use up the code for everyone: after a few wrong
+    // tries it is refused, while the right main can still pair
+    if ((pairing.byAddress.get(address) || 0) >= PAIR_TRIES_PER_ADDRESS) return send(res, 429, { error: 'Too many wrong pairing codes from this address.' });
     const body = await readJsonBody(req);
-    const mainName = typeof body?.name === 'string' ? body.name.trim().slice(0, 64) : '';
+    const mainName = typeof body?.name === 'string' ? cleanName(body.name) : '';
     const fingerprint = servedFingerprint(req);
     if (!mainName || !fingerprint || typeof body?.proof !== 'string') return send(res, 400, { error: 'Bad pairing request.' });
     const code = normalizeCode(pairing.code);
     if (!sameHex(body.proof, hmac(code, pairText.main(fingerprint, mainName)))) {
       pairing.tries += 1;
+      pairing.byAddress.set(address, (pairing.byAddress.get(address) || 0) + 1);
       audit.warn(`Node pairing refused (wrong code or a different certificate) from ${address}`);
       if (pairing.tries >= PAIR_TRIES) pairing = null;
       return send(res, 403, { error: 'Wrong pairing code.' });
@@ -254,6 +261,17 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
 
   function publicJob(job) {
     return { id: job.id, state: job.state, outTimeUs: job.outTimeUs, fps: job.fps, speed: job.speed, encoder: job.encoder, error: job.error || null, outputBytes: job.outputBytes || null };
+  }
+
+  // an MP4 starts with its ftyp box
+  async function isMp4(file) {
+    let handle;
+    try {
+      handle = await fsp.open(file, 'r');
+      const head = Buffer.alloc(8);
+      const { bytesRead } = await handle.read(head, 0, 8, 0);
+      return bytesRead === 8 && head.toString('latin1', 4, 8) === 'ftyp' && head.readUInt32BE(0) >= 8;
+    } catch { return false; } finally { await handle?.close().catch(() => {}); }
   }
 
   async function removeFiles(job) {
@@ -298,12 +316,20 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
 
   function runFfmpeg(job, attempt, settingsUsed) {
     return new Promise((resolve) => {
+      if (job.stopped) return resolve(false);
       const encodeArgs = buildEncodeArgs({
         codec: settingsUsed.codec, encoder: attempt.encoder, bitrate: settingsUsed.bitrate, quality: settingsUsed.quality,
         ...(attempt.device ? { device: attempt.device } : {}), ...(attempt.holdFrames > 0 ? { holdFrames: attempt.holdFrames } : {})
       });
+      // The upload is read as MP4 and nothing else, from this one local file:
+      // a playlist or manifest could otherwise make ffmpeg open other files
+      // here or URLs on this network. The output and its length are capped,
+      // so a clip cannot fill this server's disk.
       const args = ['-nostdin', '-hide_banner', '-loglevel', 'error', '-y',
-        ...attempt.decode, '-i', job.input, ...encodeArgs, '-an', '-sn', '-dn',
+        ...attempt.decode, '-protocol_whitelist', 'file', '-f', 'mov', '-i', job.input,
+        ...encodeArgs, '-an', '-sn', '-dn',
+        ...(settingsUsed.durationUs ? ['-t', String(Math.ceil(settingsUsed.durationUs / 1e6) + 5)] : []),
+        '-fs', String(job.inputBytes * 2 + 1024 * 1024),
         '-progress', 'pipe:1', '-nostats', '-f', 'mp4', job.output];
       let child;
       try {
@@ -353,6 +379,7 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
       for (const attempt of await attemptsFor(settingsUsed.codec, settingsUsed.holdFrames)) {
         if (job.stopped) return;
         await fsp.rm(job.output, { force: true }).catch(() => {});
+        if (job.stopped) return;
         if (await runFfmpeg(job, attempt, settingsUsed)) {
           const { size } = await fsp.stat(job.output);
           job.outputBytes = size;
@@ -379,12 +406,13 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
     const length = Number(req.headers['content-length']);
     if (!Number.isSafeInteger(length) || length <= 0) return send(res, 411, { error: 'The clip size is needed.' });
     if (length > MAX_CLIP_BYTES) return send(res, 413, { error: 'Clip too large.' });
-    if (running().length >= settings().slots) return send(res, 503, { error: 'All of this node\'s slots are busy.' });
+    // running and finished-but-not-collected jobs both hold disk space
+    if (running().length >= settings().slots || jobs.size >= settings().slots * 2) return send(res, 503, { error: 'All of this node\'s slots are busy.' });
     const id = crypto.randomBytes(16).toString('hex');
     const job = {
       id, mainId: main.id, mainName: main.name, state: 'receiving',
       input: path.join(workDir, `${id}-in.mp4`), output: path.join(workDir, `${id}-out.mp4`),
-      outTimeUs: null, fps: null, speed: null, encoder: null, startedAt: now()
+      outTimeUs: null, fps: null, speed: null, encoder: null, startedAt: now(), inputBytes: length
     };
     jobs.set(id, job);
     let received = 0;
@@ -402,8 +430,16 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
         if (!res.headersSent) send(res, 400, { error: 'The clip did not arrive whole.' });
         return;
       }
-      send(res, 200, { id });
-      void encode(job, settingsUsed);
+      isMp4(job.input).then((ok) => {
+        if (job.stopped) return;
+        if (!ok) {
+          stopJob(job);
+          send(res, 415, { error: 'Not an MP4 clip.' });
+          return;
+        }
+        send(res, 200, { id });
+        void encode(job, settingsUsed);
+      });
     });
     return undefined;
   }

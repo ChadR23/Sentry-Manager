@@ -31,6 +31,8 @@ const REQUEST_TIMEOUT_MS = 30_000;
 const HOST_RE = /^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/;
 
 const nodeError = (message, status = 400, code = 'NODE_ERROR') => Object.assign(new Error(message), { status, code });
+// text a node sent (its name, an error): safe for the log and the page
+const peerText = (value, max = 160) => String(value || '').replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').trim().slice(0, max);
 
 /** "192.168.1.20", "nas.local:9000", "[fd00::5]:9443" -> { host, port }. */
 function parseAddress(text) {
@@ -94,12 +96,37 @@ function pinMatches(pin, raw, fingerprint) {
   } catch { return false; }
 }
 
-/** One HTTP/1.1 request over a checked connection. body: Buffer, stream or null. */
-async function request(node, { method = 'GET', path, headers = {}, body = null, pin = node.pin, timeoutMs = REQUEST_TIMEOUT_MS, onResponse = null, signal = null }) {
+/**
+ * One HTTP/1.1 request over a checked connection. body: Buffer, stream or
+ * null. It always settles: an overall deadline (deadlineMs, default twice the
+ * idle timeout) destroys the connection, so a node that trickles bytes or
+ * sends too much can never leave it, or anything waiting on it, hanging.
+ */
+async function request(node, { method = 'GET', path, headers = {}, body = null, pin = node.pin, timeoutMs = REQUEST_TIMEOUT_MS, deadlineMs = timeoutMs * 2, onResponse = null, signal = null }) {
   if (signal?.aborted) throw nodeError('Cancelled.', 499, 'CANCELLED');
   const { socket, fingerprint } = await connectPinned({ host: node.host, port: node.port, pin, timeoutMs });
   return new Promise((resolve, reject) => {
-    const req = http.request({
+    let settled = false;
+    let req = null;
+    let deadline = null;
+    const finish = (err, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      signal?.removeEventListener('abort', abort);
+      if (err) {
+        req?.destroy();
+        socket.destroy();
+        reject(err.status ? err : nodeError(`The node connection failed (${err.code || err.message}).`, 502, 'NODE_UNREACHABLE'));
+      } else {
+        resolve(value);
+      }
+    };
+    const abort = () => finish(nodeError('Cancelled.', 499, 'CANCELLED'));
+    signal?.addEventListener('abort', abort, { once: true });
+    deadline = setTimeout(() => finish(nodeError('The node took too long.', 504, 'NODE_TIMEOUT')), deadlineMs);
+    deadline.unref?.();
+    req = http.request({
       // the connection checked above, never a new one (no agent: with
       // agent: false Node would open its own)
       createConnection: () => socket, method, path,
@@ -110,35 +137,32 @@ async function request(node, { method = 'GET', path, headers = {}, body = null, 
         ...headers
       }
     });
-    const abort = () => req.destroy(nodeError('Cancelled.', 499, 'CANCELLED'));
-    signal?.addEventListener('abort', abort, { once: true });
-    req.setTimeout(timeoutMs, () => req.destroy(nodeError('The node did not answer.', 504, 'NODE_TIMEOUT')));
-    req.once('error', (err) => {
-      signal?.removeEventListener('abort', abort);
-      reject(err.status ? err : nodeError(`The node connection failed (${err.code || err.message}).`, 502, 'NODE_UNREACHABLE'));
-    });
+    req.setTimeout(timeoutMs, () => finish(nodeError('The node did not answer.', 504, 'NODE_TIMEOUT')));
+    req.once('error', (err) => finish(err));
+    // closed before it answered; afterwards the answer's own end/error decide
+    let answered = false;
+    socket.once('close', () => { if (!answered) finish(nodeError('The node closed the connection.', 502, 'NODE_UNREACHABLE')); });
     req.once('response', (res) => {
+      answered = true;
+      res.once('error', (err) => finish(err));
       if (onResponse && res.statusCode === 200) {
-        onResponse(res).then((value) => { signal?.removeEventListener('abort', abort); resolve({ status: 200, value, fingerprint }); },
-          (err) => { signal?.removeEventListener('abort', abort); reject(err); });
+        onResponse(res).then((value) => finish(null, { status: 200, value, fingerprint }), (err) => finish(err));
         return;
       }
       const chunks = [];
       let size = 0;
       res.on('data', (c) => {
         size += c.length;
-        if (size > 64 * 1024) res.destroy();
+        if (size > 64 * 1024) finish(nodeError('The node sent too much.', 502, 'NODE_PROTOCOL'));
         else chunks.push(c);
       });
       res.once('end', () => {
-        signal?.removeEventListener('abort', abort);
         let json = null;
         try { json = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { /* not JSON */ }
-        resolve({ status: res.statusCode, json, fingerprint });
+        finish(null, { status: res.statusCode, json, fingerprint });
       });
-      res.once('error', (err) => reject(nodeError(`The node connection failed (${err.message}).`, 502, 'NODE_UNREACHABLE')));
     });
-    if (body && typeof body.pipe === 'function') pipeline(body, req, (err) => { if (err) req.destroy(err); });
+    if (body && typeof body.pipe === 'function') pipeline(body, req, (err) => { if (err) finish(err); });
     else req.end(body || undefined);
   });
 }
@@ -157,12 +181,12 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
   async function refresh(node) {
     try {
       const r = await request(node, { path: '/node/v1/info', timeoutMs: 8000 });
-      if (r.status !== 200 || !r.json) throw nodeError(r.json?.error || `HTTP ${r.status}`, 502);
+      if (r.status !== 200 || !r.json) throw nodeError(peerText(r.json?.error) || `HTTP ${r.status}`, 502);
       const enc = r.json.encoders || {};
       const clean = (v) => (typeof v === 'string' && /^[a-z0-9_-]{2,32}$/.test(v) ? v : null);
       info.set(node.id, {
         at: Date.now(), online: true, error: null,
-        name: typeof r.json.name === 'string' ? r.json.name.slice(0, 64) : node.name,
+        name: typeof r.json.name === 'string' ? peerText(r.json.name, 64) : node.name,
         encoders: { h265: clean(enc.h265), av1: clean(enc.av1) },
         slots: Number.isSafeInteger(r.json.slots) ? r.json.slots : null,
         busy: Number.isSafeInteger(r.json.busy) ? r.json.busy : null
@@ -228,7 +252,7 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
       timeoutMs: 15_000
     });
     if (r.status === 404) throw nodeError('That server is not set up as a node: on its Nodes page, show a pairing code first.', 409);
-    if (r.status !== 200) throw nodeError(r.json?.error || `The node refused (${r.status}).`, r.status === 403 ? 403 : 502);
+    if (r.status !== 200) throw nodeError(peerText(r.json?.error) || `The node refused (${r.status}).`, r.status === 403 ? 403 : 502);
     const token = r.json?.token;
     if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(token) || !sameHex(r.json.proof, hmac(key, pairText.worker(probe.fingerprint, token)))) {
       throw nodeError('The node\'s answer could not be verified, so it was not paired.', 502);
@@ -245,7 +269,7 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
     }
     const node = {
       id: crypto.randomBytes(9).toString('base64url').toLowerCase().replace(/[^a-z0-9]/g, '').padEnd(12, '0').slice(0, 12),
-      name: typeof r.json.name === 'string' && r.json.name.trim() ? r.json.name.trim().slice(0, 64) : target.host,
+      name: peerText(r.json.name, 64) || target.host,
       host: target.host, port: target.port, token,
       pin: { fingerprint: probe.fingerprint, authority },
       pairedAt: Date.now()
@@ -302,29 +326,36 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
       const { size } = await fsp.stat(source);
       const settings = { codec, holdFrames, ...(quality ? { quality } : { bitrate }), ...(durationUs ? { durationUs } : {}) };
       const sent = await request(node, {
-        method: 'POST', path: '/node/v1/jobs', signal: controller.signal, timeoutMs: 10 * 60_000,
+        method: 'POST', path: '/node/v1/jobs', signal: controller.signal, timeoutMs: 60_000, deadlineMs: 30 * 60_000,
         headers: { 'Content-Type': 'video/mp4', 'Content-Length': size, 'X-Node-Job': JSON.stringify(settings) },
         body: fs.createReadStream(source)
       });
-      if (sent.status !== 200 || !/^[0-9a-f]{32}$/.test(sent.json?.id || '')) throw nodeError(sent.json?.error || `The node refused the clip (${sent.status}).`, 502);
+      if (sent.status !== 200 || !/^[0-9a-f]{32}$/.test(sent.json?.id || '')) throw nodeError(peerText(sent.json?.error) || `The node refused the clip (${sent.status}).`, 502);
       jobId = sent.json.id;
+      let lastOutTimeUs = -1;
       for (;;) {
         await new Promise((r) => setTimeout(r, pollMs));
         if (controller.signal.aborted) return;
         const s = await request(node, { path: `/node/v1/jobs/${jobId}`, signal: controller.signal, timeoutMs: 15_000 });
-        if (s.status !== 200 || !s.json) throw nodeError(s.json?.error || `The node lost the clip (${s.status}).`, 502);
-        const lines = [];
-        if (Number.isSafeInteger(s.json.outTimeUs)) lines.push(`out_time_us=${s.json.outTimeUs}`);
-        if (Number.isFinite(s.json.fps)) lines.push(`fps=${s.json.fps}`);
-        if (Number.isFinite(s.json.speed)) lines.push(`speed=${s.json.speed}x`);
-        lines.push(`progress=${s.json.state === 'done' ? 'end' : 'continue'}`);
-        child.stdout.emit('data', `${lines.join('\n')}\n`);
+        if (s.status !== 200 || !s.json) throw nodeError(peerText(s.json?.error) || `The node lost the clip (${s.status}).`, 502);
+        // Only real progress counts: the converter stops an encode that shows
+        // none for a while, so a node answering "encoding" forever without
+        // moving cannot hold this lane.
+        const moved = Number.isSafeInteger(s.json.outTimeUs) && s.json.outTimeUs > lastOutTimeUs;
+        if (moved || s.json.state === 'done') {
+          if (moved) lastOutTimeUs = s.json.outTimeUs;
+          const lines = [`out_time_us=${Math.max(lastOutTimeUs, 0)}`];
+          if (Number.isFinite(s.json.fps)) lines.push(`fps=${s.json.fps}`);
+          if (Number.isFinite(s.json.speed)) lines.push(`speed=${s.json.speed}x`);
+          lines.push(`progress=${s.json.state === 'done' ? 'end' : 'continue'}`);
+          child.stdout.emit('data', `${lines.join('\n')}\n`);
+        }
         if (s.json.state === 'failed') throw nodeError('The node could not encode the clip.', 502);
         if (s.json.state === 'done') break;
       }
       // the encoded file, written new (never over an existing file)
       await request(node, {
-        path: `/node/v1/jobs/${jobId}/output`, signal: controller.signal, timeoutMs: 10 * 60_000,
+        path: `/node/v1/jobs/${jobId}/output`, signal: controller.signal, timeoutMs: 60_000, deadlineMs: 30 * 60_000,
         onResponse: (res) => new Promise((resolve, reject) => {
           const expected = Number(res.headers['content-length']);
           // a node cannot fill this server's disk: an encode is never

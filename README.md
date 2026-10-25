@@ -287,7 +287,8 @@ Security:
   anything; only this server writes to the share.
 - **Pairing can't be intercepted.** Each side proves it knows the code with
   a signature over the certificate it actually saw, so a machine in between
-  cannot pair, and five wrong codes end the pairing.
+  cannot pair. A few wrong codes from one address and that address is
+  refused; the code stays valid for the right main.
 - **Pinned certificates.** From then on this server only talks to the node's
   own certificate, or one renewed by the node's own certificate authority.
   Anything else is refused before a byte is sent. A node that was reset has
@@ -298,9 +299,18 @@ Security:
 - **Fixed settings only.** A node accepts the codec, a bitrate or quality
   level and nothing else. It builds its own ffmpeg command and runs it as
   its unprivileged app user.
-- **Nothing is trusted on the way back.** An encoded file is verified here
-  like any other (frames, timing, telemetry) before an original is replaced,
-  and a node can never send back more than twice the clip's size.
+- **Nothing is trusted on the way back.** Every file a node returns is
+  compared picture by picture with the original here (black, blurred or
+  swapped footage is caught and the clip is encoded here instead), then
+  verified like any other (frames, timing, telemetry) before an original is
+  replaced. A node can never send back more than twice the clip's size, and
+  one that stalls or misbehaves cannot hold up this server.
+- **A main can't misuse a node either.** The node reads each upload strictly
+  as an MP4 from its own work folder (so it can't be pointed at other files
+  or addresses), caps the output's size and length, and keeps a limited
+  number of clips at a time.
+- Only pair computers you own: a picture comparison catches swapped or
+  blanked footage, not a small change to part of the picture.
 
 A node needs its own HTTPS (the default; not `TLS_MODE=off`). It uses the
 same port as its web page, so there is nothing to add to `docker-compose.yml`.

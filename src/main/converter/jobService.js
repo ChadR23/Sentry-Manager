@@ -1651,6 +1651,27 @@ function createConverterJobService(deps) {
       setOwnership(runtime, item.id, composeOwnership(ownershipFor(runtime, item.id), adopted));
       timing.mark('metadata');
       await itemPatch(runtime, item.id, {}, { state: 'verifying', activeItemId: item.id });
+      // Encoded on another server (Nodes): its pictures must match the
+      // original's before anything else is checked or saved. One that does
+      // not is thrown away and the clip is encoded here instead.
+      if (selected.remote === true) {
+        const same = typeof deps.comparePicture === 'function'
+          ? await deps.comparePicture({ source: staged.source, candidate: adopted.path, signal }).catch(() => ({ ok: false, reason: 'compare-failed' }))
+          : { ok: false, reason: 'no-picture-check' };
+        if (!same?.ok) {
+          console.warn(`[CONVERTER] The encode from ${selected.device?.name || 'a node'} does not show the original's pictures; encoding here instead:`,
+            item.relativePath, JSON.stringify(same || {}).slice(0, 200));
+          const cleanup = await cleanupOwnership(runtime, item.id, adopted);
+          if (cleanup.cleaned === false) {
+            setOwnership(runtime, item.id, composeOwnership(ownershipFor(runtime, item.id), adopted));
+            throw Object.assign(new Error('cleanup pending'), { code: 'OWNED_CLEANUP_FAILED' });
+          }
+          selected = await planner.selectCpuFallback(codec);
+          usedCpuFallback = true;
+          encodeTiers = [];
+          continue;
+        }
+      }
       const verifyAccel = decodeAccelFor(selected, 'verify');
       const verifiedEncoder = decodeKey(selected);
       const verification = await deps.verifier({

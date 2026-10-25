@@ -84,6 +84,7 @@ function clipName(index) {
  *   timeline       what readTimeline returns for every clip
  *   verifier       replaces the verifier (default: every candidate passes)
  *   copyAsset      replaces the staging copy of a kept original (default: refused)
+ *   remoteEncode, comparePicture  a lane on another server (Nodes)
  */
 function createHarness(options = {}) {
   const dir = options.dir || fs.mkdtempSync(path.join(os.tmpdir(), 'sm-lanes-'));
@@ -164,7 +165,9 @@ function createHarness(options = {}) {
     // renderD128, the UHD 770 here
     defaultDevice: async () => (options.defaultDevice !== undefined ? options.defaultDevice
       : devices.some((device) => device.id === UHD.id) ? UHD.id : null),
-    encodeStallMs: 60_000
+    encodeStallMs: 60_000,
+    ...(options.remoteEncode ? { remoteEncode: options.remoteEncode } : {}),
+    ...(options.comparePicture ? { comparePicture: options.comparePicture } : {})
   };
   const service = createConverterJobService(deps);
   const destinationRoot = path.join(dir, 'out');

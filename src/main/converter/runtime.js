@@ -11,6 +11,7 @@ const { scanTeslaFootage } = require('./scanner');
 const { runConverterBenchmark } = require('./benchmark');
 const { createEncoderPlanner, decodeAccelArgs } = require('./encoderPlanner');
 const { createDeviceDiscovery, CPU_DEVICE } = require('./encodeDevices');
+const { comparePictures } = require('./pictureCheck');
 const { createAutoConverter } = require('./autoConvert');
 const { extractH264TelemetryTimeline } = require('./telemetryTimeline');
 const { createConverterAdapters } = require('./converterAdapters');
@@ -562,8 +563,13 @@ async function createConverterRuntime(options = {}) {
   // Other servers paired under Nodes come after this one's own devices.
   async function remoteNodeDevices() {
     if (typeof options.remoteNodes?.list !== 'function') return [];
+    // a node that does not answer never holds up this server's own devices
     try {
-      const nodes = await options.remoteNodes.list();
+      let timer;
+      const nodes = await Promise.race([
+        options.remoteNodes.list(),
+        new Promise((resolve) => { timer = setTimeout(() => resolve([]), 20_000); timer.unref?.(); })
+      ]).finally(() => clearTimeout(timer));
       return Array.isArray(nodes) ? nodes.filter((node) => node?.kind === 'node' && DEVICE_ID.test(String(node.id))) : [];
     } catch (_) { return []; }
   }
@@ -672,6 +678,8 @@ async function createConverterRuntime(options = {}) {
     validateProcessRequest(command, args, spawnOptions);
     return options.spawn(command, args, { ...spawnOptions, ...cudaOrderOptions(args, spawnOptions), shell: false, windowsHide: true });
   };
+  // a paired node's encode must show the original's pictures (pictureCheck.js)
+  const comparePicture = (request) => comparePictures({ ...request, ffmpegPath: options.ffmpegPath, run: processRunner });
   // Everything a converter service needs besides its job store and staging
   // area; the benchmark builds an identical, isolated service from this.
   const serviceDeps = {
@@ -690,7 +698,7 @@ async function createConverterRuntime(options = {}) {
     // A lane's GPU, from the devices this container has now.
     resolveDevice,
     // A lane on another server (Nodes): sends the clip there to be encoded.
-    ...(typeof options.remoteNodes?.encode === 'function' ? { remoteEncode: options.remoteNodes.encode } : {}),
+    ...(typeof options.remoteNodes?.encode === 'function' ? { remoteEncode: options.remoteNodes.encode, comparePicture } : {}),
     // The device a job without lanes encodes on: its workers and that
     // device's lane share it while a job switches between the two.
     defaultDevice: async (codec) => defaultDeviceOf(await recentDevices(), codec),
