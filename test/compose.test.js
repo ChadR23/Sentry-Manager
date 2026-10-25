@@ -32,3 +32,30 @@ test('no tabs and consistent two-space indentation (a stray space breaks the who
     assert.equal((line.match(/^ */)[0].length) % 2, 0, `odd indentation: ${JSON.stringify(line)}`);
   }
 });
+
+// truenas/sentry-six-manager.yaml is pasted into TrueNAS's "Install via
+// YAML": no .env file there (relative paths mean nothing), TrueNAS's apps
+// user, and the same capabilities and indentation rules as above.
+const truenas = fs.readFileSync(path.join(__dirname, '..', 'truenas', 'sentry-six-manager.yaml'), 'utf8');
+const truenasActive = truenas.split('\n').filter((line) => !/^\s*#/.test(line) && line.trim() !== '');
+
+test('TrueNAS: datasets by absolute path, no .env, apps user, only /data mounted by default', () => {
+  assert.equal(truenasActive.some((line) => /env_file|\$\{|\.\/data/.test(line)), false);
+  const mounts = truenasActive.filter((line) => /^\s+- [^"]*:\//.test(line)).map((line) => line.trim());
+  assert.deepEqual(mounts, ['- /mnt/tank/apps/sentry-six-manager:/data']);
+  assert.ok(truenasActive.some((line) => line.trim() === 'PUID: "568"'));
+  assert.ok(truenasActive.some((line) => line.trim() === 'PGID: "568"'));
+  assert.ok(truenas.includes('# - /mnt/tank/TeslaCam:/footage/my-car'));
+  assert.equal(truenasActive.some((line) => /^\s+devices:|^\s+deploy:/.test(line)), false, 'GPU blocks are opt-in');
+});
+
+test('TrueNAS: same capabilities, image and clean indentation as docker-compose.yml', () => {
+  for (const cap of ['SYS_ADMIN', 'DAC_READ_SEARCH', 'DAC_OVERRIDE', 'SETUID', 'SETGID', 'SETPCAP', 'CHOWN', 'KILL', 'ALL']) {
+    assert.ok(truenasActive.some((line) => line.trim() === `- ${cap}`), cap);
+  }
+  assert.ok(truenasActive.some((line) => line.trim() === 'image: ghcr.io/skittles-fivem/sentry-manager:latest'));
+  for (const line of truenasActive) {
+    assert.equal(line.includes('\t'), false, line);
+    assert.equal((line.match(/^ */)[0].length) % 2, 0, `odd indentation: ${JSON.stringify(line)}`);
+  }
+});

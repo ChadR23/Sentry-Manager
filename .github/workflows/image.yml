@@ -16,7 +16,7 @@ name: Image
 on:
   push:
     branches: [main]
-    paths-ignore: ['README.md', 'docs/**']
+    paths-ignore: ['README.md', 'docs/**', 'truenas/**']
   schedule:
     - cron: '17 5 * * 1'
   workflow_dispatch:

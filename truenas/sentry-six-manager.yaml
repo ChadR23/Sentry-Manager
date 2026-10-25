@@ -1,0 +1,77 @@
+# Sentry Six Manager on TrueNAS SCALE 24.10 or newer (Apps run on Docker).
+#
+#   Apps > Discover Apps > (three dots, top right) > Install via YAML
+#   Name: sentry-six-manager, paste this file, change the two paths marked
+#   CHANGE below, then Save. Full steps: README.md, "TrueNAS".
+#
+# The web UI is then on https://<truenas>:9000. The setup code and the HTTPS
+# fingerprint are in the app's logs (Apps > Installed > sentry-six-manager >
+# Workloads > the log icon).
+services:
+  sentry-six-manager:
+    image: ghcr.io/skittles-fivem/sentry-manager:latest
+    container_name: sentry-six-manager
+    restart: unless-stopped
+    # Room to stop cleanly when updating mid-conversion.
+    stop_grace_period: 1m
+    ports:
+      # Another app already on 9000 (MinIO uses it): change the left number.
+      - "9000:9000"
+    environment:
+      TZ: America/Chicago
+      # TrueNAS's "apps" user. The web app and ffmpeg run as this user: it
+      # owns /data and must be able to write to the footage dataset.
+      PUID: "568"
+      PGID: "568"
+      # The names / IP addresses you reach TrueNAS by, so the certificate
+      # covers them (more can be added in Settings > Security).
+      # TLS_HOSTNAMES: 192.168.1.20,truenas.local
+      # Create a first vehicle from the footage dataset below:
+      # VEHICLE_NAME: My Car
+      # FOOTAGE_PATH: /footage/my-car
+    volumes:
+      # CHANGE: a dataset of its own for accounts, settings, journals,
+      # thumbnails and converter staging. Not inside the footage dataset.
+      - /mnt/tank/apps/sentry-six-manager:/data
+      # CHANGE: the dataset that holds the Tesla footage (the folder with
+      # TeslaCam, or RecentClips / SentryClips / SavedClips), then add it in
+      # Settings > Add vehicle > Folder in the container: /footage/my-car.
+      # Remove the # to use it; more vehicles: more lines below /footage.
+      # Footage on another NAS can be added as an SMB share instead.
+      # - /mnt/tank/TeslaCam:/footage/my-car
+      # Optional, CPU watts and kWh (Overview > Server): TrueNAS on most
+      # Intel and AMD machines has these counters (not in a VM).
+      # - /sys/devices/virtual/powercap:/host/powercap:ro
+    # Only the small root supervisor keeps these; the web app and ffmpeg run
+    # as PUID:PGID with no capabilities at all.
+    #   SYS_ADMIN, DAC_READ_SEARCH, DAC_OVERRIDE  mount.cifs (SMB shares)
+    #   SETUID, SETGID, SETPCAP                   start the app unprivileged
+    #   CHOWN, KILL                               own /data, stop the app
+    cap_drop:
+      - ALL
+    cap_add:
+      - SYS_ADMIN
+      - DAC_READ_SEARCH
+      - DAC_OVERRIDE
+      - SETUID
+      - SETGID
+      - SETPCAP
+      - CHOWN
+      - KILL
+    security_opt:
+      - no-new-privileges:true
+      - apparmor:unconfined      # Docker's default AppArmor profile forbids mount
+
+    # ---- AMD (dGPU or APU) / Intel GPU: uncomment
+    # devices:
+    #   - /dev/dri:/dev/dri
+
+    # ---- NVIDIA GPU: first Apps > Configuration > Settings > Install NVIDIA
+    # Drivers, then uncomment
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
