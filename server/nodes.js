@@ -303,6 +303,7 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
     child.stderr = new EventEmitter();
     child.pid = undefined;
     const controller = new AbortController();
+    let upload = null; // the clip on its way up, until the node answers
     let jobId = null;
     let closed = false;
     const close = (code, signal = null) => {
@@ -319,6 +320,9 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
     };
     child.kill = (signal = 'SIGTERM') => {
       controller.abort();
+      // A clip that is all sent is let through: the node's answer holds the
+      // job's id, and without it the job could not be deleted there.
+      if (upload && !upload.sent) upload.controller.abort();
       forget();
       close(null, signal);
       return true;
@@ -341,11 +345,25 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
         // (a benchmark measures up to the node's maximum, past its setting)
         const busy = !benchmark && Number.isSafeInteger(free.json?.slots) && Number.isSafeInteger(free.json?.busy) && free.json.busy >= free.json.slots;
         if (!busy) {
+          if (controller.signal.aborted) return;
+          upload = { controller: new AbortController(), sent: false };
+          const body = fs.createReadStream(source);
+          const current = upload;
+          body.once('end', () => { current.sent = true; });
           sent = await request(node, {
-            method: 'POST', path: '/node/v1/jobs', signal: controller.signal, timeoutMs: 60_000, deadlineMs: 30 * 60_000,
+            method: 'POST', path: '/node/v1/jobs', signal: upload.controller.signal, timeoutMs: 60_000, deadlineMs: 30 * 60_000,
             headers: { 'Content-Type': 'video/mp4', 'Content-Length': size, 'X-Node-Job': JSON.stringify(settings), ...(benchmark ? { 'X-Node-Benchmark': '1' } : {}) },
-            body: fs.createReadStream(source)
+            body
           }).catch((err) => (err?.code === 'CANCELLED' ? Promise.reject(err) : { status: 0, error: err }));
+          upload = null;
+          if (controller.signal.aborted) {
+            // cancelled while the node answered: delete what it accepted
+            if (sent.status === 200 && /^[0-9a-f]{32}$/.test(sent.json?.id || '')) {
+              jobId = sent.json.id;
+              await forget();
+            }
+            return;
+          }
           if (sent.status !== 503 && sent.status !== 0) break;
           if (sent.status === 0 && Date.now() >= waitUntil) throw sent.error;
         }

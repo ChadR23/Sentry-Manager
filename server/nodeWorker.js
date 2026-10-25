@@ -40,6 +40,8 @@ const MAX_SLOTS = 8;
 const DEFAULT_SLOTS = 2;
 const DONE_TTL_MS = 10 * 60_000;
 const STALL_MS = 10 * 60_000;
+// a job its main stopped asking about (the main crashed or lost the id)
+const ORPHAN_MS = 5 * 60_000;
 const BAD_TOKEN_LIMIT = 20;
 const BAD_TOKEN_WINDOW_MS = 10 * 60_000;
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O, 1/I
@@ -280,6 +282,7 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
   }
 
   function stopJob(job) {
+    if (job.stopped) return Promise.resolve();
     job.stopped = true;
     try { job.child?.kill('SIGKILL'); } catch { /* gone */ }
     job.upload?.destroy?.();
@@ -291,6 +294,7 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
   const sweeper = setInterval(() => {
     for (const job of jobs.values()) {
       if ((job.state === 'done' || job.state === 'failed') && now() - job.endedAt > DONE_TTL_MS) stopJob(job);
+      else if (job.state === 'encoding' && now() - job.seenAt > ORPHAN_MS) stopJob(job);
     }
   }, 60_000);
   sweeper.unref?.();
@@ -414,9 +418,14 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
     const job = {
       id, mainId: main.id, mainName: main.name, state: 'receiving',
       input: path.join(workDir, `${id}-in.mp4`), output: path.join(workDir, `${id}-out.mp4`),
-      outTimeUs: null, fps: null, speed: null, encoder: null, startedAt: now(), inputBytes: length
+      outTimeUs: null, fps: null, speed: null, encoder: null, startedAt: now(), seenAt: now(), inputBytes: length
     };
     jobs.set(id, job);
+    // The main cancelled before the job's id reached it (the upload was
+    // whole, the answer was not): it can never ask for or delete this job.
+    res.once('close', () => {
+      if (!res.writableFinished) stopJob(job);
+    });
     let received = 0;
     const file = fs.createWriteStream(job.input, { flags: 'wx', mode: 0o600 });
     job.upload = file;
@@ -478,6 +487,7 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
       const m = /^\/node\/v1\/jobs\/([0-9a-f]{32})(\/output)?$/.exec(p);
       const job = m ? jobs.get(m[1]) : null;
       if (!job || job.mainId !== main.id) return send(res, 404, { error: 'No such job.' }), true;
+      job.seenAt = now();
       if (!m[2] && req.method === 'GET') return send(res, 200, publicJob(job)), true;
       if (!m[2] && req.method === 'DELETE') {
         await stopJob(job);

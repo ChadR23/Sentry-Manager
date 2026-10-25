@@ -134,6 +134,24 @@ test('pairing, a changed certificate, tokens and a real remote encode', { skip: 
     assert.equal(fs.existsSync(target2), false);
     assert.deepEqual(fs.readdirSync(path.join(dir, 'work')), []);
 
+    // cancelled once the whole clip is on the node, before its answer with
+    // the job's id: the answer is still taken, and the job deleted there
+    const target3 = path.join(dir, 'out3.mp4');
+    const full = fs.statSync(clip).size;
+    await new Promise((resolve) => {
+      const child = nodes.encode({ device, source: clip, target: target3, codec: 'h265', bitrate: 400_000, quality: null });
+      const arrived = () => fs.readdirSync(path.join(dir, 'work')).some((f) => f.endsWith('-in.mp4') && fs.statSync(path.join(dir, 'work', f)).size === full);
+      const wait = setInterval(() => {
+        let ok = false;
+        try { ok = arrived(); } catch { /* a file that went away */ }
+        if (ok) { clearInterval(wait); child.kill('SIGTERM'); }
+      }, 1);
+      child.once('close', () => { clearInterval(wait); resolve(); });
+    });
+    for (let i = 0; i < 100 && fs.readdirSync(path.join(dir, 'work')).length > 0; i++) await new Promise((r) => setTimeout(r, 100));
+    assert.equal(fs.existsSync(target3), false);
+    assert.deepEqual(fs.readdirSync(path.join(dir, 'work')), [], 'a job cancelled before its id came back is deleted on the node');
+
     // the node is reset with a new certificate authority: refused before any
     // request is sent, until it is paired again
     w.server.close();
