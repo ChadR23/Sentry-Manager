@@ -29,6 +29,8 @@ const INFO_TTL_MS = 30_000;
 const POLL_MS = 1000;
 const BUSY_WAIT_MS = 5 * 60_000;
 const BUSY_POLL_MS = 3000;
+// how long a clip sent ahead may wait on the node for a slot
+const QUEUE_WAIT_MS = 30 * 60_000;
 const REQUEST_TIMEOUT_MS = 30_000;
 const HOST_RE = /^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/;
 
@@ -191,7 +193,8 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
         name: typeof r.json.name === 'string' ? peerText(r.json.name, 64) : node.name,
         encoders: { h265: clean(enc.h265), av1: clean(enc.av1) },
         slots: Number.isSafeInteger(r.json.slots) ? r.json.slots : null,
-        busy: Number.isSafeInteger(r.json.busy) ? r.json.busy : null
+        busy: Number.isSafeInteger(r.json.busy) ? r.json.busy : null,
+        encoding: Number.isSafeInteger(r.json.encoding) ? r.json.encoding : null
       });
     } catch (err) {
       info.set(node.id, { at: Date.now(), online: false, error: err.message, encoders: {}, slots: null, busy: null });
@@ -228,7 +231,7 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
       return {
         id: node.id, name: node.name, address: node.port === 9000 ? node.host : `${node.host}:${node.port}`,
         pairedAt: node.pairedAt, online: i.online === true, error: i.online ? null : i.error || null,
-        encoders: i.encoders || {}, slots: i.slots ?? null, busy: i.busy ?? null,
+        encoders: i.encoders || {}, slots: i.slots ?? null, busy: i.busy ?? null, encoding: i.encoding ?? null,
         fingerprint: node.pin?.fingerprint || null
       };
     });
@@ -352,8 +355,11 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
         });
         // unreachable: fail over at once (only a node that answers "busy" is waited for)
         if (!free || free.status !== 200) throw nodeError(peerText(free?.json?.error) || 'Could not reach the node.', 502, 'NODE_UNREACHABLE');
-        // (a benchmark measures up to the node's maximum, past its setting)
-        const busy = !benchmark && Number.isSafeInteger(free.json?.slots) && Number.isSafeInteger(free.json?.busy) && free.json.busy >= free.json.slots;
+        // full: its slots and the clips it takes ahead (a node from before
+        // the queue reports only slots); a benchmark measures up to the
+        // node's maximum, past its setting
+        const capacity = Number.isSafeInteger(free.json?.capacity) ? free.json.capacity : free.json?.slots;
+        const busy = !benchmark && Number.isSafeInteger(capacity) && Number.isSafeInteger(free.json?.busy) && free.json.busy >= capacity;
         if (!busy) {
           if (controller.signal.aborted) return;
           upload = { controller: new AbortController(), sent: false };
@@ -384,6 +390,7 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
       if (sent.status !== 200 || !/^[0-9a-f]{32}$/.test(sent.json?.id || '')) throw nodeError(peerText(sent.json?.error) || `The node refused the clip (${sent.status}).`, 502);
       jobId = sent.json.id;
       let lastOutTimeUs = -1;
+      const queuedSince = Date.now();
       for (;;) {
         await new Promise((r) => setTimeout(r, pollMs));
         if (controller.signal.aborted) return;
@@ -400,6 +407,13 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
           if (Number.isFinite(s.json.speed)) lines.push(`speed=${s.json.speed}x`);
           lines.push(`progress=${s.json.state === 'done' ? 'end' : 'continue'}`);
           child.stdout.emit('data', `${lines.join('\n')}\n`);
+        }
+        if (s.json.state === 'queued') {
+          // waiting on the node for a free slot: still alive (no progress
+          // yet), but not forever
+          if (Date.now() - queuedSince > QUEUE_WAIT_MS) throw nodeError('The clip waited too long on the node.', 503, 'NODE_BUSY');
+          child.stdout.emit('data', 'queued=1\n');
+          continue;
         }
         if (s.json.state === 'failed') throw nodeError('The node could not encode the clip.', 502);
         if (s.json.state === 'done') break;

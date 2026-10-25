@@ -306,6 +306,32 @@ test('a node that fails hands its clip to this server\'s own GPU first, not stra
   }
 });
 
+test('a node lane is sent 15 clips ahead of its conversions at once', async () => {
+  const NODE = { id: 'node:abcdefabcdef', kind: 'node', name: 'pc (node)', encoders: { h265: 'hevc_nvenc', av1: null }, online: true };
+  let active = 0;
+  let most = 0;
+  const h = createHarness({
+    clips: 20, devices: [NODE, CPU], defaultDevice: null, gpuDecode: false,
+    remoteEncode: () => {
+      active += 1;
+      most = Math.max(most, active);
+      const child = new EventEmitter();
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      child.kill = () => true;
+      setTimeout(() => { active -= 1; child.emit('close', 1, null); }, 150); // (then encoded here)
+      return child;
+    }
+  });
+  try {
+    const id = await h.service.start(h.config({ lanes: [{ device: NODE.id, concurrency: 1 }] }));
+    await h.finishJob(id);
+    assert.equal(most, 1 + 15, 'one converting and 15 waiting on the node');
+  } finally {
+    await h.close();
+  }
+});
+
 test('the worker refuses anything but an MP4, limits wrong pairing codes per address, and a node cannot hang the main', { skip: !hasTools, timeout: 120_000 }, async () => {
   const dir = await tmp();
   const material = await certs(dir, 'worker-tls');
@@ -520,3 +546,53 @@ test('the picture check decodes on this server\'s GPU, and on the CPU when the G
   await ffmpegDecoder({ spawn, accel: async () => null })('a.mp4', { width: 2, height: 2 });
   assert.deepEqual(calls.map((a) => a.includes('-hwaccel')), [false], 'no GPU: the CPU');
 });
+
+test('clips sent ahead wait on the node for a free slot, and all of them convert', { skip: !hasTools, timeout: 300_000 }, async () => {
+  const dir = await tmp();
+  const material = await certs(dir, 'worker-tls');
+  const w = await startWorker(dir, material);
+  const nodes = createNodes({ db: memDb(), log: quiet, audit: quiet, name: 'main-nas', pollMs: 100 });
+  try {
+    const { pairing } = w.worker.startPairing();
+    const node = await nodes.add({ address: `127.0.0.1:${w.port}`, code: pairing.code });
+    w.worker.setEnabled(true, 1);
+    const clip = path.join(dir, 'clip.mp4');
+    await createTeslaH264Fixture({ ffmpegPath: 'ffmpeg', outputPath: clip, durationSeconds: 2, frameRate: 12, size: '320x240', telemetryPattern: Array.from({ length: 24 }, (_, i) => Buffer.from([0x20, i])) });
+    const device = { id: `node:${node.id}` };
+    let most = { busy: 0, encoding: 0 };
+    const watch = setInterval(async () => {
+      const r = await fetchJson(w.port, '/node/v1/info', node.token).catch(() => null);
+      if (r?.busy > most.busy) most = { ...most, busy: r.busy };
+      if (r?.encoding > most.encoding) most = { ...most, encoding: r.encoding };
+      if (r) assert.equal(r.capacity, 1 + 15);
+    }, 50);
+    const sawQueued = [false, false, false];
+    const codes = await Promise.all([0, 1, 2].map((n) => new Promise((resolve) => {
+      const child = nodes.encode({ device, source: clip, target: path.join(dir, `out-${n}.mp4`), codec: 'h265', bitrate: 400_000, quality: null });
+      child.stdout.on('data', (d) => { if (String(d).includes('queued=1')) sawQueued[n] = true; });
+      child.once('close', resolve);
+    })));
+    clearInterval(watch);
+    assert.deepEqual(codes, [0, 0, 0]);
+    assert.ok(most.busy >= 2, `clips waited on the node (${most.busy} held at once)`);
+    assert.equal(most.encoding, 1, 'never more encodes than its slots');
+    assert.ok(sawQueued.some(Boolean), 'a waiting clip tells the main it is still alive');
+    assert.deepEqual(fs.readdirSync(path.join(dir, 'work')), []);
+  } finally {
+    w.server.close();
+    w.worker.close();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+function fetchJson(port, p, token) {
+  return new Promise((resolve, reject) => {
+    const req = require('https').request({ host: '127.0.0.1', port, path: p, rejectUnauthorized: false, headers: { Authorization: `Bearer ${token}` } }, (res) => {
+      let d = '';
+      res.on('data', (c) => { d += c; });
+      res.on('end', () => { try { resolve(JSON.parse(d)); } catch (err) { reject(err); } });
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}

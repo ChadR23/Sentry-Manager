@@ -28,6 +28,8 @@ const ACTIVE_STATES = new Set([
   'verifying', 'copying', 'replacing', 'paused', 'paused_network'
 ]);
 const TERMINAL_STATES = new Set(['completed', 'failed', 'cancelled', 'skipped']);
+// Clips each node (another server) is sent beyond its conversions at once
+const NODE_SEND_AHEAD = 15;
 const SAFE_CODE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const REPLACEMENT_PHASES = new Set([
   'candidate-written', 'original-backed-up', 'candidate-promoted',
@@ -585,7 +587,10 @@ function createConverterJobService(deps) {
         device = typeof deps.resolveDevice === 'function' ? await deps.resolveDevice(lane.device) : null;
       } catch (_) { device = null; }
       if (device && device.id === lane.device) {
-        limits.set(lane.device, lane.concurrency);
+        // A node (another server) gets NODE_SEND_AHEAD more clips than it
+        // converts at once: they are read and sent while it works, and wait
+        // there for a free slot, so it never waits for this server.
+        limits.set(lane.device, lane.concurrency + (device.kind === 'node' ? NODE_SEND_AHEAD : 0));
         devices.set(lane.device, device);
       } else {
         console.warn(`[CONVERTER] Encoding device ${lane.device} is not in the container; its ${lane.concurrency} conversions at once are not started.`);

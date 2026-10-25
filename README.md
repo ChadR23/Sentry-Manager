@@ -350,7 +350,13 @@ fastest, and its row under Parallel conversions too.
 
 This server reads each clip from the share, sends it to the node over HTTPS,
 gets the encoded file back, and then writes the telemetry, verifies it and
-saves it exactly as it does for its own GPUs. If a node is offline or fails
+saves it exactly as it does for its own GPUs. Each node is sent **15 clips
+ahead** of what it converts at once: they wait on the node, so it starts the
+next one the moment a slot is free instead of waiting for this server to read
+and send it (the Nodes page shows how many are converting and waiting). This
+takes up to 15 clips' worth of disk on the node, about 1 GB, and on this
+server while they wait. A clip that waits more than 30 minutes is encoded
+here instead. If a node is offline or fails
 a clip, that clip is encoded here instead, on this server's GPU when it has
 one (the CPU otherwise).
 

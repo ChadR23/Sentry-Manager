@@ -45,6 +45,9 @@ const ORPHAN_MS = 5 * 60_000;
 // Encode with: the GPU (the CPU only without one), the GPU and the CPU for
 // clips the GPU fails, or the CPU only
 const USES = ['gpu', 'gpu-cpu', 'cpu'];
+// Clips a main may send ahead, past the slots: uploaded and waiting here, so
+// the next one starts the moment a slot is free, however busy the main is.
+const QUEUE = 15;
 const BAD_TOKEN_LIMIT = 20;
 const BAD_TOKEN_WINDOW_MS = 10 * 60_000;
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O, 1/I
@@ -101,6 +104,7 @@ function parseJobSettings(raw) {
 function createNodeWorker({ db, log, audit = log, authority = () => null, workDir, ffmpegPath = 'ffmpeg', spawn = require('child_process').spawn, runtime, name = os.hostname(), platform = process.platform, now = Date.now }) {
   let pairing = null; // { code, expiresAt, tries, byAddress }
   const jobs = new Map(); // id -> job
+  const waiting = []; // uploaded jobs waiting for a slot, oldest first
   const badTokens = new Map(); // address -> [times]
 
   const settings = () => {
@@ -149,6 +153,7 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
       for (const job of jobs.values()) stopJob(job);
     }
     save(next);
+    pump(); // more slots: waiting clips start
     return status();
   }
 
@@ -265,10 +270,24 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
         encoders[family] = chosen?.codec || null;
       } catch { encoders[family] = null; }
     }
-    return { name, encoders, slots: s.slots, use: s.use, busy: running().length };
+    return { name, encoders, slots: s.slots, use: s.use, busy: running().length, encoding: encoding(), capacity: s.slots + QUEUE };
   }
 
-  const running = () => [...jobs.values()].filter((job) => job.state === 'receiving' || job.state === 'encoding');
+  // every clip held for a main: arriving, waiting for a slot or encoding
+  const running = () => [...jobs.values()].filter((job) => job.state === 'receiving' || job.state === 'queued' || job.state === 'encoding');
+  const encoding = () => [...jobs.values()].filter((job) => job.state === 'encoding').length;
+
+  // Starts waiting clips while slots are free (a main's benchmark measures
+  // up to the maximum, past the setting).
+  function pump() {
+    while (waiting.length) {
+      const next = waiting[0];
+      if (next.stopped) { waiting.shift(); continue; }
+      if (encoding() >= (next.benchmark ? MAX_SLOTS : settings().slots)) return;
+      waiting.shift();
+      void encode(next, next.settingsUsed).finally(pump);
+    }
+  }
 
   function publicJob(job) {
     return { id: job.id, state: job.state, outTimeUs: job.outTimeUs, fps: job.fps, speed: job.speed, encoder: job.encoder, error: job.error || null, outputBytes: job.outputBytes || null };
@@ -293,6 +312,8 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
   function stopJob(job) {
     if (job.stopped) return Promise.resolve();
     job.stopped = true;
+    const at = waiting.indexOf(job);
+    if (at >= 0) waiting.splice(at, 1);
     try { job.child?.kill('SIGKILL'); } catch { /* gone */ }
     job.upload?.destroy?.();
     jobs.delete(job.id);
@@ -303,7 +324,7 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
   const sweeper = setInterval(() => {
     for (const job of jobs.values()) {
       if ((job.state === 'done' || job.state === 'failed') && now() - job.endedAt > DONE_TTL_MS) stopJob(job);
-      else if (job.state === 'encoding' && now() - job.seenAt > ORPHAN_MS) stopJob(job);
+      else if ((job.state === 'encoding' || job.state === 'queued') && now() - job.seenAt > ORPHAN_MS) stopJob(job);
     }
   }, 60_000);
   sweeper.unref?.();
@@ -438,9 +459,11 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
     const length = Number(req.headers['content-length']);
     if (!Number.isSafeInteger(length) || length <= 0) return send(res, 411, { error: 'The clip size is needed.' });
     if (length > MAX_CLIP_BYTES) return send(res, 413, { error: 'Clip too large.' });
-    // running and finished-but-not-collected jobs both hold disk space; a
-    // main's benchmark may measure up to the maximum, past the setting
-    const limit = req.headers['x-node-benchmark'] === '1' ? MAX_SLOTS : settings().slots;
+    // the slots plus the clips sent ahead; running and finished-but-not-
+    // collected jobs both hold disk space; a main's benchmark may measure up
+    // to the maximum, past the setting
+    const benchmark = req.headers['x-node-benchmark'] === '1';
+    const limit = benchmark ? MAX_SLOTS : settings().slots + QUEUE;
     if (running().length >= limit || jobs.size >= limit * 2) return send(res, 503, { error: 'All of this node\'s slots are busy.' });
     const id = crypto.randomBytes(16).toString('hex');
     const job = {
@@ -477,7 +500,11 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
           return;
         }
         send(res, 200, { id });
-        void encode(job, settingsUsed);
+        job.settingsUsed = settingsUsed;
+        job.benchmark = benchmark;
+        job.state = 'queued';
+        waiting.push(job);
+        pump();
       });
     });
     return undefined;
@@ -509,6 +536,7 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
         const body = await readJsonBody(req);
         if (!Number.isSafeInteger(body?.slots) || body.slots < 1 || body.slots > MAX_SLOTS) return send(res, 400, { error: `Clips at once: 1 to ${MAX_SLOTS}.` }), true;
         save({ ...settings(), slots: body.slots });
+        pump();
         audit.info(`Main server "${main.name}" set this node to ${body.slots} clips at once`);
         return send(res, 200, { slots: body.slots }), true;
       }

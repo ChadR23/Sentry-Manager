@@ -1668,7 +1668,7 @@
         <td class="words"><b>${esc(n.name)}</b><br><span class="muted small mono">${esc(n.address)}</span></td>
         <td>${n.online ? '<span class="chip green"><span class="dot ok"></span>Online</span>' : `<span class="chip red"><span class="dot bad"></span>Offline</span><br><span class="muted small words">${esc(n.error || '')}</span>`}</td>
         <td class="small">${encodersText(n.encoders)}</td>
-        <td class="small">${n.online && n.slots ? `${n.busy ?? 0} of ${n.slots} busy` : '—'}</td>
+        <td class="small">${n.online && n.slots ? (n.encoding === null ? `${n.busy ?? 0} of ${n.slots} busy` : `${n.encoding} of ${n.slots} converting${n.busy > n.encoding ? ` · ${n.busy - n.encoding} waiting` : ''}`) : '—'}</td>
         <td class="actions">${n.online && !benches[n.id] ? `<button class="btn sm" data-bench-start="${esc(n.id)}" data-codec="h265"${benchRunning ? ' disabled' : ''}>Benchmark</button>${n.encoders?.av1 ? `<button class="btn sm" data-bench-start="${esc(n.id)}" data-codec="av1"${benchRunning ? ' disabled' : ''}>Benchmark AV1</button>` : ''}` : ''}<button class="btn sm" data-rename-node="${esc(n.id)}">Rename</button><button class="btn sm" data-remove-node="${esc(n.id)}">Remove</button></td></tr>${benchPanel(n)}`).join('');
     const pairing = worker.pairing;
     const mins = pairing ? Math.max(1, Math.round((pairing.expiresAt - Date.now()) / 60000)) : 0;
