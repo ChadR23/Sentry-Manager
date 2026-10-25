@@ -599,3 +599,67 @@ test('web shim: getConverterDevices and setConverterLanes call the server; the b
     ['/api/converter/invoke/runBenchmark', JSON.stringify({ codecs: ['h265', 'av1'], verifyMode: 'quick' })]
   ]);
 });
+
+test('web shim: after a reconnect the page catches up on the current job; a stream closed by an error answer is opened again', async () => {
+  const calls = [];
+  const streams = [];
+  const timers = [];
+  class FakeEventSource {
+    constructor(url) { this.url = url; this.readyState = 1; this.handlers = {}; streams.push(this); }
+    addEventListener(type, fn) { (this.handlers[type] ||= []).push(fn); }
+    fire(type, data) { for (const fn of this.handlers[type] || []) fn(data); }
+  }
+  FakeEventSource.CLOSED = 2;
+  const listeners = () => ({ addEventListener() {}, removeEventListener() {} });
+  const current = { id: 'auto-job', revision: 7, state: 'discovering', progress: { discovered: 25400 } };
+  const sandbox = {
+    location: { search: '', pathname: '/studio/encoder.html', origin: 'https://nas', href: '' },
+    URLSearchParams, JSON, Promise, Set, Map, Object, String, Error, Math, clearTimeout,
+    setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
+    crypto: { randomUUID: () => 'client-1' },
+    document: { documentElement: { dataset: {} }, getElementById: () => null, querySelector: () => null, querySelectorAll: () => [], addEventListener() {} },
+    fetch: async (url, init = {}) => {
+      calls.push(url);
+      return { status: 200, ok: true, json: async () => (url.endsWith('/getCurrent') ? { ok: true, value: current } : { ok: true, value: null }) };
+    },
+    EventSource: FakeEventSource,
+    MutationObserver: class { observe() {} },
+    sessionStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+    navigator: { userAgent: 'test' }
+  };
+  sandbox.window = Object.assign(sandbox, listeners());
+  sandbox.top = sandbox.window;
+  vm.runInNewContext(fs.readFileSync(path.join(REPO, 'web/electronApiShim.js'), 'utf8'), sandbox);
+  const seen = [];
+  sandbox.window.electronAPI.onConverterProgress((p) => seen.push(p));
+  const flush = () => new Promise((r) => setImmediate(r));
+
+  // the page's own first hello: subscribe, nothing to catch up on
+  streams[0].fire('hello');
+  await flush(); await flush();
+  assert.equal(seen.length, 0);
+  assert.equal(calls.filter((u) => u.endsWith('/getCurrent')).length, 0);
+
+  // a reconnect (the server restarted): the current job arrives as a full update
+  streams[0].fire('hello');
+  await flush(); await flush(); await flush();
+  assert.deepEqual(seen.map((p) => [p.jobId, p.revision, p.snapshot.progress.discovered]), [['auto-job', 7, 25400]]);
+
+  // an error answer closes the stream for good: a new one is opened after a delay
+  streams[0].readyState = FakeEventSource.CLOSED;
+  streams[0].fire('error');
+  assert.equal(streams.length, 1, 'not straight away');
+  const retry = timers.find((t) => t.ms === 1000);
+  assert.ok(retry, 'retried after a second');
+  retry.fn();
+  assert.equal(streams.length, 2);
+  assert.match(streams[1].url, /\/api\/converter\/events\?client=client-1/);
+  // its hello is a reconnect too
+  streams[1].fire('hello');
+  await flush(); await flush(); await flush();
+  assert.equal(seen.length, 2);
+  // a dropped connection the browser retries itself (still CONNECTING) opens nothing new
+  streams[1].readyState = 0;
+  streams[1].fire('error');
+  assert.equal(timers.filter((t) => t.ms >= 1000).length, 1);
+});

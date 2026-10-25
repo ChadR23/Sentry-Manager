@@ -50,9 +50,24 @@
   const converterListeners = { 'converter:progress': new Set(), 'converter:benchmarkProgress': new Set() };
   let source = null;
   let subscribed = false;
+  let retryMs = 1000;
+  // the first hello is the page's own start; every later one is a reconnect
+  let connectedBefore = false;
   function ensureEvents() {
     if (source) return;
     source = new EventSource(`/api/converter/events?client=${encodeURIComponent(clientId)}`);
+    // A dropped connection is retried by the browser itself, but an error
+    // answer (503 while the converter starts after a server restart) closes
+    // the stream for good, and the page would never hear of a new job: open
+    // it again, waiting a little longer each time.
+    const own = source;
+    source.addEventListener('error', () => {
+      if (own.readyState !== EventSource.CLOSED || source !== own) return;
+      source = null;
+      setTimeout(ensureEvents, retryMs);
+      retryMs = Math.min(retryMs * 2, 30000);
+    });
+    source.addEventListener('open', () => { retryMs = 1000; });
     for (const ch of Object.keys(converterListeners)) {
       source.addEventListener(ch, (e) => {
         let payload;
@@ -64,12 +79,26 @@
         for (const fn of converterListeners[ch]) fn(payload);
       });
     }
-    // After a reconnect the server has a new sender: subscribe again.
-    source.addEventListener('hello', () => {
-      if (subscribed) invoke('subscribeProgress');
+    // After a reconnect the server has a new sender: subscribe again, and
+    // catch up on what happened while the page was cut off (a server restart
+    // starts an automatic job, or a job finished): the current job arrives as
+    // a full update, so the page shows it instead of the last one it saw.
+    source.addEventListener('hello', async () => {
+      if (!subscribed) return;
+      await invoke('subscribeProgress');
+      if (!connectedBefore) {
+        connectedBefore = true;
+        return;
+      }
+      const current = await invoke('getCurrent');
+      const snapshot = current?.ok ? current.value : null;
+      if (!snapshot?.id) return;
+      const payload = { jobId: snapshot.id, revision: snapshot.revision, snapshot };
+      for (const fn of converterListeners['converter:progress']) fn(payload);
     });
   }
   const waitOpen = () => new Promise((resolve) => {
+    if (!source) ensureEvents();
     if (source.readyState === 1) return resolve();
     const done = () => resolve();
     source.addEventListener('open', done, { once: true });
