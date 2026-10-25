@@ -278,6 +278,13 @@ say) can encode clips for this one. It becomes one more row under
 3. Under **Encoder → Parallel conversions**, set how many clips the node
    converts at once.
 
+**Benchmark a node** from here: **Nodes → Benchmark** (or **Benchmark AV1**)
+lends the node a few sample clips from your footage and converts them at 1,
+2, 4, 6 and 8 at once, timing each level. The node needs no footage of its
+own; the encoded files are deleted and the footage is only read. **Use N at
+once** then sets the node to the lightest setting within 5% of the fastest,
+and its row under Parallel conversions too.
+
 This server reads each clip from the share, sends it to the node over HTTPS,
 gets the encoded file back, and then writes the telemetry, verifies it and
 saves it exactly as it does for its own GPUs. If a node is offline or fails

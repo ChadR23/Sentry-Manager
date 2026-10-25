@@ -406,8 +406,10 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
     const length = Number(req.headers['content-length']);
     if (!Number.isSafeInteger(length) || length <= 0) return send(res, 411, { error: 'The clip size is needed.' });
     if (length > MAX_CLIP_BYTES) return send(res, 413, { error: 'Clip too large.' });
-    // running and finished-but-not-collected jobs both hold disk space
-    if (running().length >= settings().slots || jobs.size >= settings().slots * 2) return send(res, 503, { error: 'All of this node\'s slots are busy.' });
+    // running and finished-but-not-collected jobs both hold disk space; a
+    // main's benchmark may measure up to the maximum, past the setting
+    const limit = req.headers['x-node-benchmark'] === '1' ? MAX_SLOTS : settings().slots;
+    if (running().length >= limit || jobs.size >= limit * 2) return send(res, 503, { error: 'All of this node\'s slots are busy.' });
     const id = crypto.randomBytes(16).toString('hex');
     const job = {
       id, mainId: main.id, mainName: main.name, state: 'receiving',
@@ -465,6 +467,14 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
       }
       if (p === '/node/v1/info' && req.method === 'GET') return send(res, 200, await info()), true;
       if (p === '/node/v1/jobs' && req.method === 'POST') return await receive(req, res, main), true;
+      if (p === '/node/v1/slots' && req.method === 'POST') {
+        // the main's benchmark result: how many clips at once (1 to MAX_SLOTS)
+        const body = await readJsonBody(req);
+        if (!Number.isSafeInteger(body?.slots) || body.slots < 1 || body.slots > MAX_SLOTS) return send(res, 400, { error: `Clips at once: 1 to ${MAX_SLOTS}.` }), true;
+        save({ ...settings(), slots: body.slots });
+        audit.info(`Main server "${main.name}" set this node to ${body.slots} clips at once`);
+        return send(res, 200, { slots: body.slots }), true;
+      }
       const m = /^\/node\/v1\/jobs\/([0-9a-f]{32})(\/output)?$/.exec(p);
       const job = m ? jobs.get(m[1]) : null;
       if (!job || job.mainId !== main.id) return send(res, 404, { error: 'No such job.' }), true;

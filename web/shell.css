@@ -505,3 +505,7 @@ html.reduce-effects *, html.reduce-effects *::before { transition: none !importa
 
 /* Nodes: the one-time pairing code, large enough to read across a room */
 .pair-code-value { font-size: clamp(1.25rem, 6vw, 1.9rem); white-space: nowrap; letter-spacing: 0.12em; margin: 6px 0 8px; color: var(--text); }
+/* Nodes > Benchmark results under a node's row */
+.node-bench-row > td { padding-top: 0; }
+.node-bench { border: 1px solid var(--line, rgba(255, 255, 255, 0.08)); border-radius: 12px; padding: 12px 14px; }
+.node-bench tr.is-best td { color: var(--accent); font-weight: 600; }

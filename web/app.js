@@ -1647,14 +1647,29 @@
   pages.nodes = async () => {
     const seq = renderSeq;
     const { nodes, worker } = await api('/api/nodes');
+    const benches = Object.fromEntries(await Promise.all(nodes.map(async (n) => [n.id, (await api(`/api/nodes/${encodeURIComponent(n.id)}/benchmark`).catch(() => ({}))).benchmark || null])));
     if (seq !== renderSeq) return;
+    const benchRunning = Object.values(benches).some((b) => b?.state === 'running');
+    const benchPanel = (n) => {
+      const b = benches[n.id];
+      if (!b) return '';
+      const codec = b.codec === 'av1' ? 'AV1' : 'H.265';
+      const rows = b.results.map((r) => `<tr${r.level === b.suggested ? ' class="is-best"' : ''}><td>${r.level} at once</td><td>${r.failed ? `${r.failed} failed` : `${r.clipsPerMinute} clips/min`}</td><td class="muted small">${r.clips} clips in ${r.seconds} s</td></tr>`).join('');
+      return `<tr class="node-bench-row"><td colspan="5"><div class="node-bench">
+        <div><b>Benchmark, ${codec}</b> <span class="muted small">${b.state === 'running' ? esc(b.phase || 'Running') + '…' : b.state === 'failed' ? `failed: ${esc(b.error || '')}` : b.state === 'cancelled' ? 'cancelled' : `done${b.samples ? ` · ${plural(b.samples, 'sample clip')} from your footage, only read` : ''}`}</span></div>
+        ${rows ? `<table class="table" style="margin-top:8px"><tbody>${rows}</tbody></table>` : ''}
+        <div class="form-actions" style="margin-top:8px">
+          ${b.state === 'running' ? `<button class="btn sm" data-bench-cancel="${esc(n.id)}">Cancel</button>`
+            : `${b.suggested ? `<button class="btn sm solid" data-bench-use="${esc(n.id)}" data-level="${b.suggested}">Use ${b.suggested} at once</button>` : ''}<button class="btn sm" data-bench-start="${esc(n.id)}" data-codec="${esc(b.codec)}">Run again</button>`}
+        </div></div></td></tr>`;
+    };
     const encodersText = (e) => [['H.265', e?.h265], ['AV1', e?.av1]].filter(([, v]) => v).map(([k, v]) => `${k}: ${esc(v)}`).join(' · ') || '—';
     const nodeRows = nodes.map((n) => `<tr>
         <td class="words"><b>${esc(n.name)}</b><br><span class="muted small mono">${esc(n.address)}</span></td>
         <td>${n.online ? '<span class="chip green"><span class="dot ok"></span>Online</span>' : `<span class="chip red"><span class="dot bad"></span>Offline</span><br><span class="muted small words">${esc(n.error || '')}</span>`}</td>
         <td class="small">${encodersText(n.encoders)}</td>
         <td class="small">${n.online && n.slots ? `${n.busy ?? 0} of ${n.slots} busy` : '—'}</td>
-        <td class="actions"><button class="btn sm" data-remove-node="${esc(n.id)}">Remove</button></td></tr>`).join('');
+        <td class="actions">${n.online && !benches[n.id] ? `<button class="btn sm" data-bench-start="${esc(n.id)}" data-codec="h265"${benchRunning ? ' disabled' : ''}>Benchmark</button>${n.encoders?.av1 ? `<button class="btn sm" data-bench-start="${esc(n.id)}" data-codec="av1"${benchRunning ? ' disabled' : ''}>Benchmark AV1</button>` : ''}` : ''}<button class="btn sm" data-remove-node="${esc(n.id)}">Remove</button></td></tr>${benchPanel(n)}`).join('');
     const pairing = worker.pairing;
     const mins = pairing ? Math.max(1, Math.round((pairing.expiresAt - Date.now()) / 60000)) : 0;
     const mainRows = worker.mains.map((m) => `<tr>
@@ -1706,6 +1721,48 @@
         btn.disabled = false;
       }
     };
+    page.querySelectorAll('[data-bench-start]').forEach((b) => {
+      b.onclick = async () => {
+        b.disabled = true;
+        try {
+          await api(`/api/nodes/${encodeURIComponent(b.dataset.benchStart)}/benchmark`, { body: { codec: b.dataset.codec } });
+        } catch (err) { toast(err.message, true); }
+        render();
+      };
+    });
+    page.querySelectorAll('[data-bench-cancel]').forEach((b) => {
+      b.onclick = async () => {
+        await api(`/api/nodes/${encodeURIComponent(b.dataset.benchCancel)}/benchmark`, { method: 'DELETE' }).catch(() => {});
+        render();
+      };
+    });
+    page.querySelectorAll('[data-bench-use]').forEach((b) => {
+      b.onclick = async () => {
+        const level = Number(b.dataset.level);
+        try {
+          await api(`/api/nodes/${encodeURIComponent(b.dataset.benchUse)}/slots`, { body: { slots: level } });
+          // and its row under Encoder > Parallel conversions, for the next run
+          try {
+            const key = 'converterLanes';
+            const lanes = JSON.parse(localStorage.getItem(key) || '{}') || {};
+            lanes[`node:${b.dataset.benchUse}`] = level;
+            localStorage.setItem(key, JSON.stringify(lanes));
+          } catch { /* a preference only */ }
+          toast(`The node now converts ${level} at once; its Encoder row is set to ${level} too.`);
+        } catch (err) { toast(err.message, true); }
+        render();
+      };
+    });
+    // follow a running benchmark
+    if (benchRunning) {
+      const follow = () => {
+        if (seq !== renderSeq || !location.hash.startsWith('#/nodes')) return;
+        // not while something is being typed on the page
+        if (document.activeElement?.matches?.('input, select, textarea')) setTimeout(follow, 2500);
+        else render();
+      };
+      setTimeout(follow, 2500);
+    }
     page.querySelectorAll('[data-remove-node]').forEach((b) => {
       b.onclick = async () => {
         const n = nodes.find((x) => x.id === b.dataset.removeNode);
@@ -2311,8 +2368,9 @@
   // Phones show each table row as a stacked block; the cells carry their column name.
   function labelTableCells(root) {
     root.querySelectorAll('table.table').forEach((table) => {
-      const names = [...table.querySelectorAll('thead th')].map((th) => th.textContent.trim());
-      table.querySelectorAll('tbody tr').forEach((tr) => [...tr.children].forEach((td, i) => { if (names[i]) td.dataset.label = names[i]; }));
+      // its own rows only, not those of a table inside a cell (Nodes > Benchmark)
+      const names = [...table.querySelectorAll(':scope > thead th')].map((th) => th.textContent.trim());
+      table.querySelectorAll(':scope > tbody > tr').forEach((tr) => [...tr.children].forEach((td, i) => { if (names[i]) td.dataset.label = names[i]; }));
     });
   }
 

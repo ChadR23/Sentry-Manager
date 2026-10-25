@@ -294,7 +294,7 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
    * progress and writes the encoded file to `target` (created new, like
    * ffmpeg's -n). Returns an object that behaves like ffmpeg's process.
    */
-  function encode({ device, source, target, codec, bitrate, quality, holdFrames = 0, durationUs = null }) {
+  function encode({ device, source, target, codec, bitrate, quality, holdFrames = 0, durationUs = null, benchmark = false }) {
     const id = String(device?.id || '').replace(/^node:/, '');
     const node = byId(id);
     if (!node) throw nodeError('No such node.', 404);
@@ -338,11 +338,12 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
         });
         // unreachable: fail over at once (only a node that answers "busy" is waited for)
         if (!free || free.status !== 200) throw nodeError(peerText(free?.json?.error) || 'Could not reach the node.', 502, 'NODE_UNREACHABLE');
-        const busy = Number.isSafeInteger(free.json?.slots) && Number.isSafeInteger(free.json?.busy) && free.json.busy >= free.json.slots;
+        // (a benchmark measures up to the node's maximum, past its setting)
+        const busy = !benchmark && Number.isSafeInteger(free.json?.slots) && Number.isSafeInteger(free.json?.busy) && free.json.busy >= free.json.slots;
         if (!busy) {
           sent = await request(node, {
             method: 'POST', path: '/node/v1/jobs', signal: controller.signal, timeoutMs: 60_000, deadlineMs: 30 * 60_000,
-            headers: { 'Content-Type': 'video/mp4', 'Content-Length': size, 'X-Node-Job': JSON.stringify(settings) },
+            headers: { 'Content-Type': 'video/mp4', 'Content-Length': size, 'X-Node-Job': JSON.stringify(settings), ...(benchmark ? { 'X-Node-Benchmark': '1' } : {}) },
             body: fs.createReadStream(source)
           }).catch((err) => (err?.code === 'CANCELLED' ? Promise.reject(err) : { status: 0, error: err }));
           if (sent.status !== 503 && sent.status !== 0) break;
@@ -408,7 +409,18 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
     return child;
   }
 
-  return { list, overview, add, remove, encode, refresh: (id) => (byId(id) ? refresh(byId(id)) : null) };
+  /** Sets how many clips the node converts at once (Nodes > Benchmark > Use). */
+  async function setSlots(id, slots) {
+    const node = byId(id);
+    if (!node) throw nodeError('No such node.', 404);
+    if (!Number.isSafeInteger(slots) || slots < 1 || slots > 8) throw nodeError('Clips at once: 1 to 8.');
+    const r = await request(node, { method: 'POST', path: '/node/v1/slots', headers: { 'Content-Type': 'application/json' }, body: Buffer.from(JSON.stringify({ slots })), timeoutMs: 10_000 });
+    if (r.status !== 200) throw nodeError(peerText(r.json?.error) || `The node refused (${r.status}).`, 502);
+    await refresh(node);
+    return info.get(id);
+  }
+
+  return { list, overview, add, remove, encode, setSlots, has: (id) => Boolean(byId(id)), refresh: (id) => (byId(id) ? refresh(byId(id)) : null) };
 }
 
 module.exports = { createNodes, parseAddress, connectPinned, pinMatches };

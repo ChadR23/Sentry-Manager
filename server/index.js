@@ -53,6 +53,8 @@ const { TlsManager, localTlsSource, supervisorTlsSource, parseHostnames } = requ
 const { Router, HttpError, sendJson, readJson, readRaw, serveFile } = require('./http');
 const { createNodes } = require('./nodes');
 const { createNodeWorker } = require('./nodeWorker');
+const { createNodeBenchmark } = require('./nodeBenchmark');
+const { run } = require('./proc');
 const { Telemetry } = require('./telemetry');
 
 const APP_ROOT = path.resolve(process.env.APP_ROOT || path.join(__dirname, '..'));
@@ -333,6 +335,11 @@ async function main() {
       certFile: process.env.TLS_CERT_FILE || null, keyFile: process.env.TLS_KEY_FILE || null
     }));
 
+  // Nodes > Benchmark: sample clips lent to a node, timed from here
+  const nodeBench = createNodeBenchmark({
+    nodes, vehicles, run, ffprobePath: FFPROBE, workDir: path.join(DATA, 'converter-temp', 'node-benchmark'), log: logger.scope('nodes')
+  });
+
   // Nodes, the other way: a main server's clips encoded here (server/nodeWorker.js).
   // Needs this server's own HTTPS: the main pins its certificate.
   const nodeWorker = createNodeWorker({
@@ -589,6 +596,23 @@ async function main() {
     } catch (err) {
       throw new HttpError(err.status && err.status < 500 ? err.status : 502, err.message);
     }
+  });
+  r.add('GET', '/api/nodes/:id/benchmark', (req, res, { params }) => ({ benchmark: nodeBench.view(params.id) }));
+  r.add('POST', '/api/nodes/:id/benchmark', (req, res, { params, body, user }) => {
+    if (!nodes.has(params.id)) throw new HttpError(404, 'No such node.');
+    const started = nodeBench.start(params.id, { codec: body?.codec === 'av1' ? 'av1' : 'h265' });
+    audit.info(`Node benchmark started for ${params.id}: ${by(req, user)}`);
+    return { benchmark: started };
+  });
+  r.add('DELETE', '/api/nodes/:id/benchmark', (req, res, { params }) => ({ benchmark: nodeBench.cancel(params.id) }));
+  r.add('POST', '/api/nodes/:id/slots', async (req, res, { params, body, user }) => {
+    try {
+      await nodes.setSlots(params.id, Number(body?.slots));
+    } catch (err) {
+      throw new HttpError(err.status && err.status < 500 ? err.status : 502, err.message);
+    }
+    audit.info(`Node ${params.id} set to ${Number(body?.slots)} clips at once: ${by(req, user)}`);
+    return { ok: true };
   });
   r.add('DELETE', '/api/nodes/:id', (req, res, { params, user }) => {
     const node = nodes.remove(params.id);

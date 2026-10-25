@@ -344,3 +344,69 @@ test('the worker refuses anything but an MP4, limits wrong pairing codes per add
     await fsp.rm(dir, { recursive: true, force: true });
   }
 });
+
+// ---- Nodes > Benchmark
+
+const { createNodeBenchmark, pickSamples, suggest } = require('../server/nodeBenchmark');
+const { run: runProc } = require('../server/proc');
+
+test('benchmark: the lightest level within 5% of the fastest is suggested', () => {
+  assert.equal(suggest([{ level: 1, clipsPerMinute: 4 }, { level: 2, clipsPerMinute: 7.8 }, { level: 4, clipsPerMinute: 8 }]), 2);
+  assert.equal(suggest([{ level: 1, clipsPerMinute: 4 }, { level: 2, clipsPerMinute: 6 }]), 2);
+  assert.equal(suggest([{ level: 1, clipsPerMinute: 0 }]), null);
+});
+
+test('benchmark: sample clips are H.264 Tesla clips, newest first, one camera each first', async () => {
+  const dir = await tmp();
+  try {
+    const recent = path.join(dir, 'RecentClips');
+    fs.mkdirSync(recent);
+    for (const name of ['2026-10-20_10-00-00-front.mp4', '2026-10-21_10-00-00-front.mp4', '2026-10-21_10-00-00-back.mp4', 'notes.txt', '2026-10-21_10-00-00-front.mov']) {
+      fs.writeFileSync(path.join(recent, name), Buffer.alloc(2048));
+    }
+    const codecOf = async (file) => (file.includes('10-20') ? 'h265' : 'h264');
+    const picked = await pickSamples(dir, { codecOf, minBytes: 1024 });
+    assert.deepEqual(picked.map((p) => path.basename(p)), ['2026-10-21_10-00-00-front.mp4', '2026-10-21_10-00-00-back.mp4']);
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('benchmark: real clips lent to a real node, timed per level, encodes deleted, footage untouched', { skip: !hasTools, timeout: 300_000 }, async () => {
+  const dir = await tmp();
+  const material = await certs(dir, 'worker-tls');
+  const w = await startWorker(dir, material);
+  const nodes = createNodes({ db: memDb(), log: quiet, audit: quiet, name: 'main-nas', pollMs: 100 });
+  try {
+    const { pairing } = w.worker.startPairing();
+    const node = await nodes.add({ address: `127.0.0.1:${w.port}`, code: pairing.code });
+    const tesla = path.join(dir, 'footage', 'TeslaCam', 'RecentClips');
+    fs.mkdirSync(tesla, { recursive: true });
+    for (const cam of ['front', 'back']) {
+      await createTeslaH264Fixture({ ffmpegPath: 'ffmpeg', outputPath: path.join(tesla, `2026-10-24_10-00-00-${cam}.mp4`), durationSeconds: 2, frameRate: 12, size: '320x240', spatialNoise: 3, telemetryPattern: Array.from({ length: 24 }, (_, i) => Buffer.from([0x20, i])) });
+    }
+    const before = fs.readdirSync(tesla).map((f) => [f, fs.statSync(path.join(tesla, f)).mtimeMs]);
+    const vehicles = { list: () => [{ id: 'car' }], studioRoot: () => path.join(dir, 'footage', 'TeslaCam') };
+    const work = path.join(dir, 'bench');
+    const bench = createNodeBenchmark({ nodes, vehicles, run: runProc, workDir: work, log: quiet, minBytes: 1024, levels: [1, 2] });
+    bench.start(node.id, { codec: 'h265' });
+    assert.throws(() => bench.start(node.id), /already running/);
+    for (let i = 0; i < 600 && bench.view(node.id).state === 'running'; i++) await new Promise((r) => setTimeout(r, 200));
+    const result = bench.view(node.id);
+    assert.equal(result.state, 'done', JSON.stringify(result));
+    assert.deepEqual(result.results.map((r) => r.level), [1, 2]);
+    assert.ok(result.results.every((r) => r.clipsPerMinute > 0 && r.failed === 0));
+    assert.ok([1, 2].includes(result.suggested));
+    assert.deepEqual(fs.readdirSync(work), [], 'every encode was deleted');
+    assert.deepEqual(fs.readdirSync(tesla).map((f) => [f, fs.statSync(path.join(tesla, f)).mtimeMs]), before, 'the footage is untouched');
+
+    // Use: the node takes that many clips at once
+    await nodes.setSlots(node.id, 3);
+    assert.equal(w.worker.status().slots, 3);
+    await assert.rejects(nodes.setSlots(node.id, 9), /1 to 8/);
+  } finally {
+    w.server.close();
+    w.worker.close();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
