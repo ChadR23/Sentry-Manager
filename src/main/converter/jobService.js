@@ -36,6 +36,8 @@ const NODE_MAX_AT_ONCE = 8;
 // match) encoded on this server at once: a node's whole send-ahead queue
 // failing over never starts dozens of encodes here.
 const NODE_FALLBACK_AT_ONCE = 2;
+// checks of a node's clips beyond its own number at once (see takeCheckSlot)
+const NODE_CHECK_EXTRA = 2;
 const SAFE_CODE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const REPLACEMENT_PHASES = new Set([
   'candidate-written', 'original-backed-up', 'candidate-promoted',
@@ -1583,14 +1585,16 @@ function createConverterJobService(deps) {
   }
 
   // A node's encoded clips are checked here (pictures, then frames and
-  // telemetry) no more at once than the node converts: the clips sent ahead
-  // keep the node busy, not this server's CPU with as many checks.
+  // telemetry) a few at a time: NODE_CHECK_EXTRA more than the node converts
+  // at once. As many as the clips sent ahead overloaded this server's CPU;
+  // as few as the node's own number could not keep up with a fast node
+  // (its finished clips waited here, a minute each).
   async function takeCheckSlot(runtime, lane, signal) {
     runtime.nodeChecks ||= new Map();
     const id = lane?.id || 'node';
     if (!runtime.nodeChecks.has(id)) runtime.nodeChecks.set(id, { busy: 0, waiters: [] });
     const slots = runtime.nodeChecks.get(id);
-    const limit = () => Math.max(1, runtime.lanePlan?.base?.get(id) || 1);
+    const limit = () => Math.max(1, runtime.lanePlan?.base?.get(id) || 1) + NODE_CHECK_EXTRA;
     while (slots.busy >= limit()) {
       if (signal?.aborted) throw serviceError('CANCELLED');
       await new Promise((resolve) => {
@@ -1825,9 +1829,11 @@ function createConverterJobService(deps) {
       // not is thrown away and the clip is encoded here instead.
       if (selected.remote === true) {
         if (!check.release) check.release = await takeCheckSlot(runtime, lane, signal);
+        timing.mark('checkWait');
         const same = typeof deps.comparePicture === 'function'
           ? await deps.comparePicture({ source: staged.source, candidate: adopted.path, signal }).catch(() => ({ ok: false, reason: 'compare-failed' }))
           : { ok: false, reason: 'no-picture-check' };
+        timing.mark('picture');
         if (!same?.ok) {
           console.warn(`[CONVERTER] The encode from ${selected.device?.name || 'a node'} does not show the original's pictures; encoding it on this server instead:`,
             item.relativePath, JSON.stringify(same || {}).slice(0, 200));

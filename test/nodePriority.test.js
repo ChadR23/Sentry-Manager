@@ -191,7 +191,7 @@ test('two vehicles whose folders are one inside the other never convert at once'
   }
 });
 
-test('a node\'s clips are checked here no more at once than the node converts, however many were sent ahead', async () => {
+test('a node\'s clips are checked here a few at a time (its number + 2), however many were sent ahead', async () => {
   const { EventEmitter } = require('events');
   const NODE = { id: 'node:abcdefabcdef', kind: 'node', name: 'mini (node)', encoders: { h265: 'hevc_vaapi', av1: null }, online: true };
   let checking = 0;
@@ -216,7 +216,10 @@ test('a node\'s clips are checked here no more at once than the node converts, h
     const id = await h.service.start(h.config({ lanes: [{ device: NODE.id, concurrency: 2 }] }));
     const job = await h.finishJob(id, 30_000);
     assert.equal(job.items.filter((item) => item.resultCode === 'converted').length, 20);
-    assert.ok(most <= 2, `${most} clips checked at once`);
+    assert.ok(most <= 2 + 2, `${most} clips checked at once (the node's 2, + 2)`);
+    // and the time breakdown shows the picture check and the wait for it apart from Verify
+    assert.ok(job.timings.totalMs.picture >= 20 * 35, `picture check time recorded (${job.timings.totalMs.picture} ms)`);
+    assert.ok(Number.isSafeInteger(job.timings.totalMs.checkWait), 'the wait for it too');
   } finally {
     await h.close();
   }
@@ -251,7 +254,7 @@ test('a node lane set higher than the node\'s own setting sends and checks only 
     const id = await h.service.start(h.config({ lanes: [{ device: NODE.id, concurrency: 10 }] }));
     await h.finishJob(id, 30_000);
     assert.ok(mostSent <= 2 + 15, `${mostSent} sent at once (2 converting + 15 waiting at most)`);
-    assert.ok(mostChecked <= 2, `${mostChecked} checked at once`);
+    assert.ok(mostChecked <= 2 + 2, `${mostChecked} checked at once`);
   } finally {
     await h.close();
   }
@@ -284,7 +287,7 @@ test('a node\'s row under Parallel conversions tells the node how many to conver
       const id = await h.service.start(h.config({ lanes: [{ device: NODE.id, concurrency: row }] }));
       await h.finishJob(id, 30_000);
       assert.deepEqual(told[0], [NODE.id, expected], `row ${row}: the node is told ${expected}`);
-      assert.ok(mostChecked <= expected, `row ${row}: ${mostChecked} checked at once`);
+      assert.ok(mostChecked <= expected + 2, `row ${row}: ${mostChecked} checked at once`);
     } finally {
       await h.close();
     }

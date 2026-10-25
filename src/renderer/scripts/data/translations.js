@@ -210,6 +210,8 @@ const converterEnglish = Object.freeze({
     timingMetadata: "Write telemetry",
     timingVerify: "Verify",
     timingSaveWait: "Wait to save",
+    timingCheckWait: "Wait for picture check",
+    timingPicture: "Picture check (nodes)",
     timingSave: "Save / replace",
     timingCleanup: "Clean up",
     cleanupPending: "{count} {file} with cleanup pending. Retained artifacts still consume space; hardlinks share disk allocation.",

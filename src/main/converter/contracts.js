@@ -27,7 +27,8 @@ const CONCURRENCY = deepFreeze({ min: 1, max: 64, fallback: 1, recommended: 5 })
 
 // Where a converted file's wall-clock time goes. Names avoid substrings the
 // IPC snapshot sanitizer treats as private (e.g. "telemetry", "process").
-const TIMING_PHASES = Object.freeze(['inspect', 'source', 'timeline', 'encode', 'metadata', 'verify', 'saveWait', 'save', 'cleanup']);
+// (checkWait and picture: a node's clips only, waiting for and running the picture check)
+const TIMING_PHASES = Object.freeze(['inspect', 'source', 'timeline', 'encode', 'metadata', 'checkWait', 'picture', 'verify', 'saveWait', 'save', 'cleanup']);
 
 // Adds one converted file's phase durations (ms) to a job's running totals.
 function addItemTimings(previous, phases) {

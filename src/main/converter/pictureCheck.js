@@ -63,25 +63,44 @@ function judgeFrames(sourceBuf, candidateBuf) {
   const cand = split(candidateBuf);
   if (src.length === 0 || cand.length === 0) return { ok: false, reason: 'no-frames' };
   const at = (i, j) => (j >= 0 && j < cand.length ? similarity(src[i], cand[j]) : -1);
-  // the constant offset that lines them up best, on every 8th frame
-  let best = { shift: 0, score: -Infinity };
-  for (let shift = -SHIFT; shift <= SHIFT; shift++) {
+  // the constant offset that lines them up best: first on every 32nd frame,
+  // then on every 8th near the best of those (a quarter of the work of
+  // trying every offset on every 8th frame)
+  const offsetScore = (shift, step) => {
     let sum = 0;
     let n = 0;
-    for (let i = 0; i < src.length; i += 8) {
+    for (let i = 0; i < src.length; i += step) {
       const v = at(i, i + shift);
       if (v === -1) continue;
       sum += v;
       n++;
     }
     // at least half the sampled frames overlap at this offset (short clips too)
-    if (n > 0 && n >= Math.ceil(src.length / 8) / 2 && sum / n > best.score) best = { shift, score: sum / n };
+    return n > 0 && n >= Math.ceil(src.length / step) / 2 ? sum / n : -Infinity;
+  };
+  const coarse = src.length >= 64 ? 32 : 8;
+  let best = { shift: 0, score: -Infinity };
+  for (let shift = -SHIFT; shift <= SHIFT; shift++) {
+    const score = offsetScore(shift, coarse);
+    if (score > best.score) best = { shift, score };
   }
-  // every frame against its best match near that offset
+  if (coarse !== 8) {
+    const around = best.shift;
+    best = { shift: around, score: -Infinity };
+    for (let shift = Math.max(-SHIFT, around - 4); shift <= Math.min(SHIFT, around + 4); shift++) {
+      const score = offsetScore(shift, 8);
+      if (score > best.score) best = { shift, score };
+    }
+  }
+  // every frame against its best match near that offset; a frame that
+  // already matches well at the offset is not searched further (its score
+  // can only be lower than its best, so the check is never looser)
   const scores = [];
   for (let i = 0; i < src.length; i++) {
-    let top = -1;
-    for (let d = -DRIFT; d <= DRIFT; d++) top = Math.max(top, at(i, i + best.shift + d));
+    let top = at(i, i + best.shift);
+    if (top < PICTURE_MEAN) {
+      for (let d = -DRIFT; d <= DRIFT; d++) if (d !== 0) top = Math.max(top, at(i, i + best.shift + d));
+    }
     if (top !== -1) scores.push(top);
   }
   if (scores.length < Math.min(src.length, cand.length) * 0.9) return { ok: false, reason: 'frames-missing', frames: scores.length };

@@ -99,6 +99,8 @@ const TIMING_LABELS = Object.freeze({
     timeline: ['timingTimeline', 'Read telemetry'],
     encode: ['timingEncode', 'Encode'],
     metadata: ['timingMetadata', 'Write telemetry'],
+    checkWait: ['timingCheckWait', 'Wait for picture check'],
+    picture: ['timingPicture', 'Picture check (nodes)'],
     verify: ['timingVerify', 'Verify'],
     saveWait: ['timingSaveWait', 'Wait to save'],
     save: ['timingSave', 'Save / replace'],
