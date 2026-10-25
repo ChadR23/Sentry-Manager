@@ -13,6 +13,7 @@ const SHORT_CLIP_PROFILE_MAX_US = 2_000_000;
 const { RETRY_REASONS } = require('./encoderPlanner');
 const { parseMp4, findBoxes, selectVideoTrack, buildSampleIndex } = require('./mp4');
 const { extractH264TelemetryTimeline, mapTimelineToOutput } = require('./telemetryTimeline');
+const { undecodableFrames } = require('./frameNumGaps');
 const { inspectH265Telemetry } = require('./h265Telemetry');
 const { inspectAv1Telemetry } = require('./av1Telemetry');
 const { createVerificationSnapshot } = require('./verificationSnapshot');
@@ -411,6 +412,8 @@ function readOutputTiming(candidateBytes) {
   return {
     ...dimensions,
     samples,
+    timescale,
+    durationTicks,
     durationUs,
     durationToleranceUs,
     sampleTimingProof: {
@@ -503,11 +506,16 @@ function normalizeSourceTimeline(timeline) {
     return normalized;
   });
   if (events.length !== normalizedRecords.length) throw new TypeError('Source event count does not match sample telemetry');
-  return { samples, events };
+  // Samples no decoder outputs (frameNumGaps.js) are mapped onto the frame
+  // before them; any other shape of the list means none.
+  const frames = undecodableFrames(timeline);
+  const undecodable = { frames, samples: frames > 0 ? [...timeline.undecodable.samples] : [] };
+  return { samples, events, undecodable };
 }
 
 function sameTimeline(left, right) {
   if (left.samples.length !== right.samples.length || left.events.length !== right.events.length) return false;
+  if (!sameArray(left.undecodable.samples, right.undecodable.samples)) return false;
   for (let index = 0; index < left.samples.length; index += 1) {
     const leftSample = left.samples[index];
     const rightSample = right.samples[index];
@@ -760,7 +768,22 @@ async function readSourceAuthority(options, readFile, sourceBytes, outputBytes) 
       return { error: failure(VERIFICATION_REASONS.SOURCE_TIMELINE_MISMATCH, sourceBytes, outputBytes, { kind: 'cache-mismatch' }) };
     }
   }
-  return { sourceTimeline, sourceTiming, leadInFrames };
+  // The frames the output must have: the original's, less the samples no
+  // decoder outputs, each one's duration added to the frame before it (in
+  // ticks, so the merged duration is exact), every timestamp unchanged.
+  const dropped = new Set(sourceTimeline.undecodable.samples);
+  const expectedSamples = [];
+  let mergedTicks = 0n;
+  sourceTiming.samples.forEach((sample, index) => {
+    if (!dropped.has(index)) {
+      expectedSamples.push({ ...sample });
+      mergedTicks = sourceTiming.durationTicks[index];
+      return;
+    }
+    mergedTicks += sourceTiming.durationTicks[index];
+    expectedSamples.at(-1).durationUs = ticksToMicroseconds(mergedTicks, sourceTiming.timescale);
+  });
+  return { sourceTimeline, sourceTiming, leadInFrames, undecodableFrames: dropped.size, expectedSamples };
 }
 
 // The first frame whose timestamp or duration differs between the original
@@ -895,7 +918,8 @@ async function verifyOwnedSnapshot({ options, profileId, sourceBytes, outputByte
   const vfrProof = proveVfr(candidateProbe.metadata, outputTiming);
   const vfr = vfrProof !== null;
   const frameCountTolerance = vfr ? 1 : 0;
-  const frameDelta = Math.abs(source.sourceTiming.samples.length - outputTiming.samples.length);
+  const frameDelta = Math.abs(source.expectedSamples.length - outputTiming.samples.length);
+  const undecodable = source.undecodableFrames > 0 ? { undecodableFrames: source.undecodableFrames } : {};
   const safeFrameRateProof = vfrProof?.frameRateProof || {
     output: {
       average: candidateProbe.metadata.averageRate.text,
@@ -908,6 +932,7 @@ async function verifyOwnedSnapshot({ options, profileId, sourceBytes, outputByte
       mode: vfr ? 'vfr' : 'cfr',
       sourceFrames: source.sourceTiming.samples.length,
       outputFrames: outputTiming.samples.length,
+      ...undecodable,
       frameDelta,
       toleranceFrames: frameCountTolerance,
       frameRateProof: safeFrameRateProof,
@@ -921,12 +946,16 @@ async function verifyOwnedSnapshot({ options, profileId, sourceBytes, outputByte
   // frame for frame: the same number of frames, and every frame at exactly
   // its original timestamp with its original duration. Nothing is tolerated,
   // so a lead-in clip is never replaced by a shifted or shortened file.
-  if (source.leadInFrames > 0) {
-    const mismatch = frameTimingMismatch(source.sourceTiming.samples, outputTiming.samples);
+  // An original with samples no decoder outputs (frameNumGaps.js) is held to
+  // the same: exactly those frames fewer, each one's time given to the frame
+  // before it, every other frame exactly as in the original.
+  if (source.leadInFrames > 0 || source.undecodableFrames > 0) {
+    const mismatch = frameTimingMismatch(source.expectedSamples, outputTiming.samples);
     if (mismatch) {
       return failure(VERIFICATION_REASONS.DURATION_MISMATCH, sourceBytes, outputBytes, {
         kind: 'source-output-frame-timing',
         leadInFrames: source.leadInFrames,
+        ...undecodable,
         sourceFrames: source.sourceTiming.samples.length,
         outputFrames: outputTiming.samples.length,
         ...mismatch
@@ -1008,7 +1037,9 @@ async function verifyOwnedSnapshot({ options, profileId, sourceBytes, outputByte
       frameCountTolerance,
       frameRateProof: safeFrameRateProof,
       ...(vfr ? { sampleTimingProof: vfrProof.sampleTimingProof } : {}),
-      ...(source.leadInFrames > 0 ? { leadInFrames: source.leadInFrames, frameTiming: 'exact' } : {}),
+      ...(source.leadInFrames > 0 ? { leadInFrames: source.leadInFrames } : {}),
+      ...undecodable,
+      ...(source.leadInFrames > 0 || source.undecodableFrames > 0 ? { frameTiming: 'exact' } : {}),
       telemetryEvents: mappedEventCount,
       telemetryTransitions: actualTransitions,
       telemetryGapRanges: actualGaps

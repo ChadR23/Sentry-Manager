@@ -110,6 +110,11 @@ async function createTeslaH264Fixture({
 // frame of the clip), and optionally Tesla's ending: a last zero-duration
 // sample left out by a zero-based edit list. A clip no longer than its
 // lead-in (frames <= gop - cut) has no keyframe: an empty sync-sample table.
+// skip: positions (in the clip as encoded, before anything is left out) of
+// pictures left out of the file, as Tesla's encoder sometimes skips one: the
+// picture after a skipped reference picture has a frame_num gap. `frames`,
+// `telemetryPattern` and `durations` describe the file as written.
+// editSample(index, bytes): a sample's bytes as written (before telemetry).
 async function createMidGopTeslaH264Fixture({
   ffmpegPath,
   outputPath,
@@ -121,7 +126,9 @@ async function createMidGopTeslaH264Fixture({
   size = '320x240',
   spatialNoise = 4,
   durations = null,
-  teslaEnding = true
+  teslaEnding = true,
+  skip = [],
+  editSample = null
 }) {
   const { box, fullBox, u32 } = require('./fixtureBuilders');
   const { parseMp4, findBoxes, selectVideoTrack, buildSampleIndex } = require('../../src/main/converter/mp4');
@@ -129,7 +136,7 @@ async function createMidGopTeslaH264Fixture({
     throw new RangeError('frames, gop and cut must describe a clip');
   }
   if (!Array.isArray(telemetryPattern) || telemetryPattern.length !== frames) throw new RangeError(`telemetryPattern must contain ${frames} entries`);
-  const total = cut + frames;
+  const total = cut + frames + skip.length;
   const basePath = `${outputPath}.gop.mp4`;
   const result = await runProcess(ffmpegPath, [
     '-nostdin', '-hide_banner', '-loglevel', 'error', '-y',
@@ -147,12 +154,14 @@ async function createMidGopTeslaH264Fixture({
   const track = selectVideoTrack(tree);
   const all = buildSampleIndex(track);
   if (all.length !== total) throw new Error(`fixture encode made ${all.length} frames, not ${total}`);
-  const kept = all.slice(cut);
+  const skipped = new Set(skip);
+  const positions = all.slice(cut).map((_, index) => index).filter((index) => !skipped.has(index));
+  const kept = positions.map((position) => all[cut + position]);
   // Tesla-like variable durations around 1/24 s (deterministic).
   const sampleDurations = durations || kept.map((_, index) => 380 + ((index * 7919) % 9) * 15);
   if (sampleDurations.length !== frames) throw new RangeError('durations must have one entry per frame');
   if (teslaEnding) sampleDurations[frames - 1] = 0;
-  const syncNumbers = kept.map((_, index) => index).filter((index) => (index + cut) % gop === 0).map((index) => index + 1);
+  const syncNumbers = positions.map((position, index) => ({ position, index })).filter(({ position }) => (position + cut) % gop === 0).map(({ index }) => index + 1);
 
   const stsd = findBoxes(track, 'stsd')[0];
   const stsdBox = encoded.subarray(Number(stsd.start), Number(stsd.end));
@@ -165,14 +174,18 @@ async function createMidGopTeslaH264Fixture({
     else runs.push([1, value]);
   }
   const matrix = Buffer.concat([u32(0x00010000), u32(0), u32(0), u32(0), u32(0x00010000), u32(0), u32(0), u32(0), u32(0x40000000)]);
-  const media = Buffer.concat(kept.map((sample) => encoded.subarray(Number(sample.offset), Number(sample.offset) + sample.size)));
+  const sampleBytes = kept.map((sample, index) => {
+    const bytes = encoded.subarray(Number(sample.offset), Number(sample.offset) + sample.size);
+    return editSample ? editSample(index, bytes) : bytes;
+  });
+  const media = Buffer.concat(sampleBytes);
   const makeFile = (chunkOffset) => {
     const stbl = box('stbl', Buffer.concat([
       stsdBox,
       fullBox('stts', 0, 0, Buffer.concat([u32(runs.length), ...runs.flatMap(([count, value]) => [u32(count), u32(value)])])),
       fullBox('stss', 0, 0, Buffer.concat([u32(syncNumbers.length), ...syncNumbers.map(u32)])),
       fullBox('stsc', 0, 0, Buffer.concat([u32(1), u32(1), u32(frames), u32(1)])),
-      fullBox('stsz', 0, 0, Buffer.concat([u32(0), u32(frames), ...kept.map((sample) => u32(sample.size))])),
+      fullBox('stsz', 0, 0, Buffer.concat([u32(0), u32(frames), ...sampleBytes.map((bytes) => u32(bytes.length))])),
       fullBox('stco', 0, 0, Buffer.concat([u32(1), u32(chunkOffset)]))
     ]));
     const minf = box('minf', Buffer.concat([

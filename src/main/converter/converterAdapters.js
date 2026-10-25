@@ -6,7 +6,7 @@ const { mapTimelineToOutput } = require('./telemetryTimeline');
 const { injectH265Telemetry } = require('./h265Telemetry');
 const { injectAv1Telemetry } = require('./av1Telemetry');
 const { verifyCandidate } = require('./verifier');
-const { leadInHoldFrames, retimeToSource } = require('./leadIn');
+const { sourceTimingFor, retimeToSource } = require('./leadIn');
 
 function safeTime(value, timescale) {
   const micros = (value * 1_000_000n) / timescale;
@@ -47,9 +47,11 @@ function createConverterAdapters(options = {}) {
       try {
         const before = await handle.stat({ bigint: true });
         const encoded = await handle.readFile();
-        // Held lead-in frames: the encoded track takes the original's own
-        // timing first, one sample for one sample (refused on any mismatch).
-        const bytes = leadInHoldFrames(timeline) > 0 ? retimeToSource(encoded, timeline.leadIn) : encoded;
+        // Held lead-in frames, or samples no decoder outputs: the encoded
+        // track takes the original's own timing first, one sample for each
+        // output frame (refused on any mismatch).
+        const sourceTiming = sourceTimingFor(timeline);
+        const bytes = sourceTiming ? retimeToSource(encoded, sourceTiming) : encoded;
         const mapped = mapTimelineToOutput(timeline, outputTiming(bytes));
         const output = inject(bytes, mapped);
         if (signal?.aborted) throw Object.assign(new Error('cancelled'), { code: 'CANCELLED' });

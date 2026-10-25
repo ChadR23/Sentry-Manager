@@ -17,8 +17,13 @@
 // A clip that starts on a keyframe has no lead-in and is encoded exactly as
 // before. A clip without any keyframe, or whose frames are reordered
 // (B-frames), gets no hold and fails verification as it always did.
+//
+// A clip with a sample no decoder outputs (a frame_num gap, frameNumGaps.js)
+// is retimed the same way, one sample for each frame that is output: the
+// dropped sample's duration goes to the frame before it.
 
 const { findBoxes, sampleTable, buildSampleIndex, parseMp4, selectVideoTrack, serializedBoxHeaderSize } = require('./mp4');
+const { undecodableFrames } = require('./frameNumGaps');
 
 const UINT32_MAX = 0xffffffff;
 
@@ -99,6 +104,17 @@ function leadInHoldFrames(timeline) {
   if (!leadIn || !Number.isSafeInteger(leadIn.hold) || leadIn.hold <= 0) return 0;
   if (!Array.isArray(leadIn.durationTicks) || leadIn.hold >= leadIn.durationTicks.length) return 0;
   return leadIn.hold;
+}
+
+// The original's timing the encoded track takes before its telemetry is
+// written, one duration per output frame, or null to keep the encoder's own
+// (a clip that starts on a keyframe and loses no frame, encoded as before).
+function sourceTimingFor(timeline) {
+  if (undecodableFrames(timeline) > 0) {
+    const { timescale, durationTicks } = timeline.undecodable;
+    return Array.isArray(durationTicks) && Number.isSafeInteger(timescale) ? { timescale, durationTicks } : null;
+  }
+  return leadInHoldFrames(timeline) > 0 ? timeline.leadIn : null;
 }
 
 function runLength(values) {
@@ -197,7 +213,8 @@ function serialize(buffer, node, replacements) {
  * for one sample: the media timescale becomes the original's and every
  * sample's duration the original sample's, so every frame keeps its original
  * timestamp. The encoded frames must be exactly the original's (lead-in frames
- * included), in presentation order; anything else is refused, never guessed.
+ * included, samples no decoder outputs left out, sourceTimingFor), in
+ * presentation order; anything else is refused, never guessed.
  */
 function retimeToSource(encodedMp4, leadIn) {
   if (!Buffer.isBuffer(encodedMp4)) throw new TypeError('Encoded MP4 must be a Buffer');
@@ -258,4 +275,4 @@ function retimeToSource(encodedMp4, leadIn) {
   return output;
 }
 
-module.exports = { describeLeadIn, leadInHoldFrames, retimeToSource };
+module.exports = { describeLeadIn, leadInHoldFrames, sourceTimingFor, retimeToSource };

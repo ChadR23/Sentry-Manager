@@ -17,7 +17,8 @@ const { spawn, spawnSync } = require('child_process');
 
 const REPO = path.join(__dirname, '..');
 const { buildEncodeArgs } = require(path.join(REPO, 'src/main/converter/encoderPlanner'));
-const { leadInHoldFrames, retimeToSource } = require(path.join(REPO, 'src/main/converter/leadIn'));
+const { leadInHoldFrames, sourceTimingFor, retimeToSource } = require(path.join(REPO, 'src/main/converter/leadIn'));
+const { undecodableFrames } = require(path.join(REPO, 'src/main/converter/frameNumGaps'));
 const { extractH264TelemetryTimeline, mapTimelineToOutput } = require(path.join(REPO, 'src/main/converter/telemetryTimeline'));
 const { injectH265Telemetry, inspectH265Telemetry } = require(path.join(REPO, 'src/main/converter/h265Telemetry'));
 const { inspectAv1Telemetry } = require(path.join(REPO, 'src/main/converter/av1Telemetry'));
@@ -450,6 +451,8 @@ test('replace mode, AV1: a lead-in clip converts with every frame kept and its t
 // Each clip is copied into a temporary TeslaCam folder and converted there in
 // replace mode with GPU decoding, full verification and constant quality;
 // the clips themselves are only read. One JSON line of evidence per clip.
+// Lead-in clips and clips with a frame no decoder outputs (frameNumGaps.js)
+// must convert with exactly the expected frames, each at its original time.
 const realClips = (process.env.LEADIN_CLIPS || '').split(/[,;]/).map((entry) => entry.trim()).filter(Boolean);
 test('real clips (opt-in): every frame kept at its original time, verified, replaced', {
   skip: realClips.length === 0 ? 'set LEADIN_CLIPS to run' : (fs.existsSync(HELPER) ? false : 'needs noreplace-rename'), timeout: 3_600_000
@@ -477,30 +480,46 @@ test('real clips (opt-in): every frame kept at its original time, verified, repl
       let timeline = null;
       try { timeline = extractH264TelemetryTimeline(fs.readFileSync(clip.original)); } catch (_) { /* not H.264 */ }
       report.leadIn = timeline ? { frames: timeline.leadIn.frames, hold: timeline.leadIn.hold } : null;
+      report.undecodable = timeline ? { frames: timeline.undecodable.frames, samples: timeline.undecodable.samples, reason: timeline.undecodable.reason } : null;
+      const dropped = timeline ? undecodableFrames(timeline) : 0;
+      const retimed = timeline ? sourceTimingFor(timeline) : null;
       if (item?.state === 'completed' && item.resultCode === 'converted') {
         const source = await packets(clip.original);
         const output = await packets(clip.file);
         const shown = source.list.filter((packet) => !packet.discard);
         report.sourceFrames = shown.length;
+        report.expectedFrames = shown.length - dropped;
         report.outputFrames = output.list.length;
         const counted = await runProcess('ffprobe', ['-v', 'error', '-count_frames', '-select_streams', 'v:0', '-show_entries', 'stream=nb_read_frames', '-of', 'csv=p=0', clip.file]);
         report.decodedFrames = Number(counted.stdout.trim());
-        report.maxPtsDiffUs = shown.length === output.list.length
-          ? Math.max(...output.list.map((packet, index) => Math.abs(packet.ptsUs - shown[index].ptsUs))) : null;
+        // the original's frames the output keeps: all but the dropped samples
+        const gone = new Set(dropped > 0 ? timeline.undecodable.samples : []);
+        const kept = shown.filter((_, index) => !gone.has(index));
+        report.maxPtsDiffUs = kept.length === output.list.length
+          ? Math.max(...output.list.map((packet, index) => Math.abs(packet.ptsUs - kept[index].ptsUs))) : null;
         report.timeBase = { source: source.timeBase, output: output.timeBase };
         const inspected = (codec === 'av1' ? inspectAv1Telemetry : inspectH265Telemetry)(fs.readFileSync(clip.file));
         report.telemetry = { sourceRecords: timeline.events.length, outputRecords: inspected.telemetryFingerprints.length, outputSamples: inspected.sampleCount };
-        if (timeline.leadIn.hold > 0) {
-          assert.strictEqual(report.outputFrames, report.sourceFrames, 'every frame kept');
+        if (retimed) {
+          assert.strictEqual(report.outputFrames, report.expectedFrames, 'every decodable frame kept');
+          assert.strictEqual(report.decodedFrames, report.outputFrames, 'every frame decodes');
           assert.strictEqual(report.maxPtsDiffUs <= output.tickUs / 2, true, 'every frame at its original time');
+          // exactly the original's timing, a dropped sample's time on the frame before it
+          let ticks = 0;
+          const expected = retimed.durationTicks.map((duration) => {
+            const frame = { ptsUs: Math.floor((ticks * 1e6) / retimed.timescale), durationUs: Math.floor((duration * 1e6) / retimed.timescale) };
+            ticks += duration;
+            return frame;
+          });
+          assert.deepStrictEqual(outputTiming(fs.readFileSync(clip.file)), expected, 'exact frame timing');
           assert.strictEqual(report.telemetry.outputRecords, report.telemetry.sourceRecords, 'telemetry 1:1');
         }
       }
       t.diagnostic(JSON.stringify(report));
       console.log(`LEADIN ${JSON.stringify(report)}`);
-      // A lead-in clip converts, or stays the original when the encode is
-      // not smaller (a size decision, not a lead-in failure).
-      if (timeline?.leadIn.hold > 0) assert.ok(['converted', 'no-savings'].includes(item?.resultCode), `${clip.source}: ${item?.resultCode} ${JSON.stringify(item?.failure)}`);
+      // A lead-in or gap clip converts, or stays the original when the
+      // encode is not smaller (a size decision, not a lead-in failure).
+      if (retimed) assert.ok(['converted', 'no-savings'].includes(item?.resultCode), `${clip.source}: ${item?.resultCode} ${JSON.stringify(item?.failure)}`);
     }
   } finally {
     await env.runtime.shutdown().catch(() => {});

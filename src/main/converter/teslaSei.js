@@ -53,4 +53,4 @@ function fingerprint(payload) {
   return crypto.createHash('sha256').update(payload).digest('hex');
 }
 
-module.exports = { teslaPayload, fingerprint };
+module.exports = { teslaPayload, fingerprint, removeEmulationPreventionBytes };

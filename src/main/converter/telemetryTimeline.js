@@ -3,6 +3,7 @@
 const crypto = require('crypto');
 const { parseMp4, findBoxes, selectVideoTrack, buildSampleIndex } = require('./mp4');
 const { describeLeadIn } = require('./leadIn');
+const { createFrameNumScanner, undecodableFrames } = require('./frameNumGaps');
 
 function telemetryError(message, code = 'INVALID_H264') {
   const error = new Error(message);
@@ -97,7 +98,8 @@ function readOrdinaryBox(buffer, cursor, end, context) {
   return { type, start: cursor, contentStart: cursor + 8, end: cursor + size };
 }
 
-function readAvcLengthSize(tree, track) {
+// The NAL length size and the avcC configuration record (its parameter sets).
+function readAvcConfig(tree, track) {
   const boxes = findBoxes(track, 'stsd');
   if (boxes.length !== 1) throw telemetryError('Video track must contain exactly one stsd box', 'UNSUPPORTED_CONTAINER');
   const { start, end } = nodeBounds(boxes[0], 'stsd');
@@ -120,7 +122,7 @@ function readAvcLengthSize(tree, track) {
   if (avcC.end - avcC.contentStart < 5 || tree.buffer.readUInt8(avcC.contentStart) !== 1) throw telemetryError('Invalid avcC configuration record');
   const lengthSizeMinusOne = tree.buffer.readUInt8(avcC.contentStart + 4) & 0x03;
   if (lengthSizeMinusOne === 2) throw telemetryError('avcC declares the reserved 3-byte NAL length size', 'UNSUPPORTED_AVC');
-  return lengthSizeMinusOne + 1;
+  return { lengthSize: lengthSizeMinusOne + 1, avcC: tree.buffer.subarray(avcC.contentStart, avcC.end) };
 }
 
 function removeEmulationPreventionBytes(buffer) {
@@ -186,15 +188,18 @@ function extractH264TelemetryTimeline(mp4Buffer) {
   const track = selectVideoTrack(tree);
   const samples = buildSampleIndex(track);
   const timescale = readTrackTimescale(tree, track);
-  const lengthSize = readAvcLengthSize(tree, track);
+  const { lengthSize, avcC } = readAvcConfig(tree, track);
   const timelineSamples = [];
   const events = [];
+  const frameNums = createFrameNumScanner(avcC);
 
   for (const sample of samples) {
     const start = toSafeOffset(sample.offset, 'Sample offset');
     const accessUnit = mp4Buffer.subarray(start, start + sample.size);
     const seiNals = [];
-    for (const nal of parseH264Nals(accessUnit, { format: 'length-prefixed', lengthSize })) {
+    const nals = parseH264Nals(accessUnit, { format: 'length-prefixed', lengthSize });
+    frameNums.add(nals);
+    for (const nal of nals) {
       const payload = teslaPayload(nal);
       if (!payload) continue;
       const record = { nal, fingerprint: payloadFingerprint(payload) };
@@ -210,7 +215,11 @@ function extractH264TelemetryTimeline(mp4Buffer) {
   // Frames before the first keyframe (see leadIn.js): the encoder repeats the
   // first decodable frame for them and the output takes this clip's timing.
   const leadIn = describeLeadIn(mp4Buffer, track, samples, timescale);
-  return { timescale, lengthSize, samples: timelineSamples, events, leadIn };
+  // Samples no decoder outputs because Tesla's encoder skipped a frame
+  // (frameNumGaps.js): the output has that many frames fewer, each dropped
+  // sample's time and telemetry going to the frame before it.
+  const undecodable = frameNums.describe({ samples, timescale, leadIn });
+  return { timescale, lengthSize, samples: timelineSamples, events, leadIn, undecodable };
 }
 
 function outputTimingIndex(outputSamples) {
@@ -271,6 +280,22 @@ function mapTimelineToOutput(sourceTimeline, outputSamples) {
   // reliable than timestamp matching because VFR/duplicate PTS values can
   // otherwise leave valid SEI records unmapped.
   const sourceSamples = Array.isArray(sourceTimeline.samples) ? sourceTimeline.samples : [];
+  // Samples no decoder outputs (frameNumGaps.js): every other sample maps to
+  // its output frame in order, and a dropped sample's records go to the frame
+  // before it, after that frame's own, so no record is lost or added.
+  const dropped = undecodableFrames(sourceTimeline) > 0 ? new Set(sourceTimeline.undecodable.samples) : null;
+  const tail = sourceSamples.at(-1)?.durationUs === 0 ? 1 : 0;
+  if (dropped && [...dropped].every((index) => index < sourceSamples.length - tail)
+      && sourceSamples.length - tail - dropped.size === outputSamples.length) {
+    let output = -1;
+    sourceSamples.forEach((sample, index) => {
+      if (index < sourceSamples.length - tail && !dropped.has(index)) output += 1;
+      for (const record of sample?.seiNals || []) {
+        mapped[output].seiNals.push({ nal: Buffer.from(record.nal), fingerprint: record.fingerprint });
+      }
+    });
+    return mapped;
+  }
   const ordinalCount = sourceSamples.length === outputSamples.length && sourceSamples.length > 10
     ? outputSamples.length
     : (sourceSamples.length === outputSamples.length + 1
