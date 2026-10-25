@@ -60,3 +60,30 @@ test('a real GPU whose driver lacks H.265 still gets its hint', async () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('WSL with /dev/dri left out: the bridge is not listed and no "pass it in" hint', async () => {
+  const { dir, opts } = fakeHost({ wsl: false, vainfo: { code: 1, stdout: '', stderr: '' }, smi: SMI });
+  try {
+    fs.rmSync(path.join(dir, 'dri', 'renderD128')); // in the host's list only
+    const out = await detectGpus(opts);
+    assert.deepEqual(out.gpus, []);
+    assert.deepEqual(out.hints, []);
+    assert.equal(out.nvidia.length, 1);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an AMD or Intel GPU on the host that is not passed in still gets its hint', async () => {
+  const { dir, opts } = fakeHost({ wsl: false, vainfo: { code: 1, stdout: '', stderr: '' }, smi: { code: 1, stdout: '', stderr: '' } });
+  try {
+    fs.rmSync(path.join(dir, 'dri', 'renderD128'));
+    fs.mkdirSync(path.join(dir, 'drm', 'renderD128', 'device'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'drm', 'renderD128', 'device', 'vendor'), '0x1002\n');
+    const out = await detectGpus(opts);
+    assert.equal(out.gpus.length, 1);
+    assert.match(out.hints[0], /AMD GPU found on the host but \/dev\/dri is not passed/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

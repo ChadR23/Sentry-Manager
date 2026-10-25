@@ -11,7 +11,7 @@ const { scanTeslaFootage } = require('./scanner');
 const { runConverterBenchmark } = require('./benchmark');
 const { createEncoderPlanner, decodeAccelArgs } = require('./encoderPlanner');
 const { createDeviceDiscovery, CPU_DEVICE } = require('./encodeDevices');
-const { comparePictures } = require('./pictureCheck');
+const { comparePictures, ffmpegDecoder } = require('./pictureCheck');
 const { createAutoConverter } = require('./autoConvert');
 const { extractH264TelemetryTimeline } = require('./telemetryTimeline');
 const { createConverterAdapters } = require('./converterAdapters');
@@ -679,7 +679,8 @@ async function createConverterRuntime(options = {}) {
     return options.spawn(command, args, { ...spawnOptions, ...cudaOrderOptions(args, spawnOptions), shell: false, windowsHide: true });
   };
   // a paired node's encode must show the original's pictures (pictureCheck.js)
-  const comparePicture = (request) => comparePictures({ ...request, ffmpegPath: options.ffmpegPath, run: processRunner });
+  const decodeGrey = ffmpegDecoder({ spawn: options.spawn, ffmpegPath: options.ffmpegPath });
+  const comparePicture = (request) => comparePictures({ ...request, decode: decodeGrey });
   // Everything a converter service needs besides its job store and staging
   // area; the benchmark builds an identical, isolated service from this.
   const serviceDeps = {

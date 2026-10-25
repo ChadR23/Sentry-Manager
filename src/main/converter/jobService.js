@@ -1482,6 +1482,16 @@ function createConverterJobService(deps) {
     };
   }
 
+  // This server's own encoder for a codec, never a node: its preferred one
+  // (its GPU when it has one), else the CPU.
+  async function localEncoder(codec) {
+    try {
+      const chosen = await planner.select(codec);
+      if (chosen && chosen.remote !== true) return chosen;
+    } catch (_) { /* the CPU below */ }
+    return planner.selectCpuFallback(codec);
+  }
+
   async function processVideoOnce(runtime, item, lane = null) {
     const signal = runtime.abortController.signal;
     const timing = createItemTiming();
@@ -1595,6 +1605,14 @@ function createConverterJobService(deps) {
           decodeTierRetry = true;
           continue;
         }
+        // A node (another server) that failed: this server's own encoder
+        // (its GPU when it has one) takes the clip, then the CPU if that fails.
+        if (selected.remote === true) {
+          selected = await localEncoder(codec);
+          encodeTiers = encodeDecodeTiers(selected, { zeroCopy: holdFrames === 0 });
+          usedCpuFallback = selected.hardware !== true;
+          continue;
+        }
         if (selected.hardware === true && !usedCpuFallback) {
           selected = await planner.selectCpuFallback(codec);
           usedCpuFallback = true;
@@ -1659,16 +1677,16 @@ function createConverterJobService(deps) {
           ? await deps.comparePicture({ source: staged.source, candidate: adopted.path, signal }).catch(() => ({ ok: false, reason: 'compare-failed' }))
           : { ok: false, reason: 'no-picture-check' };
         if (!same?.ok) {
-          console.warn(`[CONVERTER] The encode from ${selected.device?.name || 'a node'} does not show the original's pictures; encoding here instead:`,
+          console.warn(`[CONVERTER] The encode from ${selected.device?.name || 'a node'} does not show the original's pictures; encoding it on this server instead:`,
             item.relativePath, JSON.stringify(same || {}).slice(0, 200));
           const cleanup = await cleanupOwnership(runtime, item.id, adopted);
           if (cleanup.cleaned === false) {
             setOwnership(runtime, item.id, composeOwnership(ownershipFor(runtime, item.id), adopted));
             throw Object.assign(new Error('cleanup pending'), { code: 'OWNED_CLEANUP_FAILED' });
           }
-          selected = await planner.selectCpuFallback(codec);
-          usedCpuFallback = true;
-          encodeTiers = [];
+          selected = await localEncoder(codec);
+          encodeTiers = encodeDecodeTiers(selected, { zeroCopy: holdFrames === 0 });
+          usedCpuFallback = selected.hardware !== true;
           continue;
         }
       }

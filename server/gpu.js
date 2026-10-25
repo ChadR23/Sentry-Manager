@@ -70,6 +70,9 @@ async function detectGpus({ driDir = '/dev/dri', sysDrm = '/sys/class/drm', dxg 
   for (const node of [...new Set([...hostNodes, ...passed])]) {
     const vendorId = readSys(path.join(sysDrm, node, 'device', 'vendor'));
     const vendor = VENDORS[vendorId] || null;
+    // no AMD, Intel or NVIDIA device behind it and not passed in: nothing
+    // that could encode here (on Windows/WSL, the D3D12 bridge), so not listed
+    if (!vendor && !passed.includes(node)) continue;
     let driverName = null;
     try {
       driverName = path.basename(fs.readlinkSync(path.join(sysDrm, node, 'device', 'driver')));

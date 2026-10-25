@@ -27,6 +27,8 @@ const SETTINGS_KEY = 'nodes';
 const MAX_NODES = 8;
 const INFO_TTL_MS = 30_000;
 const POLL_MS = 1000;
+const BUSY_WAIT_MS = 5 * 60_000;
+const BUSY_POLL_MS = 3000;
 const REQUEST_TIMEOUT_MS = 30_000;
 const HOST_RE = /^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/;
 
@@ -325,11 +327,31 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
     (async () => {
       const { size } = await fsp.stat(source);
       const settings = { codec, holdFrames, ...(quality ? { quality } : { bitrate }), ...(durationUs ? { durationUs } : {}) };
-      const sent = await request(node, {
-        method: 'POST', path: '/node/v1/jobs', signal: controller.signal, timeoutMs: 60_000, deadlineMs: 30 * 60_000,
-        headers: { 'Content-Type': 'video/mp4', 'Content-Length': size, 'X-Node-Job': JSON.stringify(settings) },
-        body: fs.createReadStream(source)
-      });
+      // A lane set to more clips than the node takes at once: the extra clip
+      // waits for a free slot (up to BUSY_WAIT_MS) instead of failing over.
+      const waitUntil = Date.now() + BUSY_WAIT_MS;
+      let sent;
+      for (;;) {
+        const free = await request(node, { path: '/node/v1/info', signal: controller.signal, timeoutMs: 10_000 }).catch((err) => {
+          if (err?.code === 'CANCELLED') throw err;
+          return null;
+        });
+        // unreachable: fail over at once (only a node that answers "busy" is waited for)
+        if (!free || free.status !== 200) throw nodeError(peerText(free?.json?.error) || 'Could not reach the node.', 502, 'NODE_UNREACHABLE');
+        const busy = Number.isSafeInteger(free.json?.slots) && Number.isSafeInteger(free.json?.busy) && free.json.busy >= free.json.slots;
+        if (!busy) {
+          sent = await request(node, {
+            method: 'POST', path: '/node/v1/jobs', signal: controller.signal, timeoutMs: 60_000, deadlineMs: 30 * 60_000,
+            headers: { 'Content-Type': 'video/mp4', 'Content-Length': size, 'X-Node-Job': JSON.stringify(settings) },
+            body: fs.createReadStream(source)
+          }).catch((err) => (err?.code === 'CANCELLED' ? Promise.reject(err) : { status: 0, error: err }));
+          if (sent.status !== 503 && sent.status !== 0) break;
+          if (sent.status === 0 && Date.now() >= waitUntil) throw sent.error;
+        }
+        if (Date.now() >= waitUntil) throw nodeError('All of the node\'s slots stayed busy.', 503, 'NODE_BUSY');
+        await new Promise((r) => setTimeout(r, BUSY_POLL_MS));
+        if (controller.signal.aborted) return;
+      }
       if (sent.status !== 200 || !/^[0-9a-f]{32}$/.test(sent.json?.id || '')) throw nodeError(peerText(sent.json?.error) || `The node refused the clip (${sent.status}).`, 502);
       jobId = sent.json.id;
       let lastOutTimeUs = -1;

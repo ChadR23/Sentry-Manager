@@ -129,7 +129,8 @@ test('pairing, a changed certificate, tokens and a real remote encode', { skip: 
       setTimeout(() => child.kill('SIGTERM'), 30);
       child.once('close', (c, signal) => { assert.equal(signal, 'SIGTERM'); resolve(); });
     });
-    await new Promise((r) => setTimeout(r, 500));
+    // (cleanup runs on the node after the cancel: wait for it, a busy machine is slow)
+    for (let i = 0; i < 100 && fs.readdirSync(path.join(dir, 'work')).length > 0; i++) await new Promise((r) => setTimeout(r, 100));
     assert.equal(fs.existsSync(target2), false);
     assert.deepEqual(fs.readdirSync(path.join(dir, 'work')), []);
 
@@ -193,17 +194,28 @@ function fetchPair(port, body) {
 
 // ---- the security review's findings, each pinned by a test
 
-const { judge, comparePictures } = require('../src/main/converter/pictureCheck');
+const { judgeFrames, comparePictures, ffmpegDecoder, W, H } = require('../src/main/converter/pictureCheck');
 const { createHarness, CPU } = require('./fixtures/lanesHarness');
 const { EventEmitter } = require('events');
 const crypto = require('crypto');
 const tls = require('tls');
 
-test('picture check: real encodes pass, black or other footage does not', { skip: !hasTools, timeout: 120_000 }, async () => {
-  assert.equal(judge('n:1 Y:0.99 All:0.995 (23)\nn:2 Y:0.99 All:0.99 (20)\n').ok, true);
-  assert.equal(judge('n:1 All:0.02\nn:2 All:0.03\n').ok, false);
-  assert.equal(judge('n:1 All:0.99\nn:2 All:0.30\n').ok, false, 'one swapped frame is enough');
-  assert.equal(judge('').ok, false);
+test('picture check: real encodes pass even shifted by some frames; black, frozen or other footage does not', { skip: !hasTools, timeout: 120_000 }, async () => {
+  // synthetic frames: a moving gradient
+  const frames = (n, f) => Buffer.concat(Array.from({ length: n }, (_, k) => Buffer.from(Array.from({ length: W * H }, (_, i) => f(k, i % W, Math.floor(i / W)) & 255))));
+  const moving = (k, x, y) => (x * 3 + y * 2 + k * 5) + ((x * y + k) % 7);
+  const src = frames(60, moving);
+  assert.equal(judgeFrames(src, src).ok, true);
+  const shifted = frames(60, (k, x, y) => moving(k + 6, x, y)); // the copy starts 6 frames later
+  const r = judgeFrames(src, shifted);
+  assert.equal(r.ok, true);
+  assert.equal(r.shift, -6);
+  assert.equal(judgeFrames(src, frames(60, () => 0)).ok, false, 'black');
+  assert.equal(judgeFrames(src, frames(60, (k, x, y) => moving(0, x, y))).ok, false, 'one frame frozen');
+  assert.equal(judgeFrames(src, frames(60, (k, x, y) => (y * 7 + k * 3) ^ x)).ok, false, 'other footage');
+  assert.equal(judgeFrames(src, Buffer.alloc(0)).ok, false);
+
+  // and with real ffmpeg: a genuine encode passes, a blacked-out one does not
   const dir = await tmp();
   try {
     const source = path.join(dir, 'src.mp4');
@@ -213,13 +225,10 @@ test('picture check: real encodes pass, black or other footage does not', { skip
       assert.equal(spawnSync('ffmpeg', ['-v', 'error', '-y', '-i', source, ...(vf ? ['-vf', vf] : []), '-c:v', 'libx265', '-b:v', '300k', '-an', out]).status, 0);
       return out;
     };
-    const run = async (cmd, args) => {
-      const r = spawnSync(cmd, args, { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
-      return { status: r.status, stdout: r.stdout };
-    };
-    assert.equal((await comparePictures({ source, candidate: enc('good.mp4'), run })).ok, true);
-    assert.equal((await comparePictures({ source, candidate: enc('black.mp4', 'drawbox=t=fill:c=black'), run })).ok, false);
-    assert.equal((await comparePictures({ source, candidate: path.join(dir, 'missing.mp4'), run })).ok, false);
+    const decode = ffmpegDecoder({ spawn: require('child_process').spawn });
+    assert.equal((await comparePictures({ source, candidate: enc('good.mp4'), decode })).ok, true);
+    assert.equal((await comparePictures({ source, candidate: enc('black.mp4', 'drawbox=t=fill:c=black'), decode })).ok, false);
+    assert.equal((await comparePictures({ source, candidate: path.join(dir, 'missing.mp4'), decode })).ok, false);
   } finally {
     await fsp.rm(dir, { recursive: true, force: true });
   }
@@ -247,8 +256,33 @@ test('a node encode whose pictures do not match is thrown away and encoded here'
     const [item] = job.items.filter((entry) => entry.kind === 'video');
     assert.equal(compared.length, 1, 'the node\'s encode was compared');
     assert.equal(item.resultCode, 'converted');
-    assert.equal(item.encoder, 'libx265', 'and the clip was encoded here instead');
+    assert.equal(item.encoder, 'libx265', 'and the clip was encoded here instead (this test server has no GPU)');
     assert.equal(h.encodes().length, 1, 'one local encode, after the node\'s');
+  } finally {
+    await h.close();
+  }
+});
+
+test('a node that fails hands its clip to this server\'s own GPU first, not straight to the CPU', async () => {
+  const NODE = { id: 'node:abcdefabcdef', kind: 'node', name: 'pc (node)', encoders: { h265: 'hevc_nvenc', av1: null }, online: true };
+  const { ARC, UHD } = require('./fixtures/lanesHarness');
+  const h = createHarness({
+    clips: 1, devices: [NODE, ARC, UHD, CPU], gpuDecode: false,
+    remoteEncode: () => {
+      const child = new EventEmitter();
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      child.kill = () => true;
+      setImmediate(() => child.emit('close', 1, null)); // the node failed
+      return child;
+    }
+  });
+  try {
+    const id = await h.service.start(h.config({ lanes: [{ device: NODE.id, concurrency: 1 }] }));
+    const job = await h.finishJob(id);
+    const [item] = job.items.filter((entry) => entry.kind === 'video');
+    assert.equal(item.resultCode, 'converted');
+    assert.equal(item.encoder, 'hevc_qsv', 'this server\'s GPU encoder, not libx265');
   } finally {
     await h.close();
   }
