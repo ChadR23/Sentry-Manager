@@ -191,6 +191,12 @@ function sanitizeLiveProgress(progress) {
     if (!Number.isSafeInteger(waitingDescriptor.value) || waitingDescriptor.value < 0 || waitingDescriptor.value > 10_000) fail('INVALID_PROGRESS');
     sanitized.waitingOnNode = waitingDescriptor.value;
   }
+  // clips encoding right now (here, or started on a node)
+  const encodingDescriptor = descriptors.encodingNow;
+  if (encodingDescriptor && Object.prototype.hasOwnProperty.call(encodingDescriptor, 'value')) {
+    if (!Number.isSafeInteger(encodingDescriptor.value) || encodingDescriptor.value < 0 || encodingDescriptor.value > 10_000) fail('INVALID_PROGRESS');
+    sanitized.encodingNow = encodingDescriptor.value;
+  }
   return sanitized;
 }
 

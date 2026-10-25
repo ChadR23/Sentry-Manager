@@ -157,3 +157,22 @@ test('the clips waiting on a node stay counted apart when a full update (without
   assert.equal(nodeWaiting.hidden, true);
   assert.equal(file.textContent, 'Converting 19 files at once');
 });
+
+test('"Converting N files at once" counts the clips encoding; the rest under way are listed under it', async () => {
+  const file = el({ textContent: '' });
+  const nodeWaiting = el({ textContent: '', hidden: true });
+  const { snapshot, settle } = await controller({ extra: { currentFile: file, nodeWaiting } });
+  // the owner's run: 2 on this server's GPU, 2 on the node, 4 waiting there, 11 being read, sent, checked or saved
+  const lanes = [{ device: 'pci:0000:03:00.0', concurrency: 2 }, { device: 'node:abcdefabcdef', concurrency: 2 }];
+  snapshot({ jobId: 'job-1', revision: 20, snapshot: { id: 'job-1', revision: 20, state: 'encoding', config: { concurrency: 4, lanes }, itemStateCounts: { active: 19 }, items: [] } });
+  snapshot({ jobId: 'job-1', revision: 20, snapshot: { id: 'job-1', revision: 20, progress: { phase: 'continue', waitingOnNode: 4, encodingNow: 4 } } });
+  await settle();
+  assert.equal(file.textContent, 'Converting 4 files at once', 'not 15');
+  assert.equal(nodeWaiting.textContent, '4 waiting on a node · 11 more being read, sent, checked or saved');
+  // a job without a node: the clips being checked or saved, without "sent"
+  snapshot({ jobId: 'job-1', revision: 21, snapshot: { id: 'job-1', revision: 21, state: 'encoding', config: { concurrency: 3 }, itemStateCounts: { active: 4 }, items: [] } });
+  snapshot({ jobId: 'job-1', revision: 21, snapshot: { id: 'job-1', revision: 21, progress: { phase: 'continue', waitingOnNode: 0, encodingNow: 3 } } });
+  await settle();
+  assert.equal(file.textContent, 'Converting 3 files at once');
+  assert.equal(nodeWaiting.textContent, '1 more being read, checked or saved');
+});

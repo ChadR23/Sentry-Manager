@@ -199,6 +199,8 @@ const converterEnglish = Object.freeze({
     parallelCustomHint: "More than your graphics card or drive can handle makes conversion slower, not faster. The benchmark finds the best number for this PC.",
     convertingFiles: "Converting {count} files at once",
     waitingOnNode: "{count} waiting on a node",
+    otherUnderWay: "{count} more being read, checked or saved",
+    otherUnderWayNode: "{count} more being read, sent, checked or saved",
     speed: "Speed",
     timeRemaining: "Time remaining",
     speedValue: "{rate} files/min",

@@ -1197,8 +1197,13 @@ function createConverterJobService(deps) {
   // Clips sent ahead to a node that wait there for a slot: the Encoder
   // shows them apart from the clips converting.
   const waitingOnNode = (runtime) => [...runtime.encodes.values()].filter((live) => live.waitingOnNode).length;
+  // The clips encoding right now: here, or on a node that has started them
+  // (one still on its way to the node, or waiting there, is not). The
+  // Encoder's "Converting N files at once" is this, not every clip under way.
+  const encodingNow = (runtime) => [...runtime.encodes.values()].filter((live) => !live.waitingOnNode && (!live.remote || live.started)).length;
+  const liveCounts = (runtime) => ({ waitingOnNode: waitingOnNode(runtime), encodingNow: encodingNow(runtime) });
   function noteWaiting(runtime) {
-    emit(runtime, 'progress', { progress: { phase: 'continue', ...(runtime.lastProgress || {}), waitingOnNode: waitingOnNode(runtime) } });
+    emit(runtime, 'progress', { progress: { phase: 'continue', ...(runtime.lastProgress || {}), ...liveCounts(runtime) } });
   }
 
   async function runChild(runtime, itemId, source, target, codec, encoder, { bitrate, quality = null, durationUs = null, laneId = null, holdFrames = 0 }, decodeAccel = null) {
@@ -1259,6 +1264,9 @@ function createConverterJobService(deps) {
       node: encoder.remote === true ? (encoder.device?.name || encoder.device?.id || null) : null,
       // the lane (chosen GPU) this clip runs on; null without lanes
       deviceId: laneId,
+      // on a node: started there once it reports its first progress
+      remote: encoder.remote === true,
+      started: encoder.remote !== true,
       pid: Number.isSafeInteger(child.pid) ? child.pid : null,
       fps: null,
       speed: null,
@@ -1271,6 +1279,7 @@ function createConverterJobService(deps) {
       totalSizeB: null
     };
     runtime.encodes.set(itemId, live);
+    if (live.started) noteWaiting(runtime);
     // A cancel/stop issued while this item was starting must still stop it.
     if (runtime.cancelRequested || runtime.stopRequested || runtime.recoveryRequired) {
       entry.terminationRequested = true;
@@ -1322,7 +1331,11 @@ function createConverterJobService(deps) {
             progress.outTimeUs = parsed;
             live.outTimeUs = parsed;
           }
-          if (live.waitingOnNode) { live.waitingOnNode = false; noteWaiting(runtime); }
+          if (live.waitingOnNode || !live.started) {
+            live.waitingOnNode = false;
+            live.started = true;
+            noteWaiting(runtime);
+          }
         } else if (key === 'fps') {
           const parsed = Number(value);
           if (Number.isFinite(parsed) && parsed >= 0) {
@@ -1343,7 +1356,7 @@ function createConverterJobService(deps) {
             let fps = 0;
             for (const value of runtime.encodeFps.values()) fps += value;
             runtime.lastProgress = { ...progress, fps: Math.round(fps * 10) / 10 };
-            emit(runtime, 'progress', { progress: { ...runtime.lastProgress, waitingOnNode: waitingOnNode(runtime) } });
+            emit(runtime, 'progress', { progress: { ...runtime.lastProgress, ...liveCounts(runtime) } });
           }
         }
       }
@@ -1357,8 +1370,7 @@ function createConverterJobService(deps) {
         if (runtime.children.get(itemId) === entry) runtime.children.delete(itemId);
         if (runtime.encodes.get(itemId) === live) {
           runtime.encodes.delete(itemId);
-          // (a clip that leaves the node's queue without starting: one fewer waiting)
-          if (live.waitingOnNode) noteWaiting(runtime);
+          noteWaiting(runtime);
         }
         runtime.encodeFps.delete(itemId);
         resolve(result);

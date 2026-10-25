@@ -1054,15 +1054,27 @@ function createFootageConverterController(options = {}) {
             ? statusLabel ? message(...statusLabel) : message('statusReady', 'Converter ready')
             : message('ready', 'Ready to configure'));
         // clips sent ahead to a node wait there: counted apart, not as converting
-        const waitingOnNode = active && snapshot?.id && nodeWaiting.jobId === snapshot.id ? nodeWaiting.count : 0;
+        const live = active && snapshot?.id && nodeWaiting.jobId === snapshot.id ? nodeWaiting : null;
+        const waitingOnNode = live ? live.count : 0;
         const inFlight = snapshot?.itemStateCounts?.active ?? items.filter((item) => item.state === 'processing').length;
-        const converting = Math.max(0, inFlight - waitingOnNode);
+        // "Converting" is the clips encoding right now (here, or started on a
+        // node); the rest under way are listed under it: waiting on a node, or
+        // being read, sent, checked or saved
+        const converting = Number.isSafeInteger(live?.encoding) ? Math.min(live.encoding, inFlight) : Math.max(0, inFlight - waitingOnNode);
+        const elsewhere = Number.isSafeInteger(live?.encoding) ? Math.max(0, inFlight - converting - waitingOnNode) : 0;
+        const withNode = validLanes(snapshot?.config?.lanes).some((lane) => String(lane.device).startsWith('node:'));
         setText(elements.currentFile, active && converting > 1
             ? message('convertingFiles', 'Converting {count} files at once', { count: converting })
             : activeItem?.relativePath || message('noFileActive', 'No file active'));
         if (elements.nodeWaiting) {
-            setText(elements.nodeWaiting, waitingOnNode > 0 ? message('waitingOnNode', '{count} waiting on a node', { count: waitingOnNode }) : '');
-            elements.nodeWaiting.hidden = waitingOnNode === 0;
+            const parts = [
+                ...(waitingOnNode > 0 ? [message('waitingOnNode', '{count} waiting on a node', { count: waitingOnNode })] : []),
+                ...(elsewhere > 0 ? [withNode
+                    ? message('otherUnderWayNode', '{count} more being read, sent, checked or saved', { count: elsewhere })
+                    : message('otherUnderWay', '{count} more being read, checked or saved', { count: elsewhere })] : [])
+            ];
+            setText(elements.nodeWaiting, parts.join(' · '));
+            elements.nodeWaiting.hidden = parts.length === 0;
         }
         setText(elements.currentProgress, progress?.outTimeUs !== undefined
             ? message('progressEncoded', '{duration} encoded', { duration: formatDuration(progress.outTimeUs / 1000) })
@@ -1136,7 +1148,7 @@ function createFootageConverterController(options = {}) {
     let lastFps = null;
     // clips waiting in a node's queue: sent with live progress only, kept
     // across the job's full updates (which carry no progress) until it changes
-    let nodeWaiting = { jobId: null, count: 0 };
+    let nodeWaiting = { jobId: null, count: 0, encoding: null };
     let benchmarkRunning = false;
     let benchmarkBest = null;
 
@@ -1551,7 +1563,13 @@ function createFootageConverterController(options = {}) {
         if (!next || !Number.isSafeInteger(revision) || revision < latestRevision) return false;
         const progressOnly = Object.keys(next).every((key) => ['id', 'revision', 'progress'].includes(key));
         if (Number.isFinite(next.progress?.fps)) lastFps = { value: next.progress.fps, at: Date.now() };
-        if (Number.isSafeInteger(next.progress?.waitingOnNode)) nodeWaiting = { jobId: next.id ?? snapshot?.id ?? null, count: next.progress.waitingOnNode };
+        if (Number.isSafeInteger(next.progress?.waitingOnNode)) {
+            nodeWaiting = {
+                jobId: next.id ?? snapshot?.id ?? null,
+                count: next.progress.waitingOnNode,
+                encoding: Number.isSafeInteger(next.progress.encodingNow) ? next.progress.encodingNow : null
+            };
+        }
         if (progressOnly && snapshot) snapshot = { ...snapshot, progress: next.progress };
         else {
             snapshot = { ...next };
