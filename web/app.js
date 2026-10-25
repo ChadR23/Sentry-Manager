@@ -675,10 +675,11 @@
     // rows come and go (ffprobe, a mount): empty ones keep the table's height;
     // past PROCESS_ROWS the list scrolls inside the tile
     const pad = `<tr class="nd-pad" aria-hidden="true"><td>&nbsp;</td><td></td><td></td>${gpuCol ? '<td></td>' : ''}</tr>`.repeat(Math.max(0, PROCESS_ROWS - rows.length));
-    const encoder = enc?.running ? enc.device?.encoder : null;
-    // one line each, so a row is as tall with ffmpeg ×3 as with one ffmpeg:
+    // The server names an ffmpeg that encodes by its encoder (ffmpeg ·
+    // hevc_vaapi); the others (checks, probes, thumbnails) stay "ffmpeg".
+    // One line each, so a row is as tall with ffmpeg ×3 as with one ffmpeg:
     // a long name ends in … before its count (its title has it all)
-    const name = (r) => `${r.name}${r.name === 'ffmpeg' && encoder ? ` · ${encoder}` : ''}`;
+    const name = (r) => r.name;
     const nameCell = (r) => `<td title="${esc(`${name(r)}${r.n > 1 ? ` ×${r.n}` : ''}`)}"><span class="nd-pname"><span>${esc(name(r))}</span>${r.n > 1 ? `<span>×${r.n}</span>` : ''}</span></td>`;
     return ndTile('Top processes', procs.scope === 'host' ? 'whole server' : 'this container',
       `<div class="nd-procs-box" tabindex="0" aria-label="Processes, ${rows.length > PROCESS_ROWS ? 'scroll for more' : 'all shown'}"><table class="nd-procs"><thead><tr><th>Process</th><th>CPU</th><th>Memory</th>${gpuCol ? '<th>GPU</th>' : ''}</tr></thead><tbody>${rows.map((r) => `<tr>${nameCell(r)}<td>${pct(r.cpu)}</td><td>${size(r.memB)}</td>${gpuCol ? `<td>${r.gpu !== null ? `${pct(r.gpu)} video` : '—'}</td>` : ''}</tr>`).join('')}${pad}</tbody></table></div>`, true);

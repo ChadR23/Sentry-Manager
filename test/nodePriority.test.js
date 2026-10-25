@@ -190,3 +190,69 @@ test('two vehicles whose folders are one inside the other never convert at once'
     await h.close();
   }
 });
+
+test('a node\'s clips are checked here no more at once than the node converts, however many were sent ahead', async () => {
+  const { EventEmitter } = require('events');
+  const NODE = { id: 'node:abcdefabcdef', kind: 'node', name: 'mini (node)', encoders: { h265: 'hevc_vaapi', av1: null }, online: true };
+  let checking = 0;
+  let most = 0;
+  const h = createHarness({
+    clips: 20, devices: [NODE], defaultDevice: null, gpuDecode: false,
+    remoteEncode: () => {
+      const child = new EventEmitter(); child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.kill = () => true;
+      setTimeout(() => { child.stdout.emit('data', 'out_time_us=1\nprogress=end\n'); child.emit('close', 0, null); }, 20);
+      return child;
+    },
+    // the check of each clip takes a while (decoding both files)
+    comparePicture: async () => {
+      checking += 1;
+      most = Math.max(most, checking);
+      await new Promise((r) => setTimeout(r, 40));
+      checking -= 1;
+      return { ok: true };
+    }
+  });
+  try {
+    const id = await h.service.start(h.config({ lanes: [{ device: NODE.id, concurrency: 2 }] }));
+    const job = await h.finishJob(id, 30_000);
+    assert.equal(job.items.filter((item) => item.resultCode === 'converted').length, 20);
+    assert.ok(most <= 2, `${most} clips checked at once`);
+  } finally {
+    await h.close();
+  }
+});
+
+test('a node lane set higher than the node\'s own setting sends and checks only for what the node takes', async () => {
+  const { EventEmitter } = require('events');
+  const NODE = { id: 'node:abcdefabcdef', kind: 'node', name: 'mini (node)', encoders: { h265: 'hevc_vaapi', av1: null }, online: true, slots: 2 };
+  let inFlight = 0;
+  let mostSent = 0;
+  let checking = 0;
+  let mostChecked = 0;
+  const h = createHarness({
+    clips: 40, devices: [NODE], defaultDevice: null, gpuDecode: false,
+    remoteEncode: () => {
+      inFlight += 1;
+      mostSent = Math.max(mostSent, inFlight);
+      const child = new EventEmitter(); child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.kill = () => true;
+      setTimeout(() => { inFlight -= 1; child.stdout.emit('data', 'out_time_us=1\nprogress=end\n'); child.emit('close', 0, null); }, 60);
+      return child;
+    },
+    comparePicture: async () => {
+      checking += 1;
+      mostChecked = Math.max(mostChecked, checking);
+      await new Promise((r) => setTimeout(r, 20));
+      checking -= 1;
+      return { ok: true };
+    }
+  });
+  try {
+    // the lane says 10; the node itself converts 2 at once
+    const id = await h.service.start(h.config({ lanes: [{ device: NODE.id, concurrency: 10 }] }));
+    await h.finishJob(id, 30_000);
+    assert.ok(mostSent <= 2 + 15, `${mostSent} sent at once (2 converting + 15 waiting at most)`);
+    assert.ok(mostChecked <= 2, `${mostChecked} checked at once`);
+  } finally {
+    await h.close();
+  }
+});

@@ -584,6 +584,7 @@ function createConverterJobService(deps) {
   // Finds each lane's GPU among the devices this container has now.
   async function resolveLanes(lanes) {
     const limits = new Map();
+    const base = new Map(); // the lane's own number, without clips sent ahead
     const devices = new Map();
     for (const lane of lanes) {
       let device = null;
@@ -594,13 +595,17 @@ function createConverterJobService(deps) {
         // A node (another server) gets NODE_SEND_AHEAD more clips than it
         // converts at once: they are read and sent while it works, and wait
         // there for a free slot, so it never waits for this server.
-        limits.set(lane.device, lane.concurrency + (device.kind === 'node' ? NODE_SEND_AHEAD : 0));
+        // (a node converts no more at once than its own setting, whatever
+        // this lane says: more here would only be sent and checked here)
+        const own = device.kind === 'node' && Number.isSafeInteger(device.slots) && device.slots > 0 ? Math.min(lane.concurrency, device.slots) : lane.concurrency;
+        limits.set(lane.device, own + (device.kind === 'node' ? NODE_SEND_AHEAD : 0));
+        base.set(lane.device, own);
         devices.set(lane.device, device);
       } else {
         console.warn(`[CONVERTER] Encoding device ${lane.device} is not in the container; its ${lane.concurrency} conversions at once are not started.`);
       }
     }
-    return { fallback: devices.size === 0, limits, devices };
+    return { fallback: devices.size === 0, limits, base, devices };
   }
 
   // A lane's workers that are not on their way out.
@@ -1515,6 +1520,34 @@ function createConverterJobService(deps) {
     };
   }
 
+  // A node's encoded clips are checked here (pictures, then frames and
+  // telemetry) no more at once than the node converts: the clips sent ahead
+  // keep the node busy, not this server's CPU with as many checks.
+  async function takeCheckSlot(runtime, lane, signal) {
+    runtime.nodeChecks ||= new Map();
+    const id = lane?.id || 'node';
+    if (!runtime.nodeChecks.has(id)) runtime.nodeChecks.set(id, { busy: 0, waiters: [] });
+    const slots = runtime.nodeChecks.get(id);
+    const limit = () => Math.max(1, runtime.lanePlan?.base?.get(id) || 1);
+    while (slots.busy >= limit()) {
+      if (signal?.aborted) throw serviceError('CANCELLED');
+      await new Promise((resolve) => {
+        const done = () => { signal?.removeEventListener('abort', done); resolve(); };
+        slots.waiters.push(done);
+        signal?.addEventListener('abort', done, { once: true });
+      });
+    }
+    if (signal?.aborted) throw serviceError('CANCELLED');
+    slots.busy += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      slots.busy -= 1;
+      slots.waiters.shift()?.();
+    };
+  }
+
   async function localEncoder(codec) {
     try {
       const chosen = await planner.select(codec);
@@ -1524,6 +1557,15 @@ function createConverterJobService(deps) {
   }
 
   async function processVideoOnce(runtime, item, lane = null) {
+    const check = { release: null };
+    try {
+      return await processVideoOnceChecked(runtime, item, lane, check);
+    } finally {
+      check.release?.();
+    }
+  }
+
+  async function processVideoOnceChecked(runtime, item, lane, check) {
     const signal = runtime.abortController.signal;
     const timing = createItemTiming();
     const inspected = await deps.inspectVideo(item, item.sourcePath, signal);
@@ -1714,6 +1756,7 @@ function createConverterJobService(deps) {
       // original's before anything else is checked or saved. One that does
       // not is thrown away and the clip is encoded here instead.
       if (selected.remote === true) {
+        if (!check.release) check.release = await takeCheckSlot(runtime, lane, signal);
         const same = typeof deps.comparePicture === 'function'
           ? await deps.comparePicture({ source: staged.source, candidate: adopted.path, signal }).catch(() => ({ ok: false, reason: 'compare-failed' }))
           : { ok: false, reason: 'no-picture-check' };
@@ -1726,6 +1769,9 @@ function createConverterJobService(deps) {
             throw Object.assign(new Error('cleanup pending'), { code: 'OWNED_CLEANUP_FAILED' });
           }
           fromNode = true;
+          // (encoded here now: the check slot goes to the node's next clip)
+          check.release?.();
+          check.release = null;
           selected = await localEncoder(codec);
           encodeTiers = encodeDecodeTiers(selected, { zeroCopy: holdFrames === 0 });
           usedCpuFallback = selected.hardware !== true;
@@ -1750,6 +1796,8 @@ function createConverterJobService(deps) {
         } : {})
       });
       timing.mark('verify');
+      check.release?.();
+      check.release = null;
       if (!verification?.ok) {
         const retry = decideSizeRetry({
           retryCount: sizeRetryCount,
@@ -3352,7 +3400,8 @@ function createConverterJobService(deps) {
     const runtime = jobs.get(id);
     if (!runtime) return null;
     const plan = runtime.lanePlan;
-    if (plan && !plan.fallback) return [...plan.limits.values()].reduce((sum, n) => sum + n, 0);
+    // (the clips sent ahead to a node wait there: not converting)
+    if (plan && !plan.fallback) return [...(plan.base || plan.limits).values()].reduce((sum, n) => sum + n, 0);
     return concurrencyOf(runtime.manifest);
   }
 
