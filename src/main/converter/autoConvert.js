@@ -498,7 +498,10 @@ function createAutoConverter(options = {}) {
 
   async function startJob(sourceRoot, config) {
     try {
-      const jobId = await service.start({ ...config, autoConvert: true });
+      // (nodesOff is the vehicle's automatic setting, not the job's: a job
+      // with it was refused as INVALID_MANIFEST, so the vehicle never started)
+      const { nodesOff: _off, ...jobConfig } = config;
+      const jobId = await service.start({ ...jobConfig, autoConvert: true });
       status.active[sourceRoot] = { jobId, lanes: config.lanes || null, pausedForWindow: false, pausedForDevices: false };
       status.lastJobId = jobId;
       delete status.pending[sourceRoot];

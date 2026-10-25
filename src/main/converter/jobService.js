@@ -1884,6 +1884,8 @@ function createConverterJobService(deps) {
           ? await deps.comparePicture({ source: staged.source, candidate: adopted.path, signal, durationSeconds: inspected.durationSeconds }).catch(() => ({ ok: false, reason: 'compare-failed' }))
           : { ok: false, reason: 'no-picture-check' };
         timing.mark('picture');
+        // stopped or cancelled while it was decoding: not a mismatch
+        if (signal.aborted || runtime.stopRequested || runtime.cancelRequested) throw serviceError('CANCELLED');
         if (!same?.ok) {
           console.warn(`[CONVERTER] The encode from ${selected.device?.name || 'a node'} does not show the original's pictures; encoding it on this server instead:`,
             item.relativePath, JSON.stringify(same || {}).slice(0, 200));
@@ -1967,6 +1969,20 @@ function createConverterJobService(deps) {
             continue;
           }
           throw serviceError('KEEP_ORIGINAL');
+        }
+        // A node's encode that does not verify (a damaged or cut-off file,
+        // say): encoded here instead, as when its pictures do not match,
+        // rather than failing the clip.
+        if (selected.remote === true) {
+          console.warn(`[CONVERTER] The encode from ${selected.device?.name || 'a node'} did not verify (${verification?.reason || 'unknown'}); encoding it on this server instead:`,
+            item.relativePath, JSON.stringify(verification?.details || {}).slice(0, 300));
+          fromNode = true;
+          check.release?.();
+          check.release = null;
+          selected = await localEncoder(codec);
+          encodeTiers = encodeDecodeTiers(selected, { zeroCopy: holdFrames === 0 });
+          usedCpuFallback = selected.hardware !== true;
+          continue;
         }
         // the reason alone ("duration-mismatch") cannot tell a damaged clip
         // from a converter problem; the measurements can

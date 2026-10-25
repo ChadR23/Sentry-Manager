@@ -518,3 +518,105 @@ test('a node marked trusted: its clips skip the picture check; another node\'s s
     await h.close();
   }
 });
+
+test('a vehicle with a node set to Off still starts its automatic jobs (the Off stays out of the job)', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sm-node-off-start-'));
+  try {
+    const service = fakeService();
+    // the real job store refuses a config field it does not know
+    const start = service.start;
+    service.start = async (config) => {
+      if ('nodesOff' in config) throw Object.assign(new Error('invalid'), { code: 'INVALID_MANIFEST' });
+      return start(config);
+    };
+    const scanner = async function* () { yield { relativePath: 'RecentClips/0.mp4', sourceBytes: 1, mtimeMs: 1 }; };
+    const auto = createAutoConverter({
+      service, scanner, fs: fs.promises, directory: dir, timers: { setInterval: () => null, clearInterval: () => {} },
+      devices: async () => devices, nodePriorities: async () => ({})
+    });
+    const shared = { intervalMinutes: 60, window: null, holdManual: false, keepRunning: false, openAtLogin: false };
+    // saved with the nodes' rows at Off: the vehicle's settings remember it
+    await auto.configure({ ...shared, enabled: true, config: car('chad', [{ device: GPU, concurrency: 2 }]) });
+    assert.deepEqual(auto.getState().settings.configs[0].nodesOff, [N2, N3]);
+    await auto.tick();
+    assert.deepEqual(service.log.filter(([k]) => k === 'start'), [['start', 'chad', [GPU]]], 'the job started');
+    assert.equal('nodesOff' in service.jobs.get('job-1').config, false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a node clip whose picture check is cut short by a shutdown is not called a mismatch', async () => {
+  const { EventEmitter } = require('events');
+  const NODE = { id: 'node:abcdefabcdef', kind: 'node', name: 'mini (node)', encoders: { h265: 'hevc_vaapi', av1: null }, online: true, slots: 2 };
+  let inCheck = 0;
+  const h = createHarness({
+    clips: 20, devices: [NODE, CPU], defaultDevice: null, gpuDecode: false,
+    remoteEncode: () => {
+      const child = new EventEmitter(); child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.kill = () => true;
+      setTimeout(() => { child.stdout.emit('data', 'out_time_us=1\nprogress=end\n'); child.emit('close', 0, null); }, 20);
+      return child;
+    },
+    // the decode is killed by the shutdown, as ffmpeg's is
+    comparePicture: ({ signal }) => new Promise((resolve) => {
+      inCheck += 1;
+      const done = () => resolve({ ok: false, reason: 'decode-failed', detail: 'DECODE_FAILED' });
+      if (signal?.aborted) return done();
+      signal?.addEventListener('abort', done, { once: true });
+    })
+  });
+  const warned = [];
+  const warn = console.warn;
+  console.warn = (...args) => { warned.push(args.join(' ')); };
+  try {
+    const id = await h.service.start(h.config({ lanes: [{ device: NODE.id, concurrency: 2 }, { device: 'cpu', concurrency: 1 }] }));
+    for (let i = 0; i < 200 && inCheck < 2; i++) await new Promise((r) => setTimeout(r, 20));
+    assert.ok(inCheck >= 2, 'clips were in their picture check');
+    await h.service.shutdown();
+    assert.equal(warned.filter((line) => line.includes('does not show the original')).length, 0, warned.join('\n'));
+    const job = await h.store.load(id);
+    assert.equal(job.items.filter((item) => item.state === 'failed').length, 0, 'none failed');
+  } finally {
+    console.warn = warn;
+    await h.close();
+  }
+});
+
+test('a node encode that fails verification is encoded here instead, not failed', async () => {
+  const { EventEmitter } = require('events');
+  const NODE = { id: 'node:abcdefabcdef', kind: 'node', name: 'mini (node)', encoders: { h265: 'hevc_vaapi', av1: null }, online: true, slots: 1 };
+  const fromNode = new Set();
+  let rejected = 0;
+  const h = createHarness({
+    clips: 4, devices: [NODE, CPU], defaultDevice: null, gpuDecode: false,
+    remoteEncode: ({ target }) => {
+      fromNode.add(target);
+      const child = new EventEmitter(); child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.kill = () => true;
+      setTimeout(() => { child.stdout.emit('data', 'out_time_us=1\nprogress=end\n'); child.emit('close', 0, null); }, 10);
+      return child;
+    },
+    comparePicture: async () => ({ ok: true }),
+    nodeTrusted: () => true,
+    // every file the node sends back is cut off
+    verifier: async ({ candidate }) => {
+      if (fromNode.delete(candidate)) {
+        rejected += 1;
+        return { ok: false, reason: 'probe-failed', details: { target: 'candidate', kind: 'invalid-runner-result' } };
+      }
+      return { ok: true, outputBytes: 1_000_000, publicationArtifact: null };
+    }
+  });
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    const id = await h.service.start(h.config({ lanes: [{ device: NODE.id, concurrency: 1 }] }));
+    const job = await h.finishJob(id, 30_000);
+    const videos = job.items.filter((item) => item.kind === 'video');
+    assert.ok(rejected >= 1, 'the node\'s files were rejected');
+    assert.equal(videos.filter((item) => item.state === 'failed').length, 0, 'none failed');
+    assert.equal(videos.filter((item) => item.resultCode === 'converted').length, 4, 'all converted here');
+  } finally {
+    console.warn = warn;
+    await h.close();
+  }
+});

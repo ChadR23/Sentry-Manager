@@ -295,8 +295,16 @@ function isSensitiveField(key) {
 function rejectUnknownFields(value, allowed) {
   if (!isPlainObject(value)) throw storeError('INVALID_MANIFEST');
   for (const key of Object.keys(value)) {
-    if (!allowed.has(key)) throw storeError(isSensitiveField(key) ? 'SENSITIVE_MANIFEST_DATA' : 'INVALID_MANIFEST');
+    if (!allowed.has(key)) {
+      // (the field it was, for the log: never its value)
+      throw Object.assign(storeError(isSensitiveField(key) ? 'SENSITIVE_MANIFEST_DATA' : 'INVALID_MANIFEST'), { field: fieldName(key) });
+    }
   }
+}
+
+// A field name for the log: what a manifest refused names, never a value.
+function fieldName(key) {
+  return String(key).replace(/[^A-Za-z0-9_.-]/g, '?').slice(0, 64);
 }
 
 function assertSafeJobId(id) {
@@ -343,7 +351,13 @@ function nonNegativeFinite(value) {
 
 function optional(target, source, key, normalize) {
   if (hasOwn(source, key) && source[key] !== undefined && source[key] !== null) {
-    target[key] = normalize(source[key]);
+    try {
+      target[key] = normalize(source[key]);
+    } catch (error) {
+      // which field was refused (config.lanes, items.attempts...), for the log
+      if (error && typeof error === 'object' && !Object.isFrozen(error)) error.field = error.field ? `${fieldName(key)}.${error.field}` : fieldName(key);
+      throw error;
+    }
   }
 }
 

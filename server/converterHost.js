@@ -96,14 +96,14 @@ function createConverterHost({ dataDir, tempDir, ffmpegPath = 'ffmpeg', ffprobeP
         // other servers paired under Nodes, as encoding lanes (server/nodes.js)
         ...(remoteNodes ? { remoteNodes } : {}),
         onClipConverted: (outputPath) => onClipConverted?.(outputPath),
-        onError: (error) => log?.error(`Converter recovery failed: ${error?.code || error?.message || 'RECOVERY_FAILED'}`)
+        onError: (error) => log?.error(`Converter recovery failed: ${error?.code || error?.message || 'RECOVERY_FAILED'}${error?.field ? ` (field ${String(error.field).slice(0, 80)})` : ''}`)
       });
       retainRuntime(rt);
       await rt.start();
       if (isQuitting()) throw Object.assign(new Error('Converter shutdown requested'), { code: 'SERVICE_SHUTDOWN' });
       return rt;
     },
-    onError: (error) => log?.error(`Converter shutdown failed: ${error?.code || 'SHUTDOWN_FAILED'}`)
+    onError: (error) => log?.error(`Converter shutdown failed: ${error?.code || 'SHUTDOWN_FAILED'}${error?.field ? ` (field ${String(error.field).slice(0, 80)})` : ''}`)
   });
 
   /** Start with retries (the desktop shows a recovery dialog instead). */
