@@ -20,7 +20,16 @@ test('the package step runs again each week instead of coming from the build cac
   assert.match(dockerfile.slice(run, upgrade), /\$\{APT_REFRESH/, 'and used by it');
   const workflow = fs.readFileSync(path.join(REPO, '.github/workflows/image.yml'), 'utf8');
   assert.match(workflow, /echo "week=\$\(date -u \+%G-W%V\)"/);
-  assert.equal((workflow.match(/APT_REFRESH=\$\{\{ steps\.names\.outputs\.week \}\}/g) || []).length, 2, 'the checked build and the published one');
+  assert.equal((workflow.match(/APT_REFRESH=\$\{\{ needs\.names\.outputs\.week \}\}/g) || []).length, 2, 'the checked build and the published one');
+});
+
+test('nothing is tagged before every test passed and both images were checked', () => {
+  const workflow = fs.readFileSync(path.join(REPO, '.github/workflows/image.yml'), 'utf8');
+  assert.match(workflow, /publish:\n\s+needs: \[names, tests, build\]/);
+  assert.match(workflow, /push-by-digest=true/, 'the builds push untagged');
+  assert.equal((workflow.match(/^\s+tags:/gm) || []).length, 1, 'only the local check image has a tag in a build');
+  assert.match(workflow, /--test-shard=\$\{\{ matrix\.shard \}\}\/3/);
+  assert.deepEqual([...workflow.matchAll(/^\s+shard: \[(.*)\]/gm)].map((m) => m[1]), ['1, 2, 3'], 'every part of the tests runs');
 });
 
 test('CUDA\'s GPU order is not changed for the whole container', () => {

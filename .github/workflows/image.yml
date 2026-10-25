@@ -8,8 +8,11 @@ name: Image
 #     publishes an image tagged with that branch's name.
 #   - Every Monday it rebuilds `latest` so Debian, Node and ffmpeg security
 #     fixes arrive without a code change.
-# Nothing is published unless the tests pass and the amd64 image starts,
-# answers, has the encoders and runs the app unprivileged.
+# The tests (in three parts) and the two images (each on its own kind of
+# machine, no emulation) run at the same time. The images are pushed only by
+# digest, which nobody pulls; the tag that people pull is put on them last,
+# and only when every test passed and both images started, answered, had
+# their encoders and ran the app unprivileged.
 # New packages are private: make it public once under the owner's
 # Packages > <repo> > Package settings so anyone can pull it.
 
@@ -25,43 +28,29 @@ permissions:
   contents: read
   packages: write
 
+# A newer push replaces a build still running for an older one.
 concurrency:
   group: image-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 defaults:
   run:
     shell: bash
 
 jobs:
-  image:
+  names:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 5
+    outputs:
+      image: ${{ steps.names.outputs.image }}
+      tag: ${{ steps.names.outputs.tag }}
+      branch: ${{ steps.names.outputs.branch }}
+      sha: ${{ steps.names.outputs.sha }}
+      short: ${{ steps.names.outputs.short }}
+      created: ${{ steps.names.outputs.created }}
+      week: ${{ steps.names.outputs.week }}
     steps:
       - uses: actions/checkout@v7
-
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 24
-
-      # The ffmpeg packages the tests need (63 MB) are kept between runs: the
-      # Ubuntu mirror once took 21 minutes to send them.
-      - name: Cache ffmpeg packages
-        uses: actions/cache@v6
-        with:
-          path: ~/apt-archives
-          key: apt-ffmpeg-${{ runner.os }}-${{ github.run_id }}
-          restore-keys: apt-ffmpeg-${{ runner.os }}-
-
-      - name: Tests
-        run: |
-          mkdir -p ~/apt-archives/partial
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends -o Dir::Cache::Archives="$HOME/apt-archives" ffmpeg
-          sudo chown -R "$(id -u):$(id -g)" ~/apt-archives
-          mkdir -p build && gcc -O2 -Wall -o build/noreplace-rename native/noreplace-rename.c
-          npm test
-
       - name: Image name and tag
         id: names
         run: |
@@ -78,25 +67,72 @@ jobs:
             echo "week=$(date -u +%G-W%V)"
           } >> "$GITHUB_OUTPUT"
 
-      - uses: docker/setup-qemu-action@v4
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: true
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      # The ffmpeg packages the tests need (63 MB) are kept between runs: the
+      # Ubuntu mirror once took 21 minutes to send them.
+      - name: Cache ffmpeg packages
+        uses: actions/cache@v6
+        with:
+          path: ~/apt-archives
+          key: apt-ffmpeg-${{ runner.os }}-${{ github.run_id }}-${{ matrix.shard }}
+          restore-keys: apt-ffmpeg-${{ runner.os }}-
+
+      - name: Tests (part ${{ matrix.shard }} of 3)
+        run: |
+          mkdir -p ~/apt-archives/partial
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends -o Dir::Cache::Archives="$HOME/apt-archives" ffmpeg
+          sudo chown -R "$(id -u):$(id -g)" ~/apt-archives
+          mkdir -p build && gcc -O2 -Wall -o build/noreplace-rename native/noreplace-rename.c
+          node --disable-warning=ExperimentalWarning --test --test-shard=${{ matrix.shard }}/3 "test/**/*.test.js"
+
+  build:
+    needs: names
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+            encoders: libx265 libsvtav1 hevc_nvenc av1_nvenc hevc_vaapi av1_vaapi hevc_qsv av1_qsv
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            encoders: libx265 libsvtav1
+    steps:
+      - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
 
-      - name: Build for checking (amd64)
+      - name: Build for checking (${{ matrix.arch }})
         uses: docker/build-push-action@v7
         with:
           context: .
-          platforms: linux/amd64
+          platforms: linux/${{ matrix.arch }}
           load: true
           tags: sentry-six-manager:check
           build-args: |
-            GIT_SHA=${{ steps.names.outputs.sha }}
-            GIT_BRANCH=${{ steps.names.outputs.branch }}
-            BUILD_DATE=${{ steps.names.outputs.created }}
-            IMAGE=${{ steps.names.outputs.image }}
-            IMAGE_TAG=${{ steps.names.outputs.tag }}
-            APT_REFRESH=${{ steps.names.outputs.week }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            GIT_SHA=${{ needs.names.outputs.sha }}
+            GIT_BRANCH=${{ needs.names.outputs.branch }}
+            BUILD_DATE=${{ needs.names.outputs.created }}
+            IMAGE=${{ needs.names.outputs.image }}
+            IMAGE_TAG=${{ needs.names.outputs.tag }}
+            APT_REFRESH=${{ needs.names.outputs.week }}
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
 
       - name: Check the image
         run: |
@@ -109,7 +145,7 @@ jobs:
           curl -fsk -o /dev/null https://127.0.0.1:9000/login
           docker exec check ffmpeg -hide_banner -version | head -1
           docker exec check ffmpeg -hide_banner -encoders > encoders.txt
-          for e in libx265 libsvtav1 hevc_nvenc av1_nvenc hevc_vaapi av1_vaapi hevc_qsv av1_qsv; do
+          for e in ${{ matrix.encoders }}; do
             grep -q " $e " encoders.txt || { echo "::error::ffmpeg has no $e encoder"; exit 1; }
           done
           # the web app: uid 1000, no capabilities, no_new_privs
@@ -125,27 +161,70 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and publish (amd64, arm64)
+      # Pushed by digest only (no tag), from the build cache of the check above
+      - name: Push by digest (${{ matrix.arch }})
+        id: push
         uses: docker/build-push-action@v7
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ${{ steps.names.outputs.image }}:${{ steps.names.outputs.tag }}
-            ${{ steps.names.outputs.image }}:sha-${{ steps.names.outputs.short }}
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=image,name=${{ needs.names.outputs.image }},push-by-digest=true,name-canonical=true,push=true
           labels: |
             org.opencontainers.image.title=Sentry Six Manager
             org.opencontainers.image.description=Sentry Studio's viewer and converter as a self-hosted web app, with footage management for a TeslaCam archive
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ steps.names.outputs.sha }}
-            org.opencontainers.image.created=${{ steps.names.outputs.created }}
+            org.opencontainers.image.revision=${{ needs.names.outputs.sha }}
+            org.opencontainers.image.created=${{ needs.names.outputs.created }}
           build-args: |
-            GIT_SHA=${{ steps.names.outputs.sha }}
-            GIT_BRANCH=${{ steps.names.outputs.branch }}
-            BUILD_DATE=${{ steps.names.outputs.created }}
-            IMAGE=${{ steps.names.outputs.image }}
-            IMAGE_TAG=${{ steps.names.outputs.tag }}
-            APT_REFRESH=${{ steps.names.outputs.week }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            GIT_SHA=${{ needs.names.outputs.sha }}
+            GIT_BRANCH=${{ needs.names.outputs.branch }}
+            BUILD_DATE=${{ needs.names.outputs.created }}
+            IMAGE=${{ needs.names.outputs.image }}
+            IMAGE_TAG=${{ needs.names.outputs.tag }}
+            APT_REFRESH=${{ needs.names.outputs.week }}
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+
+      - name: Keep the digest
+        run: |
+          mkdir -p digests
+          digest="${{ steps.push.outputs.digest }}"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::no digest"; exit 1; }
+          touch "digests/${digest#sha256:}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: digest-${{ matrix.arch }}
+          path: digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: [names, tests, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tag both images (amd64, arm64)
+        working-directory: digests
+        run: |
+          image="${{ needs.names.outputs.image }}"
+          test "$(ls | wc -l)" -eq 2
+          docker buildx imagetools create \
+            -t "$image:${{ needs.names.outputs.tag }}" \
+            -t "$image:sha-${{ needs.names.outputs.short }}" \
+            $(printf "$image@sha256:%s " *)
+          docker buildx imagetools inspect "$image:${{ needs.names.outputs.tag }}"
