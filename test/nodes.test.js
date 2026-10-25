@@ -310,6 +310,12 @@ test('a node lane is sent 15 clips ahead of its conversions at once', async () =
   const NODE = { id: 'node:abcdefabcdef', kind: 'node', name: 'pc (node)', encoders: { h265: 'hevc_nvenc', av1: null }, online: true };
   let active = 0;
   let most = 0;
+  // every encode is held until 16 are under way (or 10 s pass), so a slow
+  // machine still sees them all at once; then they fail (and are encoded here)
+  const held = [];
+  let released = false;
+  const release = () => { released = true; for (const end of held.splice(0)) end(); };
+  const timer = setTimeout(release, 10_000);
   const h = createHarness({
     clips: 20, devices: [NODE, CPU], defaultDevice: null, gpuDecode: false,
     remoteEncode: () => {
@@ -319,7 +325,8 @@ test('a node lane is sent 15 clips ahead of its conversions at once', async () =
       child.stdout = new EventEmitter();
       child.stderr = new EventEmitter();
       child.kill = () => true;
-      setTimeout(() => { active -= 1; child.emit('close', 1, null); }, 150); // (then encoded here)
+      held.push(() => setTimeout(() => { active -= 1; child.emit('close', 1, null); }, 20));
+      if (released || active >= 1 + 15) release();
       return child;
     }
   });
@@ -328,6 +335,7 @@ test('a node lane is sent 15 clips ahead of its conversions at once', async () =
     await h.finishJob(id);
     assert.equal(most, 1 + 15, 'one converting and 15 waiting on the node');
   } finally {
+    clearTimeout(timer);
     await h.close();
   }
 });
