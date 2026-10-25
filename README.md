@@ -367,7 +367,13 @@ gets the encoded file back, and then writes the telemetry, verifies it and
 saves it exactly as it does for its own GPUs. Each node is sent **15 clips
 ahead** of what it converts at once: they wait on the node, so it starts the
 next one the moment a slot is free instead of waiting for this server to read
-and send it (the Nodes page shows how many are converting and waiting). This
+and send it (the Nodes page shows how many are converting and waiting, and
+the Encoder shows them apart: "Converting 4 files at once · 15 waiting on a
+node"). Setting the node's row lower or **Off** in the Encoder takes back the
+clips still waiting there: they go back to this server's queue (not counted
+as failed or as a try), and the node only finishes the clips it has started.
+A node set to Off for a vehicle stays off for it, even with that vehicle on
+its Vehicles first list. This
 takes up to 15 clips' worth of disk on the node, about 1 GB, and on this
 server while they wait. If a node stops converting for 30 minutes, the clips
 waiting on it are encoded here instead. If a node is offline or fails

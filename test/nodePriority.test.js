@@ -11,7 +11,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { createAutoConverter, planLanes } = require('../src/main/converter/autoConvert');
-const { createHarness, ARC, UHD } = require('./fixtures/lanesHarness');
+const { createHarness, ARC, UHD, CPU } = require('./fixtures/lanesHarness');
 
 const GPU = 'pci:0000:03:00.0';
 const N2 = 'node:aaaaaaaaaaaa';
@@ -367,4 +367,54 @@ test('planning: a node is not given to a vehicle that set it to Off, but still h
   const plan = planLanes({ cars: [a, b], wanting: new Set(['/cars/a', '/cars/b']), localHolder: '/cars/a', devices, priorities: { [N2]: ['/cars/a', '/cars/b'] } });
   assert.deepEqual(plan.get('/cars/a'), [{ device: GPU, concurrency: 2 }]);
   assert.deepEqual(plan.get('/cars/b'), [{ device: N2, concurrency: 1 }]);
+});
+
+test('a node\'s row set to Off takes back the clips waiting in its queue; they are converted here, none fails', async () => {
+  const { EventEmitter } = require('events');
+  const NODE = { id: 'node:abcdefabcdef', kind: 'node', name: 'mini (node)', encoders: { h265: 'hevc_vaapi', av1: null }, online: true, slots: 1 };
+  let sent = 0;
+  let killed = 0;
+  let releaseFirst = null;
+  const h = createHarness({
+    clips: 12, devices: [NODE, CPU], defaultDevice: null, gpuDecode: false,
+    remoteEncode: () => {
+      const child = new EventEmitter(); child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
+      const first = sent++ === 0;
+      let tick = null;
+      child.kill = (signal = 'SIGTERM') => { killed += 1; clearInterval(tick); setImmediate(() => child.emit('close', null, signal)); return true; };
+      if (first) {
+        // the clip the node converts: it finishes when the test says so
+        child.stdout.emit('data', 'out_time_us=1000\nprogress=continue\n');
+        releaseFirst = () => { child.stdout.emit('data', 'out_time_us=2000\nprogress=end\n'); child.emit('close', 0, null); };
+      } else {
+        // the others wait in the node's queue until taken back
+        tick = setInterval(() => child.stdout.emit('data', 'queued=1\n'), 10);
+        setImmediate(() => child.stdout.emit('data', 'queued=1\n'));
+      }
+      return child;
+    },
+    comparePicture: async () => ({ ok: true })
+  });
+  try {
+    const id = await h.service.start(h.config({ lanes: [{ device: NODE.id, concurrency: 1 }, { device: 'cpu', concurrency: 1 }] }));
+    // the node has its clip and several waiting
+    for (let i = 0; i < 200 && h.service.activeEncodes().filter((e) => e.waitingOnNode).length < 5; i++) await new Promise((r) => setTimeout(r, 20));
+    const waiting = h.service.activeEncodes().filter((e) => e.waitingOnNode).length;
+    assert.ok(waiting >= 5, `clips waiting on the node (${waiting})`);
+    // the owner sets the node's row to Off
+    await h.service.setLanes(id, [{ device: 'cpu', concurrency: 1 }]);
+    for (let i = 0; i < 100 && h.service.activeEncodes().some((e) => e.waitingOnNode); i++) await new Promise((r) => setTimeout(r, 20));
+    assert.equal(h.service.activeEncodes().filter((e) => e.waitingOnNode).length, 0, 'none left waiting on the node');
+    assert.ok(killed >= waiting, `the waiting clips were taken back (${killed} of ${waiting})`);
+    const sentBefore = sent;
+    releaseFirst();
+    const job = await h.finishJob(id, 30_000);
+    const videos = job.items.filter((item) => item.kind === 'video');
+    assert.equal(sent, sentBefore, 'nothing more sent to the node');
+    assert.equal(videos.filter((item) => item.state === 'failed').length, 0, 'none failed');
+    assert.equal(videos.filter((item) => item.resultCode === 'converted').length, 12);
+    assert.ok(videos.every((item) => (item.attempts || 0) <= 1), 'a clip taken back is not counted as a try');
+  } finally {
+    await h.close();
+  }
 });

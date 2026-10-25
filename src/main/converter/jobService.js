@@ -583,6 +583,31 @@ function createConverterJobService(deps) {
     return laneId === null ? 0 : plan.limits.get(laneId) || 0;
   }
 
+  // A node's row set lower or Off: the clips sent ahead that still wait in
+  // its queue (not started there) come back and are queued here again, so
+  // the node stops when its own clips are done, not 15 clips later. They
+  // are not encoded here instead (that is for a node that fails).
+  function withdrawFromNodes(runtime) {
+    const onLane = new Map();
+    for (const live of runtime.encodes.values()) {
+      if (typeof live.deviceId !== 'string' || !live.deviceId.startsWith('node:')) continue;
+      if (!onLane.has(live.deviceId)) onLane.set(live.deviceId, []);
+      onLane.get(live.deviceId).push(live);
+    }
+    for (const [laneId, list] of onLane) {
+      const entries = list.map((live) => ({ live, entry: runtime.children.get(live.itemId) })).filter(({ entry }) => entry && !entry.withdrawn);
+      let over = entries.length - laneLimit(runtime, laneId);
+      // the last sent come back first
+      for (const { entry } of entries.filter(({ live }) => live.waitingOnNode).reverse()) {
+        if (over <= 0) break;
+        over -= 1;
+        entry.withdrawn = true;
+        entry.terminationRequested = true;
+        try { entry.child.kill('SIGTERM'); } catch (_) { /* already gone */ }
+      }
+    }
+  }
+
   // Finds each lane's GPU among the devices this container has now.
   async function resolveLanes(lanes) {
     const limits = new Map();
@@ -1283,7 +1308,12 @@ function createConverterJobService(deps) {
         const value = line.slice(separator + 1).trim();
         if (key === 'queued') {
           // waiting in a node's queue (a clip sent ahead): not converting yet
-          if (!live.waitingOnNode) { live.waitingOnNode = true; noteWaiting(runtime); }
+          if (!live.waitingOnNode) {
+            live.waitingOnNode = true;
+            noteWaiting(runtime);
+            // (sent while its row was being set lower: it comes back)
+            withdrawFromNodes(runtime);
+          }
         } else if (key === 'out_time_ms' || key === 'out_time_us') {
           const parsed = Number(value);
           if (Number.isSafeInteger(parsed) && parsed >= 0) {
@@ -1334,7 +1364,9 @@ function createConverterJobService(deps) {
       finishStalled = () => finish({ ok: false, code: 'encoder-stalled' });
       child.once('error', () => finish({ ok: false, code: 'encoder-start-failed' }));
       child.once('close', (code, signal) => {
-        if (runtime.cancelRequested || runtime.stopRequested || runtime.recoveryRequired || signal) {
+        if (entry.withdrawn && !runtime.cancelRequested && !runtime.stopRequested && !runtime.recoveryRequired) {
+          finish({ ok: false, code: 'withdrawn' });
+        } else if (runtime.cancelRequested || runtime.stopRequested || runtime.recoveryRequired || signal) {
           finish({ ok: false, code: 'cancelled' });
         } else finish(code === 0 ? { ok: true } : { ok: false, code: 'encoder-failed' });
       });
@@ -1666,6 +1698,10 @@ function createConverterJobService(deps) {
       await itemPatch(runtime, item.id, { attempts, encoder: selected.codec }, {
         state: 'encoding', activeItemId: item.id
       });
+      // its node's row was set to Off while the clip was being read: it is
+      // not sent, and goes back to the queue (see failItem,
+      // which takes this try back)
+      if (selected.remote === true && lane && laneLimit(runtime, lane.id) === 0) throw serviceError('NODE_WITHDRAWN');
       const reserved = await staging.reserveEncodeOutput({
         jobId: runtime.manifest.id,
         itemId: item.id,
@@ -1710,6 +1746,8 @@ function createConverterJobService(deps) {
           throw Object.assign(new Error('cleanup pending'), { code: 'OWNED_CLEANUP_FAILED' });
         }
         if (encoded.code === 'cancelled') throw serviceError('CANCELLED');
+        // taken back from a node's queue: queued here again (see failItem)
+        if (encoded.code === 'withdrawn') throw serviceError('NODE_WITHDRAWN');
         // Retry the same GPU encoder with CPU decoding before giving up on it.
         if (usedTier) {
           failedTiers.push(usedTier.key);
@@ -2251,7 +2289,10 @@ function createConverterJobService(deps) {
     const cleanup = await cleanupOwnership(runtime, itemId, ownership);
     if (cleanup.cleaned === true) setOwnership(runtime, itemId, ownershipOf(ownershipFor(runtime, itemId)));
     const haltedByRecovery = runtime.recoveryRequired && runtime.recoveryItemId !== itemId;
-    const stopped = (runtime.stopRequested || haltedByRecovery) && !runtime.cancelRequested;
+    // a clip taken back from a node's queue is not a failure: it is queued
+    // again, first in line, and its try is not counted
+    const withdrawn = error?.code === 'NODE_WITHDRAWN' && !runtime.cancelRequested && cleanup.cleaned !== false;
+    const stopped = (runtime.stopRequested || haltedByRecovery || withdrawn) && !runtime.cancelRequested;
     const terminallyCancelled = runtime.cancelRequested;
     await itemPatch(runtime, itemId, {
       state: stopped ? 'queued' : (terminallyCancelled ? 'cancelled' : 'failed'),
@@ -2267,6 +2308,11 @@ function createConverterJobService(deps) {
       publicationArtifact: cleanup.cleaned === false ? ownership?.publicationArtifact || null : null,
       replacementPhase: cleanup.cleaned === false ? runtime.manifest.replacementPhase || null : null
     });
+    if (withdrawn) {
+      const attempts = currentItem(runtime, itemId)?.attempts || 0;
+      if (attempts > 0) await itemPatch(runtime, itemId, { attempts: attempts - 1 });
+      if (!runtime.stopRequested && !runtime.recoveryRequired) runtime.queue.unshift(itemId);
+    }
   }
 
   async function work(runtime, lane = null) {
@@ -2431,6 +2477,7 @@ function createConverterJobService(deps) {
       if (running()) {
         runtime.lanePlan = plan;
         startMissingWorkers(runtime);
+        withdrawFromNodes(runtime);
       }
     }
     return publicSnapshot(runtime.manifest);
