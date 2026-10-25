@@ -46,7 +46,13 @@ function nameFromDriver(driver) {
   return driver.slice(0, 80);
 }
 
-async function detectGpus({ driDir = '/dev/dri', sysDrm = '/sys/class/drm' } = {}) {
+// Windows (WSL): a render node backed by Microsoft's D3D12 bridge (Mesa's
+// d3d12 driver over /dev/dxg). It is no GPU of its own and is not used for
+// encoding; NVIDIA cards encode through the NVIDIA Container Toolkit instead.
+const isWslBridge = (driver, dxgDevice) => /d3d12/i.test(driver || '') || (dxgDevice && !driver);
+
+async function detectGpus({ driDir = '/dev/dri', sysDrm = '/sys/class/drm', dxg = '/dev/dxg', runImpl = run } = {}) {
+  const wsl = fs.existsSync(dxg);
   const gpus = [];
   let passed = [];
   try {
@@ -75,17 +81,24 @@ async function detectGpus({ driDir = '/dev/dri', sysDrm = '/sys/class/drm' } = {
       name: null, passedThrough: passed.includes(node), encodes: null, lowPowerOnly: false
     };
     if (entry.passedThrough && vendor !== 'nvidia') {
-      const va = await run('vainfo', ['--display', 'drm', '--device', entry.node], { timeoutMs: 10000 });
+      const va = await runImpl('vainfo', ['--display', 'drm', '--device', entry.node], { timeoutMs: 10000 });
+      let driver = null;
       if (va.code === 0 || va.stdout) {
         const info = parseVainfo(`${va.stdout}\n${va.stderr}`);
+        driver = info.driver;
         entry.name = nameFromDriver(info.driver);
         entry.encodes = info.encodes;
         entry.lowPowerOnly = info.lowPowerOnly;
       }
+      if (!vendor && isWslBridge(driver, wsl)) {
+        entry.virtual = true;
+        entry.name = 'Windows (WSL) graphics bridge';
+        entry.encodes = null;
+      }
     }
     gpus.push(entry);
   }
-  const smi = await run('nvidia-smi', ['--query-gpu=name,driver_version', '--format=csv,noheader'], { timeoutMs: 10000 });
+  const smi = await runImpl('nvidia-smi', ['--query-gpu=name,driver_version', '--format=csv,noheader'], { timeoutMs: 10000 });
   const nvidia = smi.code === 0
     ? smi.stdout.trim().split('\n').filter(Boolean).map((l) => {
       const [name, driver] = l.split(',').map((s) => s.trim());
@@ -94,6 +107,7 @@ async function detectGpus({ driDir = '/dev/dri', sysDrm = '/sys/class/drm' } = {
     : [];
   const hints = [];
   for (const g of gpus) {
+    if (g.virtual) continue;
     if (!g.passedThrough && g.vendor !== 'nvidia') hints.push(`${g.vendorName} GPU found on the host but /dev/dri is not passed into the container (add devices: - /dev/dri:/dev/dri).`);
     if (g.passedThrough && g.encodes && !g.encodes.hevc) hints.push(`${g.name || g.node}: the VA-API driver reports no H.265 encoder.`);
   }
