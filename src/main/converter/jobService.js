@@ -1875,11 +1875,13 @@ function createConverterJobService(deps) {
       // Encoded on another server (Nodes): its pictures must match the
       // original's before anything else is checked or saved. One that does
       // not is thrown away and the clip is encoded here instead.
-      if (selected.remote === true) {
+      // (a node the owner marked trusted on the Nodes page: no picture check)
+      const trustedNode = selected.remote === true && typeof deps.nodeTrusted === 'function' && deps.nodeTrusted(selected.device?.id) === true;
+      if (selected.remote === true && !trustedNode) {
         if (!check.release) check.release = await takeCheckSlot(runtime, lane, signal);
         timing.mark('checkWait');
         const same = typeof deps.comparePicture === 'function'
-          ? await deps.comparePicture({ source: staged.source, candidate: adopted.path, signal }).catch(() => ({ ok: false, reason: 'compare-failed' }))
+          ? await deps.comparePicture({ source: staged.source, candidate: adopted.path, signal, durationSeconds: inspected.durationSeconds }).catch(() => ({ ok: false, reason: 'compare-failed' }))
           : { ok: false, reason: 'no-picture-check' };
         timing.mark('picture');
         if (!same?.ok) {

@@ -1685,13 +1685,20 @@
         ${left.length ? `<select class="input node-car-add" data-car-add="${esc(n.id)}" aria-label="Add a vehicle for ${esc(n.name)}"><option value="">Add a vehicle…</option>${left.map((v) => `<option value="${esc(v.id)}">${esc(v.name)}</option>`).join('')}</select>` : ''}
       </div></td></tr>`;
     };
+    // a node of your own: its encodes skip the picture check (faster, less safe)
+    const trustPanel = (n) => `<tr class="node-bench-row"><td colspan="5"><label class="check node-trust">
+        <input type="checkbox" data-node-trust="${esc(n.id)}"${n.trusted ? ' checked' : ''}>
+        <span><b>Trusted</b> <span class="muted small">${n.trusted
+          ? 'Its encodes replace originals without the picture check (streams, length, frames and telemetry are still verified). Turn off if anyone else could change this computer.'
+          : 'Its encodes get the picture check here: a few random stretches of each clip compared with the original. Trust only a computer of your own: it skips that check.'}</span></span>
+      </label></td></tr>`;
     const encodersText = (e) => [['H.265', e?.h265], ['AV1', e?.av1]].filter(([, v]) => v).map(([k, v]) => `${k}: ${esc(v)}`).join(' · ') || '—';
     const nodeRows = nodes.map((n) => `<tr>
         <td class="words"><b>${esc(n.name)}</b><br><span class="muted small mono">${esc(n.address)}</span></td>
         <td>${n.online ? '<span class="chip green"><span class="dot ok"></span>Online</span>' : `<span class="chip red"><span class="dot bad"></span>Offline</span><br><span class="muted small words">${esc(n.error || '')}</span>`}</td>
         <td class="small">${encodersText(n.encoders)}</td>
         <td class="small">${n.online && n.slots ? (n.encoding === null ? `${n.busy ?? 0} of ${n.slots} busy` : `${n.encoding} of ${n.slots} converting${n.busy > n.encoding ? ` · ${n.busy - n.encoding} waiting` : ''}`) : '—'}</td>
-        <td class="actions">${n.online && !benches[n.id] ? `<button class="btn sm" data-bench-start="${esc(n.id)}" data-codec="h265"${benchRunning ? ' disabled' : ''}>Benchmark</button>${n.encoders?.av1 ? `<button class="btn sm" data-bench-start="${esc(n.id)}" data-codec="av1"${benchRunning ? ' disabled' : ''}>Benchmark AV1</button>` : ''}` : ''}<button class="btn sm" data-rename-node="${esc(n.id)}">Rename</button><button class="btn sm" data-remove-node="${esc(n.id)}">Remove</button></td></tr>${carsPanel(n)}${benchPanel(n)}`).join('');
+        <td class="actions">${n.online && !benches[n.id] ? `<button class="btn sm" data-bench-start="${esc(n.id)}" data-codec="h265"${benchRunning ? ' disabled' : ''}>Benchmark</button>${n.encoders?.av1 ? `<button class="btn sm" data-bench-start="${esc(n.id)}" data-codec="av1"${benchRunning ? ' disabled' : ''}>Benchmark AV1</button>` : ''}` : ''}<button class="btn sm" data-rename-node="${esc(n.id)}">Rename</button><button class="btn sm" data-remove-node="${esc(n.id)}">Remove</button></td></tr>${carsPanel(n)}${trustPanel(n)}${benchPanel(n)}`).join('');
     const pairing = worker.pairing;
     const mins = pairing ? Math.max(1, Math.round((pairing.expiresAt - Date.now()) / 60000)) : 0;
     const mainRows = worker.mains.map((m) => `<tr>
@@ -1786,6 +1793,22 @@
       };
       setTimeout(follow, 2500);
     }
+    page.querySelectorAll('[data-node-trust]').forEach((box) => {
+      box.addEventListener('change', async () => {
+        const on = box.checked;
+        if (on && !confirm('Trust this node? Its encodes will replace your originals without the picture check. Only for a computer of your own that nobody else can change.')) {
+          box.checked = false;
+          return;
+        }
+        try {
+          await api(`/api/nodes/${encodeURIComponent(box.dataset.nodeTrust)}`, { method: 'PUT', body: { trusted: on } });
+          toast(on ? 'Trusted: its encodes skip the picture check.' : 'Not trusted: its encodes get the picture check.');
+        } catch (err) {
+          toast(err.message, true);
+        }
+        render();
+      });
+    });
     const saveCars = async (id, list) => {
       await api(`/api/nodes/${encodeURIComponent(id)}`, { method: 'PUT', body: { cars: list } }).catch((err) => toast(err.message, true));
       render();

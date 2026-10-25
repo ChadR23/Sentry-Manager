@@ -405,7 +405,13 @@ Security:
   swapped footage is caught and the clip is encoded here instead; both are
   decoded on this server's GPU when it has one), then
   verified like any other (frames, timing, telemetry) before an original is
-  replaced. A node can never send back more than twice the clip's size, and
+  replaced. A clip of 20 seconds or more is compared on three 3-second
+  stretches at random places, picked only once the encode is back, so the
+  node can't know which; about a quarter of the decoding of every frame.
+  **Trusted** (per node, on the Nodes page, off by default, asks for the
+  password) skips the picture comparison for a computer of your own; the
+  verification of frames, timing and telemetry still runs. "Where the time
+  goes" shows the picture check and the wait for it on lines of their own. A node can never send back more than twice the clip's size, and
   one that stalls or misbehaves cannot hold up this server.
 - **A main can't misuse a node either.** The node reads each upload strictly
   as an MP4 from its own work folder (so it can't be pointed at other files

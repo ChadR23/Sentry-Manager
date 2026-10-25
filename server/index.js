@@ -285,6 +285,8 @@ async function main() {
     remoteNodes: {
       list: () => nodes.list(),
       encode: (request) => nodes.encode(request),
+      // a trusted node's encodes skip the picture check (Nodes page)
+      trusted: (device) => nodes.trusted(device),
       // a node's row under Encoder > Parallel conversions sets its clips at once
       setSlots: (device, slots) => nodes.setSlots(String(device).replace(/^node:/, ''), slots),
       // each node's vehicles, as the footage folders automatic conversion uses
@@ -643,6 +645,13 @@ async function main() {
         const renamed = nodes.rename(params.id, body.name);
         audit.info(`Node "${renamed.previous}" renamed "${renamed.name}": ${by(req, user)}`);
         out.name = renamed.name;
+      }
+      if (body?.trusted !== undefined) {
+        if (typeof body.trusted !== 'boolean') throw new HttpError(400, 'Trusted is on or off.');
+        // its encodes then replace originals without the picture check: the password again
+        if (body.trusted) requireConfirmed(req);
+        out.trusted = nodes.setTrusted(params.id, body.trusted);
+        (out.trusted ? audit.warn : audit.info).call(audit, `Node ${params.id} ${out.trusted ? 'trusted: its encodes skip the picture check' : 'no longer trusted: its encodes get the picture check'}: ${by(req, user)}`);
       }
       if (body?.cars !== undefined) {
         const known = new Set(vehicles.list().map((v) => v.id));

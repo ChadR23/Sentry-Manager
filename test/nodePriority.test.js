@@ -489,3 +489,32 @@ test('originals are read no more than two at a time, however many clips a node t
     await h.close();
   }
 });
+
+test('a node marked trusted: its clips skip the picture check; another node\'s still get it', async () => {
+  const { EventEmitter } = require('events');
+  const MINE = { id: 'node:aaaaaaaaaaaa', kind: 'node', name: 'mini (node)', encoders: { h265: 'hevc_vaapi', av1: null }, online: true, slots: 1 };
+  const OTHER = { id: 'node:bbbbbbbbbbbb', kind: 'node', name: 'other (node)', encoders: { h265: 'hevc_nvenc', av1: null }, online: true, slots: 1 };
+  const checked = [];
+  const sentTo = new Map();
+  const h = createHarness({
+    clips: 40, devices: [MINE, OTHER], defaultDevice: null, gpuDecode: false,
+    remoteEncode: ({ device, target }) => {
+      sentTo.set(target, device.id);
+      const child = new EventEmitter(); child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.kill = () => true;
+      setTimeout(() => { child.stdout.emit('data', 'out_time_us=1\nprogress=end\n'); child.emit('close', 0, null); }, 10);
+      return child;
+    },
+    comparePicture: async ({ candidate }) => { checked.push(sentTo.get(candidate)); return { ok: true }; },
+    nodeTrusted: (id) => id === MINE.id
+  });
+  try {
+    const id = await h.service.start(h.config({ lanes: [{ device: MINE.id, concurrency: 1 }, { device: OTHER.id, concurrency: 1 }] }));
+    const job = await h.finishJob(id, 30_000);
+    assert.equal(job.items.filter((item) => item.resultCode === 'converted').length, 40);
+    const used = new Set(sentTo.values());
+    assert.ok(used.has(MINE.id) && used.has(OTHER.id), `both nodes converted clips (${[...used].join(', ')}; checked ${checked.join(', ')})`);
+    assert.ok(checked.length > 0 && checked.every((node) => node === OTHER.id), `only the other node's clips checked (${checked.join(', ')})`);
+  } finally {
+    await h.close();
+  }
+});

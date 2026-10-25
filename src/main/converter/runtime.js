@@ -714,6 +714,7 @@ async function createConverterRuntime(options = {}) {
     resolveDevice,
     // A lane on another server (Nodes): sends the clip there to be encoded.
     ...(typeof options.remoteNodes?.encode === 'function' ? { remoteEncode: options.remoteNodes.encode, comparePicture } : {}),
+    ...(typeof options.remoteNodes?.trusted === 'function' ? { nodeTrusted: options.remoteNodes.trusted } : {}),
     ...(typeof options.remoteNodes?.setSlots === 'function' ? { setNodeSlots: (id, slots) => options.remoteNodes.setSlots(id, slots) } : {}),
     // The device a job without lanes encodes on: its workers and that
     // device's lane share it while a job switches between the two.

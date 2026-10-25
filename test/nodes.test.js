@@ -252,6 +252,39 @@ test('picture check: real encodes pass even shifted by some frames; black, froze
   }
 });
 
+test('picture check on a long clip: a few random stretches, chosen after the encode; a fake fails wherever they fall', { skip: !hasTools, timeout: 300_000 }, async () => {
+  const dir = await tmp();
+  try {
+    const source = path.join(dir, 'src.mp4');
+    await createTeslaH264Fixture({ ffmpegPath: 'ffmpeg', outputPath: source, durationSeconds: 30, frameRate: 12, size: '320x240', spatialNoise: 3, telemetryPattern: Array.from({ length: 360 }, (_, i) => Buffer.from([0x20, i % 256])) });
+    const enc = (name, args) => {
+      const out = path.join(dir, name);
+      assert.equal(spawnSync('ffmpeg', ['-v', 'error', '-y', ...args, '-c:v', 'libx265', '-b:v', '300k', '-x265-params', 'log-level=error:keyint=60', '-an', out]).status, 0);
+      return out;
+    };
+    const decoded = [];
+    const real = ffmpegDecoder({ spawn: require('child_process').spawn });
+    const decode = (file, opts) => { decoded.push([path.basename(file), opts.start, opts.length]); return real(file, opts); };
+    const good = enc('good.mp4', ['-i', source]);
+    // a good encode, and one that starts a second late (lead-in frames dropped)
+    for (const candidate of [good, enc('late.mp4', ['-ss', '1', '-i', source])]) {
+      decoded.length = 0;
+      const r = await comparePictures({ source, candidate, decode, durationSeconds: 30 });
+      assert.equal(r.ok, true, `${path.basename(candidate)}: ${JSON.stringify(r)}`);
+      assert.equal(r.sampled, 3, 'three stretches');
+      assert.ok(decoded.every(([, start, length]) => Number.isFinite(start) && length <= 6), 'only stretches are decoded');
+    }
+    // a fake with the right pictures only in its first ten seconds fails, in any of several tries
+    const fake = enc('fake.mp4', ['-i', source, '-vf', 'drawbox=enable=gte(t\\,10):t=fill:c=black']);
+    for (let n = 0; n < 3; n++) assert.equal((await comparePictures({ source, candidate: fake, decode, durationSeconds: 30 })).ok, false);
+    // where the stretches fall is chosen per check
+    const at = (random) => { decoded.length = 0; return comparePictures({ source, candidate: good, decode, durationSeconds: 30, random: () => random }).then(() => decoded.filter(([f]) => f === 'src.mp4').map(([, s]) => s)); };
+    assert.notDeepEqual(await at(0.1), await at(0.9));
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('a node encode whose pictures do not match is thrown away and encoded here', async () => {
   const NODE = { id: 'node:abcdefabcdef', kind: 'node', name: 'pc (node)', encoders: { h265: 'hevc_nvenc', av1: null }, online: true };
   const compared = [];
@@ -457,6 +490,20 @@ test('a node can be given a name of your own; empty names are refused', () => {
   assert.equal(db.get('nodes')[0].token, 't'.repeat(43), 'nothing else changes');
   assert.throws(() => nodes.rename('abcdefghijkl', '   '), /Enter a name/);
   assert.equal(nodes.rename('nope', 'x'), null);
+});
+
+test('a node can be marked trusted (off by default); the converter asks per clip', () => {
+  const db = memDb();
+  db.set('nodes', [{ id: 'abcdefghijkl', name: 'garage-pc', host: '10.0.0.5', port: 9000, token: 't'.repeat(43), pin: { fingerprint: '00' } }]);
+  const nodes = createNodes({ db, log: quiet, audit: quiet, name: 'main-nas' });
+  assert.equal(nodes.trusted('node:abcdefghijkl'), false, 'off by default');
+  assert.equal(nodes.setTrusted('abcdefghijkl', true), true);
+  assert.equal(nodes.trusted('node:abcdefghijkl'), true);
+  assert.equal(db.get('nodes')[0].token, 't'.repeat(43), 'nothing else changes');
+  assert.equal(nodes.setTrusted('abcdefghijkl', 'yes'), false, 'only true trusts it');
+  assert.equal(nodes.trusted('abcdefghijkl'), false);
+  assert.equal(nodes.setTrusted('nope', true), null);
+  assert.equal(nodes.trusted('node:nope'), false);
 });
 
 test('benchmark: real clips lent to a real node, timed per level, encodes deleted, footage untouched', { skip: !hasTools, timeout: 300_000 }, async () => {

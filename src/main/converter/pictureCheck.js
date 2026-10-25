@@ -19,6 +19,12 @@ const SHIFT = 48; // the largest constant offset searched (lead-in frames)
 const DRIFT = 2; // and the local slack around it (a skipped frame or two)
 const PICTURE_MEAN = 0.9;
 const PICTURE_LOW = 0.75; // the 5th percentile of frame scores
+// Clips this long or more are checked on SAMPLE_COUNT stretches of
+// SAMPLE_SECONDS each (see comparePictures); shorter ones on every frame.
+const SAMPLE_MIN_SECONDS = 20;
+const SAMPLE_COUNT = 3;
+const SAMPLE_SECONDS = 3;
+const SAMPLE_MARGIN_SECONDS = 1.5;
 
 // SSIM over 8x8 blocks (the usual constants for 8-bit pictures), averaged
 const C1 = (0.01 * 255) ** 2;
@@ -57,8 +63,12 @@ function split(buffer) {
   return frames;
 }
 
-/** Original and encoded frames (W x H grey) -> { ok, mean, low, frames, shift }. */
-function judgeFrames(sourceBuf, candidateBuf) {
+/**
+ * Original and encoded frames (W x H grey) -> { ok, mean, low, frames, shift }.
+ * The encoded frames may start up to `maxShift` frames later (a stretch of
+ * the encode read from earlier on than the original's) or `minShift` earlier.
+ */
+function judgeFrames(sourceBuf, candidateBuf, { minShift = -SHIFT, maxShift = SHIFT } = {}) {
   const src = split(sourceBuf);
   const cand = split(candidateBuf);
   if (src.length === 0 || cand.length === 0) return { ok: false, reason: 'no-frames' };
@@ -80,14 +90,14 @@ function judgeFrames(sourceBuf, candidateBuf) {
   };
   const coarse = src.length >= 64 ? 32 : 8;
   let best = { shift: 0, score: -Infinity };
-  for (let shift = -SHIFT; shift <= SHIFT; shift++) {
+  for (let shift = minShift; shift <= maxShift; shift++) {
     const score = offsetScore(shift, coarse);
     if (score > best.score) best = { shift, score };
   }
   if (coarse !== 8) {
     const around = best.shift;
     best = { shift: around, score: -Infinity };
-    for (let shift = Math.max(-SHIFT, around - 4); shift <= Math.min(SHIFT, around + 4); shift++) {
+    for (let shift = Math.max(minShift, around - 4); shift <= Math.min(maxShift, around + 4); shift++) {
       const score = offsetScore(shift, 8);
       if (score > best.score) best = { shift, score };
     }
@@ -111,7 +121,43 @@ function judgeFrames(sourceBuf, candidateBuf) {
 }
 
 /** decode(file, { width, height, signal }) -> Buffer of grey frames. */
-async function comparePictures({ source, candidate, signal, decode }) {
+async function comparePictures({ source, candidate, signal, decode, durationSeconds = null, random = Math.random }) {
+  // A clip long enough: a few short stretches at random places, chosen only
+  // now that the encode is back (the node cannot know which), instead of
+  // every frame: a tenth of the decoding. Each stretch of the encode is read
+  // from a little earlier and longer, as its frames may sit a little off the
+  // original's (lead-in frames, edit lists).
+  if (Number.isFinite(durationSeconds) && durationSeconds >= SAMPLE_MIN_SECONDS) {
+    const span = durationSeconds - SAMPLE_SECONDS;
+    // one stretch in each part of the clip, somewhere random in that part,
+    // all decoded at once
+    const starts = Array.from({ length: SAMPLE_COUNT }, (_, n) => Math.round(((n + random()) / SAMPLE_COUNT) * span * 100) / 100);
+    let results;
+    try {
+      results = await Promise.all(starts.map(async (start) => {
+        const from = Math.max(0, start - SAMPLE_MARGIN_SECONDS);
+        const [a, b] = await Promise.all([
+          decode(source, { width: W, height: H, signal, start, length: SAMPLE_SECONDS }),
+          decode(candidate, { width: W, height: H, signal, start: from, length: SAMPLE_SECONDS + (start - from) + SAMPLE_MARGIN_SECONDS })
+        ]);
+        // the encode's stretch starts (start - from) seconds early: up to ~40 fps
+        const early = Math.ceil((start - from) * 40);
+        return { ...judgeFrames(a, b, { minShift: -SHIFT, maxShift: early + SHIFT }), at: start };
+      }));
+    } catch (err) {
+      return { ok: false, reason: 'decode-failed', detail: String(err?.code || err?.message || err).slice(0, 80) };
+    }
+    const failed = results.find((r) => !r.ok);
+    if (failed) return { ...failed, sampled: results.length };
+    const round = (v) => Math.round(v * 1000) / 1000;
+    return {
+      ok: true,
+      mean: round(results.reduce((sum, r) => sum + r.mean, 0) / results.length),
+      low: Math.min(...results.map((r) => r.low)),
+      frames: results.reduce((sum, r) => sum + r.frames, 0),
+      sampled: results.length
+    };
+  }
   let a;
   let b;
   try {
@@ -130,8 +176,13 @@ async function comparePictures({ source, candidate, signal, decode }) {
  * again on the CPU.
  */
 function ffmpegDecoder({ spawn, ffmpegPath = 'ffmpeg', timeoutMs = 30 * 60_000, accel = null }) {
-  const once = (file, { width, height, signal }, hw) => new Promise((resolve, reject) => {
-    const child = spawn(ffmpegPath, ['-nostdin', '-hide_banner', '-loglevel', 'error', ...hw, '-protocol_whitelist', 'file', '-i', file,
+  const once = (file, { width, height, signal, start = null, length = null }, hw) => new Promise((resolve, reject) => {
+    // (a stretch: seeks to it, decoding from the keyframe before it)
+    const range = [
+      ...(Number.isFinite(start) && start > 0 ? ['-ss', start.toFixed(3)] : []),
+      ...(Number.isFinite(length) && length > 0 ? ['-t', length.toFixed(3)] : [])
+    ];
+    const child = spawn(ffmpegPath, ['-nostdin', '-hide_banner', '-loglevel', 'error', ...hw, '-protocol_whitelist', 'file', ...range, '-i', file,
       '-vf', `scale=${width}:${height}:flags=area,format=gray`, '-frames:v', String(MAX_FRAMES),
       '-f', 'rawvideo', '-'], { shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
     const chunks = [];
@@ -153,16 +204,16 @@ function ffmpegDecoder({ spawn, ffmpegPath = 'ffmpeg', timeoutMs = 30 * 60_000, 
       else reject(Object.assign(new Error('decode failed'), { code: 'DECODE_FAILED' }));
     });
   });
-  return async (file, { width, height, signal } = {}) => {
+  return async (file, { width, height, signal, start = null, length = null } = {}) => {
     const hw = accel ? await Promise.resolve(accel()).catch(() => null) : null;
     if (hw?.length) {
       try {
-        return await once(file, { width, height, signal }, hw);
+        return await once(file, { width, height, signal, start, length }, hw);
       } catch (err) {
         if (signal?.aborted) throw err;
       }
     }
-    return once(file, { width, height, signal }, []);
+    return once(file, { width, height, signal, start, length }, []);
   };
 }
 

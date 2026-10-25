@@ -263,7 +263,8 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
         pairedAt: node.pairedAt, online: i.online === true, error: i.online ? null : i.error || null,
         encoders: i.encoders || {}, slots: i.slots ?? null, busy: i.busy ?? null, encoding: i.encoding ?? null,
         fingerprint: node.pin?.fingerprint || null,
-        cars: Array.isArray(node.cars) ? node.cars : []
+        cars: Array.isArray(node.cars) ? node.cars : [],
+        trusted: node.trusted === true
       };
     });
   }
@@ -340,6 +341,18 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
     save(stored().map((n) => (n.id === id ? { ...n, cars: list } : n)));
     return list;
   }
+
+  /**
+   * Trusted (the owner's own computer, say): its encodes skip the picture
+   * check here (pictureCheck.js); verification of streams, length, frames
+   * and telemetry still runs. Off by default.
+   */
+  function setTrusted(id, trusted) {
+    if (!byId(id)) return null;
+    save(stored().map((n) => (n.id === id ? { ...n, trusted: trusted === true } : n)));
+    return trusted === true;
+  }
+  const trusted = (id) => byId(String(id || '').replace(/^node:/, ''))?.trusted === true;
 
   /** { 'node:<id>': [vehicle id, ...] } for the nodes that have a list. */
   const carLists = () => Object.fromEntries(stored().filter((n) => Array.isArray(n.cars) && n.cars.length).map((n) => [`node:${n.id}`, n.cars]));
@@ -519,7 +532,7 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
     return info.get(id);
   }
 
-  return { list, overview, add, rename, setCars, carLists, remove, encode, setSlots, has: (id) => Boolean(byId(id)), refresh: (id) => (byId(id) ? refresh(byId(id)) : null) };
+  return { list, overview, add, rename, setCars, setTrusted, trusted, carLists, remove, encode, setSlots, has: (id) => Boolean(byId(id)), refresh: (id) => (byId(id) ? refresh(byId(id)) : null) };
 }
 
 module.exports = { createNodes, parseAddress, connectPinned, pinMatches };

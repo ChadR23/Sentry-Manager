@@ -171,6 +171,7 @@ function createHarness(options = {}) {
     encodeStallMs: 60_000,
     ...(options.remoteEncode ? { remoteEncode: options.remoteEncode } : {}),
     ...(options.comparePicture ? { comparePicture: options.comparePicture } : {}),
+    ...(options.nodeTrusted ? { nodeTrusted: options.nodeTrusted } : {}),
     ...(options.setNodeSlots ? { setNodeSlots: options.setNodeSlots } : {})
   };
   const service = createConverterJobService(deps);
