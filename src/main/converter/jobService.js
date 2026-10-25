@@ -291,7 +291,8 @@ function createConverterJobService(deps) {
     } catch (_) { return null; }
   }
   function decodeAccelFor(encoder, purpose) {
-    if (encoder?.hardware !== true || typeof deps.decodeAccel !== 'function') return null;
+    // a node decodes its clips itself; verifying here decodes on this CPU
+    if (encoder?.hardware !== true || encoder.remote === true || typeof deps.decodeAccel !== 'function') return null;
     if (purpose === 'verify' && (verifyDecodeFallbacks.get(decodeKey(encoder)) || 0) >= VERIFY_DECODE_FALLBACK_LIMIT) return null;
     return accelArgs(encoder);
   }
@@ -301,7 +302,7 @@ function createConverterJobService(deps) {
   // repeat runs on system-memory frames, and a failure there must not rule
   // zero-copy out for the clips that start on a keyframe.
   function encodeDecodeTiers(encoder, { zeroCopy = true } = {}) {
-    if (encoder?.hardware !== true || typeof deps.decodeAccel !== 'function') return [];
+    if (encoder?.hardware !== true || encoder.remote === true || typeof deps.decodeAccel !== 'function') return [];
     return [
       ...(zeroCopy ? [{ key: `${decodeKey(encoder)}:zero-copy`, args: accelArgs(encoder, { zeroCopy: true }) }] : []),
       { key: `${decodeKey(encoder)}:gpu`, args: accelArgs(encoder) }
@@ -1139,29 +1140,45 @@ function createConverterJobService(deps) {
   }
 
   async function runChild(runtime, itemId, source, target, codec, encoder, { bitrate, quality = null, durationUs = null, laneId = null, holdFrames = 0 }, decodeAccel = null) {
-    const hwFrames = Array.isArray(decodeAccel) && decodeAccel.includes('-hwaccel_output_format');
-    const device = encoder.hardware === true ? laneDevice(encoder) : null;
-    const encodeArgs = buildEncodeArgs({
-      codec, encoder: encoder.codec, bitrate, quality, hwFrames, ...(device ? { device } : {}), ...(holdFrames > 0 ? { holdFrames } : {})
-    });
-    const args = [
-      '-nostdin', '-hide_banner', '-loglevel', 'error', '-n',
-      ...(decodeAccel || []),
-      '-i', source,
-      ...encodeArgs,
-      '-an', '-sn', '-dn',
-      '-progress', 'pipe:1', '-nostats',
-      '-f', 'mp4', target
-    ];
     let child;
-    try {
-      child = deps.spawnProcess(ffmpegPath, args, {
-        shell: false,
-        windowsHide: true,
-        stdio: ['ignore', 'pipe', 'pipe']
+    let encodeArgs = [];
+    if (encoder.remote === true) {
+      // A lane on another server (Nodes): the clip is sent there and the
+      // encoded file comes back to `target`. The returned object behaves like
+      // ffmpeg's process (progress lines on stdout, 'close', kill), so the
+      // progress, stall and cancel handling below is the same; reading,
+      // telemetry, verification and saving stay on this server.
+      try {
+        child = typeof deps.remoteEncode === 'function'
+          ? deps.remoteEncode({ device: encoder.device, source, target, codec, bitrate, quality, holdFrames, durationUs })
+          : null;
+      } catch (_) {
+        return { ok: false, code: 'encoder-start-failed' };
+      }
+    } else {
+      const hwFrames = Array.isArray(decodeAccel) && decodeAccel.includes('-hwaccel_output_format');
+      const device = encoder.hardware === true ? laneDevice(encoder) : null;
+      encodeArgs = buildEncodeArgs({
+        codec, encoder: encoder.codec, bitrate, quality, hwFrames, ...(device ? { device } : {}), ...(holdFrames > 0 ? { holdFrames } : {})
       });
-    } catch (_) {
-      return { ok: false, code: 'encoder-start-failed' };
+      const args = [
+        '-nostdin', '-hide_banner', '-loglevel', 'error', '-n',
+        ...(decodeAccel || []),
+        '-i', source,
+        ...encodeArgs,
+        '-an', '-sn', '-dn',
+        '-progress', 'pipe:1', '-nostats',
+        '-f', 'mp4', target
+      ];
+      try {
+        child = deps.spawnProcess(ffmpegPath, args, {
+          shell: false,
+          windowsHide: true,
+          stdio: ['ignore', 'pipe', 'pipe']
+        });
+      } catch (_) {
+        return { ok: false, code: 'encoder-start-failed' };
+      }
     }
     if (!child || typeof child.once !== 'function' || !child.stdout?.on || typeof child.kill !== 'function') {
       return { ok: false, code: 'encoder-start-failed' };
@@ -1175,7 +1192,9 @@ function createConverterJobService(deps) {
       encoder: encoder.codec,
       hardware: encoder.hardware === true,
       decode: Array.isArray(decodeAccel) && decodeAccel.length > 0 ? 'gpu' : 'cpu',
-      device: renderDevice([...(decodeAccel || []), ...encodeArgs]),
+      device: encoder.remote === true ? null : renderDevice([...(decodeAccel || []), ...encodeArgs]),
+      // the paired server encoding this clip (Nodes), else null
+      node: encoder.remote === true ? (encoder.device?.name || encoder.device?.id || null) : null,
       // the lane (chosen GPU) this clip runs on; null without lanes
       deviceId: laneId,
       pid: Number.isSafeInteger(child.pid) ? child.pid : null,

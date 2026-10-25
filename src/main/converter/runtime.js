@@ -559,11 +559,21 @@ async function createConverterRuntime(options = {}) {
   // One lookup at a time: callers while it runs share it, and its answer
   // is reused for DEVICE_LIST_TTL_MS after it arrives.
   let deviceList = null;
+  // Other servers paired under Nodes come after this one's own devices.
+  async function remoteNodeDevices() {
+    if (typeof options.remoteNodes?.list !== 'function') return [];
+    try {
+      const nodes = await options.remoteNodes.list();
+      return Array.isArray(nodes) ? nodes.filter((node) => node?.kind === 'node' && DEVICE_ID.test(String(node.id))) : [];
+    } catch (_) { return []; }
+  }
   async function listDevices() {
+    let local;
     try {
       const list = await discovery.list();
-      return Array.isArray(list) && list.length > 0 ? list : [CPU_DEVICE];
-    } catch (_) { return [CPU_DEVICE]; }
+      local = Array.isArray(list) && list.length > 0 ? list : [CPU_DEVICE];
+    } catch (_) { local = [CPU_DEVICE]; }
+    return [...local, ...await remoteNodeDevices()];
   }
   function lookUpDevices() {
     if (deviceList && deviceList.at === null) return deviceList.list;
@@ -679,6 +689,8 @@ async function createConverterRuntime(options = {}) {
     }),
     // A lane's GPU, from the devices this container has now.
     resolveDevice,
+    // A lane on another server (Nodes): sends the clip there to be encoded.
+    ...(typeof options.remoteNodes?.encode === 'function' ? { remoteEncode: options.remoteNodes.encode } : {}),
     // The device a job without lanes encodes on: its workers and that
     // device's lane share it while a job switches between the two.
     defaultDevice: async (codec) => defaultDeviceOf(await recentDevices(), codec),
@@ -1059,7 +1071,8 @@ async function createConverterRuntime(options = {}) {
           }
           return runs;
         };
-        const gpus = (await lookUpDevices()).filter((device) => device.kind !== 'cpu');
+        // this server's own GPUs only: a paired node is not benchmarked from here
+        const gpus = (await lookUpDevices()).filter((device) => device.kind !== 'cpu' && device.kind !== 'node');
         if (controller.signal.aborted) throw runtimeError('CANCELLED');
         if (gpus.length < 2 || typeof planner.selectFor !== 'function') {
           const runs = await runCodecs({ select: (current) => planner.select(current) });
@@ -1100,7 +1113,8 @@ async function createConverterRuntime(options = {}) {
     // already is given.
     async devices() {
       const list = await lookUpDevices();
-      if (list.filter((device) => device.kind !== 'cpu').length < 2) {
+      // one GPU and no paired node: the single number, as before lanes
+      if (list.filter((device) => device.kind !== 'cpu').length < 2 && !list.some((device) => device.kind === 'node')) {
         return { devices: list.map((device) => ({ ...device, encoders: null })), defaultDevice: null, defaultDevices: null };
       }
       const probe = !encodingNow();
@@ -1126,6 +1140,11 @@ async function createConverterRuntime(options = {}) {
       return { devices, defaultDevice: defaultDevices.h265, defaultDevices };
     },
     resolveDevice,
+    // The encoder this server uses for a codec (its default device), and the
+    // CPU encoder: a paired main server's clips are encoded with these
+    // (server/nodeWorker.js).
+    selectEncoder: (family) => planner.select(family),
+    cpuEncoder: (family) => planner.selectCpuFallback(family),
     // Every ffmpeg encoding right now, a benchmark's included (those carry
     // benchmark: true and a temporary job id).
     activeEncodes() {

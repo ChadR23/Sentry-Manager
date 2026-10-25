@@ -364,6 +364,18 @@ function createEncoderPlanner({
   async function selectFor(family, device, { probe = true } = {}) {
     requireFamily(family);
     if (!device || typeof device.id !== 'string') throw new TypeError('device is required');
+    // Another server paired under Nodes: it chose and tested its own encoder,
+    // so nothing is probed here; its clips are sent there (remote: true).
+    if (device.kind === 'node') {
+      const encoder = device.encoders?.[family];
+      // offline, or it cannot encode this codec: like a GPU that cannot, the
+      // lane's clips use this server's CPU encoder
+      if (typeof encoder !== 'string' || !encoder) {
+        const cpu = await selectCpuFallback(family);
+        return Object.freeze({ family, codec: cpu.codec, hardware: false, device: Object.freeze({ id: device.id, kind: 'node' }) });
+      }
+      return Object.freeze({ family, codec: encoder, hardware: true, remote: true, device: Object.freeze({ id: device.id, kind: 'node', name: device.name || device.id }) });
+    }
     if (device.kind === 'cpu') {
       if (!probe && !selectionCache.has(`${family}:cpu`)) return null;
       const cpu = await selectCpuFallback(family);

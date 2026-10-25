@@ -502,3 +502,6 @@ html.reduce-effects *, html.reduce-effects *::before { transition: none !importa
   .nd-range button, .nd-head-right .btn.sm, .nd-actions .btn.sm, .nd-logs-actions .btn.sm, .days-pick span { min-height: 40px; }
   .nd-more { padding: 8px 0; }
 }
+
+/* Nodes: the one-time pairing code, large enough to read across a room */
+.pair-code-value { font-size: clamp(1.25rem, 6vw, 1.9rem); white-space: nowrap; letter-spacing: 0.12em; margin: 6px 0 8px; color: var(--text); }

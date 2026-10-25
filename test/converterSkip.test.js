@@ -276,9 +276,10 @@ test('activeEncodes reports each running ffmpeg with its live numbers', { skip, 
     assert.ok(live, 'a running encode showed its progress');
     assert.deepStrictEqual(Object.keys(live).sort(), [
       'bitrateKbps', 'decode', 'device', 'deviceId', 'dropFrames', 'dupFrames', 'durationUs', 'encoder', 'fps', 'frame',
-      'hardware', 'itemId', 'jobId', 'outTimeUs', 'pid', 'relativePath', 'speed', 'totalSizeB'
+      'hardware', 'itemId', 'jobId', 'node', 'outTimeUs', 'pid', 'relativePath', 'speed', 'totalSizeB'
     ]);
     assert.strictEqual(live.deviceId, null, 'a job without lanes runs on no lane');
+    assert.strictEqual(live.node, null, 'encoded here, not on a paired node');
     const job = await env.runtime.service.get(jobId);
     assert.strictEqual(live.jobId, jobId);
     assert.strictEqual(live.itemId, job.items[0].id);

@@ -1,0 +1,361 @@
+'use strict';
+
+// Nodes, the main side: other Sentry Six Managers paired here encode clips
+// for this one. A node is a lane in the Encoder (device "node:<id>"): this
+// server reads the clip from the share, sends it over HTTPS, takes the
+// encoded file back and then writes the telemetry, verifies and saves it as
+// it does for its own GPUs. Nodes never get share passwords and never touch
+// footage.
+//
+// Every connection to a node is checked before a byte is sent: the node must
+// present the certificate it had when it was paired, or one issued by the
+// certificate authority it had then (its own, which renews the certificate).
+// Then the node's token goes along as "Authorization: Bearer".
+
+const crypto = require('crypto');
+const fs = require('fs');
+const fsp = require('fs/promises');
+const http = require('http');
+const net = require('net');
+const os = require('os');
+const tls = require('tls');
+const { EventEmitter } = require('events');
+const { pipeline } = require('stream');
+const { pairText, certFingerprint, normalizeCode, hmac, sameHex } = require('./nodeWorker');
+
+const SETTINGS_KEY = 'nodes';
+const MAX_NODES = 8;
+const INFO_TTL_MS = 30_000;
+const POLL_MS = 1000;
+const REQUEST_TIMEOUT_MS = 30_000;
+const HOST_RE = /^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/;
+
+const nodeError = (message, status = 400, code = 'NODE_ERROR') => Object.assign(new Error(message), { status, code });
+
+/** "192.168.1.20", "nas.local:9000", "[fd00::5]:9443" -> { host, port }. */
+function parseAddress(text) {
+  const value = String(text || '').trim().replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
+  let host;
+  let port = 9000;
+  const v6 = /^\[([0-9a-fA-F:.]+)\](?::(\d{1,5}))?$/.exec(value);
+  if (v6) {
+    host = v6[1];
+    if (v6[2]) port = Number(v6[2]);
+  } else {
+    const m = /^([^:]+)(?::(\d{1,5}))?$/.exec(value);
+    if (!m) return null;
+    host = m[1];
+    if (m[2]) port = Number(m[2]);
+  }
+  if (!(port >= 1 && port <= 65535)) return null;
+  if (!net.isIP(host) && !HOST_RE.test(host)) return null;
+  return { host, port };
+}
+
+/**
+ * A TLS connection that is used only if the node's certificate matches the
+ * pin: the same certificate (fingerprint), or one issued by the pinned
+ * certificate authority and valid now. With pin null (pairing), whatever is
+ * presented is accepted and reported.
+ */
+function connectPinned({ host, port, pin = null, timeoutMs = REQUEST_TIMEOUT_MS }) {
+  return new Promise((resolve, reject) => {
+    const socket = tls.connect({
+      host, port, servername: net.isIP(host) ? undefined : host,
+      rejectUnauthorized: false, ALPNProtocols: ['http/1.1'], minVersion: 'TLSv1.2'
+    });
+    const fail = (err) => {
+      socket.destroy();
+      reject(err);
+    };
+    socket.setTimeout(timeoutMs, () => fail(nodeError('The node did not answer.', 504, 'NODE_TIMEOUT')));
+    socket.once('error', (err) => reject(nodeError(`Could not reach the node (${err.code || err.message}).`, 502, 'NODE_UNREACHABLE')));
+    socket.once('secureConnect', () => {
+      const peer = socket.getPeerCertificate(true);
+      const fingerprint = certFingerprint(peer?.raw);
+      if (!fingerprint) return fail(nodeError('The node presented no certificate.', 502, 'NODE_CERT'));
+      if (pin && !pinMatches(pin, peer.raw, fingerprint)) {
+        return fail(nodeError('The node presented a different certificate than when it was paired. If you reset it, remove and pair it again.', 502, 'NODE_CERT_CHANGED'));
+      }
+      socket.setTimeout(0);
+      resolve({ socket, fingerprint, raw: peer.raw });
+    });
+  });
+}
+
+function pinMatches(pin, raw, fingerprint) {
+  if (pin.fingerprint && sameHex(pin.fingerprint, fingerprint)) return true;
+  if (!pin.authority) return false;
+  try {
+    const ca = new crypto.X509Certificate(pin.authority);
+    const leaf = new crypto.X509Certificate(raw);
+    const t = Date.now();
+    return leaf.checkIssued(ca) && leaf.verify(ca.publicKey) && Date.parse(leaf.validFrom) <= t && t <= Date.parse(leaf.validTo);
+  } catch { return false; }
+}
+
+/** One HTTP/1.1 request over a checked connection. body: Buffer, stream or null. */
+async function request(node, { method = 'GET', path, headers = {}, body = null, pin = node.pin, timeoutMs = REQUEST_TIMEOUT_MS, onResponse = null, signal = null }) {
+  if (signal?.aborted) throw nodeError('Cancelled.', 499, 'CANCELLED');
+  const { socket, fingerprint } = await connectPinned({ host: node.host, port: node.port, pin, timeoutMs });
+  return new Promise((resolve, reject) => {
+    const req = http.request({
+      // the connection checked above, never a new one (no agent: with
+      // agent: false Node would open its own)
+      createConnection: () => socket, method, path,
+      headers: {
+        Connection: 'close',
+        Host: net.isIP(node.host) === 6 ? `[${node.host}]:${node.port}` : `${node.host}:${node.port}`,
+        ...(node.token ? { Authorization: `Bearer ${node.token}` } : {}),
+        ...headers
+      }
+    });
+    const abort = () => req.destroy(nodeError('Cancelled.', 499, 'CANCELLED'));
+    signal?.addEventListener('abort', abort, { once: true });
+    req.setTimeout(timeoutMs, () => req.destroy(nodeError('The node did not answer.', 504, 'NODE_TIMEOUT')));
+    req.once('error', (err) => {
+      signal?.removeEventListener('abort', abort);
+      reject(err.status ? err : nodeError(`The node connection failed (${err.code || err.message}).`, 502, 'NODE_UNREACHABLE'));
+    });
+    req.once('response', (res) => {
+      if (onResponse && res.statusCode === 200) {
+        onResponse(res).then((value) => { signal?.removeEventListener('abort', abort); resolve({ status: 200, value, fingerprint }); },
+          (err) => { signal?.removeEventListener('abort', abort); reject(err); });
+        return;
+      }
+      const chunks = [];
+      let size = 0;
+      res.on('data', (c) => {
+        size += c.length;
+        if (size > 64 * 1024) res.destroy();
+        else chunks.push(c);
+      });
+      res.once('end', () => {
+        signal?.removeEventListener('abort', abort);
+        let json = null;
+        try { json = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { /* not JSON */ }
+        resolve({ status: res.statusCode, json, fingerprint });
+      });
+      res.once('error', (err) => reject(nodeError(`The node connection failed (${err.message}).`, 502, 'NODE_UNREACHABLE')));
+    });
+    if (body && typeof body.pipe === 'function') pipeline(body, req, (err) => { if (err) req.destroy(err); });
+    else req.end(body || undefined);
+  });
+}
+
+/**
+ * deps: { db, log, audit, name }. list() gives the nodes as converter devices;
+ * encode() is the converter's remoteEncode.
+ */
+function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL_MS }) {
+  const info = new Map(); // id -> { at, online, encoders, slots, busy, name, error }
+
+  const stored = () => (db.get(SETTINGS_KEY, []) || []).filter((n) => n && typeof n.id === 'string' && typeof n.token === 'string');
+  const save = (list) => db.set(SETTINGS_KEY, list);
+  const byId = (id) => stored().find((n) => n.id === id) || null;
+
+  async function refresh(node) {
+    try {
+      const r = await request(node, { path: '/node/v1/info', timeoutMs: 8000 });
+      if (r.status !== 200 || !r.json) throw nodeError(r.json?.error || `HTTP ${r.status}`, 502);
+      const enc = r.json.encoders || {};
+      const clean = (v) => (typeof v === 'string' && /^[a-z0-9_-]{2,32}$/.test(v) ? v : null);
+      info.set(node.id, {
+        at: Date.now(), online: true, error: null,
+        name: typeof r.json.name === 'string' ? r.json.name.slice(0, 64) : node.name,
+        encoders: { h265: clean(enc.h265), av1: clean(enc.av1) },
+        slots: Number.isSafeInteger(r.json.slots) ? r.json.slots : null,
+        busy: Number.isSafeInteger(r.json.busy) ? r.json.busy : null
+      });
+    } catch (err) {
+      info.set(node.id, { at: Date.now(), online: false, error: err.message, encoders: {}, slots: null, busy: null });
+    }
+    return info.get(node.id);
+  }
+
+  const fresh = (node) => {
+    const known = info.get(node.id);
+    if (known && Date.now() - known.at < INFO_TTL_MS) return known;
+    const pending = refresh(node);
+    return known || pending;
+  };
+
+  /** The paired nodes as encoding devices for the converter's lanes. */
+  async function list() {
+    const nodes = stored();
+    return Promise.all(nodes.map(async (node) => {
+      const i = await fresh(node);
+      return {
+        id: `node:${node.id}`, kind: 'node', name: `${node.name} (node)`,
+        node: null, index: null, pci: null,
+        online: i.online === true, encoders: i.online ? i.encoders : { h265: null, av1: null }
+      };
+    }));
+  }
+
+  /** What the Nodes page shows. */
+  async function overview() {
+    const nodes = stored();
+    await Promise.all(nodes.map((node) => refresh(node)));
+    return nodes.map((node) => {
+      const i = info.get(node.id) || {};
+      return {
+        id: node.id, name: node.name, address: node.port === 9000 ? node.host : `${node.host}:${node.port}`,
+        pairedAt: node.pairedAt, online: i.online === true, error: i.online ? null : i.error || null,
+        encoders: i.encoders || {}, slots: i.slots ?? null, busy: i.busy ?? null,
+        fingerprint: node.pin?.fingerprint || null
+      };
+    });
+  }
+
+  /** Pairs with a node that is showing a pairing code. */
+  async function add({ address, code }) {
+    const target = parseAddress(address);
+    if (!target) throw nodeError('Enter the node\'s address, like 192.168.1.30 or nas.local:9000.');
+    const key = normalizeCode(code);
+    if (key.length !== 12) throw nodeError('Enter the 12-character pairing code shown on the node.');
+    const nodes = stored();
+    if (nodes.length >= MAX_NODES) throw nodeError(`At most ${MAX_NODES} nodes.`);
+    if (nodes.some((n) => n.host === target.host && n.port === target.port)) throw nodeError('That node is already paired.');
+    // pairing: no pin yet; the code proves both sides saw the same certificate
+    const draft = { ...target, token: null };
+    const probe = await connectPinned({ ...target, pin: null, timeoutMs: 10_000 });
+    probe.socket.destroy();
+    const proof = hmac(key, pairText.main(probe.fingerprint, name.slice(0, 64)));
+    const r = await request(draft, {
+      method: 'POST', path: '/node/v1/pair', pin: { fingerprint: probe.fingerprint },
+      headers: { 'Content-Type': 'application/json' }, body: Buffer.from(JSON.stringify({ name: name.slice(0, 64), proof })),
+      timeoutMs: 15_000
+    });
+    if (r.status === 404) throw nodeError('That server is not set up as a node: on its Nodes page, show a pairing code first.', 409);
+    if (r.status !== 200) throw nodeError(r.json?.error || `The node refused (${r.status}).`, r.status === 403 ? 403 : 502);
+    const token = r.json?.token;
+    if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(token) || !sameHex(r.json.proof, hmac(key, pairText.worker(probe.fingerprint, token)))) {
+      throw nodeError('The node\'s answer could not be verified, so it was not paired.', 502);
+    }
+    // its certificate authority, when it has one and it issued the certificate
+    // seen now: certificates it renews later are then accepted too
+    let authority = null;
+    if (typeof r.json.authority === 'string' && r.json.authority.length < 16_384) {
+      try {
+        const ca = new crypto.X509Certificate(r.json.authority);
+        const leaf = new crypto.X509Certificate(probe.raw);
+        if (ca.ca && leaf.checkIssued(ca) && leaf.verify(ca.publicKey)) authority = ca.toString();
+      } catch { /* pinned by fingerprint only */ }
+    }
+    const node = {
+      id: crypto.randomBytes(9).toString('base64url').toLowerCase().replace(/[^a-z0-9]/g, '').padEnd(12, '0').slice(0, 12),
+      name: typeof r.json.name === 'string' && r.json.name.trim() ? r.json.name.trim().slice(0, 64) : target.host,
+      host: target.host, port: target.port, token,
+      pin: { fingerprint: probe.fingerprint, authority },
+      pairedAt: Date.now()
+    };
+    save([...stored(), node]);
+    await refresh(node);
+    return node;
+  }
+
+  function remove(id) {
+    const node = byId(id);
+    if (!node) return null;
+    save(stored().filter((n) => n.id !== id));
+    info.delete(id);
+    return node;
+  }
+
+  /**
+   * The converter's remoteEncode: sends `source` to the node, follows its
+   * progress and writes the encoded file to `target` (created new, like
+   * ffmpeg's -n). Returns an object that behaves like ffmpeg's process.
+   */
+  function encode({ device, source, target, codec, bitrate, quality, holdFrames = 0, durationUs = null }) {
+    const id = String(device?.id || '').replace(/^node:/, '');
+    const node = byId(id);
+    if (!node) throw nodeError('No such node.', 404);
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.pid = undefined;
+    const controller = new AbortController();
+    let jobId = null;
+    let closed = false;
+    const close = (code, signal = null) => {
+      if (closed) return;
+      closed = true;
+      setImmediate(() => child.emit('close', code, signal));
+    };
+    // the node deletes the clip and its encoded file
+    const forget = () => {
+      if (!jobId) return Promise.resolve();
+      const id = jobId;
+      jobId = null;
+      return request(node, { method: 'DELETE', path: `/node/v1/jobs/${id}`, timeoutMs: 10_000 }).catch(() => {});
+    };
+    child.kill = (signal = 'SIGTERM') => {
+      controller.abort();
+      forget();
+      close(null, signal);
+      return true;
+    };
+
+    (async () => {
+      const { size } = await fsp.stat(source);
+      const settings = { codec, holdFrames, ...(quality ? { quality } : { bitrate }), ...(durationUs ? { durationUs } : {}) };
+      const sent = await request(node, {
+        method: 'POST', path: '/node/v1/jobs', signal: controller.signal, timeoutMs: 10 * 60_000,
+        headers: { 'Content-Type': 'video/mp4', 'Content-Length': size, 'X-Node-Job': JSON.stringify(settings) },
+        body: fs.createReadStream(source)
+      });
+      if (sent.status !== 200 || !/^[0-9a-f]{32}$/.test(sent.json?.id || '')) throw nodeError(sent.json?.error || `The node refused the clip (${sent.status}).`, 502);
+      jobId = sent.json.id;
+      for (;;) {
+        await new Promise((r) => setTimeout(r, pollMs));
+        if (controller.signal.aborted) return;
+        const s = await request(node, { path: `/node/v1/jobs/${jobId}`, signal: controller.signal, timeoutMs: 15_000 });
+        if (s.status !== 200 || !s.json) throw nodeError(s.json?.error || `The node lost the clip (${s.status}).`, 502);
+        const lines = [];
+        if (Number.isSafeInteger(s.json.outTimeUs)) lines.push(`out_time_us=${s.json.outTimeUs}`);
+        if (Number.isFinite(s.json.fps)) lines.push(`fps=${s.json.fps}`);
+        if (Number.isFinite(s.json.speed)) lines.push(`speed=${s.json.speed}x`);
+        lines.push(`progress=${s.json.state === 'done' ? 'end' : 'continue'}`);
+        child.stdout.emit('data', `${lines.join('\n')}\n`);
+        if (s.json.state === 'failed') throw nodeError('The node could not encode the clip.', 502);
+        if (s.json.state === 'done') break;
+      }
+      // the encoded file, written new (never over an existing file)
+      await request(node, {
+        path: `/node/v1/jobs/${jobId}/output`, signal: controller.signal, timeoutMs: 10 * 60_000,
+        onResponse: (res) => new Promise((resolve, reject) => {
+          const expected = Number(res.headers['content-length']);
+          // a node cannot fill this server's disk: an encode is never
+          // allowed past twice the original (it must come out smaller anyway)
+          const limit = size * 2 + 1024 * 1024;
+          if (Number.isSafeInteger(expected) && expected > limit) return reject(nodeError('The node sent back a file far larger than the clip.', 502));
+          let written = 0;
+          res.on('data', (c) => {
+            written += c.length;
+            if (written > limit) res.destroy(nodeError('The node sent back a file far larger than the clip.', 502));
+          });
+          const out = fs.createWriteStream(target, { flags: 'wx', mode: 0o600 });
+          pipeline(res, out, (err) => {
+            if (err) return reject(err);
+            if (Number.isSafeInteger(expected) && written !== expected) return reject(nodeError('The encoded file did not arrive whole.', 502));
+            resolve(written);
+          });
+        })
+      });
+      await forget();
+      close(0);
+    })().catch((err) => {
+      if (closed) return;
+      if (err?.code !== 'CANCELLED') log.warn(`Node ${node.name}: ${err.message}`);
+      forget();
+      close(1);
+    });
+    return child;
+  }
+
+  return { list, overview, add, remove, encode, refresh: (id) => (byId(id) ? refresh(byId(id)) : null) };
+}
+
+module.exports = { createNodes, parseAddress, connectPinned, pinMatches };

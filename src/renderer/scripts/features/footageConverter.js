@@ -694,6 +694,12 @@ function createFootageConverterController(options = {}) {
 
     function encoderSummary(device) {
         if (device.kind === 'cpu') return message('laneCpuHint', "Uses the server's CPU cores; slower than a GPU");
+        if (device.kind === 'node') {
+            const encoders = Object.keys(CODEC_LABELS).map((codec) => [codec, deviceEncoder(device, codec)])
+                .filter(([, encoder]) => typeof encoder === 'string' && encoder)
+                .map(([codec, encoder]) => `${CODEC_LABELS[codec]}: ${encoder}`).join(' · ');
+            return message('laneNodeHint', 'Another server (Nodes), clips sent over HTTPS · {encoders}', { encoders });
+        }
         return Object.keys(CODEC_LABELS).map((codec) => [codec, deviceEncoder(device, codec)])
             .filter(([, encoder]) => typeof encoder === 'string' && encoder)
             .map(([codec, encoder]) => `${CODEC_LABELS[codec]}: ${encoder}`).join(' · ');
@@ -709,8 +715,10 @@ function createFootageConverterController(options = {}) {
             const supported = laneSupported(device);
             const count = laneCount(device);
             setText(parts.output, count === 0 ? message('laneOff', 'Off') : String(count));
-            setText(parts.note, supported ? encoderSummary(device)
-                : message('laneCantEncode', "Can't encode {codec}", { codec: CODEC_LABELS[codec] || codec }));
+            setText(parts.note, device.kind === 'node' && device.online === false
+                ? message('laneNodeOffline', 'Offline: check it under Nodes')
+                : supported ? encoderSummary(device)
+                    : message('laneCantEncode', "Can't encode {codec}", { codec: CODEC_LABELS[codec] || codec }));
             parts.row.classList?.toggle('is-off', count === 0);
             parts.row.classList?.toggle('is-unsupported', !supported);
             // the total never drops to nothing or goes past the limit
@@ -841,7 +849,8 @@ function createFootageConverterController(options = {}) {
             .filter((device) => device && typeof device.id === 'string' && device.id)
             .map((device) => ({ ...device, name: typeof device.name === 'string' && device.name.trim() ? device.name.trim() : device.id }));
         const gpus = listed.filter((device) => device.kind !== 'cpu' && device.id !== 'cpu');
-        if (gpus.length < 2) return;
+        // two GPUs, or another server paired under Nodes
+        if (gpus.length < 2 && !gpus.some((device) => device.kind === 'node')) return;
         // the CPU row is always there, last
         const cpu = listed.find((device) => device.id === 'cpu') || { id: 'cpu', kind: 'cpu', name: 'CPU (software encoder)', encoders: {} };
         const devices = [...gpus, cpu];

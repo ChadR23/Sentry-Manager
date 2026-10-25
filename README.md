@@ -261,6 +261,50 @@ Several CPUs: on a server with two or more CPU sockets, **Overview → Server**
 shows "2 × <CPU model>" and each socket's use, temperature and package power
 (CPU 1, CPU 2, …); the CPU temperature is the hottest socket.
 
+### Nodes: other servers that encode
+
+Another computer running Sentry Six Manager (a gaming PC with a better GPU,
+say) can encode clips for this one. It becomes one more row under
+**Parallel conversions**, next to this server's GPUs and CPU.
+
+1. On the other computer, open **Nodes → Let another server use this one →
+   Show pairing code** (asks for its password). The code works once, for 10
+   minutes.
+2. Here, open **Nodes → Add node** and enter that computer's address and the
+   code (asks for this server's password).
+3. Under **Encoder → Parallel conversions**, set how many clips the node
+   converts at once.
+
+This server reads each clip from the share, sends it to the node over HTTPS,
+gets the encoded file back, and then writes the telemetry, verifies it and
+saves it exactly as it does for its own GPUs. If a node is offline or fails
+a clip, that clip is encoded here on the CPU instead.
+
+Security:
+
+- **Nodes never touch your footage.** They get one clip at a time and send
+  one file back. They never see share passwords and cannot delete or replace
+  anything; only this server writes to the share.
+- **Pairing can't be intercepted.** Each side proves it knows the code with
+  a signature over the certificate it actually saw, so a machine in between
+  cannot pair, and five wrong codes end the pairing.
+- **Pinned certificates.** From then on this server only talks to the node's
+  own certificate, or one renewed by the node's own certificate authority.
+  Anything else is refused before a byte is sent. A node that was reset has
+  to be paired again.
+- **Tokens, not passwords.** Every request carries a random token. The node
+  keeps only its hash, and **Revoke** on the node (or **Remove** here) ends
+  it at once.
+- **Fixed settings only.** A node accepts the codec, a bitrate or quality
+  level and nothing else. It builds its own ffmpeg command and runs it as
+  its unprivileged app user.
+- **Nothing is trusted on the way back.** An encoded file is verified here
+  like any other (frames, timing, telemetry) before an original is replaced,
+  and a node can never send back more than twice the clip's size.
+
+A node needs its own HTTPS (the default; not `TLS_MODE=off`). It uses the
+same port as its web page, so there is nothing to add to `docker-compose.yml`.
+
 ## Recycle Bin and policies
 
 ![Recycle Bin](docs/images/recycle-bin.png)

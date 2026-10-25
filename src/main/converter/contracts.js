@@ -90,8 +90,9 @@ function isValidConcurrency(value) {
 // Conversions at once per encoding device (several GPUs, set by hand per GPU):
 // `lanes` = [{ device, concurrency }]. A device is named by its PCI slot,
 // which stays the same when the kernel numbers the render nodes differently,
-// or 'cpu' for the software encoder. A job without lanes runs as before.
-const DEVICE_ID = /^(pci:[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]|cpu)$/;
+// 'cpu' for the software encoder, or 'node:<id>' for another server paired
+// under Nodes (its encodes run there). A job without lanes runs as before.
+const DEVICE_ID = /^(pci:[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]|cpu|node:[a-z0-9]{12})$/;
 const LANES = deepFreeze({ maxEntries: 16 });
 
 function lanesError() {

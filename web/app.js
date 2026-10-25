@@ -1640,18 +1640,105 @@
     }
   };
 
-  // Multi-node is not built yet: this server is the only node. The page is
-  // here so the place for it exists; nothing is set up or sent anywhere.
+  // Nodes: other servers running Sentry Six Manager encode clips for this one
+  // (server/nodes.js), and this one can encode for another (server/nodeWorker.js).
+  // Clips go over HTTPS to the paired certificate only; nodes never get share
+  // passwords and never touch footage.
   pages.nodes = async () => {
-    page.innerHTML = head('Your servers', 'Nodes', `<button class="btn" disabled title="Coming soon">${icon('plus')} Add node</button>`) + `
-      <div class="note green" style="margin:0 0 20px">Multi-node support is coming. Later you will be able to add other servers running Sentry Six Manager here and see their status, hardware and conversions in one place. Nothing changes yet: this server keeps working on its own.</div>
-      <div class="card"><h2>Nodes</h2>
-        <table class="table" style="margin-top:12px"><thead><tr><th>Node</th><th>Role</th><th>Status</th></tr></thead><tbody>
-          <tr><td><b>This server</b><br><span class="muted small">${esc(location.host)}</span></td><td class="small">Main</td>
-            <td><span class="chip green"><span class="dot ok"></span>Online</span></td></tr>
-        </tbody></table>
-        <p class="muted small" style="margin-top:14px">Add node: coming soon.</p>
+    const seq = renderSeq;
+    const { nodes, worker } = await api('/api/nodes');
+    if (seq !== renderSeq) return;
+    const encodersText = (e) => [['H.265', e?.h265], ['AV1', e?.av1]].filter(([, v]) => v).map(([k, v]) => `${k}: ${esc(v)}`).join(' · ') || '—';
+    const nodeRows = nodes.map((n) => `<tr>
+        <td class="words"><b>${esc(n.name)}</b><br><span class="muted small mono">${esc(n.address)}</span></td>
+        <td>${n.online ? '<span class="chip green"><span class="dot ok"></span>Online</span>' : `<span class="chip red"><span class="dot bad"></span>Offline</span><br><span class="muted small words">${esc(n.error || '')}</span>`}</td>
+        <td class="small">${encodersText(n.encoders)}</td>
+        <td class="small">${n.online && n.slots ? `${n.busy ?? 0} of ${n.slots} busy` : '—'}</td>
+        <td class="actions"><button class="btn sm" data-remove-node="${esc(n.id)}">Remove</button></td></tr>`).join('');
+    const pairing = worker.pairing;
+    const mins = pairing ? Math.max(1, Math.round((pairing.expiresAt - Date.now()) / 60000)) : 0;
+    const mainRows = worker.mains.map((m) => `<tr>
+        <td class="words"><b>${esc(m.name)}</b><br><span class="muted small mono">${esc(m.address || '')}</span></td>
+        <td class="small">Paired ${when(m.pairedAt)}${m.lastSeenAt ? `<br><span class="muted">last seen ${when(m.lastSeenAt)}</span>` : ''}</td>
+        <td class="actions"><button class="btn sm" data-revoke-main="${esc(m.id)}">Revoke</button></td></tr>`).join('');
+
+    page.innerHTML = head('Your servers', 'Nodes') + `
+      <div class="card"><h2>Nodes this server uses</h2>
+        <p class="muted" style="margin-top:6px">Other servers running Sentry Six Manager can encode clips for this one. This server reads each clip, sends it to the node over HTTPS and checks the encoded file before it saves anything, as with its own GPUs. Nodes never get your share passwords and never touch the footage.</p>
+        ${nodes.length ? `<table class="table" style="margin-top:14px"><thead><tr><th>Node</th><th>Status</th><th>Encoders</th><th>Clips</th><th></th></tr></thead><tbody>${nodeRows}</tbody></table>
+          <p class="muted small" style="margin-top:10px">Each node is a row under <a href="#/encoder">Encoder</a> → Parallel conversions: set how many clips it converts at once there.</p>` : '<p style="margin-top:12px">No nodes yet.</p>'}
+        <form id="node-add" class="form" style="margin-top:18px">
+          <label class="field">Node address<input class="input" name="address" placeholder="192.168.1.30 or nas.local:9000" autocomplete="off" required></label>
+          <label class="field">Pairing code<input class="input mono" name="code" placeholder="ABCD-EFGH-JKLM" autocomplete="off" required></label>
+          <div class="full form-actions" style="margin-top:0"><button class="btn solid" type="submit">${icon('plus')} Add node</button></div>
+        </form>
+        <p class="muted small">On the other server, open Nodes → Let another server use this one → Show pairing code.</p>
+      </div>
+
+      <div class="card" style="margin-top:20px"><h2>Let another server use this one</h2>
+        ${worker.available ? `
+        <p class="muted" style="margin-top:6px">A main server you pair here sends this one clips to encode and takes the encoded files back. It can do nothing else here: no footage, settings or passwords.</p>
+        <div class="form" style="margin-top:14px">
+          <label class="check"><input type="checkbox" id="worker-on"${worker.enabled ? ' checked' : ''}> Encode for paired main servers</label>
+          <label class="field">Clips at once<select class="input" id="worker-slots">${[1, 2, 3, 4, 6, 8].map((n) => `<option${n === worker.slots ? ' selected' : ''}>${n}</option>`).join('')}</select></label>
+        </div>
+        ${pairing ? `<div class="note green pair-code" style="margin-top:14px">
+            <div class="muted small">Pairing code (one use, ${plural(mins, 'minute')} left)</div>
+            <div class="mono pair-code-value">${esc(pairing.code)}</div>
+            <div class="small">On the main server: Nodes → Add node, with this server's address <b class="mono">${esc(location.hostname)}${location.port && location.port !== '9000' ? `:${esc(location.port)}` : ''}</b> and the code.</div>
+            <button class="btn sm" id="pair-cancel" style="margin-top:10px">Cancel</button></div>`
+          : '<div class="form-actions" style="margin-top:14px"><button class="btn" id="pair-start">Show pairing code</button></div>'}
+        ${worker.mains.length ? `<table class="table" style="margin-top:16px"><thead><tr><th>Main server</th><th>Paired</th><th></th></tr></thead><tbody>${mainRows}</tbody></table>` : ''}
+        ` : '<p class="muted" style="margin-top:6px">This server runs without its own HTTPS (TLS_MODE=off), so it cannot be a node: a main server must be able to check its certificate.</p>'}
       </div>`;
+
+    $('node-add').onsubmit = async (e) => {
+      e.preventDefault();
+      const f = new FormData(e.target);
+      const btn = e.target.querySelector('button[type=submit]');
+      btn.disabled = true;
+      try {
+        await api('/api/nodes', { body: { address: f.get('address'), code: f.get('code') } });
+        toast('Node paired. Set its clips under Encoder → Parallel conversions.');
+        render();
+      } catch (err) {
+        toast(err.message, true);
+        btn.disabled = false;
+      }
+    };
+    page.querySelectorAll('[data-remove-node]').forEach((b) => {
+      b.onclick = async () => {
+        const n = nodes.find((x) => x.id === b.dataset.removeNode);
+        if (!(await confirmDialog({ title: 'Remove this node?', body: `<p><b>${esc(n?.name || '')}</b> gets no more clips from this server. To use it again, pair it again with a new code.</p>`, ok: 'Remove' }))) return;
+        await api(`/api/nodes/${encodeURIComponent(b.dataset.removeNode)}`, { method: 'DELETE' }).catch((err) => toast(err.message, true));
+        render();
+      };
+    });
+    if (!worker.available) return;
+    const saveWorker = async () => {
+      try {
+        await api('/api/nodes/worker', { body: { enabled: $('worker-on').checked, slots: Number($('worker-slots').value) } });
+      } catch (err) { toast(err.message, true); }
+      render();
+    };
+    $('worker-on').onchange = saveWorker;
+    $('worker-slots').onchange = saveWorker;
+    if ($('pair-start')) $('pair-start').onclick = async () => {
+      try { await api('/api/nodes/worker/pair', { body: {} }); } catch (err) { toast(err.message, true); }
+      render();
+    };
+    if ($('pair-cancel')) $('pair-cancel').onclick = async () => {
+      await api('/api/nodes/worker/pair', { method: 'DELETE' }).catch(() => {});
+      render();
+    };
+    page.querySelectorAll('[data-revoke-main]').forEach((b) => {
+      b.onclick = async () => {
+        const m = worker.mains.find((x) => x.id === b.dataset.revokeMain);
+        if (!(await confirmDialog({ title: 'Revoke this main server?', body: `<p><b>${esc(m?.name || '')}</b> can no longer send clips here. Clips it is converting now stop.</p>`, ok: 'Revoke', danger: true }))) return;
+        await api(`/api/nodes/worker/mains/${encodeURIComponent(b.dataset.revokeMain)}`, { method: 'DELETE' }).catch((err) => toast(err.message, true));
+        render();
+      };
+    });
   };
 
   pages.notifications = async () => {

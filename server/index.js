@@ -24,6 +24,7 @@ const fs = require('fs');
 const http = require('http');
 const http2 = require('http2');
 const net = require('net');
+const os = require('os');
 const path = require('path');
 const zlib = require('zlib');
 const { spawn } = require('child_process');
@@ -50,6 +51,8 @@ const { createLocalMounter, createIpcMounter } = require('./mounter');
 const { VERSIONS, DEFAULT_VERSION, securitySummary } = require('./mountSpec');
 const { TlsManager, localTlsSource, supervisorTlsSource, parseHostnames } = require('./tls');
 const { Router, HttpError, sendJson, readJson, readRaw, serveFile } = require('./http');
+const { createNodes } = require('./nodes');
+const { createNodeWorker } = require('./nodeWorker');
 const { Telemetry } = require('./telemetry');
 
 const APP_ROOT = path.resolve(process.env.APP_ROOT || path.join(__dirname, '..'));
@@ -274,7 +277,10 @@ async function main() {
   let statsJob = null;
   const policies = new Policies({ db, vehicles, inventory, bin, log: logger.scope('policies') });
 
+  // Nodes: other servers that encode for this one (server/nodes.js)
+  const nodes = createNodes({ db, log: logger.scope('nodes'), audit: logger.scope('audit') });
   const host = createConverterHost({
+    remoteNodes: { list: () => nodes.list(), encode: (request) => nodes.encode(request) },
     dataDir: path.join(DATA, 'converter'),
     tempDir: path.join(DATA, 'converter-temp'),
     ffmpegPath: FFMPEG,
@@ -326,6 +332,15 @@ async function main() {
       dir: path.join(DATA, 'tls'), log: logger.scope('tls'), hostnames: parseHostnames(process.env.TLS_HOSTNAMES || ''),
       certFile: process.env.TLS_CERT_FILE || null, keyFile: process.env.TLS_KEY_FILE || null
     }));
+
+  // Nodes, the other way: a main server's clips encoded here (server/nodeWorker.js).
+  // Needs this server's own HTTPS: the main pins its certificate.
+  const nodeWorker = createNodeWorker({
+    db, log: logger.scope('nodes'), audit: logger.scope('audit'),
+    authority: () => tlsSource?.caPem() || null,
+    workDir: path.join(DATA, 'node-work'), ffmpegPath: FFMPEG,
+    runtime: () => host.runtime
+  });
 
   // ---- live events to the browser
   const clients = new Set();
@@ -559,6 +574,49 @@ async function main() {
   });
 
   r.add('GET', '/api/vehicles', () => ({ vehicles: vehicles.list().map(vehicleSummary) }));
+  // ---- Nodes (server/nodes.js, server/nodeWorker.js)
+  r.add('GET', '/api/nodes', async () => ({
+    nodes: await nodes.overview(),
+    worker: { ...nodeWorker.status(), available: Boolean(tlsSource), name: os.hostname() }
+  }));
+  r.add('POST', '/api/nodes', async (req, res, { body, user }) => {
+    // it will be sent footage: like adding a vehicle, the password again
+    requireConfirmed(req);
+    try {
+      const node = await nodes.add({ address: body?.address, code: body?.code });
+      audit.info(`Node "${node.name}" paired at ${node.host}:${node.port}: ${by(req, user)}`);
+      return { ok: true, id: node.id };
+    } catch (err) {
+      throw new HttpError(err.status && err.status < 500 ? err.status : 502, err.message);
+    }
+  });
+  r.add('DELETE', '/api/nodes/:id', (req, res, { params, user }) => {
+    const node = nodes.remove(params.id);
+    if (!node) throw new HttpError(404, 'No such node.');
+    audit.info(`Node "${node.name}" removed: ${by(req, user)}`);
+    return { ok: true };
+  });
+  r.add('POST', '/api/nodes/worker', (req, res, { body, user }) => {
+    if (!tlsSource) throw new HttpError(409, 'This server runs without its own HTTPS (TLS_MODE=off), so it cannot be a node.');
+    const status = nodeWorker.setEnabled(body?.enabled === true, body?.slots);
+    audit.info(`Node mode ${status.enabled ? 'on' : 'off'} (${status.slots} clips at once): ${by(req, user)}`);
+    return status;
+  });
+  r.add('POST', '/api/nodes/worker/pair', (req, res, { user }) => {
+    if (!tlsSource) throw new HttpError(409, 'This server runs without its own HTTPS (TLS_MODE=off), so it cannot be a node.');
+    // the code lets another server send this one work: the password again
+    requireConfirmed(req);
+    audit.info(`Node pairing code shown: ${by(req, user)}`);
+    return nodeWorker.startPairing();
+  });
+  r.add('DELETE', '/api/nodes/worker/pair', () => nodeWorker.cancelPairing());
+  r.add('DELETE', '/api/nodes/worker/mains/:id', (req, res, { params, user }) => {
+    const main = nodeWorker.revoke(params.id);
+    if (!main) throw new HttpError(404, 'No such main server.');
+    audit.info(`Main server "${main.name}" can no longer use this node: ${by(req, user)}`);
+    return nodeWorker.status();
+  });
+
   r.add('POST', '/api/vehicles', (req, res, { body, user }) => {
     requireConfirmed(req);
     const v = vehicles.add(body || {});
@@ -990,6 +1048,12 @@ async function main() {
         res.writeHead(200, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store', 'Cross-Origin-Resource-Policy': 'cross-origin' });
         return res.end('ok');
       }
+      // Nodes: a paired main server's requests, by token over HTTPS only (no
+      // cookies, so the host-name and same-origin checks below do not apply)
+      if (rawPath.startsWith('/node/v1/')) {
+        if (tlsSource && await nodeWorker.handle(req, res, rawPath, clientKey(req))) return undefined;
+        return sendJson(res, 404, { error: 'Not found' });
+      }
       const reqHost = cleanHost(req);
       if (!reqHost) return sendJson(res, 421, { error: 'Unknown host name.' });
       // one decoded, normalized path for every static decision: no %2F tricks
@@ -1300,6 +1364,7 @@ async function main() {
     for (const res of clients) res.end();
     for (const s of servers) s.close();
     try { stats.stop(); } catch { /* history is saved on a best-effort basis */ }
+    nodeWorker.close();
     await host.stop().catch(() => {});
     await vehicles.stopAll();
     db.close();
