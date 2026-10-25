@@ -252,7 +252,7 @@ function createStats(options = {}) {
       processes: { scope: 'container', top: [] },
       alerts: [],
       unlock: [],
-      sparks: { cpu: [], gpuVideo: [], gpuBusy: [], rxBps: [] }
+      sparks: { cpu: [], gpuVideo: [], gpuBusy: [], rxBps: [], txBps: [] }
     };
   }
 
@@ -304,7 +304,7 @@ function createStats(options = {}) {
       processes: { scope: procs.scope, top: guard('top', () => topProcesses(encoders), []) },
       alerts: [],
       unlock: [],
-      sparks: { cpu: [], gpuVideo: [], gpuBusy: [], rxBps: [] }
+      sparks: { cpu: [], gpuVideo: [], gpuBusy: [], rxBps: [], txBps: [] }
     };
     const memPct = memory.totalB ? (memory.usedB / memory.totalB) * 100 : null;
     const values = {

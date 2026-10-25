@@ -326,3 +326,45 @@ test('clips waiting in a node\'s queue are reported apart from the clips convert
     await h.close();
   }
 });
+
+test('a node set to Off in a vehicle\'s Encoder rows stays off for it, even with that vehicle first on its list', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sm-node-off-'));
+  try {
+    const service = fakeService();
+    const scanner = async function* () {
+      for (let n = 0; n < 5; n++) yield { relativePath: `RecentClips/${n}.mp4`, sourceBytes: 1, mtimeMs: 1 };
+    };
+    const auto = createAutoConverter({
+      service, scanner, fs: fs.promises, directory: dir, timers: { setInterval: () => null, clearInterval: () => {} },
+      devices: async () => devices, nodePriorities: async () => ({ [N2]: ['/cars/chad'] })
+    });
+    const shared = { intervalMinutes: 60, window: null, holdManual: false, keepRunning: false, openAtLogin: false };
+    await auto.configure({ ...shared, enabled: true, config: car('chad', [{ device: GPU, concurrency: 2 }, { device: N2, concurrency: 2 }]) });
+    await auto.tick();
+    assert.deepEqual(service.log.at(-1), ['start', 'chad', [GPU, N2]]);
+
+    // the owner turns the node's row to Off during the run
+    await service.setLanes('job-1', [{ device: GPU, concurrency: 2 }]);
+    await auto.setLanes([{ device: GPU, concurrency: 2 }], '/cars/chad');
+    assert.deepEqual(auto.getState().settings.configs[0].nodesOff, [N2, N3]);
+    for (let i = 0; i < 3; i++) await auto.tick();
+    assert.deepEqual(service.jobs.get('job-1').config.lanes, [{ device: GPU, concurrency: 2 }], 'not put back');
+    assert.equal(service.log.filter(([k, , lanes]) => k === 'lanes' && lanes.includes(N2)).length, 0);
+
+    // and back on: it helps again, and the Off is forgotten
+    await auto.setLanes([{ device: GPU, concurrency: 2 }, { device: N2, concurrency: 1 }], '/cars/chad');
+    assert.deepEqual(auto.getState().settings.configs[0].nodesOff, [N3]);
+    await auto.tick();
+    assert.deepEqual(service.jobs.get('job-1').config.lanes.map((l) => l.device), [GPU, N2]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('planning: a node is not given to a vehicle that set it to Off, but still helps the others', () => {
+  const a = { ...car('a', [{ device: GPU, concurrency: 2 }]), nodesOff: [N2] };
+  const b = car('b', [{ device: N2, concurrency: 1 }]);
+  const plan = planLanes({ cars: [a, b], wanting: new Set(['/cars/a', '/cars/b']), localHolder: '/cars/a', devices, priorities: { [N2]: ['/cars/a', '/cars/b'] } });
+  assert.deepEqual(plan.get('/cars/a'), [{ device: GPU, concurrency: 2 }]);
+  assert.deepEqual(plan.get('/cars/b'), [{ device: N2, concurrency: 1 }]);
+});

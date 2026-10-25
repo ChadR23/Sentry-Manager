@@ -51,7 +51,7 @@ test('Overview: an Intel + Arc server mid-conversion shows every tile, like the 
   assert.match(html, /112 of 476 GB/);
   assert.match(html, /6\.1 of 8 TB/);
   assert.match(html, /<span class="nd-warn">71 °C<\/span>/, 'the hot NVMe disk');
-  assert.match(html, /↓ 112 MB\/s/);
+  assert.match(html, /↓<\/span> 112 MB\/s/);
   assert.match(html, /<dt>Core max<\/dt><dd>63 °C<\/dd>/, 'six cores, one row');
   assert.match(html, /<dt>Fan 1<\/dt><dd>1,180 rpm<\/dd>/);
   assert.match(html, /ffmpeg · hevc_vaapi ×4/, 'the same program is one row');
@@ -353,6 +353,21 @@ test('Overview: the 24 h graphs come from history, with gaps where the server wa
   const flat = spark([1, 2, 1, 2], 'x', 10);
   const ys = [...flat.matchAll(/,(\d+(?:\.\d+)?)/g)].map((m) => Number(m[1])).filter((y) => y < 40);
   assert.ok(Math.min(...ys) > 25, 'low values stay low');
+});
+
+test('Overview: the Network graph shows download in blue and upload in purple, on one scale', () => {
+  const { serverBody, spark } = overview();
+  const s = sample();
+  const html = serverBody({ ...s, sparks: { ...s.sparks, rxBps: [1e6, 2e6, 1e6], txBps: [4e6, 5e6, 4e6] } });
+  const net = html.slice(html.indexOf('<span>Network</span>'));
+  assert.match(net, /<span class="nd-down">↓<\/span>/);
+  assert.match(net, /<span class="nd-up">↑ [^<]+<\/span>/);
+  assert.match(net, /stroke="var\(--info\)"/);
+  assert.match(net, /stroke="var\(--upload\)"/);
+  // one scale: the bigger upload sits higher than the download under it
+  const both = spark([1e6, 1e6], 'a', 1, [[[4e6, 4e6], 'b']]);
+  const y = (c) => Number(both.match(new RegExp(`points="0\\.0,([\\d.]+)[^"]*" fill="none" stroke="${c}"`))[1]);
+  assert.ok(y('b') < y('a'), 'upload above download');
 });
 
 // a vehicle as GET /api/vehicles describes it

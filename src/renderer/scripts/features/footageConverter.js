@@ -1044,7 +1044,7 @@ function createFootageConverterController(options = {}) {
             ? statusLabel ? message(...statusLabel) : message('statusReady', 'Converter ready')
             : message('ready', 'Ready to configure'));
         // clips sent ahead to a node wait there: counted apart, not as converting
-        const waitingOnNode = active && Number.isSafeInteger(progress?.waitingOnNode) ? progress.waitingOnNode : 0;
+        const waitingOnNode = active && snapshot?.id && nodeWaiting.jobId === snapshot.id ? nodeWaiting.count : 0;
         const inFlight = snapshot?.itemStateCounts?.active ?? items.filter((item) => item.state === 'processing').length;
         const converting = Math.max(0, inFlight - waitingOnNode);
         setText(elements.currentFile, active && converting > 1
@@ -1124,6 +1124,9 @@ function createFootageConverterController(options = {}) {
     }
 
     let lastFps = null;
+    // clips waiting in a node's queue: sent with live progress only, kept
+    // across the job's full updates (which carry no progress) until it changes
+    let nodeWaiting = { jobId: null, count: 0 };
     let benchmarkRunning = false;
     let benchmarkBest = null;
 
@@ -1538,6 +1541,7 @@ function createFootageConverterController(options = {}) {
         if (!next || !Number.isSafeInteger(revision) || revision < latestRevision) return false;
         const progressOnly = Object.keys(next).every((key) => ['id', 'revision', 'progress'].includes(key));
         if (Number.isFinite(next.progress?.fps)) lastFps = { value: next.progress.fps, at: Date.now() };
+        if (Number.isSafeInteger(next.progress?.waitingOnNode)) nodeWaiting = { jobId: next.id ?? snapshot?.id ?? null, count: next.progress.waitingOnNode };
         if (progressOnly && snapshot) snapshot = { ...snapshot, progress: next.progress };
         else {
             snapshot = { ...next };

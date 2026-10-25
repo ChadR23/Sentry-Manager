@@ -344,29 +344,34 @@
   const linkSpeed = (mbps) => (!fin(mbps) || mbps <= 0 ? '' : mbps >= 1000 ? `${Number((mbps / 1000).toFixed(1))} Gbit/s` : `${Math.round(mbps)} Mbit/s`);
   const cpuName = (m) => String(m || '').replace(/\((R|TM)\)/gi, '').replace(/\s+CPU\s+@.*$/i, '').replace(/\s+with\s+Radeon.*$/i, '').replace(/\s+/g, ' ').trim();
 
-  /** A sparkline, 0 at the bottom; null points are gaps (no sample then). */
-  function spark(points, color, floor) {
-    const vals = (Array.isArray(points) ? points : []).map((p) => (fin(p) ? Math.max(0, p) : null));
-    const known = vals.filter((v) => v !== null);
-    if (known.length < 2) return '';
+  /**
+   * A sparkline, 0 at the bottom; null points are gaps (no sample then).
+   * `also` adds more lines ([points, color]) on the same scale, drawn over it.
+   */
+  function spark(points, color, floor, also = []) {
+    const clean = (list) => (Array.isArray(list) ? list : []).map((p) => (fin(p) ? Math.max(0, p) : null));
+    const series = [[clean(points), color], ...also.map(([p, c]) => [clean(p), c])].filter(([vals]) => vals.filter((v) => v !== null).length > 1);
+    if (!series.length) return '';
     const w = 220;
     const h = 40;
-    const top = Math.max(floor, Math.max(...known) * 1.15);
-    const x = (i) => ((i / (vals.length - 1)) * w).toFixed(1);
-    const segs = [];
-    let seg = [];
-    vals.forEach((v, i) => {
-      if (v === null) {
-        if (seg.length) segs.push(seg);
-        seg = [];
-      } else {
-        seg.push([x(i), (h - 3 - (v / top) * (h - 6)).toFixed(1)]);
-      }
-    });
-    if (seg.length) segs.push(seg);
-    const lines = segs.filter((s) => s.length > 1).map((s) => {
-      const pts = s.map((p) => p.join(',')).join(' ');
-      return `<polyline points="${s[0][0]},${h} ${pts} ${s[s.length - 1][0]},${h}" fill="${color}" opacity="0.08" stroke="none"/><polyline points="${pts}" fill="none" stroke="${color}" stroke-width="2" vector-effect="non-scaling-stroke"/>`;
+    const top = Math.max(floor, ...series.flatMap(([vals]) => vals.filter((v) => v !== null)).map((v) => v * 1.15));
+    const lines = series.flatMap(([vals, c]) => {
+      const x = (i) => ((i / (vals.length - 1)) * w).toFixed(1);
+      const segs = [];
+      let seg = [];
+      vals.forEach((v, i) => {
+        if (v === null) {
+          if (seg.length) segs.push(seg);
+          seg = [];
+        } else {
+          seg.push([x(i), (h - 3 - (v / top) * (h - 6)).toFixed(1)]);
+        }
+      });
+      if (seg.length) segs.push(seg);
+      return segs.filter((s) => s.length > 1).map((s) => {
+        const pts = s.map((p) => p.join(',')).join(' ');
+        return `<polyline points="${s[0][0]},${h} ${pts} ${s[s.length - 1][0]},${h}" fill="${c}" opacity="0.08" stroke="none"/><polyline points="${pts}" fill="none" stroke="${c}" stroke-width="2" vector-effect="non-scaling-stroke"/>`;
+      });
     });
     return `<svg class="nd-spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true">${lines.join('')}</svg>`;
   }
@@ -564,13 +569,15 @@
     return ndTile('Storage', 'disks and shares', `<div class="nd-disks">${rows.join('')}</div>${moreButton('disks', DISKS_SHOWN, list.length, all)}`, true);
   }
 
+  // download in blue, upload in purple, on one scale
   function networkTile(net, points, day) {
     const ifs = (Array.isArray(net?.interfaces) ? net.interfaces : []).filter((i) => i && (fin(i.rxBps) || fin(i.txBps)));
     if (!ifs.length) return '';
     const sum = (k) => ifs.reduce((n, i) => n + (fin(i[k]) ? i[k] : 0), 0);
     const one = ifs.length === 1 ? ifs[0] : null;
     return ndTile('Network', one ? [one.name, linkSpeed(one.speedMbps)].filter(Boolean).join(' · ') : `${ifs.length} interfaces`,
-      ndBig(`↓ ${rate(sum('rxBps'))}`, `↑ ${rate(sum('txBps'))}`) + sparkBlock(spark(points, 'var(--info)', 64 * 1024), day)
+      ndBig(`<span class="nd-down">↓</span> ${rate(sum('rxBps'))}`, `<span class="nd-up">↑ ${rate(sum('txBps'))}</span>`)
+      + sparkBlock(spark(points?.rx, 'var(--info)', 64 * 1024, [[points?.tx, 'var(--upload)']]), day)
       + ndKv(one ? [] : ifs.map((i) => [[i.name, linkSpeed(i.speedMbps)].filter(Boolean).join(' · '), `↓ ${rate(i.rxBps)} · ↑ ${rate(i.txBps)}`]))
       // a list of its own, so long interface names never narrow its values;
       // the data used is always shown (0 B too) so the tile keeps its height
@@ -746,7 +753,8 @@
       cpu: day ? day.cpu : s.sparks?.cpu,
       gpu: day ? (usable(day.gpuVideo) ? day.gpuVideo : day.gpuBusy) : s.sparks?.gpuVideo,
       gpuBusy: day ? day.gpuBusy : s.sparks?.gpuBusy,
-      rx: day ? day.rxBps : s.sparks?.rxBps
+      rx: day ? day.rxBps : s.sparks?.rxBps,
+      tx: day ? day.txBps : s.sparks?.txBps
     };
     // A GPU the page has shown keeps its tile, in its place, while a sample
     // leaves it out (its reading failed for a moment), so the tiles after it
@@ -771,7 +779,7 @@
     if (shown) seen.set('gpus', shown);
     const tiles = [
       cpuTile(s.cpu, pts.cpu, Boolean(day), seen), gpus, powerTile(s.power, s.encoder, s.price, currency, seen), memoryTile(s.memory, seen),
-      storageTile(s.filesystems, s.disks, more.disks, fin(s.at) ? s.at : Date.now()), networkTile(s.network, pts.rx, Boolean(day)),
+      storageTile(s.filesystems, s.disks, more.disks, fin(s.at) ? s.at : Date.now()), networkTile(s.network, { rx: pts.rx, tx: pts.tx }, Boolean(day)),
       sensorsTile(s.sensors, more.sensors, Number(s.cpu?.sockets) || 1, seen), processTile(s.processes, s.encoder, list.length > 0, seen)
     ].join('');
     // (Logs: the last tile of the same section)

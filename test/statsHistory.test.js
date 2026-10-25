@@ -79,7 +79,7 @@ test('sparklines: at most 90 points of the last 15 minutes, averaged, no gaps', 
   const few = new History({ intervalMs: 2000 });
   few.add(t0, row(10));
   few.add(t0 + 2000, row(20));
-  assert.deepEqual(few.sparks(t0 + 2000), { cpu: [10, 20], gpuVideo: [], gpuBusy: [], rxBps: [] });
+  assert.deepEqual(few.sparks(t0 + 2000), { cpu: [10, 20], gpuVideo: [], gpuBusy: [], rxBps: [], txBps: [] });
 });
 
 test('CSV: an ISO time column, the series in order, empty cells for no data', () => {
@@ -135,7 +135,7 @@ test('the engine saves history and energy to stats-history.json and reads them b
       assert.deepEqual(again.stats.history('24h').series, before.h24.series);
       assert.deepEqual(again.stats.energy(), before.energy);
       assert.equal(again.stats.csv('24h'), before.csv);
-      assert.deepEqual(again.stats.snapshot().sparks, { cpu: [], gpuVideo: [], gpuBusy: [], rxBps: [] }, 'sparks come with the first sample');
+      assert.deepEqual(again.stats.snapshot().sparks, { cpu: [], gpuVideo: [], gpuBusy: [], rxBps: [], txBps: [] }, 'sparks come with the first sample');
       again.stats.sampleNow();
       assert.ok(again.stats.snapshot().sparks.cpu.length > 30, 'the tiles keep their last 15 minutes');
     } finally {

@@ -1323,7 +1323,11 @@ function createConverterJobService(deps) {
         settled = true;
         clearTimeout(stallTimer);
         if (runtime.children.get(itemId) === entry) runtime.children.delete(itemId);
-        if (runtime.encodes.get(itemId) === live) runtime.encodes.delete(itemId);
+        if (runtime.encodes.get(itemId) === live) {
+          runtime.encodes.delete(itemId);
+          // (a clip that leaves the node's queue without starting: one fewer waiting)
+          if (live.waitingOnNode) noteWaiting(runtime);
+        }
         runtime.encodeFps.delete(itemId);
         resolve(result);
       };

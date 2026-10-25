@@ -64,6 +64,12 @@ function withValidLanes(config) {
   let lanes = null;
   try { lanes = normalizeLanes(config.lanes); } catch (_) { lanes = null; }
   const result = { ...config };
+  // nodes set to Off in this vehicle's Encoder rows (see nodesOffFor)
+  if (result.nodesOff !== undefined) {
+    const off = Array.isArray(result.nodesOff) ? [...new Set(result.nodesOff.filter(isNodeDevice))].slice(0, 32) : [];
+    if (off.length) result.nodesOff = off;
+    else delete result.nodesOff;
+  }
   if (lanes) {
     result.lanes = lanes;
     result.concurrency = lanesTotal(lanes);
@@ -144,10 +150,12 @@ function planLanes({ cars, wanting, localHolder = null, devices = [], priorities
   }
   for (const node of devices) {
     if (!node || !isNodeDevice(node.id) || !present.has(node.id)) continue;
-    const listed = (Array.isArray(priorities[node.id]) ? priorities[node.id] : []).find((root) => plan.has(root));
+    // (a vehicle whose Encoder row for this node is Off never gets it)
+    const allows = (root) => !(byRoot.get(root)?.nodesOff || []).includes(node.id);
+    const listed = (Array.isArray(priorities[node.id]) ? priorities[node.id] : []).find((root) => plan.has(root) && allows(root));
     const helps = listed
       || (localHolder && plan.has(localHolder) && laneOf(localHolder, node.id) ? localHolder : null)
-      || [...plan.keys()].find((root) => laneOf(root, node.id));
+      || [...plan.keys()].find((root) => laneOf(root, node.id) && allows(root));
     if (!helps) continue;
     const concurrency = laneOf(helps, node.id)?.concurrency || (Number.isSafeInteger(node.slots) && node.slots > 0 ? Math.min(node.slots, 8) : 1);
     plan.get(helps).push({ device: node.id, concurrency });
@@ -439,6 +447,17 @@ function createAutoConverter(options = {}) {
   const usesOwnDevices = (lanes) => Array.isArray(lanes) && lanes.some((lane) => !isNodeDevice(lane.device));
   const sameLanes = (a, b) => JSON.stringify(a || null) === JSON.stringify(b || null);
 
+  // The nodes a vehicle's Encoder rows leave at Off: every node paired now
+  // that its lanes do not use. A node paired later is not among them, so it
+  // helps as its "Vehicles first" list says until the owner sets its row.
+  async function nodesOffFor(lanes) {
+    if (!Array.isArray(lanes)) return [];
+    let devices = [];
+    try { devices = (await options.devices?.()) || []; } catch (_) { devices = []; }
+    const used = new Set(lanes.map((lane) => lane.device));
+    return devices.map((device) => device?.id).filter((id) => isNodeDevice(id) && !used.has(id));
+  }
+
   function noteSource(sourceRoot, fields) {
     status.sources = { ...status.sources, [sourceRoot]: { ...(status.sources[sourceRoot] || {}), ...fields } };
   }
@@ -638,7 +657,9 @@ function createAutoConverter(options = {}) {
       let configs = settings.configs;
       if (Array.isArray(next?.configs)) configs = next.configs;
       else if (next?.enabled === true && isConfig(next.config)) {
-        configs = [...configs.filter((config) => config.sourceRoot !== next.config.sourceRoot), next.config];
+        const { nodesOff: _sent, ...sent } = next.config;
+        const off = await nodesOffFor(withValidLanes(sent).lanes);
+        configs = [...configs.filter((config) => config.sourceRoot !== next.config.sourceRoot), { ...sent, ...(off.length ? { nodesOff: off } : {}) }];
       } else if (typeof next?.removeSource === 'string') {
         configs = configs.filter((config) => config.sourceRoot !== next.removeSource);
       }
@@ -682,8 +703,10 @@ function createAutoConverter(options = {}) {
       const lanes = normalizeLanes(value);
       const current = activeConfig(sourceRoot);
       if (!current || !lanes) return getState();
-      if (JSON.stringify(current.lanes || null) === JSON.stringify(lanes)) return getState();
-      settings = { ...settings, configs: settings.configs.map((c) => (c === current ? { ...c, lanes, concurrency: lanesTotal(lanes) } : c)) };
+      const off = await nodesOffFor(lanes);
+      if (JSON.stringify(current.lanes || null) === JSON.stringify(lanes) && sameLanes(current.nodesOff || [], off)) return getState();
+      const { nodesOff: _old, ...rest } = current;
+      settings = { ...settings, configs: settings.configs.map((c) => (c === current ? { ...rest, lanes, concurrency: lanesTotal(lanes), ...(off.length ? { nodesOff: off } : {}) } : c)) };
       await writeJson(SETTINGS_FILE, settings);
       changed();
       return getState();

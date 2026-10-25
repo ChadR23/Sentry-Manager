@@ -132,3 +132,28 @@ test('a highlighted counter keeps its number while the run goes on, and catches 
   await settle();
   assert.equal(waiting.textContent, '470');
 });
+
+test('the clips waiting on a node stay counted apart when a full update (without live progress) follows', async () => {
+  const file = el({ textContent: '' });
+  const nodeWaiting = el({ textContent: '', hidden: true });
+  const { snapshot, settle } = await controller({ extra: { currentFile: file, nodeWaiting } });
+  const full = (revision) => ({ jobId: 'job-1', revision, snapshot: { id: 'job-1', revision, state: 'encoding', config: { concurrency: 5 }, itemStateCounts: { active: 19 }, items: [] } });
+  snapshot(full(20));
+  // the clip whose progress is shown waits on the node: only the count comes
+  snapshot({ jobId: 'job-1', revision: 20, snapshot: { id: 'job-1', revision: 20, progress: { phase: 'continue', waitingOnNode: 15 } } });
+  await settle();
+  assert.equal(file.textContent, 'Converting 4 files at once');
+  assert.equal(nodeWaiting.textContent, '15 waiting on a node');
+  // the job's next full updates carry no live progress
+  snapshot(full(21));
+  snapshot(full(22));
+  await settle();
+  assert.equal(file.textContent, 'Converting 4 files at once', 'not 19');
+  assert.equal(nodeWaiting.hidden, false);
+  assert.equal(nodeWaiting.textContent, '15 waiting on a node');
+  // the node's queue empties
+  snapshot({ jobId: 'job-1', revision: 22, snapshot: { id: 'job-1', revision: 22, progress: { phase: 'continue', waitingOnNode: 0 } } });
+  await settle();
+  assert.equal(nodeWaiting.hidden, true);
+  assert.equal(file.textContent, 'Converting 19 files at once');
+});
