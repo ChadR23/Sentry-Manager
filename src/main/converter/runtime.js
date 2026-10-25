@@ -884,9 +884,10 @@ async function createConverterRuntime(options = {}) {
       return removed;
     } catch (_) { return 0; }
   }
-  async function hasActiveJob() {
+  async function hasActiveJob({ manualOnly = false } = {}) {
     return (await service.list()).some((job) => !['completed', 'failed', 'cancelled'].includes(job.state)
-      && !(job.state === 'paused' && job.recovery?.action === 'manual-intervention'));
+      && !(job.state === 'paused' && job.recovery?.action === 'manual-intervention')
+      && !(manualOnly && (job.autoConvert === true || job.config?.autoConvert === true)));
   }
 
   // Automatic conversion of new clips (off until the user turns it on).
@@ -896,7 +897,12 @@ async function createConverterRuntime(options = {}) {
     fs: pfs,
     pathApi,
     directory: pathApi.join(options.userDataPath, 'converter-auto'),
-    isBusy: async () => benchmarkController !== null || await hasActiveJob(),
+    // (its own automatic jobs are not in the way: it runs one per vehicle)
+    isBusy: async () => benchmarkController !== null || await hasActiveJob({ manualOnly: true }),
+    // the devices automatic jobs are given (this server's and the nodes),
+    // and which vehicles each node takes first
+    devices: () => recentDevices(),
+    ...(typeof options.remoteNodes?.priorities === 'function' ? { nodePriorities: () => options.remoteNodes.priorities() } : {}),
     ...(typeof options.isCheapNow === 'function' ? { isCheapNow: options.isCheapNow } : {}),
     onChange: (state) => { for (const listener of autoListeners) { try { listener(state); } catch (_) { /* isolated */ } } },
     ...(options.autoTimers ? { timers: options.autoTimers } : {}),

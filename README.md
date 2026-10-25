@@ -339,6 +339,18 @@ under Parallel conversions); the node keeps its own name. On the node,
 **Encode with** chooses how it encodes: its **GPU** (the default; the CPU only
 on a computer without one), **GPU, then CPU if it fails**, or **CPU only**. A clip the node can't encode comes back here.
 
+**Vehicles first** (per node, on the Nodes page) gives a node its own
+vehicles for automatic conversion, in order. Automatic conversion then runs
+a conversion per vehicle at the same time, each on devices of its own: a
+node converts for the first vehicle on its list that has new clips, while
+this server's GPU and CPU convert another vehicle. With none of its vehicles
+waiting, the node helps the others (the vehicle on this server's GPU, if its
+settings use the node). When its vehicle has new clips again, the node
+finishes the clips it has and goes back to it. A vehicle left with no device
+waits, paused, until one is free. A node with no list helps whichever vehicle
+is converting, as before. Conversions you start yourself still run one at a
+time.
+
 **Benchmark a node** from here: **Nodes → Benchmark** (or **Benchmark AV1**)
 lends the node a few sample clips from your footage and converts them at 1,
 2, 4, 6 and 8 at once, timing each level. The node needs no footage of its

@@ -1646,7 +1646,7 @@
   // passwords and never touch footage.
   pages.nodes = async () => {
     const seq = renderSeq;
-    const { nodes, worker } = await api('/api/nodes');
+    const [{ nodes, worker }, { vehicles: cars = [] }] = await Promise.all([api('/api/nodes'), api('/api/vehicles').catch(() => ({ vehicles: [] }))]);
     const benches = Object.fromEntries(await Promise.all(nodes.map(async (n) => [n.id, (await api(`/api/nodes/${encodeURIComponent(n.id)}/benchmark`).catch(() => ({}))).benchmark || null])));
     if (seq !== renderSeq) return;
     const benchRunning = Object.values(benches).some((b) => b?.state === 'running');
@@ -1663,13 +1663,26 @@
             : `${b.suggested ? `<button class="btn sm solid" data-bench-use="${esc(n.id)}" data-level="${b.suggested}">Use ${b.suggested} at once</button>` : ''}<button class="btn sm" data-bench-start="${esc(n.id)}" data-codec="${esc(b.codec)}">Run again</button>`}
         </div></div></td></tr>`;
     };
+    // the vehicles a node converts for first, in order (automatic conversion)
+    const carName = (id) => cars.find((v) => v.id === id)?.name || id;
+    const carsPanel = (n) => {
+      if (!cars.length) return '';
+      const list = n.cars || [];
+      const left = cars.filter((v) => !list.includes(v.id));
+      const items = list.map((id, i) => `<li><span class="node-car-rank">${i + 1}</span>${esc(carName(id))}${i > 0 ? `<button class="btn sm ghost" data-car-up="${esc(n.id)}" data-car="${esc(id)}" aria-label="Move ${esc(carName(id))} up">↑</button>` : ''}<button class="btn sm ghost" data-car-remove="${esc(n.id)}" data-car="${esc(id)}" aria-label="Remove ${esc(carName(id))}">✕</button></li>`).join('');
+      return `<tr class="node-bench-row"><td colspan="5"><div class="node-cars">
+        <b>Vehicles first</b> <span class="muted small">${list.length ? 'Automatic conversion sends this node these vehicles\' new clips first, in this order; with none waiting, it helps the others.' : 'None: it helps whichever vehicle is converting.'}</span>
+        ${items ? `<ol class="node-car-list">${items}</ol>` : ''}
+        ${left.length ? `<select class="input node-car-add" data-car-add="${esc(n.id)}" aria-label="Add a vehicle for ${esc(n.name)}"><option value="">Add a vehicle…</option>${left.map((v) => `<option value="${esc(v.id)}">${esc(v.name)}</option>`).join('')}</select>` : ''}
+      </div></td></tr>`;
+    };
     const encodersText = (e) => [['H.265', e?.h265], ['AV1', e?.av1]].filter(([, v]) => v).map(([k, v]) => `${k}: ${esc(v)}`).join(' · ') || '—';
     const nodeRows = nodes.map((n) => `<tr>
         <td class="words"><b>${esc(n.name)}</b><br><span class="muted small mono">${esc(n.address)}</span></td>
         <td>${n.online ? '<span class="chip green"><span class="dot ok"></span>Online</span>' : `<span class="chip red"><span class="dot bad"></span>Offline</span><br><span class="muted small words">${esc(n.error || '')}</span>`}</td>
         <td class="small">${encodersText(n.encoders)}</td>
         <td class="small">${n.online && n.slots ? (n.encoding === null ? `${n.busy ?? 0} of ${n.slots} busy` : `${n.encoding} of ${n.slots} converting${n.busy > n.encoding ? ` · ${n.busy - n.encoding} waiting` : ''}`) : '—'}</td>
-        <td class="actions">${n.online && !benches[n.id] ? `<button class="btn sm" data-bench-start="${esc(n.id)}" data-codec="h265"${benchRunning ? ' disabled' : ''}>Benchmark</button>${n.encoders?.av1 ? `<button class="btn sm" data-bench-start="${esc(n.id)}" data-codec="av1"${benchRunning ? ' disabled' : ''}>Benchmark AV1</button>` : ''}` : ''}<button class="btn sm" data-rename-node="${esc(n.id)}">Rename</button><button class="btn sm" data-remove-node="${esc(n.id)}">Remove</button></td></tr>${benchPanel(n)}`).join('');
+        <td class="actions">${n.online && !benches[n.id] ? `<button class="btn sm" data-bench-start="${esc(n.id)}" data-codec="h265"${benchRunning ? ' disabled' : ''}>Benchmark</button>${n.encoders?.av1 ? `<button class="btn sm" data-bench-start="${esc(n.id)}" data-codec="av1"${benchRunning ? ' disabled' : ''}>Benchmark AV1</button>` : ''}` : ''}<button class="btn sm" data-rename-node="${esc(n.id)}">Rename</button><button class="btn sm" data-remove-node="${esc(n.id)}">Remove</button></td></tr>${carsPanel(n)}${benchPanel(n)}`).join('');
     const pairing = worker.pairing;
     const mins = pairing ? Math.max(1, Math.round((pairing.expiresAt - Date.now()) / 60000)) : 0;
     const mainRows = worker.mains.map((m) => `<tr>
@@ -1764,6 +1777,25 @@
       };
       setTimeout(follow, 2500);
     }
+    const saveCars = async (id, list) => {
+      await api(`/api/nodes/${encodeURIComponent(id)}`, { method: 'PUT', body: { cars: list } }).catch((err) => toast(err.message, true));
+      render();
+    };
+    const carsOf = (id) => [...(nodes.find((x) => x.id === id)?.cars || [])];
+    page.querySelectorAll('[data-car-add]').forEach((sel) => {
+      sel.onchange = () => { if (sel.value) saveCars(sel.dataset.carAdd, [...carsOf(sel.dataset.carAdd), sel.value]); };
+    });
+    page.querySelectorAll('[data-car-remove]').forEach((b) => {
+      b.onclick = () => saveCars(b.dataset.carRemove, carsOf(b.dataset.carRemove).filter((id) => id !== b.dataset.car));
+    });
+    page.querySelectorAll('[data-car-up]').forEach((b) => {
+      b.onclick = () => {
+        const list = carsOf(b.dataset.carUp);
+        const i = list.indexOf(b.dataset.car);
+        if (i > 0) [list[i - 1], list[i]] = [list[i], list[i - 1]];
+        saveCars(b.dataset.carUp, list);
+      };
+    });
     page.querySelectorAll('[data-rename-node]').forEach((b) => {
       b.onclick = async () => {
         const n = nodes.find((x) => x.id === b.dataset.renameNode);

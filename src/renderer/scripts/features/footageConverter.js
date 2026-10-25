@@ -1608,7 +1608,10 @@ function createFootageConverterController(options = {}) {
             const detail = documentRef.createElement('span');
             const codec = config.codec === 'av1' ? 'AV1' : 'H.265';
             const output = config.outputMode === 'separate' ? message('autoListSeparate', 'separate folder') : message('autoListReplace', 'replaces originals');
-            const busy = status.activeSource === config.sourceRoot ? ` · ${message('autoListActive', 'converting now')}` : '';
+            const waiting = Number(status.pending?.[config.sourceRoot]) || 0;
+            const busy = status.active?.[config.sourceRoot] || (status.activeJobId && status.activeSource === config.sourceRoot)
+                ? ` · ${status.active?.[config.sourceRoot]?.pausedForDevices ? message('autoListWaitingDevice', 'waiting for a free device') : message('autoListActive', 'converting now')}`
+                : waiting > 0 ? ` · ${message('autoListWaiting', '{count} new clips waiting', { count: waiting })}` : '';
             detail.textContent = ` ${codec} · ${output}${busy}`;
             item.append(name, detail);
             if (config.sourceRoot === currentSource()) item.className = 'current';
@@ -1648,7 +1651,11 @@ function createFootageConverterController(options = {}) {
         const source = currentSource();
         const mine = Boolean(autoConfigFor(source));
         const others = autoConfigs().filter((config) => config.sourceRoot !== source).length;
-        const elsewhere = status.activeSource && status.activeSource !== source;
+        // several vehicles may convert at once (each on its own devices)
+        const running = status.active && typeof status.active === 'object' ? status.active : {};
+        const own = running[source] || (status.activeSource === source && status.activeJobId ? { jobId: status.activeJobId, pausedForWindow: status.pausedForWindow } : null);
+        const elsewhere = !own && status.activeSource && status.activeSource !== source;
+        const jobId = own?.jobId || null;
         if (!settings.enabled) text = message('autoOff', 'Off');
         else if (!mine && !status.activeSource) {
             text = message('autoOffHere', 'Off for this source · {count} other(s) convert automatically', { count: others });
@@ -1657,16 +1664,18 @@ function createFootageConverterController(options = {}) {
                 ? message('autoConvertingOther', 'Converting {name}\'s new clips…', { name: sourceLabel(status.activeSource) })
                 : message('autoCheckingOther', 'Checking {name} for new clips…', { name: sourceLabel(status.activeSource) });
         } else if (status.checking) text = message('autoChecking', 'Checking for new clips…');
-        else if (status.activeJobId && status.pausedForWindow && settings.window?.follow === 'off-peak') {
+        else if (jobId && own.pausedForDevices) {
+            text = message('autoWaitingDevice', 'Waiting for a free GPU or node — another vehicle comes first on it');
+        } else if (jobId && own.pausedForWindow && settings.window?.follow === 'off-peak') {
             text = message('autoPausedPeak', 'Paused while electricity costs more — resumes when off-peak starts');
-        } else if (status.activeJobId && status.pausedForWindow) {
+        } else if (jobId && own.pausedForWindow) {
             text = message('autoPausedWindow', 'Paused outside the time window — resumes at {time}', {
                 time: clockTime(new Date().setHours(settings.window?.startHour ?? 0, 0, 0, 0))
             });
-        } else if (status.activeJobId && snapshot?.id === status.activeJobId && snapshot.state === 'paused') {
+        } else if (jobId && snapshot?.id === jobId && snapshot.state === 'paused') {
             // Paused by the user: it waits for them.
             text = message('autoJobPaused', 'Automatic conversion is paused — resume or cancel it above');
-        } else if (status.activeJobId) text = message('autoConverting', 'Converting new clips…');
+        } else if (jobId) text = message('autoConverting', 'Converting new clips…');
         else {
             const parts = [];
             // this folder's own last check

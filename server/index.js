@@ -282,7 +282,15 @@ async function main() {
   // Nodes: other servers that encode for this one (server/nodes.js)
   const nodes = createNodes({ db, log: logger.scope('nodes'), audit: logger.scope('audit') });
   const host = createConverterHost({
-    remoteNodes: { list: () => nodes.list(), encode: (request) => nodes.encode(request) },
+    remoteNodes: {
+      list: () => nodes.list(),
+      encode: (request) => nodes.encode(request),
+      // each node's vehicles, as the footage folders automatic conversion uses
+      priorities: () => Object.fromEntries(Object.entries(nodes.carLists()).map(([device, ids]) => [device, ids.map((id) => {
+        const v = vehicles.list().find((x) => x.id === id);
+        try { return v ? vehicles.studioRoot(v) : null; } catch (_) { return null; }
+      }).filter(Boolean)]))
+    },
     dataDir: path.join(DATA, 'converter'),
     tempDir: path.join(DATA, 'converter-temp'),
     ffmpegPath: FFMPEG,
@@ -615,15 +623,24 @@ async function main() {
     return { ok: true };
   });
   r.add('PUT', '/api/nodes/:id', (req, res, { params, body, user }) => {
-    let renamed;
+    if (!nodes.has(params.id)) throw new HttpError(404, 'No such node.');
+    const out = { ok: true };
     try {
-      renamed = nodes.rename(params.id, body?.name);
+      if (body?.name !== undefined) {
+        const renamed = nodes.rename(params.id, body.name);
+        audit.info(`Node "${renamed.previous}" renamed "${renamed.name}": ${by(req, user)}`);
+        out.name = renamed.name;
+      }
+      if (body?.cars !== undefined) {
+        const known = new Set(vehicles.list().map((v) => v.id));
+        if (!Array.isArray(body.cars) || body.cars.some((id) => !known.has(id))) throw new HttpError(400, 'Unknown vehicle.');
+        out.cars = nodes.setCars(params.id, body.cars);
+        audit.info(`Node ${params.id} converts first for: ${out.cars.join(', ') || 'no vehicle in particular'}: ${by(req, user)}`);
+      }
     } catch (err) {
-      throw new HttpError(err.status || 400, err.message);
+      throw err instanceof HttpError ? err : new HttpError(err.status || 400, err.message);
     }
-    if (!renamed) throw new HttpError(404, 'No such node.');
-    audit.info(`Node "${renamed.previous}" renamed "${renamed.name}": ${by(req, user)}`);
-    return { ok: true, name: renamed.name };
+    return out;
   });
   r.add('DELETE', '/api/nodes/:id', (req, res, { params, user }) => {
     const node = nodes.remove(params.id);

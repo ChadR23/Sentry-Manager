@@ -216,7 +216,7 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
       const i = await fresh(node);
       return {
         id: `node:${node.id}`, kind: 'node', name: `${node.name} (node)`,
-        node: null, index: null, pci: null,
+        node: null, index: null, pci: null, slots: i.slots ?? null,
         online: i.online === true, encoders: i.online ? i.encoders : { h265: null, av1: null }
       };
     }));
@@ -232,7 +232,8 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
         id: node.id, name: node.name, address: node.port === 9000 ? node.host : `${node.host}:${node.port}`,
         pairedAt: node.pairedAt, online: i.online === true, error: i.online ? null : i.error || null,
         encoders: i.encoders || {}, slots: i.slots ?? null, busy: i.busy ?? null, encoding: i.encoding ?? null,
-        fingerprint: node.pin?.fingerprint || null
+        fingerprint: node.pin?.fingerprint || null,
+        cars: Array.isArray(node.cars) ? node.cars : []
       };
     });
   }
@@ -293,6 +294,25 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
     save(stored().map((n) => (n.id === id ? { ...n, name: clean } : n)));
     return { previous: node.name, name: clean };
   }
+
+  /**
+   * The vehicles a node converts for first, in order (automatic conversion):
+   * vehicle ids, at most 64. When none of them has clips to convert, the
+   * node helps the others.
+   */
+  function setCars(id, cars) {
+    const node = byId(id);
+    if (!node) return null;
+    if (!Array.isArray(cars) || cars.length > 64 || cars.some((car) => typeof car !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(car))) {
+      throw nodeError('A list of vehicles, at most 64.');
+    }
+    const list = [...new Set(cars)];
+    save(stored().map((n) => (n.id === id ? { ...n, cars: list } : n)));
+    return list;
+  }
+
+  /** { 'node:<id>': [vehicle id, ...] } for the nodes that have a list. */
+  const carLists = () => Object.fromEntries(stored().filter((n) => Array.isArray(n.cars) && n.cars.length).map((n) => [`node:${n.id}`, n.cars]));
 
   function remove(id) {
     const node = byId(id);
@@ -462,7 +482,7 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
     return info.get(id);
   }
 
-  return { list, overview, add, rename, remove, encode, setSlots, has: (id) => Boolean(byId(id)), refresh: (id) => (byId(id) ? refresh(byId(id)) : null) };
+  return { list, overview, add, rename, setCars, carLists, remove, encode, setSlots, has: (id) => Boolean(byId(id)), refresh: (id) => (byId(id) ? refresh(byId(id)) : null) };
 }
 
 module.exports = { createNodes, parseAddress, connectPinned, pinMatches };

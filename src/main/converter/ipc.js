@@ -499,8 +499,8 @@ function registerConverterIpc(options = {}) {
         // (a job with lanes may keep its one GPU still here: the settings keep it too)
         const lanes = Array.isArray(snapshot.config.lanes) && snapshot.config.lanes.length > 0 ? snapshot.config.lanes : null;
         try {
-          if (lanes && typeof options.auto?.setLanes === 'function') await options.auto.setLanes(lanes);
-          else if (!lanes && typeof options.auto?.setConcurrency === 'function') await options.auto.setConcurrency(payload.concurrency);
+          if (lanes && typeof options.auto?.setLanes === 'function') await options.auto.setLanes(lanes, snapshot.config.sourceRoot);
+          else if (!lanes && typeof options.auto?.setConcurrency === 'function') await options.auto.setConcurrency(payload.concurrency, snapshot.config.sourceRoot);
         } catch (_) { /* the job itself changed; settings follow next time */ }
       }
       return sanitizeSnapshot(snapshot);
@@ -515,7 +515,7 @@ function registerConverterIpc(options = {}) {
       if (typeof options.service.setLanes !== 'function') fail('OPERATION_FAILED');
       const snapshot = await options.service.setLanes(validateSafeJobId(payload.jobId), lanes);
       if (snapshot?.config?.autoConvert === true && typeof options.auto?.setLanes === 'function') {
-        try { await options.auto.setLanes(lanes); } catch (_) { /* the job itself changed; settings follow next time */ }
+        try { await options.auto.setLanes(lanes, snapshot.config.sourceRoot); } catch (_) { /* the job itself changed; settings follow next time */ }
       }
       return sanitizeSnapshot(snapshot);
     }),

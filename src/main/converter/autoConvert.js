@@ -118,6 +118,43 @@ function setupKey(config) {
     .digest('hex').slice(0, 24);
 }
 
+const isNodeDevice = (id) => typeof id === 'string' && id.startsWith('node:');
+
+/**
+ * Which devices each vehicle's automatic job gets, as lanes. A node goes to
+ * the first vehicle on its list (Nodes) that has a job or new clips; with
+ * none of those, it helps the vehicle on this server's own devices (when
+ * that vehicle's settings use the node), else any vehicle whose settings
+ * use it. This server's own devices go to `localHolder` only.
+ *   cars: the automatic settings, one per source folder
+ *   wanting: source folders with a job or new clips
+ *   devices: [{ id, kind, online, slots }] (this server's and the nodes)
+ *   priorities: { 'node:<id>': [sourceRoot, ...] }
+ * -> Map sourceRoot -> lanes (empty when it gets no device now)
+ */
+function planLanes({ cars, wanting, localHolder = null, devices = [], priorities = {} }) {
+  const byRoot = new Map(cars.filter((config) => Array.isArray(config.lanes)).map((config) => [config.sourceRoot, config]));
+  const plan = new Map([...byRoot.keys()].filter((root) => wanting.has(root)).map((root) => [root, []]));
+  const laneOf = (root, id) => byRoot.get(root)?.lanes.find((lane) => lane.device === id) || null;
+  const present = new Set(devices.filter((device) => device && device.online !== false).map((device) => device.id));
+  if (localHolder && plan.has(localHolder)) {
+    for (const lane of byRoot.get(localHolder).lanes) {
+      if (!isNodeDevice(lane.device) && present.has(lane.device)) plan.get(localHolder).push({ device: lane.device, concurrency: lane.concurrency });
+    }
+  }
+  for (const node of devices) {
+    if (!node || !isNodeDevice(node.id) || !present.has(node.id)) continue;
+    const listed = (Array.isArray(priorities[node.id]) ? priorities[node.id] : []).find((root) => plan.has(root));
+    const helps = listed
+      || (localHolder && plan.has(localHolder) && laneOf(localHolder, node.id) ? localHolder : null)
+      || [...plan.keys()].find((root) => laneOf(root, node.id));
+    if (!helps) continue;
+    const concurrency = laneOf(helps, node.id)?.concurrency || (Number.isSafeInteger(node.slots) && node.slots > 0 ? node.slots : 1);
+    plan.get(helps).push({ device: node.id, concurrency });
+  }
+  return plan;
+}
+
 function createAutoConverter(options = {}) {
   const { service, scanner, fs, directory } = options;
   const pathApi = options.pathApi || nodePath;
@@ -138,9 +175,12 @@ function createAutoConverter(options = {}) {
   const status = {
     lastCheckAt: null, nextCheckAt: null, lastNewFiles: null, lastJobId: null,
     activeJobId: null, pausedForWindow: false, checking: false, error: null,
-    // the source folder being checked or converted, the folders still to
-    // check in this round, and each folder's last check
-    activeSource: null, round: [], sources: {},
+    // the folder being checked, the folders still to check in this round,
+    // each folder's last check, the folders with new clips waiting for a
+    // device, and each running automatic job by folder:
+    //   { jobId, lanes, pausedForWindow, pausedForDevices }
+    // (activeJobId and activeSource name the first of them)
+    activeSource: null, round: [], sources: {}, pending: {}, active: {},
     // manual jobs this paused outside the window, and every manual job it
     // has handled since the window closed (one the owner resumes stays running)
     heldManual: [], handledManual: []
@@ -285,54 +325,58 @@ function createAutoConverter(options = {}) {
     await saveIndex(index);
   }
 
-  async function setPausedForWindow(jobId) {
-    status.pausedForWindow = Boolean(jobId);
-    await saveState(jobId);
-  }
-
   function changed() {
+    // the first running job, for anything that shows one
+    const [first] = Object.entries(status.active);
+    status.activeJobId = first ? first[1].jobId : null;
+    if (!status.checking) status.activeSource = first ? first[0] : null;
+    status.pausedForWindow = Object.values(status.active).some((entry) => entry.pausedForWindow);
     try { onChange(getState()); } catch (_) { /* observers are advisory */ }
   }
 
-  async function followActiveJob(insideWindow) {
-    let job;
-    try { job = await service.get(status.activeJobId); } catch (_) { job = null; }
-    if (!job) {
-      status.activeJobId = null;
-      status.activeSource = null;
-      if (status.pausedForWindow) await setPausedForWindow(null);
-      return;
-    }
-    if (TERMINAL.has(job.state)) {
-      await recordFinishedJob(job);
-      status.activeJobId = null;
-      status.activeSource = null;
-      if (status.pausedForWindow) await setPausedForWindow(null);
-      changed();
-      return;
-    }
-    // Turned off: no more automatic pausing or resuming; the job stays as it
-    // is for the user to resume or cancel (finished clips are still recorded).
-    if (!settings.enabled) return;
-    if (!insideWindow && !status.pausedForWindow && job.state !== 'paused') {
-      await service.pause(job.id);
-      await setPausedForWindow(job.id);
-      changed();
-    } else if (insideWindow && status.pausedForWindow) {
-      // A pause takes effect once every worker has finished its clip. Resume
-      // whether or not it already has: a pause still settling when the
-      // window opened again was never undone, and it held the job for good.
-      try { await service.resume(job.id); } catch (error) {
-        if (error?.code !== 'JOB_NOT_PAUSED') throw error;
+  async function followActiveJobs(insideWindow) {
+    for (const [sourceRoot, entry] of Object.entries(status.active)) {
+      let job;
+      try { job = await service.get(entry.jobId); } catch (_) { job = null; }
+      if (!job || TERMINAL.has(job.state)) {
+        if (job) await recordFinishedJob(job);
+        delete status.active[sourceRoot];
+        await saveState();
+        changed();
+        continue;
       }
-      await setPausedForWindow(null);
-      changed();
+      // Turned off: no more automatic pausing or resuming; the job stays as
+      // it is for the user to resume or cancel (finished clips are still
+      // recorded).
+      if (!settings.enabled) continue;
+      if (!insideWindow && !entry.pausedForWindow && job.state !== 'paused') {
+        await service.pause(job.id);
+        entry.pausedForWindow = true;
+        await saveState();
+        changed();
+      } else if (insideWindow && entry.pausedForWindow) {
+        entry.pausedForWindow = false;
+        // A pause takes effect once every worker has finished its clip.
+        // Resume whether or not it already has: a pause still settling when
+        // the window opened again was never undone, and it held the job.
+        if (!entry.pausedForDevices) await resumeJob(entry.jobId);
+        await saveState();
+        changed();
+      }
     }
   }
 
-  async function saveState(pausedJobId = status.pausedForWindow ? status.activeJobId : null) {
+  async function resumeJob(jobId) {
+    try { await service.resume(jobId); } catch (error) {
+      if (error?.code !== 'JOB_NOT_PAUSED') throw error;
+    }
+  }
+
+  async function saveState() {
     try {
-      await writeJson(STATE_FILE, { pausedForWindowJobId: pausedJobId || null, heldManual: status.heldManual, handledManual: status.handledManual });
+      const paused = Object.values(status.active).filter((entry) => entry.pausedForWindow).map((entry) => entry.jobId);
+      const forDevices = Object.values(status.active).filter((entry) => entry.pausedForDevices).map((entry) => entry.jobId);
+      await writeJson(STATE_FILE, { pausedForWindowJobIds: paused, pausedForDevicesJobIds: forDevices, heldManual: status.heldManual, handledManual: status.handledManual });
     } catch (_) { /* best effort */ }
   }
 
@@ -391,77 +435,143 @@ function createAutoConverter(options = {}) {
 
   const configFor = (sourceRoot) => settings.configs.find((config) => config.sourceRoot === sourceRoot) || null;
   // the folder whose automatic job is running (or the only one)
-  const activeConfig = () => configFor(status.activeSource) || (settings.configs.length === 1 ? settings.configs[0] : null);
+  const activeConfig = (sourceRoot = status.activeSource) => configFor(sourceRoot) || (settings.configs.length === 1 ? settings.configs[0] : null);
+  const usesOwnDevices = (lanes) => Array.isArray(lanes) && lanes.some((lane) => !isNodeDevice(lane.device));
+  const sameLanes = (a, b) => JSON.stringify(a || null) === JSON.stringify(b || null);
 
   function noteSource(sourceRoot, fields) {
     status.sources = { ...status.sources, [sourceRoot]: { ...(status.sources[sourceRoot] || {}), ...fields } };
+  }
+
+  // Each folder in the round once, one after another; a folder converting
+  // now is left to its job.
+  async function sweepRound() {
+    status.checking = true;
+    status.error = null;
+    changed();
+    try {
+      while (status.round.length && settings.enabled) {
+        const sourceRoot = status.round.shift();
+        const config = configFor(sourceRoot);
+        if (!config || status.active[sourceRoot]) continue;
+        status.activeSource = sourceRoot;
+        changed();
+        let newFiles = null;
+        let error = null;
+        try {
+          newFiles = await sweep(config);
+        } catch (sweepError) {
+          // (one vehicle's share being down never stops the others)
+          error = typeof sweepError?.code === 'string' ? sweepError.code : 'AUTO_CHECK_FAILED';
+        }
+        status.lastCheckAt = now();
+        status.lastNewFiles = newFiles;
+        if (error) status.error = error;
+        noteSource(sourceRoot, { lastCheckAt: status.lastCheckAt, lastNewFiles: newFiles, error });
+        if (newFiles > 0) status.pending[sourceRoot] = newFiles;
+        else delete status.pending[sourceRoot];
+      }
+    } finally {
+      status.checking = false;
+      changed();
+    }
+  }
+
+  async function startJob(sourceRoot, config) {
+    try {
+      const jobId = await service.start({ ...config, autoConvert: true });
+      status.active[sourceRoot] = { jobId, lanes: config.lanes || null, pausedForWindow: false, pausedForDevices: false };
+      status.lastJobId = jobId;
+      delete status.pending[sourceRoot];
+      changed();
+      return true;
+    } catch (startError) {
+      // Another conversion started meanwhile: not a failure; this folder
+      // keeps its new clips and starts once there is room.
+      if (startError?.code === 'JOB_ACTIVE') return false;
+      status.error = typeof startError?.code === 'string' ? startError.code : 'AUTO_CHECK_FAILED';
+      noteSource(sourceRoot, { error: status.error });
+      delete status.pending[sourceRoot];
+      changed();
+      return false;
+    }
+  }
+
+  // Gives each folder with a job or new clips its devices: jobs that lose a
+  // device are changed (or paused when none is left) before new jobs start.
+  async function allocate() {
+    const activeRoots = Object.keys(status.active);
+    // a job saved without per-device lanes runs alone, as before
+    if (activeRoots.some((root) => !Array.isArray(status.active[root].lanes))) return;
+    const waiting = settings.configs.map((config) => config.sourceRoot).filter((root) => status.pending[root] > 0 && !status.active[root]);
+    if (!activeRoots.length && !waiting.length) return;
+    if (!activeRoots.length) {
+      const first = configFor(waiting[0]);
+      if (!Array.isArray(first.lanes)) { await startJob(first.sourceRoot, first); return; }
+    }
+    let devices = [];
+    try { devices = (await options.devices?.()) || []; } catch (_) { devices = []; }
+    let priorities = {};
+    try { priorities = (await options.nodePriorities?.()) || {}; } catch (_) { priorities = {}; }
+    // this server's own devices: the job using them, else the next folder
+    // with new clips after the last one that had them
+    let localHolder = activeRoots.find((root) => usesOwnDevices(status.active[root].lanes)) || null;
+    if (!localHolder) {
+      const order = settings.configs.map((config) => config.sourceRoot);
+      const last = order.indexOf(status.lastLocal);
+      const candidates = waiting.filter((root) => usesOwnDevices(configFor(root)?.lanes));
+      localHolder = candidates.find((root) => order.indexOf(root) > last) || candidates[0] || null;
+    }
+    if (localHolder) status.lastLocal = localHolder;
+    const plan = planLanes({ cars: settings.configs, wanting: new Set([...activeRoots, ...waiting]), localHolder, devices, priorities });
+    for (const root of activeRoots) {
+      const entry = status.active[root];
+      const lanes = plan.get(root) || [];
+      if (!lanes.length) {
+        // its device went to the vehicle it belongs to: wait for another
+        if (!entry.pausedForDevices) {
+          try { await service.pause(entry.jobId); entry.pausedForDevices = true; } catch (_) { /* finished meanwhile */ }
+          await saveState();
+          changed();
+        }
+        continue;
+      }
+      if (!sameLanes(entry.lanes, lanes)) {
+        try { await service.setLanes(entry.jobId, lanes); entry.lanes = lanes; } catch (_) { /* finished meanwhile */ }
+        changed();
+      }
+      if (entry.pausedForDevices) {
+        entry.pausedForDevices = false;
+        if (!entry.pausedForWindow) await resumeJob(entry.jobId).catch(() => undefined);
+        await saveState();
+        changed();
+      }
+    }
+    for (const root of waiting) {
+      const lanes = plan.get(root);
+      if (!lanes?.length || !settings.enabled) continue;
+      await startJob(root, { ...configFor(root), lanes, concurrency: lanesTotal(lanes) });
+    }
   }
 
   async function tickOnce() {
     const time = now();
     const insideWindow = insideWindowAt(time);
     await holdManualJobs(insideWindow);
-    if (status.activeJobId) {
-      await followActiveJob(insideWindow);
-      if (status.activeJobId) return;
-    }
+    await followActiveJobs(insideWindow);
     if (!settings.enabled || !insideWindow) return;
-    // A round checks every automatic folder once, one after another; a
-    // folder with new clips is converted before the next one is checked.
+    if (await isBusy()) return;
     const known = new Set(settings.configs.map((config) => config.sourceRoot));
     status.round = status.round.filter((sourceRoot) => known.has(sourceRoot));
-    if (!status.round.length) {
-      if (status.nextCheckAt !== null && time < status.nextCheckAt) return;
-      if (await isBusy()) return;
+    for (const root of Object.keys(status.pending)) if (!known.has(root)) delete status.pending[root];
+    if (!status.round.length && (status.nextCheckAt === null || time >= status.nextCheckAt)) {
       status.round = [...known];
       status.nextCheckAt = time + settings.intervalMinutes * 60_000;
-    } else if (await isBusy()) return;
-    status.checking = true;
-    status.error = null;
-    changed();
-    try {
-      while (status.round.length && settings.enabled && !status.activeJobId) {
-        const sourceRoot = status.round[0];
-        const config = configFor(sourceRoot);
-        status.activeSource = sourceRoot;
-        changed();
-        let newFiles = null;
-        let error = null;
-        try {
-          if (config) newFiles = await sweep(config);
-        } catch (sweepError) {
-          // (one vehicle's share being down never stops the others)
-          error = typeof sweepError?.code === 'string' ? sweepError.code : 'AUTO_CHECK_FAILED';
-        }
-        status.round.shift();
-        status.lastCheckAt = now();
-        status.lastNewFiles = newFiles;
-        if (error) status.error = error;
-        noteSource(sourceRoot, { lastCheckAt: status.lastCheckAt, lastNewFiles: newFiles, error });
-        if (config && newFiles > 0 && settings.enabled) {
-          try {
-            const jobId = await service.start({ ...config, autoConvert: true });
-            status.activeJobId = jobId;
-            status.lastJobId = jobId;
-          } catch (startError) {
-            if (startError?.code === 'JOB_ACTIVE') {
-              // Another conversion started while this check ran: not a
-              // failure; this folder is checked again once it is finished.
-              status.round.unshift(sourceRoot);
-              break;
-            }
-            status.error = typeof startError?.code === 'string' ? startError.code : 'AUTO_CHECK_FAILED';
-            noteSource(sourceRoot, { error: status.error });
-          }
-        }
-      }
-    } finally {
-      if (!status.activeJobId) status.activeSource = null;
-      // a round begun for a folder just turned on also sets the next check
-      if (!status.round.length && status.nextCheckAt === null) status.nextCheckAt = now() + settings.intervalMinutes * 60_000;
-      status.checking = false;
-      changed();
     }
+    if (status.round.length) await sweepRound();
+    // a round begun for a folder just turned on also sets the next check
+    if (status.nextCheckAt === null) status.nextCheckAt = now() + settings.intervalMinutes * 60_000;
+    await allocate();
   }
 
   function tick() {
@@ -485,18 +595,23 @@ function createAutoConverter(options = {}) {
       const stored = await readJson(SETTINGS_FILE);
       try { if (stored) settings = normalizeSettings(stored); } catch (_) { settings = { ...DEFAULT_SETTINGS }; }
       for (const config of settings.configs) await loadIndex(config);
-      // Adopt an automatic job that was still running when the app closed.
+      // Adopt the automatic jobs still running when the app closed.
       try {
         const jobs = await service.list();
-        const running = jobs.find((job) => job.config?.autoConvert === true && !TERMINAL.has(job.state));
-        if (running) {
+        const saved = await readJson(STATE_FILE);
+        const pausedIds = new Set([...(Array.isArray(saved?.pausedForWindowJobIds) ? saved.pausedForWindowJobIds : []), saved?.pausedForWindowJobId].filter(Boolean));
+        const forDevices = new Set(Array.isArray(saved?.pausedForDevicesJobIds) ? saved.pausedForDevicesJobIds : []);
+        for (const running of jobs) {
+          if (running.config?.autoConvert !== true || TERMINAL.has(running.state) || typeof running.config.sourceRoot !== 'string') continue;
           await loadIndex(running.config);
-          status.activeJobId = running.id;
-          status.activeSource = running.config.sourceRoot || null;
           // Only a pause this feature made is undone automatically.
-          const saved = await readJson(STATE_FILE);
-          status.pausedForWindow = running.state === 'paused' && saved?.pausedForWindowJobId === running.id;
+          status.active[running.config.sourceRoot] = {
+            jobId: running.id, lanes: running.config.lanes || null,
+            pausedForWindow: running.state === 'paused' && pausedIds.has(running.id),
+            pausedForDevices: running.state === 'paused' && forDevices.has(running.id)
+          };
         }
+        changed();
       } catch (_) { /* nothing to adopt */ }
       // manual jobs paused for the window before a restart
       try {
@@ -550,10 +665,10 @@ function createAutoConverter(options = {}) {
       await saveState();
       changed();
     },
-    // Parallel conversions changed on the running automatic job: later
-    // automatic jobs use the same number.
-    async setConcurrency(value) {
-      const current = activeConfig();
+    // Parallel conversions changed on a running automatic job: later
+    // automatic jobs for that folder use the same number.
+    async setConcurrency(value, sourceRoot) {
+      const current = activeConfig(sourceRoot);
       if (!current || (current.concurrency === value && !current.lanes)) return getState();
       // the running job has one number for all; the saved setting follows it
       const { lanes: _lanes, ...config } = current;
@@ -563,9 +678,9 @@ function createAutoConverter(options = {}) {
       return getState();
     },
     // Conversions at once per GPU changed on the running automatic job.
-    async setLanes(value) {
+    async setLanes(value, sourceRoot) {
       const lanes = normalizeLanes(value);
-      const current = activeConfig();
+      const current = activeConfig(sourceRoot);
       if (!current || !lanes) return getState();
       if (JSON.stringify(current.lanes || null) === JSON.stringify(lanes)) return getState();
       settings = { ...settings, configs: settings.configs.map((c) => (c === current ? { ...c, lanes, concurrency: lanesTotal(lanes) } : c)) };
@@ -587,4 +702,4 @@ function createAutoConverter(options = {}) {
   });
 }
 
-module.exports = { createAutoConverter, INTERVAL_MINUTES, inWindow, CONVERTER_REVISION };
+module.exports = { createAutoConverter, planLanes, INTERVAL_MINUTES, inWindow, CONVERTER_REVISION };

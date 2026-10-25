@@ -2471,15 +2471,34 @@ function createConverterJobService(deps) {
     return tracked;
   }
 
+  // Automatic jobs for different vehicles may run side by side when they
+  // share no device (a GPU or a node): each has lanes of its own. Anything
+  // else (a job started by hand, one without lanes) runs alone, as always.
+  function mayRunAlongside(config, others) {
+    const devicesOf = (c) => (Array.isArray(c?.lanes) ? c.lanes.map((lane) => lane.device) : null);
+    const mine = devicesOf(config);
+    if (config?.autoConvert !== true || !mine?.length) return false;
+    const taken = new Set();
+    for (const other of others) {
+      const theirs = devicesOf(other.config);
+      if (other.config?.autoConvert !== true || !theirs?.length || other.config.sourceRoot === config.sourceRoot) return false;
+      // a paused job uses no device (automatic conversion gives it devices
+      // again before it resumes it)
+      if (other.state === 'paused') continue;
+      for (const device of theirs) taken.add(device);
+    }
+    return mine.every((device) => !taken.has(device));
+  }
+
   async function startUnlocked(config) {
     if (shuttingDown) throw serviceError('SERVICE_SHUTDOWN');
     const persistedJobs = await store.list();
-    if (persistedJobs.some((manifest) => ACTIVE_STATES.has(manifest.state))) throw serviceError('JOB_ACTIVE');
+    const active = new Map();
+    for (const manifest of persistedJobs) if (ACTIVE_STATES.has(manifest.state)) active.set(manifest.id, manifest);
     for (const runtime of jobs.values()) {
-      if (ACTIVE_STATES.has(runtime.manifest.state) && !TERMINAL_STATES.has(runtime.manifest.state)) {
-        throw serviceError('JOB_ACTIVE');
-      }
+      if (ACTIVE_STATES.has(runtime.manifest.state) && !TERMINAL_STATES.has(runtime.manifest.state)) active.set(runtime.manifest.id, runtime.manifest);
     }
+    if (active.size > 0 && !mayRunAlongside(config, [...active.values()])) throw serviceError('JOB_ACTIVE');
     const created = await store.create({
       config: clone(config),
       state: 'discovering',
