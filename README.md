@@ -224,7 +224,9 @@ copies somewhere else is a choice you make in the Output section.
 - **Benchmark.** Runs the real converter on copies of a few of your clips
   at 1, 2, 4, 6 and 8 at once, on the server, and suggests the lightest
   setting within 5% of the fastest, and, when the server reports its power,
-  the most efficient one (files per kWh). Your footage is only read.
+  the most efficient one (files per kWh). Your footage is only read. It
+  needs original (H.264) clips and looks for them, newest first, through the
+  whole source folder, so an archive that is mostly converted works too.
 - **Safe replacement.** In replace mode an original is only removed after its
   converted copy is verified, and only if it is still exactly the file that
   was converted (device, inode, size and SHA-256 are checked). The copy is
@@ -320,17 +322,25 @@ say) can encode clips for this one. It becomes one more row under
 3. Under **Encoder → Parallel conversions**, set how many clips the node
    converts at once.
 
+**Rename** gives a node a name of your own here (shown on the Nodes page and
+under Parallel conversions); the node keeps its own name. On the node,
+**Encode with** chooses how it encodes: its **GPU** (the default; the CPU only
+on a computer without one), **GPU, then CPU if it fails**, or **CPU only**. A clip the node can't encode comes back here.
+
 **Benchmark a node** from here: **Nodes → Benchmark** (or **Benchmark AV1**)
 lends the node a few sample clips from your footage and converts them at 1,
 2, 4, 6 and 8 at once, timing each level. The node needs no footage of its
-own; the encoded files are deleted and the footage is only read. **Use N at
-once** then sets the node to the lightest setting within 5% of the fastest,
-and its row under Parallel conversions too.
+own; the encoded files are deleted and the footage is only read. It lends
+original (H.264) clips, newest first, from anywhere in your footage; when the
+Encoder has converted them all, it lends converted ones and says so. **Use N
+at once** then sets the node to the lightest setting within 5% of the
+fastest, and its row under Parallel conversions too.
 
 This server reads each clip from the share, sends it to the node over HTTPS,
 gets the encoded file back, and then writes the telemetry, verifies it and
 saves it exactly as it does for its own GPUs. If a node is offline or fails
-a clip, that clip is encoded here on the CPU instead.
+a clip, that clip is encoded here instead, on this server's GPU when it has
+one (the CPU otherwise).
 
 Security:
 
@@ -353,7 +363,8 @@ Security:
   its unprivileged app user.
 - **Nothing is trusted on the way back.** Every file a node returns is
   compared picture by picture with the original here (black, blurred or
-  swapped footage is caught and the clip is encoded here instead), then
+  swapped footage is caught and the clip is encoded here instead; both are
+  decoded on this server's GPU when it has one), then
   verified like any other (frames, timing, telemetry) before an original is
   replaced. A node can never send back more than twice the clip's size, and
   one that stalls or misbehaves cannot hold up this server.

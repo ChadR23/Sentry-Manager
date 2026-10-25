@@ -42,6 +42,9 @@ const DONE_TTL_MS = 10 * 60_000;
 const STALL_MS = 10 * 60_000;
 // a job its main stopped asking about (the main crashed or lost the id)
 const ORPHAN_MS = 5 * 60_000;
+// Encode with: the GPU (the CPU only without one), the GPU and the CPU for
+// clips the GPU fails, or the CPU only
+const USES = ['gpu', 'gpu-cpu', 'cpu'];
 const BAD_TOKEN_LIMIT = 20;
 const BAD_TOKEN_WINDOW_MS = 10 * 60_000;
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O, 1/I
@@ -105,6 +108,7 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
     return {
       enabled: s.enabled === true,
       slots: Number.isSafeInteger(s.slots) && s.slots >= 1 && s.slots <= MAX_SLOTS ? s.slots : DEFAULT_SLOTS,
+      use: USES.includes(s.use) ? s.use : 'gpu',
       mains: Array.isArray(s.mains) ? s.mains.filter((m) => m && typeof m.tokenHash === 'string') : []
     };
   };
@@ -122,15 +126,20 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
     return {
       enabled: s.enabled,
       slots: s.slots,
+      use: s.use,
       busy: running().length,
       pairing: live ? { code: live.code, expiresAt: live.expiresAt } : null,
       mains: s.mains.map((m) => ({ id: m.id, name: m.name, address: m.address || null, pairedAt: m.pairedAt, lastSeenAt: m.lastSeenAt || null }))
     };
   }
 
-  function setEnabled(enabled, slots) {
+  function setEnabled(enabled, slots, use) {
     const s = settings();
     const next = { ...s, enabled: enabled === true };
+    if (use !== undefined) {
+      if (!USES.includes(use)) throw Object.assign(new Error('Encode with: gpu, gpu-cpu or cpu.'), { status: 400 });
+      next.use = use;
+    }
     if (slots !== undefined) {
       if (!Number.isSafeInteger(slots) || slots < 1 || slots > MAX_SLOTS) throw Object.assign(new Error(`Clips at once: 1 to ${MAX_SLOTS}.`), { status: 400 });
       next.slots = slots;
@@ -248,15 +257,15 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
 
   async function info() {
     const rt = runtime();
+    const s = settings();
     const encoders = {};
     for (const family of ['h265', 'av1']) {
       try {
-        const chosen = rt ? await rt.selectEncoder(family) : null;
+        const chosen = !rt ? null : s.use === 'cpu' ? await rt.cpuEncoder(family) : await rt.selectEncoder(family);
         encoders[family] = chosen?.codec || null;
       } catch { encoders[family] = null; }
     }
-    const s = settings();
-    return { name, encoders, slots: s.slots, busy: running().length };
+    return { name, encoders, slots: s.slots, use: s.use, busy: running().length };
   }
 
   const running = () => [...jobs.values()].filter((job) => job.state === 'receiving' || job.state === 'encoding');
@@ -299,21 +308,31 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
   }, 60_000);
   sweeper.unref?.();
 
-  /** Encode attempts, fastest first: GPU encode + decode, GPU encode, CPU. */
+  /**
+   * Encode attempts, fastest first, as Encode with says: GPU encode + decode,
+   * then GPU encode; the CPU only when set to, or when there is no GPU. A clip
+   * that fails here goes back to the main, which encodes it itself.
+   */
   async function attemptsFor(codec, holdFrames) {
     const rt = runtime();
     if (!rt) throw Object.assign(new Error('The converter is starting.'), { status: 503 });
+    const { use } = settings();
     const list = [];
     let selected = null;
-    try { selected = await rt.selectEncoder(codec); } catch { selected = null; }
-    if (selected?.hardware === true) {
+    if (use !== 'cpu') {
+      try { selected = await rt.selectEncoder(codec); } catch { selected = null; }
+    }
+    const gpu = selected?.hardware === true;
+    if (gpu) {
       const device = selected.device || null;
       const accel = decodeAccelArgs(selected.codec, { platform, ...(device ? { device } : {}) });
       if (accel) list.push({ encoder: selected.codec, device, decode: accel });
       list.push({ encoder: selected.codec, device, decode: [] });
     }
-    const cpu = await rt.cpuEncoder(codec);
-    list.push({ encoder: cpu.codec, device: null, decode: [] });
+    if (!gpu || use === 'gpu-cpu') {
+      const cpu = await rt.cpuEncoder(codec);
+      list.push({ encoder: cpu.codec, device: null, decode: [] });
+    }
     // held lead-in frames need system-memory frames: no GPU frame output
     return list.map((a) => ({ ...a, holdFrames }));
   }
@@ -371,9 +390,18 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
           }
         }
       });
-      child.stderr.on('data', () => {});
+      let errors = '';
+      child.stderr.on('data', (chunk) => { errors = `${errors}${chunk}`.slice(-400); });
       child.once('error', () => { clearTimeout(stall); resolve(false); });
-      child.once('close', (code) => { clearTimeout(stall); job.child = null; resolve(code === 0); });
+      child.once('close', (code) => {
+        clearTimeout(stall);
+        job.child = null;
+        if (code !== 0 && !job.stopped) {
+          const why = errors.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').trim().slice(-200) || `exit ${code}`;
+          log.warn(`Node: ${attempt.encoder}${attempt.decode.length ? ' (GPU decode)' : ''} could not encode a clip from ${job.mainName}: ${why}`);
+        }
+        resolve(code === 0);
+      });
     });
   }
 
@@ -512,7 +540,8 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
     for (const job of jobs.values()) stopJob(job);
   }
 
-  return { handle, status, setEnabled, startPairing, cancelPairing, revoke, close };
+  // attempts: the encoders a clip is tried with, in order (Encode with)
+  return { handle, status, setEnabled, startPairing, cancelPairing, revoke, close, attempts: attemptsFor };
 }
 
 module.exports = { createNodeWorker, parseJobSettings, pairText, certFingerprint, newPairingCode, normalizeCode, hmac, sameHex };

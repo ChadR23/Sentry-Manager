@@ -26,6 +26,10 @@ const { createConverterJobService } = require('./jobService');
 const { createConvertedIndex } = require('./convertedIndex');
 const { readMp4VideoCodec } = require('./mp4Header');
 
+// The Encoder benchmark's search for original clips (findBenchmarkClips)
+const BENCHMARK_SCAN_LIMIT = 500_000;
+const BENCHMARK_HEADER_CHECKS = 20_000;
+
 const ACTIVE_RECOVERY_STATES = new Set([
   'discovering', 'waiting', 'staging', 'encoding', 'writing-telemetry',
   'verifying', 'copying', 'replacing', 'paused', 'paused_network'
@@ -679,7 +683,17 @@ async function createConverterRuntime(options = {}) {
     return options.spawn(command, args, { ...spawnOptions, ...cudaOrderOptions(args, spawnOptions), shell: false, windowsHide: true });
   };
   // a paired node's encode must show the original's pictures (pictureCheck.js)
-  const decodeGrey = ffmpegDecoder({ spawn: options.spawn, ffmpegPath: options.ffmpegPath });
+  // Both files are decoded on this server's GPU when it has one (the CPU
+  // decoding them for every node clip costs more than the node saves).
+  const decodeGrey = ffmpegDecoder({
+    spawn: options.spawn,
+    ffmpegPath: options.ffmpegPath,
+    accel: options.gpuDecode === false ? null : async () => {
+      const encoder = await planner.select('h265').catch(() => null);
+      if (encoder?.hardware !== true) return null;
+      return decodeAccelArgs(encoder.codec, { platform, ...(encoder.device ? { device: encoder.device } : {}) });
+    }
+  });
   const comparePicture = (request) => comparePictures({ ...request, decode: decodeGrey });
   // Everything a converter service needs besides its job store and staging
   // area; the benchmark builds an identical, isolated service from this.
@@ -948,30 +962,41 @@ async function createConverterRuntime(options = {}) {
   }
   async function findBenchmarkClips(sourceRoot, signal) {
     if (typeof sourceRoot !== 'string' || sourceRoot.length === 0) return [];
-    // In an archive that is partly converted the first folders hold mostly
-    // converted clips (and the odd original that failed before), so look
-    // through a few thousand files. Converted clips are far smaller than the
-    // originals, so the largest are tried first; at most 64 are inspected.
+    // In an archive that is mostly converted the originals left are few and
+    // anywhere (usually the newest), so the whole archive is listed and the
+    // clips' MP4 headers (a few small reads each) are checked newest first
+    // until enough originals are found. Of those, the largest (full-length
+    // clips) are inspected properly; at most 64.
     const found = [];
     try {
       for await (const item of scanTeslaFootage({ sourceRoot }, { signal, path: pathApi, platform, concurrency: 16 })) {
         if (item.kind === 'video') found.push(item);
-        if (found.length >= 4000) break;
+        if (found.length >= BENCHMARK_SCAN_LIMIT) break;
       }
     } catch (_) { return []; }
+    found.sort((left, right) => pathApi.basename(right.sourcePath).localeCompare(pathApi.basename(left.sourcePath)));
+    const originals = [];
+    const seen = new Set();
+    let checked = 0;
+    for (let at = 0; at < found.length && originals.length < 24 && checked < BENCHMARK_HEADER_CHECKS; at += 16) {
+      if (signal?.aborted) return [];
+      const batch = found.slice(at, at + 16);
+      checked += batch.length;
+      const codecs = await Promise.all(batch.map((item) => readMp4VideoCodec(item.sourcePath, { fs: pfs, size: item.sourceBytes, signal }).catch(() => null)));
+      batch.forEach((item, i) => {
+        const name = pathApi.basename(item.sourcePath);
+        if (codecs[i] === 'h264' && !seen.has(name)) { seen.add(name); originals.push(item); }
+      });
+    }
     const clips = [];
-    const names = new Set();
     let inspected = 0;
-    for (const item of found.sort((left, right) => right.sourceBytes - left.sourceBytes)) {
-      const name = pathApi.basename(item.sourcePath);
-      if (names.has(name)) continue;
+    for (const item of originals.sort((left, right) => right.sourceBytes - left.sourceBytes)) {
       if (inspected >= 64) break;
       inspected += 1;
       try {
         if ((await inspectVideo(item, item.sourcePath, signal)).codec !== 'h264') continue;
       } catch (_) { continue; }
-      names.add(name);
-      clips.push({ sourcePath: item.sourcePath, name });
+      clips.push({ sourcePath: item.sourcePath, name: pathApi.basename(item.sourcePath) });
       if (clips.length >= 8) break;
     }
     return clips;

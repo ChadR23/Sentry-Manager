@@ -1656,7 +1656,7 @@
       const codec = b.codec === 'av1' ? 'AV1' : 'H.265';
       const rows = b.results.map((r) => `<tr${r.level === b.suggested ? ' class="is-best"' : ''}><td>${r.level} at once</td><td>${r.failed ? `${r.failed} failed` : `${r.clipsPerMinute} clips/min`}</td><td class="muted small">${r.clips} clips in ${r.seconds} s</td></tr>`).join('');
       return `<tr class="node-bench-row"><td colspan="5"><div class="node-bench">
-        <div><b>Benchmark, ${codec}</b> <span class="muted small">${b.state === 'running' ? esc(b.phase || 'Running') + '…' : b.state === 'failed' ? `failed: ${esc(b.error || '')}` : b.state === 'cancelled' ? 'cancelled' : `done${b.samples ? ` · ${plural(b.samples, 'sample clip')} from your footage, only read` : ''}`}</span></div>
+        <div><b>Benchmark, ${codec}</b> <span class="muted small">${b.state === 'running' ? esc(b.phase || 'Running') + '…' : b.state === 'failed' ? `failed: ${esc(b.error || '')}` : b.state === 'cancelled' ? 'cancelled' : `done${b.samples ? ` · ${plural(b.samples, 'sample clip')} from your footage, only read${b.converted ? ' (already converted ones: no originals are left)' : ''}` : ''}`}</span></div>
         ${rows ? `<table class="table" style="margin-top:8px"><tbody>${rows}</tbody></table>` : ''}
         <div class="form-actions" style="margin-top:8px">
           ${b.state === 'running' ? `<button class="btn sm" data-bench-cancel="${esc(n.id)}">Cancel</button>`
@@ -1669,7 +1669,7 @@
         <td>${n.online ? '<span class="chip green"><span class="dot ok"></span>Online</span>' : `<span class="chip red"><span class="dot bad"></span>Offline</span><br><span class="muted small words">${esc(n.error || '')}</span>`}</td>
         <td class="small">${encodersText(n.encoders)}</td>
         <td class="small">${n.online && n.slots ? `${n.busy ?? 0} of ${n.slots} busy` : '—'}</td>
-        <td class="actions">${n.online && !benches[n.id] ? `<button class="btn sm" data-bench-start="${esc(n.id)}" data-codec="h265"${benchRunning ? ' disabled' : ''}>Benchmark</button>${n.encoders?.av1 ? `<button class="btn sm" data-bench-start="${esc(n.id)}" data-codec="av1"${benchRunning ? ' disabled' : ''}>Benchmark AV1</button>` : ''}` : ''}<button class="btn sm" data-remove-node="${esc(n.id)}">Remove</button></td></tr>${benchPanel(n)}`).join('');
+        <td class="actions">${n.online && !benches[n.id] ? `<button class="btn sm" data-bench-start="${esc(n.id)}" data-codec="h265"${benchRunning ? ' disabled' : ''}>Benchmark</button>${n.encoders?.av1 ? `<button class="btn sm" data-bench-start="${esc(n.id)}" data-codec="av1"${benchRunning ? ' disabled' : ''}>Benchmark AV1</button>` : ''}` : ''}<button class="btn sm" data-rename-node="${esc(n.id)}">Rename</button><button class="btn sm" data-remove-node="${esc(n.id)}">Remove</button></td></tr>${benchPanel(n)}`).join('');
     const pairing = worker.pairing;
     const mins = pairing ? Math.max(1, Math.round((pairing.expiresAt - Date.now()) / 60000)) : 0;
     const mainRows = worker.mains.map((m) => `<tr>
@@ -1696,6 +1696,7 @@
         <div class="form" style="margin-top:14px">
           <label class="check"><input type="checkbox" id="worker-on"${worker.enabled ? ' checked' : ''}> Encode for paired main servers</label>
           <label class="field">Clips at once<select class="input" id="worker-slots">${[1, 2, 3, 4, 6, 8].map((n) => `<option${n === worker.slots ? ' selected' : ''}>${n}</option>`).join('')}</select></label>
+          <label class="field">Encode with<select class="input" id="worker-use">${[['gpu', 'GPU (CPU only without a GPU)'], ['gpu-cpu', 'GPU, then CPU if it fails'], ['cpu', 'CPU only']].map(([v, t]) => `<option value="${v}"${v === worker.use ? ' selected' : ''}>${t}</option>`).join('')}</select></label>
         </div>
         ${pairing ? `<div class="note green pair-code" style="margin-top:14px">
             <div class="muted small">Pairing code (one use, ${plural(mins, 'minute')} left)</div>
@@ -1763,6 +1764,22 @@
       };
       setTimeout(follow, 2500);
     }
+    page.querySelectorAll('[data-rename-node]').forEach((b) => {
+      b.onclick = async () => {
+        const n = nodes.find((x) => x.id === b.dataset.renameNode);
+        const asked = confirmDialog({ title: 'Rename node', ok: 'Save',
+          body: `<label class="field">Name<input class="input" id="node-new-name" maxlength="64" autocomplete="off" value="${esc(n?.name || '')}"></label><p class="muted small">Shown here and under Encoder → Parallel conversions. The node itself keeps its own name.</p>` });
+        const input = $('node-new-name');
+        input.select();
+        // Enter saves (the dialog's first button is Cancel)
+        input.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); $('dialog').close('ok'); } };
+        const ok = await asked;
+        const name = input.value.trim();
+        if (!ok || !name || name === n?.name) return;
+        await api(`/api/nodes/${encodeURIComponent(b.dataset.renameNode)}`, { method: 'PUT', body: { name } }).catch((err) => toast(err.message, true));
+        render();
+      };
+    });
     page.querySelectorAll('[data-remove-node]').forEach((b) => {
       b.onclick = async () => {
         const n = nodes.find((x) => x.id === b.dataset.removeNode);
@@ -1774,12 +1791,13 @@
     if (!worker.available) return;
     const saveWorker = async () => {
       try {
-        await api('/api/nodes/worker', { body: { enabled: $('worker-on').checked, slots: Number($('worker-slots').value) } });
+        await api('/api/nodes/worker', { body: { enabled: $('worker-on').checked, slots: Number($('worker-slots').value), use: $('worker-use').value } });
       } catch (err) { toast(err.message, true); }
       render();
     };
     $('worker-on').onchange = saveWorker;
     $('worker-slots').onchange = saveWorker;
+    $('worker-use').onchange = saveWorker;
     if ($('pair-start')) $('pair-start').onclick = async () => {
       try { await api('/api/nodes/worker/pair', { body: {} }); } catch (err) { toast(err.message, true); }
       render();

@@ -281,6 +281,16 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
     return node;
   }
 
+  /** A name of your own for the node (the node keeps its own). */
+  function rename(id, newName) {
+    const node = byId(id);
+    if (!node) return null;
+    const clean = peerText(newName, 64);
+    if (!clean) throw nodeError('Enter a name.');
+    save(stored().map((n) => (n.id === id ? { ...n, name: clean } : n)));
+    return { previous: node.name, name: clean };
+  }
+
   function remove(id) {
     const node = byId(id);
     if (!node) return null;
@@ -438,7 +448,7 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
     return info.get(id);
   }
 
-  return { list, overview, add, remove, encode, setSlots, has: (id) => Boolean(byId(id)), refresh: (id) => (byId(id) ? refresh(byId(id)) : null) };
+  return { list, overview, add, rename, remove, encode, setSlots, has: (id) => Boolean(byId(id)), refresh: (id) => (byId(id) ? refresh(byId(id)) : null) };
 }
 
 module.exports = { createNodes, parseAddress, connectPinned, pinMatches };

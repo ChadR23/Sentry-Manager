@@ -269,3 +269,59 @@ test('the runtime hands its power meter to the benchmark', { skip: !hasFfmpeg &&
     await fsp.rm(dir, { recursive: true, force: true });
   }
 });
+
+// A mostly converted archive: thousands of H.265 clips are scanned first, and
+// the one original left is the newest, in another folder. The benchmark still finds it.
+test('the benchmark finds the originals left anywhere in a mostly converted archive', { skip: !hasFfmpeg && 'needs ffmpeg', timeout: 180_000 }, async () => {
+  const { createConverterRuntime } = require('../src/main/converter/runtime');
+  const { createTeslaH264Fixture } = require('./fixtures/ffmpegFixtures');
+  const { spawn, spawnSync } = require('child_process');
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sm-bench-deep-'));
+  try {
+    const tesla = path.join(dir, 'footage', 'TeslaCam');
+    // SavedClips is scanned first: it holds the converted clips
+    const saved = path.join(tesla, 'SavedClips', '2026-01-01_00-00-00');
+    const recent = path.join(tesla, 'RecentClips');
+    await fsp.mkdir(saved, { recursive: true });
+    await fsp.mkdir(recent, { recursive: true });
+    for (const name of ['data', 'temp']) await fsp.mkdir(path.join(dir, name));
+    const original = path.join(recent, '2026-10-24_09-00-00-front.mp4');
+    await createTeslaH264Fixture({
+      ffmpegPath: 'ffmpeg', outputPath: original, durationSeconds: 1, frameRate: 12,
+      size: '160x120', telemetryPattern: Array.from({ length: 12 }, (_, n) => Buffer.from([0x20, n]))
+    });
+    const hevc = path.join(dir, 'converted.mp4');
+    assert.equal(spawnSync('ffmpeg', ['-v', 'error', '-i', original, '-c:v', 'libx265', '-x265-params', 'log-level=none', '-tag:v', 'hvc1', hevc]).status, 0);
+    // 4,200 converted clips (hard links of one), all older than the original
+    for (let n = 0; n < 4200; n++) {
+      const t = new Date(Date.UTC(2026, 0, 1) + n * 60_000).toISOString().slice(0, 19).replace('T', '_').replace(/:/g, '-');
+      fs.linkSync(hevc, path.join(saved, `${t}-front.mp4`));
+    }
+    let seenSource = null;
+    const fakeService = () => {
+      const started = new Map();
+      return {
+        start: async (config) => { const id = `job-${started.size + 1}`; started.set(id, config); seenSource = config.sourceRoot; return id; },
+        whenIdle: async (id) => ({
+          items: fs.readdirSync(path.join(started.get(id).sourceRoot, 'RecentClips'))
+            .map((n) => ({ state: 'completed', relativePath: `RecentClips/${n}`, sourceBytes: 100, outputBytes: 50 }))
+        }),
+        cancel: async () => {}, shutdown: async () => {}, list: async () => [], subscribe: () => () => {}, activeEncodes: () => []
+      };
+    };
+    const runtime = await createConverterRuntime({
+      userDataPath: await fsp.realpath(path.join(dir, 'data')), tempPath: await fsp.realpath(path.join(dir, 'temp')),
+      ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe', spawn, autoConvert: false,
+      factories: { createConverterJobService: fakeService }
+    });
+    try {
+      const out = await runtime.runBenchmark({ codecs: ['h265'], sourceRoot: tesla });
+      assert.equal(out.codecs[0].error, undefined, `benchmark ran (${out.codecs[0].error})`);
+      assert.ok(seenSource, 'the benchmark ran its levels');
+    } finally {
+      await runtime.shutdown();
+    }
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});

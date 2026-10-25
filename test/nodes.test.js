@@ -384,10 +384,45 @@ test('benchmark: sample clips are H.264 Tesla clips, newest first, one camera ea
     }
     const codecOf = async (file) => (file.includes('10-20') ? 'h265' : 'h264');
     const picked = await pickSamples(dir, { codecOf, minBytes: 1024 });
-    assert.deepEqual(picked.map((p) => path.basename(p)), ['2026-10-21_10-00-00-front.mp4', '2026-10-21_10-00-00-back.mp4']);
+    assert.deepEqual(picked.files.map((p) => path.basename(p)), ['2026-10-21_10-00-00-front.mp4', '2026-10-21_10-00-00-back.mp4']);
+    assert.equal(picked.converted, false);
   } finally {
     await fsp.rm(dir, { recursive: true, force: true });
   }
+});
+
+test('benchmark: originals are found past hundreds of converted clips; with none left, converted clips are lent', async () => {
+  const dir = await tmp();
+  try {
+    const recent = path.join(dir, 'RecentClips');
+    const saved = path.join(dir, 'SavedClips', '2026-01-01_00-00-00');
+    fs.mkdirSync(recent);
+    fs.mkdirSync(saved, { recursive: true });
+    // 600 newer clips, all converted, and one older original in SavedClips
+    for (let n = 0; n < 600; n++) fs.writeFileSync(path.join(recent, `2026-10-${String(1 + Math.floor(n / 60)).padStart(2, '0')}_10-${String(n % 60).padStart(2, '0')}-00-front.mp4`), Buffer.alloc(2048));
+    fs.writeFileSync(path.join(saved, '2026-01-01_00-00-00-back.mp4'), Buffer.alloc(2048));
+    const codecOf = async (file) => (file.endsWith('-back.mp4') ? 'h264' : 'h265');
+    const picked = await pickSamples(dir, { codecOf, minBytes: 1024 });
+    assert.deepEqual(picked.files.map((p) => path.basename(p)), ['2026-01-01_00-00-00-back.mp4']);
+    assert.equal(picked.converted, false);
+
+    const none = await pickSamples(dir, { codecOf: async () => 'h265', minBytes: 1024 });
+    assert.equal(none.files.length, 4);
+    assert.equal(none.converted, true, 'converted clips stand in when no original is left');
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a node can be given a name of your own; empty names are refused', () => {
+  const db = memDb();
+  db.set('nodes', [{ id: 'abcdefghijkl', name: 'garage-pc', host: '10.0.0.5', port: 9000, token: 't'.repeat(43), pin: { fingerprint: '00' } }]);
+  const nodes = createNodes({ db, log: quiet, audit: quiet, name: 'main-nas' });
+  assert.deepEqual(nodes.rename('abcdefghijkl', '  Garage 4070 Ti\n'), { previous: 'garage-pc', name: 'Garage 4070 Ti' });
+  assert.equal(db.get('nodes')[0].name, 'Garage 4070 Ti');
+  assert.equal(db.get('nodes')[0].token, 't'.repeat(43), 'nothing else changes');
+  assert.throws(() => nodes.rename('abcdefghijkl', '   '), /Enter a name/);
+  assert.equal(nodes.rename('nope', 'x'), null);
 });
 
 test('benchmark: real clips lent to a real node, timed per level, encodes deleted, footage untouched', { skip: !hasTools, timeout: 300_000 }, async () => {
@@ -427,4 +462,61 @@ test('benchmark: real clips lent to a real node, timed per level, encodes delete
     w.worker.close();
     await fsp.rm(dir, { recursive: true, force: true });
   }
+});
+
+test('Encode with: GPU only by default, the CPU as well only when chosen, or the CPU alone', async () => {
+  const dir = await tmp();
+  try {
+    let hasGpu = true;
+    const runtime = {
+      selectEncoder: async () => (hasGpu ? { codec: 'hevc_vaapi', hardware: true, device: { node: '/dev/dri/renderD128' } } : { codec: 'libx265', hardware: false }),
+      cpuEncoder: async () => ({ codec: 'libx265', hardware: false })
+    };
+    const worker = createNodeWorker({ db: memDb(), log: quiet, audit: quiet, workDir: path.join(dir, 'work'), runtime: () => runtime, platform: 'linux' });
+    const encoders = async () => (await worker.attempts('h265', 0)).map((a) => a.encoder);
+    assert.equal(worker.status().use, 'gpu');
+    assert.equal((await encoders()).includes('libx265'), false, 'a GPU clip that fails goes back to the main, not to this CPU');
+    assert.ok((await encoders()).every((e) => e === 'hevc_vaapi'));
+    worker.setEnabled(true, 2, 'gpu-cpu');
+    assert.equal((await encoders()).at(-1), 'libx265');
+    worker.setEnabled(true, 2, 'cpu');
+    assert.deepEqual(await encoders(), ['libx265']);
+    worker.setEnabled(true, 2, 'gpu');
+    hasGpu = false;
+    assert.deepEqual(await encoders(), ['libx265'], 'no GPU: the CPU');
+    assert.throws(() => worker.setEnabled(true, 2, 'npu'), /Encode with/);
+    worker.close();
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('the picture check decodes on this server\'s GPU, and on the CPU when the GPU decode fails', async () => {
+  const { ffmpegDecoder } = require('../src/main/converter/pictureCheck');
+  const { EventEmitter } = require('events');
+  const calls = [];
+  const spawn = (cmd, args) => {
+    calls.push(args);
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.kill = () => {};
+    const gpu = args.includes('-hwaccel');
+    setImmediate(() => {
+      if (!gpu || okOnGpu) child.stdout.emit('data', Buffer.alloc(4));
+      child.emit('close', gpu && !okOnGpu ? 1 : 0);
+    });
+    return child;
+  };
+  let okOnGpu = true;
+  const decode = ffmpegDecoder({ spawn, accel: async () => ['-hwaccel', 'vaapi', '-hwaccel_device', '/dev/dri/renderD128'] });
+  assert.equal((await decode('a.mp4', { width: 2, height: 2 })).length, 4);
+  assert.deepEqual(calls.map((a) => a.includes('-hwaccel')), [true]);
+  assert.ok(calls[0].indexOf('-hwaccel') < calls[0].indexOf('-i'), 'decode arguments go before the input');
+  okOnGpu = false;
+  calls.length = 0;
+  assert.equal((await decode('a.mp4', { width: 2, height: 2 })).length, 4);
+  assert.deepEqual(calls.map((a) => a.includes('-hwaccel')), [true, false], 'the CPU decodes it again');
+  calls.length = 0;
+  await ffmpegDecoder({ spawn, accel: async () => null })('a.mp4', { width: 2, height: 2 });
+  assert.deepEqual(calls.map((a) => a.includes('-hwaccel')), [false], 'no GPU: the CPU');
 });

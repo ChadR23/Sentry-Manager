@@ -18,45 +18,59 @@ const SAMPLES = 4;
 const MIN_BYTES = 2 * 1024 * 1024; // a real clip (a few seconds or more), not a stub
 const MAX_BYTES = 200 * 1024 * 1024;
 const WITHIN = 0.05;
+const MAX_CHECKS = 5000; // clip headers read while looking for samples
 const CLIP_NAME = /^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}-(front|back|left_repeater|right_repeater|left_pillar|right_pillar)\.mp4$/;
 
-/** Newest H.264 Tesla clips under a TeslaCam folder, one per camera first. */
-async function pickSamples(root, { limit = SAMPLES, codecOf = videoCodec, minBytes = MIN_BYTES } = {}) {
+/**
+ * Sample clips under a TeslaCam folder, newest first, one per camera first:
+ * originals (H.264) when any are left anywhere, otherwise converted clips
+ * (H.265), so an archive the Encoder has fully converted can still be used.
+ * -> { files, converted }.
+ */
+async function pickSamples(root, { limit = SAMPLES, codecOf = videoCodec, minBytes = MIN_BYTES, maxChecks = MAX_CHECKS } = {}) {
   const found = [];
   for (const group of ['RecentClips', 'SavedClips', 'SentryClips']) {
     const dir = path.join(root, group);
     let names;
     try { names = await fsp.readdir(dir, { withFileTypes: true }); } catch { continue; }
-    const entries = [];
     for (const d of names) {
-      if (d.isFile() && CLIP_NAME.test(d.name)) entries.push(path.join(dir, d.name));
+      if (d.isFile() && CLIP_NAME.test(d.name)) found.push(path.join(dir, d.name));
       else if (d.isDirectory() && /^\d{4}-\d{2}-\d{2}_/.test(d.name)) {
         try {
-          for (const f of await fsp.readdir(path.join(dir, d.name))) if (CLIP_NAME.test(f)) entries.push(path.join(dir, d.name, f));
+          for (const f of await fsp.readdir(path.join(dir, d.name))) if (CLIP_NAME.test(f)) found.push(path.join(dir, d.name, f));
         } catch { /* a folder that went away */ }
       }
     }
-    entries.sort((a, b) => path.basename(b).localeCompare(path.basename(a)));
-    found.push(...entries.slice(0, 200));
-    if (found.length >= 200) break;
   }
+  // newest first: the originals the Encoder has not reached yet are usually the newest
+  found.sort((a, b) => path.basename(b).localeCompare(path.basename(a)));
+  const originals = [];
+  const converted = [];
+  let checks = 0;
+  for (const file of found) {
+    if (originals.length >= limit * 6 || checks >= maxChecks) break;
+    let st;
+    try { st = await fsp.stat(file); } catch { continue; }
+    if (!st.isFile() || st.size < minBytes || st.size > MAX_BYTES) continue;
+    checks++;
+    const codec = await codecOf(file).catch(() => null);
+    if (codec === 'h264') originals.push(file);
+    else if (codec === 'h265' && converted.length < limit * 6) converted.push(file);
+  }
+  const pool = originals.length ? originals : converted;
   const picked = [];
   const cameras = new Set();
   for (const pass of [true, false]) {
-    for (const file of found) {
+    for (const file of pool) {
       if (picked.length >= limit) break;
       if (picked.includes(file)) continue;
       const camera = CLIP_NAME.exec(path.basename(file))[1];
       if (pass && cameras.has(camera)) continue;
-      let st;
-      try { st = await fsp.stat(file); } catch { continue; }
-      if (!st.isFile() || st.size < minBytes || st.size > MAX_BYTES) continue;
-      if (await codecOf(file).catch(() => null) !== 'h264') continue;
       picked.push(file);
       cameras.add(camera);
     }
   }
-  return picked;
+  return { files: picked, converted: !originals.length && picked.length > 0 };
 }
 
 /** The lightest level within WITHIN of the fastest: [{ level, clipsPerMinute }] -> level. */
@@ -81,14 +95,17 @@ function createNodeBenchmark({ nodes, vehicles, run, ffprobePath = 'ffprobe', wo
     return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
   }
 
+  // originals from any vehicle first; converted clips only when none has any
   async function samples() {
+    let fallback = null;
     for (const v of vehicles.list()) {
       let root;
       try { root = vehicles.studioRoot(v); } catch { continue; }
       const picked = await pickSamples(root, { minBytes });
-      if (picked.length) return picked;
+      if (picked.files.length && !picked.converted) return picked;
+      if (picked.files.length && !fallback) fallback = picked;
     }
-    return [];
+    return fallback || { files: [], converted: false };
   }
 
   function encodeOne(nodeId, sample, codec, signal) {
@@ -132,8 +149,9 @@ function createNodeBenchmark({ nodes, vehicles, run, ffprobePath = 'ffprobe', wo
     const signal = state.controller.signal;
     await fsp.mkdir(workDir, { recursive: true, mode: 0o700 });
     state.phase = 'Picking sample clips';
-    const files = await samples();
-    if (!files.length) throw new Error('No H.264 Tesla clips of a minute or so were found on the vehicles\' shares to lend the node.');
+    const { files, converted } = await samples();
+    if (!files.length) throw new Error('No Tesla clips were found on the vehicles\' footage to lend the node.');
+    state.converted = converted;
     const list = [];
     for (const file of files) {
       const seconds = await durationOf(file);
@@ -186,7 +204,7 @@ function createNodeBenchmark({ nodes, vehicles, run, ffprobePath = 'ffprobe', wo
   function view(id) {
     const s = states.get(id);
     if (!s) return null;
-    return { state: s.state, phase: s.phase, codec: s.codec, results: s.results, suggested: s.suggested, error: s.error, startedAt: s.startedAt, endedAt: s.endedAt || null, samples: s.samples || null };
+    return { state: s.state, phase: s.phase, codec: s.codec, results: s.results, suggested: s.suggested, error: s.error, startedAt: s.startedAt, endedAt: s.endedAt || null, samples: s.samples || null, converted: s.converted === true };
   }
 
   return { start, cancel, view, busy: () => Boolean(running) };

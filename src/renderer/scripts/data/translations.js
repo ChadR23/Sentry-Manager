@@ -172,7 +172,7 @@ const converterEnglish = Object.freeze({
     benchmarkScanning: "Finding sample clips in your source folder…",
     benchmarkCopying: "Copying sample clip {index} of {total}…",
     benchmarkTestingLevel: "Converting with {count} at once… ({index} of {total})",
-    benchmarkSourceRequired: "Choose a source folder with original (unconverted) Tesla clips first.",
+    benchmarkSourceRequired: "No original (H.264) Tesla clips were found in the source folder, and the benchmark needs some: every clip there may already be converted. Choose a folder that still has originals.",
     benchmarkDone: "Done — {clips} real clips converted with {encoder}.",
     benchmarkEncoder: "Encoder",
     benchmarkParallel: "At once",

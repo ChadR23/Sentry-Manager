@@ -614,6 +614,17 @@ async function main() {
     audit.info(`Node ${params.id} set to ${Number(body?.slots)} clips at once: ${by(req, user)}`);
     return { ok: true };
   });
+  r.add('PUT', '/api/nodes/:id', (req, res, { params, body, user }) => {
+    let renamed;
+    try {
+      renamed = nodes.rename(params.id, body?.name);
+    } catch (err) {
+      throw new HttpError(err.status || 400, err.message);
+    }
+    if (!renamed) throw new HttpError(404, 'No such node.');
+    audit.info(`Node "${renamed.previous}" renamed "${renamed.name}": ${by(req, user)}`);
+    return { ok: true, name: renamed.name };
+  });
   r.add('DELETE', '/api/nodes/:id', (req, res, { params, user }) => {
     const node = nodes.remove(params.id);
     if (!node) throw new HttpError(404, 'No such node.');
@@ -622,8 +633,8 @@ async function main() {
   });
   r.add('POST', '/api/nodes/worker', (req, res, { body, user }) => {
     if (!tlsSource) throw new HttpError(409, 'This server runs without its own HTTPS (TLS_MODE=off), so it cannot be a node.');
-    const status = nodeWorker.setEnabled(body?.enabled === true, body?.slots);
-    audit.info(`Node mode ${status.enabled ? 'on' : 'off'} (${status.slots} clips at once): ${by(req, user)}`);
+    const status = nodeWorker.setEnabled(body?.enabled === true, body?.slots, body?.use);
+    audit.info(`Node mode ${status.enabled ? 'on' : 'off'} (${status.slots} clips at once, encode with ${status.use}): ${by(req, user)}`);
     return status;
   });
   r.add('POST', '/api/nodes/worker/pair', (req, res, { user }) => {

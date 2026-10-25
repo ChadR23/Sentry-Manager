@@ -106,10 +106,13 @@ async function comparePictures({ source, candidate, signal, decode }) {
 /**
  * The decoder used in the app: ffmpeg writes the frames as raw grey bytes.
  * spawn: child_process.spawn (or the converter's); limited to MAX_FRAMES.
+ * accel: async () => GPU decode arguments (frames come back to system memory,
+ * so the same filter scales them) or null; a GPU decode that fails is done
+ * again on the CPU.
  */
-function ffmpegDecoder({ spawn, ffmpegPath = 'ffmpeg', timeoutMs = 30 * 60_000 }) {
-  return (file, { width, height, signal } = {}) => new Promise((resolve, reject) => {
-    const child = spawn(ffmpegPath, ['-nostdin', '-hide_banner', '-loglevel', 'error', '-i', file,
+function ffmpegDecoder({ spawn, ffmpegPath = 'ffmpeg', timeoutMs = 30 * 60_000, accel = null }) {
+  const once = (file, { width, height, signal }, hw) => new Promise((resolve, reject) => {
+    const child = spawn(ffmpegPath, ['-nostdin', '-hide_banner', '-loglevel', 'error', ...hw, '-i', file,
       '-vf', `scale=${width}:${height}:flags=area,format=gray`, '-frames:v', String(MAX_FRAMES),
       '-f', 'rawvideo', '-'], { shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
     const chunks = [];
@@ -131,6 +134,17 @@ function ffmpegDecoder({ spawn, ffmpegPath = 'ffmpeg', timeoutMs = 30 * 60_000 }
       else reject(Object.assign(new Error('decode failed'), { code: 'DECODE_FAILED' }));
     });
   });
+  return async (file, { width, height, signal } = {}) => {
+    const hw = accel ? await Promise.resolve(accel()).catch(() => null) : null;
+    if (hw?.length) {
+      try {
+        return await once(file, { width, height, signal }, hw);
+      } catch (err) {
+        if (signal?.aborted) throw err;
+      }
+    }
+    return once(file, { width, height, signal }, []);
+  };
 }
 
 module.exports = { comparePictures, judgeFrames, ffmpegDecoder, PICTURE_MEAN, PICTURE_LOW, W, H };

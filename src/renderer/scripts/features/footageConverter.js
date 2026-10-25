@@ -1127,7 +1127,7 @@ function createFootageConverterController(options = {}) {
         if (code === 'JOB_ACTIVE') return message('benchmarkJobActive', 'Finish or cancel the current conversion before benchmarking.');
         if (code === 'CANCELLED') return message('benchmarkCancelled', 'Benchmark cancelled.');
         if (code === 'BENCHMARK_ACTIVE') return message('benchmarkBusy', 'A benchmark is already running.');
-        if (code === 'BENCHMARK_SOURCE_REQUIRED') return message('benchmarkSourceRequired', 'Choose a source folder with original (unconverted) Tesla clips first.');
+        if (code === 'BENCHMARK_SOURCE_REQUIRED') return message('benchmarkSourceRequired', 'No original (H.264) Tesla clips were found in the source folder, and the benchmark needs some: every clip there may already be converted. Choose a folder that still has originals.');
         return message('benchmarkFailed', 'Benchmark failed: {code}', { code });
     }
 
