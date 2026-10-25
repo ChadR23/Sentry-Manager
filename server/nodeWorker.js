@@ -48,6 +48,8 @@ const USES = ['gpu', 'gpu-cpu', 'cpu'];
 // Clips a main may send ahead, past the slots: uploaded and waiting here, so
 // the next one starts the moment a slot is free, however busy the main is.
 const QUEUE = 15;
+// disk a node keeps free for itself (accounts, settings, logs)
+const DISK_SPARE = 2 * 1024 ** 3;
 const BAD_TOKEN_LIMIT = 20;
 const BAD_TOKEN_WINDOW_MS = 10 * 60_000;
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O, 1/I
@@ -464,7 +466,13 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
     // to the maximum, past the setting
     const benchmark = req.headers['x-node-benchmark'] === '1';
     const limit = benchmark ? MAX_SLOTS : settings().slots + QUEUE;
-    if (running().length >= limit || jobs.size >= limit * 2) return send(res, 503, { error: 'All of this node\'s slots are busy.' });
+    // (finished clips not yet collected count too: at most one per slot)
+    if (running().length >= limit || jobs.size >= limit + (benchmark ? MAX_SLOTS : settings().slots)) return send(res, 503, { error: 'All of this node\'s slots are busy.' });
+    // room for the clip and its encode, and some to spare for this server
+    try {
+      const disk = await fsp.statfs(workDir);
+      if (disk.bavail * disk.bsize < length * 3 + DISK_SPARE) return send(res, 507, { error: 'This node is short of disk space.' });
+    } catch { /* the work folder is made below */ }
     const id = crypto.randomBytes(16).toString('hex');
     const job = {
       id, mainId: main.id, mainName: main.name, state: 'receiving',

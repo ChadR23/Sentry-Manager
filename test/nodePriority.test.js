@@ -146,3 +146,47 @@ test('the job service runs automatic jobs for two vehicles at once only on separ
     await h.close();
   }
 });
+
+test('a node\'s clips coming back are encoded here two at a time, however many were sent ahead', async () => {
+  const { EventEmitter } = require('events');
+  const NODE = { id: 'node:abcdefabcdef', kind: 'node', name: 'pc (node)', encoders: { h265: 'hevc_nvenc', av1: null }, online: true };
+  const { CPU } = require('./fixtures/lanesHarness');
+  let most = 0;
+  const h = createHarness({
+    clips: 12, devices: [NODE, CPU], defaultDevice: null, gpuDecode: false,
+    behave: () => 'hold',
+    remoteEncode: () => {
+      const child = new EventEmitter();
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      child.kill = () => true;
+      setImmediate(() => child.emit('close', 1, null)); // the node gives every clip back
+      return child;
+    }
+  });
+  try {
+    const id = await h.service.start(h.config({ lanes: [{ device: NODE.id, concurrency: 1 }] }));
+    let done = false;
+    const idle = h.service.whenIdle(id).then(() => { done = true; });
+    for (let i = 0; i < 500 && !done; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+      most = Math.max(most, h.held().length);
+      if (i % 5 === 4) h.held()[0]?.finish(0);
+    }
+    await idle;
+    assert.ok(most >= 1 && most <= 2, `at most two encodes here at once (${most})`);
+  } finally {
+    await h.close();
+  }
+});
+
+test('two vehicles whose folders are one inside the other never convert at once', async () => {
+  const h = createHarness({ clips: 1, behave: () => 'hold', devices: [ARC, UHD] });
+  try {
+    await h.service.start(h.config({ sourceRoot: path.join(h.dir, 'car'), autoConvert: true, lanes: [{ device: ARC.id, concurrency: 1 }] }));
+    await assert.rejects(h.service.start(h.config({ sourceRoot: path.join(h.dir, 'car', 'TeslaCam'), autoConvert: true, lanes: [{ device: UHD.id, concurrency: 1 }] })), { code: 'JOB_ACTIVE' });
+    h.releaseAll();
+  } finally {
+    await h.close();
+  }
+});

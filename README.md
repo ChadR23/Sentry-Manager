@@ -367,9 +367,10 @@ ahead** of what it converts at once: they wait on the node, so it starts the
 next one the moment a slot is free instead of waiting for this server to read
 and send it (the Nodes page shows how many are converting and waiting). This
 takes up to 15 clips' worth of disk on the node, about 1 GB, and on this
-server while they wait. A clip that waits more than 30 minutes is encoded
-here instead. If a node is offline or fails
-a clip, that clip is encoded here instead, on this server's GPU when it has
+server while they wait. If a node stops converting for 30 minutes, the clips
+waiting on it are encoded here instead. If a node is offline or fails
+a clip, that clip is encoded here instead (two at a time, so a node's whole
+queue failing over never swamps this server), on this server's GPU when it has
 one (the CPU otherwise).
 
 Security:

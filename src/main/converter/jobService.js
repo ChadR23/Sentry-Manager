@@ -30,6 +30,10 @@ const ACTIVE_STATES = new Set([
 const TERMINAL_STATES = new Set(['completed', 'failed', 'cancelled', 'skipped']);
 // Clips each node (another server) is sent beyond its conversions at once
 const NODE_SEND_AHEAD = 15;
+// Clips a node gave back (it failed, went away, or its pictures did not
+// match) encoded on this server at once: a node's whole send-ahead queue
+// failing over never starts dozens of encodes here.
+const NODE_FALLBACK_AT_ONCE = 2;
 const SAFE_CODE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const REPLACEMENT_PHASES = new Set([
   'candidate-written', 'original-backed-up', 'candidate-promoted',
@@ -1489,6 +1493,28 @@ function createConverterJobService(deps) {
 
   // This server's own encoder for a codec, never a node: its preferred one
   // (its GPU when it has one), else the CPU.
+  // one counter for the whole service (every job): see NODE_FALLBACK_AT_ONCE
+  const fallbackSlots = { busy: 0, waiters: [] };
+  async function takeFallbackSlot(signal) {
+    while (fallbackSlots.busy >= NODE_FALLBACK_AT_ONCE) {
+      if (signal?.aborted) throw serviceError('CANCELLED');
+      await new Promise((resolve) => {
+        const done = () => { signal?.removeEventListener('abort', done); resolve(); };
+        fallbackSlots.waiters.push(done);
+        signal?.addEventListener('abort', done, { once: true });
+      });
+    }
+    if (signal?.aborted) throw serviceError('CANCELLED');
+    fallbackSlots.busy += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      fallbackSlots.busy -= 1;
+      fallbackSlots.waiters.shift()?.();
+    };
+  }
+
   async function localEncoder(codec) {
     try {
       const chosen = await planner.select(codec);
@@ -1543,6 +1569,9 @@ function createConverterJobService(deps) {
       ? await planner.selectFor(codec, lane.device)
       : await planner.select(codec);
     let usedCpuFallback = selected.hardware !== true;
+    // set once a node gave the clip back (or its lane landed here because
+    // the node has no encoder for the codec): its encodes here wait their turn
+    let fromNode = Boolean(lane && String(lane.id || '').startsWith('node:') && selected.remote !== true);
     // Hardware rate-control backends commonly overshoot a byte target on
     // variable-frame-rate Tesla clips. Leave a small headroom so the first
     // candidate normally lands inside the profile window; the bounded retry
@@ -1576,8 +1605,14 @@ function createConverterJobService(deps) {
       setOwnership(runtime, item.id, composeOwnership(ownershipFor(runtime, item.id), reserved));
       const usedTier = encodeTiers[0] || null;
       const durationUs = Math.round((inspected.durationSeconds || 0) * 1_000_000) || null;
-      const encoded = await runChild(runtime, item.id, staged.source, reserved.path, codec, selected,
-        { bitrate, quality, durationUs, laneId: lane ? lane.id : null, holdFrames }, usedTier?.args || null);
+      const releaseFallback = fromNode ? await takeFallbackSlot(runtime.abortController.signal) : null;
+      let encoded;
+      try {
+        encoded = await runChild(runtime, item.id, staged.source, reserved.path, codec, selected,
+          { bitrate, quality, durationUs, laneId: lane ? lane.id : null, holdFrames }, usedTier?.args || null);
+      } finally {
+        releaseFallback?.();
+      }
       timing.mark('encode');
       if (!encoded.ok) {
         let failedOwnership = reserved;
@@ -1613,6 +1648,7 @@ function createConverterJobService(deps) {
         // A node (another server) that failed: this server's own encoder
         // (its GPU when it has one) takes the clip, then the CPU if that fails.
         if (selected.remote === true) {
+          fromNode = true;
           selected = await localEncoder(codec);
           encodeTiers = encodeDecodeTiers(selected, { zeroCopy: holdFrames === 0 });
           usedCpuFallback = selected.hardware !== true;
@@ -1689,6 +1725,7 @@ function createConverterJobService(deps) {
             setOwnership(runtime, item.id, composeOwnership(ownershipFor(runtime, item.id), adopted));
             throw Object.assign(new Error('cleanup pending'), { code: 'OWNED_CLEANUP_FAILED' });
           }
+          fromNode = true;
           selected = await localEncoder(codec);
           encodeTiers = encodeDecodeTiers(selected, { zeroCopy: holdFrames === 0 });
           usedCpuFallback = selected.hardware !== true;
@@ -2474,6 +2511,13 @@ function createConverterJobService(deps) {
   // Automatic jobs for different vehicles may run side by side when they
   // share no device (a GPU or a node): each has lanes of its own. Anything
   // else (a job started by hand, one without lanes) runs alone, as always.
+  // the same folder, or one inside the other: the same files
+  function overlaps(a, b) {
+    if (typeof a !== 'string' || typeof b !== 'string') return true;
+    const [x, y] = [pathApi.resolve(a), pathApi.resolve(b)];
+    return x === y || x.startsWith(y + pathApi.sep) || y.startsWith(x + pathApi.sep);
+  }
+
   function mayRunAlongside(config, others) {
     const devicesOf = (c) => (Array.isArray(c?.lanes) ? c.lanes.map((lane) => lane.device) : null);
     const mine = devicesOf(config);
@@ -2481,7 +2525,7 @@ function createConverterJobService(deps) {
     const taken = new Set();
     for (const other of others) {
       const theirs = devicesOf(other.config);
-      if (other.config?.autoConvert !== true || !theirs?.length || other.config.sourceRoot === config.sourceRoot) return false;
+      if (other.config?.autoConvert !== true || !theirs?.length || overlaps(other.config.sourceRoot, config.sourceRoot)) return false;
       // a paused job uses no device (automatic conversion gives it devices
       // again before it resumes it)
       if (other.state === 'paused') continue;

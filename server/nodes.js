@@ -177,6 +177,9 @@ async function request(node, { method = 'GET', path, headers = {}, body = null, 
  */
 function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL_MS }) {
   const info = new Map(); // id -> { at, online, encoders, slots, busy, name, error }
+  // when each node last moved any clip forward: a clip waiting on a node
+  // that keeps working waits on, one waiting on a node that stopped does not
+  const lastMoved = new Map(); // id -> ms
 
   const stored = () => (db.get(SETTINGS_KEY, []) || []).filter((n) => n && typeof n.id === 'string' && typeof n.token === 'string');
   const save = (list) => db.set(SETTINGS_KEY, list);
@@ -192,7 +195,8 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
         at: Date.now(), online: true, error: null,
         name: typeof r.json.name === 'string' ? peerText(r.json.name, 64) : node.name,
         encoders: { h265: clean(enc.h265), av1: clean(enc.av1) },
-        slots: Number.isSafeInteger(r.json.slots) ? r.json.slots : null,
+        // (a node never runs more than 8 at once: a larger claim is not believed)
+        slots: Number.isSafeInteger(r.json.slots) ? Math.min(Math.max(r.json.slots, 1), 8) : null,
         busy: Number.isSafeInteger(r.json.busy) ? r.json.busy : null,
         encoding: Number.isSafeInteger(r.json.encoding) ? r.json.encoding : null
       });
@@ -421,6 +425,7 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
         // moving cannot hold this lane.
         const moved = Number.isSafeInteger(s.json.outTimeUs) && s.json.outTimeUs > lastOutTimeUs;
         if (moved || s.json.state === 'done') {
+          lastMoved.set(node.id, Date.now());
           if (moved) lastOutTimeUs = s.json.outTimeUs;
           const lines = [`out_time_us=${Math.max(lastOutTimeUs, 0)}`];
           if (Number.isFinite(s.json.fps)) lines.push(`fps=${s.json.fps}`);
@@ -431,7 +436,7 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
         if (s.json.state === 'queued') {
           // waiting on the node for a free slot: still alive (no progress
           // yet), but not forever
-          if (Date.now() - queuedSince > QUEUE_WAIT_MS) throw nodeError('The clip waited too long on the node.', 503, 'NODE_BUSY');
+          if (Date.now() - Math.max(queuedSince, lastMoved.get(node.id) || 0) > QUEUE_WAIT_MS) throw nodeError('The node stopped converting the clips waiting on it.', 503, 'NODE_BUSY');
           child.stdout.emit('data', 'queued=1\n');
           continue;
         }

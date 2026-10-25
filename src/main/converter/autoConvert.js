@@ -149,7 +149,7 @@ function planLanes({ cars, wanting, localHolder = null, devices = [], priorities
       || (localHolder && plan.has(localHolder) && laneOf(localHolder, node.id) ? localHolder : null)
       || [...plan.keys()].find((root) => laneOf(root, node.id));
     if (!helps) continue;
-    const concurrency = laneOf(helps, node.id)?.concurrency || (Number.isSafeInteger(node.slots) && node.slots > 0 ? node.slots : 1);
+    const concurrency = laneOf(helps, node.id)?.concurrency || (Number.isSafeInteger(node.slots) && node.slots > 0 ? Math.min(node.slots, 8) : 1);
     plan.get(helps).push({ device: node.id, concurrency });
   }
   return plan;
