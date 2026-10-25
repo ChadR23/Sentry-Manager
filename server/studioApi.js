@@ -10,6 +10,7 @@
 const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
+const { pipeline } = require('stream');
 
 const MIME = {
   '.mp4': 'video/mp4', '.mov': 'video/quicktime', '.mkv': 'video/x-matroska', '.avi': 'video/x-msvideo',
@@ -91,6 +92,13 @@ async function sendMedia(req, res, abs, fdInside = async () => true) {
     return res.end();
   }
   const { fh, st } = opened;
+  // The Viewer cancels requests when it seeks; one cancelled while the file
+  // was being opened never ends or closes a stream, so close the file here
+  // instead of leaving it to garbage collection.
+  if (res.destroyed || res.stream?.destroyed) {
+    await fh.close().catch(() => {});
+    return undefined;
+  }
   const etag = `"${st.size.toString(36)}-${Math.floor(st.mtimeMs).toString(36)}-${st.ino.toString(36)}"`;
   const type = MIME[path.extname(abs).toLowerCase()] || 'application/octet-stream';
   const headers = { 'Content-Type': type, 'Accept-Ranges': 'bytes', ETag: etag, 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff' };
@@ -127,11 +135,11 @@ async function sendMedia(req, res, abs, fdInside = async () => true) {
     await fh.close().catch(() => {});
     return res.end();
   }
-  // the stream reads from the descriptor that was checked, never the path again
+  // the stream reads from the descriptor that was checked, never the path again;
+  // pipeline closes it however the answer ends, also when the Viewer cancels
+  // the request (a seek) before or while it is sent
   const stream = fh.createReadStream({ start, end, autoClose: true });
-  stream.on('error', () => res.destroy());
-  res.on('close', () => stream.destroy());
-  stream.pipe(res);
+  pipeline(stream, res, () => {});
   return undefined;
 }
 

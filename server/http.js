@@ -3,6 +3,7 @@
 const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
+const { pipeline } = require('stream');
 
 const STATIC_MIME = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8',
@@ -133,7 +134,9 @@ async function serveFile(req, res, root, rel, { transform, cache = 'no-cache', h
     res.end();
     return true;
   }
-  fs.createReadStream(abs).pipe(res);
+  // a request the browser already cancelled never ends a stream: don't open one
+  if (res.destroyed || res.stream?.destroyed) return true;
+  pipeline(fs.createReadStream(abs), res, () => {});
   return true;
 }
 
