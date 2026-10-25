@@ -837,3 +837,16 @@ test('Live run: the progress and the Hardware panel side by side when it is wide
   assert.match(skeleton, /\.enc-sk-bay \{ width: min\(1440px, calc\(100% - 48px\)\);/);
   assert.match(css, /\.converter-bay \{\s*width: min\(1440px, calc\(100% - 48px\)\);/);
 });
+
+test('Overview: only an ffmpeg the server names as an encode shows an encoder; checks stay plain ffmpeg', () => {
+  const s = sample();
+  s.processes.top = [
+    { pid: 200, name: 'ffmpeg · hevc_vaapi', cpu: 9, memB: 1e8, gpuVideo: 40 },
+    { pid: 300, name: 'ffmpeg', cpu: 30, memB: 9e7, gpuVideo: null },
+    { pid: 301, name: 'ffmpeg', cpu: 30, memB: 9e7, gpuVideo: null }
+  ];
+  const { serverBody } = overview();
+  const html = serverBody(s);
+  assert.match(html, /<td title="ffmpeg · hevc_vaapi"><span class="nd-pname"><span>ffmpeg · hevc_vaapi<\/span>/);
+  assert.match(html, /<td title="ffmpeg ×2"><span class="nd-pname"><span>ffmpeg<\/span><span>×2<\/span>/, 'the two checks are not counted as encodes');
+});

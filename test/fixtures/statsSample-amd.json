@@ -231,14 +231,14 @@
     "top": [
       {
         "pid": 90321,
-        "name": "ffmpeg",
+        "name": "ffmpeg · libx265",
         "cpu": 43.1,
         "memB": 639631360,
         "gpuVideo": 25
       },
       {
         "pid": 90322,
-        "name": "ffmpeg",
+        "name": "ffmpeg · libx265",
         "cpu": 42.5,
         "memB": 627048448,
         "gpuVideo": 23
@@ -566,7 +566,7 @@
     ]
   },
   "price": {
-    "currency": "\u20ac",
+    "currency": "€",
     "mode": "tou",
     "now": 0.29,
     "rate": "Peak"

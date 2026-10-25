@@ -230,28 +230,28 @@
     "top": [
       {
         "pid": 41210,
-        "name": "ffmpeg",
+        "name": "ffmpeg · hevc_vaapi",
         "cpu": 4.8,
         "memB": 109051904,
         "gpuVideo": 24
       },
       {
         "pid": 41211,
-        "name": "ffmpeg",
+        "name": "ffmpeg · hevc_vaapi",
         "cpu": 4.5,
         "memB": 106954752,
         "gpuVideo": 23
       },
       {
         "pid": 41212,
-        "name": "ffmpeg",
+        "name": "ffmpeg · hevc_vaapi",
         "cpu": 4.4,
         "memB": 108003328,
         "gpuVideo": 24
       },
       {
         "pid": 41213,
-        "name": "ffmpeg",
+        "name": "ffmpeg · hevc_vaapi",
         "cpu": 4.4,
         "memB": 108003328,
         "gpuVideo": 23

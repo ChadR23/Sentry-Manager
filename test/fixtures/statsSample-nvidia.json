@@ -243,21 +243,21 @@
     "top": [
       {
         "pid": 311,
-        "name": "ffmpeg",
+        "name": "ffmpeg · hevc_nvenc",
         "cpu": 2.7,
         "memB": 406847488,
         "gpuVideo": null
       },
       {
         "pid": 312,
-        "name": "ffmpeg",
+        "name": "ffmpeg · hevc_nvenc",
         "cpu": 2.6,
         "memB": 398458880,
         "gpuVideo": null
       },
       {
         "pid": 313,
-        "name": "ffmpeg",
+        "name": "ffmpeg · hevc_nvenc",
         "cpu": 2.6,
         "memB": 409993216,
         "gpuVideo": null
