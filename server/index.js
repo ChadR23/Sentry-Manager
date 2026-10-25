@@ -285,6 +285,8 @@ async function main() {
     remoteNodes: {
       list: () => nodes.list(),
       encode: (request) => nodes.encode(request),
+      // a node's row under Encoder > Parallel conversions sets its clips at once
+      setSlots: (device, slots) => nodes.setSlots(String(device).replace(/^node:/, ''), slots),
       // each node's vehicles, as the footage folders automatic conversion uses
       priorities: () => Object.fromEntries(Object.entries(nodes.carLists()).map(([device, ids]) => [device, ids.map((id) => {
         const v = vehicles.list().find((x) => x.id === id);

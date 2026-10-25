@@ -332,7 +332,9 @@ say) can encode clips for this one. It becomes one more row under
 2. Here, open **Nodes → Add node** and enter that computer's address and the
    code (asks for this server's password).
 3. Under **Encoder → Parallel conversions**, set how many clips the node
-   converts at once.
+   converts at once. That is the one place to set it: the node is told the
+   number when a conversion starts or the row changes (at most 8, the most a
+   node runs).
 
 **Rename** gives a node a name of your own here (shown on the Nodes page and
 under Parallel conversions); the node keeps its own name. On the node,

@@ -30,6 +30,8 @@ const ACTIVE_STATES = new Set([
 const TERMINAL_STATES = new Set(['completed', 'failed', 'cancelled', 'skipped']);
 // Clips each node (another server) is sent beyond its conversions at once
 const NODE_SEND_AHEAD = 15;
+// the most a node converts at once (its own limit)
+const NODE_MAX_AT_ONCE = 8;
 // Clips a node gave back (it failed, went away, or its pictures did not
 // match) encoded on this server at once: a node's whole send-ahead queue
 // failing over never starts dozens of encodes here.
@@ -595,9 +597,21 @@ function createConverterJobService(deps) {
         // A node (another server) gets NODE_SEND_AHEAD more clips than it
         // converts at once: they are read and sent while it works, and wait
         // there for a free slot, so it never waits for this server.
-        // (a node converts no more at once than its own setting, whatever
-        // this lane says: more here would only be sent and checked here)
-        const own = device.kind === 'node' && Number.isSafeInteger(device.slots) && device.slots > 0 ? Math.min(lane.concurrency, device.slots) : lane.concurrency;
+        // A node converts as many at once as its row here says (Encoder >
+        // Parallel conversions): the node is told so (at most its maximum,
+        // 8). Where it cannot be told, its own setting counts: more here
+        // would only be sent and checked here, never converted sooner.
+        let own = lane.concurrency;
+        if (device.kind === 'node') {
+          if (typeof deps.setNodeSlots === 'function') {
+            own = Math.min(lane.concurrency, NODE_MAX_AT_ONCE);
+            if (device.slots !== own) {
+              try { await deps.setNodeSlots(device.id, own); } catch (_) {
+                if (Number.isSafeInteger(device.slots) && device.slots > 0) own = Math.min(own, device.slots);
+              }
+            }
+          } else if (Number.isSafeInteger(device.slots) && device.slots > 0) own = Math.min(lane.concurrency, device.slots);
+        }
         limits.set(lane.device, own + (device.kind === 'node' ? NODE_SEND_AHEAD : 0));
         base.set(lane.device, own);
         devices.set(lane.device, device);

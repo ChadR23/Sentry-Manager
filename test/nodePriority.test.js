@@ -256,3 +256,37 @@ test('a node lane set higher than the node\'s own setting sends and checks only 
     await h.close();
   }
 });
+
+test('a node\'s row under Parallel conversions tells the node how many to convert at once (at most 8)', async () => {
+  const { EventEmitter } = require('events');
+  for (const [row, expected] of [[4, 4], [10, 8]]) {
+    const NODE = { id: 'node:abcdefabcdef', kind: 'node', name: 'mini (node)', encoders: { h265: 'hevc_vaapi', av1: null }, online: true, slots: 2 };
+    const told = [];
+    let checking = 0;
+    let mostChecked = 0;
+    const h = createHarness({
+      clips: 30, devices: [NODE], defaultDevice: null, gpuDecode: false,
+      setNodeSlots: async (id, slots) => { told.push([id, slots]); NODE.slots = slots; },
+      remoteEncode: () => {
+        const child = new EventEmitter(); child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.kill = () => true;
+        setTimeout(() => { child.stdout.emit('data', 'out_time_us=1\nprogress=end\n'); child.emit('close', 0, null); }, 30);
+        return child;
+      },
+      comparePicture: async () => {
+        checking += 1;
+        mostChecked = Math.max(mostChecked, checking);
+        await new Promise((r) => setTimeout(r, 30));
+        checking -= 1;
+        return { ok: true };
+      }
+    });
+    try {
+      const id = await h.service.start(h.config({ lanes: [{ device: NODE.id, concurrency: row }] }));
+      await h.finishJob(id, 30_000);
+      assert.deepEqual(told[0], [NODE.id, expected], `row ${row}: the node is told ${expected}`);
+      assert.ok(mostChecked <= expected, `row ${row}: ${mostChecked} checked at once`);
+    } finally {
+      await h.close();
+    }
+  }
+});

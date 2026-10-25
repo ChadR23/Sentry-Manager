@@ -167,7 +167,8 @@ function createHarness(options = {}) {
       : devices.some((device) => device.id === UHD.id) ? UHD.id : null),
     encodeStallMs: 60_000,
     ...(options.remoteEncode ? { remoteEncode: options.remoteEncode } : {}),
-    ...(options.comparePicture ? { comparePicture: options.comparePicture } : {})
+    ...(options.comparePicture ? { comparePicture: options.comparePicture } : {}),
+    ...(options.setNodeSlots ? { setNodeSlots: options.setNodeSlots } : {})
   };
   const service = createConverterJobService(deps);
   const destinationRoot = path.join(dir, 'out');
