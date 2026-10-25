@@ -1,0 +1,40 @@
+name: Downloads
+
+# Once a day, reads the image's "Total downloads" from its GitHub package
+# page and commits docs/badges/downloads.svg (the README badge) when the
+# number changed. docs/ is ignored by the Image workflow, so this never
+# rebuilds the image. Run it by hand under Actions > Downloads.
+
+on:
+  schedule:
+    - cron: '41 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: downloads
+  cancel-in-progress: true
+
+jobs:
+  badge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Count downloads
+        run: mkdir -p docs/badges && node tools/downloadsBadge.js "${{ github.repository_owner }}" "${{ github.event.repository.name }}" sentry-manager docs/badges/downloads.svg
+      - name: Commit the badge if it changed
+        run: |
+          if [ -z "$(git status --porcelain -- docs/badges)" ]; then exit 0; fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/badges/downloads.svg
+          git commit -m 'Downloads badge: update the count'
+          git push origin HEAD:main

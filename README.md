@@ -1,5 +1,7 @@
 # Sentry Six Manager
 
+[![Downloads](docs/badges/downloads.svg)](https://github.com/skittles-fivem/Sentry-Manager/pkgs/container/sentry-manager)
+
 Watch, convert and look after your Tesla's dashcam archive from any browser.
 Sentry Six Manager runs on your NAS or home server in Docker. It brings the
 [Sentry Studio](https://github.com/ChadR23/Sentry-Six) viewer and converter to
