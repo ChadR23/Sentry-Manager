@@ -29,6 +29,32 @@ const INFO_TTL_MS = 30_000;
 const POLL_MS = 1000;
 const BUSY_WAIT_MS = 5 * 60_000;
 const BUSY_POLL_MS = 3000;
+// Clips uploaded to one node at once. The clips sent ahead (15) were all
+// read from the share and sent at the same moment, on the same hard disks
+// as the clips being saved; a couple at a time fill the node's queue as fast.
+const UPLOADS_AT_ONCE = 2;
+const uploadSlots = new Map(); // node id -> { busy, waiters }
+async function takeUploadSlot(nodeId, signal) {
+  if (!uploadSlots.has(nodeId)) uploadSlots.set(nodeId, { busy: 0, waiters: [] });
+  const slots = uploadSlots.get(nodeId);
+  while (slots.busy >= UPLOADS_AT_ONCE) {
+    if (signal.aborted) return null;
+    await new Promise((resolve) => {
+      const done = () => { signal.removeEventListener('abort', done); resolve(); };
+      slots.waiters.push(done);
+      signal.addEventListener('abort', done, { once: true });
+    });
+  }
+  if (signal.aborted) return null;
+  slots.busy += 1;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    slots.busy -= 1;
+    slots.waiters.shift()?.();
+  };
+}
 // how long a clip sent ahead may wait on the node for a slot
 const QUEUE_WAIT_MS = 30 * 60_000;
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -386,16 +412,22 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
         const busy = !benchmark && Number.isSafeInteger(capacity) && Number.isSafeInteger(free.json?.busy) && free.json.busy >= capacity;
         if (!busy) {
           if (controller.signal.aborted) return;
-          upload = { controller: new AbortController(), sent: false };
-          const body = fs.createReadStream(source);
-          const current = upload;
-          body.once('end', () => { current.sent = true; });
-          sent = await request(node, {
-            method: 'POST', path: '/node/v1/jobs', signal: upload.controller.signal, timeoutMs: 60_000, deadlineMs: 30 * 60_000,
-            headers: { 'Content-Type': 'video/mp4', 'Content-Length': size, 'X-Node-Job': JSON.stringify(settings), ...(benchmark ? { 'X-Node-Benchmark': '1' } : {}) },
-            body
-          }).catch((err) => (err?.code === 'CANCELLED' ? Promise.reject(err) : { status: 0, error: err }));
-          upload = null;
+          const releaseUpload = await takeUploadSlot(node.id, controller.signal);
+          if (!releaseUpload) return;
+          try {
+            upload = { controller: new AbortController(), sent: false };
+            const body = fs.createReadStream(source);
+            const current = upload;
+            body.once('end', () => { current.sent = true; });
+            sent = await request(node, {
+              method: 'POST', path: '/node/v1/jobs', signal: upload.controller.signal, timeoutMs: 60_000, deadlineMs: 30 * 60_000,
+              headers: { 'Content-Type': 'video/mp4', 'Content-Length': size, 'X-Node-Job': JSON.stringify(settings), ...(benchmark ? { 'X-Node-Benchmark': '1' } : {}) },
+              body
+            }).catch((err) => (err?.code === 'CANCELLED' ? Promise.reject(err) : { status: 0, error: err }));
+          } finally {
+            releaseUpload();
+            upload = null;
+          }
           if (controller.signal.aborted) {
             // cancelled while the node answered: delete what it accepted
             if (sent.status === 200 && /^[0-9a-f]{32}$/.test(sent.json?.id || '')) {

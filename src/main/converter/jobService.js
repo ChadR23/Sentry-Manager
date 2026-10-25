@@ -38,6 +38,9 @@ const NODE_MAX_AT_ONCE = 8;
 const NODE_FALLBACK_AT_ONCE = 2;
 // checks of a node's clips beyond its own number at once (see takeCheckSlot)
 const NODE_CHECK_EXTRA = 2;
+// originals read in full at once (their fingerprint, or a copy to staging),
+// for the whole service: see takeReadSlot
+const SOURCE_READS_AT_ONCE = 2;
 const SAFE_CODE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const REPLACEMENT_PHASES = new Set([
   'candidate-written', 'original-backed-up', 'candidate-promoted',
@@ -1596,6 +1599,33 @@ function createConverterJobService(deps) {
     };
   }
 
+  // Originals are read in full (fingerprinted, or copied to staging) no more
+  // than SOURCE_READS_AT_ONCE at a time across every job. With a node's clips
+  // sent ahead, up to ~20 were read at once from the same hard disks, which
+  // then spent their time seeking: reading went from 0.8 s to 5 s a clip and
+  // saving from 1.6 s to 19 s. Two at a time still read clips much faster
+  // than the encoders take them.
+  const readSlots = { busy: 0, waiters: [] };
+  async function takeReadSlot(signal) {
+    while (readSlots.busy >= SOURCE_READS_AT_ONCE) {
+      if (signal?.aborted) throw serviceError('CANCELLED');
+      await new Promise((resolve) => {
+        const done = () => { signal?.removeEventListener('abort', done); resolve(); };
+        readSlots.waiters.push(done);
+        signal?.addEventListener('abort', done, { once: true });
+      });
+    }
+    if (signal?.aborted) throw serviceError('CANCELLED');
+    readSlots.busy += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      readSlots.busy -= 1;
+      readSlots.waiters.shift()?.();
+    };
+  }
+
   // A node's encoded clips are checked here (pictures, then frames and
   // telemetry) a few at a time: NODE_CHECK_EXTRA more than the node converts
   // at once. As many as the clips sent ahead overloaded this server's CPU;
@@ -1662,7 +1692,13 @@ function createConverterJobService(deps) {
     await itemPatch(runtime, item.id, { state: 'processing', eligibleVideo: true }, {
       state: mode === 'staging' ? 'staging' : 'waiting', activeItemId: item.id
     });
-    const staged = await videoSource(runtime, item, mode);
+    const releaseRead = await takeReadSlot(runtime.abortController.signal);
+    let staged;
+    try {
+      staged = await videoSource(runtime, item, mode);
+    } finally {
+      releaseRead();
+    }
     timing.mark('source');
     try {
     const timeline = await deps.readTimeline({ source: staged.source, item, signal });

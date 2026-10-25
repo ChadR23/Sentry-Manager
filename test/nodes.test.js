@@ -593,6 +593,47 @@ test('clips sent ahead wait on the node for a free slot, and all of them convert
   }
 });
 
+test('a node is sent at most two clips at a time, however many are sent ahead', { skip: !hasTools, timeout: 300_000 }, async () => {
+  const dir = await tmp();
+  const material = await certs(dir, 'worker-tls');
+  const w = await startWorker(dir, material);
+  const nodes = createNodes({ db: memDb(), log: quiet, audit: quiet, name: 'main-nas', pollMs: 100 });
+  const { Readable } = require('stream');
+  const realCreate = fs.createReadStream;
+  let open = 0;
+  let most = 0;
+  try {
+    const { pairing } = w.worker.startPairing();
+    const node = await nodes.add({ address: `127.0.0.1:${w.port}`, code: pairing.code });
+    w.worker.setEnabled(true, 1);
+    const clip = path.join(dir, 'clip.mp4');
+    await createTeslaH264Fixture({ ffmpegPath: 'ffmpeg', outputPath: clip, durationSeconds: 2, frameRate: 12, size: '320x240', telemetryPattern: Array.from({ length: 24 }, (_, i) => Buffer.from([0x20, i])) });
+    // reading a clip from the share takes a while (hard disks)
+    fs.createReadStream = (file, ...rest) => {
+      if (file !== clip) return realCreate.call(fs, file, ...rest);
+      open += 1;
+      most = Math.max(most, open);
+      const data = fs.readFileSync(clip);
+      const slow = new Readable({ read() {} });
+      setTimeout(() => { slow.push(data); slow.push(null); }, 150);
+      slow.once('end', () => { open -= 1; });
+      return slow;
+    };
+    const device = { id: `node:${node.id}` };
+    const codes = await Promise.all([0, 1, 2, 3, 4, 5].map((n) => new Promise((resolve) => {
+      const child = nodes.encode({ device, source: clip, target: path.join(dir, `out-${n}.mp4`), codec: 'h265', bitrate: 400_000, quality: null });
+      child.once('close', resolve);
+    })));
+    assert.deepEqual(codes, [0, 0, 0, 0, 0, 0], 'all six converted');
+    assert.ok(most >= 1 && most <= 2, `${most} clips sent at once`);
+  } finally {
+    fs.createReadStream = realCreate;
+    w.server.close();
+    w.worker.close();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
 function fetchJson(port, p, token) {
   return new Promise((resolve, reject) => {
     const req = require('https').request({ host: '127.0.0.1', port, path: p, rejectUnauthorized: false, headers: { Authorization: `Bearer ${token}` } }, (res) => {

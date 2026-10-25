@@ -139,7 +139,9 @@ function createHarness(options = {}) {
     copyAsset: options.copyAsset || (async () => { throw Object.assign(new Error('no assets here'), { code: 'UNEXPECTED' }); }),
     publishSeparate: async ({ destination }) => ({ finalPath: destination, outputBytes: 1_000_000, ...owned }),
     replaceOriginal: async () => { throw Object.assign(new Error('no replace here'), { code: 'UNEXPECTED' }); },
-    cleanupOwnedArtifacts: async () => ({ cleaned: true })
+    cleanupOwnedArtifacts: async () => ({ cleaned: true }),
+    // (with options.stageSource and networkMode 'staging': each original copied first)
+    ...(options.stageSource ? { stageSource: options.stageSource } : {})
   };
 
   const deps = {
@@ -148,6 +150,7 @@ function createHarness(options = {}) {
     planner,
     stagingManager,
     ensureDestinationParent: async () => ({ revalidate: async () => {} }),
+    ...(options.stageSource ? { checkStagingSpace: async () => ({ sufficient: true }) } : {}),
     inspectVideo: async () => ({ codec: 'h264', durationSeconds: 2, containerReserveBytes: 0, telemetryReserveBytes: 0 }),
     readTimeline: async () => options.timeline || ({ frames: [] }),
     writers: { h265: async () => {}, av1: async () => {} },

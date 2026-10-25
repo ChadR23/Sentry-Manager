@@ -457,3 +457,35 @@ test('with several vehicles on automatic, a row changed during a run is saved fo
     await fsp.rm(dir, { recursive: true, force: true });
   }
 });
+
+test('originals are read no more than two at a time, however many clips a node takes ahead', async () => {
+  const { EventEmitter } = require('events');
+  const NODE = { id: 'node:abcdefabcdef', kind: 'node', name: 'mini (node)', encoders: { h265: 'hevc_vaapi', av1: null }, online: true, slots: 2 };
+  let reading = 0;
+  let most = 0;
+  const h = createHarness({
+    clips: 20, devices: [NODE, CPU], defaultDevice: null, gpuDecode: false,
+    // copying each original takes a while (the share's hard disks)
+    stageSource: async ({ source, itemId }) => {
+      reading += 1;
+      most = Math.max(most, reading);
+      await new Promise((r) => setTimeout(r, 30));
+      reading -= 1;
+      return { stagedSource: source, path: source, ownedPaths: null, ownedArtifacts: null, itemId };
+    },
+    remoteEncode: () => {
+      const child = new EventEmitter(); child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.kill = () => true;
+      setTimeout(() => { child.stdout.emit('data', 'out_time_us=1\nprogress=end\n'); child.emit('close', 0, null); }, 20);
+      return child;
+    },
+    comparePicture: async () => ({ ok: true })
+  });
+  try {
+    const id = await h.service.start(h.config({ networkMode: 'staging', lanes: [{ device: NODE.id, concurrency: 2 }, { device: 'cpu', concurrency: 1 }] }));
+    const job = await h.finishJob(id, 30_000);
+    assert.equal(job.items.filter((item) => item.resultCode === 'converted').length, 20);
+    assert.ok(most >= 1 && most <= 2, `${most} originals read at once`);
+  } finally {
+    await h.close();
+  }
+});
