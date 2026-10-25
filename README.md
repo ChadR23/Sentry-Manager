@@ -90,10 +90,21 @@ else. For a GPU, uncomment its block in the file (*Apps → Installed →
 sentry-six-manager → Edit*): AMD and Intel pass `/dev/dri`; NVIDIA first
 needs *Apps → Configuration → Settings → Install NVIDIA Drivers*. Another
 app already on port 9000 (MinIO uses it): change the left number of
-`9000:9000`. To update, click *Update* on the app when TrueNAS shows one
-(**Settings → Updates** in Sentry Six Manager also says when a newer image is
-out). *Replace originals* works on ZFS datasets (the app tests it when it opens
-the folder).
+`9000:9000`. *Replace originals* works on ZFS datasets (the app tests it when
+it opens the folder).
+
+To update (**Settings → Updates** says when a newer image is out): TrueNAS
+often keeps the copy of `latest` it already has, so fetch the new one in
+*System → Shell* and restart the app:
+
+```bash
+docker pull ghcr.io/skittles-fivem/sentry-manager:latest
+```
+
+then *Apps → Installed → sentry-six-manager → Stop*, then *Start*. The version
+on **Overview → Server** shows the update took; if it didn't, *Edit* the app
+and *Save* to have TrueNAS recreate it. Your settings stay in the `/data`
+dataset.
 
 ## Overview and Footage
 
