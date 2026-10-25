@@ -778,12 +778,20 @@ function createFootageConverterController(options = {}) {
         const next = Math.min(MAX_CONCURRENCY, Math.max(0, current + delta));
         if (next === current || (delta > 0 && total >= MAX_CONCURRENCY) || (delta < 0 && total <= 1)) return;
         laneCounts.set(id, next);
+        lastStepAt = Date.now();
         rememberLanes();
         renderLanes();
         liveLanes();
     }
 
+    // A row just stepped keeps its number for a moment (the next clicks may
+    // follow); after that the rows show the job again, even with the button
+    // still focused: a click leaves the focus on it, and the rows then went
+    // on showing Off while the job used the node.
+    let lastStepAt = 0;
+    const STEP_HOLD_MS = 3_000;
     function stepperFocused() {
+        if (Date.now() - lastStepAt > STEP_HOLD_MS) return false;
         const active = elements.lanes?.ownerDocument?.activeElement;
         return Boolean(active) && [...laneRows.values()].some((parts) => parts.minus === active || parts.plus === active);
     }

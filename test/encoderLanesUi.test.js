@@ -398,19 +398,31 @@ test('Start refused with DEVICE_UNSUPPORTED names the GPU and the codec', async 
   assert.deepEqual(p.sent.notes.at(-1), ["Intel UHD Graphics 770 can't encode AV1. Set it to Off or pick another codec.", 'error']);
 });
 
-test('the rows follow the job (its lanes, or its number on the default GPU), but not while a stepper has focus', async () => {
+test('the rows follow the job (its lanes, or its number on the default GPU), held only for a moment after a click', async () => {
   const p = await page({ job: running({ concurrency: 2 }) });
   assert.deepEqual([p.lane(ARC.id).count, p.lane(UHD.id).count], ['2', 'Off']);
   p.push({ ...running({ lanes: [{ device: UHD.id, concurrency: 2 }, { device: 'cpu', concurrency: 1 }], concurrency: 3 }), revision: 20 });
   assert.deepEqual([p.lane(ARC.id).count, p.lane(UHD.id).count, p.lane('cpu').count], ['Off', '2', '1']);
-  p.lane(ARC.id).plus.focus();
-  p.push({ ...running({ lanes: [{ device: ARC.id, concurrency: 6 }], concurrency: 6 }), revision: 21 });
-  assert.deepEqual([p.lane(ARC.id).count, p.lane(UHD.id).count], ['Off', '2'], 'the owner is on it');
+  // the owner clicks (the button keeps the focus); a job update right after
+  // does not undo the click while more clicks may follow
+  p.lane(UHD.id).minus.focus();
+  p.lane(UHD.id).minus.click();
+  await new Promise((r) => setTimeout(r, 80));
+  p.push({ ...running({ lanes: [{ device: UHD.id, concurrency: 2 }, { device: 'cpu', concurrency: 1 }], concurrency: 3 }), revision: 30 });
+  assert.equal(p.lane(UHD.id).count, '1', 'the owner is on it');
+  // a few seconds later the rows show the job again, the button still focused
+  // (a click to Off once stayed on screen while the job used the device)
+  const realNow = Date.now;
+  Date.now = () => realNow() + 4_000;
+  try {
+    p.push({ ...running({ lanes: [{ device: ARC.id, concurrency: 6 }], concurrency: 6 }), revision: 31 });
+    assert.deepEqual([p.lane(ARC.id).count, p.lane(UHD.id).count, p.lane('cpu').count], ['6', 'Off', 'Off']);
+  } finally {
+    Date.now = realNow;
+  }
   p.doc.activeElement = null;
-  p.push({ ...running({ lanes: [{ device: ARC.id, concurrency: 6 }], concurrency: 6 }), revision: 22 });
-  assert.deepEqual([p.lane(ARC.id).count, p.lane(UHD.id).count, p.lane('cpu').count], ['6', 'Off', 'Off']);
   // a saved lanes value naming a GPU that is gone: its number lands on the default GPU
-  p.push({ ...running({ lanes: [{ device: 'pci:0000:09:00.0', concurrency: 4 }], concurrency: 4 }), revision: 23 });
+  p.push({ ...running({ lanes: [{ device: 'pci:0000:09:00.0', concurrency: 4 }], concurrency: 4 }), revision: 33 });
   assert.equal(p.lane(ARC.id).count, '4');
 });
 

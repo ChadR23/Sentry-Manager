@@ -418,3 +418,39 @@ test('a node\'s row set to Off takes back the clips waiting in its queue; they a
     await h.close();
   }
 });
+
+test('with several vehicles on automatic, a row changed during a run is saved for that vehicle, not another', async () => {
+  const { createConverterRuntime } = require('../src/main/converter/runtime');
+  const fsp = fs.promises;
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sm-auto-rows-'));
+  try {
+    for (const name of ['data', 'temp', 'chad/TeslaCam', 'bingbong/TeslaCam']) await fsp.mkdir(path.join(dir, name), { recursive: true });
+    const fakeService = () => ({
+      start: async () => 'job-1', list: async () => [], get: async () => null, subscribe: () => () => {},
+      activeEncodes: () => [], cancel: async () => {}, shutdown: async () => {}
+    });
+    const runtime = await createConverterRuntime({
+      userDataPath: await fsp.realpath(path.join(dir, 'data')), tempPath: await fsp.realpath(path.join(dir, 'temp')),
+      ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe', spawn: require('child_process').spawn, autoConvert: false,
+      factories: { createConverterJobService: fakeService }
+    });
+    try {
+      const chad = path.join(dir, 'chad', 'TeslaCam');
+      const bingbong = path.join(dir, 'bingbong', 'TeslaCam');
+      const shared = { intervalMinutes: 60, window: null, holdManual: false, keepRunning: false, openAtLogin: false };
+      const lanes = (n) => [{ device: GPU, concurrency: 1 }, { device: N2, concurrency: n }];
+      await runtime.auto.configure({ ...shared, configs: [{ ...car('chad', lanes(2)), sourceRoot: chad }, { ...car('bingbong', lanes(2)), sourceRoot: bingbong }] });
+      // the second vehicle's row for the node goes to Off (its folder is passed on)
+      await runtime.auto.setLanes([{ device: GPU, concurrency: 1 }], bingbong);
+      const saved = Object.fromEntries(runtime.auto.get().settings.configs.map((c) => [path.basename(path.dirname(c.sourceRoot)), c.lanes]));
+      assert.deepEqual(saved.bingbong, [{ device: GPU, concurrency: 1 }], 'saved for the vehicle whose row changed');
+      assert.deepEqual(saved.chad, lanes(2), 'the other vehicle keeps its own');
+      await runtime.auto.setConcurrency(3, chad);
+      assert.equal(runtime.auto.get().settings.configs.find((c) => c.sourceRoot === chad).concurrency, 3);
+    } finally {
+      await runtime.shutdown();
+    }
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});

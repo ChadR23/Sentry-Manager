@@ -1243,8 +1243,10 @@ async function createConverterRuntime(options = {}) {
       get: () => auto.getState(),
       configure: (settings) => auto.configure(settings),
       checkNow: () => auto.checkNow(),
-      setConcurrency: (value) => auto.setConcurrency(value),
-      setLanes: (lanes) => auto.setLanes(lanes),
+      // (the vehicle's folder says whose settings change: with several
+      // vehicles on automatic, without it the change went to another one)
+      setConcurrency: (value, sourceRoot) => auto.setConcurrency(value, sourceRoot),
+      setLanes: (lanes, sourceRoot) => auto.setLanes(lanes, sourceRoot),
       ownerResumed: (jobId) => auto.ownerResumed(jobId),
       subscribe: (listener) => { autoListeners.add(listener); return () => autoListeners.delete(listener); }
     }),
