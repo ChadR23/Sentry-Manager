@@ -329,6 +329,7 @@ function collectElements(root) {
         status: byId('converterStatus'),
         currentFile: byId('converterCurrentFile'),
         currentProgress: byId('converterCurrentProgress'),
+        nodeWaiting: byId('converterNodeWaiting'),
         currentProgressFill: byId('converterCurrentProgressFill'),
         elapsed: byId('converterElapsed'),
         countDiscovered: byId('converterCountDiscovered'),
@@ -1042,10 +1043,17 @@ function createFootageConverterController(options = {}) {
         setText(elements.status, snapshot
             ? statusLabel ? message(...statusLabel) : message('statusReady', 'Converter ready')
             : message('ready', 'Ready to configure'));
-        const converting = snapshot?.itemStateCounts?.active ?? items.filter((item) => item.state === 'processing').length;
+        // clips sent ahead to a node wait there: counted apart, not as converting
+        const waitingOnNode = active && Number.isSafeInteger(progress?.waitingOnNode) ? progress.waitingOnNode : 0;
+        const inFlight = snapshot?.itemStateCounts?.active ?? items.filter((item) => item.state === 'processing').length;
+        const converting = Math.max(0, inFlight - waitingOnNode);
         setText(elements.currentFile, active && converting > 1
             ? message('convertingFiles', 'Converting {count} files at once', { count: converting })
             : activeItem?.relativePath || message('noFileActive', 'No file active'));
+        if (elements.nodeWaiting) {
+            setText(elements.nodeWaiting, waitingOnNode > 0 ? message('waitingOnNode', '{count} waiting on a node', { count: waitingOnNode }) : '');
+            elements.nodeWaiting.hidden = waitingOnNode === 0;
+        }
         setText(elements.currentProgress, progress?.outTimeUs !== undefined
             ? message('progressEncoded', '{duration} encoded', { duration: formatDuration(progress.outTimeUs / 1000) })
             : activeItem ? message('progressWorking', 'Working on current file') : '');

@@ -290,3 +290,39 @@ test('a node\'s row under Parallel conversions tells the node how many to conver
     }
   }
 });
+
+test('clips waiting in a node\'s queue are reported apart from the clips converting', async () => {
+  const { EventEmitter } = require('events');
+  const NODE = { id: 'node:abcdefabcdef', kind: 'node', name: 'mini (node)', encoders: { h265: 'hevc_vaapi', av1: null }, online: true, slots: 1 };
+  let turn = 0;
+  const h = createHarness({
+    clips: 8, devices: [NODE], defaultDevice: null, gpuDecode: false,
+    remoteEncode: () => {
+      const child = new EventEmitter(); child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.kill = () => true;
+      // each clip waits on the node a while (one at a time), then converts
+      const wait = 30 + 40 * turn++;
+      const tick = setInterval(() => child.stdout.emit('data', 'queued=1\n'), 10);
+      setTimeout(() => {
+        clearInterval(tick);
+        child.stdout.emit('data', 'out_time_us=1000\nprogress=continue\n');
+        setTimeout(() => { child.stdout.emit('data', 'out_time_us=2000\nprogress=end\n'); child.emit('close', 0, null); }, 20);
+      }, wait);
+      return child;
+    },
+    comparePicture: async () => ({ ok: true })
+  });
+  const seen = [];
+  const off = h.service.subscribe((event) => { if (event.type === 'progress' && Number.isSafeInteger(event.progress?.waitingOnNode)) seen.push(event.progress.waitingOnNode); });
+  try {
+    const id = await h.service.start(h.config({ lanes: [{ device: NODE.id, concurrency: 1 }] }));
+    await h.finishJob(id, 30_000);
+    assert.ok(Math.max(...seen) >= 3, `several clips reported waiting on the node (${Math.max(...seen)})`);
+    assert.equal(seen.at(-1), 0, 'none waiting at the end');
+    // and the page gets the number (the progress filter lets it through)
+    const { sanitizeLiveProgress } = require('../src/main/converter/ipc')._test || {};
+    if (sanitizeLiveProgress) assert.equal(sanitizeLiveProgress({ phase: 'continue', waitingOnNode: 5 }).waitingOnNode, 5);
+  } finally {
+    off();
+    await h.close();
+  }
+});

@@ -185,6 +185,12 @@ function sanitizeLiveProgress(progress) {
         || fpsDescriptor.value < 0 || fpsDescriptor.value > 1_000_000) fail('INVALID_PROGRESS');
     sanitized.fps = Math.round(fpsDescriptor.value * 10) / 10;
   }
+  // clips sent ahead to a node, waiting there for a slot
+  const waitingDescriptor = descriptors.waitingOnNode;
+  if (waitingDescriptor && Object.prototype.hasOwnProperty.call(waitingDescriptor, 'value')) {
+    if (!Number.isSafeInteger(waitingDescriptor.value) || waitingDescriptor.value < 0 || waitingDescriptor.value > 10_000) fail('INVALID_PROGRESS');
+    sanitized.waitingOnNode = waitingDescriptor.value;
+  }
   return sanitized;
 }
 

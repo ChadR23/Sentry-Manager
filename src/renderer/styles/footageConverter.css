@@ -641,6 +641,17 @@ body.converter-mode #driveList {
     user-select: text;
 }
 
+/* clips sent ahead that wait in a node's queue, under the current file */
+.converter-current-waiting {
+    margin-top: 2px;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.5;
+}
+
+.converter-current-waiting[hidden] { display: none; }
+
 /* the bar runs the full width; what it measures sits on its own line below
    (the line is kept while empty, so nothing moves when a clip starts) */
 .converter-current-progress-row {

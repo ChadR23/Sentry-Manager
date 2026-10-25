@@ -163,3 +163,11 @@ test('a GPU lane next to the CPU lane: the GPU comes first whichever clip is lis
     assert.equal('bottleneck' in out, false);
   }
 });
+
+test('clips waiting in a node\'s queue are not counted as converting', () => {
+  const jobs = new Map([['j1', { id: 'j1', state: 'encoding', items: [], counters: {} }]]);
+  const node = (itemId, over = {}) => worker({ itemId, encoder: 'libx265', hardware: false, decode: 'cpu', device: null, deviceId: 'node:garage', ...over });
+  const out = encoderBlock({ snapshot: { gpus: [] }, jobs, workers: [node('a'), ...['b', 'c', 'd'].map((id) => node(id, { waitingOnNode: true }))] });
+  assert.equal(out.workers.length, 1, 'the one the node converts');
+  assert.deepEqual(out.devices.map((d) => [d.id, d.workers]), [['node:garage', 1]]);
+});

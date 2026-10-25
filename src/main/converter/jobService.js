@@ -1167,6 +1167,13 @@ function createConverterJobService(deps) {
       : pathApi.resolve(config.destinationRoot, ...item.relativePath.split('/'));
   }
 
+  // Clips sent ahead to a node that wait there for a slot: the Encoder
+  // shows them apart from the clips converting.
+  const waitingOnNode = (runtime) => [...runtime.encodes.values()].filter((live) => live.waitingOnNode).length;
+  function noteWaiting(runtime) {
+    emit(runtime, 'progress', { progress: { phase: 'continue', ...(runtime.lastProgress || {}), waitingOnNode: waitingOnNode(runtime) } });
+  }
+
   async function runChild(runtime, itemId, source, target, codec, encoder, { bitrate, quality = null, durationUs = null, laneId = null, holdFrames = 0 }, decodeAccel = null) {
     let child;
     let encodeArgs = [];
@@ -1274,12 +1281,16 @@ function createConverterJobService(deps) {
         if (separator < 1) continue;
         const key = line.slice(0, separator);
         const value = line.slice(separator + 1).trim();
-        if (key === 'out_time_ms' || key === 'out_time_us') {
+        if (key === 'queued') {
+          // waiting in a node's queue (a clip sent ahead): not converting yet
+          if (!live.waitingOnNode) { live.waitingOnNode = true; noteWaiting(runtime); }
+        } else if (key === 'out_time_ms' || key === 'out_time_us') {
           const parsed = Number(value);
           if (Number.isSafeInteger(parsed) && parsed >= 0) {
             progress.outTimeUs = parsed;
             live.outTimeUs = parsed;
           }
+          if (live.waitingOnNode) { live.waitingOnNode = false; noteWaiting(runtime); }
         } else if (key === 'fps') {
           const parsed = Number(value);
           if (Number.isFinite(parsed) && parsed >= 0) {
@@ -1299,7 +1310,8 @@ function createConverterJobService(deps) {
           if (isLead(runtime, itemId)) {
             let fps = 0;
             for (const value of runtime.encodeFps.values()) fps += value;
-            emit(runtime, 'progress', { progress: { ...progress, fps: Math.round(fps * 10) / 10 } });
+            runtime.lastProgress = { ...progress, fps: Math.round(fps * 10) / 10 };
+            emit(runtime, 'progress', { progress: { ...runtime.lastProgress, waitingOnNode: waitingOnNode(runtime) } });
           }
         }
       }

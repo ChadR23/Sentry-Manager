@@ -88,7 +88,8 @@ function encoderBlock({ snapshot, jobs, workers = [], energy = null, slotsOf = n
   const list = [...(jobs?.values?.() || [])];
   const job = list.find((s) => RUNNING.has(s.state)) || list.find((s) => s.state === 'paused' || s.state === 'paused_network');
   if (!job && !workers.length) return null;
-  const mine = job ? workers.filter((w) => w.jobId === job.id) : workers;
+  // (a clip sent ahead that waits in a node's queue converts nowhere yet)
+  const mine = (job ? workers.filter((w) => w.jobId === job.id) : workers).filter((w) => !w.waitingOnNode);
   for (const known of [lastDevice, cpuKnown]) for (const id of known.keys()) if (!job || id !== job.id) known.delete(id);
   if (job && mine[0]) lastDevice.set(job.id, mine[0]);
   const first = mine[0] || (job && RUNNING.has(job.state) ? lastDevice.get(job.id) : null) || null;
