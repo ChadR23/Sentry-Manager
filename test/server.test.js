@@ -702,3 +702,30 @@ test('the password change is throttled like confirmation, and converter event st
     await fsp.rm(dir, { recursive: true, force: true });
   }
 });
+
+test('sign-in: a burst of parallel guesses is turned away, and guesses from elsewhere never lock the owner out', { timeout: 120000 }, async () => {
+  const dir = await tmp();
+  await makeFootage(path.join(dir, 'footage'));
+  // (behind a proxy the client address comes from X-Forwarded-For: two "devices")
+  const s = await startServer(dir, { TRUST_PROXY: 'true' });
+  try {
+    const from = (ip) => ({ headers: { 'X-Forwarded-For': ip } });
+    // 40 guesses at once from one address: only a couple are even checked
+    const burst = await Promise.all(Array.from({ length: 40 }, (_, i) => s.call('POST', '/api/auth/login', { username: 'admin', password: `guess${i}` }, from('10.0.0.66'))));
+    const checked = burst.filter((r) => r.status === 401).length;
+    assert.ok(checked <= 2, `${checked} guesses checked at once`);
+    assert.equal(burst.filter((r) => r.status === 429).length, 40 - checked);
+    // the attacker locks out its own address...
+    for (let i = 0; i < 5; i++) await s.call('POST', '/api/auth/login', { username: 'admin', password: `again${i}` }, from('10.0.0.66'));
+    assert.equal((await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' }, from('10.0.0.66'))).status, 429);
+    // ...but not the owner on another device
+    assert.equal((await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' }, from('10.0.0.20'))).status, 200);
+    // and a user name with a line break cannot add a line to the log
+    await s.call('POST', '/api/auth/login', { username: 'x\n2026-10-25T10:00:00.000Z INFO  [audit] Signed in: admin', password: 'p' }, from('10.0.0.77'));
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(/\n[^\n]*\[audit\] Signed in: admin\n/.test(s.output()), false);
+  } finally {
+    await s.stop();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});

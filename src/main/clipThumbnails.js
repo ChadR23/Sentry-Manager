@@ -95,7 +95,7 @@ function createClipThumbnails(options = {}) {
     const seekInputs = [];
     const filters = [];
     for (let index = 0; index < FRAMES; index += 1) {
-      seekInputs.push('-threads', '1', '-ss', ((duration * index) / FRAMES).toFixed(3), '-noaccurate_seek', '-i', videoPath);
+      seekInputs.push('-threads', '1', '-ss', ((duration * index) / FRAMES).toFixed(3), '-noaccurate_seek', '-protocol_whitelist', 'file', '-i', videoPath);
       filters.push(`[${index}:v:0]trim=end_frame=1,scale=${FRAME_WIDTH}:-2,setsar=1[f${index}]`);
     }
     const stack = `${filters.join(';')};${Array.from({ length: FRAMES }, (_, index) => `[f${index}]`).join('')}hstack=inputs=${FRAMES}[strip]`;
@@ -103,7 +103,7 @@ function createClipThumbnails(options = {}) {
     if (!ok) {
       // Fallback: scan the keyframes (reads the whole file).
       const step = Math.max(0.05, duration / FRAMES).toFixed(3);
-      ok = await made(['-skip_frame', 'nokey', '-i', videoPath, '-an', '-sn', '-dn',
+      ok = await made(['-skip_frame', 'nokey', '-protocol_whitelist', 'file', '-i', videoPath, '-an', '-sn', '-dn',
         '-vf', `select='gte(t\\,selected_n*${step})',scale=${FRAME_WIDTH}:-2,tile=${FRAMES}x1`,
         '-fps_mode', 'passthrough', '-frames:v', '1']);
     }

@@ -30,11 +30,11 @@ class Thumbnails {
     if (this.inFlight.has(out)) return this.inFlight.get(out);
     const p = this.limit(async () => {
       const tmp = `${out}.${process.pid}.tmp.jpg`;
-      const r = await run(this.ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y', '-ss', '1', '-i', clipPath,
+      const r = await run(this.ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y', '-ss', '1', '-protocol_whitelist', 'file', '-i', clipPath,
         '-frames:v', '1', '-vf', 'scale=320:-2', '-q:v', '5', tmp], { timeoutMs: 60000 });
       if (r.code !== 0) {
         // very short clip: take the first frame instead
-        const r2 = await run(this.ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y', '-i', clipPath,
+        const r2 = await run(this.ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y', '-protocol_whitelist', 'file', '-i', clipPath,
           '-frames:v', '1', '-vf', 'scale=320:-2', '-q:v', '5', tmp], { timeoutMs: 60000 });
         if (r2.code !== 0) {
           await fsp.rm(tmp, { force: true });

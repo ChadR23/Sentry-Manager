@@ -181,7 +181,12 @@ class VehicleManager extends EventEmitter {
     };
     let id = slug(input.id || vehicle.name);
     if (!ID_RE.test(id)) id = 'vehicle';
-    for (let n = 2; !free(id); n++) id = `${slug(vehicle.name).slice(0, 36)}-${n}`;
+    for (let n = 2; !free(id); n++) {
+      // (a folder vehicle at the footage folder itself leaves no room for
+      // a share's folder below it: say so instead of searching forever)
+      if (n > 1000) throw badRequest(`A share needs a folder of its own below ${this.footageRoot}, but another vehicle uses all of it.`);
+      id = `${slug(vehicle.name).slice(0, 36)}-${n}`;
+    }
     const full = { id, ...vehicle, createdAt: Date.now() };
     this.db.set('vehicles', [...this.list(), full]);
     this.startShare(full);

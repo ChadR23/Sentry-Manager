@@ -143,8 +143,40 @@ class Auth {
     const f = this.failures.get(key) || { count: 0, until: 0 };
     f.count++;
     if (f.count >= 5) f.until = Date.now() + Math.min(15 * 60, 2 ** (f.count - 5) * 30) * 1000;
+    this.failures.delete(key); // (kept newest last)
     this.failures.set(key, f);
-    if (this.failures.size > 10000) this.failures.delete(this.failures.keys().next().value);
+    if (this.failures.size > 10000) {
+      // what is no longer locked goes first, so a flood of names cannot
+      // push out the records of the keys it is locked out by
+      const now = Date.now();
+      for (const [k, v] of this.failures) {
+        if (this.failures.size <= 9000) break;
+        if (v.until <= now) this.failures.delete(k);
+      }
+      while (this.failures.size > 10000) this.failures.delete(this.failures.keys().next().value);
+    }
+  }
+
+  /**
+   * Runs one password check for these throttle keys. A check already
+   * running for any of them, or two running at all, turns this one away:
+   * a burst of parallel guesses would otherwise all pass the throttle
+   * before the first failure is counted (and fill the thread pool).
+   */
+  async attempt(keys, check) {
+    this.checking ||= new Set();
+    this.running ||= 0;
+    if (keys.some((key) => this.checking.has(key)) || this.running >= 2) {
+      throw Object.assign(new Error('Another sign-in is being checked. Try again in a moment.'), { status: 429 });
+    }
+    for (const key of keys) this.checking.add(key);
+    this.running += 1;
+    try {
+      return await check();
+    } finally {
+      this.running -= 1;
+      for (const key of keys) this.checking.delete(key);
+    }
   }
 
   noteSuccess(key) {

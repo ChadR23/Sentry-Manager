@@ -74,7 +74,10 @@ class Logger extends EventEmitter {
   // printed by the supervisor)
   write(level, scope, message, { echo = true } = {}) {
     if (LEVELS[level] < this.min) return;
-    const entry = { at: Date.now(), level, scope, message: redact(message) };
+    // one entry is one line: text from outside (a user name) cannot add
+    // lines that look like others to the log or the audit trail
+    const flat = String(message).replace(/\r?\n/g, ' ⏎ ').replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, ' ');
+    const entry = { at: Date.now(), level, scope, message: redact(flat) };
     this.lines.push(entry);
     if (this.lines.length > this.keep) this.lines.splice(0, this.lines.length - this.keep);
     const line = `${new Date(entry.at).toISOString()} ${level.toUpperCase().padEnd(5)} [${scope}] ${entry.message}`;

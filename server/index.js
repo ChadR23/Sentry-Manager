@@ -432,11 +432,22 @@ async function main() {
     }
   };
   r.add('GET', '/api/auth/me', (req) => ({ user: auth.user(req), needsSetup: auth.needsSetup(), secure: isSecure(req), fingerprint: req.socket?.encrypted ? certFingerprint() : null }), { public: true });
+  // one password check at a time per throttle key (auth.attempt)
+  const guarded = async (keys, check) => {
+    try {
+      return await auth.attempt(keys, check);
+    } catch (err) {
+      if (err.status === 429) throw new HttpError(429, err.message);
+      throw err;
+    }
+  };
   r.add('POST', '/api/auth/login', async (req, res, { body }) => {
-    const keys = [clientKey(req), `user:${String(body?.username || '').toLowerCase()}`];
+    // per address, and per account from that address: wrong guesses from
+    // elsewhere never lock the owner out
+    const keys = [clientKey(req), `user:${String(body?.username || '').toLowerCase().slice(0, 64)}@${clientKey(req)}`];
     const wait = Math.max(...keys.map((k) => auth.throttled(k)));
     if (wait) throw new HttpError(429, `Too many attempts. Try again in ${wait} s.`);
-    if (!(await auth.check(body?.username, body?.password))) {
+    if (!(await guarded(keys, () => auth.check(body?.username, body?.password)))) {
       keys.forEach((k) => auth.noteFailure(k));
       audit.warn(`Sign-in failed for "${String(body?.username || '').slice(0, 64)}" from ${clientKey(req)}`);
       throw new HttpError(401, 'Wrong user name or password.');
@@ -472,7 +483,7 @@ async function main() {
     const key = `confirm:${user}`;
     const wait = auth.throttled(key);
     if (wait) throw new HttpError(429, `Too many attempts. Try again in ${wait} s.`);
-    if (!(await auth.confirm(req, user, body?.password))) {
+    if (!(await guarded([key], () => auth.confirm(req, user, body?.password)))) {
       auth.noteFailure(key);
       audit.warn(`Password confirmation failed: ${by(req, user)}`);
       throw new HttpError(401, 'That password is not right.');
@@ -487,7 +498,7 @@ async function main() {
     const key = `confirm:${user}`;
     const wait = auth.throttled(key);
     if (wait) throw new HttpError(429, `Too many attempts. Try again in ${wait} s.`);
-    if (!(await auth.check(user, body?.current))) {
+    if (!(await guarded([key], () => auth.check(user, body?.current)))) {
       auth.noteFailure(key);
       audit.warn(`Password change with a wrong current password: ${by(req, user)}`);
       throw new HttpError(401, 'The current password is wrong.');
@@ -1028,7 +1039,8 @@ async function main() {
   });
   r.add('POST', '/api/studio/thumbnail', async (req, res, { body }) => {
     const real = await studioReadable.resolve(body?.path);
-    if (!real || hiddenPath(real) || !clipThumbs) return null;
+    // clips only: ffmpeg must never be pointed at a playlist on a share
+    if (!real || hiddenPath(real) || !clipThumbs || !/\.(mp4|mov)$/i.test(real)) return null;
     try {
       return await clipThumbs.get(real);
     } catch {
@@ -1253,6 +1265,10 @@ async function main() {
     // telemetry; over HTTP/1.1 browsers allow only six connections per
     // server, so some cameras waited for a free one and fell behind.
     httpsServer = http2.createSecureServer({ key: material.key, cert: material.cert, minVersion: 'TLSv1.2', allowHTTP1: true }, handler);
+    // A connection left idle (no request, no reply) is closed after 2
+    // minutes: live updates send something every 20 s at most, so only
+    // abandoned or deliberately held connections go.
+    httpsServer.setTimeout(120_000);
     const continuePage = fs.readFileSync(path.join(WEB, 'continue.html'), 'utf8');
     const CONTINUE_FILES = new Set(['/web/continue.js', '/web/shell.css', '/web/icon.png']);
     const redirect = http.createServer(async (req, res) => {
@@ -1302,6 +1318,8 @@ async function main() {
         process.nextTick(() => socket.resume());
       });
     });
+    // more open connections than a household's devices ever need are refused
+    front.maxConnections = 1024;
     servers.push(front, httpsServer, redirect);
     front.listen(PORT, HOST, () => log.info(`Sentry Six Manager on https://${HOST}:${PORT} (${buildInfo.sha ? buildInfo.sha.slice(0, 7) : 'dev'})`));
   }

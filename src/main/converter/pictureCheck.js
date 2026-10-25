@@ -112,7 +112,7 @@ async function comparePictures({ source, candidate, signal, decode }) {
  */
 function ffmpegDecoder({ spawn, ffmpegPath = 'ffmpeg', timeoutMs = 30 * 60_000, accel = null }) {
   const once = (file, { width, height, signal }, hw) => new Promise((resolve, reject) => {
-    const child = spawn(ffmpegPath, ['-nostdin', '-hide_banner', '-loglevel', 'error', ...hw, '-i', file,
+    const child = spawn(ffmpegPath, ['-nostdin', '-hide_banner', '-loglevel', 'error', ...hw, '-protocol_whitelist', 'file', '-i', file,
       '-vf', `scale=${width}:${height}:flags=area,format=gray`, '-frames:v', String(MAX_FRAMES),
       '-f', 'rawvideo', '-'], { shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
     const chunks = [];
