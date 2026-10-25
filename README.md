@@ -28,6 +28,8 @@ Recycle Bin, retention policies, jobs and notifications.
 - **Secure by default.** HTTPS only, with its own certificate (nothing to
   install on your devices), SMB 3 shares that are always signed and
   encrypted, and a web app that never runs as root.
+- **Support.** Chat with the Sentry Six team from its own tab, with
+  pictures and optional diagnostics.
 - **Phones and tablets.** iPhone 14 and newer, Galaxy S22 and newer, and
   iPads from 2022 on.
 
@@ -132,6 +134,10 @@ move it to the Recycle Bin. A day stays open until you close it, and picking
 a date in the filter opens that day. The checkbox on a day selects all of
 its recordings.
 
+**Show files** lists a recording's clips with each one's codec (H.264, H.265
+or AV1), says how many are not encoded yet, and *Not encoded only* hides the
+rest, so a clip the Encoder skipped or could not convert is easy to find.
+
 ## Encoder
 
 ![Encoder](docs/images/encoder.png)
@@ -197,6 +203,15 @@ copies somewhere else is a choice you make in the Output section.
   back. An encode that reports no progress for 10 minutes (a stuck GPU or
   share) is stopped and redone the slower way, or fails. The automatic
   window resumes its job even when the pause had not taken effect yet.
+- **Unusual Tesla clips convert too.** Some clips start partway into a
+  group of frames, or have a frame Tesla's encoder skipped; both convert
+  with every frame at its original time and the telemetry intact, and are
+  verified like any other clip.
+- **Gave up is not forever.** The automatic window stops retrying a clip
+  after it fails three times, or when converting it would not save space.
+  When an update changes the converter, those clips are tried again once.
+- **After a restart** the Encoder page shows the job that is running now,
+  even if the page was left open while the server restarted.
 
 ### GPU
 
@@ -270,6 +285,23 @@ interrupted) off the list after you confirm how many, so what shows up next
 is what happened since. Running, waiting and paused jobs stay. Only the list
 is cleared: footage, converted files and what the Encoder needs to resume a
 conversion are not touched.
+
+## Support
+
+![Support](docs/images/support.png)
+
+**Support** in the side bar is a chat with the Sentry Six team. The first
+message opens a ticket, and the team's replies show up on the same tab.
+Pictures, videos and log files (up to 50 MB) can be attached, and the
+team's pictures open in a popup over the chat. *Include diagnostics* adds
+the version, OS, CPU and GPU and the recent warnings, with addresses, share
+names, footage paths and email addresses removed.
+
+This is the one thing Sentry Six Manager talks to outside your network: the
+server relays the chat to `api.sentry-six.com` (and fetches pictures the
+team sends from Discord's file server). The ticket's key stays on the
+server, the browser only ever talks to your own server, and nothing is sent
+until you send a message.
 
 ## Vehicles and SMB shares
 
@@ -447,8 +479,9 @@ a malicious video on a share cannot become root or read the certificate
 authority's key.
 
 **An audit trail.** Sign-ins, password confirmations, vehicle changes,
-certificate names, permanent deletions and Clear jobs are logged with who did
-them and from which address, never with a password. Look for `[audit]` in
+certificate names, permanent deletions, Clear jobs and clearing the logs
+are logged with who did them and from which address, never with a password.
+Look for `[audit]` in
 `docker logs sentry-six-manager` or in the Overview's Logs (tick
 *Everything*).
 
@@ -462,6 +495,10 @@ in the data folder (`logs/manager.log`, at most about 10 MB with the
 previous file), survive restarts, and anything that looks like a password is
 masked. No shell on the server is needed. (Old links to Settings > Logs,
 `#/settings/logs`, open them there.)
+
+**Clear** starts the list afresh without deleting anything: the earlier
+lines move to `logs/archive/` in the data folder, and *Cleared logs* under
+the list downloads them again.
 
 ## Settings
 
