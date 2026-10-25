@@ -196,6 +196,18 @@ by its verified H.265 or AV1 version (when the share supports a safe
 replacement; see below). Keeping the originals and writing the converted
 copies somewhere else is a choice you make in the Output section.
 
+**Automatic conversion is per vehicle.** Pick a vehicle at the top of the
+Encoder, choose its settings, and tick *Convert this source's new clips
+automatically*: that vehicle's new clips are converted on the schedule with
+those settings (codec, profile, output, parallel conversions), saved for it
+alone. Vehicles you leave unticked are never converted by themselves. The
+list under the checkbox shows which vehicles convert automatically and with
+what. The schedule, the time window and off-peak are shared: each check goes
+through the automatic vehicles one after another, one conversion at a time,
+and a vehicle whose share is down doesn't hold up the others. Settings are
+changed while nothing is converting (the vehicle picker is locked during a
+conversion).
+
 - **Telemetry is always kept.** Tesla stores speed, GPS, gear, Autopilot and
   more in every video frame. The converter copies that into the H.265 or AV1
   file and checks it before it saves anything. Verification cannot be turned

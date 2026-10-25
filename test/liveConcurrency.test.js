@@ -96,10 +96,10 @@ test('for an automatic job, the saved automatic settings follow the change', asy
     });
     const config = { sourceRoot: dir, destinationRoot: null, codec: 'h265', profileId: 'balanced', networkMode: 'direct', outputMode: 'replace',
       includedGroups: ['SavedClips'], groupOrder: ['SavedClips', 'SentryClips', 'RecentClips'], replacementConfirmed: true, concurrency: 6, verifyMode: 'quick' };
-    await auto.configure({ enabled: false, intervalMinutes: 60, window: null, config });
+    await auto.configure({ enabled: true, intervalMinutes: 60, window: null, config });
     await auto.setConcurrency(2);
-    assert.equal(auto.getState().settings.config.concurrency, 2);
-    assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8')).config.concurrency, 2, 'saved for the next automatic job');
+    assert.equal(auto.getState().settings.configs[0].concurrency, 2);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8')).configs[0].concurrency, 2, 'saved for the next automatic job');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

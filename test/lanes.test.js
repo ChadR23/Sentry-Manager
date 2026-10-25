@@ -863,22 +863,22 @@ test('automatic conversion: setLanes saves the lanes and their total; a bad save
     const auto = createAutoConverter(options);
     const config = { sourceRoot: dir, destinationRoot: path.join(dir, 'out'), codec: 'h265', profileId: 'balanced', networkMode: 'direct',
       outputMode: 'separate', includedGroups: ['RecentClips'], replacementConfirmed: false, concurrency: 5, verifyMode: 'quick' };
-    await auto.configure({ enabled: false, intervalMinutes: 60, window: null, config });
+    await auto.configure({ enabled: true, intervalMinutes: 60, window: null, config });
     await auto.setLanes([{ device: ARC.id, concurrency: 3 }, { device: UHD.id, concurrency: 1 }]);
-    const saved = JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8')).config;
+    const saved = JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8')).configs[0];
     assert.deepEqual(saved.lanes, [{ device: ARC.id, concurrency: 3 }, { device: UHD.id, concurrency: 1 }]);
     assert.equal(saved.concurrency, 4);
     // one number for the whole job again: the lanes go
     await auto.setConcurrency(2);
-    assert.equal('lanes' in auto.getState().settings.config, false);
-    assert.equal(auto.getState().settings.config.concurrency, 2);
+    assert.equal('lanes' in auto.getState().settings.configs[0], false);
+    assert.equal(auto.getState().settings.configs[0].concurrency, 2);
 
-    fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({ enabled: false, intervalMinutes: 60, config: { ...config, lanes: [{ device: 'renderD128', concurrency: 2 }] } }));
+    fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({ enabled: true, intervalMinutes: 60, config: { ...config, lanes: [{ device: 'renderD128', concurrency: 2 }] } }));
     const reloaded = createAutoConverter(options);
     await reloaded.start();
     reloaded.stop();
-    assert.equal('lanes' in reloaded.getState().settings.config, false);
-    assert.equal(reloaded.getState().settings.config.concurrency, 5);
+    assert.equal('lanes' in reloaded.getState().settings.configs[0], false);
+    assert.equal(reloaded.getState().settings.configs[0].concurrency, 5);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

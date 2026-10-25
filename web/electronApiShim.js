@@ -512,10 +512,13 @@
       const replace = document.getElementById('converterOutputReplace');
       if (replace && !replace.disabled && !replace.checked) replace.click();
     };
+    // automatic conversion names each source folder by its vehicle
+    window.sentrySourceLabel = (folder) => vehicles.find((v) => footageOf(v) === folder)?.name || null;
     async function setup() {
       const input = sourceInput();
       if (!input) return;
       vehicles = await vehicleList();
+      input.dispatchEvent(new Event('input', { bubbles: true })); // (shown with the names now)
       const isBusy = await busy();
       // the last job's folders and output, restored by the converter
       const restored = Boolean(input.value);

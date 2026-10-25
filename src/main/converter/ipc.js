@@ -604,12 +604,14 @@ function registerConverterIpc(options = {}) {
     'converter:setAuto': wrapped(async (_event, payload) => {
       if (typeof options.auto?.configure !== 'function') fail('AUTO_UNAVAILABLE');
       if (!isPlainObject(payload) || Object.keys(payload)
-        .some((key) => !['enabled', 'intervalMinutes', 'window', 'holdManual', 'keepRunning', 'openAtLogin', 'config'].includes(key))) {
+        .some((key) => !['enabled', 'intervalMinutes', 'window', 'holdManual', 'keepRunning', 'openAtLogin', 'config', 'removeSource'].includes(key))) {
         fail('INVALID_REQUEST');
       }
       if (typeof payload.enabled !== 'boolean' || !AUTO_INTERVALS.has(payload.intervalMinutes)
           || typeof payload.keepRunning !== 'boolean' || typeof payload.openAtLogin !== 'boolean') fail('INVALID_REQUEST');
       if (payload.holdManual !== undefined && typeof payload.holdManual !== 'boolean') fail('INVALID_REQUEST');
+      // one vehicle's folder turned off (never validated, like turning it off)
+      if (payload.removeSource !== undefined && (typeof payload.removeSource !== 'string' || payload.removeSource.length > 4096)) fail('INVALID_REQUEST');
       let window = null;
       if (isPlainObject(payload.window) && payload.window.follow === 'off-peak' && Object.keys(payload.window).length === 1) {
         window = { follow: 'off-peak' };
@@ -627,7 +629,8 @@ function registerConverterIpc(options = {}) {
       if (payload.enabled && !config) fail('AUTO_CONFIG_REQUIRED');
       return boundedJsonValue(await options.auto.configure({
         enabled: payload.enabled, intervalMinutes: payload.intervalMinutes, window, holdManual: payload.holdManual === true,
-        keepRunning: payload.keepRunning, openAtLogin: payload.openAtLogin, config
+        keepRunning: payload.keepRunning, openAtLogin: payload.openAtLogin, config,
+        ...(payload.removeSource !== undefined ? { removeSource: payload.removeSource } : {})
       }), MAX_PAYLOAD_BYTES, { finiteNumbers: true });
     }),
     'converter:checkAutoNow': wrapped(async (_event, payload) => {

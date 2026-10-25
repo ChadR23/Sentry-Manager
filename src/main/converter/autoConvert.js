@@ -1,9 +1,12 @@
 'use strict';
 
-// Automatic conversion: on a schedule, look for clips in the source folder
-// that no earlier automatic run has handled and convert just those, with the
-// settings saved when it was turned on. An optional time window pauses an
-// automatic job outside the chosen hours and resumes it inside them.
+// Automatic conversion: on a schedule, look for clips in each automatic
+// source folder (one per vehicle) that no earlier automatic run has handled
+// and convert just those, with the settings saved for that folder when it was
+// turned on. The folders are checked one after another and converted one job
+// at a time; the schedule and the time window are shared. An optional time
+// window pauses an automatic job outside the chosen hours and resumes it
+// inside them.
 //
 // "Handled" clips are remembered in a small index per source/output setup
 // (relative path -> size and modification time), so each check only stats
@@ -41,8 +44,10 @@ const DEFAULT_SETTINGS = Object.freeze({
   holdManual: false,
   keepRunning: false,
   openAtLogin: false,
-  config: null
+  // the job settings of each automatic source folder (one per vehicle)
+  configs: []
 });
+const MAX_SOURCES = 64;
 
 function autoError(code) {
   return Object.assign(new Error(code), { code });
@@ -66,16 +71,28 @@ function withValidLanes(config) {
   return result;
 }
 
+const isConfig = (config) => Boolean(config) && typeof config === 'object' && !Array.isArray(config) && typeof config.sourceRoot === 'string';
+
+// One per source folder (the last one given wins). Settings saved before
+// there was one per vehicle had a single `config`.
+function normalizeConfigs(value) {
+  const list = Array.isArray(value.configs) ? value.configs : value.enabled === true && isConfig(value.config) ? [value.config] : [];
+  const bySource = new Map();
+  for (const config of list) if (isConfig(config)) bySource.set(config.sourceRoot, withValidLanes({ ...config }));
+  return [...bySource.values()].slice(0, MAX_SOURCES);
+}
+
 function normalizeSettings(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw autoError('INVALID_AUTO_SETTINGS');
+  const configs = normalizeConfigs(value);
   const settings = {
-    enabled: value.enabled === true,
+    enabled: configs.length > 0,
     intervalMinutes: INTERVAL_MINUTES.includes(value.intervalMinutes) ? value.intervalMinutes : DEFAULT_SETTINGS.intervalMinutes,
     window: null,
     holdManual: value.holdManual === true,
     keepRunning: value.keepRunning === true,
     openAtLogin: value.openAtLogin === true,
-    config: value.config && typeof value.config === 'object' && !Array.isArray(value.config) ? withValidLanes({ ...value.config }) : null
+    configs
   };
   if (value.window?.follow === 'off-peak') {
     settings.window = { follow: 'off-peak' };
@@ -84,7 +101,6 @@ function normalizeSettings(value) {
         || value.window.startHour === value.window.endHour) throw autoError('INVALID_AUTO_WINDOW');
     settings.window = { startHour: value.window.startHour, endHour: value.window.endHour };
   }
-  if (settings.enabled && !settings.config) throw autoError('AUTO_CONFIG_REQUIRED');
   return settings;
 }
 
@@ -122,6 +138,9 @@ function createAutoConverter(options = {}) {
   const status = {
     lastCheckAt: null, nextCheckAt: null, lastNewFiles: null, lastJobId: null,
     activeJobId: null, pausedForWindow: false, checking: false, error: null,
+    // the source folder being checked or converted, the folders still to
+    // check in this round, and each folder's last check
+    activeSource: null, round: [], sources: {},
     // manual jobs this paused outside the window, and every manual job it
     // has handled since the window closed (one the owner resumes stays running)
     heldManual: [], handledManual: []
@@ -280,12 +299,14 @@ function createAutoConverter(options = {}) {
     try { job = await service.get(status.activeJobId); } catch (_) { job = null; }
     if (!job) {
       status.activeJobId = null;
+      status.activeSource = null;
       if (status.pausedForWindow) await setPausedForWindow(null);
       return;
     }
     if (TERMINAL.has(job.state)) {
       await recordFinishedJob(job);
       status.activeJobId = null;
+      status.activeSource = null;
       if (status.pausedForWindow) await setPausedForWindow(null);
       changed();
       return;
@@ -368,6 +389,14 @@ function createAutoConverter(options = {}) {
     }
   }
 
+  const configFor = (sourceRoot) => settings.configs.find((config) => config.sourceRoot === sourceRoot) || null;
+  // the folder whose automatic job is running (or the only one)
+  const activeConfig = () => configFor(status.activeSource) || (settings.configs.length === 1 ? settings.configs[0] : null);
+
+  function noteSource(sourceRoot, fields) {
+    status.sources = { ...status.sources, [sourceRoot]: { ...(status.sources[sourceRoot] || {}), ...fields } };
+  }
+
   async function tickOnce() {
     const time = now();
     const insideWindow = insideWindowAt(time);
@@ -376,38 +405,62 @@ function createAutoConverter(options = {}) {
       await followActiveJob(insideWindow);
       if (status.activeJobId) return;
     }
-    if (!settings.enabled || !settings.config || !insideWindow) return;
-    if (status.nextCheckAt !== null && time < status.nextCheckAt) return;
-    if (await isBusy()) return;
+    if (!settings.enabled || !insideWindow) return;
+    // A round checks every automatic folder once, one after another; a
+    // folder with new clips is converted before the next one is checked.
+    const known = new Set(settings.configs.map((config) => config.sourceRoot));
+    status.round = status.round.filter((sourceRoot) => known.has(sourceRoot));
+    if (!status.round.length) {
+      if (status.nextCheckAt !== null && time < status.nextCheckAt) return;
+      if (await isBusy()) return;
+      status.round = [...known];
+      status.nextCheckAt = time + settings.intervalMinutes * 60_000;
+    } else if (await isBusy()) return;
     status.checking = true;
     status.error = null;
     changed();
     try {
-      const newFiles = await sweep(settings.config);
-      status.lastCheckAt = now();
-      status.lastNewFiles = newFiles;
-      if (newFiles > 0 && settings.enabled) {
-        const jobId = await service.start({ ...settings.config, autoConvert: true });
-        status.activeJobId = jobId;
-        status.lastJobId = jobId;
-      }
-    } catch (error) {
-      if (error?.code === 'JOB_ACTIVE') {
-        // Another conversion started while this check ran: not a failure;
-        // check again as soon as it is finished.
-        status.checking = false;
-        status.nextCheckAt = null;
+      while (status.round.length && settings.enabled && !status.activeJobId) {
+        const sourceRoot = status.round[0];
+        const config = configFor(sourceRoot);
+        status.activeSource = sourceRoot;
         changed();
-        return;
+        let newFiles = null;
+        let error = null;
+        try {
+          if (config) newFiles = await sweep(config);
+        } catch (sweepError) {
+          // (one vehicle's share being down never stops the others)
+          error = typeof sweepError?.code === 'string' ? sweepError.code : 'AUTO_CHECK_FAILED';
+        }
+        status.round.shift();
+        status.lastCheckAt = now();
+        status.lastNewFiles = newFiles;
+        if (error) status.error = error;
+        noteSource(sourceRoot, { lastCheckAt: status.lastCheckAt, lastNewFiles: newFiles, error });
+        if (config && newFiles > 0 && settings.enabled) {
+          try {
+            const jobId = await service.start({ ...config, autoConvert: true });
+            status.activeJobId = jobId;
+            status.lastJobId = jobId;
+          } catch (startError) {
+            if (startError?.code === 'JOB_ACTIVE') {
+              // Another conversion started while this check ran: not a
+              // failure; this folder is checked again once it is finished.
+              status.round.unshift(sourceRoot);
+              break;
+            }
+            status.error = typeof startError?.code === 'string' ? startError.code : 'AUTO_CHECK_FAILED';
+            noteSource(sourceRoot, { error: status.error });
+          }
+        }
       }
-      status.error = typeof error?.code === 'string' ? error.code : 'AUTO_CHECK_FAILED';
-      status.lastCheckAt = now();
     } finally {
-      if (status.checking) {
-        status.checking = false;
-        status.nextCheckAt = status.lastCheckAt + settings.intervalMinutes * 60_000;
-        changed();
-      }
+      if (!status.activeJobId) status.activeSource = null;
+      // a round begun for a folder just turned on also sets the next check
+      if (!status.round.length && status.nextCheckAt === null) status.nextCheckAt = now() + settings.intervalMinutes * 60_000;
+      status.checking = false;
+      changed();
     }
   }
 
@@ -421,7 +474,7 @@ function createAutoConverter(options = {}) {
   }
 
   function getState() {
-    return { settings: JSON.parse(JSON.stringify(settings)), status: { ...status } };
+    return { settings: JSON.parse(JSON.stringify(settings)), status: JSON.parse(JSON.stringify(status)) };
   }
 
   return Object.freeze({
@@ -431,7 +484,7 @@ function createAutoConverter(options = {}) {
     async start() {
       const stored = await readJson(SETTINGS_FILE);
       try { if (stored) settings = normalizeSettings(stored); } catch (_) { settings = { ...DEFAULT_SETTINGS }; }
-      if (settings.config) await loadIndex(settings.config);
+      for (const config of settings.configs) await loadIndex(config);
       // Adopt an automatic job that was still running when the app closed.
       try {
         const jobs = await service.list();
@@ -439,6 +492,7 @@ function createAutoConverter(options = {}) {
         if (running) {
           await loadIndex(running.config);
           status.activeJobId = running.id;
+          status.activeSource = running.config.sourceRoot || null;
           // Only a pause this feature made is undone automatically.
           const saved = await readJson(STATE_FILE);
           status.pausedForWindow = running.state === 'paused' && saved?.pausedForWindowJobId === running.id;
@@ -459,13 +513,30 @@ function createAutoConverter(options = {}) {
       void tick();
       return getState();
     },
+    /**
+     * The shared schedule and window, plus one vehicle's folder: `enabled`
+     * with `config` turns automatic on for config.sourceRoot (or saves its
+     * new settings); `removeSource` turns it off for that folder. Other
+     * folders keep theirs. `configs` replaces the whole list.
+     */
     async configure(next) {
-      const normalized = normalizeSettings(next);
-      if (normalized.config) await loadIndex(normalized.config);
-      const configChanged = JSON.stringify(normalized.config) !== JSON.stringify(settings.config);
+      let configs = settings.configs;
+      if (Array.isArray(next?.configs)) configs = next.configs;
+      else if (next?.enabled === true && isConfig(next.config)) {
+        configs = [...configs.filter((config) => config.sourceRoot !== next.config.sourceRoot), next.config];
+      } else if (typeof next?.removeSource === 'string') {
+        configs = configs.filter((config) => config.sourceRoot !== next.removeSource);
+      }
+      if (configs.length > MAX_SOURCES) throw autoError('TOO_MANY_AUTO_SOURCES');
+      const normalized = normalizeSettings({ ...next, configs });
+      for (const config of normalized.configs) await loadIndex(config);
+      const before = new Map(settings.configs.map((config) => [config.sourceRoot, JSON.stringify(config)]));
+      const added = normalized.configs.filter((config) => before.get(config.sourceRoot) !== JSON.stringify(config)).map((config) => config.sourceRoot);
       settings = normalized;
       await writeJson(SETTINGS_FILE, settings);
-      if (configChanged || !settings.enabled) status.nextCheckAt = null; // check soon with new settings
+      // a folder turned on (or with new settings) is checked soon
+      for (const sourceRoot of added) if (!status.round.includes(sourceRoot)) status.round.push(sourceRoot);
+      if (!settings.enabled) { status.round = []; status.nextCheckAt = null; }
       changed();
       void tick();
       return getState();
@@ -482,10 +553,11 @@ function createAutoConverter(options = {}) {
     // Parallel conversions changed on the running automatic job: later
     // automatic jobs use the same number.
     async setConcurrency(value) {
-      if (!settings.config || (settings.config.concurrency === value && !settings.config.lanes)) return getState();
+      const current = activeConfig();
+      if (!current || (current.concurrency === value && !current.lanes)) return getState();
       // the running job has one number for all; the saved setting follows it
-      const { lanes: _lanes, ...config } = settings.config;
-      settings = { ...settings, config: { ...config, concurrency: value } };
+      const { lanes: _lanes, ...config } = current;
+      settings = { ...settings, configs: settings.configs.map((c) => (c === current ? { ...config, concurrency: value } : c)) };
       await writeJson(SETTINGS_FILE, settings);
       changed();
       return getState();
@@ -493,15 +565,17 @@ function createAutoConverter(options = {}) {
     // Conversions at once per GPU changed on the running automatic job.
     async setLanes(value) {
       const lanes = normalizeLanes(value);
-      if (!settings.config || !lanes) return getState();
-      if (JSON.stringify(settings.config.lanes || null) === JSON.stringify(lanes)) return getState();
-      settings = { ...settings, config: { ...settings.config, lanes, concurrency: lanesTotal(lanes) } };
+      const current = activeConfig();
+      if (!current || !lanes) return getState();
+      if (JSON.stringify(current.lanes || null) === JSON.stringify(lanes)) return getState();
+      settings = { ...settings, configs: settings.configs.map((c) => (c === current ? { ...c, lanes, concurrency: lanesTotal(lanes) } : c)) };
       await writeJson(SETTINGS_FILE, settings);
       changed();
       return getState();
     },
     async checkNow() {
       status.nextCheckAt = null;
+      status.round = [];
       await tick();
       return getState();
     },

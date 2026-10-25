@@ -278,9 +278,10 @@
                         <legend data-i18n="ui.converter.autoTitle">Automatic conversion</legend>
                         <label class="converter-confirm-row">
                             <input id="converterAutoEnabled" type="checkbox">
-                            <span><strong data-i18n="ui.converter.autoEnable">Convert new clips automatically</strong>
-                            <small data-i18n="ui.converter.autoDetail">Checks the source folder on a schedule and converts only clips it hasn't handled yet, with the settings above (saved when you turn this on or change an option here).</small></span>
+                            <span><strong data-i18n="ui.converter.autoEnable">Convert this source's new clips automatically</strong>
+                            <small data-i18n="ui.converter.autoDetail">Each source has its own: its new clips are converted on the schedule below with the settings above, saved for this source when you turn this on or change an option here. Other sources keep theirs, on or off.</small></span>
                         </label>
+                        <ul id="converterAutoList" class="converter-auto-list" hidden></ul>
                         <div class="converter-auto-grid">
                             <label class="converter-field" for="converterAutoInterval">
                                 <span class="converter-field-label" data-i18n="ui.converter.autoInterval">Check every</span>

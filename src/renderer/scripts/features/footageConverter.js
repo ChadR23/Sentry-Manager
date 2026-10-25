@@ -305,6 +305,7 @@ function collectElements(root) {
         autoKeepRunning: byId('converterAutoKeepRunning'),
         autoLogin: byId('converterAutoLogin'),
         autoStatus: byId('converterAutoStatus'),
+        autoList: byId('converterAutoList'),
         autoCheckNow: byId('converterAutoCheckNow'),
         concurrency: byId('converterConcurrency'),
         concurrencyCustom: byId('converterConcurrencyCustom'),
@@ -1561,6 +1562,8 @@ function createFootageConverterController(options = {}) {
             if (progressOnly || !['completed', 'failed', 'cancelled'].includes(snapshot.state)) return;
             snapshot = null;
             latestRevision = -1;
+            // (which vehicle the automatic run is on now)
+            void refreshAuto();
         }
         applySnapshot(payload.snapshot, payload.revision);
     }
@@ -1577,11 +1580,47 @@ function createFootageConverterController(options = {}) {
         }
     }
 
+    // Automatic conversion is per source folder (one per vehicle): the
+    // checkbox is for the folder chosen above; the schedule is shared.
+    const currentSource = () => elements.sourcePath?.value?.trim() || '';
+    const autoConfigs = () => (Array.isArray(autoState?.settings?.configs) ? autoState.settings.configs : []);
+    const autoConfigFor = (sourceRoot) => autoConfigs().find((config) => config.sourceRoot === sourceRoot) || null;
+    // the web version names a folder by its vehicle
+    function sourceLabel(sourceRoot) {
+        try {
+            const named = typeof globalThis.sentrySourceLabel === 'function' ? globalThis.sentrySourceLabel(sourceRoot) : null;
+            if (named) return String(named);
+        } catch (_) { /* the folder itself */ }
+        return String(sourceRoot).split(/[\\/]/).filter(Boolean).pop() || String(sourceRoot);
+    }
+
+    function renderAutoList() {
+        const list = elements.autoList;
+        const documentRef = list?.ownerDocument || globalThis.document;
+        if (!list || typeof list.replaceChildren !== 'function' || typeof documentRef?.createElement !== 'function') return;
+        const configs = autoConfigs();
+        list.hidden = configs.length === 0;
+        const status = autoState?.status || {};
+        list.replaceChildren(...configs.map((config) => {
+            const item = documentRef.createElement('li');
+            const name = documentRef.createElement('strong');
+            name.textContent = sourceLabel(config.sourceRoot);
+            const detail = documentRef.createElement('span');
+            const codec = config.codec === 'av1' ? 'AV1' : 'H.265';
+            const output = config.outputMode === 'separate' ? message('autoListSeparate', 'separate folder') : message('autoListReplace', 'replaces originals');
+            const busy = status.activeSource === config.sourceRoot ? ` · ${message('autoListActive', 'converting now')}` : '';
+            detail.textContent = ` ${codec} · ${output}${busy}`;
+            item.append(name, detail);
+            if (config.sourceRoot === currentSource()) item.className = 'current';
+            return item;
+        }));
+    }
+
     function renderAuto() {
         const settings = autoState?.settings;
         const status = autoState?.status || {};
         if (!settings) return;
-        if (elements.autoEnabled) elements.autoEnabled.checked = settings.enabled === true;
+        if (elements.autoEnabled) elements.autoEnabled.checked = Boolean(autoConfigFor(currentSource()));
         if (elements.autoInterval) elements.autoInterval.value = String(settings.intervalMinutes || 60);
         const offPeak = settings.window?.follow === 'off-peak';
         if (elements.autoWindowEnabled) elements.autoWindowEnabled.checked = Boolean(settings.window) && !offPeak;
@@ -1596,6 +1635,7 @@ function createFootageConverterController(options = {}) {
         if (elements.autoLogin) elements.autoLogin.checked = settings.openAtLogin === true;
         for (const control of [elements.autoStart, elements.autoEnd]) setDisabled(control, !settings.window || offPeak);
         setDisabled(elements.autoCheckNow, !settings.enabled || status.checking === true);
+        renderAutoList();
         renderAutoStatus();
     }
 
@@ -1605,8 +1645,18 @@ function createFootageConverterController(options = {}) {
         const status = autoState?.status || {};
         if (!settings) return;
         let text;
+        const source = currentSource();
+        const mine = Boolean(autoConfigFor(source));
+        const others = autoConfigs().filter((config) => config.sourceRoot !== source).length;
+        const elsewhere = status.activeSource && status.activeSource !== source;
         if (!settings.enabled) text = message('autoOff', 'Off');
-        else if (status.checking) text = message('autoChecking', 'Checking for new clips…');
+        else if (!mine && !status.activeSource) {
+            text = message('autoOffHere', 'Off for this source · {count} other(s) convert automatically', { count: others });
+        } else if (elsewhere) {
+            text = status.activeJobId
+                ? message('autoConvertingOther', 'Converting {name}\'s new clips…', { name: sourceLabel(status.activeSource) })
+                : message('autoCheckingOther', 'Checking {name} for new clips…', { name: sourceLabel(status.activeSource) });
+        } else if (status.checking) text = message('autoChecking', 'Checking for new clips…');
         else if (status.activeJobId && status.pausedForWindow && settings.window?.follow === 'off-peak') {
             text = message('autoPausedPeak', 'Paused while electricity costs more — resumes when off-peak starts');
         } else if (status.activeJobId && status.pausedForWindow) {
@@ -1619,11 +1669,13 @@ function createFootageConverterController(options = {}) {
         } else if (status.activeJobId) text = message('autoConverting', 'Converting new clips…');
         else {
             const parts = [];
-            if (status.error) parts.push(message('autoError', 'Last check failed: {code}', { code: status.error }));
-            else if (Number.isSafeInteger(status.lastNewFiles)) {
-                parts.push(status.lastNewFiles === 0
-                    ? message('autoNoneNew', 'No new clips at {time}', { time: clockTime(status.lastCheckAt) })
-                    : message('autoFoundNew', '{count} new clips found at {time}', { count: status.lastNewFiles, time: clockTime(status.lastCheckAt) }));
+            // this folder's own last check
+            const last = status.sources?.[source] || {};
+            if (last.error) parts.push(message('autoError', 'Last check failed: {code}', { code: last.error }));
+            else if (Number.isSafeInteger(last.lastNewFiles)) {
+                parts.push(last.lastNewFiles === 0
+                    ? message('autoNoneNew', 'No new clips at {time}', { time: clockTime(last.lastCheckAt) })
+                    : message('autoFoundNew', '{count} new clips found at {time}', { count: last.lastNewFiles, time: clockTime(last.lastCheckAt) }));
             }
             if (status.nextCheckAt) parts.push(message('autoNext', 'Next check {time}', { time: clockTime(status.nextCheckAt) }));
             else parts.push(message('autoSoon', 'Checks shortly'));
@@ -1653,6 +1705,7 @@ function createFootageConverterController(options = {}) {
             const window = elements.autoOffPeak?.checked === true ? { follow: 'off-peak' }
                 : windowOn ? { startHour: hourValue(elements.autoStart, 1), endHour: hourValue(elements.autoEnd, 6) } : null;
             if (window && !window.follow && window.startHour === window.endHour) throw apiError('AUTO_WINDOW_INVALID');
+            const source = currentSource();
             const settings = {
                 enabled,
                 intervalMinutes: Number(elements.autoInterval?.value) || 60,
@@ -1661,8 +1714,9 @@ function createFootageConverterController(options = {}) {
                 keepRunning: elements.autoKeepRunning?.checked === true,
                 openAtLogin: elements.autoLogin?.checked === true,
                 // Turning it on (or changing an option while on) saves the
-                // current job settings above for every automatic run.
-                config: enabled ? configFromControls() : (autoState?.settings?.config || null)
+                // job settings above for this source's automatic runs;
+                // turning it off removes only this source.
+                ...(enabled ? { config: configFromControls() } : autoConfigFor(source) ? { removeSource: source } : {})
             };
             autoState = unwrap(await api.setConverterAuto(settings));
         } catch (error) {
@@ -1935,6 +1989,8 @@ function createFootageConverterController(options = {}) {
             control?.addEventListener?.('change', () => saveAuto());
         }
         elements.autoCheckNow?.addEventListener?.('click', () => checkAutoNow());
+        // another vehicle chosen: its own automatic setting
+        for (const type of ['input', 'change']) elements.sourcePath?.addEventListener?.(type, () => renderAuto());
     }
 
     async function initialize() {
