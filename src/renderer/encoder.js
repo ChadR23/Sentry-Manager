@@ -89,6 +89,14 @@ async function start() {
     await styles;
     await Promise.race([fonts, wait(3000)]);
 
+    // Back on the Encoder from the manager's other pages: a node paired,
+    // renamed or removed under Nodes (or its number set there) shows in the
+    // rows without reloading the page.
+    window.addEventListener('message', async (event) => {
+        if (event.source !== window.parent || event.origin !== location.origin || event.data?.type !== 'shown') return;
+        if ((await controller?.refreshDevices()) === 'reload') location.reload();
+    });
+
     root.classList.remove('enc-loading');
     root.classList.add('enc-ready');
     followRun();

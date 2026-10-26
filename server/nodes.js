@@ -262,7 +262,9 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
   /** What the Nodes page shows. */
   async function overview() {
     const nodes = stored();
-    await Promise.all(nodes.map((node) => refresh(node)));
+    // a node slow to answer (up to 8 s) does not hold the page: after 1.5 s
+    // its last known numbers are shown, and its answer updates them later
+    await Promise.all(nodes.map((node) => Promise.race([refresh(node), new Promise((r) => setTimeout(r, 1500).unref?.())])));
     return nodes.map((node) => {
       const i = info.get(node.id) || {};
       return {
@@ -327,6 +329,7 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
   function rename(id, newName) {
     const node = byId(id);
     if (!node) return null;
+    if (typeof newName !== 'string') throw nodeError('Enter a name.');
     const clean = peerText(newName, 64);
     if (!clean) throw nodeError('Enter a name.');
     save(stored().map((n) => (n.id === id ? { ...n, name: clean } : n)));
@@ -360,6 +363,13 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
     return trusted === true;
   }
   const trusted = (id) => byId(String(id || '').replace(/^node:/, ''))?.trusted === true;
+
+  /** A vehicle removed: out of every node's Vehicles first list. */
+  function forgetCar(car) {
+    const all = stored();
+    if (!all.some((n) => Array.isArray(n.cars) && n.cars.includes(car))) return;
+    save(all.map((n) => (Array.isArray(n.cars) && n.cars.includes(car) ? { ...n, cars: n.cars.filter((id) => id !== car) } : n)));
+  }
 
   /** { 'node:<id>': [vehicle id, ...] } for the nodes that have a list. */
   const carLists = () => Object.fromEntries(stored().filter((n) => Array.isArray(n.cars) && n.cars.length).map((n) => [`node:${n.id}`, n.cars]));
@@ -539,7 +549,7 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
     return info.get(id);
   }
 
-  return { list, overview, add, rename, setCars, setTrusted, trusted, carLists, remove, encode, setSlots, has: (id) => Boolean(byId(id)), refresh: (id) => (byId(id) ? refresh(byId(id)) : null) };
+  return { list, overview, add, rename, setCars, forgetCar, setTrusted, trusted, carLists, remove, encode, setSlots, has: (id) => Boolean(byId(id)), refresh: (id) => (byId(id) ? refresh(byId(id)) : null) };
 }
 
 module.exports = { createNodes, parseAddress, connectPinned, pinMatches, takeUploadSlot };

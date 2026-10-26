@@ -849,20 +849,23 @@ function createFootageConverterController(options = {}) {
         });
     }
 
-    // Asked once at start, without holding up the page: with two or more
-    // GPUs the rows replace the single number.
-    async function loadDevices() {
-        if (typeof api.getConverterDevices !== 'function' || !elements.lanes) return;
+    // Asked at start, without holding up the page: with two or more GPUs the
+    // rows replace the single number. Asked again (`again`) when the page is
+    // shown, as a node paired, renamed or removed meanwhile changes the rows;
+    // 'reload' when the page has to switch between rows and the number.
+    async function loadDevices({ again = false } = {}) {
+        if (typeof api.getConverterDevices !== 'function' || !elements.lanes) return undefined;
         let answer;
         try {
             answer = unwrap(await api.getConverterDevices());
-        } catch (_) { return; }
+        } catch (_) { return undefined; }
         const listed = (Array.isArray(answer?.devices) ? answer.devices : [])
             .filter((device) => device && typeof device.id === 'string' && device.id)
             .map((device) => ({ ...device, name: typeof device.name === 'string' && device.name.trim() ? device.name.trim() : device.id }));
         const gpus = listed.filter((device) => device.kind !== 'cpu' && device.id !== 'cpu');
         // two GPUs, or another server paired under Nodes
-        if (gpus.length < 2 && !gpus.some((device) => device.kind === 'node')) return;
+        if (gpus.length < 2 && !gpus.some((device) => device.kind === 'node')) return again && lanesMode() ? 'reload' : undefined;
+        if (again && !lanesMode()) return 'reload';
         // the CPU row is always there, last
         const cpu = listed.find((device) => device.id === 'cpu') || { id: 'cpu', kind: 'cpu', name: 'CPU (software encoder)', encoders: {} };
         const devices = [...gpus, cpu];
@@ -888,7 +891,9 @@ function createFootageConverterController(options = {}) {
             setText(elements.benchmarkIntro, message('benchmarkIntroLanes', BENCHMARK_INTRO_LANES));
         }
         renderLanes();
-        if (snapshot?.config) syncLanes(snapshot.config);
+        // (again: the running job's rows, not the remembered ones)
+        if (snapshot?.config) syncLanes(snapshot.config, { force: again && jobActive() });
+        return undefined;
     }
 
     function message(key, fallback, params) {
@@ -2079,6 +2084,10 @@ function createFootageConverterController(options = {}) {
             return initPromise;
         },
         setVisible(nextVisible) { visible = Boolean(nextVisible); },
+        /** The devices again (see loadDevices): 'reload' when the page must start over. */
+        refreshDevices() {
+            return initialized ? loadDevices({ again: true }).catch(() => undefined) : Promise.resolve(undefined);
+        },
         get visible() { return visible; },
         get snapshot() { return snapshot; },
         destroy() {

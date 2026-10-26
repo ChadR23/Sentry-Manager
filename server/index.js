@@ -641,22 +641,30 @@ async function main() {
     if (!nodes.has(params.id)) throw new HttpError(404, 'No such node.');
     const out = { ok: true };
     try {
+      // Everything is checked (and the password asked for) before anything
+      // is saved: a request refused part way used to keep its earlier parts.
+      if (body?.name !== undefined && (typeof body.name !== 'string' || !body.name.trim())) throw new HttpError(400, 'Enter a name.');
+      if (body?.trusted !== undefined && typeof body.trusted !== 'boolean') throw new HttpError(400, 'Trusted is on or off.');
+      // trusted: its encodes then replace originals without the picture check
+      if (body?.trusted === true) requireConfirmed(req);
+      let cars;
+      if (body?.cars !== undefined) {
+        if (!Array.isArray(body.cars) || body.cars.some((id) => typeof id !== 'string')) throw new HttpError(400, 'A list of vehicles.');
+        // a vehicle removed meanwhile is left out instead of refusing the list
+        const known = new Set(vehicles.list().map((v) => v.id));
+        cars = body.cars.filter((id) => known.has(id));
+      }
       if (body?.name !== undefined) {
         const renamed = nodes.rename(params.id, body.name);
         audit.info(`Node "${renamed.previous}" renamed "${renamed.name}": ${by(req, user)}`);
         out.name = renamed.name;
       }
       if (body?.trusted !== undefined) {
-        if (typeof body.trusted !== 'boolean') throw new HttpError(400, 'Trusted is on or off.');
-        // its encodes then replace originals without the picture check: the password again
-        if (body.trusted) requireConfirmed(req);
         out.trusted = nodes.setTrusted(params.id, body.trusted);
         (out.trusted ? audit.warn : audit.info).call(audit, `Node ${params.id} ${out.trusted ? 'trusted: its encodes skip the picture check' : 'no longer trusted: its encodes get the picture check'}: ${by(req, user)}`);
       }
-      if (body?.cars !== undefined) {
-        const known = new Set(vehicles.list().map((v) => v.id));
-        if (!Array.isArray(body.cars) || body.cars.some((id) => !known.has(id))) throw new HttpError(400, 'Unknown vehicle.');
-        out.cars = nodes.setCars(params.id, body.cars);
+      if (cars) {
+        out.cars = nodes.setCars(params.id, cars);
         audit.info(`Node ${params.id} converts first for: ${out.cars.join(', ') || 'no vehicle in particular'}: ${by(req, user)}`);
       }
     } catch (err) {
@@ -714,6 +722,8 @@ async function main() {
     requireConfirmed(req);
     const v = vehicleOr404(params.id);
     await vehicles.remove(params.id);
+    // and from every node's Vehicles first list
+    nodes.forgetCar(params.id);
     audit.info(`Vehicle "${v.name}" (${v.id}) removed (its footage is untouched): ${by(req, user)}`);
     return { ok: true };
   });

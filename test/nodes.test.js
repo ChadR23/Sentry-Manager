@@ -489,7 +489,19 @@ test('a node can be given a name of your own; empty names are refused', () => {
   assert.equal(db.get('nodes')[0].name, 'Garage 4070 Ti');
   assert.equal(db.get('nodes')[0].token, 't'.repeat(43), 'nothing else changes');
   assert.throws(() => nodes.rename('abcdefghijkl', '   '), /Enter a name/);
+  for (const bad of [5, ['x'], { name: 'x' }, null]) assert.throws(() => nodes.rename('abcdefghijkl', bad), /Enter a name/);
+  assert.equal(db.get('nodes')[0].name, 'Garage 4070 Ti');
   assert.equal(nodes.rename('nope', 'x'), null);
+});
+
+test('a removed vehicle leaves every node\'s Vehicles first list', () => {
+  const db = memDb();
+  const node = (id, cars) => ({ id, name: id, host: '10.0.0.5', port: 9000, token: 't'.repeat(43), pin: { fingerprint: '00' }, cars });
+  db.set('nodes', [node('aaaaaaaaaaaa', ['car-a', 'car-b']), node('bbbbbbbbbbbb', ['car-b']), node('cccccccccccc', undefined)]);
+  const nodes = createNodes({ db, log: quiet, audit: quiet, name: 'main-nas' });
+  nodes.forgetCar('car-b');
+  assert.deepEqual(db.get('nodes').map((n) => n.cars), [['car-a'], [], undefined]);
+  assert.deepEqual(nodes.carLists(), { 'node:aaaaaaaaaaaa': ['car-a'] });
 });
 
 test('a node can be marked trusted (off by default); the converter asks per clip', () => {

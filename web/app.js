@@ -230,6 +230,9 @@
     if (se && se.scrollTop !== top) se.scrollTop = top;
   }
 
+  // a node change being saved (the Nodes page)
+  let nodeSaving = false;
+
   // Text the reader is highlighting (or about to, with the button down) inside
   // `el`: redrawing it would take the highlight away before it can be copied.
   // Live updates wait until the highlight is gone, then catch up at once.
@@ -1797,8 +1800,15 @@
       };
       setTimeout(follow, every);
     }
+    // one node change at a time: a second click while one saves would work
+    // from the list as it was before the first
+    const once = (fn) => async (...args) => {
+      if (nodeSaving) return;
+      nodeSaving = true;
+      try { await fn(...args); } finally { nodeSaving = false; }
+    };
     page.querySelectorAll('[data-node-trust]').forEach((box) => {
-      box.addEventListener('change', async () => {
+      box.addEventListener('change', once(async () => {
         const on = box.checked;
         if (on && !confirm('Trust this node? Its encodes will replace your originals without the picture check. Only for a computer of your own that nobody else can change.')) {
           box.checked = false;
@@ -1811,12 +1821,12 @@
           toast(err.message, true);
         }
         render();
-      });
+      }));
     });
-    const saveCars = async (id, list) => {
+    const saveCars = once(async (id, list) => {
       await api(`/api/nodes/${encodeURIComponent(id)}`, { method: 'PUT', body: { cars: list } }).catch((err) => toast(err.message, true));
       render();
-    };
+    });
     const carsOf = (id) => [...(nodes.find((x) => x.id === id)?.cars || [])];
     page.querySelectorAll('[data-car-add]').forEach((sel) => {
       sel.onchange = () => { if (sel.value) saveCars(sel.dataset.carAdd, [...carsOf(sel.dataset.carAdd), sel.value]); };
@@ -1833,7 +1843,7 @@
       };
     });
     page.querySelectorAll('[data-rename-node]').forEach((b) => {
-      b.onclick = async () => {
+      b.onclick = once(async () => {
         const n = nodes.find((x) => x.id === b.dataset.renameNode);
         const asked = confirmDialog({ title: 'Rename node', ok: 'Save',
           body: `<label class="field">Name<input class="input" id="node-new-name" maxlength="64" autocomplete="off" value="${esc(n?.name || '')}"></label><p class="muted small">Shown here and under Encoder → Parallel conversions. The node itself keeps its own name.</p>` });
@@ -1846,15 +1856,15 @@
         if (!ok || !name || name === n?.name) return;
         await api(`/api/nodes/${encodeURIComponent(b.dataset.renameNode)}`, { method: 'PUT', body: { name } }).catch((err) => toast(err.message, true));
         render();
-      };
+      });
     });
     page.querySelectorAll('[data-remove-node]').forEach((b) => {
-      b.onclick = async () => {
+      b.onclick = once(async () => {
         const n = nodes.find((x) => x.id === b.dataset.removeNode);
         if (!(await confirmDialog({ title: 'Remove this node?', body: `<p><b>${esc(n?.name || '')}</b> gets no more clips from this server. To use it again, pair it again with a new code.</p>`, ok: 'Remove' }))) return;
         await api(`/api/nodes/${encodeURIComponent(b.dataset.removeNode)}`, { method: 'DELETE' }).catch((err) => toast(err.message, true));
         render();
-      };
+      });
     });
     if (!worker.available) return;
     const saveWorker = async () => {

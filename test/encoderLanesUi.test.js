@@ -675,3 +675,39 @@ test('web shim: after a reconnect the page catches up on the current job; a stre
   streams[1].fire('error');
   assert.equal(timers.filter((t) => t.ms >= 1000).length, 1);
 });
+
+test('shown again: a node paired, renamed or removed, or its number set under Nodes, shows in the rows', async () => {
+  const NODE = { id: 'node:abc', kind: 'node', name: 'Garage PC', online: true, encoders: { h265: 'hevc_nvenc', av1: null } };
+  let now = { devices: [ARC, NODE, CPU], defaultDevice: ARC.id };
+  const storage = makeStorage();
+  const p = await page({ storage, api: { getConverterDevices: async () => ({ ok: true, value: now }) } });
+  assert.equal(p.lane(NODE.id).name, 'Garage PC');
+  // renamed, and "Use 4" chosen on the Nodes page (stored by the shell)
+  now = { devices: [ARC, { ...NODE, name: 'Shop PC' }, CPU], defaultDevice: ARC.id };
+  storage.setItem('converterLanes', JSON.stringify({ [ARC.id]: 5, [NODE.id]: 4, cpu: 0 }));
+  assert.equal(await p.c.refreshDevices(), undefined, 'still rows: no reload');
+  assert.equal(p.lane(NODE.id).name, 'Shop PC');
+  assert.equal(p.lane(NODE.id).count, '4');
+  // a second node paired
+  now = { devices: [ARC, { ...NODE, name: 'Shop PC' }, { ...NODE, id: 'node:def', name: 'Office PC' }, CPU], defaultDevice: ARC.id };
+  await p.c.refreshDevices();
+  assert.equal(p.lane('node:def').count, 'Off', 'a new node starts Off');
+  // the last node removed, with one GPU: the page goes back to the single number
+  now = ONE;
+  assert.equal(await p.c.refreshDevices(), 'reload');
+  // and a first node paired on a one-GPU page: rows from then on
+  const one = await page({ api: { getConverterDevices: async () => ({ ok: true, value: now }) } });
+  assert.equal(one.elements.lanes.hidden, true);
+  assert.equal(await one.c.refreshDevices(), undefined, 'nothing changed');
+  now = { devices: [ARC, NODE, CPU], defaultDevice: ARC.id };
+  assert.equal(await one.c.refreshDevices(), 'reload');
+});
+
+test('shown again during a run: the rows show the running job, not the remembered numbers', async () => {
+  const storage = makeStorage({ converterLanes: JSON.stringify({ [ARC.id]: 1, [UHD.id]: 1, cpu: 0 }) });
+  const p = await page({ storage, job: running({ codec: 'h265', concurrency: 5, lanes: [{ device: ARC.id, concurrency: 3 }, { device: UHD.id, concurrency: 2 }] }) });
+  assert.equal(p.lane(ARC.id).count, '3');
+  await p.c.refreshDevices();
+  assert.equal(p.lane(ARC.id).count, '3');
+  assert.equal(p.lane(UHD.id).count, '2');
+});

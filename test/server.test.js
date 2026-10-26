@@ -729,3 +729,46 @@ test('sign-in: a burst of parallel guesses is turned away, and guesses from else
     await fsp.rm(dir, { recursive: true, force: true });
   }
 });
+
+test('Nodes: a change refused part way saves none of it; a removed vehicle leaves every node list', { timeout: 120000 }, async () => {
+  const dir = await tmp();
+  await makeFootage(path.join(dir, 'footage'));
+  const { ManagerDB } = require(path.join(REPO, 'server', 'db'));
+  const seed = new ManagerDB(path.join(dir, 'data', 'manager.db'));
+  // (nobody answers on port 1: the node is just offline)
+  seed.set('nodes', [{ id: 'abcdefghijkl', name: 'garage-pc', host: '127.0.0.1', port: 1, token: 't'.repeat(43), pin: { fingerprint: '00' } }]);
+  seed.close();
+  const s = await startServer(dir);
+  const node = async () => {
+    const db = new ManagerDB(path.join(dir, 'data', 'manager.db'));
+    try { return db.get('nodes')[0]; } finally { db.close(); }
+  };
+  const put = (body) => s.call('PUT', '/api/nodes/abcdefghijkl', body);
+  try {
+    await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
+    // the rename in a request refused for its other part is not saved either
+    assert.equal((await put({ name: 'Shop PC', trusted: 'yes' })).status, 400);
+    assert.equal((await put({ name: 'Shop PC', cars: 'daily-driver' })).status, 400);
+    assert.equal((await node()).name, 'garage-pc', 'not renamed by a refused request');
+    for (const body of [{ name: 5 }, { name: ['x'] }, { name: '   ' }, { trusted: 'yes' }, { cars: 'daily-driver' }, { cars: [7] }]) {
+      assert.equal((await put(body)).status, 400, JSON.stringify(body));
+    }
+    assert.equal((await node()).name, 'garage-pc');
+    // a vehicle removed while the page was open is left out, not refused
+    const saved = await put({ name: 'Shop PC', cars: ['daily-driver', 'gone-car'] });
+    assert.equal(saved.status, 200);
+    assert.deepEqual(saved.data.cars, ['daily-driver']);
+    assert.equal((await node()).name, 'Shop PC');
+    // removing the vehicle takes it off the node's list
+    assert.equal((await s.call('POST', '/api/auth/confirm', { password: 'correct horse' })).status, 200);
+    assert.equal((await s.call('DELETE', '/api/vehicles/daily-driver')).status, 200);
+    assert.deepEqual((await node()).cars, []);
+    // and the Nodes page answers without waiting for the offline node's full timeout
+    const began = Date.now();
+    assert.equal((await s.call('GET', '/api/nodes')).status, 200);
+    assert.ok(Date.now() - began < 5000);
+  } finally {
+    await s.stop();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
