@@ -30,7 +30,7 @@ const zlib = require('zlib');
 const { spawn } = require('child_process');
 const { Logger } = require('./log');
 const { ManagerDB } = require('./db');
-const { Auth } = require('./auth');
+const { Auth, parseCookies } = require('./auth');
 const { VehicleManager } = require('./vehicles');
 const { Inventory } = require('./inventory');
 const { RecycleBin, formatBytes } = require('./recycleBin');
@@ -51,6 +51,7 @@ const { createLocalMounter, createIpcMounter } = require('./mounter');
 const { VERSIONS, DEFAULT_VERSION, securitySummary } = require('./mountSpec');
 const { TlsManager, localTlsSource, supervisorTlsSource, parseHostnames } = require('./tls');
 const { Router, HttpError, sendJson, readJson, readRaw, serveFile } = require('./http');
+const { createUiPacks, originalPack, MAX_ZIP_BYTES: MAX_UI_PACK_BYTES } = require('./uiPacks');
 const { createNodes } = require('./nodes');
 const { createNodeWorker } = require('./nodeWorker');
 const { createNodeBenchmark } = require('./nodeBenchmark');
@@ -281,6 +282,12 @@ async function main() {
 
   // Nodes: other servers that encode for this one (server/nodes.js)
   const nodes = createNodes({ db, log: logger.scope('nodes'), audit: logger.scope('audit') });
+  // Settings > Interface: an interface of the owner's own (server/uiPacks.js)
+  const uiPacks = createUiPacks({ dir: path.join(DATA, 'ui-packs'), db, log: logger.scope('ui') });
+  // (the browser opened /original: the built-in interface there)
+  const UI_COOKIE = 'sm_ui_original';
+  const originalOnly = (req) => parseCookies(req.headers.cookie || '')[UI_COOKIE] === '1';
+  await uiPacks.tidy().catch((err) => logger.scope('ui').warn(`UI packs folder: ${err.message}`));
   const host = createConverterHost({
     remoteNodes: {
       list: () => nodes.list(),
@@ -569,6 +576,37 @@ async function main() {
   // Settings > Support: the Sentry Six support chat, relayed (server/support.js)
   let supportUploading = false;
   const support = createSupport({ db, log: audit, buildInfo, detectGpus, recentLogs: () => logger.recent(150, { minLevel: 'warn' }) });
+  // ---- Settings > Interface
+  r.add('GET', '/api/ui-packs', (req) => ({ active: uiPacks.active(), packs: uiPacks.list(), original: originalOnly(req) }));
+  r.add('PUT', '/api/ui-packs/active', (req, res, { body, user }) => {
+    const id = body?.id ?? null;
+    if (id !== null && typeof id !== 'string') throw new HttpError(400, 'Choose an interface.');
+    // a pack's scripts run as whoever signs in: the password again
+    if (id !== null) requireConfirmed(req);
+    const before = uiPacks.active();
+    const now = uiPacks.setActive(id);
+    // and this browser leaves /original, to see the choice
+    if (originalOnly(req)) res.setHeader('Set-Cookie', `${UI_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${auth.isSecure(req) ? '; Secure' : ''}`);
+    // every open page loads the new interface
+    if (now !== before) announce('interface');
+    if (now !== before) (now ? audit.warn : audit.info).call(audit, `Interface: ${now ? `"${uiPacks.list().find((x) => x.id === now)?.name}" (${now})` : 'the built-in one'}, for everyone: ${by(req, user)}`);
+    return { ok: true, active: now };
+  });
+  r.add('DELETE', '/api/ui-packs/:id', async (req, res, { params, user }) => {
+    const name = uiPacks.list().find((x) => x.id === params.id)?.name;
+    const wasActive = uiPacks.active() === params.id;
+    await uiPacks.remove(params.id);
+    if (wasActive) announce('interface');
+    audit.info(`Interface "${name}" (${params.id}) deleted: ${by(req, user)}`);
+    return { ok: true, active: uiPacks.active() };
+  });
+  let originalZip = null;
+  r.add('GET', '/api/ui-packs/original.zip', async (req, res) => {
+    originalZip ??= await originalPack({ web: WEB, studio: path.join(SRC, 'renderer'), version: process.env.APP_VERSION || '' });
+    res.writeHead(200, { 'Content-Type': 'application/zip', 'Content-Disposition': 'attachment; filename="sentry-six-manager-interface.zip"', 'Content-Length': originalZip.length, 'Cache-Control': 'no-store' });
+    res.end(originalZip);
+  });
+
   r.add('GET', '/api/support', () => support.status());
   r.add('GET', '/api/support/messages', (req, res, { query }) => support.messages({ since: query.since }));
   r.add('POST', '/api/support/message', (req, res, { body }) => support.send({ message: body?.message, includeDiagnostics: body?.includeDiagnostics === true }));
@@ -1156,7 +1194,7 @@ async function main() {
 
       if (isApi) {
         const m = r.match(req.method, rawPath);
-        if (!m && p !== '/api/events' && p !== '/api/converter/events' && p !== '/api/media' && p !== '/api/support/media') return sendJson(res, 404, { error: 'Not found' });
+        if (!m && p !== '/api/events' && p !== '/api/converter/events' && p !== '/api/media' && p !== '/api/support/media' && p !== '/api/ui-packs/upload') return sendJson(res, 404, { error: 'Not found' });
         if (!user && !(m && m.route.opts.public)) return sendJson(res, 401, { error: 'Sign in first.' });
         if (req.method !== 'GET' && req.method !== 'HEAD') {
           if (req.headers['x-requested-with'] !== 'sentry-six-manager') return sendJson(res, 403, { error: 'Missing X-Requested-With header.' });
@@ -1222,12 +1260,40 @@ async function main() {
             message: header('x-message'), includeDiagnostics: req.headers['x-diagnostics'] === '1'
           }));
         }
+        if (p === '/api/ui-packs/upload') {
+          if (req.method !== 'POST') return sendJson(res, 405, { error: 'Use POST.' });
+          // a pack's scripts run as whoever signs in: the password again
+          requireConfirmed(req);
+          // the .zip comes as the raw body, its name in a header
+          const bytes = await readRaw(req, MAX_UI_PACK_BYTES);
+          let fileName = '';
+          try {
+            fileName = decodeURIComponent(String(req.headers['x-file-name'] || ''));
+          } catch {
+            // no name: the pack's ui.json or a default
+          }
+          const pack = await uiPacks.install(bytes, fileName);
+          audit.warn(`Interface "${pack.name}" (${pack.id}) uploaded, ${pack.files} files: ${by(req, user)}`);
+          return sendJson(res, 200, { ok: true, pack });
+        }
         const body = req.method === 'GET' ? undefined : await readJson(req, p.startsWith('/api/converter/') ? 256 * 1024 : 1024 * 1024);
         const out = await m.route.handler(req, res, { params: m.params, query: Object.fromEntries(url.searchParams), body, user });
         if (out !== undefined && !res.headersSent) sendJson(res, 200, out);
         return undefined;
       }
 
+      // A browser that opens /original shows the built-in interface from then
+      // on (a cookie), whatever pack is chosen: a pack that breaks the pages
+      // never locks anyone out. /original?off=1 goes back to the choice.
+      if (p === '/original') {
+        const off = url.searchParams.get('off') === '1';
+        res.writeHead(302, {
+          Location: '/#/settings/interface',
+          'Set-Cookie': `${UI_COOKIE}=${off ? '' : '1'}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${off ? 0 : 365 * 86400}${auth.isSecure(req) ? '; Secure' : ''}`,
+          'Cache-Control': 'no-store'
+        });
+        return res.end();
+      }
       if (!user && !publicStatic) {
         res.writeHead(302, { Location: `/login${p === '/' ? '' : `?next=${encodeURIComponent(p + url.search)}`}` });
         return res.end();
@@ -1235,9 +1301,15 @@ async function main() {
       const serve = async (root, rel, opts) => {
         if (!(await serveFile(req, res, root, rel, opts))) notFound(res);
       };
-      if (p === '/' || p === '/index.html') return serve(WEB, 'index.html');
-      if (p === '/login') return serve(WEB, 'login.html');
-      if (p.startsWith('/web/')) return serve(WEB, p.slice(5), { cache: p.includes('/fonts/') ? 'public, max-age=604800' : 'no-cache' });
+      // the chosen interface's file first, else the built-in one
+      const ui = async (kind, root, rel, opts = {}) => {
+        const own = originalOnly(req) ? null : uiPacks.root(kind);
+        if (own && await serveFile(req, res, own, rel, { ...opts, cache: 'no-cache' })) return undefined;
+        return serve(root, rel, opts);
+      };
+      if (p === '/' || p === '/index.html') return ui('web', WEB, 'index.html');
+      if (p === '/login') return ui('web', WEB, 'login.html');
+      if (p.startsWith('/web/')) return ui('web', WEB, p.slice(5), { cache: p.includes('/fonts/') ? 'public, max-age=604800' : 'no-cache' });
       if (p === '/studio' || p === '/studio/') {
         res.writeHead(302, { Location: `/studio/index.html${url.search}` });
         return res.end();
@@ -1252,7 +1324,7 @@ async function main() {
         const rel = p.slice('/studio/'.length);
         const opts = rel === 'index.html' ? { transform: studioHtml } : rel === 'encoder.html' ? { transform: encoderHtml } : {};
         if (rel.startsWith('fonts/')) opts.cache = 'public, max-age=604800';
-        return serve(path.join(SRC, 'renderer'), rel, opts);
+        return ui('studio', path.join(SRC, 'renderer'), rel, opts);
       }
       if (p.startsWith('/shared/')) return serve(path.join(SRC, 'shared'), p.slice(8));
       if (p.startsWith('/assets/')) return serve(path.join(APP_ROOT, 'assets'), p.slice(8));

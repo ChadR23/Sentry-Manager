@@ -523,3 +523,9 @@ html.reduce-effects *, html.reduce-effects *::before { transition: none !importa
 .node-car-rank { color: var(--accent); font-weight: 700; font-size: 12px; }
 .node-car-list .btn.sm { padding: 2px 8px; min-height: 0; }
 .node-car-add { width: auto; min-width: 200px; }
+
+/* Settings > Interface */
+.ui-original-note { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; margin-top: 14px; padding: 12px 14px; border: 1px solid rgba(255, 159, 90, 0.5); border-radius: 12px; }
+.ui-original-note p { margin: 0; }
+#ui-pick { max-width: 420px; }
+.ui-packs td.actions { text-align: right; }

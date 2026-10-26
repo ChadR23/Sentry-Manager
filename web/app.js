@@ -1912,12 +1912,12 @@
   pages.settings = async (sub) => {
     const seq = renderSeq;
     const editing = sub?.startsWith('vehicle/') ? sub.slice(8) : sub === 'vehicle-new' ? 'new' : null;
-    const [settings, upd, sys, sec] = await Promise.all([api('/api/settings'), api('/api/updates'), api('/api/system').catch(() => null), api('/api/security').catch(() => null)]);
+    const [settings, upd, sys, sec, ui] = await Promise.all([api('/api/settings'), api('/api/updates'), api('/api/system').catch(() => null), api('/api/security').catch(() => null), api('/api/ui-packs').catch(() => null)]);
     if (seq !== renderSeq) return; // the user moved on while this loaded
     state.system = sys || state.system;
     state.power = settings.power || state.power || null;
     // (the Logs are on the Overview)
-    const sections = [['vehicles', 'Vehicles'], ['updates', 'Updates'], ['account', 'Account'], sec && ['security', 'Security'], (sys || settings.power) && ['system', 'System']].filter(Boolean);
+    const sections = [['vehicles', 'Vehicles'], ['updates', 'Updates'], ['account', 'Account'], ui && ['interface', 'Interface'], sec && ['security', 'Security'], (sys || settings.power) && ['system', 'System']].filter(Boolean);
     const show = editing || !sections.some(([k]) => k === sub) ? 'vehicles' : sub;
     let html = head('Your archive workspace', 'Settings');
     html += `<nav class="set-tabs" aria-label="Settings sections">${sections.map(([k, label]) => `<button type="button" data-tab="${k}">${label}</button>`).join('')}</nav>`;
@@ -1936,6 +1936,7 @@
         <label class="field">New password<input class="input" type="password" name="next" autocomplete="new-password" minlength="8" required></label>
         <div class="full form-actions" style="margin-top:0"><button class="btn solid" type="submit">Change password</button></div></form></div>`;
 
+    if (ui) html += interfaceCard(ui);
     if (sec) html += securityCard(sec);
 
     if (sys) {
@@ -1952,6 +1953,7 @@
     page.innerHTML = html;
     wireSettingsTabs(show, editing ? `#/settings/${sub}` : '#/settings', seq);
     wireSettings(editing);
+    if (ui) wireInterface(ui);
     if (sec) wireSecurity(sec);
     if (settings.power) wirePower(settings.power);
   };
@@ -2294,6 +2296,89 @@
       <div class="form-actions"><button class="btn" id="upd-check" type="button">Check now</button></div></div>`;
   }
 
+  // Settings > Interface: the built-in interface or a pack of the owner's own
+  // (server/uiPacks.js), for everyone, switched without a restart.
+  function interfaceCard(ui) {
+    const day = (iso) => (iso ? new Date(iso).toLocaleDateString() : '');
+    return `<div class="card" data-section="interface"><h2>Interface</h2>
+      <p class="muted small" style="margin-top:6px">How Sentry Six Manager looks and works for everyone who signs in. <b>Original</b> is the built-in interface; the others are packs you uploaded.</p>
+      ${ui.original ? `<div class="ui-original-note"><p>This browser shows the <b>original</b> interface, as you opened <span class="mono">/original</span>${ui.active ? `; everyone else sees <b>${esc(ui.packs.find((x) => x.id === ui.active)?.name || '')}</b>` : ''}.</p><a class="btn sm" href="/original?off=1">Show the chosen interface</a></div>` : ''}
+      <div class="form" style="margin-top:14px"><label class="field">Interface<select class="input" id="ui-pick">
+        <option value=""${ui.active ? '' : ' selected'}>Original</option>
+        ${ui.packs.map((x) => `<option value="${esc(x.id)}"${x.id === ui.active ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}
+      </select></label></div>
+      ${ui.packs.length ? `<table class="table ui-packs" style="margin-top:14px"><thead><tr><th>Pack</th><th>Changes</th><th>Uploaded</th><th></th></tr></thead><tbody>
+        ${ui.packs.map((x) => `<tr><td class="words"><b>${esc(x.name)}</b>${x.id === ui.active ? ' <span class="chip green">In use</span>' : ''}${x.description ? `<br><span class="muted small">${esc(x.description)}</span>` : ''}${x.author ? `<br><span class="muted small">by ${esc(x.author)}</span>` : ''}</td>
+          <td class="small">${x.replaces.map((k) => (k === 'web' ? 'Pages' : 'Viewer and Encoder')).join(', ')} · ${x.files} file${x.files === 1 ? '' : 's'}</td>
+          <td class="small">${esc(day(x.uploadedAt))}</td>
+          <td class="actions"><button class="btn sm danger" type="button" data-ui-del="${esc(x.id)}">Delete</button></td></tr>`).join('')}</tbody></table>` : ''}
+      <div class="form-actions" style="justify-content:flex-start;flex-wrap:wrap">
+        <input type="file" id="ui-file" accept=".zip,application/zip" hidden>
+        <button class="btn solid" type="button" id="ui-upload">${icon('plus')} Upload a pack (.zip)</button>
+        <a class="btn" href="/api/ui-packs/original.zip" download>Download the original to start from</a>
+      </div>
+      <p class="muted small" style="margin-top:12px">A pack replaces the built-in files with the same path, so it can change one stylesheet or the whole interface; the download explains the layout. <b>A pack's scripts run as whoever is signed in and can do anything you can</b>: only upload packs you made or trust. Uploading or choosing one asks for your password.</p>
+      <p class="muted small" style="margin-top:8px">If a pack breaks the pages, open <a class="mono" href="/original">${esc(location.origin)}/original</a>: that browser then shows the original interface, and you can switch back here.</p>
+    </div>`;
+  }
+
+  function wireInterface(ui) {
+    const pick = $('ui-pick');
+    const use = async (id) => {
+      await api('/api/ui-packs/active', { method: 'PUT', body: { id } });
+      // the pages of the new interface, without a restart
+      location.reload();
+    };
+    pick.onchange = async () => {
+      try {
+        await use(pick.value || null);
+      } catch (err) {
+        pick.value = ui.active || '';
+        toast(err.message, true);
+      }
+    };
+    page.querySelectorAll('[data-ui-del]').forEach((b) => {
+      b.onclick = async () => {
+        const x = ui.packs.find((y) => y.id === b.dataset.uiDel);
+        if (!(await confirmDialog({ title: 'Delete this interface?', body: `<p><b>${esc(x?.name || '')}</b> is deleted from the server.${x?.id === ui.active ? ' Everyone gets the original interface.' : ''}</p>`, ok: 'Delete', danger: true }))) return;
+        try {
+          await api(`/api/ui-packs/${encodeURIComponent(b.dataset.uiDel)}`, { method: 'DELETE' });
+          if (x?.id === ui.active) location.reload();
+          else render();
+        } catch (err) { toast(err.message, true); }
+      };
+    });
+    const file = $('ui-file');
+    $('ui-upload').onclick = () => file.click();
+    file.onchange = async () => {
+      const f = file.files[0];
+      file.value = '';
+      if (!f) return;
+      const btn = $('ui-upload');
+      btn.disabled = true;
+      try {
+        const send = () => fetch('/api/ui-packs/upload', {
+          method: 'POST', credentials: 'same-origin', body: f,
+          headers: { 'X-Requested-With': 'sentry-six-manager', 'Content-Type': 'application/zip', 'X-File-Name': encodeURIComponent(f.name) }
+        });
+        let res = await send();
+        let data = await res.json().catch(() => ({}));
+        if (res.status === 403 && data.code === 'CONFIRM_PASSWORD') {
+          await confirmPassword();
+          res = await send();
+          data = await res.json().catch(() => ({}));
+        }
+        if (!res.ok) throw new Error(data.error || `Upload failed (${res.status}).`);
+        if (await confirmDialog({ title: 'Use it now?', body: `<p><b>${esc(data.pack.name)}</b> is installed. Use it for everyone now? You can switch back to Original here at any time.</p>`, ok: 'Use it' })) await use(data.pack.id);
+        else render();
+      } catch (err) {
+        toast(err.message, true);
+      } finally {
+        btn.disabled = false;
+      }
+    };
+  }
+
   function securityCard(sec) {
     const tls = sec.tls || {};
     const ca = tls.ca;
@@ -2532,6 +2617,11 @@
     const es = new EventSource('/api/events');
     es.addEventListener('changed', async (e) => {
       const { topics } = JSON.parse(e.data);
+      // the interface was switched (Settings > Interface): its pages, now
+      if (topics.includes('interface')) {
+        location.reload();
+        return;
+      }
       if (topics.includes('vehicles') || topics.includes('inventory') || topics.includes('bin')) await loadVehicles().catch(() => {});
       if (topics.includes('notifications')) await loadNotes().catch(() => {});
       const affects = {

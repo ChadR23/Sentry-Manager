@@ -772,3 +772,66 @@ test('Nodes: a change refused part way saves none of it; a removed vehicle leave
     await fsp.rm(dir, { recursive: true, force: true });
   }
 });
+
+test('Interface: a pack uploaded in Settings serves its files for everyone, switched and switched back without a restart; /original always shows the built-in one', { timeout: 120000 }, async () => {
+  const dir = await tmp();
+  await makeFootage(path.join(dir, 'footage'));
+  const { writeZip } = require(path.join(REPO, 'server', 'zip'));
+  const pack = writeZip([
+    { name: 'ui.json', data: Buffer.from(JSON.stringify({ name: 'Red' })) },
+    { name: 'web/shell.css', data: Buffer.from('body{background:red}') },
+    { name: 'web/index.html', data: Buffer.from('<!doctype html><title>Red</title>') },
+    { name: 'studio/styles/footageConverter.css', data: Buffer.from('/* red encoder */') }
+  ]);
+  const s = await startServer(dir);
+  const upload = (body) => fetch(`${s.base}/api/ui-packs/upload`, { method: 'POST', body, headers: { 'X-Requested-With': 'sentry-six-manager', 'Content-Type': 'application/zip', 'X-File-Name': 'red.zip', Cookie: s.getCookie() } });
+  const text = async (p, cookie = s.getCookie()) => (await fetch(s.base + p, { headers: { Cookie: cookie }, redirect: 'manual' })).text();
+  const builtCss = fs.readFileSync(path.join(REPO, 'web', 'shell.css'), 'utf8');
+  try {
+    assert.equal((await fetch(`${s.base}/api/ui-packs/upload`, { method: 'POST', body: pack, headers: { 'X-Requested-With': 'sentry-six-manager' } })).status, 401, 'sign in first');
+    await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
+    assert.equal((await fetch(`${s.base}/api/ui-packs/upload`, { method: 'POST', body: pack, headers: { Cookie: s.getCookie() } })).status, 403, 'X-Requested-With needed');
+    const res = await upload(pack);
+    assert.equal(res.status, 200);
+    const { pack: meta } = await res.json();
+    assert.equal(meta.name, 'Red');
+    let list = (await s.call('GET', '/api/ui-packs')).data;
+    assert.deepEqual([list.active, list.packs.length, list.original], [null, 1, false]);
+    assert.equal(await text('/web/shell.css'), builtCss, 'installed, not chosen yet');
+    // a bad pack is refused with its reason
+    const bad = await upload(Buffer.from('not a zip, really not a zip'));
+    assert.equal(bad.status, 400);
+    assert.match((await bad.json()).error, /not a \.zip/);
+    // chosen: its files, at once, for any signed-in browser; the rest stay built-in
+    assert.equal((await s.call('PUT', '/api/ui-packs/active', { id: meta.id })).status, 200);
+    assert.equal(await text('/web/shell.css'), 'body{background:red}');
+    assert.match(await text('/'), /<title>Red<\/title>/);
+    assert.equal(await text('/studio/styles/footageConverter.css'), '/* red encoder */');
+    assert.equal(await text('/web/app.js'), fs.readFileSync(path.join(REPO, 'web', 'app.js'), 'utf8'), 'a file the pack leaves out is the built-in one');
+    assert.equal(await text('/web/shell.css', ''), 'body{background:red}', 'the sign-in page uses it too');
+    // /original: this browser gets the built-in interface, whatever is chosen
+    const escape = await fetch(`${s.base}/original`, { redirect: 'manual' });
+    assert.equal(escape.status, 302);
+    const flag = escape.headers.get('set-cookie').split(';')[0];
+    assert.match(flag, /=1$/);
+    const both = `${s.getCookie()}; ${flag}`;
+    assert.equal(await text('/web/shell.css', both), builtCss);
+    assert.doesNotMatch(await text('/', both), /<title>Red<\/title>/);
+    // and back to the original for everyone
+    assert.equal((await s.call('PUT', '/api/ui-packs/active', { id: null })).status, 200);
+    assert.equal(await text('/web/shell.css'), builtCss);
+    for (const id of ['nope', 7, '../x']) assert.equal((await s.call('PUT', '/api/ui-packs/active', { id })).status, 400, String(id));
+    // the original to start from
+    const orig = await fetch(`${s.base}/api/ui-packs/original.zip`, { headers: { Cookie: s.getCookie() } });
+    assert.equal(orig.status, 200);
+    assert.equal(orig.headers.get('content-type'), 'application/zip');
+    assert.equal((await fetch(`${s.base}/api/ui-packs/original.zip`)).status, 401);
+    // deleting the pack
+    assert.equal((await s.call('DELETE', `/api/ui-packs/${meta.id}`)).status, 200);
+    list = (await s.call('GET', '/api/ui-packs')).data;
+    assert.equal(list.packs.length, 0);
+  } finally {
+    await s.stop();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});

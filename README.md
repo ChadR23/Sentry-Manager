@@ -669,6 +669,33 @@ masked. No shell on the server is needed. (Old links to Settings > Logs,
 lines move to `logs/archive/` in the data folder, and *Cleared logs* under
 the list downloads them again.
 
+## Your own interface
+
+Settings → Interface sets how Sentry Six Manager looks and works for
+everyone who signs in. **Original** is the built-in interface; the drop-down
+also lists every interface pack you uploaded. A switch applies at once:
+open pages reload by themselves, with no restart.
+
+A pack is a `.zip` whose files take the place of the built-in files with the
+same path, so it can change one stylesheet or replace the whole interface:
+
+```
+ui.json        {"name": "Ocean", "description": "...", "author": "..."}
+web/           the manager: index.html, app.js (the pages), shell.css (the look)
+studio/        the Viewer (index.html) and the Encoder (encoder.html)
+```
+
+**Download the original to start from** gives the built-in interface as a
+pack: change what you like, zip it and upload it. Scripts must be files in
+the pack (the pages run no inline scripts and nothing from other sites).
+
+A pack's scripts run as whoever is signed in and can do anything you can,
+so only upload packs you made or trust; uploading or choosing one asks for
+your password. If a pack breaks the pages, open `https://<server>/original`:
+that browser then shows the built-in interface (until you press **Show the
+chosen interface**), and Settings → Interface can switch back for everyone.
+Packs are kept in `./data/ui-packs`.
+
 ## Settings
 
 All optional; put them in `.env` next to `docker-compose.yml`.
