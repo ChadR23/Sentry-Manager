@@ -419,7 +419,9 @@ test('background reads: a hung sensor holds at most a few threads and never the 
   };
   const r = new BackgroundReads({ now: () => t, readFile, limit: 4 });
   for (const f of ['/hwmon/a', '/hwmon/b', '/hwmon/c', '/cpu/temp', '/gpu/busy']) r.get(f);
-  await new Promise((res) => setTimeout(res, 20));
+  // the reads end a few event-loop turns later (a fixed wait could pass
+  // first on a busy machine)
+  for (let i = 0; i < 20; i++) await new Promise((res) => setImmediate(res));
   assert.equal(r.get('/cpu/temp').text, '/cpu/temp:0', 'one slot is left for the rest');
   assert.equal(r.get('/gpu/busy').text, '/gpu/busy:0');
   t = 2000;
