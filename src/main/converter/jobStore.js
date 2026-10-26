@@ -9,7 +9,9 @@ const MANIFEST_NAME = 'job.json';
 const TEMPORARY_MANIFEST_NAME = 'job.json.tmp';
 // Per-clip progress is appended here (one small JSON line per change) instead
 // of rewriting the whole manifest; job.json is rewritten every JOURNAL_LIMIT
-// changes or whenever clips are added. Loading replays the journal on top.
+// changes. Clips found while discovering are appended too (`add`): rewriting
+// a large job's file for each of them kept the disks busy for as long as
+// discovery lasted. Loading replays the journal on top.
 // A record is a few KB, so 1,000 stay well inside the byte limit; a large
 // job's file (tens of MB) is then rewritten five times less often, for a
 // fraction of a second more when a job is opened.
@@ -1032,6 +1034,10 @@ function createJobStore(options) {
         }
         items[entry[0]] = entry[1];
       }
+      if (hasOwn(record, 'add')) {
+        if (!Array.isArray(record.add) || record.add.length === 0) throw storeError('INVALID_MANIFEST');
+        items.push(...record.add);
+      }
       manifest = { ...record.top, items };
     }
     return manifest;
@@ -1305,16 +1311,18 @@ function createJobStore(options) {
   }
 
   function journalRecord(current, next) {
-    if (current.items.length !== next.items.length) return null;
+    // the clips already there keep their places; new ones only at the end
+    if (next.items.length < current.items.length) return null;
     const set = [];
-    for (let index = 0; index < next.items.length; index += 1) {
+    for (let index = 0; index < current.items.length; index += 1) {
       if (next.items[index] === current.items[index]) continue;
       if (next.items[index].id !== current.items[index].id) return null;
       set.push([index, next.items[index]]);
     }
+    const add = next.items.slice(current.items.length);
     const top = { ...next };
     delete top.items;
-    return `${JSON.stringify({ r: next.revision, top, set })}\n`;
+    return `${JSON.stringify({ r: next.revision, top, set, ...(add.length ? { add } : {}) })}\n`;
   }
 
   async function transition(id, patch) {
