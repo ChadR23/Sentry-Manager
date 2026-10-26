@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0b0620">
+  <title>Sign in · Horizon · Sentry Six Manager</title>
+  <link rel="icon" type="image/png" href="/web/icon.png">
+  <link rel="stylesheet" href="/web/shell.css">
+</head>
+<body data-page="login" class="login-body">
+  <div id="sky" class="sky" aria-hidden="true"></div>
+  <main class="login" aria-labelledby="title">
+    <div class="login-card hud">
+      <div class="brand-row">
+        <svg class="brand-mark" viewBox="0 0 48 48" aria-hidden="true" focusable="false">
+          <defs>
+            <linearGradient id="bm-sun" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffe46b"/><stop offset=".55" stop-color="#ff8a3d"/><stop offset="1" stop-color="#ff3fb4"/></linearGradient>
+          </defs>
+          <path d="M8 28a16 16 0 0 1 32 0z" fill="url(#bm-sun)"/>
+          <path d="M9 23h30M11 19h26" stroke="#0b0620" stroke-width="2"/>
+          <path d="M2 30h44M6 36h36M12 42h24M24 30v16M14 30 6 46M34 30l8 16" stroke="#3df0ff" stroke-width="1.6" fill="none" stroke-linecap="round"/>
+        </svg>
+        <div class="brand-text"><b class="chrome">HORIZON</b><span>Sentry Six Manager</span></div>
+      </div>
+      <h1 id="title" class="chrome">Sign in</h1>
+      <p class="lead" id="lead">Use the account of this Sentry Six Manager.</p>
+      <form id="form" novalidate>
+        <label class="fld">User name<input class="in" name="username" autocomplete="username" autocapitalize="none" required value="admin" spellcheck="false"></label>
+        <label class="fld">Password<input class="in" name="password" type="password" autocomplete="current-password" required></label>
+        <label class="fld" id="confirm-row" hidden>Confirm password<input class="in" name="confirm" type="password" autocomplete="new-password"></label>
+        <label class="fld" id="code-row" hidden>Setup code<input class="in mono" name="code" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" placeholder="XXXXX-XXXXX-XXXXX"><span class="hint">Printed in the container log: <code>docker logs sentry-six-manager</code></span></label>
+        <p class="warnline" id="insecure" hidden>This page is not using HTTPS, so your password could be read by others on the network. Open it with https:// instead.</p>
+        <p class="errline" id="err" role="alert"></p>
+        <button class="btn go wide" type="submit" id="go">Sign in</button>
+      </form>
+      <p class="fp" id="fp" hidden>Server certificate (SHA-256): <span class="mono" id="fp-val"></span><br>Compare it with <code>docker logs sentry-six-manager</code> or your browser's certificate details.</p>
+      <p class="login-foot"><span class="dot-live" aria-hidden="true"></span><span id="host"></span></p>
+    </div>
+  </main>
+  <script src="/web/login.js"></script>
+</body>
+</html>

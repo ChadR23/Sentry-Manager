@@ -700,7 +700,8 @@ Two complete example packs, every page rebuilt from scratch, are ready to
 upload from [`examples/ui-packs`](examples/ui-packs): **Daylight**
 (`daylight.zip`), a calm, light-first interface for everyday use, and
 **Flux** (`flux.zip`), a dark console with a command palette, live charts
-and keyboard shortcuts for the numbers people.
+and keyboard shortcuts for the numbers people. **Horizon** (`horizon.zip`) is a
+synthwave dashboard over a neon grid that scrolls toward a setting sun.
 
 ## Settings
 
