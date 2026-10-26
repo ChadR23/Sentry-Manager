@@ -701,7 +701,9 @@ upload from [`examples/ui-packs`](examples/ui-packs): **Daylight**
 (`daylight.zip`), a calm, light-first interface for everyday use, and
 **Flux** (`flux.zip`), a dark console with a command palette, live charts
 and keyboard shortcuts for the numbers people. **Horizon** (`horizon.zip`) is a
-synthwave dashboard over a neon grid that scrolls toward a setting sun.
+synthwave dashboard over a neon grid that scrolls toward a setting sun. **Aurora**
+(`aurora.zip`) floats glass windows over drifting northern lights, with a
+cockpit-style Viewer.
 
 ## Settings
 
