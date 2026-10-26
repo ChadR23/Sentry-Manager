@@ -68,7 +68,7 @@ function split(buffer) {
  * The encoded frames may start up to `maxShift` frames later (a stretch of
  * the encode read from earlier on than the original's) or `minShift` earlier.
  */
-function judgeFrames(sourceBuf, candidateBuf, { minShift = -SHIFT, maxShift = SHIFT } = {}) {
+function judgeFrames(sourceBuf, candidateBuf, { minShift = -SHIFT, maxShift = SHIFT, expect = 0 } = {}) {
   const src = split(sourceBuf);
   const cand = split(candidateBuf);
   if (src.length === 0 || cand.length === 0) return { ok: false, reason: 'no-frames' };
@@ -88,18 +88,24 @@ function judgeFrames(sourceBuf, candidateBuf, { minShift = -SHIFT, maxShift = SH
     // at least half the sampled frames overlap at this offset (short clips too)
     return n > 0 && n >= Math.ceil(src.length / step) / 2 ? sum / n : -Infinity;
   };
+  // Offsets that score alike (a still scene: a parked car) are a tie, won by
+  // the one nearest the expected offset; the first best used to win, often
+  // far off, dropping frames that then counted as missing.
+  const TIE = 0.002;
+  const better = (shift, score, best) => score > best.score + TIE
+    || (score >= best.score - TIE && Math.abs(shift - expect) < Math.abs(best.shift - expect));
   const coarse = src.length >= 64 ? 32 : 8;
-  let best = { shift: 0, score: -Infinity };
+  let best = { shift: expect, score: -Infinity };
   for (let shift = minShift; shift <= maxShift; shift++) {
     const score = offsetScore(shift, coarse);
-    if (score > best.score) best = { shift, score };
+    if (better(shift, score, best)) best = { shift, score };
   }
   if (coarse !== 8) {
     const around = best.shift;
     best = { shift: around, score: -Infinity };
     for (let shift = Math.max(minShift, around - 4); shift <= Math.min(maxShift, around + 4); shift++) {
       const score = offsetScore(shift, 8);
-      if (score > best.score) best = { shift, score };
+      if (better(shift, score, best)) best = { shift, score };
     }
   }
   // every frame against its best match near that offset; a frame that
@@ -140,9 +146,11 @@ async function comparePictures({ source, candidate, signal, decode, durationSeco
           decode(source, { width: W, height: H, signal, start, length: SAMPLE_SECONDS }),
           decode(candidate, { width: W, height: H, signal, start: from, length: SAMPLE_SECONDS + (start - from) + SAMPLE_MARGIN_SECONDS })
         ]);
-        // the encode's stretch starts (start - from) seconds early: up to ~40 fps
-        const early = Math.ceil((start - from) * 40);
-        return { ...judgeFrames(a, b, { minShift: -SHIFT, maxShift: early + SHIFT }), at: start };
+        // the encode's stretch starts (start - from) seconds early: its frames
+        // sit that many frames on (~36 fps, up to 40), give or take the lead-in
+        const early = Math.round((start - from) * 36);
+        const slack = Math.ceil((start - from) * 4) + SHIFT;
+        return { ...judgeFrames(a, b, { minShift: early - slack, maxShift: early + slack, expect: early }), at: start };
       }));
     } catch (err) {
       return { ok: false, reason: 'decode-failed', detail: String(err?.code || err?.message || err).slice(0, 80) };

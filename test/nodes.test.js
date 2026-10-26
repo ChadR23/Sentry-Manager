@@ -692,3 +692,35 @@ function fetchJson(port, p, token) {
     req.end();
   });
 }
+
+test('upload slots: a waiter that gives up (a cancel, a stop) leaves the line, so the next clip still gets its turn', async () => {
+  const { takeUploadSlot } = require('../server/nodes');
+  const id = `slot-test-${Date.now()}`;
+  const hold = [await takeUploadSlot(id, new AbortController().signal), await takeUploadSlot(id, new AbortController().signal)];
+  // two clips wait, then their jobs are cancelled
+  const quitters = [new AbortController(), new AbortController()];
+  const gaveUp = quitters.map((c) => takeUploadSlot(id, c.signal));
+  for (const c of quitters) c.abort();
+  assert.deepEqual(await Promise.all(gaveUp), [null, null]);
+  // another job's clip waits; both uploads finish
+  let got = null;
+  const waiting = takeUploadSlot(id, new AbortController().signal).then((release) => { got = release; });
+  hold.forEach((release) => release());
+  await Promise.race([waiting, new Promise((r) => setTimeout(r, 1000))]);
+  assert.equal(typeof got, 'function', 'the other job\'s clip got its upload slot');
+  got();
+});
+
+test('picture check on a still scene (a parked car): offsets that tie go to the expected one, nothing counts as missing', async () => {
+  const FPS = 36;
+  const base = new Uint8Array(W * H).map((_, i) => (Math.floor(i / W) * 2 + (i % W)) % 256);
+  const frames = (n) => {
+    const buf = Buffer.alloc(n * W * H);
+    for (let f = 0; f < n; f++) for (let i = 0; i < W * H; i++) buf[f * W * H + i] = Math.max(0, Math.min(255, base[i] + Math.round((Math.random() - 0.5) * 6)));
+    return buf;
+  };
+  const decode = async (file, { length = 60 } = {}) => frames(Math.round(length * FPS));
+  let failed = 0;
+  for (let t = 0; t < 20; t++) if (!(await comparePictures({ source: 's', candidate: 'c', decode, durationSeconds: 60 })).ok) failed += 1;
+  assert.equal(failed, 0, `${failed} of 20 still-scene clips judged not the same`);
+});

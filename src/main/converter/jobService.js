@@ -1583,7 +1583,14 @@ function createConverterJobService(deps) {
     while (fallbackSlots.busy >= NODE_FALLBACK_AT_ONCE) {
       if (signal?.aborted) throw serviceError('CANCELLED');
       await new Promise((resolve) => {
-        const done = () => { signal?.removeEventListener('abort', done); resolve(); };
+        // (an aborted waiter leaves the line: a turn handed to it was lost,
+        // and another job waiting for this slot never woke)
+        const done = () => {
+          signal?.removeEventListener('abort', done);
+          const at = fallbackSlots.waiters.indexOf(done);
+          if (at >= 0) fallbackSlots.waiters.splice(at, 1);
+          resolve();
+        };
         fallbackSlots.waiters.push(done);
         signal?.addEventListener('abort', done, { once: true });
       });
@@ -1610,7 +1617,14 @@ function createConverterJobService(deps) {
     while (readSlots.busy >= SOURCE_READS_AT_ONCE) {
       if (signal?.aborted) throw serviceError('CANCELLED');
       await new Promise((resolve) => {
-        const done = () => { signal?.removeEventListener('abort', done); resolve(); };
+        // (an aborted waiter leaves the line: a turn handed to it was lost,
+        // and another job waiting for this slot never woke)
+        const done = () => {
+          signal?.removeEventListener('abort', done);
+          const at = readSlots.waiters.indexOf(done);
+          if (at >= 0) readSlots.waiters.splice(at, 1);
+          resolve();
+        };
         readSlots.waiters.push(done);
         signal?.addEventListener('abort', done, { once: true });
       });
@@ -1640,7 +1654,14 @@ function createConverterJobService(deps) {
     while (slots.busy >= limit()) {
       if (signal?.aborted) throw serviceError('CANCELLED');
       await new Promise((resolve) => {
-        const done = () => { signal?.removeEventListener('abort', done); resolve(); };
+        // (an aborted waiter leaves the line: a turn handed to it was lost,
+        // and another job waiting for this slot never woke)
+        const done = () => {
+          signal?.removeEventListener('abort', done);
+          const at = slots.waiters.indexOf(done);
+          if (at >= 0) slots.waiters.splice(at, 1);
+          resolve();
+        };
         slots.waiters.push(done);
         signal?.addEventListener('abort', done, { once: true });
       });

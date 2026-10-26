@@ -40,7 +40,14 @@ async function takeUploadSlot(nodeId, signal) {
   while (slots.busy >= UPLOADS_AT_ONCE) {
     if (signal.aborted) return null;
     await new Promise((resolve) => {
-      const done = () => { signal.removeEventListener('abort', done); resolve(); };
+      // (an aborted waiter leaves the line: a turn handed to it was lost,
+      // and another job waiting for this slot never woke)
+      const done = () => {
+        signal.removeEventListener('abort', done);
+        const at = slots.waiters.indexOf(done);
+        if (at >= 0) slots.waiters.splice(at, 1);
+        resolve();
+      };
       slots.waiters.push(done);
       signal.addEventListener('abort', done, { once: true });
     });
@@ -535,4 +542,4 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
   return { list, overview, add, rename, setCars, setTrusted, trusted, carLists, remove, encode, setSlots, has: (id) => Boolean(byId(id)), refresh: (id) => (byId(id) ? refresh(byId(id)) : null) };
 }
 
-module.exports = { createNodes, parseAddress, connectPinned, pinMatches };
+module.exports = { createNodes, parseAddress, connectPinned, pinMatches, takeUploadSlot };

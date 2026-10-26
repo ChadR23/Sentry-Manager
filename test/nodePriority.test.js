@@ -11,7 +11,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { createAutoConverter, planLanes } = require('../src/main/converter/autoConvert');
-const { createHarness, ARC, UHD, CPU } = require('./fixtures/lanesHarness');
+const { createHarness, until, ARC, UHD, CPU } = require('./fixtures/lanesHarness');
 
 const GPU = 'pci:0000:03:00.0';
 const N2 = 'node:aaaaaaaaaaaa';
@@ -618,5 +618,54 @@ test('a node encode that fails verification is encoded here instead, not failed'
   } finally {
     console.warn = warn;
     await h.close();
+  }
+});
+
+test('a cancelled job waiting for its turn to read originals does not hold up another job', async () => {
+  let entered = 0;
+  const h = createHarness({
+    clips: 4, devices: [ARC, UHD, CPU], gpuDecode: false,
+    stageSource: async ({ source, itemId, signal }) => {
+      entered += 1;
+      if (source.includes('job1')) {
+        await new Promise((resolve, reject) => {
+          signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { code: 'CANCELLED' })), { once: true });
+        });
+      }
+      return { stagedSource: source, path: source, ownedPaths: null, ownedArtifacts: null, itemId };
+    }
+  });
+  try {
+    const id1 = await h.service.start(h.config({ sourceRoot: path.join(h.dir, 'job1'), destinationRoot: path.join(h.dir, 'out1'), networkMode: 'staging', autoConvert: true, lanes: [{ device: ARC.id, concurrency: 4 }] }));
+    assert.ok(await until(() => entered === 2), 'job 1 reads two clips (the limit)');
+    await new Promise((r) => setTimeout(r, 100)); // its two other workers wait for a turn
+    const id2 = await h.service.start(h.config({ sourceRoot: path.join(h.dir, 'job2'), destinationRoot: path.join(h.dir, 'out2'), networkMode: 'staging', autoConvert: true, lanes: [{ device: UHD.id, concurrency: 1 }] }));
+    await new Promise((r) => setTimeout(r, 100)); // job 2 waits behind them
+    assert.equal(entered, 2);
+    await h.service.cancel(id1);
+    await h.service.whenIdle(id1);
+    assert.ok(await until(() => entered > 2, 3000), `job 2 never got its turn (state ${(await h.service.get(id2)).state})`);
+  } finally {
+    await h.close();
+  }
+});
+
+test('a row changed while the nodes cannot be listed keeps the vehicle\'s Off', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sm-node-off-keep-'));
+  try {
+    let listing = true;
+    const auto = createAutoConverter({
+      service: fakeService(), scanner: async function* () {}, fs: fs.promises, directory: dir, timers: { setInterval: () => null, clearInterval: () => {} },
+      devices: async () => { if (!listing) throw new Error('a node is slow to answer'); return devices; }, nodePriorities: async () => ({})
+    });
+    const shared = { intervalMinutes: 60, window: null, holdManual: false, keepRunning: false, openAtLogin: false };
+    await auto.configure({ ...shared, enabled: true, config: car('chad', [{ device: GPU, concurrency: 2 }]) });
+    assert.deepEqual(auto.getState().settings.configs[0].nodesOff, [N2, N3]);
+    listing = false;
+    await auto.setLanes([{ device: GPU, concurrency: 1 }], '/cars/chad');
+    assert.deepEqual(auto.getState().settings.configs[0].lanes, [{ device: GPU, concurrency: 1 }], 'the row change is saved');
+    assert.deepEqual(auto.getState().settings.configs[0].nodesOff, [N2, N3], 'and the Off is kept');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });

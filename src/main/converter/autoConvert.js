@@ -450,10 +450,13 @@ function createAutoConverter(options = {}) {
   // The nodes a vehicle's Encoder rows leave at Off: every node paired now
   // that its lanes do not use. A node paired later is not among them, so it
   // helps as its "Vehicles first" list says until the owner sets its row.
+  // null when the devices could not be listed (a node slow to answer): the
+  // vehicle then keeps the Off it had, instead of losing it
   async function nodesOffFor(lanes) {
     if (!Array.isArray(lanes)) return [];
-    let devices = [];
-    try { devices = (await options.devices?.()) || []; } catch (_) { devices = []; }
+    let devices;
+    try { devices = await options.devices?.(); } catch (_) { return null; }
+    if (!Array.isArray(devices) || devices.length === 0) return null;
     const used = new Set(lanes.map((lane) => lane.device));
     return devices.map((device) => device?.id).filter((id) => isNodeDevice(id) && !used.has(id));
   }
@@ -661,7 +664,8 @@ function createAutoConverter(options = {}) {
       if (Array.isArray(next?.configs)) configs = next.configs;
       else if (next?.enabled === true && isConfig(next.config)) {
         const { nodesOff: _sent, ...sent } = next.config;
-        const off = await nodesOffFor(withValidLanes(sent).lanes);
+        const off = await nodesOffFor(withValidLanes(sent).lanes)
+          ?? (settings.configs.find((config) => config.sourceRoot === sent.sourceRoot)?.nodesOff || []);
         configs = [...configs.filter((config) => config.sourceRoot !== next.config.sourceRoot), { ...sent, ...(off.length ? { nodesOff: off } : {}) }];
       } else if (typeof next?.removeSource === 'string') {
         configs = configs.filter((config) => config.sourceRoot !== next.removeSource);
@@ -706,7 +710,7 @@ function createAutoConverter(options = {}) {
       const lanes = normalizeLanes(value);
       const current = activeConfig(sourceRoot);
       if (!current || !lanes) return getState();
-      const off = await nodesOffFor(lanes);
+      const off = (await nodesOffFor(lanes)) ?? (current.nodesOff || []);
       if (JSON.stringify(current.lanes || null) === JSON.stringify(lanes) && sameLanes(current.nodesOff || [], off)) return getState();
       const { nodesOff: _old, ...rest } = current;
       settings = { ...settings, configs: settings.configs.map((c) => (c === current ? { ...rest, lanes, concurrency: lanesTotal(lanes), ...(off.length ? { nodesOff: off } : {}) } : c)) };
