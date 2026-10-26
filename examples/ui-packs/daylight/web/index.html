@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>Sentry Six</title>
+  <link rel="icon" type="image/png" href="/web/icon.png">
+  <link rel="stylesheet" href="/web/shell.css">
+  <link rel="stylesheet" href="/web/dl/app.css">
+  <script src="/web/dl/theme.js"></script>
+  <script type="module" src="/web/dl/app.js"></script>
+</head>
+<body>
+  <a class="skip" href="#view">Skip to content</a>
+  <div class="app" id="app">
+    <aside class="side" aria-label="Main">
+      <a class="brand" href="#/home" aria-label="Sentry Six, Today">
+        <span class="brand-mark" id="brand-mark"></span>
+        <span class="brand-name"><b>Sentry Six</b><span>Footage, looked after</span></span>
+      </a>
+      <nav class="side-nav" id="side-nav"></nav>
+      <div class="side-foot">
+        <button type="button" class="side-util" id="theme-side"></button>
+        <button type="button" class="side-util" id="signout-side"></button>
+      </div>
+    </aside>
+    <header class="topbar" id="topbar">
+      <a class="brand brand-compact" href="#/home" aria-label="Sentry Six, Today"><span class="brand-mark" id="brand-mark-top"></span></a>
+      <h1 class="topbar-title" id="topbar-title">Today</h1>
+      <div class="topbar-actions">
+        <a class="icon-btn" href="#/notifications" id="bell-top" aria-label="Alerts"></a>
+        <button type="button" class="icon-btn" id="theme-top"></button>
+      </div>
+    </header>
+    <main class="main" id="view" tabindex="-1" aria-live="off"></main>
+    <nav class="tabbar" id="tabbar" aria-label="Main"></nav>
+  </div>
+  <noscript><p style="padding:24px">Sentry Six needs JavaScript turned on.</p></noscript>
+</body>
+</html>

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>Sign in · Sentry Six Manager</title>
+  <link rel="icon" type="image/png" href="/web/icon.png">
+  <link rel="stylesheet" href="/web/shell.css">
+</head>
+<body class="signin-body">
+  <button type="button" class="icon-btn theme-mini" id="theme" aria-label="Switch light or dark look"></button>
+  <main class="signin">
+    <div class="card signin-card">
+      <div class="brand">
+        <span class="brand-mark"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5 5 6v5.5c0 4.4 3 7.6 7 9 4-1.4 7-4.6 7-9V6z"/><path d="m9 12 2.2 2.2L15.5 10"/></svg></span>
+        <span class="brand-name"><b>Sentry Six</b><span>Your Tesla footage, looked after</span></span>
+      </div>
+      <h1 id="title">Welcome back</h1>
+      <p class="muted" id="lead">Sign in to see your car’s footage.</p>
+      <form id="form" novalidate>
+        <label class="field"><span>User name</span><input class="input" name="username" autocomplete="username" required value="admin" autocapitalize="none" spellcheck="false"></label>
+        <label class="field"><span>Password</span><input class="input" name="password" type="password" autocomplete="current-password" required></label>
+        <label class="field" id="confirm-row" hidden><span>Type the password again</span><input class="input" name="confirm" type="password" autocomplete="new-password"></label>
+        <label class="field" id="code-row" hidden><span>Setup code</span><input class="input mono" name="code" autocomplete="one-time-code" spellcheck="false" placeholder="XXXXX-XXXXX-XXXXX"><span class="hint">It’s printed in the container log: <code>docker logs sentry-six-manager</code></span></label>
+        <div class="note note-warn" id="insecure" hidden><span>This page isn’t using HTTPS, so others on your network could see your password. Open it with <b>https://</b> instead.</span></div>
+        <p class="err" id="err" role="alert"></p>
+        <button class="btn btn-primary btn-block" type="submit" id="submit">Sign in</button>
+      </form>
+      <div class="fingerprint small" id="fingerprint" hidden>
+        <b>Checking it’s really your server?</b>
+        <p class="muted">This server’s certificate fingerprint (SHA-256) is <span class="mono"></span>. It matches the one in <code>docker logs sentry-six-manager</code> and in your browser’s certificate details.</p>
+      </div>
+    </div>
+  </main>
+  <script src="/web/login.js"></script>
+</body>
+</html>

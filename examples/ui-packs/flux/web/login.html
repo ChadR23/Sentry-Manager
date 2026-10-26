@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#16151f">
+  <title>Sign in · Flux · Sentry Six Manager</title>
+  <link rel="icon" type="image/png" href="/web/icon.png">
+  <link rel="stylesheet" href="/web/shell.css">
+</head>
+<body class="auth-body">
+  <div class="auth-grid" aria-hidden="true"></div>
+  <main class="auth" aria-labelledby="title">
+    <div class="auth-brand">
+      <svg class="logo" viewBox="0 0 40 40" aria-hidden="true">
+        <defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#a77bff"/><stop offset="1" stop-color="#5fd8ee"/></linearGradient></defs>
+        <rect x="1" y="1" width="38" height="38" rx="10" fill="none" stroke="url(#lg)" stroke-width="2"/>
+        <path d="M8 26 L14 18 L19 23 L25 12 L32 20" fill="none" stroke="url(#lg)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <div><b>FLUX</b><span>sentry six manager · console</span></div>
+    </div>
+    <h1 id="title">Sign in</h1>
+    <p class="lead" id="lead">Use the account for this Sentry Six Manager.</p>
+    <form id="form" novalidate>
+      <label class="field">User name<input class="input" name="username" autocomplete="username" required value="admin" spellcheck="false"></label>
+      <label class="field">Password<input class="input" name="password" type="password" autocomplete="current-password" required></label>
+      <label class="field" id="confirm-row" hidden>Confirm password<input class="input" name="confirm" type="password" autocomplete="new-password"></label>
+      <label class="field" id="code-row" hidden>Setup code<input class="input mono" name="code" autocomplete="one-time-code" spellcheck="false" placeholder="XXXXX-XXXXX-XXXXX"><span class="faint small">Printed in the container log: <code>docker logs sentry-six-manager</code></span></label>
+      <p class="warn" id="insecure" hidden>This page is not using HTTPS, so your password could be seen by others on the network. Open it with https:// instead.</p>
+      <p class="err" id="err" role="alert"></p>
+      <button class="btn primary" type="submit" id="submit">Sign in</button>
+    </form>
+    <p class="fp" id="fingerprint" hidden>Server certificate (SHA-256): <span class="mono"></span><br>Compare it with <code>docker logs sentry-six-manager</code> or your browser's certificate details.</p>
+    <div class="term" aria-hidden="true"><b>$</b> flux --connect <span id="host"></span></div>
+  </main>
+  <script src="/web/login.js"></script>
+</body>
+</html>

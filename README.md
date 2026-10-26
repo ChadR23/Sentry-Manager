@@ -696,6 +696,12 @@ that browser then shows the built-in interface (until you press **Show the
 chosen interface**), and Settings → Interface can switch back for everyone.
 Packs are kept in `./data/ui-packs`.
 
+Two complete example packs, every page rebuilt from scratch, are ready to
+upload from [`examples/ui-packs`](examples/ui-packs): **Daylight**
+(`daylight.zip`), a calm, light-first interface for everyday use, and
+**Flux** (`flux.zip`), a dark console with a command palette, live charts
+and keyboard shortcuts for the numbers people.
+
 ## Settings
 
 All optional; put them in `.env` next to `docker-compose.yml`.
