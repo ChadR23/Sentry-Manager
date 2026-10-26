@@ -283,7 +283,9 @@ async function main() {
   // Nodes: other servers that encode for this one (server/nodes.js)
   const nodes = createNodes({ db, log: logger.scope('nodes'), audit: logger.scope('audit') });
   // Settings > Interface: an interface of the owner's own (server/uiPacks.js)
-  const uiPacks = createUiPacks({ dir: path.join(DATA, 'ui-packs'), db, log: logger.scope('ui') });
+  // (the packs that come with the app: ui-packs in the image, examples/ui-packs in a checkout)
+  const builtinPacks = [path.join(APP_ROOT, 'ui-packs'), path.join(APP_ROOT, 'examples', 'ui-packs')].find((d) => fs.existsSync(d)) || null;
+  const uiPacks = createUiPacks({ dir: path.join(DATA, 'ui-packs'), db, log: logger.scope('ui'), builtinDir: builtinPacks });
   // (the browser opened /original: the built-in interface there)
   const UI_COOKIE = 'sm_ui_original';
   const originalOnly = (req) => parseCookies(req.headers.cookie || '')[UI_COOKIE] === '1';

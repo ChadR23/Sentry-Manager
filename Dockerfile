@@ -70,6 +70,8 @@ COPY assets ./assets
 COPY src ./src
 COPY server ./server
 COPY web ./web
+# the interface packs that come with the app (Settings > Interface)
+COPY examples/ui-packs ./ui-packs
 
 # Set by the release build (.github/workflows/image.yml); IMAGE and
 # IMAGE_TAG let Settings > Updates check the registry for a newer image.

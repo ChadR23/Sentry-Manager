@@ -2301,17 +2301,17 @@
   function interfaceCard(ui) {
     const day = (iso) => (iso ? new Date(iso).toLocaleDateString() : '');
     return `<div class="card" data-section="interface"><h2>Interface</h2>
-      <p class="muted small" style="margin-top:6px">How Sentry Six Manager looks and works for everyone who signs in. <b>Original</b> is the built-in interface; the others are packs you uploaded.</p>
+      <p class="muted small" style="margin-top:6px">How Sentry Six Manager looks and works for everyone who signs in. <b>Original</b> is the built-in interface; Daylight, Flux, Horizon and Aurora come with the app, and you can upload packs of your own.</p>
       ${ui.original ? `<div class="ui-original-note"><p>This browser shows the <b>original</b> interface, as you opened <span class="mono">/original</span>${ui.active ? `; everyone else sees <b>${esc(ui.packs.find((x) => x.id === ui.active)?.name || '')}</b>` : ''}.</p><a class="btn sm" href="/original?off=1">Show the chosen interface</a></div>` : ''}
       <div class="form" style="margin-top:14px"><label class="field">Interface<select class="input" id="ui-pick">
         <option value=""${ui.active ? '' : ' selected'}>Original</option>
         ${ui.packs.map((x) => `<option value="${esc(x.id)}"${x.id === ui.active ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}
       </select></label></div>
-      ${ui.packs.length ? `<table class="table ui-packs" style="margin-top:14px"><thead><tr><th>Pack</th><th>Changes</th><th>Uploaded</th><th></th></tr></thead><tbody>
+      ${ui.packs.length ? `<table class="table ui-packs" style="margin-top:14px"><thead><tr><th>Pack</th><th>Changes</th><th>Added</th><th></th></tr></thead><tbody>
         ${ui.packs.map((x) => `<tr><td class="words"><b>${esc(x.name)}</b>${x.id === ui.active ? ' <span class="chip green">In use</span>' : ''}${x.description ? `<br><span class="muted small">${esc(x.description)}</span>` : ''}${x.author ? `<br><span class="muted small">by ${esc(x.author)}</span>` : ''}</td>
           <td class="small">${x.replaces.map((k) => (k === 'web' ? 'Pages' : 'Viewer and Encoder')).join(', ')} · ${x.files} file${x.files === 1 ? '' : 's'}</td>
-          <td class="small">${esc(day(x.uploadedAt))}</td>
-          <td class="actions"><button class="btn sm danger" type="button" data-ui-del="${esc(x.id)}">Delete</button></td></tr>`).join('')}</tbody></table>` : ''}
+          <td class="small">${x.builtin ? 'Built in' : esc(day(x.uploadedAt))}</td>
+          <td class="actions">${x.builtin ? '' : `<button class="btn sm danger" type="button" data-ui-del="${esc(x.id)}">Delete</button>`}</td></tr>`).join('')}</tbody></table>` : ''}
       <div class="form-actions" style="justify-content:flex-start;flex-wrap:wrap">
         <input type="file" id="ui-file" accept=".zip,application/zip" hidden>
         <button class="btn solid" type="button" id="ui-upload">${icon('plus')} Upload a pack (.zip)</button>

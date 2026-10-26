@@ -48,11 +48,66 @@ function safeRel(name) {
   return parts.join('/');
 }
 
-function createUiPacks({ dir, db, log = console }) {
+/** Every file under `folder` (relative paths), for a built-in pack's counts. */
+function countFiles(folder) {
+  let files = 0;
+  let bytes = 0;
+  const walk = (abs) => {
+    for (const entry of fs.readdirSync(abs, { withFileTypes: true })) {
+      const child = path.join(abs, entry.name);
+      if (entry.isDirectory()) walk(child);
+      else if (entry.isFile()) {
+        files++;
+        bytes += fs.statSync(child).size;
+      }
+    }
+  };
+  walk(folder);
+  return { files, bytes };
+}
+
+/**
+ * The packs that come with the app (the image's ui-packs folder): each a
+ * folder with ui.json and web/ or studio/, listed for everyone without an
+ * upload, never deleted. Read once.
+ */
+function readBuiltin(folder) {
+  const out = new Map();
+  let names = [];
+  try {
+    names = fs.readdirSync(folder, { withFileTypes: true }).filter((e) => e.isDirectory() && ID.test(e.name)).map((e) => e.name);
+  } catch {
+    return out;
+  }
+  for (const id of names.sort()) {
+    const root = path.join(folder, id);
+    try {
+      const manifest = JSON.parse(fs.readFileSync(path.join(root, 'ui.json'), 'utf8')) || {};
+      const replaces = KINDS.filter((k) => fs.existsSync(path.join(root, k)));
+      if (!replaces.length) continue;
+      const counts = replaces.reduce((sum, k) => {
+        const c = countFiles(path.join(root, k));
+        return { files: sum.files + c.files, bytes: sum.bytes + c.bytes };
+      }, { files: 0, bytes: 0 });
+      out.set(id, {
+        id, name: cleanText(manifest.name, 64) || id, description: cleanText(manifest.description, 300), author: cleanText(manifest.author, 64),
+        files: counts.files, bytes: counts.bytes, replaces, uploadedAt: null, builtin: true, root
+      });
+    } catch {
+      // a folder without a readable ui.json is not a pack
+    }
+  }
+  return out;
+}
+
+function createUiPacks({ dir, db, log = console, builtinDir = null }) {
   const metaFile = (id) => path.join(dir, id, 'pack.json');
   let installing = false;
+  const builtin = builtinDir ? readBuiltin(builtinDir) : new Map();
+  const publicMeta = ({ root: _root, ...meta }) => meta;
 
   function readMeta(id) {
+    if (builtin.has(id)) return builtin.get(id);
     try {
       const meta = JSON.parse(fs.readFileSync(metaFile(id), 'utf8'));
       return meta && meta.id === id ? meta : null;
@@ -61,15 +116,16 @@ function createUiPacks({ dir, db, log = console }) {
     }
   }
 
-  /** The installed packs, newest first. */
+  /** The packs: the built-in ones first, then the uploaded ones, newest first. */
   function list() {
     let ids = [];
     try {
-      ids = fs.readdirSync(dir).filter((id) => ID.test(id));
+      ids = fs.readdirSync(dir).filter((id) => ID.test(id) && !builtin.has(id));
     } catch {
-      return [];
+      ids = [];
     }
-    return ids.map(readMeta).filter(Boolean).sort((a, b) => String(b.uploadedAt).localeCompare(String(a.uploadedAt)));
+    const uploaded = ids.map(readMeta).filter(Boolean).sort((a, b) => String(b.uploadedAt).localeCompare(String(a.uploadedAt)));
+    return [...[...builtin.values()].map(publicMeta), ...uploaded];
   }
 
   /** The chosen pack's id, or null for the built-in interface. */
@@ -92,7 +148,7 @@ function createUiPacks({ dir, db, log = console }) {
   function root(kind) {
     const id = active();
     if (!id || !KINDS.includes(kind)) return null;
-    const folder = path.join(dir, id, 'files', kind);
+    const folder = builtin.has(id) ? path.join(builtin.get(id).root, kind) : path.join(dir, id, 'files', kind);
     return fs.existsSync(folder) ? folder : null;
   }
 
@@ -101,7 +157,7 @@ function createUiPacks({ dir, db, log = console }) {
     if (installing) throw new PackError('Another interface is being installed. Try again when it is done.');
     installing = true;
     try {
-      if (list().length >= MAX_PACKS) throw new PackError(`There are ${MAX_PACKS} interfaces already: delete one first.`);
+      if (list().filter((x) => !x.builtin).length >= MAX_PACKS) throw new PackError(`There are ${MAX_PACKS} interfaces already: delete one first.`);
       let entries;
       try {
         entries = readZip(zip);
@@ -167,6 +223,7 @@ function createUiPacks({ dir, db, log = console }) {
 
   async function remove(id) {
     if (typeof id !== 'string' || !ID.test(id) || !readMeta(id)) throw new PackError('No such interface.');
+    if (builtin.has(id)) throw new PackError('This interface comes with Sentry Six Manager and cannot be deleted.');
     if (active() === id) db.set('ui-pack', null);
     await fsp.rm(path.join(dir, id), { recursive: true, force: true });
   }

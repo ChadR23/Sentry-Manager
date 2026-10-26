@@ -796,7 +796,15 @@ test('Interface: a pack uploaded in Settings serves its files for everyone, swit
     const { pack: meta } = await res.json();
     assert.equal(meta.name, 'Red');
     let list = (await s.call('GET', '/api/ui-packs')).data;
-    assert.deepEqual([list.active, list.packs.length, list.original], [null, 1, false]);
+    assert.deepEqual([list.active, list.original], [null, false]);
+    // the packs that come with the app are listed first, without an upload, and cannot be deleted
+    const builtin = list.packs.filter((x) => x.builtin).map((x) => x.id);
+    assert.deepEqual(builtin, ['aurora', 'daylight', 'flux', 'horizon']);
+    assert.ok(list.packs.some((x) => x.id === meta.id && !x.builtin));
+    assert.equal((await s.call('DELETE', '/api/ui-packs/flux')).status, 400);
+    assert.equal((await s.call('PUT', '/api/ui-packs/active', { id: 'daylight' })).status, 200);
+    assert.equal(await text('/web/login.js'), fs.readFileSync(path.join(REPO, 'examples', 'ui-packs', 'daylight', 'web', 'login.js'), 'utf8'), 'a built-in pack serves its own files');
+    assert.equal((await s.call('PUT', '/api/ui-packs/active', { id: null })).status, 200);
     assert.equal(await text('/web/shell.css'), builtCss, 'installed, not chosen yet');
     // a bad pack is refused with its reason
     const bad = await upload(Buffer.from('not a zip, really not a zip'));
@@ -829,7 +837,7 @@ test('Interface: a pack uploaded in Settings serves its files for everyone, swit
     // deleting the pack
     assert.equal((await s.call('DELETE', `/api/ui-packs/${meta.id}`)).status, 200);
     list = (await s.call('GET', '/api/ui-packs')).data;
-    assert.equal(list.packs.length, 0);
+    assert.deepEqual(list.packs.map((x) => x.id), ['aurora', 'daylight', 'flux', 'horizon']);
   } finally {
     await s.stop();
     await fsp.rm(dir, { recursive: true, force: true });
