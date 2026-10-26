@@ -515,7 +515,7 @@ html.reduce-effects *, html.reduce-effects *::before { transition: none !importa
 .node-bench { border: 1px solid var(--line, rgba(255, 255, 255, 0.08)); border-radius: 12px; padding: 12px 14px; }
 .node-bench tr.is-best td { color: var(--accent); font-weight: 600; }
 /* Nodes: the vehicles a node converts for first */
-.node-trust { display: flex; gap: 10px; align-items: flex-start; }
+.node-trust { display: flex; gap: 10px; align-items: flex-start; border: 1px solid var(--line, rgba(255, 255, 255, 0.08)); border-radius: 12px; padding: 12px 14px; }
 .node-trust input { margin-top: 3px; }
 .node-cars { border: 1px solid var(--line, rgba(255, 255, 255, 0.08)); border-radius: 12px; padding: 12px 14px; display: grid; gap: 8px; justify-items: start; }
 .node-car-list { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }

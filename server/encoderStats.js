@@ -65,7 +65,8 @@ function deviceEntries(workers, gpus) {
     const gpu = first.hardware ? gpuFor(gpus, first.device) : null;
     entries.push({
       id,
-      name: first.hardware ? gpu?.name || null : 'CPU',
+      // (a node: its own name, "Garage PC (node)", not its id)
+      name: first.node || (first.hardware ? gpu?.name || null : 'CPU'),
       node: first.device || (first.hardware ? gpu?.node || null : null),
       encoder: first.encoder || null,
       hardware: first.hardware === true,

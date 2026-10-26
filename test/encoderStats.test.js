@@ -171,3 +171,11 @@ test('clips waiting in a node\'s queue are not counted as converting', () => {
   assert.equal(out.workers.length, 1, 'the one the node converts');
   assert.deepEqual(out.devices.map((d) => [d.id, d.workers]), [['node:garage', 1]]);
 });
+
+test('a node\'s line in the Hardware card is its name, not its id', () => {
+  const jobs = new Map([['j1', { id: 'j1', state: 'encoding', items: [], counters: {} }]]);
+  const node = worker({ itemId: 'n', encoder: 'hevc_vaapi', hardware: true, decode: 'cpu', device: null, deviceId: 'node:uz2qglsgh2fe', node: 'Garage PC (node)', remote: true, started: true });
+  const cpu = worker({ itemId: 'c', encoder: 'libx265', hardware: false, decode: 'cpu', device: null, deviceId: 'cpu' });
+  const out = encoderBlock({ snapshot: { gpus: [] }, jobs, workers: [node, cpu] });
+  assert.deepEqual(out.devices.map((d) => [d.id, d.name]), [['node:uz2qglsgh2fe', 'Garage PC (node)'], ['cpu', 'CPU']]);
+});

@@ -1783,15 +1783,19 @@
         render();
       };
     });
-    // follow a running benchmark
-    if (benchRunning) {
+    // follow a running benchmark, and the nodes' clips (converting, waiting)
+    // while any node is paired: the numbers were the ones from when the page
+    // opened. Hidden tabs and something being typed or picked wait.
+    if (benchRunning || nodes.length) {
+      const every = benchRunning ? 2500 : 5000;
       const follow = () => {
         if (seq !== renderSeq || !location.hash.startsWith('#/nodes')) return;
-        // not while something is being typed on the page
-        if (document.activeElement?.matches?.('input, select, textarea')) setTimeout(follow, 2500);
+        // (nor a node address or pairing code typed and not sent yet)
+        const typed = [...page.querySelectorAll('input[name="address"], input[name="code"]')].some((input) => input.value);
+        if (document.hidden || typed || document.activeElement?.matches?.('input, select, textarea')) setTimeout(follow, every);
         else render();
       };
-      setTimeout(follow, 2500);
+      setTimeout(follow, every);
     }
     page.querySelectorAll('[data-node-trust]').forEach((box) => {
       box.addEventListener('change', async () => {
