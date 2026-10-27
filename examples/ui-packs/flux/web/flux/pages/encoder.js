@@ -3,6 +3,7 @@
 import { esc, api, invoke, state, current, sourceOf, bytes, rate, pct, num, dur, energy, watts, money, icon, toast, confirmDialog, busy, store, fin, plural, isoish, debounce, bus, CLIENT_ID } from '../core.js';
 import { split, seg, wireSeg, meter, chip, empty } from '../ui.js';
 import { spark, C, PALETTE } from '../charts.js';
+import { splitDevices, deviceLabel, laneValue, jobLanes, groupMemory, groupBodyId, wireGroups } from '../nodelanes.js';
 
 const ACTIVE = new Set(['discovering', 'waiting', 'staging', 'encoding', 'writing-telemetry', 'verifying', 'copying', 'replacing', 'paused', 'paused_network']);
 const RUNNING = new Set(['discovering', 'waiting', 'staging', 'encoding', 'writing-telemetry', 'verifying', 'copying', 'replacing']);
@@ -57,12 +58,15 @@ export default {
     let logTimer = null;
     let lastRev = -1;
     const laneHist = new Map(); // device key -> fps history
+    const groupMem = groupMemory(store, 'enc:nodeGroups');
+    let ctlHtml = null;
     const tableF = { state: 'all', text: '' };
     const v = current();
-    const form = store.get('enc:form', {
+    // (what was saved over the defaults: the Nodes page may have saved only a lane)
+    const form = Object.assign({
       codec: 'h265', profileId: 'balanced', bitrateKbps: 4000, qualityLevel: 'balanced', outputMode: 'replace', verifyMode: 'quick',
       groups: [...GROUPS], groupOrder: ['SentryClips', 'SavedClips', 'RecentClips'], concurrency: 2, lanes: {}, dest: ''
-    });
+    }, store.get('enc:form', {}));
 
     el.innerHTML = `
       <div class="phead">
@@ -219,16 +223,25 @@ export default {
       if (s && ACTIVE.has(s.state)) {
         if (Array.isArray(lanesCfg) && lanesCfg.length) {
           const all = devices.length ? devices : lanesCfg.map((l) => ({ id: l.device, name: l.device }));
-          ctl = `<div class="live-ctl"><span class="small muted">Conversions at once per device</span>${all.map((d) => `<label class="stepper"><span>${esc(d.name || d.id)}</span><input class="input num" type="number" min="0" max="64" data-lane="${esc(d.id)}" value="${lanesCfg.find((l) => l.device === d.id)?.concurrency ?? 0}"></label>`).join('')}<button class="btn sm primary" type="button" id="lanes-apply">Apply</button></div>`;
+          const running = jobLanes(all, lanesCfg);
+          ctl = `<div class="live-ctl"><span class="small muted">Conversions at once per device</span><div class="lanes-in live-lanes">${laneFields(all, 'live', (d) => running.get(d.id) ?? 0)}</div><button class="btn sm primary" type="button" id="lanes-apply">Apply</button></div>`;
         } else {
           const cc = s.config?.concurrency || enc?.concurrency || 1;
           ctl = `<div class="live-ctl"><span class="small muted">Conversions at once</span><div class="stepper-row"><button class="btn icon" type="button" data-cc="-1" aria-label="Fewer at once (−)">−</button><output class="num big-out" id="cc-out">${cc}</output><button class="btn icon" type="button" data-cc="1" aria-label="More at once (+)">+</button></div><span class="faint small">applies to the running job at once</span></div>`;
         }
       }
-      $('#enc-lanes').innerHTML = `<header class="card-h"><h2>Lanes</h2><span class="faint small">${ws.length} encoding · ${live?.waitingOnNode || 0} waiting on node</span></header>
-        ${ctl}
-        <div class="devs">${devHtml || '<p class="muted small">No lane is busy right now.</p>'}</div>
+      const box = $('#enc-lanes');
+      if (!$('#enc-lanes-ctl')) box.innerHTML = '<header class="card-h"><h2>Lanes</h2><span class="faint small" id="enc-lanes-sub"></span></header><div id="enc-lanes-ctl"></div><div id="enc-lanes-body"></div>';
+      $('#enc-lanes-sub').textContent = `${ws.length} encoding · ${live?.waitingOnNode || 0} waiting on node`;
+      $('#enc-lanes-body').innerHTML = `<div class="devs">${devHtml || '<p class="muted small">No lane is busy right now.</p>'}</div>
         ${rows ? `<div class="tscroll"><table class="dtable"><thead><tr><th>clip</th><th>encoder</th><th>progress</th><th class="r">%</th><th class="r">fps</th><th class="r">speed</th><th class="r">bitrate</th></tr></thead><tbody>${rows}</tbody></table></div>` : ''}`;
+      // the live controls only change with the job's settings, and never under the user's finger
+      const ctlBox = $('#enc-lanes-ctl');
+      if (ctl === ctlHtml || (ctl && ctlBox.contains(document.activeElement))) return;
+      ctlHtml = ctl;
+      ctlBox.innerHTML = ctl;
+      wireGroups(ctlBox, groupMem);
+      ctlBox.oninput = () => groupTotals(ctlBox);
       el.querySelectorAll('[data-cc]').forEach((b) => { b.onclick = () => changeConcurrency(Number(b.dataset.cc)); });
       $('#lanes-apply')?.addEventListener('click', (e) => busy(e.currentTarget, async () => {
         const lanes = [...el.querySelectorAll('[data-lane]')].map((i) => ({ device: i.dataset.lane, concurrency: Math.max(0, Math.min(64, Number(i.value) || 0)) }));
@@ -313,7 +326,7 @@ export default {
           <div class="field">Verify${seg('verifyMode', [['quick', 'Quick'], ['full', 'Full decode']], form.verifyMode, 'Verify')}<span class="faint small">Telemetry is always compared frame by frame; Full also decodes every frame.</span></div>
           <div class="field">Clip groups, in order
             <ol class="grouplist">${form.groupOrder.map((g, i) => `<li><label class="check"><input type="checkbox" name="g-${g}"${form.groups.includes(g) ? ' checked' : ''}> ${esc(g)}</label><span><button class="btn sm icon" type="button" data-gup="${g}" aria-label="Move ${g} up"${i ? '' : ' disabled'}>${icon('up')}</button><button class="btn sm icon" type="button" data-gdown="${g}" aria-label="Move ${g} down"${i < 2 ? '' : ' disabled'}>${icon('down')}</button></span></li>`).join('')}</ol></div>
-          ${lanesMode ? `<div class="field">Conversions at once per device<div class="lanes-in">${devices.map((d) => `<label class="stepper"><span title="${esc(d.id)}">${esc(d.name || d.id)}</span><input class="input num" type="number" min="0" max="64" name="lane:${esc(d.id)}" value="${esc(form.lanes[d.id] ?? (d.kind === 'cpu' ? 2 : 1))}"></label>`).join('')}</div></div>`
+          ${lanesMode ? `<div class="field">Conversions at once per device<div class="lanes-in">${laneFields(devices, 'next', laneNext)}</div></div>`
             : `<label class="field">Conversions at once<input class="input num" type="number" name="concurrency" min="1" max="64" value="${esc(form.concurrency)}"></label>`}
           <div class="row-actions"><button class="btn primary" type="submit" id="enc-start">${icon('play')}Start conversion</button></div>
         </fieldset>`;
@@ -342,7 +355,35 @@ export default {
           drawForm();
         };
       });
-      f.oninput = () => { readForm(); save(); };
+      f.oninput = () => { readForm(); save(); groupTotals(f); };
+      wireGroups(f, groupMem);
+    }
+    // the next run's number for a device (a node's devices other than its default start at 0)
+    const laneNext = (d) => laneValue(form.lanes, d, d.kind === 'cpu' ? 2 : 1);
+    // this server's devices as rows; each node that lists its GPUs as a group that opens
+    function laneFields(list, scope, valueOf) {
+      const { own, nodes } = splitDevices(list);
+      const field = (d, label) => `<label class="stepper"><span title="${esc(d.id)}">${esc(label)}</span><input class="input num" type="number" min="0" max="64" ${scope === 'live' ? `data-lane="${esc(d.id)}"` : `name="lane:${esc(d.id)}"`} data-lane-value value="${esc(valueOf(d))}"></label>`;
+      const groups = nodes.map((g) => {
+        const total = g.devices.reduce((n, d) => n + (Number(valueOf(d)) || 0), 0);
+        const gpus = g.devices.filter((d) => d.deviceId !== 'cpu').length;
+        const parts = [gpus ? `${gpus} gpu${gpus === 1 ? '' : 's'}` : '', g.devices.some((d) => d.deviceId === 'cpu') ? 'cpu' : ''].filter(Boolean).join(' + ');
+        return `<div class="ngroup${g.online ? '' : ' offline'}${total ? '' : ' is-off'}" data-group-box>
+          <button type="button" class="ngroup-h" data-node-group="${scope}|${esc(g.key)}" aria-expanded="false" aria-controls="${groupBodyId(scope, g.key)}">
+            <span class="ngroup-n"><b>${esc(g.name)}</b><span class="mono faint">node · ${g.online ? '<span class="ok-text">online</span>' : '<span class="bad-text">offline</span>'} · ${esc(parts)}</span></span>
+            <span class="ngroup-t num" data-group-total>${total ? `${total}×` : 'off'}</span><span class="chev" aria-hidden="true"></span></button>
+          <div class="ngroup-b" id="${groupBodyId(scope, g.key)}" role="group" aria-label="${esc(g.name)}: GPUs and CPU" hidden>${g.devices.map((d) => field(d, deviceLabel(d))).join('')}</div></div>`;
+      }).join('');
+      return own.map((d) => field(d, d.name || d.id)).join('') + groups;
+    }
+    // each node group's header: its clips at once in all
+    function groupTotals(root) {
+      root.querySelectorAll('[data-group-box]').forEach((box) => {
+        const n = [...box.querySelectorAll('[data-lane-value]')].reduce((sum, i) => sum + Math.max(0, Number(i.value) || 0), 0);
+        const out = box.querySelector('[data-group-total]');
+        if (out) out.textContent = n ? `${n}×` : 'off';
+        box.classList.toggle('is-off', n === 0);
+      });
     }
     function save() { store.set('enc:form', form); }
     function readForm() {
@@ -376,7 +417,7 @@ export default {
         verifyMode: form.verifyMode
       };
       if (devices.length > 1) {
-        const lanes = devices.map((d) => ({ device: d.id, concurrency: Math.max(0, Math.min(64, form.lanes[d.id] ?? (d.kind === 'cpu' ? 2 : 1))) })).filter((l) => l.concurrency > 0);
+        const lanes = devices.map((d) => ({ device: d.id, concurrency: Math.max(0, Math.min(64, laneNext(d))) })).filter((l) => l.concurrency > 0);
         if (!lanes.length) throw new Error('Turn on at least one device.');
         cfg.lanes = lanes;
       } else {

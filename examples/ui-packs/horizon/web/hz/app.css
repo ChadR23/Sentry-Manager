@@ -177,6 +177,8 @@
 .kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 14px; margin: 0; font-size: 14px; }
 .kv dt { color: var(--faint); }
 .kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.devlist { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.devlist li { display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: baseline; min-width: 0; }
 .note { padding: 10px 12px; border-left: 3px solid var(--cyan); background: rgba(61, 240, 255, 0.07); border-radius: 0 var(--r) var(--r) 0; font-size: 14px; color: var(--dim); }
 .note.org { border-color: var(--org); background: rgba(255, 138, 61, 0.08); color: #ffe3c7; }
 .note.red { border-color: var(--red); background: rgba(255, 90, 120, 0.1); color: #ffd6de; }
@@ -639,6 +641,25 @@ html.sky-moving .dyno.revving::after { animation: hz-rev 1.6s ease-in-out infini
 .cc { min-width: 56px; text-align: center; font: 800 28px var(--mono); color: #fff; }
 .lane-in { min-width: 120px; }
 .lane-in .in { width: 100%; }
+/* a node as an engine block of its own: its header opens it to one input per GPU and its CPU */
+.nblocks { display: grid; gap: 10px; margin-top: 10px; }
+.nblock { min-width: 0; border-radius: var(--r); border: 1px solid var(--line-soft); background: linear-gradient(180deg, rgba(40, 20, 60, 0.55), rgba(3, 1, 12, 0.55)); }
+.nblock:not(.is-off) { border-color: rgba(255, 138, 61, 0.55); box-shadow: inset 3px 0 0 var(--org); }
+.nblock-h { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 10px; width: 100%; min-height: 48px; padding: 6px 12px; border: 0; border-radius: var(--r); background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.nblock-h:hover { background: rgba(61, 240, 255, 0.08); }
+.nblock-h > .i { color: var(--cyan); }
+.nblock-n { display: grid; gap: 2px; min-width: 0; }
+.nblock-n b, .nblock-n span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nblock-n b { font-size: 15px; color: #fff; }
+.nblock.offline .nblock-n span { color: #ffc2cf; }
+.nblock-t { font: 800 14px var(--mono); color: #ffd0a8; white-space: nowrap; }
+.nblock.is-off .nblock-t { color: var(--faint); font-weight: 600; }
+.nblock-h .chev { width: 18px; height: 18px; color: var(--dim); transition: transform 0.15s ease; }
+.nblock-h[aria-expanded="true"] .chev { transform: rotate(180deg); }
+.nblock-b { padding: 4px 12px 12px; border-top: 1px dashed rgba(255, 138, 61, 0.35); }
+.nblock-b[hidden] { display: none; }
+@media (pointer: coarse), (max-width: 1023px) { .nblock-h { min-height: 56px; } }
+@media (prefers-reduced-motion: reduce) { .nblock-h .chev { transition: none; } }
 .blocks { display: grid; gap: 12px; }
 .block { padding: 10px 12px; border-radius: var(--r); border: 1px solid rgba(255, 138, 61, 0.35); background: linear-gradient(180deg, rgba(40, 20, 60, 0.6), rgba(3, 1, 12, 0.6)); }
 .block-h { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: baseline; margin-bottom: 10px; }

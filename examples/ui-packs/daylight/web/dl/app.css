@@ -368,6 +368,23 @@ dialog.dlg[open] { animation: pop 240ms var(--ease) both; }
 .lane { display: flex; align-items: center; gap: 14px; padding: 12px 0; border-top: 1px solid var(--border); flex-wrap: wrap; }
 .lane:first-child { border-top: 0; }
 .lane .grow { flex: 1; min-width: 160px; }
+.helper-devices { margin: 6px 0 10px; padding-left: 20px; display: grid; gap: 6px; overflow-wrap: anywhere; }
+/* a helper server: one group that opens to its graphics cards and processor */
+.lane-group { border-top: 1px solid var(--border); }
+.lane-group-head { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 56px; padding: 12px 4px; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; border-radius: var(--radius-xs); }
+.lane-group-head:hover { background: var(--surface-2); }
+.lane-group-head .grow { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.lane-group.offline .lane-group-head .muted { color: var(--warn); }
+.lane-group-total { flex: none; padding: 4px 12px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-soft-ink); font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.lane-group.is-off .lane-group-total { background: var(--surface-2); color: var(--muted); font-weight: 600; }
+.lane-group-chev { flex: none; display: grid; place-items: center; width: 28px; height: 28px; color: var(--muted); transition: transform .15s ease; }
+.lane-group-chev svg { width: 20px; height: 20px; }
+.lane-group-head[aria-expanded="true"] .lane-group-chev { transform: rotate(90deg); }
+.lane-group-body { margin: 0 0 10px; padding: 0 14px; border-radius: var(--radius-sm); background: var(--surface-2); }
+.lane-group-body[hidden] { display: none; }
+.lane-group-body .lane { border-top-color: var(--border-strong); }
+.lane-group-body .stepper { background: var(--surface-3); }
+@media (prefers-reduced-motion: reduce) { .lane-group-chev { transition: none; } }
 .bench-table { width: 100%; border-collapse: collapse; font-size: 15px; }
 .bench-table th, .bench-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
 .bench-table tr.best td { background: var(--accent-soft); font-weight: 650; }

@@ -3,6 +3,7 @@
 // Everything goes through /api/converter/invoke/* and /api/converter/events.
 import { h, ico, api, conv, app, car, carRoot, size, perSec, pc, fixed, count, span, stampFull, watt, wh, cash, ok, toast, ask, act, local, segs, onSegs, pill, bar, panelHead, bus, debounce, CLIENT } from '../core.js';
 import { dial, setDial, ring, setRing } from '../gauges.js';
+import { splitDevices, deviceLabel, laneValue, jobLanes, groupMemory, groupBodyId, wireGroups } from '../nodelanes.js';
 
 const ACTIVE = new Set(['discovering', 'waiting', 'staging', 'encoding', 'writing-telemetry', 'verifying', 'copying', 'replacing', 'paused', 'paused_network']);
 const RUNNING = new Set(['discovering', 'waiting', 'staging', 'encoding', 'writing-telemetry', 'verifying', 'copying', 'replacing']);
@@ -103,6 +104,8 @@ export default {
         <div class="logbox short" id="e-log" tabindex="0" aria-label="Converter log lines"></div>
       </section>`;
     const $ = (s) => el.querySelector(s);
+    // which node blocks are open, per browser
+    const groupMem = groupMemory(local, 'enc.nodeGroups');
     /** Replaces the markup only when it changed (keeps buttons stable under a tap). */
     const drawn = new WeakMap();
     const setHtml = (node, html) => {
@@ -226,7 +229,8 @@ export default {
       if (s && ACTIVE.has(s.state)) {
         if (Array.isArray(lanes) && lanes.length) {
           const all = devices.length ? devices : lanes.map((l) => ({ id: l.device, name: l.device }));
-          ctl = `<div class="live-ctl"><span class="small dim">Conversions at once per device, for the running job</span><div class="row">${all.map((d) => `<label class="fld lane-in">${h(d.name || d.id)}<input class="in num" type="number" inputmode="numeric" min="0" max="64" data-lane="${h(d.id)}" value="${lanes.find((l) => l.device === d.id)?.concurrency ?? 0}"></label>`).join('')}<button class="btn go sm" type="button" id="e-lanes">Apply</button></div></div>`;
+          const running = jobLanes(all, lanes);
+          ctl = `<div class="live-ctl"><span class="small dim">Conversions at once per device, for the running job</span>${laneFields(all, 'live', (d) => running.get(d.id) ?? 0)}<div class="row"><button class="btn go sm" type="button" id="e-lanes">Apply</button></div></div>`;
         } else {
           const cc = s.config?.concurrency || enc?.concurrency || 1;
           ctl = `<div class="live-ctl"><span class="small dim">Cylinders firing (conversions at once), for the running job</span><div class="row"><button class="btn icon" type="button" data-cc="-1" aria-label="Fewer at once (−)">${ico('minus')}</button><output class="cc num" id="e-cc" aria-live="polite">${cc}</output><button class="btn icon" type="button" data-cc="1" aria-label="More at once (+)">${ico('plus')}</button></div></div>`;
@@ -251,6 +255,8 @@ export default {
       if (ctlBox.contains(document.activeElement) && drawn.has(ctlBox) && ctl) return;
       if (ccTimer && ctl.includes('data-cc')) return;
       if (!setHtml(ctlBox, ctl)) return;
+      wireGroups(ctlBox, groupMem);
+      ctlBox.oninput = () => groupTotals(ctlBox);
       el.querySelectorAll('[data-cc]').forEach((b) => { b.onclick = () => bump(Number(b.dataset.cc)); });
       $('#e-lanes')?.addEventListener('click', (e) => act(e.currentTarget, async () => {
         const l = [...el.querySelectorAll('[data-lane]')].map((i) => ({ device: i.dataset.lane, concurrency: Math.max(0, Math.min(64, Number(i.value) || 0)) }));
@@ -329,7 +335,7 @@ export default {
           <label class="chk" data-out="replace"${form.outputMode === 'replace' ? '' : ' hidden'}><input type="checkbox" name="confirmReplace"> Replace each original once its copy is verified (a backup is kept until the swap succeeds)</label>
           <div class="fld">Verify${segs('verifyMode', [['quick', 'Quick'], ['full', 'Full decode']], form.verifyMode, 'Verify')}<span class="hint">Telemetry is always compared frame by frame; Full also decodes every frame.</span></div>
           <div class="fld">Clip groups, in order<ol class="grouplist">${form.groupOrder.map((g, i) => `<li><label class="chk"><input type="checkbox" name="g-${g}"${form.groups.includes(g) ? ' checked' : ''}> ${h(g)}</label><span class="row"><button class="btn icon ghost" type="button" data-up="${g}" aria-label="Move ${g} up"${i ? '' : ' disabled'}>${ico('up')}</button><button class="btn icon ghost" type="button" data-down="${g}" aria-label="Move ${g} down"${i < 2 ? '' : ' disabled'}>${ico('down')}</button></span></li>`).join('')}</ol></div>
-          ${multi ? `<div class="fld">Conversions at once per device<div class="grid2">${devices.map((d) => `<label class="fld lane-in">${h(d.name || d.id)}<input class="in num" type="number" inputmode="numeric" min="0" max="64" name="lane:${h(d.id)}" value="${h(form.lanes[d.id] ?? (d.kind === 'cpu' ? 2 : 1))}"></label>`).join('')}</div></div>`
+          ${multi ? `<div class="fld">Conversions at once per device${laneFields(devices, 'next', laneNext)}</div>`
             : `<label class="fld">Conversions at once<input class="in num" type="number" inputmode="numeric" name="concurrency" min="1" max="64" value="${h(form.concurrency)}"></label>`}
           <button class="btn go wide" type="submit" id="e-start">${ico('play')}Start the engine</button>
         </fieldset>`;
@@ -353,7 +359,33 @@ export default {
           f.querySelector(`[data-${b.dataset.up ? 'up' : 'down'}="${g}"]`)?.focus();
         };
       });
-      f.oninput = () => { read(); save(); };
+      f.oninput = () => { read(); save(); groupTotals(f); };
+      wireGroups(f, groupMem);
+    }
+    // the next run's number for a device (a node's devices other than its default start at 0)
+    const laneNext = (d) => laneValue(form.lanes, d, d.kind === 'cpu' ? 2 : 1);
+    // this server's devices as inputs; each node that lists its GPUs as an engine block that opens
+    function laneFields(list, scope, valueOf) {
+      const { own, nodes } = splitDevices(list);
+      const field = (d, label) => `<label class="fld lane-in">${h(label)}<input class="in num" type="number" inputmode="numeric" min="0" max="64" ${scope === 'live' ? `data-lane="${h(d.id)}"` : `name="lane:${h(d.id)}"`} data-lane-value value="${h(valueOf(d))}"></label>`;
+      const blocks = nodes.map((g) => {
+        const total = g.devices.reduce((n, d) => n + (Number(valueOf(d)) || 0), 0);
+        return `<div class="nblock${g.online ? '' : ' offline'}${total ? '' : ' is-off'}" data-group-box>
+          <button type="button" class="nblock-h" data-node-group="${scope}|${h(g.key)}" aria-expanded="false" aria-controls="${groupBodyId(scope, g.key)}">
+            ${ico('nodes')}<span class="nblock-n"><b>${h(g.name)}</b><span class="small faint">${g.online ? 'online' : 'offline: check it under Nodes'} · ${h(count(g.devices.length, 'device'))}</span></span>
+            <span class="nblock-t num" data-group-total>${total ? h(count(total, 'cylinder')) : 'off'}</span>${ico('down', 'i chev')}</button>
+          <div class="nblock-b grid2" id="${groupBodyId(scope, g.key)}" role="group" aria-label="${h(g.name)}: GPUs and CPU" hidden>${g.devices.map((d) => field(d, deviceLabel(d))).join('')}</div></div>`;
+      }).join('');
+      return `${own.length ? `<div class="grid2">${own.map((d) => field(d, d.name || d.id)).join('')}</div>` : ''}${blocks ? `<div class="nblocks">${blocks}</div>` : ''}`;
+    }
+    // each node block's header: its cylinders (clips at once) in all
+    function groupTotals(root) {
+      root.querySelectorAll('[data-group-box]').forEach((box) => {
+        const n = [...box.querySelectorAll('[data-lane-value]')].reduce((sum, i) => sum + Math.max(0, Number(i.value) || 0), 0);
+        const out = box.querySelector('[data-group-total]');
+        if (out) out.textContent = n ? count(n, 'cylinder') : 'off';
+        box.classList.toggle('is-off', n === 0);
+      });
     }
     const save = () => local.set('enc.form', form);
     function read() {
@@ -387,7 +419,7 @@ export default {
         verifyMode: form.verifyMode
       };
       if (devices.length > 1) {
-        const lanes = devices.map((d) => ({ device: d.id, concurrency: Math.max(0, Math.min(64, form.lanes[d.id] ?? (d.kind === 'cpu' ? 2 : 1))) })).filter((l) => l.concurrency > 0);
+        const lanes = devices.map((d) => ({ device: d.id, concurrency: Math.max(0, Math.min(64, laneNext(d))) })).filter((l) => l.concurrency > 0);
         if (!lanes.length) throw new Error('Turn on at least one device.');
         cfg.lanes = lanes;
       } else cfg.concurrency = Math.max(1, Math.min(64, Math.round(form.concurrency || 1)));

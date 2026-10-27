@@ -6,6 +6,7 @@ import {
   $, $$, esc, icon, api, invoke, state, current, footageRoot, bytes, plural, pct, num, dur, when, ago, fin, ring, meter, toast,
   confirmDialog, openDialog, store, empty
 } from '../core.js';
+import { splitDevices, deviceLabel, laneValue, jobLanes, groupMemory, groupBodyId, wireGroups } from '../nodelanes.js';
 import { follow, onBenchmark, streamReady, counts, Pace, ACTIVE, PAUSED, STATE_TEXT, CODEC, PROFILES, GROUPS, explain, apply, refreshCurrent } from '../conv.js';
 
 const LANE_COLORS = ['#46f0a8', '#9b7dff', '#2fd6d8', '#e86ee0', '#ffd27a', '#8fd0ff'];
@@ -14,11 +15,16 @@ const INTERVALS = [[15, 'Every 15 minutes'], [30, 'Every 30 minutes'], [60, 'Eve
 const ITEM_TEXT = { queued: 'Waiting', processing: 'Converting', completed: 'Done', skipped: 'Skipped', failed: 'Failed', cancelled: 'Cancelled' };
 const PHASES = [['inspect', 'Inspect'], ['source', 'Read source'], ['timeline', 'Timeline'], ['encode', 'Encode'], ['metadata', 'Driving data'], ['checkWait', 'Wait for check'], ['picture', 'Picture check'], ['verify', 'Verify'], ['saveWait', 'Wait to save'], ['save', 'Save'], ['cleanup', 'Clean up']];
 
-const form = store.get('enc-form', {
+// (what was saved over the defaults: the Nodes page may have saved only a lane)
+const form = Object.assign({
   codec: 'h265', profileId: 'balanced', qualityLevel: 'balanced', bitrateKbps: 2500, outputMode: 'replace', verifyMode: 'quick',
   groups: ['SavedClips', 'SentryClips', 'RecentClips'], included: ['RecentClips', 'SavedClips', 'SentryClips'], networkMode: 'auto', concurrency: 2, lanes: {}, dest: {}
-});
+}, store.get('enc-form', {}));
 const saveForm = () => store.set('enc-form', form);
+// the next run's number for a device (a node's devices other than its default start at 0)
+const laneNext = (d) => laneValue(form.lanes, d, d.kind === 'cpu' ? 0 : 2);
+// which node groups are open, per browser
+const groupMem = groupMemory(store, 'enc-node-groups');
 
 export default {
   title: 'Encoder',
@@ -27,6 +33,8 @@ export default {
   topics: ['vehicles'],
   async mount(ctx) {
     const { body } = ctx;
+    // (the Nodes page may have set a lane since this page was last open)
+    form.lanes = store.get('enc-form', null)?.lanes || form.lanes;
     let snap = null;
     let caps = null;
     let devices = [];
@@ -119,6 +127,7 @@ export default {
       if (shape !== liveShape || !$('#live-ctrl', el)) {
         liveShape = shape;
         el.innerHTML = `<div id="live-head">${headHtml}</div><div id="live-stats">${statsHtml}</div><div id="live-ctrl">${ctrlHtml}</div>`;
+        wireGroups(el, groupMem);
       } else {
         $('#live-head', el).innerHTML = headHtml;
         $('#live-stats', el).innerHTML = statsHtml;
@@ -127,11 +136,33 @@ export default {
 
     function laneSteppers(lanes, live) {
       const devs = devices.length ? devices : lanes.map((l) => ({ id: l.device, name: l.device }));
-      return devs.map((d, i) => {
-        const val = live ? (lanes.find((l) => l.device === d.id)?.concurrency || 0) : (form.lanes[d.id] ?? (d.kind === 'cpu' ? 0 : 2));
-        return `<div class="lane-row" style="--c:${LANE_COLORS[i % LANE_COLORS.length]}"><span class="swatch"></span><span><b>${esc(d.name || d.id)}</b>${d.encoders ? `<br><span class="muted tiny">${['h265', 'av1'].filter((k) => d.encoders?.[k]).map((k) => CODEC[k]).join(' · ') || 'no hardware encoder'}</span>` : ''}</span>
-          <div class="stepper" role="group" aria-label="${esc(d.name || d.id)}: conversions at once"><button class="btn ghost" type="button" data-lane="${esc(d.id)}" data-step="-1" data-live="${live ? 1 : 0}" aria-label="Fewer">−</button><output>${val}</output><button class="btn ghost" type="button" data-lane="${esc(d.id)}" data-step="1" data-live="${live ? 1 : 0}" aria-label="More">+</button></div></div>`;
+      const running = jobLanes(devs, lanes);
+      const valueOf = (d) => (live ? running.get(d.id) || 0 : laneNext(d));
+      const scope = live ? 'live' : 'next';
+      let color = 0;
+      const row = (d, label) => `<div class="lane-row" style="--c:${LANE_COLORS[color++ % LANE_COLORS.length]}"><span class="swatch"></span><span><b>${esc(label)}</b>${d.encoders ? `<br><span class="muted tiny">${d.deviceId === 'cpu' ? 'its CPU cores · slower than a GPU' : ['h265', 'av1'].filter((k) => d.encoders?.[k]).map((k) => CODEC[k]).join(' · ') || (d.online === false ? 'offline' : 'no hardware encoder')}</span>` : ''}</span>
+          <div class="stepper" role="group" aria-label="${esc(d.name || d.id)}: conversions at once"><button class="btn ghost" type="button" data-lane="${esc(d.id)}" data-step="-1" data-live="${live ? 1 : 0}" aria-label="Fewer">−</button><output data-lane-value>${valueOf(d)}</output><button class="btn ghost" type="button" data-lane="${esc(d.id)}" data-step="1" data-live="${live ? 1 : 0}" aria-label="More">+</button></div></div>`;
+      const { own, nodes } = splitDevices(devs);
+      // each node that lists its GPUs: a constellation of its own, opened from its header
+      const groups = nodes.map((g) => {
+        const total = g.devices.reduce((n, d) => n + (Number(valueOf(d)) || 0), 0);
+        const c = LANE_COLORS[color % LANE_COLORS.length];
+        return `<div class="lane-group${g.online ? '' : ' offline'}${total ? '' : ' is-off'}" style="--c:${c}" data-group-box>
+          <button type="button" class="lane-group-h" data-node-group="${scope}|${esc(g.key)}" aria-expanded="false" aria-controls="${groupBodyId(scope, g.key)}">
+            <span class="swatch"></span><span class="lane-group-n"><b>${esc(g.name)}</b><span class="muted tiny">${g.online ? 'Online' : 'Offline: check it under Nodes'} · ${plural(g.devices.length, 'device')}</span></span>
+            <span class="chip lane-group-t" data-group-total>${total ? `${total} at once` : 'Off'}</span><span class="chev" aria-hidden="true">${icon('right')}</span></button>
+          <div class="lane-group-b lane-list" id="${groupBodyId(scope, g.key)}" role="group" aria-label="${esc(g.name)}: GPUs and CPU" hidden>${g.devices.map((d) => row(d, deviceLabel(d))).join('')}</div></div>`;
       }).join('');
+      return own.map((d) => row(d, d.name || d.id)).join('') + groups;
+    }
+    // each node group's header: its conversions at once in all
+    function groupTotals(root) {
+      root.querySelectorAll('[data-group-box]').forEach((box) => {
+        const n = [...box.querySelectorAll('[data-lane-value]')].reduce((sum, o) => sum + (Number(o.textContent) || 0), 0);
+        const out = box.querySelector('[data-group-total]');
+        if (out) out.textContent = n ? `${n} at once` : 'Off';
+        box.classList.toggle('is-off', n === 0);
+      });
     }
 
     // ---------- lanes (from /api/stats) ----------
@@ -205,7 +236,7 @@ export default {
       if (form.profileId === 'custom') cfg.bitrateKbps = Math.round(Number(form.bitrateKbps));
       if (form.profileId === 'quality') cfg.qualityLevel = form.qualityLevel;
       if (multiDevice()) {
-        const lanes = devices.map((d) => ({ device: d.id, concurrency: Number(form.lanes[d.id] ?? (d.kind === 'cpu' ? 0 : 2)) })).filter((l) => l.concurrency > 0);
+        const lanes = devices.map((d) => ({ device: d.id, concurrency: Number(laneNext(d)) })).filter((l) => l.concurrency > 0);
         if (!lanes.length) throw new Error('Set at least one device to convert.');
         cfg.lanes = lanes;
       } else cfg.concurrency = Math.max(1, Math.min(64, Number(form.concurrency) || 1));
@@ -247,6 +278,7 @@ export default {
           <p class="err" id="start-err" role="alert"></p>
           <div class="actions"><button class="btn primary" type="submit" id="f-start"${busy ? ' disabled' : ''}>${icon('play')} Start converting ${esc(v.name)}</button></div>
         </form>`;
+      wireGroups(panel, groupMem);
     }
 
     // ---------- automatic conversion ----------
@@ -408,16 +440,18 @@ export default {
         const id = lane.dataset.lane;
         const delta = Number(lane.dataset.step);
         if (lane.dataset.live === '1' && snap) {
-          const cur = devices.map((d) => ({ device: d.id, concurrency: snap.config.lanes.find((l) => l.device === d.id)?.concurrency || 0 }));
+          const running = jobLanes(devices, snap.config.lanes);
+          const cur = devices.map((d) => ({ device: d.id, concurrency: running.get(d.id) || 0 }));
           const row = cur.find((l) => l.device === id) || (cur.push({ device: id, concurrency: 0 }), cur[cur.length - 1]);
           row.concurrency = Math.max(0, Math.min(64, row.concurrency + delta));
           const r = await invoke('setLanes', { jobId: snap.id, lanes: cur });
           if (r.ok) apply(r.value); else toast(explain(r.error), 'bad');
         } else {
-          const d = devices.find((x) => x.id === id);
-          form.lanes[id] = Math.max(0, Math.min(64, Number(form.lanes[id] ?? (d?.kind === 'cpu' ? 0 : 2)) + delta));
+          const d = devices.find((x) => x.id === id) || { id };
+          form.lanes[id] = Math.max(0, Math.min(64, Number(laneNext(d)) + delta));
           saveForm();
           lane.parentElement.querySelector('output').textContent = form.lanes[id];
+          groupTotals($('#start-panel', body));
         }
         return;
       }

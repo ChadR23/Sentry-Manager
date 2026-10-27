@@ -24,15 +24,19 @@ export async function render(ctx) {
   const openPanels = new Set();
 
   const encoders = (e) => [['H.265', e?.h265], ['AV1', e?.av1]].filter(([, x]) => x).map(([k, x]) => `${k}: ${x}`).join(' · ') || 'Unknown';
+  // the device a helper's speed test and its “Use” set (its main one), in plain words
+  const mainDevice = (n) => (!n.defaultDeviceName ? '' : n.devices?.find((d) => d.isDefault)?.id === 'cpu' ? 'its processor' : n.defaultDeviceName);
   const benchPanel = (n) => {
     const b = benches[n.id];
     if (!b) return '';
     const codec = b.codec === 'av1' ? 'AV1' : 'H.265';
+    // (a helper that lists its graphics cards is tested on its main one)
+    const on = mainDevice(n) ? ` on ${esc(mainDevice(n))}` : '';
     const status = b.state === 'running' ? `${esc(b.phase || 'Running')}…` : b.state === 'failed' ? `didn’t finish: ${esc(b.error || '')}` : b.state === 'cancelled' ? 'cancelled' : `done${b.samples ? ` with ${plural(b.samples, 'sample clip')} of your footage (only read)` : ''}`;
-    return `<div class="card" style="background:var(--surface-2);box-shadow:none;margin-top:12px;padding:16px"><b>Speed test, ${codec}</b> <span class="muted small">${status}</span>
+    return `<div class="card" style="background:var(--surface-2);box-shadow:none;margin-top:12px;padding:16px"><b>Speed test, ${codec}${on}</b> <span class="muted small">${status}</span>
       ${b.results?.length ? `<div style="overflow-x:auto;margin-top:8px"><table class="bench-table"><thead><tr><th>At once</th><th>Speed</th><th>Clips</th></tr></thead><tbody>${b.results.map((r) => `<tr class="${r.level === b.suggested ? 'best' : ''}"><td>${r.level}${r.level === b.suggested ? ' (best)' : ''}</td><td>${r.failed ? `${r.failed} failed` : `${r.clipsPerMinute} clips/min`}</td><td class="muted">${r.clips} in ${r.seconds} s</td></tr>`).join('')}</tbody></table></div>` : ''}
       ${b.state === 'running' ? `${b.state === 'running' ? '<div class="loading" style="padding:10px 0"><span class="spin"></span><span>Measuring…</span></div>' : ''}<button class="btn btn-sm" type="button" data-bench-cancel="${esc(n.id)}">Cancel</button>`
-        : `<div class="row" style="margin-top:10px">${b.suggested ? `<button class="btn btn-primary btn-sm" type="button" data-bench-use="${esc(n.id)}" data-level="${b.suggested}">Use ${b.suggested} at once</button>` : ''}<button class="btn btn-sm" type="button" data-bench-start="${esc(n.id)}" data-codec="${esc(b.codec)}">Test again</button></div>`}</div>`;
+        : `<div class="row" style="margin-top:10px">${b.suggested ? `<button class="btn btn-primary btn-sm" type="button" data-bench-use="${esc(n.id)}" data-level="${b.suggested}">Use ${b.suggested} at once${on}</button>` : ''}<button class="btn btn-sm" type="button" data-bench-start="${esc(n.id)}" data-codec="${esc(b.codec)}">Test again</button></div>`}</div>`;
   };
   const carsPanel = (n) => {
     const cars = state.vehicles;
@@ -60,8 +64,10 @@ export async function render(ctx) {
       <button class="btn btn-sm" type="button" data-rename="${esc(n.id)}">Rename</button>
       <button class="btn btn-ghost btn-sm" type="button" data-remove="${esc(n.id)}">Remove</button></div>
     <details class="more" data-panel="${esc(n.id)}"${openPanels.has(n.id) ? ' open' : ''}><summary>More details</summary><div class="more-body">
-      <p class="small"><b>Encoders:</b> ${esc(encoders(n.encoders))}</p>${carsPanel(n)}
-      <p class="muted small" style="margin-top:10px">How many clips it converts at once is set on the Encoder page, like your own devices.</p></div></details>
+      ${Array.isArray(n.devices) && n.devices.length
+        ? `<p class="small"><b>Its devices:</b></p><ul class="helper-devices">${n.devices.map((d) => `<li><b>${esc(d.id === 'cpu' ? 'Processor (CPU)' : d.name)}</b>${d.isDefault ? ' <span class="muted small">(main one)</span>' : ''}<br><span class="muted small">${esc(encoders(d.encoders))}</span></li>`).join('')}</ul>`
+        : `<p class="small"><b>Encoders:</b> ${esc(encoders(n.encoders))}</p>`}${carsPanel(n)}
+      <p class="muted small" style="margin-top:10px">Which of its graphics cards (and its processor) convert, and how many clips each does at once, is chosen on the Encoder page: tap this helper there to open it.</p></div></details>
   </li>`;
 
   const draw = () => {
@@ -80,8 +86,7 @@ export async function render(ctx) {
       <section class="section"><div class="card stack"><h2>Let another server use this one</h2>
         ${w.available ? `<p class="muted">A main server you pair here sends clips to convert and takes the results back. It can do nothing else here: no footage, settings or passwords.</p>
           <label class="switch"><input type="checkbox" id="worker-on"${w.enabled ? ' checked' : ''}><span>Convert for paired main servers</span></label>
-          <div class="form-grid"><label class="field"><span>Clips at once</span><select class="input" id="worker-slots">${[1, 2, 3, 4, 6, 8].map((n) => `<option${n === w.slots ? ' selected' : ''}>${n}</option>`).join('')}</select></label>
-            <label class="field"><span>Convert with</span><select class="input" id="worker-use">${[['gpu', 'Graphics card (processor if there is none)'], ['gpu-cpu', 'Graphics card, then processor if it fails'], ['cpu', 'Processor only']].map(([k, t]) => `<option value="${k}"${k === w.use ? ' selected' : ''}>${t}</option>`).join('')}</select></label></div>
+          <p class="muted small">You don’t need to set anything else here: the main server chooses which of this server’s graphics cards (and its processor) convert, and how many clips each does at once, on its own Encoder page.</p>
           ${pairing ? `<div class="note note-good" style="flex-direction:column"><span class="muted small">Pairing code (works once, ${plural(mins, 'minute')} left)</span><span class="pair-code">${esc(pairing.code)}</span>
               <span class="small">On the main server: Helper servers → Pair a helper, with this server’s address <b class="mono">${esc(location.hostname)}${location.port && location.port !== '9000' ? `:${esc(location.port)}` : ''}</b> and this code.</span>
               <button class="btn btn-sm" type="button" id="pair-cancel">Cancel the code</button></div>`
@@ -101,7 +106,7 @@ export async function render(ctx) {
       busy(e.submitter, async () => {
         try {
           await api('/api/nodes', { body: { address: String(f.get('address')).trim(), code: String(f.get('code')).trim() } });
-          toast('Paired. Set how many clips it converts at once on the Encoder page.', { kind: 'good' });
+          toast('Paired. Choose which of its devices convert on the Encoder page.', { kind: 'good' });
           refresh();
         } catch (err) { fail(err); }
       });
@@ -112,12 +117,17 @@ export async function render(ctx) {
       b.onclick = () => busy(b, async () => {
         const level = Number(b.dataset.level);
         try {
+          const n = nodeOf(b.dataset.benchUse);
           await api(`/api/nodes/${enc(b.dataset.benchUse)}/slots`, { body: { slots: level } });
-          // the Encoder's row for this helper follows for the next conversion
+          // the Encoder's row for the tested device follows for the next conversion
           const lanes = JSON.parse(localStorage.getItem('daylight:lanes') || '{}') || {};
-          lanes[`node:${b.dataset.benchUse}`] = level;
+          const lane = n?.defaultLane || `node:${b.dataset.benchUse}`;
+          lanes[lane] = level;
+          // (the whole-helper row of before stands for the same device)
+          if (lane !== `node:${b.dataset.benchUse}`) delete lanes[`node:${b.dataset.benchUse}`];
           localStorage.setItem('daylight:lanes', JSON.stringify(lanes));
-          toast(`It now converts ${level} at once.`, { kind: 'good' });
+          const main = n ? mainDevice(n) : '';
+          toast(main ? `${main.charAt(0).toUpperCase()}${main.slice(1)} now converts ${level} at once.` : `It now converts ${level} at once.`, { kind: 'good' });
         } catch (err) { fail(err); }
         refresh();
       });
@@ -164,12 +174,10 @@ export async function render(ctx) {
     });
     if (!data.worker.available) return;
     const saveWorker = async () => {
-      try { await api('/api/nodes/worker', { body: { enabled: view.querySelector('#worker-on').checked, slots: Number(view.querySelector('#worker-slots').value), use: view.querySelector('#worker-use').value } }); toast('Saved.', { kind: 'good' }); } catch (err) { fail(err); }
+      try { await api('/api/nodes/worker', { body: { enabled: view.querySelector('#worker-on').checked } }); toast('Saved.', { kind: 'good' }); } catch (err) { fail(err); }
       refresh();
     };
     view.querySelector('#worker-on').onchange = saveWorker;
-    view.querySelector('#worker-slots').onchange = saveWorker;
-    view.querySelector('#worker-use').onchange = saveWorker;
     view.querySelector('#pair-start')?.addEventListener('click', (e) => busy(e.currentTarget, async () => { try { await api('/api/nodes/worker/pair', { body: {} }); } catch (err) { fail(err); } refresh(); }));
     view.querySelector('#pair-cancel')?.addEventListener('click', (e) => busy(e.currentTarget, async () => { await api('/api/nodes/worker/pair', { method: 'DELETE' }).catch(fail); refresh(); }));
     view.querySelectorAll('[data-revoke]').forEach((b) => {

@@ -1,5 +1,5 @@
 // Nodes: other servers that encode for this one, and this one working for another.
-import { esc, api, state, icon, toast, confirmDialog, promptDialog, busy, when, ago, plural } from '../core.js';
+import { esc, api, state, icon, toast, confirmDialog, promptDialog, busy, when, ago, plural, store } from '../core.js';
 import { chip, empty } from '../ui.js';
 
 export default {
@@ -20,6 +20,10 @@ export default {
       }
       const carName = (id) => cars.find((x) => x.id === id)?.name || id;
       const enc = (e) => [['H.265', e?.h265], ['AV1', e?.av1]].filter(([, x]) => x).map(([k, x]) => `${k}: <span class="mono">${esc(x)}</span>`).join(' · ') || '—';
+      // a node that lists its GPUs and CPU: each with its encoders
+      const encOf = (n) => (Array.isArray(n.devices) && n.devices.length
+        ? `<ul class="devlist">${n.devices.map((d) => `<li><b>${esc(d.name)}</b>${d.isDefault ? ' <span class="faint">default</span>' : ''}<span class="small">${enc(d.encoders)}</span></li>`).join('')}</ul>`
+        : enc(n.encoders));
       const nodeCard = (n) => {
         const b = benches[n.id];
         const list = n.cars || [];
@@ -27,15 +31,15 @@ export default {
         return `<article class="card node">
           <header class="card-h"><div><h3>${esc(n.name)}</h3><span class="mono small faint">${esc(n.address)}</span></div>${n.online ? chip('online', 'green') : chip('offline', 'red')}</header>
           ${n.online ? '' : `<p class="small bad-text">${esc(n.error || '')}</p>`}
-          <dl class="kv tight"><dt>encoders</dt><dd>${enc(n.encoders)}</dd><dt>clips</dt><dd class="num">${n.online && n.slots ? (n.encoding === null ? `${n.busy ?? 0} of ${n.slots} busy` : `${n.encoding} of ${n.slots} converting${n.busy > n.encoding ? ` · ${n.busy - n.encoding} waiting` : ''}`) : '—'}</dd>
+          <dl class="kv tight"><dt>${Array.isArray(n.devices) && n.devices.length ? 'devices' : 'encoders'}</dt><dd>${encOf(n)}</dd><dt>clips</dt><dd class="num">${n.online && n.slots ? (n.encoding === null ? `${n.busy ?? 0} of ${n.slots} busy` : `${n.encoding} of ${n.slots} converting${n.busy > n.encoding ? ` · ${n.busy - n.encoding} waiting` : ''}`) : '—'}</dd>
             <dt>paired</dt><dd>${esc(when(n.pairedAt))}</dd><dt>fingerprint</dt><dd class="mono small wrap">${esc(n.fingerprint || '—')}</dd></dl>
           <div class="sub-block"><b class="small">Vehicles first</b> <span class="faint small">${list.length ? 'automatic conversion sends these vehicles\' clips here first, in order' : 'none: it helps whichever vehicle is converting'}</span>
             ${list.length ? `<ol class="carlist">${list.map((id, i) => `<li><span class="num faint">${i + 1}</span><span>${esc(carName(id))}</span><button class="btn sm icon" type="button" data-car-up="${esc(n.id)}" data-car="${esc(id)}" aria-label="Move ${esc(carName(id))} up"${i ? '' : ' disabled'}>${icon('up')}</button><button class="btn sm icon" type="button" data-car-rm="${esc(n.id)}" data-car="${esc(id)}" aria-label="Remove ${esc(carName(id))}">${icon('x')}</button></li>`).join('')}</ol>` : ''}
             ${left.length ? `<select class="input" data-car-add="${esc(n.id)}" aria-label="Add a vehicle for ${esc(n.name)}"><option value="">Add a vehicle…</option>${left.map((x) => `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join('')}</select>` : ''}</div>
           <label class="check sub-block"><input type="checkbox" data-trust="${esc(n.id)}"${n.trusted ? ' checked' : ''}><span><b>Trusted</b> <span class="faint small">${n.trusted ? 'its encodes replace originals without the picture check (streams, length, frames and telemetry are still verified)' : 'its encodes get the picture check here; trust only a computer of your own'}</span></span></label>
-          ${b ? `<div class="sub-block"><b class="small">Benchmark ${esc(b.codec === 'av1' ? 'AV1' : 'H.265')}</b> <span class="faint small">${b.state === 'running' ? `${esc(b.phase || 'running')}…` : b.state === 'failed' ? `failed: ${esc(b.error || '')}` : esc(b.state)}${b.samples ? ` · ${plural(b.samples, 'sample clip')}` : ''}</span>
+          ${b ? `<div class="sub-block"><b class="small">Benchmark ${esc(b.codec === 'av1' ? 'AV1' : 'H.265')}${n.defaultDeviceName ? ` on ${esc(n.defaultDeviceName)}` : ''}</b> <span class="faint small">${b.state === 'running' ? `${esc(b.phase || 'running')}…` : b.state === 'failed' ? `failed: ${esc(b.error || '')}` : esc(b.state)}${b.samples ? ` · ${plural(b.samples, 'sample clip')}` : ''}</span>
             ${(b.results || []).length ? `<div class="tscroll"><table class="dtable"><tbody>${b.results.map((r) => `<tr class="${r.level === b.suggested ? 'best' : ''}"><td class="num">${r.level} at once</td><td class="num">${r.failed ? `${r.failed} failed` : `${r.clipsPerMinute} clips/min`}</td><td class="faint small num">${r.clips} clips in ${r.seconds}s</td></tr>`).join('')}</tbody></table></div>` : ''}
-            <div class="row-actions">${b.state === 'running' ? `<button class="btn sm" type="button" data-bench-cancel="${esc(n.id)}">Cancel</button>` : `${b.suggested ? `<button class="btn sm cyan" type="button" data-bench-use="${esc(n.id)}" data-level="${b.suggested}">Use ${b.suggested} at once</button>` : ''}<button class="btn sm" type="button" data-bench="${esc(n.id)}" data-codec="${esc(b.codec)}">Run again</button>`}</div></div>` : ''}
+            <div class="row-actions">${b.state === 'running' ? `<button class="btn sm" type="button" data-bench-cancel="${esc(n.id)}">Cancel</button>` : `${b.suggested ? `<button class="btn sm cyan" type="button" data-bench-use="${esc(n.id)}" data-level="${b.suggested}">Use ${b.suggested} at once${n.defaultDeviceName ? ` on ${esc(n.defaultDeviceName)}` : ''}</button>` : ''}<button class="btn sm" type="button" data-bench="${esc(n.id)}" data-codec="${esc(b.codec)}">Run again</button>`}</div></div>` : ''}
           <div class="row-actions">
             ${n.online && !b ? `<button class="btn sm" type="button" data-bench="${esc(n.id)}" data-codec="h265"${benchRunning ? ' disabled' : ''}>${icon('gauge')}Benchmark</button>${n.encoders?.av1 ? `<button class="btn sm" type="button" data-bench="${esc(n.id)}" data-codec="av1"${benchRunning ? ' disabled' : ''}>Benchmark AV1</button>` : ''}` : ''}
             <button class="btn sm" type="button" data-rename="${esc(n.id)}">Rename</button>
@@ -59,7 +63,7 @@ export default {
               <p class="faint small">On the other server: Nodes → Let another server use this one → Show pairing code. Pairing asks for your password.</p>
               <div class="row-actions"><button class="btn primary" type="submit">${icon('plus')}Pair node</button></div>
             </form>
-            ${nodes.length ? '<p class="faint small">Each node is a lane on the Encoder page: set how many clips it converts at once there.</p>' : ''}
+            ${nodes.length ? '<p class="faint small">Each node is a group on the <a href="#/encoder">Encoder</a> page: open it to pick which of its GPUs (and its CPU) convert, and how many clips each takes at once.</p>' : ''}
           </section>
           <section aria-label="Let another server use this one">
             <div class="section-h"><h2>Let another server use this one</h2>${worker.enabled ? chip('node mode on', 'green') : chip('off', '')}</div>
@@ -68,9 +72,8 @@ export default {
               <p class="small muted">A main server paired here sends this one clips to encode and takes the results back. It can do nothing else here.</p>
               <div class="grid2" style="margin-top:12px">
                 <label class="check span2"><input type="checkbox" id="w-on"${worker.enabled ? ' checked' : ''}> Encode for paired main servers</label>
-                <label class="field">Clips at once<select class="input" id="w-slots">${[1, 2, 3, 4, 6, 8].map((x) => `<option${x === worker.slots ? ' selected' : ''}>${x}</option>`).join('')}</select></label>
-                <label class="field">Encode with<select class="input" id="w-use">${[['gpu', 'GPU (CPU without one)'], ['gpu-cpu', 'GPU, then CPU if it fails'], ['cpu', 'CPU only']].map(([x, l]) => `<option value="${x}"${x === worker.use ? ' selected' : ''}>${l}</option>`).join('')}</select></label>
               </div>
+              <p class="small faint">Devices and clips at once are set on the main server: its Encoder picks which of this server's GPUs (and its CPU) encode, and how many each takes at once.</p>
               <p class="small faint">${worker.busy ? `${worker.busy} clip(s) converting for a main server now · ` : ''}name: <span class="mono">${esc(worker.name || '')}</span></p>
               ${pairing ? `<div class="pair"><span class="small muted">Pairing code · one use · ${plural(mins, 'minute')} left</span><b class="mono pair-code">${esc(pairing.code)}</b><span class="small">On the main server: Nodes → Pair a node, address <b class="mono">${esc(location.hostname)}${location.port && location.port !== '9000' ? `:${esc(location.port)}` : ''}</b> and this code.</span><button class="btn sm" type="button" id="pair-cancel">Cancel code</button></div>`
                 : '<div class="row-actions"><button class="btn" type="button" id="pair-start">Show pairing code</button></div>'}
@@ -98,7 +101,7 @@ export default {
         const f = new FormData(e.target);
         busy(e.target.querySelector('[type=submit]'), async () => {
           await api('/api/nodes', { body: { address: f.get('address'), code: f.get('code') } });
-          toast('Node paired. Set its clips at once on the Encoder page.');
+          toast('Node paired. Pick its GPUs and clips at once on the Encoder page.');
           e.target.reset();
           await draw();
         });
@@ -151,20 +154,29 @@ export default {
       });
       el.querySelectorAll('[data-bench-use]').forEach((b) => {
         b.onclick = () => busy(b, async () => {
-          await api(`/api/nodes/${encodeURIComponent(b.dataset.benchUse)}/slots`, { body: { slots: Number(b.dataset.level) } });
-          toast(`The node now converts ${b.dataset.level} at once.`);
+          const level = Number(b.dataset.level);
+          const n = nodes.find((x) => x.id === b.dataset.benchUse);
+          // the benchmarked device (the node's default one), on the node
+          await api(`/api/nodes/${encodeURIComponent(b.dataset.benchUse)}/slots`, { body: { slots: level } });
+          // and its lane on the Encoder page, for the next run
+          // (the Encoder fills in the rest of its form from its defaults)
+          const f = store.get('enc:form', null) || {};
+          const lane = n?.defaultLane || `node:${b.dataset.benchUse}`;
+          const lanes = { ...(f.lanes || {}), [lane]: level };
+          // (the whole-node lane of before stands for the same device)
+          if (lane !== `node:${b.dataset.benchUse}`) delete lanes[`node:${b.dataset.benchUse}`];
+          store.set('enc:form', { ...f, lanes });
+          toast(n?.defaultDeviceName ? `${n.defaultDeviceName} on ${n.name} now converts ${level} at once; its Encoder lane too.` : `The node now converts ${level} at once; its Encoder lane too.`);
           await draw();
         });
       });
       if (!worker.available) return;
       const saveWorker = () => busy(null, async () => {
-        await api('/api/nodes/worker', { body: { enabled: $('#w-on').checked, slots: Number($('#w-slots').value), use: $('#w-use').value } });
+        await api('/api/nodes/worker', { body: { enabled: $('#w-on').checked } });
         toast('Saved.');
         await draw();
       });
       $('#w-on').onchange = saveWorker;
-      $('#w-slots').onchange = saveWorker;
-      $('#w-use').onchange = saveWorker;
       $('#pair-start')?.addEventListener('click', (e) => busy(e.currentTarget, async () => { await api('/api/nodes/worker/pair', { body: {} }); await draw(); }));
       $('#pair-cancel')?.addEventListener('click', (e) => busy(e.currentTarget, async () => { await api('/api/nodes/worker/pair', { method: 'DELETE' }); await draw(); }));
       el.querySelectorAll('[data-revoke]').forEach((b) => {

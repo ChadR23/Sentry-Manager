@@ -5,6 +5,7 @@
 import { api, esc, enc, icon, bytes, plural, pct, duration, meter, chip, emptyState, details, kv, confirmDialog, modal, toast, fail, busy, invoke, store, ago, fin } from '../core.js';
 import { state, vehicle, setVehicle, vehiclePicker, vehicleById } from '../state.js';
 import { go } from '../app.js';
+import { splitDevices, deviceLabel, savedLane, jobLanes, groupMemory, groupBodyId, wireGroups } from '../nodelanes.js';
 import { follow, counts, workingMs, Pace, ACTIVE, PAUSED, STATE_WORDS, CODEC_WORD, PROFILE_WORD, GROUP_WORD, GROUPS, describe, applySnapshot, onBenchmark, streamReady } from '../convert.js';
 
 const footageOf = (v) => v.studioRoot || v.root;
@@ -35,7 +36,8 @@ async function loadInfo() {
   ]);
   info.caps = caps;
   info.context = context;
-  // several GPUs, or a helper server (node): numbers per device
+  // several GPUs, or a helper server (node: each of its graphics cards and
+  // its processor is a device of its own, grouped under the helper)
   const list = Array.isArray(devices?.devices) ? devices.devices : [];
   const gpus = list.filter((d) => d.kind !== 'cpu' && d.id !== 'cpu');
   info.devices = gpus.length >= 2 || gpus.some((d) => d.kind === 'node')
@@ -49,7 +51,8 @@ const defaultConcurrency = () => Math.max(1, Math.min(CONC_MAX, Number(store.get
 function laneCounts() {
   const saved = store.get('lanes', null);
   const out = new Map();
-  for (const d of info.devices?.lanes || []) out.set(d.id, saved && Number.isSafeInteger(saved[d.id]) ? saved[d.id] : 0);
+  // (a helper's number saved before it listed its devices is its main device's now)
+  for (const d of info.devices?.lanes || []) out.set(d.id, savedLane(saved, d) ?? 0);
   if (![...out.values()].some((n) => n > 0) && info.devices) {
     const first = info.devices.defaultDevice || info.devices.lanes.find((d) => d.kind !== 'cpu')?.id || 'cpu';
     out.set(first, defaultConcurrency());
@@ -65,6 +68,10 @@ function parallelConfig() {
   return { concurrency: total, lanes };
 }
 const deviceName = (d) => (d.kind === 'cpu' || d.id === 'cpu' ? 'Processor (CPU)' : d.kind === 'node' ? `Helper server: ${d.name || d.id}` : d.name || d.id);
+// a helper's own device, under its helper's name
+const helperDeviceName = (d) => (d.deviceId === 'cpu' ? 'Processor (CPU)' : deviceLabel(d));
+// which helpers are open under "Clips at once", per browser
+const groupMem = groupMemory(store, 'nodeGroups');
 
 // ---------- the guided flow's choices ----------
 function lastChoices() {
@@ -184,9 +191,9 @@ async function overview(ctx) {
 
   const liveParallel = (s) => {
     if (info.devices) {
-      const running = new Map((Array.isArray(s.config?.lanes) ? s.config.lanes : []).map((l) => [l.device, l.concurrency]));
+      const running = jobLanes(info.devices.lanes, s.config?.lanes);
       return `<div><h3 style="margin-bottom:4px">Clips at once</h3><p class="muted small">Changes apply right away. Clips already converting finish first.</p>
-        ${info.devices.lanes.map((d) => laneRow(d, running.get(d.id) ?? 0, 'live')).join('')}</div>`;
+        ${laneRows((d) => running.get(d.id) ?? 0, 'live')}</div>`;
     }
     const n = Number(s.config?.concurrency) || 1;
     return `<div class="row-between"><div><h3>Clips at once</h3><p class="muted small">More is faster if the server has room. Changes apply right away.</p></div>
@@ -196,8 +203,21 @@ async function overview(ctx) {
     <button type="button" data-step="${id}" data-d="-1" aria-label="Fewer"${n <= 1 ? ' disabled' : ''}>${icon('minus')}</button>
     <output id="${id}" aria-live="polite">${n}</output>
     <button type="button" data-step="${id}" data-d="1" aria-label="More"${n >= CONC_MAX ? ' disabled' : ''}>${icon('plus')}</button></div>`;
-  const laneRow = (d, n, scope) => `<div class="lane"><div class="grow"><b>${esc(deviceName(d))}</b><br><span class="muted small">${d.kind === 'node' && d.online === false ? 'Offline: check it under Helper servers' : d.kind === 'cpu' || d.id === 'cpu' ? 'Slower, but always there' : esc(Object.entries(d.encoders || {}).filter(([, e]) => e).map(([c, e]) => `${CODEC_WORD[c] || c}: ${e}`).join(' · '))}</span></div>
-    <div class="stepper" role="group" aria-label="${esc(deviceName(d))}: clips at once">
+  // this server's devices as rows, then each helper as a group that opens to its graphics cards and processor
+  const laneRows = (countOf, scope) => {
+    const { own, nodes } = splitDevices(info.devices.lanes);
+    return own.map((d) => laneRow(d, countOf(d), scope)).join('') + nodes.map((g) => {
+      const total = g.devices.reduce((n, d) => n + countOf(d), 0);
+      const id = groupBodyId(scope, g.key);
+      return `<div class="lane-group${total ? '' : ' is-off'}${g.online ? '' : ' offline'}" data-group-box>
+        <button type="button" class="lane-group-head" data-node-group="${scope}|${esc(g.key)}" aria-expanded="false" aria-controls="${id}">
+          <span class="grow"><b>Helper server: ${esc(g.name)}</b><br><span class="muted small">${g.online ? `${plural(g.devices.length, 'device')} · tap to choose which ones convert` : 'Offline: check it under Helper servers'}</span></span>
+          <span class="lane-group-total" data-group-total>${total ? `${total} at once` : 'Off'}</span><span class="lane-group-chev" aria-hidden="true">${icon('next')}</span></button>
+        <div class="lane-group-body" id="${id}" role="group" aria-label="${esc(g.name)}: graphics cards and processor" hidden>${g.devices.map((d) => laneRow(d, countOf(d), scope, helperDeviceName(d))).join('')}</div></div>`;
+    }).join('');
+  };
+  const laneRow = (d, n, scope, shown = deviceName(d)) => `<div class="lane"><div class="grow"><b>${esc(shown)}</b><br><span class="muted small">${d.kind === 'node' && d.online === false ? 'Offline: check it under Helper servers' : d.kind === 'cpu' || d.id === 'cpu' ? 'Slower, but always there' : d.deviceId === 'cpu' ? 'Its processor: slower, but always there' : esc(Object.entries(d.encoders || {}).filter(([, e]) => e).map(([c, e]) => `${CODEC_WORD[c] || c}: ${e}`).join(' · '))}</span></div>
+    <div class="stepper" role="group" aria-label="${esc(d.kind === 'node' && d.nodeName ? `${d.nodeName}, ${shown}` : shown)}: clips at once">
       <button type="button" data-lane="${esc(d.id)}" data-scope="${scope}" data-d="-1" aria-label="Fewer"${n <= 0 ? ' disabled' : ''}>${icon('minus')}</button>
       <output>${n === 0 ? 'Off' : n}</output>
       <button type="button" data-lane="${esc(d.id)}" data-scope="${scope}" data-d="1" aria-label="More">${icon('plus')}</button></div></div>`;
@@ -206,7 +226,7 @@ async function overview(ctx) {
     if (info.devices) {
       const counts2 = laneCounts();
       return `<div class="card"><h2>Clips at once</h2><p class="muted" style="margin:6px 0 10px">How many clips each device converts at the same time, for the next conversion. A speed test finds the best number.</p>
-        ${info.devices.lanes.map((d) => laneRow(d, counts2.get(d.id) || 0, 'next')).join('')}
+        ${laneRows((d) => counts2.get(d.id) || 0, 'next')}
         <div class="actions"><a class="btn btn-soft btn-sm" href="#/encoder/speed-test">${icon('speed')} Find the best numbers</a></div></div>`;
     }
     return `<div class="card"><div class="row-between"><div><h2>Clips at once</h2><p class="muted" style="margin-top:6px">For the next conversion. More is faster when the server has room to spare.</p></div>${stepper('next-conc', defaultConcurrency())}</div>
@@ -301,6 +321,7 @@ async function overview(ctx) {
 
   const wireJob = () => {
     view.querySelectorAll('[data-cmd]').forEach((b) => { b.onclick = () => command(b.dataset.cmd, b); });
+    wireGroups(view, groupMem);
     view.querySelectorAll('[data-step="live-conc"]').forEach((b) => {
       b.onclick = () => {
         const n = Math.max(1, Math.min(CONC_MAX, (Number(snap?.config?.concurrency) || 1) + Number(b.dataset.d)));
@@ -310,7 +331,7 @@ async function overview(ctx) {
     });
     view.querySelectorAll('[data-lane][data-scope="live"]').forEach((b) => {
       b.onclick = () => {
-        const cur = new Map((snap?.config?.lanes || []).map((l) => [l.device, l.concurrency]));
+        const cur = jobLanes(info.devices?.lanes, snap?.config?.lanes);
         if (!cur.size && snap?.config?.concurrency) {
           const def = info.devices?.defaults?.[snap.config.codec] || info.devices?.defaultDevice;
           if (def) cur.set(def, Number(snap.config.concurrency));
@@ -423,7 +444,7 @@ async function overview(ctx) {
     if (stateChanged && !(view.contains(document.activeElement) && document.activeElement.matches('select, input:not([type=checkbox])'))) draw();
     else {
       const focused = slot.contains(document.activeElement) ? document.activeElement : null;
-      const key = focused && (focused.dataset.cmd ? `[data-cmd="${focused.dataset.cmd}"]` : focused.dataset.step ? `[data-step="${focused.dataset.step}"][data-d="${focused.dataset.d}"]` : focused.dataset.lane ? `[data-lane="${CSS.escape(focused.dataset.lane)}"][data-d="${focused.dataset.d}"]` : null);
+      const key = focused && (focused.dataset.cmd ? `[data-cmd="${focused.dataset.cmd}"]` : focused.dataset.step ? `[data-step="${focused.dataset.step}"][data-d="${focused.dataset.d}"]` : focused.dataset.lane ? `[data-lane="${CSS.escape(focused.dataset.lane)}"][data-d="${focused.dataset.d}"]` : focused.dataset.nodeGroup ? `[data-node-group="${CSS.escape(focused.dataset.nodeGroup)}"]` : null);
       const openDetails = slot.querySelector('details')?.open;
       slot.innerHTML = jobCard();
       if (openDetails) slot.querySelector('details').open = true;

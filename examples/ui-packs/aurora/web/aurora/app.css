@@ -591,9 +591,29 @@ body[data-route="viewer"] .win-body { display: flex; flex-direction: column; }
 .lane-row .swatch { width: 12px; height: 12px; border-radius: 50%; background: var(--c); box-shadow: 0 0 10px var(--c); }
 .lane-row b { font-weight: 500; }
 .stepper { display: inline-flex; align-items: center; gap: 4px; padding: 3px; border-radius: 999px; background: rgba(4, 8, 22, .5); border: 1px solid var(--line); }
-.stepper .btn { min-height: 40px; width: 44px; min-width: 44px; padding: 0; }
+.stepper .btn { min-height: 44px; width: 44px; min-width: 44px; padding: 0; }
 .touch .stepper .btn { min-height: 44px; }
 .stepper output { min-width: 34px; text-align: center; font-variant-numeric: tabular-nums; font-weight: 600; }
+.lane-group { min-width: 0; border-radius: 18px; background: rgba(255, 255, 255, .035); border: 1px solid var(--line); -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur); transition: border-color .2s ease, box-shadow .2s ease; }
+.lane-group:not(.is-off) { border-color: color-mix(in srgb, var(--c) 45%, transparent); box-shadow: 0 0 22px -12px var(--c); }
+.lane-group-h { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; gap: 12px; align-items: center; width: 100%; min-height: 56px; padding: 8px 14px; border: 0; border-radius: 18px; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.lane-group-h:hover { background: rgba(255, 255, 255, .05); }
+.lane-group-h:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.lane-group-h .swatch { width: 14px; height: 14px; border-radius: 50%; background: var(--c); box-shadow: 0 0 12px var(--c), 0 0 0 3px color-mix(in srgb, var(--c) 25%, transparent); }
+.lane-group.is-off .swatch { opacity: .45; box-shadow: none; }
+.lane-group-n { display: grid; gap: 2px; min-width: 0; }
+.lane-group-n b { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lane-group-n .tiny { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lane-group.offline .lane-group-n .tiny { color: var(--warn); }
+.lane-group-t { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.lane-group.is-off .lane-group-t { opacity: .7; }
+.lane-group-h .chev { display: grid; place-items: center; width: 24px; height: 24px; color: var(--ink-3); transition: transform .2s ease; }
+.lane-group-h .chev .ico { width: 18px; height: 18px; }
+.lane-group-h[aria-expanded="true"] .chev { transform: rotate(90deg); }
+.lane-group-b { padding: 2px 10px 10px; }
+.lane-group-b[hidden] { display: none; }
+.lane-group-b .lane-row { background: rgba(4, 8, 22, .35); }
+@media (prefers-reduced-motion: reduce) { .lane-group-h .chev, .lane-group { transition: none; } }
 .enc-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 18px; }
 .enc-stats .stat-val { font-size: 24px; font-weight: 300; }
 .clip-states { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -618,6 +638,9 @@ body[data-route="viewer"] .win-body { display: flex; flex-direction: column; }
 .node-card { padding: 18px 20px; border-radius: 22px; background: rgba(255, 255, 255, .05); border: 1px solid var(--line); display: grid; gap: 12px; }
 .node-card + .node-card { margin-top: 14px; }
 .node-top { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; justify-content: space-between; }
+.node-devs { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.node-devs li { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; align-items: start; min-width: 0; overflow-wrap: anywhere; }
+.node-devs .swatch { width: 8px; height: 8px; margin-top: 7px; border-radius: 50%; background: var(--au-teal); box-shadow: 0 0 8px var(--au-teal); }
 .node-top h3 { font-size: 20px; font-weight: 400; }
 .pair-code { font-family: var(--mono); font-size: clamp(26px, 5vw, 38px); letter-spacing: .08em; color: #d6fff0; overflow-wrap: anywhere; }
 .cars-first { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
@@ -759,6 +782,10 @@ body[data-route="viewer"] .win-body { display: flex; flex-direction: column; }
   .logline .ls, .logline .lw { grid-column: auto; }
   .lane-row { grid-template-columns: auto minmax(0, 1fr); }
   .lane-row > :last-child { grid-column: 1 / -1; }
+  .lane-group-h { grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; padding: 8px 12px; }
+  .lane-group-t { grid-column: 2; grid-row: 2; justify-self: start; }
+  .lane-group-h .chev { grid-column: 3; grid-row: 1 / span 2; }
+  .lane-group-b { padding: 2px 6px 6px; }
 }
 @media (max-width: 380px) {
   .dock-item { width: 50px; }
