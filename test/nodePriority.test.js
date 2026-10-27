@@ -165,7 +165,8 @@ test('a node\'s clips coming back are encoded here two at a time, however many w
     }
   });
   try {
-    const id = await h.service.start(h.config({ lanes: [{ device: NODE.id, concurrency: 1 }] }));
+    // (this server's CPU on too: with it Off, a node's clips are not encoded here)
+    const id = await h.service.start(h.config({ lanes: [{ device: NODE.id, concurrency: 1 }, { device: CPU.id, concurrency: 1 }] }));
     let done = false;
     const idle = h.service.whenIdle(id).then(() => { done = true; });
     for (let i = 0; i < 500 && !done; i++) {
@@ -174,7 +175,7 @@ test('a node\'s clips coming back are encoded here two at a time, however many w
       if (i % 5 === 4) h.held()[0]?.finish(0);
     }
     await idle;
-    assert.ok(most >= 1 && most <= 2, `at most two encodes here at once (${most})`);
+    assert.ok(most >= 1 && most <= 3, `this server's own one, and at most two of the node's, at once (${most})`);
   } finally {
     await h.close();
   }
@@ -582,7 +583,7 @@ test('a node clip whose picture check is cut short by a shutdown is not called a
   }
 });
 
-test('a node encode that fails verification is encoded here instead, not failed', async () => {
+test('a node encode that fails verification is encoded here instead, not failed (this server is on too)', async () => {
   const { EventEmitter } = require('events');
   const NODE = { id: 'node:abcdefabcdef', kind: 'node', name: 'mini (node)', encoders: { h265: 'hevc_vaapi', av1: null }, online: true, slots: 1 };
   const fromNode = new Set();
@@ -609,7 +610,7 @@ test('a node encode that fails verification is encoded here instead, not failed'
   const warn = console.warn;
   console.warn = () => {};
   try {
-    const id = await h.service.start(h.config({ lanes: [{ device: NODE.id, concurrency: 1 }] }));
+    const id = await h.service.start(h.config({ lanes: [{ device: NODE.id, concurrency: 1 }, { device: CPU.id, concurrency: 1 }] }));
     const job = await h.finishJob(id, 30_000);
     const videos = job.items.filter((item) => item.kind === 'video');
     assert.ok(rejected >= 1, 'the node\'s files were rejected');

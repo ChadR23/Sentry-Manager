@@ -1724,6 +1724,15 @@ function createConverterJobService(deps) {
     };
   }
 
+  // Every one of this server's own GPUs and its CPU set to Off in the job's
+  // rows (only nodes convert): a clip a node gives back is not encoded here.
+  function ownLanesOff(runtime) {
+    const plan = runtime.lanePlan;
+    if (!plan || plan.fallback) return false;
+    for (const [id, n] of plan.limits) if (n > 0 && !String(id).startsWith('node:')) return false;
+    return true;
+  }
+
   async function localEncoder(codec) {
     try {
       const chosen = await planner.select(codec);
@@ -1796,6 +1805,8 @@ function createConverterJobService(deps) {
     // set once a node gave the clip back (or its lane landed here because
     // the node has no encoder for the codec): its encodes here wait their turn
     let fromNode = Boolean(lane && String(lane.id || '').startsWith('node:') && selected.remote !== true);
+    // (that node has no encoder for the codec, and this server is Off)
+    if (fromNode && ownLanesOff(runtime)) throw serviceError('NODE_NO_ENCODER');
     // Hardware rate-control backends commonly overshoot a byte target on
     // variable-frame-rate Tesla clips. Leave a small headroom so the first
     // candidate normally lands inside the profile window; the bounded retry
@@ -1878,6 +1889,7 @@ function createConverterJobService(deps) {
         // A node (another server) that failed: this server's own encoder
         // (its GPU when it has one) takes the clip, then the CPU if that fails.
         if (selected.remote === true) {
+          if (ownLanesOff(runtime)) throw serviceError('NODE_ENCODE_FAILED');
           fromNode = true;
           selected = await localEncoder(codec);
           encodeTiers = encodeDecodeTiers(selected, { zeroCopy: holdFrames === 0 });
@@ -1955,13 +1967,15 @@ function createConverterJobService(deps) {
         // stopped or cancelled while it was decoding: not a mismatch
         if (signal.aborted || runtime.stopRequested || runtime.cancelRequested) throw serviceError('CANCELLED');
         if (!same?.ok) {
-          console.warn(`[CONVERTER] The encode from ${selected.device?.name || 'a node'} does not show the original's pictures; encoding it on this server instead:`,
+          const here = !ownLanesOff(runtime);
+          console.warn(`[CONVERTER] The encode from ${selected.device?.name || 'a node'} does not show the original's pictures; ${here ? 'encoding it on this server instead' : 'not encoded here (this server is set to Off)'}:`,
             item.relativePath, JSON.stringify(same || {}).slice(0, 200));
           const cleanup = await cleanupOwnership(runtime, item.id, adopted);
           if (cleanup.cleaned === false) {
             setOwnership(runtime, item.id, composeOwnership(ownershipFor(runtime, item.id), adopted));
             throw Object.assign(new Error('cleanup pending'), { code: 'OWNED_CLEANUP_FAILED' });
           }
+          if (!here) throw serviceError('NODE_PICTURE_MISMATCH');
           fromNode = true;
           // (encoded here now: the check slot goes to the node's next clip)
           check.release?.();
@@ -2041,7 +2055,7 @@ function createConverterJobService(deps) {
         // A node's encode that does not verify (a damaged or cut-off file,
         // say): encoded here instead, as when its pictures do not match,
         // rather than failing the clip.
-        if (selected.remote === true) {
+        if (selected.remote === true && !ownLanesOff(runtime)) {
           console.warn(`[CONVERTER] The encode from ${selected.device?.name || 'a node'} did not verify (${verification?.reason || 'unknown'}); encoding it on this server instead:`,
             item.relativePath, JSON.stringify(verification?.details || {}).slice(0, 300));
           fromNode = true;

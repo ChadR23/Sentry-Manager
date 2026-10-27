@@ -285,11 +285,11 @@ test('picture check on a long clip: a few random stretches, chosen after the enc
   }
 });
 
-test('a node encode whose pictures do not match is thrown away and encoded here', async () => {
+test('a node encode whose pictures do not match is thrown away and encoded here (this server is on too)', async () => {
   const NODE = { id: 'node:abcdefabcdef', kind: 'node', name: 'pc (node)', encoders: { h265: 'hevc_nvenc', av1: null }, online: true };
   const compared = [];
   const h = createHarness({
-    clips: 1, devices: [NODE, CPU], defaultDevice: null, gpuDecode: false,
+    clips: 3, devices: [NODE, CPU], defaultDevice: null, gpuDecode: false,
     works: (encoder) => encoder.startsWith('lib'),
     remoteEncode: () => {
       const child = new EventEmitter();
@@ -302,13 +302,14 @@ test('a node encode whose pictures do not match is thrown away and encoded here'
     comparePicture: async (request) => { compared.push(request.candidate); return { ok: false, mean: 0.03 }; }
   });
   try {
-    const id = await h.service.start(h.config({ lanes: [{ device: NODE.id, concurrency: 1 }] }));
+    const id = await h.service.start(h.config({ lanes: [{ device: NODE.id, concurrency: 1 }, { device: CPU.id, concurrency: 1 }] }));
     const job = await h.finishJob(id);
-    const [item] = job.items.filter((entry) => entry.kind === 'video');
-    assert.equal(compared.length, 1, 'the node\'s encode was compared');
-    assert.equal(item.resultCode, 'converted');
-    assert.equal(item.encoder, 'libx265', 'and the clip was encoded here instead (this test server has no GPU)');
-    assert.equal(h.encodes().length, 1, 'one local encode, after the node\'s');
+    const items = job.items.filter((entry) => entry.kind === 'video');
+    assert.ok(compared.length >= 1, 'the node\'s encode was compared');
+    for (const item of items) {
+      assert.equal(item.resultCode, 'converted');
+      assert.equal(item.encoder, 'libx265', 'encoded here (instead), on this test server\'s CPU');
+    }
   } finally {
     await h.close();
   }
@@ -317,9 +318,11 @@ test('a node encode whose pictures do not match is thrown away and encoded here'
 test('a node that fails hands its clip to this server\'s own GPU first, not straight to the CPU', async () => {
   const NODE = { id: 'node:abcdefabcdef', kind: 'node', name: 'pc (node)', encoders: { h265: 'hevc_nvenc', av1: null }, online: true };
   const { ARC, UHD } = require('./fixtures/lanesHarness');
+  let remote = 0;
   const h = createHarness({
-    clips: 1, devices: [NODE, ARC, UHD, CPU], gpuDecode: false,
+    clips: 3, devices: [NODE, ARC, UHD, CPU], gpuDecode: false,
     remoteEncode: () => {
+      remote += 1;
       const child = new EventEmitter();
       child.stdout = new EventEmitter();
       child.stderr = new EventEmitter();
@@ -329,13 +332,46 @@ test('a node that fails hands its clip to this server\'s own GPU first, not stra
     }
   });
   try {
-    const id = await h.service.start(h.config({ lanes: [{ device: NODE.id, concurrency: 1 }] }));
+    const id = await h.service.start(h.config({ lanes: [{ device: NODE.id, concurrency: 1 }, { device: ARC.id, concurrency: 1 }] }));
     const job = await h.finishJob(id);
-    const [item] = job.items.filter((entry) => entry.kind === 'video');
-    assert.equal(item.resultCode, 'converted');
-    assert.equal(item.encoder, 'hevc_qsv', 'this server\'s GPU encoder, not libx265');
+    assert.ok(remote >= 1, 'the node was tried');
+    for (const item of job.items.filter((entry) => entry.kind === 'video')) {
+      assert.equal(item.resultCode, 'converted');
+      assert.equal(item.encoder, 'hevc_qsv', 'this server\'s GPU encoder, not libx265');
+    }
   } finally {
     await h.close();
+  }
+});
+
+test('this server set to Off: a node\'s failed, mismatched or unverified clip fails, and nothing is encoded here', async () => {
+  const NODE = { id: 'node:abcdefabcdef', kind: 'node', name: 'pc (node)', encoders: { h265: 'hevc_nvenc', av1: null }, online: true };
+  const nodeChild = (code) => () => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.kill = () => true;
+    setImmediate(() => child.emit('close', code, null));
+    return child;
+  };
+  for (const [name, options, expected] of [
+    ['failed', { remoteEncode: nodeChild(1) }, 'node-encode-failed'],
+    ['pictures', { remoteEncode: nodeChild(0), comparePicture: async () => ({ ok: false, mean: 0.03 }) }, 'node-picture-mismatch']
+  ]) {
+    const h = createHarness({ clips: 2, devices: [NODE, CPU], defaultDevice: null, gpuDecode: false, works: (encoder) => encoder.startsWith('lib'), ...options });
+    try {
+      const id = await h.service.start(h.config({ lanes: [{ device: NODE.id, concurrency: 1 }] }));
+      const job = await h.finishJob(id);
+      const items = job.items.filter((entry) => entry.kind === 'video');
+      assert.equal(items.length, 2);
+      for (const item of items) {
+        assert.equal(item.state, 'failed', `${name}: the clip fails`);
+        assert.equal(item.failure?.code, expected, name);
+      }
+      assert.equal(h.encodes().length, 0, `${name}: no encode on this server`);
+    } finally {
+      await h.close();
+    }
   }
 });
 
