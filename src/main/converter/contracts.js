@@ -8,10 +8,11 @@ const deepFreeze = (value) => {
   return value;
 };
 
+// Encoding targets, not acceptance limits: any verified reduction is useful.
 const PROFILES = deepFreeze({
-  conservative: { savings: 0.05, tolerance: 0.02 },
-  balanced: { savings: 0.20, tolerance: 0.02 },
-  aggressive: { savings: 0.50, tolerance: 0.02 }
+  conservative: { savings: 0.05 },
+  balanced: { savings: 0.20 },
+  aggressive: { savings: 0.50 }
 });
 
 const CODECS = deepFreeze({ H264: 'h264', H265: 'h265' });
@@ -63,8 +64,7 @@ function isValidQualityLevel(value) {
 //   full  - quick checks plus a complete decode of every output frame;
 //   quick - stream/duration/frame/dimension checks against the source, the
 //           per-frame telemetry comparison and size rules (no full decode);
-//   off   - only the integrity hash, "smaller than the original" and the size
-//           profile's upper limit (so a profile still compresses as promised).
+//   off   - only the integrity hash and "smaller than the original".
 // Replacing originals always uses at least quick. Jobs saved before this
 // setting existed keep running full.
 const VERIFY_MODES = deepFreeze(['off', 'quick', 'full']);
@@ -79,7 +79,7 @@ function effectiveVerifyMode(config = {}) {
   return config.outputMode === 'replace' && mode === 'off' ? 'quick' : mode;
 }
 
-// Profiles without a byte target (the verifier only requires real savings).
+// Profiles without an encoding byte target.
 function hasSizeTarget(profileId) {
   return profileId !== CUSTOM_PROFILE_ID && profileId !== QUALITY_PROFILE_ID;
 }
@@ -152,14 +152,6 @@ function targetOutputBytes(sourceBytes, profileName) {
   return Math.round(sourceBytes * (1 - profile(profileName).savings));
 }
 
-function isWithinProfile(sourceBytes, outputBytes, profileName) {
-  const selected = profile(profileName);
-  const target = targetOutputBytes(sourceBytes, profileName);
-  const tolerance = sourceBytes * selected.tolerance;
-  // Extra savings are welcome; the verifier still checks integrity and media.
-  return outputBytes <= target + tolerance;
-}
-
 function emptyGroup() {
   return { files: 0, sourceBytes: 0, outputBytes: 0, savedBytes: 0 };
 }
@@ -230,4 +222,4 @@ function serializeSummary(counters) {
   };
 }
 
-module.exports = { PROFILES, CODECS, NETWORK_MODES, OUTPUT_MODES, ITEM_STATES, CONCURRENCY, TIMING_PHASES, addItemTimings, isValidConcurrency, DEVICE_ID, LOCAL_DEVICE_ID, nodeKeyOf, nodeDeviceOf, LANES, normalizeLanes, lanesTotal, CUSTOM_PROFILE_ID, CUSTOM_BITRATE_KBPS, isValidCustomBitrate, QUALITY_PROFILE_ID, QUALITY_LEVELS, isValidQualityLevel, hasSizeTarget, VERIFY_MODES, DEFAULT_VERIFY_MODE, isValidVerifyMode, effectiveVerifyMode, createEmptyCounters, targetOutputBytes, isWithinProfile, addCompletedFile, formatBytes, isTerminalState, serializeSummary };
+module.exports = { PROFILES, CODECS, NETWORK_MODES, OUTPUT_MODES, ITEM_STATES, CONCURRENCY, TIMING_PHASES, addItemTimings, isValidConcurrency, DEVICE_ID, LOCAL_DEVICE_ID, nodeKeyOf, nodeDeviceOf, LANES, normalizeLanes, lanesTotal, CUSTOM_PROFILE_ID, CUSTOM_BITRATE_KBPS, isValidCustomBitrate, QUALITY_PROFILE_ID, QUALITY_LEVELS, isValidQualityLevel, hasSizeTarget, VERIFY_MODES, DEFAULT_VERIFY_MODE, isValidVerifyMode, effectiveVerifyMode, createEmptyCounters, targetOutputBytes, addCompletedFile, formatBytes, isTerminalState, serializeSummary };

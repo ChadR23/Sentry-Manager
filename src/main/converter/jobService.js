@@ -1808,9 +1808,8 @@ function createConverterJobService(deps) {
     // (that node has no encoder for the codec, and this server is Off)
     if (fromNode && ownLanesOff(runtime)) throw serviceError('NODE_NO_ENCODER');
     // Hardware rate-control backends commonly overshoot a byte target on
-    // variable-frame-rate Tesla clips. Leave a small headroom so the first
-    // candidate normally stays within the profile's upper limit; the bounded retry
-    // remains available for encoders that still miss.
+    // variable-frame-rate Tesla clips. Leave a small headroom to help reach
+    // the requested savings; any verified reduction is accepted.
     if (selected.hardware === true && !noTarget) bitrate = Math.max(SAFE_VIDEO_BITRATE_FLOORS[codec], Math.floor(bitrate * 0.93));
     let sizeRetryCount = 0;
     let underSourceCount = 0;

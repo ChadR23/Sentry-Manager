@@ -3,13 +3,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { PROFILES, CUSTOM_PROFILE_ID, QUALITY_PROFILE_ID, hasSizeTarget, targetOutputBytes, isWithinProfile } = require('./contracts');
-
-// A Tesla camera file can be a very short terminal fragment (for example a
-// 1–2 second clip when the vehicle changes state). MP4/SEI/container overhead
-// then dominates the byte target, so enforcing the normal percentage limit
-// would reject a valid, smaller, telemetry-complete conversion.
-const SHORT_CLIP_PROFILE_MAX_US = 2_000_000;
+const { PROFILES, CUSTOM_PROFILE_ID, QUALITY_PROFILE_ID, hasSizeTarget, targetOutputBytes } = require('./contracts');
 const { RETRY_REASONS } = require('./encoderPlanner');
 const { parseMp4, findBoxes, selectVideoTrack, buildSampleIndex } = require('./mp4');
 const { extractH264TelemetryTimeline, mapTimelineToOutput } = require('./telemetryTimeline');
@@ -807,9 +801,7 @@ function frameTimingMismatch(sourceSamples, outputSamples) {
 }
 
 // Verification off: the saved file must still be exactly the encoded file and
-// smaller than its original, and a size profile's upper limit still applies (its
-// retry keeps the promised compression); nothing about the video itself is
-// inspected.
+// smaller than its original; nothing about the video itself is inspected.
 async function verifyIntegrityOnly({ options, profileId, sourceBytes, outputBytes, outputSha256, snapshot }) {
   try {
     await readExactSnapshot(snapshot, outputBytes, outputSha256, options.trustedSnapshot === true);
@@ -818,19 +810,6 @@ async function verifyIntegrityOnly({ options, profileId, sourceBytes, outputByte
   }
   if (outputBytes >= sourceBytes) {
     return failure(VERIFICATION_REASONS.NOT_SMALLER, sourceBytes, outputBytes, { savedBytes: sourceBytes - outputBytes });
-  }
-  if (hasSizeTarget(profileId)) {
-    // Same short-clip allowance as the full checks, from the duration the
-    // converter already measured (no extra read of the original).
-    const durationUs = Number.isFinite(options.sourceDurationUs) ? options.sourceDurationUs : null;
-    const shortClipWithSavings = sourceBytes >= 500_000 && durationUs !== null && durationUs <= SHORT_CLIP_PROFILE_MAX_US;
-    if (!shortClipWithSavings && !isWithinProfile(sourceBytes, outputBytes, profileId)) {
-      return failure(VERIFICATION_REASONS.PROFILE_SIZE, sourceBytes, outputBytes, {
-        profileId,
-        targetBytes: targetOutputBytes(sourceBytes, profileId),
-        toleranceBytes: sourceBytes * PROFILES[profileId].tolerance
-      });
-    }
   }
   return {
     ok: true, reason: null, retryable: false, sourceBytes, outputBytes,
@@ -999,20 +978,9 @@ async function verifyOwnedSnapshot({ options, profileId, sourceBytes, outputByte
   if (outputBytes >= sourceBytes) {
     return failure(VERIFICATION_REASONS.NOT_SMALLER, sourceBytes, outputBytes, { savedBytes: sourceBytes - outputBytes });
   }
-  // Custom bitrate and constant quality have no size target: smaller than the
-  // source is enough.
-  const customBitrate = !hasSizeTarget(profileId);
-  const targetBytes = customBitrate ? null : targetOutputBytes(sourceBytes, profileId);
-  const shortClipWithSavings = sourceBytes >= 500_000
-    && source.sourceTiming.durationUs <= SHORT_CLIP_PROFILE_MAX_US
-    && outputBytes < sourceBytes;
-  if (!customBitrate && !shortClipWithSavings && !isWithinProfile(sourceBytes, outputBytes, profileId)) {
-    return failure(VERIFICATION_REASONS.PROFILE_SIZE, sourceBytes, outputBytes, {
-      profileId,
-      targetBytes,
-      toleranceBytes: sourceBytes * PROFILES[profileId].tolerance
-    });
-  }
+  // Keep the encoding target in the result for reporting. It is guidance:
+  // after verification, any output smaller than the source is accepted.
+  const targetBytes = hasSizeTarget(profileId) ? targetOutputBytes(sourceBytes, profileId) : null;
 
   const actualGaps = gapRanges(inspected.samples, (sample) => sample.telemetryFingerprints);
   const actualTransitions = transitionIndexes(inspected.samples, (sample) => sample.telemetryFingerprints);

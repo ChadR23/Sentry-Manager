@@ -6,7 +6,6 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const { isWithinProfile } = require('../src/main/converter/contracts');
 const { verifyCandidate } = require('../src/main/converter/verifier');
 const { createVerificationSnapshot } = require('../src/main/converter/verificationSnapshot');
 const { buildEncodeArgs } = require('../src/main/converter/encoderPlanner');
@@ -17,7 +16,7 @@ const { injectAv1Telemetry } = require('../src/main/converter/av1Telemetry');
 const { box } = require('./fixtures/fixtureBuilders');
 const { createTeslaH264Fixture, runProcess } = require('./fixtures/ffmpegFixtures');
 
-// Literal byte limits for a 1 MB source; keep the existing upper tolerance.
+// Former profile boundaries for a 1 MB source are now guidance, not limits.
 const profiles = [
   { id: 'conservative', oldLower: 930_000, target: 950_000, upper: 970_000 },
   { id: 'balanced', oldLower: 780_000, target: 800_000, upper: 820_000 },
@@ -25,25 +24,54 @@ const profiles = [
 ];
 const modes = ['off', 'quick', 'full'];
 
+// Off verifies byte integrity without inspecting video. Use real files and
+// snapshots to exercise its size rules even where FFmpeg is unavailable.
+function sizeVerifier(t) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sm-profile-size-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const source = path.join(dir, 'source.mp4');
+  const candidate = path.join(dir, 'candidate.mp4');
+  fs.writeFileSync(source, Buffer.alloc(1));
+  return async (sourceBytes, outputBytes, profileId) => {
+    fs.truncateSync(source, sourceBytes);
+    fs.writeFileSync(candidate, Buffer.alloc(outputBytes));
+    return verifyCandidate({
+      source, candidate, codec: 'h265', profileId, verifyMode: 'off',
+      runFfprobe: runProcess, runFullDecode: runProcess,
+      createSnapshot: (options) => createVerificationSnapshot({ ...options, tempRoot: dir })
+    });
+  };
+}
+
 for (const profile of profiles) {
-  test(`${profile.id} accepts extra savings and still enforces its upper size limit`, () => {
-    for (const output of [1, 100_000, profile.oldLower - 1, profile.oldLower, profile.target, profile.upper]) {
-      assert.equal(isWithinProfile(1_000_000, output, profile.id), true, `${output} bytes`);
+  test(`${profile.id} accepts any savings, from one byte to much more than the target`, async (t) => {
+    const verify = sizeVerifier(t);
+    for (const output of [1, 100_000, profile.oldLower - 1, profile.oldLower, profile.target, profile.upper, profile.upper + 1, 950_000, 999_999]) {
+      const result = await verify(1_000_000, output, profile.id);
+      assert.equal(result.ok, true, JSON.stringify(result));
+      assert.equal(result.retryable, false);
     }
-    assert.equal(isWithinProfile(1_000_000, profile.upper + 1, profile.id), false);
-    assert.equal(isWithinProfile(1_000_000, 1_000_000, profile.id), false);
+    for (const [output, reason] of [[0, 'empty-output'], [1_000_000, 'not-smaller'], [1_000_001, 'not-smaller']]) {
+      const result = await verify(1_000_000, output, profile.id);
+      assert.equal(result.ok, false);
+      assert.equal(result.reason, reason);
+      assert.equal(result.publicationArtifact, undefined);
+    }
   });
 }
 
-test('Balanced accepts recorded below-target sizes but still rejects the two over-limit outputs', () => {
-  for (const [source, output, accepted] of [
-    [25_909_775, 20_204_641, true], // right repeater: just 4,984 bytes below the old lower bound
-    [9_763_242, 7_499_006, true], // front
-    [29_734_968, 4_914_281, true], // right pillar's first attempt, before the old upward correction
-    [29_734_968, 25_613_967, false], // right pillar's historical final retry
-    [25_073_277, 20_983_151, false] // left repeater's final retry
+test('Balanced accepts the recorded savings, including the last failed left-repeater clip', async (t) => {
+  const verify = sizeVerifier(t);
+  for (const [source, output] of [
+    [25_909_775, 20_204_641], // right repeater: just 4,984 bytes below the old lower bound
+    [9_763_242, 7_499_006], // front
+    [29_734_968, 4_914_281], // right pillar's first attempt, before the old upward correction
+    [29_734_968, 25_613_967], // right pillar's historical final retry
+    [25_073_277, 20_983_151] // left repeater's final retry: 16.3% savings
   ]) {
-    assert.equal(isWithinProfile(source, output, 'balanced'), accepted, `${output}/${source}`);
+    const result = await verify(source, output, 'balanced');
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.equal(result.retryable, false);
   }
 });
 
@@ -112,23 +140,19 @@ for (const [codec, encoder, inject] of [
 
     for (const verifyMode of modes) {
       for (const profile of profiles) {
-        await t.test(`${verifyMode}/${profile.id}: extra savings, upper boundary and one byte over`, async () => {
-          for (const [output, accepted] of [[converted, true], [padTo(converted, profile.upper), true], [padTo(converted, profile.upper + 1), false]]) {
+        await t.test(`${verifyMode}/${profile.id}: accepts any savings after verification`, async () => {
+          for (const output of [converted, padTo(converted, profile.upper), padTo(converted, profile.upper + 1), padTo(converted, 950_000), padTo(converted, 999_999)]) {
             fs.writeFileSync(candidate, output);
             const before = decodeCalls;
             const result = await verify(profile.id, verifyMode);
-            assert.equal(result.ok, accepted, JSON.stringify(result));
+            assert.equal(result.ok, true, JSON.stringify(result));
             assert.equal(decodeCalls - before, verifyMode === 'full' ? 1 : 0, 'the requested verification depth must be preserved');
-            if (accepted) {
-              assert.equal(result.details.verifyMode, verifyMode);
-              assert.equal(result.publicationArtifact.size, output.length);
-              assert.deepEqual(fs.readFileSync(result.publicationArtifact.path), output);
-              fs.rmSync(path.dirname(result.publicationArtifact.path), { recursive: true, force: true });
-            } else {
-              assert.equal(result.reason, 'profile-size');
-              assert.equal(result.retryable, true);
-              assert.equal(result.publicationArtifact, undefined);
-            }
+            assert.equal(result.retryable, false, 'a verified smaller output needs no size-correction retry');
+            assert.equal(result.details.verifyMode, verifyMode);
+            if (verifyMode !== 'off') assert.equal(result.details.targetBytes, profile.target, 'the encoding target is still reported');
+            assert.equal(result.publicationArtifact.size, output.length);
+            assert.deepEqual(fs.readFileSync(result.publicationArtifact.path), output);
+            fs.rmSync(path.dirname(result.publicationArtifact.path), { recursive: true, force: true });
           }
         });
       }
