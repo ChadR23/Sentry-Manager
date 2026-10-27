@@ -2464,6 +2464,7 @@
         <label class="field">SMB version<select class="input" name="version">${Object.entries(versions).map(([x, label]) => `<option value="${esc(x)}"${String(s.version || '3.1.1') === x ? ' selected' : ''}>${esc(label)}</option>`).join('')}</select></label>
         <label class="field">Port (optional)<input class="input" name="port" inputmode="numeric" value="${esc(s.port || '')}" placeholder="445"></label>
         <label class="check full"><input type="checkbox" name="encrypt"${s.encrypt === false ? '' : ' checked'}> Encrypt the connection (recommended). Without it the connection is still signed, so nobody can change the footage, but others on the network could watch it.</label>
+        <div class="full smb-test"><button class="btn" type="button" id="smb-test">Test connection</button><p class="small" id="smb-test-result" role="status" aria-live="polite"></p></div>
         <p class="muted small full">Only SMB 3 is allowed and every connection is signed, so a man in the middle cannot read or change footage, or pose as your NAS. Files on the share can never run as programs inside the container. Use a dedicated NAS account with access to this share only.</p>
       </div>
       <div class="full" data-src="path"${s.type === 'path' ? '' : ' hidden'}>
@@ -2485,6 +2486,38 @@
           veh.querySelectorAll('[data-src]').forEach((x) => { x.hidden = x.dataset.src !== type; });
         };
       });
+      // Test connection: the details as typed, nothing saved
+      const testBtn = $('smb-test');
+      if (testBtn) {
+        testBtn.onclick = async () => {
+          const fd = new FormData(veh);
+          const out = $('smb-test-result');
+          testBtn.disabled = true;
+          out.className = 'small muted';
+          out.textContent = 'Connecting to the NAS…';
+          try {
+            const r = await api('/api/vehicles/test-smb', { body: {
+              vehicleId: editing !== 'new' ? editing : null,
+              source: { type: 'smb', share: fd.get('share'), username: fd.get('username'), password: fd.get('password') || undefined, domain: fd.get('domain'), version: fd.get('version'), encrypt: fd.get('encrypt') === 'on', port: fd.get('port') || null }
+            } });
+            if (!out.isConnected) return;
+            if (r.ok) {
+              out.className = 'small smb-ok';
+              out.textContent = `Connected: the user name and password work. ${r.footage ? `Tesla footage found${r.footage === '.' ? '' : ` in ${r.footage}`}.` : 'No TeslaCam folder found yet (empty share, or the footage is deeper than 3 folders).'} ${r.writable ? '' : 'Read-only for this user: the Recycle Bin, Protect and replacing originals need write access.'}`.trim();
+            } else {
+              out.className = 'small smb-bad';
+              out.textContent = `${r.stage === 'details' ? '' : 'Could not connect: '}${r.error}${r.hint ? ` ${r.hint}` : ''}`;
+            }
+          } catch (err) {
+            if (out.isConnected) {
+              out.className = 'small smb-bad';
+              out.textContent = err.message;
+            }
+          } finally {
+            testBtn.disabled = false;
+          }
+        };
+      }
       veh.onsubmit = async (e) => {
         e.preventDefault();
         const fd = new FormData(veh);

@@ -76,6 +76,7 @@ function smbFields(s, versions) {
   return `<label class="field full"><span>Share address</span><input class="input mono" name="share" value="${esc(s.share || '')}" placeholder="//192.168.1.50/TeslaCam" autocomplete="off" autocapitalize="none" spellcheck="false"><span class="hint">Like //nas.local/TeslaCam or //192.168.1.50/TeslaCam</span></label>
     <label class="field"><span>User name</span><input class="input" name="username" value="${esc(s.username || '')}" autocomplete="off" autocapitalize="none" spellcheck="false"></label>
     <label class="field"><span>Password</span><input class="input" name="password" type="password" placeholder="${s.passwordSet ? 'Saved. Leave empty to keep it' : ''}" autocomplete="new-password"></label>
+    <div class="full smb-test"><button class="btn" type="button" data-smb-test>Check the password</button><p class="small" data-smb-test-out role="status" aria-live="polite"></p></div>
     <div class="full">${details('More details', `<div class="form-grid">
       <label class="field"><span>Domain (optional)</span><input class="input" name="domain" value="${esc(s.domain || '')}" autocomplete="off"></label>
       <label class="field"><span>SMB version</span><select class="input" name="version">${Object.entries(versions).map(([k, t]) => `<option value="${esc(k)}"${String(s.version || '3.1.1') === k ? ' selected' : ''}>${esc(t)}</option>`).join('')}</select></label>
@@ -125,6 +126,7 @@ async function addVehicle({ el, ctx }) {
       <div class="card">${body}<div class="wiz-foot"><button class="btn" type="button" id="back">${draft.step === 1 ? 'Cancel' : 'Back'}</button>
         <button class="btn btn-primary" type="button" id="next">${draft.step === 3 ? `${icon('plus')} Add vehicle` : `Next ${icon('next')}`}</button></div></div></div>`;
     el.querySelectorAll('[data-type]').forEach((b) => { b.onclick = () => { draft.type = b.dataset.type; draft.step = 2; draw(); el.querySelector('input')?.focus(); }; });
+    wireSmbTest(el, null);
     el.querySelector('#back').onclick = () => { if (draft.step === 1) go('#/settings/vehicles'); else { keep(); draft.step -= 1; draw(); } };
     el.querySelector('#next').onclick = (e) => next(e.currentTarget);
     el.querySelector('#veh-form')?.addEventListener('submit', (e) => { e.preventDefault(); next(el.querySelector('#next')); });
@@ -177,6 +179,7 @@ async function editVehicle({ el }, id) {
         <div class="row"><button class="btn btn-primary" type="submit">Save</button><a class="btn" href="#/settings/vehicles">Cancel</a><span class="spacer"></span><button class="btn btn-ghost" type="button" id="remove" style="color:var(--bad)">${icon('trash')} Remove vehicle</button></div>
       </form>`;
     el.querySelectorAll('[data-type]').forEach((b) => { b.onclick = () => { type = b.dataset.type; draw(); }; });
+    wireSmbTest(el, v.id);
     el.querySelector('#veh-form').onsubmit = (e) => {
       e.preventDefault();
       const form = e.target;
@@ -464,5 +467,36 @@ async function system({ el }) {
         toast('Price saved.', { kind: 'good' });
       } catch (err) { fail(err); }
     });
+  };
+}
+
+// Test connection: the SMB details as typed, checked by the server with a
+// one-off mount; nothing is saved
+function wireSmbTest(root, vehicleId) {
+  const btn = root.querySelector('[data-smb-test]');
+  if (!btn) return;
+  const out = root.querySelector('[data-smb-test-out]');
+  btn.onclick = async () => {
+    const f = new FormData(btn.closest('form'));
+    btn.disabled = true;
+    out.textContent = 'Connecting to the NAS…';
+    try {
+      const r = await api('/api/vehicles/test-smb', { body: {
+        vehicleId: vehicleId || null,
+        source: { type: 'smb', share: String(f.get('share') || '').trim(), username: String(f.get('username') || ''), password: f.get('password') || undefined, domain: String(f.get('domain') || ''), version: f.get('version') || '3.1.1', encrypt: f.get('encrypt') === 'on', port: String(f.get('port') || '').trim() || null }
+      } });
+      if (!out.isConnected) return;
+      out.dataset.result = r.ok ? 'ok' : 'bad';
+      out.textContent = r.ok
+        ? `Connected: the user name and password work. ${r.footage ? `Tesla footage found${r.footage === '.' ? '' : ` in ${r.footage}`}.` : 'No TeslaCam folder found yet (an empty share, or the footage is deeper than 3 folders).'}${r.writable ? '' : ' Read-only for this user: the Recycle Bin, Protect and replacing originals need write access.'}`
+        : `${r.stage === 'details' ? '' : 'Could not connect: '}${r.error}${r.hint ? ` ${r.hint}` : ''}`;
+    } catch (err) {
+      if (out.isConnected) {
+        out.dataset.result = 'bad';
+        out.textContent = err.message;
+      }
+    } finally {
+      btn.disabled = false;
+    }
   };
 }

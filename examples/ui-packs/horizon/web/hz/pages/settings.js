@@ -47,6 +47,7 @@ async function vehicles(box, { params, go }) {
   form.scrollIntoView({ block: 'start' });
   let type = v?.source?.type === 'path' ? 'path' : 'smb';
   onSegs(form, 'src', (t) => { type = t; form.querySelectorAll('[data-src]').forEach((n) => { n.hidden = n.dataset.src !== t; }); });
+  wireSmbTest(form, v?.id);
   form.onsubmit = (e) => {
     e.preventDefault();
     const fd = new FormData(form);
@@ -101,6 +102,7 @@ function carForm(v) {
         <label class="fld">SMB version<select class="in" name="version">${Object.entries(versions).map(([x, l]) => `<option value="${h(x)}"${String(s.version || '3.1.1') === x ? ' selected' : ''}>${h(l)}</option>`).join('')}</select></label>
         <label class="fld">Port (optional)<input class="in num" name="port" inputmode="numeric" value="${h(s.port || '')}" placeholder="445"></label>
         <label class="chk span-all"><input type="checkbox" name="encrypt"${s.encrypt === false ? '' : ' checked'}> Encrypt the connection (recommended). Without it the connection is still signed.</label>
+        <div class="span-all smb-test"><button class="btn" type="button" data-smb-test>Test connection</button><p class="small" data-smb-test-out role="status" aria-live="polite"></p></div>
       </div>
       <p class="small faint">SMB 3 only, every connection signed. Use a NAS account that can reach this share only.</p>
     </div>
@@ -369,5 +371,36 @@ async function power(box) {
       app.power = await api('/api/settings/power', { method: 'PUT', body });
       toast('Saved. Costs follow this price from now on.');
     });
+  };
+}
+
+// Test connection: the SMB details as typed, checked by the server with a
+// one-off mount; nothing is saved
+function wireSmbTest(root, vehicleId) {
+  const btn = root.querySelector('[data-smb-test]');
+  if (!btn) return;
+  const out = root.querySelector('[data-smb-test-out]');
+  btn.onclick = async () => {
+    const f = new FormData(btn.closest('form'));
+    btn.disabled = true;
+    out.textContent = 'Connecting to the NAS…';
+    try {
+      const r = await api('/api/vehicles/test-smb', { body: {
+        vehicleId: vehicleId || null,
+        source: { type: 'smb', share: String(f.get('share') || '').trim(), username: String(f.get('username') || ''), password: f.get('password') || undefined, domain: String(f.get('domain') || ''), version: f.get('version') || '3.1.1', encrypt: f.get('encrypt') === 'on', port: String(f.get('port') || '').trim() || null }
+      } });
+      if (!out.isConnected) return;
+      out.dataset.result = r.ok ? 'ok' : 'bad';
+      out.textContent = r.ok
+        ? `Connected: the user name and password work. ${r.footage ? `Tesla footage found${r.footage === '.' ? '' : ` in ${r.footage}`}.` : 'No TeslaCam folder found yet (an empty share, or the footage is deeper than 3 folders).'}${r.writable ? '' : ' Read-only for this user: the Recycle Bin, Protect and replacing originals need write access.'}`
+        : `${r.stage === 'details' ? '' : 'Could not connect: '}${r.error}${r.hint ? ` ${r.hint}` : ''}`;
+    } catch (err) {
+      if (out.isConnected) {
+        out.dataset.result = 'bad';
+        out.textContent = err.message;
+      }
+    } finally {
+      btn.disabled = false;
+    }
   };
 }

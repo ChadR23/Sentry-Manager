@@ -168,7 +168,8 @@ class VehicleManager extends EventEmitter {
   add(input) {
     const vehicle = normalizeVehicle(input);
     if (vehicle.source.type === 'path') this.checkFolder(vehicle.source.path);
-    const taken = new Set(this.list().map((v) => v.id));
+    // (x-smb-test is the mount point of Settings > Test connection)
+    const taken = new Set([...this.list().map((v) => v.id), 'x-smb-test']);
     const free = (id) => {
       if (taken.has(id)) return false;
       if (vehicle.source.type !== 'smb') return true;

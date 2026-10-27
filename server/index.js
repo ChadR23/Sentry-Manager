@@ -52,6 +52,8 @@ const { VERSIONS, DEFAULT_VERSION, securitySummary } = require('./mountSpec');
 const { TlsManager, localTlsSource, supervisorTlsSource, parseHostnames } = require('./tls');
 const { Router, HttpError, sendJson, readJson, readRaw, serveFile } = require('./http');
 const { createUiPacks, originalPack, MAX_ZIP_BYTES: MAX_UI_PACK_BYTES } = require('./uiPacks');
+const { createSmbTester } = require('./smbTest');
+const { diskSpace } = require('../src/main/converter/fsSpace');
 const { createNodes } = require('./nodes');
 const { createNodeWorker } = require('./nodeWorker');
 const { createNodeBenchmark } = require('./nodeBenchmark');
@@ -193,6 +195,7 @@ async function main() {
   if (process.env.FOOTAGE_PATH) folderRoots.push(process.env.FOOTAGE_PATH);
   const protectedDirs = [DATA, APP_ROOT, RUN_DIR];
   const vehicles = new VehicleManager({ db, footageRoot: FOOTAGE_ROOT, folderRoots, protectedDirs, logger, mounter });
+  const smbTester = createSmbTester({ mounter, vehicles, log: logger.scope('vehicles') });
   vehicles.bootstrapFromEnv();
   const inventory = new Inventory({ vehicles, db, log: logger.scope('inventory'), onChange: () => announce('inventory') });
   const thumbs = new Thumbnails({ dir: path.join(DATA, 'thumbnails'), ffmpegPath: FFMPEG });
@@ -530,7 +533,7 @@ async function main() {
     converter: host.runtime ? { ready: true, capabilities: host.runtime.capabilities } : { ready: false, error: host.lastError?.code || null },
     nativeHelper: host.helperAvailable,
     gpu: await detectGpus(),
-    dataFree: await fs.promises.statfs(DATA).then((s) => Number(s.bavail) * Number(s.bsize)).catch(() => null),
+    dataFree: await diskSpace(fs.promises, DATA).then((s) => s.free).catch(() => null),
     timezone: process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone,
     security: {
       https: isSecure(req), tlsMode: TLS_MODE, supervised: SUPERVISED,
@@ -739,6 +742,14 @@ async function main() {
     return nodeWorker.status();
   });
 
+  // Settings > a vehicle > Test connection: the typed SMB details, nothing saved
+  r.add('POST', '/api/vehicles/test-smb', async (req, res, { body, user }) => {
+    const vehicleId = typeof body?.vehicleId === 'string' && body.vehicleId ? body.vehicleId : null;
+    if (vehicleId) vehicleOr404(vehicleId);
+    const result = await smbTester.test(body?.source, vehicleId);
+    audit.info(`SMB connection test of ${String(body?.source?.share || '').replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').slice(0, 200)}: ${result.ok ? 'connected' : `failed (${result.stage})`}: ${by(req, user)}`);
+    return result;
+  });
   r.add('POST', '/api/vehicles', (req, res, { body, user }) => {
     requireConfirmed(req);
     const v = vehicles.add(body || {});

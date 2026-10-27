@@ -529,3 +529,9 @@ html.reduce-effects *, html.reduce-effects *::before { transition: none !importa
 .ui-original-note p { margin: 0; }
 #ui-pick { max-width: 420px; }
 .ui-packs td.actions { text-align: right; }
+
+/* Settings > vehicle > Test connection */
+.smb-test { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.smb-test p { margin: 0; flex: 1 1 260px; }
+.smb-ok { color: var(--accent); }
+.smb-bad { color: var(--danger); }

@@ -802,3 +802,9 @@ body[data-route="viewer"] .win-body { display: flex; flex-direction: column; }
   .lane { animation: none; }
   .dock-item:hover .dock-ico { transform: none; }
 }
+
+/* Settings > vehicle > Test connection */
+.smb-test { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.smb-test p { margin: 0; flex: 1 1 240px; }
+.smb-test [data-result="ok"] { color: var(--ok); }
+.smb-test [data-result="bad"] { color: var(--bad); }

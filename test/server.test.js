@@ -843,3 +843,32 @@ test('Interface: a pack uploaded in Settings serves its files for everyone, swit
     await fsp.rm(dir, { recursive: true, force: true });
   }
 });
+
+test('Vehicles: Test connection checks the typed SMB details without saving anything', { timeout: 120000 }, async () => {
+  const dir = await tmp();
+  await makeFootage(path.join(dir, 'footage'));
+  const s = await startServer(dir);
+  const body = (source, extra = {}) => ({ source: { type: 'smb', share: '//127.0.0.1/none', username: 'tesla', password: 'pw', version: '3.1.1', encrypt: true, port: 1, ...source }, ...extra });
+  try {
+    assert.equal((await s.call('POST', '/api/vehicles/test-smb', body({}))).status, 401, 'sign in first');
+    await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
+    const before = (await s.call('GET', '/api/vehicles')).data;
+    const bad = await s.call('POST', '/api/vehicles/test-smb', body({ share: 'not a share' }));
+    assert.equal(bad.status, 200);
+    assert.deepEqual([bad.data.ok, bad.data.stage], [false, 'details']);
+    assert.equal((await s.call('POST', '/api/vehicles/test-smb', body({}, { vehicleId: 'no-such-car' }))).status, 404);
+    // a share nobody answers for: a plain "could not connect", never a server error
+    const down = await s.call('POST', '/api/vehicles/test-smb', body({}));
+    assert.equal(down.status, 200);
+    assert.equal(down.data.ok, false);
+    assert.equal(down.data.stage, 'connect');
+    assert.equal(typeof down.data.error, 'string');
+    assert.deepEqual((await s.call('GET', '/api/vehicles')).data, before, 'nothing saved');
+    // the test's mount point is never a vehicle's id
+    const added = await s.call('POST', '/api/vehicles', { name: 'X SMB Test', source: { type: 'path', path: path.join(dir, 'footage') } });
+    if (added.status === 200) assert.notEqual(added.data.id, 'x-smb-test');
+  } finally {
+    await s.stop();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});

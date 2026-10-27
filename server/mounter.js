@@ -55,6 +55,9 @@ function createLocalMounter({ footageRoot = '/footage', credDir = '/run/sentry-s
 
   async function forget(id) {
     await fsp.rm(credFile(id), { force: true });
+    // and its mount point, once nothing is mounted there (an empty folder;
+    // rmdir refuses anything else)
+    await fsp.rmdir(target(id)).catch(() => {});
   }
 
   return { mount, unmount, forget, target };

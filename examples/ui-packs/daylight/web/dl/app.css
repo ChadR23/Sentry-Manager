@@ -468,3 +468,9 @@ dialog.dlg[open] { animation: pop 240ms var(--ease) both; }
   .controls { padding: 8px 6px 2px; gap: 6px; }
   .ctl-btn.play { width: 56px; height: 56px; }
 }
+
+/* Settings > vehicle > Test connection */
+.smb-test { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.smb-test p { margin: 0; flex: 1 1 240px; }
+.smb-test [data-result="ok"] { color: var(--good); }
+.smb-test [data-result="bad"] { color: var(--bad); }
