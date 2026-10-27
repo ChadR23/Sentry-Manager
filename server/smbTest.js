@@ -5,11 +5,10 @@
 // user name and password, whether Tesla footage is there and whether files
 // can be written, then unmounts and forgets the details again.
 
-const crypto = require('crypto');
 const fsp = require('fs/promises');
 const path = require('path');
 const { normalizeSmb } = require('./mountSpec');
-const { explainMountError } = require('./share');
+const { explainMountError, checkWritable } = require('./share');
 const { findClipRoot } = require('./vehicles');
 const { tail } = require('./proc');
 
@@ -66,19 +65,15 @@ function createSmbTester({ mounter, vehicles, log = console, now = Date.now }) {
         return { ok: false, stage: 'read', error: `Connected, but the share could not be read (${err.code || err.message}).`, ms: now() - started };
       }
       const clips = findClipRoot(root);
-      // a file of our own, made and removed at once: Recycle Bin, Protect
-      // and replacing originals need to write
-      let writable = false;
-      const probe = path.join(root, `.sentry-six-test-${crypto.randomBytes(4).toString('hex')}`);
-      try {
-        await fsp.writeFile(probe, '', { flag: 'wx' });
-        writable = true;
-      } catch { /* read-only for this user */ } finally {
-        await fsp.rm(probe, { force: true }).catch(() => {});
-      }
+      // every step a save needs (Recycle Bin, Protect, replacing originals),
+      // on files of its own that are removed again
+      const write = await checkWritable(root);
+      const writable = write.ok;
       log.info?.(`SMB test of ${smb.share} as ${smb.username || '(guest)'}: connected${clips ? ', footage found' : ''}${writable ? '' : ', read-only'}`);
       return {
         ok: true, entries, writable, ms: now() - started,
+        // what the account cannot do, in words (null when it can write)
+        writeProblem: writable ? null : `Read-only for this account: ${write.step} failed (${write.error}).${write.hint ? ` ${write.hint}` : ''}`,
         footage: clips ? path.relative(root, clips).split(path.sep).join('/') || '.' : null
       };
     } finally {

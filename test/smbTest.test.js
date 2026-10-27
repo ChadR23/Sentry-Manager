@@ -114,3 +114,32 @@ test('connection test: one at a time and a few a minute, so it cannot be used to
     await fsp.rm(root, { recursive: true, force: true });
   }
 });
+
+test('write check: names the step the share refuses (here: setting a file\'s date), and leaves no files behind', async () => {
+  const { checkWritable } = require('../server/share');
+  const fspMod = require('fs/promises');
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'sm-write-'));
+  const realUtimes = fspMod.utimes;
+  try {
+    const good = await checkWritable(root);
+    assert.deepEqual([good.ok, good.renameOverwrite], [true, true]);
+    fspMod.utimes = async () => { throw Object.assign(new Error('EPERM: operation not permitted, utime'), { code: 'EPERM' }); };
+    const bad = await checkWritable(root);
+    assert.equal(bad.ok, false);
+    assert.equal(bad.step, 'setting a file\'s date');
+    assert.match(bad.error, /EPERM/);
+    assert.match(bad.hint, /file dates/);
+    assert.deepEqual(fs.readdirSync(root), [], 'its two check files are removed');
+    // and Test connection says it in words
+    fspMod.utimes = async () => { throw Object.assign(new Error('EPERM: operation not permitted, utime'), { code: 'EPERM' }); };
+    const mounter = fakeMounter(root, { files: { 'TeslaCam/RecentClips/2026-10-24_10-00-00-front.mp4': 'x' } });
+    const r = await createSmbTester({ mounter, vehicles: vehiclesWith(), log: quiet }).test(SMB);
+    assert.deepEqual([r.ok, r.writable], [true, false]);
+    assert.match(r.writeProblem, /^Read-only for this account: setting a file's date failed \(EPERM/);
+  } finally {
+    fspMod.utimes = realUtimes;
+    await fsp.rm(root, { recursive: true, force: true });
+  }
+  // a folder that is not there: the first step
+  assert.equal((await checkWritable(path.join(root, 'gone'))).step, 'writing a file');
+});

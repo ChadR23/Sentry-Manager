@@ -73,6 +73,70 @@ function explainMountError(output) {
   return null;
 }
 
+// What a share must allow for the Recycle Bin, Protect and replacing
+// originals, step by step, so a failure says which one the NAS refused.
+const WRITE_STEPS = {
+  write: 'writing a file',
+  sync: 'saving a file to disk',
+  rename: 'replacing a file by renaming another over it',
+  utime: 'setting a file\'s date',
+  read: 'reading a file back',
+  remove: 'deleting a file'
+};
+const WRITE_HINTS = {
+  write: 'The NAS account has read-only access to this share: give it write access (and check PUID/PGID).',
+  rename: 'The NAS refuses to rename a file over another. On a Mac sharing the folder, or with Samba\'s "vfs objects" such as fruit or recycle, renames over a file can be refused.',
+  utime: 'The NAS does not let this account change file dates, which keeps an original\'s date when it is replaced. Give the account full control of the share (on Windows/NTFS: Modify, or "Write attributes").',
+  remove: 'The NAS account can create files but not delete them: give it delete rights on the share.'
+};
+
+/**
+ * { ok, step, error, hint, renameOverwrite } for the folder `root`: every
+ * step of a real save, on two files of its own that are removed again.
+ */
+async function checkWritable(root, { timeoutMs = FS_TIMEOUT_MS } = {}) {
+  const a = path.join(root, '.sentry-six-manager-check-a');
+  const b = path.join(root, '.sentry-six-manager-check-b');
+  let step = 'write';
+  let renameOverwrite = null;
+  try {
+    await withTimeout((async () => {
+      await fsp.writeFile(a, 'old');
+      const fh = await fsp.open(b, 'w');
+      await fh.writeFile('new');
+      step = 'sync';
+      await fh.sync();
+      await fh.close();
+      step = 'rename';
+      try {
+        await fsp.rename(b, a);
+        renameOverwrite = true;
+      } catch {
+        renameOverwrite = false;
+        step = 'remove';
+        await fsp.unlink(a);
+        step = 'rename';
+        await fsp.rename(b, a);
+      }
+      step = 'utime';
+      const when = new Date(Date.UTC(2020, 0, 1));
+      await fsp.utimes(a, when, when);
+      step = 'read';
+      if ((await fsp.readFile(a, 'utf8')) !== 'new') throw new Error('what was read back differs from what was written');
+      step = 'remove';
+      await fsp.unlink(a);
+    })(), timeoutMs, 'Write test');
+    return { ok: true, step: null, error: null, hint: null, renameOverwrite };
+  } catch (err) {
+    await Promise.all([fsp.rm(a, { force: true }), fsp.rm(b, { force: true })]).catch(() => {});
+    const denied = err.code === 'EACCES' || err.code === 'EPERM' || err.code === 'EROFS';
+    return {
+      ok: false, step: WRITE_STEPS[step], error: err.message, renameOverwrite,
+      hint: denied || step !== 'write' ? WRITE_HINTS[step] || null : null
+    };
+  }
+}
+
 class ShareManager extends EventEmitter {
   constructor({ config, log, mounter = null, mountinfoPath = '/proc/self/mountinfo', id = 'default' }) {
     super();
@@ -275,39 +339,16 @@ class ShareManager extends EventEmitter {
    */
   async writeCheck() {
     const st = this.state;
-    const a = path.join(this.root, '.sentry-six-manager-check-a');
-    const b = path.join(this.root, '.sentry-six-manager-check-b');
     st.writeCheckedAt = Date.now();
-    try {
-      await withTimeout((async () => {
-        await fsp.writeFile(a, 'old');
-        const fh = await fsp.open(b, 'w');
-        await fh.writeFile('new');
-        await fh.sync();
-        await fh.close();
-        try {
-          await fsp.rename(b, a);
-          st.renameOverwrite = true;
-        } catch {
-          st.renameOverwrite = false;
-          await fsp.unlink(a);
-          await fsp.rename(b, a);
-        }
-        const when = new Date(Date.UTC(2020, 0, 1));
-        await fsp.utimes(a, when, when);
-        if ((await fsp.readFile(a, 'utf8')) !== 'new') throw new Error('read-back mismatch');
-        await fsp.unlink(a);
-      })(), FS_TIMEOUT_MS, 'Write test');
+    const r = await checkWritable(this.root);
+    if (r.renameOverwrite !== null) st.renameOverwrite = r.renameOverwrite;
+    if (r.ok) {
       if (st.writable === false) this.log.info('Share is writable again.');
       st.writable = true;
-    } catch (err) {
-      st.writable = false;
-      await Promise.all([fsp.rm(a, { force: true }), fsp.rm(b, { force: true })]).catch(() => {});
-      this.fail(`Share is not writable: ${err.message}`,
-        err.code === 'EACCES' || err.code === 'EPERM' || err.code === 'EROFS'
-          ? 'The SMB user needs write access, and PUID/PGID (or the uid/gid mount options) must allow writing.'
-          : null);
+      return;
     }
+    st.writable = false;
+    this.fail(`Share is not writable: ${r.step} failed (${r.error})`, r.hint);
   }
 
   updateHealthy() {
@@ -338,4 +379,4 @@ class ShareManager extends EventEmitter {
   }
 }
 
-module.exports = { ShareManager, findMount, explainMountError, withTimeout };
+module.exports = { ShareManager, findMount, explainMountError, withTimeout, checkWritable };

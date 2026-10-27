@@ -376,7 +376,7 @@ function wireSmbTest(root, vehicleId) {
       if (!out.isConnected) return;
       out.dataset.result = r.ok ? 'ok' : 'bad';
       out.textContent = r.ok
-        ? `Connected: the user name and password work. ${r.footage ? `Tesla footage found${r.footage === '.' ? '' : ` in ${r.footage}`}.` : 'No TeslaCam folder found yet (an empty share, or the footage is deeper than 3 folders).'}${r.writable ? '' : ' Read-only for this user: the Recycle Bin, Protect and replacing originals need write access.'}`
+        ? `Connected: the user name and password work. ${r.footage ? `Tesla footage found${r.footage === '.' ? '' : ` in ${r.footage}`}.` : 'No TeslaCam folder found yet (an empty share, or the footage is deeper than 3 folders).'}${r.writable ? '' : ` ${r.writeProblem || 'Read-only for this account: the Recycle Bin, Protect and replacing originals need write access.'}`}`
         : `${r.stage === 'details' ? '' : 'Could not connect: '}${r.error}${r.hint ? ` ${r.hint}` : ''}`;
     } catch (err) {
       if (out.isConnected) {

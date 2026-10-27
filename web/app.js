@@ -2503,7 +2503,7 @@
             if (!out.isConnected) return;
             if (r.ok) {
               out.className = 'small smb-ok';
-              out.textContent = `Connected: the user name and password work. ${r.footage ? `Tesla footage found${r.footage === '.' ? '' : ` in ${r.footage}`}.` : 'No TeslaCam folder found yet (empty share, or the footage is deeper than 3 folders).'} ${r.writable ? '' : 'Read-only for this user: the Recycle Bin, Protect and replacing originals need write access.'}`.trim();
+              out.textContent = `Connected: the user name and password work. ${r.footage ? `Tesla footage found${r.footage === '.' ? '' : ` in ${r.footage}`}.` : 'No TeslaCam folder found yet (empty share, or the footage is deeper than 3 folders).'} ${r.writable ? '' : `${r.writeProblem || 'Read-only for this account: the Recycle Bin, Protect and replacing originals need write access.'}`}`.trim();
             } else {
               out.className = 'small smb-bad';
               out.textContent = `${r.stage === 'details' ? '' : 'Could not connect: '}${r.error}${r.hint ? ` ${r.hint}` : ''}`;
