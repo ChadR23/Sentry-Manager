@@ -91,9 +91,26 @@ function isValidConcurrency(value) {
 // Conversions at once per encoding device (several GPUs, set by hand per GPU):
 // `lanes` = [{ device, concurrency }]. A device is named by its PCI slot,
 // which stays the same when the kernel numbers the render nodes differently,
-// 'cpu' for the software encoder, or 'node:<id>' for another server paired
-// under Nodes (its encodes run there). A job without lanes runs as before.
-const DEVICE_ID = /^(pci:[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]|cpu|node:[a-z0-9]{12})$/;
+// 'cpu' for the software encoder, or 'node:<id>@<its GPU or cpu>' for one
+// GPU (or the CPU) of another server paired under Nodes (its encodes run
+// there). 'node:<id>' alone is a node that lists no devices (an older
+// version), and the lane saved before nodes listed theirs: it stands for the
+// node's default device (its first GPU, else its CPU). A job without lanes
+// runs as before.
+const LOCAL_DEVICE_ID = /^(pci:[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]|cpu)$/;
+const DEVICE_ID = /^(pci:[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]|cpu|node:[a-z0-9]{12}(@(pci:[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]|cpu))?)$/;
+const NODE_LANE = /^(node:[a-z0-9]{12})(?:@(.+))?$/;
+// 'node:<id>' for any lane on a node (its own key: trust, Vehicles first,
+// Off per vehicle, uploads and checks are per node), else null
+function nodeKeyOf(id) {
+  const match = typeof id === 'string' ? NODE_LANE.exec(id) : null;
+  return match ? match[1] : null;
+}
+// the node's own device id ('pci:...' or 'cpu') of a lane, null for the whole node
+function nodeDeviceOf(id) {
+  const match = typeof id === 'string' ? NODE_LANE.exec(id) : null;
+  return match && match[2] && LOCAL_DEVICE_ID.test(match[2]) ? match[2] : null;
+}
 const LANES = deepFreeze({ maxEntries: 16 });
 
 function lanesError() {
@@ -212,4 +229,4 @@ function serializeSummary(counters) {
   };
 }
 
-module.exports = { PROFILES, CODECS, NETWORK_MODES, OUTPUT_MODES, ITEM_STATES, CONCURRENCY, TIMING_PHASES, addItemTimings, isValidConcurrency, DEVICE_ID, LANES, normalizeLanes, lanesTotal, CUSTOM_PROFILE_ID, CUSTOM_BITRATE_KBPS, isValidCustomBitrate, QUALITY_PROFILE_ID, QUALITY_LEVELS, isValidQualityLevel, hasSizeTarget, VERIFY_MODES, DEFAULT_VERIFY_MODE, isValidVerifyMode, effectiveVerifyMode, createEmptyCounters, targetOutputBytes, isWithinProfile, addCompletedFile, formatBytes, isTerminalState, serializeSummary };
+module.exports = { PROFILES, CODECS, NETWORK_MODES, OUTPUT_MODES, ITEM_STATES, CONCURRENCY, TIMING_PHASES, addItemTimings, isValidConcurrency, DEVICE_ID, LOCAL_DEVICE_ID, nodeKeyOf, nodeDeviceOf, LANES, normalizeLanes, lanesTotal, CUSTOM_PROFILE_ID, CUSTOM_BITRATE_KBPS, isValidCustomBitrate, QUALITY_PROFILE_ID, QUALITY_LEVELS, isValidQualityLevel, hasSizeTarget, VERIFY_MODES, DEFAULT_VERIFY_MODE, isValidVerifyMode, effectiveVerifyMode, createEmptyCounters, targetOutputBytes, isWithinProfile, addCompletedFile, formatBytes, isTerminalState, serializeSummary };

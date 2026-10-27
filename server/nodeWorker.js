@@ -14,13 +14,21 @@
 // sends the token with every request. Only the token's SHA-256 is kept here.
 //
 // Requests (HTTPS, /node/v1, the token as "Authorization: Bearer"):
-//   GET    /info                  name, encoders, slots
+//   GET    /info                  name, encoders, slots, and `devices`: this
+//                                  server's own GPUs and its CPU, each with its
+//                                  encoders and clips at once
 //   POST   /jobs                  the clip as the body, settings in X-Node-Job
+//                                  (with `device`: encoded on that GPU or CPU)
+//   POST   /slots                 clips at once: { slots: n } (older mains, the
+//                                  default device), or { slots: { device: n } }
 //   GET    /jobs/:id              progress
 //   GET    /jobs/:id/output       the encoded file, once done
 //   DELETE /jobs/:id              stop it and delete its files
 // Settings are fixed choices (codec, bitrate or quality level, held lead-in
-// frames); ffmpeg's arguments are built here, never taken from the request.
+// frames, one of this server's device ids); ffmpeg's arguments are built
+// here, never taken from the request. The main picks the devices and how many
+// clips each converts at once (its Encoder page); this server keeps no such
+// choice of its own beyond what an older main set.
 
 const crypto = require('crypto');
 const fs = require('fs');
@@ -29,8 +37,9 @@ const os = require('os');
 const path = require('path');
 const { pipeline } = require('stream');
 const { buildEncodeArgs, decodeAccelArgs } = require('../src/main/converter/encoderPlanner');
-const { QUALITY_LEVELS } = require('../src/main/converter/contracts');
+const { QUALITY_LEVELS, LOCAL_DEVICE_ID } = require('../src/main/converter/contracts');
 const { diskSpace } = require('../src/main/converter/fsSpace');
+const { cudaOrderOptions } = require('../src/main/converter/runtime');
 
 const SETTINGS_KEY = 'nodeWorker';
 const PAIR_TTL_MS = 10 * 60_000;
@@ -49,6 +58,14 @@ const USES = ['gpu', 'gpu-cpu', 'cpu'];
 // Clips a main may send ahead, past the slots: uploaded and waiting here, so
 // the next one starts the moment a slot is free, however busy the main is.
 const QUEUE = 15;
+// clips held here at once, every device together (each device has its own
+// slots + QUEUE): a bound for disk and memory whatever a main sets
+const MAX_HELD = 64;
+// devices listed at once, and how long a listing (and its encoders) is reused
+const MAX_DEVICES = 16;
+const DEVICES_TTL_MS = 30_000;
+// the pool of clips sent without a device (older mains): the default device
+const DEFAULT_POOL = '*';
 // disk a node keeps free for itself (accounts, settings, logs)
 const DISK_SPARE = 2 * 1024 ** 3;
 const BAD_TOKEN_LIMIT = 20;
@@ -85,7 +102,7 @@ function parseJobSettings(raw) {
   try { value = JSON.parse(String(raw || '')); } catch { return null; }
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const keys = Object.keys(value);
-  if (keys.some((k) => !['codec', 'bitrate', 'quality', 'holdFrames', 'durationUs'].includes(k))) return null;
+  if (keys.some((k) => !['codec', 'bitrate', 'quality', 'holdFrames', 'durationUs', 'device'].includes(k))) return null;
   if (value.codec !== 'h265' && value.codec !== 'av1') return null;
   const hasBitrate = value.bitrate !== undefined && value.bitrate !== null;
   const hasQuality = value.quality !== undefined && value.quality !== null;
@@ -96,7 +113,11 @@ function parseJobSettings(raw) {
   if (!Number.isSafeInteger(holdFrames) || holdFrames < 0 || holdFrames > 600) return null;
   const durationUs = value.durationUs ?? null;
   if (durationUs !== null && !(Number.isSafeInteger(durationUs) && durationUs > 0 && durationUs < 24 * 3600e6)) return null;
-  return { codec: value.codec, bitrate: hasBitrate ? value.bitrate : null, quality: hasQuality ? value.quality : null, holdFrames, durationUs };
+  // one of this server's devices (checked against its list when the clip
+  // arrives); without it, the default device as before
+  const device = value.device ?? null;
+  if (device !== null && !(typeof device === 'string' && LOCAL_DEVICE_ID.test(device))) return null;
+  return { codec: value.codec, bitrate: hasBitrate ? value.bitrate : null, quality: hasQuality ? value.quality : null, holdFrames, durationUs, ...(device ? { device } : {}) };
 }
 
 /**
@@ -116,6 +137,10 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
       enabled: s.enabled === true,
       slots: Number.isSafeInteger(s.slots) && s.slots >= 1 && s.slots <= MAX_SLOTS ? s.slots : DEFAULT_SLOTS,
       use: USES.includes(s.use) ? s.use : 'gpu',
+      // clips at once per device, as the main set them (device id -> 0..8)
+      deviceSlots: s.deviceSlots && typeof s.deviceSlots === 'object' && !Array.isArray(s.deviceSlots)
+        ? Object.fromEntries(Object.entries(s.deviceSlots).filter(([id, n]) => LOCAL_DEVICE_ID.test(id) && Number.isSafeInteger(n) && n >= 0 && n <= MAX_SLOTS))
+        : {},
       mains: Array.isArray(s.mains) ? s.mains.filter((m) => m && typeof m.tokenHash === 'string') : []
     };
   };
@@ -263,6 +288,64 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
     return send(res, 200, { name, token, proof: hmac(code, pairText.worker(fingerprint, token)), authority: ca ? String(ca) : null });
   }
 
+  // ---- this server's own devices (its GPUs and its CPU, never its nodes)
+
+  // [{ id, kind, name, device (the runtime's), encoders: { h265, av1 } }],
+  // the converter's own device list with the encoder each device proved for
+  // each codec (null: it cannot; the CPU's is the software encoder). Reused
+  // for DEVICES_TTL_MS; one listing at a time.
+  let deviceCache = null; // { at, list } | { pending }
+  const knownEncoders = new Map(); // `${device}:${family}` -> codec | null
+  async function listDevices() {
+    const rt = runtime();
+    if (!rt || typeof rt.localDevices !== 'function') return null;
+    let found;
+    try { found = await rt.localDevices(); } catch { found = null; }
+    const list = (Array.isArray(found) ? found : []).filter((d) => d && typeof d.id === 'string' && LOCAL_DEVICE_ID.test(d.id)).slice(0, MAX_DEVICES);
+    if (!list.some((d) => d.id === 'cpu')) list.push({ id: 'cpu', kind: 'cpu', name: 'CPU (software encoder)' });
+    // a GPU is not test-encoded while it converts (it could fail for being busy)
+    const probe = encoding() === 0 && !(typeof rt.encodingNow === 'function' && rt.encodingNow());
+    return Promise.all(list.map(async (device) => {
+      const encoders = {};
+      for (const family of ['h265', 'av1']) {
+        const key = `${device.id}:${family}`;
+        try {
+          let chosen;
+          if (device.id === 'cpu') chosen = await rt.cpuEncoder(family);
+          else if (typeof rt.selectEncoderFor === 'function') chosen = await rt.selectEncoderFor(family, device, { probe });
+          if (chosen && chosen.timedOut !== true) knownEncoders.set(key, device.id === 'cpu' || chosen.hardware === true ? chosen.codec || null : null);
+        } catch { knownEncoders.set(key, null); }
+        encoders[family] = knownEncoders.get(key) ?? null;
+      }
+      return { id: device.id, kind: device.id === 'cpu' ? 'cpu' : cleanName(device.kind) || 'gpu', name: cleanName(device.name) || device.id, device, encoders };
+    }));
+  }
+  function devices() {
+    if (deviceCache?.list && now() - deviceCache.at < DEVICES_TTL_MS) return Promise.resolve(deviceCache.list);
+    if (deviceCache?.pending) return deviceCache.pending;
+    const previous = deviceCache?.list || null;
+    const pending = listDevices().then((list) => {
+      deviceCache = { at: now(), list };
+      return list;
+    }, () => {
+      deviceCache = previous ? { at: now(), list: previous } : null;
+      return previous;
+    });
+    deviceCache = { pending, list: previous, at: deviceCache?.at || 0 };
+    return pending;
+  }
+  // the device clips without a device go to: the first GPU, else the CPU
+  const defaultDeviceOf = (list) => (list || []).find((d) => d.id !== 'cpu')?.id || 'cpu';
+
+  // Clips at once per device, as the main set them; a device it never set:
+  // the default device has the old single number, the others are off.
+  function slotsFor(pool, s = settings(), list = deviceCache?.list) {
+    if (pool === DEFAULT_POOL) return s.slots;
+    if (Number.isSafeInteger(s.deviceSlots[pool])) return s.deviceSlots[pool];
+    return pool === defaultDeviceOf(list) ? s.slots : 0;
+  }
+  const poolOf = (job) => job.settingsUsed?.device || job.device || DEFAULT_POOL;
+
   async function info() {
     const rt = runtime();
     const s = settings();
@@ -273,21 +356,38 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
         encoders[family] = chosen?.codec || null;
       } catch { encoders[family] = null; }
     }
-    return { name, encoders, slots: s.slots, use: s.use, busy: running().length, encoding: encoding(), capacity: s.slots + QUEUE };
+    const list = await devices();
+    const out = { name, encoders, slots: s.slots, use: s.use, busy: running().length, encoding: encoding(), capacity: s.slots + QUEUE };
+    if (list) {
+      const fallback = defaultDeviceOf(list);
+      out.defaultDevice = fallback;
+      out.devices = list.map((d) => {
+        const slots = slotsFor(d.id, s, list);
+        return {
+          id: d.id, kind: d.kind, name: d.name, encoders: d.encoders, slots,
+          busy: running(d.id).length, encoding: encoding(d.id), capacity: slots + QUEUE
+        };
+      });
+    }
+    return out;
   }
 
   // every clip held for a main: arriving, waiting for a slot or encoding
-  const running = () => [...jobs.values()].filter((job) => job.state === 'receiving' || job.state === 'queued' || job.state === 'encoding');
-  const encoding = () => [...jobs.values()].filter((job) => job.state === 'encoding').length;
+  // (with a device: that device's)
+  const running = (pool = null) => [...jobs.values()].filter((job) => (job.state === 'receiving' || job.state === 'queued' || job.state === 'encoding') && (pool === null || poolOf(job) === pool));
+  const encoding = (pool = null) => [...jobs.values()].filter((job) => job.state === 'encoding' && (pool === null || poolOf(job) === pool)).length;
 
-  // Starts waiting clips while slots are free (a main's benchmark measures
-  // up to the maximum, past the setting).
+  // Starts waiting clips while their device has a free slot, oldest first; a
+  // clip whose device is full lets the next one for another device start (a
+  // main's benchmark measures up to the maximum, past the setting).
   function pump() {
-    while (waiting.length) {
-      const next = waiting[0];
-      if (next.stopped) { waiting.shift(); continue; }
-      if (encoding() >= (next.benchmark ? MAX_SLOTS : settings().slots)) return;
-      waiting.shift();
+    const s = settings();
+    for (let at = 0; at < waiting.length;) {
+      const next = waiting[at];
+      if (next.stopped) { waiting.splice(at, 1); continue; }
+      const pool = poolOf(next);
+      if (encoding(pool) >= (next.benchmark ? MAX_SLOTS : slotsFor(pool, s))) { at += 1; continue; }
+      waiting.splice(at, 1);
       void encode(next, next.settingsUsed).finally(pump);
     }
   }
@@ -333,13 +433,16 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
   sweeper.unref?.();
 
   /**
-   * Encode attempts, fastest first, as Encode with says: GPU encode + decode,
-   * then GPU encode; the CPU only when set to, or when there is no GPU. A clip
-   * that fails here goes back to the main, which encodes it itself.
+   * Encode attempts, fastest first. With a device (what the main picked):
+   * on that GPU, GPU decode + encode, then GPU encode; on 'cpu', the CPU
+   * encoder. Without one (older mains), as Encode with says: GPU encode +
+   * decode, then GPU encode; the CPU only when set to, or when there is no
+   * GPU. A clip that fails here goes back to the main, which encodes it itself.
    */
-  async function attemptsFor(codec, holdFrames) {
+  async function attemptsFor(codec, holdFrames, deviceId = null) {
     const rt = runtime();
     if (!rt) throw Object.assign(new Error('The converter is starting.'), { status: 503 });
+    if (deviceId) return deviceAttempts(rt, codec, deviceId).then((list) => list.map((a) => ({ ...a, holdFrames })));
     const { use } = settings();
     const list = [];
     let selected = null;
@@ -361,6 +464,24 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
     return list.map((a) => ({ ...a, holdFrames }));
   }
 
+  async function deviceAttempts(rt, codec, deviceId) {
+    if (deviceId === 'cpu') {
+      const cpu = await rt.cpuEncoder(codec);
+      return [{ encoder: cpu.codec, device: null, decode: [] }];
+    }
+    const listed = (await devices() || []).find((d) => d.id === deviceId);
+    if (!listed || typeof rt.selectEncoderFor !== 'function') throw Object.assign(new Error('No such device here.'), { status: 400 });
+    const selected = await rt.selectEncoderFor(codec, listed.device);
+    // a GPU that cannot encode this codec: the clip goes back to the main
+    if (selected?.hardware !== true) throw new Error(`${listed.name} cannot encode ${codec}`);
+    const device = selected.device || null;
+    const list = [];
+    const accel = decodeAccelArgs(selected.codec, { platform, ...(device ? { device } : {}) });
+    if (accel) list.push({ encoder: selected.codec, device, decode: accel });
+    list.push({ encoder: selected.codec, device, decode: [] });
+    return list;
+  }
+
   function runFfmpeg(job, attempt, settingsUsed) {
     return new Promise((resolve) => {
       if (job.stopped) return resolve(false);
@@ -380,7 +501,8 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
         '-progress', 'pipe:1', '-nostats', '-f', 'mp4', job.output];
       let child;
       try {
-        child = spawn(ffmpegPath, args, { shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+        // (NVIDIA GPUs by their PCI order, as nvidia-smi numbers them)
+        child = spawn(ffmpegPath, args, { ...cudaOrderOptions(args), shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
       } catch {
         resolve(false);
         return;
@@ -432,7 +554,7 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
   async function encode(job, settingsUsed) {
     job.state = 'encoding';
     try {
-      for (const attempt of await attemptsFor(settingsUsed.codec, settingsUsed.holdFrames)) {
+      for (const attempt of await attemptsFor(settingsUsed.codec, settingsUsed.holdFrames, settingsUsed.device || null)) {
         if (job.stopped) return;
         await fsp.rm(job.output, { force: true }).catch(() => {});
         if (job.stopped) return;
@@ -466,9 +588,15 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
     // collected jobs both hold disk space; a main's benchmark may measure up
     // to the maximum, past the setting
     const benchmark = req.headers['x-node-benchmark'] === '1';
-    const limit = benchmark ? MAX_SLOTS : settings().slots + QUEUE;
+    // with a device: one of this server's own, which has its own slots and queue
+    if (settingsUsed.device && !(await devices() || []).some((d) => d.id === settingsUsed.device)) return send(res, 400, { error: 'No such device on this node.' });
+    const pool = settingsUsed.device || DEFAULT_POOL;
+    const slots = benchmark ? MAX_SLOTS : slotsFor(pool);
+    if (slots === 0) return send(res, 503, { error: 'That device is set to Off on this node.' });
+    const limit = benchmark ? MAX_SLOTS : slots + QUEUE;
     // (finished clips not yet collected count too: at most one per slot)
-    if (running().length >= limit || jobs.size >= limit + (benchmark ? MAX_SLOTS : settings().slots)) return send(res, 503, { error: 'All of this node\'s slots are busy.' });
+    const held = [...jobs.values()].filter((job) => poolOf(job) === pool).length;
+    if (running(pool).length >= limit || held >= limit + slots || jobs.size >= MAX_HELD) return send(res, 503, { error: 'All of this node\'s slots are busy.' });
     // room for the clip and its encode, and some to spare for this server
     try {
       const disk = await diskSpace(fsp, workDir);
@@ -478,7 +606,8 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
     const job = {
       id, mainId: main.id, mainName: main.name, state: 'receiving',
       input: path.join(workDir, `${id}-in.mp4`), output: path.join(workDir, `${id}-out.mp4`),
-      outTimeUs: null, fps: null, speed: null, encoder: null, startedAt: now(), seenAt: now(), inputBytes: length
+      outTimeUs: null, fps: null, speed: null, encoder: null, startedAt: now(), seenAt: now(), inputBytes: length,
+      device: settingsUsed.device || null
     };
     jobs.set(id, job);
     // The main cancelled before the job's id reached it (the upload was
@@ -541,8 +670,23 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
       if (p === '/node/v1/info' && req.method === 'GET') return send(res, 200, await info()), true;
       if (p === '/node/v1/jobs' && req.method === 'POST') return await receive(req, res, main), true;
       if (p === '/node/v1/slots' && req.method === 'POST') {
-        // the main's benchmark result: how many clips at once (1 to MAX_SLOTS)
+        // How many clips at once: per device, from the main's Encoder rows
+        // ({ slots: { "<device>": 0..8 } }, merged with the ones it left out),
+        // or one number (1 to MAX_SLOTS) from an older main.
         const body = await readJsonBody(req);
+        if (body?.slots && typeof body.slots === 'object' && !Array.isArray(body.slots)) {
+          const list = await devices() || [];
+          const entries = Object.entries(body.slots);
+          if (entries.length === 0 || entries.length > MAX_DEVICES || entries.some(([id, n]) => !list.some((d) => d.id === id) || !Number.isSafeInteger(n) || n < 0 || n > MAX_SLOTS)) {
+            return send(res, 400, { error: `Clips at once per device of this node: 0 to ${MAX_SLOTS}.` }), true;
+          }
+          const s = settings();
+          const deviceSlots = { ...s.deviceSlots, ...Object.fromEntries(entries) };
+          save({ ...s, deviceSlots });
+          pump();
+          audit.info(`Main server "${main.name}" set this node's clips at once: ${entries.map(([id, n]) => `${list.find((d) => d.id === id).name} ${n}`).join(', ')}`);
+          return send(res, 200, { slots: deviceSlots }), true;
+        }
         if (!Number.isSafeInteger(body?.slots) || body.slots < 1 || body.slots > MAX_SLOTS) return send(res, 400, { error: `Clips at once: 1 to ${MAX_SLOTS}.` }), true;
         save({ ...settings(), slots: body.slots });
         pump();
@@ -577,8 +721,8 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
     for (const job of jobs.values()) stopJob(job);
   }
 
-  // attempts: the encoders a clip is tried with, in order (Encode with)
-  return { handle, status, setEnabled, startPairing, cancelPairing, revoke, close, attempts: attemptsFor };
+  // attempts: the encoders a clip is tried with, in order (its device, or Encode with)
+  return { handle, status, setEnabled, startPairing, cancelPairing, revoke, close, attempts: attemptsFor, devices };
 }
 
 module.exports = { createNodeWorker, parseJobSettings, pairText, certFingerprint, newPairingCode, normalizeCode, hmac, sameHex };

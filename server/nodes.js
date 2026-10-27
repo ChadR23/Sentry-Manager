@@ -1,11 +1,13 @@
 'use strict';
 
 // Nodes, the main side: other Sentry Six Managers paired here encode clips
-// for this one. A node is a lane in the Encoder (device "node:<id>"): this
-// server reads the clip from the share, sends it over HTTPS, takes the
+// for this one. Each GPU of a node, and its CPU, is a lane in the Encoder
+// (device "node:<id>@<its device>"; "node:<id>" for a node of an older
+// version, which lists no devices): this server reads the clip from the
+// share, sends it over HTTPS with the device to encode it on, takes the
 // encoded file back and then writes the telemetry, verifies and saves it as
 // it does for its own GPUs. Nodes never get share passwords and never touch
-// footage.
+// footage. Trust, Vehicles first, uploads and the benchmark stay per node.
 //
 // Every connection to a node is checked before a byte is sent: the node must
 // present the certificate it had when it was paired, or one issued by the
@@ -22,6 +24,7 @@ const tls = require('tls');
 const { EventEmitter } = require('events');
 const { pipeline } = require('stream');
 const { pairText, certFingerprint, normalizeCode, hmac, sameHex } = require('./nodeWorker');
+const { LOCAL_DEVICE_ID, nodeKeyOf, nodeDeviceOf } = require('../src/main/converter/contracts');
 
 const SETTINGS_KEY = 'nodes';
 const MAX_NODES = 8;
@@ -68,6 +71,9 @@ const REQUEST_TIMEOUT_MS = 30_000;
 const HOST_RE = /^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/;
 
 const nodeError = (message, status = 400, code = 'NODE_ERROR') => Object.assign(new Error(message), { status, code });
+// the devices a node may list (its GPUs and its CPU)
+const MAX_NODE_DEVICES = 16;
+const MAX_SLOTS = 8;
 // text a node sent (its name, an error): safe for the log and the page
 const peerText = (value, max = 160) => String(value || '').replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').trim().slice(0, max);
 
@@ -218,23 +224,66 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
   const save = (list) => db.set(SETTINGS_KEY, list);
   const byId = (id) => stored().find((n) => n.id === id) || null;
 
+  const cleanEncoder = (v) => (typeof v === 'string' && /^[a-z0-9_-]{2,32}$/.test(v) ? v : null);
+  const count = (v, max = 10_000) => (Number.isSafeInteger(v) && v >= 0 && v <= max ? v : null);
+
+  // A node's own devices as it lists them (null: a node of an older version
+  // that lists none). Ids are its device ids ('pci:...' or 'cpu'), checked
+  // like this server's own; everything else is text for the page.
+  function parseDevices(value) {
+    if (!Array.isArray(value)) return null;
+    const list = [];
+    for (const d of value.slice(0, MAX_NODE_DEVICES)) {
+      if (!d || typeof d.id !== 'string' || !LOCAL_DEVICE_ID.test(d.id) || list.some((x) => x.id === d.id)) continue;
+      const enc = d.encoders || {};
+      list.push({
+        id: d.id,
+        kind: d.id === 'cpu' ? 'cpu' : (typeof d.kind === 'string' && /^[a-z]{2,16}$/.test(d.kind) ? d.kind : 'gpu'),
+        name: peerText(d.name, 64) || (d.id === 'cpu' ? 'CPU' : d.id),
+        encoders: { h265: cleanEncoder(enc.h265), av1: cleanEncoder(enc.av1) },
+        // (a node never runs more than 8 at once on a device: a larger claim is not believed)
+        slots: count(d.slots, MAX_SLOTS),
+        busy: count(d.busy), encoding: count(d.encoding), capacity: count(d.capacity)
+      });
+    }
+    return list.length ? list : null;
+  }
+  // the device a whole-node lane, a plain number and the benchmark use: its
+  // first GPU, else its CPU
+  const defaultDeviceOf = (devices) => (devices || []).find((d) => d.id !== 'cpu')?.id || (devices?.length ? 'cpu' : null);
+  // what a node listed last (kept with the node: an offline node keeps its rows)
+  const listedOf = (devices) => (devices || []).map((d) => ({ id: d.id, kind: d.kind, name: d.name }));
+
   async function refresh(node) {
+    const before = info.get(node.id);
     try {
       const r = await request(node, { path: '/node/v1/info', timeoutMs: 8000 });
       if (r.status !== 200 || !r.json) throw nodeError(peerText(r.json?.error) || `HTTP ${r.status}`, 502);
       const enc = r.json.encoders || {};
-      const clean = (v) => (typeof v === 'string' && /^[a-z0-9_-]{2,32}$/.test(v) ? v : null);
+      const devices = parseDevices(r.json.devices);
       info.set(node.id, {
         at: Date.now(), online: true, error: null,
         name: typeof r.json.name === 'string' ? peerText(r.json.name, 64) : node.name,
-        encoders: { h265: clean(enc.h265), av1: clean(enc.av1) },
+        encoders: { h265: cleanEncoder(enc.h265), av1: cleanEncoder(enc.av1) },
         // (a node never runs more than 8 at once: a larger claim is not believed)
-        slots: Number.isSafeInteger(r.json.slots) ? Math.min(Math.max(r.json.slots, 1), 8) : null,
+        slots: Number.isSafeInteger(r.json.slots) ? Math.min(Math.max(r.json.slots, 1), MAX_SLOTS) : null,
         busy: Number.isSafeInteger(r.json.busy) ? r.json.busy : null,
-        encoding: Number.isSafeInteger(r.json.encoding) ? r.json.encoding : null
+        encoding: Number.isSafeInteger(r.json.encoding) ? r.json.encoding : null,
+        devices
       });
+      // remembered with the node when they change, for when it does not answer
+      const current = byId(node.id);
+      if (current && JSON.stringify(current.devices || null) !== JSON.stringify(devices ? listedOf(devices) : null)) {
+        save(stored().map((n) => {
+          if (n.id !== node.id) return n;
+          const { devices: _old, ...rest } = n;
+          return devices ? { ...rest, devices: listedOf(devices) } : rest;
+        }));
+      }
     } catch (err) {
-      info.set(node.id, { at: Date.now(), online: false, error: err.message, encoders: {}, slots: null, busy: null });
+      // offline: its devices as last known, so their lanes stay
+      const known = before?.devices || (Array.isArray(byId(node.id)?.devices) ? byId(node.id).devices.map((d) => ({ ...d, encoders: { h265: null, av1: null }, slots: null })) : null);
+      info.set(node.id, { at: Date.now(), online: false, error: err.message, encoders: {}, slots: null, busy: null, devices: known });
     }
     return info.get(node.id);
   }
@@ -246,17 +295,35 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
     return known || pending;
   };
 
-  /** The paired nodes as encoding devices for the converter's lanes. */
+  /**
+   * The paired nodes as encoding devices for the converter's lanes: one per
+   * GPU of a node and one for its CPU (a node that lists no devices, one for
+   * the whole node). nodeId/nodeName say whose it is; isDefault marks the
+   * device a whole-node lane ('node:<id>', saved before) now stands for.
+   */
   async function list() {
     const nodes = stored();
-    return Promise.all(nodes.map(async (node) => {
+    const all = await Promise.all(nodes.map(async (node) => {
       const i = await fresh(node);
-      return {
-        id: `node:${node.id}`, kind: 'node', name: `${node.name} (node)`,
-        node: null, index: null, pci: null, slots: i.slots ?? null,
-        online: i.online === true, encoders: i.online ? i.encoders : { h265: null, av1: null }
-      };
+      const online = i.online === true;
+      const devices = i.devices || null;
+      if (!devices) {
+        return [{
+          id: `node:${node.id}`, kind: 'node', nodeId: node.id, nodeName: node.name, deviceName: null, name: `${node.name} (node)`,
+          node: null, index: null, pci: null, slots: i.slots ?? null,
+          online, encoders: online ? i.encoders : { h265: null, av1: null }
+        }];
+      }
+      const fallback = defaultDeviceOf(devices);
+      return devices.map((d) => ({
+        id: `node:${node.id}@${d.id}`, kind: 'node', nodeId: node.id, nodeName: node.name,
+        deviceId: d.id, deviceKind: d.kind, deviceName: d.name, name: `${node.name} · ${d.name}`,
+        isDefault: d.id === fallback,
+        node: null, index: null, pci: null, slots: d.slots ?? null,
+        online, encoders: online ? d.encoders : { h265: null, av1: null }
+      }));
     }));
+    return all.flat();
   }
 
   /** What the Nodes page shows. */
@@ -267,10 +334,18 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
     await Promise.all(nodes.map((node) => Promise.race([refresh(node), new Promise((r) => setTimeout(r, 1500).unref?.())])));
     return nodes.map((node) => {
       const i = info.get(node.id) || {};
+      const devices = i.devices || null;
+      const fallback = defaultDeviceOf(devices);
+      // with devices: what the main set on each (the ones it uses), in all
+      const slots = devices ? devices.reduce((sum, d) => sum + (d.slots || 0), 0) : i.slots ?? null;
       return {
         id: node.id, name: node.name, address: node.port === 9000 ? node.host : `${node.host}:${node.port}`,
         pairedAt: node.pairedAt, online: i.online === true, error: i.online ? null : i.error || null,
-        encoders: i.encoders || {}, slots: i.slots ?? null, busy: i.busy ?? null, encoding: i.encoding ?? null,
+        encoders: i.encoders || {}, slots, busy: i.busy ?? null, encoding: i.encoding ?? null,
+        devices: devices ? devices.map((d) => ({ id: d.id, lane: `node:${node.id}@${d.id}`, kind: d.kind, name: d.name, encoders: d.encoders, slots: d.slots ?? null, isDefault: d.id === fallback })) : null,
+        // the lane a whole-node number (benchmark > Use) sets
+        defaultLane: devices ? `node:${node.id}@${fallback}` : `node:${node.id}`,
+        defaultDeviceName: devices ? devices.find((d) => d.id === fallback)?.name || null : null,
         fingerprint: node.pin?.fingerprint || null,
         cars: Array.isArray(node.cars) ? node.cars : [],
         trusted: node.trusted === true
@@ -362,7 +437,13 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
     save(stored().map((n) => (n.id === id ? { ...n, trusted: trusted === true } : n)));
     return trusted === true;
   }
-  const trusted = (id) => byId(String(id || '').replace(/^node:/, ''))?.trusted === true;
+  // (any lane of the node: trust is per node)
+  const nodeIdOf = (id) => {
+    const text = String(id || '');
+    const key = nodeKeyOf(text);
+    return key ? key.slice('node:'.length) : text.replace(/@.*$/, '');
+  };
+  const trusted = (id) => byId(nodeIdOf(id))?.trusted === true;
 
   /** A vehicle removed: out of every node's Vehicles first list. */
   function forgetCar(car) {
@@ -388,9 +469,12 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
    * ffmpeg's -n). Returns an object that behaves like ffmpeg's process.
    */
   function encode({ device, source, target, codec, bitrate, quality, holdFrames = 0, durationUs = null, benchmark = false }) {
-    const id = String(device?.id || '').replace(/^node:/, '');
-    const node = byId(id);
+    const node = byId(nodeIdOf(device?.id));
     if (!node) throw nodeError('No such node.', 404);
+    // the node's device to encode on: the lane's, or for a whole-node lane
+    // (saved before, or the benchmark) its default device once it lists them
+    const known = info.get(node.id)?.devices || (Array.isArray(node.devices) ? node.devices : null);
+    const onDevice = nodeDeviceOf(device?.id) || (known ? defaultDeviceOf(known) : null);
     const child = new EventEmitter();
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
@@ -423,7 +507,7 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
 
     (async () => {
       const { size } = await fsp.stat(source);
-      const settings = { codec, holdFrames, ...(quality ? { quality } : { bitrate }), ...(durationUs ? { durationUs } : {}) };
+      const settings = { codec, holdFrames, ...(quality ? { quality } : { bitrate }), ...(durationUs ? { durationUs } : {}), ...(onDevice ? { device: onDevice } : {}) };
       // A lane set to more clips than the node takes at once: the extra clip
       // waits for a free slot (up to BUSY_WAIT_MS) instead of failing over.
       const waitUntil = Date.now() + BUSY_WAIT_MS;
@@ -436,10 +520,16 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
         // unreachable: fail over at once (only a node that answers "busy" is waited for)
         if (!free || free.status !== 200) throw nodeError(peerText(free?.json?.error) || 'Could not reach the node.', 502, 'NODE_UNREACHABLE');
         // full: its slots and the clips it takes ahead (a node from before
-        // the queue reports only slots); a benchmark measures up to the
-        // node's maximum, past its setting
-        const capacity = Number.isSafeInteger(free.json?.capacity) ? free.json.capacity : free.json?.slots;
-        const busy = !benchmark && Number.isSafeInteger(capacity) && Number.isSafeInteger(free.json?.busy) && free.json.busy >= capacity;
+        // the queue reports only slots; with a device, that device's own); a
+        // benchmark measures up to the node's maximum, past its setting
+        let state = free.json || {};
+        if (onDevice) {
+          const listed = Array.isArray(state.devices) ? state.devices.find((d) => d?.id === onDevice) : null;
+          if (!listed) throw nodeError('The node no longer has that device.', 502, 'NODE_DEVICE_GONE');
+          state = listed;
+        }
+        const capacity = Number.isSafeInteger(state.capacity) ? state.capacity : state.slots;
+        const busy = !benchmark && Number.isSafeInteger(capacity) && Number.isSafeInteger(state.busy) && state.busy >= capacity;
         if (!busy) {
           if (controller.signal.aborted) return;
           const releaseUpload = await takeUploadSlot(node.id, controller.signal);
@@ -538,15 +628,31 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
     return child;
   }
 
-  /** Sets how many clips the node converts at once (Nodes > Benchmark > Use). */
+  /**
+   * Sets how many clips the node converts at once: a number (Nodes >
+   * Benchmark > Use: its default device, or the whole node of an older
+   * version), or { lane or device id: 0..8 } for its devices, all in one
+   * request (Encoder rows).
+   */
   async function setSlots(id, slots) {
-    const node = byId(id);
+    const node = byId(nodeIdOf(id));
     if (!node) throw nodeError('No such node.', 404);
-    if (!Number.isSafeInteger(slots) || slots < 1 || slots > 8) throw nodeError('Clips at once: 1 to 8.');
-    const r = await request(node, { method: 'POST', path: '/node/v1/slots', headers: { 'Content-Type': 'application/json' }, body: Buffer.from(JSON.stringify({ slots })), timeoutMs: 10_000 });
+    let body;
+    if (slots && typeof slots === 'object' && !Array.isArray(slots)) {
+      const entries = Object.entries(slots).map(([key, n]) => [nodeDeviceOf(key) || key, n]);
+      if (entries.length === 0 || entries.length > MAX_NODE_DEVICES
+        || entries.some(([key, n]) => !LOCAL_DEVICE_ID.test(key) || !Number.isSafeInteger(n) || n < 0 || n > MAX_SLOTS)) throw nodeError('Clips at once per device: 0 to 8.');
+      body = { slots: Object.fromEntries(entries) };
+    } else {
+      if (!Number.isSafeInteger(slots) || slots < 1 || slots > MAX_SLOTS) throw nodeError('Clips at once: 1 to 8.');
+      const known = info.get(node.id)?.devices || (Array.isArray(node.devices) ? node.devices : null);
+      const on = nodeDeviceOf(id) || (known ? defaultDeviceOf(known) : null);
+      body = { slots: on ? { [on]: slots } : slots };
+    }
+    const r = await request(node, { method: 'POST', path: '/node/v1/slots', headers: { 'Content-Type': 'application/json' }, body: Buffer.from(JSON.stringify(body)), timeoutMs: 10_000 });
     if (r.status !== 200) throw nodeError(peerText(r.json?.error) || `The node refused (${r.status}).`, 502);
     await refresh(node);
-    return info.get(id);
+    return info.get(node.id);
   }
 
   return { list, overview, add, rename, setCars, forgetCar, setTrusted, trusted, carLists, remove, encode, setSlots, has: (id) => Boolean(byId(id)), refresh: (id) => (byId(id) ? refresh(byId(id)) : null) };

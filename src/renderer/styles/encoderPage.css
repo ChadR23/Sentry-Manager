@@ -588,6 +588,93 @@ select.converter-select {
 
 .converter-lanes > .converter-disclosure { margin-top: 4px; }
 
+/* A node (another server) as a group: a header that opens and closes it
+   (its name, online or not, its clips at once in all), and inside one row
+   per GPU of that node and one for its CPU. */
+.converter-lane-group {
+    min-width: 0;
+    border: 1px solid var(--fd-border-strong);
+    border-radius: 10px;
+    background: var(--fd-inner);
+    transition: border-color 0.15s ease;
+}
+
+.converter-lane-group:not(.is-off) { border-color: var(--accent-line); }
+
+.converter-lane-group-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    min-height: 52px;
+    padding: 6px 14px;
+    border: 0;
+    border-radius: 9px;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.converter-lane-group-head:hover { background: var(--fd-hover); }
+
+.converter-lane-group-head:focus-visible {
+    outline: 2px solid var(--accent-color);
+    outline-offset: -2px;
+}
+
+.converter-lane-group:not(.is-off) .converter-lane-group-head strong { color: var(--accent-color); }
+
+/* online, offline and how many: words, not encoder names */
+.converter-lane-group-head .converter-lane-name small { font-family: var(--font-sans); }
+.converter-lane-group.is-offline .converter-lane-group-head .converter-lane-name small { color: var(--fd-warn); }
+
+.converter-lane-group-total {
+    min-width: 44px;
+    color: var(--text-color);
+    font: 600 13px/1 var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    text-align: center;
+}
+
+.converter-lane-group.is-off .converter-lane-group-total {
+    color: var(--text-muted);
+    font-family: var(--font-sans);
+}
+
+.converter-lane-group-chevron {
+    width: 8px;
+    height: 8px;
+    margin: 0 4px 4px;
+    border-right: 2px solid var(--text-secondary);
+    border-bottom: 2px solid var(--text-secondary);
+    transform: rotate(45deg);
+    transition: transform 0.15s ease;
+}
+
+.converter-lane-group-head[aria-expanded="true"] .converter-lane-group-chevron {
+    margin: 4px 4px 0;
+    transform: rotate(-135deg);
+}
+
+.converter-lane-group-body {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+    padding: 0 6px 6px;
+}
+
+.converter-lane-group-body[hidden] { display: none; }
+
+/* the node's CPU hint is words */
+.converter-lane[data-device$="@cpu"] .converter-lane-name small { font-family: var(--font-sans); }
+
+@media (prefers-reduced-motion: reduce) {
+    .converter-lane-group-chevron { transition: none; }
+}
+
 /* Output: two cards with a radio mark */
 .converter-output-options { gap: 8px; }
 
@@ -1505,6 +1592,13 @@ select.converter-select {
         padding-left: 12px;
     }
 
+    .converter-lane-group-head {
+        gap: 8px;
+        padding-inline: 12px 10px;
+    }
+
+    .converter-lane-group-body { padding: 0 4px 4px; }
+
     .converter-stepper button {
         width: 40px;
         height: 40px;
@@ -1527,7 +1621,8 @@ select.converter-select {
         height: 40px;
     }
 
-    .converter-lane { min-height: 56px; }
+    .converter-lane,
+    .converter-lane-group-head { min-height: 56px; }
 
     .converter-stepper button {
         width: 44px;

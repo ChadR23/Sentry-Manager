@@ -299,8 +299,9 @@ async function main() {
       encode: (request) => nodes.encode(request),
       // a trusted node's encodes skip the picture check (Nodes page)
       trusted: (device) => nodes.trusted(device),
-      // a node's row under Encoder > Parallel conversions sets its clips at once
-      setSlots: (device, slots) => nodes.setSlots(String(device).replace(/^node:/, ''), slots),
+      // a node's rows under Encoder > Parallel conversions set its clips at
+      // once: a number for a whole node, { lane: n } for its devices
+      setSlots: (device, slots) => nodes.setSlots(String(device), slots),
       // each node's vehicles, as the footage folders automatic conversion uses
       priorities: () => Object.fromEntries(Object.entries(nodes.carLists()).map(([device, ids]) => [device, ids.map((id) => {
         const v = vehicles.list().find((x) => x.id === id);
@@ -723,8 +724,9 @@ async function main() {
   });
   r.add('POST', '/api/nodes/worker', (req, res, { body, user }) => {
     if (!tlsSource) throw new HttpError(409, 'This server runs without its own HTTPS (TLS_MODE=off), so it cannot be a node.');
+    // (slots and use: from an older page; the main picks devices and numbers now)
     const status = nodeWorker.setEnabled(body?.enabled === true, body?.slots, body?.use);
-    audit.info(`Node mode ${status.enabled ? 'on' : 'off'} (${status.slots} clips at once, encode with ${status.use}): ${by(req, user)}`);
+    audit.info(`Node mode ${status.enabled ? 'on' : 'off'}: ${by(req, user)}`);
     return status;
   });
   r.add('POST', '/api/nodes/worker/pair', (req, res, { user }) => {

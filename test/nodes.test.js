@@ -736,3 +736,301 @@ test('picture check on a still scene (a parked car): offsets that tie go to the 
   for (let t = 0; t < 20; t++) if (!(await comparePictures({ source: 's', candidate: 'c', decode, durationSeconds: 60 })).ok) failed += 1;
   assert.equal(failed, 0, `${failed} of 20 still-scene clips judged not the same`);
 });
+
+// ---- a node that lists its own GPUs and its CPU: the main picks the device
+// of each clip and how many each converts at once
+
+// A node with one Intel GPU (renderD129) and its CPU. There is no GPU here,
+// so ffmpeg is given the CPU in its place: the arguments the worker builds
+// for the GPU are recorded first (that GPU's render node, its decode), then
+// the same encode runs with libx265.
+const NODE_GPU = Object.freeze({ id: 'pci:0000:03:00.0', kind: 'dri', vendor: 'intel', name: 'Intel Arc A380', node: '/dev/dri/renderD129', index: null, pci: '0000:03:00.0' });
+const NODE_CPU = Object.freeze({ id: 'cpu', kind: 'cpu', vendor: null, name: 'CPU (software encoder)', node: null, index: null, pci: null });
+function deviceRuntime() {
+  const asked = [];
+  return {
+    asked,
+    selectEncoder: async (family) => ({ codec: family === 'h265' ? 'libx265' : 'libsvtav1', hardware: false }),
+    cpuEncoder: async (family) => ({ codec: family === 'h265' ? 'libx265' : 'libsvtav1', hardware: false }),
+    localDevices: async () => [NODE_GPU, NODE_CPU],
+    // the Arc proves H.265 (VA-API) and not AV1 here
+    selectEncoderFor: async (family, device, options) => {
+      if (options === undefined) asked.push([family, device.id]);
+      return family === 'h265' && device.id === NODE_GPU.id
+        ? { family, codec: 'hevc_vaapi', hardware: true, device: { id: device.id, kind: device.kind, node: device.node, index: null } }
+        : { family, codec: family === 'h265' ? 'libx265' : 'libsvtav1', hardware: false, device: { id: device.id, kind: device.kind } };
+    },
+    encodingNow: () => false
+  };
+}
+function gpuStandIn(seen) {
+  const { spawn } = require('child_process');
+  return (command, args, options) => {
+    seen.push(args);
+    if (!args.includes('-vaapi_device')) return spawn(command, args, options);
+    const out = [];
+    for (let i = 0; i < args.length; i++) {
+      if (['-hwaccel', '-hwaccel_device', '-vaapi_device'].includes(args[i])) { i++; continue; }
+      if (args[i] === '-vf' && args[i + 1] === 'format=nv12,hwupload') { i++; continue; }
+      out.push(args[i] === 'hevc_vaapi' ? 'libx265' : args[i]);
+    }
+    return spawn(command, out, options);
+  };
+}
+async function startDeviceWorker(dir, material, { port = 0, db = memDb(), seen = [] } = {}) {
+  const runtime = deviceRuntime();
+  const worker = createNodeWorker({ db, log: quiet, audit: quiet, authority: () => material.ca, workDir: path.join(dir, 'work'), runtime: () => runtime, name: 'garage-pc', spawn: gpuStandIn(seen), platform: 'linux' });
+  const server = http2.createSecureServer({ key: material.key, cert: material.cert, allowHTTP1: true }, async (req, res) => {
+    const p = new URL(req.url, 'http://x').pathname;
+    if (!(await worker.handle(req, res, p, '127.0.0.1'))) { res.writeHead(404); res.end(); }
+  });
+  await new Promise((r) => server.listen(port, '127.0.0.1', r));
+  return { worker, server, db, runtime, seen, port: server.address().port };
+}
+function nodeRequest(port, token, { method = 'GET', path: p, headers = {}, body = null }) {
+  return new Promise((resolve, reject) => {
+    const req = require('https').request({ host: '127.0.0.1', port, path: p, method, rejectUnauthorized: false, headers: { Authorization: `Bearer ${token}`, ...headers } }, (res) => {
+      let d = '';
+      res.on('data', (c) => { d += c; });
+      res.on('end', () => { let json = null; try { json = JSON.parse(d); } catch { /* not JSON */ } resolve({ status: res.statusCode, json }); });
+    });
+    req.on('error', reject);
+    req.end(body || undefined);
+  });
+}
+const encodeOn = (nodes, id, source, target) => new Promise((resolve) => nodes.encode({ device: { id }, source, target, codec: 'h265', bitrate: 400_000, quality: null, durationUs: 2e6 }).once('close', resolve));
+const videoCodecOf = (file) => spawnSync('ffprobe', ['-v', 'error', '-select_streams', 'v', '-show_entries', 'stream=codec_name', '-of', 'csv=p=0', file], { encoding: 'utf8' }).stdout.trim();
+
+test('the encode settings may name one of the node\'s devices, and nothing else', () => {
+  assert.equal(parseJobSettings(JSON.stringify({ codec: 'h265', bitrate: 3e6, device: 'cpu' })).device, 'cpu');
+  assert.equal(parseJobSettings(JSON.stringify({ codec: 'h265', bitrate: 3e6, device: 'pci:0000:03:00.0' })).device, 'pci:0000:03:00.0');
+  assert.equal('device' in parseJobSettings(JSON.stringify({ codec: 'h265', bitrate: 3e6 })), false, 'none: as before');
+  for (const device of ['node:abcdefabcdef', 'pci:0000:03:00.8', '/dev/dri/renderD128', 'nvidia0', 'CPU', '', 7, ['cpu']]) {
+    assert.equal(parseJobSettings(JSON.stringify({ codec: 'h265', bitrate: 3e6, device })), null, JSON.stringify(device));
+  }
+});
+
+test('a node encodes on the device asked for: its GPU (GPU decode first, then without), or its CPU', async () => {
+  const dir = await tmp();
+  try {
+    const runtime = deviceRuntime();
+    const worker = createNodeWorker({ db: memDb(), log: quiet, audit: quiet, workDir: path.join(dir, 'work'), runtime: () => runtime, platform: 'linux' });
+    const onGpu = await worker.attempts('h265', 0, NODE_GPU.id);
+    assert.deepEqual(onGpu.map((a) => [a.encoder, a.decode]), [
+      ['hevc_vaapi', ['-hwaccel', 'vaapi', '-hwaccel_device', '/dev/dri/renderD129']],
+      ['hevc_vaapi', []]
+    ], 'that GPU\'s own render node, with and then without its decode');
+    assert.equal(onGpu[0].device.node, NODE_GPU.node);
+    assert.deepEqual((await worker.attempts('h265', 0, 'cpu')).map((a) => a.encoder), ['libx265'], 'the CPU: the CPU encoder alone');
+    // a GPU that cannot encode the codec: the clip goes back to the main
+    await assert.rejects(worker.attempts('av1', 0, NODE_GPU.id), /cannot encode/);
+    await assert.rejects(worker.attempts('h265', 0, 'pci:0000:09:00.0'), /No such device/);
+    // without a device: exactly as before (Encode with)
+    assert.deepEqual((await worker.attempts('h265', 0)).map((a) => a.encoder), ['libx265']);
+    const devices = await worker.devices();
+    assert.deepEqual(devices.map((d) => [d.id, d.kind, d.name, d.encoders]), [
+      [NODE_GPU.id, 'dri', 'Intel Arc A380', { h265: 'hevc_vaapi', av1: null }],
+      ['cpu', 'cpu', 'CPU (software encoder)', { h265: 'libx265', av1: 'libsvtav1' }]
+    ]);
+    worker.close();
+    // a worker whose converter lists no devices (older) reports none
+    const plain = createNodeWorker({ db: memDb(), log: quiet, audit: quiet, workDir: path.join(dir, 'work2'), runtime: () => ({ selectEncoder: runtime.selectEncoder, cpuEncoder: runtime.cpuEncoder }) });
+    assert.equal(await plain.devices(), null);
+    plain.close();
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a node\'s GPUs and CPU: a lane each on the main, slots per device, a real encode on each, an unknown device refused', { skip: !hasTools, timeout: 300_000 }, async () => {
+  const dir = await tmp();
+  const material = await certs(dir, 'worker-tls');
+  let w = await startDeviceWorker(dir, material);
+  const mainDb = memDb();
+  const nodes = createNodes({ db: mainDb, log: quiet, audit: quiet, name: 'main-nas', pollMs: 100 });
+  try {
+    const { pairing } = w.worker.startPairing();
+    const node = await nodes.add({ address: `127.0.0.1:${w.port}`, code: pairing.code });
+    const token = mainDb.get('nodes')[0].token;
+    const gpuLane = `node:${node.id}@${NODE_GPU.id}`;
+    const cpuLane = `node:${node.id}@cpu`;
+
+    // /info: its own devices, each with its encoders and clips at once (the
+    // default device, its GPU, keeps the old number until the main sets them)
+    const info = (await nodeRequest(w.port, token, { path: '/node/v1/info' })).json;
+    assert.equal(info.defaultDevice, NODE_GPU.id);
+    assert.deepEqual(info.devices.map((d) => [d.id, d.kind, d.name, d.encoders, d.slots, d.capacity]), [
+      [NODE_GPU.id, 'dri', 'Intel Arc A380', { h265: 'hevc_vaapi', av1: null }, 2, 2 + 15],
+      ['cpu', 'cpu', 'CPU (software encoder)', { h265: 'libx265', av1: 'libsvtav1' }, 0, 0 + 15]
+    ]);
+    assert.equal(info.slots, 2, 'the old fields are still there for older mains');
+
+    // the main: one lane per device, named "<node> · <device>", the first GPU its default
+    const lanes = await nodes.list();
+    assert.deepEqual(lanes.map((l) => [l.id, l.kind, l.nodeId, l.nodeName, l.deviceName, l.name, l.isDefault, l.online, l.encoders]), [
+      [gpuLane, 'node', node.id, 'garage-pc', 'Intel Arc A380', 'garage-pc · Intel Arc A380', true, true, { h265: 'hevc_vaapi', av1: null }],
+      [cpuLane, 'node', node.id, 'garage-pc', 'CPU (software encoder)', 'garage-pc · CPU (software encoder)', false, true, { h265: 'libx265', av1: 'libsvtav1' }]
+    ]);
+    const { DEVICE_ID } = require('../src/main/converter/contracts');
+    assert.ok(lanes.every((l) => DEVICE_ID.test(l.id)));
+
+    // all of a node's rows in one request; a number sets its default device
+    await nodes.setSlots(`node:${node.id}`, { [gpuLane]: 1, [cpuLane]: 1 });
+    assert.deepEqual(w.db.get('nodeWorker').deviceSlots, { [NODE_GPU.id]: 1, cpu: 1 });
+    assert.deepEqual((await nodes.list()).map((l) => l.slots), [1, 1]);
+    await nodes.setSlots(node.id, 3);
+    assert.deepEqual(w.db.get('nodeWorker').deviceSlots, { [NODE_GPU.id]: 3, cpu: 1 }, 'Use 3 (benchmark): its default device');
+    await nodes.setSlots(cpuLane, 2);
+    assert.deepEqual(w.db.get('nodeWorker').deviceSlots, { [NODE_GPU.id]: 3, cpu: 2 }, 'a number for one lane sets that device');
+    await nodes.setSlots(`node:${node.id}`, { [gpuLane]: 1, [cpuLane]: 1 });
+
+    // refused: a device it does not have, more than 8, a job for an unknown device
+    for (const slots of [{ 'pci:0000:09:00.0': 1 }, { cpu: 9 }, { cpu: -1 }, {}]) {
+      assert.equal((await nodeRequest(w.port, token, { method: 'POST', path: '/node/v1/slots', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ slots }) })).status, 400, JSON.stringify(slots));
+    }
+    const clip = path.join(dir, 'clip.mp4');
+    await createTeslaH264Fixture({ ffmpegPath: 'ffmpeg', outputPath: clip, durationSeconds: 2, frameRate: 12, size: '320x240', telemetryPattern: Array.from({ length: 24 }, (_, i) => Buffer.from([0x20, i])) });
+    const bytes = fs.readFileSync(clip);
+    for (const device of ['pci:0000:09:00.0', 'node:abcdefabcdef', 'cuda0']) {
+      const r = await nodeRequest(w.port, token, { method: 'POST', path: '/node/v1/jobs', headers: { 'Content-Length': bytes.length, 'X-Node-Job': JSON.stringify({ codec: 'h265', bitrate: 400_000, device }) }, body: bytes });
+      assert.equal(r.status, 400, device);
+    }
+    assert.deepEqual(fs.readdirSync(path.join(dir, 'work')), [], 'nothing kept of a refused clip');
+
+    // a real clip on each lane: the GPU's arguments name its own render node
+    w.seen.length = 0;
+    assert.equal(await encodeOn(nodes, gpuLane, clip, path.join(dir, 'gpu.mp4')), 0);
+    assert.equal(videoCodecOf(path.join(dir, 'gpu.mp4')), 'hevc');
+    const first = w.seen[0];
+    assert.ok(first.includes('hevc_vaapi') && first[first.indexOf('-vaapi_device') + 1] === NODE_GPU.node && first[first.indexOf('-hwaccel_device') + 1] === NODE_GPU.node, first.join(' '));
+    w.seen.length = 0;
+    assert.equal(await encodeOn(nodes, cpuLane, clip, path.join(dir, 'cpu.mp4')), 0);
+    assert.equal(videoCodecOf(path.join(dir, 'cpu.mp4')), 'hevc');
+    assert.ok(w.seen.every((args) => args.includes('libx265') && !args.includes('-vaapi_device') && !args.includes('-hwaccel')), 'the CPU, and nothing on the GPU');
+    // a whole-node lane (saved before) encodes on its default device, the GPU
+    w.seen.length = 0;
+    assert.equal(await encodeOn(nodes, `node:${node.id}`, clip, path.join(dir, 'whole.mp4')), 0);
+    assert.ok(w.seen[0].includes('hevc_vaapi'));
+    // AV1 on that GPU: it cannot, so the clip comes back (the main encodes it)
+    const av1 = await new Promise((resolve) => nodes.encode({ device: { id: gpuLane }, source: clip, target: path.join(dir, 'av1.mp4'), codec: 'av1', bitrate: 400_000, quality: null }).once('close', resolve));
+    assert.equal(av1, 1);
+
+    // each device converts no more than its own slots, at the same time as the other
+    const most = { [NODE_GPU.id]: 0, cpu: 0 };
+    const watch = setInterval(async () => {
+      const r = await nodeRequest(w.port, token, { path: '/node/v1/info' }).catch(() => null);
+      for (const d of r?.json?.devices || []) most[d.id] = Math.max(most[d.id], d.encoding);
+    }, 30);
+    const codes = await Promise.all([gpuLane, gpuLane, gpuLane, cpuLane, cpuLane].map((id, n) => encodeOn(nodes, id, clip, path.join(dir, `many-${n}.mp4`))));
+    clearInterval(watch);
+    assert.deepEqual(codes, [0, 0, 0, 0, 0]);
+    assert.ok(most[NODE_GPU.id] <= 1 && most.cpu <= 1, JSON.stringify(most));
+
+    // an older main (no device in the job): encoded as before, on its own slots
+    const old = await nodeRequest(w.port, token, { method: 'POST', path: '/node/v1/jobs', headers: { 'Content-Length': bytes.length, 'X-Node-Job': JSON.stringify({ codec: 'h265', bitrate: 400_000 }) }, body: bytes });
+    assert.equal(old.status, 200);
+    let state = null;
+    for (let i = 0; i < 300 && state !== 'done' && state !== 'failed'; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+      state = (await nodeRequest(w.port, token, { path: `/node/v1/jobs/${old.json.id}` })).json?.state;
+    }
+    assert.equal(state, 'done');
+    await nodeRequest(w.port, token, { method: 'DELETE', path: `/node/v1/jobs/${old.json.id}` });
+
+    // the node goes away: its lanes stay (offline, no encoders), here and
+    // after this server restarts
+    w.server.close();
+    w.worker.close();
+    assert.equal((await nodes.refresh(node.id)).online, false);
+    const offline = await nodes.list();
+    assert.deepEqual(offline.map((l) => [l.id, l.online, l.encoders]), [[gpuLane, false, { h265: null, av1: null }], [cpuLane, false, { h265: null, av1: null }]]);
+    const restarted = createNodes({ db: mainDb, log: quiet, audit: quiet, name: 'main-nas', pollMs: 100 });
+    assert.deepEqual((await restarted.list()).map((l) => [l.id, l.online, l.isDefault]), [[gpuLane, false, true], [cpuLane, false, false]]);
+    // and back: online again with its encoders
+    w = await startDeviceWorker(dir, material, { port: w.port, db: w.db });
+    assert.equal((await restarted.refresh(node.id)).online, true);
+    assert.deepEqual((await restarted.list()).map((l) => [l.id, l.online]), [[gpuLane, true], [cpuLane, true]]);
+  } finally {
+    w.server.close();
+    w.worker.close();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('an older node (no devices listed) is one lane, as before, and gets the old single number', { skip: !hasTools, timeout: 120_000 }, async () => {
+  const dir = await tmp();
+  const material = await certs(dir, 'worker-tls');
+  const w = await startWorker(dir, material);
+  const nodes = createNodes({ db: memDb(), log: quiet, audit: quiet, name: 'main-nas', pollMs: 100 });
+  try {
+    const { pairing } = w.worker.startPairing();
+    const node = await nodes.add({ address: `127.0.0.1:${w.port}`, code: pairing.code });
+    const lanes = await nodes.list();
+    assert.deepEqual(lanes.map((l) => [l.id, l.name, l.nodeId]), [[`node:${node.id}`, 'garage-pc (node)', node.id]]);
+    assert.equal((await nodes.overview())[0].devices, null);
+    assert.equal((await nodes.overview())[0].defaultLane, `node:${node.id}`);
+    await nodes.setSlots(`node:${node.id}`, 4);
+    assert.equal(w.worker.status().slots, 4, 'the number, as before');
+    await assert.rejects(nodes.setSlots(`node:${node.id}`, { cpu: 1 }), /per device of this node/, 'it has no devices to set');
+    const clip = path.join(dir, 'clip.mp4');
+    await createTeslaH264Fixture({ ffmpegPath: 'ffmpeg', outputPath: clip, durationSeconds: 2, frameRate: 12, size: '320x240', telemetryPattern: Array.from({ length: 24 }, (_, i) => Buffer.from([0x20, i])) });
+    assert.equal(await encodeOn(nodes, `node:${node.id}`, clip, path.join(dir, 'out.mp4')), 0);
+    assert.equal(videoCodecOf(path.join(dir, 'out.mp4')), 'hevc');
+  } finally {
+    w.server.close();
+    w.worker.close();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('two devices of one node still share its two uploads at a time, its trust and its Vehicles first list', { skip: !hasTools, timeout: 300_000 }, async () => {
+  const dir = await tmp();
+  const material = await certs(dir, 'worker-tls');
+  const w = await startDeviceWorker(dir, material);
+  const mainDb = memDb();
+  const nodes = createNodes({ db: mainDb, log: quiet, audit: quiet, name: 'main-nas', pollMs: 100 });
+  const { Readable } = require('stream');
+  const realCreate = fs.createReadStream;
+  let open = 0;
+  let most = 0;
+  try {
+    const { pairing } = w.worker.startPairing();
+    const node = await nodes.add({ address: `127.0.0.1:${w.port}`, code: pairing.code });
+    const gpuLane = `node:${node.id}@${NODE_GPU.id}`;
+    const cpuLane = `node:${node.id}@cpu`;
+    await nodes.setSlots(`node:${node.id}`, { [gpuLane]: 2, [cpuLane]: 2 });
+    // trust and Vehicles first are the node's, whichever lane asks
+    nodes.setTrusted(node.id, true);
+    assert.equal(nodes.trusted(gpuLane), true);
+    assert.equal(nodes.trusted(cpuLane), true);
+    nodes.setCars(node.id, ['car-a']);
+    assert.deepEqual(nodes.carLists(), { [`node:${node.id}`]: ['car-a'] });
+    // the benchmark's node view: its devices, and the lane its "Use" sets
+    const [view] = await nodes.overview();
+    assert.equal(view.defaultLane, gpuLane);
+    assert.equal(view.defaultDeviceName, 'Intel Arc A380');
+    assert.deepEqual(view.devices.map((d) => [d.lane, d.slots, d.isDefault]), [[gpuLane, 2, true], [cpuLane, 2, false]]);
+    assert.equal(view.slots, 4, 'its clips at once in all');
+
+    const clip = path.join(dir, 'clip.mp4');
+    await createTeslaH264Fixture({ ffmpegPath: 'ffmpeg', outputPath: clip, durationSeconds: 2, frameRate: 12, size: '320x240', telemetryPattern: Array.from({ length: 24 }, (_, i) => Buffer.from([0x20, i])) });
+    fs.createReadStream = (file, ...rest) => {
+      if (file !== clip) return realCreate.call(fs, file, ...rest);
+      open += 1;
+      most = Math.max(most, open);
+      const data = fs.readFileSync(clip);
+      const slow = new Readable({ read() {} });
+      setTimeout(() => { slow.push(data); slow.push(null); }, 150);
+      slow.once('end', () => { open -= 1; });
+      return slow;
+    };
+    const codes = await Promise.all([gpuLane, gpuLane, gpuLane, cpuLane, cpuLane, cpuLane].map((id, n) => encodeOn(nodes, id, clip, path.join(dir, `out-${n}.mp4`))));
+    assert.deepEqual(codes, [0, 0, 0, 0, 0, 0]);
+    assert.ok(most >= 1 && most <= 2, `${most} clips sent to the node at once, its two devices together`);
+  } finally {
+    fs.createReadStream = realCreate;
+    w.server.close();
+    w.worker.close();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});

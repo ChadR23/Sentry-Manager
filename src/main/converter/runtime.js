@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const nodeFs = require('fs');
 const nodePath = require('path');
 
-const { CONCURRENCY, DEVICE_ID } = require('./contracts');
+const { CONCURRENCY, DEVICE_ID, nodeKeyOf } = require('./contracts');
 const { createJobStore } = require('./jobStore');
 const { createFilesystemTransactionAdapters } = require('./filesystemTransactions');
 const { scanTeslaFootage } = require('./scanner');
@@ -580,13 +580,16 @@ async function createConverterRuntime(options = {}) {
       return Array.isArray(nodes) ? nodes.filter((node) => node?.kind === 'node' && DEVICE_ID.test(String(node.id))) : [];
     } catch (_) { return []; }
   }
-  async function listDevices() {
-    let local;
+  // This server's own GPUs and its CPU (never the nodes): what it encodes on
+  // itself, and what it offers a main server it is a node for.
+  async function localDevices() {
     try {
       const list = await discovery.list();
-      local = Array.isArray(list) && list.length > 0 ? list : [CPU_DEVICE];
-    } catch (_) { local = [CPU_DEVICE]; }
-    return [...local, ...await remoteNodeDevices()];
+      return Array.isArray(list) && list.length > 0 ? list : [CPU_DEVICE];
+    } catch (_) { return [CPU_DEVICE]; }
+  }
+  async function listDevices() {
+    return [...await localDevices(), ...await remoteNodeDevices()];
   }
   function lookUpDevices() {
     if (deviceList && deviceList.at === null) return deviceList.list;
@@ -601,9 +604,16 @@ async function createConverterRuntime(options = {}) {
   }
   // A lane's device id from a saved job or the browser, looked up only in
   // this list: node paths and NVIDIA indexes always come from here.
+  // A lane saved as a whole node ('node:<id>', before nodes listed their
+  // GPUs) finds that node's default device (its first GPU, else its CPU)
+  // once the node lists its devices.
   async function resolveDevice(id) {
     if (typeof id !== 'string' || !DEVICE_ID.test(id)) return null;
-    return (await recentDevices()).find((device) => device.id === id) || null;
+    const list = await recentDevices();
+    const exact = list.find((device) => device.id === id);
+    if (exact) return exact;
+    if (nodeKeyOf(id) !== id) return null;
+    return list.find((device) => device?.kind === 'node' && device.isDefault === true && nodeKeyOf(device.id) === id) || null;
   }
   // The device a job without lanes encodes a codec on (planner.select's
   // choice). NVENC without -gpu takes the first NVIDIA GPU that can, in
@@ -1190,6 +1200,13 @@ async function createConverterRuntime(options = {}) {
     // (server/nodeWorker.js).
     selectEncoder: (family) => planner.select(family),
     cpuEncoder: (family) => planner.selectCpuFallback(family),
+    // This server's own GPUs and CPU, and the encoder one of them uses for a
+    // codec (proven on that GPU), as its own lanes do: a main server picks
+    // which of them encode its clips (server/nodeWorker.js).
+    localDevices: () => localDevices(),
+    selectEncoderFor: (family, device, selectOptions) => planner.selectFor(family, device, selectOptions),
+    // something converts here right now (a GPU test encode then waits)
+    encodingNow: () => encodingNow(),
     // Every ffmpeg encoding right now, a benchmark's included (those carry
     // benchmark: true and a temporary job id).
     activeEncodes() {
@@ -1399,6 +1416,7 @@ async function startConverterWithRecoveryPrompt({
 }
 
 module.exports = {
+  cudaOrderOptions,
   createBoundedProcessRunner,
   createConverterLifecycle,
   createConverterRuntime,

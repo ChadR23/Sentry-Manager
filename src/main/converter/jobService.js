@@ -12,7 +12,8 @@ const {
   serializeSummary,
   targetOutputBytes,
   hasSizeTarget,
-  effectiveVerifyMode
+  effectiveVerifyMode,
+  nodeKeyOf
 } = require('./contracts');
 const { replacementAction } = require('./jobStore');
 const {
@@ -613,41 +614,85 @@ function createConverterJobService(deps) {
     }
   }
 
+  // NODE_SEND_AHEAD shared by one node's lanes (its GPUs and its CPU) in
+  // proportion to their numbers: a node is sent the same 15 ahead however
+  // many of its devices convert.
+  function shareAhead(owns) {
+    const total = owns.reduce((sum, n) => sum + n, 0);
+    if (total <= 0) return owns.map(() => 0);
+    const exact = owns.map((n) => (NODE_SEND_AHEAD * n) / total);
+    const shares = exact.map(Math.floor);
+    let left = NODE_SEND_AHEAD - shares.reduce((sum, n) => sum + n, 0);
+    const order = exact.map((value, index) => [value - Math.floor(value), index]).sort((a, b) => b[0] - a[0]);
+    for (const [, index] of order) {
+      if (left <= 0) break;
+      shares[index] += 1;
+      left -= 1;
+    }
+    return shares;
+  }
+
   // Finds each lane's GPU among the devices this container has now.
   async function resolveLanes(lanes) {
     const limits = new Map();
     const base = new Map(); // the lane's own number, without clips sent ahead
     const devices = new Map();
+    const found = [];
+    const named = new Set(lanes.map((lane) => lane.device));
     for (const lane of lanes) {
       let device = null;
       try {
         device = typeof deps.resolveDevice === 'function' ? await deps.resolveDevice(lane.device) : null;
       } catch (_) { device = null; }
-      if (device && device.id === lane.device) {
-        // A node (another server) gets NODE_SEND_AHEAD more clips than it
-        // converts at once: they are read and sent while it works, and wait
-        // there for a free slot, so it never waits for this server.
-        // A node converts as many at once as its row here says (Encoder >
-        // Parallel conversions): the node is told so (at most its maximum,
-        // 8). Where it cannot be told, its own setting counts: more here
-        // would only be sent and checked here, never converted sooner.
-        let own = lane.concurrency;
-        if (device.kind === 'node') {
-          if (typeof deps.setNodeSlots === 'function') {
-            own = Math.min(lane.concurrency, NODE_MAX_AT_ONCE);
-            if (device.slots !== own) {
-              try { await deps.setNodeSlots(device.id, own); } catch (_) {
-                if (Number.isSafeInteger(device.slots) && device.slots > 0) own = Math.min(own, device.slots);
-              }
-            }
-          } else if (Number.isSafeInteger(device.slots) && device.slots > 0) own = Math.min(lane.concurrency, device.slots);
-        }
-        limits.set(lane.device, own + (device.kind === 'node' ? NODE_SEND_AHEAD : 0));
-        base.set(lane.device, own);
-        devices.set(lane.device, device);
+      // A lane saved as a whole node ('node:<id>') is the node's default
+      // device once the node lists its GPUs; one the job also names on its
+      // own is that lane's.
+      const alias = Boolean(device) && device.id !== lane.device && device.kind === 'node' && nodeKeyOf(device.id) === lane.device;
+      if (alias && named.has(device.id)) continue;
+      if (device && (device.id === lane.device || alias)) {
+        found.push({ lane, device, own: lane.concurrency });
       } else {
         console.warn(`[CONVERTER] Encoding device ${lane.device} is not in the container; its ${lane.concurrency} conversions at once are not started.`);
       }
+    }
+    // A node converts as many at once on each of its devices as their rows
+    // here say (Encoder > Parallel conversions): the node is told so (at
+    // most its maximum, 8), all of its devices in one request. Where it
+    // cannot be told, its own setting counts: more here would only be sent
+    // and checked here, never converted sooner. A node also gets
+    // NODE_SEND_AHEAD more clips than it converts at once: they are read and
+    // sent while it works, and wait there for a free slot, so it never waits
+    // for this server.
+    const byNode = new Map();
+    for (const entry of found) {
+      if (entry.device.kind !== 'node') continue;
+      const key = nodeKeyOf(entry.device.id) || entry.device.id;
+      if (!byNode.has(key)) byNode.set(key, []);
+      byNode.get(key).push(entry);
+    }
+    for (const [key, list] of byNode) {
+      const known = (entry) => Number.isSafeInteger(entry.device.slots) && entry.device.slots > 0;
+      if (typeof deps.setNodeSlots === 'function') {
+        for (const entry of list) entry.own = Math.min(entry.lane.concurrency, NODE_MAX_AT_ONCE);
+        if (list.some((entry) => entry.device.slots !== entry.own)) {
+          const perDevice = list.every((entry) => entry.device.id !== key);
+          try {
+            if (perDevice) await deps.setNodeSlots(key, Object.fromEntries(list.map((entry) => [entry.device.id, entry.own])));
+            else await deps.setNodeSlots(list[0].device.id, list[0].own);
+          } catch (_) {
+            for (const entry of list) if (known(entry)) entry.own = Math.min(entry.own, entry.device.slots);
+          }
+        }
+      } else {
+        for (const entry of list) if (known(entry)) entry.own = Math.min(entry.lane.concurrency, entry.device.slots);
+      }
+      const ahead = shareAhead(list.map((entry) => entry.own));
+      list.forEach((entry, index) => { entry.ahead = ahead[index]; });
+    }
+    for (const { lane, device, own, ahead = 0 } of found) {
+      limits.set(lane.device, own + ahead);
+      base.set(lane.device, own);
+      devices.set(lane.device, device);
     }
     return { fallback: devices.size === 0, limits, base, devices };
   }
@@ -1645,12 +1690,14 @@ function createConverterJobService(deps) {
   // at once. As many as the clips sent ahead overloaded this server's CPU;
   // as few as the node's own number could not keep up with a fast node
   // (its finished clips waited here, a minute each).
+  // (per node: every lane of one node, its GPUs and its CPU, counts together)
   async function takeCheckSlot(runtime, lane, signal) {
     runtime.nodeChecks ||= new Map();
-    const id = lane?.id || 'node';
+    const id = nodeKeyOf(lane?.id) || lane?.id || 'node';
     if (!runtime.nodeChecks.has(id)) runtime.nodeChecks.set(id, { busy: 0, waiters: [] });
     const slots = runtime.nodeChecks.get(id);
-    const limit = () => Math.max(1, runtime.lanePlan?.base?.get(id) || 1) + NODE_CHECK_EXTRA;
+    const own = () => [...(runtime.lanePlan?.base || new Map())].reduce((sum, [laneId, n]) => sum + ((nodeKeyOf(laneId) || laneId) === id ? n : 0), 0);
+    const limit = () => Math.max(1, own() || 1) + NODE_CHECK_EXTRA;
     while (slots.busy >= limit()) {
       if (signal?.aborted) throw serviceError('CANCELLED');
       await new Promise((resolve) => {

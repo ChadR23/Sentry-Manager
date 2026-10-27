@@ -1666,13 +1666,15 @@
       const b = benches[n.id];
       if (!b) return '';
       const codec = b.codec === 'av1' ? 'AV1' : 'H.265';
+      // (a node that lists its GPUs is measured on its default one: its first GPU, else its CPU)
+      const on = n.defaultDeviceName ? ` on ${esc(n.defaultDeviceName)}` : '';
       const rows = b.results.map((r) => `<tr${r.level === b.suggested ? ' class="is-best"' : ''}><td>${r.level} at once</td><td>${r.failed ? `${r.failed} failed` : `${r.clipsPerMinute} clips/min`}</td><td class="muted small">${r.clips} clips in ${r.seconds} s</td></tr>`).join('');
       return `<tr class="node-bench-row"><td colspan="5"><div class="node-bench">
-        <div><b>Benchmark, ${codec}</b> <span class="muted small">${b.state === 'running' ? esc(b.phase || 'Running') + '…' : b.state === 'failed' ? `failed: ${esc(b.error || '')}` : b.state === 'cancelled' ? 'cancelled' : `done${b.samples ? ` · ${plural(b.samples, 'sample clip')} from your footage, only read${b.converted ? ' (already converted ones: no originals are left)' : ''}` : ''}`}</span></div>
+        <div><b>Benchmark, ${codec}${on}</b> <span class="muted small">${b.state === 'running' ? esc(b.phase || 'Running') + '…' : b.state === 'failed' ? `failed: ${esc(b.error || '')}` : b.state === 'cancelled' ? 'cancelled' : `done${b.samples ? ` · ${plural(b.samples, 'sample clip')} from your footage, only read${b.converted ? ' (already converted ones: no originals are left)' : ''}` : ''}`}</span></div>
         ${rows ? `<table class="table" style="margin-top:8px"><tbody>${rows}</tbody></table>` : ''}
         <div class="form-actions" style="margin-top:8px">
           ${b.state === 'running' ? `<button class="btn sm" data-bench-cancel="${esc(n.id)}">Cancel</button>`
-            : `${b.suggested ? `<button class="btn sm solid" data-bench-use="${esc(n.id)}" data-level="${b.suggested}">Use ${b.suggested} at once</button>` : ''}<button class="btn sm" data-bench-start="${esc(n.id)}" data-codec="${esc(b.codec)}">Run again</button>`}
+            : `${b.suggested ? `<button class="btn sm solid" data-bench-use="${esc(n.id)}" data-level="${b.suggested}">Use ${b.suggested} at once${on}</button>` : ''}<button class="btn sm" data-bench-start="${esc(n.id)}" data-codec="${esc(b.codec)}">Run again</button>`}
         </div></div></td></tr>`;
     };
     // the vehicles a node converts for first, in order (automatic conversion)
@@ -1696,10 +1698,14 @@
           : 'Its encodes get the picture check here: a few random stretches of each clip compared with the original. Trust only a computer of your own: it skips that check.'}</span></span>
       </label></td></tr>`;
     const encodersText = (e) => [['H.265', e?.h265], ['AV1', e?.av1]].filter(([, v]) => v).map(([k, v]) => `${k}: ${esc(v)}`).join(' · ') || '—';
+    // a node that lists its GPUs and CPU: each with its encoders
+    const nodeEncoders = (n) => (Array.isArray(n.devices) && n.devices.length
+      ? n.devices.map((d) => `<span class="words"><b>${esc(d.name)}</b><br><span class="muted">${encodersText(d.encoders)}</span></span>`).join('<br>')
+      : encodersText(n.encoders));
     const nodeRows = nodes.map((n) => `<tr>
         <td class="words"><b>${esc(n.name)}</b><br><span class="muted small mono">${esc(n.address)}</span></td>
         <td>${n.online ? '<span class="chip green"><span class="dot ok"></span>Online</span>' : `<span class="chip red"><span class="dot bad"></span>Offline</span><br><span class="muted small words">${esc(n.error || '')}</span>`}</td>
-        <td class="small">${encodersText(n.encoders)}</td>
+        <td class="small">${nodeEncoders(n)}</td>
         <td class="small">${n.online && n.slots ? (n.encoding === null ? `${n.busy ?? 0} of ${n.slots} busy` : `${n.encoding} of ${n.slots} converting${n.busy > n.encoding ? ` · ${n.busy - n.encoding} waiting` : ''}`) : '—'}</td>
         <td class="actions">${n.online && !benches[n.id] ? `<button class="btn sm" data-bench-start="${esc(n.id)}" data-codec="h265"${benchRunning ? ' disabled' : ''}>Benchmark</button>${n.encoders?.av1 ? `<button class="btn sm" data-bench-start="${esc(n.id)}" data-codec="av1"${benchRunning ? ' disabled' : ''}>Benchmark AV1</button>` : ''}` : ''}<button class="btn sm" data-rename-node="${esc(n.id)}">Rename</button><button class="btn sm" data-remove-node="${esc(n.id)}">Remove</button></td></tr>${carsPanel(n)}${trustPanel(n)}${benchPanel(n)}`).join('');
     const pairing = worker.pairing;
@@ -1713,7 +1719,7 @@
       <div class="card"><h2>Nodes this server uses</h2>
         <p class="muted" style="margin-top:6px">Other servers running Sentry Six Manager can encode clips for this one. This server reads each clip, sends it to the node over HTTPS and checks the encoded file before it saves anything, as with its own GPUs. Nodes never get your share passwords and never touch the footage.</p>
         ${nodes.length ? `<table class="table" style="margin-top:14px"><thead><tr><th>Node</th><th>Status</th><th>Encoders</th><th>Clips</th><th></th></tr></thead><tbody>${nodeRows}</tbody></table>
-          <p class="muted small" style="margin-top:10px">Each node is a row under <a href="#/encoder">Encoder</a> → Parallel conversions: set how many clips it converts at once there.</p>` : '<p style="margin-top:12px">No nodes yet.</p>'}
+          <p class="muted small" style="margin-top:10px">Each node is a group under <a href="#/encoder">Encoder</a> → Parallel conversions: open it to pick which of its GPUs (and its CPU) convert, and how many clips each converts at once.</p>` : '<p style="margin-top:12px">No nodes yet.</p>'}
         <form id="node-add" class="form" style="margin-top:18px">
           <label class="field">Node address<input class="input" name="address" placeholder="192.168.1.30 or nas.local:9000" autocomplete="off" required></label>
           <label class="field">Pairing code<input class="input mono" name="code" placeholder="ABCD-EFGH-JKLM" autocomplete="off" required></label>
@@ -1727,9 +1733,8 @@
         <p class="muted" style="margin-top:6px">A main server you pair here sends this one clips to encode and takes the encoded files back. It can do nothing else here: no footage, settings or passwords.</p>
         <div class="form" style="margin-top:14px">
           <label class="check"><input type="checkbox" id="worker-on"${worker.enabled ? ' checked' : ''}> Encode for paired main servers</label>
-          <label class="field">Clips at once<select class="input" id="worker-slots">${[1, 2, 3, 4, 6, 8].map((n) => `<option${n === worker.slots ? ' selected' : ''}>${n}</option>`).join('')}</select></label>
-          <label class="field">Encode with<select class="input" id="worker-use">${[['gpu', 'GPU (CPU only without a GPU)'], ['gpu-cpu', 'GPU, then CPU if it fails'], ['cpu', 'CPU only']].map(([v, t]) => `<option value="${v}"${v === worker.use ? ' selected' : ''}>${t}</option>`).join('')}</select></label>
         </div>
+        <p class="muted small" style="margin-top:8px">The main server picks which of this server's GPUs (and its CPU) encode, and how many clips each converts at once, in its own Encoder.</p>
         ${pairing ? `<div class="note green pair-code" style="margin-top:14px">
             <div class="muted small">Pairing code (one use, ${plural(mins, 'minute')} left)</div>
             <div class="mono pair-code-value">${esc(pairing.code)}</div>
@@ -1772,16 +1777,23 @@
     page.querySelectorAll('[data-bench-use]').forEach((b) => {
       b.onclick = async () => {
         const level = Number(b.dataset.level);
+        const n = nodes.find((x) => x.id === b.dataset.benchUse);
         try {
+          // the device that was benchmarked (the node's default one), on the node
           await api(`/api/nodes/${encodeURIComponent(b.dataset.benchUse)}/slots`, { body: { slots: level } });
           // and its row under Encoder > Parallel conversions, for the next run
           try {
             const key = 'converterLanes';
             const lanes = JSON.parse(localStorage.getItem(key) || '{}') || {};
-            lanes[`node:${b.dataset.benchUse}`] = level;
+            const lane = n?.defaultLane || `node:${b.dataset.benchUse}`;
+            lanes[lane] = level;
+            // (the whole-node row of before stands for the same device)
+            if (lane !== `node:${b.dataset.benchUse}`) delete lanes[`node:${b.dataset.benchUse}`];
             localStorage.setItem(key, JSON.stringify(lanes));
           } catch { /* a preference only */ }
-          toast(`The node now converts ${level} at once; its Encoder row is set to ${level} too.`);
+          toast(n?.defaultDeviceName
+            ? `${n.defaultDeviceName} on ${n.name} now converts ${level} at once; its row under Encoder is set to ${level} too.`
+            : `The node now converts ${level} at once; its Encoder row is set to ${level} too.`);
         } catch (err) { toast(err.message, true); }
         render();
       };
@@ -1869,13 +1881,11 @@
     if (!worker.available) return;
     const saveWorker = async () => {
       try {
-        await api('/api/nodes/worker', { body: { enabled: $('worker-on').checked, slots: Number($('worker-slots').value), use: $('worker-use').value } });
+        await api('/api/nodes/worker', { body: { enabled: $('worker-on').checked } });
       } catch (err) { toast(err.message, true); }
       render();
     };
     $('worker-on').onchange = saveWorker;
-    $('worker-slots').onchange = saveWorker;
-    $('worker-use').onchange = saveWorker;
     if ($('pair-start')) $('pair-start').onclick = async () => {
       try { await api('/api/nodes/worker/pair', { body: {} }); } catch (err) { toast(err.message, true); }
       render();

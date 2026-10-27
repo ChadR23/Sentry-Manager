@@ -711,3 +711,138 @@ test('shown again during a run: the rows show the running job, not the remembere
   assert.equal(p.lane(ARC.id).count, '3');
   assert.equal(p.lane(UHD.id).count, '2');
 });
+
+// ---- a node that lists its GPUs and its CPU: one group per node, opened
+// and closed from its header, with a row per device inside
+
+const GARAGE = 'node:cccccccccccc';
+const GARAGE_GPU = { id: `${GARAGE}@pci:0000:01:00.0`, kind: 'node', nodeId: 'cccccccccccc', nodeName: 'Garage PC', deviceId: 'pci:0000:01:00.0', deviceKind: 'nvidia', deviceName: 'NVIDIA GeForce RTX 4070', name: 'Garage PC · NVIDIA GeForce RTX 4070', isDefault: true, online: true, node: null, index: null, pci: null, encoders: { h265: 'hevc_nvenc', av1: 'av1_nvenc' } };
+const GARAGE_CPU = { id: `${GARAGE}@cpu`, kind: 'node', nodeId: 'cccccccccccc', nodeName: 'Garage PC', deviceId: 'cpu', deviceKind: 'cpu', deviceName: 'CPU (software encoder)', name: 'Garage PC · CPU (software encoder)', isDefault: false, online: true, node: null, index: null, pci: null, encoders: { h265: 'libx265', av1: 'libsvtav1' } };
+const OLD_NODE = { id: 'node:dddddddddddd', kind: 'node', nodeId: 'dddddddddddd', nodeName: 'Old PC', name: 'Old PC (node)', online: true, encoders: { h265: 'hevc_vaapi', av1: null } };
+const WITH_NODE = { devices: [ARC, UHD, GARAGE_GPU, GARAGE_CPU, OLD_NODE, CPU], defaultDevice: ARC.id };
+
+function groupOf(p, key) {
+  const group = p.elements.lanes.find((n) => n.dataset.node === key);
+  if (!group) return null;
+  const head = group.find((n) => n.tagName === 'BUTTON' && n.className === 'converter-lane-group-head');
+  const body = group.find((n) => n.className === 'converter-lane-group-body');
+  return {
+    group, head, body,
+    open: head.getAttribute('aria-expanded') === 'true',
+    name: head.find((n) => n.tagName === 'STRONG').textContent,
+    status: head.find((n) => n.tagName === 'SMALL').textContent,
+    total: head.find((n) => n.className === 'converter-lane-group-total').textContent
+  };
+}
+
+test('a node with GPUs: one group, closed at first; its header opens it; a row per GPU and its CPU, each with its own stepper', async () => {
+  const storage = makeStorage({ converterConcurrency: '3' });
+  const p = await page({ devices: WITH_NODE, storage });
+  // this server's GPUs, an older node and the CPU stay rows; the node is a group after them
+  assert.deepEqual(p.elements.lanes.children.map((n) => n.dataset.device || n.dataset.node || 'total'), [ARC.id, UHD.id, OLD_NODE.id, 'cpu', GARAGE, 'total']);
+  let g = groupOf(p, GARAGE);
+  assert.equal(g.name, 'Garage PC');
+  assert.equal(g.open, false);
+  assert.equal(g.body.hidden, true);
+  assert.equal(g.head.getAttribute('aria-controls'), g.body.id, 'the header names what it opens');
+  assert.equal(g.head.type, 'button');
+  assert.equal(g.total, 'Off');
+  assert.equal(g.status, 'Online · 0 at once · 2 devices');
+  assert.deepEqual(g.body.children.map((n) => n.dataset.device), [GARAGE_GPU.id, GARAGE_CPU.id]);
+  // each row is named by its own device; its stepper says whose
+  const gpu = p.lane(GARAGE_GPU.id);
+  assert.equal(gpu.name, 'NVIDIA GeForce RTX 4070');
+  assert.equal(gpu.label, 'Garage PC · NVIDIA GeForce RTX 4070: conversions at once');
+  assert.equal(gpu.note, 'H.265: hevc_nvenc · AV1: av1_nvenc');
+  assert.equal(p.lane(GARAGE_CPU.id).name, 'CPU (software encoder)');
+  assert.equal(p.lane(GARAGE_CPU.id).note, "Uses Garage PC's CPU cores; slower than a GPU");
+  assert.equal(p.lane(OLD_NODE.id).name, 'Old PC (node)', 'an older node is one row, as before');
+
+  // the header opens and closes it, and that is remembered per node
+  g.head.click();
+  g = groupOf(p, GARAGE);
+  assert.equal(g.open, true);
+  assert.equal(g.body.hidden, false);
+  assert.deepEqual(JSON.parse(storage.map.get('converterNodeGroups')), { [GARAGE]: true });
+  const again = await page({ devices: WITH_NODE, storage });
+  assert.equal(groupOf(again, GARAGE).open, true, 'open again next time');
+  groupOf(again, GARAGE).head.click();
+  assert.equal(groupOf(again, GARAGE).body.hidden, true);
+  assert.deepEqual(JSON.parse(storage.map.get('converterNodeGroups')), {});
+
+  // its GPU and its CPU are set on their own; the header and the total count them
+  p.lane(GARAGE_GPU.id).plus.click();
+  p.lane(GARAGE_GPU.id).plus.click();
+  p.lane(GARAGE_CPU.id).plus.click();
+  assert.equal(p.lane(GARAGE_GPU.id).count, '2');
+  assert.equal(p.lane(GARAGE_CPU.id).count, '1');
+  g = groupOf(p, GARAGE);
+  assert.equal(g.total, '3');
+  assert.equal(g.status, 'Online · 3 at once · 2 devices');
+  assert.equal(g.group.classList.contains('is-off'), false);
+  assert.equal(p.elements.lanesTotal.textContent.split('.')[0], '6 at once in total', 'this server\'s 3 and the node\'s 3');
+  const config = await p.start();
+  assert.deepEqual(config.lanes, [{ device: ARC.id, concurrency: 3 }, { device: GARAGE_GPU.id, concurrency: 2 }, { device: GARAGE_CPU.id, concurrency: 1 }]);
+  assert.equal(config.concurrency, 6);
+  // its GPU alone, then its CPU alone
+  p.lane(GARAGE_GPU.id).minus.click();
+  p.lane(GARAGE_GPU.id).minus.click();
+  assert.deepEqual((await p.start()).lanes.filter((l) => l.device.startsWith(GARAGE)), [{ device: GARAGE_CPU.id, concurrency: 1 }]);
+  p.lane(GARAGE_CPU.id).minus.click();
+  p.lane(GARAGE_GPU.id).plus.click();
+  assert.deepEqual((await p.start()).lanes.filter((l) => l.device.startsWith(GARAGE)), [{ device: GARAGE_GPU.id, concurrency: 1 }]);
+
+  // offline: said on the header
+  const off = await page({ devices: { ...WITH_NODE, devices: WITH_NODE.devices.map((d) => (d.id.startsWith(GARAGE) ? { ...d, online: false, encoders: { h265: null, av1: null } } : d)) } });
+  assert.equal(groupOf(off, GARAGE).status, 'Offline: check it under Nodes');
+  assert.equal(groupOf(off, GARAGE).group.classList.contains('is-offline'), true);
+});
+
+test('a node\'s device rows change a running job live, like any other row', async () => {
+  const p = await page({ devices: WITH_NODE, job: running({ codec: 'h265', concurrency: 3, lanes: [{ device: ARC.id, concurrency: 2 }, { device: GARAGE_GPU.id, concurrency: 1 }] }) });
+  assert.equal(p.lane(GARAGE_GPU.id).count, '1');
+  assert.equal(groupOf(p, GARAGE).total, '1');
+  p.lane(GARAGE_CPU.id).plus.click();
+  await settle(80);
+  assert.deepEqual(p.sent.lanes.at(-1), ['job-1', [{ device: ARC.id, concurrency: 2 }, { device: GARAGE_GPU.id, concurrency: 1 }, { device: GARAGE_CPU.id, concurrency: 1 }]]);
+});
+
+test('a whole-node number saved before (converterLanes, a running job) shows on the node\'s first GPU, and is not sent again', async () => {
+  // the browser's rows from before nodes listed their GPUs
+  const storage = makeStorage({ converterLanes: JSON.stringify({ [ARC.id]: 2, [UHD.id]: 0, cpu: 0, [GARAGE]: 3 }) });
+  const p = await page({ devices: WITH_NODE, storage });
+  assert.equal(p.lane(GARAGE_GPU.id).count, '3', 'the node\'s number is its first GPU\'s now');
+  assert.equal(p.lane(GARAGE_CPU.id).count, 'Off');
+  assert.deepEqual((await p.start()).lanes, [{ device: ARC.id, concurrency: 2 }, { device: GARAGE_GPU.id, concurrency: 3 }]);
+  p.lane(GARAGE_CPU.id).plus.click();
+  const saved = JSON.parse(storage.map.get('converterLanes'));
+  assert.equal(saved[GARAGE_GPU.id], 3);
+  assert.equal(GARAGE in saved, false, 'the old whole-node entry is gone once the rows are saved');
+  // a running job saved with the whole node: its rows, and no live change for it
+  const q = await page({ devices: WITH_NODE, job: running({ codec: 'h265', concurrency: 4, lanes: [{ device: ARC.id, concurrency: 2 }, { device: GARAGE, concurrency: 2 }] }) });
+  assert.equal(q.lane(GARAGE_GPU.id).count, '2');
+  await q.c.refreshDevices();
+  await settle(80);
+  assert.equal(q.sent.lanes.length, 0, 'nothing is sent for a job that already converts there');
+});
+
+test('shown again: a GPU added to a node or taken out shows in its group', async () => {
+  let now = { devices: [ARC, UHD, GARAGE_CPU, CPU], defaultDevice: ARC.id };
+  const p = await page({ api: { getConverterDevices: async () => ({ ok: true, value: now }) } });
+  assert.deepEqual(groupOf(p, GARAGE).body.children.map((n) => n.dataset.device), [GARAGE_CPU.id]);
+  assert.equal(groupOf(p, GARAGE).status, 'Online · 0 at once · 1 device');
+  now = WITH_NODE;
+  assert.equal(await p.c.refreshDevices(), undefined);
+  assert.deepEqual(groupOf(p, GARAGE).body.children.map((n) => n.dataset.device), [GARAGE_GPU.id, GARAGE_CPU.id]);
+  now = { devices: [ARC, UHD, CPU], defaultDevice: ARC.id };
+  await p.c.refreshDevices();
+  assert.equal(groupOf(p, GARAGE), null, 'a node removed: its group goes');
+});
+
+test('the Encoder styles: node groups have 44 px tap targets on touch screens and never widen the page', () => {
+  const css = fs.readFileSync(path.join(REPO, 'src/renderer/styles/encoderPage.css'), 'utf8');
+  assert.match(css, /\.converter-lane-group-head \{[^}]*min-height: 52px/);
+  assert.match(css, /@media \(pointer: coarse\)[\s\S]*\.converter-lane-group-head \{ min-height: 56px; \}/);
+  assert.match(css, /\.converter-lane-group-head \{[^}]*grid-template-columns: minmax\(0, 1fr\) auto auto/, 'the name gives way, never the count');
+  assert.match(css, /\.converter-lane-group-body \{[^}]*grid-template-columns: minmax\(0, 1fr\)/);
+});

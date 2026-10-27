@@ -65,7 +65,8 @@ function deviceEntries(workers, gpus) {
     const gpu = first.hardware ? gpuFor(gpus, first.device) : null;
     entries.push({
       id,
-      // (a node: its own name, "Garage PC (node)", not its id)
+      // (a node: its own name, "Garage PC · NVIDIA GeForce RTX 4070" for one of
+      // its GPUs, "Garage PC (node)" for an older one, not its id)
       name: first.node || (first.hardware ? gpu?.name || null : 'CPU'),
       node: first.device || (first.hardware ? gpu?.node || null : null),
       encoder: first.encoder || null,

@@ -669,3 +669,154 @@ test('a row changed while the nodes cannot be listed keeps the vehicle\'s Off', 
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ---- a node that lists its GPUs and its CPU: one lane per device, while
+// everything that is the node's own (its Vehicles first list, Off per
+// vehicle, what it is sent ahead, its checks here) stays per node
+
+const NODE_KEY = 'node:cccccccccccc';
+const NODE_GPU = { id: `${NODE_KEY}@pci:0000:01:00.0`, kind: 'node', nodeId: 'cccccccccccc', nodeName: 'Garage PC', deviceName: 'NVIDIA GeForce RTX 4070', name: 'Garage PC · NVIDIA GeForce RTX 4070', isDefault: true, encoders: { h265: 'hevc_nvenc', av1: 'av1_nvenc' }, online: true, slots: 2 };
+const NODE_CPU = { id: `${NODE_KEY}@cpu`, kind: 'node', nodeId: 'cccccccccccc', nodeName: 'Garage PC', deviceName: 'CPU (software encoder)', name: 'Garage PC · CPU (software encoder)', isDefault: false, encoders: { h265: 'libx265', av1: 'libsvtav1' }, online: true, slots: 0 };
+
+test('planning with a node\'s devices: the node goes to one vehicle as a whole, with that vehicle\'s rows for each device', () => {
+  const nodeDevices = [{ id: GPU, kind: 'gpu' }, NODE_GPU, NODE_CPU];
+  const a = car('a', [{ device: GPU, concurrency: 2 }, { device: NODE_GPU.id, concurrency: 2 }, { device: NODE_CPU.id, concurrency: 1 }]);
+  const b = car('b', [{ device: GPU, concurrency: 1 }]);
+  // first on its list: b gets the whole node (b has no rows of its own on
+  // it: its default device, at what it converts there now); a gets none of it
+  let plan = planLanes({ cars: [a, b], wanting: new Set(['/cars/a', '/cars/b']), localHolder: '/cars/a', devices: nodeDevices, priorities: { [NODE_KEY]: ['/cars/b'] } });
+  assert.deepEqual(plan.get('/cars/b'), [{ device: NODE_GPU.id, concurrency: 2 }]);
+  assert.deepEqual(plan.get('/cars/a'), [{ device: GPU, concurrency: 2 }]);
+  // b has nothing new: the node helps a, on both of a's rows for it
+  plan = planLanes({ cars: [a, b], wanting: new Set(['/cars/a']), localHolder: '/cars/a', devices: nodeDevices, priorities: { [NODE_KEY]: ['/cars/b'] } });
+  assert.deepEqual(plan.get('/cars/a'), [{ device: GPU, concurrency: 2 }, { device: NODE_GPU.id, concurrency: 2 }, { device: NODE_CPU.id, concurrency: 1 }]);
+  // Off for a vehicle is per node: none of its devices goes there
+  const off = { ...a, nodesOff: [NODE_KEY] };
+  plan = planLanes({ cars: [off, b], wanting: new Set(['/cars/a']), localHolder: '/cars/a', devices: nodeDevices, priorities: { [NODE_KEY]: ['/cars/a'] } });
+  assert.deepEqual(plan.get('/cars/a'), [{ device: GPU, concurrency: 2 }]);
+  // a vehicle saved with the whole node ('node:<id>', before nodes listed
+  // their GPUs) gets the node's default device at that number
+  const old = car('old', [{ device: GPU, concurrency: 1 }, { device: NODE_KEY, concurrency: 3 }]);
+  plan = planLanes({ cars: [old], wanting: new Set(['/cars/old']), localHolder: '/cars/old', devices: nodeDevices, priorities: {} });
+  assert.deepEqual(plan.get('/cars/old'), [{ device: GPU, concurrency: 1 }, { device: NODE_GPU.id, concurrency: 3 }]);
+  // offline: none of its devices is given out
+  plan = planLanes({ cars: [a], wanting: new Set(['/cars/a']), localHolder: '/cars/a', devices: [{ id: GPU, kind: 'gpu' }, { ...NODE_GPU, online: false }, { ...NODE_CPU, online: false }], priorities: {} });
+  assert.deepEqual(plan.get('/cars/a'), [{ device: GPU, concurrency: 2 }]);
+});
+
+test('a vehicle\'s Off is per node: on while any of its devices is on, Off once all of them are', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sm-node-dev-off-'));
+  try {
+    const service = fakeService();
+    const auto = createAutoConverter({
+      service, scanner: async function* () {}, fs: fs.promises, directory: dir, timers: { setInterval: () => null, clearInterval: () => {} },
+      devices: async () => [{ id: GPU, kind: 'gpu' }, NODE_GPU, NODE_CPU, { id: N2, kind: 'node', online: true }]
+    });
+    const shared = { intervalMinutes: 60, window: null, holdManual: false, keepRunning: false, openAtLogin: false };
+    await auto.configure({ ...shared, enabled: true, config: car('chad', [{ device: GPU, concurrency: 2 }, { device: NODE_GPU.id, concurrency: 1 }]) });
+    // only the node's CPU on: the node is not Off (the older node, N2, is)
+    await auto.setLanes([{ device: GPU, concurrency: 2 }, { device: NODE_CPU.id, concurrency: 1 }], '/cars/chad');
+    assert.deepEqual(auto.getState().settings.configs[0].nodesOff, [N2]);
+    // none of its devices: the node is Off, once, as the node
+    await auto.setLanes([{ device: GPU, concurrency: 2 }], '/cars/chad');
+    assert.deepEqual(auto.getState().settings.configs[0].nodesOff, [NODE_KEY, N2]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('two devices of one node: told in one request, 15 sent ahead for the node in all, checked here as one node', async () => {
+  const { EventEmitter } = require('events');
+  const gpu = { ...NODE_GPU };
+  const cpu = { ...NODE_CPU };
+  const told = [];
+  const inFlight = { [gpu.id]: 0, [cpu.id]: 0 };
+  const most = { [gpu.id]: 0, [cpu.id]: 0, total: 0 };
+  let checking = 0;
+  let mostChecked = 0;
+  // every encode is held until 3 + 15 are under way (or 10 s pass), then all
+  // finish: the most ever sent at once is what the node is given
+  const held = [];
+  let released = false;
+  const release = () => { released = true; for (const end of held.splice(0)) end(); };
+  const timer = setTimeout(release, 10_000);
+  const h = createHarness({
+    clips: 40, devices: [gpu, cpu, CPU], defaultDevice: null, gpuDecode: false,
+    setNodeSlots: async (id, slots) => {
+      told.push([id, slots]);
+      for (const device of [gpu, cpu]) if (Number.isSafeInteger(slots?.[device.id])) device.slots = slots[device.id];
+    },
+    remoteEncode: ({ device }) => {
+      inFlight[device.id] += 1;
+      most[device.id] = Math.max(most[device.id], inFlight[device.id]);
+      most.total = Math.max(most.total, inFlight[gpu.id] + inFlight[cpu.id]);
+      const child = new EventEmitter(); child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.kill = () => true;
+      const end = () => setTimeout(() => {
+        inFlight[device.id] -= 1;
+        child.stdout.emit('data', 'out_time_us=1\nprogress=end\n');
+        child.emit('close', 0, null);
+      }, 5);
+      if (released) end(); else held.push(end);
+      if (!released && inFlight[gpu.id] + inFlight[cpu.id] >= 3 + 15) release();
+      return child;
+    },
+    comparePicture: async () => {
+      checking += 1;
+      mostChecked = Math.max(mostChecked, checking);
+      await new Promise((r) => setTimeout(r, 15));
+      checking -= 1;
+      return { ok: true };
+    }
+  });
+  try {
+    const id = await h.service.start(h.config({ lanes: [{ device: gpu.id, concurrency: 2 }, { device: cpu.id, concurrency: 1 }] }));
+    const job = await h.finishJob(id, 60_000);
+    assert.equal(job.items.filter((item) => item.resultCode === 'converted').length, 40);
+    assert.deepEqual(told[0], [NODE_KEY, { [gpu.id]: 2, [cpu.id]: 1 }], 'both devices in one request, to the node');
+    assert.equal(told.length, 1, 'and not again while nothing changes');
+    assert.equal(most.total, 3 + 15, 'the node is sent 15 ahead in all, not 15 per device');
+    assert.equal(most[gpu.id], 2 + 10, 'shared by their numbers: 10 for the GPU');
+    assert.equal(most[cpu.id], 1 + 5, 'and 5 for the CPU');
+    assert.ok(mostChecked <= 3 + 2, `${mostChecked} checked at once (the node's 3 in all, + 2)`);
+  } finally {
+    clearTimeout(timer);
+    await h.close();
+  }
+});
+
+test('a job saved with the whole node ("node:<id>") converts on the node\'s default device; one naming that device too keeps its own number', async () => {
+  const { EventEmitter } = require('events');
+  const remote = (sent) => ({ device }) => {
+    sent.push(device.id);
+    const child = new EventEmitter(); child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.kill = () => true;
+    setTimeout(() => { child.stdout.emit('data', 'out_time_us=1\nprogress=end\n'); child.emit('close', 0, null); }, 5);
+    return child;
+  };
+  {
+    const sent = [];
+    const told = [];
+    const h = createHarness({ clips: 4, devices: [{ ...NODE_GPU }, { ...NODE_CPU }, CPU], defaultDevice: null, gpuDecode: false, remoteEncode: remote(sent), comparePicture: async () => ({ ok: true }), setNodeSlots: async (...args) => { told.push(args); } });
+    try {
+      const id = await h.service.start(h.config({ lanes: [{ device: NODE_KEY, concurrency: 3 }] }));
+      const job = await h.finishJob(id);
+      assert.equal(job.items.filter((item) => item.resultCode === 'converted').length, 4);
+      assert.deepEqual([...new Set(sent)], [NODE_GPU.id], 'every clip went to the node\'s first GPU');
+      assert.deepEqual(told[0], [NODE_KEY, { [NODE_GPU.id]: 3 }]);
+      assert.deepEqual(job.config.lanes, [{ device: NODE_KEY, concurrency: 3 }], 'the saved job is left as it was');
+    } finally {
+      await h.close();
+    }
+  }
+  {
+    const sent = [];
+    const told = [];
+    const h = createHarness({ clips: 4, devices: [{ ...NODE_GPU }, { ...NODE_CPU }, CPU], defaultDevice: null, gpuDecode: false, remoteEncode: remote(sent), comparePicture: async () => ({ ok: true }), setNodeSlots: async (...args) => { told.push(args); } });
+    try {
+      const id = await h.service.start(h.config({ lanes: [{ device: NODE_KEY, concurrency: 3 }, { device: NODE_GPU.id, concurrency: 1 }] }));
+      await h.finishJob(id);
+      assert.deepEqual(told[0], [NODE_KEY, { [NODE_GPU.id]: 1 }], 'the device\'s own lane counts, the whole-node one is left out');
+    } finally {
+      await h.close();
+    }
+  }
+});

@@ -14,6 +14,8 @@ const DEFAULT_CONCURRENCY = 5;
 const CONCURRENCY_STORAGE_KEY = 'converterConcurrency';
 // With several GPUs: how many at once on each device (id -> count, 0 = Off)
 const LANES_STORAGE_KEY = 'converterLanes';
+// Which node groups under Parallel conversions are open (node -> true)
+const NODE_GROUPS_STORAGE_KEY = 'converterNodeGroups';
 const VERIFY_STORAGE_KEY = 'converterVerifyMode';
 const VERIFY_MODES = ['off', 'quick', 'full'];
 // The benchmark times these; Off stays a setting but is not compared
@@ -133,6 +135,19 @@ function deviceEncoder(device, codec) {
     return value;
 }
 
+// 'node:<id>' for any lane of a node ('node:<id>@<its GPU or cpu>', or the
+// whole node), else null
+function nodeKeyOfLane(id) {
+    const match = /^(node:[^@]+)(?:@.+)?$/.exec(String(id || ''));
+    return match ? match[1] : null;
+}
+
+// A lane on one GPU (or the CPU) of a node that lists its devices: these are
+// grouped under their node. A node that lists none is one row of its own.
+function isNodeDeviceLane(device) {
+    return device?.kind === 'node' && typeof device.id === 'string' && device.id.includes('@');
+}
+
 // A GPU's name for the lanes and the benchmark. Two cards of the same model
 // get their render node (or NVIDIA index, or PCI slot) after the name, so
 // their rows and results are never mistaken for each other.
@@ -143,7 +158,7 @@ function deviceLabels(devices) {
         if (named.get(device.name) < 2) return device.name;
         const node = typeof device.node === 'string' && device.node ? device.node.split('/').pop() : null;
         const slot = typeof device.pci === 'string' && device.pci ? device.pci
-            : String(device.id || '').replace(/^pci:/, '');
+            : String(device.deviceId || device.id || '').replace(/^pci:/, '');
         const where = node || (Number.isSafeInteger(device.index) ? `GPU ${device.index}` : slot.replace(/^0000:/, ''));
         return where ? `${device.name} (${where})` : device.name;
     });
@@ -573,6 +588,7 @@ function createFootageConverterController(options = {}) {
     let lanesUntouched = false;
     const laneCounts = new Map(); // device id -> the owner's number (0 = Off)
     const laneRows = new Map(); // device id -> { row, output, minus, plus, note }
+    const laneGroups = new Map(); // node key -> { group, head, body, status, total, devices }
     let syncedLanes = null;
     let requestedLanes = null;
     // live changes to the running job go one after another, the last one wins
@@ -616,6 +632,15 @@ function createFootageConverterController(options = {}) {
         return laneDevices?.find((device) => device.id === id)?.label || id;
     }
 
+    // The row a lane id belongs to: a lane saved as a whole node
+    // ('node:<id>', before nodes listed their GPUs) is that node's default
+    // device (its first GPU, else its CPU). null: no row.
+    function rowIdOf(id) {
+        if (laneDevices?.some((device) => device.id === id)) return id;
+        if (nodeKeyOfLane(id) !== id) return null;
+        return laneDevices?.find((device) => isNodeDeviceLane(device) && device.isDefault === true && nodeKeyOfLane(device.id) === id)?.id || null;
+    }
+
     // What a row really sends: 0 while its device can't encode the codec
     function laneCount(device) {
         return laneSupported(device) ? laneCounts.get(device.id) ?? 0 : 0;
@@ -645,8 +670,12 @@ function createFootageConverterController(options = {}) {
     // A job's numbers per device: its lanes, or the single number on the
     // default GPU (what a job without lanes runs on)
     function lanesOfConfig(config) {
-        const known = validLanes(config?.lanes).filter((lane) => laneDevices?.some((device) => device.id === lane.device));
-        if (known.length) return known.map((lane) => ({ device: lane.device, concurrency: lane.concurrency }));
+        const known = [];
+        for (const lane of validLanes(config?.lanes)) {
+            const device = rowIdOf(lane.device);
+            if (device && !known.some((entry) => entry.device === device)) known.push({ device, concurrency: lane.concurrency });
+        }
+        if (known.length) return known;
         const concurrency = normalizeConcurrency(config?.concurrency);
         const device = defaultFor(CODEC_LABELS[config?.codec] ? config.codec : selectedCodec());
         return concurrency !== null && device ? [{ device, concurrency }] : null;
@@ -691,13 +720,26 @@ function createFootageConverterController(options = {}) {
     function rememberLanes() {
         lanesUntouched = false;
         try {
-            const kept = Object.fromEntries(storedLanes() || []);
+            // (a whole-node number saved before goes: its default device's row has it now)
+            const kept = Object.fromEntries([...(storedLanes() || [])].filter(([id]) => {
+                const row = nodeKeyOfLane(id) === id ? rowIdOf(id) : null;
+                return !row || row === id;
+            }));
             storage?.setItem?.(LANES_STORAGE_KEY, JSON.stringify({ ...kept, ...Object.fromEntries(laneCounts) }));
         } catch (_) { /* preference only */ }
     }
 
     function encoderSummary(device) {
         if (device.kind === 'cpu') return message('laneCpuHint', "Uses the server's CPU cores; slower than a GPU");
+        // a GPU or the CPU of a node, in its node's group
+        if (isNodeDeviceLane(device) && device.deviceId === 'cpu') {
+            return message('laneNodeCpuHint', "Uses {node}'s CPU cores; slower than a GPU", { node: device.nodeName || '' });
+        }
+        if (isNodeDeviceLane(device)) {
+            return Object.keys(CODEC_LABELS).map((codec) => [codec, deviceEncoder(device, codec)])
+                .filter(([, encoder]) => typeof encoder === 'string' && encoder)
+                .map(([codec, encoder]) => `${CODEC_LABELS[codec]}: ${encoder}`).join(' · ');
+        }
         if (device.kind === 'node') {
             const encoders = Object.keys(CODEC_LABELS).map((codec) => [codec, deviceEncoder(device, codec)])
                 .filter(([, encoder]) => typeof encoder === 'string' && encoder)
@@ -729,47 +771,138 @@ function createFootageConverterController(options = {}) {
             setDisabled(parts.minus, !supported || count === 0 || total <= 1);
             setDisabled(parts.plus, !supported || count >= MAX_CONCURRENCY || total >= MAX_CONCURRENCY);
         }
+        // each node: online or not, and its clips at once on all of its devices
+        for (const parts of laneGroups.values()) {
+            const count = parts.devices.reduce((sum, device) => sum + laneCount(device), 0);
+            const online = parts.devices.some((device) => device.online !== false);
+            setText(parts.total, count === 0 ? message('laneOff', 'Off') : String(count));
+            setText(parts.status, online
+                ? message('laneNodeOnline', 'Online · {count} at once · {devices}', {
+                    count,
+                    devices: message(parts.devices.length === 1 ? 'laneNodeDevice' : 'laneNodeDevices', parts.devices.length === 1 ? '1 device' : '{count} devices', { count: parts.devices.length })
+                })
+                : message('laneNodeOffline', 'Offline: check it under Nodes'));
+            parts.group.classList?.toggle('is-off', count === 0);
+            parts.group.classList?.toggle('is-offline', !online);
+        }
         setText(elements.lanesTotal, total > 0
             ? message('lanesTotal', '{count} at once in total. Each GPU takes its next clip when it is free, so a faster one converts more of them.', { count: total })
             : message('lanesNone', 'Nothing is set to convert: turn on a GPU or the CPU.'));
     }
 
+    function nodeGroupsOpen() {
+        try {
+            const parsed = JSON.parse(storage?.getItem?.(NODE_GROUPS_STORAGE_KEY) || 'null');
+            return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+        } catch (_) { return {}; }
+    }
+
+    function setGroupOpen(key, open) {
+        const parts = laneGroups.get(key);
+        if (!parts) return;
+        parts.head.setAttribute('aria-expanded', open ? 'true' : 'false');
+        setHidden(parts.body, !open);
+        parts.group.classList?.toggle('is-open', open);
+        try {
+            const next = { ...nodeGroupsOpen() };
+            if (open) next[key] = true;
+            else delete next[key];
+            storage?.setItem?.(NODE_GROUPS_STORAGE_KEY, JSON.stringify(next));
+        } catch (_) { /* preference only */ }
+    }
+
+    // One node as a group: a header (its name, online or not, its clips at
+    // once in all) that opens and closes it, and a row per GPU and its CPU.
+    function buildNodeGroup(doc, key, devices) {
+        const first = devices[0];
+        const nodeName = first.nodeName || key;
+        const open = nodeGroupsOpen()[key] === true;
+        const group = doc.createElement('div');
+        group.className = open ? 'converter-lane-group is-open' : 'converter-lane-group';
+        group.setAttribute('data-node', key);
+        const bodyId = `converterNode-${key.replace(/[^A-Za-z0-9_-]/g, '-')}`;
+        const head = doc.createElement('button');
+        head.type = 'button';
+        head.className = 'converter-lane-group-head';
+        head.setAttribute('aria-expanded', open ? 'true' : 'false');
+        head.setAttribute('aria-controls', bodyId);
+        const name = doc.createElement('span');
+        name.className = 'converter-lane-name';
+        const title = doc.createElement('strong');
+        title.textContent = nodeName;
+        title.title = nodeName;
+        const status = doc.createElement('small');
+        name.append(title, status);
+        const total = doc.createElement('span');
+        total.className = 'converter-lane-group-total';
+        const chevron = doc.createElement('span');
+        chevron.className = 'converter-lane-group-chevron';
+        chevron.setAttribute('aria-hidden', 'true');
+        head.append(name, total, chevron);
+        head.addEventListener('click', () => setGroupOpen(key, head.getAttribute('aria-expanded') !== 'true'));
+        const body = doc.createElement('div');
+        body.className = 'converter-lane-group-body';
+        body.id = bodyId;
+        body.setAttribute('role', 'group');
+        body.setAttribute('aria-label', message('laneNodeGroupLabel', '{node}: GPUs and CPU', { node: nodeName }));
+        body.hidden = !open;
+        // (each named by its own GPU: the node's name is on the header)
+        const prefix = `${nodeName} · `;
+        body.append(...devices.map((device) => laneRow(doc, device, device.label.startsWith(prefix) ? device.label.slice(prefix.length) : device.deviceName || device.label)));
+        group.append(head, body);
+        laneGroups.set(key, { group, head, body, status, total, devices });
+        return group;
+    }
+
     function buildLanes() {
         const doc = elements.lanes.ownerDocument || globalThis.document;
         laneRows.clear();
-        const rows = laneDevices.map((device) => {
-            const row = doc.createElement('div');
-            row.className = 'converter-lane';
-            row.setAttribute('data-device', device.id);
-            const name = doc.createElement('span');
-            name.className = 'converter-lane-name';
-            const title = doc.createElement('strong');
-            title.textContent = device.label;
-            title.title = device.label;
-            const note = doc.createElement('small');
-            name.append(title, note);
-            const stepper = doc.createElement('div');
-            stepper.className = 'converter-stepper';
-            stepper.setAttribute('role', 'group');
-            stepper.setAttribute('aria-label', message('laneStepperLabel', '{device}: conversions at once', { device: device.label }));
-            const step = (delta, text, label) => {
-                const button = doc.createElement('button');
-                button.type = 'button';
-                button.setAttribute('data-step', String(delta));
-                button.setAttribute('aria-label', label);
-                button.textContent = text;
-                button.addEventListener('click', () => stepLane(device.id, delta));
-                return button;
-            };
-            const minus = step(-1, '−', message('laneFewer', 'Fewer'));
-            const output = doc.createElement('output');
-            const plus = step(1, '+', message('laneMore', 'More'));
-            stepper.append(minus, output, plus);
-            row.append(name, stepper);
-            laneRows.set(device.id, { row, output, minus, plus, note });
-            return row;
-        });
-        elements.lanes.replaceChildren(...rows, ...(elements.lanesTotal ? [elements.lanesTotal] : []));
+        laneGroups.clear();
+        // this server's GPUs, nodes that list no devices and the CPU as rows;
+        // then each node that lists its GPUs as a group
+        const rows = laneDevices.filter((device) => !isNodeDeviceLane(device)).map((device) => laneRow(doc, device, device.label));
+        const nodes = new Map();
+        for (const device of laneDevices.filter(isNodeDeviceLane)) {
+            const key = nodeKeyOfLane(device.id);
+            if (!nodes.has(key)) nodes.set(key, []);
+            nodes.get(key).push(device);
+        }
+        const groups = [...nodes].map(([key, devices]) => buildNodeGroup(doc, key, devices));
+        elements.lanes.replaceChildren(...rows, ...groups, ...(elements.lanesTotal ? [elements.lanesTotal] : []));
+    }
+
+    // A row: the device's name (shown) and its − n + stepper.
+    function laneRow(doc, device, shown) {
+        const row = doc.createElement('div');
+        row.className = 'converter-lane';
+        row.setAttribute('data-device', device.id);
+        const name = doc.createElement('span');
+        name.className = 'converter-lane-name';
+        const title = doc.createElement('strong');
+        title.textContent = shown;
+        title.title = device.label;
+        const note = doc.createElement('small');
+        name.append(title, note);
+        const stepper = doc.createElement('div');
+        stepper.className = 'converter-stepper';
+        stepper.setAttribute('role', 'group');
+        stepper.setAttribute('aria-label', message('laneStepperLabel', '{device}: conversions at once', { device: device.label }));
+        const step = (delta, text, label) => {
+            const button = doc.createElement('button');
+            button.type = 'button';
+            button.setAttribute('data-step', String(delta));
+            button.setAttribute('aria-label', label);
+            button.textContent = text;
+            button.addEventListener('click', () => stepLane(device.id, delta));
+            return button;
+        };
+        const minus = step(-1, '−', message('laneFewer', 'Fewer'));
+        const output = doc.createElement('output');
+        const plus = step(1, '+', message('laneMore', 'More'));
+        stepper.append(minus, output, plus);
+        row.append(name, stepper);
+        laneRows.set(device.id, { row, output, minus, plus, note });
+        return row;
     }
 
     function stepLane(id, delta) {
@@ -877,9 +1010,12 @@ function createFootageConverterController(options = {}) {
             ? Object.fromEntries(Object.keys(CODEC_LABELS).map((codec) => [codec, known(answer.defaultDevices[codec])]))
             : null;
         // first time: the default GPU gets the single number, the rest Off
+        // (a whole-node number saved before is its default device's now)
         const stored = storedLanes();
-        const remembered = stored && laneDevices.some((device) => stored.has(device.id));
-        if (remembered) for (const device of laneDevices) laneCounts.set(device.id, stored.get(device.id) ?? 0);
+        const storedFor = (device) => (stored.has(device.id) ? stored.get(device.id)
+            : isNodeDeviceLane(device) && device.isDefault === true ? stored.get(nodeKeyOfLane(device.id)) : undefined);
+        const remembered = stored && laneDevices.some((device) => storedFor(device) !== undefined);
+        if (remembered) for (const device of laneDevices) laneCounts.set(device.id, storedFor(device) ?? 0);
         else firstTimeLanes();
         lanesUntouched = !remembered;
         buildLanes();

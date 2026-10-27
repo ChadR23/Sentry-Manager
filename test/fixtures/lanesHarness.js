@@ -160,9 +160,13 @@ function createHarness(options = {}) {
     decodeAccel: options.gpuDecode === false ? undefined : (encoder, accel = {}) => decodeAccelArgs(encoder, {
       platform: 'linux', zeroCopy: accel.zeroCopy === true, ...(accel.device ? { device: accel.device } : {})
     }),
+    // (as the runtime: a whole-node lane 'node:<id>' finds that node's
+    // default device once the node lists its devices)
     resolveDevice: async (id) => {
       resolved.push(id);
-      return devices.find((device) => device.id === id) || null;
+      return devices.find((device) => device.id === id)
+        || devices.find((device) => device.kind === 'node' && device.isDefault === true && String(device.id).startsWith(`${id}@`))
+        || null;
     },
     // the GPU a job without lanes encodes on: QSV without a device opens
     // renderD128, the UHD 770 here

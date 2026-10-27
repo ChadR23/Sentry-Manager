@@ -15,7 +15,7 @@
 
 const crypto = require('crypto');
 const nodePath = require('path');
-const { normalizeLanes, lanesTotal } = require('./contracts');
+const { normalizeLanes, lanesTotal, nodeKeyOf } = require('./contracts');
 
 const INTERVAL_MINUTES = Object.freeze([15, 30, 60, 180, 360, 720, 1440]);
 const SETTINGS_FILE = 'settings.json';
@@ -66,7 +66,8 @@ function withValidLanes(config) {
   const result = { ...config };
   // nodes set to Off in this vehicle's Encoder rows (see nodesOffFor)
   if (result.nodesOff !== undefined) {
-    const off = Array.isArray(result.nodesOff) ? [...new Set(result.nodesOff.filter(isNodeDevice))].slice(0, 32) : [];
+    // (per node: a lane id of one of its devices counts as the node)
+    const off = Array.isArray(result.nodesOff) ? [...new Set(result.nodesOff.filter(isNodeDevice).map(nodeKeyOf).filter(Boolean))].slice(0, 32) : [];
     if (off.length) result.nodesOff = off;
     else delete result.nodesOff;
   }
@@ -127,38 +128,70 @@ function setupKey(config) {
 const isNodeDevice = (id) => typeof id === 'string' && id.startsWith('node:');
 
 /**
- * Which devices each vehicle's automatic job gets, as lanes. A node goes to
- * the first vehicle on its list (Nodes) that has a job or new clips; with
- * none of those, it helps the vehicle on this server's own devices (when
- * that vehicle's settings use the node), else any vehicle whose settings
- * use it. This server's own devices go to `localHolder` only.
+ * Which devices each vehicle's automatic job gets, as lanes. A node (all of
+ * its GPUs and its CPU together) goes to the first vehicle on its list
+ * (Nodes) that has a job or new clips; with none of those, it helps the
+ * vehicle on this server's own devices (when that vehicle's settings use the
+ * node), else any vehicle whose settings use it. That vehicle gets the
+ * node's devices its own rows turn on. This server's own devices go to
+ * `localHolder` only.
  *   cars: the automatic settings, one per source folder
  *   wanting: source folders with a job or new clips
- *   devices: [{ id, kind, online, slots }] (this server's and the nodes)
+ *   devices: [{ id, kind, online, slots, isDefault }] (this server's and the
+ *     nodes': 'node:<id>@<device>' per device, 'node:<id>' for a node that
+ *     lists none)
  *   priorities: { 'node:<id>': [sourceRoot, ...] }
  * -> Map sourceRoot -> lanes (empty when it gets no device now)
  */
 function planLanes({ cars, wanting, localHolder = null, devices = [], priorities = {} }) {
   const byRoot = new Map(cars.filter((config) => Array.isArray(config.lanes)).map((config) => [config.sourceRoot, config]));
   const plan = new Map([...byRoot.keys()].filter((root) => wanting.has(root)).map((root) => [root, []]));
-  const laneOf = (root, id) => byRoot.get(root)?.lanes.find((lane) => lane.device === id) || null;
   const present = new Set(devices.filter((device) => device && device.online !== false).map((device) => device.id));
   if (localHolder && plan.has(localHolder)) {
     for (const lane of byRoot.get(localHolder).lanes) {
       if (!isNodeDevice(lane.device) && present.has(lane.device)) plan.get(localHolder).push({ device: lane.device, concurrency: lane.concurrency });
     }
   }
-  for (const node of devices) {
-    if (!node || !isNodeDevice(node.id) || !present.has(node.id)) continue;
-    // (a vehicle whose Encoder row for this node is Off never gets it)
-    const allows = (root) => !(byRoot.get(root)?.nodesOff || []).includes(node.id);
-    const listed = (Array.isArray(priorities[node.id]) ? priorities[node.id] : []).find((root) => plan.has(root) && allows(root));
+  // each node's devices that answer, in the order listed
+  const nodes = new Map();
+  for (const device of devices) {
+    if (!device || !isNodeDevice(device.id) || !present.has(device.id)) continue;
+    const key = nodeKeyOf(device.id);
+    if (!nodes.has(key)) nodes.set(key, []);
+    nodes.get(key).push(device);
+  }
+  // A vehicle's lanes on one node. A lane saved as the whole node
+  // ('node:<id>', before nodes listed their GPUs) is its default device.
+  const lanesOn = (root, key, group) => {
+    const out = [];
+    for (const lane of byRoot.get(root)?.lanes || []) {
+      if (nodeKeyOf(lane.device) !== key) continue;
+      let id = lane.device;
+      if (!group.some((device) => device.id === id)) {
+        if (id !== key) continue;
+        id = group.find((device) => device.isDefault === true)?.id;
+        if (!id) continue;
+      }
+      if (!out.some((entry) => entry.device === id)) out.push({ device: id, concurrency: lane.concurrency });
+    }
+    return out;
+  };
+  for (const [key, group] of nodes) {
+    // (a vehicle whose Encoder rows for this node are all Off never gets it)
+    const allows = (root) => !(byRoot.get(root)?.nodesOff || []).includes(key);
+    const listed = (Array.isArray(priorities[key]) ? priorities[key] : []).find((root) => plan.has(root) && allows(root));
     const helps = listed
-      || (localHolder && plan.has(localHolder) && laneOf(localHolder, node.id) ? localHolder : null)
-      || [...plan.keys()].find((root) => laneOf(root, node.id) && allows(root));
+      || (localHolder && plan.has(localHolder) && allows(localHolder) && lanesOn(localHolder, key, group).length ? localHolder : null)
+      || [...plan.keys()].find((root) => lanesOn(root, key, group).length && allows(root));
     if (!helps) continue;
-    const concurrency = laneOf(helps, node.id)?.concurrency || (Number.isSafeInteger(node.slots) && node.slots > 0 ? Math.min(node.slots, 8) : 1);
-    plan.get(helps).push({ device: node.id, concurrency });
+    let lanes = lanesOn(helps, key, group);
+    if (!lanes.length) {
+      // a vehicle with no rows of its own on this node: its default device,
+      // at what the node converts there now
+      const device = group.find((entry) => entry.isDefault === true) || group[0];
+      lanes = [{ device: device.id, concurrency: Number.isSafeInteger(device.slots) && device.slots > 0 ? Math.min(device.slots, 8) : 1 }];
+    }
+    plan.get(helps).push(...lanes);
   }
   return plan;
 }
@@ -452,13 +485,14 @@ function createAutoConverter(options = {}) {
   // helps as its "Vehicles first" list says until the owner sets its row.
   // null when the devices could not be listed (a node slow to answer): the
   // vehicle then keeps the Off it had, instead of losing it
+  // (per node: Off when none of its devices is used)
   async function nodesOffFor(lanes) {
     if (!Array.isArray(lanes)) return [];
     let devices;
     try { devices = await options.devices?.(); } catch (_) { return null; }
     if (!Array.isArray(devices) || devices.length === 0) return null;
-    const used = new Set(lanes.map((lane) => lane.device));
-    return devices.map((device) => device?.id).filter((id) => isNodeDevice(id) && !used.has(id));
+    const used = new Set(lanes.map((lane) => nodeKeyOf(lane.device)).filter(Boolean));
+    return [...new Set(devices.map((device) => device?.id).filter(isNodeDevice).map(nodeKeyOf))].filter((key) => key && !used.has(key));
   }
 
   function noteSource(sourceRoot, fields) {

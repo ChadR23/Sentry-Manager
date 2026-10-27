@@ -11,7 +11,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { normalizeLanes, lanesTotal, DEVICE_ID, LANES } = require('../src/main/converter/contracts');
+const { normalizeLanes, lanesTotal, DEVICE_ID, LANES, nodeKeyOf, nodeDeviceOf } = require('../src/main/converter/contracts');
 const { createJobStore } = require('../src/main/converter/jobStore');
 const { createEncoderPlanner } = require('../src/main/converter/encoderPlanner');
 const { createHarness, fakeProbe, desktopWorks, gpuOf, until, sleep, recoveryFacts, ARC, UHD, T400, CPU } = require('./fixtures/lanesHarness');
@@ -47,6 +47,24 @@ test('lanes: device ids only, 1 to 16 entries, a total of 1 to 64, zeros left ou
     [...sixteen, { device: 'pci:0000:30:00.0', concurrency: 1 }]
   ];
   for (const value of bad) assert.throws(() => normalizeLanes(value), { code: 'INVALID_LANES' }, JSON.stringify(value));
+});
+
+test('lanes on a node: one per GPU of the node and its CPU, and the whole node of an older version', () => {
+  const node = 'node:abcdefabcdef';
+  for (const id of [node, `${node}@cpu`, `${node}@pci:0000:01:00.0`]) assert.ok(DEVICE_ID.test(id), id);
+  for (const id of ['node:abc', `${node}@`, `${node}@nvidia0`, `${node}@pci:0000:01:00.8`, `${node}@node:bbbbbbbbbbbb`, `${node}@cpu@cpu`, `${node}@CPU`]) {
+    assert.equal(DEVICE_ID.test(id), false, id);
+  }
+  // one node's GPU and CPU are separate lanes; the whole node may sit beside them (a saved job)
+  assert.deepEqual(normalizeLanes([{ device: `${node}@pci:0000:01:00.0`, concurrency: 2 }, { device: `${node}@cpu`, concurrency: 1 }, { device: node, concurrency: 1 }]).length, 3);
+  // per node: the node of any of its lanes; its own device id
+  assert.equal(nodeKeyOf(`${node}@cpu`), node);
+  assert.equal(nodeKeyOf(node), node);
+  assert.equal(nodeKeyOf('cpu'), null);
+  assert.equal(nodeKeyOf(ARC.id), null);
+  assert.equal(nodeDeviceOf(`${node}@pci:0000:01:00.0`), 'pci:0000:01:00.0');
+  assert.equal(nodeDeviceOf(node), null);
+  assert.equal(nodeDeviceOf(`${node}@nvidia0`), null);
 });
 
 test('a job keeps its lanes with the total as its concurrency; a malformed saved value still loads', async () => {
