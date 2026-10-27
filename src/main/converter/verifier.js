@@ -7,7 +7,7 @@ const { PROFILES, CUSTOM_PROFILE_ID, QUALITY_PROFILE_ID, hasSizeTarget, targetOu
 
 // A Tesla camera file can be a very short terminal fragment (for example a
 // 1–2 second clip when the vehicle changes state). MP4/SEI/container overhead
-// then dominates the byte target, so enforcing the normal percentage window
+// then dominates the byte target, so enforcing the normal percentage limit
 // would reject a valid, smaller, telemetry-complete conversion.
 const SHORT_CLIP_PROFILE_MAX_US = 2_000_000;
 const { RETRY_REASONS } = require('./encoderPlanner');
@@ -807,7 +807,7 @@ function frameTimingMismatch(sourceSamples, outputSamples) {
 }
 
 // Verification off: the saved file must still be exactly the encoded file and
-// smaller than its original, and a size profile's window still applies (its
+// smaller than its original, and a size profile's upper limit still applies (its
 // retry keeps the promised compression); nothing about the video itself is
 // inspected.
 async function verifyIntegrityOnly({ options, profileId, sourceBytes, outputBytes, outputSha256, snapshot }) {

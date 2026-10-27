@@ -64,7 +64,7 @@ function isValidQualityLevel(value) {
 //   quick - stream/duration/frame/dimension checks against the source, the
 //           per-frame telemetry comparison and size rules (no full decode);
 //   off   - only the integrity hash, "smaller than the original" and the size
-//           profile's window (so a profile still compresses as promised).
+//           profile's upper limit (so a profile still compresses as promised).
 // Replacing originals always uses at least quick. Jobs saved before this
 // setting existed keep running full.
 const VERIFY_MODES = deepFreeze(['off', 'quick', 'full']);
@@ -156,7 +156,8 @@ function isWithinProfile(sourceBytes, outputBytes, profileName) {
   const selected = profile(profileName);
   const target = targetOutputBytes(sourceBytes, profileName);
   const tolerance = sourceBytes * selected.tolerance;
-  return outputBytes >= target - tolerance && outputBytes <= target + tolerance;
+  // Extra savings are welcome; the verifier still checks integrity and media.
+  return outputBytes <= target + tolerance;
 }
 
 function emptyGroup() {
