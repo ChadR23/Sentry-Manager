@@ -51,7 +51,7 @@ function nameFromDriver(driver) {
 // encoding; NVIDIA cards encode through the NVIDIA Container Toolkit instead.
 const isWslBridge = (driver, dxgDevice) => /d3d12/i.test(driver || '') || (dxgDevice && !driver);
 
-async function detectGpus({ driDir = '/dev/dri', sysDrm = '/sys/class/drm', dxg = '/dev/dxg', runImpl = run } = {}) {
+async function detectGpus({ driDir = '/dev/dri', sysDrm = '/sys/class/drm', dxg = '/dev/dxg', runImpl = run, procVersion = '/proc/version', arch = process.arch } = {}) {
   const wsl = fs.existsSync(dxg);
   const gpus = [];
   let passed = [];
@@ -116,6 +116,22 @@ async function detectGpus({ driDir = '/dev/dri', sysDrm = '/sys/class/drm', dxg 
   }
   if (gpus.some((g) => g.vendor === 'nvidia') && !nvidia.length) {
     hints.push('An NVIDIA GPU is on the host but not available in the container. Use the NVIDIA Container Toolkit (gpus: all) with NVIDIA_DRIVER_CAPABILITIES=compute,video,utility.');
+  }
+  // Docker Desktop runs containers in a Linux VM (its kernel says linuxkit).
+  // On a Mac that VM never sees the Mac's GPU: Apple offers no way to pass
+  // it to Linux, so no setting here can turn it on.
+  if (!gpus.some((g) => g.passedThrough && !g.virtual) && !nvidia.length) {
+    let kernel = '';
+    try {
+      kernel = fs.readFileSync(procVersion, 'utf8');
+    } catch {
+      kernel = '';
+    }
+    if (/linuxkit/i.test(kernel)) {
+      hints.push(arch === 'arm64'
+        ? 'Running in Docker Desktop, likely on an Apple Silicon Mac: Docker cannot use a Mac\'s GPU (macOS does not share it with the Linux virtual machine containers run in), so conversions use the CPU encoder. A Linux or Windows computer with a GPU can encode for this server as a node (Nodes).'
+        : 'Running in Docker Desktop: its Linux virtual machine sees no GPU. On Windows, an NVIDIA GPU works with WSL 2 and gpus: all; on a Mac no GPU can be used, so conversions use the CPU encoder.');
+    }
   }
   return { gpus, nvidia, hints };
 }

@@ -30,6 +30,7 @@ const path = require('path');
 const { pipeline } = require('stream');
 const { buildEncodeArgs, decodeAccelArgs } = require('../src/main/converter/encoderPlanner');
 const { QUALITY_LEVELS } = require('../src/main/converter/contracts');
+const { diskSpace } = require('../src/main/converter/fsSpace');
 
 const SETTINGS_KEY = 'nodeWorker';
 const PAIR_TTL_MS = 10 * 60_000;
@@ -470,8 +471,8 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
     if (running().length >= limit || jobs.size >= limit + (benchmark ? MAX_SLOTS : settings().slots)) return send(res, 503, { error: 'All of this node\'s slots are busy.' });
     // room for the clip and its encode, and some to spare for this server
     try {
-      const disk = await fsp.statfs(workDir);
-      if (disk.bavail * disk.bsize < length * 3 + DISK_SPARE) return send(res, 507, { error: 'This node is short of disk space.' });
+      const disk = await diskSpace(fsp, workDir);
+      if (disk.free < length * 3 + DISK_SPARE) return send(res, 507, { error: 'This node is short of disk space.' });
     } catch { /* the work folder is made below */ }
     const id = crypto.randomBytes(16).toString('hex');
     const job = {

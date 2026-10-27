@@ -300,6 +300,11 @@ VA-API drivers. AMD's AMF encoder needs AMD's proprietary driver, which
 containers don't have, so AMD cards and APUs use VA-API; AV1 needs RDNA3 or
 newer. **Settings → System** lists the GPUs the container can see.
 
+**Mac (Docker Desktop):** containers run in a Linux virtual machine that
+macOS gives no GPU to, so on a Mac (Apple Silicon or Intel) conversions
+always use the CPU encoder; no setting can change that. Settings → System
+says so. A Linux or Windows computer with a GPU can encode for it as a node.
+
 ### Several GPUs or CPUs
 
 Pass the whole of `/dev/dri` (and, for NVIDIA, every GPU in the `deploy:`

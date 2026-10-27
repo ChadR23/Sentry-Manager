@@ -25,6 +25,7 @@ const {
 const { createConverterJobService } = require('./jobService');
 const { createConvertedIndex } = require('./convertedIndex');
 const { readMp4VideoCodec } = require('./mp4Header');
+const { fragmentSize } = require('./fsSpace');
 
 // The Encoder benchmark's search for original clips (findBenchmarkClips)
 const BENCHMARK_SCAN_LIMIT = 500_000;
@@ -414,8 +415,10 @@ function createVolumeInfo(options = {}) {
   ]);
 
   async function freeSpace(target) {
+    // (blocks count in the fragment size, not bsize: see fsSpace.js)
+    const frag = options.fs === nodeFs.promises ? await fragmentSize(target) : null;
     const stat = await options.fs.statfs(target, { bigint: true });
-    const available = BigInt(stat.bavail) * BigInt(stat.bsize);
+    const available = BigInt(stat.bavail) * (frag ? BigInt(frag) : BigInt(stat.bsize));
     if (available < 0n) throw runtimeError('FREE_SPACE_UNAVAILABLE');
     return available > BigInt(Number.MAX_SAFE_INTEGER) ? Number.MAX_SAFE_INTEGER : Number(available);
   }

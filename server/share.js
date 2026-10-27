@@ -9,6 +9,7 @@
 const { EventEmitter } = require('events');
 const fsp = require('fs/promises');
 const path = require('path');
+const { diskSpace } = require('../src/main/converter/fsSpace');
 const { tail } = require('./proc');
 
 const CHECK_INTERVAL_MS = 30 * 1000;
@@ -251,9 +252,9 @@ class ShareManager extends EventEmitter {
     }
 
     try {
-      const sfs = await withTimeout(fsp.statfs(this.root), FS_TIMEOUT_MS, 'Reading free space');
-      st.totalBytes = Number(sfs.blocks) * Number(sfs.bsize);
-      st.freeBytes = Number(sfs.bavail) * Number(sfs.bsize);
+      const space = await withTimeout(diskSpace(fsp, this.root), FS_TIMEOUT_MS, 'Reading free space');
+      st.totalBytes = space.total;
+      st.freeBytes = space.free;
     } catch {
       st.totalBytes = st.freeBytes = null;
     }

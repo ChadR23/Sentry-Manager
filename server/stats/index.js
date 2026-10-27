@@ -17,6 +17,7 @@
 const childProcess = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const { fragmentSize } = require('../../src/main/converter/fsSpace');
 const { BackgroundReads, round, maxOf, sumOf } = require('./util');
 const { ProcessTable } = require('./procs');
 const { CpuProvider } = require('./cpu');
@@ -88,7 +89,8 @@ function createStats(options = {}) {
     ...(options.pciIdsFiles ? { pciIdsFiles: options.pciIdsFiles } : {})
   });
   const power = new PowerProvider({ sysRoot, now, intervalMs });
-  const filesystems = new FilesystemsProvider({ procRoot, sysRoot, appPid, readShares, fsp, now, log });
+  // (the real file system only: a stand-in fsp in tests has no fragment size)
+  const filesystems = new FilesystemsProvider({ procRoot, sysRoot, appPid, readShares, fsp, now, log, fragmentSize: fsp === fs.promises ? fragmentSize : null });
   const host = new HostInfo({ procRoot, version: options.version });
   const history = new History({ intervalMs });
   const energy = new Energy({ intervalMs, progressOf: (jobId) => callSafe(jobProgress, jobId) || null });

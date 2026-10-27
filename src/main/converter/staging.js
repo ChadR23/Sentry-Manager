@@ -3,6 +3,7 @@
 const crypto = require('crypto');
 const nodeFs = require('fs');
 const nodePath = require('path');
+const { fragmentSize } = require('./fsSpace');
 
 const SAFE_ID = /^[a-z0-9][a-z0-9_-]{0,127}$/;
 const WINDOWS_RESERVED_NAME = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$/;
@@ -1118,8 +1119,10 @@ function createFileTransaction(options = {}) {
     try {
       if (options.replacementFreeSpace) free = await options.replacementFreeSpace(pathApi.dirname(source));
       else {
+        // (blocks count in the fragment size, not bsize: see fsSpace.js)
+        const frag = pfs === nodeFs.promises ? await fragmentSize(pathApi.dirname(source)) : null;
         const stat = await pfs.statfs(pathApi.dirname(source), { bigint: true });
-        free = BigInt(stat.bavail) * BigInt(stat.bsize);
+        free = BigInt(stat.bavail) * (frag ? BigInt(frag) : BigInt(stat.bsize));
       }
       if ((typeof free !== 'bigint' && !Number.isSafeInteger(free)) || free < 0) throw new Error('invalid space');
       free = BigInt(free);

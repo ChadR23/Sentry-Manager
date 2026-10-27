@@ -44,12 +44,14 @@ function mountFor(mounts, p) {
 }
 
 class FilesystemsProvider {
-  constructor({ procRoot, sysRoot, appPid, readShares, fsp, now, log }) {
+  constructor({ procRoot, sysRoot, appPid, readShares, fsp, now, log, fragmentSize = null }) {
     this.procRoot = procRoot;
     this.sysRoot = sysRoot;
     this.appPid = appPid;
     this.readShares = readShares;
     this.fsp = fsp;
+    // the unit statfs counts blocks in (see src/main/converter/fsSpace.js)
+    this.fragmentSize = fragmentSize;
     this.now = now;
     this.log = log;
     this.shares = new Map(); // path -> state
@@ -128,15 +130,16 @@ class FilesystemsProvider {
       } catch {
         sfs = null;
       }
-      return { latency, sfs };
-    })().then(({ latency, sfs }) => {
+      const frag = sfs && this.fragmentSize ? await this.fragmentSize(target).catch(() => null) : null;
+      return { latency, sfs, frag };
+    })().then(({ latency, sfs, frag }) => {
       if (s.mounted === false) return; // lost while checking: the folder under it answered
       s.reachable = true;
       s.answeredAt = this.now();
       this.answered.set(s.path, s.answeredAt);
       s.latencyMs = Math.max(0, Math.round(latency));
       if (sfs) {
-        const bs = Number(sfs.bsize);
+        const bs = frag || Number(sfs.bsize);
         const blocks = Number(sfs.blocks);
         if (bs > 0 && blocks > 0) {
           s.totalB = blocks * bs;
