@@ -11,6 +11,8 @@ const ARC = Object.freeze({ id: 'pci:0000:03:00.0', kind: 'dri', node: '/dev/dri
 const RTX = Object.freeze({ id: 'pci:0000:02:00.0', kind: 'nvidia', node: null, index: 1 });
 const TAIL = ['-tag:v', 'hvc1', '-fps_mode', 'passthrough', '-start_at_zero', '-avoid_negative_ts', 'make_zero', '-use_editlist', '0'];
 const AV1_TAIL = ['-tag:v', 'av01', '-fps_mode', 'passthrough', '-start_at_zero', '-avoid_negative_ts', 'make_zero', '-use_editlist', '0'];
+// hevc_nvenc with a bitrate caps its peak rate at it (encoderPlanner.js bitrateArgs)
+const NVENC_RATE = ['-rc', 'vbr', '-b:v', '1234567', '-maxrate', '1234567', '-bufsize', '2469134'];
 
 test('without a device every encoder gets exactly today\'s arguments', () => {
   const bitrate = 1_234_567;
@@ -19,9 +21,9 @@ test('without a device every encoder gets exactly today\'s arguments', () => {
   assert.deepEqual(buildEncodeArgs({ codec: 'h265', encoder: 'hevc_qsv', bitrate }),
     ['-c:v', 'hevc_qsv', '-b:v', '1234567', '-pix_fmt', 'nv12', '-bf', '0', ...TAIL]);
   assert.deepEqual(buildEncodeArgs({ codec: 'h265', encoder: 'hevc_nvenc', bitrate }),
-    ['-c:v', 'hevc_nvenc', '-b:v', '1234567', '-pix_fmt', 'yuv420p', '-bf', '0', ...TAIL]);
+    ['-c:v', 'hevc_nvenc', ...NVENC_RATE, '-pix_fmt', 'yuv420p', '-bf', '0', ...TAIL]);
   assert.deepEqual(buildEncodeArgs({ codec: 'h265', encoder: 'hevc_nvenc', bitrate, hwFrames: true }),
-    ['-c:v', 'hevc_nvenc', '-b:v', '1234567', '-bf', '0', ...TAIL]);
+    ['-c:v', 'hevc_nvenc', ...NVENC_RATE, '-bf', '0', ...TAIL]);
   assert.deepEqual(buildEncodeArgs({ codec: 'h265', encoder: 'libx265', bitrate }),
     ['-c:v', 'libx265', '-b:v', '1234567', '-pix_fmt', 'yuv420p', '-preset', 'medium', '-bf', '0', ...TAIL]);
   assert.deepEqual(buildEncodeArgs({ codec: 'av1', encoder: 'av1_vaapi', quality: 'balanced' }),

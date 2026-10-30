@@ -355,7 +355,8 @@ test('a job without lanes runs ffmpeg with exactly the arguments it always had',
     const args = nvidia.encodes()[0].args;
     assert.deepEqual(args.slice(0, 13), ['-nostdin', '-hide_banner', '-loglevel', 'error', '-n',
       '-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda', '-i', args[10], '-c:v', 'hevc_nvenc']);
-    assert.deepEqual(args.slice(13, 17), ['-b:v', '250000', '-bf', '0']);
+    // (hevc_nvenc caps its peak rate at the bitrate: encoderPlanner.js bitrateArgs)
+    assert.deepEqual(args.slice(13, 23), ['-rc', 'vbr', '-b:v', '250000', '-maxrate', '250000', '-bufsize', '500000', '-bf', '0']);
     assert.equal(args.includes('-gpu'), false);
     assert.equal(args.includes('-hwaccel_device'), false);
   } finally {

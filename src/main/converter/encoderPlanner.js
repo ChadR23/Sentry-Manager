@@ -97,6 +97,21 @@ function qualityRateArgs(codec, encoder, level) {
   return ['-crf', pick('av1crf')]; // libsvtav1
 }
 
+// A bitrate (size profiles, custom bitrate). hevc_nvenc alone also gets a
+// peak rate equal to the bitrate and a two-second buffer: with only -b:v its
+// VBR mode left the average to the encoder, which went far over it on busy
+// and night Tesla clips (more than twice it; GPU tier test on an RTX 4070 Ti, see
+// tools/nvencRate.js), and a lower -b:v on the size retry barely changed the
+// size. With the cap every such clip landed under its target on the first
+// try, at the same picture check score and SSIM within 0.002 at equal size.
+// VBR rather than CBR so a still (Sentry) scene is not padded up to the
+// bitrate. av1_nvenc met every target with -b:v alone and stays as it is.
+function bitrateArgs(encoder, bitrate) {
+  const rate = Math.round(bitrate);
+  if (encoder === 'hevc_nvenc') return ['-rc', 'vbr', '-b:v', String(rate), '-maxrate', String(rate), '-bufsize', String(2 * rate)];
+  return ['-b:v', String(rate)];
+}
+
 // A render node (Intel/AMD) or a CUDA index (NVIDIA) of an encoding device
 // chosen per GPU; without one, every argument is what it always was.
 function deviceNode(device) {
@@ -139,7 +154,7 @@ function buildEncodeArgs({ codec, encoder, bitrate, quality = null, vaapiDevice 
   args.push('-c:v', encoder);
   if (device && encoder.endsWith('_nvenc')) args.push('-gpu', deviceIndex(device));
   if (quality !== null) args.push(...qualityRateArgs(codec, encoder, quality));
-  else args.push('-b:v', String(Math.round(bitrate)));
+  else args.push(...bitrateArgs(encoder, bitrate));
 
   // GPU-resident input frames (zero-copy decode) are already 8-bit 4:2:0 and
   // cannot pass through a software pixel-format conversion.
