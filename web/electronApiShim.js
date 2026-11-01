@@ -316,9 +316,9 @@
     getSetting: async (key) => {
       // The Encoder tab never loads footage into the viewer behind it.
       if (key === 'defaultFolder') return embed === 'encoder' ? null : startFolder;
-      // The Encoder tab has no visible map: use OpenStreetMap there so Studio
-      // does not probe Google Maps and show its fallback notice over the form.
-      if (key === 'mapTileProvider' && embed === 'encoder') return 'osm';
+      // The Encoder tab has no visible map: use the street map there so Studio
+      // does not probe Google Satellite and show its fallback notice over the form.
+      if (key === 'mapTileProvider' && embed === 'encoder') return 'openfreemap';
       const all = await settings();
       if (Object.prototype.hasOwnProperty.call(all, key)) return all[key];
       return WEB_DEFAULTS[key];

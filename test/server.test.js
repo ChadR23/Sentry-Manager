@@ -320,6 +320,7 @@ test('Studio is served with the web shim; converter bridge enforces Quick and al
     await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
     const studioRes = await s.call('GET', '/studio/index.html', undefined, { raw: true });
     assert.match(studioRes.headers.get('content-security-policy'), /script-src 'self' 'unsafe-eval'/, 'Studio needs eval for its protobuf decoder');
+    assert.match(studioRes.headers.get('content-security-policy'), /connect-src 'self' https:\/\/tiles\.openfreemap\.org https:\/\/\*\.google\.com;/, 'its map fetches OpenFreeMap and Google Satellite');
     assert.doesNotMatch((await s.call('GET', '/', undefined, { raw: true })).headers.get('content-security-policy'), /unsafe-eval/, 'the shell does not');
     const html = await studioRes.text();
     assert.match(html, /webFlag\.js[\s\S]*electronApiShim\.js/);
@@ -422,7 +423,7 @@ test('the Encoder tab is a page of its own: the converter with the shim, its ske
     await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
     const res = await s.call('GET', '/studio/encoder.html?embed=encoder&vehicle=daily-driver', undefined, { raw: true });
     assert.equal(res.status, 200);
-    assert.doesNotMatch(res.headers.get('content-security-policy'), /unsafe-eval|openstreetmap/, 'only the converter: no eval, no map tiles');
+    assert.doesNotMatch(res.headers.get('content-security-policy'), /unsafe-eval|openfreemap|google/, 'only the converter: no eval, no map tiles');
     const html = await res.text();
     const head = html.split('</head>')[0];
     assert.match(head, /<script src="\/web\/webFlag\.js" defer><\/script>\s*<script src="\/web\/electronApiShim\.js" defer><\/script>/, 'the shim is injected');

@@ -1,16 +1,17 @@
 /**
- * Map Tiles Manager
+ * Map Styles Manager
  *
- * Owns which tile provider every Leaflet map in this window uses (main viewer
- * map + Advanced Editor minimap preview). Providers come from the shared
- * registry in src/shared/mapProviders.js (window.MapProviders).
+ * Owns which provider every MapLibre map in this window shows (the Viewer
+ * map and the Advanced Editor minimap preview), in light or dark and with or
+ * without labels. Providers come from the shared registry in
+ * src/shared/mapProviders.js (window.MapProviders): OpenFreeMap's vector maps
+ * by default, Google Satellite on request.
  *
- * Fallback: when a Google provider is active and Google's tile servers turn
+ * Fallback: when Google Satellite is chosen and Google's tile servers turn
  * out to be unreachable (probe failure, or repeated tile errors before the
- * first successful tile), the session falls back to OpenStreetMap on every
- * registered map, shows a toast, and notifies the main process so export
- * tile downloads and the minimap renderer window follow. The saved setting
- * is left untouched — the next launch tries Google again.
+ * first tile loads), the session falls back to OpenFreeMap on every
+ * registered map and shows a toast. The saved setting is left untouched, so
+ * the next visit tries Google again.
  */
 
 import { notify } from './notifications.js';
@@ -18,7 +19,7 @@ import { t } from '../lib/i18n.js';
 
 const SETTING_KEY = 'mapTileProvider';
 
-// Maps registered for live layer swapping: Map<LeafletMap, {layer, opts}>
+// Maps registered for live style swapping: Map<maplibregl.Map, {providerId, dark}>
 const registeredMaps = new Map();
 
 let selectedProviderId = null;   // resolved from settings (null until loaded)
@@ -52,24 +53,25 @@ function loadSelectedProvider() {
             } catch {
                 labelsEnabled = registry().DEFAULT_LABELS_ENABLED;
             }
+            // Start in the saved light/dark style rather than swapping to it
+            // when script.js reads the same setting a moment later.
+            try {
+                if (await window.electronAPI?.getSetting?.('mapDarkMode') === true) window._mapDarkMode = true;
+            } catch { /* light */ }
             return selectedProviderId;
         })();
     }
     return settingLoadPromise;
 }
 
-/**
- * Whether map labels are currently enabled (resolved setting, or default).
- * The menu toggle is not wired up yet; this is here for it to read.
- */
+/** Whether map labels are currently enabled (resolved setting, or default). */
 export function getMapLabelsEnabled() {
     return labelsEnabled === null ? registry().DEFAULT_LABELS_ENABLED : labelsEnabled;
 }
 
 /**
- * Toggle map labels: persist, then rebuild every live layer. Export tile
- * downloads and the minimap renderer window read the same persisted setting,
- * so they follow on the next export. (No UI calls this yet.)
+ * Toggle map labels: persist, then show or hide the label layers on every
+ * live map (no style reload needed).
  * @param {boolean} enabled
  */
 export async function setMapLabels(enabled) {
@@ -79,7 +81,7 @@ export async function setMapLabels(enabled) {
     } catch (err) {
         console.warn('[MAP] Failed to persist map labels setting:', err);
     }
-    applyEffectiveProviderToAllMaps();
+    for (const map of registeredMaps.keys()) applyLabels(map);
 }
 
 export function getEffectiveProviderId() {
@@ -93,34 +95,59 @@ export function getSelectedProviderId() {
     return selectedProviderId || registry().DEFAULT_PROVIDER_ID;
 }
 
-function createLayer(providerId, opts = {}) {
-    const p = registry().getProvider(providerId);
-    // Dark mode is a global (owned by script.js / settingsModal). Styled
-    // providers (Google) bake the night palette into the tile via apistyle;
-    // for others the URL is unchanged and script.js applies a CSS invert.
-    const dark = !!(typeof window !== 'undefined' && window._mapDarkMode);
-    const url = registry().getUrlTemplate(providerId, { labels: getMapLabelsEnabled(), dark });
-    return window.L.tileLayer(url, {
-        maxZoom: Math.min(p.maxZoom, opts.maxZoomCap ?? p.maxZoom),
-        subdomains: p.subdomains,
-        ...(opts.layerOptions || {})
-    });
+function isDark() {
+    return !!(typeof window !== 'undefined' && window._mapDarkMode);
 }
 
-function watchLayerForFailure(layer, providerId) {
-    if (!registry().isGoogleProvider(providerId)) return;
-    layer.on('tileload', () => { googleTileLoaded = true; });
-    layer.on('tileerror', () => {
+// Show or hide the style's label layers by the label setting. The app's own
+// layers ("sx-…") are never touched.
+function applyLabels(map) {
+    let layers;
+    try { layers = map.getStyle()?.layers || []; } catch { return; }
+    const on = getMapLabelsEnabled();
+    for (const layer of layers) {
+        if (layer.id.startsWith('sx-')) continue;
+        const visible = registry().isLayerVisible(layer, on);
+        const want = visible ? 'visible' : 'none';
+        if ((layer.layout?.visibility || 'visible') !== want) {
+            try { map.setLayoutProperty(layer.id, 'visibility', want); } catch { /* layer gone mid-swap */ }
+        }
+    }
+}
+
+function applyStyle(map, entry, force) {
+    const providerId = getEffectiveProviderId();
+    const dark = isDark();
+    if (!force && entry.providerId === providerId && entry.dark === dark) return;
+    entry.providerId = providerId;
+    entry.dark = dark;
+    try {
+        map.setStyle(registry().getStyle(providerId, { dark }), { diff: false });
+    } catch (err) {
+        console.warn('[MAP] Failed to set map style:', err);
+    }
+}
+
+function watchMapForFailure(map) {
+    map.on('style.load', () => applyLabels(map));
+    map.on('sourcedata', e => {
+        if (e.sourceId === registry().RASTER_SOURCE_ID && e.tile) googleTileLoaded = true;
+    });
+    map.on('error', e => {
+        const fromGoogle = e?.sourceId === registry().RASTER_SOURCE_ID &&
+            registry().isGoogleProvider(getEffectiveProviderId());
+        if (!fromGoogle) {
+            console.warn('[MAP]', e?.error?.message || e);
+            return;
+        }
         if (googleTileLoaded || sessionFallbackActive) return;
         googleTileErrors++;
-        if (googleTileErrors >= 3) {
-            triggerFallback('repeated tile errors');
-        }
+        if (googleTileErrors >= 3) triggerFallback('repeated tile errors');
     });
 }
 
-// Probe one known tile via an <img> load (no CORS restrictions) so a blocked
-// Google endpoint is detected even before the map requests visible tiles.
+// Probe one known tile via an <img> load so a blocked Google endpoint is
+// detected even before the map requests visible tiles.
 function probeGoogleReachable() {
     return new Promise(resolve => {
         const img = new Image();
@@ -135,7 +162,7 @@ function maybeStartProbe() {
     if (probeStarted || !registry().isGoogleProvider(getEffectiveProviderId())) return;
     probeStarted = true;
     probeGoogleReachable().then(ok => {
-        // A tileload in the meantime also proves reachability — only fall
+        // A loaded tile in the meantime also proves reachability: only fall
         // back when nothing from Google has loaded.
         if (!ok && !googleTileLoaded && !sessionFallbackActive) {
             triggerFallback('probe failed');
@@ -146,69 +173,45 @@ function maybeStartProbe() {
 function triggerFallback(reason) {
     if (sessionFallbackActive) return;
     sessionFallbackActive = true;
-    console.warn(`[MAP] Google tiles unavailable (${reason}) — falling back to OpenStreetMap for this session`);
-    applyEffectiveProviderToAllMaps();
+    console.warn(`[MAP] Google tiles unavailable (${reason}), falling back to OpenFreeMap for this session`);
+    applyEffectiveStyleToAllMaps();
     try {
         notify(t('ui.settings.mapProviderFallbackNotice'), { type: 'warn', timeoutMs: 6000 });
     } catch { /* toast is best-effort */ }
     window.electronAPI?.notifyMapProviderFallback?.();
 }
 
-function applyEffectiveProviderToAllMaps() {
-    const effective = getEffectiveProviderId();
-    for (const [map, entry] of registeredMaps) {
-        try {
-            if (entry.layer) map.removeLayer(entry.layer);
-            entry.layer = createLayer(effective, entry.opts);
-            watchLayerForFailure(entry.layer, effective);
-            entry.layer.addTo(map);
-        } catch (err) {
-            console.warn('[MAP] Failed to swap tile layer:', err);
-        }
-    }
-    // The effective provider may have changed whether a native dark style is in
-    // play (e.g. Google ↔ OSM), so re-evaluate the CSS invert on the live map.
-    if (typeof window !== 'undefined' && window._updateMapDarkFilter) {
-        window._updateMapDarkFilter();
-    }
+function applyEffectiveStyleToAllMaps() {
+    for (const [map, entry] of registeredMaps) applyStyle(map, entry, false);
 }
 
 /**
- * Rebuild every registered map's tile layer (e.g. after a dark-mode change so
- * styled providers pick up their night palette). Exposed for script.js.
+ * Apply the current provider and light/dark choice to every registered map
+ * (e.g. after a dark-mode change). Exposed for script.js.
  */
-export function refreshTileLayers() {
-    applyEffectiveProviderToAllMaps();
+export function refreshMapStyles() {
+    applyEffectiveStyleToAllMaps();
 }
 
 /**
- * Attach a tile layer for the current provider to a Leaflet map and keep it
- * registered for live provider swaps (settings change or fallback).
- * The layer is added asynchronously (after the saved setting loads).
- *
- * @param {Object} map - Leaflet map instance
- * @param {Object} opts - { maxZoomCap?: number, layerOptions?: Object }
+ * Give a MapLibre map the current provider's style and keep it registered
+ * for live swaps (settings change, dark mode or fallback). The style is set
+ * once the saved setting has loaded.
+ * @param {maplibregl.Map} map
  */
-export function attachTileLayer(map, opts = {}) {
-    const entry = { layer: null, opts };
+export function attachMapStyle(map) {
+    const entry = { providerId: null, dark: null };
     registeredMaps.set(map, entry);
+    watchMapForFailure(map);
     loadSelectedProvider().then(() => {
         if (!registeredMaps.has(map)) return; // detached before setting loaded
-        // A dark-mode/provider change may have rebuilt this entry's layer while
-        // the setting was loading — drop it first so we don't orphan a layer.
-        if (entry.layer) map.removeLayer(entry.layer);
-        const effective = getEffectiveProviderId();
-        entry.layer = createLayer(effective, opts);
-        watchLayerForFailure(entry.layer, effective);
-        entry.layer.addTo(map);
+        applyStyle(map, entry, true);
         maybeStartProbe();
     });
 }
 
-/**
- * Unregister a map (call before map.remove()).
- */
-export function detachTileLayer(map) {
+/** Unregister a map (call before map.remove()). */
+export function detachMapStyle(map) {
     registeredMaps.delete(map);
 }
 
@@ -229,6 +232,6 @@ export async function setMapTileProvider(id) {
     } catch (err) {
         console.warn('[MAP] Failed to persist map provider setting:', err);
     }
-    applyEffectiveProviderToAllMaps();
+    applyEffectiveStyleToAllMaps();
     maybeStartProbe();
 }

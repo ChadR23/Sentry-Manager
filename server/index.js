@@ -84,15 +84,18 @@ const ITEM_DONE = new Set(['completed', 'skipped', 'failed', 'cancelled']);
 // never run inline scripts. Styles allow inline attributes (both UIs set
 // style="" in markup). The embedded Studio viewer additionally needs
 // 'unsafe-eval' (its bundled protobuf.js builds the telemetry decoder with
-// new Function) and map tiles; the shell and sign-in pages get neither.
-const cspWith = ({ script = "'self'", img = "'self' data: blob:" }) => [
+// new Function) and its map: MapLibre fetches OpenFreeMap's style, tiles,
+// fonts and icons and Google's satellite tiles (the satellite probe is an
+// <img>); the shell and sign-in pages get neither.
+const MAP_HOSTS = 'https://tiles.openfreemap.org https://*.google.com';
+const cspWith = ({ script = "'self'", img = "'self' data: blob:", connect = "'self'" }) => [
   "default-src 'self'",
   `script-src ${script}`,
   "style-src 'self' 'unsafe-inline'",
   `img-src ${img}`,
   "media-src 'self' blob:",
   "font-src 'self' data:",
-  "connect-src 'self'",
+  `connect-src ${connect}`,
   "worker-src 'self' blob:",
   "frame-src 'self'",
   "frame-ancestors 'self'",
@@ -101,7 +104,7 @@ const cspWith = ({ script = "'self'", img = "'self' data: blob:" }) => [
   "form-action 'self'"
 ].join('; ');
 const CSP = cspWith({});
-const STUDIO_CSP = cspWith({ script: "'self' 'unsafe-eval'", img: "'self' data: blob: https://*.google.com https://*.tile.openstreetmap.org" });
+const STUDIO_CSP = cspWith({ script: "'self' 'unsafe-eval'", img: `'self' data: blob: ${MAP_HOSTS}`, connect: `'self' ${MAP_HOSTS}` });
 // The Encoder tab's page: the converter only (no telemetry decoder, no map),
 // so it gets the plain policy.
 const ENCODER_PAGE = '/studio/encoder.html';

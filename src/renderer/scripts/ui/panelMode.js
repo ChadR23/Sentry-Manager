@@ -56,8 +56,8 @@ export function createClipsPanelMode({ map, clipsCollapseBtn } = {}) {
       }
     }
 
-    // Leaflet sometimes needs a nudge when UI moves around.
-    if (map) setTimeout(() => { try { map.invalidateSize(); } catch { } }, 150);
+    // The map needs a nudge to fill its panel when the UI moves around.
+    if (map) setTimeout(() => { try { map.resize(); } catch { } }, 150);
   }
 
   async function initClipsPanelMode() {
@@ -128,7 +128,7 @@ export function createClipsPanelMode({ map, clipsCollapseBtn } = {}) {
       await window.electronAPI.setSetting('sidebarWidth', clampedWidth);
     }
     // Nudge map
-    if (map) setTimeout(() => { try { map.invalidateSize(); } catch { } }, 50);
+    if (map) setTimeout(() => { try { map.resize(); } catch { } }, 50);
   }
 
   // Document-level handlers from the most recent initResizeHandle() call.

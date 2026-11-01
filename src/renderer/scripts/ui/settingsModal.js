@@ -6,7 +6,7 @@
 import { initKeybindSettings } from '../lib/keybinds.js';
 import { getCurrentLanguage, setLanguage, getAvailableLanguages, onLanguageChange, t } from '../lib/i18n.js';
 import { initFeatureBadges, FEATURE_BADGE_KEYS } from '../features/exportVideo.js';
-import { setMapTileProvider, getSelectedProviderId, setMapLabels, getMapLabelsEnabled } from './mapTiles.js';
+import { setMapTileProvider, getSelectedProviderId, setMapLabels, getMapLabelsEnabled } from './mapStyles.js';
 
 
 /**
@@ -306,50 +306,27 @@ export function initSettingsModal() {
         };
     }
 
-    // Map provider (Google Maps / OpenStreetMap) and map style (Light / Dark /
-    // Satellite) dropdowns. The google-satellite tile provider is presented as
-    // provider "google" + style "satellite"; the Satellite style option is
-    // hidden while OSM is selected (OSM has no imagery). While Satellite is
-    // active, the mapDarkMode setting keeps the remembered Light/Dark choice
-    // for when the user returns to a drawn map style.
-    const settingsMapProvider = $('settingsMapProvider');
+    // Map style dropdown (Light / Dark / Satellite). Light and Dark are
+    // OpenFreeMap's street map; Satellite is the google-satellite provider.
+    // While Satellite is active, the mapDarkMode setting keeps the remembered
+    // Light/Dark choice for when the user returns to the street map.
     const settingsMapMode = $('settingsMapMode');
-    const satelliteStyleOption = settingsMapMode
-        ? settingsMapMode.querySelector('option[value="satellite"]')
-        : null;
 
-    // Reflect a tile provider id + dark flag into both dropdowns.
+    // Reflect a provider id + dark flag into the Map Style dropdown.
     function syncMapSettingsUI(providerId, dark) {
-        const satellite = providerId === 'google-satellite';
-        if (settingsMapProvider) {
-            settingsMapProvider.value = satellite ? 'google' : providerId;
-        }
-        if (satelliteStyleOption && settingsMapProvider) {
-            satelliteStyleOption.hidden = settingsMapProvider.value === 'osm';
-        }
         if (settingsMapMode) {
-            settingsMapMode.value = satellite ? 'satellite' : (dark ? 'dark' : 'light');
+            settingsMapMode.value = providerId === 'google-satellite' ? 'satellite' : (dark ? 'dark' : 'light');
         }
     }
 
-    if ((settingsMapProvider || settingsMapMode) && window.electronAPI?.getSetting) {
+    if (settingsMapMode && window.electronAPI?.getSetting) {
         Promise.all([
             window.electronAPI.getSetting('mapTileProvider'),
             window.electronAPI.getSetting('mapDarkMode')
         ]).then(([savedProvider, savedDark]) => {
-            const providerId = window.MapProviders?.getProvider?.(savedProvider)?.id || 'google';
+            const providerId = window.MapProviders?.getProvider?.(savedProvider)?.id || 'openfreemap';
             syncMapSettingsUI(providerId, savedDark === true);
         });
-    }
-
-    if (settingsMapProvider) {
-        settingsMapProvider.onchange = async () => {
-            // Switching provider always lands on a drawn map: if Satellite was
-            // active, the style select falls back to the remembered Light/Dark.
-            await setMapTileProvider(settingsMapProvider.value);
-            syncMapSettingsUI(getSelectedProviderId(), window._mapDarkMode);
-            settingsMapProvider.blur();
-        };
     }
 
     // Map labels toggle (default on — matches Sentry Drive's labeled map)
@@ -367,19 +344,19 @@ export function initSettingsModal() {
         settingsMapMode.onchange = async () => {
             const style = settingsMapMode.value;
             if (style === 'satellite') {
-                // Satellite imagery: swap the tile provider, leaving the
+                // Satellite imagery: swap the provider, leaving the
                 // persisted Light/Dark choice untouched.
                 await setMapTileProvider('google-satellite');
             } else {
-                if (getSelectedProviderId() === 'google-satellite') {
-                    await setMapTileProvider('google');
-                }
                 const enabled = style === 'dark';
                 window._mapDarkMode = enabled;
                 if (window.electronAPI?.setSetting) {
                     await window.electronAPI.setSetting('mapDarkMode', enabled);
                 }
-                if (window.applyMapDarkMode) {
+                if (getSelectedProviderId() === 'google-satellite') {
+                    // Sets the street map in the dark flag just saved
+                    await setMapTileProvider('openfreemap');
+                } else if (window.applyMapDarkMode) {
                     window.applyMapDarkMode(enabled);
                 }
             }

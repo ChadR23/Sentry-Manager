@@ -8,7 +8,8 @@
 
 import { advancedEditorState } from './state.js';
 import { findSeiAtTime } from '../../core/seiExtractor.js';
-import { attachTileLayer, detachTileLayer } from '../mapTiles.js';
+import { attachMapStyle, detachMapStyle } from '../mapStyles.js';
+import { createMap, drawRoute, boundsOf, fitTo, htmlMarker, toLngLat } from '../mapGl.js';
 
 const MPS_TO_MPH = 2.23694;
 const MPS_TO_KMH = 3.6;
@@ -228,65 +229,55 @@ function formatClock(d, mode) {
 }
 
 // --------------------------------------------------------------------------
-// Minimap — Leaflet
+// Minimap — MapLibre
 // --------------------------------------------------------------------------
 
 function makeMinimapPreview(contentEl) {
     contentEl.style.background = '#0e1a2b';
-
-    if (typeof window.L === 'undefined') {
-        contentEl.innerHTML = '<div style="color:#fff; font-size:11px; padding:10px;">Leaflet not loaded</div>';
-        return null;
-    }
 
     const mapDiv = document.createElement('div');
     mapDiv.style.cssText = 'width:100%; height:100%;';
     contentEl.appendChild(mapDiv);
 
     let map = null;
-    let polyline = null;
     let marker = null;
     let resizeObs = null;
 
-    try {
-        // Defer init to next frame so the tile has its final size.
-        requestAnimationFrame(() => {
-            map = window.L.map(mapDiv, {
-                zoomControl: false,
-                attributionControl: false,
-                dragging: false,
-                scrollWheelZoom: false,
-                doubleClickZoom: false,
-                touchZoom: false,
+    // Defer init to next frame so the tile has its final size.
+    requestAnimationFrame(() => {
+        try {
+            // 18 preserves this preview's original zoom ceiling.
+            map = createMap(mapDiv, {
+                scrollZoom: false, doubleClickZoom: false, touchZoom: false,
+                attribution: false, maxZoom: 18
             });
-            // Tile layer from the shared provider registry (Google with OSM
-            // fallback); 18 preserves this preview's original zoom ceiling.
-            attachTileLayer(map, { maxZoomCap: 18 });
+            attachMapStyle(map);
 
             const nativeVideo = depsRef?.getNativeVideo?.();
             const path = nativeVideo?.mapPath || [];
             if (path.length > 0) {
-                polyline = window.L.polyline(path, { color: '#5ee9a0', weight: 3 }).addTo(map);
-                map.fitBounds(polyline.getBounds(), { padding: [10, 10] });
-                marker = window.L.circleMarker(path[0], {
-                    radius: 5, color: '#fff', fillColor: '#5ee9a0', fillOpacity: 1
-                }).addTo(map);
-            } else {
-                map.setView([0, 0], 2);
+                const coords = path.map(p => [p.lat, p.lon]);
+                drawRoute(map, 'sx-preview-route', [{ coords, color: '#5ee9a0' }], { width: 3 });
+                fitTo(map, boundsOf(coords), { padding: 10 });
+                marker = htmlMarker(map, coords[0], {
+                    html: '<div style="width:10px;height:10px;box-sizing:border-box;border-radius:50%;background:#5ee9a0;border:2px solid #fff;"></div>'
+                });
             }
 
-            // Invalidate on tile resize (the tile element itself).
+            // Resize with the tile (the tile element itself).
             const tileEl = contentEl.closest('.ae-tile');
             if (tileEl && 'ResizeObserver' in window) {
                 resizeObs = new ResizeObserver(() => {
-                    if (map) map.invalidateSize(false);
+                    if (map) map.resize();
                 });
                 resizeObs.observe(tileEl);
             }
-        });
-    } catch (err) {
-        console.warn('[AE] minimap init failed:', err);
-    }
+        } catch (err) {
+            console.warn('[AE] minimap init failed:', err);
+            contentEl.innerHTML = '<div style="color:#fff; font-size:11px; padding:10px;">Map unavailable</div>';
+            map = null;
+        }
+    });
 
     return {
         update({ sei }) {
@@ -294,12 +285,12 @@ function makeMinimapPreview(contentEl) {
             const lat = sei.latitudeDeg ?? sei.latitude_deg;
             const lon = sei.longitudeDeg ?? sei.longitude_deg;
             if (typeof lat === 'number' && typeof lon === 'number' && (lat !== 0 || lon !== 0)) {
-                marker.setLatLng([lat, lon]);
+                marker.setLngLat(toLngLat([lat, lon]));
             }
         },
         dispose() {
             try { if (resizeObs) resizeObs.disconnect(); } catch {}
-            try { if (map) detachTileLayer(map); } catch {}
+            try { if (map) detachMapStyle(map); } catch {}
             try { if (map) map.remove(); } catch {}
         }
     };

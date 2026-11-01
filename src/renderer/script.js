@@ -32,8 +32,9 @@ import { initDraggablePanels, resetPanelPosition } from './scripts/ui/draggableP
 import { initAdvancedEditor, openAdvancedEditor } from './scripts/ui/advancedEditor/index.js';
 import { initEventMarkers, updateEventTimelineMarker, updateEventCameraHighlight } from './scripts/ui/eventMarkers.js';
 import { initSkipSeconds, skipSeconds } from './scripts/features/skipSeconds.js';
-import { initMapVisualization, updateMapVisibility, updateMapMarker, clearMapMarker, getMapOrientation, setMapOrientation, getMapBearing, setUprightMarker } from './scripts/ui/mapVisualization.js';
-import { attachTileLayer, refreshTileLayers, getEffectiveProviderId } from './scripts/ui/mapTiles.js';
+import { initMapVisualization, updateMapVisibility, updateMapMarker, clearMapMarker, getMapOrientation, setMapOrientation } from './scripts/ui/mapVisualization.js';
+import { attachMapStyle, refreshMapStyles } from './scripts/ui/mapStyles.js';
+import { createMap, htmlMarker, drawRoute, boundsOf, fitTo, centreOn, toRasterZoom } from './scripts/ui/mapGl.js';
 import { initDashboardVisibility, updateDashboardVisibility, setDashboardParked, resetDashboardParkedState } from './scripts/ui/dashboardVisibility.js';
 import { hasValidGps, extractSeiFromEntry, findSeiAtTime } from './scripts/core/seiExtractor.js';
 import { createSegmentPreloader, planKey, planSegment, preloadAllowed, preloadNeedsWait, shouldStartPreload, RETIRE_DELAY_MS } from './scripts/core/segmentPreload.js';
@@ -284,7 +285,6 @@ function resetDashboardAndMap() {
     if (eventLocationMarker) {
         eventLocationMarker.remove();
         eventLocationMarker = null;
-        setUprightMarker(null);
     }
     
     // Clear SEI data cache and tracking flags
@@ -348,37 +348,30 @@ function showEventJsonLocation(coll, { recenter = true } = {}) {
     // Store event metadata for display
     state.collection.eventMeta = eventMeta;
     
-    // Create a static marker icon (different from moving GPS arrow)
-    const eventIcon = L.divIcon({
-        className: 'event-location-marker',
-        html: `<div class="event-marker-pin">
-            <svg viewBox="0 0 24 24" width="32" height="32" fill="#e53935">
-                <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/>
-            </svg>
-        </div>`,
-        iconSize: [32, 32],
-        iconAnchor: [16, 32],
-        popupAnchor: [0, -32]
-    });
-    
     // Clear any existing event location marker before adding new one
     if (eventLocationMarker) {
         eventLocationMarker.remove();
         eventLocationMarker = null;
     }
-    
-    // Create marker and add popup with location info
-    const latlng = L.latLng(lat, lon);
-    // Note: This is a static event location marker, separate from the moving GPS marker
-    eventLocationMarker = L.marker(latlng, { icon: eventIcon }).addTo(map);
-    // Keep the pin upright while the map rotates in heading-up mode
-    setUprightMarker(eventLocationMarker);
+
+    // A static pin (different from the moving GPS arrow), its tip on the
+    // spot. Aligned to the viewport, so it stays upright in heading-up mode.
+    const latlng = [lat, lon];
+    eventLocationMarker = htmlMarker(map, latlng, {
+        className: 'event-location-marker',
+        anchor: 'bottom',
+        html: `<div class="event-marker-pin">
+            <svg viewBox="0 0 24 24" width="32" height="32" fill="#e53935">
+                <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/>
+            </svg>
+        </div>`
+    });
 
     // Center map on location (skipped on re-call after polyline fitBounds)
+    map.resize();
     if (recenter) {
-        map.setView(latlng, 16);
+        centreOn(map, latlng, 16);
     }
-    map.invalidateSize();
 }
 
 // Format event reason for display
@@ -488,68 +481,39 @@ let useMetric = false; // Will be loaded from settings
         updateTileLabels();
     });
     
-    // Map dark mode. Styled providers (Google) bake a real night palette into
-    // the tiles via apistyle, so for those we rebuild the layer and apply NO
-    // CSS filter. Drawn maps without a native dark style (OSM) get the CSS
-    // invert on the tile pane; photographic imagery (satellite) is never
-    // filtered — inverting a photo produces a color negative.
+    // Map dark mode: OpenFreeMap has a real dark style, so a change swaps the
+    // style on every map. Satellite imagery is shown as it is either way.
     window._mapDarkMode = false;
-
-    // Filter-only step (no tile rebuild) — safe to call after a tile rebuild
-    // without recursing. Decides invert vs. none based on the active provider.
-    function updateMapDarkFilter() {
-        const tilePane = document.getElementById('map')?.querySelector('.leaflet-tile-pane');
-        if (!tilePane) return;
-        const wantsFilter = window.MapProviders?.wantsDarkFilter?.(getEffectiveProviderId());
-        tilePane.style.filter = (window._mapDarkMode && wantsFilter)
-            ? 'invert(100%) hue-rotate(180deg) brightness(0.85) contrast(1.2)'
-            : '';
-    }
-    window._updateMapDarkFilter = updateMapDarkFilter;
 
     function applyMapDarkMode(enabled) {
         window._mapDarkMode = enabled;
-        // Rebuild tiles so Google picks up (or drops) its night palette; the
-        // rebuild also calls updateMapDarkFilter() to set the CSS invert.
-        refreshTileLayers();
-        updateMapDarkFilter();
+        refreshMapStyles();
     }
     window.applyMapDarkMode = applyMapDarkMode;
 
     // Init Map
     try {
-        if (window.L) {
-            map = L.map('map', { 
-                zoomControl: false, 
-                attributionControl: false,
-                dragging: false,         // Disable left-click drag (conflicts with dashboard)
-                touchZoom: true,
-                scrollWheelZoom: true,   // Enable scroll wheel zoom
-                doubleClickZoom: true,
-                boxZoom: false,
-                keyboard: false
-            }).setView([0, 0], 2);
-            // Tile source comes from the shared provider registry (Google by
-            // default, OpenStreetMap as the automatic fallback) — see
-            // scripts/ui/mapTiles.js and src/shared/mapProviders.js.
-            attachTileLayer(map);
-            
-            // Apply dark mode if previously saved
-            if (window._mapDarkMode) applyMapDarkMode(true);
-            
+        const mapEl = document.getElementById('map');
+        if (mapEl) {
+            // Left drag moves the floating panel, so the map pans with the
+            // right button instead (below); scroll, double-click and pinch zoom.
+            map = createMap(mapEl);
+            // Style from the shared provider registry (OpenFreeMap by
+            // default, Google Satellite on request): see
+            // scripts/ui/mapStyles.js and src/shared/mapProviders.js.
+            attachMapStyle(map);
+
             // Enable right-click drag for panning (to avoid conflict with dashboard left-click drag)
-            let mapDragStart = null;
-            let mapDragStartCenter = null;
+            let mapDragLast = null;
             let isMapDragging = false;
-            const mapEl = document.getElementById('map');
             const mapVis = document.getElementById('mapVis');
-            
+
             // Disable context menu on map
             mapEl.addEventListener('contextmenu', e => {
                 e.preventDefault();
                 e.stopPropagation();
             });
-            
+
             // Also prevent context menu on mapVis container
             mapVis.addEventListener('contextmenu', e => {
                 if (e.target === mapEl || mapEl.contains(e.target)) {
@@ -557,102 +521,74 @@ let useMetric = false; // Will be loaded from settings
                     e.stopPropagation();
                 }
             });
-            
+
             mapEl.addEventListener('mousedown', e => {
                 if (e.button === 2) { // Right-click
                     e.preventDefault();
                     e.stopPropagation();
                     isMapDragging = true;
-                    mapDragStart = { x: e.clientX, y: e.clientY };
-                    mapDragStartCenter = map.getCenter();
+                    mapDragLast = { x: e.clientX, y: e.clientY };
                     mapEl.style.cursor = 'grabbing';
                 }
             });
-            
+
             document.addEventListener('mousemove', e => {
-                if (isMapDragging && mapDragStart && mapDragStartCenter) {
+                if (isMapDragging && mapDragLast) {
                     e.preventDefault();
                     e.stopPropagation();
-                    let dx = e.clientX - mapDragStart.x;
-                    let dy = e.clientY - mapDragStart.y;
-                    // Counter-rotate drag vector by map bearing so drag direction
-                    // matches screen direction even when the map container is rotated
-                    const bearing = getMapBearing();
-                    if (bearing) {
-                        const rad = (bearing * Math.PI) / 180;
-                        const cos = Math.cos(rad);
-                        const sin = Math.sin(rad);
-                        const rdx = dx * cos + dy * sin;
-                        const rdy = -dx * sin + dy * cos;
-                        dx = rdx;
-                        dy = rdy;
-                    }
-                    // Convert pixel offset to lat/lng offset
-                    const startPoint = map.latLngToContainerPoint(mapDragStartCenter);
-                    const newPoint = L.point(startPoint.x - dx, startPoint.y - dy);
-                    const newCenter = map.containerPointToLatLng(newPoint);
-                    map.setView(newCenter, map.getZoom(), { animate: false });
+                    const dx = e.clientX - mapDragLast.x;
+                    const dy = e.clientY - mapDragLast.y;
+                    mapDragLast = { x: e.clientX, y: e.clientY };
+                    // Screen pixels: MapLibre accounts for the bearing itself
+                    map.panBy([-dx, -dy], { duration: 0 });
                 }
             });
-            
+
             document.addEventListener('mouseup', e => {
                 if (e.button === 2 && isMapDragging) {
                     e.preventDefault();
                     e.stopPropagation();
                     isMapDragging = false;
-                    mapDragStart = null;
-                    mapDragStartCenter = null;
+                    mapDragLast = null;
                     mapEl.style.cursor = 'default';
                 }
             });
-            
+
             // Helper to re-center map based on current polyline or cached path
             function recenterMap() {
                 if (!map) return;
-                map.invalidateSize();
+                map.resize();
 
                 // Highest priority: event marker (sentry/saved)
                 if (eventLocationMarker) {
-                    map.setView(eventLocationMarker.getLatLng(), 16, { animate: true });
+                    centreOn(map, eventLocationMarker.getLngLat(), 16, { animate: true });
                     return;
                 }
 
                 // During drive playback, center on the current arrow position
                 // at a close zoom instead of fitting the whole route
                 if (window._mapCurrentMarkerLatLng) {
-                    map.setView(window._mapCurrentMarkerLatLng, 16, { animate: true });
+                    centreOn(map, window._mapCurrentMarkerLatLng, 16, { animate: true });
                     return;
                 }
 
-                // Prefer existing polylines' bounds (not during playback)
-                if (mapPolyline) {
-                    let bounds = null;
-                    if (Array.isArray(mapPolyline) && mapPolyline.length > 0) {
-                        bounds = mapPolyline[0].getBounds();
-                        for (let i = 1; i < mapPolyline.length; i++) {
-                            bounds = bounds.extend(mapPolyline[i].getBounds());
-                        }
-                    } else if (mapPolyline.getBounds) {
-                        bounds = mapPolyline.getBounds();
-                    }
-                    if (bounds) {
-                        map.fitBounds(bounds, { padding: [20, 20], animate: true, maxZoom: 16 });
-                        return;
-                    }
+                // Prefer the drawn route's bounds (not during playback)
+                const routeBounds = mapPolyline?.getBounds?.();
+                if (routeBounds) {
+                    fitTo(map, routeBounds, { padding: 20, animate: true, maxZoom: 16 });
+                    return;
                 }
 
                 // Fallback to path data
                 const path = (nativeVideo.mapPath?.length ? nativeVideo.mapPath : window._lastMapPath) || [];
                 if (path.length > 0) {
-                    const allCoords = path.map(p => [p.lat, p.lon]);
-                    const bounds = L.latLngBounds(allCoords);
-                    map.fitBounds(bounds, { padding: [20, 20], animate: true, maxZoom: 16 });
+                    fitTo(map, boundsOf(path), { padding: 20, animate: true, maxZoom: 16 });
                     return;
                 }
 
                 // Fallback to cached bounds (saved/sentry pin)
                 if (window._lastMapBounds) {
-                    map.fitBounds(window._lastMapBounds, { padding: [20, 20], animate: true, maxZoom: 16 });
+                    fitTo(map, window._lastMapBounds, { padding: 20, animate: true, maxZoom: 16 });
                     return;
                 }
             }
@@ -722,7 +658,7 @@ let useMetric = false; // Will be loaded from settings
                 };
             }
         }
-    } catch(e) { console.error('Leaflet init failed', e); }
+    } catch(e) { console.error('Map init failed (no WebGL?)', e); map = null; }
     
     // Re-center map when window is resized or goes fullscreen
     let resizeTimeout;
@@ -730,9 +666,8 @@ let useMetric = false; // Will be loaded from settings
         clearTimeout(resizeTimeout);
         resizeTimeout = setTimeout(() => {
             if (map && mapPolyline && nativeVideo.mapPath?.length > 0) {
-                map.invalidateSize();
-                const allCoords = nativeVideo.mapPath.map(p => [p.lat, p.lon]);
-                map.fitBounds(L.latLngBounds(allCoords), { padding: [20, 20] });
+                map.resize();
+                fitTo(map, boundsOf(nativeVideo.mapPath), { padding: 20 });
             }
         }, 100);
     });
@@ -741,9 +676,8 @@ let useMetric = false; // Will be loaded from settings
     document.addEventListener('fullscreenchange', () => {
         if (map && mapPolyline && nativeVideo.mapPath?.length > 0) {
             setTimeout(() => {
-                map.invalidateSize();
-                const allCoords = nativeVideo.mapPath.map(p => [p.lat, p.lon]);
-                map.fitBounds(L.latLngBounds(allCoords), { padding: [20, 20] });
+                map.resize();
+                fitTo(map, boundsOf(nativeVideo.mapPath), { padding: 20 });
             }, 100);
         }
     });
@@ -1646,16 +1580,10 @@ function refreshFsdEventMarkers() {
         const letter = isDisengage ? 'D' : 'A';
         const title = isDisengage ? 'FSD Disengagement' : 'Accel Push';
 
-        const marker = L.marker([ev.lat, ev.lng], {
-            icon: L.divIcon({
-                className: '',
-                html: `<div title="${title}" style="width:16px;height:16px;border-radius:50%;background:${color};border:2px solid #fff;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:bold;color:#fff;line-height:1;box-shadow:0 1px 4px rgba(0,0,0,0.5)">${letter}</div>`,
-                iconSize: [16, 16],
-                iconAnchor: [8, 8],
-            }),
-        }).bindTooltip(title, { permanent: false, direction: 'top', offset: [0, -10] });
-
-        marker.addTo(map);
+        const marker = htmlMarker(map, [ev.lat, ev.lng], {
+            title,
+            html: `<div style="width:16px;height:16px;box-sizing:border-box;border-radius:50%;background:${color};border:2px solid #fff;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:bold;color:#fff;line-height:1;box-shadow:0 1px 4px rgba(0,0,0,0.5)">${letter}</div>`
+        });
         fsdEventMarkers.push(marker);
     }
 }
@@ -5093,13 +5021,11 @@ async function loadNativeSegment(segIdx) {
                     segments.push({ coords: currentSegment, autopilot: currentAutopilot });
                 }
 
-                // Create polylines for each segment
-                const polylines = segments.map(seg => {
-                    const color = seg.autopilot ? AUTOPILOT_COLOR : MANUAL_COLOR;
-                    return L.polyline(seg.coords, { color, weight: 4, opacity: 1, smoothFactor: 0, noClip: true }).addTo(map);
-                });
-
-                mapPolyline = polylines;
+                // One line layer for the whole route, a colour per segment
+                mapPolyline = drawRoute(map, 'sx-route', segments.map(seg => ({
+                    coords: seg.coords,
+                    color: seg.autopilot ? AUTOPILOT_COLOR : MANUAL_COLOR
+                })));
 
                 // Draw FSD event markers if enabled (must come before start/end markers
                 // since refreshFsdEventMarkers clears fsdEventMarkers first)
@@ -5108,14 +5034,11 @@ async function loadNativeSegment(segIdx) {
                 // Start (green) and end (red) dot markers — match SentryUSB Web UI
                 const startCoord = [mapPath[0].lat, mapPath[0].lon];
                 const endCoord   = [mapPath[mapPath.length - 1].lat, mapPath[mapPath.length - 1].lon];
-                const dotIcon = (bg) => L.divIcon({
-                    className: '',
-                    html: `<div style="width:10px;height:10px;border-radius:50%;background:${bg};border:2px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,0.5)"></div>`,
-                    iconSize: [10, 10],
-                    iconAnchor: [5, 5],
+                const dot = (coord, bg) => htmlMarker(map, coord, {
+                    html: `<div style="width:10px;height:10px;box-sizing:border-box;border-radius:50%;background:${bg};border:2px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,0.5)"></div>`
                 });
-                const startMarker = L.marker(startCoord, { icon: dotIcon('#22c55e') }).addTo(map);
-                const endMarker   = L.marker(endCoord,   { icon: dotIcon('#ef4444') }).addTo(map);
+                const startMarker = dot(startCoord, '#22c55e');
+                const endMarker   = dot(endCoord, '#ef4444');
                 // Push into fsdEventMarkers so they're cleaned up on next drive selection
                 fsdEventMarkers.push(startMarker, endMarker);
 
@@ -5127,20 +5050,19 @@ async function loadNativeSegment(segIdx) {
                 }
 
                 // Fit bounds to all points
-                const allCoords = mapPath.map(p => [p.lat, p.lon]);
-                const bounds = L.latLngBounds(allCoords);
+                const bounds = boundsOf(mapPath);
                 window._lastMapBounds = bounds; // cache for recenter
-                map.invalidateSize();
-                map.fitBounds(bounds, { padding: [20, 20] });
+                map.resize();
+                fitTo(map, bounds, { padding: 20 });
                 // For long drive routes fitBounds can zoom far out; enforce a minimum zoom of 14.
-                if (map.getZoom() < 14) {
+                if (toRasterZoom(map.getZoom()) < 14) {
                     const mid = mapPath[Math.floor(mapPath.length / 2)];
-                    map.setView([mid.lat, mid.lon], 15, { animate: false });
+                    centreOn(map, [mid.lat, mid.lon], 15);
                 }
 
-                // Re-invalidate after layout settles so tiles render correctly
+                // Resize again after layout settles so the map fills its panel
                 setTimeout(() => {
-                    if (map) map.invalidateSize();
+                    if (map) map.resize();
                 }, 1000);
             }
         }).catch(err => {

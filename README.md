@@ -18,7 +18,10 @@ Recycle Bin, retention policies, jobs and notifications.
   that falls behind on a slow network catches up), and the server reads the
   telemetry from the share, so the browser never downloads a clip twice.
   It picks the HW3 (four cameras) or HW4 (six cameras) layout from the
-  footage itself, so there is nothing to set.
+  footage itself, so there is nothing to set. The map is drawn with
+  MapLibre: OpenFreeMap's street map in light or dark, or Google satellite
+  photos. Your browser fetches the map straight from those services, so
+  they see which area is on screen; no footage is sent anywhere.
 - **Encoder.** Converts footage to H.265 or AV1 on the GPU (NVIDIA, AMD
   including APUs, Intel) or the CPU. Tesla's per-frame telemetry is copied
   into every converted file and verified, and nothing is converted twice.

@@ -2884,20 +2884,17 @@ body>.dashboard-vis-compact.draggable:not(.fixed-to-camera) {
     color: var(--text-color);
 }
 
-/* Map arrow marker - smooth position transitions via Leaflet icon container */
+/* Map arrow marker: MapLibre positions and turns it every frame, so no
+   transition (one would lag behind the map as it follows the car) */
 .arrow-marker-icon {
     transition: none !important;
-    /* Leaflet handles position, we handle rotation in the img */
 }
 
-/* Leaflet marker container - apply smooth transition for position changes */
-.leaflet-marker-icon.arrow-marker-icon {
-    will-change: transform;
-}
-
-/* The arrow marker pane - enable smooth transitions (duration controlled by CSS variable) */
-.leaflet-marker-pane .leaflet-marker-icon {
-    transition: transform var(--map-transition-duration, 0.15s) ease-out !important;
+/* The map's compact attribution button (bottom left, clear of the
+   re-center and orientation buttons on the right) */
+#map .maplibregl-ctrl-attrib.maplibregl-compact {
+    margin: 0 0 6px 6px;
+    font-size: 10px;
 }
 
 /* Loading overlay for large folder imports */

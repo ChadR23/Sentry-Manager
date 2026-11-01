@@ -8,7 +8,7 @@
     <!-- Material Symbols comes from the bundled @font-face in style.css; the
          Google Fonts CDN copy was redundant and render-blocking (blank window
          offline / on slow networks). Leaflet is vendored for the same reason. -->
-    <link rel="stylesheet" href="vendor/leaflet/leaflet.css" />
+    <link rel="stylesheet" href="vendor/maplibre/maplibre-gl.css" />
     <link rel="stylesheet" href="style.css">
     <link rel="stylesheet" href="styles/advancedEditor.css">
     <link rel="stylesheet" href="styles/footageConverter.css">
@@ -2486,13 +2486,6 @@
                                     </div>
                                 </label>
                                 <div class="select-row">
-                                    <span class="select-row-label" data-i18n="ui.settings.mapProvider">Map Provider</span>
-                                    <select id="settingsMapProvider" class="settings-select">
-                                        <option value="google" selected data-i18n="ui.settings.mapProviderGoogle">Google Maps</option>
-                                        <option value="osm" data-i18n="ui.settings.mapProviderOsm">OpenStreetMap</option>
-                                    </select>
-                                </div>
-                                <div class="select-row">
                                     <span class="select-row-label" data-i18n="ui.settings.mapStyle">Map Style</span>
                                     <select id="settingsMapMode" class="settings-select">
                                         <option value="light" selected data-i18n="ui.settings.mapStyleLight">Light</option>
@@ -3667,7 +3660,6 @@
     </div>
 
     <!-- Scripts -->
-    <script src="vendor/leaflet/leaflet.js"></script>
     <script src="../shared/mapProviders.js"></script>
     <script src="vendor/protobuf.min.js"></script>
     <script src="scripts/data/dashcam-mp4.js"></script>
