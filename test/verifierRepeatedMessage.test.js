@@ -14,7 +14,6 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const { needsTool } = require('./fixtures/platformSkip');
 
 const REPO = path.join(__dirname, '..');
 const { verifyCandidate, withoutToleratedStderr } = require(path.join(REPO, 'src/main/converter/verifier'));
@@ -27,7 +26,7 @@ const { createMidGopTeslaH264Fixture, runProcess } = require('./fixtures/ffmpegF
 
 const encoders = spawnSync('ffmpeg', ['-hide_banner', '-encoders']).stdout?.toString() || '';
 const has = (name) => new RegExp(`\\s${name}\\s`).test(encoders);
-const needsFfmpeg = needsTool(has('libx264') && has('libx265'), 'needs ffmpeg with libx264 and libx265');
+const needsFfmpeg = !(has('libx264') && has('libx265')) && 'needs ffmpeg with libx264 and libx265';
 
 const DUP = (n) => `[null @ 0x55911466dd00] Application provided invalid, non monotonically increasing dts to muxer in stream 0: ${n} >= ${n}`;
 const REPEAT = (n) => `    Last message repeated ${n} times`;
