@@ -144,3 +144,23 @@ test('viewerMap: the packs\' map module uses the Viewer\'s own MapLibre helpers 
   assert.match(src, /\/studio\/vendor\/maplibre\/maplibre-gl\.css/, 'and MapLibre\'s stylesheet');
   assert.match(src, /\/api\/studio\/settings/, 'the street / satellite choice is the Viewer\'s setting');
 });
+
+// A whole day (hundreds of clips): the clip bar stays visible and each block
+// is its true length before it is played.
+for (const [pack, bar] of [['horizon', 'vw-tlc'], ['flux', 'vw-tl-segs']]) {
+  test(`${pack}: a day of hundreds of clips draws a solid clip bar, every block its own length`, () => {
+    const mod = PACKS[pack];
+    const src = fs.readFileSync(path.join(ROOT, pack, 'web', mod, 'pages', 'viewer.js'), 'utf8');
+    assert.match(src, new RegExp(`const bar = \\$\\('#${bar}'\\);\\n\\s+bar\\.classList\\.toggle\\('dense', st\\.\\w+\\.length > \\(bar\\.clientWidth \\|\\| 800\\) / 6\\);`), 'no gaps below 6 px a clip');
+    assert.doesNotMatch(src, /knownLen|knownDur/, 'one clip\'s length is never used for all');
+    assert.match(src, /\/speeds\?date=/, 'lengths from the speed index');
+    const css = fs.readFileSync(path.join(ROOT, pack, 'web', pack === 'flux' ? 'flux.css' : `${mod}/app.css`), 'utf8');
+    assert.match(css, /\.dense \{ gap: 0; \}/);
+  });
+}
+
+test('aurora: a day of hundreds of clips draws no clip dividers, and lengths come from the speed index', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'aurora', 'web', 'aurora', 'pages', 'viewer.js'), 'utf8');
+  assert.match(src, /const dividers = clips\.length > 1 && clips\.length <= \(q\('#track'\)\.clientWidth \|\| 800\) \/ 6;/);
+  assert.match(src, /\/speeds\?date=/);
+});

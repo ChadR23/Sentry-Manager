@@ -187,11 +187,22 @@ export default {
     }
 
     // ---------- timeline ----------
-    const durOf = (s) => (fin(s.dur) && s.dur > 0 ? s.dur : st.knownDur || DEFAULT_DUR);
+    // a clip's length: its video's once played, else the speed index's (one
+    // reading a second), else a minute; never one clip's length for all
+    // (a short first clip made every block short until each was played)
+    const durOf = (s) => (fin(s.dur) && s.dur > 0 ? s.dur : fin(s.idxLen) && s.idxLen > 0 ? s.idxLen : DEFAULT_DUR);
     const total = () => st.segs.reduce((n, s) => n + durOf(s), 0);
     const offsetOf = (i) => st.segs.slice(0, i).reduce((n, s) => n + durOf(s), 0);
+    // A whole day can hold hundreds of clips: with a gap between each, the
+    // gaps alone outgrow the bar and every clip shrinks to nothing. Below
+    // 6 px a clip the bar is drawn solid, without gaps.
+    function denseBar() {
+      const bar = $('#vw-tl-segs');
+      bar.classList.toggle('dense', st.segs.length > (bar.clientWidth || 800) / 6);
+    }
     function drawTimeline() {
       const T = total() || 1;
+      denseBar();
       $('#vw-tl-segs').innerHTML = st.segs.map((s, i) => {
         let mark = '';
         if (s.eventAt && s.at && s.eventAt >= s.at && s.eventAt < s.at + durOf(s) * 1000 + 30000) {
@@ -319,7 +330,7 @@ export default {
         return;
       }
       msg('');
-      if (fin(m.duration)) { s.dur = m.duration; st.knownDur = st.knownDur || m.duration; drawTimeline(); }
+      if (fin(m.duration)) { s.dur = m.duration; drawTimeline(); }
       for (const vid of activeVideos()) {
         try { vid.currentTime = offset; } catch { /* not seekable yet */ }
       }
@@ -553,7 +564,25 @@ export default {
         if (i >= 0) { start = i; off = Math.max(0, (ev.eventAt - st.segs[i].at) / 1000 - 5); }
       }
       await loadSeg(start, off, !reducedMotion() && params.get('autoplay') !== '0');
+      loadLengths();
       loadRoute();
+    }
+
+    // every clip's length from the server's speed index, so the timeline's
+    // blocks are their true size before each clip is played
+    async function loadLengths() {
+      for (const day of new Set(st.segs.map((s) => String(s.key).slice(0, 10)))) {
+        try {
+          const { speeds } = await api(`/api/vehicles/${encodeURIComponent(v.id)}/speeds?date=${encodeURIComponent(day)}`);
+          for (const s of st.segs) {
+            const sp = s.files.front && speeds?.[s.files.front];
+            if (Array.isArray(sp) && sp.length) s.idxLen = sp.length;
+          }
+        } catch { /* a minute each until played */ }
+        if (!alive) return;
+      }
+      drawTimeline();
+      drawHead();
     }
 
     // the rest of the playlist's route, a few clips at a time, nearest first

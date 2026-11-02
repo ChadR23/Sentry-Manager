@@ -489,7 +489,9 @@ export default {
       s.setAttribute('aria-valuemax', String(Math.round(tot)));
       s.setAttribute('aria-valuenow', String(Math.round(pos)));
       s.setAttribute('aria-valuetext', `${clock(pos)} of ${clock(tot)}`);
-      const marks = clips.length > 1 || events.length ? `${clips.slice(1).map((c, i) => `<span class="scrub-clip" style="left:${((offsetOf(i + 1) / tot) * 100).toFixed(2)}%"></span>`).join('')}${events.map((e) => `<span class="scrub-event" title="Event" style="left:${(((offsetOf(e.clip) + e.offset) / tot) * 100).toFixed(2)}%"></span>`).join('')}` : '';
+      // hundreds of clips (a whole day): no dividers, which would fill the track
+      const dividers = clips.length > 1 && clips.length <= (q('#track').clientWidth || 800) / 6;
+      const marks = clips.length > 1 || events.length ? `${(dividers ? clips.slice(1) : []).map((c, i) => `<span class="scrub-clip" style="left:${((offsetOf(i + 1) / tot) * 100).toFixed(2)}%"></span>`).join('')}${events.map((e) => `<span class="scrub-event" title="Event" style="left:${(((offsetOf(e.clip) + e.offset) / tot) * 100).toFixed(2)}%"></span>`).join('')}` : '';
       if (marks !== drawnMarks) {
         $$('.scrub-clip, .scrub-event', ctrlEl).forEach((x) => x.remove());
         q('#track').insertAdjacentHTML('beforeend', marks);
@@ -514,6 +516,21 @@ export default {
       telem = t;
       map.addRoute(c.key, t?.rec);
       paintHud();
+    }
+    // every clip's length from the server's speed index (one reading a
+    // second): the last clip of a drive is often well under a minute
+    async function loadLengths() {
+      for (const day of new Set(clips.map((c) => String(c.key).slice(0, 10)))) {
+        try {
+          const { speeds } = await api(`/api/vehicles/${encodeURIComponent(v.id)}/speeds?date=${encodeURIComponent(day)}`);
+          if (dead) return;
+          clips.forEach((c, k) => {
+            const sp = c.cams.front && speeds?.[c.cams.front];
+            if (k !== index && Array.isArray(sp) && sp.length) durations[k] = sp.length;
+          });
+        } catch { /* the gaps between clip names stand */ }
+      }
+      paint();
     }
     // the rest of the playlist's route, a few clips at a time, nearest first
     async function loadRoute() {
@@ -748,6 +765,7 @@ export default {
       else loadClip(0, 0, false);
       paintPlay();
       fit();
+      loadLengths();
       loadRoute();
     }
 

@@ -42,8 +42,7 @@ export default {
       i: 0,
       playing: false,
       tel: null,
-      fps: 36,
-      knownLen: null
+      fps: 36
     };
     let alive = true;
     let raf = 0;
@@ -154,11 +153,22 @@ export default {
     }
 
     // ---------- timeline ----------
-    const lenOf = (c) => (ok(c?.len) && c.len > 0 ? c.len : st.knownLen || NOMINAL);
+    // a clip's length: its video's once played, else the speed index's (one
+    // reading a second), else a minute; never one clip's length for all
+    // (a short first clip made every block short until each was played)
+    const lenOf = (c) => (ok(c?.len) && c.len > 0 ? c.len : Array.isArray(c?.spd) && c.spd.length ? c.spd.length : NOMINAL);
     const total = () => st.clips.reduce((n, c) => n + lenOf(c), 0);
     const offset = (i) => st.clips.slice(0, i).reduce((n, c) => n + lenOf(c), 0);
+    // A whole day can hold hundreds of clips: with a gap between each, the
+    // gaps alone outgrow the bar and every clip shrinks to nothing. Below
+    // 6 px a clip the bar is drawn solid, without gaps.
+    function denseBar() {
+      const bar = $('#vw-tlc');
+      bar.classList.toggle('dense', st.clips.length > (bar.clientWidth || 800) / 6);
+    }
     function drawClips() {
       const T = total() || 1;
+      denseBar();
       $('#vw-tlc').innerHTML = st.clips.map((c, i) => {
         let mark = '';
         if (c.eventAt && c.at && c.eventAt >= c.at && c.eventAt < c.at + lenOf(c) * 1000 + 30000) mark = `<i class="tl-ev" style="left:${Math.min(100, ((c.eventAt - c.at) / 1000 / lenOf(c)) * 100).toFixed(1)}%"></i>`;
@@ -232,7 +242,8 @@ export default {
         } catch { /* read below */ }
         if (!alive) return;
       }
-      drawSpeed();
+      drawClips();
+      drawTime();
       const todo = st.clips.filter((c) => c.files.front && c.spd === undefined);
       for (let k = 0; k < todo.length && alive; k += 6) {
         const part = todo.slice(k, k + 6);
@@ -242,10 +253,10 @@ export default {
         } catch {
           return;
         }
-        if (alive) drawSpeed();
+        if (alive) { drawClips(); drawTime(); }
       }
     }
-    const spdSize = new ResizeObserver(() => drawSpeed());
+    const spdSize = new ResizeObserver(() => { denseBar(); drawSpeed(); });
     spdSize.observe($('#vw-tl'));
 
     $('#vw-clips').addEventListener('click', (e) => {
@@ -351,7 +362,7 @@ export default {
         return;
       }
       say('');
-      if (ok(m.duration)) { c.len = m.duration; st.knownLen = st.knownLen || m.duration; drawClips(); }
+      if (ok(m.duration)) { c.len = m.duration; drawClips(); }
       for (const x of active()) {
         try { x.currentTime = at; } catch { /* not seekable yet */ }
       }
