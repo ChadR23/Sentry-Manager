@@ -1,8 +1,9 @@
 'use strict';
 
-// The image build: the weekly rebuild really fetches Debian's security fixes
-// (its package step is not reused from the build cache), and CUDA keeps its
-// own GPU order for every ffmpeg that names no GPU.
+// The image build: only a release builds an image (never a timer), a release
+// in a new week really fetches Debian's security fixes (its package step is
+// not reused from the build cache), and CUDA keeps its own GPU order for
+// every ffmpeg that names no GPU.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -10,6 +11,14 @@ const fs = require('fs');
 const path = require('path');
 
 const REPO = path.join(__dirname, '..');
+
+test('images come only from a push to main or a run by hand, never on a timer', () => {
+  const workflow = fs.readFileSync(path.join(REPO, '.github/workflows/image.yml'), 'utf8');
+  const on = workflow.slice(workflow.indexOf('\non:'), workflow.indexOf('\npermissions:'));
+  assert.match(on, /push:\n\s+branches: \[main\]/);
+  assert.match(on, /workflow_dispatch:/);
+  assert.doesNotMatch(on, /schedule:|cron:/, 'no scheduled rebuild: an update always means a release');
+});
 
 test('the package step runs again each week instead of coming from the build cache', () => {
   const dockerfile = fs.readFileSync(path.join(REPO, 'Dockerfile'), 'utf8');

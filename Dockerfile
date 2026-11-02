@@ -28,8 +28,8 @@ FROM debian:trixie-slim
 # openssl          the local HTTPS certificate authority
 # util-linux       setpriv: the app runs unprivileged (supervisor.js)
 COPY jellyfin.gpg /etc/apt/keyrings/jellyfin.gpg
-# The release build passes the week (like 2026-W43): a new week runs this step
-# again instead of reusing the build cache, so the weekly rebuild really
+# The release build passes the week (like 2026-W43): a release in a new week
+# runs this step again instead of reusing the build cache, so it really
 # fetches the packages' latest security fixes.
 ARG APT_REFRESH=""
 RUN set -eux; \

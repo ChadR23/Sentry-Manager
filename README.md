@@ -628,9 +628,10 @@ hide it. Only change the file for the next critical release.
 Images are built by GitHub Actions for amd64 and arm64
 ([`image.yml`](.github/workflows/image.yml)) and published to
 `ghcr.io/skittles-fivem/sentry-manager`. `latest` follows `main`, every
-commit also gets a `sha-<commit>` tag you can pin with `SENTRY_TAG`, and
-every image is rebuilt weekly so Debian, Node and ffmpeg security fixes
-arrive without a code change.
+commit also gets a `sha-<commit>` tag you can pin with `SENTRY_TAG`.
+Images are only built for a release (nothing is rebuilt on a timer), so
+"update available" always means there is a new release; each build takes
+the latest Debian, Node and ffmpeg security fixes.
 
 ## Security
 

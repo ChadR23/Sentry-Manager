@@ -6,8 +6,11 @@ name: Image
 #     with SENTRY_TAG to stay on, or go back to, a version).
 #   - Running it by hand for another branch (Actions > Image > Run workflow)
 #     publishes an image tagged with that branch's name.
-#   - Every Monday it rebuilds `latest` so Debian, Node and ffmpeg security
-#     fixes arrive without a code change.
+#   - Nothing is built on a timer: a new image only ever comes from a push
+#     to main or a run by hand, so an "update available" always means the
+#     owner released something. Each build fetches the latest Debian, Node
+#     and ffmpeg packages (the package step is not reused from an older
+#     week's build cache).
 # The tests (in three parts) and the two images (each on its own kind of
 # machine, no emulation) run at the same time. The images are pushed only by
 # digest, which nobody pulls; the tag that people pull is put on them last,
@@ -20,8 +23,6 @@ on:
   push:
     branches: [main]
     paths-ignore: ['README.md', 'docs/**', 'truenas/**']
-  schedule:
-    - cron: '17 5 * * 1'
   workflow_dispatch:
 
 # Read-only by default; only the jobs that push images may write packages.

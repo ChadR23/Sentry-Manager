@@ -6,8 +6,7 @@
 // The release build records which image and tag it made (BUILD_INFO.json).
 // Twice a day this asks that registry, anonymously, which image the tag
 // points to now and compares its revision and build time with ours: a new
-// commit, or the weekly rebuild that picks up Debian / Node / ffmpeg security
-// fixes. Nothing is downloaded or installed and no token is stored.
+// release (images are only built for one, never on a timer). Nothing is downloaded or installed and no token is stored.
 // UPDATE_CHECK=off turns it off; images built locally have no tag to check.
 
 const CHECK_MS = 12 * 3600 * 1000;
