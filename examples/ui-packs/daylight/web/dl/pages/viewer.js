@@ -3,10 +3,11 @@
 // driving data under the picture, and keyboard shortcuts.
 
 import { api, esc, enc, icon, bytes, plural, dayTitle, dayShort, niceTime, CATEGORY, chip, emptyState, store, toast, fail, details, clockOf, hourOpts, wall } from '../core.js';
-import { state, vehicle, setVehicle, vehiclePicker, vehicleById } from '../state.js';
+import { state, vehicle, setVehicle, vehiclePicker, vehicleById, on } from '../state.js';
 import { go } from '../app.js';
 import { thumbUrl, moveToBin, setProtected } from './footage.js';
 import { decodeTelemetry, at } from '../telemetry.js';
+import { createViewerMap } from '/web/viewerMap.js';
 
 // laid out like the car: pillars and front on top, repeaters and back below
 const CAMS = ['left_pillar', 'front', 'right_pillar', 'left_repeater', 'back', 'right_repeater'];
@@ -145,6 +146,7 @@ async function player(ctx, v, day, recId) {
       </div>
     </section>
     <div class="dash" id="dash" aria-label="Driving data"></div>
+    ${present.length ? '<section class="map-card" aria-label="Map"><h2 class="map-title">Where the car was</h2><div class="vw-map" id="vw-map" role="region" aria-label="Map of the drive"></div></section>' : ''}
     <div class="actions">
       <button class="btn btn-sm" type="button" id="protect">${icon(rec.protected ? 'unlock' : 'lock')} ${rec.protected ? 'Unprotect' : 'Protect'}</button>
       ${rec.protected ? '' : `<button class="btn btn-ghost btn-sm" type="button" id="trash">${icon('trash')} Move to Recycle Bin</button>`}
@@ -169,6 +171,30 @@ async function player(ctx, v, day, recId) {
   document.body.dataset.player = '1';
   ctx.cleanup(() => { delete document.body.dataset.player; });
   const tiles = new Map(present.map((c) => [c, view.querySelector(`.cam[data-cam="${c}"]`)]));
+  // the drive on a map, light or dark with the look: teal for driving
+  // yourself, Daylight's violet for Autopilot
+  const darkLook = () => document.documentElement.dataset.theme === 'dark'
+    || (!document.documentElement.dataset.theme && matchMedia('(prefers-color-scheme: dark)').matches);
+  const map = present.length ? createViewerMap($('#vw-map'), { dark: darkLook(), colors: { manual: '#0d8f8f', autopilot: '#7b6ae0' } }) : null;
+  if (map) {
+    const follow = () => map.setDark(darkLook());
+    const mq = matchMedia('(prefers-color-scheme: dark)');
+    mq.addEventListener('change', follow);
+    const off = on('theme', follow);
+    ctx.cleanup(() => { mq.removeEventListener('change', follow); off(); map.destroy(); });
+  }
+  // the whole recording's route, a few clips at a time
+  async function loadRoute() {
+    for (let k = 0; k < segs.length && ctx.alive(); k += 4) {
+      await Promise.all(segs.slice(k, k + 4).map(async (s) => {
+        const p = s.cams.front || Object.values(s.cams)[0];
+        try {
+          const res = await fetch(`/api/telemetry?path=${enc(p)}`, { credentials: 'same-origin' });
+          if (res.ok && ctx.alive()) map.addRoute(s.ts, decodeTelemetry(await res.json()));
+        } catch { /* that clip's line is left out */ }
+      }));
+    }
+  }
   const videos = new Map(present.map((c) => [c, tiles.get(c).querySelector('video')]));
   const seg = () => segs[st.seg];
   const masterCam = () => (seg()?.cams.front && videos.has('front') ? 'front' : present.find((c) => seg()?.cams[c]));
@@ -222,6 +248,7 @@ async function player(ctx, v, day, recId) {
       const data = decodeTelemetry(await res.json());
       if (st.teleFor !== p || !ctx.alive()) return undefined;
       st.tele = data;
+      map?.addRoute(seg().ts, data);
       drawDash(at(data, (master()?.currentTime || 0) * 1000), data.length ? '' : 'none');
     } catch {
       if (st.teleFor === p) drawDash(null, 'none');
@@ -325,6 +352,7 @@ async function player(ctx, v, day, recId) {
     scrub.setAttribute('aria-valuetext', `${clockOf(t * 1000)} of ${clockOf(d * 1000)}`);
     $('#time').innerHTML = `<b>${esc(seg() ? clockAt(seg().ts, t) : '—')}</b><br>${clockOf(t * 1000)} / ${clockOf(d * 1000)}${segs.length > 1 ? ` · clip ${st.seg + 1} of ${segs.length}` : ''}`;
     if (st.tele.length) drawDash(at(st.tele, t * 1000));
+    map?.setPosition(st.tele.length ? at(st.tele, t * 1000) : null);
   }
 
   // keep the cameras together: the front camera leads, the others follow
@@ -446,4 +474,5 @@ async function player(ctx, v, day, recId) {
 
   load(st.seg, new URLSearchParams(location.hash.split('?')[1] || '').get('autoplay') === '1');
   if (!present.length) drawDash(null, 'none');
+  if (map) loadRoute();
 }

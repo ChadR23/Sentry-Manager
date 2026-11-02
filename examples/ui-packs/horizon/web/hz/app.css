@@ -625,6 +625,14 @@ body.theater-on .dash, body.theater-on .tuner { visibility: hidden; }
 .vw { grid-template-rows: auto 1fr; }
 .vw-bar { align-self: start; }
 .vw-side .fld { margin-top: 10px; }
+.vw-map {
+  height: 260px; margin-top: 10px; border-radius: var(--r); border: 1px solid var(--line);
+  box-shadow: 0 0 0 1px rgba(255, 63, 180, 0.18), 0 0 18px rgba(61, 240, 255, 0.12);
+  --vm-bg: #120a33; --vm-btn-bg: rgba(10, 5, 30, 0.88); --vm-btn-fg: var(--ink);
+  --vm-btn-border: var(--line); --vm-btn-active: var(--cyan); --vm-radius: var(--r);
+}
+.vw-map .vm-btn:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+@media (max-width: 700px) { .vw-map { height: 220px; } }
 @media (max-width: 700px) { .vw-msg .tech { display: none; } .cam:not(.main).err::after { display: none; } }
 
 /* ---------- Encoder: garage and dyno ---------- */

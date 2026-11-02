@@ -104,6 +104,9 @@ const cspWith = ({ script = "'self'", img = "'self' data: blob:", connect = "'se
   "form-action 'self'"
 ].join('; ');
 const CSP = cspWith({});
+// The main page: an interface pack draws the Viewer's map in it (with
+// web/viewerMap.js), so it may fetch the same map hosts as the Viewer.
+const SHELL_CSP = cspWith({ img: `'self' data: blob: ${MAP_HOSTS}`, connect: `'self' ${MAP_HOSTS}` });
 const STUDIO_CSP = cspWith({ script: "'self' 'unsafe-eval'", img: `'self' data: blob: ${MAP_HOSTS}`, connect: `'self' ${MAP_HOSTS}` });
 // The Encoder tab's page: the converter only (no telemetry decoder, no map),
 // so it gets the plain policy.
@@ -184,7 +187,9 @@ function securityHeaders(req, res, pathname = '') {
   res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
   res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), usb=(), serial=(), payment=(), fullscreen=(self)');
-  res.setHeader('Content-Security-Policy', pathname.startsWith('/studio/') && pathname !== ENCODER_PAGE ? STUDIO_CSP : CSP);
+  const page = pathname.split('?')[0];
+  res.setHeader('Content-Security-Policy', page.startsWith('/studio/') && page !== ENCODER_PAGE ? STUDIO_CSP
+    : page === '/' || page === '/index.html' ? SHELL_CSP : CSP);
   if (isSecure(req)) res.setHeader('Strict-Transport-Security', 'max-age=31536000');
 }
 

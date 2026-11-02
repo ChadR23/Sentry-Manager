@@ -52,6 +52,8 @@ const overlaysByMap = new WeakMap();
  * @param {boolean} [opts.scrollZoom=true]
  * @param {boolean} [opts.doubleClickZoom=true]
  * @param {boolean} [opts.touchZoom=true]
+ * @param {boolean} [opts.dragPan=false] left-drag / one-finger pan (the
+ *   interface packs' maps, which sit in the page rather than a floating panel)
  * @param {boolean} [opts.attribution=true] compact attribution button
  * @param {number} [opts.maxZoom] raster zoom ceiling
  * @returns {maplibregl.Map}
@@ -65,7 +67,7 @@ export function createMap(container, opts = {}) {
         ...(opts.maxZoom !== undefined ? { maxZoom: toGlZoom(opts.maxZoom) } : {}),
         maxPitch: 0,
         attributionControl: false,
-        dragPan: false,
+        dragPan: opts.dragPan === true,
         dragRotate: false,
         keyboard: false,
         boxZoom: false,
@@ -100,10 +102,17 @@ export function createMap(container, opts = {}) {
         observer.observe(map.getContainer());
         map.once('remove', () => observer.disconnect());
     }
-    // The compact credits start folded into their (i) button.
-    map.once('load', () => {
-        map.getContainer().querySelector('.maplibregl-ctrl-attrib')?.classList.remove('maplibregl-compact-show');
-    });
+    // The compact credits stay folded into their (i) button: MapLibre opens
+    // them whenever a style brings new credits (every light / dark /
+    // satellite swap); a tap on (i) still opens them.
+    const foldCredits = () => {
+        const el = map.getContainer().querySelector('.maplibregl-ctrl-attrib.maplibregl-compact');
+        if (!el) return;
+        el.classList.remove('maplibregl-compact-show');
+        el.removeAttribute('open');
+    };
+    map.on('styledata', foldCredits);
+    map.on('sourcedata', e => { if (e.sourceDataType === 'metadata') foldCredits(); });
     return map;
 }
 

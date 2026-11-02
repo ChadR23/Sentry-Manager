@@ -105,14 +105,18 @@
   }
 
   /**
-   * Whether a style layer should be visible under the label setting. Only
-   * symbol layers are affected; lines, fills and imagery always show.
+   * Whether a style layer should be visible under the label setting. Symbol
+   * layers follow it; 3D buildings never show; lines, fills and imagery do.
    * @param {{type: string, 'source-layer'?: string}} layer
    * @param {boolean} labelsEnabled
    * @returns {boolean}
    */
   function isLayerVisible(layer, labelsEnabled) {
-    if (!layer || layer.type !== 'symbol') return true;
+    if (!layer) return true;
+    // A flat map, as before: 3D buildings show their walls towards the
+    // panel's edges even looking straight down.
+    if (layer.type === 'fill-extrusion') return false;
+    if (layer.type !== 'symbol') return true;
     if (!labelsEnabled) return false;
     return CURATED_LABEL_SOURCE_LAYERS.indexOf(layer['source-layer']) !== -1;
   }

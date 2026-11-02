@@ -315,6 +315,17 @@ dialog.dlg[open] { animation: pop 240ms var(--ease) both; }
 .dash .gauge b { font-size: 24px; font-variant-numeric: tabular-nums; }
 .dash .gauge small { font-size: 14px; color: var(--muted); margin-left: 4px; }
 .dash .gauge.on b { color: var(--accent); }
+.map-card { margin-top: 16px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px 14px; box-shadow: var(--shadow-1); }
+.map-title { font-size: 13px; color: var(--muted); font-weight: 600; margin: 0 0 10px; }
+.vw-map {
+  height: 300px; border-radius: var(--radius-sm); border: 1px solid var(--border);
+  --vm-bg: var(--surface-2); --vm-btn-bg: var(--surface); --vm-btn-fg: var(--text-2);
+  --vm-btn-border: var(--border-strong); --vm-btn-active: var(--accent); --vm-radius: var(--radius-xs);
+}
+.vw-map .vm-btn { width: 40px; height: 40px; box-shadow: var(--shadow-1); }
+.vw-map .vm-btn:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+.vw-map .vm-note { font-size: 15px; }
+@media (max-width: 600px) { .vw-map { height: 240px; } }
 .gear { display: inline-flex; gap: 6px; }
 .gear i { font-style: normal; font-weight: 700; color: var(--muted); opacity: .45; }
 .gear i.on { color: var(--accent); opacity: 1; }

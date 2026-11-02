@@ -387,6 +387,13 @@ a.kpi:hover { border-color: var(--violet); transform: translateY(-1px); }
 .seglist button.on { border-color: var(--violet); background: var(--violet-soft); color: var(--text); }
 .seglist .faint { text-align: right; }
 .vw-side .card + .card { margin-top: 12px; }
+.vw-map {
+  height: 240px; border-radius: var(--r-sm); border: 1px solid var(--line-soft);
+  --vm-bg: var(--bg-2); --vm-btn-bg: color-mix(in oklch, var(--panel) 90%, transparent); --vm-btn-fg: var(--text-2);
+  --vm-btn-border: var(--line); --vm-btn-active: var(--cyan); --vm-radius: var(--r-sm);
+}
+.vw-map .vm-btn:hover { color: var(--text); border-color: var(--violet); }
+.vw-map .vm-btn:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 
 /* encoder */
 .enc-setup .card + .card, .enc-live .card + .card { margin-top: 12px; }

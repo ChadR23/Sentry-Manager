@@ -124,3 +124,23 @@ for (const [pack, mod] of Object.entries(PACKS)) {
     }
   });
 }
+
+for (const [pack, mod] of Object.entries(PACKS)) {
+  test(`${pack}: the Viewer shows the drive on the shared MapLibre map, and closes it on leaving`, () => {
+    const src = fs.readFileSync(path.join(ROOT, pack, 'web', mod, 'pages', 'viewer.js'), 'utf8');
+    assert.match(src, /import \{ createViewerMap \} from '\/web\/viewerMap\.js';/);
+    assert.match(src, /createViewerMap\(/, 'the map is made');
+    assert.match(src, /\.addRoute\(/, 'the route is drawn');
+    assert.match(src, /\.setPosition\(/, 'the car follows the playhead');
+    assert.match(src, /map\.destroy\(\)/, 'and the map is closed with the page');
+    assert.match(src, /id="vw-map"/);
+  });
+}
+
+test('viewerMap: the packs\' map module uses the Viewer\'s own MapLibre helpers and maps', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'web', 'viewerMap.js'), 'utf8');
+  assert.match(src, /from '\/studio\/scripts\/ui\/mapGl\.js'/);
+  assert.match(src, /import '\/shared\/mapProviders\.js'/);
+  assert.match(src, /\/studio\/vendor\/maplibre\/maplibre-gl\.css/, 'and MapLibre\'s stylesheet');
+  assert.match(src, /\/api\/studio\/settings/, 'the street / satellite choice is the Viewer\'s setting');
+});

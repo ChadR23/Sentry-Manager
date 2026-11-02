@@ -6,6 +6,7 @@
 
 import { $, $$, esc, icon, api, state, current, setVehicle, vehiclePicker, plural, clock, wall, dayTitle, timeOf, humanize, store, empty, toast, fin } from '../core.js';
 import * as tele from '../telemetry.js';
+import { createViewerMap } from '/web/viewerMap.js';
 
 const CAMS = ['front', 'back', 'left_repeater', 'right_repeater', 'left_pillar', 'right_pillar'];
 // on small tiles the labels shrink to these codes (one line, never wrapping)
@@ -118,9 +119,12 @@ export default {
         </div>
       </div>
       <p class="vw-meta" id="vw-meta"><span id="vw-why"></span><span class="clipline" id="clipline"></span></p>
+      <section class="vw-mappanel panel"><div class="panel-head"><h3>${icon('pin')} Map</h3></div><div class="vw-map" id="vw-map" role="region" aria-label="Map of the drive"></div></section>
       <section class="vw-side panel"><div class="panel-head"><h3 id="list-title">Recordings that day</h3></div><div class="vw-list" id="vw-list"></div></section>`;
 
     const cockpit = q('#cockpit');
+    // the drive on a map: Aurora's teal for driving yourself, its green for Autopilot
+    const map = createViewerMap(q('#vw-map'), { dark: true, colors: { manual: '#2fd6d8', autopilot: '#46f0a8' } });
     const ctrlEl = q('#ctrl');
     const stageEl = q('#vw-stage');
     const root = document.documentElement;
@@ -508,9 +512,21 @@ export default {
       const t = await tele.load(path);
       if (dead || telemFor !== path) return;
       telem = t;
+      map.addRoute(c.key, t?.rec);
       paintHud();
     }
+    // the rest of the playlist's route, a few clips at a time, nearest first
+    async function loadRoute() {
+      const order = clips.map((c, k) => [Math.abs(k - index), c]).sort((a, b) => a[0] - b[0]).map(([, c]) => c).slice(0, 40);
+      for (let k = 0; k < order.length && !dead; k += 4) {
+        await Promise.all(order.slice(k, k + 4).map(async (c) => {
+          const t = await tele.load(c.cams.front || Object.values(c.cams)[0]);
+          if (!dead && t) map.addRoute(c.key, t.rec);
+        }));
+      }
+    }
     function paintHud() {
+      map.setPosition(telem ? tele.at(telem, now() * 1000) : null);
       const hud = q('#hud');
       if (!opts.tele || !telem) {
         hud.hidden = true;
@@ -572,7 +588,7 @@ export default {
       if (el.requestVideoFrameCallback) {
         const frame = () => {
           if (dead) return;
-          if (k === master && opts.tele && telem) paintHud();
+          if (k === master && telem) paintHud();
           el.requestVideoFrameCallback(frame);
         };
         el.requestVideoFrameCallback(frame);
@@ -718,10 +734,12 @@ export default {
     } catch (err) {
       q('#vw-title').innerHTML = `<span class="note bad">${esc(err.message)}</span>`;
     }
-    if (dead) return {};
+    if (dead) { map.destroy(); return {}; }
     drawList();
     if (!ok) {
       ctrlEl.remove();
+      map.destroy();
+      q('.vw-mappanel')?.remove();
       q('#vw-stage').innerHTML = empty('Nothing to play yet', 'This vehicle has no recordings with camera clips here.', `<a class="btn" href="#/footage">${icon('film')} Footage</a>`);
     } else {
       // an event: start a little before it
@@ -730,11 +748,13 @@ export default {
       else loadClip(0, 0, false);
       paintPlay();
       fit();
+      loadRoute();
     }
 
     return {
       destroy() {
         dead = true;
+        map.destroy();
         document.removeEventListener('keydown', onKey);
         document.removeEventListener('visibilitychange', onHidden);
         clearTimeout(syncTimer);

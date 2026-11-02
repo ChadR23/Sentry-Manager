@@ -487,7 +487,7 @@ body[data-route="viewer"] .win-body { display: flex; flex-direction: column; }
 .cockpit.compact .hud-speed b { font-size: 24px; }
 /* while it plays sideways the picture is all there is: the date, event and
    recordings rows come back on pause (or scroll down to them) */
-:root.vw-theatre.vw-playing body[data-route="viewer"] :is(.vw-top, .vw-meta, .vw-side) { display: none; }
+:root.vw-theatre.vw-playing body[data-route="viewer"] :is(.vw-top, .vw-meta, .vw-side, .vw-mappanel) { display: none; }
 :root.vw-theatre body[data-route="viewer"] .stage { padding-top: calc(4px + var(--safe-t)); padding-bottom: calc(10px + var(--safe-b)); }
 :root.vw-theatre body[data-route="viewer"] .win { padding-top: 4px; }
 .vw-idle .cockpit { cursor: none; }
@@ -561,6 +561,14 @@ body[data-route="viewer"] .win-body { display: flex; flex-direction: column; }
 .speed-sel { width: auto; min-width: 92px; border-radius: 999px; min-height: 44px; }
 .clipline { font-size: 13px; color: var(--ink-3); }
 .vw-side { margin-top: 18px; }
+.vw-mappanel { margin-top: 18px; }
+.vw-map {
+  height: 300px; border-radius: 18px; border: 1px solid var(--line-2); box-shadow: var(--edge);
+  --vm-bg: var(--sky-2); --vm-btn-bg: var(--glass-strong); --vm-btn-fg: var(--ink);
+  --vm-btn-border: var(--line-2); --vm-btn-active: var(--au-green); --vm-radius: 999px;
+}
+.vw-map .vm-btn { width: 36px; height: 36px; }
+.vw-map .vm-btn:focus-visible { outline: 2px solid var(--au-green); outline-offset: 2px; }
 .vw-list { display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
 .vw-item { text-decoration: none; display: flex; gap: 10px; align-items: center; padding: 8px; border-radius: 16px; background: rgba(255, 255, 255, .05); border: 1px solid var(--line); color: var(--ink); text-align: left; cursor: pointer; font: inherit; min-height: 56px; }
 .vw-item.on { border-color: rgba(94, 242, 184, .7); background: rgba(94, 242, 184, .1); }
@@ -810,6 +818,8 @@ body[data-route="viewer"] .win-body { display: flex; flex-direction: column; }
   body[data-route="viewer"] .win { padding: 10px 12px 16px; }
   .vw-top { order: 2; margin: 12px 0 0; }
   .vw-side { order: 3; }
+  .vw-mappanel { order: 3; }
+  .vw-map { height: 240px; }
   .ctrl { padding: 6px 10px; }
   .ctrl .play-btn { width: 46px; min-height: 46px; }
   .ctrl-row { gap: 6px; }

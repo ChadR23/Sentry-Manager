@@ -3,6 +3,7 @@
 // the other cameras ride along as picture-in-picture tiles you tap to swap in.
 import { h, ico, api, send, car, toast, local, ok, dayName, words, mmss, wall, CAMS, CAM_NAME, CAM_TAG } from '../core.js';
 import { load as loadTel, at as telAt, rate as telRate } from '../telemetry.js';
+import { createViewerMap } from '/web/viewerMap.js';
 
 const FILE_RE = /(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})-([a-z0-9_]+)\.mp4$/i;
 const SPEEDS = [0.25, 0.5, 1, 1.5, 2, 4];
@@ -107,12 +108,15 @@ export default {
             <label class="fld">Recording<select class="in" id="vw-pick"></select></label>
             <ol class="cliplist" id="vw-clips" aria-label="Clips"></ol>
           </section>
+          <section class="panel hud vw-mappanel"><div class="ph"><h2>${ico('map')}Map</h2></div><div class="vw-map" id="vw-map" role="region" aria-label="Map of the drive"></div></section>
           <section class="panel hud"><div class="ph"><h2>${ico('hud')}Telemetry</h2></div><dl class="kv" id="vw-kv"></dl><p class="small faint" id="vw-tnote"></p></section>
         </aside>
       </section>`;
     const $ = (s) => el.querySelector(s);
     const stage = $('#vw-stage');
     const tiles = Object.fromEntries([...stage.querySelectorAll('.cam')].map((f) => [f.dataset.cam, { fig: f, video: f.querySelector('video') }]));
+    // the drive on a map: Horizon's cyan for driving yourself, its green for Autopilot
+    const map = createViewerMap($('#vw-map'), { dark: true, colors: { manual: '#3df0ff', autopilot: '#5dffb0' } });
 
     // ---------- playlist ----------
     const detail = (id) => api(`/api/vehicles/${encodeURIComponent(v.id)}/recordings/${encodeURIComponent(id)}`);
@@ -440,7 +444,18 @@ export default {
       st.fps = telRate(tel) || 36;
       $('#vw-tnote').textContent = tel ? `${tel.r.length} telemetry records · ${st.fps.toFixed(1)} per second` : 'This clip carries no telemetry (older firmware, parked, or not a Tesla clip).';
       stage.classList.toggle('notel', !tel);
+      map.addRoute(c.key, tel?.r);
       drawHud();
+    }
+    // the rest of the playlist's route, a few clips at a time, nearest first
+    async function loadRoute() {
+      const order = st.clips.map((c, k) => [Math.abs(k - st.i), c]).sort((a, b) => a[0] - b[0]).map(([, c]) => c).slice(0, 40);
+      for (let k = 0; k < order.length && alive; k += 4) {
+        await Promise.all(order.slice(k, k + 4).map(async (c) => {
+          const tel = await loadTel(c.files.front || Object.values(c.files)[0]);
+          if (alive && tel) map.addRoute(c.key, tel.r);
+        }));
+      }
     }
     function drawHud() {
       const m = master();
@@ -459,6 +474,7 @@ export default {
       $('#h-steert').textContent = `${ang.toFixed(0)}°`;
       const ped = r && ok(r.pedal) ? (r.pedal <= 1 ? r.pedal * 100 : r.pedal) : 0;
       $('#h-pedal').style.transform = `scaleX(${Math.max(0, Math.min(100, ped)) / 100})`;
+      map.setPosition(r);
       $('#h-gps').textContent = r && ok(r.lat) && (r.lat || r.lon) ? `${r.lat.toFixed(4)}, ${r.lon.toFixed(4)}${ok(r.heading) ? ` · ${Math.round(r.heading)}°` : ''}` : '';
       $('#vw-kv').innerHTML = r ? [
         ['Speed', ok(r.speed) ? `${(Math.abs(r.speed) * f).toFixed(1)} ${st.units === 'mph' ? 'mph' : 'km/h'}` : '—'],
@@ -547,7 +563,7 @@ export default {
       info = await build();
     } catch (err) {
       say(`<b>${h(err.message)}</b>`);
-      return { unmount() { alive = false; spdSize.disconnect(); document.removeEventListener('visibilitychange', onVis); } };
+      return { unmount() { alive = false; map.destroy(); spdSize.disconnect(); document.removeEventListener('visibilitychange', onVis); } };
     }
     drawPick(info);
     $('#h-tag').textContent = info.recId ? $('#vw-title').textContent : (info.day ? dayName(info.day) : '');
@@ -564,11 +580,13 @@ export default {
       }
       await open(start, off, params.get('autoplay') !== '0');
       loadSpeeds();
+      loadRoute();
     }
 
     return {
       unmount() {
         alive = false;
+        map.destroy();
         spdSize.disconnect();
         cancelAnimationFrame(raf);
         document.removeEventListener('visibilitychange', onVis);

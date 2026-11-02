@@ -2,6 +2,7 @@
 // timeline, camera layouts and a live telemetry readout.
 import { esc, api, current, icon, toast, store, fin, clock, wall, wallDay, dayTitle, CAMERAS, CAMERA_LABEL, CAMERA_SHORT, humanize, reducedMotion } from '../core.js';
 import { telemetryFor, recordAt, fpsOf } from '../telemetry.js';
+import { createViewerMap } from '/web/viewerMap.js';
 import { TimeChart, C } from '../charts.js';
 import { split, seg, wireSeg, empty } from '../ui.js';
 
@@ -118,6 +119,10 @@ export default {
             <div id="t-chart"></div>
             <p class="small faint" id="t-note"></p>
           </section>
+          <section class="card vw-mapcard">
+            <header class="card-h"><h2>Map</h2></header>
+            <div class="vw-map" id="vw-map" role="region" aria-label="Map of the drive"></div>
+          </section>
           <section class="card">
             <header class="card-h"><h2>Clips</h2><span class="faint small" id="vw-count"></span></header>
             <ol class="seglist" id="vw-segs"></ol>
@@ -128,6 +133,8 @@ export default {
     split($('#vw-split'), { id: 'viewer', initial: Math.max(600, (el.clientWidth || 1200) - 360), min: 420, max: 2400 });
     const stage = $('#vw-stage');
     const tiles = Object.fromEntries([...stage.querySelectorAll('.cam')].map((f) => [f.dataset.cam, { fig: f, video: f.querySelector('video') }]));
+    // the drive on a map: Flux's violet for driving yourself, its cyan for Autopilot
+    const map = createViewerMap($('#vw-map'), { dark: true, colors: { manual: '#a78bfa', autopilot: '#4fd8f0' } });
     const chart = new TimeChart($('#t-chart'), {
       height: 96, floor: 10, format: (x) => `${Math.round(x)}`, legend: true,
       timeFormat: (t) => `${(t / 1000).toFixed(0)}s`,
@@ -404,6 +411,7 @@ export default {
       if (st.segs[st.idx] !== s) return;
       st.tel = tel;
       st.fps = fpsOf(tel) || 36;
+      map.addRoute(s.key, tel?.recs);
       if (!tel) {
         $('#t-note').textContent = 'This clip has no telemetry (older firmware, parked, or not a Tesla clip).';
         chart.set([], {});
@@ -417,6 +425,7 @@ export default {
     function drawTelemetry() {
       const m = master();
       const r = st.tel && m ? recordAt(st.tel, m.currentTime * 1000) : null;
+      map.setPosition(r);
       const f = st.units === 'mph' ? 2.23694 : 3.6;
       $('#t-speed').textContent = r && fin(r.speed) ? Math.round(r.speed * f) : '—';
       el.querySelectorAll('#t-gear [data-g]').forEach((g) => g.classList.toggle('on', Boolean(r) && g.dataset.g === r.gear));
@@ -526,6 +535,7 @@ export default {
       info = await buildPlaylist();
     } catch (err) {
       el.querySelector('.vw-main').innerHTML = empty(esc(err.message));
+      map.destroy();
       return {};
     }
     $('#vw-title').textContent = st.title || 'no footage';
@@ -543,6 +553,18 @@ export default {
         if (i >= 0) { start = i; off = Math.max(0, (ev.eventAt - st.segs[i].at) / 1000 - 5); }
       }
       await loadSeg(start, off, !reducedMotion() && params.get('autoplay') !== '0');
+      loadRoute();
+    }
+
+    // the rest of the playlist's route, a few clips at a time, nearest first
+    async function loadRoute() {
+      const order = st.segs.map((s, k) => [Math.abs(k - st.idx), s]).sort((a, b) => a[0] - b[0]).map(([, s]) => s).slice(0, 40);
+      for (let k = 0; k < order.length && alive; k += 4) {
+        await Promise.all(order.slice(k, k + 4).map(async (s) => {
+          const tel = await telemetryFor(s.files.front || Object.values(s.files)[0]);
+          if (alive && tel) map.addRoute(s.key, tel.recs);
+        }));
+      }
     }
 
     return {
@@ -550,6 +572,7 @@ export default {
         alive = false;
         cancelAnimationFrame(raf);
         chart.destroy();
+        map.destroy();
         for (const c of GRID_ORDER) {
           const vid = tiles[c].video;
           vid.pause();

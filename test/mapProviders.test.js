@@ -32,7 +32,7 @@ test('Google Satellite is an inline raster style, the same in light and dark', (
   assert.notEqual(providers.getStyle('google-satellite'), style);
 });
 
-test('labels: place and road names only, none when labels are off; other layers always show', () => {
+test('labels: place and road names only, none when labels are off; no 3D buildings; other layers always show', () => {
   const symbol = (sourceLayer) => ({ type: 'symbol', 'source-layer': sourceLayer });
   assert.ok(providers.isLayerVisible(symbol('place'), true));
   assert.ok(providers.isLayerVisible(symbol('transportation_name'), true));
@@ -41,9 +41,11 @@ test('labels: place and road names only, none when labels are off; other layers 
   }
   assert.ok(!providers.isLayerVisible(symbol('place'), false));
   assert.ok(!providers.isLayerVisible(symbol('transportation_name'), false));
-  for (const type of ['line', 'fill', 'background', 'raster', 'fill-extrusion']) {
+  for (const type of ['line', 'fill', 'background', 'raster']) {
     assert.ok(providers.isLayerVisible({ type, 'source-layer': 'poi' }, false), type);
   }
+  // a flat map: no 3D buildings
+  assert.ok(!providers.isLayerVisible({ type: 'fill-extrusion', 'source-layer': 'building' }, true));
 });
 
 test('MapLibre is bundled with its worker and licence, and Leaflet is gone', () => {

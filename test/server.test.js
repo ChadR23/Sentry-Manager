@@ -321,7 +321,10 @@ test('Studio is served with the web shim; converter bridge enforces Quick and al
     const studioRes = await s.call('GET', '/studio/index.html', undefined, { raw: true });
     assert.match(studioRes.headers.get('content-security-policy'), /script-src 'self' 'unsafe-eval'/, 'Studio needs eval for its protobuf decoder');
     assert.match(studioRes.headers.get('content-security-policy'), /connect-src 'self' https:\/\/tiles\.openfreemap\.org https:\/\/\*\.google\.com;/, 'its map fetches OpenFreeMap and Google Satellite');
-    assert.doesNotMatch((await s.call('GET', '/', undefined, { raw: true })).headers.get('content-security-policy'), /unsafe-eval/, 'the shell does not');
+    const shellCsp = (await s.call('GET', '/', undefined, { raw: true })).headers.get('content-security-policy');
+    assert.doesNotMatch(shellCsp, /unsafe-eval/, 'the shell does not');
+    assert.match(shellCsp, /connect-src 'self' https:\/\/tiles\.openfreemap\.org https:\/\/\*\.google\.com;/, 'an interface pack draws the map in the main page');
+    assert.doesNotMatch((await s.call('GET', '/login', undefined, { raw: true })).headers.get('content-security-policy'), /openfreemap/, 'the sign-in page has no map');
     const html = await studioRes.text();
     assert.match(html, /webFlag\.js[\s\S]*electronApiShim\.js/);
     assert.ok(!/<script>/.test(html.split('</head>')[0].split('<head>')[1].split('<title>')[0]), 'nothing inline is injected');
