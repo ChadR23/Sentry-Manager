@@ -245,7 +245,7 @@ details.more p { margin-top: 10px; color: var(--text-2); max-width: 760px; }
 .logscope { color: var(--info); font-family: var(--mono); font-size: 12px; }
 .logmsg { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
 
-/* Overview > Server ("nerd stats"): the approved mockup, docs/plans/server-monitor-mock.js */
+/* Overview > Server ("nerd stats"): from the approved mockup (the server monitor plan, in git history) */
 .nd-server { container-type: inline-size; }
 .nd-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
 .nd-head > div:first-child { min-width: 0; }

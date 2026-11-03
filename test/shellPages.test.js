@@ -42,7 +42,7 @@ test('Logs: every old link to Settings > Logs leads to the Overview', () => {
   for (const hash of ['#/overview/logs', '#/settings/logs', '#settings/logs', '#/settings/logs/']) assert.ok(LOGS_HASH.test(hash), hash);
   for (const hash of ['#/overview', '#/settings', '#/settings/logsx']) assert.ok(!LOGS_HASH.test(hash), hash);
   // and nothing in the app, the docs or the README links to the old place
-  const files = ['README.md', 'web/index.html', 'docs/plans/server-monitor-mock.js'];
+  const files = ['README.md', 'web/index.html', ...fs.readdirSync(path.join(REPO, 'docs')).filter((f) => f.endsWith('.md')).map((f) => `docs/${f}`)];
   for (const f of files) assert.doesNotMatch(fs.readFileSync(path.join(REPO, f), 'utf8'), /#\/settings\/logs"|Settings > Logs lists/, f);
   assert.doesNotMatch(app, /href="#\/settings\/logs"/);
 });

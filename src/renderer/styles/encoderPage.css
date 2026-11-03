@@ -1084,7 +1084,7 @@ select.converter-select {
 
 /* --------------------------------------------------------------------------
    Hardware (scripts/features/hardwarePanel.js): what the run uses and what
-   it costs. Started from the approved mockup (docs/plans/server-monitor-mock.js);
+   it costs. Started from the approved mockup (the server monitor plan, in git history);
    since then, at the owner's request, it has no row per clip and sits beside
    the run's progress instead of above it.
    -------------------------------------------------------------------------- */
