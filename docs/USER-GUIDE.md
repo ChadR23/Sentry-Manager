@@ -224,6 +224,11 @@ On Windows, open the app at `https://localhost:9000` on the PC itself.
    and the certificate's **fingerprint** (a long string of letters and
    numbers with colons).
 
+   ![docker logs: the setup code (1) and the certificate fingerprint (2)](images/guide/docker-logs.png)
+
+   *(1) the setup code, (2) the certificate fingerprint. Your code and
+   fingerprint are different.*
+
    Important:
    - **Use the newest code.** Every restart before you've created the
      account prints a **new** code; older ones stop working. Use the
@@ -260,6 +265,15 @@ On Windows, open the app at `https://localhost:9000` on the PC itself.
    (the only way back in is [Start over](#start-over-completely), which
    resets the account and settings).
 
+   ![The first-start page](images/guide/first-start.png)
+
+   *(1) user name, (2) password, (3) the same password again, (4) the setup
+   code from the log, (5) **Create account**. Under the button is the
+   certificate fingerprint, the same as in the log.*
+
+5. **You should see** the **Overview** page, with **Add your first vehicle**
+   at the top.
+
 **If not:**
 - The page doesn't load at all: check the address and port, that the
   container is `Up` (`docker ps`), and that no firewall on the server blocks
@@ -292,7 +306,13 @@ What the share needs:
 
 Steps:
 
-1. In the app: **Settings → Vehicles → Add vehicle**.
+1. In the app, click **Settings** in the menu on the left (1), then **Add
+   vehicle** in the *Vehicles* box (2). On a phone the menu is the row of
+   icons at the top of the screen; Settings is the gear.
+
+   ![Settings in the menu](images/guide/overview-settings.png)
+
+   ![Add vehicle in Settings](images/guide/settings-add-vehicle.png)
 2. Name: anything (`Daily Driver`). Time zone: your car's time zone.
 3. Footage source: **SMB share**.
 4. Share: `//<nas-ip>/<share-name>`, for example `//192.168.1.50/TeslaCam`.
@@ -304,6 +324,12 @@ Steps:
    says so.
 7. Press **Test connection** and wait.
 
+   ![The SMB share form](images/guide/add-smb.png)
+
+   *(1) **SMB share**, (2) the share's address, (3) and (4) the NAS user
+   name and password, (5) **Test connection**. The result shows right under
+   the button.*
+
    **You should see** *Connected: the user name and password work.* and
    *Tesla footage found*. **If not**, it tells you why; see
    [SMB errors](#smb-errors). Two messages that are not errors:
@@ -312,8 +338,10 @@ Steps:
      (`//192.168.1.50/share/folder` works).
    - *Read-only for this account*: it will work, but to convert footage or
      use the Recycle Bin, give that NAS account write access.
-8. Press **Add vehicle**. It asks for **your password again** (adding a
-   vehicle is a protected change).
+8. Press **Add vehicle** (6), at the bottom of the form. It asks for **your
+   password again** (adding a vehicle is a protected change).
+
+   ![Add vehicle at the bottom of the form](images/guide/add-smb-save.png)
 
 **You should see** the vehicle in the list, and after its first scan the
 footage under **Footage**.
@@ -358,6 +386,11 @@ you add one:
    **Folder in the container**, Folder: `/footage/my-car` (the **container**
    path, the right side of the line, **not** the server path). Press **Add
    vehicle** and enter your password again.
+
+   ![The folder form](images/guide/add-folder.png)
+
+   *(1) **Folder in the container**, (2) the container path
+   `/footage/my-car`, (3) **Add vehicle**.*
 
 **You should see** the vehicle, and its footage under **Footage**.
 
@@ -416,6 +449,11 @@ docker pull ghcr.io/skittles-fivem/sentry-manager:latest
 then *Apps → Installed → sentry-six-manager → Stop*, then *Start*. If
 **Overview → Server** still shows the old version, *Edit* the app and *Save*
 without changes.
+
+**Which version runs:** on the **Overview**, in the *Server* box, at the end
+of the line under *Server* (1).
+
+![The version on the Overview](images/guide/overview-version.png)
 
 ---
 
@@ -517,6 +555,10 @@ changed nothing on the server, **don't continue**: compare the fingerprint
 with `docker logs sentry-six-manager`. To get rid of the warning for good on
 a device, install the app's certificate authority from **Settings →
 Security**; that page has the steps for each device.
+
+The fingerprint to compare is also in **Settings → Security** (1):
+
+![The certificate fingerprint in Settings → Security](images/guide/settings-security.png)
 
 ### SMB errors
 
