@@ -113,6 +113,11 @@ Use SSH, which gives you exactly the commands above:
    with `sudo` in front of every `docker` command.
 
 Synology notes:
+- Synology's Container Manager can come with a Compose **older than 2.24**.
+  If `sudo docker compose version` shows that, use the
+  [Old Compose](#old-compose-below-224) fix before `docker compose up -d`.
+- On Synology every `docker` command needs `sudo`, including
+  `sudo docker logs sentry-six-manager` in the next section.
 - Synology users usually have a user ID of 1026 or higher, not 1000. If your
   footage is in a folder on the Synology itself, read
   [Permissions](#permissions-read-only-vehicle).
@@ -224,7 +229,8 @@ On Windows, open the app at `https://localhost:9000` on the PC itself.
      account prints a **new** code; older ones stop working. Use the
      **last** one in the log.
    - The same code is also in the file `data/setup-code.txt` (in the folder
-     where you ran `docker compose up -d`).
+     where you ran `docker compose up -d`). Only the app's user may read it,
+     so use `sudo cat data/setup-code.txt`.
 
    **If you see no code:** an account already exists (for example from
    `UI_PASSWORD` in `.env`). Sign in with that account instead.
@@ -246,14 +252,21 @@ On Windows, open the app at `https://localhost:9000` on the PC itself.
    Each device asks once. To be sure it's your server, compare the
    fingerprint in the browser's certificate details with the one in the log.
 
-4. **You should see** the sign-in page asking for **Setup code**, a user name
-   and a password. Enter the code (dashes optional), a user name (letters,
-   numbers and `. _ @ -`), and a password of **at least 8 characters**.
+4. **You should see** the first-start page asking for a **User name**, a
+   **Password**, **Confirm password** and the **Setup code**. Enter a user
+   name (letters, numbers and `. _ @ -`), a password of **at least 8
+   characters** twice, and the code (dashes and small letters are fine).
+   Write the user name and password down: there is no "forgot password"
+   (the only way back in is [Start over](#start-over-completely), which
+   resets the account and settings).
 
 **If not:**
 - The page doesn't load at all: check the address and port, that the
   container is `Up` (`docker ps`), and that no firewall on the server blocks
-  port 9000.
+  port 9000 (for example `sudo ufw allow 9000/tcp` on Ubuntu).
+- A short page about a certificate instead of the app: you typed
+  `http://`. Type `https://`.
+- *The passwords do not match*: type the same password in both fields.
 - *That setup code is not right*: you used an old code. Run
   `docker logs sentry-six-manager` again and use the **last** code.
 
@@ -291,8 +304,14 @@ Steps:
    says so.
 7. Press **Test connection** and wait.
 
-   **You should see** a success message. **If not**, it tells you why; see
-   [SMB errors](#smb-errors).
+   **You should see** *Connected: the user name and password work.* and
+   *Tesla footage found*. **If not**, it tells you why; see
+   [SMB errors](#smb-errors). Two messages that are not errors:
+   - *No TeslaCam folder found yet*: the share is empty, or the footage is
+     more than 3 folders deep. Point the share at a folder closer to it
+     (`//192.168.1.50/share/folder` works).
+   - *Read-only for this account*: it will work, but to convert footage or
+     use the Recycle Bin, give that NAS account write access.
 8. Press **Add vehicle**. It asks for **your password again** (adding a
    vehicle is a protected change).
 
@@ -421,6 +440,10 @@ Everything is optional; the web page does all the setup. If you do use a
   in the container. It must be the **container** path (`/footage/my-car`),
   and the volume line from [4b](#b-footage-on-this-same-server-a-folder) must
   be there.
+- **`PUID` and `PGID` must not be `0`** (root): the app is built to run
+  as an ordinary user.
+- **`TZ`** sets the server's time zone (log times, when policies run), for
+  example `TZ=America/Chicago`. Without it the server uses UTC.
 - **Don't set `PORT`** in `.env`. The compose file always maps port 9000; to
   use another port, change the **left** number in `docker-compose.yml`
   (`"9010:9000"`), not `PORT`.
@@ -459,6 +482,28 @@ with
 and create an empty `.env` file next to it (`touch .env`). Then
 `docker compose up -d`.
 
+### "no configuration file provided" or "no such service"
+
+You ran `docker compose` in the wrong folder. `cd` into the folder that holds
+`docker-compose.yml` (for example `cd ~/sentry-six-manager`) and try again.
+
+### "yaml: line …" after editing docker-compose.yml
+
+The file's indentation is off. Use **spaces, never tabs**, and line the new
+line up exactly with the one above it (`- ./data:/data`). When unsure,
+download the file again and redo the edit.
+
+### "The container name ... is already in use"
+
+An old container with the same name is left over (from an earlier try, or a
+TrueNAS or Portainer install). Remove only the container (your `data` folder
+stays): `docker rm -f sentry-six-manager`, then `docker compose up -d`.
+
+### "no matching manifest" / "exec format error"
+
+Images exist for 64-bit Intel/AMD (`amd64`) and 64-bit ARM (`arm64`). A
+Raspberry Pi needs a **64-bit** OS; 32-bit systems can't run it.
+
 ### Port 9000 is taken
 
 In `docker-compose.yml`, change `"9000:9000"` to, for example,
@@ -488,6 +533,24 @@ The **Test connection** button explains the problem. What each one means:
 | *Could not reach the SMB server* | Wrong IP, NAS off, or port 445 blocked between the server and the NAS. |
 | *Could not resolve the server name* | Use the NAS's IP address instead of its name. |
 | *not allowed to mount* | The `cap_add` lines in `docker-compose.yml` were removed. Download the file again. |
+
+### Fedora, RHEL and other SELinux systems
+
+If mounts or the `data` folder fail with *permission denied* although the
+permissions look right, delete the `#` in front of `- label=disable` under
+`security_opt:` in `docker-compose.yml`, then `docker compose up -d`.
+
+### Keep `data` on a local disk
+
+The `data` folder (account, settings, journals, converter work) must be on
+a local disk of the server, not on an SMB or NFS share. Only the footage may
+live on a share.
+
+### Watching from outside your home
+
+Don't forward port 9000 on your router. Use a VPN to your home network (your
+router's, or one like WireGuard or Tailscale) and open the same
+`https://<server-ip>:9000` address.
 
 ### The container keeps restarting
 
