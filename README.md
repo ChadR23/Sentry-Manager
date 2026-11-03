@@ -12,6 +12,10 @@ Recycle Bin, retention policies, jobs and notifications.
 
 *Screenshots use generated demo footage.*
 
+**New here? Follow the [step-by-step install guide](docs/USER-GUIDE.md)**:
+every command, what you should see after it, and what to do if you don't
+(Linux, Synology, Unraid, TrueNAS, Windows).
+
 - **Viewer.** All six cameras in sync, with the telemetry dashboard (speed,
   gear, Autopilot, blinkers, steering, G-force) and the map. The cameras
   stream over one HTTP/2 connection and keep pace with each other (a camera
