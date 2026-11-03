@@ -2,7 +2,7 @@
 #
 #   Apps > Discover Apps > (three dots, top right) > Install via YAML
 #   Name: sentry-six-manager, paste this file, change the lines marked
-#   CHANGE, then Save. Full steps: README.md, "TrueNAS".
+#   CHANGE, then Save. Full steps: docs/truenas.md (or docs/USER-GUIDE.md).
 #
 # The web UI is then on https://<truenas>:9000. The setup code and the HTTPS
 # fingerprint are in the app's logs (Apps > Installed > sentry-six-manager >

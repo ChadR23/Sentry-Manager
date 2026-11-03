@@ -1,0 +1,33 @@
+# Recycle Bin, policies and jobs
+
+[← Back to the README](../README.md)
+
+![Recycle Bin](images/recycle-bin.png)
+
+**Move to trash** moves a recording into `.sentry-recycle-bin` on the same
+share. That is a rename, so it is instant. From the Recycle Bin you restore a
+recording to exactly where it was, or delete it for good, which always asks
+you to confirm (and for your password, unless you entered it in the last 10
+minutes). Protected recordings, and recordings the converter is working on,
+can't be trashed.
+
+![Policies](images/policies.png)
+
+A **policy** keeps a number of days per category (Recent, Sentry, Saved,
+Other) and moves older recordings to the Recycle Bin once a day. It previews
+what the next run would move. Protected recordings are always skipped, and a
+policy never deletes anything.
+
+## Jobs
+
+**Jobs** lists what Sentry Six Manager did and is doing for the selected
+vehicle: inventory scans, conversions (with the energy they used), moves to
+and from the Recycle Bin and policy runs, newest first, with how long each
+took. A job that a restart stopped (a scan, a move) shows as *interrupted*;
+a conversion carries on where it was.
+
+**Clear jobs** takes the finished ones (done, failed, cancelled and
+interrupted) off the list after you confirm how many, so what shows up next
+is what happened since. Running, waiting and paused jobs stay. Only the list
+is cleared: footage, converted files and what the Encoder needs to resume a
+conversion are not touched.
