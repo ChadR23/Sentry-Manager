@@ -370,6 +370,19 @@ export default {
     }
     function camsHere() { return CAMS.filter((k) => clips[index]?.cams[k]); }
 
+    // A clip that cannot be opened while the playlist plays is skipped (a
+    // damaged file: Tesla leaves one when the car powers down mid-clip), so
+    // a whole day plays on. Three in a row stop it: then it is the browser
+    // that cannot play the format, and the message says so.
+    const MAX_SKIPS = 3;
+    let skipped = 0;
+    function skip(why) {
+      if (index >= clips.length - 1 || skipped >= MAX_SKIPS) return false;
+      skipped++;
+      toast(`Skipped the clip at ${wall(clips[index].key)}: ${why}`, 'bad');
+      loadClip(index + 1, 0, true);
+      return true;
+    }
     function loadClip(i, at = 0, autoplay = playing) {
       index = Math.max(0, Math.min(clips.length - 1, i));
       const c = clips[index];
@@ -390,6 +403,7 @@ export default {
         }
       }
       pickMaster();
+      if (!master && autoplay && skip('it has no video.')) return;
       const start = () => {
         for (const k of camsHere()) {
           try { vids[k].currentTime = Math.max(0, at); } catch { /* not ready */ }
@@ -585,13 +599,15 @@ export default {
           if (master && master !== was && playing) play();
         }
         if (camsHere().every((c) => vids[c].dataset.bad)) {
+          if (playing && skip('the files are damaged or this browser cannot play them.')) return;
           pause();
-          q('#clipline').textContent = 'None of these cameras can play in this browser.';
+          q('#clipline').textContent = 'This clip can’t be played: the files may be damaged, or this browser can’t play the format.';
         }
       });
       el.addEventListener('timeupdate', () => { if (k === master) paint(); });
       el.addEventListener('loadedmetadata', () => {
         if (k === master && fin(el.duration) && el.duration > 0) {
+          if (playing) skipped = 0;
           durations[index] = el.duration;
           paint();
         }

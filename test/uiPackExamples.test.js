@@ -164,3 +164,15 @@ test('aurora: a day of hundreds of clips draws no clip dividers, and lengths com
   assert.match(src, /const dividers = clips\.length > 1 && clips\.length <= \(q\('#track'\)\.clientWidth \|\| 800\) \/ 6;/);
   assert.match(src, /\/speeds\?date=/);
 });
+
+// A whole day plays on past a clip that can't be opened (a damaged file):
+// it is skipped with a note while playing; three in a row stop playback.
+for (const [pack, mod] of Object.entries(PACKS)) {
+  test(`${pack}: a clip that can't be played is skipped while playing, three in a row stop`, () => {
+    const src = fs.readFileSync(path.join(ROOT, pack, 'web', mod, 'pages', 'viewer.js'), 'utf8');
+    assert.match(src, /const MAX_SKIPS = 3;/);
+    assert.match(src, /skipped >= MAX_SKIPS|skipped < MAX_SKIPS/, 'the skips are counted');
+    assert.match(src, /skipped = 0/, 'and reset when a clip plays');
+    assert.match(src, /Skipped the clip at \$\{/, 'the skipped clip is named');
+  });
+}

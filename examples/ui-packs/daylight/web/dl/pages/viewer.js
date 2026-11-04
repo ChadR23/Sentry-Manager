@@ -200,6 +200,20 @@ async function player(ctx, v, day, recId) {
   const masterCam = () => (seg()?.cams.front && videos.has('front') ? 'front' : present.find((c) => seg()?.cams[c]));
   const master = () => videos.get(masterCam());
 
+  // A clip that can't be opened while playing is skipped (a damaged file:
+  // Tesla leaves one when the car powers down mid-clip), so a recording or
+  // the whole day plays on. Three in a row stop it: then it's the browser
+  // that can't play the format, and the note on the camera says so.
+  const MAX_SKIPS = 3;
+  let skipped = 0;
+  // the next clip, or the next recording of the day, or the end
+  function advance() {
+    if (st.seg < segs.length - 1) load(st.seg + 1, true);
+    else if (nextRec) {
+      toast('Playing the next recording of the day.');
+      go(`#/viewer/${enc(v.id)}/${enc(nextRec.id)}?day=${enc(rec.day)}&autoplay=1`);
+    } else pauseAll();
+  }
   function load(index, autoplay) {
     st.seg = Math.max(0, Math.min(segs.length - 1, index));
     st.wantPlay = autoplay;
@@ -379,18 +393,21 @@ async function player(ctx, v, day, recId) {
   for (const [c, vid] of videos) {
     vid.addEventListener('ended', () => {
       if (c !== masterCam()) return;
-      if (st.seg < segs.length - 1) load(st.seg + 1, true);
-      else if (nextRec) {
-        toast('Playing the next recording of the day.');
-        go(`#/viewer/${enc(v.id)}/${enc(nextRec.id)}?day=${enc(rec.day)}&autoplay=1`);
-      } else pauseAll();
+      advance();
     });
     vid.addEventListener('error', () => {
       if (!vid.getAttribute('src')) return;
       const note = tiles.get(c).querySelector('.cam-note');
-      note.textContent = 'This browser can’t play this video. Try another browser, or convert it to H.265.';
+      note.textContent = 'This video can’t be played. The file may be damaged, or this browser can’t play it: try another browser, or convert it to H.265.';
       note.hidden = false;
+      // while playing, a clip that can't be opened is skipped (see advance)
+      if (c === masterCam() && (st.playing || st.wantPlay) && skipped < MAX_SKIPS) {
+        skipped++;
+        toast(`Skipped the clip at ${niceTime(seg().ts)}: it can’t be played.`);
+        advance();
+      }
     });
+    vid.addEventListener('loadeddata', () => { if (c === masterCam() && (st.playing || st.wantPlay)) skipped = 0; });
     vid.addEventListener('loadeddata', () => { tiles.get(c).querySelector('.cam-note').hidden = true; });
   }
 

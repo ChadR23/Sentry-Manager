@@ -289,6 +289,19 @@ export default {
       $('#vw-msg').textContent = text || '';
     }
 
+    // A clip that cannot be opened while the playlist plays is skipped (a
+    // damaged file: Tesla leaves one when the car powers down mid-clip), so
+    // a whole day plays on. Three in a row stop it: then it is the browser
+    // that cannot play the format, and the message says so.
+    const MAX_SKIPS = 3;
+    let skipped = 0;
+    function skip(s, why) {
+      if (st.idx >= st.segs.length - 1 || skipped >= MAX_SKIPS) return false;
+      skipped++;
+      toast(`Skipped the clip at ${wall(s.key)}: ${why}`, 'bad');
+      loadSeg(st.idx + 1, 0, true);
+      return true;
+    }
     async function loadSeg(i, offset = 0, autoplay = false) {
       if (i < 0 || i >= st.segs.length) return;
       const seq = ++loadSeq;
@@ -315,7 +328,11 @@ export default {
       drawTimeline();
       msg('loading…');
       const m = master();
-      if (!m) { msg('This clip has no video.'); return; }
+      if (!m) {
+        if (autoplay && skip(s, 'it has no video.')) return;
+        msg('This clip has no video.');
+        return;
+      }
       await new Promise((res) => {
         if (m.readyState >= 1) return res();
         const done = () => { m.removeEventListener('loadedmetadata', done); m.removeEventListener('error', done); res(); };
@@ -325,10 +342,13 @@ export default {
       });
       if (seq !== loadSeq || !alive) return;
       if (m.error) {
-        msg(`This browser can't play this clip (${m.error.message || m.error.code}). Telemetry still shows.`);
+        if (autoplay && skip(s, 'the file is damaged or this browser cannot play it.')) return;
+        setPlaying(false);
+        msg(`This clip can't be played: the file may be damaged, or this browser has no decoder for it (${m.error.message || m.error.code}). Telemetry still shows.`);
         loadTelemetry(s);
         return;
       }
+      if (autoplay) skipped = 0;
       msg('');
       if (fin(m.duration)) { s.dur = m.duration; drawTimeline(); }
       for (const vid of activeVideos()) {

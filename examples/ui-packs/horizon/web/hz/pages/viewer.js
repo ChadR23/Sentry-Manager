@@ -320,7 +320,20 @@ export default {
       $('#vw-msg').hidden = !text;
       $('#vw-msg').innerHTML = text || '';
     }
-    const cantPlay = (err) => `<b>This browser can't play this video.</b><span>The clip is probably H.264 or H.265 and this browser has no decoder for it<small class="tech"> (${h(err?.message || `code ${err?.code ?? '?'}`)})</small>. Convert it to AV1 on the Encoder page, or open it in Safari or Chrome on a device with that codec. Telemetry still shows.</span>`;
+    // A clip that cannot be opened while the playlist plays is skipped (a
+    // damaged file: Tesla leaves one when the car powers down mid-clip), so
+    // a whole day plays on. Three in a row stop it: then it is the browser
+    // that cannot play the format, and the message says so.
+    const MAX_SKIPS = 3;
+    let skipped = 0;
+    function skip(c, why) {
+      if (st.i >= st.clips.length - 1 || skipped >= MAX_SKIPS) return false;
+      skipped++;
+      toast(`Skipped the clip at ${wall(c.key)}: ${why}`, 'bad');
+      open(st.i + 1, 0, true);
+      return true;
+    }
+    const cantPlay = (err) => `<b>This clip can't be played.</b><span>The file may be damaged, or it is H.264 or H.265 and this browser has no decoder for it<small class="tech"> (${h(err?.message || `code ${err?.code ?? '?'}`)})</small>. Convert it to AV1 on the Encoder page, or open it in Safari or Chrome on a device with that codec. Telemetry still shows.</span>`;
 
     async function open(i, at = 0, autoplay = false) {
       if (i < 0 || i >= st.clips.length) return;
@@ -346,7 +359,11 @@ export default {
       drawClips();
       say('<span class="spin" aria-hidden="true"></span><span>Loading the clip…</span>');
       const m = master();
-      if (!m) { say('<b>This clip has no video.</b>'); return; }
+      if (!m) {
+        if (autoplay && skip(c, 'it has no video.')) return;
+        say('<b>This clip has no video.</b>');
+        return;
+      }
       await new Promise((res) => {
         if (m.readyState >= 1 || m.error) { res(); return; }
         const done = () => { m.removeEventListener('loadedmetadata', done); m.removeEventListener('error', done); res(); };
@@ -357,10 +374,12 @@ export default {
       if (mine !== loadSeq || !alive) return;
       loadTelemetry(c);
       if (m.error) {
+        if (autoplay && skip(c, 'the file is damaged or this browser cannot play it.')) return;
         say(cantPlay(m.error));
         setPlaying(false);
         return;
       }
+      if (autoplay) skipped = 0;
       say('');
       if (ok(m.duration)) { c.len = m.duration; drawClips(); }
       for (const x of active()) {
