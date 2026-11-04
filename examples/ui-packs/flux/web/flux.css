@@ -397,6 +397,9 @@ a.kpi:hover { border-color: var(--violet); transform: translateY(-1px); }
 }
 .vw-map .vm-btn:hover { color: var(--text); border-color: var(--violet); }
 .vw-map .vm-btn:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+/* the Export panel (web/exportPanel.js) in Flux's colours */
+.xp { --xp-bg: var(--panel); --xp-fg: var(--text); --xp-muted: var(--muted); --xp-line: var(--line); --xp-field: var(--bg-2);
+  --xp-accent: var(--violet-strong); --xp-accent-fg: #fff; --xp-radius: var(--r); --xp-font: var(--sans); }
 
 /* encoder */
 .enc-setup .card + .card, .enc-live .card + .card { margin-top: 12px; }

@@ -176,3 +176,22 @@ for (const [pack, mod] of Object.entries(PACKS)) {
     assert.match(src, /Skipped the clip at \$\{/, 'the skipped clip is named');
   });
 }
+
+// Export: every Viewer opens the shared panel (web/exportPanel.js) with its
+// playlist and playhead, and closes it with the page.
+for (const [pack, mod] of Object.entries(PACKS)) {
+  test(`${pack}: the Viewer has Export, wired to the shared panel`, () => {
+    const src = fs.readFileSync(path.join(ROOT, pack, 'web', mod, 'pages', 'viewer.js'), 'utf8');
+    assert.match(src, /import \{ createExportPanel \} from '\/web\/exportPanel\.js';/);
+    assert.match(src, /createExportPanel\(\{[\s\S]*?clips: \(\) =>[\s\S]*?position: \(\) =>/);
+    assert.match(src, /xp\.destroy\(\)/, 'closed with the page');
+    assert.match(src, /xp\.toggle\(\)/, 'a button or key opens it');
+  });
+}
+
+test('the built-in Viewer\'s Export button opens the shared panel in the web version', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'script.js'), 'utf8');
+  assert.match(src, /if \(window\.__SENTRY_WEB__\) \{\s*openWebExport\(\);/);
+  const css = fs.readFileSync(path.join(__dirname, '..', 'web', 'studioEmbed.css'), 'utf8');
+  assert.doesNotMatch(css, /#exportBtn[^{]*\{[^}]*display:\s*none/, 'the button is no longer hidden');
+});

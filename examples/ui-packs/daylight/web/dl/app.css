@@ -324,6 +324,11 @@ dialog.dlg[open] { animation: pop 240ms var(--ease) both; }
 }
 .vw-map .vm-btn { width: 40px; height: 40px; box-shadow: var(--shadow-1); }
 .vw-map .vm-btn:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+/* the Export panel (web/exportPanel.js) in Daylight's look, light or dark */
+.xp { --xp-bg: var(--surface); --xp-fg: var(--text); --xp-muted: var(--muted); --xp-line: var(--border); --xp-field: var(--surface-2);
+  --xp-accent: var(--accent); --xp-accent-fg: var(--accent-ink); --xp-radius: var(--radius); --xp-font: var(--font); box-shadow: var(--shadow-3); }
+.xp .xp-err { color: var(--bad); }
+.ctl-export { width: auto; display: inline-flex; align-items: center; gap: 6px; padding: 0 14px; font: 600 14px var(--font); }
 .vw-map .vm-note { font-size: 15px; }
 @media (max-width: 600px) { .vw-map { height: 240px; } }
 .gear { display: inline-flex; gap: 6px; }

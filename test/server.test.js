@@ -875,3 +875,46 @@ test('Vehicles: Test connection checks the typed SMB details without saving anyt
     await fsp.rm(dir, { recursive: true, force: true });
   }
 });
+
+test('Export: a stretch of a vehicle\'s footage renders into one MP4 to download; other files are refused', { skip: !hasFfmpeg && 'needs ffmpeg', timeout: 120000 }, async () => {
+  const dir = await tmp();
+  const root = path.join(dir, 'footage');
+  await makeFootage(root);
+  const s = await startServer(dir);
+  try {
+    await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
+    const v = (await s.call('GET', '/api/vehicles')).data.vehicles[0];
+    const front = path.join(root, 'TeslaCam/RecentClips/2020-01-01_08-00-00-front.mp4');
+    const body = { units: 'kmh', clips: [{ key: '2020-01-01_08-00-00', files: { front }, from: 0, to: 1.5 }] };
+    // a file that is not this vehicle's footage
+    const bad = await s.call('POST', `/api/vehicles/${v.id}/exports`, { clips: [{ ...body.clips[0], files: { front: '/etc/passwd' } }] });
+    assert.equal(bad.status, 400);
+    assert.match(bad.data.error, /not in Daily Driver's footage/);
+    assert.equal((await s.call('POST', '/api/exports', { clips: [{ ...body.clips[0], files: { front: '/etc/passwd' } }] })).status, 400, 'nor without a vehicle');
+    // the built-in Viewer's route finds the vehicle from the files
+    const started = await s.call('POST', '/api/exports', body);
+    assert.equal(started.status, 200, JSON.stringify(started.data));
+    assert.equal(started.data.vehicleId, v.id);
+    let x;
+    await waitFor(async () => {
+      x = (await s.call('GET', `/api/exports/${started.data.id}`)).data;
+      return !['waiting', 'running'].includes(x.state);
+    }, 60000);
+    assert.equal(x.state, 'done', x.error);
+    const res = await s.call('GET', `/api/exports/${x.id}/file`, undefined, { raw: true });
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('content-type'), 'video/mp4');
+    assert.match(res.headers.get('content-disposition'), /^attachment; filename="Sentry Daily Driver 2020-01-01 8-00-00 AM\.mp4"/);
+    assert.ok((await res.arrayBuffer()).byteLength > 1000);
+    // it is a job like the others
+    const jobs = (await s.call('GET', '/api/jobs')).data.jobs;
+    assert.ok(jobs.some((j) => j.type === 'export' && j.status === 'done' && /Ready to download/.test(j.detail)));
+    assert.equal((await s.call('GET', '/api/exports/nope')).status, 404);
+    // signed out: nothing
+    s.setCookie('');
+    assert.equal((await s.call('GET', `/api/exports/${x.id}/file`, undefined, { raw: true })).status, 401);
+  } finally {
+    await s.stop();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});

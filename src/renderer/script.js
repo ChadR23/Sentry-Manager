@@ -1060,6 +1060,12 @@ let useMetric = false; // Will be loaded from settings
     if (exportBtn) {
         exportBtn.onclick = (e) => {
             e.preventDefault();
+            // Sentry Six Manager: the server renders the export (web/exportPanel.js)
+            if (window.__SENTRY_WEB__) {
+                openWebExport();
+                exportBtn.blur();
+                return;
+            }
             if (library.capabilities?.export === false) {
                 notify('Export support for this vehicle profile is coming later.', { type: 'info' });
                 return;
@@ -4246,6 +4252,29 @@ initSkipSeconds({
 });
 
 // Native Video Playback System
+// Sentry Six Manager's Export panel (web/exportPanel.js): mark a start and an
+// end at the playhead, see the clips, and the server renders one video. It
+// reads the clips of the day or event on screen and where the playhead is.
+let webExport = null;
+async function openWebExport() {
+    if (!webExport) {
+        const { createExportPanel } = await import('/web/exportPanel.js');
+        webExport = createExportPanel({
+            vehicleId: () => null, // the server finds the vehicle from the files
+            clips: () => (state.collection.active?.groups || []).map((g, i) => ({
+                key: g.timestampKey,
+                files: Object.fromEntries([...g.filesByCamera].map(([cam, entry]) => [cam, entry?.file?.path]).filter(([, p]) => p)),
+                len: nativeVideo.segmentDurations?.[i],
+                cat: ({ RecentClips: 'Recent', SentryClips: 'Sentry', SavedClips: 'Saved' })[g.tag] || g.tag
+            })),
+            position: () => ({ index: Math.max(0, nativeVideo.currentSegmentIdx), t: nativeVideo.master?.currentTime || 0 }),
+            units: () => (useMetric ? 'kmh' : 'mph'),
+            toast: (text) => notify(text, { type: 'success' })
+        });
+    }
+    webExport.toggle();
+}
+
 const nativeVideo = {
     master: null,           // Master video element (drives timeline)
     streams: new Map(),     // slot -> { video, file, url }

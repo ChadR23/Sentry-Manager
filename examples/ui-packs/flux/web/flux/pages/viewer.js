@@ -3,6 +3,7 @@
 import { esc, api, current, icon, toast, store, fin, clock, wall, wallDay, dayTitle, CAMERAS, CAMERA_LABEL, CAMERA_SHORT, humanize, reducedMotion } from '../core.js';
 import { telemetryFor, recordAt, fpsOf } from '../telemetry.js';
 import { createViewerMap } from '/web/viewerMap.js';
+import { createExportPanel } from '/web/exportPanel.js';
 import { TimeChart, C } from '../charts.js';
 import { split, seg, wireSeg, empty } from '../ui.js';
 
@@ -94,6 +95,7 @@ export default {
             <div class="tr-time num" id="vw-time">0:00.0 / 0:00.0</div>
             <div class="tr-right">
               <label class="speed"><span class="sr-only">Speed</span><select class="input" id="vw-speed" aria-label="Playback speed">${SPEEDS.map((s) => `<option value="${s}"${s === st.speed ? ' selected' : ''}>${s}×</option>`).join('')}</select></label>
+              <button class="btn" type="button" id="vw-export" aria-label="Export a video (e)" title="Export a video (e)">${icon('download')}Export</button>
               <button class="btn icon" type="button" id="vw-full" aria-label="Fullscreen (f)" title="Fullscreen (f)">${icon('maximize')}</button>
             </div>
           </div>
@@ -135,6 +137,15 @@ export default {
     const tiles = Object.fromEntries([...stage.querySelectorAll('.cam')].map((f) => [f.dataset.cam, { fig: f, video: f.querySelector('video') }]));
     // the drive on a map: Flux's violet for driving yourself, its cyan for Autopilot
     const map = createViewerMap($('#vw-map'), { dark: true, colors: { manual: '#a78bfa', autopilot: '#4fd8f0' } });
+    // Export: mark a start and an end, see the clips, render one video on the server
+    const xp = createExportPanel({
+      vehicleId: () => v.id,
+      clips: () => st.segs.map((s) => ({ key: s.key, files: s.files, len: durOf(s), cat: s.category })),
+      position: () => ({ index: st.idx, t: master()?.currentTime || 0 }),
+      units: () => (st.units === 'mph' ? 'mph' : 'kmh'),
+      toast
+    });
+    $('#vw-export').onclick = () => xp.toggle();
     const chart = new TimeChart($('#t-chart'), {
       height: 96, floor: 10, format: (x) => `${Math.round(x)}`, legend: true,
       timeFormat: (t) => `${(t / 1000).toFixed(0)}s`,
@@ -567,6 +578,7 @@ export default {
     } catch (err) {
       el.querySelector('.vw-main').innerHTML = empty(esc(err.message));
       map.destroy();
+      xp.destroy();
       return {};
     }
     $('#vw-title').textContent = st.title || 'no footage';
@@ -622,6 +634,7 @@ export default {
         cancelAnimationFrame(raf);
         chart.destroy();
         map.destroy();
+        xp.destroy();
         for (const c of GRID_ORDER) {
           const vid = tiles[c].video;
           vid.pause();
@@ -647,6 +660,7 @@ export default {
           case 'l': setLayout(LAYOUTS[(LAYOUTS.findIndex(([x]) => x === st.layout) + 1) % LAYOUTS.length][0]); return true;
           case 't': $('#vw-tele-btn').click(); return true;
           case 'f': $('#vw-full').click(); return true;
+          case 'e': xp.toggle(); return true;
           default:
             if (/^[1-6]$/.test(e.key)) { setFocus(CAMERAS[Number(e.key) - 1]); return true; }
             return false;
@@ -655,6 +669,7 @@ export default {
       commands: () => [
         { group: 'Viewer', label: st.playing ? 'Pause' : 'Play', hint: 'Space', icon: st.playing ? 'pause' : 'play', run: toggle },
         { group: 'Viewer', label: 'Next clip', hint: 'n', icon: 'next', run: () => $('#vw-next').click() },
+        { group: 'Viewer', label: 'Export a video', hint: 'e', icon: 'download', run: () => xp.open() },
         { group: 'Viewer', label: 'Previous clip', hint: 'p', icon: 'prev', run: () => $('#vw-prev').click() },
         ...LAYOUTS.map(([l, label]) => ({ group: 'Viewer layout', label: `Layout: ${label}`, icon: 'grid', run: () => setLayout(l) })),
         ...CAMERAS.map((c, i) => ({ group: 'Viewer camera', label: `Focus ${CAMERA_LABEL[c]}`, hint: String(i + 1), icon: 'viewer', run: () => setFocus(c) })),

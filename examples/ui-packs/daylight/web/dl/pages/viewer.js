@@ -8,6 +8,7 @@ import { go } from '../app.js';
 import { thumbUrl, moveToBin, setProtected } from './footage.js';
 import { decodeTelemetry, at } from '../telemetry.js';
 import { createViewerMap } from '/web/viewerMap.js';
+import { createExportPanel } from '/web/exportPanel.js';
 
 // laid out like the car: pillars and front on top, repeaters and back below
 const CAMS = ['left_pillar', 'front', 'right_pillar', 'left_repeater', 'back', 'right_repeater'];
@@ -140,6 +141,7 @@ async function player(ctx, v, day, recId) {
           <label class="sr-only" for="rate">Speed</label>
           <select class="ctl-speed" id="rate">${SPEEDS.map((s) => `<option value="${s}"${s === st.rate ? ' selected' : ''}>${s}×</option>`).join('')}</select>
           <button type="button" class="ctl-btn" id="grid" aria-label="Show all cameras">${icon('grid')}</button>
+          <button type="button" class="ctl-btn ctl-export" id="export" aria-label="Export a video">${icon('download')}<span class="hide-phone">Export</span></button>
           <button type="button" class="ctl-btn" id="full" aria-label="Full screen">${icon('expand')}</button>
         </div>
         ${segs.length > 1 ? `<div class="clip-dots" role="group" aria-label="Clips in this recording">${segs.map((s, i) => `<button type="button" class="clip-dot" data-seg="${i}" aria-label="Clip ${i + 1}, ${esc(niceTime(s.ts))}">${esc(wall(s.ts, false))}</button>`).join('')}</div>` : ''}
@@ -162,7 +164,8 @@ async function player(ctx, v, day, recId) {
       <span><span class="kbd">1</span>–<span class="kbd">6</span> make a camera big</span>
       <span><span class="kbd">0</span> or <span class="kbd">G</span> all cameras</span>
       <span><span class="kbd">−</span> <span class="kbd">+</span> slower / faster</span>
-      <span><span class="kbd">F</span> full screen</span></div>`)}
+      <span><span class="kbd">F</span> full screen</span>
+      <span><span class="kbd">E</span> export a video</span></div>`)}
     ${details('More details', `<p class="small muted">Folder <span class="mono">${esc(rec.folder)}</span> · ${plural(rec.fileCount, 'file')} · ${bytes(rec.bytes)}${rec.event ? ` · ${esc([rec.event.reason, rec.event.street, rec.event.city].filter(Boolean).join(' · '))}` : ''}</p>`)}
   </div>`;
 
@@ -183,6 +186,16 @@ async function player(ctx, v, day, recId) {
     const off = on('theme', follow);
     ctx.cleanup(() => { mq.removeEventListener('change', follow); off(); map.destroy(); });
   }
+  // Export: mark a start and an end, see the clips, render one video on the server
+  const xp = createExportPanel({
+    vehicleId: () => v.id,
+    clips: () => segs.map((s, i) => ({ key: s.ts, files: s.cams, len: i === st.seg && master()?.duration > 0 ? master().duration : 60, cat: rec.category })),
+    position: () => ({ index: st.seg, t: master()?.currentTime || 0 }),
+    units: () => (st.units === 'mph' ? 'mph' : 'kmh'),
+    toast
+  });
+  ctx.cleanup(() => xp.destroy());
+  $('#export').onclick = () => xp.toggle();
   // the whole recording's route, a few clips at a time
   async function loadRoute() {
     for (let k = 0; k < segs.length && ctx.alive(); k += 4) {
@@ -475,6 +488,7 @@ async function player(ctx, v, day, recId) {
     else if (k === '+' || k === '=') setRate(SPEEDS[Math.min(SPEEDS.length - 1, SPEEDS.indexOf(st.rate) + 1)]);
     else if (k === '-' || k === '_') setRate(SPEEDS[Math.max(0, SPEEDS.indexOf(st.rate) - 1)]);
     else if (k === 'f' || k === 'F') $('#full').click();
+    else if (k === 'e' || k === 'E') xp.toggle();
     else handled = false;
     if (handled) e.preventDefault();
   };

@@ -18,10 +18,10 @@ html[data-embed="encoder"] #converterChooseSource {
   display: none !important;
 }
 
-/* Desktop-app features with no web counterpart: video export (and its
-   start / end markers), shared links, the default TeslaCam
-   folder and SentryUSB drive data. */
-#setStartMarkerBtn, #setEndMarkerBtn, #exportBtn, #mySharedClipsBtn,
+/* Desktop-app features with no web counterpart: the desktop export's start /
+   end markers (Export opens the server's export panel instead), shared links,
+   the default TeslaCam folder and SentryUSB drive data. */
+#setStartMarkerBtn, #setEndMarkerBtn, #mySharedClipsBtn,
 .settings-accordion:has(#defaultFolderPath),
 .settings-accordion:has(#driveDataFilePath) {
   display: none !important;
@@ -89,3 +89,9 @@ html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
   }
   #mapVis { touch-action: none; }
 }
+
+/* The Export panel (web/exportPanel.js) in the Viewer's colours */
+.xp { --xp-bg: #11151c; --xp-fg: #e8ecf2; --xp-muted: #9aa4b2; --xp-line: rgba(255, 255, 255, .14);
+  --xp-field: rgba(255, 255, 255, .06); --xp-accent: var(--accent-color, #c8f25a); --xp-accent-fg: #0b1206; --xp-radius: 14px; }
+/* above the playback bar, so its buttons (Export included) stay reachable */
+@media (min-width: 601px) { .xp { inset: auto 16px 84px auto; } }

@@ -61,6 +61,7 @@ const { createNodeBenchmark } = require('./nodeBenchmark');
 const { run } = require('./proc');
 const { Telemetry } = require('./telemetry');
 const { createSpeedIndex } = require('./speedIndex');
+const { createExporter } = require('./exporter');
 
 const APP_ROOT = path.resolve(process.env.APP_ROOT || path.join(__dirname, '..'));
 const SRC = path.join(APP_ROOT, 'src');
@@ -688,6 +689,54 @@ async function main() {
   });
 
   r.add('GET', '/api/vehicles', () => ({ vehicles: vehicles.list().map(vehicleSummary) }));
+
+  // ---- Export: a stretch of footage rendered into one MP4 (server/exporter.js)
+  const exporter = createExporter({
+    dir: path.join(DATA, 'exports'), ffmpegPath: FFMPEG, ffprobePath: FFPROBE,
+    jobs, log: logger.scope('export'), clock24: () => Boolean(db.get('appearance', {}).clock24),
+    // a file of this vehicle's footage, as a real path, or null
+    resolve: async (p, vehicle) => {
+      const real = await studioReadable.resolve(p);
+      if (!real || hiddenPath(real)) return null;
+      return vehicleForReal(real)?.vehicle.id === vehicle.id ? real : null;
+    },
+    // the speed of each second of a clip, from the speed index
+    speedsFor: async (real) => {
+      const owner = vehicleForReal(real);
+      if (!owner) return null;
+      const st = await fs.promises.stat(real);
+      return speedIndex.clip(owner.vehicle.id, path.relative(owner.root, real).split(path.sep).join('/'), real, st.size, st.mtimeMs);
+    }
+  });
+  exporter.tidy().catch((err) => logger.scope('export').warn(`Exports folder: ${err.message}`));
+  setInterval(() => exporter.tidy().catch(() => {}), 3600 * 1000).unref();
+  r.add('POST', '/api/vehicles/:id/exports', async (req, res, { params, body }) => exporter.start({ vehicle: vehicleOr404(params.id), body }));
+  // the built-in Viewer: the vehicle is the one whose footage the clips are
+  r.add('POST', '/api/exports', async (req, res, { body }) => {
+    const first = Object.values(body?.clips?.[0]?.files || {}).find((p) => typeof p === 'string');
+    const real = first ? await studioReadable.resolve(first) : null;
+    const owner = real && !hiddenPath(real) ? vehicleForReal(real) : null;
+    if (!owner) throw new HttpError(400, 'These clips are not in any vehicle\'s footage.');
+    return exporter.start({ vehicle: owner.vehicle, body });
+  });
+  r.add('GET', '/api/exports', (req, res, { query }) => ({ exports: exporter.list(query.vehicle || null) }));
+  r.add('GET', '/api/exports/:id', (req, res, { params }) => {
+    const x = exporter.get(params.id);
+    if (!x) throw new HttpError(404, 'No such export (exports are kept for a day).');
+    return x;
+  });
+  r.add('DELETE', '/api/exports/:id', (req, res, { params }) => ({ ok: exporter.cancel(params.id) }));
+  r.add('GET', '/api/exports/:id/file', async (req, res, { params }) => {
+    const f = exporter.file(params.id);
+    if (!f) throw new HttpError(404, 'This export is not ready, or it was removed after a day.');
+    const st = await fs.promises.stat(f.file);
+    res.writeHead(200, {
+      'Content-Type': 'video/mp4', 'Content-Length': st.size, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
+      'Content-Disposition': `attachment; filename="${f.name.replace(/[^\x20-\x7e]/g, '_')}"; filename*=UTF-8''${encodeURIComponent(f.name)}`
+    });
+    fs.createReadStream(f.file).pipe(res);
+    return undefined;
+  });
   // ---- Nodes (server/nodes.js, server/nodeWorker.js)
   r.add('GET', '/api/nodes', async () => ({
     nodes: await nodes.overview(),
@@ -1636,6 +1685,7 @@ async function main() {
     for (const s of servers) s.close();
     try { stats.stop(); } catch { /* history is saved on a best-effort basis */ }
     nodeWorker.close();
+    exporter.stop();
     await host.stop().catch(() => {});
     await vehicles.stopAll();
     db.close();

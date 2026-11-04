@@ -21,6 +21,9 @@ Recycle Bin, retention policies, jobs and notifications.
 - **Encoder.** Converts footage to H.265 or AV1 on the GPU (NVIDIA, AMD
   including APUs, Intel) or the CPU. Tesla's per-frame telemetry is copied
   into every converted file and verified, and nothing is converted twice.
+- **Export.** Mark a start and an end in the Viewer, see the clips it
+  covers, and download one video of all cameras (or one), with the date,
+  time and speed burned in. The server renders it.
 - **Footage.** Every recording per vehicle, by day, with what is already
   encoded, filtered by category and date, with Play, Protect and Move to
   trash.
@@ -73,6 +76,7 @@ on TrueNAS, see [TrueNAS](docs/truenas.md) for the update steps.
 | [TrueNAS](docs/truenas.md) | Installing and updating as a TrueNAS SCALE app |
 | [Overview and Footage](docs/overview-and-footage.md) | The server's live stats, logs, and browsing recordings |
 | [Encoder](docs/encoder.md) | Converting footage, GPUs, several GPUs at once, other servers as nodes |
+| [Export a video](docs/export.md) | Making one video of a stretch of footage, and its limits |
 | [Recycle Bin, policies and jobs](docs/recycle-bin-and-jobs.md) | Retention, restoring, and what the server is doing |
 | [Vehicles and SMB shares](docs/vehicles-and-shares.md) | Footage on a share or on the same machine, permissions |
 | [Phones and tablets](docs/phones-and-tablets.md) | Supported devices |
@@ -84,8 +88,9 @@ on TrueNAS, see [TrueNAS](docs/truenas.md) for the update steps.
 
 ## Not in the web version (yet)
 
-- Export, clip sharing and the SentryUSB drive tools from the desktop app;
-  the Viewer leaves them out.
+- Clip sharing, the Advanced Editor's export options (blur zones,
+  dashboard styles, minimap) and the SentryUSB drive tools from the desktop
+  app; the Viewer leaves them out.
 - Desktop-only converter options (keep running when closed, start with
   Windows).
 

@@ -7,6 +7,7 @@
 import { $, $$, esc, icon, api, state, current, setVehicle, vehiclePicker, plural, clock, wall, dayTitle, timeOf, humanize, store, empty, toast, fin } from '../core.js';
 import * as tele from '../telemetry.js';
 import { createViewerMap } from '/web/viewerMap.js';
+import { createExportPanel } from '/web/exportPanel.js';
 
 const CAMS = ['front', 'back', 'left_repeater', 'right_repeater', 'left_pillar', 'right_pillar'];
 // on small tiles the labels shrink to these codes (one line, never wrapping)
@@ -111,6 +112,7 @@ export default {
             <span class="ctrl-extra" id="ctrl-extra">
               <button class="btn sm" type="button" id="c-unit">${opts.unit === 'mph' ? 'mph' : 'km/h'}</button>
               <button class="btn sm" type="button" id="c-mirror" aria-pressed="${opts.mirror}">Mirror</button>
+              <button class="btn sm" type="button" id="c-export" aria-label="Export a video (e)">${icon('download')} Export</button>
             </span>
             <button class="btn sm" type="button" id="c-all" hidden>All cameras</button>
             <button class="btn icon" type="button" id="c-more" aria-expanded="false" aria-controls="ctrl-extra" aria-label="More controls">⋯</button>
@@ -125,6 +127,14 @@ export default {
     const cockpit = q('#cockpit');
     // the drive on a map: Aurora's teal for driving yourself, its green for Autopilot
     const map = createViewerMap(q('#vw-map'), { dark: true, colors: { manual: '#2fd6d8', autopilot: '#46f0a8' } });
+    // Export: mark a start and an end, see the clips, render one video on the server
+    const xp = createExportPanel({
+      vehicleId: () => v.id,
+      clips: () => clips.map((c, k) => ({ key: c.key, files: c.cams, len: durations[k], cat: c.rec?.category })),
+      position: () => ({ index, t: now() }),
+      units: () => (opts.unit === 'mph' ? 'mph' : 'kmh'),
+      toast
+    });
     const ctrlEl = q('#ctrl');
     const stageEl = q('#vw-stage');
     const root = document.documentElement;
@@ -689,6 +699,7 @@ export default {
         return fit();
       }
       if (t.closest('#c-all')) return setFocus(null);
+      if (t.closest('#c-export')) return xp.toggle();
       if (t.closest('#c-hud')) {
         opts.tele = !opts.tele;
         store.set('hud', opts.tele);
@@ -753,6 +764,7 @@ export default {
       else if (k === 't') q('#c-hud').click();
       else if (k === 'm') q('#c-mirror').click();
       else if (k === 'f') full();
+      else if (k === 'e') xp.toggle();
       else hit = false;
       if (hit) e.preventDefault();
     };
@@ -767,11 +779,12 @@ export default {
     } catch (err) {
       q('#vw-title').innerHTML = `<span class="note bad">${esc(err.message)}</span>`;
     }
-    if (dead) { map.destroy(); return {}; }
+    if (dead) { map.destroy(); xp.destroy(); return {}; }
     drawList();
     if (!ok) {
       ctrlEl.remove();
       map.destroy();
+      xp.destroy();
       q('.vw-mappanel')?.remove();
       q('#vw-stage').innerHTML = empty('Nothing to play yet', 'This vehicle has no recordings with camera clips here.', `<a class="btn" href="#/footage">${icon('film')} Footage</a>`);
     } else {
@@ -789,6 +802,7 @@ export default {
       destroy() {
         dead = true;
         map.destroy();
+        xp.destroy();
         document.removeEventListener('keydown', onKey);
         document.removeEventListener('visibilitychange', onHidden);
         clearTimeout(syncTimer);

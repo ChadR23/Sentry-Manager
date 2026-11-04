@@ -569,6 +569,10 @@ body[data-route="viewer"] .win-body { display: flex; flex-direction: column; }
 }
 .vw-map .vm-btn { width: 36px; height: 36px; }
 .vw-map .vm-btn:focus-visible { outline: 2px solid var(--au-green); outline-offset: 2px; }
+/* the Export panel (web/exportPanel.js) in Aurora's glass */
+.xp { --xp-bg: var(--glass-solid); --xp-fg: var(--ink); --xp-muted: var(--ink-3); --xp-line: var(--line-2); --xp-field: rgba(255, 255, 255, .06);
+  --xp-accent: var(--au-green); --xp-accent-fg: var(--ink-inv); --xp-radius: 20px; box-shadow: var(--float), var(--edge); }
+@media (min-width: 601px) { .xp { bottom: calc(var(--ctrl-bottom, 16px) + 90px); } }
 .vw-list { display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
 .vw-item { text-decoration: none; display: flex; gap: 10px; align-items: center; padding: 8px; border-radius: 16px; background: rgba(255, 255, 255, .05); border: 1px solid var(--line); color: var(--ink); text-align: left; cursor: pointer; font: inherit; min-height: 56px; }
 .vw-item.on { border-color: rgba(94, 242, 184, .7); background: rgba(94, 242, 184, .1); }

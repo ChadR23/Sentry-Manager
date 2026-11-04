@@ -5,7 +5,7 @@ import { state, vehiclePicker, vehicleById, loadJobs } from '../state.js';
 
 let filter = null;
 const STATUS = { running: ['In progress', 'teal'], done: ['Done', 'good'], failed: ['Problem', 'bad'], cancelled: ['Stopped', 'grey'], interrupted: ['Interrupted', 'warn'] };
-const TYPE = { scan: 'Looking for footage', conversion: 'Converting', trash: 'Moving to Recycle Bin', policy: 'Cleanup rules', restore: 'Restoring', delete: 'Deleting' };
+const TYPE = { scan: 'Looking for footage', conversion: 'Converting', trash: 'Moving to Recycle Bin', policy: 'Cleanup rules', restore: 'Restoring', delete: 'Deleting', export: 'Exporting a video' };
 
 const energyText = (e) => {
   if (!fin(e?.wh)) return '';

@@ -4,6 +4,7 @@
 import { h, ico, api, send, car, toast, local, ok, dayName, words, mmss, wall, CAMS, CAM_NAME, CAM_TAG } from '../core.js';
 import { load as loadTel, at as telAt, rate as telRate } from '../telemetry.js';
 import { createViewerMap } from '/web/viewerMap.js';
+import { createExportPanel } from '/web/exportPanel.js';
 
 const FILE_RE = /(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})-([a-z0-9_]+)\.mp4$/i;
 const SPEEDS = [0.25, 0.5, 1, 1.5, 2, 4];
@@ -96,6 +97,7 @@ export default {
               <button class="btn sm" type="button" id="vw-units" aria-label="Speed units (u)">${st.units === 'mph' ? 'mph' : 'km/h'}</button>
               <button class="btn icon" type="button" id="vw-hudb" aria-pressed="${st.hud}" aria-label="Heads-up display (h)">${ico('hud')}</button>
               <button class="btn icon" type="button" id="vw-gridb" aria-pressed="${st.grid}" aria-label="All six cameras (0)">${ico('grid')}</button>
+              <button class="btn sm" type="button" id="vw-export" aria-label="Export a video (e)">${ico('download')}Export</button>
               <button class="btn icon" type="button" id="vw-full" aria-label="Fullscreen (f)">${ico('full')}</button>
             </div>
           </div>
@@ -116,6 +118,15 @@ export default {
     const tiles = Object.fromEntries([...stage.querySelectorAll('.cam')].map((f) => [f.dataset.cam, { fig: f, video: f.querySelector('video') }]));
     // the drive on a map: Horizon's cyan for driving yourself, its green for Autopilot
     const map = createViewerMap($('#vw-map'), { dark: true, colors: { manual: '#3df0ff', autopilot: '#5dffb0' } });
+    // Export: mark a start and an end, see the clips, render one video on the server
+    const xp = createExportPanel({
+      vehicleId: () => v.id,
+      clips: () => st.clips.map((c) => ({ key: c.key, files: c.files, len: lenOf(c), cat: c.cat })),
+      position: () => ({ index: st.i, t: master()?.currentTime || 0 }),
+      units: () => (st.units === 'mph' ? 'mph' : 'kmh'),
+      toast
+    });
+    $('#vw-export').onclick = () => xp.toggle();
 
     // ---------- playlist ----------
     const detail = (id) => api(`/api/vehicles/${encodeURIComponent(v.id)}/recordings/${encodeURIComponent(id)}`);
@@ -593,7 +604,7 @@ export default {
       info = await build();
     } catch (err) {
       say(`<b>${h(err.message)}</b>`);
-      return { unmount() { alive = false; map.destroy(); spdSize.disconnect(); document.removeEventListener('visibilitychange', onVis); } };
+      return { unmount() { alive = false; map.destroy(); xp.destroy(); spdSize.disconnect(); document.removeEventListener('visibilitychange', onVis); } };
     }
     drawPick(info);
     $('#h-tag').textContent = info.recId ? $('#vw-title').textContent : (info.day ? dayName(info.day) : '');
@@ -617,6 +628,7 @@ export default {
       unmount() {
         alive = false;
         map.destroy();
+        xp.destroy();
         spdSize.disconnect();
         cancelAnimationFrame(raf);
         document.removeEventListener('visibilitychange', onVis);
@@ -630,7 +642,7 @@ export default {
         }
       },
       onCar() { go('#/viewer'); },
-      keys: [['Space or k', 'Play / pause'], ['← / →', 'Seek 5 s (Shift: 1 s)'], [', / .', 'One frame back / forward'], ['n / p', 'Next / previous clip'], ['1 … 6', 'Camera large: front, rear, repeaters, pillars'], ['0', 'All six cameras'], ['h', 'Heads-up display on / off'], ['u', 'mph / km/h'], ['- / +', 'Slower / faster'], ['f', 'Fullscreen']],
+      keys: [['Space or k', 'Play / pause'], ['← / →', 'Seek 5 s (Shift: 1 s)'], [', / .', 'One frame back / forward'], ['n / p', 'Next / previous clip'], ['1 … 6', 'Camera large: front, rear, repeaters, pillars'], ['0', 'All six cameras'], ['h', 'Heads-up display on / off'], ['u', 'mph / km/h'], ['- / +', 'Slower / faster'], ['f', 'Fullscreen'], ['e', 'Export a video']],
       onKey(e) {
         const m = master();
         switch (e.key) {
@@ -645,6 +657,7 @@ export default {
           case 'h': setHud(!st.hud); return true;
           case 'u': setUnits(st.units === 'mph' ? 'kmh' : 'mph'); return true;
           case 'f': $('#vw-full').click(); return true;
+          case 'e': xp.toggle(); return true;
           case '-': case '_': setSpeed(SPEEDS[Math.max(0, SPEEDS.indexOf(st.speed) - 1)] ?? 1); toast(`Speed ${st.speed}×`); return true;
           case '+': case '=': setSpeed(SPEEDS[Math.min(SPEEDS.length - 1, SPEEDS.indexOf(st.speed) + 1)] ?? 1); toast(`Speed ${st.speed}×`); return true;
           case 'Escape': if (box.classList.contains('theater')) { box.classList.remove('theater'); document.body.classList.remove('theater-on'); return true; } return false;
