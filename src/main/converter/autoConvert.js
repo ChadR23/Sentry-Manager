@@ -393,6 +393,10 @@ function createAutoConverter(options = {}) {
       if (!job || TERMINAL.has(job.state)) {
         if (job) await recordFinishedJob(job);
         delete status.active[sourceRoot];
+        // It stopped at its clip limit with more to convert: the folder is
+        // checked again at once (what this job handled is skipped), not
+        // only at the next scheduled check.
+        if (job?.state === 'completed' && job.moreAfter && settings.enabled && !status.round.includes(sourceRoot)) status.round.push(sourceRoot);
         await saveState();
         changed();
         continue;

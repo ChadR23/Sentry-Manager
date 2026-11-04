@@ -16,6 +16,7 @@ const {
   nodeKeyOf
 } = require('./contracts');
 const { replacementAction } = require('./jobStore');
+const { compareScanPaths } = require('./scanner');
 const {
   SAFE_VIDEO_BITRATE_FLOORS,
   buildEncodeArgs,
@@ -388,6 +389,11 @@ function createConverterJobService(deps) {
   // persist-each-item-before-enqueue cadence; larger values avoid rewriting the
   // whole manifest once per discovered file.
   const discoveryBatchSize = deps.discoveryBatchSize || 1;
+  // A job takes at most this many clips (the job file holds 50,000, every
+  // clip it finds counted, converted ones too); the scan goes on after the
+  // last one in a follow-up job, part after part, so an archive of any size
+  // converts while each job file stays small.
+  const jobClipLimit = deps.jobClipLimit || 40_000;
   const discoveryFlushMs = deps.discoveryFlushMs ?? 250;
   if (!Number.isSafeInteger(discoveryBatchSize) || discoveryBatchSize < 1
       || !Number.isSafeInteger(discoveryFlushMs) || discoveryFlushMs < 0) {
@@ -961,6 +967,8 @@ function createConverterJobService(deps) {
     runtime.scannerStarted = true;
     const identity = (item) => `${item.relativePath}\u0000${item.sourcePath}`;
     const known = new Set(runtime.manifest.items.map(identity));
+    const resumeAfter = runtime.manifest.config.resumeAfter || null;
+    let full = false;
     let pending = [];
     let pendingWork = 0;
     let lastFlush = -Infinity;
@@ -1001,10 +1009,14 @@ function createConverterJobService(deps) {
         retryOperation: ({ path: affectedPath, operation }) => retryAffectedOperation(runtime, affectedPath, operation)
       })) {
         if (stopped()) break;
+        // a follow-up part: only what comes after the previous part's last clip
+        if (resumeAfter && compareScanPaths(discovered.relativePath, resumeAfter, runtime.manifest.config.groupOrder) <= 0) continue;
         const key = identity(discovered);
         if (known.has(key)) continue;
         // Automatic jobs skip clips an earlier automatic run already handled.
         if (typeof deps.skipDiscovered === 'function' && deps.skipDiscovered(runtime.manifest.config, discovered)) continue;
+        // full: the rest of the scan is the next part's
+        if (known.size >= jobClipLimit) { full = true; break; }
         known.add(key);
         checking.push({ discovered, verdict: convertedCodecOf(runtime, discovered) });
         while (checking.length >= headerCheckConcurrency && !stopped()) await settleNext();
@@ -1012,7 +1024,9 @@ function createConverterJobService(deps) {
       while (checking.length > 0 && !stopped()) await settleNext();
       if (!stopped()) {
         await flush();
-        await update(runtime, { discoveryComplete: true });
+        // items join in scan order: the last one is where the next part starts
+        const last = full ? runtime.manifest.items[runtime.manifest.items.length - 1] : null;
+        await update(runtime, last ? { discoveryComplete: true, moreAfter: last.relativePath } : { discoveryComplete: true });
         void convertedIndex?.flush?.();
       }
       runtime.producerDone = true;
@@ -2782,6 +2796,16 @@ function createConverterJobService(deps) {
       };
     });
     emit(runtime, 'completed', { summary });
+    // the job reached its clip limit: the next part carries on after its last
+    // clip (an automatic job's next part comes from automatic conversion,
+    // which skips what it has handled)
+    if (runtime.manifest.moreAfter && runtime.manifest.config.autoConvert !== true) {
+      const { resumeAfter: _was, part, ...config } = runtime.manifest.config;
+      setImmediate(() => {
+        start({ ...config, resumeAfter: runtime.manifest.moreAfter, part: (part || 1) + 1 })
+          .catch((error) => console.warn('[CONVERTER] The next part of the conversion could not start:', error?.code || error?.message || error));
+      });
+    }
   }
 
   function launch(runtime, { discover = true, itemIds = [] } = {}) {

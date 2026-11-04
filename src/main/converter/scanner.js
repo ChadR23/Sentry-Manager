@@ -517,8 +517,33 @@ async function* scanTeslaFootage(config = {}, adapterOverrides = {}) {
   yield* walkAhead(sourceRoot, [], rootGroup, []);
 }
 
+/**
+ * Where two clips come in the scan, as -1, 0 or 1: the scan walks each
+ * folder sorted the same way every time (the Tesla clip groups first, in
+ * groupOrder, then names in code-unit order), depth first. A long job uses it
+ * to carry on in a later job right after the last clip the previous one took,
+ * even when that clip has since gone. relativePath uses '/'.
+ */
+function compareScanPaths(left, right, groupOrder) {
+  const rank = new Map(normalizeGroupOrder(groupOrder).map((group, index) => [group, index]));
+  const a = String(left).split('/');
+  const b = String(right).split('/');
+  for (let i = 0; i < Math.min(a.length, b.length); i++) {
+    if (a[i] === b[i]) continue;
+    const leftGroup = canonicalGroup(a[i]);
+    const rightGroup = canonicalGroup(b[i]);
+    if (leftGroup && rightGroup) return Math.sign(rank.get(leftGroup) - rank.get(rightGroup)) || (a[i] < b[i] ? -1 : 1);
+    if (leftGroup) return -1;
+    if (rightGroup) return 1;
+    return a[i] < b[i] ? -1 : 1;
+  }
+  // a folder comes before what is inside it
+  return Math.sign(a.length - b.length);
+}
+
 module.exports = {
   GROUPS,
+  compareScanPaths,
   resolveContainedPath,
   scanTeslaFootage
 };

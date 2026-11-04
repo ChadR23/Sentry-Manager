@@ -1631,7 +1631,7 @@ async function main() {
     // a finished conversion taken off Jobs by Clear jobs stays off (its
     // summary dismissed in the Encoder is no news); running again brings it back
     if (!jobId && terminal && db.jobCleared(externalId)) return;
-    if (!jobId) jobId = jobs.start({ type: 'conversion', vehicleId: v?.id || null, title: `Convert ${v ? v.name : src} to ${({ h265: 'H.265', av1: 'AV1' })[s.config?.codec] || String(s.config?.codec || '').toUpperCase()}`, externalId });
+    if (!jobId) jobId = jobs.start({ type: 'conversion', vehicleId: v?.id || null, title: `Convert ${v ? v.name : src} to ${({ h265: 'H.265', av1: 'AV1' })[s.config?.codec] || String(s.config?.codec || '').toUpperCase()}${s.config?.part > 1 ? ` (part ${s.config.part})` : ''}`, externalId });
     const existing = db.jobByExternal(externalId);
     if (terminal && existing?.status === 'running') {
       const measured = stats.energy().byJob?.[s.id] || null;

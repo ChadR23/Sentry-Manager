@@ -57,12 +57,13 @@ const DIRECTORY_SYNC_UNSUPPORTED = new Set(['EISDIR', 'EINVAL', 'EPERM', 'EACCES
 const TOP_FIELDS = new Set([
   'schemaVersion', 'id', 'state', 'revision', 'config', 'items', 'counters',
   'summary', 'summaryDismissed', 'discoveryComplete', 'createdAt', 'updatedAt', 'activeItemId', 'ownedPaths',
-  'ownedArtifacts', 'publicationArtifact', 'replacementPhase', 'recovery', 'failure', 'timings', 'pausedMs'
+  'ownedArtifacts', 'publicationArtifact', 'replacementPhase', 'recovery', 'failure', 'timings', 'pausedMs',
+  'moreAfter'
 ]);
 const CONFIG_FIELDS = new Set([
   'sourceRoot', 'destinationRoot', 'codec', 'profileId', 'networkMode',
   'outputMode', 'includedGroups', 'groupOrder', 'replacementConfirmed', 'concurrency', 'bitrateKbps', 'qualityLevel', 'autoConvert', 'verifyMode',
-  'lanes', 'keepOffTarget'
+  'lanes', 'keepOffTarget', 'resumeAfter', 'part'
 ]);
 const ITEM_FIELDS = new Set([
   'id', 'state', 'kind', 'group', 'eventId', 'relativePath', 'sourcePath',
@@ -538,6 +539,15 @@ function normalizeConfig(value) {
     if (typeof value.keepOffTarget !== 'boolean') throw storeError('INVALID_MANIFEST');
     if (value.keepOffTarget && hasSizeTarget(result.profileId)) result.keepOffTarget = true;
   }
+  // A follow-up of a job that reached its clip limit: it takes only the clips
+  // after this one in scan order, as part `part` of the conversion.
+  if (value.resumeAfter !== undefined && value.resumeAfter !== null) {
+    result.resumeAfter = boundedPath(value.resumeAfter, { relative: true });
+  }
+  if (value.part !== undefined) {
+    if (!Number.isSafeInteger(value.part) || value.part < 1 || value.part > 100_000) throw storeError('INVALID_MANIFEST');
+    result.part = value.part;
+  }
   // Started by automatic conversion (only clips it has not handled before).
   if (value.autoConvert !== undefined) {
     if (value.autoConvert !== true) throw storeError('INVALID_MANIFEST');
@@ -726,6 +736,9 @@ function normalizeManifest(value, cache = null) {
   optional(result, value, 'createdAt', (entry) => safeInteger(entry));
   optional(result, value, 'updatedAt', (entry) => safeInteger(entry));
   optional(result, value, 'pausedMs', (entry) => safeInteger(entry));
+  // The job stopped taking clips at its limit: the scan goes on after this
+  // one in a follow-up job (null or absent: the scan was complete).
+  if (value.moreAfter !== undefined && value.moreAfter !== null) result.moreAfter = boundedPath(value.moreAfter, { relative: true });
   optional(result, value, 'activeItemId', portableItemId);
   optional(result, value, 'ownedPaths', normalizeOwnedPaths);
   optional(result, value, 'ownedArtifacts', (entry) => normalizeOwnedArtifacts(entry, result.ownedPaths));

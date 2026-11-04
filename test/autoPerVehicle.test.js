@@ -38,7 +38,7 @@ function setup() {
   };
   const finish = (id) => { jobs.get(id).state = 'completed'; };
   const auto = createAutoConverter({ service, scanner, fs: fs.promises, directory: dir, timers: { setInterval: () => null, clearInterval: () => {} } });
-  return { dir, auto, started, finish, down, clips };
+  return { dir, auto, started, finish, down, clips, jobs };
 }
 
 const shared = { intervalMinutes: 60, window: null, holdManual: false, keepRunning: false, openAtLogin: false };
@@ -102,6 +102,32 @@ test('settings saved before there was one per vehicle become that vehicle\'s', a
     auto.stop();
     assert.deepEqual(auto.getState().settings.configs.map((c) => c.sourceRoot), ['/cars/a']);
     assert.equal(auto.getState().settings.enabled, true);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a job that stopped at its clip limit with more to do: the folder is checked again at once, not at the next scheduled check', async () => {
+  const { dir, auto, started, clips, jobs } = setup();
+  try {
+    clips['/cars/a'] = 5;
+    await auto.configure({ ...shared, intervalMinutes: 600, enabled: true, config: config('/cars/a') });
+    await auto.tick();
+    assert.deepEqual(started.map((j) => j.sourceRoot), ['/cars/a']);
+    // the job took clips 0-2, then stopped at its limit with more left
+    Object.assign(jobs.get('job-1'), {
+      state: 'completed', moreAfter: 'RecentClips/2.mp4',
+      items: [0, 1, 2].map((n) => ({ state: 'completed', relativePath: `RecentClips/${n}.mp4`, sourceBytes: 100, mtimeMs: 1 }))
+    });
+    await auto.tick();
+    assert.deepEqual(started.map((j) => j.sourceRoot), ['/cars/a', '/cars/a'], 'the next part started on the next tick, ten hours before the scheduled check');
+    // a job that ended without more to do waits for the schedule as before
+    Object.assign(jobs.get('job-2'), {
+      state: 'completed',
+      items: [3, 4].map((n) => ({ state: 'completed', relativePath: `RecentClips/${n}.mp4`, sourceBytes: 100, mtimeMs: 1 }))
+    });
+    await auto.tick();
+    assert.equal(started.length, 2);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

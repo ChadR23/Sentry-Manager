@@ -748,6 +748,9 @@ async function createConverterRuntime(options = {}) {
     // never held back by the queue: the job knows every clip early and the
     // time remaining covers the whole archive, not the first 10,000 clips.
     queueLimit: 50_000,
+    // a job takes at most this many clips, then a follow-up part carries on
+    // (jobService's default; tests set a small one)
+    jobClipLimit: options.jobClipLimit,
     // How long ffmpeg may go without reporting progress before it counts
     // as stuck (jobService's default when unset).
     encodeStallMs: options.encodeStallMs,
