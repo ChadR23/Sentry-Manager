@@ -442,6 +442,13 @@ body[data-route="viewer"] .win-body { display: flex; flex-direction: column; }
 .cam[data-cam="right_pillar"] { grid-area: rp; }
 .cam[data-cam="left_repeater"] { grid-area: lr; }
 .cam[data-cam="right_repeater"] { grid-area: rr; }
+/* HW3 footage (no pillar cameras): no pillar windows; the repeaters stand
+   beside the front camera (every tile keeps its size, so the fit holds) */
+.cockpit.hw3 .cam[data-cam$="_pillar"] { display: none; }
+.cockpit.hw3.lay-wide { grid-template-areas: ". back ." "lr front rr" "lr front rr"; }
+.cockpit.hw3.lay-tall { grid-template-areas: "back back back back" "front front front front" ". lr rr ."; }
+.cockpit.hw3.lay-theatre { grid-template-areas: "lr front rr" "lr front rr"; }
+.cockpit.hw3 .cam[data-cam$="_repeater"] { align-self: center; }
 /* side windows, angled towards the driver (wide layout only) */
 .lay-wide .cam[data-cam="left_pillar"] { transform: rotateY(14deg); transform-origin: 100% 50%; align-self: end; }
 .lay-wide .cam[data-cam="right_pillar"] { transform: rotateY(-14deg); transform-origin: 0 50%; align-self: end; }

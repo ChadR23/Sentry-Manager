@@ -607,6 +607,19 @@ export default {
       return { unmount() { alive = false; map.destroy(); xp.destroy(); spdSize.disconnect(); document.removeEventListener('visibilitychange', onVis); } };
     }
     drawPick(info);
+    // HW3 or HW4 from the footage itself, as the built-in Viewer does: only
+    // HW4 cars record the pillar cameras, so without them there are no
+    // pillar tiles or buttons and all cameras make a 2 x 2 grid
+    const hw4 = st.clips.some((c) => c.files.left_pillar || c.files.right_pillar);
+    const shown = hw4 ? CAMS : CAMS.filter((c) => !c.endsWith('_pillar'));
+    stage.classList.toggle('hw3', !hw4);
+    for (const k of CAMS) tiles[k].fig.hidden = !shown.includes(k);
+    el.querySelectorAll('[data-pick]').forEach((b) => { b.hidden = !shown.includes(b.dataset.pick); });
+    if (!shown.includes(st.main)) {
+      const grid = st.grid;
+      setMain('front');
+      if (grid) setGrid(true);
+    }
     $('#h-tag').textContent = info.recId ? $('#vw-title').textContent : (info.day ? dayName(info.day) : '');
     if (!st.clips.length) {
       say('<b>No clips to play yet.</b><span>Footage shows up here once the car has recorded some.</span>');
@@ -662,7 +675,7 @@ export default {
           case '+': case '=': setSpeed(SPEEDS[Math.min(SPEEDS.length - 1, SPEEDS.indexOf(st.speed) + 1)] ?? 1); toast(`Speed ${st.speed}×`); return true;
           case 'Escape': if (box.classList.contains('theater')) { box.classList.remove('theater'); document.body.classList.remove('theater-on'); return true; } return false;
           default:
-            if (/^[1-6]$/.test(e.key)) { setMain(CAMS[Number(e.key) - 1]); return true; }
+            if (/^[1-6]$/.test(e.key)) { const c = CAMS[Number(e.key) - 1]; if (!tiles[c].fig.hidden) setMain(c); return true; }
             return false;
         }
       }

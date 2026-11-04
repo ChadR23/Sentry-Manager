@@ -340,6 +340,12 @@ a.kpi:hover { border-color: var(--violet); transform: translateY(-1px); }
 .lay-focus { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 .lay-focus .cam { order: 2; }
 .lay-focus .cam.focused { order: 1; grid-column: 1 / -1; }
+/* HW3 footage (no pillar cameras): a 2 x 2 grid, front and rear on top as in the built-in Viewer */
+.cam[hidden] { display: none; }
+.stage.hw3.lay-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.stage.hw3.lay-grid .cam[data-cam=front] { order: 0; } .stage.hw3.lay-grid .cam[data-cam=back] { order: 1; }
+.stage.hw3.lay-grid .cam[data-cam=left_repeater] { order: 2; } .stage.hw3.lay-grid .cam[data-cam=right_repeater] { order: 3; }
+.stage.hw3.lay-focus { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .lay-duo { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .lay-duo .cam:not([data-cam="front"]):not([data-cam="back"]) { display: none; }
 .lay-single { grid-template-columns: 1fr; }

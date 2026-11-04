@@ -557,6 +557,13 @@ text.tk-hot { fill: #ffb3c2; }
 .vw-stage.nohud .hud-layer > * { display: none; }
 .vw-stage.notel .hud-center, .vw-stage.notel .hud-low { opacity: 0.35; }
 .vw-stage.all { grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: auto; }
+/* HW3 footage (no pillar cameras): three tiles beside the main camera, a 2 x 2 grid */
+.cam[hidden] { display: none; }
+.vw-stage.hw3 { grid-template-rows: repeat(3, minmax(0, 1fr)); }
+.vw-stage.hw3 .cam.main, .vw-stage.hw3 .hud-layer, .vw-stage.hw3 .vw-msg { grid-row: 1 / span 3; }
+.vw-stage.hw3.all { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: auto; }
+.vw-stage.hw3.all .cam.main { grid-row: auto; }
+.vw-stage.hw3.all .vw-msg { grid-row: 1; }
 .vw-stage.all .cam, .vw-stage.all .cam.main { grid-column: auto; grid-row: auto; aspect-ratio: 16 / 9; max-height: none; min-height: 0; order: 0; }
 .vw-stage.all .cam figcaption { display: flex; }
 .vw-stage.all .hud-layer { display: none; }
@@ -616,6 +623,10 @@ body.theater-on .dash, body.theater-on .tuner { visibility: hidden; }
   .hud-layer, .vw-msg { grid-column: 1 / -1; grid-row: 1; }
   .vw-stage.all { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .vw-stage.all .cam { grid-row: auto; }
+  .vw-stage.hw3 { grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: auto auto; }
+  .vw-stage.hw3 .cam.main, .vw-stage.hw3 .hud-layer, .vw-stage.hw3 .vw-msg { grid-row: 1; }
+  .vw-stage.hw3.all { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .vw-stage.hw3.all .cam, .vw-stage.hw3.all .cam.main { grid-row: auto; }
   .hud-tr { display: none; }
   .vw-msg { font-size: 12.5px; padding: 8px 10px; }
   .transport { justify-content: center; }

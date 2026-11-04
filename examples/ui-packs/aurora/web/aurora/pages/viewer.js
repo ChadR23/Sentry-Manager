@@ -781,6 +781,11 @@ export default {
     }
     if (dead) { map.destroy(); xp.destroy(); return {}; }
     drawList();
+    // HW3 or HW4 from the footage itself, as the built-in Viewer does: only
+    // HW4 cars record the pillar cameras, so without them the cockpit has no
+    // pillar windows and the repeaters stand beside the front camera
+    cockpit.classList.toggle('hw3', !clips.some((c) => c.cams.left_pillar || c.cams.right_pillar));
+    fit();
     if (!ok) {
       ctrlEl.remove();
       map.destroy();

@@ -195,3 +195,15 @@ test('the built-in Viewer\'s Export button opens the shared panel in the web ver
   const css = fs.readFileSync(path.join(__dirname, '..', 'web', 'studioEmbed.css'), 'utf8');
   assert.doesNotMatch(css, /#exportBtn[^{]*\{[^}]*display:\s*none/, 'the button is no longer hidden');
 });
+
+// HW3 or HW4 from the footage, as the built-in Viewer does: only HW4 cars
+// record the pillar cameras, so without them a pack shows no pillar tiles.
+for (const [pack, mod] of [['horizon', 'hz'], ['flux', 'flux'], ['aurora', 'aurora']]) {
+  test(`${pack}: the Viewer shows pillar cameras only for footage that has them (HW4)`, () => {
+    const src = fs.readFileSync(path.join(ROOT, pack, 'web', mod, 'pages', 'viewer.js'), 'utf8');
+    assert.match(src, /\.some\(\(\w\) => \w\.(files|cams)\.left_pillar \|\| \w\.(files|cams)\.right_pillar\)/, 'decided from the playlist');
+    assert.match(src, /classList\.toggle\('hw3'/);
+    const css = fs.readFileSync(path.join(ROOT, pack, 'web', pack === 'flux' ? 'flux.css' : `${mod}/app.css`), 'utf8');
+    assert.match(css, /\.hw3/, 'and laid out without them');
+  });
+}

@@ -500,7 +500,7 @@ export default {
     function setLayout(l) {
       st.layout = l;
       store.set('vw:layout', l);
-      stage.className = `stage lay-${l}${st.playing ? ' playing' : ''}`;
+      stage.className = `stage lay-${l}${st.hw3 ? ' hw3' : ''}${st.playing ? ' playing' : ''}`;
       el.querySelectorAll('[data-seg="layout"] button').forEach((b) => { b.classList.toggle('on', b.dataset.v === l); b.setAttribute('aria-checked', String(b.dataset.v === l)); });
       drawCamChips();
     }
@@ -583,6 +583,20 @@ export default {
     }
     $('#vw-title').textContent = st.title || 'no footage';
     drawPick(info);
+    // HW3 or HW4 from the footage itself, as the built-in Viewer does: only
+    // HW4 cars record the pillar cameras, so without them there are no
+    // pillar tiles or buttons and the grid is 2 x 2
+    st.hw3 = !st.segs.some((s) => s.files.left_pillar || s.files.right_pillar);
+    stage.classList.toggle('hw3', st.hw3);
+    for (const c of GRID_ORDER) tiles[c].fig.hidden = st.hw3 && c.endsWith('_pillar');
+    el.querySelectorAll('[data-cam-pick]').forEach((b) => { b.hidden = st.hw3 && b.dataset.camPick.endsWith('_pillar'); });
+    if (st.hw3 && String(st.focus).endsWith('_pillar')) {
+      // a pillar was the focused camera: the front instead, layout unchanged
+      st.focus = 'front';
+      stage.dataset.focus = 'front';
+      GRID_ORDER.forEach((x) => tiles[x].fig.classList.toggle('focused', x === 'front'));
+      drawCamChips();
+    }
     if (!st.segs.length) {
       msg('No clips to play yet. Footage appears here once the car has recorded some.');
       drawTimeline();
@@ -662,7 +676,7 @@ export default {
           case 'f': $('#vw-full').click(); return true;
           case 'e': xp.toggle(); return true;
           default:
-            if (/^[1-6]$/.test(e.key)) { setFocus(CAMERAS[Number(e.key) - 1]); return true; }
+            if (/^[1-6]$/.test(e.key)) { const c = CAMERAS[Number(e.key) - 1]; if (!tiles[c].fig.hidden) setFocus(c); return true; }
             return false;
         }
       },
