@@ -79,7 +79,6 @@ const SUPERVISED = process.env.SENTRY_SUPERVISED === '1' && typeof process.send 
 const TRUSTED_HOSTS = (process.env.TRUSTED_HOSTS || '').split(/[\s,]+/).filter(Boolean).map((h) => h.toLowerCase());
 
 const CONVERTER_ACTIVE = new Set(['discovering', 'waiting', 'staging', 'encoding', 'writing-telemetry', 'verifying', 'copying', 'replacing', 'paused', 'paused_network']);
-const ITEM_DONE = new Set(['completed', 'skipped', 'failed', 'cancelled']);
 
 // Pages may load scripts, styles, frames and data only from this server, and
 // never run inline scripts. Styles allow inline attributes (both UIs set
@@ -262,14 +261,18 @@ async function main() {
 
   // ---- converter
   const converterJobs = new Map(); // job id -> latest snapshot
-  const isBusy = (abs) => {
+  // The clips a conversion has in hand right now (absolute paths). Only
+  // those are refused by the Recycle Bin: a clip still queued may go, the
+  // converter skips a clip that is gone when it gets there.
+  const busyPaths = () => {
+    const out = new Set();
     for (const s of converterJobs.values()) {
       if (!CONVERTER_ACTIVE.has(s.state) || !s.config?.sourceRoot) continue;
-      if ((s.items || []).some((i) => !ITEM_DONE.has(i.state) && i.relativePath && path.join(s.config.sourceRoot, i.relativePath) === abs)) return true;
+      for (const i of s.items || []) if (i.state === 'processing' && i.relativePath) out.add(path.join(s.config.sourceRoot, i.relativePath));
     }
-    return false;
+    return out;
   };
-  const bin = new RecycleBin({ db, vehicles, inventory, jobs, log: logger.scope('bin'), isBusy });
+  const bin = new RecycleBin({ db, vehicles, inventory, jobs, log: logger.scope('bin'), busyPaths });
 
   // ---- server stats (Overview > Server, the Encoder's Hardware panel):
   // sampled only while a page asks or a conversion runs

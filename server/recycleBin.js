@@ -59,9 +59,21 @@ async function exists(p) {
   }
 }
 
+const SKIP_WORDS = { protected: 'protected', converting: 'being converted right now', missing: 'a file is no longer there (refresh the inventory)', error: 'could not be moved' };
+/** Why recordings were not moved, counted: "3 protected, 1 could not be moved (EACCES: ...)". */
+function skipWhy(skipped) {
+  const by = new Map();
+  for (const s of skipped) {
+    const k = SKIP_WORDS[s.reason] ? s.reason : 'error';
+    if (!by.has(k)) by.set(k, { n: 0, message: s.message });
+    by.get(k).n++;
+  }
+  return [...by].map(([k, { n, message }]) => `${n} ${SKIP_WORDS[k]}${k === 'error' && message ? ` (${String(message).slice(0, 160)})` : ''}`).join(', ');
+}
+
 class RecycleBin {
-  constructor({ db, vehicles, inventory, jobs, log, isBusy = () => false }) {
-    Object.assign(this, { db, vehicles, inventory, jobs, log, isBusy });
+  constructor({ db, vehicles, inventory, jobs, log, busyPaths = () => new Set() }) {
+    Object.assign(this, { db, vehicles, inventory, jobs, log, busyPaths });
     this.locks = new Map(); // vehicle id -> tail of its lock chain
   }
 
@@ -106,7 +118,9 @@ class RecycleBin {
           result.skipped.push({ id: rec.id, reason: 'protected' });
           return;
         }
-        const busy = rec.files.find((rel) => this.isBusy(path.join(root, rel)) || this.isBusy(path.join(realRoot, rel)));
+        // only a clip a conversion is working on right now; a queued one may go
+        const inHand = this.busyPaths();
+        const busy = inHand.size && rec.files.find((rel) => inHand.has(path.join(root, rel)) || inHand.has(path.join(realRoot, rel)));
         if (busy) {
           result.skipped.push({ id: rec.id, reason: 'converting' });
           return;
@@ -149,9 +163,10 @@ class RecycleBin {
     this.inventory.rebuild(vehicleId);
     this.jobs.finish(jobId, {
       status: result.skipped.some((s) => s.reason === 'error') ? 'failed' : 'done',
-      detail: `${result.moved.length} moved (${formatBytes(result.bytes)})${result.skipped.length ? `, ${result.skipped.length} skipped` : ''}`,
+      detail: `${result.moved.length} moved (${formatBytes(result.bytes)})${result.skipped.length ? `, ${result.skipped.length} skipped: ${skipWhy(result.skipped)}` : ''}`,
       result
     });
+    if (result.skipped.length) this.log.warn(`${vehicle.name}: ${result.skipped.length} recording(s) not moved to the Recycle Bin: ${skipWhy(result.skipped)}`);
     this.log.info(`${vehicle.name}: ${result.moved.length} recording(s) moved to the Recycle Bin (${reason})`);
     return result;
   }

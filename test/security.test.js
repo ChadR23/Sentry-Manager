@@ -365,7 +365,7 @@ test('the HTTPS CA cannot vouch for names outside its constraints', { skip: !has
   }
 });
 
-function binFixture(root, recordings) {
+function binFixture(root, recordings, extra = {}) {
   const db = new ManagerDB(':memory:');
   const files = new Map();
   for (const r of recordings) for (const rel of r.files) files.set(rel, { rel, size: 4 });
@@ -376,9 +376,29 @@ function binFixture(root, recordings) {
     rootOf: () => root
   };
   const inventory = { get: () => inv, rebuild() {}, scan: async () => inv };
-  const jobs = { start: () => 1, finish() {} };
-  return { db, bin: new RecycleBin({ db, vehicles, inventory, jobs, log: quiet }) };
+  const jobs = { finished: [], start: () => 1, finish(id, f) { this.finished.push(f); } };
+  return { db, jobs, bin: new RecycleBin({ db, vehicles, inventory, jobs, log: quiet, ...extra }) };
 }
+
+test('Recycle Bin: only the clip a conversion has in hand is refused, and the job says why', async () => {
+  const root = await tmp();
+  try {
+    const recs = ['08-00', '09-00'].map((t) => ({ id: t, category: 'Recent', start: `2020-01-01 ${t}`, files: [`TeslaCam/RecentClips/2020-01-01_${t}-00-front.mp4`] }));
+    for (const r of recs) {
+      await fsp.mkdir(path.dirname(path.join(root, r.files[0])), { recursive: true });
+      await fsp.writeFile(path.join(root, r.files[0]), 'clip');
+    }
+    // a whole day queued for conversion, one clip of it being converted now
+    const { bin, jobs } = binFixture(root, recs, { busyPaths: () => new Set([path.join(root, recs[1].files[0])]) });
+    const out = await bin.trash('car', ['08-00', '09-00']);
+    assert.deepEqual(out.moved, ['08-00'], 'a queued clip may go');
+    assert.deepEqual(out.skipped.map((x) => [x.id, x.reason]), [['09-00', 'converting']]);
+    assert.equal(jobs.finished[0].detail, '1 moved (4 B), 1 skipped: 1 being converted right now');
+    assert.ok(fs.existsSync(path.join(root, recs[1].files[0])));
+  } finally {
+    await fsp.rm(root, { recursive: true, force: true });
+  }
+});
 
 test('Recycle Bin: an interrupted move is settled after a restart, and unlisted bin folders are recovered', async () => {
   const root = await tmp();
