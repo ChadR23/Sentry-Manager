@@ -309,6 +309,8 @@ function collectElements(root) {
         qualityRow: byId('converterQualityRow'),
         keepOffTarget: byId('converterKeepOffTarget'),
         keepOffTargetRow: byId('converterKeepOffTargetRow'),
+        keepLarger: byId('converterKeepLarger'),
+        keepLargerRow: byId('converterKeepLargerRow'),
         verifyMode: byId('converterVerifyMode'),
         verifyReplaceNote: byId('converterVerifyReplaceNote'),
         benchmarkVerifyTable: byId('converterBenchmarkVerifyTable'),
@@ -530,12 +532,20 @@ function createFootageConverterController(options = {}) {
         setHidden(elements.qualityRow, selectedProfile() !== 'quality');
         // custom bitrate and constant quality have no size target to miss
         setHidden(elements.keepOffTargetRow, ['custom', 'quality'].includes(selectedProfile()));
+        // ...and only they have "Always convert, even if larger"
+        setHidden(elements.keepLargerRow, !['custom', 'quality'].includes(selectedProfile()));
     }
 
     // "Keep clips that can't reach the size target" (size profiles only)
     function keepOffTargetSetting(profileId) {
         if (['custom', 'quality'].includes(profileId)) return {};
         return elements.keepOffTarget?.checked === true ? { keepOffTarget: true } : {};
+    }
+
+    // "Always convert, even if larger" (constant quality and custom bitrate only)
+    function keepLargerSetting(profileId) {
+        if (!['custom', 'quality'].includes(profileId)) return {};
+        return elements.keepLarger?.checked === true ? { keepLarger: true } : {};
     }
 
     function storedVerifyMode() {
@@ -1095,6 +1105,7 @@ function createFootageConverterController(options = {}) {
         // Jobs saved before the setting existed ran full verification.
         if (elements.verifyMode) elements.verifyMode.value = VERIFY_MODES.includes(config.verifyMode) ? config.verifyMode : 'full';
         if (elements.keepOffTarget) elements.keepOffTarget.checked = config.keepOffTarget === true;
+        if (elements.keepLarger) elements.keepLarger.checked = config.keepLarger === true;
         updateCustomBitrateVisibility();
         setChecked(elements.outputOptions, 'converterOutput', config.outputMode);
         const included = new Set(config.includedGroups || []);
@@ -2026,6 +2037,7 @@ function createFootageConverterController(options = {}) {
             profileId,
             ...profileSettings(profileId),
             ...keepOffTargetSetting(profileId),
+            ...keepLargerSetting(profileId),
             networkMode: 'auto',
             outputMode,
             includedGroups,

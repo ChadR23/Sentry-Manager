@@ -138,6 +138,7 @@ const converterEnglish = Object.freeze({
     qualitySmall: "Small — smallest files",
     qualityHint: "Instead of a size target, each clip is encoded to the same visual quality: parked and still scenes shrink far more, busy driving keeps its detail. A clip that would not get smaller is encoded again under its original bitrate, so every clip ends up in the chosen codec.",
     keepOffTarget: "Keep clips that can't reach the size target (still smaller than the original and fully checked)",
+    keepLarger: "Always convert, even if larger (a clip still not smaller after two tries at a lower bitrate is kept converted)",
     itemOffTarget: "kept: {saved}% smaller (target {target}%)",
     customBitrateLabel: "Video bitrate (Mbps)",
     customBitrateHint: "Tesla clips are recorded at roughly 3–6 Mbps. Pick a lower value to save space; a clip whose result is not smaller than its original keeps the original.",

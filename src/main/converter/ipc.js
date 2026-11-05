@@ -315,9 +315,11 @@ async function validateStartConfig(payload, dependencies, capabilities) {
   const hasVerify = isPlainObject(payload) && Object.prototype.hasOwnProperty.call(payload, 'verifyMode');
   const hasLanes = isPlainObject(payload) && Object.prototype.hasOwnProperty.call(payload, 'lanes');
   const hasKeepOffTarget = isPlainObject(payload) && Object.prototype.hasOwnProperty.call(payload, 'keepOffTarget');
+  const hasKeepLarger = isPlainObject(payload) && Object.prototype.hasOwnProperty.call(payload, 'keepLarger');
   const expectedKeys = [...keys, ...(hasGroupOrder ? ['groupOrder'] : []), ...(hasConcurrency ? ['concurrency'] : []),
     ...(hasBitrate ? ['bitrateKbps'] : []), ...(hasQuality ? ['qualityLevel'] : []), ...(hasVerify ? ['verifyMode'] : []),
-    ...(hasLanes ? ['lanes'] : []), ...(hasKeepOffTarget ? ['keepOffTarget'] : [])];
+    ...(hasLanes ? ['lanes'] : []), ...(hasKeepOffTarget ? ['keepOffTarget'] : []),
+    ...(hasKeepLarger ? ['keepLarger'] : [])];
   if (!exactKeys(payload, expectedKeys)) fail('INVALID_REQUEST');
   // Custom profile: an explicit bitrate is required; size profiles take none.
   if (payload.profileId === 'custom' ? !isValidCustomBitrate(payload.bitrateKbps) : hasBitrate) fail('INVALID_BITRATE');
@@ -328,6 +330,10 @@ async function validateStartConfig(payload, dependencies, capabilities) {
   // has a target, so custom bitrate and constant quality must not turn it on.
   if (hasKeepOffTarget && (typeof payload.keepOffTarget !== 'boolean'
       || (payload.keepOffTarget && (payload.profileId === 'custom' || payload.profileId === 'quality')))) fail('INVALID_KEEP_OFF_TARGET');
+  // Always convert, even if larger: the other way round, only constant
+  // quality and custom bitrate (no size target) may turn it on.
+  if (hasKeepLarger && (typeof payload.keepLarger !== 'boolean'
+      || (payload.keepLarger && payload.profileId !== 'custom' && payload.profileId !== 'quality'))) fail('INVALID_KEEP_LARGER');
   // Conversions at once per GPU. A device id that is not in the container
   // now is kept (a saved automatic setting can outlive a GPU); the job skips
   // that lane and says so in the log.
@@ -645,7 +651,9 @@ function registerConverterIpc(options = {}) {
       // share can always be switched off.
       const config = !payload.enabled || payload.config === undefined || payload.config === null
         ? null : await validateStartConfig(payload.config, dependencies, capabilities);
-      if (payload.enabled && !config) fail('AUTO_CONFIG_REQUIRED');
+      // (one vehicle turned off while others stay on: enabled with only
+      // removeSource, no settings to check)
+      if (payload.enabled && !config && payload.removeSource === undefined) fail('AUTO_CONFIG_REQUIRED');
       return boundedJsonValue(await options.auto.configure({
         enabled: payload.enabled, intervalMinutes: payload.intervalMinutes, window, holdManual: payload.holdManual === true,
         keepRunning: payload.keepRunning, openAtLogin: payload.openAtLogin, config,

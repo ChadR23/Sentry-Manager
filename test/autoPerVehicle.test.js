@@ -132,3 +132,27 @@ test('a job that stopped at its clip limit with more to do: the folder is checke
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('IPC: one vehicle turned off while another stays on needs no settings (no AUTO_CONFIG_REQUIRED)', async () => {
+  const { registerConverterIpc } = require('../src/main/converter/ipc');
+  const handlers = new Map();
+  const configured = [];
+  const registration = registerConverterIpc({
+    ipcMain: { handle: (channel, fn) => handlers.set(channel, fn), removeHandler: (channel) => handlers.delete(channel) },
+    dialog: { showOpenDialog: async () => ({ canceled: true }) },
+    service: { subscribe: () => () => {}, start: async () => 'job-1', list: async () => [] },
+    capabilities: { replacement: 'available' },
+    auto: { configure: async (settings) => { configured.push(settings); return { settings }; } }
+  });
+  const invoke = (name, payload) => handlers.get(`converter:${name}`)({ sender: null }, payload);
+  const shared = { intervalMinutes: 60, window: null, keepRunning: false, openAtLogin: false };
+  try {
+    const out = await invoke('setAuto', { ...shared, enabled: true, removeSource: '/cars/chad' });
+    assert.equal(out.ok, true, JSON.stringify(out));
+    assert.deepEqual([configured.at(-1).enabled, configured.at(-1).removeSource, configured.at(-1).config], [true, '/cars/chad', null]);
+    // turning automatic on still needs a vehicle's settings
+    assert.equal((await invoke('setAuto', { ...shared, enabled: true })).error?.code, 'AUTO_CONFIG_REQUIRED');
+  } finally {
+    registration.unregister();
+  }
+});

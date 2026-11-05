@@ -2022,6 +2022,9 @@ function createConverterJobService(deps) {
         // Opt-in: a size-profile miss that passed every other check comes
         // back ok with details.offTarget instead of failing profile-size.
         ...(runtime.manifest.config.keepOffTarget === true ? { keepOffTarget: true } : {}),
+        // Opt-in ("Always convert, even if larger"): only after the retries
+        // under the original's bitrate, the last copy is kept even if larger.
+        ...(noTarget && runtime.manifest.config.keepLarger === true && underSourceCount >= UNDER_SOURCE_SHARES.length ? { allowLarger: true } : {}),
         ...(verifyAccel && effectiveVerifyMode(runtime.manifest.config) === 'full' ? {
           decodeAccel: verifyAccel,
           onDecodeAccelFallback: () => verifyDecodeFallbacks.set(verifiedEncoder, (verifyDecodeFallbacks.get(verifiedEncoder) || 0) + 1)
@@ -2030,6 +2033,9 @@ function createConverterJobService(deps) {
       timing.mark('verify');
       check.release?.();
       check.release = null;
+      if (verification?.ok && verification.details?.larger === true) {
+        console.warn('[CONVERTER] Kept although larger (option on):', item.relativePath, `${verification.details.largerBytes} bytes larger than the original`);
+      }
       if (verification?.ok && verification.details?.offTarget === true) {
         // Missed the size target but passed everything else: the usual size
         // retry comes first; only the last attempt's file is kept as is.

@@ -109,6 +109,7 @@ function validateOptions(options) {
     throw new TypeError('verifyMode must be off, quick or full');
   }
   if (options.keepOffTarget !== undefined && typeof options.keepOffTarget !== 'boolean') throw new TypeError('keepOffTarget must be a boolean');
+  if (options.allowLarger !== undefined && typeof options.allowLarger !== 'boolean') throw new TypeError('allowLarger must be a boolean');
   if (options.onDecodeAccelFallback !== undefined && typeof options.onDecodeAccelFallback !== 'function') {
     throw new TypeError('onDecodeAccelFallback must be a function');
   }
@@ -853,9 +854,13 @@ async function verifyIntegrityOnly({ options, profileId, sourceBytes, outputByte
   } catch (_error) {
     return failure(VERIFICATION_REASONS.SNAPSHOT_FAILED, sourceBytes, outputBytes, { kind: 'integrity-failed' });
   }
-  if (outputBytes >= sourceBytes) {
+  // Opt-in for constant quality and custom bitrate ("Always convert, even
+  // if larger"): a copy that is not smaller but passed every other check is
+  // ok, marked larger; the job only asks for this on its last attempt.
+  if (outputBytes >= sourceBytes && (options.allowLarger !== true || hasSizeTarget(profileId))) {
     return failure(VERIFICATION_REASONS.NOT_SMALLER, sourceBytes, outputBytes, { savedBytes: sourceBytes - outputBytes });
   }
+  const larger = outputBytes >= sourceBytes ? { larger: true, largerBytes: outputBytes - sourceBytes } : {};
   let offTarget = {};
   if (hasSizeTarget(profileId)) {
     // Same short-clip allowance as the full checks, from the duration the
@@ -874,7 +879,7 @@ async function verifyIntegrityOnly({ options, profileId, sourceBytes, outputByte
   }
   return {
     ok: true, reason: null, retryable: false, sourceBytes, outputBytes,
-    details: { codec: EXPECTED_VIDEO[options.codec].codec, tag: EXPECTED_VIDEO[options.codec].tag, profileId, verifyMode: 'off', ...offTarget }
+    details: { codec: EXPECTED_VIDEO[options.codec].codec, tag: EXPECTED_VIDEO[options.codec].tag, profileId, verifyMode: 'off', ...offTarget, ...larger }
   };
 }
 
@@ -1036,9 +1041,13 @@ async function verifyOwnedSnapshot({ options, profileId, sourceBytes, outputByte
   const telemetryMismatch = compareTelemetry(expectedTimeline, inspected);
   if (telemetryMismatch) return failure(VERIFICATION_REASONS.TELEMETRY_MISMATCH, sourceBytes, outputBytes, telemetryMismatch);
 
-  if (outputBytes >= sourceBytes) {
+  // Opt-in for constant quality and custom bitrate ("Always convert, even
+  // if larger"): a copy that is not smaller but passed every other check is
+  // ok, marked larger; the job only asks for this on its last attempt.
+  if (outputBytes >= sourceBytes && (options.allowLarger !== true || hasSizeTarget(profileId))) {
     return failure(VERIFICATION_REASONS.NOT_SMALLER, sourceBytes, outputBytes, { savedBytes: sourceBytes - outputBytes });
   }
+  const larger = outputBytes >= sourceBytes ? { larger: true, largerBytes: outputBytes - sourceBytes } : {};
   // Custom bitrate and constant quality have no size target: smaller than the
   // source is enough.
   const customBitrate = !hasSizeTarget(profileId);
@@ -1085,7 +1094,8 @@ async function verifyOwnedSnapshot({ options, profileId, sourceBytes, outputByte
       telemetryEvents: mappedEventCount,
       telemetryTransitions: actualTransitions,
       telemetryGapRanges: actualGaps,
-      ...offTarget
+      ...offTarget,
+      ...larger
     }
   };
 }

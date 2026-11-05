@@ -100,7 +100,10 @@ with *Load these*, which fills the form only when you click it.
   bitrate, a clip that does not come out smaller (busy repeater footage,
   night, rain) is encoded again at 85% of its original bitrate, then 60%,
   instead of staying H.264. Only if even that is not smaller is the
-  original kept.
+  original kept, unless *Always convert, even if larger* is on (off by
+  default): then that last copy is kept although it is a little bigger, as
+  long as it passed every other check. Turning it on also tries again the
+  clips automatic conversion had left as they were for this reason.
 - **Size profiles** (5%, 20%, 50% smaller) retry a clip that comes out too
   big at a lower bitrate; *Keep clips that can't reach the size target*
   (off by default) then keeps it anyway, if it is smaller than the original

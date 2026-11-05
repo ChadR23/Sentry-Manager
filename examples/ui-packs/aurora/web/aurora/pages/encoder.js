@@ -18,7 +18,7 @@ const PHASES = [['inspect', 'Inspect'], ['source', 'Read source'], ['timeline', 
 
 // (what was saved over the defaults: the Nodes page may have saved only a lane)
 const form = Object.assign({
-  codec: 'h265', profileId: 'balanced', qualityLevel: 'balanced', bitrateKbps: 2500, keepOffTarget: false, outputMode: 'replace', verifyMode: 'quick',
+  codec: 'h265', profileId: 'balanced', qualityLevel: 'balanced', bitrateKbps: 2500, keepOffTarget: false, keepLarger: false, outputMode: 'replace', verifyMode: 'quick',
   groups: ['SavedClips', 'SentryClips', 'RecentClips'], included: ['RecentClips', 'SavedClips', 'SentryClips'], networkMode: 'auto', concurrency: 2, lanes: {}, dest: {}
 }, store.get('enc-form', {}));
 const saveForm = () => store.set('enc-form', form);
@@ -241,6 +241,7 @@ export default {
       if (form.profileId === 'custom') cfg.bitrateKbps = Math.round(Number(form.bitrateKbps));
       if (form.profileId === 'quality') cfg.qualityLevel = form.qualityLevel;
       if (form.keepOffTarget && !['custom', 'quality'].includes(form.profileId)) cfg.keepOffTarget = true;
+      if (form.keepLarger && ['custom', 'quality'].includes(form.profileId)) cfg.keepLarger = true;
       if (multiDevice()) {
         const lanes = devices.map((d) => ({ device: d.id, concurrency: Number(laneNext(d)) })).filter((l) => l.concurrency > 0);
         if (!lanes.length) throw new Error('Set at least one device to convert.');
@@ -271,7 +272,7 @@ export default {
           <div id="f-saved" class="small"></div>
           <div class="field">Size<div class="choice-grid">${PROFILES.map(([k, label, hint]) => `<label class="choice"><input type="radio" name="profile" value="${k}"${form.profileId === k ? ' checked' : ''}><b>${label}</b><span>${hint}</span></label>`).join('')}</div></div>
           ${form.profileId === 'quality' ? `<div class="field">Quality level<div class="seg big" role="group" aria-label="Quality level">${QUALITY.map(([k, l]) => `<button type="button" data-f="qualityLevel" data-v="${k}" aria-pressed="${form.qualityLevel === k}">${l}</button>`).join('')}</div></div>` : ''}
-          ${['custom', 'quality'].includes(form.profileId) ? '' : `<label class="check" style="padding:2px 4px"><input type="checkbox" id="f-offtarget"${form.keepOffTarget ? ' checked' : ''}> Keep a clip that can’t quite reach this size — only if it’s still smaller than the original and passed every other check</label>`}
+          ${['custom', 'quality'].includes(form.profileId) ? `<label class="check" style="padding:2px 4px"><input type="checkbox" id="f-keeplarger"${form.keepLarger ? ' checked' : ''}> Always convert, even if larger — a clip still not smaller after two tries at a lower bitrate is kept converted</label>` : `<label class="check" style="padding:2px 4px"><input type="checkbox" id="f-offtarget"${form.keepOffTarget ? ' checked' : ''}> Keep a clip that can’t quite reach this size — only if it’s still smaller than the original and passed every other check</label>`}
           ${form.profileId === 'custom' ? '<label class="field" style="max-width:280px">Bitrate (kbit/s)<input class="input" id="f-bitrate" type="number" inputmode="numeric" min="250" max="100000" step="50" value="' + esc(form.bitrateKbps) + '"></label>' : ''}
           <div class="field">Output<div class="choice-grid">
             <label class="choice"><input type="radio" name="out" value="replace"${replace ? ' checked' : ''}${canReplace ? '' : ' disabled'}><b>Replace originals</b><span>${canReplace ? 'after each result is verified; saves the space' : 'not possible on this storage'}</span></label>
@@ -302,7 +303,7 @@ export default {
         onLoad: (c) => {
           const f = window.SentryVehicleEncoding.formFields(c, form);
           Object.assign(form, {
-            codec: f.codec, profileId: f.profileId, outputMode: f.outputMode, verifyMode: f.verifyMode, keepOffTarget: f.keepOffTarget,
+            codec: f.codec, profileId: f.profileId, outputMode: f.outputMode, verifyMode: f.verifyMode, keepOffTarget: f.keepOffTarget, keepLarger: f.keepLarger,
             included: f.groups, ...(f.groupOrder ? { groups: f.groupOrder } : {}), ...(f.bitrateKbps ? { bitrateKbps: f.bitrateKbps } : {}),
             ...(f.qualityLevel ? { qualityLevel: f.qualityLevel } : {}), ...(f.lanes ? { lanes: f.lanes } : { concurrency: f.concurrency })
           });
@@ -553,6 +554,7 @@ export default {
       if (t.name === 'out') { form.outputMode = t.value; saveForm(); drawStart(); return; }
       if (t.id === 'f-confirm') { confirmed = t.checked; return; }
       if (t.id === 'f-offtarget') { form.keepOffTarget = t.checked; saveForm(); return; }
+      if (t.id === 'f-keeplarger') { form.keepLarger = t.checked; saveForm(); return; }
       if (t.id === 'f-dest') { form.dest[veh().id] = t.value.trim(); saveForm(); return; }
       if (t.id === 'f-bitrate') { form.bitrateKbps = Number(t.value); saveForm(); return; }
       if (t.matches('[data-group]')) {

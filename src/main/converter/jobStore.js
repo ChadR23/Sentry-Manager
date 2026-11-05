@@ -63,7 +63,7 @@ const TOP_FIELDS = new Set([
 const CONFIG_FIELDS = new Set([
   'sourceRoot', 'destinationRoot', 'codec', 'profileId', 'networkMode',
   'outputMode', 'includedGroups', 'groupOrder', 'replacementConfirmed', 'concurrency', 'bitrateKbps', 'qualityLevel', 'autoConvert', 'verifyMode',
-  'lanes', 'keepOffTarget', 'resumeAfter', 'part'
+  'lanes', 'keepOffTarget', 'keepLarger', 'resumeAfter', 'part'
 ]);
 const ITEM_FIELDS = new Set([
   'id', 'state', 'kind', 'group', 'eventId', 'relativePath', 'sourcePath',
@@ -348,6 +348,13 @@ function safeInteger(value, { positive = false } = {}) {
   return value;
 }
 
+// Saved bytes may be negative: "Always convert, even if larger" keeps a clip
+// whose copy is bigger than its original.
+function signedInteger(value) {
+  if (!Number.isSafeInteger(value)) throw storeError('INVALID_MANIFEST');
+  return value;
+}
+
 function nonNegativeFinite(value) {
   if (!Number.isFinite(value) || value < 0 || value > Number.MAX_SAFE_INTEGER) throw storeError('INVALID_MANIFEST');
   return value;
@@ -446,7 +453,7 @@ function normalizePublication(value) {
 function normalizeGroupCounters(value) {
   rejectUnknownFields(value, GROUP_COUNTER_FIELDS);
   const result = {};
-  for (const key of GROUP_COUNTER_FIELDS) result[key] = safeInteger(value[key]);
+  for (const key of GROUP_COUNTER_FIELDS) result[key] = key === 'savedBytes' ? signedInteger(value[key]) : safeInteger(value[key]);
   if (result.savedBytes !== result.sourceBytes - result.outputBytes) throw storeError('INVALID_MANIFEST');
   return result;
 }
@@ -455,7 +462,7 @@ function normalizeCounters(value, allowed = COUNTER_FIELDS) {
   rejectUnknownFields(value, allowed);
   const result = {};
   for (const key of ['files', 'sourceVideoBytes', 'outputVideoBytes', 'savedBytes', 'copiedAssetBytes']) {
-    result[key] = safeInteger(value[key]);
+    result[key] = key === 'savedBytes' ? signedInteger(value[key]) : safeInteger(value[key]);
   }
   if (result.savedBytes !== result.sourceVideoBytes - result.outputVideoBytes) throw storeError('INVALID_MANIFEST');
   rejectUnknownFields(value.groups, new Set(GROUPS));
@@ -538,6 +545,13 @@ function normalizeConfig(value) {
   if (value.keepOffTarget !== undefined) {
     if (typeof value.keepOffTarget !== 'boolean') throw storeError('INVALID_MANIFEST');
     if (value.keepOffTarget && hasSizeTarget(result.profileId)) result.keepOffTarget = true;
+  }
+  // Always convert, even if larger: keep the last copy of a clip that is not
+  // smaller after the retries under the original's bitrate. Only without a
+  // size target; kept only when on.
+  if (value.keepLarger !== undefined) {
+    if (typeof value.keepLarger !== 'boolean') throw storeError('INVALID_MANIFEST');
+    if (value.keepLarger && !hasSizeTarget(result.profileId)) result.keepLarger = true;
   }
   // A follow-up of a job that reached its clip limit: it takes only the clips
   // after this one in scan order, as part `part` of the conversion.

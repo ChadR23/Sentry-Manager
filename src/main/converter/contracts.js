@@ -226,7 +226,8 @@ function serializeSummary(counters) {
     copiedAssetBytes: counters.copiedAssetBytes,
     source: formatBytes(counters.sourceVideoBytes),
     output: formatBytes(counters.outputVideoBytes),
-    saved: formatBytes(counters.savedBytes),
+    // negative when a clip kept although larger outweighs the rest
+    saved: counters.savedBytes < 0 ? `-${formatBytes(-counters.savedBytes)}` : formatBytes(counters.savedBytes),
     copiedAssets: formatBytes(counters.copiedAssetBytes),
     groups: JSON.parse(JSON.stringify(counters.groups))
   };

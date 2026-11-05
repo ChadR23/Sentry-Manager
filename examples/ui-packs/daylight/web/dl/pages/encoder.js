@@ -85,6 +85,7 @@ function lastChoices() {
     profile: ['conservative', 'balanced', 'aggressive', 'quality'].includes(c.profile) ? c.profile : 'balanced',
     quality: ['high', 'balanced', 'small'].includes(c.quality) ? c.quality : 'balanced',
     keepOffTarget: c.keepOffTarget === true,
+    keepLarger: c.keepLarger === true,
     verify: c.verify === 'full' ? 'full' : 'quick',
     destination: typeof c.destination === 'string' ? c.destination : ''
   };
@@ -101,6 +102,7 @@ function configFrom(ch, v) {
     profileId: ch.profile,
     ...(ch.profile === 'quality' ? { qualityLevel: ch.quality } : {}),
     ...(ch.keepOffTarget && ch.profile !== 'quality' ? { keepOffTarget: true } : {}),
+    ...(ch.keepLarger && ch.profile === 'quality' ? { keepLarger: true } : {}),
     networkMode: 'auto',
     outputMode: ch.mode,
     includedGroups: GROUPS.filter((g) => ch.groups.includes(g)),
@@ -247,7 +249,7 @@ async function overview(ctx) {
     const mine = v ? s.configs.find((c) => c.sourceRoot === footageOf(v) || vehicleForRoot(c.sourceRoot)?.id === v.id) : null;
     const on = Boolean(s.enabled && mine);
     const others = s.configs.filter((c) => c !== mine).map((c) => vehicleForRoot(c.sourceRoot)?.name || c.sourceRoot);
-    const ch = mine ? { codec: mine.codec, profile: mine.profileId, quality: mine.qualityLevel || 'balanced', keepOffTarget: mine.keepOffTarget === true, groups: mine.includedGroups, mode: mine.outputMode, verify: mine.verifyMode || 'quick' } : { ...lastChoices(), mode: canReplace() ? lastChoices().mode : 'separate' };
+    const ch = mine ? { codec: mine.codec, profile: mine.profileId, quality: mine.qualityLevel || 'balanced', keepOffTarget: mine.keepOffTarget === true, keepLarger: mine.keepLarger === true, groups: mine.includedGroups, mode: mine.outputMode, verify: mine.verifyMode || 'quick' } : { ...lastChoices(), mode: canReplace() ? lastChoices().mode : 'separate' };
     const win = s.window?.follow === 'off-peak' ? 'offpeak' : s.window ? 'hours' : 'any';
     const hours = Array.from({ length: 24 }, (_, h) => h);
     const hourName = (h) => new Date(2000, 0, 1, h).toLocaleTimeString([], hourOpts(clockPref.h24 ? { minute: '2-digit' } : {}));
@@ -271,6 +273,7 @@ async function overview(ctx) {
         <label class="field"><span>Format</span><select class="input" name="codec"><option value="h265"${ch.codec === 'h265' ? ' selected' : ''}>H.265 (plays everywhere)</option><option value="av1"${ch.codec === 'av1' ? ' selected' : ''}>AV1 (smallest, slower)</option></select></label>
         <label class="field"><span>How much smaller</span><select class="input" name="profile">${['conservative', 'balanced', 'aggressive', 'quality'].map((p) => `<option value="${p}"${ch.profile === p ? ' selected' : ''}>${esc(PROFILE_WORD[p])}</option>`).join('')}</select></label>
         <label class="check full"><input type="checkbox" name="offtarget"${ch.keepOffTarget ? ' checked' : ''}> <span>Keep clips that can’t shrink quite that much, as long as they’re still smaller than the original and pass every check</span></label>
+        <label class="check full"><input type="checkbox" name="keeplarger"${ch.keepLarger ? ' checked' : ''}> <span>With constant quality: always convert, even a clip that comes out a little larger</span></label>
         <label class="field"><span>Originals</span><select class="input" name="mode"><option value="replace"${ch.mode === 'replace' ? ' selected' : ''}${canReplace() ? '' : ' disabled'}>Replace them once each copy checks out</option><option value="separate"${ch.mode === 'separate' ? ' selected' : ''}>Keep them; put copies in the converted folder</option></select></label>
         <fieldset class="full" style="border:0;padding:0;margin:0"><legend class="field" style="margin-bottom:6px">Which footage</legend><div class="row">${GROUPS.map((g) => `<label class="check"><input type="checkbox" name="group" value="${g}"${ch.groups.includes(g) ? ' checked' : ''}> ${GROUP_WORD[g]}</label>`).join('')}</div></fieldset>
         <div class="full row"><button class="btn btn-primary" type="submit">Save options</button><button class="btn" type="button" id="auto-check"${s.enabled ? '' : ' disabled'}>${icon('refresh')} Check now</button></div>
@@ -409,7 +412,7 @@ async function overview(ctx) {
     };
     const groups = f.getAll('group');
     if (!groups.length) return toast('Pick at least one kind of footage.', { kind: 'bad' });
-    const ch = { mode: f.get('mode') === 'replace' && canReplace() ? 'replace' : 'separate', codec: f.get('codec'), profile: f.get('profile'), quality: 'balanced', keepOffTarget: f.get('offtarget') === 'on', groups, verify: 'quick', destination: '' };
+    const ch = { mode: f.get('mode') === 'replace' && canReplace() ? 'replace' : 'separate', codec: f.get('codec'), profile: f.get('profile'), quality: 'balanced', keepOffTarget: f.get('offtarget') === 'on', keepLarger: f.get('keeplarger') === 'on', groups, verify: 'quick', destination: '' };
     const mine = auto.settings.configs.find((c) => c.sourceRoot === footageOf(v) || vehicleForRoot(c.sourceRoot)?.id === v.id);
     const others = auto.settings.configs.filter((c) => c !== mine);
     return busy(btn, async () => {
@@ -501,7 +504,7 @@ function showSaved() {
     onLoad: (c) => {
       store.set('choices', {
         ...store.get('choices', {}), vehicleId: v.id, mode: c.outputMode, codec: c.codec, profile: c.profileId, quality: c.qualityLevel || 'balanced',
-        keepOffTarget: c.keepOffTarget === true, groups: c.includedGroups, verify: c.verifyMode, destination: c.destinationRoot || ''
+        keepOffTarget: c.keepOffTarget === true, keepLarger: c.keepLarger === true, groups: c.includedGroups, verify: c.verifyMode, destination: c.destinationRoot || ''
       });
       toast(`${v.name}’s saved settings are ready in the guided flow.`, { kind: 'good' });
       location.hash = '#/encoder/new';
@@ -554,7 +557,7 @@ async function wizard(ctx) {
           <button type="button" class="choice" data-codec="av1" aria-pressed="${ch.codec === 'av1'}"><span><b>AV1</b><span>Even smaller, takes longer, needs newer players.</span></span></button></div>
         <h3 style="margin:22px 0 10px">How much smaller</h3>
         <div class="choices compact" role="group" aria-label="How much smaller">${[['conservative', 'Light', 'About 5% smaller, looks identical'], ['balanced', 'Balanced', 'About 20% smaller. Recommended'], ['aggressive', 'Strong', 'About half the size'], ['quality', 'Constant quality', 'Size varies: still scenes shrink most']].map(([p, t, d]) => `<button type="button" class="choice" data-profile="${p}" aria-pressed="${ch.profile === p}"><span><b>${t}</b><span>${d}</span></span></button>`).join('')}</div>
-        ${ch.profile === 'quality' ? '' : `<label class="check" style="margin-top:14px"><input type="checkbox" id="offtarget"${ch.keepOffTarget ? ' checked' : ''}> <span>Keep clips that can’t shrink quite that much, as long as they’re still smaller than the original and pass every check</span></label>`}
+        ${ch.profile === 'quality' ? `<label class="check" style="margin-top:14px"><input type="checkbox" id="keeplarger"${ch.keepLarger ? ' checked' : ''}> <span>Always convert, even a clip that comes out a little larger (after two tries at a lower bitrate)</span></label>` : `<label class="check" style="margin-top:14px"><input type="checkbox" id="offtarget"${ch.keepOffTarget ? ' checked' : ''}> <span>Keep clips that can’t shrink quite that much, as long as they’re still smaller than the original and pass every check</span></label>`}
         ${ch.profile === 'quality' ? `<label class="field" style="margin-top:14px"><span>Quality</span><select class="input" id="quality">${Object.entries(QUALITY_WORD).map(([k, t]) => `<option value="${k}"${ch.quality === k ? ' selected' : ''}>${t}</option>`).join('')}</select></label>` : ''}
         ${details('More details', `<label class="field"><span>How carefully to check each result</span><select class="input" id="verify"><option value="quick"${ch.verify === 'quick' ? ' selected' : ''}>Quick: streams, length, frames, size and driving data (recommended)</option><option value="full"${ch.verify === 'full' ? ' selected' : ''}>Thorough: also decodes every frame (slower)</option></select></label>
           ${ch.mode === 'separate' ? `<label class="field" style="margin-top:12px"><span>Where the copies go</span><div class="row" style="flex-wrap:nowrap"><input class="input mono" id="dest" value="${esc(ch.destination || defaultDestination(v()))}" style="flex:1;min-width:0"><button class="btn" type="button" id="browse">Browse</button></div></label>` : ''}
@@ -591,6 +594,7 @@ async function wizard(ctx) {
     view.querySelectorAll('[data-profile]').forEach((b) => { b.onclick = () => { ch.profile = b.dataset.profile; remember(); draw(); }; });
     view.querySelector('#quality')?.addEventListener('change', (e) => { ch.quality = e.target.value; remember(); });
     view.querySelector('#offtarget')?.addEventListener('change', (e) => { ch.keepOffTarget = e.target.checked; remember(); });
+    view.querySelector('#keeplarger')?.addEventListener('change', (e) => { ch.keepLarger = e.target.checked; remember(); });
     view.querySelector('#verify')?.addEventListener('change', (e) => { ch.verify = e.target.value; remember(); });
     view.querySelector('#dest')?.addEventListener('change', (e) => { ch.destination = e.target.value.trim(); remember(); });
     view.querySelector('#browse')?.addEventListener('click', async () => {

@@ -47,8 +47,11 @@ test('given-up clips are skipped until the converter changes; converted ones sta
     assert.equal(auto.isKnown(c, clip('RecentClips/big.mp4')), true, 'not smaller: skipped while the converter is the same');
     const saved = JSON.parse(fs.readFileSync(path.join(dir, `index-${keyOf(c)}.json`), 'utf8'));
     assert.equal(saved.v, 2);
-    assert.deepEqual(saved.gaveUp['RecentClips/big.mp4'], [100, 5, CONVERTER_REVISION]);
+    assert.deepEqual(saved.gaveUp['RecentClips/big.mp4'], [100, 5, CONVERTER_REVISION, 'no-savings']);
     assert.ok(saved.files['RecentClips/h265.mp4']);
+    // "Always convert, even if larger" on: a clip kept for being not smaller is tried again
+    assert.equal(auto.isKnown({ ...c, keepLarger: true }, clip('RecentClips/big.mp4')), false, 'tried again with Always convert on');
+    assert.equal(auto.isKnown({ ...c, keepLarger: true }, clip('RecentClips/h265.mp4')), true);
 
     // the same index read by a later converter: the given-up clip is tried again
     saved.gaveUp['RecentClips/big.mp4'][2] = CONVERTER_REVISION - 1;

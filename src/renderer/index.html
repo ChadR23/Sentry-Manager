@@ -628,6 +628,10 @@
                                     <input id="converterKeepOffTarget" type="checkbox">
                                     <span data-i18n="ui.converter.keepOffTarget">Keep clips that can't reach the size target (still smaller than the original and fully checked)</span>
                                 </label>
+                                <label id="converterKeepLargerRow" class="converter-confirm-row" hidden>
+                                    <input id="converterKeepLarger" type="checkbox">
+                                    <span data-i18n="ui.converter.keepLarger">Always convert, even if larger (a clip still not smaller after two tries at a lower bitrate is kept converted)</span>
+                                </label>
                                 <p class="converter-disclosure" data-i18n="ui.converter.lossyDisclosure">Conversion re-encodes video using lossy compression. Every profile may discard some image detail.</p>
                             </fieldset>
 

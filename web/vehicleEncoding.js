@@ -108,6 +108,7 @@
       ['Size', sizeWords(c)]
     ];
     if (hasTarget(c)) rows.push(['Keep clips that miss the target', c.keepOffTarget === true ? 'On — kept converted even when not smaller enough' : 'Off — the original stays when its copy misses the target']);
+    else rows.push(['Always convert', c.keepLarger === true ? 'On — every clip ends up converted, even the few that come out larger' : 'Off — a clip that still isn’t smaller stays as it was']);
     rows.push(['Output', outputWords(c)], ['Verify', verifyWords(c)], ['Clip groups and order', groupsWords(c)],
       ['Devices', devicesWords(c, devices)], ['Automatic conversion', autoWords(entry, settings)]);
     return rows;
@@ -280,6 +281,7 @@
             <label class="${k.field} ve-field" data-ve-show="quality"${sizeValue === 'quality' ? '' : ' hidden'}><span>Quality level</span><select class="${k.input}" name="qualityLevel">${QUALITY_LEVELS.map(([id, t]) => `<option value="${id}"${(c.qualityLevel || 'balanced') === id ? ' selected' : ''}>${esc(t)}</option>`).join('')}</select></label>
             <label class="${k.field} ve-field" data-ve-show="custom"${sizeValue === 'custom' ? '' : ' hidden'}><span>Bitrate (Mbps)</span><input class="${k.input}" type="number" name="bitrate" min="0.25" max="100" step="0.25" inputmode="decimal" value="${c.bitrateKbps ? c.bitrateKbps / 1000 : 8}"></label>
             <label class="${k.check}" data-ve-show="target"${hasTarget(c) ? '' : ' hidden'}><input type="checkbox" name="keepOffTarget"${c.keepOffTarget === true ? ' checked' : ''}> Keep clips that miss the size target (otherwise the original stays)</label>
+            <label class="${k.check}" data-ve-show="notarget"${hasTarget(c) ? ' hidden' : ''}><input type="checkbox" name="keepLarger"${c.keepLarger === true ? ' checked' : ''}> Always convert, even if larger (a clip still not smaller after two tries at a lower bitrate is kept converted instead of left as it was)</label>
           </fieldset>
           <fieldset><legend>Output</legend><div class="ve-choices">
             ${radio('outputMode', 'replace', 'Replace originals', c.outputMode === 'replace', replaceOk ? '' : ' disabled')}
@@ -323,6 +325,7 @@
       c.qualityLevel = fd.get('qualityLevel') || 'balanced';
       c._bitrate = fd.get('bitrate');
       c.keepOffTarget = fd.get('keepOffTarget') === 'on';
+      c.keepLarger = fd.get('keepLarger') === 'on';
       c.outputMode = fd.get('outputMode') || 'separate';
       c.destinationRoot = String(fd.get('destinationRoot') ?? c.destinationRoot ?? '').trim() || null;
       c.replacementConfirmed = fd.get('replacementConfirmed') === 'on';
@@ -345,6 +348,7 @@
       if (c.profileId === 'custom') out.bitrateKbps = Math.round(Number(c._bitrate ?? (c.bitrateKbps / 1000)) * 1000);
       if (c.profileId === 'quality') out.qualityLevel = c.qualityLevel;
       if (hasTarget(c)) out.keepOffTarget = c.keepOffTarget === true;
+      else out.keepLarger = c.keepLarger === true;
       if (Array.isArray(c.lanes) && c.lanes.length) out.lanes = c.lanes.map((l) => ({ device: l.device, concurrency: l.concurrency }));
       else out.concurrency = c.concurrency;
       return out;
@@ -368,6 +372,7 @@
       show('quality', profile === 'quality');
       show('custom', profile === 'custom');
       show('target', !['custom', 'quality'].includes(profile));
+      show('notarget', ['custom', 'quality'].includes(profile));
       const replace = fd.get('outputMode') === 'replace';
       show('replace', replace);
       show('separate', !replace);
@@ -494,7 +499,7 @@
   function formFields(c, current = {}) {
     return {
       codec: c.codec, profileId: c.profileId, outputMode: c.outputMode, verifyMode: c.verifyMode === 'full' ? 'full' : 'quick',
-      keepOffTarget: c.keepOffTarget === true, groups: [...(c.includedGroups || [])],
+      keepOffTarget: c.keepOffTarget === true, keepLarger: c.keepLarger === true, groups: [...(c.includedGroups || [])],
       ...(c.bitrateKbps ? { bitrateKbps: c.bitrateKbps } : {}), ...(c.qualityLevel ? { qualityLevel: c.qualityLevel } : {}),
       ...(Array.isArray(c.groupOrder) && c.groupOrder.length === 3 ? { groupOrder: [...c.groupOrder] } : {}),
       ...(c.outputMode === 'separate' && c.destinationRoot ? { dest: c.destinationRoot } : {}),

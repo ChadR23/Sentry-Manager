@@ -34,7 +34,8 @@ const MAX_FAILED_SWEEPS = 3;
 // 2: Tesla mid-GOP lead-in frames are kept (leadIn.js).
 // 3: a frame Tesla's encoder skipped no longer fails the clip (frameNumGaps.js).
 // 4: a clip that is not smaller is encoded again under the original's bitrate.
-const CONVERTER_REVISION = 4;
+// 5: "Always convert, even if larger" keeps a clip that is still not smaller.
+const CONVERTER_REVISION = 5;
 const INDEX_VERSION = 2;
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
 
@@ -94,6 +95,7 @@ function normalizeConfigs(value) {
     const copy = { ...config };
     // "keep clips that miss the size target": only true is kept
     if (copy.keepOffTarget !== true) delete copy.keepOffTarget;
+    if (copy.keepLarger !== true) delete copy.keepLarger;
     bySource.set(config.sourceRoot, withValidLanes(copy));
   }
   return [...bySource.values()].slice(0, MAX_SOURCES);
@@ -273,7 +275,7 @@ function createAutoConverter(options = {}) {
       }
       if (stored && stored.gaveUp && typeof stored.gaveUp === 'object') {
         for (const [relativePath, entry] of Object.entries(stored.gaveUp)) {
-          if (Array.isArray(entry) && entry.length === 3) gaveUp.set(relativePath, entry);
+          if (Array.isArray(entry) && (entry.length === 3 || entry.length === 4)) gaveUp.set(relativePath, entry);
         }
       }
       const failures = new Map(Object.entries(stored?.failures || {}).filter(([, count]) => Number.isSafeInteger(count)));
@@ -297,18 +299,21 @@ function createAutoConverter(options = {}) {
     index.dirty = true;
   }
 
-  // Not converted, and not tried again until the converter changes.
-  function giveUp(index, relativePath, size, mtimeMs) {
-    index.gaveUp.set(relativePath, [size, mtimeMs, CONVERTER_REVISION]);
+  // Not converted, and not tried again until the converter changes. A clip
+  // kept because it was not smaller says so ('no-savings'): turning on
+  // "Always convert, even if larger" tries those again.
+  function giveUp(index, relativePath, size, mtimeMs, why = null) {
+    index.gaveUp.set(relativePath, why ? [size, mtimeMs, CONVERTER_REVISION, why] : [size, mtimeMs, CONVERTER_REVISION]);
     index.files.delete(relativePath);
     index.failures.delete(relativePath);
     index.dirty = true;
   }
 
-  function knownIn(index, discovered) {
+  function knownIn(index, discovered, config = null) {
     const entry = index.files.get(discovered.relativePath);
     if (entry) return entry[0] === discovered.sourceBytes && entry[1] === discovered.mtimeMs;
     const given = index.gaveUp.get(discovered.relativePath);
+    if (given && given[3] === 'no-savings' && config?.keepLarger === true) return false;
     return Boolean(given) && given[0] === discovered.sourceBytes && given[1] === discovered.mtimeMs && given[2] === CONVERTER_REVISION;
   }
 
@@ -316,7 +321,7 @@ function createAutoConverter(options = {}) {
   function isKnown(config, discovered) {
     if (config?.autoConvert !== true) return false;
     const index = indexes.get(setupKey(config));
-    return Boolean(index) && knownIn(index, discovered);
+    return Boolean(index) && knownIn(index, discovered, config);
   }
 
   async function destinationExists(config, discovered) {
@@ -337,7 +342,7 @@ function createAutoConverter(options = {}) {
     let newFiles = 0;
     try {
       for await (const discovered of scanner(config, { signal: controller.signal })) {
-        if (knownIn(index, discovered)) continue;
+        if (knownIn(index, discovered, config)) continue;
         if (await destinationExists(config, discovered)) {
           remember(index, discovered.relativePath, discovered.sourceBytes, discovered.mtimeMs);
           continue;
@@ -356,7 +361,7 @@ function createAutoConverter(options = {}) {
     for (const item of job.items || []) {
       if (item.state === 'skipped' && item.resultCode === 'no-savings') {
         // kept as the original (the encode was not smaller): a later converter may do better
-        giveUp(index, item.relativePath, item.sourceBytes, item.mtimeMs);
+        giveUp(index, item.relativePath, item.sourceBytes, item.mtimeMs, 'no-savings');
       } else if (item.state === 'completed' || item.state === 'skipped') {
         if (job.config.outputMode === 'replace' && item.state === 'completed') {
           // The original was replaced: remember the converted file now there.
