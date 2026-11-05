@@ -73,7 +73,7 @@ function vehicleForm(v, sys) {
       </div>
     </div>
     <p class="err" id="veh-err" role="alert"></p>
-    <div class="actions">${v ? `<button class="btn danger" type="button" id="veh-del">${icon('trash')} Remove vehicle</button><span class="spacer"></span>` : ''}<a class="btn" href="#/settings/vehicles">Cancel</a><button class="btn primary" type="submit">${v ? 'Save' : 'Add vehicle'}</button></div>
+    <div class="actions">${v ? `<button class="btn danger" type="button" id="veh-del">${icon('trash')} Remove vehicle</button><button class="btn" type="button" id="veh-saved">Reset space saved</button><span class="spacer"></span>` : ''}<a class="btn" href="#/settings/vehicles">Cancel</a><button class="btn primary" type="submit">${v ? 'Save' : 'Add vehicle'}</button></div>
   </form>`;
 }
 
@@ -149,6 +149,14 @@ async function vehicles(box, sub) {
     } finally {
       btn.disabled = false;
     }
+  });
+  $('#veh-saved', form)?.addEventListener('click', async () => {
+    if (!(await confirmDialog({ title: `Reset space saved of ${editing.name}?`, body: '<p>The total of space saved by conversions starts again from zero for this vehicle, for example after its footage was deleted. No footage or conversion is touched.</p>', ok: 'Reset', danger: true }))) return;
+    try {
+      await api(`/api/vehicles/${encodeURIComponent(editing.id)}/saved`, { method: 'DELETE' });
+      await loadVehicles();
+      toast('Space saved starts again from zero.');
+    } catch (x) { toast(x.message, 'bad'); }
   });
   $('#veh-del', form)?.addEventListener('click', async () => {
     if (!(await confirmDialog({ title: `Remove ${editing.name}?`, body: '<p>Sentry Six Manager forgets the vehicle and disconnects its share. No footage is deleted.</p>', ok: 'Remove', danger: true }))) return;

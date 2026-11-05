@@ -176,7 +176,7 @@ async function editVehicle({ el }, id) {
         <div><p class="field" style="margin-bottom:8px">Footage is</p><div class="seg" role="group" aria-label="Footage source"><button type="button" data-type="smb" aria-pressed="${type === 'smb'}">On a network share</button><button type="button" data-type="path" aria-pressed="${type === 'path'}">In a folder</button></div></div>
         <div class="form-grid">${type === 'smb' ? smbFields(v.source.type === 'smb' ? v.source : { version: '3.1.1', encrypt: true }, versions) : `<label class="field full"><span>Folder</span><input class="input mono" name="path" value="${esc(v.source.path || '')}" placeholder="/footage/car" autocapitalize="none" spellcheck="false"></label>`}</div>
         <p class="muted small">Changing where footage comes from asks for your password.</p>
-        <div class="row"><button class="btn btn-primary" type="submit">Save</button><a class="btn" href="#/settings/vehicles">Cancel</a><span class="spacer"></span><button class="btn btn-ghost" type="button" id="remove" style="color:var(--bad)">${icon('trash')} Remove vehicle</button></div>
+        <div class="row"><button class="btn btn-primary" type="submit">Save</button><a class="btn" href="#/settings/vehicles">Cancel</a><span class="spacer"></span><button class="btn btn-ghost" type="button" id="reset-saved">Reset space saved</button><button class="btn btn-ghost" type="button" id="remove" style="color:var(--bad)">${icon('trash')} Remove vehicle</button></div>
       </form>`;
     el.querySelectorAll('[data-type]').forEach((b) => { b.onclick = () => { type = b.dataset.type; draw(); }; });
     wireSmbTest(el, v.id);
@@ -195,6 +195,16 @@ async function editVehicle({ el }, id) {
           await loadVehicles();
           toast(body.source ? 'Saved. Connecting to the footage…' : 'Saved.', { kind: 'good' });
           go('#/settings/vehicles');
+        } catch (err) { fail(err); }
+      });
+    };
+    el.querySelector('#reset-saved').onclick = async (e) => {
+      if (!(await confirmDialog({ title: `Reset space saved of ${esc(v.name)}?`, body: '<p>The total of space saved by conversions starts again from zero for this vehicle, for example after its footage was deleted. No footage or conversion is touched.</p>', ok: 'Reset', danger: true }))) return;
+      await busy(e.currentTarget, async () => {
+        try {
+          await api(`/api/vehicles/${enc(v.id)}/saved`, { method: 'DELETE' });
+          await loadVehicles();
+          toast('Space saved starts again from zero.');
         } catch (err) { fail(err); }
       });
     };

@@ -2402,7 +2402,7 @@
         <label class="field">Folder<input class="input" name="path" value="${esc(s.path || '')}" placeholder="/footage/weekend-car"></label>
         <p class="muted small" style="margin-top:8px">A folder you mounted into the container yourself (bind mount or Docker CIFS volume).</p>
       </div>
-      <div class="full form-actions">${v ? '<button class="btn danger" type="button" id="veh-del">Remove vehicle</button>' : ''}<a class="btn" href="#/settings">Cancel</a><button class="btn solid" type="submit">${v ? 'Save' : 'Add vehicle'}</button></div>
+      <div class="full form-actions">${v ? '<button class="btn danger" type="button" id="veh-del">Remove vehicle</button><button class="btn" type="button" id="veh-saved">Reset space saved</button>' : ''}<a class="btn" href="#/settings">Cancel</a><button class="btn solid" type="submit">${v ? 'Save' : 'Add vehicle'}</button></div>
     </form>`;
   }
 
@@ -2475,6 +2475,13 @@
           toast(err.message, true);
         }
       };
+      if ($('veh-saved')) {
+        $('veh-saved').onclick = async () => {
+          if (!(await confirmDialog({ title: 'Reset space saved?', body: '<p>The total of space saved by conversions starts again from zero for this vehicle, for example after its footage was deleted. No footage or conversion is touched.</p>', ok: 'Reset', danger: true }))) return;
+          await api(`/api/vehicles/${encodeURIComponent(editing)}/saved`, { method: 'DELETE' }).then(() => toast('Space saved starts again from zero.'), (err) => toast(err.message, true));
+          await loadVehicles();
+        };
+      }
       if ($('veh-del')) {
         $('veh-del').onclick = async () => {
           if (!(await confirmDialog({ title: 'Remove this vehicle?', body: '<p>Sentry Six Manager forgets the vehicle and unmounts its share. No footage is deleted.</p>', ok: 'Remove', danger: true }))) return;

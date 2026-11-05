@@ -868,6 +868,16 @@ async function main() {
     }
     return vehicleSummary(v);
   });
+  // Space saved starts over for one vehicle (its footage is gone, say).
+  // Only the number: no footage or conversion is touched.
+  r.add('DELETE', '/api/vehicles/:id/saved', (req, res, { params, user }) => {
+    const v = vehicleOr404(params.id);
+    const before = savings.forVehicle(v.id);
+    savings.reset(v.id);
+    audit.info(`Space saved of "${v.name}" reset (was ${formatBytes(before.bytes)}, ${before.clips} clips): ${by(req, user)}`);
+    announce('inventory');
+    return { ok: true, saved: savings.forVehicle(v.id) };
+  });
   r.add('DELETE', '/api/vehicles/:id', async (req, res, { params, user }) => {
     requireConfirmed(req);
     const v = vehicleOr404(params.id);

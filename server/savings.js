@@ -48,7 +48,21 @@ function createSavings({ db }) {
     db.set(KEY, s);
   }
 
-  return { record, forVehicle, forget };
+  /**
+   * Start a vehicle's total over (its footage was deleted, say). The jobs it
+   * has seen stay remembered, so a conversion still running only adds what
+   * it saves from now on.
+   */
+  function reset(vehicleId) {
+    const s = load();
+    const v = s.vehicles[vehicleId];
+    if (!v || (!v.bytes && !v.clips)) return false;
+    s.vehicles[vehicleId] = { bytes: 0, clips: 0 };
+    db.set(KEY, s);
+    return true;
+  }
+
+  return { record, forVehicle, forget, reset };
 }
 
 module.exports = { createSavings };

@@ -34,3 +34,18 @@ test('space saved: each job adds only what it adds since its last snapshot', () 
   assert.deepEqual(again.forVehicle('car'), { bytes: 0, clips: 0 });
   assert.deepEqual(again.forVehicle('other'), { bytes: 7, clips: 1 });
 });
+
+test('space saved: a reset starts one vehicle over, and a running job adds only what it saves next', () => {
+  const s = createSavings({ db: memoryDb() });
+  s.record('j1', 'car', { bytes: 400, clips: 4 });
+  s.record('j2', 'other', { bytes: 9, clips: 1 });
+  assert.equal(s.reset('car'), true);
+  assert.deepEqual(s.forVehicle('car'), { bytes: 0, clips: 0 });
+  assert.deepEqual(s.forVehicle('other'), { bytes: 9, clips: 1 }, 'other vehicles keep theirs');
+  // the same job's next snapshot does not bring the old total back
+  s.record('j1', 'car', { bytes: 400, clips: 4 });
+  assert.deepEqual(s.forVehicle('car'), { bytes: 0, clips: 0 });
+  s.record('j1', 'car', { bytes: 450, clips: 5 });
+  assert.deepEqual(s.forVehicle('car'), { bytes: 50, clips: 1 });
+  assert.equal(s.reset('none'), false);
+});

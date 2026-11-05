@@ -72,6 +72,14 @@ async function vehicles(box, { params, go }) {
       go('#/settings/vehicles');
     });
   };
+  form.querySelector('#v-saved')?.addEventListener('click', async (e) => {
+    if (!(await ask({ title: `Reset space saved of ${v.name}?`, body: '<p>The total of space saved by conversions starts again from zero for this vehicle, for example after its footage was deleted. No footage or conversion is touched.</p>', yes: 'Reset', danger: true }))) return;
+    await act(e.target, async () => {
+      await api(`/api/vehicles/${encodeURIComponent(v.id)}/saved`, { method: 'DELETE' });
+      await loadCars();
+      toast('Space saved starts again from zero.');
+    });
+  });
   form.querySelector('#v-del')?.addEventListener('click', async (e) => {
     if (!(await ask({ title: `Remove ${v.name}?`, body: '<p>The manager forgets the vehicle and unmounts its share. No footage is deleted. This asks for your password.</p>', yes: 'Remove vehicle', danger: true }))) return;
     await act(e.target, async () => {
@@ -111,7 +119,7 @@ function carForm(v) {
       <p class="small faint">A folder mounted into the container (a bind mount or a Docker CIFS volume).</p>
     </div>
     <p class="small faint">Adding a vehicle or changing where its footage comes from asks for your password.</p>
-    <div class="row">${v ? `<button class="btn danger" type="button" id="v-del">${ico('bin')}Remove vehicle…</button>` : ''}<a class="btn" href="#/settings/vehicles">Cancel</a><button class="btn go" type="submit">${v ? 'Save' : 'Add vehicle'}</button></div>
+    <div class="row">${v ? `<button class="btn danger" type="button" id="v-del">${ico('bin')}Remove vehicle…</button><button class="btn" type="button" id="v-saved">Reset space saved…</button>` : ''}<a class="btn" href="#/settings/vehicles">Cancel</a><button class="btn go" type="submit">${v ? 'Save' : 'Add vehicle'}</button></div>
   </form>`;
 }
 
