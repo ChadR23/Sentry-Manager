@@ -390,7 +390,7 @@ test('Overview: the vehicle\'s inventory and free space are the Server section\'
   assert.match(html, /<div class="nd-big"><b>4\.6 TB<\/b><span class="muted small">all categories<\/span><\/div>/);
   assert.match(html, /<div class="nd-big"><b>2\.6 TB<\/b><span class="muted small">free<\/span><\/div>/);
   assert.deepEqual(kvRows(html), [
-    ['Recordings', '12,345'], ['Space saved', 'none yet'], ['Scanned', '5 m ago'], ['Time zone', 'America/Chicago'],
+    ['Recordings', '12,345'], ['Space saved', 'none yet'], ['Days of footage', '—'], ['Scanned', '5 m ago'], ['Time zone', 'America/Chicago'],
     ['Capacity', '7.2 TB'], ['Used', '64%'], ['Recycle Bin', '12 GB']
   ]);
   assert.match(html, /<div class="nd-bar"><span style="width:63\.9%"><\/span><\/div>/, 'the meter');
@@ -405,7 +405,7 @@ test('Overview: only a share with a problem gets a chip; a nearly full share tur
   assert.match(ro, /<b>2\.6 TB<\/b><span class="muted small">free<\/span><span class="chip amber">Read-only share<\/span>/);
   const down = vehicleTiles(car({ share: { healthy: false, writable: null, totalBytes: null, freeBytes: null } }), 1_000_000);
   assert.match(down, /<b>—<\/b><span class="muted small">free<\/span><span class="chip red">Share unavailable<\/span>/);
-  assert.deepEqual(kvRows(down).slice(4), [['Capacity', 'unknown'], ['Used', '—'], ['Recycle Bin', '12 GB']]);
+  assert.deepEqual(kvRows(down).slice(5), [['Capacity', 'unknown'], ['Used', '—'], ['Recycle Bin', '12 GB']]);
   assert.match(down, /<div class="nd-bar"><span style="width:0%"><\/span><\/div>/, 'an empty meter keeps the tile\'s height');
   const total = 100 * G;
   assert.match(vehicleTiles(car({ share: { healthy: true, writable: true, totalBytes: total, freeBytes: 0.1 * total } })), /<div class="nd-bar hot">/);
@@ -427,9 +427,13 @@ test('Overview: the vehicle tiles keep their rows whatever the inventory, and es
   const b = car({ id: 'b', saved: { bytes: 3 * G, clips: 2 } });
   const two = kvRows(vehicleTiles(a, 1_000_000, [a, b]));
   assert.deepEqual(two.slice(1, 3), [['Space saved', '5 GB · 40 clips'], ['All vehicles saved', '8 GB · 42 clips']]);
-  assert.deepEqual(kvRows(vehicleTiles(car({ inventory: null }), 1_000_000)).slice(0, 3), [['Recordings', '—'], ['Space saved', 'none yet'], ['Scanned', 'not yet']]);
-  assert.deepEqual(kvRows(vehicleTiles(car({ inventory: null, scanning: true }), 1_000_000))[2], ['Scanned', 'scanning…']);
-  assert.deepEqual(kvRows(vehicleTiles(car({ binBytes: 0 }), 1_000_000))[6], ['Recycle Bin', 'empty']);
+  assert.deepEqual(kvRows(vehicleTiles(car({ inventory: null }), 1_000_000)).slice(0, 4), [['Recordings', '—'], ['Space saved', 'none yet'], ['Days of footage', '—'], ['Scanned', 'not yet']]);
+  assert.deepEqual(kvRows(vehicleTiles(car({ inventory: null, scanning: true }), 1_000_000))[3], ['Scanned', 'scanning…']);
+  assert.deepEqual(kvRows(vehicleTiles(car({ binBytes: 0 }), 1_000_000))[7], ['Recycle Bin', 'empty']);
+  // days of footage: this vehicle's, since when, and with more than one vehicle all of theirs
+  const d = car({ inventory: { ...car().inventory, days: 412, firstDay: '2025-09-20' } });
+  assert.match(vehicleTiles(d, 1_000_000), /<dt>Days of footage<\/dt><dd[^>]*>412 <span class="muted small">since [^<]+<\/span><\/dd>/);
+  assert.deepEqual(kvRows(vehicleTiles(d, 1_000_000, [d, b], 430)).find(([k]) => k === 'All vehicles, days'), ['All vehicles, days', '430']);
   const hostile = vehicleTiles(car({ id: '"><img src=x>', name: HOSTILE, timezone: HOSTILE }), 1_000_000);
   assert.doesNotMatch(hostile, /<img/);
   assert.match(hostile, /&lt;img src=x onerror=alert\(1\)&gt;/);
@@ -442,8 +446,8 @@ test('Overview: the vehicle tiles keep their rows whatever the inventory, and es
 test('Overview: one window: the vehicle tiles sit at the top of the Server section, Nerd stats on or off', () => {
   const app = fs.readFileSync(path.join(REPO, 'web/app.js'), 'utf8');
   const section = app.match(/\n {2}function serverSection\(\) \{[\s\S]*?\n {2}\}\n/)[0];
-  assert.ok(section.indexOf('${vehicleTiles(current(), Date.now(), state.vehicles)}') > section.indexOf('class="nd-head"'), 'under the section\'s head');
-  assert.ok(section.indexOf('${vehicleTiles(current(), Date.now(), state.vehicles)}') < section.indexOf('nd-body'), 'above the server\'s tiles');
+  assert.ok(section.indexOf('${vehicleTiles(current(), Date.now(), state.vehicles, state.footageDays)}') > section.indexOf('class="nd-head"'), 'under the section\'s head');
+  assert.ok(section.indexOf('${vehicleTiles(current(), Date.now(), state.vehicles, state.footageDays)}') < section.indexOf('nd-body'), 'above the server\'s tiles');
   assert.doesNotMatch(section.slice(section.indexOf('${vehicleTiles')).split('\n')[0], /\bon\b/, 'whatever the switch says');
   const overviewPage = app.match(/\n {2}pages\.overview = [\s\S]*?\n {2}\};\n/)[0];
   assert.doesNotMatch(overviewPage, /class="(card|grid2|toolbar)"/, 'no cards of its own beside the section');

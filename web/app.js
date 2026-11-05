@@ -180,8 +180,9 @@
   }
 
   async function loadVehicles() {
-    const { vehicles } = await api('/api/vehicles');
+    const { vehicles, footageDays } = await api('/api/vehicles');
     state.vehicles = vehicles;
+    state.footageDays = footageDays;
     if (!current() && vehicles.length) state.vehicleId = vehicles[0].id;
     else if (current()) state.vehicleId = current().id;
     const binItems = vehicles.reduce((n, v) => n + v.binItems, 0);
@@ -767,7 +768,7 @@
   const savedTotal = (list) => list.reduce((t, v) => ({ bytes: t.bytes + (v.saved?.bytes || 0), clips: t.clips + (v.saved?.clips || 0) }), { bytes: 0, clips: 0 });
   const savedText = (sv) => (sv?.bytes > 0 ? `${size(sv.bytes)} · ${plural(sv.clips, 'clip')}` : 'none yet');
 
-  function vehicleTiles(v, at = Date.now(), all = [v]) {
+  function vehicleTiles(v, at = Date.now(), all = [v], allDays = null) {
     if (!v) {
       return `<div class="nd-grid nd-vgrid">${ndTile('Vehicles', 'none yet', '<p class="nd-note">Each vehicle has its own footage share (SMB) or folder. Add one in Settings to start.</p><div class="nd-actions"><a class="btn sm solid" href="#/settings">Open settings</a></div>')}</div>`;
     }
@@ -782,6 +783,9 @@
         ['Recordings', inv ? Number(inv.recordings || 0).toLocaleString() : '—'],
         ['Space saved', savedText(v.saved)],
         ...(all.length > 1 ? [['All vehicles saved', savedText(savedTotal(all))]] : []),
+        // days with any footage, and since when
+        ['Days of footage', inv && fin(inv.days) ? `${inv.days.toLocaleString()}${inv.firstDay ? ` <span class="muted small">since ${esc(new Date(`${inv.firstDay}T12:00:00`).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }))}</span>` : ''}` : '—'],
+        ...(all.length > 1 && fin(allDays) ? [['All vehicles, days', allDays.toLocaleString()]] : []),
         ['Scanned', esc(scanned)],
         ['Time zone', esc(v.timezone || '—')]
       ])
@@ -877,7 +881,7 @@
           ${on ? `<div class="seg nd-range" role="group" aria-label="Graphs over"><button type="button" data-range="15m">15 min</button><button type="button" data-range="24h">24 h</button></div>
           <a class="btn sm" href="/api/stats/export.csv?range=24h" download title="The last 24 hours as a spreadsheet">CSV</a>` : ''}
           <label class="check small"><input type="checkbox" id="nd-toggle" data-kept${on ? ' checked' : ''}> Nerd stats</label></div></div>
-      ${vehicleTiles(current(), Date.now(), state.vehicles)}
+      ${vehicleTiles(current(), Date.now(), state.vehicles, state.footageDays)}
       ${on ? '<div class="nd-body"></div>' : ''}
       ${logsPart()}</section>`;
   }

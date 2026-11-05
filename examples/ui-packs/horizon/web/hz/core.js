@@ -283,8 +283,9 @@ export function pickCar(id) {
   bus.emit('car', id);
 }
 export async function loadCars() {
-  const { vehicles } = await api('/api/vehicles');
+  const { vehicles, footageDays } = await api('/api/vehicles');
   app.vehicles = vehicles;
+  app.footageDays = footageDays;
   if (!vehicles.some((v) => v.id === app.vehicleId)) app.vehicleId = vehicles[0]?.id || null;
   bus.emit('cars', vehicles);
   return vehicles;

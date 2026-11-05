@@ -688,7 +688,12 @@ async function main() {
     return undefined;
   });
 
-  r.add('GET', '/api/vehicles', () => ({ vehicles: vehicles.list().map(vehicleSummary) }));
+  r.add('GET', '/api/vehicles', () => {
+    const list = vehicles.list();
+    // days with footage from any vehicle (two cars on one day: one day)
+    const footageDays = new Set(list.flatMap((v) => inventory.footageDays(v.id))).size;
+    return { vehicles: list.map(vehicleSummary), footageDays };
+  });
 
   // ---- Export: a stretch of footage rendered into one MP4 (server/exporter.js)
   const exporter = createExporter({

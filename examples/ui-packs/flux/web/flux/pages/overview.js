@@ -305,6 +305,8 @@ export default {
         k('Footage', bytes(inv), plural(recs, 'recording'), '', '#/footage'),
         k('Free', bytes(free), v ? `on ${v.name}` : '—', fin(free) && v?.share?.totalBytes && free / v.share.totalBytes < 0.05 ? 'bad' : ''),
         k('Space saved', savedB ? bytes(savedB) : 'none yet', savedB ? `${plural(savedN, 'clip')} converted · all cars` : 'by conversions', '', '#/encoder'),
+        // days with any footage (any car's; one day once)
+        k('Days of footage', fin(state.footageDays) ? state.footageDays.toLocaleString() : '—', vs.length > 1 ? 'all cars' : v?.inventory?.firstDay ? `since ${v.inventory.firstDay}` : 'recorded', '', '#/footage'),
         k('Recycle Bin', bytes(binB), plural(vs.reduce((n, x) => n + (x.binItems || 0), 0), 'item'), '', '#/bin'),
         k('Attention', String(open.length), open.some((n) => n.level === 'critical') ? 'critical open' : 'open notifications', open.some((n) => n.level === 'critical') ? 'bad' : open.length ? 'warn' : '', '#/notifications'),
         k('CPU', pct(s?.cpu?.usage), s?.cpu?.load ? `load ${s.cpu.load[0]}` : '—'),
@@ -328,7 +330,7 @@ export default {
         const cats = Object.entries(v.inventory?.byCategory || {}).map(([c, x]) => `<span class="cat ${c}">${esc(c)} ${x.recordings}</span>`).join('');
         return `<div class="veh"><div class="veh-top"><b>${esc(v.name)}</b>${status}</div>
           ${meter(used, used > 95 ? 'red' : used > 85 ? 'amber' : 'violet')}
-          <div class="small muted num">${bytes(s.freeBytes)} free of ${bytes(s.totalBytes)} · ${bytes(v.inventory?.bytes)} footage · saved ${v.saved?.bytes ? `${bytes(v.saved.bytes)} · ${plural(v.saved.clips, 'clip')}` : 'none yet'}</div>
+          <div class="small muted num">${bytes(s.freeBytes)} free of ${bytes(s.totalBytes)} · ${bytes(v.inventory?.bytes)} footage · ${fin(v.inventory?.days) ? plural(v.inventory.days, 'day') : '— days'} · saved ${v.saved?.bytes ? `${bytes(v.saved.bytes)} · ${plural(v.saved.clips, 'clip')}` : 'none yet'}</div>
           <div class="cats">${cats}</div>
           ${s.warning ? `<p class="small amber-text">${esc(s.warning)}</p>` : ''}${s.lastError ? `<p class="small bad-text">${esc(s.lastError)}</p>` : ''}
           <div class="small faint">${v.scanning ? 'scanning…' : `scanned ${ago(v.inventory?.scannedAt)}`} · ${esc(v.timezone || '')}</div>

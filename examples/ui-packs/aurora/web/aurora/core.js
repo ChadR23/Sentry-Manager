@@ -296,8 +296,9 @@ export const current = () => state.vehicles.find((v) => v.id === state.vehicleId
 export const footageRoot = (v) => (v ? v.studioRoot || v.root : null);
 
 export async function loadVehicles() {
-  const { vehicles } = await api('/api/vehicles');
+  const { vehicles, footageDays } = await api('/api/vehicles');
   state.vehicles = vehicles;
+  state.footageDays = footageDays;
   if (!vehicles.some((v) => v.id === state.vehicleId)) state.vehicleId = vehicles[0]?.id || null;
   emit('vehicles', vehicles);
   return vehicles;

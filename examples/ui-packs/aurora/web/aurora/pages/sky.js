@@ -4,7 +4,7 @@
 
 import {
   $, $$, esc, icon, api, state, current, setVehicle, bytes, rate, pct, plural, ago, when, whenFull, watts, energy, money, num, fin,
-  ring, meter, toast, confirmDialog, loadNotes, dayParts, empty, liveDraw
+  ring, meter, toast, confirmDialog, loadNotes, dayParts, dayTitle, empty, liveDraw
 } from '../core.js';
 import { follow, counts, STATE_TEXT, ACTIVE, CODEC } from '../conv.js';
 
@@ -48,7 +48,7 @@ function hero(v) {
     ? `<p class="note bad" style="margin-top:14px">${icon('warn')} ${esc(s.lastError || 'The footage can’t be reached right now.')}${s.hint ? ` ${esc(s.hint)}` : ''}</p>`
     : s.writable === false ? '<p class="note warn" style="margin-top:14px">Read-only: footage can be watched, not converted or moved.</p>' : '';
   const line = inv.recordings !== undefined
-    ? `${plural(inv.recordings, 'recording')} · ${bytes(inv.bytes)} of footage${v.saved?.bytes ? ` · ${bytes(v.saved.bytes)} saved by conversions` : ''}${v.scanning ? ' · scanning now' : inv.scannedAt ? ` · checked ${ago(inv.scannedAt)}` : ''}`
+    ? `${plural(inv.recordings, 'recording')} · ${bytes(inv.bytes)} of footage${typeof inv.days === 'number' ? ` · ${plural(inv.days, 'day')}` : ''}${v.saved?.bytes ? ` · ${bytes(v.saved.bytes)} saved by conversions` : ''}${v.scanning ? ' · scanning now' : inv.scannedAt ? ` · checked ${ago(inv.scannedAt)}` : ''}`
     : v.scanning ? 'Looking through the footage for the first time…' : 'Not scanned yet.';
   return `<section class="sky-hero glass">
     <div>
@@ -222,6 +222,7 @@ export default {
       el.innerHTML = `<div class="stat-grid">
         <div class="stat"><span class="stat-label">Recycle Bin</span><span class="stat-val">${bytes(v.binBytes)}</span><span class="muted tiny">${plural(v.binItems || 0, 'item')}</span></div>
         <div class="stat"><span class="stat-label">Space saved</span><span class="stat-val">${savedB ? bytes(savedB) : 'None yet'}</span><span class="muted tiny">${savedB ? `${plural(savedN, 'clip')} converted${state.vehicles.length > 1 ? ' · all cars' : ''}` : 'by conversions'}</span></div>
+        <div class="stat"><span class="stat-label">Days of footage</span><span class="stat-val">${typeof state.footageDays === 'number' ? state.footageDays.toLocaleString() : '—'}</span><span class="muted tiny">${state.vehicles.length > 1 ? 'any car' : v.inventory?.firstDay ? `since ${esc(dayTitle(v.inventory.firstDay))}` : 'recorded'}</span></div>
         <div class="stat"><span class="stat-label">Policy</span><span class="stat-val">${p?.enabled ? 'On' : 'Off'}</span><span class="muted tiny">${p?.enabled ? (keeps.length ? keeps.map(([c, d]) => `${esc(c)} ${d} d`).join(' · ') : 'keeps everything') : 'nothing is moved by itself'}</span></div></div>
         <div class="actions start"><a class="btn sm" href="#/bin">${icon('trash')} Bin</a><a class="btn sm" href="#/policies">${icon('shield')} Policies</a></div>`;
     };

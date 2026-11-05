@@ -286,6 +286,7 @@ class Inventory {
     const e = this.state.get(vehicleId);
     if (!e?.recordings) return null;
     const by = {};
+    const days = this.footageDays(vehicleId);
     for (const r of e.recordings) {
       by[r.category] = by[r.category] || { recordings: 0, bytes: 0 };
       by[r.category].recordings++;
@@ -293,11 +294,22 @@ class Inventory {
     }
     return {
       recordings: e.recordings.length,
+      // days with any footage (the car's own dates), and the first and last
+      days: days.length,
+      firstDay: days[0] || null,
+      lastDay: days[days.length - 1] || null,
       files: e.files.size,
       bytes: e.recordings.reduce((n, r) => n + r.bytes, 0),
       byCategory: by,
       scannedAt: e.scannedAt
     };
+  }
+
+  /** The days ("YYYY-MM-DD", oldest first) with any recording of a vehicle. */
+  footageDays(vehicleId) {
+    const e = this.state.get(vehicleId);
+    if (!e?.recordings) return [];
+    return [...new Set(e.recordings.map((r) => r.day).filter(Boolean))].sort();
   }
 
   /** event.json of a Sentry/Saved event, if present and small. */

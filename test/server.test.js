@@ -918,3 +918,22 @@ test('Export: a stretch of a vehicle\'s footage renders into one MP4 to download
     await fsp.rm(dir, { recursive: true, force: true });
   }
 });
+
+test('days of footage: per vehicle with the first and last day, and across all vehicles (one day once)', async () => {
+  const dir = await tmp();
+  await makeFootage(path.join(dir, 'footage'));
+  const s = await startServer(dir);
+  try {
+    await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
+    await waitFor(async () => (await s.call('GET', '/api/vehicles')).data.vehicles[0].inventory);
+    const { vehicles, footageDays } = (await s.call('GET', '/api/vehicles')).data;
+    const inv = vehicles[0].inventory;
+    assert.equal(inv.days, 3, 'recordings on 2020-01-01, 01-02 and 01-03');
+    assert.equal(inv.firstDay, '2020-01-01');
+    assert.equal(inv.lastDay, '2020-01-03');
+    assert.equal(footageDays, 3);
+  } finally {
+    await s.stop();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});

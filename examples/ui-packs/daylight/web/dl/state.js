@@ -37,8 +37,9 @@ export function setVehicle(id) {
 }
 
 export async function loadVehicles() {
-  const { vehicles } = await api('/api/vehicles');
+  const { vehicles, footageDays } = await api('/api/vehicles');
   state.vehicles = vehicles;
+  state.footageDays = footageDays;
   if (!vehicle() && vehicles.length) state.vehicleId = vehicles[0].id;
   emit('vehicles', vehicles);
   return vehicles;
