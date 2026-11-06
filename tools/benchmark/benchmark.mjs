@@ -188,9 +188,10 @@ async function serverPart() {
   if (A.export && detail) {
     const files = {};
     const key = detail.startKey;
-    for (const rel of detail.files || []) {
-      const m = String(rel).match(/(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})-([a-z_]+)\.mp4$/i);
-      if (m && m[1] === key) files[m[2]] = `${detail.root}/${rel}`;
+    for (const f of detail.files || []) {
+      const rel = typeof f === 'string' ? f : f?.rel;
+      const m = String(rel || '').match(/(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})-([a-z_]+)\.mp4$/i);
+      if (m && m[1] === key) files[m[2]] = typeof f === 'object' && f.path ? f.path : `${detail.root}/${rel}`;
     }
     if (!Object.keys(files).length && front) files.front = front;
     const [startMs, x] = await timed(() => c.json(`/api/vehicles/${encodeURIComponent(v.id)}/exports`, { clips: [{ key, files, from: 0, to: 60 }], camera: 'grid' }));
@@ -225,20 +226,27 @@ async function signIn(page) {
   await Promise.all([page.waitForURL((u) => !String(u).includes('/login'), { timeout: 30000 }).catch(() => {}), page.press('[name=password]', 'Enter')]);
 }
 
-// until the page's own requests have finished (live streams and video left out)
+// until the page's own requests have finished (live streams and video left
+// out; a redirect counts as finished; one open over 5 s is a stream or a long
+// poll, not part of loading the page)
 function quiet(page) {
-  const inflight = new Set();
-  const skip = (r) => /\/api\/(events|converter\/events|media)|\.mp4/.test(r.url()) || r.resourceType() === 'media' || r.resourceType() === 'eventsource';
-  page.on('request', (r) => { if (!skip(r)) inflight.add(r); });
+  const inflight = new Map(); // request -> when it started
+  const skip = (r) => /\/api\/(events|converter\/events|media)|\.mp4/.test(r.url()) || ['media', 'eventsource', 'websocket'].includes(r.resourceType());
+  page.on('request', (r) => {
+    const from = r.redirectedFrom();
+    if (from) inflight.delete(from);
+    if (!skip(r)) inflight.set(r, performance.now());
+  });
   const done = (r) => inflight.delete(r);
   page.on('requestfinished', done);
   page.on('requestfailed', done);
-  return async (t0, max = 20000) => {
+  return async (t0, max = 15000) => {
     let idleSince = null;
     for (;;) {
       await wait(25);
       const now = performance.now();
-      if (inflight.size === 0) { if (idleSince === null) idleSince = now; if (now - idleSince >= 300) return idleSince - t0; } else idleSince = null;
+      const open = [...inflight.values()].filter((at) => now - at < 5000).length;
+      if (open === 0) { if (idleSince === null) idleSince = now; if (now - idleSince >= 300) return idleSince - t0; } else idleSince = null;
       if (now - t0 > max) return null;
     }
   };
@@ -265,15 +273,27 @@ async function pagesFor(browser, label, ctxOpts, pack) {
   await page.goto(`${A.url}/`);
   await settle(performance.now());
   const links = await page.evaluate(() => [...new Set([...document.querySelectorAll('a[href^="#/"]')].map((a) => a.getAttribute('href').split('?')[0]))].filter((h) => h.split('/').length <= 3).slice(0, 16));
+  // a page is ready when its requests are done and it has stopped building
+  // itself on screen (the first 150 ms with no new elements or text; a clock
+  // ticking each second after that does not count)
   for (const href of links) {
     const runs = [];
     for (let i = 0; i < 3; i++) {
       await page.evaluate(() => { location.hash = '#/__bench'; });
-      await wait(150);
+      await wait(300);
       const t = performance.now();
-      await page.evaluate((h) => { location.hash = h; }, href);
-      const d = await settle(t);
-      runs.push(d);
+      const dom = await page.evaluate(async (h) => {
+        const t0 = performance.now();
+        let last = t0;
+        const mo = new MutationObserver(() => { last = performance.now(); });
+        mo.observe(document.body, { childList: true, subtree: true, characterData: true });
+        location.hash = h;
+        while (performance.now() - last < 150 && performance.now() - t0 < 10000) await new Promise((r) => setTimeout(r, 10));
+        mo.disconnect();
+        return last - t0;
+      }, href);
+      const net = await settle(t);
+      runs.push(Math.max(dom, net ?? 0));
     }
     out.pages[href] = med(runs);
   }
@@ -336,37 +356,6 @@ async function viewerFor(browser, label, ctxOpts, pack, v, day) {
       }
     }, to));
   }
-  // dragging the timeline: does each camera show the second under the pointer?
-  await page.evaluate((sel) => document.querySelector(sel)?.scrollIntoView({ block: 'center' }), def.tl);
-  await wait(300);
-  const box = await page.locator(def.tl).boundingBox().catch(() => null);
-  if (box) {
-    const y = box.y + box.height / 2;
-    let right = 0; let n = 0;
-    await page.mouse.move(box.x + box.width * 0.05, y);
-    await page.mouse.down();
-    for (let k = 0; k <= 30; k++) {
-      await page.mouse.move(box.x + box.width * (0.05 + 0.9 * k / 30), y);
-      await wait(50);
-      const r = await page.evaluate(() => [...document.querySelectorAll('video')].filter((x) => x.offsetWidth > 40 && x.currentSrc).map((x) => {
-        const l = x.nextElementSibling?.classList?.contains('sentry-scrub') ? x.nextElementSibling : null;
-        return l && l.style.display === 'block' ? 'preview' : x._shown !== undefined && !x.seeking && x.readyState >= 2 ? 'video' : 'stale';
-      }));
-      for (const s of r) { n++; if (s !== 'stale') right++; }
-    }
-    await page.mouse.up();
-    const t0 = performance.now();
-    for (;;) {
-      const settled = await page.evaluate(() => [...document.querySelectorAll('video')].filter((x) => x.offsetWidth > 40 && x.currentSrc).every((x) => {
-        const l = x.nextElementSibling?.classList?.contains('sentry-scrub') ? x.nextElementSibling : null;
-        return (!l || l.style.display !== 'block') && !x.seeking && x.readyState >= 2;
-      }));
-      if (settled || performance.now() - t0 > 15000) break;
-      await wait(16);
-    }
-    out.dragShowing = n ? right / n : null;
-    out.dragSettleMs = performance.now() - t0;
-  }
   // playing: camera sync, and the next clip
   await page.locator(def.play).click({ timeout: 5000 }).catch(() => page.keyboard.press('Space'));
   await wait(2000);
@@ -400,6 +389,41 @@ async function viewerFor(browser, label, ctxOpts, pack, v, day) {
       if (performance.now() - tEnd > 20000) return null;
     }
   });
+  // paused again for the drag
+  await page.locator(def.play).click({ timeout: 5000 }).catch(() => page.keyboard.press('Space'));
+  await page.evaluate(() => document.querySelectorAll('video').forEach((x) => x.pause()));
+  await wait(500);
+  // dragging the timeline: does each camera show the second under the pointer?
+  await page.evaluate((sel) => document.querySelector(sel)?.scrollIntoView({ block: 'center' }), def.tl);
+  await wait(300);
+  const box = await page.locator(def.tl).boundingBox().catch(() => null);
+  if (box) {
+    const y = box.y + box.height / 2;
+    let right = 0; let n = 0;
+    await page.mouse.move(box.x + box.width * 0.05, y);
+    await page.mouse.down();
+    for (let k = 0; k <= 30; k++) {
+      await page.mouse.move(box.x + box.width * (0.05 + 0.9 * k / 30), y);
+      await wait(50);
+      const r = await page.evaluate(() => [...document.querySelectorAll('video')].filter((x) => x.offsetWidth > 40 && x.currentSrc).map((x) => {
+        const l = x.nextElementSibling?.classList?.contains('sentry-scrub') ? x.nextElementSibling : null;
+        return l && l.style.display === 'block' ? 'preview' : x._shown !== undefined && !x.seeking && x.readyState >= 2 ? 'video' : 'stale';
+      }));
+      for (const s of r) { n++; if (s !== 'stale') right++; }
+    }
+    await page.mouse.up();
+    const t0 = performance.now();
+    for (;;) {
+      const settled = await page.evaluate(() => [...document.querySelectorAll('video')].filter((x) => x.offsetWidth > 40 && x.currentSrc).every((x) => {
+        const l = x.nextElementSibling?.classList?.contains('sentry-scrub') ? x.nextElementSibling : null;
+        return (!l || l.style.display !== 'block') && !x.seeking && x.readyState >= 2;
+      }));
+      if (settled || performance.now() - t0 > 15000) break;
+      await wait(16);
+    }
+    out.dragShowing = n ? right / n : null;
+    out.dragSettleMs = performance.now() - t0;
+  }
   await ctx.close();
   R.viewer[`${pack} · ${label}`] = out;
   say('viewer', pack, label, `picture ${ms(out.openPicture)}`, `seek ${ms(med(out.seeks))}`);
@@ -407,6 +431,15 @@ async function viewerFor(browser, label, ctxOpts, pack, v, day) {
 
 async function browserPart(info) {
   const browser = await chromium.launch();
+  // stopped part way (Ctrl+C): the owner's interface is put back first
+  const putBack = async () => {
+    if (A.allPacks) {
+      try { await info.c.call('POST', '/api/auth/confirm', { password: A.password }); await info.c.call('PUT', '/api/ui-packs/active', { id: info.active === 'builtin' ? null : info.active }); } catch { /* best effort */ }
+    }
+    process.exit(130);
+  };
+  process.once('SIGINT', putBack);
+  process.once('SIGTERM', putBack);
   const packsToRun = A.allPacks ? ['builtin', ...['horizon', 'flux', 'aurora', 'daylight'].filter((p) => info.packs.includes(p))] : [info.active || 'builtin'];
   const setPack = async (id) => {
     await info.c.call('POST', '/api/auth/confirm', { password: A.password });
@@ -435,7 +468,8 @@ function report() {
   L.push('## The machines', '', '| | |', '| --- | --- |');
   if (s.version) L.push(`| Server | ${s.cpu || '?'} (${s.threads || '?'} threads), ${mb(s.ramB)} RAM${s.gpus?.length ? `, ${s.gpus.join(', ')}` : ''} · ${s.os} |`, `| App version | ${s.version} |`);
   L.push(`| Browser machine | ${R.client.cpu} (${R.client.threads} threads), ${mb(R.client.ramB)} RAM · ${R.client.os} |`);
-  if (s.footage) L.push(`| Footage | ${s.footage.map((f) => `${f.name}: ${f.recordings ?? '?'} recordings${f.bytes ? `, ${(f.bytes / 1e12).toFixed(2)} TB` : ''}`).join(' · ')} |`);
+  const size = (b) => (b >= 1e12 ? `${(b / 1e12).toFixed(2)} TB` : `${Math.round(b / 1e9)} GB`);
+  if (s.footage) L.push(`| Footage | ${s.footage.map((f) => `${f.name}: ${f.recordings ?? '?'} recordings${f.bytes ? `, ${size(f.bytes)}` : ''}`).join(' · ')} |`);
   L.push('');
   if (R.install.pullMs || R.boot.healthyMs) {
     L.push('## Install and start', '', '| | |', '| --- | --- |');
