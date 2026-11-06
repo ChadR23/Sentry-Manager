@@ -4,6 +4,7 @@ import { esc, api, current, icon, toast, store, fin, clock, wall, wallDay, dayTi
 import { telemetryFor, recordAt, fpsOf } from '../telemetry.js';
 import { createViewerMap } from '/web/viewerMap.js';
 import { createExportPanel } from '/web/exportPanel.js';
+import { createScrubber } from '/web/scrub.js';
 import { TimeChart, C } from '../charts.js';
 import { split, seg, wireSeg, empty } from '../ui.js';
 
@@ -60,6 +61,10 @@ export default {
     let raf = 0;
     let loadSeq = 0;
     let scrubbing = false;
+    // while the timeline is dragged: the clip and time under the pointer
+    // (previews show it; another clip only loads when the drag ends)
+    let scrubTo = null;
+    const scrubber = createScrubber();
 
     el.innerHTML = `
       <div class="phead vw-head">
@@ -231,13 +236,14 @@ export default {
     });
     function drawHead() {
       const m = master();
-      const t = m ? m.currentTime : 0;
+      const idx = scrubTo ? scrubTo.i : st.idx;
+      const t = scrubTo ? scrubTo.off : m ? m.currentTime : 0;
       const T = total() || 1;
-      const pos = offsetOf(st.idx) + t;
+      const pos = offsetOf(idx) + t;
       $('#vw-tl-head').style.left = `${Math.min(100, (pos / T) * 100).toFixed(3)}%`;
       $('#vw-tl').setAttribute('aria-valuenow', String(Math.round((pos / T) * 100)));
       $('#vw-tl').setAttribute('aria-valuetext', `${clock(pos)} of ${clock(T)}`);
-      $('#vw-time').textContent = `${clock(t)} / ${clock(durOf(st.segs[st.idx] || {}))}  ·  clip ${st.idx + 1}/${st.segs.length}`;
+      $('#vw-time').textContent = `${clock(t)} / ${clock(durOf(st.segs[idx] || {}))}  ·  clip ${idx + 1}/${st.segs.length}`;
     }
     function seekGlobal(sec) {
       let acc = 0;
@@ -257,10 +263,34 @@ export default {
       const r = tl.getBoundingClientRect();
       return Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * total();
     };
+    // dragging: previews of the second under the pointer at once, the real
+    // seek one at a time within the loaded clip, another clip on letting go
+    function scrubAt(sec) {
+      let acc = 0;
+      let i = st.segs.length - 1;
+      for (let k = 0; k < st.segs.length; k++) {
+        if (sec < acc + durOf(st.segs[k]) || k === st.segs.length - 1) { i = k; break; }
+        acc += durOf(st.segs[k]);
+      }
+      const off = Math.max(0, Math.min(durOf(st.segs[i]) - 0.05, sec - acc));
+      scrubTo = { i, off };
+      const s = st.segs[i];
+      scrubber.show(GRID_ORDER.map((c) => ({ video: tiles[c].video, src: s.files[c] })), off);
+      if (i === st.idx) scrubber.seek(activeVideos(), off);
+      drawHead();
+    }
+    function scrubEnd() {
+      if (!scrubbing) return;
+      scrubbing = false;
+      const to = scrubTo;
+      scrubTo = null;
+      if (to && to.i === st.idx) seekLocal(to.off); else if (to) loadSeg(to.i, to.off, st.playing);
+      scrubber.release(GRID_ORDER.map((c) => tiles[c].video));
+    }
     tl.addEventListener('pointerdown', (e) => {
       scrubbing = true;
       tl.setPointerCapture(e.pointerId);
-      seekGlobal(posAt(e));
+      scrubAt(posAt(e));
     });
     tl.addEventListener('pointermove', (e) => {
       const sec = posAt(e);
@@ -268,10 +298,10 @@ export default {
       hover.hidden = false;
       hover.textContent = clock(sec);
       hover.style.left = `${(sec / (total() || 1)) * 100}%`;
-      if (scrubbing) seekGlobal(sec);
+      if (scrubbing) scrubAt(sec);
     });
-    tl.addEventListener('pointerup', () => { scrubbing = false; });
-    tl.addEventListener('pointercancel', () => { scrubbing = false; });
+    tl.addEventListener('pointerup', scrubEnd);
+    tl.addEventListener('pointercancel', scrubEnd);
     tl.addEventListener('pointerleave', () => { $('#vw-tl-hover').hidden = true; });
     tl.addEventListener('keydown', (e) => {
       const m = master();
@@ -337,6 +367,8 @@ export default {
         }
       }
       drawTimeline();
+      // scrub previews of this clip and its neighbours, ready before a drag
+      scrubber.warm([s, st.segs[i + 1], st.segs[i - 1]].flatMap((x) => (x ? Object.values(x.files) : [])));
       msg('loading…');
       const m = master();
       if (!m) {

@@ -15,7 +15,9 @@ Recycle Bin, retention policies, jobs and notifications.
 - **Viewer.** All six cameras in sync, with the telemetry dashboard (speed,
   gear, Autopilot, blinkers, steering, G-force) and the drive on a map. It
   picks the HW3 (four cameras) or HW4 (six cameras) layout from the footage
-  itself. The map (OpenFreeMap, or Google satellite) is fetched by your
+  itself. Dragging the timeline shows every camera at the second under
+  your finger at once, across clips, from small preview frames; the full
+  video takes over when you let go. The map (OpenFreeMap, or Google satellite) is fetched by your
   browser straight from those services, so they see which area is on
   screen; no footage is sent anywhere.
 - **Encoder.** Converts footage to H.265 or AV1 on the GPU (NVIDIA, AMD

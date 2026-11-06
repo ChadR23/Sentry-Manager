@@ -25,4 +25,7 @@ All optional; put them in `.env` next to `docker-compose.yml`.
 
 `./data` holds the account, settings, job history, thumbnails, the
 converter's work folder and the certificate authority. Keep it on a local
-disk, not on a share.
+disk, not on a share. `data/scrub` holds the Viewer's timeline previews
+(about 1 MB per minute of footage, six cameras), made when a clip is first
+opened; it keeps at most about 1 GB and drops the least recently used first.
+Deleting it is safe: previews are made again when needed.

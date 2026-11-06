@@ -5,6 +5,7 @@ import { h, ico, api, send, car, toast, local, ok, dayName, words, mmss, wall, C
 import { load as loadTel, at as telAt, rate as telRate } from '../telemetry.js';
 import { createViewerMap } from '/web/viewerMap.js';
 import { createExportPanel } from '/web/exportPanel.js';
+import { createScrubber } from '/web/scrub.js';
 
 const FILE_RE = /(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})-([a-z0-9_]+)\.mp4$/i;
 const SPEEDS = [0.25, 0.5, 1, 1.5, 2, 4];
@@ -49,6 +50,10 @@ export default {
     let raf = 0;
     let loadSeq = 0;
     let scrub = false;
+    // while the timeline is dragged: the clip and time under the pointer
+    // (previews show it; another clip only loads when the drag ends)
+    let scrubTo = null;
+    const scrubber = createScrubber();
 
     el.innerHTML = `
       <section class="vw" id="vw">
@@ -276,14 +281,15 @@ export default {
     });
     function drawTime() {
       const m = master();
-      const t = m ? m.currentTime : 0;
+      const i = scrubTo ? scrubTo.i : st.i;
+      const t = scrubTo ? scrubTo.off : m ? m.currentTime : 0;
       const T = total() || 1;
-      const pos = offset(st.i) + t;
+      const pos = offset(i) + t;
       $('#vw-tlh').style.transform = `translateX(${(Math.min(1, pos / T) * $('#vw-tl').clientWidth).toFixed(1)}px)`;
       $('#vw-tl').setAttribute('aria-valuenow', String(Math.round((pos / T) * 100)));
       $('#vw-tl').setAttribute('aria-valuetext', `${mmss(pos)} of ${mmss(T)}`);
-      $('#vw-time').textContent = `${mmss(t)} / ${mmss(lenOf(st.clips[st.i]))} · clip ${st.i + 1}/${st.clips.length}`;
-      const c = st.clips[st.i];
+      $('#vw-time').textContent = `${mmss(t)} / ${mmss(lenOf(st.clips[i]))} · clip ${i + 1}/${st.clips.length}`;
+      const c = st.clips[i];
       if (c?.at) {
         const d = new Date(c.at + t * 1000);
         $('#h-clock').textContent = wall(d.toISOString().slice(11, 19));
@@ -306,10 +312,34 @@ export default {
       const r = tl.getBoundingClientRect();
       return Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * total();
     };
-    tl.addEventListener('pointerdown', (e) => { scrub = true; tl.setPointerCapture(e.pointerId); seekAll(posAt(e)); });
-    tl.addEventListener('pointermove', (e) => { if (scrub) seekAll(posAt(e)); });
-    tl.addEventListener('pointerup', () => { scrub = false; });
-    tl.addEventListener('pointercancel', () => { scrub = false; });
+    // dragging: previews of the second under the pointer at once, the real
+    // seek one at a time within the loaded clip, another clip on letting go
+    function scrubAt(sec) {
+      let acc = 0;
+      let i = st.clips.length - 1;
+      for (let k = 0; k < st.clips.length; k++) {
+        if (sec < acc + lenOf(st.clips[k]) || k === st.clips.length - 1) { i = k; break; }
+        acc += lenOf(st.clips[k]);
+      }
+      const off = Math.max(0, Math.min(lenOf(st.clips[i]) - 0.05, sec - acc));
+      scrubTo = { i, off };
+      const c = st.clips[i];
+      scrubber.show(CAMS.map((k) => ({ video: tiles[k].video, src: c.files[k] })), off);
+      if (i === st.i) scrubber.seek(active(), off);
+      frame();
+    }
+    function scrubEnd() {
+      if (!scrub) return;
+      scrub = false;
+      const to = scrubTo;
+      scrubTo = null;
+      if (to && to.i === st.i) seek(to.off); else if (to) open(to.i, to.off, st.playing);
+      scrubber.release(CAMS.map((k) => tiles[k].video));
+    }
+    tl.addEventListener('pointerdown', (e) => { scrub = true; tl.setPointerCapture(e.pointerId); scrubAt(posAt(e)); });
+    tl.addEventListener('pointermove', (e) => { if (scrub) scrubAt(posAt(e)); });
+    tl.addEventListener('pointerup', scrubEnd);
+    tl.addEventListener('pointercancel', scrubEnd);
     tl.addEventListener('keydown', (e) => {
       const m = master();
       if (!m || !['ArrowLeft', 'ArrowRight'].includes(e.key)) return;
@@ -368,6 +398,8 @@ export default {
         }
       }
       drawClips();
+      // scrub previews of this clip and its neighbours, ready before a drag
+      scrubber.warm([c, st.clips[i + 1], st.clips[i - 1]].flatMap((x) => (x ? Object.values(x.files) : [])));
       say('<span class="spin" aria-hidden="true"></span><span>Loading the clip…</span>');
       const m = master();
       if (!m) {

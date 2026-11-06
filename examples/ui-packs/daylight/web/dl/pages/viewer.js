@@ -9,6 +9,7 @@ import { thumbUrl, moveToBin, setProtected } from './footage.js';
 import { decodeTelemetry, at } from '../telemetry.js';
 import { createViewerMap } from '/web/viewerMap.js';
 import { createExportPanel } from '/web/exportPanel.js';
+import { createScrubber } from '/web/scrub.js';
 
 // laid out like the car: pillars and front on top, repeaters and back below
 const CAMS = ['left_pillar', 'front', 'right_pillar', 'left_repeater', 'back', 'right_repeater'];
@@ -209,6 +210,8 @@ async function player(ctx, v, day, recId) {
     }
   }
   const videos = new Map(present.map((c) => [c, tiles.get(c).querySelector('video')]));
+  // dragging the slider: previews of the second at once, one seek at a time
+  const scrubber = createScrubber();
   const seg = () => segs[st.seg];
   const masterCam = () => (seg()?.cams.front && videos.has('front') ? 'front' : present.find((c) => seg()?.cams[c]));
   const master = () => videos.get(masterCam());
@@ -230,6 +233,8 @@ async function player(ctx, v, day, recId) {
   function load(index, autoplay) {
     st.seg = Math.max(0, Math.min(segs.length - 1, index));
     st.wantPlay = autoplay;
+    // scrub previews of this clip and its neighbours, ready before a drag
+    scrubber.warm([segs[st.seg], segs[st.seg + 1], segs[st.seg - 1]].flatMap((x) => (x ? Object.values(x.cams) : [])));
     for (const [c, vid] of videos) {
       const p = seg().cams[c];
       const note = tiles.get(c).querySelector('.cam-note');
@@ -431,9 +436,22 @@ async function player(ctx, v, day, recId) {
   $('#grid').onclick = () => setFocus(null);
   $('#rate').onchange = (e) => setRate(Number(e.target.value));
   const scrub = $('#scrub');
-  scrub.addEventListener('input', () => { st.scrubbing = true; seek(Number(scrub.value)); });
-  scrub.addEventListener('change', () => { st.scrubbing = false; seek(Number(scrub.value)); });
-  scrub.addEventListener('pointerup', () => { st.scrubbing = false; });
+  const shown = () => [...videos.values()].filter((v) => !v.hidden && v.src);
+  scrub.addEventListener('input', () => {
+    st.scrubbing = true;
+    const t = Number(scrub.value);
+    scrubber.show([...videos].map(([c, video]) => ({ video, src: seg().cams[c] })), t);
+    scrubber.seek(shown(), t);
+    updateTime();
+  });
+  const scrubDone = () => {
+    if (!st.scrubbing) return;
+    st.scrubbing = false;
+    seek(Number(scrub.value));
+    scrubber.release([...videos.values()]);
+  };
+  scrub.addEventListener('change', scrubDone);
+  scrub.addEventListener('pointerup', scrubDone);
   view.querySelectorAll('.clip-dot').forEach((b) => { b.onclick = () => load(Number(b.dataset.seg), st.playing); });
   for (const [c, t] of tiles) t.addEventListener('click', () => setFocus(c));
   $('#full').onclick = () => {

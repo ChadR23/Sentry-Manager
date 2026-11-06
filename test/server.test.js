@@ -246,6 +246,18 @@ test('footage, protect, Recycle Bin and policies never lose files', { timeout: 1
     assert.equal((await tail.arrayBuffer()).byteLength, 1024 * 1024);
     assert.equal((await s.call('GET', `/api/media?path=${encodeURIComponent('/etc/passwd')}`, undefined, { raw: true })).status, 403);
     assert.equal((await s.call('POST', '/api/studio/readDir', { path: '/etc' })).status, 403);
+    // scrub previews: a JPEG grid per clip, only inside the shares, only signed in
+    if (hasFfmpeg) {
+      const real = path.join(root, 'TeslaCam/RecentClips/2020-01-01_08-00-00-front.mp4');
+      const g = await s.call('GET', `/api/scrub?path=${encodeURIComponent(real)}`, undefined, { raw: true });
+      assert.equal(g.status, 200);
+      assert.equal(g.headers.get('content-type'), 'image/jpeg');
+      assert.ok((await g.arrayBuffer()).byteLength > 1000);
+    }
+    assert.equal((await s.call('GET', `/api/scrub?path=${encodeURIComponent(clip)}`, undefined, { raw: true })).status, 404, 'not a video: no previews');
+    assert.equal((await s.call('GET', `/api/scrub?path=${encodeURIComponent('/etc/passwd')}`, undefined, { raw: true })).status, 403);
+    const anon = await fetch(`${s.base}/api/scrub?path=${encodeURIComponent(clip)}`);
+    assert.equal(anon.status, 401);
 
     // protected recordings are never trashed
     const sentry = by['Sentry 2020-01-02 12:29:00'];

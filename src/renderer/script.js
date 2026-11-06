@@ -3754,6 +3754,13 @@ function previewAtSliderValue() {
         const pct = +progressBar.value || 0;
         const totalSec = nativeVideo.cumulativeStarts[nativeVideo.cumulativeStarts.length - 1] || 1;
         const targetSec = (pct / 100) * totalSec;
+        // Sentry Six Manager: while the slider is dragged, previews of the
+        // second under it (any segment) and one seek at a time in the loaded
+        // segment; another segment loads when it is let go (web/scrub.js)
+        if (scrubber && state.ui.isScrubbing) {
+            scrubPreview(targetSec, totalSec);
+            return;
+        }
         seekNativeDayCollectionBySec(targetSec);
         return;
     }
@@ -3796,6 +3803,39 @@ progressBar.addEventListener('input', () => {
     previewAtSliderValue();
 });
 
+// Sentry Six Manager: fast timeline dragging (web/scrub.js)
+let scrubber = null;
+import('/web/scrub.js').then((m) => { scrubber = m.createScrubber(); }).catch(() => { /* plain seeking */ });
+const scrubVideos = () => Object.values(videoBySlot).concat(videoMain).filter(Boolean);
+function scrubSegmentAt(targetSec) {
+    const cumStarts = nativeVideo.cumulativeStarts;
+    let segIdx = 0;
+    while (segIdx < cumStarts.length - 2 && targetSec >= cumStarts[segIdx + 1]) segIdx++;
+    return { segIdx, localSec: Math.max(0, targetSec - (cumStarts[segIdx] || 0)) };
+}
+function scrubPreview(targetSec, totalSec) {
+    const { segIdx, localSec } = scrubSegmentAt(Math.max(0, Math.min(totalSec, targetSec)));
+    const plan = getSegmentPlan(segIdx);
+    if (plan) {
+        scrubber.show(plan.targets.map(t => ({
+            video: videoBySlot[t.slot] || (t.slot === 'main' ? videoMain : null),
+            src: t.entry?.file?.path || null
+        })), localSec);
+    }
+    if (segIdx === nativeVideo.currentSegmentIdx) scrubber.seek(scrubVideos().filter(v => v.src), localSec);
+    updateTimeDisplayNew(Math.floor(targetSec), Math.floor(totalSec));
+}
+// previews give way once the final seek (and any segment load) is done
+function scrubRelease() {
+    if (!scrubber) return;
+    const start = performance.now();
+    const wait = () => {
+        if ((nativeVideo.isSeeking || nativeVideo._pendingSeekSec != null) && performance.now() - start < 5000) requestAnimationFrame(wait);
+        else scrubber.release(scrubVideos());
+    };
+    requestAnimationFrame(wait);
+}
+
 // Commit when the user releases the slider (click or drag end)
 progressBar.addEventListener('change', () => {
     state.ui.isScrubbing = false;
@@ -3806,6 +3846,7 @@ progressBar.addEventListener('change', () => {
         const pct = +progressBar.value || 0;
         const totalSec = nativeVideo.cumulativeStarts[nativeVideo.cumulativeStarts.length - 1] || 1;
         seekNativeDayCollectionBySec((pct / 100) * totalSec);
+        scrubRelease();
         return;
     }
     if (state.ui.nativeVideoMode && nativeVideo.master) {
@@ -4871,6 +4912,8 @@ async function loadNativeSegment(segIdx) {
     // and so is one that would replace a video the browser holds
     // (picture-in-picture, fullscreen): that one loads in place
     const plan = getSegmentPlan(segIdx);
+    // Sentry Six Manager: scrub previews of this segment and its neighbours
+    scrubber?.warm([segIdx, segIdx + 1, segIdx - 1].flatMap(i => getSegmentPlan(i)?.targets.map(t => t.entry?.file?.path) || []));
     let preloaded = null;
     if (shownVideoHeldByBrowser()) segmentPreloader.cancel();
     else preloaded = segmentPreloader.take(segIdx, planKey(plan, mediaSourceKey), preloadContext());

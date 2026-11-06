@@ -34,6 +34,7 @@ const { Auth, parseCookies } = require('./auth');
 const { VehicleManager } = require('./vehicles');
 const { Inventory } = require('./inventory');
 const { RecycleBin, formatBytes } = require('./recycleBin');
+const { createScrubFrames } = require('./scrubFrames');
 const { Policies } = require('./policies');
 const { Jobs, Notifications } = require('./activity');
 const { ImageUpdates, criticalFromFile } = require('./imageUpdates');
@@ -387,6 +388,8 @@ async function main() {
   });
   let bridge = null;
   let clipThumbs = null;
+  // the Viewer's scrub previews (see scrubFrames.js)
+  const scrubFrames = createScrubFrames({ directory: path.join(DATA, 'scrub'), ffmpegPath: FFMPEG, spawn });
 
   const updates = new ImageUpdates({
     db, log: logger.scope('updates'), buildInfo, notes, ownCritical: readOwnCritical(), enabled: !/^(off|false|0|no)$/i.test(process.env.UPDATE_CHECK || '')
@@ -1367,7 +1370,7 @@ async function main() {
 
       if (isApi) {
         const m = r.match(req.method, rawPath);
-        if (!m && p !== '/api/events' && p !== '/api/converter/events' && p !== '/api/media' && p !== '/api/ui-packs/upload') return sendJson(res, 404, { error: 'Not found' });
+        if (!m && p !== '/api/events' && p !== '/api/converter/events' && p !== '/api/media' && p !== '/api/scrub' && p !== '/api/ui-packs/upload') return sendJson(res, 404, { error: 'Not found' });
         if (!user && !(m && m.route.opts.public)) return sendJson(res, 401, { error: 'Sign in first.' });
         if (req.method !== 'GET' && req.method !== 'HEAD') {
           if (req.headers['x-requested-with'] !== 'sentry-six-manager') return sendJson(res, 403, { error: 'Missing X-Requested-With header.' });
@@ -1411,6 +1414,17 @@ async function main() {
           const real = await studioReadable.resolve(url.searchParams.get('path') || '');
           if (!real || hiddenPath(real)) return sendJson(res, 403, { error: 'Outside the vehicle shares.' });
           return sendMedia(req, res, real, studioReadable.fdInside);
+        }
+        if (p === '/api/scrub') {
+          // one clip's scrub previews (a JPEG grid), made the first time it is asked for
+          const real = await studioReadable.resolve(url.searchParams.get('path') || '');
+          if (!real || hiddenPath(real) || !/\.mp4$/i.test(real)) return sendJson(res, 403, { error: 'Outside the vehicle shares.' });
+          const grid = await scrubFrames.get(real);
+          if (!grid) return sendJson(res, 404, { error: 'No previews for this clip.' });
+          const size = (await fs.promises.stat(grid)).size;
+          res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Content-Length': size, 'Cache-Control': 'private, max-age=86400' });
+          if (req.method === 'HEAD') return res.end();
+          return require('stream').pipeline(fs.createReadStream(grid), res, () => {});
         }
         if (p === '/api/ui-packs/upload') {
           if (req.method !== 'POST') return sendJson(res, 405, { error: 'Use POST.' });

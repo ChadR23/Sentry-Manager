@@ -8,6 +8,7 @@ import { $, $$, esc, icon, api, state, current, setVehicle, vehiclePicker, plura
 import * as tele from '../telemetry.js';
 import { createViewerMap } from '/web/viewerMap.js';
 import { createExportPanel } from '/web/exportPanel.js';
+import { createScrubber } from '/web/scrub.js';
 
 const CAMS = ['front', 'back', 'left_repeater', 'right_repeater', 'left_pillar', 'right_pillar'];
 // on small tiles the labels shrink to these codes (one line, never wrapping)
@@ -297,6 +298,9 @@ export default {
     for (const t of ACTIVITY) document.addEventListener(t, wake, { capture: true, passive: true });
     document.addEventListener('click', swallow, true);
     const vids = Object.fromEntries(CAMS.map((c) => [c, $(`.cam[data-cam="${c}"] video`, cockpit)]));
+    // while the scrubber is dragged: the clip and time under the pointer
+    let scrubPos = null;
+    const scrubber = createScrubber();
     const camEl = (c) => $(`.cam[data-cam="${c}"]`, cockpit);
     const note = (c, html) => {
       const n = $('.cam-note', camEl(c));
@@ -413,6 +417,8 @@ export default {
         }
       }
       pickMaster();
+      // scrub previews of this clip and its neighbours, ready before a drag
+      scrubber.warm([c, clips[index + 1], clips[index - 1]].flatMap((x) => (x ? Object.values(x.cams) : [])));
       if (!master && autoplay && skip('it has no video.')) return;
       const start = () => {
         for (const k of camsHere()) {
@@ -504,7 +510,7 @@ export default {
     function paint() {
       if (dead) return;
       const tot = totalDur();
-      const pos = offsetOf(index) + now();
+      const pos = scrubPos ? offsetOf(scrubPos.i) + scrubPos.off : offsetOf(index) + now();
       const f = tot ? Math.min(1, pos / tot) : 0;
       q('#fill').style.width = `${(f * 100).toFixed(3)}%`;
       q('#knob').style.left = `${(f * 100).toFixed(3)}%`;
@@ -641,15 +647,34 @@ export default {
     // ---------- controls ----------
     const scrub = q('#scrub');
     let dragging = false;
+    // dragging: previews of the second under the pointer at once, the real
+    // seek one at a time within the loaded clip, another clip on letting go
     const scrubTo = (e) => {
       const r = q('#track').getBoundingClientRect();
       const f = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
-      seekGlobal(f * totalDur());
+      const tot = totalDur();
+      const t = Math.max(0, Math.min(tot - 0.05, f * tot));
+      let i = 0;
+      while (i < clips.length - 1 && t >= offsetOf(i + 1)) i++;
+      const off = t - offsetOf(i);
+      scrubPos = { i, off };
+      const c = clips[i];
+      scrubber.show(CAMS.map((k) => ({ video: vids[k], src: c?.cams[k] })), off);
+      if (i === index) scrubber.seek(camsHere().map((k) => vids[k]), off);
+      paint();
+    };
+    const scrubEnd = () => {
+      if (!dragging) return;
+      dragging = false;
+      const to = scrubPos;
+      scrubPos = null;
+      if (to && to.i === index) { for (const k of camsHere()) { try { vids[k].currentTime = to.off; } catch { /* not ready */ } } paint(); } else if (to) loadClip(to.i, to.off, playing);
+      scrubber.release(CAMS.map((k) => vids[k]));
     };
     scrub.addEventListener('pointerdown', (e) => { dragging = true; scrub.setPointerCapture(e.pointerId); scrubTo(e); });
     scrub.addEventListener('pointermove', (e) => { if (dragging) scrubTo(e); });
-    scrub.addEventListener('pointerup', () => { dragging = false; });
-    scrub.addEventListener('pointercancel', () => { dragging = false; });
+    scrub.addEventListener('pointerup', scrubEnd);
+    scrub.addEventListener('pointercancel', scrubEnd);
     scrub.addEventListener('keydown', (e) => {
       if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
         e.preventDefault();
