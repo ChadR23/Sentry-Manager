@@ -49,9 +49,9 @@ services:
     command: sentry-six-manager    # only this container, nothing else
 ```
 
-Change `TZ` to [your time zone](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones)
-and the time if 4:17 AM doesn't suit you (the fields are seconds, minutes,
-hours). Then start it:
+Change `TZ` to [your time zone](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones),
+and `WATCHTOWER_SCHEDULE` if once a day at 4:17 AM doesn't suit you (see
+[How often it checks](#how-often-it-checks)). Then start it:
 
 ```bash
 docker compose -f watchtower.yml up -d
@@ -92,6 +92,69 @@ restarted the app: after an update, *Installed* may still show the app as it
 was until you open it. **Overview → Server** in Sentry Six Manager always
 shows the version that is really running. If the app ever looks stuck on an
 old version, use the manual steps in [TrueNAS](truenas.md).
+
+## How often it checks
+
+Replace the `WATCHTOWER_SCHEDULE` line with one of these, indented the same
+(the fields are seconds, minutes, hours, day, month, weekday):
+
+**Every 5 minutes:**
+
+```yaml
+      WATCHTOWER_SCHEDULE: "0 */5 * * * *"
+```
+
+**Every 15 minutes:**
+
+```yaml
+      WATCHTOWER_SCHEDULE: "0 2,17,32,47 * * * *"
+```
+
+**Every 30 minutes:**
+
+```yaml
+      WATCHTOWER_SCHEDULE: "0 17,47 * * * *"
+```
+
+**Every hour:**
+
+```yaml
+      WATCHTOWER_SCHEDULE: "0 17 * * * *"
+```
+
+**Every 6 hours:**
+
+```yaml
+      WATCHTOWER_SCHEDULE: "0 17 */6 * * *"
+```
+
+**Every 12 hours:**
+
+```yaml
+      WATCHTOWER_SCHEDULE: "0 17 4,16 * * *"
+```
+
+**Every 24 hours (4:17 AM):**
+
+```yaml
+      WATCHTOWER_SCHEDULE: "0 17 4 * * *"
+```
+
+The minutes are a little past the hour on purpose: GitHub's registry is
+busiest right at :00. Every 6 hours runs at 12:17 AM, 6:17, 12:17 PM and
+6:17 PM; every 12 hours at 4:17 AM and 4:17 PM.
+
+New versions only come out with a release, so once a day or every few hours
+is plenty; checking every few minutes only gets an update a little sooner.
+Each check is one small request.
+
+After changing it, restart Watchtower so it uses the new schedule:
+
+```bash
+docker compose -f watchtower.yml up -d
+```
+
+On TrueNAS: *Apps → Installed → watchtower → Edit*, change the line, *Save*.
 
 ## Check it now instead of waiting
 
