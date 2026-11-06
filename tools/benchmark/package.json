@@ -1,8 +1,0 @@
-{
-  "name": "sentry-six-manager-benchmark",
-  "private": true,
-  "type": "module",
-  "description": "Speed test for Sentry Six Manager on your own machine and footage (see README.md)",
-  "scripts": { "start": "node benchmark.mjs" },
-  "dependencies": { "playwright": "1.48.2" }
-}
