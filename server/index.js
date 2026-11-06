@@ -1,5 +1,10 @@
 'use strict';
 
+// MALLOC_ARENA_MAX (set by the image, see the Dockerfile) has done its work
+// for this process by now (glibc reads it at start); the ffmpeg processes
+// started from here keep glibc's default, which encodes a little faster.
+delete process.env.MALLOC_ARENA_MAX;
+
 // Sentry Six Manager server: the Sentry Studio viewer and converter as a web app,
 // plus file management (vehicles, footage, Recycle Bin, policies, jobs,
 // notifications, settings, sign-in, update notices).
@@ -1611,14 +1616,19 @@ async function main() {
       }
       mirrorConverterJob(event.snapshot);
       recordSavings(event.snapshot);
+      converterJobs.set(event.snapshot.id, slimJob(event.snapshot));
     });
     // jobs from before a restart (a paused one still owns its clips)
     // (only a list that loaded settles rows: a failed one would end them all)
-    const listed = await runtime.service.list().catch(() => null);
-    for (const s of listed || []) {
-      if (!converterJobs.has(s.id)) converterJobs.set(s.id, s);
+    // (summaries: counts without every clip of every job ever run)
+    const listed = await (runtime.service.listSummaries ? runtime.service.listSummaries() : runtime.service.list()).catch(() => null);
+    for (const listedJob of listed || []) {
+      // a job still under way is kept whole (its clips: what is in hand)
+      const s = CONVERTER_ACTIVE.has(listedJob.state) && !listedJob.items?.length
+        ? await runtime.service.get(listedJob.id).catch(() => listedJob) : listedJob;
       // (and the space saved by jobs from before savings were kept)
       recordSavings(s);
+      if (!converterJobs.has(s.id)) converterJobs.set(s.id, slimJob(s));
     }
     if (Array.isArray(listed)) {
       converterListed = true;
@@ -1626,8 +1636,18 @@ async function main() {
     }
   }).catch((err) => log.error(`Converter unavailable: ${err.code || err.message}`));
 
+  // A job that has ended, as kept here: its counts without its clip list (a
+  // large job lists tens of thousands of clips; kept for every job, they grew
+  // the server past a gigabyte). Running and paused jobs stay whole.
+  function slimJob(s) {
+    if (!s || CONVERTER_ACTIVE.has(s.state) || !Array.isArray(s.items) || s.items.length === 0) return s;
+    const { items: _items, ...rest } = s;
+    return { ...rest, items: [], itemCounts: converterCounts(s), progressClips: jobProgress(s).clips };
+  }
+
   // Clip results of a converter job (its counters only hold files and bytes).
   function converterCounts(s) {
+    if (s.itemCounts && !s.items?.length) return s.itemCounts;
     const out = { converted: 0, skipped: 0, failed: 0 };
     for (const item of s.items || []) {
       if (item?.kind !== 'video') continue;

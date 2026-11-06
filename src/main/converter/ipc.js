@@ -494,6 +494,21 @@ function registerConverterIpc(options = {}) {
     }
   });
 
+  // The current job, whole (with its clips), chosen from summaries: the
+  // Encoder asks every few seconds, and reading every job ever run, clips
+  // and all, for each answer made the server parse hundreds of MB (a
+  // service without summaries gives the full list, as before).
+  async function currentJob() {
+    const summaries = typeof options.service.listSummaries === 'function' ? await options.service.listSummaries() : null;
+    if (!summaries) return chooseCurrent(await options.service.list());
+    const chosen = chooseCurrent(summaries);
+    if (!chosen) return null;
+    try {
+      return sanitizeSnapshot(await options.service.get(chosen.id));
+    } catch (_) {
+      return chooseCurrent(await options.service.list());
+    }
+  }
   const handlers = {
     'converter:chooseFolder': wrapped(async (_event, payload) => {
       if (!isPlainObject(payload) || !['source', 'destination'].includes(payload.purpose)
@@ -511,7 +526,7 @@ function registerConverterIpc(options = {}) {
     }),
     'converter:getCurrent': wrapped(async (_event, payload) => {
       validateNoPayload(payload);
-      return chooseCurrent(await options.service.list());
+      return currentJob();
     }),
     'converter:pause': wrapped(async (_event, payload) => sanitizeSnapshot(await options.service.pause(validateJobId(payload)))),
     // Parallel conversions changed mid-run; an automatic job's saved settings
@@ -562,7 +577,7 @@ function registerConverterIpc(options = {}) {
     'converter:discard': wrapped(async (_event, payload) => {
       if (typeof options.service.discard !== 'function') fail('OPERATION_FAILED');
       await options.service.discard(validateJobId(payload));
-      return chooseCurrent(await options.service.list());
+      return currentJob();
     }),
     'converter:retryFailed': wrapped(async (_event, payload) => sanitizeSnapshot(await options.service.retryFailed(validateJobId(payload)))),
     'converter:dismissSummary': wrapped(async (_event, payload) => sanitizeSnapshot(await options.service.dismissSummary(validateJobId(payload)))),

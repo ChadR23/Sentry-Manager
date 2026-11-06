@@ -23,6 +23,8 @@ function gpuFor(gpus, node) {
 
 /** A job's clips converted so far and the bytes they saved. */
 function jobProgress(job) {
+  // a finished job kept without its clip list (index.js slimJob)
+  if (Number.isSafeInteger(job?.progressClips) && !job.items?.length) return { clips: job.progressClips, savedB: Number(job?.counters?.savedBytes) || 0 };
   let clips = 0;
   for (const item of job?.items || []) if (item?.kind === 'video' && item.state === 'completed' && item.eligibleVideo !== false) clips++;
   return { clips, savedB: Number(job?.counters?.savedBytes) || 0 };

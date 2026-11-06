@@ -1290,6 +1290,65 @@ function createJobStore(options) {
     return manifests;
   }
 
+  // Every job as a summary: all of it but its clip list, with the clip
+  // results counted (itemCounts, progressClips). For the frequent questions
+  // (which job is current, is one running) that need no clips: a job of
+  // tens of thousands of clips is tens of MB parsed, and reading every job
+  // ever run for each of them made the server parse hundreds of MB every few
+  // seconds and hold it. A summary is kept per job and made again only when
+  // the job's files change (their size and time), so an idle converter reads
+  // nothing.
+  const summaryCache = new Map(); // id -> { stamp, summary }
+  async function stampOf(id) {
+    const paths = jobPaths(id);
+    const part = async (file) => {
+      try { const st = await fileSystem.stat(file); return `${st.size}:${Math.round(st.mtimeMs * 1000)}`; } catch (_) { return '-'; }
+    };
+    return `${await part(paths.manifest)}|${await part(paths.journal)}`;
+  }
+  function summarize(manifest) {
+    const { items, ...rest } = manifest;
+    const itemCounts = { converted: 0, skipped: 0, failed: 0 };
+    let progressClips = 0;
+    for (const item of items || []) {
+      if (item?.kind !== 'video') continue;
+      if (item.state === 'completed' && item.eligibleVideo !== false) { itemCounts.converted++; progressClips++; }
+      else if (item.state === 'skipped') itemCounts.skipped++;
+      else if (item.state === 'failed') itemCounts.failed++;
+    }
+    return freezeDeep({ ...rest, items: [], itemCounts, progressClips, itemTotal: (items || []).length });
+  }
+  async function summaries() {
+    await ensureRoot();
+    let entries;
+    try { entries = await fileSystem.readdir(rootDir, { withFileTypes: true }); } catch (_) {
+      throw storeError('MANIFEST_READ_FAILED');
+    }
+    const out = [];
+    const present = new Set();
+    for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+      if (!entry.isDirectory() || entry.isSymbolicLink() || !SAFE_JOB_ID.test(entry.name) || WINDOWS_RESERVED_NAME.test(entry.name)) continue;
+      present.add(entry.name);
+      try {
+        const stamp = await stampOf(entry.name);
+        const cached = summaryCache.get(entry.name);
+        if (cached && cached.stamp === stamp) { out.push(cached.summary); continue; }
+        const manifest = await runExclusive(entry.name, () => readManifest(entry.name));
+        if (!manifest) { summaryCache.delete(entry.name); continue; }
+        const summary = summarize(manifest);
+        summaryCache.set(entry.name, { stamp, summary });
+        out.push(summary);
+      } catch (error) {
+        summaryCache.delete(entry.name);
+        if (error?.code !== 'CORRUPT_MANIFEST') {
+          try { onUnreadable(entry.name, error); } catch (_) { /* reporting is best effort */ }
+        }
+      }
+    }
+    for (const id of summaryCache.keys()) if (!present.has(id)) summaryCache.delete(id);
+    return out;
+  }
+
   // Sets a job aside so it is no longer loaded: its job file is renamed (kept
   // for diagnosis, never deleted) and its journal removed. Converted files
   // and the clips themselves are not touched. Used when a job cannot be
@@ -1395,7 +1454,10 @@ function createJobStore(options) {
         // one can remove it (appends would land after the stale records).
         written = null;
       }
-      if (written) await rememberWritten(id, paths, next, written);
+      // (a job that has ended is not kept: its whole clip list, tens of MB
+      // for a large job, stayed here for every job ever run; a later change
+      // to it, rare, reads the file again)
+      if (written && !TERMINAL_JOB_STATES.has(next.state)) await rememberWritten(id, paths, next, written);
       else lastWritten.delete(id);
       // Returned frozen (it is the store's own cached copy); callers build new
       // objects for changes, and reusing its items keeps the next save cheap.
@@ -1492,7 +1554,7 @@ function createJobStore(options) {
     });
   }
 
-  return Object.freeze({ create, save, load, list, transition, recover, discard });
+  return Object.freeze({ create, save, load, list, summaries, transition, recover, discard });
 }
 
 module.exports = {

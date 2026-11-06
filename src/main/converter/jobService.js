@@ -2846,6 +2846,7 @@ function createConverterJobService(deps) {
         runtime.runPromise = null;
         runtime.runKind = null;
       }
+      forgetFinished(runtime);
     });
     if (!launchedFromRecovery) {
       runtime.runKind = 'job';
@@ -2882,7 +2883,8 @@ function createConverterJobService(deps) {
 
   async function startUnlocked(config) {
     if (shuttingDown) throw serviceError('SERVICE_SHUTDOWN');
-    const persistedJobs = await store.list();
+    // (only states and settings are needed: summaries, not every clip of every job)
+    const persistedJobs = typeof store.summaries === 'function' ? await store.summaries() : await store.list();
     const active = new Map();
     for (const manifest of persistedJobs) if (ACTIVE_STATES.has(manifest.state)) active.set(manifest.id, manifest);
     for (const runtime of jobs.values()) {
@@ -2909,6 +2911,17 @@ function createConverterJobService(deps) {
 
   function start(config) {
     return serializeCommand(() => startUnlocked(config));
+  }
+
+  // A job that has ended (completed, failed, cancelled) is saved on disk:
+  // its runtime, with the whole clip list (tens of MB for a large job), is
+  // let go, and get/list/ensureRuntime read it from disk when asked. Kept
+  // for every job ever run, these grew the server past a gigabyte.
+  function forgetFinished(runtime) {
+    const id = runtime.manifest?.id;
+    if (!id || jobs.get(id) !== runtime || runtime.runPromise || shuttingDown) return;
+    if (!TERMINAL_STATES.has(runtime.manifest.state) || runtime.recoveryRequired) return;
+    jobs.delete(id);
   }
 
   async function ensureRuntime(id) {
@@ -2946,6 +2959,36 @@ function createConverterJobService(deps) {
 
   async function list() {
     return deepFreeze((await store.list()).map(publicSnapshot));
+  }
+
+  // Every job without its clip list (counts instead: itemCounts,
+  // progressClips): what is current, is one running, a job's settings. Jobs
+  // in memory (running, paused) are as they are now; the rest come from the
+  // store's cached summaries, so this reads nothing while nothing changes.
+  // A store without summaries gives the full list.
+  async function listSummaries() {
+    if (typeof store.summaries !== 'function') return list();
+    const live = new Map();
+    for (const runtime of jobs.values()) live.set(runtime.manifest.id, summaryOf(runtime.manifest));
+    const out = [];
+    for (const summary of await store.summaries()) {
+      out.push(live.get(summary.id) || publicSnapshot(summary));
+      live.delete(summary.id);
+    }
+    out.push(...live.values());
+    return deepFreeze(out);
+  }
+  function summaryOf(manifest) {
+    const itemCounts = { converted: 0, skipped: 0, failed: 0 };
+    let progressClips = 0;
+    for (const item of manifest.items || []) {
+      if (item?.kind !== 'video') continue;
+      if (item.state === 'completed' && item.eligibleVideo !== false) { itemCounts.converted++; progressClips++; }
+      else if (item.state === 'skipped') itemCounts.skipped++;
+      else if (item.state === 'failed') itemCounts.failed++;
+    }
+    const snapshot = publicSnapshot({ ...manifest, items: [] });
+    return deepFreeze({ ...snapshot, itemCounts, progressClips, itemTotal: (manifest.items || []).length });
   }
 
   async function pause(id) {
@@ -3737,6 +3780,7 @@ function createConverterJobService(deps) {
   }
 
   return Object.freeze({
+    listSummaries,
     start,
     get,
     list,

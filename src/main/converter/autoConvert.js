@@ -687,7 +687,7 @@ function createAutoConverter(options = {}) {
       for (const config of settings.configs) await loadIndex(config);
       // Adopt the automatic jobs still running when the app closed.
       try {
-        const jobs = await service.list();
+        const jobs = typeof service.listSummaries === 'function' ? await service.listSummaries() : await service.list();
         const saved = await readJson(STATE_FILE);
         const pausedIds = new Set([...(Array.isArray(saved?.pausedForWindowJobIds) ? saved.pausedForWindowJobIds : []), saved?.pausedForWindowJobId].filter(Boolean));
         const forDevices = new Set(Array.isArray(saved?.pausedForDevicesJobIds) ? saved.pausedForDevicesJobIds : []);

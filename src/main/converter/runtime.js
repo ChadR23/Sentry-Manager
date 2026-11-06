@@ -903,7 +903,7 @@ async function createConverterRuntime(options = {}) {
     } catch (_) { return 0; }
   }
   async function hasActiveJob({ manualOnly = false } = {}) {
-    return (await service.list()).some((job) => !['completed', 'failed', 'cancelled'].includes(job.state)
+    return (await (service.listSummaries ? service.listSummaries() : service.list())).some((job) => !['completed', 'failed', 'cancelled'].includes(job.state)
       && !(job.state === 'paused' && job.recovery?.action === 'manual-intervention')
       && !(manualOnly && (job.autoConvert === true || job.config?.autoConvert === true)));
   }

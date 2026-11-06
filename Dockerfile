@@ -83,6 +83,13 @@ ARG IMAGE_TAG=""
 RUN printf '{"sha":"%s","branch":"%s","builtAt":"%s","image":"%s","tag":"%s"}\n' "$GIT_SHA" "$GIT_BRANCH" \
       "${BUILD_DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" "$IMAGE" "$IMAGE_TAG" > /app/BUILD_INFO.json
 
+# Two malloc arenas for the Node processes (the supervisor and the app):
+# with one per thread, memory freed after a large conversion job stayed with
+# the process (about 320 MB settled after three 48,000-clip jobs, 185 MB with
+# two). The app drops it from its environment at start, so ffmpeg keeps
+# glibc's default (encoding with two was about 3% slower).
+ENV MALLOC_ARENA_MAX=2
+
 VOLUME ["/data"]
 EXPOSE 9000
 # /healthz answers on plain HTTP too (everything else there redirects to HTTPS)
