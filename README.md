@@ -81,6 +81,7 @@ on TrueNAS, see [TrueNAS](docs/truenas.md) for the update steps.
 | [Vehicles and SMB shares](docs/vehicles-and-shares.md) | Footage on a share or on the same machine, permissions |
 | [Phones and tablets](docs/phones-and-tablets.md) | Supported devices |
 | [Updates](docs/updates.md) | Updating, critical updates, how images are built |
+| [Automatic updates](docs/auto-updates.md) | Watchtower, to install new versions for you |
 | [Security](docs/security.md) | HTTPS and the certificate, sign-in, what runs as root |
 | [Your own interface](docs/interface-packs.md) | The four interface packs, and making your own |
 | [Settings](docs/settings.md) | Every `.env` setting |

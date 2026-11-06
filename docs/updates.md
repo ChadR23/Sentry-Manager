@@ -17,8 +17,9 @@ itself after the restart, with nothing to press. Only files that something
 else changed in the meantime make it wait for you. **Settings → Updates** shows the
 version you run and checks twice a day
 whether a newer image is out. It only tells you and never installs anything
-(`UPDATE_CHECK=off` turns the check off). For automatic updates, use a tool
-such as [Watchtower](https://containrrr.dev/watchtower/).
+(`UPDATE_CHECK=off` turns the check off). To have updates installed for
+you, follow [Automatic updates](auto-updates.md) (Watchtower, for Compose
+and TrueNAS).
 
 ## Critical updates
 
