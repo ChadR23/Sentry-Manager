@@ -234,13 +234,13 @@ test('footage, protect, Recycle Bin and policies never lose files', { timeout: 1
     const part = await s.call('GET', `/api/media?path=${encodeURIComponent(clip)}`, undefined, { raw: true, headers: { Range: 'bytes=10-19' } });
     assert.equal(part.status, 206);
     assert.equal((await part.arrayBuffer()).byteLength, 10);
-    // an open-ended range (what a video asks for) is answered in parts of at most 2 MiB
+    // an open-ended range (what a video asks for) is answered in parts of at most 1 MiB
     const big = path.join(root, 'TeslaCam/RecentClips/2020-01-01_08-02-00-front.mp4');
     await fsp.writeFile(big, crypto.randomBytes(5 * 1024 * 1024));
     const head = await s.call('GET', `/api/media?path=${encodeURIComponent(big)}`, undefined, { raw: true, headers: { Range: 'bytes=0-' } });
     assert.equal(head.status, 206);
-    assert.equal(head.headers.get('content-range'), `bytes 0-${2 * 1024 * 1024 - 1}/${5 * 1024 * 1024}`);
-    assert.equal((await head.arrayBuffer()).byteLength, 2 * 1024 * 1024);
+    assert.equal(head.headers.get('content-range'), `bytes 0-${1024 * 1024 - 1}/${5 * 1024 * 1024}`);
+    assert.equal((await head.arrayBuffer()).byteLength, 1024 * 1024);
     const tail = await s.call('GET', `/api/media?path=${encodeURIComponent(big)}`, undefined, { raw: true, headers: { Range: `bytes=${4 * 1024 * 1024}-` } });
     assert.equal(tail.headers.get('content-range'), `bytes ${4 * 1024 * 1024}-${5 * 1024 * 1024 - 1}/${5 * 1024 * 1024}`);
     assert.equal((await tail.arrayBuffer()).byteLength, 1024 * 1024);

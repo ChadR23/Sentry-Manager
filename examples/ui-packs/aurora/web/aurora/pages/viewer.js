@@ -9,6 +9,7 @@ import * as tele from '../telemetry.js';
 import { createViewerMap } from '/web/viewerMap.js';
 import { createExportPanel } from '/web/exportPanel.js';
 import { createScrubber } from '/web/scrub.js';
+import { syncTo } from '/web/camSync.js';
 
 const CAMS = ['front', 'back', 'left_repeater', 'right_repeater', 'left_pillar', 'right_pillar'];
 // on small tiles the labels shrink to these codes (one line, never wrapping)
@@ -419,11 +420,16 @@ export default {
       pickMaster();
       // scrub previews of this clip and its neighbours, ready before a drag
       scrubber.warm([c, clips[index + 1], clips[index - 1]].flatMap((x) => (x ? Object.values(x.cams) : [])));
+      // a picture at once: the preview of this second until the videos show theirs
+      scrubber.show(CAMS.map((k) => ({ video: vids[k], src: c.cams[k] })), at);
       if (!master && autoplay && skip('it has no video.')) return;
       const start = () => {
+        // (a camera already there is not sent a seek: even one to where it is
+        // throws its decoded frames away, about half a second for six)
         for (const k of camsHere()) {
-          try { vids[k].currentTime = Math.max(0, at); } catch { /* not ready */ }
+          try { if (Math.abs(vids[k].currentTime - Math.max(0, at)) > 0.01) vids[k].currentTime = Math.max(0, at); } catch { /* not ready */ }
         }
+        scrubber.release(CAMS.map((k) => vids[k]));
         if (autoplay) play();
         else paint();
       };
@@ -467,13 +473,11 @@ export default {
         for (const k of camsHere()) {
           const el = vids[k];
           if (k === master || el.dataset.bad || el.readyState < 1) continue;
-          if (Math.abs(el.currentTime - m.currentTime) > 0.18 && !el.seeking) {
-            try { el.currentTime = m.currentTime; } catch { /* later */ }
-          }
+          if (!el.seeking) { try { syncTo(m, el, opts.speed); } catch { /* later */ } }
           if (el.paused && !m.paused) el.play().catch(() => {});
         }
       }
-      syncTimer = setTimeout(sync, 300);
+      syncTimer = setTimeout(sync, 150);
     }
 
     const offsetOf = (i) => durations.slice(0, i).reduce((a, b) => a + b, 0);

@@ -83,7 +83,13 @@ async function readTextConfined(abs, fdInside, maxBytes) {
 // so every other request (another page, the API) waited until those video
 // downloads were cancelled, 15 s or more. Each answer is now at most a few
 // MB; the video simply asks for the next part, as with any media server.
-const MEDIA_CHUNK = 2 * 1024 * 1024;
+// 1 MiB: a seek or a new clip only waits for its first part, so a smaller
+// one answers sooner (six cameras, measured: seeks 190 -> 124 ms on a local
+// disk, 489 -> 295 ms on a slow 30 MB/s share; going on to the next clip
+// about 100 ms sooner). 8 MiB was far slower (2 s to open a day on that
+// share), and 512 KiB, a little faster there, would spend too much of a
+// remote connection's time on round trips.
+const MEDIA_CHUNK = 1024 * 1024;
 
 async function sendMedia(req, res, abs, fdInside = async () => true) {
   const opened = await openConfined(abs, fdInside);

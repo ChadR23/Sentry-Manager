@@ -5,6 +5,7 @@ import { telemetryFor, recordAt, fpsOf } from '../telemetry.js';
 import { createViewerMap } from '/web/viewerMap.js';
 import { createExportPanel } from '/web/exportPanel.js';
 import { createScrubber } from '/web/scrub.js';
+import { syncTo } from '/web/camSync.js';
 import { TimeChart, C } from '../charts.js';
 import { split, seg, wireSeg, empty } from '../ui.js';
 
@@ -369,6 +370,8 @@ export default {
       drawTimeline();
       // scrub previews of this clip and its neighbours, ready before a drag
       scrubber.warm([s, st.segs[i + 1], st.segs[i - 1]].flatMap((x) => (x ? Object.values(x.files) : [])));
+      // a picture at once: the preview of this second until the videos show theirs
+      scrubber.show(GRID_ORDER.map((c) => ({ video: tiles[c].video, src: s.files[c] })), offset);
       msg('loading…');
       const m = master();
       if (!m) {
@@ -394,9 +397,12 @@ export default {
       if (autoplay) skipped = 0;
       msg('');
       if (fin(m.duration)) { s.dur = m.duration; drawTimeline(); }
+      // (a camera already there is not sent a seek: even one to where it is
+      // throws its decoded frames away, about half a second for six)
       for (const vid of activeVideos()) {
-        try { vid.currentTime = offset; } catch { /* not seekable yet */ }
+        try { if (Math.abs(vid.currentTime - offset) > 0.01) vid.currentTime = offset; } catch { /* not seekable yet */ }
       }
+      scrubber.release(GRID_ORDER.map((c) => tiles[c].video));
       loadTelemetry(s);
       drawHead();
       if (autoplay) play(); else setPlaying(false);
@@ -459,8 +465,7 @@ export default {
         // keep the other cameras within a frame or two of the master
         for (const x of activeVideos()) {
           if (x === m || x.seeking || x.readyState < 2) continue;
-          const drift = x.currentTime - m.currentTime;
-          if (Math.abs(drift) > 0.15) x.currentTime = m.currentTime;
+          syncTo(m, x, st.speed);
           if (x.paused && !m.paused) x.play().catch(() => {});
         }
         if (m.ended || (fin(m.duration) && m.currentTime >= m.duration - 0.03 && m.paused)) {

@@ -163,6 +163,19 @@ function buildEncodeArgs({ codec, encoder, bitrate, quality = null, vaapiDevice 
   else if (!encoder.endsWith('_vaapi')) args.push('-pix_fmt', 'yuv420p');
 
   if (encoder.endsWith('_amf') && quality === null) args.push('-rc', 'vbr_peak');
+  // A keyframe every 2 seconds of the clip. The encoders' own default
+  // (about one every 7 s) made seeking in converted footage 2.5 times slower
+  // (a seek decodes from the keyframe before it: 572 ms against 225 ms on a
+  // driving clip) and left the Viewer's scrub previews, made from keyframes,
+  // a frame per 7 s. Every 2 s costs about 1% on driving footage and keeps
+  // parked footage 95% smaller (every 1 s: 91%), at nearly the same seek
+  // speed. By time, so any frame rate gets it; NVENC and QSV make them IDR
+  // (clean seek points), VA-API does on its own, SVT-AV1 takes its own
+  // setting.
+  args.push('-force_key_frames', 'expr:gte(t,n_forced*2)');
+  if (encoder.endsWith('_nvenc')) args.push('-forced-idr', '1');
+  if (encoder.endsWith('_qsv')) args.push('-forced_idr', '1');
+  if (encoder === 'libsvtav1') args.push('-svtav1-params', 'keyint=2s');
   if (encoder === 'libx265') args.push('-preset', 'medium');
   if (encoder === 'libsvtav1') args.push('-preset', '8');
   if (encoder === 'libaom-av1') args.push('-cpu-used', '6', '-row-mt', '1');

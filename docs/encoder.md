@@ -96,6 +96,13 @@ with *Load these*, which fills the form only when you click it.
   group of frames, or have a frame Tesla's encoder skipped; both convert
   with every frame at its original time and the telemetry intact, and are
   verified like any other clip.
+- **Quick to seek.** Converted clips get a keyframe every 2 seconds (the
+  encoders' own default is about one every 7), so jumping around a
+  converted clip in the Viewer is about as quick as in the car's own files,
+  and the timeline previews change every 2 seconds. It costs about 1% on
+  driving footage; parked footage stays about 95% smaller. Clips converted
+  before this keep their keyframes: they play the same, seek a little
+  slower, and their previews change less often.
 - **Every clip ends up in one codec.** With *Constant quality* or a custom
   bitrate, a clip that does not come out smaller (busy repeater footage,
   night, rain) is encoded again at 85% of its original bitrate, then 60%,

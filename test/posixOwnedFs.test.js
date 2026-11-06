@@ -195,11 +195,12 @@ test('the real converter replaces originals in place with telemetry intact', { s
     await fsp.mkdir(clips, { recursive: true });
     await fsp.mkdir(path.join(root, 'user'));
     await fsp.mkdir(path.join(root, 'tmp'));
-    const pattern = Array.from({ length: 36 }, (_, i) => (i % 3 ? Buffer.from([0x20, i & 0xff]) : null));
+    const pattern = Array.from({ length: 108 }, (_, i) => (i % 3 ? Buffer.from([0x20, i & 0xff]) : null));
     const before = {};
     for (const cam of ['front', 'back']) {
       const p = path.join(clips, `2026-08-30_12-00-00-${cam}.mp4`);
-      await createTeslaH264Fixture({ ffmpegPath: 'ffmpeg', outputPath: p, durationSeconds: 3, frameRate: 12, size: '640x360', spatialNoise: 12, telemetryPattern: pattern });
+      // Tesla's own frame rate: a keyframe every 2 s is then a small part of the clip, as on the car's footage
+      await createTeslaH264Fixture({ ffmpegPath: 'ffmpeg', outputPath: p, durationSeconds: 3, frameRate: 36, size: '640x360', spatialNoise: 12, telemetryPattern: pattern });
       before[p] = extractH264TelemetryTimeline(await fsp.readFile(p)).samples.flatMap((s) => (s.seiNals || []).map((r) => String(r.fingerprint))).filter((f) => f !== 'undefined');
     }
     const { removeOwned, renameExclusive } = adapters();

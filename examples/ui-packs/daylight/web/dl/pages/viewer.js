@@ -10,6 +10,7 @@ import { decodeTelemetry, at } from '../telemetry.js';
 import { createViewerMap } from '/web/viewerMap.js';
 import { createExportPanel } from '/web/exportPanel.js';
 import { createScrubber } from '/web/scrub.js';
+import { syncTo } from '/web/camSync.js';
 
 // laid out like the car: pillars and front on top, repeaters and back below
 const CAMS = ['left_pillar', 'front', 'right_pillar', 'left_repeater', 'back', 'right_repeater'];
@@ -259,6 +260,9 @@ async function player(ctx, v, day, recId) {
     $('#prev-seg').disabled = st.seg === 0 && !prevRec;
     $('#next-seg').disabled = st.seg === segs.length - 1 && !nextRec;
     loadTelemetry();
+    // a picture at once: the first second's preview until the videos show theirs
+    scrubber.show([...videos].map(([c, video]) => ({ video, src: seg().cams[c] })), 0);
+    scrubber.release([...videos.values()]);
     const m = master();
     if (m && autoplay) {
       const go2 = () => playAll();
@@ -392,14 +396,14 @@ async function player(ctx, v, day, recId) {
   let lastSync = 0;
   const tick = (now) => {
     raf = requestAnimationFrame(tick);
-    if (now - lastSync < 200) return;
+    if (now - lastSync < 100) return;
     lastSync = now;
     const m = master();
     if (!m) return;
     if (st.playing) {
       for (const vid of videos.values()) {
         if (vid === m || vid.hidden || !vid.src || vid.readyState < 1) continue;
-        if (Math.abs(vid.currentTime - m.currentTime) > 0.25 && !vid.seeking) vid.currentTime = m.currentTime;
+        if (!vid.seeking) syncTo(m, vid, st.rate);
         if (vid.paused && !m.paused && !vid.ended) vid.play().catch(() => {});
       }
     }

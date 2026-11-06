@@ -24,7 +24,7 @@ const COLS = 10;
 const ROWS = 7;
 const MAX_IMAGES = 60;
 
-const images = new Map(); // path -> { img, ready, failed }
+const images = new Map(); // path -> { img, ready, failed, waiters }
 
 function pathOf(src) {
   if (!src) return null;
@@ -47,8 +47,13 @@ function grid(path) {
   }
   const img = new Image();
   img.decoding = 'async';
-  e = { img, ready: false, failed: false };
-  img.onload = () => { e.ready = img.naturalWidth > 0; };
+  e = { img, ready: false, failed: false, waiters: new Set() };
+  img.onload = () => {
+    e.ready = img.naturalWidth > 0;
+    // previews asked for before the grid had arrived
+    for (const fn of e.waiters) fn();
+    e.waiters.clear();
+  };
   img.onerror = () => { e.failed = true; images.delete(path); };
   img.src = `/api/scrub?path=${encodeURIComponent(path)}`;
   images.set(path, e);
@@ -60,7 +65,27 @@ export function createScrubber() {
   const layers = new WeakMap(); // video -> preview element
   const seeks = new WeakMap(); // video -> { want, sent }
   const shown = new Set();
+  const wanted = new WeakMap(); // video -> the preview last asked for
+  const released = new WeakSet(); // its drag or load is over: the preview goes when the video shows a frame
   let settling = 0;
+  let settleStart = 0;
+
+  // previews of released videos give way once each video shows its frame
+  // (restarted when a late preview appears)
+  function settle(restart = true) {
+    if (restart) settleStart = performance.now();
+    cancelAnimationFrame(settling);
+    const check = () => {
+      const age = performance.now() - settleStart;
+      for (const v of [...shown]) {
+        if (released.has(v) && age > 60 && !v.seeking && v.readyState >= 2) hideOne(v, true);
+      }
+      const left = [...shown].some((v) => released.has(v));
+      if (left && age < 8000) settling = requestAnimationFrame(check);
+      else if (left) for (const v of [...shown]) if (released.has(v)) hideOne(v, true);
+    };
+    settling = requestAnimationFrame(check);
+  }
 
   function layerFor(video) {
     let el = layers.get(video);
@@ -71,7 +96,7 @@ export function createScrubber() {
     el = document.createElement('div');
     el.className = 'sentry-scrub';
     el.setAttribute('aria-hidden', 'true');
-    el.style.cssText = 'position:absolute;pointer-events:none;background-repeat:no-repeat;z-index:1;display:none';
+    el.style.cssText = 'position:absolute;pointer-events:none;background-repeat:no-repeat;z-index:0;display:none';
     video.after(el);
     layers.set(video, el);
     return el;
@@ -83,7 +108,22 @@ export function createScrubber() {
     const g = grid(path);
     const el = layerFor(video);
     if (!el) return;
-    if (!g?.ready) { hideOne(video); return; }
+    if (!g?.ready) {
+      hideOne(video);
+      // drawn when the grid arrives, if this is still wanted and the video
+      // still has nothing to show
+      if (g) {
+        wanted.set(video, { path, t });
+        g.waiters.add(() => {
+          const w = wanted.get(video);
+          if (w && w.path === path && !showsIt(video, path, w.t) && !(video.readyState >= 2 && !video.seeking && pathOf(video.currentSrc) === path)) {
+            draw(video, path, w.t);
+            if (released.has(video)) settle();
+          }
+        });
+      }
+      return;
+    }
     const W = video.offsetWidth;
     const H = video.offsetHeight;
     if (!W || !H) { hideOne(video); return; }
@@ -109,7 +149,8 @@ export function createScrubber() {
     shown.add(video);
   }
 
-  function hideOne(video) {
+  function hideOne(video, forget = false) {
+    if (forget) wanted.delete(video);
     const el = layers.get(video);
     if (el) el.style.display = 'none';
     shown.delete(video);
@@ -138,7 +179,9 @@ export function createScrubber() {
       cancelAnimationFrame(settling);
       for (const { video, src } of pairs) {
         if (!video) continue;
+        released.delete(video);
         const path = pathOf(src);
+        wanted.set(video, path ? { path, t } : null);
         const s = seeks.get(video);
         if (s) { s.path = path; s.want = s.want ?? t; }
         if (!path || showsIt(video, path, t)) hideOne(video);
@@ -164,17 +207,13 @@ export function createScrubber() {
     },
     // the drag ended: each preview goes once its video shows the frame
     release(videos) {
-      for (const v of videos) { const s = seeks.get(v); if (s) s.want = s.sent = null; }
-      const start = performance.now();
-      cancelAnimationFrame(settling);
-      const check = () => {
-        for (const v of [...shown]) {
-          if (performance.now() - start > 60 && !v.seeking && v.readyState >= 2) hideOne(v);
-        }
-        if (shown.size && performance.now() - start < 8000) settling = requestAnimationFrame(check);
-        else for (const v of [...shown]) hideOne(v);
-      };
-      settling = requestAnimationFrame(check);
+      for (const v of videos) {
+        if (!v) continue;
+        const s = seeks.get(v);
+        if (s) s.want = s.sent = null;
+        released.add(v);
+      }
+      settle();
     },
     warm(srcs) {
       for (const src of srcs || []) grid(pathOf(src));

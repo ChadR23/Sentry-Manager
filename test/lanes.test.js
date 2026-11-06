@@ -340,7 +340,7 @@ test('a job without lanes runs ffmpeg with exactly the arguments it always had',
       '-nostdin', '-hide_banner', '-loglevel', 'error', '-n',
       '-hwaccel', 'vaapi', '-hwaccel_device', '/dev/dri/renderD128',
       '-i', source,
-      '-c:v', 'hevc_qsv', '-b:v', '250000', '-pix_fmt', 'nv12', '-bf', '0', ...TAIL,
+      '-c:v', 'hevc_qsv', '-b:v', '250000', '-pix_fmt', 'nv12', '-force_key_frames', 'expr:gte(t,n_forced*2)', '-forced_idr', '1', '-bf', '0', ...TAIL,
       '-an', '-sn', '-dn', '-progress', 'pipe:1', '-nostats', '-f', 'mp4', target
     ]]);
     assert.deepEqual(qsv.resolved, [], 'no device is looked up');
@@ -356,7 +356,8 @@ test('a job without lanes runs ffmpeg with exactly the arguments it always had',
     assert.deepEqual(args.slice(0, 13), ['-nostdin', '-hide_banner', '-loglevel', 'error', '-n',
       '-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda', '-i', args[10], '-c:v', 'hevc_nvenc']);
     // (hevc_nvenc caps its peak rate at the bitrate: encoderPlanner.js bitrateArgs)
-    assert.deepEqual(args.slice(13, 23), ['-rc', 'vbr', '-b:v', '250000', '-maxrate', '250000', '-bufsize', '500000', '-bf', '0']);
+    assert.deepEqual(args.slice(13, 27), ['-rc', 'vbr', '-b:v', '250000', '-maxrate', '250000', '-bufsize', '500000',
+      '-force_key_frames', 'expr:gte(t,n_forced*2)', '-forced-idr', '1', '-bf', '0']);
     assert.equal(args.includes('-gpu'), false);
     assert.equal(args.includes('-hwaccel_device'), false);
   } finally {

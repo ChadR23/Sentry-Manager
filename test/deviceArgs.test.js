@@ -14,22 +14,25 @@ const AV1_TAIL = ['-tag:v', 'av01', '-fps_mode', 'passthrough', '-start_at_zero'
 // hevc_nvenc with a bitrate caps its peak rate at it (encoderPlanner.js bitrateArgs)
 const NVENC_RATE = ['-rc', 'vbr', '-b:v', '1234567', '-maxrate', '1234567', '-bufsize', '2469134'];
 
+// a keyframe every 2 s (encoderPlanner.js); NVENC and QSV make them IDR
+const KF = ['-force_key_frames', 'expr:gte(t,n_forced*2)'];
+
 test('without a device every encoder gets exactly today\'s arguments', () => {
   const bitrate = 1_234_567;
   assert.deepEqual(buildEncodeArgs({ codec: 'h265', encoder: 'hevc_vaapi', bitrate }),
-    ['-vaapi_device', '/dev/dri/renderD128', '-vf', 'format=nv12,hwupload', '-c:v', 'hevc_vaapi', '-b:v', '1234567', '-bf', '0', ...TAIL]);
+    ['-vaapi_device', '/dev/dri/renderD128', '-vf', 'format=nv12,hwupload', '-c:v', 'hevc_vaapi', '-b:v', '1234567', ...KF, '-bf', '0', ...TAIL]);
   assert.deepEqual(buildEncodeArgs({ codec: 'h265', encoder: 'hevc_qsv', bitrate }),
-    ['-c:v', 'hevc_qsv', '-b:v', '1234567', '-pix_fmt', 'nv12', '-bf', '0', ...TAIL]);
+    ['-c:v', 'hevc_qsv', '-b:v', '1234567', '-pix_fmt', 'nv12', ...KF, '-forced_idr', '1', '-bf', '0', ...TAIL]);
   assert.deepEqual(buildEncodeArgs({ codec: 'h265', encoder: 'hevc_nvenc', bitrate }),
-    ['-c:v', 'hevc_nvenc', ...NVENC_RATE, '-pix_fmt', 'yuv420p', '-bf', '0', ...TAIL]);
+    ['-c:v', 'hevc_nvenc', ...NVENC_RATE, '-pix_fmt', 'yuv420p', ...KF, '-forced-idr', '1', '-bf', '0', ...TAIL]);
   assert.deepEqual(buildEncodeArgs({ codec: 'h265', encoder: 'hevc_nvenc', bitrate, hwFrames: true }),
-    ['-c:v', 'hevc_nvenc', ...NVENC_RATE, '-bf', '0', ...TAIL]);
+    ['-c:v', 'hevc_nvenc', ...NVENC_RATE, ...KF, '-forced-idr', '1', '-bf', '0', ...TAIL]);
   assert.deepEqual(buildEncodeArgs({ codec: 'h265', encoder: 'libx265', bitrate }),
-    ['-c:v', 'libx265', '-b:v', '1234567', '-pix_fmt', 'yuv420p', '-preset', 'medium', '-bf', '0', ...TAIL]);
+    ['-c:v', 'libx265', '-b:v', '1234567', '-pix_fmt', 'yuv420p', ...KF, '-preset', 'medium', '-bf', '0', ...TAIL]);
   assert.deepEqual(buildEncodeArgs({ codec: 'av1', encoder: 'av1_vaapi', quality: 'balanced' }),
-    ['-vaapi_device', '/dev/dri/renderD128', '-vf', 'format=nv12,hwupload', '-c:v', 'av1_vaapi', '-rc_mode', 'CQP', '-global_quality', '112', ...AV1_TAIL]);
+    ['-vaapi_device', '/dev/dri/renderD128', '-vf', 'format=nv12,hwupload', '-c:v', 'av1_vaapi', '-rc_mode', 'CQP', '-global_quality', '112', ...KF, ...AV1_TAIL]);
   assert.deepEqual(buildEncodeArgs({ codec: 'av1', encoder: 'av1_qsv', quality: 'high' }),
-    ['-c:v', 'av1_qsv', '-global_quality', '24', '-pix_fmt', 'nv12', ...AV1_TAIL]);
+    ['-c:v', 'av1_qsv', '-global_quality', '24', '-pix_fmt', 'nv12', ...KF, '-forced_idr', '1', ...AV1_TAIL]);
   assert.deepEqual(buildEncodeArgs({ codec: 'h265', encoder: 'hevc_vaapi', bitrate, vaapiDevice: '/dev/dri/renderD130' }).slice(0, 2),
     ['-vaapi_device', '/dev/dri/renderD130']);
 
@@ -50,7 +53,7 @@ test('a chosen GPU: VA-API and QSV on its render node, NVENC by its index', () =
   const qsv = buildEncodeArgs({ codec: 'av1', encoder: 'av1_qsv', bitrate: 800_000, device: ARC });
   assert.deepEqual(qsv.slice(0, 4), ['-init_hw_device', 'qsv=qsvenc:hw_any,child_device=/dev/dri/renderD129', '-c:v', 'av1_qsv']);
   assert.ok(qsv.indexOf('-init_hw_device') < qsv.indexOf('-c:v'), 'the global option comes before -c:v');
-  assert.deepEqual(qsv.slice(4), ['-b:v', '800000', '-pix_fmt', 'nv12', ...AV1_TAIL]);
+  assert.deepEqual(qsv.slice(4), ['-b:v', '800000', '-pix_fmt', 'nv12', ...KF, '-forced_idr', '1', ...AV1_TAIL]);
 
   const nvenc = buildEncodeArgs({ codec: 'h265', encoder: 'hevc_nvenc', quality: 'small', device: RTX });
   assert.deepEqual(nvenc.slice(0, 4), ['-c:v', 'hevc_nvenc', '-gpu', '1']);
