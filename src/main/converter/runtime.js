@@ -1224,7 +1224,11 @@ async function createConverterRuntime(options = {}) {
       if (shutdownPromise) return Promise.reject(runtimeError('SERVICE_SHUTDOWN'));
       if (!startPromise) {
         const attempt = (async () => {
-          const manifests = await store.list();
+          // Summaries (each job's state and the files it still owns, saved
+          // beside finished jobs) rather than every job ever run in full: the
+          // sweeps need only the owned files, recovery only unfinished jobs,
+          // which it reads whole itself.
+          const manifests = typeof store.summaries === 'function' ? await store.summaries() : await store.list();
           if (options.sweepLeftoversOnStart !== false) await sweepUnreferencedSnapshotFolders(manifests);
           const recovered = [];
           for (const manifest of manifests) {

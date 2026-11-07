@@ -1310,13 +1310,50 @@ function createJobStore(options) {
     const { items, ...rest } = manifest;
     const itemCounts = { converted: 0, skipped: 0, failed: 0 };
     let progressClips = 0;
+    // every file the job or its clips still own (the startup sweeps keep these)
+    const owned = {};
+    let n = 0;
+    const own = (value) => { if (typeof value === 'string') owned[`p${n++}`] = value; };
+    const ownAll = (holder) => {
+      for (const value of Object.values(holder?.ownedPaths || {})) own(value);
+      for (const value of Object.values(holder?.ownedArtifacts || {})) own(value?.path);
+      own(holder?.publicationArtifact?.path);
+    };
+    ownAll(manifest);
     for (const item of items || []) {
+      ownAll(item);
       if (item?.kind !== 'video') continue;
       if (item.state === 'completed' && item.eligibleVideo !== false) { itemCounts.converted++; progressClips++; }
       else if (item.state === 'skipped') itemCounts.skipped++;
       else if (item.state === 'failed') itemCounts.failed++;
     }
-    return freezeDeep({ ...rest, items: [], itemCounts, progressClips, itemTotal: (items || []).length });
+    return freezeDeep({ ...rest, items: [], ownedPaths: owned, itemCounts, progressClips, itemTotal: (items || []).length });
+  }
+
+  // A finished job's summary is also saved beside it (summary.json, with the
+  // stamp of the files it was made from): after a restart the summaries come
+  // from these small files instead of parsing every job ever run (about
+  // 1.7 s of CPU at startup with three 48,000-clip jobs).
+  const SUMMARY_NAME = 'summary.json';
+  async function savedSummary(id, stamp) {
+    try {
+      const saved = JSON.parse(await fileSystem.readFile(path.join(jobPaths(id).directory, SUMMARY_NAME), 'utf8'));
+      if (saved?.v !== 1 || saved.stamp !== stamp || saved.summary?.id !== id || !Array.isArray(saved.summary.items)) return null;
+      return freezeDeep(saved.summary);
+    } catch (_) {
+      return null;
+    }
+  }
+  async function saveSummary(id, stamp, summary) {
+    if (!TERMINAL_JOB_STATES.has(summary.state)) return;
+    const directory = jobPaths(id).directory;
+    const temporary = path.join(directory, `${SUMMARY_NAME}.${process.pid}.tmp`);
+    try {
+      await fileSystem.writeFile(temporary, JSON.stringify({ v: 1, stamp, summary }));
+      await fileSystem.rename(temporary, path.join(directory, SUMMARY_NAME));
+    } catch (_) {
+      await fileSystem.unlink?.(temporary)?.catch?.(() => {});
+    }
   }
   async function summaries() {
     await ensureRoot();
@@ -1333,10 +1370,13 @@ function createJobStore(options) {
         const stamp = await stampOf(entry.name);
         const cached = summaryCache.get(entry.name);
         if (cached && cached.stamp === stamp) { out.push(cached.summary); continue; }
+        const saved = await savedSummary(entry.name, stamp);
+        if (saved) { summaryCache.set(entry.name, { stamp, summary: saved }); out.push(saved); continue; }
         const manifest = await runExclusive(entry.name, () => readManifest(entry.name));
         if (!manifest) { summaryCache.delete(entry.name); continue; }
         const summary = summarize(manifest);
         summaryCache.set(entry.name, { stamp, summary });
+        await saveSummary(entry.name, stamp, summary);
         out.push(summary);
       } catch (error) {
         summaryCache.delete(entry.name);
