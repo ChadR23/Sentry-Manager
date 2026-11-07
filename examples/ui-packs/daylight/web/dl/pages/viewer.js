@@ -12,6 +12,7 @@ import { createExportPanel } from '/web/exportPanel.js';
 import { createScrubber, attachTimelineTip } from '/web/scrub.js';
 import { createMoments } from '/web/moments.js';
 import { attachViewerExtras, savedPosition } from '/web/viewerExtras.js';
+import { createLayoutSlots } from '/web/layouts.js';
 import { syncTo } from '/web/camSync.js';
 
 // laid out like the car: pillars and front on top, repeaters and back below
@@ -587,6 +588,14 @@ async function player(ctx, v, day, recId) {
     offerResume: false
   });
   ctx.cleanup(() => extras.destroy());
+  // three saved camera layouts (web/layouts.js)
+  const slots = createLayoutSlots($('#full').parentElement, {
+    key: 'daylight',
+    get: () => ({ focus: st.focus || null }),
+    apply: (l) => { if ((l.focus || null) !== (st.focus || null)) setFocus(l.focus || st.focus); },
+    describe: (l) => (l.focus ? `${CAM_WORD[l.focus] || l.focus} camera large` : 'all cameras')
+  });
+  ctx.cleanup(() => slots.destroy());
   const atSeg = atClip ? segOf(atClip) : -1;
   if (atSeg >= 0) { st.seg = atSeg; pendingSeek = Math.max(0, (Number(atSec) || 0) - 3); }
   load(st.seg, new URLSearchParams(location.hash.split('?')[1] || '').get('autoplay') === '1');

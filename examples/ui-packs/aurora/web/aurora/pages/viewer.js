@@ -11,6 +11,7 @@ import { createExportPanel } from '/web/exportPanel.js';
 import { createScrubber, attachTimelineTip, timeAfter } from '/web/scrub.js';
 import { createMoments } from '/web/moments.js';
 import { attachViewerExtras } from '/web/viewerExtras.js';
+import { createLayoutSlots } from '/web/layouts.js';
 import { syncTo } from '/web/camSync.js';
 
 const CAMS = ['front', 'back', 'left_repeater', 'right_repeater', 'left_pillar', 'right_pillar'];
@@ -154,6 +155,13 @@ export default {
       where: () => { const c = clips[index]; const m = vids[master || camsHere()[0]]; return c && m ? { vehicle: v.id, day: c.key.slice(0, 10), clip: c.key, second: m.currentTime } : null; },
       resumeTo: (pos) => go(`#/viewer/${encodeURIComponent(pos.vehicle)}/day/${encodeURIComponent(pos.day)}?at=${encodeURIComponent(`${pos.clip}~${pos.second}`)}`),
       offerResume: !query?.get('at') && !params[0]
+    });
+    // three saved camera layouts (web/layouts.js)
+    const slots = createLayoutSlots(q('#c-full').parentElement, {
+      key: 'aurora',
+      get: () => ({ focus: focus || null }),
+      apply: (l) => { if ((l.focus || null) !== (focus || null)) setFocus(l.focus || focus); },
+      describe: (l) => (l.focus ? `${NAMES[l.focus] || l.focus} large` : 'all cameras')
     });
     // Export: mark a start and an end, see the clips, render one video on the server
     const xp = createExportPanel({
@@ -850,7 +858,7 @@ export default {
     } catch (err) {
       q('#vw-title').innerHTML = `<span class="note bad">${esc(err.message)}</span>`;
     }
-    if (dead) { tip.destroy(); moments.destroy(); extras.destroy(); map.destroy(); xp.destroy(); return {}; }
+    if (dead) { tip.destroy(); moments.destroy(); extras.destroy(); slots.destroy(); map.destroy(); xp.destroy(); return {}; }
     drawList();
     // HW3 or HW4 from the footage itself, as the built-in Viewer does: only
     // HW4 cars record the pillar cameras, so without them the cockpit has no
@@ -885,6 +893,7 @@ export default {
         tip.destroy();
         moments.destroy();
         extras.destroy();
+        slots.destroy();
         map.destroy();
         xp.destroy();
         document.removeEventListener('keydown', onKey);

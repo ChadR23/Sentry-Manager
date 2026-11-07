@@ -91,7 +91,10 @@ function normalize(body) {
   if (camera !== 'grid' && !CAMS.includes(camera)) throw new ExportError('Choose all cameras or one camera.');
   if (camera !== 'grid' && !out.some((c) => c.files[camera])) throw new ExportError(`None of these clips has the ${CAM_NAME[camera]} camera.`);
   const units = body?.units === 'kmh' ? 'kmh' : 'mph';
-  return { clips: out, camera, units, seconds };
+  // privacy: no speed in the picture and no hidden details in the file
+  // (encoder, creation time); the date and time stay. Off unless asked for.
+  const privacy = body?.privacy === true;
+  return { clips: out, camera, units, seconds, privacy };
 }
 
 /** The picture: one camera, or a grid of the cameras these clips have. */
@@ -307,7 +310,7 @@ function createExporter({ dir, ffmpegPath = 'ffmpeg', ffprobePath = null, jobs, 
         continue;
       }
       const front = clip.files.front || clip.files[layout.cams.find((c) => clip.files[c])] || Object.values(clip.files)[0];
-      const speeds = await speedsFor(front).catch(() => null);
+      const speeds = x.privacy ? null : await speedsFor(front).catch(() => null);
       const assName = `part-${i}.ass`;
       const outName = `part-${i}.mp4`;
       await fsp.writeFile(path.join(work, assName), overlayAss({ clip, speeds, units: x.units, clock24: clock24(), width: layout.w, height: layout.h, layout }));
@@ -353,7 +356,9 @@ function createExporter({ dir, ffmpegPath = 'ffmpeg', ffprobePath = null, jobs, 
       if (!parts.length) throw new Error('none of these clips could be read');
       await fsp.writeFile(path.join(work, 'parts.txt'), parts.map((p) => `file '${p}'`).join('\n'));
       jobs.update(x.jobId, { detail: 'Joining the clips…' });
-      await ffmpeg(x, ['-hide_banner', '-nostdin', '-y', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', 'parts.txt', '-c', 'copy', '-movflags', '+faststart', 'export.mp4'], work, 0);
+      await ffmpeg(x, ['-hide_banner', '-nostdin', '-y', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', 'parts.txt', '-c', 'copy',
+        ...(x.privacy ? ['-map_metadata', '-1', '-map_chapters', '-1', '-fflags', '+bitexact', '-metadata:s:v', 'handler_name=', '-metadata:s:v', 'encoder='] : []),
+        '-movflags', '+faststart', 'export.mp4'], work, 0);
       await fsp.rename(path.join(work, 'export.mp4'), x.file);
       x.bytes = (await fsp.stat(x.file)).size;
       x.state = 'done';

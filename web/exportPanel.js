@@ -41,6 +41,8 @@ const CSS = `
 .xp-sel{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .xp-sel label{display:grid;gap:4px;font-size:12.5px;color:var(--xp-muted,#9aa4b2)}
 .xp-sel select{width:100%;color:var(--xp-fg,#e8ecf2)}
+.xp-priv{display:flex;gap:8px;align-items:flex-start;font-size:12.5px;line-height:1.35;color:var(--xp-muted,#9aa4b2);cursor:pointer}
+.xp-priv input{margin:2px 0 0;flex:none}
 .xp-sel option{color:#111;background:#fff}
 .xp-sum{font-size:12.5px;color:var(--xp-muted,#9aa4b2)}
 .xp-sum b{color:var(--xp-fg,#e8ecf2)}
@@ -148,6 +150,7 @@ export function createExportPanel({ vehicleId, clips, position, units = () => 'm
         <label>Cameras<select data-x="camera"></select></label>
         <label>Speed in<select data-x="units"><option value="mph">mph</option><option value="kmh">km/h</option></select></label>
       </div>
+      <label class="xp-priv"><input type="checkbox" data-x="privacy"> Privacy: leave out the speed and the file's hidden details (the date and time stay)</label>
       <div data-x="run" hidden>
         <p class="xp-sum" data-x="state" style="margin:0 0 6px"></p>
         <div class="xp-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-label="Export progress"><i data-x="bar"></i></div>
@@ -275,7 +278,7 @@ export function createExportPanel({ vehicleId, clips, position, units = () => 'm
       try {
         const vid = vehicleId();
         job = await call('POST', vid ? `/api/vehicles/${encodeURIComponent(vid)}/exports` : '/api/exports', {
-          camera: $('camera').value, units: $('units').value,
+          camera: $('camera').value, units: $('units').value, privacy: $('privacy').checked,
           clips: parts.map((p) => ({ key: p.clip.key, files: p.clip.files, from: Number(p.from.toFixed(3)), to: Number(p.to.toFixed(3)) }))
         });
         showJob();
@@ -290,6 +293,9 @@ export function createExportPanel({ vehicleId, clips, position, units = () => 'm
       showJob();
     }
   });
+  el.addEventListener('change', (e) => {
+    if (e.target.matches('[data-x="privacy"]')) { try { localStorage.setItem('sentry-export-privacy', e.target.checked ? '1' : '0'); } catch { /* this time only */ } }
+  });
   el.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') { e.stopPropagation(); close(); }
     // keys typed in the panel are the panel's, not the player's shortcuts
@@ -299,6 +305,8 @@ export function createExportPanel({ vehicleId, clips, position, units = () => 'm
   async function open() {
     h24 = await useClock24();
     $('units').value = units() === 'kmh' ? 'kmh' : 'mph';
+    // the privacy choice is remembered in this browser (off at first)
+    try { $('privacy').checked = localStorage.getItem('sentry-export-privacy') === '1'; } catch { /* off */ }
     if (!start) {
       // a first look: from here, 30 seconds on
       el.querySelector('[data-x="set-start"]').click();

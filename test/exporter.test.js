@@ -207,3 +207,10 @@ test('a GPU that passes its trial but fails on the footage: the export is render
     await fsp.rm(dir, { recursive: true, force: true });
   }
 });
+
+test('privacy export: off unless asked for', () => {
+  const body = { clips: [{ key: '2026-11-03_10-00-00', files: { front: '/a.mp4' }, from: 0, to: 5 }] };
+  assert.equal(normalize(body).privacy, false);
+  assert.equal(normalize({ ...body, privacy: 'yes' }).privacy, false, 'only true turns it on');
+  assert.equal(normalize({ ...body, privacy: true }).privacy, true);
+});

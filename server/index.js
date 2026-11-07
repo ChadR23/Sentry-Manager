@@ -1284,6 +1284,75 @@ async function main() {
     }
     return { weeks: [...out.values()].map((w) => ({ ...w, distance: Math.round(w.distance), top: Math.round(w.top * 100) / 100 })) };
   });
+  // The event map: every Sentry and Saved event with a position (Tesla's
+  // event.json est_lat / est_lon), newest first; each event.json is read once
+  // and kept while it does not change
+  const eventSpots = new Map(); // `${vid}/${rel}` -> { stamp, info }
+  r.add('GET', '/api/vehicles/:id/event-map', async (req, res, { params }) => {
+    const v = vehicleOr404(params.id);
+    const inv = inventory.get(v.id);
+    const recs = (inv?.recordings || []).filter((x) => x.eventId).sort((a, b) => String(b.startKey).localeCompare(String(a.startKey))).slice(0, 1000);
+    const out = [];
+    let next = 0;
+    const work = async () => {
+      while (next < recs.length) {
+        const rec = recs[next++];
+        const rel = rec.files.find((f) => /\/event\.json$/i.test(f));
+        const f = rel && inv.files.get(rel);
+        if (!f) continue;
+        const key = `${v.id}/${rel}`;
+        const stamp = `${f.size}/${Math.round(f.mtimeMs)}`;
+        let had = eventSpots.get(key);
+        if (!had || had.stamp !== stamp) {
+          had = { stamp, info: await inventory.eventInfo(v.id, rec).catch(() => null) };
+          eventSpots.set(key, had);
+          if (eventSpots.size > 20000) eventSpots.delete(eventSpots.keys().next().value);
+        }
+        const lat = Number(had.info?.est_lat);
+        const lon = Number(had.info?.est_lon);
+        if (!Number.isFinite(lat) || !Number.isFinite(lon) || (lat === 0 && lon === 0) || Math.abs(lat) > 90 || Math.abs(lon) > 180) continue;
+        out.push({
+          recording: rec.id, category: rec.category, day: rec.day, start: rec.start, startKey: rec.startKey, lat, lon,
+          reason: had.info.reason || null, city: had.info.city || null, street: had.info.street || null, at: had.info.timestamp || null
+        });
+      }
+    };
+    await Promise.all(Array.from({ length: 6 }, work));
+    out.sort((a, b) => String(b.startKey).localeCompare(String(a.startKey)));
+    return { events: out, withoutPosition: recs.length - out.length };
+  });
+  // Saved places: named spots (Home, Work) for the maps and the place search
+  const placeList = () => (Array.isArray(db.get('places', [])) ? db.get('places', []) : []);
+  const placeName = (n) => String(n ?? '').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 60);
+  r.add('GET', '/api/places', () => ({ places: placeList() }));
+  r.add('POST', '/api/places', (req, res, { body }) => {
+    const lat = Number(body?.lat);
+    const lon = Number(body?.lon);
+    const name = placeName(body?.name);
+    if (!name) throw new HttpError(400, 'Give the place a name.');
+    if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) throw new HttpError(400, 'That is not a place on the map.');
+    const list = placeList();
+    if (list.length >= 200) throw new HttpError(400, 'There are 200 saved places already: remove some first.');
+    const place = { id: crypto.randomBytes(5).toString('hex'), name, lat: Math.round(lat * 1e5) / 1e5, lon: Math.round(lon * 1e5) / 1e5 };
+    db.set('places', [...list, place]);
+    return { place };
+  });
+  r.add('PATCH', '/api/places/:id', (req, res, { params, body }) => {
+    const list = placeList();
+    const place = list.find((x) => x.id === params.id);
+    if (!place) throw new HttpError(404, 'No such place.');
+    const name = placeName(body?.name);
+    if (!name) throw new HttpError(400, 'Give the place a name.');
+    place.name = name;
+    db.set('places', list);
+    return { place };
+  });
+  r.add('DELETE', '/api/places/:id', (req, res, { params }) => {
+    const list = placeList();
+    if (!list.some((x) => x.id === params.id)) throw new HttpError(404, 'No such place.');
+    db.set('places', list.filter((x) => x.id !== params.id));
+    return { ok: true };
+  });
   // Search by place: every clip that passed near a point (speedIndex.near)
   r.add('GET', '/api/places/near', async (req, res, { query }) => {
     const lat = Number(query.lat);

@@ -8,6 +8,7 @@ import { createExportPanel } from '/web/exportPanel.js';
 import { createScrubber, attachTimelineTip, timeAfter } from '/web/scrub.js';
 import { createMoments } from '/web/moments.js';
 import { attachViewerExtras } from '/web/viewerExtras.js';
+import { createLayoutSlots } from '/web/layouts.js';
 import { syncTo } from '/web/camSync.js';
 
 const FILE_RE = /(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})-([a-z0-9_]+)\.mp4$/i;
@@ -162,6 +163,13 @@ export default {
       where: () => { const c = st.clips[st.i]; const m = master(); return c && m ? { vehicle: v.id, day: c.key.slice(0, 10), clip: c.key, second: m.currentTime } : null; },
       resumeTo: (pos) => go(`#/viewer?day=${encodeURIComponent(pos.day)}&at=${encodeURIComponent(`${pos.clip}~${pos.second}`)}&autoplay=0`),
       offerResume: !params.get('at') && !params.get('rec') && !params.get('day')
+    });
+    // three saved camera layouts (web/layouts.js)
+    const slots = createLayoutSlots($('#vw-export').parentElement, {
+      key: 'horizon',
+      get: () => ({ main: st.main, grid: st.grid, hud: st.hud }),
+      apply: (l) => { if (l.main && l.main !== st.main) setMain(l.main); setGrid(Boolean(l.grid)); setHud(l.hud !== false); },
+      describe: (l) => `${l.grid ? 'all cameras' : `${CAM_NAME[l.main] || 'Front'} large`}${l.hud === false ? ', no heads-up display' : ''}`
     });
 
     // ---------- playlist ----------
@@ -737,6 +745,7 @@ export default {
         tip.destroy();
         moments.destroy();
         extras.destroy();
+        slots.destroy();
         map.destroy();
         xp.destroy();
         spdSize.disconnect();

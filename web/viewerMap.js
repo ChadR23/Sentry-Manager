@@ -94,6 +94,14 @@ const CSS = `
 .vm-places li b{font-variant-numeric:tabular-nums}
 .vm-places li span{opacity:.7;margin-left:auto;white-space:nowrap}
 .vm-places p{margin:0;padding:10px}
+.vm-pin{all:unset;box-sizing:border-box;width:16px;height:16px;border-radius:50%;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.5);cursor:pointer}
+.vm-pin:focus-visible{outline:3px solid #fff}
+.vm-place{display:flex;align-items:center;gap:4px;pointer-events:none;font:700 11px/1.2 system-ui,sans-serif;color:#fff;text-shadow:0 1px 2px #000,0 0 3px #000}
+.vm-place i{width:10px;height:10px;border-radius:3px;background:#ffd34a;border:2px solid #fff;flex:none}
+.vm-chips{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;margin-top:6px}
+.vm-chips button,.vm-places header button[data-save],.vm-save button{all:unset;cursor:pointer;padding:3px 9px;border-radius:999px;border:1px solid var(--vm-btn-border,rgba(255,255,255,.3));font-weight:600;font-size:12px}
+.vm-save{display:flex;gap:6px;padding:6px 10px}
+.vm-save input{flex:1;min-width:0;padding:4px 8px;border-radius:6px;border:1px solid var(--vm-btn-border,rgba(255,255,255,.3));background:transparent;color:inherit;font:inherit}
 .vm-spot{width:14px;height:14px;border-radius:50%;background:var(--vm-btn-active,#5ee9a0);border:2px solid #fff;box-shadow:0 0 0 6px rgba(94,233,160,.25)}
 `;
 
@@ -144,11 +152,12 @@ export function createViewerMap(container, opts = {}) {
   // what the map is to show, kept until it is there
   const routes = new Map();
   let pos = null;
+  let pins = null; // [pins, options] kept until the map is there
   let dark = !!opts.dark;
   let real = null;
   let dead = false;
   let onScreen = typeof IntersectionObserver !== 'function';
-  const hasGps = () => hasFix(pos) || [...routes.values()].some((records) => (records || []).some(hasFix));
+  const hasGps = () => hasFix(pos) || Boolean(pins?.[0]?.length) || [...routes.values()].some((records) => (records || []).some(hasFix));
   const io = onScreen ? null : new IntersectionObserver((entries) => {
     onScreen = entries.some((e) => e.isIntersecting);
     maybeLoad();
@@ -164,6 +173,7 @@ export function createViewerMap(container, opts = {}) {
       real = buildViewerMap(container, { ...opts, dark });
       for (const [key, records] of routes) real.addRoute(key, records);
       if (pos) real.setPosition(pos);
+      if (pins) real.setPins(...pins);
     }).catch(() => {
       note.textContent = 'The map could not be loaded.';
       note.hidden = false;
@@ -174,6 +184,8 @@ export function createViewerMap(container, opts = {}) {
     clearRoute() { if (real) real.clearRoute(); else { routes.clear(); pos = null; maybeLoad(); } },
     setPosition(r) { if (real) real.setPosition(r); else { pos = r; if (hasFix(r)) maybeLoad(); } },
     setDark(on) { dark = !!on; real?.setDark(on); },
+    /** Pins: [{ lat, lon, color, title }] and { onPick(pin) }; the map fits them when it has no route. */
+    setPins(list, pinOpts = {}) { if (real) real.setPins(list, pinOpts); else { pins = [list || [], pinOpts]; maybeLoad(); } },
     resize() { real?.resize(); },
     destroy() {
       dead = true;
@@ -282,7 +294,7 @@ function buildViewerMap(container, opts = {}) {
 
   function showNote() {
     note.textContent = noGpsText;
-    note.hidden = !!(last || routes.size && [...routes.values()].some((pts) => pts.length));
+    note.hidden = !!(last || pinMarkers.length || routes.size && [...routes.values()].some((pts) => pts.length));
   }
 
   function setFollow(on) {
@@ -308,6 +320,44 @@ function buildViewerMap(container, opts = {}) {
     saveSetting('mapTileProvider', provider);
     applyStyle();
   });
+  // ---- pins (the event map) ----
+  let pinMarkers = [];
+  function setPins(list, { onPick = null } = {}) {
+    for (const m of pinMarkers) m.remove();
+    pinMarkers = [];
+    const pts = [];
+    for (const p of list || []) {
+      if (!hasFix(p)) continue;
+      const el = document.createElement('button');
+      el.type = 'button';
+      el.className = 'vm-pin';
+      el.style.background = p.color || '#ff5d5d';
+      el.title = p.title || '';
+      el.setAttribute('aria-label', p.title || 'Event');
+      if (onPick) el.addEventListener('click', (e) => { e.stopPropagation(); onPick(p); });
+      const marker = htmlMarker(map, [p.lat, p.lon], { html: '' });
+      marker.getElement().appendChild(el);
+      pinMarkers.push(marker);
+      pts.push([p.lat, p.lon]);
+    }
+    showNote();
+    if (pts.length && !routes.size && !last) fitTo(map, boundsOf(pts), { padding: 40, maxZoom: 15 });
+  }
+
+  // ---- saved places: labelled on the map, and places the search can use ----
+  let places = [];
+  let placeMarkers = [];
+  async function loadPlaces() {
+    try {
+      const r = await fetch('/api/places', { credentials: 'same-origin' });
+      places = r.ok ? (await r.json()).places || [] : [];
+    } catch { places = []; }
+    if (destroyed) return;
+    for (const m of placeMarkers) m.remove();
+    placeMarkers = places.map((p) => htmlMarker(map, [p.lat, p.lon], { html: `<div class="vm-place"><i></i><span>${esc(p.name)}</span></div>` }));
+  }
+  if (opts.places !== false) loadPlaces();
+
   // ---- search by place ----
   let picking = false;
   let spot = null;
@@ -328,16 +378,34 @@ function buildViewerMap(container, opts = {}) {
     container.querySelector('.vm-hint')?.remove();
     if (on) {
       closePlaces();
-      container.insertAdjacentHTML('beforeend', '<div class="vm-hint" role="status">Tap a place on the map to find clips recorded there</div>');
+      container.insertAdjacentHTML('beforeend', `<div class="vm-hint" role="status">Tap a place on the map to find clips recorded there${places.length ? `<span class="vm-chips">${places.map((p, i) => `<button type="button" data-place="${i}">${esc(p.name)}</button>`).join('')}</span>` : ''}</div>`);
+      container.querySelector('.vm-hint').addEventListener('click', (e) => {
+        const b = e.target.closest('[data-place]');
+        if (b) { const p = places[Number(b.dataset.place)]; if (p) findAt(p.lat, p.lon, p.name); }
+      });
     }
   }
-  async function findAt(lat, lon) {
+  async function findAt(lat, lon, placeLabel = null) {
     setPicking(false);
     spot = htmlMarker(map, [lat, lon], { html: '<div class="vm-spot"></div>' });
+    centreOn(map, [lat, lon], undefined, { animate: true });
     panel = document.createElement('div');
     panel.className = 'vm-places';
-    panel.innerHTML = '<header><span>Looking for clips here…</span><button type="button" aria-label="Close">×</button></header>';
-    panel.querySelector('header button').onclick = closePlaces;
+    panel.innerHTML = `<header><span>Looking for clips here…</span>${placeLabel ? '' : '<button type="button" data-save title="Save this place with a name">Save place</button>'}<button type="button" data-close aria-label="Close">×</button></header>
+      <form class="vm-save" hidden><input type="text" maxlength="60" placeholder="Name, like Home or Work" aria-label="Name of this place" required><button type="submit">Save</button></form>`;
+    panel.querySelector('[data-close]').onclick = closePlaces;
+    const form = panel.querySelector('.vm-save');
+    panel.querySelector('[data-save]')?.addEventListener('click', () => { form.hidden = false; form.querySelector('input').focus(); });
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      try {
+        const r = await fetch('/api/places', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'sentry-six-manager' }, body: JSON.stringify({ name: form.querySelector('input').value, lat, lon }) });
+        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'Not saved.');
+        form.hidden = true;
+        panel.querySelector('[data-save]')?.remove();
+        loadPlaces();
+      } catch (err) { form.querySelector('input').setCustomValidity(err.message); form.querySelector('input').reportValidity(); setTimeout(() => form.querySelector('input').setCustomValidity(''), 3000); }
+    });
     container.appendChild(panel);
     let data;
     try {
@@ -351,7 +419,7 @@ function buildViewerMap(container, opts = {}) {
     if (!panel) return;
     const list = data.results || [];
     const vehiclesShown = new Set(list.map((x) => x.vehicle)).size > 1;
-    panel.querySelector('header span').textContent = list.length ? `${list.length} clip${list.length === 1 ? '' : 's'} within ${data.radius} m` : `No clips within ${data.radius} m`;
+    panel.querySelector('header span').textContent = `${list.length ? `${list.length} clip${list.length === 1 ? '' : 's'}` : 'No clips'} within ${data.radius} m${placeLabel ? ` of ${placeLabel}` : ''}`;
     if (!list.length) {
       panel.insertAdjacentHTML('beforeend', '<p>Only footage with GPS that the speed index has read is searched; new footage is read in the background.</p>');
       return;
@@ -424,6 +492,7 @@ function buildViewerMap(container, opts = {}) {
       dark = !!on;
       applyStyle();
     },
+    setPins,
     resize() { map.resize(); },
     destroy() {
       destroyed = true;

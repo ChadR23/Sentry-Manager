@@ -7,6 +7,7 @@ import { createExportPanel } from '/web/exportPanel.js';
 import { createScrubber, attachTimelineTip, timeAfter } from '/web/scrub.js';
 import { createMoments } from '/web/moments.js';
 import { attachViewerExtras } from '/web/viewerExtras.js';
+import { createLayoutSlots } from '/web/layouts.js';
 import { syncTo } from '/web/camSync.js';
 import { TimeChart, C } from '../charts.js';
 import { split, seg, wireSeg, empty } from '../ui.js';
@@ -175,6 +176,13 @@ export default {
       where: () => { const s = st.segs[st.idx]; const m = master(); return s && m ? { vehicle: current()?.id, day: s.key.slice(0, 10), clip: s.key, second: m.currentTime } : null; },
       resumeTo: (pos) => go(`#/viewer?day=${encodeURIComponent(pos.day)}&at=${encodeURIComponent(`${pos.clip}~${pos.second}`)}&autoplay=0`),
       offerResume: !params.get('at') && !params.get('rec') && !params.get('day')
+    });
+    // three saved camera layouts (web/layouts.js)
+    const slots = createLayoutSlots($('#vw-export').parentElement, {
+      key: 'flux',
+      get: () => ({ layout: st.layout, focus: st.focus }),
+      apply: (l) => { if (l.focus) setFocus(l.focus); if (l.layout) setLayout(l.layout); },
+      describe: (l) => `${l.layout === 'grid' ? 'grid' : l.layout === 'duo' ? 'front and rear' : `${l.layout}, ${String(l.focus || 'front').replace('_', ' ')} large`}`
     });
     const xp = createExportPanel({
       vehicleId: () => v.id,
@@ -735,6 +743,7 @@ export default {
         tip.destroy();
         moments.destroy();
         extras.destroy();
+        slots.destroy();
         cancelAnimationFrame(raf);
         chart.destroy();
         map.destroy();

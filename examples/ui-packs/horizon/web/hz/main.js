@@ -14,6 +14,7 @@ export const PAGES = [
   { id: 'bin', label: 'Recycle Bin', short: 'Bin', icon: 'bin' },
   { id: 'alerts', label: 'Notifications', short: 'Alerts', icon: 'bell' },
   { id: 'driving', label: 'Driving', icon: 'tacho' },
+  { id: 'map', label: 'Map', icon: 'map' },
   { id: 'health', label: 'Health', icon: 'shield' },
   { id: 'settings', label: 'Settings', icon: 'gear' }
 ];

@@ -2058,6 +2058,12 @@
     const m = await import('/web/driving.js');
     m.createDrivingPage($('dr-page'), { vehicleId: v?.id, vehicleName: v?.name });
   };
+  pages.map = async () => {
+    const v = current();
+    page.innerHTML = head('Your archive workspace', 'Map') + '<div class="card" id="em-page"></div>';
+    const m = await import('/web/eventMap.js');
+    m.createEventMapPage($('em-page'), { vehicleId: v?.id, vehicleName: v?.name, openEvent: (ev) => openStudio('viewer', { date: ev.day, at: `${ev.startKey}~0` }) });
+  };
   pages.health = async () => {
     page.innerHTML = head('Your archive workspace', 'Health') + '<div class="card" id="hl-page"></div>';
     const m = await import('/web/health.js');

@@ -30,6 +30,7 @@ const CSS = `
 .sentry-x-btn:hover{background:rgba(127,127,127,.16)}
 .sentry-x-btn:focus-visible{outline:2px solid currentColor;outline-offset:2px}
 .sentry-x-btn svg{width:16px;height:16px}
+@media (max-width:700px){.sentry-x-btn span{display:none}.sentry-x-btn{padding:6px 8px}}
 .sentry-x-steps{position:absolute;left:0;right:0;bottom:12px;z-index:5;display:flex;justify-content:center;gap:28px;pointer-events:none}
 .sentry-x-steps.fixed{position:fixed;bottom:calc(96px + env(safe-area-inset-bottom));z-index:2147482000}
 .sentry-x-steps button{all:unset;pointer-events:auto;width:58px;height:58px;border-radius:50%;display:grid;place-items:center;cursor:pointer;
@@ -99,6 +100,8 @@ export function attachViewerExtras({ stage, videos: listVideos = () => [], main:
       } catch { /* not ready or not allowed */ }
     });
     buttons.appendChild(b);
+    // a row that cannot fit one more button wraps instead of widening the page
+    if (getComputedStyle(buttons).display.includes('flex')) buttons.style.flexWrap = 'wrap';
     cleanups.push(() => b.remove());
   }
 
