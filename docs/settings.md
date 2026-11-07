@@ -20,6 +20,8 @@ All optional; put them in `.env` next to `docker-compose.yml`.
 | `SENTRY_TAG` | `latest` | Which image to follow |
 | `UPDATE_CHECK` | `on` | `off` = don't check for newer images |
 | `EXPORT_ENCODER` | `auto` | `cpu` = render exports on the CPU even when a GPU could |
+| `CPU_ENCODER_PRESET` | `medium` | `fast` or `faster` = quicker conversions on the CPU, a little less detail ([Encoder](encoder.md#gpu)) |
+| `SCRUB_PREPARE_DAYS` | `2` | Days of the newest footage whose timeline previews are made ahead; `0` = only when opened |
 | `EXTRA_ROOTS` | | More container folders the converter may write to (`:`-separated) |
 | `SCAN_INTERVAL_MINUTES` | `15` | How often every vehicle is re-scanned |
 | `PORT`, `DATA_PATH`, `LOG_LEVEL` | `9000`, `/data`, `info` | |
@@ -27,6 +29,7 @@ All optional; put them in `.env` next to `docker-compose.yml`.
 `./data` holds the account, settings, job history, thumbnails, the
 converter's work folder and the certificate authority. Keep it on a local
 disk, not on a share. `data/scrub` holds the Viewer's timeline previews
-(about 1 MB per minute of footage, six cameras), made when a clip is first
-opened; it keeps at most about 1 GB and drops the least recently used first.
+(about 1 MB per minute of footage, six cameras), made ahead for the newest
+two days in the background (not while converting) and otherwise when a clip
+is first opened; it keeps at most about 1 GB and drops the least recently used first.
 Deleting it is safe: previews are made again when needed.

@@ -143,6 +143,12 @@ deleting just that `#` turns it on, already lined up.
 | Intel iGPU or Arc | `hevc_qsv`, `av1_qsv`, VA-API | `devices: - /dev/dri:/dev/dri` |
 | none | `libx265`, `libsvtav1` | nothing |
 
+**CPU speed.** The CPU encoders take the most care by default (libx265's
+`medium` preset). `CPU_ENCODER_PRESET=fast` or `faster` in `.env` makes
+them quicker (`faster`: about a fifth to a third less time) for a little
+less detail at the same size, or a somewhat larger file with constant
+quality. GPU encoders are not affected.
+
 ffmpeg is [jellyfin-ffmpeg](https://github.com/jellyfin/jellyfin-ffmpeg),
 which the Jellyfin team keeps on the current FFmpeg release with its own
 VA-API drivers. AMD's AMF encoder needs AMD's proprietary driver, which

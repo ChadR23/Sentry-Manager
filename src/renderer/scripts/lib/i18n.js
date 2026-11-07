@@ -106,25 +106,16 @@ function detectSystemLanguage() {
  */
 export function t(key, params = {}) {
     const keys = key.split('.');
-    let value = translations[currentLanguage];
-    
-    // Navigate through nested keys
-    for (const k of keys) {
-        if (value && typeof value === 'object') {
-            value = value[k];
-        } else {
-            // Fallback to English if key not found
-            value = translations['en'];
-            for (const fallbackKey of keys) {
-                if (value && typeof value === 'object') {
-                    value = value[fallbackKey];
-                } else {
-                    break;
-                }
-            }
-            break;
-        }
-    }
+    // The current language, else English: a key a language lacks (18 newer
+    // ones in every language but English) showed as its raw name before,
+    // since the fallback only ran for a missing group, not a missing key.
+    const lookup = (lang) => {
+        let v = translations[lang];
+        for (const k of keys) v = v && typeof v === 'object' ? v[k] : undefined;
+        return v;
+    };
+    let value = lookup(currentLanguage);
+    if (typeof value !== 'string' && currentLanguage !== 'en') value = lookup('en');
     
     // If still not found, return the key itself
     if (typeof value !== 'string') {

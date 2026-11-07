@@ -87,3 +87,16 @@ test('a probe for a chosen GPU encodes with that GPU\'s arguments', async () => 
   assert.equal(broken.usable, false, 'a device without an index cannot be probed');
   assert.equal(seen.length, 2);
 });
+
+test('CPU_ENCODER_PRESET makes the CPU encoders faster; anything else, and the GPU encoders, stay as they are', () => {
+  const bitrate = 1_234_567;
+  const x265 = (cpuPreset) => buildEncodeArgs({ codec: 'h265', encoder: 'libx265', bitrate, cpuPreset });
+  const after = (args, flag) => args[args.indexOf(flag) + 1];
+  assert.equal(after(x265(undefined), '-preset'), 'medium');
+  assert.equal(after(x265('faster'), '-preset'), 'faster');
+  assert.equal(after(x265(' Fast '), '-preset'), 'fast');
+  assert.equal(after(x265('placebo'), '-preset'), 'medium', 'only the listed speeds');
+  assert.equal(after(buildEncodeArgs({ codec: 'av1', encoder: 'libsvtav1', quality: 'balanced', cpuPreset: 'faster' }), '-preset'), '10');
+  assert.equal(after(buildEncodeArgs({ codec: 'av1', encoder: 'libaom-av1', quality: 'balanced', cpuPreset: 'fast' }), '-cpu-used'), '7');
+  assert.deepEqual(buildEncodeArgs({ codec: 'h265', encoder: 'hevc_vaapi', bitrate, cpuPreset: 'faster' }), buildEncodeArgs({ codec: 'h265', encoder: 'hevc_vaapi', bitrate }));
+});

@@ -7,7 +7,8 @@
 // about every second, and decoding only those is quick), the first time a
 // clip is opened, and cached on the data volume by the clip's path, size and
 // modification time, so a changed clip never shows stale frames. Making one
-// also prepares the next clip of the same camera in the background.
+// also prepares the next clip of the same camera in the background, and the
+// newest footage is prepared ahead of time (server/scrubPrepare.js).
 
 const crypto = require('crypto');
 const os = require('os');
@@ -146,7 +147,7 @@ function createScrubFrames(options = {}) {
 
   // The cached grid's path, making it first when needed (null when the clip
   // cannot be read or decoded).
-  async function get(videoPath, { urgent = true, next = true } = {}) {
+  async function get(videoPath, { urgent = true, next = true, touch = true } = {}) {
     if (typeof videoPath !== 'string' || !pathApi.isAbsolute(videoPath) || !/\.mp4$/i.test(videoPath)) return null;
     let target;
     try {
@@ -158,6 +159,7 @@ function createScrubFrames(options = {}) {
     if (!target) return null;
     if (next) void nextClipOf(videoPath).then((p) => p && get(p, { urgent: false, next: false }));
     if (await exists(target)) {
+      if (!touch) return target;
       // recently used: kept longest when the cache is pruned
       const now = new Date();
       fs.utimes(target, now, now).catch(() => {});

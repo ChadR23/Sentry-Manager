@@ -25,6 +25,7 @@ process.env.UV_THREADPOOL_SIZE = process.env.UV_THREADPOOL_SIZE || '16';
 // the database holds password hashes and SMB passwords: nothing we create is world-readable
 process.umask(0o027);
 
+const crypto = require('crypto');
 const fs = require('fs');
 const http = require('http');
 const http2 = require('http2');
@@ -40,6 +41,7 @@ const { VehicleManager } = require('./vehicles');
 const { Inventory } = require('./inventory');
 const { RecycleBin, formatBytes } = require('./recycleBin');
 const { createScrubFrames } = require('./scrubFrames');
+const { createScrubPrepare } = require('./scrubPrepare');
 const { Policies } = require('./policies');
 const { Jobs, Notifications } = require('./activity');
 const { ImageUpdates, criticalFromFile } = require('./imageUpdates');
@@ -144,6 +146,25 @@ function withCriticalBar(html) {
   return `${html}\n${CRITICAL_TAG}\n`;
 }
 
+// Versioned asset links: a page's own scripts and stylesheets are linked as
+// /v/<version>/<path>, which the server answers like <path> but lets the
+// browser keep for a year without asking again. The version changes with
+// the build and the interface chosen, so a new one is always fetched; the
+// page itself is never kept. Modules a script imports by a relative path
+// get the same prefix by themselves.
+const VERSIONED = /^\/v\/([A-Za-z0-9_-]{1,40})(\/.*)$/;
+const LONG_CACHE = 'private, max-age=31536000, immutable';
+function versionLinks(html, pageDir, version) {
+  return html.replace(/<(?:script|link)\b[^>]*>/gi, (tag) => tag.replace(/\b(src|href)=(["'])([^"']+)\2/i, (m, attr, q, url) => {
+    if (/^[a-z][a-z0-9+.-]*:|^\/\/|^#/i.test(url)) return m; // another site, data:, an anchor
+    const [file, rest = ''] = url.split(/(?=[?#])/, 2);
+    if (!/\.(m?js|css)$/i.test(file)) return m;
+    const abs = file.startsWith('/') ? path.posix.normalize(file) : path.posix.join(pageDir, file);
+    if (!abs.startsWith('/') || abs.startsWith('/api/') || abs.startsWith('/v/')) return m;
+    return `${attr}=${q}/v/${version}${abs}${rest}${q}`;
+  }));
+}
+
 /** The critical text this image was built with (CRITICAL_UPDATE.txt, if any). */
 function readOwnCritical() {
   try {
@@ -235,7 +256,8 @@ async function main() {
   const smbTester = createSmbTester({ mounter, vehicles, log: logger.scope('vehicles') });
   vehicles.bootstrapFromEnv();
   let speedIndex = null;
-  const inventory = new Inventory({ vehicles, db, log: logger.scope('inventory'), onChange: () => announce('inventory'), onScanned: () => speedIndex?.kick() });
+  let scrubPrepare = null;
+  const inventory = new Inventory({ vehicles, db, log: logger.scope('inventory'), onChange: () => announce('inventory'), onScanned: () => { speedIndex?.kick(); scrubPrepare?.kick(); } });
   const thumbs = new Thumbnails({ dir: path.join(DATA, 'thumbnails'), ffmpegPath: FFMPEG });
   const telemetry = new Telemetry({ srcRoot: SRC, cacheDir: path.join(DATA, 'telemetry'), log: logger.scope('telemetry') });
   // every front clip's speed, a value a second, indexed in the background for the Viewer's speed graph
@@ -342,6 +364,14 @@ async function main() {
   // (the browser opened /original: the built-in interface there)
   const UI_COOKIE = 'sm_ui_original';
   const originalOnly = (req) => parseCookies(req.headers.cookie || '')[UI_COOKIE] === '1';
+  // the version in /v/<version>/ links: this build (or this start, without a
+  // build id) and the interface this browser is shown. An uploaded pack is
+  // never changed in place (a new upload has a new id).
+  const bootId = buildInfo.sha || `start-${Date.now()}`;
+  const assetVersion = (req) => {
+    const key = `${bootId}|${originalOnly(req) ? 'original' : uiPacks.active() || 'builtin'}`;
+    return crypto.createHash('sha256').update(key).digest('base64url').slice(0, 12);
+  };
   await uiPacks.tidy().catch((err) => logger.scope('ui').warn(`UI packs folder: ${err.message}`));
   const host = createConverterHost({
     remoteNodes: {
@@ -397,6 +427,12 @@ async function main() {
   let clipThumbs = null;
   // the Viewer's scrub previews (see scrubFrames.js)
   const scrubFrames = createScrubFrames({ directory: path.join(DATA, 'scrub'), ffmpegPath: FFMPEG, spawn });
+  // the newest footage's previews, made ahead in the background (not while converting)
+  const prepareDays = Number.parseInt(process.env.SCRUB_PREPARE_DAYS ?? '2', 10);
+  scrubPrepare = createScrubPrepare({
+    inventory, vehicles, scrubFrames, days: Number.isFinite(prepareDays) ? Math.max(0, Math.min(prepareDays, 30)) : 2,
+    idle: () => !converterRunning() && benchmarking === null, log: logger.scope('scrub')
+  });
 
   const updates = new ImageUpdates({
     db, log: logger.scope('updates'), buildInfo, notes, ownCritical: readOwnCritical(), enabled: !/^(off|false|0|no)$/i.test(process.env.UPDATE_CHECK || '')
@@ -1370,6 +1406,14 @@ async function main() {
         return sendJson(res, 400, { error: 'Bad request' });
       }
       if (p.includes('\0') || p.includes('\\') || path.posix.normalize(p) !== p) return sendJson(res, 400, { error: 'Bad request' });
+      // /v/<version>/<path>: <path>, kept for a year when the version is the
+      // current one (versionLinks)
+      let longCache = false;
+      const versioned = VERSIONED.exec(p);
+      if (versioned && !versioned[2].startsWith('/api/') && !versioned[2].startsWith('/v/')) {
+        p = versioned[2];
+        longCache = versioned[1] === assetVersion(req);
+      }
 
       const user = auth.user(req);
       const isApi = p.startsWith('/api/');
@@ -1471,17 +1515,24 @@ async function main() {
         res.writeHead(302, { Location: `/login${p === '/' ? '' : `?next=${encodeURIComponent(p + url.search)}`}` });
         return res.end();
       }
-      const serve = async (root, rel, opts) => {
+      const serve = async (root, rel, opts = {}) => {
+        if (longCache) opts = { ...opts, cache: LONG_CACHE };
         if (!(await serveFile(req, res, root, rel, opts))) notFound(res);
       };
       // the chosen interface's file first, else the built-in one
       const ui = async (kind, root, rel, opts = {}) => {
-        if (/\.html?$/i.test(rel) && rel !== 'login.html') {
+        if (/\.html?$/i.test(rel)) {
           const inner = opts.transform;
-          opts = { ...opts, transform: (html) => withCriticalBar(inner ? inner(html) : html) };
+          const version = assetVersion(req);
+          const pageDir = p.endsWith('/') ? p : `${path.posix.dirname(p)}/`;
+          const critical = rel !== 'login.html'; // the login page has no status to show yet
+          opts = { ...opts, transform: (html) => {
+            const page = inner ? inner(html) : html;
+            return versionLinks(critical ? withCriticalBar(page) : page, pageDir, version);
+          } };
         }
         const own = originalOnly(req) ? null : uiPacks.root(kind);
-        if (own && await serveFile(req, res, own, rel, { ...opts, cache: 'no-cache' })) return undefined;
+        if (own && await serveFile(req, res, own, rel, { ...opts, cache: longCache ? LONG_CACHE : 'no-cache' })) return undefined;
         return serve(root, rel, opts);
       };
       if (p === '/' || p === '/index.html') return ui('web', WEB, 'index.html');
@@ -1503,7 +1554,7 @@ async function main() {
       // language when it is first shown (server/studioTranslations.js)
       if (p === '/studio/scripts/data/translations.js') {
         const t = await studioTranslations.module();
-        return sendText(req, res, t.body, { type: 'text/javascript; charset=utf-8', etag: t.etag });
+        return sendText(req, res, t.body, { type: 'text/javascript; charset=utf-8', etag: t.etag, ...(longCache ? { cache: LONG_CACHE } : {}) });
       }
       const lang = /^\/studio\/i18n\/([a-z]{2,3}(?:-[A-Za-z]{2,4})?)\.json$/.exec(p);
       if (lang) {
@@ -1752,6 +1803,7 @@ async function main() {
     try { stats.stop(); } catch { /* history is saved on a best-effort basis */ }
     nodeWorker.close();
     exporter.stop();
+    scrubPrepare.stop();
     await host.stop().catch(() => {});
     await vehicles.stopAll();
     db.close();

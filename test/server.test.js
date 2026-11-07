@@ -441,9 +441,10 @@ test('the Encoder tab is a page of its own: the converter with the shim, its ske
     assert.doesNotMatch(res.headers.get('content-security-policy'), /unsafe-eval|openfreemap|google/, 'only the converter: no eval, no map tiles');
     const html = await res.text();
     const head = html.split('</head>')[0];
-    assert.match(head, /<script src="\/web\/webFlag\.js" defer><\/script>\s*<script src="\/web\/electronApiShim\.js" defer><\/script>/, 'the shim is injected');
-    assert.ok(head.indexOf('electronApiShim.js') < head.indexOf('src="encoder.js"'), 'and runs before the page script');
-    assert.match(head, /<link rel="preload" href="\/web\/studioEmbed\.css" as="style">/);
+    // (links are versioned: /v/<version>/..., see versionLinks in server/index.js)
+    assert.match(head, /<script src="(?:\/v\/[\w-]+)?\/web\/webFlag\.js" defer><\/script>\s*<script src="(?:\/v\/[\w-]+)?\/web\/electronApiShim\.js" defer><\/script>/, 'the shim is injected');
+    assert.ok(head.indexOf('electronApiShim.js') < head.search(/src="(?:\/v\/[\w-]+\/studio\/)?encoder\.js"/), 'and runs before the page script');
+    assert.match(head, /<link rel="preload" href="(?:\/v\/[\w-]+)?\/web\/studioEmbed\.css" as="style">/);
     // nothing holds up the first paint (the skeleton): no blocking script or
     // stylesheet, the skeleton's styles inline
     assert.doesNotMatch(head, /<script\b(?![^>]*\b(?:defer|async|type="module"))[^>]*>/, 'no blocking script');
@@ -460,7 +461,7 @@ test('the Encoder tab is a page of its own: the converter with the shim, its ske
     assert.match(await viewer.text(), /electronApiShim\.js/);
     // the shell paints the same skeleton before its script arrives
     const shell = await (await s.call('GET', '/', undefined, { raw: true })).text();
-    assert.match(shell, /<script src="\/web\/boot\.js"><\/script>[\s\S]*id="encoder-skeleton"/);
+    assert.match(shell, /<script src="(?:\/v\/[\w-]+)?\/web\/boot\.js"><\/script>[\s\S]*id="encoder-skeleton"/);
   } finally {
     await s.stop();
     await fsp.rm(dir, { recursive: true, force: true });
@@ -810,9 +811,9 @@ test('Interface: a pack uploaded in Settings serves its files for everyone, swit
     assert.ok(list.packs.some((x) => x.id === meta.id && !x.builtin));
     assert.equal((await s.call('DELETE', '/api/ui-packs/flux')).status, 400);
     // the critical-update bar is in every page the server serves, not the sign-in page
-    const BAR = '<script src="/web/critical.js" defer></script>';
-    for (const p of ['/', '/studio/index.html', '/studio/encoder.html']) assert.ok((await text(p)).includes(BAR), p);
-    assert.ok(!(await text('/login', '')).includes(BAR), 'not on the sign-in page');
+    const BAR = /<script src="\/v\/[\w-]+\/web\/critical\.js" defer><\/script>/; // versioned (see versionLinks)
+    for (const p of ['/', '/studio/index.html', '/studio/encoder.html']) assert.ok(BAR.test(await text(p)), p);
+    assert.ok(!BAR.test(await text('/login', '')), 'not on the sign-in page');
     assert.equal(await text('/web/critical.js'), fs.readFileSync(path.join(REPO, 'web', 'critical.js'), 'utf8'));
     assert.equal((await s.call('PUT', '/api/ui-packs/active', { id: 'daylight' })).status, 200);
     assert.equal((await text('/')).split(BAR).length, 2, 'a built-in pack\'s page has it, once');
@@ -827,7 +828,7 @@ test('Interface: a pack uploaded in Settings serves its files for everyone, swit
     assert.equal((await s.call('PUT', '/api/ui-packs/active', { id: meta.id })).status, 200);
     assert.equal(await text('/web/shell.css'), 'body{background:red}');
     assert.match(await text('/'), /<title>Red<\/title>/);
-    assert.ok((await text('/')).includes(BAR), 'an uploaded pack\'s page has it too');
+    assert.ok(BAR.test(await text('/')), 'an uploaded pack\'s page has it too');
     assert.equal(await text('/web/critical.js'), fs.readFileSync(path.join(REPO, 'web', 'critical.js'), 'utf8'), 'a pack cannot replace the bar');
     assert.equal(await text('/studio/styles/footageConverter.css'), '/* red encoder */');
     assert.equal(await text('/web/app.js'), fs.readFileSync(path.join(REPO, 'web', 'app.js'), 'utf8'), 'a file the pack leaves out is the built-in one');
@@ -944,6 +945,44 @@ test('days of footage: per vehicle with the first and last day, and across all v
     assert.equal(inv.firstDay, '2020-01-01');
     assert.equal(inv.lastDay, '2020-01-03');
     assert.equal(footageDays, 3);
+  } finally {
+    await s.stop();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('pages link their scripts and styles under /v/<version>/: kept a year, a new version when the interface changes', async () => {
+  const dir = await tmp();
+  const s = await startServer(dir);
+  try {
+    const login = await (await s.call('GET', '/login', undefined, { raw: true })).text();
+    const loginJs = /src="(\/v\/[A-Za-z0-9_-]+)\/web\/login\.js"/.exec(login);
+    assert.ok(loginJs, 'the sign-in page links its script versioned');
+    const pub = await s.call('GET', `${loginJs[1]}/web/login.js`, undefined, { raw: true });
+    assert.equal(pub.status, 200, 'public before sign-in like /web/login.js');
+    assert.equal(pub.headers.get('cache-control'), 'private, max-age=31536000, immutable');
+    assert.equal((await s.call('GET', `${loginJs[1]}/web/app.js`, undefined, { raw: true, redirect: 'manual' })).status, 302, 'the rest still needs sign-in');
+
+    await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
+    const page = await (await s.call('GET', '/', undefined, { raw: true })).text();
+    const v = /src="\/v\/([A-Za-z0-9_-]+)\/web\/app\.js"/.exec(page)[1];
+    assert.match(page, new RegExp(`href="/v/${v}/web/shell\\.css"`));
+    assert.match(page, new RegExp(`src="/v/${v}/web/critical\\.js"`), 'the critical-update bar too');
+    const studio = await (await s.call('GET', '/studio/index.html', undefined, { raw: true })).text();
+    assert.match(studio, new RegExp(`src="/v/${v}/web/webFlag\\.js"`), 'injected links');
+    assert.match(studio, new RegExp(`src="/v/${v}/studio/script\\.js"|src="/v/${v}/studio/[^"]+\\.js"`), 'relative links resolved against the page');
+    const app = await s.call('GET', `/v/${v}/web/app.js`, undefined, { raw: true });
+    assert.equal(app.headers.get('cache-control'), 'private, max-age=31536000, immutable');
+    const stale = await s.call('GET', '/v/oldversion1/web/app.js', undefined, { raw: true });
+    assert.equal(stale.status, 200, 'an old page still gets the file');
+    assert.equal(stale.headers.get('cache-control'), 'no-cache', 'but not to keep');
+    assert.equal((await s.call('GET', `/v/${v}/api/vehicles`, undefined, { raw: true })).status, 404, 'never the API');
+
+    await s.call('POST', '/api/auth/confirm', { password: 'correct horse' });
+    await s.call('PUT', '/api/ui-packs/active', { id: 'horizon' });
+    const packPage = await (await s.call('GET', '/', undefined, { raw: true })).text();
+    const v2 = /(?:src|href)="\/v\/([A-Za-z0-9_-]+)\//.exec(packPage)[1];
+    assert.notEqual(v2, v, 'another interface: other links');
   } finally {
     await s.stop();
     await fsp.rm(dir, { recursive: true, force: true });

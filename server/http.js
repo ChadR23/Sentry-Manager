@@ -217,8 +217,8 @@ async function serveFile(req, res, root, rel, { transform, cache = 'no-cache', h
 }
 
 /** Text the server made (not a file): an ETag, 304, compressed like a file. */
-function sendText(req, res, body, { type, etag }) {
-  const common = { 'Content-Type': type, 'Cache-Control': 'no-cache', ETag: etag, Vary: 'Accept-Encoding', 'X-Content-Type-Options': 'nosniff' };
+function sendText(req, res, body, { type, etag, cache = 'no-cache' }) {
+  const common = { 'Content-Type': type, 'Cache-Control': cache, ETag: etag, Vary: 'Accept-Encoding', 'X-Content-Type-Options': 'nosniff' };
   if (String(req.headers['if-none-match'] || '').split(/\s*,\s*/).includes(etag)) {
     res.writeHead(304, common);
     return res.end();

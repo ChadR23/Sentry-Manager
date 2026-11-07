@@ -26,6 +26,21 @@ const CANDIDATES = Object.freeze({
   })
 });
 
+// CPU encoder speed (CPU_ENCODER_PRESET): medium, the default, gives the
+// most detail for the size; fast and faster take less time (faster: about a
+// fifth to a third quicker) for a little less detail at the same bitrate,
+// or a larger file at constant quality. GPU encoders ignore it.
+const CPU_PRESETS = Object.freeze({
+  medium: Object.freeze({ libx265: 'medium', libsvtav1: '8', aom: '6' }),
+  fast: Object.freeze({ libx265: 'fast', libsvtav1: '9', aom: '7' }),
+  faster: Object.freeze({ libx265: 'faster', libsvtav1: '10', aom: '8' })
+});
+
+function cpuPresetFrom(value) {
+  const name = String(value || '').trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(CPU_PRESETS, name) ? name : 'medium';
+}
+
 function requireFamily(codec) {
   if (!Object.prototype.hasOwnProperty.call(CANDIDATES, codec)) {
     throw new RangeError(`Unsupported encoder family: ${codec}`);
@@ -130,7 +145,8 @@ function deviceIndex(device) {
 // encoded file has every frame of the original. tpad clones the frame it is
 // given, so it runs on system-memory frames before any upload; GPU-resident
 // (zero-copy) frames are not used for such clips (jobService).
-function buildEncodeArgs({ codec, encoder, bitrate, quality = null, vaapiDevice = '/dev/dri/renderD128', hwFrames = false, device = null, holdFrames = 0 }) {
+function buildEncodeArgs({ codec, encoder, bitrate, quality = null, vaapiDevice = '/dev/dri/renderD128', hwFrames = false, device = null, holdFrames = 0, cpuPreset = process.env.CPU_ENCODER_PRESET }) {
+  const speed = CPU_PRESETS[cpuPresetFrom(cpuPreset)];
   requireFamily(codec);
   if (quality === null) requirePositive('bitrate', bitrate);
   if (typeof encoder !== 'string' || !encoderBelongsToFamily(codec, encoder)) {
@@ -177,9 +193,9 @@ function buildEncodeArgs({ codec, encoder, bitrate, quality = null, vaapiDevice 
   if (encoder.endsWith('_nvenc')) args.push('-forced-idr', '1');
   if (encoder.endsWith('_qsv')) args.push('-forced_idr', '1');
   if (encoder === 'libsvtav1') args.push('-svtav1-params', 'keyint=2s');
-  if (encoder === 'libx265') args.push('-preset', 'medium');
-  if (encoder === 'libsvtav1') args.push('-preset', '8');
-  if (encoder === 'libaom-av1') args.push('-cpu-used', '6', '-row-mt', '1');
+  if (encoder === 'libx265') args.push('-preset', speed.libx265);
+  if (encoder === 'libsvtav1') args.push('-preset', speed.libsvtav1);
+  if (encoder === 'libaom-av1') args.push('-cpu-used', speed.aom, '-row-mt', '1');
   if (codec === 'h265') args.push('-bf', '0');
 
   args.push(
@@ -511,6 +527,8 @@ function decideSizeRetry({
 
 module.exports = {
   SAFE_VIDEO_BITRATE_FLOORS,
+  CPU_PRESETS,
+  cpuPresetFrom,
   decodeAccelArgs,
   RETRY_REASONS,
   buildEncodeArgs,
