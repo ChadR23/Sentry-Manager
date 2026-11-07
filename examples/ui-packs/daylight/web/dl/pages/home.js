@@ -5,6 +5,7 @@ import { api, esc, icon, bytes, plural, ago, pct, meter, emptyState, dayShort, f
 import { state, vehicle, shareHealth, unreadCount, loadVehicles } from '../state.js';
 import { follow, counts, STATE_WORDS, ACTIVE, PAUSED, Pace } from '../convert.js';
 import { thumbUrl } from './footage.js';
+import { fullIn } from '/web/fullIn.js';
 
 function greeting() {
   const h = new Date().getHours();
@@ -60,7 +61,7 @@ function spaceCard() {
     : bin > 0 ? '<a class="btn btn-primary" href="#/bin">Free up space</a>' : '<a class="btn btn-primary" href="#/encoder">Shrink my footage</a>';
   return card({
     tone, iconName: 'disk', q: 'How much space is left?', a: `${bytes(free)} free`,
-    detail: `${list.length > 1 ? `${esc(v.name)} has the least room. ` : ''}${pct(used * 100)} of ${bytes(v.share.totalBytes)} used. ${tip} Space saved by converting: ${saved ? `${bytes(saved)} · ${plural(clips, 'clip')}` : 'none yet'}. Days of footage: ${fin(state.footageDays) ? state.footageDays.toLocaleString() : '—'}.`,
+    detail: `${list.length > 1 ? `${esc(v.name)} has the least room. ` : ''}${pct(used * 100)} of ${bytes(v.share.totalBytes)} used. ${tip} Space saved by converting: ${saved ? `${bytes(saved)} · ${plural(clips, 'clip')}` : 'none yet'}. Days of footage: ${fin(state.footageDays) ? state.footageDays.toLocaleString() : '—'}.${(() => { const f = fullIn(v.storage); return f ? ` ${esc(f.text)}${v.storage.capped ? '' : ` (about ${bytes(v.storage.perDay)} of footage a day)`}.` : ''; })()}`,
     body: meter(used, tone === 'good' ? '' : tone) , action
   });
 }

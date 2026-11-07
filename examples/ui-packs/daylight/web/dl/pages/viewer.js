@@ -10,6 +10,7 @@ import { decodeTelemetry, at } from '../telemetry.js';
 import { createViewerMap } from '/web/viewerMap.js';
 import { createExportPanel } from '/web/exportPanel.js';
 import { createScrubber, attachTimelineTip } from '/web/scrub.js';
+import { createMoments } from '/web/moments.js';
 import { syncTo } from '/web/camSync.js';
 
 // laid out like the car: pillars and front on top, repeaters and back below
@@ -96,7 +97,11 @@ async function player(ctx, v, day, recId) {
     playlist = (await api(`/api/vehicles/${enc(v.id)}/recordings?${q}`)).recordings
       .sort((a, b) => String(a.startKey).localeCompare(String(b.startKey)));
   }
-  let rid = recId || playlist[0]?.id;
+  // a link to a moment (search by place, Find moments): at=<clip>~<second>
+  const [atClip, atSec] = String(ctx.query.get('at') || '').split('~');
+  const digits = (k) => String(k || '').replace(/\D/g, '');
+  const recOf = (clip) => [...playlist].reverse().find((r) => digits(r.startKey) <= digits(clip));
+  let rid = recId || (atClip && recOf(atClip)?.id) || playlist[0]?.id;
   if (!rid) {
     view.innerHTML = `<div class="page">${emptyState({ art: 'film', title: 'Nothing recorded that day', action: `<a class="btn btn-soft" href="#/viewer/${enc(v.id)}">Choose something else</a>` })}</div>`;
     return;
@@ -151,6 +156,7 @@ async function player(ctx, v, day, recId) {
     </section>
     <div class="dash" id="dash" aria-label="Driving data"></div>
     ${present.length ? '<section class="map-card" aria-label="Map"><h2 class="map-title">Where the car was</h2><div class="vw-map" id="vw-map" role="region" aria-label="Map of the drive"></div></section>' : ''}
+    <section class="map-card" aria-label="Moments"><h2 class="map-title">Moments that day</h2><div id="vw-moments"></div></section>
     <div class="actions">
       <button class="btn btn-sm" type="button" id="protect">${icon(rec.protected ? 'unlock' : 'lock')} ${rec.protected ? 'Unprotect' : 'Protect'}</button>
       ${rec.protected ? '' : `<button class="btn btn-ghost btn-sm" type="button" id="trash">${icon('trash')} Move to Recycle Bin</button>`}
@@ -180,7 +186,33 @@ async function player(ctx, v, day, recId) {
   // yourself, Daylight's violet for Autopilot
   const darkLook = () => document.documentElement.dataset.theme === 'dark'
     || (!document.documentElement.dataset.theme && matchMedia('(prefers-color-scheme: dark)').matches);
-  const map = present.length ? createViewerMap($('#vw-map'), { dark: darkLook(), colors: { manual: '#0d8f8f', autopilot: '#7b6ae0' } }) : null;
+  const map = present.length ? createViewerMap($('#vw-map'), {
+    dark: darkLook(), colors: { manual: '#0d8f8f', autopilot: '#7b6ae0' },
+    clock: (hms) => wall(hms),
+    // search by place: a clip found there opens at that moment
+    onPlaceClip: (x) => { setVehicle(x.vehicle); go(`#/viewer/${enc(x.vehicle)}?day=${enc(x.day)}&at=${enc(`${x.clip}~${x.second}`)}`); }
+  }) : null;
+  // Find moments: the day's hard braking, swerves and top speeds
+  const segOf = (clip) => segs.findIndex((x) => digits(x.ts) === digits(clip));
+  let pendingSeek = null;
+  const moments = createMoments($('#vw-moments'), {
+    clock: (hms) => wall(hms),
+    speedUnit: () => (st.units === 'mph' ? 'mph' : 'kmh'),
+    onPick: (m) => {
+      const i = segOf(m.clip);
+      if (i >= 0) { pendingSeek = Math.max(0, m.second - 3); load(i, st.playing); seekWhenReady(); return; }
+      const r = recOf(m.clip);
+      if (r) go(`#/viewer/${enc(v.id)}/${enc(r.id)}?day=${enc(rec.day)}&at=${enc(`${m.clip}~${m.second}`)}`);
+    }
+  });
+  ctx.cleanup(() => moments.destroy());
+  // a seek asked for before the clip has loaded
+  function seekWhenReady() {
+    const m = master();
+    if (pendingSeek === null || !m) return;
+    if (m.readyState >= 1) { const t = pendingSeek; pendingSeek = null; seek(t); return; }
+    m.addEventListener('loadedmetadata', () => { if (pendingSeek !== null) { const t = pendingSeek; pendingSeek = null; seek(t); } }, { once: true });
+  }
   if (map) {
     const follow = () => map.setDark(darkLook());
     const mq = matchMedia('(prefers-color-scheme: dark)');
@@ -483,6 +515,7 @@ async function player(ctx, v, day, recId) {
     st.units = st.units === 'mph' ? 'kmh' : 'mph';
     store.set('units', st.units);
     e.currentTarget.textContent = `Show speed in ${st.units === 'mph' ? 'km/h' : 'mph'}`;
+    moments.refresh();
     updateTime();
   };
   $('#protect').onclick = async (e) => {
@@ -536,7 +569,11 @@ async function player(ctx, v, day, recId) {
   document.addEventListener('visibilitychange', onHide);
   ctx.cleanup(() => document.removeEventListener('visibilitychange', onHide));
 
+  const atSeg = atClip ? segOf(atClip) : -1;
+  if (atSeg >= 0) { st.seg = atSeg; pendingSeek = Math.max(0, (Number(atSec) || 0) - 3); }
   load(st.seg, new URLSearchParams(location.hash.split('?')[1] || '').get('autoplay') === '1');
+  seekWhenReady();
+  moments.load(v.id, rec.day || day);
   if (!present.length) drawDash(null, 'none');
   if (map) loadRoute();
 }

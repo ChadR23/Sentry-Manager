@@ -2,6 +2,7 @@
 // space, trip counters, warning lights, server telemetry and the black-box log.
 import { h, ico, api, app, car, size, perSec, pc, fixed, count, span, since, stampFull, watt, wh, cash, ok, toast, ask, act, local, segs, onSegs, pill, bar, panelHead, debounce, liveDraw } from '../core.js';
 import { dial, setDial, fuel, setFuel, spark } from '../gauges.js';
+import { fullIn } from '/web/fullIn.js';
 
 const KEEP = 180; // samples kept for the sparklines (6 min at 2 s)
 
@@ -261,6 +262,7 @@ export default {
         return `<div class="carcard"><div class="row"><b>${h(v.name)}</b>${!sh.healthy ? pill('offline', 'red') : sh.writable === false ? pill('read-only', 'org') : pill('online', 'grn')}</div>
           ${bar(u, u > 95 ? 'red' : u > 85 ? 'org' : '')}
           <p class="small dim num">${size(sh.freeBytes)} free of ${size(sh.totalBytes)} · ${size(v.inventory?.bytes)} of footage · ${ok(v.inventory?.days) ? count(v.inventory.days, 'day') : '— days'} · saved ${savedTxt(v.saved)}</p>
+          ${(() => { const f = fullIn(v.storage); return f ? `<p class="small num ${f.tone === 'bad' ? 'badtx' : f.tone === 'warn' ? 'warm' : 'dim'}">${h(f.text)}</p>` : ''; })()}
           <div class="row">${cats}</div>
           ${sh.warning ? `<p class="small warm">${h(sh.warning)}</p>` : ''}${sh.lastError ? `<p class="small badtx">${h(sh.lastError)}</p>` : ''}
           <div class="row"><button class="btn sm" type="button" data-scan="${h(v.id)}">${ico('refresh')}Refresh inventory</button>${sh.healthy ? '' : `<button class="btn sm" type="button" data-recon="${h(v.id)}">Reconnect</button>`}</div></div>`;

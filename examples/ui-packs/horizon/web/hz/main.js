@@ -297,3 +297,6 @@ qs('#hz-dlg').addEventListener('click', (e) => { if (e.target.id === 'hz-dlg') e
   refreshJobs();
   pollConverter();
 })();
+
+// Footage thumbnails flip through their recording under the mouse (web/scrub.js)
+import('/web/scrub.js').then((m) => m.hoverFrames(document.body, '.album-art, .tk-art, .pl-art')).catch(() => {});

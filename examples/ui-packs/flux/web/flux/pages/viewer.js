@@ -1,10 +1,11 @@
 // Viewer: a six-camera synced player with frame stepping, speed, a playlist
 // timeline, camera layouts and a live telemetry readout.
-import { esc, api, current, icon, toast, store, fin, clock, wall, wallDay, dayTitle, CAMERAS, CAMERA_LABEL, CAMERA_SHORT, humanize, reducedMotion } from '../core.js';
+import { esc, api, current, setVehicle, icon, toast, store, fin, clock, wall, wallDay, dayTitle, CAMERAS, CAMERA_LABEL, CAMERA_SHORT, humanize, reducedMotion } from '../core.js';
 import { telemetryFor, recordAt, fpsOf } from '../telemetry.js';
 import { createViewerMap } from '/web/viewerMap.js';
 import { createExportPanel } from '/web/exportPanel.js';
 import { createScrubber, attachTimelineTip, timeAfter } from '/web/scrub.js';
+import { createMoments } from '/web/moments.js';
 import { syncTo } from '/web/camSync.js';
 import { TimeChart, C } from '../charts.js';
 import { split, seg, wireSeg, empty } from '../ui.js';
@@ -135,6 +136,10 @@ export default {
             <header class="card-h"><h2>Clips</h2><span class="faint small" id="vw-count"></span></header>
             <ol class="seglist" id="vw-segs"></ol>
           </section>
+          <section class="card">
+            <header class="card-h"><h2>Moments</h2></header>
+            <div id="vw-moments"></div>
+          </section>
         </aside>
       </div>`;
     const $ = (s) => el.querySelector(s);
@@ -142,8 +147,25 @@ export default {
     const stage = $('#vw-stage');
     const tiles = Object.fromEntries([...stage.querySelectorAll('.cam')].map((f) => [f.dataset.cam, { fig: f, video: f.querySelector('video') }]));
     // the drive on a map: Flux's violet for driving yourself, its cyan for Autopilot
-    const map = createViewerMap($('#vw-map'), { dark: true, colors: { manual: '#a78bfa', autopilot: '#4fd8f0' } });
+    const map = createViewerMap($('#vw-map'), {
+      dark: true, colors: { manual: '#a78bfa', autopilot: '#4fd8f0' },
+      clock: (hms) => wall(hms),
+      // search by place: a clip found there opens at that moment
+      onPlaceClip: (x) => {
+        if (x.vehicle !== current()?.id) setVehicle(x.vehicle);
+        go(`#/viewer?day=${encodeURIComponent(x.day)}&at=${encodeURIComponent(`${x.clip}~${x.second}`)}&autoplay=0`);
+      }
+    });
     // Export: mark a start and an end, see the clips, render one video on the server
+    // Find moments: the day's hard braking, swerves and top speeds
+    const moments = createMoments($('#vw-moments'), {
+      clock: (hms) => wall(hms),
+      speedUnit: () => (st.units === 'mph' ? 'mph' : 'kmh'),
+      onPick: (m) => {
+        const i = st.segs.findIndex((s) => s.key === m.clip);
+        if (i >= 0) seekGlobal(offsetOf(i) + Math.max(0, m.second - 3));
+      }
+    });
     const xp = createExportPanel({
       vehicleId: () => v.id,
       clips: () => st.segs.map((s) => ({ key: s.key, files: s.files, len: durOf(s), cat: s.category })),
@@ -540,6 +562,7 @@ export default {
     wireSeg(el, 'units', (u) => {
       st.units = u;
       store.set('vw:units', u);
+      moments.refresh();
       $('#t-unit').textContent = u === 'mph' ? 'mph' : 'km/h';
       const s = st.segs[st.idx];
       if (s) loadTelemetry(s);
@@ -658,7 +681,12 @@ export default {
         const i = st.segs.findIndex((s) => s.at && ev.eventAt >= s.at && ev.eventAt < s.at + 60000);
         if (i >= 0) { start = i; off = Math.max(0, (ev.eventAt - st.segs[i].at) / 1000 - 5); }
       }
+      // a link to a moment (search by place): at=<clip>~<second>
+      const [atClip, atSec] = String(params.get('at') || '').split('~');
+      const atIdx = atClip ? st.segs.findIndex((s) => s.key === atClip) : -1;
+      if (atIdx >= 0) { start = atIdx; off = Math.max(0, (Number(atSec) || 0) - 3); }
       await loadSeg(start, off, !reducedMotion() && params.get('autoplay') !== '0');
+      moments.load(current()?.id, st.segs[0].key.slice(0, 10));
       loadLengths();
       loadRoute();
     }
@@ -695,6 +723,7 @@ export default {
       unmount() {
         alive = false;
         tip.destroy();
+        moments.destroy();
         cancelAnimationFrame(raf);
         chart.destroy();
         map.destroy();

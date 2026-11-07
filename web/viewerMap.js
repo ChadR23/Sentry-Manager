@@ -15,11 +15,18 @@
 //   map.setPosition(record);          // lat, lon, heading at the playhead
 //   map.destroy();
 //
+// Search by place: with `onPlaceClip`, a pin button lets the next tap on the
+// map list every clip recorded near that spot (any day, any vehicle; from
+// the speed index's GPS points, /api/places/near), and picking one calls
+// onPlaceClip({ vehicle, day, clip, second, path }) so the pack opens it.
+// `clock("HH-MM-SS")` formats the times as the pack does.
+//
 // The street-map / satellite choice and Map Labels are the Viewer's own
 // settings (/api/studio/settings), so a choice made in one interface holds
 // in the others. Light or dark follows the pack's look (`dark`).
 
 import '/shared/mapProviders.js';
+import { timeAfter } from '/web/scrub.js';
 
 // MapLibre (1.6 MB, about 400 KB compressed) is loaded only when the map is
 // needed: a route with GPS has come and the map is on screen (or nearly). A
@@ -52,12 +59,13 @@ const SATELLITE = 'google-satellite';
 const ICON = {
   centre: '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zm8.94 3A9 9 0 0 0 13 3.06V1h-2v2.06A9 9 0 0 0 3.06 11H1v2h2.06A9 9 0 0 0 11 20.94V23h2v-2.06A9 9 0 0 0 20.94 13H23v-2h-2.06zM12 19a7 7 0 1 1 0-14 7 7 0 0 1 0 14z"/></svg>',
   compass: '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M12 2 7 20l5-3 5 3z"/></svg>',
+  pin: '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M12 2a7 7 0 0 0-7 7c0 5.2 7 13 7 13s7-7.8 7-13a7 7 0 0 0-7-7zm0 9.5A2.5 2.5 0 1 1 12 6.5a2.5 2.5 0 0 1 0 5z"/></svg>',
   layers: '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="m12 3 10 5-10 5L2 8zm-7.6 8.8L12 15.6l7.6-3.8L22 13l-10 5-10-5zm0 5L12 20.6l7.6-3.8L22 18l-10 5-10-5z"/></svg>'
 };
 
 const CSS = `
 .vm{position:relative;overflow:hidden;background:var(--vm-bg,#1b2230);isolation:isolate}
-.vm-canvas{position:absolute;inset:0}
+.vm .vm-canvas{position:absolute;inset:0}
 .vm-btns{position:absolute;right:8px;bottom:8px;display:flex;gap:6px;z-index:2}
 .vm-btn{width:32px;height:32px;display:grid;place-items:center;padding:0;cursor:pointer;
   border-radius:var(--vm-radius,8px);border:1px solid var(--vm-btn-border,rgba(255,255,255,.18));
@@ -69,7 +77,24 @@ const CSS = `
   font-size:12px;color:var(--vm-btn-fg,#e6e9ef);background:var(--vm-bg,#1b2230);z-index:1}
 .vm-note[hidden]{display:none}
 .vm .maplibregl-ctrl-attrib.maplibregl-compact{margin:0 0 8px 8px;font-size:10px}
+.vm-arrow{pointer-events:none}
 .vm-arrow img{display:block;width:64px;height:64px}
+.vm.vm-picking .vm-canvas canvas{cursor:crosshair}
+.vm-hint{position:absolute;left:8px;right:8px;top:8px;z-index:3;padding:6px 10px;border-radius:var(--vm-radius,8px);
+  font:600 12px/1.3 system-ui,sans-serif;text-align:center;background:var(--vm-btn-bg,rgba(11,14,19,.88));color:var(--vm-btn-fg,#e6e9ef)}
+.vm-places{position:absolute;left:8px;right:8px;top:8px;max-height:calc(100% - 56px);z-index:3;display:flex;flex-direction:column;
+  border-radius:var(--vm-radius,8px);border:1px solid var(--vm-btn-border,rgba(255,255,255,.18));
+  background:var(--vm-btn-bg,rgba(11,14,19,.92));color:var(--vm-btn-fg,#e6e9ef);font:13px/1.35 system-ui,sans-serif;overflow:hidden}
+.vm-places header{display:flex;align-items:center;gap:8px;padding:8px 10px;font-weight:600;border-bottom:1px solid var(--vm-btn-border,rgba(255,255,255,.18))}
+.vm-places header span{flex:1}
+.vm-places header button{all:unset;cursor:pointer;padding:0 4px;font-size:16px;line-height:1}
+.vm-places ol{list-style:none;margin:0;padding:4px 0;overflow:auto}
+.vm-places li button{all:unset;box-sizing:border-box;display:flex;gap:8px;width:100%;padding:6px 10px;cursor:pointer}
+.vm-places li button:hover,.vm-places li button:focus-visible{background:rgba(255,255,255,.08)}
+.vm-places li b{font-variant-numeric:tabular-nums}
+.vm-places li span{opacity:.7;margin-left:auto;white-space:nowrap}
+.vm-places p{margin:0;padding:10px}
+.vm-spot{width:14px;height:14px;border-radius:50%;background:var(--vm-btn-active,#5ee9a0);border:2px solid #fff;box-shadow:0 0 0 6px rgba(94,233,160,.25)}
 `;
 
 function addCss() {
@@ -165,6 +190,7 @@ function buildViewerMap(container, opts = {}) {
     <div class="vm-btns">
       <button type="button" class="vm-btn" data-vm="centre" title="Follow the car" aria-label="Follow the car" hidden>${ICON.centre}</button>
       <button type="button" class="vm-btn" data-vm="heading" title="Heading up (tap for north up)" aria-label="Heading up" aria-pressed="true">${ICON.compass}</button>
+      ${opts.onPlaceClip ? `<button type="button" class="vm-btn" data-vm="place" title="Find clips recorded at a place" aria-label="Find clips recorded at a place" aria-pressed="false">${ICON.pin}</button>` : ''}
       <button type="button" class="vm-btn" data-vm="layers" title="Satellite" aria-label="Satellite" aria-pressed="false">${ICON.layers}</button>
     </div>`;
   const note = container.querySelector('.vm-note');
@@ -282,6 +308,68 @@ function buildViewerMap(container, opts = {}) {
     saveSetting('mapTileProvider', provider);
     applyStyle();
   });
+  // ---- search by place ----
+  let picking = false;
+  let spot = null;
+  let panel = null;
+  const clock = opts.clock || ((hms) => { const [h, m, sec] = hms.split('-').map(Number); return `${h % 12 || 12}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}`; });
+  const dayText = (d) => { try { return new Date(`${d}T12:00:00`).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' }); } catch { return d; } };
+  const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  function closePlaces() {
+    panel?.remove();
+    panel = null;
+    spot?.remove();
+    spot = null;
+  }
+  function setPicking(on) {
+    picking = on;
+    container.classList.toggle('vm-picking', on);
+    btn('place')?.setAttribute('aria-pressed', String(on));
+    container.querySelector('.vm-hint')?.remove();
+    if (on) {
+      closePlaces();
+      container.insertAdjacentHTML('beforeend', '<div class="vm-hint" role="status">Tap a place on the map to find clips recorded there</div>');
+    }
+  }
+  async function findAt(lat, lon) {
+    setPicking(false);
+    spot = htmlMarker(map, [lat, lon], { html: '<div class="vm-spot"></div>' });
+    panel = document.createElement('div');
+    panel.className = 'vm-places';
+    panel.innerHTML = '<header><span>Looking for clips here…</span><button type="button" aria-label="Close">×</button></header>';
+    panel.querySelector('header button').onclick = closePlaces;
+    container.appendChild(panel);
+    let data;
+    try {
+      const r = await fetch(`/api/places/near?lat=${lat.toFixed(5)}&lon=${lon.toFixed(5)}&radius=150`, { credentials: 'same-origin' });
+      data = await r.json();
+      if (!r.ok) throw new Error(data.error || 'The search failed.');
+    } catch (err) {
+      if (panel) panel.querySelector('header span').textContent = err.message || 'The search failed.';
+      return;
+    }
+    if (!panel) return;
+    const list = data.results || [];
+    const vehiclesShown = new Set(list.map((x) => x.vehicle)).size > 1;
+    panel.querySelector('header span').textContent = list.length ? `${list.length} clip${list.length === 1 ? '' : 's'} within ${data.radius} m` : `No clips within ${data.radius} m`;
+    if (!list.length) {
+      panel.insertAdjacentHTML('beforeend', '<p>Only footage with GPS that the speed index has read is searched; new footage is read in the background.</p>');
+      return;
+    }
+    const ol = document.createElement('ol');
+    ol.innerHTML = list.map((x, i) => {
+      const at = timeAfter(x.clip, x.second);
+      return `<li><button type="button" data-i="${i}"><b>${esc(dayText(x.day))}</b> ${esc(at ? clock(at) : x.clip)}<span>${vehiclesShown ? `${esc(x.vehicleName)} · ` : ''}${x.metres} m</span></button></li>`;
+    }).join('');
+    ol.addEventListener('click', (e) => {
+      const b = e.target.closest('button[data-i]');
+      if (b) opts.onPlaceClip(list[Number(b.dataset.i)]);
+    });
+    panel.appendChild(ol);
+  }
+  btn('place')?.addEventListener('click', () => setPicking(!picking));
+  map.on('click', (e) => { if (picking) findAt(e.lngLat.lat, e.lngLat.lng); });
+
   map.on('rotate', () => {
     const svg = btn('heading').querySelector('svg');
     if (svg) svg.style.transform = `rotate(${-map.getBearing()}deg)`;

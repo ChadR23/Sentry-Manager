@@ -81,3 +81,73 @@ test('speed index: every finished footage scan starts an indexing pass', async (
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('speed index: each clip also keeps its hardest braking, sideways g, top speed and where it was', { timeout: 60_000 }, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'speedsum-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const root = path.join(dir, 'car');
+  fs.mkdirSync(path.join(root, 'RecentClips'), { recursive: true });
+  // 4 seconds of 12 frames: 20, 20, 12 (hard braking), 11 m/s; 3 m/s² sideways in second 1;
+  // driving north from 37.7749, -122.4194
+  const speeds = [20, 20, 12, 11];
+  const record = (n) => {
+    const sec = Math.floor(n / 12);
+    const b = [];
+    const f = Buffer.alloc(4); f.writeFloatLE(speeds[sec]); b.push(Buffer.from([0x25]), f);
+    const dbl = (tag, v) => { const d = Buffer.alloc(8); d.writeDoubleLE(v); b.push(Buffer.from([tag]), d); };
+    dbl(0x59, 37.7749 + sec * 0.001); // field 11, type 1
+    dbl(0x61, -122.4194); // field 12
+    dbl(0x71, -1); // field 14
+    dbl(0x79, sec === 1 ? -3 : 0.5); // field 15
+    return Buffer.concat(b);
+  };
+  const clip = path.join(root, 'RecentClips', '2026-10-11_10-00-11-front.mp4');
+  await createTeslaH264Fixture({ ffmpegPath: 'ffmpeg', outputPath: clip, telemetryPattern: Array.from({ length: 48 }, (_, n) => record(n)), size: '160x120' });
+  const st = fs.statSync(clip);
+  const files = new Map([['RecentClips/2026-10-11_10-00-11-front.mp4', { rel: 'RecentClips/2026-10-11_10-00-11-front.mp4', kind: 'clip', camera: 'front', day: '2026-10-11', size: st.size, mtimeMs: st.mtimeMs }]]);
+  const idx = createSpeedIndex({ dir: path.join(dir, 'speeds'), inventory: { get: () => ({ files }) }, vehicles: { list: () => [{ id: 'v1' }], rootOf: () => root }, telemetry: {}, pauseMs: 0 });
+  await idx.kick();
+  assert.deepEqual(await idx.day('v1', '2026-10-11'), { 'RecentClips/2026-10-11_10-00-11-front.mp4': [20, 20, 12, 11] });
+  assert.deepEqual(await idx.summaries('v1', '2026-10-11'), {
+    'RecentClips/2026-10-11_10-00-11-front.mp4': { b: [1, 8], t: [1, 3], v: [0, 20], g: [[0, 37.7749, -122.4194]] }
+  });
+
+  // an entry from before summaries existed is read again
+  const file = path.join(dir, 'speeds', 'v1', '2026-10-11.json');
+  const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+  data['RecentClips/2026-10-11_10-00-11-front.mp4'].length = 3;
+  fs.writeFileSync(file, JSON.stringify(data));
+  const again = createSpeedIndex({ dir: path.join(dir, 'speeds'), inventory: { get: () => ({ files }) }, vehicles: { list: () => [{ id: 'v1' }], rootOf: () => root }, telemetry: {}, pauseMs: 0 });
+  assert.deepEqual(await again.summaries('v1', '2026-10-11'), {});
+  await again.kick();
+  assert.equal(Object.keys(await again.summaries('v1', '2026-10-11')).length, 1);
+});
+
+test('moments: hard braking and swerves over the line, strongest first, and the three fastest clips; places: clips that passed near', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'moments-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const clip = (n) => `RecentClips/2026-10-11_10-0${n}-00-front.mp4`;
+  const files = new Map([1, 2, 3, 4, 5].map((n) => [clip(n), { rel: clip(n), kind: 'clip', camera: 'front', day: '2026-10-11', size: 100 + n, mtimeMs: 1000 }]));
+  const sum = (b, tt, v, g = []) => ({ b, t: tt, v, g });
+  const data = {
+    [clip(1)]: [101, 1000, [], sum([12, 3.0], [3, 2], [0, 20])], // nothing hard
+    [clip(2)]: [102, 1000, [], sum([30, 7.2], [5, 1], [10, 25], [[0, 37.7749, -122.4194], [5, 37.7760, -122.4194]])],
+    [clip(3)]: [103, 1000, [], sum([2, 4.5], [40, 5.1], [20, 31])],
+    [clip(4)]: [104, 1000, [], sum(null, null, [1, 33])],
+    [clip(5)]: [999, 1000, [], sum([1, 9], null, [1, 40])] // changed since: left out
+  };
+  fs.mkdirSync(path.join(dir, 'speeds', 'v1'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'speeds', 'v1', '2026-10-11.json'), JSON.stringify(data));
+  const idx = createSpeedIndex({ dir: path.join(dir, 'speeds'), inventory: { get: () => ({ files }) }, vehicles: { list: () => [] }, telemetry: {}, pauseMs: 0 });
+  assert.deepEqual((await idx.moments('v1', '2026-10-11')).map((m) => [m.kind, m.rel.slice(23, 31), m.second, m.value]), [
+    ['brake', '10-02-00', 30, 7.2],
+    ['swerve', '10-03-00', 40, 5.1],
+    ['brake', '10-03-00', 2, 4.5],
+    ['speed', '10-04-00', 1, 33],
+    ['speed', '10-03-00', 20, 31],
+    ['speed', '10-02-00', 10, 25]
+  ]);
+  const near = await idx.near(['v1'], 37.7759, -122.4194, 150);
+  assert.deepEqual(near.map(({ rel, second, metres }) => [rel.slice(23, 31), second, metres]), [['10-02-00', 5, 11]]);
+  assert.deepEqual(await idx.near(['v1'], 40, -100, 150), [], 'nowhere near');
+});

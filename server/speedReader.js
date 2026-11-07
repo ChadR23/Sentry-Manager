@@ -53,6 +53,52 @@ function speedOfBytes(buf) {
   return null;
 }
 
+/**
+ * The fields the indexes use from a record's protobuf bytes: speed (4, m/s),
+ * latitude and longitude (11, 12, degrees) and acceleration along and across
+ * the car (14, 15, m/s²); null for a record that cannot be read.
+ */
+function sampleOfBytes(buf) {
+  const out = { v: null, lat: null, lon: null, ax: null, ay: null };
+  let p = 0;
+  const vint = () => {
+    let n = 0;
+    let mul = 1;
+    for (;;) {
+      if (p >= buf.length) throw new RangeError('short');
+      const b = buf[p++];
+      n += (b & 0x7f) * mul;
+      if (!(b & 0x80)) return n;
+      mul *= 128;
+      if (mul > 2 ** 63) throw new RangeError('long');
+    }
+  };
+  try {
+    while (p < buf.length) {
+      const tag = vint();
+      const field = Math.floor(tag / 8);
+      const type = tag % 8;
+      if (type === 5) {
+        if (p + 4 > buf.length) break;
+        if (field === 4) out.v = buf.readFloatLE(p);
+        p += 4;
+      } else if (type === 1) {
+        if (p + 8 > buf.length) break;
+        const d = buf.readDoubleLE(p);
+        if (field === 11) out.lat = d;
+        else if (field === 12) out.lon = d;
+        else if (field === 14) out.ax = d;
+        else if (field === 15) out.ay = d;
+        p += 8;
+      } else if (type === 0) vint();
+      else if (type === 2) p += vint();
+      else break;
+    }
+  } catch { /* a short record: what was read */ }
+  for (const k of Object.keys(out)) if (out[k] !== null && !Number.isFinite(out[k])) out[k] = null;
+  return out;
+}
+
 /** Tesla's protobuf inside an SEI NAL (06 05 size 42.. 69 payload 80), or null (dashcam-mp4.js seiPayload). */
 function teslaPayload(nal) {
   if (nal.length < 6 || (nal[0] & 31) !== 6 || nal[1] !== 5 || nal[nal.length - 1] !== 0x80) return null;
@@ -142,7 +188,7 @@ async function topBoxes(fh, fileSize) {
 }
 
 /** One speed a second (m/s; null for a second without a record) for the clip at real. */
-async function readSpeeds(real) {
+async function readRecords(real) {
   const fh = await fsp.open(real, 'r');
   try {
     const { size: fileSize } = await fh.stat();
@@ -156,7 +202,7 @@ async function readSpeeds(real) {
     const tree = parseMp4(image);
     const track = selectVideoTrack(tree);
     const samples = buildSampleIndex(track);
-    if (!samples.length) return null;
+    if (!samples.length) return [];
     const mdhd = findBoxes(track, 'mdhd')[0];
     const md = image.subarray(Number(mdhd.contentStart), Number(mdhd.end));
     const scale = md[0] === 1 ? md.readUInt32BE(20) : md.readUInt32BE(12);
@@ -207,13 +253,27 @@ async function readSpeeds(real) {
           rec = recordIn(list, codec);
         }
       }
-      const v = rec ? speedOfBytes(rec) : null;
-      out.push(v === null || !Number.isFinite(v) ? null : Math.round(v * 100) / 100);
+      out.push(rec || null);
     }
-    return out.some((v) => v !== null) ? out : null;
+    return out;
   } finally {
     await fh.close();
   }
 }
 
-module.exports = { readSpeeds, speedOfBytes, teslaPayload };
+/** One speed a second (m/s, null where a second has none), or null for none at all. */
+async function readSpeeds(real) {
+  const out = (await readRecords(real)).map((rec) => {
+    const v = rec ? speedOfBytes(rec) : null;
+    return v === null || !Number.isFinite(v) ? null : Math.round(v * 100) / 100;
+  });
+  return out.some((v) => v !== null) ? out : null;
+}
+
+/** The record of each second as sampleOfBytes reads it (null where none), or null for none at all. */
+async function readSamples(real) {
+  const out = (await readRecords(real)).map((rec) => (rec ? sampleOfBytes(rec) : null));
+  return out.some((x) => x && x.v !== null) ? out : null;
+}
+
+module.exports = { readSpeeds, readSamples, speedOfBytes, sampleOfBytes, teslaPayload };

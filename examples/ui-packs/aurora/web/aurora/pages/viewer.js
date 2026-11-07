@@ -9,6 +9,7 @@ import * as tele from '../telemetry.js';
 import { createViewerMap } from '/web/viewerMap.js';
 import { createExportPanel } from '/web/exportPanel.js';
 import { createScrubber, attachTimelineTip, timeAfter } from '/web/scrub.js';
+import { createMoments } from '/web/moments.js';
 import { syncTo } from '/web/camSync.js';
 
 const CAMS = ['front', 'back', 'left_repeater', 'right_repeater', 'left_pillar', 'right_pillar'];
@@ -60,7 +61,7 @@ export default {
   wide: true,
   topics: [],
   async mount(ctx) {
-    const { body, actions, params } = ctx;
+    const { body, actions, params, query, go } = ctx;
     const sky = window.auroraSky;
     if (params[0] && state.vehicles.some((x) => x.id === params[0]) && params[0] !== state.vehicleId) {
       // a link to another vehicle's recording: that vehicle, without a re-render
@@ -124,11 +125,26 @@ export default {
       </div>
       <p class="vw-meta" id="vw-meta"><span id="vw-why"></span><span class="clipline" id="clipline"></span></p>
       <section class="vw-mappanel panel"><div class="panel-head"><h3>${icon('pin')} Map</h3></div><div class="vw-map" id="vw-map" role="region" aria-label="Map of the drive"></div></section>
-      <section class="vw-side panel"><div class="panel-head"><h3 id="list-title">Recordings that day</h3></div><div class="vw-list" id="vw-list"></div></section>`;
+      <section class="vw-side panel"><div class="panel-head"><h3 id="list-title">Recordings that day</h3></div><div class="vw-list" id="vw-list"></div></section>
+      <section class="vw-moments panel"><div class="panel-head"><h3>${icon('alert')} Moments</h3></div><div id="vw-moments"></div></section>`;
 
     const cockpit = q('#cockpit');
     // the drive on a map: Aurora's teal for driving yourself, its green for Autopilot
-    const map = createViewerMap(q('#vw-map'), { dark: true, colors: { manual: '#2fd6d8', autopilot: '#46f0a8' } });
+    const map = createViewerMap(q('#vw-map'), {
+      dark: true, colors: { manual: '#2fd6d8', autopilot: '#46f0a8' },
+      clock: (hms) => wall(hms),
+      // search by place: a clip found there opens at that moment
+      onPlaceClip: (x) => go(`#/viewer/${encodeURIComponent(x.vehicle)}/day/${encodeURIComponent(x.day)}?at=${encodeURIComponent(`${x.clip}~${x.second}`)}`)
+    });
+    // Find moments: the day's hard braking, swerves and top speeds
+    const moments = createMoments(q('#vw-moments'), {
+      clock: (hms) => wall(hms),
+      speedUnit: () => (opts.unit === 'mph' ? 'mph' : 'kmh'),
+      onPick: (m) => {
+        const i = clips.findIndex((c) => c.key === m.clip);
+        if (i >= 0) loadClip(i, Math.max(0, m.second - 3), playing);
+      }
+    });
     // Export: mark a start and an end, see the clips, render one video on the server
     const xp = createExportPanel({
       vehicleId: () => v.id,
@@ -754,6 +770,7 @@ export default {
         opts.unit = opts.unit === 'mph' ? 'kmh' : 'mph';
         store.set('unit', opts.unit);
         t.closest('#c-unit').textContent = opts.unit === 'mph' ? 'mph' : 'km/h';
+        moments.refresh();
         return paintHud();
       }
       if (t.closest('#c-mirror')) {
@@ -823,7 +840,7 @@ export default {
     } catch (err) {
       q('#vw-title').innerHTML = `<span class="note bad">${esc(err.message)}</span>`;
     }
-    if (dead) { tip.destroy(); map.destroy(); xp.destroy(); return {}; }
+    if (dead) { tip.destroy(); moments.destroy(); map.destroy(); xp.destroy(); return {}; }
     drawList();
     // HW3 or HW4 from the footage itself, as the built-in Viewer does: only
     // HW4 cars record the pillar cameras, so without them the cockpit has no
@@ -839,8 +856,13 @@ export default {
     } else {
       // an event: start a little before it
       const ev = events[0];
-      if (ev && recId) loadClip(ev.clip, Math.max(0, ev.offset - 8), false);
+      // a link to a moment (search by place): ?at=<clip>~<second>
+      const [atClip, atSec] = String(query?.get('at') || '').split('~');
+      const atIdx = atClip ? clips.findIndex((c) => c.key === atClip) : -1;
+      if (atIdx >= 0) loadClip(atIdx, Math.max(0, (Number(atSec) || 0) - 3), false);
+      else if (ev && recId) loadClip(ev.clip, Math.max(0, ev.offset - 8), false);
       else loadClip(0, 0, false);
+      moments.load(v.id, day || clips[0]?.key.slice(0, 10));
       paintPlay();
       fit();
       loadLengths();
@@ -851,6 +873,7 @@ export default {
       destroy() {
         dead = true;
         tip.destroy();
+        moments.destroy();
         map.destroy();
         xp.destroy();
         document.removeEventListener('keydown', onKey);

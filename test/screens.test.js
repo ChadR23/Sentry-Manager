@@ -391,7 +391,7 @@ test('Overview: the vehicle\'s inventory and free space are the Server section\'
   assert.match(html, /<div class="nd-big"><b>2\.6 TB<\/b><span class="muted small">free<\/span><\/div>/);
   assert.deepEqual(kvRows(html), [
     ['Recordings', '12,345'], ['Space saved', 'none yet'], ['Days of footage', '—'], ['Scanned', '5 m ago'], ['Time zone', 'America/Chicago'],
-    ['Capacity', '7.2 TB'], ['Used', '64%'], ['Recycle Bin', '12 GB']
+    ['Capacity', '7.2 TB'], ['Used', '64%'], ['Recycle Bin', '12 GB'], ['Full in', '—']
   ]);
   assert.match(html, /<div class="nd-bar"><span style="width:63\.9%"><\/span><\/div>/, 'the meter');
   assert.match(html, /<button type="button" class="btn sm" id="refresh-inv">Refresh inventory<\/button>/);
@@ -405,7 +405,13 @@ test('Overview: only a share with a problem gets a chip; a nearly full share tur
   assert.match(ro, /<b>2\.6 TB<\/b><span class="muted small">free<\/span><span class="chip amber">Read-only share<\/span>/);
   const down = vehicleTiles(car({ share: { healthy: false, writable: null, totalBytes: null, freeBytes: null } }), 1_000_000);
   assert.match(down, /<b>—<\/b><span class="muted small">free<\/span><span class="chip red">Share unavailable<\/span>/);
-  assert.deepEqual(kvRows(down).slice(5), [['Capacity', 'unknown'], ['Used', '—'], ['Recycle Bin', '12 GB']]);
+  assert.deepEqual(kvRows(down).slice(5), [['Capacity', 'unknown'], ['Used', '—'], ['Recycle Bin', '12 GB'], ['Full in', '—']]);
+  // days until full, from the vehicle's storage: a chip once it is close
+  const full = (storage) => /<dt>Full in<\/dt><dd[^>]*>(.*?)<\/dd>/.exec(vehicleTiles(car({ storage }), 1_000_000))[1];
+  assert.equal(full({ free: 10 * G, perDay: G, daysLeft: 10, capped: false }), '<span class="chip amber">10 days</span> <span class="muted small">at 1 GB a day</span>');
+  assert.equal(full({ free: 10 * G, perDay: G, daysLeft: 200, capped: false }), '7 months <span class="muted small">at 1 GB a day</span>');
+  assert.equal(full({ free: 10 * G, perDay: 0, daysLeft: null, capped: false }), '— <span class="muted small">no new footage lately</span>');
+  assert.equal(full({ free: 10 * G, perDay: G, daysLeft: 10, capped: true }), 'never <span class="muted small">policies delete old footage</span>');
   assert.match(down, /<div class="nd-bar"><span style="width:0%"><\/span><\/div>/, 'an empty meter keeps the tile\'s height');
   const total = 100 * G;
   assert.match(vehicleTiles(car({ share: { healthy: true, writable: true, totalBytes: total, freeBytes: 0.1 * total } })), /<div class="nd-bar hot">/);

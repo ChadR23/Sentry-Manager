@@ -3803,6 +3803,20 @@ progressBar.addEventListener('input', () => {
     previewAtSliderValue();
 });
 
+// Sentry Six Manager: jump to a second of one clip of the day shown (Find
+// moments, a link from search by place); the speed unit for the shell
+window.sentryViewer = {
+    seekTo(clipKey, sec) {
+        const groups = state.collection.active?.groups || [];
+        const i = groups.findIndex(g => g.timestampKey === clipKey);
+        if (i < 0 || !state.ui.nativeVideoMode || !nativeVideo.cumulativeStarts?.length) return false;
+        seekNativeDayCollectionBySec((nativeVideo.cumulativeStarts[i] || 0) + Math.max(0, sec));
+        return true;
+    },
+    day: () => state.collection.active?.groups?.[0]?.timestampKey?.slice(0, 10) || null,
+    metric: () => useMetric
+};
+
 // Sentry Six Manager: fast timeline dragging (web/scrub.js)
 let scrubber = null;
 import('/web/scrub.js').then((m) => {

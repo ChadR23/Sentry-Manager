@@ -437,6 +437,39 @@
         select.addEventListener('change', () => toShell({ type: 'select-vehicle', id: select.value }));
         document.getElementById('chooseFolderBtn')?.before(select);
       }
+      // Find moments: a list of the day's hard braking, swerves and top
+      // speeds under the clip list; picking one plays it (web/moments.js)
+      import('/web/moments.js').then(({ createMoments }) => {
+        const browser = document.getElementById('clipBrowser');
+        if (!browser) return;
+        const box = document.createElement('section');
+        box.className = 'sm-moments';
+        box.innerHTML = '<h3 style="margin:10px 12px 4px;font-size:13px;font-weight:600;opacity:.85">Moments</h3>';
+        const list = document.createElement('div');
+        list.style.cssText = 'padding:0 6px 8px;max-height:220px;overflow:auto';
+        box.append(list);
+        browser.append(box);
+        const moments = createMoments(list, {
+          speedUnit: () => (window.sentryViewer?.metric?.() ? 'kmh' : 'mph'),
+          onPick: (m) => window.sentryViewer?.seekTo(m.clip, Math.max(0, m.second - 3))
+        });
+        let shown = null;
+        const follow = () => {
+          const day = window.sentryViewer?.day?.() || document.getElementById('dayFilter')?.value;
+          if (day && /^\d{4}-\d{2}-\d{2}$/.test(day) && day !== shown) { shown = day; moments.load(vehicleId, day); }
+        };
+        document.getElementById('dayFilter')?.addEventListener('change', () => setTimeout(follow, 1500));
+        const first = setInterval(() => { follow(); if (shown) clearInterval(first); }, 1000);
+        setTimeout(() => clearInterval(first), 180000);
+      }).catch(() => { /* no moments */ });
+      // a link to a moment: at=<clip>~<second>, once that day has loaded
+      const wantAt = String(params.get('at') || '').split('~');
+      if (wantAt[0]) {
+        const since = Date.now();
+        const seekAt = setInterval(() => {
+          if (window.sentryViewer?.seekTo(wantAt[0], Math.max(0, (Number(wantAt[1]) || 0) - 3)) || Date.now() - since > 180000) clearInterval(seekAt);
+        }, 500);
+      }
       // Footage > Play day: pick that day once Studio has listed the days
       const wantDay = params.get('date');
       if (wantDay) {

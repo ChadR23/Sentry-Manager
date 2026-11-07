@@ -372,3 +372,6 @@ async function signOut() {
   connect();
   refreshJobBadges();
 })();
+
+// Footage thumbnails flip through their recording under the mouse (web/scrub.js)
+import('/web/scrub.js').then((m) => m.hoverFrames(document.body, '.thumbc')).catch(() => {});

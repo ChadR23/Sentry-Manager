@@ -370,3 +370,6 @@ renderDock();
 
 // remembered between visits: nothing else to restore
 store.set('lastVisit', Date.now());
+
+// Footage thumbnails flip through their recording under the mouse (web/scrub.js)
+import('/web/scrub.js').then((m) => m.hoverFrames(document.body, '.frame-pic, .rec-pic')).catch(() => {});

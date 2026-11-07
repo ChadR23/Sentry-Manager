@@ -331,3 +331,117 @@ export function createScrubber() {
     }
   };
 }
+
+// Flip through a recording on its thumbnail: moving the mouse across a
+// recording's picture shows its frames from start to end (the front camera's
+// preview grids), as streaming sites do. One listener for a whole list:
+//
+//   hoverFrames(listEl, '.thumb');   // which recording: the thumbnail's own URL
+//   hoverFrames(listEl, '.thumb', (thumb) => ({ vehicleId, recordingId }));
+//
+// The picture's box gets a layer on top while the mouse is over it.
+const FLIP_CLIP_SECONDS = 60;
+const flipClips = new Map(); // `${vehicle}/${recording}` -> Promise<[front clip paths]>
+function frontClipsOf(vehicleId, recordingId) {
+  const key = `${vehicleId}/${recordingId}`;
+  if (!flipClips.has(key)) {
+    flipClips.set(key, fetch(`/api/vehicles/${encodeURIComponent(vehicleId)}/recordings/${encodeURIComponent(recordingId)}`, { credentials: 'same-origin' })
+      .then((r) => (r.ok ? r.json() : { files: [] }))
+      .then((d) => (d.files || []).map((f) => f.path).filter((p) => /-front\.mp4$/i.test(p || '')).sort())
+      .catch(() => []));
+    if (flipClips.size > 300) flipClips.delete(flipClips.keys().next().value);
+  }
+  return flipClips.get(key);
+}
+
+const THUMB_URL = /\/api\/vehicles\/([^/]+)\/recordings\/([^/]+)\/thumbnail/;
+function fromThumbnail(el) {
+  const img = el.matches?.('img') ? el : el.querySelector?.('img[src*="/thumbnail"]');
+  const m = img && THUMB_URL.exec(img.getAttribute('src') || '');
+  return m ? { vehicleId: decodeURIComponent(m[1]), recordingId: decodeURIComponent(m[2]) } : null;
+}
+
+export function hoverFrames(root, selector, info = fromThumbnail) {
+  if (!root) return { destroy() {} };
+  let box = null;
+  let layer = null;
+  let clips = null;
+  let token = 0;
+  let lastX = 0;
+  const stop = () => {
+    token++;
+    layer?.remove();
+    layer = null;
+    box = null;
+    clips = null;
+  };
+  function paint() {
+    if (!box || !clips?.length) return;
+    const r = box.getBoundingClientRect();
+    const f = Math.max(0, Math.min(0.999, (lastX - r.left) / r.width));
+    const pos = f * clips.length;
+    const i = Math.floor(pos);
+    const t = (pos - i) * FLIP_CLIP_SECONDS;
+    const g = grid(clips[i]);
+    if (!g?.ready) {
+      if (g) g.waiters.add(() => { if (box && clips?.[i] === clips[i]) paint(); });
+      return;
+    }
+    if (!layer) {
+      layer = document.createElement('div');
+      layer.className = 'sentry-flip';
+      layer.setAttribute('aria-hidden', 'true');
+      layer.style.cssText = 'position:absolute;inset:0;pointer-events:none;background-repeat:no-repeat;z-index:1;border-radius:inherit;overflow:hidden';
+      const bar = document.createElement('i');
+      bar.style.cssText = 'position:absolute;left:0;bottom:0;height:3px;background:rgba(255,255,255,.9)';
+      layer.appendChild(bar);
+      if (getComputedStyle(box).position === 'static') box.style.position = 'relative';
+      box.appendChild(layer);
+    }
+    // the frame covers the box (as a cropped thumbnail does)
+    const cw = g.img.naturalWidth / COLS;
+    const ch = g.img.naturalHeight / ROWS;
+    const s = Math.max(r.width / cw, r.height / ch);
+    const fw = cw * s;
+    const fh = ch * s;
+    const n = Math.max(0, Math.min(COLS * ROWS - 1, Math.floor(t)));
+    Object.assign(layer.style, {
+      backgroundImage: `url("${g.img.src}")`,
+      backgroundSize: `${fw * COLS}px ${fh * ROWS}px`,
+      backgroundPosition: `${(r.width - fw) / 2 - (n % COLS) * fw}px ${(r.height - fh) / 2 - Math.floor(n / COLS) * fh}px`
+    });
+    layer.firstChild.style.width = `${(f * 100).toFixed(1)}%`;
+  }
+  const onMove = (e) => {
+    if (e.pointerType !== 'mouse') return;
+    const el = e.target.closest?.(selector);
+    if (!el || !root.contains(el)) { if (box) stop(); return; }
+    lastX = e.clientX;
+    if (el !== box) {
+      stop();
+      box = el;
+      const want = info(el);
+      if (!want?.vehicleId || !want?.recordingId) return;
+      const mine = token;
+      frontClipsOf(want.vehicleId, want.recordingId).then((list) => {
+        if (mine !== token) return;
+        clips = list;
+        // the grids of what the mouse can reach next
+        for (const p of list.slice(0, 3)) grid(p);
+        paint();
+      });
+      return;
+    }
+    paint();
+  };
+  const onLeave = (e) => { if (box && !box.contains(e.relatedTarget)) stop(); };
+  root.addEventListener('pointermove', onMove);
+  root.addEventListener('pointerout', onLeave);
+  return {
+    destroy() {
+      stop();
+      root.removeEventListener('pointermove', onMove);
+      root.removeEventListener('pointerout', onLeave);
+    }
+  };
+}

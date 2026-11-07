@@ -250,3 +250,6 @@ document.addEventListener('error', (e) => {
   render();
   connect();
 })();
+
+// Footage thumbnails flip through their recording under the mouse (web/scrub.js)
+import('/web/scrub.js').then((m) => m.hoverFrames(document.body, '.thumb')).catch(() => {});

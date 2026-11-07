@@ -510,6 +510,41 @@ async function main() {
   const requireConfirmed = (req) => {
     if (!auth.recentlyConfirmed(req)) throw confirmRequired();
   };
+  // Days until full: the share's free space (its status, read with each
+  // health check) against how much footage a day the car has added lately
+  // (the last 14 days, by the car's dates, at the files' size now).
+  const DAY_MS = 86_400_000;
+  const recentFootage = new Map(); // vehicle id -> the last 14 days' bytes, per scan
+  function storageOf(v) {
+    const st = vehicles.share(v.id)?.status?.();
+    const disk = st && Number.isFinite(st.freeBytes) ? { free: st.freeBytes, total: st.totalBytes } : null;
+    if (!disk) return null;
+    const inv = inventory.get(v.id);
+    const since = new Date(Date.now() - 14 * DAY_MS).toISOString().slice(0, 10);
+    let had = recentFootage.get(v.id);
+    if (!had || had.files !== inv?.files || had.since !== since) {
+      let bytes = 0;
+      let first = null;
+      for (const f of inv?.files?.values() || []) {
+        if (!f.day || f.day < since) continue;
+        bytes += f.size || 0;
+        if (!first || f.day < first) first = f.day;
+      }
+      had = { files: inv?.files, since, bytes, first };
+      recentFootage.set(v.id, had);
+    }
+    // over the last 14 days, or since the first footage when that is newer
+    const span = had.first ? Math.min(14, Math.max(1, Math.round((Date.now() - Date.parse(`${had.first}T00:00:00Z`)) / DAY_MS))) : 14;
+    const perDay = had.bytes / span;
+    const policy = policies.get(v.id);
+    // a policy that deletes every kind of footage after some days keeps the share from filling
+    const capped = Boolean(policy?.enabled && Object.values(policy.keepDays || {}).every((d) => Number.isFinite(d) && d > 0));
+    return {
+      free: disk.free, total: disk.total, perDay: Math.round(perDay),
+      daysLeft: perDay > 0 ? Math.floor(disk.free / perDay) : null,
+      capped
+    };
+  }
   const vehicleSummary = (v) => ({
     ...vehicles.publicView(v),
     security: v.source.type === 'smb' ? securitySummary({ encrypt: v.source.encrypt !== false, version: v.source.version }) : null,
@@ -518,7 +553,8 @@ async function main() {
     binBytes: bin.binBytes(v.id),
     binItems: db.binItems(v.id).length,
     policy: policies.get(v.id),
-    saved: savings.forVehicle(v.id)
+    saved: savings.forVehicle(v.id),
+    storage: storageOf(v)
   });
   // Who the throttle and the audit log count as the client. Behind a trusted
   // reverse proxy every request arrives from the proxy's own address, so the
@@ -1036,6 +1072,37 @@ async function main() {
     const root = vehicles.rootOf(v);
     const byRel = await speedIndex.day(v.id, String(query.date || ''));
     return { speeds: Object.fromEntries(Object.entries(byRel).map(([rel, sp]) => [path.join(root, rel), sp])) };
+  });
+  // Find moments: a day's hard braking, swerves and top speeds (speedIndex.moments)
+  const clipKeyOf = (rel) => (/(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})/.exec(rel) || [])[1] || null;
+  r.add('GET', '/api/vehicles/:id/moments', async (req, res, { params, query }) => {
+    const v = vehicleOr404(params.id);
+    const day = String(query.date || '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new HttpError(400, 'Give a day (date=YYYY-MM-DD).');
+    const root = vehicles.rootOf(v);
+    const list = await speedIndex.moments(v.id, day);
+    const idx = (await speedIndex.progress(v.id, [day]).catch(() => ({})))[day] || { clips: 0, indexed: 0 };
+    return {
+      moments: list.map((m) => ({ kind: m.kind, path: path.join(root, m.rel), clip: clipKeyOf(m.rel), second: m.second, value: m.value })),
+      clips: idx.clips, indexed: idx.indexed
+    };
+  });
+  // Search by place: every clip that passed near a point (speedIndex.near)
+  r.add('GET', '/api/places/near', async (req, res, { query }) => {
+    const lat = Number(query.lat);
+    const lon = Number(query.lon);
+    const radius = Math.max(25, Math.min(5000, Number(query.radius) || 150));
+    if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) throw new HttpError(400, 'Give a place (lat, lon).');
+    const list = vehicles.list();
+    const byId = new Map(list.map((v) => [v.id, v]));
+    const hits = await speedIndex.near(list.map((v) => v.id), lat, lon, radius);
+    return {
+      radius,
+      results: hits.filter((h) => inventory.get(h.vid)?.files?.has(h.rel)).map((h) => ({
+        vehicle: h.vid, vehicleName: byId.get(h.vid)?.name || h.vid, day: h.day, clip: clipKeyOf(h.rel),
+        path: path.join(vehicles.rootOf(byId.get(h.vid)), h.rel), second: h.second, metres: h.metres
+      }))
+    };
   });
   // "Index speeds" on the Footage page: start a pass now, and how far it is
   r.add('GET', '/api/speeds/status', () => speedIndex.status());

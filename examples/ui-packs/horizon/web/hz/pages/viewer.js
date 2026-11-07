@@ -1,11 +1,12 @@
 // Viewer: a full-bleed heads-up display. The main camera fills the stage with the
 // car's telemetry drawn over it (speed, gear, blinkers, Autopilot, brake, wheel);
 // the other cameras ride along as picture-in-picture tiles you tap to swap in.
-import { h, ico, api, send, car, toast, local, ok, dayName, words, mmss, wall, CAMS, CAM_NAME, CAM_TAG } from '../core.js';
+import { h, ico, api, send, car, pickCar, toast, local, ok, dayName, words, mmss, wall, CAMS, CAM_NAME, CAM_TAG } from '../core.js';
 import { load as loadTel, at as telAt, rate as telRate } from '../telemetry.js';
 import { createViewerMap } from '/web/viewerMap.js';
 import { createExportPanel } from '/web/exportPanel.js';
 import { createScrubber, attachTimelineTip, timeAfter } from '/web/scrub.js';
+import { createMoments } from '/web/moments.js';
 import { syncTo } from '/web/camSync.js';
 
 const FILE_RE = /(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})-([a-z0-9_]+)\.mp4$/i;
@@ -115,6 +116,7 @@ export default {
             <label class="fld">Recording<select class="in" id="vw-pick"></select></label>
             <ol class="cliplist" id="vw-clips" aria-label="Clips"></ol>
           </section>
+          <section class="panel hud"><div class="ph"><h2>${ico('warn')}Moments</h2></div><div id="vw-moments"></div></section>
           <section class="panel hud vw-mappanel"><div class="ph"><h2>${ico('map')}Map</h2></div><div class="vw-map" id="vw-map" role="region" aria-label="Map of the drive"></div></section>
           <section class="panel hud"><div class="ph"><h2>${ico('hud')}Telemetry</h2></div><dl class="kv" id="vw-kv"></dl><p class="small faint" id="vw-tnote"></p></section>
         </aside>
@@ -123,7 +125,15 @@ export default {
     const stage = $('#vw-stage');
     const tiles = Object.fromEntries([...stage.querySelectorAll('.cam')].map((f) => [f.dataset.cam, { fig: f, video: f.querySelector('video') }]));
     // the drive on a map: Horizon's cyan for driving yourself, its green for Autopilot
-    const map = createViewerMap($('#vw-map'), { dark: true, colors: { manual: '#3df0ff', autopilot: '#5dffb0' } });
+    const map = createViewerMap($('#vw-map'), {
+      dark: true, colors: { manual: '#3df0ff', autopilot: '#5dffb0' },
+      clock: (hms) => wall(hms),
+      // search by place: a clip found there opens at that moment
+      onPlaceClip: (x) => {
+        if (x.vehicle !== v.id) pickCar(x.vehicle);
+        go(`#/viewer?day=${encodeURIComponent(x.day)}&at=${encodeURIComponent(`${x.clip}~${x.second}`)}&autoplay=0`);
+      }
+    });
     // Export: mark a start and an end, see the clips, render one video on the server
     const xp = createExportPanel({
       vehicleId: () => v.id,
@@ -133,6 +143,16 @@ export default {
       toast
     });
     $('#vw-export').onclick = () => xp.toggle();
+    // Find moments: the day's hard braking, swerves and top speeds; picking
+    // one plays it from a few seconds before
+    const moments = createMoments($('#vw-moments'), {
+      clock: (hms) => wall(hms),
+      speedUnit: () => (st.units === 'mph' ? 'mph' : 'kmh'),
+      onPick: (m) => {
+        const i = st.clips.findIndex((c) => c.key === m.clip);
+        if (i >= 0) seekAll(offset(i) + Math.max(0, m.second - 3));
+      }
+    });
 
     // ---------- playlist ----------
     const detail = (id) => api(`/api/vehicles/${encodeURIComponent(v.id)}/recordings/${encodeURIComponent(id)}`);
@@ -617,6 +637,7 @@ export default {
       local.set('vw.units', u);
       $('#vw-units').textContent = u === 'mph' ? 'mph' : 'km/h';
       $('#h-unit').textContent = u === 'mph' ? 'MPH' : 'KM/H';
+      moments.refresh();
       drawHud();
       drawSpeed();
     }
@@ -690,7 +711,12 @@ export default {
         const k = st.clips.findIndex((c) => c.at && ev.eventAt >= c.at && ev.eventAt < c.at + 60000);
         if (k >= 0) { start = k; off = Math.max(0, (ev.eventAt - st.clips[k].at) / 1000 - 5); }
       }
+      // a link to a moment (search by place, Find moments): at=<clip>~<second>
+      const [atClip, atSec] = String(params.get('at') || '').split('~');
+      const atIdx = atClip ? st.clips.findIndex((c) => c.key === atClip) : -1;
+      if (atIdx >= 0) { start = atIdx; off = Math.max(0, (Number(atSec) || 0) - 3); }
       await open(start, off, params.get('autoplay') !== '0');
+      moments.load(v.id, info.day || st.clips[0].key.slice(0, 10));
       loadSpeeds();
       loadRoute();
     }
@@ -699,6 +725,7 @@ export default {
       unmount() {
         alive = false;
         tip.destroy();
+        moments.destroy();
         map.destroy();
         xp.destroy();
         spdSize.disconnect();

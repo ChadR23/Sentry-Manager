@@ -9,6 +9,10 @@ archive (its size, how many recordings, when it was last scanned, with
 *Refresh inventory*) and the free space on its share (capacity, how full it
 is, what the Recycle Bin holds, with *Vehicle settings*). A chip shows only
 when the share has a problem: *Read-only share* or *Share unavailable*.
+**Full in** says when the share runs out of room at the rate footage has
+come in over the last 14 days (by the car's dates, at the files' size now,
+so converted footage counts smaller). With a policy that deletes every kind
+of footage after some days, it says the policies keep it from filling.
 
 Under them, behind the *Nerd stats* switch, what the machine is doing, live,
 so you don't need Glances or another tool:
@@ -78,6 +82,26 @@ move it to the Recycle Bin. A day stays open until you close it, and picking
 a date in the filter opens that day. The checkbox on a day selects all of
 its recordings.
 
+Moving the mouse across a recording's or day's picture flips through it,
+start to end, from the Viewer's timeline previews (made the first time a
+clip is shown, then kept).
+
 **Show files** lists a recording's clips with each one's codec (H.264, H.265
 or AV1), says how many are not encoded yet, and *Not encoded only* hides the
 rest, so a clip the Encoder skipped or could not convert is easy to find.
+
+## In the Viewer
+
+- **Timeline preview**: hovering the timeline with a mouse (no click) shows
+  the frame and time under the pointer above the bar; on a phone it shows
+  while your finger drags.
+- **Moments**: the day's hard braking (at least 0.4 g of slowing in a
+  second), swerves and sharp turns (at least 0.4 g sideways) and the three
+  fastest stretches, strongest first. Picking one plays it from three
+  seconds before. They come from the speed index, which reads a few KB of
+  each front-camera clip in the background (speed, position and the car's
+  measured acceleration); footage it has not read yet says so.
+- **Find clips at a place** (the pin on the map, every interface pack):
+  tap a spot and every clip recorded within 150 m of it is listed, any day
+  and any vehicle, newest first; picking one opens it at that moment. Only
+  clips with GPS that the speed index has read are found.

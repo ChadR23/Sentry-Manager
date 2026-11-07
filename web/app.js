@@ -768,6 +768,15 @@
   const savedTotal = (list) => list.reduce((t, v) => ({ bytes: t.bytes + (v.saved?.bytes || 0), clips: t.clips + (v.saved?.clips || 0) }), { bytes: 0, clips: 0 });
   const savedText = (sv) => (sv?.bytes > 0 ? `${size(sv.bytes)} · ${plural(sv.clips, 'clip')}` : 'none yet');
 
+  function fullInText(st) {
+    if (!st || !fin(st.free)) return '—';
+    if (st.capped) return 'never <span class="muted small">policies delete old footage</span>';
+    const d = st.daysLeft;
+    if (!fin(d)) return '— <span class="muted small">no new footage lately</span>';
+    const t = d < 1 ? 'under a day' : d < 60 ? `${d} day${d === 1 ? '' : 's'}` : d < 730 ? `${Math.round(d / 30.4)} months` : `${Math.round(d / 365)} years`;
+    const tone = d < 7 ? 'red' : d < 30 ? 'amber' : '';
+    return `${tone ? `<span class="chip ${tone}">${t}</span>` : t} <span class="muted small">at ${size(st.perDay)} a day</span>`;
+  }
   function vehicleTiles(v, at = Date.now(), all = [v], allDays = null) {
     if (!v) {
       return `<div class="nd-grid nd-vgrid">${ndTile('Vehicles', 'none yet', '<p class="nd-note">Each vehicle has its own footage share (SMB) or folder. Add one in Settings to start.</p><div class="nd-actions"><a class="btn sm solid" href="#/settings">Open settings</a></div>')}</div>`;
@@ -796,7 +805,9 @@
       + ndKv([
         ['Capacity', known ? size(s.totalBytes) : 'unknown'],
         ['Used', known ? pct(used) : '—'],
-        ['Recycle Bin', fin(v.binBytes) && v.binBytes > 0 ? size(v.binBytes) : 'empty']
+        ['Recycle Bin', fin(v.binBytes) && v.binBytes > 0 ? size(v.binBytes) : 'empty'],
+        // days until full at the footage added lately (as web/fullIn.js words it)
+        ['Full in', fullInText(v.storage)]
       ])
       + `<div class="nd-actions"><a class="btn sm" href="#/settings/vehicle/${esc(v.id)}">Vehicle settings</a></div>`);
     return `<div class="nd-grid nd-vgrid">${inventory}${free}</div>`;
@@ -2640,3 +2651,6 @@
     connect();
   })();
 })();
+
+// Footage thumbnails flip through their recording under the mouse (web/scrub.js)
+import('/web/scrub.js').then((m) => m.hoverFrames(document.body, '.day-thumb, .thumb')).catch(() => {});

@@ -2,6 +2,7 @@
 import { esc, api, state, current, bytes, rate, pct, num, watts, energy, money, dur, ago, when, isoish, tod, fin, store, toast, confirmDialog, busy, plural, icon, debounce, liveDraw } from '../core.js';
 import { TimeChart, HeatStrip, C, PALETTE, coreBars } from '../charts.js';
 import { split, seg, wireSeg, meter, chip } from '../ui.js';
+import { fullIn } from '/web/fullIn.js';
 
 const MAX_POINTS = 450;
 
@@ -304,6 +305,7 @@ export default {
         k('Vehicles', `${healthy}/${vs.length}`, 'shares reachable', healthy < vs.length ? 'warn' : '', '#/settings/vehicles'),
         k('Footage', bytes(inv), plural(recs, 'recording'), '', '#/footage'),
         k('Free', bytes(free), v ? `on ${v.name}` : '—', fin(free) && v?.share?.totalBytes && free / v.share.totalBytes < 0.05 ? 'bad' : ''),
+        (() => { const f = fullIn(v?.storage); return k('Full in', f ? f.short : '—', f ? (v.storage.capped ? 'policies delete old footage' : `at ${bytes(v.storage.perDay)} a day · ${v.name}`) : 'not known yet', f?.tone === 'bad' ? 'bad' : f?.tone === 'warn' ? 'warn' : ''); })(),
         k('Space saved', savedB ? bytes(savedB) : 'none yet', savedB ? `${plural(savedN, 'clip')} converted · all cars` : 'by conversions', '', '#/encoder'),
         // days with any footage (any car's; one day once)
         k('Days of footage', fin(state.footageDays) ? state.footageDays.toLocaleString() : '—', vs.length > 1 ? 'all cars' : v?.inventory?.firstDay ? `since ${v.inventory.firstDay}` : 'recorded', '', '#/footage'),

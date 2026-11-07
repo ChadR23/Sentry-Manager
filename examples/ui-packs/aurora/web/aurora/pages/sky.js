@@ -7,6 +7,7 @@ import {
   ring, meter, toast, confirmDialog, loadNotes, dayParts, dayTitle, empty, liveDraw
 } from '../core.js';
 import { follow, counts, STATE_TEXT, ACTIVE, CODEC } from '../conv.js';
+import { fullIn } from '/web/fullIn.js';
 
 const CATS = [['Recent', 'teal', 'drive', 'drives'], ['Sentry', 'magenta', 'Sentry event', 'Sentry events'], ['Saved', 'green', 'saved clip', 'saved clips'], ['Other', 'violet', 'other recording', 'other recordings']];
 
@@ -223,6 +224,7 @@ export default {
         <div class="stat"><span class="stat-label">Recycle Bin</span><span class="stat-val">${bytes(v.binBytes)}</span><span class="muted tiny">${plural(v.binItems || 0, 'item')}</span></div>
         <div class="stat"><span class="stat-label">Space saved</span><span class="stat-val">${savedB ? bytes(savedB) : 'None yet'}</span><span class="muted tiny">${savedB ? `${plural(savedN, 'clip')} converted${state.vehicles.length > 1 ? ' · all cars' : ''}` : 'by conversions'}</span></div>
         <div class="stat"><span class="stat-label">Days of footage</span><span class="stat-val">${typeof state.footageDays === 'number' ? state.footageDays.toLocaleString() : '—'}</span><span class="muted tiny">${state.vehicles.length > 1 ? 'any car' : v.inventory?.firstDay ? `since ${esc(dayTitle(v.inventory.firstDay))}` : 'recorded'}</span></div>
+        ${(() => { const f = fullIn(v.storage); return `<div class="stat${f?.tone === 'bad' ? ' bad' : f?.tone === 'warn' ? ' warn' : ''}"><span class="stat-label">Full in</span><span class="stat-val">${esc(f ? f.short : '—')}</span><span class="muted tiny">${f ? (v.storage.capped ? 'policies delete old footage' : `at ${bytes(v.storage.perDay)} a day`) : 'not known yet'}</span></div>`; })()}
         <div class="stat"><span class="stat-label">Policy</span><span class="stat-val">${p?.enabled ? 'On' : 'Off'}</span><span class="muted tiny">${p?.enabled ? (keeps.length ? keeps.map(([c, d]) => `${esc(c)} ${d} d`).join(' · ') : 'keeps everything') : 'nothing is moved by itself'}</span></div></div>
         <div class="actions start"><a class="btn sm" href="#/bin">${icon('trash')} Bin</a><a class="btn sm" href="#/policies">${icon('shield')} Policies</a></div>`;
     };
