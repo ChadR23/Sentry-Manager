@@ -59,6 +59,8 @@ function summarize(samples) {
 function createSpeedIndex({ dir, inventory, vehicles, telemetry, log, pauseMs = 100, idle = () => true }) {
   const days = new Map(); // `${vid}/${day}` -> { rel: [size, mtimeMs, speeds] }
   const dirty = new Set();
+  const ver = new Map(); // `${vid}/${day}` -> changes made here, for the place search's cache
+  const touch = (key) => { dirty.add(key); ver.set(key, (ver.get(key) || 0) + 1); };
   let running = null;
   let again = false;
   let stopped = false;
@@ -143,7 +145,7 @@ function createSpeedIndex({ dir, inventory, vehicles, telemetry, log, pauseMs = 
       while (!idle() && !stopped) await new Promise((r) => setTimeout(r, 2000));
       const data = await load(c.vid, c.day);
       data[c.rel] = [c.size, c.mtimeMs, ...(await speedsFor(path.join(c.root, c.rel), c.size))];
-      dirty.add(`${c.vid}/${c.day}`);
+      touch(`${c.vid}/${c.day}`);
       Object.assign(progress_, { done: done + 1, day: c.day });
       if (++done % 25 === 0) await flush();
       if (done % 250 === 0 && done < todo.length) {
@@ -221,26 +223,93 @@ function createSpeedIndex({ dir, inventory, vehicles, telemetry, log, pauseMs = 
    * day of the given vehicles: [{ vid, day, rel, second, metres }], newest
    * first, at most `limit`. Day files are read without keeping them.
    */
+  // The place search's cache: each day's positions packed small
+  // ({ stamp, rels, at: clip i's points start at at[i], pts: [second, lat, lon]… }),
+  // and each clip's box, so a search reads no file twice and skips clips far away
+  const geo = new Map();
+  let geoPoints = 0;
+  const GEO_MAX = 3_000_000; // points kept (12 bytes each)
+  function packGeo(data) {
+    const rels = [];
+    const at = [0];
+    const box = [];
+    let n = 0;
+    for (const entry of Object.values(data)) n += entry?.[3]?.g?.length || 0;
+    const pts = new Float32Array(n * 3);
+    let k = 0;
+    for (const [rel, entry] of Object.entries(data)) {
+      const g = entry?.[3]?.g;
+      if (!g?.length) continue;
+      let a0 = Infinity; let a1 = -Infinity; let o0 = Infinity; let o1 = -Infinity;
+      for (const [sec, a, o] of g) {
+        pts[k++] = sec; pts[k++] = a; pts[k++] = o;
+        if (a < a0) a0 = a; if (a > a1) a1 = a; if (o < o0) o0 = o; if (o > o1) o1 = o;
+      }
+      rels.push(rel);
+      at.push(k / 3);
+      box.push(a0, a1, o0, o1);
+    }
+    return { rels, at, box, pts };
+  }
+  async function geoOf(vid, d, file) {
+    const key = `${vid}/${d}`;
+    let st;
+    try { st = await fsp.stat(file); } catch { st = null; }
+    const mem = days.get(key);
+    if (!st && !mem) return null;
+    const stamp = `${ver.get(key) || 0}|${st ? `${st.size}/${st.mtimeMs}` : '-'}`;
+    const had = geo.get(key);
+    if (had && had.stamp === stamp) {
+      geo.delete(key); // newest use last
+      geo.set(key, had);
+      return had;
+    }
+    let data = mem;
+    if (!data) {
+      try { data = JSON.parse(await fsp.readFile(file, 'utf8')); } catch { return null; }
+    }
+    const packed = { stamp, ...packGeo(data || {}) };
+    if (had) geoPoints -= had.pts.length / 3;
+    geo.set(key, packed);
+    geoPoints += packed.pts.length / 3;
+    for (const [k, v] of geo) {
+      if (geoPoints <= GEO_MAX || k === key) break;
+      geo.delete(k);
+      geoPoints -= v.pts.length / 3;
+    }
+    return packed;
+  }
+
+  /**
+   * Clips that passed within `radius` metres of a place, across every indexed
+   * day of the given vehicles: [{ vid, day, rel, second, metres }], newest
+   * first, at most `limit`.
+   */
   async function near(vids, lat, lon, radius, limit = 300) {
     const hits = [];
+    // a box around the place a little wider than the radius: points outside it are too far
+    const dLat = (radius / 111320) * 1.05 + 1e-4;
+    const dLon = (radius / (111320 * Math.max(0.01, Math.cos((lat * Math.PI) / 180)))) * 1.05 + 1e-4;
     for (const vid of vids) {
+      const folder = path.dirname(fileOf(vid, '2000-01-01'));
       let names = [];
-      try { names = (await fsp.readdir(path.dirname(fileOf(vid, '2000-01-01')))).filter((n) => DAY.test(n.slice(0, -5)) && n.endsWith('.json')); } catch { continue; }
+      try { names = (await fsp.readdir(folder)).filter((n) => n.endsWith('.json') && DAY.test(n.slice(0, -5))); } catch { continue; }
       for (const name of names.sort().reverse()) {
         const d = name.slice(0, -5);
-        let data = days.get(`${vid}/${d}`);
-        if (!data) {
-          try { data = JSON.parse(await fsp.readFile(path.join(path.dirname(fileOf(vid, d)), name), 'utf8')); } catch { continue; }
-        }
-        for (const [rel, entry] of Object.entries(data)) {
-          const g = entry?.[3]?.g;
-          if (!g?.length) continue;
+        const day_ = await geoOf(vid, d, path.join(folder, name));
+        if (!day_) continue;
+        const { rels, at, box, pts } = day_;
+        for (let i = 0; i < rels.length; i++) {
+          if (box[4 * i + 1] < lat - dLat || box[4 * i] > lat + dLat || box[4 * i + 3] < lon - dLon || box[4 * i + 2] > lon + dLon) continue;
           let best = null;
-          for (const [sec, a, o] of g) {
+          for (let j = at[i]; j < at[i + 1]; j++) {
+            const a = pts[3 * j + 1];
+            const o = pts[3 * j + 2];
+            if (Math.abs(a - lat) > dLat || Math.abs(o - lon) > dLon) continue;
             const m = metres(lat, lon, a, o);
-            if (m <= radius && (!best || m < best.metres)) best = { second: sec, metres: Math.round(m) };
+            if (m <= radius && (!best || m < best.metres)) best = { second: pts[3 * j], metres: Math.round(m) };
           }
-          if (best) hits.push({ vid, day: d, rel, ...best });
+          if (best) hits.push({ vid, day: d, rel: rels[i], ...best });
         }
         if (hits.length >= limit * 2) break;
       }
@@ -271,7 +340,7 @@ function createSpeedIndex({ dir, inventory, vehicles, telemetry, log, pauseMs = 
     if (f && f.day && DAY.test(f.day) && f.camera === 'front') {
       const data = await load(vid, f.day);
       data[rel] = [size, Math.round(mtimeMs), sp, sum];
-      dirty.add(`${vid}/${f.day}`);
+      touch(`${vid}/${f.day}`);
       if (!running) flush().catch(() => {});
     }
     return sp;

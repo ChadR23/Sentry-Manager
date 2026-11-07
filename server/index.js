@@ -77,6 +77,13 @@ const { Telemetry } = require('./telemetry');
 const { createSpeedIndex } = require('./speedIndex');
 const { createExporter } = require('./exporter');
 
+/** Run fn over items, at most n at a time. */
+async function eachLimit(items, n, fn) {
+  let next = 0;
+  const work = async () => { while (next < items.length) await fn(items[next++]); };
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, work));
+}
+
 const APP_ROOT = path.resolve(process.env.APP_ROOT || path.join(__dirname, '..'));
 const SRC = path.join(APP_ROOT, 'src');
 const WEB = path.join(APP_ROOT, 'web');
@@ -493,6 +500,7 @@ async function main() {
   // ---- live events to the browser
   const clients = new Set();
   const MAX_EVENT_CLIENTS = 200;
+  const seenAt = new Map(); // session hash -> when its "last used" was last written
   let converterStreams = 0; // open /api/converter/events streams
   const pending = new Set();
   let flushTimer = null;
@@ -1306,12 +1314,13 @@ async function main() {
     const limit = Math.min(500, Math.max(1, Number(query.limit) || 100));
     const page = list.slice(offset, offset + limit);
     // Sentry and Saved events at a saved place get its name (place), when there are saved places
-    const places = placeList().length > 0;
-    const tagged = await Promise.all(page.map(async (rec) => {
-      const out = publicRecording(rec);
-      if (places && rec.eventId) out.place = placeAt((await eventSpot(params.id, rec).catch(() => null))?.pos);
-      return out;
-    }));
+    const places = placeList();
+    const tagged = page.map(publicRecording);
+    if (places.length) {
+      await eachLimit(page.map((rec, i) => [rec, i]).filter(([rec]) => rec.eventId), 6, async ([rec, i]) => {
+        tagged[i].place = placeAt((await eventSpot(params.id, rec).catch(() => null))?.pos, places);
+      });
+    }
     return {
       total: list.length, offset, limit, scannedAt: inv?.scannedAt || null, scanning: Boolean(inv?.scanning), error: inv?.lastError || null,
       dates: [...new Set((inv?.recordings || []).map((x) => x.day))].sort().reverse(),
@@ -1475,11 +1484,11 @@ async function main() {
     return { info: had.info, pos };
   }
   /** The saved place an event happened at (nearest within 200 m: the car's position is an estimate), or null. */
-  function placeAt(pos) {
+  function placeAt(pos, places = placeList()) {
     if (!pos) return null;
     let best = null;
-    for (const p of placeList()) {
-      const rad = Math.PI / 180;
+    const rad = Math.PI / 180;
+    for (const p of places) {
       const a = Math.sin(((p.lat - pos.lat) * rad) / 2) ** 2 + Math.cos(pos.lat * rad) * Math.cos(p.lat * rad) * Math.sin(((p.lon - pos.lon) * rad) / 2) ** 2;
       const m = 2 * 6371000 * Math.asin(Math.min(1, Math.sqrt(a)));
       if (m <= 200 && (!best || m < best.m)) best = { name: p.name, m };
@@ -1491,20 +1500,16 @@ async function main() {
     const inv = inventory.get(v.id);
     const recs = (inv?.recordings || []).filter((x) => x.eventId).sort((a, b) => String(b.startKey).localeCompare(String(a.startKey))).slice(0, 1000);
     const out = [];
-    let next = 0;
-    const work = async () => {
-      while (next < recs.length) {
-        const rec = recs[next++];
-        const spot = await eventSpot(v.id, rec);
-        if (!spot?.pos) continue;
-        const { info } = spot;
-        out.push({
-          recording: rec.id, category: rec.category, day: rec.day, start: rec.start, startKey: rec.startKey, lat: spot.pos.lat, lon: spot.pos.lon,
-          reason: info.reason || null, city: info.city || null, street: info.street || null, at: info.timestamp || null, place: placeAt(spot.pos)
-        });
-      }
-    };
-    await Promise.all(Array.from({ length: 6 }, work));
+    const places = placeList();
+    await eachLimit(recs, 6, async (rec) => {
+      const spot = await eventSpot(v.id, rec).catch(() => null);
+      if (!spot?.pos) return;
+      const { info } = spot;
+      out.push({
+        recording: rec.id, category: rec.category, day: rec.day, start: rec.start, startKey: rec.startKey, lat: spot.pos.lat, lon: spot.pos.lon,
+        reason: info.reason || null, city: info.city || null, street: info.street || null, at: info.timestamp || null, place: placeAt(spot.pos, places)
+      });
+    });
     out.sort((a, b) => String(b.startKey).localeCompare(String(a.startKey)));
     return { events: out, withoutPosition: recs.length - out.length };
   });
@@ -1971,8 +1976,14 @@ async function main() {
       const isApi = p.startsWith('/api/');
       if (user) {
         // when and from where each signed-in device was last used
+        // (at most once a minute each: video and scrub requests come many a second)
         const h = auth.sessionHash(req);
-        if (h) db.touchSession(h, clientKey(req));
+        const nowMs = Date.now();
+        if (h && !(seenAt.get(h) > nowMs - 60_000)) {
+          seenAt.set(h, nowMs);
+          if (seenAt.size > 5000) seenAt.clear();
+          db.touchSession(h, clientKey(req));
+        }
         // a watch-only account watches: no deleting, converting or settings
         if (isApi && accounts.roleOf(user) === 'viewer' && !viewerMay(req.method, p)) return sendJson(res, 403, { error: 'This account can only watch footage. An admin account can do this.' });
       }

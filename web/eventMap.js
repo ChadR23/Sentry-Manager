@@ -69,24 +69,33 @@ export function createEventMapPage(el, { vehicleId, vehicleName = '', openEvent 
   const map = createViewerMap($('[data-map]'), { dark, noGps: 'No events with a position yet' });
 
   const when = (ev) => { try { return new Date(`${ev.startKey.slice(0, 10)}T${ev.startKey.slice(11).replace(/-/g, ':')}`).toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); } catch { return ev.start || ev.day; } };
+  let withoutPosition = 0;
+  let loads = 0;
   async function loadEvents() {
     if (!vehicleId) { $('[data-sum]').textContent = 'Add a vehicle first.'; return; }
+    const mine = ++loads; // a newer load wins
     try {
       const r = await fetch(`/api/vehicles/${encodeURIComponent(vehicleId)}/event-map`, { credentials: 'same-origin' });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || 'Could not load the events.');
-      if (!alive) return;
+      if (!alive || mine !== loads) return;
       allEvents = d.events;
-      events = shownPlace ? allEvents.filter((ev) => (ev.place || '') === (shownPlace === '-' ? '' : shownPlace)) : allEvents;
-      drawFilter();
-      $('[data-sum]').textContent = `${vehicleName ? `${vehicleName}: ` : ''}${events.length} event${events.length === 1 ? '' : 's'} with a position${d.withoutPosition ? ` (${d.withoutPosition} without one)` : ''}`;
-      map.setPins(events.map((ev, i) => ({ lat: ev.lat, lon: ev.lon, color: COLOR[ev.category] || '#6aa9ff', title: `${ev.category} · ${when(ev)}${ev.place ? ` · at ${ev.place}` : ''}${ev.reason ? ` · ${reasonText(ev.reason)}` : ''}`, i })), { onPick: (p) => openEvent(events[p.i]) });
-      $('[data-list]').innerHTML = events.slice(0, 50).map((ev, i) => `<li><i style="background:${COLOR[ev.category] || '#6aa9ff'}"></i>
+      withoutPosition = d.withoutPosition;
+      if (shownPlace && shownPlace !== '-' && !allEvents.some((ev) => ev.place === shownPlace)) shownPlace = null;
+      drawEvents();
+    } catch (err) {
+      if (alive && mine === loads) $('[data-sum]').textContent = err.message;
+    }
+  }
+  // the filter only redraws: the events are already here
+  function drawEvents() {
+    events = shownPlace ? allEvents.filter((ev) => (ev.place || '') === (shownPlace === '-' ? '' : shownPlace)) : allEvents;
+    drawFilter();
+    $('[data-sum]').textContent = `${vehicleName ? `${vehicleName}: ` : ''}${events.length} event${events.length === 1 ? '' : 's'} with a position${withoutPosition ? ` (${withoutPosition} without one)` : ''}`;
+    map.setPins(events.map((ev, i) => ({ lat: ev.lat, lon: ev.lon, color: COLOR[ev.category] || '#6aa9ff', title: `${ev.category} · ${when(ev)}${ev.place ? ` · at ${ev.place}` : ''}${ev.reason ? ` · ${reasonText(ev.reason)}` : ''}`, i })), { onPick: (p) => openEvent(events[p.i]) });
+    $('[data-list]').innerHTML = events.slice(0, 50).map((ev, i) => `<li><i style="background:${COLOR[ev.category] || '#6aa9ff'}"></i>
         <span class="em-grow"><b>${esc(when(ev))}</b> · ${esc(ev.category)}${ev.place ? ` <span class="em-tag">at ${esc(ev.place)}</span>` : ''}${ev.reason ? ` · ${esc(reasonText(ev.reason))}` : ''}<br><span class="em-muted">${esc([ev.street, ev.city].filter(Boolean).join(', '))}</span></span>
         <button type="button" class="em-btn" data-open="${i}">Play</button></li>`).join('') || '<li class="em-muted">No Sentry or Saved events with a position.</li>';
-    } catch (err) {
-      if (alive) $('[data-sum]').textContent = err.message;
-    }
   }
   async function loadPlaces() {
     let places = [];
@@ -98,7 +107,7 @@ export function createEventMapPage(el, { vehicleId, vehicleName = '', openEvent 
   }
   el.addEventListener('click', async (e) => {
     const f = e.target.closest('[data-place-f]');
-    if (f) { shownPlace = f.dataset.placeF === '' ? null : f.dataset.placeF; loadEvents(); return; }
+    if (f) { shownPlace = f.dataset.placeF === '' ? null : f.dataset.placeF; drawEvents(); return; }
     const o = e.target.closest('[data-open]');
     if (o) { openEvent(events[Number(o.dataset.open)]); return; }
     const rn = e.target.closest('[data-rename]');
@@ -106,12 +115,14 @@ export function createEventMapPage(el, { vehicleId, vehicleName = '', openEvent 
       const input = el.querySelector(`[data-name="${CSS.escape(rn.dataset.rename)}"]`);
       await fetch(`/api/places/${encodeURIComponent(rn.dataset.rename)}`, { method: 'PATCH', credentials: 'same-origin', headers: H, body: JSON.stringify({ name: input.value }) });
       loadPlaces();
+      loadEvents(); // the events' place names
       return;
     }
     const rm = e.target.closest('[data-remove]');
     if (rm) {
       await fetch(`/api/places/${encodeURIComponent(rm.dataset.remove)}`, { method: 'DELETE', credentials: 'same-origin', headers: H });
       loadPlaces();
+      loadEvents();
     }
   });
   loadEvents();

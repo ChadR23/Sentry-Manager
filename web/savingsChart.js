@@ -44,7 +44,12 @@ export function watchSavingsCharts(root = document.body) {
   };
   fill();
   let queued = false;
-  new MutationObserver(() => { if (!queued) { queued = true; requestAnimationFrame(() => { queued = false; fill(); }); } }).observe(root, { childList: true, subtree: true });
+  // only when elements were added (a ticking clock or progress text adds text nodes only)
+  new MutationObserver((list) => {
+    if (queued || !list.some((m) => [...m.addedNodes].some((n) => n.nodeType === 1))) return;
+    queued = true;
+    requestAnimationFrame(() => { queued = false; fill(); });
+  }).observe(root, { childList: true, subtree: true });
 }
 
 export function createSavingsChart(el, { vehicleId } = {}) {
