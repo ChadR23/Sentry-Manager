@@ -13,7 +13,7 @@ import { createScrubber, attachTimelineTip } from '/web/scrub.js';
 import { createMoments } from '/web/moments.js';
 import { attachViewerExtras, savedPosition } from '/web/viewerExtras.js';
 import { createLayoutSlots } from '/web/layouts.js';
-import { syncTo } from '/web/camSync.js';
+import { syncTo, readyTogether, clipAhead } from '/web/camSync.js';
 
 // laid out like the car: pillars and front on top, repeaters and back below
 const CAMS = ['left_pillar', 'front', 'right_pillar', 'left_repeater', 'back', 'right_repeater'];
@@ -238,6 +238,10 @@ async function player(ctx, v, day, recId) {
     toast
   });
   ctx.cleanup(() => xp.destroy());
+  // the next clip loads in this one's last seconds (camSync.clipAhead)
+  const ahead = clipAhead();
+  ctx.cleanup(() => ahead.destroy());
+  let loadSeq = 0;
   $('#export').onclick = () => xp.toggle();
   // the whole recording's route, a few clips at a time
   async function loadRoute() {
@@ -273,6 +277,7 @@ async function player(ctx, v, day, recId) {
     } else pauseAll();
   }
   function load(index, autoplay) {
+    const mine = ++loadSeq;
     st.seg = Math.max(0, Math.min(segs.length - 1, index));
     st.wantPlay = autoplay;
     // scrub previews of this clip and its neighbours, ready before a drag
@@ -305,11 +310,15 @@ async function player(ctx, v, day, recId) {
     scrubber.show([...videos].map(([c, video]) => ({ video, src: seg().cams[c] })), 0);
     scrubber.release([...videos.values()]);
     const m = master();
-    if (m && autoplay) {
-      const go2 = () => playAll();
-      if (m.readyState >= 2) go2();
-      else m.addEventListener('loadeddata', go2, { once: true });
-    }
+    const next = segs[st.seg + 1];
+    ahead.follow(m, () => (next ? [...videos.keys()].map((c) => next.cams[c] && mediaUrl(next.cams[c])) : []));
+    // every camera ready first, so they start as one
+    const shown = [...videos.values()].filter((vid) => !vid.hidden && vid.getAttribute('src'));
+    readyTogether(shown).then(() => {
+      if (mine !== loadSeq) return;
+      ahead.clear();
+      if (m && autoplay && !m.error) playAll();
+    });
     updateTime();
   }
 

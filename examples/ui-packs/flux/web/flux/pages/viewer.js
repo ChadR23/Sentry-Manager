@@ -8,7 +8,7 @@ import { createScrubber, attachTimelineTip, timeAfter } from '/web/scrub.js';
 import { createMoments } from '/web/moments.js';
 import { attachViewerExtras } from '/web/viewerExtras.js';
 import { createLayoutSlots } from '/web/layouts.js';
-import { syncTo } from '/web/camSync.js';
+import { syncTo, readyTogether, clipAhead } from '/web/camSync.js';
 import { TimeChart, C } from '../charts.js';
 import { split, seg, wireSeg, empty } from '../ui.js';
 
@@ -184,6 +184,7 @@ export default {
       apply: (l) => { if (l.focus) setFocus(l.focus); if (l.layout) setLayout(l.layout); },
       describe: (l) => `${l.layout === 'grid' ? 'grid' : l.layout === 'duo' ? 'front and rear' : `${l.layout}, ${String(l.focus || 'front').replace('_', ' ')} large`}`
     });
+    const ahead = clipAhead();
     const xp = createExportPanel({
       vehicleId: () => v.id,
       clips: () => st.segs.map((s) => ({ key: s.key, files: s.files, len: durOf(s), cat: s.category })),
@@ -457,7 +458,19 @@ export default {
       scrubber.release(GRID_ORDER.map((c) => tiles[c].video));
       loadTelemetry(s);
       drawHead();
-      if (autoplay) play(); else setPlaying(false);
+      // the next clip loads in this one's last seconds (camSync.clipAhead)
+      const next = st.segs[i + 1];
+      ahead.follow(m, () => (next ? GRID_ORDER.map((c) => next.files[c] && `/api/media?path=${encodeURIComponent(next.files[c])}`) : []));
+      if (!autoplay) {
+        setPlaying(false);
+        readyTogether(activeVideos()).then(() => { if (seq === loadSeq) ahead.clear(); });
+        return;
+      }
+      // every camera ready first, so they start as one
+      await readyTogether(activeVideos());
+      if (seq !== loadSeq || !alive) return;
+      ahead.clear();
+      play();
     }
 
     function setPlaying(on) {
@@ -668,7 +681,7 @@ export default {
     } catch (err) {
       el.querySelector('.vw-main').innerHTML = empty(esc(err.message));
       // everything made above is taken down when leaving, as after a start
-      return { unmount() { alive = false; tip.destroy(); moments.destroy(); extras.destroy(); slots.destroy(); cancelAnimationFrame(raf); chart.destroy(); map.destroy(); xp.destroy(); } };
+      return { unmount() { alive = false; tip.destroy(); moments.destroy(); extras.destroy(); slots.destroy(); cancelAnimationFrame(raf); chart.destroy(); map.destroy(); xp.destroy(); ahead.destroy(); } };
     }
     $('#vw-title').textContent = st.title || 'no footage';
     drawPick(info);
@@ -747,6 +760,7 @@ export default {
         chart.destroy();
         map.destroy();
         xp.destroy();
+        ahead.destroy();
         for (const c of GRID_ORDER) {
           const vid = tiles[c].video;
           vid.pause();

@@ -12,7 +12,7 @@ import { createScrubber, attachTimelineTip, timeAfter } from '/web/scrub.js';
 import { createMoments } from '/web/moments.js';
 import { attachViewerExtras } from '/web/viewerExtras.js';
 import { createLayoutSlots } from '/web/layouts.js';
-import { syncTo } from '/web/camSync.js';
+import { syncTo, readyTogether, clipAhead } from '/web/camSync.js';
 
 const CAMS = ['front', 'back', 'left_repeater', 'right_repeater', 'left_pillar', 'right_pillar'];
 // on small tiles the labels shrink to these codes (one line, never wrapping)
@@ -164,6 +164,7 @@ export default {
       describe: (l) => (l.focus ? `${NAMES[l.focus] || l.focus} large` : 'all cameras')
     });
     // Export: mark a start and an end, see the clips, render one video on the server
+    const ahead = clipAhead();
     const xp = createExportPanel({
       vehicleId: () => v.id,
       clips: () => clips.map((c, k) => ({ key: c.key, files: c.cams, len: durations[k], cat: c.rec?.category })),
@@ -432,7 +433,9 @@ export default {
       loadClip(index + 1, 0, true);
       return true;
     }
+    let clipSeq = 0;
     function loadClip(i, at = 0, autoplay = playing) {
+      const mine = ++clipSeq;
       index = Math.max(0, Math.min(clips.length - 1, i));
       const c = clips[index];
       for (const k of CAMS) {
@@ -464,8 +467,21 @@ export default {
           try { if (Math.abs(vids[k].currentTime - Math.max(0, at)) > 0.01) vids[k].currentTime = Math.max(0, at); } catch { /* not ready */ }
         }
         scrubber.release(CAMS.map((k) => vids[k]));
-        if (autoplay) play();
-        else paint();
+        // the next clip loads in this one's last seconds (camSync.clipAhead)
+        const next = clips[index + 1];
+        ahead.follow(vids[master], () => (next ? CAMS.map((k) => next.cams[k] && media(next.cams[k])) : []));
+        // every camera ready first, so they start as one
+        const ready = readyTogether(camsHere().map((k) => vids[k]));
+        if (!autoplay) {
+          paint();
+          ready.then(() => { if (mine === clipSeq) ahead.clear(); });
+          return;
+        }
+        ready.then(() => {
+          if (mine !== clipSeq || dead) return;
+          ahead.clear();
+          play();
+        });
       };
       if (master && vids[master].readyState >= 1) start();
       else if (master) vids[master].addEventListener('loadedmetadata', start, { once: true });
@@ -896,6 +912,7 @@ export default {
         slots.destroy();
         map.destroy();
         xp.destroy();
+        ahead.destroy();
         document.removeEventListener('keydown', onKey);
         document.removeEventListener('visibilitychange', onHidden);
         clearTimeout(syncTimer);

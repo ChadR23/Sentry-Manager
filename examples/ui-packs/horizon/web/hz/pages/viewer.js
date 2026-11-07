@@ -9,7 +9,7 @@ import { createScrubber, attachTimelineTip, timeAfter } from '/web/scrub.js';
 import { createMoments } from '/web/moments.js';
 import { attachViewerExtras } from '/web/viewerExtras.js';
 import { createLayoutSlots } from '/web/layouts.js';
-import { syncTo } from '/web/camSync.js';
+import { syncTo, readyTogether, clipAhead } from '/web/camSync.js';
 
 const FILE_RE = /(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})-([a-z0-9_]+)\.mp4$/i;
 const SPEEDS = [0.25, 0.5, 1, 1.5, 2, 4];
@@ -137,6 +137,7 @@ export default {
       }
     });
     // Export: mark a start and an end, see the clips, render one video on the server
+    const ahead = clipAhead();
     const xp = createExportPanel({
       vehicleId: () => v.id,
       clips: () => st.clips.map((c) => ({ key: c.key, files: c.files, len: lenOf(c), cat: c.cat })),
@@ -493,7 +494,19 @@ export default {
       }
       scrubber.release(CAMS.map((k) => tiles[k].video));
       drawTime();
-      if (autoplay) play(); else setPlaying(false);
+      // the next clip loads in this one's last seconds (camSync.clipAhead)
+      const next = st.clips[i + 1];
+      ahead.follow(m, () => (next ? CAMS.map((k) => next.files[k] && `/api/media?path=${encodeURIComponent(next.files[k])}`) : []));
+      if (!autoplay) {
+        setPlaying(false);
+        readyTogether(active()).then(() => { if (mine === loadSeq) ahead.clear(); });
+        return;
+      }
+      // every camera ready first, so they start as one
+      await readyTogether(active());
+      if (mine !== loadSeq || !alive) return;
+      ahead.clear();
+      play();
     }
 
     function setPlaying(on) {
@@ -701,7 +714,7 @@ export default {
       info = await build();
     } catch (err) {
       say(`<b>${h(err.message)}</b>`);
-      return { unmount() { alive = false; tip.destroy(); moments.destroy(); slots.destroy(); extras.destroy(); map.destroy(); xp.destroy(); spdSize.disconnect(); document.removeEventListener('visibilitychange', onVis); } };
+      return { unmount() { alive = false; tip.destroy(); moments.destroy(); slots.destroy(); extras.destroy(); map.destroy(); xp.destroy(); ahead.destroy(); spdSize.disconnect(); document.removeEventListener('visibilitychange', onVis); } };
     }
     drawPick(info);
     // HW3 or HW4 from the footage itself, as the built-in Viewer does: only
@@ -748,6 +761,7 @@ export default {
         slots.destroy();
         map.destroy();
         xp.destroy();
+        ahead.destroy();
         spdSize.disconnect();
         cancelAnimationFrame(raf);
         document.removeEventListener('visibilitychange', onVis);
