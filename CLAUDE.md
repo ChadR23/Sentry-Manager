@@ -40,3 +40,7 @@ any stray branch.
 - No co-author trailers in commits, no model names in commits or code.
 - No pull requests unless the owner asks.
 - Run `npm test` before every push.
+- Never access the owner's Z: drive (on the "water" PC) in any way, not even
+  to read or list it: it holds everything critical. A session on that PC that
+  needs something from Z: stops and names the file or folder; the owner
+  copies it by hand.
