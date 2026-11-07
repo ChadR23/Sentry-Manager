@@ -24,12 +24,13 @@ export async function render(ctx) {
   };
   const draw = () => {
     view.innerHTML = `<div class="page">
-      <div class="page-head"><div><h1>Cleanup rules</h1><p class="lede">Keep footage for as long as you like. Older recordings move to the Recycle Bin once a day; protected ones always stay, and nothing is ever deleted by a rule.</p></div>
+      <div class="page-head"><div><h1>Cleanup rules</h1><p class="lede">Keep footage for as long as you like. Older recordings move to the Recycle Bin once a day; protected ones always stay, and nothing is deleted for good unless you set the Recycle Bin to empty itself.</p></div>
         <div class="head-actions">${vehiclePicker()}</div></div>
       <form class="card stack" id="pol">
         <label class="switch"><input type="checkbox" name="enabled"${policy.enabled ? ' checked' : ''}><span>Tidy up ${esc(v.name)}’s footage every day</span></label>
         <div class="form-grid">${CATS.map(daySelect).join('')}
-          <label class="field"><span>At what time</span><input class="input" type="time" name="runAt" value="${esc(policy.runAt || '03:30')}"><span class="hint">The server’s time</span></label></div>
+          <label class="field"><span>At what time</span><input class="input" type="time" name="runAt" value="${esc(policy.runAt || '03:30')}"><span class="hint">The server’s time</span></label>
+          <label class="field"><span>Empty the Recycle Bin after</span><input class="input" type="number" inputmode="numeric" min="1" max="365" name="binDays" value="${esc(policy.binDays ?? '')}" placeholder="Never"><span class="hint">Days in the bin before it is deleted for good. Empty: only when you empty it.</span></label></div>
         <div class="note ${preview.recordings ? 'note-warn' : 'note-good'}">${icon(preview.recordings ? 'info' : 'checkCircle')}<span>${preview.recordings ? `With these rules, the next run moves <b>${plural(preview.recordings, 'recording')}</b> (${bytes(preview.bytes)}) to the Recycle Bin.` : 'With these rules, nothing would be moved right now.'}
           ${policy.lastRunAt ? `<br><span class="muted small">Last run ${esc(when(policy.lastRunAt))}: ${policy.lastResult?.error ? esc(policy.lastResult.error) : `${policy.lastResult?.moved ?? 0} moved, ${policy.lastResult?.skipped ?? 0} kept`}.</span>` : ''}</span></div>
         <div class="row"><button class="btn btn-primary" type="submit">Save rules</button><button class="btn" type="button" id="run">${icon('play')} Run now</button></div>
@@ -41,7 +42,8 @@ export async function render(ctx) {
     return {
       enabled: f.get('enabled') === 'on',
       runAt: f.get('runAt') || '03:30',
-      keepDays: Object.fromEntries(CATS.map((c) => { const x = f.get(`keep-${c}`); return [c, x && x !== 'custom' ? Number(x) : null]; }))
+      keepDays: Object.fromEntries(CATS.map((c) => { const x = f.get(`keep-${c}`); return [c, x && x !== 'custom' ? Number(x) : null]; })),
+      binDays: f.get('binDays') ? Number(f.get('binDays')) : null
     };
   };
   const save = async () => {

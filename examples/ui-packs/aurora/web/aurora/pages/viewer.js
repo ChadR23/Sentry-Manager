@@ -10,6 +10,7 @@ import { createViewerMap } from '/web/viewerMap.js';
 import { createExportPanel } from '/web/exportPanel.js';
 import { createScrubber, attachTimelineTip, timeAfter } from '/web/scrub.js';
 import { createMoments } from '/web/moments.js';
+import { attachViewerExtras } from '/web/viewerExtras.js';
 import { syncTo } from '/web/camSync.js';
 
 const CAMS = ['front', 'back', 'left_repeater', 'right_repeater', 'left_pillar', 'right_pillar'];
@@ -146,6 +147,13 @@ export default {
       },
       now: () => { const c = clips[index]; const m = vids[camsHere()[0]]; return c && m ? { clip: c.key, second: m.currentTime } : null; },
       openAt: (x) => go(`#/viewer/${encodeURIComponent(x.vehicle)}/day/${encodeURIComponent(x.day)}?at=${encodeURIComponent(`${x.clip}~${x.second}`)}`)
+    });
+    // pop out, resume, zoom a still, frame by frame on phones (web/viewerExtras.js)
+    const extras = attachViewerExtras({
+      stage: q('#vw-stage'), videos: () => camsHere().map((k) => vids[k]), main: () => vids[focus || master || 'front'], buttons: q('#c-full').parentElement, step,
+      where: () => { const c = clips[index]; const m = vids[master || camsHere()[0]]; return c && m ? { vehicle: v.id, day: c.key.slice(0, 10), clip: c.key, second: m.currentTime } : null; },
+      resumeTo: (pos) => go(`#/viewer/${encodeURIComponent(pos.vehicle)}/day/${encodeURIComponent(pos.day)}?at=${encodeURIComponent(`${pos.clip}~${pos.second}`)}`),
+      offerResume: !query?.get('at') && !params[0]
     });
     // Export: mark a start and an end, see the clips, render one video on the server
     const xp = createExportPanel({
@@ -842,7 +850,7 @@ export default {
     } catch (err) {
       q('#vw-title').innerHTML = `<span class="note bad">${esc(err.message)}</span>`;
     }
-    if (dead) { tip.destroy(); moments.destroy(); map.destroy(); xp.destroy(); return {}; }
+    if (dead) { tip.destroy(); moments.destroy(); extras.destroy(); map.destroy(); xp.destroy(); return {}; }
     drawList();
     // HW3 or HW4 from the footage itself, as the built-in Viewer does: only
     // HW4 cars record the pillar cameras, so without them the cockpit has no
@@ -876,6 +884,7 @@ export default {
         dead = true;
         tip.destroy();
         moments.destroy();
+        extras.destroy();
         map.destroy();
         xp.destroy();
         document.removeEventListener('keydown', onKey);

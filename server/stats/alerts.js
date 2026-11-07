@@ -41,6 +41,11 @@ function rules(body) {
       key: `disk-temp:${d.name}`, level: 'warn', value: d.tempC, raise: limit, clear: limit - 5, above: true,
       message: () => `${DISK_KIND[d.kind] || 'Disk'} ${d.name} at ${round(d.tempC, 0)} °C`
     });
+    // read or write errors since the app started: stays until the next start
+    out.push({
+      key: `disk-errors:${d.name}`, level: 'error', value: d.ioErrors ?? null, raise: 1, clear: 0.5, above: true,
+      message: () => `${DISK_KIND[d.kind] || 'Disk'} ${d.name}${d.model ? ` (${d.model})` : ''} reported ${d.ioErrors} read/write error${d.ioErrors === 1 ? '' : 's'}: check its health (SMART) on the NAS and that your footage is backed up`
+    });
   }
   for (const f of body.filesystems || []) {
     // a vehicle's share already has its own notifications for full and offline

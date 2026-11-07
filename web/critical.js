@@ -156,3 +156,78 @@
   if (document.body) start();
   else document.addEventListener('DOMContentLoaded', start);
 })();
+
+// The startup check's bar (server/health.js): when a check that runs a minute
+// after every start failed (the database, the data folder, ffmpeg, the GPU
+// encoder, a footage share), an amber bar at the top of every page says what
+// and links to Health. It can be closed for this visit; it goes away by
+// itself once the next check passes.
+(() => {
+  try {
+    if (window.top !== window.self) return;
+  } catch {
+    return;
+  }
+  const ID = 'sentry-health-bar';
+  const css = `
+#${ID}{position:relative;z-index:2147483646;box-sizing:border-box;margin:0;display:flex;gap:10px;align-items:center;flex-wrap:wrap;
+  padding:8px max(14px,env(safe-area-inset-right)) 8px max(14px,env(safe-area-inset-left));background:#8a5a00;color:#fff;
+  font:500 14px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;border-bottom:2px solid #ffc94a;color-scheme:dark}
+#${ID} *{box-sizing:border-box;color:inherit;font-family:inherit;letter-spacing:normal;text-transform:none}
+#${ID} b{font-weight:800}
+#${ID} span{flex:1 1 240px;min-width:0;overflow-wrap:anywhere}
+#${ID} a,#${ID} button{all:unset;cursor:pointer;font-weight:700;padding:4px 10px;border-radius:6px;border:1px solid rgba(255,255,255,.6)}
+#${ID} a:focus-visible,#${ID} button:focus-visible{outline:2px solid #fff;outline-offset:2px}
+@media print{#${ID}{display:none}}`;
+  let bar = null;
+  const key = (problems) => `sentry-health-closed:${problems.map((p) => p.label).join('|')}`;
+  function hide() { bar?.remove(); bar = null; }
+  function show(problems) {
+    try { if (sessionStorage.getItem(key(problems))) return; } catch { /* shown */ }
+    if (!document.getElementById(`${ID}-css`)) {
+      const style = document.createElement('style');
+      style.id = `${ID}-css`;
+      style.textContent = css;
+      document.head.appendChild(style);
+    }
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = ID;
+      bar.setAttribute('role', 'status');
+      const red = document.getElementById('sentry-critical-update');
+      if (red?.nextSibling) red.nextSibling.after(bar); else document.body.prepend(bar);
+    }
+    bar.textContent = '';
+    const text = document.createElement('span');
+    const b = document.createElement('b');
+    b.textContent = problems.length === 1 ? 'Startup check found a problem: ' : `Startup check found ${problems.length} problems: `;
+    text.append(b, problems.map((p) => `${p.label}${p.detail ? ` (${p.detail})` : ''}`).join('; '));
+    const open = document.createElement('a');
+    open.href = '/#/health';
+    open.textContent = 'Open Health';
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.textContent = 'Close';
+    close.setAttribute('aria-label', 'Close this bar for now');
+    close.addEventListener('click', () => { try { sessionStorage.setItem(key(problems), '1'); } catch { /* until reload */ } hide(); });
+    bar.append(text, open, close);
+  }
+  async function check() {
+    try {
+      const res = await fetch('/api/health/banner', { credentials: 'same-origin', headers: { 'X-Requested-With': 'sentry-six-manager' }, cache: 'no-store' });
+      if (!res.ok) return;
+      const { problems } = await res.json();
+      if (Array.isArray(problems) && problems.length) show(problems);
+      else hide();
+    } catch {
+      // offline or signed out: try again later
+    }
+  }
+  function start() {
+    check();
+    setTimeout(check, 75_000); // the startup check runs a minute after the app starts
+    setInterval(check, 10 * 60 * 1000);
+  }
+  if (document.body) start();
+  else document.addEventListener('DOMContentLoaded', start);
+})();

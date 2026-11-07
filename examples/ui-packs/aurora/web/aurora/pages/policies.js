@@ -1,5 +1,5 @@
 // Policies: how long each kind of recording stays before the policy moves it
-// to the Recycle Bin (never deleted by a policy; protected ones always stay).
+// to the Recycle Bin (protected ones always stay); the bin can empty itself after some days.
 
 import { $, esc, icon, api, current, vehiclePicker, bytes, plural, whenFull, toast, confirmDialog, empty } from '../core.js';
 
@@ -32,10 +32,11 @@ export default {
       body.innerHTML = `<form id="pol" class="stack" novalidate>
         <section class="panel"><div class="panel-head"><h2>Retention for ${esc(v.name)}</h2>
           <label class="check"><input type="checkbox" name="enabled"${policy.enabled ? ' checked' : ''}> Run every day</label></div>
-          <p class="lead">Recordings older than the days below move to the Recycle Bin once a day. A policy never deletes anything, and protected recordings always stay. Leave a field empty to keep that kind forever.</p>
+          <p class="lead">Recordings older than the days below move to the Recycle Bin once a day. Protected recordings always stay; nothing is deleted for good unless you set the Recycle Bin to empty itself. Leave a field empty to keep that kind forever.</p>
           <div class="keep-grid" style="margin-top:18px">${CATS.map(([c, label, color]) => `<label class="keep"><span class="row"><span class="cat-dot" style="background:${color};box-shadow:0 0 10px ${color}"></span><b>${esc(label)}</b></span>
             <span class="field">Keep for (days)<input class="input" type="number" inputmode="numeric" min="1" max="3650" name="keep-${c}" value="${policy.keepDays[c] ?? ''}" placeholder="forever"></span></label>`).join('')}</div>
-          <div class="form" style="margin-top:16px"><label class="field">Run at (server time)<input class="input" type="time" name="runAt" value="${esc(policy.runAt)}" required></label></div>
+          <div class="form" style="margin-top:16px"><label class="field">Run at (server time)<input class="input" type="time" name="runAt" value="${esc(policy.runAt)}" required></label>
+            <label class="field">Empty the Recycle Bin after (days)<input class="input" type="number" inputmode="numeric" min="1" max="365" name="binDays" value="${policy.binDays ?? ''}" placeholder="never: you empty it"></label></div>
           <p class="note" id="pol-note" style="margin-top:16px"></p>
           <div class="actions"><button class="btn" type="button" id="run">${icon('play')} Run now</button><button class="btn primary" type="submit">${icon('check')} Save</button></div>
         </section></form>`;
@@ -43,7 +44,7 @@ export default {
     }
     const read = () => {
       const fd = new FormData($('#pol', body));
-      return { enabled: fd.get('enabled') === 'on', runAt: String(fd.get('runAt') || ''), keepDays: Object.fromEntries(CATS.map(([c]) => [c, fd.get(`keep-${c}`) ? Number(fd.get(`keep-${c}`)) : null])) };
+      return { enabled: fd.get('enabled') === 'on', runAt: String(fd.get('runAt') || ''), keepDays: Object.fromEntries(CATS.map(([c]) => [c, fd.get(`keep-${c}`) ? Number(fd.get(`keep-${c}`)) : null])), binDays: fd.get('binDays') ? Number(fd.get('binDays')) : null };
     };
     const load = async (full = true) => {
       const out = await api(url);

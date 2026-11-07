@@ -6,6 +6,7 @@ import { createViewerMap } from '/web/viewerMap.js';
 import { createExportPanel } from '/web/exportPanel.js';
 import { createScrubber, attachTimelineTip, timeAfter } from '/web/scrub.js';
 import { createMoments } from '/web/moments.js';
+import { attachViewerExtras } from '/web/viewerExtras.js';
 import { syncTo } from '/web/camSync.js';
 import { TimeChart, C } from '../charts.js';
 import { split, seg, wireSeg, empty } from '../ui.js';
@@ -167,6 +168,13 @@ export default {
       },
       now: () => { const s = st.segs[st.idx]; const m = master(); return s && m ? { clip: s.key, second: m.currentTime } : null; },
       openAt: (x) => go(`#/viewer?day=${encodeURIComponent(x.day)}&at=${encodeURIComponent(`${x.clip}~${x.second}`)}&autoplay=0`)
+    });
+    // pop out, resume, zoom a still, frame by frame on phones (web/viewerExtras.js)
+    const extras = attachViewerExtras({
+      stage: $('#vw-stage'), videos: () => activeVideos(), main: () => master(), buttons: $('#vw-export').parentElement, step,
+      where: () => { const s = st.segs[st.idx]; const m = master(); return s && m ? { vehicle: current()?.id, day: s.key.slice(0, 10), clip: s.key, second: m.currentTime } : null; },
+      resumeTo: (pos) => go(`#/viewer?day=${encodeURIComponent(pos.day)}&at=${encodeURIComponent(`${pos.clip}~${pos.second}`)}&autoplay=0`),
+      offerResume: !params.get('at') && !params.get('rec') && !params.get('day')
     });
     const xp = createExportPanel({
       vehicleId: () => v.id,
@@ -726,6 +734,7 @@ export default {
         alive = false;
         tip.destroy();
         moments.destroy();
+        extras.destroy();
         cancelAnimationFrame(raf);
         chart.destroy();
         map.destroy();

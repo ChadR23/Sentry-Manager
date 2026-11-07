@@ -111,7 +111,54 @@ rest, so a clip the Encoder skipped or could not convert is easy to find.
   starred moments from every day are listed under the moments, in every
   interface; picking one opens it, and × removes the star (the recording
   stays protected until you unprotect it).
+- **Pop out** (picture in picture): the main camera keeps playing in its own
+  small window while you use other pages or apps.
+- **Pick up where you left off**: the Viewer remembers, in this browser,
+  where you were in each car's footage for 14 days and offers to go back
+  there when you open it (Daylight: the *Continue* card goes to that second).
+- **Zoom a still**: while paused, scroll (mouse) or pinch (touch) over a
+  camera to zoom in up to 6×, and drag to look around, to read a number
+  plate. Playing or a double-click resets it.
+- **Frame by frame on phones**: while paused, large ‹ › buttons on the main
+  camera step one frame back or forward.
 - **Find clips at a place** (the pin on the map, every interface pack):
   tap a spot and every clip recorded within 150 m of it is listed, any day
   and any vehicle, newest first; picking one opens it at that moment. Only
   clips with GPS that the speed index has read are found.
+
+## Driving
+
+A page of its own in every interface: the selected car's driving week by
+week for the last 12 weeks, from the driving data in the footage: distance
+(as bars), time moving, days driven, hard braking and swerves (about 0.4 g
+or more) and top speed, with this week against the last. Miles or
+kilometres, remembered in the browser.
+
+## Health
+
+Also a page in every interface:
+
+- **Checks**, each with what to do when it fails: the data folder (writable,
+  free space, cache folders, database intact, daily snapshot), each car's
+  share (readable, writable, free space), ffmpeg, the GPU encoder (a real
+  test encode; not while converting) and HTTPS. They also run by themselves
+  a minute after every start (after an update, say): what fails there is a
+  notification and an amber bar at the top of every page, with a link here.
+- **Database snapshots**: once a day the database (accounts, vehicles,
+  settings, policies, starred moments, job history) is copied to
+  `data/snapshots`, keeping the newest 7. *Restore…* asks for your password,
+  then the app restarts on that copy; the one it replaced stays as
+  `data/manager.db.before-restore`. Footage is never touched.
+- **Logs**: search between two dates (archived logs too), for some text and
+  level, and download what matches.
+- **Support bundle**: a .zip with the last 7 days of logs, the checks and
+  the set-up, for someone helping you. Passwords are masked, and footage
+  paths, share and vehicle names, IP addresses and e-mail addresses are
+  replaced with placeholders.
+
+**A share that drops** (a NAS restarting, a Wi-Fi blip) is retried quietly,
+waiting longer between tries; the *share is offline* alert only comes when it
+is still down after 10 minutes. **Disk errors**: when a disk the server can
+see reports read or write errors while the app runs, an alert says which
+disk. Full SMART health needs root and raw access to the disks, which the
+container does not have; your NAS (TrueNAS) checks SMART itself.

@@ -2,7 +2,11 @@
 
 // Whole disks: read/write bytes per second and how busy they are from
 // /proc/diskstats deltas, model and kind from /sys/block, temperature from
-// the disk's own sensor (drivetemp / nvme hwmon, see sensors.js).
+// the disk's own sensor (drivetemp / nvme hwmon, see sensors.js), and the
+// I/O errors the kernel counted on it since this app started
+// (device/ioerr_cnt, SATA and SAS disks): errors that keep coming are an
+// early sign of a failing disk. Full SMART needs root and the raw disk,
+// which this container does not have; the NAS itself checks SMART.
 
 const { readText, readLine, readNum, listDir, round, clampPct, join } = require('./util');
 
@@ -39,6 +43,17 @@ class DisksProvider {
     this.disks = new Map();
     this.prev = null;
     this.prevAt = null;
+    this.errBase = new Map(); // disk -> its error count when first read
+  }
+
+  /** I/O errors on the disk since this app started (null: not counted). */
+  errorsSince(name) {
+    const raw = readLine(join(this.sysRoot, 'block', name, 'device', 'ioerr_cnt'));
+    if (!raw) return null;
+    const n = Number.parseInt(raw, raw.startsWith('0x') ? 16 : 10);
+    if (!Number.isFinite(n)) return null;
+    if (!this.errBase.has(name)) this.errBase.set(name, n);
+    return Math.max(0, n - this.errBase.get(name));
   }
 
   probe() {
@@ -70,7 +85,8 @@ class DisksProvider {
         writeBps = Math.round((cur.write - before.write) / dt);
         if (cur.ioMs >= before.ioMs) busy = round(clampPct((cur.ioMs - before.ioMs) / (dt * 10)), 0);
       }
-      out.push({ name: d.name, model: d.model, readBps, writeBps, tempC: this.sensors.diskTemp(d.name), kind: d.kind, busy });
+      const ioErrors = this.errorsSince(d.name);
+      out.push({ name: d.name, model: d.model, readBps, writeBps, tempC: this.sensors.diskTemp(d.name), kind: d.kind, busy, ...(ioErrors === null ? {} : { ioErrors }) });
     }
     if (stats.size) {
       this.prev = stats;

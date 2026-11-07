@@ -470,6 +470,28 @@
         const first = setInterval(() => { follow(); if (shown) clearInterval(first); }, 1000);
         setTimeout(() => clearInterval(first), 180000);
       }).catch(() => { /* no moments */ });
+      // pop out, resume, zoom a still, frame by frame on phones (web/viewerExtras.js)
+      import('/web/viewerExtras.js').then(({ attachViewerExtras }) => {
+        const stage = document.getElementById('videoContainer');
+        if (!stage) return;
+        attachViewerExtras({
+          stage,
+          videos: () => window.sentryViewer?.videos?.() || [],
+          main: () => window.sentryViewer?.main?.(),
+          buttons: document.getElementById('settingsBtn')?.parentElement || null,
+          step: (dir) => window.sentryViewer?.step?.(dir),
+          where: () => { const n = window.sentryViewer?.now?.(); return n ? { vehicle: vehicleId, day: n.clip.slice(0, 10), ...n } : null; },
+          resumeTo: (pos) => {
+            const q = new URLSearchParams(location.search);
+            q.set('date', pos.day);
+            q.set('at', `${pos.clip}~${pos.second}`);
+            location.search = q.toString();
+          },
+          offerResume: !params.get('at') && !params.get('date'),
+          // Studio's floating panels can cover the cameras
+          stepsFixed: true
+        });
+      }).catch(() => { /* without them */ });
       // a link to a moment: at=<clip>~<second>, once that day has loaded
       const wantAt = String(params.get('at') || '').split('~');
       if (wantAt[0]) {

@@ -15,8 +15,12 @@ can't be trashed.
 
 A **policy** keeps a number of days per category (Recent, Sentry, Saved,
 Other) and moves older recordings to the Recycle Bin once a day. It previews
-what the next run would move. Protected recordings are always skipped, and a
-policy never deletes anything.
+what the next run would move. Protected recordings are always skipped.
+
+**Empty the Recycle Bin after (days)**, on the same page, is off by default:
+then nothing is deleted for good until you empty the bin. With a number,
+each daily run deletes what has been in that vehicle's bin longer than
+that, and the policy's last result says how much it freed.
 
 ## Jobs
 

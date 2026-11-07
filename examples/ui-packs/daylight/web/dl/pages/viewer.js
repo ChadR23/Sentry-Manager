@@ -11,6 +11,7 @@ import { createViewerMap } from '/web/viewerMap.js';
 import { createExportPanel } from '/web/exportPanel.js';
 import { createScrubber, attachTimelineTip } from '/web/scrub.js';
 import { createMoments } from '/web/moments.js';
+import { attachViewerExtras, savedPosition } from '/web/viewerExtras.js';
 import { syncTo } from '/web/camSync.js';
 
 // laid out like the car: pillars and front on top, repeaters and back below
@@ -69,11 +70,14 @@ async function chooser(ctx, v) {
   }
   const last = store.get('lastWatched', null);
   const resume = last && last.vehicle === v.id && data.recordings.find((r) => r.id === last.rec);
+  // the exact second, when this browser has it (web/viewerExtras.js)
+  const exact = savedPosition(v.id);
+  const resumeHref = exact ? `#/viewer/${enc(v.id)}?day=${enc(exact.day)}&at=${enc(`${exact.clip}~${exact.second}`)}` : resume ? `#/viewer/${enc(v.id)}/${enc(resume.id)}?day=${enc(resume.day)}` : '';
   view.innerHTML = `<div class="page">
     <div class="page-head"><div><h1>Viewer</h1><p class="lede">Choose something to watch. All cameras play together.</p></div>
       <div class="head-actions">${vehiclePicker()}</div></div>
     ${resume ? `<div class="card row-between" style="margin-bottom:22px"><div><p class="eyebrow">Pick up where you left off</p><h3>${esc((CATEGORY[resume.category] || CATEGORY.Other).word)} · ${esc(dayShort(resume.day))}, ${esc(niceTime(resume.start))}</h3></div>
-      <a class="btn btn-primary" href="#/viewer/${enc(v.id)}/${enc(resume.id)}?day=${enc(resume.day)}">${icon('play')} Continue</a></div>` : ''}
+      <a class="btn btn-primary" href="${resumeHref}">${icon('play')} Continue</a></div>` : ''}
     ${data.recordings.length ? [...byDay].map(([d, list]) => `<section class="section" style="margin-top:20px"><div class="section-head"><h2>${esc(dayTitle(d))}</h2>
         <a class="btn btn-ghost btn-sm" href="#/viewer/${enc(v.id)}?day=${enc(d)}">${icon('play')} Play the whole day</a></div>
         <div class="pick-list">${[...list].sort((a, b) => String(a.startKey).localeCompare(String(b.startKey))).map((r) => {
@@ -209,6 +213,7 @@ async function player(ctx, v, day, recId) {
     openAt: (x) => go(`#/viewer/${enc(x.vehicle)}?day=${enc(x.day)}&at=${enc(`${x.clip}~${x.second}`)}`)
   });
   ctx.cleanup(() => moments.destroy());
+
   // a seek asked for before the clip has loaded
   function seekWhenReady() {
     const m = master();
@@ -572,6 +577,16 @@ async function player(ctx, v, day, recId) {
   document.addEventListener('visibilitychange', onHide);
   ctx.cleanup(() => document.removeEventListener('visibilitychange', onHide));
 
+  // pop out, zoom a still, frame by frame on phones, and where you were for
+  // "Pick up where you left off" (web/viewerExtras.js)
+  const extras = attachViewerExtras({
+    stage: $('#cams'), videos: () => shown(), main: () => master(), buttons: $('#full').parentElement,
+    // one frame (Tesla records 36 a second); step() moves by seconds
+    step: (dir) => { pauseAll(); step(dir / 36); },
+    where: () => { const s = seg(); const m = master(); return s && m ? { vehicle: v.id, day: rec.day, clip: s.ts.replace(' ', '_').replace(/:/g, '-'), second: m.currentTime } : null; },
+    offerResume: false
+  });
+  ctx.cleanup(() => extras.destroy());
   const atSeg = atClip ? segOf(atClip) : -1;
   if (atSeg >= 0) { st.seg = atSeg; pendingSeek = Math.max(0, (Number(atSec) || 0) - 3); }
   load(st.seg, new URLSearchParams(location.hash.split('?')[1] || '').get('autoplay') === '1');

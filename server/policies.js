@@ -1,13 +1,15 @@
 'use strict';
 
 // Retention policies per vehicle: "keep Recent clips N days" etc. A policy
-// only ever MOVES old recordings to the Recycle Bin; protected recordings are
-// skipped, and nothing is deleted until the user empties the bin.
+// MOVES old recordings to the Recycle Bin; protected recordings are skipped.
+// Nothing is deleted for good unless the user empties the bin, or turns on
+// "empty the Recycle Bin after N days" (binDays): then, at the policy's run,
+// what has sat in the bin longer than that is deleted.
 
 const CATEGORIES = ['Recent', 'Sentry', 'Saved', 'Other'];
 
 function defaultPolicy() {
-  return { enabled: false, runAt: '03:30', keepDays: { Recent: null, Sentry: null, Saved: null, Other: null }, lastRunAt: null, lastResult: null };
+  return { enabled: false, runAt: '03:30', keepDays: { Recent: null, Sentry: null, Saved: null, Other: null }, binDays: null, lastRunAt: null, lastResult: null };
 }
 
 function normalizePolicy(input, prev = defaultPolicy()) {
@@ -16,6 +18,14 @@ function normalizePolicy(input, prev = defaultPolicy()) {
   if (input.runAt !== undefined) {
     if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(String(input.runAt))) throw Object.assign(new Error('Run time must be HH:MM.'), { status: 400 });
     out.runAt = String(input.runAt);
+  }
+  if (input.binDays !== undefined) {
+    if (input.binDays === null || input.binDays === '') out.binDays = null;
+    else {
+      const n = Number(input.binDays);
+      if (!Number.isInteger(n) || n < 1 || n > 365) throw Object.assign(new Error('Empty the Recycle Bin after 1 to 365 days, or leave empty to keep it until you empty it.'), { status: 400 });
+      out.binDays = n;
+    }
   }
   for (const c of CATEGORIES) {
     const v = input.keepDays?.[c];
@@ -86,8 +96,30 @@ class Policies {
     const { ids } = this.preview(vehicleId);
     const result = ids.length ? await this.bin.trash(vehicleId, ids, { reason: 'policy' }) : { moved: [], skipped: [], bytes: 0 };
     const policy = this.get(vehicleId);
-    this.db.set(`policy:${vehicleId}`, { ...policy, lastRunAt: Date.now(), lastResult: { moved: result.moved.length, skipped: result.skipped.length, bytes: result.bytes } });
+    const emptied = policy.binDays ? await this.emptyOld(vehicleId, policy.binDays) : null;
+    this.db.set(`policy:${vehicleId}`, {
+      ...policy, lastRunAt: Date.now(),
+      lastResult: { moved: result.moved.length, skipped: result.skipped.length, bytes: result.bytes, ...(emptied ? { emptied: emptied.deleted, freed: emptied.bytes } : {}) }
+    });
     return result;
+  }
+
+  /** Delete for good what has been in the vehicle's Recycle Bin longer than `days`. */
+  async emptyOld(vehicleId, days, now = Date.now()) {
+    const before = now - days * 86400000;
+    let deleted = 0;
+    let bytes = 0;
+    for (const item of this.db.binItems(vehicleId)) {
+      if (!(item.trashedAt < before)) continue;
+      try {
+        bytes += (await this.bin.deleteForever(item.id)).bytes || 0;
+        deleted++;
+      } catch (err) {
+        this.log.warn(`Recycle Bin: could not empty ${item.label}: ${err.message}`);
+      }
+    }
+    if (deleted) this.log.info(`Recycle Bin of ${vehicleId}: ${deleted} item(s) older than ${days} days deleted`);
+    return { deleted, bytes };
   }
 
   /** Called every minute: run policies whose time has come. */

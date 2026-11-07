@@ -7,9 +7,13 @@
 const { EventEmitter } = require('events');
 
 class Jobs extends EventEmitter {
-  constructor({ db }) {
+  constructor({ db, shareGraceMs = 10 * 60 * 1000 }) {
     super();
     this.db = db;
+    // a share that drops for a moment (a NAS reboot, a Wi-Fi blip) is
+    // retried quietly; only one still down after this long raises an alert
+    this.shareGraceMs = shareGraceMs;
+    this.shareDown = new Map(); // vehicle id -> { since, timer, vehicle, status }
   }
 
   start({ type, vehicleId = null, title, detail = null, externalId = null }) {
@@ -59,9 +63,13 @@ class Jobs extends EventEmitter {
 }
 
 class Notifications extends EventEmitter {
-  constructor({ db }) {
+  constructor({ db, shareGraceMs = 10 * 60 * 1000 }) {
     super();
     this.db = db;
+    // a share that drops for a moment (a NAS reboot, a Wi-Fi blip) is
+    // retried quietly; only one still down after this long raises an alert
+    this.shareGraceMs = shareGraceMs;
+    this.shareDown = new Map(); // vehicle id -> { since, timer, vehicle, status }
   }
 
   raise(n) {
@@ -94,12 +102,33 @@ class Notifications extends EventEmitter {
     const key = `share:${vehicle.id}`;
     if (!status) return;
     if (!status.healthy) {
-      this.raise({
-        kind: 'share', level: 'critical', vehicleId: vehicle.id, dedupeKey: key,
-        title: `${vehicle.name}: footage share is offline`,
-        message: [status.lastError, status.hint].filter(Boolean).join(' ') || 'The share cannot be read.'
-      });
-    } else this.resolve(key);
+      let down = this.shareDown.get(vehicle.id);
+      if (!down) {
+        down = { since: Date.now(), timer: null };
+        this.shareDown.set(vehicle.id, down);
+      }
+      down.vehicle = vehicle;
+      down.status = status;
+      const raise = () => {
+        const d = this.shareDown.get(vehicle.id);
+        if (!d) return;
+        const mins = Math.round((Date.now() - d.since) / 60000);
+        this.raise({
+          kind: 'share', level: 'critical', vehicleId: vehicle.id, dedupeKey: key,
+          title: `${d.vehicle.name}: footage share is offline`,
+          message: [`Not reachable for ${mins} minute${mins === 1 ? '' : 's'}; still retrying.`, d.status.lastError, d.status.hint].filter(Boolean).join(' ')
+        });
+      };
+      if (Date.now() - down.since >= this.shareGraceMs) raise();
+      else if (!down.timer) {
+        down.timer = setTimeout(raise, this.shareGraceMs - (Date.now() - down.since));
+        down.timer.unref?.();
+      }
+    } else {
+      const down = this.shareDown.get(vehicle.id);
+      if (down) { clearTimeout(down.timer); this.shareDown.delete(vehicle.id); }
+      this.resolve(key);
+    }
 
     const roKey = `readonly:${vehicle.id}`;
     if (status.healthy && status.writable === false) {

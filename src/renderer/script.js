@@ -3819,7 +3819,18 @@ window.sentryViewer = {
         const m = nativeVideo.master;
         return g?.timestampKey && m ? { clip: g.timestampKey, second: m.currentTime || 0 } : null;
     },
-    metric: () => useMetric
+    metric: () => useMetric,
+    // for the Viewer conveniences (web/viewerExtras.js): the cameras shown,
+    // the main one, and one frame (Tesla records 36 a second) back or forward
+    videos: () => scrubVideos().filter(v => v.src && v.offsetWidth > 0),
+    main: () => nativeVideo.master || videoMain,
+    step(dir) {
+        const m = nativeVideo.master;
+        if (!m) return;
+        pause();
+        const t = Math.max(0, Math.min((Number.isFinite(m.duration) ? m.duration : Infinity) - 0.01, m.currentTime + dir / 36));
+        for (const v of scrubVideos().filter(x => x.src)) v.currentTime = t;
+    }
 };
 
 // Sentry Six Manager: fast timeline dragging (web/scrub.js)

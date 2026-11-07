@@ -13,7 +13,7 @@ export default {
       }
       const all = await Promise.all(state.vehicles.map(async (v) => [v, await api(`/api/vehicles/${encodeURIComponent(v.id)}/policy`).catch((err) => ({ error: err.message }))]));
       const cur = current();
-      el.innerHTML = `<div class="phead"><div><h1>Policies</h1><p class="muted small">Recordings older than the days you set move to the Recycle Bin once a day. Nothing is ever deleted by a policy, and protected recordings are always skipped. Empty means keep forever.</p></div></div>
+      el.innerHTML = `<div class="phead"><div><h1>Policies</h1><p class="muted small">Recordings older than the days you set move to the Recycle Bin once a day. Protected recordings are always skipped; nothing is deleted for good unless you set the Recycle Bin to empty itself. Empty means keep forever.</p></div></div>
         <div class="pol-grid">${all.map(([v, d]) => {
           if (d.error) return `<article class="card"><h2>${esc(v.name)}</h2><p class="bad-text">${esc(d.error)}</p></article>`;
           const p = d.policy;
@@ -23,6 +23,7 @@ export default {
             <label class="check"><input type="checkbox" name="enabled"${p.enabled ? ' checked' : ''}> Run this policy every day</label>
             <div class="grid4">${CATS.map((c) => `<label class="field">Keep ${c} (days)<input class="input num" type="number" min="1" max="3650" name="keep-${c}" value="${p.keepDays?.[c] ?? ''}" placeholder="forever"></label>`).join('')}</div>
             <label class="field narrow">Run at (server time)<input class="input num" type="time" name="runAt" value="${esc(p.runAt || '03:30')}"></label>
+            <label class="field narrow">Empty the Recycle Bin after (days)<input class="input num" type="number" min="1" max="365" name="binDays" value="${p.binDays ?? ''}" placeholder="never: you empty it"></label>
             <div class="note ${pv.recordings ? 'amber' : ''}">${pv.recordings ? `With the saved settings the next run moves <b>${plural(pv.recordings, 'recording')}</b> (<b class="num">${bytes(pv.bytes)}</b>) to the Recycle Bin.` : 'With the saved settings nothing would move right now.'}
               ${p.lastRunAt ? `<br><span class="small">Last run ${esc(when(p.lastRunAt))}: ${p.lastResult?.error ? esc(p.lastResult.error) : `${p.lastResult?.moved ?? 0} moved, ${p.lastResult?.skipped ?? 0} skipped`}.</span>` : ''}</div>
             <div class="row-actions"><button class="btn" type="button" data-run>${icon('play')}Run now…</button><button class="btn primary" type="submit">Save policy</button></div>
@@ -32,7 +33,7 @@ export default {
         const id = form.dataset.v;
         const read = () => {
           const fd = new FormData(form);
-          return { enabled: fd.get('enabled') === 'on', runAt: fd.get('runAt') || '03:30', keepDays: Object.fromEntries(CATS.map((c) => [c, fd.get(`keep-${c}`) ? Number(fd.get(`keep-${c}`)) : null])) };
+          return { enabled: fd.get('enabled') === 'on', runAt: fd.get('runAt') || '03:30', keepDays: Object.fromEntries(CATS.map((c) => [c, fd.get(`keep-${c}`) ? Number(fd.get(`keep-${c}`)) : null])), binDays: fd.get('binDays') ? Number(fd.get('binDays')) : null };
         };
         form.onsubmit = (e) => {
           e.preventDefault();

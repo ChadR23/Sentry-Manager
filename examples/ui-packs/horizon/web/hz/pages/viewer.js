@@ -7,6 +7,7 @@ import { createViewerMap } from '/web/viewerMap.js';
 import { createExportPanel } from '/web/exportPanel.js';
 import { createScrubber, attachTimelineTip, timeAfter } from '/web/scrub.js';
 import { createMoments } from '/web/moments.js';
+import { attachViewerExtras } from '/web/viewerExtras.js';
 import { syncTo } from '/web/camSync.js';
 
 const FILE_RE = /(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})-([a-z0-9_]+)\.mp4$/i;
@@ -154,6 +155,13 @@ export default {
       },
       now: () => { const c = st.clips[st.i]; const m = master(); return c && m ? { clip: c.key, second: m.currentTime } : null; },
       openAt: (x) => go(`#/viewer?day=${encodeURIComponent(x.day)}&at=${encodeURIComponent(`${x.clip}~${x.second}`)}&autoplay=0`)
+    });
+    // pop out, resume, zoom a still, frame by frame on phones (web/viewerExtras.js)
+    const extras = attachViewerExtras({
+      stage: $('#vw-stage'), videos: () => active(), main: () => master(), buttons: $('#vw-export').parentElement, step,
+      where: () => { const c = st.clips[st.i]; const m = master(); return c && m ? { vehicle: v.id, day: c.key.slice(0, 10), clip: c.key, second: m.currentTime } : null; },
+      resumeTo: (pos) => go(`#/viewer?day=${encodeURIComponent(pos.day)}&at=${encodeURIComponent(`${pos.clip}~${pos.second}`)}&autoplay=0`),
+      offerResume: !params.get('at') && !params.get('rec') && !params.get('day')
     });
 
     // ---------- playlist ----------
@@ -685,7 +693,7 @@ export default {
       info = await build();
     } catch (err) {
       say(`<b>${h(err.message)}</b>`);
-      return { unmount() { alive = false; tip.destroy(); map.destroy(); xp.destroy(); spdSize.disconnect(); document.removeEventListener('visibilitychange', onVis); } };
+      return { unmount() { alive = false; tip.destroy(); extras.destroy(); map.destroy(); xp.destroy(); spdSize.disconnect(); document.removeEventListener('visibilitychange', onVis); } };
     }
     drawPick(info);
     // HW3 or HW4 from the footage itself, as the built-in Viewer does: only
@@ -728,6 +736,7 @@ export default {
         alive = false;
         tip.destroy();
         moments.destroy();
+        extras.destroy();
         map.destroy();
         xp.destroy();
         spdSize.disconnect();

@@ -11,11 +11,14 @@ import bin from './pages/bin.js';
 import notifications from './pages/notifications.js';
 import settings from './pages/settings.js';
 import vehicles from './pages/vehicles.js';
+import driving from './pages/driving.js';
+import health from './pages/health.js';
 
 const PAGES = [
   { id: 'overview', label: 'Overview', icon: 'overview', key: 'o', mod: overview, group: 'Monitor' },
   { id: 'footage', label: 'Footage', icon: 'footage', key: 'f', mod: footage, group: 'Monitor' },
   { id: 'viewer', label: 'Viewer', icon: 'viewer', key: 'v', mod: viewer, group: 'Monitor' },
+  { id: 'driving', label: 'Driving', icon: 'gauge', key: 'd', mod: driving, group: 'Monitor' },
   { id: 'encoder', label: 'Encoder', icon: 'encoder', key: 'e', mod: encoder, group: 'Process' },
   { id: 'vehicles', label: 'Encoding per vehicle', icon: 'encoder', key: 'c', mod: vehicles, group: 'Process' },
   { id: 'nodes', label: 'Nodes', icon: 'nodes', key: 'n', mod: nodes, group: 'Process' },
@@ -23,6 +26,7 @@ const PAGES = [
   { id: 'jobs', label: 'Jobs', icon: 'jobs', key: 'j', mod: jobs, group: 'Process' },
   { id: 'bin', label: 'Recycle Bin', icon: 'bin', key: 'b', mod: bin, group: 'Process' },
   { id: 'notifications', label: 'Notifications', icon: 'bell', key: 'a', mod: notifications, group: 'System' },
+  { id: 'health', label: 'Health', icon: 'check', key: 'h', mod: health, group: 'System' },
   { id: 'settings', label: 'Settings', icon: 'settings', key: 's', mod: settings, group: 'System' }
 ];
 const byId = Object.fromEntries(PAGES.map((p) => [p.id, p]));

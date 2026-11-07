@@ -47,6 +47,9 @@ const { Jobs, Notifications } = require('./activity');
 const { ImageUpdates, criticalFromFile } = require('./imageUpdates');
 const { Thumbnails } = require('./thumbnails');
 const { detectGpus } = require('./gpu');
+const { createHealth } = require('./health');
+const { createSnapshots, applyPendingRestore } = require('./snapshots');
+const { writeZip } = require('./zip');
 const { createConverterHost } = require('./converterHost');
 const { createStats } = require('./stats');
 const { encoderBlock, jobProgress, RUNNING: CONVERTER_RUNNING } = require('./encoderStats');
@@ -233,7 +236,11 @@ async function main() {
   const log = logger.scope('server');
   fs.mkdirSync(DATA, { recursive: true });
   const buildInfo = readBuildInfo();
+  // a snapshot chosen in Settings → Health takes the database's place first
+  try { applyPendingRestore(path.join(DATA, 'manager.db'), log); } catch (err) { log.error(`Restoring the database snapshot failed: ${err.message}`); }
   const db = new ManagerDB(path.join(DATA, 'manager.db'));
+  const snapshots = createSnapshots({ db, dbFile: path.join(DATA, 'manager.db'), dir: path.join(DATA, 'snapshots'), log: logger.scope('snapshots') });
+  snapshots.start();
   const auth = new Auth({ db, log: logger.scope('auth'), isSecure, setupFile: path.join(DATA, 'setup-code.txt') });
   auth.bootstrap();
   const jobs = new Jobs({ db });
@@ -773,6 +780,102 @@ async function main() {
     return undefined;
   });
 
+  // ---- Settings → Health: checks with what to do, the startup self-check,
+  // database snapshots, log search by date and the support bundle
+  const health = createHealth({
+    db, dataDir: DATA, vehicles, ffmpegPath: FFMPEG, ffprobePath: FFPROBE, spawn,
+    diskSpace: (dir) => diskSpace(fs.promises, dir), runtime: () => host.runtime, detectGpus, snapshots,
+    tls: () => ({ mode: TLS_MODE, trustProxy: TRUST_PROXY, error: (() => { try { return tlsSource?.status()?.error || null; } catch (err) { return err.message; } })() }),
+    log: logger.scope('health')
+  });
+  // after every start: what fails is a notification and the amber bar on every page
+  const healthLog = logger.scope('health');
+  setTimeout(() => {
+    health.run({ startup: true }).then((res) => {
+      const bad = res.checks.filter((c) => c.status === 'bad');
+      for (const c of res.checks) {
+        if (c.status === 'bad') notes.raise({ kind: 'health', level: 'critical', dedupeKey: `health:${c.id}`, title: `Startup check: ${c.label}${c.detail ? `: ${c.detail}` : ''}`, message: c.hint || 'Settings → Health has the details.' });
+        else notes.resolve(`health:${c.id}`);
+      }
+      if (bad.length) healthLog.error(`Startup check: ${bad.map((c) => `${c.label}${c.detail ? ` (${c.detail})` : ''}`).join('; ')}`);
+      else healthLog.info(`Startup check: all ${res.checks.length} checks passed or were skipped`);
+    }).catch((err) => healthLog.warn(`Startup check did not run: ${err.message}`));
+  }, 60_000).unref?.();
+  r.add('GET', '/api/health', async () => health.last() || health.run());
+  r.add('POST', '/api/health/run', async () => health.run());
+  // for the amber bar (web/critical.js): what the startup check found broken
+  r.add('GET', '/api/health/banner', () => {
+    const last = health.last();
+    return { problems: last ? last.checks.filter((c) => c.status === 'bad').map((c) => ({ label: c.label, detail: c.detail })) : [] };
+  });
+  r.add('GET', '/api/snapshots', () => ({ snapshots: snapshots.list(), keep: 7 }));
+  r.add('POST', '/api/snapshots', (req, res, { user }) => {
+    const name = snapshots.take({ force: true });
+    audit.info(`Database snapshot ${name} made: ${by(req, user)}`);
+    return { snapshots: snapshots.list() };
+  });
+  r.add('POST', '/api/snapshots/:name/restore', (req, res, { params, user }) => {
+    // it replaces accounts and settings: the password again
+    requireConfirmed(req);
+    snapshots.prepareRestore(params.name);
+    audit.warn(`Database snapshot ${params.name} chosen to restore; restarting: ${by(req, user)}`);
+    setTimeout(() => shutdown('restore'), 500);
+    return { ok: true, restarting: true };
+  });
+  // Logs between two dates (and archived ones), optionally filtered by text
+  r.add('GET', '/api/logs/search', async (req, res, { query }) => {
+    const at = (v, end) => { if (!v) return null; const t = Date.parse(/^\d{4}-\d{2}-\d{2}$/.test(v) ? `${v}T${end ? '23:59:59.999' : '00:00:00'}` : v); return Number.isFinite(t) ? t : null; };
+    const lines = await logger.search({ from: at(query.from, false), to: at(query.to, true), text: query.q || '', minLevel: ['debug', 'info', 'warn', 'error'].includes(query.level) ? query.level : 'info', limit: query.download ? 50000 : 2000 });
+    if (!query.download) return { lines: lines.reverse() };
+    const text = lines.map((l) => `${new Date(l.at).toISOString()} ${l.level.toUpperCase().padEnd(5)} [${l.scope}] ${l.message}`).join('\n');
+    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': `attachment; filename="sentry-six-manager-${query.from || 'start'}-to-${query.to || 'now'}.log"` });
+    res.end(`${text}\n`);
+    return undefined;
+  });
+  // Support bundle: what someone helping needs, without passwords (already
+  // masked in the logs), footage paths, share names, IP addresses or e-mails
+  r.add('GET', '/api/support-bundle', async (req, res) => {
+    const list = vehicles.list();
+    const swaps = [];
+    list.forEach((v, i) => {
+      for (const p of [vehicles.rootOf(v), vehicles.studioRoot?.(v), v.source?.path]) if (p && p.length > 1) swaps.push([p, `<footage-${i + 1}>`]);
+      if (v.source?.share) swaps.push([v.source.share, `<share-${i + 1}>`]);
+      if (v.source?.username) swaps.push([v.source.username, `<share-user-${i + 1}>`]);
+      if (v.name) swaps.push([v.name, `<vehicle-${i + 1}>`]);
+    });
+    swaps.push([DATA, '<data>']);
+    swaps.sort((a, b) => b[0].length - a[0].length);
+    const scrub = (text) => {
+      let t = String(text);
+      for (const [from, to] of swaps) t = t.split(from).join(to);
+      return t.replace(/\b\d{1,3}(?:\.\d{1,3}){3}\b/g, '<ip>').replace(/\b[\w.+-]+@[\w-]+\.[\w.-]+\b/g, '<email>')
+        .replace(/\b(?:[0-9a-f]{1,4}:){2,7}[0-9a-f]{1,4}\b/gi, '<ip6>');
+    };
+    const week = Date.now() - 7 * 86400000;
+    const lines = await logger.search({ from: week, minLevel: 'info', limit: 50000 });
+    const results = health.last() || await health.run();
+    const system = {
+      made: new Date().toISOString(), version: buildInfo, node: process.version, platform: `${process.platform} ${process.arch}`,
+      supervised: SUPERVISED, tlsMode: TLS_MODE, trustProxy: TRUST_PROXY, timezone: process.env.TZ || null,
+      gpus: await detectGpus().catch(() => []), converter: host.runtime ? host.runtime.capabilities : { ready: false },
+      vehicles: list.map((v, i) => {
+        const st = vehicles.share(v.id)?.status?.() || {};
+        return { vehicle: `<vehicle-${i + 1}>`, type: v.source?.type, healthy: st.healthy, writable: st.writable, freeBytes: st.freeBytes, totalBytes: st.totalBytes, recordings: inventory.totals(v.id)?.recordings ?? null, policy: policies.get(v.id) };
+      }),
+      uiPack: uiPacks.active()
+    };
+    const files = [
+      { name: 'README.txt', data: Buffer.from('Sentry Six Manager support bundle.\nsystem.json: version, GPUs, converter, shares (no paths or names).\nhealth.json: Settings > Health checks.\nlogs.txt: the last 7 days of logs.\nPasswords are masked in logs; footage paths, share names, vehicle names, IP addresses and e-mail addresses are replaced with <placeholders>.\n') },
+      { name: 'system.json', data: Buffer.from(scrub(JSON.stringify(system, null, 2))) },
+      { name: 'health.json', data: Buffer.from(scrub(JSON.stringify(results, null, 2))) },
+      { name: 'logs.txt', data: Buffer.from(scrub(lines.map((l) => `${new Date(l.at).toISOString()} ${l.level.toUpperCase().padEnd(5)} [${l.scope}] ${l.message}`).join('\n'))) }
+    ];
+    const zip = writeZip(files);
+    res.writeHead(200, { 'Content-Type': 'application/zip', 'Content-Length': zip.length, 'Cache-Control': 'no-store', 'Content-Disposition': `attachment; filename="sentry-six-manager-support-${new Date().toISOString().slice(0, 10)}.zip"` });
+    res.end(zip);
+    return undefined;
+  });
+
   r.add('GET', '/api/vehicles', () => {
     const list = vehicles.list();
     // days with footage from any vehicle (two cars on one day: one day)
@@ -1143,6 +1246,43 @@ async function main() {
     if (!list.some((x) => x.id === params.id)) throw new HttpError(404, 'No such starred moment.');
     db.set('stars', list.filter((x) => x.id !== params.id));
     return { ok: true };
+  });
+  // Driving by week: distance, time moving, hard braking and swerves, top
+  // speed and days driven, from the speed index (weeks start on Monday)
+  r.add('GET', '/api/vehicles/:id/driving', async (req, res, { params, query }) => {
+    const v = vehicleOr404(params.id);
+    const weeks = Math.max(1, Math.min(52, Number(query.weeks) || 12));
+    const monday = (d) => { const t = new Date(`${d}T12:00:00Z`); t.setUTCDate(t.getUTCDate() - ((t.getUTCDay() + 6) % 7)); return t.toISOString().slice(0, 10); };
+    const thisWeek = monday(new Date().toISOString().slice(0, 10));
+    const first = new Date(`${thisWeek}T12:00:00Z`);
+    first.setUTCDate(first.getUTCDate() - 7 * (weeks - 1));
+    const since = first.toISOString().slice(0, 10);
+    const out = new Map();
+    for (let i = 0; i < weeks; i++) {
+      const w = new Date(first);
+      w.setUTCDate(first.getUTCDate() + 7 * i);
+      const key = w.toISOString().slice(0, 10);
+      out.set(key, { week: key, distance: 0, driving: 0, top: 0, hardBrakes: 0, swerves: 0, days: 0 });
+    }
+    for (const d of inventory.footageDays(v.id).filter((x) => x >= since)) {
+      const w = out.get(monday(d));
+      if (!w) continue;
+      let moved = false;
+      for (const sp of Object.values(await speedIndex.day(v.id, d))) {
+        for (const x of sp || []) {
+          if (!Number.isFinite(x)) continue;
+          w.distance += x;
+          if (x > 0.5) { w.driving += 1; moved = true; }
+          if (x > w.top) w.top = x;
+        }
+      }
+      if (moved) w.days += 1;
+      for (const m of await speedIndex.moments(v.id, d)) {
+        if (m.kind === 'brake') w.hardBrakes += 1;
+        else if (m.kind === 'swerve') w.swerves += 1;
+      }
+    }
+    return { weeks: [...out.values()].map((w) => ({ ...w, distance: Math.round(w.distance), top: Math.round(w.top * 100) / 100 })) };
   });
   // Search by place: every clip that passed near a point (speedIndex.near)
   r.add('GET', '/api/places/near', async (req, res, { query }) => {
@@ -1928,6 +2068,7 @@ async function main() {
     nodeWorker.close();
     exporter.stop();
     scrubPrepare.stop();
+    snapshots.stop();
     await host.stop().catch(() => {});
     await vehicles.stopAll();
     db.close();
