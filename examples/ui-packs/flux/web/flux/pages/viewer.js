@@ -397,9 +397,11 @@ export default {
       loadSeg(st.idx + 1, 0, true);
       return true;
     }
+    let pauses = 0; // a pause while a clip change waits for its cameras keeps it paused
     async function loadSeg(i, offset = 0, autoplay = false) {
       if (i < 0 || i >= st.segs.length) return;
       const seq = ++loadSeq;
+      const pausedBefore = pauses; // (a pause from here on keeps it paused)
       st.idx = i;
       const s = st.segs[i];
       for (const c of GRID_ORDER) {
@@ -468,7 +470,7 @@ export default {
       }
       // every camera ready first, so they start as one
       await readyTogether(activeVideos());
-      if (seq !== loadSeq || !alive) return;
+      if (seq !== loadSeq || !alive || pauses !== pausedBefore) return;
       ahead.clear();
       play();
     }
@@ -494,6 +496,7 @@ export default {
       await Promise.all(vids.map((x) => x.play().catch(() => null)));
     }
     function pause() {
+      pauses++;
       activeVideos().forEach((x) => x.pause());
       // line every camera up on the master's frame
       const m = master();

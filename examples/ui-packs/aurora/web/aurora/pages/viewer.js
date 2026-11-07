@@ -434,8 +434,10 @@ export default {
       return true;
     }
     let clipSeq = 0;
+    let pauses = 0; // a pause while a clip change waits for its cameras keeps it paused
     function loadClip(i, at = 0, autoplay = playing) {
       const mine = ++clipSeq;
+      const pausedBefore = pauses; // (a pause from here on keeps it paused)
       index = Math.max(0, Math.min(clips.length - 1, i));
       const c = clips[index];
       for (const k of CAMS) {
@@ -478,7 +480,7 @@ export default {
           return;
         }
         ready.then(() => {
-          if (mine !== clipSeq || dead) return;
+          if (mine !== clipSeq || dead || pauses !== pausedBefore) return;
           ahead.clear();
           play();
         });
@@ -505,6 +507,7 @@ export default {
       arm();
     }
     function pause() {
+      pauses++;
       playing = false;
       sky?.hold('video', false);
       for (const k of CAMS) vids[k].pause();

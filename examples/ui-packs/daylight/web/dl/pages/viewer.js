@@ -314,9 +314,11 @@ async function player(ctx, v, day, recId) {
     ahead.follow(m, () => (next ? [...videos.keys()].map((c) => next.cams[c] && mediaUrl(next.cams[c])) : []));
     // every camera ready first, so they start as one
     const shown = [...videos.values()].filter((vid) => !vid.hidden && vid.getAttribute('src'));
+    const pausedBefore = pauses;
     readyTogether(shown).then(() => {
       if (mine !== loadSeq) return;
       ahead.clear();
+      if (pauses !== pausedBefore) return;
       if (m && autoplay && !m.error) playAll();
     });
     updateTime();
@@ -370,7 +372,9 @@ async function player(ctx, v, day, recId) {
     }
     drawPlay();
   }
+  let pauses = 0; // a pause while a clip change waits for its cameras keeps it paused
   function pauseAll() {
+    pauses++;
     st.playing = false;
     for (const vid of videos.values()) vid.pause();
     drawPlay();

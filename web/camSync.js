@@ -26,13 +26,20 @@ export function syncTo(master, x, speed = 1) {
  * first frames move as one instead of the ready ones running ahead.
  */
 export function readyTogether(videos, ms = 1500) {
-  const waits = videos.filter((v) => v && v.getAttribute('src') && v.readyState < 3 && !v.error).map((v) => new Promise((done) => {
-    const end = () => { v.removeEventListener('canplay', end); v.removeEventListener('error', end); done(); };
-    v.addEventListener('canplay', end);
-    v.addEventListener('error', end);
-  }));
-  if (!waits.length) return Promise.resolve();
-  return Promise.race([Promise.all(waits), new Promise((done) => setTimeout(done, ms))]);
+  const waiting = videos.filter((v) => v && v.getAttribute('src') && v.readyState < 3 && !v.error);
+  if (!waiting.length) return Promise.resolve();
+  return new Promise((done) => {
+    let left = waiting.length;
+    const offs = [];
+    const finish = () => { clearTimeout(timer); for (const off of offs) off(); done(); };
+    const timer = setTimeout(finish, ms);
+    for (const v of waiting) {
+      const one = () => { v.removeEventListener('canplay', one); v.removeEventListener('error', one); if (--left === 0) finish(); };
+      v.addEventListener('canplay', one);
+      v.addEventListener('error', one);
+      offs.push(() => { v.removeEventListener('canplay', one); v.removeEventListener('error', one); });
+    }
+  });
 }
 
 /**

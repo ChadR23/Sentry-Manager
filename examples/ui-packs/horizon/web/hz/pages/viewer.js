@@ -436,9 +436,11 @@ export default {
     }
     const cantPlay = (err) => `<b>This clip can't be played.</b><span>The file may be damaged, or it is H.264 or H.265 and this browser has no decoder for it<small class="tech"> (${h(err?.message || `code ${err?.code ?? '?'}`)})</small>. Convert it to AV1 on the Encoder page, or open it in Safari or Chrome on a device with that codec. Telemetry still shows.</span>`;
 
+    let pauses = 0; // a pause while a clip change waits for its cameras keeps it paused
     async function open(i, at = 0, autoplay = false) {
       if (i < 0 || i >= st.clips.length) return;
       const mine = ++loadSeq;
+      const pausedBefore = pauses; // (a pause from here on keeps it paused)
       st.i = i;
       const c = st.clips[i];
       for (const k of CAMS) {
@@ -504,7 +506,7 @@ export default {
       }
       // every camera ready first, so they start as one
       await readyTogether(active());
-      if (mine !== loadSeq || !alive) return;
+      if (mine !== loadSeq || !alive || pauses !== pausedBefore) return;
       ahead.clear();
       play();
     }
@@ -533,6 +535,7 @@ export default {
       if (m.paused && m.error) { setPlaying(false); say(cantPlay(m.error)); }
     }
     function pause() {
+      pauses++;
       active().forEach((x) => x.pause());
       const m = master();
       if (m) for (const x of active()) if (x !== m && Math.abs(x.currentTime - m.currentTime) > 0.02) x.currentTime = m.currentTime;
