@@ -130,6 +130,31 @@ test('a real export: two clips joined into one MP4, a damaged camera shows black
   }
 });
 
+test('a privacy export: no car name in the file name, no encoder details in the video', { skip: !hasFfmpeg && 'needs ffmpeg', timeout: 120000 }, async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sm-export-'));
+  try {
+    const a = path.join(dir, '2026-11-03_10-00-00-front.mp4');
+    await testClip(a, 3);
+    const ex = createExporter({ dir: path.join(dir, 'exports'), jobs: fakeJobs(), log: { warn() {} }, resolve: async (p) => p, speedsFor: async () => [10, 10, 10] });
+    const x = await ex.start({ vehicle: { id: 'car', name: 'Secret Car' }, body: { privacy: true, clips: [{ key: '2026-11-03_10-00-00', files: { front: a }, from: 0, to: 3 }] } });
+    let s;
+    for (let i = 0; i < 200; i++) {
+      s = ex.get(x.id);
+      if (!['waiting', 'running'].includes(s.state)) break;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    assert.equal(s.state, 'done', s.error);
+    const f = ex.file(x.id);
+    assert.match(f.name, /^Sentry export 2026-11-03 10-00-00 AM\.mp4$/);
+    const data = await fsp.readFile(f.file);
+    assert.equal(data.includes('x264'), false, 'no encoder name or settings');
+    assert.equal(data.includes('Lavf'), false, 'no muxer name');
+    assert.ok(duration(f.file) > 2.5);
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('one export at a time: the next waits, and a waiting one can be cancelled', { skip: !hasFfmpeg && 'needs ffmpeg', timeout: 120000 }, async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sm-export-'));
   try {

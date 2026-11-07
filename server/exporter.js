@@ -357,7 +357,9 @@ function createExporter({ dir, ffmpegPath = 'ffmpeg', ffprobePath = null, jobs, 
       await fsp.writeFile(path.join(work, 'parts.txt'), parts.map((p) => `file '${p}'`).join('\n'));
       jobs.update(x.jobId, { detail: 'Joining the clips…' });
       await ffmpeg(x, ['-hide_banner', '-nostdin', '-y', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', 'parts.txt', '-c', 'copy',
-        ...(x.privacy ? ['-map_metadata', '-1', '-map_chapters', '-1', '-fflags', '+bitexact', '-metadata:s:v', 'handler_name=', '-metadata:s:v', 'encoder='] : []),
+        // privacy: no tags, and no SEI units in the video (the encoder writes its
+        // name, version and settings in one); the picture is untouched
+        ...(x.privacy ? ['-map_metadata', '-1', '-map_chapters', '-1', '-fflags', '+bitexact', '-metadata:s:v', 'handler_name=', '-metadata:s:v', 'encoder=', '-bsf:v', 'filter_units=remove_types=6'] : []),
         '-movflags', '+faststart', 'export.mp4'], work, 0);
       await fsp.rename(path.join(work, 'export.mp4'), x.file);
       x.bytes = (await fsp.stat(x.file)).size;
@@ -431,7 +433,8 @@ function createExporter({ dir, ffmpegPath = 'ffmpeg', ffprobePath = null, jobs, 
       const last = req.clips[req.clips.length - 1];
       const from = wallAt(first.key, first.from, clock24());
       const to = wallAt(last.key, last.to, clock24()).slice(11);
-      const name = `Sentry ${vehicle.name} ${from.replace(/:/g, '-')}.mp4`.replace(/[\\/"<>|?*]/g, '');
+      // a privacy export's file name does not name the car either
+      const name = `Sentry ${req.privacy ? 'export' : vehicle.name} ${from.replace(/:/g, '-')}.mp4`.replace(/[\\/"<>|?*]/g, '');
       const title = `Export ${vehicle.name}: ${from} to ${to}${req.camera === 'grid' ? '' : ` (${CAM_NAME[req.camera]})`}`;
       const x = {
         id, vehicleId: vehicle.id, ...req, state: 'waiting', doneSeconds: 0, name, title,

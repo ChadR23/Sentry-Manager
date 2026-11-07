@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const readline = require('readline');
 const util = require('util');
 const { EventEmitter } = require('events');
 
@@ -217,23 +218,38 @@ class Logger extends EventEmitter {
    * `text` must appear in the scope or message (any case); `minLevel` as in
    * recent(). At most `limit` lines (the newest).
    */
+  /**
+   * Log lines by time, level and text, oldest first (the newest `limit`).
+   * Files are read one at a time, line by line, and an archive last written
+   * before `from` is not read at all: a search keeps no whole log in memory.
+   */
   async search({ from = null, to = null, text = '', minLevel = 'debug', limit = 5000 } = {}) {
     const min = LEVELS[minLevel] || 0;
     const needle = String(text || '').toLowerCase();
-    const texts = [];
-    for (const a of this.archives().reverse()) texts.push(await this.archiveText(a.name));
-    texts.push(await this.fileText());
     const LINE = /^(\d{4}-\d{2}-\d{2}T[\d:.]+Z) (DEBUG|INFO|WARN|ERROR)\s* \[([^\]]{1,40})\] (.*)$/;
-    const out = [];
-    for (const t of texts) {
-      for (const raw of String(t || '').split('\n')) {
-        const m = LINE.exec(raw);
-        if (!m) continue;
-        const at = Date.parse(m[1]);
-        const level = m[2].toLowerCase();
-        if ((from !== null && at < from) || (to !== null && at > to) || LEVELS[level] < min) continue;
-        if (needle && !`${m[3]} ${m[4]}`.toLowerCase().includes(needle)) continue;
-        out.push({ at, level, scope: m[3], message: m[4] });
+    const files = this.archives().reverse().filter((a) => from === null || a.at >= from).map((a) => ({ file: path.join(this.archiveDir, a.name), noFollow: true }));
+    if (this.file) files.push({ file: `${this.file}.1` }, { file: this.file });
+    let out = [];
+    for (const { file, noFollow } of files) {
+      let stream;
+      try {
+        stream = fs.createReadStream(file, { encoding: 'utf8', flags: noFollow ? fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW : 'r' });
+        const lines = readline.createInterface({ input: stream, crlfDelay: Infinity });
+        for await (const raw of lines) {
+          const m = LINE.exec(raw);
+          if (!m) continue;
+          const at = Date.parse(m[1]);
+          if ((from !== null && at < from) || (to !== null && at > to)) continue;
+          const level = m[2].toLowerCase();
+          if (LEVELS[level] < min) continue;
+          if (needle && !`${m[3]} ${m[4]}`.toLowerCase().includes(needle)) continue;
+          out.push({ at, level, scope: m[3], message: m[4] });
+          if (out.length >= limit * 2) out = out.slice(-limit); // only the newest are kept
+        }
+      } catch {
+        // a file that is gone or cannot be read is left out
+      } finally {
+        stream?.destroy();
       }
     }
     out.sort((a, b) => a.at - b.at);

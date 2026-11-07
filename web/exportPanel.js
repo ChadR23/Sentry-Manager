@@ -150,7 +150,7 @@ export function createExportPanel({ vehicleId, clips, position, units = () => 'm
         <label>Cameras<select data-x="camera"></select></label>
         <label>Speed in<select data-x="units"><option value="mph">mph</option><option value="kmh">km/h</option></select></label>
       </div>
-      <label class="xp-priv"><input type="checkbox" data-x="privacy"> Privacy: leave out the speed and the file's hidden details (the date and time stay)</label>
+      <label class="xp-priv"><input type="checkbox" data-x="privacy"> Privacy: leave out the speed, the car's name and the file's hidden details (the date and time stay)</label>
       <div data-x="run" hidden>
         <p class="xp-sum" data-x="state" style="margin:0 0 6px"></p>
         <div class="xp-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-label="Export progress"><i data-x="bar"></i></div>

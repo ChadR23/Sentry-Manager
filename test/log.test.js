@@ -83,3 +83,28 @@ test('Clear moves the logs into logs/archive/ and loses nothing; only its own na
   assert.equal(await logger.archiveText(planted), null);
   assert.equal(new Logger({ silent: true, file: tmpFile() }).archive(), null, 'nothing to keep: no empty archive');
 });
+
+test('log search: by time, level and text across archives, the newest kept, old archives not read', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'logsearch-'));
+  const file = path.join(dir, 'manager.log');
+  const log = new Logger({ silent: true, file });
+  fs.mkdirSync(log.archiveDir, { recursive: true });
+  const line = (iso, level, msg) => `${iso} ${level.padEnd(5)} [test] ${msg}\n`;
+  const old = path.join(log.archiveDir, 'manager-2026-01-01T00-00-00-000Z.log');
+  fs.writeFileSync(old, line('2026-01-01T00:00:00.000Z', 'ERROR', 'old trouble'));
+  fs.utimesSync(old, new Date('2026-01-01T00:00:00Z'), new Date('2026-01-01T00:00:00Z'));
+  const recent = path.join(log.archiveDir, 'manager-2026-11-01T00-00-00-000Z.log');
+  fs.writeFileSync(recent, Array.from({ length: 30 }, (_, i) => line(`2026-10-31T10:00:${String(i).padStart(2, '0')}.000Z`, i % 2 ? 'WARN' : 'DEBUG', `share hiccup ${i}`)).join(''));
+  fs.writeFileSync(file, line('2026-11-06T09:00:00.000Z', 'INFO', 'started') + line('2026-11-06T09:00:01.000Z', 'ERROR', 'share hiccup now'));
+
+  const all = await log.search({ minLevel: 'debug' });
+  assert.equal(all.length, 33);
+  assert.equal(all[0].message, 'old trouble', 'oldest first');
+  const since = await log.search({ from: Date.parse('2026-10-01T00:00:00Z'), minLevel: 'debug' });
+  assert.ok(!since.some((x) => x.message === 'old trouble'));
+  const warn = await log.search({ text: 'HICCUP', minLevel: 'warn' });
+  assert.equal(warn.length, 16);
+  const newest = await log.search({ text: 'hiccup', minLevel: 'debug', limit: 4 });
+  assert.deepEqual(newest.map((x) => x.message), ['share hiccup 27', 'share hiccup 28', 'share hiccup 29', 'share hiccup now']);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
