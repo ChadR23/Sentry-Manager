@@ -4,6 +4,7 @@ import { createEventMapPage } from '/web/eventMap.js';
 
 export default {
   topics: [],
+  vehicle: true,
   async mount(ctx) {
     const { body, actions } = ctx;
     const v = current();

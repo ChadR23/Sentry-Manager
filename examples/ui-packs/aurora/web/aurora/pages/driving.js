@@ -4,6 +4,7 @@ import { createDrivingPage } from '/web/driving.js';
 
 export default {
   topics: [],
+  vehicle: true,
   async mount(ctx) {
     const { body, actions } = ctx;
     const v = current();

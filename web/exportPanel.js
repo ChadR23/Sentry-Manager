@@ -96,7 +96,7 @@ async function call(method, url, body) {
     body: body ? JSON.stringify(body) : undefined
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `The server answered ${res.status}.`);
+  if (!res.ok) throw Object.assign(new Error(data.error || `The server answered ${res.status}.`), { status: res.status });
   return data;
 }
 
@@ -237,10 +237,17 @@ export function createExportPanel({ vehicleId, clips, position, units = () => 'm
     }
     draw();
   }
+  let dead = false;
   async function follow() {
     clearTimeout(poll);
-    if (!job || !['waiting', 'running'].includes(job.state)) return;
-    try { job = await call('GET', `/api/exports/${encodeURIComponent(job.id)}`); } catch { /* keep trying */ }
+    if (dead || !job || !['waiting', 'running'].includes(job.state)) return;
+    try {
+      job = await call('GET', `/api/exports/${encodeURIComponent(job.id)}`);
+    } catch (e) {
+      // the server restarted (exports live in its memory): this one is gone
+      if (e.status === 404) job = { ...job, state: 'failed', error: 'the server restarted while it was being made. Start it again.' };
+    }
+    if (dead) return;
     showJob();
     if (job.state === 'done') toast?.('Your export is ready to download.');
     poll = setTimeout(follow, 1500);
@@ -325,6 +332,6 @@ export function createExportPanel({ vehicleId, clips, position, units = () => 'm
     isOpen: () => !el.hidden,
     /** The playlist changed (another day or recording): start over. */
     reset() { start = null; end = null; if (!job || !['waiting', 'running'].includes(job.state)) job = null; draw(); showJob(); },
-    destroy() { clearTimeout(poll); el.remove(); }
+    destroy() { dead = true; clearTimeout(poll); el.remove(); }
   };
 }

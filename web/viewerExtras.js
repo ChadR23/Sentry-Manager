@@ -117,7 +117,10 @@ export function attachViewerExtras({ stage, videos: listVideos = () => [], main:
   cleanups.push(() => { clearInterval(ticker); lastSave = 0; remember(); });
   if (offerResume && where && resumeTo) {
     // what this page opened on, to tell a saved spot elsewhere from here
-    setTimeout(() => {
+    let gone = false; // the page was left before the offer came
+    cleanups.push(() => { gone = true; clearTimeout(offer); });
+    const offer = setTimeout(() => {
+      if (gone) return;
       const here = where();
       const saved = here?.vehicle ? readResume(here.vehicle) : null;
       if (!saved || (saved.clip === here.clip && Math.abs(saved.second - (here.second || 0)) < 10)) return;
@@ -134,8 +137,8 @@ export function attachViewerExtras({ stage, videos: listVideos = () => [], main:
         if (e.target.closest('[data-go], [data-no]')) box.remove();
       });
       document.body.appendChild(box);
-      const gone = setTimeout(() => box.remove(), 15000);
-      cleanups.push(() => { clearTimeout(gone); box.remove(); });
+      const hide = setTimeout(() => box.remove(), 15000);
+      cleanups.push(() => { clearTimeout(hide); box.remove(); });
     }, 2500);
   }
 
@@ -155,16 +158,21 @@ export function attachViewerExtras({ stage, videos: listVideos = () => [], main:
         && (v.parentElement?.contains(e.target) || e.target.contains?.(v));
     }) || null;
   };
+  // touches while paused: a zoomed camera takes them all (drag the picture);
+  // one not zoomed lets the page scroll up and down, and a pinch still zooms
+  function touchOf(v) { v.style.touchAction = paused() ? (zoom.has(v) ? 'none' : 'pan-y') : ''; }
   function apply(v) {
     const z = zoom.get(v);
     if (!z || z.s <= 1.01) {
       zoom.delete(v);
+      touchOf(v);
       v.style.scale = '';
       v.style.translate = '';
       v.style.transformOrigin = '';
       v.parentElement?.querySelector('.sentry-x-zoomhint')?.remove();
       return;
     }
+    touchOf(v);
     v.style.transformOrigin = '0 0';
     v.style.translate = `${z.x}px ${z.y}px`;
     v.style.scale = String(z.s);
@@ -248,7 +256,7 @@ export function attachViewerExtras({ stage, videos: listVideos = () => [], main:
   // a click that only moved the zoomed picture does not also act (swap cameras)
   on(stage, 'click', (e) => { if (drag?.moved) { e.stopPropagation(); e.preventDefault(); } }, true);
   // a zoomed camera takes touches itself (no page zoom or scroll) while paused
-  const touchMode = () => { for (const v of videos()) v.style.touchAction = paused() ? 'none' : ''; };
+  const touchMode = () => { for (const v of videos()) touchOf(v); };
 
   // ---- frame by frame on phones (paused)
   let steps = null;

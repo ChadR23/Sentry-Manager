@@ -191,7 +191,7 @@ new MutationObserver(() => {
 bus.on('vehicle', () => {
   // pages showing one vehicle redraw for the new one
   if (mounted?.onVehicle) mounted.onVehicle();
-  else if (['footage', 'policies', 'jobs', 'bin', 'overview'].includes(mountedId)) render();
+  else if (['footage', 'policies', 'jobs', 'bin', 'overview', 'driving', 'map'].includes(mountedId)) render();
 });
 
 // ---------- live updates ----------

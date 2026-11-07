@@ -128,12 +128,17 @@ export function createMoments(container, { clock = defaultClock, speedUnit = () 
       <button type="button" class="sentry-moments-del" data-unstar="${esc(x.id)}" aria-label="Remove the star from ${esc(x.note || 'this moment')}" title="Remove the star">×</button></div>`).join('');
   }
 
+  let starSeq = 0;
   async function loadStars() {
-    if (!vehicle) return;
+    const mine = ++starSeq; // a newer load (another car or day) wins
+    if (!vehicle) { stars = []; drawStars(); return; }
+    let got;
     try {
       const r = await fetch(`/api/stars?vehicle=${encodeURIComponent(vehicle)}`, { credentials: 'same-origin' });
-      stars = r.ok ? (await r.json()).stars || [] : [];
-    } catch { stars = []; }
+      got = r.ok ? (await r.json()).stars || [] : [];
+    } catch { got = []; }
+    if (mine !== starSeq) return;
+    stars = got;
     drawStars();
   }
 
@@ -189,7 +194,7 @@ export function createMoments(container, { clock = defaultClock, speedUnit = () 
       const mine = ++seq;
       vehicle = vehicleId || null;
       shownDay = day || null;
-      if (!vehicleId || !day) { list.innerHTML = ''; return; }
+      if (!vehicleId || !day) { list.innerHTML = ''; loadStars(); return; }
       list.innerHTML = '<p class="sentry-moments-note">Looking…</p>';
       loadStars();
       try {

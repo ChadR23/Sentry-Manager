@@ -6,8 +6,16 @@
   const form = document.getElementById('code-form');
   const err = document.getElementById('err');
   const raw = new URLSearchParams(location.search).get('next') || '/';
-  // only a path on this server
-  const next = /^\/(?!\/)/.test(raw) && !raw.startsWith('/login') ? raw : '/';
+  // only a path on this server (as login.js: "/\evil.com" and tabs count as another site)
+  const next = (() => {
+    try {
+      const u = new URL(raw, location.origin);
+      if (u.origin !== location.origin || !raw.startsWith('/') || raw.startsWith('//') || /[\\\s]/.test(raw) || u.pathname.startsWith('/login')) return '/';
+      return u.pathname + u.search + u.hash;
+    } catch {
+      return '/';
+    }
+  })();
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const button = form.querySelector('button');

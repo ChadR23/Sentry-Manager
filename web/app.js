@@ -2054,28 +2054,30 @@
     });
   };
 
-  // Driving and Health: the same pages as every interface pack (web/driving.js, web/health.js)
+  // Driving, Map, Account and Health: the same pages as every interface pack
+  // (web/driving.js, eventMap.js, account.js, health.js); the one showing is
+  // taken down when the next page draws (render), so maps and polls stop
+  let shared = null;
+  async function mountShared(id, crumb, mod, make) {
+    const seq = renderSeq;
+    page.innerHTML = head('Your archive workspace', crumb) + `<div class="card" id="${id}"></div>`;
+    const m = await import(mod);
+    if (seq !== renderSeq || !$(id)) return; // the user moved on while it loaded
+    shared = make(m, $(id)) || null;
+  }
   pages.driving = async () => {
     const v = current();
-    page.innerHTML = head('Your archive workspace', 'Driving') + '<div class="card" id="dr-page"></div>';
-    const m = await import('/web/driving.js');
-    m.createDrivingPage($('dr-page'), { vehicleId: v?.id, vehicleName: v?.name });
+    await mountShared('dr-page', 'Driving', '/web/driving.js', (m, el) => m.createDrivingPage(el, { vehicleId: v?.id, vehicleName: v?.name }));
   };
   pages.map = async () => {
     const v = current();
-    page.innerHTML = head('Your archive workspace', 'Map') + '<div class="card" id="em-page"></div>';
-    const m = await import('/web/eventMap.js');
-    m.createEventMapPage($('em-page'), { vehicleId: v?.id, vehicleName: v?.name, openEvent: (ev) => openStudio('viewer', { date: ev.day, at: `${ev.startKey}~0` }) });
+    await mountShared('em-page', 'Map', '/web/eventMap.js', (m, el) => m.createEventMapPage(el, { vehicleId: v?.id, vehicleName: v?.name, openEvent: (ev) => openStudio('viewer', { date: ev.day, at: `${ev.startKey}~0` }) }));
   };
   pages.account = async () => {
-    page.innerHTML = head('Your archive workspace', 'Account') + '<div class="card" id="ac-page"></div>';
-    const m = await import('/web/account.js');
-    m.createAccountPage($('ac-page'));
+    await mountShared('ac-page', 'Account', '/web/account.js', (m, el) => m.createAccountPage(el));
   };
   pages.health = async () => {
-    page.innerHTML = head('Your archive workspace', 'Health') + '<div class="card" id="hl-page"></div>';
-    const m = await import('/web/health.js');
-    m.createHealthPage($('hl-page'));
+    await mountShared('hl-page', 'Health', '/web/health.js', (m, el) => m.createHealthPage(el));
   };
 
   pages.settings = async (sub) => {
@@ -2570,6 +2572,8 @@
   async function render() {
     const seq = ++renderSeq;
     held.page = false;
+    try { shared?.destroy?.(); } catch { /* gone already */ }
+    shared = null;
     // the Logs moved from Settings to the Overview: old links land there
     if (/^#\/?settings\/logs\/?$/.test(location.hash)) history.replaceState(null, '', '#/overview/logs');
     // the shell's opening state (boot.js, index.html) ends here

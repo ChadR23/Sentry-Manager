@@ -67,6 +67,8 @@ function matchTotp(secret, code, now = Date.now()) {
 }
 
 const sha = (t) => crypto.createHash('sha256').update(String(t)).digest('hex');
+/** A recovery code as kept: its 10 letters and digits, so a dash or space typed or not is the same. */
+const recoveryKey = (code) => String(code || '').toLowerCase().replace(/[^0-9a-f]/g, '');
 const ROLES = ['admin', 'viewer'];
 
 function createAccounts({ db, issuer = 'Sentry Six Manager', now = () => Date.now() }) {
@@ -113,7 +115,7 @@ function createAccounts({ db, issuer = 'Sentry Six Manager', now = () => Date.no
     const step = matchTotp(setup.secret, code, now());
     if (step === null) throw Object.assign(new Error('That code is not right. Check the phone\'s clock, and use the newest code.'), { status: 400 });
     const recovery = Array.from({ length: 10 }, () => crypto.randomBytes(5).toString('hex').replace(/(.{5})/, '$1-'));
-    setMeta(username, { ...m, totpSetup: undefined, totp: { secret: setup.secret, enabled: true, last: step }, recovery: recovery.map(sha) });
+    setMeta(username, { ...m, totpSetup: undefined, totp: { secret: setup.secret, enabled: true, last: step }, recovery: recovery.map((c) => sha(recoveryKey(c))), recoveryV: 2 });
     return recovery;
   }
   function disableTotp(username) {
@@ -131,7 +133,10 @@ function createAccounts({ db, issuer = 'Sentry Six Manager', now = () => Date.no
       setMeta(username, { ...m, totp: { ...m.totp, last: step } });
       return true;
     }
-    const h = sha(String(code || '').trim().toLowerCase());
+    // codes kept before recoveryV 2 were hashed with the dash
+    const given = recoveryKey(code);
+    if (given.length !== 10) return false;
+    const h = sha(m.recoveryV === 2 ? given : `${given.slice(0, 5)}-${given.slice(5)}`);
     const i = (m.recovery || []).indexOf(h);
     if (i < 0) return false;
     const rest = [...m.recovery];
@@ -175,10 +180,11 @@ const VIEWER_POSTS = [
   /^\/api\/auth\/(logout|confirm|password|2fa\/.*|sessions\/.*|sessions-end-others)$/,
   /^\/api\/telemetry\/speeds$/,
   /^\/api\/vehicles\/[^/]+\/exports$/,
-  /^\/api\/exports\/[^/]+$/,
+  /^\/api\/exports(\/[^/]+)?$/,
   /^\/api\/stars(\/[^/]+)?$/,
   /^\/api\/places(\/[^/]+)?$/,
-  /^\/api\/notifications\/[^/]+\/(read|dismiss)$/
+  /^\/api\/notifications\/[^/]+\/(read|dismiss)$/,
+  /^\/api\/notifications\/read$/
 ];
 const VIEWER_HIDDEN = [/^\/api\/metrics/, /^\/api\/logs/, /^\/api\/support-bundle/, /^\/api\/snapshots/, /^\/api\/security/, /^\/api\/accounts/, /^\/api\/ui-packs\/original\.zip/, /^\/api\/nodes/];
 function viewerMay(method, p) {

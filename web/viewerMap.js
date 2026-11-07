@@ -218,7 +218,7 @@ function buildViewerMap(container, opts = {}) {
     note.textContent = 'The map needs WebGL, which this browser has turned off.';
     note.hidden = false;
     const dead = () => {};
-    return { addRoute: dead, clearRoute: dead, setPosition: dead, setDark: dead, resize: dead, destroy: () => { container.innerHTML = ''; } };
+    return { addRoute: dead, clearRoute: dead, setPosition: dead, setDark: dead, resize: dead, setPins: dead, destroy: () => { container.innerHTML = ''; } };
   }
 
   let dark = !!opts.dark;
@@ -387,6 +387,7 @@ function buildViewerMap(container, opts = {}) {
   }
   async function findAt(lat, lon, placeLabel = null) {
     setPicking(false);
+    closePlaces(); // one search at a time: the last one asked for is shown
     spot = htmlMarker(map, [lat, lon], { html: '<div class="vm-spot"></div>' });
     centreOn(map, [lat, lon], undefined, { animate: true });
     panel = document.createElement('div');
@@ -407,16 +408,17 @@ function buildViewerMap(container, opts = {}) {
       } catch (err) { form.querySelector('input').setCustomValidity(err.message); form.querySelector('input').reportValidity(); setTimeout(() => form.querySelector('input').setCustomValidity(''), 3000); }
     });
     container.appendChild(panel);
+    const mine = panel;
     let data;
     try {
       const r = await fetch(`/api/places/near?lat=${lat.toFixed(5)}&lon=${lon.toFixed(5)}&radius=150`, { credentials: 'same-origin' });
       data = await r.json();
       if (!r.ok) throw new Error(data.error || 'The search failed.');
     } catch (err) {
-      if (panel) panel.querySelector('header span').textContent = err.message || 'The search failed.';
+      if (panel === mine) mine.querySelector('header span').textContent = err.message || 'The search failed.';
       return;
     }
-    if (!panel) return;
+    if (panel !== mine) return; // closed, or another spot searched since
     const list = data.results || [];
     const vehiclesShown = new Set(list.map((x) => x.vehicle)).size > 1;
     panel.querySelector('header span').textContent = `${list.length ? `${list.length} clip${list.length === 1 ? '' : 's'}` : 'No clips'} within ${data.radius} m${placeLabel ? ` of ${placeLabel}` : ''}`;

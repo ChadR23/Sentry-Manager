@@ -667,9 +667,8 @@ export default {
       info = await buildPlaylist();
     } catch (err) {
       el.querySelector('.vw-main').innerHTML = empty(esc(err.message));
-      map.destroy();
-      xp.destroy();
-      return {};
+      // everything made above is taken down when leaving, as after a start
+      return { unmount() { alive = false; tip.destroy(); moments.destroy(); extras.destroy(); slots.destroy(); cancelAnimationFrame(raf); chart.destroy(); map.destroy(); xp.destroy(); } };
     }
     $('#vw-title').textContent = st.title || 'no footage';
     drawPick(info);

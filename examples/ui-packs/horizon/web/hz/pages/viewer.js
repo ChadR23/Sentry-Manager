@@ -701,7 +701,7 @@ export default {
       info = await build();
     } catch (err) {
       say(`<b>${h(err.message)}</b>`);
-      return { unmount() { alive = false; tip.destroy(); extras.destroy(); map.destroy(); xp.destroy(); spdSize.disconnect(); document.removeEventListener('visibilitychange', onVis); } };
+      return { unmount() { alive = false; tip.destroy(); moments.destroy(); slots.destroy(); extras.destroy(); map.destroy(); xp.destroy(); spdSize.disconnect(); document.removeEventListener('visibilitychange', onVis); } };
     }
     drawPick(info);
     // HW3 or HW4 from the footage itself, as the built-in Viewer does: only

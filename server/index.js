@@ -42,7 +42,7 @@ const { Inventory } = require('./inventory');
 const { RecycleBin, formatBytes } = require('./recycleBin');
 const { createScrubFrames } = require('./scrubFrames');
 const { createScrubPrepare } = require('./scrubPrepare');
-const { Policies } = require('./policies');
+const { Policies, dayInZone } = require('./policies');
 const { Jobs, Notifications } = require('./activity');
 const { ImageUpdates, criticalFromFile } = require('./imageUpdates');
 const { Thumbnails } = require('./thumbnails');
@@ -1391,7 +1391,8 @@ async function main() {
     const known = new Set(vehicles.list().map((v) => v.id));
     return { stars: starList().filter((x) => known.has(x.vehicle) && (!vid || x.vehicle === vid)).sort((a, b) => `${b.clip}`.localeCompare(`${a.clip}`) || b.second - a.second) };
   });
-  r.add('POST', '/api/stars', async (req, res, { body }) => {
+  const recordingOfClip = (vid, clip) => (inventory.get(vid)?.recordings || []).find((x) => x.files.some((rel) => rel.includes(clip)));
+  r.add('POST', '/api/stars', async (req, res, { body, user }) => {
     const v = vehicleOr404(String(body?.vehicle || ''));
     const clip = String(body?.clip || '');
     const second = Math.floor(Number(body?.second));
@@ -1399,15 +1400,17 @@ async function main() {
     const list = starList();
     if (list.length >= MAX_STARS) throw new HttpError(400, `There are ${MAX_STARS} starred moments already: remove some first.`);
     const star = { id: crypto.randomBytes(6).toString('hex'), vehicle: v.id, day: clip.slice(0, 10), clip, second, note: cleanNote(body?.note), createdAt: new Date().toISOString() };
+    // its recording is protected (by an admin's star: a watch-only account changes nothing kept)
+    const rec = recordingOfClip(v.id, clip);
+    const mayProtect = accounts.roleOf(user) === 'admin';
+    if (rec && !rec.protected && mayProtect) star.protects = rec.id;
     db.set('stars', [...list, star]);
-    // its recording is protected
-    const rec = (inventory.get(v.id)?.recordings || []).find((x) => x.files.some((rel) => rel.includes(clip)));
-    if (rec && !rec.protected) {
+    if (star.protects) {
       await bin.setProtected(v.id, rec.files, true);
       inventory.rebuild(v.id);
       announce('inventory');
     }
-    return { star, protected: Boolean(rec) };
+    return { star, protected: Boolean(rec && (rec.protected || star.protects)) };
   });
   r.add('PATCH', '/api/stars/:id', (req, res, { params, body }) => {
     const list = starList();
@@ -1417,10 +1420,22 @@ async function main() {
     db.set('stars', list);
     return { star };
   });
-  r.add('DELETE', '/api/stars/:id', (req, res, { params }) => {
+  r.add('DELETE', '/api/stars/:id', async (req, res, { params }) => {
     const list = starList();
-    if (!list.some((x) => x.id === params.id)) throw new HttpError(404, 'No such starred moment.');
-    db.set('stars', list.filter((x) => x.id !== params.id));
+    const star = list.find((x) => x.id === params.id);
+    if (!star) throw new HttpError(404, 'No such starred moment.');
+    const rest = list.filter((x) => x.id !== params.id);
+    db.set('stars', rest);
+    // a recording that only this star protected is no longer kept for it
+    if (star.protects) {
+      const rec = recordingOfClip(star.vehicle, star.clip);
+      const others = rest.some((x) => x.vehicle === star.vehicle && rec && rec.files.some((rel) => rel.includes(x.clip)));
+      if (rec?.protected && !others) {
+        await bin.setProtected(star.vehicle, rec.files, false);
+        inventory.rebuild(star.vehicle);
+        announce('inventory');
+      }
+    }
     return { ok: true };
   });
   // Driving by week: distance, time moving, hard braking and swerves, top
@@ -1429,7 +1444,7 @@ async function main() {
     const v = vehicleOr404(params.id);
     const weeks = Math.max(1, Math.min(52, Number(query.weeks) || 12));
     const monday = (d) => { const t = new Date(`${d}T12:00:00Z`); t.setUTCDate(t.getUTCDate() - ((t.getUTCDay() + 6) % 7)); return t.toISOString().slice(0, 10); };
-    const thisWeek = monday(new Date().toISOString().slice(0, 10));
+    const thisWeek = monday(dayInZone(new Date(), v.timezone || 'UTC')); // the car's today, as footage days are
     const first = new Date(`${thisWeek}T12:00:00Z`);
     first.setUTCDate(first.getUTCDate() - 7 * (weeks - 1));
     const since = first.toISOString().slice(0, 10);
@@ -1475,7 +1490,8 @@ async function main() {
     let had = eventSpots.get(key);
     if (!had || had.stamp !== stamp) {
       had = { stamp, info: await inventory.eventInfo(vid, rec).catch(() => null) };
-      eventSpots.set(key, had);
+      // a failed read (the share dropped) is tried again next time
+      if (had.info) eventSpots.set(key, had);
       if (eventSpots.size > 20000) eventSpots.delete(eventSpots.keys().next().value);
     }
     const lat = Number(had.info?.est_lat);

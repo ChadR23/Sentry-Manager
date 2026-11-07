@@ -109,12 +109,17 @@ export function attachTimelineTip(bar, at, { width = TIP_WIDTH, thumb = null } =
 
   let want = null; // { path, t } shown or awaited
   let dragging = false;
+  // one waiter per grid, however often the pointer moves while it loads
+  const waiting = new Set();
 
   function paint(path, t) {
     const g = grid(path);
     if (!g?.ready) {
       pic.style.backgroundImage = '';
-      if (g) g.waiters.add(() => { if (want && want.path === path) paint(path, want.t); });
+      if (g && !waiting.has(path)) {
+        waiting.add(path);
+        g.waiters.add(() => { waiting.delete(path); if (want && want.path === path) paint(path, want.t); });
+      }
       return;
     }
     const cw = g.img.naturalWidth / COLS;
@@ -384,6 +389,8 @@ export function hoverFrames(root, selector, info = fromThumbnail) {
     box = null;
     clips = null;
   };
+  // one waiter however often the pointer moves while a grid loads (a Set keeps it once)
+  const repaint = () => { if (box && clips?.length) paint(); };
   function paint() {
     if (!box || !clips?.length) return;
     const r = box.getBoundingClientRect();
@@ -393,7 +400,7 @@ export function hoverFrames(root, selector, info = fromThumbnail) {
     const t = (pos - i) * FLIP_CLIP_SECONDS;
     const g = grid(clips[i]);
     if (!g?.ready) {
-      if (g) g.waiters.add(() => { if (box && clips?.[i] === clips[i]) paint(); });
+      if (g) g.waiters.add(repaint);
       return;
     }
     if (!layer) {

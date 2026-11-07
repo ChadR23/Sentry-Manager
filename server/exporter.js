@@ -323,10 +323,10 @@ function createExporter({ dir, ffmpegPath = 'ffmpeg', ffprobePath = null, jobs, 
   async function run(x) {
     running = x;
     x.state = 'running';
-    jobs.update(x.jobId, { status: 'running', detail: 'Starting…' });
     const work = path.join(dir, `${x.id}.work`);
-    await fsp.mkdir(work, { recursive: true });
     try {
+      jobs.update(x.jobId, { status: 'running', detail: 'Starting…' });
+      await fsp.mkdir(work, { recursive: true });
       const layout = layoutFor(x.clips, x.camera);
       if (x.camera !== 'grid') {
         const sample = x.clips.find((c) => c.files[x.camera]).files[x.camera];
@@ -381,7 +381,7 @@ function createExporter({ dir, ffmpegPath = 'ffmpeg', ffprobePath = null, jobs, 
       await fsp.rm(work, { recursive: true, force: true }).catch(() => {});
       running = null;
       const next = queue.shift();
-      if (next) run(next);
+      if (next) run(next).catch((err) => log.warn(`Export ${next.id}: ${err.message}`));
     }
   }
 

@@ -269,7 +269,7 @@ function createSpeedIndex({ dir, inventory, vehicles, telemetry, log, pauseMs = 
       try { data = JSON.parse(await fsp.readFile(file, 'utf8')); } catch { return null; }
     }
     const packed = { stamp, ...packGeo(data || {}) };
-    if (had) geoPoints -= had.pts.length / 3;
+    if (had) { geo.delete(key); geoPoints -= had.pts.length / 3; }
     geo.set(key, packed);
     geoPoints += packed.pts.length / 3;
     for (const [k, v] of geo) {

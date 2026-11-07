@@ -13,7 +13,11 @@
 const fsp = require('fs/promises');
 const path = require('path');
 
-/** What is wrong with an MP4 file (null: nothing found). */
+/**
+ * What is wrong with an MP4 file (null: nothing found). A file that could not
+ * be read (the share dropped, no permission) throws: that says nothing about
+ * the clip, so it is not kept as a result.
+ */
 async function checkFile(file) {
   let fh;
   try {
@@ -45,8 +49,6 @@ async function checkFile(file) {
       if (++boxes > 10000) break;
     }
     return moov ? null : 'no index (moov): it will not play';
-  } catch (err) {
-    return `could not be read (${err.code || err.message})`;
   } finally {
     await fh?.close().catch(() => {});
   }
@@ -92,7 +94,12 @@ function createIntegrity({ dir, inventory, vehicles, log, concurrency = 4, marks
       const work = async () => {
         while (next < todo.length) {
           const f = todo[next++];
-          data[f.rel] = [f.size, Math.round(f.mtimeMs), await checkFile(path.join(root, f.rel))];
+          try {
+            data[f.rel] = [f.size, Math.round(f.mtimeMs), await checkFile(path.join(root, f.rel))];
+          } catch {
+            delete data[f.rel]; // read again next time
+            run.unreadable = (run.unreadable || 0) + 1;
+          }
           run.done++;
           if (++sinceSave >= 200) { sinceSave = 0; await save(vid); }
         }
@@ -103,7 +110,7 @@ function createIntegrity({ dir, inventory, vehicles, log, concurrency = 4, marks
       for (const rel of Object.keys(data)) if (!present.has(rel)) delete data[rel];
       await save(vid);
       const bad = Object.values(data).filter((x) => x[2]).length;
-      log?.info?.(`Footage check of ${vid}: ${run.total} file(s) read, ${bad} that will not play`);
+      log?.info?.(`Footage check of ${vid}: ${run.total} file(s) read, ${bad} that will not play${run.unreadable ? `, ${run.unreadable} that could not be read now (checked again next time)` : ''}`);
       marks?.set(vid, false);
     })().catch((err) => log?.warn?.(`Footage check of ${vid}: ${err.message}`)).finally(() => {
       run.running = false;

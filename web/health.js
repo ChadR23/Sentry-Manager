@@ -40,7 +40,8 @@ async function api(url, opts = {}) {
 }
 const size = (b) => (b >= 1024 ** 3 ? `${(b / 1024 ** 3).toFixed(1)} GB` : b >= 1024 ** 2 ? `${(b / 1024 ** 2).toFixed(1)} MB` : `${Math.round((b || 0) / 1024)} KB`);
 const day = (d) => { try { return new Date(`${d}T12:00:00`).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' }); } catch { return d; } };
-const iso = (t) => new Date(t).toISOString().slice(0, 10);
+// a day on this device's calendar (the server reads From and To as local days too)
+const iso = (t) => { const d = new Date(t); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
 
 export function createHealthPage(el) {
   if (!document.getElementById('sentry-health-css')) {

@@ -34,6 +34,8 @@ test('good, cut off, empty and not-MP4 clips are told apart; results are kept', 
   assert.match(await checkFile(path.join(rc, '2026-11-01_10-01-00-front.mp4')), /cut off/);
   assert.equal(await checkFile(path.join(rc, '2026-11-01_10-02-00-front.mp4')), 'empty file');
   assert.equal(await checkFile(path.join(rc, '2026-11-01_10-03-00-front.mp4')), 'not an MP4 file');
+  // a file that cannot be read now (the share dropped) is no verdict on the clip
+  await assert.rejects(checkFile(path.join(rc, 'gone-front.mp4')));
 
   const files = new Map();
   for (const name of fs.readdirSync(rc)) {
