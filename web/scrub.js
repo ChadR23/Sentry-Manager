@@ -61,6 +61,103 @@ function grid(path) {
   return e;
 }
 
+// The preview over the timeline, as video sites have it: a small frame of
+// the second under the pointer, with its time, above the bar. With a mouse
+// it follows the pointer without a click; on a touch screen it shows while
+// a finger drags. `at(clientX)` says what is there: { src, t, label } (src
+// a clip's path or /api/media URL, t the second in it), or null for nothing.
+//
+//   const tip = attachTimelineTip(timelineEl, (x) => ({ src, t, label }));
+//   tip.destroy();
+const TIP_WIDTH = 176;
+export function attachTimelineTip(bar, at, { width = TIP_WIDTH } = {}) {
+  if (!bar) return { destroy() {} };
+  const tip = document.createElement('div');
+  tip.className = 'sentry-tip';
+  tip.setAttribute('aria-hidden', 'true');
+  tip.style.cssText = 'position:fixed;left:0;top:0;z-index:2147483000;pointer-events:none;display:none;'
+    + 'flex-direction:column;align-items:center;gap:4px;transition:opacity .08s;';
+  const pic = document.createElement('div');
+  pic.className = 'sentry-tip-frame';
+  pic.style.cssText = `width:${width}px;height:${Math.round(width * 9 / 16)}px;border:2px solid rgba(255,255,255,.92);border-radius:6px;`
+    + 'background:#000 no-repeat;box-shadow:0 4px 18px rgba(0,0,0,.55);overflow:hidden;';
+  const label = document.createElement('div');
+  label.className = 'sentry-tip-time';
+  label.style.cssText = 'font:600 12px/1.2 system-ui,sans-serif;color:#fff;padding:2px 7px;border-radius:4px;'
+    + 'background:rgba(0,0,0,.72);font-variant-numeric:tabular-nums;white-space:nowrap;';
+  tip.append(pic, label);
+  document.body.appendChild(tip);
+
+  let want = null; // { path, t } shown or awaited
+  let dragging = false;
+
+  function paint(path, t) {
+    const g = grid(path);
+    if (!g?.ready) {
+      pic.style.backgroundImage = '';
+      if (g) g.waiters.add(() => { if (want && want.path === path) paint(path, want.t); });
+      return;
+    }
+    const cw = g.img.naturalWidth / COLS;
+    const ch = g.img.naturalHeight / ROWS;
+    const h = Math.round(width * ch / cw);
+    pic.style.height = `${h}px`;
+    const i = Math.max(0, Math.min(COLS * ROWS - 1, Math.floor(t)));
+    Object.assign(pic.style, {
+      backgroundImage: `url("${g.img.src}")`,
+      backgroundSize: `${width * COLS}px ${h * ROWS}px`,
+      backgroundPosition: `${-(i % COLS) * width}px ${-Math.floor(i / COLS) * h}px`
+    });
+  }
+
+  function showAt(x) {
+    const what = at(x);
+    const path = what && pathOf(what.src);
+    if (!what || !path) { hide(); return; }
+    want = { path, t: what.t };
+    label.textContent = what.label || '';
+    label.style.display = what.label ? '' : 'none';
+    paint(path, what.t);
+    tip.style.display = 'flex';
+    const r = bar.getBoundingClientRect();
+    const w = tip.offsetWidth;
+    const left = Math.max(6, Math.min(window.innerWidth - w - 6, x - w / 2));
+    const top = Math.max(6, r.top - tip.offsetHeight - 10);
+    tip.style.transform = `translate(${Math.round(left)}px,${Math.round(top)}px)`;
+  }
+
+  function hide() {
+    want = null;
+    tip.style.display = 'none';
+  }
+
+  const onMove = (e) => {
+    // a mouse shows it on hover; a finger or pen only while dragging
+    if (e.pointerType === 'mouse' || dragging) showAt(e.clientX);
+  };
+  const onDown = (e) => { dragging = true; showAt(e.clientX); };
+  const onUp = (e) => { dragging = false; if (e.pointerType !== 'mouse') hide(); };
+  const onLeave = () => { if (!dragging) hide(); };
+  bar.addEventListener('pointermove', onMove);
+  bar.addEventListener('pointerdown', onDown);
+  bar.addEventListener('pointerup', onUp);
+  bar.addEventListener('pointercancel', onUp);
+  bar.addEventListener('pointerleave', onLeave);
+  window.addEventListener('scroll', hide, { passive: true, capture: true });
+  return {
+    destroy() {
+      bar.removeEventListener('pointermove', onMove);
+      bar.removeEventListener('pointerdown', onDown);
+      bar.removeEventListener('pointerup', onUp);
+      bar.removeEventListener('pointercancel', onUp);
+      bar.removeEventListener('pointerleave', onLeave);
+      window.removeEventListener('scroll', hide, { capture: true });
+      tip.remove();
+    },
+    hide
+  };
+}
+
 export function createScrubber() {
   const layers = new WeakMap(); // video -> preview element
   const seeks = new WeakMap(); // video -> { want, sent }

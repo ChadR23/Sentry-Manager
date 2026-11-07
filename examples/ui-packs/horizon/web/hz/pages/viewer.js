@@ -5,7 +5,7 @@ import { h, ico, api, send, car, toast, local, ok, dayName, words, mmss, wall, C
 import { load as loadTel, at as telAt, rate as telRate } from '../telemetry.js';
 import { createViewerMap } from '/web/viewerMap.js';
 import { createExportPanel } from '/web/exportPanel.js';
-import { createScrubber } from '/web/scrub.js';
+import { createScrubber, attachTimelineTip } from '/web/scrub.js';
 import { syncTo } from '/web/camSync.js';
 
 const FILE_RE = /(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})-([a-z0-9_]+)\.mp4$/i;
@@ -341,6 +341,28 @@ export default {
     tl.addEventListener('pointermove', (e) => { if (scrub) scrubAt(posAt(e)); });
     tl.addEventListener('pointerup', scrubEnd);
     tl.addEventListener('pointercancel', scrubEnd);
+    // the frame and time under the pointer, above the bar (hover with a
+    // mouse, while dragging on a phone)
+    const tip = attachTimelineTip(tl, (x) => {
+      const r = tl.getBoundingClientRect();
+      const sec = Math.max(0, Math.min(1, (x - r.left) / r.width)) * total();
+      let acc = 0;
+      for (let k = 0; k < st.clips.length; k++) {
+        const c = st.clips[k];
+        const d = lenOf(c);
+        if (sec < acc + d || k === st.clips.length - 1) {
+          const off = Math.max(0, Math.min(d - 0.05, sec - acc));
+          const m = /(\d{2})-(\d{2})-(\d{2})$/.exec(String(c.key || ''));
+          const at = m ? (Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]) + Math.floor(off)) % 86400 : null;
+          const p2 = (n) => String(n).padStart(2, '0');
+          const label = at === null ? mmss(off) : wall(`${p2(Math.floor(at / 3600))}-${p2(Math.floor(at / 60) % 60)}-${p2(at % 60)}`);
+          const src = c.files[st.main] || c.files.front || Object.values(c.files)[0];
+          return src ? { src, t: off, label } : null;
+        }
+        acc += d;
+      }
+      return null;
+    });
     tl.addEventListener('keydown', (e) => {
       const m = master();
       if (!m || !['ArrowLeft', 'ArrowRight'].includes(e.key)) return;
@@ -642,7 +664,7 @@ export default {
       info = await build();
     } catch (err) {
       say(`<b>${h(err.message)}</b>`);
-      return { unmount() { alive = false; map.destroy(); xp.destroy(); spdSize.disconnect(); document.removeEventListener('visibilitychange', onVis); } };
+      return { unmount() { alive = false; tip.destroy(); map.destroy(); xp.destroy(); spdSize.disconnect(); document.removeEventListener('visibilitychange', onVis); } };
     }
     drawPick(info);
     // HW3 or HW4 from the footage itself, as the built-in Viewer does: only
@@ -678,6 +700,7 @@ export default {
     return {
       unmount() {
         alive = false;
+        tip.destroy();
         map.destroy();
         xp.destroy();
         spdSize.disconnect();
