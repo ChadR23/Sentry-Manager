@@ -16,6 +16,7 @@ export const PAGES = [
   { id: 'driving', label: 'Driving', icon: 'tacho' },
   { id: 'map', label: 'Map', icon: 'map' },
   { id: 'health', label: 'Health', icon: 'shield' },
+  { id: 'account', label: 'Account', icon: 'lock' },
   { id: 'settings', label: 'Settings', icon: 'gear' }
 ];
 const byId = Object.fromEntries(PAGES.map((p, i) => [p.id, { ...p, n: i + 1 }]));

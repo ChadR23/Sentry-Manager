@@ -1017,3 +1017,86 @@ test('starred moments: kept on the server with a note, protect their recording, 
     await fsp.rm(dir, { recursive: true, force: true });
   }
 });
+
+test('accounts: a watch-only account watches; two-step sign-in with a code (and a recovery code); devices listed and signed out', { timeout: 120000 }, async () => {
+  const { totp } = require('../server/accounts');
+  const dir = await tmp();
+  await makeFootage(path.join(dir, 'footage'));
+  const s = await startServer(dir);
+  // a client with its own cookies (more than one at a time)
+  const client = (agent) => {
+    const jar = new Map();
+    return async (method, p, body) => {
+      const res = await fetch(s.base + p, {
+        method, redirect: 'manual',
+        headers: { 'X-Requested-With': 'sentry-six-manager', 'User-Agent': agent, ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), Cookie: [...jar].map(([k, v]) => `${k}=${v}`).join('; ') },
+        body: body === undefined ? undefined : JSON.stringify(body)
+      });
+      for (const c of res.headers.getSetCookie()) {
+        const [kv] = c.split(';');
+        const i = kv.indexOf('=');
+        if (/Max-Age=0/.test(c)) jar.delete(kv.slice(0, i)); else jar.set(kv.slice(0, i), kv.slice(i + 1));
+      }
+      const text = await res.text();
+      let data = text;
+      try { data = JSON.parse(text); } catch { /* text */ }
+      return { status: res.status, data, location: res.headers.get('location') };
+    };
+  };
+  try {
+    const admin = client('Mozilla/5.0 (Windows NT 10.0) Chrome/130.0');
+    assert.equal((await admin('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' })).status, 200);
+    assert.equal((await admin('GET', '/api/auth/me')).data.role, 'admin', 'accounts from before roles are admins');
+    // (adding an account needs the password typed lately: signing in just did)
+    assert.deepEqual((await admin('POST', '/api/accounts', { username: 'kid', password: 'watching only', role: 'viewer' })).data.accounts.map((a) => [a.username, a.role]), [['admin', 'admin'], ['kid', 'viewer']]);
+    assert.equal((await admin('PATCH', '/api/accounts/admin', { role: 'viewer' })).status, 409, 'the last admin stays');
+
+    const kid = client('Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Safari/604.1');
+    assert.equal((await kid('POST', '/api/auth/login', { username: 'kid', password: 'watching only' })).status, 200);
+    await waitFor(async () => (await kid('GET', '/api/vehicles')).data.vehicles?.[0]?.inventory);
+    assert.equal((await kid('GET', '/api/vehicles')).status, 200, 'watching is fine');
+    const rec = (await kid('GET', '/api/vehicles/daily-driver/recordings')).data.recordings[0];
+    assert.equal((await kid('POST', '/api/vehicles/daily-driver/trash', { ids: [rec.id] })).status, 403, 'no deleting');
+    assert.equal((await kid('PUT', '/api/vehicles/daily-driver/policy', { enabled: true })).status, 403, 'no settings');
+    assert.equal((await kid('GET', '/api/support-bundle')).status, 403, 'no server details');
+    assert.equal((await kid('POST', '/api/stars', { vehicle: 'daily-driver', clip: '2020-01-01_08-00-00', second: 3 })).status, 200, 'starring is fine');
+
+    // devices: the admin sees two of its own sessions after signing in elsewhere
+    const phone = client('Mozilla/5.0 (Linux; Android 14) Chrome/130.0 Mobile');
+    await phone('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
+    const list = (await admin('GET', '/api/auth/sessions')).data.sessions;
+    assert.equal(list.length, 2);
+    assert.equal(list.filter((x) => x.current).length, 1);
+    assert.ok(list.some((x) => /Android/.test(x.agent)));
+    assert.equal((await admin('POST', '/api/auth/sessions-end-others')).data.ended, 1);
+    assert.equal((await phone('GET', '/api/vehicles')).status, 401, 'signed out there');
+
+    // two-step sign-in
+    await admin('POST', '/api/auth/confirm', { password: 'correct horse' });
+    const { secret } = (await admin('POST', '/api/auth/2fa/start')).data;
+    assert.equal((await admin('POST', '/api/auth/2fa/enable', { code: '000000' })).status, 400);
+    const now = () => Math.floor(Date.now() / 30000);
+    const { recovery } = (await admin('POST', '/api/auth/2fa/enable', { code: totp(secret, now()) })).data;
+    assert.equal(recovery.length, 10);
+    const laptop = client('Mozilla/5.0 (Macintosh; Mac OS X 14) Safari/605');
+    const first = await laptop('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
+    assert.equal(first.data.twoFactor, true, 'the password alone does not sign in');
+    assert.equal((await laptop('GET', '/api/vehicles')).status, 401);
+    assert.match((await laptop('GET', '/footage')).location, /^\/login\/code/, 'pages send it to the code page');
+    assert.equal((await laptop('GET', '/login/code')).status, 200);
+    assert.equal((await laptop('POST', '/api/auth/2fa/code', { code: '123456' })).status, 401);
+    assert.equal((await laptop('POST', '/api/auth/2fa/code', { code: totp(secret, now() + 1) })).status, 200);
+    assert.equal((await laptop('GET', '/api/vehicles')).status, 200, 'signed in with the code');
+    // a recovery code works once
+    const lost = client('Mozilla/5.0 (X11; Linux) Firefox/130');
+    await lost('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
+    assert.equal((await lost('POST', '/api/auth/2fa/code', { code: recovery[0] })).status, 200);
+    const again = client('Mozilla/5.0 (X11; Linux) Firefox/130');
+    await again('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
+    assert.equal((await again('POST', '/api/auth/2fa/code', { code: recovery[0] })).status, 401, 'used already');
+    assert.equal((await laptop('GET', '/api/auth/2fa')).data.recoveryLeft, 9);
+  } finally {
+    await s.stop();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});

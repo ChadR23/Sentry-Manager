@@ -55,6 +55,10 @@ class ManagerDB {
     this.db = new DatabaseSync(file);
     this.db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;');
     this.db.exec(SCHEMA);
+    // sessions know the device they are on (signed-in devices); added to databases from before
+    for (const col of ['agent TEXT', 'ip TEXT', 'seen_at INTEGER']) {
+      try { this.db.exec(`ALTER TABLE sessions ADD COLUMN ${col}`); } catch { /* there already */ }
+    }
     this.cache = new Map();
   }
 
@@ -103,8 +107,26 @@ class ManagerDB {
       ON CONFLICT(username) DO UPDATE SET salt = excluded.salt, hash = excluded.hash`).run(username, salt, hash, Date.now());
   }
 
-  addSession(tokenHash, username, expiresAt) {
-    this.q('INSERT INTO sessions (token_hash, username, created_at, expires_at) VALUES (?, ?, ?, ?)').run(tokenHash, username, Date.now(), expiresAt);
+  addSession(tokenHash, username, expiresAt, { agent = null, ip = null } = {}) {
+    this.q('INSERT INTO sessions (token_hash, username, created_at, expires_at, agent, ip, seen_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(tokenHash, username, Date.now(), expiresAt, agent, ip, Date.now());
+  }
+
+  /** A session was used: when and from where (kept at most once a minute). */
+  touchSession(tokenHash, ip) {
+    this.q('UPDATE sessions SET seen_at = ?, ip = COALESCE(?, ip) WHERE token_hash = ? AND (seen_at IS NULL OR seen_at < ?)').run(Date.now(), ip, tokenHash, Date.now() - 60_000);
+  }
+
+  sessionsFor(username) {
+    return this.q('SELECT token_hash, created_at, expires_at, agent, ip, seen_at FROM sessions WHERE username = ? AND expires_at > ? ORDER BY COALESCE(seen_at, created_at) DESC').all(username, Date.now());
+  }
+
+  listUsers() {
+    return this.q('SELECT username, created_at FROM users ORDER BY created_at').all();
+  }
+
+  deleteUser(username) {
+    this.q('DELETE FROM users WHERE username = ?').run(username);
+    this.q('DELETE FROM sessions WHERE username = ?').run(username);
   }
 
   getSession(tokenHash) {

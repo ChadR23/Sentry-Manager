@@ -17,8 +17,9 @@ import vehicles from './pages/vehicles.js';
 import driving from './pages/driving.js';
 import map from './pages/map.js';
 import health from './pages/health.js';
+import account from './pages/account.js';
 
-const PAGES = { sky, footage, viewer, driving, map, encoder, vehicles, nodes, policies, jobs, bin, alerts, health, settings };
+const PAGES = { sky, footage, viewer, driving, map, encoder, vehicles, nodes, policies, jobs, bin, alerts, health, account, settings };
 // [route, label, icon, key (g + key), primary on phones]
 const DOCK = [
   ['sky', 'Sky', 'sky', 's', true],
@@ -36,6 +37,7 @@ const DOCK = [
   ['alerts', 'Alerts', 'bell', 'a', true],
   '|',
   ['health', 'Health', 'check', 'h', false],
+  ['account', 'Account', 'key', 'u', false],
   ['settings', 'Settings', 'gear', ',', false]
 ];
 const LONG = { vehicles: 'Encoding per vehicle', bin: 'Recycle Bin', alerts: 'Notifications', sky: 'Sky (home)' };

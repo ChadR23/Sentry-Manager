@@ -50,6 +50,7 @@ const { detectGpus } = require('./gpu');
 const { createHealth } = require('./health');
 const { createSnapshots, applyPendingRestore } = require('./snapshots');
 const { createIntegrity } = require('./integrity');
+const { createAccounts, viewerMay } = require('./accounts');
 const { writeZip } = require('./zip');
 const { createConverterHost } = require('./converterHost');
 const { createStats } = require('./stats');
@@ -243,6 +244,7 @@ async function main() {
   const snapshots = createSnapshots({ db, dbFile: path.join(DATA, 'manager.db'), dir: path.join(DATA, 'snapshots'), log: logger.scope('snapshots') });
   snapshots.start();
   const auth = new Auth({ db, log: logger.scope('auth'), isSecure, setupFile: path.join(DATA, 'setup-code.txt') });
+  const accounts = createAccounts({ db });
   auth.bootstrap();
   const jobs = new Jobs({ db });
   // a scan or a move to the Recycle Bin that a restart stopped: interrupted
@@ -590,7 +592,14 @@ async function main() {
       return null;
     }
   };
-  r.add('GET', '/api/auth/me', (req) => ({ user: auth.user(req), needsSetup: auth.needsSetup(), secure: isSecure(req), fingerprint: req.socket?.encrypted ? certFingerprint() : null }), { public: true });
+  r.add('GET', '/api/auth/me', (req) => {
+    const user = auth.user(req);
+    return { user, role: accounts.roleOf(user), twoFactor: user ? accounts.twoFactorOn(user) : false, needsSetup: auth.needsSetup(), secure: isSecure(req), fingerprint: req.socket?.encrypted ? certFingerprint() : null };
+  }, { public: true });
+  // two-step sign-in: the password was right, the code is still to come
+  const PENDING_COOKIE = 'sm_pending';
+  const pendingToken = (req) => { const t = parseCookies(req.headers.cookie || '')[PENDING_COOKIE]; return typeof t === 'string' && /^[A-Za-z0-9_-]{20,80}$/.test(t) ? t : null; };
+  const pendingCookie = (req, value, maxAge) => `${PENDING_COOKIE}=${value}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAge}${isSecure(req) ? '; Secure' : ''}`;
   // one password check at a time per throttle key (auth.attempt)
   const guarded = async (keys, check) => {
     try {
@@ -612,10 +621,92 @@ async function main() {
       throw new HttpError(401, 'Wrong user name or password.');
     }
     keys.forEach((k) => auth.noteSuccess(k));
-    auth.login(req, res, body.username);
+    if (accounts.twoFactorOn(body.username)) {
+      // the code comes next, on /login/code (every page sends a pending sign-in there)
+      res.setHeader('Set-Cookie', pendingCookie(req, accounts.startPending(body.username), 300));
+      audit.info(`Password right, waiting for the two-step code: ${by(req, body.username)}`);
+      return { ok: true, twoFactor: true, next: '/login/code' };
+    }
+    auth.login(req, res, body.username, { ip: clientKey(req) });
     audit.info(`Signed in: ${by(req, body.username)}`);
     return { ok: true };
   }, { public: true });
+  r.add('POST', '/api/auth/2fa/code', async (req, res, { body }) => {
+    const key = `code:${clientKey(req)}`;
+    const wait = auth.throttled(key);
+    if (wait) throw new HttpError(429, `Too many attempts. Try again in ${wait} s.`);
+    let username;
+    try {
+      username = accounts.finishPending(pendingToken(req), body?.code);
+    } catch (err) {
+      auth.noteFailure(key);
+      if (err.expired) res.setHeader('Set-Cookie', pendingCookie(req, '', 0));
+      audit.warn(`Two-step code wrong from ${clientKey(req)}`);
+      throw new HttpError(err.status || 401, err.message);
+    }
+    auth.noteSuccess(key);
+    auth.login(req, res, username, { ip: clientKey(req) });
+    const set = res.getHeader('Set-Cookie');
+    res.setHeader('Set-Cookie', [...[].concat(set || []), pendingCookie(req, '', 0)]);
+    audit.info(`Signed in with a two-step code: ${by(req, username)}`);
+    return { ok: true };
+  }, { public: true });
+  // ---- Account: two-step sign-in, signed-in devices, other accounts
+  r.add('GET', '/api/auth/2fa', (req, res, { user }) => ({ enabled: accounts.twoFactorOn(user), recoveryLeft: accounts.recoveryLeft(user) }));
+  r.add('POST', '/api/auth/2fa/start', (req, res, { user }) => { requireConfirmed(req); return accounts.startTotp(user); });
+  r.add('POST', '/api/auth/2fa/enable', (req, res, { body, user }) => {
+    const recovery = accounts.enableTotp(user, body?.code);
+    audit.warn(`Two-step sign-in turned on: ${by(req, user)}`);
+    return { recovery };
+  });
+  r.add('POST', '/api/auth/2fa/disable', (req, res, { user }) => {
+    requireConfirmed(req);
+    accounts.disableTotp(user);
+    audit.warn(`Two-step sign-in turned off: ${by(req, user)}`);
+    return { ok: true };
+  });
+  r.add('GET', '/api/auth/sessions', (req, res, { user }) => {
+    const mine = auth.sessionHash(req);
+    return { sessions: db.sessionsFor(user).map((x) => ({ id: x.token_hash.slice(0, 16), current: x.token_hash === mine, agent: x.agent, ip: x.ip, createdAt: x.created_at, seenAt: x.seen_at })) };
+  });
+  r.add('POST', '/api/auth/sessions/:id/end', (req, res, { params, user }) => {
+    const hit = db.sessionsFor(user).find((x) => x.token_hash.slice(0, 16) === params.id);
+    if (!hit) throw new HttpError(404, 'No such session.');
+    db.deleteSession(hit.token_hash);
+    audit.info(`Signed out a device: ${by(req, user)}`);
+    return { ok: true };
+  });
+  r.add('POST', '/api/auth/sessions-end-others', (req, res, { user }) => {
+    const mine = auth.sessionHash(req);
+    let n = 0;
+    for (const x of db.sessionsFor(user)) if (x.token_hash !== mine) { db.deleteSession(x.token_hash); n++; }
+    audit.warn(`Signed out everywhere else (${n} session${n === 1 ? '' : 's'}): ${by(req, user)}`);
+    return { ended: n };
+  });
+  r.add('GET', '/api/accounts', () => ({ accounts: accounts.list() }));
+  r.add('POST', '/api/accounts', (req, res, { body, user }) => {
+    requireConfirmed(req);
+    const name = String(body?.username || '');
+    if (db.getUser(name)) throw new HttpError(409, 'There is an account with that name already.');
+    auth.setPassword(name, String(body?.password || ''));
+    accounts.setRole(name, body?.role === 'admin' ? 'admin' : 'viewer');
+    audit.warn(`Account "${name}" (${accounts.roleOf(name)}) created: ${by(req, user)}`);
+    return { accounts: accounts.list() };
+  });
+  r.add('PATCH', '/api/accounts/:name', (req, res, { params, body, user }) => {
+    requireConfirmed(req);
+    accounts.setRole(params.name, body?.role);
+    // a role change takes effect on the next request; nothing to sign out
+    audit.warn(`Account "${params.name}" is now ${body?.role}: ${by(req, user)}`);
+    return { accounts: accounts.list() };
+  });
+  r.add('DELETE', '/api/accounts/:name', (req, res, { params, user }) => {
+    requireConfirmed(req);
+    if (params.name === user) throw new HttpError(400, 'You cannot remove the account you are signed in with.');
+    accounts.remove(params.name);
+    audit.warn(`Account "${params.name}" removed: ${by(req, user)}`);
+    return { accounts: accounts.list() };
+  });
   r.add('POST', '/api/auth/setup', async (req, res, { body }) => {
     const key = `setup:${clientKey(req)}`;
     const wait = auth.throttled(key);
@@ -629,7 +720,7 @@ async function main() {
       }
       throw err;
     }
-    auth.login(req, res, body.username);
+    auth.login(req, res, body.username, { ip: clientKey(req) });
     audit.info(`Account "${body.username}" created with the setup code: ${by(req, body.username)}`);
     return { ok: true };
   }, { public: true });
@@ -666,7 +757,7 @@ async function main() {
     auth.setPassword(user, String(body?.next || ''));
     db.deleteSessionsFor(user);
     auth.forgetConfirmations();
-    auth.login(req, res, user);
+    auth.login(req, res, user, { ip: clientKey(req) });
     audit.info(`Password changed (all other sessions signed out): ${by(req, user)}`);
     return { ok: true };
   });
@@ -1721,7 +1812,7 @@ async function main() {
   });
 
   // ---- HTTP handler
-  const PUBLIC_STATIC = new Set(['/login', '/web/login.js', '/web/shell.css', '/web/icon.png']);
+  const PUBLIC_STATIC = new Set(['/login', '/web/login.js', '/web/shell.css', '/web/icon.png', '/login/code', '/web/login-code.js']);
   const handler = async (req, res) => {
     let url;
     try {
@@ -1764,6 +1855,13 @@ async function main() {
 
       const user = auth.user(req);
       const isApi = p.startsWith('/api/');
+      if (user) {
+        // when and from where each signed-in device was last used
+        const h = auth.sessionHash(req);
+        if (h) db.touchSession(h, clientKey(req));
+        // a watch-only account watches: no deleting, converting or settings
+        if (isApi && accounts.roleOf(user) === 'viewer' && !viewerMay(req.method, p)) return sendJson(res, 403, { error: 'This account can only watch footage. An admin account can do this.' });
+      }
       const publicStatic = PUBLIC_STATIC.has(p) || (p.startsWith('/web/fonts/') && !p.slice(11).includes('/'));
 
       if (isApi) {
@@ -1859,7 +1957,9 @@ async function main() {
         return res.end();
       }
       if (!user && !publicStatic) {
-        res.writeHead(302, { Location: `/login${p === '/' ? '' : `?next=${encodeURIComponent(p + url.search)}`}` });
+        // a sign-in waiting for its two-step code goes to the code page
+        const where = accounts.pendingUser(pendingToken(req)) ? '/login/code' : '/login';
+        res.writeHead(302, { Location: `${where}${p === '/' ? '' : `?next=${encodeURIComponent(p + url.search)}`}` });
         return res.end();
       }
       const serve = async (root, rel, opts = {}) => {
@@ -1884,6 +1984,8 @@ async function main() {
       };
       if (p === '/' || p === '/index.html') return ui('web', WEB, 'index.html');
       if (p === '/login') return ui('web', WEB, 'login.html');
+      // the two-step code page: always the built-in one, for every interface
+      if (p === '/login/code') return serve(WEB, 'login-code.html');
       // always the built-in one: an interface pack cannot replace the bar
       if (p === '/web/critical.js') return serve(WEB, 'critical.js');
       if (p.startsWith('/web/')) return ui('web', WEB, p.slice(5), { cache: p.includes('/fonts/') ? 'public, max-age=604800' : 'no-cache' });

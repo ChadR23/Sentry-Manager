@@ -18,11 +18,12 @@ const ROUTES = {
   jobs: { label: 'Activity', icon: 'activity', group: 'care', desc: 'What the server has been doing', load: () => import('./pages/jobs.js') },
   notifications: { label: 'Alerts', icon: 'bell', group: 'care', desc: 'Things that may need you', load: () => import('./pages/notifications.js') },
   nodes: { label: 'Helper servers', icon: 'nodes', group: 'setup', desc: 'Other computers that convert for you (Nodes)', load: () => import('./pages/nodes.js') },
+  account: { label: 'Account', icon: 'key', group: 'setup', desc: 'Two-step sign-in, devices, other accounts', load: () => import('./pages/account.js') },
   health: { label: 'Health', icon: 'shieldCheck', group: 'setup', desc: 'Checks, database snapshots, log search', load: () => import('./pages/health.js') },
   server: { label: 'Server & logs', icon: 'server', group: 'setup', desc: 'CPU, memory, disks, temperatures, logs', load: () => import('./pages/server.js') },
   settings: { label: 'Settings', icon: 'gear', group: 'setup', desc: 'Vehicles, account, look, security', load: () => import('./pages/settings.js') }
 };
-export const MORE_ROUTES = ['map', 'driving', 'vehicles', 'bin', 'policies', 'jobs', 'notifications', 'nodes', 'health', 'server', 'settings'];
+export const MORE_ROUTES = ['map', 'driving', 'vehicles', 'bin', 'policies', 'jobs', 'notifications', 'nodes', 'health', 'account', 'server', 'settings'];
 export const routeInfo = (r) => ROUTES[r];
 
 // ---------- the look ----------

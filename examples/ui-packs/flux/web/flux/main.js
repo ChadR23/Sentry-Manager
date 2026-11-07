@@ -14,6 +14,7 @@ import vehicles from './pages/vehicles.js';
 import driving from './pages/driving.js';
 import map from './pages/map.js';
 import health from './pages/health.js';
+import account from './pages/account.js';
 
 const PAGES = [
   { id: 'overview', label: 'Overview', icon: 'overview', key: 'o', mod: overview, group: 'Monitor' },
@@ -29,6 +30,7 @@ const PAGES = [
   { id: 'bin', label: 'Recycle Bin', icon: 'bin', key: 'b', mod: bin, group: 'Process' },
   { id: 'notifications', label: 'Notifications', icon: 'bell', key: 'a', mod: notifications, group: 'System' },
   { id: 'health', label: 'Health', icon: 'check', key: 'h', mod: health, group: 'System' },
+  { id: 'account', label: 'Account', icon: 'lock', key: 'u', mod: account, group: 'System' },
   { id: 'settings', label: 'Settings', icon: 'settings', key: 's', mod: settings, group: 'System' }
 ];
 const byId = Object.fromEntries(PAGES.map((p) => [p.id, p]));

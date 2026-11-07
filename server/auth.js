@@ -191,13 +191,14 @@ class Auth {
     return `HttpOnly; SameSite=Strict; Path=/; Max-Age=${maxAge}${this.isSecure(req) ? '; Secure' : ''}`;
   }
 
-  login(req, res, username) {
+  login(req, res, username, { ip = null } = {}) {
     // a fresh token every sign-in, so a token set before sign-in is never reused
     const old = this.token(req);
     if (old) this.db.deleteSession(sha256(old));
     const token = crypto.randomBytes(32).toString('base64url');
     const tokenHash = sha256(token);
-    this.db.addSession(tokenHash, username, Date.now() + SESSION_MS);
+    // the device it is on, for the signed-in devices list
+    this.db.addSession(tokenHash, username, Date.now() + SESSION_MS, { agent: String(req.headers['user-agent'] || '').slice(0, 300) || null, ip });
     this.confirmed.set(tokenHash, Date.now() + CONFIRM_MS); // just typed the password
     res.setHeader('Set-Cookie', `${this.cookieName(req)}=${token}; ${this.cookieAttrs(req, SESSION_MS / 1000)}`);
   }
@@ -216,6 +217,12 @@ class Auth {
     // over HTTPS only the __Host- cookie counts: a plain-HTTP cookie could have been planted
     const token = this.isSecure(req) ? cookies[SECURE_COOKIE] : cookies[COOKIE];
     return typeof token === 'string' && /^[A-Za-z0-9_-]{20,100}$/.test(token) ? token : null;
+  }
+
+  /** This request's session (its hash), to list or end sessions. */
+  sessionHash(req) {
+    const token = this.token(req);
+    return token ? sha256(token) : null;
   }
 
   /** The signed-in user name, or null. */
