@@ -977,12 +977,46 @@ test('pages link their scripts and styles under /v/<version>/: kept a year, a ne
     assert.equal(stale.status, 200, 'an old page still gets the file');
     assert.equal(stale.headers.get('cache-control'), 'no-cache', 'but not to keep');
     assert.equal((await s.call('GET', `/v/${v}/api/vehicles`, undefined, { raw: true })).status, 404, 'never the API');
+    // a versioned script's imports of the shared scripts are versioned too (kept, not asked again)
+    const appText = await app.text();
+    assert.match(appText, new RegExp(`import\\('/v/${v}/web/scrub\\.js'\\)`), 'its import of /web/scrub.js');
+    assert.ok(!/['"]\/web\/[\w./-]+\.js['"]/.test(appText), 'no plain /web/ script links left');
+    const viewerMap = await (await s.call('GET', `/v/${v}/web/viewerMap.js`, undefined, { raw: true })).text();
+    assert.match(viewerMap, new RegExp(`import '/v/${v}/shared/mapProviders\\.js'`), 'and under /shared/');
+    const plain = await (await s.call('GET', '/web/app.js', undefined, { raw: true })).text();
+    assert.match(plain, /import\('\/web\/scrub\.js'\)/, 'the file itself, asked for plainly, is as it is');
 
     await s.call('POST', '/api/auth/confirm', { password: 'correct horse' });
     await s.call('PUT', '/api/ui-packs/active', { id: 'horizon' });
     const packPage = await (await s.call('GET', '/', undefined, { raw: true })).text();
     const v2 = /(?:src|href)="\/v\/([A-Za-z0-9_-]+)\//.exec(packPage)[1];
     assert.notEqual(v2, v, 'another interface: other links');
+  } finally {
+    await s.stop();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('early data: the calls the main page made the last two times it opened are asked for at once the next time', async () => {
+  const dir = await tmp();
+  const s = await startServer(dir);
+  try {
+    await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
+    const fetchLike = { headers: { 'Sec-Fetch-Dest': 'empty' } };
+    const open = async (calls) => {
+      const page = await (await s.call('GET', '/', undefined, { raw: true })).text();
+      for (const c of calls) await s.call('GET', c, undefined, fetchLike);
+      await s.call('GET', '/api/settings', undefined, { headers: { 'Sec-Fetch-Dest': 'image' } }); // not a fetch(): not noted
+      await new Promise((r) => setTimeout(r, 2300));
+      return page;
+    };
+    assert.ok(!(await open(['/api/vehicles', '/api/updates?x=1'])).includes('prefetch.js'), 'nothing learnt yet');
+    assert.ok(!(await open(['/api/vehicles', '/api/updates?x=2'])).includes('prefetch.js'), 'learnt after it opened twice');
+    const page = await open([]);
+    const m = /<script src="\/v\/[\w-]+\/web\/prefetch\.js" data-urls="([^"]+)"><\/script>/.exec(page);
+    assert.ok(m, 'the early-data script, first in the head');
+    assert.deepEqual(JSON.parse(m[1].replace(/&quot;/g, '"')), ['/api/vehicles'], 'only what both openings asked for, by fetch()');
+    assert.ok(page.indexOf('prefetch.js') < page.indexOf('app.js'), 'before the page\'s own scripts');
   } finally {
     await s.stop();
     await fsp.rm(dir, { recursive: true, force: true });

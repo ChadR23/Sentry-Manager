@@ -151,3 +151,25 @@ test('moments: hard braking and swerves over the line, strongest first, and the 
   assert.deepEqual(near.map(({ rel, second, metres }) => [rel.slice(23, 31), second, metres]), [['10-02-00', 5, 11]]);
   assert.deepEqual(await idx.near(['v1'], 40, -100, 150), [], 'nowhere near');
 });
+
+test('place search cache: filled ahead (warm), then a search reads no day file', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'si-warm-'));
+  fs.mkdirSync(path.join(dir, 'car'));
+  for (const day of ['2026-11-01', '2026-11-02']) {
+    fs.writeFileSync(path.join(dir, 'car', `${day}.json`), JSON.stringify({ [`TeslaCam/RecentClips/${day}_10-00-00-front.mp4`]: [1, 1, [10], { b: null, t: null, v: [0, 10], g: [[0, 37.788, -122.4193], [5, 37.8, -122.5]] }] }));
+  }
+  const si = createSpeedIndex({ dir, inventory: { get: () => null }, vehicles: { list: () => [] }, telemetry: {} });
+  await si.warm(['car'], 0);
+  const fsp = require('fs/promises');
+  const realRead = fsp.readFile;
+  let reads = 0;
+  fsp.readFile = async (...a) => { reads++; return realRead(...a); };
+  try {
+    const hits = await si.near(['car'], 37.788, -122.4193, 100);
+    assert.deepEqual(hits.map((h) => [h.day, h.second, h.metres]), [['2026-11-02', 0, 0], ['2026-11-01', 0, 0]]);
+    assert.equal(reads, 0, 'every day came from the cache');
+  } finally {
+    fsp.readFile = realRead;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

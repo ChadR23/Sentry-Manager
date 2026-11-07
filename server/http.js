@@ -169,7 +169,12 @@ async function packedCopy(abs, st, enc) {
  * ETag meant every page load downloaded every script again (6 MB for the
  * Viewer). Text is sent compressed (brotli or gzip), from a cached copy.
  */
-async function serveFile(req, res, root, rel, { transform, cache = 'no-cache', headers = {} } = {}) {
+// transformed files kept ready (text and its compressed copies), when the
+// caller names what makes the output differ (transformKey): a versioned
+// script is the same for everyone who asks for that version
+const transformed = new Map(); // `${abs}|${size}|${mtime}|${key}` -> { body, packed: { enc: Buffer } }
+
+async function serveFile(req, res, root, rel, { transform, transformKey = null, cache = 'no-cache', headers = {} } = {}) {
   if (typeof rel !== 'string' || rel.includes('\0') || rel.split('/').some((seg) => seg === '..')) return false;
   const abs = path.resolve(root, `.${path.sep}${rel}`);
   if (abs !== root && !abs.startsWith(root + path.sep)) return false;
@@ -183,12 +188,21 @@ async function serveFile(req, res, root, rel, { transform, cache = 'no-cache', h
   const type = STATIC_MIME[path.extname(abs).toLowerCase()] || 'application/octet-stream';
   const textual = COMPRESSIBLE.test(type);
   if (transform) {
-    const body = transform(await fsp.readFile(abs, 'utf8'));
-    const enc = textual && body.length > 1024 ? encodingFor(req) : null;
-    const out = enc ? compress(Buffer.from(body), enc) : body;
-    res.writeHead(200, { ...headers, 'Content-Type': type, 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff',
-      ...(enc ? { 'Content-Encoding': enc, Vary: 'Accept-Encoding' } : {}) });
-    res.end(out);
+    const memoKey = transformKey === null ? null : `${abs}|${st.size}|${st.mtimeMs}|${transformKey}`;
+    let hit = memoKey && transformed.get(memoKey);
+    if (!hit) {
+      hit = { body: transform(await fsp.readFile(abs, 'utf8')), packed: {} };
+      if (memoKey) {
+        transformed.set(memoKey, hit);
+        if (transformed.size > 400) transformed.delete(transformed.keys().next().value);
+      }
+    }
+    const enc = textual && hit.body.length > 1024 ? encodingFor(req) : null;
+    const out = enc ? (hit.packed[enc] ||= compress(Buffer.from(hit.body), enc)) : hit.body;
+    // a page made for this request is never kept; a versioned script may be
+    res.writeHead(200, { ...headers, 'Content-Type': type, 'Cache-Control': memoKey ? cache : 'no-cache', 'X-Content-Type-Options': 'nosniff',
+      ...(enc ? { 'Content-Encoding': enc } : {}), ...(textual ? { Vary: 'Accept-Encoding' } : {}) });
+    res.end(req.method === 'HEAD' ? undefined : out);
     return true;
   }
   const etag = `W/"${st.size.toString(36)}-${Math.round(st.mtimeMs).toString(36)}"`;

@@ -317,6 +317,25 @@ function createSpeedIndex({ dir, inventory, vehicles, telemetry, log, pauseMs = 
     return hits.sort((a, b) => (a.day === b.day ? b.rel.localeCompare(a.rel) : b.day.localeCompare(a.day))).slice(0, limit);
   }
 
+  /**
+   * Read every indexed day into the place search's cache, newest first, a day
+   * at a time with a pause between (after start-up, so the first search is as
+   * quick as the next ones).
+   */
+  async function warm(vids, pause = 20) {
+    for (const vid of vids) {
+      const folder = path.dirname(fileOf(vid, '2000-01-01'));
+      let names = [];
+      try { names = (await fsp.readdir(folder)).filter((n) => n.endsWith('.json') && DAY.test(n.slice(0, -5))); } catch { continue; }
+      for (const name of names.sort().reverse()) {
+        if (stopped || geoPoints >= GEO_MAX) return;
+        while (!idle() && !stopped) await new Promise((r) => setTimeout(r, 2000));
+        await geoOf(vid, name.slice(0, -5), path.join(folder, name));
+        if (pause) await new Promise((r) => setTimeout(r, pause));
+      }
+    }
+  }
+
   /** How far each day is indexed: { day: { clips, indexed } } (front-camera clips). */
   async function progress(vid, list) {
     const per = {};
@@ -346,7 +365,7 @@ function createSpeedIndex({ dir, inventory, vehicles, telemetry, log, pauseMs = 
     return sp;
   }
 
-  return { kick, day, summaries, moments, near, clip, progress, status: () => ({ ...progress_ }), flush, stop() { stopped = true; } };
+  return { kick, day, summaries, moments, near, warm, clip, progress, status: () => ({ ...progress_ }), flush, stop() { stopped = true; } };
 }
 
 module.exports = { createSpeedIndex, summarize };

@@ -166,6 +166,17 @@ function withCriticalBar(html) {
 // get the same prefix by themselves.
 const VERSIONED = /^\/v\/([A-Za-z0-9_-]{1,40})(\/.*)$/;
 const LONG_CACHE = 'private, max-age=31536000, immutable';
+/**
+ * A versioned script's own links to the shared scripts (import '/web/x.js',
+ * import('/web/x.js'), script.src = '/web/x.js', and the same under
+ * /shared/) get its version too, so the modules it pulls in are kept as long
+ * as it is, instead of asked for again on every visit. Only quoted paths of
+ * .js files under /web/ and /shared/ change.
+ */
+function versionScriptLinks(js, version) {
+  return js.replace(/(['"`])\/(web|shared)\/([A-Za-z0-9_./-]+\.m?js)\1/g, (m, q, dir, rest) => (rest.includes('..') ? m : `${q}/v/${version}/${dir}/${rest}${q}`));
+}
+
 function versionLinks(html, pageDir, version) {
   return html.replace(/<(?:script|link)\b[^>]*>/gi, (tag) => tag.replace(/\b(src|href)=(["'])([^"']+)\2/i, (m, attr, q, url) => {
     if (/^[a-z][a-z0-9+.-]*:|^\/\/|^#/i.test(url)) return m; // another site, data:, an anchor
@@ -280,6 +291,8 @@ async function main() {
   const telemetry = new Telemetry({ srcRoot: SRC, cacheDir: path.join(DATA, 'telemetry'), log: logger.scope('telemetry') });
   // every front clip's speed, a value a second, indexed in the background for the Viewer's speed graph
   speedIndex = createSpeedIndex({ dir: path.join(DATA, 'speeds'), inventory, vehicles, telemetry, log: logger.scope('speeds') });
+  // the place search's cache, filled quietly half a minute after start
+  setTimeout(() => speedIndex.warm(vehicles.list().map((v) => v.id)).catch((err) => log.warn(`Place search: ${err.message}`)), 30_000).unref?.();
 
   // ---- paths
   // Default place for converted copies ("keep originals" mode); EXTRA_ROOTS adds more.
@@ -501,6 +514,48 @@ async function main() {
   const clients = new Set();
   const MAX_EVENT_CLIENTS = 200;
   const seenAt = new Map(); // session hash -> when its "last used" was last written
+  // Early data for the main page (web/prefetch.js): the API calls a page
+  // makes in its first two seconds are noted, per account and interface
+  // version; the ones it made the last two times are asked for at once the
+  // next time, while its scripts still load
+  const PREFETCH_WINDOW = 2000;
+  const learning = new Map(); // session hash -> { key, until, urls: Set }
+  // (kept in the database, so a restart does not start over)
+  const learnt = new Map(Object.entries(db.get('prefetch', {}) || {})); // `${user}|${version}` -> { last: [urls], hints: [urls] }
+  function noteStartCall(req, h, p, search) {
+    const l = learning.get(h);
+    if (!l || Date.now() > l.until || l.urls.size >= 20) return;
+    // fetch() calls only: images and video are asked for by the page itself
+    if (req.headers['sec-fetch-dest'] !== 'empty') return;
+    if (/^\/api\/(events|media|scrub|converter\/events)\b/.test(p)) return;
+    l.urls.add(p + search);
+  }
+  function startLearning(h, key) {
+    if (!h) return;
+    const l = { key, until: Date.now() + PREFETCH_WINDOW, urls: new Set() };
+    learning.set(h, l);
+    setTimeout(() => {
+      if (learning.get(h) === l) learning.delete(h);
+      const urls = [...l.urls];
+      const had = learnt.get(key);
+      // only what the last two openings both asked for: a call made once, or
+      // with a changing address, is not fetched for nothing
+      const hints = had ? urls.filter((u) => had.last.includes(u)) : [];
+      const sameSet = (a, b) => a.length === b.length && a.every((u) => b.includes(u)); // (the order calls come in varies)
+      const same = had && sameSet(had.hints, hints) && sameSet(had.last, urls);
+      learnt.delete(key);
+      learnt.set(key, { last: urls, hints });
+      if (learnt.size > 200) learnt.delete(learnt.keys().next().value);
+      if (!same) db.set('prefetch', Object.fromEntries(learnt));
+    }, PREFETCH_WINDOW + 100).unref?.();
+  }
+  /** The shell page with web/prefetch.js first in its head, given what this interface asked for before. */
+  function withPrefetch(html, key) {
+    const hints = learnt.get(key)?.hints || [];
+    if (!hints.length) return html;
+    const tag = `<script src="/web/prefetch.js" data-urls="${escHtml(JSON.stringify(hints))}"></script>`;
+    return /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, (m) => `${m}\n${tag}`) : `${tag}\n${html}`;
+  }
   let converterStreams = 0; // open /api/converter/events streams
   const pending = new Set();
   let flushTimer = null;
@@ -1995,6 +2050,7 @@ async function main() {
         // (at most once a minute each: video and scrub requests come many a second)
         const h = auth.sessionHash(req);
         const nowMs = Date.now();
+        if (h && isApi && req.method === 'GET') noteStartCall(req, h, p, url.search);
         if (h && !(seenAt.get(h) > nowMs - 60_000)) {
           seenAt.set(h, nowMs);
           if (seenAt.size > 5000) seenAt.clear();
@@ -2103,8 +2159,12 @@ async function main() {
         res.writeHead(302, { Location: `${where}${p === '/' ? '' : `?next=${encodeURIComponent(p + url.search)}`}` });
         return res.end();
       }
+      // a script asked for by its version: its links to the shared scripts get that version too
+      const scriptVersion = versioned && /\.m?js$/i.test(p) ? versioned[1] : null;
+      const versionedScript = (opts) => (scriptVersion && !opts.transform ? { ...opts, transform: (js) => versionScriptLinks(js, scriptVersion), transformKey: scriptVersion, cache: longCache ? LONG_CACHE : 'no-cache' } : opts);
       const serve = async (root, rel, opts = {}) => {
         if (longCache) opts = { ...opts, cache: LONG_CACHE };
+        opts = versionedScript(opts);
         if (!(await serveFile(req, res, root, rel, opts))) notFound(res);
       };
       // the chosen interface's file first, else the built-in one
@@ -2120,10 +2180,14 @@ async function main() {
           } };
         }
         const own = originalOnly(req) ? null : uiPacks.root(kind);
-        if (own && await serveFile(req, res, own, rel, { ...opts, cache: longCache ? LONG_CACHE : 'no-cache' })) return undefined;
+        if (own && await serveFile(req, res, own, rel, versionedScript({ ...opts, cache: longCache ? LONG_CACHE : 'no-cache' }))) return undefined;
         return serve(root, rel, opts);
       };
-      if (p === '/' || p === '/index.html') return ui('web', WEB, 'index.html');
+      if (p === '/' || p === '/index.html') {
+        const key = `${user}|${assetVersion(req)}`;
+        startLearning(auth.sessionHash(req), key);
+        return ui('web', WEB, 'index.html', { transform: (html) => withPrefetch(html, key) });
+      }
       if (p === '/login') return ui('web', WEB, 'login.html');
       // the two-step code page: always the built-in one, for every interface
       if (p === '/login/code') return serve(WEB, 'login-code.html');
