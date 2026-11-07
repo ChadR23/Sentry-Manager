@@ -41,7 +41,11 @@ test('without a device every encoder gets exactly today\'s arguments', () => {
   assert.deepEqual(decodeAccelArgs('hevc_qsv', { platform: 'win32' }), ['-hwaccel', 'd3d11va']);
   assert.deepEqual(decodeAccelArgs('hevc_nvenc', { platform: 'linux' }), ['-hwaccel', 'cuda']);
   assert.deepEqual(decodeAccelArgs('hevc_nvenc', { platform: 'linux', zeroCopy: true }), ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda']);
-  assert.equal(decodeAccelArgs('hevc_vaapi', { platform: 'linux', zeroCopy: true }), null);
+  // VA-API zero-copy: frames stay on the GPU, so the encode takes them as they are
+  assert.deepEqual(decodeAccelArgs('hevc_vaapi', { platform: 'linux', zeroCopy: true }), ['-hwaccel', 'vaapi', '-hwaccel_device', '/dev/dri/renderD128', '-hwaccel_output_format', 'vaapi']);
+  assert.deepEqual(buildEncodeArgs({ codec: 'h265', encoder: 'hevc_vaapi', bitrate, hwFrames: true }),
+    ['-c:v', 'hevc_vaapi', '-b:v', '1234567', ...KF, '-bf', '0', ...TAIL]);
+  assert.equal(decodeAccelArgs('hevc_qsv', { platform: 'linux', zeroCopy: true }), null, 'no zero-copy tier for QSV');
   assert.equal(decodeAccelArgs('libx265', { platform: 'linux' }), null);
 });
 

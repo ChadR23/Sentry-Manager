@@ -141,7 +141,8 @@ function buildEncodeArgs({ codec, encoder, bitrate, quality = null, vaapiDevice 
   const hold = holdFrames > 0 ? [`tpad=start=${holdFrames}:start_mode=clone`] : [];
 
   const args = [];
-  if (encoder.endsWith('_vaapi')) {
+  // (zero-copy VA-API frames are on the GPU already: no upload, no device here)
+  if (encoder.endsWith('_vaapi') && !hwFrames) {
     const node = device ? deviceNode(device) : vaapiDevice;
     if (typeof node !== 'string' || node.length === 0) throw new RangeError('vaapiDevice must be a non-empty path');
     args.push('-vaapi_device', node, '-vf', [...hold, 'format=nv12,hwupload'].join(','));
@@ -200,9 +201,17 @@ function decodeAccelArgs(encoder, { platform = process.platform, vaapiDevice = '
   if (typeof encoder !== 'string') return null;
   // With a device, the GPU that encodes also decodes.
   const cudaDevice = () => (device ? ['-hwaccel_device', deviceIndex(device)] : []);
-  // Zero-copy: NVDEC frames stay in GPU memory and go straight into NVENC.
-  if (zeroCopy) return encoder.endsWith('_nvenc') ? ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda', ...cudaDevice()] : null;
   const vaapi = () => ['-hwaccel', 'vaapi', '-hwaccel_device', device ? deviceNode(device) : vaapiDevice];
+  // Zero-copy: decoded frames stay in GPU memory and go straight into the
+  // encoder: NVDEC into NVENC, and VA-API into VA-API (AMD and Intel on
+  // Linux), which otherwise copied every decoded frame to system memory and
+  // uploaded it again. A GPU or driver that cannot is tried once and then
+  // falls back to GPU decode with the copy (jobService encodeDecodeTiers).
+  if (zeroCopy) {
+    if (encoder.endsWith('_nvenc')) return ['-hwaccel', 'cuda', '-hwaccel_output_format', 'cuda', ...cudaDevice()];
+    if (encoder.endsWith('_vaapi')) return [...vaapi(), '-hwaccel_output_format', 'vaapi'];
+    return null;
+  }
   if (encoder.endsWith('_nvenc')) return ['-hwaccel', 'cuda', ...cudaDevice()];
   if (encoder.endsWith('_videotoolbox')) return ['-hwaccel', 'videotoolbox'];
   if (encoder.endsWith('_vaapi')) return vaapi();

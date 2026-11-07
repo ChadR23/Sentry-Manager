@@ -96,6 +96,11 @@ with *Load these*, which fills the form only when you click it.
   group of frames, or have a frame Tesla's encoder skipped; both convert
   with every frame at its original time and the telemetry intact, and are
   verified like any other clip.
+- **Frames stay on the GPU.** On NVIDIA (NVDEC into NVENC) and on AMD and
+  Intel through VA-API, a clip is decoded and encoded on the GPU without
+  copying each frame to the computer's memory and back. A GPU or driver that
+  cannot is tried once, then the converter decodes on the GPU and copies the
+  frames as before, then on the CPU.
 - **Quick to seek.** Converted clips get a keyframe every 2 seconds (the
   encoders' own default is about one every 7), so jumping around a
   converted clip in the Viewer is about as quick as in the car's own files,
