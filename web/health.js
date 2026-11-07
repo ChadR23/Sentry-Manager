@@ -55,6 +55,9 @@ export function createHealthPage(el) {
     <section aria-labelledby="sh-c"><div class="sh-row"><h2 id="sh-c">Checks</h2><button type="button" class="sh-btn" data-run>Run the checks</button><span class="sh-muted" data-when></span></div>
       <p class="sh-muted" style="margin:0">They also run by themselves a minute after every start; what fails there shows as a bar at the top of every page.</p>
       <div data-checks><p class="sh-muted">Loading…</p></div></section>
+    <section aria-labelledby="sh-f"><div class="sh-row"><h2 id="sh-f">Footage check</h2></div>
+      <p class="sh-muted" style="margin:0">Finds clips that will not play: cut off when the car lost power, empty, or not video at all. Only a few bytes of each file are read; a check that a restart interrupts goes on where it was, and unchanged files are not read again.</p>
+      <div data-integrity><p class="sh-muted">Loading…</p></div></section>
     <section aria-labelledby="sh-s"><div class="sh-row"><h2 id="sh-s">Database snapshots</h2><button type="button" class="sh-btn" data-snap>Make one now</button></div>
       <p class="sh-muted" style="margin:0">A copy of the accounts, vehicles, settings, policies and starred moments, made every day; the newest 7 are kept in data/snapshots. Restoring one restarts the app; footage is not touched.</p>
       <div data-snaps></div></section>
@@ -155,7 +158,36 @@ export function createHealthPage(el) {
     }
   });
 
+  // ---- footage check, per vehicle
+  let vehicles = [];
+  const polls = new Map();
+  async function drawIntegrity() {
+    if (!alive) return;
+    const rows = await Promise.all(vehicles.map(async (v) => {
+      let r = null;
+      try { r = await api(`/api/vehicles/${encodeURIComponent(v.id)}/integrity`); } catch { /* shown as unknown */ }
+      return { v, r };
+    }));
+    if (!alive) return;
+    $('[data-integrity]').innerHTML = rows.map(({ v, r }) => {
+      const busy = r?.running;
+      const state = !r ? 'Could not be read.' : busy ? `Checking: ${r.done} of ${r.total} files…`
+        : r.checked ? `${r.checked} of ${r.files} files checked${r.checked < r.files ? ' (new files since: check again)' : ''}: ${r.problems.length + (r.more || 0) ? `<b>${r.problems.length + (r.more || 0)} will not play</b>` : 'all fine'}` : 'Not checked yet.';
+      const list = r?.problems?.length ? `<table>${r.problems.slice(0, 100).map((p) => `<tr><td>${esc(p.day || '')}</td><td>${esc(p.rel.split('/').pop())}</td><td class="sh-muted">${esc(p.problem)}</td></tr>`).join('')}</table>${r.problems.length > 100 || r.more ? '<p class="sh-muted">… and more: download the logs or the support bundle for the full list.</p>' : ''}` : '';
+      if (busy && !polls.has(v.id)) polls.set(v.id, setTimeout(() => { polls.delete(v.id); drawIntegrity(); }, 2000));
+      return `<div class="sh-group">${esc(v.name)}</div><div class="sh-row"><span>${state}</span><button type="button" class="sh-btn" data-check="${esc(v.id)}"${busy ? ' disabled' : ''}>${r?.checked ? 'Check again' : 'Check now'}</button></div>${list}`;
+    }).join('') || '<p class="sh-muted">No vehicles yet.</p>';
+  }
+  el.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-check]');
+    if (!b) return;
+    b.disabled = true;
+    try { await api(`/api/vehicles/${encodeURIComponent(b.dataset.check)}/integrity`, { method: 'POST' }); } catch (err) { alert(err.message); }
+    drawIntegrity();
+  });
+  api('/api/vehicles').then((d) => { vehicles = d.vehicles || []; drawIntegrity(); }).catch(() => { $('[data-integrity]').innerHTML = '<p class="sh-muted">Could not load the vehicles.</p>'; });
+
   runChecks(false);
   loadSnaps();
-  return { destroy() { alive = false; el.innerHTML = ''; } };
+  return { destroy() { alive = false; for (const t of polls.values()) clearTimeout(t); el.innerHTML = ''; } };
 }

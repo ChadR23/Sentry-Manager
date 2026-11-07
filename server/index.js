@@ -49,6 +49,7 @@ const { Thumbnails } = require('./thumbnails');
 const { detectGpus } = require('./gpu');
 const { createHealth } = require('./health');
 const { createSnapshots, applyPendingRestore } = require('./snapshots');
+const { createIntegrity } = require('./integrity');
 const { writeZip } = require('./zip');
 const { createConverterHost } = require('./converterHost');
 const { createStats } = require('./stats');
@@ -264,7 +265,8 @@ async function main() {
   vehicles.bootstrapFromEnv();
   let speedIndex = null;
   let scrubPrepare = null;
-  const inventory = new Inventory({ vehicles, db, log: logger.scope('inventory'), onChange: () => announce('inventory'), onScanned: () => { speedIndex?.kick(); scrubPrepare?.kick(); } });
+  let integrityRef = null; // the footage check: one cut short by a restart goes on after the first scan
+  const inventory = new Inventory({ vehicles, db, log: logger.scope('inventory'), onChange: () => announce('inventory'), onScanned: (vid) => { speedIndex?.kick(); scrubPrepare?.kick(); integrityRef?.resume(vid); } });
   const thumbs = new Thumbnails({ dir: path.join(DATA, 'thumbnails'), ffmpegPath: FFMPEG });
   const telemetry = new Telemetry({ srcRoot: SRC, cacheDir: path.join(DATA, 'telemetry'), log: logger.scope('telemetry') });
   // every front clip's speed, a value a second, indexed in the background for the Viewer's speed graph
@@ -1352,6 +1354,18 @@ async function main() {
     if (!list.some((x) => x.id === params.id)) throw new HttpError(404, 'No such place.');
     db.set('places', list.filter((x) => x.id !== params.id));
     return { ok: true };
+  });
+  // Footage check: clips that will not play (cut off, empty, not MP4)
+  const integrity = createIntegrity({
+    dir: path.join(DATA, 'integrity'), inventory, vehicles, log: logger.scope('integrity'),
+    marks: { get: (vid) => db.get(`integrity-running:${vid}`, false) === true, set: (vid, on) => db.set(`integrity-running:${vid}`, on) }
+  });
+  integrityRef = integrity;
+  r.add('GET', '/api/vehicles/:id/integrity', async (req, res, { params }) => integrity.results(vehicleOr404(params.id).id));
+  r.add('POST', '/api/vehicles/:id/integrity', async (req, res, { params }) => {
+    const v = vehicleOr404(params.id);
+    if (!inventory.get(v.id)?.files) await inventory.scan(v.id);
+    return integrity.start(v.id);
   });
   // Search by place: every clip that passed near a point (speedIndex.near)
   r.add('GET', '/api/places/near', async (req, res, { query }) => {
