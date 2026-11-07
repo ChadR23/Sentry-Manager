@@ -47,8 +47,12 @@ or press **e** in any of them.
 - Up to **60 minutes** in one export.
 - **One export at a time**; another one waits in Jobs until it is done.
   Cancel either from the panel.
-- Rendering uses the CPU at a lower priority, so playback and conversions
-  carry on; a long all-camera export can take about as long as the footage.
+- Rendering uses the GPU's H.264 encoder when there is one (NVIDIA, Intel,
+  or AMD through VA-API): several times faster than the CPU, which stays
+  free for playback and conversions. Without one it uses the CPU at a lower
+  priority, and a long all-camera export can take about as long as the
+  footage. A GPU that fails on an export renders it again on the CPU, and
+  `EXPORT_ENCODER=cpu` always uses the CPU. The job says when the GPU made it.
 - The finished file is kept on the server for **a day** (the 10 newest at
   most), in `data/exports`, then removed. Download it before then.
 - No sound: Tesla's cameras record none.

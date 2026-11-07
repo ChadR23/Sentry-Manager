@@ -19,6 +19,7 @@ All optional; put them in `.env` next to `docker-compose.yml`.
 | `TRUSTED_HOSTS` | | If set, refuse requests for any other host name |
 | `SENTRY_TAG` | `latest` | Which image to follow |
 | `UPDATE_CHECK` | `on` | `off` = don't check for newer images |
+| `EXPORT_ENCODER` | `auto` | `cpu` = render exports on the CPU even when a GPU could |
 | `EXTRA_ROOTS` | | More container folders the converter may write to (`:`-separated) |
 | `SCAN_INTERVAL_MINUTES` | `15` | How often every vehicle is re-scanned |
 | `PORT`, `DATA_PATH`, `LOG_LEVEL` | `9000`, `/data`, `info` | |

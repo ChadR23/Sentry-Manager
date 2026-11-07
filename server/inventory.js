@@ -235,7 +235,11 @@ class Inventory {
     return this.state.get(vehicleId) || null;
   }
 
-  scan(vehicleId) {
+  // `light`: the background rescan (index.js, every 15 minutes) reuses what
+  // the last scan knew of unchanged folders (scanner.js); every sixth, about
+  // every 90 minutes, and every other scan (Refresh, a policy, a restore)
+  // looks at every file.
+  scan(vehicleId, { light = false } = {}) {
     if (this.scans.has(vehicleId)) return this.scans.get(vehicleId);
     const p = (async () => {
       const vehicle = this.vehicles.get(vehicleId);
@@ -245,9 +249,13 @@ class Inventory {
       const prev = this.state.get(vehicleId);
       this.state.set(vehicleId, { ...(prev || {}), scanning: true });
       try {
-        const res = await scanFootage(this.vehicles.rootOf(vehicle));
+        const lights = prev?.lightScans || 0;
+        const reuse = light && prev?.files && prev?.dirs && lights < 5;
+        const res = await scanFootage(this.vehicles.rootOf(vehicle), reuse ? { previous: { files: prev.files, dirs: prev.dirs } } : {});
         const entry = {
           files: res.files,
+          dirs: res.dirs,
+          lightScans: reuse ? lights + 1 : 0,
           scannedAt: res.scannedAt,
           durationMs: res.durationMs,
           errors: res.errors.slice(0, 20),
@@ -256,7 +264,7 @@ class Inventory {
         };
         entry.recordings = buildRecordings(res.files, { vehicleId, protectedRels: this.db.protectedSet(vehicleId) });
         this.state.set(vehicleId, entry);
-        this.log.info(`${vehicle.name}: ${entry.recordings.length} recordings, ${res.files.size} files (${(res.durationMs / 1000).toFixed(1)}s)`);
+        this.log.info(`${vehicle.name}: ${entry.recordings.length} recordings, ${res.files.size} files (${(res.durationMs / 1000).toFixed(1)}s${reuse ? `, ${res.reused} unchanged` : ''})`);
         this.probeCodecs(vehicleId);
         this.onScanned(vehicleId);
         return entry;

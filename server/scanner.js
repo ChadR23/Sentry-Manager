@@ -38,21 +38,39 @@ function limiter(max) {
  * Walk the footage root. Network shares make every stat a round trip, so
  * directory reads and stats run in parallel (bounded by `concurrency`).
  */
-async function scanFootage(root, { concurrency = 16, onProgress } = {}) {
+//
+// A light rescan (`previous`, from the last scan): a folder whose modified
+// time is unchanged keeps what it knew of its files, except files changed in
+// the last two hours (one still being copied grows without touching its
+// folder). Adding, removing or replacing a file (the converter swapping a clip
+// in) changes the folder's time, so such a folder is looked at in full. On a
+// quiet share that is one call per folder instead of one per file (48,000
+// files: 48,000 round trips to the NAS every 15 minutes).
+const RECENT_MS = 2 * 3600 * 1000;
+async function scanFootage(root, { concurrency = 16, onProgress, previous = null } = {}) {
   const started = Date.now();
   const limit = limiter(concurrency);
   const files = new Map();
+  const dirs = new Map(); // relDir -> modified time
   const errors = [];
   let seen = 0;
+  let reused = 0;
 
   async function visit(relDir) {
     let entries;
+    let dirMtime = null;
     try {
-      entries = await limit(() => fsp.readdir(path.join(root, relDir), { withFileTypes: true }));
+      [entries, dirMtime] = await Promise.all([
+        limit(() => fsp.readdir(path.join(root, relDir), { withFileTypes: true })),
+        // (every scan notes it, for the next light one)
+        limit(() => fsp.stat(path.join(root, relDir))).then((st) => st.mtimeMs, () => null)
+      ]);
     } catch (err) {
       errors.push({ rel: relDir || '.', message: err.message, code: err.code });
       return;
     }
+    if (dirMtime !== null) dirs.set(relDir, dirMtime);
+    const unchanged = previous && dirMtime !== null && previous.dirs?.get(relDir) === dirMtime;
     const tasks = [];
     for (const ent of entries) {
       const rel = relDir ? `${relDir}/${ent.name}` : ent.name;
@@ -65,6 +83,13 @@ async function scanFootage(root, { concurrency = 16, onProgress } = {}) {
       if (isConverterArtifact(ent.name)) continue;
       const info = classify(rel);
       if (!info) continue;
+      const known = unchanged ? previous.files.get(rel) : null;
+      if (known && started - known.mtimeMs > RECENT_MS) {
+        files.set(rel, known);
+        seen++;
+        reused++;
+        continue;
+      }
       tasks.push(limit(() => fsp.stat(path.join(root, rel))).then(
         (st) => {
           files.set(rel, {
@@ -86,7 +111,7 @@ async function scanFootage(root, { concurrency = 16, onProgress } = {}) {
   }
 
   await visit('');
-  return { files, errors, scannedAt: Date.now(), durationMs: Date.now() - started };
+  return { files, dirs, errors, reused, light: Boolean(previous), scannedAt: Date.now(), durationMs: Date.now() - started };
 }
 
 module.exports = { scanFootage, limiter };

@@ -19,8 +19,30 @@
 // settings (/api/studio/settings), so a choice made in one interface holds
 // in the others. Light or dark follows the pack's look (`dark`).
 
-import { createMap, htmlMarker, drawRoute, boundsOf, fitTo, centreOn, toLngLat, toRasterZoom } from '/studio/scripts/ui/mapGl.js';
 import '/shared/mapProviders.js';
+
+// MapLibre (1.6 MB, about 400 KB compressed) is loaded only when the map is
+// needed: a route with GPS has come and the map is on screen (or nearly). A
+// clip without GPS, a map scrolled away on a phone, or a page left before
+// then never loads it.
+let createMap, htmlMarker, drawRoute, boundsOf, fitTo, centreOn, toLngLat, toRasterZoom;
+let mapLib = null;
+function loadMapLib() {
+  if (!mapLib) {
+    // MapLibre's own stylesheet (markers, controls), as the built-in Viewer has
+    if (!document.getElementById('vm-lib-css')) {
+      const link = document.createElement('link');
+      link.id = 'vm-lib-css';
+      link.rel = 'stylesheet';
+      link.href = '/studio/vendor/maplibre/maplibre-gl.css';
+      document.head.appendChild(link);
+    }
+    mapLib = import('/studio/scripts/ui/mapGl.js').then((m) => {
+      ({ createMap, htmlMarker, drawRoute, boundsOf, fitTo, centreOn, toLngLat, toRasterZoom } = m);
+    });
+  }
+  return mapLib;
+}
 
 const P = () => self.MapProviders;
 const AUTOPILOT = '#22c55e';
@@ -52,11 +74,6 @@ const CSS = `
 
 function addCss() {
   if (document.getElementById('vm-css')) return;
-  // MapLibre's own stylesheet (markers, controls), as the built-in Viewer has
-  const link = document.createElement('link');
-  link.rel = 'stylesheet';
-  link.href = '/studio/vendor/maplibre/maplibre-gl.css';
-  document.head.appendChild(link);
   const style = document.createElement('style');
   style.id = 'vm-css';
   style.textContent = CSS;
@@ -96,6 +113,53 @@ const hasFix = (r) => r && fin(r.lat) && fin(r.lon) && Math.abs(r.lat) <= 90 && 
 export function createViewerMap(container, opts = {}) {
   addCss();
   container.classList.add('vm');
+  const noGpsText = opts.noGps || 'No GPS in this clip';
+  container.innerHTML = '<div class="vm-note" hidden></div>';
+  const note = container.querySelector('.vm-note');
+  // what the map is to show, kept until it is there
+  const routes = new Map();
+  let pos = null;
+  let dark = !!opts.dark;
+  let real = null;
+  let dead = false;
+  let onScreen = typeof IntersectionObserver !== 'function';
+  const hasGps = () => hasFix(pos) || [...routes.values()].some((records) => (records || []).some(hasFix));
+  const io = onScreen ? null : new IntersectionObserver((entries) => {
+    onScreen = entries.some((e) => e.isIntersecting);
+    maybeLoad();
+  }, { rootMargin: '300px' });
+  io?.observe(container);
+  function maybeLoad() {
+    note.textContent = noGpsText;
+    note.hidden = hasGps() || routes.size === 0;
+    if (real || dead || !onScreen || !hasGps()) return;
+    loadMapLib().then(() => {
+      if (real || dead) return;
+      io?.disconnect();
+      real = buildViewerMap(container, { ...opts, dark });
+      for (const [key, records] of routes) real.addRoute(key, records);
+      if (pos) real.setPosition(pos);
+    }).catch(() => {
+      note.textContent = 'The map could not be loaded.';
+      note.hidden = false;
+    });
+  }
+  return {
+    addRoute(key, records) { if (real) real.addRoute(key, records); else { routes.set(key, records); maybeLoad(); } },
+    clearRoute() { if (real) real.clearRoute(); else { routes.clear(); pos = null; maybeLoad(); } },
+    setPosition(r) { if (real) real.setPosition(r); else { pos = r; if (hasFix(r)) maybeLoad(); } },
+    setDark(on) { dark = !!on; real?.setDark(on); },
+    resize() { real?.resize(); },
+    destroy() {
+      dead = true;
+      io?.disconnect();
+      if (real) real.destroy(); else container.innerHTML = '';
+    }
+  };
+}
+
+// The map itself, once MapLibre is loaded (see createViewerMap).
+function buildViewerMap(container, opts = {}) {
   container.innerHTML = `<div class="vm-canvas"></div>
     <div class="vm-note" hidden></div>
     <div class="vm-btns">

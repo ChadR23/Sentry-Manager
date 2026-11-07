@@ -139,7 +139,9 @@ for (const [pack, mod] of Object.entries(PACKS)) {
 
 test('viewerMap: the packs\' map module uses the Viewer\'s own MapLibre helpers and maps', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'web', 'viewerMap.js'), 'utf8');
-  assert.match(src, /from '\/studio\/scripts\/ui\/mapGl\.js'/);
+  // loaded when the map is needed (a route with GPS, on screen), not with the page
+  assert.match(src, /import\('\/studio\/scripts\/ui\/mapGl\.js'\)/);
+  assert.doesNotMatch(src, /from '\/studio\/scripts\/ui\/mapGl\.js'/, 'not with the page');
   assert.match(src, /import '\/shared\/mapProviders\.js'/);
   assert.match(src, /\/studio\/vendor\/maplibre\/maplibre-gl\.css/, 'and MapLibre\'s stylesheet');
   assert.match(src, /\/api\/studio\/settings/, 'the street / satellite choice is the Viewer\'s setting');

@@ -153,9 +153,23 @@ function overlayAss({ clip, speeds, units, clock24, width, height, layout }) {
 }
 
 /** ffmpeg's arguments for one clip's part (run in the work folder). */
+// How each H.264 encoder is run: global options (before the inputs), the end
+// of the filter chain (the frame format it takes; VA-API uploads to the GPU)
+// and its own settings, at about the CPU's quality (CRF 23).
+const VAAPI_DEVICE = '/dev/dri/renderD128';
+const ENCODERS = {
+  libx264: { pre: [], tail: 'format=yuv420p', args: ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23'] },
+  h264_nvenc: { pre: [], tail: 'format=yuv420p', args: ['-c:v', 'h264_nvenc', '-preset', 'p4', '-rc', 'vbr', '-cq', '23', '-b:v', '0'] },
+  h264_qsv: { pre: [], tail: 'format=nv12', args: ['-c:v', 'h264_qsv', '-global_quality', '23'] },
+  h264_vaapi: { pre: ['-vaapi_device', VAAPI_DEVICE], tail: 'format=nv12,hwupload', args: ['-c:v', 'h264_vaapi', '-rc_mode', 'CQP', '-qp', '23'] }
+};
+// tried in this order on the first export; the first that works is used
+const GPU_ENCODERS = ['h264_nvenc', 'h264_qsv', 'h264_vaapi'];
+
 function partArgs({ clip, layout, assName, outName, encoder = 'libx264' }) {
   const dur = clip.to - clip.from;
-  const args = ['-hide_banner', '-nostdin', '-y', '-loglevel', 'error', '-progress', 'pipe:1', '-nostats'];
+  const enc = ENCODERS[encoder] || ENCODERS.libx264;
+  const args = ['-hide_banner', '-nostdin', '-y', '-loglevel', 'error', '-progress', 'pipe:1', '-nostats', ...enc.pre];
   const filters = [];
   const tiles = [];
   layout.cams.forEach((cam, i) => {
@@ -179,9 +193,9 @@ function partArgs({ clip, layout, assName, outName, encoder = 'libx264' }) {
     filters.push(`${tiles.join('')}xstack=inputs=${tiles.length}:layout=${pos}:fill=black[grid]`);
     last = 'grid';
   }
-  filters.push(`[${last}]subtitles=${assName},format=yuv420p[out]`);
+  filters.push(`[${last}]subtitles=${assName},${enc.tail}[out]`);
   args.push('-filter_complex', filters.join(';'), '-map', '[out]', '-t', dur.toFixed(3), '-an',
-    '-c:v', encoder, '-preset', 'veryfast', '-crf', '23', '-r', String(FPS), '-movflags', '+faststart', outName);
+    ...enc.args, '-r', String(FPS), '-movflags', '+faststart', outName);
   return args;
 }
 
@@ -199,8 +213,42 @@ function probeSize(ffprobe, file, spawn = realSpawn) {
   });
 }
 
-function createExporter({ dir, ffmpegPath = 'ffmpeg', ffprobePath = null, jobs, log = console, resolve, speedsFor = async () => null, clock24 = () => false, spawn = realSpawn, now = Date.now }) {
+function createExporter({ dir, ffmpegPath = 'ffmpeg', ffprobePath = null, jobs, log = console, resolve, speedsFor = async () => null, clock24 = () => false, spawn = realSpawn, now = Date.now,
+  gpu = process.env.EXPORT_ENCODER !== 'cpu', gpuEncoders = GPU_ENCODERS }) {
   const ffprobe = ffprobePath || (ffmpegPath.endsWith('ffmpeg') ? `${ffmpegPath.slice(0, -6)}ffprobe` : 'ffprobe');
+
+  // The GPU's H.264 encoder, found once: each is tried on a few frames of a
+  // still picture, and the first that works renders exports (several times
+  // faster than the CPU, which then stays free for playback and
+  // conversions). None, or EXPORT_ENCODER=cpu: libx264, as before.
+  let chosen = null;
+  function tryEncoder(name) {
+    const enc = ENCODERS[name];
+    if (!enc) return Promise.resolve(false);
+    return new Promise((ok) => {
+      let p;
+      try {
+        p = spawn(ffmpegPath, ['-hide_banner', '-nostdin', '-loglevel', 'error', ...enc.pre, '-f', 'lavfi', '-i', `color=c=black:s=320x240:r=${FPS}`,
+          '-frames:v', '5', '-vf', enc.tail, ...enc.args, '-f', 'null', '-'], { stdio: ['ignore', 'ignore', 'ignore'] });
+      } catch {
+        ok(false);
+        return;
+      }
+      const timer = setTimeout(() => { try { p.kill('SIGKILL'); } catch { /* gone */ } }, 15000);
+      p.on('error', () => { clearTimeout(timer); ok(false); });
+      p.on('close', (code) => { clearTimeout(timer); ok(code === 0); });
+    });
+  }
+  function encoderFor() {
+    if (!chosen) {
+      chosen = (async () => {
+        if (!gpu) return 'libx264';
+        for (const name of gpuEncoders) if (await tryEncoder(name)) { log.info?.(`Exports render on the GPU (${name})`); return name; }
+        return 'libx264';
+      })();
+    }
+    return chosen;
+  }
   const all = new Map(); // id -> export
   const queue = [];
   let running = null;
@@ -237,6 +285,38 @@ function createExporter({ dir, ffmpegPath = 'ffmpeg', ffprobePath = null, jobs, 
     }
   }
 
+  // Each clip as one part (renamed part-<n>.mp4), with the given encoder.
+  async function renderParts(x, layout, work, encoder, notes) {
+    const parts = [];
+    for (let i = 0; i < x.clips.length; i++) {
+      if (x.cancel) throw new Error('cancelled');
+      const clip = x.clips[i];
+      // a damaged camera file (Tesla leaves one when the car powers down
+      // mid-clip) shows as a black tile; a clip with none that opens is
+      // left out, so one bad file never sinks the whole export
+      for (const cam of Object.keys(clip.files)) {
+        if (!layout.cams.includes(cam)) { delete clip.files[cam]; continue; }
+        if (!(await probeSize(ffprobe, clip.files[cam], spawn))) {
+          delete clip.files[cam];
+          notes.push(`${CAM_NAME[cam]} at ${wallAt(clip.key, 0, clock24()).slice(11)} could not be read (black)`);
+        }
+      }
+      if (!layout.cams.some((c) => clip.files[c])) {
+        notes.push(`the clip at ${wallAt(clip.key, 0, clock24()).slice(11)} could not be read (left out)`);
+        x.doneSeconds += clip.to - clip.from;
+        continue;
+      }
+      const front = clip.files.front || clip.files[layout.cams.find((c) => clip.files[c])] || Object.values(clip.files)[0];
+      const speeds = await speedsFor(front).catch(() => null);
+      const assName = `part-${i}.ass`;
+      const outName = `part-${i}.mp4`;
+      await fsp.writeFile(path.join(work, assName), overlayAss({ clip, speeds, units: x.units, clock24: clock24(), width: layout.w, height: layout.h, layout }));
+      await ffmpeg(x, partArgs({ clip, layout, assName, outName, encoder }), work, clip.to - clip.from);
+      parts.push(outName);
+    }
+    return parts;
+  }
+
   async function run(x) {
     running = x;
     x.state = 'running';
@@ -253,34 +333,22 @@ function createExporter({ dir, ffmpegPath = 'ffmpeg', ffprobePath = null, jobs, 
         const h = s ? Math.round((s.h * layout.w) / s.w) : 960;
         layout.h = h - (h % 2);
       }
-      const parts = [];
+      // on the GPU when there is one; a GPU that fails part way renders the
+      // whole export again on the CPU (parts of both could not be joined)
+      let encoder = await encoderFor();
+      let parts;
       const notes = [];
-      for (let i = 0; i < x.clips.length; i++) {
-        if (x.cancel) throw new Error('cancelled');
-        const clip = x.clips[i];
-        // a damaged camera file (Tesla leaves one when the car powers down
-        // mid-clip) shows as a black tile; a clip with none that opens is
-        // left out, so one bad file never sinks the whole export
-        for (const cam of Object.keys(clip.files)) {
-          if (!layout.cams.includes(cam)) { delete clip.files[cam]; continue; }
-          if (!(await probeSize(ffprobe, clip.files[cam], spawn))) {
-            delete clip.files[cam];
-            notes.push(`${CAM_NAME[cam]} at ${wallAt(clip.key, 0, clock24()).slice(11)} could not be read (black)`);
-          }
-        }
-        if (!layout.cams.some((c) => clip.files[c])) {
-          notes.push(`the clip at ${wallAt(clip.key, 0, clock24()).slice(11)} could not be read (left out)`);
-          x.doneSeconds += clip.to - clip.from;
-          continue;
-        }
-        const front = clip.files.front || clip.files[layout.cams.find((c) => clip.files[c])] || Object.values(clip.files)[0];
-        const speeds = await speedsFor(front).catch(() => null);
-        const assName = `part-${i}.ass`;
-        const outName = `part-${i}.mp4`;
-        await fsp.writeFile(path.join(work, assName), overlayAss({ clip, speeds, units: x.units, clock24: clock24(), width: layout.w, height: layout.h, layout }));
-        await ffmpeg(x, partArgs({ clip, layout, assName, outName }), work, clip.to - clip.from);
-        parts.push(outName);
+      try {
+        parts = await renderParts(x, layout, work, encoder, notes);
+      } catch (err) {
+        if (x.cancel || encoder === 'libx264') throw err;
+        log.warn(`Export ${x.id}: the GPU encoder (${encoder}) failed (${err.message}); rendering on the CPU`);
+        chosen = Promise.resolve('libx264');
+        encoder = 'libx264';
+        x.doneSeconds = 0;
+        parts = await renderParts(x, layout, work, encoder, notes);
       }
+      x.encoder = encoder;
       if (x.cancel) throw new Error('cancelled');
       if (!parts.length) throw new Error('none of these clips could be read');
       await fsp.writeFile(path.join(work, 'parts.txt'), parts.map((p) => `file '${p}'`).join('\n'));
@@ -292,7 +360,7 @@ function createExporter({ dir, ffmpegPath = 'ffmpeg', ffprobePath = null, jobs, 
       x.finishedAt = now();
       x.doneSeconds = x.seconds;
       x.notes = notes;
-      jobs.finish(x.jobId, { detail: `Ready to download: ${clockLen(x.seconds)}, ${mb(x.bytes)}. Kept for a day.${notes.length ? ` Note: ${notes.slice(0, 5).join('; ')}${notes.length > 5 ? `, and ${notes.length - 5} more` : ''}.` : ''}`, result: { export: x.id } });
+      jobs.finish(x.jobId, { detail: `Ready to download: ${clockLen(x.seconds)}, ${mb(x.bytes)}${x.encoder && x.encoder !== 'libx264' ? ', made on the GPU' : ''}. Kept for a day.${notes.length ? ` Note: ${notes.slice(0, 5).join('; ')}${notes.length > 5 ? `, and ${notes.length - 5} more` : ''}.` : ''}`, result: { export: x.id } });
     } catch (err) {
       x.finishedAt = now();
       if (x.cancel) {
@@ -414,4 +482,4 @@ function mb(b) {
   return b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(b / 1e6))} MB`;
 }
 
-module.exports = { createExporter, normalize, layoutFor, overlayAss, partArgs, wallAt, ExportError, MAX_SECONDS, MAX_CLIPS, CAM_NAME };
+module.exports = { createExporter, normalize, layoutFor, overlayAss, partArgs, wallAt, ExportError, MAX_SECONDS, MAX_CLIPS, CAM_NAME, GPU_ENCODERS };

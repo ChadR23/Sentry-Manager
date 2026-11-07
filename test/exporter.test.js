@@ -155,3 +155,55 @@ test('one export at a time: the next waits, and a waiting one can be cancelled',
     await fsp.rm(dir, { recursive: true, force: true });
   }
 });
+
+test('on the GPU: VA-API uploads the composed picture and is opened before the inputs; NVENC and QSV take their own settings', () => {
+  const c = clip('2026-11-03_10-00-00', 0, 10, ['front', 'back']);
+  const vaapi = partArgs({ clip: c, layout: layoutFor([c], 'grid'), assName: 'p.ass', outName: 'p.mp4', encoder: 'h264_vaapi' });
+  const s = vaapi.join(' ');
+  assert.ok(vaapi.indexOf('-vaapi_device') < vaapi.indexOf('-i'), 'the device comes before the inputs');
+  assert.match(s, /subtitles=p\.ass,format=nv12,hwupload\[out\]/);
+  assert.match(s, /-c:v h264_vaapi -rc_mode CQP -qp 23 -r 30/);
+  assert.match(partArgs({ clip: c, layout: layoutFor([c], 'grid'), assName: 'p.ass', outName: 'p.mp4', encoder: 'h264_nvenc' }).join(' '), /format=yuv420p\[out\].*-c:v h264_nvenc -preset p4 -rc vbr -cq 23 -b:v 0/);
+  assert.match(partArgs({ clip: c, layout: layoutFor([c], 'grid'), assName: 'p.ass', outName: 'p.mp4', encoder: 'h264_qsv' }).join(' '), /format=nv12\[out\].*-c:v h264_qsv -global_quality 23/);
+  // the CPU as it always was
+  assert.match(partArgs({ clip: c, layout: layoutFor([c], 'grid'), assName: 'p.ass', outName: 'p.mp4' }).join(' '), /format=yuv420p\[out\].*-c:v libx264 -preset veryfast -crf 23/);
+});
+
+test('a GPU that passes its trial but fails on the footage: the export is rendered again on the CPU and still done', { skip: !hasFfmpeg && 'needs ffmpeg', timeout: 120000 }, async () => {
+  const { spawn: realSpawn } = require('child_process');
+  const { EventEmitter } = require('events');
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sm-export-gpu-'));
+  try {
+    const a = path.join(dir, '2026-11-03_10-00-00-front.mp4');
+    await testClip(a, 3);
+    // the VA-API trial "works" here; the real encode then fails (no GPU in this machine)
+    const used = [];
+    const spawn = (cmd, args, opts) => {
+      if (args.includes('-f') && args.includes('null') && args.includes('h264_vaapi')) {
+        const p = new EventEmitter();
+        p.kill = () => {};
+        setImmediate(() => p.emit('close', 0));
+        return p;
+      }
+      const ci = args.indexOf('-c:v');
+      if (ci >= 0) used.push(args[ci + 1]);
+      return realSpawn(cmd, args, opts);
+    };
+    const jobs = fakeJobs();
+    const warnings = [];
+    const ex = createExporter({ dir: path.join(dir, 'exports'), jobs, log: { warn: (m) => warnings.push(m), info() {} }, resolve: async (p) => p, spawn, gpuEncoders: ['h264_vaapi'] });
+    const x = await ex.start({ vehicle: { id: 'car', name: 'Car' }, body: { clips: [{ key: '2026-11-03_10-00-00', files: { front: a }, from: 0, to: 3 }] } });
+    let s;
+    for (let i = 0; i < 300; i++) {
+      s = ex.get(x.id);
+      if (!['waiting', 'running'].includes(s.state)) break;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    assert.equal(s.state, 'done', s.error);
+    assert.deepEqual(used.filter((e) => e !== 'copy'), ['h264_vaapi', 'libx264'], 'tried on the GPU, then on the CPU');
+    assert.match(warnings.join('\n'), /GPU encoder \(h264_vaapi\) failed.*rendering on the CPU/);
+    assert.doesNotMatch(jobs.jobs.get(x.jobId).detail, /GPU/);
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});

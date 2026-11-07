@@ -5,6 +5,22 @@
 
 import { translations } from '../data/translations.js';
 
+// Sentry Six Manager sends English with the page and every other language as
+// null (server/studioTranslations.js): one is fetched when first shown. Until
+// then t() falls back to English, as for any missing key.
+async function ensureLanguage(lang) {
+    if (!(lang in translations)) return false;
+    if (translations[lang]) return true;
+    try {
+        const res = await fetch(`/studio/i18n/${encodeURIComponent(lang)}.json`, { credentials: 'same-origin' });
+        if (!res.ok) return false;
+        translations[lang] = await res.json();
+        return true;
+    } catch (_) {
+        return false;
+    }
+}
+
 // Current language (default: English)
 let currentLanguage = 'en';
 
@@ -22,7 +38,7 @@ export async function initI18n() {
         savedLang = await window.electronAPI.getSetting('language');
     }
     
-    if (savedLang && translations[savedLang]) {
+    if (savedLang && savedLang in translations) {
         // Use saved language preference
         currentLanguage = savedLang;
     } else {
@@ -35,6 +51,9 @@ export async function initI18n() {
         }
     }
     
+    // (a language other than English is fetched now)
+    if (!(await ensureLanguage(currentLanguage))) currentLanguage = 'en';
+
     // Apply language to HTML
     document.documentElement.lang = currentLanguage;
     
@@ -135,7 +154,7 @@ export function getCurrentLanguage() {
  * @param {string} lang - Language code
  */
 export async function setLanguage(lang) {
-    if (!translations[lang]) {
+    if (!(await ensureLanguage(lang))) {
         console.error(`Language not supported: ${lang}`);
         return;
     }

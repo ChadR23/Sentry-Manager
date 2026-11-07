@@ -56,7 +56,8 @@ const { createRealGuard, isInside } = require('./safePath');
 const { createLocalMounter, createIpcMounter } = require('./mounter');
 const { VERSIONS, DEFAULT_VERSION, securitySummary } = require('./mountSpec');
 const { TlsManager, localTlsSource, supervisorTlsSource, parseHostnames } = require('./tls');
-const { Router, HttpError, sendJson, readJson, readRaw, serveFile } = require('./http');
+const { Router, HttpError, sendJson, readJson, readRaw, serveFile, sendText } = require('./http');
+const { createStudioTranslations } = require('./studioTranslations');
 const { createUiPacks, originalPack, MAX_ZIP_BYTES: MAX_UI_PACK_BYTES } = require('./uiPacks');
 const { createSmbTester } = require('./smbTest');
 const { diskSpace } = require('../src/main/converter/fsSpace');
@@ -392,6 +393,7 @@ async function main() {
     }
   });
   let bridge = null;
+  const studioTranslations = createStudioTranslations(path.join(SRC, 'renderer/scripts/data/translations.js'));
   let clipThumbs = null;
   // the Viewer's scrub previews (see scrubFrames.js)
   const scrubFrames = createScrubFrames({ directory: path.join(DATA, 'scrub'), ffmpegPath: FFMPEG, spawn });
@@ -1497,6 +1499,17 @@ async function main() {
         res.writeHead(302, { Location: `${ENCODER_PAGE}${url.search}` });
         return res.end();
       }
+      // the built-in Viewer's translations: English with the page, any other
+      // language when it is first shown (server/studioTranslations.js)
+      if (p === '/studio/scripts/data/translations.js') {
+        const t = await studioTranslations.module();
+        return sendText(req, res, t.body, { type: 'text/javascript; charset=utf-8', etag: t.etag });
+      }
+      const lang = /^\/studio\/i18n\/([a-z]{2,3}(?:-[A-Za-z]{2,4})?)\.json$/.exec(p);
+      if (lang) {
+        const t = await studioTranslations.language(lang[1]);
+        return t ? sendText(req, res, t.body, { type: 'application/json; charset=utf-8', etag: t.etag }) : notFound(res);
+      }
       if (p.startsWith('/studio/')) {
         const rel = p.slice('/studio/'.length);
         const opts = rel === 'index.html' ? { transform: studioHtml } : rel === 'encoder.html' ? { transform: encoderHtml } : {};
@@ -1714,7 +1727,8 @@ async function main() {
     stats.tick();
   }, 60 * 1000).unref();
   setInterval(() => {
-    for (const v of vehicles.list()) if (vehicles.share(v.id)?.isHealthy()) inventory.scan(v.id).then(() => announce('inventory')).catch(() => {});
+    // (light: unchanged folders keep what they knew; see inventory.scan)
+    for (const v of vehicles.list()) if (vehicles.share(v.id)?.isHealthy()) inventory.scan(v.id, { light: true }).then(() => announce('inventory')).catch(() => {});
   }, Number(process.env.SCAN_INTERVAL_MINUTES || 15) * 60 * 1000).unref();
   // renew the HTTPS certificate before it expires (checked daily)
   if (tlsSource) {
