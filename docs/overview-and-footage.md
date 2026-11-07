@@ -94,13 +94,23 @@ rest, so a clip the Encoder skipped or could not convert is easy to find.
 
 - **Timeline preview**: hovering the timeline with a mouse (no click) shows
   the frame and time under the pointer above the bar; on a phone it shows
-  while your finger drags.
+  while your finger drags. The frame is the exact second a click goes to:
+  a clip with a keyframe every second (Tesla's own) is previewed from its
+  keyframes, a converted clip (fewer keyframes) from every frame.
 - **Moments**: the day's hard braking (at least 0.4 g of slowing in a
   second), swerves and sharp turns (at least 0.4 g sideways) and the three
   fastest stretches, strongest first. Picking one plays it from three
   seconds before. They come from the speed index, which reads a few KB of
   each front-camera clip in the background (speed, position and the car's
   measured acceleration); footage it has not read yet says so.
+- **The day in numbers**, above the moments: how far the car drove (from
+  its speed each second), how long it was moving and its top speed.
+- **Star this moment**: marks where the video is, with a note if you like
+  ("pothole", "near miss"). Starring also protects the recording, so
+  policies and *Delete through this date* leave it alone. The vehicle's
+  starred moments from every day are listed under the moments, in every
+  interface; picking one opens it, and × removes the star (the recording
+  stays protected until you unprotect it).
 - **Find clips at a place** (the pin on the map, every interface pack):
   tap a spot and every clip recorded within 150 m of it is listed, any day
   and any vehicle, newest first; picking one opens it at that moment. Only

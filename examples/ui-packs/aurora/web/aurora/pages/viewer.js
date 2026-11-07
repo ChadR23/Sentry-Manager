@@ -143,7 +143,9 @@ export default {
       onPick: (m) => {
         const i = clips.findIndex((c) => c.key === m.clip);
         if (i >= 0) loadClip(i, Math.max(0, m.second - 3), playing);
-      }
+      },
+      now: () => { const c = clips[index]; const m = vids[camsHere()[0]]; return c && m ? { clip: c.key, second: m.currentTime } : null; },
+      openAt: (x) => go(`#/viewer/${encodeURIComponent(x.vehicle)}/day/${encodeURIComponent(x.day)}?at=${encodeURIComponent(`${x.clip}~${x.second}`)}`)
     });
     // Export: mark a start and an end, see the clips, render one video on the server
     const xp = createExportPanel({

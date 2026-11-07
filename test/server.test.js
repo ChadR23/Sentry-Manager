@@ -988,3 +988,32 @@ test('pages link their scripts and styles under /v/<version>/: kept a year, a ne
     await fsp.rm(dir, { recursive: true, force: true });
   }
 });
+
+test('starred moments: kept on the server with a note, protect their recording, edited and removed; the day has a summary', async () => {
+  const dir = await tmp();
+  await makeFootage(path.join(dir, 'footage'));
+  const s = await startServer(dir);
+  try {
+    await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
+    await waitFor(async () => (await s.call('GET', '/api/vehicles')).data.vehicles[0].inventory);
+    const bad = await s.call('POST', '/api/stars', { vehicle: 'daily-driver', clip: 'nonsense', second: 3 });
+    assert.equal(bad.status, 400);
+    const made = await s.call('POST', '/api/stars', { vehicle: 'daily-driver', clip: '2020-01-01_08-01-00', second: 12.7, note: '  near miss\n at the light ' });
+    assert.equal(made.status, 200, JSON.stringify(made.data));
+    assert.deepEqual((({ day, clip, second, note }) => ({ day, clip, second, note }))(made.data.star), { day: '2020-01-01', clip: '2020-01-01_08-01-00', second: 12, note: 'near miss  at the light' });
+    assert.equal(made.data.protected, true);
+    const recs = (await s.call('GET', '/api/vehicles/daily-driver/recordings?date=2020-01-01')).data.recordings;
+    assert.ok(recs.find((r) => r.startKey <= '2020-01-01_08-01-00' && r.protected), 'its recording is protected');
+    const id = made.data.star.id;
+    assert.equal((await s.call('PATCH', `/api/stars/${id}`, { note: 'pothole' })).data.star.note, 'pothole');
+    assert.deepEqual((await s.call('GET', '/api/stars?vehicle=daily-driver')).data.stars.map((x) => x.note), ['pothole']);
+    assert.equal((await s.call('DELETE', `/api/stars/${id}`)).status, 200);
+    assert.deepEqual((await s.call('GET', '/api/stars')).data.stars, []);
+    assert.equal((await s.call('DELETE', `/api/stars/${id}`)).status, 404);
+    // no driving data in these clips: a summary of nothing
+    assert.deepEqual((await s.call('GET', '/api/vehicles/daily-driver/moments?date=2020-01-01')).data.summary, { distance: 0, driving: 0, top: 0 });
+  } finally {
+    await s.stop();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});

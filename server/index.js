@@ -426,7 +426,7 @@ async function main() {
   const studioTranslations = createStudioTranslations(path.join(SRC, 'renderer/scripts/data/translations.js'));
   let clipThumbs = null;
   // the Viewer's scrub previews (see scrubFrames.js)
-  const scrubFrames = createScrubFrames({ directory: path.join(DATA, 'scrub'), ffmpegPath: FFMPEG, spawn });
+  const scrubFrames = createScrubFrames({ directory: path.join(DATA, 'scrub'), ffmpegPath: FFMPEG, ffprobePath: FFPROBE, spawn });
   // the newest footage's previews, made ahead in the background (not while converting)
   const prepareDays = Number.parseInt(process.env.SCRUB_PREPARE_DAYS ?? '2', 10);
   scrubPrepare = createScrubPrepare({
@@ -1082,10 +1082,67 @@ async function main() {
     const root = vehicles.rootOf(v);
     const list = await speedIndex.moments(v.id, day);
     const idx = (await speedIndex.progress(v.id, [day]).catch(() => ({})))[day] || { clips: 0, indexed: 0 };
+    // the day in numbers, from the front camera's speed a second: how far
+    // (speed × 1 s), how long moving (over 0.5 m/s), how fast
+    let distance = 0;
+    let driving = 0;
+    let top = 0;
+    for (const sp of Object.values(await speedIndex.day(v.id, day))) {
+      for (const x of sp || []) {
+        if (!Number.isFinite(x)) continue;
+        distance += x;
+        if (x > 0.5) driving += 1;
+        if (x > top) top = x;
+      }
+    }
     return {
       moments: list.map((m) => ({ kind: m.kind, path: path.join(root, m.rel), clip: clipKeyOf(m.rel), second: m.second, value: m.value })),
-      clips: idx.clips, indexed: idx.indexed
+      clips: idx.clips, indexed: idx.indexed,
+      summary: { distance: Math.round(distance), driving, top: Math.round(top * 100) / 100 }
     };
+  });
+  // Starred moments: a moment marked with a note, kept on the server for
+  // every interface; starring one also protects its recording, so policies
+  // and Delete through this date leave it alone
+  const MAX_STARS = 2000;
+  const starList = () => (Array.isArray(db.get('stars', [])) ? db.get('stars', []) : []);
+  const cleanNote = (n) => String(n ?? '').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 200);
+  r.add('GET', '/api/stars', (req, res, { query }) => {
+    const vid = query.vehicle ? String(query.vehicle) : null;
+    const known = new Set(vehicles.list().map((v) => v.id));
+    return { stars: starList().filter((x) => known.has(x.vehicle) && (!vid || x.vehicle === vid)).sort((a, b) => `${b.clip}`.localeCompare(`${a.clip}`) || b.second - a.second) };
+  });
+  r.add('POST', '/api/stars', async (req, res, { body }) => {
+    const v = vehicleOr404(String(body?.vehicle || ''));
+    const clip = String(body?.clip || '');
+    const second = Math.floor(Number(body?.second));
+    if (!/^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$/.test(clip) || !Number.isFinite(second) || second < 0 || second > 7200) throw new HttpError(400, 'Give the clip and second to star.');
+    const list = starList();
+    if (list.length >= MAX_STARS) throw new HttpError(400, `There are ${MAX_STARS} starred moments already: remove some first.`);
+    const star = { id: crypto.randomBytes(6).toString('hex'), vehicle: v.id, day: clip.slice(0, 10), clip, second, note: cleanNote(body?.note), createdAt: new Date().toISOString() };
+    db.set('stars', [...list, star]);
+    // its recording is protected
+    const rec = (inventory.get(v.id)?.recordings || []).find((x) => x.files.some((rel) => rel.includes(clip)));
+    if (rec && !rec.protected) {
+      await bin.setProtected(v.id, rec.files, true);
+      inventory.rebuild(v.id);
+      announce('inventory');
+    }
+    return { star, protected: Boolean(rec) };
+  });
+  r.add('PATCH', '/api/stars/:id', (req, res, { params, body }) => {
+    const list = starList();
+    const star = list.find((x) => x.id === params.id);
+    if (!star) throw new HttpError(404, 'No such starred moment.');
+    star.note = cleanNote(body?.note);
+    db.set('stars', list);
+    return { star };
+  });
+  r.add('DELETE', '/api/stars/:id', (req, res, { params }) => {
+    const list = starList();
+    if (!list.some((x) => x.id === params.id)) throw new HttpError(404, 'No such starred moment.');
+    db.set('stars', list.filter((x) => x.id !== params.id));
+    return { ok: true };
   });
   // Search by place: every clip that passed near a point (speedIndex.near)
   r.add('GET', '/api/places/near', async (req, res, { query }) => {

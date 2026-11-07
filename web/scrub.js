@@ -55,7 +55,7 @@ function grid(path) {
     e.waiters.clear();
   };
   img.onerror = () => { e.failed = true; images.delete(path); };
-  img.src = `/api/scrub?path=${encodeURIComponent(path)}`;
+  img.src = `/api/scrub?v=2&path=${encodeURIComponent(path)}`; // v: previews made exact (server/scrubFrames.js)
   images.set(path, e);
   while (images.size > MAX_IMAGES) images.delete(images.keys().next().value);
   return e;
@@ -80,7 +80,16 @@ export function timeAfter(key, off) {
   const p2 = (n) => String(n).padStart(2, '0');
   return `${p2(Math.floor(at / 3600))}-${p2(Math.floor(at / 60) % 60)}-${p2(at % 60)}`;
 }
-export function attachTimelineTip(bar, at, { width = TIP_WIDTH } = {}) {
+export function attachTimelineTip(bar, at, { width = TIP_WIDTH, thumb = null } = {}) {
+  // a slider's knob centre travels the bar less its own width: the pointer
+  // is mapped the same way, so the preview is the second a click goes to
+  const knob = thumb ?? (bar.matches?.('input[type="range"]') ? 16 : 0);
+  const along = (x) => {
+    if (!knob) return x;
+    const r = bar.getBoundingClientRect();
+    const f = Math.max(0, Math.min(1, (x - r.left - knob / 2) / Math.max(1, r.width - knob)));
+    return r.left + f * r.width;
+  };
   if (!bar) return { destroy() {} };
   const tip = document.createElement('div');
   tip.className = 'sentry-tip';
@@ -121,7 +130,7 @@ export function attachTimelineTip(bar, at, { width = TIP_WIDTH } = {}) {
   }
 
   function showAt(x) {
-    const what = at(x);
+    const what = at(along(x));
     const path = what && pathOf(what.src);
     if (!what || !path) { hide(); return; }
     want = { path, t: what.t };

@@ -82,3 +82,40 @@ test('the cache stays bounded: the oldest grids go first', { skip: !hasFfmpeg &&
     await fsp.rm(dir, { recursive: true, force: true });
   }
 });
+
+test('each cell shows its own second, also when keyframes are far apart (converted footage)', { skip: !hasFfmpeg && 'needs ffmpeg', timeout: 120000 }, async (t) => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'scrub-sync-'));
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  // every second a colour of its own; a keyframe every second, then every 7 s
+  const colour = (s) => [(s * 37) % 256, (s * 91) % 256, (s * 53) % 256];
+  const make = (file, gop) => {
+    const r = spawnSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i',
+      "color=s=160x120:c=black:r=12:d=20,geq=r='mod(floor(T)*37\\,256)':g='mod(floor(T)*91\\,256)':b='mod(floor(T)*53\\,256)'",
+      '-c:v', 'libx264', '-g', String(gop), '-keyint_min', String(gop), '-sc_threshold', '0', '-pix_fmt', 'yuv420p', file]);
+    assert.equal(r.status, 0, String(r.stderr));
+  };
+  const frames = createScrubFrames({ directory: path.join(dir, 'scrub'), ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe', spawn });
+  for (const gop of [12, 84]) {
+    const file = path.join(dir, `2026-01-01_10-00-0${gop === 12 ? 0 : 1}-front.mp4`);
+    make(file, gop);
+    const grid = await frames.get(file, { next: false });
+    const raw = spawnSync('ffmpeg', ['-v', 'error', '-i', grid, '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'], { maxBuffer: 64 * 1024 * 1024 }).stdout;
+    const [w, h] = size(grid).split(',').map(Number);
+    const cw = w / COLS;
+    const ch = h / ROWS;
+    const shown = [];
+    for (let n = 0; n < 20; n++) {
+      const x = Math.floor((n % COLS) * cw + cw / 2);
+      const y = Math.floor(Math.floor(n / COLS) * ch + ch / 2);
+      const p = raw.subarray((y * w + x) * 3, (y * w + x) * 3 + 3);
+      let best = 0;
+      let bestD = Infinity;
+      for (let s = 0; s < 20; s++) {
+        const d = colour(s).reduce((sum, c, i) => sum + (c - p[i]) ** 2, 0);
+        if (d < bestD) { bestD = d; best = s; }
+      }
+      shown.push(best);
+    }
+    assert.deepEqual(shown, Array.from({ length: 20 }, (_, n) => n), `a keyframe every ${gop / 12} s`);
+  }
+});

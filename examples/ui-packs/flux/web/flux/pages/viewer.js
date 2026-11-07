@@ -164,7 +164,9 @@ export default {
       onPick: (m) => {
         const i = st.segs.findIndex((s) => s.key === m.clip);
         if (i >= 0) seekGlobal(offsetOf(i) + Math.max(0, m.second - 3));
-      }
+      },
+      now: () => { const s = st.segs[st.idx]; const m = master(); return s && m ? { clip: s.key, second: m.currentTime } : null; },
+      openAt: (x) => go(`#/viewer?day=${encodeURIComponent(x.day)}&at=${encodeURIComponent(`${x.clip}~${x.second}`)}&autoplay=0`)
     });
     const xp = createExportPanel({
       vehicleId: () => v.id,

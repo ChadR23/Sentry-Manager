@@ -3814,6 +3814,11 @@ window.sentryViewer = {
         return true;
     },
     day: () => state.collection.active?.groups?.[0]?.timestampKey?.slice(0, 10) || null,
+    now() {
+        const g = state.collection.active?.groups?.[nativeVideo.currentSegmentIdx];
+        const m = nativeVideo.master;
+        return g?.timestampKey && m ? { clip: g.timestampKey, second: m.currentTime || 0 } : null;
+    },
     metric: () => useMetric
 };
 
@@ -3839,7 +3844,7 @@ import('/web/scrub.js').then((m) => {
         const label = at ? `${hh % 12 || 12}:${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')} ${hh < 12 ? 'AM' : 'PM'}`
             : `${Math.floor(localSec / 60)}:${String(Math.floor(localSec % 60)).padStart(2, '0')}`;
         return { src, t: localSec, label };
-    });
+    }, { thumb: 14 }); // the slider's knob (style.css .progress-bar)
 }).catch(() => { /* plain seeking */ });
 const scrubVideos = () => Object.values(videoBySlot).concat(videoMain).filter(Boolean);
 function scrubSegmentAt(targetSec) {

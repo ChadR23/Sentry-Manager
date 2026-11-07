@@ -451,7 +451,15 @@
         browser.append(box);
         const moments = createMoments(list, {
           speedUnit: () => (window.sentryViewer?.metric?.() ? 'kmh' : 'mph'),
-          onPick: (m) => window.sentryViewer?.seekTo(m.clip, Math.max(0, m.second - 3))
+          onPick: (m) => window.sentryViewer?.seekTo(m.clip, Math.max(0, m.second - 3)),
+          now: () => window.sentryViewer?.now?.() || null,
+          // a starred moment of another day: this page again, on that day
+          openAt: (x) => {
+            const q = new URLSearchParams(location.search);
+            q.set('date', x.day);
+            q.set('at', `${x.clip}~${x.second}`);
+            location.search = q.toString();
+          }
         });
         let shown = null;
         const follow = () => {

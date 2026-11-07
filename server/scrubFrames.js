@@ -3,9 +3,12 @@
 // Scrub previews: one small frame for every second of a clip (one camera),
 // in a single JPEG grid. While the timeline is dragged the Viewer shows
 // these at once instead of waiting for the video to seek; when it is let go
-// the video takes over. Made from the clip's keyframes only (Tesla writes one
-// about every second, and decoding only those is quick), the first time a
-// clip is opened, and cached on the data volume by the clip's path, size and
+// the video takes over. Made from the clip's keyframes only when it has one
+// at least every 1.1 s (Tesla's own clips: decoding only those takes a
+// quarter of a second); a clip with fewer (converted footage: one every 2 s,
+// or every ~7 s before that) has every frame decoded, about 3 s a minute of
+// footage, as keyframes alone showed a second up to 6 s early. Made the
+// first time a clip is opened, and cached on the data volume by the clip's path, size and
 // modification time, so a changed clip never shows stale frames. Making one
 // also prepares the next clip of the same camera in the background, and the
 // newest footage is prepared ahead of time (server/scrubPrepare.js).
@@ -27,6 +30,7 @@ function createScrubFrames(options = {}) {
   const fs = options.fs || nodeFs.promises;
   const pathApi = options.pathApi || nodePath;
   const { directory, ffmpegPath, spawn } = options;
+  const ffprobePath = options.ffprobePath || null;
   if (typeof directory !== 'string' || !ffmpegPath || typeof spawn !== 'function') {
     throw new TypeError('directory, ffmpegPath and spawn are required');
   }
@@ -56,6 +60,40 @@ function createScrubFrames(options = {}) {
     });
   }
 
+  // The longest gap between the clip's keyframes, in seconds (Infinity when
+  // unknown): read from the packets' flags, nothing is decoded.
+  function keyframeGap(videoPath) {
+    if (!ffprobePath) return Promise.resolve(Infinity);
+    return new Promise((resolve) => {
+      let child;
+      try {
+        child = spawn(ffprobePath, ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'packet=pts_time,flags', '-of', 'csv=p=0', '-protocol_whitelist', 'file', videoPath],
+          { shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+      } catch (_) {
+        resolve(Infinity);
+        return;
+      }
+      let last = null;
+      let gap = 0;
+      let rest = '';
+      const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch (_) { /* gone */ } }, 20_000);
+      child.stdout.on('data', (chunk) => {
+        const lines = (rest + chunk).split('\n');
+        rest = lines.pop();
+        for (const line of lines) {
+          const [t, flags] = line.split(',');
+          if (!flags || !flags.includes('K')) continue;
+          const at = Number(t);
+          if (!Number.isFinite(at)) continue;
+          if (last !== null) gap = Math.max(gap, at - last);
+          last = at;
+        }
+      });
+      child.once('error', () => { clearTimeout(timer); resolve(Infinity); });
+      child.once('close', (status) => { clearTimeout(timer); resolve(status === 0 && last !== null ? gap : Infinity); });
+    });
+  }
+
   async function prune() {
     try {
       const names = (await fs.readdir(directory)).filter((name) => name.endsWith('.jpg'));
@@ -77,7 +115,7 @@ function createScrubFrames(options = {}) {
     const stat = await fs.stat(videoPath);
     if (!stat.isFile() || stat.size === 0) return null;
     const key = crypto.createHash('sha1')
-      .update(`scrub1\0${pathApi.resolve(videoPath)}\0${stat.size}\0${Math.round(Number(stat.mtimeMs))}`)
+      .update(`scrub2\0${pathApi.resolve(videoPath)}\0${stat.size}\0${Math.round(Number(stat.mtimeMs))}`)
       .digest('hex');
     return pathApi.join(directory, `${key}.jpg`);
   }
@@ -89,11 +127,13 @@ function createScrubFrames(options = {}) {
   async function generate(videoPath, target) {
     const temporary = `${target}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp.jpg`;
     try {
-      // keyframes only, one frame per second of the clip (fps=1 repeats the
-      // last keyframe where a second has none), laid out in the grid
+      // one frame per second of the clip, laid out in the grid: from the
+      // keyframes alone when there is one every second or so, else from
+      // every frame (deblocking skipped: nothing to see at this size)
+      const quick = (await keyframeGap(videoPath)) <= 1.1;
       const status = await run(['-nostdin', '-hide_banner', '-loglevel', 'error',
-        '-skip_frame', 'nokey', '-threads', '2', '-protocol_whitelist', 'file', '-i', videoPath,
-        '-an', '-sn', '-dn', '-vf', `fps=1,scale=${FRAME_WIDTH}:-2,setsar=1,tile=${COLS}x${ROWS}`,
+        ...(quick ? ['-skip_frame', 'nokey'] : ['-skip_loop_filter', 'all']), '-threads', '2', '-protocol_whitelist', 'file', '-i', videoPath,
+        '-an', '-sn', '-dn', '-vf', `fps=1:eof_action=pass,scale=${FRAME_WIDTH}:-2,setsar=1,tile=${COLS}x${ROWS}`,
         '-frames:v', '1', '-q:v', '6', '-y', temporary]);
       if (status !== 0 || !(await exists(temporary))) return null;
       await fs.rename(temporary, target);

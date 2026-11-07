@@ -203,7 +203,10 @@ async function player(ctx, v, day, recId) {
       if (i >= 0) { pendingSeek = Math.max(0, m.second - 3); load(i, st.playing); seekWhenReady(); return; }
       const r = recOf(m.clip);
       if (r) go(`#/viewer/${enc(v.id)}/${enc(r.id)}?day=${enc(rec.day)}&at=${enc(`${m.clip}~${m.second}`)}`);
-    }
+    },
+    // the clip's key from its start (2026-11-06 09:01:00 -> 2026-11-06_09-01-00)
+    now: () => { const s = seg(); const m = master(); return s && m ? { clip: s.ts.replace(' ', '_').replace(/:/g, '-'), second: m.currentTime } : null; },
+    openAt: (x) => go(`#/viewer/${enc(x.vehicle)}?day=${enc(x.day)}&at=${enc(`${x.clip}~${x.second}`)}`)
   });
   ctx.cleanup(() => moments.destroy());
   // a seek asked for before the clip has loaded

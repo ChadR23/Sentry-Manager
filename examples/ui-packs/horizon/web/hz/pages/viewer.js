@@ -151,7 +151,9 @@ export default {
       onPick: (m) => {
         const i = st.clips.findIndex((c) => c.key === m.clip);
         if (i >= 0) seekAll(offset(i) + Math.max(0, m.second - 3));
-      }
+      },
+      now: () => { const c = st.clips[st.i]; const m = master(); return c && m ? { clip: c.key, second: m.currentTime } : null; },
+      openAt: (x) => go(`#/viewer?day=${encodeURIComponent(x.day)}&at=${encodeURIComponent(`${x.clip}~${x.second}`)}&autoplay=0`)
     });
 
     // ---------- playlist ----------
