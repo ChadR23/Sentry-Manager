@@ -5,7 +5,7 @@ import { h, ico, api, send, car, toast, local, ok, dayName, words, mmss, wall, C
 import { load as loadTel, at as telAt, rate as telRate } from '../telemetry.js';
 import { createViewerMap } from '/web/viewerMap.js';
 import { createExportPanel } from '/web/exportPanel.js';
-import { createScrubber, attachTimelineTip } from '/web/scrub.js';
+import { createScrubber, attachTimelineTip, timeAfter } from '/web/scrub.js';
 import { syncTo } from '/web/camSync.js';
 
 const FILE_RE = /(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})-([a-z0-9_]+)\.mp4$/i;
@@ -352,10 +352,8 @@ export default {
         const d = lenOf(c);
         if (sec < acc + d || k === st.clips.length - 1) {
           const off = Math.max(0, Math.min(d - 0.05, sec - acc));
-          const m = /(\d{2})-(\d{2})-(\d{2})$/.exec(String(c.key || ''));
-          const at = m ? (Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]) + Math.floor(off)) % 86400 : null;
-          const p2 = (n) => String(n).padStart(2, '0');
-          const label = at === null ? mmss(off) : wall(`${p2(Math.floor(at / 3600))}-${p2(Math.floor(at / 60) % 60)}-${p2(at % 60)}`);
+          const at = timeAfter(c.key, off);
+          const label = at ? wall(at) : mmss(off);
           const src = c.files[st.main] || c.files.front || Object.values(c.files)[0];
           return src ? { src, t: off, label } : null;
         }

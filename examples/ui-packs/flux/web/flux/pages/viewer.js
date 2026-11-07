@@ -4,7 +4,7 @@ import { esc, api, current, icon, toast, store, fin, clock, wall, wallDay, dayTi
 import { telemetryFor, recordAt, fpsOf } from '../telemetry.js';
 import { createViewerMap } from '/web/viewerMap.js';
 import { createExportPanel } from '/web/exportPanel.js';
-import { createScrubber } from '/web/scrub.js';
+import { createScrubber, attachTimelineTip, timeAfter } from '/web/scrub.js';
 import { syncTo } from '/web/camSync.js';
 import { TimeChart, C } from '../charts.js';
 import { split, seg, wireSeg, empty } from '../ui.js';
@@ -293,17 +293,29 @@ export default {
       tl.setPointerCapture(e.pointerId);
       scrubAt(posAt(e));
     });
-    tl.addEventListener('pointermove', (e) => {
-      const sec = posAt(e);
-      const hover = $('#vw-tl-hover');
-      hover.hidden = false;
-      hover.textContent = clock(sec);
-      hover.style.left = `${(sec / (total() || 1)) * 100}%`;
-      if (scrubbing) scrubAt(sec);
-    });
+    tl.addEventListener('pointermove', (e) => { if (scrubbing) scrubAt(posAt(e)); });
     tl.addEventListener('pointerup', scrubEnd);
     tl.addEventListener('pointercancel', scrubEnd);
-    tl.addEventListener('pointerleave', () => { $('#vw-tl-hover').hidden = true; });
+    // the frame and time under the pointer, above the bar (hover with a
+    // mouse, while dragging on a phone); it carries the time the small
+    // hover label used to show
+    const tip = attachTimelineTip(tl, (x) => {
+      const r = tl.getBoundingClientRect();
+      const sec = Math.max(0, Math.min(1, (x - r.left) / r.width)) * total();
+      let acc = 0;
+      for (let k = 0; k < st.segs.length; k++) {
+        const s = st.segs[k];
+        const d = durOf(s);
+        if (sec < acc + d || k === st.segs.length - 1) {
+          const off = Math.max(0, Math.min(d - 0.05, sec - acc));
+          const at = timeAfter(s.key, off);
+          const src = s.files[st.focus] || s.files.front || Object.values(s.files)[0];
+          return src ? { src, t: off, label: at ? wall(at) : clock(sec) } : null;
+        }
+        acc += d;
+      }
+      return null;
+    });
     tl.addEventListener('keydown', (e) => {
       const m = master();
       if (!m) return;
@@ -682,6 +694,7 @@ export default {
     return {
       unmount() {
         alive = false;
+        tip.destroy();
         cancelAnimationFrame(raf);
         chart.destroy();
         map.destroy();

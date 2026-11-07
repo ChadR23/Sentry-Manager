@@ -70,6 +70,16 @@ function grid(path) {
 //   const tip = attachTimelineTip(timelineEl, (x) => ({ src, t, label }));
 //   tip.destroy();
 const TIP_WIDTH = 176;
+
+// The time of day `off` seconds into a clip named by its start
+// (…_HH-MM-SS), as "HH-MM-SS" for an interface's own clock format, or null.
+export function timeAfter(key, off) {
+  const m = /(\d{2})-(\d{2})-(\d{2})(?:-[a-z_]+)?(?:\.mp4)?$/i.exec(String(key || ''));
+  if (!m) return null;
+  const at = (Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]) + Math.floor(Math.max(0, off))) % 86400;
+  const p2 = (n) => String(n).padStart(2, '0');
+  return `${p2(Math.floor(at / 3600))}-${p2(Math.floor(at / 60) % 60)}-${p2(at % 60)}`;
+}
 export function attachTimelineTip(bar, at, { width = TIP_WIDTH } = {}) {
   if (!bar) return { destroy() {} };
   const tip = document.createElement('div');

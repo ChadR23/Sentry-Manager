@@ -9,7 +9,7 @@ import { thumbUrl, moveToBin, setProtected } from './footage.js';
 import { decodeTelemetry, at } from '../telemetry.js';
 import { createViewerMap } from '/web/viewerMap.js';
 import { createExportPanel } from '/web/exportPanel.js';
-import { createScrubber } from '/web/scrub.js';
+import { createScrubber, attachTimelineTip } from '/web/scrub.js';
 import { syncTo } from '/web/camSync.js';
 
 // laid out like the car: pillars and front on top, repeaters and back below
@@ -456,6 +456,17 @@ async function player(ctx, v, day, recId) {
   };
   scrub.addEventListener('change', scrubDone);
   scrub.addEventListener('pointerup', scrubDone);
+  // the frame and time under the pointer, above the slider (hover with a
+  // mouse, while dragging on a phone)
+  const tip = attachTimelineTip(scrub, (x) => {
+    const s = seg();
+    if (!s) return null;
+    const r = scrub.getBoundingClientRect();
+    const t = Math.max(0, Math.min(1, (x - r.left) / r.width)) * (Number(scrub.max) || 60);
+    const src = s.cams[st.focus] || s.cams.front || Object.values(s.cams)[0];
+    return src ? { src, t, label: clockAt(s.ts, t) } : null;
+  });
+  ctx.cleanup(() => tip.destroy());
   view.querySelectorAll('.clip-dot').forEach((b) => { b.onclick = () => load(Number(b.dataset.seg), st.playing); });
   for (const [c, t] of tiles) t.addEventListener('click', () => setFocus(c));
   $('#full').onclick = () => {

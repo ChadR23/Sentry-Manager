@@ -8,7 +8,7 @@ import { $, $$, esc, icon, api, state, current, setVehicle, vehiclePicker, plura
 import * as tele from '../telemetry.js';
 import { createViewerMap } from '/web/viewerMap.js';
 import { createExportPanel } from '/web/exportPanel.js';
-import { createScrubber } from '/web/scrub.js';
+import { createScrubber, attachTimelineTip, timeAfter } from '/web/scrub.js';
 import { syncTo } from '/web/camSync.js';
 
 const CAMS = ['front', 'back', 'left_repeater', 'right_repeater', 'left_pillar', 'right_pillar'];
@@ -678,6 +678,21 @@ export default {
     scrub.addEventListener('pointerdown', (e) => { dragging = true; scrub.setPointerCapture(e.pointerId); scrubTo(e); });
     scrub.addEventListener('pointermove', (e) => { if (dragging) scrubTo(e); });
     scrub.addEventListener('pointerup', scrubEnd);
+    // the frame and time under the pointer, above the bar (hover with a
+    // mouse, while dragging on a phone)
+    const tip = attachTimelineTip(scrub, (x) => {
+      const r = q('#track').getBoundingClientRect();
+      const tot = totalDur();
+      if (!clips.length || !tot) return null;
+      const t = Math.max(0, Math.min(tot - 0.05, Math.max(0, Math.min(1, (x - r.left) / r.width)) * tot));
+      let i = 0;
+      while (i < clips.length - 1 && t >= offsetOf(i + 1)) i++;
+      const off = t - offsetOf(i);
+      const c = clips[i];
+      const src = c.cams[focus] || c.cams.front || Object.values(c.cams)[0];
+      const at = timeAfter(c.key, off);
+      return src ? { src, t: off, label: at ? wall(at) : clock(t) } : null;
+    });
     scrub.addEventListener('pointercancel', scrubEnd);
     scrub.addEventListener('keydown', (e) => {
       if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
@@ -808,7 +823,7 @@ export default {
     } catch (err) {
       q('#vw-title').innerHTML = `<span class="note bad">${esc(err.message)}</span>`;
     }
-    if (dead) { map.destroy(); xp.destroy(); return {}; }
+    if (dead) { tip.destroy(); map.destroy(); xp.destroy(); return {}; }
     drawList();
     // HW3 or HW4 from the footage itself, as the built-in Viewer does: only
     // HW4 cars record the pillar cameras, so without them the cockpit has no
@@ -835,6 +850,7 @@ export default {
     return {
       destroy() {
         dead = true;
+        tip.destroy();
         map.destroy();
         xp.destroy();
         document.removeEventListener('keydown', onKey);

@@ -3805,7 +3805,28 @@ progressBar.addEventListener('input', () => {
 
 // Sentry Six Manager: fast timeline dragging (web/scrub.js)
 let scrubber = null;
-import('/web/scrub.js').then((m) => { scrubber = m.createScrubber(); }).catch(() => { /* plain seeking */ });
+import('/web/scrub.js').then((m) => {
+    scrubber = m.createScrubber();
+    // the frame and time under the pointer, above the slider (hover with a
+    // mouse, while dragging on a phone), for a day's footage
+    m.attachTimelineTip(progressBar, (x) => {
+        if (!state.ui.nativeVideoMode || !state.collection.active) return null;
+        const totalSec = nativeVideo.cumulativeStarts[nativeVideo.cumulativeStarts.length - 1] || 0;
+        if (!totalSec) return null;
+        const r = progressBar.getBoundingClientRect();
+        const targetSec = Math.max(0, Math.min(1, (x - r.left) / r.width)) * totalSec;
+        const { segIdx, localSec } = scrubSegmentAt(targetSec);
+        const targets = getSegmentPlan(segIdx)?.targets || [];
+        const pick = targets.find(t => t.slot === 'main') || targets.find(t => /front/i.test(t.entry?.file?.path || '')) || targets[0];
+        const src = pick?.entry?.file?.path;
+        if (!src) return null;
+        const at = m.timeAfter(src, localSec);
+        const [hh, mm, ss] = (at || '').split('-').map(Number);
+        const label = at ? `${hh % 12 || 12}:${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')} ${hh < 12 ? 'AM' : 'PM'}`
+            : `${Math.floor(localSec / 60)}:${String(Math.floor(localSec % 60)).padStart(2, '0')}`;
+        return { src, t: localSec, label };
+    });
+}).catch(() => { /* plain seeking */ });
 const scrubVideos = () => Object.values(videoBySlot).concat(videoMain).filter(Boolean);
 function scrubSegmentAt(targetSec) {
     const cumStarts = nativeVideo.cumulativeStarts;
