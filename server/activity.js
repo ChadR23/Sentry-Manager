@@ -73,6 +73,9 @@ class Notifications extends EventEmitter {
   }
 
   raise(n) {
+    // Notification rules: a kind the owner turned off is not raised (it is still logged)
+    const muted = this.db.get?.('notify-muted', []) || [];
+    if (Array.isArray(muted) && muted.includes(n.kind)) return null;
     const id = this.db.notify(n);
     this.emit('changed', id);
     return id;

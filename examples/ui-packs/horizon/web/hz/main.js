@@ -15,8 +15,9 @@ export const PAGES = [
   { id: 'alerts', label: 'Notifications', short: 'Alerts', icon: 'bell' },
   { id: 'driving', label: 'Driving', icon: 'tacho' },
   { id: 'map', label: 'Map', icon: 'map' },
-  { id: 'health', label: 'Health', icon: 'shield' },
-  { id: 'account', label: 'Account', icon: 'lock' },
+  // (not in the top bar, which they would overflow: the tuner and Settings reach them)
+  { id: 'health', label: 'Health', icon: 'shield', bar: false },
+  { id: 'account', label: 'Account', icon: 'lock', bar: false },
   { id: 'settings', label: 'Settings', icon: 'gear' }
 ];
 const byId = Object.fromEntries(PAGES.map((p, i) => [p.id, { ...p, n: i + 1 }]));
@@ -25,7 +26,7 @@ const RUNNING = new Set(['discovering', 'waiting', 'staging', 'encoding', 'writi
 // ---------- navigation markup ----------
 const navItem = (p) => `<a href="#/${p.id}" data-route="${p.id}" class="nav-i"><span class="nav-ico">${ico(p.icon)}<span class="badge" data-badge="${p.id}" hidden></span></span><span class="nav-l">${h(p.short || p.label)}</span></a>`;
 qs('#nav-a').innerHTML = PAGES.slice(0, 5).map(navItem).join('');
-qs('#nav-b').innerHTML = PAGES.slice(5).map(navItem).join('');
+qs('#nav-b').innerHTML = PAGES.slice(5).filter((p) => p.bar !== false).map(navItem).join('');
 qs('#tuner').innerHTML = `<div class="tuner-track" id="tuner-track">${PAGES.map((p) => `<a href="#/${p.id}" data-route="${p.id}" class="tune">${ico(p.icon)}<span>${h(p.short || p.label)}</span><span class="badge" data-badge="${p.id}" hidden></span></a>`).join('')}</div>`;
 
 export function setBadge(id, text, tone = '') {

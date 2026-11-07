@@ -24,6 +24,7 @@ export default {
             <div class="keep">${CATS.map(([c, tone]) => `<label class="fld keep-i k-${tone || 'none'}"><span>${c}</span><span class="keep-in"><input class="in num" type="number" inputmode="numeric" min="1" max="3650" name="keep-${c}" value="${h(p.keepDays?.[c] ?? '')}" placeholder="forever" aria-label="Keep ${c} recordings for this many days"><span class="small faint">days</span></span></label>`).join('')}</div>
             <label class="fld" style="max-width:220px">Run at (server time)<input class="in num" type="time" name="runAt" value="${h(p.runAt || '03:30')}"></label>
             <label class="fld" style="max-width:320px">Empty the Recycle Bin after (days)<input class="in num" type="number" inputmode="numeric" min="1" max="365" name="binDays" value="${h(p.binDays ?? '')}" placeholder="never: you empty it"></label>
+            <label class="fld" style="max-width:320px">Keep the footage under (GB)<input class="in num" type="number" inputmode="decimal" min="1" step="any" name="maxGB" value="${h(p.maxGB ?? '')}" placeholder="no limit"></label>
             <div class="note ${pv.recordings ? 'org' : ''}">${pv.recordings ? `With the saved settings the next run moves <b>${count(pv.recordings, 'recording')}</b> (<b>${size(pv.bytes)}</b>) to the Recycle Bin.` : 'With the saved settings nothing would move right now.'}
               ${p.lastRunAt ? `<br><span class="small">Last run ${h(stamp(p.lastRunAt))}: ${p.lastResult?.error ? h(p.lastResult.error) : h(`${p.lastResult?.moved ?? 0} moved, ${p.lastResult?.skipped ?? 0} skipped`)}.</span>` : ''}</div>
             <div class="row"><button class="btn go" type="submit">Save policy</button><button class="btn" type="button" data-run>${ico('play')}Run now…</button></div>
@@ -34,7 +35,7 @@ export default {
         const id = form.dataset.v;
         const read = () => {
           const fd = new FormData(form);
-          return { enabled: fd.get('enabled') === 'on', runAt: fd.get('runAt') || '03:30', keepDays: Object.fromEntries(CATS.map(([c]) => [c, fd.get(`keep-${c}`) ? Number(fd.get(`keep-${c}`)) : null])), binDays: fd.get('binDays') ? Number(fd.get('binDays')) : null };
+          return { enabled: fd.get('enabled') === 'on', runAt: fd.get('runAt') || '03:30', keepDays: Object.fromEntries(CATS.map(([c]) => [c, fd.get(`keep-${c}`) ? Number(fd.get(`keep-${c}`)) : null])), binDays: fd.get('binDays') ? Number(fd.get('binDays')) : null, maxGB: fd.get('maxGB') ? Number(fd.get('maxGB')) : null };
         };
         form.onsubmit = (e) => {
           e.preventDefault();

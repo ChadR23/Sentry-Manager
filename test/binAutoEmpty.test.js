@@ -33,3 +33,20 @@ test('a policy run with binDays deletes only bin items older than that, and says
   assert.deepEqual(deleted, ['old']);
   assert.deepEqual((({ emptied, freed }) => ({ emptied, freed }))(store.get('policy:car').lastResult), { emptied: 1, freed: 100 });
 });
+
+test('maxGB: the oldest unprotected recordings past the limit move, after the age rules', () => {
+  const GB = 1024 ** 3;
+  const recs = [
+    { id: 'a', category: 'Recent', day: '2026-11-01', startKey: '2026-11-01_10-00-00', bytes: 3 * GB },
+    { id: 'b', category: 'Sentry', day: '2026-11-02', startKey: '2026-11-02_10-00-00', bytes: 3 * GB, protected: true },
+    { id: 'c', category: 'Recent', day: '2026-11-03', startKey: '2026-11-03_10-00-00', bytes: 3 * GB },
+    { id: 'd', category: 'Recent', day: '2026-11-04', startKey: '2026-11-04_10-00-00', bytes: 3 * GB }
+  ];
+  const store = new Map([['policy:car', { enabled: true, maxGB: 7, keepDays: { Recent: null, Sentry: null, Saved: null, Other: null } }]]);
+  const p = new Policies({ db: { get: (k) => store.get(k), set: (k, v) => store.set(k, v) }, vehicles: { get: () => ({ timezone: 'UTC' }) }, inventory: { get: () => ({ recordings: recs }) }, bin: {}, log: {} });
+  const out = p.preview('car');
+  assert.deepEqual(out.ids, ['a', 'c'], '12 GB down to 6 GB: the two oldest that are not protected');
+  assert.equal(out.overLimit, 2);
+  assert.throws(() => normalizePolicy({ maxGB: 0 }), /1 GB or more/);
+  assert.equal(normalizePolicy({ maxGB: '250' }).maxGB, 250);
+});

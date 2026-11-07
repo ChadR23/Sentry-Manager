@@ -77,3 +77,43 @@ masked. No shell on the server is needed. (Old links to Settings > Logs,
 **Clear** starts the list afresh without deleting anything: the earlier
 lines move to `logs/archive/` in the data folder, and *Cleared logs* under
 the list downloads them again.
+
+## Accounts and roles
+
+**Account** (a page in every interface) lists the accounts for admins, who can
+add more: **Admin** can do everything; **Watch only** can watch footage, use
+the Viewer and the maps, export videos and star moments, but cannot delete,
+convert or change settings, and cannot read the logs, snapshots or support
+bundle. There is always at least one admin. Adding, changing or removing an
+account asks for your password again.
+
+## Two-step sign-in
+
+Turned on per account on the Account page: an authenticator app on your phone
+(Google Authenticator, Microsoft Authenticator, 1Password, Bitwarden, Aegis…)
+gets a setup key (typed in, or opened in the app with the link on a phone),
+and from then on signing in asks for its 6-digit code after the password, on
+a page every interface uses. Each code works once. Ten one-time recovery
+codes are shown when it is turned on: keep them, for when the phone is lost.
+Nothing is sent anywhere: the app makes the codes itself from the key.
+
+## Signed-in devices
+
+The Account page lists where your account is signed in (browser and system,
+address, when it was last used), and signs out one of them, or everywhere
+but here.
+
+## Metrics (off by default)
+
+For your own monitoring (Prometheus, Grafana, Home Assistant): Health →
+*Metrics* turns on `/metrics` on the same address and port (no new port is
+opened) and makes a token, shown once. Without the token it answers 401; while
+off, 404. It gives numbers only (free space, footage size, shares up or down,
+the Recycle Bin, conversions, open alerts), no paths or names. *Turn off*
+ends it and the token.
+
+## Which alerts you get
+
+Health → *Which alerts you get*: turn off a kind of notification (shares,
+space, server hardware, startup checks, conversions, new versions); it is
+still written to the logs. The critical-update bar always shows.

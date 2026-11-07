@@ -873,6 +873,63 @@ async function main() {
     return undefined;
   });
 
+  // ---- metrics (Prometheus text): the numbers a dashboard needs, nothing private
+  const startedAt = Date.now();
+  function metricsText() {
+    const lines = [];
+    const metric = (name, help, type, rows) => {
+      lines.push(`# HELP ${name} ${help}`, `# TYPE ${name} ${type}`);
+      for (const [labels, value] of rows) if (Number.isFinite(value)) lines.push(`${name}${labels} ${value}`);
+    };
+    const lab = (v) => `{vehicle="${String(v.id).replace(/["\\\n]/g, '_')}"}`;
+    const list = vehicles.list();
+    const st = (v) => vehicles.share(v.id)?.status?.() || {};
+    metric('sentry_up', 'The app is running', 'gauge', [['', 1]]);
+    metric('sentry_uptime_seconds', 'Seconds since the app started', 'gauge', [['', Math.round((Date.now() - startedAt) / 1000)]]);
+    metric('sentry_process_resident_bytes', 'Memory the app uses', 'gauge', [['', process.memoryUsage().rss]]);
+    metric('sentry_share_up', 'The footage share can be read (1) or not (0)', 'gauge', list.map((v) => [lab(v), st(v).healthy ? 1 : 0]));
+    metric('sentry_share_writable', 'The footage share can be written', 'gauge', list.map((v) => [lab(v), st(v).writable ? 1 : 0]));
+    metric('sentry_share_free_bytes', 'Free space on the footage share', 'gauge', list.map((v) => [lab(v), st(v).freeBytes ?? NaN]));
+    metric('sentry_share_total_bytes', 'Size of the footage share', 'gauge', list.map((v) => [lab(v), st(v).totalBytes ?? NaN]));
+    metric('sentry_footage_bytes', 'Footage size', 'gauge', list.map((v) => [lab(v), inventory.totals(v.id)?.bytes ?? NaN]));
+    metric('sentry_recordings', 'Recordings', 'gauge', list.map((v) => [lab(v), inventory.totals(v.id)?.recordings ?? NaN]));
+    metric('sentry_recycle_bin_bytes', 'Bytes in the Recycle Bin', 'gauge', list.map((v) => [lab(v), bin.binBytes(v.id) ?? NaN]));
+    metric('sentry_saved_bytes', 'Space saved by conversions', 'gauge', list.map((v) => [lab(v), savings.forVehicle(v.id)?.bytes ?? NaN]));
+    metric('sentry_days_until_full', 'Days until the share is full at the last 14 days\' rate', 'gauge', list.map((v) => [lab(v), storageOf(v)?.daysLeft ?? NaN]));
+    metric('sentry_conversion_running', 'A conversion is running', 'gauge', [['', converterRunning() ? 1 : 0]]);
+    const open = db.notifications({ open: true, limit: 1000 });
+    metric('sentry_notifications_open', 'Open notifications', 'gauge', ['critical', 'warning', 'info'].map((l) => [`{level="${l}"}`, open.filter((n) => n.level === l).length]));
+    const last = health.last();
+    metric('sentry_health_checks_failing', 'Health checks failing at the last run', 'gauge', [['', last ? last.checks.filter((c) => c.status === 'bad').length : NaN]]);
+    return `${lines.join('\n')}\n`;
+  }
+  r.add('GET', '/api/metrics/settings', () => ({ enabled: Boolean(db.get('metrics', null)?.enabled) }));
+  r.add('POST', '/api/metrics/enable', (req, res, { user }) => {
+    requireConfirmed(req);
+    const token = crypto.randomBytes(24).toString('base64url');
+    db.set('metrics', { enabled: true, tokenHash: crypto.createHash('sha256').update(token).digest('hex'), at: Date.now() });
+    audit.warn(`Metrics turned on (new token): ${by(req, user)}`);
+    return { enabled: true, token };
+  });
+  r.add('POST', '/api/metrics/disable', (req, res, { user }) => {
+    requireConfirmed(req);
+    db.set('metrics', { enabled: false });
+    audit.warn(`Metrics turned off: ${by(req, user)}`);
+    return { enabled: false };
+  });
+  // Notification rules: which kinds of notification are raised
+  const NOTIFY_KINDS = ['share', 'storage', 'server', 'health', 'conversion', 'update'];
+  r.add('GET', '/api/notification-rules', () => {
+    const muted = db.get('notify-muted', []) || [];
+    return { rules: NOTIFY_KINDS.map((kind) => ({ kind, on: !muted.includes(kind) })) };
+  });
+  r.add('PUT', '/api/notification-rules', (req, res, { body, user }) => {
+    const muted = NOTIFY_KINDS.filter((k) => body?.rules?.[k] === false);
+    db.set('notify-muted', muted);
+    audit.info(`Notification rules: ${muted.length ? `off for ${muted.join(', ')}` : 'all on'}: ${by(req, user)}`);
+    return { rules: NOTIFY_KINDS.map((kind) => ({ kind, on: !muted.includes(kind) })) };
+  });
+
   // ---- Settings → Health: checks with what to do, the startup self-check,
   // database snapshots, log search by date and the support bundle
   const health = createHealth({
@@ -1823,6 +1880,20 @@ async function main() {
     const rawPath = url.pathname;
     try {
       securityHeaders(req, res, rawPath);
+      // Metrics for the owner's own monitoring (Prometheus): off unless turned
+      // on in Health, then only with the token made there (read-only numbers)
+      if (rawPath === '/metrics') {
+        const cfg = db.get('metrics', null);
+        if (!cfg?.enabled || !cfg.tokenHash) return sendJson(res, 404, { error: 'Not found' });
+        const given = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+        const ok = given && crypto.timingSafeEqual(Buffer.from(crypto.createHash('sha256').update(given).digest('hex')), Buffer.from(cfg.tokenHash));
+        if (!ok) {
+          res.writeHead(401, { 'Content-Type': 'text/plain', 'WWW-Authenticate': 'Bearer', 'Cache-Control': 'no-store' });
+          return res.end('Bearer token required');
+        }
+        res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4; charset=utf-8', 'Cache-Control': 'no-store' });
+        return res.end(metricsText());
+      }
       if (rawPath === '/healthz') {
         // readable cross-origin: the plain-HTTP page checks with it whether this device trusts the certificate
         res.writeHead(200, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store', 'Cross-Origin-Resource-Policy': 'cross-origin' });

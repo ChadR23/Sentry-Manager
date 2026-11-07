@@ -58,6 +58,12 @@ export function createHealthPage(el) {
     <section aria-labelledby="sh-f"><div class="sh-row"><h2 id="sh-f">Footage check</h2></div>
       <p class="sh-muted" style="margin:0">Finds clips that will not play: cut off when the car lost power, empty, or not video at all. Only a few bytes of each file are read; a check that a restart interrupts goes on where it was, and unchanged files are not read again.</p>
       <div data-integrity><p class="sh-muted">Loading…</p></div></section>
+    <section aria-labelledby="sh-r"><h2 id="sh-r">Which alerts you get</h2>
+      <p class="sh-muted" style="margin:0">Turn a kind off and it no longer makes a notification (it is still in the logs). The critical-update bar always shows.</p>
+      <div data-rules class="sh-row"></div></section>
+    <section aria-labelledby="sh-m"><h2 id="sh-m">Metrics for your own monitoring</h2>
+      <p class="sh-muted" style="margin:0">For Prometheus, Grafana or Home Assistant on your network: free space, footage size, shares up or down, conversions, open alerts. <b>Off unless you turn it on</b>; then <code>/metrics</code> on this same address answers only with the token made here (read-only numbers, no paths or names). No new port is opened.</p>
+      <div data-metrics></div></section>
     <section aria-labelledby="sh-s"><div class="sh-row"><h2 id="sh-s">Database snapshots</h2><button type="button" class="sh-btn" data-snap>Make one now</button></div>
       <p class="sh-muted" style="margin:0">A copy of the accounts, vehicles, settings, policies and starred moments, made every day; the newest 7 are kept in data/snapshots. Restoring one restarts the app; footage is not touched.</p>
       <div data-snaps></div></section>
@@ -186,6 +192,51 @@ export function createHealthPage(el) {
     drawIntegrity();
   });
   api('/api/vehicles').then((d) => { vehicles = d.vehicles || []; drawIntegrity(); }).catch(() => { $('[data-integrity]').innerHTML = '<p class="sh-muted">Could not load the vehicles.</p>'; });
+
+  // ---- notification rules
+  const RULES = { share: 'Footage share offline or read-only', storage: 'Share running out of space', server: 'Server hardware (temperatures, disks, memory)', health: 'Startup check failures', conversion: 'Conversions that fail', update: 'New versions' };
+  async function drawRules() {
+    let d;
+    try { d = await api('/api/notification-rules'); } catch (err) { $('[data-rules]').textContent = err.message; return; }
+    if (!alive) return;
+    $('[data-rules]').innerHTML = d.rules.map((r) => `<label class="sh-row" style="flex:1 1 260px"><input type="checkbox" data-rule="${esc(r.kind)}"${r.on ? ' checked' : ''}> ${esc(RULES[r.kind] || r.kind)}</label>`).join('');
+  }
+  el.addEventListener('change', async (e) => {
+    if (!e.target.matches('[data-rule]')) return;
+    const rules = Object.fromEntries([...el.querySelectorAll('[data-rule]')].map((x) => [x.dataset.rule, x.checked]));
+    try { await api('/api/notification-rules', { method: 'PUT', body: JSON.stringify({ rules }) }); } catch (err) { alert(err.message); drawRules(); }
+  });
+
+  // ---- metrics (opt-in)
+  async function drawMetrics(token = null) {
+    let d;
+    try { d = await api('/api/metrics/settings'); } catch (err) { $('[data-metrics]').textContent = err.message; return; }
+    if (!alive) return;
+    const url = `${location.origin}/metrics`;
+    $('[data-metrics]').innerHTML = d.enabled
+      ? `<p><b>On.</b> ${token ? `Your token (shown once; keep it like a password):<br><code style="user-select:all">${esc(token)}</code></p>
+          <p class="sh-muted">Prometheus:</p><pre class="sh-log" style="max-height:none">- job_name: sentry-six-manager\n  scheme: ${esc(location.protocol.replace(':', ''))}\n  static_configs: [{ targets: ['${esc(location.host)}'] }]\n  authorization: { credentials: '${esc(token)}' }${location.protocol === 'https:' ? '\n  tls_config: { insecure_skip_verify: true }  # or the CA from Settings → Security' : ''}</pre>`
+        : `Scraped at <code>${esc(url)}</code> with the token made when it was turned on.</p>`}
+        <div class="sh-row"><button type="button" class="sh-btn" data-metrics-on>New token</button><button type="button" class="sh-btn" data-metrics-off>Turn off</button></div>`
+      : '<p class="sh-muted">Off.</p><div class="sh-row"><button type="button" class="sh-btn" data-metrics-on>Turn on…</button></div>';
+  }
+  async function metricsAction(path) {
+    try { return await api(path, { method: 'POST' }); } catch (err) {
+      if (/password/i.test(err.message)) {
+        const pw = prompt('Enter your password to confirm:');
+        if (!pw) return null;
+        try { await api('/api/auth/confirm', { method: 'POST', body: JSON.stringify({ password: pw }) }); return await api(path, { method: 'POST' }); } catch (e2) { alert(e2.message); return null; }
+      }
+      alert(err.message);
+      return null;
+    }
+  }
+  el.addEventListener('click', async (e) => {
+    if (e.target.closest('[data-metrics-on]')) { const d = await metricsAction('/api/metrics/enable'); if (d) drawMetrics(d.token); }
+    if (e.target.closest('[data-metrics-off]')) { if (await metricsAction('/api/metrics/disable')) drawMetrics(); }
+  });
+  drawRules();
+  drawMetrics();
 
   runChecks(false);
   loadSnaps();

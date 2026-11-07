@@ -180,7 +180,7 @@ const VIEWER_POSTS = [
   /^\/api\/places(\/[^/]+)?$/,
   /^\/api\/notifications\/[^/]+\/(read|dismiss)$/
 ];
-const VIEWER_HIDDEN = [/^\/api\/logs/, /^\/api\/support-bundle/, /^\/api\/snapshots/, /^\/api\/security/, /^\/api\/accounts/, /^\/api\/ui-packs\/original\.zip/, /^\/api\/nodes/];
+const VIEWER_HIDDEN = [/^\/api\/metrics/, /^\/api\/logs/, /^\/api\/support-bundle/, /^\/api\/snapshots/, /^\/api\/security/, /^\/api\/accounts/, /^\/api\/ui-packs\/original\.zip/, /^\/api\/nodes/];
 function viewerMay(method, p) {
   if (method === 'GET' || method === 'HEAD') return !VIEWER_HIDDEN.some((re) => re.test(p));
   return VIEWER_POSTS.some((re) => re.test(p));

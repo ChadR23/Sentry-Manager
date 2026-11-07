@@ -35,3 +35,9 @@ interrupted) off the list after you confirm how many, so what shows up next
 is what happened since. Running, waiting and paused jobs stay. Only the list
 is cleared: footage, converted files and what the Encoder needs to resume a
 conversion are not touched.
+
+**Keep the footage under (GB)**, also on the Policies page and off by
+default: at each run, once the car's footage is over that size, its oldest
+recordings that are not protected move to the Recycle Bin until it is under
+(after the days rules). They still take room until the bin is emptied, by
+hand or with *Empty the Recycle Bin after*.

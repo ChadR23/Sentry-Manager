@@ -36,7 +36,8 @@ export default {
           <div class="keep-grid" style="margin-top:18px">${CATS.map(([c, label, color]) => `<label class="keep"><span class="row"><span class="cat-dot" style="background:${color};box-shadow:0 0 10px ${color}"></span><b>${esc(label)}</b></span>
             <span class="field">Keep for (days)<input class="input" type="number" inputmode="numeric" min="1" max="3650" name="keep-${c}" value="${policy.keepDays[c] ?? ''}" placeholder="forever"></span></label>`).join('')}</div>
           <div class="form" style="margin-top:16px"><label class="field">Run at (server time)<input class="input" type="time" name="runAt" value="${esc(policy.runAt)}" required></label>
-            <label class="field">Empty the Recycle Bin after (days)<input class="input" type="number" inputmode="numeric" min="1" max="365" name="binDays" value="${policy.binDays ?? ''}" placeholder="never: you empty it"></label></div>
+            <label class="field">Empty the Recycle Bin after (days)<input class="input" type="number" inputmode="numeric" min="1" max="365" name="binDays" value="${policy.binDays ?? ''}" placeholder="never: you empty it"></label>
+            <label class="field">Keep the footage under (GB)<input class="input" type="number" inputmode="decimal" min="1" step="any" name="maxGB" value="${policy.maxGB ?? ''}" placeholder="no limit"></label></div>
           <p class="note" id="pol-note" style="margin-top:16px"></p>
           <div class="actions"><button class="btn" type="button" id="run">${icon('play')} Run now</button><button class="btn primary" type="submit">${icon('check')} Save</button></div>
         </section></form>`;
@@ -44,7 +45,7 @@ export default {
     }
     const read = () => {
       const fd = new FormData($('#pol', body));
-      return { enabled: fd.get('enabled') === 'on', runAt: String(fd.get('runAt') || ''), keepDays: Object.fromEntries(CATS.map(([c]) => [c, fd.get(`keep-${c}`) ? Number(fd.get(`keep-${c}`)) : null])), binDays: fd.get('binDays') ? Number(fd.get('binDays')) : null };
+      return { enabled: fd.get('enabled') === 'on', runAt: String(fd.get('runAt') || ''), keepDays: Object.fromEntries(CATS.map(([c]) => [c, fd.get(`keep-${c}`) ? Number(fd.get(`keep-${c}`)) : null])), binDays: fd.get('binDays') ? Number(fd.get('binDays')) : null, maxGB: fd.get('maxGB') ? Number(fd.get('maxGB')) : null };
     };
     const load = async (full = true) => {
       const out = await api(url);

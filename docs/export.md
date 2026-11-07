@@ -42,6 +42,14 @@ or press **e** in any of them.
 - A camera a clip doesn't have, or whose file is damaged, is a black tile;
   a clip that can't be read at all is left out. The job says which.
 
+## Privacy
+
+**Privacy** (a switch in the export panel, off by default, remembered in the
+browser) leaves the speed out of the picture and strips the file's hidden
+details (the encoder and the creation time); the date and time stay in the
+picture. An export never carries GPS: Tesla's driving data stays in the
+original clips, and the exported video is made new.
+
 ## Limits
 
 - Up to **60 minutes** in one export.

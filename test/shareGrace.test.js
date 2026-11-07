@@ -37,3 +37,13 @@ test('a share back within the grace time raises nothing; one still down raises t
   notes.syncShare(car, { healthy: true, writable: true });
   assert.equal(db.open.has('share:car'), false, 'back: resolved');
 });
+
+test('notification rules: a kind turned off is not raised; the others are', () => {
+  const raised = [];
+  const store = new Map([['notify-muted', ['storage']]]);
+  const db = { get: (k, d) => (store.has(k) ? store.get(k) : d), notify: (n) => { raised.push(n.kind); return raised.length; }, resolve() {} };
+  const notes = new Notifications({ db });
+  assert.equal(notes.raise({ kind: 'storage', title: 'full' }), null);
+  notes.raise({ kind: 'share', title: 'offline' });
+  assert.deepEqual(raised, ['share']);
+});

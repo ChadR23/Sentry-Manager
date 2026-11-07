@@ -9,7 +9,7 @@ let system = null;
 export default {
   async mount(el, { sub, params, go, status }) {
     const tab = TABS.some(([k]) => k === sub.split('/')[0]) ? sub.split('/')[0] : 'vehicles';
-    el.innerHTML = `<section class="ptitle hud"><div><h1 class="chrome">Settings</h1></div></section>
+    el.innerHTML = `<section class="ptitle hud"><div><h1 class="chrome">Settings</h1><p><a class="btn sm" href="#/health">${ico('shield')}Health</a> <a class="btn sm" href="#/account">${ico('lock')}Account</a></p></div></section>
       <div class="settings">
         <nav class="stabs hud" aria-label="Settings sections">${TABS.map(([k, l, i]) => `<a href="#/settings/${k}" class="stab${k === tab ? ' on' : ''}"${k === tab ? ' aria-current="page"' : ''}>${ico(i)}<span>${l}</span></a>`).join('')}</nav>
         <div class="spanel" id="sp"><div class="loading"><i></i><i></i><i></i></div></div>

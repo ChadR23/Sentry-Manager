@@ -9,7 +9,7 @@
 const CATEGORIES = ['Recent', 'Sentry', 'Saved', 'Other'];
 
 function defaultPolicy() {
-  return { enabled: false, runAt: '03:30', keepDays: { Recent: null, Sentry: null, Saved: null, Other: null }, binDays: null, lastRunAt: null, lastResult: null };
+  return { enabled: false, runAt: '03:30', keepDays: { Recent: null, Sentry: null, Saved: null, Other: null }, binDays: null, maxGB: null, lastRunAt: null, lastResult: null };
 }
 
 function normalizePolicy(input, prev = defaultPolicy()) {
@@ -18,6 +18,16 @@ function normalizePolicy(input, prev = defaultPolicy()) {
   if (input.runAt !== undefined) {
     if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(String(input.runAt))) throw Object.assign(new Error('Run time must be HH:MM.'), { status: 400 });
     out.runAt = String(input.runAt);
+  }
+  // keep this vehicle's footage under this many GB: the oldest unprotected
+  // recordings beyond it move to the Recycle Bin at the run
+  if (input.maxGB !== undefined) {
+    if (input.maxGB === null || input.maxGB === '') out.maxGB = null;
+    else {
+      const n = Number(input.maxGB);
+      if (!Number.isFinite(n) || n < 1 || n > 1_000_000) throw Object.assign(new Error('Keep the footage under 1 GB or more, or leave it empty for no limit.'), { status: 400 });
+      out.maxGB = Math.round(n * 10) / 10;
+    }
   }
   if (input.binDays !== undefined) {
     if (input.binDays === null || input.binDays === '') out.binDays = null;
@@ -81,14 +91,29 @@ class Policies {
     const vehicle = this.vehicles.get(vehicleId);
     const inv = this.inventory.get(vehicleId);
     if (!vehicle || !inv?.recordings) return { recordings: 0, bytes: 0, byCategory: {} };
-    const hit = selectExpired(inv.recordings, this.get(vehicleId), { timeZone: vehicle.timezone });
+    const policy = this.get(vehicleId);
+    const hit = selectExpired(inv.recordings, policy, { timeZone: vehicle.timezone });
+    // over the size limit: the oldest of the rest, until under it
+    let overLimit = 0;
+    if (policy.maxGB) {
+      const limit = policy.maxGB * 1024 ** 3;
+      const chosen = new Set(hit.map((r) => r.id));
+      let total = inv.recordings.reduce((n, r) => n + (r.bytes || 0), 0) - hit.reduce((n, r) => n + (r.bytes || 0), 0);
+      const oldest = inv.recordings.filter((r) => !chosen.has(r.id) && !r.protected).sort((a, b) => String(a.startKey).localeCompare(String(b.startKey)));
+      for (const r of oldest) {
+        if (total <= limit) break;
+        hit.push(r);
+        total -= r.bytes || 0;
+        overLimit++;
+      }
+    }
     const byCategory = {};
     for (const r of hit) {
       byCategory[r.category] = byCategory[r.category] || { recordings: 0, bytes: 0 };
       byCategory[r.category].recordings++;
       byCategory[r.category].bytes += r.bytes;
     }
-    return { recordings: hit.length, bytes: hit.reduce((n, r) => n + r.bytes, 0), byCategory, ids: hit.map((r) => r.id) };
+    return { recordings: hit.length, bytes: hit.reduce((n, r) => n + r.bytes, 0), byCategory, overLimit, ids: hit.map((r) => r.id) };
   }
 
   async run(vehicleId) {

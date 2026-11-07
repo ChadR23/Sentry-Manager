@@ -162,3 +162,30 @@ is still down after 10 minutes. **Disk errors**: when a disk the server can
 see reports read or write errors while the app runs, an alert says which
 disk. Full SMART health needs root and raw access to the disks, which the
 container does not have; your NAS (TrueNAS) checks SMART itself.
+
+## Map
+
+A page in every interface: every Sentry and Saved event of the car as a pin
+where it happened (red Sentry, green Saved, from the event.json the car
+writes), the newest listed with why the car saved it (*Something moved near
+the car*, *Saved with the horn*…) and the street. Tap one to play it.
+
+**Saved places**: after a place search on the Viewer's map, *Save place*
+names the spot (Home, Work). Saved places show on the maps with their names,
+the pin button offers them so a search is one tap, and the Map page renames
+or removes them.
+
+## More in the Viewer
+
+- **Layouts** (the interface packs): three slots for how the cameras are laid
+  out. Tap a slot to use it; hold it (or Shift-click) to save the current
+  layout there. The built-in Viewer keeps Studio's own layout picker.
+
+## Footage check
+
+On the Health page: finds clips that will not play (cut off when the car
+lost power or the USB drive was pulled, empty, or not video), per car. Only a
+few bytes of each file are read. Results are kept: a check a restart cuts
+short goes on by itself, and files that have not changed are not read again
+(the speed index, the timeline previews and conversions also go on where they
+were after a restart).

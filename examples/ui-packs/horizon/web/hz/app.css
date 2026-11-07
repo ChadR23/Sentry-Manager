@@ -833,3 +833,8 @@ fieldset:disabled { opacity: 0.6; }
 .smb-test p { margin: 0; flex: 1 1 240px; }
 .smb-test [data-result="ok"] { color: var(--grn); }
 .smb-test [data-result="bad"] { color: var(--red); }
+
+/* Driving and Map: in the top bar when it has room, in the tuner always */
+@media (max-width: 1360px) {
+  #nav-b [data-route="driving"], #nav-b [data-route="map"] { display: none; }
+}
