@@ -361,6 +361,15 @@ async function main() {
   const policies = new Policies({ db, vehicles, inventory, bin, log: logger.scope('policies') });
   // space saved by conversions, per vehicle, kept when jobs are cleared
   const savings = createSavings({ db });
+  // savings by month: what was counted before months were kept goes to the
+  // month its conversion finished (the job history)
+  savings.backfill((jobId) => {
+    const j = db.jobByExternal(`converter:${jobId}`);
+    const t = j?.finishedAt || j?.finished_at || j?.startedAt || j?.started_at;
+    if (!t) return null;
+    const d = new Date(Number(t));
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  });
 
   // Nodes: other servers that encode for this one (server/nodes.js)
   const nodes = createNodes({
@@ -1288,17 +1297,25 @@ async function main() {
       });
     return { ...summary, started: true };
   });
-  r.add('GET', '/api/vehicles/:id/recordings', (req, res, { params, query }) => {
+  r.add('GET', '/api/vehicles/:id/recordings', async (req, res, { params, query }) => {
     vehicleOr404(params.id);
     const inv = inventory.get(params.id);
     let list = filtered(params.id, query);
     if (query.protected === '1') list = list.filter((x) => x.protected);
     const offset = Math.max(0, Number(query.offset) || 0);
     const limit = Math.min(500, Math.max(1, Number(query.limit) || 100));
+    const page = list.slice(offset, offset + limit);
+    // Sentry and Saved events at a saved place get its name (place), when there are saved places
+    const places = placeList().length > 0;
+    const tagged = await Promise.all(page.map(async (rec) => {
+      const out = publicRecording(rec);
+      if (places && rec.eventId) out.place = placeAt((await eventSpot(params.id, rec).catch(() => null))?.pos);
+      return out;
+    }));
     return {
       total: list.length, offset, limit, scannedAt: inv?.scannedAt || null, scanning: Boolean(inv?.scanning), error: inv?.lastError || null,
       dates: [...new Set((inv?.recordings || []).map((x) => x.day))].sort().reverse(),
-      recordings: list.slice(offset, offset + limit).map(publicRecording)
+      recordings: tagged
     };
   });
   // a clip's telemetry records for the viewer (server/telemetry.js)
@@ -1438,6 +1455,37 @@ async function main() {
   // event.json est_lat / est_lon), newest first; each event.json is read once
   // and kept while it does not change
   const eventSpots = new Map(); // `${vid}/${rel}` -> { stamp, info }
+  /** An event recording's event.json (where and why), read once while it does not change. */
+  async function eventSpot(vid, rec) {
+    const inv = inventory.get(vid);
+    const rel = rec.files.find((f) => /\/event\.json$/i.test(f));
+    const f = rel && inv?.files?.get(rel);
+    if (!f) return null;
+    const key = `${vid}/${rel}`;
+    const stamp = `${f.size}/${Math.round(f.mtimeMs)}`;
+    let had = eventSpots.get(key);
+    if (!had || had.stamp !== stamp) {
+      had = { stamp, info: await inventory.eventInfo(vid, rec).catch(() => null) };
+      eventSpots.set(key, had);
+      if (eventSpots.size > 20000) eventSpots.delete(eventSpots.keys().next().value);
+    }
+    const lat = Number(had.info?.est_lat);
+    const lon = Number(had.info?.est_lon);
+    const pos = Number.isFinite(lat) && Number.isFinite(lon) && !(lat === 0 && lon === 0) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180 ? { lat, lon } : null;
+    return { info: had.info, pos };
+  }
+  /** The saved place an event happened at (nearest within 200 m: the car's position is an estimate), or null. */
+  function placeAt(pos) {
+    if (!pos) return null;
+    let best = null;
+    for (const p of placeList()) {
+      const rad = Math.PI / 180;
+      const a = Math.sin(((p.lat - pos.lat) * rad) / 2) ** 2 + Math.cos(pos.lat * rad) * Math.cos(p.lat * rad) * Math.sin(((p.lon - pos.lon) * rad) / 2) ** 2;
+      const m = 2 * 6371000 * Math.asin(Math.min(1, Math.sqrt(a)));
+      if (m <= 200 && (!best || m < best.m)) best = { name: p.name, m };
+    }
+    return best ? best.name : null;
+  }
   r.add('GET', '/api/vehicles/:id/event-map', async (req, res, { params }) => {
     const v = vehicleOr404(params.id);
     const inv = inventory.get(v.id);
@@ -1447,23 +1495,12 @@ async function main() {
     const work = async () => {
       while (next < recs.length) {
         const rec = recs[next++];
-        const rel = rec.files.find((f) => /\/event\.json$/i.test(f));
-        const f = rel && inv.files.get(rel);
-        if (!f) continue;
-        const key = `${v.id}/${rel}`;
-        const stamp = `${f.size}/${Math.round(f.mtimeMs)}`;
-        let had = eventSpots.get(key);
-        if (!had || had.stamp !== stamp) {
-          had = { stamp, info: await inventory.eventInfo(v.id, rec).catch(() => null) };
-          eventSpots.set(key, had);
-          if (eventSpots.size > 20000) eventSpots.delete(eventSpots.keys().next().value);
-        }
-        const lat = Number(had.info?.est_lat);
-        const lon = Number(had.info?.est_lon);
-        if (!Number.isFinite(lat) || !Number.isFinite(lon) || (lat === 0 && lon === 0) || Math.abs(lat) > 90 || Math.abs(lon) > 180) continue;
+        const spot = await eventSpot(v.id, rec);
+        if (!spot?.pos) continue;
+        const { info } = spot;
         out.push({
-          recording: rec.id, category: rec.category, day: rec.day, start: rec.start, startKey: rec.startKey, lat, lon,
-          reason: had.info.reason || null, city: had.info.city || null, street: had.info.street || null, at: had.info.timestamp || null
+          recording: rec.id, category: rec.category, day: rec.day, start: rec.start, startKey: rec.startKey, lat: spot.pos.lat, lon: spot.pos.lon,
+          reason: info.reason || null, city: info.city || null, street: info.street || null, at: info.timestamp || null, place: placeAt(spot.pos)
         });
       }
     };
@@ -1514,6 +1551,12 @@ async function main() {
     const v = vehicleOr404(params.id);
     if (!inventory.get(v.id)?.files) await inventory.scan(v.id);
     return integrity.start(v.id);
+  });
+  // Savings by month (the main pages' chart)
+  r.add('GET', '/api/vehicles/:id/savings-by-month', (req, res, { params, query }) => {
+    const v = vehicleOr404(params.id);
+    const months = Math.max(3, Math.min(36, Number(query.months) || 12));
+    return { months: savings.byMonth(v.id, months), total: savings.forVehicle(v.id) };
   });
   // Search by place: every clip that passed near a point (speedIndex.near)
   r.add('GET', '/api/places/near', async (req, res, { query }) => {

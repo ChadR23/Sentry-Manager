@@ -381,3 +381,5 @@ store.set('lastVisit', Date.now());
 
 // Footage thumbnails flip through their recording under the mouse (web/scrub.js)
 import('/web/scrub.js').then((m) => m.hoverFrames(document.body, '.frame-pic, .rec-pic')).catch(() => {});
+// saved by converting, month by month, wherever a page puts a placeholder (web/savingsChart.js)
+import('/web/savingsChart.js').then((m) => m.watchSavingsCharts(document.body)).catch(() => {});

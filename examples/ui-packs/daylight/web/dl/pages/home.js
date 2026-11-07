@@ -62,7 +62,7 @@ function spaceCard() {
   return card({
     tone, iconName: 'disk', q: 'How much space is left?', a: `${bytes(free)} free`,
     detail: `${list.length > 1 ? `${esc(v.name)} has the least room. ` : ''}${pct(used * 100)} of ${bytes(v.share.totalBytes)} used. ${tip} Space saved by converting: ${saved ? `${bytes(saved)} · ${plural(clips, 'clip')}` : 'none yet'}. Days of footage: ${fin(state.footageDays) ? state.footageDays.toLocaleString() : '—'}.${(() => { const f = fullIn(v.storage); return f ? ` ${esc(f.text)}${v.storage.capped ? '' : ` (about ${bytes(v.storage.perDay)} of footage a day)`}.` : ''; })()}`,
-    body: meter(used, tone === 'good' ? '' : tone) , action
+    body: `${meter(used, tone === 'good' ? '' : tone)}<div data-savings-chart="${esc(v.id)}" style="margin-top:12px"></div>`, action
   });
 }
 

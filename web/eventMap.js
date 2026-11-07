@@ -24,6 +24,8 @@ const STYLE = `
 .sentry-em li .em-grow{flex:1;min-width:0}
 .sentry-em button.em-btn{all:unset;box-sizing:border-box;cursor:pointer;padding:5px 10px;border-radius:7px;border:1px solid rgba(127,127,127,.45);font-weight:600;font-size:13px;white-space:nowrap}
 .sentry-em button.em-btn:focus-visible{outline:2px solid currentColor;outline-offset:2px}
+.sentry-em .em-tag{font-size:11px;font-weight:700;padding:1px 7px;border-radius:999px;background:rgba(255,211,74,.22);white-space:nowrap}
+.sentry-em button.em-btn[aria-pressed="true"]{background:rgba(127,127,127,.25)}
 .sentry-em input{padding:5px 8px;border-radius:7px;border:1px solid rgba(127,127,127,.45);background:transparent;color:inherit;font:inherit;min-width:0}
 `;
 const COLOR = { Sentry: '#ff5d5d', Saved: '#3ddc84' };
@@ -46,6 +48,7 @@ export function createEventMapPage(el, { vehicleId, vehicleName = '', openEvent 
   el.innerHTML = `<div class="sentry-em">
     <div class="em-row"><span class="em-muted" data-sum>Loading the events…</span>
       <span class="em-key"><i style="background:${COLOR.Sentry}"></i>Sentry</span><span class="em-key"><i style="background:${COLOR.Saved}"></i>Saved</span></div>
+    <div class="em-row" data-placefilter hidden></div>
     <div class="em-map" data-map></div>
     <h2>Newest events</h2><ol data-list></ol>
     <h2>Saved places</h2><p class="em-muted" style="margin:0">Name a place from the Viewer's map: the pin button, tap the place, then <b>Save place</b>. Saved places show on the maps, and the place search can go straight to them.</p><ol data-places></ol>
@@ -53,6 +56,16 @@ export function createEventMapPage(el, { vehicleId, vehicleName = '', openEvent 
   const $ = (s) => el.querySelector(s);
   let alive = true;
   let events = [];
+  let allEvents = [];
+  let shownPlace = null; // filter: a saved place's name, '-' (elsewhere) or null (all)
+  // the saved places events happened at, as a filter
+  function drawFilter() {
+    const names = [...new Set(allEvents.map((ev) => ev.place).filter(Boolean))].sort();
+    const box = $('[data-placefilter]');
+    box.hidden = !names.length;
+    const btn = (v, label) => `<button type="button" class="em-btn" data-place-f="${esc(v ?? '')}" aria-pressed="${shownPlace === v}">${esc(label)}</button>`;
+    box.innerHTML = `<span class="em-muted">Where:</span>${btn(null, 'Anywhere')}${names.map((n) => btn(n, `At ${n}`)).join('')}${btn('-', 'Elsewhere')}`;
+  }
   const map = createViewerMap($('[data-map]'), { dark, noGps: 'No events with a position yet' });
 
   const when = (ev) => { try { return new Date(`${ev.startKey.slice(0, 10)}T${ev.startKey.slice(11).replace(/-/g, ':')}`).toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); } catch { return ev.start || ev.day; } };
@@ -63,11 +76,13 @@ export function createEventMapPage(el, { vehicleId, vehicleName = '', openEvent 
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || 'Could not load the events.');
       if (!alive) return;
-      events = d.events;
+      allEvents = d.events;
+      events = shownPlace ? allEvents.filter((ev) => (ev.place || '') === (shownPlace === '-' ? '' : shownPlace)) : allEvents;
+      drawFilter();
       $('[data-sum]').textContent = `${vehicleName ? `${vehicleName}: ` : ''}${events.length} event${events.length === 1 ? '' : 's'} with a position${d.withoutPosition ? ` (${d.withoutPosition} without one)` : ''}`;
-      map.setPins(events.map((ev, i) => ({ lat: ev.lat, lon: ev.lon, color: COLOR[ev.category] || '#6aa9ff', title: `${ev.category} · ${when(ev)}${ev.reason ? ` · ${reasonText(ev.reason)}` : ''}`, i })), { onPick: (p) => openEvent(events[p.i]) });
+      map.setPins(events.map((ev, i) => ({ lat: ev.lat, lon: ev.lon, color: COLOR[ev.category] || '#6aa9ff', title: `${ev.category} · ${when(ev)}${ev.place ? ` · at ${ev.place}` : ''}${ev.reason ? ` · ${reasonText(ev.reason)}` : ''}`, i })), { onPick: (p) => openEvent(events[p.i]) });
       $('[data-list]').innerHTML = events.slice(0, 50).map((ev, i) => `<li><i style="background:${COLOR[ev.category] || '#6aa9ff'}"></i>
-        <span class="em-grow"><b>${esc(when(ev))}</b> · ${esc(ev.category)}${ev.reason ? ` · ${esc(reasonText(ev.reason))}` : ''}<br><span class="em-muted">${esc([ev.street, ev.city].filter(Boolean).join(', '))}</span></span>
+        <span class="em-grow"><b>${esc(when(ev))}</b> · ${esc(ev.category)}${ev.place ? ` <span class="em-tag">at ${esc(ev.place)}</span>` : ''}${ev.reason ? ` · ${esc(reasonText(ev.reason))}` : ''}<br><span class="em-muted">${esc([ev.street, ev.city].filter(Boolean).join(', '))}</span></span>
         <button type="button" class="em-btn" data-open="${i}">Play</button></li>`).join('') || '<li class="em-muted">No Sentry or Saved events with a position.</li>';
     } catch (err) {
       if (alive) $('[data-sum]').textContent = err.message;
@@ -82,6 +97,8 @@ export function createEventMapPage(el, { vehicleId, vehicleName = '', openEvent 
       <button type="button" class="em-btn" data-rename="${esc(p.id)}">Rename</button><button type="button" class="em-btn" data-remove="${esc(p.id)}">Remove</button></li>`).join('') || '<li class="em-muted">None yet.</li>';
   }
   el.addEventListener('click', async (e) => {
+    const f = e.target.closest('[data-place-f]');
+    if (f) { shownPlace = f.dataset.placeF === '' ? null : f.dataset.placeF; loadEvents(); return; }
     const o = e.target.closest('[data-open]');
     if (o) { openEvent(events[Number(o.dataset.open)]); return; }
     const rn = e.target.closest('[data-rename]');

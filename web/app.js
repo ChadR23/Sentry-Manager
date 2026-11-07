@@ -798,6 +798,8 @@
         ['Scanned', esc(scanned)],
         ['Time zone', esc(v.timezone || '—')]
       ])
+      // saved by converting, month by month (web/savingsChart.js fills it)
+      + `<div data-savings-chart="${esc(v.id)}" style="margin-top:12px"></div>`
       + '<div class="nd-actions"><button type="button" class="btn sm" id="refresh-inv">Refresh inventory</button></div>');
     const free = ndTile('Free space', `last observed on ${v.name}`, `<div class="nd-big"><b>${fin(s.freeBytes) ? size(s.freeBytes) : '—'}</b><span class="muted small">free</span>${problem}</div>`
       // (no capacity known: an empty meter keeps the tile's height)
@@ -1406,7 +1408,7 @@
         <input type="checkbox" aria-label="Select ${esc(r.start)}"${f.selected.has(r.id) ? ' checked' : ''}>
         <div class="thumb">${thumb}</div>
         <div class="rec-info"><span class="when">${esc(r.start ? clockText(r.start) : r.day)}${range}</span>
-          <span class="meta"><span class="chip ${chip}">${esc(r.category)}</span>${recEncodedChip(r)}<span>${plural(r.fileCount, 'file')}</span><span>${bytes(r.bytes)}</span>${r.eventAt ? `<span>event ${esc(r.eventAt.slice(11))}</span>` : ''}${r.cameras.length ? `<span>${plural(r.cameras.length, 'camera')}</span>` : ''}${r.protected ? '<span class="chip green">Protected</span>' : ''}</span>
+          <span class="meta"><span class="chip ${chip}">${esc(r.category)}</span>${r.place ? `<span class="chip">at ${esc(r.place)}</span>` : ''}${recEncodedChip(r)}<span>${plural(r.fileCount, 'file')}</span><span>${bytes(r.bytes)}</span>${r.eventAt ? `<span>event ${esc(r.eventAt.slice(11))}</span>` : ''}${r.cameras.length ? `<span>${plural(r.cameras.length, 'camera')}</span>` : ''}${r.protected ? '<span class="chip green">Protected</span>' : ''}</span>
           <span class="orig">Original capture: ${esc(r.startKey ? `${r.startKey.slice(0, 10)}T${r.startKey.slice(11).replace(/-/g, ':')}` : r.day)} · ${esc(r.folder)}</span></div>
         <div class="rec-actions"><button class="btn" data-play>Play recording</button><button class="btn" data-files>${f.expanded.has(r.id) ? 'Hide files' : 'Show files'}</button></div>
       </div>
@@ -2680,3 +2682,5 @@
 
 // Footage thumbnails flip through their recording under the mouse (web/scrub.js)
 import('/web/scrub.js').then((m) => m.hoverFrames(document.body, '.day-thumb, .thumb')).catch(() => {});
+// saved by converting, month by month, wherever a page puts a placeholder (web/savingsChart.js)
+import('/web/savingsChart.js').then((m) => m.watchSavingsCharts(document.body)).catch(() => {});

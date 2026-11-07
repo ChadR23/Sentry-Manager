@@ -203,7 +203,7 @@ export default {
         if (f.conv === 'yes' && !(r.encoded?.encoded > 0)) return false;
         if (f.conv === 'no' && r.encoded?.encoded > 0 && r.encoded.encoded === r.encoded.clips) return false;
         if (!q) return true;
-        return `${r.start} ${r.end} ${r.folder} ${r.category} ${r.eventId || ''} ${r.cameras.join(' ')} ${r.id}`.toLowerCase().includes(q);
+        return `${r.start} ${r.end} ${r.folder} ${r.category} ${r.place || ''} ${r.eventId || ''} ${r.cameras.join(' ')} ${r.id}`.toLowerCase().includes(q);
       });
       const { key, dir } = f.sort;
       list = list.slice().sort((a, b) => {
@@ -239,7 +239,7 @@ export default {
           <td class="cb"><label class="cbl"><input type="checkbox" aria-label="Select ${esc(r.start)}"${sel ? ' checked' : ''}></label></td>
           <td class="thumbc">${r.thumbRel || r.frontRel ? `<img loading="lazy" alt="" src="/api/vehicles/${encodeURIComponent(v.id)}/recordings/${encodeURIComponent(r.id)}/thumbnail">` : ''}</td>
           <td class="mono nowrap">${esc(r.start ? wallDay(r.start) : r.day)}<div class="faint small">${r.end && r.end !== r.start ? `→ ${esc(wall(r.end))}` : ''}${r.eventAt ? ` · event ${esc(wall(r.eventAt))}` : ''}</div></td>
-          <td><span class="cat ${esc(cat)}">${esc(cat)}</span></td>
+          <td><span class="cat ${esc(cat)}">${esc(cat)}</span>${r.place ? `<div class="faint small">at ${esc(r.place)}</div>` : ''}</td>
           <td class="r num">${r.minutes}m</td>
           <td>${camsCell(r)}</td>
           <td class="r num">${r.fileCount}</td>

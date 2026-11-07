@@ -252,7 +252,7 @@ function recCard(v, r, selecting, selected) {
     <div class="rc-body">
       <div class="row-between"><span class="rc-time">${esc(time)}</span>
         ${selecting ? `<label class="rc-select"><input type="checkbox" data-select${selected ? ' checked' : ''}> Select</label>` : ''}</div>
-      <div class="row">${chip(cat.word, cat.tone)}${r.protected ? chip('Protected', 'good', 'lock') : ''}${encodedChip(r.encoded)}</div>
+      <div class="row">${chip(cat.word, cat.tone)}${r.place ? chip(`at ${r.place}`) : ''}${r.protected ? chip('Protected', 'good', 'lock') : ''}${encodedChip(r.encoded)}</div>
       <p class="rc-sub">${r.eventAt ? `Event at ${esc(niceTime(r.eventAt))} · ` : ''}${plural(r.cameras.length, 'camera')} · ${bytes(r.bytes)}</p>
       <div class="rc-actions">
         <button class="btn btn-primary btn-sm" type="button" data-play>${icon('play')} Play</button>

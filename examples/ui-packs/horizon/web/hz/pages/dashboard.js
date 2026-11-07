@@ -264,6 +264,7 @@ export default {
           <p class="small dim num">${size(sh.freeBytes)} free of ${size(sh.totalBytes)} · ${size(v.inventory?.bytes)} of footage · ${ok(v.inventory?.days) ? count(v.inventory.days, 'day') : '— days'} · saved ${savedTxt(v.saved)}</p>
           ${(() => { const f = fullIn(v.storage); return f ? `<p class="small num ${f.tone === 'bad' ? 'badtx' : f.tone === 'warn' ? 'warm' : 'dim'}">${h(f.text)}</p>` : ''; })()}
           <div class="row">${cats}</div>
+          <div data-savings-chart="${h(v.id)}"></div>
           ${sh.warning ? `<p class="small warm">${h(sh.warning)}</p>` : ''}${sh.lastError ? `<p class="small badtx">${h(sh.lastError)}</p>` : ''}
           <div class="row"><button class="btn sm" type="button" data-scan="${h(v.id)}">${ico('refresh')}Refresh inventory</button>${sh.healthy ? '' : `<button class="btn sm" type="button" data-recon="${h(v.id)}">Reconnect</button>`}</div></div>`;
       }).join('');

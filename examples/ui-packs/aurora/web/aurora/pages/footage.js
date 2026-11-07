@@ -64,7 +64,7 @@ function card(v, r, selected, open) {
   return `<article class="rec${selected ? ' sel' : ''}" data-id="${esc(r.id)}">
     <button class="rec-pic" type="button" data-play aria-label="Play ${esc(r.category)} recording at ${esc(range)}">
       ${r.thumbRel || r.frontRel ? `<img class="thumb-img" loading="lazy" alt="" src="${thumb(v, r.id)}">` : ''}
-      <span class="tags"><span class="chip ${CAT_CHIP[r.category] || ''}">${esc(r.category)}</span>${r.protected ? `<span class="chip green">${icon('lock')}Protected</span>` : ''}${encodedChip(r)}</span>
+      <span class="tags"><span class="chip ${CAT_CHIP[r.category] || ''}">${esc(r.category)}</span>${r.place ? `<span class="chip">at ${esc(r.place)}</span>` : ''}${r.protected ? `<span class="chip green">${icon('lock')}Protected</span>` : ''}${encodedChip(r)}</span>
       <span class="play-orb">${icon('play')}</span>
     </button>
     <div class="rec-body">

@@ -174,7 +174,7 @@ export default {
         if (f.conv === 'yes' && !(r.encoded?.encoded > 0)) return false;
         if (f.conv === 'no' && r.encoded?.clips && r.encoded.encoded === r.encoded.clips) return false;
         if (!q) return true;
-        return `${r.start} ${r.end} ${r.folder} ${r.category} ${r.eventId || ''} ${r.cameras.map((c) => CAM_NAME[c] || c).join(' ')}`.toLowerCase().includes(q);
+        return `${r.start} ${r.end} ${r.folder} ${r.category} ${r.place || ''} ${r.eventId || ''} ${r.cameras.map((c) => CAM_NAME[c] || c).join(' ')}`.toLowerCase().includes(q);
       }).sort((a, b) => String(b.startKey).localeCompare(String(a.startKey)));
     }
     function codec(r) {
@@ -196,7 +196,7 @@ export default {
           <button class="tk-play" type="button" data-act="play" aria-label="Play ${h(r.start)}">${ico('play')}</button>
           <span class="tk-art" aria-hidden="true">${r.thumbRel || r.frontRel ? `<img loading="lazy" alt="" src="${thumbUrl(v.id, r.id)}">` : ''}</span>
           <span class="tk-t"><b class="num">${h(wall(r.start))}<span class="faint"> – ${h(wall(r.end || r.start))}</span></b>
-            <span class="tk-sub small">${pill(r.category, CAT_TONE[r.category] || '')}<span class="dim">${h(f.day ? '' : `${dayName(r.day)} · `)}${h(words(r.type || ''))}${h(ev)}</span>${r.protected ? `<span class="lock" title="Protected">${ico('lock')}<span class="sr-only">Protected</span></span>` : ''}</span></span>
+            <span class="tk-sub small">${pill(r.category, CAT_TONE[r.category] || '')}${r.place ? pill(`at ${r.place}`, '') : ''}<span class="dim">${h(f.day ? '' : `${dayName(r.day)} · `)}${h(words(r.type || ''))}${h(ev)}</span>${r.protected ? `<span class="lock" title="Protected">${ico('lock')}<span class="sr-only">Protected</span></span>` : ''}</span></span>
           <span class="tk-cams" aria-label="Cameras: ${h(r.cameras.map((c) => CAM_NAME[c] || c).join(', '))}">${CAMS.map((c) => `<i class="${have.has(c) ? 'on' : ''}">${CAM_TAG[c]}</i>`).join('')}</span>
           <span class="tk-codec">${codec(r)}</span>
           <span class="tk-dur num">${dur(r.minutes)}<span class="faint small"> · ${size(r.bytes)}</span></span>

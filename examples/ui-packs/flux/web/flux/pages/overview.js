@@ -334,6 +334,7 @@ export default {
           ${meter(used, used > 95 ? 'red' : used > 85 ? 'amber' : 'violet')}
           <div class="small muted num">${bytes(s.freeBytes)} free of ${bytes(s.totalBytes)} · ${bytes(v.inventory?.bytes)} footage · ${fin(v.inventory?.days) ? plural(v.inventory.days, 'day') : '— days'} · saved ${v.saved?.bytes ? `${bytes(v.saved.bytes)} · ${plural(v.saved.clips, 'clip')}` : 'none yet'}</div>
           <div class="cats">${cats}</div>
+          <div data-savings-chart="${esc(v.id)}"></div>
           ${s.warning ? `<p class="small amber-text">${esc(s.warning)}</p>` : ''}${s.lastError ? `<p class="small bad-text">${esc(s.lastError)}</p>` : ''}
           <div class="small faint">${v.scanning ? 'scanning…' : `scanned ${ago(v.inventory?.scannedAt)}`} · ${esc(v.timezone || '')}</div>
           <div class="row-actions"><button class="btn sm" type="button" data-scan="${esc(v.id)}">${icon('refresh')}Refresh inventory</button>${s.healthy ? '' : `<button class="btn sm" type="button" data-reconnect="${esc(v.id)}">Reconnect</button>`}<a class="btn sm" href="#/footage">Footage</a></div></div>`;

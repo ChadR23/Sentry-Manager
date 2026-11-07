@@ -226,6 +226,7 @@ export default {
         <div class="stat"><span class="stat-label">Days of footage</span><span class="stat-val">${typeof state.footageDays === 'number' ? state.footageDays.toLocaleString() : '—'}</span><span class="muted tiny">${state.vehicles.length > 1 ? 'any car' : v.inventory?.firstDay ? `since ${esc(dayTitle(v.inventory.firstDay))}` : 'recorded'}</span></div>
         ${(() => { const f = fullIn(v.storage); return `<div class="stat${f?.tone === 'bad' ? ' bad' : f?.tone === 'warn' ? ' warn' : ''}"><span class="stat-label">Full in</span><span class="stat-val">${esc(f ? f.short : '—')}</span><span class="muted tiny">${f ? (v.storage.capped ? 'policies delete old footage' : `at ${bytes(v.storage.perDay)} a day`) : 'not known yet'}</span></div>`; })()}
         <div class="stat"><span class="stat-label">Policy</span><span class="stat-val">${p?.enabled ? 'On' : 'Off'}</span><span class="muted tiny">${p?.enabled ? (keeps.length ? keeps.map(([c, d]) => `${esc(c)} ${d} d`).join(' · ') : 'keeps everything') : 'nothing is moved by itself'}</span></div></div>
+        <div data-savings-chart="${esc(v.id)}" style="margin:6px 0 10px"></div>
         <div class="actions start"><a class="btn sm" href="#/bin">${icon('trash')} Bin</a><a class="btn sm" href="#/policies">${icon('shield')} Policies</a></div>`;
     };
     const drawDays = () => {

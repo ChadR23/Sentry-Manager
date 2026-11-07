@@ -44,6 +44,11 @@ so you don't need Glances or another tool:
   the server keeps (see [Security](security.md)); an alert's *Logs* link goes
   there.
 
+**Saved by converting**, on every main page with each car: the space
+conversions won back in each of the last 12 months, as bars, with this
+month's and the total. Savings from before this chart are put in the month
+their conversion finished (from the job history).
+
 It only measures while a page shows it or a conversion runs (and reads the
 network's byte counters once a day, so the data used lands on the right
 day), and every number stays on the server. A tile appears only when the server provides its
@@ -169,6 +174,11 @@ A page in every interface: every Sentry and Saved event of the car as a pin
 where it happened (red Sentry, green Saved, from the event.json the car
 writes), the newest listed with why the car saved it (*Something moved near
 the car*, *Saved with the horn*…) and the street. Tap one to play it.
+
+**Tagged by place**: a Sentry or Saved event within 200 m of a saved place
+gets its name (*at Home*, *at Work*) on the Footage cards and on the Map,
+where *Where:* shows only the events at one place, or elsewhere. Footage
+search finds them by the place's name too (the interface packs).
 
 **Saved places**: after a place search on the Viewer's map, *Save place*
 names the spot (Home, Work). Saved places show on the maps with their names,
