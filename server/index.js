@@ -80,7 +80,7 @@ const { createSpeedIndex } = require('./speedIndex');
 const { createExporter } = require('./exporter');
 const { createCanLogs, parseName: parseCanName } = require('./canLogs');
 const { createCanIndex, CLIP_STEP_MS: CAN_CLIP_STEP_MS } = require('./canIndex');
-const { openCanLog } = require('./canLogReader');
+const { openCanLog, stopWhenStalled } = require('./canLogReader');
 const { createCanTrust } = require('./canTrust');
 const { createCanPort } = require('./canPort');
 const { createCanSync } = require('./canSync');
@@ -2242,23 +2242,44 @@ async function main() {
    * after the text has started (a log cut off, or refused) ends it with a # line saying so: candump
    * readers skip those, as they skip the bridge's own # lines.
    */
-  async function* canCandumpText(reader, chunks = reader.chunks()) {
+  async function* canCandumpText(reader, chunks = reader.chunks(), { maxBytes = Infinity } = {}) {
+    let sent = 0;
     try {
-      yield* chunks;
+      for await (const c of chunks) {
+        if (sent + c.length > maxBytes) {
+          // (a bundle's share for this log): cut after the last whole line that fits, then say so; leaving the
+          // loop stops xz and the decoder
+          const room = maxBytes - sent;
+          const cut = room > 0 ? c.lastIndexOf(10, room - 1) + 1 : 0;
+          if (cut) yield c.subarray(0, cut);
+          yield Buffer.from(`\n# Sentry Six Manager: cut here: this bundle holds at most ${maxBytes} bytes of this log's candump text; download the log alone ("candump .log") for all of it\n`);
+          return;
+        }
+        sent += c.length;
+        yield c;
+      }
       if (reader.truncated) yield Buffer.from(`\n# Sentry Six Manager: this log ends early: ${reader.truncated.replace(/[\r\n]+/g, ' ')}\n`);
     } catch (err) {
       if (err.retry) throw err;
       yield Buffer.from(`\n# Sentry Six Manager: could not read this log as candump text: ${String(err.message).replace(/[\r\n]+/g, ' ')}\n`);
     }
   }
-  /** About how many bytes a log's candump text is, for the bundle's check: from the sidecar's frames, else the file's size. */
+  /**
+   * How many bytes of a log's candump text a bundle holds at most: from the sidecar's frames, else the
+   * file's size. The sidecar is the uploader's word, so this is also the cap the bundle cuts that log's
+   * text at (canCandumpText maxBytes): the size the check reports then holds, whatever the log decodes to.
+   */
   const candumpEstimate = async (f, format) => {
     let side = null;
     try { side = JSON.parse(await fs.promises.readFile(`${f.file}.json`, 'utf8')); } catch { /* none */ }
-    // a frame line is about 47 bytes ("(1794099498.000437) can0 34C#01690000204C0001")
-    if (Number.isFinite(side?.frames) && side.frames >= 0) return side.frames * 47 + 4096;
-    return f.size * ((side?.format || format) === 'canbridge-columns-xz/2' ? 14 : 6);
+    // a frame line is about 47 bytes ("(1794099498.000437) can0 34C#01690000204C0001"), 50 with a 29-bit id
+    // and 8 bytes: 64 a frame leaves room for those and for the bridge's own # lines
+    if (Number.isSafeInteger(side?.frames) && side.frames >= 0) return side.frames * 64 + 64 * 1024;
+    // no sidecar: xz packs candump text about 8 times, columns about 17 times (the CAN Bridge's test files)
+    return f.size * ((side?.format || format) === 'canbridge-columns-xz/2' ? 40 : 16) + 64 * 1024;
   };
+  // a CAN download whose reader stops taking data for this long is ended (it holds a decoder slot)
+  const CAN_STALL_MS = 60_000;
 
   // one log (or its sidecar), exactly as it was received
   r.add('GET', '/api/can/files/:name/download', async (req, res, { params, user }) => {
@@ -2281,20 +2302,23 @@ async function main() {
     if (!n || n.sidecar) throw new HttpError(400, 'That is not a CAN Bridge log name.');
     const f = await canFileOf(params.name);
     if (!f) throw new HttpError(404, 'No such CAN file.');
-    const reader = openCanLog(f.file);
+    // downloads have a decoder slot of their own (canLogReader.js): busy for half a minute, try again later
+    const reader = openCanLog(f.file, { pool: 'download', slotWaitMs: 30_000 });
     const chunks = reader.chunks();
     // the first text before the answer: a log that cannot be read at all (a columns log is checked whole
-    // before its first line) is an error, not an empty file
+    // before its first line; a file xz cannot read gives nothing) is an error, not an empty file
     let first;
     try { first = await chunks.next(); } catch (err) {
-      throw new HttpError(err.retry ? 503 : 422, err.retry ? 'The log cannot be read just now; try again.' : `This log cannot be turned into candump text: ${err.message}`);
+      throw new HttpError(err.retry ? 503 : 422, err.busy ? 'Another CAN log is being turned into candump text; try again in a minute.' : err.retry ? 'The log cannot be read just now; try again.' : `This log cannot be turned into candump text: ${err.message}`);
     }
+    if (first.done && reader.truncated) throw new HttpError(422, `This log cannot be turned into candump text: xz could not read it: ${reader.truncated}`);
     res.writeHead(200, {
       'Content-Type': 'text/plain; charset=us-ascii', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
       'Content-Disposition': attachment(params.name.replace(/\.xz$/, ''))
     });
     if (req.method === 'HEAD') { await chunks.return(); return res.end(); }
     audit.info(`CAN file downloaded as candump text: ${params.name}: ${by(req, user)}`);
+    stopWhenStalled(res, CAN_STALL_MS);
     const { Readable } = require('stream');
     require('stream').pipeline(Readable.from((async function* all() { if (!first.done) yield first.value; yield* canCandumpText(reader, chunks); }())), res, () => {});
     return undefined;
@@ -2337,8 +2361,9 @@ async function main() {
       }
       const log = await canFileOf(nm);
       if (withText && log) {
-        textBytes += (await candumpEstimate(log, format)) + 200;
-        entries.push({ name: `${key}/${nm.replace(/\.xz$/, '')}`, size: null, mtime: log.mtime, open: () => require('stream').Readable.from(canCandumpText(openCanLog(log.file))) });
+        const most = await candumpEstimate(log, format);
+        textBytes += most + 400; // (and the note when it is cut, and the zip's headers)
+        entries.push({ name: `${key}/${nm.replace(/\.xz$/, '')}`, size: null, mtime: log.mtime, open: () => { const rd = openCanLog(log.file, { pool: 'download' }); return require('stream').Readable.from(canCandumpText(rd, rd.chunks(), { maxBytes: most })); } });
       }
       const rec = await canTrust.record(key, nm).catch(() => null);
       manifest.push({ name: nm, startedAt: isoOf(parseCanName(nm).startedAt), bytes: log?.size ?? null, sidecar: Boolean(await canFileOf(`${nm}.json`)), format: typeof format === 'string' ? format.slice(0, 64) : null, check: rec?.status || 'waiting', ...(rec?.reason ? { reason: rec.reason } : {}) });
@@ -2354,6 +2379,7 @@ async function main() {
     const idsOf = async () => (ids ||= await canIndex.idSummary(key, from, to, { stop: () => res.destroyed }));
     res.writeHead(200, { 'Content-Type': 'application/zip', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': attachment(file) });
     audit.info(`CAN bundle downloaded: ${key} ${isoOf(from)} to ${isoOf(to)} (${picked.length} logs): ${by(req, user)}`);
+    if (withText) stopWhenStalled(res, CAN_STALL_MS);
     try {
       await streamZip(res, [
         ...entries,

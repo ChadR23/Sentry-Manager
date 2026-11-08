@@ -21,9 +21,18 @@
 // line, a columns body with absurd counts) cannot use up memory:
 // - no line longer than MAX_LINE (a candump line is under 100 bytes), longer ones skipped;
 // - at most MAX_UNPACKED bytes of text from one log (a one-minute log is about 10 MB of text);
-// - a columns body of at most MAX_COLUMNS_BODY, decoded with at most DECODE_HEAP_MB of
-//   memory and at most MAX_DECODERS at a time; over any of these, or malformed, the log
-//   is refused (an error, as for any unreadable log).
+// - a columns body of at most MAX_COLUMNS_BODY holding at most MAX_FRAMES frames (checked
+//   in the worker before the decoder allocates anything), decoded with a JS heap of at most
+//   DECODE_HEAP_MB; over any of these, or malformed, the log is refused (an error, as for
+//   any unreadable log). The heap limit covers V8's heap only: the decoder's typed arrays
+//   (about 17 bytes a frame) and the body itself are outside it, which is why the frames are
+//   counted first. One decode so uses at most about DECODE_HEAP_MB + DECODE_YOUNG_MB +
+//   MAX_FRAMES x 17 B + 2 x the body. Measured (process RSS): about 680 MB for the worst body
+//   MAX_FRAMES allows (8 million frames, each in a new second), 500 MB for a 48 MB body of 4.2
+//   million real-looking frames, far less for a real one-minute log.
+// - decoder slots: one for the indexer ('index'), one for downloads ('download'), so a slow
+//   download can never hold up indexing. A slot is taken before a columns body is collected,
+//   so a log waiting for one holds only its first bytes (xz is paused meanwhile).
 
 const path = require('path');
 const { spawn } = require('child_process');
@@ -44,7 +53,11 @@ const MAX_COLUMNS_BODY = 64 * 1024 ** 2;
 // the decoder's heap: a 48 MB body of real-looking frames needs 200 to 256 MB; the worst a 64 MB body
 // can be (22 million frames of 3 bytes each) fits in 512 MB too. Past it, the log is refused.
 const DECODE_HEAP_MB = 512;
-const MAX_DECODERS = 2;
+const DECODE_YOUNG_MB = 32;
+// the most frames a columns body may hold: a one-minute log of a Model Y holds about 230,000 (three buses
+// at full load, under a million); a 48 MB body of real-looking frames (the most the bridge writes) 4.2 million. A crafted 64 MB body could claim 22 million
+// (3 bytes each), about 380 MB of typed arrays outside the heap limit: refused before anything is allocated.
+const MAX_FRAMES = 8_000_000;
 
 /** Lines from a stream, each at most maxLine bytes (longer ones are skipped), stopping after maxTotal bytes. */
 async function* boundedLines(stream, { maxLine = MAX_LINE, maxTotal = MAX_UNPACKED, onLimit = () => {} } = {}) {
@@ -83,36 +96,42 @@ async function* boundedLines(stream, { maxLine = MAX_LINE, maxTotal = MAX_UNPACK
 const refused = (name, why) => Object.assign(new Error(`could not read ${name} (${FORMAT_COLUMNS}): ${why}`), { code: 'CAN_LOG_REFUSED' });
 const mb = (n) => (n >= 1024 ** 2 ? `${Math.round(n / 1024 ** 2)} MB` : `${Math.round(n / 1024)} KB`);
 
-// at most MAX_DECODERS workers at once (the indexer reads one log at a time; downloads may add a few)
-let decoding = 0;
-const queue = [];
-async function decoderSlot() {
-  if (decoding < MAX_DECODERS) { decoding++; return; }
-  await new Promise((ok) => queue.push(ok)); // the slot is handed over as it is
-}
-function releaseSlot() {
-  const next = queue.shift();
-  if (next) next(); else decoding--;
+// decoder slots, by who reads: the indexer reads one log at a time; downloads share one of their own,
+// so downloads that stall (a paused browser) never stop the indexer, and at most two decode at once
+const POOLS = { index: { max: 1, busy: 0, queue: [] }, download: { max: 1, busy: 0, queue: [] } };
+/** Wait for a slot of a pool (at most waitMs, then a `retry` error); resolves to its release (safe to call twice). */
+function decoderSlot(pool = 'index', waitMs = Infinity) {
+  const p = POOLS[pool];
+  if (!p) throw new Error(`no decoder pool ${pool}`);
+  const release = () => { let done = false; return () => { if (done) return; done = true; const next = p.queue.shift(); if (next) next.give(); else p.busy--; }; };
+  if (p.busy < p.max) { p.busy++; return Promise.resolve(release()); }
+  return new Promise((ok, no) => {
+    const w = { give: () => { if (timer) clearTimeout(timer); ok(release()); } }; // the slot is handed over as it is
+    const timer = Number.isFinite(waitMs) ? setTimeout(() => {
+      p.queue.splice(p.queue.indexOf(w), 1);
+      no(Object.assign(new Error('the columns decoder is busy with another download'), { retry: true, busy: true }));
+    }, waitMs) : null;
+    p.queue.push(w);
+  });
 }
 
-/** The candump text of a whole columns body, decoded in a worker, in chunks taken as they are read. */
-async function* decodeInWorker(name, parts, length, { heapMb = DECODE_HEAP_MB } = {}) {
+/** The candump text of a whole columns body, decoded in a worker, in chunks taken as they are read (the caller holds a slot). */
+async function* decodeInWorker(name, parts, length, { heapMb = DECODE_HEAP_MB, maxFrames = MAX_FRAMES } = {}) {
   // a fresh buffer of its own (handed to the worker, never one of Node's shared pool)
   const ab = new ArrayBuffer(length);
   const u8 = new Uint8Array(ab);
   let at = 0;
   for (const p of parts) { u8.set(p, at); at += p.length; }
   parts.length = 0;
-  await decoderSlot();
   const credit = new Int32Array(new SharedArrayBuffer(4));
   credit[0] = 2; // chunks the worker may send ahead of the reader
   let worker;
   try {
     worker = new Worker(path.join(__dirname, 'canColumnsWorker.js'), {
-      workerData: { body: ab, credit: credit.buffer }, transferList: [ab], resourceLimits: { maxOldGenerationSizeMb: heapMb }
+      workerData: { body: ab, credit: credit.buffer, maxFrames }, transferList: [ab],
+      resourceLimits: { maxOldGenerationSizeMb: heapMb, maxYoungGenerationSizeMb: DECODE_YOUNG_MB }
     });
   } catch (err) {
-    releaseSlot();
     throw Object.assign(new Error(`the columns decoder could not be started for ${name}: ${err.message}`), { retry: true });
   }
   const inbox = [];
@@ -135,7 +154,6 @@ async function* decodeInWorker(name, parts, length, { heapMb = DECODE_HEAP_MB } 
     }
   } finally {
     await worker.terminate().catch(() => {});
-    releaseSlot();
   }
 }
 
@@ -148,8 +166,11 @@ async function* decodeInWorker(name, parts, length, { heapMb = DECODE_HEAP_MB } 
  * or a columns log refused (code CAN_LOG_REFUSED). After reading, `format` is the format found
  * (null for an empty file) and `truncated` is why a candump text log ended early, or null:
  * what was read before is good (a log cut off when the bridge lost power).
+ * `pool`: whose decoder slot a columns log takes ('index', or 'download' for what people download);
+ * `slotWaitMs`: how long to wait for it before a `retry` error (busy).
  */
-function openCanLog(file, { xz = 'xz', maxUnpacked = MAX_UNPACKED, maxBody = MAX_COLUMNS_BODY, heapMb = DECODE_HEAP_MB } = {}) {
+function openCanLog(file, { xz = 'xz', maxUnpacked = MAX_UNPACKED, maxBody = MAX_COLUMNS_BODY, heapMb = DECODE_HEAP_MB, maxFrames = MAX_FRAMES, pool = 'index', slotWaitMs = Infinity } = {}) {
+  if (!POOLS[pool]) throw new Error(`no decoder pool ${pool}`);
   const name = path.basename(file);
   const state = { format: null, truncated: null };
   async function* chunks() {
@@ -166,6 +187,7 @@ function openCanLog(file, { xz = 'xz', maxUnpacked = MAX_UNPACKED, maxBody = MAX
       try { for await (const c of child.stdout) yield c; } catch (err) { if (err.code !== 'ERR_STREAM_PREMATURE_CLOSE') throw err; }
     }());
     let ended = false;
+    let release = null; // a decoder slot, held from the first bytes of a columns log to its end
     try {
       let head = [];
       let headLen = 0;
@@ -183,6 +205,8 @@ function openCanLog(file, { xz = 'xz', maxUnpacked = MAX_UNPACKED, maxBody = MAX
           head = null;
           columns = isColumns(c);
           state.format = columns ? FORMAT_COLUMNS : FORMAT_CANDUMP;
+          // before the body is collected: a log waiting here holds only these bytes (xz waits on its pipe)
+          if (columns) release = await decoderSlot(pool, slotWaitMs);
         }
         if (total > (columns ? maxBody : maxUnpacked)) { tooBig = true; child.kill(); break; }
         if (columns) body.push(c);
@@ -201,7 +225,7 @@ function openCanLog(file, { xz = 'xz', maxUnpacked = MAX_UNPACKED, maxBody = MAX
         if (tooBig) throw refused(name, `it unpacks to more than ${mb(maxBody)}, more than the CAN Bridge writes`);
         if (code !== 0) throw refused(name, `xz: ${xzWhy}`);
         let text = 0;
-        for await (const t of decodeInWorker(name, body, total, { heapMb })) {
+        for await (const t of decodeInWorker(name, body, total, { heapMb, maxFrames })) {
           text += t.length;
           if (text > maxUnpacked) throw refused(name, `it decodes to more than ${mb(maxUnpacked)}`);
           yield t;
@@ -213,6 +237,7 @@ function openCanLog(file, { xz = 'xz', maxUnpacked = MAX_UNPACKED, maxBody = MAX
     } finally {
       // stopped early (or a failure): stop xz, which would wait for ever on its full pipe
       if (!ended && child.exitCode === null && child.signalCode === null) { child.kill(); child.stdout.destroy(); }
+      if (release) release();
     }
   }
   return {
@@ -223,4 +248,24 @@ function openCanLog(file, { xz = 'xz', maxUnpacked = MAX_UNPACKED, maxBody = MAX
   };
 }
 
-module.exports = { openCanLog, boundedLines, FORMATS, FORMAT_CANDUMP, FORMAT_COLUMNS, MAX_LINE, MAX_UNPACKED, MAX_COLUMNS_BODY, DECODE_HEAP_MB };
+/**
+ * Ends a download whose reader stopped taking data (a paused browser, a phone asleep with the connection
+ * open): once its buffer has stayed full for `ms`, the response is destroyed, which stops the log
+ * reading behind it (xz, the decoder, its slot). A slow reader that keeps draining is left alone.
+ */
+function stopWhenStalled(res, ms = 60_000) {
+  let since = null;
+  const onDrain = () => { since = null; };
+  res.on('drain', onDrain);
+  const timer = setInterval(() => {
+    if (res.destroyed) return;
+    if (!res.writableNeedDrain) { since = null; return; }
+    since ??= Date.now();
+    if (Date.now() - since >= ms) res.destroy(); // (no error: nothing more can reach this reader)
+  }, Math.max(10, Math.min(5000, Math.floor(ms / 4))));
+  timer.unref?.();
+  res.once('close', () => { clearInterval(timer); res.off('drain', onDrain); });
+  return () => clearInterval(timer);
+}
+
+module.exports = { openCanLog, boundedLines, stopWhenStalled, FORMATS, FORMAT_CANDUMP, FORMAT_COLUMNS, MAX_LINE, MAX_UNPACKED, MAX_COLUMNS_BODY, MAX_FRAMES, DECODE_HEAP_MB };

@@ -142,10 +142,13 @@ the signature covers the `.log.xz` file's bytes, whichever format it holds.
 
 A columns body is decoded whole (in a worker thread, so the server keeps
 answering): one that unpacks to more than 64 MB (the bridge closes a compact
-file at 48 MB in memory, sidecar `closed_because: "size"`), is malformed or
-cut off, or needs more than 512 MB to decode, is refused: kept as it came,
+file at 48 MB in memory, sidecar `closed_because: "size"`), that says it
+holds more than 8 million frames (a minute is about 230,000), is malformed or
+cut off, or needs more than 512 MB of heap to decode, is refused: kept as it came,
 listed, and reported once in the Nerd panel's Index line, like any log that
-cannot be read.
+cannot be read. The indexer and the downloads each have one decoder of their
+own, so a download never holds up indexing; a candump download that stops
+taking data for a minute is ended.
 
 The sidecar's `closed_because` is one of `rotate` (the minute was over),
 `quiet`, `stop`, `size` (a compact file closed early at 48 MB in memory) and
@@ -258,7 +261,7 @@ read anything, and watch-only accounts get 403.
 | Route | What |
 |---|---|
 | `GET /api/can/files/<name>/download` | One log (`….log.xz`) or its sidecar (`….log.xz.json`), exactly as received (the signed bytes). |
-| `GET /api/can/files/<name>/candump` | One log as candump text (`….log`, `text/plain`, streamed), whichever format it was stored in: for SavvyCAN, cantools and other tools that only read candump. A `/1` log is its `xz -dc`; a `/2` log is decoded on the fly. Not signed (check the `.log.xz`). A log that cannot be read answers `422`; one cut off ends with a `# Sentry Six Manager: …` line saying so. |
+| `GET /api/can/files/<name>/candump` | One log as candump text (`….log`, `text/plain`, streamed), whichever format it was stored in: for SavvyCAN, cantools and other tools that only read candump. A `/1` log is its `xz -dc`; a `/2` log is decoded on the fly. Not signed (check the `.log.xz`). A log that cannot be read (refused, or not xz at all) answers `422`; `503` while another download is being decoded; one cut off ends with a `# Sentry Six Manager: …` line saying so. |
 | `GET /api/can/export/bundle?key=&from=&to=[&candump=1]` | A `.zip` (streamed) of that car key's logs and sidecars that start in the range (plus the one running at its start), and, after them, `ids.csv` (every CAN id seen: bus, id, DBC message or `unknown`, frames, Hz, first and last seen, minutes, from the index's frame counts) and `manifest.json` (each log's `format` and check). `candump=1` adds each log as candump text (`….log`) beside it (about 10 MB a minute; a log that cannot be read gets a one-line `#` note instead). At most 7 days, 12,600 logs (a week of a log a minute around the clock, with room to spare) and 4 GB. `check=1`: what it would hold, as JSON. |
 | `GET /api/can/export/decoded?key=&from=&to=&signals=[&mode=changes\|every]` | The decoded signals as CSV (`timestamp_utc,signal,value,unit,value_name`), streamed, gzipped when the browser accepts it. `mode=changes` (the default without `signals`): a value when it changes, and once a minute while it stays the same. `mode=every` (the default with `signals`): every point the index keeps (a change, and once a second). At most 24 hours and 5,000,000 rows. `check=1`: `{ mode, minutes, estimatedRows, rowLimit, willStop }` before downloading. A cell that starts like a formula (`= + - @`) is written with a `'` first. |
 | `GET /api/can/export/new-ids?key=&since=[&format=csv]` | CAN ids first seen on or after `since`, with the DBC message or `UNKNOWN`, from per-day id summaries the index keeps (always complete). |
@@ -275,8 +278,11 @@ decoding changes, every stored log is indexed again in the background.
 
 Times are ISO with a zone, or the car's own clock (`YYYY-MM-DD[THH:MM]`).
 `check=1` on the bundle and decoded routes answers what they would hold
-(JSON) without sending the file; with `candump=1`, `candumpBytes` is an
-estimate of the text. The checks, the pairing and the chain
+(JSON) without sending the file; with `candump=1`, `candumpBytes` is the
+most candump text it holds: each log's share comes from its sidecar's
+`frames` (64 bytes a frame, plus 64 KB), or from its size when it has no
+sidecar, and a log whose text is longer is cut there after a whole line,
+with a `# Sentry Six Manager: cut here: …` line (download it alone for all of it). The checks, the pairing and the chain
 are kept in `<data>/can/<vehicleKey>/trust.json`.
 
 **TLS.** Port 10000 takes TLS 1.3 (the bridge uses only 1.3) and 1.2; older

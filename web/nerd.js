@@ -517,7 +517,7 @@ export function openNerdPanel() {
       </div>
       <div class="nd-row">
         <button type="button" class="nd-btn" data-dl-bundle>Logs + ids.csv (.zip, up to 7 days)</button>
-        <label class="nd-lab nd-check"><input type="checkbox" data-dl-candump> with each log as candump text too (.log, for SavvyCAN and cantools; about 10 MB a minute)</label>
+        <label class="nd-lab nd-check"><input type="checkbox" data-dl-bundle-text> with each log as candump text too (.log, for SavvyCAN and cantools; about 10 MB a minute)</label>
         <button type="button" class="nd-btn" data-dl-decoded>Decoded signals (.csv, up to 24 hours)</button>
       </div>
       <div data-dl-out aria-live="polite"></div>
@@ -724,7 +724,7 @@ export function openNerdPanel() {
     } else if (b.matches('[data-dl-bundle]')) {
       const q = rangeQuery();
       if (!q) { $('[data-dl-out]').innerHTML = '<p class="nd-warn">Pick the car key and both times.</p>'; return; }
-      if ($('[data-dl-candump]').checked) q.set('candump', '1');
+      if ($('[data-dl-bundle-text]').checked) q.set('candump', '1');
       await download(`/api/can/export/bundle?${q}`, $('[data-dl-out]'), (i) => `${i.logs.toLocaleString()} log${i.logs === 1 ? '' : 's'} (${size(i.bytes)}) with their sidecars${i.candumpBytes ? `, as candump text (about ${size(i.candumpBytes)})` : ''} and ids.csv.`);
     } else if (b.matches('[data-dl-decoded]')) {
       const q = rangeQuery();

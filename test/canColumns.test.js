@@ -15,7 +15,8 @@ const os = require('os');
 const path = require('path');
 const zlib = require('zlib');
 const { execFileSync, spawnSync } = require('child_process');
-const { openCanLog, FORMAT_CANDUMP, FORMAT_COLUMNS, MAX_COLUMNS_BODY } = require('../server/canLogReader');
+const { Writable } = require('stream');
+const { openCanLog, stopWhenStalled, FORMAT_CANDUMP, FORMAT_COLUMNS, MAX_COLUMNS_BODY, MAX_FRAMES } = require('../server/canLogReader');
 const { createCanIndex } = require('../server/canIndex');
 const { encodeColumns } = require('./fixtures/columnsEncode');
 
@@ -160,4 +161,77 @@ test('a candump text log reads as before: lines as they come, a short file, an e
   } finally {
     await fsp.rm(base, { recursive: true, force: true });
   }
+});
+
+test('a columns body claiming more frames than the bridge writes is refused before the decoder allocates them (outside the heap limit)', { skip, timeout: 60000 }, async () => {
+  const base = await tmp();
+  try {
+    // the worst a 64 MB body can be: one key, no notes, 22 million frames of 3 bytes (time 0, key 0, no data)
+    const head = Buffer.concat([Buffer.from('CANBRIDGE-COLUMNS/2\n'), Buffer.from([1, 6]), Buffer.from('can0 1'), Buffer.from([0])]);
+    const n = Math.floor((MAX_COLUMNS_BODY - head.length - 4) / 3);
+    const count = [];
+    for (let v = n; ; v = Math.floor(v / 128)) { if (v < 128) { count.push(v); break; } count.push((v & 0x7f) | 0x80); }
+    const body = Buffer.concat([head, Buffer.from(count), Buffer.alloc(3 * n)]);
+    assert.ok(body.length <= MAX_COLUMNS_BODY && n > MAX_FRAMES, `${n} frames in ${body.length} bytes`);
+    const file = path.join(base, 'K_20200101T090000Z_1.log.xz');
+    fs.writeFileSync(file, xzc(body));
+    const t0 = Date.now();
+    await assert.rejects(textOf(file), (err) => {
+      assert.equal(err.code, 'CAN_LOG_REFUSED');
+      assert.match(err.message, /holds 22,369,6\d\d frames, more than the 8,000,000/);
+      return true;
+    });
+    assert.ok(Date.now() - t0 < 20_000);
+    // (a smaller bound, the same way; under it the same file decodes)
+    await assert.rejects(textOf(COLUMNS, { maxFrames: 1000 }), /holds 10,8\d\d frames, more than the 1,000/);
+    const { text } = await textOf(COLUMNS, { maxFrames: 20_000 });
+    assert.equal(crypto.createHash('sha256').update(text).digest('hex'), SAMPLE_SHA256);
+  } finally {
+    await fsp.rm(base, { recursive: true, force: true });
+  }
+});
+
+test('a download that stops reading never holds up the indexer: downloads have a decoder slot of their own', { skip, timeout: 60000 }, async () => {
+  // a download that took its first text and then stalled (a paused browser): it holds the download slot
+  const stalled = openCanLog(COLUMNS, { pool: 'download' }).chunks();
+  assert.equal((await stalled.next()).done, false);
+  try {
+    // the indexer's reads go on
+    for (let i = 0; i < 2; i++) {
+      const { text } = await textOf(COLUMNS);
+      assert.equal(crypto.createHash('sha256').update(text).digest('hex'), SAMPLE_SHA256);
+    }
+    // another download waits at most as long as it is told, then is told to try again (busy, not the log's fault)
+    await assert.rejects(textOf(COLUMNS, { pool: 'download', slotWaitMs: 200 }), (err) => err.retry && err.busy);
+    // a candump text log needs no decoder: never waits
+    assert.ok((await textOf(CANDUMP, { pool: 'download', slotWaitMs: 1 })).text.length > 400_000);
+  } finally {
+    await stalled.return();
+  }
+  // once it is ended the slot is free again
+  const { text } = await textOf(COLUMNS, { pool: 'download', slotWaitMs: 5000 });
+  assert.equal(crypto.createHash('sha256').update(text).digest('hex'), SAMPLE_SHA256);
+  assert.throws(() => openCanLog(COLUMNS, { pool: 'nobody' }), /no decoder pool/);
+});
+
+test('a download whose reader stops taking data is ended; one that drains, however slowly, is not', async () => {
+  const sink = (drains) => {
+    const w = new Writable({ highWaterMark: 16, write(chunk, enc, cb) { if (drains) setTimeout(cb, 5); } });
+    w.on('error', () => {});
+    return w;
+  };
+  const stuck = sink(false);
+  stopWhenStalled(stuck, 80);
+  stuck.write(Buffer.alloc(64));
+  assert.equal(stuck.writableNeedDrain, true);
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal(stuck.destroyed, true, 'a full buffer for longer than allowed');
+  const slow = sink(true);
+  stopWhenStalled(slow, 80);
+  const end = Date.now() + 400;
+  while (Date.now() < end) {
+    if (!slow.write(Buffer.alloc(64))) await new Promise((r) => slow.once('drain', r));
+  }
+  assert.equal(slow.destroyed, false);
+  slow.destroy();
 });

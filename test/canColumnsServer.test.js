@@ -158,6 +158,28 @@ test('a columns log through the server: uploaded, indexed, listed with its forma
     // without the option: only the files as received
     const plain = readZip(Buffer.from(await (await s.call('GET', `/api/can/export/bundle?${q}`, undefined, { raw: true })).arrayBuffer())).map((e) => e.name);
     assert.equal(plain.filter((n) => n.endsWith('.log')).length, 0);
+
+    // a file xz cannot read at all (not xz): an error too, not a 200 with only a note
+    const junk = `${key}_20261108T012000Z_4.log.xz`;
+    assert.equal((await put(token, junk, crypto.randomBytes(3000))).status, 201);
+    const junkDump = await s.call('GET', `/api/can/files/${junk}/candump`);
+    assert.equal(junkDump.status, 422);
+    assert.match(JSON.stringify(junkDump.data), /xz could not read it/);
+    // a sidecar that understates the frames (the uploader's word): the bundle holds no more of the log's text
+    // than its check said, cut after a whole line with a note, instead of breaking the zip partway
+    const liar = `${key}_20261108T012100Z_5.log.xz`;
+    assert.equal((await put(token, liar, log)).status, 201);
+    assert.equal((await put(token, `${liar}.json`, Buffer.from(JSON.stringify({ format: 'canbridge-columns-xz/2', frames: 0 })))).status, 201);
+    const q2 = `key=${key}&from=2026-11-08T01:20:30Z&to=2026-11-08T01:22:00Z`;
+    const check2 = (await s.call('GET', `/api/can/export/bundle?${q2}&candump=1&check=1`)).data;
+    assert.equal(check2.logs, 2);
+    const zip2 = readZip(Buffer.from(await (await s.call('GET', `/api/can/export/bundle?${q2}&candump=1`, undefined, { raw: true })).arrayBuffer()));
+    const texts = zip2.filter((e) => e.name.endsWith('.log'));
+    assert.ok(texts.reduce((n, e) => n + e.data.length, 0) <= check2.candumpBytes, 'within what the check reported');
+    const cutText = zip2.find((e) => e.name === `${key}/${liar.replace(/\.xz$/, '')}`).data.toString('latin1');
+    assert.ok(cutText.length < text.length && cutText.length > 60_000, `cut (${cutText.length})`);
+    assert.match(cutText, /\n\n# Sentry Six Manager: cut here: .*candump \.log/);
+    assert.ok(text.toString('latin1').startsWith(cutText.slice(0, cutText.indexOf('\n\n# Sentry') + 1)), 'whole lines, as they are');
   } finally {
     await s.stop();
     await fsp.rm(dir, { recursive: true, force: true });
