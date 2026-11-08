@@ -62,6 +62,18 @@ class DisksProvider {
     return Math.max(0, n - this.errBase.get(name));
   }
 
+  /**
+   * Sampling stopped (nobody watching) and starts again later: the next
+   * sample has nothing to diff against, so the idle stretch is neither a
+   * rate averaged over hours nor taken for a stall. The error counts stay:
+   * errors that came while nobody watched still count as the disk's own,
+   * unless most disks rose together.
+   */
+  resetBaseline() {
+    this.prev = null;
+    this.prevAt = null;
+  }
+
   probe() {
     this.disks = new Map();
     for (const name of listDir(join(this.sysRoot, 'block')).sort()) {

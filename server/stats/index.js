@@ -379,6 +379,8 @@ function createStats(options = {}) {
     if (timer) timers.clearTimeout(timer);
     timer = null;
     guard('gpus', () => gpu.stopStreams());
+    // a sample after a long idle stretch is a fresh start, not a stall
+    guard('disks', () => disks.resetBaseline());
     if (dirty) save();
     callSafe(options.onSampling, false);
   }

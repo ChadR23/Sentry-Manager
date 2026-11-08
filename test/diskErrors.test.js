@@ -108,3 +108,34 @@ test('errors that arrive across a stall (no sample for minutes) are not the disk
   alerts.evaluate(31000, { disks: got });
   assert.equal(raised.length, 0, 'a single error is not "keeps reporting"');
 });
+
+test('errors that came while nobody watched (sampling idle for an hour) are still the disk\'s own; most disks at once stay shared', (t) => {
+  const { disks, set, clock } = fakeDisks(t, ['sda', 'sdb', 'sdc']);
+  disks.sample();
+  clock.now += 2000;
+  disks.sample();
+  disks.resetBaseline(); // goIdle: nobody watches any more
+  clock.now += 3_600_000;
+  set('sda', 25);
+  const got = disks.sample(); // touch(): sampling starts again
+  assert.deepEqual(got.map((d) => [d.name, d.ioErrors, d.ioErrorsShared]), [['sda', 25, undefined], ['sdb', 0, undefined], ['sdc', 0, undefined]]);
+  assert.equal(got[0].readBps, null, 'no rate averaged over the idle hour');
+  const raised = [];
+  const alerts = new Alerts({ onAlert: (a) => raised.push(a) });
+  alerts.evaluate(0, { disks: got });
+  alerts.evaluate(31000, { disks: got });
+  assert.deepEqual(raised.map((a) => a.key), ['disk-errors:sda']);
+  // the same idle stretch with most disks rising together is still shared
+  disks.resetBaseline();
+  clock.now += 3_600_000;
+  set('sda', 26);
+  set('sdb', 1);
+  set('sdc', 1);
+  assert.deepEqual(disks.sample().map((d) => [d.ioErrors, d.ioErrorsShared]), [[25, 1], [0, 1], [0, 1]]);
+});
+
+test('the stats engine resets the disk baseline when it goes idle', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server', 'stats', 'index.js'), 'utf8');
+  const idle = src.slice(src.indexOf('function goIdle()'), src.indexOf('load();', src.indexOf('function goIdle()')));
+  assert.match(idle, /disks\.resetBaseline\(\)/);
+});
