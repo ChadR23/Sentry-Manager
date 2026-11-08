@@ -1988,8 +1988,8 @@ async function main() {
   };
   r.add('GET', '/api/can/settings', async () => {
     const cfg = canCfg();
-    const { bytes, count, logs } = await canLogs.list({ limit: 2000 });
-    const keys = [...new Set([...logs.map((l) => l.vehicleKey), ...cfg.tokens.map((t) => t.key).filter(Boolean)])].sort();
+    const { bytes, count, keys: logKeys } = await canLogs.summary();
+    const keys = [...new Set([...logKeys, ...cfg.tokens.map((t) => t.key).filter(Boolean)])].sort();
     return {
       enabled: Boolean(cfg.enabled), since: cfg.at || null, logs: count, bytes, port: { ...(canPort?.state() || { listening: false, error: null, port: CAN_PORT }), https: Boolean(tlsSource) },
       keys, map: canMap(), vehicles: vehicles.list().map((v) => ({ id: v.id, name: v.name })), index: canIndex.status(),

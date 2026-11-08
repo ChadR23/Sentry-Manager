@@ -46,7 +46,26 @@ async function sha256Of(file) {
   return h.digest('hex');
 }
 
-function createCanLogs({ dir, freeBytes = async () => Infinity, now = () => Date.now(), maxFilesPerCar = 20_000, minFree = 2 * 1024 ** 3 }) {
+/** Run fn over items, at most `n` at a time. */
+async function eachLimit(items, n, fn) {
+  let i = 0;
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => { while (i < items.length) await fn(items[i++]); }));
+}
+
+/** What the Nerd panel shows of a sidecar. */
+const sideFacts = (side) => ({
+  frames: Number.isFinite(side?.frames) ? side.frames : null,
+  dropped: [side?.dropped_chunks, side?.dropped].find((x) => Number.isFinite(x)) ?? null,
+  appVersion: [side?.app_version, side?.appVersion].find((x) => typeof x === 'string')?.slice(0, 40) ?? null
+});
+
+// A bridge uploads a log every 10 minutes around the clock: 144 a day. The cap counts finished logs
+// only (not sidecars or uploads under way) and is there against a stolen token making endless tiny
+// files; the free-space floor is what guards the disk. 200,000 is close to four years of one car.
+const MAX_LOGS_PER_CAR = 200_000;
+const RESCAN_MS = 10 * 60_000; // the catalogue is read again from the folder at least this often
+
+function createCanLogs({ dir, freeBytes = async () => Infinity, now = () => Date.now(), maxFilesPerCar = MAX_LOGS_PER_CAR, minFree = 2 * 1024 ** 3 }) {
   const fileOf = (name) => {
     const n = parseName(name);
     if (!n) throw canError(400, 'bad_name', 'That is not a CAN Bridge log name.');
@@ -95,6 +114,7 @@ function createCanLogs({ dir, freeBytes = async () => Infinity, now = () => Date
         if (st && now() - st.mtimeMs > maxAgeMs) {
           await fsp.rm(path.join(dir, key, f), { force: true });
           await fsp.rm(path.join(dir, key, `${f}.json`), { force: true });
+          await ownChange(key);
           n++;
         }
       }
@@ -133,9 +153,8 @@ function createCanLogs({ dir, freeBytes = async () => Infinity, now = () => Date
       if (offset === 0 && (await freeBytes()) < length * 2 + minFree) throw canError(507, 'no_space', 'There is not enough free space for this file.');
       if (offset === 0) {
         // at most so many files per car (a stolen token cannot fill the disk with small ones)
-        let count = 0;
-        try { count = (await fsp.readdir(path.dirname(file))).length; } catch { /* a new car */ }
-        if (count >= maxFilesPerCar) throw canError(507, 'car_full', `This car has ${maxFilesPerCar} CAN files already: the owner can delete old ones in the Nerd settings.`, { received: 0 });
+        const count = n.sidecar ? 0 : (await catalogue(n.vehicleKey)).rows.size;
+        if (count >= maxFilesPerCar) throw canError(507, 'car_full', `This car has ${maxFilesPerCar} CAN logs already: the owner can delete old ones in the Nerd settings.`, { received: 0 });
       }
       if (offset === 0) {
         // at most 16 uploads half-finished at once per car (the bridge sends one at a time)
@@ -147,6 +166,7 @@ function createCanLogs({ dir, freeBytes = async () => Infinity, now = () => Date
       const part = `${file}.part`;
       if (offset === 0) await fsp.writeFile(`${part}.json`, JSON.stringify({ length, sha256, startedAt: now() }));
       await fsp.appendFile(part, body);
+      if (offset === 0) await ownChange(n.vehicleKey); // a new .part is no change to the catalogue
       const received = offset + body.length;
       if (received < length) return { received, length, complete: false };
       // the last byte: kept only when it is the file the app hashed
@@ -165,43 +185,134 @@ function createCanLogs({ dir, freeBytes = async () => Infinity, now = () => Date
       }
       await fsp.rename(part, file);
       await fsp.rm(`${part}.json`, { force: true });
+      await noteChanged(n.vehicleKey, n.sidecar ? name.slice(0, -5) : name);
       return { received, length, complete: true };
     } finally {
       busy.delete(file);
     }
   }
 
-  /** Every finished log, newest first: name, vehicleKey, start, size, sidecar facts. */
-  async function list({ limit = 200 } = {}) {
-    const out = [];
-    let keys = [];
-    try { keys = (await fsp.readdir(dir, { withFileTypes: true })).filter((d) => d.isDirectory()).map((d) => d.name); } catch { return { logs: [], bytes: 0, count: 0 }; }
+  // ---- the catalogue: every finished log of each car, with its size and sidecar facts, kept in memory
+  // (the Nerd panel lists it on every upload and index step; reading 20,000 files each time took seconds).
+  // Changes made here update it at once; the folder is read again when its time changes (a change made
+  // from outside), and at least every RESCAN_MS. A folder read stats each file, but reads a sidecar again
+  // only when its size or time changed.
+  const cats = new Map(); // key -> { rows: Map(name -> row), orphanBytes, dirMtime, at, loading }
+  const rowBytes = (r) => r.bytes + (r.sideBytes || 0);
+
+  async function readFolder(key, old) {
+    const kdir = path.join(dir, key);
+    const st0 = await exists(kdir);
+    let names = [];
+    try { names = await fsp.readdir(kdir); } catch { /* no such car (yet) */ }
+    const have = new Set(names);
+    const rows = new Map();
+    let orphanBytes = 0;
+    const logs = [];
+    for (const name of names) {
+      const n = parseName(name);
+      if (!n || n.vehicleKey !== key) continue;
+      if (n.sidecar) { if (!have.has(name.slice(0, -5))) logs.push({ name, n, orphan: true }); continue; }
+      logs.push({ name, n });
+    }
+    await eachLimit(logs, 16, async ({ name, n, orphan }) => {
+      const st = await exists(path.join(kdir, name));
+      if (!st?.isFile()) return;
+      if (orphan) { orphanBytes += st.size; return; }
+      const row = { name, vehicleKey: key, startedAtMs: n.startedAt, seq: n.seq, bytes: st.size, mtimeMs: st.mtimeMs, sideBytes: 0, sideMtime: null, side: null };
+      if (have.has(`${name}.json`)) {
+        const ss = await exists(path.join(kdir, `${name}.json`));
+        if (ss?.isFile()) {
+          row.sideBytes = ss.size;
+          row.sideMtime = ss.mtimeMs;
+          const was = old?.get(name);
+          if (was && was.sideBytes === ss.size && was.sideMtime === ss.mtimeMs) row.side = was.side;
+          else {
+            try { row.side = sideFacts(JSON.parse(await fsp.readFile(path.join(kdir, `${name}.json`), 'utf8'))); } catch { row.side = null; }
+          }
+        }
+      }
+      rows.set(name, row);
+    });
+    return { rows, orphanBytes, dirMtime: st0?.mtimeMs ?? null, at: now() };
+  }
+
+  async function catalogue(key) {
+    let c = cats.get(key);
+    if (c?.loading) return c.loading;
+    if (c) {
+      const st = await exists(path.join(dir, key));
+      if ((st?.mtimeMs ?? null) === c.dirMtime && now() - c.at < RESCAN_MS) return c;
+    }
+    const loading = readFolder(key, c?.rows).then((fresh) => { cats.set(key, fresh); return fresh; }, (err) => { cats.delete(key); throw err; });
+    cats.set(key, { ...(c || { rows: new Map(), orphanBytes: 0, dirMtime: null, at: 0 }), loading });
+    return loading;
+  }
+
+  /** A log (or its sidecar) was finished or deleted here: its row now, and the folder's time taken as seen. */
+  async function noteChanged(key, logName) {
+    const c = cats.get(key);
+    if (!c || c.loading) return; // read whole the next time it is asked for
+    const kdir = path.join(dir, key);
+    const st = await exists(path.join(kdir, logName));
+    if (!st?.isFile()) c.rows.delete(logName);
+    else {
+      const n = parseName(logName);
+      const row = { name: logName, vehicleKey: key, startedAtMs: n.startedAt, seq: n.seq, bytes: st.size, mtimeMs: st.mtimeMs, sideBytes: 0, sideMtime: null, side: null };
+      const ss = await exists(path.join(kdir, `${logName}.json`));
+      if (ss?.isFile()) {
+        row.sideBytes = ss.size;
+        row.sideMtime = ss.mtimeMs;
+        try { row.side = sideFacts(JSON.parse(await fsp.readFile(path.join(kdir, `${logName}.json`), 'utf8'))); } catch { row.side = null; }
+      }
+      c.rows.set(logName, row);
+    }
+    // a sidecar that came before its log was counted apart: read whole next time
+    if (c.orphanBytes) { cats.delete(key); return; }
+    c.dirMtime = (await exists(kdir))?.mtimeMs ?? null;
+  }
+
+  /** The folder changed here in a way the catalogue does not show (an upload started, a stale one dropped). */
+  async function ownChange(key) {
+    const c = cats.get(key);
+    if (c && !c.loading) c.dirMtime = (await exists(path.join(dir, key)))?.mtimeMs ?? null;
+  }
+
+  async function carKeys() {
+    try { return (await fsp.readdir(dir, { withFileTypes: true })).filter((d) => d.isDirectory()).map((d) => d.name); } catch { return []; }
+  }
+
+  /** How many finished logs, and how many bytes of logs and sidecars, without listing them. */
+  async function summary() {
     let bytes = 0;
     let count = 0;
-    for (const key of keys) {
-      let names = [];
-      try { names = await fsp.readdir(path.join(dir, key)); } catch { continue; }
-      for (const name of names) {
-        const n = parseName(name);
-        const st = n ? await exists(path.join(dir, key, name)) : null;
-        if (!st) continue;
-        bytes += st.size;
-        if (n.sidecar) continue;
-        count++;
-        let side = null;
-        if (names.includes(`${name}.json`)) {
-          try { side = JSON.parse(await fsp.readFile(path.join(dir, key, `${name}.json`), 'utf8')); } catch { side = null; }
-        }
-        out.push({
-          name, vehicleKey: n.vehicleKey, startedAt: new Date(n.startedAt).toISOString(), seq: n.seq, bytes: st.size, receivedAt: new Date(st.mtimeMs).toISOString(),
-          sidecar: Boolean(side), frames: Number.isFinite(side?.frames) ? side.frames : null,
-          dropped: [side?.dropped_chunks, side?.dropped].find((x) => Number.isFinite(x)) ?? null,
-          appVersion: [side?.app_version, side?.appVersion].find((x) => typeof x === 'string')?.slice(0, 40) ?? null
-        });
-      }
+    const keys = [];
+    for (const key of await carKeys()) {
+      const c = await catalogue(key);
+      if (!c.rows.size && !c.orphanBytes) continue;
+      keys.push(key);
+      count += c.rows.size;
+      bytes += c.orphanBytes;
+      for (const r of c.rows.values()) bytes += rowBytes(r);
     }
-    out.sort((a, b) => b.startedAt.localeCompare(a.startedAt) || b.seq - a.seq);
-    return { logs: out.slice(0, Math.max(1, Math.min(2000, limit))), bytes, count };
+    return { bytes, count, keys };
+  }
+
+  /** Every finished log, newest first: name, vehicleKey, start, size, sidecar facts. */
+  async function list({ limit = 200 } = {}) {
+    const all = [];
+    let bytes = 0;
+    for (const key of await carKeys()) {
+      const c = await catalogue(key);
+      bytes += c.orphanBytes;
+      for (const r of c.rows.values()) { bytes += rowBytes(r); all.push(r); }
+    }
+    all.sort((a, b) => b.startedAtMs - a.startedAtMs || b.seq - a.seq);
+    const logs = all.slice(0, Math.max(1, Math.min(2000, limit))).map((r) => ({
+      name: r.name, vehicleKey: r.vehicleKey, startedAt: new Date(r.startedAtMs).toISOString(), seq: r.seq, bytes: r.bytes, receivedAt: new Date(r.mtimeMs).toISOString(),
+      sidecar: Boolean(r.side), frames: r.side?.frames ?? null, dropped: r.side?.dropped ?? null, appVersion: r.side?.appVersion ?? null
+    }));
+    return { logs, bytes, count: all.length };
   }
 
   /** Delete one log and its sidecar (the Nerd settings). */
@@ -211,9 +322,10 @@ function createCanLogs({ dir, freeBytes = async () => Infinity, now = () => Date
     const file = fileOf(name);
     if (!(await exists(file))) throw canError(404, 'not_found', 'No such log.');
     for (const f of [file, `${file}.json`, `${file}.part`, `${file}.part.json`]) await fsp.rm(f, { force: true });
+    await noteChanged(n.vehicleKey, name);
   }
 
-  return { status, receive, list, remove, stateOf, cleanStale, MAX_CHUNK, MAX_FILE, MAX_SIDECAR };
+  return { status, receive, list, summary, remove, stateOf, cleanStale, MAX_CHUNK, MAX_FILE, MAX_SIDECAR };
 }
 
-module.exports = { createCanLogs, parseName, MAX_CHUNK, MAX_FILE, MAX_SIDECAR };
+module.exports = { createCanLogs, parseName, MAX_CHUNK, MAX_FILE, MAX_SIDECAR, MAX_LOGS_PER_CAR };
