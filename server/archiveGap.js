@@ -49,10 +49,8 @@
 
 const fsp = require('fs/promises');
 const path = require('path');
-const zlib = require('zlib');
-const { promisify } = require('util');
+const { classify, readHead, readMinuteFile, KIND } = require('./canFormat');
 
-const gunzip = promisify(zlib.gunzip);
 const MIN = 60;
 const HOUR = 3600;
 const GRACE_S = 3 * HOUR; // a minute is looked at once it is this old ...
@@ -60,8 +58,6 @@ const LONG_GRACE_S = 24 * HOUR; // ... or this old when nothing later is on the 
 const WINDOW_DAYS = 7;
 const HABIT_DAYS = 14;
 const MOVING = 3; // m/s (about 11 km/h)
-const MOVING_KPH = 3;
-const MAX_KPH = 285; // DI_vehicleSpeed's range ends here; 4095 raw (287.6 km/h) is "not available"
 const GAP_S = 3 * MIN; // footage that stops while moving and goes on this much later: a cut
 const LATE_MS = 3600 * 1000; // a clip that reached the share this long after it was recorded is late
 const FILLING_MS = 2 * 3600 * 1000; // ... and the share is still receiving if one arrived this recently
@@ -82,7 +78,18 @@ function stampSec(name) {
   return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) / 1000 : null;
 }
 const keyOfSec = (s) => new Date(s * 1000).toISOString().slice(0, 19).replace('T', '_').replace(/:/g, '-');
-const dayOfSec = (s) => keyOfSec(s).slice(0, 10);
+// the day of a moment, kept per day number: analyze() asks for it several times per clip
+const dayNames = new Map();
+const dayOfSec = (s) => {
+  const n = Math.floor(s / 86400);
+  let d = dayNames.get(n);
+  if (d === undefined) {
+    d = new Date(n * 86400_000).toISOString().slice(0, 10);
+    if (dayNames.size > 5000) dayNames.clear();
+    dayNames.set(n, d);
+  }
+  return d;
+};
 const hhmm = (k) => k.slice(11, 16).replace('-', ':');
 
 const formats = new Map(); // time zone -> Intl.DateTimeFormat (or null: not a zone)
@@ -129,6 +136,16 @@ function coverIdx(starts, s) {
   return best >= 0 && s - starts[best] < 62 ? best : -1;
 }
 const covered = (starts, s) => coverIdx(starts, s) >= 0;
+/** The first index of `starts` (sorted) after `s`, or -1. */
+function nextAfter(starts, s) {
+  let lo = 0;
+  let hi = starts.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (starts[mid] > s) hi = mid; else lo = mid + 1;
+  }
+  return lo < starts.length ? lo : -1;
+}
 
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
 const dayLabel = (day) => {
@@ -164,7 +181,7 @@ function analyze({ files, nowMs, tz = 'UTC', encoded = new Set(), speeds = new M
   const now = wallSec(nowMs, tz);
   const offsets = new Map();
   const utc = (s) => utcOfWall(s, tz, offsets);
-  const firstDay = dayOfSec(now - (windowDays - 1) * 86400);
+  const firstDaySec = Math.floor((now - (windowDays - 1) * 86400) / 86400) * 86400;
   const clips = [];
   for (const f of files.values ? files.values() : files) {
     if (f.kind !== 'clip' || !(f.size > 0)) continue;
@@ -202,7 +219,7 @@ function analyze({ files, nowMs, tz = 'UTC', encoded = new Set(), speeds = new M
   const due = (s) => now - s >= GRACE_S && (past(s) || quiet(s));
   // not due only because the archive is still copying: the day is "filling"
   const hold = (s) => { if (now - s >= GRACE_S && !past(s) && catchingUp) dayOf(dayOfSec(s)).held.add(s); };
-  const inWindow = (s) => dayOfSec(s) >= firstDay;
+  const inWindow = (s) => s >= firstDaySec;
   const valuesOf = (rel) => speeds.get(rel).filter((v) => Number.isFinite(v));
   const frontAt = new Map(); // clip start -> its front clip's speeds
   for (const c of clips) if (c.f.camera === 'front' && Array.isArray(speeds.get(c.f.rel))) frontAt.set(c.s, valuesOf(c.f.rel));
@@ -226,9 +243,20 @@ function analyze({ files, nowMs, tz = 'UTC', encoded = new Set(), speeds = new M
     // footage minutes of the day have a CAN minute; with a wrong one they have it k hours away.
     const canSet = canMinutes ? new Set([...canMinutes].map((x) => x - (x % MIN))) : null;
     const aligned = (mins, k) => mins.filter((x) => canSet.has(x + k * HOUR)).length / mins.length;
+    // the footage minutes of each day, grouped once
+    const startsByDay = new Map();
+    if (canSet) {
+      for (const x of starts) {
+        const d = dayOfSec(x);
+        if (!perDay.has(d)) continue;
+        let set = startsByDay.get(d);
+        if (!set) startsByDay.set(d, (set = new Set()));
+        set.add(x - (x % MIN));
+      }
+    }
     for (const [day, list] of perDay) {
       let shift = 0;
-      const mins = canSet ? [...new Set(starts.filter((x) => dayOfSec(x) === day).map((x) => x - (x % MIN)))] : [];
+      const mins = [...(startsByDay.get(day) || [])];
       if (mins.length >= 5 && aligned(mins, 0) < 0.3) {
         let best = 0;
         for (const k of SHIFTS) {
@@ -255,7 +283,7 @@ function analyze({ files, nowMs, tz = 'UTC', encoded = new Set(), speeds = new M
       if (tail.length < 3 || !tail.every((x) => x > MOVING)) continue;
       const end = c.s + MIN;
       // the next footage of any kind after this minute
-      const nextIdx = starts.findIndex((s) => s > c.s);
+      const nextIdx = nextAfter(starts, c.s);
       const next = nextIdx >= 0 ? starts[nextIdx] : null;
       // real time in between (a change of clocks between two clip names is no gap)
       const endU = utc(c.s) + MIN;
@@ -426,17 +454,8 @@ function noteFor(vehicle, f) {
 }
 const scoreOf = (f) => f.missingMinutes + f.partialMinutes;
 
-/** What a CAN minute shows: 'drive', 'sentry' or 'none'. */
-function classify(sig) {
-  const speed = (sig.DI_vehicleSpeed || []).map((p) => p[1]);
-  const gear = (sig.DI_gear || []).map((p) => p[1]);
-  const moving = speed.some((x) => x > MOVING_KPH && x <= MAX_KPH); // not "not available" (287.6)
-  const inDR = gear.some((x) => x === 4 || x === 2);
-  const parked = gear.length > 0 && gear.every((x) => x === 1);
-  if (inDR || (moving && !parked)) return 'drive';
-  if ((sig.UI_autopilotPowerStateRequest || []).some((p) => p[1] === 1) || (sig.UIsentryMode284 || []).some((p) => p[1] === 1)) return 'sentry';
-  return 'none';
-}
+// what a CAN minute shows (classify, canFormat.js): worked out when the minute is written and kept
+// at the top of its file (`act`), so only that is read; a minute from before that is read whole
 
 /**
  * The service: check(vid) after each scan (single flight, one more run queued when
@@ -466,11 +485,14 @@ function createArchiveGap({ inventory, vehicles, notes, db, speedIndex = null, c
   async function minuteKind(key, name) {
     const id = `${key}/${name}`;
     if (canCache.has(id)) return canCache.get(id);
-    let kind;
-    try {
-      const data = JSON.parse((await gunzip(await fsp.readFile(path.join(canDir, key, name)))).toString('utf8'));
+    const file = path.join(canDir, key, name);
+    const head = await readHead(file);
+    let kind = head && KIND[head.act];
+    if (!kind) {
+      const data = await readMinuteFile(file);
+      if (!data) return 'none'; // unreadable now: asked again next time
       kind = classify(data.signals || {});
-    } catch { return 'none'; } // unreadable now: asked again next time
+    }
     if (canCache.size > 100_000) canCache.clear();
     canCache.set(id, kind);
     return kind;
@@ -498,8 +520,8 @@ function createArchiveGap({ inventory, vehicles, notes, db, speedIndex = null, c
       try { names = await fsp.readdir(path.join(canDir, key)); } catch { continue; }
       const trusted = () => canKeyMapped(key) || matched.has(key);
       const k = { key, driving: [], sentry: [], minutes: [], coveredActive: 0 };
-      for (const name of names.sort().reverse()) {
-        if (/^\d{8}T\d{4}/.test(name) && name.slice(0, 13) < fromKey) break; // older than the window: the rest are too
+      // the window's minutes only, before sorting (a car key's folder holds months of them)
+      for (const name of names.filter((x) => x.slice(0, 13) >= fromKey && MINUTE_FILE.test(x)).sort().reverse()) {
         const m = MINUTE_FILE.exec(name);
         if (!m) continue;
         const s = wallSec(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]), tz);

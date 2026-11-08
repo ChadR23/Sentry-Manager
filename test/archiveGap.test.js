@@ -562,3 +562,20 @@ test('a check asked for while one runs runs again after it; soon() checks after 
     await fsp.rm(dir, { recursive: true, force: true });
   }
 });
+
+test('a CAN minute\'s kind comes from `act` at the top of its file (its signals not read); an older minute is read whole', async () => {
+  const files = drive(new Map(), at(7, 8), at(7, 9));
+  drive(files, at(7, 18), at(7, 18, 10));
+  const dir = await canSetup([[at(7, 9, 30), 40, 4]]); // the older layout: classified from its signals
+  try {
+    // written since `act` is kept: its signals say nothing, its act says driving (worked out when written)
+    const name = `${new Date(at(7, 9, 31)).toISOString().slice(0, 16).replace(/[-:]/g, '')}.json.gz`;
+    await fsp.writeFile(path.join(dir, 'K', name), zlib.gzipSync(JSON.stringify({ minute: name.slice(0, 13), enc: 'c1', act: 'd', logs: {}, signals: {}, ids: {} })));
+    const db = fakeDb();
+    const { gap } = service({ files, db, dir });
+    const res = await gap.check('car');
+    assert.equal(res.days['2026-11-07'].missingMinutes, 2);
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});

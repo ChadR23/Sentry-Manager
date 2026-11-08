@@ -5,10 +5,12 @@
 // already in signals. For every car (vehicleKey) and UTC minute:
 //
 //   <DATA>/can-index/<vehicleKey>/<yyyyMMddTHHmm>.json.gz
-//     { minute, trust, logs: { "<log name>": { span: [first ms, last ms], ids, trust } },
+//     { minute, enc, act, trust, logs: { "<log name>": { span: [first ms, last ms], ids, trust } },
 //       signals: { name: [[ms since the minute, value], …] },
 //       ids: { "can0:2E5": frames, … } }       (unknown ids are counted too; last,
 //                                               canSearch.js reads only them)
+//     (on disk each series is two columns, time steps and values: canFormat.js;
+//     `act` is what the minute shows of the car, for the archive gap check)
 //   <DATA>/can-index/<vehicleKey>/signals.json   every signal seen, with unit,
 //                                                range, value names, bus
 //   <DATA>/can-index/<vehicleKey>/<yyyyMMddTHHmm>.raw.json.gz
@@ -18,6 +20,10 @@
 //     every id's payload as it changes (decodable or not), for the Viewer's raw
 //     view: at most RAW_PER_SEC changes a second per id, the last payload of
 //     each second, and each id's payload at the start of the minute
+//   <DATA>/can-index/<vehicleKey>/ids-<yyyyMMdd>.json  every id of that UTC day:
+//     { v, ids: { "can0:2E5": [first minute, last minute, minutes] } }, made
+//     from the minutes' tops when asked for (new ids since a date) and
+//     removed whenever a minute of the day is written
 //   <DATA>/can-index/done.json                   which logs are indexed
 //     ("<size>/<mtime>/<FORMAT>[/<sidecar size>-<sidecar mtime>]": a log
 //     indexed by an older format is read again, and only what that format
@@ -39,6 +45,7 @@ const path = require('path');
 const zlib = require('zlib');
 const { spawn } = require('child_process');
 const { parseName } = require('./canLogs');
+const fmt = require('./canFormat');
 const { bundledDbc, decodeFrame } = require('./canDbc');
 
 // a log is read line by line with bounds: no line longer than this (a candump line is under 100
@@ -85,7 +92,11 @@ const RAW_PER_SEC = 10; // raw payload changes kept a second per id
 // the index format: r1 added the raw snapshots (an older stamp has none)
 const FORMAT = 'r1';
 const KEEP_MS = 1000; // a point at least once a second
-const LINE = /^\((\d+)\.(\d+)\)\s+(\S+)\s+([0-9A-Fa-f]{1,8})#([0-9A-Fa-f]*)\s*$/;
+// the interface is a plain name (can0, vcan1): anything else in a log line is not indexed, so a
+// crafted log cannot make up ids (each a key in the index) or put a formula into a CSV download
+const IFACE = /^[A-Za-z][A-Za-z0-9_]{0,15}$/;
+const LINE = /^\((\d+)\.(\d+)\)\s+([A-Za-z][A-Za-z0-9_]{0,15})\s+([0-9A-Fa-f]{1,8})#([0-9A-Fa-f]*)\s*$/;
+const goodId = (idKey) => IFACE.test(String(idKey).split(':')[0]);
 const DEFAULT_BUSES = { can0: 'VehicleBus', can1: 'ChassisBus' };
 
 const minuteKey = (ms) => new Date(Math.floor(ms / 60000) * 60000).toISOString().slice(0, 16).replace(/[-:]/g, '');
@@ -110,6 +121,11 @@ function busMapOf(side) {
 }
 
 const MINUTE_FILE = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})\.json\.gz$/;
+const RAW_FILE = /^(\d{8}T\d{4})\.raw\.json\.gz$/;
+const ID_DAY = 'v1';
+const dayFile = (dayKey) => `ids-${dayKey}.json`;
+const MINUTE_CACHE = 4; // parsed minutes kept for the Viewer (a busy minute is tens of MB parsed)
+const CLIP_STEP_MS = 250; // every signal of a clip (the Viewer's list): the last value each 250 ms
 const minuteOfFile = (f) => { const m = MINUTE_FILE.exec(f); return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]) : null; };
 
 /** Write a file whole or not at all (a failed write leaves no .tmp file behind). */
@@ -151,7 +167,7 @@ async function sidecarStamp(file) {
   return st ? `/${st.size}-${Math.round(st.mtimeMs)}` : '';
 }
 
-function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bundledDbc, xz = 'xz', onIndexed = null, onProgress = null, usable = async () => ({ use: true, trust: 'unsigned' }), maxUnpacked = MAX_UNPACKED }) {
+function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bundledDbc, xz = 'xz', onIndexed = null, onProgress = null, usable = async () => ({ use: true, trust: 'unsigned' }), maxUnpacked = MAX_UNPACKED, autoRepack = true }) {
   const doneFile = path.join(dir, 'done.json');
   let done = null;
   const loadDone = async () => {
@@ -167,8 +183,38 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
   // the Nerd panel's progress line (index.js throttles it)
   const progress = () => { try { onProgress?.({ ...status }); } catch { /* the caller's own business */ } };
 
-  async function readMinute(key, minute) {
-    try { return JSON.parse(zlib.gunzipSync(await fsp.readFile(path.join(dir, key, `${minute}.json.gz`))).toString('utf8')); } catch { return null; }
+  // a few parsed minutes, for the Viewer: the next clip shares most of its minutes with this one
+  const minuteCache = new Map(); // key/minute -> Promise<data|null>
+  let generation = 0; // bumped on every change to the index (callers cache answers by it)
+  const changed = (key, minute) => { minuteCache.delete(`${key}/${minute}`); generation++; };
+  function readMinute(key, minute, { cache = false } = {}) {
+    const file = path.join(dir, key, `${minute}.json.gz`);
+    if (!cache) return fmt.readMinuteFile(file);
+    const k = `${key}/${minute}`;
+    let p = minuteCache.get(k);
+    if (p) { minuteCache.delete(k); minuteCache.set(k, p); return p; } // most recently used last
+    p = fmt.readMinuteFile(file);
+    minuteCache.set(k, p);
+    while (minuteCache.size > MINUTE_CACHE) minuteCache.delete(minuteCache.keys().next().value);
+    return p;
+  }
+  // one change at a time to a car key's minute files (indexing, removing a log, repacking)
+  const locks = new Map();
+  function withLock(key, fn) {
+    const prev = locks.get(key) || Promise.resolve();
+    const p = prev.then(fn, fn);
+    const tail = p.catch(() => {});
+    locks.set(key, tail);
+    tail.then(() => { if (locks.get(key) === tail) locks.delete(key); });
+    return p;
+  }
+  // the per-day id summaries: one is removed before any minute of its day changes (a crash in
+  // between leaves no stale summary), and one made while a minute changed is not saved
+  const dayGen = new Map(); // key/day -> changes
+  async function dayChanged(key, minute) {
+    const day = minute.slice(0, 8);
+    dayGen.set(`${key}/${day}`, (dayGen.get(`${key}/${day}`) || 0) + 1);
+    await fsp.rm(path.join(dir, key, dayFile(day)), { force: true });
   }
   /**
    * Write one log's part of a minute. A minute can span two logs: merge with
@@ -197,16 +243,18 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
     let trust;
     for (const p of Object.values(logs)) trust = worseTrust(trust, p.trust);
     // the frame counts last: canSearch.js reads only them, from the end of the file
-    const out = { minute, ...(trust ? { trust } : {}), logs, signals, ids };
+    const body = await fmt.packMinute({ minute, trust, logs, signals, ids });
     await fsp.mkdir(path.join(dir, key), { recursive: true });
-    await writeAtomic(path.join(dir, key, `${minute}.json.gz`), zlib.gzipSync(JSON.stringify(out), { level: 6 }));
+    await dayChanged(key, minute);
+    await writeAtomic(path.join(dir, key, `${minute}.json.gz`), body);
+    changed(key, minute);
   }
   // ---- raw snapshots (<minute>.raw.json.gz): merged so that indexing a log again replaces its own part
   const rawCache = new Map(); // key/minute -> Promise<data|null> (a few, for the Viewer's fetches)
   function readRaw(key, minute) {
     const k = `${key}/${minute}`;
     if (!rawCache.has(k)) {
-      rawCache.set(k, fsp.readFile(path.join(dir, key, `${minute}.raw.json.gz`)).then((b) => JSON.parse(zlib.gunzipSync(b).toString('utf8')), () => null));
+      rawCache.set(k, fmt.readRawFile(path.join(dir, key, `${minute}.raw.json.gz`)));
       if (rawCache.size > 6) rawCache.delete(rawCache.keys().next().value);
     }
     return rawCache.get(k);
@@ -228,8 +276,9 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
       data.logs = { ...had.logs, ...data.logs };
     }
     await fsp.mkdir(path.join(dir, key), { recursive: true });
-    await writeAtomic(path.join(dir, key, `${minute}.raw.json.gz`), zlib.gzipSync(JSON.stringify(data), { level: 6 }));
+    await writeAtomic(path.join(dir, key, `${minute}.raw.json.gz`), await fmt.packRaw(data));
     rawCache.delete(`${key}/${minute}`);
+    generation++;
   }
   async function mergeSignals(key, seen) {
     const file = path.join(dir, key, 'signals.json');
@@ -250,6 +299,7 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
     const seen = new Map();
     let minute = null;
     let minuteStart = 0;
+    let minuteNo = null; // the minute as a number: a frame's minute is told by it, not by a date string
     let bucket = null;
     const last = new Map(); // signal -> { t, v, pt (last kept time), pending }
     const flushPending = () => {
@@ -272,12 +322,12 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
       bucket = null;
       rawBucket = null;
     };
-    const writeOut = async ([a, b, rawData, part]) => {
+    const writeOut = ([a, b, rawData, part]) => withLock(key, async () => {
       // the raw file's record of this log, from before: what it wrote to the minute
       const hadRaw = await rawNow(key, a);
       if (!rawOnly) await writeMinute(key, a, b, name, part, hadRaw?.logs?.[name] || null);
       await writeRaw(key, a, rawData, name, hadRaw);
-    };
+    });
     const child = spawn(xz, ['-dc', file], { stdio: ['ignore', 'pipe', 'pipe'] });
     let stderr = '';
     let spawnError = null;
@@ -299,12 +349,14 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
         const m = LINE.exec(line);
         if (!m) continue;
         const t = Number(m[1]) * 1000 + Number(`0.${m[2]}`) * 1000;
-        const mk = minuteKey(t);
-        if (mk !== minute) {
+        const no = Math.floor(t / 60000);
+        if (no !== minuteNo) {
           if (minute) written++;
-          closeMinute();
+          closeMinute(); // (with the minute before's start: what it held back goes there)
+          minuteNo = no;
+          minuteStart = no * 60000;
+          const mk = minuteKey(minuteStart);
           minute = mk;
-          minuteStart = Math.floor(t / 60000) * 60000;
           bucket = { minute: mk, signals: {}, ids: {} };
           rawLog = { span: [Math.round(t - minuteStart), Math.round(t - minuteStart)], buses: busOf, ids: {} };
           rawBucket = { minute: mk, raw: {}, logs: { [name]: rawLog } };
@@ -449,6 +501,8 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
           }
           status.pending--;
         }
+        // nothing waiting: older minute files into the smaller layout (stops for a new upload)
+        if (!again && autoRepack) await repack({ shouldStop: () => again });
       } while (again);
     })().catch((err) => { status.lastError = err.message; }).finally(() => {
       running = null;
@@ -459,43 +513,64 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
     return running;
   }
 
-  /** The signals of these cars between two times: { name: [[ms (UTC), value], …] } (the value before `from` too). */
   /** The worst trust of the data between two times: verified, unsigned or override (used despite failing its check), or null. */
   async function trustOf(keys, from, to) {
     let t;
     for (const key of keys) {
       for (let m = Math.floor(from / 60000) * 60000; m <= to; m += 60000) {
-        const data = await readMinute(key, minuteKey(m));
-        if (data) t = worseTrust(t, data.trust || 'unsigned');
+        // only the top of each file: the trust is there, before the signals
+        const head = await fmt.readHead(path.join(dir, key, `${minuteKey(m)}.json.gz`));
+        if (head) t = worseTrust(t, head.trust || 'unsigned');
       }
     }
     return t || null;
   }
 
-  async function series(keys, from, to, names) {
+  /**
+   * The signals of these cars between two times, and the worst trust of the minutes inside it:
+   * { series: { name: [[ms (UTC), value], …] } (the value before `from` too), trust }. Each
+   * minute is read once (and kept for the next clip). `stepMs`: only the last point of each
+   * such step per signal (with the one before `from`), for a list of live values.
+   */
+  async function clipData(keys, from, to, names, { stepMs = 0 } = {}) {
     const want = names ? new Set(names) : null;
     const out = {};
+    let trust;
     for (const key of keys) {
       // the minute before as well, for each signal's value at `from`
       for (let t = Math.floor(from / 60000) * 60000 - 60000; t <= to; t += 60000) {
-        const data = await readMinute(key, minuteKey(t));
+        const data = await readMinute(key, minuteKey(t), { cache: true });
         if (!data) continue;
+        if (t + 60000 > from) trust = worseTrust(trust, data.trust || 'unsigned');
         for (const [name, pts] of Object.entries(data.signals || {})) {
           if (want && !want.has(name)) continue;
           const list = (out[name] ||= []);
           for (const [ms, v] of pts) list.push([t + ms, v]);
         }
+        await new Promise((r) => setImmediate(r)); // other requests between minutes
       }
     }
     for (const [name, pts] of Object.entries(out)) {
-      pts.sort((a, b) => a[0] - b[0]);
+      if (keys.length > 1) pts.sort((a, b) => a[0] - b[0]);
+      else if (pts.some((p, i) => i && p[0] < pts[i - 1][0])) pts.sort((a, b) => a[0] - b[0]);
       // keep the last point before `from` and everything up to `to`
       let i = 0;
       while (i + 1 < pts.length && pts[i + 1][0] <= from) i++;
-      out[name] = pts.slice(i).filter((p) => p[0] <= to);
-      if (!out[name].length) delete out[name];
+      let kept = [];
+      for (let k = i; k < pts.length && pts[k][0] <= to; k++) {
+        const p = pts[k];
+        if (stepMs > 0 && kept.length > 1 && Math.floor(p[0] / stepMs) === Math.floor(kept[kept.length - 1][0] / stepMs)) kept[kept.length - 1] = p;
+        else kept.push(p);
+      }
+      if (kept.length) out[name] = kept; else delete out[name];
+      kept = null;
     }
-    return out;
+    return { series: out, trust: trust || null };
+  }
+
+  /** The signals of these cars between two times: { name: [[ms (UTC), value], …] } (the value before `from` too). */
+  async function series(keys, from, to, names) {
+    return (await clipData(keys, from, to, names)).series;
   }
 
   /**
@@ -573,48 +648,60 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
   async function removeLog(key, name) {
     const n = parseName(name);
     if (!n) return 0;
-    let changed = 0;
+    let count = 0;
     for (let t = n.startedAt - 2 * 60_000; t <= n.startedAt + 30 * 60_000; t += 60_000) {
-      const minute = minuteKey(t);
-      const had = await readMinute(key, minute);
-      if (had?.logs?.[name]) {
-        const rest = withoutPart({ signals: had.signals || {}, ids: had.ids || {} }, had.logs[name]);
-        const logs = { ...had.logs };
-        delete logs[name];
-        const file = path.join(dir, key, `${minute}.json.gz`);
-        if (!Object.keys(logs).length) await fsp.rm(file, { force: true });
-        else {
-          let trust;
-          for (const p of Object.values(logs)) trust = worseTrust(trust, p.trust);
-          await writeAtomic(file, zlib.gzipSync(JSON.stringify({ minute, ...(trust ? { trust } : {}), logs, signals: rest.signals, ids: rest.ids }), { level: 6 }));
-        }
-        changed++;
-      }
-      const raw = await rawNow(key, minute);
-      if (raw?.logs?.[name]) {
-        const rest = withoutPart({ signals: raw.raw || {} }, raw.logs[name]).signals;
-        const logs = { ...raw.logs };
-        delete logs[name];
-        const file = path.join(dir, key, `${minute}.raw.json.gz`);
-        if (!Object.keys(logs).length) await fsp.rm(file, { force: true });
-        else await writeAtomic(file, zlib.gzipSync(JSON.stringify({ ...raw, raw: rest, logs }), { level: 6 }));
-        rawCache.delete(`${key}/${minute}`);
-      }
+      if (await withLock(key, () => removeFromMinute(key, minuteKey(t), name))) count++;
     }
     await forget(key, name);
-    return changed;
+    return count;
+  }
+  async function removeFromMinute(key, minute, name) {
+    let removed = false;
+    const had = await readMinute(key, minute);
+    if (had?.logs?.[name]) {
+      const rest = withoutPart({ signals: had.signals || {}, ids: had.ids || {} }, had.logs[name]);
+      const logs = { ...had.logs };
+      delete logs[name];
+      const file = path.join(dir, key, `${minute}.json.gz`);
+      await dayChanged(key, minute);
+      if (!Object.keys(logs).length) await fsp.rm(file, { force: true });
+      else {
+        let trust;
+        for (const p of Object.values(logs)) trust = worseTrust(trust, p.trust);
+        await writeAtomic(file, await fmt.packMinute({ minute, trust, logs, signals: rest.signals, ids: rest.ids }));
+      }
+      changed(key, minute);
+      removed = true;
+    }
+    const raw = await rawNow(key, minute);
+    if (raw?.logs?.[name]) {
+      const rest = withoutPart({ signals: raw.raw || {} }, raw.logs[name]).signals;
+      const logs = { ...raw.logs };
+      delete logs[name];
+      const file = path.join(dir, key, `${minute}.raw.json.gz`);
+      if (!Object.keys(logs).length) await fsp.rm(file, { force: true });
+      else await writeAtomic(file, await fmt.packRaw({ ...raw, raw: rest, logs }));
+      rawCache.delete(`${key}/${minute}`);
+      generation++;
+    }
+    return removed;
   }
 
+  /** The minute times (UTC ms) of one car key's index files between two times, oldest first. */
+  async function minuteTimes(key, from = -Infinity, to = Infinity) {
+    let names = [];
+    try { names = await fsp.readdir(path.join(dir, key)); } catch { return []; }
+    return names.map(minuteOfFile).filter((t) => t !== null && t + 60_000 > from && t <= to).sort((a, b) => a - b);
+  }
   /** One car key's indexed minutes between two times (UTC ms), oldest first: [t, data] (read one at a time). */
   async function* minutesIn(key, from, to) {
-    let names = [];
-    try { names = await fsp.readdir(path.join(dir, key)); } catch { return; }
-    const ts = names.map(minuteOfFile).filter((t) => t !== null && t + 60_000 > from && t <= to).sort((a, b) => a - b);
-    for (const t of ts) {
+    for (const t of await minuteTimes(key, from, to)) {
       const data = await readMinute(key, minuteKey(t));
       if (data) yield [t, data];
     }
   }
+  /** The top of a minute (logs, spans, id counts per log, trust, act), or null. */
+  const headOf = (key, t) => fmt.readHead(path.join(dir, key, `${minuteKey(t)}.json.gz`));
 
   /** The DBC message of an id ("can0:2E5") on a bus map, or null when the DBC does not know it there. */
   function messageName(idKey, busOf = DEFAULT_BUSES) {
@@ -630,7 +717,7 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
    * name (the DBC's, else null), frames, hz (while its log ran), firstSeen,
    * lastSeen (UTC ms, to the log's span within the minute), minutes }], by id.
    */
-  async function idSummary(key, from, to) {
+  async function idSummary(key, from, to, { stop = null } = {}) {
     const out = new Map();
     const buses = new Map(); // log name -> its bus map (from its sidecar)
     const busesOf = async (name) => {
@@ -641,13 +728,18 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
       }
       return buses.get(name);
     };
-    for await (const [t, data] of minutesIn(key, from, to)) {
+    for (const t of await minuteTimes(key, from, to)) {
+      if (stop?.()) break;
+      // only the top of each file (the logs' id counts and spans), not its signals
+      const data = await headOf(key, t);
+      if (!data) continue;
       for (const [name, part] of Object.entries(data.logs || {})) {
         if (!part?.ids) continue;
         const [a, b] = Array.isArray(part.span) ? part.span : [0, 59_999];
         const ms = Math.max(1000, b - a);
         const busOf = await busesOf(name);
         for (const [idKey, n] of Object.entries(part.ids)) {
+          if (!goodId(idKey)) continue;
           let e = out.get(idKey);
           if (!e) {
             const [iface, hexId] = idKey.split(':');
@@ -666,7 +758,124 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
       .sort((x, y) => parseInt(x.id, 16) - parseInt(y.id, 16) || x.bus.localeCompare(y.bus));
   }
 
-  return { kick, trustOf, indexLog, series, raw, signals, forget, removeLog, minutesIn, idSummary, messageName, status: () => ({ ...status }), pendingLogs };
+  /** Every id of one UTC day (yyyyMMdd), from its minutes' tops: { id: [first minute, last minute, minutes] }. */
+  async function idDay(key, day, times) {
+    const file = path.join(dir, key, dayFile(day));
+    try {
+      const saved = JSON.parse(await fsp.readFile(file, 'utf8'));
+      if (saved?.v === ID_DAY && saved.ids) return saved.ids;
+    } catch { /* made now */ }
+    const gen = dayGen.get(`${key}/${day}`) || 0;
+    const ids = {};
+    for (const t of times) {
+      const head = await headOf(key, t);
+      // a minute from before the per-log counts: its own id counts (the whole file)
+      const here = fmt.idsOfHead(head) || (await readMinute(key, minuteKey(t)))?.ids;
+      if (!here) continue;
+      for (const k of Object.keys(here)) {
+        if (!goodId(k)) continue;
+        const e = ids[k];
+        if (!e) ids[k] = [t, t, 1];
+        else { e[0] = Math.min(e[0], t); e[1] = Math.max(e[1], t); e[2]++; }
+      }
+    }
+    // not kept when a minute of the day changed meanwhile (it is made again next time)
+    if ((dayGen.get(`${key}/${day}`) || 0) === gen) await writeAtomic(file, JSON.stringify({ v: ID_DAY, ids })).catch(() => {});
+    return ids;
+  }
+
+  /**
+   * CAN ids of one car key first seen in the minute of `since` or later (as after a software
+   * update), from per-day summaries (complete, however long the history): { appeared: [{ id,
+   * at (its first minute), lastSeen, seenMinutes }], appearedCount, idCount, totalMinutes, complete }.
+   */
+  async function newIds(key, since, { limit = 1000, stop = null } = {}) {
+    const byDay = new Map();
+    for (const t of await minuteTimes(key)) {
+      const d = minuteKey(t).slice(0, 8);
+      if (!byDay.has(d)) byDay.set(d, []);
+      byDay.get(d).push(t);
+    }
+    const all = new Map(); // id -> [first, last, minutes]
+    for (const [day, times] of byDay) {
+      if (stop?.()) throw Object.assign(new Error('The search was stopped.'), { status: 409 });
+      for (const [k, [a, b, n]] of Object.entries(await idDay(key, day, times))) {
+        const e = all.get(k);
+        if (!e) all.set(k, [a, b, n]);
+        else { e[0] = Math.min(e[0], a); e[1] = Math.max(e[1], b); e[2] += n; }
+      }
+    }
+    const from = Math.floor(since / 60_000) * 60_000;
+    const appeared = [...all].filter(([, e]) => e[0] >= from).map(([id, e]) => ({ id, at: e[0], lastSeen: e[1] + 59_999, seenMinutes: e[2] }))
+      .sort((a, b) => a.at - b.at || a.id.localeCompare(b.id));
+    let totalMinutes = 0;
+    for (const times of byDay.values()) totalMinutes += times.length;
+    return { appeared: appeared.slice(0, limit), appearedCount: appeared.length, idCount: all.size, totalMinutes, scannedMinutes: totalMinutes, complete: true };
+  }
+
+  // ---- repacking: minutes written before the column layout (canFormat.js) are written again in
+  // it, in the background once nothing is waiting to be indexed: about half the room on disk.
+  // The content stays the same; only the layout (and `act` on top) changes. Done per car key, once.
+  const packFile = path.join(dir, 'packed.json');
+  async function encOf(file) {
+    let fh;
+    try {
+      fh = await fsp.open(file, 'r');
+      const buf = Buffer.alloc(512);
+      const { bytesRead } = await fh.read(buf, 0, 512, 0);
+      const head = zlib.gunzipSync(buf.subarray(0, bytesRead), { finishFlush: zlib.constants.Z_SYNC_FLUSH }).toString('utf8', 0, 200);
+      return /"enc":"(\w+)"/.exec(head)?.[1] || null;
+    } catch { return undefined; } finally { await fh?.close().catch(() => {}); }
+  }
+  async function repack({ shouldStop = () => false } = {}) {
+    let packed = {};
+    try { packed = JSON.parse(await fsp.readFile(packFile, 'utf8')) || {}; } catch { /* none yet */ }
+    let keys = [];
+    try { keys = (await fsp.readdir(dir, { withFileTypes: true })).filter((e) => e.isDirectory()).map((e) => e.name); } catch { return 0; }
+    let n = 0;
+    for (const key of keys) {
+      if (packed[key] === fmt.ENC) continue;
+      let names = [];
+      try { names = await fsp.readdir(path.join(dir, key)); } catch { continue; }
+      let finished = true;
+      for (const name of names.sort().reverse()) {
+        const isMinute = MINUTE_FILE.test(name);
+        const rawMinute = RAW_FILE.exec(name)?.[1];
+        if (!isMinute && !rawMinute) continue;
+        if (shouldStop()) { finished = false; break; }
+        while (!idle() && !shouldStop()) await new Promise((r) => setTimeout(r, 2000));
+        const file = path.join(dir, key, name);
+        if ((await encOf(file)) !== null) continue; // packed already (or unreadable)
+        await withLock(key, async () => {
+          if ((await encOf(file)) !== null) return;
+          if (isMinute) {
+            const minute = name.slice(0, 13);
+            const data = await readMinute(key, minute);
+            if (!data) return;
+            const { minute: m, trust, logs, signals, ids } = data;
+            await writeAtomic(file, await fmt.packMinute({ minute: m ?? minute, trust, logs: logs || {}, signals: signals || {}, ids: ids || {} }));
+            changed(key, minute);
+          } else {
+            const data = await rawNow(key, rawMinute);
+            if (!data) return;
+            await writeAtomic(file, await fmt.packRaw(data));
+            rawCache.delete(`${key}/${rawMinute}`);
+          }
+          n++;
+        });
+        await new Promise((r) => setImmediate(r));
+      }
+      if (finished) {
+        packed[key] = fmt.ENC;
+        await fsp.mkdir(dir, { recursive: true });
+        await writeAtomic(packFile, JSON.stringify(packed));
+      } else break;
+    }
+    if (n) log?.info?.(`CAN index: ${n} older minute file(s) repacked`);
+    return n;
+  }
+
+  return { kick, trustOf, indexLog, series, clipData, raw, signals, forget, removeLog, minutesIn, minuteTimes, idSummary, newIds, repack, messageName, generation: () => generation, status: () => ({ ...status }), pendingLogs };
 }
 
-module.exports = { createCanIndex, minuteKey, busMapOf, FORMAT, RAW_PER_SEC };
+module.exports = { createCanIndex, minuteKey, busMapOf, FORMAT, RAW_PER_SEC, CLIP_STEP_MS, IFACE };

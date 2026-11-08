@@ -14,6 +14,9 @@ const path = require('path');
 const zlib = require('zlib');
 const { execFileSync, spawnSync } = require('child_process');
 const { createCanIndex, FORMAT, RAW_PER_SEC } = require('../server/canIndex');
+const { decodeMinute, decodeRaw } = require('../server/canFormat');
+// the files as stored (columns on disk since canFormat's "c1"), as point lists
+const readRawFile = (f) => decodeRaw(JSON.parse(zlib.gunzipSync(fs.readFileSync(f)).toString()));
 
 const skip = spawnSync('xz', ['--version']).status !== 0 && 'needs xz';
 const T0 = Date.UTC(2020, 0, 1, 8, 0, 0); // a minute boundary
@@ -41,7 +44,7 @@ test('raw snapshots: every change up to the limit a second, the last of each sec
   try {
     const r = await idx.indexLog('K', 'K_20200101T080000Z_1.log.xz');
     assert.equal(r.frames, 330);
-    const file = JSON.parse(zlib.gunzipSync(fs.readFileSync(rawFile('20200101T0800'))).toString());
+    const file = readRawFile(rawFile('20200101T0800'));
     const pts = file.raw['can0:6E3'];
     for (let s = 10; s < 13; s++) {
       const inSec = pts.filter((p) => Math.floor(p[0] / 1000) === s);
@@ -79,10 +82,10 @@ test('raw snapshots: a minute two logs share has both; each minute starts with e
   try {
     await fsp.writeFile(path.join(base, 'can', 'K', 'K_20200101T080055Z_2.log.xz'), execFileSync('xz', ['-1', '-c'], { input: `${line(T0 + 55_000, '5A1', '01')}\n` }));
     await idx.kick();
-    const m0 = JSON.parse(zlib.gunzipSync(fs.readFileSync(rawFile('20200101T0800'))).toString());
+    const m0 = readRawFile(rawFile('20200101T0800'));
     assert.deepEqual(Object.keys(m0.raw).sort(), ['can0:5A1', 'can0:6E3']);
     assert.deepEqual(Object.keys(m0.logs).sort(), ['K_20200101T080050Z_1.log.xz', 'K_20200101T080055Z_2.log.xz']);
-    const m1 = JSON.parse(zlib.gunzipSync(fs.readFileSync(rawFile('20200101T0801'))).toString());
+    const m1 = readRawFile(rawFile('20200101T0801'));
     assert.deepEqual(m1.raw['can0:6E3'], [[10_000, 'AA']], 'the next minute has the payload again (same as before)');
     const got = await idx.raw(['K'], T0 + 60_000, T0 + 80_000);
     assert.deepEqual(got.find((e) => e.key === 'can0:6E3').changes, [[T0 + 50_000, 'AA']], 'but only real changes are sent');
@@ -134,7 +137,7 @@ const volts = (ms, v, bus = 'can0') => {
   b.writeUInt16LE(Math.round(v / 0.01), 0);
   return line(ms, '132', b.toString('hex').toUpperCase(), bus);
 };
-const minuteFile = (base, m) => JSON.parse(zlib.gunzipSync(fs.readFileSync(path.join(base, 'idx', 'K', `${m}.json.gz`))).toString());
+const minuteFile = (base, m) => decodeMinute(JSON.parse(zlib.gunzipSync(fs.readFileSync(path.join(base, 'idx', 'K', `${m}.json.gz`))).toString()));
 
 test('indexing a log again replaces its own part: no frame counted twice, the other log of a minute untouched', { skip }, async () => {
   const a = [];
@@ -200,7 +203,7 @@ test('a sidecar that comes after its log: the log is indexed again with its bus 
     await idx.kick();
     assert.equal((await idx.series(['K'], T0, T0 + 59_000)).BattVoltage132.length, 30);
     assert.deepEqual(minuteFile(base, '20200101T0800').ids, { 'can1:132': 30 });
-    const raw = JSON.parse(zlib.gunzipSync(fs.readFileSync(rawFile('20200101T0800'))).toString());
+    const raw = readRawFile(rawFile('20200101T0800'));
     assert.equal(raw.logs[name].buses.can1, 'VehicleBus', 'the raw view\'s bus too');
     assert.deepEqual(raw.logs[name].ids, { 'can1:132': 30 });
     const rawAfter = await idx.raw(['K'], T0, T0 + 59_000);

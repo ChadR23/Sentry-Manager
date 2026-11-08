@@ -30,6 +30,7 @@ const path = require('path');
 const zlib = require('zlib');
 const { promisify } = require('util');
 const { tsFrom } = require('./inventory');
+const { readMinuteFile, readHead, idsOfHead } = require('./canFormat');
 
 const gunzip = promisify(zlib.gunzip);
 const MINUTE_FILE = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})\.json\.gz$/;
@@ -129,11 +130,12 @@ function parseWhen(s, toUtc = (...a) => Date.UTC(a[0], a[1] - 1, a[2], a[3], a[4
 }
 
 function createCanSearch({ dir, now = () => Date.now() }) {
-  async function readMinute(key, t) {
-    try { return JSON.parse((await gunzip(await fsp.readFile(path.join(dir, key, fileOf(t))))).toString('utf8')); } catch { return null; }
-  }
-  // only the frame counts: they come last in the file, so the signals need not be parsed
+  const readMinute = (key, t) => readMinuteFile(path.join(dir, key, fileOf(t)));
+  // only the frame counts: each log's are at the top of the file (only its first KB unpacked);
+  // a minute from before those keeps them last, so the signals need not be parsed
   async function readIds(key, t) {
+    const fromHead = idsOfHead(await readHead(path.join(dir, key, fileOf(t))));
+    if (fromHead) return fromHead;
     let text;
     try { text = (await gunzip(await fsp.readFile(path.join(dir, key, fileOf(t))))).toString('utf8'); } catch { return null; }
     const at = text.lastIndexOf(',"ids":');
