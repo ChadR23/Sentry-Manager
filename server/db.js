@@ -280,13 +280,20 @@ class ManagerDB {
   }
 
   // ---- notifications
-  /** Open (or refresh) a notification; one open entry per dedupe key. */
+  /**
+   * Open (or refresh) a notification; one open entry per dedupe key. An open
+   * one raised again with the same level, title and message is left as it is
+   * (its time too): `lastNotifyChanged` says whether anything changed.
+   */
   notify({ kind, level = 'warning', vehicleId = null, title, message = null, dedupeKey = null }) {
     const now = Date.now();
+    this.lastNotifyChanged = true;
     if (dedupeKey) {
       const open = this.q('SELECT id FROM notifications WHERE dedupe_key = ? AND resolved_at IS NULL').get(dedupeKey);
       if (open) {
-        this.q('UPDATE notifications SET level = ?, title = ?, message = ?, updated_at = ? WHERE id = ?').run(level, title, message, now, open.id);
+        const r = this.q('UPDATE notifications SET level = ?, title = ?, message = ?, updated_at = ? WHERE id = ? AND (level IS NOT ? OR title IS NOT ? OR message IS NOT ?)')
+          .run(level, title, message, now, open.id, level, title, message);
+        this.lastNotifyChanged = Number(r.changes) > 0;
         return Number(open.id);
       }
     }

@@ -77,7 +77,8 @@ class Notifications extends EventEmitter {
     const muted = this.db.get?.('notify-muted', []) || [];
     if (Array.isArray(muted) && muted.includes(n.kind)) return null;
     const id = this.db.notify(n);
-    this.emit('changed', id);
+    // the same warning again (a check that found nothing new): no update sent to every page
+    if (this.db.lastNotifyChanged !== false) this.emit('changed', id);
     return id;
   }
 
