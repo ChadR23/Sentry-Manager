@@ -44,6 +44,7 @@ const STYLE = `
 .sentry-nerd .nd-warn{color:#ffd37a}
 .sentry-nerd .nd-ok{color:#7dff8a;font-weight:700}
 .sentry-nerd .nd-bad{color:#ff8a8a;font-weight:700}
+.sentry-nerd small.nd-note{display:inline-block;max-width:100%;overflow-wrap:anywhere;font-weight:400;color:#d6f5d6;opacity:.8;margin-top:2px}
 .sentry-nerd .nd-box ul{margin:4px 0;padding-left:18px}
 .sentry-nerd .nd-scroll{overflow-x:auto}
 .sentry-nerd table{border-collapse:collapse;width:100%;font-size:12.5px}
@@ -280,11 +281,11 @@ export function localInput(ms) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
-/** The received logs a filter lets through: car key, check status, and text in the name or app version. */
+/** The received logs a filter lets through: car key, check status (or "could-not-sign"), and text in the name or app version. */
 export function filterLogs(logs, { key = '', check = '', text = '' } = {}) {
   const t = String(text || '').trim().toLowerCase();
   return logs.filter((f) => (!key || f.vehicleKey === key)
-    && (!check || (f.check?.status || 'waiting') === check)
+    && (!check || (check === 'could-not-sign' ? f.check?.kind === 'bridge-could-not-sign' : (f.check?.status || 'waiting') === check))
     && (!t || f.name.toLowerCase().includes(t) || String(f.appVersion || '').toLowerCase().includes(t)));
 }
 
@@ -364,6 +365,9 @@ export function openNerdPanel() {
     unsigned: ['unsigned', 'nd-muted', 'No signature (an older CAN Bridge, before pairing). Used, with a note.'],
     waiting: ['waiting', 'nd-muted', 'Its sidecar (with the signature) has not arrived yet.']
   };
+  // a failed log the CAN Bridge says it could not sign (an error on the Screenmate, not a changed file)
+  const COULD_NOT_SIGN = ['✗ not signed', 'nd-warn', 'The CAN Bridge could not sign this log (an error on the Screenmate, not a changed file). It is outside the chain, and not used unless you say so: nothing proves it came from the paired Screenmate.'];
+  const short = (s, n) => (String(s).length > n ? `${String(s).slice(0, n - 1)}…` : String(s));
   // the sidecar's "format": both are read here, and both download as candump text
   const FORMAT = {
     'canbridge-candump-xz/1': ['candump', 'Candump text, xz'],
@@ -422,6 +426,8 @@ export function openNerdPanel() {
       ${st.keys.map((k) => {
         const t = trustOf(k) || { counts: {}, chain: { issues: [] } };
         const c = t.counts || {};
+        const cns = t.couldNotSign || { count: 0, used: 0 };
+        const segs = t.chain?.segments || [];
         return `<div class="nd-box">
           <div class="nd-row"><b class="nd-mono">${esc(k)}</b>
             <select data-map="${esc(k)}" aria-label="The car ${esc(k)} is" class="nd-btn">
@@ -430,9 +436,13 @@ export function openNerdPanel() {
           <p>${t.pin ? `Paired (${esc(t.pin.how)}, ${esc(when(t.pin.pinnedAt))}) with key<br><span class="nd-mono">${esc(t.pin.fingerprint)}</span>` : '<span class="nd-muted">Not paired yet: its first signed log pairs it.</span>'}</p>
           ${t.newKey ? `<p class="nd-warn">Logs signed by another key arrived (${esc(when(t.newKey.firstSeen))}):<br><span class="nd-mono">${esc(t.newKey.fingerprint)}</span><br>If this is your Screenmate (a new one, or the app reinstalled), check the fingerprint in the app, then trust it. Until then those logs are not used.</p>
             <div class="nd-row"><button type="button" class="nd-btn" data-trust="${esc(k)}" data-fp="${esc(t.newKey.fingerprint)}">Trust this key…</button></div>` : ''}
-          <p>${c.verified || 0} verified · ${c.failed ? `<span class="nd-warn">${c.failed} failed</span>` : '0 failed'} · ${c.unsigned || 0} unsigned · ${c.waiting || 0} waiting</p>
-          <p>${t.chain?.count ? `Chain: logs ${t.chain.first} to ${t.chain.last} of this key${t.chain.issues.length ? '' : ', no gaps, every log follows the one before.'}` : ''}</p>
-          ${t.chain?.issues?.length ? `<ul class="nd-warn">${t.chain.issues.slice(0, 20).map((i) => `<li>${esc(i.text)}</li>`).join('')}${t.chain.issues.length > 20 ? `<li>and ${t.chain.issues.length - 20} more</li>` : ''}</ul>` : ''}
+          <p>${c.verified || 0} verified · ${c.failed ? `<span class="nd-warn">${c.failed} failed${cns.count ? ` (${cns.count} the CAN Bridge could not sign)` : ''}</span>` : '0 failed'} · ${c.unsigned || 0} unsigned · ${c.waiting || 0} waiting</p>
+          <p>${t.chain?.count ? `Chain: ${segs.length > 1 ? segs.map((x, n) => `${n ? 'then started again: ' : ''}logs ${x.first} to ${x.last}`).join(', ') : `logs ${t.chain.first} to ${t.chain.last}`} of this key${t.chain.issues.length ? '' : `, no gaps, every log follows the one before${segs.length > 1 ? ' in each part' : ''}.`}` : ''}${cns.count ? ` <span class="nd-muted">Logs the CAN Bridge could not sign are not part of it.</span>` : ''}</p>
+          ${t.chain?.restarts?.length ? `<ul class="nd-muted">${t.chain.restarts.slice(0, 10).map((i) => `<li>${esc(short(i.text, 400))}</li>`).join('')}${t.chain.restarts.length > 10 ? `<li>and ${t.chain.restarts.length - 10} more</li>` : ''}</ul>` : ''}
+          ${t.chain?.issues?.length ? `<ul class="nd-warn">${t.chain.issues.slice(0, 20).map((i) => `<li>${esc(short(i.text, 400))}</li>`).join('')}${t.chain.issues.length > 20 ? `<li>and ${t.chain.issues.length - 20} more</li>` : ''}</ul>` : ''}
+          ${cns.count ? `<p class="nd-muted">${cns.count.toLocaleString()} log${cns.count === 1 ? '' : 's'} arrived unsigned because the CAN Bridge could not sign ${cns.count === 1 ? 'it' : 'them'} (each says why). Not tampering, but nothing proves ${cns.count === 1 ? 'it' : 'they'} came from the paired Screenmate, so ${cns.count === 1 ? 'it is' : 'they are'} not used unless you say so${cns.used ? `; ${cns.used.toLocaleString()} used now` : ''}.</p>
+            <div class="nd-row">${cns.count > cns.used ? `<button type="button" class="nd-btn" data-cns="${esc(k)}" data-on="1" data-n="${cns.count - cns.used}">Use all logs the bridge could not sign (${(cns.count - cns.used).toLocaleString()})…</button>` : ''}
+            ${cns.used ? `<button type="button" class="nd-btn" data-cns="${esc(k)}" data-on="0" data-n="${cns.used}">Stop using them (${cns.used.toLocaleString()})…</button>` : ''}</div>` : ''}
           ${t.pin ? `<div class="nd-row"><button type="button" class="nd-btn" data-forget="${esc(k)}">Forget the pairing…</button></div>` : ''}
         </div>`;
       }).join('')}` : ''}`;
@@ -479,14 +489,17 @@ export function openNerdPanel() {
     const focusKey = a && box.contains(a) ? [...a.attributes].filter((x) => x.name.startsWith('data-')).map((x) => `[${x.name}="${CSS.escape(x.value)}"]`).join('') : '';
     box.innerHTML = shown.length ? `<table><thead><tr><th>Started</th><th>Car</th><th>Check</th><th>Footage</th><th>Download</th><th>Size</th><th>Format</th><th>Frames</th><th>Dropped</th><th>App</th><th></th></tr></thead><tbody>
       ${shown.map((f) => {
-        const [label, cls, tip] = CHECK[f.check?.status] || CHECK.waiting;
+        const cns = f.check?.status === 'failed' && f.check?.kind === 'bridge-could-not-sign';
+        const [label, cls, tip] = cns ? COULD_NOT_SIGN : CHECK[f.check?.status] || CHECK.waiting;
+        // the bridge's note on its chain (not signed: shown as it said it)
+        const note = f.check?.chainNote ? `<br><small class="nd-note" title="${esc(`Chain note from the CAN Bridge (not signed): ${f.check.chainNote}`)}">chain note: ${esc(short(f.check.chainNote, 160))}</small>` : '';
         const why = f.check?.reason ? `${tip ? `${tip} ` : ''}${f.check.reason}` : tip;
         const dl = (n, text, what) => `<a class="nd-btn nd-small" href="/api/can/files/${encodeURIComponent(n)}/download" download="${esc(n)}" data-dl-file="${esc(n)}" aria-label="Download ${esc(what)} ${esc(f.name)}">${text}</a>`;
         // the same lines as candump text, for tools that only read that (SavvyCAN, cantools)
         const txt = `<a class="nd-btn nd-small" href="/api/can/files/${encodeURIComponent(f.name)}/candump" download="${esc(f.name.replace(/\.xz$/, ''))}" data-dl-candump="${esc(f.name)}" title="As candump text (.log), whichever format it was stored in" aria-label="Download as candump text ${esc(f.name)}">candump .log</a>`;
         const [fmt, fmtTip] = FORMAT[f.format] || (f.format ? [f.format, ''] : ['—', f.sidecar ? 'The sidecar does not say' : 'No sidecar yet']);
         return `<tr><td>${esc(new Date(f.startedAt).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' }))}${f.check?.index !== null && f.check?.index !== undefined ? ` · #${esc(f.check.index)}` : f.seq ? ` · #${f.seq}` : ''}</td><td class="nd-mono">${esc(f.vehicleKey)}</td>
-        <td class="${cls}${f.check?.status === 'failed' ? ' nd-wrap' : ''}" title="${esc(why)}">${esc(label)}${f.check?.status === 'failed' ? `<br><small>${esc(f.check.reason || '')}</small>${f.check.override ? '<br><small class="nd-warn">used anyway</small>' : ''}` : ''}</td>
+        <td class="${cls}${f.check?.status === 'failed' || note ? ' nd-wrap' : ''}" title="${esc(why)}">${esc(label)}${f.check?.status === 'failed' ? `<br><small>${esc(f.check.reason || '')}</small>${f.check.override ? '<br><small class="nd-warn">used anyway</small>' : ''}` : ''}${note}</td>
         <td class="${(FOOTAGE[f.footage] || ['', 'nd-muted'])[1]}" title="${esc((FOOTAGE[f.footage] || [0, 0, 'No car is chosen for this key (Cars, pairing and the chain): its logs are never deleted with footage.'])[2])}">${esc((FOOTAGE[f.footage] || ['—'])[0])}</td>
         <td>${dl(f.name, '.log.xz', 'the log')} ${txt}${f.sidecar ? ` ${dl(`${f.name}.json`, '.json', 'the sidecar of')}` : ''}</td>
         <td>${esc(size(f.bytes))}</td><td title="${esc(fmtTip)}">${esc(fmt)}${f.closedBecause ? `<br><small title="${esc(CLOSED[f.closedBecause] || '')}">closed: ${esc(f.closedBecause)}</small>` : ''}</td><td>${f.frames === null ? '—' : f.frames.toLocaleString()}</td><td>${f.dropped === null ? '—' : f.dropped.toLocaleString()}</td><td class="nd-mono">${esc(f.appVersion || (f.sidecar ? '' : 'no sidecar yet'))}</td>
@@ -609,7 +622,7 @@ export function openNerdPanel() {
         <p data-logs-sum></p>
         <div class="nd-row" data-logs-filter>
           <label class="nd-lab">Car key<select class="nd-in" data-f-key data-keys="All"></select></label>
-          <label class="nd-lab">Check<select class="nd-in" data-f-check><option value="">All</option>${Object.entries(CHECK).map(([k, [l]]) => `<option value="${k}">${esc(l)}</option>`).join('')}</select></label>
+          <label class="nd-lab">Check<select class="nd-in" data-f-check><option value="">All</option>${Object.entries(CHECK).map(([k, [l]]) => `<option value="${k}">${esc(l)}</option>`).join('')}<option value="could-not-sign">${esc(COULD_NOT_SIGN[0])} (the bridge could not sign)</option></select></label>
           <label class="nd-lab nd-grow">Search<input class="nd-in" type="search" data-f-text autocomplete="off" spellcheck="false" placeholder="Name or app version"></label>
           <span class="nd-muted nd-count" data-f-count aria-live="polite"></span>
         </div>
@@ -757,6 +770,13 @@ export function openNerdPanel() {
     } else if (b.matches('[data-forget]')) {
       if (!confirm(`Forget the pairing of ${b.dataset.forget}? The next signed log pairs it again (logs already verified stay verified).`)) return;
       if (await confirmThen(`/api/can/pairing/${encodeURIComponent(b.dataset.forget)}/forget`)) await draw();
+    } else if (b.matches('[data-cns]')) {
+      const on = b.dataset.on === '1';
+      const n = Number(b.dataset.n) || 0;
+      if (!confirm(on
+        ? `Use all ${n} log${n === 1 ? '' : 's'} of ${b.dataset.cns} the CAN Bridge could not sign? Nothing proves they came from your Screenmate: use them only if you know the bridge had this problem then. Their data then shows in the Viewer with a warning, and they are used for syncing. Each can be stopped again.`
+        : `Stop using the ${n} log${n === 1 ? '' : 's'} of ${b.dataset.cns} the CAN Bridge could not sign? Their data leaves the Viewer, the search and the sync.`)) return;
+      if (await confirmThen(`/api/can/pairing/${encodeURIComponent(b.dataset.cns)}/could-not-sign`, post('', { use: on }))) await draw();
     } else if (b.matches('[data-use]')) {
       const on = b.dataset.on === '1';
       if (on && !confirm('Use this log although its check failed? Its data then shows in the Viewer with a warning, and it is used for syncing.')) return;

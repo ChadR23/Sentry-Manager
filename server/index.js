@@ -2196,6 +2196,20 @@ async function main() {
     announce('can');
     return out;
   });
+  // every log of a car key the bridge could not sign ("signed": false with an "error") used anyway at once, or none
+  // of them: the same per-log override as "Use anyway", on exactly those logs
+  r.add('POST', '/api/can/pairing/:key/could-not-sign', async (req, res, { params, body, user }) => {
+    requireConfirmed(req);
+    if (!/^[A-Za-z0-9-]{1,64}$/.test(params.key)) throw new HttpError(400, 'Not a car key.');
+    if (typeof body?.use !== 'boolean') throw new HttpError(400, 'Send { "use": true | false }.');
+    const names = await canTrust.setOverrideCouldNotSign(params.key, body.use);
+    audit.warn(`CAN Bridge ${params.key}: ${names.length} log${names.length === 1 ? '' : 's'} the bridge could not sign ${body.use ? 'used anyway' : 'no longer used'}${names.length ? ` (${names[0]}${names.length > 1 ? ` to ${names[names.length - 1]}` : ''})` : ''}: ${by(req, user)}`);
+    // no longer used: their data leaves the Viewer, the search, the raw view and the sync
+    if (!body.use) for (const n of names) await dropCanLog(params.key, n);
+    canIndex.kick();
+    announce('can');
+    return { changed: names.length, names, summary: await canTrust.summary(params.key) };
+  });
   // a failed log used anyway (the dashboard warns), or not
   r.add('POST', '/api/can/files/:name/use', async (req, res, { params, body, user }) => {
     requireConfirmed(req);
@@ -2215,7 +2229,7 @@ async function main() {
     const pairs = new Map();
     for (const l of out.logs) {
       const rec = await canTrust.record(l.vehicleKey, l.name);
-      l.check = rec ? { status: rec.status, reason: rec.reason || null, index: rec.index ?? null, override: Boolean(rec.override) } : { status: 'waiting', reason: null };
+      l.check = rec ? { status: rec.status, kind: rec.kind || null, reason: rec.reason || null, index: rec.index ?? null, override: Boolean(rec.override), chainNote: rec.chainNote || null } : { status: 'waiting', reason: null };
       if (!pairs.has(l.vehicleKey)) pairs.set(l.vehicleKey, await canPrune.pairing(l.vehicleKey).catch(() => null));
       l.footage = pairs.get(l.vehicleKey)?.get(l.name) || null;
     }

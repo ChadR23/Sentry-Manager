@@ -203,7 +203,8 @@ checked again. *Forget the pairing* lets the next signed log pair again.
 |---|---|---|
 | verified | signed by the paired key, and the file is exactly what was signed | yes |
 | failed | changed after signing, signed for another car or by another key, a bad signature or fields, or not signed although the car is paired | no: kept and listed with the reason; the owner can *Use anyway*, and then the Viewer warns ("CAN data failed its check") wherever it shows that data |
-| unsigned | no signature (`"signed": false`, or no `integrity`) from a car that is not paired | yes, with a quiet note ("unsigned") |
+| failed, "✗ not signed" (reason kind `bridge-could-not-sign`) | from a paired car, `"signed": false` with an `"error"`: the bridge says it could not sign it (SMO build 143 did this while its `chain.json` was damaged). Listed as `unsigned: the CAN Bridge could not sign it (<its error, at most 120 characters, control characters removed>)` | no, not tampering, but nothing proves it came from the paired Screenmate. *Use anyway* one by one, or all of a key's at once (below) |
+| unsigned | no signature (`"signed": false`, with or without an `"error"`, or no `integrity`) from a car that is not paired | yes, with a quiet note ("unsigned") |
 | waiting | the sidecar has not arrived (after 10 minutes without it, the log is judged as unsigned) | not yet |
 
 Nothing is decoded for the Viewer, the sync or the search until its check
@@ -211,9 +212,31 @@ allows it. Only the log is signed, and everything that matters is in it
 (frames, `# clock`, `# helper-clock`, `# dropped`, `# not recorded`); the
 sidecar's other fields are an unsigned summary (shown, never trusted).
 
+**Use all logs the bridge could not sign.** For a car key with such logs the
+Nerd settings show *Use all logs the bridge could not sign (N)* and, once
+some are used, *Stop using them (N)*: `POST /api/can/pairing/<key>/could-not-sign`
+with `{ "use": true | false }`, after the password (as the other trust
+changes; watch-only accounts may not). It sets the same per-log override as
+*Use anyway* on exactly the logs of that key with the reason kind
+`bridge-could-not-sign` (not on logs that are not what was signed, or signed
+by another key), writes one audit line with the count and the first and last
+name, and the index decodes them (or takes their data out again). Each can
+still be stopped or used one by one. The answer is `{ changed, names, summary }`.
+
+**Judged again after an update.** Each car key's `trust.json` and each record
+carry the version of the rules they were judged by. At start (and every few
+minutes) records of an older version are brought up to date without a new
+upload: logs judged unsigned (or failed for it) are judged again from their
+sidecar (so logs judged "not signed, but this car is paired" before move to
+the new reason; an override set by hand stays), and signed logs only get
+their sidecar's `chain_note`. The chain is worked out from the records each
+time, so it follows at once.
+
 **The chain.** `index` counts up by 1 per log of a key (from 0) and each log
-names the previous one (`prev_name`, `prev_sha256`). For the paired key's
-logs the Nerd settings report:
+names the previous one (`prev_name`, `prev_sha256`). Only signed logs are
+links: a log the bridge could not sign is not part of the chain (the next
+signed log names the last signed one as its previous, which is no break).
+For the paired key's signed logs the Nerd settings report:
 
 - a gap: indexes that never arrived (`log 41 is missing`);
 - a mismatch: a log whose `prev_name`/`prev_sha256` is not the log stored
@@ -224,7 +247,28 @@ logs the Nerd settings report:
 
 Logs received here and deleted later still count (their record is kept), and
 the bridge deleting its own copies after upload is not a break. A new key
-starts again at 0.
+starts again at 0 (and is offered for trust, above).
+
+**A restart.** If the bridge's `chain.json` is unusable and no signed log is
+left on the Screenmate, it starts a new chain at 0 with the same key
+(`prev_name` `-`, `prev_sha256` 64 zeros). A signed log like that after the
+key's first one (or the first one, when two or more logs of the key are
+older: a chain received from its middle) is reported as *the chain started
+again at 0 with <name> (the bridge says: <its chain_note>)*, not as a
+duplicate or mismatch: only the paired key can sign it. Each part is then
+checked on its own (gaps, mismatches, reorders), and the summary says that
+logs signed between the end of the part before and the restart cannot be
+checked for gaps. `chain` in `/api/can/settings` has `restarts` and
+`segments` (`[{ first, last, count }]`) for this.
+
+**`chain_note`.** The bridge says in the integrity object's `chain_note`
+(not signed; informational) how it repaired its chain, e.g. `chain.json was
+64 zero bytes (likely a power cut); chain continued from <name> (index 198)`.
+It is kept with the log (one line, control characters removed, at most 300
+characters), listed in `/api/can/files` as `check.chainNote`, shown in the
+Nerd list under the log's check (escaped, cut to 160 characters, all of it
+on hover), and quoted in the chain summary for a restart, a duplicate or a
+mismatch at that log. It never changes a log's check.
 
 ## Errors
 
