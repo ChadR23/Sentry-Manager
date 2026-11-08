@@ -31,7 +31,7 @@ const DEFAULT_BUSES = { can0: 'VehicleBus', can1: 'ChassisBus' };
 
 const minuteKey = (ms) => new Date(Math.floor(ms / 60000) * 60000).toISOString().slice(0, 16).replace(/[-:]/g, '');
 
-function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bundledDbc, xz = 'xz' }) {
+function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bundledDbc, xz = 'xz', onIndexed = null }) {
   const doneFile = path.join(dir, 'done.json');
   let done = null;
   const loadDone = async () => {
@@ -113,6 +113,8 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
     const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
     let frames = 0;
     let written = 0;
+    let first = null;
+    let lastT = null;
     for await (const line of lines) {
       const m = LINE.exec(line);
       if (!m) continue;
@@ -128,6 +130,8 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
         if (writes.length >= 2) { const [a, b] = writes.shift(); await writeMinute(key, a, b); }
       }
       frames++;
+      if (first === null) first = t;
+      lastT = t;
       const iface = m[3];
       const id = parseInt(m[4], 16);
       const idKey = `${iface}:${m[4].toUpperCase()}`;
@@ -141,7 +145,12 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
         let s = last.get(nm);
         if (!s) { s = { pt: -Infinity, v: undefined, pending: null }; last.set(nm, s); }
         const value = Math.round(v * 1e6) / 1e6;
-        if (value === s.v && t - s.pt < KEEP_MS) continue;
+        if (value === s.v && t - s.pt < KEEP_MS) {
+          // a change held back (under 50 ms after the last point) is kept at its own time once 50 ms have gone by,
+          // not a second later (the CAN sync matches these edges to the footage)
+          if (s.pending && t - s.pt >= STEP_MS) { (bucket.signals[nm] ||= []).push([s.pending[0] - minuteStart, s.pending[1]]); s.pt = s.pending[0]; s.pending = null; }
+          continue;
+        }
         s.v = value;
         if (t - s.pt >= STEP_MS) {
           (bucket.signals[nm] ||= []).push([Math.round(t - minuteStart), value]);
@@ -158,7 +167,7 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
     for (const [a, b] of writes) await writeMinute(key, a, b);
     await mergeSignals(key, seen);
     minutes = written + (minute ? 1 : 0);
-    return { frames, minutes };
+    return { frames, minutes, from: first, to: lastT };
   }
 
   /** Every complete log not indexed yet, oldest first. */
@@ -202,6 +211,7 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
             await saveDone();
             status.indexed++;
             log?.info?.(`CAN index: ${job.name}: ${r.frames} frames, ${r.minutes} minute(s)`);
+            try { onIndexed?.(job.key, r.from, r.to); } catch { /* the sync's own business */ }
           } catch (err) {
             status.lastError = `${job.name}: ${err.message}`;
             log?.warn?.(`CAN index: ${status.lastError}`);

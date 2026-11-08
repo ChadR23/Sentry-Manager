@@ -79,6 +79,7 @@ const { createSpeedIndex } = require('./speedIndex');
 const { createExporter } = require('./exporter');
 const { createCanLogs, parseName: parseCanName } = require('./canLogs');
 const { createCanIndex } = require('./canIndex');
+const { createCanSync } = require('./canSync');
 
 /** A wall-clock time in an IANA time zone (as a TeslaCam clip is named) in UTC milliseconds. */
 function zonedToUtc(y, mo, d, h, mi, sec, timeZone) {
@@ -1679,7 +1680,8 @@ async function main() {
   // ---- CAN Bridge logs (the hidden Nerd settings; docs/can-bridge-api.md)
   const canLogs = createCanLogs({ dir: path.join(DATA, 'can'), freeBytes: () => diskSpace(fs.promises, DATA).then((x) => x.free).catch(() => Infinity) });
   // each log decoded once in the background (not while a conversion runs), so the Viewer gets it ready
-  const canIndex = createCanIndex({ canDir: path.join(DATA, 'can'), dir: path.join(DATA, 'can-index'), log: logger.scope('can'), idle: () => !converterRunning() });
+  let canSync = null;
+  const canIndex = createCanIndex({ canDir: path.join(DATA, 'can'), dir: path.join(DATA, 'can-index'), log: logger.scope('can'), idle: () => !converterRunning(), onIndexed: (key, from, to) => canSync?.indexed(key, from, to).catch(() => {}) });
   setTimeout(() => canIndex.kick(), 20_000).unref?.();
   // which car each CAN Bridge key is (a key of its own when there is one car)
   const canMap = () => db.get('can-vehicles', {}) || {};
@@ -1690,16 +1692,26 @@ async function main() {
     const single = vehicles.list().length === 1;
     return keys.filter((k) => map[k] === vid || (!map[k] && single));
   }
+  /** A clip's start in UTC from its name (the car's zone), or null. */
+  const canStartOf = (v, name) => {
+    const m = /(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})/.exec(name);
+    return m ? zonedToUtc(+m[1], +m[2], +m[3], +m[4], +m[5], +m[6], v.timezone || 'UTC') : null;
+  };
   /** The car, its CAN keys and the clip's start in UTC, for a clip file. */
   async function canClipOf(p) {
     const real = String(p || '');
     const v = vehicles.list().find((x) => { const root = vehicles.rootOf(x); return root && (real === root || real.startsWith(`${root}${path.sep}`)); });
     if (!v) throw new HttpError(404, 'Not a clip of a vehicle.');
-    const m = /(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})/.exec(path.basename(real));
-    if (!m) throw new HttpError(400, 'Not a TeslaCam clip name.');
-    const start = zonedToUtc(+m[1], +m[2], +m[3], +m[4], +m[5], +m[6], v.timezone || 'UTC');
+    const start = canStartOf(v, path.basename(real));
+    if (start === null) throw new HttpError(400, 'Not a TeslaCam clip name.');
     return { v, keys: await canKeysFor(v.id), start };
   }
+  // where on the CAN clock each clip's first frame is, from its own telemetry (server/canSync.js)
+  canSync = createCanSync({
+    dir: path.join(DATA, 'can-index'), series: canIndex.series, telemetry: async (real) => (await telemetry.forFile(real)).body,
+    vehicles, inventory, keysFor: canKeysFor, startOf: canStartOf, log: logger.scope('can'),
+    idle: () => !converterRunning() && !canIndex.status().running
+  });
   // the Viewer: every signal there is for this car (for the stat picker) ...
   r.add('GET', '/api/can/signals', async (req, res, { query }) => {
     const { keys } = await canClipOf(query.path);
@@ -1707,10 +1719,14 @@ async function main() {
   });
   // ... and the chosen ones over this clip (UTC times), already decoded
   r.add('GET', '/api/can/clip', async (req, res, { query }) => {
-    const { keys, start } = await canClipOf(query.path);
+    const { v, keys, start: named } = await canClipOf(query.path);
     const names = String(query.signals || '').split(',').map((x) => x.trim()).filter((x) => /^\w{1,80}$/.test(x)).slice(0, 64);
-    if (!names.length || !keys.length) return { start, series: {} };
-    return { start, series: await canIndex.series(keys, start - 2000, start + 70_000, names) };
+    if (!names.length || !keys.length) return { start: named, series: {} };
+    // the clip's start on the CAN clock: its name's time, corrected by the sync
+    const real = await studioReadable.resolve(String(query.path || ''));
+    const sync = real && !hiddenPath(real) ? await canSync.forClip({ v, keys, real, start: named }).catch((err) => { log.warn(`CAN sync: ${err.message}`); return null; }) : null;
+    const start = Math.round((named + (sync?.offsetMs || 0)) * 10) / 10;
+    return { start, sync, series: await canIndex.series(keys, start - 2000, start + 70_000, names) };
   });
   r.add('POST', '/api/can/vehicle-map', (req, res, { body, user }) => {
     const key = String(body?.key || '');

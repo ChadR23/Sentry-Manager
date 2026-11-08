@@ -68,6 +68,7 @@ const STYLE = `
 .sentry-sd .sd-pick select{font-size:11px;padding:2px 20px 2px 6px;width:100%}
 .sentry-sd .sd-none{color:var(--sd-dim);font-size:12px;padding:4px 6px}
 .sentry-sd .sd-hide{margin-left:auto}
+.sentry-sd .sd-sync{font-size:11px;color:var(--sd-dim);white-space:nowrap}
 @media (max-width:640px){
   .sentry-sd .sd-small{flex-basis:88px}
   .sentry-sd .sd-v{font-size:20px}
@@ -340,8 +341,18 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
   const ctx = (ms = null) => ({
     metric: board?.metric ?? metricDefault(),
     // a CAN signal's value at this moment of the clip
-    can: (name) => (can && ms !== null ? canSeriesAt(can.series?.[name], can.start + ms) : null)
+    // (the server lines the CAN clock up with the footage: start, and the drift as rate)
+    can: (name) => (can && ms !== null ? canSeriesAt(can.series?.[name], can.start + ms * (can.sync?.rate || 1)) : null)
   });
+  // how well the CAN data is lined up with the footage, small in the tools row
+  function syncNote() {
+    const node = el.querySelector('[data-sync]');
+    if (!node) return;
+    const s = can && canNames().length ? can.sync : null;
+    const m = s?.method;
+    node.textContent = !s ? '' : m === 'clock' ? 'CAN: clock only' : m === 'speed' ? 'CAN synced by speed' : `CAN synced ±${Math.max(1, Math.round(s.spreadMs ?? 0))} ms`;
+    node.title = !s ? '' : m === 'clock' ? 'CAN data placed by the clip\'s time only: nothing to line it up with' : m === 'speed' ? 'CAN data lined up with the footage by its speed' : `CAN data lined up with the footage from ${s.matches} matching changes (brake, blinkers, accelerator)${m === 'edges-drive' ? ' across the drive' : ''}`;
+  }
   const canNames = () => [...new Set((board?.blocks || []).flatMap((b) => b.signals).filter((id) => id.startsWith('can.')).map((id) => id.slice(4)))].sort();
   function loadCan(path) {
     const names = canNames();
@@ -350,8 +361,8 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     canFor = key;
     // new names (and the stat picker) once the car's signal list is here
     canMetaFor(path).then((meta) => { if (registerCanSignals(meta) && alive && state) draw(); });
-    if (!names.length) { can = null; return; }
-    canClipFor(path, names).then((d) => { if (canFor === key) { can = d; tick(true); } });
+    if (!names.length) { can = null; syncNote(); return; }
+    canClipFor(path, names).then((d) => { if (canFor === key) { can = d; syncNote(); tick(true); } });
   }
 
   function place() {
@@ -411,7 +422,9 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
           <button type="button" class="sd-btn" data-new>New dashboard</button><button type="button" class="sd-btn" data-rename>Rename</button>
           ${state.boards.length > 1 ? '<button type="button" class="sd-btn" data-delete>Delete</button>' : ''}
         </span>
+        <span class="sd-sync" data-sync></span>
         <button type="button" class="sd-btn sd-hide" data-hide aria-label="Hide the car data">Hide</button></div>`;
+    syncNote();
     tick(true);
   }
   const change = () => { saveBoards(state); draw(); };
