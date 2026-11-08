@@ -77,6 +77,7 @@ const STYLE = `
 .sentry-sd button.sd-btn[hidden]{display:none}
 .sentry-sd .sd-raw{margin-top:6px;min-width:0;max-width:100%;-webkit-user-select:text;user-select:text}
 .sentry-sd .sd-raw[hidden]{display:none}
+.sentry-sd .sd-raw.sd-raw-loading .sd-raw-scroll{opacity:.5}
 .sentry-sd .sd-raw-bar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:6px}
 .sentry-sd .sd-raw-bar input{all:unset;box-sizing:border-box;flex:1 1 140px;min-width:0;max-width:260px;padding:4px 10px;border-radius:8px;border:1px solid var(--sd-line);background:rgba(255,255,255,.06);color:var(--sd-fg);font:600 12px/1.6 system-ui,sans-serif}
 .sentry-sd .sd-raw-bar input:focus-visible{outline:2px solid var(--sd-blue);outline-offset:2px}
@@ -115,7 +116,8 @@ const fmt = (n, d = 0) => (Number.isFinite(n) ? n.toLocaleString(undefined, { mi
 // ---- signals: what a block can show. CAN signals are added the same way.
 // { id, label, group, kind: 'number' | 'text' | 'bool', unit(ctx), value(rec, ctx) → number | string | boolean | null, digits, bar(rec) 0..1 }
 const SIGNALS = new Map();
-export function registerSignals(list) { for (const s of list) SIGNALS.set(s.id, s); }
+let signalsVersion = 0; // goes up with each change of SIGNALS (the picker's options are built once per version)
+export function registerSignals(list) { for (const s of list) SIGNALS.set(s.id, s); if (list.length) signalsVersion++; }
 registerSignals([
   { id: 'dash.speed', label: 'Speed', group: 'Driving', kind: 'number', unit: (c) => (c.metric ? 'km/h' : 'mph'), value: (r, c) => (r.speedMps == null ? null : r.speedMps * (c.metric ? MPS_KMH : MPS_MPH)), digits: 0 },
   { id: 'dash.gear', label: 'Gear', group: 'Driving', kind: 'text', value: (r) => r.gear ?? null },
@@ -198,45 +200,73 @@ function registerCanSignals(meta) {
   registerSignals(list);
   return list.length;
 }
-const canMetaCache = new Map(); // front path -> Promise<meta>
-const canClipCache = new Map(); // front path + names -> Promise<{ start, series }>
+// An answer that says "nothing (yet)", or a request that failed, is kept only
+// for RETRY_MS: the server indexes CAN logs in the background, so a clip with
+// no CAN data now can have it a minute later. A good answer is kept.
+const RETRY_MS = 30_000;
+/** The cache entry { p: Promise, settled, until } for `key`, asked with get(entry) when missing or expired. */
+function cachedGet(map, key, max, get, good) {
+  const hit = map.get(key);
+  if (hit && !(hit.until && Date.now() > hit.until)) return hit;
+  const entry = { p: null, settled: false, until: 0 };
+  entry.p = get(entry).then((d) => {
+    entry.settled = true;
+    if (!good(d)) entry.until = Date.now() + RETRY_MS;
+    return d;
+  });
+  map.delete(key);
+  map.set(key, entry);
+  if (map.size > max) map.delete(map.keys().next().value);
+  return entry;
+}
+const hasKeys = (o) => Boolean(o && Object.keys(o).length);
+let optionsBuilt = { v: -1, html: '' };
+/** Every signal as <optgroup>s of <option>s, built once per change of SIGNALS. */
+function signalOptions() {
+  if (optionsBuilt.v === signalsVersion) return optionsBuilt.html;
+  const groups = new Map();
+  for (const s of SIGNALS.values()) (groups.get(s.group) || groups.set(s.group, []).get(s.group)).push(s);
+  const html = [...groups].map(([g, list]) => `<optgroup label="${esc(g)}">${list.map((s) => `<option value="${esc(s.id)}">${esc(s.label)}</option>`).join('')}</optgroup>`).join('');
+  optionsBuilt = { v: signalsVersion, html };
+  return html;
+}
+const canMetaCache = new Map(); // front path -> entry of Promise<meta>
+const canClipCache = new Map(); // front path + names -> entry of Promise<{ start, sync, series } | null>
 function canMetaFor(path) {
-  if (!canMetaCache.has(path)) {
-    canMetaCache.set(path, fetch(`/api/can/signals?path=${encodeURIComponent(path)}`, { credentials: 'same-origin' }).then((r) => (r.ok ? r.json() : null)).then((d) => d?.signals || {}).catch(() => ({})));
-    if (canMetaCache.size > 8) canMetaCache.delete(canMetaCache.keys().next().value);
-  }
-  return canMetaCache.get(path);
+  return cachedGet(canMetaCache, path, 8, () => fetch(`/api/can/signals?path=${encodeURIComponent(path)}`, { credentials: 'same-origin' }).then((r) => (r.ok ? r.json() : null)).then((d) => d?.signals || {}).catch(() => ({})), hasKeys).p;
 }
+const canClipGood = (d) => Object.values(d?.series || {}).some((pts) => pts?.length);
 function canClipFor(path, names) {
-  const key = `${path}|${names.join(',')}`;
-  if (!canClipCache.has(key)) {
-    canClipCache.set(key, fetch(`/api/can/clip?path=${encodeURIComponent(path)}&signals=${encodeURIComponent(names.join(','))}`, { credentials: 'same-origin' }).then((r) => (r.ok ? r.json() : null)).catch(() => null));
-    if (canClipCache.size > 16) canClipCache.delete(canClipCache.keys().next().value);
-  }
-  return canClipCache.get(key);
+  return cachedGet(canClipCache, `${path}|${names.join(',')}`, 16, () => fetch(`/api/can/clip?path=${encodeURIComponent(path)}&signals=${encodeURIComponent(names.join(','))}`, { credentials: 'same-origin' }).then((r) => (r.ok ? r.json() : null)).catch(() => null), canClipGood).p;
 }
+/** Forget every /api/can/clip answer for this clip (to ask again with the newest sync). */
+function dropCanClip(path) {
+  for (const key of [...canClipCache.keys()]) if (key.startsWith(`${path}|`)) canClipCache.delete(key);
+}
+/**
+ * A moment of the clip (ms in) on the CAN clock: the clip's start there, and
+ * the drive's drift as rate. The signals and the raw view both use this, with
+ * the same answer, so their frames agree.
+ */
+function canTime(sync, ms) { return sync.start + ms * (sync.sync?.rate || 1); }
 
 // ---- the nerd raw view: every CAN id at the moment shown, decodable or not
 // (GET /api/can/raw), with the bytes that just changed lit up, to find which
 // message moves when the footage shows the brake pressed. Fetched once per
 // clip, only while open (a tiny probe decides whether "Raw" is offered).
 const RAW_HOT_MS = 500;
-const rawProbeCache = new Map(); // front path -> Promise<boolean>
-const rawDataCache = new Map(); // front path -> Promise<{ start, ids } | null>
-const rawGet = (url) => fetch(url, { credentials: 'same-origin' }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+const rawProbeCache = new Map(); // front path -> entry of Promise<boolean>
+const rawDataCache = new Map(); // front path -> entry of Promise<{ start, sync, ids } | null>
+const rawGet = (url, signal) => fetch(url, { credentials: 'same-origin', signal }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
 function rawProbe(path) {
-  if (!rawProbeCache.has(path)) {
-    rawProbeCache.set(path, rawGet(`/api/can/raw?path=${encodeURIComponent(path)}&probe=1`).then((d) => d?.count > 0));
-    if (rawProbeCache.size > 16) rawProbeCache.delete(rawProbeCache.keys().next().value);
-  }
-  return rawProbeCache.get(path);
+  return cachedGet(rawProbeCache, path, 16, () => rawGet(`/api/can/raw?path=${encodeURIComponent(path)}&probe=1`).then((d) => d?.count > 0), Boolean).p;
 }
+/** The cache entry (its p, and abort to stop the download) of the clip's raw data. */
 function rawFor(path) {
-  if (!rawDataCache.has(path)) {
-    rawDataCache.set(path, rawGet(`/api/can/raw?path=${encodeURIComponent(path)}`));
-    if (rawDataCache.size > 3) rawDataCache.delete(rawDataCache.keys().next().value);
-  }
-  return rawDataCache.get(path);
+  return cachedGet(rawDataCache, path, 3, (entry) => {
+    entry.abort = new AbortController();
+    return rawGet(`/api/can/raw?path=${encodeURIComponent(path)}`, entry.abort.signal);
+  }, (d) => Boolean(d?.ids?.length));
 }
 /** The index of the last change at or before `utc` (-1: none yet). */
 function rawIndexAt(changes, utc) {
@@ -264,9 +294,14 @@ let rawOpenPref = false;
 try { rawOpenPref = localStorage.getItem('sentry-sd-raw') === '1'; } catch { /* no storage */ }
 /**
  * The raw table, its own element (kept across the dashboard's redraws):
- *   const rv = createRawView({ onAvailable(yes) });  rv.setPath(path);  rv.tick(ms into clip)
+ *   const rv = createRawView({ onAvailable(yes), syncFor(path), onData(path, data) });
+ *   rv.setPath(path);  rv.tick(ms into clip);  rv.destroy()
+ * syncFor(path) gives the signals' answer for the clip ({ start, sync }) when
+ * there is one, so the raw view lines up with the footage exactly as they do;
+ * else the raw answer's own start and sync are used. onData hears each raw
+ * answer (a newer sync than the signals' tells the dashboard to ask again).
  */
-function createRawView({ onAvailable = () => {} } = {}) {
+function createRawView({ onAvailable = () => {}, syncFor = () => null, onData = () => {} } = {}) {
   const box = document.createElement('div');
   box.className = 'sd-raw';
   box.hidden = true;
@@ -280,15 +315,19 @@ function createRawView({ onAvailable = () => {} } = {}) {
   let path = null;
   let available = false;
   let open = rawOpenPref;
-  let data = null; // { start, ids }
+  let data = null; // { start, sync, ids }
   let rows = []; // { e (the id), tr, cell, spans, idx, hot, hex }
   let unknownOnly = false;
   let lastMs = NaN;
   let token = 0;
+  let dead = false; // destroyed: nothing more is asked or drawn
+  let pending = null; // the raw download (cache entry) this view waits for
+  let retry = 0; // the timer that asks again when there was no data (yet)
 
   function build() {
     rows = [];
     body.textContent = '';
+    box.classList.remove('sd-raw-loading');
     if (!data?.ids?.length) {
       body.innerHTML = '<tr><td colspan="5" class="sd-none">No CAN messages for this clip.</td></tr>';
       count.textContent = '';
@@ -345,11 +384,52 @@ function createRawView({ onAvailable = () => {} } = {}) {
     r.hex = hex;
     r.hot = hot;
   }
+  function setAvailable(yes) {
+    if (yes !== available) { available = yes; onAvailable(yes); }
+    box.hidden = !(open && available);
+  }
+  // a new clip: the last clip's rows stay (dimmed, not painted) until the new
+  // ones are here, so the page does not jump and the scroll stays
+  function loading() {
+    box.classList.add('sd-raw-loading');
+    count.textContent = 'Loading…';
+    if (!rows.length) body.innerHTML = '<tr><td colspan="5" class="sd-none">Loading…</td></tr>';
+  }
+  // ask again in a while: the server may not have indexed this clip's CAN logs yet
+  function later(p) {
+    clearTimeout(retry);
+    retry = setTimeout(() => { if (!dead && p === path) check(p); }, RETRY_MS + 1000);
+  }
+  // whether the clip has raw data: only cars with CAN signals are asked; while
+  // the view is open its own download says so, else a small probe does
+  function check(p) {
+    canMetaFor(p).then((meta) => {
+      if (dead || p !== path) return;
+      if (!hasKeys(meta)) { setAvailable(false); return; }
+      if (open) { load(); return; }
+      rawProbe(p).then((yes) => {
+        if (dead || p !== path) return;
+        setAvailable(yes);
+        if (!yes) later(p);
+      });
+    });
+  }
   function load() {
-    if (!open || !available || !path) return;
+    if (dead || !open || !path) return;
     const my = ++token;
     const p = path;
-    rawFor(p).then((d) => { if (my === token && p === path) { data = d; build(); } });
+    clearTimeout(retry);
+    const entry = rawFor(p);
+    pending = entry;
+    entry.p.then((d) => {
+      if (pending === entry) pending = null;
+      if (dead || my !== token || p !== path) return;
+      data = d;
+      setAvailable(Boolean(d?.ids?.length));
+      build();
+      if (d) onData(p, d);
+      if (!d?.ids?.length) later(p);
+    });
   }
   filterEl.addEventListener('input', applyFilter);
   unknownBtn.addEventListener('click', () => {
@@ -361,40 +441,46 @@ function createRawView({ onAvailable = () => {} } = {}) {
     el: box,
     get available() { return available; },
     get open() { return open; },
+    /** The raw answer shown for this clip (null: none yet). */
+    dataFor(p) { return p === path ? data : null; },
     setPath(p) {
-      if (p === path) return;
+      if (dead || p === path) return;
       path = p;
       data = null;
-      rows = [];
-      body.textContent = '';
-      count.textContent = '';
       token++;
-      if (available) { available = false; onAvailable(false); }
-      box.hidden = true;
-      // only cars with CAN signals are asked; the probe is a small answer
-      canMetaFor(p).then((meta) => (meta && Object.keys(meta).length ? rawProbe(p) : false)).then((yes) => {
-        if (p !== path) return;
-        available = yes;
-        box.hidden = !(open && available);
-        onAvailable(available);
-        load();
-      });
+      clearTimeout(retry);
+      // the view and its button stay until the new clip's answer says there is nothing
+      if (available) loading();
+      check(p);
     },
     toggle() {
+      if (dead) return;
       open = !open;
       try { localStorage.setItem('sentry-sd-raw', open ? '1' : '0'); } catch { /* no storage */ }
       rawOpenPref = open;
       box.hidden = !(open && available);
-      if (open && !data) load();
+      if (open && available && !data) load();
       lastMs = NaN;
     },
     /** Payloads at this moment of the clip (cells change only where a byte does). */
     tick(ms) {
-      if (box.hidden || !data?.ids?.length) return;
+      if (dead || box.hidden || !data?.ids?.length) return;
       if (Math.abs(ms - lastMs) < 40) return; // about 25 updates a second at most
       lastMs = ms;
-      const utc = data.start + ms;
+      const s = syncFor(path);
+      const utc = canTime(Number.isFinite(s?.start) ? s : data, ms);
       for (const r of rows) if (!r.tr.hidden) paint(r, utc);
+    },
+    /** Stops asking and drawing; a download only this view waits for is stopped (and not kept). */
+    destroy() {
+      dead = true;
+      token++;
+      clearTimeout(retry);
+      if (pending && !pending.settled) {
+        pending.abort?.abort();
+        for (const [k, v] of rawDataCache) if (v === pending) rawDataCache.delete(k);
+      }
+      pending = null;
     }
   };
 }
@@ -542,16 +628,35 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
   let alive = true;
   let recs = null;
   let recsFor = null;
-  let can = null; // { start (UTC ms of the clip's 0 s), series }
+  let can = null; // { start (UTC ms of the clip's 0 s), sync, trust, series }
+  let canOf = null; // the clip `can` is for
   let canFor = null;
+  let canRetry = 0; // the timer that asks again when the clip had no CAN data (yet)
   let raf = 0;
-  // the nerd raw view (createRawView): its own element, put back after each redraw
-  const rawView = createRawView({ onAvailable: (yes) => { const b = el.querySelector('[data-raw]'); if (b) b.hidden = !yes; } });
+  // the nerd raw view (createRawView): its own element, put back after each redraw.
+  // It uses the signals' sync for the clip when there is one (canTime), so both agree.
+  const rawView = createRawView({
+    onAvailable: (yes) => { const b = el.querySelector('[data-raw]'); if (b) b.hidden = !yes; },
+    syncFor: (p) => (can && canOf === p ? can : null),
+    onData: (p, d) => reconcile(p, d)
+  });
+  // The raw answer is asked for later, so its sync is the newer one: when it
+  // differs from the signals', they ask again (once per raw answer), and both
+  // then use the same sync.
+  let reconciledWith = null;
+  function reconcile(p, d) {
+    if (!alive || !can || canOf !== p || !d || d === reconciledWith || !Number.isFinite(d.start)) return;
+    const rateDiffers = d.sync !== undefined && (d.sync?.rate || 1) !== (can.sync?.rate || 1);
+    if (Math.abs(d.start - can.start) <= 0.05 && !rateDiffers) return;
+    reconciledWith = d;
+    dropCanClip(p);
+    canFor = null;
+  }
   const ctx = (ms = null) => ({
     metric: board?.metric ?? metricDefault(),
     // a CAN signal's value at this moment of the clip
     // (the server lines the CAN clock up with the footage: start, and the drift as rate)
-    can: (name) => (can && ms !== null ? canSeriesAt(can.series?.[name], can.start + ms * (can.sync?.rate || 1)) : null)
+    can: (name) => (can && ms !== null ? canSeriesAt(can.series?.[name], canTime(can, ms)) : null)
   });
   // how well the CAN data is lined up with the footage, small in the tools row
   function syncNote() {
@@ -578,10 +683,20 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     const key = `${path}|${names.join(',')}`;
     if (key === canFor) return;
     canFor = key;
+    clearTimeout(canRetry);
     // new names (and the stat picker) once the car's signal list is here
-    canMetaFor(path).then((meta) => { if (registerCanSignals(meta) && alive && state) draw(); });
-    if (!names.length) { can = null; syncNote(); return; }
-    canClipFor(path, names).then((d) => { if (canFor === key) { can = d; syncNote(); tick(true); } });
+    canMetaFor(path).then((meta) => { if (alive && registerCanSignals(meta) && state) draw(); });
+    if (!names.length) { can = null; canOf = null; syncNote(); return; }
+    canClipFor(path, names).then((d) => {
+      if (!alive || canFor !== key) return;
+      can = d;
+      canOf = path;
+      syncNote();
+      tick(true);
+      reconcile(path, rawView.dataFor(path));
+      // no data (yet): asked again in a while (the next tick, once canFor is cleared)
+      if (!canClipGood(d)) canRetry = setTimeout(() => { if (canFor === key) canFor = null; }, RETRY_MS + 1000);
+    });
   }
 
   function place() {
@@ -594,18 +709,25 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     } else if (el.previousElementSibling !== stage) stage.after(el);
   }
 
-  const options = (selected) => {
-    const groups = new Map();
-    for (const s of SIGNALS.values()) (groups.get(s.group) || groups.set(s.group, []).get(s.group)).push(s);
-    const unknown = selected && !SIGNALS.has(selected) ? `<option value="${esc(selected)}" selected>${esc(selected.replace(/^can\./, ''))} (no data yet)</option>` : '';
-    return unknown + [...groups].map(([g, list]) => `<optgroup label="${esc(g)}">${list.map((s) => `<option value="${esc(s.id)}"${s.id === selected ? ' selected' : ''}>${esc(s.label)}</option>`).join('')}</optgroup>`).join('');
+  // a stat picker shows only its stat until it is opened (fillPick): with
+  // thousands of CAN signals, every redraw would otherwise build them all
+  const pickOption = (id) => {
+    const s = SIGNALS.get(id);
+    return `<option value="${esc(id)}" selected>${esc(s ? s.label : `${String(id).replace(/^can\./, '')} (no data yet)`)}</option>`;
   };
+  function fillPick(sel) {
+    if (sel.dataset.filled) return;
+    const id = board?.blocks[Number(sel.dataset.pick)]?.signals[Number(sel.dataset.slot)];
+    sel.innerHTML = (id && !SIGNALS.has(id) ? pickOption(id) : '') + signalOptions();
+    sel.value = id ?? '';
+    sel.dataset.filled = '1';
+  }
   function blockHtml(b, i) {
     const sigs = b.signals.map((id) => SIGNALS.get(id));
     const editBar = `<div class="sd-edit sd-bar-edit"><span class="sd-grip" data-grip="${i}" title="Drag to move" aria-hidden="true">⠿</span>
       <button type="button" class="sd-btn" data-move="${i}" data-dir="-1" aria-label="Move left">‹</button><button type="button" class="sd-btn" data-move="${i}" data-dir="1" aria-label="Move right">›</button>
       <button type="button" class="sd-btn sd-x" data-remove="${i}" aria-label="Remove this block">×</button></div>`;
-    const pick = `<div class="sd-edit sd-pick">${b.signals.map((id, k) => `<select data-pick="${i}" data-slot="${k}" aria-label="Stat ${k + 1}">${options(id)}</select>`).join('')}</div>`;
+    const pick = editing ? `<div class="sd-edit sd-pick">${b.signals.map((id, k) => `<select data-pick="${i}" data-slot="${k}" aria-label="Stat ${k + 1}">${pickOption(id)}</select>`).join('')}</div>` : '';
     const label = (s, k = 0) => esc(s?.label || String(b.signals[k] || '?').replace(/^can\./, ''));
     if (b.type === 'small') {
       const s = sigs[0];
@@ -653,12 +775,13 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
   // values at the moment shown
   let lastKey = '';
   function tick(force = false) {
+    if (!alive) return;
     const m = main();
     const path = frontPathOf([m, ...videos()].filter(Boolean));
     if (path && path !== recsFor) {
       recsFor = path;
       recs = null;
-      recordsFor(path).then((r) => { if (recsFor === path) { recs = r; tick(true); } });
+      recordsFor(path).then((r) => { if (alive && recsFor === path) { recs = r; tick(true); } });
     }
     if (path) { loadCan(path); rawView.setPath(path); }
     const ms = (m?.currentTime || 0) * 1000;
@@ -749,6 +872,10 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
       change();
     }
   });
+  // a picker gets its full list as it is opened (a tap, a click or the keyboard)
+  const onPickOpen = (e) => { const sel = e.target.closest?.('select[data-pick]'); if (sel) fillPick(sel); };
+  el.addEventListener('pointerdown', onPickOpen);
+  el.addEventListener('focusin', onPickOpen);
   el.addEventListener('change', (e) => {
     const t = e.target;
     if (t.matches('[data-board]')) {
@@ -797,6 +924,6 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
   });
   return {
     el,
-    destroy() { alive = false; cancelAnimationFrame(raf); el.remove(); }
+    destroy() { alive = false; cancelAnimationFrame(raf); clearTimeout(canRetry); rawView.destroy(); el.remove(); }
   };
 }

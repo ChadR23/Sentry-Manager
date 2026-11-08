@@ -1253,6 +1253,7 @@ test('CAN index: an uploaded log is decoded in the background, and a clip gets i
     // the nerd raw view: every id, the unknown one too, its payload changes in UTC
     const raw = (await s.call('GET', `/api/can/raw?path=${encodeURIComponent(clip)}`, undefined, { headers: https })).data;
     assert.equal(raw.start, got.start);
+    assert.deepEqual(raw.sync, got.sync, 'the same sync as the signals (its rate is the drift)');
     assert.deepEqual(raw.ids.map((e) => [e.bus, e.id, e.name]), [['can0', '132', 'ID132HVBattAmpVolt'], ['can0', '257', 'ID257DIspeed'], ['can0', '7EF', null], ['can0', '7FF', 'ID7FFcarConfig']], 'sorted by id; null for what the DBC does not know');
     const same = raw.ids.find((e) => e.id === '7FF');
     assert.deepEqual(same.changes.map((c) => c[1]), ['0102030405060708'], 'a payload that never changes: once');

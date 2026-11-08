@@ -1783,7 +1783,8 @@ async function main() {
     const ids = keys.length && to >= from ? await canIndex.raw(keys, from, to) : [];
     // probe=1: only how many ids there are (whether the Viewer offers the raw view)
     if (query.probe) return { start, count: ids.length };
-    return { start, from, to, ids };
+    // (sync too: its rate is the drive's drift, which the raw view applies as the signals do)
+    return { start, sync, from, to, ids };
   });
   r.add('POST', '/api/can/vehicle-map', (req, res, { body, user }) => {
     const key = String(body?.key || '');
