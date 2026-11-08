@@ -1581,6 +1581,19 @@
   window.addEventListener('resize', () => fitFrames());
   pages.viewer = () => {
     page.innerHTML = '';
+    // a link to a moment, as the other interfaces take it (the Nerd panel's
+    // CAN search): #/viewer?day=YYYY-MM-DD&at=<clip>~<second>
+    const q = new URLSearchParams(location.hash.split('?')[1] || '');
+    if (q.get('day') || q.get('at')) {
+      if (q.get('vehicle') && q.get('vehicle') !== state.vehicleId && state.vehicles.some((v) => v.id === q.get('vehicle'))) {
+        state.vehicleId = q.get('vehicle');
+        store.set('vehicle', state.vehicleId);
+      }
+      const url = studioUrl('viewer', { ...(q.get('day') ? { date: q.get('day') } : {}), ...(q.get('at') ? { at: q.get('at') } : {}) });
+      if (frames.viewer?.dataset.src === url) { frames.viewer.remove(); delete frames.viewer; } // the same moment again: seek again
+      pendingFrame.viewer = url;
+      history.replaceState(null, '', '#/viewer');
+    }
     showFrame('viewer');
   };
   let vehicleEncoding = null; // the Encoding per vehicle view (vehicleEncoding.js)

@@ -36,6 +36,12 @@ const STYLE = `
 .sentry-nerd th,.sentry-nerd td{text-align:left;padding:5px 8px;border-top:1px solid #1f331f;white-space:nowrap}
 .sentry-nerd th{color:#a8e6ad;font-weight:600}
 .sentry-nerd .nd-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}
+.sentry-nerd input.nd-in,.sentry-nerd select.nd-in{color-scheme:dark;box-sizing:border-box;padding:6px 8px;border-radius:8px;border:1px solid #3c6b3f;background:#070a07;color:#d6f5d6;font:13px system-ui,sans-serif;min-width:0}
+.sentry-nerd input.nd-in:focus-visible,.sentry-nerd select.nd-in:focus-visible{outline:2px solid #7dff8a;outline-offset:1px}
+.sentry-nerd label.nd-lab{display:flex;flex-direction:column;gap:2px;font-size:12px;color:#a8e6ad}
+.sentry-nerd .nd-grow{flex:1 1 220px}
+.sentry-nerd a.nd-link{color:#7dff8a}
+@media (max-width:560px){.sentry-nerd{padding:14px}.sentry-nerd .nd-grow{flex-basis:100%}}
 `;
 
 async function api(url, opts = {}) {
@@ -53,6 +59,133 @@ function css() {
   document.head.appendChild(s);
 }
 
+const OPS = [['>', 'is above'], ['<', 'is below'], ['>=', 'is at least'], ['<=', 'is at most'], ['=', 'is'], ['!=', 'is not'], ['changed', 'changed'], ['appeared', 'first has data']];
+const fmtVal = (m) => (m.text ? `${m.text} (${m.value})` : String(m.value));
+
+/**
+ * A link that opens the Viewer at a match's moment, or why not. Each
+ * interface takes a moment as <clip>~<second>, at its own address: Aurora
+ * #/viewer/<car>/day/<day>?at=…, Daylight #/viewer/<car>?day=…&at=…, the
+ * others (the built-in one too) #/viewer?day=…&at=….
+ */
+function openLink(m, vid, pack) {
+  const f = m.footage;
+  if (!f) return '<span class="nd-muted">no footage</span>';
+  const at = encodeURIComponent(`${f.clip}~${f.second}`);
+  const car = encodeURIComponent(vid);
+  const day = encodeURIComponent(f.day);
+  const href = pack === 'aurora' ? `#/viewer/${car}/day/${day}?at=${at}`
+    : pack === 'daylight' ? `#/viewer/${car}?day=${day}&at=${at}`
+      : `#/viewer?day=${day}&at=${at}&vehicle=${car}`;
+  return `<a class="nd-link" data-open href="/${esc(href)}">Open in Viewer</a>`;
+}
+
+/**
+ * "Find when it started": the first time a CAN signal met a condition, over
+ * every indexed minute of a car, and which CAN ids are new or went quiet.
+ * Viewer accounts may use it too.
+ */
+async function drawFind(el, close) {
+  let cars = [];
+  try { cars = (await api('/api/vehicles')).vehicles || []; } catch { return; }
+  let pack = null; // the interface, for the Viewer's address
+  try { pack = (await api('/api/ui-packs')).active || null; } catch { /* the built-in one's */ }
+  if (!cars.length) return;
+  let vid = cars[0].id;
+  el.innerHTML = `
+    <h3>Find when it started</h3>
+    <p class="nd-muted">Every decoded minute of the car, oldest first: the first time a signal met the condition, and the next times after it.</p>
+    <form data-sig-form>
+      <div class="nd-row">
+        ${cars.length > 1 ? `<label class="nd-lab">Car<select class="nd-in" data-car>${cars.map((v) => `<option value="${esc(v.id)}">${esc(v.name)}</option>`).join('')}</select></label>` : ''}
+        <label class="nd-lab nd-grow">Signal<input class="nd-in" data-signal list="nd-signals" required autocomplete="off" spellcheck="false" placeholder="Type to search, e.g. DI_vehicleSpeed"></label>
+        <datalist id="nd-signals"></datalist>
+        <label class="nd-lab">Condition<select class="nd-in" data-op>${OPS.map(([v, t]) => `<option value="${esc(v)}">${esc(t)}</option>`).join('')}</select></label>
+        <label class="nd-lab" data-value-wrap>Value<input class="nd-in" data-value size="8" placeholder="40 or a name"></label>
+      </div>
+      <div class="nd-row">
+        <label class="nd-lab">From (optional)<input class="nd-in" type="date" data-from></label>
+        <label class="nd-lab">To (optional)<input class="nd-in" type="date" data-to></label>
+        <label class="nd-lab" style="flex-direction:row;align-items:center;gap:6px"><input type="checkbox" data-all> Count every match (reads it all)</label>
+        <button type="submit" class="nd-btn">Search</button>
+      </div>
+    </form>
+    <div data-sig-out></div>
+    <h3>CAN id changes</h3>
+    <p class="nd-muted">From the frames counted per minute: ids that are new (since a date, as after a software update; else after the first hour of data), and ids the car sent all the time that went quiet while it was awake.</p>
+    <form data-id-form><div class="nd-row">
+      <label class="nd-lab">New since (optional)<input class="nd-in" type="date" data-before></label>
+      <label class="nd-lab">Quiet for (minutes awake)<input class="nd-in" type="number" min="1" max="10000" value="10" data-gap style="width:7em"></label>
+      <button type="submit" class="nd-btn">ID changes</button>
+    </div></form>
+    <div data-id-out></div>`;
+  const $ = (s) => el.querySelector(s);
+  const meta = {};
+  async function loadSignals() {
+    $('#nd-signals').innerHTML = '';
+    try {
+      const { signals } = await api(`/api/can/vehicle-signals?vehicle=${encodeURIComponent(vid)}`);
+      Object.assign(meta, signals);
+      const names = Object.keys(signals).sort();
+      $('#nd-signals').innerHTML = names.map((n) => { const s = signals[n] || {}; const l = [s.label && s.label !== n ? s.label : '', s.unit ? `(${s.unit})` : ''].filter(Boolean).join(' '); return `<option value="${esc(n)}"${l ? ` label="${esc(l)}"` : ''}></option>`; }).join('');
+      $('[data-signal]').placeholder = names.length ? `Type to search ${names.length} signals` : 'No CAN data for this car yet';
+    } catch { /* typed by hand, then */ }
+  }
+  const syncOp = () => { const op = $('[data-op]').value; $('[data-value-wrap]').hidden = op === 'changed' || op === 'appeared'; };
+  syncOp();
+  loadSignals();
+  $('[data-car]')?.addEventListener('change', (e) => { vid = e.target.value; $('[data-sig-out]').innerHTML = ''; $('[data-id-out]').innerHTML = ''; loadSignals(); });
+  $('[data-op]').addEventListener('change', syncOp);
+  el.addEventListener('click', (e) => { if (e.target.closest('a[data-open]')) close(); }); // the Viewer, under the panel
+
+  let sigFrom = null; // a scan out of time goes on from here
+  async function searchSignal(resume) {
+    const out = $('[data-sig-out]');
+    const name = $('[data-signal]').value.trim();
+    const op = $('[data-op]').value;
+    if (!name) return;
+    const q = new URLSearchParams({ vehicle: vid, signal: name, op });
+    if (!$('[data-value-wrap]').hidden) q.set('value', $('[data-value]').value.trim());
+    if (resume && sigFrom) q.set('from', String(sigFrom)); else if ($('[data-from]').value) q.set('from', $('[data-from]').value);
+    if ($('[data-to]').value) q.set('to', $('[data-to]').value);
+    if ($('[data-all]').checked) q.set('all', '1');
+    out.innerHTML = '<p class="nd-muted">Searching… (a long history can take a while)</p>';
+    let r;
+    try { r = await api(`/api/can/search?${q}`); } catch (err) { out.innerHTML = `<p class="nd-warn">${esc(err.message)}</p>`; return; }
+    sigFrom = r.complete ? null : r.resumeFrom;
+    const unit = r.unit ? ` ${r.unit}` : '';
+    const opText = OPS.find(([v]) => v === op)?.[1] || op;
+    const head = r.first
+      ? `<p><b>First:</b> ${esc(r.first.localTime)} (car time) · ${esc(fmtVal(r.first))}${esc(unit)}${r.first.previous !== undefined && r.first.previous !== null ? ` (was ${esc(r.first.previousText || r.first.previous)})` : ''} · ${openLink(r.first, vid, pack)}</p>`
+      : `<p>${esc(name)} never ${esc(opText)}${r.value !== null && r.value !== undefined && op !== 'changed' && op !== 'appeared' ? ` ${esc(r.value)}${esc(unit)}` : ''} in ${r.scannedMinutes.toLocaleString()} minute${r.scannedMinutes === 1 ? '' : 's'} read${r.minutesWithData ? '' : ' (the signal has no data in them)'}.</p>`;
+    const counts = `<p class="nd-muted">${r.matchingMinutes.toLocaleString()} matching minute${r.matchingMinutes === 1 ? '' : 's'} of ${r.minutesWithData.toLocaleString()} with this signal${r.complete ? '' : ' so far'}; ${r.scannedMinutes.toLocaleString()} of ${r.totalMinutes.toLocaleString()} minutes read.</p>`;
+    const more = r.resumeFrom && !r.complete && r.scannedMinutes < r.totalMinutes && !r.matches.length
+      ? `<div class="nd-row"><button type="button" class="nd-btn" data-resume>Go on reading from ${esc(new Date(r.resumeFrom).toLocaleString())}</button></div>` : '';
+    out.innerHTML = `${head}${counts}${r.matches.length > 1 ? `<div class="nd-scroll"><table><thead><tr><th>When (car time)</th><th>Value</th><th></th></tr></thead><tbody>
+      ${r.matches.map((m) => `<tr><td>${esc(m.localTime)}</td><td>${esc(fmtVal(m))}${esc(unit)}</td><td>${openLink(m, vid, pack)}</td></tr>`).join('')}</tbody></table></div>` : ''}${more}`;
+  }
+  $('[data-sig-form]').addEventListener('submit', (e) => { e.preventDefault(); sigFrom = null; searchSignal(false); });
+  el.addEventListener('click', (e) => { if (e.target.closest('[data-resume]')) searchSignal(true); });
+
+  $('[data-id-form]').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const out = $('[data-id-out]');
+    const q = new URLSearchParams({ vehicle: vid, gap: $('[data-gap]').value || '10' });
+    if ($('[data-before]').value) q.set('before', $('[data-before]').value);
+    out.innerHTML = '<p class="nd-muted">Reading the frame counts…</p>';
+    let r;
+    try { r = await api(`/api/can/id-events?${q}`); } catch (err) { out.innerHTML = `<p class="nd-warn">${esc(err.message)}</p>`; return; }
+    if (!r.totalMinutes) { out.innerHTML = '<p class="nd-muted">No CAN data for this car yet.</p>'; return; }
+    const span = `<p class="nd-muted">${r.idCount.toLocaleString()} ids in ${r.awakeMinutes.toLocaleString()} awake minutes${r.complete ? '' : ` (stopped reading at ${esc(new Date(r.resumeFrom).toLocaleString())}: out of time)`}.</p>`;
+    const table = (rows, cols) => `<div class="nd-scroll"><table><thead><tr>${cols.map((c) => `<th>${esc(c)}</th>`).join('')}<th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    out.innerHTML = `${span}
+      <p><b>New ids</b>${r.appearedCount > r.appeared.length ? ` (first ${r.appeared.length} of ${r.appearedCount})` : ''}</p>
+      ${r.appeared.length ? table(r.appeared.map((x) => `<tr><td class="nd-mono">${esc(x.id)}</td><td>${esc(x.localTime)}</td><td>${x.seenMinutes.toLocaleString()}</td><td>${openLink(x, vid, pack)}</td></tr>`).join(''), ['Id', 'First seen (car time)', 'Minutes seen']) : '<p class="nd-muted">None.</p>'}
+      <p><b>Went quiet</b> (for ${esc(r.gap)}+ awake minutes)</p>
+      ${r.stopped.length ? table(r.stopped.map((x) => `<tr><td class="nd-mono">${esc(x.id)}</td><td>${esc(x.localTime)}</td><td>${x.back ? `after ${x.missingMinutes.toLocaleString()} min` : `still quiet (${x.missingMinutes.toLocaleString()} min)`}</td><td>${openLink(x, vid, pack)}</td></tr>`).join(''), ['Id', 'Quiet from (car time)', 'Back']) : '<p class="nd-muted">None.</p>'}`;
+  });
+}
+
 /** The CAN Bridge panel, as a dialog over the page. */
 export function openNerdPanel() {
   css();
@@ -62,6 +195,7 @@ export function openNerdPanel() {
     <div class="nd-head"><div><h2 id="nd-title">&gt;_ nerd</h2><p class="nd-muted">CAN Bridge: every CAN message the car sends, recorded by the Screenmate and synced to the footage.</p></div>
       <button type="button" class="nd-btn" data-close aria-label="Close">Close</button></div>
     <div data-body><p class="nd-muted">Loading…</p></div>
+    <div data-find></div>
   </div>`;
   const prevFocus = document.activeElement;
   const close = () => { bg.remove(); document.removeEventListener('keydown', onKey, true); prevFocus?.focus?.(); };
@@ -162,6 +296,7 @@ export function openNerdPanel() {
     }
   });
   draw();
+  drawFind(bg.querySelector('[data-find]'), close);
   return { close };
 }
 

@@ -11,6 +11,7 @@ const fsp = require('fs/promises');
 const net = require('net');
 const os = require('os');
 const path = require('path');
+const zlib = require('zlib');
 const { spawn, spawnSync, execFileSync } = require('child_process');
 
 const REPO = path.join(__dirname, '..');
@@ -1132,6 +1133,39 @@ test('CAN index: an uploaded log is decoded in the background, and a clip gets i
     const st = (await s.call('GET', '/api/can/settings', undefined, { headers: https })).data;
     assert.deepEqual(st.keys, ['MY-car']);
     assert.equal(st.index.lastError, null);
+  } finally {
+    await s.stop();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('CAN search: when a signal first met a condition and when an id appeared, with the clip that covers it', { timeout: 60000 }, async () => {
+  const dir = await tmp();
+  await makeFootage(path.join(dir, 'footage'));
+  // three indexed minutes of the car MY-car (its only car, in UTC): 08:00 to 08:02
+  const idx = path.join(dir, 'data', 'can-index', 'MY-car');
+  await fsp.mkdir(idx, { recursive: true });
+  const t0 = Date.UTC(2020, 0, 1, 8, 0);
+  const minute = (i, signals, ids) => fsp.writeFile(path.join(idx, `20200101T080${i}.json.gz`), zlib.gzipSync(JSON.stringify({ minute: `20200101T080${i}`, signals, ids })));
+  await minute(0, { DI_vehicleSpeed: [[0, 10], [30_000, 20]] }, { 'can0:257': 600 });
+  await minute(1, { DI_vehicleSpeed: [[0, 30], [42_000, 55]] }, { 'can0:257': 600, 'can0:3F5': 10 });
+  await minute(2, { DI_vehicleSpeed: [[0, 50]] }, { 'can0:257': 600, 'can0:3F5': 10 });
+  const s = await startServer(dir);
+  try {
+    await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
+    const vid = (await s.call('GET', '/api/vehicles')).data.vehicles[0].id;
+    await waitFor(async () => (await s.call('GET', `/api/vehicles/${vid}/recordings`)).data?.recordings?.length);
+    const found = (await s.call('GET', `/api/can/search?vehicle=${vid}&signal=DI_vehicleSpeed&op=%3E&value=40`)).data;
+    assert.equal(found.first.at, t0 + 60_000 + 42_000);
+    assert.equal(found.first.value, 55);
+    assert.equal(found.first.localTime, '2020-01-01 08:01:42');
+    assert.deepEqual(found.first.footage, { at: t0 + 102_000, localTime: '2020-01-01 08:01:42', day: '2020-01-01', clip: '2020-01-01_08-01-00', second: 42 });
+    assert.equal((await s.call('GET', `/api/can/search?vehicle=${vid}&signal=DI_vehicleSpeed&op=%3E&value=40&from=2020-01-01T08:02`)).data.first.at, t0 + 120_000);
+    assert.equal((await s.call('GET', `/api/can/search?vehicle=${vid}&signal=DI_vehicleSpeed&op=~&value=40`)).status, 400);
+    const ev = (await s.call('GET', `/api/can/id-events?vehicle=${vid}&before=2020-01-01T08:01`)).data;
+    assert.deepEqual(ev.appeared.map((x) => [x.id, x.at, x.footage?.clip]), [['can0:3F5', t0 + 60_000, '2020-01-01_08-01-00']]);
+    assert.ok((await s.call('GET', `/api/can/vehicle-signals?vehicle=${vid}`)).data.signals);
+    assert.equal((await s.call('GET', '/api/can/search?vehicle=nope&signal=x&op=appeared')).status, 404);
   } finally {
     await s.stop();
     await fsp.rm(dir, { recursive: true, force: true });

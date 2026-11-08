@@ -80,6 +80,7 @@ const { createExporter } = require('./exporter');
 const { createCanLogs, parseName: parseCanName } = require('./canLogs');
 const { createCanIndex } = require('./canIndex');
 const { createCanSync } = require('./canSync');
+const { createCanSearch, footageAt, clipStamps, localTime, parseWhen } = require('./canSearch');
 
 /** A wall-clock time in an IANA time zone (as a TeslaCam clip is named) in UTC milliseconds. */
 function zonedToUtc(y, mo, d, h, mi, sec, timeZone) {
@@ -1728,6 +1729,36 @@ async function main() {
     const start = Math.round((named + (sync?.offsetMs || 0)) * 10) / 10;
     return { start, sync, series: await canIndex.series(keys, start - 2000, start + 70_000, names) };
   });
+  // "when did this start" (canSearch.js): one search at a time, each match with the clip that covers it
+  const canSearch = createCanSearch({ dir: path.join(DATA, 'can-index') });
+  let canSearchQueue = Promise.resolve();
+  const canStamps = new Map(); // vehicle id -> { of, stamps }
+  async function canSearchRun(query, fn) {
+    const v = vehicleOr404(String(query.vehicle || ''));
+    const keys = await canKeysFor(v.id);
+    const tz = v.timezone || 'UTC';
+    const when = (s, end) => parseWhen(s, (...a) => zonedToUtc(...a, tz), end);
+    const job = canSearchQueue.then(() => fn(keys, when));
+    canSearchQueue = job.catch(() => {});
+    let out;
+    try { out = await job; } catch (err) { throw new HttpError(err.status || 500, err.message); }
+    const inv = inventory.get(v.id);
+    let c = canStamps.get(v.id);
+    if (inv?.recordings && c?.of !== inv.recordings) {
+      c = { of: inv.recordings, stamps: clipStamps(inv.recordings) };
+      canStamps.set(v.id, c);
+    }
+    const add = (m) => { if (m && Number.isFinite(m.at)) { m.localTime = localTime(m.at, tz); m.footage = footageAt(c?.stamps, m.at, tz); } };
+    for (const list of [out.matches, out.appeared, out.stopped]) list?.forEach(add);
+    return { vehicle: v.id, timezone: tz, keys, ...out };
+  }
+  r.add('GET', '/api/can/vehicle-signals', async (req, res, { query }) => ({ signals: await canIndex.signals(await canKeysFor(vehicleOr404(String(query.vehicle || '')).id)) }));
+  r.add('GET', '/api/can/search', (req, res, { query }) => canSearchRun(query, (keys, when) => canSearch.signal(keys, {
+    signal: query.signal, op: query.op, value: query.value, from: when(query.from), to: when(query.to, true), limit: query.limit, all: query.all === '1' || query.all === 'true'
+  })));
+  r.add('GET', '/api/can/id-events', (req, res, { query }) => canSearchRun(query, (keys, when) => canSearch.ids(keys, {
+    from: when(query.from), to: when(query.to, true), before: when(query.before), gap: query.gap, id: query.id || null, limit: query.limit
+  })));
   r.add('POST', '/api/can/vehicle-map', (req, res, { body, user }) => {
     const key = String(body?.key || '');
     if (!/^[A-Za-z0-9-]{1,64}$/.test(key)) throw new HttpError(400, 'Give the CAN Bridge car key.');
