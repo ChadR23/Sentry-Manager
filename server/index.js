@@ -77,6 +77,21 @@ const { Telemetry } = require('./telemetry');
 const { createSpeedIndex } = require('./speedIndex');
 const { createExporter } = require('./exporter');
 const { createCanLogs, parseName: parseCanName } = require('./canLogs');
+const { createCanIndex } = require('./canIndex');
+
+/** A wall-clock time in an IANA time zone (as a TeslaCam clip is named) in UTC milliseconds. */
+function zonedToUtc(y, mo, d, h, mi, sec, timeZone) {
+  const offsetAt = (ms) => {
+    try {
+      const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })
+        .formatToParts(new Date(ms)).map((x) => [x.type, x.value]));
+      return Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second) - ms;
+    } catch { return 0; }
+  };
+  const guess = Date.UTC(y, mo - 1, d, h, mi, sec);
+  const first = guess - offsetAt(guess);
+  return guess - offsetAt(first); // again, for a change of clocks in between
+}
 
 /** Run fn over items, at most n at a time. */
 async function eachLimit(items, n, fn) {
@@ -1656,6 +1671,50 @@ async function main() {
   });
   // ---- CAN Bridge logs (the hidden Nerd settings; docs/can-bridge-api.md)
   const canLogs = createCanLogs({ dir: path.join(DATA, 'can'), freeBytes: () => diskSpace(fs.promises, DATA).then((x) => x.free).catch(() => Infinity) });
+  // each log decoded once in the background (not while a conversion runs), so the Viewer gets it ready
+  const canIndex = createCanIndex({ canDir: path.join(DATA, 'can'), dir: path.join(DATA, 'can-index'), log: logger.scope('can'), idle: () => !converterRunning() });
+  setTimeout(() => canIndex.kick(), 20_000).unref?.();
+  // which car each CAN Bridge key is (a key of its own when there is one car)
+  const canMap = () => db.get('can-vehicles', {}) || {};
+  async function canKeysFor(vid) {
+    const map = canMap();
+    let keys = [];
+    try { keys = (await fs.promises.readdir(path.join(DATA, 'can-index'), { withFileTypes: true })).filter((d) => d.isDirectory()).map((d) => d.name); } catch { return []; }
+    const single = vehicles.list().length === 1;
+    return keys.filter((k) => map[k] === vid || (!map[k] && single));
+  }
+  /** The car, its CAN keys and the clip's start in UTC, for a clip file. */
+  async function canClipOf(p) {
+    const real = String(p || '');
+    const v = vehicles.list().find((x) => { const root = vehicles.rootOf(x); return root && (real === root || real.startsWith(`${root}${path.sep}`)); });
+    if (!v) throw new HttpError(404, 'Not a clip of a vehicle.');
+    const m = /(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})/.exec(path.basename(real));
+    if (!m) throw new HttpError(400, 'Not a TeslaCam clip name.');
+    const start = zonedToUtc(+m[1], +m[2], +m[3], +m[4], +m[5], +m[6], v.timezone || 'UTC');
+    return { v, keys: await canKeysFor(v.id), start };
+  }
+  // the Viewer: every signal there is for this car (for the stat picker) ...
+  r.add('GET', '/api/can/signals', async (req, res, { query }) => {
+    const { keys } = await canClipOf(query.path);
+    return { signals: await canIndex.signals(keys) };
+  });
+  // ... and the chosen ones over this clip (UTC times), already decoded
+  r.add('GET', '/api/can/clip', async (req, res, { query }) => {
+    const { keys, start } = await canClipOf(query.path);
+    const names = String(query.signals || '').split(',').map((x) => x.trim()).filter((x) => /^\w{1,80}$/.test(x)).slice(0, 64);
+    if (!names.length || !keys.length) return { start, series: {} };
+    return { start, series: await canIndex.series(keys, start - 2000, start + 70_000, names) };
+  });
+  r.add('POST', '/api/can/vehicle-map', (req, res, { body, user }) => {
+    const key = String(body?.key || '');
+    if (!/^[A-Za-z0-9-]{1,64}$/.test(key)) throw new HttpError(400, 'Give the CAN Bridge car key.');
+    const vid = body?.vehicleId ? vehicleOr404(String(body.vehicleId)).id : null;
+    const map = { ...canMap() };
+    if (vid) map[key] = vid; else delete map[key];
+    db.set('can-vehicles', map);
+    audit.info(`CAN car ${key} is ${vid || 'no vehicle'}: ${by(req, user)}`);
+    return { map };
+  });
   const canCfg = () => db.get('can', null) || { enabled: false };
   const canTokenOk = (req) => {
     const cfg = canCfg();
@@ -1687,7 +1746,10 @@ async function main() {
         const num = (h) => (req.headers[h] === undefined || req.headers[h] === '' ? NaN : Number(req.headers[h]));
         const body = await readRaw(req, canLogs.MAX_CHUNK);
         const out = await canLogs.receive(name, body, { offset: num('upload-offset'), length: num('upload-length'), sha256: String(req.headers['upload-sha256'] || '').toLowerCase() });
-        if (out.complete && !out.already) log.info(`CAN Bridge: received ${name} (${out.length} bytes)`);
+        if (out.complete && !out.already) {
+          log.info(`CAN Bridge: received ${name} (${out.length} bytes)`);
+          canIndex.kick(); // decoded now, ready for the Viewer
+        }
         return sendJson(res, out.complete ? 201 : 200, out);
       }
       return fail(404, 'not_found', 'Not found');
@@ -1699,8 +1761,12 @@ async function main() {
   };
   r.add('GET', '/api/can/settings', async () => {
     const cfg = canCfg();
-    const { bytes, count } = await canLogs.list({ limit: 1 });
-    return { enabled: Boolean(cfg.enabled), since: cfg.at || null, logs: count, bytes };
+    const { bytes, count, logs } = await canLogs.list({ limit: 2000 });
+    return {
+      enabled: Boolean(cfg.enabled), since: cfg.at || null, logs: count, bytes,
+      keys: [...new Set(logs.map((l) => l.vehicleKey))].sort(), map: canMap(),
+      vehicles: vehicles.list().map((v) => ({ id: v.id, name: v.name })), index: canIndex.status()
+    };
   });
   r.add('POST', '/api/can/enable', (req, res, { user }) => {
     requireConfirmed(req);
@@ -1718,6 +1784,8 @@ async function main() {
   r.add('GET', '/api/can/files', async (req, res, { query }) => canLogs.list({ limit: Number(query.limit) || 200 }));
   r.add('DELETE', '/api/can/files/:name', async (req, res, { params, user }) => {
     try { await canLogs.remove(params.name); } catch (err) { throw new HttpError(err.status || 500, err.message); }
+    const n = parseCanName(params.name);
+    if (n) await canIndex.forget(n.vehicleKey, params.name).catch(() => {});
     audit.info(`CAN log deleted: ${params.name}: ${by(req, user)}`);
     return { ok: true };
   });

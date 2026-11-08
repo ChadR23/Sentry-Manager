@@ -1066,6 +1066,51 @@ test('CAN Bridge uploads: off until turned on, HTTPS and a write-only token, chu
   }
 });
 
+test('CAN index: an uploaded log is decoded in the background, and a clip gets its signals at its own time', { skip: spawnSync('xz', ['--version']).status !== 0 && 'needs xz', timeout: 60000 }, async () => {
+  const dir = await tmp();
+  await makeFootage(path.join(dir, 'footage'));
+  const s = await startServer(dir, { TRUST_PROXY: 'true' });
+  const https = { 'X-Forwarded-Proto': 'https' };
+  try {
+    await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' }, { headers: https });
+    await s.call('POST', '/api/auth/confirm', { password: 'correct horse' }, { headers: https });
+    const token = (await s.call('POST', '/api/can/enable', {}, { headers: https })).data.token;
+    // a minute of the clip 2020-01-01_08-00-00 (the car's zone is UTC here): battery
+    // voltage 380 V rising 0.1 V a second, speed 36 km/h, and an id no DBC knows
+    const t0 = Date.UTC(2020, 0, 1, 8, 0, 0) / 1000;
+    const lines = ['# canbridge v1'];
+    for (let i = 0; i < 70 * 10; i++) {
+      const t = t0 - 2 + i / 10;
+      const volts = 380 + (t - t0) * 0.1;
+      const b132 = Buffer.alloc(8);
+      b132.writeUInt16LE(Math.round(volts / 0.01), 0);
+      const b257 = Buffer.alloc(8);
+      b257.writeUInt32LE(Math.round((36 + 40) / 0.08) << 12, 0);
+      lines.push(`(${t.toFixed(6)}) can0 132#${b132.toString('hex').toUpperCase()}`, `(${t.toFixed(6)}) can0 257#${b257.toString('hex').toUpperCase()}`, `(${t.toFixed(6)}) can0 7FF#0102030405060708`);
+    }
+    const file = execFileSync('xz', ['-6', '-c'], { input: `${lines.join('\n')}\n` });
+    const name = 'MY-car_20200101T075958Z_1.log.xz';
+    const up = await fetch(`${s.base}/api/can/logs/${name}`, { method: 'POST', body: file, headers: { ...https, Authorization: `Bearer ${token}`, 'Upload-Offset': '0', 'Upload-Length': String(file.length), 'Upload-SHA256': crypto.createHash('sha256').update(file).digest('hex') } });
+    assert.equal(up.status, 201);
+    const clip = path.join(dir, 'footage', 'TeslaCam', 'RecentClips', '2020-01-01_08-00-00-front.mp4');
+    await waitFor(async () => (await s.call('GET', `/api/can/signals?path=${encodeURIComponent(clip)}`, undefined, { headers: https })).data.signals?.BattVoltage132);
+    const meta = (await s.call('GET', `/api/can/signals?path=${encodeURIComponent(clip)}`, undefined, { headers: https })).data.signals;
+    assert.equal(meta.BattVoltage132.unit, 'V');
+    const got = (await s.call('GET', `/api/can/clip?path=${encodeURIComponent(clip)}&signals=BattVoltage132,DI_vehicleSpeed`, undefined, { headers: https })).data;
+    assert.equal(got.start, t0 * 1000, 'the clip starts at its name, in the car\'s zone');
+    const at = (pts, ms) => pts.filter((p) => p[0] <= ms).pop()?.[1];
+    assert.ok(Math.abs(at(got.series.BattVoltage132, got.start + 10_000) - 381) < 0.02, 'about 381 V ten seconds in');
+    assert.ok(Math.abs(at(got.series.DI_vehicleSpeed, got.start + 30_000) - 36) < 0.1, '36 km/h');
+    assert.ok(got.series.BattVoltage132[0][0] <= got.start, 'with the value from before the clip starts');
+    const st = (await s.call('GET', '/api/can/settings', undefined, { headers: https })).data;
+    assert.deepEqual(st.keys, ['MY-car']);
+    assert.equal(st.index.lastError, null);
+  } finally {
+    await s.stop();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('Viewer dashboards: kept per account, cleaned of anything that is not a block', async () => {
   const dir = await tmp();
   const s = await startServer(dir);

@@ -119,11 +119,24 @@ export function openNerdPanel() {
           <td><button type="button" class="nd-btn nd-danger" data-del="${esc(f.name)}" aria-label="Delete the log ${esc(f.name)}">Delete</button></td></tr>`).join('')}
       </tbody></table></div>` : ''}
 
-      <h3>Coming next</h3>
-      <p class="nd-muted">Decoding (DBC), syncing each drive to the footage, and the stats you choose on screen in the Viewer.</p>
+      ${st.keys?.length ? `<h3>Which car</h3>
+      <p class="nd-muted">The CAN Bridge names each car by a key. ${st.vehicles.length === 1 ? 'With one car here, every key is that car unless you choose.' : 'Choose the car each key is, for the Viewer.'}</p>
+      ${st.keys.map((k) => `<div class="nd-row"><span class="nd-mono">${esc(k)}</span><select data-map="${esc(k)}" aria-label="The car ${esc(k)} is" class="nd-btn">
+        <option value="">${st.vehicles.length === 1 ? `${esc(st.vehicles[0].name)} (only car)` : 'Not chosen'}</option>
+        ${st.vehicles.map((v) => `<option value="${esc(v.id)}"${st.map[k] === v.id ? ' selected' : ''}>${esc(v.name)}</option>`).join('')}</select></div>`).join('')}` : ''}
+
+      <h3>Index</h3>
+      <p>${st.index.running ? `Decoding${st.index.current ? ` <span class="nd-mono">${esc(st.index.current)}</span>` : ''}… ${st.index.pending ? `${st.index.pending} log${st.index.pending === 1 ? '' : 's'} to go.` : ''}` : 'Every log is decoded and ready for the Viewer.'}
+        ${st.index.lastError ? `<br><span class="nd-warn">Last problem: ${esc(st.index.lastError)}</span>` : ''}</p>
+      <p class="nd-muted">Each log is decoded once when it arrives (Model 3/Y DBC, model3dbc), into signals per minute, so the Viewer's dashboard has them at once: Customize, then pick any signal under "CAN".</p>
       <div class="nd-row"><button type="button" class="nd-btn" data-hide>Hide the Nerd button</button></div>`;
   }
 
+  body.addEventListener('change', async (e) => {
+    const sel = e.target.closest('[data-map]');
+    if (!sel) return;
+    try { await api('/api/can/vehicle-map', { method: 'POST', body: JSON.stringify({ key: sel.dataset.map, vehicleId: sel.value || null }) }); } catch (err) { alert(err.message); }
+  });
   body.addEventListener('click', async (e) => {
     if (e.target.closest('[data-on]')) {
       const d = await confirmThen('/api/can/enable');

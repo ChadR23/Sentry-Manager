@@ -110,6 +110,87 @@ registerSignals([
   { id: 'dash.frame', label: 'Frame no.', group: 'Nerd', kind: 'number', unit: () => '', value: (r) => r.frame ?? null, digits: 0 }
 ]);
 
+// ---- CAN signals (CAN Bridge logs, indexed on the server: /api/can/signals, /api/can/clip)
+const CAN_UNITS = {
+  C: { metric: ['°C', (v) => v], imperial: ['°F', (v) => v * 1.8 + 32] },
+  degC: { metric: ['°C', (v) => v], imperial: ['°F', (v) => v * 1.8 + 32] },
+  kph: { metric: ['km/h', (v) => v], imperial: ['mph', (v) => v / 1.609344] },
+  'km/h': { metric: ['km/h', (v) => v], imperial: ['mph', (v) => v / 1.609344] },
+  km: { metric: ['km', (v) => v], imperial: ['mi', (v) => v / 1.609344] },
+  kPa: { metric: ['kPa', (v) => v], imperial: ['psi', (v) => v * 0.1450377] },
+  bar: { metric: ['bar', (v) => v], imperial: ['psi', (v) => v * 14.50377] }
+};
+const canSeriesAt = (pts, ms) => {
+  if (!pts?.length || ms < pts[0][0]) return null;
+  let lo = 0;
+  let hi = pts.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (pts[mid][0] <= ms) lo = mid; else hi = mid - 1;
+  }
+  return pts[lo][1];
+};
+/** A readable name: the DBC's description (up to its first comma), else the signal name in words. */
+function canLabel(name, comment) {
+  const c = String(comment || '').split(/[,(;]/)[0].trim();
+  if (c && c !== name && c.length <= 28) return c;
+  const words = String(name)
+    .replace(/^[A-Z0-9]{2,8}_/, '') // the sender (DI_, BMS_, VCFRONT_)
+    .replace(/(?<=[a-z])\d{3}$|^ID[0-9A-F]+/, '') // the message id at the end (BattVoltage132)
+    .replace(/_/g, ' ')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .trim();
+  return words ? words[0].toUpperCase() + words.slice(1) : name;
+}
+function registerCanSignals(meta) {
+  const list = [];
+  for (const [name, m] of Object.entries(meta || {})) {
+    const id = `can.${name}`;
+    if (SIGNALS.has(id)) continue;
+    const conv = CAN_UNITS[m.unit];
+    const named = m.values && Object.keys(m.values).length ? m.values : null;
+    // words only when every value has a name (a gear, a state); a number with a
+    // name for one special value (SNA: not available) stays a number
+    const span = Number.isFinite(m.max) && Number.isFinite(m.min) ? m.max - m.min : Infinity;
+    const allNamed = Boolean(named) && span <= 16;
+    const label = canLabel(name, m.label);
+    list.push({
+      id, label, group: `CAN · ${String(m.bus || '').replace(/Bus$/, '') || 'bus'} · ${String(m.message || '').replace(/^ID[0-9A-F]+/, '') || 'message'}`,
+      kind: allNamed ? 'text' : 'number', source: 'can', canName: name,
+      unit: (c) => (conv ? conv[c.metric ? 'metric' : 'imperial'][0] : m.unit || ''),
+      value: (r, c) => {
+        const v = c.can(name);
+        if (v == null) return null;
+        // (value names are for raw values: used for named states, whose scale is 1)
+        if (allNamed) return named[String(Math.round(v))] ?? String(v);
+        return conv ? conv[c.metric ? 'metric' : 'imperial'][1](v) : v;
+      },
+      bool: (r, c) => { const v = c.can(name); return v != null && v !== 0; },
+      digits: Math.abs((m.max ?? 0) - (m.min ?? 0)) > 200 ? 0 : 1
+    });
+  }
+  registerSignals(list);
+  return list.length;
+}
+const canMetaCache = new Map(); // front path -> Promise<meta>
+const canClipCache = new Map(); // front path + names -> Promise<{ start, series }>
+function canMetaFor(path) {
+  if (!canMetaCache.has(path)) {
+    canMetaCache.set(path, fetch(`/api/can/signals?path=${encodeURIComponent(path)}`, { credentials: 'same-origin' }).then((r) => (r.ok ? r.json() : null)).then((d) => d?.signals || {}).catch(() => ({})));
+    if (canMetaCache.size > 8) canMetaCache.delete(canMetaCache.keys().next().value);
+  }
+  return canMetaCache.get(path);
+}
+function canClipFor(path, names) {
+  const key = `${path}|${names.join(',')}`;
+  if (!canClipCache.has(key)) {
+    canClipCache.set(key, fetch(`/api/can/clip?path=${encodeURIComponent(path)}&signals=${encodeURIComponent(names.join(','))}`, { credentials: 'same-origin' }).then((r) => (r.ok ? r.json() : null)).catch(() => null));
+    if (canClipCache.size > 16) canClipCache.delete(canClipCache.keys().next().value);
+  }
+  return canClipCache.get(key);
+}
+
 const DEFAULT_BOARD = () => ({
   id: 'default', name: 'Drive', placement: 'below', metric: null,
   blocks: [
@@ -253,8 +334,25 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
   let alive = true;
   let recs = null;
   let recsFor = null;
+  let can = null; // { start (UTC ms of the clip's 0 s), series }
+  let canFor = null;
   let raf = 0;
-  const ctx = () => ({ metric: board?.metric ?? metricDefault() });
+  const ctx = (ms = null) => ({
+    metric: board?.metric ?? metricDefault(),
+    // a CAN signal's value at this moment of the clip
+    can: (name) => (can && ms !== null ? canSeriesAt(can.series?.[name], can.start + ms) : null)
+  });
+  const canNames = () => [...new Set((board?.blocks || []).flatMap((b) => b.signals).filter((id) => id.startsWith('can.')).map((id) => id.slice(4)))].sort();
+  function loadCan(path) {
+    const names = canNames();
+    const key = `${path}|${names.join(',')}`;
+    if (key === canFor) return;
+    canFor = key;
+    // new names (and the stat picker) once the car's signal list is here
+    canMetaFor(path).then((meta) => { if (registerCanSignals(meta) && alive && state) draw(); });
+    if (!names.length) { can = null; return; }
+    canClipFor(path, names).then((d) => { if (canFor === key) { can = d; tick(true); } });
+  }
 
   function place() {
     const where = over ? 'over' : board?.placement === 'over' ? 'over' : 'below';
@@ -269,7 +367,8 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
   const options = (selected) => {
     const groups = new Map();
     for (const s of SIGNALS.values()) (groups.get(s.group) || groups.set(s.group, []).get(s.group)).push(s);
-    return [...groups].map(([g, list]) => `<optgroup label="${esc(g)}">${list.map((s) => `<option value="${esc(s.id)}"${s.id === selected ? ' selected' : ''}>${esc(s.label)}</option>`).join('')}</optgroup>`).join('');
+    const unknown = selected && !SIGNALS.has(selected) ? `<option value="${esc(selected)}" selected>${esc(selected.replace(/^can\./, ''))} (no data yet)</option>` : '';
+    return unknown + [...groups].map(([g, list]) => `<optgroup label="${esc(g)}">${list.map((s) => `<option value="${esc(s.id)}"${s.id === selected ? ' selected' : ''}>${esc(s.label)}</option>`).join('')}</optgroup>`).join('');
   };
   function blockHtml(b, i) {
     const sigs = b.signals.map((id) => SIGNALS.get(id));
@@ -277,13 +376,13 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
       <button type="button" class="sd-btn" data-move="${i}" data-dir="-1" aria-label="Move left">‹</button><button type="button" class="sd-btn" data-move="${i}" data-dir="1" aria-label="Move right">›</button>
       <button type="button" class="sd-btn sd-x" data-remove="${i}" aria-label="Remove this block">×</button></div>`;
     const pick = `<div class="sd-edit sd-pick">${b.signals.map((id, k) => `<select data-pick="${i}" data-slot="${k}" aria-label="Stat ${k + 1}">${options(id)}</select>`).join('')}</div>`;
-    const label = (s) => esc(s?.label || '?');
+    const label = (s, k = 0) => esc(s?.label || String(b.signals[k] || '?').replace(/^can\./, ''));
     if (b.type === 'small') {
       const s = sigs[0];
       return `<div class="sd-b sd-small" data-i="${i}">${editBar}<div><span class="sd-v" data-v="0"></span><span class="sd-u" data-u="0"></span></div><div class="sd-l">${label(s)}</div>${s?.bar ? '<div class="sd-bar"><i data-bar="0"></i></div>' : ''}${pick}</div>`;
     }
     if (b.type === 'wide') {
-      return `<div class="sd-b sd-wide" data-i="${i}">${editBar}${sigs.map((s, k) => `<div class="sd-line"><span class="sd-l">${label(s)}</span><span><span class="sd-v" data-v="${k}"></span><span class="sd-u" data-u="${k}"></span></span></div>`).join('')}${pick}</div>`;
+      return `<div class="sd-b sd-wide" data-i="${i}">${editBar}${sigs.map((s, k) => `<div class="sd-line"><span class="sd-l">${label(s, k)}</span><span><span class="sd-v" data-v="${k}"></span><span class="sd-u" data-u="${k}"></span></span></div>`).join('')}${pick}</div>`;
     }
     if (b.type === 'gauge') {
       return `<div class="sd-b sd-gauge" data-i="${i}">${editBar}<div class="sd-ring"><span class="sd-v" data-v="0"></span><span class="sd-u" data-u="0"></span><div class="sd-gears" data-gears></div></div><div class="sd-ap" data-ap></div>${pick}</div>`;
@@ -327,11 +426,13 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
       recs = null;
       recordsFor(path).then((r) => { if (recsFor === path) { recs = r; tick(true); } });
     }
-    const r = recs ? recordAt(recs, (m?.currentTime || 0) * 1000) : null;
-    const key = `${r?.t ?? 'x'}|${recs ? 1 : 0}|${editing}`;
+    if (path) loadCan(path);
+    const ms = (m?.currentTime || 0) * 1000;
+    const r = recs ? recordAt(recs, ms) : null;
+    const key = `${r?.t ?? 'x'}|${recs ? 1 : 0}|${editing}|${can ? Math.floor(ms / 50) : ''}`;
     if (!force && key === lastKey) return;
     lastKey = key;
-    const c = ctx();
+    const c = ctx(ms);
     el.querySelectorAll('[data-i]').forEach((node) => {
       const b = board.blocks[Number(node.dataset.i)];
       if (!b) return;
@@ -339,9 +440,9 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
         const s = SIGNALS.get(id);
         const vEl = node.querySelector(`[data-v="${k}"]`);
         const uEl = node.querySelector(`[data-u="${k}"]`);
-        const raw = r && s ? s.value(r, c) : null;
-        if (vEl) vEl.textContent = raw == null ? '—' : s.kind === 'number' ? fmt(raw, s.digits ?? 1) : s.kind === 'bool' ? (raw ? 'On' : 'Off') : String(raw);
-        if (uEl) uEl.textContent = raw == null || !s?.unit ? '' : s.unit(c);
+        const raw = s && (s.source === 'can' || r) ? s.value(r, c) : null;
+        if (vEl) vEl.textContent = raw == null ? '—' : typeof raw === 'number' ? fmt(raw, s.digits ?? 1) : typeof raw === 'boolean' ? (raw ? 'On' : 'Off') : String(raw);
+        if (uEl) uEl.textContent = raw == null || !s?.unit || typeof raw !== 'number' ? '' : s.unit(c);
         const bar = node.querySelector(`[data-bar="${k}"]`);
         if (bar && s?.bar) bar.style.width = `${Math.max(0, Math.min(1, r ? s.bar(r) : 0)) * 100}%`;
       });
@@ -352,7 +453,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
       }
       if (b.type === 'state') {
         const s = SIGNALS.get(b.signals[0]);
-        const on = Boolean(r && s && (s.bool ? s.bool(r) : s.value(r, c)));
+        const on = Boolean(s && (s.source === 'can' || r) && (s.bool ? s.bool(r, c) : s.value(r, c)));
         node.classList.toggle('on', on);
         node.setAttribute('aria-label', `${s?.label || ''}: ${on ? 'on' : 'off'}`);
       }
@@ -453,7 +554,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
 
   loadBoards().then((d) => {
     if (!alive) return;
-    state = { boards: d.boards.map((x) => ({ ...DEFAULT_BOARD(), ...x, blocks: (x.blocks || []).filter((b) => SLOTS[b.type]).map((b) => ({ type: b.type, signals: [...(b.signals || [])].concat(DEFAULT_SIGNAL[b.type]).slice(0, SLOTS[b.type]).map((id) => (SIGNALS.has(id) ? id : DEFAULT_SIGNAL[b.type][0])) })) })), active: d.active };
+    state = { boards: d.boards.map((x) => ({ ...DEFAULT_BOARD(), ...x, blocks: (x.blocks || []).filter((b) => SLOTS[b.type]).map((b) => ({ type: b.type, signals: [...(b.signals || [])].concat(DEFAULT_SIGNAL[b.type]).slice(0, SLOTS[b.type]).map((id) => (SIGNALS.has(id) || String(id).startsWith('can.') ? id : DEFAULT_SIGNAL[b.type][0])) })) })), active: d.active };
     board = state.boards.find((x) => x.id === state.active) || state.boards[0];
     draw();
     raf = requestAnimationFrame(loop);
