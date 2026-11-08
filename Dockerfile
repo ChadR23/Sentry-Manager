@@ -45,7 +45,7 @@ RUN set -eux; \
     # FFmpeg 8 when Jellyfin publishes it for this release, else their 7.x
     ffmpeg_pkg=jellyfin-ffmpeg8; apt-cache show "$ffmpeg_pkg" >/dev/null 2>&1 || ffmpeg_pkg=jellyfin-ffmpeg7; \
     apt-get install -y --no-install-recommends "$ffmpeg_pkg" cifs-utils tini tzdata \
-      fontconfig fonts-liberation fonts-dejavu-core openssl util-linux; \
+      fontconfig fonts-liberation fonts-dejavu-core openssl util-linux xz-utils; \
     ln -s /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/lib/jellyfin-ffmpeg/ffprobe /usr/lib/jellyfin-ffmpeg/vainfo /usr/local/bin/; \
     rm -rf /var/lib/apt/lists/*; \
     # no setuid/setgid programs: nothing inside can become root again (the

@@ -76,6 +76,7 @@ const { run } = require('./proc');
 const { Telemetry } = require('./telemetry');
 const { createSpeedIndex } = require('./speedIndex');
 const { createExporter } = require('./exporter');
+const { createCanLogs, parseName: parseCanName } = require('./canLogs');
 
 /** Run fn over items, at most n at a time. */
 async function eachLimit(items, n, fn) {
@@ -286,6 +287,8 @@ async function main() {
   let speedIndex = null;
   let scrubPrepare = null;
   let integrityRef = null; // the footage check: one cut short by a restart goes on after the first scan
+  let canUploadRef = null; // CAN Bridge uploads (set where canLogs is made)
+  const canUpload = (req, res, p) => (canUploadRef ? canUploadRef(req, res, p) : sendJson(res, 404, { error: 'Not found' }));
   const inventory = new Inventory({ vehicles, db, log: logger.scope('inventory'), onChange: () => announce('inventory'), onScanned: (vid) => { speedIndex?.kick(); scrubPrepare?.kick(); integrityRef?.resume(vid); } });
   const thumbs = new Thumbnails({ dir: path.join(DATA, 'thumbnails'), ffmpegPath: FFMPEG });
   const telemetry = new Telemetry({ srcRoot: SRC, cacheDir: path.join(DATA, 'telemetry'), log: logger.scope('telemetry') });
@@ -1628,6 +1631,74 @@ async function main() {
     if (!inventory.get(v.id)?.files) await inventory.scan(v.id);
     return integrity.start(v.id);
   });
+  // ---- CAN Bridge logs (the hidden Nerd settings; docs/can-bridge-api.md)
+  const canLogs = createCanLogs({ dir: path.join(DATA, 'can'), freeBytes: () => diskSpace(fs.promises, DATA).then((x) => x.free).catch(() => Infinity) });
+  const canCfg = () => db.get('can', null) || { enabled: false };
+  const canTokenOk = (req) => {
+    const cfg = canCfg();
+    const given = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    if (!given || !cfg.tokenHash) return false;
+    return crypto.timingSafeEqual(Buffer.from(crypto.createHash('sha256').update(given).digest('hex')), Buffer.from(cfg.tokenHash));
+  };
+  canUploadRef = async (req, res, rawPath) => {
+    const cfg = canCfg();
+    const fail = (status, code, error, extra = {}) => sendJson(res, status, { error, code, ...extra });
+    if (!cfg.enabled || !cfg.tokenHash) return fail(404, 'off', 'Not found');
+    if (!isSecure(req)) return fail(403, 'https_only', 'CAN logs are only taken over HTTPS.');
+    if (!canTokenOk(req)) {
+      res.setHeader('WWW-Authenticate', 'Bearer');
+      return fail(401, 'bad_token', 'A valid CAN Bridge token is needed.');
+    }
+    const sub = rawPath.slice('/api/can/logs'.length);
+    try {
+      if (req.method === 'GET' && sub === '/ping') {
+        return sendJson(res, 200, { ok: true, api: 1, maxChunk: canLogs.MAX_CHUNK, maxFile: canLogs.MAX_FILE, maxSidecar: canLogs.MAX_SIDECAR });
+      }
+      if (req.method === 'POST' && sub === '/status') {
+        let body;
+        try { body = JSON.parse((await readRaw(req, 1024 * 1024)).toString('utf8') || '{}'); } catch { return fail(400, 'bad_request', 'Send JSON: { "names": [...] }.'); }
+        return sendJson(res, 200, await canLogs.status(body?.names));
+      }
+      const name = sub.startsWith('/') ? decodeURIComponent(sub.slice(1)) : '';
+      if (req.method === 'POST' && parseCanName(name)) {
+        const num = (h) => (req.headers[h] === undefined || req.headers[h] === '' ? NaN : Number(req.headers[h]));
+        const body = await readRaw(req, canLogs.MAX_CHUNK);
+        const out = await canLogs.receive(name, body, { offset: num('upload-offset'), length: num('upload-length'), sha256: String(req.headers['upload-sha256'] || '').toLowerCase() });
+        if (out.complete && !out.already) log.info(`CAN Bridge: received ${name} (${out.length} bytes)`);
+        return sendJson(res, out.complete ? 201 : 200, out);
+      }
+      return fail(404, 'not_found', 'Not found');
+    } catch (err) {
+      if (err.status) return fail(err.status, err.code || 'error', err.message, err.received !== undefined ? { received: err.received } : {});
+      log.warn(`CAN Bridge upload: ${err.message}`);
+      return fail(500, 'server_error', 'The server could not take this file now; try again later.');
+    }
+  };
+  r.add('GET', '/api/can/settings', async () => {
+    const cfg = canCfg();
+    const { bytes, count } = await canLogs.list({ limit: 1 });
+    return { enabled: Boolean(cfg.enabled), since: cfg.at || null, logs: count, bytes };
+  });
+  r.add('POST', '/api/can/enable', (req, res, { user }) => {
+    requireConfirmed(req);
+    const token = crypto.randomBytes(32).toString('base64url');
+    db.set('can', { enabled: true, tokenHash: crypto.createHash('sha256').update(token).digest('hex'), at: Date.now() });
+    audit.warn(`CAN Bridge uploads turned on (new token): ${by(req, user)}`);
+    return { enabled: true, token, fingerprint: certFingerprint() };
+  });
+  r.add('POST', '/api/can/disable', (req, res, { user }) => {
+    requireConfirmed(req);
+    db.set('can', { enabled: false });
+    audit.warn(`CAN Bridge uploads turned off: ${by(req, user)}`);
+    return { enabled: false };
+  });
+  r.add('GET', '/api/can/files', async (req, res, { query }) => canLogs.list({ limit: Number(query.limit) || 200 }));
+  r.add('DELETE', '/api/can/files/:name', async (req, res, { params, user }) => {
+    try { await canLogs.remove(params.name); } catch (err) { throw new HttpError(err.status || 500, err.message); }
+    audit.info(`CAN log deleted: ${params.name}: ${by(req, user)}`);
+    return { ok: true };
+  });
+
   // Savings by month (the main pages' chart)
   r.add('GET', '/api/vehicles/:id/savings-by-month', (req, res, { params, query }) => {
     const v = vehicleOr404(params.id);
@@ -2013,6 +2084,9 @@ async function main() {
         res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4; charset=utf-8', 'Cache-Control': 'no-store' });
         return res.end(metricsText());
       }
+      // CAN Bridge uploads (docs/can-bridge-api.md): opt-in, HTTPS only, a
+      // write-only token; no cookies, so the page checks below do not apply
+      if (rawPath === '/api/can/logs' || rawPath.startsWith('/api/can/logs/')) return canUpload(req, res, rawPath);
       if (rawPath === '/healthz') {
         // readable cross-origin: the plain-HTTP page checks with it whether this device trusts the certificate
         res.writeHead(200, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store', 'Cross-Origin-Resource-Policy': 'cross-origin' });

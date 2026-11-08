@@ -997,6 +997,75 @@ test('pages link their scripts and styles under /v/<version>/: kept a year, a ne
   }
 });
 
+test('CAN Bridge uploads: off until turned on, HTTPS and a write-only token, chunks resumed, kept only when the hash matches', async () => {
+  const dir = await tmp();
+  const s = await startServer(dir, { TRUST_PROXY: 'true' });
+  const https = { 'X-Forwarded-Proto': 'https' };
+  const name = 'MY-car_20261108T143000Z_1.log.xz';
+  const file = crypto.randomBytes(300_000);
+  const sha = crypto.createHash('sha256').update(file).digest('hex');
+  const up = (token, body, offset, extra = {}) => fetch(`${s.base}/api/can/logs/${name}`, {
+    method: 'POST', body,
+    headers: { ...https, Authorization: `Bearer ${token}`, 'Content-Type': 'application/octet-stream', 'Upload-Offset': String(offset), 'Upload-Length': String(file.length), 'Upload-SHA256': sha, ...extra }
+  }).then(async (r) => ({ status: r.status, data: await r.json() }));
+  try {
+    assert.equal((await fetch(`${s.base}/api/can/logs/ping`, { headers: https })).status, 404, 'off: nothing there');
+    await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' }, { headers: https });
+    await s.call('POST', '/api/auth/confirm', { password: 'correct horse' }, { headers: https }); // (a password confirmed just now)
+    const on = await s.call('POST', '/api/can/enable', {}, { headers: https });
+    assert.equal(on.status, 200);
+    const token = on.data.token;
+    assert.ok(token.length >= 40);
+
+    assert.equal((await fetch(`${s.base}/api/can/logs/ping`, { headers: { Authorization: `Bearer ${token}` } })).status, 403, 'plain HTTP refused');
+    assert.equal((await fetch(`${s.base}/api/can/logs/ping`, { headers: { ...https, Authorization: 'Bearer wrong' } })).status, 401);
+    const ping = await (await fetch(`${s.base}/api/can/logs/ping`, { headers: { ...https, Authorization: `Bearer ${token}` } })).json();
+    assert.equal(ping.api, 1);
+    // the token does nothing else
+    assert.equal((await fetch(`${s.base}/api/vehicles`, { headers: { ...https, Authorization: `Bearer ${token}` } })).status, 401, 'no footage with the token');
+
+    // two chunks, the connection "lost" in between: status says where to go on
+    const first = await up(token, file.subarray(0, 100_000), 0);
+    assert.deepEqual([first.status, first.data.received, first.data.complete], [200, 100_000, false]);
+    const st = await (await fetch(`${s.base}/api/can/logs/status`, { method: 'POST', headers: { ...https, Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ names: [name, `${name}.json`, 'nonsense'] }) })).json();
+    assert.deepEqual(st.files[name], { state: 'partial', received: 100_000, length: 300_000 });
+    assert.equal(st.files[`${name}.json`].state, 'missing');
+    assert.equal(st.files.nonsense.state, 'invalid');
+    const wrongOffset = await up(token, file.subarray(0, 10), 50);
+    assert.deepEqual([wrongOffset.status, wrongOffset.data.code, wrongOffset.data.received], [409, 'offset_mismatch', 100_000]);
+    const last = await up(token, file.subarray(100_000), 100_000);
+    assert.deepEqual([last.status, last.data.complete], [201, true]);
+    const again = await up(token, file.subarray(0), 0);
+    assert.deepEqual([again.status, again.data.already], [201, true], 'a retry of a finished file is harmless');
+
+    // a file that arrives different from its hash is thrown away
+    const other = 'MY-car_20261108T144000Z_2.log.xz';
+    const bad = await fetch(`${s.base}/api/can/logs/${other}`, { method: 'POST', body: Buffer.from('abc'), headers: { ...https, Authorization: `Bearer ${token}`, 'Upload-Offset': '0', 'Upload-Length': '3', 'Upload-SHA256': 'a'.repeat(64) } });
+    assert.equal(bad.status, 422);
+    // the sidecar
+    const side = Buffer.from(JSON.stringify({ frames: 3_540_000, dropped: 0, appVersion: 'build-107' }));
+    const sideUp = await fetch(`${s.base}/api/can/logs/${name}.json`, { method: 'POST', body: side, headers: { ...https, Authorization: `Bearer ${token}`, 'Upload-Offset': '0', 'Upload-Length': String(side.length), 'Upload-SHA256': crypto.createHash('sha256').update(side).digest('hex') } });
+    assert.equal(sideUp.status, 201);
+
+    // the Nerd panel sees them; the file is stored as it came
+    const files = await s.call('GET', '/api/can/files', undefined, { headers: https });
+    assert.deepEqual(files.data.logs.map((l) => [l.name, l.bytes, l.frames, l.appVersion]), [[name, 300_000, 3_540_000, 'build-107']]);
+    assert.ok((await fsp.readFile(path.join(dir, 'data', 'can', 'MY-car', name))).equals(file));
+    assert.equal((await s.call('DELETE', `/api/can/files/${name}`, undefined, { headers: https })).status, 200);
+    assert.equal((await s.call('GET', '/api/can/files', undefined, { headers: https })).data.logs.length, 0);
+
+    // a new token replaces the old one; off: gone again
+    const on2 = await s.call('POST', '/api/can/enable', {}, { headers: https });
+    assert.equal((await fetch(`${s.base}/api/can/logs/ping`, { headers: { ...https, Authorization: `Bearer ${token}` } })).status, 401, 'the old token stops working');
+    assert.equal((await fetch(`${s.base}/api/can/logs/ping`, { headers: { ...https, Authorization: `Bearer ${on2.data.token}` } })).status, 200);
+    await s.call('POST', '/api/can/disable', {}, { headers: https });
+    assert.equal((await fetch(`${s.base}/api/can/logs/ping`, { headers: { ...https, Authorization: `Bearer ${on2.data.token}` } })).status, 404);
+  } finally {
+    await s.stop();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('early data: the calls the main page made the last two times it opened are asked for at once the next time', async () => {
   const dir = await tmp();
   const s = await startServer(dir);
