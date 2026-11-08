@@ -1797,14 +1797,38 @@ async function main() {
       const got = await canIndex.clipData(keys, start - 2000, start + 70_000, names);
       return { start, sync, trust: got.trust, series: got.series };
     }
-    const id = `${keys.join(',')}|${start}|${JSON.stringify(sync)}|${canIndex.generation()}`;
+    // Every signal, each thinned to its last value every step= ms (250 by default; the list shows
+    // the value now). cols=1 (the Viewer's List): values the same as the one before left out,
+    // `changing` the names whose value moves (from every point), and the points as columns:
+    // { name: [[ms after `base`, then after the one before…], [values…]] } (a fifth the size of
+    // [[UTC ms, value], …] pairs, and typed arrays in the browser). Without cols=1: pairs.
+    const step = Math.max(CAN_CLIP_STEP_MS, Math.min(5000, Math.round(Number(query.step) || CAN_CLIP_STEP_MS)));
+    const cols = query.cols === '1';
+    const id = `${keys.join(',')}|${start}|${JSON.stringify(sync)}|${step}|${cols ? 'c' : 'p'}|${canIndex.generation()}`;
     let body = canEvery.ready.get(id);
     if (!body) {
       await canEverySlot(res);
       try {
         if (res.destroyed) return undefined;
-        const got = await canIndex.clipData(keys, start - 2000, start + 70_000, null, { stepMs: CAN_CLIP_STEP_MS });
-        const json = Buffer.from(JSON.stringify({ start, sync, trust: got.trust, series: got.series }));
+        let answer;
+        if (cols) {
+          const changing = new Set();
+          const got = await canIndex.clipData(keys, start - 2000, start + 70_000, null, { step, dropRepeats: true, changing });
+          const base = Math.round(start);
+          const out = {};
+          for (const [name, pts] of Object.entries(got.series)) {
+            const dt = new Array(pts.length);
+            const val = new Array(pts.length);
+            let prev = base;
+            for (let k = 0; k < pts.length; k++) { dt[k] = Math.round(pts[k][0] - prev); prev += dt[k]; val[k] = pts[k][1]; }
+            out[name] = [dt, val];
+          }
+          answer = { start, sync, trust: got.trust, step, base, changing: [...changing], cols: out };
+        } else {
+          const got = await canIndex.clipData(keys, start - 2000, start + 70_000, null, { step });
+          answer = { start, sync, trust: got.trust, series: got.series };
+        }
+        const json = Buffer.from(JSON.stringify(answer));
         body = { json, gz: await gzipAsync(json, { level: 4 }) };
       } finally { canEveryDone(); }
       canEvery.ready.set(id, body);

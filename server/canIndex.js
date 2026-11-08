@@ -513,6 +513,22 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
     return running;
   }
 
+  /**
+   * `pts` (sorted, the first the value at `from`) thinned to the last value of
+   * each `step` ms (counted from `from`); `dropRepeats`: a value the same as the
+   * one kept before it is left out too.
+   */
+  function thin(pts, from, step, dropRepeats) {
+    const out = [pts[0]];
+    for (let k = 1; k < pts.length; k++) {
+      const p = pts[k];
+      const next = pts[k + 1];
+      // (the last point of its step only)
+      if (next && Math.floor((next[0] - from) / step) === Math.floor((p[0] - from) / step)) continue;
+      if (!dropRepeats || p[1] !== out[out.length - 1][1]) out.push(p);
+    }
+    return out;
+  }
   /** The worst trust of the data between two times: verified, unsigned or override (used despite failing its check), or null. */
   async function trustOf(keys, from, to) {
     let t;
@@ -529,10 +545,14 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
   /**
    * The signals of these cars between two times, and the worst trust of the minutes inside it:
    * { series: { name: [[ms (UTC), value], …] } (the value before `from` too), trust }. Each
-   * minute is read once (and kept for the next clip). `stepMs`: only the last point of each
-   * such step per signal (with the one before `from`), for a list of live values.
+   * minute is read once (and kept for the next clip).
+   * `step` (ms, optional): thin each signal to the last value of each step (from
+   * `from`), for a list of live values; `dropRepeats` also leaves out a value the
+   * same as the one before (the value now is the same at any moment). Then
+   * `changing` (a Set, optional) gets each name whose value changes anywhere in
+   * the window, from every point, not the thinned ones.
    */
-  async function clipData(keys, from, to, names, { stepMs = 0 } = {}) {
+  async function clipData(keys, from, to, names, { step = 0, dropRepeats = false, changing = null } = {}) {
     const want = names ? new Set(names) : null;
     const out = {};
     let trust;
@@ -556,21 +576,20 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
       // keep the last point before `from` and everything up to `to`
       let i = 0;
       while (i + 1 < pts.length && pts[i + 1][0] <= from) i++;
-      let kept = [];
-      for (let k = i; k < pts.length && pts[k][0] <= to; k++) {
-        const p = pts[k];
-        if (stepMs > 0 && kept.length > 1 && Math.floor(p[0] / stepMs) === Math.floor(kept[kept.length - 1][0] / stepMs)) kept[kept.length - 1] = p;
-        else kept.push(p);
-      }
-      if (kept.length) out[name] = kept; else delete out[name];
-      kept = null;
+      let end = i;
+      while (end < pts.length && pts[end][0] <= to) end++;
+      if (end === i) { delete out[name]; continue; }
+      let kept = i === 0 && end === pts.length ? pts : pts.slice(i, end);
+      if (changing && kept.some((p) => p[1] !== kept[0][1])) changing.add(name);
+      if (step > 0) kept = thin(kept, from, step, dropRepeats);
+      out[name] = kept;
     }
     return { series: out, trust: trust || null };
   }
 
   /** The signals of these cars between two times: { name: [[ms (UTC), value], …] } (the value before `from` too). */
-  async function series(keys, from, to, names) {
-    return (await clipData(keys, from, to, names)).series;
+  async function series(keys, from, to, names, opts) {
+    return (await clipData(keys, from, to, names, opts)).series;
   }
 
   /**

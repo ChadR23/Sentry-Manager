@@ -123,9 +123,9 @@ function server(routes) {
   const json = (body, status = 200) => ({ ok: status < 300, status, json: async () => body });
   globalThis.fetch = (url, opts = {}) => {
     const u = new URL(url, 'https://car.test');
-    asked.push({ url: u, signal: opts.signal });
+    asked.push({ url: u, signal: opts.signal, method: opts.method || 'GET', body: opts.body });
     if (u.pathname === '/api/dashboards') return Promise.resolve(json(routes.boards || { boards: [], active: null }));
-    if (u.pathname === '/api/telemetry') return Promise.resolve(json({ frames: [] }));
+    if (u.pathname === '/api/telemetry') return Promise.resolve(json(routes.telemetry ? routes.telemetry(u.searchParams.get('path')) : { frames: [] }));
     const route = routes[u.pathname === '/api/can/raw' && u.searchParams.get('probe') ? 'probe' : u.pathname];
     if (!route) return Promise.resolve(json(null, 404));
     return Promise.resolve(route(u.searchParams.get('path'), u, opts)).then((r) => (r && r.status ? json(r.body, r.status) : json(r)));
@@ -156,7 +156,7 @@ async function dashboard({ rawOpen = true, routes = {}, clip = clipPath(1) } = {
   const frame = async () => { const fn = frames.shift(); fn?.(); await settle(); };
   await settle();
   await frame();
-  return { dash, el: dash.el, video, asked, frame, raw: () => dash.el.querySelector('.sd-raw'), rawButton: () => dash.el.querySelector('[data-raw]') };
+  return { dash, el: dash.el, stage, video, asked, frame, raw: () => dash.el.querySelector('.sd-raw'), rawButton: () => dash.el.querySelector('[data-raw]') };
 }
 // the payload the raw view shows for one id right now
 const payload = (d, id) => {
@@ -485,4 +485,150 @@ test('the picker: a Popular group first, the first id there for each, then every
   fire(d.el.querySelector('[data-edit]'), 'click');
   assert.equal(d.el.querySelector('.sd-small').querySelector('.sd-l').textContent, 'Battery %', 'the tile says what it is, not SOCUI292');
   d.dash.destroy();
+});
+
+// ---- the List across clips, the built-in stats, fullscreen, the List's own answer ----
+/** One telemetry record (SEI, as /api/telemetry sends it): speed (m/s) and steering (°). */
+const rec = (speedMps, steering) => {
+  const b = Buffer.alloc(10);
+  b[0] = 0x25; b.writeFloatLE(speedMps, 1); // field 4 (speed), 32-bit
+  b[5] = 0x35; b.writeFloatLE(steering, 6); // field 6 (steering), 32-bit
+  return b.toString('base64');
+};
+const listBoard = (more = []) => board([{ type: 'list', signals: [], q: '', changing: false }, ...more]);
+const labels = (d) => d.dash.panel.querySelectorAll('.sd-list-r[data-row]').map((r) => `${r.children[0].textContent}=${r.querySelector('[data-lv]').textContent}`);
+
+test('the List after a clip change: the new clip\'s stats, names and values together', async (t) => {
+  const many = (p, n) => Object.fromEntries(Array.from({ length: n }, (_, k) => [`${p}_sig${p}${k}`, { unit: p === 'AAA' ? 'V' : 'A', bus: 'VehicleBus', message: `ID1${k}X` }]));
+  const meta = { signals: { ...many('AAA', 40), ...many('BBB', 40) } };
+  const data = (p, v, start) => ({ start, sync: { method: 'clock' }, series: Object.fromEntries(Array.from({ length: 40 }, (_, k) => [`${p}_sig${p}${k}`, [[start - 1000, v]]])) });
+  const d = await dashboard({
+    rawOpen: false,
+    routes: {
+      boards: listBoard(),
+      '/api/can/signals': () => meta,
+      '/api/can/clip': (p) => (p === clipPath(1) ? data('AAA', 111, S) : data('BBB', 222, S + 60_000))
+    }
+  });
+  t.after(() => d.dash.destroy());
+  await d.frame();
+  assert.match(labels(d)[0], /^Sig AAA0=111\.0V$/, `clip 1: ${labels(d)[0]}`);
+  d.video.src = `/api/media?path=${encodeURIComponent(clipPath(2))}`;
+  await d.frame();
+  await d.frame();
+  const rows = labels(d);
+  assert.ok(rows.length > 10);
+  assert.ok(rows.every((x) => /^Sig BBB\d+=222\.0A$/.test(x)), `every row is clip 2's, name and value: ${rows.slice(0, 3)}`);
+  assert.equal(d.dash.panel.querySelectorAll('.sd-list-r.hot').length, 0, 'nothing lit: a new clip\'s values are not changes');
+});
+
+test('the next clip shows no CAN value until its own answer is here (not the last clip\'s)', async (t) => {
+  let release;
+  const d = await dashboard({
+    rawOpen: false,
+    routes: {
+      boards: board([{ type: 'small', signals: ['can.BattVoltage132'] }]),
+      '/api/can/signals': () => POP_META,
+      '/api/can/clip': (p) => (p === clipPath(1)
+        ? { start: S, sync: { method: 'clock' }, series: { BattVoltage132: [[S - 1000, 300], [S + 5000, 350]] } }
+        : new Promise((r) => { release = () => r({ start: S + 60_000, sync: { method: 'clock' }, series: { BattVoltage132: [[S + 59_000, 400]] } }); }))
+    }
+  });
+  t.after(() => d.dash.destroy());
+  const shown = () => d.el.querySelector('[data-v="0"]').textContent;
+  d.video.currentTime = 6;
+  await d.frame();
+  assert.equal(shown(), '350.0');
+  d.video.src = `/api/media?path=${encodeURIComponent(clipPath(2))}`;
+  await d.frame();
+  assert.equal(shown(), '—', 'nothing while the next clip\'s answer is on its way');
+  assert.equal(d.el.querySelector('[data-sync]').textContent, '', 'and no sync note of the last clip');
+  release();
+  await settle();
+  await d.frame();
+  assert.equal(shown(), '400.0', 'then its own value');
+});
+
+test('the List, "Changing only": built-in stats that change are kept, those that hold are not', async (t) => {
+  const frames = Array.from({ length: 20 }, (_, k) => [k * 100, rec(10 + k, 5)]); // speed moves, steering holds
+  const d = await dashboard({
+    rawOpen: false,
+    routes: { boards: listBoard(), telemetry: () => ({ frames }) }
+  });
+  t.after(() => d.dash.destroy());
+  await d.frame();
+  const names = () => listed(d).filter((x) => !x.startsWith('#'));
+  assert.ok(names().includes('Speed') && names().includes('Steering'), `with data: ${names()}`);
+  assert.ok(!names().includes('Latitude'), 'a built-in stat with no data in the clip is left out');
+  const ch = d.dash.panel.querySelector('[data-list-changing]');
+  ch.checked = true;
+  fire(ch, 'change');
+  assert.deepEqual(names(), ['Speed'], 'the speed changes; the steering holds');
+});
+
+test('fullscreen: with the cameras themselves fullscreen, the List and the picker are inside them; back out, they go back', async (t) => {
+  const d = await dashboard({ rawOpen: false, routes: { boards: listBoard([{ type: 'small', signals: ['dash.speed'] }]) } });
+  Object.assign(globalThis, { innerWidth: 1440, innerHeight: 900 });
+  t.after(() => { delete globalThis.document.fullscreenElement; delete globalThis.innerWidth; delete globalThis.innerHeight; d.dash.destroy(); });
+  const page = d.stage.parentElement;
+  assert.equal(d.dash.panel.parentElement, page, 'docked under the bar');
+  globalThis.document.fullscreenElement = d.stage;
+  for (const fn of globalThis.document.listeners.fullscreenchange || []) fn({});
+  assert.equal(d.el.parentElement, d.stage, 'the bar over the cameras');
+  assert.equal(d.dash.panel.parentElement, d.stage, 'the List floats over them');
+  assert.ok(d.dash.panel.classList.contains('float'));
+  fire(d.el.querySelector('[data-edit]'), 'click');
+  fire(d.el.querySelector('button[data-pick]'), 'click');
+  assert.equal(d.stage.querySelectorAll('.sd-pop').length, 1, 'the picker opens inside what is fullscreen');
+  delete globalThis.document.fullscreenElement;
+  for (const fn of globalThis.document.listeners.fullscreenchange || []) fn({});
+  assert.equal(d.stage.querySelectorAll('.sd-pop').length, 0, 'an open picker closes');
+  assert.equal(d.dash.panel.parentElement, page, 'docked again');
+  assert.equal(d.dash.panel.classList.contains('float'), false);
+  assert.equal(d.el.parentElement, page, 'the bar back under the cameras');
+});
+
+test('destroy() keeps a List filter typed a moment before', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const d = await dashboard({ rawOpen: false, routes: { boards: listBoard() } });
+  const q = d.dash.panel.querySelector('[data-list-q]');
+  q.value = 'batt';
+  fire(q, 'input');
+  d.dash.destroy();
+  t.mock.timers.tick(1000);
+  const puts = d.asked.filter((a) => a.url.pathname === '/api/dashboards' && a.method === 'PUT');
+  assert.equal(puts.length, 1, 'saved, once');
+  assert.equal(JSON.parse(puts[0].body).boards[0].blocks[0].q, 'batt', 'with the filter');
+});
+
+test('the List asks for its own thinned answer as columns, and the bar\'s signals by name', async (t) => {
+  const asks = [];
+  const d = await dashboard({
+    rawOpen: false,
+    routes: {
+      boards: listBoard([{ type: 'small', signals: ['can.BattVoltage132'] }]),
+      '/api/can/signals': () => POP_META,
+      '/api/can/clip': (p, u) => {
+        asks.push(Object.fromEntries(u.searchParams));
+        if (u.searchParams.get('signals') !== '*') return { start: S, sync: { method: 'clock' }, series: { BattVoltage132: [[S - 1000, 300], [S + 5000, 350]] } };
+        // every 250 ms: base, then ms after the one before
+        return { start: S, sync: { method: 'clock' }, step: 250, base: S, changing: ['BattVoltage132'], cols: { BattVoltage132: [[-1000, 6000], [300, 350]], UI_Range: [[-1000], [250]] } };
+      }
+    }
+  });
+  t.after(() => d.dash.destroy());
+  await d.frame();
+  const list = asks.find((a) => a.signals === '*');
+  assert.deepEqual([list.step, list.cols], ['250', '1'], 'the List: every signal, a value every 250 ms, as columns');
+  assert.ok(asks.some((a) => a.signals === 'BattVoltage132'), 'the bar: its own signal, every point');
+  d.video.currentTime = 6;
+  await d.frame();
+  assert.equal(d.el.querySelector('[data-v="0"]').textContent, '350.0');
+  const rows = labels(d);
+  assert.ok(rows.includes('Range=250mi'), `from the columns: ${rows}`);
+  assert.ok(rows.includes('Battery voltage=350.0V'), `${rows}`);
+  const ch = d.dash.panel.querySelector('[data-list-changing]');
+  ch.checked = true;
+  fire(ch, 'change');
+  assert.deepEqual(labels(d), ['Battery voltage=350.0V'], 'what changes: the server\'s list');
 });

@@ -204,7 +204,19 @@ const CAN_UNITS = {
   kPa: { metric: ['kPa', (v) => v], imperial: ['psi', (v) => v * 0.1450377] },
   bar: { metric: ['bar', (v) => v], imperial: ['psi', (v) => v * 14.50377] }
 };
+/** A series' value at `ms`: [[ms, value], …] pairs, or { t: Float64Array, v } columns (the List's answer). */
 const canSeriesAt = (pts, ms) => {
+  if (pts && !Array.isArray(pts)) {
+    const { t, v } = pts;
+    if (!t.length || ms < t[0]) return null;
+    let lo = 0;
+    let hi = t.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (t[mid] <= ms) lo = mid; else hi = mid - 1;
+    }
+    return v[lo];
+  }
   if (!pts?.length || ms < pts[0][0]) return null;
   let lo = 0;
   let hi = pts.length - 1;
@@ -395,13 +407,41 @@ const canClipCache = new Map(); // front path + names -> entry of Promise<{ star
 function canMetaFor(path) {
   return cachedGet(canMetaCache, path, 8, () => fetch(`/api/can/signals?path=${encodeURIComponent(path)}`, { credentials: 'same-origin' }).then((r) => (r.ok ? r.json() : null)).then((d) => d?.signals || {}).catch(() => ({})), hasKeys).p;
 }
-const canClipGood = (d) => Object.values(d?.series || {}).some((pts) => pts?.length);
+const seriesLen = (pts) => (pts ? (Array.isArray(pts) ? pts.length : pts.t.length) : 0);
+const canClipGood = (d) => Object.values(d?.series || {}).some((pts) => seriesLen(pts) > 0);
 function canClipFor(path, names) {
   return cachedGet(canClipCache, `${path}|${names.join(',')}`, 16, () => fetch(`/api/can/clip?path=${encodeURIComponent(path)}&signals=${encodeURIComponent(names.join(','))}`, { credentials: 'same-origin' }).then((r) => (r.ok ? r.json() : null)).catch(() => null), canClipGood).p;
+}
+// The List's answer: every signal of the clip, each at its value every
+// LIST_STEP_MS (the List shows the value now, as text), as columns kept in
+// typed arrays, with `changing` (the names whose value moves, worked out on
+// the server from every point). An eighth of the download and a tenth of the
+// memory of every point at full rate; at most 2 are kept (this clip and the
+// one before), the bar's own signals (a few, at full rate) separately.
+const LIST_STEP_MS = 250;
+const canListCache = new Map(); // front path -> entry of Promise<{ start, sync, trust, series, changing } | null>
+/** An answer as columns ({ base, cols: { name: [[dt…], [v…]] } }) as { name: { t: Float64Array, v } }; one as pairs (an older server) as it is. */
+export function decodeCanCols(d) {
+  if (!d || !d.cols) return d ? { ...d, changing: Array.isArray(d.changing) ? new Set(d.changing) : null } : d;
+  const series = {};
+  for (const [name, col] of Object.entries(d.cols)) {
+    const [dt, v] = col || [];
+    if (!dt?.length) continue;
+    const t = new Float64Array(dt.length);
+    let at = Number(d.base) || 0;
+    for (let k = 0; k < dt.length; k++) { at += dt[k]; t[k] = at; }
+    series[name] = { t, v: v.every((x) => typeof x === 'number') ? Float64Array.from(v) : v };
+  }
+  const { cols, base, ...rest } = d;
+  return { ...rest, series, changing: new Set(d.changing || []) };
+}
+function canListFor(path) {
+  return cachedGet(canListCache, path, 2, () => fetch(`/api/can/clip?path=${encodeURIComponent(path)}&signals=*&step=${LIST_STEP_MS}&cols=1`, { credentials: 'same-origin' }).then((r) => (r.ok ? r.json() : null)).then(decodeCanCols).catch(() => null), canClipGood).p;
 }
 /** Forget every /api/can/clip answer for this clip (to ask again with the newest sync). */
 function dropCanClip(path) {
   for (const key of [...canClipCache.keys()]) if (key.startsWith(`${path}|`)) canClipCache.delete(key);
+  canListCache.delete(path);
 }
 /**
  * A moment of the clip (ms in) on the CAN clock: the clip's start there, and
@@ -764,7 +804,8 @@ function saveBoards(state) {
   saved = Promise.resolve(state);
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    fetch('/api/dashboards', { method: 'PUT', credentials: 'same-origin', headers: H, body: JSON.stringify(state) }).catch(() => {});
+    // (keepalive: a save as the page closes still reaches the server)
+    fetch('/api/dashboards', { method: 'PUT', credentials: 'same-origin', headers: H, body: JSON.stringify(state), keepalive: true }).catch(() => {});
   }, 500);
 }
 const metricDefault = () => !/^en-(US|GB|LR|MM)$/i.test(navigator.language || '');
@@ -791,16 +832,23 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
   let alive = true;
   let recs = null;
   let recsFor = null;
-  let can = null; // { start (UTC ms of the clip's 0 s), sync, trust, series }
-  let canOf = null; // the clip `can` is for
-  let canFor = null;
-  let canRetry = 0; // the timer that asks again when the clip had no CAN data (yet)
+  // the CAN data: the bar's own signals (by name, every point) and, with a
+  // List, every signal (canListFor). Each is { data: { start (UTC ms of the
+  // clip's 0 s), sync, trust, series }, of: its clip, key: what was asked, retry }.
+  const feed = () => ({ data: null, of: null, key: null, retry: 0 });
+  const canBar = feed();
+  const canAll = feed();
+  let shownPath = null; // the clip the cameras show now
+  /** The answer for clip `p` that says how it lines up (the bar's, else the List's), or null. */
+  const canFor = (p) => (canBar.data && canBar.of === p ? canBar.data : canAll.data && canAll.of === p ? canAll.data : null);
+  /** The List's answer for the clip shown (never the last clip's while the next one loads). */
+  const listData = () => (canAll.data && canAll.of === shownPath ? canAll.data : null);
   let raf = 0;
   // the nerd raw view (createRawView): its own element, put back after each redraw.
   // It uses the signals' sync for the clip when there is one (canTime), so both agree.
   const rawView = createRawView({
     onAvailable: (yes) => { const b = el.querySelector('[data-raw]'); if (b) b.hidden = !yes; },
-    syncFor: (p) => (can && canOf === p ? can : null),
+    syncFor: (p) => canFor(p),
     onData: (p, d) => reconcile(p, d)
   });
   // The raw answer is asked for later, so its sync is the newer one: when it
@@ -808,29 +856,37 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
   // then use the same sync.
   let reconciledWith = null;
   function reconcile(p, d) {
-    if (!alive || !can || canOf !== p || !d || d === reconciledWith || !Number.isFinite(d.start)) return;
+    const can = canFor(p);
+    if (!alive || !can || !d || d === reconciledWith || !Number.isFinite(d.start)) return;
     const rateDiffers = d.sync !== undefined && (d.sync?.rate || 1) !== (can.sync?.rate || 1);
     if (Math.abs(d.start - can.start) <= 0.05 && !rateDiffers) return;
     reconciledWith = d;
     dropCanClip(p);
-    canFor = null;
+    canBar.key = null;
+    canAll.key = null;
   }
   const ctx = (ms = null) => ({
     metric: board?.metric ?? metricDefault(),
-    // a CAN signal's value at this moment of the clip
+    // a CAN signal's value at this moment of the clip shown: from the bar's
+    // answer (every point) when it has the signal, else from the List's
     // (the server lines the CAN clock up with the footage: start, and the drift as rate)
-    can: (name) => (can && ms !== null ? canSeriesAt(can.series?.[name], canTime(can, ms)) : null)
+    can: (name) => {
+      if (ms === null || !shownPath) return null;
+      const a = canBar.of === shownPath && canBar.data?.series?.[name] ? canBar.data : listData();
+      return a ? canSeriesAt(a.series?.[name], canTime(a, ms)) : null;
+    }
   });
   // how well the CAN data is lined up with the footage, small in the tools row
   function syncNote() {
     const node = el.querySelector('[data-sync]');
     if (!node) return;
-    const s = can && canNames().length ? can.sync : null;
+    const can = shownPath ? canFor(shownPath) : null;
+    const s = can ? can.sync : null;
     const m = s?.method;
     node.textContent = !s ? '' : m === 'clock' ? 'CAN: clock only' : m === 'speed' ? 'CAN synced by speed' : `CAN synced ±${Math.max(1, Math.round(s.spreadMs ?? 0))} ms`;
     node.title = !s ? '' : m === 'clock' ? 'CAN data placed by the clip\'s time only: nothing to line it up with' : m === 'speed' ? 'CAN data lined up with the footage by its speed' : `CAN data lined up with the footage from ${s.matches} matching changes (brake, blinkers, accelerator)${m === 'edges-drive' ? ' across the drive' : ''}`;
     // a log that failed its signature check, used anyway: always said; unsigned (an older bridge): said quietly
-    const trust = can && canNames().length ? can.trust : null;
+    const trust = can ? can.trust : null;
     node.classList.toggle('sd-warn', trust === 'override');
     if (trust === 'override') {
       node.textContent = `⚠ CAN data failed its check · ${node.textContent}`;
@@ -840,39 +896,61 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
       node.title = `${node.title}. These logs are not signed (an older CAN Bridge).`;
     }
   }
-  const canNames = () => ((board?.blocks || []).some((b) => b.type === 'list') ? ['*'] : [...new Set((board?.blocks || []).flatMap((b) => b.signals).filter((id) => id.startsWith('can.')).map((id) => id.slice(4)))].sort());
-  function loadCan(path) {
-    const names = canNames();
-    const key = `${path}|${names.join(',')}`;
-    if (key === canFor) return;
-    canFor = key;
-    clearTimeout(canRetry);
-    // new names (and the stat picker) once the car's signal list is here
-    canMetaFor(path).then((meta) => { if (alive && registerCanSignals(meta) && state) draw(); });
-    if (!names.length) { can = null; canOf = null; syncNote(); return; }
-    canClipFor(path, names).then((d) => {
-      if (!alive || canFor !== key) return;
-      can = d;
-      canOf = path;
+  const hasList = () => (board?.blocks || []).some((b) => b.type === 'list');
+  /** The CAN signals the bar's blocks show (the List's come with its own answer). */
+  const barNames = () => [...new Set((board?.blocks || []).filter((b) => b.type !== 'list').flatMap((b) => b.signals).filter((id) => id.startsWith('can.')).map((id) => id.slice(4)))].sort();
+  /** Ask for one feed's answer for `path` (none: `want` false). A new clip empties it first: nothing of the last clip is shown as this one's. */
+  function loadFeed(f, path, want, key, get) {
+    if (key === f.key) return;
+    f.key = key;
+    clearTimeout(f.retry);
+    if (f.of !== path || !want) { f.data = null; f.of = null; }
+    if (!want) return;
+    get().then((d) => {
+      if (!alive || f.key !== key) return;
+      f.data = d;
+      f.of = path;
       syncNote();
       tick(true);
       reconcile(path, rawView.dataFor(path));
-      // no data (yet): asked again in a while (the next tick, once canFor is cleared)
-      if (!canClipGood(d)) canRetry = setTimeout(() => { if (canFor === key) canFor = null; }, RETRY_MS + 1000);
+      // no data (yet): asked again in a while (the next tick, once the key is cleared)
+      if (!canClipGood(d)) f.retry = setTimeout(() => { if (f.key === key) f.key = null; }, RETRY_MS + 1000);
     });
+  }
+  function loadCan(path) {
+    const names = barNames();
+    const list = hasList();
+    const barKey = `${path}|${names.join(',')}`;
+    const allKey = `${path}|${list ? '*' : ''}`;
+    if (barKey === canBar.key && allKey === canAll.key) return;
+    if (canBar.of !== path && canAll.of !== path) reconciledWith = null;
+    // new names (and the stat picker) once the car's signal list is here
+    canMetaFor(path).then((meta) => { if (alive && registerCanSignals(meta) && state) draw(); });
+    loadFeed(canBar, path, names.length > 0, barKey, () => canClipFor(path, names));
+    loadFeed(canAll, path, list, allKey, () => canListFor(path));
+    syncNote();
   }
 
   // where the bar is: under the cameras, over them, or anywhere on the page (float: dragged by its
   // Move handle; the spot is kept per account, one for wide screens and one for narrow ones)
   const whereNow = () => (board?.placement === 'float' ? 'float' : over || board?.placement === 'over' ? 'over' : 'below');
   const screenKind = () => (innerWidth < 700 ? 'narrow' : 'wide');
+  // In fullscreen only the fullscreen element is drawn: what floats goes in it
+  // (not the page's body), and when the cameras themselves are fullscreen (the
+  // stage), the bar goes over them and the docked List floats over them too.
+  const fsHost = () => {
+    const f = globalThis.document?.fullscreenElement || globalThis.document?.webkitFullscreenElement || null;
+    return f && (f === stage || f.contains?.(stage)) ? f : null;
+  };
+  const floatHost = () => fsHost() || document.body;
+  const stageFull = () => fsHost() === stage;
   function place() {
-    const where = whereNow();
+    const where = whereNow() === 'below' && stageFull() ? 'over' : whereNow();
     el.classList.toggle('over', where === 'over');
     el.classList.toggle('below', where === 'below');
     el.classList.toggle('float', where === 'float');
     if (where === 'float') {
-      if (el.parentElement !== document.body) document.body.appendChild(el);
+      if (el.parentElement !== floatHost()) floatHost().appendChild(el);
     } else {
       el.style.left = '';
       el.style.top = '';
@@ -884,13 +962,14 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
   }
   // the list box: docked under the bar, or floating where it was dragged
   const listFloats = () => board?.listPlacement === 'float';
+  const panelFloats = () => listFloats() || stageFull();
   function placePanel() {
     const has = !hidden && board.blocks.some((b) => b.type === 'list');
     if (!has) { panel.remove(); return; }
-    panel.classList.toggle('float', listFloats());
-    panel.classList.toggle('below', !listFloats());
-    if (listFloats()) {
-      if (panel.parentElement !== document.body) document.body.appendChild(panel);
+    panel.classList.toggle('float', panelFloats());
+    panel.classList.toggle('below', !panelFloats());
+    if (panelFloats()) {
+      if (panel.parentElement !== floatHost()) floatHost().appendChild(panel);
     } else {
       panel.style.left = '';
       panel.style.top = '';
@@ -908,7 +987,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
   }
   function applyFloat() {
     if (whereNow() === 'float') floatTo(el, board.float?.[screenKind()] || { x: 0.5, y: 0.94 });
-    if (listFloats() && panel.parentElement) floatTo(panel, board.listFloat?.[screenKind()] || { x: 0.98, y: 0.3 });
+    if (panelFloats() && panel.parentElement) floatTo(panel, board.listFloat?.[screenKind()] || { x: 0.98, y: 0.3 });
   }
   /** Keep where it is now (after a drag or a nudge): the bar's spot, or (`node` the list box) the list's. */
   function keepFloat(left, top, node = el) {
@@ -923,6 +1002,9 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
   }
   const onResize = () => applyFloat();
   globalThis.addEventListener?.('resize', onResize);
+  // into fullscreen and out: the boxes move to where they can be seen (an open picker closes)
+  const onFullscreen = () => { if (!alive || !board) return; closePick(false); place(); placePanel(); applyFloat(); };
+  for (const type of ['fullscreenchange', 'webkitfullscreenchange']) document.addEventListener?.(type, onFullscreen);
 
   // A stat picker is a button showing its stat; it opens a searchable list
   // (thousands of CAN signals: a plain drop-down cannot be searched and its
@@ -930,7 +1012,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
   const SHOWN = 250;
   const statName = (id) => { const s = SIGNALS.get(id); return s ? s.label : `${String(id).replace(/^can\./, '')} (no data yet)`; };
   const pickButton = (id, i, k) => `<button type="button" class="sd-btn sd-pickbtn" data-pick="${i}" data-slot="${k}" aria-haspopup="listbox" aria-label="Stat ${k + 1}: ${esc(statName(id))}. Change it" title="${esc(statName(id))}">${esc(statName(id))}</button>`;
-  const popHost = () => document.body || el;
+  const popHost = () => fsHost() || document.body || el;
   const popId = `sdpop${Math.random().toString(36).slice(2, 8)}`;
   let pop = null; // { node, input, list, count, pick, slot, items, active, current }
   const onOutside = (e) => {
@@ -1045,24 +1127,53 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
   // built (thousands of CAN signals); a value that changes lights up for a
   // moment.
   const ROW = 30;
-  const lists = new WeakMap(); // block -> { key, rows, hidden, prev, hot }
-  const changingOf = new WeakMap(); // can answer -> Set of names whose value changes
+  const lists = new WeakMap(); // block -> { key, data, recs, gen, rows, hidden, prev, hot }
+  const changingOf = new WeakMap(); // the List's answer -> Set of names whose value changes
   let hotLeft = 0;
-  function changingNames() {
-    if (!can) return new Set();
-    let set = changingOf.get(can);
+  function changingNames(data) {
+    if (!data) return new Set();
+    if (data.changing) return data.changing; // (the server's, from every point)
+    let set = changingOf.get(data);
     if (!set) {
-      set = new Set(Object.entries(can.series || {}).filter(([, pts]) => pts?.some((p) => p[1] !== pts[0][1])).map(([n]) => n));
-      changingOf.set(can, set);
+      // (an answer as pairs, from an older server: worked out here)
+      set = new Set(Object.entries(data.series || {}).filter(([, pts]) => Array.isArray(pts) && pts.some((p) => p[1] !== pts[0][1])).map(([n]) => n));
+      changingOf.set(data, set);
     }
     return set;
   }
+  // The built-in (telemetry) stats with data in these records, and those whose
+  // value changes: one pass over the clip's records, once per clip.
+  const dashOf = new WeakMap(); // recs -> { has: Set of ids, moving: Set of ids }
+  const NO_DASH = { has: new Set(), moving: new Set() };
+  function dashStats() {
+    if (!recs?.length) return NO_DASH;
+    let d = dashOf.get(recs);
+    if (d) return d;
+    d = { has: new Set(), moving: new Set() };
+    const c0 = { metric: true, can: () => null };
+    for (const s of SIGNALS.values()) {
+      if (s.source === 'can') continue;
+      let first;
+      for (const rec of recs) {
+        const v = s.value(rec, c0);
+        if (v == null || (typeof v === 'number' && !Number.isFinite(v))) continue;
+        if (first === undefined) { first = v; d.has.add(s.id); } else if (v !== first) { d.moving.add(s.id); break; }
+      }
+    }
+    dashOf.set(recs, d);
+    return d;
+  }
+  let listGen = 0;
   function listRows(b) {
     const st = lists.get(b) || lists.set(b, { key: '', rows: [], hidden: 0, prev: new Map(), hot: new Map() }).get(b);
-    const key = `${signalsVersion}|${b.q || ''}|${b.changing ? 1 : 0}|${recs ? 1 : 0}`;
-    if (st.key === key && st.can === can) return st;
-    const moving = b.changing ? changingNames() : null;
-    const shown = (s) => (s.source === 'can' ? (moving ? moving.has(s.canName) : can?.series?.[s.canName]?.length > 0) : !moving && Boolean(recs?.length));
+    const data = listData();
+    const key = `${signalsVersion}|${b.q || ''}|${b.changing ? 1 : 0}`;
+    if (st.key === key && st.data === data && st.recs === recs) return st;
+    const moving = b.changing ? changingNames(data) : null;
+    const dash = dashStats();
+    const shown = (s) => (s.source === 'can'
+      ? (moving ? moving.has(s.canName) : seriesLen(data?.series?.[s.canName]) > 0)
+      : (moving ? dash.moving.has(s.id) : dash.has.has(s.id)));
     const found = searchSignals(b.q || '', shown);
     const rows = found.filter(shown);
     const pops = (b.q || '').trim() ? 0 : rows.filter((s) => s.popular).length;
@@ -1070,8 +1181,12 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     st.rows = pops ? [{ head: 'Popular' }, ...rows.slice(0, pops), ...(rows.length > pops ? [{ head: 'All stats' }] : []), ...rows.slice(pops)] : rows;
     st.count = rows.length;
     st.hidden = found.length - rows.length;
+    // new data (another clip, or its records): its values are not "changes" of the last clip's
+    if (st.data !== data || st.recs !== recs) { st.prev = new Map(); st.hot = new Map(); }
     st.key = key;
-    st.can = can;
+    st.data = data;
+    st.recs = recs;
+    st.gen = ++listGen; // (the rows drawn are redrawn whenever the rows are new)
     return st;
   }
   const messageOf = (s) => String(s.group || '').split(' · ').pop();
@@ -1085,7 +1200,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     if (count) count.textContent = `${st.count.toLocaleString()} stat${st.count === 1 ? '' : 's'}${st.hidden ? ` · ${st.hidden.toLocaleString()} ${b.changing ? 'not changing or ' : ''}with no data here` : ''}`;
     const first = Math.max(0, Math.floor((scroll.scrollTop || 0) / ROW) - 4);
     const last = Math.min(n, first + Math.ceil((scroll.clientHeight || 15 * ROW) / ROW) + 8);
-    const drawn = `${st.key}|${first}|${last}`;
+    const drawn = `${st.gen}|${first}|${last}`;
     // (kept on the element: a redraw of the bar gives a new, empty one)
     if (pad.dataset.drawn !== drawn) {
       pad.dataset.drawn = drawn;
@@ -1206,10 +1321,11 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
       recs = null;
       recordsFor(path).then((r) => { if (alive && recsFor === path) { recs = r; tick(true); } });
     }
+    shownPath = path || null;
     if (path) { loadCan(path); rawView.setPath(path); }
     const ms = (m?.currentTime || 0) * 1000;
     const r = recs ? recordAt(recs, ms) : null;
-    const key = `${r?.t ?? 'x'}|${recs ? 1 : 0}|${editing}|${can ? Math.floor(ms / 50) : ''}`;
+    const key = `${path}|${r?.t ?? 'x'}|${recs ? 1 : 0}|${editing}|${canBar.data || canAll.data ? Math.floor(ms / 50) : ''}`;
     if (!force && key === lastKey) return;
     lastKey = key;
     const c = ctx(ms);
@@ -1315,7 +1431,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     if (scroll) scroll.scrollTop = 0;
     redrawList(i);
     clearTimeout(listSave);
-    listSave = setTimeout(() => saveBoards(state), 600);
+    listSave = setTimeout(() => { listSave = null; saveBoards(state); }, 600);
   });
   on('scroll', (e) => { const t = e.target; if (t?.matches?.('[data-list-scroll]')) redrawList(Number(t.dataset.listScroll)); }, true);
   on('change', (e) => {
@@ -1430,6 +1546,13 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
   return {
     el,
     panel, // the list box (outside the bar)
-    destroy() { closePick(false); clearTimeout(listSave); alive = false; cancelAnimationFrame(raf); clearTimeout(canRetry); globalThis.removeEventListener?.('resize', onResize); rawView.destroy(); el.remove(); panel.remove(); }
+    destroy() {
+      closePick(false);
+      // a List filter typed in the last moment is kept (its save waits for the typing to stop)
+      if (listSave) { clearTimeout(listSave); listSave = null; if (state) saveBoards(state); }
+      alive = false; cancelAnimationFrame(raf); clearTimeout(canBar.retry); clearTimeout(canAll.retry); globalThis.removeEventListener?.('resize', onResize);
+      for (const type of ['fullscreenchange', 'webkitfullscreenchange']) document.removeEventListener?.(type, onFullscreen);
+      rawView.destroy(); el.remove(); panel.remove();
+    }
   };
 }

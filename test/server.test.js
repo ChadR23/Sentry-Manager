@@ -1322,6 +1322,21 @@ test('CAN index: an uploaded log is decoded in the background, and a clip gets i
     assert.ok(Math.abs(at(bv, got.start + 10_000) - at(got.series.BattVoltage132, got.start + 10_000)) < 0.05, 'the same values, fewer of them');
     assert.equal(all.trust, got.trust);
     assert.deepEqual((await s.call('GET', `/api/can/clip?path=${encodeURIComponent(clip)}&signals=*`, undefined, { headers: https })).data, all, 'kept ready for the next viewer');
+    // the List's answer: every signal, thinned to a value every 250 ms, as columns, with what changes
+    const lst = (await s.call('GET', `/api/can/clip?path=${encodeURIComponent(clip)}&signals=*&step=250&cols=1`, undefined, { headers: https })).data;
+    assert.equal(lst.start, got.start);
+    assert.equal(lst.step, 250);
+    assert.equal(lst.series, undefined, 'columns, not pairs');
+    const [dt, vals] = lst.cols.BattVoltage132;
+    const times = dt.reduce((a, d) => [...a, (a.length ? a[a.length - 1] : lst.base) + d], []);
+    assert.ok(times[0] <= lst.start, 'the value from before the clip starts');
+    assert.ok(times.every((t, k) => k <= 1 || Math.floor((t - lst.start + 2000) / 250) > Math.floor((times[k - 1] - lst.start + 2000) / 250)), `at most one value per 250 ms: ${times.slice(0, 8).map((t) => t - lst.start)}`);
+    assert.ok(Math.abs(vals[times.filter((t) => t <= lst.start + 10_000).length - 1] - 381) < 0.05, 'about 381 V ten seconds in, as the full answer says');
+    assert.ok(lst.changing.includes('BattVoltage132') && !lst.changing.includes('DI_vehicleSpeed'), `what changes: ${lst.changing}`);
+    assert.equal(lst.trust, got.trust);
+    assert.ok(all.series.BattVoltage132.length >= dt.length, 'signals=* alone (an older page): pairs, each value every 250 ms, repeats kept');
+    assert.deepEqual((await s.call('GET', `/api/can/clip?path=${encodeURIComponent(clip)}&signals=*&step=250&cols=1`, undefined, { headers: https })).data, lst, 'the List\'s answer kept ready too');
+    assert.equal((await s.call('GET', `/api/can/clip?path=${encodeURIComponent(clip)}&signals=*&step=0&cols=1`, undefined, { headers: https })).data.step, 250, 'never finer than 250 ms for every signal');
     // the nerd raw view: every id, the unknown one too, its payload changes in UTC
     const raw = (await s.call('GET', `/api/can/raw?path=${encodeURIComponent(clip)}`, undefined, { headers: https })).data;
     assert.equal(raw.start, got.start);

@@ -363,3 +363,26 @@ test('id summary and progress: every id of a range from the frame counts (the bu
     await fsp.rm(base, { recursive: true, force: true });
   }
 });
+
+test('series with step: the last value of each step, repeats dropped, and what changes from every point', { skip }, async () => {
+  // 132 at 20 Hz: the voltage goes up a step every 100 ms for 3 s, then holds
+  const lines = [];
+  for (let i = 0; i < 200; i++) {
+    const b = Buffer.alloc(8);
+    b.writeUInt16LE(38000 + Math.min(i, 60) * 10, 0);
+    lines.push(line(T0 + i * 50, '132', b.toString('hex').toUpperCase()));
+  }
+  const { base, idx } = await setup('K_20200101T080000Z_1.log.xz', lines);
+  await idx.indexLog('K', 'K_20200101T080000Z_1.log.xz');
+  const full = (await idx.series(['K'], T0, T0 + 9_000)).BattVoltage132;
+  const changing = new Set();
+  const thin = (await idx.series(['K'], T0, T0 + 9_000, null, { step: 250, dropRepeats: true, changing })).BattVoltage132;
+  assert.ok(full.length > 30, `every point (${full.length})`);
+  assert.ok(thin.length <= 14, `about one point per 250 ms while it moves, none while it holds (${thin.length})`);
+  const at = (pts, ms) => pts.filter((p) => p[0] <= ms).pop()?.[1];
+  // (at the end of each step the thinned series says what every point does)
+  for (let k = 1; k <= 36; k++) assert.equal(at(thin, T0 + k * 250 - 1), at(full, T0 + k * 250 - 1), `the value at ${k * 250 - 1} ms`);
+  assert.equal(thin[thin.length - 1][1], full[full.length - 1][1], 'the value it ends on');
+  assert.ok(changing.has('BattVoltage132'), 'it changes');
+  await fsp.rm(base, { recursive: true, force: true });
+});
