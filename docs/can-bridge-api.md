@@ -12,15 +12,24 @@ top of the stored logs.
 
 ## Turning it on
 
-Off by default: while off, every `/api/can/logs` address answers `404`.
+Off by default: while off, port 10000 is closed and every `/api/can/logs`
+address on the web port answers `404`.
 
 An admin turns it on in the hidden Nerd settings (Settings page: tap the
 Version line seven times, then **>_ nerd**). Turning it on, or making a new
 token, asks for the password and shows:
 
-- the upload address, `https://<host>:<port>/api/can/logs`;
+- the upload address, `https://<host>:10000/api/can/logs`;
 - the token, once (only its SHA-256 is stored; a new token replaces the old one);
 - the server certificate's SHA-256 fingerprint, for the app to pin.
+
+## The port
+
+The CAN Bridge uploads to its own port, **10000** (the server's `CAN_PORT`
+setting). That port answers only the requests below; everything else there
+is `404`. It is open only while CAN uploads are on: turning them off closes
+it. In Docker it is published like the web port (`"10000:10000"`). The same
+requests also work on the web port (9000), but the app should use 10000.
 
 ## Rules for every request
 

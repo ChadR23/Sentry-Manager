@@ -29,6 +29,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const http = require('http');
 const http2 = require('http2');
+const https = require('https');
 const net = require('net');
 const os = require('os');
 const path = require('path');
@@ -107,6 +108,8 @@ const DATA = path.resolve(process.env.DATA_PATH || '/data');
 const RUN_DIR = path.resolve(process.env.RUN_DIR || '/run/sentry-six-manager');
 const FOOTAGE_ROOT = path.resolve(process.env.FOOTAGE_ROOT || '/footage');
 const PORT = Number(process.env.PORT || 9000);
+// the CAN Bridge's uploads: a port of their own, open only while they are turned on
+const CAN_PORT = Number(process.env.CAN_PORT || 10000);
 const HOST = process.env.HOST || '0.0.0.0';
 const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
 const FFPROBE = process.env.FFPROBE_PATH || 'ffprobe';
@@ -303,6 +306,9 @@ async function main() {
   let scrubPrepare = null;
   let integrityRef = null; // the footage check: one cut short by a restart goes on after the first scan
   let canUploadRef = null; // CAN Bridge uploads (set where canLogs is made)
+  let canPortRef = null; // opens or closes the CAN Bridge's own port (set where the servers start)
+  let canServer = null;
+  let canPortState = { listening: false, error: null, port: CAN_PORT };
   const canUpload = (req, res, p) => (canUploadRef ? canUploadRef(req, res, p) : sendJson(res, 404, { error: 'Not found' }));
   const inventory = new Inventory({ vehicles, db, log: logger.scope('inventory'), onChange: () => announce('inventory'), onScanned: (vid) => { speedIndex?.kick(); scrubPrepare?.kick(); integrityRef?.resume(vid); } });
   const thumbs = new Thumbnails({ dir: path.join(DATA, 'thumbnails'), ffmpegPath: FFMPEG });
@@ -886,6 +892,7 @@ async function main() {
     const list = parseHostnames(Array.isArray(body?.hostnames) ? body.hostnames.join(',') : String(body?.hostnames || ''));
     const out = await tlsSource.setHostnames(list);
     if (httpsServer) httpsServer.setSecureContext({ key: out.key, cert: out.cert });
+    canServer?.setSecureContext?.({ key: out.key, cert: out.cert });
     audit.info(`HTTPS certificate names set to [${list.join(', ')}]${out.caReplaced ? ' (new certificate authority)' : ''}: ${by(req, user)}`);
     return { ok: true, caReplaced: Boolean(out.caReplaced), tls: tlsSource.status() };
   });
@@ -1763,7 +1770,7 @@ async function main() {
     const cfg = canCfg();
     const { bytes, count, logs } = await canLogs.list({ limit: 2000 });
     return {
-      enabled: Boolean(cfg.enabled), since: cfg.at || null, logs: count, bytes,
+      enabled: Boolean(cfg.enabled), since: cfg.at || null, logs: count, bytes, port: { ...canPortState, https: Boolean(tlsSource) },
       keys: [...new Set(logs.map((l) => l.vehicleKey))].sort(), map: canMap(),
       vehicles: vehicles.list().map((v) => ({ id: v.id, name: v.name })), index: canIndex.status()
     };
@@ -1773,12 +1780,14 @@ async function main() {
     const token = crypto.randomBytes(32).toString('base64url');
     db.set('can', { enabled: true, tokenHash: crypto.createHash('sha256').update(token).digest('hex'), at: Date.now() });
     audit.warn(`CAN Bridge uploads turned on (new token): ${by(req, user)}`);
-    return { enabled: true, token, fingerprint: certFingerprint() };
+    canPortRef?.(true).catch((err) => log.warn(`CAN Bridge port: ${err.message}`));
+    return { enabled: true, token, fingerprint: certFingerprint(), port: CAN_PORT };
   });
   r.add('POST', '/api/can/disable', (req, res, { user }) => {
     requireConfirmed(req);
     db.set('can', { enabled: false });
     audit.warn(`CAN Bridge uploads turned off: ${by(req, user)}`);
+    canPortRef?.(false).catch(() => {});
     return { enabled: false };
   });
   r.add('GET', '/api/can/files', async (req, res, { query }) => canLogs.list({ limit: Number(query.limit) || 200 }));
@@ -2476,6 +2485,45 @@ async function main() {
     servers.push(front, httpsServer, redirect);
     front.listen(PORT, HOST, () => log.info(`Sentry Six Manager on https://${HOST}:${PORT} (${buildInfo.sha ? buildInfo.sha.slice(0, 7) : 'dev'})`));
   }
+  // The CAN Bridge's port (CAN_PORT, 10000): only the CAN upload API
+  // (/api/can/logs…), with the same certificate; it listens only while the
+  // uploads are on (the Nerd settings), so the port is closed otherwise
+  canPortRef = async (on) => {
+    if (on && !canServer) {
+      const only = (req, res) => {
+        const p = String(req.url || '').split('?')[0];
+        if (p === '/api/can/logs' || p.startsWith('/api/can/logs/')) return canUpload(req, res, p);
+        securityHeaders(req, res, p);
+        return sendJson(res, 404, { error: 'Not found' });
+      };
+      let srv;
+      if (tlsSource) {
+        const m = await tlsSource.load();
+        srv = https.createServer({ key: m.key, cert: m.cert, minVersion: 'TLSv1.2' }, only);
+      } else srv = http.createServer(only); // behind a reverse proxy that does HTTPS
+      srv.setTimeout(120_000);
+      srv.maxConnections = 64;
+      canPortState = { listening: false, error: null, port: CAN_PORT };
+      srv.on('error', (err) => {
+        canPortState = { listening: false, error: err.code === 'EADDRINUSE' ? `Port ${CAN_PORT} is used by something else.` : err.message, port: CAN_PORT };
+        log.warn(`CAN Bridge port ${CAN_PORT}: ${err.message}`);
+        if (canServer === srv) canServer = null;
+      });
+      canServer = srv;
+      srv.listen(CAN_PORT, HOST, () => {
+        canPortState = { listening: true, error: null, port: CAN_PORT };
+        log.info(`CAN Bridge uploads on ${tlsSource ? 'https' : 'http'}://${HOST}:${CAN_PORT}/api/can/logs`);
+      });
+    } else if (!on && canServer) {
+      const srv = canServer;
+      canServer = null;
+      canPortState = { listening: false, error: null, port: CAN_PORT };
+      srv.close();
+      srv.closeAllConnections?.();
+      log.info(`CAN Bridge port ${CAN_PORT} closed`);
+    }
+  };
+  if (db.get('can', null)?.enabled) canPortRef(true).catch((err) => log.warn(`CAN Bridge port: ${err.message}`));
   vehicles.startAll();
 
   // Converter starts in the background; the Encoder tab shows "starting" until ready.
@@ -2606,6 +2654,7 @@ async function main() {
       try {
         const m = await tlsSource.load();
         httpsServer?.setSecureContext({ key: m.key, cert: m.cert });
+        canServer?.setSecureContext?.({ key: m.key, cert: m.cert });
       } catch (err) {
         log.warn(`HTTPS certificate check failed: ${err.message}`);
       }
@@ -2640,7 +2689,7 @@ async function main() {
       if (m?.type === 'rapl-reading') return stats.setRapl(m);
       if (m?.type === 'supervisor-log') return logger.write(m.level === 'warn' || m.level === 'error' ? m.level : 'info', 'supervisor', String(m.message || '').slice(0, 4000), { echo: false });
       if (m?.type !== 'tls-updated' || !tlsSource || !httpsServer) return;
-      tlsSource.load().then((x) => httpsServer.setSecureContext({ key: x.key, cert: x.cert }), (err) => log.warn(`Reloading the certificate failed: ${err.message}`));
+      tlsSource.load().then((x) => { httpsServer.setSecureContext({ key: x.key, cert: x.cert }); canServer?.setSecureContext?.({ key: x.key, cert: x.cert }); }, (err) => log.warn(`Reloading the certificate failed: ${err.message}`));
     });
   }
 }

@@ -95,20 +95,24 @@ export function openNerdPanel() {
       body.innerHTML = `<p class="nd-warn">${esc(err.status === 403 ? 'Only an admin account can change these.' : err.message)}</p>`;
       return;
     }
-    const url = `${location.origin}/api/can/logs`;
+    // the CAN Bridge's own port (10000 unless CAN_PORT says otherwise)
+    const port = st.port?.port || 10000;
+    const url = `${st.port?.https === false ? 'http' : 'https'}://${location.hostname.includes(':') ? `[${location.hostname}]` : location.hostname}:${port}/api/can/logs`;
     const https = location.protocol === 'https:';
     body.innerHTML = `
       <h3>Uploads from the CAN Bridge</h3>
       ${st.enabled
         ? `<p>On since ${esc(new Date(st.since).toLocaleString())}. The app uploads finished logs to:</p>
            <div class="nd-box nd-mono">${esc(url)}</div>
+           <p class="${st.port?.listening ? 'nd-muted' : 'nd-warn'}">${st.port?.listening ? `Port ${port} is open for the CAN Bridge (only its uploads; it closes when this is turned off).` : st.port?.error ? `Port ${port} could not open: ${esc(st.port.error)}` : `Port ${port} is opening…`}
+             If Sentry Six Manager runs in Docker, the port must also be published (<code>${port}:${port}</code>).</p>
            ${token ? `<p><b>Token</b> (shown once: paste it into the CAN Bridge app now):</p><div class="nd-box nd-mono" data-token>${esc(token)}</div>
              ${fingerprint ? `<p><b>Certificate SHA-256</b> (the app pins it):</p><div class="nd-box nd-mono">${esc(fingerprint)}</div>` : ''}
              <div class="nd-row"><button type="button" class="nd-btn" data-copy>Copy token</button></div>` : '<p class="nd-muted">The token was shown when it was made. Make a new one if the app needs it again (the old one stops working).</p>'}
            <div class="nd-row"><button type="button" class="nd-btn" data-on>New token…</button><button type="button" class="nd-btn nd-danger" data-off>Turn off…</button></div>`
-        : `<p>Off: the upload address answers "not found" and takes nothing.</p>
+        : `<p>Off: port ${port} is closed, and the upload address answers "not found".</p>
            <div class="nd-row"><button type="button" class="nd-btn" data-on>Turn on…</button></div>`}
-      ${https ? '' : '<p class="nd-warn">This page is on plain HTTP. The app only uploads over HTTPS: open Sentry Six Manager with https:// for the address and the certificate it pins.</p>'}
+      ${https || st.port?.https ? '' : '<p class="nd-warn">This page is on plain HTTP. The app only uploads over HTTPS: open Sentry Six Manager with https:// for the address and the certificate it pins.</p>'}
       <p class="nd-muted">The token can only upload CAN logs: it cannot see footage or change anything else.</p>
 
       <h3>Received logs</h3>

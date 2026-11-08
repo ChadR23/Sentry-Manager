@@ -21,6 +21,8 @@ services:
     ports:
       # another app already on 9000 (MinIO uses it): change the left number
       - "9000:9000"
+      # the Screenmate CAN Bridge's uploads (closed until turned on in the app)
+      - "10000:10000"
 
     environment:
       TZ: America/Chicago

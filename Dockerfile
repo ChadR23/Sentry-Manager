@@ -92,6 +92,8 @@ ENV MALLOC_ARENA_MAX=2
 
 VOLUME ["/data"]
 EXPOSE 9000
+# the CAN Bridge's uploads, only while they are turned on (Nerd settings; CAN_PORT)
+EXPOSE 10000
 # /healthz answers on plain HTTP too (everything else there redirects to HTTPS)
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||9000)+'/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"

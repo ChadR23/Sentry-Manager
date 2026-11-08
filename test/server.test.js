@@ -1066,6 +1066,33 @@ test('CAN Bridge uploads: off until turned on, HTTPS and a write-only token, chu
   }
 });
 
+test('CAN Bridge port: closed until uploads are on, only the CAN API while open, closed again when off', async () => {
+  const dir = await tmp();
+  const canPort = await freePort();
+  const s = await startServer(dir, { TRUST_PROXY: 'true', CAN_PORT: String(canPort) });
+  const https = { 'X-Forwarded-Proto': 'https' };
+  const canBase = `http://127.0.0.1:${canPort}`;
+  const reach = (p, headers = {}) => fetch(canBase + p, { headers: { ...https, ...headers } }).then((r) => r.status, () => 'closed');
+  try {
+    assert.equal(await reach('/api/can/logs/ping'), 'closed', 'nothing listens while off');
+    await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' }, { headers: https });
+    await s.call('POST', '/api/auth/confirm', { password: 'correct horse' }, { headers: https });
+    const on = await s.call('POST', '/api/can/enable', {}, { headers: https });
+    assert.equal(on.data.port, canPort);
+    await waitFor(async () => (await reach('/api/can/logs/ping', { Authorization: `Bearer ${on.data.token}` })) === 200);
+    assert.equal(await reach('/api/vehicles'), 404, 'only the CAN API there');
+    assert.equal(await reach('/', { Cookie: s.getCookie() }), 404, 'not the app, even signed in');
+    assert.equal(await reach('/api/can/logs/ping', { Authorization: 'Bearer wrong' }), 401);
+    const st = (await s.call('GET', '/api/can/settings', undefined, { headers: https })).data;
+    assert.deepEqual([st.port.port, st.port.listening], [canPort, true]);
+    await s.call('POST', '/api/can/disable', {}, { headers: https });
+    await waitFor(async () => (await reach('/api/can/logs/ping')) === 'closed');
+  } finally {
+    await s.stop();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('CAN index: an uploaded log is decoded in the background, and a clip gets its signals at its own time', { skip: spawnSync('xz', ['--version']).status !== 0 && 'needs xz', timeout: 60000 }, async () => {
   const dir = await tmp();
   await makeFootage(path.join(dir, 'footage'));
