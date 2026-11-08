@@ -144,3 +144,25 @@ test('new ids since a date: from per-day summaries, complete however long the hi
   assert.deepEqual(again.appeared, [], '3A1 was there on the first day too');
   assert.deepEqual((await idx.newIds('K', T0 - day)).appeared.map((x) => x.id), ['can0:132', 'can0:3A1']);
 });
+
+test('repack keeps a minute from before the per-log records as it was: indexing its log again counts nothing twice', { skip }, async (t) => {
+  const base = await fsp.mkdtemp(path.join(os.tmpdir(), 'canfmt-'));
+  t.after(() => fsp.rm(base, { recursive: true, force: true }));
+  await fsp.mkdir(path.join(base, 'can', 'K'), { recursive: true });
+  const name = 'K_20200101T080010Z_1.log.xz';
+  const lines = [];
+  for (let i = 0; i < 30; i++) lines.push(volts(T0 + 10_000 + i * 100, 380 + i));
+  await fsp.writeFile(path.join(base, 'can', 'K', name), execFileSync('xz', ['-1', '-c'], { input: `${lines.join('\n')}\n` }));
+  const idx = createCanIndex({ canDir: path.join(base, 'can'), dir: path.join(base, 'idx'), autoRepack: false });
+  await idx.indexLog('K', name, { trust: 'verified' });
+  const f = path.join(base, 'idx', 'K', '20200101T0800.json.gz');
+  const now = fmt.decodeMinute(JSON.parse(zlib.gunzipSync(fs.readFileSync(f)).toString()));
+  fs.writeFileSync(f, zlib.gzipSync(JSON.stringify({ minute: now.minute, signals: now.signals, ids: now.ids, trust: 'verified' })));
+  assert.equal(await idx.repack(), 1);
+  const head = await fmt.readHead(f);
+  assert.equal(head.logs, undefined, 'still no per-log records');
+  assert.equal(head.trust, 'verified');
+  await idx.indexLog('K', name, { trust: 'verified' });
+  const after = fmt.decodeMinute(JSON.parse(zlib.gunzipSync(fs.readFileSync(f)).toString()));
+  assert.deepEqual(after.ids, { 'can0:132': 30 });
+});

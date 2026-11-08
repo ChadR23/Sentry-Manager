@@ -853,7 +853,8 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
             const data = await readMinute(key, minute);
             if (!data) return;
             const { minute: m, trust, logs, signals, ids } = data;
-            await writeAtomic(file, await fmt.packMinute({ minute: m ?? minute, trust, logs: logs || {}, signals: signals || {}, ids: ids || {} }));
+            // (a minute from before the per-log records keeps having none: indexing it again relies on that)
+            await writeAtomic(file, await fmt.packMinute({ minute: m ?? minute, trust, logs, signals: signals || {}, ids: ids || {} }));
             changed(key, minute);
           } else {
             const data = await rawNow(key, rawMinute);
