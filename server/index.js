@@ -85,6 +85,7 @@ const { createCanTrust } = require('./canTrust');
 const { createCanPort } = require('./canPort');
 const { createCanSync } = require('./canSync');
 const { createCanPrune } = require('./canPrune');
+const { createCanFootage } = require('./canFootage');
 const { createArchiveGap } = require('./archiveGap');
 const { createCanSearch, createSearchQueue, footageAt, clipStamps, localTime, parseWhen } = require('./canSearch');
 
@@ -317,6 +318,7 @@ async function main() {
   let integrityRef = null; // the footage check: one cut short by a restart goes on after the first scan
   let canUploadRef = null; // CAN Bridge uploads (set where canLogs is made)
   let canPruneRef = null; // CAN logs that go with their footage (canPrune.js, set where canLogs is made)
+  let canFootageRef = null; // which recordings have CAN Bridge data (canFootage.js, set where the CAN index is made)
   /** The CAN logs footage would take with it ("Also delete its CAN data"), counted; null: no key mapped to the car. */
   const canWith = async (vid, what) => {
     const r = await canPruneRef?.deleteWith(vid, { ...what, dryRun: true }).catch(() => null);
@@ -1357,6 +1359,11 @@ async function main() {
     const { files, clipRels, ...rest } = rec;
     return { ...rest, encoded: inventory.encoded(rec.vehicleId, rec) };
   };
+  /** rec -> whether CAN Bridge data covers it (as the Viewer would show), or null when there is none to look at. */
+  const canOf = async (vehicleId) => {
+    if (!canFootageRef) return null;
+    try { return await canFootageRef.forVehicle(vehicleOr404(vehicleId)); } catch (err) { log.warn(`CAN tags: ${err.message}`); return null; }
+  };
   const filtered = (vehicleId, query) => {
     let list = inventory.get(vehicleId)?.recordings || [];
     if (query.category && query.category !== 'all') list = list.filter((x) => x.category === query.category);
@@ -1376,6 +1383,13 @@ async function main() {
     // footage that looks only partly copied to the share yet (the "Partly archived?" tag)
     const gaps = archiveGapRef ? archiveGapRef.forDays(params.id) : {};
     for (const d of shown) { d.speedIndex = idx[d.day] || { clips: 0, indexed: 0 }; d.archive = gaps[d.day] || null; }
+    // how many of each day's recordings have CAN Bridge data (the green "CAN" tag)
+    const hasCan = await canOf(params.id);
+    if (hasCan) {
+      const want = new Map(shown.map((d) => [d.day, d]));
+      for (const d of shown) d.canRecordings = 0;
+      for (const rec of filtered(params.id, query)) { const d = want.get(rec.day); if (d && hasCan(rec)) d.canRecordings++; }
+    }
     return {
       total: days.length, recordings: days.reduce((n, d) => n + d.recordings, 0), offset, limit,
       scannedAt: inv?.scannedAt || null, scanning: Boolean(inv?.scanning), error: inv?.lastError || null,
@@ -1432,6 +1446,9 @@ async function main() {
     // Sentry and Saved events at a saved place get its name (place), when there are saved places
     const places = placeList();
     const tagged = page.map(publicRecording);
+    // recordings with CAN Bridge data (the green "CAN" tag): can: true, else left out
+    const hasCan = await canOf(params.id);
+    if (hasCan) page.forEach((rec, i) => { if (hasCan(rec)) tagged[i].can = true; });
     if (places.length) {
       await eachLimit(page.map((rec, i) => [rec, i]).filter(([rec]) => rec.eventId), 6, async ([rec, i]) => {
         tagged[i].place = placeAt((await eventSpot(params.id, rec).catch(() => null))?.pos, places);
@@ -1755,6 +1772,7 @@ async function main() {
     canSync?.indexed(key, from, to).catch(() => {});
   }, onProgress: canProgress });
   setTimeout(() => canIndex.kick(), 20_000).unref?.();
+  canFootageRef = createCanFootage({ keysFor: (vid) => canKeysFor(vid), minuteTimes: (key) => canIndex.minuteTimes(key), generation: () => canIndex.generation(), startOf: (v, name) => canStartOf(v, name) });
   // which car each CAN Bridge key is (a key of its own when there is one car)
   const canMap = () => db.get('can-vehicles', {}) || {};
   async function canKeysFor(vid) {

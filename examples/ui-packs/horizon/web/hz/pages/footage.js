@@ -136,7 +136,7 @@ export default {
             <span class="album-art" aria-hidden="true">${d.thumbId ? `<img alt="" loading="lazy" src="${thumbUrl(v.id, d.thumbId)}">` : ico('film')}</span>
             <span class="album-t"><b>${h(dayName(d.day))}</b><span class="small dim">${count(d.recordings, 'track')} · ${footMinutes(d.minutes)} · ${size(d.bytes)}</span>
               <span class="catbar" aria-hidden="true">${cats.map(([c, n]) => `<i class="c-${h(c)}" style="flex:${n}"></i>`).join('')}</span>
-              <span class="tiny faint">${cats.map(([c, n]) => `${c} ${n}`).join(' · ')}${d.protected ? ` · ${d.protected} protected` : ''} · ${enc}% converted${ix ? ` · <span class="album-ix">${h(ix.toLowerCase())}</span>` : ''}</span>${gap}</span></button>`;
+              <span class="tiny faint">${cats.map(([c, n]) => `${c} ${n}`).join(' · ')}${d.protected ? ` · ${d.protected} protected` : ''} · ${enc}% converted${ix ? ` · <span class="album-ix">${h(ix.toLowerCase())}</span>` : ''}</span>${d.canRecordings > 0 ? `<span class="album-gap"><span class="pill can" title="${h(`CAN Bridge data for ${count(d.canRecordings, 'recording')} of this day (car data in the Viewer)`)}">${(d.canRecordings === d.recordings ? 'CAN' : `CAN ${d.canRecordings}/${d.recordings}`)}</span></span>` : ''}${gap}</span></button>`;
         }).join('')}
         ${!list.length && !days.error ? '<p class="small dim">No days match these filters.</p>' : ''}`);
     }
@@ -209,7 +209,7 @@ export default {
           <button class="tk-play" type="button" data-act="play" aria-label="Play ${h(r.start)}">${ico('play')}</button>
           <span class="tk-art" aria-hidden="true">${r.thumbRel || r.frontRel ? `<img loading="lazy" alt="" src="${thumbUrl(v.id, r.id)}">` : ''}</span>
           <span class="tk-t"><b class="num">${h(wall(r.start))}<span class="faint"> – ${h(wall(r.end || r.start))}</span></b>
-            <span class="tk-sub small">${pill(r.category, CAT_TONE[r.category] || '')}${r.place ? pill(`at ${r.place}`, '') : ''}<span class="dim">${h(f.day ? '' : `${dayName(r.day)} · `)}${h(words(r.type || ''))}${h(ev)}</span>${r.protected ? `<span class="lock" title="Protected">${ico('lock')}<span class="sr-only">Protected</span></span>` : ''}</span></span>
+            <span class="tk-sub small">${pill(r.category, CAT_TONE[r.category] || '')}${r.place ? pill(`at ${r.place}`, '') : ''}${r.can === true ? '<span class="pill can" title="CAN Bridge data for this footage (car data in the Viewer)">CAN</span>' : ''}<span class="dim">${h(f.day ? '' : `${dayName(r.day)} · `)}${h(words(r.type || ''))}${h(ev)}</span>${r.protected ? `<span class="lock" title="Protected">${ico('lock')}<span class="sr-only">Protected</span></span>` : ''}</span></span>
           <span class="tk-cams" aria-label="Cameras: ${h(r.cameras.map((c) => CAM_NAME[c] || c).join(', '))}">${CAMS.map((c) => `<i class="${have.has(c) ? 'on' : ''}">${CAM_TAG[c]}</i>`).join('')}</span>
           <span class="tk-codec">${codec(r)}</span>
           <span class="tk-dur num">${dur(r.minutes)}<span class="faint small"> · ${size(r.bytes)}</span></span>

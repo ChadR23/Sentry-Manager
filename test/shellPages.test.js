@@ -151,3 +151,32 @@ test('footage delete confirmations offer "Also delete its CAN data" (unticked, o
     assert.match(src, /trash-preview/, pack);
   }
 });
+
+test('Footage: a green CAN tag, in the Nerd panel\'s green, on recordings with CAN Bridge data and on their day, in every interface', () => {
+  const nerd = fs.readFileSync(path.join(REPO, 'web/nerd.js'), 'utf8');
+  const btn = nerd.match(/\.sentry-nerd-btn\{[^}]*background:(#[0-9a-f]{6});color:(#[0-9a-f]{6});border:1px solid (#[0-9a-f]{6})/);
+  assert.ok(btn, 'the Nerd button\'s colours');
+  const [, bg, fg, border] = btn;
+  const TITLE = 'CAN Bridge data for this footage (car data in the Viewer)';
+  // the built-in interface: next to "at Home", only when the server says can: true
+  assert.match(fn('recCard'), /\$\{r\.place \? `<span class="chip">at \$\{esc\(r\.place\)\}<\/span>` : ''\}\$\{r\.can === true \? `<span class="chip can" title="\$\{CAN_TAG_TITLE\}">CAN<\/span>` : ''\}/);
+  assert.ok(app.includes(`const CAN_TAG_TITLE = '${TITLE}';`));
+  assert.match(fn('dayCard'), /\$\{dayCanChip\(d\)\}/);
+  assert.match(fn('dayCanChip'), /if \(!\(d\.canRecordings > 0\)\) return '';/);
+  const rule = css.match(/\.chip\.can \{([^}]*)\}/);
+  assert.ok(rule, '.chip.can');
+  for (const c of [fg, bg, border]) assert.ok(rule[1].includes(c), `${c} in .chip.can`);
+  // the four packs: the same words, the same colours, only for can: true
+  const ROOT = path.join(REPO, 'examples', 'ui-packs');
+  const packs = { aurora: ['aurora', 'aurora/app.css'], daylight: ['dl', 'dl/app.css'], flux: ['flux', 'flux.css'], horizon: ['hz', 'hz/app.css'] };
+  for (const [pack, [mod, cssFile]] of Object.entries(packs)) {
+    const page = fs.readFileSync(path.join(ROOT, pack, 'web', mod, 'pages', 'footage.js'), 'utf8');
+    assert.match(page, /r\.can === true \?/, `${pack}: the recording's tag`);
+    assert.ok(page.includes(TITLE), `${pack}: its tooltip`);
+    assert.match(page, /d\.canRecordings > 0 \?/, `${pack}: the day's tag`);
+    const packCss = fs.readFileSync(path.join(ROOT, pack, 'web', cssFile), 'utf8');
+    const line = packCss.split('\n').find((l) => /\bcan\b[^{]*\{/.test(l) && l.includes(fg));
+    assert.ok(line, `${pack}: a can rule in the Nerd green`);
+    for (const c of [fg, bg, border]) assert.ok(line.includes(c), `${pack}: ${c}`);
+  }
+});

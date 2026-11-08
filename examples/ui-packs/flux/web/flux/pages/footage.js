@@ -154,6 +154,7 @@ export default {
             <div class="small muted num">${plural(d.recordings, 'rec')} · ${footMinutes(d.minutes)} · ${d.cameras} cams${d.protected ? ` · ${d.protected} ${icon('lock', 'ico xs')}` : ''}</div>
             <div class="enc-line"><span class="enc-track"><span style="width:${encP.toFixed(1)}%"></span></span><span class="small faint num">${d.encoded}/${d.clips} encoded</span></div>
             ${ix ? `<div><span class="chip violet" title="Speeds read for the Viewer's speed graph">${ix}</span></div>` : ''}
+            ${d.canRecordings > 0 ? `<div><span class="chip can" title="${esc(`CAN Bridge data for ${plural(d.canRecordings, 'recording')} of this day (car data in the Viewer)`)}">${(d.canRecordings === d.recordings ? 'CAN' : `CAN ${d.canRecordings}/${d.recordings}`)}</span></div>` : ''}
             ${d.archive ? `<div><span class="chip gap${d.archive.state === 'partial' ? ' amber' : ''}" title="${esc(d.archive.summary)}">${d.archive.state === 'partial' ? `Partly archived?${d.archive.missingMinutes ? ` ~${d.archive.missingMinutes} min missing` : ''}` : 'Still arriving'}</span></div>` : ''}
             ${d.archive && f.date === d.day ? `<p class="note small gap-note${d.archive.state === 'partial' ? ' amber' : ''}">${esc(d.archive.summary)}${d.archive.state === 'partial' ? ` ${esc(d.archive.advice || ARCHIVE_ADVICE)}` : ''}</p>` : ''}
             <div class="day-actions">
@@ -252,7 +253,7 @@ export default {
           <td class="cb"><label class="cbl"><input type="checkbox" aria-label="Select ${esc(r.start)}"${sel ? ' checked' : ''}></label></td>
           <td class="thumbc">${r.thumbRel || r.frontRel ? `<img loading="lazy" alt="" src="/api/vehicles/${encodeURIComponent(v.id)}/recordings/${encodeURIComponent(r.id)}/thumbnail">` : ''}</td>
           <td class="mono nowrap">${esc(r.start ? wallDay(r.start) : r.day)}<div class="faint small">${r.end && r.end !== r.start ? `→ ${esc(wall(r.end))}` : ''}${r.eventAt ? ` · event ${esc(wall(r.eventAt))}` : ''}</div></td>
-          <td><span class="cat ${esc(cat)}">${esc(cat)}</span>${r.place ? `<div class="faint small">at ${esc(r.place)}</div>` : ''}</td>
+          <td><span class="cat ${esc(cat)}">${esc(cat)}</span>${r.can === true ? ` <span class="cat can" title="CAN Bridge data for this footage (car data in the Viewer)">CAN</span>` : ''}${r.place ? `<div class="faint small">at ${esc(r.place)}</div>` : ''}</td>
           <td class="r num">${trackLength(r.minutes * 60)}</td>
           <td>${camsCell(r)}</td>
           <td class="r num">${r.fileCount}</td>

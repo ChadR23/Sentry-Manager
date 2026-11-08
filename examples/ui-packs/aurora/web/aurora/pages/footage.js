@@ -50,6 +50,9 @@ const thumb = (v, id) => `/api/vehicles/${encodeURIComponent(v.id)}/recordings/$
 // what to check when a day looks only partly archived (the server sends its own words too)
 const ADVICE = 'Check the Sentry USB: its Logs page, its archive settings and its Wi-Fi to the NAS. Clips it recycles before copying them are lost.';
 
+// the green "CAN" tag (the Nerd panel's green): CAN Bridge data covers the recording
+const CAN_TITLE = 'CAN Bridge data for this footage (car data in the Viewer)';
+
 function frame(v, d, on) {
   const p = dayParts(d.day);
   const cats = Object.entries(d.byCategory || {}).filter(([, n]) => n);
@@ -60,7 +63,7 @@ function frame(v, d, on) {
   return `<button class="frame${on ? ' on' : ''}" type="button" data-day="${esc(d.day)}" aria-pressed="${on}" aria-label="${esc(dayTitle(d.day))}: ${plural(d.recordings, 'recording')}, ${esc(bytes(d.bytes))}${gap ? `, ${esc(gap)}` : ''}">
     <div class="frame-pic">${d.thumbId ? `<img class="thumb-img" loading="lazy" alt="" src="${thumb(v, d.thumbId)}">` : ''}<div class="frame-date"><b>${esc(p.dd)}</b><span>${esc(p.mon)} · ${esc(p.wd)}</span></div></div>
     <div class="frame-info"><span class="frame-cats">${cats.map(([c, n]) => `<span class="chip ${CAT_CHIP[c] || ''}" style="padding:1px 8px;font-size:12px"><i class="dot cat-${esc(c)}"></i>${n}</span>`).join('')}</span>
-      <span class="muted">${footMinutes(d.minutes)} · ${esc(bytes(d.bytes))}${d.protected ? ` · ${d.protected} protected` : ''}${enc ? ` · ${enc}` : ''}</span>${ix ? `<span class="chip violet" style="padding:1px 8px;font-size:12px;align-self:flex-start" title="Speeds read for the Viewer's speed graph">${esc(ix)}</span>` : ''}${gap ? `<span class="chip gap ${d.archive.state === 'partial' ? 'amber' : 'teal'}" title="${esc(d.archive.summary)}">${esc(gap)}</span>` : ''}</div>
+      <span class="muted">${footMinutes(d.minutes)} · ${esc(bytes(d.bytes))}${d.protected ? ` · ${d.protected} protected` : ''}${enc ? ` · ${enc}` : ''}</span>${ix ? `<span class="chip violet" style="padding:1px 8px;font-size:12px;align-self:flex-start" title="Speeds read for the Viewer's speed graph">${esc(ix)}</span>` : ''}${gap ? `<span class="chip gap ${d.archive.state === 'partial' ? 'amber' : 'teal'}" title="${esc(d.archive.summary)}">${esc(gap)}</span>` : ''}${d.canRecordings > 0 ? `<span class="chip can" style="padding:1px 8px;font-size:12px;align-self:flex-start" title="${esc(`CAN Bridge data for ${plural(d.canRecordings, 'recording')} of this day (car data in the Viewer)`)}">${d.canRecordings === d.recordings ? 'CAN' : `CAN ${d.canRecordings}/${d.recordings}`}</span>` : ''}</div>
   </button>`;
 }
 
@@ -76,7 +79,7 @@ function card(v, r, selected, open) {
   return `<article class="rec${selected ? ' sel' : ''}" data-id="${esc(r.id)}">
     <button class="rec-pic" type="button" data-play aria-label="Play ${esc(r.category)} recording at ${esc(range)}">
       ${r.thumbRel || r.frontRel ? `<img class="thumb-img" loading="lazy" alt="" src="${thumb(v, r.id)}">` : ''}
-      <span class="tags"><span class="chip ${CAT_CHIP[r.category] || ''}">${esc(r.category)}</span>${r.place ? `<span class="chip">at ${esc(r.place)}</span>` : ''}${r.protected ? `<span class="chip green">${icon('lock')}Protected</span>` : ''}${encodedChip(r)}</span>
+      <span class="tags"><span class="chip ${CAT_CHIP[r.category] || ''}">${esc(r.category)}</span>${r.place ? `<span class="chip">at ${esc(r.place)}</span>` : ''}${r.can === true ? `<span class="chip can" title="${esc(CAN_TITLE)}">CAN</span>` : ''}${r.protected ? `<span class="chip green">${icon('lock')}Protected</span>` : ''}${encodedChip(r)}</span>
       <span class="play-orb">${icon('play')}</span>
     </button>
     <div class="rec-body">

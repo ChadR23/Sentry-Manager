@@ -125,6 +125,7 @@ hr.soft { border: 0; border-top: 1px solid var(--line); margin: 20px 0; }
 .chip.magenta { color: #ffd2fb; border-color: rgba(232, 110, 224, .45); background: rgba(232, 110, 224, .12); }
 .chip.amber { color: #ffe6b3; border-color: rgba(255, 210, 122, .45); background: rgba(255, 210, 122, .1); }
 .chip.red { color: #ffd0d9; border-color: rgba(255, 143, 163, .5); background: rgba(255, 143, 163, .12); }
+.chip.can { color: #7dff8a; border-color: #3c6b3f; background: #1f2a1f; letter-spacing: .04em; } /* the Nerd panel's green: CAN Bridge data */
 .chip .ico { width: 15px; height: 15px; }
 .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ink-3); flex: none; display: inline-block; }
 .dot.ok { background: var(--ok); box-shadow: 0 0 8px rgba(111, 243, 191, .7); }
@@ -393,6 +394,7 @@ details.more-info summary { cursor: pointer; min-height: 44px; display: flex; al
 .rec-pic:hover .play-orb { transform: scale(1.1); }
 .rec-pic .tags { position: absolute; left: 10px; top: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
 .rec-pic .tags .chip { background: rgba(6, 10, 26, .78); }
+.rec-pic .tags .chip.can { background: #1f2a1f; }
 .rec-body { padding: 14px 16px 16px; display: grid; gap: 8px; flex: 1; }
 .rec-time { font-size: 22px; font-weight: 300; letter-spacing: -0.01em; }
 .rec-meta { font-size: 14px; color: var(--ink-3); display: flex; gap: 6px 12px; flex-wrap: wrap; }

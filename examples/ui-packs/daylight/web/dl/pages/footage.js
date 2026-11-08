@@ -181,7 +181,7 @@ function dayCard(v, d) {
     <div class="thumb">${d.thumbId ? `<img class="thumb-img" loading="lazy" alt="" src="${thumbUrl(v.id, d.thumbId)}">` : icon('film')}
       <span class="thumb-badge">${plural(d.recordings, 'recording')}</span><span class="play-over">${icon('playOutline')}</span></div>
     <div class="dc-body"><span class="dc-title">${esc(dayTitle(d.day, { weekday: 'long', month: 'short', day: 'numeric' }))}</span>
-      <div class="row">${catChips(d)}${d.protected ? chip(`${d.protected} protected`, 'good', 'lock') : ''}${d.encodedRecordings ? chip(d.encodedRecordings === d.recordings ? 'Converted' : `${d.encodedRecordings}/${d.recordings} converted`, 'teal', 'sparkle') : ''}${d.speedIndex?.indexed ? chip(d.speedIndex.indexed >= d.speedIndex.clips ? 'Speed indexed' : `Speed indexed ${d.speedIndex.indexed}/${d.speedIndex.clips}`, 'violet') : ''}${archiveChip(d)}</div>
+      <div class="row">${catChips(d)}${d.protected ? chip(`${d.protected} protected`, 'good', 'lock') : ''}${d.encodedRecordings ? chip(d.encodedRecordings === d.recordings ? 'Converted' : `${d.encodedRecordings}/${d.recordings} converted`, 'teal', 'sparkle') : ''}${d.speedIndex?.indexed ? chip(d.speedIndex.indexed >= d.speedIndex.clips ? 'Speed indexed' : `Speed indexed ${d.speedIndex.indexed}/${d.speedIndex.clips}`, 'violet') : ''}${d.canRecordings > 0 ? `<span class="chip chip-can" title="${esc(`CAN Bridge data for ${plural(d.canRecordings, 'recording')} of this day (car data in the Viewer)`)}">${(d.canRecordings === d.recordings ? 'CAN' : `CAN ${d.canRecordings}/${d.recordings}`)}</span>` : ''}${archiveChip(d)}</div>
       <span class="dc-meta">${footMinutes(d.minutes)} of video · ${bytes(d.bytes)}</span></div></a>`;
 }
 
@@ -276,7 +276,7 @@ function recCard(v, r, selecting, selected) {
     <div class="rc-body">
       <div class="row-between"><span class="rc-time">${esc(time)}</span>
         ${selecting ? `<label class="rc-select"><input type="checkbox" data-select${selected ? ' checked' : ''}> Select</label>` : ''}</div>
-      <div class="row">${chip(cat.word, cat.tone)}${r.place ? chip(`at ${r.place}`) : ''}${r.protected ? chip('Protected', 'good', 'lock') : ''}${encodedChip(r.encoded)}</div>
+      <div class="row">${chip(cat.word, cat.tone)}${r.place ? chip(`at ${r.place}`) : ''}${r.can === true ? '<span class="chip chip-can" title="CAN Bridge data for this footage (car data in the Viewer)">CAN</span>' : ''}${r.protected ? chip('Protected', 'good', 'lock') : ''}${encodedChip(r.encoded)}</div>
       <p class="rc-sub">${r.eventAt ? `Event at ${esc(niceTime(r.eventAt))} · ` : ''}${plural(r.cameras.length, 'camera')} · ${bytes(r.bytes)}</p>
       <div class="rc-actions">
         <button class="btn btn-primary btn-sm" type="button" data-play>${icon('play')} Play</button>

@@ -144,6 +144,8 @@ td.ell { display: table-cell; }
 .cat.Recent { background: var(--cyan-soft); color: var(--cyan); }
 .cat.Sentry { background: var(--amber-soft); color: var(--amber); }
 .cat.Saved { background: var(--green-soft); color: var(--green); }
+/* the Nerd panel's green: CAN Bridge data for this footage */
+.cat.can, .chip.can { background: #1f2a1f; color: #7dff8a; box-shadow: inset 0 0 0 1px #3c6b3f; letter-spacing: .04em; }
 .cat-Recent { background: var(--cyan); }
 .cat-Sentry { background: var(--amber); }
 .cat-Saved { background: var(--green); }
