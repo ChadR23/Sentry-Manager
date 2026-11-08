@@ -34,6 +34,7 @@
 // before (its frame counts, and its points within its own span of the
 // minute) is taken out first, so nothing is counted twice. A log whose xz
 // ends early (cut off when the bridge lost power) keeps what could be read.
+// A log's lines come from canLogReader.js, in either format the bridge writes.
 //
 // A signal keeps a point when its value changes, at most 20 a second (the
 // last value of each 50 ms wins), and once a second while it stays the same.
@@ -50,49 +51,10 @@ const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
 const zlib = require('zlib');
-const { spawn } = require('child_process');
 const { parseName } = require('./canLogs');
 const fmt = require('./canFormat');
+const { openCanLog, MAX_UNPACKED } = require('./canLogReader');
 const { bundledDbc, decodeFrame } = require('./canDbc');
-
-// a log is read line by line with bounds: no line longer than this (a candump line is under 100
-// bytes), and no more than this many bytes unpacked from one log (a 10-minute log is about 150 MB),
-// so a crafted file (one endless line, or a tiny file that unpacks to terabytes) cannot use up memory
-const MAX_LINE = 512;
-const MAX_UNPACKED = 4 * 1024 ** 3;
-
-/** Lines from a stream, each at most maxLine bytes (longer ones are skipped), stopping after maxTotal bytes. */
-async function* boundedLines(stream, { maxLine = MAX_LINE, maxTotal = MAX_UNPACKED, onLimit = () => {} } = {}) {
-  let rest = '';
-  let total = 0;
-  let skipping = false;
-  const chunks = (async function* read() {
-    // a stream closed early (xz could not start, or was stopped) just ends the lines
-    try { for await (const c of stream) yield c; } catch (err) { if (err.code !== 'ERR_STREAM_PREMATURE_CLOSE') throw err; }
-  }());
-  for await (const chunk of chunks) {
-    total += chunk.length;
-    if (total > maxTotal) { onLimit(); return; }
-    const text = chunk.toString('latin1');
-    let start = 0;
-    for (;;) {
-      const nl = text.indexOf('\n', start);
-      if (nl < 0) break;
-      if (skipping) skipping = false;
-      else {
-        const line = rest + text.slice(start, nl);
-        if (line.length <= maxLine) yield line;
-      }
-      rest = '';
-      start = nl + 1;
-    }
-    if (!skipping) {
-      rest += text.slice(start);
-      if (rest.length > maxLine) { rest = ''; skipping = true; }
-    }
-  }
-  if (!skipping && rest) yield rest;
-}
 
 const STEP_MS = 50; // at most 20 points a second per signal
 const RAW_PER_SEC = 10; // raw payload changes kept a second per id
@@ -343,17 +305,9 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
       if (!rawOnly) await writeMinute(key, a, b, name, part, hadRaw?.logs?.[name] || null);
       await writeRaw(key, a, rawData, name, hadRaw);
     });
-    const child = spawn(xz, ['-dc', file], { stdio: ['ignore', 'pipe', 'pipe'] });
-    let stderr = '';
-    let spawnError = null;
-    child.stderr.on('data', (c) => { if (stderr.length < 4096) stderr += c; });
-    let tooBig = false;
-    const lines = boundedLines(child.stdout, { maxTotal: maxUnpacked, onLimit: () => { tooBig = true; child.kill(); } });
-    // how xz ended: its exit code, or null when it could not be started (no xz, no free process slot)
-    const exited = new Promise((ok) => {
-      child.once('error', (err) => { spawnError = err; child.stdout.destroy(); ok(null); });
-      child.once('close', (code) => ok(code));
-    });
+    // either format (canLogReader.js): xz that cannot start throws (retry), a refused columns log throws
+    const reader = openCanLog(file, { xz, maxUnpacked });
+    const lines = reader.lines();
     let frames = 0;
     let written = 0;
     let first = null;
@@ -433,15 +387,12 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
       ended = true;
     } finally {
       // a write that failed partway: stop xz, which would wait for ever on its full pipe
-      if (!ended && child.exitCode === null && child.signalCode === null) { child.kill(); child.stdout.destroy(); }
+      if (!ended) await lines.return();
     }
     closeMinute();
-    const code = await exited;
-    // (not this log's fault: it is read again at the next look)
-    if (spawnError) throw Object.assign(new Error(`xz could not be started for ${name}: ${spawnError.message}`), { retry: true });
     // xz stopped early (a log cut off, or damaged): what it read before is kept, unless that is nothing
-    const truncated = code !== 0 || tooBig;
-    const why = tooBig ? `it unpacks to more than ${Math.round(maxUnpacked / 1024 ** 2)} MB (stopped there)` : `${stderr.trim().slice(0, 200) || `exit ${code}`}`;
+    const why = reader.truncated;
+    const truncated = Boolean(why);
     if (truncated && !frames) throw new Error(`xz could not read ${name}: ${why}`);
     for (const w of writes) await writeOut(w);
     if (!rawOnly) await mergeSignals(key, seen);
