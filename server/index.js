@@ -52,7 +52,7 @@ const { createHealth } = require('./health');
 const { createSnapshots, applyPendingRestore } = require('./snapshots');
 const { createIntegrity } = require('./integrity');
 const { createAccounts, viewerMay } = require('./accounts');
-const { writeZip, streamZip, ZIP_LIMIT } = require('./zip');
+const { writeZip, streamZip, waitDrain, ZIP_LIMIT } = require('./zip');
 const { createConverterHost } = require('./converterHost');
 const { createStats } = require('./stats');
 const { encoderBlock, jobProgress, RUNNING: CONVERTER_RUNNING } = require('./encoderStats');
@@ -2151,7 +2151,7 @@ async function main() {
   /** Write to a response, waiting when its buffer is full; false once the reader has gone. */
   const writeOut = async (res, text) => {
     if (res.destroyed) return false;
-    if (!res.write(text)) await new Promise((ok) => { res.once('drain', ok); res.once('close', ok); });
+    if (!res.write(text)) await waitDrain(res);
     return !res.destroyed;
   };
   const attachment = (name) => `attachment; filename="${name.replace(/[^A-Za-z0-9._-]/g, '_')}"`;

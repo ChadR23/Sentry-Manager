@@ -50,3 +50,42 @@ test('streamZip: a file that changed size, or a reader that went away, is an err
   gone.destroy();
   await assert.rejects(streamZip(gone, [{ name: 'c', data: Buffer.alloc(4) }]), /stopped/);
 });
+
+test('streamZip: a slow reader leaves no listeners behind (one per backpressure wait before), and a made entry comes last', async () => {
+  const { Writable } = require('stream');
+  const got = [];
+  const out = new Writable({ highWaterMark: 1024, write(c, e, cb) { got.push(c); setImmediate(cb); } });
+  const warnings = [];
+  const onWarn = (w) => warnings.push(w);
+  process.on('warning', onWarn);
+  const big = crypto.randomBytes(2 * 1024 * 1024);
+  const chunks = [];
+  for (let i = 0; i < big.length; i += 4096) chunks.push(big.subarray(i, i + 4096));
+  await streamZip(out, [
+    { name: 'a.log.xz', size: big.length, open: () => Readable.from(chunks) },
+    { name: 'ids.csv', make: async () => Buffer.from('made last\n') }
+  ]);
+  process.off('warning', onWarn);
+  await new Promise((ok) => out.end(ok));
+  assert.equal(out.listenerCount('close'), 0);
+  assert.equal(out.listenerCount('drain'), 0);
+  assert.ok(out.listenerCount('error') <= 1, 'only the stream\'s own error listener');
+  assert.equal(warnings.filter((w) => w.name === 'MaxListenersExceededWarning').length, 0);
+  const files = readZip(Buffer.concat(got), { maxFile: 4 * 1024 * 1024 });
+  assert.deepEqual(files.map((f) => f.name), ['a.log.xz', 'ids.csv']);
+  assert.deepEqual(files[0].data, big);
+  assert.equal(files[1].data.toString(), 'made last\n');
+});
+
+test('waitDrain: true on drain, false when the reader goes away, nothing left attached', async () => {
+  const { waitDrain } = require('../server/zip');
+  const s = new PassThrough();
+  const p = waitDrain(s);
+  s.emit('drain');
+  assert.equal(await p, true);
+  const q = waitDrain(s);
+  s.destroy();
+  assert.equal(await q, false);
+  assert.equal(s.listenerCount('drain') + s.listenerCount('close'), 0);
+  assert.equal(await waitDrain(s), false);
+});

@@ -130,27 +130,55 @@ function dosTime(ms) {
   return { time: (d.getUTCHours() << 11) | (d.getUTCMinutes() << 5) | (d.getUTCSeconds() >> 1), date: ((y - 1980) << 9) | ((d.getUTCMonth() + 1) << 5) | d.getUTCDate() };
 }
 
+/**
+ * Wait until `out` drains, or closes or fails. Resolves true on drain,
+ * false when the reader went away. Both listeners come off again either
+ * way, so a long download does not pile up one per backpressure wait.
+ */
+function waitDrain(out) {
+  return new Promise((resolve) => {
+    if (out.destroyed) return resolve(false);
+    const done = (ok) => () => {
+      out.off('drain', onDrain);
+      out.off('close', onClose);
+      out.off('error', onClose);
+      resolve(ok);
+    };
+    const onDrain = done(true);
+    const onClose = done(false);
+    out.on('drain', onDrain);
+    out.on('close', onClose);
+    out.on('error', onClose);
+  });
+}
+
 const ZIP_LIMIT = 0xffffffff - 64 * 1024 * 1024; // no zip64: the whole archive stays under 4 GiB
 
 /**
  * Stream a .zip to `out` (an HTTP response) without holding the files: each
  * entry is stored as it is (a .log.xz is packed already), its CRC worked out
  * while it streams and written after it (a data descriptor).
- * `entries`: [{ name, data: Buffer } | { name, size, mtime, open: () => Readable }].
+ * `entries`: [{ name, data: Buffer } | { name, size, mtime, open: () => Readable }
+ * | { name, mtime, make: async () => Buffer }] (made when its turn comes, so
+ * a summary can go last and the download starts at once).
  * The caller checks that the sizes add up to less than ZIP_LIMIT. Resolves
  * when it is written; rejects (out destroyed) when a file changed size or
  * could not be read, or the reader went away.
  */
 async function streamZip(out, entries) {
-  const { once } = require('events');
   let offset = 0;
   const central = [];
   const write = async (buf) => {
     if (out.destroyed) throw new ZipError('The download was stopped.');
     offset += buf.length;
-    if (!out.write(buf)) await Promise.race([once(out, 'drain'), once(out, 'close').then(() => { throw new ZipError('The download was stopped.'); })]);
+    if (!out.write(buf) && !(await waitDrain(out))) throw new ZipError('The download was stopped.');
   };
-  for (const e of entries) {
+  for (let e of entries) {
+    if (e.make) {
+      const data = await e.make();
+      if (out.destroyed) throw new ZipError('The download was stopped.');
+      e = { ...e, data };
+    }
     const nameBuf = Buffer.from(e.name, 'utf8');
     const { time, date } = dosTime(e.mtime);
     const size = e.data ? e.data.length : e.size;
@@ -164,8 +192,7 @@ async function streamZip(out, entries) {
     head.writeUInt16LE(time, 10);
     head.writeUInt16LE(date, 12);
     head.writeUInt16LE(nameBuf.length, 26);
-    await write(head);
-    await write(nameBuf);
+    await write(Buffer.concat([head, nameBuf]));
     let crc = 0;
     let n = 0;
     if (e.data) {
@@ -217,4 +244,4 @@ async function streamZip(out, entries) {
   await write(tail);
 }
 
-module.exports = { readZip, writeZip, streamZip, ZIP_LIMIT, ZipError };
+module.exports = { readZip, writeZip, streamZip, waitDrain, ZIP_LIMIT, ZipError };
