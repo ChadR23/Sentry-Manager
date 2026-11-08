@@ -1,6 +1,9 @@
 // Daylight: shared helpers (API, formatting, dialogs, toasts, storage).
 // Every piece of server text goes through esc() before it becomes HTML.
 
+export { footMinutes, trackLength } from './duration.js';
+import { trackLength } from './duration.js';
+
 export const $ = (sel, root = document) => root.querySelector(sel);
 export const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
@@ -65,10 +68,7 @@ export function duration(ms) {
   if (h < 48) return `${h} h ${Math.floor((s % 3600) / 60)} min`;
   return `${Math.floor(h / 24)} d ${h % 24} h`;
 }
-export const clockOf = (ms) => {
-  const s = Math.max(0, Math.floor(ms / 1000));
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
-};
+export const clockOf = (ms) => trackLength(Math.max(0, Math.floor(ms / 1000)));
 /** "Sunday, October 25" for a YYYY-MM-DD (shown as the car's local day). */
 export const dayTitle = (day, opts = { weekday: 'long', month: 'long', day: 'numeric' }) => new Date(`${day}T12:00:00`).toLocaleDateString(undefined, opts);
 export const dayShort = (day) => dayTitle(day, { weekday: 'short', month: 'short', day: 'numeric' });

@@ -20,6 +20,7 @@
 // -time, -note) and inherits the page's colours; a pack can style it.
 
 import { timeAfter } from '/web/scrub.js';
+import { footMinutes } from '/web/duration.js';
 
 const KIND = {
   brake: { label: 'Hard braking', color: '#ff5d5d' },
@@ -92,7 +93,7 @@ export function createMoments(container, { clock = defaultClock, speedUnit = () 
   const speed = (mps) => (speedUnit() === 'kmh' ? `${Math.round(mps * 3.6)} km/h` : `${Math.round(mps * 2.23694)} mph`);
   const value = (m) => (m.kind === 'speed' ? speed(m.value) : `${(m.value / 9.81).toFixed(2)} g`);
   const distance = (m) => (speedUnit() === 'kmh' ? `${(m / 1000).toFixed(m < 10000 ? 1 : 0)} km` : `${(m / 1609.344).toFixed(m < 16093 ? 1 : 0)} mi`);
-  const duration = (sec) => (sec < 3600 ? `${Math.max(1, Math.round(sec / 60))} min` : `${Math.floor(sec / 3600)} h ${Math.round((sec % 3600) / 60)} min`);
+  const duration = (sec) => footMinutes(Math.max(1, Math.round(sec / 60)));
   const dayText = (d) => { try { return new Date(`${d}T12:00:00`).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }); } catch { return d; } };
   const timeOf = (x) => { const at = timeAfter(x.clip, x.second); return at ? clock(at) : x.clip; };
   const send = (method, url, body) => fetch(url, { method, credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'sentry-six-manager' }, body: body ? JSON.stringify(body) : undefined })

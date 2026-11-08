@@ -5,6 +5,8 @@
 // page; the bars use the page's text colour.
 //
 //   const page = createDrivingPage(el, { vehicleId, vehicleName });
+import { footMinutes } from '/web/duration.js';
+
 
 const CSS = `
 .sentry-driving{display:flex;flex-direction:column;gap:18px;font-size:14px;line-height:1.45}
@@ -35,7 +37,7 @@ function setUnits(u) { try { localStorage.setItem(UNIT_KEY, u); } catch { /* per
 const dist = (m, u) => (u === 'km' ? m / 1000 : m / 1609.344);
 const fmtDist = (m, u) => { const x = dist(m, u); return `${x >= 100 ? Math.round(x) : x.toFixed(1)} ${u}`; };
 const speed = (mps, u) => (u === 'km' ? `${Math.round(mps * 3.6)} km/h` : `${Math.round(mps * 2.23694)} mph`);
-const hours = (s) => (s < 3600 ? `${Math.round(s / 60)} min` : `${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} min`);
+const hours = (s) => footMinutes(s / 60);
 const weekText = (d) => { try { return new Date(`${d}T12:00:00`).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }); } catch { return d; } };
 
 export function createDrivingPage(el, { vehicleId, vehicleName = '' } = {}) {

@@ -2,7 +2,7 @@
 // make it big, tap it again for the grid. Big, simple play controls, the
 // driving data under the picture, and keyboard shortcuts.
 
-import { api, esc, enc, icon, bytes, plural, dayTitle, dayShort, niceTime, CATEGORY, chip, emptyState, store, toast, fail, details, clockOf, hourOpts, wall } from '../core.js';
+import { api, esc, enc, icon, bytes, plural, dayTitle, dayShort, niceTime, CATEGORY, chip, emptyState, store, toast, fail, details, clockOf, hourOpts, wall, footMinutes } from '../core.js';
 import { state, vehicle, setVehicle, vehiclePicker, vehicleById, on } from '../state.js';
 import { go } from '../app.js';
 import { thumbUrl, moveToBin, setProtected } from './footage.js';
@@ -85,7 +85,7 @@ async function chooser(ctx, v) {
           const cat = CATEGORY[r.category] || CATEGORY.Other;
           return `<a class="card pick" href="#/viewer/${enc(v.id)}/${enc(r.id)}?day=${enc(d)}">
             <span class="thumb">${r.thumbRel || r.frontRel ? `<img class="thumb-img" loading="lazy" alt="" src="${thumbUrl(v.id, r.id)}">` : icon('film')}</span>
-            <span><b>${esc(niceTime(r.start))}</b><br>${chip(cat.word, cat.tone)} <span class="muted small">${r.minutes} min</span></span></a>`;
+            <span><b>${esc(niceTime(r.start))}</b><br>${chip(cat.word, cat.tone)} <span class="muted small">${footMinutes(r.minutes)}</span></span></a>`;
         }).join('')}</div></section>`).join('')
       : emptyState({ art: 'film', title: 'Nothing to watch yet', text: `Once ${esc(v.name)} records something, you can watch it here.`, action: '<a class="btn btn-soft" href="#/footage">Go to Footage</a>' })}
   </div>`;

@@ -1,7 +1,7 @@
 // Footage: a calendar of days with pictures. Tap a day to see what the car
 // recorded, play it, keep it safe (protect) or move it to the Recycle Bin.
 
-import { api, esc, enc, icon, bytes, plural, dayTitle, dayShort, niceTime, CATEGORY, CODEC, humanize, chip, emptyState, confirmDialog, toast, fail, busy, ago, store, liveDraw, wall } from '../core.js';
+import { api, esc, enc, icon, bytes, plural, dayTitle, dayShort, niceTime, CATEGORY, CODEC, humanize, chip, emptyState, confirmDialog, toast, fail, busy, ago, store, liveDraw, wall, footMinutes } from '../core.js';
 import { state, vehicle, setVehicle, vehiclePicker, loadVehicles } from '../state.js';
 import { go } from '../app.js';
 
@@ -182,7 +182,7 @@ function dayCard(v, d) {
       <span class="thumb-badge">${plural(d.recordings, 'recording')}</span><span class="play-over">${icon('playOutline')}</span></div>
     <div class="dc-body"><span class="dc-title">${esc(dayTitle(d.day, { weekday: 'long', month: 'short', day: 'numeric' }))}</span>
       <div class="row">${catChips(d)}${d.protected ? chip(`${d.protected} protected`, 'good', 'lock') : ''}${d.encodedRecordings ? chip(d.encodedRecordings === d.recordings ? 'Converted' : `${d.encodedRecordings}/${d.recordings} converted`, 'teal', 'sparkle') : ''}${d.speedIndex?.indexed ? chip(d.speedIndex.indexed >= d.speedIndex.clips ? 'Speed indexed' : `Speed indexed ${d.speedIndex.indexed}/${d.speedIndex.clips}`, 'violet') : ''}${archiveChip(d)}</div>
-      <span class="dc-meta">${d.minutes} min of video · ${bytes(d.bytes)}</span></div></a>`;
+      <span class="dc-meta">${footMinutes(d.minutes)} of video · ${bytes(d.bytes)}</span></div></a>`;
 }
 
 function noVehicle(view) {
@@ -272,7 +272,7 @@ function recCard(v, r, selecting, selected) {
   const hasThumb = r.thumbRel || r.frontRel;
   const time = r.end && r.end !== r.start ? `${niceTime(r.start)} – ${niceTime(r.end)}` : niceTime(r.start);
   return `<article class="card rec-card${selected ? ' selected' : ''}" data-id="${esc(r.id)}">
-    <button type="button" class="thumb" data-play aria-label="Play ${esc(cat.word)} at ${esc(time)}">${hasThumb ? `<img class="thumb-img" loading="lazy" alt="" src="${thumbUrl(v.id, r.id)}">` : icon('film')}<span class="thumb-badge">${r.minutes} min</span><span class="play-over">${icon('playOutline')}</span></button>
+    <button type="button" class="thumb" data-play aria-label="Play ${esc(cat.word)} at ${esc(time)}">${hasThumb ? `<img class="thumb-img" loading="lazy" alt="" src="${thumbUrl(v.id, r.id)}">` : icon('film')}<span class="thumb-badge">${footMinutes(r.minutes)}</span><span class="play-over">${icon('playOutline')}</span></button>
     <div class="rc-body">
       <div class="row-between"><span class="rc-time">${esc(time)}</span>
         ${selecting ? `<label class="rc-select"><input type="checkbox" data-select${selected ? ' checked' : ''}> Select</label>` : ''}</div>
@@ -322,7 +322,7 @@ async function renderDay(ctx, v, day) {
     view.innerHTML = `<div class="page">
       <a class="back-link" href="#/footage?vehicle=${enc(v.id)}">${icon('back')} All days</a>
       <div class="day-hero"><div><p class="eyebrow">${esc(v.name)}</p><h1>${esc(dayTitle(day, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' }))}</h1>
-        <p class="lede muted">${plural(recs.length, 'recording')} · ${minutes} min of video · ${bytes(totalBytes)}${view$.category !== 'all' ? ` · ${esc(CATS.find((c) => c[0] === view$.category)?.[1])} only` : ''}</p></div>
+        <p class="lede muted">${plural(recs.length, 'recording')} · ${footMinutes(minutes)} of video · ${bytes(totalBytes)}${view$.category !== 'all' ? ` · ${esc(CATS.find((c) => c[0] === view$.category)?.[1])} only` : ''}</p></div>
         <div class="head-actions row">
           ${recs.length ? `<a class="btn btn-primary" href="#/viewer/${enc(v.id)}?day=${enc(day)}">${icon('play')} Play this day</a>` : ''}
           ${recs.length ? `<button class="btn" type="button" id="select-mode" aria-pressed="${selecting}">${icon('select')} ${selecting ? 'Done selecting' : 'Select'}</button>` : ''}

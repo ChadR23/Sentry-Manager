@@ -1,6 +1,6 @@
 // Footage as a music library: days are albums, recordings are the tracks of a
 // playlist, each with a play button and a duration.
-import { h, ico, api, car, size, count, since, dayName, words, wall, wallDay, toast, ask, sheet, act, local, segs, onSegs, pill, debounce, CAMS, CAM_NAME, CAM_TAG, CODEC_NAME, paint, liveDraw } from '../core.js';
+import { h, ico, api, car, size, count, since, dayName, words, wall, wallDay, toast, ask, sheet, act, local, segs, onSegs, pill, debounce, CAMS, CAM_NAME, CAM_TAG, CODEC_NAME, paint, liveDraw, footMinutes, trackLength } from '../core.js';
 
 // "Also delete its CAN data" in a footage delete confirmation: shown only when a CAN Bridge key is
 // mapped to the car (can: the server's count, null otherwise), unticked; those logs go for good, now
@@ -35,7 +35,7 @@ async function followIndex(b, start) {
 
 const CAT_TONE = { Recent: 'cyan', Sentry: 'org', Saved: 'grn', Other: '' };
 const thumbUrl = (vid, rid) => `/api/vehicles/${encodeURIComponent(vid)}/recordings/${encodeURIComponent(rid)}/thumbnail`;
-const dur = (min) => `${Math.floor(min)}:00`;
+const dur = (min) => trackLength(Math.floor(min) * 60);
 
 // what to check when a day looks only partly archived (the server sends its own words too)
 const ARCHIVE_ADVICE = 'Check the Sentry USB: its Logs page, its archive settings and its Wi-Fi to the NAS. Clips it recycles before copying them are lost.';
@@ -134,7 +134,7 @@ export default {
           const gap = d.archive ? `<span class="album-gap"><span class="pill ${d.archive.state === 'partial' ? 'org' : 'cyan'}" title="${h(d.archive.summary)}">${d.archive.state === 'partial' ? 'Partly archived?' : 'Still arriving'}</span>${d.archive.missingMinutes ? `<span class="tiny faint">~${d.archive.missingMinutes} min missing</span>` : ''}</span>` : '';
           return `<button type="button" class="album${f.day === d.day ? ' on' : ''}" data-day="${h(d.day)}" aria-pressed="${f.day === d.day}">
             <span class="album-art" aria-hidden="true">${d.thumbId ? `<img alt="" loading="lazy" src="${thumbUrl(v.id, d.thumbId)}">` : ico('film')}</span>
-            <span class="album-t"><b>${h(dayName(d.day))}</b><span class="small dim">${count(d.recordings, 'track')} · ${d.minutes} min · ${size(d.bytes)}</span>
+            <span class="album-t"><b>${h(dayName(d.day))}</b><span class="small dim">${count(d.recordings, 'track')} · ${footMinutes(d.minutes)} · ${size(d.bytes)}</span>
               <span class="catbar" aria-hidden="true">${cats.map(([c, n]) => `<i class="c-${h(c)}" style="flex:${n}"></i>`).join('')}</span>
               <span class="tiny faint">${cats.map(([c, n]) => `${c} ${n}`).join(' · ')}${d.protected ? ` · ${d.protected} protected` : ''} · ${enc}% converted${ix ? ` · <span class="album-ix">${h(ix.toLowerCase())}</span>` : ''}</span>${gap}</span></button>`;
         }).join('')}
@@ -162,7 +162,7 @@ export default {
         <div class="pl-info">
           <span class="tiny faint pl-kind">${f.day ? 'DAY' : 'LIBRARY'} · ${h(v.name)}</span>
           <h2 class="chrome pl-title">${h(f.day ? dayName(f.day, true) : 'All days')}</h2>
-          <p class="small dim">${count(total, 'track')} · ${mins} min · ${size(b)}${f.cat !== 'all' ? ` · ${h(f.cat)} only` : ''}${f.prot ? ' · protected only' : ''}</p>
+          <p class="small dim">${count(total, 'track')} · ${footMinutes(mins)} · ${size(b)}${f.cat !== 'all' ? ` · ${h(f.cat)} only` : ''}${f.prot ? ' · protected only' : ''}</p>
           ${d?.archive ? `<p class="note small gap-note${d.archive.state === 'partial' ? ' org' : ''}">${h(d.archive.summary)}${d.archive.state === 'partial' ? ` ${h(d.archive.advice || ARCHIVE_ADVICE)}` : ''}</p>` : ''}
           <div class="row">
             <button class="btn go" type="button" id="ft-playall"${recs.length ? '' : ' disabled'}>${ico('play')}${f.day ? 'Play day' : 'Play newest day'}</button>

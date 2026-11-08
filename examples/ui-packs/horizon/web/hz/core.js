@@ -1,6 +1,9 @@
 // Horizon core: the JSON API client, number formatting, dialogs, toasts and
 // the little shared state every page reads (vehicles, notifications).
 
+export { footMinutes, trackLength } from './duration.js';
+import { trackLength } from './duration.js';
+
 export const qs = (sel, root = document) => root.querySelector(sel);
 export const qsa = (sel, root = document) => [...root.querySelectorAll(sel)];
 const ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
@@ -48,8 +51,7 @@ export function span(ms) {
 }
 export function mmss(sec) {
   if (!ok(sec) || sec < 0) return '0:00';
-  const m = Math.floor(sec / 60);
-  return `${m}:${String(Math.floor(sec - m * 60)).padStart(2, '0')}`;
+  return trackLength(sec);
 }
 export function since(ts) {
   if (!ts) return 'never';

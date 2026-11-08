@@ -4,7 +4,7 @@
 // and the files of each with their codecs and downloads.
 
 import {
-  $, $$, esc, icon, api, current, vehiclePicker, bytes, plural, dayParts, dayTitle, timeOf, humanize, toast, confirmDialog, empty, loadVehicles
+  $, $$, esc, icon, api, current, vehiclePicker, bytes, plural, dayParts, dayTitle, timeOf, humanize, toast, confirmDialog, empty, loadVehicles, footMinutes
 } from '../core.js';
 
 // "Also delete its CAN data" in a footage delete confirmation: shown only when a CAN Bridge key is
@@ -60,7 +60,7 @@ function frame(v, d, on) {
   return `<button class="frame${on ? ' on' : ''}" type="button" data-day="${esc(d.day)}" aria-pressed="${on}" aria-label="${esc(dayTitle(d.day))}: ${plural(d.recordings, 'recording')}, ${esc(bytes(d.bytes))}${gap ? `, ${esc(gap)}` : ''}">
     <div class="frame-pic">${d.thumbId ? `<img class="thumb-img" loading="lazy" alt="" src="${thumb(v, d.thumbId)}">` : ''}<div class="frame-date"><b>${esc(p.dd)}</b><span>${esc(p.mon)} · ${esc(p.wd)}</span></div></div>
     <div class="frame-info"><span class="frame-cats">${cats.map(([c, n]) => `<span class="chip ${CAT_CHIP[c] || ''}" style="padding:1px 8px;font-size:12px"><i class="dot cat-${esc(c)}"></i>${n}</span>`).join('')}</span>
-      <span class="muted">${d.minutes} min · ${esc(bytes(d.bytes))}${d.protected ? ` · ${d.protected} protected` : ''}${enc ? ` · ${enc}` : ''}</span>${ix ? `<span class="chip violet" style="padding:1px 8px;font-size:12px;align-self:flex-start" title="Speeds read for the Viewer's speed graph">${esc(ix)}</span>` : ''}${gap ? `<span class="chip gap ${d.archive.state === 'partial' ? 'amber' : 'teal'}" title="${esc(d.archive.summary)}">${esc(gap)}</span>` : ''}</div>
+      <span class="muted">${footMinutes(d.minutes)} · ${esc(bytes(d.bytes))}${d.protected ? ` · ${d.protected} protected` : ''}${enc ? ` · ${enc}` : ''}</span>${ix ? `<span class="chip violet" style="padding:1px 8px;font-size:12px;align-self:flex-start" title="Speeds read for the Viewer's speed graph">${esc(ix)}</span>` : ''}${gap ? `<span class="chip gap ${d.archive.state === 'partial' ? 'amber' : 'teal'}" title="${esc(d.archive.summary)}">${esc(gap)}</span>` : ''}</div>
   </button>`;
 }
 
@@ -81,7 +81,7 @@ function card(v, r, selected, open) {
     </button>
     <div class="rec-body">
       <div class="rec-time">${esc(range)}</div>
-      <div class="rec-meta"><span>${r.minutes} min</span><span>${plural(r.cameras.length, 'camera')}</span><span>${plural(r.fileCount, 'file')}</span><span>${esc(bytes(r.bytes))}</span>${r.eventAt ? `<span>event ${esc(timeOf(r.eventAt))}</span>` : ''}</div>
+      <div class="rec-meta"><span>${footMinutes(r.minutes)}</span><span>${plural(r.cameras.length, 'camera')}</span><span>${plural(r.fileCount, 'file')}</span><span>${esc(bytes(r.bytes))}</span>${r.eventAt ? `<span>event ${esc(timeOf(r.eventAt))}</span>` : ''}</div>
       <div class="rec-acts">
         <label class="check"><input type="checkbox" data-pick${selected ? ' checked' : ''}> Select</label>
         <button class="btn sm" type="button" data-protect="${r.protected ? 'off' : 'on'}">${icon(r.protected ? 'unlock' : 'lock')}${r.protected ? 'Unprotect' : 'Protect'}</button>
@@ -188,7 +188,7 @@ export default {
     function drawDay() {
       const d = days.find((x) => x.day === chosen);
       const sel = recs.filter((r) => selected.has(r.id));
-      const html = `<div class="day-head"><div><p class="muted small">${d ? `${plural(d.recordings, 'recording')} · ${d.minutes} min · ${esc(bytes(d.bytes))}` : ''}</p><h2>${esc(dayTitle(chosen))}</h2></div>
+      const html = `<div class="day-head"><div><p class="muted small">${d ? `${plural(d.recordings, 'recording')} · ${footMinutes(d.minutes)} · ${esc(bytes(d.bytes))}` : ''}</p><h2>${esc(dayTitle(chosen))}</h2></div>
         <div class="row"><a class="btn primary" href="#/viewer/${encodeURIComponent(v.id)}/day/${encodeURIComponent(chosen)}">${icon('play')} Play day</a>
           <button class="btn" type="button" data-select-all>${icon('select')} Select all</button>
           <button class="btn" type="button" data-trash-day="day">${icon('trash')} Delete this day</button>

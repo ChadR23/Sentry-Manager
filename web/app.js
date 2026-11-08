@@ -1285,7 +1285,18 @@
 
   const DAYS_PER_PAGE = 30;
   const CODEC_NAMES = { h265: 'H.265', av1: 'AV1', h264: 'H.264' };
-  const minutesText = (m) => (m >= 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m} min`);
+  // footMinutes of web/duration.js (app.js is not a module; test/duration.test.js checks the two agree)
+  const minutesText = (min) => {
+    const m = Math.max(0, Math.round(Number(min) || 0));
+    const days = Math.floor(m / 1440);
+    const hours = Math.floor((m % 1440) / 60);
+    const mins = m % 60;
+    const parts = [];
+    if (days) parts.push(`${days} ${days === 1 ? 'day' : 'days'}`);
+    if (hours) parts.push(`${hours} h`);
+    if (mins || !parts.length) parts.push(`${mins} min`);
+    return parts.join(' ');
+  };
   const dayTitle = (day) => new Date(`${day}T12:00:00`).toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'short', day: 'numeric' });
 
   /** "Index speeds": start the speed graph's index now; the button shows how far it is. */

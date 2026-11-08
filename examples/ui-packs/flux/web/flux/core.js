@@ -1,5 +1,7 @@
 // Flux core: API client, formatting, dialogs, toasts, shared state.
 
+export { footMinutes, trackLength } from './duration.js';
+
 export const $ = (sel, root = document) => root.querySelector(sel);
 export const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 export const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -42,9 +44,10 @@ export function dur(ms) {
 }
 export function clock(sec) {
   if (!fin(sec) || sec < 0) return '0:00';
-  const m = Math.floor(sec / 60);
-  const s = sec - m * 60;
-  return `${m}:${s.toFixed(1).padStart(4, '0')}`;
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec - h * 3600 - m * 60;
+  return h ? `${h}:${String(m).padStart(2, '0')}:${s.toFixed(1).padStart(4, '0')}` : `${m}:${s.toFixed(1).padStart(4, '0')}`;
 }
 export function ago(ts) {
   if (!ts) return 'never';

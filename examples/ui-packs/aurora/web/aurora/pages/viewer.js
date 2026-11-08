@@ -4,7 +4,7 @@
 // All cameras play in sync from /api/media (any subset), clip after clip;
 // the driving data from /api/telemetry shows as a heads-up display.
 
-import { $, $$, esc, icon, api, state, current, setVehicle, vehiclePicker, plural, clock, wall, dayTitle, timeOf, humanize, store, empty, toast, fin } from '../core.js';
+import { $, $$, esc, icon, api, state, current, setVehicle, vehiclePicker, plural, clock, wall, dayTitle, timeOf, humanize, store, empty, toast, fin, footMinutes } from '../core.js';
 import * as tele from '../telemetry.js';
 import { createViewerMap } from '/web/viewerMap.js';
 import { createExportPanel } from '/web/exportPanel.js';
@@ -361,7 +361,7 @@ export default {
       q('#list-title').textContent = day ? `${dayTitle(day)}` : 'Recordings';
       q('#vw-list').innerHTML = dayRecs.length ? dayRecs.map((r) => `<button class="vw-item${r.id === recId ? ' on' : ''}" type="button" data-rec="${esc(r.id)}" aria-pressed="${r.id === recId}">
         <img class="thumb-img" loading="lazy" alt="" src="/api/vehicles/${encodeURIComponent(v.id)}/recordings/${encodeURIComponent(r.id)}/thumbnail">
-        <span>${esc(timeOf(r.start))}${r.end !== r.start ? `–${esc(timeOf(r.end))}` : ''}<small>${esc(r.category)} · ${r.minutes} min${r.protected ? ' · protected' : ''}</small></span></button>`).join('')
+        <span>${esc(timeOf(r.start))}${r.end !== r.start ? `–${esc(timeOf(r.end))}` : ''}<small>${esc(r.category)} · ${footMinutes(r.minutes)}${r.protected ? ' · protected' : ''}</small></span></button>`).join('')
         + `<a class="vw-item${recId ? '' : ' on'}" href="#/viewer/${encodeURIComponent(v.id)}/day/${encodeURIComponent(day || '')}">${icon('film')}<span>The whole day<small>every recording in order</small></span></a>` : '<p class="muted">No recordings.</p>';
       const dates = state.viewerDates || [];
       const i = dates.indexOf(day);

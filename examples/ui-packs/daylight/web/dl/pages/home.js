@@ -1,7 +1,7 @@
 // Today: the owner's questions first. Is the footage safe? How much space is
 // left? Is anything converting? Does anything need me?
 
-import { api, esc, icon, bytes, plural, ago, pct, meter, emptyState, dayShort, fail, toast, busy, fin, liveDraw } from '../core.js';
+import { api, esc, icon, bytes, plural, ago, pct, meter, emptyState, dayShort, fail, toast, busy, fin, liveDraw, footMinutes } from '../core.js';
 import { state, vehicle, shareHealth, unreadCount, loadVehicles } from '../state.js';
 import { follow, counts, STATE_WORDS, ACTIVE, PAUSED, Pace } from '../convert.js';
 import { thumbUrl } from './footage.js';
@@ -155,7 +155,7 @@ export async function render(ctx) {
     const v = vehicle();
     return `<a class="card day-card" href="#/footage/${encodeURIComponent(d.day)}?vehicle=${encodeURIComponent(v.id)}">
       <div class="thumb">${d.thumbId ? `<img class="thumb-img" loading="lazy" alt="" src="${thumbUrl(v.id, d.thumbId)}">` : icon('film')}<span class="thumb-badge">${plural(d.recordings, 'recording')}</span></div>
-      <div class="dc-body"><span class="dc-title">${esc(dayShort(d.day))}</span><span class="dc-meta">${d.minutes} min · ${bytes(d.bytes)}</span></div></a>`;
+      <div class="dc-body"><span class="dc-title">${esc(dayShort(d.day))}</span><span class="dc-meta">${footMinutes(d.minutes)} · ${bytes(d.bytes)}</span></div></a>`;
   };
   const healthBody = (s) => {
     if (!s) return '<div class="loading"><span class="spin"></span><span>Asking the server…</span></div>';

@@ -1,6 +1,9 @@
 // Aurora core: the API client (password re-check, sign-out), formatting,
 // dialogs, toasts and the state every window shares.
 
+export { footMinutes, trackLength } from './duration.js';
+import { trackLength } from './duration.js';
+
 export const $ = (sel, root = document) => root.querySelector(sel);
 export const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 export const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -45,9 +48,7 @@ export function dur(ms) {
 }
 export function clock(sec) {
   if (!fin(sec) || sec < 0) return '0:00';
-  const m = Math.floor(sec / 60);
-  const s = Math.floor(sec - m * 60);
-  return `${m}:${String(s).padStart(2, '0')}`;
+  return trackLength(sec);
 }
 export function ago(ts) {
   if (!ts) return 'never';
