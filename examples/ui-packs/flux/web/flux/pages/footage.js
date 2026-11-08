@@ -144,6 +144,7 @@ export default {
             <div class="small muted num">${plural(d.recordings, 'rec')} · ${d.minutes} min · ${d.cameras} cams${d.protected ? ` · ${d.protected} ${icon('lock', 'ico xs')}` : ''}</div>
             <div class="enc-line"><span class="enc-track"><span style="width:${encP.toFixed(1)}%"></span></span><span class="small faint num">${d.encoded}/${d.clips} encoded</span></div>
             ${ix ? `<div><span class="chip violet" title="Speeds read for the Viewer's speed graph">${ix}</span></div>` : ''}
+            ${d.archive ? `<div><span class="chip${d.archive.state === 'partial' ? ' amber' : ''}" title="${esc(d.archive.summary)}">${d.archive.state === 'partial' ? `Partly archived?${d.archive.missingMinutes ? ` ~${d.archive.missingMinutes} min missing` : ''}` : 'Still arriving'}</span></div>` : ''}
             <div class="day-actions">
               <button class="btn sm" type="button" data-play-day="${esc(d.day)}" aria-label="Play ${esc(d.day)}">${icon('play')}Play</button>
               <button class="btn sm" type="button" data-del-day="${esc(d.day)}">Delete day</button>

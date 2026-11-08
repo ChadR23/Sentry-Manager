@@ -120,11 +120,13 @@ export default {
           const enc = d.clips ? Math.round((d.encoded / d.clips) * 100) : 0;
           // the speed graph's index for this day
           const ix = (d.speedIndex?.indexed ? (d.speedIndex.indexed >= d.speedIndex.clips ? 'Indexed' : `Indexed ${d.speedIndex.indexed}/${d.speedIndex.clips}`) : '');
+          // footage the car recorded that is not on the share yet (the Sentry USB's archive)
+          const gap = d.archive ? `<span class="album-gap"><span class="pill ${d.archive.state === 'partial' ? 'org' : 'cyan'}" title="${h(d.archive.summary)}">${d.archive.state === 'partial' ? 'Partly archived?' : 'Still arriving'}</span>${d.archive.missingMinutes ? `<span class="tiny faint">~${d.archive.missingMinutes} min missing</span>` : ''}</span>` : '';
           return `<button type="button" class="album${f.day === d.day ? ' on' : ''}" data-day="${h(d.day)}" aria-pressed="${f.day === d.day}">
             <span class="album-art" aria-hidden="true">${d.thumbId ? `<img alt="" loading="lazy" src="${thumbUrl(v.id, d.thumbId)}">` : ico('film')}</span>
             <span class="album-t"><b>${h(dayName(d.day))}</b><span class="small dim">${count(d.recordings, 'track')} · ${d.minutes} min · ${size(d.bytes)}</span>
               <span class="catbar" aria-hidden="true">${cats.map(([c, n]) => `<i class="c-${h(c)}" style="flex:${n}"></i>`).join('')}</span>
-              <span class="tiny faint">${cats.map(([c, n]) => `${c} ${n}`).join(' · ')}${d.protected ? ` · ${d.protected} protected` : ''} · ${enc}% converted${ix ? ` · <span class="album-ix">${h(ix.toLowerCase())}</span>` : ''}</span></span></button>`;
+              <span class="tiny faint">${cats.map(([c, n]) => `${c} ${n}`).join(' · ')}${d.protected ? ` · ${d.protected} protected` : ''} · ${enc}% converted${ix ? ` · <span class="album-ix">${h(ix.toLowerCase())}</span>` : ''}</span>${gap}</span></button>`;
         }).join('')}
         ${!list.length && !days.error ? '<p class="small dim">No days match these filters.</p>' : ''}`);
     }

@@ -328,7 +328,8 @@ class ManagerDB {
     return this.db.prepare(sql).all(...args).map((r) => ({
       id: Number(r.id), kind: r.kind, level: r.level, vehicleId: r.vehicle_id, title: r.title, message: r.message,
       createdAt: Number(r.created_at), updatedAt: Number(r.updated_at),
-      resolvedAt: r.resolved_at === null ? null : Number(r.resolved_at), readAt: r.read_at === null ? null : Number(r.read_at)
+      resolvedAt: r.resolved_at === null ? null : Number(r.resolved_at), readAt: r.read_at === null ? null : Number(r.read_at),
+      dedupeKey: r.dedupe_key ?? null
     }));
   }
 

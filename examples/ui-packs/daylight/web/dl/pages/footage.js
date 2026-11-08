@@ -152,12 +152,20 @@ function calendar(dates, month, selected) {
   </div>`;
 }
 
+/** Footage the car recorded that is not on the share yet (the Sentry USB's archive; server/archiveGap.js). */
+function archiveChip(d) {
+  const a = d.archive;
+  if (!a) return '';
+  if (a.state === 'filling') return `<span class="chip chip-grey" title="${esc(a.summary)}">Still arriving</span>`;
+  return `<span class="chip chip-warn" title="${esc(a.summary)}">${icon('alert')}Partly archived?${a.missingMinutes ? ` ~${a.missingMinutes} min missing` : ''}</span>`;
+}
+
 function dayCard(v, d) {
   return `<a class="card day-card" href="#/footage/${enc(d.day)}?vehicle=${enc(v.id)}">
     <div class="thumb">${d.thumbId ? `<img class="thumb-img" loading="lazy" alt="" src="${thumbUrl(v.id, d.thumbId)}">` : icon('film')}
       <span class="thumb-badge">${plural(d.recordings, 'recording')}</span><span class="play-over">${icon('playOutline')}</span></div>
     <div class="dc-body"><span class="dc-title">${esc(dayTitle(d.day, { weekday: 'long', month: 'short', day: 'numeric' }))}</span>
-      <div class="row">${catChips(d)}${d.protected ? chip(`${d.protected} protected`, 'good', 'lock') : ''}${d.encodedRecordings ? chip(d.encodedRecordings === d.recordings ? 'Converted' : `${d.encodedRecordings}/${d.recordings} converted`, 'teal', 'sparkle') : ''}${d.speedIndex?.indexed ? chip(d.speedIndex.indexed >= d.speedIndex.clips ? 'Speed indexed' : `Speed indexed ${d.speedIndex.indexed}/${d.speedIndex.clips}`, 'violet') : ''}</div>
+      <div class="row">${catChips(d)}${d.protected ? chip(`${d.protected} protected`, 'good', 'lock') : ''}${d.encodedRecordings ? chip(d.encodedRecordings === d.recordings ? 'Converted' : `${d.encodedRecordings}/${d.recordings} converted`, 'teal', 'sparkle') : ''}${d.speedIndex?.indexed ? chip(d.speedIndex.indexed >= d.speedIndex.clips ? 'Speed indexed' : `Speed indexed ${d.speedIndex.indexed}/${d.speedIndex.clips}`, 'violet') : ''}${archiveChip(d)}</div>
       <span class="dc-meta">${d.minutes} min of video · ${bytes(d.bytes)}</span></div></a>`;
 }
 

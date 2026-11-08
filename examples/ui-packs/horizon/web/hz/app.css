@@ -413,6 +413,8 @@ text.tk-hot { fill: #ffb3c2; }
 .album-t { display: grid; gap: 2px; min-width: 0; }
 .album-t b { font-size: 15px; }
 .album-ix { color: #aef8ff; }
+.album-gap { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; margin-top: 4px; }
+.album-gap .pill { white-space: normal; }
 .catbar { display: flex; height: 4px; border-radius: 2px; overflow: hidden; background: rgba(255, 255, 255, 0.08); margin: 3px 0 1px; }
 .catbar i { display: block; }
 .c-Recent { background: var(--cyan); } .c-Sentry { background: var(--org); } .c-Saved { background: var(--grn); } .c-Other { background: var(--violet); }

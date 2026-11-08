@@ -82,6 +82,7 @@ const { createCanIndex } = require('./canIndex');
 const { createCanTrust } = require('./canTrust');
 const { createCanPort } = require('./canPort');
 const { createCanSync } = require('./canSync');
+const { createArchiveGap } = require('./archiveGap');
 const { createCanSearch, createSearchQueue, footageAt, clipStamps, localTime, parseWhen } = require('./canSearch');
 
 /** A wall-clock time in an IANA time zone (as a TeslaCam clip is named) in UTC milliseconds. */
@@ -308,11 +309,12 @@ async function main() {
   vehicles.bootstrapFromEnv();
   let speedIndex = null;
   let scrubPrepare = null;
+  let archiveGapRef = null; // footage the car recorded that has not reached the share (set where CAN is known)
   let integrityRef = null; // the footage check: one cut short by a restart goes on after the first scan
   let canUploadRef = null; // CAN Bridge uploads (set where canLogs is made)
   let canPort = null; // opens or closes the CAN Bridge's own port, one call at a time (set where the servers start)
   const canUpload = (req, res, p) => (canUploadRef ? canUploadRef(req, res, p) : sendJson(res, 404, { error: 'Not found' }));
-  const inventory = new Inventory({ vehicles, db, log: logger.scope('inventory'), onChange: () => announce('inventory'), onScanned: (vid) => { speedIndex?.kick(); scrubPrepare?.kick(); integrityRef?.resume(vid); } });
+  const inventory = new Inventory({ vehicles, db, log: logger.scope('inventory'), onChange: () => announce('inventory'), onScanned: (vid) => { speedIndex?.kick(); scrubPrepare?.kick(); integrityRef?.resume(vid); archiveGapRef?.check(vid); } });
   const thumbs = new Thumbnails({ dir: path.join(DATA, 'thumbnails'), ffmpegPath: FFMPEG });
   const telemetry = new Telemetry({ srcRoot: SRC, cacheDir: path.join(DATA, 'telemetry'), log: logger.scope('telemetry') });
   // every front clip's speed, a value a second, indexed in the background for the Viewer's speed graph
@@ -1017,7 +1019,7 @@ async function main() {
     return { enabled: false };
   });
   // Notification rules: which kinds of notification are raised
-  const NOTIFY_KINDS = ['share', 'storage', 'server', 'health', 'conversion', 'update'];
+  const NOTIFY_KINDS = ['share', 'storage', 'server', 'health', 'conversion', 'update', 'archive'];
   r.add('GET', '/api/notification-rules', () => {
     const muted = db.get('notify-muted', []) || [];
     return { rules: NOTIFY_KINDS.map((kind) => ({ kind, on: !muted.includes(kind) })) };
@@ -1317,6 +1319,7 @@ async function main() {
     const v = vehicleOr404(params.id);
     await vehicles.remove(params.id);
     savings.forget(params.id);
+    archiveGapRef?.forget(params.id);
     // and from every node's Vehicles first list
     nodes.forgetCar(params.id);
     audit.info(`Vehicle "${v.name}" (${v.id}) removed (its footage is untouched): ${by(req, user)}`);
@@ -1357,7 +1360,9 @@ async function main() {
     // how much of each day the speed index has read (the "Indexed" tag)
     const shown = days.slice(offset, offset + limit);
     const idx = await speedIndex.progress(params.id, shown.map((d) => d.day)).catch(() => ({}));
-    for (const d of shown) d.speedIndex = idx[d.day] || { clips: 0, indexed: 0 };
+    // footage that looks only partly copied to the share yet (the "Partly archived?" tag)
+    const gaps = archiveGapRef ? archiveGapRef.forDays(params.id) : {};
+    for (const d of shown) { d.speedIndex = idx[d.day] || { clips: 0, indexed: 0 }; d.archive = gaps[d.day] || null; }
     return {
       total: days.length, recordings: days.reduce((n, d) => n + d.recordings, 0), offset, limit,
       scannedAt: inv?.scannedAt || null, scanning: Boolean(inv?.scanning), error: inv?.lastError || null,
@@ -1702,7 +1707,7 @@ async function main() {
     canProgressTimer = setTimeout(() => { canProgressTimer = null; canProgressAt = Date.now(); announce('can'); }, wait);
     canProgressTimer.unref?.();
   };
-  const canIndex = createCanIndex({ usable: (k, n) => canTrust.usable(k, n), canDir: path.join(DATA, 'can'), dir: path.join(DATA, 'can-index'), log: logger.scope('can'), idle: () => !converterRunning(), onIndexed: (key, from, to) => canSync?.indexed(key, from, to).catch(() => {}), onProgress: canProgress });
+  const canIndex = createCanIndex({ usable: (k, n) => canTrust.usable(k, n), canDir: path.join(DATA, 'can'), dir: path.join(DATA, 'can-index'), log: logger.scope('can'), idle: () => !converterRunning(), onIndexed: (key, from, to) => { archiveGapRef?.indexed(key, from, to); canSync?.indexed(key, from, to).catch(() => {}); }, onProgress: canProgress });
   setTimeout(() => canIndex.kick(), 20_000).unref?.();
   // which car each CAN Bridge key is (a key of its own when there is one car)
   const canMap = () => db.get('can-vehicles', {}) || {};
@@ -1713,6 +1718,14 @@ async function main() {
     const single = vehicles.list().length === 1;
     return keys.filter((k) => map[k] === vid || (!map[k] && single));
   }
+  // archive gaps (archiveGap.js): driving per CAN Bridge, drives cut off, minutes missing cameras
+  archiveGapRef = createArchiveGap({ inventory, vehicles, notes, db, speedIndex, canKeysFor, canDir: path.join(DATA, 'can-index'), log: logger.scope('archive') });
+  r.add('GET', '/api/vehicles/:id/archive-gaps', async (req, res, { params }) => {
+    const v = vehicleOr404(params.id);
+    const out = await archiveGapRef.results(v.id);
+    return { vehicleId: v.id, timezone: v.timezone || 'UTC', checkedAt: out.checkedAt || null, signals: out.signals || {}, stalled: out.stalled || null,
+      days: Object.values(out.days || {}).sort((a, b) => b.day.localeCompare(a.day)) };
+  });
   /** A clip's start in UTC from its name (the car's zone), or null. */
   const canStartOf = (v, name) => {
     const m = /(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})/.exec(name);

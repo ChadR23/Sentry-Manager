@@ -195,7 +195,7 @@ export function createHealthPage(el) {
   api('/api/vehicles').then((d) => { vehicles = d.vehicles || []; drawIntegrity(); }).catch(() => { $('[data-integrity]').innerHTML = '<p class="sh-muted">Could not load the vehicles.</p>'; });
 
   // ---- notification rules
-  const RULES = { share: 'Footage share offline or read-only', storage: 'Share running out of space', server: 'Server hardware (temperatures, disks, memory)', health: 'Startup check failures', conversion: 'Conversions that fail', update: 'New versions' };
+  const RULES = { share: 'Footage share offline or read-only', storage: 'Share running out of space', server: 'Server hardware (temperatures, disks, memory)', health: 'Startup check failures', conversion: 'Conversions that fail', update: 'New versions', archive: 'Footage the car recorded that has not reached the share (Sentry USB archive gaps)' };
   async function drawRules() {
     let d;
     try { d = await api('/api/notification-rules'); } catch (err) { $('[data-rules]').textContent = err.message; return; }

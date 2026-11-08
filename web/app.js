@@ -1324,6 +1324,15 @@
     return `<span class="chip violet" title="${esc(`Speed read from ${x.indexed} of ${x.clips} front-camera clips for the Viewer's speed graph`)}"><span class="cdot"></span>${label}</span>`;
   }
 
+  /** The amber "Partly archived?" badge: footage the car recorded that is not on the share yet (server/archiveGap.js). */
+  function dayArchiveChip(d) {
+    const a = d.archive;
+    if (!a) return '';
+    const tip = `${a.summary}${a.state === 'partial' ? ' Check the Sentry USB: its Logs page, archive settings and Wi-Fi.' : ''}`;
+    if (a.state === 'filling') return `<span class="chip gap" title="${esc(tip)}"><span class="cdot"></span>Still arriving</span>`;
+    return `<span class="chip amber gap" title="${esc(tip)}"><span class="cdot"></span>Partly archived?${a.missingMinutes ? ` ~${a.missingMinutes} min missing` : ''}</span>`;
+  }
+
   function dayCard(v, d) {
     const f = state.footage;
     const open = f.open.has(d.day);
@@ -1339,7 +1348,7 @@
         <div class="day-thumb">${thumb}<span class="count">${plural(d.recordings, 'recording')}</span></div>
         <div class="day-info">
           <span class="date">${esc(dayTitle(d.day))}</span>
-          <span class="row">${cat('Recent', '', 'drive')}${cat('Sentry', 'amber', 'Sentry event')}${cat('Saved', 'green', 'Saved event')}${cat('Other', '', 'other')}${dayEncodedChip(d)}${dayIndexedChip(d)}${d.protected ? `<span class="chip green">${d.protected} protected</span>` : ''}</span>
+          <span class="row">${cat('Recent', '', 'drive')}${cat('Sentry', 'amber', 'Sentry event')}${cat('Saved', 'green', 'Saved event')}${cat('Other', '', 'other')}${dayArchiveChip(d)}${dayEncodedChip(d)}${dayIndexedChip(d)}${d.protected ? `<span class="chip green">${d.protected} protected</span>` : ''}</span>
           <span class="meta">${minutesText(d.minutes)}${d.cameras ? ` · ${plural(d.cameras, 'camera')}` : ''} · ${bytes(d.bytes)}${d.unknown ? ' · checking which clips are encoded…' : ''}</span>
         </div>
         <div class="day-actions">

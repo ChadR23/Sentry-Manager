@@ -160,6 +160,8 @@ details.more p { margin-top: 10px; color: var(--text-2); max-width: 760px; }
 .chip.blue { color: var(--info); border-color: rgba(90, 209, 242, 0.55); background: rgba(90, 209, 242, 0.12); }
 .chip.violet { color: #c4b5fd; border-color: rgba(167, 139, 250, 0.55); background: rgba(167, 139, 250, 0.12); }
 .chip .cdot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+/* the "Partly archived?" tag wraps on a narrow card (server/archiveGap.js) */
+.chip.gap { white-space: normal; max-width: 100%; }
 /* Footage by day */
 .days { display: flex; flex-direction: column; gap: 16px; }
 .day { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px; }

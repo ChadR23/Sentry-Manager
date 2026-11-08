@@ -96,6 +96,9 @@ async function scanFootage(root, { concurrency = 16, onProgress, previous = null
             rel,
             size: st.size,
             mtimeMs: st.mtimeMs,
+            // when it reached the share (the archive keeps mtime): archiveGap.js
+            ctimeMs: st.ctimeMs,
+            birthtimeMs: st.birthtimeMs,
             ...info,
             day: info.day || localDay(st.mtimeMs)
           });

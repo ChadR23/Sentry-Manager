@@ -199,3 +199,41 @@ few bytes of each file are read. Results are kept: a check a restart cuts
 short goes on by itself, and files that have not changed are not read again
 (the speed index, the timeline previews and conversions also go on where they
 were after a restart).
+
+## Archive gaps (footage not on the share yet)
+
+A Sentry USB (or another USB drive that copies itself to the NAS over Wi-Fi)
+archives the car's clips some time after the car records them, and recycles
+old clips to make room. Footage it has not copied by then is lost, and Sentry
+Six Manager can only show what is on the share. So after every scan the last
+seven days of each car are checked for footage that looks recorded but not
+copied:
+
+- **CAN Bridge:** the car's CAN logs show it driving (gear D or R, or moving)
+  in minutes with no footage at all. Only for cars with CAN Bridge logs, and
+  only driving counts: a car awake to charge or for climate records nothing.
+- **A drive cut off:** the footage stops while the car is moving (from the
+  speed index) and the next footage comes minutes later.
+- **Minutes short a camera:** two or more minutes with only some of the
+  cameras the minutes either side have (a copy cut off part way).
+
+A minute counts once it is 3 hours old, or 24 hours old if nothing the car
+recorded later is on the share yet. A parked, sleeping car never warns. A car
+with no Recent clips on the share in the last two weeks (its archive leaves
+RecentClips out) is not checked for missing drives.
+
+The day gets an amber **Partly archived?** tag on the Footage page (with the
+evidence when you point at it), and a warning notification names the car,
+the day, about how many minutes look missing and why, and what to check on the
+Sentry USB: its Logs page, its archive settings and its Wi-Fi to the NAS. The
+notification updates as more is found, clears itself when the footage
+arrives, and once dismissed only comes back if the gap grows a good deal.
+Turn it off in Settings → Health → Notification rules ("Footage the car
+recorded that has not reached the share").
+
+A day whose clips are still reaching the share hours after they were recorded
+gets a grey **Still arriving** tag instead (no notification): the archive is
+behind, but working. This needs a share that reports when a file arrived (its
+creation or change time); a share copied or restored on the NAS is ignored.
+
+The findings per day are at `GET /api/vehicles/:id/archive-gaps`.
