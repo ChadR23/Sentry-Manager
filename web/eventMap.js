@@ -11,6 +11,8 @@
 import { createViewerMap } from '/web/viewerMap.js';
 
 const STYLE = `
+.sentry-em.em-ro [data-rename],.sentry-em.em-ro [data-remove]{display:none}
+.sentry-em.em-ro [data-name]{pointer-events:none;border-color:transparent}
 .sentry-em{display:flex;flex-direction:column;gap:14px;font-size:14px;line-height:1.45}
 .sentry-em .em-map{height:min(62vh,560px);min-height:300px;border-radius:12px;overflow:hidden}
 .sentry-em .em-row{display:flex;flex-wrap:wrap;gap:6px 16px;align-items:center}
@@ -127,5 +129,9 @@ export function createEventMapPage(el, { vehicleId, vehicleName = '', openEvent 
   });
   loadEvents();
   loadPlaces();
+  // places are for admins: a watch-only account sees them, without rename and remove
+  fetch('/api/auth/me', { credentials: 'same-origin' }).then((r) => (r.ok ? r.json() : null)).then((m) => {
+    if (m?.role === 'viewer') el.querySelector('.sentry-em')?.classList.add('em-ro');
+  }).catch(() => {});
   return { destroy() { alive = false; map.destroy(); el.innerHTML = ''; } };
 }

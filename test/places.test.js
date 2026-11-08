@@ -90,12 +90,12 @@ test('where the car parks most: spots within 150 m are one suggestion, the most 
   assert.deepEqual(P.suggestPlaces([], []), []);
 });
 
-test('watch-only accounts: places read and written as before, and the suggestions read like the places', () => {
+test('watch-only accounts: places and suggestions read, but only admins change places', () => {
   assert.equal(viewerMay('GET', '/api/places'), true);
   assert.equal(viewerMay('GET', '/api/places/suggestions'), true, 'reading suggestions follows GET /api/places');
-  assert.equal(viewerMay('POST', '/api/places'), true, 'the existing rule: places are like stars');
-  assert.equal(viewerMay('PATCH', '/api/places/abc'), true);
-  assert.equal(viewerMay('DELETE', '/api/places/abc'), true);
+  assert.equal(viewerMay('POST', '/api/places'), false, 'only admins add places');
+  assert.equal(viewerMay('PATCH', '/api/places/abc'), false, 'or rename them');
+  assert.equal(viewerMay('DELETE', '/api/places/abc'), false, 'or remove them');
   assert.equal(viewerMay('POST', '/api/places/abc/more'), false, 'nothing under a place');
   assert.equal(viewerMay('PUT', '/api/settings/power'), false, 'other settings stay for admins');
 });

@@ -357,6 +357,9 @@ function buildViewerMap(container, opts = {}) {
     placeMarkers = places.map((p) => htmlMarker(map, [p.lat, p.lon], { html: `<div class="vm-place"><i></i><span>${esc(p.name)}</span></div>` }));
   }
   if (opts.places !== false) loadPlaces();
+  // places are for admins: a watch-only account gets no "Save place"
+  let canSavePlace = true;
+  fetch('/api/auth/me', { credentials: 'same-origin' }).then((r) => (r.ok ? r.json() : null)).then((m) => { if (m?.role === 'viewer') canSavePlace = false; }).catch(() => {});
 
   // ---- search by place ----
   let picking = false;
@@ -392,7 +395,7 @@ function buildViewerMap(container, opts = {}) {
     centreOn(map, [lat, lon], undefined, { animate: true });
     panel = document.createElement('div');
     panel.className = 'vm-places';
-    panel.innerHTML = `<header><span>Looking for clips here…</span>${placeLabel ? '' : '<button type="button" data-save title="Save this place with a name">Save place</button>'}<button type="button" data-close aria-label="Close">×</button></header>
+    panel.innerHTML = `<header><span>Looking for clips here…</span>${placeLabel || !canSavePlace ? '' : '<button type="button" data-save title="Save this place with a name">Save place</button>'}<button type="button" data-close aria-label="Close">×</button></header>
       <form class="vm-save" hidden><input type="text" maxlength="60" placeholder="Name, like Home or Work" aria-label="Name of this place" required><button type="submit">Save</button></form>`;
     panel.querySelector('[data-close]').onclick = closePlaces;
     const form = panel.querySelector('.vm-save');

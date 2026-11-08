@@ -182,7 +182,6 @@ const VIEWER_POSTS = [
   /^\/api\/vehicles\/[^/]+\/exports$/,
   /^\/api\/exports(\/[^/]+)?$/,
   /^\/api\/stars(\/[^/]+)?$/,
-  /^\/api\/places(\/[^/]+)?$/,
   /^\/api\/dashboards$/,
   /^\/api\/notifications\/[^/]+\/(read|dismiss)$/,
   /^\/api\/notifications\/read$/

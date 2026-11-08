@@ -19,12 +19,14 @@ function memoryDb() {
   };
 }
 
-test('watch-only accounts: exports, stars and places yes; settings and deleting no', () => {
+test('watch-only accounts: exports and stars yes; settings, places and deleting no', () => {
   assert.equal(viewerMay('POST', '/api/exports'), true);
   assert.equal(viewerMay('POST', '/api/vehicles/car/exports'), true);
   assert.equal(viewerMay('DELETE', '/api/exports/abc'), true);
   assert.equal(viewerMay('POST', '/api/notifications/read'), true);
   assert.equal(viewerMay('POST', '/api/stars'), true);
+  assert.equal(viewerMay('POST', '/api/places'), false, 'places are for admins');
+  assert.equal(viewerMay('GET', '/api/places'), true);
   assert.equal(viewerMay('POST', '/api/settings'), false);
   assert.equal(viewerMay('POST', '/api/vehicles/car/trash'), false);
   assert.equal(viewerMay('POST', '/api/vehicles/car/trash-days'), false, 'no Delete this day (nor its CAN data)');

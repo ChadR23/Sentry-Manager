@@ -12,6 +12,7 @@
 //   p.destroy();
 
 const STYLE = `
+.sentry-pl.pl-ro [data-add],.sentry-pl.pl-ro button{display:none!important}
 .sentry-pl{display:flex;flex-direction:column;gap:18px;font-size:14px;line-height:1.45}
 .sentry-pl h3{margin:0 0 6px;font-size:15px}
 .sentry-pl p{margin:0}
@@ -121,6 +122,13 @@ export function createPlacesSettings(el, { cls = {}, toast = () => {}, confirm =
       </form></section>
   </div>`;
   const $ = (s) => el.querySelector(s);
+  // places are for admins: a watch-only account sees them, without the buttons
+  fetch('/api/auth/me', { credentials: 'same-origin' }).then((r) => (r.ok ? r.json() : null)).then((m) => {
+    if (m?.role !== 'viewer') return;
+    const root = el.querySelector('.sentry-pl');
+    root?.classList.add('pl-ro');
+    root?.insertAdjacentHTML('afterbegin', `<p class="${c.muted} pl-note">Only an admin can add or change places.</p>`);
+  }).catch(() => {});
   let alive = true;
   let places = [];
   let counts = null;

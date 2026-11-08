@@ -139,12 +139,16 @@ test('places: suggestions where the car parks, radius checked and used for the t
     assert.deepEqual([work.lat, work.lon, work.radius], [41.9, -87.7, 300]);
     assert.equal((await admin('GET', '/api/places/suggestions')).data.counts[work.id], 2);
 
-    // a watch-only account reads the suggestions like the places (and writes places as before)
+    // a watch-only account reads the suggestions like the places, but cannot change places
     assert.equal((await admin('POST', '/api/accounts', { username: 'kid', password: 'watching only', role: 'viewer' })).status, 200);
     const kid = client();
     assert.equal((await kid('POST', '/api/auth/login', { username: 'kid', password: 'watching only' })).status, 200);
     assert.equal((await kid('GET', '/api/places/suggestions')).status, 200);
     assert.equal((await kid('GET', '/api/places')).data.places.length, 2);
+    assert.equal((await kid('POST', '/api/places', { name: 'Mine', lat: 41.9, lon: -87.6 })).status, 403, 'only admins add places');
+    assert.equal((await kid('PATCH', `/api/places/${work.id}`, { name: 'Nope' })).status, 403, 'or rename them');
+    assert.equal((await kid('DELETE', `/api/places/${work.id}`)).status, 403, 'or remove them');
+    assert.equal((await kid('GET', '/api/places')).data.places.length, 2, 'nothing changed');
     assert.equal((await kid('PUT', '/api/settings/power', { mode: 'flat' })).status, 403, 'other settings stay for admins');
 
     assert.equal((await admin('DELETE', `/api/places/${work.id}`)).status, 200);
