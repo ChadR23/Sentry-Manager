@@ -310,7 +310,27 @@ function pearson(tv, cv, ts, base, lag) {
   return (sxy - (sx * sy) / n) / Math.sqrt(vx * vy);
 }
 
-/** The offset that lines up the footage's speed with the CAN speed: { offsetMs, score } or null. */
+/** How far apart two speed curves are at a lag: mean absolute difference (kph), or null. */
+function meanGap(tv, cv, ts, base, lag) {
+  let n = 0;
+  let sum = 0;
+  let mean = 0;
+  for (let i = 0; i < tv.length; i++) {
+    const j = Math.round((ts[i] + lag - base) / GRID_MS);
+    const y = j >= 0 && j < cv.length ? cv[j] : NaN;
+    if (Number.isNaN(tv[i]) || Number.isNaN(y)) continue;
+    n++;
+    sum += Math.abs(tv[i] - y);
+    mean += tv[i];
+  }
+  return n >= 200 ? { gap: sum / n, mean: mean / n } : null;
+}
+
+/**
+ * The offset that lines up the footage's speed with the CAN speed: { offsetMs, score } or null.
+ * A match must also mean something: the two speeds about equal there (not just rising together),
+ * and clearly better than at offsets far from it (two ramps correlate at every lag).
+ */
 function speedOffset(frames, ch, start, { center = 0, range = SEARCH_MS } = {}) {
   if (frames.length < 50 || ch.speed.length < 10) return null;
   const sp = telGrid(frames, 'v');
@@ -334,16 +354,24 @@ function speedOffset(frames, ch, start, { center = 0, range = SEARCH_MS } = {}) 
     return { rs, s: parts.reduce((a, b) => a + b, 0) / parts.length };
   };
   let best = null;
+  const coarse = [];
   for (let lag = center - range; lag <= center + range; lag += 100) {
     const s = score(lag, false);
+    if (s) coarse.push({ lag, s: s.s });
     if (s && (!best || s.s > best.s)) best = { lag, ...s };
   }
   if (!best) return null;
+  // distinct: the best offset beats every offset 2 s or more away by a clear margin
+  const far = coarse.filter((x) => Math.abs(x.lag - best.lag) >= 2000);
+  if (far.length && best.s - Math.max(...far.map((x) => x.s)) < 0.03) return null;
   const fine = [];
   for (let lag = best.lag - 250; lag <= best.lag + 250; lag += GRID_MS) fine.push({ lag, sc: score(lag, true) });
   let k = -1;
   for (let i = 0; i < fine.length; i++) if (fine[i].sc && (k < 0 || fine[i].sc.s > fine[k].sc.s)) k = i;
   if (k < 0 || fine[k].sc.rs < 0.85) return null;
+  // the same speed there, not only the same shape (within 3 km/h or 8 %)
+  const agree = meanGap(sp.vs, cs, tsAbs, base, fine[k].lag);
+  if (!agree || agree.gap > Math.max(3, 0.08 * agree.mean)) return null;
   let off = fine[k].lag;
   // the peak between grid steps (a parabola through the best three)
   if (k > 0 && k + 1 < fine.length && fine[k - 1].sc && fine[k + 1].sc) {

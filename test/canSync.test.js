@@ -165,6 +165,23 @@ test('speed only (no edges): the speed correlation, within 60 ms', () => {
   assert.ok(Math.abs(est.result.offsetMs - truth) <= 60, `offset ${est.result.offsetMs} vs ${truth}`);
 });
 
+test('no false match: speeds that only rise together, or are far apart, are not a sync', () => {
+  const rand = rng(9);
+  // the footage: a car speeding up steadily from 20 to 110 km/h over the minute
+  const ramp = (t) => ({ v: 20 + (90 * Math.max(0, Math.min(60_000, t))) / 60_000, acc: 0, steer: 0, left: false, right: false, brake: false });
+  const frames = telemetryFrames(clipBody(ramp, T0, 60_000, rand));
+  // the CAN: another steady ramp (0 to 100 km/h), unrelated in time: no edges, no shape to match
+  const series = { DI_vehicleSpeed: [] };
+  for (let t = T0 - 15_000; t <= T0 + 75_000; t += 20) series.DI_vehicleSpeed.push([t, Math.max(0, (t - T0 + 15_000) / 900)]);
+  assert.equal(estimateClip({ frames, series, start: T0 }).result.method, 'clock', 'two ramps correlate at every lag: no offset from them');
+  // the same shape as the footage but a different speed throughout (another car, wrong units): not a match either
+  const drive = makeDrive(6, 60_000, { edges: false });
+  const fr2 = telemetryFrames(clipBody(drive, T0, 60_000, rand));
+  const other = canSeries((t) => ({ ...drive(t), v: drive(t).v * 0.6 }), T0 - 15_000, T0 + 75_000, (t) => t, rand);
+  for (const k of ['IBST_driverBrakeApply', 'VCFRONT_turnSignalLeftStatus', 'VCFRONT_turnSignalRightStatus', 'DI_accelPedalPos', 'SteeringAngle129']) delete other[k];
+  assert.equal(estimateClip({ frames: fr2.map((f) => ({ ...f, acc: 0, brake: false, left: false, right: false, steer: 0 })), series: other, start: T0 }).result.method, 'clock');
+});
+
 test('no data: the clock as it is', () => {
   const none = estimateClip({ frames: [], series: {}, start: T0 });
   assert.deepEqual(none.result, { offsetMs: 0, method: 'clock', matches: 0, spreadMs: null });
