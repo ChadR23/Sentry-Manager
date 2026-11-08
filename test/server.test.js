@@ -1104,6 +1104,15 @@ test('CAN Bridge port: closed until uploads are on, only the CAN API while open,
     assert.equal(await reach('/api/can/logs/ping', { Authorization: 'Bearer wrong' }), 401);
     const st = (await s.call('GET', '/api/can/settings', undefined, { headers: https })).data;
     assert.deepEqual([st.port.port, st.port.listening], [canPort, true]);
+    // one address cannot hold every connection: the seventh at once is closed
+    const net = require('net');
+    const socks = await Promise.all(Array.from({ length: 7 }, () => new Promise((ok) => { const c = net.connect(canPort, '127.0.0.1', () => ok(c)); c.on('error', () => ok(c)); })));
+    await new Promise((r) => setTimeout(r, 300));
+    // (the test's own earlier requests may still hold a kept-alive connection or two)
+    const open = socks.filter((c) => !c.destroyed && c.readyState === 'open').length;
+    assert.ok(open <= 6 && open < 7, `at most six at once from one address (${open} of 7 kept)`);
+    socks.forEach((c) => c.destroy());
+    await new Promise((r) => setTimeout(r, 100));
     await s.call('POST', '/api/can/disable', {}, { headers: https });
     await waitFor(async () => (await reach('/api/can/logs/ping')) === 'closed');
     // turned on and off quickly, many times at once: it ends as the last call
@@ -1230,6 +1239,13 @@ test('CAN Bridge security: a token per car, signed logs verified, a changed log 
     let last = 0;
     for (let i = 0; i < 22; i++) last = (await put(`wrong${i}`, n0, Buffer.from('x'))).status;
     assert.equal(last, 429, 'an address that keeps guessing is refused');
+    // ... but the right token from that same address still works (wrong tokens cannot lock the car out)
+    assert.equal((await fetch(`${s.base}/api/can/logs/ping`, { headers: { ...https, Authorization: `Bearer ${tokA}` } })).status, 200);
+    // a token not tied to a car yet cannot ask about two cars at once (nor see either)
+    const fresh = (await s.call('POST', '/api/can/tokens', {}, { headers: https })).data.token;
+    const mixed = await fetch(`${s.base}/api/can/logs/status`, { method: 'POST', headers: { ...https, Authorization: `Bearer ${fresh}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ names: [n0, nB] }) });
+    assert.deepEqual([mixed.status, (await mixed.json()).code], [400, 'mixed_cars']);
+
     // the CAN token cannot do anything else
     assert.equal((await fetch(`${s.base}/api/can/settings`, { headers: { ...https, Authorization: `Bearer ${tokA}` } })).status, 401);
     assert.equal((await fetch(`${s.base}/api/can/files/${n0}`, { method: 'DELETE', headers: { ...https, Authorization: `Bearer ${tokA}`, 'X-Requested-With': 'sentry-six-manager' } })).status, 401);

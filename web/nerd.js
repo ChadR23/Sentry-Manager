@@ -383,7 +383,7 @@ export function openNerdPanel() {
   body.addEventListener('change', async (e) => {
     const sel = e.target.closest('[data-map]');
     if (!sel) return;
-    try { await api('/api/can/vehicle-map', { method: 'POST', body: JSON.stringify({ key: sel.dataset.map, vehicleId: sel.value || null }) }); } catch (err) { alert(err.message); }
+    if (!(await confirmThen('/api/can/vehicle-map', { method: 'POST', body: JSON.stringify({ key: sel.dataset.map, vehicleId: sel.value || null }) }))) await draw();
   });
   const post = (path, data) => ({ method: 'POST', body: JSON.stringify(data || {}) });
   body.addEventListener('click', async (e) => {

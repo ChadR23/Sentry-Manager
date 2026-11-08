@@ -46,7 +46,7 @@ async function sha256Of(file) {
   return h.digest('hex');
 }
 
-function createCanLogs({ dir, freeBytes = async () => Infinity, now = () => Date.now() }) {
+function createCanLogs({ dir, freeBytes = async () => Infinity, now = () => Date.now(), maxFilesPerCar = 20_000, minFree = 2 * 1024 ** 3 }) {
   const fileOf = (name) => {
     const n = parseName(name);
     if (!n) throw canError(400, 'bad_name', 'That is not a CAN Bridge log name.');
@@ -129,7 +129,14 @@ function createCanLogs({ dir, freeBytes = async () => Infinity, now = () => Date
       if (offset !== had.received) throw canError(409, 'offset_mismatch', `Expected Upload-Offset ${had.received}.`, { received: had.received });
       if (offset + body.length > length) throw canError(400, 'past_end', 'The chunk goes past Upload-Length.', { received: had.received });
       if (body.length > MAX_CHUNK) throw canError(413, 'chunk_too_large', `A chunk can be at most ${MAX_CHUNK} bytes.`, { received: had.received });
-      if (offset === 0 && (await freeBytes()) < length * 2) throw canError(507, 'no_space', 'There is not enough free space for this file.');
+      // room for it, and the data disk never filled by CAN logs (a floor kept free for everything else)
+      if (offset === 0 && (await freeBytes()) < length * 2 + minFree) throw canError(507, 'no_space', 'There is not enough free space for this file.');
+      if (offset === 0) {
+        // at most so many files per car (a stolen token cannot fill the disk with small ones)
+        let count = 0;
+        try { count = (await fsp.readdir(path.dirname(file))).length; } catch { /* a new car */ }
+        if (count >= maxFilesPerCar) throw canError(507, 'car_full', `This car has ${maxFilesPerCar} CAN files already: the owner can delete old ones in the Nerd settings.`, { received: 0 });
+      }
       if (offset === 0) {
         // at most 16 uploads half-finished at once per car (the bridge sends one at a time)
         let parts = [];

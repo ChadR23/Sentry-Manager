@@ -196,7 +196,8 @@ starts again at 0.
 | 401 | `bad_token` | No token, or a revoked one: ask the owner for a new token. |
 | 403 | `https_only` | Plain HTTP was used. |
 | 403 | `wrong_car` | This token is for another car key. |
-| 429 | `slow_down` | Too many wrong tokens from this address (20 in 10 minutes): wait. |
+| 400 | `mixed_cars` | A token not tied to a car yet asked about two cars' files at once. |
+| 429 | `slow_down` | Too many wrong tokens from this address (20 in 10 minutes), or more than 1,200 requests in 10 minutes with one token: wait. A right token is never refused because of wrong ones. |
 | 429 | `too_many_partial` | 16 unfinished uploads for this car already: finish or wait (unfinished uploads are dropped after two days). |
 | 404 | `off` / `not_found` | Uploads are turned off, or an unknown address. Try again later (hours). |
 | 409 | `offset_mismatch` | `Upload-Offset` is not what the server has: resume at `received`. |
@@ -206,7 +207,8 @@ starts again at 0.
 | 413 | `too_large`, `chunk_too_large` | Over `maxFile`/`maxSidecar`, or a chunk over `maxChunk`. |
 | 422 | `sha256_mismatch` | The finished file did not match its hash; it was discarded. Upload it again from offset 0. |
 | 422 | `bad_sidecar` | The sidecar is not JSON; it was discarded. |
-| 507 | `no_space` | The server is short of disk space: try again later. |
+| 507 | `no_space` | The server is short of disk space (it keeps 2 GB free for everything else): try again later. |
+| 507 | `car_full` | This car has 20,000 CAN files here already: the owner deletes old ones in the Nerd settings. |
 | 500 | `server_error` | Try again later, with backoff. |
 
 ## What happens to the files
@@ -219,7 +221,16 @@ are kept in `<data>/can/<vehicleKey>/trust.json`.
 
 **TLS.** Port 10000 takes TLS 1.3 (the bridge uses only 1.3) and 1.2; older
 versions are refused. A client that sends its headers slower than 20 s, or
-one request longer than 10 minutes, is cut off. Sync to the footage uses the sidecar's clock pairs and the
+one request longer than 10 minutes, is cut off. One address may hold at most
+6 connections at once (256 in all), and a connection that sends no request
+within 15 s is closed.
+
+**Reading a log.** Each log is unpacked once, line by line: a line longer
+than 512 bytes is skipped, and a log that unpacks to more than 4 GB is
+stopped there (what was read before is kept). A crafted file cannot use up
+the server's memory. Deleting a log, or no longer using one that failed its
+check, takes its data out of the Viewer, the search, the raw view and the
+sync. Sync to the footage uses the sidecar's clock pairs and the
 `# clock` lines, then refines the offset per drive by matching CAN signals
 (brake, blinkers, accelerator, speed) with Tesla's per-frame video data,
 aiming for under 20 ms on footage that carries that data.

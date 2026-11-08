@@ -1786,6 +1786,7 @@ async function main() {
     return { start, sync, from, to, ids };
   });
   r.add('POST', '/api/can/vehicle-map', (req, res, { body, user }) => {
+    requireConfirmed(req); // (which car a key's data belongs to)
     const key = String(body?.key || '');
     if (!/^[A-Za-z0-9-]{1,64}$/.test(key)) throw new HttpError(400, 'Give the CAN Bridge car key.');
     const vid = body?.vehicleId ? vehicleOr404(String(body.vehicleId)).id : null;
@@ -1827,6 +1828,27 @@ async function main() {
     canBadTries.set(ip, { n: fresh ? 1 : b.n + 1, until: fresh ? Date.now() + 10 * 60_000 : b.until });
     if (canBadTries.size > 5000) canBadTries.delete(canBadTries.keys().next().value);
   };
+  // a right token's pace: requests per 10 minutes
+  const canPace = new Map(); // token id -> { n, until }
+  const canTokenPace = (id) => {
+    const p = canPace.get(id);
+    if (!p || p.until < Date.now()) { canPace.set(id, { n: 1, until: Date.now() + 10 * 60_000 }); return true; }
+    p.n++;
+    return p.n <= 1200;
+  };
+  /** The car key a token is for: the one it is tied to, else this one (tied now, before anything is written). */
+  const claimToken = (tok, key) => {
+    const c = canCfg();
+    const t = c.tokens.find((x) => x.id === tok.id);
+    if (!t) return null;
+    if (!t.key) {
+      t.key = key;
+      saveCanCfg(c);
+      log.info(`CAN Bridge token "${t.label}" is now for car key ${key}`);
+      if (t.vehicleId && !canMap()[key]) db.set('can-vehicles', { ...canMap(), [key]: t.vehicleId });
+    }
+    return t.key;
+  };
   /** A token's first upload binds it to that car key (and the key to the token's car). */
   const bindToken = (tok, key) => {
     const c = canCfg();
@@ -1853,19 +1875,30 @@ async function main() {
   // half-finished uploads older than two days are dropped
   setInterval(() => canLogs.cleanStale(2 * 24 * 3600_000).catch(() => {}), 3600_000).unref?.();
 
+  /** A log's data taken out of the index (and the sync told to work those times out again). */
+  const dropCanLog = async (key, name) => {
+    await canIndex.removeLog(key, name).catch((err) => log.warn(`CAN index: removing ${name}: ${err.message}`));
+    const n = parseCanName(name);
+    if (n) canSync?.indexed(key, n.startedAt - 2 * 60_000, n.startedAt + 30 * 60_000).catch(() => {});
+  };
   canUploadRef = async (req, res, rawPath) => {
     const cfg = canCfg();
     const fail = (status, code, error, extra = {}) => sendJson(res, status, { error, code, ...extra });
     if (!cfg.enabled || !cfg.tokens.length) return fail(404, 'off', 'Not found');
     if (!isSecure(req)) return fail(403, 'https_only', 'CAN logs are only taken over HTTPS.');
-    const ip = clientKey(req);
-    if (canBlocked(ip)) return fail(429, 'slow_down', 'Too many wrong tokens from this address; try again later.');
+    // on the CAN port the address is the connection's own (nothing there is behind a proxy, so a
+    // forwarded header could only be a lie); on the web port it is the usual client address
+    const ip = req.socket?.localPort === CAN_PORT ? req.socket.remoteAddress || '?' : clientKey(req);
     const tok = canTokenOf(req);
     if (!tok) {
+      // wrong tokens: an address that keeps trying is refused for a while (a right token never is)
+      if (canBlocked(ip)) return fail(429, 'slow_down', 'Too many wrong tokens from this address; try again later.');
       canBadTry(ip);
       res.setHeader('WWW-Authenticate', 'Bearer');
       return fail(401, 'bad_token', 'A valid CAN Bridge token is needed.');
     }
+    // a right token is still limited: 1,200 requests in 10 minutes is far more than the bridge sends
+    if (!canTokenPace(tok.id)) return fail(429, 'slow_down', 'Too many requests with this token; try again later.');
     const sub = rawPath.slice('/api/can/logs'.length);
     try {
       if (req.method === 'GET' && sub === '/ping') {
@@ -1874,14 +1907,22 @@ async function main() {
       if (req.method === 'POST' && sub === '/status') {
         let body;
         try { body = JSON.parse((await readRaw(req, 1024 * 1024)).toString('utf8') || '{}'); } catch { return fail(400, 'bad_request', 'Send JSON: { "names": [...] }.'); }
-        // a token sees only its own car's files
-        return sendJson(res, 200, await canLogs.status(body?.names, { key: tok.key }));
+        // a token sees only its own car's files; a token not tied to a car yet is tied by the names it asks about (one car only)
+        let key = tok.key;
+        if (!key && Array.isArray(body?.names)) {
+          const keys = [...new Set(body.names.map((x) => parseCanName(x)?.vehicleKey).filter(Boolean))];
+          if (keys.length > 1) return fail(400, 'mixed_cars', 'A token is for one car: ask about one car key\'s files.');
+          if (keys.length === 1) key = claimToken(tok, keys[0]);
+        }
+        return sendJson(res, 200, await canLogs.status(body?.names, { key: key || '\u0000none' }));
       }
       let name = '';
       try { name = sub.startsWith('/') ? decodeURIComponent(sub.slice(1)) : ''; } catch { return fail(400, 'bad_name', 'That is not a CAN Bridge log name.'); }
       const n = parseCanName(name);
       if (req.method === 'POST' && n) {
-        if (tok.key && tok.key !== n.vehicleKey) return fail(403, 'wrong_car', `This token is for car key ${tok.key}, not ${n.vehicleKey}.`);
+        // tied to its car before anything is written (in one step: two first uploads cannot claim two cars)
+        const key = claimToken(tok, n.vehicleKey);
+        if (key !== n.vehicleKey) return fail(403, 'wrong_car', `This token is for car key ${key}, not ${n.vehicleKey}.`);
         const num = (h) => (req.headers[h] === undefined || req.headers[h] === '' ? NaN : Number(req.headers[h]));
         const body = await readRaw(req, canLogs.MAX_CHUNK);
         const out = await canLogs.receive(name, body, { offset: num('upload-offset'), length: num('upload-length'), sha256: String(req.headers['upload-sha256'] || '').toLowerCase() });
@@ -1915,8 +1956,10 @@ async function main() {
   const newCanToken = (cfg, { vehicleId = null, label = '' } = {}) => {
     const token = crypto.randomBytes(32).toString('base64url');
     const v = vehicleId ? vehicleOr404(String(vehicleId)) : vehicles.list().length === 1 ? vehicles.list()[0] : null;
+    // a car whose CAN Bridge key is known already: the token is tied to it now
+    const known = v ? Object.entries(canMap()).filter(([, vid]) => vid === v.id).map(([k]) => k) : [];
     const entry = {
-      id: crypto.randomBytes(6).toString('hex'), hash: tokenHash(token), vehicleId: v?.id || null, key: null,
+      id: crypto.randomBytes(6).toString('hex'), hash: tokenHash(token), vehicleId: v?.id || null, key: known.length === 1 ? known[0] : null,
       label: String(label || '').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 40) || `${v?.name || 'Car'} CAN Bridge`, createdAt: Date.now(), lastUsedAt: null
     };
     if (cfg.tokens.length >= 20) throw new HttpError(400, 'There are 20 tokens already: revoke some first.');
@@ -1986,6 +2029,8 @@ async function main() {
     if (!n || n.sidecar) throw new HttpError(400, 'Not a CAN log name.');
     try { await canTrust.setOverride(n.vehicleKey, params.name, body?.use === true); } catch (err) { throw new HttpError(err.status || 500, err.message); }
     audit.warn(`CAN log ${params.name} ${body?.use === true ? 'used despite failing its check' : 'no longer used'}: ${by(req, user)}`);
+    // no longer used: its data leaves the Viewer, the search, the raw view and the sync
+    if (body?.use !== true) await dropCanLog(n.vehicleKey, params.name);
     canIndex.kick();
     return { ok: true };
   });
@@ -2003,7 +2048,7 @@ async function main() {
     try { await canLogs.remove(params.name); } catch (err) { throw new HttpError(err.status || 500, err.message); }
     const n = parseCanName(params.name);
     if (n) {
-      await canIndex.forget(n.vehicleKey, params.name).catch(() => {});
+      await dropCanLog(n.vehicleKey, params.name);
       await canTrust.deleted(n.vehicleKey, params.name).catch(() => {});
     }
     audit.info(`CAN log deleted: ${params.name}: ${by(req, user)}`);
@@ -2717,7 +2762,21 @@ async function main() {
       // a client that sends its headers slowly, or a body for ever, is cut off (TLS 1.2 and 1.3 are both accepted)
       srv.headersTimeout = 20_000;
       srv.requestTimeout = 10 * 60_000;
-      srv.maxConnections = 64;
+      srv.maxConnections = 256;
+      // one address cannot take every connection (the bridge uses one or two): at most 6 each,
+      // and a connection that has not sent a request within 15 s is closed
+      const perAddress = new Map();
+      srv.on('connection', (socket) => {
+        const ip = socket.remoteAddress || '?';
+        const n = (perAddress.get(ip) || 0) + 1;
+        if (n > 6) { socket.destroy(); return; }
+        perAddress.set(ip, n);
+        socket.once('close', () => { const m = (perAddress.get(ip) || 1) - 1; if (m > 0) perAddress.set(ip, m); else perAddress.delete(ip); });
+        const idle = setTimeout(() => socket.destroy(), 15_000);
+        idle.unref?.();
+        socket.once('data', () => clearTimeout(idle));
+        socket.once('close', () => clearTimeout(idle));
+      });
       return srv;
     }
   });

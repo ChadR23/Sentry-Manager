@@ -36,11 +36,49 @@
 const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
-const readline = require('readline');
 const zlib = require('zlib');
 const { spawn } = require('child_process');
 const { parseName } = require('./canLogs');
 const { bundledDbc, decodeFrame } = require('./canDbc');
+
+// a log is read line by line with bounds: no line longer than this (a candump line is under 100
+// bytes), and no more than this many bytes unpacked from one log (a 10-minute log is about 150 MB),
+// so a crafted file (one endless line, or a tiny file that unpacks to terabytes) cannot use up memory
+const MAX_LINE = 512;
+const MAX_UNPACKED = 4 * 1024 ** 3;
+
+/** Lines from a stream, each at most maxLine bytes (longer ones are skipped), stopping after maxTotal bytes. */
+async function* boundedLines(stream, { maxLine = MAX_LINE, maxTotal = MAX_UNPACKED, onLimit = () => {} } = {}) {
+  let rest = '';
+  let total = 0;
+  let skipping = false;
+  const chunks = (async function* read() {
+    // a stream closed early (xz could not start, or was stopped) just ends the lines
+    try { for await (const c of stream) yield c; } catch (err) { if (err.code !== 'ERR_STREAM_PREMATURE_CLOSE') throw err; }
+  }());
+  for await (const chunk of chunks) {
+    total += chunk.length;
+    if (total > maxTotal) { onLimit(); return; }
+    const text = chunk.toString('latin1');
+    let start = 0;
+    for (;;) {
+      const nl = text.indexOf('\n', start);
+      if (nl < 0) break;
+      if (skipping) skipping = false;
+      else {
+        const line = rest + text.slice(start, nl);
+        if (line.length <= maxLine) yield line;
+      }
+      rest = '';
+      start = nl + 1;
+    }
+    if (!skipping) {
+      rest += text.slice(start);
+      if (rest.length > maxLine) { rest = ''; skipping = true; }
+    }
+  }
+  if (!skipping && rest) yield rest;
+}
 
 const STEP_MS = 50; // at most 20 points a second per signal
 const RAW_PER_SEC = 10; // raw payload changes kept a second per id
@@ -95,7 +133,7 @@ async function sidecarStamp(file) {
   return st ? `/${st.size}-${Math.round(st.mtimeMs)}` : '';
 }
 
-function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bundledDbc, xz = 'xz', onIndexed = null, usable = async () => ({ use: true, trust: 'unsigned' }) }) {
+function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bundledDbc, xz = 'xz', onIndexed = null, usable = async () => ({ use: true, trust: 'unsigned' }), maxUnpacked = MAX_UNPACKED }) {
   const doneFile = path.join(dir, 'done.json');
   let done = null;
   const loadDone = async () => {
@@ -233,11 +271,12 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
     const child = spawn(xz, ['-dc', file], { stdio: ['ignore', 'pipe', 'pipe'] });
     let stderr = '';
     let spawnError = null;
-    child.stderr.on('data', (c) => { stderr += c; });
-    const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
+    child.stderr.on('data', (c) => { if (stderr.length < 4096) stderr += c; });
+    let tooBig = false;
+    const lines = boundedLines(child.stdout, { maxTotal: maxUnpacked, onLimit: () => { tooBig = true; child.kill(); } });
     // how xz ended: its exit code, or null when it could not be started (no xz, no free process slot)
     const exited = new Promise((ok) => {
-      child.once('error', (err) => { spawnError = err; lines.close(); child.stdout.destroy(); ok(null); });
+      child.once('error', (err) => { spawnError = err; child.stdout.destroy(); ok(null); });
       child.once('close', (code) => ok(code));
     });
     let frames = 0;
@@ -322,8 +361,8 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
     // (not this log's fault: it is read again at the next look)
     if (spawnError) throw Object.assign(new Error(`xz could not be started for ${name}: ${spawnError.message}`), { retry: true });
     // xz stopped early (a log cut off, or damaged): what it read before is kept, unless that is nothing
-    const truncated = code !== 0;
-    const why = `${stderr.trim().slice(0, 200) || `exit ${code}`}`;
+    const truncated = code !== 0 || tooBig;
+    const why = tooBig ? `it unpacks to more than ${Math.round(maxUnpacked / 1024 ** 2)} MB (stopped there)` : `${stderr.trim().slice(0, 200) || `exit ${code}`}`;
     if (truncated && !frames) throw new Error(`xz could not read ${name}: ${why}`);
     for (const w of writes) await writeOut(w);
     if (!rawOnly) await mergeSignals(key, seen);
@@ -511,7 +550,47 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
     await saveDone();
   }
 
-  return { kick, trustOf, indexLog, series, raw, signals, forget, status: () => ({ ...status }), pendingLogs };
+  /**
+   * Take one log's data out of the index (deleted, or no longer used): its part of every minute
+   * it wrote is removed (by the per-log records), then it counts as not indexed. A log covers at
+   * most a few minutes from the start in its name; those minutes are the ones looked at.
+   */
+  async function removeLog(key, name) {
+    const n = parseName(name);
+    if (!n) return 0;
+    let changed = 0;
+    for (let t = n.startedAt - 2 * 60_000; t <= n.startedAt + 30 * 60_000; t += 60_000) {
+      const minute = minuteKey(t);
+      const had = await readMinute(key, minute);
+      if (had?.logs?.[name]) {
+        const rest = withoutPart({ signals: had.signals || {}, ids: had.ids || {} }, had.logs[name]);
+        const logs = { ...had.logs };
+        delete logs[name];
+        const file = path.join(dir, key, `${minute}.json.gz`);
+        if (!Object.keys(logs).length) await fsp.rm(file, { force: true });
+        else {
+          let trust;
+          for (const p of Object.values(logs)) trust = worseTrust(trust, p.trust);
+          await writeAtomic(file, zlib.gzipSync(JSON.stringify({ minute, ...(trust ? { trust } : {}), logs, signals: rest.signals, ids: rest.ids }), { level: 6 }));
+        }
+        changed++;
+      }
+      const raw = await rawNow(key, minute);
+      if (raw?.logs?.[name]) {
+        const rest = withoutPart({ signals: raw.raw || {} }, raw.logs[name]).signals;
+        const logs = { ...raw.logs };
+        delete logs[name];
+        const file = path.join(dir, key, `${minute}.raw.json.gz`);
+        if (!Object.keys(logs).length) await fsp.rm(file, { force: true });
+        else await writeAtomic(file, zlib.gzipSync(JSON.stringify({ ...raw, raw: rest, logs }), { level: 6 }));
+        rawCache.delete(`${key}/${minute}`);
+      }
+    }
+    await forget(key, name);
+    return changed;
+  }
+
+  return { kick, trustOf, indexLog, series, raw, signals, forget, removeLog, status: () => ({ ...status }), pendingLogs };
 }
 
 module.exports = { createCanIndex, minuteKey, FORMAT, RAW_PER_SEC };

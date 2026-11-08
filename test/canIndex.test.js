@@ -290,3 +290,41 @@ test('a write that fails partway: xz is stopped, no .tmp file left behind', { sk
     await fsp.rm(base, { recursive: true, force: true });
   }
 });
+
+test('a crafted log cannot use up memory: an endless line is skipped, and a log that unpacks too far is stopped', { skip, timeout: 60000 }, async () => {
+  // one 200 MB line with no newline (a few KB packed), then a real frame
+  const base = await fsp.mkdtemp(path.join(os.tmpdir(), 'canindex-'));
+  await fsp.mkdir(path.join(base, 'can', 'K'), { recursive: true });
+  const name = 'K_20200101T080000Z_1.log.xz';
+  const bomb = spawnSync('sh', ['-c', `head -c 209715200 /dev/zero | tr '\\0' 'A' | xz -1 -c; printf '\\n${line(T0 + 500, '132', '00A0000000000000')}\\n' | xz -1 -c`], { maxBuffer: 1 << 26 }).stdout;
+  assert.ok(bomb.length < 1024 * 1024, `the file is small (${bomb.length} bytes)`);
+  await fsp.writeFile(path.join(base, 'can', 'K', name), bomb);
+  const before = process.memoryUsage().rss;
+  const idx = createCanIndex({ canDir: path.join(base, 'can'), dir: path.join(base, 'idx') });
+  const r = await idx.indexLog('K', name);
+  assert.equal(r.frames, 1, 'the endless line skipped, the real frame read');
+  assert.ok(process.memoryUsage().rss - before < 150 * 1024 * 1024, 'no 200 MB string was built');
+  // unpacking past the limit: stopped there, what was read is kept, and it says why
+  const small = createCanIndex({ canDir: path.join(base, 'can'), dir: path.join(base, 'idx2'), maxUnpacked: 10 * 1024 * 1024 });
+  // (here the endless line fills the 10 MB before the frame: nothing read, so it is an error for that log)
+  await assert.rejects(small.indexLog('K', name), /unpacks to more than 10 MB/);
+  await fsp.rm(base, { recursive: true, force: true });
+});
+
+test('a log taken out of the index (deleted, or no longer used): its data goes, another log of the same minute stays', { skip }, async () => {
+  const a = 'K_20200101T080000Z_1.log.xz';
+  const { base, idx } = await setup(a, Array.from({ length: 50 }, (_, i) => line(T0 + i * 100, '132', '00A0000000000000')));
+  const b = 'K_20200101T080030Z_2.log.xz';
+  await fsp.writeFile(path.join(base, 'can', 'K', b), execFileSync('xz', ['-1', '-c'], { input: `${Array.from({ length: 50 }, (_, i) => line(T0 + 30_000 + i * 100, '2E5', '0000030D0000D000')).join('\n')}\n` }));
+  await idx.indexLog('K', a);
+  await idx.indexLog('K', b);
+  const both = await idx.series(['K'], T0, T0 + 60_000);
+  assert.ok(both.BattVoltage132 && Object.keys(both).some((n) => /2E5/.test(n)), 'both logs indexed');
+  await idx.removeLog('K', a);
+  const left = await idx.series(['K'], T0, T0 + 60_000);
+  assert.ok(!left.BattVoltage132, 'the removed log\'s signals are gone');
+  assert.ok(Object.keys(left).some((n) => /2E5/.test(n)), 'the other log\'s stay');
+  const raw = await idx.raw(['K'], T0, T0 + 60_000);
+  assert.ok(!raw.some((x) => x.id === '132'), 'and its raw frames');
+  await fsp.rm(base, { recursive: true, force: true });
+});
