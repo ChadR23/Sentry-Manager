@@ -29,6 +29,10 @@ test('watch-only accounts: exports, stars and places yes; settings and deleting 
   assert.equal(viewerMay('POST', '/api/vehicles/car/trash'), false);
   assert.equal(viewerMay('GET', '/api/logs'), false);
   assert.equal(viewerMay('GET', '/api/vehicles'), true);
+  assert.equal(viewerMay('GET', '/api/can/settings'), false, 'the Nerd settings are for admins');
+  assert.equal(viewerMay('PUT', '/api/dashboards'), true, 'their own Viewer dashboards');
+  assert.equal(viewerMay('POST', '/api/can/enable'), false);
+  assert.equal(viewerMay('DELETE', '/api/can/files/x.log.xz'), false);
 });
 
 test('two-step sign-in: a code is used once; recovery codes work with or without the dash, once each', () => {

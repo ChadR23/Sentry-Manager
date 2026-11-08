@@ -385,3 +385,5 @@ async function signOut() {
 import('/web/scrub.js').then((m) => m.hoverFrames(document.body, '.thumbc')).catch(() => {});
 // saved by converting, month by month, wherever a page puts a placeholder (web/savingsChart.js)
 import('/web/savingsChart.js').then((m) => m.watchSavingsCharts(document.body)).catch(() => {});
+// the hidden Nerd settings: tap Version seven times on the Settings page (web/nerd.js)
+import('/web/nerd.js').then((m) => m.watchNerdUnlock(document.body)).catch(() => {});

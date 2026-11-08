@@ -11,6 +11,7 @@ const fsp = require('fs/promises');
 const net = require('net');
 const os = require('os');
 const path = require('path');
+const zlib = require('zlib');
 const { spawn, spawnSync, execFileSync } = require('child_process');
 
 const REPO = path.join(__dirname, '..');
@@ -991,6 +992,340 @@ test('pages link their scripts and styles under /v/<version>/: kept a year, a ne
     const packPage = await (await s.call('GET', '/', undefined, { raw: true })).text();
     const v2 = /(?:src|href)="\/v\/([A-Za-z0-9_-]+)\//.exec(packPage)[1];
     assert.notEqual(v2, v, 'another interface: other links');
+  } finally {
+    await s.stop();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('CAN Bridge uploads: off until turned on, HTTPS and a write-only token, chunks resumed, kept only when the hash matches', async () => {
+  const dir = await tmp();
+  const s = await startServer(dir, { TRUST_PROXY: 'true' });
+  const https = { 'X-Forwarded-Proto': 'https' };
+  const name = 'MY-car_20261108T143000Z_1.log.xz';
+  const file = crypto.randomBytes(300_000);
+  const sha = crypto.createHash('sha256').update(file).digest('hex');
+  const up = (token, body, offset, extra = {}) => fetch(`${s.base}/api/can/logs/${name}`, {
+    method: 'POST', body,
+    headers: { ...https, Authorization: `Bearer ${token}`, 'Content-Type': 'application/octet-stream', 'Upload-Offset': String(offset), 'Upload-Length': String(file.length), 'Upload-SHA256': sha, ...extra }
+  }).then(async (r) => ({ status: r.status, data: await r.json() }));
+  try {
+    assert.equal((await fetch(`${s.base}/api/can/logs/ping`, { headers: https })).status, 404, 'off: nothing there');
+    await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' }, { headers: https });
+    await s.call('POST', '/api/auth/confirm', { password: 'correct horse' }, { headers: https }); // (a password confirmed just now)
+    const on = await s.call('POST', '/api/can/enable', {}, { headers: https });
+    assert.equal(on.status, 200);
+    const token = on.data.token;
+    assert.ok(token.length >= 40);
+
+    assert.equal((await fetch(`${s.base}/api/can/logs/ping`, { headers: { Authorization: `Bearer ${token}` } })).status, 403, 'plain HTTP refused');
+    assert.equal((await fetch(`${s.base}/api/can/logs/ping`, { headers: { ...https, Authorization: 'Bearer wrong' } })).status, 401);
+    const ping = await (await fetch(`${s.base}/api/can/logs/ping`, { headers: { ...https, Authorization: `Bearer ${token}` } })).json();
+    assert.equal(ping.api, 1);
+    // the token does nothing else
+    assert.equal((await fetch(`${s.base}/api/vehicles`, { headers: { ...https, Authorization: `Bearer ${token}` } })).status, 401, 'no footage with the token');
+
+    // two chunks, the connection "lost" in between: status says where to go on
+    const first = await up(token, file.subarray(0, 100_000), 0);
+    assert.deepEqual([first.status, first.data.received, first.data.complete], [200, 100_000, false]);
+    const st = await (await fetch(`${s.base}/api/can/logs/status`, { method: 'POST', headers: { ...https, Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ names: [name, `${name}.json`, 'nonsense'] }) })).json();
+    assert.deepEqual(st.files[name], { state: 'partial', received: 100_000, length: 300_000 });
+    assert.equal(st.files[`${name}.json`].state, 'missing');
+    assert.equal(st.files.nonsense.state, 'invalid');
+    const wrongOffset = await up(token, file.subarray(0, 10), 50);
+    assert.deepEqual([wrongOffset.status, wrongOffset.data.code, wrongOffset.data.received], [409, 'offset_mismatch', 100_000]);
+    const last = await up(token, file.subarray(100_000), 100_000);
+    assert.deepEqual([last.status, last.data.complete], [201, true]);
+    const again = await up(token, file.subarray(0), 0);
+    assert.deepEqual([again.status, again.data.already], [201, true], 'a retry of a finished file is harmless');
+
+    // a file that arrives different from its hash is thrown away
+    const other = 'MY-car_20261108T144000Z_2.log.xz';
+    const bad = await fetch(`${s.base}/api/can/logs/${other}`, { method: 'POST', body: Buffer.from('abc'), headers: { ...https, Authorization: `Bearer ${token}`, 'Upload-Offset': '0', 'Upload-Length': '3', 'Upload-SHA256': 'a'.repeat(64) } });
+    assert.equal(bad.status, 422);
+    // the sidecar
+    const side = Buffer.from(JSON.stringify({ frames: 3_540_000, dropped: 0, appVersion: 'build-107' }));
+    const sideUp = await fetch(`${s.base}/api/can/logs/${name}.json`, { method: 'POST', body: side, headers: { ...https, Authorization: `Bearer ${token}`, 'Upload-Offset': '0', 'Upload-Length': String(side.length), 'Upload-SHA256': crypto.createHash('sha256').update(side).digest('hex') } });
+    assert.equal(sideUp.status, 201);
+
+    // the Nerd panel sees them; the file is stored as it came
+    const files = await s.call('GET', '/api/can/files', undefined, { headers: https });
+    assert.deepEqual(files.data.logs.map((l) => [l.name, l.bytes, l.frames, l.appVersion]), [[name, 300_000, 3_540_000, 'build-107']]);
+    assert.ok((await fsp.readFile(path.join(dir, 'data', 'can', 'MY-car', name))).equals(file));
+    assert.equal((await s.call('DELETE', `/api/can/files/${name}`, undefined, { headers: https })).status, 200);
+    assert.equal((await s.call('GET', '/api/can/files', undefined, { headers: https })).data.logs.length, 0);
+
+    // tokens per car: another token, then the first revoked; off: gone again
+    const on2 = await s.call('POST', '/api/can/tokens', {}, { headers: https });
+    assert.equal((await fetch(`${s.base}/api/can/logs/ping`, { headers: { ...https, Authorization: `Bearer ${on2.data.token}` } })).status, 200);
+    const tokens = (await s.call('GET', '/api/can/settings', undefined, { headers: https })).data.tokens;
+    assert.equal(tokens.length, 2);
+    assert.equal(tokens[0].key, 'MY-car', 'the first token is for the car it uploaded for');
+    assert.ok(!('hash' in tokens[0]), 'the token\'s hash is not shown');
+    assert.equal((await s.call('DELETE', `/api/can/tokens/${tokens[0].id}`, undefined, { headers: https })).status, 200);
+    assert.equal((await fetch(`${s.base}/api/can/logs/ping`, { headers: { ...https, Authorization: `Bearer ${token}` } })).status, 401, 'a revoked token stops working');
+    await s.call('POST', '/api/can/disable', {}, { headers: https });
+    assert.equal((await fetch(`${s.base}/api/can/logs/ping`, { headers: { ...https, Authorization: `Bearer ${on2.data.token}` } })).status, 404);
+  } finally {
+    await s.stop();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('CAN Bridge port: closed until uploads are on, only the CAN API while open, closed again when off', async () => {
+  const dir = await tmp();
+  const canPort = await freePort();
+  const s = await startServer(dir, { TRUST_PROXY: 'true', CAN_PORT: String(canPort) });
+  const https = { 'X-Forwarded-Proto': 'https' };
+  const canBase = `http://127.0.0.1:${canPort}`;
+  const reach = (p, headers = {}) => fetch(canBase + p, { headers: { ...https, ...headers } }).then((r) => r.status, () => 'closed');
+  try {
+    assert.equal(await reach('/api/can/logs/ping'), 'closed', 'nothing listens while off');
+    await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' }, { headers: https });
+    await s.call('POST', '/api/auth/confirm', { password: 'correct horse' }, { headers: https });
+    const on = await s.call('POST', '/api/can/enable', {}, { headers: https });
+    assert.equal(on.data.port, canPort);
+    await waitFor(async () => (await reach('/api/can/logs/ping', { Authorization: `Bearer ${on.data.token}` })) === 200);
+    assert.equal(await reach('/api/vehicles'), 404, 'only the CAN API there');
+    assert.equal(await reach('/', { Cookie: s.getCookie() }), 404, 'not the app, even signed in');
+    assert.equal(await reach('/api/can/logs/ping', { Authorization: 'Bearer wrong' }), 401);
+    const st = (await s.call('GET', '/api/can/settings', undefined, { headers: https })).data;
+    assert.deepEqual([st.port.port, st.port.listening], [canPort, true]);
+    await s.call('POST', '/api/can/disable', {}, { headers: https });
+    await waitFor(async () => (await reach('/api/can/logs/ping')) === 'closed');
+  } finally {
+    await s.stop();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('CAN Bridge security: a token per car, signed logs verified, a changed log kept but not used, the chain checked, abuse refused', { skip: spawnSync('xz', ['--version']).status !== 0 && 'needs xz', timeout: 90000 }, async () => {
+  const { signedMessage } = require('../server/canTrust');
+  const dir = await tmp();
+  await makeFootage(path.join(dir, 'footage'));
+  const s = await startServer(dir, { TRUST_PROXY: 'true' });
+  const https = { 'X-Forwarded-Proto': 'https' };
+  const A = 'aaaaaa000001';
+  const B = 'bbbbbb000002';
+  const put = (token, name, body, extra = {}) => fetch(`${s.base}/api/can/logs/${encodeURIComponent(name)}`, { method: 'POST', body, headers: { ...https, Authorization: `Bearer ${token}`, 'Upload-Offset': '0', 'Upload-Length': String(body.length), 'Upload-SHA256': crypto.createHash('sha256').update(body).digest('hex'), ...extra } }).then(async (r) => ({ status: r.status, data: await r.json().catch(() => null) }));
+  // the bridge: a P-256 key and a chain
+  const { privateKey, publicKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const der = publicKey.export({ format: 'der', type: 'spki' });
+  let index = 0;
+  let prev = { name: '-', sha256: '0'.repeat(64) };
+  const t0 = Date.UTC(2020, 0, 1, 8, 0, 0) / 1000;
+  const logFor = (minute, volts) => {
+    const lines = [];
+    for (let i = 0; i < 600; i++) {
+      const b = Buffer.alloc(8);
+      b.writeUInt16LE(Math.round(volts / 0.01), 0);
+      lines.push(`(${(t0 + minute * 60 + i / 10).toFixed(6)}) can0 132#${b.toString('hex').toUpperCase()}`);
+    }
+    return execFileSync('xz', ['-6', '-c'], { input: `${lines.join('\n')}\n` });
+  };
+  const signed = (name, body, key = A) => {
+    const sha = crypto.createHash('sha256').update(body).digest('hex');
+    const msg = signedMessage({ vehicleKey: key, name, sha256: sha, length: body.length, index, prevName: prev.name, prevSha256: prev.sha256 });
+    const integrity = { signed: true, version: 'canbridge-log-sig-v1', algorithm: 'ECDSA-P256-SHA256', public_key: der.toString('base64'), vehicle_key: key, sha256: sha, length: body.length, index, prev_name: prev.name, prev_sha256: prev.sha256, signature: crypto.sign('sha256', Buffer.from(msg), privateKey).toString('base64') };
+    prev = { name, sha256: sha };
+    index++;
+    return Buffer.from(JSON.stringify({ format: 'canbridge-candump-xz/1', frames: 600, app_version: '0.2.118', dropped_chunks: 0, integrity }));
+  };
+  try {
+    await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' }, { headers: https });
+    await s.call('POST', '/api/auth/confirm', { password: 'correct horse' }, { headers: https });
+    const tokA = (await s.call('POST', '/api/can/enable', {}, { headers: https })).data.token;
+    const tokB = (await s.call('POST', '/api/can/tokens', {}, { headers: https })).data.token;
+
+    // log 0 of car A, signed: verified, paired, decoded
+    const n0 = `${A}_20200101T080000Z_1.log.xz`;
+    const log0 = logFor(0, 390);
+    assert.equal((await put(tokA, n0, log0)).status, 201);
+    assert.equal((await put(tokA, `${n0}.json`, signed(n0, log0))).status, 201);
+    // the token is now car A's: car B's logs are refused, and B's names are not even answered
+    const nB = `${B}_20200101T080000Z_1.log.xz`;
+    const wrong = await put(tokA, nB, Buffer.from('x'));
+    assert.deepEqual([wrong.status, wrong.data.code], [403, 'wrong_car']);
+    const st = await (await fetch(`${s.base}/api/can/logs/status`, { method: 'POST', headers: { ...https, Authorization: `Bearer ${tokA}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ names: [n0, nB] }) })).json();
+    assert.deepEqual([st.files[n0].state, st.files[nB].state], ['complete', 'forbidden']);
+    // car B's own token works for car B
+    assert.equal((await put(tokB, nB, Buffer.from('car b'))).status, 201);
+    assert.equal((await put(tokB, `${A}_20200101T090000Z_5.log.xz`, Buffer.from('x'))).data.code, 'wrong_car', 'and only for car B');
+
+    const files = async () => Object.fromEntries((await s.call('GET', '/api/can/files', undefined, { headers: https })).data.logs.map((l) => [l.name, l]));
+    await waitFor(async () => (await files())[n0]?.check.status === 'verified');
+    const f0 = (await files())[n0];
+    assert.deepEqual([f0.appVersion, f0.dropped, f0.check.index], ['0.2.118', 0, 0], 'the sidecar\'s own field names');
+    const clip0 = path.join(dir, 'footage', 'TeslaCam', 'RecentClips', '2020-01-01_08-00-00-front.mp4');
+    await waitFor(async () => (await s.call('GET', `/api/can/clip?path=${encodeURIComponent(clip0)}&signals=BattVoltage132`, undefined, { headers: https })).data.series?.BattVoltage132);
+    const c0 = (await s.call('GET', `/api/can/clip?path=${encodeURIComponent(clip0)}&signals=BattVoltage132`, undefined, { headers: https })).data;
+    assert.equal(c0.trust, 'verified');
+
+    // log 1, swapped after signing: kept, failed, not decoded
+    const n1 = `${A}_20200101T080100Z_2.log.xz`;
+    const log1 = logFor(1, 350);
+    const side1 = signed(n1, log1);
+    // (a valid log, but not the one signed: another battery voltage throughout)
+    const changed = logFor(1, 351);
+    assert.equal((await put(tokA, n1, changed)).status, 201, 'taken (the upload hash is the file\'s own)');
+    assert.equal((await put(tokA, `${n1}.json`, side1)).status, 201);
+    await waitFor(async () => (await files())[n1]?.check.status === 'failed');
+    assert.match((await files())[n1].check.reason, /not the one that was signed/);
+    const clip1 = path.join(dir, 'footage', 'TeslaCam', 'RecentClips', '2020-01-01_08-01-00-front.mp4');
+    await new Promise((r) => setTimeout(r, 1500));
+    const c1 = (await s.call('GET', `/api/can/clip?path=${encodeURIComponent(clip1)}&signals=BattVoltage132`, undefined, { headers: https })).data;
+    assert.ok(!(c1.series.BattVoltage132 || []).some(([t, v]) => t >= (t0 + 62) * 1000 && Math.abs(v - 351) < 1), 'the changed log\'s data is not used');
+    // used anyway: decoded, and flagged
+    assert.equal((await s.call('POST', `/api/can/files/${n1}/use`, { use: true }, { headers: https })).status, 200);
+    await waitFor(async () => (await s.call('GET', `/api/can/clip?path=${encodeURIComponent(clip1)}&signals=BattVoltage132`, undefined, { headers: https })).data.trust === 'override');
+
+    // log 2 never arrives; log 3 does: a gap in the chain
+    signed(`${A}_20200101T080200Z_3.log.xz`, logFor(2, 380));
+    const n3 = `${A}_20200101T080300Z_4.log.xz`;
+    const log3 = logFor(3, 381);
+    await put(tokA, n3, log3);
+    await put(tokA, `${n3}.json`, signed(n3, log3));
+    await waitFor(async () => (await files())[n3]?.check.status === 'verified');
+    const trustA = (await s.call('GET', '/api/can/settings', undefined, { headers: https })).data.trust.find((x) => x.key === A);
+    assert.deepEqual(trustA.chain.issues.map((i) => i.kind), ['failed', 'gap']);
+    assert.match(trustA.chain.issues[0].text, /^log 1 .* failed its check/);
+    assert.equal(trustA.chain.issues[1].text, 'log 2 is missing');
+    assert.match(trustA.pin.fingerprint, /^([0-9A-F]{2}:){31}[0-9A-F]{2}$/);
+    assert.deepEqual([trustA.counts.verified, trustA.counts.failed], [2, 1]);
+
+    // abuse: names that try to leave the folder, a sidecar too large, a flood of wrong tokens
+    assert.ok([400, 404].includes((await put(tokA, '../../etc/passwd', Buffer.from('x'))).status));
+    assert.ok([400, 404].includes((await put(tokA, `${A}_20200101T080000Z_1.log.xz/../../x`, Buffer.from('x'))).status));
+    assert.equal((await put(tokA, `${A}_20200101T090000Z_9.log.xz.json`, Buffer.alloc(10), { 'Upload-Length': String(5 * 1024 * 1024) })).status, 413);
+    let last = 0;
+    for (let i = 0; i < 22; i++) last = (await put(`wrong${i}`, n0, Buffer.from('x'))).status;
+    assert.equal(last, 429, 'an address that keeps guessing is refused');
+    // the CAN token cannot do anything else
+    assert.equal((await fetch(`${s.base}/api/can/settings`, { headers: { ...https, Authorization: `Bearer ${tokA}` } })).status, 401);
+    assert.equal((await fetch(`${s.base}/api/can/files/${n0}`, { method: 'DELETE', headers: { ...https, Authorization: `Bearer ${tokA}`, 'X-Requested-With': 'sentry-six-manager' } })).status, 401);
+  } finally {
+    await s.stop();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('CAN index: an uploaded log is decoded in the background, and a clip gets its signals at its own time', { skip: spawnSync('xz', ['--version']).status !== 0 && 'needs xz', timeout: 60000 }, async () => {
+  const dir = await tmp();
+  await makeFootage(path.join(dir, 'footage'));
+  const s = await startServer(dir, { TRUST_PROXY: 'true' });
+  const https = { 'X-Forwarded-Proto': 'https' };
+  try {
+    await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' }, { headers: https });
+    await s.call('POST', '/api/auth/confirm', { password: 'correct horse' }, { headers: https });
+    const token = (await s.call('POST', '/api/can/enable', {}, { headers: https })).data.token;
+    // a minute of the clip 2020-01-01_08-00-00 (the car's zone is UTC here): battery
+    // voltage 380 V rising 0.1 V a second, speed 36 km/h, and an id no DBC knows
+    const t0 = Date.UTC(2020, 0, 1, 8, 0, 0) / 1000;
+    const lines = ['# canbridge v1'];
+    for (let i = 0; i < 70 * 10; i++) {
+      const t = t0 - 2 + i / 10;
+      const volts = 380 + (t - t0) * 0.1;
+      const b132 = Buffer.alloc(8);
+      b132.writeUInt16LE(Math.round(volts / 0.01), 0);
+      const b257 = Buffer.alloc(8);
+      b257.writeUInt32LE(Math.round((36 + 40) / 0.08) << 12, 0);
+      lines.push(`(${t.toFixed(6)}) can0 132#${b132.toString('hex').toUpperCase()}`, `(${t.toFixed(6)}) can0 257#${b257.toString('hex').toUpperCase()}`, `(${t.toFixed(6)}) can0 7FF#0102030405060708`,
+        `(${t.toFixed(6)}) can0 7EF#AA00${(Math.floor(i / 20) & 0xff).toString(16).padStart(2, '0').toUpperCase()}00`); // unknown: byte 2 counts every 2 s
+    }
+    const file = execFileSync('xz', ['-6', '-c'], { input: `${lines.join('\n')}\n` });
+    const name = 'MY-car_20200101T075958Z_1.log.xz';
+    const up = await fetch(`${s.base}/api/can/logs/${name}`, { method: 'POST', body: file, headers: { ...https, Authorization: `Bearer ${token}`, 'Upload-Offset': '0', 'Upload-Length': String(file.length), 'Upload-SHA256': crypto.createHash('sha256').update(file).digest('hex') } });
+    assert.equal(up.status, 201);
+    // its sidecar (unsigned, as from a bridge before signing): the log is used once it is here
+    const side = Buffer.from(JSON.stringify({ format: 'canbridge-candump-xz/1', frames: 2100 }));
+    const sideUp = await fetch(`${s.base}/api/can/logs/${name}.json`, { method: 'POST', body: side, headers: { ...https, Authorization: `Bearer ${token}`, 'Upload-Offset': '0', 'Upload-Length': String(side.length), 'Upload-SHA256': crypto.createHash('sha256').update(side).digest('hex') } });
+    assert.equal(sideUp.status, 201);
+    const clip = path.join(dir, 'footage', 'TeslaCam', 'RecentClips', '2020-01-01_08-00-00-front.mp4');
+    await waitFor(async () => (await s.call('GET', `/api/can/signals?path=${encodeURIComponent(clip)}`, undefined, { headers: https })).data.signals?.BattVoltage132);
+    const meta = (await s.call('GET', `/api/can/signals?path=${encodeURIComponent(clip)}`, undefined, { headers: https })).data.signals;
+    assert.equal(meta.BattVoltage132.unit, 'V');
+    const got = (await s.call('GET', `/api/can/clip?path=${encodeURIComponent(clip)}&signals=BattVoltage132,DI_vehicleSpeed`, undefined, { headers: https })).data;
+    assert.equal(got.start, t0 * 1000, 'the clip starts at its name, in the car\'s zone');
+    const at = (pts, ms) => pts.filter((p) => p[0] <= ms).pop()?.[1];
+    assert.ok(Math.abs(at(got.series.BattVoltage132, got.start + 10_000) - 381) < 0.02, 'about 381 V ten seconds in');
+    assert.ok(Math.abs(at(got.series.DI_vehicleSpeed, got.start + 30_000) - 36) < 0.1, '36 km/h');
+    assert.ok(got.series.BattVoltage132[0][0] <= got.start, 'with the value from before the clip starts');
+    // the nerd raw view: every id, the unknown one too, its payload changes in UTC
+    const raw = (await s.call('GET', `/api/can/raw?path=${encodeURIComponent(clip)}`, undefined, { headers: https })).data;
+    assert.equal(raw.start, got.start);
+    assert.deepEqual(raw.ids.map((e) => [e.bus, e.id, e.name]), [['can0', '132', 'ID132HVBattAmpVolt'], ['can0', '257', 'ID257DIspeed'], ['can0', '7EF', null], ['can0', '7FF', 'ID7FFcarConfig']], 'sorted by id; null for what the DBC does not know');
+    const same = raw.ids.find((e) => e.id === '7FF');
+    assert.deepEqual(same.changes.map((c) => c[1]), ['0102030405060708'], 'a payload that never changes: once');
+    assert.ok(same.changes[0][0] <= raw.start, 'the payload at the clip\'s start');
+    assert.ok(Math.abs(same.hz - 10) < 0.5, `10 frames a second (${same.hz})`);
+    const unknown = raw.ids.find((e) => e.id === '7EF').changes;
+    const at0 = unknown.filter((c) => c[0] <= raw.start).pop();
+    assert.equal(at0[1], 'AA000100', 'the unknown id\'s payload as the clip starts (2 s after its count began)');
+    assert.ok(unknown.some((c) => c[0] === raw.start + 2000 && c[1] === 'AA000200'), 'and when it changes');
+    assert.equal(unknown.filter((c) => c[0] > raw.start).length, 33, 'one change every 2 s (2 … 66 s), nothing in between');
+    const volts = raw.ids.find((e) => e.id === '132').changes;
+    assert.ok(volts.length > 50 && volts.every((c, i) => i === 0 || c[0] > volts[i - 1][0]), 'the changes in time order');
+    const part = (await s.call('GET', `/api/can/raw?path=${encodeURIComponent(clip)}&from=10000&to=11000`, undefined, { headers: https })).data;
+    assert.ok(part.ids.find((e) => e.id === '132').changes.every((c) => c[0] <= raw.start + 11000) && part.from === raw.start + 10000, 'a part of the clip');
+    assert.deepEqual((await s.call('GET', `/api/can/raw?path=${encodeURIComponent(clip)}&probe=1`, undefined, { headers: https })).data, { start: raw.start, count: 4 });
+    const st = (await s.call('GET', '/api/can/settings', undefined, { headers: https })).data;
+    assert.deepEqual(st.keys, ['MY-car']);
+    assert.equal(st.index.lastError, null);
+  } finally {
+    await s.stop();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('CAN search: when a signal first met a condition and when an id appeared, with the clip that covers it', { timeout: 60000 }, async () => {
+  const dir = await tmp();
+  await makeFootage(path.join(dir, 'footage'));
+  // three indexed minutes of the car MY-car (its only car, in UTC): 08:00 to 08:02
+  const idx = path.join(dir, 'data', 'can-index', 'MY-car');
+  await fsp.mkdir(idx, { recursive: true });
+  const t0 = Date.UTC(2020, 0, 1, 8, 0);
+  const minute = (i, signals, ids) => fsp.writeFile(path.join(idx, `20200101T080${i}.json.gz`), zlib.gzipSync(JSON.stringify({ minute: `20200101T080${i}`, signals, ids })));
+  await minute(0, { DI_vehicleSpeed: [[0, 10], [30_000, 20]] }, { 'can0:257': 600 });
+  await minute(1, { DI_vehicleSpeed: [[0, 30], [42_000, 55]] }, { 'can0:257': 600, 'can0:3F5': 10 });
+  await minute(2, { DI_vehicleSpeed: [[0, 50]] }, { 'can0:257': 600, 'can0:3F5': 10 });
+  const s = await startServer(dir);
+  try {
+    await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
+    const vid = (await s.call('GET', '/api/vehicles')).data.vehicles[0].id;
+    await waitFor(async () => (await s.call('GET', `/api/vehicles/${vid}/recordings`)).data?.recordings?.length);
+    const found = (await s.call('GET', `/api/can/search?vehicle=${vid}&signal=DI_vehicleSpeed&op=%3E&value=40`)).data;
+    assert.equal(found.first.at, t0 + 60_000 + 42_000);
+    assert.equal(found.first.value, 55);
+    assert.equal(found.first.localTime, '2020-01-01 08:01:42');
+    assert.deepEqual(found.first.footage, { at: t0 + 102_000, localTime: '2020-01-01 08:01:42', day: '2020-01-01', clip: '2020-01-01_08-01-00', second: 42 });
+    assert.equal((await s.call('GET', `/api/can/search?vehicle=${vid}&signal=DI_vehicleSpeed&op=%3E&value=40&from=2020-01-01T08:02`)).data.first.at, t0 + 120_000);
+    assert.equal((await s.call('GET', `/api/can/search?vehicle=${vid}&signal=DI_vehicleSpeed&op=~&value=40`)).status, 400);
+    const ev = (await s.call('GET', `/api/can/id-events?vehicle=${vid}&before=2020-01-01T08:01`)).data;
+    assert.deepEqual(ev.appeared.map((x) => [x.id, x.at, x.footage?.clip]), [['can0:3F5', t0 + 60_000, '2020-01-01_08-01-00']]);
+    assert.ok((await s.call('GET', `/api/can/vehicle-signals?vehicle=${vid}`)).data.signals);
+    assert.equal((await s.call('GET', '/api/can/search?vehicle=nope&signal=x&op=appeared')).status, 404);
+  } finally {
+    await s.stop();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('Viewer dashboards: kept per account, cleaned of anything that is not a block', async () => {
+  const dir = await tmp();
+  const s = await startServer(dir);
+  try {
+    await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
+    assert.deepEqual((await s.call('GET', '/api/dashboards')).data, { boards: [], active: null }, 'none yet: the page uses its default');
+    const put = await s.call('PUT', '/api/dashboards', { active: 'b2', boards: [
+      { id: 'b1', name: 'Drive', placement: 'below', blocks: [{ type: 'gauge', signals: ['dash.speed'] }, { type: 'wide', signals: ['a', 'b', 'c', 'd'] }, { type: 'evil', signals: ['x'] }] },
+      { id: 'b2', name: '  Battery\nnerd ', placement: 'sideways', metric: true, blocks: [{ type: 'small', signals: ['can.BattVoltage132', '<script>'] }] }
+    ] });
+    assert.equal(put.status, 200);
+    const got = (await s.call('GET', '/api/dashboards')).data;
+    assert.equal(got.active, 'b2');
+    assert.deepEqual(got.boards[0].blocks, [{ type: 'gauge', signals: ['dash.speed'] }, { type: 'wide', signals: ['a', 'b', 'c'] }], 'three stats at most in a wide block; unknown block types dropped');
+    assert.deepEqual([got.boards[1].name, got.boards[1].placement, got.boards[1].metric, got.boards[1].blocks[0].signals], ['Battery nerd', 'below', true, ['can.BattVoltage132']]);
+    assert.equal((await s.call('PUT', '/api/dashboards', { boards: [] })).status, 400);
   } finally {
     await s.stop();
     await fsp.rm(dir, { recursive: true, force: true });

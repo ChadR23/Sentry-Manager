@@ -29,6 +29,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const http = require('http');
 const http2 = require('http2');
+const https = require('https');
 const net = require('net');
 const os = require('os');
 const path = require('path');
@@ -76,6 +77,25 @@ const { run } = require('./proc');
 const { Telemetry } = require('./telemetry');
 const { createSpeedIndex } = require('./speedIndex');
 const { createExporter } = require('./exporter');
+const { createCanLogs, parseName: parseCanName } = require('./canLogs');
+const { createCanIndex } = require('./canIndex');
+const { createCanTrust } = require('./canTrust');
+const { createCanSync } = require('./canSync');
+const { createCanSearch, footageAt, clipStamps, localTime, parseWhen } = require('./canSearch');
+
+/** A wall-clock time in an IANA time zone (as a TeslaCam clip is named) in UTC milliseconds. */
+function zonedToUtc(y, mo, d, h, mi, sec, timeZone) {
+  const offsetAt = (ms) => {
+    try {
+      const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })
+        .formatToParts(new Date(ms)).map((x) => [x.type, x.value]));
+      return Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second) - ms;
+    } catch { return 0; }
+  };
+  const guess = Date.UTC(y, mo - 1, d, h, mi, sec);
+  const first = guess - offsetAt(guess);
+  return guess - offsetAt(first); // again, for a change of clocks in between
+}
 
 /** Run fn over items, at most n at a time. */
 async function eachLimit(items, n, fn) {
@@ -91,6 +111,8 @@ const DATA = path.resolve(process.env.DATA_PATH || '/data');
 const RUN_DIR = path.resolve(process.env.RUN_DIR || '/run/sentry-six-manager');
 const FOOTAGE_ROOT = path.resolve(process.env.FOOTAGE_ROOT || '/footage');
 const PORT = Number(process.env.PORT || 9000);
+// the CAN Bridge's uploads: a port of their own, open only while they are turned on
+const CAN_PORT = Number(process.env.CAN_PORT || 10000);
 const HOST = process.env.HOST || '0.0.0.0';
 const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
 const FFPROBE = process.env.FFPROBE_PATH || 'ffprobe';
@@ -286,6 +308,11 @@ async function main() {
   let speedIndex = null;
   let scrubPrepare = null;
   let integrityRef = null; // the footage check: one cut short by a restart goes on after the first scan
+  let canUploadRef = null; // CAN Bridge uploads (set where canLogs is made)
+  let canPortRef = null; // opens or closes the CAN Bridge's own port (set where the servers start)
+  let canServer = null;
+  let canPortState = { listening: false, error: null, port: CAN_PORT };
+  const canUpload = (req, res, p) => (canUploadRef ? canUploadRef(req, res, p) : sendJson(res, 404, { error: 'Not found' }));
   const inventory = new Inventory({ vehicles, db, log: logger.scope('inventory'), onChange: () => announce('inventory'), onScanned: (vid) => { speedIndex?.kick(); scrubPrepare?.kick(); integrityRef?.resume(vid); } });
   const thumbs = new Thumbnails({ dir: path.join(DATA, 'thumbnails'), ffmpegPath: FFMPEG });
   const telemetry = new Telemetry({ srcRoot: SRC, cacheDir: path.join(DATA, 'telemetry'), log: logger.scope('telemetry') });
@@ -868,6 +895,7 @@ async function main() {
     const list = parseHostnames(Array.isArray(body?.hostnames) ? body.hostnames.join(',') : String(body?.hostnames || ''));
     const out = await tlsSource.setHostnames(list);
     if (httpsServer) httpsServer.setSecureContext({ key: out.key, cert: out.cert });
+    canServer?.setSecureContext?.({ key: out.key, cert: out.cert });
     audit.info(`HTTPS certificate names set to [${list.join(', ')}]${out.caReplaced ? ' (new certificate authority)' : ''}: ${by(req, user)}`);
     return { ok: true, caReplaced: Boolean(out.caReplaced), tls: tlsSource.status() };
   });
@@ -1584,6 +1612,29 @@ async function main() {
     out.sort((a, b) => String(b.startKey).localeCompare(String(a.startKey)));
     return { events: out, withoutPosition: recs.length - out.length };
   });
+  // The Viewer's stats dashboards (web/statDash.js): each account's own
+  const DASH_TYPES = { small: 1, wide: 3, gauge: 1, state: 1 };
+  const cleanBoards = (body) => {
+    const boards = (Array.isArray(body?.boards) ? body.boards : []).slice(0, 12).map((b, i) => ({
+      id: /^[\w-]{1,24}$/.test(String(b?.id)) ? String(b.id) : `b${i}`,
+      name: String(b?.name ?? 'Dashboard').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 40) || 'Dashboard',
+      placement: b?.placement === 'over' ? 'over' : 'below',
+      metric: typeof b?.metric === 'boolean' ? b.metric : null,
+      blocks: (Array.isArray(b?.blocks) ? b.blocks : []).slice(0, 32).filter((x) => DASH_TYPES[x?.type]).map((x) => ({
+        type: x.type, signals: (Array.isArray(x.signals) ? x.signals : []).slice(0, DASH_TYPES[x.type]).map((id) => String(id)).filter((id) => /^[\w.:-]{1,80}$/.test(id))
+      }))
+    }));
+    if (!boards.length) throw new HttpError(400, 'Send at least one dashboard.');
+    const active = boards.some((b) => b.id === body?.active) ? body.active : boards[0].id;
+    return { boards, active };
+  };
+  r.add('GET', '/api/dashboards', (req, res, { user }) => db.get(`dash:${user}`, null) || { boards: [], active: null });
+  r.add('PUT', '/api/dashboards', (req, res, { body, user }) => {
+    const clean = cleanBoards(body);
+    db.set(`dash:${user}`, clean);
+    return clean;
+  });
+
   // Saved places: named spots (Home, Work) for the maps and the place search
   const placeList = () => (Array.isArray(db.get('places', [])) ? db.get('places', []) : []);
   const placeName = (n) => String(n ?? '').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 60);
@@ -1628,6 +1679,331 @@ async function main() {
     if (!inventory.get(v.id)?.files) await inventory.scan(v.id);
     return integrity.start(v.id);
   });
+  // ---- CAN Bridge logs (the hidden Nerd settings; docs/can-bridge-api.md)
+  const canLogs = createCanLogs({ dir: path.join(DATA, 'can'), freeBytes: () => diskSpace(fs.promises, DATA).then((x) => x.free).catch(() => Infinity) });
+  // each log decoded once in the background (not while a conversion runs), so the Viewer gets it ready
+  let canSync = null;
+  // signatures, pairing and the chain of each car's logs (canTrust.js): a log is decoded only when it may be used
+  const canTrust = createCanTrust({ dir: path.join(DATA, 'can'), log: logger.scope('can') });
+  const canIndex = createCanIndex({ usable: (k, n) => canTrust.usable(k, n), canDir: path.join(DATA, 'can'), dir: path.join(DATA, 'can-index'), log: logger.scope('can'), idle: () => !converterRunning(), onIndexed: (key, from, to) => canSync?.indexed(key, from, to).catch(() => {}) });
+  setTimeout(() => canIndex.kick(), 20_000).unref?.();
+  // which car each CAN Bridge key is (a key of its own when there is one car)
+  const canMap = () => db.get('can-vehicles', {}) || {};
+  async function canKeysFor(vid) {
+    const map = canMap();
+    let keys = [];
+    try { keys = (await fs.promises.readdir(path.join(DATA, 'can-index'), { withFileTypes: true })).filter((d) => d.isDirectory()).map((d) => d.name); } catch { return []; }
+    const single = vehicles.list().length === 1;
+    return keys.filter((k) => map[k] === vid || (!map[k] && single));
+  }
+  /** A clip's start in UTC from its name (the car's zone), or null. */
+  const canStartOf = (v, name) => {
+    const m = /(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})/.exec(name);
+    return m ? zonedToUtc(+m[1], +m[2], +m[3], +m[4], +m[5], +m[6], v.timezone || 'UTC') : null;
+  };
+  /** The car, its CAN keys and the clip's start in UTC, for a clip file. */
+  async function canClipOf(p) {
+    const real = String(p || '');
+    const v = vehicles.list().find((x) => { const root = vehicles.rootOf(x); return root && (real === root || real.startsWith(`${root}${path.sep}`)); });
+    if (!v) throw new HttpError(404, 'Not a clip of a vehicle.');
+    const start = canStartOf(v, path.basename(real));
+    if (start === null) throw new HttpError(400, 'Not a TeslaCam clip name.');
+    return { v, keys: await canKeysFor(v.id), start };
+  }
+  // where on the CAN clock each clip's first frame is, from its own telemetry (server/canSync.js)
+  canSync = createCanSync({
+    dir: path.join(DATA, 'can-index'), series: canIndex.series, telemetry: async (real) => (await telemetry.forFile(real)).body,
+    vehicles, inventory, keysFor: canKeysFor, startOf: canStartOf, log: logger.scope('can'),
+    idle: () => !converterRunning() && !canIndex.status().running
+  });
+  // the Viewer: every signal there is for this car (for the stat picker) ...
+  r.add('GET', '/api/can/signals', async (req, res, { query }) => {
+    const { keys } = await canClipOf(query.path);
+    return { signals: await canIndex.signals(keys) };
+  });
+  // ... and the chosen ones over this clip (UTC times), already decoded
+  r.add('GET', '/api/can/clip', async (req, res, { query }) => {
+    const { v, keys, start: named } = await canClipOf(query.path);
+    const names = String(query.signals || '').split(',').map((x) => x.trim()).filter((x) => /^\w{1,80}$/.test(x)).slice(0, 64);
+    if (!names.length || !keys.length) return { start: named, series: {} };
+    // the clip's start on the CAN clock: its name's time, corrected by the sync
+    const real = await studioReadable.resolve(String(query.path || ''));
+    const sync = real && !hiddenPath(real) ? await canSync.forClip({ v, keys, real, start: named }).catch((err) => { log.warn(`CAN sync: ${err.message}`); return null; }) : null;
+    const start = Math.round((named + (sync?.offsetMs || 0)) * 10) / 10;
+    // how far it can be trusted: verified, unsigned, or override (a log that failed its check, used anyway)
+    const trust = await canIndex.trustOf(keys, start - 2000, start + 70_000);
+    return { start, sync, trust, series: await canIndex.series(keys, start - 2000, start + 70_000, names) };
+  });
+  // "when did this start" (canSearch.js): one search at a time, each match with the clip that covers it
+  const canSearch = createCanSearch({ dir: path.join(DATA, 'can-index') });
+  let canSearchQueue = Promise.resolve();
+  const canStamps = new Map(); // vehicle id -> { of, stamps }
+  async function canSearchRun(query, fn) {
+    const v = vehicleOr404(String(query.vehicle || ''));
+    const keys = await canKeysFor(v.id);
+    const tz = v.timezone || 'UTC';
+    const when = (s, end) => parseWhen(s, (...a) => zonedToUtc(...a, tz), end);
+    const job = canSearchQueue.then(() => fn(keys, when));
+    canSearchQueue = job.catch(() => {});
+    let out;
+    try { out = await job; } catch (err) { throw new HttpError(err.status || 500, err.message); }
+    const inv = inventory.get(v.id);
+    let c = canStamps.get(v.id);
+    if (inv?.recordings && c?.of !== inv.recordings) {
+      c = { of: inv.recordings, stamps: clipStamps(inv.recordings) };
+      canStamps.set(v.id, c);
+    }
+    const add = (m) => { if (m && Number.isFinite(m.at)) { m.localTime = localTime(m.at, tz); m.footage = footageAt(c?.stamps, m.at, tz); } };
+    for (const list of [out.matches, out.appeared, out.stopped]) list?.forEach(add);
+    return { vehicle: v.id, timezone: tz, keys, ...out };
+  }
+  r.add('GET', '/api/can/vehicle-signals', async (req, res, { query }) => ({ signals: await canIndex.signals(await canKeysFor(vehicleOr404(String(query.vehicle || '')).id)) }));
+  r.add('GET', '/api/can/search', (req, res, { query }) => canSearchRun(query, (keys, when) => canSearch.signal(keys, {
+    signal: query.signal, op: query.op, value: query.value, from: when(query.from), to: when(query.to, true), limit: query.limit, all: query.all === '1' || query.all === 'true'
+  })));
+  r.add('GET', '/api/can/id-events', (req, res, { query }) => canSearchRun(query, (keys, when) => canSearch.ids(keys, {
+    from: when(query.from), to: when(query.to, true), before: when(query.before), gap: query.gap, id: query.id || null, limit: query.limit
+  })));
+  // ... and the nerd raw view: every id's payload changes over the clip (or from/to ms into it), decodable or not
+  r.add('GET', '/api/can/raw', async (req, res, { query }) => {
+    const { v, keys, start: named } = await canClipOf(query.path);
+    // on the CAN clock, as /api/can/clip (the same sync), so raw frames and signals agree
+    const real = keys.length ? await studioReadable.resolve(String(query.path || '')) : null;
+    const sync = real && !hiddenPath(real) ? await canSync.forClip({ v, keys, real, start: named }).catch(() => null) : null;
+    const start = Math.round((named + (sync?.offsetMs || 0)) * 10) / 10;
+    const ms = (x, d) => { const n = Number(x); return x !== undefined && x !== '' && Number.isFinite(n) ? Math.max(-120_000, Math.min(180_000, n)) : d; };
+    const from = start + ms(query.from, -2000);
+    const to = start + ms(query.to, 70_000);
+    const ids = keys.length && to >= from ? await canIndex.raw(keys, from, to) : [];
+    // probe=1: only how many ids there are (whether the Viewer offers the raw view)
+    if (query.probe) return { start, count: ids.length };
+    return { start, from, to, ids };
+  });
+  r.add('POST', '/api/can/vehicle-map', (req, res, { body, user }) => {
+    const key = String(body?.key || '');
+    if (!/^[A-Za-z0-9-]{1,64}$/.test(key)) throw new HttpError(400, 'Give the CAN Bridge car key.');
+    const vid = body?.vehicleId ? vehicleOr404(String(body.vehicleId)).id : null;
+    const map = { ...canMap() };
+    if (vid) map[key] = vid; else delete map[key];
+    db.set('can-vehicles', map);
+    audit.info(`CAN car ${key} is ${vid || 'no vehicle'}: ${by(req, user)}`);
+    return { map };
+  });
+  // ---- who may upload: one token per car (docs/can-bridge-api.md, "Tokens")
+  // db 'can': { enabled, at, tokens: [{ id, hash, vehicleId, key, label, createdAt, lastUsedAt }] }
+  // A token is bound to one CAN Bridge car key (on its first upload, or when
+  // made) and can only send that car's logs; only its SHA-256 is kept.
+  const canCfg = () => {
+    const c = db.get('can', null) || { enabled: false };
+    // (one token from before tokens were per car)
+    if (c.tokenHash && !Array.isArray(c.tokens)) return { enabled: c.enabled, at: c.at, tokens: [{ id: 'first', hash: c.tokenHash, vehicleId: null, key: null, label: 'First token', createdAt: c.at || null, lastUsedAt: null }] };
+    return { ...c, tokens: Array.isArray(c.tokens) ? c.tokens : [] };
+  };
+  const saveCanCfg = (c) => db.set('can', { enabled: Boolean(c.enabled), at: c.at || null, tokens: c.tokens });
+  const tokenHash = (t) => crypto.createHash('sha256').update(String(t)).digest('hex');
+  /** The token a request carries (compared in constant time with every token), or null. */
+  const canTokenOf = (req) => {
+    const given = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    if (!given || given.length > 200) return null;
+    const h = Buffer.from(tokenHash(given));
+    let found = null;
+    for (const t of canCfg().tokens) {
+      if (typeof t.hash === 'string' && t.hash.length === 64 && crypto.timingSafeEqual(h, Buffer.from(t.hash))) found = t;
+    }
+    return found;
+  };
+  // wrong tokens: an address that keeps trying is refused for a while (tokens are 256-bit; this keeps logs quiet)
+  const canBadTries = new Map(); // address -> { n, until }
+  const canBlocked = (ip) => { const b = canBadTries.get(ip); return b && b.until > Date.now() && b.n >= 20; };
+  const canBadTry = (ip) => {
+    const b = canBadTries.get(ip);
+    const fresh = !b || b.until < Date.now();
+    canBadTries.set(ip, { n: fresh ? 1 : b.n + 1, until: fresh ? Date.now() + 10 * 60_000 : b.until });
+    if (canBadTries.size > 5000) canBadTries.delete(canBadTries.keys().next().value);
+  };
+  /** A token's first upload binds it to that car key (and the key to the token's car). */
+  const bindToken = (tok, key) => {
+    const c = canCfg();
+    const t = c.tokens.find((x) => x.id === tok.id);
+    if (!t) return;
+    if (!t.key) {
+      t.key = key;
+      log.info(`CAN Bridge token "${t.label}" is now for car key ${key}`);
+      if (t.vehicleId && !canMap()[key]) db.set('can-vehicles', { ...canMap(), [key]: t.vehicleId });
+    }
+    t.lastUsedAt = Date.now();
+    saveCanCfg(c);
+  };
+  /** Judge a log (after its log or sidecar arrived), then decode it if it may be used. */
+  const judgeCanLog = async (key, logName) => {
+    const rec = await canTrust.check(key, logName).catch((err) => { log.warn(`CAN trust ${logName}: ${err.message}`); return null; });
+    if (rec && rec.status !== 'waiting') canIndex.kick();
+    return rec;
+  };
+  // at start, and every few minutes: logs not judged yet, or waiting for a sidecar that never came
+  const judgePending = async () => { for (const { key, name } of await canTrust.pending()) await judgeCanLog(key, name); };
+  setTimeout(() => judgePending().catch(() => {}), 15_000).unref?.();
+  setInterval(() => judgePending().catch(() => {}), 5 * 60_000).unref?.();
+  // half-finished uploads older than two days are dropped
+  setInterval(() => canLogs.cleanStale(2 * 24 * 3600_000).catch(() => {}), 3600_000).unref?.();
+
+  canUploadRef = async (req, res, rawPath) => {
+    const cfg = canCfg();
+    const fail = (status, code, error, extra = {}) => sendJson(res, status, { error, code, ...extra });
+    if (!cfg.enabled || !cfg.tokens.length) return fail(404, 'off', 'Not found');
+    if (!isSecure(req)) return fail(403, 'https_only', 'CAN logs are only taken over HTTPS.');
+    const ip = clientKey(req);
+    if (canBlocked(ip)) return fail(429, 'slow_down', 'Too many wrong tokens from this address; try again later.');
+    const tok = canTokenOf(req);
+    if (!tok) {
+      canBadTry(ip);
+      res.setHeader('WWW-Authenticate', 'Bearer');
+      return fail(401, 'bad_token', 'A valid CAN Bridge token is needed.');
+    }
+    const sub = rawPath.slice('/api/can/logs'.length);
+    try {
+      if (req.method === 'GET' && sub === '/ping') {
+        return sendJson(res, 200, { ok: true, api: 1, vehicleKey: tok.key || null, maxChunk: canLogs.MAX_CHUNK, maxFile: canLogs.MAX_FILE, maxSidecar: canLogs.MAX_SIDECAR });
+      }
+      if (req.method === 'POST' && sub === '/status') {
+        let body;
+        try { body = JSON.parse((await readRaw(req, 1024 * 1024)).toString('utf8') || '{}'); } catch { return fail(400, 'bad_request', 'Send JSON: { "names": [...] }.'); }
+        // a token sees only its own car's files
+        return sendJson(res, 200, await canLogs.status(body?.names, { key: tok.key }));
+      }
+      let name = '';
+      try { name = sub.startsWith('/') ? decodeURIComponent(sub.slice(1)) : ''; } catch { return fail(400, 'bad_name', 'That is not a CAN Bridge log name.'); }
+      const n = parseCanName(name);
+      if (req.method === 'POST' && n) {
+        if (tok.key && tok.key !== n.vehicleKey) return fail(403, 'wrong_car', `This token is for car key ${tok.key}, not ${n.vehicleKey}.`);
+        const num = (h) => (req.headers[h] === undefined || req.headers[h] === '' ? NaN : Number(req.headers[h]));
+        const body = await readRaw(req, canLogs.MAX_CHUNK);
+        const out = await canLogs.receive(name, body, { offset: num('upload-offset'), length: num('upload-length'), sha256: String(req.headers['upload-sha256'] || '').toLowerCase() });
+        bindToken(tok, n.vehicleKey);
+        if (out.complete && !out.already) {
+          log.info(`CAN Bridge: received ${name} (${out.length} bytes)`);
+          // checked against its signature before anything uses it, then decoded for the Viewer
+          judgeCanLog(n.vehicleKey, name.replace(/\.json$/, ''));
+        }
+        return sendJson(res, out.complete ? 201 : 200, out);
+      }
+      return fail(404, 'not_found', 'Not found');
+    } catch (err) {
+      if (err.status) return fail(err.status, err.code || 'error', err.message, err.received !== undefined ? { received: err.received } : {});
+      log.warn(`CAN Bridge upload: ${err.message}`);
+      return fail(500, 'server_error', 'The server could not take this file now; try again later.');
+    }
+  };
+  r.add('GET', '/api/can/settings', async () => {
+    const cfg = canCfg();
+    const { bytes, count, logs } = await canLogs.list({ limit: 2000 });
+    const keys = [...new Set([...logs.map((l) => l.vehicleKey), ...cfg.tokens.map((t) => t.key).filter(Boolean)])].sort();
+    return {
+      enabled: Boolean(cfg.enabled), since: cfg.at || null, logs: count, bytes, port: { ...canPortState, https: Boolean(tlsSource) },
+      keys, map: canMap(), vehicles: vehicles.list().map((v) => ({ id: v.id, name: v.name })), index: canIndex.status(),
+      tokens: cfg.tokens.map((t) => ({ id: t.id, label: t.label, vehicleId: t.vehicleId, key: t.key, createdAt: t.createdAt, lastUsedAt: t.lastUsedAt })),
+      trust: await Promise.all(keys.map((k) => canTrust.summary(k)))
+    };
+  });
+  /** A new token for a car (shown once). */
+  const newCanToken = (cfg, { vehicleId = null, label = '' } = {}) => {
+    const token = crypto.randomBytes(32).toString('base64url');
+    const v = vehicleId ? vehicleOr404(String(vehicleId)) : vehicles.list().length === 1 ? vehicles.list()[0] : null;
+    const entry = {
+      id: crypto.randomBytes(6).toString('hex'), hash: tokenHash(token), vehicleId: v?.id || null, key: null,
+      label: String(label || '').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 40) || `${v?.name || 'Car'} CAN Bridge`, createdAt: Date.now(), lastUsedAt: null
+    };
+    if (cfg.tokens.length >= 20) throw new HttpError(400, 'There are 20 tokens already: revoke some first.');
+    cfg.tokens.push(entry);
+    return { token, entry };
+  };
+  r.add('POST', '/api/can/enable', (req, res, { user, body }) => {
+    requireConfirmed(req);
+    const cfg = canCfg();
+    cfg.enabled = true;
+    cfg.at = cfg.at || Date.now();
+    // the first token comes with turning it on; more are made per car below
+    const made = cfg.tokens.length ? null : newCanToken(cfg, { vehicleId: body?.vehicleId });
+    saveCanCfg(cfg);
+    audit.warn(`CAN Bridge uploads turned on${made ? ` (token "${made.entry.label}")` : ''}: ${by(req, user)}`);
+    canPortRef?.(true).catch((err) => log.warn(`CAN Bridge port: ${err.message}`));
+    return { enabled: true, token: made?.token || null, tokenId: made?.entry.id || null, fingerprint: certFingerprint(), port: CAN_PORT };
+  });
+  r.add('POST', '/api/can/disable', (req, res, { user }) => {
+    requireConfirmed(req);
+    const cfg = canCfg();
+    saveCanCfg({ ...cfg, enabled: false }); // the tokens stay, unusable while off
+    audit.warn(`CAN Bridge uploads turned off: ${by(req, user)}`);
+    canPortRef?.(false).catch(() => {});
+    return { enabled: false };
+  });
+  r.add('POST', '/api/can/tokens', (req, res, { user, body }) => {
+    requireConfirmed(req);
+    const cfg = canCfg();
+    const made = newCanToken(cfg, { vehicleId: body?.vehicleId, label: body?.label });
+    saveCanCfg(cfg);
+    audit.warn(`CAN Bridge token "${made.entry.label}" made: ${by(req, user)}`);
+    return { token: made.token, id: made.entry.id, fingerprint: certFingerprint(), port: CAN_PORT };
+  });
+  r.add('DELETE', '/api/can/tokens/:id', (req, res, { params, user }) => {
+    requireConfirmed(req);
+    const cfg = canCfg();
+    const t = cfg.tokens.find((x) => x.id === params.id);
+    if (!t) throw new HttpError(404, 'No such token.');
+    cfg.tokens = cfg.tokens.filter((x) => x !== t);
+    saveCanCfg(cfg);
+    audit.warn(`CAN Bridge token "${t.label}" revoked: ${by(req, user)}`);
+    return { ok: true };
+  });
+  // pairing: trust the new key a car's logs are signed with, or forget the pairing
+  r.add('POST', '/api/can/pairing/:key/trust', async (req, res, { params, body, user }) => {
+    requireConfirmed(req);
+    if (!/^[A-Za-z0-9-]{1,64}$/.test(params.key)) throw new HttpError(400, 'Not a car key.');
+    try {
+      const out = await canTrust.trustKey(params.key, String(body?.fingerprint || ''));
+      audit.warn(`CAN Bridge ${params.key}: key ${out.pin?.fingerprint} trusted: ${by(req, user)}`);
+      canIndex.kick();
+      return out;
+    } catch (err) { throw new HttpError(err.status || 500, err.message); }
+  });
+  r.add('POST', '/api/can/pairing/:key/forget', async (req, res, { params, user }) => {
+    requireConfirmed(req);
+    if (!/^[A-Za-z0-9-]{1,64}$/.test(params.key)) throw new HttpError(400, 'Not a car key.');
+    const out = await canTrust.forgetPin(params.key);
+    audit.warn(`CAN Bridge ${params.key}: pairing forgotten: ${by(req, user)}`);
+    return out;
+  });
+  // a failed log used anyway (the dashboard warns), or not
+  r.add('POST', '/api/can/files/:name/use', async (req, res, { params, body, user }) => {
+    requireConfirmed(req);
+    const n = parseCanName(params.name);
+    if (!n || n.sidecar) throw new HttpError(400, 'Not a CAN log name.');
+    try { await canTrust.setOverride(n.vehicleKey, params.name, body?.use === true); } catch (err) { throw new HttpError(err.status || 500, err.message); }
+    audit.warn(`CAN log ${params.name} ${body?.use === true ? 'used despite failing its check' : 'no longer used'}: ${by(req, user)}`);
+    canIndex.kick();
+    return { ok: true };
+  });
+  r.add('GET', '/api/can/files', async (req, res, { query }) => {
+    const out = await canLogs.list({ limit: Number(query.limit) || 200 });
+    // each log's check: verified, failed (why), unsigned, waiting
+    for (const l of out.logs) {
+      const rec = await canTrust.record(l.vehicleKey, l.name);
+      l.check = rec ? { status: rec.status, reason: rec.reason || null, index: rec.index ?? null, override: Boolean(rec.override) } : { status: 'waiting', reason: null };
+    }
+    return out;
+  });
+  r.add('DELETE', '/api/can/files/:name', async (req, res, { params, user }) => {
+    requireConfirmed(req);
+    try { await canLogs.remove(params.name); } catch (err) { throw new HttpError(err.status || 500, err.message); }
+    const n = parseCanName(params.name);
+    if (n) {
+      await canIndex.forget(n.vehicleKey, params.name).catch(() => {});
+      await canTrust.deleted(n.vehicleKey, params.name).catch(() => {});
+    }
+    audit.info(`CAN log deleted: ${params.name}: ${by(req, user)}`);
+    return { ok: true };
+  });
+
   // Savings by month (the main pages' chart)
   r.add('GET', '/api/vehicles/:id/savings-by-month', (req, res, { params, query }) => {
     const v = vehicleOr404(params.id);
@@ -2013,6 +2389,9 @@ async function main() {
         res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4; charset=utf-8', 'Cache-Control': 'no-store' });
         return res.end(metricsText());
       }
+      // CAN Bridge uploads (docs/can-bridge-api.md): opt-in, HTTPS only, a
+      // write-only token; no cookies, so the page checks below do not apply
+      if (rawPath === '/api/can/logs' || rawPath.startsWith('/api/can/logs/')) return canUpload(req, res, rawPath);
       if (rawPath === '/healthz') {
         // readable cross-origin: the plain-HTTP page checks with it whether this device trusts the certificate
         res.writeHead(200, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store', 'Cross-Origin-Resource-Policy': 'cross-origin' });
@@ -2311,6 +2690,48 @@ async function main() {
     servers.push(front, httpsServer, redirect);
     front.listen(PORT, HOST, () => log.info(`Sentry Six Manager on https://${HOST}:${PORT} (${buildInfo.sha ? buildInfo.sha.slice(0, 7) : 'dev'})`));
   }
+  // The CAN Bridge's port (CAN_PORT, 10000): only the CAN upload API
+  // (/api/can/logs…), with the same certificate; it listens only while the
+  // uploads are on (the Nerd settings), so the port is closed otherwise
+  canPortRef = async (on) => {
+    if (on && !canServer) {
+      const only = (req, res) => {
+        const p = String(req.url || '').split('?')[0];
+        if (p === '/api/can/logs' || p.startsWith('/api/can/logs/')) return canUpload(req, res, p);
+        securityHeaders(req, res, p);
+        return sendJson(res, 404, { error: 'Not found' });
+      };
+      let srv;
+      if (tlsSource) {
+        const m = await tlsSource.load();
+        srv = https.createServer({ key: m.key, cert: m.cert, minVersion: 'TLSv1.2' }, only);
+      } else srv = http.createServer(only); // behind a reverse proxy that does HTTPS
+      srv.setTimeout(120_000);
+      // a client that sends its headers slowly, or a body for ever, is cut off (TLS 1.2 and 1.3 are both accepted)
+      srv.headersTimeout = 20_000;
+      srv.requestTimeout = 10 * 60_000;
+      srv.maxConnections = 64;
+      canPortState = { listening: false, error: null, port: CAN_PORT };
+      srv.on('error', (err) => {
+        canPortState = { listening: false, error: err.code === 'EADDRINUSE' ? `Port ${CAN_PORT} is used by something else.` : err.message, port: CAN_PORT };
+        log.warn(`CAN Bridge port ${CAN_PORT}: ${err.message}`);
+        if (canServer === srv) canServer = null;
+      });
+      canServer = srv;
+      srv.listen(CAN_PORT, HOST, () => {
+        canPortState = { listening: true, error: null, port: CAN_PORT };
+        log.info(`CAN Bridge uploads on ${tlsSource ? 'https' : 'http'}://${HOST}:${CAN_PORT}/api/can/logs`);
+      });
+    } else if (!on && canServer) {
+      const srv = canServer;
+      canServer = null;
+      canPortState = { listening: false, error: null, port: CAN_PORT };
+      srv.close();
+      srv.closeAllConnections?.();
+      log.info(`CAN Bridge port ${CAN_PORT} closed`);
+    }
+  };
+  if (db.get('can', null)?.enabled) canPortRef(true).catch((err) => log.warn(`CAN Bridge port: ${err.message}`));
   vehicles.startAll();
 
   // Converter starts in the background; the Encoder tab shows "starting" until ready.
@@ -2441,6 +2862,7 @@ async function main() {
       try {
         const m = await tlsSource.load();
         httpsServer?.setSecureContext({ key: m.key, cert: m.cert });
+        canServer?.setSecureContext?.({ key: m.key, cert: m.cert });
       } catch (err) {
         log.warn(`HTTPS certificate check failed: ${err.message}`);
       }
@@ -2475,7 +2897,7 @@ async function main() {
       if (m?.type === 'rapl-reading') return stats.setRapl(m);
       if (m?.type === 'supervisor-log') return logger.write(m.level === 'warn' || m.level === 'error' ? m.level : 'info', 'supervisor', String(m.message || '').slice(0, 4000), { echo: false });
       if (m?.type !== 'tls-updated' || !tlsSource || !httpsServer) return;
-      tlsSource.load().then((x) => httpsServer.setSecureContext({ key: x.key, cert: x.cert }), (err) => log.warn(`Reloading the certificate failed: ${err.message}`));
+      tlsSource.load().then((x) => { httpsServer.setSecureContext({ key: x.key, cert: x.cert }); canServer?.setSecureContext?.({ key: x.key, cert: x.cert }); }, (err) => log.warn(`Reloading the certificate failed: ${err.message}`));
     });
   }
 }

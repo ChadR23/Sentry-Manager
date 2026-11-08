@@ -45,7 +45,7 @@ RUN set -eux; \
     # FFmpeg 8 when Jellyfin publishes it for this release, else their 7.x
     ffmpeg_pkg=jellyfin-ffmpeg8; apt-cache show "$ffmpeg_pkg" >/dev/null 2>&1 || ffmpeg_pkg=jellyfin-ffmpeg7; \
     apt-get install -y --no-install-recommends "$ffmpeg_pkg" cifs-utils tini tzdata \
-      fontconfig fonts-liberation fonts-dejavu-core openssl util-linux; \
+      fontconfig fonts-liberation fonts-dejavu-core openssl util-linux xz-utils; \
     ln -s /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/lib/jellyfin-ffmpeg/ffprobe /usr/lib/jellyfin-ffmpeg/vainfo /usr/local/bin/; \
     rm -rf /var/lib/apt/lists/*; \
     # no setuid/setgid programs: nothing inside can become root again (the
@@ -92,6 +92,8 @@ ENV MALLOC_ARENA_MAX=2
 
 VOLUME ["/data"]
 EXPOSE 9000
+# the CAN Bridge's uploads, only while they are turned on (Nerd settings; CAN_PORT)
+EXPOSE 10000
 # /healthz answers on plain HTTP too (everything else there redirects to HTTPS)
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||9000)+'/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"

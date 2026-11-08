@@ -21,6 +21,9 @@ services:
     stop_grace_period: 1m
     ports:
       - "9000:9000"
+      # the Screenmate CAN Bridge uploads its CAN logs here; nothing listens
+      # until CAN uploads are turned on (Settings, hidden Nerd settings)
+      - "10000:10000"
     env_file:
       - path: .env
         required: false
