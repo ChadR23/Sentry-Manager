@@ -161,7 +161,9 @@ const ZIP_LIMIT = 0xffffffff - 64 * 1024 * 1024; // no zip64: the whole archive 
  * `entries`: [{ name, data: Buffer } | { name, size, mtime, open: () => Readable }
  * | { name, mtime, make: async () => Buffer }] (made when its turn comes, so
  * a summary can go last and the download starts at once).
- * The caller checks that the sizes add up to less than ZIP_LIMIT. Resolves
+ * The caller checks that the sizes add up to less than ZIP_LIMIT. `size: null`:
+ * not known before it is read (made while it streams, as a log's candump text):
+ * whatever it gives is taken, and the archive stops when it would pass the limit. Resolves
  * when it is written; rejects (out destroyed) when a file changed size or
  * could not be read, or the reader went away.
  */
@@ -181,8 +183,9 @@ async function streamZip(out, entries) {
     }
     const nameBuf = Buffer.from(e.name, 'utf8');
     const { time, date } = dosTime(e.mtime);
-    const size = e.data ? e.data.length : e.size;
-    if (offset + size > ZIP_LIMIT) throw new ZipError('The archive would be too large.');
+    const known = e.data || e.size !== null;
+    let size = e.data ? e.data.length : e.size;
+    if (known && offset + size > ZIP_LIMIT) throw new ZipError('The archive would be too large.');
     const at = offset;
     const head = Buffer.alloc(30);
     head.writeUInt32LE(LOCAL, 0);
@@ -205,10 +208,12 @@ async function streamZip(out, entries) {
         for await (const chunk of src) {
           crc = zlib.crc32(chunk, crc);
           n += chunk.length;
-          if (n > size) break;
+          if (known && n > size) break;
+          if (!known && offset + chunk.length > ZIP_LIMIT) throw new ZipError('The archive would be too large.');
           await write(chunk);
         }
       } finally { src.destroy?.(); }
+      if (!known) size = n;
     }
     if (n !== size) throw new ZipError(`${e.name} changed while it was being sent.`);
     const desc = Buffer.alloc(16);

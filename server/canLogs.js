@@ -24,7 +24,7 @@ const path = require('path');
 const LOG_NAME = /^([A-Za-z0-9-]{1,64})_(\d{8}T\d{6}Z)_(\d{1,6})\.log\.xz$/;
 const SIDECAR_NAME = /^([A-Za-z0-9-]{1,64})_(\d{8}T\d{6}Z)_(\d{1,6})\.log\.xz\.json$/;
 const MAX_CHUNK = 16 * 1024 * 1024; // one request's body
-const MAX_FILE = 1024 * 1024 * 1024; // one log (a 10-minute log is about 17 MB)
+const MAX_FILE = 1024 * 1024 * 1024; // one log (a one-minute log is about 1.7 MB as candump text, 0.7 MB as columns)
 const MAX_SIDECAR = 1024 * 1024;
 
 const canError = (status, code, message, extra = {}) => Object.assign(new Error(message), { status, code, ...extra });
@@ -56,12 +56,18 @@ async function eachLimit(items, n, fn) {
 const sideFacts = (side) => ({
   frames: Number.isFinite(side?.frames) ? side.frames : null,
   dropped: [side?.dropped_chunks, side?.dropped].find((x) => Number.isFinite(x)) ?? null,
-  appVersion: [side?.app_version, side?.appVersion].find((x) => typeof x === 'string')?.slice(0, 40) ?? null
+  appVersion: [side?.app_version, side?.appVersion].find((x) => typeof x === 'string')?.slice(0, 40) ?? null,
+  // what the sidecar says the log holds (canbridge-candump-xz/1 or canbridge-columns-xz/2; canLogReader.js reads
+  // either, by its first bytes), and why the bridge closed it: rotate, quiet, stop, size (48 MB in memory), flush
+  format: typeof side?.format === 'string' && /^[\w./-]{1,64}$/.test(side.format) ? side.format : null,
+  closedBecause: typeof side?.closed_because === 'string' && /^[\w-]{1,20}$/.test(side.closed_because) ? side.closed_because : null
 });
 
-// A bridge uploads a log every 10 minutes around the clock: 144 a day. The cap counts finished logs
-// only (not sidecars or uploads under way) and is there against a stolen token making endless tiny
-// files; the free-space floor is what guards the disk. 200,000 is close to four years of one car.
+// A bridge uploads a log a minute while the car is awake (older bridges: one every 10 minutes). The
+// cap counts finished logs only (not sidecars or uploads under way) and is there against a stolen
+// token making endless tiny files; the free-space floor is what guards the disk. 200,000 is about
+// 139 days of a car awake around the clock, and years of a car awake a few hours a day; the
+// catalogue keeps about 400 bytes of memory per log.
 const MAX_LOGS_PER_CAR = 200_000;
 const RESCAN_MS = 10 * 60_000; // the catalogue is read again from the folder at least this often
 
@@ -310,7 +316,8 @@ function createCanLogs({ dir, freeBytes = async () => Infinity, now = () => Date
     all.sort((a, b) => b.startedAtMs - a.startedAtMs || b.seq - a.seq);
     const logs = all.slice(0, Math.max(1, Math.min(2000, limit))).map((r) => ({
       name: r.name, vehicleKey: r.vehicleKey, startedAt: new Date(r.startedAtMs).toISOString(), seq: r.seq, bytes: r.bytes, receivedAt: new Date(r.mtimeMs).toISOString(),
-      sidecar: Boolean(r.side), frames: r.side?.frames ?? null, dropped: r.side?.dropped ?? null, appVersion: r.side?.appVersion ?? null
+      sidecar: Boolean(r.side), frames: r.side?.frames ?? null, dropped: r.side?.dropped ?? null, appVersion: r.side?.appVersion ?? null,
+      format: r.side?.format ?? null, closedBecause: r.side?.closedBecause ?? null
     }));
     return { logs, bytes, count: all.length };
   }

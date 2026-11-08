@@ -2,8 +2,9 @@
 
 How the Screenmate CAN Bridge app (repo `skittles-fivem/SMO`) sends its CAN
 logs to Sentry Six Manager. The log format itself is defined by the app, in
-`docs/sentry-manager-format.md` in SMO: `candump -L` lines, xz-compressed,
-one file per 10 minutes, with a JSON sidecar.
+`docs/sentry-manager-format.md` in SMO: `candump -L` lines, xz-compressed
+(as text, or as columns: see Log formats), one file per minute, with a JSON
+sidecar.
 
 Sentry Six Manager keeps every log exactly as it arrives, including messages
 nobody can decode yet, so a message identified later also works on old
@@ -100,8 +101,8 @@ Up to 2000 names per request. Answer `200`:
 | `Upload-Length` | the whole file's size in bytes (the same on every chunk) |
 | `Upload-SHA256` | the whole file's SHA-256 in hex (the same on every chunk) |
 
-- A chunk is at most `maxChunk` (16 MiB). A 10-minute log (about 17 MB)
-  takes two chunks; a sidecar always fits in one.
+- A chunk is at most `maxChunk` (16 MiB). A one-minute log (about 1.7 MB as
+  candump text, 0.7 MB as columns) takes one chunk; so does a sidecar.
 - `200 { "received": n, "length": total, "complete": false }`: send the next
   chunk at offset `n`.
 - `201 { "received": total, "length": total, "complete": true }`: the last
@@ -120,6 +121,36 @@ To resume after a lost connection, ask `status` (or read `received` from the
 `<vehicleKey>_<UTC yyyyMMddTHHmmssZ>_<seq>.log.xz` and the same plus `.json`
 for the sidecar. `vehicleKey` is 1–64 letters, digits or `-`; `seq` is 1–6
 digits. Anything else is refused with `400 bad_name`.
+
+## Log formats
+
+Both are one xz stream under the same names, with the same sidecar; the
+sidecar's `format` says which, and Sentry Six Manager also tells them apart
+by the first bytes after `xz -dc`:
+
+| `format` | After `xz -dc` | Size |
+|---|---|---|
+| `canbridge-candump-xz/1` | candump text, starting `# canbridge v1` | about 1.7 MB a minute |
+| `canbridge-columns-xz/2` | `CANBRIDGE-COLUMNS/2` and LF, then the same lines kept as columns (SMO, `docs/sentry-manager-format.md`, "Columns format") | about 0.7 MB a minute (2.4 times smaller), lossless |
+
+A columns log decodes to exactly the candump text a `/1` log of the same
+frames holds, in the same order; Sentry Six Manager decodes it with the
+bridge's own decoder (`server/canColumns.js`, a copy of SMO's
+`tools/columns-to-candump.js`), so the index, the raw view, the search and
+the sync read the same lines either way. The stored file is never re-encoded:
+the signature covers the `.log.xz` file's bytes, whichever format it holds.
+
+A columns body is decoded whole (in a worker thread, so the server keeps
+answering): one that unpacks to more than 64 MB (the bridge closes a compact
+file at 48 MB in memory, sidecar `closed_because: "size"`), is malformed or
+cut off, or needs more than 512 MB to decode, is refused: kept as it came,
+listed, and reported once in the Nerd panel's Index line, like any log that
+cannot be read.
+
+The sidecar's `closed_because` is one of `rotate` (the minute was over),
+`quiet`, `stop`, `size` (a compact file closed early at 48 MB in memory) and
+`flush` (closed early, before an app update or shutdown); the Nerd list shows
+it under the format.
 
 ## Signatures and pairing
 
@@ -215,7 +246,8 @@ starts again at 0.
 
 Kept under `<data>/can/<vehicleKey>/`, exactly as received; a finished file
 cannot be replaced (`409 exists_different`), only added. The Nerd panel lists
-them (start, car key, check, size, frames and dropped from the sidecar, in a
+them (start, car key, check, size, format and why it was closed, frames and
+dropped from the sidecar, in a
 box of its own height with a filter by car key, check and text), follows new
 uploads, checks and the index live, and can delete one (with the password).
 
@@ -225,8 +257,9 @@ read anything, and watch-only accounts get 403.
 
 | Route | What |
 |---|---|
-| `GET /api/can/files/<name>/download` | One log (`….log.xz`) or its sidecar (`….log.xz.json`), exactly as received. |
-| `GET /api/can/export/bundle?key=&from=&to=` | A `.zip` (streamed) of that car key's logs and sidecars that start in the range (plus the one running at its start), and, after them, `ids.csv` (every CAN id seen: bus, id, DBC message or `unknown`, frames, Hz, first and last seen, minutes, from the index's frame counts) and `manifest.json`. At most 7 days and 2,016 logs (a week of a log every 10 minutes around the clock, with room to spare). `check=1`: what it would hold, as JSON. |
+| `GET /api/can/files/<name>/download` | One log (`….log.xz`) or its sidecar (`….log.xz.json`), exactly as received (the signed bytes). |
+| `GET /api/can/files/<name>/candump` | One log as candump text (`….log`, `text/plain`, streamed), whichever format it was stored in: for SavvyCAN, cantools and other tools that only read candump. A `/1` log is its `xz -dc`; a `/2` log is decoded on the fly. Not signed (check the `.log.xz`). A log that cannot be read answers `422`; one cut off ends with a `# Sentry Six Manager: …` line saying so. |
+| `GET /api/can/export/bundle?key=&from=&to=[&candump=1]` | A `.zip` (streamed) of that car key's logs and sidecars that start in the range (plus the one running at its start), and, after them, `ids.csv` (every CAN id seen: bus, id, DBC message or `unknown`, frames, Hz, first and last seen, minutes, from the index's frame counts) and `manifest.json` (each log's `format` and check). `candump=1` adds each log as candump text (`….log`) beside it (about 10 MB a minute; a log that cannot be read gets a one-line `#` note instead). At most 7 days, 12,600 logs (a week of a log a minute around the clock, with room to spare) and 4 GB. `check=1`: what it would hold, as JSON. |
 | `GET /api/can/export/decoded?key=&from=&to=&signals=[&mode=changes\|every]` | The decoded signals as CSV (`timestamp_utc,signal,value,unit,value_name`), streamed, gzipped when the browser accepts it. `mode=changes` (the default without `signals`): a value when it changes, and once a minute while it stays the same. `mode=every` (the default with `signals`): every point the index keeps (a change, and once a second). At most 24 hours and 5,000,000 rows. `check=1`: `{ mode, minutes, estimatedRows, rowLimit, willStop }` before downloading. A cell that starts like a formula (`= + - @`) is written with a `'` first. |
 | `GET /api/can/export/new-ids?key=&since=[&format=csv]` | CAN ids first seen on or after `since`, with the DBC message or `UNKNOWN`, from per-day id summaries the index keeps (always complete). |
 
@@ -242,7 +275,8 @@ decoding changes, every stored log is indexed again in the background.
 
 Times are ISO with a zone, or the car's own clock (`YYYY-MM-DD[THH:MM]`).
 `check=1` on the bundle and decoded routes answers what they would hold
-(JSON) without sending the file. The checks, the pairing and the chain
+(JSON) without sending the file; with `candump=1`, `candumpBytes` is an
+estimate of the text. The checks, the pairing and the chain
 are kept in `<data>/can/<vehicleKey>/trust.json`.
 
 **TLS.** Port 10000 takes TLS 1.3 (the bridge uses only 1.3) and 1.2; older
@@ -251,10 +285,11 @@ one request longer than 10 minutes, is cut off. One address may hold at most
 6 connections at once (256 in all), and a connection that sends no request
 within 15 s is closed.
 
-**Reading a log.** Each log is unpacked once, line by line: a line longer
-than 512 bytes is skipped, and a log that unpacks to more than 4 GB is
-stopped there (what was read before is kept). A crafted file cannot use up
-the server's memory. Deleting a log, or no longer using one that failed its
+**Reading a log.** Each log is unpacked once, line by line (a columns log is
+decoded to those lines first, see Log formats): a line longer than 512 bytes
+is skipped, and a candump text log that unpacks to more than 4 GB is stopped
+there (what was read before is kept). A crafted file cannot use up the
+server's memory. Deleting a log, or no longer using one that failed its
 check, takes its data out of the Viewer, the search, the raw view and the
 sync. Sync to the footage uses the sidecar's clock pairs and the
 `# clock` lines, then refines the offset per drive by matching CAN signals

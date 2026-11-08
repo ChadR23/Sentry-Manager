@@ -54,6 +54,7 @@ const STYLE = `
 .sentry-nerd input.nd-in:focus-visible,.sentry-nerd select.nd-in:focus-visible{outline:2px solid #7dff8a;outline-offset:1px}
 .sentry-nerd label.nd-lab{display:flex;flex-direction:column;gap:2px;font-size:12px;color:#a8e6ad}
 .sentry-nerd .nd-grow{flex:1 1 220px}
+.sentry-nerd label.nd-check{flex-direction:row;align-items:center;gap:6px;flex:1 1 220px}
 .sentry-nerd a.nd-link{color:#7dff8a}
 @media (max-width:560px){.sentry-nerd{padding:14px}.sentry-nerd .nd-grow{flex-basis:100%}.sentry-nerd td.nd-wrap{white-space:normal;min-width:150px;max-width:240px}
 .sentry-nerd .nd-count{margin-left:0}.sentry-nerd-bg{padding:12px 8px}}
@@ -363,6 +364,15 @@ export function openNerdPanel() {
     unsigned: ['unsigned', 'nd-muted', 'No signature (an older CAN Bridge, before pairing). Used, with a note.'],
     waiting: ['waiting', 'nd-muted', 'Its sidecar (with the signature) has not arrived yet.']
   };
+  // the sidecar's "format": both are read here, and both download as candump text
+  const FORMAT = {
+    'canbridge-candump-xz/1': ['candump', 'Candump text, xz'],
+    'canbridge-columns-xz/2': ['columns', 'The same lines as columns, xz: about 2.4 times smaller. Only Sentry Six Manager and the CAN Bridge read it; "candump .log" gives the text.']
+  };
+  // the sidecar's "closed_because"
+  const CLOSED = {
+    rotate: 'The minute was over', quiet: 'The car went quiet', stop: 'Recording stopped', size: 'Closed early: 48 MB in memory on the Screenmate', flush: 'Closed early, before an app update or shutdown'
+  };
   const when = (t) => (t ? new Date(t).toLocaleString() : '—');
   const carName = (id) => st.vehicles.find((v) => v.id === id)?.name || (id ? id : 'any car');
   const keysOf = () => [...new Set([...(st?.keys || []), ...files.logs.map((f) => f.vehicleKey)])].sort();
@@ -442,15 +452,18 @@ export function openNerdPanel() {
     const { scrollTop, scrollLeft } = box;
     const a = document.activeElement;
     const focusKey = a && box.contains(a) ? [...a.attributes].filter((x) => x.name.startsWith('data-')).map((x) => `[${x.name}="${CSS.escape(x.value)}"]`).join('') : '';
-    box.innerHTML = shown.length ? `<table><thead><tr><th>Started</th><th>Car</th><th>Check</th><th>Download</th><th>Size</th><th>Frames</th><th>Dropped</th><th>App</th><th></th></tr></thead><tbody>
+    box.innerHTML = shown.length ? `<table><thead><tr><th>Started</th><th>Car</th><th>Check</th><th>Download</th><th>Size</th><th>Format</th><th>Frames</th><th>Dropped</th><th>App</th><th></th></tr></thead><tbody>
       ${shown.map((f) => {
         const [label, cls, tip] = CHECK[f.check?.status] || CHECK.waiting;
         const why = f.check?.reason ? `${tip ? `${tip} ` : ''}${f.check.reason}` : tip;
         const dl = (n, text, what) => `<a class="nd-btn nd-small" href="/api/can/files/${encodeURIComponent(n)}/download" download="${esc(n)}" data-dl-file="${esc(n)}" aria-label="Download ${esc(what)} ${esc(f.name)}">${text}</a>`;
+        // the same lines as candump text, for tools that only read that (SavvyCAN, cantools)
+        const txt = `<a class="nd-btn nd-small" href="/api/can/files/${encodeURIComponent(f.name)}/candump" download="${esc(f.name.replace(/\.xz$/, ''))}" data-dl-candump="${esc(f.name)}" title="As candump text (.log), whichever format it was stored in" aria-label="Download as candump text ${esc(f.name)}">candump .log</a>`;
+        const [fmt, fmtTip] = FORMAT[f.format] || (f.format ? [f.format, ''] : ['—', f.sidecar ? 'The sidecar does not say' : 'No sidecar yet']);
         return `<tr><td>${esc(new Date(f.startedAt).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' }))}${f.check?.index !== null && f.check?.index !== undefined ? ` · #${esc(f.check.index)}` : f.seq ? ` · #${f.seq}` : ''}</td><td class="nd-mono">${esc(f.vehicleKey)}</td>
         <td class="${cls}${f.check?.status === 'failed' ? ' nd-wrap' : ''}" title="${esc(why)}">${esc(label)}${f.check?.status === 'failed' ? `<br><small>${esc(f.check.reason || '')}</small>${f.check.override ? '<br><small class="nd-warn">used anyway</small>' : ''}` : ''}</td>
-        <td>${dl(f.name, '.log.xz', 'the log')}${f.sidecar ? ` ${dl(`${f.name}.json`, '.json', 'the sidecar of')}` : ''}</td>
-        <td>${esc(size(f.bytes))}</td><td>${f.frames === null ? '—' : f.frames.toLocaleString()}</td><td>${f.dropped === null ? '—' : f.dropped.toLocaleString()}</td><td class="nd-mono">${esc(f.appVersion || (f.sidecar ? '' : 'no sidecar yet'))}</td>
+        <td>${dl(f.name, '.log.xz', 'the log')} ${txt}${f.sidecar ? ` ${dl(`${f.name}.json`, '.json', 'the sidecar of')}` : ''}</td>
+        <td>${esc(size(f.bytes))}</td><td title="${esc(fmtTip)}">${esc(fmt)}${f.closedBecause ? `<br><small title="${esc(CLOSED[f.closedBecause] || '')}">closed: ${esc(f.closedBecause)}</small>` : ''}</td><td>${f.frames === null ? '—' : f.frames.toLocaleString()}</td><td>${f.dropped === null ? '—' : f.dropped.toLocaleString()}</td><td class="nd-mono">${esc(f.appVersion || (f.sidecar ? '' : 'no sidecar yet'))}</td>
         <td>${f.check?.status === 'failed' ? `<button type="button" class="nd-btn nd-small" data-use="${esc(f.name)}" data-on="${f.check.override ? '0' : '1'}">${f.check.override ? 'Stop using' : 'Use anyway…'}</button> ` : ''}<button type="button" class="nd-btn nd-small nd-danger" data-del="${esc(f.name)}" aria-label="Delete the log ${esc(f.name)}">Delete</button></td></tr>`;
       }).join('')}
     </tbody></table>` : '<p class="nd-muted" style="padding:8px">No log matches the filter.</p>';
@@ -504,6 +517,7 @@ export function openNerdPanel() {
       </div>
       <div class="nd-row">
         <button type="button" class="nd-btn" data-dl-bundle>Logs + ids.csv (.zip, up to 7 days)</button>
+        <label class="nd-lab nd-check"><input type="checkbox" data-dl-candump> with each log as candump text too (.log, for SavvyCAN and cantools; about 10 MB a minute)</label>
         <button type="button" class="nd-btn" data-dl-decoded>Decoded signals (.csv, up to 24 hours)</button>
       </div>
       <div data-dl-out aria-live="polite"></div>
@@ -710,7 +724,8 @@ export function openNerdPanel() {
     } else if (b.matches('[data-dl-bundle]')) {
       const q = rangeQuery();
       if (!q) { $('[data-dl-out]').innerHTML = '<p class="nd-warn">Pick the car key and both times.</p>'; return; }
-      await download(`/api/can/export/bundle?${q}`, $('[data-dl-out]'), (i) => `${i.logs.toLocaleString()} log${i.logs === 1 ? '' : 's'} (${size(i.bytes)}) with their sidecars and ids.csv.`);
+      if ($('[data-dl-candump]').checked) q.set('candump', '1');
+      await download(`/api/can/export/bundle?${q}`, $('[data-dl-out]'), (i) => `${i.logs.toLocaleString()} log${i.logs === 1 ? '' : 's'} (${size(i.bytes)}) with their sidecars${i.candumpBytes ? `, as candump text (about ${size(i.candumpBytes)})` : ''} and ids.csv.`);
     } else if (b.matches('[data-dl-decoded]')) {
       const q = rangeQuery();
       if (!q) { $('[data-dl-out]').innerHTML = '<p class="nd-warn">Pick the car key and both times.</p>'; return; }
