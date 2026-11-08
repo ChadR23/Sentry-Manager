@@ -5,8 +5,10 @@
 // already in signals. For every car (vehicleKey) and UTC minute:
 //
 //   <DATA>/can-index/<vehicleKey>/<yyyyMMddTHHmm>.json.gz
-//     { minute, signals: { name: [[ms since the minute, value], …] },
-//       ids: { "can0:2E5": frames, … } }       (unknown ids are counted too)
+//     { minute, trust, logs: { "<log name>": { span: [first ms, last ms], ids, trust } },
+//       signals: { name: [[ms since the minute, value], …] },
+//       ids: { "can0:2E5": frames, … } }       (unknown ids are counted too; last,
+//                                               canSearch.js reads only them)
 //   <DATA>/can-index/<vehicleKey>/signals.json   every signal seen, with unit,
 //                                                range, value names, bus
 //   <DATA>/can-index/<vehicleKey>/<yyyyMMddTHHmm>.raw.json.gz
@@ -17,8 +19,15 @@
 //     view: at most RAW_PER_SEC changes a second per id, the last payload of
 //     each second, and each id's payload at the start of the minute
 //   <DATA>/can-index/done.json                   which logs are indexed
-//     ("<size>/<mtime>/<FORMAT>": a log indexed by an older format is read
-//     again, and only what that format lacked is written)
+//     ("<size>/<mtime>/<FORMAT>[/<sidecar size>-<sidecar mtime>]": a log
+//     indexed by an older format is read again, and only what that format
+//     lacked is written; a sidecar that comes, or changes, after its log has
+//     the log indexed again with its bus map)
+//
+// Indexing a log again replaces its own part of each minute: what it wrote
+// before (its frame counts, and its points within its own span of the
+// minute) is taken out first, so nothing is counted twice. A log whose xz
+// ends early (cut off when the bridge lost power) keeps what could be read.
 //
 // A signal keeps a point when its value changes, at most 20 a second (the
 // last value of each 50 ms wins), and once a second while it stays the same.
@@ -47,6 +56,45 @@ const minuteKey = (ms) => new Date(Math.floor(ms / 60000) * 60000).toISOString()
 const TRUST_RANK = { override: 0, unsigned: 1, verified: 2 };
 const worseTrust = (a, b) => (a === undefined ? b : b === undefined ? a : (TRUST_RANK[a] ?? 1) <= (TRUST_RANK[b] ?? 1) ? a : b);
 
+/** Write a file whole or not at all (a failed write leaves no .tmp file behind). */
+async function writeAtomic(file, body) {
+  const tmp = `${file}.${process.pid}.tmp`;
+  try {
+    await fsp.writeFile(tmp, body);
+    await fsp.rename(tmp, file);
+  } catch (err) {
+    await fsp.rm(tmp, { force: true }).catch(() => {});
+    throw err;
+  }
+}
+
+/**
+ * A minute without one log's part: its frame counts taken off, and its points
+ * (signal values or raw payloads) within its span of the minute taken out.
+ * `old` is that log's record ({ span, ids }), or nothing when it had no part.
+ */
+function withoutPart({ signals, ids = {} }, old) {
+  if (!old || !Array.isArray(old.span)) return { signals, ids };
+  const [a, b] = old.span;
+  const outSignals = {};
+  for (const [nm, pts] of Object.entries(signals)) {
+    const keep = pts.filter((p) => p[0] < a || p[0] > b);
+    if (keep.length) outSignals[nm] = keep;
+  }
+  const outIds = { ...ids };
+  for (const [id, n] of Object.entries(old.ids || {})) {
+    const left = (outIds[id] || 0) - n;
+    if (left > 0) outIds[id] = left; else delete outIds[id];
+  }
+  return { signals: outSignals, ids: outIds };
+}
+
+/** The part of a stamp that names the sidecar: its size and mtime, or nothing when there is none. */
+async function sidecarStamp(file) {
+  const st = await fsp.stat(`${file}.json`).catch(() => null);
+  return st ? `/${st.size}-${Math.round(st.mtimeMs)}` : '';
+}
+
 function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bundledDbc, xz = 'xz', onIndexed = null, usable = async () => ({ use: true, trust: 'unsigned' }) }) {
   const doneFile = path.join(dir, 'done.json');
   let done = null;
@@ -57,32 +105,43 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
   };
   const saveDone = async () => {
     await fsp.mkdir(dir, { recursive: true });
-    const tmp = `${doneFile}.${process.pid}.tmp`;
-    await fsp.writeFile(tmp, JSON.stringify(done));
-    await fsp.rename(tmp, doneFile);
+    await writeAtomic(doneFile, JSON.stringify(done));
   };
   const status = { running: false, current: null, indexed: 0, pending: 0, lastError: null, lastAt: null };
 
   async function readMinute(key, minute) {
     try { return JSON.parse(zlib.gunzipSync(await fsp.readFile(path.join(dir, key, `${minute}.json.gz`))).toString('utf8')); } catch { return null; }
   }
-  async function writeMinute(key, minute, data) {
-    // a minute can span two logs: merge with what is there
+  /**
+   * Write one log's part of a minute. A minute can span two logs: merge with
+   * what is there, after taking out what this log wrote before (`before`: its
+   * record in the raw file, for a minute written before the per-log records).
+   */
+  async function writeMinute(key, minute, data, name, part, before = null) {
     const had = await readMinute(key, minute);
+    const logs = {};
+    let signals = data.signals;
+    let ids = data.ids;
     if (had) {
-      for (const [name, pts] of Object.entries(had.signals || {})) {
-        const mine = data.signals[name];
-        data.signals[name] = mine ? [...pts, ...mine].sort((a, b) => a[0] - b[0]).filter((p, i, a) => i === 0 || p[0] !== a[i - 1][0]) : pts;
+      // a minute from before the per-log records: its trust is kept as a part of its own
+      if (had.logs) Object.assign(logs, had.logs);
+      else if (had.trust) logs[''] = { trust: had.trust };
+      const old = had.logs ? had.logs[name] : before;
+      const rest = withoutPart({ signals: had.signals || {}, ids: had.ids || {} }, old);
+      for (const [nm, pts] of Object.entries(rest.signals)) {
+        const mine = signals[nm];
+        signals[nm] = mine ? [...pts, ...mine].sort((a, b) => a[0] - b[0]).filter((p, i, a) => i === 0 || p[0] !== a[i - 1][0]) : pts;
       }
-      for (const [id, n] of Object.entries(had.ids || {})) data.ids[id] = (data.ids[id] || 0) + n;
-      const t = worseTrust(had.trust, data.trust);
-      if (t) data.trust = t;
+      ids = { ...rest.ids };
+      for (const [id, n] of Object.entries(data.ids)) ids[id] = (ids[id] || 0) + n;
     }
+    logs[name] = part;
+    let trust;
+    for (const p of Object.values(logs)) trust = worseTrust(trust, p.trust);
+    // the frame counts last: canSearch.js reads only them, from the end of the file
+    const out = { minute, ...(trust ? { trust } : {}), logs, signals, ids };
     await fsp.mkdir(path.join(dir, key), { recursive: true });
-    const file = path.join(dir, key, `${minute}.json.gz`);
-    const tmp = `${file}.${process.pid}.tmp`;
-    await fsp.writeFile(tmp, zlib.gzipSync(JSON.stringify(data), { level: 6 }));
-    await fsp.rename(tmp, file);
+    await writeAtomic(path.join(dir, key, `${minute}.json.gz`), zlib.gzipSync(JSON.stringify(out), { level: 6 }));
   }
   // ---- raw snapshots (<minute>.raw.json.gz): merged so that indexing a log again replaces its own part
   const rawCache = new Map(); // key/minute -> Promise<data|null> (a few, for the Viewer's fetches)
@@ -94,22 +153,24 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
     }
     return rawCache.get(k);
   }
-  async function writeRaw(key, minute, data) {
+  async function rawNow(key, minute) {
     rawCache.delete(`${key}/${minute}`);
     const had = await readRaw(key, minute);
     rawCache.delete(`${key}/${minute}`);
+    return had;
+  }
+  /** Write one log's part of a minute's raw snapshots, after taking out what it wrote before. */
+  async function writeRaw(key, minute, data, name, had) {
     if (had) {
-      for (const [id, pts] of Object.entries(had.raw || {})) {
+      const rest = withoutPart({ signals: had.raw || {} }, had.logs?.[name]).signals;
+      for (const [id, pts] of Object.entries(rest)) {
         const mine = data.raw[id];
         data.raw[id] = mine ? [...pts, ...mine].sort((a, b) => a[0] - b[0]).filter((p, i, a) => i === 0 || p[0] !== a[i - 1][0] || p[1] !== a[i - 1][1]) : pts;
       }
       data.logs = { ...had.logs, ...data.logs };
     }
     await fsp.mkdir(path.join(dir, key), { recursive: true });
-    const file = path.join(dir, key, `${minute}.raw.json.gz`);
-    const tmp = `${file}.${process.pid}.tmp`;
-    await fsp.writeFile(tmp, zlib.gzipSync(JSON.stringify(data), { level: 6 }));
-    await fsp.rename(tmp, file);
+    await writeAtomic(path.join(dir, key, `${minute}.raw.json.gz`), zlib.gzipSync(JSON.stringify(data), { level: 6 }));
     rawCache.delete(`${key}/${minute}`);
   }
   async function mergeSignals(key, seen) {
@@ -118,7 +179,7 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
     try { all = JSON.parse(await fsp.readFile(file, 'utf8')) || {}; } catch { /* first */ }
     for (const [name, meta] of seen) all[name] = meta;
     await fsp.mkdir(path.join(dir, key), { recursive: true });
-    await fsp.writeFile(file, JSON.stringify(all));
+    await writeAtomic(file, JSON.stringify(all));
   }
 
   /** Index one log: decode every frame, write its minutes (rawOnly: only the raw snapshots, for a log indexed before them). */
@@ -159,96 +220,115 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
       if (!bucket) return;
       flushPending();
       flushRaw();
-      writes.push([minute, bucket, rawBucket]);
+      writes.push([minute, bucket, rawBucket, { span: rawLog.span, ids: rawLog.ids, ...(trust ? { trust } : {}) }]);
       bucket = null;
       rawBucket = null;
     };
-    const writeOut = async ([a, b, rawData]) => {
-      if (!rawOnly) await writeMinute(key, a, b);
-      await writeRaw(key, a, rawData);
+    const writeOut = async ([a, b, rawData, part]) => {
+      // the raw file's record of this log, from before: what it wrote to the minute
+      const hadRaw = await rawNow(key, a);
+      if (!rawOnly) await writeMinute(key, a, b, name, part, hadRaw?.logs?.[name] || null);
+      await writeRaw(key, a, rawData, name, hadRaw);
     };
     const child = spawn(xz, ['-dc', file], { stdio: ['ignore', 'pipe', 'pipe'] });
     let stderr = '';
+    let spawnError = null;
     child.stderr.on('data', (c) => { stderr += c; });
     const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
+    // how xz ended: its exit code, or null when it could not be started (no xz, no free process slot)
+    const exited = new Promise((ok) => {
+      child.once('error', (err) => { spawnError = err; lines.close(); child.stdout.destroy(); ok(null); });
+      child.once('close', (code) => ok(code));
+    });
     let frames = 0;
     let written = 0;
     let first = null;
     let lastT = null;
-    for await (const line of lines) {
-      const m = LINE.exec(line);
-      if (!m) continue;
-      const t = Number(m[1]) * 1000 + Number(`0.${m[2]}`) * 1000;
-      const mk = minuteKey(t);
-      if (mk !== minute) {
-        if (minute) written++;
-        closeMinute();
-        minute = mk;
-        minuteStart = Math.floor(t / 60000) * 60000;
-        bucket = { minute: mk, signals: {}, ids: {}, ...(trust ? { trust } : {}) };
-        rawLog = { span: [Math.round(t - minuteStart), Math.round(t - minuteStart)], buses: busOf, ids: {} };
-        rawBucket = { minute: mk, raw: {}, logs: { [name]: rawLog } };
-        for (const s of last.values()) s.pt = -Infinity; // each minute starts with every signal's value
-        for (const s of rawLast.values()) s.v = null; // ... and every id's payload
-        if (writes.length >= 2) await writeOut(writes.shift());
-      }
-      frames++;
-      if (first === null) first = t;
-      lastT = t;
-      const iface = m[3];
-      const idKey = `${iface}:${m[4].toUpperCase()}`;
-      bucket.ids[idKey] = (bucket.ids[idKey] || 0) + 1;
-      // raw: the payload when it changes (a string compare for the frames that repeat)
-      rawLog.ids[idKey] = (rawLog.ids[idKey] || 0) + 1;
-      rawLog.span[1] = Math.round(t - minuteStart);
-      const hex = m[5];
-      let r = rawLast.get(idKey);
-      if (!r) { r = { v: null, sec: -1, n: 0, pending: null }; rawLast.set(idKey, r); }
-      if (hex !== r.v) {
-        r.v = hex;
-        const sec = Math.floor(t / 1000);
-        if (sec !== r.sec) {
-          // the last payload of the second before, when the limit held it back
-          if (r.pending) { keepRaw(idKey, r.pending[0], r.pending[1]); r.pending = null; }
-          r.sec = sec;
-          r.n = 0;
+    let ended = false;
+    try {
+      for await (const line of lines) {
+        const m = LINE.exec(line);
+        if (!m) continue;
+        const t = Number(m[1]) * 1000 + Number(`0.${m[2]}`) * 1000;
+        const mk = minuteKey(t);
+        if (mk !== minute) {
+          if (minute) written++;
+          closeMinute();
+          minute = mk;
+          minuteStart = Math.floor(t / 60000) * 60000;
+          bucket = { minute: mk, signals: {}, ids: {} };
+          rawLog = { span: [Math.round(t - minuteStart), Math.round(t - minuteStart)], buses: busOf, ids: {} };
+          rawBucket = { minute: mk, raw: {}, logs: { [name]: rawLog } };
+          for (const s of last.values()) s.pt = -Infinity; // each minute starts with every signal's value
+          for (const s of rawLast.values()) s.v = null; // ... and every id's payload
+          if (writes.length >= 2) await writeOut(writes.shift());
         }
-        if (r.n < RAW_PER_SEC) { keepRaw(idKey, t, hex); r.n++; r.pending = null; } else r.pending = [t, hex];
-      }
-      if (rawOnly) continue;
-      const id = parseInt(m[4], 16);
-      const msg = messages.get(id);
-      if (!msg || (busOf[iface] && msg.bus !== busOf[iface])) continue;
-      const bytes = Buffer.from(m[5], 'hex');
-      for (const [sig, v] of decodeFrame(msg, bytes)) {
-        const nm = sig.name;
-        if (!seen.has(nm)) seen.set(nm, { label: sig.comment || nm, unit: sig.unit || '', min: sig.min, max: sig.max, values: sig.values, bus: sig.bus, message: sig.message, id: sig.messageId });
-        let s = last.get(nm);
-        if (!s) { s = { pt: -Infinity, v: undefined, pending: null }; last.set(nm, s); }
-        const value = Math.round(v * 1e6) / 1e6;
-        if (value === s.v && t - s.pt < KEEP_MS) {
-          // a change held back (under 50 ms after the last point) is kept at its own time once 50 ms have gone by,
-          // not a second later (the CAN sync matches these edges to the footage)
-          if (s.pending && t - s.pt >= STEP_MS) { (bucket.signals[nm] ||= []).push([s.pending[0] - minuteStart, s.pending[1]]); s.pt = s.pending[0]; s.pending = null; }
-          continue;
+        frames++;
+        if (first === null) first = t;
+        lastT = t;
+        const iface = m[3];
+        const idKey = `${iface}:${m[4].toUpperCase()}`;
+        bucket.ids[idKey] = (bucket.ids[idKey] || 0) + 1;
+        // raw: the payload when it changes (a string compare for the frames that repeat)
+        rawLog.ids[idKey] = (rawLog.ids[idKey] || 0) + 1;
+        rawLog.span[1] = Math.round(t - minuteStart);
+        const hex = m[5];
+        let r = rawLast.get(idKey);
+        if (!r) { r = { v: null, sec: -1, n: 0, pending: null }; rawLast.set(idKey, r); }
+        if (hex !== r.v) {
+          r.v = hex;
+          const sec = Math.floor(t / 1000);
+          if (sec !== r.sec) {
+            // the last payload of the second before, when the limit held it back
+            if (r.pending) { keepRaw(idKey, r.pending[0], r.pending[1]); r.pending = null; }
+            r.sec = sec;
+            r.n = 0;
+          }
+          if (r.n < RAW_PER_SEC) { keepRaw(idKey, t, hex); r.n++; r.pending = null; } else r.pending = [t, hex];
         }
-        s.v = value;
-        if (t - s.pt >= STEP_MS) {
-          (bucket.signals[nm] ||= []).push([Math.round(t - minuteStart), value]);
-          s.pt = t;
-          s.pending = null;
-        } else s.pending = [Math.round(t), value];
+        if (rawOnly) continue;
+        const id = parseInt(m[4], 16);
+        const msg = messages.get(id);
+        if (!msg || (busOf[iface] && msg.bus !== busOf[iface])) continue;
+        const bytes = Buffer.from(m[5], 'hex');
+        for (const [sig, v] of decodeFrame(msg, bytes)) {
+          const nm = sig.name;
+          if (!seen.has(nm)) seen.set(nm, { label: sig.comment || nm, unit: sig.unit || '', min: sig.min, max: sig.max, values: sig.values, bus: sig.bus, message: sig.message, id: sig.messageId });
+          let s = last.get(nm);
+          if (!s) { s = { pt: -Infinity, v: undefined, pending: null }; last.set(nm, s); }
+          const value = Math.round(v * 1e6) / 1e6;
+          if (value === s.v && t - s.pt < KEEP_MS) {
+            // a change held back (under 50 ms after the last point) is kept at its own time once 50 ms have gone by,
+            // not a second later (the CAN sync matches these edges to the footage)
+            if (s.pending && t - s.pt >= STEP_MS) { (bucket.signals[nm] ||= []).push([s.pending[0] - minuteStart, s.pending[1]]); s.pt = s.pending[0]; s.pending = null; }
+            continue;
+          }
+          s.v = value;
+          if (t - s.pt >= STEP_MS) {
+            (bucket.signals[nm] ||= []).push([Math.round(t - minuteStart), value]);
+            s.pt = t;
+            s.pending = null;
+          } else s.pending = [Math.round(t), value];
+        }
+        if (frames % 200000 === 0) await new Promise((r) => setImmediate(r)); // let requests through
       }
-      if (frames % 200000 === 0) await new Promise((r) => setImmediate(r)); // let requests through
+      ended = true;
+    } finally {
+      // a write that failed partway: stop xz, which would wait for ever on its full pipe
+      if (!ended && child.exitCode === null && child.signalCode === null) { child.kill(); child.stdout.destroy(); }
     }
     closeMinute();
-    let minutes = writes.length;
-    const code = await new Promise((ok) => (child.exitCode !== null ? ok(child.exitCode) : child.once('close', ok)));
-    if (code !== 0) throw new Error(`xz could not read ${name}: ${stderr.trim().slice(0, 200) || `exit ${code}`}`);
+    const code = await exited;
+    // (not this log's fault: it is read again at the next look)
+    if (spawnError) throw Object.assign(new Error(`xz could not be started for ${name}: ${spawnError.message}`), { retry: true });
+    // xz stopped early (a log cut off, or damaged): what it read before is kept, unless that is nothing
+    const truncated = code !== 0;
+    const why = `${stderr.trim().slice(0, 200) || `exit ${code}`}`;
+    if (truncated && !frames) throw new Error(`xz could not read ${name}: ${why}`);
     for (const w of writes) await writeOut(w);
     if (!rawOnly) await mergeSignals(key, seen);
-    minutes = written + (minute ? 1 : 0);
-    return { frames, minutes, from: first, to: lastT };
+    const minutes = written + (minute ? 1 : 0);
+    return { frames, minutes, from: first, to: lastT, ...(truncated ? { truncated: `xz stopped early: ${why}` } : {}) };
   }
 
   /** Every complete log not indexed yet, oldest first. */
@@ -266,15 +346,17 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
         const st = await fsp.stat(path.join(canDir, key, name)).catch(() => null);
         if (!st) continue;
         const file = `${st.size}/${Math.round(st.mtimeMs)}`;
-        const stamp = `${file}/${FORMAT}`;
+        // the sidecar is part of the stamp: one that comes (or changes) later has the log read again with its bus map
+        const side = await sidecarStamp(path.join(canDir, key, name));
+        const stamp = `${file}/${FORMAT}${side}`;
         const had = d[`${key}/${name}`];
-        // indexed before the raw snapshots (the same file): only those are written now
         if (had === stamp) continue;
         // only logs whose check allows it (canTrust: verified, unsigned before pairing, or used anyway);
         // the others wait, and are looked at again when their check changes
         const ok = await usable(key, name).catch(() => ({ use: false }));
         if (!ok.use) continue;
-        out.push({ key, name, stamp, startedAt: n.startedAt, rawOnly: had === file, trust: ok.trust });
+        // indexed before the raw snapshots (the same file, no sidecar since): only those are written now
+        out.push({ key, name, stamp, startedAt: n.startedAt, rawOnly: had === file && !side, trust: ok.trust });
       }
     }
     return out.sort((a, b) => a.startedAt - b.startedAt);
@@ -300,12 +382,18 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
             await saveDone();
             status.indexed++;
             log?.info?.(`CAN index: ${job.name}: ${r.frames} frames, ${r.minutes} minute(s)`);
+            if (r.truncated) {
+              status.lastError = `${job.name}: ${r.truncated} (what was read before is indexed)`;
+              log?.warn?.(`CAN index: ${status.lastError}`);
+            }
             try { onIndexed?.(job.key, r.from, r.to); } catch { /* the sync's own business */ }
           } catch (err) {
             status.lastError = `${job.name}: ${err.message}`;
             log?.warn?.(`CAN index: ${status.lastError}`);
-            (await loadDone())[`${job.key}/${job.name}`] = job.stamp; // not again until the file changes
-            await saveDone();
+            if (!err.retry) {
+              (await loadDone())[`${job.key}/${job.name}`] = job.stamp; // not again until the file changes
+              await saveDone();
+            }
           }
           status.pending--;
         }

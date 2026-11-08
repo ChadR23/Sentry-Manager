@@ -126,3 +126,167 @@ test('raw snapshots: a log indexed before them gains them once, its signal minut
     await fsp.rm(base, { recursive: true, force: true });
   }
 });
+
+// ---- indexing again, sidecars after their log, xz that fails
+
+const volts = (ms, v, bus = 'can0') => {
+  const b = Buffer.alloc(8);
+  b.writeUInt16LE(Math.round(v / 0.01), 0);
+  return line(ms, '132', b.toString('hex').toUpperCase(), bus);
+};
+const minuteFile = (base, m) => JSON.parse(zlib.gunzipSync(fs.readFileSync(path.join(base, 'idx', 'K', `${m}.json.gz`))).toString());
+
+test('indexing a log again replaces its own part: no frame counted twice, the other log of a minute untouched', { skip }, async () => {
+  const a = [];
+  for (let i = 0; i < 40; i++) a.push(volts(T0 + 10_000 + i * 100, 380 + i));
+  const name = 'K_20200101T080010Z_1.log.xz';
+  const { base, idx } = await setup(name, a);
+  try {
+    const other = 'K_20200101T080050Z_2.log.xz';
+    const b = [];
+    for (let i = 0; i < 20; i++) b.push(volts(T0 + 50_000 + i * 100, 300 + i));
+    await fsp.writeFile(path.join(base, 'can', 'K', other), execFileSync('xz', ['-1', '-c'], { input: `${b.join('\n')}\n` }));
+    await idx.kick();
+    const once = minuteFile(base, '20200101T0800');
+    assert.deepEqual(once.ids, { 'can0:132': 60 });
+    const series = await idx.series(['K'], T0, T0 + 59_000);
+    await idx.indexLog('K', name);
+    await idx.indexLog('K', name);
+    const twice = minuteFile(base, '20200101T0800');
+    assert.deepEqual(twice.ids, { 'can0:132': 60 }, 'each frame counted once');
+    assert.deepEqual(Object.keys(twice.logs).sort(), [name, other]);
+    assert.deepEqual(await idx.series(['K'], T0, T0 + 59_000), series, 'the same points, the other log\'s too');
+    assert.ok(series.BattVoltage132.some((p) => p[1] === 300), 'the other log is there');
+    assert.equal(Object.keys(twice).pop(), 'ids', 'the frame counts last (canSearch.js reads them from the end)');
+  } finally {
+    await fsp.rm(base, { recursive: true, force: true });
+  }
+});
+
+test('indexing again a minute written before the per-log records: its frames taken out by the raw record', { skip }, async () => {
+  const a = [];
+  for (let i = 0; i < 30; i++) a.push(volts(T0 + 10_000 + i * 100, 380 + i));
+  const name = 'K_20200101T080010Z_1.log.xz';
+  const { base, idx } = await setup(name, a);
+  try {
+    await idx.indexLog('K', name, { trust: 'verified' });
+    // as an older version wrote it: no per-log records, the frame counts and trust only
+    const f = path.join(base, 'idx', 'K', '20200101T0800.json.gz');
+    const old = minuteFile(base, '20200101T0800');
+    fs.writeFileSync(f, zlib.gzipSync(JSON.stringify({ minute: old.minute, signals: old.signals, ids: old.ids, trust: 'verified' })));
+    await idx.indexLog('K', name, { trust: 'verified' });
+    const now = minuteFile(base, '20200101T0800');
+    assert.deepEqual(now.ids, { 'can0:132': 30 });
+    assert.equal(now.signals.BattVoltage132.length, old.signals.BattVoltage132.length);
+    assert.equal(now.trust, 'verified');
+  } finally {
+    await fsp.rm(base, { recursive: true, force: true });
+  }
+});
+
+test('a sidecar that comes after its log: the log is indexed again with its bus map, nothing counted twice', { skip }, async () => {
+  // the battery voltage (a Vehicle bus message) on can1, which is the Chassis bus unless the sidecar says otherwise
+  const a = [];
+  for (let i = 0; i < 30; i++) a.push(volts(T0 + 10_000 + i * 100, 380 + i, 'can1'));
+  const name = 'K_20200101T080010Z_1.log.xz';
+  const { base, idx, rawFile } = await setup(name, a);
+  try {
+    await idx.kick();
+    assert.equal((await idx.series(['K'], T0, T0 + 59_000)).BattVoltage132, undefined, 'by the default bus map: not the Vehicle bus');
+    const rawBefore = await idx.raw(['K'], T0, T0 + 59_000);
+    assert.equal(rawBefore[0].name, null);
+    fs.writeFileSync(path.join(base, 'can', 'K', `${name}.json`), JSON.stringify({ busMap: { can0: 'ChassisBus', can1: 'VehicleBus' } }));
+    assert.deepEqual((await idx.pendingLogs()).map((j) => [j.name, j.rawOnly]), [[name, false]], 'pending again');
+    await idx.kick();
+    assert.equal((await idx.series(['K'], T0, T0 + 59_000)).BattVoltage132.length, 30);
+    assert.deepEqual(minuteFile(base, '20200101T0800').ids, { 'can1:132': 30 });
+    const raw = JSON.parse(zlib.gunzipSync(fs.readFileSync(rawFile('20200101T0800'))).toString());
+    assert.equal(raw.logs[name].buses.can1, 'VehicleBus', 'the raw view\'s bus too');
+    assert.deepEqual(raw.logs[name].ids, { 'can1:132': 30 });
+    const rawAfter = await idx.raw(['K'], T0, T0 + 59_000);
+    assert.equal(rawAfter[0].name, 'ID132HVBattAmpVolt');
+    assert.deepEqual(rawAfter[0].changes, rawBefore[0].changes, 'no payload twice');
+    assert.deepEqual(await idx.pendingLogs(), [], 'once');
+    // a sidecar that changes: again
+    fs.writeFileSync(path.join(base, 'can', 'K', `${name}.json`), JSON.stringify({ busMap: { can0: 'VehicleBus', can1: 'ChassisBus' } }));
+    const later = new Date(Date.now() + 5000);
+    fs.utimesSync(path.join(base, 'can', 'K', `${name}.json`), later, later);
+    await idx.kick();
+    assert.equal((await idx.series(['K'], T0, T0 + 59_000)).BattVoltage132, undefined, 'its points taken out again');
+    assert.deepEqual(minuteFile(base, '20200101T0800').ids, { 'can1:132': 30 });
+  } finally {
+    await fsp.rm(base, { recursive: true, force: true });
+  }
+});
+
+// minutes of the battery voltage at 100 Hz, with a counter so xz cannot squeeze it to nothing
+const longLog = (minutes, hz = 100) => {
+  const out = [];
+  for (let i = 0; i < minutes * 60 * hz; i++) {
+    const ms = T0 + i * (1000 / hz);
+    out.push(volts(ms, 350 + (i % 997) / 10), line(ms, '6E3', `${hex2(i)}${hex2(i >> 8)}${hex2(i * 7)}${hex2(i * 13)}`));
+  }
+  return out;
+};
+
+test('a log cut off (xz ends early): what was read is indexed, signals.json too, and the sync is told', { skip }, async () => {
+  const name = 'K_20200101T080000Z_1.log.xz';
+  const { base } = await setup(name, longLog(6));
+  try {
+    const file = path.join(base, 'can', 'K', name);
+    const whole = fs.readFileSync(file);
+    fs.writeFileSync(file, whole.subarray(0, Math.floor(whole.length * 0.75)));
+    const told = [];
+    const idx = createCanIndex({ canDir: path.join(base, 'can'), dir: path.join(base, 'idx'), onIndexed: (k, from, to) => told.push([k, from, to]) });
+    const r = await idx.indexLog('K', name);
+    assert.ok(r.frames > 0 && r.truncated, 'a partial result, flagged');
+    assert.ok(r.minutes >= 2);
+    for (let m = 0; m < r.minutes; m++) assert.ok(minuteFile(base, `20200101T080${m}`).ids['can0:132'] > 0, `minute ${m} written`);
+    assert.ok(JSON.parse(fs.readFileSync(path.join(base, 'idx', 'K', 'signals.json'), 'utf8')).BattVoltage132);
+    fs.rmSync(path.join(base, 'idx'), { recursive: true });
+    await idx.kick();
+    assert.equal(told.length, 1, 'the sync works the drives out');
+    assert.equal(told[0][0], 'K');
+    assert.match(idx.status().lastError, /stopped early/);
+    assert.deepEqual(await idx.pendingLogs(), []);
+  } finally {
+    await fsp.rm(base, { recursive: true, force: true });
+  }
+});
+
+test('xz that cannot be started: an error for that log, not a crash, and tried again later', { skip }, async () => {
+  const name = 'K_20200101T080000Z_1.log.xz';
+  const { base } = await setup(name, [volts(T0, 380)]);
+  try {
+    const idx = createCanIndex({ canDir: path.join(base, 'can'), dir: path.join(base, 'idx'), xz: 'no-such-xz-binary' });
+    await assert.rejects(idx.indexLog('K', name), /could not be started.*ENOENT/);
+    await idx.kick();
+    assert.match(idx.status().lastError, /ENOENT/);
+    assert.equal((await idx.pendingLogs()).length, 1, 'not marked done');
+  } finally {
+    await fsp.rm(base, { recursive: true, force: true });
+  }
+});
+
+test('a write that fails partway: xz is stopped, no .tmp file left behind', { skip }, async () => {
+  const name = 'K_20200101T080000Z_1.log.xz';
+  const { base } = await setup(name, longLog(8));
+  try {
+    // xz through a script that says its process id
+    const pidFile = path.join(base, 'xz.pid');
+    const wrapper = path.join(base, 'xz.sh');
+    fs.writeFileSync(wrapper, `#!/bin/sh\necho $$ > '${pidFile}'\nexec xz "$@"\n`, { mode: 0o755 });
+    // the first minute's file cannot be written (a folder is in its way)
+    fs.mkdirSync(path.join(base, 'idx', 'K', '20200101T0800.json.gz', 'x'), { recursive: true });
+    const idx = createCanIndex({ canDir: path.join(base, 'can'), dir: path.join(base, 'idx'), xz: wrapper });
+    await assert.rejects(idx.indexLog('K', name));
+    const pid = Number(fs.readFileSync(pidFile, 'utf8'));
+    const alive = () => { try { process.kill(pid, 0); return true; } catch { return false; } };
+    for (let i = 0; i < 50 && alive(); i++) await new Promise((r) => setTimeout(r, 100));
+    assert.equal(alive(), false, 'xz is not left running');
+    assert.deepEqual(fs.readdirSync(path.join(base, 'idx', 'K')).filter((f) => f.endsWith('.tmp')), []);
+  } finally {
+    try { process.kill(Number(fs.readFileSync(path.join(base, 'xz.pid'), 'utf8'))); } catch { /* gone */ }
+    await fsp.rm(base, { recursive: true, force: true });
+  }
+});
