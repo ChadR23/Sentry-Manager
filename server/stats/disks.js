@@ -5,7 +5,11 @@
 // the disk's own sensor (drivetemp / nvme hwmon, see sensors.js), and the
 // I/O errors the kernel counted on it since this app started
 // (device/ioerr_cnt, SATA and SAS disks): errors that keep coming are an
-// early sign of a failing disk. Full SMART needs root and the raw disk,
+// early sign of a failing disk. Errors that reach most disks in the same
+// moment, or arrive across a stall (the server frozen for a while), are the
+// controller's or the whole server's (commands timed out while everything
+// waited, a bus reset, the NAS's own SMART polling): they are counted apart
+// (ioErrorsShared) and are not the disk's own. Full SMART needs root and the raw disk,
 // which this container does not have; the NAS itself checks SMART.
 
 const { readText, readLine, readNum, listDir, round, clampPct, join } = require('./util');
@@ -44,6 +48,8 @@ class DisksProvider {
     this.prev = null;
     this.prevAt = null;
     this.errBase = new Map(); // disk -> its error count when first read
+    this.errLast = new Map(); // disk -> its count since start at the last sample
+    this.errShared = new Map(); // disk -> errors that came with most disks at once, or across a stall
   }
 
   /** I/O errors on the disk since this app started (null: not counted). */
@@ -85,9 +91,9 @@ class DisksProvider {
         writeBps = Math.round((cur.write - before.write) / dt);
         if (cur.ioMs >= before.ioMs) busy = round(clampPct((cur.ioMs - before.ioMs) / (dt * 10)), 0);
       }
-      const ioErrors = this.errorsSince(d.name);
-      out.push({ name: d.name, model: d.model, readBps, writeBps, tempC: this.sensors.diskTemp(d.name), kind: d.kind, busy, ...(ioErrors === null ? {} : { ioErrors }) });
+      out.push({ name: d.name, model: d.model, readBps, writeBps, tempC: this.sensors.diskTemp(d.name), kind: d.kind, busy });
     }
+    this.splitErrors(out, dt);
     if (stats.size) {
       this.prev = stats;
       this.prevAt = t;
@@ -95,5 +101,28 @@ class DisksProvider {
     return out;
   }
 }
+
+/** Disks a stall is judged by: a sample this long after the last one means the server was frozen. */
+const STALL_S = 60;
+
+DisksProvider.prototype.splitErrors = function splitErrors(out, dt) {
+  const counted = [];
+  for (const d of out) {
+    const total = this.errorsSince(d.name);
+    if (total === null) continue;
+    const before = this.errLast.get(d.name);
+    this.errLast.set(d.name, total);
+    counted.push({ d, total, rise: before === undefined ? 0 : Math.max(0, total - before) });
+  }
+  const rising = counted.filter((x) => x.rise > 0);
+  // the same moment on most disks (two or more, at least half of them), or a stall: not one disk's fault
+  const shared = (rising.length >= 2 && rising.length * 2 >= counted.length) || (rising.length > 0 && dt > STALL_S);
+  for (const x of counted) {
+    if (shared && x.rise) this.errShared.set(x.d.name, (this.errShared.get(x.d.name) || 0) + x.rise);
+    const sharedN = Math.min(x.total, this.errShared.get(x.d.name) || 0);
+    x.d.ioErrors = x.total - sharedN;
+    if (sharedN) x.d.ioErrorsShared = sharedN;
+  }
+};
 
 module.exports = { DisksProvider, parseDiskstats, kindOf };

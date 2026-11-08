@@ -367,6 +367,12 @@ test('the list block: every stat of the clip, asked for all at once, filtered, l
   d.video.currentTime = 11;
   await d.frame();
   assert.ok(d.el.querySelectorAll('.sd-list-r.hot').length >= 1, 'a value that changed lights up');
+  // Customize redraws the bar: the list is drawn again in the new one
+  fire(d.el.querySelector('[data-edit]'), 'click');
+  await d.frame();
+  assert.ok(d.el.querySelectorAll('.sd-list-r').length >= 2, 'rows after a redraw');
+  fire(d.el.querySelector('[data-edit]'), 'click');
+  await d.frame();
   // filter
   const q = d.el.querySelector('[data-list-q]');
   q.value = 'volt';

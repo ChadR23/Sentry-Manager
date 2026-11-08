@@ -11,11 +11,14 @@
 //   /data/speeds/<vehicleId>/<YYYY-MM-DD>.json  { rel: [size, mtimeMs, speeds | null, summary | null] }
 //
 // The summary is what Find moments and the place search read (summarize):
-//   { b: [second, m/s lost in one second] hardest braking,
+//   { b: [second, m/s²] hardest braking: the car's own forward accelerometer in
+//        a second where it is slowing, or the speed lost in one second, the larger,
 //     t: [second, m/s²] hardest sideways acceleration,
 //     v: [second, m/s] top speed,
-//     g: [[second, lat, lon], …] where the car was, every 5 seconds }
-// Entries from before it existed (three items) are read again.
+//     g: [[second, lat, lon], …] where the car was, every 5 seconds,
+//     k: SUMMARY_VERSION }
+// Entries from before it existed (three items), or from an older summary
+// (another k), are read again: every clip, however old.
 
 const fsp = require('fs/promises');
 const path = require('path');
@@ -26,6 +29,8 @@ const DAY = /^\d{4}-\d{2}-\d{2}$/;
 const GPS_EVERY = 5;
 const BRAKE = 3.9; // m/s lost in one second (about 0.4 g)
 const SWERVE = 4; // m/s² sideways (about 0.4 g)
+// 2: braking from the accelerometer too (the speed, one value a second, misses most stops)
+const SUMMARY_VERSION = 2;
 
 /** Metres between two points (haversine). */
 function metres(lat1, lon1, lat2, lon2) {
@@ -49,11 +54,15 @@ function summarize(samples) {
     if (x.v !== null && (!v || x.v > v[1])) v = [s, r2(x.v)];
     const n = samples[s + 1];
     if (x.v !== null && n && n.v !== null && x.v - n.v > 0 && (!b || x.v - n.v > b[1])) b = [s, r2(x.v - n.v)];
+    // the accelerometer, in a second where the car is slowing (its sign does not matter then)
+    const p = samples[s - 1];
+    const slowing = x.v !== null && ((n && n.v !== null && n.v < x.v - 0.3) || (p && p.v !== null && x.v < p.v - 0.3));
+    if (slowing && Number.isFinite(x.ax) && x.ax !== null && (!b || Math.abs(x.ax) > b[1])) b = [s, r2(Math.abs(x.ax))];
     if (x.ay !== null && (!t || Math.abs(x.ay) > t[1])) t = [s, r2(Math.abs(x.ay))];
     if (s % GPS_EVERY === 0 && x.lat !== null && x.lon !== null && (x.lat !== 0 || x.lon !== 0)
       && Math.abs(x.lat) <= 90 && Math.abs(x.lon) <= 180) g.push([s, r5(x.lat), r5(x.lon)]);
   }
-  return { b, t, v, g };
+  return { b, t, v, g, k: SUMMARY_VERSION };
 }
 
 function createSpeedIndex({ dir, inventory, vehicles, telemetry, log, pauseMs = 100, idle = () => true }) {
@@ -133,7 +142,7 @@ function createSpeedIndex({ dir, inventory, vehicles, telemetry, log, pauseMs = 
       if (!root) continue;
       for (const c of fronts(v.id)) {
         const had = (await load(c.vid, c.day))[c.rel];
-        if (!(had && had[0] === c.size && had[1] === c.mtimeMs && had.length >= 4)) todo.push({ ...c, root });
+        if (!(had && had[0] === c.size && had[1] === c.mtimeMs && had.length >= 4 && (had[3] === null || had[3]?.k === SUMMARY_VERSION))) todo.push({ ...c, root });
       }
     }
     if (todo.length) log?.info(`Speed index: ${todo.length} clip(s) to read, newest days first`);

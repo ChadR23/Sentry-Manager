@@ -67,7 +67,9 @@ const STYLE = `
 .sentry-sd:not(.editing) .sd-edit{display:none!important}
 .sentry-sd.editing .sd-edit{display:flex}
 .sentry-sd.editing .sd-b{padding-top:30px;border-style:dashed}
-.sentry-sd .sd-bar-edit{position:absolute;left:4px;right:4px;top:4px;gap:4px;align-items:center}
+.sentry-sd .sd-bar-edit{position:absolute;left:4px;right:4px;top:4px;gap:3px;align-items:center}
+.sentry-sd .sd-bar-edit .sd-btn{padding:0 7px;line-height:1.5}
+.sentry-sd.editing .sd-small,.sentry-sd.editing .sd-state{min-width:124px}
 .sentry-sd .sd-grip{cursor:grab;touch-action:none;padding:2px 6px;border-radius:6px;font-size:13px;color:var(--sd-dim)}
 .sentry-sd .sd-grip:active{cursor:grabbing}
 .sentry-sd .sd-x{margin-left:auto}
@@ -910,7 +912,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
   // rows in view are built (thousands of CAN signals); a value that changes
   // lights up for a moment.
   const ROW = 30;
-  const lists = new WeakMap(); // block -> { key, rows, hidden, drawn, prev, hot }
+  const lists = new WeakMap(); // block -> { key, rows, hidden, prev, hot }
   const changingOf = new WeakMap(); // can answer -> Set of names whose value changes
   let hotLeft = 0;
   function changingNames() {
@@ -923,7 +925,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     return set;
   }
   function listRows(b) {
-    const st = lists.get(b) || lists.set(b, { key: '', rows: [], hidden: 0, drawn: '', prev: new Map(), hot: new Map() }).get(b);
+    const st = lists.get(b) || lists.set(b, { key: '', rows: [], hidden: 0, prev: new Map(), hot: new Map() }).get(b);
     const key = `${signalsVersion}|${b.q || ''}|${b.changing ? 1 : 0}|${recs ? 1 : 0}`;
     if (st.key === key && st.can === can) return st;
     const moving = b.changing ? changingNames() : null;
@@ -932,7 +934,6 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     st.hidden = found.length - st.rows.length;
     st.key = key;
     st.can = can;
-    st.drawn = '';
     return st;
   }
   const messageOf = (s) => String(s.group || '').split(' · ').pop();
@@ -947,8 +948,9 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     const first = Math.max(0, Math.floor((scroll.scrollTop || 0) / ROW) - 4);
     const last = Math.min(n, first + Math.ceil((scroll.clientHeight || 15 * ROW) / ROW) + 8);
     const drawn = `${st.key}|${first}|${last}`;
-    if (st.drawn !== drawn) {
-      st.drawn = drawn;
+    // (kept on the element: a redraw of the bar gives a new, empty one)
+    if (pad.dataset.drawn !== drawn) {
+      pad.dataset.drawn = drawn;
       pad.style.height = `${n * ROW}px`;
       pad.innerHTML = n
         ? st.rows.slice(first, last).map((s, k) => `<div class="sd-list-r" role="row" style="top:${(first + k) * ROW}px" data-row="${first + k}" title="${esc(`${s.label} (${s.group}${s.canName ? `, ${s.canName}` : ''})`)}"><span class="sd-list-l" role="cell">${esc(s.label)}</span><span class="sd-list-m" role="cell">${esc(messageOf(s))}</span><span class="sd-list-v" role="cell" data-lv></span></div>`).join('')

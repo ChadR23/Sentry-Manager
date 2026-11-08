@@ -109,7 +109,7 @@ test('speed index: each clip also keeps its hardest braking, sideways g, top spe
   await idx.kick();
   assert.deepEqual(await idx.day('v1', '2026-10-11'), { 'RecentClips/2026-10-11_10-00-11-front.mp4': [20, 20, 12, 11] });
   assert.deepEqual(await idx.summaries('v1', '2026-10-11'), {
-    'RecentClips/2026-10-11_10-00-11-front.mp4': { b: [1, 8], t: [1, 3], v: [0, 20], g: [[0, 37.7749, -122.4194]] }
+    'RecentClips/2026-10-11_10-00-11-front.mp4': { b: [1, 8], t: [1, 3], v: [0, 20], g: [[0, 37.7749, -122.4194]], k: 2 }
   });
 
   // an entry from before summaries existed is read again
@@ -121,6 +121,24 @@ test('speed index: each clip also keeps its hardest braking, sideways g, top spe
   assert.deepEqual(await again.summaries('v1', '2026-10-11'), {});
   await again.kick();
   assert.equal(Object.keys(await again.summaries('v1', '2026-10-11')).length, 1);
+
+  // and so is one from an older summary (before braking came from the accelerometer), however old the clip
+  const old = JSON.parse(fs.readFileSync(file, 'utf8'));
+  delete old['RecentClips/2026-10-11_10-00-11-front.mp4'][3].k;
+  old['RecentClips/2026-10-11_10-00-11-front.mp4'][3].b = null;
+  fs.writeFileSync(file, JSON.stringify(old));
+  const third = createSpeedIndex({ dir: path.join(dir, 'speeds'), inventory: { get: () => ({ files }) }, vehicles: { list: () => [{ id: 'v1' }], rootOf: () => root }, telemetry: {}, pauseMs: 0 });
+  await third.kick();
+  assert.deepEqual(Object.values(await third.summaries('v1', '2026-10-11'))[0].b, [1, 8]);
+});
+
+test('hard braking from the accelerometer, in a second where the car is slowing (the one-a-second speed misses it)', () => {
+  const { summarize } = require('../server/speedIndex');
+  const s = (v, ax) => ({ v, lat: null, lon: null, ax, ay: null });
+  // 20 m/s to 17 to 14: 3 m/s a second by speed, but the car felt 0.6 g at second 1
+  assert.deepEqual(summarize([s(20, 0), s(17, -5.9), s(14, -2), s(14, 0)]).b, [1, 5.9]);
+  // a jolt while not slowing (a bump, speeding up) is not braking
+  assert.deepEqual(summarize([s(10, 0), s(10, -6), s(12, 2), s(14, 0)]).b, null);
 });
 
 test('moments: hard braking and swerves over the line, strongest first, and the three fastest clips; places: clips that passed near', async (t) => {

@@ -41,10 +41,11 @@ function rules(body) {
       key: `disk-temp:${d.name}`, level: 'warn', value: d.tempC, raise: limit, clear: limit - 5, above: true,
       message: () => `${DISK_KIND[d.kind] || 'Disk'} ${d.name} at ${round(d.tempC, 0)} °C`
     });
-    // read or write errors since the app started: stays until the next start
+    // the disk's own read or write errors since the app started (not those that came with
+    // most disks at once or across a stall, see disks.js), two or more: stays until the next start
     out.push({
-      key: `disk-errors:${d.name}`, level: 'error', value: d.ioErrors ?? null, raise: 1, clear: 0.5, above: true,
-      message: () => `${DISK_KIND[d.kind] || 'Disk'} ${d.name}${d.model ? ` (${d.model})` : ''} reported ${d.ioErrors} read/write error${d.ioErrors === 1 ? '' : 's'}: check its health (SMART) on the NAS and that your footage is backed up`
+      key: `disk-errors:${d.name}`, level: 'error', value: d.ioErrors ?? null, raise: 2, clear: 1.5, above: true,
+      message: () => `${DISK_KIND[d.kind] || 'Disk'} ${d.name}${d.model ? ` (${d.model})` : ''} keeps reporting read/write errors (${d.ioErrors} of its own since the app started): check its health (SMART) on the NAS and that your footage is backed up`
     });
   }
   for (const f of body.filesystems || []) {
