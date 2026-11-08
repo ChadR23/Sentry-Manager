@@ -15,6 +15,10 @@
 // /api/telemetry: Tesla's SeiMetadata). CAN signals from the CAN Bridge join
 // the same list later (registerSignals), with nothing else to change.
 //
+// "Raw" (when the clip has CAN data) opens the nerd raw view under the blocks:
+// every CAN id at the moment shown, known to the DBC or not, with the bytes
+// that changed in the last half second lit up (createRawView).
+//
 //   const dash = attachStatDash({ stage, videos: () => [...], main: () => video, over: false });
 //   dash.destroy();
 
@@ -69,6 +73,25 @@ const STYLE = `
 .sentry-sd .sd-none{color:var(--sd-dim);font-size:12px;padding:4px 6px}
 .sentry-sd .sd-hide{margin-left:auto}
 .sentry-sd .sd-sync{font-size:11px;color:var(--sd-dim);white-space:nowrap}
+.sentry-sd button.sd-btn[hidden]{display:none}
+.sentry-sd .sd-raw{margin-top:6px;min-width:0;max-width:100%;-webkit-user-select:text;user-select:text}
+.sentry-sd .sd-raw[hidden]{display:none}
+.sentry-sd .sd-raw-bar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:6px}
+.sentry-sd .sd-raw-bar input{all:unset;box-sizing:border-box;flex:1 1 140px;min-width:0;max-width:260px;padding:4px 10px;border-radius:8px;border:1px solid var(--sd-line);background:rgba(255,255,255,.06);color:var(--sd-fg);font:600 12px/1.6 system-ui,sans-serif}
+.sentry-sd .sd-raw-bar input:focus-visible{outline:2px solid var(--sd-blue);outline-offset:2px}
+.sentry-sd .sd-raw-n{font-size:12px;color:var(--sd-dim)}
+.sentry-sd .sd-raw-scroll{overflow:auto;max-height:46vh;max-width:100%;background:var(--sd-tile);border:1px solid var(--sd-line);border-radius:12px;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
+.sentry-sd.over .sd-raw-scroll{max-height:30vh}
+.sentry-sd .sd-raw table{border-collapse:collapse;width:100%;font:12px/1.35 ui-monospace,Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}
+.sentry-sd .sd-raw th{position:sticky;top:0;background:#1d2026;color:var(--sd-dim);font:700 11px/1.6 system-ui,sans-serif;text-align:left;padding:4px 8px;white-space:nowrap}
+.sentry-sd .sd-raw td{padding:2px 8px;border-top:1px solid var(--sd-line);white-space:nowrap}
+.sentry-sd .sd-raw td.sd-raw-hz{text-align:right;color:var(--sd-dim)}
+.sentry-sd .sd-raw td.sd-raw-p{width:100%}
+.sentry-sd .sd-raw td.sd-raw-name{font-family:system-ui,sans-serif;max-width:220px;overflow:hidden;text-overflow:ellipsis}
+.sentry-sd .sd-raw td.sd-raw-name.unknown{color:var(--sd-amber);font-style:italic}
+.sentry-sd .sd-raw .sd-raw-p i{font-style:normal;padding:0 2px;border-radius:3px;margin-right:1px}
+.sentry-sd .sd-raw .sd-raw-p i.hot{background:var(--sd-amber);color:#111}
+.sentry-sd .sd-raw .sd-raw-p.none{color:var(--sd-dim)}
 @media (max-width:640px){
   .sentry-sd .sd-small{flex-basis:88px}
   .sentry-sd .sd-v{font-size:20px}
@@ -190,6 +213,189 @@ function canClipFor(path, names) {
     if (canClipCache.size > 16) canClipCache.delete(canClipCache.keys().next().value);
   }
   return canClipCache.get(key);
+}
+
+// ---- the nerd raw view: every CAN id at the moment shown, decodable or not
+// (GET /api/can/raw), with the bytes that just changed lit up, to find which
+// message moves when the footage shows the brake pressed. Fetched once per
+// clip, only while open (a tiny probe decides whether "Raw" is offered).
+const RAW_HOT_MS = 500;
+const rawProbeCache = new Map(); // front path -> Promise<boolean>
+const rawDataCache = new Map(); // front path -> Promise<{ start, ids } | null>
+const rawGet = (url) => fetch(url, { credentials: 'same-origin' }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+function rawProbe(path) {
+  if (!rawProbeCache.has(path)) {
+    rawProbeCache.set(path, rawGet(`/api/can/raw?path=${encodeURIComponent(path)}&probe=1`).then((d) => d?.count > 0));
+    if (rawProbeCache.size > 16) rawProbeCache.delete(rawProbeCache.keys().next().value);
+  }
+  return rawProbeCache.get(path);
+}
+function rawFor(path) {
+  if (!rawDataCache.has(path)) {
+    rawDataCache.set(path, rawGet(`/api/can/raw?path=${encodeURIComponent(path)}`));
+    if (rawDataCache.size > 3) rawDataCache.delete(rawDataCache.keys().next().value);
+  }
+  return rawDataCache.get(path);
+}
+/** The index of the last change at or before `utc` (-1: none yet). */
+function rawIndexAt(changes, utc) {
+  if (!changes.length || utc < changes[0][0]) return -1;
+  let lo = 0;
+  let hi = changes.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (changes[mid][0] <= utc) lo = mid; else hi = mid - 1;
+  }
+  return lo;
+}
+/** Which bytes changed in the RAW_HOT_MS before `utc`: a string of 0/1 per byte. */
+function rawHot(changes, i, utc) {
+  const n = changes[i][1].length >> 1;
+  const hot = new Array(n).fill('0');
+  for (let j = i; j > 0 && changes[j][0] > utc - RAW_HOT_MS; j--) {
+    const a = changes[j][1];
+    const b = changes[j - 1][1];
+    for (let k = 0; k < n; k++) if (a.substr(k * 2, 2) !== b.substr(k * 2, 2)) hot[k] = '1';
+  }
+  return hot.join('');
+}
+let rawOpenPref = false;
+try { rawOpenPref = localStorage.getItem('sentry-sd-raw') === '1'; } catch { /* no storage */ }
+/**
+ * The raw table, its own element (kept across the dashboard's redraws):
+ *   const rv = createRawView({ onAvailable(yes) });  rv.setPath(path);  rv.tick(ms into clip)
+ */
+function createRawView({ onAvailable = () => {} } = {}) {
+  const box = document.createElement('div');
+  box.className = 'sd-raw';
+  box.hidden = true;
+  box.innerHTML = `<div class="sd-raw-bar"><input type="search" data-raw-filter placeholder="Filter: id or name" aria-label="Filter CAN ids by id or name" autocomplete="off" spellcheck="false">
+    <button type="button" class="sd-btn" data-raw-unknown aria-pressed="false">Unknown only</button><span class="sd-raw-n" data-raw-n></span></div>
+    <div class="sd-raw-scroll"><table><thead><tr><th>ID</th><th>Bus</th><th>Name</th><th>Hz</th><th>Payload</th></tr></thead><tbody data-raw-body></tbody></table></div>`;
+  const body = box.querySelector('[data-raw-body]');
+  const count = box.querySelector('[data-raw-n]');
+  const filterEl = box.querySelector('[data-raw-filter]');
+  const unknownBtn = box.querySelector('[data-raw-unknown]');
+  let path = null;
+  let available = false;
+  let open = rawOpenPref;
+  let data = null; // { start, ids }
+  let rows = []; // { e (the id), tr, cell, spans, idx, hot, hex }
+  let unknownOnly = false;
+  let lastMs = NaN;
+  let token = 0;
+
+  function build() {
+    rows = [];
+    body.textContent = '';
+    if (!data?.ids?.length) {
+      body.innerHTML = '<tr><td colspan="5" class="sd-none">No CAN messages for this clip.</td></tr>';
+      count.textContent = '';
+      return;
+    }
+    const frag = document.createDocumentFragment();
+    for (const e of data.ids) {
+      const tr = document.createElement('tr');
+      const id = e.id.padStart(e.id.length > 3 ? 8 : 3, '0'); // 00C; extended ids in 8
+      tr.innerHTML = `<td>${esc(id)}</td><td>${esc(e.bus)}</td><td class="sd-raw-name${e.name ? '' : ' unknown'}" title="${esc(e.name || 'No DBC message for this id')}">${esc(e.name || 'unknown')}</td><td class="sd-raw-hz">${fmt(e.hz, e.hz < 10 ? 1 : 0)}</td><td class="sd-raw-p none">—</td>`;
+      rows.push({ e, tr, cell: tr.lastElementChild, spans: [], idx: -2, hot: '', hex: '', search: `${id} ${e.id} ${e.bus}:${id} ${e.name || 'unknown'}`.toLowerCase() });
+      frag.appendChild(tr);
+    }
+    body.appendChild(frag);
+    applyFilter();
+    lastMs = NaN;
+  }
+  function applyFilter() {
+    const q = filterEl.value.trim().toLowerCase().replace(/^0x/, '');
+    let shown = 0;
+    for (const r of rows) {
+      const hide = (unknownOnly && r.e.name) || (q && !r.search.includes(q));
+      r.tr.hidden = Boolean(hide);
+      if (!hide) shown++;
+    }
+    count.textContent = rows.length ? `${shown} of ${rows.length} ids` : '';
+    lastMs = NaN;
+  }
+  // a row's payload cell: one span per byte, rebuilt only when the length changes
+  function paint(r, utc) {
+    const i = rawIndexAt(r.e.changes, utc);
+    if (i < 0) {
+      if (r.idx !== -1) { r.idx = -1; r.hex = ''; r.hot = ''; r.spans = []; r.cell.className = 'sd-raw-p none'; r.cell.textContent = '—'; }
+      return;
+    }
+    const hex = r.e.changes[i][1];
+    const hot = rawHot(r.e.changes, i, utc);
+    if (i === r.idx && hot === r.hot) return;
+    const n = hex.length >> 1;
+    if (r.spans.length !== n) {
+      r.cell.className = 'sd-raw-p';
+      r.cell.textContent = '';
+      r.spans = [];
+      for (let k = 0; k < n; k++) r.spans.push(r.cell.appendChild(document.createElement('i')));
+      r.hex = '';
+      r.hot = '';
+    }
+    for (let k = 0; k < n; k++) {
+      const byte = hex.substr(k * 2, 2);
+      if (byte !== r.hex.substr(k * 2, 2)) r.spans[k].textContent = byte;
+      if (hot[k] !== r.hot[k]) r.spans[k].classList.toggle('hot', hot[k] === '1');
+    }
+    r.idx = i;
+    r.hex = hex;
+    r.hot = hot;
+  }
+  function load() {
+    if (!open || !available || !path) return;
+    const my = ++token;
+    const p = path;
+    rawFor(p).then((d) => { if (my === token && p === path) { data = d; build(); } });
+  }
+  filterEl.addEventListener('input', applyFilter);
+  unknownBtn.addEventListener('click', () => {
+    unknownOnly = !unknownOnly;
+    unknownBtn.setAttribute('aria-pressed', String(unknownOnly));
+    applyFilter();
+  });
+  return {
+    el: box,
+    get available() { return available; },
+    get open() { return open; },
+    setPath(p) {
+      if (p === path) return;
+      path = p;
+      data = null;
+      rows = [];
+      body.textContent = '';
+      count.textContent = '';
+      token++;
+      if (available) { available = false; onAvailable(false); }
+      box.hidden = true;
+      // only cars with CAN signals are asked; the probe is a small answer
+      canMetaFor(p).then((meta) => (meta && Object.keys(meta).length ? rawProbe(p) : false)).then((yes) => {
+        if (p !== path) return;
+        available = yes;
+        box.hidden = !(open && available);
+        onAvailable(available);
+        load();
+      });
+    },
+    toggle() {
+      open = !open;
+      try { localStorage.setItem('sentry-sd-raw', open ? '1' : '0'); } catch { /* no storage */ }
+      rawOpenPref = open;
+      box.hidden = !(open && available);
+      if (open && !data) load();
+      lastMs = NaN;
+    },
+    /** Payloads at this moment of the clip (cells change only where a byte does). */
+    tick(ms) {
+      if (box.hidden || !data?.ids?.length) return;
+      if (Math.abs(ms - lastMs) < 40) return; // about 25 updates a second at most
+      lastMs = ms;
+      const utc = data.start + ms;
+      for (const r of rows) if (!r.tr.hidden) paint(r, utc);
+    }
+  };
 }
 
 const DEFAULT_BOARD = () => ({
@@ -338,6 +544,8 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
   let can = null; // { start (UTC ms of the clip's 0 s), series }
   let canFor = null;
   let raf = 0;
+  // the nerd raw view (createRawView): its own element, put back after each redraw
+  const rawView = createRawView({ onAvailable: (yes) => { const b = el.querySelector('[data-raw]'); if (b) b.hidden = !yes; } });
   const ctx = (ms = null) => ({
     metric: board?.metric ?? metricDefault(),
     // a CAN signal's value at this moment of the clip
@@ -423,8 +631,10 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
           ${state.boards.length > 1 ? '<button type="button" class="sd-btn" data-delete>Delete</button>' : ''}
         </span>
         <span class="sd-sync" data-sync></span>
+        <button type="button" class="sd-btn" data-raw aria-pressed="${rawView.open}" title="Every CAN message at this moment, decodable or not"${rawView.available ? '' : ' hidden'}>Raw</button>
         <button type="button" class="sd-btn sd-hide" data-hide aria-label="Hide the car data">Hide</button></div>`;
     syncNote();
+    el.appendChild(rawView.el);
     tick(true);
   }
   const change = () => { saveBoards(state); draw(); };
@@ -439,7 +649,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
       recs = null;
       recordsFor(path).then((r) => { if (recsFor === path) { recs = r; tick(true); } });
     }
-    if (path) loadCan(path);
+    if (path) { loadCan(path); rawView.setPath(path); }
     const ms = (m?.currentTime || 0) * 1000;
     const r = recs ? recordAt(recs, ms) : null;
     const key = `${r?.t ?? 'x'}|${recs ? 1 : 0}|${editing}|${can ? Math.floor(ms / 50) : ''}`;
@@ -475,6 +685,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
   const loop = () => {
     if (!alive) return;
     tick();
+    if (!hidden) rawView.tick((main()?.currentTime || 0) * 1000);
     raf = requestAnimationFrame(loop);
   };
 
@@ -483,6 +694,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     const t = e.target.closest('button');
     if (!t) return;
     if (t.matches('[data-edit]')) { editing = !editing; draw(); return; }
+    if (t.matches('[data-raw]')) { rawView.toggle(); t.setAttribute('aria-pressed', String(rawView.open)); return; }
     if (t.matches('[data-hide]')) { hidden = true; editing = false; draw(); return; }
     if (t.matches('[data-show]')) { hidden = false; draw(); return; }
     if (t.matches('[data-add]')) {

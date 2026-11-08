@@ -1759,6 +1759,21 @@ async function main() {
   r.add('GET', '/api/can/id-events', (req, res, { query }) => canSearchRun(query, (keys, when) => canSearch.ids(keys, {
     from: when(query.from), to: when(query.to, true), before: when(query.before), gap: query.gap, id: query.id || null, limit: query.limit
   })));
+  // ... and the nerd raw view: every id's payload changes over the clip (or from/to ms into it), decodable or not
+  r.add('GET', '/api/can/raw', async (req, res, { query }) => {
+    const { v, keys, start: named } = await canClipOf(query.path);
+    // on the CAN clock, as /api/can/clip (the same sync), so raw frames and signals agree
+    const real = keys.length ? await studioReadable.resolve(String(query.path || '')) : null;
+    const sync = real && !hiddenPath(real) ? await canSync.forClip({ v, keys, real, start: named }).catch(() => null) : null;
+    const start = Math.round((named + (sync?.offsetMs || 0)) * 10) / 10;
+    const ms = (x, d) => { const n = Number(x); return x !== undefined && x !== '' && Number.isFinite(n) ? Math.max(-120_000, Math.min(180_000, n)) : d; };
+    const from = start + ms(query.from, -2000);
+    const to = start + ms(query.to, 70_000);
+    const ids = keys.length && to >= from ? await canIndex.raw(keys, from, to) : [];
+    // probe=1: only how many ids there are (whether the Viewer offers the raw view)
+    if (query.probe) return { start, count: ids.length };
+    return { start, from, to, ids };
+  });
   r.add('POST', '/api/can/vehicle-map', (req, res, { body, user }) => {
     const key = String(body?.key || '');
     if (!/^[A-Za-z0-9-]{1,64}$/.test(key)) throw new HttpError(400, 'Give the CAN Bridge car key.');

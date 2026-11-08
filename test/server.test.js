@@ -1114,7 +1114,8 @@ test('CAN index: an uploaded log is decoded in the background, and a clip gets i
       b132.writeUInt16LE(Math.round(volts / 0.01), 0);
       const b257 = Buffer.alloc(8);
       b257.writeUInt32LE(Math.round((36 + 40) / 0.08) << 12, 0);
-      lines.push(`(${t.toFixed(6)}) can0 132#${b132.toString('hex').toUpperCase()}`, `(${t.toFixed(6)}) can0 257#${b257.toString('hex').toUpperCase()}`, `(${t.toFixed(6)}) can0 7FF#0102030405060708`);
+      lines.push(`(${t.toFixed(6)}) can0 132#${b132.toString('hex').toUpperCase()}`, `(${t.toFixed(6)}) can0 257#${b257.toString('hex').toUpperCase()}`, `(${t.toFixed(6)}) can0 7FF#0102030405060708`,
+        `(${t.toFixed(6)}) can0 7EF#AA00${(Math.floor(i / 20) & 0xff).toString(16).padStart(2, '0').toUpperCase()}00`); // unknown: byte 2 counts every 2 s
     }
     const file = execFileSync('xz', ['-6', '-c'], { input: `${lines.join('\n')}\n` });
     const name = 'MY-car_20200101T075958Z_1.log.xz';
@@ -1130,6 +1131,24 @@ test('CAN index: an uploaded log is decoded in the background, and a clip gets i
     assert.ok(Math.abs(at(got.series.BattVoltage132, got.start + 10_000) - 381) < 0.02, 'about 381 V ten seconds in');
     assert.ok(Math.abs(at(got.series.DI_vehicleSpeed, got.start + 30_000) - 36) < 0.1, '36 km/h');
     assert.ok(got.series.BattVoltage132[0][0] <= got.start, 'with the value from before the clip starts');
+    // the nerd raw view: every id, the unknown one too, its payload changes in UTC
+    const raw = (await s.call('GET', `/api/can/raw?path=${encodeURIComponent(clip)}`, undefined, { headers: https })).data;
+    assert.equal(raw.start, got.start);
+    assert.deepEqual(raw.ids.map((e) => [e.bus, e.id, e.name]), [['can0', '132', 'ID132HVBattAmpVolt'], ['can0', '257', 'ID257DIspeed'], ['can0', '7EF', null], ['can0', '7FF', 'ID7FFcarConfig']], 'sorted by id; null for what the DBC does not know');
+    const same = raw.ids.find((e) => e.id === '7FF');
+    assert.deepEqual(same.changes.map((c) => c[1]), ['0102030405060708'], 'a payload that never changes: once');
+    assert.ok(same.changes[0][0] <= raw.start, 'the payload at the clip\'s start');
+    assert.ok(Math.abs(same.hz - 10) < 0.5, `10 frames a second (${same.hz})`);
+    const unknown = raw.ids.find((e) => e.id === '7EF').changes;
+    const at0 = unknown.filter((c) => c[0] <= raw.start).pop();
+    assert.equal(at0[1], 'AA000100', 'the unknown id\'s payload as the clip starts (2 s after its count began)');
+    assert.ok(unknown.some((c) => c[0] === raw.start + 2000 && c[1] === 'AA000200'), 'and when it changes');
+    assert.equal(unknown.filter((c) => c[0] > raw.start).length, 33, 'one change every 2 s (2 … 66 s), nothing in between');
+    const volts = raw.ids.find((e) => e.id === '132').changes;
+    assert.ok(volts.length > 50 && volts.every((c, i) => i === 0 || c[0] > volts[i - 1][0]), 'the changes in time order');
+    const part = (await s.call('GET', `/api/can/raw?path=${encodeURIComponent(clip)}&from=10000&to=11000`, undefined, { headers: https })).data;
+    assert.ok(part.ids.find((e) => e.id === '132').changes.every((c) => c[0] <= raw.start + 11000) && part.from === raw.start + 10000, 'a part of the clip');
+    assert.deepEqual((await s.call('GET', `/api/can/raw?path=${encodeURIComponent(clip)}&probe=1`, undefined, { headers: https })).data, { start: raw.start, count: 4 });
     const st = (await s.call('GET', '/api/can/settings', undefined, { headers: https })).data;
     assert.deepEqual(st.keys, ['MY-car']);
     assert.equal(st.index.lastError, null);

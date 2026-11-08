@@ -9,7 +9,16 @@
 //       ids: { "can0:2E5": frames, … } }       (unknown ids are counted too)
 //   <DATA>/can-index/<vehicleKey>/signals.json   every signal seen, with unit,
 //                                                range, value names, bus
+//   <DATA>/can-index/<vehicleKey>/<yyyyMMddTHHmm>.raw.json.gz
+//     { minute, raw: { "can0:2E5": [[ms since the minute, "PAYLOADHEX"], …] },
+//       logs: { "<log name>": { span: [first ms, last ms], buses: { can0: 'VehicleBus' },
+//                               ids: { "can0:2E5": frames } } } }
+//     every id's payload as it changes (decodable or not), for the Viewer's raw
+//     view: at most RAW_PER_SEC changes a second per id, the last payload of
+//     each second, and each id's payload at the start of the minute
 //   <DATA>/can-index/done.json                   which logs are indexed
+//     ("<size>/<mtime>/<FORMAT>": a log indexed by an older format is read
+//     again, and only what that format lacked is written)
 //
 // A signal keeps a point when its value changes, at most 20 a second (the
 // last value of each 50 ms wins), and once a second while it stays the same.
@@ -25,6 +34,9 @@ const { parseName } = require('./canLogs');
 const { bundledDbc, decodeFrame } = require('./canDbc');
 
 const STEP_MS = 50; // at most 20 points a second per signal
+const RAW_PER_SEC = 10; // raw payload changes kept a second per id
+// the index format: r1 added the raw snapshots (an older stamp has none)
+const FORMAT = 'r1';
 const KEEP_MS = 1000; // a point at least once a second
 const LINE = /^\((\d+)\.(\d+)\)\s+(\S+)\s+([0-9A-Fa-f]{1,8})#([0-9A-Fa-f]*)\s*$/;
 const DEFAULT_BUSES = { can0: 'VehicleBus', can1: 'ChassisBus' };
@@ -66,6 +78,34 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
     await fsp.writeFile(tmp, zlib.gzipSync(JSON.stringify(data), { level: 6 }));
     await fsp.rename(tmp, file);
   }
+  // ---- raw snapshots (<minute>.raw.json.gz): merged so that indexing a log again replaces its own part
+  const rawCache = new Map(); // key/minute -> Promise<data|null> (a few, for the Viewer's fetches)
+  function readRaw(key, minute) {
+    const k = `${key}/${minute}`;
+    if (!rawCache.has(k)) {
+      rawCache.set(k, fsp.readFile(path.join(dir, key, `${minute}.raw.json.gz`)).then((b) => JSON.parse(zlib.gunzipSync(b).toString('utf8')), () => null));
+      if (rawCache.size > 6) rawCache.delete(rawCache.keys().next().value);
+    }
+    return rawCache.get(k);
+  }
+  async function writeRaw(key, minute, data) {
+    rawCache.delete(`${key}/${minute}`);
+    const had = await readRaw(key, minute);
+    rawCache.delete(`${key}/${minute}`);
+    if (had) {
+      for (const [id, pts] of Object.entries(had.raw || {})) {
+        const mine = data.raw[id];
+        data.raw[id] = mine ? [...pts, ...mine].sort((a, b) => a[0] - b[0]).filter((p, i, a) => i === 0 || p[0] !== a[i - 1][0] || p[1] !== a[i - 1][1]) : pts;
+      }
+      data.logs = { ...had.logs, ...data.logs };
+    }
+    await fsp.mkdir(path.join(dir, key), { recursive: true });
+    const file = path.join(dir, key, `${minute}.raw.json.gz`);
+    const tmp = `${file}.${process.pid}.tmp`;
+    await fsp.writeFile(tmp, zlib.gzipSync(JSON.stringify(data), { level: 6 }));
+    await fsp.rename(tmp, file);
+    rawCache.delete(`${key}/${minute}`);
+  }
   async function mergeSignals(key, seen) {
     const file = path.join(dir, key, 'signals.json');
     let all = {};
@@ -75,8 +115,8 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
     await fsp.writeFile(file, JSON.stringify(all));
   }
 
-  /** Index one log: decode every frame, write its minutes. */
-  async function indexLog(key, name) {
+  /** Index one log: decode every frame, write its minutes (rawOnly: only the raw snapshots, for a log indexed before them). */
+  async function indexLog(key, name, { rawOnly = false } = {}) {
     const file = path.join(canDir, key, name);
     let side = {};
     try { side = JSON.parse(await fsp.readFile(`${file}.json`, 'utf8')) || {}; } catch { /* no sidecar */ }
@@ -100,12 +140,26 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
     const flushPending = () => {
       for (const [nm, s] of last) if (s.pending && bucket) { (bucket.signals[nm] ||= []).push([s.pending[0] - minuteStart, s.pending[1]]); s.pt = s.pending[0]; s.pending = null; }
     };
+    // raw: per id { v: the last payload seen, sec, n: changes kept this second, pending: [t, hex] held back by the limit }
+    const rawLast = new Map();
+    let rawBucket = null;
+    let rawLog = null; // this log's part of the minute: { span, buses, ids }
+    const keepRaw = (idKey, t, hex) => { (rawBucket.raw[idKey] ||= []).push([Math.round(t - minuteStart), hex.toUpperCase()]); };
+    const flushRaw = () => {
+      for (const [idKey, s] of rawLast) if (s.pending && rawBucket) { keepRaw(idKey, s.pending[0], s.pending[1]); s.pending = null; }
+    };
     const writes = [];
     const closeMinute = () => {
       if (!bucket) return;
       flushPending();
-      writes.push([minute, bucket]);
+      flushRaw();
+      writes.push([minute, bucket, rawBucket]);
       bucket = null;
+      rawBucket = null;
+    };
+    const writeOut = async ([a, b, rawData]) => {
+      if (!rawOnly) await writeMinute(key, a, b);
+      await writeRaw(key, a, rawData);
     };
     const child = spawn(xz, ['-dc', file], { stdio: ['ignore', 'pipe', 'pipe'] });
     let stderr = '';
@@ -126,16 +180,37 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
         minute = mk;
         minuteStart = Math.floor(t / 60000) * 60000;
         bucket = { minute: mk, signals: {}, ids: {} };
+        rawLog = { span: [Math.round(t - minuteStart), Math.round(t - minuteStart)], buses: busOf, ids: {} };
+        rawBucket = { minute: mk, raw: {}, logs: { [name]: rawLog } };
         for (const s of last.values()) s.pt = -Infinity; // each minute starts with every signal's value
-        if (writes.length >= 2) { const [a, b] = writes.shift(); await writeMinute(key, a, b); }
+        for (const s of rawLast.values()) s.v = null; // ... and every id's payload
+        if (writes.length >= 2) await writeOut(writes.shift());
       }
       frames++;
       if (first === null) first = t;
       lastT = t;
       const iface = m[3];
-      const id = parseInt(m[4], 16);
       const idKey = `${iface}:${m[4].toUpperCase()}`;
       bucket.ids[idKey] = (bucket.ids[idKey] || 0) + 1;
+      // raw: the payload when it changes (a string compare for the frames that repeat)
+      rawLog.ids[idKey] = (rawLog.ids[idKey] || 0) + 1;
+      rawLog.span[1] = Math.round(t - minuteStart);
+      const hex = m[5];
+      let r = rawLast.get(idKey);
+      if (!r) { r = { v: null, sec: -1, n: 0, pending: null }; rawLast.set(idKey, r); }
+      if (hex !== r.v) {
+        r.v = hex;
+        const sec = Math.floor(t / 1000);
+        if (sec !== r.sec) {
+          // the last payload of the second before, when the limit held it back
+          if (r.pending) { keepRaw(idKey, r.pending[0], r.pending[1]); r.pending = null; }
+          r.sec = sec;
+          r.n = 0;
+        }
+        if (r.n < RAW_PER_SEC) { keepRaw(idKey, t, hex); r.n++; r.pending = null; } else r.pending = [t, hex];
+      }
+      if (rawOnly) continue;
+      const id = parseInt(m[4], 16);
       const msg = messages.get(id);
       if (!msg || (busOf[iface] && msg.bus !== busOf[iface])) continue;
       const bytes = Buffer.from(m[5], 'hex');
@@ -164,8 +239,8 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
     let minutes = writes.length;
     const code = await new Promise((ok) => (child.exitCode !== null ? ok(child.exitCode) : child.once('close', ok)));
     if (code !== 0) throw new Error(`xz could not read ${name}: ${stderr.trim().slice(0, 200) || `exit ${code}`}`);
-    for (const [a, b] of writes) await writeMinute(key, a, b);
-    await mergeSignals(key, seen);
+    for (const w of writes) await writeOut(w);
+    if (!rawOnly) await mergeSignals(key, seen);
     minutes = written + (minute ? 1 : 0);
     return { frames, minutes, from: first, to: lastT };
   }
@@ -184,8 +259,11 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
         if (!n || n.sidecar) continue;
         const st = await fsp.stat(path.join(canDir, key, name)).catch(() => null);
         if (!st) continue;
-        const stamp = `${st.size}/${Math.round(st.mtimeMs)}`;
-        if (d[`${key}/${name}`] !== stamp) out.push({ key, name, stamp, startedAt: n.startedAt });
+        const file = `${st.size}/${Math.round(st.mtimeMs)}`;
+        const stamp = `${file}/${FORMAT}`;
+        const had = d[`${key}/${name}`];
+        // indexed before the raw snapshots (the same file): only those are written now
+        if (had !== stamp) out.push({ key, name, stamp, startedAt: n.startedAt, rawOnly: had === file });
       }
     }
     return out.sort((a, b) => a.startedAt - b.startedAt);
@@ -206,7 +284,7 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
           while (!idle()) await new Promise((r) => setTimeout(r, 2000));
           status.current = job.name;
           try {
-            const r = await indexLog(job.key, job.name);
+            const r = await indexLog(job.key, job.name, { rawOnly: job.rawOnly });
             (await loadDone())[`${job.key}/${job.name}`] = job.stamp;
             await saveDone();
             status.indexed++;
@@ -255,6 +333,57 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
     return out;
   }
 
+  /**
+   * Every CAN id of these cars between two times, decodable or not, for the
+   * Viewer's raw view: [{ key ("can0:2E5"), bus ("can0"), id ("2E5"), name (the
+   * DBC's message, else null), hz, changes: [[ms (UTC), "HEX"], …] }], sorted
+   * by id; the first change is the payload at `from` when there is one before.
+   */
+  async function raw(keys, from, to) {
+    const { messages } = dbc();
+    const out = new Map();
+    const entry = (idKey) => {
+      let e = out.get(idKey);
+      if (!e) { e = { key: idKey, pts: [], frames: 0, ms: 0, bus: null }; out.set(idKey, e); }
+      return e;
+    };
+    for (const key of keys) {
+      // the minute before as well, for each id's payload at `from`
+      for (let t = Math.floor(from / 60000) * 60000 - 60000; t <= to; t += 60000) {
+        const data = await readRaw(key, minuteKey(t));
+        if (!data) continue;
+        for (const [idKey, pts] of Object.entries(data.raw || {})) {
+          const e = entry(idKey);
+          for (const [ms, hex] of pts) e.pts.push([t + ms, hex]);
+        }
+        const inside = t + 60000 > from; // the rate from the minutes of the window only
+        for (const lg of Object.values(data.logs || {})) {
+          const span = Math.max(1000, (lg.span?.[1] ?? 0) - (lg.span?.[0] ?? 0));
+          for (const [idKey, n] of Object.entries(lg.ids || {})) {
+            const e = entry(idKey);
+            e.bus ||= lg.buses?.[idKey.split(':')[0]] || null;
+            if (inside) { e.frames += n; e.ms += span; }
+          }
+        }
+      }
+    }
+    const list = [];
+    for (const e of out.values()) {
+      e.pts.sort((a, b) => a[0] - b[0]);
+      let i = 0;
+      while (i + 1 < e.pts.length && e.pts[i + 1][0] <= from) i++;
+      // (each minute starts with every id's payload: only real changes are sent)
+      const changes = [];
+      for (let k = i; k < e.pts.length && e.pts[k][0] <= to; k++) if (!changes.length || changes[changes.length - 1][1] !== e.pts[k][1]) changes.push(e.pts[k]);
+      if (!changes.length) continue;
+      const [iface, hexId] = e.key.split(':');
+      const msg = messages.get(parseInt(hexId, 16));
+      const known = msg && (!e.bus || msg.bus === e.bus);
+      list.push({ key: e.key, bus: iface, id: hexId, name: known ? msg.name : null, hz: e.ms ? Math.round((e.frames / e.ms) * 10000) / 10 : 0, changes });
+    }
+    return list.sort((a, b) => parseInt(a.id, 16) - parseInt(b.id, 16) || a.bus.localeCompare(b.bus));
+  }
+
   /** Every signal seen for these cars, with unit, range and value names. */
   async function signals(keys) {
     const all = {};
@@ -271,7 +400,7 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
     await saveDone();
   }
 
-  return { kick, indexLog, series, signals, forget, status: () => ({ ...status }), pendingLogs };
+  return { kick, indexLog, series, raw, signals, forget, status: () => ({ ...status }), pendingLogs };
 }
 
-module.exports = { createCanIndex, minuteKey };
+module.exports = { createCanIndex, minuteKey, FORMAT, RAW_PER_SEC };
