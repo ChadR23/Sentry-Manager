@@ -1624,18 +1624,30 @@ async function main() {
   // The Viewer's stats dashboards (web/statDash.js): each account's own
   // (list: every stat, scrolled, with its own search kept as `q`)
   const DASH_TYPES = { small: 1, wide: 3, gauge: 1, state: 1, list: 0 };
+  // a box's spot for wide and narrow screens: x a share of the room across the page (0 to 1), y a
+  // share of the room down it, and top its place on the page in px (the page, not the window: it
+  // scrolls with what is under it; a spot saved before has no top)
+  const SCREENS = ['wide', 'narrow'];
+  const share = (v) => Math.max(0, Math.min(1, v));
+  const cleanSpots = (o) => Object.fromEntries(SCREENS.map((k) => [k, o?.[k]]).filter(([, p]) => Number.isFinite(p?.x) && Number.isFinite(p?.y))
+    .map(([k, p]) => [k, { x: share(p.x), y: share(p.y), ...(Number.isFinite(p.top) ? { top: Math.round(Math.max(0, Math.min(100000, p.top))) } : {}) }]));
+  // a box's size for wide and narrow screens, in px (w only when it floats; either may be left out)
+  const cleanSizes = (o) => Object.fromEntries(SCREENS.map((k) => [k, o?.[k]]).filter(([, z]) => Number.isFinite(z?.w) || Number.isFinite(z?.h))
+    .map(([k, z]) => [k, { ...(Number.isFinite(z.w) ? { w: Math.round(Math.max(120, Math.min(8000, z.w))) } : {}), ...(Number.isFinite(z.h) ? { h: Math.round(Math.max(40, Math.min(8000, z.h))) } : {}) }]));
   const cleanBoards = (body) => {
     const boards = (Array.isArray(body?.boards) ? body.boards : []).slice(0, 12).map((b, i) => ({
       id: /^[\w-]{1,24}$/.test(String(b?.id)) ? String(b.id) : `b${i}`,
       name: String(b?.name ?? 'Dashboard').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 40) || 'Dashboard',
       placement: ['over', 'float'].includes(b?.placement) ? b.placement : 'below',
-      // where a floating bar was moved to, for wide and for narrow screens: shares of the room left (0 to 1)
-      float: Object.fromEntries(['wide', 'narrow'].map((k) => [k, b?.float?.[k]]).filter(([, p]) => Number.isFinite(p?.x) && Number.isFinite(p?.y))
-        .map(([k, p]) => [k, { x: Math.max(0, Math.min(1, p.x)), y: Math.max(0, Math.min(1, p.y)) }])),
-      // the list box: under the car data (dock) or anywhere, where it was dragged
+      // where a bar pulled out to float goes back to ("Put back")
+      barHome: b?.barHome === 'over' ? 'over' : 'below',
+      // where a floating bar was moved to, and its size
+      float: cleanSpots(b?.float),
+      size: cleanSizes(b?.size),
+      // the list box: under the car data (dock) or anywhere, where it was dragged; and its size
       listPlacement: b?.listPlacement === 'float' ? 'float' : 'dock',
-      listFloat: Object.fromEntries(['wide', 'narrow'].map((k) => [k, b?.listFloat?.[k]]).filter(([, p]) => Number.isFinite(p?.x) && Number.isFinite(p?.y))
-        .map(([k, p]) => [k, { x: Math.max(0, Math.min(1, p.x)), y: Math.max(0, Math.min(1, p.y)) }])),
+      listFloat: cleanSpots(b?.listFloat),
+      listSize: cleanSizes(b?.listSize),
       metric: typeof b?.metric === 'boolean' ? b.metric : null,
       blocks: (Array.isArray(b?.blocks) ? b.blocks : []).slice(0, 32).filter((x) => Object.hasOwn(DASH_TYPES, String(x?.type))).map((x) => ({
         type: x.type, signals: (Array.isArray(x.signals) ? x.signals : []).slice(0, DASH_TYPES[x.type]).map((id) => String(id)).filter((id) => /^[\w.:-]{1,80}$/.test(id)),

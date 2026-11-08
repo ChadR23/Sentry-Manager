@@ -1648,6 +1648,19 @@ test('Viewer dashboards: kept per account, cleaned of anything that is not a blo
     const lb = await s.call('PUT', '/api/dashboards', { boards: [{ id: 'l', listPlacement: 'float', listFloat: { wide: { x: 0.9, y: 0.2 }, narrow: { x: -3, y: 9 }, other: { x: 0, y: 0 } }, blocks: [] }, { id: 'm', listPlacement: 'sideways', blocks: [] }] });
     assert.deepEqual([lb.data.boards[0].listPlacement, lb.data.boards[0].listFloat], ['float', { wide: { x: 0.9, y: 0.2 }, narrow: { x: 0, y: 1 } }]);
     assert.deepEqual([lb.data.boards[1].listPlacement, lb.data.boards[1].listFloat], ['dock', {}]);
+    // spots on the page (top in px), sizes per screen kind (px, within sane bounds), where a pulled-out bar goes back to
+    const pg = await s.call('PUT', '/api/dashboards', { boards: [{ id: 'p', placement: 'float', barHome: 'over',
+      float: { wide: { x: 0.5, y: 0.2, top: 1234.6 }, narrow: { x: 0.1, y: 0.1, top: -50 } },
+      listFloat: { wide: { x: 0.3, y: 0.4, top: 9e9 }, narrow: { x: 0.3, y: 0.4, top: 'high' } },
+      size: { wide: { w: 640.4, h: 210 }, narrow: { h: 5 }, other: { w: 1, h: 1 } },
+      listSize: { wide: { w: 99999, h: 'tall' }, narrow: { w: 'x' } }, blocks: [] }, { id: 'q', barHome: 'sideways', blocks: [] }] });
+    const p0 = pg.data.boards[0];
+    assert.deepEqual([p0.barHome, pg.data.boards[1].barHome], ['over', 'below']);
+    assert.deepEqual(p0.float, { wide: { x: 0.5, y: 0.2, top: 1235 }, narrow: { x: 0.1, y: 0.1, top: 0 } });
+    assert.deepEqual(p0.listFloat, { wide: { x: 0.3, y: 0.4, top: 100000 }, narrow: { x: 0.3, y: 0.4 } });
+    assert.deepEqual(p0.size, { wide: { w: 640, h: 210 }, narrow: { h: 40 } });
+    assert.deepEqual(p0.listSize, { wide: { w: 8000 } });
+    assert.deepEqual([pg.data.boards[1].size, pg.data.boards[1].listSize], [{}, {}], 'old dashboards: today\'s sizes');
     // a list block: no stats of its own, its search and "changing only" kept
     const li = await s.call('PUT', '/api/dashboards', { boards: [{ id: 'l', blocks: [{ type: 'list', signals: ['a'], q: 'volt\u0007age', changing: true }, { type: 'toString', signals: [] }] }] });
     assert.deepEqual(li.data.boards[0].blocks, [{ type: 'list', signals: [], q: 'volt age', changing: true }]);

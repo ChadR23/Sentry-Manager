@@ -11,6 +11,12 @@
 // kept on the server for each account (/api/dashboards), so they follow to
 // every interface and device.
 //
+// Both boxes (the bar and the "Every stat" list) have a Move handle and a
+// resize grip at all times: dragged (mouse, pen or finger) or moved with the
+// keys, a box leaves its place and floats on the PAGE where it is dropped (it
+// scrolls with what is under it); "Put back" / "Dock" returns it. Spots and
+// sizes are kept per dashboard, one for wide screens and one for narrow ones.
+//
 // The data comes from the front camera's per-frame record (GET
 // /api/telemetry: Tesla's SeiMetadata). CAN signals from the CAN Bridge join
 // the same list later (registerSignals), with nothing else to change.
@@ -30,12 +36,10 @@ const STYLE = `
 .sentry-sd{--sd-bg:rgba(18,20,24,.86);--sd-tile:rgba(255,255,255,.07);--sd-line:rgba(255,255,255,.14);--sd-fg:#f2f4f7;--sd-dim:rgba(242,244,247,.78);--sd-on:#43d17a;--sd-amber:#ffb547;--sd-blue:#4aa8ff;
   box-sizing:border-box;color:var(--sd-fg);font:14px/1.3 system-ui,-apple-system,"Segoe UI",sans-serif;-webkit-user-select:none;user-select:none}
 .sentry-sd *{box-sizing:border-box}
-.sentry-sd.below{margin:8px 0;background:var(--sd-bg);border:1px solid var(--sd-line);border-radius:18px;padding:8px}
-.sentry-sd.float{position:fixed;z-index:2147482000;left:0;top:0;max-width:min(96vw,1180px);background:rgba(18,20,24,.97);border:1px solid var(--sd-line);border-radius:16px;padding:6px;box-shadow:0 12px 32px rgba(0,0,0,.45)}
-.sentry-sd .sd-move{cursor:grab;touch-action:none;-webkit-user-select:none;user-select:none}
-.sentry-sd .sd-move:active,.sentry-sd.moving .sd-move{cursor:grabbing}
+.sentry-sd.below{position:relative;margin:8px 0;background:var(--sd-bg);border:1px solid var(--sd-line);border-radius:18px;padding:8px}
+.sentry-sd.float{position:absolute;z-index:2147482000;left:0;top:0;max-width:min(96vw,1180px);background:rgba(18,20,24,.97);border:1px solid var(--sd-line);border-radius:16px;padding:6px;box-shadow:0 12px 32px rgba(0,0,0,.45)}
 .sentry-sd.moving{opacity:.92;box-shadow:0 16px 40px rgba(0,0,0,.6)}
-.sentry-sd.over{position:absolute;left:8px;right:8px;bottom:8px;z-index:6;background:rgba(10,12,15,.55);-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);border-radius:16px;padding:6px;pointer-events:auto}
+.sentry-sd.over{position:absolute;left:8px;right:8px;bottom:8px;z-index:11;background:rgba(10,12,15,.55);-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);border-radius:16px;padding:6px;pointer-events:auto}
 .sentry-sd .sd-row{display:flex;flex-wrap:wrap;gap:6px;align-items:stretch}
 .sentry-sd .sd-b{position:relative;background:var(--sd-tile);border:1px solid var(--sd-line);border-radius:12px;padding:8px 12px;min-height:64px;display:flex;flex-direction:column;justify-content:center}
 .sentry-sd .sd-small{flex:1 1 104px;max-width:170px;align-items:center;text-align:center}
@@ -68,6 +72,17 @@ const STYLE = `
 .sentry-sd select option{color:#111;background:#fff}
 .sentry-sd button.sd-btn:focus-visible,.sentry-sd select:focus-visible{outline:2px solid var(--sd-blue);outline-offset:2px}
 .sentry-sd button.sd-btn[aria-pressed="true"]{background:rgba(74,168,255,.25);border-color:var(--sd-blue)}
+.sentry-sd button.sd-btn.sd-move{cursor:grab;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+.sentry-sd button.sd-btn.sd-move:active,.sentry-sd.moving button.sd-btn.sd-move{cursor:grabbing}
+.sentry-sd button.sd-btn.sd-size{position:absolute;right:3px;bottom:3px;z-index:3;width:26px;height:26px;padding:0;display:flex;align-items:center;justify-content:center;font-size:14px;line-height:1;color:var(--sd-dim);background:rgba(255,255,255,.06);border-color:transparent;border-radius:7px 7px 13px 7px;cursor:nwse-resize;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+.sentry-sd.over > button.sd-btn.sd-size{bottom:auto;top:3px;border-radius:7px 13px 7px 7px;cursor:nesw-resize}
+.sentry-sd button.sd-btn.sd-size:hover,.sentry-sd.sizing button.sd-btn.sd-size{color:var(--sd-fg);background:rgba(255,255,255,.16)}
+.sentry-sd:not(.sd-listpanel):not(.over) > .sd-tools{padding-right:30px}
+.sentry-sd.over:not(.sd-listpanel) > .sd-row{padding-right:30px}
+.sentry-sd.sizing{opacity:.95}
+.sentry-sd.sized:not(.sd-listpanel){display:flex;flex-direction:column}
+.sentry-sd.sized:not(.sd-listpanel) > .sd-row{flex:1 1 auto;min-height:36px;overflow:auto;align-content:flex-start;overscroll-behavior:contain}
+.sentry-sd.sized:not(.sd-listpanel) > .sd-tools,.sentry-sd.sized:not(.sd-listpanel) > .sd-raw{flex:0 0 auto}
 .sentry-sd:not(.editing) .sd-edit{display:none!important}
 .sentry-sd.editing .sd-edit{display:flex}
 .sentry-sd.editing .sd-b{padding-top:30px;border-style:dashed}
@@ -119,9 +134,13 @@ const STYLE = `
 .sentry-sd .sd-pop-o.cur::after{content:'✓';margin-left:auto}
 .sentry-sd .sd-pop-none{padding:10px;color:var(--sd-dim);font-size:14px}
 .sentry-sd .sd-row:has(.sd-list){align-items:flex-start}
-.sentry-sd.sd-listpanel.below{margin:8px 0;background:var(--sd-bg);border:1px solid var(--sd-line);border-radius:18px;padding:8px}
-.sentry-sd.sd-listpanel.float{position:fixed;z-index:2147481900;left:0;top:0;width:min(560px,calc(100vw - 16px));background:rgba(18,20,24,.97);border:1px solid var(--sd-line);border-radius:16px;padding:6px;box-shadow:0 12px 32px rgba(0,0,0,.45)}
+.sentry-sd.sd-listpanel.below{position:relative;margin:8px 0;background:var(--sd-bg);border:1px solid var(--sd-line);border-radius:18px;padding:8px}
+.sentry-sd.sd-listpanel.float{position:absolute;z-index:2147481900;left:0;top:0;width:min(560px,calc(100vw - 16px));background:rgba(18,20,24,.97);border:1px solid var(--sd-line);border-radius:16px;padding:6px;box-shadow:0 12px 32px rgba(0,0,0,.45)}
 .sentry-sd.sd-listpanel.moving{opacity:.92}
+.sentry-sd.sd-listpanel.below,.sentry-sd.sd-listpanel.float{padding-bottom:30px}
+.sentry-sd.sd-listpanel.sized{display:flex;flex-direction:column}
+.sentry-sd.sd-listpanel.sized > .sd-row{flex:1 1 auto;min-height:0;align-items:stretch}
+.sentry-sd.sd-listpanel.sized .sd-list-scroll{height:auto;flex:1 1 0;min-height:60px}
 .sentry-sd .sd-listhead{margin:0 0 6px}
 .sentry-sd .sd-listtitle{font-size:14px;font-weight:800}
 .sentry-sd.sd-listpanel .sd-list{max-width:none}
@@ -976,7 +995,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
   // where the bar is: under the cameras, over them, or anywhere on the page (float: dragged by its
   // Move handle; the spot is kept per account, one for wide screens and one for narrow ones)
   const whereNow = () => (board?.placement === 'float' ? 'float' : over || board?.placement === 'over' ? 'over' : 'below');
-  const screenKind = () => (innerWidth < 700 ? 'narrow' : 'wide');
+  const screenKind = () => ((globalThis.innerWidth ?? 1000) < 700 ? 'narrow' : 'wide');
   // In fullscreen only the fullscreen element is drawn: what floats goes in it
   // (not the page's body), and when the cameras themselves are fullscreen (the
   // stage), the bar goes over them and the docked List floats over them too.
@@ -1020,33 +1039,128 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
       if (panel.previousElementSibling !== after) after.after(panel);
     }
   }
-  /** Put a floating box where it was left: x and y are shares of the room around it, so it stays on screen at any size. */
-  function floatTo(node, p) {
-    const roomX = Math.max(0, innerWidth - node.offsetWidth);
-    const roomY = Math.max(0, innerHeight - node.offsetHeight);
-    node.style.left = `${Math.round(p.x * roomX)}px`;
-    node.style.top = `${Math.round(p.y * roomY)}px`;
+  // A floating box sits on the PAGE, not on the window: position:absolute in <body>, in page
+  // coordinates, so it scrolls with what is under it (every interface's Viewer scrolls the
+  // document). Its spot is kept as x, a share of the room across the page (it stays on the page
+  // at any width), and top, its place down the page in px (a spot saved before has only y, a
+  // share of the window's room, as it was at the top of the page).
+  // (in fullscreen the docked List floats over the cameras too: panelFloats)
+  let fsSpots = {}; // where a box was moved to in this fullscreen (not kept: see keepFloat)
+  const floating = (node) => (node === panel ? panelFloats() && Boolean(panel.parentElement) : whereNow() === 'float');
+  let held = null; // the box being dragged or resized: a redraw meanwhile leaves it where the pointer has it
+  const rectOf = (node) => node.getBoundingClientRect?.() || { left: 0, top: 0, width: 0, height: 0 };
+  const sx = () => globalThis.scrollX || 0;
+  const sy = () => globalThis.scrollY || 0;
+  const winW = () => globalThis.innerWidth || 0;
+  const winH = () => globalThis.innerHeight || 0;
+  const viewW = () => document.documentElement?.clientWidth || winW();
+  /** The page's size without the floating boxes, and where the boxes' containing block starts on it. */
+  function pageBox() {
+    // in fullscreen the boxes are in the fullscreen element (fixed to the screen): its own box
+    const fs = fsHost();
+    if (fs) {
+      const r = rectOf(fs);
+      return { w: fs.clientWidth || winW(), h: fs.clientHeight || winH(), ox: r.left + sx() + (fs.clientLeft || 0), oy: r.top + sy() + (fs.clientTop || 0), fs: true };
+    }
+    const de = document.documentElement;
+    const boxes = [el, panel].filter((n) => n.parentElement && n.classList.contains('float'));
+    const was = boxes.map((n) => n.style.display);
+    boxes.forEach((n) => { n.style.display = 'none'; });
+    const w = viewW();
+    const h = Math.max(de?.scrollHeight || 0, de?.clientHeight || 0, winH());
+    boxes.forEach((n, k) => { n.style.display = was[k]; });
+    let ox = 0;
+    let oy = 0;
+    const body = document.body;
+    const cs = body && globalThis.getComputedStyle?.(body);
+    if (cs && (cs.position !== 'static' || (cs.transform && cs.transform !== 'none'))) {
+      const r = rectOf(body);
+      ox = r.left + sx() + (body.clientLeft || 0);
+      oy = r.top + sy() + (body.clientTop || 0);
+    }
+    return { w, h, ox, oy };
+  }
+  /** Put a floating box at (left, top) on the page, kept on the page; where it went. */
+  function setPagePos(node, left, top, pb = pageBox()) {
+    const L = Math.max(0, Math.min(pb.w - node.offsetWidth, left));
+    const T = Math.max(0, Math.min(pb.h - node.offsetHeight, top));
+    node.style.left = `${Math.round(L - pb.ox)}px`;
+    node.style.top = `${Math.round(T - pb.oy)}px`;
+    return { left: L, top: T };
+  }
+  const pageXY = (node) => { const r = rectOf(node); return { left: r.left + sx(), top: r.top + sy() }; };
+  function floatTo(node, p, pb) {
+    const left = p.x * Math.max(0, pb.w - node.offsetWidth);
+    // (in fullscreen: y, a share of the screen's room; the page's top means nothing there)
+    const top = Number.isFinite(p.top) && !pb.fs ? p.top : p.y * Math.max(0, (pb.fs ? pb.h : winH()) - node.offsetHeight);
+    setPagePos(node, left, top, pb);
+  }
+  // sizes: both boxes resize from their corner grip; width only while floating (docked boxes
+  // are as wide as the page), never more than the window; kept per dashboard and screen kind
+  const MIN = { bar: { w: 220, h: 64 }, list: { w: 260, h: 170 } };
+  const sizeField = (node) => (node === panel ? 'listSize' : 'size');
+  function clampSize(node, w, h) {
+    const m = node === panel ? MIN.list : MIN.bar;
+    const W = viewW();
+    const H = winH();
+    return { w: Math.round(Math.max(Math.min(m.w, W), Math.min(W, w))), h: Math.round(Math.max(Math.min(m.h, H), Math.min(H, h))) };
+  }
+  function applySize(node) {
+    if (node === held) return;
+    const s = hidden && node === el ? null : board?.[sizeField(node)]?.[screenKind()];
+    const w = floating(node) && Number.isFinite(s?.w) ? s.w : null;
+    const h = Number.isFinite(s?.h) ? s.h : null;
+    const c = clampSize(node, w ?? 0, h ?? 0);
+    node.style.width = w == null ? '' : `${c.w}px`;
+    node.style.maxWidth = w == null ? '' : 'none';
+    node.style.height = h == null ? '' : `${c.h}px`;
+    node.classList.toggle('sized', h != null);
   }
   function applyFloat() {
-    if (whereNow() === 'float') floatTo(el, board.float?.[screenKind()] || { x: 0.5, y: 0.94 });
-    if (panelFloats() && panel.parentElement) floatTo(panel, board.listFloat?.[screenKind()] || { x: 0.98, y: 0.3 });
+    if (!board) return;
+    applySize(el);
+    if (panel.parentElement) applySize(panel);
+    const bar = floating(el) && el.parentElement && el !== held;
+    const list = floating(panel) && panel !== held;
+    if (!bar && !list) return;
+    const pb = pageBox();
+    const spot = (field) => (pb.fs && fsSpots[field]) || board[field]?.[screenKind()];
+    if (bar) floatTo(el, spot('float') || { x: 0.5, y: 0.94 }, pb);
+    if (list) floatTo(panel, spot('listFloat') || { x: 0.98, y: 0.3 }, pb);
   }
-  /** Keep where it is now (after a drag or a nudge): the bar's spot, or (`node` the list box) the list's. */
+  /** Keep a floating box where it is now (after a drag, a nudge or a resize): page coordinates. */
   function keepFloat(left, top, node = el) {
-    const roomX = Math.max(1, innerWidth - node.offsetWidth);
-    const roomY = Math.max(1, innerHeight - node.offsetHeight);
-    const x = Math.max(0, Math.min(1, left / roomX));
-    const y = Math.max(0, Math.min(1, top / roomY));
+    const pb = pageBox();
+    const at = setPagePos(node, left, top, pb);
+    // a box moved while the cameras are fullscreen stays there until fullscreen ends; the spot
+    // kept is the page's (a spot on the screen would put it somewhere else on the page)
+    const r3 = (v) => Math.round(Math.max(0, Math.min(1, v)) * 1000) / 1000;
     const field = node === panel ? 'listFloat' : 'float';
-    board[field] = { ...(board[field] || {}), [screenKind()]: { x: Math.round(x * 1000) / 1000, y: Math.round(y * 1000) / 1000 } };
+    if (pb.fs) { fsSpots[field] = { x: r3(at.left / Math.max(1, pb.w - node.offsetWidth)), y: r3(at.top / Math.max(1, pb.h - node.offsetHeight)) }; return; }
+    board[field] = { ...(board[field] || {}), [screenKind()]: { x: r3(at.left / Math.max(1, pb.w - node.offsetWidth)), y: r3(at.top / Math.max(1, pb.h - node.offsetHeight)), top: Math.round(at.top) } };
     saveBoards(state);
-    applyFloat();
   }
-  const onResize = () => applyFloat();
+  /** Keep a box's size (h always; w only when it floats). */
+  function keepSize(node, w, h) {
+    const field = sizeField(node);
+    const k = screenKind();
+    const prev = board[field]?.[k] || {};
+    board[field] = { ...(board[field] || {}), [k]: { ...prev, ...(floating(node) ? { w } : {}), h } };
+    saveBoards(state);
+  }
+  const onResize = () => { if (!held) applyFloat(); };
   globalThis.addEventListener?.('resize', onResize);
   // into fullscreen and out: the boxes move to where they can be seen (an open picker closes)
-  const onFullscreen = () => { if (!alive || !board) return; closePick(false); place(); placePanel(); applyFloat(); };
+  const onFullscreen = () => { if (!alive || !board) return; if (!fsHost()) fsSpots = {}; closePick(false); place(); placePanel(); applyFloat(); };
   for (const type of ['fullscreenchange', 'webkitfullscreenchange']) document.addEventListener?.(type, onFullscreen);
+  // the page grows as it loads (a box kept low on the page waits for it) or shrinks: put them back
+  let reflowRaf = 0;
+  const reflow = () => {
+    if (reflowRaf || !board || !(floating(el) || floating(panel))) return;
+    reflowRaf = requestAnimationFrame(() => { reflowRaf = 0; if (alive && !held) applyFloat(); });
+  };
+  const pageWatch = globalThis.ResizeObserver ? new ResizeObserver(reflow) : null;
+  for (let n = stage; n && n !== document.documentElement; n = n.parentElement) pageWatch?.observe(n);
 
   // A stat picker is a button showing its stat; it opens a searchable list
   // (thousands of CAN signals: a plain drop-down cannot be searched and its
@@ -1310,6 +1424,9 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     const kindClass = /brake/i.test(s?.id) ? 'sd-brake' : /blink/i.test(s?.id) ? 'sd-blink' : /autopilot/i.test(s?.id) ? 'sd-ap' : '';
     return `<div class="sd-b sd-state ${kindClass}" data-i="${i}">${editBar}<span class="sd-ico" aria-hidden="true">${esc(s?.icon || '●')}</span><div class="sd-l">${label(s)}</div>${pick}</div>`;
   }
+  const MOVE_BAR = '<button type="button" class="sd-btn sd-move" data-move-bar aria-label="Move the car data: drag it anywhere, or use the arrow keys" title="Drag to move it anywhere (arrow keys work too)">⠿ Move</button>';
+  const DOCK_LIST = '<button type="button" class="sd-btn" data-dock-list title="Put the list back under the car data">Dock</button>';
+  const putBack = () => `<button type="button" class="sd-btn" data-dock-bar title="Put the car data back ${board.barHome === 'over' || over ? 'over the video' : 'under the cameras'}">Put back</button>`;
   function draw() {
     if (pop && (!editing || hidden || !board.blocks[pop.pick])) closePick(false);
     place();
@@ -1326,9 +1443,10 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     const inBar = board.blocks.map((b, i) => (b.type === 'list' ? '' : blockHtml(b, i))).join('');
     const lists = board.blocks.map((b, i) => (b.type === 'list' ? blockHtml(b, i) : '')).join('');
     panel.innerHTML = lists && `<div class="sd-tools sd-listhead"><button type="button" class="sd-btn sd-move" data-move-list aria-label="Move the list: drag it, or use the arrow keys" title="Drag to move anywhere (arrow keys work too)">⠿ Move</button>
-        <b class="sd-listtitle">Every stat</b>${listFloats() ? '<button type="button" class="sd-btn" data-dock-list title="Put the list back under the car data">Dock</button>' : ''}</div><div class="sd-row">${lists}</div>`;
+        <b class="sd-listtitle">Every stat</b>${listFloats() ? DOCK_LIST : ''}</div><div class="sd-row">${lists}</div>
+        <button type="button" class="sd-btn sd-size" data-size-list aria-label="Resize the list: drag, or Shift and the arrow keys" title="Drag to resize (Shift and the arrow keys work too)">◢</button>`;
     el.innerHTML = `<div class="sd-row" data-row>${inBar || (lists ? '' : '<span class="sd-none">No blocks: Customize to add some.</span>')}</div>
-      <div class="sd-tools">${whereNow() === 'float' ? '<button type="button" class="sd-btn sd-move" data-move-bar aria-label="Move the car data: drag it, or use the arrow keys" title="Drag to move anywhere (arrow keys work too)">⠿ Move</button>' : ''}${boardsSel}
+      <div class="sd-tools">${MOVE_BAR}${whereNow() === 'float' ? putBack() : ''}${boardsSel}
         <button type="button" class="sd-btn" data-edit aria-pressed="${editing}">${editing ? 'Done' : 'Customize'}</button>
         <span class="sd-edit" style="gap:6px;flex-wrap:wrap;align-items:center">
           <button type="button" class="sd-btn" data-add="small">+ Small</button><button type="button" class="sd-btn" data-add="wide">+ Wide (3)</button>
@@ -1343,7 +1461,8 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
         </span>
         <span class="sd-sync" data-sync></span>
         <button type="button" class="sd-btn" data-raw aria-pressed="${rawView.open}" title="Every CAN message at this moment, decodable or not"${rawView.available ? '' : ' hidden'}>Raw</button>
-        <button type="button" class="sd-btn sd-hide" data-hide aria-label="Hide the car data">Hide</button></div>`;
+        <button type="button" class="sd-btn sd-hide" data-hide aria-label="Hide the car data">Hide</button></div>
+      <button type="button" class="sd-btn sd-size" data-size-bar aria-label="Resize the car data: drag, or Shift and the arrow keys" title="Drag to resize (Shift and the arrow keys work too)">${whereNow() === 'over' ? '◥' : '◢'}</button>`;
     syncNote();
     el.appendChild(rawView.el);
     if (pop) { pop.opener = el.querySelector(`[data-pick="${pop.pick}"][data-slot="${pop.slot}"]`) || pop.opener; if (!pop.node.parentElement) popHost().appendChild(pop.node); }
@@ -1413,7 +1532,8 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     const t = e.target.closest('button');
     if (!t) return;
     if (t.matches('[data-pick]')) { openPick(t); return; }
-    if (t.matches('[data-dock-list]')) { board.listPlacement = 'dock'; change(); return; }
+    if (t.matches('[data-dock-list]')) { board.listPlacement = 'dock'; change(); panel.querySelector('[data-move-list]')?.focus(); return; }
+    if (t.matches('[data-dock-bar]')) { board.placement = board.barHome === 'over' ? 'over' : 'below'; change(); el.querySelector('[data-move-bar]')?.focus(); return; }
     if (t.matches('[data-edit]')) { editing = !editing; draw(); return; }
     if (t.matches('[data-raw]')) { rawView.toggle(); t.setAttribute('aria-pressed', String(rawView.open)); return; }
     if (t.matches('[data-hide]')) { hidden = true; editing = false; draw(); return; }
@@ -1488,67 +1608,138 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
       state.active = board.id;
       change();
     } else if (t.matches('[data-placement]')) {
+      if (t.value === 'float' && whereNow() !== 'float') board.barHome = whereNow() === 'over' ? 'over' : 'below';
       board.placement = t.value;
       change();
       el.querySelector('[data-placement]')?.focus();
     }
   });
-  // a floating bar, or the list box, moves with its Move handle: dragged (mouse or finger), or
-  // nudged with the arrow keys; the list leaves its dock as it is first moved
-  const moverOf = (target) => {
-    if (target.closest?.('[data-move-bar]')) return whereNow() === 'float' ? el : null;
-    return target.closest?.('[data-move-list]') ? panel : null;
-  };
+  // Both boxes move with their Move handle: dragged (mouse, pen or finger), or nudged with the
+  // arrow keys. A docked box leaves its place as it is first moved (the bar: "Put back" returns
+  // it; the list: "Dock"). The pointer is followed on the window, not on the box: a redraw
+  // during the drag (a clip's signals arriving) replaces the handle, and the drag goes on.
+  const moverOf = (target) => (target.closest?.('[data-move-bar]') ? el : target.closest?.('[data-move-list]') ? panel : null);
+  const sizerOf = (target) => (target.closest?.('[data-size-bar]') ? el : target.closest?.('[data-size-list]') ? panel : null);
   function unDock(node) {
-    if (node !== panel || listFloats()) return;
-    const r = panel.getBoundingClientRect();
-    board.listPlacement = 'float';
-    placePanel();
-    panel.style.left = `${Math.round(r.left)}px`;
-    panel.style.top = `${Math.round(r.top)}px`;
-    const head = panel.querySelector('.sd-listhead');
-    if (head && !head.querySelector('[data-dock-list]')) head.insertAdjacentHTML?.('beforeend', '<button type="button" class="sd-btn" data-dock-list title="Put the list back under the car data">Dock</button>');
+    if (floating(node)) return;
+    const at = pageXY(node);
+    if (node === panel) {
+      board.listPlacement = 'float';
+      placePanel();
+      const head = panel.querySelector('.sd-listhead');
+      if (head && !head.querySelector('[data-dock-list]')) head.insertAdjacentHTML?.('beforeend', DOCK_LIST);
+    } else {
+      board.barHome = whereNow() === 'over' ? 'over' : 'below';
+      board.placement = 'float';
+      place();
+      placePanel();
+      el.querySelector('[data-move-bar]')?.insertAdjacentHTML?.('afterend', putBack());
+      const sel = el.querySelector('[data-placement]');
+      if (sel) sel.value = 'float';
+    }
+    applySize(node);
+    setPagePos(node, at.left, at.top);
   }
-  let barDrag = null;
+  let gesture = null; // { kind: 'move' | 'size', node, id, ... }
+  const W = globalThis;
+  function endGesture(e) {
+    if (!gesture || (e && e.pointerId !== gesture.id)) return;
+    const g = gesture;
+    gesture = null;
+    held = null;
+    W.removeEventListener?.('pointermove', onGestureMove, true);
+    W.removeEventListener?.('pointerup', endGesture, true);
+    W.removeEventListener?.('pointercancel', endGesture, true);
+    g.node.classList.remove('moving');
+    g.node.classList.remove('sizing');
+    if (g.kind === 'move' && g.moved) { const p = pageXY(g.node); keepFloat(p.left, p.top, g.node); }
+    if (g.kind === 'size' && g.moved) {
+      const r = rectOf(g.node);
+      keepSize(g.node, Math.round(r.width), Math.round(r.height));
+      if (floating(g.node)) { const p = pageXY(g.node); keepFloat(p.left, p.top, g.node); }
+      redrawLists();
+    }
+  }
+  function onGestureMove(e) {
+    const g = gesture;
+    if (!g || e.pointerId !== g.id) return;
+    const dx = e.clientX - g.x0;
+    const dy = e.clientY - g.y0;
+    if (!g.moved && Math.abs(dx) + Math.abs(dy) < 3) return;
+    e.preventDefault?.();
+    if (g.kind === 'move') {
+      if (!g.moved) {
+        unDock(g.node);
+        g.pb = pageBox();
+        // the handle stays under the pointer, wherever it is in the box now
+        const nr = rectOf(g.node);
+        const hr = rectOf(g.node.querySelector('.sd-move') || g.node);
+        g.dx = hr.left - nr.left + g.hx;
+        g.dy = hr.top - nr.top + g.hy;
+      }
+      g.moved = true;
+      setPagePos(g.node, e.clientX - g.dx + sx(), e.clientY - g.dy + sy(), g.pb);
+      return;
+    }
+    g.moved = true;
+    const c = clampSize(g.node, Math.min(g.room, g.w0 + dx), g.h0 + (g.up ? -dy : dy));
+    if (g.free) { g.node.style.width = `${c.w}px`; g.node.style.maxWidth = 'none'; }
+    g.node.style.height = `${c.h}px`;
+    g.node.classList.add('sized');
+    redrawLists();
+  }
+  function startGesture(e, g) {
+    e.preventDefault();
+    endGesture();
+    gesture = { ...g, id: e.pointerId, x0: e.clientX, y0: e.clientY, moved: false };
+    held = g.node;
+    try { e.target.closest?.('button')?.setPointerCapture?.(e.pointerId); } catch { /* the window follows it anyway */ }
+    W.addEventListener?.('pointermove', onGestureMove, true);
+    W.addEventListener?.('pointerup', endGesture, true);
+    W.addEventListener?.('pointercancel', endGesture, true);
+  }
   on('pointerdown', (e) => {
-    const node = moverOf(e.target);
-    if (!node) return;
-    e.preventDefault();
-    const r = node.getBoundingClientRect();
-    barDrag = { node, id: e.pointerId, dx: e.clientX - r.left, dy: e.clientY - r.top, moved: false };
-    e.target.closest('.sd-move')?.setPointerCapture?.(e.pointerId);
-    node.classList.add('moving');
+    if (e.button > 0) return;
+    const mover = moverOf(e.target);
+    if (mover) {
+      const hr = rectOf(e.target.closest('.sd-move'));
+      startGesture(e, { kind: 'move', node: mover, hx: e.clientX - hr.left, hy: e.clientY - hr.top });
+      mover.classList.add('moving');
+      return;
+    }
+    const sizer = sizerOf(e.target);
+    if (!sizer) return;
+    const r = rectOf(sizer);
+    const free = floating(sizer);
+    startGesture(e, { kind: 'size', node: sizer, w0: r.width, h0: r.height, free, up: sizer === el && whereNow() === 'over', room: free ? viewW() - r.left : Infinity });
+    sizer.classList.add('sizing');
   });
-  on('pointermove', (e) => {
-    if (!barDrag || e.pointerId !== barDrag.id) return;
-    const { node } = barDrag;
-    if (!barDrag.moved) unDock(node);
-    barDrag.moved = true;
-    const left = Math.max(0, Math.min(innerWidth - node.offsetWidth, e.clientX - barDrag.dx));
-    const top = Math.max(0, Math.min(innerHeight - node.offsetHeight, e.clientY - barDrag.dy));
-    node.style.left = `${Math.round(left)}px`;
-    node.style.top = `${Math.round(top)}px`;
-  });
-  const endBarDrag = (e) => {
-    if (!barDrag || e.pointerId !== barDrag.id) return;
-    const { node, moved } = barDrag;
-    barDrag = null;
-    node.classList.remove('moving');
-    if (moved) keepFloat(parseFloat(node.style.left) || 0, parseFloat(node.style.top) || 0, node);
-  };
-  on('pointerup', endBarDrag);
-  on('pointercancel', endBarDrag);
+  const redrawLists = () => panel.querySelectorAll('.sd-list').forEach((n) => redrawList(Number(n.dataset.i)));
   on('keydown', (e) => {
-    const node = moverOf(e.target);
-    if (!node) return;
+    const k = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[e.key];
+    if (!k) return;
     const step = e.shiftKey ? 50 : 10;
-    const d = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[e.key];
-    if (!d) return;
+    const node = moverOf(e.target);
+    if (node) {
+      e.preventDefault();
+      unDock(node);
+      const p = pageXY(node);
+      keepFloat(p.left + k[0] * step, p.top + k[1] * step, node);
+      node.querySelector('.sd-move')?.focus();
+      return;
+    }
+    const sizer = sizerOf(e.target);
+    if (!sizer) return;
     e.preventDefault();
-    unDock(node);
-    const r = node.getBoundingClientRect();
-    keepFloat(Math.max(0, Math.min(innerWidth - node.offsetWidth, r.left + d[0])), Math.max(0, Math.min(innerHeight - node.offsetHeight, r.top + d[1])), node);
-    node.querySelector('.sd-move')?.focus();
+    const r = rectOf(sizer);
+    const free = floating(sizer);
+    const up = sizer === el && whereNow() === 'over';
+    const c = clampSize(sizer, free ? Math.min(viewW() - r.left, r.width + k[0] * step) : r.width, r.height + (up ? -k[1] : k[1]) * step);
+    keepSize(sizer, c.w, c.h);
+    applySize(sizer);
+    if (free) { const p = pageXY(sizer); keepFloat(p.left, p.top, sizer); }
+    redrawLists();
+    sizer.querySelector('.sd-size')?.focus();
   });
   // drag a block by its grip to move it
   let drag = null;
@@ -1590,9 +1781,11 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     panel, // the list box (outside the bar)
     destroy() {
       closePick(false);
+      endGesture();
       // a List filter typed in the last moment is kept (its save waits for the typing to stop)
       if (listSave) { clearTimeout(listSave); listSave = null; if (state) saveBoards(state); }
-      alive = false; cancelAnimationFrame(raf); clearTimeout(canBar.retry); clearTimeout(canAll.retry); globalThis.removeEventListener?.('resize', onResize);
+      alive = false; cancelAnimationFrame(raf); cancelAnimationFrame(reflowRaf); pageWatch?.disconnect();
+      clearTimeout(canBar.retry); clearTimeout(canAll.retry); globalThis.removeEventListener?.('resize', onResize);
       for (const type of ['fullscreenchange', 'webkitfullscreenchange']) document.removeEventListener?.(type, onFullscreen);
       rawView.destroy(); el.remove(); panel.remove();
     }

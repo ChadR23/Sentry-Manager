@@ -87,6 +87,36 @@ class El {
   addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
   focus() {}
   setPointerCapture() {}
+  insertAdjacentHTML(where, html) {
+    const tmp = new El('div');
+    parseInto(tmp, html);
+    const kids = [...tmp.children];
+    if (where === 'beforeend') { for (const k of kids) this.appendChild(k); return; }
+    const p = this.parentElement; // afterend
+    let at = p.children.indexOf(this) + 1;
+    for (const k of kids) { k.remove(); p.children.splice(at++, 0, k); k.parentElement = p; }
+  }
+  // ---- a simple page layout (the move and resize tests): a box (.sentry-sd) docked sits at
+  // dockTop on the page, full width; floating, where its style puts it, at its natural size
+  // unless its style gives one. Anything inside a box is at the box's top left, 60 x 30.
+  getBoundingClientRect() {
+    const L = globalThis.__layout;
+    if (!L) return null;
+    if (!this.classList.contains('sentry-sd')) {
+      const box = this.closest('.sentry-sd');
+      const r = box ? box.getBoundingClientRect() : { left: 0, top: 0 };
+      return { left: r.left, top: r.top, width: 60, height: 30, right: r.left + 60, bottom: r.top + 30 };
+    }
+    const list = this.classList.contains('sd-listpanel');
+    const float = this.classList.contains('float');
+    const width = parseFloat(this.style.width) || (float ? (list ? 560 : 600) : L.pageW);
+    const height = parseFloat(this.style.height) || (list ? 400 : 150);
+    const left = (float ? parseFloat(this.style.left) || 0 : 0) - globalThis.scrollX;
+    const top = (float ? parseFloat(this.style.top) || 0 : list ? L.dockTop + 160 : L.dockTop) - globalThis.scrollY;
+    return { left, top, width, height, right: left + width, bottom: top + height };
+  }
+  get offsetWidth() { return this.getBoundingClientRect()?.width ?? 0; }
+  get offsetHeight() { return this.getBoundingClientRect()?.height ?? 0; }
   get options() { return this.querySelectorAll('option'); }
   get value() {
     if (this.tagName === 'SELECT') { const o = this.options; return (o.filter((x) => x.selected).pop() || o[0])?.attrs.value ?? ''; }
@@ -109,8 +139,8 @@ function parseInto(root, html) {
   }
 }
 /** An event at `target`, bubbling up to the dashboard's listeners. */
-function fire(target, type) {
-  const e = { target, preventDefault() {}, stopPropagation() {} };
+function fire(target, type, extra = {}) {
+  const e = { target, preventDefault() {}, stopPropagation() {}, ...extra };
   for (let n = target; n; n = n.parentElement) for (const fn of n.listeners[type] || []) fn(e);
 }
 const settle = async () => { for (let i = 0; i < 12; i++) await new Promise((r) => setImmediate(r)); };
@@ -133,7 +163,7 @@ function server(routes) {
   return asked;
 }
 let instance = 0;
-async function dashboard({ rawOpen = true, routes = {}, clip = clipPath(1) } = {}) {
+async function dashboard({ rawOpen = true, routes = {}, clip = clipPath(1), before = null } = {}) {
   const store = new Map([['sentry-sd-raw', rawOpen ? '1' : '0']]);
   const frames = [];
   Object.assign(globalThis, {
@@ -151,6 +181,7 @@ async function dashboard({ rawOpen = true, routes = {}, clip = clipPath(1) } = {
   const stage = page.appendChild(new El('div'));
   const video = { currentTime: 0, src: '', getAttribute: () => video.src };
   video.src = `/api/media?path=${encodeURIComponent(clip)}`;
+  before?.();
   const dash = mod.attachStatDash({ stage, main: () => video, videos: () => [video] });
   // one animation frame (the dashboard's loop), then whatever it asked for
   const frame = async () => { const fn = frames.shift(); fn?.(); await settle(); };
@@ -709,4 +740,132 @@ test('CAN values: decimals from the DBC step, every unit converted, SNA and the 
   assert.equal(cpu.children[0].textContent, 'Cpu Temperature');
   assert.equal(cpu.querySelector('[data-lv]').textContent, '86°F');
   d.dash.destroy();
+});
+
+// ---- moving and resizing both boxes ----------------------------------------------
+/** A page 1400 x 3000 in a 1400 x 900 window, scrolled to scrollY; window listeners kept here. */
+function layoutPage(t, { scrollY = 0, width = 1400 } = {}) {
+  const win = {};
+  Object.assign(globalThis, {
+    __layout: { pageW: width, dockTop: 500 }, innerWidth: width, innerHeight: 900, scrollX: 0, scrollY,
+    addEventListener: (type, fn) => { (win[type] ||= []).push(fn); },
+    removeEventListener: (type, fn) => { win[type] = (win[type] || []).filter((f) => f !== fn); }
+  });
+  t.after(() => { for (const k of ['__layout', 'innerWidth', 'innerHeight', 'scrollX', 'scrollY', 'addEventListener', 'removeEventListener']) delete globalThis[k]; });
+  // (after dashboard() made the document)
+  const finish = () => {
+    document.body = new El('body');
+    document.documentElement = { clientWidth: globalThis.innerWidth, clientHeight: 900, scrollHeight: 3000 };
+    globalThis.getComputedStyle = (n) => ({ position: n === document.body ? 'static' : 'relative', transform: 'none' });
+  };
+  // a pointer event on the window (as the browser sends it once a drag has started)
+  const send = (type, x, y, extra = {}) => { for (const fn of [...(win[type] || [])]) fn({ pointerId: 1, clientX: x, clientY: y, preventDefault() {}, ...extra }); };
+  return { win, finish, send };
+}
+async function pageDash(t, blocks, extra = {}, opts = {}) {
+  const page = layoutPage(t, opts);
+  const d = await dashboard({ rawOpen: false, routes: { boards: { boards: [{ id: 'b', name: 'B', placement: 'below', blocks, ...extra }], active: 'b' } }, before: page.finish });
+  t.after(() => d.dash.destroy());
+  const saved = async () => { await new Promise((r) => setTimeout(r, 600)); const put = d.asked.filter((a) => a.method === 'PUT').pop(); return put && JSON.parse(put.body).boards[0]; };
+  return { ...d, ...page, saved };
+}
+
+test('the bar: its Move handle pulls it out of its place to float on the page where dropped; Put back returns it', async (t) => {
+  const d = await pageDash(t, [{ type: 'small', signals: ['dash.speed'] }], {}, { scrollY: 200 });
+  const bar = d.el;
+  assert.ok(bar.querySelector('[data-move-bar]'), 'a Move handle in every placement');
+  assert.ok(bar.querySelector('[data-size-bar]'), 'and a resize grip');
+  // the bar is under the cameras at 500 on the page (300 in the window, scrolled by 200)
+  fire(bar.querySelector('[data-move-bar]'), 'pointerdown', { pointerId: 1, clientX: 10, clientY: 310, button: 0 });
+  d.send('pointermove', 60, 260);
+  // a redraw during the drag (a clip's signals arriving): the drag goes on, the box is not put back
+  fire(bar.querySelector('[data-edit]'), 'click');
+  fire(bar.querySelector('[data-edit]'), 'click');
+  d.send('pointermove', 110, 210);
+  assert.ok(bar.classList.contains('float'), 'it floats');
+  assert.equal(bar.parentElement, document.body, 'on the page (in <body>, position:absolute)');
+  assert.deepEqual([bar.style.left, bar.style.top], ['100px', '400px'], 'the handle stays under the pointer, in page coordinates');
+  d.send('pointerup', 110, 210);
+  const b = await d.saved();
+  assert.equal(b.placement, 'float');
+  assert.equal(b.barHome, 'below');
+  assert.deepEqual(b.float.wide, { x: 0.125, y: Math.round((400 / (3000 - 150)) * 1000) / 1000, top: 400 }, 'kept on the page: top in px');
+  // scrolling leaves it on the page: a redraw after a scroll puts it at the same page spot
+  globalThis.scrollY = 900;
+  for (const fn of d.win.resize || []) fn();
+  assert.equal(bar.style.top, '400px');
+  // after a drag that ended, a move with no button down does nothing
+  d.send('pointermove', 500, 500);
+  assert.equal(bar.style.left, '100px');
+  // the arrow keys move a focused handle
+  fire(bar.querySelector('[data-move-bar]'), 'keydown', { key: 'ArrowRight' });
+  assert.equal(bar.style.left, '110px');
+  fire(bar.querySelector('[data-move-bar]'), 'keydown', { key: 'ArrowUp', shiftKey: true });
+  assert.equal(bar.style.top, '350px');
+  // kept inside the page
+  for (let i = 0; i < 40; i++) fire(bar.querySelector('[data-move-bar]'), 'keydown', { key: 'ArrowRight', shiftKey: true });
+  assert.equal(bar.style.left, `${1400 - 600}px`, 'never past the right edge');
+  // Put back
+  fire(bar.querySelector('[data-dock-bar]'), 'click');
+  assert.ok(bar.classList.contains('below') && !bar.classList.contains('float'));
+  assert.equal(bar.style.left, '');
+  assert.ok(bar.querySelector('[data-move-bar]'), 'the handle is still there');
+  assert.equal(bar.querySelector('[data-dock-bar]'), null);
+});
+
+test('a spot saved before (a share of the window) is put on the page as it was at the top', async (t) => {
+  const d = await pageDash(t, [{ type: 'small', signals: ['dash.speed'] }], { placement: 'float', float: { wide: { x: 0.5, y: 0.5 } } }, { scrollY: 300 });
+  assert.deepEqual([d.el.style.left, d.el.style.top], [`${0.5 * 800}px`, `${0.5 * (900 - 150)}px`]);
+  assert.ok(d.el.querySelector('[data-dock-bar]'), 'Put back, floating');
+});
+
+test('the List box: resized from its grip (height docked, both floating), clamped, kept per screen kind', async (t) => {
+  const d = await pageDash(t, [{ type: 'small', signals: ['dash.speed'] }, { type: 'list', signals: [], q: '', changing: false }]);
+  const box = d.dash.panel;
+  const grip = box.querySelector('[data-size-list]');
+  assert.ok(grip, 'a resize grip');
+  // docked: only the height
+  fire(grip, 'pointerdown', { pointerId: 1, clientX: 1390, clientY: 1050, button: 0 });
+  d.send('pointermove', 1440, 1150);
+  assert.equal(box.style.height, '500px');
+  assert.equal(box.style.width, '', 'docked: as wide as the page');
+  assert.ok(box.classList.contains('sized'), 'its rows grow with it');
+  d.send('pointerup', 1440, 1150);
+  assert.deepEqual((await d.saved()).listSize, { wide: { h: 500 } });
+  // never taller than the window, never smaller than its least
+  fire(box.querySelector('[data-size-list]'), 'pointerdown', { pointerId: 2, clientX: 0, clientY: 0, button: 0 });
+  d.send('pointermove', 0, 5000, { pointerId: 2 });
+  assert.equal(box.style.height, '900px');
+  d.send('pointermove', 0, -5000, { pointerId: 2 });
+  assert.equal(box.style.height, '170px');
+  d.send('pointercancel', 0, -5000, { pointerId: 2 });
+  // Shift and the arrow keys on the grip
+  fire(box.querySelector('[data-size-list]'), 'keydown', { key: 'ArrowDown', shiftKey: true });
+  assert.equal(box.style.height, '220px');
+  // the Move handle's arrow keys take it out of its dock; then its width can change too
+  fire(box.querySelector('[data-move-list]'), 'keydown', { key: 'ArrowRight' });
+  assert.ok(box.classList.contains('float') && box.parentElement === document.body);
+  assert.ok(box.querySelector('[data-dock-list]'), 'Dock');
+  fire(box.querySelector('[data-size-list]'), 'keydown', { key: 'ArrowLeft', shiftKey: true });
+  assert.equal(box.style.width, `${560 - 50}px`);
+  for (let i = 0; i < 20; i++) fire(box.querySelector('[data-size-list]'), 'keydown', { key: 'ArrowLeft', shiftKey: true });
+  assert.equal(box.style.width, '260px', 'its least width');
+  const b = await d.saved();
+  assert.deepEqual(b.listSize.wide, { h: 220, w: 260 });
+  assert.equal(b.listPlacement, 'float');
+  assert.equal(Number.isFinite(b.listFloat.wide.top), true);
+  // a narrow window has its own (none yet): today's size
+  globalThis.innerWidth = 500;
+  document.documentElement.clientWidth = 500;
+  for (const fn of d.win.resize || []) fn();
+  assert.deepEqual([box.style.width, box.style.height], ['', '']);
+  // back to wide: the size again, within the window
+  globalThis.innerWidth = 1400;
+  document.documentElement.clientWidth = 1400;
+  for (const fn of d.win.resize || []) fn();
+  assert.deepEqual([box.style.width, box.style.height], ['260px', '220px']);
+  // Dock: back under the bar, its height kept
+  fire(box.querySelector('[data-dock-list]'), 'click');
+  assert.ok(box.classList.contains('below'));
+  assert.deepEqual([box.style.width, box.style.height], ['', '220px']);
 });
