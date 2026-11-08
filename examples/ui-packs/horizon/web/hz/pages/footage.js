@@ -30,6 +30,9 @@ const CAT_TONE = { Recent: 'cyan', Sentry: 'org', Saved: 'grn', Other: '' };
 const thumbUrl = (vid, rid) => `/api/vehicles/${encodeURIComponent(vid)}/recordings/${encodeURIComponent(rid)}/thumbnail`;
 const dur = (min) => `${Math.floor(min)}:00`;
 
+// what to check when a day looks only partly archived (the server sends its own words too)
+const ARCHIVE_ADVICE = 'Check the Sentry USB: its Logs page, its archive settings and its Wi-Fi to the NAS. Clips it recycles before copying them are lost.';
+
 export default {
   async mount(el, { params, go, status }) {
     const v = car();
@@ -153,6 +156,7 @@ export default {
           <span class="tiny faint pl-kind">${f.day ? 'DAY' : 'LIBRARY'} · ${h(v.name)}</span>
           <h2 class="chrome pl-title">${h(f.day ? dayName(f.day, true) : 'All days')}</h2>
           <p class="small dim">${count(total, 'track')} · ${mins} min · ${size(b)}${f.cat !== 'all' ? ` · ${h(f.cat)} only` : ''}${f.prot ? ' · protected only' : ''}</p>
+          ${d?.archive ? `<p class="note small gap-note${d.archive.state === 'partial' ? ' org' : ''}">${h(d.archive.summary)}${d.archive.state === 'partial' ? ` ${h(d.archive.advice || ARCHIVE_ADVICE)}` : ''}</p>` : ''}
           <div class="row">
             <button class="btn go" type="button" id="ft-playall"${recs.length ? '' : ' disabled'}>${ico('play')}${f.day ? 'Play day' : 'Play newest day'}</button>
             ${f.day ? `<button class="btn danger" type="button" id="ft-delday">${ico('bin')}Move day to Bin</button><button class="btn danger" type="button" id="ft-delthru">${ico('bin')}This day and older</button>` : ''}

@@ -71,7 +71,9 @@ test('Footage: no day opens by itself; a date picked in the filter opens that da
   assert.doesNotMatch(footage, /f\.open\.add\(data\.days/, 'the newest day is not opened for the reader');
   assert.doesNotMatch(app, /\bopened: false\b|f\.opened\b/);
   assert.match(footage, /\$\('f-date'\)\.onchange = \(e\) => \{ f\.date = e\.target\.value; f\.offset = 0; if \(f\.date\) f\.open\.add\(f\.date\); render\(\); \};/);
-  assert.match(footage, /el\.querySelector\('\[data-toggle\]'\)\.onclick = \(\) => \{ if \(f\.open\.has\(day\)\) f\.open\.delete\(day\); else f\.open\.add\(day\); render\(\); \};/, 'the reader opens and closes days');
+  assert.match(footage, /const toggle = \(\) => \{ if \(f\.open\.has\(day\)\) f\.open\.delete\(day\); else f\.open\.add\(day\); render\(\); \};\n\s*el\.querySelector\('\[data-toggle\]'\)\.onclick = toggle;/, 'the reader opens and closes days');
+  // the "Partly archived?" tag opens the day too, where its evidence is in words (no hover on a phone)
+  assert.match(footage, /if \(gap\) gap\.onclick = toggle;/);
 });
 
 test('Jobs: a Clear jobs button, only with finished jobs, and a confirmation first', () => {

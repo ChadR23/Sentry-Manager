@@ -156,8 +156,14 @@ function calendar(dates, month, selected) {
 function archiveChip(d) {
   const a = d.archive;
   if (!a) return '';
-  if (a.state === 'filling') return `<span class="chip chip-grey" title="${esc(a.summary)}">Still arriving</span>`;
-  return `<span class="chip chip-warn" title="${esc(a.summary)}">${icon('alert')}Partly archived?${a.missingMinutes ? ` ~${a.missingMinutes} min missing` : ''}</span>`;
+  if (a.state === 'filling') return `<span class="chip chip-grey chip-gap" title="${esc(a.summary)}">Still arriving</span>`;
+  return `<span class="chip chip-warn chip-gap" title="${esc(a.summary)}">${icon('alert')}<span>Partly archived?${a.missingMinutes ? ` ~${a.missingMinutes} min missing` : ''}</span></span>`;
+}
+const ADVICE = 'Check the Sentry USB: its Logs page, its archive settings and its Wi-Fi to the NAS. Clips it recycles before copying them are lost.';
+/** The evidence in words, on the day's own page (a tag's tooltip never shows on a phone). */
+function archiveNote(a) {
+  if (!a) return '';
+  return `<div class="card gap-note${a.state === 'partial' ? ' warn' : ''}" role="note">${a.state === 'partial' ? icon('alert') : ''}<p>${esc(a.summary)}${a.state === 'partial' ? ` ${esc(a.advice || ADVICE)}` : ''}</p></div>`;
 }
 
 function dayCard(v, d) {
@@ -283,10 +289,16 @@ async function renderDay(ctx, v, day) {
   const { view } = ctx;
   let recs = [];
   let selecting = false;
+  let gap = null; // footage of the day that looks only partly archived
   const selected = new Set();
   const load = async () => {
     const q = new URLSearchParams({ date: day, category: view$.category, limit: '500' });
-    recs = (await api(`/api/vehicles/${enc(v.id)}/recordings?${q}`)).recordings;
+    const [out, gaps] = await Promise.all([
+      api(`/api/vehicles/${enc(v.id)}/recordings?${q}`),
+      api(`/api/vehicles/${enc(v.id)}/archive-gaps`).catch(() => null)
+    ]);
+    recs = out.recordings;
+    gap = (gaps?.days || []).find((x) => x.day === day) || null;
     for (const id of [...selected]) if (!recs.some((r) => r.id === id)) selected.delete(id);
   };
   await load();
@@ -305,6 +317,7 @@ async function renderDay(ctx, v, day) {
           ${recs.length ? `<a class="btn btn-primary" href="#/viewer/${enc(v.id)}?day=${enc(day)}">${icon('play')} Play this day</a>` : ''}
           ${recs.length ? `<button class="btn" type="button" id="select-mode" aria-pressed="${selecting}">${icon('select')} ${selecting ? 'Done selecting' : 'Select'}</button>` : ''}
         </div></div>
+      ${archiveNote(gap)}
       ${recs.length ? `<div class="rec-list">${sorted.map((r) => recCard(v, r, selecting, selected.has(r.id))).join('')}</div>`
         : emptyState({ art: 'film', title: 'Nothing left on this day', text: 'It may have moved to the Recycle Bin.', action: '<a class="btn btn-soft" href="#/bin">Open Recycle Bin</a>' })}
       ${recs.length ? `<div class="card" style="margin-top:22px"><h3>Tidy up this day</h3>

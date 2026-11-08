@@ -364,7 +364,11 @@ details.more-info summary { cursor: pointer; min-height: 44px; display: flex; al
 .frame-date { position: absolute; left: 12px; bottom: 16px; z-index: 2; display: flex; align-items: baseline; gap: 6px; text-shadow: 0 2px 8px rgba(0, 0, 0, .8); }
 .frame-date b { font-size: 38px; font-weight: 250; line-height: 1; }
 .frame-date span { font-size: 14px; font-weight: 600; }
-.frame-info { padding: 10px 12px 12px; display: grid; gap: 6px; }
+.frame-info { padding: 10px 12px 12px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
+/* "Partly archived? ~N min missing" wraps inside the card (server/archiveGap.js) */
+.frame-info .chip.gap { white-space: normal; justify-self: start; max-width: 100%; padding: 1px 8px; font-size: 12px; line-height: 1.35; }
+.gap-note { margin: 0 0 16px; padding: 12px 14px; border-radius: 16px; background: rgba(63, 210, 212, .08); border: 1px solid rgba(63, 210, 212, .3); color: var(--ink-2); font-size: 14.5px; max-width: 820px; }
+.gap-note.amber { background: rgba(255, 210, 122, .08); border-color: rgba(255, 210, 122, .4); color: #ffe6b3; }
 .frame-info .muted { font-size: 13px; }
 .frame-cats { display: flex; gap: 4px; flex-wrap: wrap; }
 .frame-cats i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }

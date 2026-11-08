@@ -1258,7 +1258,10 @@
     followIndex($('speed-index'), false);
     page.querySelectorAll('.day').forEach((el) => {
       const day = el.dataset.day;
-      el.querySelector('[data-toggle]').onclick = () => { if (f.open.has(day)) f.open.delete(day); else f.open.add(day); render(); };
+      const toggle = () => { if (f.open.has(day)) f.open.delete(day); else f.open.add(day); render(); };
+      el.querySelector('[data-toggle]').onclick = toggle;
+      const gap = el.querySelector('[data-gap]');
+      if (gap) gap.onclick = toggle; // the tag opens the day, which says what looks missing
       el.querySelector('[data-play-day]').onclick = () => openStudio('viewer', { date: day });
       el.querySelector('[data-delete-day]').onclick = () => deleteDays(v, day, false);
       el.querySelector('[data-delete-through]').onclick = () => deleteDays(v, day, true);
@@ -1324,13 +1327,20 @@
     return `<span class="chip violet" title="${esc(`Speed read from ${x.indexed} of ${x.clips} front-camera clips for the Viewer's speed graph`)}"><span class="cdot"></span>${label}</span>`;
   }
 
-  /** The amber "Partly archived?" badge: footage the car recorded that is not on the share yet (server/archiveGap.js). */
-  function dayArchiveChip(d) {
+  /** The amber "Partly archived?" badge: footage the car recorded that is not on the share yet (server/archiveGap.js).
+   *  A button: it opens the day, where the evidence and what to check are shown (no hover needed). */
+  const ARCHIVE_ADVICE = 'Check the Sentry USB: its Logs page, its archive settings and its Wi-Fi to the NAS. Clips it recycles before copying them are lost.';
+  function dayArchiveChip(d, open) {
     const a = d.archive;
     if (!a) return '';
-    const tip = `${a.summary}${a.state === 'partial' ? ' Check the Sentry USB: its Logs page, archive settings and Wi-Fi.' : ''}`;
-    if (a.state === 'filling') return `<span class="chip gap" title="${esc(tip)}"><span class="cdot"></span>Still arriving</span>`;
-    return `<span class="chip amber gap" title="${esc(tip)}"><span class="cdot"></span>Partly archived?${a.missingMinutes ? ` ~${a.missingMinutes} min missing` : ''}</span>`;
+    const label = a.state === 'filling' ? 'Still arriving' : `Partly archived?${a.missingMinutes ? ` ~${a.missingMinutes} min missing` : ''}`;
+    return `<button type="button" class="chip gap${a.state === 'filling' ? '' : ' amber'}" data-gap aria-expanded="${open}" aria-controls="gap-${esc(d.day)}" title="${esc(a.summary)}"><span class="cdot"></span>${esc(label)}</button>`;
+  }
+  /** The evidence in words, in the opened day. */
+  function dayArchiveNote(d) {
+    const a = d.archive;
+    if (!a) return '';
+    return `<p class="note gap-note${a.state === 'filling' ? '' : ' amber'}" id="gap-${esc(d.day)}">${esc(a.summary)}${a.state === 'partial' ? ` ${esc(a.advice || ARCHIVE_ADVICE)}` : ''}</p>`;
   }
 
   function dayCard(v, d) {
@@ -1348,7 +1358,7 @@
         <div class="day-thumb">${thumb}<span class="count">${plural(d.recordings, 'recording')}</span></div>
         <div class="day-info">
           <span class="date">${esc(dayTitle(d.day))}</span>
-          <span class="row">${cat('Recent', '', 'drive')}${cat('Sentry', 'amber', 'Sentry event')}${cat('Saved', 'green', 'Saved event')}${cat('Other', '', 'other')}${dayArchiveChip(d)}${dayEncodedChip(d)}${dayIndexedChip(d)}${d.protected ? `<span class="chip green">${d.protected} protected</span>` : ''}</span>
+          <span class="row">${cat('Recent', '', 'drive')}${cat('Sentry', 'amber', 'Sentry event')}${cat('Saved', 'green', 'Saved event')}${cat('Other', '', 'other')}${dayArchiveChip(d, open)}${dayEncodedChip(d)}${dayIndexedChip(d)}${d.protected ? `<span class="chip green">${d.protected} protected</span>` : ''}</span>
           <span class="meta">${minutesText(d.minutes)}${d.cameras ? ` · ${plural(d.cameras, 'camera')}` : ''} · ${bytes(d.bytes)}${d.unknown ? ' · checking which clips are encoded…' : ''}</span>
         </div>
         <div class="day-actions">
@@ -1358,6 +1368,7 @@
         </div>
       </div>
       <button class="day-toggle" type="button" data-toggle aria-expanded="${open}">${open ? '▾ Hide recordings' : `▸ Show ${plural(d.recordings, 'recording')}`}</button>
+      ${open ? dayArchiveNote(d) : ''}
       ${open ? `<div class="recs">${recs.map((r) => recCard(v, r)).join('') || '<p class="muted">No recordings.</p>'}</div>` : ''}
     </article>`;
   }

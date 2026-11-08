@@ -40,6 +40,9 @@ const keep = { category: 'all', protectedOnly: false, vehicleId: null };
 
 const thumb = (v, id) => `/api/vehicles/${encodeURIComponent(v.id)}/recordings/${encodeURIComponent(id)}/thumbnail`;
 
+// what to check when a day looks only partly archived (the server sends its own words too)
+const ADVICE = 'Check the Sentry USB: its Logs page, its archive settings and its Wi-Fi to the NAS. Clips it recycles before copying them are lost.';
+
 function frame(v, d, on) {
   const p = dayParts(d.day);
   const cats = Object.entries(d.byCategory || {}).filter(([, n]) => n);
@@ -50,7 +53,7 @@ function frame(v, d, on) {
   return `<button class="frame${on ? ' on' : ''}" type="button" data-day="${esc(d.day)}" aria-pressed="${on}" aria-label="${esc(dayTitle(d.day))}: ${plural(d.recordings, 'recording')}, ${esc(bytes(d.bytes))}${gap ? `, ${esc(gap)}` : ''}">
     <div class="frame-pic">${d.thumbId ? `<img class="thumb-img" loading="lazy" alt="" src="${thumb(v, d.thumbId)}">` : ''}<div class="frame-date"><b>${esc(p.dd)}</b><span>${esc(p.mon)} · ${esc(p.wd)}</span></div></div>
     <div class="frame-info"><span class="frame-cats">${cats.map(([c, n]) => `<span class="chip ${CAT_CHIP[c] || ''}" style="padding:1px 8px;font-size:12px"><i class="dot cat-${esc(c)}"></i>${n}</span>`).join('')}</span>
-      <span class="muted">${d.minutes} min · ${esc(bytes(d.bytes))}${d.protected ? ` · ${d.protected} protected` : ''}${enc ? ` · ${enc}` : ''}</span>${ix ? `<span class="chip violet" style="padding:1px 8px;font-size:12px;align-self:flex-start" title="Speeds read for the Viewer's speed graph">${esc(ix)}</span>` : ''}${gap ? `<span class="chip ${d.archive.state === 'partial' ? 'amber' : 'teal'}" style="padding:1px 8px;font-size:12px;align-self:flex-start" title="${esc(d.archive.summary)}">${esc(gap)}</span>` : ''}</div>
+      <span class="muted">${d.minutes} min · ${esc(bytes(d.bytes))}${d.protected ? ` · ${d.protected} protected` : ''}${enc ? ` · ${enc}` : ''}</span>${ix ? `<span class="chip violet" style="padding:1px 8px;font-size:12px;align-self:flex-start" title="Speeds read for the Viewer's speed graph">${esc(ix)}</span>` : ''}${gap ? `<span class="chip gap ${d.archive.state === 'partial' ? 'amber' : 'teal'}" title="${esc(d.archive.summary)}">${esc(gap)}</span>` : ''}</div>
   </button>`;
 }
 
@@ -183,6 +186,7 @@ export default {
           <button class="btn" type="button" data-select-all>${icon('select')} Select all</button>
           <button class="btn" type="button" data-trash-day="day">${icon('trash')} Delete this day</button>
           <button class="btn" type="button" data-trash-day="through">Delete through this date</button></div></div>
+        ${d?.archive ? `<p class="gap-note${d.archive.state === 'partial' ? ' amber' : ''}">${esc(d.archive.summary)}${d.archive.state === 'partial' ? ` ${esc(d.archive.advice || ADVICE)}` : ''}</p>` : ''}
         ${selected.size ? `<div class="selbar" role="region" aria-label="Selection"><b>${selected.size} selected</b><span class="spacer"></span>
           <button class="btn sm" type="button" data-bulk="protect">${icon('lock')} Protect</button>
           <button class="btn sm" type="button" data-bulk="unprotect"${sel.some((r) => r.protected) ? '' : ' disabled'}>${icon('unlock')} Unprotect</button>

@@ -11,7 +11,7 @@ const os = require('os');
 const path = require('path');
 const zlib = require('zlib');
 const { EventEmitter } = require('events');
-const { analyze, createArchiveGap, stampSec } = require('../server/archiveGap');
+const { analyze, createArchiveGap, stampSec, classify } = require('../server/archiveGap');
 const { Notifications } = require('../server/activity');
 
 const CAMS = ['back', 'front', 'left_repeater', 'right_repeater'];
@@ -85,7 +85,7 @@ test('a drive whose footage stops while moving, the next footage much later: cut
   assert.equal(d.cutoffs.length, 1);
   assert.equal(d.cutoffs[0].kph, 63);
   assert.equal(d.missingMinutes, 67, 'moving at both ends: every minute in between (14:03-15:09)');
-  assert.match(d.summary, /the footage stops at 14:03 while the car is moving \(63 km\/h\), and the next is at 15:10/);
+  assert.match(d.summary, /the footage stops at 14:03 while the car was moving \(63 km\/h\), and the next starts at 15:10/);
 
   // a drive that ends parked: nothing
   const parked = new Map();
@@ -293,4 +293,272 @@ test('several CAN stretches read as one list', () => {
   drive(files, at(7, 18), at(7, 18, 10));
   const can = [at(7, 9), at(7, 9, 1), at(7, 10), at(7, 11, 30), at(7, 11, 31)].map((t) => stampSec(key(t)));
   assert.match(analyze({ files, nowMs: NOW, canDriving: can }).days['2026-11-07'].summary, /CAN Bridge shows the car driving 09:00–09:01, 10:00 and 11:30–11:31 with no footage\./);
+});
+
+// ---- fixes from review
+
+const range = (from, to) => { const out = []; for (let t = from; t < to; t += 60_000) out.push(stampSec(key(t))); return out; };
+
+test('an archive catching up (the share still receiving) is not a gap: the minutes past its newest clip wait', () => {
+  const files = drive(new Map(), at(7, 8), at(7, 9)); // the copy has got to 08:59
+  const can = range(at(7, 9, 30), at(7, 10)); // driving 09:30-10:00, over a day ago
+  const busy = analyze({ files, nowMs: NOW, canDriving: can, receivedMs: NOW - 10 * 60_000 });
+  const d = busy.days['2026-11-07'];
+  assert.equal(d.state, 'filling', 'still copying: a tag, no warning');
+  assert.equal(d.missingMinutes, 0);
+  assert.equal(d.waitingMinutes, 30);
+  assert.match(d.summary, /^Still being copied: the share is still receiving footage \(the latest 10 min ago\), and 30 minutes the car recorded after its newest clip are not there yet\.$/);
+  assert.equal(busy.signals.catchingUp, true);
+  // nothing new for hours: the copy stopped there
+  assert.equal(analyze({ files, nowMs: NOW, canDriving: can, receivedMs: NOW - 3 * 3600_000 }).days['2026-11-07'].missingMinutes, 30);
+
+  // the newest copied clip ends at speed: not a cut-off while the share is still receiving
+  const speeds = new Map();
+  for (const f of fronts(files)) speeds.set(f.rel, Array(60).fill(20));
+  assert.equal(analyze({ files, nowMs: NOW, speeds, receivedMs: NOW - 10 * 60_000 }).days['2026-11-07'].state, 'filling');
+  assert.equal(analyze({ files, nowMs: NOW, speeds, receivedMs: NOW - 3 * 3600_000 }).days['2026-11-07'].cutoffs.length, 1);
+});
+
+test('CAN speed "not available" (4095 raw, 287.6 km/h) is not driving; Park with a speed is not either', () => {
+  assert.equal(classify({ DI_vehicleSpeed: [[0, 287.6]] }), 'none');
+  assert.equal(classify({ DI_vehicleSpeed: [[0, 287.6]], DI_gear: [[0, 1]] }), 'none');
+  assert.equal(classify({ DI_vehicleSpeed: [[0, 12]], DI_gear: [[0, 1]] }), 'none');
+  assert.equal(classify({ DI_vehicleSpeed: [[0, 50]] }), 'drive');
+  assert.equal(classify({ DI_gear: [[0, 2]] }), 'drive');
+  assert.equal(classify({ DI_gear: [[0, 1]], UI_autopilotPowerStateRequest: [[0, 1]] }), 'sentry');
+});
+
+test('CAN and footage a whole number of hours apart (a wrong time zone, a road trip) is not missing footage', () => {
+  const files = drive(new Map(), at(7, 8), at(7, 9)); // the drive's footage, on the car's clock
+  const can = range(at(7, 9), at(7, 10)); // the same drive, CAN put an hour later by the car's set zone
+  const res = analyze({ files, nowMs: NOW, canDriving: can, canMinutes: can });
+  assert.deepEqual(res.days, {});
+  assert.deepEqual(res.signals.tzShift, [{ day: '2026-11-07', hours: 1, minutes: 60 }]);
+  // CAN Bridge awake during the footage too: the zones match, the hour after is missing
+  const both = [...range(at(7, 8), at(7, 9)), ...can];
+  assert.equal(analyze({ files, nowMs: NOW, canDriving: can, canMinutes: both }).days['2026-11-07'].missingMinutes, 60);
+});
+
+test('a change of clocks between two clip names is no gap in a drive', () => {
+  const tz = 'Europe/Amsterdam'; // 29 Mar 2026: 02:00 -> 03:00
+  const files = new Map();
+  const speeds = new Map();
+  for (const name of ['01-57', '01-58', '01-59', '03-00', '03-01', '03-02']) {
+    for (const camera of CAMS) {
+      const rel = `Sentry/RecentClips/2026-03-29/2026-03-29_${name}-00-${camera}.mp4`;
+      files.set(rel, { rel, size: 30e6, mtimeMs: 1, ctimeMs: 1, birthtimeMs: 1, kind: 'clip', type: 'RecentClips', camera });
+      if (camera === 'front') speeds.set(rel, name === '03-02' ? [...Array(50).fill(25), ...Array(10).fill(0)] : Array(60).fill(25)); // parked at the end
+    }
+  }
+  assert.deepEqual(analyze({ files, nowMs: Date.UTC(2026, 2, 30, 12), tz, speeds }).days, {}, '01:59 to 03:00 is one minute of real time');
+});
+
+test('"Still arriving" measures from the clip name on the car\'s clock, not the FAT file time', () => {
+  const tz = 'America/Los_Angeles';
+  const nowMs = Date.UTC(2026, 10, 8, 20); // 12:00 there
+  const files = new Map();
+  for (let i = 0; i < 10; i++) {
+    for (const camera of CAMS) {
+      const rel = `Sentry/RecentClips/2026-11-08/2026-11-08_01-0${i}-00-${camera}.mp4`;
+      const real = Date.UTC(2026, 10, 8, 9, i + 1); // 01:0i there, as UTC
+      // the FAT time read as UTC on the Sentry USB: 8 h before the real time; it reached the share 30 s after
+      files.set(rel, { rel, size: 30e6, mtimeMs: real - 8 * 3600_000, ctimeMs: real + 30_000, birthtimeMs: real + 30_000, kind: 'clip', type: 'RecentClips', camera });
+    }
+  }
+  const res = analyze({ files, nowMs, tz });
+  assert.deepEqual(res.days, {});
+  assert.equal(res.signals.arrival, false);
+});
+
+test('an archive that stopped altogether goes on warning: Recent clips are expected once the share has had them', () => {
+  const files = drive(new Map(), Date.UTC(2026, 9, 20, 8), Date.UTC(2026, 9, 20, 8, 30)); // the last copy, 19 days ago
+  const can = range(at(7, 9), at(7, 9, 30));
+  assert.equal(analyze({ files, nowMs: NOW, canDriving: can }).days['2026-11-07'].missingMinutes, 30);
+  // the share's retention has removed those too: remembered from earlier scans
+  assert.equal(analyze({ files: new Map(), nowMs: NOW, canDriving: can, lastRecentS: stampSec('2026-10-20_08-29-00') }).days['2026-11-07'].missingMinutes, 30);
+  // the archive works but leaves RecentClips out: Sentry clips go on arriving long after the last Recent one
+  const events = drive(new Map(), Date.UTC(2026, 9, 10, 8), Date.UTC(2026, 9, 10, 8, 5));
+  drive(events, at(6, 8), at(6, 8, 10), { type: 'SentryClips' });
+  assert.deepEqual(analyze({ files: events, nowMs: NOW, canDriving: can }).days, {});
+});
+
+test('a cut-off and CAN Bridge naming the same minutes are told once, in the past tense', () => {
+  const files = drive(new Map(), at(7, 14), at(7, 14, 3));
+  drive(files, at(7, 15, 10), at(7, 15, 20));
+  const speeds = new Map();
+  for (const f of fronts(files)) speeds.set(f.rel, Array(60).fill(17.5));
+  const can = range(at(7, 14, 3), at(7, 15, 10));
+  const d = analyze({ files, nowMs: NOW, speeds, canDriving: can }).days['2026-11-07'];
+  assert.equal(d.missingMinutes, 67);
+  assert.deepEqual(d.can, []);
+  assert.doesNotMatch(d.summary, /CAN Bridge/);
+  assert.match(d.summary, /while the car was moving/);
+});
+
+async function canFiles(minutes, dir = null) {
+  dir ||= await fsp.mkdtemp(path.join(os.tmpdir(), 'archivegap-'));
+  await fsp.mkdir(path.join(dir, 'K'), { recursive: true });
+  for (const [t, signals] of minutes) {
+    const name = `${new Date(t).toISOString().slice(0, 16).replace(/[-:]/g, '')}.json.gz`;
+    await fsp.writeFile(path.join(dir, 'K', name), zlib.gzipSync(JSON.stringify({ minute: t, logs: {}, signals, ids: {} })));
+  }
+  return dir;
+}
+const driving = (from, to) => { const out = []; for (let t = from; t < to; t += 60_000) out.push([t, { DI_vehicleSpeed: [[0, 50]], DI_gear: [[0, 4]] }]); return out; };
+const sentryOn = (from, to) => { const out = []; for (let t = from; t < to; t += 60_000) out.push([t, { DI_vehicleSpeed: [[0, 0]], DI_gear: [[0, 1]], UI_autopilotPowerStateRequest: [[0, 1]] }]); return out; };
+
+function service2({ files, db, dir, clock, keys = () => ['K'], mapped = () => true, soonMs }) {
+  const car = { id: 'car', name: 'Model Y', timezone: 'UTC' };
+  const notes = new Notifications({ db });
+  const inventory = { get: () => ({ files }), codecs: () => new Map() };
+  const vehicles = { get: (id) => (id === 'car' ? car : null) };
+  const gap = createArchiveGap({ inventory, vehicles, notes, db, canKeysFor: async () => keys(), canKeyMapped: mapped, canDir: dir, now: () => clock.now, soonMs });
+  return { gap, notes, inventory, vehicles };
+}
+
+test('Sentry Mode minutes with no footage count, once the share shows the car records in Sentry Mode', async () => {
+  const files = drive(new Map(), at(7, 0), at(7, 1)); // parked in Sentry 00:00-01:00, on the share
+  drive(files, at(7, 18), at(7, 18, 10));
+  const dir = await canFiles(sentryOn(at(7, 0), at(7, 1, 30))); // Sentry on until 01:30
+  try {
+    const db = fakeDb();
+    const { gap } = service2({ files, db, dir, clock: { now: NOW } });
+    const d = (await gap.check('car')).days['2026-11-07'];
+    assert.equal(d.missingMinutes, 30);
+    assert.match(d.summary, /CAN Bridge shows Sentry Mode on 01:00–01:29 with no footage/);
+    assert.equal(db.get('archive-gap:car').sentry, true, 'learned, and remembered');
+    // a car that saves only Sentry events: most of its Sentry minutes have no footage, and that is normal
+    const events = drive(new Map(), at(7, 0), at(7, 0, 5));
+    drive(events, at(7, 18), at(7, 18, 10));
+    const db2 = fakeDb();
+    const other = service2({ files: events, db: db2, dir, clock: { now: NOW } });
+    assert.deepEqual((await other.gap.check('car')).days, {});
+    assert.equal(db2.rows.length, 0);
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('an unmapped CAN Bridge key counts for the only car once its CAN data has matched the car\'s footage', async () => {
+  const files = drive(new Map(), at(7, 8), at(7, 9));
+  drive(files, at(7, 18), at(7, 18, 10));
+  const stranger = await canFiles(driving(at(7, 9), at(7, 9, 30))); // another car's drive: no footage of it at all
+  const own = await canFiles([...driving(at(7, 8), at(7, 9)), ...driving(at(7, 9), at(7, 9, 30))]);
+  try {
+    const a = service2({ files, db: fakeDb(), dir: stranger, clock: { now: NOW }, mapped: () => false });
+    const res = await a.gap.check('car');
+    assert.deepEqual(res.days, {});
+    assert.equal(res.signals.can, false);
+    const db = fakeDb();
+    const b = service2({ files, db, dir: own, clock: { now: NOW }, mapped: () => false });
+    assert.equal((await b.gap.check('car')).days['2026-11-07'].missingMinutes, 30);
+    assert.deepEqual(db.get('archive-gap:car').matched, ['K']);
+  } finally {
+    await fsp.rm(stranger, { recursive: true, force: true });
+    await fsp.rm(own, { recursive: true, force: true });
+  }
+});
+
+test('a dismissed warning stays dismissed when its evidence is gone for a while, or the kind is muted and turned on again', async () => {
+  const files = drive(new Map(), at(7, 8), at(7, 9));
+  drive(files, at(7, 18), at(7, 18, 10));
+  const dir = await canFiles(driving(at(7, 9), at(7, 9, 30)));
+  try {
+    const db = fakeDb();
+    let keys = ['K'];
+    const { gap, notes } = service2({ files, db, dir, clock: { now: NOW }, keys: () => keys });
+    await gap.check('car');
+    notes.dismiss(db.rows[0].id);
+    keys = []; // the CAN data out of reach for a check
+    await gap.check('car');
+    keys = ['K'];
+    await gap.check('car');
+    assert.equal(db.rows.filter((r) => !r.resolvedAt).length, 0, 'back, still dismissed');
+    db.set('notify-muted', ['archive']);
+    await gap.check('car');
+    db.set('notify-muted', []);
+    await gap.check('car');
+    assert.equal(db.rows.filter((r) => !r.resolvedAt).length, 0, 'muted and on again: still dismissed');
+    assert.equal(db.rows.length, 1);
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('an open warning: kept through a check without its evidence, resolved after hours without it, or when its day leaves the window', async () => {
+  const files = drive(new Map(), at(7, 8), at(7, 9));
+  drive(files, at(7, 18), at(7, 18, 10));
+  const dir = await canFiles(driving(at(7, 9), at(7, 9, 30)));
+  try {
+    const db = fakeDb();
+    const clock = { now: NOW };
+    const { gap } = service2({ files, db, dir, clock });
+    await gap.check('car');
+    assert.equal(db.rows.filter((r) => !r.resolvedAt).length, 1);
+    // the CAN minutes are re-indexed away (the check still ran with CAN data): not at once ...
+    await fsp.rm(path.join(dir, 'K'), { recursive: true, force: true });
+    await fsp.mkdir(path.join(dir, 'K'));
+    gap.indexed('K', NaN, NaN);
+    await gap.check('car');
+    assert.equal(db.rows.filter((r) => !r.resolvedAt).length, 1, 'gone once: kept');
+    clock.now = NOW + 7 * 3600_000;
+    await gap.check('car');
+    assert.equal(db.rows.filter((r) => !r.resolvedAt).length, 0, 'gone for hours: resolved');
+
+    // another, left open until its day leaves the window: resolved, and forgotten
+    const db2 = fakeDb();
+    const dir2 = await canFiles(driving(at(7, 9), at(7, 9, 30)));
+    const clock2 = { now: NOW };
+    const s2 = service2({ files, db: db2, dir: dir2, clock: clock2 });
+    await s2.gap.check('car');
+    assert.equal(db2.rows.filter((r) => !r.resolvedAt).length, 1);
+    clock2.now = NOW + 8 * 86400_000;
+    await s2.gap.check('car');
+    assert.equal(db2.rows.filter((r) => !r.resolvedAt).length, 0);
+    assert.deepEqual(db2.get('archive-gap:car').days, {});
+    await fsp.rm(dir2, { recursive: true, force: true });
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a check asked for while one runs runs again after it; soon() checks after CAN logs are indexed; a removed car raises nothing', async () => {
+  const files = drive(new Map(), at(7, 8), at(7, 9));
+  drive(files, at(7, 18), at(7, 18, 10));
+  const dir = await canFiles(driving(at(7, 9), at(7, 9, 30)));
+  try {
+    const db = fakeDb();
+    const s = service2({ files, db, dir, clock: { now: NOW }, soonMs: 5 });
+    let runs = 0;
+    const get = s.inventory.get;
+    s.inventory.get = () => { runs++; return get(); };
+    const a = s.gap.check('car');
+    const b = s.gap.check('car');
+    await Promise.all([a, b]);
+    assert.equal(runs, 2, 'the second request is not answered by the run that was already going');
+    s.gap.soon('car');
+    s.gap.soon('car');
+    await new Promise((r) => setTimeout(r, 60));
+    assert.equal(runs, 3, 'two indexed logs in a row: one check');
+
+    // removed while a check runs: nothing raised for it afterwards
+    const db2 = fakeDb();
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    const car = { id: 'car', name: 'Model Y', timezone: 'UTC' };
+    let present = true;
+    const gap = createArchiveGap({
+      inventory: { get: () => ({ files }), codecs: () => new Map() }, vehicles: { get: (id) => (present && id === 'car' ? car : null) },
+      notes: new Notifications({ db: db2 }), db: db2, canKeysFor: async () => { await gate; return ['K']; }, canDir: dir, now: () => NOW
+    });
+    const p = gap.check('car');
+    present = false;
+    gap.forget('car');
+    release();
+    assert.equal(await p, null);
+    assert.equal(db2.rows.length, 0);
+    assert.deepEqual(db2.get('archive-gap:car'), {});
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
 });

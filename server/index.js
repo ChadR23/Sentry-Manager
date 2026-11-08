@@ -1707,7 +1707,12 @@ async function main() {
     canProgressTimer = setTimeout(() => { canProgressTimer = null; canProgressAt = Date.now(); announce('can'); }, wait);
     canProgressTimer.unref?.();
   };
-  const canIndex = createCanIndex({ usable: (k, n) => canTrust.usable(k, n), canDir: path.join(DATA, 'can'), dir: path.join(DATA, 'can-index'), log: logger.scope('can'), idle: () => !converterRunning(), onIndexed: (key, from, to) => { archiveGapRef?.indexed(key, from, to); canSync?.indexed(key, from, to).catch(() => {}); }, onProgress: canProgress });
+  const canIndex = createCanIndex({ usable: (k, n) => canTrust.usable(k, n), canDir: path.join(DATA, 'can'), dir: path.join(DATA, 'can-index'), log: logger.scope('can'), idle: () => !converterRunning(), onIndexed: (key, from, to) => {
+    archiveGapRef?.indexed(key, from, to);
+    // and the cars of that key are checked for archive gaps again (CAN driving with no footage)
+    if (archiveGapRef) for (const v of vehicles.list()) canKeysFor(v.id).then((keys) => { if (keys.includes(key)) archiveGapRef.soon(v.id); }).catch(() => {});
+    canSync?.indexed(key, from, to).catch(() => {});
+  }, onProgress: canProgress });
   setTimeout(() => canIndex.kick(), 20_000).unref?.();
   // which car each CAN Bridge key is (a key of its own when there is one car)
   const canMap = () => db.get('can-vehicles', {}) || {};
@@ -1719,7 +1724,7 @@ async function main() {
     return keys.filter((k) => map[k] === vid || (!map[k] && single));
   }
   // archive gaps (archiveGap.js): driving per CAN Bridge, drives cut off, minutes missing cameras
-  archiveGapRef = createArchiveGap({ inventory, vehicles, notes, db, speedIndex, canKeysFor, canDir: path.join(DATA, 'can-index'), log: logger.scope('archive') });
+  archiveGapRef = createArchiveGap({ inventory, vehicles, notes, db, speedIndex, canKeysFor, canKeyMapped: (k) => Boolean(canMap()[k]), canDir: path.join(DATA, 'can-index'), log: logger.scope('archive') });
   r.add('GET', '/api/vehicles/:id/archive-gaps', async (req, res, { params }) => {
     const v = vehicleOr404(params.id);
     const out = await archiveGapRef.results(v.id);
