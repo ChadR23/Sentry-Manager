@@ -208,7 +208,7 @@ starts again at 0.
 | 422 | `sha256_mismatch` | The finished file did not match its hash; it was discarded. Upload it again from offset 0. |
 | 422 | `bad_sidecar` | The sidecar is not JSON; it was discarded. |
 | 507 | `no_space` | The server is short of disk space (it keeps 2 GB free for everything else): try again later. |
-| 507 | `car_full` | This car has 20,000 CAN files here already: the owner deletes old ones in the Nerd settings. |
+| 507 | `car_full` | This car has 200,000 CAN logs here already (finished logs are counted, not sidecars): the owner deletes old ones in the Nerd settings. |
 | 500 | `server_error` | Try again later, with backoff. |
 
 ## What happens to the files
@@ -226,9 +226,9 @@ read anything, and watch-only accounts get 403.
 | Route | What |
 |---|---|
 | `GET /api/can/files/<name>/download` | One log (`….log.xz`) or its sidecar (`….log.xz.json`), exactly as received. |
-| `GET /api/can/export/bundle?key=&from=&to=` | A `.zip` (streamed) of that car key's logs and sidecars that start in the range (plus the one running at its start), `manifest.json`, and `ids.csv`: every CAN id seen (bus, id, DBC message or `unknown`, frames, Hz, first and last seen, minutes) from the index's frame counts. At most 7 days and 1,000 logs. |
-| `GET /api/can/export/decoded?key=&from=&to=&signals=` | The decoded signals as CSV (`timestamp_utc,signal,value,unit,value_name`), streamed, as indexed (a value when it changes, and once a second). At most 24 hours and 2,000,000 rows. |
-| `GET /api/can/export/new-ids?key=&since=[&format=csv]` | CAN ids first seen on or after `since`, with the DBC message or `UNKNOWN`. |
+| `GET /api/can/export/bundle?key=&from=&to=` | A `.zip` (streamed) of that car key's logs and sidecars that start in the range (plus the one running at its start), and, after them, `ids.csv` (every CAN id seen: bus, id, DBC message or `unknown`, frames, Hz, first and last seen, minutes, from the index's frame counts) and `manifest.json`. At most 7 days and 2,016 logs (a week of a log every 10 minutes around the clock, with room to spare). `check=1`: what it would hold, as JSON. |
+| `GET /api/can/export/decoded?key=&from=&to=&signals=[&mode=changes\|every]` | The decoded signals as CSV (`timestamp_utc,signal,value,unit,value_name`), streamed, gzipped when the browser accepts it. `mode=changes` (the default without `signals`): a value when it changes, and once a minute while it stays the same. `mode=every` (the default with `signals`): every point the index keeps (a change, and once a second). At most 24 hours and 5,000,000 rows. `check=1`: `{ mode, minutes, estimatedRows, rowLimit, willStop }` before downloading. A cell that starts like a formula (`= + - @`) is written with a `'` first. |
+| `GET /api/can/export/new-ids?key=&since=[&format=csv]` | CAN ids first seen on or after `since`, with the DBC message or `UNKNOWN`, from per-day id summaries the index keeps (always complete). |
 
 Times are ISO with a zone, or the car's own clock (`YYYY-MM-DD[THH:MM]`).
 `check=1` on the bundle and decoded routes answers what they would hold

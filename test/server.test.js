@@ -1314,6 +1314,14 @@ test('CAN index: an uploaded log is decoded in the background, and a clip gets i
     assert.ok(Math.abs(at(got.series.BattVoltage132, got.start + 10_000) - 381) < 0.02, 'about 381 V ten seconds in');
     assert.ok(Math.abs(at(got.series.DI_vehicleSpeed, got.start + 30_000) - 36) < 0.1, '36 km/h');
     assert.ok(got.series.BattVoltage132[0][0] <= got.start, 'with the value from before the clip starts');
+    // signals=* (the Viewer's list): every signal, each one's last value every 250 ms (here 10 a second come in)
+    const all = (await s.call('GET', `/api/can/clip?path=${encodeURIComponent(clip)}&signals=*`, undefined, { headers: https })).data;
+    assert.ok(all.series.BattVoltage132 && all.series.DI_vehicleSpeed, 'every signal');
+    const bv = all.series.BattVoltage132;
+    assert.ok(bv.length <= 4 * 72 + 2 && bv.length > 4 * 60, `about four a second (${bv.length})`);
+    assert.ok(Math.abs(at(bv, got.start + 10_000) - at(got.series.BattVoltage132, got.start + 10_000)) < 0.05, 'the same values, fewer of them');
+    assert.equal(all.trust, got.trust);
+    assert.deepEqual((await s.call('GET', `/api/can/clip?path=${encodeURIComponent(clip)}&signals=*`, undefined, { headers: https })).data, all, 'kept ready for the next viewer');
     // the nerd raw view: every id, the unknown one too, its payload changes in UTC
     const raw = (await s.call('GET', `/api/can/raw?path=${encodeURIComponent(clip)}`, undefined, { headers: https })).data;
     assert.equal(raw.start, got.start);
@@ -1409,12 +1417,13 @@ test('CAN downloads (Nerd): a log as received, a bundle with ids.csv, decoded CS
     assert.equal((await get('/api/can/export/decoded?key=MY-car&from=2020-01-01&to=2020-01-03')).status, 400, 'over a day');
     assert.equal((await get('/api/can/export/bundle?key=MY-car&from=2021-01-01&to=2021-01-02')).status, 404, 'no logs then');
 
-    // the bundle: ids.csv, manifest.json, the log and sidecar (the one running at the start counts)
+    // the bundle: the log and sidecar (the one running at the start counts), then ids.csv and manifest.json
     const b = await get('/api/can/export/bundle?key=MY-car&from=2020-01-01T08:00&to=2020-01-01T08:30');
     assert.equal(b.status, 200);
     assert.equal(b.headers.get('content-type'), 'application/zip');
     assert.match(b.headers.get('content-disposition'), /^attachment; filename="can-MY-car-20200101T0800-to-20200101T0830\.zip"$/);
     const zipBuf = Buffer.from(await b.arrayBuffer());
+    assert.deepEqual(readZip(zipBuf).map((e) => e.name), [`MY-car/${name}`, `MY-car/${name}.json`, 'ids.csv', 'manifest.json'], 'the logs first: the download starts at once');
     const entries = Object.fromEntries(readZip(zipBuf).map((e) => [e.name, e.data]));
     assert.deepEqual(Object.keys(entries).sort(), ['MY-car/' + name, `MY-car/${name}.json`, 'ids.csv', 'manifest.json'].sort());
     assert.deepEqual(entries[`MY-car/${name}`], file, 'the log byte for byte');
@@ -1445,6 +1454,19 @@ test('CAN downloads (Nerd): a log as received, a bundle with ids.csv, decoded CS
     assert.ok(decLines.length > 20, `rows (${decLines.length})`);
     assert.match(decLines[1], /^2020-01-01T08:00:00\.\d{3}Z,BattVoltage132,38\d\.\d*,V,$/);
     assert.ok(decLines.slice(1).every((l) => l.split(',')[0] <= '2020-01-01T08:00:30.000Z' && l.split(',')[1] === 'BattVoltage132'), 'only that signal, inside the range');
+    assert.equal(dec.headers.get('content-encoding'), 'gzip', 'sent gzipped (the browser unpacks it)');
+    const plain = await get('/api/can/export/decoded?key=MY-car&from=2020-01-01T08:00&to=2020-01-01T08:00:30&signals=BattVoltage132', { 'Accept-Encoding': 'identity' });
+    assert.equal(plain.headers.get('content-encoding'), null);
+    assert.equal((await plain.text()).trim().split('\n').length, decLines.length);
+    // every signal: only changes (and a value that stays the same once a minute), with an estimate first
+    const est = (await s.call('GET', '/api/can/export/decoded?key=MY-car&from=2020-01-01T08:00&to=2020-01-01T08:00&check=1', undefined, { headers: https })).data;
+    assert.equal(est.mode, 'changes');
+    assert.equal(est.minutes, 1);
+    assert.ok(est.estimatedRows > 0 && est.willStop === false, JSON.stringify(est));
+    const allDec = (await (await get('/api/can/export/decoded?key=MY-car&from=2020-01-01T08:00&to=2020-01-01T08:00')).text()).trim().split('\n').slice(1);
+    assert.equal(allDec.length, est.estimatedRows, 'the estimate of one minute is its count');
+    const every = (await (await get('/api/can/export/decoded?key=MY-car&from=2020-01-01T08:00&to=2020-01-01T08:00&mode=every')).text()).trim().split('\n').slice(1);
+    assert.ok(every.length >= allDec.length, `every point the index keeps (${every.length} >= ${allDec.length})`);
 
     // new ids since a date: JSON for the panel, CSV to download
     const fresh = (await s.call('GET', '/api/can/export/new-ids?key=MY-car&since=2019-12-31', undefined, { headers: https })).data;
@@ -1685,6 +1707,27 @@ test('accounts: a watch-only account watches; two-step sign-in with a code (and 
     await again('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
     assert.equal((await again('POST', '/api/auth/2fa/code', { code: recovery[0] })).status, 401, 'used already');
     assert.equal((await laptop('GET', '/api/auth/2fa')).data.recoveryLeft, 9);
+  } finally {
+    await s.stop();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('CAN bundle: a full week of a bridge logging every 10 minutes around the clock is not refused', async () => {
+  const dir = await tmp();
+  await makeFootage(path.join(dir, 'footage'));
+  // 8 days of ten-minute logs (the files' content does not matter to the check)
+  const can = path.join(dir, 'data', 'can', 'MY-car');
+  await fsp.mkdir(can, { recursive: true });
+  const t0 = Date.UTC(2020, 0, 1);
+  for (let i = 0; i < 8 * 144; i++) await fsp.writeFile(path.join(can, `MY-car_${new Date(t0 + i * 600_000).toISOString().slice(0, 19).replace(/[-:]/g, '')}Z_${i + 1}.log.xz`), 'x');
+  const s = await startServer(dir, { TRUST_PROXY: 'true' });
+  const https = { 'X-Forwarded-Proto': 'https' };
+  try {
+    await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' }, { headers: https });
+    const week = await s.call('GET', '/api/can/export/bundle?key=MY-car&from=2020-01-01T00:00Z&to=2020-01-08T00:00Z&check=1', undefined, { headers: https });
+    assert.equal(week.status, 200, JSON.stringify(week.data));
+    assert.equal(week.data.logs, 7 * 144, 'the log that starts exactly at the end holds nothing of the range');
   } finally {
     await s.stop();
     await fsp.rm(dir, { recursive: true, force: true });

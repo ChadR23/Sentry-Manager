@@ -34,6 +34,7 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const zlib = require('zlib');
+const gzipAsync = require('util').promisify(zlib.gzip);
 const { spawn } = require('child_process');
 const { Logger } = require('./log');
 const { ManagerDB } = require('./db');
@@ -78,7 +79,7 @@ const { Telemetry } = require('./telemetry');
 const { createSpeedIndex } = require('./speedIndex');
 const { createExporter } = require('./exporter');
 const { createCanLogs, parseName: parseCanName } = require('./canLogs');
-const { createCanIndex } = require('./canIndex');
+const { createCanIndex, CLIP_STEP_MS: CAN_CLIP_STEP_MS } = require('./canIndex');
 const { createCanTrust } = require('./canTrust');
 const { createCanPort } = require('./canPort');
 const { createCanSync } = require('./canSync');
@@ -1759,6 +1760,26 @@ async function main() {
     const { keys } = await canClipOf(query.path);
     return { signals: await canIndex.signals(keys) };
   });
+  // signals=* (the Viewer's list block: every signal, each one's value every 250 ms) is the costly
+  // answer: at most two are made at once, a few wait (more get 429), one whose page closed is not
+  // made, and the last few are kept ready (another viewer of the same clip, a replay), until the
+  // index changes
+  const canEvery = { running: 0, waiting: [], ready: new Map() };
+  const CAN_EVERY_AT_ONCE = 2;
+  const CAN_EVERY_WAITING = 8;
+  async function canEverySlot(res) {
+    if (canEvery.running < CAN_EVERY_AT_ONCE) { canEvery.running++; return; }
+    if (canEvery.waiting.length >= CAN_EVERY_WAITING) throw new HttpError(429, 'The car data is busy: try again in a moment.');
+    await new Promise((ok, fail) => {
+      const w = { ok, fail };
+      canEvery.waiting.push(w);
+      res.on('close', () => { const i = canEvery.waiting.indexOf(w); if (i >= 0) { canEvery.waiting.splice(i, 1); fail(new HttpError(409, 'Stopped: the page closed.')); } });
+    });
+  }
+  function canEveryDone() {
+    const next = canEvery.waiting.shift();
+    if (next) next.ok(); else canEvery.running--;
+  }
   // ... and the chosen ones over this clip (UTC times), already decoded
   r.add('GET', '/api/can/clip', async (req, res, { query }) => {
     const { v, keys, start: named } = await canClipOf(query.path);
@@ -1770,9 +1791,29 @@ async function main() {
     const real = await studioReadable.resolve(String(query.path || ''));
     const sync = real && !hiddenPath(real) ? await canSync.forClip({ v, keys, real, start: named }).catch((err) => { log.warn(`CAN sync: ${err.message}`); return null; }) : null;
     const start = Math.round((named + (sync?.offsetMs || 0)) * 10) / 10;
-    // how far it can be trusted: verified, unsigned, or override (a log that failed its check, used anyway)
-    const trust = await canIndex.trustOf(keys, start - 2000, start + 70_000);
-    return { start, sync, trust, series: await canIndex.series(keys, start - 2000, start + 70_000, names) };
+    // how far it can be trusted (verified, unsigned, or override: a log that failed its check,
+    // used anyway), from the same minutes as the signals, each read once
+    if (!every) {
+      const got = await canIndex.clipData(keys, start - 2000, start + 70_000, names);
+      return { start, sync, trust: got.trust, series: got.series };
+    }
+    const id = `${keys.join(',')}|${start}|${JSON.stringify(sync)}|${canIndex.generation()}`;
+    let body = canEvery.ready.get(id);
+    if (!body) {
+      await canEverySlot(res);
+      try {
+        if (res.destroyed) return undefined;
+        const got = await canIndex.clipData(keys, start - 2000, start + 70_000, null, { stepMs: CAN_CLIP_STEP_MS });
+        const json = Buffer.from(JSON.stringify({ start, sync, trust: got.trust, series: got.series }));
+        body = { json, gz: await gzipAsync(json, { level: 4 }) };
+      } finally { canEveryDone(); }
+      canEvery.ready.set(id, body);
+      while (canEvery.ready.size > 4) canEvery.ready.delete(canEvery.ready.keys().next().value);
+    }
+    const gz = /\bgzip\b/.test(String(req.headers['accept-encoding'] || ''));
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...(gz ? { 'Content-Encoding': 'gzip' } : {}), Vary: 'Accept-Encoding' });
+    res.end(gz ? body.gz : body.json);
+    return undefined;
   });
   // "when did this start" (canSearch.js): one search at a time, each match with the clip that covers it.
   // Each user has one search at most (a newer one stops the older), a few
@@ -2110,10 +2151,21 @@ async function main() {
   // with every CAN id seen (new ones stand out), the decoded signals as CSV, and the ids new since a date.
   const CAN_KEY = /^[A-Za-z0-9-]{1,64}$/;
   const CAN_BUNDLE_DAYS = 7;
-  const CAN_BUNDLE_FILES = 1000; // logs (and as many sidecars): a week is about 1,000 ten-minute logs of driving
+  // logs (and as many sidecars): a bridge logs every 10 minutes around the clock, so the longest range
+  // is 1,008 logs; twice that leaves room for logs split early (seq) and still stops a runaway count
+  const CAN_BUNDLE_FILES = CAN_BUNDLE_DAYS * 24 * 6 * 2;
   const CAN_DECODED_HOURS = 24;
-  const CAN_DECODED_ROWS = 2_000_000;
-  const csvCell = (v) => { const t = String(v ?? ''); return /[",\n\r]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
+  // rows of one decoded export (gzip makes them about 8 times smaller on the wire); by default only
+  // changes are written (each signal is kept once a second in the index even when it stays the same)
+  const CAN_DECODED_ROWS = 5_000_000;
+  const CAN_HEARTBEAT_MS = 60_000; // ... and a signal that stays the same once a minute
+  // a cell that starts like a formula (= + - @, a tab or a return) is written with a ' first, so a
+  // spreadsheet shows it as text; numbers (negative ones too) are left as they are
+  const csvCell = (v) => {
+    let t = String(v ?? '');
+    if (typeof v !== 'number' && /^[=+\-@\t\r]/.test(t)) t = `'${t}`;
+    return /[",\n\r]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t;
+  };
   const csvLine = (cells) => `${cells.map(csvCell).join(',')}\n`;
   const isoOf = (ms) => (Number.isFinite(ms) ? new Date(ms).toISOString() : '');
   /** The car a CAN key belongs to (its map, else the only car), for the time zone a date is read in. */
@@ -2187,7 +2239,8 @@ async function main() {
     try { names = await fs.promises.readdir(path.join(DATA, 'can', key)); } catch { /* no logs */ }
     const logs = names.map((nm) => ({ nm, n: parseCanName(nm) })).filter((x) => x.n && !x.n.sidecar && x.n.vehicleKey === key).sort((a, b) => a.n.startedAt - b.n.startedAt || a.n.seq - b.n.seq);
     // the logs that start in the range, and the one already running at its start (a log is 10 minutes)
-    const inside = logs.filter((x) => x.n.startedAt >= from && x.n.startedAt <= to);
+    // (a log starting exactly at the end holds nothing of the range)
+    const inside = logs.filter((x) => x.n.startedAt >= from && (x.n.startedAt < to || x.n.startedAt === from));
     const before = logs.filter((x) => x.n.startedAt < from && x.n.startedAt >= from - 30 * 60_000).pop();
     const picked = before ? [before, ...inside] : inside;
     if (!picked.length) throw new HttpError(404, 'No logs of this car key in that time.');
@@ -2208,19 +2261,26 @@ async function main() {
     if (total > ZIP_LIMIT - 64 * 1024 * 1024) throw new HttpError(413, 'That bundle would be over 4 GB: take a shorter time.');
     // check=1: what it would hold (the panel asks first, so a mistake is a message, not a downloaded error)
     if (query.check) return { logs: picked.length, files: entries.length, bytes: total, from, to };
-    const ids = await canIndex.idSummary(key, from, to);
-    const csv = Buffer.from(idsCsv(ids));
-    const info = Buffer.from(`${JSON.stringify({
-      vehicleKey: key, from: isoOf(from), to: isoOf(to), madeAt: isoOf(Date.now()), logs: manifest,
-      ids: { count: ids.length, unknown: ids.filter((e) => !e.name).length },
-      note: 'The .log.xz files are exactly as the CAN Bridge uploaded them (candump lines, xz). ids.csv is every CAN id seen in the range, from the index (frames per minute); "unknown" ones are not in the DBC this server decodes with (model3dbc).'
-    }, null, 2)}\n`);
-    if (total + csv.length + info.length > ZIP_LIMIT) throw new HttpError(413, 'That bundle would be over 4 GB: take a shorter time.');
     const file = `can-${key}-${isoOf(from).slice(0, 16).replace(/[-:]/g, '')}-to-${isoOf(to).slice(0, 16).replace(/[-:]/g, '')}.zip`;
+    // the logs go first, so the download starts at once; ids.csv and manifest.json (made from the
+    // index while the logs stream, only the top of each minute read) come last. The sizes were
+    // checked with 64 MB to spare, far more than the two small files need.
+    let ids = null;
+    const idsOf = async () => (ids ||= await canIndex.idSummary(key, from, to, { stop: () => res.destroyed }));
     res.writeHead(200, { 'Content-Type': 'application/zip', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': attachment(file) });
     audit.info(`CAN bundle downloaded: ${key} ${isoOf(from)} to ${isoOf(to)} (${picked.length} logs): ${by(req, user)}`);
     try {
-      await streamZip(res, [{ name: 'ids.csv', data: csv, mtime: Date.now() }, { name: 'manifest.json', data: info, mtime: Date.now() }, ...entries]);
+      await streamZip(res, [
+        ...entries,
+        { name: 'ids.csv', mtime: Date.now(), make: async () => Buffer.from(idsCsv(await idsOf())) },
+        {
+          name: 'manifest.json', mtime: Date.now(), make: async () => Buffer.from(`${JSON.stringify({
+            vehicleKey: key, from: isoOf(from), to: isoOf(to), madeAt: isoOf(Date.now()), logs: manifest,
+            ids: { count: (await idsOf()).length, unknown: (await idsOf()).filter((e) => !e.name).length },
+            note: 'The .log.xz files are exactly as the CAN Bridge uploaded them (candump lines, xz). ids.csv is every CAN id seen in the range, from the index (frames per minute); "unknown" ones are not in the DBC this server decodes with (model3dbc).'
+          }, null, 2)}\n`)
+        }
+      ]);
       res.end();
     } catch (err) {
       log.warn(`CAN bundle ${file}: ${err.message}`);
@@ -2229,49 +2289,95 @@ async function main() {
     return undefined;
   });
 
-  // the decoded signals of a car key over a time range (at most a day) as CSV, streamed minute by minute
+  /**
+   * The rows a decoded export writes, signal by signal: every point the index keeps (`every`), or
+   * only changes, with a signal that stays the same once a minute (so "the same" can be told from
+   * "stopped sending"). `last` carries each signal's last written point across minutes.
+   */
+  const decodedRows = (data, t, from, to, only, every, last) => {
+    const pts = [];
+    for (const [name, list] of Object.entries(data.signals || {})) {
+      if (only && !only.has(name)) continue;
+      let l = last.get(name);
+      for (const [ms, v] of list) {
+        const at = t + ms;
+        if (at < from || at > to) continue;
+        if (!every && l && l.v === v && at - l.at < CAN_HEARTBEAT_MS) continue;
+        if (!l) last.set(name, (l = { v, at }));
+        else { l.v = v; l.at = at; }
+        pts.push([at, name, v]);
+      }
+    }
+    return pts.sort((a, b) => a[0] - b[0] || (a[1] < b[1] ? -1 : 1));
+  };
+
+  // the decoded signals of a car key over a time range (at most a day) as CSV, streamed minute by
+  // minute (gzip when the browser takes it, as browsers do for a download: about 8 times smaller).
+  // mode=changes (the default without a signal list) or mode=every (the default with one).
   r.add('GET', '/api/can/export/decoded', async (req, res, { query, user }) => {
     const key = canKeyOr400(query.key);
     const { from, to } = canRange(key, query, CAN_DECODED_HOURS * 3_600_000, 'A decoded export');
     const only = query.signals ? new Set(String(query.signals).split(',').map((x) => x.trim()).filter((x) => /^\w{1,80}$/.test(x)).slice(0, 200)) : null;
+    const every = query.mode === 'every' || (Boolean(only) && query.mode !== 'changes');
     const meta = await canIndex.signals([key]);
-    if (query.check) return { ok: true, from, to, signals: only ? [...only].filter((x) => meta[x]).length : Object.keys(meta).length };
-    const file = `can-${key}-decoded-${isoOf(from).slice(0, 16).replace(/[-:]/g, '')}-to-${isoOf(to).slice(0, 16).replace(/[-:]/g, '')}.csv`;
-    res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': attachment(file) });
-    audit.info(`CAN decoded export: ${key} ${isoOf(from)} to ${isoOf(to)}: ${by(req, user)}`);
-    let rows = 0;
-    if (!(await writeOut(res, csvLine(['timestamp_utc', 'signal', 'value', 'unit', 'value_name'])))) return undefined;
-    outer: for await (const [t, data] of canIndex.minutesIn(key, from, to)) {
-      const pts = [];
-      for (const [name, list] of Object.entries(data.signals || {})) {
-        if (only && !only.has(name)) continue;
-        for (const [ms, v] of list) if (t + ms >= from && t + ms <= to) pts.push([t + ms, name, v]);
+    if (query.check) {
+      // how many rows it would be: a few minutes of the range counted, times its minutes
+      const times = await canIndex.minuteTimes(key, from, to);
+      const picks = [...new Set([0, 0.5, 1].map((f) => times[Math.min(times.length - 1, Math.floor(f * (times.length - 1)))]).filter((t) => t !== undefined))];
+      let rows = 0;
+      for (const t of picks) {
+        const data = (await canIndex.minutesIn(key, t, t).next()).value?.[1];
+        if (data) rows += decodedRows(data, t, -Infinity, Infinity, only, every, new Map()).length;
       }
-      pts.sort((a, b) => a[0] - b[0] || (a[1] < b[1] ? -1 : 1));
+      const estimatedRows = picks.length ? Math.round((rows / picks.length) * times.length) : 0;
+      return {
+        ok: true, from, to, signals: only ? [...only].filter((x) => meta[x]).length : Object.keys(meta).length, mode: every ? 'every' : 'changes',
+        minutes: times.length, estimatedRows, rowLimit: CAN_DECODED_ROWS, willStop: estimatedRows > CAN_DECODED_ROWS
+      };
+    }
+    const file = `can-${key}-decoded-${isoOf(from).slice(0, 16).replace(/[-:]/g, '')}-to-${isoOf(to).slice(0, 16).replace(/[-:]/g, '')}.csv`;
+    const gz = /\bgzip\b/.test(String(req.headers['accept-encoding'] || ''));
+    res.writeHead(200, {
+      'Content-Type': 'text/csv; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': attachment(file),
+      ...(gz ? { 'Content-Encoding': 'gzip' } : {}), Vary: 'Accept-Encoding'
+    });
+    audit.info(`CAN decoded export: ${key} ${isoOf(from)} to ${isoOf(to)}: ${by(req, user)}`);
+    let out = res;
+    if (gz) {
+      out = zlib.createGzip({ level: 4 });
+      require('stream').pipeline(out, res, () => {});
+    }
+    const put = async (text) => {
+      if (res.destroyed || out.destroyed) return false;
+      if (!out.write(text)) await waitDrain(out);
+      return !res.destroyed && !out.destroyed;
+    };
+    let rows = 0;
+    const last = new Map();
+    if (!(await put(csvLine(['timestamp_utc', 'signal', 'value', 'unit', 'value_name'])))) return undefined;
+    outer: for await (const [t, data] of canIndex.minutesIn(key, from, to)) {
       let chunk = '';
-      for (const [at, name, v] of pts) {
-        if (rows >= CAN_DECODED_ROWS) { chunk += `# stopped at ${CAN_DECODED_ROWS} rows: export a shorter time, or fewer signals\n`; await writeOut(res, chunk); break outer; }
+      for (const [at, name, v] of decodedRows(data, t, from, to, only, every, last)) {
+        if (rows >= CAN_DECODED_ROWS) { chunk += `# stopped at ${CAN_DECODED_ROWS} rows: export a shorter time, or fewer signals\n`; await put(chunk); break outer; }
         const m = meta[name] || {};
         chunk += csvLine([isoOf(at), name, v, m.unit || '', m.values?.[v] ?? '']);
         rows++;
       }
-      if (chunk && !(await writeOut(res, chunk))) return undefined;
+      if (chunk && !(await put(chunk))) return undefined;
     }
-    res.end();
+    out.end();
     return undefined;
   });
 
-  // CAN ids first seen on or after a date (as after a software update), from the index's frame counts; JSON for the panel, or CSV
+  // CAN ids first seen on or after a date (as after a software update), from per-day id summaries
+  // the index keeps (complete, however long the history); JSON for the panel, or CSV
   r.add('GET', '/api/can/export/new-ids', async (req, res, { query, user }) => {
     const key = canKeyOr400(query.key);
     const tz = canCarOf(key)?.timezone || 'UTC';
     let since;
     try { since = parseWhen(query.since, (...a) => zonedToUtc(...a, tz)); } catch (err) { throw new HttpError(400, err.message); }
     if (since === null) throw new HttpError(400, 'Give the date to look from (since).');
-    const job = canQueue.run(user || clientKey(req), (stop) => canSearch.ids([key], { before: since, limit: 1000, budgetMs: 120_000, stop }));
-    res.on('close', () => { if (!res.writableEnded) job.cancel('Stopped: the page closed.'); });
-    let out;
-    try { out = await job.done; } catch (err) { throw new HttpError(err.status || 500, err.message); }
+    const out = await canIndex.newIds(key, since, { limit: 1000, stop: () => res.destroyed });
     const rows = out.appeared.map((x) => {
       const [bus, id] = x.id.split(':');
       const name = canIndex.messageName(x.id);
@@ -2284,7 +2390,6 @@ async function main() {
     res.end([
       csvLine(['bus', 'id_hex', 'message', 'unknown', 'first_seen_utc', 'last_seen_utc', 'minutes_seen']),
       ...rows.map((x) => csvLine([x.bus, `0x${x.id}`, x.name || 'unknown', x.unknown ? 'UNKNOWN' : '', isoOf(x.firstSeen), isoOf(x.lastSeen), x.minutesSeen])),
-      ...(out.complete ? [] : ['# not all minutes were read in time: there may be more\n']),
       ...(out.appearedCount > rows.length ? [`# the first ${rows.length} of ${out.appearedCount}\n`] : [])
     ].join(''));
     return undefined;
