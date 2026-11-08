@@ -77,7 +77,7 @@ async function waitFor(fn, ms = 30000) {
   }
 }
 
-test('a columns log through the server: uploaded, indexed, listed with its format, downloaded as received and as candump text', { skip, timeout: 90000 }, async () => {
+test('ping lists both formats; a columns log through the server: uploaded, indexed, listed with its format, downloaded as received and as candump text', { skip, timeout: 90000 }, async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sm-columns-'));
   await fsp.mkdir(path.join(dir, 'footage'), { recursive: true });
   const s = await startServer(dir);
@@ -91,6 +91,8 @@ test('a columns log through the server: uploaded, indexed, listed with its forma
     const token = (await s.call('POST', '/api/can/enable', {})).data.token;
     const ping = await (await fetch(`${s.base}/api/can/logs/ping`, { headers: { ...s.https, Authorization: `Bearer ${token}` } })).json();
     assert.equal(ping.api, 1);
+    // both formats are read here: the bridge may write the compact one
+    assert.deepEqual(ping.formats, ['canbridge-candump-xz/1', 'canbridge-columns-xz/2']);
 
     const key = 'COLS-car';
     const name = `${key}_20261108T005818Z_1.log.xz`;

@@ -80,7 +80,7 @@ const { createSpeedIndex } = require('./speedIndex');
 const { createExporter } = require('./exporter');
 const { createCanLogs, parseName: parseCanName } = require('./canLogs');
 const { createCanIndex, CLIP_STEP_MS: CAN_CLIP_STEP_MS } = require('./canIndex');
-const { openCanLog, stopWhenStalled } = require('./canLogReader');
+const { openCanLog, stopWhenStalled, FORMATS: CAN_FORMATS } = require('./canLogReader');
 const { createCanTrust } = require('./canTrust');
 const { createCanPort } = require('./canPort');
 const { createCanSync } = require('./canSync');
@@ -2024,7 +2024,9 @@ async function main() {
     const sub = rawPath.slice('/api/can/logs'.length);
     try {
       if (req.method === 'GET' && sub === '/ping') {
-        return sendJson(res, 200, { ok: true, api: 1, vehicleKey: tok.key || null, maxChunk: canLogs.MAX_CHUNK, maxFile: canLogs.MAX_FILE, maxSidecar: canLogs.MAX_SIDECAR });
+        // formats: every log format all the readers here handle (canLogReader.js); the bridge writes the compact
+        // one only while it is listed, so it is listed only because the indexer and the downloads read it
+        return sendJson(res, 200, { ok: true, api: 1, vehicleKey: tok.key || null, maxChunk: canLogs.MAX_CHUNK, maxFile: canLogs.MAX_FILE, maxSidecar: canLogs.MAX_SIDECAR, formats: CAN_FORMATS });
       }
       if (req.method === 'POST' && sub === '/status') {
         let body;

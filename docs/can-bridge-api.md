@@ -64,9 +64,13 @@ requests also work on the web port (9000), but the app should use 10000.
 
 `GET /api/can/logs/ping`
 
-`200 { "ok": true, "api": 1, "maxChunk": 16777216, "maxFile": 1073741824, "maxSidecar": 1048576 }`
+`200 { "ok": true, "api": 1, "vehicleKey": "MY-car", "maxChunk": 16777216, "maxFile": 1073741824, "maxSidecar": 1048576, "formats": ["canbridge-candump-xz/1", "canbridge-columns-xz/2"] }`
 
 Use it to test the address, token and pinned certificate, and read the limits.
+`formats` lists the log formats this server reads (see Log formats). The
+bridge writes `canbridge-columns-xz/2` only while it is listed, and goes back
+to candump text if a later `ping` stops listing it (an older server, which
+answers no `formats`, gets candump text).
 
 ## 2. Which files are already here
 
