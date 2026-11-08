@@ -1387,6 +1387,9 @@ test('Viewer dashboards: kept per account, cleaned of anything that is not a blo
     const fl = await s.call('PUT', '/api/dashboards', { active: 'f', boards: [{ id: 'f', name: 'Float', placement: 'float', float: { wide: { x: 0.25, y: 0.1 }, narrow: { x: 7, y: -2 }, huge: { x: 1, y: 1 } }, blocks: [] }] });
     assert.deepEqual([fl.data.boards[0].placement, fl.data.boards[0].float], ['float', { wide: { x: 0.25, y: 0.1 }, narrow: { x: 1, y: 0 } }]);
     assert.equal((await s.call('PUT', '/api/dashboards', { boards: [{ id: 'x', placement: 'sideways', blocks: [] }] })).data.boards[0].placement, 'below');
+    // a list block: no stats of its own, its search and "changing only" kept
+    const li = await s.call('PUT', '/api/dashboards', { boards: [{ id: 'l', blocks: [{ type: 'list', signals: ['a'], q: 'volt\u0007age', changing: true }, { type: 'toString', signals: [] }] }] });
+    assert.deepEqual(li.data.boards[0].blocks, [{ type: 'list', signals: [], q: 'volt age', changing: true }]);
   } finally {
     await s.stop();
     await fsp.rm(dir, { recursive: true, force: true });

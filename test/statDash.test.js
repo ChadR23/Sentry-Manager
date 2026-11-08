@@ -304,25 +304,81 @@ test('destroy() stops the raw view: no download after it, and one in flight is s
   assert.equal(download.signal.aborted, true, 'and is stopped by destroy()');
 });
 
-test('the stat pickers are built only while customizing, each with its full list only when opened', async () => {
+test('a stat picker: a button while customizing, opening a list searched by name, group or id', async () => {
   const d = await dashboard({
     rawOpen: false,
     routes: { boards: board([{ type: 'wide', signals: ['dash.speed', 'dash.steering', 'dash.brake'] }, { type: 'small', signals: ['can.DI_brake'] }]) }
   });
-  assert.equal(d.el.querySelectorAll('select[data-pick]').length, 0, 'no pickers while not customizing');
+  assert.equal(d.el.querySelectorAll('[data-pick]').length, 0, 'no pickers while not customizing');
   fire(d.el.querySelector('[data-edit]'), 'click');
-  const picks = d.el.querySelectorAll('select[data-pick]');
+  const picks = d.el.querySelectorAll('button[data-pick]');
   assert.equal(picks.length, 4);
-  assert.deepEqual(picks.map((s) => s.options.length), [1, 1, 1, 1], 'each shows only its stat');
-  assert.equal(picks[3].options[0].textContent, 'DI_brake (no data yet)');
-  fire(picks[1], 'focusin');
-  assert.ok(picks[1].options.length >= 15, 'opened: every stat to pick from');
-  assert.equal(picks[1].value, 'dash.steering', 'with its own stat chosen');
-  fire(picks[3], 'pointerdown');
-  assert.equal(picks[3].value, 'can.DI_brake', 'a CAN stat with no data yet stays chosen');
-  // picking another stat
-  picks[1].value = 'dash.accelerator';
-  fire(picks[1], 'change');
+  assert.equal(picks[3].textContent, 'DI_brake (no data yet)');
+  assert.equal(d.el.querySelectorAll('[data-opt]').length, 0, 'no list until one is opened');
+  fire(picks[1], 'click');
+  const pop = d.el.querySelector('.sd-pop');
+  assert.ok(pop, 'opened');
+  assert.ok(pop.querySelectorAll('[data-opt]').length >= 15, 'every stat to pick from');
+  assert.equal(pop.querySelector('.cur').textContent, 'Steering', 'its own stat marked');
+  const q = pop.querySelector('[data-pop-q]');
+  q.value = 'accel';
+  fire(q, 'input');
+  const found = pop.querySelectorAll('[data-opt]').map((o) => o.children[0].textContent);
+  assert.ok(found.includes('Accelerator'), `found: ${found}`);
+  assert.ok(!found.includes('Steering'));
+  q.value = 'zzzz nothing';
+  fire(q, 'input');
+  assert.equal(pop.querySelectorAll('[data-opt]').length, 0);
+  assert.match(pop.textContent, /No stat matches/);
+  // picking one (a click on it)
+  q.value = 'accelerator';
+  fire(q, 'input');
+  fire(pop.querySelector('[data-opt]'), 'click');
+  assert.equal(d.el.querySelector('.sd-pop'), null, 'closed once picked');
   assert.equal(d.el.querySelector('.sd-wide').querySelectorAll('.sd-l')[1].textContent, 'Accelerator');
+  // Escape closes without changing anything
+  fire(d.el.querySelectorAll('button[data-pick]')[0], 'click');
+  const e = { target: d.el.querySelector('[data-pop-q]'), key: 'Escape', preventDefault() {}, stopPropagation() {} };
+  for (const fn of d.el.querySelector('.sd-pop').listeners.keydown) fn(e);
+  assert.equal(d.el.querySelector('.sd-pop'), null);
+  assert.equal(d.el.querySelector('.sd-wide').querySelectorAll('.sd-l')[0].textContent, 'Speed');
+  d.dash.destroy();
+});
+
+test('the list block: every stat of the clip, asked for all at once, filtered, live as the footage plays', async () => {
+  const META2 = { signals: { DI_brake: { unit: '', bus: 'ChassisBus', message: 'ID145ESP' }, BMS_packVoltage: { unit: 'V', bus: 'VehicleBus', message: 'ID132HVBattAmpVolt' }, VCFRONT_never: { unit: '', bus: 'VehicleBus', message: 'ID3F2X' } } };
+  let asked = '';
+  const d = await dashboard({
+    rawOpen: false,
+    routes: {
+      boards: board([{ type: 'list', signals: [], q: '', changing: false }]),
+      '/api/can/signals': () => META2,
+      '/api/can/clip': (p, u) => { asked = u.searchParams.get('signals'); return { start: S, sync: { method: 'clock' }, series: { DI_brake: [[S - 1000, 0], [S + 10_000, 1]], BMS_packVoltage: [[S - 1000, 398.5]] } }; }
+    }
+  });
+  await d.frame();
+  await d.frame();
+  assert.equal(asked, '*', 'every signal of the clip');
+  const rows = () => d.el.querySelectorAll('.sd-list-r').map((r) => `${r.children[0].textContent}=${r.querySelector('[data-lv]').textContent}`);
+  assert.equal(rows().length >= 2, true, 'the CAN stats with data');
+  assert.ok(rows().some((x) => /398\.5V$/.test(x)), `pack voltage shown: ${rows()}`);
+  assert.ok(!rows().some((x) => /never/i.test(x)), 'a signal with no data in this clip is left out');
+  // the footage moves on: the brake turns on
+  d.video.currentTime = 11;
+  await d.frame();
+  assert.ok(d.el.querySelectorAll('.sd-list-r.hot').length >= 1, 'a value that changed lights up');
+  // filter
+  const q = d.el.querySelector('[data-list-q]');
+  q.value = 'volt';
+  fire(q, 'input');
+  assert.equal(d.el.querySelectorAll('.sd-list-r').length, 1);
+  // changing only: the voltage does not change in this clip
+  q.value = '';
+  fire(q, 'input');
+  const ch = d.el.querySelector('[data-list-changing]');
+  ch.checked = true;
+  fire(ch, 'change');
+  assert.ok(rows().every((x) => !/398/.test(x)), `only what changes: ${rows()}`);
+  assert.ok(rows().length >= 1, 'the brake changes');
   d.dash.destroy();
 });

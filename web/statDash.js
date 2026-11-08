@@ -23,7 +23,7 @@
 //   dash.destroy();
 
 const STYLE = `
-.sentry-sd{--sd-bg:rgba(18,20,24,.86);--sd-tile:rgba(255,255,255,.07);--sd-line:rgba(255,255,255,.14);--sd-fg:#f2f4f7;--sd-dim:rgba(242,244,247,.62);--sd-on:#43d17a;--sd-amber:#ffb547;--sd-blue:#4aa8ff;
+.sentry-sd{--sd-bg:rgba(18,20,24,.86);--sd-tile:rgba(255,255,255,.07);--sd-line:rgba(255,255,255,.14);--sd-fg:#f2f4f7;--sd-dim:rgba(242,244,247,.78);--sd-on:#43d17a;--sd-amber:#ffb547;--sd-blue:#4aa8ff;
   box-sizing:border-box;color:var(--sd-fg);font:14px/1.3 system-ui,-apple-system,"Segoe UI",sans-serif;-webkit-user-select:none;user-select:none}
 .sentry-sd *{box-sizing:border-box}
 .sentry-sd.below{margin:8px 0;background:var(--sd-bg);border:1px solid var(--sd-line);border-radius:18px;padding:8px}
@@ -39,17 +39,17 @@ const STYLE = `
 .sentry-sd .sd-gauge{flex:0 0 132px;align-items:center;text-align:center;padding:6px}
 .sentry-sd .sd-state{flex:0 1 92px;align-items:center;text-align:center}
 .sentry-sd .sd-v{font-weight:800;font-size:24px;letter-spacing:-.01em;font-variant-numeric:tabular-nums;white-space:nowrap}
-.sentry-sd .sd-u{font-weight:600;font-size:12px;color:var(--sd-dim);margin-left:2px}
-.sentry-sd .sd-l{font-size:12px;color:var(--sd-dim);font-weight:600;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.sentry-sd .sd-u{font-weight:600;font-size:13px;color:var(--sd-dim);margin-left:2px}
+.sentry-sd .sd-l{font-size:14px;color:var(--sd-dim);font-weight:600;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
 .sentry-sd .sd-line{display:flex;justify-content:space-between;align-items:baseline;gap:12px;padding:3px 0;border-top:1px solid var(--sd-line)}
 .sentry-sd .sd-line:first-child{border-top:0}
-.sentry-sd .sd-line .sd-v{font-size:17px}
-.sentry-sd .sd-line .sd-l{margin:0;font-size:13px;color:var(--sd-fg)}
+.sentry-sd .sd-line .sd-v{font-size:18px}
+.sentry-sd .sd-line .sd-l{margin:0;font-size:14px;color:var(--sd-fg)}
 .sentry-sd .sd-ring{width:96px;height:96px;border-radius:50%;border:2px solid var(--sd-line);display:flex;flex-direction:column;align-items:center;justify-content:center;background:radial-gradient(circle,rgba(255,255,255,.05),transparent 70%)}
 .sentry-sd .sd-ring .sd-v{font-size:30px;line-height:1}
-.sentry-sd .sd-gears{font:700 12px/1.4 ui-monospace,Menlo,Consolas,monospace;letter-spacing:.2em;color:var(--sd-dim);margin-top:4px}
+.sentry-sd .sd-gears{font:700 14px/1.4 ui-monospace,Menlo,Consolas,monospace;letter-spacing:.2em;color:var(--sd-dim);margin-top:4px}
 .sentry-sd .sd-gears b{color:var(--sd-fg);background:rgba(255,255,255,.18);border-radius:3px;padding:0 1px}
-.sentry-sd .sd-ap{font-size:11px;font-weight:700;color:var(--sd-blue);min-height:14px;margin-top:2px}
+.sentry-sd .sd-ap{font-size:13px;font-weight:700;color:var(--sd-blue);min-height:14px;margin-top:2px}
 .sentry-sd .sd-ico{font-size:24px;line-height:1;opacity:.28;transition:opacity .08s}
 .sentry-sd .sd-state.on .sd-ico{opacity:1}
 .sentry-sd .sd-state.on.sd-brake .sd-ico{color:#ff5d5d}
@@ -59,7 +59,7 @@ const STYLE = `
 .sentry-sd .sd-bar i{display:block;height:100%;background:var(--sd-on);width:0}
 .sentry-sd .sd-tools{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:6px}
 .sentry-sd.over .sd-tools{margin-top:4px}
-.sentry-sd button.sd-btn,.sentry-sd select{all:unset;box-sizing:border-box;cursor:pointer;padding:4px 10px;border-radius:8px;border:1px solid var(--sd-line);background:rgba(255,255,255,.06);color:var(--sd-fg);font:600 12px/1.6 system-ui,sans-serif;max-width:100%}
+.sentry-sd button.sd-btn,.sentry-sd select{all:unset;box-sizing:border-box;cursor:pointer;padding:4px 10px;border-radius:8px;border:1px solid var(--sd-line);background:rgba(255,255,255,.06);color:var(--sd-fg);font:600 14px/1.6 system-ui,sans-serif;max-width:100%}
 .sentry-sd select{padding-right:22px;background-image:linear-gradient(45deg,transparent 50%,currentColor 50%),linear-gradient(135deg,currentColor 50%,transparent 50%);background-position:calc(100% - 12px) 55%,calc(100% - 7px) 55%;background-size:5px 5px;background-repeat:no-repeat}
 .sentry-sd select option{color:#111;background:#fff}
 .sentry-sd button.sd-btn:focus-visible,.sentry-sd select:focus-visible{outline:2px solid var(--sd-blue);outline-offset:2px}
@@ -73,23 +73,24 @@ const STYLE = `
 .sentry-sd .sd-x{margin-left:auto}
 .sentry-sd .sd-b.dragging{opacity:.4}
 .sentry-sd .sd-pick{display:flex;flex-direction:column;gap:4px;margin-top:6px;width:100%}
-.sentry-sd .sd-pick select{font-size:11px;padding:2px 20px 2px 6px;width:100%}
-.sentry-sd .sd-none{color:var(--sd-dim);font-size:12px;padding:4px 6px}
+.sentry-sd .sd-pickbtn{display:block;width:100%;padding:4px 8px;font-size:13px;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sentry-sd .sd-pickbtn::before{content:'⌕ ';color:var(--sd-dim)}
+.sentry-sd .sd-none{color:var(--sd-dim);font-size:14px;padding:4px 6px}
 .sentry-sd .sd-hide{margin-left:auto}
-.sentry-sd .sd-sync{font-size:11px;color:var(--sd-dim);white-space:nowrap}
+.sentry-sd .sd-sync{font-size:13px;color:var(--sd-dim);white-space:nowrap}
 .sentry-sd .sd-sync.sd-warn{color:var(--sd-amber);font-weight:700}
 .sentry-sd button.sd-btn[hidden]{display:none}
 .sentry-sd .sd-raw{margin-top:6px;min-width:0;max-width:100%;-webkit-user-select:text;user-select:text}
 .sentry-sd .sd-raw[hidden]{display:none}
 .sentry-sd .sd-raw.sd-raw-loading .sd-raw-scroll{opacity:.5}
 .sentry-sd .sd-raw-bar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:6px}
-.sentry-sd .sd-raw-bar input{all:unset;box-sizing:border-box;flex:1 1 140px;min-width:0;max-width:260px;padding:4px 10px;border-radius:8px;border:1px solid var(--sd-line);background:rgba(255,255,255,.06);color:var(--sd-fg);font:600 12px/1.6 system-ui,sans-serif}
+.sentry-sd .sd-raw-bar input{all:unset;box-sizing:border-box;flex:1 1 140px;min-width:0;max-width:260px;padding:4px 10px;border-radius:8px;border:1px solid var(--sd-line);background:rgba(255,255,255,.06);color:var(--sd-fg);font:600 14px/1.6 system-ui,sans-serif}
 .sentry-sd .sd-raw-bar input:focus-visible{outline:2px solid var(--sd-blue);outline-offset:2px}
-.sentry-sd .sd-raw-n{font-size:12px;color:var(--sd-dim)}
+.sentry-sd .sd-raw-n{font-size:13px;color:var(--sd-dim)}
 .sentry-sd .sd-raw-scroll{overflow:auto;max-height:46vh;max-width:100%;background:var(--sd-tile);border:1px solid var(--sd-line);border-radius:12px;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
 .sentry-sd.over .sd-raw-scroll{max-height:30vh}
-.sentry-sd .sd-raw table{border-collapse:collapse;width:100%;font:12px/1.35 ui-monospace,Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}
-.sentry-sd .sd-raw th{position:sticky;top:0;background:#1d2026;color:var(--sd-dim);font:700 11px/1.6 system-ui,sans-serif;text-align:left;padding:4px 8px;white-space:nowrap}
+.sentry-sd .sd-raw table{border-collapse:collapse;width:100%;font:13px/1.4 ui-monospace,Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}
+.sentry-sd .sd-raw th{position:sticky;top:0;background:#1d2026;color:var(--sd-dim);font:700 12px/1.6 system-ui,sans-serif;text-align:left;padding:4px 8px;white-space:nowrap}
 .sentry-sd .sd-raw td{padding:2px 8px;border-top:1px solid var(--sd-line);white-space:nowrap}
 .sentry-sd .sd-raw td.sd-raw-hz{text-align:right;color:var(--sd-dim)}
 .sentry-sd .sd-raw td.sd-raw-p{width:100%}
@@ -98,6 +99,37 @@ const STYLE = `
 .sentry-sd .sd-raw .sd-raw-p i{font-style:normal;padding:0 2px;border-radius:3px;margin-right:1px}
 .sentry-sd .sd-raw .sd-raw-p i.hot{background:var(--sd-amber);color:#111}
 .sentry-sd .sd-raw .sd-raw-p.none{color:var(--sd-dim)}
+.sentry-sd.sd-pop{position:fixed;z-index:2147483000;left:8px;top:8px;width:min(400px,calc(100vw - 16px));display:flex;flex-direction:column;gap:6px;padding:8px;background:#15171c;border:1px solid rgba(255,255,255,.24);border-radius:14px;box-shadow:0 18px 44px rgba(0,0,0,.6)}
+.sentry-sd.sd-pop input{all:unset;box-sizing:border-box;width:100%;padding:9px 12px;border-radius:10px;border:1px solid var(--sd-line);background:rgba(255,255,255,.08);color:var(--sd-fg);font:600 16px/1.4 system-ui,sans-serif;-webkit-user-select:text;user-select:text}
+.sentry-sd.sd-pop input:focus-visible{outline:2px solid var(--sd-blue);outline-offset:1px}
+.sentry-sd .sd-pop-n{font-size:13px;color:var(--sd-dim);padding:0 4px}
+.sentry-sd .sd-pop-list{list-style:none;margin:0;padding:0;overflow:auto;max-height:50vh;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
+.sentry-sd .sd-pop-g{position:sticky;top:0;z-index:1;background:#15171c;font:800 12px/1.8 system-ui,sans-serif;color:var(--sd-amber);letter-spacing:.04em;padding:6px 10px 2px}
+.sentry-sd .sd-pop-o{display:flex;justify-content:space-between;align-items:baseline;gap:10px;padding:9px 10px;border-radius:8px;cursor:pointer;font:500 15px/1.3 system-ui,sans-serif;color:var(--sd-fg)}
+.sentry-sd .sd-pop-o small{font-size:12px;color:var(--sd-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:45%;flex:0 1 auto}
+.sentry-sd .sd-pop-o:hover{background:rgba(255,255,255,.08)}
+.sentry-sd .sd-pop-o[aria-selected="true"]{background:rgba(74,168,255,.3)}
+.sentry-sd .sd-pop-o.cur{color:var(--sd-blue);font-weight:800}
+.sentry-sd .sd-pop-o.cur::after{content:'✓';margin-left:auto}
+.sentry-sd .sd-pop-none{padding:10px;color:var(--sd-dim);font-size:14px}
+.sentry-sd .sd-row:has(.sd-list){align-items:flex-start}
+.sentry-sd .sd-list{flex:1 1 340px;max-width:620px;padding:8px;justify-content:flex-start;gap:6px}
+.sentry-sd .sd-list-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.sentry-sd .sd-list-bar input[type=search]{all:unset;box-sizing:border-box;flex:1 1 140px;min-width:0;padding:5px 10px;border-radius:8px;border:1px solid var(--sd-line);background:rgba(255,255,255,.06);color:var(--sd-fg);font:600 14px/1.5 system-ui,sans-serif;-webkit-user-select:text;user-select:text}
+.sentry-sd .sd-list-bar input[type=search]:focus-visible{outline:2px solid var(--sd-blue);outline-offset:1px}
+.sentry-sd .sd-list-ch{font-size:13px;color:var(--sd-dim);display:flex;gap:5px;align-items:center;cursor:pointer;white-space:nowrap}
+.sentry-sd .sd-list-n{font-size:12px;color:var(--sd-dim);white-space:nowrap}
+.sentry-sd .sd-list-scroll{position:relative;overflow:auto;height:min(452px,48vh);border:1px solid var(--sd-line);border-radius:10px;background:rgba(0,0,0,.22);overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
+.sentry-sd.over .sd-list-scroll{height:min(302px,32vh)}
+.sentry-sd .sd-list-scroll:focus-visible{outline:2px solid var(--sd-blue);outline-offset:1px}
+.sentry-sd .sd-list-pad{position:relative}
+.sentry-sd .sd-list-r{position:absolute;left:0;right:0;height:30px;display:flex;align-items:center;gap:10px;padding:0 10px;border-bottom:1px solid rgba(255,255,255,.06)}
+.sentry-sd .sd-list-l{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;font-weight:600}
+.sentry-sd .sd-list-m{flex:0 1 30%;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--sd-dim)}
+.sentry-sd .sd-list-v{flex:0 0 auto;min-width:88px;text-align:right;font:700 14px/1 ui-monospace,Menlo,Consolas,monospace;font-variant-numeric:tabular-nums;border-radius:4px;padding:4px 5px;transition:background .5s}
+.sentry-sd .sd-list-v small{font:600 12px/1 system-ui,sans-serif;color:var(--sd-dim);margin-left:3px}
+.sentry-sd .sd-list-r.hot .sd-list-v{background:rgba(255,181,71,.4);transition:none}
+.sentry-sd .sd-list-empty{padding:12px;color:var(--sd-dim);font-size:14px}
 @media (max-width:640px){
   .sentry-sd .sd-small{flex-basis:88px}
   .sentry-sd .sd-v{font-size:20px}
@@ -224,15 +256,33 @@ function cachedGet(map, key, max, get, good) {
   return entry;
 }
 const hasKeys = (o) => Boolean(o && Object.keys(o).length);
-let optionsBuilt = { v: -1, html: '' };
-/** Every signal as <optgroup>s of <option>s, built once per change of SIGNALS. */
-function signalOptions() {
-  if (optionsBuilt.v === signalsVersion) return optionsBuilt.html;
+let grouped = { v: -1, list: [] };
+/** Every signal, its group's together (the order the picker shows with no search), built once per change of SIGNALS. */
+function signalsGrouped() {
+  if (grouped.v === signalsVersion) return grouped.list;
   const groups = new Map();
   for (const s of SIGNALS.values()) (groups.get(s.group) || groups.set(s.group, []).get(s.group)).push(s);
-  const html = [...groups].map(([g, list]) => `<optgroup label="${esc(g)}">${list.map((s) => `<option value="${esc(s.id)}">${esc(s.label)}</option>`).join('')}</optgroup>`).join('');
-  optionsBuilt = { v: signalsVersion, html };
-  return html;
+  grouped = { v: signalsVersion, list: [...groups.values()].flat() };
+  return grouped.list;
+}
+const squash = (t) => String(t ?? '').toLowerCase().replace(/[_.\-]+/g, ' ');
+/**
+ * The signals a search finds: every word in the name, group or id (any
+ * order, any case; "_" and "." count as spaces), names that start with it
+ * first. An empty search: every signal, by group.
+ */
+export function searchSignals(query) {
+  const words = squash(query).split(/\s+/).filter(Boolean);
+  if (!words.length) return signalsGrouped();
+  const found = [];
+  for (const s of signalsGrouped()) {
+    const name = squash(s.label);
+    const hay = `${name} ${squash(s.group)} ${squash(s.id)} ${String(s.id).toLowerCase()}`;
+    if (!words.every((w) => hay.includes(w))) continue;
+    const rank = name.startsWith(words[0]) ? 0 : words.every((w) => name.includes(w)) ? 1 : 2;
+    found.push({ s, rank });
+  }
+  return found.sort((a, b) => a.rank - b.rank).map((x) => x.s);
 }
 const canMetaCache = new Map(); // front path -> entry of Promise<meta>
 const canClipCache = new Map(); // front path + names -> entry of Promise<{ start, sync, series } | null>
@@ -501,8 +551,8 @@ const DEFAULT_BOARD = () => ({
     { type: 'state', signals: ['dash.blinkRight'] }
   ]
 });
-const SLOTS = { small: 1, wide: 3, gauge: 1, state: 1 };
-const DEFAULT_SIGNAL = { small: ['dash.speed'], wide: ['dash.speed', 'dash.accelerator', 'dash.steering'], gauge: ['dash.speed'], state: ['dash.brake'] };
+const SLOTS = { small: 1, wide: 3, gauge: 1, state: 1, list: 0 }; // (list: every stat, scrolled)
+const DEFAULT_SIGNAL = { small: ['dash.speed'], wide: ['dash.speed', 'dash.accelerator', 'dash.steering'], gauge: ['dash.speed'], state: ['dash.brake'], list: [] };
 
 // ---- the front camera's per-frame records (the same decoding as the packs)
 function decodeRecord(bytes) {
@@ -681,7 +731,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
       node.title = `${node.title}. These logs are not signed (an older CAN Bridge).`;
     }
   }
-  const canNames = () => [...new Set((board?.blocks || []).flatMap((b) => b.signals).filter((id) => id.startsWith('can.')).map((id) => id.slice(4)))].sort();
+  const canNames = () => ((board?.blocks || []).some((b) => b.type === 'list') ? ['*'] : [...new Set((board?.blocks || []).flatMap((b) => b.signals).filter((id) => id.startsWith('can.')).map((id) => id.slice(4)))].sort());
   function loadCan(path) {
     const names = canNames();
     const key = `${path}|${names.join(',')}`;
@@ -743,27 +793,206 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     applyFloat();
   }
   const onResize = () => applyFloat();
-  addEventListener('resize', onResize);
+  globalThis.addEventListener?.('resize', onResize);
 
-  // a stat picker shows only its stat until it is opened (fillPick): with
-  // thousands of CAN signals, every redraw would otherwise build them all
-  const pickOption = (id) => {
-    const s = SIGNALS.get(id);
-    return `<option value="${esc(id)}" selected>${esc(s ? s.label : `${String(id).replace(/^can\./, '')} (no data yet)`)}</option>`;
+  // A stat picker is a button showing its stat; it opens a searchable list
+  // (thousands of CAN signals: a plain drop-down cannot be searched and its
+  // text is tiny). The list is built only while open, at most SHOWN rows.
+  const SHOWN = 250;
+  const statName = (id) => { const s = SIGNALS.get(id); return s ? s.label : `${String(id).replace(/^can\./, '')} (no data yet)`; };
+  const pickButton = (id, i, k) => `<button type="button" class="sd-btn sd-pickbtn" data-pick="${i}" data-slot="${k}" aria-haspopup="listbox" aria-label="Stat ${k + 1}: ${esc(statName(id))}. Change it" title="${esc(statName(id))}">${esc(statName(id))}</button>`;
+  const popHost = () => document.body || el;
+  const popId = `sdpop${Math.random().toString(36).slice(2, 8)}`;
+  let pop = null; // { node, input, list, count, pick, slot, items, active, current }
+  const onOutside = (e) => {
+    if (!pop) return;
+    for (let n = e.target; n; n = n.parentElement) if (n === pop.node || n === pop.opener) return;
+    closePick(false);
   };
-  function fillPick(sel) {
-    if (sel.dataset.filled) return;
-    const id = board?.blocks[Number(sel.dataset.pick)]?.signals[Number(sel.dataset.slot)];
-    sel.innerHTML = (id && !SIGNALS.has(id) ? pickOption(id) : '') + signalOptions();
-    sel.value = id ?? '';
-    sel.dataset.filled = '1';
+  function closePick(focusBack = true) {
+    if (!pop) return;
+    const { node, pick, slot } = pop;
+    pop = null;
+    node.remove();
+    globalThis.removeEventListener?.('pointerdown', onOutside, true);
+    if (focusBack) el.querySelector(`[data-pick="${pick}"][data-slot="${slot}"]`)?.focus();
   }
+  function drawPick() {
+    const q = pop.input.value || '';
+    const found = searchSignals(q);
+    pop.items = found.slice(0, SHOWN);
+    pop.active = Math.max(0, Math.min(pop.items.length - 1, pop.active));
+    let html = '';
+    let group = null;
+    pop.items.forEach((s, k) => {
+      if (!q.trim() && s.group !== group) { group = s.group; html += `<li class="sd-pop-g" role="presentation">${esc(group)}</li>`; }
+      html += `<li role="option" id="${popId}-${k}" data-opt="${k}" class="sd-pop-o${s.id === pop.current ? ' cur' : ''}" aria-selected="${k === pop.active}"><span>${esc(s.label)}</span>${q.trim() ? `<small>${esc(s.group)}</small>` : ''}</li>`;
+    });
+    if (found.length > SHOWN) html += `<li class="sd-pop-none" role="presentation">${(found.length - SHOWN).toLocaleString()} more: type more of the name.</li>`;
+    pop.list.innerHTML = html || `<li class="sd-pop-none" role="presentation">No stat matches "${esc(q)}".</li>`;
+    pop.count.textContent = q.trim() ? `${found.length.toLocaleString()} of ${SIGNALS.size.toLocaleString()} stats` : `${SIGNALS.size.toLocaleString()} stats: type to search`;
+    pop.input.setAttribute('aria-activedescendant', pop.items.length ? `${popId}-${pop.active}` : '');
+  }
+  function showActive() {
+    pop.list.querySelectorAll('[aria-selected="true"]').forEach((n) => n.setAttribute('aria-selected', 'false'));
+    const on = pop.list.querySelector(`[data-opt="${pop.active}"]`);
+    on?.setAttribute('aria-selected', 'true');
+    on?.scrollIntoView?.({ block: 'nearest' });
+    pop.input.setAttribute('aria-activedescendant', on ? `${popId}-${pop.active}` : '');
+  }
+  function choosePick(k) {
+    const s = pop?.items[k];
+    if (!s) return;
+    const { pick, slot } = pop;
+    const b = board.blocks[pick];
+    closePick(false);
+    if (b) { b.signals[slot] = s.id; change(); }
+    el.querySelector(`[data-pick="${pick}"][data-slot="${slot}"]`)?.focus();
+  }
+  function placePick() {
+    const r = pop.opener.getBoundingClientRect?.();
+    if (!r || typeof innerWidth !== 'number') return;
+    const w = Math.min(400, innerWidth - 16);
+    const left = Math.max(8, Math.min(innerWidth - w - 8, r.left));
+    const below = innerHeight - r.bottom - 16;
+    const above = r.top - 16;
+    const room = Math.max(below, above);
+    const listMax = Math.max(140, Math.min(440, room - 80));
+    pop.list.style.maxHeight = `${listMax}px`;
+    pop.node.style.left = `${Math.round(left)}px`;
+    if (below >= 260 || below >= above) { pop.node.style.top = `${Math.round(r.bottom + 6)}px`; pop.node.style.bottom = 'auto'; }
+    else { pop.node.style.top = 'auto'; pop.node.style.bottom = `${Math.round(innerHeight - r.top + 6)}px`; }
+  }
+  function openPick(btn) {
+    const pick = Number(btn.dataset.pick);
+    const slot = Number(btn.dataset.slot);
+    const same = pop && pop.pick === pick && pop.slot === slot;
+    closePick(false);
+    if (same) return; // a second tap closes it
+    const node = document.createElement('div');
+    node.className = 'sentry-sd sd-pop';
+    node.setAttribute('role', 'dialog');
+    node.setAttribute('aria-label', 'Choose a stat');
+    node.innerHTML = `<input type="search" data-pop-q role="combobox" aria-expanded="true" aria-autocomplete="list" aria-controls="${popId}" aria-label="Search the stats" placeholder="Search: battery, voltage, brake, 0x132…" autocomplete="off" spellcheck="false">
+      <div class="sd-pop-n" data-pop-n aria-live="polite"></div><ul class="sd-pop-list" id="${popId}" role="listbox" data-pop-list></ul>`;
+    pop = { node, input: node.querySelector('[data-pop-q]'), list: node.querySelector('[data-pop-list]'), count: node.querySelector('[data-pop-n]'), opener: btn, pick, slot, items: [], active: 0, current: board.blocks[pick]?.signals[slot] };
+    const cur = searchSignals('').findIndex((s) => s.id === pop.current);
+    pop.active = Math.max(0, Math.min(SHOWN - 1, cur));
+    node.addEventListener('input', () => { if (pop) { pop.active = 0; drawPick(); } });
+    node.addEventListener('keydown', (e) => {
+      e.stopPropagation(); // the Viewer's own shortcuts stay quiet while typing
+      if (!pop) return;
+      const n = pop.items.length;
+      const step = { ArrowDown: 1, ArrowUp: -1, PageDown: 8, PageUp: -8 }[e.key];
+      if (step && n) { e.preventDefault(); pop.active = Math.max(0, Math.min(n - 1, pop.active + step)); showActive(); }
+      else if (e.key === 'Enter') { e.preventDefault(); choosePick(pop.active); }
+      else if (e.key === 'Escape') { e.preventDefault(); closePick(); }
+      else if (e.key === 'Tab') closePick(false);
+    });
+    node.addEventListener('pointerdown', (e) => { if (e.target.closest?.('[data-opt]')) e.preventDefault(); });
+    node.addEventListener('click', (e) => { const o = e.target.closest?.('[data-opt]'); if (o) choosePick(Number(o.dataset.opt)); });
+    popHost().appendChild(node);
+    drawPick();
+    placePick();
+    showActive();
+    globalThis.addEventListener?.('pointerdown', onOutside, true);
+    pop.input.focus();
+  }
+  /** A stat's value now: { text, unit } (text "—" when it has none). */
+  function valueOf(s, r, c) {
+    const raw = s && (s.source === 'can' || r) ? s.value(r, c) : null;
+    const text = raw == null ? '—' : typeof raw === 'number' ? fmt(raw, s.digits ?? 1) : typeof raw === 'boolean' ? (raw ? 'On' : 'Off') : String(raw);
+    return { text, unit: raw == null || !s?.unit || typeof raw !== 'number' ? '' : s.unit(c) };
+  }
+
+  // The list block: every stat with data in this clip (or only those that
+  // change), filtered by its own search, live as the footage plays. Only the
+  // rows in view are built (thousands of CAN signals); a value that changes
+  // lights up for a moment.
+  const ROW = 30;
+  const lists = new WeakMap(); // block -> { key, rows, hidden, drawn, prev, hot }
+  const changingOf = new WeakMap(); // can answer -> Set of names whose value changes
+  let hotLeft = 0;
+  function changingNames() {
+    if (!can) return new Set();
+    let set = changingOf.get(can);
+    if (!set) {
+      set = new Set(Object.entries(can.series || {}).filter(([, pts]) => pts?.some((p) => p[1] !== pts[0][1])).map(([n]) => n));
+      changingOf.set(can, set);
+    }
+    return set;
+  }
+  function listRows(b) {
+    const st = lists.get(b) || lists.set(b, { key: '', rows: [], hidden: 0, drawn: '', prev: new Map(), hot: new Map() }).get(b);
+    const key = `${signalsVersion}|${b.q || ''}|${b.changing ? 1 : 0}|${recs ? 1 : 0}`;
+    if (st.key === key && st.can === can) return st;
+    const moving = b.changing ? changingNames() : null;
+    const found = searchSignals(b.q || '');
+    st.rows = found.filter((s) => (s.source === 'can' ? (moving ? moving.has(s.canName) : can?.series?.[s.canName]?.length > 0) : !moving && Boolean(recs?.length)));
+    st.hidden = found.length - st.rows.length;
+    st.key = key;
+    st.can = can;
+    st.drawn = '';
+    return st;
+  }
+  const messageOf = (s) => String(s.group || '').split(' · ').pop();
+  function renderList(node, b, r, c) {
+    const st = listRows(b);
+    const scroll = node.querySelector('[data-list-scroll]');
+    const pad = node.querySelector('[data-list-pad]');
+    const count = node.querySelector('[data-list-n]');
+    if (!scroll || !pad) return;
+    const n = st.rows.length;
+    if (count) count.textContent = `${n.toLocaleString()} stat${n === 1 ? '' : 's'}${st.hidden ? ` · ${st.hidden.toLocaleString()} ${b.changing ? 'not changing or ' : ''}with no data here` : ''}`;
+    const first = Math.max(0, Math.floor((scroll.scrollTop || 0) / ROW) - 4);
+    const last = Math.min(n, first + Math.ceil((scroll.clientHeight || 15 * ROW) / ROW) + 8);
+    const drawn = `${st.key}|${first}|${last}`;
+    if (st.drawn !== drawn) {
+      st.drawn = drawn;
+      pad.style.height = `${n * ROW}px`;
+      pad.innerHTML = n
+        ? st.rows.slice(first, last).map((s, k) => `<div class="sd-list-r" role="row" style="top:${(first + k) * ROW}px" data-row="${first + k}" title="${esc(`${s.label} (${s.group}${s.canName ? `, ${s.canName}` : ''})`)}"><span class="sd-list-l" role="cell">${esc(s.label)}</span><span class="sd-list-m" role="cell">${esc(messageOf(s))}</span><span class="sd-list-v" role="cell" data-lv></span></div>`).join('')
+        : `<div class="sd-list-empty">${b.q ? `No stat with data here matches "${esc(b.q)}".` : b.changing ? 'Nothing changes in this clip.' : 'No car data for this clip yet.'}</div>`;
+    }
+    const nowMs = Date.now();
+    pad.querySelectorAll('[data-row]').forEach((rowEl) => {
+      const s = st.rows[Number(rowEl.dataset.row)];
+      if (!s) return;
+      const v = valueOf(s, r, c);
+      const shown = `${v.text}|${v.unit}`;
+      const vEl = rowEl.querySelector('[data-lv]');
+      if (vEl && vEl.dataset.shown !== shown) {
+        vEl.dataset.shown = shown;
+        vEl.innerHTML = `${esc(v.text)}${v.unit ? `<small>${esc(v.unit)}</small>` : ''}`;
+      }
+      const before = st.prev.get(s.id);
+      st.prev.set(s.id, shown);
+      if (before !== undefined && before !== shown) { st.hot.set(s.id, nowMs + 700); hotLeft++; }
+      rowEl.classList.toggle('hot', (st.hot.get(s.id) || 0) > nowMs);
+    });
+  }
+  /** A lit value goes out after its moment, even while paused. */
+  function coolLists() {
+    if (!hotLeft) return;
+    const nowMs = Date.now();
+    let left = 0;
+    el.querySelectorAll('.sd-list').forEach((node) => {
+      const st = lists.get(board.blocks[Number(node.dataset.i)]);
+      if (!st) return;
+      node.querySelectorAll('.sd-list-r.hot').forEach((rowEl) => {
+        const s = st.rows[Number(rowEl.dataset.row)];
+        if ((st.hot.get(s?.id) || 0) <= nowMs) rowEl.classList.remove('hot'); else left++;
+      });
+    });
+    hotLeft = left;
+  }
+
   function blockHtml(b, i) {
     const sigs = b.signals.map((id) => SIGNALS.get(id));
     const editBar = `<div class="sd-edit sd-bar-edit"><span class="sd-grip" data-grip="${i}" title="Drag to move" aria-hidden="true">⠿</span>
       <button type="button" class="sd-btn" data-move="${i}" data-dir="-1" aria-label="Move left">‹</button><button type="button" class="sd-btn" data-move="${i}" data-dir="1" aria-label="Move right">›</button>
       <button type="button" class="sd-btn sd-x" data-remove="${i}" aria-label="Remove this block">×</button></div>`;
-    const pick = editing ? `<div class="sd-edit sd-pick">${b.signals.map((id, k) => `<select data-pick="${i}" data-slot="${k}" aria-label="Stat ${k + 1}">${pickOption(id)}</select>`).join('')}</div>` : '';
+    const pick = editing ? `<div class="sd-edit sd-pick">${b.signals.map((id, k) => pickButton(id, i, k)).join('')}</div>` : '';
     const label = (s, k = 0) => esc(s?.label || String(b.signals[k] || '?').replace(/^can\./, ''));
     if (b.type === 'small') {
       const s = sigs[0];
@@ -775,11 +1004,17 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     if (b.type === 'gauge') {
       return `<div class="sd-b sd-gauge" data-i="${i}">${editBar}<div class="sd-ring"><span class="sd-v" data-v="0"></span><span class="sd-u" data-u="0"></span><div class="sd-gears" data-gears></div></div><div class="sd-ap" data-ap></div>${pick}</div>`;
     }
+    if (b.type === 'list') {
+      return `<div class="sd-b sd-list" data-i="${i}">${editBar}<div class="sd-list-bar"><input type="search" data-list-q="${i}" value="${esc(b.q || '')}" placeholder="Filter: battery, volt, brake…" aria-label="Filter the stats" autocomplete="off" spellcheck="false">
+        <label class="sd-list-ch"><input type="checkbox" data-list-changing="${i}"${b.changing ? ' checked' : ''}> Changing only</label><span class="sd-list-n" data-list-n aria-live="polite"></span></div>
+        <div class="sd-list-scroll" data-list-scroll="${i}" tabindex="0" role="table" aria-label="Every stat at this moment"><div class="sd-list-pad" data-list-pad role="rowgroup"></div></div></div>`;
+    }
     const s = sigs[0];
     const kindClass = /brake/i.test(s?.id) ? 'sd-brake' : /blink/i.test(s?.id) ? 'sd-blink' : /autopilot/i.test(s?.id) ? 'sd-ap' : '';
     return `<div class="sd-b sd-state ${kindClass}" data-i="${i}">${editBar}<span class="sd-ico" aria-hidden="true">${esc(s?.icon || '●')}</span><div class="sd-l">${label(s)}</div>${pick}</div>`;
   }
   function draw() {
+    if (pop && (!editing || hidden || !board.blocks[pop.pick])) closePick(false);
     place();
     el.classList.toggle('editing', editing);
     if (hidden) {
@@ -794,7 +1029,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
         <button type="button" class="sd-btn" data-edit aria-pressed="${editing}">${editing ? 'Done' : 'Customize'}</button>
         <span class="sd-edit" style="gap:6px;flex-wrap:wrap;align-items:center">
           <button type="button" class="sd-btn" data-add="small">+ Small</button><button type="button" class="sd-btn" data-add="wide">+ Wide (3)</button>
-          <button type="button" class="sd-btn" data-add="gauge">+ Gauge</button><button type="button" class="sd-btn" data-add="state">+ Light</button>
+          <button type="button" class="sd-btn" data-add="gauge">+ Gauge</button><button type="button" class="sd-btn" data-add="state">+ Light</button><button type="button" class="sd-btn" data-add="list">+ List (every stat)</button>
           <select data-placement aria-label="Where the car data is">
             ${over ? '' : `<option value="below"${whereNow() === 'below' ? ' selected' : ''}>Below the cameras</option>`}
             <option value="over"${whereNow() === 'over' ? ' selected' : ''}>Over the video</option>
@@ -808,6 +1043,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
         <button type="button" class="sd-btn sd-hide" data-hide aria-label="Hide the car data">Hide</button></div>`;
     syncNote();
     el.appendChild(rawView.el);
+    if (pop) { pop.opener = el.querySelector(`[data-pick="${pop.pick}"][data-slot="${pop.slot}"]`) || pop.opener; if (!pop.node.parentElement) popHost().appendChild(pop.node); }
     tick(true);
     applyFloat();
   }
@@ -834,13 +1070,14 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     el.querySelectorAll('[data-i]').forEach((node) => {
       const b = board.blocks[Number(node.dataset.i)];
       if (!b) return;
+      if (b.type === 'list') { renderList(node, b, r, c); return; }
       b.signals.forEach((id, k) => {
         const s = SIGNALS.get(id);
         const vEl = node.querySelector(`[data-v="${k}"]`);
         const uEl = node.querySelector(`[data-u="${k}"]`);
-        const raw = s && (s.source === 'can' || r) ? s.value(r, c) : null;
-        if (vEl) vEl.textContent = raw == null ? '—' : typeof raw === 'number' ? fmt(raw, s.digits ?? 1) : typeof raw === 'boolean' ? (raw ? 'On' : 'Off') : String(raw);
-        if (uEl) uEl.textContent = raw == null || !s?.unit || typeof raw !== 'number' ? '' : s.unit(c);
+        const v = valueOf(s, r, c);
+        if (vEl) vEl.textContent = v.text;
+        if (uEl) uEl.textContent = v.unit;
         const bar = node.querySelector(`[data-bar="${k}"]`);
         if (bar && s?.bar) bar.style.width = `${Math.max(0, Math.min(1, r ? s.bar(r) : 0)) * 100}%`;
       });
@@ -860,6 +1097,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
   const loop = () => {
     if (!alive) return;
     tick();
+    coolLists();
     if (!hidden) rawView.tick((main()?.currentTime || 0) * 1000);
     raf = requestAnimationFrame(loop);
   };
@@ -868,13 +1106,14 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
   el.addEventListener('click', (e) => {
     const t = e.target.closest('button');
     if (!t) return;
+    if (t.matches('[data-pick]')) { openPick(t); return; }
     if (t.matches('[data-edit]')) { editing = !editing; draw(); return; }
     if (t.matches('[data-raw]')) { rawView.toggle(); t.setAttribute('aria-pressed', String(rawView.open)); return; }
     if (t.matches('[data-hide]')) { hidden = true; editing = false; draw(); return; }
     if (t.matches('[data-show]')) { hidden = false; draw(); return; }
     if (t.matches('[data-add]')) {
       const type = t.dataset.add;
-      board.blocks.push({ type, signals: DEFAULT_SIGNAL[type].slice(0, SLOTS[type]) });
+      board.blocks.push({ type, signals: DEFAULT_SIGNAL[type].slice(0, SLOTS[type]), ...(type === 'list' ? { q: '', changing: false } : {}) });
       change();
       return;
     }
@@ -913,19 +1152,34 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
       change();
     }
   });
-  // a picker gets its full list as it is opened (a tap, a click or the keyboard)
-  const onPickOpen = (e) => { const sel = e.target.closest?.('select[data-pick]'); if (sel) fillPick(sel); };
-  el.addEventListener('pointerdown', onPickOpen);
-  el.addEventListener('focusin', onPickOpen);
+  // a list's search and "changing only": kept with the dashboard; the list redrawn without a full redraw (the cursor stays)
+  let listSave = null;
+  const redrawList = (i) => { const node = el.querySelector(`.sd-list[data-i="${i}"]`); if (node) { const m = main(); const ms = (m?.currentTime || 0) * 1000; renderList(node, board.blocks[i], recs ? recordAt(recs, ms) : null, ctx(ms)); } };
+  el.addEventListener('input', (e) => {
+    const t = e.target;
+    if (!t.matches?.('[data-list-q]')) return;
+    const i = Number(t.dataset.listQ);
+    const b = board.blocks[i];
+    if (!b) return;
+    b.q = String(t.value || '').slice(0, 60);
+    const scroll = el.querySelector(`[data-list-scroll="${i}"]`);
+    if (scroll) scroll.scrollTop = 0;
+    redrawList(i);
+    clearTimeout(listSave);
+    listSave = setTimeout(() => saveBoards(state), 600);
+  });
+  el.addEventListener('scroll', (e) => { const t = e.target; if (t?.matches?.('[data-list-scroll]')) redrawList(Number(t.dataset.listScroll)); }, true);
   el.addEventListener('change', (e) => {
     const t = e.target;
+    if (t.matches('[data-list-changing]')) {
+      const i = Number(t.dataset.listChanging);
+      if (board.blocks[i]) { board.blocks[i].changing = Boolean(t.checked); saveBoards(state); redrawList(i); }
+      return;
+    }
     if (t.matches('[data-board]')) {
       board = state.boards.find((x) => x.id === t.value) || board;
       state.active = board.id;
       change();
-    } else if (t.matches('[data-pick]')) {
-      const b = board.blocks[Number(t.dataset.pick)];
-      if (b) { b.signals[Number(t.dataset.slot)] = t.value; change(); }
     } else if (t.matches('[data-placement]')) {
       board.placement = t.value;
       change();
@@ -999,13 +1253,13 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
 
   loadBoards().then((d) => {
     if (!alive) return;
-    state = { boards: d.boards.map((x) => ({ ...DEFAULT_BOARD(), ...x, blocks: (x.blocks || []).filter((b) => SLOTS[b.type]).map((b) => ({ type: b.type, signals: [...(b.signals || [])].concat(DEFAULT_SIGNAL[b.type]).slice(0, SLOTS[b.type]).map((id) => (SIGNALS.has(id) || String(id).startsWith('can.') ? id : DEFAULT_SIGNAL[b.type][0])) })) })), active: d.active };
+    state = { boards: d.boards.map((x) => ({ ...DEFAULT_BOARD(), ...x, blocks: (x.blocks || []).filter((b) => Object.hasOwn(SLOTS, String(b?.type))).map((b) => ({ ...(b.type === 'list' ? { q: String(b.q || ''), changing: b.changing === true } : {}), type: b.type, signals: [...(b.signals || [])].concat(DEFAULT_SIGNAL[b.type]).slice(0, SLOTS[b.type]).map((id) => (SIGNALS.has(id) || String(id).startsWith('can.') ? id : DEFAULT_SIGNAL[b.type][0])) })) })), active: d.active };
     board = state.boards.find((x) => x.id === state.active) || state.boards[0];
     draw();
     raf = requestAnimationFrame(loop);
   });
   return {
     el,
-    destroy() { alive = false; cancelAnimationFrame(raf); clearTimeout(canRetry); removeEventListener('resize', onResize); rawView.destroy(); el.remove(); }
+    destroy() { closePick(false); clearTimeout(listSave); alive = false; cancelAnimationFrame(raf); clearTimeout(canRetry); globalThis.removeEventListener?.('resize', onResize); rawView.destroy(); el.remove(); }
   };
 }

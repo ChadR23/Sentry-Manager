@@ -1612,7 +1612,8 @@ async function main() {
     return { events: out, withoutPosition: recs.length - out.length };
   });
   // The Viewer's stats dashboards (web/statDash.js): each account's own
-  const DASH_TYPES = { small: 1, wide: 3, gauge: 1, state: 1 };
+  // (list: every stat, scrolled, with its own search kept as `q`)
+  const DASH_TYPES = { small: 1, wide: 3, gauge: 1, state: 1, list: 0 };
   const cleanBoards = (body) => {
     const boards = (Array.isArray(body?.boards) ? body.boards : []).slice(0, 12).map((b, i) => ({
       id: /^[\w-]{1,24}$/.test(String(b?.id)) ? String(b.id) : `b${i}`,
@@ -1622,8 +1623,9 @@ async function main() {
       float: Object.fromEntries(['wide', 'narrow'].map((k) => [k, b?.float?.[k]]).filter(([, p]) => Number.isFinite(p?.x) && Number.isFinite(p?.y))
         .map(([k, p]) => [k, { x: Math.max(0, Math.min(1, p.x)), y: Math.max(0, Math.min(1, p.y)) }])),
       metric: typeof b?.metric === 'boolean' ? b.metric : null,
-      blocks: (Array.isArray(b?.blocks) ? b.blocks : []).slice(0, 32).filter((x) => DASH_TYPES[x?.type]).map((x) => ({
-        type: x.type, signals: (Array.isArray(x.signals) ? x.signals : []).slice(0, DASH_TYPES[x.type]).map((id) => String(id)).filter((id) => /^[\w.:-]{1,80}$/.test(id))
+      blocks: (Array.isArray(b?.blocks) ? b.blocks : []).slice(0, 32).filter((x) => Object.hasOwn(DASH_TYPES, String(x?.type))).map((x) => ({
+        type: x.type, signals: (Array.isArray(x.signals) ? x.signals : []).slice(0, DASH_TYPES[x.type]).map((id) => String(id)).filter((id) => /^[\w.:-]{1,80}$/.test(id)),
+        ...(x.type === 'list' ? { q: String(x.q ?? '').replace(/[\u0000-\u001f]/g, ' ').slice(0, 60), changing: x.changing === true } : {})
       }))
     }));
     if (!boards.length) throw new HttpError(400, 'Send at least one dashboard.');
@@ -1726,8 +1728,10 @@ async function main() {
   // ... and the chosen ones over this clip (UTC times), already decoded
   r.add('GET', '/api/can/clip', async (req, res, { query }) => {
     const { v, keys, start: named } = await canClipOf(query.path);
-    const names = String(query.signals || '').split(',').map((x) => x.trim()).filter((x) => /^\w{1,80}$/.test(x)).slice(0, 64);
-    if (!names.length || !keys.length) return { start: named, series: {} };
+    // signals=* : every signal of the clip (the Viewer's list block)
+    const every = query.signals === '*';
+    const names = every ? null : String(query.signals || '').split(',').map((x) => x.trim()).filter((x) => /^\w{1,80}$/.test(x)).slice(0, 64);
+    if ((!every && !names.length) || !keys.length) return { start: named, series: {} };
     // the clip's start on the CAN clock: its name's time, corrected by the sync
     const real = await studioReadable.resolve(String(query.path || ''));
     const sync = real && !hiddenPath(real) ? await canSync.forClip({ v, keys, real, start: named }).catch((err) => { log.warn(`CAN sync: ${err.message}`); return null; }) : null;
