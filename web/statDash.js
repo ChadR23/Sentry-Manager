@@ -73,6 +73,7 @@ const STYLE = `
 .sentry-sd .sd-none{color:var(--sd-dim);font-size:12px;padding:4px 6px}
 .sentry-sd .sd-hide{margin-left:auto}
 .sentry-sd .sd-sync{font-size:11px;color:var(--sd-dim);white-space:nowrap}
+.sentry-sd .sd-sync.sd-warn{color:var(--sd-amber);font-weight:700}
 .sentry-sd button.sd-btn[hidden]{display:none}
 .sentry-sd .sd-raw{margin-top:6px;min-width:0;max-width:100%;-webkit-user-select:text;user-select:text}
 .sentry-sd .sd-raw[hidden]{display:none}
@@ -560,6 +561,16 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     const m = s?.method;
     node.textContent = !s ? '' : m === 'clock' ? 'CAN: clock only' : m === 'speed' ? 'CAN synced by speed' : `CAN synced ±${Math.max(1, Math.round(s.spreadMs ?? 0))} ms`;
     node.title = !s ? '' : m === 'clock' ? 'CAN data placed by the clip\'s time only: nothing to line it up with' : m === 'speed' ? 'CAN data lined up with the footage by its speed' : `CAN data lined up with the footage from ${s.matches} matching changes (brake, blinkers, accelerator)${m === 'edges-drive' ? ' across the drive' : ''}`;
+    // a log that failed its signature check, used anyway: always said; unsigned (an older bridge): said quietly
+    const trust = can && canNames().length ? can.trust : null;
+    node.classList.toggle('sd-warn', trust === 'override');
+    if (trust === 'override') {
+      node.textContent = `⚠ CAN data failed its check · ${node.textContent}`;
+      node.title = `Some of this CAN data comes from a log whose signature check failed and was used anyway (Nerd settings). ${node.title}`;
+    } else if (trust === 'unsigned') {
+      node.textContent = `${node.textContent} · unsigned`;
+      node.title = `${node.title}. These logs are not signed (an older CAN Bridge).`;
+    }
   }
   const canNames = () => [...new Set((board?.blocks || []).flatMap((b) => b.signals).filter((id) => id.startsWith('can.')).map((id) => id.slice(4)))].sort();
   function loadCan(path) {

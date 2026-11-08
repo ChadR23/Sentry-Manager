@@ -70,14 +70,36 @@ function createCanLogs({ dir, freeBytes = async () => Infinity, now = () => Date
     return { state: 'missing', received: 0, length: null };
   }
 
-  /** Many at once (the app asks which of its files are here). */
-  async function status(names) {
+  /** Many at once (the app asks which of its files are here); `key`: only that car's names are answered. */
+  async function status(names, { key = null } = {}) {
     if (!Array.isArray(names) || names.length > 2000) throw canError(400, 'bad_request', 'Send { "names": [...] } with up to 2000 names.');
     const files = {};
     for (const name of names) {
+      const n = parseName(name);
+      if (n && key && n.vehicleKey !== key) { files[name] = { state: 'forbidden', received: 0, length: null }; continue; }
       try { files[name] = await stateOf(name); } catch { files[name] = { state: 'invalid', received: 0, length: null }; }
     }
     return { files };
+  }
+
+  /** Half-finished uploads older than `maxAgeMs` are dropped (an app that gave up, or someone filling the disk). */
+  async function cleanStale(maxAgeMs) {
+    let keys = [];
+    try { keys = (await fsp.readdir(dir, { withFileTypes: true })).filter((d) => d.isDirectory()).map((d) => d.name); } catch { return 0; }
+    let n = 0;
+    for (const key of keys) {
+      let names = [];
+      try { names = await fsp.readdir(path.join(dir, key)); } catch { continue; }
+      for (const f of names.filter((x) => x.endsWith('.part'))) {
+        const st = await exists(path.join(dir, key, f));
+        if (st && now() - st.mtimeMs > maxAgeMs) {
+          await fsp.rm(path.join(dir, key, f), { force: true });
+          await fsp.rm(path.join(dir, key, `${f}.json`), { force: true });
+          n++;
+        }
+      }
+    }
+    return n;
   }
 
   /**
@@ -108,6 +130,12 @@ function createCanLogs({ dir, freeBytes = async () => Infinity, now = () => Date
       if (offset + body.length > length) throw canError(400, 'past_end', 'The chunk goes past Upload-Length.', { received: had.received });
       if (body.length > MAX_CHUNK) throw canError(413, 'chunk_too_large', `A chunk can be at most ${MAX_CHUNK} bytes.`, { received: had.received });
       if (offset === 0 && (await freeBytes()) < length * 2) throw canError(507, 'no_space', 'There is not enough free space for this file.');
+      if (offset === 0) {
+        // at most 16 uploads half-finished at once per car (the bridge sends one at a time)
+        let parts = [];
+        try { parts = (await fsp.readdir(path.dirname(file))).filter((x) => x.endsWith('.part')); } catch { /* none */ }
+        if (parts.length >= 16) throw canError(429, 'too_many_partial', 'Too many unfinished uploads for this car; finish or wait for them.', { received: 0 });
+      }
       await fsp.mkdir(path.dirname(file), { recursive: true });
       const part = `${file}.part`;
       if (offset === 0) await fsp.writeFile(`${part}.json`, JSON.stringify({ length, sha256, startedAt: now() }));
@@ -159,8 +187,9 @@ function createCanLogs({ dir, freeBytes = async () => Infinity, now = () => Date
         }
         out.push({
           name, vehicleKey: n.vehicleKey, startedAt: new Date(n.startedAt).toISOString(), seq: n.seq, bytes: st.size, receivedAt: new Date(st.mtimeMs).toISOString(),
-          sidecar: Boolean(side), frames: Number.isFinite(side?.frames) ? side.frames : null, dropped: Number.isFinite(side?.dropped) ? side.dropped : null,
-          appVersion: typeof side?.appVersion === 'string' ? side.appVersion.slice(0, 40) : null
+          sidecar: Boolean(side), frames: Number.isFinite(side?.frames) ? side.frames : null,
+          dropped: [side?.dropped_chunks, side?.dropped].find((x) => Number.isFinite(x)) ?? null,
+          appVersion: [side?.app_version, side?.appVersion].find((x) => typeof x === 'string')?.slice(0, 40) ?? null
         });
       }
     }
@@ -177,7 +206,7 @@ function createCanLogs({ dir, freeBytes = async () => Infinity, now = () => Date
     for (const f of [file, `${file}.json`, `${file}.part`, `${file}.part.json`]) await fsp.rm(f, { force: true });
   }
 
-  return { status, receive, list, remove, stateOf, MAX_CHUNK, MAX_FILE, MAX_SIDECAR };
+  return { status, receive, list, remove, stateOf, cleanStale, MAX_CHUNK, MAX_FILE, MAX_SIDECAR };
 }
 
 module.exports = { createCanLogs, parseName, MAX_CHUNK, MAX_FILE, MAX_SIDECAR };

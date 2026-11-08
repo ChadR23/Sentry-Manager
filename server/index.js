@@ -79,6 +79,7 @@ const { createSpeedIndex } = require('./speedIndex');
 const { createExporter } = require('./exporter');
 const { createCanLogs, parseName: parseCanName } = require('./canLogs');
 const { createCanIndex } = require('./canIndex');
+const { createCanTrust } = require('./canTrust');
 const { createCanSync } = require('./canSync');
 const { createCanSearch, footageAt, clipStamps, localTime, parseWhen } = require('./canSearch');
 
@@ -1682,7 +1683,9 @@ async function main() {
   const canLogs = createCanLogs({ dir: path.join(DATA, 'can'), freeBytes: () => diskSpace(fs.promises, DATA).then((x) => x.free).catch(() => Infinity) });
   // each log decoded once in the background (not while a conversion runs), so the Viewer gets it ready
   let canSync = null;
-  const canIndex = createCanIndex({ canDir: path.join(DATA, 'can'), dir: path.join(DATA, 'can-index'), log: logger.scope('can'), idle: () => !converterRunning(), onIndexed: (key, from, to) => canSync?.indexed(key, from, to).catch(() => {}) });
+  // signatures, pairing and the chain of each car's logs (canTrust.js): a log is decoded only when it may be used
+  const canTrust = createCanTrust({ dir: path.join(DATA, 'can'), log: logger.scope('can') });
+  const canIndex = createCanIndex({ usable: (k, n) => canTrust.usable(k, n), canDir: path.join(DATA, 'can'), dir: path.join(DATA, 'can-index'), log: logger.scope('can'), idle: () => !converterRunning(), onIndexed: (key, from, to) => canSync?.indexed(key, from, to).catch(() => {}) });
   setTimeout(() => canIndex.kick(), 20_000).unref?.();
   // which car each CAN Bridge key is (a key of its own when there is one car)
   const canMap = () => db.get('can-vehicles', {}) || {};
@@ -1727,7 +1730,9 @@ async function main() {
     const real = await studioReadable.resolve(String(query.path || ''));
     const sync = real && !hiddenPath(real) ? await canSync.forClip({ v, keys, real, start: named }).catch((err) => { log.warn(`CAN sync: ${err.message}`); return null; }) : null;
     const start = Math.round((named + (sync?.offsetMs || 0)) * 10) / 10;
-    return { start, sync, series: await canIndex.series(keys, start - 2000, start + 70_000, names) };
+    // how far it can be trusted: verified, unsigned, or override (a log that failed its check, used anyway)
+    const trust = await canIndex.trustOf(keys, start - 2000, start + 70_000);
+    return { start, sync, trust, series: await canIndex.series(keys, start - 2000, start + 70_000, names) };
   });
   // "when did this start" (canSearch.js): one search at a time, each match with the clip that covers it
   const canSearch = createCanSearch({ dir: path.join(DATA, 'can-index') });
@@ -1784,40 +1789,101 @@ async function main() {
     audit.info(`CAN car ${key} is ${vid || 'no vehicle'}: ${by(req, user)}`);
     return { map };
   });
-  const canCfg = () => db.get('can', null) || { enabled: false };
-  const canTokenOk = (req) => {
-    const cfg = canCfg();
-    const given = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-    if (!given || !cfg.tokenHash) return false;
-    return crypto.timingSafeEqual(Buffer.from(crypto.createHash('sha256').update(given).digest('hex')), Buffer.from(cfg.tokenHash));
+  // ---- who may upload: one token per car (docs/can-bridge-api.md, "Tokens")
+  // db 'can': { enabled, at, tokens: [{ id, hash, vehicleId, key, label, createdAt, lastUsedAt }] }
+  // A token is bound to one CAN Bridge car key (on its first upload, or when
+  // made) and can only send that car's logs; only its SHA-256 is kept.
+  const canCfg = () => {
+    const c = db.get('can', null) || { enabled: false };
+    // (one token from before tokens were per car)
+    if (c.tokenHash && !Array.isArray(c.tokens)) return { enabled: c.enabled, at: c.at, tokens: [{ id: 'first', hash: c.tokenHash, vehicleId: null, key: null, label: 'First token', createdAt: c.at || null, lastUsedAt: null }] };
+    return { ...c, tokens: Array.isArray(c.tokens) ? c.tokens : [] };
   };
+  const saveCanCfg = (c) => db.set('can', { enabled: Boolean(c.enabled), at: c.at || null, tokens: c.tokens });
+  const tokenHash = (t) => crypto.createHash('sha256').update(String(t)).digest('hex');
+  /** The token a request carries (compared in constant time with every token), or null. */
+  const canTokenOf = (req) => {
+    const given = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    if (!given || given.length > 200) return null;
+    const h = Buffer.from(tokenHash(given));
+    let found = null;
+    for (const t of canCfg().tokens) {
+      if (typeof t.hash === 'string' && t.hash.length === 64 && crypto.timingSafeEqual(h, Buffer.from(t.hash))) found = t;
+    }
+    return found;
+  };
+  // wrong tokens: an address that keeps trying is refused for a while (tokens are 256-bit; this keeps logs quiet)
+  const canBadTries = new Map(); // address -> { n, until }
+  const canBlocked = (ip) => { const b = canBadTries.get(ip); return b && b.until > Date.now() && b.n >= 20; };
+  const canBadTry = (ip) => {
+    const b = canBadTries.get(ip);
+    const fresh = !b || b.until < Date.now();
+    canBadTries.set(ip, { n: fresh ? 1 : b.n + 1, until: fresh ? Date.now() + 10 * 60_000 : b.until });
+    if (canBadTries.size > 5000) canBadTries.delete(canBadTries.keys().next().value);
+  };
+  /** A token's first upload binds it to that car key (and the key to the token's car). */
+  const bindToken = (tok, key) => {
+    const c = canCfg();
+    const t = c.tokens.find((x) => x.id === tok.id);
+    if (!t) return;
+    if (!t.key) {
+      t.key = key;
+      log.info(`CAN Bridge token "${t.label}" is now for car key ${key}`);
+      if (t.vehicleId && !canMap()[key]) db.set('can-vehicles', { ...canMap(), [key]: t.vehicleId });
+    }
+    t.lastUsedAt = Date.now();
+    saveCanCfg(c);
+  };
+  /** Judge a log (after its log or sidecar arrived), then decode it if it may be used. */
+  const judgeCanLog = async (key, logName) => {
+    const rec = await canTrust.check(key, logName).catch((err) => { log.warn(`CAN trust ${logName}: ${err.message}`); return null; });
+    if (rec && rec.status !== 'waiting') canIndex.kick();
+    return rec;
+  };
+  // at start, and every few minutes: logs not judged yet, or waiting for a sidecar that never came
+  const judgePending = async () => { for (const { key, name } of await canTrust.pending()) await judgeCanLog(key, name); };
+  setTimeout(() => judgePending().catch(() => {}), 15_000).unref?.();
+  setInterval(() => judgePending().catch(() => {}), 5 * 60_000).unref?.();
+  // half-finished uploads older than two days are dropped
+  setInterval(() => canLogs.cleanStale(2 * 24 * 3600_000).catch(() => {}), 3600_000).unref?.();
+
   canUploadRef = async (req, res, rawPath) => {
     const cfg = canCfg();
     const fail = (status, code, error, extra = {}) => sendJson(res, status, { error, code, ...extra });
-    if (!cfg.enabled || !cfg.tokenHash) return fail(404, 'off', 'Not found');
+    if (!cfg.enabled || !cfg.tokens.length) return fail(404, 'off', 'Not found');
     if (!isSecure(req)) return fail(403, 'https_only', 'CAN logs are only taken over HTTPS.');
-    if (!canTokenOk(req)) {
+    const ip = clientKey(req);
+    if (canBlocked(ip)) return fail(429, 'slow_down', 'Too many wrong tokens from this address; try again later.');
+    const tok = canTokenOf(req);
+    if (!tok) {
+      canBadTry(ip);
       res.setHeader('WWW-Authenticate', 'Bearer');
       return fail(401, 'bad_token', 'A valid CAN Bridge token is needed.');
     }
     const sub = rawPath.slice('/api/can/logs'.length);
     try {
       if (req.method === 'GET' && sub === '/ping') {
-        return sendJson(res, 200, { ok: true, api: 1, maxChunk: canLogs.MAX_CHUNK, maxFile: canLogs.MAX_FILE, maxSidecar: canLogs.MAX_SIDECAR });
+        return sendJson(res, 200, { ok: true, api: 1, vehicleKey: tok.key || null, maxChunk: canLogs.MAX_CHUNK, maxFile: canLogs.MAX_FILE, maxSidecar: canLogs.MAX_SIDECAR });
       }
       if (req.method === 'POST' && sub === '/status') {
         let body;
         try { body = JSON.parse((await readRaw(req, 1024 * 1024)).toString('utf8') || '{}'); } catch { return fail(400, 'bad_request', 'Send JSON: { "names": [...] }.'); }
-        return sendJson(res, 200, await canLogs.status(body?.names));
+        // a token sees only its own car's files
+        return sendJson(res, 200, await canLogs.status(body?.names, { key: tok.key }));
       }
-      const name = sub.startsWith('/') ? decodeURIComponent(sub.slice(1)) : '';
-      if (req.method === 'POST' && parseCanName(name)) {
+      let name = '';
+      try { name = sub.startsWith('/') ? decodeURIComponent(sub.slice(1)) : ''; } catch { return fail(400, 'bad_name', 'That is not a CAN Bridge log name.'); }
+      const n = parseCanName(name);
+      if (req.method === 'POST' && n) {
+        if (tok.key && tok.key !== n.vehicleKey) return fail(403, 'wrong_car', `This token is for car key ${tok.key}, not ${n.vehicleKey}.`);
         const num = (h) => (req.headers[h] === undefined || req.headers[h] === '' ? NaN : Number(req.headers[h]));
         const body = await readRaw(req, canLogs.MAX_CHUNK);
         const out = await canLogs.receive(name, body, { offset: num('upload-offset'), length: num('upload-length'), sha256: String(req.headers['upload-sha256'] || '').toLowerCase() });
+        bindToken(tok, n.vehicleKey);
         if (out.complete && !out.already) {
           log.info(`CAN Bridge: received ${name} (${out.length} bytes)`);
-          canIndex.kick(); // decoded now, ready for the Viewer
+          // checked against its signature before anything uses it, then decoded for the Viewer
+          judgeCanLog(n.vehicleKey, name.replace(/\.json$/, ''));
         }
         return sendJson(res, out.complete ? 201 : 200, out);
       }
@@ -1831,32 +1897,109 @@ async function main() {
   r.add('GET', '/api/can/settings', async () => {
     const cfg = canCfg();
     const { bytes, count, logs } = await canLogs.list({ limit: 2000 });
+    const keys = [...new Set([...logs.map((l) => l.vehicleKey), ...cfg.tokens.map((t) => t.key).filter(Boolean)])].sort();
     return {
       enabled: Boolean(cfg.enabled), since: cfg.at || null, logs: count, bytes, port: { ...canPortState, https: Boolean(tlsSource) },
-      keys: [...new Set(logs.map((l) => l.vehicleKey))].sort(), map: canMap(),
-      vehicles: vehicles.list().map((v) => ({ id: v.id, name: v.name })), index: canIndex.status()
+      keys, map: canMap(), vehicles: vehicles.list().map((v) => ({ id: v.id, name: v.name })), index: canIndex.status(),
+      tokens: cfg.tokens.map((t) => ({ id: t.id, label: t.label, vehicleId: t.vehicleId, key: t.key, createdAt: t.createdAt, lastUsedAt: t.lastUsedAt })),
+      trust: await Promise.all(keys.map((k) => canTrust.summary(k)))
     };
   });
-  r.add('POST', '/api/can/enable', (req, res, { user }) => {
-    requireConfirmed(req);
+  /** A new token for a car (shown once). */
+  const newCanToken = (cfg, { vehicleId = null, label = '' } = {}) => {
     const token = crypto.randomBytes(32).toString('base64url');
-    db.set('can', { enabled: true, tokenHash: crypto.createHash('sha256').update(token).digest('hex'), at: Date.now() });
-    audit.warn(`CAN Bridge uploads turned on (new token): ${by(req, user)}`);
+    const v = vehicleId ? vehicleOr404(String(vehicleId)) : vehicles.list().length === 1 ? vehicles.list()[0] : null;
+    const entry = {
+      id: crypto.randomBytes(6).toString('hex'), hash: tokenHash(token), vehicleId: v?.id || null, key: null,
+      label: String(label || '').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 40) || `${v?.name || 'Car'} CAN Bridge`, createdAt: Date.now(), lastUsedAt: null
+    };
+    if (cfg.tokens.length >= 20) throw new HttpError(400, 'There are 20 tokens already: revoke some first.');
+    cfg.tokens.push(entry);
+    return { token, entry };
+  };
+  r.add('POST', '/api/can/enable', (req, res, { user, body }) => {
+    requireConfirmed(req);
+    const cfg = canCfg();
+    cfg.enabled = true;
+    cfg.at = cfg.at || Date.now();
+    // the first token comes with turning it on; more are made per car below
+    const made = cfg.tokens.length ? null : newCanToken(cfg, { vehicleId: body?.vehicleId });
+    saveCanCfg(cfg);
+    audit.warn(`CAN Bridge uploads turned on${made ? ` (token "${made.entry.label}")` : ''}: ${by(req, user)}`);
     canPortRef?.(true).catch((err) => log.warn(`CAN Bridge port: ${err.message}`));
-    return { enabled: true, token, fingerprint: certFingerprint(), port: CAN_PORT };
+    return { enabled: true, token: made?.token || null, tokenId: made?.entry.id || null, fingerprint: certFingerprint(), port: CAN_PORT };
   });
   r.add('POST', '/api/can/disable', (req, res, { user }) => {
     requireConfirmed(req);
-    db.set('can', { enabled: false });
+    const cfg = canCfg();
+    saveCanCfg({ ...cfg, enabled: false }); // the tokens stay, unusable while off
     audit.warn(`CAN Bridge uploads turned off: ${by(req, user)}`);
     canPortRef?.(false).catch(() => {});
     return { enabled: false };
   });
-  r.add('GET', '/api/can/files', async (req, res, { query }) => canLogs.list({ limit: Number(query.limit) || 200 }));
+  r.add('POST', '/api/can/tokens', (req, res, { user, body }) => {
+    requireConfirmed(req);
+    const cfg = canCfg();
+    const made = newCanToken(cfg, { vehicleId: body?.vehicleId, label: body?.label });
+    saveCanCfg(cfg);
+    audit.warn(`CAN Bridge token "${made.entry.label}" made: ${by(req, user)}`);
+    return { token: made.token, id: made.entry.id, fingerprint: certFingerprint(), port: CAN_PORT };
+  });
+  r.add('DELETE', '/api/can/tokens/:id', (req, res, { params, user }) => {
+    requireConfirmed(req);
+    const cfg = canCfg();
+    const t = cfg.tokens.find((x) => x.id === params.id);
+    if (!t) throw new HttpError(404, 'No such token.');
+    cfg.tokens = cfg.tokens.filter((x) => x !== t);
+    saveCanCfg(cfg);
+    audit.warn(`CAN Bridge token "${t.label}" revoked: ${by(req, user)}`);
+    return { ok: true };
+  });
+  // pairing: trust the new key a car's logs are signed with, or forget the pairing
+  r.add('POST', '/api/can/pairing/:key/trust', async (req, res, { params, body, user }) => {
+    requireConfirmed(req);
+    if (!/^[A-Za-z0-9-]{1,64}$/.test(params.key)) throw new HttpError(400, 'Not a car key.');
+    try {
+      const out = await canTrust.trustKey(params.key, String(body?.fingerprint || ''));
+      audit.warn(`CAN Bridge ${params.key}: key ${out.pin?.fingerprint} trusted: ${by(req, user)}`);
+      canIndex.kick();
+      return out;
+    } catch (err) { throw new HttpError(err.status || 500, err.message); }
+  });
+  r.add('POST', '/api/can/pairing/:key/forget', async (req, res, { params, user }) => {
+    requireConfirmed(req);
+    if (!/^[A-Za-z0-9-]{1,64}$/.test(params.key)) throw new HttpError(400, 'Not a car key.');
+    const out = await canTrust.forgetPin(params.key);
+    audit.warn(`CAN Bridge ${params.key}: pairing forgotten: ${by(req, user)}`);
+    return out;
+  });
+  // a failed log used anyway (the dashboard warns), or not
+  r.add('POST', '/api/can/files/:name/use', async (req, res, { params, body, user }) => {
+    requireConfirmed(req);
+    const n = parseCanName(params.name);
+    if (!n || n.sidecar) throw new HttpError(400, 'Not a CAN log name.');
+    try { await canTrust.setOverride(n.vehicleKey, params.name, body?.use === true); } catch (err) { throw new HttpError(err.status || 500, err.message); }
+    audit.warn(`CAN log ${params.name} ${body?.use === true ? 'used despite failing its check' : 'no longer used'}: ${by(req, user)}`);
+    canIndex.kick();
+    return { ok: true };
+  });
+  r.add('GET', '/api/can/files', async (req, res, { query }) => {
+    const out = await canLogs.list({ limit: Number(query.limit) || 200 });
+    // each log's check: verified, failed (why), unsigned, waiting
+    for (const l of out.logs) {
+      const rec = await canTrust.record(l.vehicleKey, l.name);
+      l.check = rec ? { status: rec.status, reason: rec.reason || null, index: rec.index ?? null, override: Boolean(rec.override) } : { status: 'waiting', reason: null };
+    }
+    return out;
+  });
   r.add('DELETE', '/api/can/files/:name', async (req, res, { params, user }) => {
+    requireConfirmed(req);
     try { await canLogs.remove(params.name); } catch (err) { throw new HttpError(err.status || 500, err.message); }
     const n = parseCanName(params.name);
-    if (n) await canIndex.forget(n.vehicleKey, params.name).catch(() => {});
+    if (n) {
+      await canIndex.forget(n.vehicleKey, params.name).catch(() => {});
+      await canTrust.deleted(n.vehicleKey, params.name).catch(() => {});
+    }
     audit.info(`CAN log deleted: ${params.name}: ${by(req, user)}`);
     return { ok: true };
   });
@@ -2564,6 +2707,9 @@ async function main() {
         srv = https.createServer({ key: m.key, cert: m.cert, minVersion: 'TLSv1.2' }, only);
       } else srv = http.createServer(only); // behind a reverse proxy that does HTTPS
       srv.setTimeout(120_000);
+      // a client that sends its headers slowly, or a body for ever, is cut off (TLS 1.2 and 1.3 are both accepted)
+      srv.headersTimeout = 20_000;
+      srv.requestTimeout = 10 * 60_000;
       srv.maxConnections = 64;
       canPortState = { listening: false, error: null, port: CAN_PORT };
       srv.on('error', (err) => {

@@ -31,6 +31,9 @@ const STYLE = `
 .sentry-nerd code,.sentry-nerd .nd-mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;word-break:break-all}
 .sentry-nerd .nd-box{background:#070a07;border:1px solid #2c4a2e;border-radius:8px;padding:10px;margin:6px 0}
 .sentry-nerd .nd-warn{color:#ffd37a}
+.sentry-nerd .nd-ok{color:#7dff8a;font-weight:700}
+.sentry-nerd .nd-bad{color:#ff8a8a;font-weight:700}
+.sentry-nerd .nd-box ul{margin:4px 0;padding-left:18px}
 .sentry-nerd .nd-scroll{overflow-x:auto}
 .sentry-nerd table{border-collapse:collapse;width:100%;font-size:12.5px}
 .sentry-nerd th,.sentry-nerd td{text-align:left;padding:5px 8px;border-top:1px solid #1f331f;white-space:nowrap}
@@ -208,17 +211,26 @@ export function openNerdPanel() {
   let token = null; // shown once, right after it is made
   let fingerprint = null;
 
-  async function confirmThen(path) {
-    try { return await api(path, { method: 'POST' }); } catch (err) {
+  // a change that asks for the password first (the server says so)
+  async function confirmThen(path, opts = { method: 'POST' }) {
+    try { return await api(path, opts); } catch (err) {
       if (!/password/i.test(err.message)) { alert(err.message); return null; }
       const pw = prompt('Enter your password to confirm:');
       if (!pw) return null;
       try {
         await api('/api/auth/confirm', { method: 'POST', body: JSON.stringify({ password: pw }) });
-        return await api(path, { method: 'POST' });
+        return await api(path, opts);
       } catch (e2) { alert(e2.message); return null; }
     }
   }
+  const CHECK = {
+    verified: ['✓ verified', 'nd-ok', 'Signed by this car\'s paired key, and the file is what was signed.'],
+    failed: ['✗ failed', 'nd-bad', ''],
+    unsigned: ['unsigned', 'nd-muted', 'No signature (an older CAN Bridge, before pairing). Used, with a note.'],
+    waiting: ['waiting', 'nd-muted', 'Its sidecar (with the signature) has not arrived yet.']
+  };
+  const when = (t) => (t ? new Date(t).toLocaleString() : '—');
+  const carName = (st, id) => st.vehicles.find((v) => v.id === id)?.name || (id ? id : 'any car');
 
   async function draw() {
     let st;
@@ -233,40 +245,67 @@ export function openNerdPanel() {
     const port = st.port?.port || 10000;
     const url = `${st.port?.https === false ? 'http' : 'https'}://${location.hostname.includes(':') ? `[${location.hostname}]` : location.hostname}:${port}/api/can/logs`;
     const https = location.protocol === 'https:';
+    const trustOf = (k) => st.trust?.find((x) => x.key === k);
     body.innerHTML = `
       <h3>Uploads from the CAN Bridge</h3>
       ${st.enabled
-        ? `<p>On since ${esc(new Date(st.since).toLocaleString())}. The app uploads finished logs to:</p>
+        ? `<p>On since ${esc(when(st.since))}. The app uploads finished logs to:</p>
            <div class="nd-box nd-mono">${esc(url)}</div>
            <p class="${st.port?.listening ? 'nd-muted' : 'nd-warn'}">${st.port?.listening ? `Port ${port} is open for the CAN Bridge (only its uploads; it closes when this is turned off).` : st.port?.error ? `Port ${port} could not open: ${esc(st.port.error)}` : `Port ${port} is opening…`}
              If Sentry Six Manager runs in Docker, the port must also be published (<code>${port}:${port}</code>).</p>
-           ${token ? `<p><b>Token</b> (shown once: paste it into the CAN Bridge app now):</p><div class="nd-box nd-mono" data-token>${esc(token)}</div>
-             ${fingerprint ? `<p><b>Certificate SHA-256</b> (the app pins it):</p><div class="nd-box nd-mono">${esc(fingerprint)}</div>` : ''}
-             <div class="nd-row"><button type="button" class="nd-btn" data-copy>Copy token</button></div>` : '<p class="nd-muted">The token was shown when it was made. Make a new one if the app needs it again (the old one stops working).</p>'}
-           <div class="nd-row"><button type="button" class="nd-btn" data-on>New token…</button><button type="button" class="nd-btn nd-danger" data-off>Turn off…</button></div>`
+           <div class="nd-row"><button type="button" class="nd-btn nd-danger" data-off>Turn off…</button></div>`
         : `<p>Off: port ${port} is closed, and the upload address answers "not found".</p>
            <div class="nd-row"><button type="button" class="nd-btn" data-on>Turn on…</button></div>`}
       ${https || st.port?.https ? '' : '<p class="nd-warn">This page is on plain HTTP. The app only uploads over HTTPS: open Sentry Six Manager with https:// for the address and the certificate it pins.</p>'}
-      <p class="nd-muted">The token can only upload CAN logs: it cannot see footage or change anything else.</p>
+
+      <h3>Tokens (one per car)</h3>
+      <p class="nd-muted">Each token is for one car: its first upload ties it to that car's CAN Bridge key, and from then on it can only send that car's logs. A token can only upload: it cannot see footage or change anything else. Only a fingerprint of it is kept here.</p>
+      ${token ? `<p><b>New token</b> (shown once: paste it into that car's CAN Bridge app now):</p><div class="nd-box nd-mono" data-token>${esc(token)}</div>
+        ${fingerprint ? `<p><b>Certificate SHA-256</b> (the app pins it):</p><div class="nd-box nd-mono">${esc(fingerprint)}</div>` : ''}
+        <div class="nd-row"><button type="button" class="nd-btn" data-copy>Copy token</button></div>` : ''}
+      ${st.tokens?.length ? `<div class="nd-scroll"><table><thead><tr><th>Token</th><th>Car</th><th>CAN Bridge key</th><th>Made</th><th>Last used</th><th></th></tr></thead><tbody>
+        ${st.tokens.map((t) => `<tr><td>${esc(t.label)}</td><td>${esc(carName(st, t.vehicleId))}</td><td class="nd-mono">${esc(t.key || 'not used yet')}</td><td>${esc(when(t.createdAt))}</td><td>${esc(when(t.lastUsedAt))}</td>
+          <td><button type="button" class="nd-btn nd-danger" data-revoke="${esc(t.id)}" aria-label="Revoke the token ${esc(t.label)}">Revoke</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="nd-muted">No tokens.</p>'}
+      ${st.enabled ? `<div class="nd-row"><select class="nd-btn" data-token-car aria-label="The car for the new token">${st.vehicles.map((v) => `<option value="${esc(v.id)}">${esc(v.name)}</option>`).join('')}</select>
+        <button type="button" class="nd-btn" data-new-token>New token for this car…</button></div>` : ''}
+
+      ${st.keys?.length ? `<h3>Cars, pairing and the chain</h3>
+      <p class="nd-muted">Every log is signed on the Screenmate with a key that never leaves it. The first signed log pairs the car; after that only logs signed by that key are trusted. Compare the fingerprint below with "Log signing key" in the CAN Bridge app.</p>
+      ${st.keys.map((k) => {
+        const t = trustOf(k) || { counts: {}, chain: { issues: [] } };
+        const c = t.counts || {};
+        return `<div class="nd-box">
+          <div class="nd-row"><b class="nd-mono">${esc(k)}</b>
+            <select data-map="${esc(k)}" aria-label="The car ${esc(k)} is" class="nd-btn">
+              <option value="">${st.vehicles.length === 1 ? `${esc(st.vehicles[0].name)} (only car)` : 'Not chosen'}</option>
+              ${st.vehicles.map((v) => `<option value="${esc(v.id)}"${st.map[k] === v.id ? ' selected' : ''}>${esc(v.name)}</option>`).join('')}</select></div>
+          <p>${t.pin ? `Paired (${esc(t.pin.how)}, ${esc(when(t.pin.pinnedAt))}) with key<br><span class="nd-mono">${esc(t.pin.fingerprint)}</span>` : '<span class="nd-muted">Not paired yet: its first signed log pairs it.</span>'}</p>
+          ${t.newKey ? `<p class="nd-warn">Logs signed by another key arrived (${esc(when(t.newKey.firstSeen))}):<br><span class="nd-mono">${esc(t.newKey.fingerprint)}</span><br>If this is your Screenmate (a new one, or the app reinstalled), check the fingerprint in the app, then trust it. Until then those logs are not used.</p>
+            <div class="nd-row"><button type="button" class="nd-btn" data-trust="${esc(k)}" data-fp="${esc(t.newKey.fingerprint)}">Trust this key…</button></div>` : ''}
+          <p>${c.verified || 0} verified · ${c.failed ? `<span class="nd-warn">${c.failed} failed</span>` : '0 failed'} · ${c.unsigned || 0} unsigned · ${c.waiting || 0} waiting</p>
+          <p>${t.chain?.count ? `Chain: logs ${t.chain.first} to ${t.chain.last} of this key${t.chain.issues.length ? '' : ', no gaps, every log follows the one before.'}` : ''}</p>
+          ${t.chain?.issues?.length ? `<ul class="nd-warn">${t.chain.issues.slice(0, 20).map((i) => `<li>${esc(i.text)}</li>`).join('')}${t.chain.issues.length > 20 ? `<li>and ${t.chain.issues.length - 20} more</li>` : ''}</ul>` : ''}
+          ${t.pin ? `<div class="nd-row"><button type="button" class="nd-btn" data-forget="${esc(k)}">Forget the pairing…</button></div>` : ''}
+        </div>`;
+      }).join('')}` : ''}
 
       <h3>Received logs</h3>
-      <p>${st.logs ? `${st.logs.toLocaleString()} log${st.logs === 1 ? '' : 's'}, ${esc(size(st.bytes))} in all. Kept exactly as recorded, also the messages nothing knows the meaning of yet.` : 'None yet.'}</p>
-      ${files.logs.length ? `<div class="nd-scroll"><table><thead><tr><th>Started</th><th>Car</th><th>Size</th><th>Frames</th><th>Dropped</th><th>App</th><th></th></tr></thead><tbody>
-        ${files.logs.map((f) => `<tr><td>${esc(new Date(f.startedAt).toLocaleString())}${f.seq ? ` · #${f.seq}` : ''}</td><td class="nd-mono">${esc(f.vehicleKey)}</td><td>${esc(size(f.bytes))}</td>
-          <td>${f.frames === null ? '—' : f.frames.toLocaleString()}</td><td>${f.dropped === null ? '—' : f.dropped.toLocaleString()}</td><td class="nd-mono">${esc(f.appVersion || (f.sidecar ? '' : 'no sidecar yet'))}</td>
-          <td><button type="button" class="nd-btn nd-danger" data-del="${esc(f.name)}" aria-label="Delete the log ${esc(f.name)}">Delete</button></td></tr>`).join('')}
+      <p>${st.logs ? `${st.logs.toLocaleString()} log${st.logs === 1 ? '' : 's'}, ${esc(size(st.bytes))} in all. Kept exactly as recorded, also the messages nothing knows the meaning of yet. A log that fails its check is kept, but not used.` : 'None yet.'}</p>
+      ${files.logs.length ? `<div class="nd-scroll"><table><thead><tr><th>Started</th><th>Car</th><th>Check</th><th>Size</th><th>Frames</th><th>Dropped</th><th>App</th><th></th></tr></thead><tbody>
+        ${files.logs.map((f) => {
+          const [label, cls, tip] = CHECK[f.check?.status] || CHECK.waiting;
+          const why = f.check?.reason ? `${tip ? `${tip} ` : ''}${f.check.reason}` : tip;
+          return `<tr><td>${esc(when(f.startedAt))}${f.check?.index !== null && f.check?.index !== undefined ? ` · #${esc(f.check.index)}` : f.seq ? ` · #${f.seq}` : ''}</td><td class="nd-mono">${esc(f.vehicleKey)}</td>
+          <td class="${cls}" title="${esc(why)}">${esc(label)}${f.check?.status === 'failed' ? `<br><small>${esc(f.check.reason || '')}</small>${f.check.override ? '<br><small class="nd-warn">used anyway</small>' : ''}` : ''}</td>
+          <td>${esc(size(f.bytes))}</td><td>${f.frames === null ? '—' : f.frames.toLocaleString()}</td><td>${f.dropped === null ? '—' : f.dropped.toLocaleString()}</td><td class="nd-mono">${esc(f.appVersion || (f.sidecar ? '' : 'no sidecar yet'))}</td>
+          <td>${f.check?.status === 'failed' ? `<button type="button" class="nd-btn" data-use="${esc(f.name)}" data-on="${f.check.override ? '0' : '1'}">${f.check.override ? 'Stop using' : 'Use anyway…'}</button> ` : ''}<button type="button" class="nd-btn nd-danger" data-del="${esc(f.name)}" aria-label="Delete the log ${esc(f.name)}">Delete</button></td></tr>`;
+        }).join('')}
       </tbody></table></div>` : ''}
 
-      ${st.keys?.length ? `<h3>Which car</h3>
-      <p class="nd-muted">The CAN Bridge names each car by a key. ${st.vehicles.length === 1 ? 'With one car here, every key is that car unless you choose.' : 'Choose the car each key is, for the Viewer.'}</p>
-      ${st.keys.map((k) => `<div class="nd-row"><span class="nd-mono">${esc(k)}</span><select data-map="${esc(k)}" aria-label="The car ${esc(k)} is" class="nd-btn">
-        <option value="">${st.vehicles.length === 1 ? `${esc(st.vehicles[0].name)} (only car)` : 'Not chosen'}</option>
-        ${st.vehicles.map((v) => `<option value="${esc(v.id)}"${st.map[k] === v.id ? ' selected' : ''}>${esc(v.name)}</option>`).join('')}</select></div>`).join('')}` : ''}
-
       <h3>Index</h3>
-      <p>${st.index.running ? `Decoding${st.index.current ? ` <span class="nd-mono">${esc(st.index.current)}</span>` : ''}… ${st.index.pending ? `${st.index.pending} log${st.index.pending === 1 ? '' : 's'} to go.` : ''}` : 'Every log is decoded and ready for the Viewer.'}
+      <p>${st.index.running ? `Decoding${st.index.current ? ` <span class="nd-mono">${esc(st.index.current)}</span>` : ''}… ${st.index.pending ? `${st.index.pending} log${st.index.pending === 1 ? '' : 's'} to go.` : ''}` : 'Every usable log is decoded and ready for the Viewer.'}
         ${st.index.lastError ? `<br><span class="nd-warn">Last problem: ${esc(st.index.lastError)}</span>` : ''}</p>
-      <p class="nd-muted">Each log is decoded once when it arrives (Model 3/Y DBC, model3dbc), into signals per minute, so the Viewer's dashboard has them at once: Customize, then pick any signal under "CAN".</p>
+      <p class="nd-muted">Each log is decoded once when it arrives and passes its check (Model 3/Y DBC, model3dbc), into signals per minute, so the Viewer's dashboard has them at once: Customize, then pick any signal under "CAN".</p>
       <div class="nd-row"><button type="button" class="nd-btn" data-hide>Hide the Nerd button</button></div>`;
   }
 
@@ -275,23 +314,43 @@ export function openNerdPanel() {
     if (!sel) return;
     try { await api('/api/can/vehicle-map', { method: 'POST', body: JSON.stringify({ key: sel.dataset.map, vehicleId: sel.value || null }) }); } catch (err) { alert(err.message); }
   });
+  const post = (path, data) => ({ method: 'POST', body: JSON.stringify(data || {}) });
   body.addEventListener('click', async (e) => {
-    if (e.target.closest('[data-on]')) {
-      const d = await confirmThen('/api/can/enable');
+    const b = e.target.closest('button');
+    if (!b) return;
+    if (b.matches('[data-on]') && !b.matches('[data-use]')) {
+      const car = body.querySelector('[data-token-car]')?.value || null;
+      const d = await confirmThen('/api/can/enable', post('', { vehicleId: car }));
       if (d) { token = d.token; fingerprint = d.fingerprint; await draw(); }
-    } else if (e.target.closest('[data-off]')) {
-      if (!confirm('Turn CAN Bridge uploads off? The logs already here are kept; the token stops working.')) return;
+    } else if (b.matches('[data-off]')) {
+      if (!confirm('Turn CAN Bridge uploads off? Port 10000 closes and no token works; the logs already here and the tokens are kept.')) return;
       if (await confirmThen('/api/can/disable')) { token = null; await draw(); }
-    } else if (e.target.closest('[data-copy]')) {
-      try { await navigator.clipboard.writeText(token); e.target.textContent = 'Copied'; } catch { /* select it by hand */ }
-    } else if (e.target.closest('[data-del]')) {
-      const name = e.target.closest('[data-del]').dataset.del;
+    } else if (b.matches('[data-new-token]')) {
+      const car = body.querySelector('[data-token-car]')?.value || null;
+      const d = await confirmThen('/api/can/tokens', post('', { vehicleId: car }));
+      if (d) { token = d.token; fingerprint = d.fingerprint; await draw(); }
+    } else if (b.matches('[data-revoke]')) {
+      if (!confirm('Revoke this token? Its CAN Bridge can no longer upload until it gets a new one.')) return;
+      if (await confirmThen(`/api/can/tokens/${encodeURIComponent(b.dataset.revoke)}`, { method: 'DELETE' })) await draw();
+    } else if (b.matches('[data-copy]')) {
+      try { await navigator.clipboard.writeText(token); b.textContent = 'Copied'; } catch { /* select it by hand */ }
+    } else if (b.matches('[data-trust]')) {
+      if (!confirm(`Trust the key\n${b.dataset.fp}\nfor ${b.dataset.trust}? Check that it matches "Log signing key" in the CAN Bridge app first. Logs signed by it are then checked again and used.`)) return;
+      if (await confirmThen(`/api/can/pairing/${encodeURIComponent(b.dataset.trust)}/trust`, post('', { fingerprint: b.dataset.fp }))) await draw();
+    } else if (b.matches('[data-forget]')) {
+      if (!confirm(`Forget the pairing of ${b.dataset.forget}? The next signed log pairs it again (logs already verified stay verified).`)) return;
+      if (await confirmThen(`/api/can/pairing/${encodeURIComponent(b.dataset.forget)}/forget`)) await draw();
+    } else if (b.matches('[data-use]')) {
+      const on = b.dataset.on === '1';
+      if (on && !confirm('Use this log although its check failed? Its data then shows in the Viewer with a warning, and it is used for syncing.')) return;
+      if (await confirmThen(`/api/can/files/${encodeURIComponent(b.dataset.use)}/use`, post('', { use: on }))) await draw();
+    } else if (b.matches('[data-del]')) {
+      const name = b.dataset.del;
       if (!confirm(`Delete ${name}? It cannot be brought back.`)) return;
-      try { await api(`/api/can/files/${encodeURIComponent(name)}`, { method: 'DELETE' }); } catch (err) { alert(err.message); }
-      await draw();
-    } else if (e.target.closest('[data-hide]')) {
+      if (await confirmThen(`/api/can/files/${encodeURIComponent(name)}`, { method: 'DELETE' })) await draw();
+    } else if (b.matches('[data-hide]')) {
       setUnlocked(false);
-      document.querySelectorAll('.sentry-nerd-btn').forEach((b) => b.remove());
+      document.querySelectorAll('.sentry-nerd-btn').forEach((x) => x.remove());
       close();
     }
   });

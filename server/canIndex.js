@@ -43,7 +43,11 @@ const DEFAULT_BUSES = { can0: 'VehicleBus', can1: 'ChassisBus' };
 
 const minuteKey = (ms) => new Date(Math.floor(ms / 60000) * 60000).toISOString().slice(0, 16).replace(/[-:]/g, '');
 
-function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bundledDbc, xz = 'xz', onIndexed = null }) {
+// how far a minute's data can be trusted, worst first (canTrust.js)
+const TRUST_RANK = { override: 0, unsigned: 1, verified: 2 };
+const worseTrust = (a, b) => (a === undefined ? b : b === undefined ? a : (TRUST_RANK[a] ?? 1) <= (TRUST_RANK[b] ?? 1) ? a : b);
+
+function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bundledDbc, xz = 'xz', onIndexed = null, usable = async () => ({ use: true, trust: 'unsigned' }) }) {
   const doneFile = path.join(dir, 'done.json');
   let done = null;
   const loadDone = async () => {
@@ -71,6 +75,8 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
         data.signals[name] = mine ? [...pts, ...mine].sort((a, b) => a[0] - b[0]).filter((p, i, a) => i === 0 || p[0] !== a[i - 1][0]) : pts;
       }
       for (const [id, n] of Object.entries(had.ids || {})) data.ids[id] = (data.ids[id] || 0) + n;
+      const t = worseTrust(had.trust, data.trust);
+      if (t) data.trust = t;
     }
     await fsp.mkdir(path.join(dir, key), { recursive: true });
     const file = path.join(dir, key, `${minute}.json.gz`);
@@ -116,13 +122,13 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
   }
 
   /** Index one log: decode every frame, write its minutes (rawOnly: only the raw snapshots, for a log indexed before them). */
-  async function indexLog(key, name, { rawOnly = false } = {}) {
+  async function indexLog(key, name, { rawOnly = false, trust } = {}) {
     const file = path.join(canDir, key, name);
     let side = {};
     try { side = JSON.parse(await fsp.readFile(`${file}.json`, 'utf8')) || {}; } catch { /* no sidecar */ }
     // which DBC bus each interface is (the sidecar's bus map, else can0/can1)
     const busOf = { ...DEFAULT_BUSES };
-    const map = side.busMap || side.buses || null;
+    const map = side.bus || side.busMap || side.buses || null;
     if (map && typeof map === 'object') {
       for (const [iface, v] of Object.entries(map)) {
         const s = String(typeof v === 'object' ? v?.dbcBus || v?.name || '' : v).toLowerCase();
@@ -179,7 +185,7 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
         closeMinute();
         minute = mk;
         minuteStart = Math.floor(t / 60000) * 60000;
-        bucket = { minute: mk, signals: {}, ids: {} };
+        bucket = { minute: mk, signals: {}, ids: {}, ...(trust ? { trust } : {}) };
         rawLog = { span: [Math.round(t - minuteStart), Math.round(t - minuteStart)], buses: busOf, ids: {} };
         rawBucket = { minute: mk, raw: {}, logs: { [name]: rawLog } };
         for (const s of last.values()) s.pt = -Infinity; // each minute starts with every signal's value
@@ -263,7 +269,12 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
         const stamp = `${file}/${FORMAT}`;
         const had = d[`${key}/${name}`];
         // indexed before the raw snapshots (the same file): only those are written now
-        if (had !== stamp) out.push({ key, name, stamp, startedAt: n.startedAt, rawOnly: had === file });
+        if (had === stamp) continue;
+        // only logs whose check allows it (canTrust: verified, unsigned before pairing, or used anyway);
+        // the others wait, and are looked at again when their check changes
+        const ok = await usable(key, name).catch(() => ({ use: false }));
+        if (!ok.use) continue;
+        out.push({ key, name, stamp, startedAt: n.startedAt, rawOnly: had === file, trust: ok.trust });
       }
     }
     return out.sort((a, b) => a.startedAt - b.startedAt);
@@ -284,7 +295,7 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
           while (!idle()) await new Promise((r) => setTimeout(r, 2000));
           status.current = job.name;
           try {
-            const r = await indexLog(job.key, job.name, { rawOnly: job.rawOnly });
+            const r = await indexLog(job.key, job.name, { rawOnly: job.rawOnly, trust: job.trust });
             (await loadDone())[`${job.key}/${job.name}`] = job.stamp;
             await saveDone();
             status.indexed++;
@@ -307,6 +318,18 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
   }
 
   /** The signals of these cars between two times: { name: [[ms (UTC), value], …] } (the value before `from` too). */
+  /** The worst trust of the data between two times: verified, unsigned or override (used despite failing its check), or null. */
+  async function trustOf(keys, from, to) {
+    let t;
+    for (const key of keys) {
+      for (let m = Math.floor(from / 60000) * 60000; m <= to; m += 60000) {
+        const data = await readMinute(key, minuteKey(m));
+        if (data) t = worseTrust(t, data.trust || 'unsigned');
+      }
+    }
+    return t || null;
+  }
+
   async function series(keys, from, to, names) {
     const want = names ? new Set(names) : null;
     const out = {};
@@ -400,7 +423,7 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
     await saveDone();
   }
 
-  return { kick, indexLog, series, raw, signals, forget, status: () => ({ ...status }), pendingLogs };
+  return { kick, trustOf, indexLog, series, raw, signals, forget, status: () => ({ ...status }), pendingLogs };
 }
 
 module.exports = { createCanIndex, minuteKey, FORMAT, RAW_PER_SEC };

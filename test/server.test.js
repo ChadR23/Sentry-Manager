@@ -1055,10 +1055,15 @@ test('CAN Bridge uploads: off until turned on, HTTPS and a write-only token, chu
     assert.equal((await s.call('DELETE', `/api/can/files/${name}`, undefined, { headers: https })).status, 200);
     assert.equal((await s.call('GET', '/api/can/files', undefined, { headers: https })).data.logs.length, 0);
 
-    // a new token replaces the old one; off: gone again
-    const on2 = await s.call('POST', '/api/can/enable', {}, { headers: https });
-    assert.equal((await fetch(`${s.base}/api/can/logs/ping`, { headers: { ...https, Authorization: `Bearer ${token}` } })).status, 401, 'the old token stops working');
+    // tokens per car: another token, then the first revoked; off: gone again
+    const on2 = await s.call('POST', '/api/can/tokens', {}, { headers: https });
     assert.equal((await fetch(`${s.base}/api/can/logs/ping`, { headers: { ...https, Authorization: `Bearer ${on2.data.token}` } })).status, 200);
+    const tokens = (await s.call('GET', '/api/can/settings', undefined, { headers: https })).data.tokens;
+    assert.equal(tokens.length, 2);
+    assert.equal(tokens[0].key, 'MY-car', 'the first token is for the car it uploaded for');
+    assert.ok(!('hash' in tokens[0]), 'the token\'s hash is not shown');
+    assert.equal((await s.call('DELETE', `/api/can/tokens/${tokens[0].id}`, undefined, { headers: https })).status, 200);
+    assert.equal((await fetch(`${s.base}/api/can/logs/ping`, { headers: { ...https, Authorization: `Bearer ${token}` } })).status, 401, 'a revoked token stops working');
     await s.call('POST', '/api/can/disable', {}, { headers: https });
     assert.equal((await fetch(`${s.base}/api/can/logs/ping`, { headers: { ...https, Authorization: `Bearer ${on2.data.token}` } })).status, 404);
   } finally {
@@ -1094,6 +1099,116 @@ test('CAN Bridge port: closed until uploads are on, only the CAN API while open,
   }
 });
 
+test('CAN Bridge security: a token per car, signed logs verified, a changed log kept but not used, the chain checked, abuse refused', { skip: spawnSync('xz', ['--version']).status !== 0 && 'needs xz', timeout: 90000 }, async () => {
+  const { signedMessage } = require('../server/canTrust');
+  const dir = await tmp();
+  await makeFootage(path.join(dir, 'footage'));
+  const s = await startServer(dir, { TRUST_PROXY: 'true' });
+  const https = { 'X-Forwarded-Proto': 'https' };
+  const A = 'aaaaaa000001';
+  const B = 'bbbbbb000002';
+  const put = (token, name, body, extra = {}) => fetch(`${s.base}/api/can/logs/${encodeURIComponent(name)}`, { method: 'POST', body, headers: { ...https, Authorization: `Bearer ${token}`, 'Upload-Offset': '0', 'Upload-Length': String(body.length), 'Upload-SHA256': crypto.createHash('sha256').update(body).digest('hex'), ...extra } }).then(async (r) => ({ status: r.status, data: await r.json().catch(() => null) }));
+  // the bridge: a P-256 key and a chain
+  const { privateKey, publicKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const der = publicKey.export({ format: 'der', type: 'spki' });
+  let index = 0;
+  let prev = { name: '-', sha256: '0'.repeat(64) };
+  const t0 = Date.UTC(2020, 0, 1, 8, 0, 0) / 1000;
+  const logFor = (minute, volts) => {
+    const lines = [];
+    for (let i = 0; i < 600; i++) {
+      const b = Buffer.alloc(8);
+      b.writeUInt16LE(Math.round(volts / 0.01), 0);
+      lines.push(`(${(t0 + minute * 60 + i / 10).toFixed(6)}) can0 132#${b.toString('hex').toUpperCase()}`);
+    }
+    return execFileSync('xz', ['-6', '-c'], { input: `${lines.join('\n')}\n` });
+  };
+  const signed = (name, body, key = A) => {
+    const sha = crypto.createHash('sha256').update(body).digest('hex');
+    const msg = signedMessage({ vehicleKey: key, name, sha256: sha, length: body.length, index, prevName: prev.name, prevSha256: prev.sha256 });
+    const integrity = { signed: true, version: 'canbridge-log-sig-v1', algorithm: 'ECDSA-P256-SHA256', public_key: der.toString('base64'), vehicle_key: key, sha256: sha, length: body.length, index, prev_name: prev.name, prev_sha256: prev.sha256, signature: crypto.sign('sha256', Buffer.from(msg), privateKey).toString('base64') };
+    prev = { name, sha256: sha };
+    index++;
+    return Buffer.from(JSON.stringify({ format: 'canbridge-candump-xz/1', frames: 600, app_version: '0.2.118', dropped_chunks: 0, integrity }));
+  };
+  try {
+    await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' }, { headers: https });
+    await s.call('POST', '/api/auth/confirm', { password: 'correct horse' }, { headers: https });
+    const tokA = (await s.call('POST', '/api/can/enable', {}, { headers: https })).data.token;
+    const tokB = (await s.call('POST', '/api/can/tokens', {}, { headers: https })).data.token;
+
+    // log 0 of car A, signed: verified, paired, decoded
+    const n0 = `${A}_20200101T080000Z_1.log.xz`;
+    const log0 = logFor(0, 390);
+    assert.equal((await put(tokA, n0, log0)).status, 201);
+    assert.equal((await put(tokA, `${n0}.json`, signed(n0, log0))).status, 201);
+    // the token is now car A's: car B's logs are refused, and B's names are not even answered
+    const nB = `${B}_20200101T080000Z_1.log.xz`;
+    const wrong = await put(tokA, nB, Buffer.from('x'));
+    assert.deepEqual([wrong.status, wrong.data.code], [403, 'wrong_car']);
+    const st = await (await fetch(`${s.base}/api/can/logs/status`, { method: 'POST', headers: { ...https, Authorization: `Bearer ${tokA}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ names: [n0, nB] }) })).json();
+    assert.deepEqual([st.files[n0].state, st.files[nB].state], ['complete', 'forbidden']);
+    // car B's own token works for car B
+    assert.equal((await put(tokB, nB, Buffer.from('car b'))).status, 201);
+    assert.equal((await put(tokB, `${A}_20200101T090000Z_5.log.xz`, Buffer.from('x'))).data.code, 'wrong_car', 'and only for car B');
+
+    const files = async () => Object.fromEntries((await s.call('GET', '/api/can/files', undefined, { headers: https })).data.logs.map((l) => [l.name, l]));
+    await waitFor(async () => (await files())[n0]?.check.status === 'verified');
+    const f0 = (await files())[n0];
+    assert.deepEqual([f0.appVersion, f0.dropped, f0.check.index], ['0.2.118', 0, 0], 'the sidecar\'s own field names');
+    const clip0 = path.join(dir, 'footage', 'TeslaCam', 'RecentClips', '2020-01-01_08-00-00-front.mp4');
+    await waitFor(async () => (await s.call('GET', `/api/can/clip?path=${encodeURIComponent(clip0)}&signals=BattVoltage132`, undefined, { headers: https })).data.series?.BattVoltage132);
+    const c0 = (await s.call('GET', `/api/can/clip?path=${encodeURIComponent(clip0)}&signals=BattVoltage132`, undefined, { headers: https })).data;
+    assert.equal(c0.trust, 'verified');
+
+    // log 1, swapped after signing: kept, failed, not decoded
+    const n1 = `${A}_20200101T080100Z_2.log.xz`;
+    const log1 = logFor(1, 350);
+    const side1 = signed(n1, log1);
+    // (a valid log, but not the one signed: another battery voltage throughout)
+    const changed = logFor(1, 351);
+    assert.equal((await put(tokA, n1, changed)).status, 201, 'taken (the upload hash is the file\'s own)');
+    assert.equal((await put(tokA, `${n1}.json`, side1)).status, 201);
+    await waitFor(async () => (await files())[n1]?.check.status === 'failed');
+    assert.match((await files())[n1].check.reason, /not the one that was signed/);
+    const clip1 = path.join(dir, 'footage', 'TeslaCam', 'RecentClips', '2020-01-01_08-01-00-front.mp4');
+    await new Promise((r) => setTimeout(r, 1500));
+    const c1 = (await s.call('GET', `/api/can/clip?path=${encodeURIComponent(clip1)}&signals=BattVoltage132`, undefined, { headers: https })).data;
+    assert.ok(!(c1.series.BattVoltage132 || []).some(([t, v]) => t >= (t0 + 62) * 1000 && Math.abs(v - 351) < 1), 'the changed log\'s data is not used');
+    // used anyway: decoded, and flagged
+    assert.equal((await s.call('POST', `/api/can/files/${n1}/use`, { use: true }, { headers: https })).status, 200);
+    await waitFor(async () => (await s.call('GET', `/api/can/clip?path=${encodeURIComponent(clip1)}&signals=BattVoltage132`, undefined, { headers: https })).data.trust === 'override');
+
+    // log 2 never arrives; log 3 does: a gap in the chain
+    signed(`${A}_20200101T080200Z_3.log.xz`, logFor(2, 380));
+    const n3 = `${A}_20200101T080300Z_4.log.xz`;
+    const log3 = logFor(3, 381);
+    await put(tokA, n3, log3);
+    await put(tokA, `${n3}.json`, signed(n3, log3));
+    await waitFor(async () => (await files())[n3]?.check.status === 'verified');
+    const trustA = (await s.call('GET', '/api/can/settings', undefined, { headers: https })).data.trust.find((x) => x.key === A);
+    assert.deepEqual(trustA.chain.issues.map((i) => i.kind), ['failed', 'gap']);
+    assert.match(trustA.chain.issues[0].text, /^log 1 .* failed its check/);
+    assert.equal(trustA.chain.issues[1].text, 'log 2 is missing');
+    assert.match(trustA.pin.fingerprint, /^([0-9A-F]{2}:){31}[0-9A-F]{2}$/);
+    assert.deepEqual([trustA.counts.verified, trustA.counts.failed], [2, 1]);
+
+    // abuse: names that try to leave the folder, a sidecar too large, a flood of wrong tokens
+    assert.ok([400, 404].includes((await put(tokA, '../../etc/passwd', Buffer.from('x'))).status));
+    assert.ok([400, 404].includes((await put(tokA, `${A}_20200101T080000Z_1.log.xz/../../x`, Buffer.from('x'))).status));
+    assert.equal((await put(tokA, `${A}_20200101T090000Z_9.log.xz.json`, Buffer.alloc(10), { 'Upload-Length': String(5 * 1024 * 1024) })).status, 413);
+    let last = 0;
+    for (let i = 0; i < 22; i++) last = (await put(`wrong${i}`, n0, Buffer.from('x'))).status;
+    assert.equal(last, 429, 'an address that keeps guessing is refused');
+    // the CAN token cannot do anything else
+    assert.equal((await fetch(`${s.base}/api/can/settings`, { headers: { ...https, Authorization: `Bearer ${tokA}` } })).status, 401);
+    assert.equal((await fetch(`${s.base}/api/can/files/${n0}`, { method: 'DELETE', headers: { ...https, Authorization: `Bearer ${tokA}`, 'X-Requested-With': 'sentry-six-manager' } })).status, 401);
+  } finally {
+    await s.stop();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('CAN index: an uploaded log is decoded in the background, and a clip gets its signals at its own time', { skip: spawnSync('xz', ['--version']).status !== 0 && 'needs xz', timeout: 60000 }, async () => {
   const dir = await tmp();
   await makeFootage(path.join(dir, 'footage'));
@@ -1121,6 +1236,10 @@ test('CAN index: an uploaded log is decoded in the background, and a clip gets i
     const name = 'MY-car_20200101T075958Z_1.log.xz';
     const up = await fetch(`${s.base}/api/can/logs/${name}`, { method: 'POST', body: file, headers: { ...https, Authorization: `Bearer ${token}`, 'Upload-Offset': '0', 'Upload-Length': String(file.length), 'Upload-SHA256': crypto.createHash('sha256').update(file).digest('hex') } });
     assert.equal(up.status, 201);
+    // its sidecar (unsigned, as from a bridge before signing): the log is used once it is here
+    const side = Buffer.from(JSON.stringify({ format: 'canbridge-candump-xz/1', frames: 2100 }));
+    const sideUp = await fetch(`${s.base}/api/can/logs/${name}.json`, { method: 'POST', body: side, headers: { ...https, Authorization: `Bearer ${token}`, 'Upload-Offset': '0', 'Upload-Length': String(side.length), 'Upload-SHA256': crypto.createHash('sha256').update(side).digest('hex') } });
+    assert.equal(sideUp.status, 201);
     const clip = path.join(dir, 'footage', 'TeslaCam', 'RecentClips', '2020-01-01_08-00-00-front.mp4');
     await waitFor(async () => (await s.call('GET', `/api/can/signals?path=${encodeURIComponent(clip)}`, undefined, { headers: https })).data.signals?.BattVoltage132);
     const meta = (await s.call('GET', `/api/can/signals?path=${encodeURIComponent(clip)}`, undefined, { headers: https })).data.signals;

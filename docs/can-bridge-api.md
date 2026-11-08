@@ -20,8 +20,25 @@ Version line seven times, then **>_ nerd**). Turning it on, or making a new
 token, asks for the password and shows:
 
 - the upload address, `https://<host>:10000/api/can/logs`;
-- the token, once (only its SHA-256 is stored; a new token replaces the old one);
+- the token, once (only its SHA-256 is stored);
 - the server certificate's SHA-256 fingerprint, for the app to pin.
+
+## Tokens: one per car
+
+Each token is for one car. The owner makes it for a car in the Nerd settings
+(*New token for this car*); its first upload ties it to that car's CAN Bridge
+key (`vehicleKey`, the first part of the file names), and from then on:
+
+- it can upload only that key's files (`403 wrong_car` for another key);
+- `status` answers only that key's names (another key's names come back as
+  `"state": "forbidden"`, so a token cannot even see what another car sent);
+- it can do nothing else: no footage, no settings, no deleting.
+
+Several cars, several tokens (at most 20). A token can be revoked on its own
+(the others keep working). Turning uploads off closes port 10000 and makes
+every token unusable until they are turned on again; the tokens are kept.
+`ping` answers the key a token is tied to (`"vehicleKey"`, or `null` before
+its first upload).
 
 ## The port
 
@@ -35,8 +52,9 @@ requests also work on the web port (9000), but the app should use 10000.
 
 - **HTTPS only.** Over plain HTTP the answer is `403 https_only`. The
   certificate may be self-signed: pin it by its SHA-256 fingerprint.
-- **Token:** `Authorization: Bearer <token>`. It is write-only: it can call
-  the three requests below and nothing else (no footage, no settings).
+- **Token:** `Authorization: Bearer <token>`, one per car (see Tokens). It
+  is write-only: it can call the three requests below and nothing else (no
+  footage, no settings).
 - No cookies, no `X-Requested-With` header needed.
 - Every answer is JSON. Errors are `{ "error": "<words>", "code": "<code>" }`,
   plus `"received"` when it says how far an upload got.
@@ -103,13 +121,83 @@ To resume after a lost connection, ask `status` (or read `received` from the
 for the sidecar. `vehicleKey` is 1–64 letters, digits or `-`; `seq` is 1–6
 digits. Anything else is refused with `400 bad_name`.
 
+## Signatures and pairing
+
+Every finished log is signed on the Screenmate (ECDSA P-256, a key in the
+Android keystore that cannot be copied off it). The signature travels in the
+sidecar's `integrity` object (SMO, `docs/sentry-manager-format.md`,
+"Integrity"). The signed bytes are these lines joined by LF with a trailing
+LF:
+
+```
+canbridge-log-sig-v1
+<vehicle_key>
+<log file name>
+<log sha256, lowercase hex>
+<log length in bytes>
+<index>
+<prev_name>
+<prev_sha256>
+```
+
+When a log and its sidecar have both arrived, Sentry Six Manager:
+
+1. hashes the log as it is stored here (SHA-256 and length) and rebuilds the
+   signed message from that, the file name and the sidecar's chain fields;
+2. checks that the sidecar's `vehicle_key` is the file name's key, its
+   `sha256` and `length` are the file's, `version` and `algorithm` are the
+   ones above, the key is a P-256 key and `key_fingerprint` is that key's;
+3. verifies the signature with `crypto.verify('sha256', message, key, signature)`;
+4. compares the key with the one the car is paired with.
+
+**Pairing.** The first signed log of a car key pairs it: its public key is
+pinned (the fingerprint is the SHA-256 of the key's DER, hex in pairs with
+colons, as the app shows under "Log signing key"; the Nerd settings show it
+too, to compare). From then on only logs signed by that key are trusted. A
+log signed by another key (a new Screenmate, the app reinstalled, or someone
+else) is kept but not used, and the Nerd settings offer that key: the owner
+checks its fingerprint in the app and trusts it, and the logs it signed are
+checked again. *Forget the pairing* lets the next signed log pair again.
+
+**What each log becomes** (shown in the Nerd list):
+
+| Check | When | Used? |
+|---|---|---|
+| verified | signed by the paired key, and the file is exactly what was signed | yes |
+| failed | changed after signing, signed for another car or by another key, a bad signature or fields, or not signed although the car is paired | no: kept and listed with the reason; the owner can *Use anyway*, and then the Viewer warns ("CAN data failed its check") wherever it shows that data |
+| unsigned | no signature (`"signed": false`, or no `integrity`) from a car that is not paired | yes, with a quiet note ("unsigned") |
+| waiting | the sidecar has not arrived (after 10 minutes without it, the log is judged as unsigned) | not yet |
+
+Nothing is decoded for the Viewer, the sync or the search until its check
+allows it. Only the log is signed, and everything that matters is in it
+(frames, `# clock`, `# helper-clock`, `# dropped`, `# not recorded`); the
+sidecar's other fields are an unsigned summary (shown, never trusted).
+
+**The chain.** `index` counts up by 1 per log of a key (from 0) and each log
+names the previous one (`prev_name`, `prev_sha256`). For the paired key's
+logs the Nerd settings report:
+
+- a gap: indexes that never arrived (`log 41 is missing`);
+- a mismatch: a log whose `prev_name`/`prev_sha256` is not the log stored
+  here with the index before (swapped, changed or replaced);
+- a duplicate index, or a later index that starts before an earlier one
+  (reordered);
+- a log of the chain that failed its check.
+
+Logs received here and deleted later still count (their record is kept), and
+the bridge deleting its own copies after upload is not a break. A new key
+starts again at 0.
+
 ## Errors
 
 | Status | `code` | Meaning, what the app does |
 |---|---|---|
 | 400 | `bad_name`, `bad_offset`, `bad_length`, `bad_sha256`, `past_end`, `bad_request` | The request is wrong; fix it, do not retry as is. |
-| 401 | `bad_token` | No token, or not the current one: ask the owner for the new token. |
+| 401 | `bad_token` | No token, or a revoked one: ask the owner for a new token. |
 | 403 | `https_only` | Plain HTTP was used. |
+| 403 | `wrong_car` | This token is for another car key. |
+| 429 | `slow_down` | Too many wrong tokens from this address (20 in 10 minutes): wait. |
+| 429 | `too_many_partial` | 16 unfinished uploads for this car already: finish or wait (unfinished uploads are dropped after two days). |
 | 404 | `off` / `not_found` | Uploads are turned off, or an unknown address. Try again later (hours). |
 | 409 | `offset_mismatch` | `Upload-Offset` is not what the server has: resume at `received`. |
 | 409 | `length_changed` | A different `Upload-Length` than the upload already started. |
@@ -123,9 +211,15 @@ digits. Anything else is refused with `400 bad_name`.
 
 ## What happens to the files
 
-Kept under `<data>/can/<vehicleKey>/`, exactly as received. The Nerd panel
-lists them (start, car key, size, frames and dropped from the sidecar) and
-can delete one. Sync to the footage uses the sidecar's clock pairs and the
+Kept under `<data>/can/<vehicleKey>/`, exactly as received; a finished file
+cannot be replaced (`409 exists_different`), only added. The Nerd panel lists
+them (start, car key, check, size, frames and dropped from the sidecar) and
+can delete one (with the password). The checks, the pairing and the chain
+are kept in `<data>/can/<vehicleKey>/trust.json`.
+
+**TLS.** Port 10000 takes TLS 1.3 (the bridge uses only 1.3) and 1.2; older
+versions are refused. A client that sends its headers slower than 20 s, or
+one request longer than 10 minutes, is cut off. Sync to the footage uses the sidecar's clock pairs and the
 `# clock` lines, then refines the offset per drive by matching CAN signals
 (brake, blinkers, accelerator, speed) with Tesla's per-frame video data,
 aiming for under 20 ms on footage that carries that data.
