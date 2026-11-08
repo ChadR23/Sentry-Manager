@@ -94,7 +94,7 @@ test('raw snapshots: a minute two logs share has both; each minute starts with e
   }
 });
 
-test('raw snapshots: a log indexed before them gains them once, its signal minutes untouched', { skip }, async () => {
+test('a log indexed before the raw snapshots (an older format) is decoded again whole, once', { skip }, async () => {
   const lines = [];
   for (let i = 0; i < 50; i++) {
     const b = Buffer.alloc(8);
@@ -112,19 +112,18 @@ test('raw snapshots: a log indexed before them gains them once, its signal minut
     fs.writeFileSync(doneFile, JSON.stringify({ [`K/${name}`]: stamp.replace(`/${FORMAT}`, '') }));
     fs.rmSync(rawFile('20200101T0800'));
     const sigFile = path.join(base, 'idx', 'K', '20200101T0800.json.gz');
-    const before = fs.readFileSync(sigFile);
     const old = new Date('2001-01-01');
     fs.utimesSync(sigFile, old, old);
     const again = createCanIndex({ canDir: path.join(base, 'can'), dir: path.join(base, 'idx') });
     const todo = await again.pendingLogs();
-    assert.deepEqual(todo.map((j) => [j.name, j.rawOnly]), [[name, true]]);
+    assert.deepEqual(todo.map((j) => [j.name, j.rawOnly]), [[name, false]], 'its signals were decoded by an older format too');
     await again.kick();
     assert.ok(fs.existsSync(rawFile('20200101T0800')), 'raw snapshots written');
-    assert.deepEqual(fs.readFileSync(sigFile), before);
-    assert.equal(fs.statSync(sigFile).mtimeMs, old.getTime(), 'the signal minute was not written again');
+    assert.notEqual(fs.statSync(sigFile).mtimeMs, old.getTime(), 'the signal minute was written again');
     assert.equal(JSON.parse(fs.readFileSync(doneFile, 'utf8'))[`K/${name}`], stamp);
     assert.deepEqual(await again.pendingLogs(), [], 'once');
     assert.equal((await again.raw(['K'], T0, T0 + 5000))[0].changes.length, 50);
+    assert.equal((await again.series(['K'], T0, T0 + 5000)).BattVoltage132.length, 50, 'every point once, not twice');
   } finally {
     await fsp.rm(base, { recursive: true, force: true });
   }

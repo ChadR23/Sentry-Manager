@@ -50,6 +50,7 @@
 const fsp = require('fs/promises');
 const path = require('path');
 const { classify, readHead, readMinuteFile, KIND } = require('./canFormat');
+const { FORMAT: CAN_FORMAT } = require('./canIndex');
 
 const MIN = 60;
 const HOUR = 3600;
@@ -475,7 +476,13 @@ function createArchiveGap({ inventory, vehicles, notes, db, speedIndex = null, c
 
   function loadState(vid) {
     const raw = db.get(stateKey(vid), {}) || {};
-    if (raw.days) return { days: {}, rx: null, lastRecentS: null, sentry: false, matched: [], ...raw };
+    if (raw.days) {
+      const st = { days: {}, rx: null, lastRecentS: null, sentry: false, matched: [], ...raw };
+      // what was learned from the CAN minutes (does this car record in Sentry, which keys are it)
+      // is learned again when the index decodes them differently (canIndex.js FORMAT)
+      if (raw.canFormat !== CAN_FORMAT) Object.assign(st, { sentry: false, matched: [] });
+      return st;
+    }
     // the first version kept only the days, at the top level
     const days = {};
     for (const [k, v] of Object.entries(raw)) if (v && typeof v === 'object' && v.day) days[k] = v;
@@ -650,7 +657,7 @@ function createArchiveGap({ inventory, vehicles, notes, db, speedIndex = null, c
     });
     // the car was removed while this ran: nothing of it is kept or raised
     if ((generation.get(vid) || 0) !== gen || !vehicles.get(vid)) return null;
-    if (can) { st.sentry = can.learned.sentry; st.matched = can.learned.matched; }
+    if (can) { st.sentry = can.learned.sentry; st.matched = can.learned.matched; st.canFormat = CAN_FORMAT; }
     if (res.newestRecent !== null) st.lastRecentS = Math.max(st.lastRecentS || 0, res.newestRecent);
     res.checkedAt = nowMs;
     results.set(vid, res);

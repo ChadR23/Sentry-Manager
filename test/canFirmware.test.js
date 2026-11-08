@@ -183,3 +183,89 @@ test('an index written by r1 is decoded again: the old names go, from the minute
     await fsp.rm(base, { recursive: true, force: true });
   }
 });
+
+test('an r1 index of stored logs ends up wholly r2: every minute, signals.json, the summaries, and what the sync and the gap check learned', { skip }, async () => {
+  const fmt = require('../server/canFormat');
+  const { SYNC_FORMAT } = require('../server/canSync');
+  const nameA = 'K_20261108T012750Z_1.log.xz'; // 01:27:50 to 01:28:10, stored
+  const nameB = 'K_20261108T013000Z_2.log.xz'; // 01:30:00 to 01:30:05, then gone (cannot be decoded again)
+  const side = { bus: { can0: 'vehicle (inferred from IDs)', can1: 'chassis (inferred from IDs)', can3: 'screenmate-internal' } };
+  const { base, idx } = await setup(nameA, candump(T0 - 10_000, 200), side);
+  try {
+    await fsp.writeFile(path.join(base, 'can', 'K', nameB), execFileSync('xz', ['-1', '-c'], { input: candump(T0 + 120_000, 50) }));
+    await idx.kick();
+    const dirK = path.join(base, 'idx', 'K');
+    const doneFile = path.join(base, 'idx', 'done.json');
+    // as r1 left it: stamps, minutes in the older layout with parts that say no fmt and what its
+    // decoding made of these frames (can3's position, the flat pack temperatures, page 5 of 0x261 as
+    // page 1: 3.6 V), signals.json without fmt, no packed.json
+    const done = JSON.parse(fs.readFileSync(doneFile, 'utf8'));
+    for (const k of Object.keys(done)) done[k] = done[k].replace(`/${FORMAT}`, '/r1');
+    fs.writeFileSync(doneFile, JSON.stringify(done));
+    fs.rmSync(path.join(base, 'idx', 'packed.json'), { force: true });
+    const minutes = fs.readdirSync(dirK).filter((f) => /^\d{8}T\d{4}\.json\.gz$/.test(f));
+    assert.deepEqual(minutes.sort(), ['20261108T0127.json.gz', '20261108T0128.json.gz', '20261108T0130.json.gz']);
+    for (const f of minutes) {
+      const m = fmt.decodeMinute(JSON.parse(zlib.gunzipSync(fs.readFileSync(path.join(dirK, f))).toString()));
+      delete m.act;
+      for (const p of Object.values(m.logs)) delete p.fmt;
+      m.signals.GPSLatitude04F = [[0, 40.2]];
+      m.signals.BMSmaxPackTemperature = [[1000, 15], [2000, -25]];
+      m.signals.v12vBattVoltage261 = [[0, 15.77], [500, 3.6], [1000, 15.77], [1500, 3.6]];
+      fs.writeFileSync(path.join(dirK, f), zlib.gzipSync(JSON.stringify(m)));
+    }
+    const sigFile = path.join(dirK, 'signals.json');
+    const meta = JSON.parse(fs.readFileSync(sigFile, 'utf8'));
+    for (const v of Object.values(meta)) delete v.fmt;
+    meta.GPSLatitude04F = { unit: 'Deg' };
+    fs.writeFileSync(sigFile, JSON.stringify(meta));
+    fs.writeFileSync(path.join(dirK, 'ids-20261108.json'), JSON.stringify({ v: 'v1', ids: { 'can9:123': [T0, T0, 1] } }));
+    fs.rmSync(path.join(base, 'can', 'K', nameB)); // log B is gone: its part cannot be decoded again
+
+    const told = [];
+    const again = createCanIndex({ canDir: path.join(base, 'can'), dir: path.join(base, 'idx'), onIndexed: (k, a, b) => told.push([k, a, b]) });
+    assert.deepEqual((await again.pendingLogs()).map((j) => j.name), [nameA], 'the stored log, decoded again');
+    await again.kick();
+
+    // every minute: columns, its activity, every part r2, nothing of the r1 decoding left
+    for (const f of minutes) {
+      const file = path.join(dirK, f);
+      const head = await fmt.readHead(file);
+      assert.equal(head.enc, fmt.ENC, f);
+      assert.ok(head.act, `${f}: act`);
+      assert.ok(Object.values(head.logs).every((p) => p.fmt === FORMAT), `${f}: ${JSON.stringify(head.logs)}`);
+      const m = await fmt.readMinuteFile(file);
+      for (const n of ['GPSLatitude04F', 'BMSmaxPackTemperature']) assert.equal(m.signals[n], undefined, `${f}: ${n}`);
+      assert.ok(!(m.signals.v12vBattVoltage261 || []).some((p) => p[1] < 10), `${f}: no 3.6 V`);
+    }
+    // log B's minute: its frame counts kept (not decoded), its signals gone
+    const b = await fmt.readMinuteFile(path.join(dirK, '20261108T0130.json.gz'));
+    assert.deepEqual(Object.keys(b.signals), []);
+    assert.ok(b.ids['can0:243'] > 0);
+    // log A's values: steady, as the car sent them
+    const s = await again.series(['K'], T0 - 10_000, T0 + 10_000);
+    for (const [n, want] of Object.entries(EXPECTED)) {
+      for (let t = T0 - 9000; t < T0 + 9000; t += 1000) {
+        const v = at(s[n], t);
+        assert.ok(v !== undefined && near(v, want, 0.01), `${n} at ${new Date(t).toISOString()}: ${v}, not ${want}`);
+      }
+    }
+    // signals.json: only r2 names
+    const metaAfter = JSON.parse(fs.readFileSync(sigFile, 'utf8'));
+    assert.equal(metaAfter.GPSLatitude04F, undefined);
+    assert.ok(Object.values(metaAfter).every((v) => v.fmt === FORMAT));
+    // per-day id summaries: made again (the made-up id is gone)
+    const fresh = await again.newIds('K', T0 - 86400_000);
+    assert.ok(!fresh.appeared.some((x) => x.id === 'can9:123'), 'the day summary was made again');
+    assert.ok(fresh.appeared.some((x) => x.id === 'can0:243'));
+    // packed once for this layout and decoding; the sync and the gap check told of both logs' minutes
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(base, 'idx', 'packed.json'), 'utf8')), { K: `${fmt.ENC}/${FORMAT}` });
+    const covers = (t) => told.some(([k, a, z]) => k === 'K' && a <= t && t <= z);
+    assert.ok(covers(T0) && covers(T0 + 121_000), `told: ${JSON.stringify(told)}`);
+    assert.equal(await again.repack(), 0, 'nothing more to do');
+    // the sync's stored offsets are kept by the index's decoding: an r1 sync.json is worked out again
+    assert.ok(SYNC_FORMAT.endsWith(`/${FORMAT}`), SYNC_FORMAT);
+  } finally {
+    await fsp.rm(base, { recursive: true, force: true });
+  }
+});

@@ -27,6 +27,7 @@
 
 const fsp = require('fs/promises');
 const path = require('path');
+const { FORMAT: INDEX_FORMAT } = require('./canIndex');
 
 const SIG = {
   speed: 'DI_vehicleSpeed', // kph
@@ -41,7 +42,9 @@ const SEARCH_MS = 10_000; // how far the clocks may be apart
 const GRID_MS = 5; // the CAN signals sampled this finely for the correlation
 const TEL_STEP = 50; // the footage's signals every 50 ms
 const ACCEL_STEPS = [5, 20]; // accelerator edges: crossing these (%)
-const FORMAT = 1;
+// what is kept (sync.json) is worked out from the index's signals: kept by the index's decoding
+// too (canIndex.js FORMAT), so a decoding fixed later has every offset worked out again
+const FORMAT = `1/${INDEX_FORMAT}`;
 
 const median = (a) => {
   if (!a.length) return NaN;
@@ -689,4 +692,4 @@ function createCanSync({ dir, series, telemetry, vehicles, inventory, keysFor, s
   return { forClip, indexed, status: () => ({ ...status }), settled };
 }
 
-module.exports = { createCanSync, estimateClip, solveDrive, telemetryFrames, decodeRecord, canChannels, telEdges, canEdges, robustFit, speedOffset, clipDuration, NAMES, SIG };
+module.exports = { SYNC_FORMAT: FORMAT, createCanSync, estimateClip, solveDrive, telemetryFrames, decodeRecord, canChannels, telEdges, canEdges, robustFit, speedOffset, clipDuration, NAMES, SIG };

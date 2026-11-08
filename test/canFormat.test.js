@@ -14,7 +14,7 @@ const path = require('path');
 const zlib = require('zlib');
 const { execFileSync, spawnSync } = require('child_process');
 const fmt = require('../server/canFormat');
-const { createCanIndex } = require('../server/canIndex');
+const { createCanIndex, FORMAT } = require('../server/canIndex');
 
 const skip = spawnSync('xz', ['--version']).status !== 0 && 'needs xz';
 const T0 = Date.UTC(2020, 0, 1, 8, 0, 0);
@@ -113,7 +113,7 @@ test('repack: older minute files are written again as columns with the same cont
   assert.deepEqual(await older.series(['K'], T0, T0 + 90_000, null), series);
   assert.deepEqual(await older.raw(['K'], T0, T0 + 90_000), raw);
   assert.equal((await fmt.readHead(path.join(dirK, '20200101T0800.json.gz'))).act, 'n');
-  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(base, 'idx', 'packed.json'), 'utf8')), { K: 'c1' });
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(base, 'idx', 'packed.json'), 'utf8')), { K: `c1/${FORMAT}` }, 'for this layout and this decoding');
 });
 
 test('new ids since a date: from per-day summaries, complete however long the history, made again when a day changes', { skip }, async (t) => {

@@ -274,7 +274,10 @@ sidecar's bus map (or the default: can0 vehicle, can1 chassis) names, with that
 bus's message; the Screenmate's own buses (can2, can3: "screenmate-internal")
 are kept and counted, not decoded. A signal name that two messages share has
 the message id after it in the decoded data (`UI_cpuTemperature_353`). When the
-decoding changes, every stored log is indexed again in the background.
+decoding changes, every stored log is indexed again in the background, each
+replacing its own part of its minutes; then whatever an older decoding wrote
+for a log that cannot be read again (deleted, not usable) is taken out, and
+the CAN-to-footage sync and the archive gap check work out their answers again.
 
 Times are ISO with a zone, or the car's own clock (`YYYY-MM-DD[THH:MM]`).
 `check=1` on the bundle and decoded routes answers what they would hold

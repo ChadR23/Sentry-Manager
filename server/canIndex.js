@@ -5,7 +5,7 @@
 // already in signals. For every car (vehicleKey) and UTC minute:
 //
 //   <DATA>/can-index/<vehicleKey>/<yyyyMMddTHHmm>.json.gz
-//     { minute, enc, act, trust, logs: { "<log name>": { span: [first ms, last ms], ids, trust } },
+//     { minute, enc, act, trust, logs: { "<log name>": { span: [first ms, last ms], ids, trust, fmt } },
 //       signals: { name: [[ms since the minute, value], …] },
 //       ids: { "can0:2E5": frames, … } }       (unknown ids are counted too; last,
 //                                               canSearch.js reads only them)
@@ -26,9 +26,22 @@
 //     removed whenever a minute of the day is written
 //   <DATA>/can-index/done.json                   which logs are indexed
 //     ("<size>/<mtime>/<FORMAT>[/<sidecar size>-<sidecar mtime>]": a log
-//     indexed by an older format is read again, and only what that format
-//     lacked is written; a sidecar that comes, or changes, after its log has
-//     the log indexed again with its bus map)
+//     indexed by an older format is decoded again, whole; a sidecar that
+//     comes, or changes, after its log has the log indexed again with its bus map)
+//
+// Two versions, each about one thing: FORMAT is how the signals are decoded
+// (r2: the firmware overrides, named buses only, unique series names); it is
+// in each log's stamp in done.json, in each log's part of a minute (`fmt`), and
+// in signals.json. canFormat.js's ENC is only how a minute is laid out on disk
+// (c1: columns). A minute is current when it is ENC and every part of it is
+// FORMAT. After an upgrade every stored log is decoded again (its stamp is
+// older), each replacing its own part of its minutes; then repack() looks at
+// every minute once: an older layout is written again as columns, and the
+// signals of a part still decoded by an older FORMAT (a log that could not be
+// decoded again: not stored any more, not usable, unreadable) are taken out,
+// so nothing an older decoding wrote stays in the index. The CAN sync
+// (canSync.js) and the archive gap check (archiveGap.js) keep their own
+// results by FORMAT too, and are told of every minute that changes.
 //
 // Indexing a log again replaces its own part of each minute: what it wrote
 // before (its frame counts, and its points within its own span of the
@@ -136,6 +149,17 @@ function withoutPart({ signals, ids = {} }, old) {
   return { signals: outSignals, ids: outIds };
 }
 
+/** The points of `signals` inside one of the parts' spans (every point a log wrote is inside its own). */
+function onlyInSpans(signals, parts) {
+  const spans = parts.map((p) => p?.span).filter((sp) => Array.isArray(sp));
+  const out = {};
+  for (const [nm, pts] of Object.entries(signals)) {
+    const keep = pts.filter((p) => spans.some(([a, b]) => p[0] >= a && p[0] <= b));
+    if (keep.length) out[nm] = keep;
+  }
+  return out;
+}
+
 /** The part of a stamp that names the sidecar: its size and mtime, or nothing when there is none. */
 async function sidecarStamp(file) {
   const st = await fsp.stat(`${file}.json`).catch(() => null);
@@ -194,19 +218,22 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
   /**
    * Write one log's part of a minute. A minute can span two logs: merge with
    * what is there, after taking out what this log wrote before (`before`: its
-   * record in the raw file, for a minute written before the per-log records).
+   * record in the raw file, when the minute has no part of this log's).
    */
   async function writeMinute(key, minute, data, name, part, before = null) {
     const had = await readMinute(key, minute);
     const logs = {};
     let signals = data.signals;
     let ids = data.ids;
-    if (had) {
-      // a minute from before the per-log records: its trust is kept as a part of its own
-      if (had.logs) Object.assign(logs, had.logs);
-      else if (had.trust) logs[''] = { trust: had.trust };
-      const old = had.logs ? had.logs[name] : before;
+    // A minute from before the per-log records (or with a part kept for them, '') cannot be told
+    // apart log by log, and an older FORMAT decoded it: every log is decoded again since, so it
+    // is not merged with but replaced (its other logs put their parts back as they are decoded).
+    if (had && had.logs && !Object.hasOwn(had.logs, '')) {
+      Object.assign(logs, had.logs);
+      const old = had.logs[name] || before;
       const rest = withoutPart({ signals: had.signals || {}, ids: had.ids || {} }, old);
+      // (and a point no other log's span holds: no log wrote it, it is left from before)
+      rest.signals = onlyInSpans(rest.signals, Object.entries(had.logs).filter(([n]) => n !== name).map(([, p]) => p));
       for (const [nm, pts] of Object.entries(rest.signals)) {
         const mine = signals[nm];
         signals[nm] = mine ? [...pts, ...mine].sort((a, b) => a[0] - b[0]).filter((p, i, a) => i === 0 || p[0] !== a[i - 1][0]) : pts;
@@ -295,7 +322,7 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
       if (!bucket) return;
       flushPending();
       flushRaw();
-      writes.push([minute, bucket, rawBucket, { span: rawLog.span, ids: rawLog.ids, ...(trust ? { trust } : {}) }]);
+      writes.push([minute, bucket, rawBucket, { span: rawLog.span, ids: rawLog.ids, ...(trust ? { trust } : {}), fmt: FORMAT }]);
       bucket = null;
       rawBucket = null;
     };
@@ -424,8 +451,8 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
         // the others wait, and are looked at again when their check changes
         const ok = await usable(key, name).catch(() => ({ use: false }));
         if (!ok.use) continue;
-        // indexed before the raw snapshots (the same file, no sidecar since): only those are written now
-        out.push({ key, name, stamp, startedAt: n.startedAt, rawOnly: had === file && !side, trust: ok.trust });
+        // (a log indexed before the raw snapshots, or by an older FORMAT: decoded again whole)
+        out.push({ key, name, stamp, startedAt: n.startedAt, rawOnly: false, trust: ok.trust });
       }
     }
     return out.sort((a, b) => a.startedAt - b.startedAt);
@@ -802,10 +829,15 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
     return { appeared: appeared.slice(0, limit), appearedCount: appeared.length, idCount: all.size, totalMinutes, scannedMinutes: totalMinutes, complete: true };
   }
 
-  // ---- repacking: minutes written before the column layout (canFormat.js) are written again in
-  // it, in the background once nothing is waiting to be indexed: about half the room on disk.
-  // The content stays the same; only the layout (and `act` on top) changes. Done per car key, once.
+  // ---- repacking: once nothing is waiting to be indexed, every minute file not current is
+  // written again, in the background, once per car key (packed.json says which keys are done, for
+  // which layout and FORMAT): an older layout (before canFormat.js's columns: about half the room on
+  // disk) as columns, and a minute with a part an older FORMAT decoded (its log was not decoded
+  // again: not stored any more, not usable, unreadable) without that part's signals (its frame
+  // counts stay: they are not decoded). A minute from before the per-log records keeps having none
+  // (indexing its log again relies on that), without its signals.
   const packFile = path.join(dir, 'packed.json');
+  const PACKED = `${fmt.ENC}/${FORMAT}`;
   async function encOf(file) {
     let fh;
     try {
@@ -816,17 +848,29 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
       return /"enc":"(\w+)"/.exec(head)?.[1] || null;
     } catch { return undefined; } finally { await fh?.close().catch(() => {}); }
   }
+  /** Whether a minute's parts were all decoded by this FORMAT (none from before the per-log records). */
+  const decodedNow = (logs) => Boolean(logs) && typeof logs === 'object' && !Object.hasOwn(logs, '') && Object.values(logs).every((p) => p?.fmt === FORMAT);
+  /** A minute file's state: 'ok', 'layout' (an older layout only), 'stale' (an older FORMAT's signals), or null (unreadable). */
+  async function minuteState(file) {
+    const head = await fmt.readHead(file);
+    if (!head) return null;
+    if (!decodedNow(head.logs)) return 'stale';
+    return (await encOf(file)) === fmt.ENC ? 'ok' : 'layout';
+  }
   async function repack({ shouldStop = () => false } = {}) {
     let packed = {};
     try { packed = JSON.parse(await fsp.readFile(packFile, 'utf8')) || {}; } catch { /* none yet */ }
     let keys = [];
     try { keys = (await fsp.readdir(dir, { withFileTypes: true })).filter((e) => e.isDirectory()).map((e) => e.name); } catch { return 0; }
     let n = 0;
+    let stripped = 0;
     for (const key of keys) {
-      if (packed[key] === fmt.ENC) continue;
+      if (packed[key] === PACKED) continue;
       let names = [];
       try { names = await fsp.readdir(path.join(dir, key)); } catch { continue; }
       let finished = true;
+      let from = Infinity;
+      let to = -Infinity;
       for (const name of names.sort().reverse()) {
         const isMinute = MINUTE_FILE.test(name);
         const rawMinute = RAW_FILE.exec(name)?.[1];
@@ -834,18 +878,38 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
         if (shouldStop()) { finished = false; break; }
         while (!idle() && !shouldStop()) await new Promise((r) => setTimeout(r, 2000));
         const file = path.join(dir, key, name);
-        if ((await encOf(file)) !== null) continue; // packed already (or unreadable)
+        const was = isMinute ? await minuteState(file) : null;
+        if (isMinute ? was !== 'layout' && was !== 'stale' : (await encOf(file)) !== null) continue; // current (or unreadable)
         await withLock(key, async () => {
-          if ((await encOf(file)) !== null) return;
           if (isMinute) {
+            const state = await minuteState(file);
+            if (state !== 'layout' && state !== 'stale') return;
             const minute = name.slice(0, 13);
             const data = await readMinute(key, minute);
             if (!data) return;
-            const { minute: m, trust, logs, signals, ids } = data;
+            const { minute: m, trust } = data;
+            let { logs, signals, ids } = data;
+            signals ||= {};
+            if (state === 'stale') {
+              if (!logs || Object.hasOwn(logs, '')) signals = {}; // (not told apart log by log)
+              else {
+                logs = { ...logs };
+                // only the points of the parts this FORMAT decoded (its frame counts stay; nothing of
+                // an older decoding is left)
+                signals = onlyInSpans(signals, Object.values(logs).filter((part) => part?.fmt === FORMAT));
+                for (const [ln, part] of Object.entries(logs)) if (part?.fmt !== FORMAT) logs[ln] = { ...part, fmt: FORMAT };
+              }
+              const t = minuteOfFile(name);
+              from = Math.min(from, t);
+              to = Math.max(to, t + 59_999);
+              stripped++;
+            }
             // (a minute from before the per-log records keeps having none: indexing it again relies on that)
-            await writeAtomic(file, await fmt.packMinute({ minute: m ?? minute, trust, logs, signals: signals || {}, ids: ids || {} }));
+            await dayChanged(key, minute);
+            await writeAtomic(file, await fmt.packMinute({ minute: m ?? minute, trust, logs, signals, ids: ids || {} }));
             changed(key, minute);
           } else {
+            if ((await encOf(file)) !== null) return;
             const data = await rawNow(key, rawMinute);
             if (!data) return;
             await writeAtomic(file, await fmt.packRaw(data));
@@ -855,13 +919,15 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
         });
         await new Promise((r) => setImmediate(r));
       }
+      // what the sync and the archive gap check worked out from those minutes is worked out again
+      if (from <= to) { try { onIndexed?.(key, from, to); } catch { /* their own business */ } }
       if (finished) {
-        packed[key] = fmt.ENC;
+        packed[key] = PACKED;
         await fsp.mkdir(dir, { recursive: true });
         await writeAtomic(packFile, JSON.stringify(packed));
       } else break;
     }
-    if (n) log?.info?.(`CAN index: ${n} older minute file(s) repacked`);
+    if (n) log?.info?.(`CAN index: ${n} older minute file(s) written again${stripped ? ` (${stripped} without what an older decoding wrote)` : ''}`);
     return n;
   }
 
