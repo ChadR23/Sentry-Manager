@@ -1383,6 +1383,10 @@ test('Viewer dashboards: kept per account, cleaned of anything that is not a blo
     assert.deepEqual(got.boards[0].blocks, [{ type: 'gauge', signals: ['dash.speed'] }, { type: 'wide', signals: ['a', 'b', 'c'] }], 'three stats at most in a wide block; unknown block types dropped');
     assert.deepEqual([got.boards[1].name, got.boards[1].placement, got.boards[1].metric, got.boards[1].blocks[0].signals], ['Battery nerd', 'below', true, ['can.BattVoltage132']]);
     assert.equal((await s.call('PUT', '/api/dashboards', { boards: [] })).status, 400);
+    // a bar moved anywhere: its spot for wide and narrow screens, kept within the screen (0 to 1)
+    const fl = await s.call('PUT', '/api/dashboards', { active: 'f', boards: [{ id: 'f', name: 'Float', placement: 'float', float: { wide: { x: 0.25, y: 0.1 }, narrow: { x: 7, y: -2 }, huge: { x: 1, y: 1 } }, blocks: [] }] });
+    assert.deepEqual([fl.data.boards[0].placement, fl.data.boards[0].float], ['float', { wide: { x: 0.25, y: 0.1 }, narrow: { x: 1, y: 0 } }]);
+    assert.equal((await s.call('PUT', '/api/dashboards', { boards: [{ id: 'x', placement: 'sideways', blocks: [] }] })).data.boards[0].placement, 'below');
   } finally {
     await s.stop();
     await fsp.rm(dir, { recursive: true, force: true });

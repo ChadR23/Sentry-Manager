@@ -1617,7 +1617,10 @@ async function main() {
     const boards = (Array.isArray(body?.boards) ? body.boards : []).slice(0, 12).map((b, i) => ({
       id: /^[\w-]{1,24}$/.test(String(b?.id)) ? String(b.id) : `b${i}`,
       name: String(b?.name ?? 'Dashboard').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 40) || 'Dashboard',
-      placement: b?.placement === 'over' ? 'over' : 'below',
+      placement: ['over', 'float'].includes(b?.placement) ? b.placement : 'below',
+      // where a floating bar was moved to, for wide and for narrow screens: shares of the room left (0 to 1)
+      float: Object.fromEntries(['wide', 'narrow'].map((k) => [k, b?.float?.[k]]).filter(([, p]) => Number.isFinite(p?.x) && Number.isFinite(p?.y))
+        .map(([k, p]) => [k, { x: Math.max(0, Math.min(1, p.x)), y: Math.max(0, Math.min(1, p.y)) }])),
       metric: typeof b?.metric === 'boolean' ? b.metric : null,
       blocks: (Array.isArray(b?.blocks) ? b.blocks : []).slice(0, 32).filter((x) => DASH_TYPES[x?.type]).map((x) => ({
         type: x.type, signals: (Array.isArray(x.signals) ? x.signals : []).slice(0, DASH_TYPES[x.type]).map((id) => String(id)).filter((id) => /^[\w.:-]{1,80}$/.test(id))
