@@ -1622,6 +1622,10 @@ async function main() {
       // where a floating bar was moved to, for wide and for narrow screens: shares of the room left (0 to 1)
       float: Object.fromEntries(['wide', 'narrow'].map((k) => [k, b?.float?.[k]]).filter(([, p]) => Number.isFinite(p?.x) && Number.isFinite(p?.y))
         .map(([k, p]) => [k, { x: Math.max(0, Math.min(1, p.x)), y: Math.max(0, Math.min(1, p.y)) }])),
+      // the list box: under the car data (dock) or anywhere, where it was dragged
+      listPlacement: b?.listPlacement === 'float' ? 'float' : 'dock',
+      listFloat: Object.fromEntries(['wide', 'narrow'].map((k) => [k, b?.listFloat?.[k]]).filter(([, p]) => Number.isFinite(p?.x) && Number.isFinite(p?.y))
+        .map(([k, p]) => [k, { x: Math.max(0, Math.min(1, p.x)), y: Math.max(0, Math.min(1, p.y)) }])),
       metric: typeof b?.metric === 'boolean' ? b.metric : null,
       blocks: (Array.isArray(b?.blocks) ? b.blocks : []).slice(0, 32).filter((x) => Object.hasOwn(DASH_TYPES, String(x?.type))).map((x) => ({
         type: x.type, signals: (Array.isArray(x.signals) ? x.signals : []).slice(0, DASH_TYPES[x.type]).map((id) => String(id)).filter((id) => /^[\w.:-]{1,80}$/.test(id)),

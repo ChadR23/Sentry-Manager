@@ -115,6 +115,13 @@ const STYLE = `
 .sentry-sd .sd-pop-o.cur::after{content:'✓';margin-left:auto}
 .sentry-sd .sd-pop-none{padding:10px;color:var(--sd-dim);font-size:14px}
 .sentry-sd .sd-row:has(.sd-list){align-items:flex-start}
+.sentry-sd.sd-listpanel.below{margin:8px 0;background:var(--sd-bg);border:1px solid var(--sd-line);border-radius:18px;padding:8px}
+.sentry-sd.sd-listpanel.float{position:fixed;z-index:2147481900;left:0;top:0;width:min(560px,calc(100vw - 16px));background:rgba(18,20,24,.97);border:1px solid var(--sd-line);border-radius:16px;padding:6px;box-shadow:0 12px 32px rgba(0,0,0,.45)}
+.sentry-sd.sd-listpanel.moving{opacity:.92}
+.sentry-sd .sd-listhead{margin:0 0 6px}
+.sentry-sd .sd-listtitle{font-size:14px;font-weight:800}
+.sentry-sd.sd-listpanel .sd-list{max-width:none}
+.sentry-sd.sd-listpanel.below .sd-list{max-width:760px}
 .sentry-sd .sd-list{flex:1 1 340px;max-width:620px;padding:8px;justify-content:flex-start;gap:6px}
 .sentry-sd .sd-list-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .sentry-sd .sd-list-bar input[type=search]{all:unset;box-sizing:border-box;flex:1 1 140px;min-width:0;padding:5px 10px;border-radius:8px;border:1px solid var(--sd-line);background:rgba(255,255,255,.06);color:var(--sd-fg);font:600 14px/1.5 system-ui,sans-serif;-webkit-user-select:text;user-select:text}
@@ -675,6 +682,9 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
   }
   const el = document.createElement('div');
   el.className = 'sentry-sd';
+  // the list blocks live in their own box, outside the bar: under it, or anywhere (dragged)
+  const panel = document.createElement('div');
+  panel.className = 'sentry-sd sd-listpanel';
   el.setAttribute('role', 'region');
   el.setAttribute('aria-label', 'Car data at this moment');
   let state = null; // { boards, active }
@@ -775,22 +785,42 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
       } else if (el.previousElementSibling !== stage) stage.after(el);
     }
   }
-  /** Put a floating bar where it was left: x and y are shares of the room around it, so it stays on screen at any size. */
-  function applyFloat() {
-    if (whereNow() !== 'float') return;
-    const p = board.float?.[screenKind()] || { x: 0.5, y: 0.94 };
-    const roomX = Math.max(0, innerWidth - el.offsetWidth);
-    const roomY = Math.max(0, innerHeight - el.offsetHeight);
-    el.style.left = `${Math.round(p.x * roomX)}px`;
-    el.style.top = `${Math.round(p.y * roomY)}px`;
+  // the list box: docked under the bar, or floating where it was dragged
+  const listFloats = () => board?.listPlacement === 'float';
+  function placePanel() {
+    const has = !hidden && board.blocks.some((b) => b.type === 'list');
+    if (!has) { panel.remove(); return; }
+    panel.classList.toggle('float', listFloats());
+    panel.classList.toggle('below', !listFloats());
+    if (listFloats()) {
+      if (panel.parentElement !== document.body) document.body.appendChild(panel);
+    } else {
+      panel.style.left = '';
+      panel.style.top = '';
+      // right after the bar when it is under the cameras, else right after the cameras
+      const after = whereNow() === 'below' ? el : stage;
+      if (panel.previousElementSibling !== after) after.after(panel);
+    }
   }
-  /** Keep where it is now (after a drag or a nudge). */
-  function keepFloat(left, top) {
-    const roomX = Math.max(1, innerWidth - el.offsetWidth);
-    const roomY = Math.max(1, innerHeight - el.offsetHeight);
+  /** Put a floating box where it was left: x and y are shares of the room around it, so it stays on screen at any size. */
+  function floatTo(node, p) {
+    const roomX = Math.max(0, innerWidth - node.offsetWidth);
+    const roomY = Math.max(0, innerHeight - node.offsetHeight);
+    node.style.left = `${Math.round(p.x * roomX)}px`;
+    node.style.top = `${Math.round(p.y * roomY)}px`;
+  }
+  function applyFloat() {
+    if (whereNow() === 'float') floatTo(el, board.float?.[screenKind()] || { x: 0.5, y: 0.94 });
+    if (listFloats() && panel.parentElement) floatTo(panel, board.listFloat?.[screenKind()] || { x: 0.98, y: 0.3 });
+  }
+  /** Keep where it is now (after a drag or a nudge): the bar's spot, or (`node` the list box) the list's. */
+  function keepFloat(left, top, node = el) {
+    const roomX = Math.max(1, innerWidth - node.offsetWidth);
+    const roomY = Math.max(1, innerHeight - node.offsetHeight);
     const x = Math.max(0, Math.min(1, left / roomX));
     const y = Math.max(0, Math.min(1, top / roomY));
-    board.float = { ...(board.float || {}), [screenKind()]: { x: Math.round(x * 1000) / 1000, y: Math.round(y * 1000) / 1000 } };
+    const field = node === panel ? 'listFloat' : 'float';
+    board[field] = { ...(board[field] || {}), [screenKind()]: { x: Math.round(x * 1000) / 1000, y: Math.round(y * 1000) / 1000 } };
     saveBoards(state);
     applyFloat();
   }
@@ -978,7 +1008,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     if (!hotLeft) return;
     const nowMs = Date.now();
     let left = 0;
-    el.querySelectorAll('.sd-list').forEach((node) => {
+    panel.querySelectorAll('.sd-list').forEach((node) => {
       const st = lists.get(board.blocks[Number(node.dataset.i)]);
       if (!st) return;
       node.querySelectorAll('.sd-list-r.hot').forEach((rowEl) => {
@@ -1019,6 +1049,8 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     if (pop && (!editing || hidden || !board.blocks[pop.pick])) closePick(false);
     place();
     el.classList.toggle('editing', editing);
+    panel.classList.toggle('editing', editing);
+    placePanel();
     if (hidden) {
       el.innerHTML = '<div class="sd-tools"><button type="button" class="sd-btn" data-show>Show car data</button></div>';
       applyFloat();
@@ -1026,7 +1058,11 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     }
     const boardsSel = state.boards.length > 1 || editing
       ? `<select data-board aria-label="Dashboard">${state.boards.map((x) => `<option value="${esc(x.id)}"${x.id === board.id ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}</select>` : '';
-    el.innerHTML = `<div class="sd-row" data-row>${board.blocks.map(blockHtml).join('') || '<span class="sd-none">No blocks: Customize to add some.</span>'}</div>
+    const inBar = board.blocks.map((b, i) => (b.type === 'list' ? '' : blockHtml(b, i))).join('');
+    const lists = board.blocks.map((b, i) => (b.type === 'list' ? blockHtml(b, i) : '')).join('');
+    panel.innerHTML = lists && `<div class="sd-tools sd-listhead"><button type="button" class="sd-btn sd-move" data-move-list aria-label="Move the list: drag it, or use the arrow keys" title="Drag to move anywhere (arrow keys work too)">⠿ Move</button>
+        <b class="sd-listtitle">Every stat</b>${listFloats() ? '<button type="button" class="sd-btn" data-dock-list title="Put the list back under the car data">Dock</button>' : ''}</div><div class="sd-row">${lists}</div>`;
+    el.innerHTML = `<div class="sd-row" data-row>${inBar || (lists ? '' : '<span class="sd-none">No blocks: Customize to add some.</span>')}</div>
       <div class="sd-tools">${whereNow() === 'float' ? '<button type="button" class="sd-btn sd-move" data-move-bar aria-label="Move the car data: drag it, or use the arrow keys" title="Drag to move anywhere (arrow keys work too)">⠿ Move</button>' : ''}${boardsSel}
         <button type="button" class="sd-btn" data-edit aria-pressed="${editing}">${editing ? 'Done' : 'Customize'}</button>
         <span class="sd-edit" style="gap:6px;flex-wrap:wrap;align-items:center">
@@ -1069,7 +1105,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     if (!force && key === lastKey) return;
     lastKey = key;
     const c = ctx(ms);
-    el.querySelectorAll('[data-i]').forEach((node) => {
+    [...el.querySelectorAll('[data-i]'), ...panel.querySelectorAll('[data-i]')].forEach((node) => {
       const b = board.blocks[Number(node.dataset.i)];
       if (!b) return;
       if (b.type === 'list') { renderList(node, b, r, c); return; }
@@ -1104,11 +1140,14 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     raf = requestAnimationFrame(loop);
   };
 
+  // both boxes (the bar and the list box) answer the same taps and keys
+  const on = (type, fn, capture) => { el.addEventListener(type, fn, capture); panel.addEventListener(type, fn, capture); };
   // editing
-  el.addEventListener('click', (e) => {
+  on('click', (e) => {
     const t = e.target.closest('button');
     if (!t) return;
     if (t.matches('[data-pick]')) { openPick(t); return; }
+    if (t.matches('[data-dock-list]')) { board.listPlacement = 'dock'; change(); return; }
     if (t.matches('[data-edit]')) { editing = !editing; draw(); return; }
     if (t.matches('[data-raw]')) { rawView.toggle(); t.setAttribute('aria-pressed', String(rawView.open)); return; }
     if (t.matches('[data-hide]')) { hidden = true; editing = false; draw(); return; }
@@ -1126,7 +1165,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
       if (j < 0 || j >= board.blocks.length) return;
       [board.blocks[i], board.blocks[j]] = [board.blocks[j], board.blocks[i]];
       change();
-      el.querySelector(`[data-move="${j}"][data-dir="${t.dataset.dir}"]`)?.focus();
+      (el.querySelector(`[data-move="${j}"][data-dir="${t.dataset.dir}"]`) || panel.querySelector(`[data-move="${j}"][data-dir="${t.dataset.dir}"]`))?.focus();
       return;
     }
 
@@ -1156,22 +1195,22 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
   });
   // a list's search and "changing only": kept with the dashboard; the list redrawn without a full redraw (the cursor stays)
   let listSave = null;
-  const redrawList = (i) => { const node = el.querySelector(`.sd-list[data-i="${i}"]`); if (node) { const m = main(); const ms = (m?.currentTime || 0) * 1000; renderList(node, board.blocks[i], recs ? recordAt(recs, ms) : null, ctx(ms)); } };
-  el.addEventListener('input', (e) => {
+  const redrawList = (i) => { const node = panel.querySelector(`.sd-list[data-i="${i}"]`); if (node) { const m = main(); const ms = (m?.currentTime || 0) * 1000; renderList(node, board.blocks[i], recs ? recordAt(recs, ms) : null, ctx(ms)); } };
+  on('input', (e) => {
     const t = e.target;
     if (!t.matches?.('[data-list-q]')) return;
     const i = Number(t.dataset.listQ);
     const b = board.blocks[i];
     if (!b) return;
     b.q = String(t.value || '').slice(0, 60);
-    const scroll = el.querySelector(`[data-list-scroll="${i}"]`);
+    const scroll = panel.querySelector(`[data-list-scroll="${i}"]`);
     if (scroll) scroll.scrollTop = 0;
     redrawList(i);
     clearTimeout(listSave);
     listSave = setTimeout(() => saveBoards(state), 600);
   });
-  el.addEventListener('scroll', (e) => { const t = e.target; if (t?.matches?.('[data-list-scroll]')) redrawList(Number(t.dataset.listScroll)); }, true);
-  el.addEventListener('change', (e) => {
+  on('scroll', (e) => { const t = e.target; if (t?.matches?.('[data-list-scroll]')) redrawList(Number(t.dataset.listScroll)); }, true);
+  on('change', (e) => {
     const t = e.target;
     if (t.matches('[data-list-changing]')) {
       const i = Number(t.dataset.listChanging);
@@ -1188,46 +1227,66 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
       el.querySelector('[data-placement]')?.focus();
     }
   });
-  // a floating bar moves with its Move handle: dragged (mouse or finger), or nudged with the arrow keys
+  // a floating bar, or the list box, moves with its Move handle: dragged (mouse or finger), or
+  // nudged with the arrow keys; the list leaves its dock as it is first moved
+  const moverOf = (target) => {
+    if (target.closest?.('[data-move-bar]')) return whereNow() === 'float' ? el : null;
+    return target.closest?.('[data-move-list]') ? panel : null;
+  };
+  function unDock(node) {
+    if (node !== panel || listFloats()) return;
+    const r = panel.getBoundingClientRect();
+    board.listPlacement = 'float';
+    placePanel();
+    panel.style.left = `${Math.round(r.left)}px`;
+    panel.style.top = `${Math.round(r.top)}px`;
+    const head = panel.querySelector('.sd-listhead');
+    if (head && !head.querySelector('[data-dock-list]')) head.insertAdjacentHTML?.('beforeend', '<button type="button" class="sd-btn" data-dock-list title="Put the list back under the car data">Dock</button>');
+  }
   let barDrag = null;
-  el.addEventListener('pointerdown', (e) => {
-    const h = e.target.closest('[data-move-bar]');
-    if (!h || whereNow() !== 'float') return;
+  on('pointerdown', (e) => {
+    const node = moverOf(e.target);
+    if (!node) return;
     e.preventDefault();
-    const r = el.getBoundingClientRect();
-    barDrag = { id: e.pointerId, dx: e.clientX - r.left, dy: e.clientY - r.top, moved: false };
-    h.setPointerCapture?.(e.pointerId);
-    el.classList.add('moving');
+    const r = node.getBoundingClientRect();
+    barDrag = { node, id: e.pointerId, dx: e.clientX - r.left, dy: e.clientY - r.top, moved: false };
+    e.target.closest('.sd-move')?.setPointerCapture?.(e.pointerId);
+    node.classList.add('moving');
   });
-  el.addEventListener('pointermove', (e) => {
+  on('pointermove', (e) => {
     if (!barDrag || e.pointerId !== barDrag.id) return;
+    const { node } = barDrag;
+    if (!barDrag.moved) unDock(node);
     barDrag.moved = true;
-    const left = Math.max(0, Math.min(innerWidth - el.offsetWidth, e.clientX - barDrag.dx));
-    const top = Math.max(0, Math.min(innerHeight - el.offsetHeight, e.clientY - barDrag.dy));
-    el.style.left = `${Math.round(left)}px`;
-    el.style.top = `${Math.round(top)}px`;
+    const left = Math.max(0, Math.min(innerWidth - node.offsetWidth, e.clientX - barDrag.dx));
+    const top = Math.max(0, Math.min(innerHeight - node.offsetHeight, e.clientY - barDrag.dy));
+    node.style.left = `${Math.round(left)}px`;
+    node.style.top = `${Math.round(top)}px`;
   });
   const endBarDrag = (e) => {
     if (!barDrag || e.pointerId !== barDrag.id) return;
-    const moved = barDrag.moved;
+    const { node, moved } = barDrag;
     barDrag = null;
-    el.classList.remove('moving');
-    if (moved) keepFloat(parseFloat(el.style.left) || 0, parseFloat(el.style.top) || 0);
+    node.classList.remove('moving');
+    if (moved) keepFloat(parseFloat(node.style.left) || 0, parseFloat(node.style.top) || 0, node);
   };
-  el.addEventListener('pointerup', endBarDrag);
-  el.addEventListener('pointercancel', endBarDrag);
-  el.addEventListener('keydown', (e) => {
-    if (!e.target.closest?.('[data-move-bar]') || whereNow() !== 'float') return;
+  on('pointerup', endBarDrag);
+  on('pointercancel', endBarDrag);
+  on('keydown', (e) => {
+    const node = moverOf(e.target);
+    if (!node) return;
     const step = e.shiftKey ? 50 : 10;
     const d = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[e.key];
     if (!d) return;
     e.preventDefault();
-    const r = el.getBoundingClientRect();
-    keepFloat(Math.max(0, Math.min(innerWidth - el.offsetWidth, r.left + d[0])), Math.max(0, Math.min(innerHeight - el.offsetHeight, r.top + d[1])));
+    unDock(node);
+    const r = node.getBoundingClientRect();
+    keepFloat(Math.max(0, Math.min(innerWidth - node.offsetWidth, r.left + d[0])), Math.max(0, Math.min(innerHeight - node.offsetHeight, r.top + d[1])), node);
+    node.querySelector('.sd-move')?.focus();
   });
   // drag a block by its grip to move it
   let drag = null;
-  el.addEventListener('pointerdown', (e) => {
+  on('pointerdown', (e) => {
     const grip = e.target.closest('[data-grip]');
     if (!grip || !editing) return;
     e.preventDefault();
@@ -1235,7 +1294,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     drag.node.classList.add('dragging');
     grip.setPointerCapture?.(e.pointerId);
   });
-  el.addEventListener('pointermove', (e) => {
+  on('pointermove', (e) => {
     if (!drag || e.pointerId !== drag.id) return;
     const over_ = document.elementFromPoint(e.clientX, e.clientY)?.closest?.('.sentry-sd .sd-b');
     if (!over_ || over_ === drag.node) return;
@@ -1248,10 +1307,10 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     drag.node?.classList.add('dragging');
   });
   const endDrag = () => { if (!drag) return; drag = null; el.querySelectorAll('.dragging').forEach((n) => n.classList.remove('dragging')); change(); };
-  el.addEventListener('pointerup', endDrag);
-  el.addEventListener('pointercancel', endDrag);
+  on('pointerup', endDrag);
+  on('pointercancel', endDrag);
   // the dashboard's own keys and taps stay its own (the Viewer's shortcuts do not fire)
-  el.addEventListener('keydown', (e) => e.stopPropagation());
+  on('keydown', (e) => e.stopPropagation());
 
   loadBoards().then((d) => {
     if (!alive) return;
@@ -1262,6 +1321,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
   });
   return {
     el,
-    destroy() { closePick(false); clearTimeout(listSave); alive = false; cancelAnimationFrame(raf); clearTimeout(canRetry); globalThis.removeEventListener?.('resize', onResize); rawView.destroy(); el.remove(); }
+    panel, // the list box (outside the bar)
+    destroy() { closePick(false); clearTimeout(listSave); alive = false; cancelAnimationFrame(raf); clearTimeout(canRetry); globalThis.removeEventListener?.('resize', onResize); rawView.destroy(); el.remove(); panel.remove(); }
   };
 }

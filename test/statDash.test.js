@@ -359,29 +359,31 @@ test('the list block: every stat of the clip, asked for all at once, filtered, l
   await d.frame();
   await d.frame();
   assert.equal(asked, '*', 'every signal of the clip');
-  const rows = () => d.el.querySelectorAll('.sd-list-r').map((r) => `${r.children[0].textContent}=${r.querySelector('[data-lv]').textContent}`);
+  assert.equal(d.el.querySelectorAll('.sd-list').length, 0, 'the list is not in the bar');
+  assert.equal(d.el.nextElementSibling ?? d.el.parentElement.children[d.el.parentElement.children.indexOf(d.el) + 1], d.dash.panel, 'its own box, right under the bar');
+  const rows = () => d.dash.panel.querySelectorAll('.sd-list-r').map((r) => `${r.children[0].textContent}=${r.querySelector('[data-lv]').textContent}`);
   assert.equal(rows().length >= 2, true, 'the CAN stats with data');
   assert.ok(rows().some((x) => /398\.5V$/.test(x)), `pack voltage shown: ${rows()}`);
   assert.ok(!rows().some((x) => /never/i.test(x)), 'a signal with no data in this clip is left out');
   // the footage moves on: the brake turns on
   d.video.currentTime = 11;
   await d.frame();
-  assert.ok(d.el.querySelectorAll('.sd-list-r.hot').length >= 1, 'a value that changed lights up');
+  assert.ok(d.dash.panel.querySelectorAll('.sd-list-r.hot').length >= 1, 'a value that changed lights up');
   // Customize redraws the bar: the list is drawn again in the new one
   fire(d.el.querySelector('[data-edit]'), 'click');
   await d.frame();
-  assert.ok(d.el.querySelectorAll('.sd-list-r').length >= 2, 'rows after a redraw');
+  assert.ok(d.dash.panel.querySelectorAll('.sd-list-r').length >= 2, 'rows after a redraw');
   fire(d.el.querySelector('[data-edit]'), 'click');
   await d.frame();
   // filter
-  const q = d.el.querySelector('[data-list-q]');
+  const q = d.dash.panel.querySelector('[data-list-q]');
   q.value = 'volt';
   fire(q, 'input');
-  assert.equal(d.el.querySelectorAll('.sd-list-r').length, 1);
+  assert.equal(d.dash.panel.querySelectorAll('.sd-list-r').length, 1);
   // changing only: the voltage does not change in this clip
   q.value = '';
   fire(q, 'input');
-  const ch = d.el.querySelector('[data-list-changing]');
+  const ch = d.dash.panel.querySelector('[data-list-changing]');
   ch.checked = true;
   fire(ch, 'change');
   assert.ok(rows().every((x) => !/398/.test(x)), `only what changes: ${rows()}`);
