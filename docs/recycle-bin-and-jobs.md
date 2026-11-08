@@ -11,6 +11,10 @@ you to confirm (and for your password, unless you entered it in the last 10
 minutes). Protected recordings, and recordings the converter is working on,
 can't be trashed.
 
+CAN Bridge logs go with their footage: when footage is deleted for good, the
+logs of the same car and minutes go too (while it is only in the Recycle Bin
+they stay). See "How long logs are kept" in [can-bridge-api.md](can-bridge-api.md).
+
 ![Policies](images/policies.png)
 
 A **policy** keeps a number of days per category (Recent, Sentry, Saved,

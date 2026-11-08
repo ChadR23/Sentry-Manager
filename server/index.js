@@ -84,6 +84,7 @@ const { openCanLog, stopWhenStalled, FORMATS: CAN_FORMATS } = require('./canLogR
 const { createCanTrust } = require('./canTrust');
 const { createCanPort } = require('./canPort');
 const { createCanSync } = require('./canSync');
+const { createCanPrune } = require('./canPrune');
 const { createArchiveGap } = require('./archiveGap');
 const { createCanSearch, createSearchQueue, footageAt, clipStamps, localTime, parseWhen } = require('./canSearch');
 
@@ -315,6 +316,7 @@ async function main() {
   let archiveGapRef = null; // footage the car recorded that has not reached the share (set where CAN is known)
   let integrityRef = null; // the footage check: one cut short by a restart goes on after the first scan
   let canUploadRef = null; // CAN Bridge uploads (set where canLogs is made)
+  let canPruneRef = null; // CAN logs that go with their footage (canPrune.js, set where canLogs is made)
   let canPort = null; // opens or closes the CAN Bridge's own port, one call at a time (set where the servers start)
   const canUpload = (req, res, p) => (canUploadRef ? canUploadRef(req, res, p) : sendJson(res, 404, { error: 'Not found' }));
   const inventory = new Inventory({ vehicles, db, log: logger.scope('inventory'), onChange: () => announce('inventory'), onScanned: (vid) => { speedIndex?.kick(); scrubPrepare?.kick(); integrityRef?.resume(vid); archiveGapRef?.check(vid); } });
@@ -364,7 +366,7 @@ async function main() {
     }
     return out;
   };
-  const bin = new RecycleBin({ db, vehicles, inventory, jobs, log: logger.scope('bin'), busyPaths });
+  const bin = new RecycleBin({ db, vehicles, inventory, jobs, log: logger.scope('bin'), busyPaths, onDeleted: (item) => canPruneRef?.footageGone(item.vehicleId, item) });
 
   // ---- server stats (Overview > Server, the Encoder's Hardware panel):
   // sampled only while a page asks or a conversion runs
@@ -2003,6 +2005,17 @@ async function main() {
     const n = parseCanName(name);
     if (n) canSync?.indexed(key, n.startedAt - 2 * 60_000, n.startedAt + 30 * 60_000).catch(() => {});
   };
+  // CAN logs live and die with their footage (canPrune.js): only keys mapped to a car, through the
+  // same steps as a delete here (the file, the index, the sync, the trust record), one audit line a run
+  const canPrune = createCanPrune({
+    db, vehicles, inventory, canLogs, canTrust, startOf: canStartOf, withLock: (vid, fn) => bin.withLock(vid, fn),
+    keysOf: (vid) => Object.entries(canMap()).filter(([, id]) => id === vid).map(([k]) => k),
+    drop: (key, name) => dropCanLog(key, name), audit, log: logger.scope('can'), onChange: () => announce('can')
+  });
+  canPruneRef = canPrune;
+  // every hour (footage the car or the archive removed, logs past the car's oldest footage); first after 10 minutes
+  setTimeout(() => canPrune.sweep().catch(() => {}), 10 * 60_000).unref?.();
+  setInterval(() => canPrune.sweep().catch(() => {}), 3600_000).unref?.();
   canUploadRef = async (req, res, rawPath) => {
     const cfg = canCfg();
     const fail = (status, code, error, extra = {}) => sendJson(res, status, { error, code, ...extra });
@@ -2074,8 +2087,18 @@ async function main() {
       enabled: Boolean(cfg.enabled), since: cfg.at || null, logs: count, bytes, port: { ...(canPort?.state() || { listening: false, error: null, port: CAN_PORT }), https: Boolean(tlsSource) },
       keys, map: canMap(), vehicles: vehicles.list().map((v) => ({ id: v.id, name: v.name })), index: canIndex.status(),
       tokens: cfg.tokens.map((t) => ({ id: t.id, label: t.label, vehicleId: t.vehicleId, key: t.key, createdAt: t.createdAt, lastUsedAt: t.lastUsedAt })),
-      trust: await Promise.all(keys.map((k) => canTrust.summary(k)))
+      trust: await Promise.all(keys.map((k) => canTrust.summary(k))),
+      keep: canPrune.status()
     };
+  });
+  // "Delete CAN logs with their footage" (on by default)
+  r.add('POST', '/api/can/keep', (req, res, { body, user }) => {
+    requireConfirmed(req);
+    if (typeof body?.withFootage !== 'boolean') throw new HttpError(400, 'Send { "withFootage": true | false }.');
+    const out = canPrune.set({ withFootage: body.withFootage });
+    audit.warn(`CAN logs ${out.withFootage ? 'are deleted with their footage' : 'are no longer deleted with their footage'}: ${by(req, user)}`);
+    announce('can');
+    return out;
   });
   /** A new token for a car (shown once). */
   const newCanToken = (cfg, { vehicleId = null, label = '' } = {}) => {
@@ -2164,10 +2187,13 @@ async function main() {
   });
   r.add('GET', '/api/can/files', async (req, res, { query }) => {
     const out = await canLogs.list({ limit: Number(query.limit) || 200 });
-    // each log's check: verified, failed (why), unsigned, waiting
+    // each log's check: verified, failed (why), unsigned, waiting; and its footage: paired, none, or null (no car chosen)
+    const pairs = new Map();
     for (const l of out.logs) {
       const rec = await canTrust.record(l.vehicleKey, l.name);
       l.check = rec ? { status: rec.status, reason: rec.reason || null, index: rec.index ?? null, override: Boolean(rec.override) } : { status: 'waiting', reason: null };
+      if (!pairs.has(l.vehicleKey)) pairs.set(l.vehicleKey, await canPrune.pairing(l.vehicleKey).catch(() => null));
+      l.footage = pairs.get(l.vehicleKey)?.get(l.name) || null;
     }
     return out;
   });
@@ -2625,6 +2651,8 @@ async function main() {
     const item = db.binItem(params.item);
     const out = await bin.deleteForever(params.item);
     audit.info(`Deleted forever from the Recycle Bin: ${item?.label || params.item} (${formatBytes(out.bytes)}): ${by(req, user)}`);
+    // its CAN logs now (an automatic delete waits a little for more)
+    if (item?.vehicleId) canPruneRef?.soon(item.vehicleId, 1000);
     announce('bin');
     return out;
   });
@@ -2634,6 +2662,7 @@ async function main() {
     if (body?.vehicle) vehicleOr404(body.vehicle);
     const out = await bin.empty(body?.vehicle || null);
     audit.info(`Recycle Bin emptied${body?.vehicle ? ` for ${body.vehicle}` : ''}: ${out.deleted} item(s), ${formatBytes(out.bytes)}: ${by(req, user)}`);
+    for (const v of body?.vehicle ? [vehicleOr404(body.vehicle)] : vehicles.list()) canPruneRef?.soon(v.id, 1000);
     announce('bin');
     return out;
   });

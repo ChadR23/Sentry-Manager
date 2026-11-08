@@ -5,7 +5,8 @@
 // on the same share, so it is instant. The .binned suffix keeps the files
 // invisible to the converter and the viewer. Nothing in here ever deletes on
 // its own: files only go away when the user deletes them forever or empties
-// the bin.
+// the bin (or the bin is emptied after N days, policies.js). Each item deleted
+// for good is reported (onDeleted), so its CAN logs can go with it.
 //
 // Crash safety: the bin item is written to the database (its files marked
 // pending) before the first file moves, so a crash or power cut in the middle
@@ -72,8 +73,9 @@ function skipWhy(skipped) {
 }
 
 class RecycleBin {
-  constructor({ db, vehicles, inventory, jobs, log, busyPaths = () => new Set() }) {
-    Object.assign(this, { db, vehicles, inventory, jobs, log, busyPaths });
+  // onDeleted(item): an item was deleted for good (its CAN logs may go with it: canPrune.js)
+  constructor({ db, vehicles, inventory, jobs, log, busyPaths = () => new Set(), onDeleted = () => {} }) {
+    Object.assign(this, { db, vehicles, inventory, jobs, log, busyPaths, onDeleted });
     this.locks = new Map(); // vehicle id -> tail of its lock chain
   }
 
@@ -294,6 +296,8 @@ class RecycleBin {
     }
     await rmrfInside(root, safeJoin(root, `${BIN_DIR}/${itemId}`));
     this.db.removeBinItem(itemId);
+    // every delete for good comes here (by hand, emptying the bin, the bin emptied after N days)
+    try { this.onDeleted(item); } catch (err) { this.log.warn(`After deleting ${item.label}: ${err.message}`); }
     return { bytes };
   }
 

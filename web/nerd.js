@@ -415,6 +415,8 @@ export function openNerdPanel() {
       ${st.enabled ? `<div class="nd-row"><select class="nd-btn" data-token-car aria-label="The car for the new token">${st.vehicles.map((v) => `<option value="${esc(v.id)}">${esc(v.name)}</option>`).join('')}</select>
         <button type="button" class="nd-btn" data-new-token>New token for this car…</button></div>` : ''}
 
+      ${keepHtml()}
+
       ${st.keys?.length ? `<h3>Cars, pairing and the chain</h3>
       <p class="nd-muted">Every log is signed on the Screenmate with a key that never leaves it. The first signed log pairs the car; after that only logs signed by that key are trusted. Compare the fingerprint below with "Log signing key" in the CAN Bridge app.</p>
       ${st.keys.map((k) => {
@@ -436,6 +438,26 @@ export function openNerdPanel() {
       }).join('')}` : ''}`;
   }
 
+  // "Delete CAN logs with their footage" (canPrune.js), and what its last look at each car did
+  function keepHtml() {
+    const k = st.keep || { withFootage: true, cars: {} };
+    const lines = st.vehicles.map((v) => {
+      const l = k.cars?.[v.id];
+      if (!l) return '';
+      const what = l.skip ? `not looked at: ${l.skip}` : `${l.removed ? `${l.removed.toLocaleString()} removed with their footage` : 'nothing to remove'}${l.pending ? `, ${l.pending} still arriving or waiting for their check` : ''}${l.more ? `, ${l.more.toLocaleString()} more next` : ''}`;
+      return `<li>${esc(v.name)} (${esc(when(l.at))}): ${esc(what)}</li>`;
+    }).join('');
+    return `<h3>Keeping logs</h3>
+      <label class="nd-lab nd-check"><input type="checkbox" data-keep${k.withFootage !== false ? ' checked' : ''}> Delete CAN logs with their footage</label>
+      <p class="nd-muted">A log is <b>paired</b> with the footage of its car that covers its minute (Recent, Sentry and Saved clips). When that footage is deleted for good (the Recycle Bin emptied, by hand or after N days), its logs go too; while it is only in the Recycle Bin they stay, and a restore keeps them. Protected footage keeps its logs. A log from a minute with no footage (an archive gap, Sentry off) stays while it is newer than the car's oldest footage, and goes once all footage before it is gone. Only keys chosen for a car below are touched, never a log still arriving or waiting for its check, and nothing while a car's share is unreachable or its scan incomplete. ${k.withFootage !== false ? '' : 'Off: logs are kept until you delete them (at most 200,000 per car).'}</p>
+      ${lines ? `<ul class="nd-muted">${lines}</ul>` : ''}`;
+  }
+  // the Received logs footage column: paired, no footage, or no car chosen for the key
+  const FOOTAGE = {
+    paired: ['paired', 'nd-ok', 'Footage of this car covers this log\'s minute: they are kept and deleted together.'],
+    none: ['no footage', 'nd-muted', 'No footage of this car covers this minute (an archive gap, Sentry off, or deleted). Kept while newer than the car\'s oldest footage.']
+  };
+
   // the Received logs: a box of its own height (the header row stays), filtered here
   function drawLogs() {
     const box = $('[data-logs-box]');
@@ -452,7 +474,7 @@ export function openNerdPanel() {
     const { scrollTop, scrollLeft } = box;
     const a = document.activeElement;
     const focusKey = a && box.contains(a) ? [...a.attributes].filter((x) => x.name.startsWith('data-')).map((x) => `[${x.name}="${CSS.escape(x.value)}"]`).join('') : '';
-    box.innerHTML = shown.length ? `<table><thead><tr><th>Started</th><th>Car</th><th>Check</th><th>Download</th><th>Size</th><th>Format</th><th>Frames</th><th>Dropped</th><th>App</th><th></th></tr></thead><tbody>
+    box.innerHTML = shown.length ? `<table><thead><tr><th>Started</th><th>Car</th><th>Check</th><th>Footage</th><th>Download</th><th>Size</th><th>Format</th><th>Frames</th><th>Dropped</th><th>App</th><th></th></tr></thead><tbody>
       ${shown.map((f) => {
         const [label, cls, tip] = CHECK[f.check?.status] || CHECK.waiting;
         const why = f.check?.reason ? `${tip ? `${tip} ` : ''}${f.check.reason}` : tip;
@@ -462,6 +484,7 @@ export function openNerdPanel() {
         const [fmt, fmtTip] = FORMAT[f.format] || (f.format ? [f.format, ''] : ['—', f.sidecar ? 'The sidecar does not say' : 'No sidecar yet']);
         return `<tr><td>${esc(new Date(f.startedAt).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' }))}${f.check?.index !== null && f.check?.index !== undefined ? ` · #${esc(f.check.index)}` : f.seq ? ` · #${f.seq}` : ''}</td><td class="nd-mono">${esc(f.vehicleKey)}</td>
         <td class="${cls}${f.check?.status === 'failed' ? ' nd-wrap' : ''}" title="${esc(why)}">${esc(label)}${f.check?.status === 'failed' ? `<br><small>${esc(f.check.reason || '')}</small>${f.check.override ? '<br><small class="nd-warn">used anyway</small>' : ''}` : ''}</td>
+        <td class="${(FOOTAGE[f.footage] || ['', 'nd-muted'])[1]}" title="${esc((FOOTAGE[f.footage] || [0, 0, 'No car is chosen for this key (Cars, pairing and the chain): its logs are never deleted with footage.'])[2])}">${esc((FOOTAGE[f.footage] || ['—'])[0])}</td>
         <td>${dl(f.name, '.log.xz', 'the log')} ${txt}${f.sidecar ? ` ${dl(`${f.name}.json`, '.json', 'the sidecar of')}` : ''}</td>
         <td>${esc(size(f.bytes))}</td><td title="${esc(fmtTip)}">${esc(fmt)}${f.closedBecause ? `<br><small title="${esc(CLOSED[f.closedBecause] || '')}">closed: ${esc(f.closedBecause)}</small>` : ''}</td><td>${f.frames === null ? '—' : f.frames.toLocaleString()}</td><td>${f.dropped === null ? '—' : f.dropped.toLocaleString()}</td><td class="nd-mono">${esc(f.appVersion || (f.sidecar ? '' : 'no sidecar yet'))}</td>
         <td>${f.check?.status === 'failed' ? `<button type="button" class="nd-btn nd-small" data-use="${esc(f.name)}" data-on="${f.check.override ? '0' : '1'}">${f.check.override ? 'Stop using' : 'Use anyway…'}</button> ` : ''}<button type="button" class="nd-btn nd-small nd-danger" data-del="${esc(f.name)}" aria-label="Delete the log ${esc(f.name)}">Delete</button></td></tr>`;
@@ -683,6 +706,14 @@ export function openNerdPanel() {
   } catch { /* no live updates: the panel still works */ }
 
   body.addEventListener('change', async (e) => {
+    const keep = e.target.closest('[data-keep]');
+    if (keep) {
+      const on = keep.checked;
+      if (on && !confirm('Delete CAN logs with their footage? Logs whose footage was deleted for good, and logs older than all of a car\'s footage, are deleted (they cannot be brought back).')) { keep.checked = false; return; }
+      await confirmThen('/api/can/keep', post('', { withFootage: on }));
+      await draw();
+      return;
+    }
     const sel = e.target.closest('[data-map]');
     if (!sel) return;
     if (!(await confirmThen('/api/can/vehicle-map', { method: 'POST', body: JSON.stringify({ key: sel.dataset.map, vehicleId: sel.value || null }) }))) await draw();

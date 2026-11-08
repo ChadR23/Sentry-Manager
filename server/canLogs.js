@@ -322,7 +322,13 @@ function createCanLogs({ dir, freeBytes = async () => Infinity, now = () => Date
     return { logs, bytes, count: all.length };
   }
 
-  /** Delete one log and its sidecar (the Nerd settings). */
+  /** Every finished log of one car key (catalogue rows: name, startedAtMs, seq, bytes, ...). */
+  async function rowsOf(key) {
+    if (!/^[A-Za-z0-9-]{1,64}$/.test(String(key || ''))) return [];
+    return [...(await catalogue(key)).rows.values()];
+  }
+
+  /** Delete one log and its sidecar (the Nerd settings, and with its footage: canPrune.js). */
   async function remove(name) {
     const n = parseName(name);
     if (!n || n.sidecar) throw canError(400, 'bad_name', 'That is not a CAN Bridge log name.');
@@ -332,7 +338,7 @@ function createCanLogs({ dir, freeBytes = async () => Infinity, now = () => Date
     await noteChanged(n.vehicleKey, name);
   }
 
-  return { status, receive, list, summary, remove, stateOf, cleanStale, MAX_CHUNK, MAX_FILE, MAX_SIDECAR };
+  return { status, receive, list, summary, remove, rowsOf, stateOf, cleanStale, MAX_CHUNK, MAX_FILE, MAX_SIDECAR };
 }
 
 module.exports = { createCanLogs, parseName, MAX_CHUNK, MAX_FILE, MAX_SIDECAR, MAX_LOGS_PER_CAR };

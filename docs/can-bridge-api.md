@@ -246,7 +246,7 @@ starts again at 0.
 | 422 | `sha256_mismatch` | The finished file did not match its hash; it was discarded. Upload it again from offset 0. |
 | 422 | `bad_sidecar` | The sidecar is not JSON; it was discarded. |
 | 507 | `no_space` | The server is short of disk space (it keeps 2 GB free for everything else): try again later. |
-| 507 | `car_full` | This car has 200,000 CAN logs here already (finished logs are counted, not sidecars): the owner deletes old ones in the Nerd settings. |
+| 507 | `car_full` | This car has 200,000 CAN logs here already (finished logs are counted, not sidecars): a safety net only (see "How long logs are kept"); the owner deletes old ones in the Nerd settings. |
 | 500 | `server_error` | Try again later, with backoff. |
 
 ## What happens to the files
@@ -257,6 +257,38 @@ them (start, car key, check, size, format and why it was closed, frames and
 dropped from the sidecar, in a
 box of its own height with a filter by car key, check and text), follows new
 uploads, checks and the index live, and can delete one (with the password).
+
+**How long logs are kept: with their footage.** A log is *paired* with the
+footage of its car (the car its key is chosen for in the Nerd settings) that
+covers its minute: Recent, Sentry and Saved clips, read from their names in the
+car's time zone, a clip being about a minute. The Nerd list shows each log as
+`paired`, `no footage`, or `—` (no car chosen for its key). With "Delete CAN
+logs with their footage" (Nerd settings, *Keeping logs*; on by default):
+
+- Footage deleted for good (the Recycle Bin emptied by hand, one item deleted
+  forever, or the bin emptied after N days by a policy; policies and the size
+  limit only move footage to the bin): its car's logs whose minute no longer
+  has any footage are deleted with it. While the footage is only in the
+  Recycle Bin its logs stay, and a restore keeps them.
+- Protected footage keeps its logs (it cannot be moved to the bin).
+- A log whose minute never had footage (an archive gap, Sentry off) stays
+  while it is newer than the car's oldest footage (on the share or in the bin),
+  and is deleted once it is more than an hour older than all of it: footage
+  retention bounds the logs. Looked at every hour, and right after a delete.
+- Never touched: keys not chosen for a car, a log whose sidecar is still
+  uploading or that waits for its check, and every log of a car whose share is
+  unreachable, whose scan is running, failed or could not read some folders,
+  or that has no footage at all (a share outage must not look like "all
+  footage deleted"). Minutes deleted while the share is away are remembered and
+  acted on once it is back.
+- At most 500 logs a run (the rest a minute later), each deleted as a delete in
+  the Nerd settings is (the file and sidecar, its minutes in the index, the
+  sync, its trust record kept as deleted for the chain), with one audit line a
+  run ("CAN logs deleted with their footage (car …): N (… with their footage
+  deleted, … older than the car's oldest footage)").
+
+Turned off, logs are kept until the owner deletes them, up to the 200,000 per
+car cap (`car_full`), which stays as a safety net either way.
 
 **Downloads (Nerd panel, admin accounts only).** To work out what changed after
 a Tesla software update. These use the web session; the upload token cannot
