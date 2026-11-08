@@ -246,3 +246,129 @@ test('the service: worked out on the first request, cached, and forgotten when a
     await fsp.rm(dir, { recursive: true, force: true });
   }
 });
+
+// ---- the service's cache and background
+
+/** A drive's clip with its CAN log, and a service over a vehicle folder in a temp dir. */
+async function serviceFor(dir, { linkRoot = false, keys = ['MY-car'], rec = true, series, telemetry, log, rels } = {}) {
+  const footage = path.join(dir, 'footage');
+  rels = rels || ['TeslaCam/RecentClips/2026-06-01_12-00-00-front.mp4'];
+  for (const r of rels) {
+    const file = path.join(footage, ...r.split('/'));
+    await fsp.mkdir(path.dirname(file), { recursive: true });
+    await fsp.writeFile(file, 'x');
+  }
+  let root = footage;
+  if (linkRoot) { root = path.join(dir, 'link'); await fsp.symlink(footage, root); }
+  const rand = rng(9);
+  const state = makeDrive(5, 60_000);
+  const carStart = T0 + 100;
+  const toCan = (t) => t + OFFSET;
+  const relState = (t) => state(t - carStart);
+  const all = canSeries(relState, carStart - 15_000, carStart + 75_000, toCan, rand);
+  const body = clipBody(relState, carStart, 60_000, rand);
+  const counts = { reads: 0 };
+  const v = { id: 'car' };
+  const sync = createCanSync({
+    dir: path.join(dir, 'can-index'),
+    series: series ? (...a) => series(all, ...a) : async () => all,
+    telemetry: async (real) => { counts.reads++; return telemetry ? telemetry(body, real) : body; },
+    vehicles: { list: () => [v], rootOf: () => root },
+    inventory: { get: () => ({ files: new Map(rels.map((r) => [r, { camera: 'front' }])), recordings: rec ? [{ id: 'r1', clipRels: rels }] : [] }) },
+    keysFor: async () => keys,
+    startOf: () => T0,
+    log,
+    pauseMs: 0
+  });
+  // what forClip is given: the clip's real path (symlinks resolved), as studioReadable.resolve gives it
+  const realOf = (r) => path.join(footage, ...r.split('/'));
+  return { sync, v, counts, realOf, rels, truth: toCan(carStart) - T0 };
+}
+const withDir = async (fn) => {
+  const dir = await fsp.realpath(await fsp.mkdtemp(path.join(os.tmpdir(), 'cansync-')));
+  try { await fn(dir); } finally { await fsp.rm(dir, { recursive: true, force: true }); }
+};
+
+test('the service: a clip whose named start moved (the car\'s time zone changed) is worked out again', () => withDir(async (dir) => {
+  const { sync, v, counts, realOf, rels } = await serviceFor(dir, { rec: false });
+  await sync.forClip({ v, keys: ['MY-car'], real: realOf(rels[0]), start: T0 });
+  await sync.settled();
+  const before = counts.reads;
+  await sync.forClip({ v, keys: ['MY-car'], real: realOf(rels[0]), start: T0 + 8 * 3600_000 });
+  assert.ok(counts.reads > before, 'not the entry worked out for the old start');
+  await sync.settled();
+}));
+
+test('the service: a vehicle folder behind a symlink still gets its drive worked out', () => withDir(async (dir) => {
+  const { sync, v, realOf, rels, truth } = await serviceFor(dir, { linkRoot: true });
+  const first = await sync.forClip({ v, keys: ['MY-car'], real: realOf(rels[0]), start: T0 });
+  assert.equal(first.method, 'edges');
+  await sync.settled();
+  const again = await sync.forClip({ v, keys: ['MY-car'], real: realOf(rels[0]), start: T0 });
+  assert.equal(again.method, 'edges-drive', 'the drive worked out in the background is what the viewer gets');
+  assert.ok(Math.abs(again.offsetMs - truth) <= 20);
+}));
+
+test('the service: a log under a car\'s second key forgets what is kept under its first', () => withDir(async (dir) => {
+  let have = false; // B's log is not indexed yet: no CAN
+  const { sync, v, realOf, rels } = await serviceFor(dir, { keys: ['A', 'B'], rec: false, series: async (all) => (have ? all : {}) });
+  const first = await sync.forClip({ v, keys: ['A', 'B'], real: realOf(rels[0]), start: T0 });
+  assert.equal(first.method, 'clock');
+  await sync.settled();
+  have = true;
+  await sync.indexed('B', T0, T0 + 600_000);
+  await sync.settled();
+  const again = await sync.forClip({ v, keys: ['A', 'B'], real: realOf(rels[0]), start: T0 });
+  assert.equal(again.method, 'edges', 'worked out again with the new log');
+  await sync.settled();
+}));
+
+test('the service: two requests that load a store at once both keep their entries', () => withDir(async (dir) => {
+  const rels = ['TeslaCam/RecentClips/2026-06-01_12-00-00-front.mp4', 'TeslaCam/RecentClips/2026-06-01_12-01-00-front.mp4'];
+  const { sync, v, realOf } = await serviceFor(dir, { rec: false, rels, series: async () => ({}) });
+  await Promise.all(rels.map((r) => sync.forClip({ v, keys: ['MY-car'], real: realOf(r), start: T0 })));
+  await sync.settled();
+  const saved = JSON.parse(await fsp.readFile(path.join(dir, 'can-index', 'MY-car', 'sync.json'), 'utf8'));
+  assert.deepEqual(Object.keys(saved.clips).sort(), rels.map(realOf).sort());
+}));
+
+test('the service: a drive queued just as the background finishes is still worked out', () => withDir(async (dir) => {
+  // the moment the background ends is a few microtasks after a drive's last step: try each
+  for (let n = 0; n < 30; n++) {
+    const sub = path.join(dir, String(n));
+    await fsp.mkdir(sub);
+    let fired = false;
+    let pending = null;
+    let sync = null;
+    const log = {
+      warn() {},
+      info() { // the last thing a drive's solve does
+        if (fired) return;
+        fired = true;
+        (async () => { for (let i = 0; i < n; i++) await null; pending = sync.indexed('MY-car', T0, T0 + 600_000); })();
+      }
+    };
+    const made = await serviceFor(sub, { log });
+    sync = made.sync;
+    await sync.forClip({ v: made.v, keys: ['MY-car'], real: made.realOf(made.rels[0]), start: T0 });
+    await sync.settled();
+    while (!pending) await new Promise((r) => setImmediate(r));
+    await pending;
+    await sync.settled();
+    assert.equal(sync.status().pending, 0, `after ${n} microtasks: a drive left in the queue`);
+  }
+}));
+
+test('the service: a telemetry read that failed is not kept, and is tried again', () => withDir(async (dir) => {
+  let fail = true;
+  const { sync, v, counts, realOf, rels } = await serviceFor(dir, { telemetry: (body) => { if (fail) throw new Error('telemetry reader stopped'); return body; } });
+  const first = await sync.forClip({ v, keys: ['MY-car'], real: realOf(rels[0]), start: T0 });
+  assert.equal(first.method, 'clock');
+  await sync.settled();
+  fail = false;
+  const before = counts.reads;
+  const again = await sync.forClip({ v, keys: ['MY-car'], real: realOf(rels[0]), start: T0 });
+  assert.ok(counts.reads > before, 'read again');
+  assert.equal(again.method, 'edges');
+  await sync.settled();
+}));

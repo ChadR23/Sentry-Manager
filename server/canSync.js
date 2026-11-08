@@ -483,19 +483,23 @@ function solveDrive(clips) {
 
 // ---- the service: cache, lazy requests, the background
 function createCanSync({ dir, series, telemetry, vehicles, inventory, keysFor, startOf, idle = () => true, log = null, pauseMs = 200 }) {
-  const stores = new Map(); // key -> { v, clips: { real: entry } }
+  // key -> the promise of { v, clips: { front: entry } }: kept as a promise, so
+  // two requests that load the same key at once share one object
+  const stores = new Map();
   const fileOf = (key) => path.join(dir, key, 'sync.json');
-  async function load(key) {
-    if (stores.has(key)) return stores.get(key);
+  function load(key) {
+    if (!stores.has(key)) stores.set(key, readStore(key));
+    return stores.get(key);
+  }
+  async function readStore(key) {
     let data = null;
     try { data = JSON.parse(await fsp.readFile(fileOf(key), 'utf8')); } catch { /* none yet */ }
     if (!data || data.v !== FORMAT || typeof data.clips !== 'object') data = { v: FORMAT, clips: {} };
-    stores.set(key, data);
     return data;
   }
   let writing = Promise.resolve();
   const save = (key) => (writing = writing.then(async () => {
-    const data = stores.get(key);
+    const data = await stores.get(key);
     if (!data) return;
     await fsp.mkdir(path.join(dir, key), { recursive: true });
     const file = fileOf(key);
@@ -506,7 +510,25 @@ function createCanSync({ dir, series, telemetry, vehicles, inventory, keysFor, s
 
   const frontOf = (real) => real.replace(/-(front|back|left_repeater|right_repeater|left_pillar|right_pillar)\.mp4$/i, '-front.mp4');
   const stampOf = async (real) => { const st = await fsp.stat(real); return `${st.size}/${Math.round(st.mtimeMs)}`; };
-  const relOf = (v, real) => { const root = vehicles.rootOf(v); return root ? path.relative(root, real).split(path.sep).join('/') : null; };
+  const inside = (rel) => rel && !rel.startsWith('..') && !path.isAbsolute(rel);
+  /**
+   * A clip's path in its vehicle's folder ('TeslaCam/...'), or null. The clip
+   * comes in as a real path (symlinks resolved), the folder as set up, which
+   * can be a symlink or sit under one: so the real folder is tried as well.
+   */
+  async function relOf(v, real) {
+    const root = vehicles.rootOf(v);
+    if (!root) return null;
+    let rel = path.relative(root, real);
+    if (!inside(rel)) {
+      let realRoot = null;
+      try { realRoot = await fsp.realpath(root); } catch { /* not there */ }
+      rel = realRoot ? path.relative(realRoot, real) : null;
+    }
+    return inside(rel) ? rel.split(path.sep).join('/') : null;
+  }
+  /** Where a clip's entry is kept: its path under the vehicle's folder as set up, as solveRecording keeps it. */
+  const entryOf = (v, rel, real) => { const root = vehicles.rootOf(v); return rel && root ? path.join(root, ...rel.split('/')) : real; };
 
   /** The recording (inventory) a clip is in, with its front clips in order. */
   function recordingOf(v, rel) {
@@ -522,12 +544,15 @@ function createCanSync({ dir, series, telemetry, vehicles, inventory, keysFor, s
       .filter((c) => Number.isFinite(c.start)).sort((a, b) => a.start - b.start);
   }
 
+  // failed: the telemetry could not be read (not the same as a clip with none),
+  // so what comes of it is not kept and is worked out again next time
   async function estimate(keys, real, start) {
     let frames = [];
-    try { frames = telemetryFrames(await telemetry(real)); } catch { frames = []; }
+    let failed = false;
+    try { frames = telemetryFrames(await telemetry(real)); } catch { frames = []; failed = true; }
     const dur = clipDuration(frames) || 60_000;
     const s = frames.length ? await series(keys, start - SEARCH_MS - 2000, start + dur + SEARCH_MS + 2000, NAMES) : {};
-    return estimateClip({ frames, series: s, start });
+    return { ...estimateClip({ frames, series: s, start }), failed };
   }
 
   const storeKey = (keys) => [...keys].sort()[0];
@@ -541,15 +566,18 @@ function createCanSync({ dir, series, telemetry, vehicles, inventory, keysFor, s
     try { stamp = await stampOf(front); } catch { return null; }
     const key = storeKey(keys);
     const data = await load(key);
-    const had = data.clips[front];
-    const rel = relOf(v, front);
-    if (had && had.stamp === stamp && had.keys === keysTag(keys)) {
+    const rel = await relOf(v, front);
+    const at = entryOf(v, rel, front);
+    const had = data.clips[at];
+    // the start counts too: it moves when the car's time zone is changed
+    if (had && had.stamp === stamp && had.keys === keysTag(keys) && had.start === start) {
       if (!had.drive && rel) queue(v, rel);
       return had.sync;
     }
     const est = await estimate(keys, front, start);
+    if (est.failed) return est.result;
     const rec = rel ? recordingOf(v, rel) : null;
-    data.clips[front] = { stamp, keys: keysTag(keys), start, end: start + (est.dur || 60_000), rec: rec?.id || null, drive: !est.hasCan, sync: est.result };
+    data.clips[at] = { stamp, keys: keysTag(keys), start, end: start + (est.dur || 60_000), rec: rec?.id || null, drive: !est.hasCan, sync: est.result };
     save(key);
     if (est.hasCan && rel) queue(v, rel);
     return est.result;
@@ -577,7 +605,12 @@ function createCanSync({ dir, series, telemetry, vehicles, inventory, keysFor, s
         status.pending = todo.size;
         try { await solveRecording(job.vid, job.rel); status.drives++; } catch (err) { status.lastError = err.message; log?.warn?.(`CAN sync: ${err.message}`); }
       }
-    })().finally(() => { running = null; status.running = false; });
+    })().finally(() => {
+      running = null;
+      status.running = false;
+      // a drive queued while this run was ending: run() saw it still running
+      if (todo.size) run();
+    });
     return running;
   }
   const wait = async () => { while (!idle()) await new Promise((r) => setTimeout(r, 2000)); };
@@ -601,6 +634,7 @@ function createCanSync({ dir, series, telemetry, vehicles, inventory, keysFor, s
     const key = storeKey(keys);
     const data = await load(key);
     clips.forEach((c, k) => {
+      if (c.est.failed) return; // its telemetry could not be read: tried again when it is viewed
       data.clips[c.real] = { stamp: c.stamp, keys: keysTag(keys), start: c.start, end: c.start + (c.est.dur || 60_000), rec: rec.id, drive: true, sync: results[k] };
     });
     save(key);
@@ -614,6 +648,28 @@ function createCanSync({ dir, series, telemetry, vehicles, inventory, keysFor, s
    */
   async function indexed(key, from, to) {
     if (!Number.isFinite(from) || !Number.isFinite(to)) return;
+    // the cars this key is for, and the stores their entries are kept in
+    // (a car with more than one key keeps them under its first: storeKey)
+    const cars = [];
+    const where = new Set([key]);
+    for (const v of vehicles.list()) {
+      const keys = await keysFor(v.id);
+      if (!keys.includes(key)) continue;
+      cars.push(v);
+      where.add(storeKey(keys));
+    }
+    for (const k of where) await forget(k, from, to);
+    for (const v of cars) {
+      for (const rec of inventory.get(v.id)?.recordings || []) {
+        const fronts = frontsOf(v, rec);
+        if (!fronts.length || fronts[0].start > to + 60_000 || fronts[fronts.length - 1].start + 60_000 < from) continue;
+        queue(v, fronts[0].rel);
+      }
+    }
+  }
+
+  /** In one store: what was worked out for the drives that overlap from..to is forgotten. */
+  async function forget(key, from, to) {
     const data = await load(key);
     const recs = new Set();
     for (const e of Object.values(data.clips)) if (e.end >= from - 60_000 && e.start <= to + 60_000) recs.add(e.rec || e);
@@ -622,14 +678,6 @@ function createCanSync({ dir, series, telemetry, vehicles, inventory, keysFor, s
       if (recs.has(e) || (e.rec && recs.has(e.rec))) { delete data.clips[real]; changed = true; }
     }
     if (changed) save(key);
-    for (const v of vehicles.list()) {
-      if (!(await keysFor(v.id)).includes(key)) continue;
-      for (const rec of inventory.get(v.id)?.recordings || []) {
-        const fronts = frontsOf(v, rec);
-        if (!fronts.length || fronts[0].start > to + 60_000 || fronts[fronts.length - 1].start + 60_000 < from) continue;
-        queue(v, fronts[0].rel);
-      }
-    }
   }
 
   /** Once the background and the writes are done (for tests). */
