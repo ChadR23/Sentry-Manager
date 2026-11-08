@@ -632,3 +632,81 @@ test('the List asks for its own thinned answer as columns, and the bar\'s signal
   fire(ch, 'change');
   assert.deepEqual(labels(d), ['Battery voltage=350.0V'], 'what changes: the server\'s list');
 });
+
+// ---- CAN values shown right: decimals from the step, units, "not available" ----
+test('CAN values: decimals from the DBC step, every unit converted, SNA and the like as no data', async (t) => {
+  const meta = {
+    // a tire pressure: 255 is "SNA" (read as words, it showed "3.2" with no unit)
+    VCSEC_TPMSPressure0: { unit: 'bar', bus: 'VehicleBus', message: 'ID219VCSEC_TPMSData', min: 0, max: 6.35, factor: 0.025, offset: 0, values: { 255: 'SNA' } },
+    VCSEC_TPMSPressure1: { unit: 'bar', bus: 'VehicleBus', message: 'ID219VCSEC_TPMSData', min: 0, max: 6.35, factor: 0.025, offset: 0, values: { 255: 'SNA' } },
+    // a position in millionths of a degree (with 0 decimals it showed 40 and -108)
+    GPSLatitude04F: { unit: 'Deg', bus: 'ChassisBus', message: 'ID04FGPSLatLong', min: -134.218, max: 134.218, factor: 1e-6, offset: 0 },
+    // a speed limit in the car's units: UI_mapSpeedLimitUnits says which; 0 is "UNKNOWN_SNA", 31 "NONE"
+    DAS_fusedSpeedLimit: { unit: 'kph/mph', bus: 'ChassisBus', message: 'ID399DAS_status', min: 0, max: 150, factor: 5, offset: 0, values: { 0: 'UNKNOWN_SNA', 31: 'NONE' } },
+    UI_mapSpeedLimitUnits: { unit: '', bus: 'ChassisBus', message: 'ID3D9UI_gpsVehicleSpeed', min: 0, max: 1, factor: 1, offset: 0, values: { 0: 'MPH', 1: 'KPH' } },
+    Elevation3D8: { unit: 'M', bus: 'VehicleBus', message: 'ID3D8Elevation', min: -8192, max: 8191, factor: 1, offset: 0 },
+    DAS_leadVehDx: { unit: 'm', bus: 'ChassisBus', message: 'ID309DAS_object', min: 0, max: 127, factor: 0.5, offset: 0 },
+    // a model temperature that sends 0 (-40 C) when it has none
+    BattBrickModelTMin332: { unit: 'C', bus: 'VehicleBus', message: 'ID332BattBrickMinMax', min: -40, max: 87.5, factor: 0.5, offset: -40, values: { 0: 'SNA' } },
+    // the battery temperature now, and the old one (its layout changed: not a popular stat any more)
+    BattBrickTempMax332: { label: 'Max Batt Brick Temp', unit: 'C', bus: 'VehicleBus', message: 'ID332BattBrickMinMax', min: -40, max: 87.5, factor: 0.5, offset: -40 },
+    BMSmaxPackTemperature: { unit: 'C', bus: 'VehicleBus', message: 'ID312BMSthermal', min: -25, max: 100, factor: 0.25, offset: -25 },
+    // a series named after its message (two messages have the name): read by its signal's name
+    UI_cpuTemperature_353: { label: 'UI_cpuTemperature', signal: 'UI_cpuTemperature', unit: 'C', bus: 'VehicleBus', message: 'ID353UI_status', min: -40, max: 87, factor: 1, offset: 40 },
+    // a state (whole steps, every value named) stays words
+    VCRIGHT_hvacRecirc: { unit: '', bus: 'VehicleBus', message: 'ID243VCRIGHT_hvacStatus', min: 0, max: 2, factor: 1, offset: 0, values: { 0: 'AUTO', 1: 'RECIRC', 2: 'FRESH' } }
+  };
+  const series = {
+    VCSEC_TPMSPressure0: [[S - 1000, 2.575]],
+    VCSEC_TPMSPressure1: [[S - 1000, 6.375]],
+    GPSLatitude04F: [[S - 1000, 40.199897]],
+    DAS_fusedSpeedLimit: [[S - 1000, 55], [S + 10_000, 90], [S + 20_000, 0], [S + 30_000, 155]],
+    UI_mapSpeedLimitUnits: [[S - 1000, 0], [S + 10_000, 1]],
+    Elevation3D8: [[S - 1000, 194]],
+    DAS_leadVehDx: [[S - 1000, 30.5]],
+    BattBrickModelTMin332: [[S - 1000, -40]],
+    BattBrickTempMax332: [[S - 1000, 21.5]],
+    BMSmaxPackTemperature: [[S - 1000, -25]],
+    UI_cpuTemperature_353: [[S - 1000, 30]],
+    VCRIGHT_hvacRecirc: [[S - 1000, 2]]
+  };
+  const d = await dashboard({
+    rawOpen: false,
+    routes: {
+      boards: board([{ type: 'list', signals: [], q: '', changing: false }, { type: 'small', signals: ['dash.speed'] }]),
+      '/api/can/signals': () => ({ signals: meta }),
+      '/api/can/clip': () => ({ start: S, sync: { method: 'clock' }, series })
+    }
+  });
+  t.after(() => d.dash.destroy());
+  await d.frame();
+  await d.frame();
+  const rows = () => Object.fromEntries(d.dash.panel.querySelectorAll('.sd-list-r[data-row]').map((r) => [r.getAttribute('title').match(/, (\w+)\)$/)?.[1] || r.children[0].textContent, r.querySelector('[data-lv]').textContent]));
+  const at = async (ms) => { d.video.currentTime = ms / 1000; await d.frame(); return rows(); };
+  let v = await at(1000);
+  assert.equal(v.VCSEC_TPMSPressure0, '37.35psi', 'a pressure is a number, in psi');
+  assert.equal(v.VCSEC_TPMSPressure1, '—', '255 raw is "not available"');
+  assert.equal(v.GPSLatitude04F, '40.199897°', 'six decimals for a millionth of a degree');
+  assert.equal(v.DAS_fusedSpeedLimit, '55mph', 'the car says mph');
+  assert.equal(v.Elevation3D8, '636ft');
+  assert.equal(v.DAS_leadVehDx, '100.1ft', '"m" in feet too');
+  assert.equal(v.BattBrickModelTMin332, '—', 'raw 0 (-40 C) is no value');
+  assert.equal(v.VCRIGHT_hvacRecirc, 'FRESH', 'a state stays words');
+  v = await at(11_000);
+  assert.equal(v.DAS_fusedSpeedLimit, '56mph', '90 km/h when the car says km/h');
+  v = await at(21_000);
+  assert.equal(v.DAS_fusedSpeedLimit, '—', '0 is "UNKNOWN_SNA", not 0.0 kph/mph');
+  v = await at(31_000);
+  assert.equal(v.DAS_fusedSpeedLimit, '—', '31 is "NONE": no limit, not 155');
+  // the popular battery temperature: the bricks', in °F; the old 0x312 one is not chosen
+  const list = listed(d);
+  assert.ok(list.includes('Battery temp (max)'), `rows: ${list}`);
+  const pop = d.dash.panel.querySelectorAll('.sd-list-r[data-row]').find((r) => r.children[0].textContent === 'Battery temp (max)');
+  assert.match(pop.getAttribute('title'), /BattBrickTempMax332/);
+  assert.equal(pop.querySelector('[data-lv]').textContent, '70.7°F');
+  // a series named after its message is labelled by its signal
+  const cpu = d.dash.panel.querySelectorAll('.sd-list-r[data-row]').find((r) => /UI_cpuTemperature_353/.test(r.getAttribute('title')));
+  assert.equal(cpu.children[0].textContent, 'Cpu Temperature');
+  assert.equal(cpu.querySelector('[data-lv]').textContent, '86°F');
+  d.dash.destroy();
+});

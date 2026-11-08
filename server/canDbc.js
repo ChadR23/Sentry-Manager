@@ -8,7 +8,14 @@
 //
 // The bundled server/dbc/Model3CAN.dbc is the community model3dbc (MIT,
 // LICENSE-model3dbc.txt), which the Screenmate CAN Bridge uses too; it names
-// the buses VehicleBus and ChassisBus.
+// the buses VehicleBus and ChassisBus. server/dbc/override.dbc is read after
+// it: the messages whose layout Tesla changed in newer firmware (checked
+// against a real car's logs), each replacing the base message of its id.
+//
+// A signal name can be in more than one message (UI_cpuTemperature in 0x00C
+// and 0x353): each signal has a series name of its own (sig.series), the name
+// itself where it is unique, else the name and the message id
+// (UI_cpuTemperature_353), so two messages' values are never mixed.
 
 const fs = require('fs');
 const path = require('path');
@@ -56,7 +63,18 @@ function parseDbc(text) {
     const sig = byMsgSig(raw >= 0x80000000 ? raw - 0x80000000 : raw, c[2]);
     if (sig) sig.comment = c[3].replace(/\s+/g, ' ').trim().slice(0, 200);
   }
-  return { messages };
+  return { messages: withSeriesNames(messages) };
+}
+
+/** Give each signal its series name: its own name where unique, else name_ID (the message id in hex). */
+function withSeriesNames(messages) {
+  const count = new Map();
+  for (const m of messages.values()) for (const s of m.signals) count.set(s.name, (count.get(s.name) || 0) + 1);
+  for (const m of messages.values()) {
+    const hex = m.id.toString(16).toUpperCase().padStart(3, '0');
+    for (const s of m.signals) s.series = count.get(s.name) > 1 ? `${s.name}_${hex}` : s.name;
+  }
+  return messages;
 }
 
 /** The raw (unscaled) bits of a signal in a frame's bytes. */
@@ -106,9 +124,12 @@ function decodeFrame(msg, bytes) {
 }
 
 let bundled = null;
-/** The bundled Model 3/Y DBC, parsed once. */
+/** The bundled Model 3/Y DBC with the firmware overrides over it, parsed once. */
 function bundledDbc() {
-  bundled ||= parseDbc(fs.readFileSync(path.join(__dirname, 'dbc', 'Model3CAN.dbc'), 'utf8'));
+  const read = (f) => fs.readFileSync(path.join(__dirname, 'dbc', f), 'utf8');
+  // (one text: a BO_ read later replaces the message of its id, and the VAL_ and CM_ lines of both
+  // name the signals of the messages that stay; the override's own come last, so they win)
+  bundled ||= parseDbc(`${read('Model3CAN.dbc')}\n${read('override.dbc')}\n`);
   return bundled;
 }
 

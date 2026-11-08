@@ -230,6 +230,16 @@ read anything, and watch-only accounts get 403.
 | `GET /api/can/export/decoded?key=&from=&to=&signals=[&mode=changes\|every]` | The decoded signals as CSV (`timestamp_utc,signal,value,unit,value_name`), streamed, gzipped when the browser accepts it. `mode=changes` (the default without `signals`): a value when it changes, and once a minute while it stays the same. `mode=every` (the default with `signals`): every point the index keeps (a change, and once a second). At most 24 hours and 5,000,000 rows. `check=1`: `{ mode, minutes, estimatedRows, rowLimit, willStop }` before downloading. A cell that starts like a formula (`= + - @`) is written with a `'` first. |
 | `GET /api/can/export/new-ids?key=&since=[&format=csv]` | CAN ids first seen on or after `since`, with the DBC message or `UNKNOWN`, from per-day id summaries the index keeps (always complete). |
 
+**Decoding.** With model3dbc's `Model3CAN.dbc` and, over it, `server/dbc/override.dbc`:
+the messages whose layout changed in newer Tesla firmware, checked against a
+real car's logs (a message there with no signals has a layout not known yet and
+is not decoded; it shows as `unknown`). A frame is decoded only on a bus the
+sidecar's bus map (or the default: can0 vehicle, can1 chassis) names, with that
+bus's message; the Screenmate's own buses (can2, can3: "screenmate-internal")
+are kept and counted, not decoded. A signal name that two messages share has
+the message id after it in the decoded data (`UI_cpuTemperature_353`). When the
+decoding changes, every stored log is indexed again in the background.
+
 Times are ISO with a zone, or the car's own clock (`YYYY-MM-DD[THH:MM]`).
 `check=1` on the bundle and decoded routes answers what they would hold
 (JSON) without sending the file. The checks, the pairing and the chain

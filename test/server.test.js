@@ -1388,7 +1388,51 @@ test('CAN index: an uploaded log is decoded in the background, and a clip gets i
   }
 });
 
-test('CAN downloads (Nerd): a log as received, a bundle with ids.csv, decoded CSV and new ids; admins only, never the upload token; live updates on upload', { skip: spawnSync('xz', ['--version']).status !== 0 && 'needs xz', timeout: 90000 }, async () => {
+test('CAN clip: a Model Y\'s multi-bus log, two clips in a row: every stat steady from one second and clip to the next', { skip: spawnSync('xz', ['--version']).status !== 0 && 'needs xz', timeout: 60000 }, async () => {
+  // the owner's car (test/canModelY.js): pages sent in turn, the same ids on can0, can1 and can3
+  // with other data; read wrongly, each second showed another page (3.6 V then 15.7 V, ...)
+  const { candump, EXPECTED } = require('./canModelY');
+  const dir = await tmp();
+  await makeFootage(path.join(dir, 'footage'));
+  const s = await startServer(dir, { TRUST_PROXY: 'true' });
+  const https = { 'X-Forwarded-Proto': 'https' };
+  try {
+    await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' }, { headers: https });
+    await s.call('POST', '/api/auth/confirm', { password: 'correct horse' }, { headers: https });
+    const token = (await s.call('POST', '/api/can/enable', {}, { headers: https })).data.token;
+    const t0 = Date.UTC(2020, 0, 1, 8, 0, 0);
+    const file = execFileSync('xz', ['-6', '-c'], { input: candump(t0 - 2000, 1240) }); // 07:59:58 to 08:02:02
+    const name = 'MY-car_20200101T075958Z_1.log.xz';
+    const put = async (n, body) => (await fetch(`${s.base}/api/can/logs/${n}`, { method: 'POST', body, headers: { ...https, Authorization: `Bearer ${token}`, 'Upload-Offset': '0', 'Upload-Length': String(body.length), 'Upload-SHA256': crypto.createHash('sha256').update(body).digest('hex') } })).status;
+    assert.equal(await put(name, file), 201);
+    // the sidecar's bus map, as the CAN Bridge writes it
+    const side = Buffer.from(JSON.stringify({ format: 'canbridge-candump-xz/1', frames: 1240 * 15, bus: { can0: 'vehicle (inferred from IDs)', can1: 'chassis (inferred from IDs)', can3: 'screenmate-internal' } }));
+    assert.equal(await put(`${name}.json`, side), 201);
+    const clips = ['2020-01-01_08-00-00-front.mp4', '2020-01-01_08-01-00-front.mp4'].map((c) => path.join(dir, 'footage', 'TeslaCam', 'RecentClips', c));
+    const names = Object.keys(EXPECTED).join(',');
+    const ask = (clip) => s.call('GET', `/api/can/clip?path=${encodeURIComponent(clip)}&signals=${names}`, undefined, { headers: https }).then((r) => r.data);
+    await waitFor(async () => (await ask(clips[1])).series?.v12vBattVoltage261);
+    const at = (pts, ms) => pts?.filter((p) => p[0] <= ms).pop()?.[1];
+    for (const clip of clips) {
+      const got = await ask(clip);
+      for (const [n, want] of Object.entries(EXPECTED)) {
+        for (let ms = 0; ms < 60_000; ms += 1000) {
+          const v = at(got.series[n], got.start + ms);
+          assert.ok(v !== undefined && Math.abs(v - want) < 0.01, `${path.basename(clip)} +${ms / 1000} s: ${n} is ${v}, not ${want}`);
+        }
+      }
+    }
+    // the decoded list has no signal from the Screenmate's own bus, nor a layout not known
+    const meta = (await s.call('GET', `/api/can/signals?path=${encodeURIComponent(clips[0])}`, undefined, { headers: https })).data.signals;
+    for (const n of ['GPSLatitude04F', 'BMSmaxPackTemperature', 'BrakeTempFL3FE', 'UI_cpuTemperature']) assert.equal(meta[n], undefined, n);
+    assert.equal(meta.VCSEC_TPMSPressure0.unit, 'bar');
+  } finally {
+    await s.stop();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('CAN downloads (Nerd): a log as received, a bundle with ids.csv, decoded CSV and new ids; admins only, never the upload token; live updates on upload',{ skip: spawnSync('xz', ['--version']).status !== 0 && 'needs xz', timeout: 90000 }, async () => {
   const { readZip } = require('../server/zip');
   const dir = await tmp();
   await makeFootage(path.join(dir, 'footage'));

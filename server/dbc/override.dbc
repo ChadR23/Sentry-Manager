@@ -1,0 +1,164 @@
+// Firmware overrides for Model3CAN.dbc (read after it: a BO_ here replaces the
+// message of the same id whole, its bus included; VAL_ and CM_ lines of the
+// base still name the signals they share a name with, unless one here does).
+//
+// Checked against a 2026 Model Y's own logs (CAN Bridge, 2026-11-08, parked,
+// charge complete, about 2 C outside): each layout below gave steady values
+// that agree with each other (energy remaining / full pack = SOC 88.7 %),
+// where the base layout flipped between pages every second.
+//
+// A message with no signals is one whose layout changed and is not known yet
+// on this firmware: it is not decoded (it shows as unknown in the raw view).
+
+// 0x243: the page index is 3 bits (pages 0, 1, 2, C3 and 04 are sent); with
+// 2 bits page 4 read as page 0 and gave a 132 C cabin
+BO_ 579 ID243VCRIGHT_hvacStatus: 8 VehicleBus
+ SG_ VCRIGHT_hvacStatusIndex M : 0|3@1+ (1,0) [0|7] ""  Receiver
+ SG_ VCRIGHT_hvacACRunning m0 : 50|1@1+ (1,0) [0|1] ""  Receiver
+ SG_ VCRIGHT_hvacAirDistributionMode m0 : 41|3@1+ (1,0) [0|7] ""  Receiver
+ SG_ VCRIGHT_hvacBlowerSegment m0 : 44|4@1+ (1,0) [0|11] ""  Receiver
+ SG_ VCRIGHT_hvacCabinTempEst m0 : 30|11@1+ (0.1,-40) [-40|164] "C"  Receiver
+ SG_ VCRIGHT_hvacDuctTargetLeft m1 : 48|8@1+ (0.5,-40) [-40|80] "C"  Receiver
+ SG_ VCRIGHT_hvacDuctTargetRight m1 : 56|8@1+ (0.5,-40) [-40|80] "C"  Receiver
+ SG_ VCRIGHT_hvacEvapInletTempEstimat m2 : 19|10@1+ (0.13,-40) [-40|90] "C"  Receiver
+ SG_ VCRIGHT_hvacMassflowRefrigSystem m1 : 2|8@1+ (1,0) [0|250] "g/s"  Receiver
+ SG_ VCRIGHT_hvacModelInitStatus m0 : 60|3@1+ (1,0) [0|5] ""  Receiver
+ SG_ VCRIGHT_hvacOverheatProtActive m0 : 63|1@1+ (1,0) [0|1] ""  Receiver
+ SG_ VCRIGHT_hvacPowerState m0 : 51|3@1+ (1,0) [0|4] ""  Receiver
+ SG_ VCRIGHT_hvacQdotLeft m0 : 2|14@1+ (1,-8191) [-8191|8191] "W"  Receiver
+ SG_ VCRIGHT_hvacQdotRight m0 : 16|14@1+ (1,-8191) [-8191|8191] "W"  Receiver
+ SG_ VCRIGHT_hvacRecirc m0 : 48|2@1+ (1,0) [0|2] ""  Receiver
+ SG_ VCRIGHT_hvacRecircDoorPercent m1 : 10|6@1+ (1.6,0) [0|100] "%"  Receiver
+ SG_ VCRIGHT_hvacSecondRowState m0 : 56|3@1+ (1,0) [0|4] ""  Receiver
+ SG_ VCRIGHT_hvacSystemNominal m0 : 59|1@1+ (1,0) [0|1] ""  Receiver
+ SG_ VCRIGHT_hvacVentStatus m0 : 54|2@1+ (1,0) [0|2] ""  Receiver
+ SG_ VCRIGHT_tempDuctLeft m1 : 16|8@1+ (0.5,-22) [-22|105] "C"  Receiver
+ SG_ VCRIGHT_tempDuctLeftLower m1 : 24|8@1+ (0.5,-22) [-22|105] "C"  Receiver
+ SG_ VCRIGHT_tempDuctLeftUpper m2 : 2|8@1+ (0.5,-22) [-22|105] "C"  Receiver
+ SG_ VCRIGHT_tempDuctRight m1 : 32|8@1+ (0.5,-22) [-22|105] "C"  Receiver
+ SG_ VCRIGHT_tempDuctRightLower m1 : 40|8@1+ (0.5,-22) [-22|105] "C"  Receiver
+ SG_ VCRIGHT_tempDuctRightUpper m2 : 10|8@1+ (0.5,-22) [-22|105] "C"  Receiver
+
+// 0x261: the page index is 3 bits (00 31 62 73 EC 45: pages 0-5); with 2 bits
+// page 5 read as page 1 and gave a 3.6 V 12 V battery (page 1: 15.8 V)
+BO_ 609 ID261_12vBattStatus: 8 VehicleBus
+ SG_ VCFRONT_12VBatteryStatusChecksum : 56|8@1+ (1,0) [0|0] ""  Receiver
+ SG_ VCFRONT_12VBatteryStatusCounter : 52|4@1+ (1,0) [0|0] ""  Receiver
+ SG_ VCFRONT_LVBatteryDisconnected m1 : 50|1@1+ (1,0) [0|0] ""  Receiver
+ SG_ VCFRONT_LVBatterySupported m1 : 49|1@1+ (1,0) [0|0] ""  Receiver
+ SG_ VCFRONT_voltageFloorReachedCount m0 : 48|4@1+ (1,0) [0|0] ""  Receiver
+ SG_ VCFRONT_reverseBatteryFault m1 : 48|1@1+ (1,0) [0|0] ""  Receiver
+ SG_ VCFRONT_LVLoadRequest : 47|1@1+ (1,0) [0|0] ""  Receiver
+ SG_ VCFRONT_good12VforUpdate : 46|1@1+ (1,0) [0|0] ""  Receiver
+ SG_ VCFRONT_firstChargePOR m0 : 45|1@1+ (1,0) [0|0] ""  Receiver
+ SG_ VCFRONT_chargeNeeded m1 : 45|1@1+ (1,0) [0|0] ""  Receiver
+ SG_ VCFRONT_firstChargeOTA m0 : 44|1@1+ (1,0) [0|0] ""  Receiver
+ SG_ VCFRONT_PCSMia m1 : 44|1@1+ (1,0) [0|0] ""  Receiver
+ SG_ VCFRONT_silentWakeIBSCurrent m0 : 32|12@1- (0.1,-204.7) [-409.5|2.8421709430404E-014] "mA"  Receiver
+ SG_ v12vBattVoltage261 m1 : 32|12@1+ (0.00544368,0) [0|22.2918696] "V"  Receiver
+ SG_ VCFRONT_12VBatteryTargetVoltage m2 : 32|10@1+ (0.01,9) [9|19.23] "V"  Receiver
+ SG_ v12vBattCurrent261 m0 : 16|16@1- (0.005,0) [-163.84|163.835] "A"  Receiver
+ SG_ VCFRONT_IBSCurrent m1 : 16|16@1- (0.005,0) [-163.84|163.835] "A"  Receiver
+ SG_ v12vBattTemp261 m2 : 16|16@1- (0.01,0) [-327.68|327.67] "C"  Receiver
+ SG_ VCFRONT_shortedCellFaultCounter m0 : 13|3@1+ (1,0) [0|0] ""  Receiver
+ SG_ VCFRONT_isVehicleSupported m0 : 12|1@1+ (1,0) [0|0] ""  Receiver
+ SG_ VCFRONT_targetCurrent m1 : 8|8@1+ (0.125,0) [0|31.875] "A"  Receiver
+ SG_ VCFRONT_voltageDropCounter m0 : 8|4@1+ (1,0) [0|0] ""  Receiver
+ SG_ VCFRONT_batterySMState m1 : 4|4@1+ (1,0) [0|0] ""  Receiver
+ SG_ VCFRONT_12VOverchargeCounter m0 : 4|4@1+ (1,0) [0|0] ""  Receiver
+ SG_ VCFRONT_batterySupportRequest m1 : 3|1@1+ (1,0) [0|0] ""  Receiver
+ SG_ v12vBattAH261 m2 : 2|14@1- (0.005,0) [-40.96|40.955] "Ah"  Receiver
+ SG_ VCFRONT_voltageProfile m0 : 2|2@1+ (1,0) [0|0] ""  Receiver
+ SG_ VCFRONT_IBSFault m1 : 2|1@1+ (1,0) [0|0] ""  Receiver
+ SG_ VCFRONT_12VBatteryStatusIndex M : 0|3@1+ (1,0) [0|7] ""  Receiver
+
+// 0x352: paged now (index in bits 0-1), 16-bit fields at 0.02 kWh. Page 0:
+// full pack 67.54, remaining 59.92, ideal 59.70 kWh; page 1: buffer 3.04,
+// expected remaining 59.70, to charge complete 1.18 kWh. Pages 2 and 3 are not
+// known yet. (The flat 11-bit layout gave 158 kWh remaining, 0 kWh full.)
+BO_ 850 ID352BMS_energyStatus: 8 VehicleBus
+ SG_ BMS_energyStatusIndex M : 0|2@1+ (1,0) [0|3] ""  Receiver
+ SG_ BMS_fullChargeComplete m0 : 15|1@1+ (1,0) [0|1] ""  Receiver
+ SG_ BMS_nominalFullPackEnergy m0 : 16|16@1+ (0.02,0) [0|1310.7] "KWh"  Receiver
+ SG_ BMS_nominalEnergyRemaining m0 : 32|16@1+ (0.02,0) [0|1310.7] "KWh"  Receiver
+ SG_ BMS_idealEnergyRemaining m0 : 48|16@1+ (0.02,0) [0|1310.7] "KWh"  Receiver
+ SG_ BMS_energyBuffer m1 : 16|16@1+ (0.01,0) [0|655.35] "KWh"  Receiver
+ SG_ BMS_expectedEnergyRemaining m1 : 32|16@1+ (0.02,0) [0|1310.7] "KWh"  Receiver
+ SG_ BMS_energyToChargeComplete m1 : 48|16@1+ (0.02,0) [0|1310.7] "KWh"  Receiver
+
+// 0x332: as the base, with real ranges; the model temperatures send 0 (-40 C)
+// when they have no value
+BO_ 818 ID332BattBrickMinMax: 8 VehicleBus
+ SG_ BattBrickMultiplexer332 M : 0|2@1+ (1,0) [0|3] ""  Receiver
+ SG_ BattBrickempMaxNum332 m0 : 2|4@1+ (1,0) [0|15] ""  Receiver
+ SG_ BattBrickTempMinNum332 m0 : 8|4@1+ (1,0) [0|15] ""  Receiver
+ SG_ BattBrickTempMax332 m0 : 16|8@1+ (0.5,-40) [-40|87.5] "C"  Receiver
+ SG_ BattBrickTempMin332 m0 : 24|8@1+ (0.5,-40) [-40|87.5] "C"  Receiver
+ SG_ BattBrickModelTMax332 m0 : 32|8@1+ (0.5,-40) [-40|87.5] "C"  Receiver
+ SG_ BattBrickModelTMin332 m0 : 40|8@1+ (0.5,-40) [-40|87.5] "C"  Receiver
+ SG_ BattBrickVoltageMax332 m1 : 2|12@1+ (0.002,0) [0|8.19] "V"  Receiver
+ SG_ BattBrickVoltageMin332 m1 : 16|12@1+ (0.002,0) [0|8.19] "V"  Receiver
+ SG_ BattBrickVoltageMaxNum332 m1 : 32|7@1+ (1,1) [1|128] ""  Receiver
+ SG_ BattBrickVoltageMinNum332 m1 : 40|7@1+ (1,1) [1|128] ""  Receiver
+
+// 0x219: the tire data is on the vehicle bus now (can0), pages 0-5 in bits
+// 0-2. Page 5: the four pressures (0.025 bar, 2.50-2.58 bar cold); page 4: the
+// recommended pressures (2.9 bar = 42 psi). Which wheel each slot is, and
+// pages 0-3 (sensor ids?), are not known yet. On the chassis bus (can1) 0x219
+// is now a counter: read there, all four tires showed 3.2 bar.
+BO_ 537 ID219VCSEC_TPMSData: 8 VehicleBus
+ SG_ VCSEC_TPMSDataIndex M : 0|3@1+ (1,0) [0|7] ""  Receiver
+ SG_ VCSEC_TPMSPressure0 m5 : 16|8@1+ (0.025,0) [0|6.35] "bar"  Receiver
+ SG_ VCSEC_TPMSPressure1 m5 : 24|8@1+ (0.025,0) [0|6.35] "bar"  Receiver
+ SG_ VCSEC_TPMSPressure2 m5 : 32|8@1+ (0.025,0) [0|6.35] "bar"  Receiver
+ SG_ VCSEC_TPMSPressure3 m5 : 40|8@1+ (0.025,0) [0|6.35] "bar"  Receiver
+ SG_ VCSEC_TPMSRecommendedPressure0 m4 : 8|8@1+ (0.025,0) [0|6.35] "bar"  Receiver
+ SG_ VCSEC_TPMSRecommendedPressure1 m4 : 16|8@1+ (0.025,0) [0|6.35] "bar"  Receiver
+
+// Layout unknown on this firmware (paged now, or not what the base says):
+// 0x312 BMS thermal: two kinds of frame (byte 0 00/80 and C9/A1); read flat,
+//   the pack temperatures flipped between 33/53 C and -25/-23 C (min above max)
+BO_ 786 ID312BMSthermal: 8 VehicleBus
+// 0x3FE brake temps: bytes 0 and 1 count (D9-E8, C0-CF) on can0
+BO_ 1022 ID3FEbrakeTemps: 8 VehicleBus
+// paged now with no page index in the base (byte 0 alternates between kinds of frame)
+BO_ 290 ID122VCLEFT_doorStatus2: 8 VehicleBus
+BO_ 291 ID123UI_alertMatrix1: 8 VehicleBus
+BO_ 789 ID315RearInverterTemps: 8 VehicleBus
+BO_ 886 ID376FrontInverterTemps: 8 VehicleBus
+BO_ 893 ID37DCP_thermalStatus: 8 VehicleBus
+BO_ 929 ID3A1VCFRONT_vehicleStatus: 8 VehicleBus
+BO_ 963 ID3C3VCRIGHT_switchStatus: 8 VehicleBus
+// pages 0-2 sent, the base's 1-bit index reads page 2 as page 0
+BO_ 1834 ID72ABMS_serialNumber: 8 VehicleBus
+// fields that do not fit the frames any more:
+// 0x201 page 0 comes as two kinds of frame (byte 0 70 and 80): the pump speed flipped 3360/8460 rpm
+BO_ 513 ID201VCFRONT_loggingAndVitals10H: 8 VehicleBus
+// 0x2A8: the state bits the base reads are in the frame's last byte, which counts
+BO_ 680 ID2A8CMPD_state: 8 VehicleBus
+// 0x2B4: read as the base says, the 12 V bus was 22 V and the current jumped 1.5/360 A
+BO_ 692 ID2B4PCS_dcdcRailStatus: 8 VehicleBus
+
+VAL_ 579 VCRIGHT_hvacStatusIndex 0 "STATUS_UI" 1 "STATUS_VCFRONT" 2 "STATUS_VCFRONT2" ;
+VAL_ 850 BMS_energyStatusIndex 0 "ENERGY" 1 "CHARGE" ;
+VAL_ 850 BMS_fullChargeComplete 0 "NOT_COMPLETE" 1 "COMPLETE" ;
+VAL_ 850 BMS_nominalFullPackEnergy 65535 "SNA" ;
+VAL_ 850 BMS_nominalEnergyRemaining 65535 "SNA" ;
+VAL_ 850 BMS_idealEnergyRemaining 65535 "SNA" ;
+VAL_ 850 BMS_energyBuffer 65535 "SNA" ;
+VAL_ 850 BMS_expectedEnergyRemaining 65535 "SNA" ;
+VAL_ 850 BMS_energyToChargeComplete 65535 "SNA" ;
+VAL_ 818 BattBrickModelTMax332 0 "SNA" ;
+VAL_ 818 BattBrickModelTMin332 0 "SNA" ;
+VAL_ 537 VCSEC_TPMSDataIndex 4 "RECOMMENDED" 5 "PRESSURES" ;
+VAL_ 537 VCSEC_TPMSRecommendedPressure0 255 "SNA" ;
+VAL_ 537 VCSEC_TPMSRecommendedPressure1 255 "SNA" ;
+
+CM_ SG_ 850 BMS_idealEnergyRemaining "Batt Ideal Remaining kWh";
+CM_ SG_ 850 BMS_expectedEnergyRemaining "Batt Expected Remaining kWh";
+CM_ SG_ 537 VCSEC_TPMSPressure0 "Tire pressure, slot 1";
+CM_ SG_ 537 VCSEC_TPMSPressure1 "Tire pressure, slot 2";
+CM_ SG_ 537 VCSEC_TPMSPressure2 "Tire pressure, slot 3";
+CM_ SG_ 537 VCSEC_TPMSPressure3 "Tire pressure, slot 4";
+CM_ SG_ 537 VCSEC_TPMSRecommendedPressure0 "Recommended tire pressure 1";
+CM_ SG_ 537 VCSEC_TPMSRecommendedPressure1 "Recommended tire pressure 2";

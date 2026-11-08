@@ -199,11 +199,35 @@ const CAN_UNITS = {
   KM: { metric: ['km', (v) => v], imperial: ['mi', (v) => v / 1.609344] },
   mi: { metric: ['km', (v) => v * 1.609344], imperial: ['mi', (v) => v] },
   M: { metric: ['m', (v) => v], imperial: ['ft', (v) => v * 3.28084] },
+  m: { metric: ['m', (v) => v], imperial: ['ft', (v) => v * 3.28084] },
+  'm/s': { metric: ['km/h', (v) => v * MPS_KMH], imperial: ['mph', (v) => v * MPS_MPH] },
+  mph: { metric: ['km/h', (v) => v * 1.609344], imperial: ['mph', (v) => v] },
+  deg: { metric: ['°', (v) => v], imperial: ['°', (v) => v] },
+  Deg: { metric: ['°', (v) => v], imperial: ['°', (v) => v] },
   KWh: { metric: ['kWh', (v) => v], imperial: ['kWh', (v) => v] },
+  kWh: { metric: ['kWh', (v) => v], imperial: ['kWh', (v) => v] },
   NM: { metric: ['Nm', (v) => v], imperial: ['Nm', (v) => v] },
   kPa: { metric: ['kPa', (v) => v], imperial: ['psi', (v) => v * 0.1450377] },
   bar: { metric: ['bar', (v) => v], imperial: ['psi', (v) => v * 14.50377] }
 };
+// a speed in the car's own units ("kph/mph": a speed limit, a set offset): UI_mapSpeedLimitUnits says which (0 mph, 1 km/h)
+const CAR_UNITS = 'UI_mapSpeedLimitUnits';
+function carSpeed(c, v) {
+  const u = c.can(CAR_UNITS);
+  if (u == null) return [v, 'km/h or mph'];
+  const kmh = u === 1 ? v : v * 1.609344;
+  return c.metric ? [kmh, 'km/h'] : [kmh / 1.609344, 'mph'];
+}
+// value names that mean "no value" (the signal is not available): shown as no data; a number's
+// NONE or UNKNOWN too (a speed limit's 31 "NONE" is no limit, not 155), a state's stays a word
+const SNA_NAME = /(^|_)SNA($|_)|^(INVALID|UNAVAILABLE|NOT_?AVAILABLE)$/i;
+const NO_NUMBER = /^(NONE|UNKNOWN)$/i;
+/** How many decimals a signal's value is shown with: from its step (the DBC factor), else from its range. */
+function canDigits(m) {
+  const f = Math.abs(Number(m.factor));
+  if (Number.isFinite(f) && f > 0) return f >= 1 ? 0 : Math.min(6, Math.ceil(-Math.log10(f) - 1e-9));
+  return Math.abs((m.max ?? 0) - (m.min ?? 0)) > 200 ? 0 : 1;
+}
 /** A series' value at `ms`: [[ms, value], …] pairs, or { t: Float64Array, v } columns (the List's answer). */
 const canSeriesAt = (pts, ms) => {
   if (pts && !Array.isArray(pts)) {
@@ -245,27 +269,41 @@ function registerCanSignals(meta) {
     const id = `can.${name}`;
     if (SIGNALS.has(id)) continue;
     const conv = CAN_UNITS[m.unit];
+    const speedInCarUnits = m.unit === 'kph/mph';
     const named = m.values && Object.keys(m.values).length ? m.values : null;
-    // words only when every value has a name (a gear, a state); a number with a
-    // name for one special value (SNA: not available) stays a number
     const span = Number.isFinite(m.max) && Number.isFinite(m.min) ? m.max - m.min : Infinity;
-    const allNamed = Boolean(named) && span <= 16;
-    // (a popular stat's signal with no readable name of its own, SOCUI292, takes the popular name)
-    const own = canLabel(name, m.label);
-    const label = own === name && POPULAR_NAME.has(id) ? POPULAR_NAME.get(id) : own;
+    // (the raw value under a scaled one: what the value names are for; known when the index says the scale)
+    const scaled = Number.isFinite(m.factor) && m.factor !== 0;
+    const rawOf = (v) => (scaled ? Math.round((v - (m.offset || 0)) / m.factor) : Math.round(v));
+    const rawsNamed = (re) => new Set(Object.entries(named || {}).filter(([, t]) => re.test(t)).map(([k]) => Number(k)));
+    const sna = rawsNamed(SNA_NAME);
+    // words only for a state (a gear, a mode): a small range of whole steps with names for its
+    // values; a number with a name for one special value (SNA: not available) stays a number
+    // (a tire pressure has names too: 255 "SNA"; read as words it showed "3.2" with no unit)
+    const states = named ? Object.keys(named).filter((k) => !sna.has(Number(k))).length : 0;
+    const allNamed = Boolean(named) && span <= 16 && (scaled ? Math.abs(m.factor) === 1 && states >= 2 : true);
+    // the raw values that mean "no value": no data, not a number (or a word)
+    const noValue = allNamed ? sna : new Set([...sna, ...rawsNamed(NO_NUMBER)]);
+    // (a popular stat's signal with no readable name of its own, SOCUI292, takes the popular name;
+    // a series named after its message too, UI_cpuTemperature_353, is read by its signal's name)
+    const own = canLabel(m.signal || name, m.label);
+    const label = own === (m.signal || name) && POPULAR_NAME.has(id) ? POPULAR_NAME.get(id) : own;
     list.push({
       id, label, group: `CAN · ${String(m.bus || '').replace(/Bus$/, '') || 'bus'} · ${String(m.message || '').replace(/^ID[0-9A-F]+/, '') || 'message'}`,
       kind: allNamed ? 'text' : 'number', source: 'can', canName: name,
-      unit: (c) => (conv ? conv[c.metric ? 'metric' : 'imperial'][0] : m.unit || ''),
+      // (a speed in the car's units needs the signal that says which)
+      ...(speedInCarUnits ? { needs: [CAR_UNITS] } : {}),
+      unit: (c) => (speedInCarUnits ? carSpeed(c, 0)[1] : conv ? conv[c.metric ? 'metric' : 'imperial'][0] : m.unit || ''),
       value: (r, c) => {
         const v = c.can(name);
-        if (v == null) return null;
+        if (v == null || noValue.has(rawOf(v))) return null;
         // (value names are for raw values: used for named states, whose scale is 1)
-        if (allNamed) return named[String(Math.round(v))] ?? String(v);
+        if (allNamed) return named[String(rawOf(v))] ?? String(v);
+        if (speedInCarUnits) return carSpeed(c, v)[0];
         return conv ? conv[c.metric ? 'metric' : 'imperial'][1](v) : v;
       },
-      bool: (r, c) => { const v = c.can(name); return v != null && v !== 0; },
-      digits: Math.abs((m.max ?? 0) - (m.min ?? 0)) > 200 ? 0 : 1
+      bool: (r, c) => { const v = c.can(name); return v != null && v !== 0 && !noValue.has(rawOf(v)); },
+      digits: canDigits(m)
     });
   }
   registerSignals(list);
@@ -298,8 +336,13 @@ const hasKeys = (o) => Boolean(o && Object.keys(o).length);
 // stat, else the CAN signal; a car whose DBC names differ still gets the
 // stat from the next id). The one chosen is shown once, at the top, and not
 // again below; the others stay in their own group. Ids from model3dbc's
-// Model3CAN.dbc (server/dbc). Battery power, live Wh/mi and charging power
-// have no one signal (they are worked out from others), so they are not here.
+// Model3CAN.dbc with the firmware overrides (server/dbc), checked against a
+// 2026 Model Y's logs: a signal whose layout is not known on newer firmware
+// (the 0x312 pack temperatures, the 0x3FE brake temperatures) is not here,
+// nor is one from the Screenmate's own buses (0x04F's position, on can3).
+// A name in two messages has the message id after it (RCM_longitudinalAccel_111).
+// Battery power, live Wh/mi and charging power have no one signal (they are
+// worked out from others), so they are not here.
 const POPULAR = [
   ['Speed', 'dash.speed', 'can.DI_vehicleSpeed', 'can.UI_gpsVehicleSpeed'],
   ['Battery %', 'can.SOCUI292', 'can.UI_SOC', 'can.SOCave292'],
@@ -315,35 +358,31 @@ const POPULAR = [
   ['Right blinker', 'dash.blinkRight', 'can.VCFRONT_turnSignalRightStatus', 'can.VCRIGHT_turnSignalStatus'],
   ['Battery voltage', 'can.BattVoltage132'],
   ['Battery current', 'can.SmoothBattCurrent132', 'can.RawBattCurrent132'],
-  ['Battery temp (max)', 'can.BMSmaxPackTemperature', 'can.BattBrickTempMax332'],
-  ['Battery temp (min)', 'can.BMSminPackTemperature', 'can.BattBrickTempMin332'],
+  ['Battery temp (max)', 'can.BattBrickTempMax332'],
+  ['Battery temp (min)', 'can.BattBrickTempMin332'],
   ['Outside temp', 'can.VCFRONT_tempAmbientFiltered', 'can.VCFRONT_tempAmbient', 'can.VCRIGHT_tempAmbientRaw'],
-  ['Cabin temp', 'can.VCRIGHT_hvacCabinTempEst', 'can.VCRIGHT_thsTemperature'],
-  ['12V battery', 'can.v12vBattVoltage261', 'can.PCS_dcdcLvBusVolt'],
+  ['Cabin temp', 'can.VCRIGHT_hvacCabinTempEst'],
+  ['12V battery', 'can.v12vBattVoltage261'],
   ['Rear motor torque', 'can.DIR_torqueActual', 'can.RearTorque1D8'],
   ['Front motor torque', 'can.DIF_torqueActual', 'can.FrontTorque1D5'],
   ['Odometer', 'can.UI_odometer', 'can.Odometer3B6'],
-  // (a sensor slot, not a fixed wheel: VCSEC_TPMSLocation0-3 says which)
+  // (a sensor slot, not a fixed wheel: which wheel each is, is not known yet on newer firmware)
   ['Tire pressure 1', 'can.VCSEC_TPMSPressure0'],
   ['Tire pressure 2', 'can.VCSEC_TPMSPressure1'],
   ['Tire pressure 3', 'can.VCSEC_TPMSPressure2'],
   ['Tire pressure 4', 'can.VCSEC_TPMSPressure3'],
-  ['Charging', 'can.BMS_uiChargeStatus', 'can.CP_hvChargeStatus', 'can.PCS_hvChargeStatus'],
+  ['Charging', 'can.BMS_uiChargeStatus', 'can.CP_hvChargeStatus_13D', 'can.CP_hvChargeStatus_23D', 'can.PCS_hvChargeStatus'],
   ['Charge time left', 'can.ChargeHoursRemaining132'],
   ['Energy remaining', 'can.BMS_nominalEnergyRemaining', 'can.BMS_expectedEnergyRemaining'],
   ['Full pack energy', 'can.BMS_nominalFullPackEnergy'],
   ['Heading', 'dash.heading', 'can.UI_gpsVehicleHeading'],
   ['Elevation', 'can.Elevation3D8'],
-  ['Accel (fwd)', 'dash.accelLong', 'can.RCM_longitudinalAccel'],
-  ['Accel (side)', 'dash.accelLat', 'can.RCM_lateralAccel'],
+  ['Accel (fwd)', 'dash.accelLong', 'can.RCM_longitudinalAccel_111', 'can.RCM_longitudinalAccel_116'],
+  ['Accel (side)', 'dash.accelLat', 'can.RCM_lateralAccel_111', 'can.RCM_lateralAccel_116'],
   ['Set speed', 'can.DAS_setSpeed'],
   ['Speed limit', 'can.DAS_fusedSpeedLimit'],
-  ['Latitude', 'dash.lat', 'can.GPSLatitude04F'],
-  ['Longitude', 'dash.lon', 'can.GPSLongitude04F'],
-  ['Brake temp FL', 'can.BrakeTempFL3FE'],
-  ['Brake temp FR', 'can.BrakeTempFR3FE'],
-  ['Brake temp RL', 'can.BrakeTempRL3FE'],
-  ['Brake temp RR', 'can.BrakeTempRR3FE'],
+  ['Latitude', 'dash.lat'],
+  ['Longitude', 'dash.lon'],
   ['Lifetime charged', 'can.TotalChargeKWh3D2'],
   ['Lifetime used', 'can.TotalDischargeKWh3D2']
 ].map(([name, ...ids]) => ({ name, ids }));
@@ -897,8 +936,11 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     }
   }
   const hasList = () => (board?.blocks || []).some((b) => b.type === 'list');
-  /** The CAN signals the bar's blocks show (the List's come with its own answer). */
-  const barNames = () => [...new Set((board?.blocks || []).filter((b) => b.type !== 'list').flatMap((b) => b.signals).filter((id) => id.startsWith('can.')).map((id) => id.slice(4)))].sort();
+  /**
+   * The CAN signals the bar's blocks show (the List's come with its own answer), with the
+   * signals a chosen one needs: a speed limit in the car's units needs the units.
+   */
+  const barNames = () => [...new Set((board?.blocks || []).filter((b) => b.type !== 'list').flatMap((b) => b.signals).filter((id) => id.startsWith('can.')).flatMap((id) => [id.slice(4), ...(SIGNALS.get(id)?.needs || [])]))].sort();
   /** Ask for one feed's answer for `path` (none: `want` false). A new clip empties it first: nothing of the last clip is shown as this one's. */
   function loadFeed(f, path, want, key, get) {
     if (key === f.key) return;

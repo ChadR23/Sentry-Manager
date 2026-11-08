@@ -38,6 +38,13 @@
 // A signal keeps a point when its value changes, at most 20 a second (the
 // last value of each 50 ms wins), and once a second while it stays the same.
 // The raw logs stay as they came: a better DBC later means indexing again.
+//
+// A frame is decoded only on a bus the bus map names (can0 vehicle, can1
+// chassis, or the sidecar's map), and only with a message of that bus: the
+// same id carries unrelated data on different buses (the Screenmate's own
+// can2 and can3 among them), so a bus nobody named is counted, kept raw, and
+// not decoded. Signals are stored under their series name (canDbc.js), unique
+// per message.
 
 const fs = require('fs');
 const fsp = require('fs/promises');
@@ -89,8 +96,10 @@ async function* boundedLines(stream, { maxLine = MAX_LINE, maxTotal = MAX_UNPACK
 
 const STEP_MS = 50; // at most 20 points a second per signal
 const RAW_PER_SEC = 10; // raw payload changes kept a second per id
-// the index format: r1 added the raw snapshots (an older stamp has none)
-const FORMAT = 'r1';
+// the index format: r1 added the raw snapshots (an older stamp has none); r2 decodes with the
+// firmware overrides, only on named buses, and with unique series names (a log indexed by r1 is
+// decoded again, in the background, from its stored .log.xz)
+const FORMAT = 'r2';
 const KEEP_MS = 1000; // a point at least once a second
 // the interface is a plain name (can0, vcan1): anything else in a log line is not indexed, so a
 // crafted log cannot make up ids (each a key in the index) or put a formula into a CSV download
@@ -105,14 +114,18 @@ const minuteKey = (ms) => new Date(Math.floor(ms / 60000) * 60000).toISOString()
 const TRUST_RANK = { override: 0, unsigned: 1, verified: 2 };
 const worseTrust = (a, b) => (a === undefined ? b : b === undefined ? a : (TRUST_RANK[a] ?? 1) <= (TRUST_RANK[b] ?? 1) ? a : b);
 
-/** Which DBC bus each interface is: the sidecar's bus map, else can0 vehicle and can1 chassis. */
+/**
+ * Which DBC bus each interface is: the sidecar's bus map, else can0 vehicle and can1 chassis.
+ * An interface the map calls internal (the CAN Bridge's "screenmate-internal" can3) is no DBC bus.
+ */
 function busMapOf(side) {
   const busOf = { ...DEFAULT_BUSES };
   const map = side?.bus || side?.busMap || side?.buses || null;
   if (map && typeof map === 'object') {
     for (const [iface, v] of Object.entries(map)) {
       const s = String(typeof v === 'object' ? v?.dbcBus || v?.name || '' : v).toLowerCase();
-      if (/vehicle/.test(s)) busOf[iface] = 'VehicleBus';
+      if (/internal|screenmate/.test(s)) delete busOf[iface];
+      else if (/vehicle/.test(s)) busOf[iface] = 'VehicleBus';
       else if (/chassis/.test(s)) busOf[iface] = 'ChassisBus';
       else if (/party/.test(s)) busOf[iface] = 'PartyBus';
     }
@@ -284,6 +297,8 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
     const file = path.join(dir, key, 'signals.json');
     let all = {};
     try { all = JSON.parse(await fsp.readFile(file, 'utf8')) || {}; } catch { /* first */ }
+    // (what an older format wrote is dropped: its names can be gone, or mean something else now)
+    for (const [name, meta] of Object.entries(all)) if (meta?.fmt !== FORMAT) delete all[name];
     for (const [name, meta] of seen) all[name] = meta;
     await fsp.mkdir(path.join(dir, key), { recursive: true });
     await writeAtomic(file, JSON.stringify(all));
@@ -390,11 +405,13 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
         if (rawOnly) continue;
         const id = parseInt(m[4], 16);
         const msg = messages.get(id);
-        if (!msg || (busOf[iface] && msg.bus !== busOf[iface])) continue;
+        // only on a bus the map names, with that bus's message (can2, can3: not decoded)
+        const want = busOf[iface];
+        if (!msg || !want || msg.bus !== want) continue;
         const bytes = Buffer.from(m[5], 'hex');
         for (const [sig, v] of decodeFrame(msg, bytes)) {
-          const nm = sig.name;
-          if (!seen.has(nm)) seen.set(nm, { label: sig.comment || nm, unit: sig.unit || '', min: sig.min, max: sig.max, values: sig.values, bus: sig.bus, message: sig.message, id: sig.messageId });
+          const nm = sig.series || sig.name;
+          if (!seen.has(nm)) seen.set(nm, { label: sig.comment || sig.name, signal: sig.name, unit: sig.unit || '', min: sig.min, max: sig.max, factor: sig.factor, offset: sig.offset, values: sig.values, bus: sig.bus, message: sig.message, id: sig.messageId, fmt: FORMAT });
           let s = last.get(nm);
           if (!s) { s = { pt: -Infinity, v: undefined, pending: null }; last.set(nm, s); }
           const value = Math.round(v * 1e6) / 1e6;
@@ -637,7 +654,8 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
       if (!changes.length) continue;
       const [iface, hexId] = e.key.split(':');
       const msg = messages.get(parseInt(hexId, 16));
-      const known = msg && (!e.bus || msg.bus === e.bus);
+      // (no bus mapped: not decoded, so not known; a message with no signals: its layout is not known)
+      const known = msg && msg.signals.length && e.bus && msg.bus === e.bus;
       list.push({ key: e.key, bus: iface, id: hexId, name: known ? msg.name : null, hz: e.ms ? Math.round((e.frames / e.ms) * 10000) / 10 : 0, changes });
     }
     return list.sort((a, b) => parseInt(a.id, 16) - parseInt(b.id, 16) || a.bus.localeCompare(b.bus));
@@ -727,7 +745,8 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
     const [iface, hexId] = String(idKey).split(':');
     const msg = dbc().messages.get(parseInt(hexId, 16));
     const bus = busOf[iface] || null;
-    return msg && (!bus || !msg.bus || msg.bus === bus) ? msg.name : null;
+    // (decoded only there: on a bus with no DBC name nothing is, and a message with no signals has no known layout)
+    return msg && msg.signals.length && bus && msg.bus === bus ? msg.name : null;
   }
 
   /**
