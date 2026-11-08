@@ -1,4 +1,4 @@
-// Settings: vehicles (with a guided "add my vehicle"), account, look,
+// Settings: vehicles (with a guided "add my vehicle"), places (Home, Work), account, look,
 // interface packs, security, updates, system and the electricity price.
 
 import { api, upload, esc, enc, icon, bytes, plural, when, ago, chip, kv, details, emptyState, confirmDialog, modal, toast, fail, busy, store, fin, liveDraw, clockPref } from '../core.js';
@@ -6,7 +6,7 @@ import { state, loadVehicles, shareHealth, setVehicle, vehicleById } from '../st
 import { go, setTheme, currentTheme, signOut } from '../app.js';
 
 const SECTIONS = [
-  ['vehicles', 'Vehicles', 'car'], ['account', 'Account', 'key'], ['look', 'Look', 'palette'], ['interface', 'Interface', 'grid'],
+  ['vehicles', 'Vehicles', 'car'], ['places', 'Places', 'map'], ['account', 'Account', 'key'], ['look', 'Look', 'palette'], ['interface', 'Interface', 'grid'],
   ['security', 'Security', 'lock'], ['updates', 'Updates', 'download'], ['system', 'System & power', 'server']
 ];
 
@@ -27,6 +27,7 @@ export async function render(ctx) {
   if (section === 'vehicles') return vehicles(sub);
   if (section === 'add-vehicle') return addVehicle(sub);
   if (section === 'vehicle') return editVehicle(sub, params[1]);
+  if (section === 'places') return places(sub);
   if (section === 'account') return account(sub);
   if (section === 'look') return look(sub);
   if (section === 'interface') return iface(sub);
@@ -221,6 +222,17 @@ async function editVehicle({ el }, id) {
     };
   };
   draw();
+}
+
+// ---------- places (Home, Work: web/placesSettings.js, the same in every interface) ----------
+async function places({ el }) {
+  el.innerHTML = '<div class="card stack"><h2>Places</h2><div id="dl-places"></div></div>';
+  const { createPlacesSettings } = await import('/web/placesSettings.js');
+  createPlacesSettings(el.querySelector('#dl-places'), {
+    cls: { btn: 'btn btn-soft btn-sm', primary: 'btn btn-primary btn-sm', danger: 'btn btn-danger btn-sm', input: 'input', muted: 'muted' },
+    toast: (m, bad) => toast(m, { kind: bad ? 'bad' : 'good' }),
+    confirm: ({ title, body, ok }) => confirmDialog({ title, body, ok, danger: true })
+  });
 }
 
 // ---------- account ----------

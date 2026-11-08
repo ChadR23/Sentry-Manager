@@ -21,7 +21,7 @@ const ROUTES = {
   account: { label: 'Account', icon: 'key', group: 'setup', desc: 'Two-step sign-in, devices, other accounts', load: () => import('./pages/account.js') },
   health: { label: 'Health', icon: 'shieldCheck', group: 'setup', desc: 'Checks, database snapshots, log search', load: () => import('./pages/health.js') },
   server: { label: 'Server & logs', icon: 'server', group: 'setup', desc: 'CPU, memory, disks, temperatures, logs', load: () => import('./pages/server.js') },
-  settings: { label: 'Settings', icon: 'gear', group: 'setup', desc: 'Vehicles, account, look, security', load: () => import('./pages/settings.js') }
+  settings: { label: 'Settings', icon: 'gear', group: 'setup', desc: 'Vehicles, places, account, look, security', load: () => import('./pages/settings.js') }
 };
 export const MORE_ROUTES = ['map', 'driving', 'vehicles', 'bin', 'policies', 'jobs', 'notifications', 'nodes', 'health', 'account', 'server', 'settings'];
 export const routeInfo = (r) => ROUTES[r];

@@ -2158,7 +2158,7 @@
     state.system = sys || state.system;
     state.power = settings.power || state.power || null;
     // (the Logs are on the Overview)
-    const sections = [['vehicles', 'Vehicles'], ['updates', 'Updates'], ['account', 'Account'], ui && ['interface', 'Interface'], sec && ['security', 'Security'], (sys || settings.power) && ['system', 'System']].filter(Boolean);
+    const sections = [['vehicles', 'Vehicles'], ['places', 'Places'], ['updates', 'Updates'], ['account', 'Account'], ui && ['interface', 'Interface'], sec && ['security', 'Security'], (sys || settings.power) && ['system', 'System']].filter(Boolean);
     const show = editing || !sections.some(([k]) => k === sub) ? 'vehicles' : sub;
     let html = head('Your archive workspace', 'Settings');
     html += `<nav class="set-tabs" aria-label="Settings sections">${sections.map(([k, label]) => `<button type="button" data-tab="${k}">${label}</button>`).join('')}</nav>`;
@@ -2169,6 +2169,9 @@
         <td class="small words">${v.share?.healthy ? (v.share.writable === false ? 'Read-only' : 'Connected') : esc(v.share?.lastError || 'Unavailable')}</td>
         <td class="actions"><a class="btn sm" href="#/settings/vehicle/${esc(v.id)}">Edit</a></td></tr>`).join('')}</tbody></table>` : '<p style="margin-top:12px">No vehicles yet.</p>'}
       ${editing ? vehicleForm(editing === 'new' ? null : state.vehicles.find((v) => v.id === editing)) : ''}</div>`;
+
+    // Places: Home, Work (web/placesSettings.js, the same in every interface)
+    html += '<div class="card" data-section="places"><h2>Places</h2><div id="places-box" style="margin-top:12px"></div></div>';
 
     html += updatesCard(upd);
 
@@ -2197,6 +2200,11 @@
     if (ui) wireInterface(ui);
     if (sec) wireSecurity(sec);
     if (settings.power) wirePower(settings.power);
+    import('/web/placesSettings.js').then((m) => {
+      const box = $('places-box');
+      if (seq !== renderSeq || !box) return;
+      m.createPlacesSettings(box, { cls: { btn: 'btn sm', primary: 'btn sm solid', danger: 'btn sm danger', input: 'input', muted: 'muted' }, toast, confirm: ({ title, body, ok }) => confirmDialog({ title, body, ok, danger: true }) });
+    }).catch(() => { const box = $('places-box'); if (box) box.textContent = 'Places could not load. Reload the page.'; });
   };
 
   // Settings > System: the electricity price behind every cost shown with

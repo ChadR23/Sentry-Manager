@@ -53,6 +53,7 @@ const { createHealth } = require('./health');
 const { createSnapshots, applyPendingRestore } = require('./snapshots');
 const { createIntegrity } = require('./integrity');
 const { createAccounts, viewerMay } = require('./accounts');
+const placesLib = require('./places');
 const { writeZip, streamZip, waitDrain, ZIP_LIMIT } = require('./zip');
 const { createConverterHost } = require('./converterHost');
 const { createStats } = require('./stats');
@@ -1632,18 +1633,8 @@ async function main() {
     const pos = Number.isFinite(lat) && Number.isFinite(lon) && !(lat === 0 && lon === 0) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180 ? { lat, lon } : null;
     return { info: had.info, pos };
   }
-  /** The saved place an event happened at (nearest within 200 m: the car's position is an estimate), or null. */
-  function placeAt(pos, places = placeList()) {
-    if (!pos) return null;
-    let best = null;
-    const rad = Math.PI / 180;
-    for (const p of places) {
-      const a = Math.sin(((p.lat - pos.lat) * rad) / 2) ** 2 + Math.cos(pos.lat * rad) * Math.cos(p.lat * rad) * Math.sin(((p.lon - pos.lon) * rad) / 2) ** 2;
-      const m = 2 * 6371000 * Math.asin(Math.min(1, Math.sqrt(a)));
-      if (m <= 200 && (!best || m < best.m)) best = { name: p.name, m };
-    }
-    return best ? best.name : null;
-  }
+  /** The saved place an event happened at (nearest within that place's radius, 200 m by default: the car's position is an estimate), or null. */
+  const placeAt = (pos, places = placeList()) => placesLib.placeAt(pos, places);
   r.add('GET', '/api/vehicles/:id/event-map', async (req, res, { params }) => {
     const v = vehicleOr404(params.id);
     const inv = inventory.get(v.id);
@@ -1710,25 +1701,37 @@ async function main() {
   const placeList = () => (Array.isArray(db.get('places', [])) ? db.get('places', []) : []);
   const placeName = (n) => String(n ?? '').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 60);
   r.add('GET', '/api/places', () => ({ places: placeList() }));
+  const placeRadius = (v) => {
+    const r = placesLib.cleanRadius(v);
+    if (r === null) throw new HttpError(400, `The radius is ${placesLib.MIN_RADIUS} to ${placesLib.MAX_RADIUS} m.`);
+    return r;
+  };
   r.add('POST', '/api/places', (req, res, { body }) => {
-    const lat = Number(body?.lat);
-    const lon = Number(body?.lon);
+    const lat = placesLib.coord(body?.lat);
+    const lon = placesLib.coord(body?.lon);
     const name = placeName(body?.name);
     if (!name) throw new HttpError(400, 'Give the place a name.');
     if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) throw new HttpError(400, 'That is not a place on the map.');
+    const radius = body?.radius === undefined || body?.radius === null ? placesLib.DEFAULT_RADIUS : placeRadius(body.radius);
     const list = placeList();
     if (list.length >= 200) throw new HttpError(400, 'There are 200 saved places already: remove some first.');
-    const place = { id: crypto.randomBytes(5).toString('hex'), name, lat: Math.round(lat * 1e5) / 1e5, lon: Math.round(lon * 1e5) / 1e5 };
+    const place = { id: crypto.randomBytes(5).toString('hex'), name, lat: Math.round(lat * 1e6) / 1e6, lon: Math.round(lon * 1e6) / 1e6, radius };
     db.set('places', [...list, place]);
     return { place };
   });
+  // a new name, a new radius, or both
   r.add('PATCH', '/api/places/:id', (req, res, { params, body }) => {
     const list = placeList();
     const place = list.find((x) => x.id === params.id);
     if (!place) throw new HttpError(404, 'No such place.');
-    const name = placeName(body?.name);
+    const hasName = body?.name !== undefined;
+    const hasRadius = body?.radius !== undefined;
+    if (!hasName && !hasRadius) throw new HttpError(400, 'Send a name or a radius.');
+    const name = hasName ? placeName(body.name) : place.name;
     if (!name) throw new HttpError(400, 'Give the place a name.');
+    const radius = hasRadius ? placeRadius(body.radius) : null;
     place.name = name;
+    if (radius !== null) place.radius = radius;
     db.set('places', list);
     return { place };
   });
@@ -1737,6 +1740,35 @@ async function main() {
     if (!list.some((x) => x.id === params.id)) throw new HttpError(404, 'No such place.');
     db.set('places', list.filter((x) => x.id !== params.id));
     return { ok: true };
+  });
+  // Settings > Places: where the car parks most (Sentry and Saved events of
+  // the last 90 days, at most the newest 1500 across the vehicles, grouped
+  // within 150 m, leaving out what a saved place covers already), and how
+  // many of those events are at each saved place
+  const SUGGEST_DAYS = 90;
+  const SUGGEST_EVENTS = 1500;
+  r.add('GET', '/api/places/suggestions', async () => {
+    const since = new Date(Date.now() - SUGGEST_DAYS * 86400000).toISOString().slice(0, 10);
+    const recs = [];
+    for (const v of vehicles.list()) {
+      for (const rec of inventory.get(v.id)?.recordings || []) {
+        if (rec.eventId && (!rec.day || rec.day >= since)) recs.push([v, rec]);
+      }
+    }
+    recs.sort((a, b) => String(b[1].startKey).localeCompare(String(a[1].startKey)));
+    const picked = recs.slice(0, SUGGEST_EVENTS);
+    const spots = [];
+    await eachLimit(picked, 6, async ([v, rec]) => {
+      const spot = await eventSpot(v.id, rec).catch(() => null);
+      if (!spot?.pos) return;
+      spots.push({ ...spot.pos, key: rec.startKey, at: spot.info?.timestamp || rec.start || rec.day || null, city: spot.info?.city || null, street: spot.info?.street || null, vehicle: v.name || v.id });
+    });
+    const places = placeList();
+    return {
+      days: SUGGEST_DAYS, events: picked.length, withPosition: spots.length,
+      suggestions: placesLib.suggestPlaces(spots, places),
+      counts: placesLib.countAtPlaces(spots, places)
+    };
   });
   // Footage check: clips that will not play (cut off, empty, not MP4)
   const integrity = createIntegrity({

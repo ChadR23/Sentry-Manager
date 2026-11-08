@@ -1,4 +1,4 @@
-// Settings: vehicles, account, interface (background effect, glass, interface
+// Settings: vehicles, places (Home, Work), account, interface (background effect, glass, interface
 // packs), updates, security, system and the electricity price.
 
 import {
@@ -6,7 +6,7 @@ import {
 } from '../core.js';
 
 const SECTIONS = [
-  ['vehicles', 'Vehicles', 'car'], ['account', 'Account', 'key'], ['interface', 'Interface', 'sparkle'], ['updates', 'Updates', 'download'],
+  ['vehicles', 'Vehicles', 'car'], ['places', 'Places', 'pin'], ['account', 'Account', 'key'], ['interface', 'Interface', 'sparkle'], ['updates', 'Updates', 'download'],
   ['security', 'Security', 'lock'], ['system', 'System', 'cpu'], ['power', 'Electricity', 'bolt']
 ];
 const WEEK = [[1, 'Mon'], [2, 'Tue'], [3, 'Wed'], [4, 'Thu'], [5, 'Fri'], [6, 'Sat'], [0, 'Sun']];
@@ -166,6 +166,17 @@ async function vehicles(box, sub) {
       toast('Vehicle removed.');
       location.hash = '#/settings/vehicles';
     } catch (x) { toast(x.message, 'bad'); }
+  });
+}
+
+// ---------- Places (Home, Work: web/placesSettings.js, the same in every interface) ----------
+async function places(box) {
+  box.innerHTML = '<section class="panel"><div class="panel-head"><h2>Places</h2></div><div id="au-places"></div></section>';
+  const { createPlacesSettings } = await import('/web/placesSettings.js');
+  createPlacesSettings($('#au-places', box), {
+    cls: { btn: 'btn sm', primary: 'btn sm primary', danger: 'btn sm danger', input: 'input', muted: 'muted' },
+    toast: (m, bad) => toast(m, bad ? 'bad' : 'ok'),
+    confirm: ({ title, body, ok }) => confirmDialog({ title, body, ok, danger: true })
   });
 }
 
@@ -450,7 +461,7 @@ async function power(box) {
   });
 }
 
-const SECTION = { vehicles, account, interface: iface, updates, security, system, power };
+const SECTION = { vehicles, places, account, interface: iface, updates, security, system, power };
 
 // Test connection: the SMB details as typed, checked by the server with a
 // one-off mount; nothing is saved

@@ -1,7 +1,7 @@
 // The Map page, the same in every interface: every Sentry and Saved event of
 // a vehicle as a pin where it happened (from Tesla's event.json), the newest
-// events listed under it, and the saved places (named on the Viewer's map
-// with "Save place"), which can be renamed or removed here.
+// events listed under it, and the saved places (named in Settings > Places or on the
+// Viewer's map with "Save place"), which can be renamed or removed here.
 //
 //   const page = createEventMapPage(el, {
 //     vehicleId, vehicleName,
@@ -51,7 +51,7 @@ export function createEventMapPage(el, { vehicleId, vehicleName = '', openEvent 
     <div class="em-row" data-placefilter hidden></div>
     <div class="em-map" data-map></div>
     <h2>Newest events</h2><ol data-list></ol>
-    <h2>Saved places</h2><p class="em-muted" style="margin:0">Name a place from the Viewer's map: the pin button, tap the place, then <b>Save place</b>. Saved places show on the maps, and the place search can go straight to them.</p><ol data-places></ol>
+    <h2>Saved places</h2><p class="em-muted" style="margin:0">Add places (Home, Work) in Settings &gt; Places, with suggestions from where the car parks most, or from the Viewer's map: the pin button, tap the place, then <b>Save place</b>. Saved places show on the maps, and the place search can go straight to them.</p><ol data-places></ol>
   </div>`;
   const $ = (s) => el.querySelector(s);
   let alive = true;

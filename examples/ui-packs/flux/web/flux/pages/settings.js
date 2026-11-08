@@ -1,8 +1,8 @@
-// Settings: vehicles, account, interface (UI packs), updates, security, system, power, appearance.
+// Settings: vehicles, places (Home, Work), account, interface (UI packs), updates, security, system, power, appearance.
 import { esc, api, upload, state, current, setVehicle, loadVehicles, bytes, isoish, icon, toast, confirmDialog, busy, fin, store, liveDraw, clockPref } from '../core.js';
 import { seg, wireSeg, chip } from '../ui.js';
 
-const TABS = [['vehicles', 'Vehicles'], ['account', 'Account'], ['interface', 'Interface'], ['updates', 'Updates'], ['security', 'Security'], ['system', 'System'], ['power', 'Electricity'], ['appearance', 'Appearance']];
+const TABS = [['vehicles', 'Vehicles'], ['places', 'Places'], ['account', 'Account'], ['interface', 'Interface'], ['updates', 'Updates'], ['security', 'Security'], ['system', 'System'], ['power', 'Electricity'], ['appearance', 'Appearance']];
 const WEEK = [[1, 'Mon'], [2, 'Tue'], [3, 'Wed'], [4, 'Thu'], [5, 'Fri'], [6, 'Sat'], [0, 'Sun']];
 
 export default {
@@ -14,7 +14,7 @@ export default {
         <div class="spanel" id="sp"><div class="loading"><i></i><i></i><i></i></div></div>
       </div>`;
     const box = el.querySelector('#sp');
-    const sections = { vehicles, account, interface: iface, updates, security, system, power, appearance };
+    const sections = { vehicles, places, account, interface: iface, updates, security, system, power, appearance };
     await sections[tab](box, { params, go });
     return {
       onTopics(t) {
@@ -123,6 +123,17 @@ function vehicleForm(v) {
     <p class="faint small">Adding a vehicle or changing where its footage comes from asks for your password.</p>
     <div class="row-actions">${v ? '<button class="btn danger" type="button" id="veh-del">Remove vehicle…</button><button class="btn" type="button" id="veh-saved">Reset space saved…</button>' : ''}<a class="btn" href="#/settings/vehicles">Cancel</a><button class="btn primary" type="submit">${v ? 'Save' : 'Add vehicle'}</button></div>
   </form>`;
+}
+
+// ---------- places (Home, Work: web/placesSettings.js, the same in every interface) ----------
+async function places(box) {
+  box.innerHTML = '<section class="card"><header class="card-h"><h2>Places</h2></header><div id="fx-places"></div></section>';
+  const { createPlacesSettings } = await import('/web/placesSettings.js');
+  createPlacesSettings(box.querySelector('#fx-places'), {
+    cls: { btn: 'btn sm', primary: 'btn sm primary', danger: 'btn sm danger', input: 'input', muted: 'faint' },
+    toast: (m, bad) => toast(m, bad ? 'bad' : 'ok'),
+    confirm: ({ title, body, ok }) => confirmDialog({ title, body, ok, danger: true })
+  });
 }
 
 // ---------- account ----------

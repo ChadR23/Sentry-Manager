@@ -1,8 +1,8 @@
-// Settings: the garage (vehicles), account, interface packs, the background
+// Settings: the garage (vehicles), places (Home, Work), account, interface packs, the background
 // effect, updates, security, system and the electricity price.
 import { h, ico, api, send, app, pickCar, loadCars, size, stampFull, toast, ask, act, ok, local, segs, onSegs, pill, panelHead, liveDraw, clockPref } from '../core.js';
 
-const TABS = [['vehicles', 'Vehicles', 'car'], ['account', 'Account', 'lock'], ['interface', 'Interface', 'horizon'], ['display', 'Background', 'hud'], ['updates', 'Updates', 'download'], ['security', 'Security', 'shield'], ['system', 'System', 'info'], ['power', 'Electricity', 'bolt']];
+const TABS = [['vehicles', 'Vehicles', 'car'], ['places', 'Places', 'map'], ['account', 'Account', 'lock'], ['interface', 'Interface', 'horizon'], ['display', 'Background', 'hud'], ['updates', 'Updates', 'download'], ['security', 'Security', 'shield'], ['system', 'System', 'info'], ['power', 'Electricity', 'bolt']];
 const WEEK = [[1, 'Mon'], [2, 'Tue'], [3, 'Wed'], [4, 'Thu'], [5, 'Fri'], [6, 'Sat'], [0, 'Sun']];
 let system = null;
 
@@ -17,7 +17,7 @@ export default {
     status(TABS.find(([k]) => k === tab)[1]);
     el.querySelector('.stab.on')?.scrollIntoView?.({ block: 'nearest', inline: 'center' });
     const box = el.querySelector('#sp');
-    const parts = { vehicles, account, interface: iface, display, updates, security, system: sys, power };
+    const parts = { vehicles, places, account, interface: iface, display, updates, security, system: sys, power };
     await parts[tab](box, { params, go });
     return {
       onTopics(t) {
@@ -121,6 +121,17 @@ function carForm(v) {
     <p class="small faint">Adding a vehicle or changing where its footage comes from asks for your password.</p>
     <div class="row">${v ? `<button class="btn danger" type="button" id="v-del">${ico('bin')}Remove vehicle…</button><button class="btn" type="button" id="v-saved">Reset space saved…</button>` : ''}<a class="btn" href="#/settings/vehicles">Cancel</a><button class="btn go" type="submit">${v ? 'Save' : 'Add vehicle'}</button></div>
   </form>`;
+}
+
+// ---------- places (Home, Work: web/placesSettings.js, the same in every interface) ----------
+async function places(box) {
+  box.innerHTML = `<section class="panel hud">${panelHead(`${ico('map')}Places`)}<div id="hz-places"></div></section>`;
+  const { createPlacesSettings } = await import('/web/placesSettings.js');
+  createPlacesSettings(box.querySelector('#hz-places'), {
+    cls: { btn: 'btn sm', primary: 'btn go sm', danger: 'btn sm danger', input: 'in', muted: 'faint' },
+    toast: (m, bad) => toast(m, bad ? 'bad' : 'ok'),
+    confirm: ({ title, body, ok }) => ask({ title, body, yes: ok, danger: true })
+  });
 }
 
 // ---------- account ----------
