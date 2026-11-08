@@ -30,6 +30,15 @@ test('watch-only accounts: exports, stars and places yes; settings and deleting 
   assert.equal(viewerMay('GET', '/api/logs'), false);
   assert.equal(viewerMay('GET', '/api/vehicles'), true);
   assert.equal(viewerMay('GET', '/api/can/settings'), false, 'the Nerd settings are for admins');
+  assert.equal(viewerMay('GET', '/api/can/files'), false, 'the CAN log list is for admins');
+  assert.equal(viewerMay('GET', '/api/can/tokens'), false, 'tokens are for admins');
+  assert.equal(viewerMay('GET', '/api/can/pairing/aaaaaa000001'), false, 'pairing is for admins');
+  assert.equal(viewerMay('POST', '/api/can/tokens'), false);
+  assert.equal(viewerMay('DELETE', '/api/can/tokens/abc'), false);
+  assert.equal(viewerMay('POST', '/api/can/pairing/aaaaaa000001/trust'), false);
+  for (const p of ['/api/can/signals', '/api/can/clip', '/api/can/raw', '/api/can/search', '/api/can/id-events', '/api/can/vehicle-signals']) {
+    assert.equal(viewerMay('GET', p), true, `${p}: what the Viewer shows`);
+  }
   assert.equal(viewerMay('PUT', '/api/dashboards'), true, 'their own Viewer dashboards');
   assert.equal(viewerMay('POST', '/api/can/enable'), false);
   assert.equal(viewerMay('DELETE', '/api/can/files/x.log.xz'), false);

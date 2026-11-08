@@ -251,6 +251,16 @@ async function drawFind(el, close) {
 }
 
 /** The CAN Bridge panel, as a dialog over the page. */
+/**
+ * The upload address for the CAN Bridge app: this page's host on the CAN port.
+ * A browser gives an IPv6 host with its brackets already ('[fd00::5]'), so
+ * they are added only when missing.
+ */
+export function canUploadAddress(hostname, port, https = true) {
+  const host = hostname.includes(':') && !hostname.startsWith('[') ? `[${hostname}]` : hostname;
+  return `${https ? 'https' : 'http'}://${host}:${port}/api/can/logs`;
+}
+
 export function openNerdPanel() {
   css();
   const bg = document.createElement('div');
@@ -304,7 +314,7 @@ export function openNerdPanel() {
     }
     // the CAN Bridge's own port (10000 unless CAN_PORT says otherwise)
     const port = st.port?.port || 10000;
-    const url = `${st.port?.https === false ? 'http' : 'https'}://${location.hostname.includes(':') ? `[${location.hostname}]` : location.hostname}:${port}/api/can/logs`;
+    const url = canUploadAddress(location.hostname, port, st.port?.https !== false);
     const https = location.protocol === 'https:';
     const trustOf = (k) => st.trust?.find((x) => x.key === k);
     body.innerHTML = `

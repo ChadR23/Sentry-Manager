@@ -1072,6 +1072,19 @@ test('CAN Bridge uploads: off until turned on, HTTPS and a write-only token, chu
   }
 });
 
+test('CAN Bridge upload address in the Nerd panel: an IPv6 host keeps one pair of brackets', async () => {
+  // a browser module (the package is CommonJS), loaded as one
+  const src = fs.readFileSync(path.join(__dirname, '..', 'web', 'nerd.js'), 'utf8');
+  const { canUploadAddress } = await import(`data:text/javascript,${encodeURIComponent(src)}`);
+  // what a browser's location.hostname gives for each kind of host
+  const host = (u) => new URL(u).hostname;
+  assert.equal(canUploadAddress(host('https://[fd00::5]:9000/'), 10000), 'https://[fd00::5]:10000/api/can/logs');
+  assert.equal(canUploadAddress('fd00::5', 10000), 'https://[fd00::5]:10000/api/can/logs', 'bare IPv6 gets its brackets');
+  assert.equal(canUploadAddress(host('https://192.168.1.5:9000/'), 10000), 'https://192.168.1.5:10000/api/can/logs');
+  assert.equal(canUploadAddress(host('https://nas.local/'), 10001, false), 'http://nas.local:10001/api/can/logs');
+  assert.doesNotThrow(() => new URL(canUploadAddress(host('https://[fd00::5]:9000/'), 10000)));
+});
+
 test('CAN Bridge port: closed until uploads are on, only the CAN API while open, closed again when off', async () => {
   const dir = await tmp();
   const canPort = await freePort();
@@ -1093,6 +1106,23 @@ test('CAN Bridge port: closed until uploads are on, only the CAN API while open,
     assert.deepEqual([st.port.port, st.port.listening], [canPort, true]);
     await s.call('POST', '/api/can/disable', {}, { headers: https });
     await waitFor(async () => (await reach('/api/can/logs/ping')) === 'closed');
+    // turned on and off quickly, many times at once: it ends as the last call
+    // said, with one listener when on (so it can still be closed) and none when off
+    const flip = (on) => s.call('POST', on ? '/api/can/enable' : '/api/can/disable', {}, { headers: https });
+    const settle = async () => {
+      await new Promise((r) => setTimeout(r, 500));
+      return (await s.call('GET', '/api/can/settings', undefined, { headers: https })).data.port;
+    };
+    for (let round = 0; round < 3; round++) {
+      await Promise.all([flip(true), flip(false), flip(true), flip(true), flip(false), flip(true)]);
+      const up = await settle();
+      assert.deepEqual([up.listening, up.error], [true, null], 'on, one listener, no "used by something else"');
+      assert.equal(await reach('/api/can/logs/ping', { Authorization: `Bearer ${on.data.token}` }), 200);
+      await Promise.all([flip(false), flip(true), flip(false), flip(true), flip(false)]);
+      const down = await settle();
+      assert.deepEqual([down.listening, down.error], [false, null]);
+      assert.equal(await reach('/api/can/logs/ping'), 'closed', 'nothing left listening');
+    }
   } finally {
     await s.stop();
     await fsp.rm(dir, { recursive: true, force: true });
