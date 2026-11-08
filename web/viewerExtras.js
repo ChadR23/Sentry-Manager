@@ -293,6 +293,16 @@ export function attachViewerExtras({ stage, videos: listVideos = () => [], main:
   for (const type of ['play', 'playing', 'pause', 'loadeddata', 'emptied']) on(stage, type, sync, true);
   setTimeout(sync, 0);
 
+  // ---- the car's data at this moment, in blocks you choose (web/statDash.js);
+  // over the cameras where a page's panels float over them (Studio)
+  let dash = null;
+  let dashGone = false;
+  import('/web/statDash.js').then(({ attachStatDash }) => {
+    if (dashGone) return;
+    dash = attachStatDash({ stage, videos, main, over: stepsFixed });
+  }).catch(() => { /* without it */ });
+  cleanups.push(() => { dashGone = true; dash?.destroy(); });
+
   return {
     destroy() {
       resetAll();

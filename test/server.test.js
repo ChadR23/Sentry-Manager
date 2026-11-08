@@ -1066,6 +1066,28 @@ test('CAN Bridge uploads: off until turned on, HTTPS and a write-only token, chu
   }
 });
 
+test('Viewer dashboards: kept per account, cleaned of anything that is not a block', async () => {
+  const dir = await tmp();
+  const s = await startServer(dir);
+  try {
+    await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
+    assert.deepEqual((await s.call('GET', '/api/dashboards')).data, { boards: [], active: null }, 'none yet: the page uses its default');
+    const put = await s.call('PUT', '/api/dashboards', { active: 'b2', boards: [
+      { id: 'b1', name: 'Drive', placement: 'below', blocks: [{ type: 'gauge', signals: ['dash.speed'] }, { type: 'wide', signals: ['a', 'b', 'c', 'd'] }, { type: 'evil', signals: ['x'] }] },
+      { id: 'b2', name: '  Battery\nnerd ', placement: 'sideways', metric: true, blocks: [{ type: 'small', signals: ['can.BattVoltage132', '<script>'] }] }
+    ] });
+    assert.equal(put.status, 200);
+    const got = (await s.call('GET', '/api/dashboards')).data;
+    assert.equal(got.active, 'b2');
+    assert.deepEqual(got.boards[0].blocks, [{ type: 'gauge', signals: ['dash.speed'] }, { type: 'wide', signals: ['a', 'b', 'c'] }], 'three stats at most in a wide block; unknown block types dropped');
+    assert.deepEqual([got.boards[1].name, got.boards[1].placement, got.boards[1].metric, got.boards[1].blocks[0].signals], ['Battery nerd', 'below', true, ['can.BattVoltage132']]);
+    assert.equal((await s.call('PUT', '/api/dashboards', { boards: [] })).status, 400);
+  } finally {
+    await s.stop();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('early data: the calls the main page made the last two times it opened are asked for at once the next time', async () => {
   const dir = await tmp();
   const s = await startServer(dir);

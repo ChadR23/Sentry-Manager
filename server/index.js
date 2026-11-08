@@ -1587,6 +1587,29 @@ async function main() {
     out.sort((a, b) => String(b.startKey).localeCompare(String(a.startKey)));
     return { events: out, withoutPosition: recs.length - out.length };
   });
+  // The Viewer's stats dashboards (web/statDash.js): each account's own
+  const DASH_TYPES = { small: 1, wide: 3, gauge: 1, state: 1 };
+  const cleanBoards = (body) => {
+    const boards = (Array.isArray(body?.boards) ? body.boards : []).slice(0, 12).map((b, i) => ({
+      id: /^[\w-]{1,24}$/.test(String(b?.id)) ? String(b.id) : `b${i}`,
+      name: String(b?.name ?? 'Dashboard').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 40) || 'Dashboard',
+      placement: b?.placement === 'over' ? 'over' : 'below',
+      metric: typeof b?.metric === 'boolean' ? b.metric : null,
+      blocks: (Array.isArray(b?.blocks) ? b.blocks : []).slice(0, 32).filter((x) => DASH_TYPES[x?.type]).map((x) => ({
+        type: x.type, signals: (Array.isArray(x.signals) ? x.signals : []).slice(0, DASH_TYPES[x.type]).map((id) => String(id)).filter((id) => /^[\w.:-]{1,80}$/.test(id))
+      }))
+    }));
+    if (!boards.length) throw new HttpError(400, 'Send at least one dashboard.');
+    const active = boards.some((b) => b.id === body?.active) ? body.active : boards[0].id;
+    return { boards, active };
+  };
+  r.add('GET', '/api/dashboards', (req, res, { user }) => db.get(`dash:${user}`, null) || { boards: [], active: null });
+  r.add('PUT', '/api/dashboards', (req, res, { body, user }) => {
+    const clean = cleanBoards(body);
+    db.set(`dash:${user}`, clean);
+    return clean;
+  });
+
   // Saved places: named spots (Home, Work) for the maps and the place search
   const placeList = () => (Array.isArray(db.get('places', [])) ? db.get('places', []) : []);
   const placeName = (n) => String(n ?? '').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 60);
