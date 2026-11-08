@@ -632,6 +632,19 @@ test('destroy() keeps a List filter typed a moment before', async (t) => {
   assert.equal(JSON.parse(puts[0].body).boards[0].blocks[0].q, 'batt', 'with the filter');
 });
 
+test('a box resized just before the Viewer goes is saved at once, not half a second later (when the page is gone)', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const d = await dashboard({ rawOpen: false, routes: { boards: listBoard() } });
+  fire(d.dash.panel.querySelector('[data-size-list]'), 'keydown', { key: 'ArrowDown', shiftKey: true });
+  const puts = () => d.asked.filter((a) => a.url.pathname === '/api/dashboards' && a.method === 'PUT');
+  assert.equal(puts().length, 0, 'waiting (saves wait for a pause)');
+  d.dash.destroy();
+  assert.equal(puts().length, 1, 'sent as it goes');
+  assert.ok(Number.isFinite(JSON.parse(puts()[0].body).boards[0].listSize.wide?.h), 'with the new height');
+  t.mock.timers.tick(1000);
+  assert.equal(puts().length, 1, 'once');
+});
+
 test('the List asks for its own thinned answer as columns, and the bar\'s signals by name', async (t) => {
   const asks = [];
   const d = await dashboard({
@@ -868,4 +881,17 @@ test('the List box: resized from its grip (height docked, both floating), clampe
   fire(box.querySelector('[data-dock-list]'), 'click');
   assert.ok(box.classList.contains('below'));
   assert.deepEqual([box.style.width, box.style.height], ['', '220px']);
+});
+
+test('a bar over a short video is no taller than the video: its grip, on its top, stays where it can be reached', async (t) => {
+  const d = await pageDash(t, [{ type: 'small', signals: ['dash.speed'] }], { placement: 'over', size: { wide: { h: 600 } } });
+  d.stage.clientHeight = 250;
+  for (const fn of d.win.resize || []) fn();
+  assert.ok(d.el.classList.contains('over'));
+  assert.equal(d.el.style.height, `${250 - 16}px`, 'as tall as the video, less its margins');
+  // dragged up from the grip, it stops there too
+  fire(d.el.querySelector('[data-size-bar]'), 'pointerdown', { pointerId: 1, clientX: 100, clientY: 100, button: 0 });
+  d.send('pointermove', 100, -400);
+  assert.equal(d.el.style.height, `${250 - 16}px`);
+  d.send('pointerup', 100, -400);
 });

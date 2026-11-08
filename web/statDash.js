@@ -858,14 +858,28 @@ function loadBoards() {
   return saved;
 }
 let saveTimer = 0;
+let saveState = null; // what the waiting save sends
+function sendBoards(state) {
+  // (keepalive: a save as the page closes still reaches the server)
+  fetch('/api/dashboards', { method: 'PUT', credentials: 'same-origin', headers: H, body: JSON.stringify(state), keepalive: true }).catch(() => {});
+}
 function saveBoards(state) {
   saved = Promise.resolve(state);
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    // (keepalive: a save as the page closes still reaches the server)
-    fetch('/api/dashboards', { method: 'PUT', credentials: 'same-origin', headers: H, body: JSON.stringify(state), keepalive: true }).catch(() => {});
-  }, 500);
+  saveState = state;
+  saveTimer = setTimeout(() => { saveTimer = 0; saveState = null; sendBoards(state); }, 500);
 }
+/** A save still waiting goes now (the page is closing, reloading or hidden: a box moved or resized just before is kept). */
+function flushBoards() {
+  if (!saveTimer) return;
+  clearTimeout(saveTimer);
+  saveTimer = 0;
+  const st = saveState;
+  saveState = null;
+  if (st) sendBoards(st);
+}
+globalThis.addEventListener?.('pagehide', flushBoards);
+globalThis.document?.addEventListener?.('visibilitychange', () => { if (document.visibilityState === 'hidden') flushBoards(); });
 const metricDefault = () => !/^en-(US|GB|LR|MM)$/i.test(navigator.language || '');
 
 export function attachStatDash({ stage, videos = () => [], main = () => null, over = false } = {}) {
@@ -1102,7 +1116,10 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
   function clampSize(node, w, h) {
     const m = node === panel ? MIN.list : MIN.bar;
     const W = viewW();
-    const H = winH();
+    // (a bar over the video is no taller than the video, less its margins: its grip, on its top,
+    // stays where it can be reached when the video is short, as when a tall List shares the screen)
+    const room = node === el && el.classList.contains('over') ? (stage.clientHeight || 0) - 16 : 0;
+    const H = room > 0 ? Math.min(winH(), room) : winH();
     return { w: Math.round(Math.max(Math.min(m.w, W), Math.min(W, w))), h: Math.round(Math.max(Math.min(m.h, H), Math.min(H, h))) };
   }
   function applySize(node) {
@@ -1156,7 +1173,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
   // the page grows as it loads (a box kept low on the page waits for it) or shrinks: put them back
   let reflowRaf = 0;
   const reflow = () => {
-    if (reflowRaf || !board || !(floating(el) || floating(panel))) return;
+    if (reflowRaf || !board || !(floating(el) || floating(panel) || el.classList.contains('sized'))) return;
     reflowRaf = requestAnimationFrame(() => { reflowRaf = 0; if (alive && !held) applyFloat(); });
   };
   const pageWatch = globalThis.ResizeObserver ? new ResizeObserver(reflow) : null;
@@ -1784,6 +1801,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
       endGesture();
       // a List filter typed in the last moment is kept (its save waits for the typing to stop)
       if (listSave) { clearTimeout(listSave); listSave = null; if (state) saveBoards(state); }
+      flushBoards(); // (and any save still waiting: the page is going)
       alive = false; cancelAnimationFrame(raf); cancelAnimationFrame(reflowRaf); pageWatch?.disconnect();
       clearTimeout(canBar.retry); clearTimeout(canAll.retry); globalThis.removeEventListener?.('resize', onResize);
       for (const type of ['fullscreenchange', 'webkitfullscreenchange']) document.removeEventListener?.(type, onFullscreen);
