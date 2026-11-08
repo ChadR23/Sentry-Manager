@@ -42,6 +42,11 @@ test('watch-only accounts: exports, stars and places yes; settings and deleting 
   assert.equal(viewerMay('PUT', '/api/dashboards'), true, 'their own Viewer dashboards');
   assert.equal(viewerMay('POST', '/api/can/enable'), false);
   assert.equal(viewerMay('DELETE', '/api/can/files/x.log.xz'), false);
+  // the CAN downloads (raw logs, bundles, decoded CSV, new ids) are for admins
+  for (const p of ['/api/can/files/x_20260101T000000Z_1.log.xz/download', '/api/can/files/x_20260101T000000Z_1.log.xz.json/download', '/api/can/export/bundle', '/api/can/export/decoded', '/api/can/export/new-ids', '/api/can/export']) {
+    assert.equal(viewerMay('GET', p), false, `${p}: admins only`);
+    assert.equal(viewerMay('HEAD', p), false, `${p}: admins only`);
+  }
 });
 
 test('two-step sign-in: a code is used once; recovery codes work with or without the dash, once each', () => {

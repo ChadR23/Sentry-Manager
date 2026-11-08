@@ -189,7 +189,7 @@ const VIEWER_POSTS = [
 ];
 // the CAN Bridge's logs, tokens and pairing are for admins; its signals, clips
 // and searches (what the Viewer shows) stay readable
-const VIEWER_HIDDEN = [/^\/api\/metrics/, /^\/api\/can\/(settings|files|tokens|pairing)(\/|$)/, /^\/api\/logs/, /^\/api\/support-bundle/, /^\/api\/snapshots/, /^\/api\/security/, /^\/api\/accounts/, /^\/api\/ui-packs\/original\.zip/, /^\/api\/nodes/];
+const VIEWER_HIDDEN = [/^\/api\/metrics/, /^\/api\/can\/(settings|files|tokens|pairing|export)(\/|$)/, /^\/api\/logs/, /^\/api\/support-bundle/, /^\/api\/snapshots/, /^\/api\/security/, /^\/api\/accounts/, /^\/api\/ui-packs\/original\.zip/, /^\/api\/nodes/];
 function viewerMay(method, p) {
   if (method === 'GET' || method === 'HEAD') return !VIEWER_HIDDEN.some((re) => re.test(p));
   return VIEWER_POSTS.some((re) => re.test(p));

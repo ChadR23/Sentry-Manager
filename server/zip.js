@@ -123,4 +123,98 @@ function writeZip(files) {
   return Buffer.concat([...parts, cd, tail]);
 }
 
-module.exports = { readZip, writeZip, ZipError };
+/** A date and time as a .zip keeps it (DOS, local fields taken as UTC). */
+function dosTime(ms) {
+  const d = new Date(Number.isFinite(ms) ? ms : Date.UTC(2026, 0, 1));
+  const y = Math.max(1980, Math.min(2107, d.getUTCFullYear()));
+  return { time: (d.getUTCHours() << 11) | (d.getUTCMinutes() << 5) | (d.getUTCSeconds() >> 1), date: ((y - 1980) << 9) | ((d.getUTCMonth() + 1) << 5) | d.getUTCDate() };
+}
+
+const ZIP_LIMIT = 0xffffffff - 64 * 1024 * 1024; // no zip64: the whole archive stays under 4 GiB
+
+/**
+ * Stream a .zip to `out` (an HTTP response) without holding the files: each
+ * entry is stored as it is (a .log.xz is packed already), its CRC worked out
+ * while it streams and written after it (a data descriptor).
+ * `entries`: [{ name, data: Buffer } | { name, size, mtime, open: () => Readable }].
+ * The caller checks that the sizes add up to less than ZIP_LIMIT. Resolves
+ * when it is written; rejects (out destroyed) when a file changed size or
+ * could not be read, or the reader went away.
+ */
+async function streamZip(out, entries) {
+  const { once } = require('events');
+  let offset = 0;
+  const central = [];
+  const write = async (buf) => {
+    if (out.destroyed) throw new ZipError('The download was stopped.');
+    offset += buf.length;
+    if (!out.write(buf)) await Promise.race([once(out, 'drain'), once(out, 'close').then(() => { throw new ZipError('The download was stopped.'); })]);
+  };
+  for (const e of entries) {
+    const nameBuf = Buffer.from(e.name, 'utf8');
+    const { time, date } = dosTime(e.mtime);
+    const size = e.data ? e.data.length : e.size;
+    if (offset + size > ZIP_LIMIT) throw new ZipError('The archive would be too large.');
+    const at = offset;
+    const head = Buffer.alloc(30);
+    head.writeUInt32LE(LOCAL, 0);
+    head.writeUInt16LE(20, 4);
+    head.writeUInt16LE(0x808, 6); // UTF-8 names, sizes and CRC in the descriptor after the data
+    head.writeUInt16LE(0, 8); // stored
+    head.writeUInt16LE(time, 10);
+    head.writeUInt16LE(date, 12);
+    head.writeUInt16LE(nameBuf.length, 26);
+    await write(head);
+    await write(nameBuf);
+    let crc = 0;
+    let n = 0;
+    if (e.data) {
+      crc = zlib.crc32(e.data);
+      n = e.data.length;
+      await write(e.data);
+    } else {
+      const src = e.open();
+      try {
+        for await (const chunk of src) {
+          crc = zlib.crc32(chunk, crc);
+          n += chunk.length;
+          if (n > size) break;
+          await write(chunk);
+        }
+      } finally { src.destroy?.(); }
+    }
+    if (n !== size) throw new ZipError(`${e.name} changed while it was being sent.`);
+    const desc = Buffer.alloc(16);
+    desc.writeUInt32LE(0x08074b50, 0);
+    desc.writeUInt32LE(crc >>> 0, 4);
+    desc.writeUInt32LE(size, 8);
+    desc.writeUInt32LE(size, 12);
+    await write(desc);
+    const entry = Buffer.alloc(46);
+    entry.writeUInt32LE(CENTRAL, 0);
+    entry.writeUInt16LE(20, 4);
+    entry.writeUInt16LE(20, 6);
+    entry.writeUInt16LE(0x808, 8);
+    entry.writeUInt16LE(0, 10);
+    entry.writeUInt16LE(time, 12);
+    entry.writeUInt16LE(date, 14);
+    entry.writeUInt32LE(crc >>> 0, 16);
+    entry.writeUInt32LE(size, 20);
+    entry.writeUInt32LE(size, 24);
+    entry.writeUInt16LE(nameBuf.length, 28);
+    entry.writeUInt32LE(at, 42);
+    central.push(entry, nameBuf);
+  }
+  const cd = Buffer.concat(central);
+  const cdAt = offset;
+  await write(cd);
+  const tail = Buffer.alloc(22);
+  tail.writeUInt32LE(EOCD, 0);
+  tail.writeUInt16LE(entries.length, 8);
+  tail.writeUInt16LE(entries.length, 10);
+  tail.writeUInt32LE(cd.length, 12);
+  tail.writeUInt32LE(cdAt, 16);
+  await write(tail);
+}
+
+module.exports = { readZip, writeZip, streamZip, ZIP_LIMIT, ZipError };

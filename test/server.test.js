@@ -1085,6 +1085,24 @@ test('CAN Bridge upload address in the Nerd panel: an IPv6 host keeps one pair o
   assert.doesNotThrow(() => new URL(canUploadAddress(host('https://[fd00::5]:9000/'), 10000)));
 });
 
+test('Nerd panel: the Received logs filter (car key, check, text) and the download times', async () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'web', 'nerd.js'), 'utf8');
+  const { filterLogs, localInput } = await import(`data:text/javascript,${encodeURIComponent(src)}`);
+  const logs = [
+    { name: 'AAA_20261108T080000Z_1.log.xz', vehicleKey: 'AAA', check: { status: 'verified' }, appVersion: '0.2.118' },
+    { name: 'AAA_20261108T081000Z_2.log.xz', vehicleKey: 'AAA', check: { status: 'failed' }, appVersion: '0.2.120' },
+    { name: 'BBB_20261108T080000Z_1.log.xz', vehicleKey: 'BBB', appVersion: null }
+  ];
+  const names = (f) => filterLogs(logs, f).map((l) => l.name.slice(0, 22));
+  assert.deepEqual(names({}), ['AAA_20261108T080000Z_1', 'AAA_20261108T081000Z_2', 'BBB_20261108T080000Z_1']);
+  assert.deepEqual(names({ key: 'AAA', check: 'failed' }), ['AAA_20261108T081000Z_2']);
+  assert.deepEqual(names({ check: 'waiting' }), ['BBB_20261108T080000Z_1'], 'no check yet counts as waiting');
+  assert.deepEqual(names({ text: ' 0.2.120 ' }), ['AAA_20261108T081000Z_2'], 'the app version');
+  assert.deepEqual(names({ text: 't0810' }), ['AAA_20261108T081000Z_2'], 'the name, any case');
+  assert.match(localInput(Date.UTC(2026, 10, 8, 8, 5)), /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/);
+  assert.equal(new Date(localInput(Date.UTC(2026, 10, 8, 8, 5, 30))).getTime(), Date.UTC(2026, 10, 8, 8, 5), 'this browser\'s clock, to the minute');
+});
+
 test('CAN Bridge port: closed until uploads are on, only the CAN API while open, closed again when off', async () => {
   const dir = await tmp();
   const canPort = await freePort();
@@ -1318,6 +1336,141 @@ test('CAN index: an uploaded log is decoded in the background, and a clip gets i
     const st = (await s.call('GET', '/api/can/settings', undefined, { headers: https })).data;
     assert.deepEqual(st.keys, ['MY-car']);
     assert.equal(st.index.lastError, null);
+  } finally {
+    await s.stop();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('CAN downloads (Nerd): a log as received, a bundle with ids.csv, decoded CSV and new ids; admins only, never the upload token; live updates on upload', { skip: spawnSync('xz', ['--version']).status !== 0 && 'needs xz', timeout: 90000 }, async () => {
+  const { readZip } = require('../server/zip');
+  const dir = await tmp();
+  await makeFootage(path.join(dir, 'footage'));
+  const s = await startServer(dir, { TRUST_PROXY: 'true' });
+  const https = { 'X-Forwarded-Proto': 'https' };
+  const get = (p, headers = {}) => fetch(s.base + p, { headers: { ...https, Cookie: s.getCookie(), ...headers } });
+  try {
+    await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' }, { headers: https });
+    await s.call('POST', '/api/auth/confirm', { password: 'correct horse' }, { headers: https });
+    const token = (await s.call('POST', '/api/can/enable', {}, { headers: https })).data.token;
+    // a minute and a bit at 08:00 UTC: battery voltage, and an id no DBC knows (7EF)
+    const t0 = Date.UTC(2020, 0, 1, 8, 0, 0) / 1000;
+    const lines = [];
+    for (let i = 0; i < 700; i++) {
+      const t = t0 - 2 + i / 10;
+      const b = Buffer.alloc(8);
+      b.writeUInt16LE(Math.round((380 + i * 0.01) / 0.01), 0);
+      lines.push(`(${t.toFixed(6)}) can0 132#${b.toString('hex').toUpperCase()}`, `(${t.toFixed(6)}) can0 7EF#AA00${(i & 0xff).toString(16).padStart(2, '0').toUpperCase()}00`);
+    }
+    const file = execFileSync('xz', ['-6', '-c'], { input: `${lines.join('\n')}\n` });
+    const name = 'MY-car_20200101T075958Z_1.log.xz';
+    const side = Buffer.from(JSON.stringify({ format: 'canbridge-candump-xz/1', frames: 1400 }));
+    const put = (n, body) => fetch(`${s.base}/api/can/logs/${n}`, { method: 'POST', body, headers: { ...https, Authorization: `Bearer ${token}`, 'Upload-Offset': '0', 'Upload-Length': String(body.length), 'Upload-SHA256': crypto.createHash('sha256').update(body).digest('hex') } });
+
+    // the Nerd panel's live updates: a finished upload is announced as 'can'
+    const events = await get('/api/events');
+    const reader = events.body.getReader();
+    await reader.read(); // hello
+    assert.equal((await put(name, file)).status, 201);
+    let seen = '';
+    const until = Date.now() + 10000;
+    while (!/"can"/.test(seen) && Date.now() < until) {
+      const chunk = await Promise.race([reader.read(), new Promise((r) => setTimeout(() => r({ value: new Uint8Array() }), 1000))]);
+      seen += new TextDecoder().decode(chunk.value || new Uint8Array());
+    }
+    await reader.cancel();
+    assert.match(seen, /event: changed\ndata: \{"topics":\[[^\]]*"can"/, 'announced on the live updates');
+    assert.equal((await put(`${name}.json`, side)).status, 201);
+    // decoded in the background
+    await waitFor(async () => (await s.call('GET', '/api/can/export/new-ids?key=MY-car&since=2019-12-31', undefined, { headers: https })).data.ids?.length >= 2);
+
+    // one log and its sidecar, exactly as received
+    const raw = await get(`/api/can/files/${name}/download`);
+    assert.equal(raw.status, 200);
+    assert.equal(raw.headers.get('content-disposition'), `attachment; filename="${name}"`);
+    assert.equal(raw.headers.get('content-type'), 'application/x-xz');
+    assert.deepEqual(Buffer.from(await raw.arrayBuffer()), file);
+    const sd = await get(`/api/can/files/${name}.json/download`);
+    assert.equal(sd.status, 200);
+    assert.deepEqual(Buffer.from(await sd.arrayBuffer()), side);
+    // only names canLogs takes, under the car's own folder
+    assert.equal((await get('/api/can/files/nonsense/download')).status, 400);
+    assert.equal((await get('/api/can/files/MY-car_20200101T075958Z_9.log.xz/download')).status, 404, 'a good name that is not here');
+    for (const bad of ['..%2F..%2Fdb.json', '..%2Fcan%2FMY-car%2F' + name, 'MY-car_20200101T075958Z_1.log.xz.part', '%2Fetc%2Fpasswd', 'MY-car_20200101T075958Z_1.log.xz%2F..%2F..%2Fdb.json']) {
+      const st = (await get(`/api/can/files/${bad}/download`)).status;
+      assert.ok(st === 400 || st === 404, `${bad}: refused (${st})`);
+    }
+    for (const bad of ['../can', '..%2F..', 'MY car', '']) assert.equal((await get(`/api/can/export/bundle?key=${bad}&from=2020-01-01&to=2020-01-02`)).status, 400, `key ${bad}`);
+    // ranges: both ends, in order, at most a week (a day for decoded)
+    assert.equal((await get('/api/can/export/bundle?key=MY-car&from=2020-01-01')).status, 400);
+    assert.equal((await get('/api/can/export/bundle?key=MY-car&from=2020-01-02&to=2020-01-01')).status, 400);
+    assert.equal((await get('/api/can/export/bundle?key=MY-car&from=2020-01-01&to=2020-01-09')).status, 400, 'over 7 days');
+    assert.equal((await get('/api/can/export/bundle?key=MY-car&from=2020-01-01&to=nope')).status, 400);
+    assert.equal((await get('/api/can/export/decoded?key=MY-car&from=2020-01-01&to=2020-01-03')).status, 400, 'over a day');
+    assert.equal((await get('/api/can/export/bundle?key=MY-car&from=2021-01-01&to=2021-01-02')).status, 404, 'no logs then');
+
+    // the bundle: ids.csv, manifest.json, the log and sidecar (the one running at the start counts)
+    const b = await get('/api/can/export/bundle?key=MY-car&from=2020-01-01T08:00&to=2020-01-01T08:30');
+    assert.equal(b.status, 200);
+    assert.equal(b.headers.get('content-type'), 'application/zip');
+    assert.match(b.headers.get('content-disposition'), /^attachment; filename="can-MY-car-20200101T0800-to-20200101T0830\.zip"$/);
+    const zipBuf = Buffer.from(await b.arrayBuffer());
+    const entries = Object.fromEntries(readZip(zipBuf).map((e) => [e.name, e.data]));
+    assert.deepEqual(Object.keys(entries).sort(), ['MY-car/' + name, `MY-car/${name}.json`, 'ids.csv', 'manifest.json'].sort());
+    assert.deepEqual(entries[`MY-car/${name}`], file, 'the log byte for byte');
+    assert.deepEqual(entries[`MY-car/${name}.json`], side);
+    const csv = entries['ids.csv'].toString('utf8').trim().split('\n');
+    assert.equal(csv[0], 'bus,id_hex,message,unknown,frames,hz,first_seen_utc,last_seen_utc,minutes_seen');
+    const row = (id) => csv.find((l) => l.startsWith(`can0,0x${id},`))?.split(',');
+    assert.deepEqual(row('132').slice(2, 4), ['ID132HVBattAmpVolt', '']);
+    assert.deepEqual(row('7EF').slice(2, 4), ['unknown', 'UNKNOWN'], 'an id the DBC does not know stands out');
+    assert.equal(Number(row('7EF')[4]), 680, 'its frames from 08:00 on (the range), from the index');
+    assert.ok(Math.abs(Number(row('7EF')[5]) - 10) < 0.5, `about 10 Hz (${row('7EF')[5]})`);
+    assert.equal(row('7EF')[6], '2020-01-01T08:00:00.000Z');
+    const manifest = JSON.parse(entries['manifest.json']);
+    assert.deepEqual([manifest.vehicleKey, manifest.logs.length, manifest.logs[0].name, manifest.ids.unknown], ['MY-car', 1, name, 1]);
+    // a real zip tool reads it too (stored entries with data descriptors)
+    if (spawnSync('unzip', ['-v']).status === 0) {
+      const zf = path.join(dir, 'bundle.zip');
+      await fsp.writeFile(zf, zipBuf);
+      assert.equal(spawnSync('unzip', ['-tq', zf]).status, 0, 'unzip -t passes');
+    }
+
+    // decoded signals as CSV
+    const dec = await get('/api/can/export/decoded?key=MY-car&from=2020-01-01T08:00&to=2020-01-01T08:00:30&signals=BattVoltage132');
+    assert.equal(dec.status, 200);
+    assert.match(dec.headers.get('content-type'), /^text\/csv/);
+    const decLines = (await dec.text()).trim().split('\n');
+    assert.equal(decLines[0], 'timestamp_utc,signal,value,unit,value_name');
+    assert.ok(decLines.length > 20, `rows (${decLines.length})`);
+    assert.match(decLines[1], /^2020-01-01T08:00:00\.\d{3}Z,BattVoltage132,38\d\.\d*,V,$/);
+    assert.ok(decLines.slice(1).every((l) => l.split(',')[0] <= '2020-01-01T08:00:30.000Z' && l.split(',')[1] === 'BattVoltage132'), 'only that signal, inside the range');
+
+    // new ids since a date: JSON for the panel, CSV to download
+    const fresh = (await s.call('GET', '/api/can/export/new-ids?key=MY-car&since=2019-12-31', undefined, { headers: https })).data;
+    assert.deepEqual(fresh.ids.map((x) => [x.key, x.name, x.unknown]), [['can0:132', 'ID132HVBattAmpVolt', false], ['can0:7EF', null, true]]);
+    assert.equal((await s.call('GET', '/api/can/export/new-ids?key=MY-car&since=2020-01-02', undefined, { headers: https })).data.ids.length, 0, 'nothing new after');
+    const nc = await get('/api/can/export/new-ids?key=MY-car&since=2019-12-31&format=csv');
+    assert.match(nc.headers.get('content-disposition'), /filename="can-MY-car-new-ids-since-2019-12-31\.csv"/);
+    assert.match(await nc.text(), /^bus,id_hex,message,unknown,first_seen_utc,last_seen_utc,minutes_seen\ncan0,0x132,ID132HVBattAmpVolt,,.*\ncan0,0x7EF,unknown,UNKNOWN,/);
+    assert.equal((await get('/api/can/export/new-ids?key=MY-car')).status, 400, 'since is needed');
+
+    // the upload token reads nothing: not on the web port, and not with a cookie-less request
+    const tok = { ...https, Authorization: `Bearer ${token}` };
+    for (const p of [`/api/can/files/${name}/download`, '/api/can/export/bundle?key=MY-car&from=2020-01-01&to=2020-01-02', '/api/can/export/decoded?key=MY-car&from=2020-01-01&to=2020-01-01', '/api/can/export/new-ids?key=MY-car&since=2019-12-31', `/api/can/logs/${name}`, `/api/can/logs/${name}/download`]) {
+      const res = await fetch(s.base + p, { headers: tok });
+      assert.ok(res.status === 401 || res.status === 404, `${p} with the token: ${res.status}`);
+      assert.notEqual(res.headers.get('content-type'), 'application/x-xz');
+    }
+
+    // a watch-only account gets none of it
+    assert.equal((await s.call('POST', '/api/accounts', { username: 'kid', password: 'watching only', role: 'viewer' }, { headers: https })).status, 200);
+    const login = await fetch(`${s.base}/api/auth/login`, { method: 'POST', headers: { ...https, 'Content-Type': 'application/json', 'X-Requested-With': 'sentry-six-manager' }, body: JSON.stringify({ username: 'kid', password: 'watching only' }) });
+    assert.equal(login.status, 200);
+    const kid = login.headers.getSetCookie().map((c) => c.split(';')[0]).join('; ');
+    for (const p of [`/api/can/files/${name}/download`, '/api/can/export/bundle?key=MY-car&from=2020-01-01&to=2020-01-02', '/api/can/export/decoded?key=MY-car&from=2020-01-01&to=2020-01-01', '/api/can/export/new-ids?key=MY-car&since=2019-12-31&format=csv']) {
+      assert.equal((await fetch(s.base + p, { headers: { ...https, Cookie: kid } })).status, 403, `${p}: watch-only refused`);
+    }
   } finally {
     await s.stop();
     await fsp.rm(dir, { recursive: true, force: true });

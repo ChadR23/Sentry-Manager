@@ -94,6 +94,24 @@ const minuteKey = (ms) => new Date(Math.floor(ms / 60000) * 60000).toISOString()
 const TRUST_RANK = { override: 0, unsigned: 1, verified: 2 };
 const worseTrust = (a, b) => (a === undefined ? b : b === undefined ? a : (TRUST_RANK[a] ?? 1) <= (TRUST_RANK[b] ?? 1) ? a : b);
 
+/** Which DBC bus each interface is: the sidecar's bus map, else can0 vehicle and can1 chassis. */
+function busMapOf(side) {
+  const busOf = { ...DEFAULT_BUSES };
+  const map = side?.bus || side?.busMap || side?.buses || null;
+  if (map && typeof map === 'object') {
+    for (const [iface, v] of Object.entries(map)) {
+      const s = String(typeof v === 'object' ? v?.dbcBus || v?.name || '' : v).toLowerCase();
+      if (/vehicle/.test(s)) busOf[iface] = 'VehicleBus';
+      else if (/chassis/.test(s)) busOf[iface] = 'ChassisBus';
+      else if (/party/.test(s)) busOf[iface] = 'PartyBus';
+    }
+  }
+  return busOf;
+}
+
+const MINUTE_FILE = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})\.json\.gz$/;
+const minuteOfFile = (f) => { const m = MINUTE_FILE.exec(f); return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]) : null; };
+
 /** Write a file whole or not at all (a failed write leaves no .tmp file behind). */
 async function writeAtomic(file, body) {
   const tmp = `${file}.${process.pid}.tmp`;
@@ -133,7 +151,7 @@ async function sidecarStamp(file) {
   return st ? `/${st.size}-${Math.round(st.mtimeMs)}` : '';
 }
 
-function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bundledDbc, xz = 'xz', onIndexed = null, usable = async () => ({ use: true, trust: 'unsigned' }), maxUnpacked = MAX_UNPACKED }) {
+function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bundledDbc, xz = 'xz', onIndexed = null, onProgress = null, usable = async () => ({ use: true, trust: 'unsigned' }), maxUnpacked = MAX_UNPACKED }) {
   const doneFile = path.join(dir, 'done.json');
   let done = null;
   const loadDone = async () => {
@@ -146,6 +164,8 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
     await writeAtomic(doneFile, JSON.stringify(done));
   };
   const status = { running: false, current: null, indexed: 0, pending: 0, lastError: null, lastAt: null };
+  // the Nerd panel's progress line (index.js throttles it)
+  const progress = () => { try { onProgress?.({ ...status }); } catch { /* the caller's own business */ } };
 
   async function readMinute(key, minute) {
     try { return JSON.parse(zlib.gunzipSync(await fsp.readFile(path.join(dir, key, `${minute}.json.gz`))).toString('utf8')); } catch { return null; }
@@ -225,17 +245,7 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
     const file = path.join(canDir, key, name);
     let side = {};
     try { side = JSON.parse(await fsp.readFile(`${file}.json`, 'utf8')) || {}; } catch { /* no sidecar */ }
-    // which DBC bus each interface is (the sidecar's bus map, else can0/can1)
-    const busOf = { ...DEFAULT_BUSES };
-    const map = side.bus || side.busMap || side.buses || null;
-    if (map && typeof map === 'object') {
-      for (const [iface, v] of Object.entries(map)) {
-        const s = String(typeof v === 'object' ? v?.dbcBus || v?.name || '' : v).toLowerCase();
-        if (/vehicle/.test(s)) busOf[iface] = 'VehicleBus';
-        else if (/chassis/.test(s)) busOf[iface] = 'ChassisBus';
-        else if (/party/.test(s)) busOf[iface] = 'PartyBus';
-      }
-    }
+    const busOf = busMapOf(side);
     const { messages } = dbc();
     const seen = new Map();
     let minute = null;
@@ -406,15 +416,18 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
   /** Index what is new (after an upload, and at start). */
   function kick() {
     if (running) { again = true; return running; }
+    const indexedBefore = status.indexed;
     running = (async () => {
       status.running = true;
       do {
         again = false;
         const todo = await pendingLogs();
         status.pending = todo.length;
+        if (todo.length) progress();
         for (const job of todo) {
           while (!idle()) await new Promise((r) => setTimeout(r, 2000));
           status.current = job.name;
+          progress();
           try {
             const r = await indexLog(job.key, job.name, { rawOnly: job.rawOnly, trust: job.trust });
             (await loadDone())[`${job.key}/${job.name}`] = job.stamp;
@@ -439,7 +452,9 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
       } while (again);
     })().catch((err) => { status.lastError = err.message; }).finally(() => {
       running = null;
+      const worked = status.indexed;
       Object.assign(status, { running: false, current: null, lastAt: Date.now() });
+      if (worked !== indexedBefore || status.lastError) progress();
     });
     return running;
   }
@@ -590,7 +605,68 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
     return changed;
   }
 
-  return { kick, trustOf, indexLog, series, raw, signals, forget, removeLog, status: () => ({ ...status }), pendingLogs };
+  /** One car key's indexed minutes between two times (UTC ms), oldest first: [t, data] (read one at a time). */
+  async function* minutesIn(key, from, to) {
+    let names = [];
+    try { names = await fsp.readdir(path.join(dir, key)); } catch { return; }
+    const ts = names.map(minuteOfFile).filter((t) => t !== null && t + 60_000 > from && t <= to).sort((a, b) => a - b);
+    for (const t of ts) {
+      const data = await readMinute(key, minuteKey(t));
+      if (data) yield [t, data];
+    }
+  }
+
+  /** The DBC message of an id ("can0:2E5") on a bus map, or null when the DBC does not know it there. */
+  function messageName(idKey, busOf = DEFAULT_BUSES) {
+    const [iface, hexId] = String(idKey).split(':');
+    const msg = dbc().messages.get(parseInt(hexId, 16));
+    const bus = busOf[iface] || null;
+    return msg && (!bus || !msg.bus || msg.bus === bus) ? msg.name : null;
+  }
+
+  /**
+   * Every CAN id of one car key between two times, from the frame counts the
+   * index keeps per log and minute (nothing decoded again): [{ key, bus, id,
+   * name (the DBC's, else null), frames, hz (while its log ran), firstSeen,
+   * lastSeen (UTC ms, to the log's span within the minute), minutes }], by id.
+   */
+  async function idSummary(key, from, to) {
+    const out = new Map();
+    const buses = new Map(); // log name -> its bus map (from its sidecar)
+    const busesOf = async (name) => {
+      if (!buses.has(name)) {
+        let side = {};
+        if (parseName(name)) { try { side = JSON.parse(await fsp.readFile(path.join(canDir, key, `${name}.json`), 'utf8')) || {}; } catch { /* none */ } }
+        buses.set(name, busMapOf(side));
+      }
+      return buses.get(name);
+    };
+    for await (const [t, data] of minutesIn(key, from, to)) {
+      for (const [name, part] of Object.entries(data.logs || {})) {
+        if (!part?.ids) continue;
+        const [a, b] = Array.isArray(part.span) ? part.span : [0, 59_999];
+        const ms = Math.max(1000, b - a);
+        const busOf = await busesOf(name);
+        for (const [idKey, n] of Object.entries(part.ids)) {
+          let e = out.get(idKey);
+          if (!e) {
+            const [iface, hexId] = idKey.split(':');
+            e = { key: idKey, bus: iface, id: hexId, name: messageName(idKey, busOf), frames: 0, ms: 0, firstSeen: t + a, lastSeen: t + b, minutes: new Set() };
+            out.set(idKey, e);
+          }
+          e.frames += n;
+          e.ms += ms;
+          e.firstSeen = Math.min(e.firstSeen, t + a);
+          e.lastSeen = Math.max(e.lastSeen, t + b);
+          e.minutes.add(t);
+        }
+      }
+    }
+    return [...out.values()].map((e) => ({ key: e.key, bus: e.bus, id: e.id, name: e.name, frames: e.frames, hz: Math.round((e.frames / e.ms) * 10000) / 10, firstSeen: e.firstSeen, lastSeen: e.lastSeen, minutes: e.minutes.size }))
+      .sort((x, y) => parseInt(x.id, 16) - parseInt(y.id, 16) || x.bus.localeCompare(y.bus));
+  }
+
+  return { kick, trustOf, indexLog, series, raw, signals, forget, removeLog, minutesIn, idSummary, messageName, status: () => ({ ...status }), pendingLogs };
 }
 
-module.exports = { createCanIndex, minuteKey, FORMAT, RAW_PER_SEC };
+module.exports = { createCanIndex, minuteKey, busMapOf, FORMAT, RAW_PER_SEC };

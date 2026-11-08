@@ -215,8 +215,24 @@ starts again at 0.
 
 Kept under `<data>/can/<vehicleKey>/`, exactly as received; a finished file
 cannot be replaced (`409 exists_different`), only added. The Nerd panel lists
-them (start, car key, check, size, frames and dropped from the sidecar) and
-can delete one (with the password). The checks, the pairing and the chain
+them (start, car key, check, size, frames and dropped from the sidecar, in a
+box of its own height with a filter by car key, check and text), follows new
+uploads, checks and the index live, and can delete one (with the password).
+
+**Downloads (Nerd panel, admin accounts only).** To work out what changed after
+a Tesla software update. These use the web session; the upload token cannot
+read anything, and watch-only accounts get 403.
+
+| Route | What |
+|---|---|
+| `GET /api/can/files/<name>/download` | One log (`….log.xz`) or its sidecar (`….log.xz.json`), exactly as received. |
+| `GET /api/can/export/bundle?key=&from=&to=` | A `.zip` (streamed) of that car key's logs and sidecars that start in the range (plus the one running at its start), `manifest.json`, and `ids.csv`: every CAN id seen (bus, id, DBC message or `unknown`, frames, Hz, first and last seen, minutes) from the index's frame counts. At most 7 days and 1,000 logs. |
+| `GET /api/can/export/decoded?key=&from=&to=&signals=` | The decoded signals as CSV (`timestamp_utc,signal,value,unit,value_name`), streamed, as indexed (a value when it changes, and once a second). At most 24 hours and 2,000,000 rows. |
+| `GET /api/can/export/new-ids?key=&since=[&format=csv]` | CAN ids first seen on or after `since`, with the DBC message or `UNKNOWN`. |
+
+Times are ISO with a zone, or the car's own clock (`YYYY-MM-DD[THH:MM]`).
+`check=1` on the bundle and decoded routes answers what they would hold
+(JSON) without sending the file. The checks, the pairing and the chain
 are kept in `<data>/can/<vehicleKey>/trust.json`.
 
 **TLS.** Port 10000 takes TLS 1.3 (the bridge uses only 1.3) and 1.2; older

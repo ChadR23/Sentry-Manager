@@ -52,7 +52,7 @@ const { createHealth } = require('./health');
 const { createSnapshots, applyPendingRestore } = require('./snapshots');
 const { createIntegrity } = require('./integrity');
 const { createAccounts, viewerMay } = require('./accounts');
-const { writeZip } = require('./zip');
+const { writeZip, streamZip, ZIP_LIMIT } = require('./zip');
 const { createConverterHost } = require('./converterHost');
 const { createStats } = require('./stats');
 const { encoderBlock, jobProgress, RUNNING: CONVERTER_RUNNING } = require('./encoderStats');
@@ -1693,7 +1693,16 @@ async function main() {
   let canSync = null;
   // signatures, pairing and the chain of each car's logs (canTrust.js): a log is decoded only when it may be used
   const canTrust = createCanTrust({ dir: path.join(DATA, 'can'), log: logger.scope('can') });
-  const canIndex = createCanIndex({ usable: (k, n) => canTrust.usable(k, n), canDir: path.join(DATA, 'can'), dir: path.join(DATA, 'can-index'), log: logger.scope('can'), idle: () => !converterRunning(), onIndexed: (key, from, to) => canSync?.indexed(key, from, to).catch(() => {}) });
+  // the Nerd panel follows uploads, checks and the index live ('can' on /api/events); the index's progress at most once a second
+  let canProgressAt = 0;
+  let canProgressTimer = null;
+  const canProgress = () => {
+    if (canProgressTimer) return;
+    const wait = Math.max(0, canProgressAt + 1000 - Date.now());
+    canProgressTimer = setTimeout(() => { canProgressTimer = null; canProgressAt = Date.now(); announce('can'); }, wait);
+    canProgressTimer.unref?.();
+  };
+  const canIndex = createCanIndex({ usable: (k, n) => canTrust.usable(k, n), canDir: path.join(DATA, 'can'), dir: path.join(DATA, 'can-index'), log: logger.scope('can'), idle: () => !converterRunning(), onIndexed: (key, from, to) => canSync?.indexed(key, from, to).catch(() => {}), onProgress: canProgress });
   setTimeout(() => canIndex.kick(), 20_000).unref?.();
   // which car each CAN Bridge key is (a key of its own when there is one car)
   const canMap = () => db.get('can-vehicles', {}) || {};
@@ -1875,8 +1884,11 @@ async function main() {
   };
   /** Judge a log (after its log or sidecar arrived), then decode it if it may be used. */
   const judgeCanLog = async (key, logName) => {
+    const before = await canTrust.record(key, logName).catch(() => null);
     const rec = await canTrust.check(key, logName).catch((err) => { log.warn(`CAN trust ${logName}: ${err.message}`); return null; });
     if (rec && rec.status !== 'waiting') canIndex.kick();
+    // its check changed (waiting -> verified, …): the Nerd panel shows it
+    if (rec && (rec.status !== before?.status || rec.reason !== before?.reason)) announce('can');
     return rec;
   };
   // at start, and every few minutes: logs not judged yet, or waiting for a sidecar that never came
@@ -1940,6 +1952,7 @@ async function main() {
         bindToken(tok, n.vehicleKey);
         if (out.complete && !out.already) {
           log.info(`CAN Bridge: received ${name} (${out.length} bytes)`);
+          announce('can');
           // checked against its signature before anything uses it, then decoded for the Viewer
           judgeCanLog(n.vehicleKey, name.replace(/\.json$/, ''));
         }
@@ -2022,6 +2035,7 @@ async function main() {
     try {
       const out = await canTrust.trustKey(params.key, String(body?.fingerprint || ''));
       audit.warn(`CAN Bridge ${params.key}: key ${out.pin?.fingerprint} trusted: ${by(req, user)}`);
+      announce('can');
       canIndex.kick();
       return out;
     } catch (err) { throw new HttpError(err.status || 500, err.message); }
@@ -2031,6 +2045,7 @@ async function main() {
     if (!/^[A-Za-z0-9-]{1,64}$/.test(params.key)) throw new HttpError(400, 'Not a car key.');
     const out = await canTrust.forgetPin(params.key);
     audit.warn(`CAN Bridge ${params.key}: pairing forgotten: ${by(req, user)}`);
+    announce('can');
     return out;
   });
   // a failed log used anyway (the dashboard warns), or not
@@ -2043,6 +2058,7 @@ async function main() {
     // no longer used: its data leaves the Viewer, the search, the raw view and the sync
     if (body?.use !== true) await dropCanLog(n.vehicleKey, params.name);
     canIndex.kick();
+    announce('can');
     return { ok: true };
   });
   r.add('GET', '/api/can/files', async (req, res, { query }) => {
@@ -2063,7 +2079,194 @@ async function main() {
       await canTrust.deleted(n.vehicleKey, params.name).catch(() => {});
     }
     audit.info(`CAN log deleted: ${params.name}: ${by(req, user)}`);
+    announce('can');
     return { ok: true };
+  });
+
+  // ---- CAN downloads (the Nerd panel, admins only: accounts.js keeps /api/can/files and /api/can/export
+  // from watch-only accounts; the upload token reaches only /api/can/logs, so it cannot read anything).
+  // For diagnosing a Tesla update: one log as it came, a bundle of a car key's logs over a time range
+  // with every CAN id seen (new ones stand out), the decoded signals as CSV, and the ids new since a date.
+  const CAN_KEY = /^[A-Za-z0-9-]{1,64}$/;
+  const CAN_BUNDLE_DAYS = 7;
+  const CAN_BUNDLE_FILES = 1000; // logs (and as many sidecars): a week is about 1,000 ten-minute logs of driving
+  const CAN_DECODED_HOURS = 24;
+  const CAN_DECODED_ROWS = 2_000_000;
+  const csvCell = (v) => { const t = String(v ?? ''); return /[",\n\r]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
+  const csvLine = (cells) => `${cells.map(csvCell).join(',')}\n`;
+  const isoOf = (ms) => (Number.isFinite(ms) ? new Date(ms).toISOString() : '');
+  /** The car a CAN key belongs to (its map, else the only car), for the time zone a date is read in. */
+  const canCarOf = (key) => {
+    const vid = canMap()[key];
+    const list = vehicles.list();
+    return list.find((v) => v.id === vid) || (!vid && list.length === 1 ? list[0] : null);
+  };
+  const canKeyOr400 = (k) => {
+    const key = String(k || '');
+    if (!CAN_KEY.test(key)) throw new HttpError(400, 'Give a CAN Bridge car key.');
+    return key;
+  };
+  /** from/to of a query (the car's own clock, or ISO with a zone): both needed, in order, at most `maxMs` apart. */
+  const canRange = (key, query, maxMs, what) => {
+    const tz = canCarOf(key)?.timezone || 'UTC';
+    let from;
+    let to;
+    try {
+      from = parseWhen(query.from, (...a) => zonedToUtc(...a, tz));
+      to = parseWhen(query.to, (...a) => zonedToUtc(...a, tz), true);
+    } catch (err) { throw new HttpError(400, err.message); }
+    if (from === null || to === null) throw new HttpError(400, 'Give a start and an end (from, to).');
+    if (to < from) throw new HttpError(400, 'The end is before the start.');
+    if (to - from > maxMs) throw new HttpError(400, `${what} can cover at most ${maxMs >= 86_400_000 ? `${Math.round(maxMs / 86_400_000)} days` : `${Math.round(maxMs / 3_600_000)} hours`}.`);
+    return { from, to, tz };
+  };
+  /** A finished CAN file of the data folder (a log or its sidecar), only by a name canLogs accepts, never a link: { file, size, mtime } or null. */
+  const canFileOf = async (name) => {
+    const n = parseCanName(name);
+    if (!n) return null;
+    const dir = path.join(DATA, 'can', n.vehicleKey);
+    const file = path.join(dir, name);
+    if (path.dirname(file) !== dir) return null;
+    const st = await fs.promises.lstat(file).catch(() => null);
+    return st?.isFile() ? { file, size: st.size, mtime: st.mtimeMs, ...n } : null;
+  };
+  /** Write to a response, waiting when its buffer is full; false once the reader has gone. */
+  const writeOut = async (res, text) => {
+    if (res.destroyed) return false;
+    if (!res.write(text)) await new Promise((ok) => { res.once('drain', ok); res.once('close', ok); });
+    return !res.destroyed;
+  };
+  const attachment = (name) => `attachment; filename="${name.replace(/[^A-Za-z0-9._-]/g, '_')}"`;
+
+  // one log (or its sidecar), exactly as it was received
+  r.add('GET', '/api/can/files/:name/download', async (req, res, { params, user }) => {
+    const f = await canFileOf(params.name);
+    if (!f) throw new HttpError(parseCanName(params.name) ? 404 : 400, parseCanName(params.name) ? 'No such CAN file.' : 'That is not a CAN Bridge log name.');
+    res.writeHead(200, {
+      'Content-Type': f.sidecar ? 'application/json' : 'application/x-xz', 'Content-Length': f.size, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
+      'Content-Disposition': attachment(params.name)
+    });
+    if (req.method === 'HEAD') return res.end();
+    audit.info(`CAN file downloaded: ${params.name}: ${by(req, user)}`);
+    require('stream').pipeline(fs.createReadStream(f.file, { start: 0, end: Math.max(0, f.size - 1) }), res, () => {});
+    return undefined;
+  });
+
+  /** The ids.csv of a bundle: every id seen, the ones the DBC does not know flagged. */
+  const idsCsv = (ids) => [
+    csvLine(['bus', 'id_hex', 'message', 'unknown', 'frames', 'hz', 'first_seen_utc', 'last_seen_utc', 'minutes_seen']),
+    ...ids.map((e) => csvLine([e.bus, `0x${e.id}`, e.name || 'unknown', e.name ? '' : 'UNKNOWN', e.frames, e.hz, isoOf(e.firstSeen), isoOf(e.lastSeen), e.minutes]))
+  ].join('');
+
+  // a car key's logs and sidecars over a time range (at most a week), with ids.csv, as one .zip streamed as it is read
+  r.add('GET', '/api/can/export/bundle', async (req, res, { query, user }) => {
+    const key = canKeyOr400(query.key);
+    const { from, to } = canRange(key, query, CAN_BUNDLE_DAYS * 86_400_000, 'A bundle');
+    let names = [];
+    try { names = await fs.promises.readdir(path.join(DATA, 'can', key)); } catch { /* no logs */ }
+    const logs = names.map((nm) => ({ nm, n: parseCanName(nm) })).filter((x) => x.n && !x.n.sidecar && x.n.vehicleKey === key).sort((a, b) => a.n.startedAt - b.n.startedAt || a.n.seq - b.n.seq);
+    // the logs that start in the range, and the one already running at its start (a log is 10 minutes)
+    const inside = logs.filter((x) => x.n.startedAt >= from && x.n.startedAt <= to);
+    const before = logs.filter((x) => x.n.startedAt < from && x.n.startedAt >= from - 30 * 60_000).pop();
+    const picked = before ? [before, ...inside] : inside;
+    if (!picked.length) throw new HttpError(404, 'No logs of this car key in that time.');
+    if (picked.length > CAN_BUNDLE_FILES) throw new HttpError(413, `That is ${picked.length} logs: at most ${CAN_BUNDLE_FILES} go in one bundle. Take a shorter time.`);
+    const entries = [];
+    const manifest = [];
+    let total = 0;
+    for (const { nm } of picked) {
+      for (const name of [nm, `${nm}.json`]) {
+        const f = await canFileOf(name);
+        if (!f) continue;
+        total += f.size + 200;
+        entries.push({ name: `${key}/${name}`, size: f.size, mtime: f.mtime, open: () => fs.createReadStream(f.file, { start: 0, end: Math.max(0, f.size - 1) }) });
+      }
+      const rec = await canTrust.record(key, nm).catch(() => null);
+      manifest.push({ name: nm, startedAt: isoOf(parseCanName(nm).startedAt), bytes: (await canFileOf(nm))?.size ?? null, sidecar: Boolean(await canFileOf(`${nm}.json`)), check: rec?.status || 'waiting', ...(rec?.reason ? { reason: rec.reason } : {}) });
+    }
+    if (total > ZIP_LIMIT - 64 * 1024 * 1024) throw new HttpError(413, 'That bundle would be over 4 GB: take a shorter time.');
+    // check=1: what it would hold (the panel asks first, so a mistake is a message, not a downloaded error)
+    if (query.check) return { logs: picked.length, files: entries.length, bytes: total, from, to };
+    const ids = await canIndex.idSummary(key, from, to);
+    const csv = Buffer.from(idsCsv(ids));
+    const info = Buffer.from(`${JSON.stringify({
+      vehicleKey: key, from: isoOf(from), to: isoOf(to), madeAt: isoOf(Date.now()), logs: manifest,
+      ids: { count: ids.length, unknown: ids.filter((e) => !e.name).length },
+      note: 'The .log.xz files are exactly as the CAN Bridge uploaded them (candump lines, xz). ids.csv is every CAN id seen in the range, from the index (frames per minute); "unknown" ones are not in the DBC this server decodes with (model3dbc).'
+    }, null, 2)}\n`);
+    if (total + csv.length + info.length > ZIP_LIMIT) throw new HttpError(413, 'That bundle would be over 4 GB: take a shorter time.');
+    const file = `can-${key}-${isoOf(from).slice(0, 16).replace(/[-:]/g, '')}-to-${isoOf(to).slice(0, 16).replace(/[-:]/g, '')}.zip`;
+    res.writeHead(200, { 'Content-Type': 'application/zip', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': attachment(file) });
+    audit.info(`CAN bundle downloaded: ${key} ${isoOf(from)} to ${isoOf(to)} (${picked.length} logs): ${by(req, user)}`);
+    try {
+      await streamZip(res, [{ name: 'ids.csv', data: csv, mtime: Date.now() }, { name: 'manifest.json', data: info, mtime: Date.now() }, ...entries]);
+      res.end();
+    } catch (err) {
+      log.warn(`CAN bundle ${file}: ${err.message}`);
+      res.destroy();
+    }
+    return undefined;
+  });
+
+  // the decoded signals of a car key over a time range (at most a day) as CSV, streamed minute by minute
+  r.add('GET', '/api/can/export/decoded', async (req, res, { query, user }) => {
+    const key = canKeyOr400(query.key);
+    const { from, to } = canRange(key, query, CAN_DECODED_HOURS * 3_600_000, 'A decoded export');
+    const only = query.signals ? new Set(String(query.signals).split(',').map((x) => x.trim()).filter((x) => /^\w{1,80}$/.test(x)).slice(0, 200)) : null;
+    const meta = await canIndex.signals([key]);
+    if (query.check) return { ok: true, from, to, signals: only ? [...only].filter((x) => meta[x]).length : Object.keys(meta).length };
+    const file = `can-${key}-decoded-${isoOf(from).slice(0, 16).replace(/[-:]/g, '')}-to-${isoOf(to).slice(0, 16).replace(/[-:]/g, '')}.csv`;
+    res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': attachment(file) });
+    audit.info(`CAN decoded export: ${key} ${isoOf(from)} to ${isoOf(to)}: ${by(req, user)}`);
+    let rows = 0;
+    if (!(await writeOut(res, csvLine(['timestamp_utc', 'signal', 'value', 'unit', 'value_name'])))) return undefined;
+    outer: for await (const [t, data] of canIndex.minutesIn(key, from, to)) {
+      const pts = [];
+      for (const [name, list] of Object.entries(data.signals || {})) {
+        if (only && !only.has(name)) continue;
+        for (const [ms, v] of list) if (t + ms >= from && t + ms <= to) pts.push([t + ms, name, v]);
+      }
+      pts.sort((a, b) => a[0] - b[0] || (a[1] < b[1] ? -1 : 1));
+      let chunk = '';
+      for (const [at, name, v] of pts) {
+        if (rows >= CAN_DECODED_ROWS) { chunk += `# stopped at ${CAN_DECODED_ROWS} rows: export a shorter time, or fewer signals\n`; await writeOut(res, chunk); break outer; }
+        const m = meta[name] || {};
+        chunk += csvLine([isoOf(at), name, v, m.unit || '', m.values?.[v] ?? '']);
+        rows++;
+      }
+      if (chunk && !(await writeOut(res, chunk))) return undefined;
+    }
+    res.end();
+    return undefined;
+  });
+
+  // CAN ids first seen on or after a date (as after a software update), from the index's frame counts; JSON for the panel, or CSV
+  r.add('GET', '/api/can/export/new-ids', async (req, res, { query, user }) => {
+    const key = canKeyOr400(query.key);
+    const tz = canCarOf(key)?.timezone || 'UTC';
+    let since;
+    try { since = parseWhen(query.since, (...a) => zonedToUtc(...a, tz)); } catch (err) { throw new HttpError(400, err.message); }
+    if (since === null) throw new HttpError(400, 'Give the date to look from (since).');
+    const job = canQueue.run(user || clientKey(req), (stop) => canSearch.ids([key], { before: since, limit: 1000, budgetMs: 120_000, stop }));
+    res.on('close', () => { if (!res.writableEnded) job.cancel('Stopped: the page closed.'); });
+    let out;
+    try { out = await job.done; } catch (err) { throw new HttpError(err.status || 500, err.message); }
+    const rows = out.appeared.map((x) => {
+      const [bus, id] = x.id.split(':');
+      const name = canIndex.messageName(x.id);
+      return { key: x.id, bus, id, name, unknown: !name, firstSeen: x.at, lastSeen: x.lastSeen, minutesSeen: x.seenMinutes, localTime: localTime(x.at, tz) };
+    });
+    const answer = { key, since, timezone: tz, ids: rows, count: out.appearedCount, idCount: out.idCount, complete: out.complete, scannedMinutes: out.scannedMinutes, totalMinutes: out.totalMinutes };
+    if (query.format !== 'csv') return answer;
+    const day = String(query.since).slice(0, 10).replace(/[^0-9-]/g, '');
+    res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': attachment(`can-${key}-new-ids-since-${day}.csv`) });
+    res.end([
+      csvLine(['bus', 'id_hex', 'message', 'unknown', 'first_seen_utc', 'last_seen_utc', 'minutes_seen']),
+      ...rows.map((x) => csvLine([x.bus, `0x${x.id}`, x.name || 'unknown', x.unknown ? 'UNKNOWN' : '', isoOf(x.firstSeen), isoOf(x.lastSeen), x.minutesSeen])),
+      ...(out.complete ? [] : ['# not all minutes were read in time: there may be more\n']),
+      ...(out.appearedCount > rows.length ? [`# the first ${rows.length} of ${out.appearedCount}\n`] : [])
+    ].join(''));
+    return undefined;
   });
 
   // Savings by month (the main pages' chart)

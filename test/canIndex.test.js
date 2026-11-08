@@ -328,3 +328,35 @@ test('a log taken out of the index (deleted, or no longer used): its data goes, 
   assert.ok(!raw.some((x) => x.id === '132'), 'and its raw frames');
   await fsp.rm(base, { recursive: true, force: true });
 });
+
+test('id summary and progress: every id of a range from the frame counts (the bus from the sidecar), and the index says when it moves on', { skip }, async () => {
+  const lines = [];
+  // 132 at 10 Hz for 90 s from 08:00:30 (300 frames in the first minute, 600 in the second), 6E3 (unknown) at 1 Hz from 08:01
+  for (let i = 0; i < 900; i++) lines.push(line(T0 + 30_000 + i * 100, '132', '0000000000000000'));
+  for (let i = 0; i < 60; i++) lines.push(line(T0 + 60_000 + i * 1000, '6E3', '00'));
+  lines.sort((a, b) => Number(a.slice(1, a.indexOf(')'))) - Number(b.slice(1, b.indexOf(')'))));
+  const base = await fsp.mkdtemp(path.join(os.tmpdir(), 'canindex-'));
+  const name = 'K_20200101T080030Z_1.log.xz';
+  await fsp.mkdir(path.join(base, 'can', 'K'), { recursive: true });
+  await fsp.writeFile(path.join(base, 'can', 'K', name), execFileSync('xz', ['-1', '-c'], { input: `${lines.join('\n')}\n` }));
+  // the sidecar says can0 is the chassis bus: 132 (a vehicle bus message) is unknown there
+  await fsp.writeFile(path.join(base, 'can', 'K', `${name}.json`), JSON.stringify({ bus: { can0: 'chassis' } }));
+  const seen = [];
+  const idx = createCanIndex({ canDir: path.join(base, 'can'), dir: path.join(base, 'idx'), onProgress: (st) => seen.push(st) });
+  try {
+    await idx.kick();
+    assert.ok(seen.some((st) => st.running && st.current === name), 'progress names the log being read');
+    assert.equal(seen.at(-1).running, false, 'and says when it is done');
+    const ids = await idx.idSummary('K', T0, T0 + 120_000);
+    assert.deepEqual(ids.map((e) => [e.key, e.name, e.frames, e.minutes]), [['can0:132', null, 900, 2], ['can0:6E3', null, 60, 1]]);
+    assert.equal(ids[0].firstSeen, T0 + 30_000);
+    assert.equal(ids[0].lastSeen, T0 + 30_000 + 899 * 100);
+    assert.equal((await idx.idSummary('K', T0 + 60_000, T0 + 120_000))[0].frames, 600, 'only the minutes of the range (08:01 on)');
+    assert.equal(idx.messageName('can0:132'), 'ID132HVBattAmpVolt', 'on the default bus map it is known');
+    const rows = [];
+    for await (const [t] of idx.minutesIn('K', T0, T0 + 120_000)) rows.push(t);
+    assert.deepEqual(rows, [T0, T0 + 60_000]);
+  } finally {
+    await fsp.rm(base, { recursive: true, force: true });
+  }
+});

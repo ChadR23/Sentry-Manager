@@ -24,10 +24,21 @@ const STYLE = `
 .sentry-nerd p{margin:6px 0}
 .sentry-nerd .nd-muted{opacity:.7}
 .sentry-nerd .nd-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:8px 0}
-.sentry-nerd button.nd-btn{all:unset;box-sizing:border-box;cursor:pointer;padding:6px 12px;border-radius:8px;border:1px solid #3c6b3f;background:#162016;color:#d6f5d6;font-weight:600;font-size:13px}
-.sentry-nerd button.nd-btn:hover{background:#1e2e1e}
-.sentry-nerd button.nd-btn:focus-visible{outline:2px solid #7dff8a;outline-offset:2px}
+.sentry-nerd button.nd-btn,.sentry-nerd a.nd-btn{all:unset;box-sizing:border-box;cursor:pointer;display:inline-block;padding:6px 12px;border-radius:8px;border:1px solid #3c6b3f;background:#162016;color:#d6f5d6;font-weight:600;font-size:13px;line-height:1.4;text-decoration:none}
+.sentry-nerd button.nd-btn:hover,.sentry-nerd a.nd-btn:hover{background:#1e2e1e}
+.sentry-nerd button.nd-btn:focus-visible,.sentry-nerd a.nd-btn:focus-visible{outline:2px solid #7dff8a;outline-offset:2px}
 .sentry-nerd button.nd-btn.nd-danger{border-color:#7a3434;color:#ffb3b3}
+.sentry-nerd .nd-btn.nd-small{padding:2px 8px;font-size:12px}
+.sentry-nerd .nd-logbox{max-height:min(460px,62vh);overflow:auto;overscroll-behavior:contain;border:1px solid #2c4a2e;border-radius:8px;background:#070a07;margin:6px 0}
+.sentry-nerd .nd-logbox:focus-visible{outline:2px solid #7dff8a;outline-offset:1px}
+.sentry-nerd .nd-logbox th{position:sticky;top:0;z-index:1;background:#132013;border-top:0;box-shadow:inset 0 -1px #2c4a2e}
+.sentry-nerd .nd-logbox tr:first-child td{border-top:0}
+.sentry-nerd .nd-logbox td{padding:4px 8px}
+.sentry-nerd td.nd-wrap{white-space:normal;min-width:150px;max-width:240px}
+.sentry-nerd .nd-count{margin-left:auto;font-size:12px;align-self:flex-end;padding-bottom:6px}
+.sentry-nerd .nd-live{display:inline-block;vertical-align:middle;margin-left:6px;padding:0 7px;border-radius:999px;border:1px solid #3c6b3f;font:600 10.5px/1.6 system-ui,sans-serif;letter-spacing:.04em;color:#a8e6ad;opacity:.75}
+.sentry-nerd .nd-live::before{content:'';display:inline-block;width:6px;height:6px;border-radius:50%;margin-right:5px;vertical-align:1px;background:#777}
+.sentry-nerd .nd-live.on::before{background:#7dff8a;box-shadow:0 0 6px #7dff8a}
 .sentry-nerd code,.sentry-nerd .nd-mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;word-break:break-all}
 .sentry-nerd .nd-box{background:#070a07;border:1px solid #2c4a2e;border-radius:8px;padding:10px;margin:6px 0}
 .sentry-nerd .nd-warn{color:#ffd37a}
@@ -44,7 +55,8 @@ const STYLE = `
 .sentry-nerd label.nd-lab{display:flex;flex-direction:column;gap:2px;font-size:12px;color:#a8e6ad}
 .sentry-nerd .nd-grow{flex:1 1 220px}
 .sentry-nerd a.nd-link{color:#7dff8a}
-@media (max-width:560px){.sentry-nerd{padding:14px}.sentry-nerd .nd-grow{flex-basis:100%}}
+@media (max-width:560px){.sentry-nerd{padding:14px}.sentry-nerd .nd-grow{flex-basis:100%}.sentry-nerd td.nd-wrap{white-space:normal;min-width:150px;max-width:240px}
+.sentry-nerd .nd-count{margin-left:0}.sentry-nerd-bg{padding:12px 8px}}
 `;
 
 async function api(url, opts = {}) {
@@ -250,7 +262,6 @@ async function drawFind(el, close) {
   el.addEventListener('click', (e) => { if (e.target.closest('[data-id-resume]')) searchIds(true); });
 }
 
-/** The CAN Bridge panel, as a dialog over the page. */
 /**
  * The upload address for the CAN Bridge app: this page's host on the CAN port.
  * A browser gives an IPv6 host with its brackets already ('[fd00::5]'), so
@@ -261,18 +272,44 @@ export function canUploadAddress(hostname, port, https = true) {
   return `${https ? 'https' : 'http'}://${host}:${port}/api/can/logs`;
 }
 
+/** A local date and time as a datetime-local input takes it ("2026-11-08T08:00"). */
+export function localInput(ms) {
+  const d = new Date(ms);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/** The received logs a filter lets through: car key, check status, and text in the name or app version. */
+export function filterLogs(logs, { key = '', check = '', text = '' } = {}) {
+  const t = String(text || '').trim().toLowerCase();
+  return logs.filter((f) => (!key || f.vehicleKey === key)
+    && (!check || (f.check?.status || 'waiting') === check)
+    && (!t || f.name.toLowerCase().includes(t) || String(f.appVersion || '').toLowerCase().includes(t)));
+}
+
+/** The CAN Bridge panel, as a dialog over the page. It follows uploads, checks and the index live (/api/events, 'can'). */
 export function openNerdPanel() {
   css();
   const bg = document.createElement('div');
   bg.className = 'sentry-nerd-bg';
   bg.innerHTML = `<div class="sentry-nerd" role="dialog" aria-modal="true" aria-labelledby="nd-title">
-    <div class="nd-head"><div><h2 id="nd-title">&gt;_ nerd</h2><p class="nd-muted">CAN Bridge: every CAN message the car sends, recorded by the Screenmate and synced to the footage.</p></div>
+    <div class="nd-head"><div><h2 id="nd-title">&gt;_ nerd <span class="nd-live" data-live title="Live updates: connecting">connecting</span></h2><p class="nd-muted">CAN Bridge: every CAN message the car sends, recorded by the Screenmate and synced to the footage.</p></div>
       <button type="button" class="nd-btn" data-close aria-label="Close">Close</button></div>
     <div data-body><p class="nd-muted">Loading…</p></div>
     <div data-find></div>
   </div>`;
   const prevFocus = document.activeElement;
-  const close = () => { bg.remove(); document.removeEventListener('keydown', onKey, true); prevFocus?.focus?.(); };
+  let es = null;
+  let liveTimer = null;
+  let closed = false;
+  const close = () => {
+    closed = true;
+    es?.close();
+    clearTimeout(liveTimer);
+    bg.remove();
+    document.removeEventListener('keydown', onKey, true);
+    prevFocus?.focus?.();
+  };
   const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
   document.addEventListener('keydown', onKey, true);
   bg.addEventListener('click', (e) => { if (e.target === bg || e.target.closest('[data-close]')) close(); });
@@ -281,6 +318,10 @@ export function openNerdPanel() {
   const body = bg.querySelector('[data-body]');
   let token = null; // shown once, right after it is made
   let fingerprint = null;
+  let st = null; // the last /api/can/settings
+  let files = { logs: [] }; // the last /api/can/files
+  const filter = { key: '', check: '', text: '' }; // the Received logs filter (kept across live redraws)
+  const $ = (s) => body.querySelector(s);
 
   // a change that asks for the password first (the server says so)
   async function confirmThen(path, opts = { method: 'POST' }) {
@@ -301,23 +342,25 @@ export function openNerdPanel() {
     waiting: ['waiting', 'nd-muted', 'Its sidecar (with the signature) has not arrived yet.']
   };
   const when = (t) => (t ? new Date(t).toLocaleString() : '—');
-  const carName = (st, id) => st.vehicles.find((v) => v.id === id)?.name || (id ? id : 'any car');
+  const carName = (id) => st.vehicles.find((v) => v.id === id)?.name || (id ? id : 'any car');
+  const keysOf = () => [...new Set([...(st?.keys || []), ...files.logs.map((f) => f.vehicleKey)])].sort();
+  const options = (list, value, first) => `${first ? `<option value="">${esc(first)}</option>` : ''}${list.map((k) => `<option value="${esc(k)}"${k === value ? ' selected' : ''}>${esc(k)}</option>`).join('')}`;
+  /** Whether the reader is busy in a part of the panel (a field or list focused, or text selected there): it is not redrawn under them. */
+  const busyIn = (el) => {
+    if (!el) return false;
+    const a = document.activeElement;
+    if (a && el.contains(a) && a.matches('input, select, textarea')) return true;
+    const sel = document.getSelection?.();
+    return Boolean(sel && !sel.isCollapsed && sel.rangeCount && el.contains(sel.getRangeAt(0).commonAncestorContainer));
+  };
 
-  async function draw() {
-    let st;
-    let files;
-    try {
-      [st, files] = await Promise.all([api('/api/can/settings'), api('/api/can/files?limit=100')]);
-    } catch (err) {
-      body.innerHTML = `<p class="nd-warn">${esc(err.status === 403 ? 'Only an admin account can change these.' : err.message)}</p>`;
-      return;
-    }
+  function topHtml() {
     // the CAN Bridge's own port (10000 unless CAN_PORT says otherwise)
     const port = st.port?.port || 10000;
     const url = canUploadAddress(location.hostname, port, st.port?.https !== false);
     const https = location.protocol === 'https:';
     const trustOf = (k) => st.trust?.find((x) => x.key === k);
-    body.innerHTML = `
+    return `
       <h3>Uploads from the CAN Bridge</h3>
       ${st.enabled
         ? `<p>On since ${esc(when(st.since))}. The app uploads finished logs to:</p>
@@ -330,12 +373,12 @@ export function openNerdPanel() {
       ${https || st.port?.https ? '' : '<p class="nd-warn">This page is on plain HTTP. The app only uploads over HTTPS: open Sentry Six Manager with https:// for the address and the certificate it pins.</p>'}
 
       <h3>Tokens (one per car)</h3>
-      <p class="nd-muted">Each token is for one car: its first upload ties it to that car's CAN Bridge key, and from then on it can only send that car's logs. A token can only upload: it cannot see footage or change anything else. Only a fingerprint of it is kept here.</p>
+      <p class="nd-muted">Each token is for one car: its first upload ties it to that car's CAN Bridge key, and from then on it can only send that car's logs. A token can only upload: it cannot see footage, download logs or change anything else. Only a fingerprint of it is kept here.</p>
       ${token ? `<p><b>New token</b> (shown once: paste it into that car's CAN Bridge app now):</p><div class="nd-box nd-mono" data-token>${esc(token)}</div>
         ${fingerprint ? `<p><b>Certificate SHA-256</b> (the app pins it):</p><div class="nd-box nd-mono">${esc(fingerprint)}</div>` : ''}
         <div class="nd-row"><button type="button" class="nd-btn" data-copy>Copy token</button></div>` : ''}
       ${st.tokens?.length ? `<div class="nd-scroll"><table><thead><tr><th>Token</th><th>Car</th><th>CAN Bridge key</th><th>Made</th><th>Last used</th><th></th></tr></thead><tbody>
-        ${st.tokens.map((t) => `<tr><td>${esc(t.label)}</td><td>${esc(carName(st, t.vehicleId))}</td><td class="nd-mono">${esc(t.key || 'not used yet')}</td><td>${esc(when(t.createdAt))}</td><td>${esc(when(t.lastUsedAt))}</td>
+        ${st.tokens.map((t) => `<tr><td>${esc(t.label)}</td><td>${esc(carName(t.vehicleId))}</td><td class="nd-mono">${esc(t.key || 'not used yet')}</td><td>${esc(when(t.createdAt))}</td><td>${esc(when(t.lastUsedAt))}</td>
           <td><button type="button" class="nd-btn nd-danger" data-revoke="${esc(t.id)}" aria-label="Revoke the token ${esc(t.label)}">Revoke</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="nd-muted">No tokens.</p>'}
       ${st.enabled ? `<div class="nd-row"><select class="nd-btn" data-token-car aria-label="The car for the new token">${st.vehicles.map((v) => `<option value="${esc(v.id)}">${esc(v.name)}</option>`).join('')}</select>
         <button type="button" class="nd-btn" data-new-token>New token for this car…</button></div>` : ''}
@@ -358,27 +401,225 @@ export function openNerdPanel() {
           ${t.chain?.issues?.length ? `<ul class="nd-warn">${t.chain.issues.slice(0, 20).map((i) => `<li>${esc(i.text)}</li>`).join('')}${t.chain.issues.length > 20 ? `<li>and ${t.chain.issues.length - 20} more</li>` : ''}</ul>` : ''}
           ${t.pin ? `<div class="nd-row"><button type="button" class="nd-btn" data-forget="${esc(k)}">Forget the pairing…</button></div>` : ''}
         </div>`;
-      }).join('')}` : ''}
+      }).join('')}` : ''}`;
+  }
 
-      <h3>Received logs</h3>
-      <p>${st.logs ? `${st.logs.toLocaleString()} log${st.logs === 1 ? '' : 's'}, ${esc(size(st.bytes))} in all. Kept exactly as recorded, also the messages nothing knows the meaning of yet. A log that fails its check is kept, but not used.` : 'None yet.'}</p>
-      ${files.logs.length ? `<div class="nd-scroll"><table><thead><tr><th>Started</th><th>Car</th><th>Check</th><th>Size</th><th>Frames</th><th>Dropped</th><th>App</th><th></th></tr></thead><tbody>
-        ${files.logs.map((f) => {
-          const [label, cls, tip] = CHECK[f.check?.status] || CHECK.waiting;
-          const why = f.check?.reason ? `${tip ? `${tip} ` : ''}${f.check.reason}` : tip;
-          return `<tr><td>${esc(when(f.startedAt))}${f.check?.index !== null && f.check?.index !== undefined ? ` · #${esc(f.check.index)}` : f.seq ? ` · #${f.seq}` : ''}</td><td class="nd-mono">${esc(f.vehicleKey)}</td>
-          <td class="${cls}" title="${esc(why)}">${esc(label)}${f.check?.status === 'failed' ? `<br><small>${esc(f.check.reason || '')}</small>${f.check.override ? '<br><small class="nd-warn">used anyway</small>' : ''}` : ''}</td>
-          <td>${esc(size(f.bytes))}</td><td>${f.frames === null ? '—' : f.frames.toLocaleString()}</td><td>${f.dropped === null ? '—' : f.dropped.toLocaleString()}</td><td class="nd-mono">${esc(f.appVersion || (f.sidecar ? '' : 'no sidecar yet'))}</td>
-          <td>${f.check?.status === 'failed' ? `<button type="button" class="nd-btn" data-use="${esc(f.name)}" data-on="${f.check.override ? '0' : '1'}">${f.check.override ? 'Stop using' : 'Use anyway…'}</button> ` : ''}<button type="button" class="nd-btn nd-danger" data-del="${esc(f.name)}" aria-label="Delete the log ${esc(f.name)}">Delete</button></td></tr>`;
-        }).join('')}
-      </tbody></table></div>` : ''}
+  // the Received logs: a box of its own height (the header row stays), filtered here
+  function drawLogs() {
+    const box = $('[data-logs-box]');
+    if (!box) return;
+    $('[data-logs-sum]').innerHTML = st.logs ? `${st.logs.toLocaleString()} log${st.logs === 1 ? '' : 's'}, ${esc(size(st.bytes))} in all. Kept exactly as recorded, also the messages nothing knows the meaning of yet. A log that fails its check is kept, but not used.` : 'None yet.';
+    const shown = filterLogs(files.logs, filter);
+    const total = files.logs.length;
+    $('[data-f-count]').textContent = total ? `${shown.length.toLocaleString()} of ${total.toLocaleString()}${st.logs > total ? ` (the newest ${total.toLocaleString()})` : ''}` : '';
+    $('[data-logs]').hidden = !total;
+    // where the reader is: the box's scroll and a focused button keep their place
+    const { scrollTop, scrollLeft } = box;
+    const a = document.activeElement;
+    const focusKey = a && box.contains(a) ? [...a.attributes].filter((x) => x.name.startsWith('data-')).map((x) => `[${x.name}="${CSS.escape(x.value)}"]`).join('') : '';
+    box.innerHTML = shown.length ? `<table><thead><tr><th>Started</th><th>Car</th><th>Check</th><th>Download</th><th>Size</th><th>Frames</th><th>Dropped</th><th>App</th><th></th></tr></thead><tbody>
+      ${shown.map((f) => {
+        const [label, cls, tip] = CHECK[f.check?.status] || CHECK.waiting;
+        const why = f.check?.reason ? `${tip ? `${tip} ` : ''}${f.check.reason}` : tip;
+        const dl = (n, text, what) => `<a class="nd-btn nd-small" href="/api/can/files/${encodeURIComponent(n)}/download" download="${esc(n)}" data-dl-file="${esc(n)}" aria-label="Download ${esc(what)} ${esc(f.name)}">${text}</a>`;
+        return `<tr><td>${esc(new Date(f.startedAt).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' }))}${f.check?.index !== null && f.check?.index !== undefined ? ` · #${esc(f.check.index)}` : f.seq ? ` · #${f.seq}` : ''}</td><td class="nd-mono">${esc(f.vehicleKey)}</td>
+        <td class="${cls}${f.check?.status === 'failed' ? ' nd-wrap' : ''}" title="${esc(why)}">${esc(label)}${f.check?.status === 'failed' ? `<br><small>${esc(f.check.reason || '')}</small>${f.check.override ? '<br><small class="nd-warn">used anyway</small>' : ''}` : ''}</td>
+        <td>${dl(f.name, '.log.xz', 'the log')}${f.sidecar ? ` ${dl(`${f.name}.json`, '.json', 'the sidecar of')}` : ''}</td>
+        <td>${esc(size(f.bytes))}</td><td>${f.frames === null ? '—' : f.frames.toLocaleString()}</td><td>${f.dropped === null ? '—' : f.dropped.toLocaleString()}</td><td class="nd-mono">${esc(f.appVersion || (f.sidecar ? '' : 'no sidecar yet'))}</td>
+        <td>${f.check?.status === 'failed' ? `<button type="button" class="nd-btn nd-small" data-use="${esc(f.name)}" data-on="${f.check.override ? '0' : '1'}">${f.check.override ? 'Stop using' : 'Use anyway…'}</button> ` : ''}<button type="button" class="nd-btn nd-small nd-danger" data-del="${esc(f.name)}" aria-label="Delete the log ${esc(f.name)}">Delete</button></td></tr>`;
+      }).join('')}
+    </tbody></table>` : '<p class="nd-muted" style="padding:8px">No log matches the filter.</p>';
+    box.scrollTop = scrollTop;
+    box.scrollLeft = scrollLeft;
+    if (focusKey) box.querySelector(focusKey)?.focus({ preventScroll: true });
+  }
 
-      <h3>Index</h3>
+  function indexHtml() {
+    return `<h3>Index</h3>
       <p>${st.index.running ? `Decoding${st.index.current ? ` <span class="nd-mono">${esc(st.index.current)}</span>` : ''}… ${st.index.pending ? `${st.index.pending} log${st.index.pending === 1 ? '' : 's'} to go.` : ''}` : 'Every usable log is decoded and ready for the Viewer.'}
         ${st.index.lastError ? `<br><span class="nd-warn">Last problem: ${esc(st.index.lastError)}</span>` : ''}</p>
-      <p class="nd-muted">Each log is decoded once when it arrives and passes its check (Model 3/Y DBC, model3dbc), into signals per minute, so the Viewer's dashboard has them at once: Customize, then pick any signal under "CAN".</p>
-      <div class="nd-row"><button type="button" class="nd-btn" data-hide>Hide the Nerd button</button></div>`;
+      <p class="nd-muted">Each log is decoded once when it arrives and passes its check (Model 3/Y DBC, model3dbc), into signals per minute, so the Viewer's dashboard has them at once: Customize, then pick any signal under "CAN".</p>`;
   }
+
+  // the car key pickers: their options follow the keys there are, the choice stays (not while one is open)
+  function syncKeys() {
+    const keys = keysOf();
+    for (const sel of body.querySelectorAll('select[data-keys]')) {
+      if (document.activeElement === sel) continue;
+      const v = sel.value;
+      const first = sel.dataset.keys || '';
+      sel.innerHTML = options(keys, keys.includes(v) ? v : first ? '' : keys[0] || '', first);
+    }
+  }
+
+  /** The newest log of a car key: the downloads' times start around it. */
+  const newestOf = (key) => files.logs.find((f) => f.vehicleKey === key);
+  function defaultRange(force = false) {
+    const from = $('[data-dl-from]');
+    const to = $('[data-dl-to]');
+    if (!from || (!force && from.value && to.value)) return;
+    const n = newestOf($('[data-dl-key]').value);
+    const end = n ? Date.parse(n.startedAt) + 15 * 60_000 : Date.now();
+    to.value = localInput(end);
+    from.value = localInput(end - 2 * 3600_000);
+    if (!$('[data-new-since]').value) $('[data-new-since]').value = localInput(end - 7 * 86_400_000).slice(0, 10);
+  }
+
+  const DL_HTML = `
+    <h3>Diagnose a CAN update</h3>
+    <p class="nd-muted">When Tesla updates the car's software, its CAN messages can change. Download what the CAN Bridge recorded around it: the logs as they came with every CAN id seen (ids the DBC does not know are marked UNKNOWN), or the decoded signals. Times are this browser's clock.</p>
+    <form data-dl-form>
+      <div class="nd-row">
+        <label class="nd-lab">Car key<select class="nd-in" data-dl-key data-keys=""></select></label>
+        <label class="nd-lab">From<input class="nd-in" type="datetime-local" data-dl-from required></label>
+        <label class="nd-lab">To<input class="nd-in" type="datetime-local" data-dl-to required></label>
+      </div>
+      <div class="nd-row">
+        <label class="nd-lab nd-grow">Signals for the decoded CSV (optional, comma separated)<input class="nd-in" data-dl-signals autocomplete="off" spellcheck="false" placeholder="All signals, e.g. DI_vehicleSpeed,BattVoltage132"></label>
+      </div>
+      <div class="nd-row">
+        <button type="button" class="nd-btn" data-dl-bundle>Logs + ids.csv (.zip, up to 7 days)</button>
+        <button type="button" class="nd-btn" data-dl-decoded>Decoded signals (.csv, up to 24 hours)</button>
+      </div>
+      <div data-dl-out aria-live="polite"></div>
+    </form>
+    <h3>New CAN ids since</h3>
+    <p class="nd-muted">CAN ids first seen on or after a date (from the frames counted per minute), as after a software update.</p>
+    <form data-new-form><div class="nd-row">
+      <label class="nd-lab">Car key<select class="nd-in" data-new-key data-keys=""></select></label>
+      <label class="nd-lab">First seen on or after<input class="nd-in" type="date" data-new-since required></label>
+      <button type="submit" class="nd-btn">List new ids</button>
+    </div></form>
+    <div data-new-out aria-live="polite"></div>`;
+
+  /** Download a file by link (the session's cookie goes with it); `check` asks first, so a mistake shows here instead of downloading an error. */
+  async function download(url, out, describe) {
+    out.innerHTML = '<p class="nd-muted">Checking…</p>';
+    let info;
+    try { info = await api(`${url}&check=1`); } catch (err) { out.innerHTML = `<p class="nd-warn">${esc(err.message)}</p>`; return; }
+    out.innerHTML = `<p class="nd-muted">${esc(describe(info))} The download starts now; a long time can take a while to prepare.</p>`;
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = '';
+    a.hidden = true;
+    body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+  const rangeQuery = () => {
+    const key = $('[data-dl-key]').value;
+    const from = $('[data-dl-from]').value;
+    const to = $('[data-dl-to]').value;
+    if (!key || !from || !to) return null;
+    return new URLSearchParams({ key, from: new Date(from).toISOString(), to: new Date(to).toISOString() });
+  };
+
+  const newAsk = latest();
+  async function listNewIds(e) {
+    e.preventDefault();
+    const out = $('[data-new-out]');
+    const key = $('[data-new-key]').value;
+    const since = $('[data-new-since]').value;
+    if (!key || !since) return;
+    // the date at this browser's midnight
+    const q = new URLSearchParams({ key, since: new Date(`${since}T00:00`).toISOString() });
+    const n = newAsk.next();
+    out.innerHTML = '<p class="nd-muted">Reading the frame counts…</p>';
+    let r;
+    try { r = await api(`/api/can/export/new-ids?${q}`); } catch (err) { if (!newAsk.stale(n)) out.innerHTML = `<p class="nd-warn">${esc(err.message)}</p>`; return; }
+    if (newAsk.stale(n)) return;
+    const csv = `/api/can/export/new-ids?${q}&format=csv`;
+    out.innerHTML = `<p class="nd-muted">${r.count.toLocaleString()} new of ${r.idCount.toLocaleString()} ids${r.complete ? '' : ` (${r.scannedMinutes.toLocaleString()} of ${r.totalMinutes.toLocaleString()} minutes read: there may be more)`}${r.count > r.ids.length ? `; the first ${r.ids.length} shown` : ''}.
+      ${r.ids.length ? `<a class="nd-btn nd-small" href="${esc(csv)}" download data-new-csv>Download CSV</a>` : ''}</p>
+      ${r.ids.length ? `<div class="nd-logbox"><table><thead><tr><th>Bus</th><th>Id</th><th>Message</th><th>First seen</th><th>Last seen</th><th>Minutes</th></tr></thead><tbody>
+        ${r.ids.map((x) => `<tr><td>${esc(x.bus)}</td><td class="nd-mono">0x${esc(x.id)}</td><td>${x.unknown ? '<b class="nd-warn">UNKNOWN</b>' : `<span class="nd-mono">${esc(x.name)}</span>`}</td><td>${esc(when(x.firstSeen))}</td><td>${esc(when(x.lastSeen))}</td><td>${x.minutesSeen.toLocaleString()}</td></tr>`).join('')}
+      </tbody></table></div>` : ''}`;
+  }
+
+  function firstDraw() {
+    body.innerHTML = `
+      <div data-top></div>
+      <section data-logs>
+        <h3>Received logs</h3>
+        <p data-logs-sum></p>
+        <div class="nd-row" data-logs-filter>
+          <label class="nd-lab">Car key<select class="nd-in" data-f-key data-keys="All"></select></label>
+          <label class="nd-lab">Check<select class="nd-in" data-f-check><option value="">All</option>${Object.entries(CHECK).map(([k, [l]]) => `<option value="${k}">${esc(l)}</option>`).join('')}</select></label>
+          <label class="nd-lab nd-grow">Search<input class="nd-in" type="search" data-f-text autocomplete="off" spellcheck="false" placeholder="Name or app version"></label>
+          <span class="nd-muted nd-count" data-f-count aria-live="polite"></span>
+        </div>
+        <div class="nd-logbox nd-logs" data-logs-box tabindex="0" role="region" aria-label="Received logs"></div>
+      </section>
+      <section data-dl>${DL_HTML}</section>
+      <div data-index></div>
+      <div class="nd-row"><button type="button" class="nd-btn" data-hide>Hide the Nerd button</button></div>`;
+    const onFilter = () => {
+      filter.key = $('[data-f-key]').value;
+      filter.check = $('[data-f-check]').value;
+      filter.text = $('[data-f-text]').value;
+      drawLogs();
+    };
+    $('[data-logs-filter]').addEventListener('input', onFilter);
+    $('[data-logs-filter]').addEventListener('change', onFilter);
+    $('[data-new-form]').addEventListener('submit', listNewIds);
+    $('[data-dl-key]').addEventListener('change', () => defaultRange(true));
+  }
+
+  /** Everything again from the server; the parts the reader is busy in wait for the next update. */
+  let drawing = null;
+  let again = false;
+  async function draw() {
+    if (drawing) { again = true; return drawing; }
+    drawing = (async () => {
+      do {
+        again = false;
+        let s2;
+        let f2;
+        try {
+          [s2, f2] = await Promise.all([api('/api/can/settings'), api('/api/can/files?limit=2000')]);
+        } catch (err) {
+          // (a live update that failed keeps what is shown)
+          if (!st) body.innerHTML = `<p class="nd-warn">${esc(err.status === 403 ? 'Only an admin account can change these.' : err.message)}</p>`;
+          return;
+        }
+        if (closed) return;
+        const first = !st;
+        st = s2;
+        files = f2;
+        if (first) firstDraw();
+        const top = $('[data-top]');
+        if (first || !busyIn(top)) {
+          const car = $('[data-token-car]')?.value;
+          top.innerHTML = topHtml();
+          if (car && $('[data-token-car]')) $('[data-token-car]').value = car;
+        } else again = again || 'later';
+        syncKeys();
+        drawLogs();
+        $('[data-index]').innerHTML = indexHtml();
+        if (first) defaultRange();
+      } while (again === true);
+    })().finally(() => {
+      const later = again === 'later';
+      drawing = null;
+      again = false;
+      if (later && !closed) live(2000);
+    });
+    return drawing;
+  }
+  // live updates, a few at once taken as one
+  const live = (ms = 500) => { clearTimeout(liveTimer); liveTimer = setTimeout(() => { if (!closed) draw(); }, ms); };
+  try {
+    es = new EventSource('/api/events');
+    const dot = bg.querySelector('[data-live]');
+    const mark = (on) => { dot.textContent = on ? 'live' : 'reconnecting'; dot.classList.toggle('on', on); dot.title = on ? 'Live updates: uploads, checks and the index show as they happen' : 'Live updates: reconnecting'; };
+    es.addEventListener('open', () => mark(true));
+    es.addEventListener('error', () => mark(false));
+    es.addEventListener('changed', (e) => {
+      let topics = [];
+      try { ({ topics } = JSON.parse(e.data)); } catch { return; }
+      if (topics.includes('can') || topics.includes('vehicles')) live();
+    });
+  } catch { /* no live updates: the panel still works */ }
 
   body.addEventListener('change', async (e) => {
     const sel = e.target.closest('[data-map]');
@@ -419,6 +660,16 @@ export function openNerdPanel() {
       const name = b.dataset.del;
       if (!confirm(`Delete ${name}? It cannot be brought back.`)) return;
       if (await confirmThen(`/api/can/files/${encodeURIComponent(name)}`, { method: 'DELETE' })) await draw();
+    } else if (b.matches('[data-dl-bundle]')) {
+      const q = rangeQuery();
+      if (!q) { $('[data-dl-out]').innerHTML = '<p class="nd-warn">Pick the car key and both times.</p>'; return; }
+      await download(`/api/can/export/bundle?${q}`, $('[data-dl-out]'), (i) => `${i.logs.toLocaleString()} log${i.logs === 1 ? '' : 's'} (${size(i.bytes)}) with their sidecars and ids.csv.`);
+    } else if (b.matches('[data-dl-decoded]')) {
+      const q = rangeQuery();
+      if (!q) { $('[data-dl-out]').innerHTML = '<p class="nd-warn">Pick the car key and both times.</p>'; return; }
+      const sig = $('[data-dl-signals]').value.split(',').map((x) => x.trim()).filter(Boolean).join(',');
+      if (sig) q.set('signals', sig);
+      await download(`/api/can/export/decoded?${q}`, $('[data-dl-out]'), (i) => `${i.signals.toLocaleString()} signal${i.signals === 1 ? '' : 's'}, as indexed (a value when it changes, and once a second).`);
     } else if (b.matches('[data-hide]')) {
       setUnlocked(false);
       document.querySelectorAll('.sentry-nerd-btn').forEach((x) => x.remove());
