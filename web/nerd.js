@@ -65,15 +65,39 @@ function css() {
 const OPS = [['>', 'is above'], ['<', 'is below'], ['>=', 'is at least'], ['<=', 'is at most'], ['=', 'is'], ['!=', 'is not'], ['changed', 'changed'], ['appeared', 'first has data']];
 const fmtVal = (m) => (m.text ? `${m.text} (${m.value})` : String(m.value));
 
+// where each interface keeps the car picked in it (in this browser) ...
+const PICKED = { '': 'sm:vehicle', aurora: 'aurora:vehicle', daylight: 'daylight:vehicle', flux: 'flux:vehicle', horizon: 'horizon.vehicle' };
+// ... and the ones whose Viewer plays that car, whatever a link says
+const PICKS_OWN = new Set(['flux', 'horizon']);
+
+/** The interface this browser shows: null for the built-in one (also when this browser chose it over the active pack). */
+export const packOf = (ui) => (ui?.original ? null : ui?.active || null);
+
+/** The car picked in the interface (as it keeps it), else the first. */
+export function pickedCar(pack, cars, storage = globalThis.localStorage) {
+  let id = null;
+  try { id = JSON.parse(storage.getItem(PICKED[pack || '']) ?? 'null'); } catch { /* none kept */ }
+  return cars.some((v) => v.id === id) ? id : cars[0]?.id ?? null;
+}
+
+/** Only the newest request's answer is shown: next() before asking, stale(n) after; drop() makes every open one stale. */
+export function latest() {
+  let n = 0;
+  return { next: () => ++n, stale: (t) => t !== n, drop: () => { n++; } };
+}
+
 /**
  * A link that opens the Viewer at a match's moment, or why not. Each
  * interface takes a moment as <clip>~<second>, at its own address: Aurora
  * #/viewer/<car>/day/<day>?at=…, Daylight #/viewer/<car>?day=…&at=…, the
- * others (the built-in one too) #/viewer?day=…&at=….
+ * others (the built-in one too) #/viewer?day=…&at=…&vehicle=…. Flux and
+ * Horizon play the car picked in them whatever the link says, so for another
+ * car (`picked` is the one picked there) the link would open the wrong footage.
  */
-function openLink(m, vid, pack) {
+export function openLink(m, vid, pack, picked = null) {
   const f = m.footage;
   if (!f) return '<span class="nd-muted">no footage</span>';
+  if (PICKS_OWN.has(pack) && picked && picked !== vid) return '<span class="nd-muted">pick this car in the interface to open it</span>';
   const at = encodeURIComponent(`${f.clip}~${f.second}`);
   const car = encodeURIComponent(vid);
   const day = encodeURIComponent(f.day);
@@ -92,15 +116,16 @@ async function drawFind(el, close) {
   let cars = [];
   try { cars = (await api('/api/vehicles')).vehicles || []; } catch { return; }
   let pack = null; // the interface, for the Viewer's address
-  try { pack = (await api('/api/ui-packs')).active || null; } catch { /* the built-in one's */ }
+  try { pack = packOf(await api('/api/ui-packs')); } catch { /* the built-in one's */ }
   if (!cars.length) return;
-  let vid = cars[0].id;
+  const picked = pickedCar(pack, cars); // the car picked in the interface: searched first
+  let vid = picked;
   el.innerHTML = `
     <h3>Find when it started</h3>
     <p class="nd-muted">Every decoded minute of the car, oldest first: the first time a signal met the condition, and the next times after it.</p>
     <form data-sig-form>
       <div class="nd-row">
-        ${cars.length > 1 ? `<label class="nd-lab">Car<select class="nd-in" data-car>${cars.map((v) => `<option value="${esc(v.id)}">${esc(v.name)}</option>`).join('')}</select></label>` : ''}
+        ${cars.length > 1 ? `<label class="nd-lab">Car<select class="nd-in" data-car>${cars.map((v) => `<option value="${esc(v.id)}"${v.id === vid ? ' selected' : ''}>${esc(v.name)}</option>`).join('')}</select></label>` : ''}
         <label class="nd-lab nd-grow">Signal<input class="nd-in" data-signal list="nd-signals" required autocomplete="off" spellcheck="false" placeholder="Type to search, e.g. DI_vehicleSpeed"></label>
         <datalist id="nd-signals"></datalist>
         <label class="nd-lab">Condition<select class="nd-in" data-op>${OPS.map(([v, t]) => `<option value="${esc(v)}">${esc(t)}</option>`).join('')}</select></label>
@@ -124,10 +149,17 @@ async function drawFind(el, close) {
     <div data-id-out></div>`;
   const $ = (s) => el.querySelector(s);
   const meta = {};
+  // one guard each: an answer that comes after a newer request (or another car) is dropped
+  const sigAsk = latest();
+  const idAsk = latest();
+  const listAsk = latest();
   async function loadSignals() {
+    const n = listAsk.next();
+    const car = vid;
     $('#nd-signals').innerHTML = '';
     try {
-      const { signals } = await api(`/api/can/vehicle-signals?vehicle=${encodeURIComponent(vid)}`);
+      const { signals } = await api(`/api/can/vehicle-signals?vehicle=${encodeURIComponent(car)}`);
+      if (listAsk.stale(n)) return;
       Object.assign(meta, signals);
       const names = Object.keys(signals).sort();
       $('#nd-signals').innerHTML = names.map((n) => { const s = signals[n] || {}; const l = [s.label && s.label !== n ? s.label : '', s.unit ? `(${s.unit})` : ''].filter(Boolean).join(' '); return `<option value="${esc(n)}"${l ? ` label="${esc(l)}"` : ''}></option>`; }).join('');
@@ -137,56 +169,85 @@ async function drawFind(el, close) {
   const syncOp = () => { const op = $('[data-op]').value; $('[data-value-wrap]').hidden = op === 'changed' || op === 'appeared'; };
   syncOp();
   loadSignals();
-  $('[data-car]')?.addEventListener('change', (e) => { vid = e.target.value; $('[data-sig-out]').innerHTML = ''; $('[data-id-out]').innerHTML = ''; loadSignals(); });
+  $('[data-car]')?.addEventListener('change', (e) => {
+    vid = e.target.value;
+    sigAsk.drop();
+    idAsk.drop();
+    sigResume = null;
+    idResume = null;
+    $('[data-sig-out]').innerHTML = '';
+    $('[data-id-out]').innerHTML = '';
+    loadSignals();
+  });
   $('[data-op]').addEventListener('change', syncOp);
   el.addEventListener('click', (e) => { if (e.target.closest('a[data-open]')) close(); }); // the Viewer, under the panel
+  const goOn = (r, attr) => (r.resume
+    ? `<div class="nd-row"><button type="button" class="nd-btn" ${attr}>Go on reading from ${esc(new Date(r.resumeFrom).toLocaleString())}</button></div>` : '');
 
-  let sigFrom = null; // a scan out of time goes on from here
+  // a scan out of time: its token, to go on exactly where it stopped (with what it found so far)
+  let sigResume = null;
   async function searchSignal(resume) {
     const out = $('[data-sig-out]');
-    const name = $('[data-signal]').value.trim();
-    const op = $('[data-op]').value;
-    if (!name) return;
-    const q = new URLSearchParams({ vehicle: vid, signal: name, op });
-    if (!$('[data-value-wrap]').hidden) q.set('value', $('[data-value]').value.trim());
-    if (resume && sigFrom) q.set('from', String(sigFrom)); else if ($('[data-from]').value) q.set('from', $('[data-from]').value);
-    if ($('[data-to]').value) q.set('to', $('[data-to]').value);
-    if ($('[data-all]').checked) q.set('all', '1');
+    const car = vid;
+    let q;
+    if (resume && sigResume) q = new URLSearchParams({ vehicle: car, resume: sigResume });
+    else {
+      const name = $('[data-signal]').value.trim();
+      if (!name) return;
+      q = new URLSearchParams({ vehicle: car, signal: name, op: $('[data-op]').value });
+      if (!$('[data-value-wrap]').hidden) q.set('value', $('[data-value]').value.trim());
+      if ($('[data-from]').value) q.set('from', $('[data-from]').value);
+      if ($('[data-to]').value) q.set('to', $('[data-to]').value);
+      if ($('[data-all]').checked) q.set('all', '1');
+    }
+    const n = sigAsk.next();
     out.innerHTML = '<p class="nd-muted">Searching… (a long history can take a while)</p>';
     let r;
-    try { r = await api(`/api/can/search?${q}`); } catch (err) { out.innerHTML = `<p class="nd-warn">${esc(err.message)}</p>`; return; }
-    sigFrom = r.complete ? null : r.resumeFrom;
+    try { r = await api(`/api/can/search?${q}`); } catch (err) { if (!sigAsk.stale(n)) out.innerHTML = `<p class="nd-warn">${esc(err.message)}</p>`; return; }
+    if (sigAsk.stale(n)) return;
+    sigResume = r.resume || null;
+    const { op, signal: name } = r;
     const unit = r.unit ? ` ${r.unit}` : '';
     const opText = OPS.find(([v]) => v === op)?.[1] || op;
     const head = r.first
-      ? `<p><b>First:</b> ${esc(r.first.localTime)} (car time) · ${esc(fmtVal(r.first))}${esc(unit)}${r.first.previous !== undefined && r.first.previous !== null ? ` (was ${esc(r.first.previousText || r.first.previous)})` : ''} · ${openLink(r.first, vid, pack)}</p>`
+      ? `<p><b>First:</b> ${esc(r.first.localTime)} (car time) · ${esc(fmtVal(r.first))}${esc(unit)}${r.first.previous !== undefined && r.first.previous !== null ? ` (was ${esc(r.first.previousText || r.first.previous)})` : ''} · ${openLink(r.first, car, pack, picked)}</p>`
       : `<p>${esc(name)} never ${esc(opText)}${r.value !== null && r.value !== undefined && op !== 'changed' && op !== 'appeared' ? ` ${esc(r.value)}${esc(unit)}` : ''} in ${r.scannedMinutes.toLocaleString()} minute${r.scannedMinutes === 1 ? '' : 's'} read${r.minutesWithData ? '' : ' (the signal has no data in them)'}.</p>`;
     const counts = `<p class="nd-muted">${r.matchingMinutes.toLocaleString()} matching minute${r.matchingMinutes === 1 ? '' : 's'} of ${r.minutesWithData.toLocaleString()} with this signal${r.complete ? '' : ' so far'}; ${r.scannedMinutes.toLocaleString()} of ${r.totalMinutes.toLocaleString()} minutes read.</p>`;
-    const more = r.resumeFrom && !r.complete && r.scannedMinutes < r.totalMinutes && !r.matches.length
-      ? `<div class="nd-row"><button type="button" class="nd-btn" data-resume>Go on reading from ${esc(new Date(r.resumeFrom).toLocaleString())}</button></div>` : '';
     out.innerHTML = `${head}${counts}${r.matches.length > 1 ? `<div class="nd-scroll"><table><thead><tr><th>When (car time)</th><th>Value</th><th></th></tr></thead><tbody>
-      ${r.matches.map((m) => `<tr><td>${esc(m.localTime)}</td><td>${esc(fmtVal(m))}${esc(unit)}</td><td>${openLink(m, vid, pack)}</td></tr>`).join('')}</tbody></table></div>` : ''}${more}`;
+      ${r.matches.map((m) => `<tr><td>${esc(m.localTime)}</td><td>${esc(fmtVal(m))}${esc(unit)}</td><td>${openLink(m, car, pack, picked)}</td></tr>`).join('')}</tbody></table></div>` : ''}${goOn(r, 'data-resume')}`;
   }
-  $('[data-sig-form]').addEventListener('submit', (e) => { e.preventDefault(); sigFrom = null; searchSignal(false); });
+  $('[data-sig-form]').addEventListener('submit', (e) => { e.preventDefault(); sigResume = null; searchSignal(false); });
   el.addEventListener('click', (e) => { if (e.target.closest('[data-resume]')) searchSignal(true); });
 
-  $('[data-id-form]').addEventListener('submit', async (e) => {
-    e.preventDefault();
+  let idResume = null;
+  async function searchIds(resume) {
     const out = $('[data-id-out]');
-    const q = new URLSearchParams({ vehicle: vid, gap: $('[data-gap]').value || '10' });
-    if ($('[data-before]').value) q.set('before', $('[data-before]').value);
+    const car = vid;
+    const q = new URLSearchParams({ vehicle: car });
+    if (resume && idResume) q.set('resume', idResume);
+    else {
+      q.set('gap', $('[data-gap]').value || '10');
+      if ($('[data-before]').value) q.set('before', $('[data-before]').value);
+    }
+    const n = idAsk.next();
     out.innerHTML = '<p class="nd-muted">Reading the frame counts…</p>';
     let r;
-    try { r = await api(`/api/can/id-events?${q}`); } catch (err) { out.innerHTML = `<p class="nd-warn">${esc(err.message)}</p>`; return; }
+    try { r = await api(`/api/can/id-events?${q}`); } catch (err) { if (!idAsk.stale(n)) out.innerHTML = `<p class="nd-warn">${esc(err.message)}</p>`; return; }
+    if (idAsk.stale(n)) return;
+    idResume = r.resume || null;
     if (!r.totalMinutes) { out.innerHTML = '<p class="nd-muted">No CAN data for this car yet.</p>'; return; }
-    const span = `<p class="nd-muted">${r.idCount.toLocaleString()} ids in ${r.awakeMinutes.toLocaleString()} awake minutes${r.complete ? '' : ` (stopped reading at ${esc(new Date(r.resumeFrom).toLocaleString())}: out of time)`}.</p>`;
+    const span = `<p class="nd-muted">${r.idCount.toLocaleString()} ids in ${r.awakeMinutes.toLocaleString()} awake minutes${r.complete ? '' : `, ${r.scannedMinutes.toLocaleString()} of ${r.totalMinutes.toLocaleString()} minutes read (out of time)`}.</p>`;
+    // not all read: what is not there yet may still come
+    const none = r.complete ? '<p class="nd-muted">None.</p>' : '<p class="nd-muted">None so far (not all of it read yet).</p>';
     const table = (rows, cols) => `<div class="nd-scroll"><table><thead><tr>${cols.map((c) => `<th>${esc(c)}</th>`).join('')}<th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
-    out.innerHTML = `${span}
+    out.innerHTML = `${span}${goOn(r, 'data-id-resume')}
       <p><b>New ids</b>${r.appearedCount > r.appeared.length ? ` (first ${r.appeared.length} of ${r.appearedCount})` : ''}</p>
-      ${r.appeared.length ? table(r.appeared.map((x) => `<tr><td class="nd-mono">${esc(x.id)}</td><td>${esc(x.localTime)}</td><td>${x.seenMinutes.toLocaleString()}</td><td>${openLink(x, vid, pack)}</td></tr>`).join(''), ['Id', 'First seen (car time)', 'Minutes seen']) : '<p class="nd-muted">None.</p>'}
+      ${r.appeared.length ? table(r.appeared.map((x) => `<tr><td class="nd-mono">${esc(x.id)}</td><td>${esc(x.localTime)}</td><td>${x.seenMinutes.toLocaleString()}</td><td>${openLink(x, car, pack, picked)}</td></tr>`).join(''), ['Id', 'First seen (car time)', 'Minutes seen']) : none}
       <p><b>Went quiet</b> (for ${esc(r.gap)}+ awake minutes)</p>
-      ${r.stopped.length ? table(r.stopped.map((x) => `<tr><td class="nd-mono">${esc(x.id)}</td><td>${esc(x.localTime)}</td><td>${x.back ? `after ${x.missingMinutes.toLocaleString()} min` : `still quiet (${x.missingMinutes.toLocaleString()} min)`}</td><td>${openLink(x, vid, pack)}</td></tr>`).join(''), ['Id', 'Quiet from (car time)', 'Back']) : '<p class="nd-muted">None.</p>'}`;
-  });
+      ${r.stopped.length ? table(r.stopped.map((x) => `<tr><td class="nd-mono">${esc(x.id)}</td><td>${esc(x.localTime)}</td><td>${x.back ? `after ${x.missingMinutes.toLocaleString()} min` : `still quiet (${x.missingMinutes.toLocaleString()} min${r.complete ? '' : ' so far'})`}</td><td>${openLink(x, car, pack, picked)}</td></tr>`).join(''), ['Id', 'Quiet from (car time)', 'Back']) : none}`;
+  }
+  $('[data-id-form]').addEventListener('submit', (e) => { e.preventDefault(); idResume = null; searchIds(false); });
+  el.addEventListener('click', (e) => { if (e.target.closest('[data-id-resume]')) searchIds(true); });
 }
 
 /** The CAN Bridge panel, as a dialog over the page. */

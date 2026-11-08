@@ -1588,6 +1588,9 @@
       if (q.get('vehicle') && q.get('vehicle') !== state.vehicleId && state.vehicles.some((v) => v.id === q.get('vehicle'))) {
         state.vehicleId = q.get('vehicle');
         store.set('vehicle', state.vehicleId);
+        // as every other switch of car: the other car's page and selection go
+        state.footage.offset = 0;
+        state.footage.selected.clear();
       }
       const url = studioUrl('viewer', { ...(q.get('day') ? { date: q.get('day') } : {}), ...(q.get('at') ? { at: q.get('at') } : {}) });
       if (frames.viewer?.dataset.src === url) { frames.viewer.remove(); delete frames.viewer; } // the same moment again: seek again

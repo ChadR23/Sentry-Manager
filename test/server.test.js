@@ -1300,6 +1300,16 @@ test('CAN search: when a signal first met a condition and when an id appeared, w
     assert.deepEqual(found.first.footage, { at: t0 + 102_000, localTime: '2020-01-01 08:01:42', day: '2020-01-01', clip: '2020-01-01_08-01-00', second: 42 });
     assert.equal((await s.call('GET', `/api/can/search?vehicle=${vid}&signal=DI_vehicleSpeed&op=%3E&value=40&from=2020-01-01T08:02`)).data.first.at, t0 + 120_000);
     assert.equal((await s.call('GET', `/api/can/search?vehicle=${vid}&signal=DI_vehicleSpeed&op=~&value=40`)).status, 400);
+    // a time that is not one is an error, not the whole history
+    for (const bad of ['to=2020%2F01%2F01', 'from=yesterday', 'from=2020-02-31']) {
+      const res = await s.call('GET', `/api/can/search?vehicle=${vid}&signal=DI_vehicleSpeed&op=%3E&value=40&${bad}`);
+      assert.equal(res.status, 400, bad);
+      assert.match(res.data.error, /is not a time/);
+    }
+    assert.equal((await s.call('GET', `/api/can/id-events?vehicle=${vid}&before=2020-13-01`)).status, 400);
+    // all read: nothing to go on with; a token that is not kept is a 400
+    assert.deepEqual([found.complete, found.resume], [true, null]);
+    assert.equal((await s.call('GET', `/api/can/search?vehicle=${vid}&resume=0123456789abcdef01234567`)).status, 400);
     const ev = (await s.call('GET', `/api/can/id-events?vehicle=${vid}&before=2020-01-01T08:01`)).data;
     assert.deepEqual(ev.appeared.map((x) => [x.id, x.at, x.footage?.clip]), [['can0:3F5', t0 + 60_000, '2020-01-01_08-01-00']]);
     assert.ok((await s.call('GET', `/api/can/vehicle-signals?vehicle=${vid}`)).data.signals);
