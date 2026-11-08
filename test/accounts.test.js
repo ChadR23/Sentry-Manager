@@ -27,6 +27,9 @@ test('watch-only accounts: exports, stars and places yes; settings and deleting 
   assert.equal(viewerMay('POST', '/api/stars'), true);
   assert.equal(viewerMay('POST', '/api/settings'), false);
   assert.equal(viewerMay('POST', '/api/vehicles/car/trash'), false);
+  assert.equal(viewerMay('POST', '/api/vehicles/car/trash-days'), false, 'no Delete this day (nor its CAN data)');
+  assert.equal(viewerMay('POST', '/api/vehicles/car/trash-preview'), false);
+  assert.equal(viewerMay('POST', '/api/can/keep'), false);
   assert.equal(viewerMay('GET', '/api/logs'), false);
   assert.equal(viewerMay('GET', '/api/vehicles'), true);
   assert.equal(viewerMay('GET', '/api/can/settings'), false, 'the Nerd settings are for admins');

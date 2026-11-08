@@ -3,6 +3,13 @@
 import { esc, api, state, current, bytes, plural, dayTitle, ago, icon, toast, confirmDialog, busy, jsonHtml, debounce, store, CAMERAS, CAMERA_LABEL, CAMERA_SHORT, humanize, liveDraw, wall, wallDay } from '../core.js';
 import { split, seg, wireSeg, drawer, empty, chip } from '../ui.js';
 
+// "Also delete its CAN data" in a footage delete confirmation: shown only when a CAN Bridge key is
+// mapped to the car (can: the server's count, null otherwise), unticked; those logs go for good, now
+const canWithHtml = (can, through) => (!can ? '' : `<label class="check can-with"><input type="checkbox" data-with-can${can.skip ? ' disabled' : ''}> Also delete its CAN data${through ? ', every log through this date' : ''} (${plural(can.logs || 0, 'log')})</label>
+  <p class="muted can-with-note">${can.skip ? `Not possible right now: ${esc(can.skip)}.` : 'The CAN logs are deleted for good now: they do not come back if you restore the footage from the Recycle Bin.'}${can.kept ? ` ${plural(can.kept, 'log')} of minutes that other footage still covers stay${can.kept === 1 ? 's' : ''}.` : ''}</p>`);
+const withCanChecked = () => Boolean(document.querySelector('[data-with-can]')?.checked);
+const canToast = (c) => (!c ? '' : c.skip ? ` Its CAN data was not deleted: ${c.skip}.` : ` ${plural(c.removed, 'CAN log')} deleted${c.pending ? ` (${c.pending} still arriving stay)` : ''}.`);
+
 // "Index speeds": start the speed graph's index now; the button shows how far it is
 async function followIndex(b, start) {
   if (!b || b.dataset.following) return;
@@ -189,13 +196,14 @@ export default {
       const scope = f.category === 'all' ? '' : ` (${f.category} only, as filtered)`;
       const ok = await confirmDialog({
         title: through ? 'Move this day and every older day to the Recycle Bin?' : 'Move this day to the Recycle Bin?',
-        body: `<p><b>${plural(preview.recordings, 'recording')}</b> · <b>${bytes(preview.bytes)}</b> from ${esc(dayTitle(day))}${through ? ` and older${preview.days > 1 ? ` (${preview.days} days, oldest ${esc(preview.oldest)})` : ''}` : ''}${esc(scope)}.</p><p class="muted">Nothing is deleted until you empty the Recycle Bin.${preview.protected ? ` ${plural(preview.protected, 'protected recording')} stay.` : ''}</p>`,
+        body: `<p><b>${plural(preview.recordings, 'recording')}</b> · <b>${bytes(preview.bytes)}</b> from ${esc(dayTitle(day))}${through ? ` and older${preview.days > 1 ? ` (${preview.days} days, oldest ${esc(preview.oldest)})` : ''}` : ''}${esc(scope)}.</p><p class="muted">Nothing is deleted until you empty the Recycle Bin.${preview.protected ? ` ${plural(preview.protected, 'protected recording')} stay.` : ''}</p>${canWithHtml(preview.can, through)}`,
         ok: through ? 'Move day and older' : 'Move day', danger: true
       });
       if (!ok) return;
+      const withCan = withCanChecked();
       await busy(null, async () => {
-        const out = await api(`/api/vehicles/${encodeURIComponent(v.id)}/trash-days`, { body: { day, through, category: f.category } });
-        toast(`Moving ${plural(out.recordings, 'recording')} (${bytes(out.bytes)}) to the Recycle Bin. Jobs shows the progress.`);
+        const out = await api(`/api/vehicles/${encodeURIComponent(v.id)}/trash-days`, { body: { day, through, category: f.category, ...(withCan ? { withCan: true } : {}) } });
+        toast(`Moving ${plural(out.recordings, 'recording')} (${bytes(out.bytes)}) to the Recycle Bin${withCan ? ', and deleting its CAN data' : ''}. Jobs shows the progress.`);
       });
     }
 
@@ -367,16 +375,18 @@ export default {
       const movable = list.filter((r) => !r.protected);
       if (!movable.length) { toast('Protected recordings stay where they are.', 'bad'); return; }
       const b = movable.reduce((n, r) => n + r.bytes, 0);
+      const can = await api(`/api/vehicles/${encodeURIComponent(v.id)}/trash-preview`, { body: { ids: movable.map((r) => r.id) } }).then((x) => x.can, () => null);
       const ok = await confirmDialog({
         title: `Move ${plural(movable.length, 'recording')} to the Recycle Bin?`,
-        body: `<p><b class="num">${bytes(b)}</b> moves to the Recycle Bin on the same share. Restore it any time; nothing is deleted until you empty the bin.</p>${list.length > movable.length ? `<p class="muted">${list.length - movable.length} protected recording(s) are skipped.</p>` : ''}`,
+        body: `<p><b class="num">${bytes(b)}</b> moves to the Recycle Bin on the same share. Restore it any time; nothing is deleted until you empty the bin.</p>${list.length > movable.length ? `<p class="muted">${list.length - movable.length} protected recording(s) are skipped.</p>` : ''}${canWithHtml(can, false)}`,
         ok: 'Move to Bin', danger: true
       });
       if (!ok) return;
+      const withCan = withCanChecked();
       await busy(null, async () => {
-        const out = await api(`/api/vehicles/${encodeURIComponent(v.id)}/trash`, { body: { ids: movable.map((r) => r.id) } });
+        const out = await api(`/api/vehicles/${encodeURIComponent(v.id)}/trash`, { body: { ids: movable.map((r) => r.id), ...(withCan ? { withCan: true } : {}) } });
         const why = out.skipped?.length ? ` ${out.skipped.length} skipped (${[...new Set(out.skipped.map((s) => s.reason))].join(', ')}).` : '';
-        toast(`${plural(out.moved.length, 'recording')} moved to the Recycle Bin (${bytes(out.bytes)}).${why}`, out.skipped?.length && !out.moved.length ? 'bad' : 'ok');
+        toast(`${plural(out.moved.length, 'recording')} moved to the Recycle Bin (${bytes(out.bytes)}).${why}${canToast(out.can)}`, out.skipped?.length && !out.moved.length ? 'bad' : 'ok');
         movable.forEach((r) => f.selected.delete(r.id));
       });
       await Promise.all([loadRecs(), loadDays()]);

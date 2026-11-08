@@ -317,6 +317,12 @@ async function main() {
   let integrityRef = null; // the footage check: one cut short by a restart goes on after the first scan
   let canUploadRef = null; // CAN Bridge uploads (set where canLogs is made)
   let canPruneRef = null; // CAN logs that go with their footage (canPrune.js, set where canLogs is made)
+  /** The CAN logs footage would take with it ("Also delete its CAN data"), counted; null: no key mapped to the car. */
+  const canWith = async (vid, what) => {
+    const r = await canPruneRef?.deleteWith(vid, { ...what, dryRun: true }).catch(() => null);
+    if (!r || r.skip === 'no CAN Bridge key is mapped to this car' || r.skip === 'no such car') return null;
+    return { logs: r.logs || 0, kept: r.kept || 0, ...(r.skip ? { skip: r.skip } : {}) };
+  };
   let canPort = null; // opens or closes the CAN Bridge's own port, one call at a time (set where the servers start)
   const canUpload = (req, res, p) => (canUploadRef ? canUploadRef(req, res, p) : sendJson(res, 404, { error: 'Not found' }));
   const inventory = new Inventory({ vehicles, db, log: logger.scope('inventory'), onChange: () => announce('inventory'), onScanned: (vid) => { speedIndex?.kick(); scrubPrepare?.kick(); integrityRef?.resume(vid); archiveGapRef?.check(vid); } });
@@ -1380,7 +1386,7 @@ async function main() {
   // "Delete this day" / "Delete through this date": the recordings of that day
   // (or that day and every older one) go to the Recycle Bin, protected ones
   // stay. preview: true only counts them for the confirmation.
-  r.add('POST', '/api/vehicles/:id/trash-days', async (req, res, { params, body }) => {
+  r.add('POST', '/api/vehicles/:id/trash-days', async (req, res, { params, body, user }) => {
     const v = vehicleOr404(params.id);
     const day = String(body?.day || '');
     if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new HttpError(400, 'Choose a day.');
@@ -1390,9 +1396,25 @@ async function main() {
       recordings: movable.length, bytes: movable.reduce((n, x) => n + x.bytes, 0), protected: list.length - movable.length,
       days: new Set(movable.map((x) => x.day)).size, oldest: movable.length ? movable.reduce((a, x) => (x.day < a ? x.day : a), day) : null
     };
-    if (body?.preview === true || !movable.length) return { ...summary, started: false };
-    // a big batch takes a while on a share: it runs as a job (bin.trash starts one)
-    bin.trash(v.id, movable.map((x) => x.id)).catch((err) => log.warn(`Moving ${v.name}'s footage to the Recycle Bin failed: ${err.message}`))
+    // "Also delete its CAN data": the logs of the moved recordings' minutes, and with Delete through
+    // this date every log of the car up to the end of that day (not those still covered by footage
+    // that stays: protected, or another category); can: null when no CAN Bridge key is mapped to the car
+    const until = body?.through ? zonedToUtc(...day.split('-').map(Number), 23, 59, 59, v.timezone || 'UTC') + 1000 : null;
+    if (body?.preview === true || !movable.length) {
+      const can = movable.length ? await canWith(v.id, { rels: movable.flatMap((x) => x.files), until }) : null;
+      return { ...summary, can, started: false };
+    }
+    const withCan = body?.withCan === true;
+    const ids = new Set(movable.map((x) => x.id));
+    const recs = new Map(movable.map((x) => [x.id, x]));
+    bin.trash(v.id, [...ids]).then(async (out) => {
+      // only when footage really moved, and only the minutes of the recordings that did (not protected or converting ones)
+      if (!withCan || !out?.moved?.length) return;
+      const rels = out.moved.flatMap((id) => recs.get(id)?.files || []);
+      const r = await canPruneRef?.deleteWith(v.id, { rels, until, by: by(req, user) });
+      if (r) log.info(`CAN data with ${v.name}'s footage: ${r.skip ? `none deleted (${r.skip})` : `${r.removed} deleted, ${r.kept} kept (footage that stays), ${r.pending} still arriving`}`);
+      announce('can');
+    }).catch((err) => log.warn(`Moving ${v.name}'s footage to the Recycle Bin failed: ${err.message}`))
       .finally(() => {
         announce('inventory');
         announce('bin');
@@ -2094,9 +2116,11 @@ async function main() {
   // "Delete CAN logs with their footage" (on by default)
   r.add('POST', '/api/can/keep', (req, res, { body, user }) => {
     requireConfirmed(req);
-    if (typeof body?.withFootage !== 'boolean') throw new HttpError(400, 'Send { "withFootage": true | false }.');
-    const out = canPrune.set({ withFootage: body.withFootage });
-    audit.warn(`CAN logs ${out.withFootage ? 'are deleted with their footage' : 'are no longer deleted with their footage'}: ${by(req, user)}`);
+    const ok = ['withFootage', 'deleteUnlinked'].some((k) => typeof body?.[k] === 'boolean') || body?.unlinkedDays !== undefined;
+    const days = body?.unlinkedDays;
+    if (!ok || (days !== undefined && !(Number.isInteger(days) && days >= 1 && days <= 365))) throw new HttpError(400, 'Send { "withFootage": true | false, "deleteUnlinked": true | false, "unlinkedDays": 1-365 } (any of them).');
+    const out = canPrune.set(body);
+    audit.warn(`CAN logs: ${out.withFootage ? 'deleted with their footage' : 'not deleted with their footage'}; ${out.deleteUnlinked ? `deleted when not linked to footage after ${out.unlinkedDays} days` : 'kept when not linked to footage'}: ${by(req, user)}`);
     announce('can');
     return out;
   });
@@ -2630,12 +2654,27 @@ async function main() {
     announce('inventory');
     return { ok: true, count: recs.length };
   });
-  r.add('POST', '/api/vehicles/:id/trash', async (req, res, { params, body }) => {
+  r.add('POST', '/api/vehicles/:id/trash', async (req, res, { params, body, user }) => {
     vehicleOr404(params.id);
-    const out = await bin.trash(params.id, Array.isArray(body?.ids) ? body.ids : []);
+    const ids = Array.isArray(body?.ids) ? body.ids : [];
+    const recs = new Map((inventory.get(params.id)?.recordings || []).map((r) => [r.id, r]));
+    const out = await bin.trash(params.id, ids);
+    // "Also delete its CAN data": the logs of the moved recordings' minutes go now, for good
+    if (body?.withCan === true && out.moved?.length) {
+      out.can = await canPruneRef?.deleteWith(params.id, { rels: out.moved.flatMap((id) => recs.get(id)?.files || []), by: by(req, user) });
+      announce('can');
+    }
     announce('inventory');
     announce('bin');
     return out;
+  });
+  // for the Move to trash confirmation: how many CAN logs "Also delete its CAN data" would delete
+  // (can: null when no CAN Bridge key is mapped to the car)
+  r.add('POST', '/api/vehicles/:id/trash-preview', async (req, res, { params, body }) => {
+    vehicleOr404(params.id);
+    const wanted = new Set(Array.isArray(body?.ids) ? body.ids : []);
+    const recs = (inventory.get(params.id)?.recordings || []).filter((r) => wanted.has(r.id) && !r.protected);
+    return { recordings: recs.length, can: recs.length ? await canWith(params.id, { rels: recs.flatMap((r) => r.files) }) : null };
   });
 
   r.add('GET', '/api/bin', (req, res, { query }) => ({ items: bin.list(query.vehicle || null) }));

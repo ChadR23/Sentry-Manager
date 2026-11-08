@@ -284,11 +284,37 @@ logs with their footage" (Nerd settings, *Keeping logs*; on by default):
 - At most 500 logs a run (the rest a minute later), each deleted as a delete in
   the Nerd settings is (the file and sidecar, its minutes in the index, the
   sync, its trust record kept as deleted for the chain), with one audit line a
-  run ("CAN logs deleted with their footage (car …): N (… with their footage
-  deleted, … older than the car's oldest footage)").
+  run ("CAN logs deleted (car …): N (… with their footage deleted, … older
+  than the car's oldest footage, … not linked to footage after 7 days)").
 
-Turned off, logs are kept until the owner deletes them, up to the 200,000 per
-car cap (`car_full`), which stays as a safety net either way.
+**Logs not linked to footage.** "Delete logs not linked to footage after
+[7] days" (*Keeping logs*, its own switch, on by default, 1 to 365 days): a
+log that no footage of its car covers (on the share, in the Recycle Bin or
+protected) is deleted once it is that many days old, counted from its minute
+or from when it arrived when that was later (a bridge that uploads late gets
+the full time). The archive had a week to bring the clips. Every rule above
+about what is never touched applies to it too (unmapped keys, pending logs,
+an unhealthy share, an incomplete scan, a car with no footage at all). The
+audit line counts them ("… not linked to footage after 7 days").
+
+**Deleting footage with its CAN data.** The footage delete confirmations offer
+"Also delete its CAN data (N logs)" when a key is mapped to the car (unticked).
+Ticked, `POST /api/vehicles/:id/trash` and `/trash-days` get `withCan: true`
+and, once the footage has moved, the logs of the moved recordings' minutes are
+deleted at once (with Delete through this date, `through: true`, every log of
+the car ending before the end of that day in the car's time zone as well).
+These do not come back on a restore. Minutes that footage still on the share
+or protected footage covers keep their logs; pending logs stay; nothing
+happens for an unmapped key or while the car's footage cannot be trusted.
+The count comes from `POST /api/vehicles/:id/trash-preview` `{ ids }` and the
+`trash-days` preview (`can: { logs, kept } | null`). One audit line ("CAN logs
+deleted with footage moved to the Recycle Bin (car …)").
+
+`POST /api/can/keep` takes any of `{ "withFootage": bool, "deleteUnlinked":
+bool, "unlinkedDays": 1-365 }` (admins, with the password).
+
+With both switches off, logs are kept until the owner deletes them, up to the
+200,000 per car cap (`car_full`), which stays as a safety net either way.
 
 **Downloads (Nerd panel, admin accounts only).** To work out what changed after
 a Tesla software update. These use the web session; the upload token cannot

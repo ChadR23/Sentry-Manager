@@ -13,7 +13,21 @@ can't be trashed.
 
 CAN Bridge logs go with their footage: when footage is deleted for good, the
 logs of the same car and minutes go too (while it is only in the Recycle Bin
-they stay). See "How long logs are kept" in [can-bridge-api.md](can-bridge-api.md).
+they stay). Logs that no footage covers 7 days after they were recorded are
+deleted as well (a setting). See "How long logs are kept" in
+[can-bridge-api.md](can-bridge-api.md).
+
+**Also delete its CAN data.** When a CAN Bridge key is mapped to the car,
+every footage delete confirmation (Move to trash, Delete this day, Delete
+through this date, in the built-in interface and the packs) has this
+checkbox, unticked, with the number of logs it would delete. Ticked, the
+car's CAN logs of the moved recordings' minutes are deleted **now and for
+good**: they do not come back if the footage is restored from the Recycle
+Bin. With Delete through this date it also takes every other log of the car
+up to the end of that day (the car's time zone), logs with no footage
+included. Minutes that footage staying on the share (another category,
+protected) still covers keep their logs, and so do logs still arriving or
+waiting for their check. Watch-only accounts cannot delete footage at all.
 
 ![Policies](images/policies.png)
 

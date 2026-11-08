@@ -440,22 +440,25 @@ export function openNerdPanel() {
 
   // "Delete CAN logs with their footage" (canPrune.js), and what its last look at each car did
   function keepHtml() {
-    const k = st.keep || { withFootage: true, cars: {} };
+    const k = st.keep || { withFootage: true, deleteUnlinked: true, unlinkedDays: 7, cars: {} };
+    const days = k.unlinkedDays || 7;
     const lines = st.vehicles.map((v) => {
       const l = k.cars?.[v.id];
       if (!l) return '';
-      const what = l.skip ? `not looked at: ${l.skip}` : `${l.removed ? `${l.removed.toLocaleString()} removed with their footage` : 'nothing to remove'}${l.pending ? `, ${l.pending} still arriving or waiting for their check` : ''}${l.more ? `, ${l.more.toLocaleString()} more next` : ''}`;
+      const what = l.skip ? `not looked at: ${l.skip}` : `${l.removed ? `${l.removed.toLocaleString()} removed${l.unlinked ? ` (${l.unlinked.toLocaleString()} not linked to footage)` : ''}` : 'nothing to remove'}${l.pending ? `, ${l.pending} still arriving or waiting for their check` : ''}${l.more ? `, ${l.more.toLocaleString()} more next` : ''}`;
       return `<li>${esc(v.name)} (${esc(when(l.at))}): ${esc(what)}</li>`;
     }).join('');
     return `<h3>Keeping logs</h3>
       <label class="nd-lab nd-check"><input type="checkbox" data-keep${k.withFootage !== false ? ' checked' : ''}> Delete CAN logs with their footage</label>
-      <p class="nd-muted">A log is <b>paired</b> with the footage of its car that covers its minute (Recent, Sentry and Saved clips). When that footage is deleted for good (the Recycle Bin emptied, by hand or after N days), its logs go too; while it is only in the Recycle Bin they stay, and a restore keeps them. Protected footage keeps its logs. A log from a minute with no footage (an archive gap, Sentry off) stays while it is newer than the car's oldest footage, and goes once all footage before it is gone. Only keys chosen for a car below are touched, never a log still arriving or waiting for its check, and nothing while a car's share is unreachable or its scan incomplete. ${k.withFootage !== false ? '' : 'Off: logs are kept until you delete them (at most 200,000 per car).'}</p>
+      <p class="nd-muted">A log is <b>paired</b> with the footage of its car that covers its minute (Recent, Sentry and Saved clips). When that footage is deleted for good (the Recycle Bin emptied, by hand or after N days), its logs go too; while it is only in the Recycle Bin they stay, and a restore keeps them. Protected footage keeps its logs. A log from a minute with no footage (an archive gap, Sentry off) stays while it is newer than the car's oldest footage, and goes once all footage before it is gone. Only keys chosen for a car below are touched, never a log still arriving or waiting for its check, and nothing while a car's share is unreachable or its scan incomplete. ${k.withFootage !== false ? '' : 'Off: deleting footage leaves its logs.'}</p>
+      <label class="nd-lab nd-check"><input type="checkbox" data-unlinked${k.deleteUnlinked !== false ? ' checked' : ''}> Delete logs not linked to footage after <input type="number" min="1" max="365" step="1" value="${days}" data-unlinked-days aria-label="Days" style="width:4.5em"> days</label>
+      <p class="nd-muted">A log is <b>not linked</b> when no footage of its car covers its minute. One still not linked ${days} days after it was recorded (or after it arrived, when the bridge sent it late) is deleted: the archive had that long to bring its clips. Footage in the Recycle Bin and protected footage still link. ${k.deleteUnlinked !== false ? '' : 'Off: logs with no footage are kept'}${k.deleteUnlinked !== false ? '' : k.withFootage !== false ? ' while newer than the car\'s oldest footage.' : ' until you delete them (at most 200,000 per car).'}</p>
       ${lines ? `<ul class="nd-muted">${lines}</ul>` : ''}`;
   }
   // the Received logs footage column: paired, no footage, or no car chosen for the key
   const FOOTAGE = {
     paired: ['paired', 'nd-ok', 'Footage of this car covers this log\'s minute: they are kept and deleted together.'],
-    none: ['no footage', 'nd-muted', 'No footage of this car covers this minute (an archive gap, Sentry off, or deleted). Kept while newer than the car\'s oldest footage.']
+    none: ['no footage', 'nd-muted', 'Not linked: no footage of this car covers this minute (an archive gap, Sentry off, or deleted). Deleted once it is still not linked the set number of days after it was recorded (Keeping logs).']
   };
 
   // the Received logs: a box of its own height (the header row stays), filtered here
@@ -711,6 +714,16 @@ export function openNerdPanel() {
       const on = keep.checked;
       if (on && !confirm('Delete CAN logs with their footage? Logs whose footage was deleted for good, and logs older than all of a car\'s footage, are deleted (they cannot be brought back).')) { keep.checked = false; return; }
       await confirmThen('/api/can/keep', post('', { withFootage: on }));
+      await draw();
+      return;
+    }
+    const unl = e.target.closest('[data-unlinked], [data-unlinked-days]');
+    if (unl) {
+      const box = body.querySelector('[data-unlinked]');
+      const n = Number(body.querySelector('[data-unlinked-days]')?.value);
+      if (!Number.isInteger(n) || n < 1 || n > 365) { alert('Days: a whole number from 1 to 365.'); await draw(); return; }
+      if (box.checked && !confirm(`Delete CAN logs that are still not linked to footage ${n} days after they were recorded? Logs older than that with no footage go at the next look; they cannot be brought back.`)) { await draw(); return; }
+      await confirmThen('/api/can/keep', post('', { deleteUnlinked: box.checked, unlinkedDays: n }));
       await draw();
       return;
     }

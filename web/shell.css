@@ -85,6 +85,10 @@ p { margin: 0; }
 .top-checks { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px 18px; }
 .crumb { color: var(--text-2); }
 .check { display: inline-flex; align-items: center; gap: 10px; cursor: pointer; -webkit-user-select: none; user-select: none; }
+.can-with { margin-top: 4px; align-items: flex-start; }
+.check.can-with input { margin-top: 3px; flex: none; }
+.can-with[aria-disabled="true"] { opacity: .6; cursor: default; }
+.can-with-note { margin: 4px 0 0 26px; }
 .check input { width: 17px; height: 17px; accent-color: var(--accent); margin: 0; }
 .page-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 26px; }
 .head-actions { display: flex; gap: 12px; flex-wrap: wrap; justify-content: flex-end; }

@@ -5,6 +5,13 @@ import { api, esc, enc, icon, bytes, plural, dayTitle, dayShort, niceTime, CATEG
 import { state, vehicle, setVehicle, vehiclePicker, loadVehicles } from '../state.js';
 import { go } from '../app.js';
 
+// "Also delete its CAN data" in a footage delete confirmation: shown only when a CAN Bridge key is
+// mapped to the car (can: the server's count, null otherwise), unticked; those logs go for good, now
+const canWithHtml = (can, through) => (!can ? '' : `<label class="check can-with"><input type="checkbox" data-with-can${can.skip ? ' disabled' : ''}> Also delete its CAN data${through ? ', every log through this date' : ''} (${plural(can.logs || 0, 'log')})</label>
+  <p class="muted small can-with-note">${can.skip ? `Not possible right now: ${esc(can.skip)}.` : 'The CAN logs are deleted for good now: they do not come back if you restore the footage from the Recycle Bin.'}${can.kept ? ` ${plural(can.kept, 'log')} of minutes that other footage still covers stay${can.kept === 1 ? 's' : ''}.` : ''}</p>`);
+const withCanChecked = () => Boolean(document.querySelector('[data-with-can]')?.checked);
+const canToast = (c) => (!c ? '' : c.skip ? ` Its CAN data was not deleted: ${c.skip}.` : ` ${plural(c.removed, 'CAN log')} deleted${c.pending ? ` (${c.pending} still arriving stay)` : ''}.`);
+
 // "Index speeds": start the speed graph's index now; the button shows how far it is
 async function followIndex(b, start) {
   if (!b || b.dataset.following) return;
@@ -49,21 +56,23 @@ function encodedChip(e) {
 export async function moveToBin(v, recs, { ask = true } = {}) {
   if (!recs.length) return false;
   const total = recs.reduce((n, r) => n + (r.bytes || 0), 0);
+  const can = ask ? await api(`/api/vehicles/${enc(v.id)}/trash-preview`, { body: { ids: recs.map((r) => r.id) } }).then((x) => x.can, () => null) : null;
   if (ask && !(await confirmDialog({
     title: recs.length === 1 ? 'Move this to the Recycle Bin?' : `Move ${plural(recs.length, 'recording')} to the Recycle Bin?`,
-    body: `<p>${bytes(total)} goes to the Recycle Bin on the same storage. Nothing is deleted: you can put it back any time.</p>${recs.some((r) => r.protected) ? '<p class="muted">Protected recordings stay where they are.</p>' : ''}`,
+    body: `<p>${bytes(total)} goes to the Recycle Bin on the same storage. Nothing is deleted: you can put it back any time.</p>${recs.some((r) => r.protected) ? '<p class="muted">Protected recordings stay where they are.</p>' : ''}${canWithHtml(can, false)}`,
     ok: 'Move to Recycle Bin'
   }))) return false;
+  const withCan = ask && withCanChecked();
   const since = Date.now() - 2000;
   try {
-    const out = await api(`/api/vehicles/${enc(v.id)}/trash`, { body: { ids: recs.map((r) => r.id) } });
+    const out = await api(`/api/vehicles/${enc(v.id)}/trash`, { body: { ids: recs.map((r) => r.id), ...(withCan ? { withCan: true } : {}) } });
     const skipped = out.skipped?.length ? ` ${plural(out.skipped.length, 'recording')} stayed (${[...new Set(out.skipped.map((s) => (s.reason === 'protected' ? 'protected' : s.reason === 'converting' ? 'being converted' : s.reason)))].join(', ')}).` : '';
     if (!out.moved?.length) {
       toast(`Nothing moved.${skipped}`, { kind: 'bad' });
       return false;
     }
     const labels = new Set(recs.filter((r) => out.moved.includes(r.id)).map((r) => `${r.category} ${r.start || ''}`.trim()));
-    toast(`${plural(out.moved.length, 'recording')} moved to the Recycle Bin (${bytes(out.bytes)}).${skipped}`, {
+    toast(`${plural(out.moved.length, 'recording')} moved to the Recycle Bin (${bytes(out.bytes)}).${skipped}${canToast(out.can)}${out.can?.removed ? ' Undo brings back only the footage.' : ''}`, {
       kind: 'good',
       action: {
         label: 'Undo',
@@ -111,13 +120,14 @@ async function trashDays(v, day, through) {
   const ok = await confirmDialog({
     title: through ? 'Clear out this day and older?' : 'Move this whole day to the Recycle Bin?',
     body: `<p>${plural(preview.recordings, 'recording')} from ${what}${view$.category !== 'all' ? ` (${esc(CATS.find((c) => c[0] === view$.category)?.[1] || '')} only)` : ''}, ${bytes(preview.bytes)}${through && preview.days > 1 ? ` across ${plural(preview.days, 'day')}` : ''}, will move to the Recycle Bin.</p>
-      <p class="muted">You can restore it from there until you empty the Recycle Bin.${preview.protected ? ` ${plural(preview.protected, 'protected recording')} will stay.` : ''}</p>`,
+      <p class="muted">You can restore it from there until you empty the Recycle Bin.${preview.protected ? ` ${plural(preview.protected, 'protected recording')} will stay.` : ''}</p>${canWithHtml(preview.can, through)}`,
     ok: 'Move to Recycle Bin', danger: through
   });
   if (!ok) return false;
+  const withCan = withCanChecked();
   try {
-    const out = await api(`/api/vehicles/${enc(v.id)}/trash-days`, { body });
-    toast(`Moving ${plural(out.recordings, 'recording')} (${bytes(out.bytes)}) to the Recycle Bin. Activity shows the progress.`, { kind: 'good', action: { label: 'Open Recycle Bin', run: () => go('#/bin') } });
+    const out = await api(`/api/vehicles/${enc(v.id)}/trash-days`, { body: { ...body, ...(withCan ? { withCan: true } : {}) } });
+    toast(`Moving ${plural(out.recordings, 'recording')} (${bytes(out.bytes)}) to the Recycle Bin${withCan ? ', and deleting its CAN data' : ''}. Activity shows the progress.`, { kind: 'good', action: { label: 'Open Recycle Bin', run: () => go('#/bin') } });
     return true;
   } catch (err) { fail(err); return false; }
 }

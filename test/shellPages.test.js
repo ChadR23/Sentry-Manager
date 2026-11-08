@@ -135,3 +135,19 @@ test('Jobs: Clear jobs confirms in its request; the count does not', () => {
   assert.match(clear, /api\('\/api\/jobs\/clear', \{ body: \{ \.\.\.body, confirm: true \} \}\)/);
   assert.ok(clear.indexOf('if (!ok) return;') < clear.indexOf('confirm: true'));
 });
+
+test('footage delete confirmations offer "Also delete its CAN data" (unticked, only with a mapped key) in the shell and every pack', () => {
+  const box = fn('canWithHtml');
+  assert.match(box, /if \(!can\) return '';/, 'no key mapped to the car: no box');
+  assert.match(box, /<input type="checkbox" data-with-can\$\{/, 'unticked');
+  assert.match(box, /deleted for good now: they do not come back if you restore the footage/);
+  assert.match(fn('trash'), /trash-preview[\s\S]*canWithHtml\(can, false\)[\s\S]*withCan: true/);
+  assert.match(fn('deleteDays'), /canWithHtml\(preview\.can, through\)[\s\S]*withCan: true/);
+  for (const [pack, mod] of Object.entries({ daylight: 'dl', flux: 'flux', horizon: 'hz', aurora: 'aurora' })) {
+    const src = fs.readFileSync(path.join(REPO, 'examples', 'ui-packs', pack, 'web', mod, 'pages', 'footage.js'), 'utf8');
+    assert.match(src, /data-with-can\$\{can\.skip/, pack);
+    assert.match(src, /do not come back if you restore the footage/, pack);
+    assert.equal((src.match(/withCan: true/g) || []).length, 2, `${pack}: Move to trash and Delete days`);
+    assert.match(src, /trash-preview/, pack);
+  }
+});

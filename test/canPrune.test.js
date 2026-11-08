@@ -37,7 +37,7 @@ function startOf(v, name) {
 /** The CAN log name of a UTC moment. */
 const logName = (iso, key = KEY, seq = 1) => `${key}_${iso.replace(/[-:]/g, '').replace(/\.\d+/, '')}_${seq}.log.xz`;
 
-async function fixture({ timezone = 'UTC', clips = [], events = {}, mapped = true } = {}) {
+async function fixture({ timezone = 'UTC', clips = [], events = {}, mapped = true, now } = {}) {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sm-canprune-'));
   const root = path.join(dir, 'footage');
   const canDir = path.join(dir, 'can');
@@ -72,13 +72,14 @@ async function fixture({ timezone = 'UTC', clips = [], events = {}, mapped = tru
     db, vehicles, inventory, canLogs, canTrust, startOf, withLock: (vid, fn) => bin.withLock(vid, fn),
     keysOf: (vid) => Object.entries(db.get('can-vehicles', {}) || {}).filter(([, id]) => id === vid).map(([k]) => k),
     drop: async (key, name) => { dropped.push(name); },
-    audit: { info: (m) => audits.push(m) }, log: { info: (m) => logs.push(m), warn: (m) => logs.push(m) }, soonMs: 3_600_000
+    audit: { info: (m) => audits.push(m) }, log: { info: (m) => logs.push(m), warn: (m) => logs.push(m) }, soonMs: 3_600_000, ...(now ? { now } : {})
   });
   /** A finished, judged log (unsigned: an older bridge), or one still pending. */
-  const addLog = async (name, { judged = true, sidecar = true, sidecarPart = false } = {}) => {
+  const addLog = async (name, { judged = true, sidecar = true, sidecarPart = false, receivedAt = null } = {}) => {
     const kdir = path.join(canDir, name.split('_')[0]);
     await fsp.mkdir(kdir, { recursive: true });
     await fsp.writeFile(path.join(kdir, name), 'log');
+    if (receivedAt) await fsp.utimes(path.join(kdir, name), new Date(receivedAt), new Date(receivedAt));
     if (sidecar) await fsp.writeFile(path.join(kdir, `${name}.json`), '{}');
     if (sidecarPart) await fsp.writeFile(path.join(kdir, `${name}.json.part`), '{');
     if (judged) await canTrust.check(name.split('_')[0], name);
@@ -127,8 +128,8 @@ test('emptying the Recycle Bin deletes the paired logs; while it is only in the 
     assert.ok(!fs.existsSync(path.join(f.dir, 'can', KEY, `${a}.json`)), 'its sidecar goes too');
     assert.deepEqual(f.dropped.sort(), [a, b].sort(), 'taken out of the index and the sync');
     assert.equal((await f.canTrust.record(KEY, a)).deleted, true, 'its trust record is kept, marked deleted (for the chain)');
-    assert.match(f.audits.join('\n'), /CAN logs deleted with their footage \(car Daily Driver\): 2 \(2 with their footage deleted\)/);
-    assert.match(f.logs.join('\n'), /CAN logs: removed 2 with their footage \(car Daily Driver\)/);
+    assert.match(f.audits.join('\n'), /CAN logs deleted \(car Daily Driver\): 2 \(2 with their footage deleted\)/);
+    assert.match(f.logs.join('\n'), /CAN logs: removed 2 \(2 with their footage deleted\) \(car Daily Driver\)/);
     // done with: the deleted minutes are forgotten, a run again removes nothing
     assert.equal(f.db.get('can-prune:car').gone.length, 0);
     assert.equal((await f.prune.check('car')).removed, 0);
@@ -270,13 +271,13 @@ test('a deleted minute noted while the share is away is acted on once it is back
   } finally { await f.done(); }
 });
 
-test('the setting off: nothing is deleted; on by default', async () => {
+test('the settings off: nothing is deleted; on by default', async () => {
   const f = await fixture({ clips: ['2026-11-05_10-00-00'] });
   try {
-    assert.equal(f.prune.settings().withFootage, true, 'on by default');
+    assert.deepEqual(f.prune.settings(), { withFootage: true, deleteUnlinked: true, unlinkedDays: 7 }, 'on by default, 7 days');
     const old = logName('2026-11-01T10:00:00Z');
     await f.addLog(old);
-    f.prune.set({ withFootage: false });
+    f.prune.set({ withFootage: false, deleteUnlinked: false });
     const out = await f.prune.check('car');
     assert.equal(out.removed, 0);
     assert.equal(out.skip, 'turned off');
@@ -303,5 +304,159 @@ test('a run deletes at most a batch; the rest the next time', async () => {
     assert.equal((await p.check('car')).removed, 2);
     assert.equal((await p.check('car')).removed, 1);
     p.stop();
+  } finally { await f.done(); }
+});
+
+// "Delete logs not linked to footage after N days" (on by default, 7 days)
+const DAY = 86400_000;
+test('a log no footage covers N days after its minute (or after it arrived) is deleted; a linked one stays; the days are the setting', async () => {
+  const now = Date.parse('2026-11-12T00:00:00Z');
+  const f = await fixture({ clips: ['2026-11-01_10-00-00', '2026-11-20_10-00-00'], now: () => now });
+  try {
+    const linked = logName('2026-11-01T10:00:00Z', KEY);
+    const gap = logName('2026-11-02T10:00:00Z', KEY); // 10 days old, never linked
+    const fresh = logName('2026-11-10T10:00:00Z', KEY); // 2 days old
+    const late = logName('2026-11-01T20:00:00Z', KEY); // old minute, but it only arrived 3 days ago
+    await f.addLog(linked, { receivedAt: '2026-11-01T10:01:00Z' });
+    await f.addLog(gap, { receivedAt: '2026-11-02T10:01:00Z' });
+    await f.addLog(fresh, { receivedAt: '2026-11-10T10:01:00Z' });
+    await f.addLog(late, { receivedAt: '2026-11-09T00:00:00Z' });
+    // 30 days: none is old enough
+    f.prune.set({ unlinkedDays: 30 });
+    assert.equal((await f.prune.check('car')).removed, 0);
+    // 7 days (the default): the gap goes, nothing else
+    assert.equal(f.prune.set({ unlinkedDays: 7 }).unlinkedDays, 7);
+    const out = await f.prune.check('car');
+    assert.equal(out.removed, 1);
+    assert.equal(out.unlinked, 1);
+    assert.ok(f.exists(linked) && !f.exists(gap) && f.exists(fresh) && f.exists(late));
+    assert.match(f.audits.join('\n'), /1 not linked to footage after 7 days/);
+    // 2 days: the late arrival goes too (3 days since it came); the fresh one (under 2 days) stays
+    f.prune.set({ unlinkedDays: 2 });
+    assert.equal((await f.prune.check('car')).removed, 1);
+    assert.ok(!f.exists(late) && f.exists(fresh) && f.exists(linked));
+  } finally { await f.done(); }
+});
+
+test('the unlinked rule: off keeps them; it works with the footage rule off; and every safety check still applies', async () => {
+  const now = Date.parse('2026-11-30T00:00:00Z');
+  const f = await fixture({ clips: ['2026-11-01_10-00-00', '2026-11-25_10-00-00'], now: () => now });
+  try {
+    const gap = logName('2026-11-05T10:00:00Z');
+    const waiting = logName('2026-11-05T11:00:00Z');
+    await f.addLog(gap, { receivedAt: '2026-11-05T10:01:00Z' });
+    await f.addLog(waiting, { judged: false, receivedAt: '2026-11-05T11:01:00Z' });
+    f.prune.set({ deleteUnlinked: false });
+    assert.equal((await f.prune.check('car')).removed, 0, 'off: kept (and it is newer than the oldest footage)');
+    // the footage rule off, the unlinked rule on: it runs alone
+    f.prune.set({ withFootage: false, deleteUnlinked: true });
+    // a deleted minute noted now is not forgotten by a run of the unlinked rule
+    f.prune.footageGone('car', { files: [{ rel: 'TeslaCam/RecentClips/2026-11-29_10-00-00-front.mp4' }] });
+    f.share.healthy = false;
+    assert.match((await f.prune.check('car')).skip, /share is not reachable/);
+    f.share.healthy = true;
+    f.inventory.get('car').errorCount = 2;
+    assert.match((await f.prune.check('car')).skip, /could not be read/);
+    f.inventory.get('car').errorCount = 0;
+    assert.ok(f.exists(gap));
+    const out = await f.prune.check('car');
+    assert.equal(out.removed, 1);
+    assert.equal(out.pending, 1, 'one not checked yet: kept');
+    assert.ok(!f.exists(gap) && f.exists(waiting));
+    assert.equal(f.db.get('can-prune:car').gone.length, 1, 'the footage rule\'s minutes stay for when it is turned on');
+    // a key not mapped to the car: nothing
+    f.db.set('can-vehicles', {});
+    const other = logName('2026-11-05T12:00:00Z');
+    await f.addLog(other, { receivedAt: '2026-11-05T12:01:00Z' });
+    assert.match((await f.prune.check('car')).skip, /no CAN Bridge key is mapped/);
+    assert.ok(f.exists(other));
+  } finally { await f.done(); }
+});
+
+test('the settings: each switch alone, days 1-365 (anything else keeps what was set)', async () => {
+  const f = await fixture({ clips: ['2026-11-05_10-00-00'] });
+  try {
+    assert.deepEqual(f.prune.set({ deleteUnlinked: false }), { withFootage: true, deleteUnlinked: false, unlinkedDays: 7 });
+    assert.deepEqual(f.prune.set({ withFootage: false, unlinkedDays: 14 }), { withFootage: false, deleteUnlinked: false, unlinkedDays: 14 });
+    for (const bad of [0, 366, 2.5, 'x', null]) assert.equal(f.prune.set({ unlinkedDays: bad }).unlinkedDays, 14);
+    assert.equal((await f.prune.check('car')).skip, 'turned off');
+    assert.deepEqual(f.prune.set({ deleteUnlinked: true }), { withFootage: false, deleteUnlinked: true, unlinkedDays: 14 });
+    assert.equal(f.prune.status().deleteUnlinked, true);
+  } finally { await f.done(); }
+});
+
+// "Also delete its CAN data" when footage is moved to the Recycle Bin
+test('deleteWith: the logs of the moved clips\' minutes go now; a minute other footage covers keeps its log; pending kept; counted first', async () => {
+  const f = await fixture({ clips: ['2026-11-01_10-00-00', '2026-11-01_10-01-00', '2026-11-01_10-02-00', '2026-11-01_10-03-00', '2026-11-01_10-04-00', '2026-11-01_12-00-00'], events: { '2026-11-01_10-01-30': ['2026-11-01_10-01-00'] } });
+  try {
+    const a = logName('2026-11-01T10:00:00Z');
+    const b = logName('2026-11-01T10:01:00Z'); // the Sentry event of that minute stays
+    const e = logName('2026-11-01T10:03:00Z');
+    const c = logName('2026-11-01T10:04:00Z'); // not checked yet
+    const d = logName('2026-11-01T12:00:00Z'); // another drive: not asked
+    const gap = logName('2026-11-01T11:00:00Z'); // no footage, not asked
+    for (const n of [a, b, e, d, gap]) await f.addLog(n);
+    await f.addLog(c, { judged: false });
+    const rec = f.inventory.get('car').recordings.find((r) => r.category === 'Recent' && r.files.some((x) => x.includes('10-00-00')));
+    assert.ok(rec.files.some((x) => x.includes('10-04-00')), 'one drive: 10:00 to 10:04');
+    // counted for the confirmation while the footage is still there
+    assert.deepEqual(await f.prune.deleteWith('car', { rels: rec.files, dryRun: true }), { logs: 3, kept: 1 });
+    assert.ok(f.exists(a), 'a count deletes nothing');
+    const moved = await f.bin.trash('car', [rec.id]);
+    const out = await f.prune.deleteWith('car', { rels: moved.moved.flatMap(() => rec.files), by: 'admin' });
+    assert.deepEqual(out, { removed: 2, kept: 1, pending: 1 });
+    assert.ok(!f.exists(a) && f.exists(b) && !f.exists(e) && f.exists(c) && f.exists(d) && f.exists(gap));
+    assert.deepEqual(f.dropped, [a, e]);
+    assert.equal((await f.canTrust.record(KEY, a)).deleted, true);
+    assert.match(f.audits.join('\n'), /CAN logs deleted with footage moved to the Recycle Bin \(car Daily Driver\): 2, .*: admin/);
+    // a restore does not bring it back
+    await f.bin.restore(f.db.binItems('car')[0].id);
+    await f.inventory.scan('car');
+    assert.ok(!f.exists(a));
+  } finally { await f.done(); }
+});
+
+test('deleteWith through a date: every log up to the end of that day in the car\'s zone, except minutes footage that stays covers', async () => {
+  // Los Angeles in November: UTC-8; 3 November ends at 08:00 UTC on the 4th
+  const f = await fixture({ timezone: 'America/Los_Angeles', clips: ['2026-11-02_10-00-00', '2026-11-03_09-00-00', '2026-11-05_10-00-00'] });
+  try {
+    const until = startOf(f.v, '2026-11-04_00-00-00');
+    assert.equal(new Date(until).toISOString(), '2026-11-04T08:00:00.000Z');
+    const stays = logName('2026-11-02T18:00:00Z'); // 10:00 local on the 2nd: that clip stays (another category, say)
+    const trashed = logName('2026-11-03T17:00:00Z'); // 09:00 local on the 3rd: its clip is moved
+    const gap = logName('2026-11-03T20:00:00Z'); // no footage, on the 3rd
+    const lastMinute = logName('2026-11-04T07:58:00Z'); // 23:58 local on the 3rd
+    const nextDay = logName('2026-11-04T08:00:00Z'); // 00:00 local on the 4th
+    for (const n of [stays, trashed, gap, lastMinute, nextDay]) await f.addLog(n);
+    const rec = f.recOf('2026-11-03_09-00-00');
+    assert.deepEqual(await f.prune.deleteWith('car', { rels: rec.files, until, dryRun: true }), { logs: 3, kept: 1 });
+    await f.bin.trash('car', [rec.id]);
+    assert.deepEqual(await f.prune.deleteWith('car', { rels: rec.files, until }), { removed: 3, kept: 1, pending: 0 });
+    assert.ok(f.exists(stays) && !f.exists(trashed) && !f.exists(gap) && !f.exists(lastMinute) && f.exists(nextDay));
+    assert.match(f.audits.join('\n'), /every log through 2026-11-04T07:59:59/);
+  } finally { await f.done(); }
+});
+
+test('deleteWith: protected footage keeps its log; an unmapped key, the share away or an incomplete scan: nothing', async () => {
+  const f = await fixture({ clips: ['2026-11-01_09-00-00', '2026-11-01_10-00-00'], mapped: false });
+  try {
+    const a = logName('2026-11-01T10:00:00Z');
+    await f.addLog(a);
+    const rec = f.recOf('2026-11-01_10-00-00');
+    assert.match((await f.prune.deleteWith('car', { rels: rec.files, until: Date.now() })).skip, /no CAN Bridge key is mapped/);
+    assert.ok(f.exists(a));
+    f.db.set('can-vehicles', { [KEY]: 'car' });
+    f.share.healthy = false;
+    assert.match((await f.prune.deleteWith('car', { rels: rec.files })).skip, /share is not reachable/);
+    f.share.healthy = true;
+    f.inventory.get('car').scanning = true;
+    assert.match((await f.prune.deleteWith('car', { rels: rec.files })).skip, /scan is running/);
+    f.inventory.get('car').scanning = false;
+    assert.ok(f.exists(a));
+    await f.bin.setProtected('car', rec.files, true);
+    assert.deepEqual(await f.prune.deleteWith('car', { rels: rec.files, until: Date.now() }), { removed: 0, kept: 1, pending: 0 });
+    assert.ok(f.exists(a));
+    // nothing asked: nothing done
+    assert.deepEqual(await f.prune.deleteWith('car', {}), { removed: 0, kept: 0, pending: 0 });
   } finally { await f.done(); }
 });

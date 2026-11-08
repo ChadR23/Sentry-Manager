@@ -17,6 +17,15 @@
 //              while it is newer than the car's oldest footage, less MARGIN;
 //              older than all of it: deleted (footage retention bounds the
 //              logs).
+//   unlinked   a log no footage covers UNLINKED_DAYS (7, 1-365) after its
+//              minute, or after it arrived when that was later (the archive
+//              had a week to bring the clips): deleted, with its own switch
+//              (deleteUnlinked), on by default. Each switch works alone.
+//
+// deleteWith: "Also delete its CAN data" when footage is moved to the Recycle
+// Bin by hand: the logs of its minutes (and with Delete through this date every
+// log up to the end of that day) are deleted at once, for good; a restore of
+// the footage does not bring them back.
 //
 // Never touched: CAN keys not mapped to a car in the Nerd settings, logs still
 // arriving (a sidecar upload under way) or not judged yet (canTrust waiting),
@@ -27,7 +36,7 @@
 // same path as a delete in the Nerd settings (index, sync, trust record), with
 // one audit line per run saying why.
 //
-//   db 'can-keep'         { withFootage: true }   the Nerd setting (on by default)
+//   db 'can-keep'         { withFootage: true, deleteUnlinked: true, unlinkedDays: 7 }   the Nerd settings (on by default)
 //   db 'can-prune:<vid>'  { gone: [[from, to, at], ...], last: { at, removed, ... } }
 
 const CLIP_MS = 62_000; // a Tesla clip is a minute, a second or two more
@@ -35,6 +44,8 @@ const LOG_MIN_MS = 60_000; // a log is a minute ...
 const LOG_MAX_MS = 10 * 60_000; // ... older bridges wrote one every 10 minutes
 const MARGIN_MS = 3600_000;
 const BATCH = 500;
+const UNLINKED_DAYS = 7;
+const DAY_MS = 86400_000;
 const FRESH_MS = 30 * 60_000; // a scan older than this is done again before deciding
 const GONE_KEEP_MS = 7 * 86400_000; // a deleted minute whose log was still pending: remembered this long
 const TS = /(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})/;
@@ -69,7 +80,8 @@ function createCanPrune({
   db, vehicles, inventory, canLogs, canTrust, keysOf, drop, startOf, withLock = (vid, fn) => fn(),
   audit = null, log = null, now = () => Date.now(), batch = BATCH, freshMs = FRESH_MS, soonMs = 30_000, onChange = () => {}
 }) {
-  const settings = () => ({ withFootage: true, ...(db.get('can-keep', null) || {}) });
+  const settings = () => ({ withFootage: true, deleteUnlinked: true, unlinkedDays: UNLINKED_DAYS, ...(db.get('can-keep', null) || {}) });
+  const anyOn = (c = settings()) => c.withFootage || c.deleteUnlinked;
   const stateKey = (vid) => `can-prune:${vid}`;
   const loadState = (vid) => ({ gone: [], last: null, ...(db.get(stateKey(vid), null) || {}) });
   const running = new Map(); // vid -> { p, next }
@@ -132,6 +144,69 @@ function createCanPrune({
     return out;
   }
 
+  /**
+   * "Also delete its CAN data" when footage is moved to the Recycle Bin (by hand, or Delete this day /
+   * Delete through this date): the car's CAN logs are deleted NOW, whatever the switches say, in
+   *   rels    the minutes of these clips (the ones moved), and/or
+   *   until   every log ending before this time (UTC ms; through a date: the end of that day)
+   * except minutes that other footage still on the share or protected footage covers, and logs still
+   * arriving or waiting for their check. Only keys mapped to the car, and nothing while its footage
+   * cannot be trusted (the share away, a scan running or incomplete). dryRun: only counted (for the
+   * confirmation, before the footage moves: the clips in rels then count as gone).
+   * { removed, kept, pending } (dryRun: { logs, kept }), or { skip } with why.
+   */
+  async function deleteWith(vid, { rels = [], until = null, by = '', dryRun = false } = {}) {
+    const v = vehicles.get(vid);
+    if (!v) return { removed: 0, kept: 0, pending: 0, skip: 'no such car' };
+    const keys = keysOf(vid);
+    if (!keys.length) return { removed: 0, kept: 0, pending: 0, skip: 'no CAN Bridge key is mapped to this car' };
+    const limit = Number.isFinite(until) ? until : null;
+    const going = new Set(rels);
+    const asked = [...new Set(rels.map((r) => clipStart(v, r)).filter((t) => t !== null))].sort((a, b) => a - b);
+    if (!asked.length && limit === null) return dryRun ? { logs: 0, kept: 0 } : { removed: 0, kept: 0, pending: 0 };
+    return withLock(vid, async () => {
+      const why = untrusted(v);
+      if (why) {
+        if (!dryRun) log?.warn?.(`CAN logs of ${v.name} not deleted with its footage: ${why}`);
+        return dryRun ? { logs: 0, kept: 0, skip: why } : { removed: 0, kept: 0, pending: 0, skip: why };
+      }
+      // what still stays: other footage on the share (not in the bin) and protected footage
+      const stay = new Set();
+      const add = (rel) => { const t = clipStart(v, rel); if (t !== null) stay.add(t); };
+      for (const f of inventory.get(vid)?.files?.values?.() || []) if (f.kind === 'clip' && !going.has(f.rel)) add(f.rel);
+      for (const rel of db.protectedSet?.(vid) || []) if (/\.mp4$/i.test(rel)) add(rel);
+      const stays = [...stay].sort((a, b) => a - b);
+      let removed = 0;
+      let kept = 0;
+      let pending = 0;
+      let logs = 0;
+      const names = [];
+      for (const key of keys) {
+        for (const s of spans(await canLogs.rowsOf(key))) {
+          const wanted = (limit !== null && s.to <= limit) || overlaps(asked, s.from, s.to);
+          if (!wanted) continue;
+          if (overlaps(stays, s.from, s.to)) { kept++; continue; }
+          if (dryRun) { logs++; continue; }
+          const rec = await canTrust.record(key, s.row.name).catch(() => null);
+          const side = await canLogs.stateOf(`${s.row.name}.json`).catch(() => ({ state: 'partial' }));
+          if (!rec || rec.status === 'waiting' || side.state === 'partial') { pending++; continue; }
+          try { await canLogs.remove(s.row.name); } catch (err) { if (err.status !== 404) { log?.warn?.(`CAN log ${s.row.name}: not deleted: ${err.message}`); continue; } }
+          await drop(key, s.row.name);
+          await canTrust.deleted(key, s.row.name).catch(() => {});
+          removed++;
+          names.push(s.row.name);
+        }
+      }
+      if (dryRun) return { logs, kept };
+      if (removed) {
+        log?.info?.(`CAN logs: removed ${removed} with footage moved to the Recycle Bin (car ${v.name})`);
+        audit?.info?.(`CAN logs deleted with footage moved to the Recycle Bin (car ${v.name}): ${removed}, ${names[0]}${removed > 1 ? ` to ${names[names.length - 1]}` : ''}${limit !== null ? `, every log through ${new Date(limit - 1).toISOString()}` : ''}${by ? `: ${by}` : ''}`);
+        onChange(vid);
+      }
+      return { removed, kept, pending };
+    });
+  }
+
   /** Footage was deleted for good (a Recycle Bin item): its minutes are remembered, and the car looked at soon. */
   function footageGone(vid, item) {
     const v = vehicles.get(vid);
@@ -158,7 +233,7 @@ function createCanPrune({
   }
 
   /** What would go (decided under the Recycle Bin's lock, so a restore or a move is never half seen). */
-  async function plan(v, st) {
+  async function plan(v, st, cfg = settings()) {
     const keys = keysOf(v.id);
     if (!keys.length) return { skip: 'no CAN Bridge key is mapped to this car' };
     let why = untrusted(v);
@@ -183,16 +258,19 @@ function createCanPrune({
       const maxEnd = [];
       for (const [i, g] of gone.entries()) maxEnd.push(Math.max(g[1], i ? maxEnd[i - 1] : -Infinity));
       const inGone = (from, to) => { const i = lowerBound(goneStarts, to); return i > 0 && maxEnd[i - 1] > from; };
+      const unlinkedBefore = now() - cfg.unlinkedDays * DAY_MS;
       const todo = [];
       const held = []; // pending logs in a deleted minute: their minute is remembered
       let pending = 0;
       for (const key of keys) {
         for (const s of spans(await canLogs.rowsOf(key))) {
           if (overlaps(starts, s.from, s.to)) continue;
-          const goneHere = inGone(s.from, s.to);
-          const old = s.to < oldest - MARGIN_MS;
-          if (!goneHere && !old) continue;
-          todo.push({ key, name: s.row.name, from: s.from, to: s.to, why: goneHere ? 'footage' : 'old' });
+          const goneHere = cfg.withFootage && inGone(s.from, s.to);
+          const old = cfg.withFootage && s.to < oldest - MARGIN_MS;
+          // counted from its minute, or from when it arrived when that was later (a bridge that was offline)
+          const unlinked = cfg.deleteUnlinked && Math.max(s.to, s.row.mtimeMs || 0) < unlinkedBefore;
+          if (!goneHere && !old && !unlinked) continue;
+          todo.push({ key, name: s.row.name, from: s.from, to: s.to, why: goneHere ? 'footage' : old ? 'old' : 'unlinked' });
         }
       }
       // not one still arriving or waiting for its check
@@ -222,8 +300,10 @@ function createCanPrune({
       onChange(vid);
       return s.last;
     };
-    if (!settings().withFootage) return done({ removed: 0, skip: 'turned off' });
-    const p = await plan(v, st);
+    if (!anyOn()) return done({ removed: 0, skip: 'turned off' });
+    // the deleted minutes are only done with when the footage rule looked at them
+    const cfg = settings();
+    const p = await plan(v, st, cfg);
     if (p.skip) {
       if (st.gone.length) log?.info?.(`CAN logs of ${v.name}: not looked at now: ${p.skip}`);
       return done({ removed: 0, skip: p.skip });
@@ -231,11 +311,11 @@ function createCanPrune({
     const take = p.todo.slice(0, batch);
     let removed = 0;
     const names = [];
-    const byWhy = { footage: 0, old: 0 };
+    const byWhy = { footage: 0, old: 0, unlinked: 0 };
     for (const [i, t] of take.entries()) {
       // the share checked again now and then: a car whose share went away stops here
       if (i && i % 50 === 0 && untrusted(v)) break;
-      if (!settings().withFootage) break;
+      if (!anyOn()) break;
       try {
         await canLogs.remove(t.name);
       } catch (err) {
@@ -254,15 +334,15 @@ function createCanPrune({
     const heldSpans = p.held.map((h) => [h.from, h.to]);
     // (minutes noted while this ran are looked at next time)
     const seen = new Set(st.gone.map((g) => g.join(',')));
-    if (more <= 0) s.gone = s.gone.filter((g) => !seen.has(g.join(',')) || (at - g[2] < GONE_KEEP_MS && heldSpans.some(([a, b]) => g[0] < b && g[1] > a)));
+    if (more <= 0 && cfg.withFootage) s.gone = s.gone.filter((g) => !seen.has(g.join(',')) || (at - g[2] < GONE_KEEP_MS && heldSpans.some(([a, b]) => g[0] < b && g[1] > a)));
     db.set(stateKey(vid), s);
     if (removed) {
-      const parts = [byWhy.footage ? `${byWhy.footage} with their footage deleted` : '', byWhy.old ? `${byWhy.old} older than the car's oldest footage` : ''].filter(Boolean).join(', ');
-      log?.info?.(`CAN logs: removed ${removed} with their footage (car ${v.name})`);
-      audit?.info?.(`CAN logs deleted with their footage (car ${v.name}): ${removed} (${parts}), ${names[0]}${removed > 1 ? ` to ${names[names.length - 1]}` : ''}: automatic ("Delete CAN logs with their footage")`);
+      const parts = [byWhy.footage ? `${byWhy.footage} with their footage deleted` : '', byWhy.old ? `${byWhy.old} older than the car's oldest footage` : '', byWhy.unlinked ? `${byWhy.unlinked} not linked to footage after ${cfg.unlinkedDays} days` : ''].filter(Boolean).join(', ');
+      log?.info?.(`CAN logs: removed ${removed} (${parts}) (car ${v.name})`);
+      audit?.info?.(`CAN logs deleted (car ${v.name}): ${removed} (${parts}), ${names[0]}${removed > 1 ? ` to ${names[names.length - 1]}` : ''}: automatic (Nerd settings, Keeping logs)`);
     }
     if (more > 0 && removed) soon(vid, 60_000);
-    return done({ removed, footage: byWhy.footage, old: byWhy.old, pending: p.pending, more: Math.max(0, more), oldestFootage: p.oldest });
+    return done({ removed, footage: byWhy.footage, old: byWhy.old, unlinked: byWhy.unlinked, pending: p.pending, more: Math.max(0, more), oldestFootage: p.oldest });
   }
 
   /** One run per car at a time; asked during one: once more after it. */
@@ -278,20 +358,26 @@ function createCanPrune({
 
   /** Every car (the hourly look: footage the car or the archive removed, and logs past the oldest footage). */
   async function sweep() {
-    if (!settings().withFootage) return;
+    if (!anyOn()) return;
     for (const v of vehicles.list()) await check(v.id);
   }
 
   function set(input) {
-    const next = { ...settings(), withFootage: input?.withFootage !== false };
+    const cur = settings();
+    const days = Number(input?.unlinkedDays);
+    const next = {
+      withFootage: typeof input?.withFootage === 'boolean' ? input.withFootage : cur.withFootage,
+      deleteUnlinked: typeof input?.deleteUnlinked === 'boolean' ? input.deleteUnlinked : cur.deleteUnlinked,
+      unlinkedDays: Number.isInteger(days) && days >= 1 && days <= 365 ? days : cur.unlinkedDays
+    };
     db.set('can-keep', next);
-    if (next.withFootage) for (const v of vehicles.list()) soon(v.id, 5000);
+    if (anyOn(next)) for (const v of vehicles.list()) soon(v.id, 5000);
     return next;
   }
 
   const status = () => ({ ...settings(), cars: Object.fromEntries(vehicles.list().map((v) => [v.id, loadState(v.id).last])) });
 
-  return { settings, set, status, footageGone, check, sweep, pairing, soon, stop: () => { for (const t of timers.values()) clearTimeout(t); timers.clear(); } };
+  return { settings, set, status, footageGone, deleteWith, check, sweep, pairing, soon, stop: () => { for (const t of timers.values()) clearTimeout(t); timers.clear(); } };
 }
 
-module.exports = { createCanPrune, spans, overlaps, CLIP_MS, MARGIN_MS, BATCH };
+module.exports = { createCanPrune, spans, overlaps, CLIP_MS, MARGIN_MS, BATCH, UNLINKED_DAYS };
