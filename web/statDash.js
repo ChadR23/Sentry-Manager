@@ -15,6 +15,10 @@
 // /api/telemetry: Tesla's SeiMetadata). CAN signals from the CAN Bridge join
 // the same list later (registerSignals), with nothing else to change.
 //
+// The stats people most like to see (speed, battery %, range, power, ...:
+// POPULAR) come first in the "List" box and the stat picker, under
+// "Popular", each once; then every other stat, by group.
+//
 // "Raw" (when the clip has CAN data) opens the nerd raw view under the blocks:
 // every CAN id at the moment shown, known to the DBC or not, with the bytes
 // that changed in the last half second lit up (createRawView).
@@ -138,6 +142,8 @@ const STYLE = `
 .sentry-sd .sd-list-v{flex:0 0 auto;min-width:88px;text-align:right;font:700 14px/1 ui-monospace,Menlo,Consolas,monospace;font-variant-numeric:tabular-nums;border-radius:4px;padding:4px 5px;transition:background .5s}
 .sentry-sd .sd-list-v small{font:600 12px/1 system-ui,sans-serif;color:var(--sd-dim);margin-left:3px}
 .sentry-sd .sd-list-r.hot .sd-list-v{background:rgba(255,181,71,.4);transition:none}
+.sentry-sd .sd-list-h{border-bottom-color:var(--sd-line);background:#1d2026}
+.sentry-sd .sd-list-h .sd-list-l{font:800 12px/1 system-ui,sans-serif;color:var(--sd-amber);letter-spacing:.04em;text-transform:uppercase}
 .sentry-sd .sd-list-empty{padding:12px;color:var(--sd-dim);font-size:14px}
 @media (max-width:640px){
   .sentry-sd .sd-small{flex-basis:88px}
@@ -188,7 +194,13 @@ const CAN_UNITS = {
   degC: { metric: ['°C', (v) => v], imperial: ['°F', (v) => v * 1.8 + 32] },
   kph: { metric: ['km/h', (v) => v], imperial: ['mph', (v) => v / 1.609344] },
   'km/h': { metric: ['km/h', (v) => v], imperial: ['mph', (v) => v / 1.609344] },
+  KPH: { metric: ['km/h', (v) => v], imperial: ['mph', (v) => v / 1.609344] },
   km: { metric: ['km', (v) => v], imperial: ['mi', (v) => v / 1.609344] },
+  KM: { metric: ['km', (v) => v], imperial: ['mi', (v) => v / 1.609344] },
+  mi: { metric: ['km', (v) => v * 1.609344], imperial: ['mi', (v) => v] },
+  M: { metric: ['m', (v) => v], imperial: ['ft', (v) => v * 3.28084] },
+  KWh: { metric: ['kWh', (v) => v], imperial: ['kWh', (v) => v] },
+  NM: { metric: ['Nm', (v) => v], imperial: ['Nm', (v) => v] },
   kPa: { metric: ['kPa', (v) => v], imperial: ['psi', (v) => v * 0.1450377] },
   bar: { metric: ['bar', (v) => v], imperial: ['psi', (v) => v * 14.50377] }
 };
@@ -226,7 +238,9 @@ function registerCanSignals(meta) {
     // name for one special value (SNA: not available) stays a number
     const span = Number.isFinite(m.max) && Number.isFinite(m.min) ? m.max - m.min : Infinity;
     const allNamed = Boolean(named) && span <= 16;
-    const label = canLabel(name, m.label);
+    // (a popular stat's signal with no readable name of its own, SOCUI292, takes the popular name)
+    const own = canLabel(name, m.label);
+    const label = own === name && POPULAR_NAME.has(id) ? POPULAR_NAME.get(id) : own;
     list.push({
       id, label, group: `CAN · ${String(m.bus || '').replace(/Bus$/, '') || 'bus'} · ${String(m.message || '').replace(/^ID[0-9A-F]+/, '') || 'message'}`,
       kind: allNamed ? 'text' : 'number', source: 'can', canName: name,
@@ -265,6 +279,81 @@ function cachedGet(map, key, max, get, good) {
   return entry;
 }
 const hasKeys = (o) => Boolean(o && Object.keys(o).length);
+
+// ---- the stats people most like to see (what Tesla dash apps put first),
+// shown first in the List and the picker, in this order. Each is a name and
+// the ids that can give it, best first: the first one there wins (a built-in
+// stat, else the CAN signal; a car whose DBC names differ still gets the
+// stat from the next id). The one chosen is shown once, at the top, and not
+// again below; the others stay in their own group. Ids from model3dbc's
+// Model3CAN.dbc (server/dbc). Battery power, live Wh/mi and charging power
+// have no one signal (they are worked out from others), so they are not here.
+const POPULAR = [
+  ['Speed', 'dash.speed', 'can.DI_vehicleSpeed', 'can.UI_gpsVehicleSpeed'],
+  ['Battery %', 'can.SOCUI292', 'can.UI_SOC', 'can.SOCave292'],
+  ['Range', 'can.UI_Range', 'can.UI_idealRange'],
+  ['Rear motor power', 'can.RearPower266'],
+  ['Front motor power', 'can.FrontPower2E5'],
+  ['Gear', 'dash.gear', 'can.DI_gear'],
+  ['Accelerator', 'dash.accelerator', 'can.DI_accelPedalPos'],
+  ['Brake', 'dash.brake', 'can.DI_brakePedalState', 'can.IBST_driverBrakeApply', 'can.ESP_driverBrakeApply'],
+  ['Steering', 'dash.steering', 'can.SteeringAngle129'],
+  ['Autopilot', 'dash.autopilot', 'can.DAS_autopilotState'],
+  ['Left blinker', 'dash.blinkLeft', 'can.VCFRONT_turnSignalLeftStatus', 'can.VCLEFT_turnSignalStatus'],
+  ['Right blinker', 'dash.blinkRight', 'can.VCFRONT_turnSignalRightStatus', 'can.VCRIGHT_turnSignalStatus'],
+  ['Battery voltage', 'can.BattVoltage132'],
+  ['Battery current', 'can.SmoothBattCurrent132', 'can.RawBattCurrent132'],
+  ['Battery temp (max)', 'can.BMSmaxPackTemperature', 'can.BattBrickTempMax332'],
+  ['Battery temp (min)', 'can.BMSminPackTemperature', 'can.BattBrickTempMin332'],
+  ['Outside temp', 'can.VCFRONT_tempAmbientFiltered', 'can.VCFRONT_tempAmbient', 'can.VCRIGHT_tempAmbientRaw'],
+  ['Cabin temp', 'can.VCRIGHT_hvacCabinTempEst', 'can.VCRIGHT_thsTemperature'],
+  ['12V battery', 'can.v12vBattVoltage261', 'can.PCS_dcdcLvBusVolt'],
+  ['Rear motor torque', 'can.DIR_torqueActual', 'can.RearTorque1D8'],
+  ['Front motor torque', 'can.DIF_torqueActual', 'can.FrontTorque1D5'],
+  ['Odometer', 'can.UI_odometer', 'can.Odometer3B6'],
+  // (a sensor slot, not a fixed wheel: VCSEC_TPMSLocation0-3 says which)
+  ['Tire pressure 1', 'can.VCSEC_TPMSPressure0'],
+  ['Tire pressure 2', 'can.VCSEC_TPMSPressure1'],
+  ['Tire pressure 3', 'can.VCSEC_TPMSPressure2'],
+  ['Tire pressure 4', 'can.VCSEC_TPMSPressure3'],
+  ['Charging', 'can.BMS_uiChargeStatus', 'can.CP_hvChargeStatus', 'can.PCS_hvChargeStatus'],
+  ['Charge time left', 'can.ChargeHoursRemaining132'],
+  ['Energy remaining', 'can.BMS_nominalEnergyRemaining', 'can.BMS_expectedEnergyRemaining'],
+  ['Full pack energy', 'can.BMS_nominalFullPackEnergy'],
+  ['Heading', 'dash.heading', 'can.UI_gpsVehicleHeading'],
+  ['Elevation', 'can.Elevation3D8'],
+  ['Accel (fwd)', 'dash.accelLong', 'can.RCM_longitudinalAccel'],
+  ['Accel (side)', 'dash.accelLat', 'can.RCM_lateralAccel'],
+  ['Set speed', 'can.DAS_setSpeed'],
+  ['Speed limit', 'can.DAS_fusedSpeedLimit'],
+  ['Latitude', 'dash.lat', 'can.GPSLatitude04F'],
+  ['Longitude', 'dash.lon', 'can.GPSLongitude04F'],
+  ['Brake temp FL', 'can.BrakeTempFL3FE'],
+  ['Brake temp FR', 'can.BrakeTempFR3FE'],
+  ['Brake temp RL', 'can.BrakeTempRL3FE'],
+  ['Brake temp RR', 'can.BrakeTempRR3FE'],
+  ['Lifetime charged', 'can.TotalChargeKWh3D2'],
+  ['Lifetime used', 'can.TotalDischargeKWh3D2']
+].map(([name, ...ids]) => ({ name, ids }));
+const POPULAR_NAME = new Map(POPULAR.flatMap((p) => p.ids.map((id) => [id, p.name])));
+/**
+ * The popular stats, in order: for each, the first of its ids there (and
+ * with ok(s), e.g. "has data in this clip"), as a copy of the signal named
+ * the popular way, popular: its place. Everything else of the signal (id,
+ * value, unit) is its own.
+ */
+function popularSignals(ok = () => true) {
+  const out = [];
+  POPULAR.forEach((p, k) => {
+    for (const id of p.ids) {
+      const s = SIGNALS.get(id);
+      if (!s || !ok(s)) continue;
+      out.push({ ...s, label: p.name, ownLabel: s.label === p.name ? s.canName || s.label : s.label, popular: k + 1 });
+      break;
+    }
+  });
+  return out;
+}
 let grouped = { v: -1, list: [] };
 /** Every signal, its group's together (the order the picker shows with no search), built once per change of SIGNALS. */
 function signalsGrouped() {
@@ -278,20 +367,28 @@ const squash = (t) => String(t ?? '').toLowerCase().replace(/[_.\-]+/g, ' ');
 /**
  * The signals a search finds: every word in the name, group or id (any
  * order, any case; "_" and "." count as spaces), names that start with it
- * first. An empty search: every signal, by group.
+ * first, and of those as good, the popular ones first (in POPULAR's order).
+ * An empty search: the popular stats first, then every other signal, by
+ * group. ok(s) picks which of a popular stat's ids counts (the List: the
+ * first with data here); a stat is in the answer once.
  */
-export function searchSignals(query) {
+export function searchSignals(query, ok) {
+  const pop = popularSignals(ok);
+  const taken = new Set(pop.map((s) => s.id));
+  const rest = signalsGrouped().filter((s) => !taken.has(s.id));
   const words = squash(query).split(/\s+/).filter(Boolean);
-  if (!words.length) return signalsGrouped();
+  if (!words.length) return pop.concat(rest);
   const found = [];
-  for (const s of signalsGrouped()) {
-    const name = squash(s.label);
-    const hay = `${name} ${squash(s.group)} ${squash(s.id)} ${String(s.id).toLowerCase()}`;
+  for (const s of pop.concat(rest)) {
+    const names = [squash(s.label)];
+    if (s.ownLabel) names.push(squash(s.ownLabel));
+    else if (POPULAR_NAME.has(s.id)) names.push(squash(POPULAR_NAME.get(s.id))); // ("battery %" finds the ids it did not choose)
+    const hay = `${names.join(' ')} ${squash(s.group)} ${squash(s.id)} ${String(s.id).toLowerCase()}`;
     if (!words.every((w) => hay.includes(w))) continue;
-    const rank = name.startsWith(words[0]) ? 0 : words.every((w) => name.includes(w)) ? 1 : 2;
-    found.push({ s, rank });
+    const rank = names.some((n) => n.startsWith(words[0])) ? 0 : names.some((n) => words.every((w) => n.includes(w))) ? 1 : 2;
+    found.push({ s, rank, pop: s.popular || 1e9 });
   }
-  return found.sort((a, b) => a.rank - b.rank).map((x) => x.s);
+  return found.sort((a, b) => a.rank - b.rank || a.pop - b.pop).map((x) => x.s);
 }
 const canMetaCache = new Map(); // front path -> entry of Promise<meta>
 const canClipCache = new Map(); // front path + names -> entry of Promise<{ start, sync, series } | null>
@@ -857,8 +954,11 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     let html = '';
     let group = null;
     pop.items.forEach((s, k) => {
-      if (!q.trim() && s.group !== group) { group = s.group; html += `<li class="sd-pop-g" role="presentation">${esc(group)}</li>`; }
-      html += `<li role="option" id="${popId}-${k}" data-opt="${k}" class="sd-pop-o${s.id === pop.current ? ' cur' : ''}" aria-selected="${k === pop.active}"><span>${esc(s.label)}</span>${q.trim() ? `<small>${esc(s.group)}</small>` : ''}</li>`;
+      const g = s.popular ? 'Popular' : s.group;
+      if (!q.trim() && g !== group) { group = g; html += `<li class="sd-pop-g" role="presentation">${esc(group)}</li>`; }
+      // (a popular stat from CAN says which signal it is)
+      const note = q.trim() ? s.group : s.popular && s.source === 'can' ? s.ownLabel : '';
+      html += `<li role="option" id="${popId}-${k}" data-opt="${k}" class="sd-pop-o${s.id === pop.current ? ' cur' : ''}" aria-selected="${k === pop.active}"><span>${esc(s.label)}</span>${note ? `<small>${esc(note)}</small>` : ''}</li>`;
     });
     if (found.length > SHOWN) html += `<li class="sd-pop-none" role="presentation">${(found.length - SHOWN).toLocaleString()} more: type more of the name.</li>`;
     pop.list.innerHTML = html || `<li class="sd-pop-none" role="presentation">No stat matches "${esc(q)}".</li>`;
@@ -938,9 +1038,12 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
   }
 
   // The list block: every stat with data in this clip (or only those that
-  // change), filtered by its own search, live as the footage plays. Only the
-  // rows in view are built (thousands of CAN signals); a value that changes
-  // lights up for a moment.
+  // change), filtered by its own search, live as the footage plays. With no
+  // search, the popular stats come first under their own heading (for each,
+  // the first of its ids with data here), then everything else; with one,
+  // the popular ones lead the matches as good. Only the rows in view are
+  // built (thousands of CAN signals); a value that changes lights up for a
+  // moment.
   const ROW = 30;
   const lists = new WeakMap(); // block -> { key, rows, hidden, prev, hot }
   const changingOf = new WeakMap(); // can answer -> Set of names whose value changes
@@ -959,9 +1062,14 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     const key = `${signalsVersion}|${b.q || ''}|${b.changing ? 1 : 0}|${recs ? 1 : 0}`;
     if (st.key === key && st.can === can) return st;
     const moving = b.changing ? changingNames() : null;
-    const found = searchSignals(b.q || '');
-    st.rows = found.filter((s) => (s.source === 'can' ? (moving ? moving.has(s.canName) : can?.series?.[s.canName]?.length > 0) : !moving && Boolean(recs?.length)));
-    st.hidden = found.length - st.rows.length;
+    const shown = (s) => (s.source === 'can' ? (moving ? moving.has(s.canName) : can?.series?.[s.canName]?.length > 0) : !moving && Boolean(recs?.length));
+    const found = searchSignals(b.q || '', shown);
+    const rows = found.filter(shown);
+    const pops = (b.q || '').trim() ? 0 : rows.filter((s) => s.popular).length;
+    // (headings are rows too, with no id: the list draws only the rows in view)
+    st.rows = pops ? [{ head: 'Popular' }, ...rows.slice(0, pops), ...(rows.length > pops ? [{ head: 'All stats' }] : []), ...rows.slice(pops)] : rows;
+    st.count = rows.length;
+    st.hidden = found.length - rows.length;
     st.key = key;
     st.can = can;
     return st;
@@ -974,7 +1082,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     const count = node.querySelector('[data-list-n]');
     if (!scroll || !pad) return;
     const n = st.rows.length;
-    if (count) count.textContent = `${n.toLocaleString()} stat${n === 1 ? '' : 's'}${st.hidden ? ` · ${st.hidden.toLocaleString()} ${b.changing ? 'not changing or ' : ''}with no data here` : ''}`;
+    if (count) count.textContent = `${st.count.toLocaleString()} stat${st.count === 1 ? '' : 's'}${st.hidden ? ` · ${st.hidden.toLocaleString()} ${b.changing ? 'not changing or ' : ''}with no data here` : ''}`;
     const first = Math.max(0, Math.floor((scroll.scrollTop || 0) / ROW) - 4);
     const last = Math.min(n, first + Math.ceil((scroll.clientHeight || 15 * ROW) / ROW) + 8);
     const drawn = `${st.key}|${first}|${last}`;
@@ -983,13 +1091,13 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
       pad.dataset.drawn = drawn;
       pad.style.height = `${n * ROW}px`;
       pad.innerHTML = n
-        ? st.rows.slice(first, last).map((s, k) => `<div class="sd-list-r" role="row" style="top:${(first + k) * ROW}px" data-row="${first + k}" title="${esc(`${s.label} (${s.group}${s.canName ? `, ${s.canName}` : ''})`)}"><span class="sd-list-l" role="cell">${esc(s.label)}</span><span class="sd-list-m" role="cell">${esc(messageOf(s))}</span><span class="sd-list-v" role="cell" data-lv></span></div>`).join('')
+        ? st.rows.slice(first, last).map((s, k) => (s.head ? `<div class="sd-list-r sd-list-h" role="row" style="top:${(first + k) * ROW}px"><span class="sd-list-l" role="columnheader">${esc(s.head)}</span></div>` : `<div class="sd-list-r${s.popular ? ' sd-list-pop' : ''}" role="row" style="top:${(first + k) * ROW}px" data-row="${first + k}" title="${esc(`${s.label} (${s.group}${s.canName ? `, ${s.canName}` : ''})`)}"><span class="sd-list-l" role="cell">${esc(s.label)}</span><span class="sd-list-m" role="cell">${esc(s.popular && s.source === 'can' ? s.ownLabel : messageOf(s))}</span><span class="sd-list-v" role="cell" data-lv></span></div>`)).join('')
         : `<div class="sd-list-empty">${b.q ? `No stat with data here matches "${esc(b.q)}".` : b.changing ? 'Nothing changes in this clip.' : 'No car data for this clip yet.'}</div>`;
     }
     const nowMs = Date.now();
     pad.querySelectorAll('[data-row]').forEach((rowEl) => {
       const s = st.rows[Number(rowEl.dataset.row)];
-      if (!s) return;
+      if (!s || s.head) return;
       const v = valueOf(s, r, c);
       const shown = `${v.text}|${v.unit}`;
       const vEl = rowEl.querySelector('[data-lv]');

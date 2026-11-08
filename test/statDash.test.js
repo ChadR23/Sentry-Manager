@@ -390,3 +390,99 @@ test('the list block: every stat of the clip, asked for all at once, filtered, l
   assert.ok(rows().length >= 1, 'the brake changes');
   d.dash.destroy();
 });
+
+// ---- the stats people like most: first in the List and the picker ---------------
+const POP_META = {
+  signals: {
+    BMS_packFoo: { unit: 'V', bus: 'VehicleBus', message: 'ID100AAA' },
+    SOCUI292: { unit: '%', bus: 'VehicleBus', message: 'ID292BMS_SOC' },
+    UI_SOC: { unit: '%', bus: 'VehicleBus', message: 'ID33AUI_rangeSOC' },
+    UI_Range: { unit: 'mi', bus: 'VehicleBus', message: 'ID33AUI_rangeSOC', min: 0, max: 1023 },
+    DI_vehicleSpeed: { unit: 'kph', bus: 'VehicleBus', message: 'ID257DIspeed', min: -40, max: 285 },
+    BattVoltage132: { unit: 'V', bus: 'VehicleBus', message: 'ID132HVBattAmpVolt' },
+    SomethingElseVolt: { unit: 'V', bus: 'VehicleBus', message: 'ID999ZZZ' }
+  }
+};
+async function popDash(series, block = { type: 'list', signals: [], q: '', changing: false }) {
+  return dashboard({
+    rawOpen: false,
+    routes: {
+      boards: board([block, { type: 'small', signals: ['dash.speed'] }]),
+      '/api/can/signals': () => POP_META,
+      '/api/can/clip': () => ({ start: S, sync: { method: 'clock' }, series })
+    }
+  });
+}
+const listed = (d) => d.dash.panel.querySelectorAll('.sd-list-r').map((r) => (r.classList.contains('sd-list-h') ? `# ${r.textContent}` : r.children[0].textContent));
+
+test('the List: the popular stats first, under their own heading, each once', async (t) => {
+  // no SOCUI292 in this clip: Battery % comes from UI_SOC, the next of its ids
+  const d = await popDash({ BMS_packFoo: [[S - 1000, 1]], UI_SOC: [[S - 1000, 80]], UI_Range: [[S - 1000, 250]], DI_vehicleSpeed: [[S - 1000, 50], [S + 5000, 60]], BattVoltage132: [[S - 1000, 398]], SomethingElseVolt: [[S - 1000, 3]] });
+  t.after(() => d.dash.destroy());
+  await d.frame();
+  await d.frame();
+  const rows = listed(d);
+  assert.deepEqual(rows.slice(0, 6), ['# Popular', 'Speed', 'Battery %', 'Range', 'Battery voltage', '# All stats'], `rows: ${rows}`);
+  // Speed: no dash telemetry here, so the CAN speed (in mph by default: 50 km/h)
+  const speed = d.dash.panel.querySelectorAll('.sd-list-r')[1];
+  assert.equal(speed.querySelector('[data-lv]').textContent, '31mph');
+  assert.equal(speed.children[1].textContent, 'Vehicle Speed', 'which signal it is');
+  const range = d.dash.panel.querySelectorAll('.sd-list-r')[3];
+  assert.equal(range.querySelector('[data-lv]').textContent, '250mi');
+  // each once: the signals chosen are not listed again below
+  const values = d.dash.panel.querySelectorAll('.sd-list-r[data-row]').map((r) => r.getAttribute('title'));
+  assert.equal(new Set(values).size, values.length, 'no duplicates');
+  assert.equal(values.filter((t) => /DI_vehicleSpeed/.test(t)).length, 1);
+  assert.equal(values.filter((t) => /UI_SOC/.test(t)).length, 1);
+  assert.match(d.dash.panel.querySelector('[data-list-n]').textContent, /^6 stats/, 'headings are not counted');
+  // changing only: still applies to the popular rows
+  const ch = d.dash.panel.querySelector('[data-list-changing]');
+  ch.checked = true;
+  fire(ch, 'change');
+  assert.deepEqual(listed(d), ['# Popular', 'Speed'], 'only the speed changes');
+  // a search: the popular match leads the matches as good
+  ch.checked = false;
+  fire(ch, 'change');
+  const q = d.dash.panel.querySelector('[data-list-q]');
+  q.value = 'volt';
+  fire(q, 'input');
+  const found = listed(d);
+  assert.equal(found[0], 'Battery voltage', `found: ${found}`);
+  assert.ok(!found.some((x) => x.startsWith('#')), 'no headings in a search');
+  q.value = 'battery %';
+  fire(q, 'input');
+  assert.deepEqual(listed(d), ['Battery %']);
+  d.dash.destroy();
+});
+
+test('the picker: a Popular group first, the first id there for each, then every stat once', async (t) => {
+  const d = await popDash({}, { type: 'small', signals: ['dash.steering'] });
+  t.after(() => d.dash.destroy());
+  fire(d.el.querySelector('[data-edit]'), 'click');
+  fire(d.el.querySelector('button[data-pick]'), 'click');
+  const pop = d.el.querySelector('.sd-pop');
+  const heads = pop.querySelectorAll('.sd-pop-g').map((g) => g.textContent);
+  assert.equal(heads[0], 'Popular');
+  const opts = pop.querySelectorAll('[data-opt]').map((o) => o.children[0].textContent);
+  // the built-in speed wins over the CAN one; SOCUI292 (first) over UI_SOC
+  assert.deepEqual(opts.slice(0, 4), ['Speed', 'Battery %', 'Range', 'Gear'], `opts: ${opts}`);
+  assert.equal(opts.filter((x) => x === 'Speed').length, 1, 'the built-in speed is not listed again');
+  assert.equal(opts.filter((x) => x === 'Steering').length, 1);
+  const battery = pop.querySelectorAll('[data-opt]')[1];
+  assert.equal(battery.querySelector('small').textContent, 'SOCUI292', 'which signal it is');
+  // the next ids stay in their own group
+  assert.ok(opts.includes('Vehicle speed') || opts.some((x) => /speed/i.test(x) && x !== 'Speed'), 'the CAN speed is still in its group');
+  // a search: popular first of the matches as good
+  const q = pop.querySelector('[data-pop-q]');
+  q.value = 'volt';
+  fire(q, 'input');
+  const found = pop.querySelectorAll('[data-opt]').map((o) => o.children[0].textContent);
+  assert.equal(found[0], 'Battery voltage', `found: ${found}`);
+  // picking a popular stat stores its real id
+  q.value = 'battery %';
+  fire(q, 'input');
+  fire(pop.querySelector('[data-opt]'), 'click');
+  fire(d.el.querySelector('[data-edit]'), 'click');
+  assert.equal(d.el.querySelector('.sd-small').querySelector('.sd-l').textContent, 'Battery %', 'the tile says what it is, not SOCUI292');
+  d.dash.destroy();
+});
