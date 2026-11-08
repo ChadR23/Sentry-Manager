@@ -198,7 +198,8 @@ class Inventory {
       if (!entry?.files || !vehicle) return 0;
       const root = this.vehicles.rootOf(vehicle);
       const map = this.codecs(vehicleId);
-      for (const rel of map.keys()) if (!entry.files.has(rel)) map.delete(rel);
+      let gone = 0;
+      for (const rel of map.keys()) if (!entry.files.has(rel) && map.delete(rel)) gone++;
       const todo = [...entry.files.values()].filter((f) => f.kind === 'clip' && /\.mp4$/i.test(f.rel)
         && !(map.get(f.rel)?.size === f.size && map.get(f.rel)?.mtimeMs === f.mtimeMs));
       const limit = limiter(8);
@@ -212,7 +213,8 @@ class Inventory {
           // unreadable right now (share dropped, file being replaced): next scan
         }
       })));
-      this.db.set(`codecs:${vehicleId}`, Object.fromEntries([...map].map(([rel, v]) => [rel, [v.size, v.mtimeMs, v.codec]])));
+      // saved only when something changed: the map is megabytes for a big car, and most rescans change nothing
+      if (read || gone) this.db.set(`codecs:${vehicleId}`, Object.fromEntries([...map].map(([rel, v]) => [rel, [v.size, v.mtimeMs, v.codec]])));
       if (read) this.onChange(vehicleId);
       return read;
     })().catch((err) => {
