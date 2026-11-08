@@ -1085,6 +1085,29 @@ test('CAN Bridge upload address in the Nerd panel: an IPv6 host keeps one pair o
   assert.doesNotThrow(() => new URL(canUploadAddress(host('https://[fd00::5]:9000/'), 10000)));
 });
 
+test('Nerd panel live updates: a burst is one refresh, and at most one refresh each 5 s however often things change', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+  const src = fs.readFileSync(path.join(__dirname, '..', 'web', 'nerd.js'), 'utf8');
+  const { liveSchedule } = await import(`data:text/javascript,${encodeURIComponent(src)}`);
+  let refreshes = 0;
+  const s = liveSchedule(() => { refreshes++; s.fetched(); }, { gap: 5000 });
+  s.fetched(); // the first draw
+  for (let k = 0; k < 5; k++) { s.live(); t.mock.timers.tick(100); }
+  t.mock.timers.tick(1000);
+  assert.equal(refreshes, 0, 'not within 5 s of the last refresh');
+  t.mock.timers.tick(4000);
+  assert.equal(refreshes, 1, 'the burst: one refresh');
+  // an event every second (the index decoding a backlog): one refresh each 5 s, not each second
+  for (let k = 0; k < 30; k++) { s.live(); t.mock.timers.tick(1000); }
+  assert.ok(refreshes >= 6 && refreshes <= 8, `${refreshes} refreshes in 30 s`);
+  s.stop();
+  s.live();
+  t.mock.timers.tick(60_000);
+  const after = refreshes;
+  t.mock.timers.tick(60_000);
+  assert.equal(refreshes, after, 'nothing after stop()');
+});
+
 test('Nerd panel: the Received logs filter (car key, check, text) and the download times', async () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'web', 'nerd.js'), 'utf8');
   const { filterLogs, localInput } = await import(`data:text/javascript,${encodeURIComponent(src)}`);

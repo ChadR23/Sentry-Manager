@@ -287,6 +287,27 @@ export function filterLogs(logs, { key = '', check = '', text = '' } = {}) {
     && (!t || f.name.toLowerCase().includes(t) || String(f.appVersion || '').toLowerCase().includes(t)));
 }
 
+/**
+ * Live updates, a few at once taken as one, and at most one refresh each
+ * `gap` ms however often the server says something changed (each refresh
+ * reads every log's details on the server):
+ *   const s = liveSchedule(refresh, { gap });  s.live(ms);  s.fetched() (a refresh started);  s.stop()
+ */
+export function liveSchedule(refresh, { gap = 5000, now = () => Date.now() } = {}) {
+  let timer = null;
+  let last = -Infinity;
+  let stopped = false;
+  return {
+    live(ms = 500) {
+      // (one already waiting covers this one too: it reads what is there when it runs)
+      if (stopped || timer) return;
+      timer = setTimeout(() => { timer = null; if (!stopped) refresh(); }, Math.max(ms, last + gap - now()));
+    },
+    fetched() { last = now(); },
+    stop() { stopped = true; clearTimeout(timer); }
+  };
+}
+
 /** The CAN Bridge panel, as a dialog over the page. It follows uploads, checks and the index live (/api/events, 'can'). */
 export function openNerdPanel() {
   css();
@@ -300,14 +321,15 @@ export function openNerdPanel() {
   </div>`;
   const prevFocus = document.activeElement;
   let es = null;
-  let liveTimer = null;
   let closed = false;
   const close = () => {
     closed = true;
     es?.close();
-    clearTimeout(liveTimer);
+    schedule.stop();
+    clearTimeout(leaveTimer);
     bg.remove();
     document.removeEventListener('keydown', onKey, true);
+    document.removeEventListener('selectionchange', onLeave);
     prevFocus?.focus?.();
   };
   const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
@@ -408,6 +430,9 @@ export function openNerdPanel() {
   function drawLogs() {
     const box = $('[data-logs-box]');
     if (!box) return;
+    // (text selected in the table, to copy it: drawn again once the reader is done)
+    if (busyIn(box)) { stale.logs = true; return; }
+    stale.logs = false;
     $('[data-logs-sum]').innerHTML = st.logs ? `${st.logs.toLocaleString()} log${st.logs === 1 ? '' : 's'}, ${esc(size(st.bytes))} in all. Kept exactly as recorded, also the messages nothing knows the meaning of yet. A log that fails its check is kept, but not used.` : 'None yet.';
     const shown = filterLogs(files.logs, filter);
     const total = files.logs.length;
@@ -565,7 +590,34 @@ export function openNerdPanel() {
     $('[data-dl-key]').addEventListener('change', () => defaultRange(true));
   }
 
-  /** Everything again from the server; the parts the reader is busy in wait for the next update. */
+  // the top part (settings, tokens, pairing): not drawn under a reader busy
+  // in it (a select still focused after a change, the token being selected)
+  function drawTop() {
+    const top = $('[data-top]');
+    if (!top) return;
+    const car = $('[data-token-car]')?.value;
+    top.innerHTML = topHtml();
+    if (car && $('[data-token-car]')) $('[data-token-car]').value = car;
+    stale.top = false;
+  }
+  // a part left out while the reader was busy in it: drawn from what is here
+  // already, as they leave it (no new request to the server)
+  const stale = { top: false, logs: false };
+  let leaveTimer = null;
+  const onLeave = () => {
+    if (closed || !(stale.top || stale.logs)) return;
+    clearTimeout(leaveTimer);
+    // (after the focus has moved on)
+    leaveTimer = setTimeout(() => {
+      if (closed || !st) return;
+      if (stale.top && !busyIn($('[data-top]'))) drawTop();
+      if (stale.logs) drawLogs();
+    }, 0);
+  };
+  body.addEventListener('focusout', onLeave);
+  document.addEventListener('selectionchange', onLeave);
+
+  /** Everything again from the server; a part the reader is busy in is drawn once they leave it. */
   let drawing = null;
   let again = false;
   async function draw() {
@@ -575,6 +627,7 @@ export function openNerdPanel() {
         again = false;
         let s2;
         let f2;
+        schedule.fetched();
         try {
           [s2, f2] = await Promise.all([api('/api/can/settings'), api('/api/can/files?limit=2000')]);
         } catch (err) {
@@ -587,27 +640,21 @@ export function openNerdPanel() {
         st = s2;
         files = f2;
         if (first) firstDraw();
-        const top = $('[data-top]');
-        if (first || !busyIn(top)) {
-          const car = $('[data-token-car]')?.value;
-          top.innerHTML = topHtml();
-          if (car && $('[data-token-car]')) $('[data-token-car]').value = car;
-        } else again = again || 'later';
+        if (first || !busyIn($('[data-top]'))) drawTop(); else stale.top = true;
         syncKeys();
         drawLogs();
         $('[data-index]').innerHTML = indexHtml();
         if (first) defaultRange();
-      } while (again === true);
+      } while (again);
     })().finally(() => {
-      const later = again === 'later';
       drawing = null;
       again = false;
-      if (later && !closed) live(2000);
     });
     return drawing;
   }
-  // live updates, a few at once taken as one
-  const live = (ms = 500) => { clearTimeout(liveTimer); liveTimer = setTimeout(() => { if (!closed) draw(); }, ms); };
+  // live updates (from /api/events): a few at once taken as one, at most one refresh each 5 s
+  const schedule = liveSchedule(() => { if (!closed) draw(); }, { gap: 5000 });
+  const live = (ms) => schedule.live(ms);
   try {
     es = new EventSource('/api/events');
     const dot = bg.querySelector('[data-live]');
