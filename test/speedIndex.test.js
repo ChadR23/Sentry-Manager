@@ -191,3 +191,40 @@ test('place search cache: filled ahead (warm), then a search reads no day file',
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('hard braking counts only deceleration: the peak of a pull, or a jolt up, is not braking', () => {
+  const { summarize } = require('../server/speedIndex');
+  const s = (v, ax) => ({ v, lat: null, lon: null, ax, ay: null });
+  // accelerating at 0.43 g, then lifting off (regen takes 0.5 m/s): only the speed lost counts
+  assert.deepEqual(summarize([s(8, 3), s(12, 4.5), s(15, 4.2), s(14.5, 0.5), s(14.5, 0)]).b, [2, 0.5]);
+  // a positive spike in a slowing second is not braking either
+  assert.deepEqual(summarize([s(20, 0), s(18, 6.5), s(16, 0), s(16, 0)]).b, [0, 2]);
+  // a one-sample bump far beyond what the speed lost
+  assert.deepEqual(summarize([s(20, 0), s(19.5, -9), s(19.5, 0), s(19.5, 0)]).b, [0, 0.5]);
+});
+
+test('an older summary whose speeds have no slowing second is upgraded in place, not read again', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'si-upgrade-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const rel = (n) => `RecentClips/2026-10-11_10-0${n}-00-front.mp4`;
+  const files = new Map([1, 2].map((n) => [rel(n), { rel: rel(n), kind: 'clip', camera: 'front', day: '2026-10-11', size: 100 + n, mtimeMs: 1000 }]));
+  fs.mkdirSync(path.join(dir, 'speeds', 'v1'), { recursive: true });
+  const parked = { b: null, t: [3, 0.2], v: [0, 0], g: [] };
+  fs.writeFileSync(path.join(dir, 'speeds', 'v1', '2026-10-11.json'), JSON.stringify({
+    [rel(1)]: [101, 1000, [0, 0, 0, 0.1, 0.2], parked], // parked Sentry clip: cannot change
+    [rel(2)]: [102, 1000, [20, 18, 16], { b: [0, 2], t: null, v: [0, 20], g: [] }] // slows: read again
+  }));
+  const read = [];
+  const root = path.join(dir, 'car');
+  const idx = createSpeedIndex({ dir: path.join(dir, 'speeds'), inventory: { get: () => ({ files }) }, vehicles: { list: () => [{ id: 'v1' }], rootOf: () => root }, telemetry: { limit: (fn) => fn(), read: async (real) => { read.push(path.basename(real)); throw new Error('gone'); } }, pauseMs: 0 });
+  await idx.kick();
+  assert.deepEqual(read, ['2026-10-11_10-02-00-front.mp4']);
+  const saved = JSON.parse(fs.readFileSync(path.join(dir, 'speeds', 'v1', '2026-10-11.json'), 'utf8'));
+  assert.deepEqual(saved[rel(1)], [101, 1000, [0, 0, 0, 0.1, 0.2], { ...parked, k: 2 }]);
+});
+
+test('index.js waits for the converter and the benchmark before reading speeds', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server', 'index.js'), 'utf8');
+  assert.match(src, /createSpeedIndex\(\{[^}]*idle: \(\) => !speedIndexBusy\(\)/);
+  assert.match(src, /speedIndexBusy = \(\) => converterRunning\(\) \|\| benchmarking !== null;/);
+});

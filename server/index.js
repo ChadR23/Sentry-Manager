@@ -308,6 +308,7 @@ async function main() {
   const smbTester = createSmbTester({ mounter, vehicles, log: logger.scope('vehicles') });
   vehicles.bootstrapFromEnv();
   let speedIndex = null;
+  let speedIndexBusy = () => false; // a conversion or the benchmark runs (set where the converter is made)
   let scrubPrepare = null;
   let archiveGapRef = null; // footage the car recorded that has not reached the share (set where CAN is known)
   let integrityRef = null; // the footage check: one cut short by a restart goes on after the first scan
@@ -318,7 +319,8 @@ async function main() {
   const thumbs = new Thumbnails({ dir: path.join(DATA, 'thumbnails'), ffmpegPath: FFMPEG });
   const telemetry = new Telemetry({ srcRoot: SRC, cacheDir: path.join(DATA, 'telemetry'), log: logger.scope('telemetry') });
   // every front clip's speed, a value a second, indexed in the background for the Viewer's speed graph
-  speedIndex = createSpeedIndex({ dir: path.join(DATA, 'speeds'), inventory, vehicles, telemetry, log: logger.scope('speeds') });
+  // (not while a conversion or the benchmark runs: the speed reads share the data disk; both are declared below)
+  speedIndex = createSpeedIndex({ dir: path.join(DATA, 'speeds'), inventory, vehicles, telemetry, log: logger.scope('speeds'), idle: () => !speedIndexBusy() });
   // the place search's cache, filled quietly half a minute after start
   setTimeout(() => speedIndex.warm(vehicles.list().map((v) => v.id)).catch((err) => log.warn(`Place search: ${err.message}`)), 30_000).unref?.();
 
@@ -366,6 +368,7 @@ async function main() {
   // sampled only while a page asks or a conversion runs
   const converterRunning = () => [...converterJobs.values()].some((s) => CONVERTER_RUNNING.has(s.state));
   let benchmarking = null; // the benchmark's energy token while it runs
+  speedIndexBusy = () => converterRunning() || benchmarking !== null;
   // Server alerts from before a restart: the new run raises them again if
   // they still hold (a stale one could otherwise never be cleared)
   db.resolvePrefix('server:');

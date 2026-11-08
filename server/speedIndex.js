@@ -31,6 +31,9 @@ const BRAKE = 3.9; // m/s lost in one second (about 0.4 g)
 const SWERVE = 4; // m/s² sideways (about 0.4 g)
 // 2: braking from the accelerometer too (the speed, one value a second, misses most stops)
 const SUMMARY_VERSION = 2;
+// a summary of an older version needs the clip read again only if its stored speeds have a second
+// the new rule looks at (one 0.3 m/s slower than its neighbour; stored to 0.01, hence 0.29)
+const canBrake = (sp) => Array.isArray(sp) && sp.some((x, i) => x !== null && i + 1 < sp.length && sp[i + 1] !== null && Math.abs(x - sp[i + 1]) >= 0.29);
 
 /** Metres between two points (haversine). */
 function metres(lat1, lon1, lat2, lon2) {
@@ -54,10 +57,14 @@ function summarize(samples) {
     if (x.v !== null && (!v || x.v > v[1])) v = [s, r2(x.v)];
     const n = samples[s + 1];
     if (x.v !== null && n && n.v !== null && x.v - n.v > 0 && (!b || x.v - n.v > b[1])) b = [s, r2(x.v - n.v)];
-    // the accelerometer, in a second where the car is slowing (its sign does not matter then)
+    // the accelerometer, in a second where the car is slowing: only deceleration (a negative
+    // forward ax), and only as much as the speed lost around that second can account for
+    // (a bump, or the peak of a pull just before lifting off, is not braking)
     const p = samples[s - 1];
-    const slowing = x.v !== null && ((n && n.v !== null && n.v < x.v - 0.3) || (p && p.v !== null && x.v < p.v - 0.3));
-    if (slowing && Number.isFinite(x.ax) && x.ax !== null && (!b || Math.abs(x.ax) > b[1])) b = [s, r2(Math.abs(x.ax))];
+    const lostNext = x.v !== null && n && n.v !== null ? x.v - n.v : 0;
+    const lostPrev = x.v !== null && p && p.v !== null ? p.v - x.v : 0;
+    const dec = Number.isFinite(x.ax) && x.ax < 0 ? -x.ax : 0;
+    if (dec > 0 && (lostNext > 0.3 || lostPrev > 0.3) && Math.max(lostNext, lostPrev) >= 0.4 * dec && (!b || dec > b[1])) b = [s, r2(dec)];
     if (x.ay !== null && (!t || Math.abs(x.ay) > t[1])) t = [s, r2(Math.abs(x.ay))];
     if (s % GPS_EVERY === 0 && x.lat !== null && x.lon !== null && (x.lat !== 0 || x.lon !== 0)
       && Math.abs(x.lat) <= 90 && Math.abs(x.lon) <= 180) g.push([s, r5(x.lat), r5(x.lon)]);
@@ -137,15 +144,26 @@ function createSpeedIndex({ dir, inventory, vehicles, telemetry, log, pauseMs = 
   async function pass() {
     // what is left to read, so the log can say how far along it is
     const todo = [];
+    let upgraded = 0;
     for (const v of vehicles.list()) {
       const root = vehicles.rootOf(v);
       if (!root) continue;
       for (const c of fronts(v.id)) {
         const had = (await load(c.vid, c.day))[c.rel];
-        if (!(had && had[0] === c.size && had[1] === c.mtimeMs && had.length >= 4 && (had[3] === null || had[3]?.k === SUMMARY_VERSION))) todo.push({ ...c, root });
+        const same = had && had[0] === c.size && had[1] === c.mtimeMs && had.length >= 4;
+        if (same && (had[3] === null || had[3]?.k === SUMMARY_VERSION)) continue;
+        // an older summary whose speeds show no slowing second gives the same summary read again: upgraded in place
+        if (same && had[3] && typeof had[3] === 'object' && !canBrake(had[2])) {
+          had[3] = { ...had[3], k: SUMMARY_VERSION };
+          touch(`${c.vid}/${c.day}`);
+          upgraded++;
+          continue;
+        }
+        todo.push({ ...c, root });
       }
     }
-    if (todo.length) log?.info(`Speed index: ${todo.length} clip(s) to read, newest days first`);
+    if (upgraded) await flush();
+    if (todo.length) log?.info(`Speed index: ${todo.length} clip(s) to read, newest days first${upgraded ? ` (${upgraded} kept as they were: no slowing second)` : ''}`);
     let done = 0;
     Object.assign(progress_, { done: 0, total: todo.length, day: null });
     const started = Date.now();
@@ -156,7 +174,7 @@ function createSpeedIndex({ dir, inventory, vehicles, telemetry, log, pauseMs = 
       data[c.rel] = [c.size, c.mtimeMs, ...(await speedsFor(path.join(c.root, c.rel), c.size))];
       touch(`${c.vid}/${c.day}`);
       Object.assign(progress_, { done: done + 1, day: c.day });
-      if (++done % 25 === 0) await flush();
+      if (++done % 100 === 0) await flush();
       if (done % 250 === 0 && done < todo.length) {
         const left = Math.round(((Date.now() - started) / done) * (todo.length - done) / 60000);
         log?.info(`Speed index: ${done} of ${todo.length} clips (now on ${c.day}, about ${left} min left)`);
