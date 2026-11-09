@@ -610,11 +610,22 @@ test('server: GET /api/vehicles/:id/sentry-usb and /days carry the status; misma
     assert.match(days.sentryUsb.summary, /^Sentry USB's last archive \(.+\) copied 120 files, newest clip/);
     const { record, ...api } = (await call('GET', '/api/vehicles/daily-driver/sentry-usb')).data;
     // the checksums Manager records for every arrived clip (arrivalChecksums.js): these two arrived just now
-    assert.deepEqual({ ...record, pending: typeof record.pending }, { enabled: true, today: 0, lastAt: null, pending: 'number', lines: 0, windowDays: 7, backfill: null, canBackfill: true });
-    assert.equal((await call('POST', '/api/vehicles/daily-driver/sentry-usb/record', { days: 0 })).status, 400);
-    const bf = await call('POST', '/api/vehicles/daily-driver/sentry-usb/record', { days: 30 });
-    assert.equal(bf.status, 200);
-    assert.equal(bf.data.record.backfill.days, 30);
+    assert.deepEqual({ ...record, pending: typeof record.pending, backlog: record.backlog && Object.keys(record.backlog) }, { enabled: true, today: 0, lastAt: null, pending: 'number', lines: 0, windowDays: 7, older: true,
+      backlog: record.backlog && ['total', 'done', 'left', 'failed', 'bytesLeft', 'etaMinutes'], canBackfill: true });
+    // (the 2020 clips arrived just now: in the recent window, still settling; nothing older)
+    let rec;
+    for (let i = 0; i < 100; i++) {
+      rec = (await call('GET', '/api/vehicles/daily-driver/sentry-usb')).data.record;
+      if (rec.backlog) break;
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    assert.deepEqual(rec.backlog, { total: 0, done: 0, left: 0, failed: 0, bytesLeft: 0, etaMinutes: 0 });
+    assert.equal((await call('POST', '/api/vehicles/daily-driver/sentry-usb/record', { days: 30 })).status, 400, 'the old "last N days" form is gone');
+    const off = await call('POST', '/api/vehicles/daily-driver/sentry-usb/record', { older: false });
+    assert.equal(off.status, 200);
+    assert.equal(off.data.record.older, false);
+    assert.equal(off.data.record.backlog, null);
+    assert.equal((await call('POST', '/api/vehicles/daily-driver/sentry-usb/record', { older: true })).data.record.older, true);
     assert.deepEqual({ ...api, readAt: typeof api.readAt }, {
       present: true, readAt: 'number', writtenAt: 1762646400_000, device: 'sentryusb', state: 'idle',
       archive: { result: 'ok', startedAt: 1762646000_000, finishedAt: 1762646390_000, filesArchived: 120, filesNotArchived: 0,

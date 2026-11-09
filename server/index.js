@@ -409,7 +409,9 @@ async function main() {
   arrivalRef = createArrivalChecksums({
     dir: path.join(DATA, 'arrival-checksums'), vehicles, inventory, log: logger.scope('sentry-usb'),
     record: (request) => originalChecksums.record(request),
-    holds: (abs) => sentryUsb.holds(abs), busyPaths, idle: () => !speedIndexBusy()
+    holds: (abs) => sentryUsb.holds(abs), busyPaths, idle: () => !speedIndexBusy(),
+    // "Record checksums for older clips" (on unless an admin turned it off for the car): every clip, any age
+    olderOf: (vid) => (db.get('sentry-usb-record', {}) || {})[vid]?.older !== false
   });
   arrivalRef.start();
   // Server alerts from before a restart: the new run raises them again if
@@ -1382,6 +1384,7 @@ async function main() {
     archiveGapRef?.forget(params.id);
     sentryUsb.forget(params.id);
     arrivalRef?.forget(params.id);
+    { const rec = { ...(db.get('sentry-usb-record', {}) || {}) }; if (rec[params.id]) { delete rec[params.id]; db.set('sentry-usb-record', rec); } }
     // and from every node's Vehicles first list
     nodes.forgetCar(params.id);
     audit.info(`Vehicle "${v.name}" (${v.id}) removed (its footage is untouched): ${by(req, user)}`);
@@ -1885,19 +1888,23 @@ async function main() {
   });
   sentryUsb.start();
   // Sentry USB's last archive and checksum results, or what it is copying now
-  // (record: the checksums Manager records for it, arrivalChecksums.js; canBackfill: this account may ask for older days)
+  // (record: the checksums Manager records for it, arrivalChecksums.js; canBackfill: this account may turn the older clips on or off)
   const sentryUsbView = (v, user) => ({ ...sentryUsb.api(v.id), record: { ...arrivalRef.view(v.id), canBackfill: accounts.roleOf(user) === 'admin' } });
   r.add('GET', '/api/vehicles/:id/sentry-usb', async (req, res, { params, user }) => {
     const v = vehicleOr404(params.id);
     if (!sentryUsb.known(v.id)) await sentryUsb.refresh(v.id).catch(() => null);
     return sentryUsbView(v, user);
   });
-  // "Record checksums for clips from the last N days" (admin: a POST a watch-only account may not make)
+  // "Record checksums for older clips" on or off for the car: { older: true | false }
+  // (admin: a POST a watch-only account may not make)
   r.add('POST', '/api/vehicles/:id/sentry-usb/record', async (req, res, { params, body, user }) => {
     const v = vehicleOr404(params.id);
-    const days = Number(body?.days);
-    arrivalRef.backfill(v.id, days);
-    audit.info(`Checksum record of "${v.name}": clips from the last ${Math.floor(days)} days asked for: ${by(req, user)}`);
+    if (typeof body?.older !== 'boolean') throw Object.assign(new Error('Send { "older": true } or { "older": false }: every clip is recorded, newest first, unless older clips are turned off.'), { status: 400 });
+    const rec = { ...(db.get('sentry-usb-record', {}) || {}) };
+    rec[v.id] = { ...(rec[v.id] || {}), older: body.older };
+    db.set('sentry-usb-record', rec);
+    arrivalRef.kick();
+    audit.info(`Checksum record of "${v.name}": older clips ${body.older ? 'on' : 'off'}: ${by(req, user)}`);
     return sentryUsbView(v, user);
   });
   r.add('GET', '/api/vehicles/:id/archive-gaps', async (req, res, { params }) => {

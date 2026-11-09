@@ -34,8 +34,11 @@ While Sentry USB is sending, the line refreshes every minute.
 **Checksums recorded** in the details says how many clips Sentry Six Manager
 wrote a checksum line for today, when the last one was, and how many are
 waiting (for example `12 clips today · last at 3:05 PM · 4 waiting`; see
-"Every arrived clip gets a checksum line" below). An admin also sees **Record
-checksums for clips from the last N days** there.
+"Every arrived clip gets a checksum line" below). While the older clips on the
+share are still being read the first time it says how far that is instead,
+for example `Recording checksums for older clips: 12,400 of 35,480 · about 2 h
+left`, and the usual line again once they are done. An admin also sees the
+**Record checksums for older clips** setting there (on by default).
 
 A day whose clips were still being sent when the car drove off gets a grey-blue
 **Waiting for Sentry USB** tag instead of **Partly archived?**. Nothing is
@@ -109,13 +112,19 @@ or was skipped), not only before conversions:
   and sends the clip again. The new upload is a new file and gets a new line.
 - Only for shares whose root (the folder holding `RecentClips/`) has a
   `.sentryusb/` folder. Nothing is written on any other share.
-- Which clips: Tesla clips (`YYYY-MM-DD_HH-MM-SS-<camera>.mp4`) in
+- Which clips: **every** Tesla clip (`YYYY-MM-DD_HH-MM-SS-<camera>.mp4`) in
   `RecentClips/`, `SentryClips/`, `SavedClips/` and `TeslaTrackMode/` found by
-  the inventory scan, whose own time, modification time or arrival on the share
-  (birth time, else change time) is within the last 7 days. The rest of the
-  archive is not read, unless an admin asks for it: **Record checksums for
-  clips from the last N days** in the Sentry USB details (1 to 365 days, once;
-  `POST /api/vehicles/:id/sentry-usb/record` with `{ "days": N }`).
+  the inventory scan, however old. Turning **Record checksums for older clips**
+  off in the Sentry USB details (admins; per car;
+  `POST /api/vehicles/:id/sentry-usb/record` with `{ "older": false }`) limits
+  it to clips whose own time, modification time or arrival on the share (birth
+  time, else change time) is within the last 7 days, as before.
+- Order: newest first, and fresh arrivals never wait behind the old archive.
+  Each pass first takes the clips of the last 7 days, for every car (those that
+  arrived in the last 48 hours first, then by the clip's own time, newest
+  first), then the older ones (the backlog), newest first by the clip's own
+  time. New clips found by a scan while the backlog is being read end that pass
+  after the file in hand, and the next pass starts with them.
 
 Skipped, and why:
 
@@ -136,13 +145,31 @@ dropped; the new file is hashed on the next pass.
 **Cost.** One file at a time across all cars, read in 1 MiB pieces at most
 64 MiB/s, paused while a conversion or the benchmark runs, at most 300 clips a
 pass (the next pass follows half a minute later while more are waiting). A pass
-runs after every inventory scan and every 10 minutes. SHA-256 takes about one
-CPU-second per GiB, so the limit is roughly 6% of one core while it reads;
+runs after every inventory scan and every 10 minutes. Measured: SHA-256 with
+the reads takes about 1.1 CPU-seconds per GiB (some 900 MiB/s unlimited on one
+core), so at the 64 MiB/s limit it is roughly 8% of one core while it reads;
 reading is from the NAS's own disk (over the container's mount), never over the
-car's Wi-Fi. A day of driving (some tens of GB) takes several minutes. What was
-recorded is kept in `<data>/arrival-checksums/<car>.json` (path, size,
-modification time, inode, when), and entries go when the clip is gone or after
-45 days. The record's own lines are kept 45 days.
+car's Wi-Fi. A day of driving (some tens of GB) takes several minutes. The
+whole archive is read once, the first time: 550 GB (about 35,000 clips) is
+about 2.3 hours of reading at the limit, some 3.3 hours with the half-minute
+pauses between passes, longer while conversions run (it waits for them). After
+that only new clips are read.
+
+What was recorded is kept in `<data>/arrival-checksums/<car>.json` and
+`<car>.log` (path, size, modification time, inode, when; a compact snapshot by
+folder plus a journal of the changes, appended in batches and folded into the
+snapshot now and then, not rewritten per clip). An entry stays as long as its
+clip is on the share unchanged, however old, so a clip is never read twice;
+entries go only when the clip is gone (or replaced: a new file is hashed
+again).
+
+**Pruning.** The record's own lines are kept at least 45 days by when they were
+written and older ones may be pruned (see "Converting clips in place"),
+whatever the clip's date. That is enough: the Pi only needs a clip's line
+within its first day or so after the upload (it waits up to 24 hours for it,
+then checks the clip itself), and a clip whose line was pruned is not hashed
+again (its entry above stays). So an old clip recorded in the backlog keeps
+its line at least 45 days after it was written, then only the entry.
 
 ## The status file
 
@@ -163,8 +190,15 @@ Manager reads it to:
 
 The server gives the file, read and in milliseconds, at
 `GET /api/vehicles/:id/sentry-usb` (`{ "present": false }` when there is none),
-with `record`: `{ enabled, today, lastAt, pending, lines, windowDays, backfill,
-canBackfill }` (the checksum lines written for arrived clips, above).
+with `record`: `{ enabled, today, lastAt, pending, lines, windowDays, older,
+backlog, canBackfill }` (the checksum lines written for arrived clips, above).
+`older` is the **Record checksums for older clips** setting; `backlog` is
+`null` while it is off (or before the first pass), else the clips older than
+the 7 days: `{ total, done, left, failed, bytesLeft, etaMinutes }` (`done` of
+`total` looked at, `bytesLeft` still to read, `etaMinutes` an estimate at the
+measured speed with the pauses between passes). `pending` counts the clips of
+the last 7 days still waiting. `canBackfill`: this account may change the
+setting (admins).
 
 ## Checking that it all works
 

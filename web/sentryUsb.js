@@ -5,7 +5,7 @@
 //
 //   sentryUsbView(status, { timeZone, h24 })  -> null (nothing to show) or
 //     { tone: 'ok'|'busy'|'wait'|'bad'|'stale', text, line, details: [[label, value]], transferring,
-//       record: null | { text, backfill: null | { days, done, total, running }, canBackfill } }
+//       record: null | { text, older, backlog: null | { done, total, etaMinutes }, canBackfill } }
 //     (record: the checksums Sentry Manager records for the Pi, status.record)
 //   sentryUsbHtml(view, { open, tagClass })  -> '<details class="usb-status …">…' or ''
 //   mountSentryUsb(el, vehicle, { tagClass, h24: () => bool })  -> { refresh(), destroy() }
@@ -166,30 +166,47 @@ export function sentryUsbView(s, { timeZone, now = Date.now(), locale, h24 = fal
   return { tone, text, line: `Sentry USB · ${text}`, details, transferring: s.state === 'transferring' && !s.stale, record };
 }
 
+// "about 2 h left"
+function eta(minutes) {
+  const m = Math.max(1, Math.ceil(num(minutes)));
+  if (m < 60) return `about ${m} min left`;
+  const h = Math.round(m / 60);
+  if (h < 48) return `about ${h} h left`;
+  return `about ${Math.round(h / 24)} days left`;
+}
+
 // "12 clips today · last at 3:05 PM · 4 waiting": the clips whose SHA-256
 // Sentry Manager wrote to the share's checksum record, so the Pi verifies them
-// without reading them back
+// without reading them back; while the older clips are still being read
+// (every clip on the share gets a line, newest first):
+// "Recording checksums for older clips: 12,400 of 35,480 · about 2 h left"
 function recordView(r, when) {
   if (!r || r.enabled !== true) return null;
-  const parts = [`${plural(r.today, 'clip')} today`];
-  if (fin(r.lastAt)) parts.push(`last at ${when(r.lastAt)}`);
-  else parts.push('none yet');
-  if (num(r.pending)) parts.push(`${num(r.pending).toLocaleString('en-US')} waiting`);
-  const b = r.backfill && typeof r.backfill === 'object' ? r.backfill : null;
-  const backfill = b ? { days: num(b.days), done: num(b.done), total: b.total == null ? null : num(b.total), running: !fin(b.finishedAt) } : null;
-  if (backfill) parts.push(backfill.running ? `last ${plural(backfill.days, 'day')}: ${backfill.total == null ? 'starting' : `${backfill.done.toLocaleString('en-US')} of ${backfill.total.toLocaleString('en-US')} looked at`}` : `last ${plural(backfill.days, 'day')} done`);
-  return { text: parts.join(' · '), backfill, canBackfill: r.canBackfill === true };
+  const older = r.older !== false;
+  const b = older && r.backlog && typeof r.backlog === 'object' ? r.backlog : null;
+  const backlog = b && num(b.total) > num(b.done) ? { done: num(b.done), total: num(b.total), etaMinutes: num(b.etaMinutes) } : null;
+  let text;
+  if (backlog) {
+    text = `Recording checksums for older clips: ${backlog.done.toLocaleString('en-US')} of ${backlog.total.toLocaleString('en-US')} · ${eta(backlog.etaMinutes)}`;
+  } else {
+    const parts = [`${plural(r.today, 'clip')} today`];
+    if (fin(r.lastAt)) parts.push(`last at ${when(r.lastAt)}`);
+    else parts.push('none yet');
+    if (num(r.pending)) parts.push(`${num(r.pending).toLocaleString('en-US')} waiting`);
+    text = parts.join(' · ');
+  }
+  return { text, older, backlog, windowDays: num(r.windowDays) || 7, canBackfill: r.canBackfill === true };
 }
 
 /** The markup: a details element whose summary is the line (tag + text) and whose body lists the details. */
-export function sentryUsbHtml(view, { open = false, tagClass = () => '', days = 30, note = '' } = {}) {
+export function sentryUsbHtml(view, { open = false, tagClass = () => '', note = '' } = {}) {
   if (!view) return '';
   return `<details class="usb-status usb-${view.tone}" data-usb${open ? ' open' : ''}>
     <summary><span class="usb-tag ${esc(tagClass(view.tone))}">Sentry USB</span><span class="usb-text">${esc(view.text)}</span></summary>
     <dl class="usb-details">${view.details.map(([k, v]) => `<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`).join('')}</dl>
     ${view.record?.canBackfill ? `<form class="usb-backfill" data-usb-backfill>
-      <label>Record checksums for clips from the last <input type="number" name="days" min="1" max="365" value="${esc(days)}" inputmode="numeric" aria-label="Days"> days</label>
-      <button type="submit"${view.record.backfill?.running ? ' disabled' : ''}>Record</button>
+      <label><input type="checkbox" name="older"${view.record.older ? ' checked' : ''}> Record checksums for older clips</label>
+      <span class="usb-backfill-hint">${view.record.older ? 'every clip on the share, newest first' : `only clips from the last ${plural(view.record.windowDays, 'day')}`}</span>
       <span class="usb-backfill-note" role="status" aria-live="polite">${esc(note)}</span>
     </form>` : ''}
   </details>`;
@@ -211,10 +228,9 @@ const CSS = `
 :where(.usb-status) .usb-details dt{font-size:11.5px;opacity:.65;letter-spacing:.03em}
 :where(.usb-status) .usb-details dd{margin:0;overflow-wrap:anywhere}
 :where(.usb-status) .usb-backfill{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin:0;padding:0 12px 12px;font-size:12.5px}
-:where(.usb-status) .usb-backfill input{width:4.5em;font:inherit;padding:2px 4px;margin:0 4px;box-sizing:border-box;color:inherit;background:transparent;border:1px solid rgba(127,127,127,.45);border-radius:6px}
-:where(.usb-status) .usb-backfill button{font:inherit;padding:3px 10px;border-radius:6px;border:1px solid rgba(127,127,127,.45);background:transparent;color:inherit;cursor:pointer}
-:where(.usb-status) .usb-backfill button[disabled]{opacity:.5;cursor:default}
-:where(.usb-status) .usb-backfill-note{opacity:.75}
+:where(.usb-status) .usb-backfill label{display:inline-flex;align-items:center;gap:6px;cursor:pointer}
+:where(.usb-status) .usb-backfill input{margin:0;accent-color:currentColor;width:15px;height:15px}
+:where(.usb-status) .usb-backfill-hint,:where(.usb-status) .usb-backfill-note{opacity:.7}
 @media (max-width:600px){:where(.usb-status) .usb-details{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}}
 `;
 function addCss() {
@@ -245,24 +261,19 @@ export function mountSentryUsb(el, vehicle, { tagClass, h24 = () => false } = {}
   let timer = null;
   let dead = false;
   let last = null;
-  let days = 30; // the backfill form's days, kept across redraws
   let note = '';
   const id = vehicle?.id;
   const draw = (s) => {
     if (dead || !el.isConnected) return;
     if (selecting(el)) { clearTimeout(timer); timer = setTimeout(() => draw(s), 2000); return; }
-    // (nor while the days are being typed)
-    if (el.querySelector('[data-usb-backfill] input') === document.activeElement) { clearTimeout(timer); timer = setTimeout(() => draw(s), 2000); return; }
     const open = Boolean(el.querySelector('details[data-usb]')?.open);
-    const input = el.querySelector('[data-usb-backfill] input[name="days"]');
-    if (input && input.value) days = input.value;
     const view = sentryUsbView(s, { timeZone: vehicle?.timezone, h24: Boolean(h24()) });
-    const html = sentryUsbHtml(view, { open, tagClass, days, note });
+    const html = sentryUsbHtml(view, { open, tagClass, note });
     if (html !== last) { el.innerHTML = html; last = html; }
     el.hidden = !html;
     clearTimeout(timer);
-    // every 60 s while Sentry USB sends; every 10 s while older days are recorded
-    if (view?.record?.backfill?.running) timer = setTimeout(load, 10000);
+    // every 60 s while Sentry USB sends; every 10 s while older clips are recorded
+    if (view?.record?.backlog) timer = setTimeout(load, 10000);
     else if (view?.transferring) timer = setTimeout(load, POLL_MS);
   };
   const load = async () => {
@@ -277,22 +288,19 @@ export function mountSentryUsb(el, vehicle, { tagClass, h24 = () => false } = {}
     cache.set(id, { s, at: Date.now() });
     draw(s);
   };
-  // "Record checksums for clips from the last N days"
-  const submit = async (ev) => {
-    const form = ev.target.closest?.('[data-usb-backfill]');
-    if (!form || !id) return;
-    ev.preventDefault();
-    days = form.querySelector('input[name="days"]')?.value || days;
-    const button = form.querySelector('button');
-    if (button) button.disabled = true;
+  // "Record checksums for older clips" on or off (admin)
+  const change = async (ev) => {
+    const box = ev.target;
+    if (!box?.matches?.('[data-usb-backfill] input[name="older"]') || !id) return;
+    box.disabled = true;
     try {
       const r = await fetch(`/api/vehicles/${encodeURIComponent(id)}/sentry-usb/record`, {
         method: 'POST', credentials: 'same-origin',
         headers: { 'X-Requested-With': 'sentry-six-manager', 'Content-Type': 'application/json' },
-        body: JSON.stringify({ days: Number(days) })
+        body: JSON.stringify({ older: box.checked })
       });
       const body = await r.json().catch(() => ({}));
-      note = r.ok ? 'Started.' : body.error || `Could not start (${r.status}).`;
+      note = r.ok ? 'Saved.' : body.error || `Could not save (${r.status}).`;
       if (r.ok) { cache.set(id, { s: body, at: Date.now() }); last = null; draw(body); return; }
     } catch {
       note = 'Could not reach Sentry Manager.';
@@ -300,7 +308,9 @@ export function mountSentryUsb(el, vehicle, { tagClass, h24 = () => false } = {}
     last = null;
     draw(cache.get(id)?.s || { present: false });
   };
+  const submit = (ev) => { if (ev.target.closest?.('[data-usb-backfill]')) ev.preventDefault(); };
   el.addEventListener('submit', submit);
+  el.addEventListener('change', change);
   addCss();
   el.classList.add('usb-slot');
   const known = cache.get(id);
@@ -309,6 +319,6 @@ export function mountSentryUsb(el, vehicle, { tagClass, h24 = () => false } = {}
   load();
   return {
     refresh: load,
-    destroy() { dead = true; clearTimeout(timer); el.removeEventListener('submit', submit); }
+    destroy() { dead = true; clearTimeout(timer); el.removeEventListener('submit', submit); el.removeEventListener('change', change); }
   };
 }

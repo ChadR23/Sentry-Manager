@@ -261,36 +261,142 @@ test('arrival: a file replaced while it is being hashed is dropped, then hashed 
   assert.deepEqual(await s.lines(), [{ sha256: sha(replaced), rel }]);
 });
 
-test('arrival: older clips are not read by default; backfill(N days) records them once; bad days refused', async () => {
-  const s = await setup();
-  const old = NOW - 20 * DAY;
-  const n = `${stamp(old)}-front.mp4`;
-  const rel = `RecentClips/${n.slice(0, 10)}/${n}`;
-  const bytes = crypto.randomBytes(2000);
+/** A clip `ageMs` old (its name, modification and arrival time), in group/day folders. */
+async function oldClip(s, ageMs, { cam = 'front', group = 'RecentClips', bytes = crypto.randomBytes(1500) } = {}) {
+  const t = NOW - ageMs;
+  const n = `${stamp(t)}-${cam}.mp4`;
+  const rel = group === 'RecentClips' ? `RecentClips/${n.slice(0, 10)}/${n}` : `${group}/${stamp(t + 60_000)}/${n}`;
   const abs = await s.write(rel, bytes);
-  await fsp.utimes(abs, new Date(old), new Date(old));
-  const age = async () => { await s.inventory.scan(); for (const f of s.inventory.get().files.values()) { f.birthtimeMs = old; f.ctimeMs = old; } };
-  await age();
+  await fsp.utimes(abs, new Date(t), new Date(t));
+  return { rel, abs, bytes, t };
+}
+/** Scan, with every file's arrival (birth, change time) set to its modification time: the clips arrived long ago. */
+async function scanAged(s, fresh = new Set()) {
+  await s.inventory.scan();
+  for (const f of s.inventory.get().files.values()) {
+    if (fresh.has(f.rel)) continue;
+    f.birthtimeMs = f.mtimeMs;
+    f.ctimeMs = f.mtimeMs;
+  }
+}
+
+test('arrival: every clip gets a line by default, however old; the backlog shows its progress', async () => {
+  const s = await setup();
+  const clips = [];
+  for (const age of [3 * DAY, 20 * DAY, 200 * DAY, 3 * 365 * DAY]) clips.push(await oldClip(s, age));
+  clips.push(await oldClip(s, 400 * DAY, { group: 'SentryClips', cam: 'back' }));
+  await scanAged(s);
   await s.arrival.kick(); await s.arrival.settled();
-  assert.deepEqual(await s.lines(), [], 'outside the 7 days');
+  const got = await s.lines();
+  assert.deepEqual(Object.fromEntries(got.map((l) => [l.rel, l.sha256])), Object.fromEntries(clips.map((c) => [c.rel, sha(c.bytes)])), 'all ages, one line each');
+  const v = s.arrival.view('car1');
+  assert.equal(v.older, true);
+  assert.deepEqual(v.backlog, { total: 4, done: 4, left: 0, failed: 0, bytesLeft: 0, etaMinutes: 0 }, 'the 4 older than the 7-day window, all done');
+  assert.equal(v.lines, 5);
+});
+
+test('arrival: newest first, and what arrived lately always before the backlog', async () => {
+  const order = [];
+  const s = await setup();
+  // (the order lines are written in is the order clips were hashed)
+  const a = await oldClip(s, 300 * DAY); // oldest
+  const b = await oldClip(s, 30 * DAY);
+  const c = await oldClip(s, 90 * DAY);
+  const d = await oldClip(s, 2 * DAY); // in the window
+  const e = await oldClip(s, 500 * DAY); // an old clip that reached the share just now (the Pi caught up)
+  await scanAged(s, new Set([e.rel]));
+  s.inventory.get().files.get(e.rel).birthtimeMs = NOW - 600_000;
+  await s.arrival.kick(); await s.arrival.settled();
+  for (const l of await s.lines()) order.push(l.rel);
+  assert.deepEqual(order, [e.rel, d.rel, b.rel, c.rel, a.rel], 'fresh arrival, then the window, then the backlog newest first');
+
+  // a pass reading the backlog stops for new arrivals (a kick): the next pass takes them first
+  const t = await setup({ options: { rate: 2 * 1024 * 1024 } });
+  const old = [];
+  for (let i = 0; i < 4; i++) old.push(await oldClip(t, (30 + i) * DAY, { bytes: crypto.randomBytes(1024 * 1024) }));
+  await scanAged(t);
+  const p = t.arrival.kick();
+  for (let i = 0; i < 200 && (await t.lines()).length < 1; i++) await new Promise((r) => setTimeout(r, 10));
+  const fresh = await t.write(t.clipRel(name()), crypto.randomBytes(1000));
+  await scanAged(t, new Set([path.relative(t.root, fresh).split(path.sep).join('/')]));
+  t.arrival.kick();
+  await p; await t.arrival.settled();
+  const rels = (await t.lines()).map((l) => l.rel);
+  assert.equal(rels.length, 5);
+  const at = rels.indexOf(path.relative(t.root, fresh).split(path.sep).join('/'));
+  assert.ok(at >= 1 && at <= 2, `the new arrival came straight after the clip being read (at ${at} of ${JSON.stringify(rels)})`);
+  assert.deepEqual(rels.filter((r, i) => i !== at), old.map((o) => o.rel), 'the backlog newest first');
+});
+
+test('arrival: an unchanged clip keeps its entry past 45 days (never hashed again after its line is pruned); gone clips lose theirs', async () => {
+  let clock = null; // (the real clock, then 60 days on)
+  const s = await setup({ options: { now: () => clock ?? Date.now() } });
+  const a = await oldClip(s, 10 * DAY);
+  const b = await oldClip(s, 11 * DAY);
+  await scanAged(s);
+  await s.arrival.kick(); await s.arrival.settled();
+  assert.equal((await s.lines()).length, 2);
+  const bytes = s.arrival.stats().bytes;
+  // 60 days on: the record's lines may be pruned, the clips are the same
+  clock = Date.now() + 60 * DAY;
+  await fsp.writeFile(s.recordFile, '');
+  await s.arrival.kick(); await s.arrival.settled();
+  assert.equal(s.arrival.stats().bytes, bytes, 'nothing read again');
+  assert.deepEqual(await s.lines(), [], 'no new line');
+  assert.equal(s.arrival.view('car1').lines, 2, 'both entries kept');
+  // a new hasher on the same index (a restart) knows them too
+  const again = createArrivalChecksums({ dir: path.join(s.base, '..', `${path.basename(s.base)}-data`), vehicles: s.vehicles, inventory: s.inventory, now: () => clock, record: () => { throw new Error('no line expected'); }, settleMs: 0, rate: 0, codecOf: async () => 'h264' });
+  await again.kick(); await again.settled();
+  assert.equal(again.stats().bytes, 0);
+  // gone from the share: its entry goes (and stays gone after a restart)
+  await fsp.unlink(b.abs);
+  await scanAged(s);
+  await s.arrival.kick(); await s.arrival.settled();
+  assert.equal(s.arrival.view('car1').lines, 1);
+  await s.arrival.stop();
+  const third = createArrivalChecksums({ dir: path.join(s.base, '..', `${path.basename(s.base)}-data`), vehicles: s.vehicles, inventory: s.inventory, now: () => clock, record: async () => {}, settleMs: 0, rate: 0, codecOf: async () => 'h264' });
+  assert.equal(third.view('car1').lines, 1);
+  assert.ok(a.rel);
+});
+
+test('arrival: "older clips" off: only the 7-day window, as before; on again: the rest follows', async () => {
+  let older = false;
+  const s = await setup({ options: { olderOf: () => older } });
+  const recent = await oldClip(s, 3 * DAY);
+  const old = await oldClip(s, 20 * DAY);
+  await scanAged(s);
+  await s.arrival.kick(); await s.arrival.settled();
+  assert.deepEqual((await s.lines()).map((l) => l.rel), [recent.rel], 'outside the 7 days: not read');
+  let v = s.arrival.view('car1');
+  assert.equal(v.older, false);
+  assert.equal(v.backlog, null);
   // one that arrived only now (birth time), though recorded 20 days ago: in
-  assert.throws(() => s.arrival.backfill('car1', 0), (e) => e.status === 400);
-  assert.throws(() => s.arrival.backfill('car1', 9999), (e) => e.status === 400);
-  const v = s.arrival.backfill('car1', 30);
-  assert.equal(v.backfill.days, 30);
-  await s.arrival.settled();
-  assert.deepEqual(await s.lines(), [{ sha256: sha(bytes), rel }]);
-  const after = s.arrival.view('car1').backfill;
-  assert.ok(after.finishedAt);
-  assert.equal(after.done, 1);
-  assert.equal(after.total, 1);
-  const n2 = `${stamp(old - 60_000)}-front.mp4`;
-  const rel2 = `RecentClips/${n2.slice(0, 10)}/${n2}`;
-  const abs2 = await s.write(rel2, bytes);
-  await fsp.utimes(abs2, new Date(old), new Date(old));
-  await age();
+  const late = await oldClip(s, 25 * DAY);
+  await scanAged(s, new Set([late.rel]));
+  s.inventory.get().files.get(late.rel).birthtimeMs = NOW - 3600_000;
   await s.arrival.kick(); await s.arrival.settled();
-  assert.equal((await s.lines()).length, 1, 'the backfill was once; the window is back to 7 days');
+  assert.deepEqual((await s.lines()).map((l) => l.rel), [recent.rel, late.rel]);
+  older = true;
+  await scanAged(s);
+  await s.arrival.kick(); await s.arrival.settled();
+  assert.deepEqual((await s.lines()).map((l) => l.rel), [recent.rel, late.rel, old.rel]);
+  v = s.arrival.view('car1');
+  assert.equal(v.backlog.done, v.backlog.total);
+});
+
+test('arrival: backlog progress while it runs: total, done, bytes left and an estimate', async () => {
+  const s = await setup({ options: { perCycle: 2, rate: 0, nextCycleMs: 60_000 } });
+  for (let i = 0; i < 5; i++) await oldClip(s, (30 + i) * DAY, { bytes: crypto.randomBytes(1000 + i) });
+  await scanAged(s);
+  await s.arrival.kick();
+  const v = s.arrival.view('car1');
+  assert.equal(v.backlog.total, 5);
+  assert.equal(v.backlog.done, 2, 'the cap: 2 a pass');
+  assert.equal(v.backlog.left, 3);
+  assert.equal(v.backlog.bytesLeft, 1002 + 1003 + 1004, 'the oldest three are left (newest first)');
+  assert.ok(v.backlog.etaMinutes >= 1, 'at least a minute (the next passes)');
+  assert.equal(v.pending, 0, 'the backlog is not "waiting"');
+  await s.arrival.stop();
 });
 
 test('arrival: a clip that arrived recently (birth time) is recorded even when its own time is old', async () => {
@@ -336,6 +442,42 @@ test('arrival: a pass stops at its cap and the next one carries on; the rate lim
   await s.arrival.stop();
 });
 
+test('arrival: the index is compact and written in batches (a journal), not rewritten per clip; a v1 index is read', async () => {
+  const s = await setup({ options: { saveEvery: 10, compactMin: 25 } });
+  const dataDir = path.join(s.base, '..', `${path.basename(s.base)}-data`);
+  for (let i = 0; i < 12; i++) await s.write(s.clipRel(name(i * 60_000)), crypto.randomBytes(200));
+  await s.run();
+  const snap = JSON.parse(await fsp.readFile(path.join(dataDir, 'car1.json'), 'utf8'));
+  assert.equal(snap.v, 2);
+  assert.equal(Object.keys(snap.dirs).length, 1, 'by folder');
+  assert.equal(Object.keys(Object.values(snap.dirs)[0]).length, 10, 'the first batch (10) in the snapshot');
+  const journal = (await fsp.readFile(path.join(dataDir, 'car1.log'), 'utf8')).trim().split('\n');
+  assert.equal(journal.length, 2, 'the rest appended');
+  // more clips: appended while the journal is short, compacted once it is long
+  for (let i = 12; i < 40; i++) await s.write(s.clipRel(name(i * 60_000)), crypto.randomBytes(200));
+  await s.run();
+  const files = await fsp.readdir(dataDir);
+  const snap2 = JSON.parse(await fsp.readFile(path.join(dataDir, 'car1.json'), 'utf8'));
+  const inSnap = Object.values(snap2.dirs).reduce((n, d) => n + Object.keys(d).length, 0);
+  const inLog = files.includes('car1.log') ? (await fsp.readFile(path.join(dataDir, 'car1.log'), 'utf8')).trim().split('\n').filter(Boolean).length : 0;
+  assert.ok(inSnap >= 30 && inSnap + inLog >= 40, `${inSnap} + ${inLog}`);
+  // a torn journal line is skipped; a v1 index is read and rewritten as v2
+  await fsp.appendFile(path.join(dataDir, 'car1.log'), '["RecentClips/x.mp4",1,');
+  const v1dir = path.join(s.base, '..', `${path.basename(s.base)}-v1`);
+  await fsp.mkdir(v1dir);
+  const one = [...s.inventory.get().files.values()].find((f) => f.kind === 'clip');
+  const st = await fsp.stat(path.join(s.base, one.rel));
+  await fsp.writeFile(path.join(v1dir, 'car1.json'), JSON.stringify({ v: 1, files: { [one.rel]: [st.size, st.mtimeMs, Number(st.ino), NOW, 'h'] } }));
+  const reread = createArrivalChecksums({ dir: dataDir, vehicles: s.vehicles, inventory: s.inventory, record: async () => {}, settleMs: 0, rate: 0, codecOf: async () => 'h264' });
+  assert.equal(reread.view('car1').lines, 40);
+  let wrote = 0;
+  const fromV1 = createArrivalChecksums({ dir: v1dir, vehicles: s.vehicles, inventory: s.inventory, record: async () => { wrote++; }, settleMs: 0, rate: 0, codecOf: async () => 'h264' });
+  assert.equal(fromV1.view('car1').lines, 1);
+  await fromV1.kick(); await fromV1.settled();
+  assert.equal(wrote, 39, 'the clip the v1 index knew is not read again');
+  assert.equal(JSON.parse(await fsp.readFile(path.join(v1dir, 'car1.json'), 'utf8')).v, 2);
+});
+
 test('arrival: index entries of gone clips are dropped; the API route is a POST a watch-only account may not make', async () => {
   const s = await setup();
   const rel = s.clipRel(name());
@@ -353,4 +495,5 @@ test('arrival: index entries of gone clips are dropped; the API route is a POST 
   assert.match(src, /canBackfill: accounts\.roleOf\(user\) === 'admin'/);
   assert.match(src, /onClipConverted: \(outputPath\) => \{ arrivalRef\?\.converted\(outputPath\)/);
   assert.match(src, /idle: \(\) => !speedIndexBusy\(\)/);
+  assert.match(src, /olderOf: \(vid\) => \(db\.get\('sentry-usb-record', \{\}\) \|\| \{\}\)\[vid\]\?\.older !== false/, 'older clips on unless turned off');
 });
