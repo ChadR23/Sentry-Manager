@@ -128,6 +128,15 @@ function isReplacementArtifact(name) {
   return /^(?:TEMP-(?:H265|AV1)-|BACKUP-)/i.test(name);
 }
 
+// Dot-named files and folders are never footage: an upload still in
+// progress (Sentry USB's <clip folder>/.sentryusb-partial/<clip>.mp4, which
+// is moved to its real name once complete), its status folder (.sentryusb/),
+// Sentry Six Manager's own (.sentrymanager/, .sentry-recycle-bin/) or a
+// NAS's metadata.
+function isHiddenEntry(name) {
+  return typeof name === 'string' && name.startsWith('.');
+}
+
 function toRelativePath(parts) {
   return parts.join('/');
 }
@@ -272,6 +281,7 @@ async function* scanTeslaFootage(config = {}, adapterOverrides = {}) {
       for (const entry of entries) {
       if (adapters.signal?.aborted) throw Object.assign(new Error('cancelled'), { code: 'CANCELLED' });
       if (entry.isFile() && isReplacementArtifact(entry.name)) continue;
+      if (isHiddenEntry(entry.name)) continue;
       const childPath = pathApi.join(directoryPath, entry.name);
       const childRelativeParts = relativeParts.concat(entry.name);
 
@@ -411,6 +421,7 @@ async function* scanTeslaFootage(config = {}, adapterOverrides = {}) {
   // into, or an item to yield.
   function prepare(entry, directoryPath, relativeParts, group, groupRelativeParts) {
     if (entry.isFile() && isReplacementArtifact(entry.name)) return null;
+    if (isHiddenEntry(entry.name)) return null;
     const childPath = pathApi.join(directoryPath, entry.name);
     const childRelativeParts = relativeParts.concat(entry.name);
     if (typeof entry.isSymbolicLink === 'function' && entry.isSymbolicLink()) return null;

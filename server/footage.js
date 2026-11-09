@@ -25,6 +25,19 @@ const SKIP_DIRS = new Set(['#recycle', '#snapshot', '$recycle.bin', 'system volu
 // never list, trash or delete them from the manager.
 const CONVERTER_ARTIFACT_RE = /^(TEMP-H265-|TEMP-AV1-|BACKUP-)|\.sentry-six-[^/]*\.(partial|candidate|backup)$|^\.sentry-owned-remove-/;
 
+// What Sentry USB leaves on the share besides clips (docs/sentry-usb.md): a
+// copy that failed its SHA-256 check is renamed aside to
+// <clip>.mp4.mismatch-<unix time> and the clip is uploaded again under its
+// real name. It belongs to no recording: never listed, counted, converted,
+// checked, exported or moved to the Recycle Bin. (Its .sentryusb/,
+// .sentryusb-partial/ and .sentryusbtmp/ folders are dot-named, skipped
+// like every dot-named folder.)
+const SENTRY_USB_ARTIFACT_RE = /\.mp4\.mismatch-[^/\\]*$/i;
+
+function isSentryUsbArtifact(name) {
+  return SENTRY_USB_ARTIFACT_RE.test(String(name || ''));
+}
+
 function isValidDay(day) {
   if (!DAY_RE.test(day)) return false;
   const [y, m, d] = day.split('-').map(Number);
@@ -61,8 +74,10 @@ function localDay(mtimeMs) {
 function classify(relPath) {
   const segments = relPath.split(/[\\/]+/).filter(Boolean);
   const name = segments[segments.length - 1];
-  if (!name || name.startsWith('.')) return null;
+  if (!name || name.startsWith('.') || isSentryUsbArtifact(name)) return null;
   const dirs = segments.slice(0, -1);
+  // (inside a dot-named folder: an upload in progress, metadata)
+  if (dirs.some((d) => d.startsWith('.'))) return null;
   const type = clipTypeFor(dirs);
   const parent = dirs[dirs.length - 1] || '';
   const eventMatch = parent.match(EVENT_DIR_RE);
@@ -108,6 +123,7 @@ module.exports = {
   safeJoin,
   shouldSkipDir,
   isConverterArtifact,
+  isSentryUsbArtifact,
   EVENT_DIR_RE,
   TYPE_BY_FOLDER
 };
