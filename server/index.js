@@ -88,6 +88,8 @@ const { createCanSync } = require('./canSync');
 const { createCanPrune } = require('./canPrune');
 const { createCanFootage } = require('./canFootage');
 const { createArchiveGap } = require('./archiveGap');
+const { createSentryUsbStatus, stampSec: clipStampSec } = require('./sentryUsb');
+const { createOriginalChecksums } = require('./originalChecksums');
 const { createCanSearch, createSearchQueue, footageAt, clipStamps, localTime, parseWhen } = require('./canSearch');
 
 /** A wall-clock time in an IANA time zone (as a TeslaCam clip is named) in UTC milliseconds. */
@@ -328,7 +330,23 @@ async function main() {
   };
   let canPort = null; // opens or closes the CAN Bridge's own port, one call at a time (set where the servers start)
   const canUpload = (req, res, p) => (canUploadRef ? canUploadRef(req, res, p) : sendJson(res, 404, { error: 'Not found' }));
-  const inventory = new Inventory({ vehicles, db, log: logger.scope('inventory'), onChange: () => announce('inventory'), onScanned: (vid) => { speedIndex?.kick(); scrubPrepare?.kick(); integrityRef?.resume(vid); archiveGapRef?.check(vid); } });
+  // Sentry USB's status file on each car's share (sentryUsb.js): read on every
+  // scan, and every minute while it says a transfer runs
+  const sentryUsb = createSentryUsbStatus({
+    vehicles, log: logger.scope('sentry-usb'),
+    onChange: (vid) => { archiveGapRef?.check(vid); announce('inventory'); }
+  });
+  const inventory = new Inventory({ vehicles, db, log: logger.scope('inventory'), onChange: () => announce('inventory'), onScanned: (vid) => {
+    speedIndex?.kick(); scrubPrepare?.kick(); integrityRef?.resume(vid);
+    // (the gap check reads the status the scan just found)
+    sentryUsb.refresh(vid).catch(() => null).finally(() => archiveGapRef?.check(vid));
+  } });
+  // the SHA-256 of every original the converter replaces in place, for
+  // Sentry USB (originalChecksums.js), written inside a vehicle's folder only
+  const originalChecksums = createOriginalChecksums({
+    log: logger.scope('converter'),
+    allowedRoot: (dir) => Boolean(vehicles.vehicleForPath(dir))
+  });
   const thumbs = new Thumbnails({ dir: path.join(DATA, 'thumbnails'), ffmpegPath: FFMPEG });
   const telemetry = new Telemetry({ srcRoot: SRC, cacheDir: path.join(DATA, 'telemetry'), log: logger.scope('telemetry') });
   // every front clip's speed, a value a second, indexed in the background for the Viewer's speed graph
@@ -458,6 +476,18 @@ async function main() {
   };
   await uiPacks.tidy().catch((err) => logger.scope('ui').warn(`UI packs folder: ${err.message}`));
   const host = createConverterHost({
+    // in place: the original's SHA-256 goes into the share's checksum record
+    // (fsynced) before the original is touched
+    beforeReplaceOriginal: async (request) => {
+      try {
+        await originalChecksums.record(request);
+      } catch (err) {
+        logger.scope('converter').error(`Could not record the original's checksum for Sentry USB, so it was kept: ${path.basename(String(request.source || ''))}: ${err.code || err.message}`);
+        throw err;
+      }
+    },
+    // clips Sentry USB is still copying to the share wait for a later run
+    holdDiscovered: (config, discovered) => sentryUsb.holds(discovered.sourcePath),
     remoteNodes: {
       list: () => nodes.list(),
       encode: (request) => nodes.encode(request),
@@ -1336,6 +1366,7 @@ async function main() {
     await vehicles.remove(params.id);
     savings.forget(params.id);
     archiveGapRef?.forget(params.id);
+    sentryUsb.forget(params.id);
     // and from every node's Vehicles first list
     nodes.forgetCar(params.id);
     audit.info(`Vehicle "${v.name}" (${v.id}) removed (its footage is untouched): ${by(req, user)}`);
@@ -1392,6 +1423,8 @@ async function main() {
       for (const rec of filtered(params.id, query)) { const d = want.get(rec.day); if (d && hasCan(rec)) d.canRecordings++; }
     }
     return {
+      // Sentry USB's status file on this share (as GET /api/vehicles/:id/sentry-usb)
+      sentryUsb: sentryUsb.api(params.id),
       total: days.length, recordings: days.reduce((n, d) => n + d.recordings, 0), offset, limit,
       scannedAt: inv?.scannedAt || null, scanning: Boolean(inv?.scanning), error: inv?.lastError || null,
       dates: [...new Set((inv?.recordings || []).map((x) => x.day))].sort().reverse(),
@@ -1815,7 +1848,22 @@ async function main() {
     return keys.filter((k) => map[k] === vid || (!map[k] && single));
   }
   // archive gaps (archiveGap.js): driving per CAN Bridge, drives cut off, minutes missing cameras
-  archiveGapRef = createArchiveGap({ inventory, vehicles, notes, db, speedIndex, canKeysFor, canKeyMapped: (k) => Boolean(canMap()[k]), canDir: path.join(DATA, 'can-index'), log: logger.scope('archive') });
+  archiveGapRef = createArchiveGap({
+    inventory, vehicles, notes, db, speedIndex, canKeysFor, canKeyMapped: (k) => Boolean(canMap()[k]), canDir: path.join(DATA, 'can-index'), log: logger.scope('archive'),
+    // the range Sentry USB is still copying: not missing (sentryUsb.js)
+    sentryUsbFor: (vid) => {
+      const n = sentryUsb.now(vid);
+      if (!n.transferring || !n.range) return null;
+      return { transferring: true, overdue: n.overdue, firstS: clipStampSec(n.range.first), lastS: clipStampSec(n.range.last) };
+    }
+  });
+  sentryUsb.start();
+  // Sentry USB's last archive and checksum results, or what it is copying now
+  r.add('GET', '/api/vehicles/:id/sentry-usb', async (req, res, { params }) => {
+    const v = vehicleOr404(params.id);
+    if (!sentryUsb.known(v.id)) await sentryUsb.refresh(v.id).catch(() => null);
+    return sentryUsb.api(v.id);
+  });
   r.add('GET', '/api/vehicles/:id/archive-gaps', async (req, res, { params }) => {
     const v = vehicleOr404(params.id);
     const out = await archiveGapRef.results(v.id);

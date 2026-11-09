@@ -176,9 +176,14 @@ const runList = (minutes) => runsOf(minutes).map(([a, b]) => ({ from: keyOfSec(a
  *   canMinutes   wall-clock seconds of every minute CAN Bridge has logged (the car awake), to see the zones match
  *   receivedMs   when the share last received new footage of this car (from the scans), if known
  *   lastRecentS  the newest Recent clip ever seen on the share (stampSec), if known
+ *   sentryUsb    Sentry USB's status file (sentryUsb.js), when it says it is
+ *                transferring: { transferring, overdue, firstS, lastS } (stampSec of
+ *                the first and last clip still arriving). Minutes in that range
+ *                are still arriving, never missing; past its give-up time
+ *                (overdue) every minute from firstS on waits for Sentry USB.
  * { days: { day: finding }, stalled, signals }
  */
-function analyze({ files, nowMs, tz = 'UTC', encoded = new Set(), speeds = new Map(), canDriving = null, canSentry = [], canMinutes = null, receivedMs = null, lastRecentS = null, windowDays = WINDOW_DAYS }) {
+function analyze({ files, nowMs, tz = 'UTC', encoded = new Set(), speeds = new Map(), canDriving = null, canSentry = [], canMinutes = null, receivedMs = null, lastRecentS = null, windowDays = WINDOW_DAYS, sentryUsb = null }) {
   const now = wallSec(nowMs, tz);
   const offsets = new Map();
   const utc = (s) => utcOfWall(s, tz, offsets);
@@ -212,7 +217,12 @@ function analyze({ files, nowMs, tz = 'UTC', encoded = new Set(), speeds = new M
   }
   const catchingUp = received > 0 && nowMs - received < FILLING_MS;
   const days = {};
-  const dayOf = (d) => (days[d] ||= { day: d, missing: new Set(), can: [], sentry: [], cut: new Set(), cutoffs: [], partial: [], late: 0, maxLateMs: 0, lastArrival: 0, held: new Set() });
+  const dayOf = (d) => (days[d] ||= { day: d, missing: new Set(), can: [], sentry: [], cut: new Set(), cutoffs: [], partial: [], late: 0, maxLateMs: 0, lastArrival: 0, held: new Set(), piHeld: new Set() });
+  // Sentry USB is still copying this minute (its status file): not missing
+  const pi = sentryUsb && sentryUsb.transferring && Number.isFinite(sentryUsb.firstS) ? sentryUsb : null;
+  const piLast = pi ? (Number.isFinite(pi.lastS) ? pi.lastS : pi.firstS) : null;
+  const piHolds = (s) => Boolean(pi) && s >= pi.firstS - MIN && (pi.overdue === true || s <= piLast + MIN);
+  const holdPi = (s) => { if (s >= firstDaySec && now - s >= GRACE_S) dayOf(dayOfSec(s)).piHeld.add(s); };
   // the archive has got past a minute: footage the car recorded later is on the share
   const past = (s) => newestRecent !== null && newestRecent > s + MIN;
   // nothing later on the share: only after a day, and not while the share is still receiving
@@ -234,6 +244,7 @@ function analyze({ files, nowMs, tz = 'UTC', encoded = new Set(), speeds = new M
     const perDay = new Map();
     for (const m of [...what.keys()].sort((a, b) => a - b)) {
       if (!inWindow(m) || covered(starts, m + 30)) continue;
+      if (piHolds(m)) { holdPi(m); continue; }
       if (!due(m)) { hold(m); continue; }
       const day = dayOfSec(m);
       if (!perDay.has(day)) perDay.set(day, []);
@@ -291,6 +302,7 @@ function analyze({ files, nowMs, tz = 'UTC', encoded = new Set(), speeds = new M
       const gap = next === null ? null : utc(next) - endU;
       if (gap !== null && gap < GAP_S) continue;
       if (now - end < GRACE_S) continue;
+      if (piHolds(end)) { holdPi(end); continue; }
       if (next === null && !quiet(end)) { hold(end); continue; }
       let lost = 1; // at least the minute that should have followed
       if (gap !== null && gap <= 3 * HOUR) {
@@ -324,6 +336,8 @@ function analyze({ files, nowMs, tz = 'UTC', encoded = new Set(), speeds = new M
     for (let i = 0; i < list.length; i++) {
       const e = list[i];
       if (!inWindow(e.s) || now - e.s < GRACE_S) continue;
+      // (a minute Sentry USB is still copying is not partial yet)
+      if (piHolds(e.s)) continue;
       const prev = i > 0 && e.s - list[i - 1].s <= 90 ? list[i - 1] : null;
       const next = i + 1 < list.length && list[i + 1].s - e.s <= 90 ? list[i + 1] : null;
       if (!prev && !next) continue;
@@ -362,6 +376,12 @@ function analyze({ files, nowMs, tz = 'UTC', encoded = new Set(), speeds = new M
     d.lastArrival = Math.max(d.lastArrival, arrival);
   }
 
+  // the days of the range Sentry USB is copying (to its last clip; past its
+  // give-up time to now) are tagged as such, evidence or not
+  if (pi) {
+    const to = pi.overdue ? now : Math.min(now, piLast + MIN);
+    for (let s = Math.max(pi.firstS, firstDaySec); s <= to; s = (Math.floor(s / 86400) + 1) * 86400) dayOf(dayOfSec(s)).piRange = true;
+  }
   const out = {};
   for (const d of Object.values(days)) {
     const missingMinutes = d.missing.size;
@@ -369,13 +389,19 @@ function analyze({ files, nowMs, tz = 'UTC', encoded = new Set(), speeds = new M
     const late = d.late >= 4 && nowMs - d.lastArrival < FILLING_MS;
     // one partial minute alone is not enough (a camera can miss a minute)
     const partial = missingMinutes > 0 || partialMinutes >= 2;
-    if (!partial && !late && !d.held.size) continue;
+    const piDay = Boolean(pi) && (d.piHeld.size > 0 || d.piRange === true);
+    if (!partial && !late && !d.held.size && !piDay) continue;
     const finding = {
       day: d.day,
-      state: partial ? 'partial' : 'filling',
+      // waiting: Sentry USB's transfer is past its give-up time (nothing lost)
+      state: partial ? 'partial' : piDay && pi.overdue ? 'waiting' : 'filling',
       missingMinutes,
       partialMinutes,
       waitingMinutes: d.held.size,
+      // minutes Sentry USB says it is still copying: 'transferring', or
+      // 'waiting' once its transfer is past its give-up time
+      sentryUsb: piDay ? (pi.overdue ? 'waiting' : 'transferring') : null,
+      sentryUsbMinutes: d.piHeld.size,
       lateClips: late ? d.late : 0,
       maxLateHours: late ? Math.round(d.maxLateMs / 360000) / 10 : 0,
       // a minute the cut-off below already accounts for is not listed twice
@@ -401,10 +427,12 @@ function analyze({ files, nowMs, tz = 'UTC', encoded = new Set(), speeds = new M
     let had = 0;
     for (let i = 0; i < HABIT_DAYS; i++) if (dayset.has(dayOfSec(stampSec(`${lastDay}_12-00-00`) - i * 86400))) had++;
     if (quietMs >= 36 * 3600 * 1000 && had / HABIT_DAYS >= 0.6) stalled = { since: newest, hours: Math.round(quietMs / 3600000), usualDays: had, of: HABIT_DAYS };
+    // Sentry USB's transfer stopped part way: it is away, nothing is lost
+    if (stalled && pi?.overdue) stalled.waitingForSentryUsb = true;
   }
   return {
     days: out, stalled,
-    signals: { can: canDriving !== null && habit, speed: habit && speeds.size > 0, arrival: informative, recent: habit, catchingUp, receivedAt: received || null, tzShift },
+    signals: { can: canDriving !== null && habit, speed: habit && speeds.size > 0, arrival: informative, recent: habit, catchingUp, receivedAt: received || null, tzShift, sentryUsb: pi ? (pi.overdue ? 'waiting' : 'transferring') : null },
     newestRecent
   };
 }
@@ -433,13 +461,17 @@ function summarize(f, { receivedMs = 0, nowMs = Date.now() } = {}) {
     bits.push(`the share is still receiving footage${ago ? ` (the latest ${ago} min ago)` : ''}, and ${plural(f.waitingMinutes, 'minute')} the car recorded after its newest clip ${f.waitingMinutes === 1 ? 'is' : 'are'} not there yet`);
   }
   if (f.lateClips) bits.push(`clips are reaching the share up to ${f.maxLateHours} h after they were recorded`);
+  const piMin = f.sentryUsbMinutes ? `, so ${plural(f.sentryUsbMinutes, 'minute')} of this day ${f.sentryUsbMinutes === 1 ? 'is' : 'are'} not here yet` : '';
+  if (f.sentryUsb === 'waiting') bits.push(`Sentry USB's transfer stopped part way (the car most likely drove off or lost Wi-Fi)${piMin}. Nothing is lost: the clips stay on the Sentry USB and the rest arrives at its next archive`);
+  else if (f.sentryUsb === 'transferring') bits.push(`Sentry USB is copying this day's clips now${f.sentryUsbMinutes ? `; ${plural(f.sentryUsbMinutes, 'minute')} ${f.sentryUsbMinutes === 1 ? 'is' : 'are'} still on the way` : ''}`);
   let head;
-  if (f.state === 'filling') head = 'Still being copied: ';
+  if (f.state === 'waiting') head = 'Waiting for Sentry USB: ';
+  else if (f.state === 'filling') head = 'Still being copied: ';
   else if (f.missingMinutes) head = `About ${plural(f.missingMinutes, 'minute')} the car recorded ${f.missingMinutes === 1 ? 'is' : 'are'} not on the share: `;
   else head = 'Some footage looks only partly copied: ';
   const text = bits.join('; ');
   // (lower case after the colon, but not an acronym such as CAN)
-  const first = /^[A-Z][a-z]/.test(text) ? text.charAt(0).toLowerCase() : text.charAt(0);
+  const first = /^[A-Z][a-z]/.test(text) && !text.startsWith('Sentry USB') ? text.charAt(0).toLowerCase() : text.charAt(0);
   return `${head}${first}${text.slice(1)}.`;
 }
 
@@ -466,7 +498,7 @@ const scoreOf = (f) => f.missingMinutes + f.partialMinutes;
  *                     mapped to it explicitly (an unmapped key of the only car is used
  *                     once its CAN data has matched the car's footage)
  */
-function createArchiveGap({ inventory, vehicles, notes, db, speedIndex = null, canKeysFor = async () => [], canKeyMapped = () => true, canDir = null, log = null, now = () => Date.now(), soonMs = 30_000 }) {
+function createArchiveGap({ inventory, vehicles, notes, db, speedIndex = null, canKeysFor = async () => [], canKeyMapped = () => true, canDir = null, log = null, now = () => Date.now(), soonMs = 30_000, sentryUsbFor = () => null }) {
   const results = new Map(); // vid -> analysis + checkedAt
   const running = new Map(); // vid -> { p, next }
   const generation = new Map(); // vid -> bumped by forget()
@@ -653,7 +685,8 @@ function createArchiveGap({ inventory, vehicles, notes, db, speedIndex = null, c
     const speeds = await speedsOf(vid, nowMs, tz);
     const res = analyze({
       files: entry.files, nowMs, tz, encoded: encodedSet(vid), speeds,
-      canDriving: can?.used ? can.driving : null, canSentry: can?.sentry || [], canMinutes: can?.used ? can.minutes : null, receivedMs, lastRecentS: st.lastRecentS
+      canDriving: can?.used ? can.driving : null, canSentry: can?.sentry || [], canMinutes: can?.used ? can.minutes : null, receivedMs, lastRecentS: st.lastRecentS,
+      sentryUsb: (() => { try { return sentryUsbFor(vid); } catch { return null; } })()
     });
     // the car was removed while this ran: nothing of it is kept or raised
     if ((generation.get(vid) || 0) !== gen || !vehicles.get(vid)) return null;
@@ -690,7 +723,7 @@ function createArchiveGap({ inventory, vehicles, notes, db, speedIndex = null, c
     /** { day: { state, missingMinutes, partialMinutes, summary, advice } } for the day cards (no check started). */
     forDays(vid) {
       const out = {};
-      for (const [d, f] of Object.entries(results.get(vid)?.days || {})) out[d] = { state: f.state, missingMinutes: f.missingMinutes, partialMinutes: f.partialMinutes, lateClips: f.lateClips, maxLateHours: f.maxLateHours, summary: f.summary, advice: f.state === 'partial' ? ADVICE : null };
+      for (const [d, f] of Object.entries(results.get(vid)?.days || {})) out[d] = { state: f.state, missingMinutes: f.missingMinutes, partialMinutes: f.partialMinutes, lateClips: f.lateClips, maxLateHours: f.maxLateHours, sentryUsb: f.sentryUsb || null, summary: f.summary, advice: f.state === 'partial' ? ADVICE : null };
       return out;
     },
     /** A CAN log was indexed: forget what was read of its minutes. */

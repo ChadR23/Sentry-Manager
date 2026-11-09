@@ -62,7 +62,7 @@ function createNetwork() {
  * @param {string} o.tempDir   persistent local dir for staging / verification
  * @param {(runtime) => void} [o.onReady]
  */
-function createConverterHost({ dataDir, tempDir, ffmpegPath = 'ffmpeg', ffprobePath = 'ffprobe', log, onClipConverted, owned = createPosixOwnedFs(), powerMeter = null, isCheapNow = null, remoteNodes = null }) {
+function createConverterHost({ dataDir, tempDir, ffmpegPath = 'ffmpeg', ffprobePath = 'ffprobe', log, onClipConverted, owned = createPosixOwnedFs(), powerMeter = null, isCheapNow = null, remoteNodes = null, beforeReplaceOriginal = null, holdDiscovered = null }) {
   fs.mkdirSync(dataDir, { recursive: true });
   fs.mkdirSync(tempDir, { recursive: true });
   let runtime = null;
@@ -95,6 +95,11 @@ function createConverterHost({ dataDir, tempDir, ffmpegPath = 'ffmpeg', ffprobeP
         ...(isCheapNow ? { isCheapNow } : {}),
         // other servers paired under Nodes, as encoding lanes (server/nodes.js)
         ...(remoteNodes ? { remoteNodes } : {}),
+        // Sentry USB (docs/sentry-usb.md): the original's checksum record
+        // before an in-place replacement, and clips still being copied to
+        // the share held back
+        ...(beforeReplaceOriginal ? { beforeReplaceOriginal } : {}),
+        ...(holdDiscovered ? { holdDiscovered } : {}),
         onClipConverted: (outputPath) => onClipConverted?.(outputPath),
         onError: (error) => log?.error(`Converter recovery failed: ${error?.code || error?.message || 'RECOVERY_FAILED'}${error?.field ? ` (field ${String(error.field).slice(0, 80)})` : ''}`)
       });

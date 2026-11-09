@@ -220,6 +220,9 @@ function createAutoConverter(options = {}) {
   // true while the cheapest electricity rate is in force, false otherwise,
   // null without a time-of-use plan (then any time is off-peak)
   const isCheapNow = options.isCheapNow || (() => null);
+  // clips the host holds back for now (still being copied to the share):
+  // not new yet, and found again by a later check
+  const isHeld = typeof options.holdDiscovered === 'function' ? options.holdDiscovered : () => false;
   if (!service || typeof scanner !== 'function' || !fs || typeof directory !== 'string') {
     throw new TypeError('service, scanner, fs and directory are required');
   }
@@ -343,6 +346,7 @@ function createAutoConverter(options = {}) {
     try {
       for await (const discovered of scanner(config, { signal: controller.signal })) {
         if (knownIn(index, discovered, config)) continue;
+        if (isHeld(config, discovered)) continue;
         if (await destinationExists(config, discovered)) {
           remember(index, discovered.relativePath, discovered.sourceBytes, discovered.mtimeMs);
           continue;

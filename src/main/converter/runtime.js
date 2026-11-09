@@ -528,6 +528,12 @@ async function createConverterRuntime(options = {}) {
   const filesystemTransactions = createFilesystemTransactionAdapters({ fs: fileSystem, platform });
   const removeOwned = options.removeOwned || filesystemTransactions.removeOwned;
   const renameExclusive = options.renameExclusive || filesystemTransactions.renameExclusive;
+  // Clips the host holds back for now (see skipDiscovered below): never
+  // throws, false when unsure.
+  const holdDiscovered = (config, discovered) => {
+    if (typeof options.holdDiscovered !== 'function') return false;
+    try { return options.holdDiscovered(config, discovered) === true; } catch (_) { return false; }
+  };
   const stagingOptions = {
     // One staged source and one encode output per parallel conversion.
     maxActiveLeases: CONCURRENCY.max,
@@ -545,7 +551,10 @@ async function createConverterRuntime(options = {}) {
     renameExclusive,
     // The converter's own work files are removed by exact name and identity
     // (see staging) where the host says its temp folder is private to it.
-    ...(options.privateTempIdentityCleanup === true ? { privateTempCleanup: 'identity' } : {})
+    ...(options.privateTempIdentityCleanup === true ? { privateTempCleanup: 'identity' } : {}),
+    // awaited before an original is replaced in place, with its SHA-256
+    // (Sentry Six Manager records it for Sentry USB); a failure keeps it
+    ...(typeof options.beforeReplaceOriginal === 'function' ? { beforeReplaceOriginal: options.beforeReplaceOriginal } : {})
   };
   const stagingManager = factories.createFileTransaction({ ...stagingOptions, tempRoot });
   const planner = factories.createEncoderPlanner({
@@ -741,7 +750,10 @@ async function createConverterRuntime(options = {}) {
     // Persist discovered files in batches and let discovery run ahead of
     // conversion (item ids are tiny; the manifest itself caps the item count),
     // instead of one full manifest rewrite per file in lock-step with encoding.
-    skipDiscovered: (config, discovered) => auto.isKnown(config, discovered),
+    // (and clips the host says are not ready yet: Sentry Six Manager holds
+    // back clips Sentry USB is still copying to the share; a later run
+    // finds them)
+    skipDiscovered: (config, discovered) => auto.isKnown(config, discovered) || holdDiscovered(config, discovered),
     discoveryBatchSize: 200,
     discoveryFlushMs: 250,
     // As many as a job can hold (jobStore's item limit), so discovery is
@@ -920,6 +932,7 @@ async function createConverterRuntime(options = {}) {
     // the devices automatic jobs are given (this server's and the nodes),
     // and which vehicles each node takes first
     devices: () => recentDevices(),
+    holdDiscovered,
     ...(typeof options.remoteNodes?.priorities === 'function' ? { nodePriorities: () => options.remoteNodes.priorities() } : {}),
     ...(typeof options.isCheapNow === 'function' ? { isCheapNow: options.isCheapNow } : {}),
     onChange: (state) => { for (const listener of autoListeners) { try { listener(state); } catch (_) { /* isolated */ } } },
