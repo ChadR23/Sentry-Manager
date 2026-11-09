@@ -372,7 +372,10 @@ read anything, and watch-only accounts get 403.
 | `GET /api/can/export/decoded?key=&from=&to=&signals=[&mode=changes\|every]` | The decoded signals as CSV (`timestamp_utc,signal,value,unit,value_name`), streamed, gzipped when the browser accepts it. `mode=changes` (the default without `signals`): a value when it changes, and once a minute while it stays the same. `mode=every` (the default with `signals`): every point the index keeps (a change, and once a second). At most 24 hours and 5,000,000 rows. `check=1`: `{ mode, minutes, estimatedRows, rowLimit, willStop }` before downloading. A cell that starts like a formula (`= + - @`) is written with a `'` first. |
 | `GET /api/can/export/new-ids?key=&since=[&format=csv]` | CAN ids first seen on or after `since`, with the DBC message or `UNKNOWN`, from per-day id summaries the index keeps (always complete). |
 
-**Decoding.** With model3dbc's `Model3CAN.dbc` and, over it, `server/dbc/override.dbc`:
+**Decoding.** Each car with the DBC set of its model and year (below, "Car
+models and years"). A Model 3 or Y (every year, and the default when nothing
+is known): model3dbc's `Model3CAN.dbc`, then the messages it lacks from opendbc
+that checked out on a Model Y (`server/dbc/model3y-opendbc.dbc`), and over them `server/dbc/override.dbc`:
 the messages whose layout changed in newer Tesla firmware, checked against a
 real car's logs (a message there with no signals has a layout not known yet and
 is not decoded; it shows as `unknown`). A frame is decoded only on a bus the
@@ -392,6 +395,69 @@ the CAN-to-footage sync and the archive gap check work out their answers again.
 (Index r3 added only the internal bus's position: what r2 decoded of the car's
 buses stays, also for logs that are gone, and so do the sync's and the gap
 check's answers.)
+
+### Car models and years
+
+Which DBC set reads a car's CAN data comes from the vehicle's **Car model** and
+**Year** setting (Settings, the vehicle; admins), Automatic by default: the
+car's own VIN, which it sends on the CAN bus (0x405 on a Model 3, Y and a 2021+
+Model S or X; 0x508 on a Model S or X from before the 2021 refresh). The 4th
+character is the model, the 10th the model year (L 2020, M 2021, N 2022, P
+2023, R 2024, S 2025, T 2026, V 2027, ...); a Model S or X that sends 0x508 is
+a legacy car whatever its year. Indexing a log keeps what its VIN says for the
+car key (`<data>/can-index/<key>/car.json`); `GET /api/vehicles` gives each
+vehicle `car`: `{ setting: { model, generation }, detected: { model, year,
+plant, via, vin (without the serial number) } | null, model, year, generation,
+generationLabel, profile, source: setting | vin | default }`, and the choices
+as `carModels`. `PUT /api/vehicles/:id` takes `car: { model: "auto" | "3" |
+"Y" | "S" | "X", generation: "auto" | "Y-2020" | ... }`. A sidecar may say the
+VIN too (`vin`, or `car.vin`); the CAN Bridge sends none today.
+
+| Model | Year (generation) | DBC set | Checked on a real car |
+|---|---|---|---|
+| Model 3 | 2017-2023; 2024 and later (Highland) | `tesla-3y` | No (the same set as the Model Y; the firmware overrides follow the software, which the 3 and Y share) |
+| Model Y | 2020-2024; 2025 and later (Juniper) | `tesla-3y` | Yes: the owner's Model Y (VIN model year 2022, on 2026 firmware), parked |
+| Model S | 2012-2014 (before Autopilot hardware); 2015-2020 | `tesla-sx-legacy` | No: community sources only |
+| Model S | 2021 and later (refresh) | `tesla-3y` | No: no public DBC for it; its electrical system is close to the 3/Y's |
+| Model X | 2016-2020 | `tesla-sx-legacy` | No: community sources only |
+| Model X | 2021 and later (refresh) | `tesla-3y` | No (as the Model S refresh) |
+
+The sets (`server/canDbc.js` PROFILES; files in `server/dbc/`, each source's
+license beside it):
+
+- `tesla-3y`: [model3dbc](https://github.com/joshwardell/model3dbc) `Model3CAN.dbc`
+  (MIT, its latest commit c56c113, 2021: the bundled file is that one), then
+  `model3y-opendbc.dbc` (from [opendbc](https://github.com/commaai/opendbc),
+  MIT, commit 27fa1c5 of 2026-11-07: 0x370 `EPAS3S_sysStatus` and 0x488
+  `DAS_steeringControl` on the chassis bus, 0x343 `VCRIGHT_status` on the
+  vehicle bus; each frame's checksum right on the owner's car, the values
+  sensible parked; what was left out and why is in the file), then
+  `override.dbc` (the firmware overrides). Buses: can0 vehicle, can1 chassis.
+- `tesla-sx-legacy`: opendbc's `tesla_can.dbc` (chassis bus) and
+  `tesla_powertrain.dbc` (powertrain bus) as they are, then `sx-legacy.dbc`:
+  the speed in km/h as every other model's, and the messages Open Vehicle
+  Monitoring System's Model S module reads ([OVMS](https://github.com/openvehicles/Open-Vehicle-Monitoring-System-3),
+  MIT): pack voltage, state of charge, range, odometer, inverter and motor
+  temperatures, charging power, tire pressures and the brick voltages and
+  module temperatures. Buses: can0 powertrain, can1 chassis (the sidecar's bus
+  map wins: "powertrain", "chassis", "vehicle").
+
+A set's own name is in its logs' stamps and parts (`r4/tesla-sx-legacy`; the
+Model 3/Y set leaves them as they were), so a car whose set changes (its VIN
+seen for the first time, or the setting changed) has its logs decoded again
+in the background, and what the other set wrote is taken out; a car that
+stays on the Model 3/Y set (a Model 3 or Y whose VIN is seen) is not decoded
+again for that. The Viewer's
+popular stats take the first of their signals a car has, the Model 3/Y one
+first, then the legacy S/X one (`SOCUI302` for Battery %, `DI_vehicleSpeed_116`
+for Speed, ...). The CAN-to-footage sync and Drives read Model 3/Y signals
+(speed, brake, GPS position): on a legacy Model S or X they find none yet.
+
+Not usable here: onyx-m2-dbc (no license given), Tesla's own Roadster DBC
+files (no license that allows copying them). Index r4 added the sets and the
+three opendbc messages: every stored log is decoded again once for them, and
+every signal r3 decoded comes out the same (test/canModels.test.js, also on
+the owner's whole logs), so the sync's and the gap check's answers stay.
 
 Times are ISO with a zone, or the car's own clock (`YYYY-MM-DD[THH:MM]`).
 `check=1` on the bundle and decoded routes answers what they would hold

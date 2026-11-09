@@ -17,6 +17,7 @@ const { ShareManager } = require('./share');
 const { normalizeSmb } = require('./mountSpec');
 const { isInside } = require('./safePath');
 const { shouldSkipDir } = require('./footage');
+const { normalizeCar } = require('./carModels');
 
 const CLIP_FOLDER = /^(recentclips|sentryclips|savedclips)$/i;
 
@@ -83,7 +84,10 @@ function normalizeVehicle(input, existing = null) {
     // the UI sends no password to keep the stored one
     source = normalizeSmb(src, existing?.source?.type === 'smb' ? existing.source : null);
   }
-  return { name, timezone, source };
+  // which car it is (carModels.js): Automatic (its VIN on the CAN bus) or a model and year; it
+  // picks the DBC set its CAN data is decoded with
+  const car = normalizeCar(input.car ?? existing?.car);
+  return { name, timezone, source, car };
 }
 
 class VehicleManager extends EventEmitter {

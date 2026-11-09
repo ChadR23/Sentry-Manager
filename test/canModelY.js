@@ -95,4 +95,26 @@ function gps04F(lat, lon, acc) {
   return b.toString('hex').toUpperCase();
 }
 
-module.exports = { PAGES, frames, candump, gps04F, EXPECTED };
+// Messages model3dbc lacks, from opendbc (server/dbc/model3y-opendbc.dbc), as the same car sent
+// them (each frame's checksum right), with what they say: the steering about 6 degrees (as parked),
+// no hands on the wheel, the 12 V supply as 0x261 reads it.
+const OPENDBC_PAGES = {
+  'can1:370': ['11FE07F1203904D7', '11FE07F1203902D5'],
+  'can1:488': ['403A0D1300000000', '403A070D00000000'],
+  'can0:343': ['329364FEB5008000', '3293642EB6008000']
+};
+const OPENDBC_EXPECTED = {
+  EPAS3S_internalSAS: 5.7, // deg
+  EPAS3S_torsionBarTorque: -0.17, // Nm
+  EPAS3S_steeringRackForce: -75, // N
+  EPAS3S_eacStatus: 0, // EAC_INHIBITED
+  EPAS3S_steeringFault: 0,
+  DAS_steeringAngleRequest: 5.85, // deg
+  DAS_steeringControlType: 0, // NONE
+  VCRIGHT_vbatProt: 15.8465, // V
+  VCRIGHT_5AVoltage: 5.0136, // V
+  VCRIGHT_rearDefrostState: 2, // HEATER_STATE_OFF
+  VCRIGHT_mirrorHeatState: 2
+};
+
+module.exports = { PAGES, frames, candump, gps04F, EXPECTED, OPENDBC_PAGES, OPENDBC_EXPECTED };

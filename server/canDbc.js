@@ -7,10 +7,11 @@
 // signals included (one signal says which of the others the frame carries).
 //
 // The bundled server/dbc/Model3CAN.dbc is the community model3dbc (MIT,
-// LICENSE-model3dbc.txt), which the Screenmate CAN Bridge uses too; it names
-// the buses VehicleBus and ChassisBus. server/dbc/override.dbc is read after
-// it: the messages whose layout Tesla changed in newer firmware (checked
-// against a real car's logs), each replacing the base message of its id.
+// LICENSE-model3dbc.txt, its latest commit c56c113, 2021), which the Screenmate
+// CAN Bridge uses too; it names the buses VehicleBus and ChassisBus.
+// server/dbc/override.dbc is read after it: the messages whose layout Tesla
+// changed in newer firmware (checked against a real car's logs), each replacing
+// the base message of its id. Other cars get other sets (PROFILES below).
 //
 // A signal name can be in more than one message (UI_cpuTemperature in 0x00C
 // and 0x353): each signal has a series name of its own (sig.series), the name
@@ -123,14 +124,47 @@ function decodeFrame(msg, bytes) {
   return out;
 }
 
-let bundled = null;
-/** The bundled Model 3/Y DBC with the firmware overrides over it, parsed once. */
-function bundledDbc() {
-  const read = (f) => fs.readFileSync(path.join(__dirname, 'dbc', f), 'utf8');
-  // (one text: a BO_ read later replaces the message of its id, and the VAL_ and CM_ lines of both
-  // name the signals of the messages that stay; the override's own come last, so they win)
-  bundled ||= parseDbc(`${read('Model3CAN.dbc')}\n${read('override.dbc')}\n`);
-  return bundled;
-}
+// The DBC sets, one per kind of car (server/carModels.js says which a car gets): files read in
+// order, as one text (a BO_ read later replaces the message of its id, its bus included, and the
+// VAL_ and CM_ lines of every file name the signals of the messages that stay; a later file's
+// own come last, so they win). `bus` (optional) names the bus of every message of that file, for
+// a file whose BO_ lines name the sending ECU instead (opendbc's).
+//
+//   tesla-3y: Model 3 and Model Y of every year, and the 2021+ Model S and X (as close to the 3
+//     and Y as the public sources know; not checked on one). model3dbc, the messages it lacks from
+//     opendbc (checked against the owner's Model Y), then the firmware overrides (checked on it).
+//   tesla-sx-legacy: Model S and X before the 2021 refresh. opendbc's chassis and powertrain
+//     files, then sx-legacy.dbc (from OVMS; not checked on a car).
+const PROFILES = {
+  'tesla-3y': {
+    files: [{ file: 'Model3CAN.dbc' }, { file: 'model3y-opendbc.dbc' }, { file: 'override.dbc' }],
+    buses: { can0: 'VehicleBus', can1: 'ChassisBus' }
+  },
+  'tesla-sx-legacy': {
+    files: [{ file: 'opendbc-tesla_can.dbc', bus: 'ChassisBus' }, { file: 'opendbc-tesla_powertrain.dbc', bus: 'PowertrainBus' }, { file: 'sx-legacy.dbc' }],
+    buses: { can0: 'PowertrainBus', can1: 'ChassisBus' }
+  }
+};
+const DEFAULT_PROFILE = 'tesla-3y';
+const BO_LINE = /^(BO_\s+\d+\s+\w+\s*:\s*\d+\s+)\w+/gm;
 
-module.exports = { parseDbc, decodeFrame, signalValue, rawBits, bundledDbc };
+const parsed = new Map();
+/** A DBC set by its name (PROFILES), parsed once; an unknown name is the default set. */
+function dbcFor(profile = DEFAULT_PROFILE) {
+  const name = Object.hasOwn(PROFILES, profile) ? profile : DEFAULT_PROFILE;
+  if (!parsed.has(name)) {
+    const read = ({ file, bus }) => {
+      const text = fs.readFileSync(path.join(__dirname, 'dbc', file), 'utf8');
+      return bus ? text.replace(BO_LINE, `$1${bus}`) : text;
+    };
+    const dbc = parseDbc(`${PROFILES[name].files.map(read).join('\n')}\n`);
+    dbc.profile = name;
+    dbc.buses = { ...PROFILES[name].buses };
+    parsed.set(name, dbc);
+  }
+  return parsed.get(name);
+}
+/** The Model 3/Y set (model3dbc, the opendbc messages checked on a Model Y, the firmware overrides), parsed once. */
+const bundledDbc = () => dbcFor(DEFAULT_PROFILE);
+
+module.exports = { parseDbc, decodeFrame, signalValue, rawBits, bundledDbc, dbcFor, PROFILES, DEFAULT_PROFILE };

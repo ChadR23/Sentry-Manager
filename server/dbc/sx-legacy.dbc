@@ -1,0 +1,375 @@
+// Model S and Model X from before the 2021 refresh ("legacy": 2012-2020, the
+// first Model X from late 2015), read after opendbc's tesla_can.dbc (chassis bus)
+// and tesla_powertrain.dbc (powertrain bus), which have only what openpilot needs.
+//
+// The messages below are written from Open Vehicle Monitoring System 3's Model S
+// module (MIT, LICENSE-ovms.txt; vehicle/OVMS.V3/components/vehicle_teslamodels/
+// src/vehicle_teslamodels.cpp, repository HEAD 2755ca51f2833af5093a4260ed74e11b2fd936db),
+// each signal's bits, scale and unit as that code reads them; OVMS reads 0x102 to
+// 0x6F2 on CAN3 (powertrain) and 0x31F on CAN6 (chassis). OVMS reads the VIN from
+// 0x508 (first byte 0, 1, 2: seven, seven and three characters): Sentry Six Manager
+// reads it there to tell the car (server/carModels.js), so it has no signals here.
+//
+// NOT CHECKED ON A REAL CAR: nobody has sent a legacy Model S or X log yet. These
+// come from the community sources above only.
+//
+// Two ids of the powertrain and chassis files clash with one here or with each
+// other (one id, one message here): 0x238 is the powertrain's STW_ACTN_RQ (the
+// chassis's UI_driverAssistRoadSign is left out), and 0x338 is OVMS's range
+// message on the powertrain bus (the chassis's UI_status bits are left out).
+//
+// 0x116 and 0x118 (DI_torque2, powertrain and chassis): as opendbc has them, but
+// the speed in km/h (opendbc: mph, 0.05 mph steps from -25 mph), as every other
+// model's DI_vehicleSpeed, so the stats and the computed ones read it alike.
+
+BO_ 278 DI_torque2: 6 PowertrainBus
+ SG_ DI_torqueEstimate : 0|12@1- (0.5,0) [-750|750] "Nm" Receiver
+ SG_ DI_gear : 12|3@1+ (1,0) [0|7] "" Receiver
+ SG_ DI_brakePedal : 15|1@1+ (1,0) [0|1] "" Receiver
+ SG_ DI_vehicleSpeed : 16|12@1+ (0.0804672,-40.2336) [-40.2336|289.27] "kph" Receiver
+ SG_ DI_gearRequest : 28|3@1+ (1,0) [0|7] "" Receiver
+ SG_ DI_torqueInterfaceFailure : 31|1@1+ (1,0) [0|1] "" Receiver
+ SG_ DI_torque2Counter : 32|4@1+ (1,0) [0|15] "" Receiver
+ SG_ DI_brakePedalState : 36|2@1+ (1,0) [0|3] "" Receiver
+ SG_ DI_epbParkRequest : 38|1@1+ (1,0) [0|1] "" Receiver
+ SG_ DI_epbInterfaceReady : 39|1@1+ (1,0) [0|1] "" Receiver
+ SG_ DI_torque2Checksum : 40|8@1+ (1,0) [0|255] "" Receiver
+
+BO_ 280 DI_torque2: 6 ChassisBus
+ SG_ DI_torqueEstimate : 0|12@1- (0.5,0) [-750|750] "Nm" Receiver
+ SG_ DI_gear : 12|3@1+ (1,0) [0|7] "" Receiver
+ SG_ DI_brakePedal : 15|1@1+ (1,0) [0|1] "" Receiver
+ SG_ DI_vehicleSpeed : 16|12@1+ (0.0804672,-40.2336) [-40.2336|289.27] "kph" Receiver
+ SG_ DI_gearRequest : 28|3@1+ (1,0) [0|7] "" Receiver
+ SG_ DI_torqueInterfaceFailure : 31|1@1+ (1,0) [0|1] "" Receiver
+ SG_ DI_torque2Counter : 32|4@1+ (1,0) [0|15] "" Receiver
+ SG_ DI_brakePedalState : 36|2@1+ (1,0) [0|3] "" Receiver
+ SG_ DI_epbParkRequest : 38|1@1+ (1,0) [0|1] "" Receiver
+ SG_ DI_epbInterfaceReady : 39|1@1+ (1,0) [0|1] "" Receiver
+ SG_ DI_torque2Checksum : 40|8@1+ (1,0) [0|255] "" Receiver
+
+// OVMS: "BMS current and voltage" (it reads the voltage and a temperature)
+BO_ 258 BMS_hvBusStatus102: 8 PowertrainBus
+ SG_ BattVoltage102 : 0|16@1+ (0.01,0) [0|655.35] "V" Receiver
+ SG_ BattTemp102 : 48|11@1+ (0.1,0) [0|204.7] "C" Receiver
+
+// OVMS: charging power (W) and charging voltage
+BO_ 546 CHG_power222: 8 PowertrainBus
+ SG_ ChargerPower222 : 0|16@1+ (1,0) [0|65535] "W" Receiver
+
+BO_ 652 CHG_voltage28C: 8 PowertrainBus
+ SG_ ChargerVoltage28C : 0|16@1+ (0.00390625,0) [0|255.996] "V" Receiver
+
+// OVMS: state of charge, 0.1 % (bits 10-19)
+BO_ 770 BMS_soc302: 8 PowertrainBus
+ SG_ SOCUI302 : 10|10@1+ (0.1,0) [0|102.3] "%" Receiver
+
+// OVMS: drive inverter and motor temperatures
+BO_ 774 DI_temps306: 8 PowertrainBus
+ SG_ InverterTemp306 : 8|8@1+ (1,-40) [-40|215] "C" Receiver
+ SG_ MotorTemp306 : 16|8@1+ (1,-40) [-40|215] "C" Receiver
+
+// OVMS: "MCU_range": ideal and rated range (miles), rated consumption (Wh/mi)
+BO_ 824 MCU_range338: 8 PowertrainBus
+ SG_ IdealRange338 : 0|16@1+ (1,0) [0|65535] "mi" Receiver
+ SG_ RatedRange338 : 16|16@1+ (1,0) [0|65535] "mi" Receiver
+ SG_ RatedConsumption338 : 32|16@1+ (1,0) [0|65535] "Wh/mi" Receiver
+
+// OVMS: odometer, 0.001 mile
+BO_ 1496 Odometer5D8: 8 PowertrainBus
+ SG_ Odometer5D8 : 0|32@1+ (0.001,0) [0|4294967.295] "mi" Receiver
+
+// OVMS (chassis bus): tire pressures (byte / 2.755 psi: 0.025 bar) and temperatures
+BO_ 799 TPMS31F: 8 ChassisBus
+ SG_ TPMSFLpressure31F : 0|8@1+ (0.025,0) [0|6.375] "bar" Receiver
+ SG_ TPMSFLtemp31F : 8|8@1+ (1,-40) [-40|215] "C" Receiver
+ SG_ TPMSFRpressure31F : 16|8@1+ (0.025,0) [0|6.375] "bar" Receiver
+ SG_ TPMSFRtemp31F : 24|8@1+ (1,-40) [-40|215] "C" Receiver
+ SG_ TPMSRLpressure31F : 32|8@1+ (0.025,0) [0|6.375] "bar" Receiver
+ SG_ TPMSRLtemp31F : 40|8@1+ (1,-40) [-40|215] "C" Receiver
+ SG_ TPMSRRpressure31F : 48|8@1+ (0.025,0) [0|6.375] "bar" Receiver
+ SG_ TPMSRRtemp31F : 56|8@1+ (1,-40) [-40|215] "C" Receiver
+
+// OVMS: brick voltages (pages 0-23, four bricks a page, 0.000305 V) and module
+// temperatures (pages 24-31, four a page, signed, 0.0122 C); 0 and 16383 mean none
+BO_ 1778 BMS_bricks6F2: 8 PowertrainBus
+ SG_ BMS_bricks6F2Index M : 0|8@1+ (1,0) [0|31] "" Receiver
+ SG_ BrickVoltage1_6F2 m0 : 8|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage2_6F2 m0 : 22|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage3_6F2 m0 : 36|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage4_6F2 m0 : 50|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage5_6F2 m1 : 8|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage6_6F2 m1 : 22|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage7_6F2 m1 : 36|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage8_6F2 m1 : 50|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage9_6F2 m2 : 8|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage10_6F2 m2 : 22|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage11_6F2 m2 : 36|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage12_6F2 m2 : 50|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage13_6F2 m3 : 8|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage14_6F2 m3 : 22|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage15_6F2 m3 : 36|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage16_6F2 m3 : 50|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage17_6F2 m4 : 8|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage18_6F2 m4 : 22|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage19_6F2 m4 : 36|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage20_6F2 m4 : 50|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage21_6F2 m5 : 8|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage22_6F2 m5 : 22|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage23_6F2 m5 : 36|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage24_6F2 m5 : 50|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage25_6F2 m6 : 8|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage26_6F2 m6 : 22|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage27_6F2 m6 : 36|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage28_6F2 m6 : 50|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage29_6F2 m7 : 8|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage30_6F2 m7 : 22|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage31_6F2 m7 : 36|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage32_6F2 m7 : 50|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage33_6F2 m8 : 8|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage34_6F2 m8 : 22|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage35_6F2 m8 : 36|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage36_6F2 m8 : 50|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage37_6F2 m9 : 8|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage38_6F2 m9 : 22|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage39_6F2 m9 : 36|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage40_6F2 m9 : 50|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage41_6F2 m10 : 8|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage42_6F2 m10 : 22|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage43_6F2 m10 : 36|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage44_6F2 m10 : 50|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage45_6F2 m11 : 8|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage46_6F2 m11 : 22|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage47_6F2 m11 : 36|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage48_6F2 m11 : 50|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage49_6F2 m12 : 8|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage50_6F2 m12 : 22|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage51_6F2 m12 : 36|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage52_6F2 m12 : 50|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage53_6F2 m13 : 8|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage54_6F2 m13 : 22|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage55_6F2 m13 : 36|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage56_6F2 m13 : 50|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage57_6F2 m14 : 8|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage58_6F2 m14 : 22|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage59_6F2 m14 : 36|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage60_6F2 m14 : 50|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage61_6F2 m15 : 8|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage62_6F2 m15 : 22|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage63_6F2 m15 : 36|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage64_6F2 m15 : 50|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage65_6F2 m16 : 8|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage66_6F2 m16 : 22|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage67_6F2 m16 : 36|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage68_6F2 m16 : 50|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage69_6F2 m17 : 8|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage70_6F2 m17 : 22|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage71_6F2 m17 : 36|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage72_6F2 m17 : 50|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage73_6F2 m18 : 8|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage74_6F2 m18 : 22|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage75_6F2 m18 : 36|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage76_6F2 m18 : 50|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage77_6F2 m19 : 8|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage78_6F2 m19 : 22|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage79_6F2 m19 : 36|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage80_6F2 m19 : 50|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage81_6F2 m20 : 8|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage82_6F2 m20 : 22|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage83_6F2 m20 : 36|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage84_6F2 m20 : 50|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage85_6F2 m21 : 8|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage86_6F2 m21 : 22|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage87_6F2 m21 : 36|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage88_6F2 m21 : 50|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage89_6F2 m22 : 8|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage90_6F2 m22 : 22|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage91_6F2 m22 : 36|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage92_6F2 m22 : 50|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage93_6F2 m23 : 8|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage94_6F2 m23 : 22|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage95_6F2 m23 : 36|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ BrickVoltage96_6F2 m23 : 50|14@1+ (0.000305,0) [0|4.997] "V" Receiver
+ SG_ ModuleTemp1_6F2 m24 : 8|14@1- (0.0122,0) [-99.94|99.93] "C" Receiver
+ SG_ ModuleTemp2_6F2 m24 : 22|14@1- (0.0122,0) [-99.94|99.93] "C" Receiver
+ SG_ ModuleTemp3_6F2 m24 : 36|14@1- (0.0122,0) [-99.94|99.93] "C" Receiver
+ SG_ ModuleTemp4_6F2 m24 : 50|14@1- (0.0122,0) [-99.94|99.93] "C" Receiver
+ SG_ ModuleTemp5_6F2 m25 : 8|14@1- (0.0122,0) [-99.94|99.93] "C" Receiver
+ SG_ ModuleTemp6_6F2 m25 : 22|14@1- (0.0122,0) [-99.94|99.93] "C" Receiver
+ SG_ ModuleTemp7_6F2 m25 : 36|14@1- (0.0122,0) [-99.94|99.93] "C" Receiver
+ SG_ ModuleTemp8_6F2 m25 : 50|14@1- (0.0122,0) [-99.94|99.93] "C" Receiver
+ SG_ ModuleTemp9_6F2 m26 : 8|14@1- (0.0122,0) [-99.94|99.93] "C" Receiver
+ SG_ ModuleTemp10_6F2 m26 : 22|14@1- (0.0122,0) [-99.94|99.93] "C" Receiver
+ SG_ ModuleTemp11_6F2 m26 : 36|14@1- (0.0122,0) [-99.94|99.93] "C" Receiver
+ SG_ ModuleTemp12_6F2 m26 : 50|14@1- (0.0122,0) [-99.94|99.93] "C" Receiver
+ SG_ ModuleTemp13_6F2 m27 : 8|14@1- (0.0122,0) [-99.94|99.93] "C" Receiver
+ SG_ ModuleTemp14_6F2 m27 : 22|14@1- (0.0122,0) [-99.94|99.93] "C" Receiver
+ SG_ ModuleTemp15_6F2 m27 : 36|14@1- (0.0122,0) [-99.94|99.93] "C" Receiver
+ SG_ ModuleTemp16_6F2 m27 : 50|14@1- (0.0122,0) [-99.94|99.93] "C" Receiver
+ SG_ ModuleTemp17_6F2 m28 : 8|14@1- (0.0122,0) [-99.94|99.93] "C" Receiver
+ SG_ ModuleTemp18_6F2 m28 : 22|14@1- (0.0122,0) [-99.94|99.93] "C" Receiver
+ SG_ ModuleTemp19_6F2 m28 : 36|14@1- (0.0122,0) [-99.94|99.93] "C" Receiver
+ SG_ ModuleTemp20_6F2 m28 : 50|14@1- (0.0122,0) [-99.94|99.93] "C" Receiver
+ SG_ ModuleTemp21_6F2 m29 : 8|14@1- (0.0122,0) [-99.94|99.93] "C" Receiver
+ SG_ ModuleTemp22_6F2 m29 : 22|14@1- (0.0122,0) [-99.94|99.93] "C" Receiver
+ SG_ ModuleTemp23_6F2 m29 : 36|14@1- (0.0122,0) [-99.94|99.93] "C" Receiver
+ SG_ ModuleTemp24_6F2 m29 : 50|14@1- (0.0122,0) [-99.94|99.93] "C" Receiver
+ SG_ ModuleTemp25_6F2 m30 : 8|14@1- (0.0122,0) [-99.94|99.93] "C" Receiver
+ SG_ ModuleTemp26_6F2 m30 : 22|14@1- (0.0122,0) [-99.94|99.93] "C" Receiver
+ SG_ ModuleTemp27_6F2 m30 : 36|14@1- (0.0122,0) [-99.94|99.93] "C" Receiver
+ SG_ ModuleTemp28_6F2 m30 : 50|14@1- (0.0122,0) [-99.94|99.93] "C" Receiver
+ SG_ ModuleTemp29_6F2 m31 : 8|14@1- (0.0122,0) [-99.94|99.93] "C" Receiver
+ SG_ ModuleTemp30_6F2 m31 : 22|14@1- (0.0122,0) [-99.94|99.93] "C" Receiver
+ SG_ ModuleTemp31_6F2 m31 : 36|14@1- (0.0122,0) [-99.94|99.93] "C" Receiver
+ SG_ ModuleTemp32_6F2 m31 : 50|14@1- (0.0122,0) [-99.94|99.93] "C" Receiver
+
+VAL_ 278 DI_gear 7 "DI_GEAR_SNA" 4 "DI_GEAR_D" 3 "DI_GEAR_N" 2 "DI_GEAR_R" 1 "DI_GEAR_P" 0 "DI_GEAR_INVALID" ;
+VAL_ 278 DI_vehicleSpeed 4095 "SNA" ;
+VAL_ 278 DI_brakePedalState 3 "SNA" 2 "INVALID" 1 "ON" 0 "OFF" ;
+VAL_ 280 DI_gear 7 "DI_GEAR_SNA" 4 "DI_GEAR_D" 3 "DI_GEAR_N" 2 "DI_GEAR_R" 1 "DI_GEAR_P" 0 "DI_GEAR_INVALID" ;
+VAL_ 280 DI_vehicleSpeed 4095 "SNA" ;
+VAL_ 280 DI_brakePedalState 3 "SNA" 2 "INVALID" 1 "ON" 0 "OFF" ;
+VAL_ 799 TPMSFLtemp31F 0 "SNA" ;
+VAL_ 799 TPMSFRtemp31F 0 "SNA" ;
+VAL_ 799 TPMSRLtemp31F 0 "SNA" ;
+VAL_ 799 TPMSRRtemp31F 0 "SNA" ;
+VAL_ 1778 BrickVoltage1_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage2_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage3_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage4_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage5_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage6_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage7_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage8_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage9_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage10_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage11_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage12_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage13_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage14_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage15_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage16_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage17_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage18_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage19_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage20_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage21_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage22_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage23_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage24_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage25_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage26_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage27_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage28_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage29_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage30_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage31_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage32_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage33_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage34_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage35_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage36_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage37_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage38_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage39_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage40_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage41_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage42_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage43_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage44_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage45_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage46_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage47_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage48_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage49_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage50_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage51_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage52_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage53_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage54_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage55_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage56_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage57_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage58_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage59_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage60_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage61_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage62_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage63_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage64_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage65_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage66_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage67_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage68_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage69_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage70_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage71_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage72_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage73_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage74_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage75_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage76_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage77_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage78_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage79_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage80_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage81_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage82_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage83_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage84_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage85_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage86_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage87_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage88_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage89_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage90_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage91_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage92_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage93_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage94_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage95_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 BrickVoltage96_6F2 0 "SNA" 16383 "SNA" ;
+VAL_ 1778 ModuleTemp1_6F2 0 "SNA" -1 "SNA" ;
+VAL_ 1778 ModuleTemp2_6F2 0 "SNA" -1 "SNA" ;
+VAL_ 1778 ModuleTemp3_6F2 0 "SNA" -1 "SNA" ;
+VAL_ 1778 ModuleTemp4_6F2 0 "SNA" -1 "SNA" ;
+VAL_ 1778 ModuleTemp5_6F2 0 "SNA" -1 "SNA" ;
+VAL_ 1778 ModuleTemp6_6F2 0 "SNA" -1 "SNA" ;
+VAL_ 1778 ModuleTemp7_6F2 0 "SNA" -1 "SNA" ;
+VAL_ 1778 ModuleTemp8_6F2 0 "SNA" -1 "SNA" ;
+VAL_ 1778 ModuleTemp9_6F2 0 "SNA" -1 "SNA" ;
+VAL_ 1778 ModuleTemp10_6F2 0 "SNA" -1 "SNA" ;
+VAL_ 1778 ModuleTemp11_6F2 0 "SNA" -1 "SNA" ;
+VAL_ 1778 ModuleTemp12_6F2 0 "SNA" -1 "SNA" ;
+VAL_ 1778 ModuleTemp13_6F2 0 "SNA" -1 "SNA" ;
+VAL_ 1778 ModuleTemp14_6F2 0 "SNA" -1 "SNA" ;
+VAL_ 1778 ModuleTemp15_6F2 0 "SNA" -1 "SNA" ;
+VAL_ 1778 ModuleTemp16_6F2 0 "SNA" -1 "SNA" ;
+VAL_ 1778 ModuleTemp17_6F2 0 "SNA" -1 "SNA" ;
+VAL_ 1778 ModuleTemp18_6F2 0 "SNA" -1 "SNA" ;
+VAL_ 1778 ModuleTemp19_6F2 0 "SNA" -1 "SNA" ;
+VAL_ 1778 ModuleTemp20_6F2 0 "SNA" -1 "SNA" ;
+VAL_ 1778 ModuleTemp21_6F2 0 "SNA" -1 "SNA" ;
+VAL_ 1778 ModuleTemp22_6F2 0 "SNA" -1 "SNA" ;
+VAL_ 1778 ModuleTemp23_6F2 0 "SNA" -1 "SNA" ;
+VAL_ 1778 ModuleTemp24_6F2 0 "SNA" -1 "SNA" ;
+VAL_ 1778 ModuleTemp25_6F2 0 "SNA" -1 "SNA" ;
+VAL_ 1778 ModuleTemp26_6F2 0 "SNA" -1 "SNA" ;
+VAL_ 1778 ModuleTemp27_6F2 0 "SNA" -1 "SNA" ;
+VAL_ 1778 ModuleTemp28_6F2 0 "SNA" -1 "SNA" ;
+VAL_ 1778 ModuleTemp29_6F2 0 "SNA" -1 "SNA" ;
+VAL_ 1778 ModuleTemp30_6F2 0 "SNA" -1 "SNA" ;
+VAL_ 1778 ModuleTemp31_6F2 0 "SNA" -1 "SNA" ;
+VAL_ 1778 ModuleTemp32_6F2 0 "SNA" -1 "SNA" ;
+
+CM_ SG_ 258 BattVoltage102 "Battery voltage";
+CM_ SG_ 258 BattTemp102 "Battery temp (OVMS)";
+CM_ SG_ 546 ChargerPower222 "Charging power (OVMS)";
+CM_ SG_ 652 ChargerVoltage28C "Charging voltage (OVMS)";
+CM_ SG_ 770 SOCUI302 "Battery % (as shown)";
+CM_ SG_ 774 InverterTemp306 "Drive inverter temp";
+CM_ SG_ 774 MotorTemp306 "Drive motor temp";
+CM_ SG_ 824 IdealRange338 "Ideal range";
+CM_ SG_ 824 RatedRange338 "Rated range";
+CM_ SG_ 824 RatedConsumption338 "Rated consumption";
+CM_ SG_ 1496 Odometer5D8 "Odometer";

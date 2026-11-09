@@ -45,7 +45,8 @@
   const CHARGE_NAMES = CHARGE.map(([n]) => n);
   const LV_VOLTS = ['v12vBattVoltage261'];
   const LV_AMPS = ['v12vBattCurrent261'];
-  const SPEED = ['DI_vehicleSpeed']; // km/h
+  // (a legacy Model S/X's after the Model 3/Y one: server/dbc/sx-legacy.dbc, in km/h too)
+  const SPEED = ['DI_vehicleSpeed', 'DI_vehicleSpeed_116', 'DI_vehicleSpeed_118']; // km/h
   const KMH_PER_MPH = 1.609344;
 
   /** Battery power, kW: positive out of the pack, negative into it. */

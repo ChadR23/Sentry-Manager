@@ -31,9 +31,10 @@
 //
 // Two versions, each about one thing: FORMAT is how the signals are decoded
 // (r2: the firmware overrides, named buses only, unique series names; r3: the
-// GPS position from the Screenmate's internal bus as well, see below); it is
-// in each log's stamp in done.json, in each log's part of a minute (`fmt`), and
-// in signals.json. canFormat.js's ENC is only how a minute is laid out on disk
+// GPS position from the Screenmate's internal bus as well, see below; r4: a DBC
+// set per kind of car, and three more messages in the Model 3/Y set); it is in
+// each log's stamp in done.json, in each log's part of a minute (`fmt`), and in
+// signals.json. canFormat.js's ENC is only how a minute is laid out on disk
 // (c1: columns). A minute is current when it is ENC and every part of it is
 // FORMAT. After an upgrade every stored log is decoded again (its stamp is
 // older), each replacing its own part of its minutes; then repack() looks at
@@ -41,12 +42,20 @@
 // signals of a part still decoded by an older FORMAT (a log that could not be
 // decoded again: not stored any more, not usable, unreadable) are taken out,
 // so nothing an older decoding wrote stays in the index. A part decoded by
-// CAR_FORMAT (r2) is not older in that sense: r3 decodes the car's own buses
-// as r2 did and only adds the internal bus's GPS, so such a part keeps its
-// signals (it has no GPS, that is all) and so does signals.json. The CAN sync
-// (canSync.js) and the archive gap check (archiveGap.js) keep their own
-// results by CAR_FORMAT (they read only the car's buses), and are told of
-// every minute that changes.
+// CAR_FORMAT (r2) or r3 is not older in that sense: r3 and r4 decode every
+// signal r2 decoded as r2 did (r3 added the internal bus's GPS, r4 added
+// signals), so such a part keeps its signals (it lacks the new ones, that is
+// all) and so does signals.json. The CAN sync (canSync.js) and the archive gap
+// check (archiveGap.js) keep their own results by CAR_FORMAT (they read only
+// the car's buses), and are told of every minute that changes.
+//
+// Which DBC set decodes a car key's logs (canDbc.js PROFILES) comes from
+// profileOf(key) (index.js: the vehicle's "Car model" setting, else the car's
+// own VIN, which indexing a log keeps in <dir>/<key>/car.json: carModels.js).
+// The default set (Model 3/Y) leaves the stamps and parts as they were; another
+// set is in them ("r4/tesla-sx-legacy"), so a car whose set changes has every
+// log decoded again, and what another set wrote counts as older (taken out by
+// repack when its log cannot be decoded again).
 //
 // Indexing a log again replaces its own part of each minute: what it wrote
 // before (its frame counts, and its points within its own span of the
@@ -82,7 +91,8 @@ const zlib = require('zlib');
 const { parseName } = require('./canLogs');
 const fmt = require('./canFormat');
 const { openCanLog, MAX_UNPACKED } = require('./canLogReader');
-const { bundledDbc, decodeFrame } = require('./canDbc');
+const { dbcFor, decodeFrame, DEFAULT_PROFILE } = require('./canDbc');
+const { vinCollector, decodeVin } = require('./carModels');
 
 const STEP_MS = 50; // at most 20 points a second per signal
 const RAW_PER_SEC = 10; // raw payload changes kept a second per id
@@ -90,10 +100,20 @@ const RAW_PER_SEC = 10; // raw payload changes kept a second per id
 // firmware overrides, only on named buses, and with unique series names (a log indexed by r1 is
 // decoded again, in the background, from its stored .log.xz)
 // r3: 0x04F's position from the internal bus as well (INTERNAL_BUS_MESSAGES); the car's buses as r2
-const FORMAT = 'r3';
-// the decoding of the car's own buses: r3 left it as r2 had it, so what r2 decoded stays right
+// r4: a DBC set per kind of car (canDbc.js PROFILES, carModels.js), and in the Model 3/Y set the
+// messages model3dbc lacks from opendbc (0x370, 0x488, 0x343: checked on a Model Y); every signal
+// r3 decoded is decoded as before (test/canModels.test.js), so what r2 and r3 wrote stays right
+const FORMAT = 'r4';
+// the decoding of the car's own buses that the CAN sync and the archive gap check read: r3 and r4
+// left it as r2 had it (r4 only adds signals), so what r2 decoded stays right
 const CAR_FORMAT = 'r2';
-const stillRight = (f) => f === FORMAT || f === CAR_FORMAT;
+const DEFAULT_RIGHT = new Set([FORMAT, 'r3', CAR_FORMAT]);
+// A car decoded with another set than the default one has it in its stamps and parts ("r4/tesla-sx-
+// legacy"): a log is decoded again when its car's set changes (a VIN found, the setting changed),
+// and only that set's own parts are right for it. The default set's stamps stay as they were.
+const profileStamp = (profile) => (!profile || profile === DEFAULT_PROFILE ? '' : `/${profile}`);
+const partFormat = (profile) => `${FORMAT}${profileStamp(profile)}`;
+const stillRight = (f, profile = DEFAULT_PROFILE) => (profileStamp(profile) ? f === partFormat(profile) : DEFAULT_RIGHT.has(f));
 // on an interface the bus map calls internal: these messages only (by id), and only these signals
 // (series names). The Screenmate's other ids carry data of their own (its 0x3D9 is not the chassis bus's).
 const INTERNAL_BUS_MESSAGES = new Map([
@@ -106,7 +126,7 @@ const KEEP_MS = 1000; // a point at least once a second
 const IFACE = /^[A-Za-z][A-Za-z0-9_]{0,15}$/;
 const LINE = /^\((\d+)\.(\d+)\)\s+([A-Za-z][A-Za-z0-9_]{0,15})\s+([0-9A-Fa-f]{1,8})#([0-9A-Fa-f]*)\s*$/;
 const goodId = (idKey) => IFACE.test(String(idKey).split(':')[0]);
-const DEFAULT_BUSES = { can0: 'VehicleBus', can1: 'ChassisBus' };
+const DEFAULT_BUSES = { can0: 'VehicleBus', can1: 'ChassisBus' }; // (a set's own: canDbc.js PROFILES)
 
 const minuteKey = (ms) => new Date(Math.floor(ms / 60000) * 60000).toISOString().slice(0, 16).replace(/[-:]/g, '');
 
@@ -123,15 +143,17 @@ function sideEntries(side) {
 const INTERNAL = /internal|screenmate/;
 
 /**
- * Which DBC bus each interface is: the sidecar's bus map, else can0 vehicle and can1 chassis.
- * An interface the map calls internal (the CAN Bridge's "screenmate-internal" can3) is no DBC bus.
+ * Which DBC bus each interface is: the sidecar's bus map, else the DBC set's defaults (Model 3/Y:
+ * can0 vehicle and can1 chassis; a legacy Model S/X: can0 powertrain and can1 chassis). An
+ * interface the map calls internal (the CAN Bridge's "screenmate-internal" can3) is no DBC bus.
  */
-function busMapOf(side) {
-  const busOf = { ...DEFAULT_BUSES };
+function busMapOf(side, defaults = DEFAULT_BUSES) {
+  const busOf = { ...defaults };
   for (const [iface, s] of sideEntries(side)) {
     if (INTERNAL.test(s)) delete busOf[iface];
     else if (/vehicle/.test(s)) busOf[iface] = 'VehicleBus';
     else if (/chassis/.test(s)) busOf[iface] = 'ChassisBus';
+    else if (/powertrain/.test(s)) busOf[iface] = 'PowertrainBus';
     else if (/party/.test(s)) busOf[iface] = 'PartyBus';
   }
   return busOf;
@@ -205,7 +227,37 @@ async function sidecarStamp(file) {
   return st ? `/${st.size}-${Math.round(st.mtimeMs)}` : '';
 }
 
-function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bundledDbc, xz = 'xz', onIndexed = null, onProgress = null, usable = async () => ({ use: true, trust: 'unsigned' }), maxUnpacked = MAX_UNPACKED, autoRepack = true }) {
+/**
+ * profileOf(key): the DBC set a car key's logs are decoded with (index.js: the vehicle's setting,
+ * else what the car's VIN says, carOf); dbc(profile): that set, parsed.
+ */
+function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = dbcFor, profileOf = async () => DEFAULT_PROFILE, xz = 'xz', onIndexed = null, onProgress = null, usable = async () => ({ use: true, trust: 'unsigned' }), maxUnpacked = MAX_UNPACKED, autoRepack = true }) {
+  const profileFor = async (key) => {
+    try { return (await profileOf(key)) || DEFAULT_PROFILE; } catch { return DEFAULT_PROFILE; }
+  };
+  const dbcOf = (profile) => dbc(profile || DEFAULT_PROFILE);
+  const busesOfSet = (profile) => dbcOf(profile)?.buses || DEFAULT_BUSES;
+  // ---- what each car key's own CAN data says it is (its VIN): <dir>/<key>/car.json
+  const cars = new Map(); // key -> { vin, model, year, plant, via, seenAt } | null
+  async function carOf(key) {
+    if (!cars.has(key)) {
+      let c = null;
+      try { c = JSON.parse(await fsp.readFile(path.join(dir, key, 'car.json'), 'utf8')) || null; } catch { /* none yet */ }
+      cars.set(key, c);
+    }
+    return cars.get(key);
+  }
+  /** Keep a key's VIN; true when it is new or another one (its set may change: the logs are looked at again). */
+  async function noteCar(key, found) {
+    const had = await carOf(key);
+    if (had?.vin === found.vin && had?.via === found.via) return false;
+    const c = { vin: found.vin, model: found.model, year: found.year, plant: found.plant, via: found.via, seenAt: Date.now() };
+    await fsp.mkdir(path.join(dir, key), { recursive: true });
+    await writeAtomic(path.join(dir, key, 'car.json'), JSON.stringify(c));
+    cars.set(key, c);
+    log?.info?.(`CAN index: car ${key} is a ${found.model ? `Model ${found.model}` : 'car'}${found.year ? ` of ${found.year}` : ''} (its VIN, ${found.via})`);
+    return true;
+  }
   const doneFile = path.join(dir, 'done.json');
   let done = null;
   const loadDone = async () => {
@@ -321,15 +373,16 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
     rawCache.delete(`${key}/${minute}`);
     generation++;
   }
-  async function mergeSignals(key, seen) {
+  async function mergeSignals(key, seen, profile) {
     const file = path.join(dir, key, 'signals.json');
     let all = {};
     try { all = JSON.parse(await fsp.readFile(file, 'utf8')) || {}; } catch { /* first */ }
-    // (what an older format wrote is dropped: its names can be gone, or mean something else now;
-    // CAR_FORMAT's are still right)
+    // (what an older format, or another DBC set, wrote is dropped: its names can be gone, or mean
+    // something else now; CAR_FORMAT's are still right for the default set)
+    const now = partFormat(profile);
     for (const [name, meta] of Object.entries(all)) {
-      if (!stillRight(meta?.fmt)) delete all[name];
-      else if (meta.fmt !== FORMAT) all[name] = { ...meta, fmt: FORMAT };
+      if (!stillRight(meta?.fmt, profile)) delete all[name];
+      else if (meta.fmt !== now) all[name] = { ...meta, fmt: now };
     }
     for (const [name, meta] of seen) all[name] = meta;
     await fsp.mkdir(path.join(dir, key), { recursive: true });
@@ -337,14 +390,17 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
   }
 
   /** Index one log: decode every frame, write its minutes (rawOnly: only the raw snapshots, for a log indexed before them). */
-  async function indexLog(key, name, { rawOnly = false, trust } = {}) {
+  async function indexLog(key, name, { rawOnly = false, trust, profile } = {}) {
+    profile ||= await profileFor(key);
+    const fmtNow = partFormat(profile);
     const file = path.join(canDir, key, name);
     let side = {};
     try { side = JSON.parse(await fsp.readFile(`${file}.json`, 'utf8')) || {}; } catch { /* no sidecar */ }
-    const busOf = busMapOf(side);
+    const busOf = busMapOf(side, busesOfSet(profile));
     const internal = internalBusesOf(side);
     const carSent = new Map(); // INTERNAL_BUS_MESSAGES id -> when a car bus last sent it (that one wins)
-    const { messages } = dbc();
+    const { messages } = dbcOf(profile);
+    const vin = vinCollector(); // the car's VIN (0x405, or 0x508 on a legacy Model S/X), on whichever bus
     const seen = new Map();
     let minute = null;
     let minuteStart = 0;
@@ -367,7 +423,7 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
       if (!bucket) return;
       flushPending();
       flushRaw();
-      writes.push([minute, bucket, rawBucket, { span: rawLog.span, ids: rawLog.ids, ...(trust ? { trust } : {}), fmt: FORMAT }]);
+      writes.push([minute, bucket, rawBucket, { span: rawLog.span, ids: rawLog.ids, ...(trust ? { trust } : {}), fmt: fmtNow }]);
       bucket = null;
       rawBucket = null;
     };
@@ -428,6 +484,7 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
           }
           if (r.n < RAW_PER_SEC) { keepRaw(idKey, t, hex); r.n++; r.pending = null; } else r.pending = [t, hex];
         }
+        if (!vin.vin && (m[4] === '405' || m[4] === '508')) vin.add(parseInt(m[4], 16), Buffer.from(hex, 'hex'));
         if (rawOnly) continue;
         const id = parseInt(m[4], 16);
         const msg = messages.get(id);
@@ -449,7 +506,7 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
         for (const [sig, v] of decodeFrame(msg, bytes)) {
           const nm = sig.series || sig.name;
           if (only && !only.has(nm)) continue;
-          if (!seen.has(nm)) seen.set(nm, { label: sig.comment || sig.name, signal: sig.name, unit: sig.unit || '', min: sig.min, max: sig.max, factor: sig.factor, offset: sig.offset, values: sig.values, bus: sig.bus, message: sig.message, id: sig.messageId, fmt: FORMAT });
+          if (!seen.has(nm)) seen.set(nm, { label: sig.comment || sig.name, signal: sig.name, unit: sig.unit || '', min: sig.min, max: sig.max, factor: sig.factor, offset: sig.offset, values: sig.values, bus: sig.bus, message: sig.message, id: sig.messageId, fmt: fmtNow });
           let s = last.get(nm);
           if (!s) { s = { pt: -Infinity, v: undefined, pending: null }; last.set(nm, s); }
           const value = Math.round(v * 1e6) / 1e6;
@@ -479,9 +536,14 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
     const truncated = Boolean(why);
     if (truncated && !frames) throw new Error(`xz could not read ${name}: ${why}`);
     for (const w of writes) await writeOut(w);
-    if (!rawOnly) await mergeSignals(key, seen);
+    if (!rawOnly) await mergeSignals(key, seen, profile);
+    // the car said which it is (a sidecar may say it too): kept for the key
+    const sideVin = typeof side?.vin === 'string' ? side.vin : typeof side?.car?.vin === 'string' ? side.car.vin : null;
+    const fromSide = sideVin ? decodeVin(sideVin) : null;
+    const found = vin.vin || (fromSide ? { ...fromSide, via: 'sidecar' } : null);
+    const carChanged = found ? await noteCar(key, found).catch(() => false) : false;
     const minutes = written + (minute ? 1 : 0);
-    return { frames, minutes, from: first, to: lastT, ...(truncated ? { truncated: `xz stopped early: ${why}` } : {}) };
+    return { frames, minutes, from: first, to: lastT, profile, carChanged, ...(truncated ? { truncated: `xz stopped early: ${why}` } : {}) };
   }
 
   /** Every complete log not indexed yet, oldest first. */
@@ -493,6 +555,8 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
     for (const key of keys) {
       let names = [];
       try { names = await fsp.readdir(path.join(canDir, key)); } catch { continue; }
+      // (the car's DBC set is in the stamp: a car whose set changes has its logs decoded again)
+      const profile = await profileFor(key);
       for (const name of names) {
         const n = parseName(name);
         if (!n || n.sidecar) continue;
@@ -501,7 +565,7 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
         const file = `${st.size}/${Math.round(st.mtimeMs)}`;
         // the sidecar is part of the stamp: one that comes (or changes) later has the log read again with its bus map
         const side = await sidecarStamp(path.join(canDir, key, name));
-        const stamp = `${file}/${FORMAT}${side}`;
+        const stamp = `${file}/${FORMAT}${profileStamp(profile)}${side}`;
         const had = d[`${key}/${name}`];
         if (had === stamp) continue;
         // only logs whose check allows it (canTrust: verified, unsigned before pairing, or used anyway);
@@ -509,7 +573,7 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
         const ok = await usable(key, name).catch(() => ({ use: false }));
         if (!ok.use) continue;
         // (a log indexed before the raw snapshots, or by an older FORMAT: decoded again whole)
-        out.push({ key, name, stamp, startedAt: n.startedAt, rawOnly: false, trust: ok.trust });
+        out.push({ key, name, stamp, startedAt: n.startedAt, rawOnly: false, trust: ok.trust, profile });
       }
     }
     return out.sort((a, b) => a.startedAt - b.startedAt);
@@ -533,7 +597,9 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
           status.current = job.name;
           progress();
           try {
-            const r = await indexLog(job.key, job.name, { rawOnly: job.rawOnly, trust: job.trust });
+            const r = await indexLog(job.key, job.name, { rawOnly: job.rawOnly, trust: job.trust, profile: job.profile });
+            // a VIN that changes the car's set: its logs are looked at again (this one too), after this pass
+            if (r.carChanged && (await profileFor(job.key)) !== job.profile) again = true;
             (await loadDone())[`${job.key}/${job.name}`] = job.stamp;
             await saveDone();
             status.indexed++;
@@ -651,14 +717,15 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
    * by id; the first change is the payload at `from` when there is one before.
    */
   async function raw(keys, from, to) {
-    const { messages } = dbc();
     const out = new Map();
+    let messages = null;
     const entry = (idKey) => {
       let e = out.get(idKey);
-      if (!e) { e = { key: idKey, pts: [], frames: 0, ms: 0, bus: null, internal: false }; out.set(idKey, e); }
+      if (!e) { e = { key: idKey, pts: [], frames: 0, ms: 0, bus: null, internal: false, messages }; out.set(idKey, e); }
       return e;
     };
     for (const key of keys) {
+      messages = dbcOf(await profileFor(key)).messages; // (each key's names from its own car's set)
       // the minute before as well, for each id's payload at `from`
       for (let t = Math.floor(from / 60000) * 60000 - 60000; t <= to; t += 60000) {
         const data = await readRaw(key, minuteKey(t));
@@ -689,7 +756,7 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
       for (let k = i; k < e.pts.length && e.pts[k][0] <= to; k++) if (!changes.length || changes[changes.length - 1][1] !== e.pts[k][1]) changes.push(e.pts[k]);
       if (!changes.length) continue;
       const [iface, hexId] = e.key.split(':');
-      const msg = messages.get(parseInt(hexId, 16));
+      const msg = e.messages.get(parseInt(hexId, 16));
       // (no bus mapped: not decoded, so not known, but for INTERNAL_BUS_MESSAGES on an internal bus;
       // a message with no signals: its layout is not known)
       const known = decodedOn(msg, parseInt(hexId, 16), iface, e.bus ? { [iface]: e.bus } : {}, e.internal ? [iface] : []);
@@ -781,10 +848,10 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
    * The DBC message of an id ("can0:2E5") on a bus map (and the interfaces it calls internal), or
    * null when the DBC does not know it there.
    */
-  function messageName(idKey, busOf = DEFAULT_BUSES, internal = []) {
+  function messageName(idKey, busOf = DEFAULT_BUSES, internal = [], profile = DEFAULT_PROFILE) {
     const [iface, hexId] = String(idKey).split(':');
     const id = parseInt(hexId, 16);
-    const msg = dbc().messages.get(id);
+    const msg = dbcOf(profile).messages.get(id);
     // (decoded only there: on a bus with no DBC name nothing is but INTERNAL_BUS_MESSAGES on an
     // internal one, and a message with no signals has no known layout)
     return decodedOn(msg, id, iface, busOf, internal) ? msg.name : null;
@@ -798,12 +865,13 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
    */
   async function idSummary(key, from, to, { stop = null } = {}) {
     const out = new Map();
+    const profile = await profileFor(key);
     const buses = new Map(); // log name -> its bus map (from its sidecar)
     const busesOf = async (name) => {
       if (!buses.has(name)) {
         let side = {};
         if (parseName(name)) { try { side = JSON.parse(await fsp.readFile(path.join(canDir, key, `${name}.json`), 'utf8')) || {}; } catch { /* none */ } }
-        buses.set(name, { busOf: busMapOf(side), internal: internalBusesOf(side) });
+        buses.set(name, { busOf: busMapOf(side, busesOfSet(profile)), internal: internalBusesOf(side) });
       }
       return buses.get(name);
     };
@@ -822,7 +890,7 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
           let e = out.get(idKey);
           if (!e) {
             const [iface, hexId] = idKey.split(':');
-            e = { key: idKey, bus: iface, id: hexId, name: messageName(idKey, busOf, internal), frames: 0, ms: 0, firstSeen: t + a, lastSeen: t + b, minutes: new Set() };
+            e = { key: idKey, bus: iface, id: hexId, name: messageName(idKey, busOf, internal, profile), frames: 0, ms: 0, firstSeen: t + a, lastSeen: t + b, minutes: new Set() };
             out.set(idKey, e);
           }
           e.frames += n;
@@ -900,7 +968,7 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
   // counts stay: they are not decoded). A minute from before the per-log records keeps having none
   // (indexing its log again relies on that), without its signals.
   const packFile = path.join(dir, 'packed.json');
-  const PACKED = `${fmt.ENC}/${FORMAT}`;
+  const packedStamp = (profile) => `${fmt.ENC}/${FORMAT}${profileStamp(profile)}`;
   async function encOf(file) {
     let fh;
     try {
@@ -911,13 +979,13 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
       return /"enc":"(\w+)"/.exec(head)?.[1] || null;
     } catch { return undefined; } finally { await fh?.close().catch(() => {}); }
   }
-  /** Whether a minute's parts were all decoded by this FORMAT or CAR_FORMAT (none from before the per-log records). */
-  const decodedNow = (logs) => Boolean(logs) && typeof logs === 'object' && !Object.hasOwn(logs, '') && Object.values(logs).every((p) => stillRight(p?.fmt));
-  /** A minute file's state: 'ok', 'layout' (an older layout only), 'stale' (an older FORMAT's signals), or null (unreadable). */
-  async function minuteState(file) {
+  /** Whether a minute's parts were all decoded by this FORMAT (or CAR_FORMAT), with the car's set (none from before the per-log records). */
+  const decodedNow = (logs, profile) => Boolean(logs) && typeof logs === 'object' && !Object.hasOwn(logs, '') && Object.values(logs).every((p) => stillRight(p?.fmt, profile));
+  /** A minute file's state: 'ok', 'layout' (an older layout only), 'stale' (an older FORMAT's, or another set's, signals), or null (unreadable). */
+  async function minuteState(file, profile) {
     const head = await fmt.readHead(file);
     if (!head) return null;
-    if (!decodedNow(head.logs)) return 'stale';
+    if (!decodedNow(head.logs, profile)) return 'stale';
     return (await encOf(file)) === fmt.ENC ? 'ok' : 'layout';
   }
   async function repack({ shouldStop = () => false } = {}) {
@@ -928,6 +996,8 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
     let n = 0;
     let stripped = 0;
     for (const key of keys) {
+      const profile = await profileFor(key);
+      const PACKED = packedStamp(profile);
       if (packed[key] === PACKED) continue;
       let names = [];
       try { names = await fsp.readdir(path.join(dir, key)); } catch { continue; }
@@ -941,11 +1011,11 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
         if (shouldStop()) { finished = false; break; }
         while (!idle() && !shouldStop()) await new Promise((r) => setTimeout(r, 2000));
         const file = path.join(dir, key, name);
-        const was = isMinute ? await minuteState(file) : null;
+        const was = isMinute ? await minuteState(file, profile) : null;
         if (isMinute ? was !== 'layout' && was !== 'stale' : (await encOf(file)) !== null) continue; // current (or unreadable)
         await withLock(key, async () => {
           if (isMinute) {
-            const state = await minuteState(file);
+            const state = await minuteState(file, profile);
             if (state !== 'layout' && state !== 'stale') return;
             const minute = name.slice(0, 13);
             const data = await readMinute(key, minute);
@@ -959,8 +1029,8 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
                 logs = { ...logs };
                 // only the points of the parts this FORMAT decoded (its frame counts stay; nothing of
                 // an older decoding is left)
-                signals = onlyInSpans(signals, Object.values(logs).filter((part) => stillRight(part?.fmt)));
-                for (const [ln, part] of Object.entries(logs)) if (!stillRight(part?.fmt)) logs[ln] = { ...part, fmt: FORMAT };
+                signals = onlyInSpans(signals, Object.values(logs).filter((part) => stillRight(part?.fmt, profile)));
+                for (const [ln, part] of Object.entries(logs)) if (!stillRight(part?.fmt, profile)) logs[ln] = { ...part, fmt: partFormat(profile) };
               }
               const t = minuteOfFile(name);
               from = Math.min(from, t);
@@ -994,7 +1064,7 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
     return n;
   }
 
-  return { kick, trustOf, indexLog, series, clipData, raw, signals, forget, removeLog, minutesIn, minuteTimes, idSummary, newIds, repack, messageName, generation: () => generation, status: () => ({ ...status }), pendingLogs };
+  return { kick, trustOf, indexLog, series, clipData, raw, signals, forget, removeLog, minutesIn, minuteTimes, idSummary, newIds, repack, messageName, carOf, profileFor, generation: () => generation, status: () => ({ ...status }), pendingLogs };
 }
 
-module.exports = { createCanIndex, minuteKey, busMapOf, internalBusesOf, FORMAT, CAR_FORMAT, INTERNAL_BUS_MESSAGES, INTERNAL_YIELD_MS, RAW_PER_SEC, CLIP_STEP_MS, IFACE };
+module.exports = { createCanIndex, minuteKey, busMapOf, internalBusesOf, FORMAT, CAR_FORMAT, INTERNAL_BUS_MESSAGES, INTERNAL_YIELD_MS, RAW_PER_SEC, CLIP_STEP_MS, IFACE, profileStamp, partFormat, stillRight };

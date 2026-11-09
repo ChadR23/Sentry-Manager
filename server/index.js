@@ -40,6 +40,7 @@ const { Logger } = require('./log');
 const { ManagerDB } = require('./db');
 const { Auth, parseCookies } = require('./auth');
 const { VehicleManager } = require('./vehicles');
+const carModels = require('./carModels');
 const { Inventory } = require('./inventory');
 const { RecycleBin, formatBytes } = require('./recycleBin');
 const { createScrubFrames } = require('./scrubFrames');
@@ -328,6 +329,7 @@ async function main() {
   let arrivalRef = null; // every arrived clip's checksum for Sentry USB (arrivalChecksums.js, set where the converter is known)
   let canUploadRef = null; // CAN Bridge uploads (set where canLogs is made)
   let canPruneRef = null; // CAN logs that go with their footage (canPrune.js, set where canLogs is made)
+  let canIndexRef = null; // the CAN index (set where it is made): a vehicle's car model changed
   let canFootageRef = null; // which recordings have CAN Bridge data (canFootage.js, set where the CAN index is made)
   let recPlacesRef = null; // where a recording was, for its place tag (recordingPlace.js, set with canFootageRef)
   /** The CAN logs footage would take with it ("Also delete its CAN data"), counted; null: no key mapped to the car. */
@@ -727,6 +729,9 @@ async function main() {
       capped
     };
   }
+  // the car each vehicle is (its model and year: which DBC set decodes its CAN data), set below with the CAN index
+  let carSummaryRef = null;
+  const withCar = async (v) => ({ ...vehicleSummary(v), car: carSummaryRef ? await carSummaryRef(v).catch(() => null) : { setting: carModels.normalizeCar(v.car), detected: null, ...carModels.resolveCar(v.car, null) } });
   const vehicleSummary = (v) => ({
     ...vehicles.publicView(v),
     security: v.source.type === 'smb' ? securitySummary({ encrypt: v.source.encrypt !== false, version: v.source.version }) : null,
@@ -1198,11 +1203,14 @@ async function main() {
     return undefined;
   });
 
-  r.add('GET', '/api/vehicles', () => {
+  r.add('GET', '/api/vehicles', async () => {
     const list = vehicles.list();
     // days with footage from any vehicle (two cars on one day: one day)
     const footageDays = new Set(list.flatMap((v) => inventory.footageDays(v.id))).size;
-    return { vehicles: list.map(vehicleSummary), footageDays };
+    const out = [];
+    for (const v of list) out.push(await withCar(v));
+    // (the choices of the vehicle settings' "Car model" and "Year")
+    return { vehicles: out, footageDays, carModels: carModels.choices() };
   });
 
   // ---- Export: a stretch of footage rendered into one MP4 (server/exporter.js)
@@ -1360,7 +1368,7 @@ async function main() {
     requireConfirmed(req);
     const v = vehicles.add(body || {});
     audit.info(`Vehicle "${v.name}" (${v.id}) added, ${describeSource(v.source)}: ${by(req, user)}`);
-    return vehicleSummary(v);
+    return withCar(v);
   });
   r.add('PUT', '/api/vehicles/:id', async (req, res, { params, body, user }) => {
     const before = vehicleOr404(params.id);
@@ -1373,7 +1381,15 @@ async function main() {
     } else if (before.name !== v.name || before.timezone !== v.timezone) {
       audit.info(`Vehicle ${v.id} renamed or time zone changed: ${by(req, user)}`);
     }
-    return vehicleSummary(v);
+    const carWas = carModels.normalizeCar(before.car);
+    const carNow = carModels.normalizeCar(v.car);
+    if (carWas.model !== carNow.model || carWas.generation !== carNow.generation) {
+      const say = (c) => (c.model === 'auto' ? 'Automatic' : `Model ${c.model}${c.generation === 'auto' ? '' : ` ${carModels.generationById(c.generation)?.label || c.generation}`}`);
+      audit.info(`Vehicle ${v.id} car model: ${say(carWas)} -> ${say(carNow)}: ${by(req, user)}`);
+      // (a car whose DBC set changes has its CAN logs decoded again, in the background)
+      canIndexRef?.kick();
+    }
+    return withCar(v);
   });
   // Space saved starts over for one vehicle (its footage is gone, say).
   // Only the number: no footage or conversion is touched.
@@ -1992,12 +2008,15 @@ async function main() {
     canProgressTimer = setTimeout(() => { canProgressTimer = null; canProgressAt = Date.now(); announce('can'); }, wait);
     canProgressTimer.unref?.();
   };
-  const canIndex = createCanIndex({ usable: (k, n) => canTrust.usable(k, n), canDir: path.join(DATA, 'can'), dir: path.join(DATA, 'can-index'), log: logger.scope('can'), idle: () => !converterRunning(), onIndexed: (key, from, to) => {
+  // which DBC set decodes a car key's logs: its vehicle's "Car model" setting, else what the car's
+  // VIN says (carModels.js); a change has that key's logs decoded again (canIndex.js)
+  const canIndex = createCanIndex({ usable: (k, n) => canTrust.usable(k, n), canDir: path.join(DATA, 'can'), dir: path.join(DATA, 'can-index'), log: logger.scope('can'), idle: () => !converterRunning(), profileOf: async (key) => (await carForKey(key)).profile, onIndexed: (key, from, to) => {
     archiveGapRef?.indexed(key, from, to);
     // and the cars of that key are checked for archive gaps again (CAN driving with no footage)
     if (archiveGapRef) for (const v of vehicles.list()) canKeysFor(v.id).then((keys) => { if (keys.includes(key)) archiveGapRef.soon(v.id); }).catch(() => {});
     canSync?.indexed(key, from, to).catch(() => {});
   }, onProgress: canProgress });
+  canIndexRef = canIndex;
   setTimeout(() => canIndex.kick(), 20_000).unref?.();
   canFootageRef = createCanFootage({ keysFor: (vid) => canKeysFor(vid), minuteTimes: (key) => canIndex.minuteTimes(key), generation: () => canIndex.generation(), startOf: (v, name) => canStartOf(v, name) });
   recPlacesRef = createRecordingPlaces({
@@ -2221,6 +2240,7 @@ async function main() {
     if (vid) map[key] = vid; else delete map[key];
     db.set('can-vehicles', map);
     audit.info(`CAN car ${key} is ${vid || 'no vehicle'}: ${by(req, user)}`);
+    canIndex.kick(); // (the car's model can differ: its logs are decoded with its DBC set)
     return { map };
   });
   // ---- who may upload: one token per car (docs/can-bridge-api.md, "Tokens")
@@ -2563,6 +2583,31 @@ async function main() {
     const list = vehicles.list();
     return list.find((v) => v.id === vid) || (!vid && list.length === 1 ? list[0] : null);
   };
+  /** The VIN the car of a vehicle sent (the latest any of its CAN keys kept), or null. */
+  async function detectedCarOf(vid) {
+    let best = null;
+    for (const k of await canKeysFor(vid)) {
+      const c = await canIndex.carOf(k);
+      if (c && (!best || (c.seenAt || 0) > (best.seenAt || 0))) best = c;
+    }
+    return best;
+  }
+  /** What a car key's car is (carModels.resolveCar): its vehicle's setting, its own VIN, else the vehicle's. */
+  async function carForKey(key) {
+    const v = canCarOf(key);
+    const own = await canIndex.carOf(key);
+    return carModels.resolveCar(v?.car, own || (v ? await detectedCarOf(v.id) : null));
+  }
+  /** A vehicle's car for the API: { setting, detected (VIN without its serial number), and what it resolves to }. */
+  async function carSummary(v) {
+    const det = await detectedCarOf(v.id).catch(() => null);
+    return {
+      setting: carModels.normalizeCar(v.car),
+      detected: det ? { model: det.model, year: det.year, plant: det.plant, via: det.via, vin: carModels.maskVin(det.vin), seenAt: det.seenAt } : null,
+      ...carModels.resolveCar(v.car, det)
+    };
+  }
+  carSummaryRef = carSummary;
   const canKeyOr400 = (k) => {
     const key = String(k || '');
     if (!CAN_KEY.test(key)) throw new HttpError(400, 'Give a CAN Bridge car key.');
@@ -2750,7 +2795,7 @@ async function main() {
           name: 'manifest.json', mtime: Date.now(), make: async () => Buffer.from(`${JSON.stringify({
             vehicleKey: key, from: isoOf(from), to: isoOf(to), madeAt: isoOf(Date.now()), logs: manifest,
             ids: { count: (await idsOf()).length, unknown: (await idsOf()).filter((e) => !e.name).length },
-            note: `The .log.xz files are exactly as the CAN Bridge uploaded them and signed them (xz; "format" says which: canbridge-candump-xz/1 is candump text, canbridge-columns-xz/2 the same lines as columns, which only Sentry Six Manager and the CAN Bridge's tools/columns-to-candump.js read).${withText ? ' Each .log beside it is that log as candump text, made from it for this download (not signed: check the .log.xz).' : ''} ids.csv is every CAN id seen in the range, from the index (frames per minute); "unknown" ones are not in the DBC this server decodes with (model3dbc, with the firmware overrides).`
+            note: `The .log.xz files are exactly as the CAN Bridge uploaded them and signed them (xz; "format" says which: canbridge-candump-xz/1 is candump text, canbridge-columns-xz/2 the same lines as columns, which only Sentry Six Manager and the CAN Bridge's tools/columns-to-candump.js read).${withText ? ' Each .log beside it is that log as candump text, made from it for this download (not signed: check the .log.xz).' : ''} ids.csv is every CAN id seen in the range, from the index (frames per minute); "unknown" ones are not in the DBC set this server decodes the car with (its model's: model3dbc with opendbc's and the firmware overrides for a Model 3/Y, docs/can-bridge-api.md).`
           }, null, 2)}\n`)
         }
       ]);
@@ -2865,9 +2910,10 @@ async function main() {
     try { since = parseWhen(query.since, (...a) => zonedToUtc(...a, tz)); } catch (err) { throw new HttpError(400, err.message); }
     if (since === null) throw new HttpError(400, 'Give the date to look from (since).');
     const out = await canIndex.newIds(key, since, { limit: 1000, stop: () => res.destroyed });
+    const profile = await canIndex.profileFor(key);
     const rows = out.appeared.map((x) => {
       const [bus, id] = x.id.split(':');
-      const name = canIndex.messageName(x.id);
+      const name = canIndex.messageName(x.id, undefined, [], profile);
       return { key: x.id, bus, id, name, unknown: !name, firstSeen: x.at, lastSeen: x.lastSeen, minutesSeen: x.seenMinutes, localTime: localTime(x.at, tz) };
     });
     const answer = { key, since, timezone: tz, ids: rows, count: out.appearedCount, idCount: out.idCount, complete: out.complete, scannedMinutes: out.scannedMinutes, totalMinutes: out.totalMinutes };

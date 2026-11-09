@@ -1,0 +1,76 @@
+// Messages model3dbc does not have, from commaai/opendbc (MIT, LICENSE-opendbc.txt;
+// tesla_model3_party.dbc and tesla_model3_vehicle.dbc at commit
+// 27fa1c5d8eed3238a0a78c52ff5abb6cdc807bd2, 2026-11-07), copied as they are there
+// but for the bus (opendbc names the sender; here it is the bus the message came
+// on in the owner's Model Y's logs) and the signals left out below. Read after
+// Model3CAN.dbc and before override.dbc; none of these ids is in either.
+//
+// Checked against the owner's Model Y (VIN year code N: a 2022 car built in
+// Austin, on 2026 firmware; CAN Bridge logs of 2026-11-08, parked, about 2 C
+// outside, 43 minutes). Each one's checksum (the byte sum with the id, opendbc's
+// Tesla checksum) was right in every frame, so the frames are these messages:
+//   0x370 EPAS3S_sysStatus, can1: 24,420 of 24,420 frames. internalSAS 5.7-5.9
+//     deg (0x129 SteeringAngle129 read 3.5-5.9 deg meanwhile), torsion bar
+//     -0.25..0.13 Nm (hands off), rack force -125..25 N, no fault, EAC_INHIBITED.
+//   0x488 DAS_steeringControl, can1: 51,655 of 51,655. Angle request 5.85-6.05
+//     deg (where the wheel is), control type NONE.
+//   0x343 VCRIGHT_status, can0: no checksum in it; vbatProt 15.75-15.92 V (the
+//     12 V battery read 15.77 V on 0x261 meanwhile), 5 V rail 5.01-5.03 V,
+//     mirror and rear defrost heaters off. Left out: VCRIGHT_pcbaTemperature
+//     (read -39 C in a 2 C garage), and VCRIGHT_vehiclePowerStateDBG and
+//     VCRIGHT_swEnStatus (model3dbc has signals of those names in other
+//     messages: they would change those signals' series names).
+// Left out on purpose: 0x489 DAS_redundantBrakingControl (its checksum was wrong
+// in every frame on this car), 0x39B DAS_status (on this car the same data as
+// model3dbc's 0x399 on the chassis bus), 0x286 DI_state (read 112 km/h parked on
+// can0: not this layout there), 0x311 UI_warning (blinkers and high beam flipped
+// every frame while parked).
+
+BO_ 880 EPAS3S_sysStatus: 8 ChassisBus
+ SG_ EPAS3S_sysStatusChecksum : 56|8@1+ (1,0) [0|255] ""  Receiver
+ SG_ EPAS3S_sysStatusCounter : 48|4@1+ (1,0) [0|15] ""  Receiver
+ SG_ EPAS3S_eacStatus : 55|3@0+ (1,0) [0|7] ""  Receiver
+ SG_ EPAS3S_internalSAS : 37|14@0+ (0.1,-819.2) [-819.2|819] "deg"  Receiver
+ SG_ EPAS3S_handsOnLevel : 39|2@0+ (1,0) [0|3] ""  Receiver
+ SG_ EPAS3S_torsionBarTorque : 19|12@0+ (0.01,-20.5) [-20.5|20.45] "Nm"  Receiver
+ SG_ EPAS3S_eacErrorCode : 23|4@0+ (1,0) [0|15] ""  Receiver
+ SG_ EPAS3S_steeringRackForce : 1|10@0+ (50,-25575) [-25575|25575] "N"  Receiver
+ SG_ EPAS3S_steeringFault : 2|1@0+ (1,0) [0|1] ""  Receiver
+ SG_ EPAS3S_steeringReduced : 3|1@0+ (1,0) [0|1] ""  Receiver
+ SG_ EPAS3S_internalSASQF : 4|1@0+ (1,0) [0|1] ""  Receiver
+ SG_ EPAS3S_currentTuneMode : 7|3@0+ (1,0) [0|5] ""  Receiver
+
+BO_ 1160 DAS_steeringControl: 4 ChassisBus
+ SG_ DAS_steeringControlChecksum : 24|8@1+ (1,0) [0|255] ""  Receiver
+ SG_ DAS_steeringControlCounter : 16|4@1+ (1,0) [0|15] ""  Receiver
+ SG_ DAS_steeringControlType : 23|3@0+ (1,0) [0|7] ""  Receiver
+ SG_ DAS_steeringAngleRequest : 6|15@0+ (0.1,-1638.35) [-1638.35|1638.35] "deg"  Receiver
+ SG_ DAS_steeringHapticRequest : 7|1@0+ (1,0) [0|1] ""  Receiver
+
+BO_ 835 VCRIGHT_status: 8 VehicleBus
+ SG_ VCRIGHT_5AVoltage : 18|10@1+ (0.005443676098,0) [0|5.56888] "V"  Receiver
+ SG_ VCRIGHT_loadShedPriority : 0|8@1+ (1,0) [0|255] ""  Receiver
+ SG_ VCRIGHT_rearDefrostState : 11|3@1+ (1,0) [0|4] ""  Receiver
+ SG_ VCRIGHT_vbatProt : 28|12@1+ (0.005443676098,0) [0|22.29185] "V"  Receiver
+ SG_ VCRIGHT_mirrorHeatState : 14|3@1+ (1,0) [0|4] ""  Receiver
+ SG_ VCRIGHT_OTAState : 17|1@1+ (1,0) [0|1] ""  Receiver
+ SG_ VCRIGHT_footwellLightCurrent : 40|12@1- (0.1,0) [-204.8|204.7] "mA"  Receiver
+
+VAL_ 880 EPAS3S_eacStatus 7 "SNA" 2 "EAC_ACTIVE" 4 "LANE_KEEP_ASSIST" 3 "EAC_FAULT" 1 "EAC_AVAILABLE" 5 "EMERGENCY_LANE_KEEP" 0 "EAC_INHIBITED" ;
+VAL_ 880 EPAS3S_handsOnLevel 1 "LEVEL_1" 0 "LEVEL_0" 3 "LEVEL_3" 2 "LEVEL_2" ;
+VAL_ 880 EPAS3S_torsionBarTorque 4095 "SNA" 4094 "UNDEFINABLE_DATA" ;
+VAL_ 880 EPAS3S_steeringRackForce 1023 "SNA" 1022 "NOT_IN_SPEC" ;
+VAL_ 880 EPAS3S_steeringFault 0 "NO_FAULT" 1 "FAULT" ;
+VAL_ 880 EPAS3S_steeringReduced 0 "NORMAL_ASSIST" 1 "REDUCED_ASSIST" ;
+VAL_ 880 EPAS3S_internalSASQF 1 "IN_SPEC" 0 "UNDEFINABLE_ACCURACY" ;
+VAL_ 880 EPAS3S_currentTuneMode 3 "STEERING_TUNE_RWD_COMFORT" 1 "STEERING_TUNE_DM_STANDARD" 5 "STEERING_TUNE_RWD_SPORT" 0 "STEERING_TUNE_DM_COMFORT" 4 "STEERING_TUNE_RWD_STANDARD" 2 "STEERING_TUNE_DM_SPORT" ;
+VAL_ 1160 DAS_steeringControlType 2 "LANE_KEEP_ASSIST" 0 "NONE" 1 "ANGLE_CONTROL" 3 "EMERGENCY_LANE_KEEP" 4 "FSD" ;
+VAL_ 835 VCRIGHT_rearDefrostState 2 "HEATER_STATE_OFF" 4 "HEATER_STATE_FAULT" 1 "HEATER_STATE_ON" 0 "HEATER_STATE_SNA" 3 "HEATER_STATE_OFF_UNAVAILABLE" ;
+VAL_ 835 VCRIGHT_mirrorHeatState 2 "HEATER_STATE_OFF" 4 "HEATER_STATE_FAULT" 1 "HEATER_STATE_ON" 0 "HEATER_STATE_SNA" 3 "HEATER_STATE_OFF_UNAVAILABLE" ;
+
+CM_ SG_ 880 EPAS3S_internalSAS "Steering angle (power steering's own sensor)";
+CM_ SG_ 880 EPAS3S_torsionBarTorque "Steering wheel torque (driver)";
+CM_ SG_ 880 EPAS3S_steeringRackForce "Steering rack force";
+CM_ SG_ 1160 DAS_steeringAngleRequest "Autopilot steering angle request";
+CM_ SG_ 835 VCRIGHT_vbatProt "12V supply at the right body controller";
+CM_ SG_ 835 VCRIGHT_5AVoltage "Right body controller 5 V rail";
