@@ -77,7 +77,10 @@ function fitBar() {
   const tools = inner(qs('.dash-tools'), 4, (k) => (k === pick ? inner(pick, 6, carSize) : w(k)));
   const cs = getComputedStyle(dash);
   const room = dash.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
-  const need = inner(qs('.dash-brand'), 10) + 6 + inner(qs('#nav-a'), 2) + w(qs('.radio')) + inner(qs('#nav-b'), 2) + tools + 4 * 10;
+  // the page groups sit in equal columns either side of the radio: each
+  // side needs room for the longer of the two
+  const side = Math.max(inner(qs('#nav-a'), 2), inner(qs('#nav-b'), 2));
+  const need = inner(qs('.dash-brand'), 10) + 6 + 2 * side + w(qs('.radio')) + tools + 4 * 10;
   dash.classList.toggle('two', need > room);
 }
 new ResizeObserver(() => fitBar()).observe(qs('#dash'));
