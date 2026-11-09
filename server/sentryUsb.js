@@ -29,6 +29,8 @@ const DIR = '.sentryusb';
 const FILE = 'archive-status.json';
 const MAX_BYTES = 64 * 1024;
 const POLL_MS = 60_000;
+const ARRIVED_MS = 1000; // a transfer's progress is counted at most this often
+const IDLE_LOOK_MS = 5000; // otherwise the file is looked at again at most this often when asked
 const RESULTS = new Set(['in_progress', 'ok', 'failed', 'nothing_new']);
 const TS_RE = /(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})/;
 
@@ -301,6 +303,65 @@ function createSentryUsbStatus({ vehicles, now = () => Date.now(), log = null, o
     return next.status;
   }
 
+  // what of a transfer in progress is on the share already: the clip files
+  // (.mp4, not dot-named: an unfinished upload has another name) whose time
+  // is in the transfer's range, counted at most once a second per car, each
+  // file's size read once
+  const arrivedOf = new Map(); // vid -> { key, at, result, sizes, running }
+  const stamp = (name) => String(name).slice(0, 19);
+  async function countArrived(vid) {
+    const c = cache.get(vid);
+    const n = interpret(c?.status || null, now());
+    if (!n.transferring || !n.range || !c?.file) return null;
+    const root = path.dirname(path.dirname(c.file));
+    const key = `${root}|${n.range.first}|${n.range.last}`;
+    let a = arrivedOf.get(vid);
+    if (!a || a.key !== key) { a = { key, at: 0, result: null, sizes: new Map(), running: null }; arrivedOf.set(vid, a); }
+    if (a.result && now() - a.at < ARRIVED_MS) return a.result;
+    if (a.running) return a.running;
+    const first = stamp(n.range.first), last = stamp(n.range.last);
+    const firstDay = first.slice(0, 10), lastDay = last.slice(0, 10);
+    a.running = (async () => {
+      const dirs = [];
+      for (const top of ['RecentClips', 'SentryClips', 'SavedClips', 'TeslaTrackMode']) {
+        let ents;
+        try { ents = await fsp.readdir(path.join(root, top), { withFileTypes: true }); } catch { continue; }
+        dirs.push(path.join(root, top)); // older cars: clips loose in RecentClips
+        for (const d of ents) {
+          if (!d.isDirectory() || d.name.startsWith('.')) continue;
+          const day = d.name.slice(0, 10);
+          if (day >= firstDay && day <= lastDay) dirs.push(path.join(root, top, d.name));
+        }
+      }
+      let files = 0;
+      let bytes = 0;
+      const seen = new Set();
+      for (const dir of dirs) {
+        let names;
+        try { names = await fsp.readdir(dir); } catch { continue; }
+        for (const name of names) {
+          if (name.startsWith('.') || !name.endsWith('.mp4')) continue;
+          const t = stamp(name);
+          if (t < first || t > last) continue;
+          const file = path.join(dir, name);
+          let size = a.sizes.get(file);
+          if (size === undefined) {
+            try { const st = await fsp.stat(file); if (!st.isFile()) continue; size = st.size; } catch { continue; }
+            a.sizes.set(file, size);
+          }
+          seen.add(file);
+          files += 1;
+          bytes += size;
+        }
+      }
+      for (const file of a.sizes.keys()) if (!seen.has(file)) a.sizes.delete(file);
+      a.result = { files, bytes, countedAt: now() };
+      a.at = now();
+      return a.result;
+    })().finally(() => { a.running = null; });
+    return a.running;
+  }
+
   async function poll() {
     for (const v of vehicles.list()) {
       const c = cache.get(v.id);
@@ -312,6 +373,19 @@ function createSentryUsbStatus({ vehicles, now = () => Date.now(), log = null, o
 
   return {
     refresh,
+    /**
+     * When a page asks: the status file looked at again (a stat; re-read only
+     * when it changed) if the last look is older than a second while a
+     * transfer runs, else older than IDLE_LOOK_MS, so a transfer that starts
+     * (or a file that appears) shows within seconds, not at the next scan.
+     */
+    async fresh(vid) {
+      const c = cache.get(vid);
+      const age = c ? now() - (c.readAt || 0) : Infinity;
+      if (age >= (c?.status?.state === 'transferring' ? ARRIVED_MS : IDLE_LOOK_MS)) await refresh(vid).catch(() => null);
+    },
+    /** While a transfer runs: { files, bytes, countedAt } on the share already in its range, else null. */
+    arrived(vid) { return countArrived(vid).catch(() => null); },
     /** The last status read (no I/O), or null. */
     get(vid) { return cache.get(vid)?.status || null; },
     /** interpret() of the last status, now. */
@@ -347,7 +421,7 @@ function createSentryUsbStatus({ vehicles, now = () => Date.now(), log = null, o
       if (timer) timers.clearInterval(timer);
       timer = null;
     },
-    forget(vid) { cache.delete(vid); }
+    forget(vid) { cache.delete(vid); arrivedOf.delete(vid); }
   };
 }
 

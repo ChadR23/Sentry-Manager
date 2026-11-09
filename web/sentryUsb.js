@@ -107,7 +107,8 @@ export function sentryUsbView(s, { timeZone, now = Date.now(), locale, h24 = fal
     const firstDay = clipTime(t.firstClip)?.day || today;
     const last = clip(t.lastClip, firstDay);
     const range = first && last && t.firstClip !== t.lastClip ? ` (from ${first} to ${last})` : first ? ` (${first})` : '';
-    text = `sending ${plural(t.files, 'clip')}${range}${fin(t.expectedFinishAt) ? ` · expected by ${when(t.expectedFinishAt)}` : ''}`;
+    const got = arrivedOf(t);
+    text = `sending ${plural(t.files, 'clip')}${range}${got ? ` · ${got.files.toLocaleString('en-US')} of ${num(t.files).toLocaleString('en-US')} here (${got.pct}%)` : ''}${fin(t.expectedFinishAt) ? ` · expected by ${when(t.expectedFinishAt)}` : ''}`;
   } else if (s.state === 'waiting') {
     tone = 'wait';
     const started = when(t?.startedAt || s.writtenAt);
@@ -133,6 +134,8 @@ export function sentryUsbView(s, { timeZone, now = Date.now(), locale, h24 = fal
   const add = (label, value) => { if (value !== '' && value != null) details.push([label, String(value)]); };
   if (t && (s.state === 'transferring' || s.state === 'waiting')) {
     add(s.state === 'waiting' ? 'Unfinished transfer' : 'Sending', `${plural(t.files, 'clip')}${fin(t.bytes) ? `, ${size(t.bytes)}` : ''}`);
+    const got = s.state === 'transferring' ? arrivedOf(t) : null;
+    if (got) add('On the share so far', `${plural(got.files, 'clip')}${fin(t.bytes) ? `, ${size(got.bytes)} of ${size(t.bytes)}` : `, ${size(got.bytes)}`} · ${got.pct}%`);
     const firstDay = clipTime(t.firstClip)?.day || today;
     if (t.firstClip) add('Clips', t.firstClip === t.lastClip || !t.lastClip ? clip(t.firstClip) : `${clip(t.firstClip)} to ${clip(t.lastClip, firstDay)}`);
     add('Transfer started', when(t.startedAt));
@@ -163,7 +166,20 @@ export function sentryUsbView(s, { timeZone, now = Date.now(), locale, h24 = fal
   add('Status written', when(s.writtenAt, true));
   add('Read by Sentry Manager', when(s.readAt, true));
 
-  return { tone, text, line: `Sentry USB · ${text}`, details, transferring: s.state === 'transferring' && !s.stale, record };
+  const got = t && s.state === 'transferring' && !s.stale ? arrivedOf(t) : null;
+  return { tone, text, line: `Sentry USB · ${text}`, details, transferring: s.state === 'transferring' && !s.stale, record, progress: got ? got.fraction : null };
+}
+
+// what of a transfer is on the share already (the server counts it): { files, bytes, fraction, pct }, or null
+function arrivedOf(t) {
+  const a = t?.arrived;
+  const total = Number(t?.files);
+  if (!a || !Number.isFinite(a.files) || !(total > 0)) return null;
+  // by size when both are known (one long clip is more of the wait than a short one)
+  const bySize = Number(t.bytes) > 0 && Number.isFinite(a.bytes);
+  const fraction = Math.max(0, Math.min(1, bySize ? a.bytes / Number(t.bytes) : a.files / total));
+  // never more than the transfer (a clip already there before it started counts too)
+  return { files: Math.min(a.files, total), bytes: Number(t.bytes) > 0 ? Math.min(a.bytes, Number(t.bytes)) : a.bytes, fraction, pct: Math.floor(fraction * 100) };
 }
 
 // "about 2 h left"
@@ -202,7 +218,7 @@ function recordView(r, when) {
 export function sentryUsbHtml(view, { open = false, tagClass = () => '', note = '' } = {}) {
   if (!view) return '';
   return `<details class="usb-status usb-${view.tone}" data-usb${open ? ' open' : ''}>
-    <summary><span class="usb-tag ${esc(tagClass(view.tone))}">Sentry USB</span><span class="usb-text">${esc(view.text)}</span></summary>
+    <summary><span class="usb-tag ${esc(tagClass(view.tone))}">Sentry USB</span><span class="usb-text">${esc(view.text)}</span>${view.progress != null ? `<span class="usb-bar" role="progressbar" aria-label="Transfer" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.floor(view.progress * 100)}"><i style="width:${(view.progress * 100).toFixed(1)}%"></i></span>` : ''}</summary>
     <dl class="usb-details">${view.details.map(([k, v]) => `<div><dt>${esc(k)}</dt><dd>${esc(v)}</dd></div>`).join('')}</dl>
     ${view.record?.canBackfill ? `<form class="usb-backfill" data-usb-backfill>
       <label><input type="checkbox" name="older"${view.record.older ? ' checked' : ''}> Record checksums for older clips</label>
@@ -221,6 +237,8 @@ const CSS = `
 :where(.usb-status[open]) summary::after{content:'Hide \\25BE'}
 :where(.usb-status) summary:focus-visible{outline:2px solid currentColor;outline-offset:2px}
 :where(.usb-status) .usb-tag{flex:none}
+:where(.usb-status) .usb-bar{order:3;flex:1 0 100%;height:4px;border-radius:2px;background:rgba(127,127,127,.25);overflow:hidden}
+:where(.usb-status) .usb-bar i{display:block;height:100%;background:currentColor;opacity:.8;transition:width .9s linear}
 :where(.usb-status) .usb-text{min-width:0;flex:1 1 240px;overflow-wrap:anywhere}
 :where(.usb-stale) .usb-text{opacity:.6}
 :where(.usb-status) .usb-details{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:8px 18px;margin:0;padding:4px 12px 12px}
@@ -241,7 +259,15 @@ function addCss() {
   document.head.append(st);
 }
 
-const POLL_MS = 60000;
+// while Sentry USB sends or older clips' checksums are recorded: every
+// second while the page is in view, every 15 s while it is in the background
+const LIVE_MS = 1000;
+const HIDDEN_MS = 15000;
+const liveMs = () => (typeof document !== 'undefined' && document.hidden ? HIDDEN_MS : LIVE_MS);
+// otherwise every 5 s in view (a transfer that starts shows at once), a minute in the background
+const IDLE_MS = 5000;
+const IDLE_HIDDEN_MS = 60000;
+const idleMs = () => (typeof document !== 'undefined' && document.hidden ? IDLE_HIDDEN_MS : IDLE_MS);
 const cache = new Map(); // vehicle id -> { s, at }
 
 // a highlight inside el holds a redraw (the same rule as every live page)
@@ -254,7 +280,7 @@ function selecting(el) {
 
 /**
  * Shows the line in el for this vehicle: the last known status at once, then
- * the server's; every 60 s while Sentry USB is sending. el stays empty and
+ * the server's; every second while Sentry USB is sending. el stays empty and
  * hidden when there is nothing to show (no status file, an older server).
  */
 // open or closed as the viewer last left it (this browser), open at first
@@ -271,6 +297,7 @@ export function mountSentryUsb(el, vehicle, { tagClass, h24 = () => false } = {}
   let dead = false;
   let last = null;
   let note = '';
+  let live = false;
   const id = vehicle?.id;
   const draw = (s) => {
     if (dead || !el.isConnected) return;
@@ -282,9 +309,8 @@ export function mountSentryUsb(el, vehicle, { tagClass, h24 = () => false } = {}
     if (html !== last) { el.innerHTML = html; last = html; }
     el.hidden = !html;
     clearTimeout(timer);
-    // every 60 s while Sentry USB sends; every 10 s while older clips are recorded
-    if (view?.record?.backlog) timer = setTimeout(load, 10000);
-    else if (view?.transferring) timer = setTimeout(load, POLL_MS);
+    live = Boolean(view?.record?.backlog || view?.transferring);
+    timer = setTimeout(load, live ? liveMs() : idleMs());
   };
   const load = async () => {
     if (dead || !id) return;
@@ -322,6 +348,9 @@ export function mountSentryUsb(el, vehicle, { tagClass, h24 = () => false } = {}
   // toggle does not bubble: caught on the way down
   const toggle = (ev) => { if (ev.target?.matches?.('details[data-usb]')) saveOpen(ev.target.open); };
   el.addEventListener('toggle', toggle, true);
+  // back in view: at once, not after the background wait
+  const seen = () => { if (!document.hidden) { clearTimeout(timer); load(); } };
+  document.addEventListener('visibilitychange', seen);
   el.addEventListener('submit', submit);
   el.addEventListener('change', change);
   addCss();
@@ -332,6 +361,6 @@ export function mountSentryUsb(el, vehicle, { tagClass, h24 = () => false } = {}
   load();
   return {
     refresh: load,
-    destroy() { dead = true; clearTimeout(timer); el.removeEventListener('submit', submit); el.removeEventListener('change', change); el.removeEventListener('toggle', toggle, true); }
+    destroy() { dead = true; clearTimeout(timer); el.removeEventListener('submit', submit); el.removeEventListener('change', change); el.removeEventListener('toggle', toggle, true); document.removeEventListener('visibilitychange', seen); }
   };
 }

@@ -93,9 +93,13 @@ test('Sentry USB: nothing shown without a status file; the markup escapes what t
   assert.equal(m.clipTime('RecentClips/x.mp4'), null);
 });
 
-test('Sentry USB: polls every 60 s only while sending, and a highlight holds the redraw', () => {
-  assert.match(SRC, /const POLL_MS = 60000;/);
-  assert.match(SRC, /if \(view\?\.transferring\) timer = setTimeout\(load, POLL_MS\);/);
+test('Sentry USB: every second while sending or recording (15 s in the background), and a highlight holds the redraw', () => {
+  assert.match(SRC, /const LIVE_MS = 1000;/);
+  assert.match(SRC, /const HIDDEN_MS = 15000;/);
+  assert.match(SRC, /timer = setTimeout\(load, live \? liveMs\(\) : idleMs\(\)\);/);
+  assert.match(SRC, /const IDLE_MS = 5000;/, 'a transfer that starts shows within seconds');
+  assert.match(SRC, /document\.addEventListener\('visibilitychange', seen\)/, 'back in view: at once');
+  assert.match(SRC, /document\.removeEventListener\('visibilitychange', seen\)/);
   assert.match(SRC, /if \(selecting\(el\)\)/);
   assert.match(SRC, /if \(dead \|\| !el\.isConnected\) return;/, 'stops when the page is gone');
   assert.match(SRC, /fetch\(`\/api\/vehicles\/\$\{encodeURIComponent\(id\)\}\/sentry-usb`/);
@@ -173,5 +177,18 @@ test('Sentry USB details: the checksums Sentry Manager records, the older clips\
   assert.equal(Object.fromEntries((await view(BASE)).details)['Checksums recorded'], undefined, 'an older server: no row');
   assert.match(SRC, /fetch\(`\/api\/vehicles\/\$\{encodeURIComponent\(id\)\}\/sentry-usb\/record`, \{\s*method: 'POST'/);
   assert.match(SRC, /body: JSON\.stringify\(\{ older: box\.checked \}\)/);
-  assert.match(SRC, /if \(view\?\.record\?\.backlog\) timer = setTimeout\(load, 10000\);/);
+  assert.match(SRC, /live = Boolean\(view\?\.record\?\.backlog \|\| view\?\.transferring\)/, "live while older clips are recorded");
+});
+
+test('Sentry USB sending: how much is on the share already, in the line, the details and a bar', async () => {
+  const s = { ...BASE, state: 'transferring', transfer: { ...TRANSFER, arrived: { files: 12, bytes: 536870912, countedAt: NOW } } };
+  const v = await view(s);
+  assert.match(v.text, /sending 48 clips .* · 12 of 48 here \(25%\)/);
+  assert.equal(v.progress, 0.25);
+  assert.ok(v.details.some(([k, val]) => k === 'On the share so far' && /^12 clips, .* of .* · 25%$/.test(val)));
+  const html = (await load()).sentryUsbHtml(v);
+  assert.match(html, /class="usb-bar" role="progressbar"[^>]*aria-valuenow="25"><i style="width:25\.0%"><\/i>/);
+  const idle = await view(BASE);
+  assert.equal(idle.progress, null);
+  assert.doesNotMatch((await load()).sentryUsbHtml(idle), /usb-bar/);
 });

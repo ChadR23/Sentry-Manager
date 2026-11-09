@@ -2030,8 +2030,12 @@ async function main() {
   const sentryUsbView = (v, user) => ({ ...sentryUsb.api(v.id), record: { ...arrivalRef.view(v.id), canBackfill: accounts.roleOf(user) === 'admin' } });
   r.add('GET', '/api/vehicles/:id/sentry-usb', async (req, res, { params, user }) => {
     const v = vehicleOr404(params.id);
-    if (!sentryUsb.known(v.id)) await sentryUsb.refresh(v.id).catch(() => null);
-    return sentryUsbView(v, user);
+    // while a transfer runs the page asks every second: the status file is
+    // looked at again (a stat) and what has arrived on the share is counted
+    await sentryUsb.fresh(v.id);
+    const view = sentryUsbView(v, user);
+    if (view.transfer && view.state === 'transferring') view.transfer.arrived = await sentryUsb.arrived(v.id);
+    return view;
   });
   // "Record checksums for older clips" on or off for the car: { older: true | false }
   // (admin: a POST a watch-only account may not make)

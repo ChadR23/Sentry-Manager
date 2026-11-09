@@ -488,6 +488,43 @@ test('status: read per car from the TeslaCam folder, cached by mtime, polled whi
   }
 });
 
+test('status: while sending, the clips of the transfer already on the share are counted, once a second at most', async () => {
+  const root = tmp();
+  try {
+    const carRoot = path.join(root, 'car');
+    const share = path.join(carRoot, 'TeslaCam');
+    fs.mkdirSync(path.join(share, '.sentryusb'), { recursive: true });
+    const file = path.join(share, '.sentryusb', 'archive-status.json');
+    const v = { id: 'car', timezone: 'UTC' };
+    const vehicles = { list: () => [v], get: (id) => (id === 'car' ? v : null), rootOf: () => carRoot, studioRoot: () => share };
+    let clock = Date.UTC(2026, 10, 8, 13, 32);
+    const status = createSentryUsbStatus({ vehicles, now: () => clock, timers: { setInterval: () => 1, clearInterval: () => {} } });
+    fs.writeFileSync(file, JSON.stringify(STATUS));
+    await status.refresh('car');
+    assert.equal(await status.arrived('car'), null, 'not sending: nothing counted');
+    fs.writeFileSync(file, JSON.stringify(transferring(Date.UTC(2026, 10, 8, 13, 31) / 1000)));
+    fs.utimesSync(file, new Date(Date.now() + 5000), new Date(Date.now() + 5000));
+    await status.refresh('car');
+    const put = (rel, size) => { const f = path.join(share, rel); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, Buffer.alloc(size)); };
+    put('RecentClips/2026-11-08/2026-11-08_13-10-00-front.mp4', 100);
+    put('RecentClips/2026-11-08/2026-11-08_13-30-00-back.mp4', 50);
+    put('RecentClips/2026-11-08/2026-11-08_13-30-00-right_repeater.mp4', 25); // same minute as the last clip: in
+    put('SentryClips/2026-11-08_13-05-00/2026-11-08_13-00-00-front.mp4', 10);
+    put('SentryClips/2026-11-08_13-05-00/event.json', 5); // not a clip
+    put('RecentClips/2026-11-08/2026-11-08_12-59-00-front.mp4', 1000); // before the range
+    put('RecentClips/2026-11-08/2026-11-08_13-31-00-front.mp4', 1000); // after it
+    put('RecentClips/2026-11-08/.sentryusb-partial/2026-11-08_13-20-00-front.mp4', 1000); // still uploading
+    put('RecentClips/2026-11-08/2026-11-08_13-15-00-front.mp4.mismatch-1762646400', 1000); // set aside
+    assert.deepEqual(await status.arrived('car'), { files: 4, bytes: 185, countedAt: clock });
+    put('RecentClips/2026-11-08/2026-11-08_13-11-00-front.mp4', 15);
+    assert.equal((await status.arrived('car')).files, 4, 'within the second: the last count');
+    clock += 1000;
+    assert.deepEqual(await status.arrived('car'), { files: 5, bytes: 200, countedAt: clock });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // ── archive gaps and automatic conversion ─────────────────────────────────
 
 const key = (ms) => new Date(ms).toISOString().slice(0, 19).replace('T', '_').replace(/:/g, '-');
