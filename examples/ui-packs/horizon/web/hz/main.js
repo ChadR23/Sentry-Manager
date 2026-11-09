@@ -1,12 +1,12 @@
 // Horizon shell: the dashboard HUD strip with its radio display, the phone tuner
 // bar and quick-action button, routing, keyboard, live updates and badges.
 import { qs, qsa, h, ico, api, conv, app, car, pickCar, loadCars, loadNotes, bus, toast, sheet, act, clockPref } from './core.js';
+import { hiddenRoute } from '/web/hiddenTabs.js';
 
 export const PAGES = [
   { id: 'dashboard', label: 'Dashboard', short: 'Dash', icon: 'dash' },
   { id: 'footage', label: 'Footage', icon: 'film' },
   { id: 'viewer', label: 'Viewer', icon: 'viewer' },
-  { id: 'drives', label: 'Drives', icon: 'route' },
   { id: 'encoder', label: 'Encoder', icon: 'engine' },
   { id: 'vehicles', label: 'Encoding per vehicle', short: 'Per car', icon: 'engine' },
   { id: 'nodes', label: 'Nodes', icon: 'nodes' },
@@ -19,7 +19,8 @@ export const PAGES = [
   { id: 'account', label: 'Account', icon: 'lock', bar: false },
   { id: 'settings', label: 'Settings', icon: 'gear' }
 ];
-const byId = Object.fromEntries(PAGES.map((p, i) => [p.id, { ...p, n: i + 1 }]));
+// Drives is hidden for now (web/hiddenTabs.js): no navigation; its addresses open the Dashboard
+const byId = Object.fromEntries([...PAGES, { id: 'drives', label: 'Drives', icon: 'route' }].map((p, i) => [p.id, { ...p, n: i + 1 }]));
 const RUNNING = new Set(['discovering', 'waiting', 'staging', 'encoding', 'writing-telemetry', 'verifying', 'copying', 'replacing']);
 
 // ---------- navigation markup ----------
@@ -135,6 +136,7 @@ const MOVED = { driving: 'drives/driving', map: 'drives/map' };
 function movedHash() {
   const was = /^#\/?([\w-]+)\/?(\?.*)?$/.exec(location.hash);
   if (was && MOVED[was[1]]) history.replaceState(null, '', `#/${MOVED[was[1]]}${was[2] || ''}`);
+  if (hiddenRoute(location.hash.replace(/^#\/?/, '').split(/[/?]/)[0])) history.replaceState(null, '', '#/dashboard');
 }
 export function parse() {
   movedHash();

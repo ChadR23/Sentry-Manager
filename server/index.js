@@ -360,8 +360,8 @@ async function main() {
   const telemetry = new Telemetry({ srcRoot: SRC, cacheDir: path.join(DATA, 'telemetry'), log: logger.scope('telemetry') });
   // every front clip's speed, a value a second, indexed in the background for the Viewer's speed graph
   // (not while a conversion or the benchmark runs: the speed reads share the data disk; both are declared below)
-  // Sentry USB's drive-data.json on each car's share (driveData.js): read in
-  // the background when it changes, kept boiled down under the data folder
+  // Sentry USB's drive-data.json on each car's share (driveData.js): read when
+  // the drives API asks and it changed, kept boiled down under the data folder
   driveData = driveDataLib.createDriveData({ dir: path.join(DATA, 'drive-data'), vehicles, log: logger.scope('drives'), idle: () => !speedIndexBusy() });
   speedIndex = createSpeedIndex({ dir: path.join(DATA, 'speeds'), inventory, vehicles, telemetry, log: logger.scope('speeds'), idle: () => !speedIndexBusy() });
   // the place search's cache, filled quietly half a minute after start
@@ -2024,7 +2024,8 @@ async function main() {
     }
   });
   sentryUsb.start();
-  driveData.start();
+  // driveData is not started: the Drives tab is hidden, so drive-data.json is read
+  // only when the drives API asks (driveData.check there), and costs nothing otherwise
   // Sentry USB's last archive and checksum results, or what it is copying now
   // (record: the checksums Manager records for it, arrivalChecksums.js; canBackfill: this account may turn the older clips on or off)
   const sentryUsbView = (v, user) => ({ ...sentryUsb.api(v.id), record: { ...arrivalRef.view(v.id), canBackfill: accounts.roleOf(user) === 'admin' } });

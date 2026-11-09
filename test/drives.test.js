@@ -115,27 +115,62 @@ test('drives: start and end named by a saved place, else a Sentry event\'s stree
   assert.deepEqual(label({ lat: 42.5, lon: -87.7 }), { place: null, label: null });
 });
 
-test('Drives tab: in the built-in interface and every pack, opening the Viewer at the drive\'s start', () => {
+test('Drives tab: hidden in the built-in interface and every pack (Driving and Map with it), the page kept, opening the Viewer at the drive\'s start', () => {
   const src = fs.readFileSync(path.join(REPO, 'web', 'drives.js'), 'utf8');
   assert.match(src, /import \{ footMinutes \} from '\/web\/duration\.js';/, 'lengths in days, hours and minutes like the rest');
-  assert.match(fs.readFileSync(path.join(REPO, 'web', 'index.html'), 'utf8'), /<a href="#\/drives" data-route="drives">/);
-  assert.match(fs.readFileSync(path.join(REPO, 'web', 'app.js'), 'utf8'), /pages\.drives = [\s\S]*?createDrivesPage\([\s\S]*?openStudio\('viewer', \{ date: at\.day, at: `\$\{at\.clip\}~\$\{at\.second\}` \}\)/);
+  const index = fs.readFileSync(path.join(REPO, 'web', 'index.html'), 'utf8');
+  for (const r of ['drives', 'driving', 'map']) assert.doesNotMatch(index, new RegExp(`data-route="${r}"`), `no ${r} in the built-in navigation`);
+  const app = fs.readFileSync(path.join(REPO, 'web', 'app.js'), 'utf8');
+  assert.match(app, /pages\.drives = [\s\S]*?createDrivesPage\([\s\S]*?openStudio\('viewer', \{ date: at\.day, at: `\$\{at\.clip\}~\$\{at\.second\}` \}\)/, 'the page is kept');
+  assert.match(app, /if \(\/\^#\\\/\?drives\(\\\/\|\\\?\|\$\)\/\.test\(location\.hash\)\) \{[\s\S]*?sentry-show-drives[\s\S]*?history\.replaceState\(null, '', '#\/overview'\)/, 'its address opens the Overview');
+  const hidden = fs.readFileSync(path.join(REPO, 'web', 'hiddenTabs.js'), 'utf8');
+  assert.match(hidden, /export const HIDDEN_ROUTES = \['drives', 'driving', 'map'\];/);
   const ROOT = path.join(REPO, 'examples', 'ui-packs');
-  const nav = {
-    aurora: ['aurora/main.js', /\['drives', 'Drives', 'route'/],
-    daylight: ['dl/app.js', /drives: \{ label: 'Drives'/],
-    flux: ['flux/main.js', /\{ id: 'drives', label: 'Drives'/],
-    horizon: ['hz/main.js', /\{ id: 'drives', label: 'Drives'/]
+  const shell = {
+    aurora: ['aurora/main.js', /\['drives', /, /history\.replaceState\(null, '', '#\/sky'\)/],
+    daylight: ['dl/app.js', /group: 'hidden'/, /history\.replaceState\(null, '', '#\/home'\)/],
+    flux: ['flux/main.js', /\{ id: 'drives', label: 'Drives', icon: 'route', key/, /history\.replaceState\(null, '', '#\/overview'\)/],
+    horizon: ['hz/main.js', /\{ id: 'drives', label: 'Drives', icon: 'route' \},\n/, /history\.replaceState\(null, '', '#\/dashboard'\)/]
   };
-  for (const [pack, [file, re]] of Object.entries(nav)) {
-    assert.match(fs.readFileSync(path.join(ROOT, pack, 'web', file), 'utf8'), re, `${pack} has the tab`);
+  for (const [pack, [file, navRe, homeRe]] of Object.entries(shell)) {
+    const main = fs.readFileSync(path.join(ROOT, pack, 'web', file), 'utf8');
+    if (pack === 'daylight') assert.match(main, navRe, 'daylight: in no navigation group');
+    else assert.doesNotMatch(main, navRe, `${pack}: not in the navigation`);
+    assert.doesNotMatch(main, /\['driving', |\{ id: 'driving'|\['map', |\{ id: 'map'|^\s+(driving|map): \{ label/m, `${pack}: no Driving or Map either`);
+    assert.match(main, /import \{ hiddenRoute \} from '\/web\/hiddenTabs\.js';/, `${pack}: hides it`);
+    assert.match(main, homeRe, `${pack}: its address opens the home page`);
+    if (pack === 'daylight') assert.doesNotMatch(main, /MORE_ROUTES = \[[^\]]*'drives'/, 'not in More');
     const dir = path.dirname(path.join(ROOT, pack, 'web', file));
     const page = fs.readFileSync(path.join(dir, 'pages', 'drives.js'), 'utf8');
-    assert.match(page, /import \{ createDrivesPage \} from '\/web\/drives\.js';/, `${pack} uses the shared page`);
+    assert.match(page, /import \{ createDrivesPage \} from '\/web\/drives\.js';/, `${pack} keeps the shared page`);
+    assert.match(page, /DRIVES_TABS = \[\['trips', 'Drives', trips\], \['driving', 'Driving', driving\], \['map', 'Map', map\]\]/, `${pack}: Drives | Driving | Map`);
     assert.match(page, /#\/viewer[^`]*at=\$\{encodeURIComponent\(`\$\{at\.clip\}~\$\{at\.second\}`\)\}|at=\$\{enc\(`\$\{at\.clip\}~\$\{at\.second\}`\)\}/, `${pack} opens the Viewer at the start`);
     assert.match(page, /h24: \(\) => clockPref\.h24/, `${pack} follows its 24-hour clock`);
-    const html = fs.readFileSync(path.join(ROOT, pack, 'web', 'index.html'), 'utf8');
-    if (pack !== 'daylight') assert.match(html, /id="[ig]-route"/, `${pack} has the icon`);
+  }
+});
+
+test('Drives hidden: Sentry USB\'s drive-data.json is read only when the drives API asks, never in the background', () => {
+  const src = fs.readFileSync(path.join(REPO, 'server', 'index.js'), 'utf8');
+  assert.doesNotMatch(src, /driveData\.start\(\)/);
+  assert.match(src, /r\.add\('GET', '\/api\/vehicles\/:id\/drives'[\s\S]*?driveData\.check\(v\.id\)/);
+});
+
+test('sub-tabs (web/subTabs.js): the one asked for, else the last one used here, else the first; remembered', async () => {
+  const src = fs.readFileSync(path.join(REPO, 'web', 'subTabs.js'), 'utf8');
+  const store = new Map();
+  global.localStorage = { getItem: (k) => store.get(k) ?? null, setItem: (k, v) => store.set(k, String(v)) };
+  try {
+    const m = await import(`data:text/javascript,${encodeURIComponent(src)}`);
+    assert.equal(m.pickSubTab('k', ['a', 'b', 'c'], undefined), 'a');
+    assert.equal(m.pickSubTab('k', ['a', 'b', 'c'], 'c'), 'c');
+    assert.equal(m.pickSubTab('k', ['a', 'b', 'c'], ''), 'c', 'remembered');
+    assert.equal(m.pickSubTab('k', ['a', 'b', 'c'], 'nope'), 'c');
+    global.localStorage = { getItem() { throw new Error('blocked'); }, setItem() { throw new Error('blocked'); } };
+    assert.equal(m.pickSubTab('k', ['a', 'b'], undefined), 'a', 'storage blocked: the first');
+    const html = m.subTabsHtml([['a', 'One'], ['b', 'Two']], 'b', { href: (k) => `#/p/${k}`, cls: 'seg' });
+    assert.match(html, /<nav class="sentry-subtabs seg" aria-label="Sections"><a class="" href="#\/p\/a" data-subtab="a">One<\/a><a class=" on" href="#\/p\/b" data-subtab="b" aria-current="page">Two<\/a><\/nav>/);
+  } finally {
+    delete global.localStorage;
   }
 });
 

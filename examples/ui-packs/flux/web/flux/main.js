@@ -14,12 +14,12 @@ import vehicles from './pages/vehicles.js';
 import drives from './pages/drives.js';
 import health from './pages/health.js';
 import account from './pages/account.js';
+import { hiddenRoute } from '/web/hiddenTabs.js';
 
 const PAGES = [
   { id: 'overview', label: 'Overview', icon: 'overview', key: 'o', mod: overview, group: 'Monitor' },
   { id: 'footage', label: 'Footage', icon: 'footage', key: 'f', mod: footage, group: 'Monitor' },
   { id: 'viewer', label: 'Viewer', icon: 'viewer', key: 'v', mod: viewer, group: 'Monitor' },
-  { id: 'drives', label: 'Drives', icon: 'route', key: 'r', mod: drives, group: 'Monitor' },
   { id: 'encoder', label: 'Encoder', icon: 'encoder', key: 'e', mod: encoder, group: 'Process' },
   { id: 'vehicles', label: 'Encoding per vehicle', icon: 'encoder', key: 'c', mod: vehicles, group: 'Process' },
   { id: 'nodes', label: 'Nodes', icon: 'nodes', key: 'n', mod: nodes, group: 'Process' },
@@ -31,9 +31,10 @@ const PAGES = [
   { id: 'account', label: 'Account', icon: 'lock', key: 'u', mod: account, group: 'System' },
   { id: 'settings', label: 'Settings', icon: 'settings', key: 's', mod: settings, group: 'System' }
 ];
-const byId = Object.fromEntries(PAGES.map((p) => [p.id, p]));
+// Drives is hidden for now (web/hiddenTabs.js): no navigation; its addresses open the Overview
+const byId = Object.fromEntries([...PAGES, { id: 'drives', label: 'Drives', icon: 'route', mod: drives }].map((p) => [p.id, p]));
 // sub-tabs with their own shortcut: [address, label, icon, key (g + key)]
-const SUB_KEYS = [['drives/driving', 'Driving (in Drives)', 'gauge', 'd'], ['drives/map', 'Map (in Drives)', 'clip', 'm']];
+const SUB_KEYS = []; // (none now: Drives is hidden)
 
 
 // ---------- sidebar ----------
@@ -140,6 +141,7 @@ const MOVED = { driving: 'drives/driving', map: 'drives/map' };
 function movedHash() {
   const was = /^#\/?([\w-]+)\/?(\?.*)?$/.exec(location.hash);
   if (was && MOVED[was[1]]) history.replaceState(null, '', `#/${MOVED[was[1]]}${was[2] || ''}`);
+  if (hiddenRoute(location.hash.replace(/^#\/?/, '').split(/[/?]/)[0])) history.replaceState(null, '', '#/overview');
 }
 export function parseHash() {
   movedHash();

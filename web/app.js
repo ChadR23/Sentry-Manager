@@ -2684,6 +2684,12 @@
     // Driving and Map are sub-tabs of Drives now: their old addresses open them there
     const moved = /^#\/?(driving|map)\/?(\?.*)?$/.exec(location.hash);
     if (moved) history.replaceState(null, '', `#/drives/${moved[1]}${moved[2] || ''}`);
+    // Drives (and its Driving and Map) is hidden for now (web/hiddenTabs.js): its addresses open the Overview
+    if (/^#\/?drives(\/|\?|$)/.test(location.hash)) {
+      let show = false;
+      try { show = localStorage.getItem('sentry-show-drives') === '1'; } catch { /* hidden */ }
+      if (!show) history.replaceState(null, '', '#/overview');
+    }
     // the shell's opening state (boot.js, index.html) ends here
     bootFrame?.remove();
     delete document.documentElement.dataset.boot;

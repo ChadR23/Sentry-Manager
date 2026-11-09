@@ -3,6 +3,7 @@
 
 import { $, $$, esc, icon, api, state, loadVehicles, loadNotes, setVehicle, on, emit, toast, store, infoDialog, motionOK, selecting, liveDraw, clockPref, hourOpts } from './core.js';
 import { createSky } from './sky.js';
+import { hiddenRoute } from '/web/hiddenTabs.js';
 import sky from './pages/sky.js';
 import footage from './pages/footage.js';
 import viewer from './pages/viewer.js';
@@ -24,7 +25,6 @@ const DOCK = [
   ['sky', 'Sky', 'sky', 's', true],
   ['footage', 'Footage', 'film', 'f', true],
   ['viewer', 'Viewer', 'cockpit', 'v', true],
-  ['drives', 'Drives', 'route', 'r', false],
   ['encoder', 'Encoder', 'orbit', 'e', true],
   ['vehicles', 'Per car', 'orbit', 'c', false],
   '|',
@@ -38,8 +38,8 @@ const DOCK = [
   ['account', 'Account', 'key', 'u', false],
   ['settings', 'Settings', 'gear', ',', false]
 ];
-// shortcuts to a sub-tab: [address, label, key (g + key)]
-const SUB_KEYS = [['drives/driving', 'Driving (in Drives)', 'd'], ['drives/map', 'Map (in Drives)', 'm']];
+// shortcuts to a sub-tab: [address, label, key (g + key)] (none now: Drives is hidden)
+const SUB_KEYS = [];
 const LONG = { vehicles: 'Encoding per vehicle', bin: 'Recycle Bin', alerts: 'Notifications', sky: 'Sky (home)' };
 
 // ---------- the sky ----------
@@ -140,6 +140,8 @@ const MOVED = { driving: 'drives/driving', map: 'drives/map' };
 function parseHash() {
   const was = /^#\/?([\w-]+)\/?(\?.*)?$/.exec(location.hash);
   if (was && MOVED[was[1]]) history.replaceState(null, '', `#/${MOVED[was[1]]}${was[2] || ''}`);
+  // hidden for now (web/hiddenTabs.js): the Sky instead
+  if (hiddenRoute(location.hash.replace(/^#\/?/, '').split(/[/?]/)[0])) history.replaceState(null, '', '#/sky');
   const raw = location.hash.replace(/^#\/?/, '');
   const [path, qs = ''] = raw.split('?');
   const parts = path.split('/').filter(Boolean).map((p) => {
