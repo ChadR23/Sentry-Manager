@@ -31,6 +31,12 @@ they did), whether the Pi deletes its own copies after checking them
 (auto-delete), the device name, and when the status was written and read.
 While Sentry USB is sending, the line refreshes every minute.
 
+**Checksums recorded** in the details says how many clips Sentry Six Manager
+wrote a checksum line for today, when the last one was, and how many are
+waiting (for example `12 clips today · last at 3:05 PM · 4 waiting`; see
+"Every arrived clip gets a checksum line" below). An admin also sees **Record
+checksums for clips from the last N days** there.
+
 A day whose clips were still being sent when the car drove off gets a grey-blue
 **Waiting for Sentry USB** tag instead of **Partly archived?**. Nothing is
 lost: the clips stay on the Pi, and the transfer carries on at the next archive.
@@ -84,6 +90,60 @@ original again, and Sentry Six Manager converts it again later.
 Converting to a separate folder ("keep originals") leaves the originals alone
 and needs none of this.
 
+## Every arrived clip gets a checksum line
+
+Sentry USB verifies from Sentry Six Manager's record first: a clip with a line
+in `.sentrymanager/original-checksums.sha256` is compared with the Pi's own
+hash and never read back over the network. A clip without a line waits up to
+24 hours for one, then the Pi reads the share's copy back in full. So Sentry
+Six Manager writes a line for **every clip once it has fully arrived**,
+converted or not (already H.265, an excluded folder, a conversion that failed
+or was skipped), not only before conversions:
+
+- The line is the SHA-256 of the clip on the share as it is now, in the same
+  file and format as the conversion's lines (appended, fsynced, pruned the
+  same way). It is the same hash a later in-place conversion writes for the
+  original; a later line for the same path wins and an equal one changes
+  nothing.
+- A damaged upload gets its true (damaged) hash, so the Pi sees the mismatch
+  and sends the clip again. The new upload is a new file and gets a new line.
+- Only for shares whose root (the folder holding `RecentClips/`) has a
+  `.sentryusb/` folder. Nothing is written on any other share.
+- Which clips: Tesla clips (`YYYY-MM-DD_HH-MM-SS-<camera>.mp4`) in
+  `RecentClips/`, `SentryClips/`, `SavedClips/` and `TeslaTrackMode/` found by
+  the inventory scan, whose own time, modification time or arrival on the share
+  (birth time, else change time) is within the last 7 days. The rest of the
+  archive is not read, unless an admin asks for it: **Record checksums for
+  clips from the last N days** in the Sentry USB details (1 to 365 days, once;
+  `POST /api/vehicles/:id/sentry-usb/record` with `{ "days": N }`).
+
+Skipped, and why:
+
+| Clip | Why |
+|---|---|
+| in the range Sentry USB is still copying (status file `transferring`) | not fully arrived; recorded after the transfer |
+| modified or renamed into place in the last minute | may still be written |
+| one a conversion is working on right now | its own line comes with the conversion |
+| unchanged (same size, modification time and inode) since its line | already recorded |
+| the output of our own in-place conversion | the record keeps the original's hash for it; the converted bytes never get a line |
+| any other H.265 / AV1 clip | not what the Pi uploaded and not converted here, so its hash proves nothing (the Pi marks it unconfirmed by codec) |
+| dot-named files and folders, `*.mismatch-*`, `TEMP-H265-…` / `BACKUP-…` | not clips (see above) |
+
+A clip replaced while it is being hashed (a re-upload, a conversion) is
+noticed by its size, modification time and inode afterwards, and its hash is
+dropped; the new file is hashed on the next pass.
+
+**Cost.** One file at a time across all cars, read in 1 MiB pieces at most
+64 MiB/s, paused while a conversion or the benchmark runs, at most 300 clips a
+pass (the next pass follows half a minute later while more are waiting). A pass
+runs after every inventory scan and every 10 minutes. SHA-256 takes about one
+CPU-second per GiB, so the limit is roughly 6% of one core while it reads;
+reading is from the NAS's own disk (over the container's mount), never over the
+car's Wi-Fi. A day of driving (some tens of GB) takes several minutes. What was
+recorded is kept in `<data>/arrival-checksums/<car>.json` (path, size,
+modification time, inode, when), and entries go when the clip is gone or after
+45 days. The record's own lines are kept 45 days.
+
 ## The status file
 
 Sentry USB writes `.sentryusb/archive-status.json` at the share root when a
@@ -102,13 +162,16 @@ Manager reads it to:
   "not heard from since".
 
 The server gives the file, read and in milliseconds, at
-`GET /api/vehicles/:id/sentry-usb` (`{ "present": false }` when there is none).
+`GET /api/vehicles/:id/sentry-usb` (`{ "present": false }` when there is none),
+with `record`: `{ enabled, today, lastAt, pending, lines, windowDays, backfill,
+canBackfill }` (the checksum lines written for arrived clips, above).
 
 ## Checking that it all works
 
 1. Turn on automatic conversion with "replace originals" for the car, and let
    it convert some clips. `.sentrymanager/original-checksums.sha256` appears on
-   the share and gets a line per converted clip.
+   the share and gets a line per arrived clip (and the converted ones' lines
+   before they are replaced).
 2. The Pi runs Sentry USB `v3.28.10-test.5` or later.
 3. After the next archive, the Pi's `archiveloop` log shows
    `Archive verification: N matched, M re-encoded on the server by Sentry

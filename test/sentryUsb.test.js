@@ -608,7 +608,13 @@ test('server: GET /api/vehicles/:id/sentry-usb and /days carry the status; misma
     }
     assert.equal(days.sentryUsb.present, true);
     assert.match(days.sentryUsb.summary, /^Sentry USB's last archive \(.+\) copied 120 files, newest clip/);
-    const api = (await call('GET', '/api/vehicles/daily-driver/sentry-usb')).data;
+    const { record, ...api } = (await call('GET', '/api/vehicles/daily-driver/sentry-usb')).data;
+    // the checksums Manager records for every arrived clip (arrivalChecksums.js): these two arrived just now
+    assert.deepEqual({ ...record, pending: typeof record.pending }, { enabled: true, today: 0, lastAt: null, pending: 'number', lines: 0, windowDays: 7, backfill: null, canBackfill: true });
+    assert.equal((await call('POST', '/api/vehicles/daily-driver/sentry-usb/record', { days: 0 })).status, 400);
+    const bf = await call('POST', '/api/vehicles/daily-driver/sentry-usb/record', { days: 30 });
+    assert.equal(bf.status, 200);
+    assert.equal(bf.data.record.backfill.days, 30);
     assert.deepEqual({ ...api, readAt: typeof api.readAt }, {
       present: true, readAt: 'number', writtenAt: 1762646400_000, device: 'sentryusb', state: 'idle',
       archive: { result: 'ok', startedAt: 1762646000_000, finishedAt: 1762646390_000, filesArchived: 120, filesNotArchived: 0,
@@ -626,7 +632,7 @@ test('server: GET /api/vehicles/:id/sentry-usb and /days carry the status; misma
       if (bad.present === false) break;
       await new Promise((r) => setTimeout(r, 150));
     }
-    assert.deepEqual(bad, { present: false, error: 'not a schema 1 status file' });
+    assert.deepEqual({ ...bad, record: undefined }, { present: false, error: 'not a schema 1 status file', record: undefined });
     const recs = (await call('GET', '/api/vehicles/daily-driver/recordings')).data.recordings;
     assert.equal(recs.length, 2);
     for (const r of recs) {

@@ -143,3 +143,29 @@ test('Sentry USB: the 24-hour clock switch', async () => {
   assert.equal(m.sentryUsbView(BASE, { timeZone: TZ, now: NOW, locale: 'en-US', h24: true }).line, 'Sentry USB · last archive 15:07 ok · 120 clips · verified 120, 2 of them re-encoded by Sentry Manager');
   assert.match(app, /h24: \(\) => clockPref\.h24/);
 });
+
+test('Sentry USB details: the checksums Sentry Manager records, and the backfill form for admins only', async () => {
+  const m = await load();
+  const rec = { enabled: true, today: 12, lastAt: at('2026-11-08T21:05:00Z'), pending: 4, lines: 300, windowDays: 7, backfill: null, canBackfill: true };
+  const v = await view({ ...BASE, record: rec });
+  assert.equal(Object.fromEntries(v.details)['Checksums recorded'], '12 clips today · last at 3:05 PM · 4 waiting');
+  assert.equal(v.line, (await view(BASE)).line, 'the line itself is unchanged');
+  const html = m.sentryUsbHtml(v, { days: 30 });
+  assert.match(html, /<form class="usb-backfill" data-usb-backfill>/);
+  assert.match(html, /Record checksums for clips from the last <input type="number" name="days" min="1" max="365" value="30"/);
+  // a watch-only account: the row, no form
+  const viewer = await view({ ...BASE, record: { ...rec, canBackfill: false } });
+  assert.doesNotMatch(m.sentryUsbHtml(viewer), /usb-backfill/);
+  assert.ok(Object.fromEntries(viewer.details)['Checksums recorded']);
+  // none yet, a backfill under way and done; a share without .sentryusb/ (not enabled) shows nothing
+  assert.equal(Object.fromEntries((await view({ ...BASE, record: { ...rec, today: 0, lastAt: null, pending: 0 } })).details)['Checksums recorded'], '0 clips today · none yet');
+  const running = await view({ ...BASE, record: { ...rec, backfill: { days: 30, done: 40, total: 900, startedAt: NOW, finishedAt: null } } });
+  assert.match(Object.fromEntries(running.details)['Checksums recorded'], /· last 30 days: 40 of 900 looked at$/);
+  assert.match(m.sentryUsbHtml(running), /<button type="submit" disabled>Record<\/button>/);
+  const done = await view({ ...BASE, record: { ...rec, backfill: { days: 30, done: 900, total: 900, startedAt: NOW, finishedAt: NOW } } });
+  assert.match(Object.fromEntries(done.details)['Checksums recorded'], /· last 30 days done$/);
+  assert.equal(Object.fromEntries((await view({ ...BASE, record: { ...rec, enabled: false } })).details)['Checksums recorded'], undefined);
+  assert.equal(Object.fromEntries((await view(BASE)).details)['Checksums recorded'], undefined, 'an older server: no row');
+  assert.match(SRC, /fetch\(`\/api\/vehicles\/\$\{encodeURIComponent\(id\)\}\/sentry-usb\/record`, \{\s*method: 'POST'/);
+  assert.match(SRC, /if \(view\?\.record\?\.backfill\?\.running\) timer = setTimeout\(load, 10000\);/);
+});

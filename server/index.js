@@ -90,6 +90,7 @@ const { createCanFootage } = require('./canFootage');
 const { createArchiveGap } = require('./archiveGap');
 const { createSentryUsbStatus, stampSec: clipStampSec } = require('./sentryUsb');
 const { createOriginalChecksums } = require('./originalChecksums');
+const { createArrivalChecksums } = require('./arrivalChecksums');
 const { createCanSearch, createSearchQueue, footageAt, clipStamps, localTime, parseWhen } = require('./canSearch');
 
 /** A wall-clock time in an IANA time zone (as a TeslaCam clip is named) in UTC milliseconds. */
@@ -319,6 +320,7 @@ async function main() {
   let scrubPrepare = null;
   let archiveGapRef = null; // footage the car recorded that has not reached the share (set where CAN is known)
   let integrityRef = null; // the footage check: one cut short by a restart goes on after the first scan
+  let arrivalRef = null; // every arrived clip's checksum for Sentry USB (arrivalChecksums.js, set where the converter is known)
   let canUploadRef = null; // CAN Bridge uploads (set where canLogs is made)
   let canPruneRef = null; // CAN logs that go with their footage (canPrune.js, set where canLogs is made)
   let canFootageRef = null; // which recordings have CAN Bridge data (canFootage.js, set where the CAN index is made)
@@ -338,8 +340,8 @@ async function main() {
   });
   const inventory = new Inventory({ vehicles, db, log: logger.scope('inventory'), onChange: () => announce('inventory'), onScanned: (vid) => {
     speedIndex?.kick(); scrubPrepare?.kick(); integrityRef?.resume(vid);
-    // (the gap check reads the status the scan just found)
-    sentryUsb.refresh(vid).catch(() => null).finally(() => archiveGapRef?.check(vid));
+    // (the gap check and the checksum record read the status the scan just found)
+    sentryUsb.refresh(vid).catch(() => null).finally(() => { archiveGapRef?.check(vid); arrivalRef?.kick(); });
   } });
   // the SHA-256 of every original the converter replaces in place, for
   // Sentry USB (originalChecksums.js), written inside a vehicle's folder only
@@ -400,6 +402,15 @@ async function main() {
   const converterRunning = () => [...converterJobs.values()].some((s) => CONVERTER_RUNNING.has(s.state));
   let benchmarking = null; // the benchmark's energy token while it runs
   speedIndexBusy = () => converterRunning() || benchmarking !== null;
+  // every clip that reaches a Sentry USB share gets a line in the checksum
+  // record, converted or not (arrivalChecksums.js): the Pi then never reads it
+  // back. One file at a time, rate-limited, not while a conversion runs.
+  arrivalRef = createArrivalChecksums({
+    dir: path.join(DATA, 'arrival-checksums'), vehicles, inventory, log: logger.scope('sentry-usb'),
+    record: (request) => originalChecksums.record(request),
+    holds: (abs) => sentryUsb.holds(abs), busyPaths, idle: () => !speedIndexBusy()
+  });
+  arrivalRef.start();
   // Server alerts from before a restart: the new run raises them again if
   // they still hold (a stale one could otherwise never be cleared)
   db.resolvePrefix('server:');
@@ -488,6 +499,8 @@ async function main() {
     },
     // clips Sentry USB is still copying to the share wait for a later run
     holdDiscovered: (config, discovered) => sentryUsb.holds(discovered.sourcePath),
+    // our in-place output: the record's line stays the original's (never the converted bytes')
+    onClipConverted: (outputPath) => { arrivalRef?.converted(outputPath).catch(() => {}); },
     remoteNodes: {
       list: () => nodes.list(),
       encode: (request) => nodes.encode(request),
@@ -1367,6 +1380,7 @@ async function main() {
     savings.forget(params.id);
     archiveGapRef?.forget(params.id);
     sentryUsb.forget(params.id);
+    arrivalRef?.forget(params.id);
     // and from every node's Vehicles first list
     nodes.forgetCar(params.id);
     audit.info(`Vehicle "${v.name}" (${v.id}) removed (its footage is untouched): ${by(req, user)}`);
@@ -1859,10 +1873,20 @@ async function main() {
   });
   sentryUsb.start();
   // Sentry USB's last archive and checksum results, or what it is copying now
-  r.add('GET', '/api/vehicles/:id/sentry-usb', async (req, res, { params }) => {
+  // (record: the checksums Manager records for it, arrivalChecksums.js; canBackfill: this account may ask for older days)
+  const sentryUsbView = (v, user) => ({ ...sentryUsb.api(v.id), record: { ...arrivalRef.view(v.id), canBackfill: accounts.roleOf(user) === 'admin' } });
+  r.add('GET', '/api/vehicles/:id/sentry-usb', async (req, res, { params, user }) => {
     const v = vehicleOr404(params.id);
     if (!sentryUsb.known(v.id)) await sentryUsb.refresh(v.id).catch(() => null);
-    return sentryUsb.api(v.id);
+    return sentryUsbView(v, user);
+  });
+  // "Record checksums for clips from the last N days" (admin: a POST a watch-only account may not make)
+  r.add('POST', '/api/vehicles/:id/sentry-usb/record', async (req, res, { params, body, user }) => {
+    const v = vehicleOr404(params.id);
+    const days = Number(body?.days);
+    arrivalRef.backfill(v.id, days);
+    audit.info(`Checksum record of "${v.name}": clips from the last ${Math.floor(days)} days asked for: ${by(req, user)}`);
+    return sentryUsbView(v, user);
   });
   r.add('GET', '/api/vehicles/:id/archive-gaps', async (req, res, { params }) => {
     const v = vehicleOr404(params.id);
