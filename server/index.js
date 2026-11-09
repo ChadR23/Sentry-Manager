@@ -98,6 +98,8 @@ const { createSentryUsbStatus, stampSec: clipStampSec } = require('./sentryUsb')
 const { createOriginalChecksums } = require('./originalChecksums');
 const { createArrivalChecksums } = require('./arrivalChecksums');
 const { createCanSearch, createSearchQueue, footageAt, clipStamps, localTime, parseWhen } = require('./canSearch');
+const { clientAddress, fromTrustedProxy, proxyMatcher, banKey } = require('./clientAddress');
+const { createAccess, validate: validateAccess } = require('./access');
 
 /** A wall-clock time in an IANA time zone (as a TeslaCam clip is named) in UTC milliseconds. */
 function zonedToUtc(y, mo, d, h, mi, sec, timeZone) {
@@ -134,6 +136,10 @@ const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
 const FFPROBE = process.env.FFPROBE_PATH || 'ffprobe';
 const TLS_MODE = (process.env.TLS_MODE || 'auto').toLowerCase(); // auto | off
 const TRUST_PROXY = process.env.TRUST_PROXY === 'true';
+// which connections may say who the client is (X-Forwarded-For, -Proto,
+// -Host): TRUSTED_PROXIES when given, else any address on the local network
+// (server/clientAddress.js)
+const PROXY = { trustProxy: TRUST_PROXY, trusted: proxyMatcher(process.env.TRUSTED_PROXIES) };
 const SUPERVISED = process.env.SENTRY_SUPERVISED === '1' && typeof process.send === 'function';
 const TRUSTED_HOSTS = (process.env.TRUSTED_HOSTS || '').split(/[\s,]+/).filter(Boolean).map((h) => h.toLowerCase());
 
@@ -254,13 +260,13 @@ function encoderHtml(html) {
 
 function isSecure(req) {
   if (req.socket?.encrypted) return true;
-  return TRUST_PROXY && String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase() === 'https';
+  return fromTrustedProxy(req, PROXY) && String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase() === 'https';
 }
 
 /** The Host header, if it is a plain host[:port] (and trusted, when TRUSTED_HOSTS is set). */
 function cleanHost(req) {
   // HTTP/2 sends the host as :authority
-  const raw = String((TRUST_PROXY && req.headers['x-forwarded-host']) || req.headers.host || req.headers[':authority'] || '').split(',')[0].trim();
+  const raw = String((fromTrustedProxy(req, PROXY) && req.headers['x-forwarded-host']) || req.headers.host || req.headers[':authority'] || '').split(',')[0].trim();
   if (!/^[A-Za-z0-9.\-[\]:]{1,300}$/.test(raw)) return null;
   if (TRUSTED_HOSTS.length) {
     const name = raw.replace(/:\d+$/, '').replace(/^\[|\]$/g, '').toLowerCase();
@@ -283,6 +289,17 @@ function securityHeaders(req, res, pathname = '') {
 }
 
 const escHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+
+// the client address, worked out once per request (clientKey)
+const CLIENT = Symbol('client address');
+// what a banned address is told: the same whatever it tried, so it says
+// nothing about accounts
+const BANNED_TEXT = 'Too many failed attempts from this address, so it is blocked for a while. Try again later.';
+const TWO_FACTOR_OUTSIDE_TEXT = 'This account has no two-step sign-in, so it can only sign in from the home network. Sign in at home and turn it on under Account (two-step sign-in), then you can sign in from anywhere.';
+const TWO_FACTOR_EVERYONE_TEXT = 'Every account needs two-step sign-in, and this one has none yet. Sign in once from the home network to set it up.';
+const HOME_ONLY_CHANGES_TEXT = 'Changes that need an admin can only be made from the home network (Settings → Security). Viewing works from anywhere.';
+const HOME_ONLY_PAGES_TEXT = 'From outside the home network, admin accounts can only watch (Settings → Security). Settings and the other admin pages open at home.';
+const TWO_FACTOR_SETUP_TEXT = 'Turn on two-step sign-in first: every account needs it (Settings → Security).';
 
 function confirmRequired() {
   return Object.assign(new HttpError(403, 'Enter your password to confirm this change.'), { code: 'CONFIRM_PASSWORD', expose: true });
@@ -744,20 +761,63 @@ async function main() {
     saved: savings.forVehicle(v.id),
     storage: storageOf(v)
   });
-  // Who the throttle and the audit log count as the client. Behind a trusted
-  // reverse proxy every request arrives from the proxy's own address, so the
-  // real client is the first X-Forwarded-For hop (the proxy sets it); without
-  // TRUST_PROXY that header is attacker-controlled and ignored. Keying on the
-  // real client means one attacker cannot lock out everyone behind the proxy.
+  // Who the throttle, the bans, the home-network rules and the audit log
+  // count as the client (server/clientAddress.js): the connection's own
+  // address; behind a trusted reverse proxy (TRUST_PROXY, and the connection
+  // comes from it) the rightmost X-Forwarded-For hop that is not one of the
+  // proxies. Without TRUST_PROXY, or from any other connection, that header
+  // is ignored: anyone could send it. Keying on the real client means one
+  // attacker cannot lock out everyone behind the proxy.
   const clientKey = (req) => {
-    if (TRUST_PROXY) {
-      const fwd = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
-      if (fwd) return fwd;
-    }
-    return req.socket.remoteAddress || '?';
+    if (!req[CLIENT]) req[CLIENT] = clientAddress(req, PROXY);
+    return req[CLIENT];
   };
   // who did what, for the log: security-relevant actions only, never secrets
   const audit = logger.scope('audit');
+  // Settings → Security: bans, two-step rules, the home network (server/access.js)
+  const access = createAccess({ db, audit });
+  const fromHome = (req) => access.isHome(clientKey(req));
+  /** A banned address gets this on every sign-in step. */
+  const refuseBanned = (req) => {
+    if (!access.banned(clientKey(req))) return;
+    throw Object.assign(new HttpError(429, BANNED_TEXT), { code: 'BANNED', expose: true });
+  };
+  /**
+   * One failed attempt from this request's address. A ban it brings that
+   * came from a signed-in session (a wrong password confirmation) also
+   * signs that session out.
+   */
+  const failedAttempt = (req, reason, { session = false } = {}) => {
+    const b = access.fail(clientKey(req), reason);
+    if (b && session) {
+      const h = auth.sessionHash(req);
+      if (h) db.deleteSession(h);
+    }
+    return b;
+  };
+  // the two-step rules (Settings → Security), for a signed-in account here:
+  // 'ok'; 'out' (no two-step sign-in, outside the home network, and a rule
+  // needs it there: signed out); 'setup' (every account needs it, at home:
+  // only setting it up is open)
+  const twoFactorState = (user, home) => {
+    const rules = access.get().twoFactor;
+    if (!user || (!rules.outside && !rules.everyone) || accounts.twoFactorOn(user)) return 'ok';
+    if (!home) return 'out';
+    return rules.everyone ? 'setup' : 'ok';
+  };
+  // an admin who may make admin changes from where this request comes
+  const adminHere = (req, user) => {
+    if (accounts.roleOf(user) !== 'admin') return false;
+    const rules = access.get().homeOnly;
+    return !((rules.adminChanges || rules.adminPages) && !fromHome(req));
+  };
+  // an admin outside the home network with "Settings and admin pages only
+  // from the home network" on has watch-only rights there
+  const roleFor = (req, user) => {
+    const role = accounts.roleOf(user);
+    if (role === 'admin' && access.get().homeOnly.adminPages && !fromHome(req)) return 'viewer';
+    return role;
+  };
   const by = (req, user) => `${user || 'someone'} from ${clientKey(req)}`;
   const describeSource = (src) => (src?.type === 'path' ? `folder ${src.path}` : `SMB ${src?.share} as ${src?.username} (SMB ${src?.version}, ${src?.encrypt === false ? 'signed only' : 'encrypted'})`);
 
@@ -771,7 +831,14 @@ async function main() {
   };
   r.add('GET', '/api/auth/me', (req) => {
     const user = auth.user(req);
-    return { user, role: accounts.roleOf(user), twoFactor: user ? accounts.twoFactorOn(user) : false, needsSetup: auth.needsSetup(), secure: isSecure(req), fingerprint: req.socket?.encrypted ? certFingerprint() : null };
+    const home = fromHome(req);
+    const rules = access.get();
+    const limited = user && accounts.roleOf(user) === 'admin' && !home ? (rules.homeOnly.adminPages ? 'pages' : rules.homeOnly.adminChanges ? 'changes' : null) : null;
+    return {
+      user, role: user ? roleFor(req, user) : accounts.roleOf(user), twoFactor: user ? accounts.twoFactorOn(user) : false, needsSetup: auth.needsSetup(), secure: isSecure(req), fingerprint: req.socket?.encrypted ? certFingerprint() : null,
+      // where the server sees this device: the home network or not, and what that limits
+      homeNetwork: home, ...(limited ? { adminLimited: limited } : {}), ...(user && twoFactorState(user, home) === 'setup' ? { twoFactorSetupRequired: true } : {})
+    };
   }, { public: true });
   // two-step sign-in: the password was right, the code is still to come
   const PENDING_COOKIE = 'sm_pending';
@@ -787,6 +854,7 @@ async function main() {
     }
   };
   r.add('POST', '/api/auth/login', async (req, res, { body }) => {
+    refuseBanned(req);
     // per address, and per account from that address: wrong guesses from
     // elsewhere never lock the owner out
     const keys = [clientKey(req), `user:${String(body?.username || '').toLowerCase().slice(0, 64)}@${clientKey(req)}`];
@@ -795,9 +863,17 @@ async function main() {
     if (!(await guarded(keys, () => auth.check(body?.username, body?.password)))) {
       keys.forEach((k) => auth.noteFailure(k));
       audit.warn(`Sign-in failed for "${String(body?.username || '').slice(0, 64)}" from ${clientKey(req)}`);
+      // (the same for a name that does not exist)
+      if (failedAttempt(req, 'wrong password')) throw Object.assign(new HttpError(429, BANNED_TEXT), { code: 'BANNED', expose: true });
       throw new HttpError(401, 'Wrong user name or password.');
     }
     keys.forEach((k) => auth.noteSuccess(k));
+    // the two-step rules: an account without it signs in only where they allow
+    const rule = twoFactorState(body.username, fromHome(req));
+    if (rule === 'out') {
+      audit.warn(`Sign-in refused (no two-step sign-in, outside the home network): ${by(req, body.username)}`);
+      throw Object.assign(new HttpError(403, access.get().twoFactor.everyone ? TWO_FACTOR_EVERYONE_TEXT : TWO_FACTOR_OUTSIDE_TEXT), { code: 'TWO_FACTOR_REQUIRED', expose: true });
+    }
     if (accounts.twoFactorOn(body.username)) {
       // the code comes next, on /login/code (every page sends a pending sign-in there)
       res.setHeader('Set-Cookie', pendingCookie(req, accounts.startPending(body.username), 300));
@@ -805,10 +881,15 @@ async function main() {
       return { ok: true, twoFactor: true, next: '/login/code' };
     }
     auth.login(req, res, body.username, { ip: clientKey(req) });
+    if (rule === 'setup') {
+      audit.info(`Signed in to set up two-step sign-in (every account needs it): ${by(req, body.username)}`);
+      return { ok: true, twoFactorSetup: true, next: '/login/two-factor' };
+    }
     audit.info(`Signed in: ${by(req, body.username)}`);
     return { ok: true };
   }, { public: true });
   r.add('POST', '/api/auth/2fa/code', async (req, res, { body }) => {
+    refuseBanned(req);
     const key = `code:${clientKey(req)}`;
     const wait = auth.throttled(key);
     if (wait) throw new HttpError(429, `Too many attempts. Try again in ${wait} s.`);
@@ -819,6 +900,7 @@ async function main() {
       auth.noteFailure(key);
       if (err.expired) res.setHeader('Set-Cookie', pendingCookie(req, '', 0));
       audit.warn(`Two-step code wrong from ${clientKey(req)}`);
+      if (failedAttempt(req, 'wrong two-step code')) throw Object.assign(new HttpError(429, BANNED_TEXT), { code: 'BANNED', expose: true });
       throw new HttpError(err.status || 401, err.message);
     }
     auth.noteSuccess(key);
@@ -885,6 +967,7 @@ async function main() {
     return { accounts: accounts.list() };
   });
   r.add('POST', '/api/auth/setup', async (req, res, { body }) => {
+    refuseBanned(req);
     const key = `setup:${clientKey(req)}`;
     const wait = auth.throttled(key);
     if (wait) throw new HttpError(429, `Too many attempts. Try again in ${wait} s.`);
@@ -894,6 +977,7 @@ async function main() {
       if (err.status === 403) {
         auth.noteFailure(key);
         audit.warn(`Account setup with a wrong setup code from ${clientKey(req)}`);
+        if (failedAttempt(req, 'wrong setup code')) throw Object.assign(new HttpError(429, BANNED_TEXT), { code: 'BANNED', expose: true });
       }
       throw err;
     }
@@ -907,12 +991,14 @@ async function main() {
     return { ok: true };
   });
   r.add('POST', '/api/auth/confirm', async (req, res, { body, user }) => {
+    refuseBanned(req);
     const key = `confirm:${user}`;
     const wait = auth.throttled(key);
     if (wait) throw new HttpError(429, `Too many attempts. Try again in ${wait} s.`);
     if (!(await guarded([key], () => auth.confirm(req, user, body?.password)))) {
       auth.noteFailure(key);
       audit.warn(`Password confirmation failed: ${by(req, user)}`);
+      if (failedAttempt(req, 'wrong password confirmation', { session: true })) throw Object.assign(new HttpError(429, BANNED_TEXT), { code: 'BANNED', expose: true });
       throw new HttpError(401, 'That password is not right.');
     }
     auth.noteSuccess(key);
@@ -922,12 +1008,14 @@ async function main() {
   r.add('POST', '/api/auth/password', async (req, res, { body, user }) => {
     // the same throttle as confirmation: a stolen session must not guess the
     // password here instead
+    refuseBanned(req);
     const key = `confirm:${user}`;
     const wait = auth.throttled(key);
     if (wait) throw new HttpError(429, `Too many attempts. Try again in ${wait} s.`);
     if (!(await guarded([key], () => auth.check(user, body?.current)))) {
       auth.noteFailure(key);
       audit.warn(`Password change with a wrong current password: ${by(req, user)}`);
+      if (failedAttempt(req, 'wrong current password', { session: true })) throw Object.assign(new HttpError(429, BANNED_TEXT), { code: 'BANNED', expose: true });
       throw new HttpError(401, 'The current password is wrong.');
     }
     auth.noteSuccess(key);
@@ -983,6 +1071,44 @@ async function main() {
     res.writeHead(200, { 'Content-Type': 'application/x-x509-ca-cert', 'Content-Disposition': 'attachment; filename="sentry-six-manager-ca.crt"', 'Cache-Control': 'no-store' });
     res.end(pem);
     return undefined;
+  });
+
+  // Settings → Security, for a server open to the internet: bans, the
+  // two-step rules and the home network (server/access.js)
+  const accessView = (req) => {
+    const ip = clientKey(req);
+    return {
+      settings: access.get(), bans: access.list(), watching: access.watching(),
+      you: { address: ip, banKey: banKey(ip), home: access.isHome(ip) },
+      trustProxy: TRUST_PROXY, trustedProxies: process.env.TRUSTED_PROXIES || null,
+      twoFactor: { yours: accounts.twoFactorOn(auth.user(req)), without: accounts.list().filter((a) => !a.twoFactor).map((a) => a.username) }
+    };
+  };
+  r.add('GET', '/api/security/access', (req) => accessView(req));
+  r.add('PUT', '/api/security/access', (req, res, { body, user }) => {
+    requireConfirmed(req);
+    const before = access.get();
+    const next = validateAccess(body?.settings ?? body, before);
+    // never lock yourself out with the change itself
+    const mine = accounts.twoFactorOn(user);
+    const home = access.isHome(clientKey(req));
+    if (next.twoFactor.everyone && !before.twoFactor.everyone && !mine) throw new HttpError(409, 'Turn on two-step sign-in for your own account first (Account), then every account can be made to need it.');
+    if (next.twoFactor.outside && !before.twoFactor.outside && !mine && !home) throw new HttpError(409, 'You are outside the home network without two-step sign-in: this would sign you out. Turn it on for your account first (Account).');
+    access.set(next);
+    const changes = [];
+    for (const part of Object.keys(next)) {
+      for (const k of Object.keys(next[part])) {
+        const a = JSON.stringify(before[part][k]);
+        const b = JSON.stringify(next[part][k]);
+        if (a !== b) changes.push(`${part}.${k} ${a} → ${b}`);
+      }
+    }
+    if (changes.length) audit.warn(`Security settings changed (${changes.join(', ')}): ${by(req, user)}`);
+    return accessView(req);
+  });
+  r.add('POST', '/api/security/unban', (req, res, { body, user }) => {
+    access.unban(String(body?.address || '').slice(0, 64), by(req, user));
+    return accessView(req);
   });
 
   // Overview > Logs: the newest lines first; problems (warnings and errors)
@@ -1623,7 +1749,7 @@ async function main() {
     const star = { id: crypto.randomBytes(6).toString('hex'), vehicle: v.id, day: clip.slice(0, 10), clip, second, note: cleanNote(body?.note), createdAt: new Date().toISOString() };
     // its recording is protected (by an admin's star: a watch-only account changes nothing kept)
     const rec = recordingOfClip(v.id, clip);
-    const mayProtect = accounts.roleOf(user) === 'admin';
+    const mayProtect = adminHere(req, user);
     if (rec && !rec.protected && mayProtect) star.protects = rec.id;
     db.set('stars', [...list, star]);
     if (star.protects) {
@@ -2048,13 +2174,13 @@ async function main() {
   // only when the drives API asks (driveData.check there), and costs nothing otherwise
   // Sentry USB's last archive and checksum results, or what it is copying now
   // (record: the checksums Manager records for it, arrivalChecksums.js; canBackfill: this account may turn the older clips on or off)
-  const sentryUsbView = (v, user) => ({ ...sentryUsb.api(v.id), record: { ...arrivalRef.view(v.id), canBackfill: accounts.roleOf(user) === 'admin' } });
+  const sentryUsbView = (v, user, req) => ({ ...sentryUsb.api(v.id), record: { ...arrivalRef.view(v.id), canBackfill: adminHere(req, user) } });
   r.add('GET', '/api/vehicles/:id/sentry-usb', async (req, res, { params, user }) => {
     const v = vehicleOr404(params.id);
     // while a transfer runs the page asks every second: the status file is
     // looked at again (a stat) and what has arrived on the share is counted
     await sentryUsb.fresh(v.id);
-    const view = sentryUsbView(v, user);
+    const view = sentryUsbView(v, user, req);
     if (view.transfer && view.state === 'transferring') view.transfer.arrived = await sentryUsb.arrived(v.id);
     return view;
   });
@@ -2068,7 +2194,7 @@ async function main() {
     db.set('sentry-usb-record', rec);
     arrivalRef.kick();
     audit.info(`Checksum record of "${v.name}": older clips ${body.older ? 'on' : 'off'}: ${by(req, user)}`);
-    return sentryUsbView(v, user);
+    return sentryUsbView(v, user, req);
   });
   r.add('GET', '/api/vehicles/:id/archive-gaps', async (req, res, { params }) => {
     const v = vehicleOr404(params.id);
@@ -3309,7 +3435,11 @@ async function main() {
   });
 
   // ---- HTTP handler
-  const PUBLIC_STATIC = new Set(['/login', '/web/login.js', '/web/shell.css', '/web/icon.png', '/login/code', '/web/login-code.js']);
+  const PUBLIC_STATIC = new Set(['/login', '/web/login.js', '/web/shell.css', '/web/icon.png', '/login/code', '/web/login-code.js', '/web/login-two-factor.js']);
+  // the sign-in steps a banned address is refused, signed in or not
+  const BAN_STEPS = new Set(['/api/auth/login', '/api/auth/2fa/code', '/api/auth/setup', '/api/auth/confirm', '/api/auth/password']);
+  // all a session may do while its account still has to set up two-step sign-in
+  const SETUP_ONLY_API = new Set(['GET /api/auth/me', 'GET /api/auth/2fa', 'POST /api/auth/2fa/start', 'POST /api/auth/2fa/enable', 'POST /api/auth/confirm', 'POST /api/auth/logout']);
   const handler = async (req, res) => {
     let url;
     try {
@@ -3371,8 +3501,29 @@ async function main() {
         longCache = versioned[1] === assetVersion(req);
       }
 
-      const user = auth.user(req);
+      let user = auth.user(req);
       const isApi = p.startsWith('/api/');
+      // a banned address: every sign-in step (and anything else without a
+      // session) is refused; a session it already has keeps working
+      if (isApi && p !== '/api/auth/me' && (!user || BAN_STEPS.has(p)) && access.banned(clientKey(req))) {
+        return sendJson(res, 429, { error: BANNED_TEXT, code: 'BANNED' });
+      }
+      // the two-step rules (Settings → Security), checked on every request,
+      // so turning one on also applies to devices already signed in
+      let setupOnly = false;
+      if (user) {
+        const state = twoFactorState(user, fromHome(req));
+        if (state === 'out') {
+          const h = auth.sessionHash(req);
+          if (h) db.deleteSession(h);
+          audit.warn(`Signed out (no two-step sign-in, outside the home network): ${by(req, user)}`);
+          if (isApi) return sendJson(res, 401, { error: access.get().twoFactor.everyone ? TWO_FACTOR_EVERYONE_TEXT : TWO_FACTOR_OUTSIDE_TEXT, code: 'TWO_FACTOR_REQUIRED' });
+          user = null;
+        } else if (state === 'setup') {
+          setupOnly = true;
+          if (isApi && !SETUP_ONLY_API.has(`${req.method} ${p}`)) return sendJson(res, 403, { error: TWO_FACTOR_SETUP_TEXT, code: 'TWO_FACTOR_SETUP' });
+        }
+      }
       if (user) {
         // when and from where each signed-in device was last used
         // (at most once a minute each: video and scrub requests come many a second)
@@ -3385,7 +3536,15 @@ async function main() {
           db.touchSession(h, clientKey(req));
         }
         // a watch-only account watches: no deleting, converting or settings
-        if (isApi && accounts.roleOf(user) === 'viewer' && !viewerMay(req.method, p)) return sendJson(res, 403, { error: 'This account can only watch footage. An admin account can do this.' });
+        if (isApi && !viewerMay(req.method, p)) {
+          const role = accounts.roleOf(user);
+          if (role === 'viewer') return sendJson(res, 403, { error: 'This account can only watch footage. An admin account can do this.' });
+          // an admin outside the home network, when Settings → Security keeps admin work at home
+          const rules = access.get().homeOnly;
+          if ((rules.adminPages || (rules.adminChanges && req.method !== 'GET' && req.method !== 'HEAD')) && !fromHome(req)) {
+            return sendJson(res, 403, { error: rules.adminPages ? HOME_ONLY_PAGES_TEXT : HOME_ONLY_CHANGES_TEXT, code: 'HOME_NETWORK_ONLY' });
+          }
+        }
       }
       const publicStatic = PUBLIC_STATIC.has(p) || (p.startsWith('/web/fonts/') && !p.slice(11).includes('/'));
 
@@ -3481,6 +3640,11 @@ async function main() {
         });
         return res.end();
       }
+      // every account needs two-step sign-in and this one has none: its page to set it up, nothing else
+      if (setupOnly && !publicStatic && p !== '/login/two-factor' && (p === '/' || /\.html?$/i.test(p) || p.startsWith('/studio'))) {
+        res.writeHead(302, { Location: '/login/two-factor', 'Cache-Control': 'no-store' });
+        return res.end();
+      }
       if (!user && !publicStatic) {
         // a sign-in waiting for its two-step code goes to the code page
         const where = accounts.pendingUser(pendingToken(req)) ? '/login/code' : '/login';
@@ -3519,6 +3683,8 @@ async function main() {
       if (p === '/login') return ui('web', WEB, 'login.html');
       // the two-step code page: always the built-in one, for every interface
       if (p === '/login/code') return serve(WEB, 'login-code.html');
+      // setting up two-step sign-in when every account needs it: the built-in page too
+      if (p === '/login/two-factor') return serve(WEB, 'login-two-factor.html');
       // always the built-in one: an interface pack cannot replace the bar
       if (p === '/web/critical.js') return serve(WEB, 'critical.js');
       if (p.startsWith('/web/')) return ui('web', WEB, p.slice(5), { cache: p.includes('/fonts/') ? 'public, max-age=604800' : 'no-cache' });

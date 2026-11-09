@@ -94,7 +94,7 @@
     }
     const data = res ? await res.json().catch(() => ({})) : {};
     if (!res) err.textContent = 'Can’t reach Sentry Six Manager. Check that the server is running.';
-    else if (res.status === 429) err.textContent = `${data.error || 'Too many attempts.'} Take a short break, then try again.`;
+    else if (res.status === 429 && data.code !== 'BANNED') err.textContent = `${data.error || 'Too many attempts.'} Take a short break, then try again.`;
     else err.textContent = data.error || 'That didn’t work. Try again.';
   });
 })();

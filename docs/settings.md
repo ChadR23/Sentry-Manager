@@ -15,7 +15,8 @@ All optional; put them in `.env` next to `docker-compose.yml`.
 | `TLS_HOSTNAMES` | | Names and IP addresses the certificate covers (more in Settings → Security) |
 | `TLS_CERT_FILE` / `TLS_KEY_FILE` | | Your own certificate instead of the built-in certificate authority |
 | `TLS_MODE` | `auto` | `off` = plain HTTP, only behind a reverse proxy that does HTTPS |
-| `TRUST_PROXY` | `false` | Trust `X-Forwarded-Proto` / `-Host` from that reverse proxy |
+| `TRUST_PROXY` | `false` | Trust `X-Forwarded-For` / `-Proto` / `-Host` from that reverse proxy (only from a connection that comes from it: see [Security](security.md#which-address-a-request-comes-from)) |
+| `TRUSTED_PROXIES` | | With `TRUST_PROXY`: the reverse proxy's addresses or ranges (`172.18.0.5`, `10.0.0.0/8`), when it is not on the local network (a proxy reached over Tailscale, `100.64.0.0/10`) or to trust only it; default: any address on the local network |
 | `TRUSTED_HOSTS` | | If set, refuse requests for any other host name |
 | `SENTRY_TAG` | `latest` | Which image to follow |
 | `UPDATE_CHECK` | `on` | `off` = don't check for newer images |

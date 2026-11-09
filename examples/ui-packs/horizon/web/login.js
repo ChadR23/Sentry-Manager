@@ -317,7 +317,8 @@
     document.body.classList.remove('igniting');
     const data = res ? await res.json().catch(() => ({})) : {};
     const msg = data.error || (res ? `Sign-in failed (${res.status}).` : 'Sentry Six Manager cannot be reached.');
-    if (res && res.status === 429) {
+    // (a banned address is told to try later: no countdown)
+    if (res && res.status === 429 && data.code !== 'BANNED') {
       const m = /(\d+)\s*s/.exec(msg);
       wait(m ? Number(m[1]) : 30, msg);
       return;

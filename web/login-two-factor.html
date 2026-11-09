@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>Set up two-step sign-in</title>
+<link rel="icon" href="/web/icon.png">
+<style>
+  :root{--bg:#0f1218;--card:#171b23;--fg:#e8ecf2;--muted:#9aa4b2;--line:#2a3140;--accent:#5ee9a0;--bad:#ff7b7b}
+  @media (prefers-color-scheme: light){:root{--bg:#f4f5f7;--card:#fff;--fg:#14171c;--muted:#5b6472;--line:#d9dde3;--accent:#0f8a55;--bad:#c0392b}}
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;display:grid;place-items:center;padding:16px;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  main{width:100%;max-width:440px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:26px 24px}
+  h1{margin:0 0 6px;font-size:20px}
+  p{margin:0 0 16px;color:var(--muted)}
+  label{display:block;font-weight:600;margin-bottom:6px}
+  input{width:100%;padding:12px 14px;border-radius:10px;border:1px solid var(--line);background:transparent;color:var(--fg);font:600 22px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.18em;text-align:center}
+  input:focus{outline:2px solid var(--accent);outline-offset:1px}
+  button{margin-top:14px;width:100%;padding:12px;border:0;border-radius:10px;background:var(--accent);color:#06140d;font:700 15px/1 system-ui,sans-serif;cursor:pointer}
+  button[disabled]{opacity:.6;cursor:default}
+  .err{color:var(--bad);margin:12px 0 0;min-height:1.5em}
+  .alt{display:block;margin-top:16px;text-align:center;color:var(--muted);font-size:13px}
+  .alt a{color:inherit}
+  .key{display:block;margin:6px 0;font:600 16px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.06em;padding:6px 10px;border-radius:8px;background:rgba(127,127,127,.16);user-select:all;-webkit-user-select:all;overflow-wrap:anywhere}
+  ol{margin:0 0 6px;padding-left:20px;color:var(--fg)}
+  ol li{margin-bottom:10px}
+  .codes{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin:0 0 12px}
+  .codes code{font:600 15px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;padding:4px 8px;border-radius:6px;background:rgba(127,127,127,.16);text-align:center}
+  .btn2{display:block;margin-top:10px;text-align:center;padding:11px;border-radius:10px;border:1px solid var(--line);color:var(--fg);text-decoration:none;font-weight:600}
+  input.pw{font:15px/1.2 system-ui,sans-serif;letter-spacing:0;text-align:left}
+  [hidden]{display:none!important}
+  a{color:var(--accent)}
+</style>
+</head>
+<body>
+<main>
+  <h1>Set up two-step sign-in</h1>
+  <p id="lead">Every account on this server needs two-step sign-in (an admin turned it on in Settings → Security). Set it up now: you need an authenticator app on your phone.</p>
+  <form id="pw-form" hidden autocomplete="off">
+    <label for="pw">Your password, to confirm</label>
+    <input id="pw" class="pw" type="password" autocomplete="current-password" required>
+    <button type="submit">Continue</button>
+  </form>
+  <div id="start-box"><button type="button" id="start">Start</button></div>
+  <form id="code-form" hidden autocomplete="off">
+    <ol>
+      <li>In an authenticator app (Google Authenticator, Microsoft Authenticator, 1Password, Bitwarden, Aegis…), add an account with this setup key:<span class="key" id="key"></span><span class="alt" style="text-align:left;margin:0">On this phone? <a id="uri" href="#">Open it in the authenticator app</a>.</span></li>
+      <li>Type the 6-digit code it shows:</li>
+    </ol>
+    <input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required>
+    <button type="submit">Turn on</button>
+  </form>
+  <div id="done" hidden>
+    <p><b style="color:var(--accent)">Two-step sign-in is on.</b> Keep these recovery codes somewhere safe: each signs in once without the phone. They are not shown again.</p>
+    <div class="codes" id="codes"></div>
+    <a class="btn2" id="download" download="sentry-six-manager-recovery-codes.txt" href="#">Download them</a>
+    <button type="button" id="continue">Continue to Sentry Six Manager</button>
+  </div>
+  <p class="err" id="err" role="alert"></p>
+  <span class="alt"><a href="#" id="logout">Sign out</a></span>
+</main>
+<script src="/web/login-two-factor.js"></script>
+</body>
+</html>

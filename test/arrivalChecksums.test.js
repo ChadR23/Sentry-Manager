@@ -492,7 +492,9 @@ test('arrival: index entries of gone clips are dropped; the API route is a POST 
   assert.equal(viewerMay('GET', '/api/vehicles/car1/sentry-usb'), true);
   const src = fs.readFileSync(path.join(REPO, 'server', 'index.js'), 'utf8');
   assert.match(src, /r\.add\('POST', '\/api\/vehicles\/:id\/sentry-usb\/record'/);
-  assert.match(src, /canBackfill: accounts\.roleOf\(user\) === 'admin'/);
+  // an admin who may make changes from where the page is open (Settings → Security can keep that to the home network)
+  assert.match(src, /canBackfill: adminHere\(req, user\)/);
+  assert.match(src, /const adminHere = \(req, user\) => \{\n    if \(accounts\.roleOf\(user\) !== 'admin'\) return false;/);
   assert.match(src, /onClipConverted: \(outputPath\) => \{ arrivalRef\?\.converted\(outputPath\)/);
   assert.match(src, /idle: \(\) => !speedIndexBusy\(\)/);
   assert.match(src, /olderOf: \(vid\) => \(db\.get\('sentry-usb-record', \{\}\) \|\| \{\}\)\[vid\]\?\.older !== false/, 'older clips on unless turned off');

@@ -2505,6 +2505,8 @@
           <div class="full form-actions" style="margin-top:0"><a class="btn" href="/api/security/ca.crt" download>Download certificate authority</a><button class="btn solid" type="submit">Save names</button></div>
         </form>`;
     }
+    // sign-in protection for a server open to the internet (web/accessSettings.js, the same in every interface)
+    body += `<h3 style="margin:26px 0 4px">Sign-in protection</h3><p class="muted small" style="margin:0 0 14px">Rules for a server that is reachable from the internet. They decide by the address each request comes from; the home network is defined at the bottom.</p><div id="sec-access"></div>`;
     return `<div class="card" data-section="security"><h2>Security</h2>${body}</div>`;
   }
 
@@ -2535,6 +2537,12 @@
     }
     const add = $('sec-add-host');
     if (add) add.onclick = () => save([...(sec.tls?.editable || []), add.dataset.host]);
+    const box = $('sec-access');
+    if (box) {
+      import('/web/accessSettings.js').then((m) => {
+        if ($('sec-access') === box) m.createAccessSettings(box, { cls: { btn: 'btn sm', primary: 'btn sm solid', input: 'input' } });
+      }).catch(() => { box.textContent = 'Sign-in protection could not load. Reload the page.'; });
+    }
   }
 
   function vehicleForm(v) {

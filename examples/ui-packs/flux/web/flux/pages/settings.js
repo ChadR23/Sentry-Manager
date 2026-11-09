@@ -272,7 +272,11 @@ async function security(box) {
         <div class="row-actions"><a class="btn" href="/api/security/ca.crt" download>${icon('download')}Download certificate authority</a><button class="btn primary" type="submit">Save names</button></div>
       </form>`;
   }
-  box.innerHTML = `<section class="card"><header class="card-h"><h2>Security</h2>${sec.https ? chip('HTTPS', 'green') : chip('plain HTTP', 'red')}</header>${body}</section>`;
+  box.innerHTML = `<section class="card"><header class="card-h"><h2>Security</h2>${sec.https ? chip('HTTPS', 'green') : chip('plain HTTP', 'red')}</header>${body}</section>
+    <section class="card" style="margin-top:16px"><header class="card-h"><h2>Sign-in protection</h2></header><p class="small muted">Rules for a server that is reachable from the internet. They decide by the address each request comes from; the home network is defined at the bottom.</p><div id="sec-access" style="margin-top:12px"></div></section>`;
+  // sign-in protection for a server open to the internet (web/accessSettings.js, the same in every interface)
+  import('/web/accessSettings.js').then((m) => m.createAccessSettings(box.querySelector('#sec-access'), { cls: { btn: 'btn sm', primary: 'btn primary', input: 'input' } }))
+    .catch(() => { box.querySelector('#sec-access').textContent = 'Sign-in protection could not load. Reload the page.'; });
   const save = async (names) => {
     if (!(await confirmDialog({ title: 'Make a new certificate?', body: '<p>The certificate will cover the new names. Devices that continued past the browser\'s warning see it once more.</p>', ok: 'Save names' }))) return;
     await busy(null, async () => {

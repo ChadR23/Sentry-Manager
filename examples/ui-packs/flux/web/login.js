@@ -79,7 +79,8 @@
     }
     const data = res ? await res.json().catch(() => ({})) : {};
     const msg = data.error || (res ? `Sign-in failed (${res.status}).` : 'Could not reach Sentry Six Manager.');
-    if (res && res.status === 429) {
+    // (a banned address is told to try later: no countdown)
+    if (res && res.status === 429 && data.code !== 'BANNED') {
       const m = /(\d+)\s*s/.exec(msg);
       lockFor(m ? Number(m[1]) : 30, msg);
       return;

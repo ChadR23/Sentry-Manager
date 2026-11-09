@@ -360,7 +360,11 @@ async function security(box) {
         <p class="muted small full">The addresses or names you type to reach this server. Saving makes a new certificate (devices that continued past the warning see it once more). From TLS_HOSTNAMES: ${esc((tls.fromEnv || []).join(', ') || 'none')}.</p>
         <div class="full actions" style="margin-top:0"><a class="btn" href="/api/security/ca.crt" download>${icon('download')} Download certificate authority</a><button class="btn primary" type="submit">Save names</button></div></form>`;
   }
-  box.innerHTML = `<section class="panel"><div class="panel-head"><h2>Security</h2></div>${html}</section>`;
+  // sign-in protection for a server open to the internet (web/accessSettings.js, the same in every interface)
+  box.innerHTML = `<section class="panel"><div class="panel-head"><h2>Security</h2></div>${html}</section>
+    <section class="panel" style="margin-top:18px"><div class="panel-head"><h2>Sign-in protection</h2></div><p class="lead">Rules for a server that is reachable from the internet. They decide by the address each request comes from; the home network is defined at the bottom.</p><div id="sec-access" style="margin-top:14px"></div></section>`;
+  import('/web/accessSettings.js').then((m) => m.createAccessSettings($('#sec-access', box), { cls: { btn: 'btn sm', primary: 'btn primary', input: 'input' } }))
+    .catch(() => { $('#sec-access', box).textContent = 'Sign-in protection could not load. Reload the page.'; });
   const save = async (names) => {
     if (!(await confirmDialog({ title: 'Make a new certificate?', body: '<p>The certificate will cover the new names. Devices that continued past the warning before will see it once more; devices with the certificate authority installed won’t.</p>', ok: 'Save names' }))) return;
     try {

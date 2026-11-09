@@ -393,7 +393,11 @@ async function security({ el }) {
   el.innerHTML = `<div class="card stack"><h2>Security</h2>
     <div class="note ${sec.https ? 'note-good' : 'note-bad'}">${icon(sec.https ? 'lock' : 'alert')}<span>${sec.https ? '<b>This connection is encrypted (HTTPS).</b> Your password and footage can’t be read on the way.' : '<b>This connection isn’t encrypted.</b> Others on the network could read your password and footage. Use https:// or a reverse proxy that does HTTPS.'}</span></div>
     ${details('About the server process', `<p class="small">${sec.runningAsRoot ? 'It runs as root (not supervised). Fine while developing; the Docker image runs it as an ordinary user.' : 'It runs as an ordinary user; only the supervisor can connect shares.'}</p>`)}
-    <h3>Certificate</h3>${certBody}</div>`;
+    <h3>Certificate</h3>${certBody}</div>
+    <div class="card stack" style="margin-top:16px"><h2>Sign-in protection</h2><p class="small">Rules for a server that is reachable from the internet. They decide by the address each request comes from; the home network is defined at the bottom.</p><div id="sec-access"></div></div>`;
+  // sign-in protection for a server open to the internet (web/accessSettings.js, the same in every interface)
+  import('/web/accessSettings.js').then((m) => m.createAccessSettings(el.querySelector('#sec-access'), { cls: { btn: 'btn btn-sm', primary: 'btn btn-primary', input: 'input' } }))
+    .catch(() => { el.querySelector('#sec-access').textContent = 'Sign-in protection could not load. Reload the page.'; });
   el.querySelector('#hosts')?.addEventListener('submit', (e) => { e.preventDefault(); save(String(new FormData(e.target).get('hostnames') || '').split(/[\s,]+/).filter(Boolean), e.submitter); });
   el.querySelector('#add-host')?.addEventListener('click', (e) => save([...(tls.editable || []), host], e.currentTarget));
 }
