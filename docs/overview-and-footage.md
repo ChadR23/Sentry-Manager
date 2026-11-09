@@ -254,4 +254,9 @@ also gets the grey **Still arriving** tag (no notification): the archive is
 behind, but working. This needs a share that reports when a file arrived (its
 creation or change time); a share copied or restored on the NAS is ignored.
 
+A day whose clips were still being sent when the car drove off gets a
+grey-blue **Waiting for Sentry USB** tag instead: nothing is lost, the clips
+stay on the Pi and arrive with the next archive. See [Sentry USB](sentry-usb.md)
+for the Sentry USB line at the top of the Footage page.
+
 The findings per day are at `GET /api/vehicles/:id/archive-gaps`.

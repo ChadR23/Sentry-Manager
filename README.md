@@ -81,6 +81,7 @@ on TrueNAS, see [TrueNAS](docs/truenas.md) for the update steps.
 | [Export a video](docs/export.md) | Making one video of a stretch of footage, and its limits |
 | [Recycle Bin, policies and jobs](docs/recycle-bin-and-jobs.md) | Retention, restoring, and what the server is doing |
 | [Vehicles and SMB shares](docs/vehicles-and-shares.md) | Footage on a share or on the same machine, permissions |
+| [Sentry USB](docs/sentry-usb.md) | The Pi that archives the car's clips: its status on the Footage page, and converting without upsetting its checks |
 | [Phones and tablets](docs/phones-and-tablets.md) | Supported devices |
 | [Updates](docs/updates.md) | Updating, critical updates, how images are built |
 | [Automatic updates](docs/auto-updates.md) | Watchtower, to install new versions for you |
