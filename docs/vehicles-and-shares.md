@@ -35,6 +35,18 @@ Advanced* (minimum SMB 3, encryption on); Samba, TrueNAS and Unraid
 CIFS kernel module (`sudo modprobe cifs`); Synology, Unraid, TrueNAS and most
 Linux distributions have it.
 
+## Car model and year
+
+Each vehicle's settings have **Car model** (Automatic, Model 3, Model Y, Model
+S, Model X) and **Year** (the generations of that model), for an admin. They
+pick how the car's CAN Bridge data is read (which DBC files decode it), nothing
+else. Automatic, the default, is what the car says: its VIN is on the CAN bus,
+and its 4th character is the model and its 10th the model year. The note under
+the fields says what the VIN said and what is in use. Changing it reads that
+car's CAN logs again in the background. The details, and what is checked on a
+real car (only a Model Y so far), are in
+[CAN Bridge: car models](can-bridge-api.md#car-models-and-years).
+
 ## Footage on the same machine
 
 If the footage is on the server that runs Sentry Six Manager, no SMB share

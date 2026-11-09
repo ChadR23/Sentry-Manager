@@ -6,6 +6,8 @@ import {
 } from '../core.js';
 // Nodes is a section here (#/settings/nodes; #/nodes opens it): its page module as it was, taken down with Settings.
 import nodesPage from './nodes.js';
+// the vehicle's car model and year (shared with every interface)
+import { carModelFields, wireCarModel, readCarModel } from '/web/carModelField.js';
 
 const SECTIONS = [
   ['vehicles', 'Vehicles', 'car'], ['places', 'Places', 'pin'], ['account', 'Account', 'key'], ['interface', 'Interface', 'sparkle'], ['updates', 'Updates', 'download'],
@@ -61,6 +63,7 @@ function vehicleForm(v, sys) {
     <div class="form">
       <label class="field">Name<input class="input" name="name" required maxlength="60" value="${esc(v?.name || '')}" placeholder="Daily driver" autocomplete="off"></label>
       <label class="field">Time zone<input class="input" name="timezone" value="${esc(v?.timezone || tz)}" placeholder="America/Chicago" autocomplete="off" autocapitalize="none" spellcheck="false"></label>
+      ${carModelFields(v, { hint: 'muted small full' })}
       <div class="field full">Where the footage is<div class="seg big" role="group" aria-label="Footage source"><button type="button" data-src="smb" aria-pressed="${smb}">Network share (SMB)</button><button type="button" data-src="path" aria-pressed="${!smb}">Folder in the container</button></div></div>
       <div class="full form" data-for="smb"${smb ? '' : ' hidden'}>
         <label class="field full">Share<input class="input mono" name="share" value="${esc(s.share || '')}" placeholder="//192.168.1.50/TeslaCam" autocomplete="off" autocapitalize="none" spellcheck="false"></label>
@@ -119,6 +122,7 @@ async function vehicles(box, sub) {
   }));
   form.querySelector('[name=name]').focus({ preventScroll: true });
   wireSmbTest(form, editing && editing !== 'new' ? editing.id : null);
+  wireCarModel(form);
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const fd = new FormData(form);
@@ -128,7 +132,8 @@ async function vehicles(box, sub) {
       name: String(fd.get('name') || '').trim(), timezone: String(fd.get('timezone') || '').trim(),
       source: type === 'path'
         ? { type: 'path', path: String(fd.get('path') || '').trim() }
-        : { type: 'smb', share: String(fd.get('share') || '').trim(), username: String(fd.get('username') || ''), password: fd.get('password') || undefined, domain: String(fd.get('domain') || ''), version: fd.get('version'), encrypt: fd.get('encrypt') === 'on', port: String(fd.get('port') || '').trim() || null }
+        : { type: 'smb', share: String(fd.get('share') || '').trim(), username: String(fd.get('username') || ''), password: fd.get('password') || undefined, domain: String(fd.get('domain') || ''), version: fd.get('version'), encrypt: fd.get('encrypt') === 'on', port: String(fd.get('port') || '').trim() || null },
+      car: readCarModel(form)
     };
     if (!body.name) { err.textContent = 'Give the vehicle a name.'; return; }
     if (editing && editing !== 'new') {

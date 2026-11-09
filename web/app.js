@@ -2544,6 +2544,7 @@
       <h3 class="full">${v ? `Edit ${esc(v.name)}` : 'Add a vehicle'}</h3>
       <label class="field">Name<input class="input" name="name" required value="${esc(v?.name || '')}" placeholder="Daily Driver"></label>
       <label class="field">Time zone<input class="input" name="timezone" value="${esc(v?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone)}" placeholder="America/Chicago"></label>
+      <div data-car-slot style="display:contents"></div>
       <div class="field full">Footage source<div class="seg" id="src-type"><button type="button" data-type="smb" class="${s.type !== 'path' ? 'on' : ''}">SMB share</button><button type="button" data-type="path" class="${s.type === 'path' ? 'on' : ''}">Folder in the container</button></div></div>
       <div class="full form" data-src="smb"${s.type === 'path' ? ' hidden' : ''}>
         <label class="field full">Share<input class="input" name="share" value="${esc(s.share || '')}" placeholder="//192.168.1.50/TeslaCam"></label>
@@ -2567,6 +2568,17 @@
   function wireSettings(editing) {
     const veh = $('veh');
     if (veh) {
+      // the car model and year (web/carModelField.js, shared with the other interfaces)
+      let carField = null;
+      const slot = veh.querySelector('[data-car-slot]');
+      if (slot) {
+        import('/web/carModelField.js').then((m) => {
+          if (!slot.isConnected) return;
+          carField = m;
+          slot.innerHTML = m.carModelFields(state.vehicles.find((x) => x.id === editing), { hint: 'muted small full' });
+          m.wireCarModel(veh);
+        }).catch(() => {});
+      }
       let type = veh.querySelector('#src-type .on')?.dataset.type || 'smb';
       veh.querySelectorAll('#src-type button').forEach((b) => {
         b.onclick = () => {
@@ -2613,6 +2625,7 @@
         const body = { name: fd.get('name'), timezone: fd.get('timezone'), source: type === 'path'
           ? { type: 'path', path: fd.get('path') }
           : { type: 'smb', share: fd.get('share'), username: fd.get('username'), password: fd.get('password') || undefined, domain: fd.get('domain'), version: fd.get('version'), encrypt: fd.get('encrypt') === 'on', port: fd.get('port') || null } };
+        if (carField) body.car = carField.readCarModel(veh);
         // only send the source when it changed, so a rename needs no password
         if (editing !== 'new') {
           const was = state.vehicles.find((x) => x.id === editing)?.source || {};

@@ -3,6 +3,8 @@
 import { h, ico, api, send, app, pickCar, loadCars, size, stampFull, toast, ask, act, ok, local, segs, onSegs, pill, panelHead, liveDraw, clockPref } from '../core.js';
 // Nodes is a section here (#/settings/nodes; #/nodes opens it): its page module as it was, taken down with Settings.
 import nodesPage from './nodes.js';
+// the vehicle's car model and year (shared with every interface)
+import { carModelFields, wireCarModel, readCarModel } from '/web/carModelField.js';
 
 const TABS = [['vehicles', 'Vehicles', 'car'], ['places', 'Places', 'map'], ['account', 'Account', 'lock'], ['interface', 'Interface', 'horizon'], ['display', 'Background', 'hud'], ['updates', 'Updates', 'download'], ['security', 'Security', 'shield'], ['system', 'System', 'info'], ['power', 'Electricity', 'bolt'], ['nodes', 'Nodes', 'nodes']];
 const WEEK = [[1, 'Mon'], [2, 'Tue'], [3, 'Wed'], [4, 'Thu'], [5, 'Fri'], [6, 'Sat'], [0, 'Sun']];
@@ -54,6 +56,7 @@ async function vehicles(box, { params, go }) {
   let type = v?.source?.type === 'path' ? 'path' : 'smb';
   onSegs(form, 'src', (t) => { type = t; form.querySelectorAll('[data-src]').forEach((n) => { n.hidden = n.dataset.src !== t; }); });
   wireSmbTest(form, v?.id);
+  wireCarModel(form);
   form.onsubmit = (e) => {
     e.preventDefault();
     const fd = new FormData(form);
@@ -61,7 +64,8 @@ async function vehicles(box, { params, go }) {
       name: String(fd.get('name') || '').trim(), timezone: String(fd.get('timezone') || '').trim(),
       source: type === 'path'
         ? { type: 'path', path: String(fd.get('path') || '').trim() }
-        : { type: 'smb', share: String(fd.get('share') || '').trim(), username: fd.get('username'), password: fd.get('password') || undefined, domain: fd.get('domain'), version: fd.get('version'), encrypt: fd.get('encrypt') === 'on', port: fd.get('port') ? Number(fd.get('port')) : null }
+        : { type: 'smb', share: String(fd.get('share') || '').trim(), username: fd.get('username'), password: fd.get('password') || undefined, domain: fd.get('domain'), version: fd.get('version'), encrypt: fd.get('encrypt') === 'on', port: fd.get('port') ? Number(fd.get('port')) : null },
+      car: readCarModel(form)
     };
     if (v) {
       // send the source only when it changed, so a rename needs no password
@@ -105,6 +109,7 @@ function carForm(v) {
     <div class="grid2">
       <label class="fld">Name<input class="in" name="name" required value="${h(v?.name || '')}" placeholder="Daily driver"></label>
       <label class="fld">Time zone<input class="in" name="timezone" value="${h(v?.timezone || tz)}" placeholder="America/Chicago" autocapitalize="none" spellcheck="false"></label>
+      ${carModelFields(v, { field: (text, control) => `<label class="fld">${text}${control}</label>`, input: 'in', hint: 'small faint' })}
     </div>
     <div class="fld">Footage source${segs('src', [['smb', 'SMB share'], ['path', 'Folder in the container']], s.type === 'path' ? 'path' : 'smb', 'Footage source')}</div>
     <div data-src="smb" class="form"${s.type === 'path' ? ' hidden' : ''}>

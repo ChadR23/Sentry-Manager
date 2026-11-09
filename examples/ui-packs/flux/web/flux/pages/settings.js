@@ -1,5 +1,7 @@
 // Settings: vehicles, places (Home, Work), account, interface (UI packs), updates, security, system, power, appearance.
 import { esc, api, upload, state, current, setVehicle, loadVehicles, bytes, isoish, icon, toast, confirmDialog, busy, fin, store, liveDraw, clockPref } from '../core.js';
+// the vehicle's car model and year (shared with every interface)
+import { carModelFields, wireCarModel, readCarModel } from '/web/carModelField.js';
 import { seg, wireSeg, chip } from '../ui.js';
 // Nodes is a section here (#/settings/nodes; #/nodes opens it): its page module as it was, taken down with Settings.
 import nodesPage from './nodes.js';
@@ -55,6 +57,7 @@ async function vehicles(box, { params, go }) {
     form.querySelectorAll('[data-src]').forEach((n) => { n.hidden = n.dataset.src !== t; });
   });
   wireSmbTest(form, v?.id);
+  wireCarModel(form);
   form.onsubmit = (e) => {
     e.preventDefault();
     const fd = new FormData(form);
@@ -62,7 +65,8 @@ async function vehicles(box, { params, go }) {
       name: String(fd.get('name') || '').trim(), timezone: String(fd.get('timezone') || '').trim(),
       source: type === 'path'
         ? { type: 'path', path: String(fd.get('path') || '').trim() }
-        : { type: 'smb', share: String(fd.get('share') || '').trim(), username: fd.get('username'), password: fd.get('password') || undefined, domain: fd.get('domain'), version: fd.get('version'), encrypt: fd.get('encrypt') === 'on', port: fd.get('port') ? Number(fd.get('port')) : null }
+        : { type: 'smb', share: String(fd.get('share') || '').trim(), username: fd.get('username'), password: fd.get('password') || undefined, domain: fd.get('domain'), version: fd.get('version'), encrypt: fd.get('encrypt') === 'on', port: fd.get('port') ? Number(fd.get('port')) : null },
+      car: readCarModel(form)
     };
     if (v) {
       // only send the source when it changed, so a rename needs no password
@@ -107,6 +111,7 @@ function vehicleForm(v) {
     <div class="grid2">
       <label class="field">Name<input class="input" name="name" required value="${esc(v?.name || '')}" placeholder="Daily driver"></label>
       <label class="field">Time zone<input class="input" name="timezone" value="${esc(v?.timezone || tz)}" placeholder="America/Chicago"></label>
+      ${carModelFields(v, { hint: 'faint small' })}
     </div>
     <div class="field">Footage source${seg('srctype', [['smb', 'SMB share'], ['path', 'Folder in the container']], s.type === 'path' ? 'path' : 'smb', 'Footage source')}</div>
     <div data-src="smb"${s.type === 'path' ? ' hidden' : ''}>

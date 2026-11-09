@@ -6,6 +6,8 @@ import { state, loadVehicles, shareHealth, setVehicle, vehicleById } from '../st
 import { go, setTheme, currentTheme, signOut } from '../app.js';
 // Helper servers (Nodes) is a section here (#/settings/nodes; #/nodes opens it): its page module as it was, taken down with Settings.
 import * as nodesPage from './nodes.js';
+// the vehicle's car model and year (shared with every interface)
+import { carModelFields, wireCarModel, readCarModel } from '/web/carModelField.js';
 
 const SECTIONS = [
   ['vehicles', 'Vehicles', 'car'], ['places', 'Places', 'map'], ['account', 'Account', 'key'], ['look', 'Look', 'palette'], ['interface', 'Interface', 'grid'],
@@ -176,7 +178,8 @@ async function editVehicle({ el }, id) {
   const draw = () => {
     el.innerHTML = `<a class="back-link" href="#/settings/vehicles">${icon('back')} Vehicles</a>
       <form class="card stack" id="veh-form"><h2>Edit ${esc(v.name)}</h2>
-        <div class="form-grid"><label class="field"><span>Vehicle name</span><input class="input" name="name" value="${esc(v.name)}" required></label>${timezoneField(v.timezone)}</div>
+        <div class="form-grid"><label class="field"><span>Vehicle name</span><input class="input" name="name" value="${esc(v.name)}" required></label>${timezoneField(v.timezone)}
+          ${carModelFields(v, { field: (text, control) => `<label class="field"><span>${text}</span>${control}</label>`, hint: 'muted small' })}</div>
         <div><p class="field" style="margin-bottom:8px">Footage is</p><div class="seg" role="group" aria-label="Footage source"><button type="button" data-type="smb" aria-pressed="${type === 'smb'}">On a network share</button><button type="button" data-type="path" aria-pressed="${type === 'path'}">In a folder</button></div></div>
         <div class="form-grid">${type === 'smb' ? smbFields(v.source.type === 'smb' ? v.source : { version: '3.1.1', encrypt: true }, versions) : `<label class="field full"><span>Folder</span><input class="input mono" name="path" value="${esc(v.source.path || '')}" placeholder="/footage/car" autocapitalize="none" spellcheck="false"></label>`}</div>
         <p class="muted small">Changing where footage comes from asks for your password.</p>
@@ -184,11 +187,12 @@ async function editVehicle({ el }, id) {
       </form>`;
     el.querySelectorAll('[data-type]').forEach((b) => { b.onclick = () => { type = b.dataset.type; draw(); }; });
     wireSmbTest(el, v.id);
+    wireCarModel(el.querySelector('#veh-form'));
     el.querySelector('#veh-form').onsubmit = (e) => {
       e.preventDefault();
       const form = e.target;
       const f = new FormData(form);
-      const body = { name: String(f.get('name') || '').trim(), timezone: String(f.get('timezone') || '') , source: readSource(form, type) };
+      const body = { name: String(f.get('name') || '').trim(), timezone: String(f.get('timezone') || '') , source: readSource(form, type), car: readCarModel(form) };
       const was = v.source;
       const same = type === was.type && (type === 'path' ? body.source.path === was.path
         : ['share', 'username', 'domain', 'version'].every((k) => String(body.source[k] ?? '') === String(was[k] ?? '')) && body.source.encrypt === (was.encrypt !== false) && String(body.source.port ?? '') === String(was.port ?? '') && !body.source.password);
