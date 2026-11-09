@@ -139,7 +139,10 @@ test('emptying the Recycle Bin deletes the paired CAN log through the server: fi
     await waitFor(async () => !fs.existsSync(logFile), 20000);
     assert.equal(fs.existsSync(`${logFile}.json`), false, 'and its sidecar');
     await waitFor(async () => !fs.existsSync(minute), 10000);
-    const trust = JSON.parse(await fsp.readFile(path.join(dir, 'data', 'can', key, 'trust.json'), 'utf8'));
+    // (the trust record is written just after the file and the index: wait for it under load)
+    const trustOf = async () => { try { return JSON.parse(await fsp.readFile(path.join(dir, 'data', 'can', key, 'trust.json'), 'utf8')); } catch { return null; } };
+    await waitFor(async () => (await trustOf())?.logs?.[name]?.deleted === true, 10000);
+    const trust = await trustOf();
     assert.equal(trust.logs[name].deleted, true, 'its trust record is kept, marked deleted');
     assert.equal(await listed(), undefined);
     const after = (await s.call('GET', '/api/can/settings')).data.keep.cars[vid];

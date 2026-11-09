@@ -202,6 +202,8 @@ test('arrival: an H.265 clip we did not convert is skipped (unknown origin); one
   const abs3 = await s.write(rel3, bytes3);
   await s.arrival.converted(abs3);
   await s.run();
+  // (a pass already under way when this one was asked for can finish first under load: wait for the line)
+  for (let i = 0; i < 50 && !(await s.lines()).length; i++) { await new Promise((r) => setTimeout(r, 100)); await s.run(); }
   assert.deepEqual(await s.lines(), [{ sha256: sha(bytes3), rel: rel3 }]);
 });
 
