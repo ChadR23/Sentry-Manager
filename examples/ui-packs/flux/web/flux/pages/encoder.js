@@ -388,7 +388,7 @@ export default {
       const host = $('#enc-saved');
       if (!host || !veh || !window.SentryVehicleEncoding) return;
       window.SentryVehicleEncoding.encoderLine(host, {
-        folder: sourceOf(veh), name: veh.name, href: '#/vehicles', classes: { btn: 'btn sm' },
+        folder: sourceOf(veh), name: veh.name, href: '#/policies/per-car', classes: { btn: 'btn sm' },
         onLoad: (c) => {
           Object.assign(form, window.SentryVehicleEncoding.formFields(c, form));
           save();

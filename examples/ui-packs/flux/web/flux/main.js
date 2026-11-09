@@ -10,7 +10,6 @@ import jobs from './pages/jobs.js';
 import bin from './pages/bin.js';
 import notifications from './pages/notifications.js';
 import settings from './pages/settings.js';
-import vehicles from './pages/vehicles.js';
 import drives from './pages/drives.js';
 import health from './pages/health.js';
 import account from './pages/account.js';
@@ -21,7 +20,6 @@ const PAGES = [
   { id: 'footage', label: 'Footage', icon: 'footage', key: 'f', mod: footage, group: 'Monitor' },
   { id: 'viewer', label: 'Viewer', icon: 'viewer', key: 'v', mod: viewer, group: 'Monitor' },
   { id: 'encoder', label: 'Encoder', icon: 'encoder', key: 'e', mod: encoder, group: 'Process' },
-  { id: 'vehicles', label: 'Encoding per vehicle', icon: 'encoder', key: 'c', mod: vehicles, group: 'Process' },
   { id: 'nodes', label: 'Nodes', icon: 'nodes', key: 'n', mod: nodes, group: 'Process' },
   { id: 'policies', label: 'Policies', icon: 'policies', key: 'p', mod: policies, group: 'Process' },
   { id: 'jobs', label: 'Jobs', icon: 'jobs', key: 'j', mod: jobs, group: 'Process' },
@@ -34,7 +32,7 @@ const PAGES = [
 // Drives is hidden for now (web/hiddenTabs.js): no navigation; its addresses open the Overview
 const byId = Object.fromEntries([...PAGES, { id: 'drives', label: 'Drives', icon: 'route', mod: drives }].map((p) => [p.id, p]));
 // sub-tabs with their own shortcut: [address, label, icon, key (g + key)]
-const SUB_KEYS = []; // (none now: Drives is hidden)
+const SUB_KEYS = [['policies/per-car', 'Encoding per vehicle (Policies → Per car)', 'encoder', 'c']];
 
 
 // ---------- sidebar ----------
@@ -137,7 +135,7 @@ let mountedId = null;
 const page = $('#page');
 
 // pages that moved inside another as its sub-tab: their old addresses open them there
-const MOVED = { driving: 'drives/driving', map: 'drives/map' };
+const MOVED = { driving: 'drives/driving', map: 'drives/map', vehicles: 'policies/per-car' };
 function movedHash() {
   const was = /^#\/?([\w-]+)\/?(\?.*)?$/.exec(location.hash);
   if (was && MOVED[was[1]]) history.replaceState(null, '', `#/${MOVED[was[1]]}${was[2] || ''}`);

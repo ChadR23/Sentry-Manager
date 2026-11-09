@@ -1,11 +1,15 @@
 // Policies: how long each kind of recording stays before the policy moves it
 // to the Recycle Bin (protected ones always stay); the bin can empty itself after some days.
 
+// Per car (Encoding per vehicle) is its sub-tab (Policies | Per car, web/subTabs.js): #/policies/<tab>,
+// each the page module it always was, taken down with the page.
+import { pickSubTab, subTabsHtml } from '/web/subTabs.js';
+import perCar from './vehicles.js';
 import { $, esc, icon, api, current, vehiclePicker, bytes, plural, whenFull, toast, confirmDialog, empty } from '../core.js';
 
 const CATS = [['Recent', 'Drives (RecentClips)', 'var(--au-teal)'], ['Sentry', 'Sentry events', 'var(--au-magenta)'], ['Saved', 'Saved clips', 'var(--au-green)'], ['Other', 'Other', 'var(--au-violet)']];
 
-export default {
+const retention = {
   title: 'Policies',
   kicker: 'Retention',
   icon: 'shield',
@@ -78,5 +82,22 @@ export default {
       refresh() { load(false).catch(() => {}); },
       destroy() { dead = true; }
     };
+  }
+};
+export const POLICY_TABS = [['retention', 'Policies', retention], ['per-car', 'Per car', perCar]];
+
+export default {
+  title: 'Policies',
+  kicker: 'Retention',
+  icon: 'shield',
+  vehicle: true,
+  topics: ['inventory'],
+  async mount(ctx) {
+    const tab = pickSubTab('sentry-policies-tab', POLICY_TABS.map(([k]) => k), ctx.params[0]);
+    const [, , mod] = POLICY_TABS.find(([k]) => k === tab);
+    if (tab !== 'retention') { document.title = 'Per car · Policies · Sentry Six Manager'; ctx.sub(''); }
+    ctx.body.innerHTML = `${subTabsHtml(POLICY_TABS, tab, { href: (k) => `#/policies/${k}`, label: 'Policies sections', cls: 'seg' })}<div data-subbody></div>`;
+    const ctl = await mod.mount({ ...ctx, body: ctx.body.querySelector('[data-subbody]'), params: ctx.params.slice(1) });
+    return { destroy() { ctl?.destroy?.(); }, refresh: ctl?.refresh ? (t) => ctl.refresh(t) : undefined };
   }
 };

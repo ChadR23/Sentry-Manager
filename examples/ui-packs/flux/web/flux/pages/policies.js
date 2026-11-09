@@ -1,10 +1,14 @@
 // Policies: per-vehicle retention (keep N days per category), preview and run now.
+// Per car (Encoding per vehicle) is its sub-tab (Policies | Per car, web/subTabs.js): #/policies/<tab>,
+// each the page module it always was, taken down with the page.
+import { pickSubTab, subTabsHtml } from '/web/subTabs.js';
+import perCar from './vehicles.js';
 import { esc, api, state, current, bytes, plural, when, icon, toast, confirmDialog, busy, liveDraw } from '../core.js';
 import { empty, chip } from '../ui.js';
 
 const CATS = ['Recent', 'Sentry', 'Saved', 'Other'];
 
-export default {
+const retention = {
   async mount(el) {
     const draw = async () => {
       if (!state.vehicles.length) {
@@ -62,5 +66,18 @@ export default {
       },
       onVehicle() { el.querySelector(`form.pol[data-v="${CSS.escape(current()?.id || '')}"]`)?.scrollIntoView({ block: 'start' }); }
     };
+  }
+};
+export const POLICY_TABS = [['retention', 'Policies', retention], ['per-car', 'Per car', perCar]];
+
+export default {
+  async mount(el, opts) {
+    const [asked, ...rest] = String(opts.sub || '').split('/');
+    const tab = pickSubTab('sentry-policies-tab', POLICY_TABS.map(([k]) => k), asked);
+    const [, , mod] = POLICY_TABS.find(([k]) => k === tab);
+    if (tab !== 'retention') document.title = 'Per car · Policies · Flux · Sentry Six Manager';
+    el.innerHTML = `${subTabsHtml(POLICY_TABS, tab, { href: (k) => `#/policies/${k}`, label: 'Policies sections', cls: 'tabs' })}<div data-subview></div>`;
+    const m = await mod.mount(el.querySelector('[data-subview]'), { ...opts, sub: rest.join('/') });
+    return { ...m, unmount() { m?.unmount?.(); } };
   }
 };

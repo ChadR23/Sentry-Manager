@@ -1,12 +1,16 @@
 // Cleanup rules (retention policies): how long to keep each kind of footage.
 
+// Per car (Encoding per vehicle) is its sub-tab (Cleanup rules | Per car, web/subTabs.js): #/policies/<tab>,
+// each the page module it always was, taken down with the page.
+import { pickSubTab, subTabsHtml } from '/web/subTabs.js';
+import * as perCar from './vehicles.js';
 import { api, esc, enc, icon, bytes, plural, when, emptyState, confirmDialog, toast, fail, busy, CATEGORY } from '../core.js';
 import { vehicle, setVehicle, vehiclePicker } from '../state.js';
 
 const CATS = ['Recent', 'Sentry', 'Saved', 'Other'];
 const PRESETS = [['', 'Keep forever'], ['7', '1 week'], ['14', '2 weeks'], ['30', '1 month'], ['60', '2 months'], ['90', '3 months'], ['180', '6 months'], ['365', '1 year']];
 
-export async function render(ctx) {
+async function renderRetention(ctx) {
   const { view } = ctx;
   const v = vehicle();
   if (!v) {
@@ -87,4 +91,13 @@ export async function render(ctx) {
     });
   };
   draw();
+}
+
+export const POLICY_TABS = [['retention', 'Cleanup rules', { render: renderRetention }], ['per-car', 'Per car', perCar]];
+
+export async function render(ctx) {
+  const tab = pickSubTab('sentry-policies-tab', POLICY_TABS.map(([k]) => k), ctx.params[0]);
+  const [, , mod] = POLICY_TABS.find(([k]) => k === tab);
+  ctx.view.innerHTML = `<div class="page subtab-bar">${subTabsHtml(POLICY_TABS, tab, { href: (k) => `#/policies/${k}`, label: 'Cleanup rules sections', cls: 'seg' })}</div><div data-subview></div>`;
+  await mod.render({ ...ctx, view: ctx.view.querySelector('[data-subview]'), params: ctx.params.slice(1) });
 }

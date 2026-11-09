@@ -1674,19 +1674,14 @@
     showFrame('viewer');
   };
   let vehicleEncoding = null; // the Encoding per vehicle view (vehicleEncoding.js)
-  pages.encoder = async (sub) => {
-    vehicleEncoding?.destroy();
-    vehicleEncoding = null;
-    if (sub !== 'vehicles') {
-      page.innerHTML = '';
-      showFrame('encoder');
-      return;
-    }
-    // Encoder > Encoding per vehicle: what each vehicle converts with
+  pages.encoder = async () => {
+    page.innerHTML = '';
+    showFrame('encoder');
+  };
+  // Policies > Per car (Encoding per vehicle): what each vehicle converts with
+  async function perCar(top) {
     for (const el of Object.values(frames)) hideFrame(el);
-    page.innerHTML = `${head('Encoder', 'Encoding per vehicle')}
-      <div class="pills" role="tablist" style="margin-bottom:16px"><a class="pill" style="text-decoration:none" href="#/encoder">Encoder</a><a class="pill active" style="text-decoration:none" href="#/encoder/vehicles" aria-current="page">Encoding per vehicle</a></div>
-      <div id="vehicle-encoding"></div>`;
+    page.innerHTML = `${top}<div id="vehicle-encoding"></div>`;
     if (!window.SentryVehicleEncoding) {
       await new Promise((resolve, reject) => {
         const script = document.createElement('script');
@@ -1696,6 +1691,7 @@
         document.head.append(script);
       });
     }
+    if (!$('vehicle-encoding')) return; // the user moved on while it loaded
     const edit = new URLSearchParams(location.hash.split('?')[1] || '').get('edit');
     vehicleEncoding = window.SentryVehicleEncoding.mount($('vehicle-encoding'), {
       classes: { card: 'card', btn: 'btn', primary: 'btn solid', input: 'input', field: 'field', check: 'check', muted: 'muted' },
@@ -1703,7 +1699,7 @@
       confirm: (text) => confirmDialog({ title: 'Replace originals?', body: `<p>${esc(text)}</p>`, ok: 'Replace originals', danger: true })
     });
     await vehicleEncoding.ready;
-  };
+  }
   window.addEventListener('message', (e) => {
     if (e.origin !== location.origin || e.data?.source !== 'sentry-studio') return;
     if (e.data.type === 'showInFolder') {
@@ -1720,9 +1716,21 @@
     }
   });
 
-  pages.policies = async () => {
+  // Policies | Per car (web/subTabs.js): #/policies/<tab>, #/policies the one used last
+  const POLICY_TABS = [['retention', 'Policies'], ['per-car', 'Per car']];
+  let policiesTab = 'retention';
+  pages.policies = async (sub) => {
+    const seq = renderSeq;
+    const { pickSubTab, subTabsHtml } = await import('/web/subTabs.js');
+    if (seq !== renderSeq) return;
+    policiesTab = pickSubTab('sentry-policies-tab', POLICY_TABS.map(([k]) => k), sub);
+    const bar = subTabsHtml(POLICY_TABS, policiesTab, { href: (k) => `#/policies/${k}`, label: 'Policies sections', cls: 'pills', item: 'pill', on: 'active' });
+    if (policiesTab === 'per-car') {
+      document.title = 'Per car · Policies · Sentry Six Manager';
+      return perCar(head('Your archive workspace', 'Policies') + bar);
+    }
     const v = current();
-    let html = head('Your archive workspace', 'Policies') + pills();
+    let html = head('Your archive workspace', 'Policies') + bar + pills();
     if (!v) {
       page.innerHTML = `${html}<div class="empty">Add a vehicle in Settings first.</div>`;
       return;
@@ -2679,11 +2687,16 @@
     held.page = false;
     try { shared?.destroy?.(); } catch { /* gone already */ }
     shared = null;
+    try { vehicleEncoding?.destroy(); } catch { /* gone already */ }
+    vehicleEncoding = null;
     // the Logs moved from Settings to the Overview: old links land there
     if (/^#\/?settings\/logs\/?$/.test(location.hash)) history.replaceState(null, '', '#/overview/logs');
     // Driving and Map are sub-tabs of Drives now: their old addresses open them there
     const moved = /^#\/?(driving|map)\/?(\?.*)?$/.exec(location.hash);
     if (moved) history.replaceState(null, '', `#/drives/${moved[1]}${moved[2] || ''}`);
+    // Encoding per vehicle is Policies > Per car now
+    const perCarWas = /^#\/?encoder\/vehicles\/?(\?.*)?$/.exec(location.hash);
+    if (perCarWas) history.replaceState(null, '', `#/policies/per-car${perCarWas[1] || ''}`);
     // Drives (and its Driving and Map) is hidden for now (web/hiddenTabs.js): its addresses open the Overview
     if (/^#\/?drives(\/|\?|$)/.test(location.hash)) {
       let show = false;
@@ -2754,7 +2767,7 @@
       if (topics.includes('notifications')) await loadNotes().catch(() => {});
       const affects = {
         overview: ['vehicles', 'inventory', 'notifications', 'bin'], footage: ['inventory'], jobs: ['jobs'],
-        bin: ['bin'], notifications: ['notifications'], policies: ['inventory']
+        bin: ['bin'], notifications: ['notifications'], policies: policiesTab === 'per-car' ? [] : ['inventory']
       }[state.route] || [];
       // (not while the reader fills in a field: the redraw would take it
       // away; a switch the page keeps itself, data-kept, is redrawn as it is)

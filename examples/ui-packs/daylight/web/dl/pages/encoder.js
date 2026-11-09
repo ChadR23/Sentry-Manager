@@ -500,7 +500,7 @@ function showSaved() {
   const v = vehicle();
   if (!host || !v || !window.SentryVehicleEncoding) return;
   window.SentryVehicleEncoding.encoderLine(host, {
-    folder: footageOf(v), name: v.name, href: '#/vehicles', classes: { btn: 'btn btn-sm' },
+    folder: footageOf(v), name: v.name, href: '#/policies/per-car', classes: { btn: 'btn btn-sm' },
     onLoad: (c) => {
       store.set('choices', {
         ...store.get('choices', {}), vehicleId: v.id, mode: c.outputMode, codec: c.codec, profile: c.profileId, quality: c.qualityLevel || 'balanced',

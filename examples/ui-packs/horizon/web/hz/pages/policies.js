@@ -1,10 +1,14 @@
 // Policies: each vehicle's service schedule. Recordings older than the days you
 // set move to the Recycle Bin once a day; protected ones are always skipped.
+// Per car (Encoding per vehicle) is its sub-tab (Policies | Per car, web/subTabs.js): #/policies/<tab>,
+// each the page module it always was, taken down with the page.
+import { pickSubTab, subTabsHtml } from '/web/subTabs.js';
+import perCar from './vehicles.js';
 import { h, ico, api, app, car, size, count, stamp, toast, ask, act, pill, panelHead, blank, liveDraw } from '../core.js';
 
 const CATS = [['Recent', 'cyan'], ['Sentry', 'org'], ['Saved', 'grn'], ['Other', '']];
 
-export default {
+const retention = {
   async mount(el, { status }) {
     async function draw() {
       if (!app.vehicles.length) {
@@ -61,5 +65,19 @@ export default {
       onTopics(t) { if ((t.includes('inventory') || t.includes('vehicles')) && !el.contains(document.activeElement)) liveDraw(el, draw); },
       onCar() { el.querySelector(`form.pol[data-v="${CSS.escape(car()?.id || '')}"]`)?.scrollIntoView({ block: 'start' }); }
     };
+  }
+};
+export const POLICY_TABS = [['retention', 'Policies', retention], ['per-car', 'Per car', perCar]];
+
+export default {
+  async mount(el, opts) {
+    const [asked, ...rest] = String(opts.sub || '').split('/');
+    const tab = pickSubTab('sentry-policies-tab', POLICY_TABS.map(([k]) => k), asked);
+    const [, , mod] = POLICY_TABS.find(([k]) => k === tab);
+    if (tab !== 'retention') document.title = 'Per car · Policies · Horizon · Sentry Six Manager';
+    // (the sub-page's box is display: contents, as .page, so its panels sit in the view's grid)
+    el.innerHTML = `${subTabsHtml(POLICY_TABS, tab, { href: (k) => `#/policies/${k}`, label: 'Policies sections', cls: 'segs' })}<div class="page" data-subview></div>`;
+    const m = await mod.mount(el.querySelector('[data-subview]'), { ...opts, sub: rest.join('/') });
+    return { ...m, unmount() { m?.unmount?.(); } };
   }
 };

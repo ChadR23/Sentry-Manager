@@ -587,7 +587,7 @@
         }
         const v = vehicles.find((x) => footageOf(x) === folder);
         await lib.encoderLine(host, {
-          folder, name: v?.name, href: '/#/encoder/vehicles', target: '_top', classes: { btn: 'converter-button' },
+          folder, name: v?.name, href: '/#/policies/per-car', target: '_top', classes: { btn: 'converter-button' },
           onLoad: (config) => window.dispatchEvent(new CustomEvent('sentry:converter-load', { detail: { config: { ...config, sourceRoot: folder } } }))
         });
       } catch (_) { /* the line is extra */ }

@@ -12,10 +12,9 @@ const ROUTES = {
   // hidden for now (web/hiddenTabs.js): in no group, so in no navigation; its addresses open Today
   drives: { label: 'Drives', icon: 'route', group: 'hidden', desc: 'Every trip, how far you drove each week, and the map of events', load: () => import('./pages/drives.js') },
   encoder: { label: 'Encoder', icon: 'encoder', group: 'main', load: () => import('./pages/encoder.js') },
-  vehicles: { label: 'Encoding per vehicle', icon: 'encoder', group: 'main', desc: 'What each vehicle converts with', load: () => import('./pages/vehicles.js') },
   more: { label: 'More', icon: 'more', group: 'phone', load: () => import('./pages/more.js') },
   bin: { label: 'Recycle Bin', icon: 'trash', group: 'care', desc: 'Restore or delete for good', load: () => import('./pages/bin.js') },
-  policies: { label: 'Cleanup rules', icon: 'rules', group: 'care', desc: 'Keep footage for as long as you like', load: () => import('./pages/policies.js') },
+  policies: { label: 'Cleanup rules', icon: 'rules', group: 'care', desc: 'Keep footage for as long as you like, and what each vehicle converts with', load: () => import('./pages/policies.js') },
   jobs: { label: 'Activity', icon: 'activity', group: 'care', desc: 'What the server has been doing', load: () => import('./pages/jobs.js') },
   notifications: { label: 'Alerts', icon: 'bell', group: 'care', desc: 'Things that may need you', load: () => import('./pages/notifications.js') },
   nodes: { label: 'Helper servers', icon: 'nodes', group: 'setup', desc: 'Other computers that convert for you (Nodes)', load: () => import('./pages/nodes.js') },
@@ -24,7 +23,7 @@ const ROUTES = {
   server: { label: 'Server & logs', icon: 'server', group: 'setup', desc: 'CPU, memory, disks, temperatures, logs', load: () => import('./pages/server.js') },
   settings: { label: 'Settings', icon: 'gear', group: 'setup', desc: 'Vehicles, places, account, look, security', load: () => import('./pages/settings.js') }
 };
-export const MORE_ROUTES = ['vehicles', 'bin', 'policies', 'jobs', 'notifications', 'nodes', 'health', 'account', 'server', 'settings'];
+export const MORE_ROUTES = ['bin', 'policies', 'jobs', 'notifications', 'nodes', 'health', 'account', 'server', 'settings'];
 export const routeInfo = (r) => ROUTES[r];
 
 // ---------- the look ----------
@@ -88,7 +87,7 @@ const view = $('#view');
 const current = { route: 'home', cleanup: [], seq: 0 };
 
 // pages that moved inside another as its sub-tab: their old addresses open them there
-const MOVED = { driving: 'drives/driving', map: 'drives/map' };
+const MOVED = { driving: 'drives/driving', map: 'drives/map', vehicles: 'policies/per-car' };
 function movedHash() {
   const was = /^#\/?([\w-]+)\/?(\?.*)?$/.exec(location.hash);
   if (was && MOVED[was[1]]) history.replaceState(null, '', `#/${MOVED[was[1]]}${was[2] || ''}`);

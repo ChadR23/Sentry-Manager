@@ -14,19 +14,17 @@ import jobs from './pages/jobs.js';
 import bin from './pages/bin.js';
 import alerts from './pages/alerts.js';
 import settings from './pages/settings.js';
-import vehicles from './pages/vehicles.js';
 import drives from './pages/drives.js';
 import health from './pages/health.js';
 import account from './pages/account.js';
 
-const PAGES = { sky, footage, viewer, drives, encoder, vehicles, nodes, policies, jobs, bin, alerts, health, account, settings };
+const PAGES = { sky, footage, viewer, drives, encoder, nodes, policies, jobs, bin, alerts, health, account, settings };
 // [route, label, icon, key (g + key), primary on phones]
 const DOCK = [
   ['sky', 'Sky', 'sky', 's', true],
   ['footage', 'Footage', 'film', 'f', true],
   ['viewer', 'Viewer', 'cockpit', 'v', true],
   ['encoder', 'Encoder', 'orbit', 'e', true],
-  ['vehicles', 'Per car', 'orbit', 'c', false],
   '|',
   ['nodes', 'Nodes', 'nodes', 'n', false],
   ['policies', 'Policies', 'shield', 'p', false],
@@ -39,7 +37,7 @@ const DOCK = [
   ['settings', 'Settings', 'gear', ',', false]
 ];
 // shortcuts to a sub-tab: [address, label, key (g + key)] (none now: Drives is hidden)
-const SUB_KEYS = [];
+const SUB_KEYS = [['policies/per-car', 'Encoding per vehicle (Policies → Per car)', 'c']];
 const LONG = { vehicles: 'Encoding per vehicle', bin: 'Recycle Bin', alerts: 'Notifications', sky: 'Sky (home)' };
 
 // ---------- the sky ----------
@@ -136,7 +134,7 @@ let pending = new Set();
 let seq = 0;
 
 // pages that moved inside another as its sub-tab: their old addresses open them there
-const MOVED = { driving: 'drives/driving', map: 'drives/map' };
+const MOVED = { driving: 'drives/driving', map: 'drives/map', vehicles: 'policies/per-car' };
 function parseHash() {
   const was = /^#\/?([\w-]+)\/?(\?.*)?$/.exec(location.hash);
   if (was && MOVED[was[1]]) history.replaceState(null, '', `#/${MOVED[was[1]]}${was[2] || ''}`);

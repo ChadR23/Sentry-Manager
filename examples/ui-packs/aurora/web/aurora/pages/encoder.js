@@ -299,7 +299,7 @@ export default {
       const host = $('#f-saved', body);
       if (!host || !window.SentryVehicleEncoding) return;
       window.SentryVehicleEncoding.encoderLine(host, {
-        folder: footageRoot(v), name: v.name, href: '#/vehicles', classes: { btn: 'btn' },
+        folder: footageRoot(v), name: v.name, href: '#/policies/per-car', classes: { btn: 'btn' },
         onLoad: (c) => {
           const f = window.SentryVehicleEncoding.formFields(c, form);
           Object.assign(form, {

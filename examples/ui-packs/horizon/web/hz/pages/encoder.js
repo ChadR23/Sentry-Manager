@@ -406,7 +406,7 @@ export default {
       const host = $('#e-saved');
       if (!host || !veh || !window.SentryVehicleEncoding) return;
       window.SentryVehicleEncoding.encoderLine(host, {
-        folder: carRoot(veh), name: veh.name, href: '#/vehicles', classes: { btn: 'btn' },
+        folder: carRoot(veh), name: veh.name, href: '#/policies/per-car', classes: { btn: 'btn' },
         onLoad: (c) => { Object.assign(form, window.SentryVehicleEncoding.formFields(c, form)); save(); drawForm(); toast(`${veh.name}'s saved settings loaded.`); }
       }).catch(() => {});
     }
