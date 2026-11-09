@@ -90,6 +90,7 @@ const { createCanSync } = require('./canSync');
 const canCalc = require('./canCalc');
 const { createCanPrune } = require('./canPrune');
 const { createCanFootage } = require('./canFootage');
+const { createRecordingPlaces, minuteFileOf } = require('./recordingPlace');
 const { createArchiveGap } = require('./archiveGap');
 const { createSentryUsbStatus, stampSec: clipStampSec } = require('./sentryUsb');
 const { createOriginalChecksums } = require('./originalChecksums');
@@ -328,6 +329,7 @@ async function main() {
   let canUploadRef = null; // CAN Bridge uploads (set where canLogs is made)
   let canPruneRef = null; // CAN logs that go with their footage (canPrune.js, set where canLogs is made)
   let canFootageRef = null; // which recordings have CAN Bridge data (canFootage.js, set where the CAN index is made)
+  let recPlacesRef = null; // where a recording was, for its place tag (recordingPlace.js, set with canFootageRef)
   /** The CAN logs footage would take with it ("Also delete its CAN data"), counted; null: no key mapped to the car. */
   const canWith = async (vid, what) => {
     const r = await canPruneRef?.deleteWith(vid, { ...what, dryRun: true }).catch(() => null);
@@ -1503,15 +1505,24 @@ async function main() {
     const offset = Math.max(0, Number(query.offset) || 0);
     const limit = Math.min(500, Math.max(1, Number(query.limit) || 100));
     const page = list.slice(offset, offset + limit);
-    // Sentry and Saved events at a saved place get its name (place), when there are saved places
     const places = placeList();
     const tagged = page.map(publicRecording);
     // recordings with CAN Bridge data (the green "CAN" tag): can: true, else left out
     const hasCan = await canOf(params.id);
     if (hasCan) page.forEach((rec, i) => { if (hasCan(rec)) tagged[i].can = true; });
-    if (places.length) {
-      await eachLimit(page.map((rec, i) => [rec, i]).filter(([rec]) => rec.eventId), 6, async ([rec, i]) => {
-        tagged[i].place = placeAt((await eventSpot(params.id, rec).catch(() => null))?.pos, places);
+    // recordings at a saved place get its name (place: started and ended there), else from and to
+    // when it started or ended at one; placeSource says from what: CAN Bridge GPS, the cameras'
+    // GPS (the speed index) or an event's event.json (recordingPlace.js)
+    if (places.length && recPlacesRef) {
+      const v = vehicleOr404(params.id);
+      const placeOf = (pos) => placesLib.placeOf(pos, places);
+      const eventPos = async (rec) => (await eventSpot(params.id, rec).catch(() => null))?.pos || null;
+      await eachLimit(page.map((rec, i) => [rec, i]), 6, async ([rec, i]) => {
+        try {
+          Object.assign(tagged[i], await recPlacesRef.tag(v, rec, { hasCan, eventPos, placeOf }));
+        } catch (err) {
+          log.warn(`Place tag: ${err.message}`);
+        }
       });
     }
     return {
@@ -1795,6 +1806,16 @@ async function main() {
     const label = await labelFor(drives.some((d) => d.clips.some((c) => statsFor(c)?.a)));
     const hasCan = await canOf(v.id);
     const list = drives.map((d) => drivesLib.describe(d, statsFor, { label, hasCan }));
+    // where a drive with CAN Bridge data started and ended: its GPS (good fixes only) over the cameras'
+    if (recPlacesRef && list.some((d) => d.can)) {
+      const keys = [...await canKeysFor(v.id)].sort();
+      const stamp = (wall) => wall.replace(' ', '_').replace(/:/g, '-');
+      await eachLimit(list.filter((d) => d.can), 4, async (d) => {
+        const { a, z } = await recPlacesRef.canEnds(keys, canStartOf(v, stamp(d.start)), canStartOf(v, stamp(d.end))).catch(() => ({ a: null, z: null }));
+        if (a) d.from = { lat: a.lat, lon: a.lon, ...label({ lat: a.lat, lon: a.lon }) };
+        if (z) d.to = { lat: z.lat, lon: z.lon, ...label({ lat: z.lat, lon: z.lon }) };
+      });
+    }
     return {
       drives: list,
       more,
@@ -1979,6 +2000,10 @@ async function main() {
   }, onProgress: canProgress });
   setTimeout(() => canIndex.kick(), 20_000).unref?.();
   canFootageRef = createCanFootage({ keysFor: (vid) => canKeysFor(vid), minuteTimes: (key) => canIndex.minuteTimes(key), generation: () => canIndex.generation(), startOf: (v, name) => canStartOf(v, name) });
+  recPlacesRef = createRecordingPlaces({
+    keysFor: (vid) => canKeysFor(vid), canFile: minuteFileOf(path.join(DATA, 'can-index')), utcOf: (v, stamp) => canStartOf(v, stamp),
+    clipStats: (vid, day) => speedIndex.clipStats(vid, day), filesOf: (vid) => inventory.get(vid)?.files, generation: () => canIndex.generation()
+  });
   // which car each CAN Bridge key is (a key of its own when there is one car)
   const canMap = () => db.get('can-vehicles', {}) || {};
   async function canKeysFor(vid) {

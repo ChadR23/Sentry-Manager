@@ -6,6 +6,9 @@ import { state, vehicle, setVehicle, vehiclePicker, loadVehicles } from '../stat
 import { go } from '../app.js';
 import { mountSentryUsb } from '/web/sentryUsb.js';
 
+/** A recording's place tag: at the saved place it started and ended at, else from one and/or to one. */
+const placeText = (r) => (r.place ? `at ${r.place}` : r.from && r.to ? `${r.from} → ${r.to}` : r.from ? `from ${r.from}` : r.to ? `to ${r.to}` : '');
+
 // the Sentry USB line's tag, in this pack's chips (web/sentryUsb.js)
 const USB_TAG = { ok: 'chip chip-good', busy: 'chip chip-teal', wait: 'chip chip-slate', bad: 'chip chip-warn', stale: 'chip chip-grey' };
 let usb = null;
@@ -286,7 +289,7 @@ function recCard(v, r, selecting, selected) {
     <div class="rc-body">
       <div class="row-between"><span class="rc-time">${esc(time)}</span>
         ${selecting ? `<label class="rc-select"><input type="checkbox" data-select${selected ? ' checked' : ''}> Select</label>` : ''}</div>
-      <div class="row">${chip(cat.word, cat.tone)}${r.place ? chip(`at ${r.place}`) : ''}${r.can === true ? '<span class="chip chip-can" title="CAN Bridge data for this footage (car data in the Viewer)">CAN</span>' : ''}${r.protected ? chip('Protected', 'good', 'lock') : ''}${encodedChip(r.encoded)}</div>
+      <div class="row">${chip(cat.word, cat.tone)}${placeText(r) ? chip(placeText(r)) : ''}${r.can === true ? '<span class="chip chip-can" title="CAN Bridge data for this footage (car data in the Viewer)">CAN</span>' : ''}${r.protected ? chip('Protected', 'good', 'lock') : ''}${encodedChip(r.encoded)}</div>
       <p class="rc-sub">${r.eventAt ? `Event at ${esc(niceTime(r.eventAt))} · ` : ''}${plural(r.cameras.length, 'camera')} · ${bytes(r.bytes)}</p>
       <div class="rc-actions">
         <button class="btn btn-primary btn-sm" type="button" data-play>${icon('play')} Play</button>

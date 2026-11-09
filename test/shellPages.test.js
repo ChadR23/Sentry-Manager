@@ -158,8 +158,8 @@ test('Footage: a green CAN tag, in the Nerd panel\'s green, on recordings with C
   assert.ok(btn, 'the Nerd button\'s colours');
   const [, bg, fg, border] = btn;
   const TITLE = 'CAN Bridge data for this footage (car data in the Viewer)';
-  // the built-in interface: next to "at Home", only when the server says can: true
-  assert.match(fn('recCard'), /\$\{r\.place \? `<span class="chip">at \$\{esc\(r\.place\)\}<\/span>` : ''\}\$\{r\.can === true \? `<span class="chip can" title="\$\{CAN_TAG_TITLE\}">CAN<\/span>` : ''\}/);
+  // the built-in interface: next to "at Home" (or "Home → Work"), only when the server says can: true
+  assert.match(fn('recCard'), /\$\{placeText\(r\) \? `<span class="chip">\$\{esc\(placeText\(r\)\)\}<\/span>` : ''\}\$\{r\.can === true \? `<span class="chip can" title="\$\{CAN_TAG_TITLE\}">CAN<\/span>` : ''\}/);
   assert.ok(app.includes(`const CAN_TAG_TITLE = '${TITLE}';`));
   assert.match(fn('dayCard'), /\$\{dayCanChip\(d\)\}/);
   assert.match(fn('dayCanChip'), /if \(!\(d\.canRecordings > 0\)\) return '';/);

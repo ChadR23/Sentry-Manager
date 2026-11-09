@@ -4,6 +4,9 @@ import { esc, api, state, current, bytes, plural, dayTitle, ago, icon, toast, co
 import { split, seg, wireSeg, drawer, empty, chip } from '../ui.js';
 import { mountSentryUsb } from '/web/sentryUsb.js';
 
+/** A recording's place tag: at the saved place it started and ended at, else from one and/or to one. */
+const placeText = (r) => (r.place ? `at ${r.place}` : r.from && r.to ? `${r.from} → ${r.to}` : r.from ? `from ${r.from}` : r.to ? `to ${r.to}` : '');
+
 // the Sentry USB line's tag, in this pack's chips (web/sentryUsb.js)
 const USB_TAG = { ok: 'chip green', busy: 'chip cyan', wait: 'chip slate', bad: 'chip amber', stale: 'chip' };
 // the day's archive tag: partly archived (amber), waiting for Sentry USB (the car left mid-transfer; neutral) or still arriving
@@ -226,7 +229,7 @@ export default {
         if (f.conv === 'yes' && !(r.encoded?.encoded > 0)) return false;
         if (f.conv === 'no' && r.encoded?.encoded > 0 && r.encoded.encoded === r.encoded.clips) return false;
         if (!q) return true;
-        return `${r.start} ${r.end} ${r.folder} ${r.category} ${r.place || ''} ${r.eventId || ''} ${r.cameras.join(' ')} ${r.id}`.toLowerCase().includes(q);
+        return `${r.start} ${r.end} ${r.folder} ${r.category} ${placeText(r)} ${r.eventId || ''} ${r.cameras.join(' ')} ${r.id}`.toLowerCase().includes(q);
       });
       const { key, dir } = f.sort;
       list = list.slice().sort((a, b) => {
@@ -262,7 +265,7 @@ export default {
           <td class="cb"><label class="cbl"><input type="checkbox" aria-label="Select ${esc(r.start)}"${sel ? ' checked' : ''}></label></td>
           <td class="thumbc">${r.thumbRel || r.frontRel ? `<img loading="lazy" alt="" src="/api/vehicles/${encodeURIComponent(v.id)}/recordings/${encodeURIComponent(r.id)}/thumbnail">` : ''}</td>
           <td class="mono nowrap">${esc(r.start ? wallDay(r.start) : r.day)}<div class="faint small">${r.end && r.end !== r.start ? `→ ${esc(wall(r.end))}` : ''}${r.eventAt ? ` · event ${esc(wall(r.eventAt))}` : ''}</div></td>
-          <td><span class="cat ${esc(cat)}">${esc(cat)}</span>${r.can === true ? ` <span class="cat can" title="CAN Bridge data for this footage (car data in the Viewer)">CAN</span>` : ''}${r.place ? `<div class="faint small">at ${esc(r.place)}</div>` : ''}</td>
+          <td><span class="cat ${esc(cat)}">${esc(cat)}</span>${r.can === true ? ` <span class="cat can" title="CAN Bridge data for this footage (car data in the Viewer)">CAN</span>` : ''}${placeText(r) ? `<div class="faint small">${esc(placeText(r))}</div>` : ''}</td>
           <td class="r num">${trackLength(r.minutes * 60)}</td>
           <td>${camsCell(r)}</td>
           <td class="r num">${r.fileCount}</td>

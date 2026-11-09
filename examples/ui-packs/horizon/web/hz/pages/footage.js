@@ -3,6 +3,9 @@
 import { h, ico, api, car, size, count, since, dayName, words, wall, wallDay, toast, ask, sheet, act, local, segs, onSegs, pill, debounce, CAMS, CAM_NAME, CAM_TAG, CODEC_NAME, paint, liveDraw, footMinutes, trackLength, hourOpts } from '../core.js';
 import { mountSentryUsb } from '/web/sentryUsb.js';
 
+/** A recording's place tag: at the saved place it started and ended at, else from one and/or to one. */
+const placeText = (r) => (r.place ? `at ${r.place}` : r.from && r.to ? `${r.from} → ${r.to}` : r.from ? `from ${r.from}` : r.to ? `to ${r.to}` : '');
+
 // the Sentry USB line's tag, in this pack's pills (web/sentryUsb.js)
 const USB_TAG = { ok: 'pill grn', busy: 'pill cyan', wait: 'pill slate', bad: 'pill org', stale: 'pill' };
 // the day's archive tag: partly archived (orange), waiting for Sentry USB (the car left mid-transfer; neutral) or still arriving
@@ -196,7 +199,7 @@ export default {
         if (f.conv === 'yes' && !(r.encoded?.encoded > 0)) return false;
         if (f.conv === 'no' && r.encoded?.clips && r.encoded.encoded === r.encoded.clips) return false;
         if (!q) return true;
-        return `${r.start} ${r.end} ${r.folder} ${r.category} ${r.place || ''} ${r.eventId || ''} ${r.cameras.map((c) => CAM_NAME[c] || c).join(' ')}`.toLowerCase().includes(q);
+        return `${r.start} ${r.end} ${r.folder} ${r.category} ${placeText(r)} ${r.eventId || ''} ${r.cameras.map((c) => CAM_NAME[c] || c).join(' ')}`.toLowerCase().includes(q);
       }).sort((a, b) => String(b.startKey).localeCompare(String(a.startKey)));
     }
     function codec(r) {
@@ -218,7 +221,7 @@ export default {
           <button class="tk-play" type="button" data-act="play" aria-label="Play ${h(r.start)}">${ico('play')}</button>
           <span class="tk-art" aria-hidden="true">${r.thumbRel || r.frontRel ? `<img loading="lazy" alt="" src="${thumbUrl(v.id, r.id)}">` : ''}</span>
           <span class="tk-t"><b class="num">${h(wall(r.start))}<span class="faint"> – ${h(wall(r.end || r.start))}</span></b>
-            <span class="tk-sub small">${pill(r.category, CAT_TONE[r.category] || '')}${r.place ? pill(`at ${r.place}`, '') : ''}${r.can === true ? '<span class="pill can" title="CAN Bridge data for this footage (car data in the Viewer)">CAN</span>' : ''}<span class="dim">${h(f.day ? '' : `${dayName(r.day)} · `)}${h(words(r.type || ''))}${h(ev)}</span>${r.protected ? `<span class="lock" title="Protected">${ico('lock')}<span class="sr-only">Protected</span></span>` : ''}</span></span>
+            <span class="tk-sub small">${pill(r.category, CAT_TONE[r.category] || '')}${placeText(r) ? pill(placeText(r), '') : ''}${r.can === true ? '<span class="pill can" title="CAN Bridge data for this footage (car data in the Viewer)">CAN</span>' : ''}<span class="dim">${h(f.day ? '' : `${dayName(r.day)} · `)}${h(words(r.type || ''))}${h(ev)}</span>${r.protected ? `<span class="lock" title="Protected">${ico('lock')}<span class="sr-only">Protected</span></span>` : ''}</span></span>
           <span class="tk-cams" aria-label="Cameras: ${h(r.cameras.map((c) => CAM_NAME[c] || c).join(', '))}">${CAMS.map((c) => `<i class="${have.has(c) ? 'on' : ''}">${CAM_TAG[c]}</i>`).join('')}</span>
           <span class="tk-codec">${codec(r)}</span>
           <span class="tk-dur num">${dur(r.minutes)}<span class="faint small"> · ${size(r.bytes)}</span></span>

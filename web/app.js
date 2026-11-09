@@ -1347,6 +1347,8 @@
     return `<span class="chip blue" title="${esc(`${d.encoded} of ${d.clips} clips are H.265 or AV1`)}"><span class="cdot"></span>${label}</span>`;
   }
 
+  /** A recording's place tag: at the saved place it started and ended at, else from one and/or to one. */
+  const placeText = (r) => (r.place ? `at ${r.place}` : r.from && r.to ? `${r.from} → ${r.to}` : r.from ? `from ${r.from}` : r.to ? `to ${r.to}` : '');
   /** The green "CAN" tag (the Nerd panel's green): CAN Bridge data covers the recording, or this many of the day's. */
   const CAN_TAG_TITLE = 'CAN Bridge data for this footage (car data in the Viewer)';
   function dayCanChip(d) {
@@ -1476,7 +1478,7 @@
         <input type="checkbox" aria-label="Select ${esc(r.start)}"${f.selected.has(r.id) ? ' checked' : ''}>
         <div class="thumb">${thumb}</div>
         <div class="rec-info"><span class="when">${esc(r.start ? clockText(r.start) : r.day)}${range}</span>
-          <span class="meta"><span class="chip ${chip}">${esc(r.category)}</span>${r.place ? `<span class="chip">at ${esc(r.place)}</span>` : ''}${r.can === true ? `<span class="chip can" title="${CAN_TAG_TITLE}">CAN</span>` : ''}${recEncodedChip(r)}<span>${plural(r.fileCount, 'file')}</span><span>${bytes(r.bytes)}</span>${r.eventAt ? `<span>event ${esc(r.eventAt.slice(11))}</span>` : ''}${r.cameras.length ? `<span>${plural(r.cameras.length, 'camera')}</span>` : ''}${r.protected ? '<span class="chip green">Protected</span>' : ''}</span>
+          <span class="meta"><span class="chip ${chip}">${esc(r.category)}</span>${placeText(r) ? `<span class="chip">${esc(placeText(r))}</span>` : ''}${r.can === true ? `<span class="chip can" title="${CAN_TAG_TITLE}">CAN</span>` : ''}${recEncodedChip(r)}<span>${plural(r.fileCount, 'file')}</span><span>${bytes(r.bytes)}</span>${r.eventAt ? `<span>event ${esc(r.eventAt.slice(11))}</span>` : ''}${r.cameras.length ? `<span>${plural(r.cameras.length, 'camera')}</span>` : ''}${r.protected ? '<span class="chip green">Protected</span>' : ''}</span>
           <span class="orig">Original capture: ${esc(r.startKey ? `${r.startKey.slice(0, 10)}T${r.startKey.slice(11).replace(/-/g, ':')}` : r.day)} · ${esc(r.folder)}</span></div>
         <div class="rec-actions"><button class="btn" data-play>Play recording</button><button class="btn" data-files>${f.expanded.has(r.id) ? 'Hide files' : 'Show files'}</button></div>
       </div>

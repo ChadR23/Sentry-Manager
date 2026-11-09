@@ -51,6 +51,8 @@ const thumb = (v, id) => `/api/vehicles/${encodeURIComponent(v.id)}/recordings/$
 // what to check when a day looks only partly archived (the server sends its own words too)
 const ADVICE = 'Check the Sentry USB: its Logs page, its archive settings and its Wi-Fi to the NAS. Clips it recycles before copying them are lost.';
 
+/** A recording's place tag: at the saved place it started and ended at, else from one and/or to one. */
+const placeText = (r) => (r.place ? `at ${r.place}` : r.from && r.to ? `${r.from} → ${r.to}` : r.from ? `from ${r.from}` : r.to ? `to ${r.to}` : '');
 // the green "CAN" tag (the Nerd panel's green): CAN Bridge data covers the recording
 const CAN_TITLE = 'CAN Bridge data for this footage (car data in the Viewer)';
 
@@ -86,7 +88,7 @@ function card(v, r, selected, open) {
   return `<article class="rec${selected ? ' sel' : ''}" data-id="${esc(r.id)}">
     <button class="rec-pic" type="button" data-play aria-label="Play ${esc(r.category)} recording at ${esc(range)}">
       ${r.thumbRel || r.frontRel ? `<img class="thumb-img" loading="lazy" alt="" src="${thumb(v, r.id)}">` : ''}
-      <span class="tags"><span class="chip ${CAT_CHIP[r.category] || ''}">${esc(r.category)}</span>${r.place ? `<span class="chip">at ${esc(r.place)}</span>` : ''}${r.can === true ? `<span class="chip can" title="${esc(CAN_TITLE)}">CAN</span>` : ''}${r.protected ? `<span class="chip green">${icon('lock')}Protected</span>` : ''}${encodedChip(r)}</span>
+      <span class="tags"><span class="chip ${CAT_CHIP[r.category] || ''}">${esc(r.category)}</span>${placeText(r) ? `<span class="chip">${esc(placeText(r))}</span>` : ''}${r.can === true ? `<span class="chip can" title="${esc(CAN_TITLE)}">CAN</span>` : ''}${r.protected ? `<span class="chip green">${icon('lock')}Protected</span>` : ''}${encodedChip(r)}</span>
       <span class="play-orb">${icon('play')}</span>
     </button>
     <div class="rec-body">
