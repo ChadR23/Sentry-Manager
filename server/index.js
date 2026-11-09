@@ -55,6 +55,7 @@ const { createIntegrity } = require('./integrity');
 const { createAccounts, viewerMay } = require('./accounts');
 const placesLib = require('./places');
 const drivesLib = require('./drives');
+const driveDataLib = require('./driveData');
 const { writeZip, streamZip, waitDrain, ZIP_LIMIT } = require('./zip');
 const { createConverterHost } = require('./converterHost');
 const { createStats } = require('./stats');
@@ -318,6 +319,7 @@ async function main() {
   const smbTester = createSmbTester({ mounter, vehicles, log: logger.scope('vehicles') });
   vehicles.bootstrapFromEnv();
   let speedIndex = null;
+  let driveData = null; // Sentry USB drive-data.json per car (driveData.js)
   let speedIndexBusy = () => false; // a conversion or the benchmark runs (set where the converter is made)
   let scrubPrepare = null;
   let archiveGapRef = null; // footage the car recorded that has not reached the share (set where CAN is known)
@@ -344,6 +346,7 @@ async function main() {
     speedIndex?.kick(); scrubPrepare?.kick(); integrityRef?.resume(vid);
     // (the gap check and the checksum record read the status the scan just found)
     sentryUsb.refresh(vid).catch(() => null).finally(() => { archiveGapRef?.check(vid); arrivalRef?.kick(); });
+    driveData?.check(vid).catch(() => null);
   } });
   // the SHA-256 of every original the converter replaces in place, for
   // Sentry USB (originalChecksums.js), written inside a vehicle's folder only
@@ -355,6 +358,9 @@ async function main() {
   const telemetry = new Telemetry({ srcRoot: SRC, cacheDir: path.join(DATA, 'telemetry'), log: logger.scope('telemetry') });
   // every front clip's speed, a value a second, indexed in the background for the Viewer's speed graph
   // (not while a conversion or the benchmark runs: the speed reads share the data disk; both are declared below)
+  // Sentry USB's drive-data.json on each car's share (driveData.js): read in
+  // the background when it changes, kept boiled down under the data folder
+  driveData = driveDataLib.createDriveData({ dir: path.join(DATA, 'drive-data'), vehicles, log: logger.scope('drives'), idle: () => !speedIndexBusy() });
   speedIndex = createSpeedIndex({ dir: path.join(DATA, 'speeds'), inventory, vehicles, telemetry, log: logger.scope('speeds'), idle: () => !speedIndexBusy() });
   // the place search's cache, filled quietly half a minute after start
   setTimeout(() => speedIndex.warm(vehicles.list().map((v) => v.id)).catch((err) => log.warn(`Place search: ${err.message}`)), 30_000).unref?.();
@@ -1384,6 +1390,7 @@ async function main() {
     savings.forget(params.id);
     archiveGapRef?.forget(params.id);
     sentryUsb.forget(params.id);
+    driveData.forget(params.id);
     arrivalRef?.forget(params.id);
     { const rec = { ...(db.get('sentry-usb-record', {}) || {}) }; if (rec[params.id]) { delete rec[params.id]; db.set('sentry-usb-record', rec); } }
     // and from every node's Vehicles first list
@@ -1729,6 +1736,13 @@ async function main() {
     }
     return p;
   }
+  const clipKeys = new WeakMap(); // clipsOf() list -> clip key -> clip
+  const clipKeyMap = (clips) => {
+    let m = clipKeys.get(clips);
+    if (!m) { m = new Map(clips.map((c) => [c.key, c])); clipKeys.set(clips, m); }
+    return m;
+  };
+  const keyOfMs = (ms) => new Date(Math.floor(ms / 1000) * 1000).toISOString().slice(0, 19).replace('T', '_').replace(/:/g, '-');
   r.add('GET', '/api/vehicles/:id/drives', async (req, res, { params, query }) => {
     const v = vehicleOr404(params.id);
     const inv = inventory.get(v.id);
@@ -1743,13 +1757,42 @@ async function main() {
       const s = byDay.get(c.day);
       return s ? s[c.rel] || null : null;
     };
+    const readDays = async (list) => {
+      for (const c of list) if (!byDay.has(c.day)) byDay.set(c.day, await speedIndex.clipStats(v.id, c.day).catch(() => ({})));
+    };
+    const places = placeList();
+    const labelFor = async (needSpots) => {
+      const spots = needSpots ? await eventSpotsOf(v.id).catch(() => []) : [];
+      return drivesLib.labeller({ placeOf: (pos) => placesLib.placeOf(pos, places), spots, metres: placesLib.metres });
+    };
+    // Sentry USB's drive data, when the car's share has it and it was read
+    // (driveData.js): its drives; else (and while a first read runs) the clips'
+    driveData.check(v.id).catch(() => null);
+    const dd = driveData.view(v.id);
+    const usbDrives = dd.usable ? driveData.drives(v.id, gapMin * 60) : [];
+    if (usbDrives.length) {
+      let i = 0;
+      if (before) while (i < usbDrives.length && keyOfMs(usbDrives[i].startMs) >= before) i++;
+      const page = usbDrives.slice(i, i + limit);
+      const more = i + limit < usbDrives.length;
+      const byKey = clipKeyMap(clips);
+      const clipOf = (k) => byKey.get(k) || null;
+      await readDays(page.flatMap((d) => d.keys.map(clipOf).filter(Boolean)));
+      const label = await labelFor(page.some((d) => d.from || d.to));
+      const hasCan = await canOf(v.id);
+      const tags = driveData.tags(v.id);
+      const list = page.map((d) => driveDataLib.describeDrive(d, { tags, clipOf, statsOf: statsFor, label, hasCan }));
+      return {
+        drives: list, more, next: more && list.length ? list[list.length - 1].id : null, gap: gapMin,
+        source: 'sentry-usb', driveData: dd.meta, reading: dd.reading,
+        scanning: Boolean(inv?.scanning), indexing: Boolean(speedIndex.status().running)
+      };
+    }
     const { drives, more } = await drivesLib.group(clips, async (c) => {
       if (!byDay.has(c.day)) byDay.set(c.day, await speedIndex.clipStats(v.id, c.day).catch(() => ({})));
       return statsFor(c);
     }, { gapS: gapMin * 60, limit, before });
-    const places = placeList();
-    const spots = drives.some((d) => d.clips.some((c) => statsFor(c)?.a)) ? await eventSpotsOf(v.id).catch(() => []) : [];
-    const label = drivesLib.labeller({ placeOf: (pos) => placesLib.placeOf(pos, places), spots, metres: placesLib.metres });
+    const label = await labelFor(drives.some((d) => d.clips.some((c) => statsFor(c)?.a)));
     const hasCan = await canOf(v.id);
     const list = drives.map((d) => drivesLib.describe(d, statsFor, { label, hasCan }));
     return {
@@ -1757,6 +1800,9 @@ async function main() {
       more,
       next: more && list.length ? list[list.length - 1].id : null,
       gap: gapMin,
+      source: 'clips',
+      driveData: dd.meta,
+      reading: dd.reading,
       scanning: Boolean(inv?.scanning),
       indexing: Boolean(speedIndex.status().running)
     };
@@ -1953,6 +1999,7 @@ async function main() {
     }
   });
   sentryUsb.start();
+  driveData.start();
   // Sentry USB's last archive and checksum results, or what it is copying now
   // (record: the checksums Manager records for it, arrivalChecksums.js; canBackfill: this account may turn the older clips on or off)
   const sentryUsbView = (v, user) => ({ ...sentryUsb.api(v.id), record: { ...arrivalRef.view(v.id), canBackfill: accounts.roleOf(user) === 'admin' } });
@@ -3701,6 +3748,7 @@ async function main() {
     nodeWorker.close();
     exporter.stop();
     scrubPrepare.stop();
+    driveData.stop();
     snapshots.stop();
     await host.stop().catch(() => {});
     await vehicles.stopAll();

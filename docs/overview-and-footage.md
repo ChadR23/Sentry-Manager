@@ -153,6 +153,37 @@ interface's Viewer. Older drives load 40 at a time ("Show older drives").
 The same list is `GET /api/vehicles/:id/drives` (`limit`, `before`, `gap`),
 readable by watch-only accounts.
 
+### Sentry USB's drive data
+
+When the car's share has Sentry USB's `drive-data.json` (Sentry USB writes
+it next to RecentClips/ after each archive that found new drives; Sentry
+Studio's Drives tab reads the same file), the drives come from it instead,
+grouped the way Sentry USB and Studio group them: a clip starting more than
+the gap after the one before starts a new drive, and Park for 2 seconds or
+more ends a drive even inside a clip (by the gear data Sentry USB read from
+the clips). Each drive then also shows how much of it was driven on Full
+Self-Driving or Autopilot (Autosteer and Traffic-Aware Cruise Control), as a
+share of the distance like Sentry USB and Studio show it, its drive tags,
+and a small drawing of the route. Drives whose clips are no longer on the
+share are listed too ("no footage here") but have nothing to play. Hard
+braking, swerves, CAN tags and place names still come from Manager's own
+data. The page says which source it shows: "From Sentry USB's drive data,
+updated …" or "From your clips".
+
+The file can be over a gigabyte, so it is read in the background a piece at
+a time (slower while a conversion runs), boiled down to a few numbers per
+clip and kept under the data folder (`drive-data/`), and read again only
+when its size or time changes. A file changed in the last seconds is left
+to settle first; a read that fails (a copy cut short, not JSON) keeps the
+last good one and the page says so. Until a first read is done the drives
+come from the clips. Manager never writes to the file. In the API the
+response has `source` (`"sentry-usb"` or `"clips"`), `driveData` (`file`,
+`updatedAt`, `readAt`, `routes`, `reading`, `progress`, `error`, or null
+without a file) and `reading`; a Sentry USB drive adds `autopilot`
+(`percent`, `fsd`, `autosteer`, `tacc` in % of the distance, seconds and
+metres), `tags`, `route` (up to 96 `[lat, lon]`) and `footage` (clips of it
+here); `open` is null when none is.
+
 ## Driving
 
 A page of its own in every interface: the selected car's driving week by
