@@ -6,7 +6,8 @@
 // signal name two messages share. Each of these made every stat flip from
 // one second (or clip) to the next: the pages of a message read with one
 // layout, can1 and can3 frames of an id read as can0's, two messages' values
-// in one series. An index written before (r1) is decoded again.
+// in one series. An index written before (r1) is decoded again. Of can3 only
+// 0x04F, the car's GPS position, is decoded (r3; test/canInternalGps.test.js).
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -17,7 +18,7 @@ const path = require('path');
 const zlib = require('zlib');
 const { execFileSync, spawnSync } = require('child_process');
 const { bundledDbc, decodeFrame } = require('../server/canDbc');
-const { createCanIndex, busMapOf, FORMAT } = require('../server/canIndex');
+const { createCanIndex, busMapOf, internalBusesOf, FORMAT } = require('../server/canIndex');
 const { PAGES, candump, EXPECTED } = require('./canModelY');
 
 const skip = spawnSync('xz', ['--version']).status !== 0 && 'needs xz';
@@ -73,6 +74,10 @@ test('the bus map: an interface the sidecar calls internal is no DBC bus', () =>
   assert.deepEqual(busMapOf({}), { can0: 'VehicleBus', can1: 'ChassisBus' });
   assert.deepEqual(busMapOf({ bus: { can0: 'vehicle (inferred from IDs)', can1: 'chassis (inferred from IDs)', can3: 'screenmate-internal' } }), { can0: 'VehicleBus', can1: 'ChassisBus' });
   assert.deepEqual(busMapOf({ bus: { can0: 'chassis', can1: 'vehicle', can2: 'internal' } }), { can0: 'ChassisBus', can1: 'VehicleBus' });
+  // (where 0x04F's position is decoded as well, and only there)
+  assert.deepEqual(internalBusesOf({ bus: { can0: 'vehicle (inferred from IDs)', can1: 'chassis (inferred from IDs)', can3: 'screenmate-internal' } }), ['can3']);
+  assert.deepEqual(internalBusesOf({}), [], 'no sidecar: no internal bus');
+  assert.deepEqual(internalBusesOf({ bus: { 'can3;x': 'internal' } }), [], 'not a plain interface name');
 });
 
 async function setup(name, text, side = null) {
@@ -103,9 +108,15 @@ test('a multi-bus log through the index: every value steady from second to secon
         }
       }
     }
-    // what is not decoded: the can3 position, the old pack temperatures, the 0x3FE "brake temperatures",
-    // and a name that two messages share
-    for (const n of ['GPSLatitude04F', 'GPSLongitude04F', 'BMSmaxPackTemperature', 'BMSminPackTemperature', 'BrakeTempFL3FE', 'UI_cpuTemperature']) assert.equal(clipB[n], undefined, n);
+    // what is not decoded: the old pack temperatures, the 0x3FE "brake temperatures", and a name that
+    // two messages share
+    for (const n of ['BMSmaxPackTemperature', 'BMSminPackTemperature', 'BrakeTempFL3FE', 'UI_cpuTemperature']) assert.equal(clipB[n], undefined, n);
+    // can3's 0x04F is (the car's position: only there on this car), and nothing else of can3: its 0x3D9
+    // would give an HDOP of 6.3
+    assert.deepEqual([...new Set(clipB.GPSLatitude04F.map((p) => p[1]))], [40.199897]);
+    assert.deepEqual([...new Set(clipB.GPSLongitude04F.map((p) => p[1]))], [-107.523232]);
+    assert.deepEqual([...new Set(clipB.GPSAccuracy04F.map((p) => p[1]))], [25]);
+    assert.deepEqual([...new Set(clipB.UI_gpsHDOP.map((p) => p[1]))], [0]);
     // the chassis bus's 0x219 counter is not read as tires: one value per slot, all the time
     assert.equal(new Set(clipB.VCSEC_TPMSPressure0.map((p) => p[1])).size, 1);
     // signals.json: a series of its own for each message, with what the display needs
@@ -114,18 +125,19 @@ test('a multi-bus log through the index: every value steady from second to secon
     assert.equal(meta.UI_cpuTemperature_353.message, 'ID353UI_status');
     assert.equal(meta.BMS_nominalEnergyRemaining.factor, 0.02);
     assert.equal(meta.BMS_nominalEnergyRemaining.fmt, FORMAT);
-    assert.equal(meta.GPSLatitude04F, undefined);
-    // the raw view and the ids list: can3's ids are counted, with no DBC name (not decoded there)
+    assert.deepEqual([meta.GPSLatitude04F.unit, meta.GPSAccuracy04F.unit, meta.GPSLatitude04F.fmt], ['Deg', 'm', FORMAT]);
+    // the raw view and the ids list: can3's ids are counted, with no DBC name (not decoded there), but 0x04F
     const raw = await idx.raw(['K'], T0, T0 + 5000);
     const named = Object.fromEntries(raw.map((e) => [e.key, e.name]));
     assert.equal(named['can3:3D9'], null);
-    assert.equal(named['can3:04F'], null);
+    assert.equal(named['can3:04F'], 'ID04FGPSLatLong');
     assert.equal(named['can1:3D9'], 'ID3D9UI_gpsVehicleSpeed');
     assert.equal(named['can0:312'], null, 'a layout not known: unknown');
     assert.equal(named['can1:219'], null, '0x219 is a vehicle bus message now');
     assert.equal(named['can0:219'], 'ID219VCSEC_TPMSData');
     const ids = Object.fromEntries((await idx.idSummary('K', T0 - 10_000, T0 + 10_000)).map((e) => [e.key, e.name]));
     assert.equal(ids['can3:3D9'], null);
+    assert.equal(ids['can3:04F'], 'ID04FGPSLatLong');
     assert.equal(ids['can1:3D9'], 'ID3D9UI_gpsVehicleSpeed');
   } finally {
     await fsp.rm(base, { recursive: true, force: true });
@@ -138,7 +150,9 @@ test('a bus nobody named is not decoded (no sidecar: only can0 and can1 are)', {
   try {
     await idx.kick();
     const s = await idx.series(['K'], T0 - 10_000, T0 - 5000);
-    assert.equal(s.GPSLatitude04F, undefined, '0x04F is only on can3');
+    assert.equal(s.GPSLatitude04F, undefined, '0x04F is only on can3, which no sidecar calls internal here');
+    const named = Object.fromEntries((await idx.raw(['K'], T0 - 10_000, T0 - 5000)).map((e) => [e.key, e.name]));
+    assert.equal(named['can3:04F'], null);
     assert.deepEqual([...new Set(s.UI_gpsHDOP.map((p) => p[1]))], [0], 'the HDOP from can1 only (can3 has 6.3)');
   } finally {
     await fsp.rm(base, { recursive: true, force: true });
@@ -152,9 +166,9 @@ test('an index written by r1 is decoded again: the old names go, from the minute
     await idx.kick();
     const doneFile = path.join(base, 'idx', 'done.json');
     const stamp = JSON.parse(fs.readFileSync(doneFile, 'utf8'))[`K/${name}`];
-    assert.match(stamp, /\/r2$/);
+    assert.ok(stamp.endsWith(`/${FORMAT}`), stamp);
     // as r1 left it: its stamp, the flat 0x312 pack temperatures and one UI_cpuTemperature in the minutes, no fmt in signals.json
-    fs.writeFileSync(doneFile, JSON.stringify({ [`K/${name}`]: stamp.replace(/r2$/, 'r1') }));
+    fs.writeFileSync(doneFile, JSON.stringify({ [`K/${name}`]: stamp.replace(new RegExp(`${FORMAT}$`), 'r1') }));
     const file = path.join(base, 'idx', 'K', '20261108T0128.json.gz');
     const m = JSON.parse(zlib.gunzipSync(fs.readFileSync(file)).toString());
     m.signals.BMSmaxPackTemperature = [[1000, 15], [2000, -25]];
@@ -184,7 +198,7 @@ test('an index written by r1 is decoded again: the old names go, from the minute
   }
 });
 
-test('an r1 index of stored logs ends up wholly r2: every minute, signals.json, the summaries, and what the sync and the gap check learned', { skip }, async () => {
+test('an r1 index of stored logs ends up wholly current: every minute, signals.json, the summaries, and what the sync and the gap check learned', { skip }, async () => {
   const fmt = require('../server/canFormat');
   const { SYNC_FORMAT } = require('../server/canSync');
   const nameA = 'K_20261108T012750Z_1.log.xz'; // 01:27:50 to 01:28:10, stored
@@ -227,7 +241,7 @@ test('an r1 index of stored logs ends up wholly r2: every minute, signals.json, 
     assert.deepEqual((await again.pendingLogs()).map((j) => j.name), [nameA], 'the stored log, decoded again');
     await again.kick();
 
-    // every minute: columns, its activity, every part r2, nothing of the r1 decoding left
+    // every minute: columns, its activity, every part current, nothing of the r1 decoding left
     for (const f of minutes) {
       const file = path.join(dirK, f);
       const head = await fmt.readHead(file);
@@ -235,7 +249,9 @@ test('an r1 index of stored logs ends up wholly r2: every minute, signals.json, 
       assert.ok(head.act, `${f}: act`);
       assert.ok(Object.values(head.logs).every((p) => p.fmt === FORMAT), `${f}: ${JSON.stringify(head.logs)}`);
       const m = await fmt.readMinuteFile(file);
-      for (const n of ['GPSLatitude04F', 'BMSmaxPackTemperature']) assert.equal(m.signals[n], undefined, `${f}: ${n}`);
+      assert.equal(m.signals.BMSmaxPackTemperature, undefined, f);
+      // (log A's position is decoded again from its can3 frames: the car's, not r1's 40.2)
+      assert.ok((m.signals.GPSLatitude04F || []).every((p) => p[1] === 40.199897), `${f}: ${JSON.stringify(m.signals.GPSLatitude04F?.slice(0, 3))}`);
       assert.ok(!(m.signals.v12vBattVoltage261 || []).some((p) => p[1] < 10), `${f}: no 3.6 V`);
     }
     // log B's minute: its frame counts kept (not decoded), its signals gone
@@ -250,9 +266,9 @@ test('an r1 index of stored logs ends up wholly r2: every minute, signals.json, 
         assert.ok(v !== undefined && near(v, want, 0.01), `${n} at ${new Date(t).toISOString()}: ${v}, not ${want}`);
       }
     }
-    // signals.json: only r2 names
+    // signals.json: only current names (the position's from log A's decoding)
     const metaAfter = JSON.parse(fs.readFileSync(sigFile, 'utf8'));
-    assert.equal(metaAfter.GPSLatitude04F, undefined);
+    assert.equal(metaAfter.GPSLatitude04F.factor, 1e-6);
     assert.ok(Object.values(metaAfter).every((v) => v.fmt === FORMAT));
     // per-day id summaries: made again (the made-up id is gone)
     const fresh = await again.newIds('K', T0 - 86400_000);
@@ -263,8 +279,9 @@ test('an r1 index of stored logs ends up wholly r2: every minute, signals.json, 
     const covers = (t) => told.some(([k, a, z]) => k === 'K' && a <= t && t <= z);
     assert.ok(covers(T0) && covers(T0 + 121_000), `told: ${JSON.stringify(told)}`);
     assert.equal(await again.repack(), 0, 'nothing more to do');
-    // the sync's stored offsets are kept by the index's decoding: an r1 sync.json is worked out again
-    assert.ok(SYNC_FORMAT.endsWith(`/${FORMAT}`), SYNC_FORMAT);
+    // the sync's stored offsets are kept by the index's decoding of the car's buses: an r1 sync.json is
+    // worked out again (r3 changed only the internal bus: test/canInternalGps.test.js)
+    assert.ok(SYNC_FORMAT.endsWith(`/${require('../server/canIndex').CAR_FORMAT}`), SYNC_FORMAT);
   } finally {
     await fsp.rm(base, { recursive: true, force: true });
   }

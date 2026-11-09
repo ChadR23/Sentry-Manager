@@ -5,7 +5,8 @@
 // with the pages it sends in turn, and on which bus. The tests build candump
 // logs from them, so the decoding is checked against what the car really sends.
 //
-//   frames(ms, i) -> [[bus, id, payload], ...]   the frames of the i-th tenth of a second
+//   frames(i, pages) -> [[bus, id, payload], ...]   the frames of the i-th tenth of a second
+//   gps04F(lat, lon, acc) -> 0x04F's payload with that position (the rest of the can3 frame's bits)
 
 const PAGES = {
   // cabin: 3-bit page index (page 4 read as page 0 gave 132 C)
@@ -25,7 +26,8 @@ const PAGES = {
   // GPS speed and heading: the chassis bus's, and the Screenmate's own can3 (different data)
   'can1:3D9': ['0000001000000000'],
   'can3:3D9': ['3F01000000000000'],
-  // a position only on can3 (not the car's)
+  // the car's GPS position, only on can3 (the Screenmate's own bus): 40.199897, -107.523232, 25 m
+  // (parked in the garage: a poor fix)
   'can3:04F': ['D9666502367599FA'],
   // 0x3FE on can0: counters, not brake temperatures
   'can0:3FE': ['D9C0020B2CB0002F', 'DAC1020B2CB0002F', 'DBC2020B2CB0002F'],
@@ -37,20 +39,20 @@ const PAGES = {
 };
 
 /** The frames of the i-th tenth of a second: every id once, its pages in turn. */
-function frames(i) {
-  return Object.entries(PAGES).map(([key, pages]) => {
+function frames(i, all = PAGES) {
+  return Object.entries(all).map(([key, pages]) => {
     const [bus, id] = key.split(':');
     return [bus, id, pages[i % pages.length]];
   });
 }
 
 /** A candump -L log from `fromMs` for `tenths` tenths of a second. */
-function candump(fromMs, tenths) {
+function candump(fromMs, tenths, pages = PAGES) {
   const lines = ['# canbridge v1 app=0.2.120 build=120 device=Screenmate_Screenmate_One ts_source=helper-receive jitter=unmeasured'];
   for (let i = 0; i < tenths; i++) {
     const t = fromMs + i * 100;
     const stamp = `${Math.floor(t / 1000)}.${String(Math.round((t % 1000) * 1000)).padStart(6, '0')}`;
-    for (const [bus, id, payload] of frames(i)) lines.push(`(${stamp}) ${bus} ${id}#${payload}`);
+    for (const [bus, id, payload] of frames(i, pages)) lines.push(`(${stamp}) ${bus} ${id}#${payload}`);
   }
   return `${lines.join('\n')}\n`;
 }
@@ -80,4 +82,17 @@ const EXPECTED = {
   UI_cpuTemperature_00C: 50
 };
 
-module.exports = { PAGES, frames, candump, EXPECTED };
+/**
+ * 0x04F's payload for a position (model3dbc: latitude bits 0-27 and longitude 28-55, signed, a
+ * millionth of a degree; accuracy bits 57-63, 0.2 m; Intel byte order), bit 56 as the car sent it.
+ */
+function gps04F(lat, lon, acc) {
+  const real = Buffer.from(PAGES['can3:04F'][0], 'hex').readBigUInt64LE();
+  const bits = (v, n) => BigInt.asUintN(n, BigInt(Math.round(v)));
+  const v = bits(lat * 1e6, 28) | (bits(lon * 1e6, 28) << 28n) | (real & (1n << 56n)) | (bits(acc / 0.2, 7) << 57n);
+  const b = Buffer.alloc(8);
+  b.writeBigUInt64LE(v);
+  return b.toString('hex').toUpperCase();
+}
+
+module.exports = { PAGES, frames, candump, gps04F, EXPECTED };

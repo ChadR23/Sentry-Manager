@@ -50,7 +50,7 @@
 const fsp = require('fs/promises');
 const path = require('path');
 const { classify, readHead, readMinuteFile, KIND } = require('./canFormat');
-const { FORMAT: CAN_FORMAT } = require('./canIndex');
+const { CAR_FORMAT: CAN_FORMAT } = require('./canIndex');
 
 const MIN = 60;
 const HOUR = 3600;
@@ -511,7 +511,7 @@ function createArchiveGap({ inventory, vehicles, notes, db, speedIndex = null, c
     if (raw.days) {
       const st = { days: {}, rx: null, lastRecentS: null, sentry: false, matched: [], ...raw };
       // what was learned from the CAN minutes (does this car record in Sentry, which keys are it)
-      // is learned again when the index decodes them differently (canIndex.js FORMAT)
+      // is learned again when the index decodes the car's buses differently (canIndex.js CAR_FORMAT)
       if (raw.canFormat !== CAN_FORMAT) Object.assign(st, { sentry: false, matched: [] });
       return st;
     }

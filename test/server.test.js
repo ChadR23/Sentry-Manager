@@ -1427,9 +1427,10 @@ test('CAN clip: a Model Y\'s multi-bus log, two clips in a row: every stat stead
         }
       }
     }
-    // the decoded list has no signal from the Screenmate's own bus, nor a layout not known
+    // the decoded list has no layout not known, nor a name two messages share (of the Screenmate's own
+    // bus only the car's position is decoded: test/canInternalGps.test.js)
     const meta = (await s.call('GET', `/api/can/signals?path=${encodeURIComponent(clips[0])}`, undefined, { headers: https })).data.signals;
-    for (const n of ['GPSLatitude04F', 'BMSmaxPackTemperature', 'BrakeTempFL3FE', 'UI_cpuTemperature']) assert.equal(meta[n], undefined, n);
+    for (const n of ['BMSmaxPackTemperature', 'BrakeTempFL3FE', 'UI_cpuTemperature']) assert.equal(meta[n], undefined, n);
     assert.equal(meta.VCSEC_TPMSPressure0.unit, 'bar');
   } finally {
     await s.stop();

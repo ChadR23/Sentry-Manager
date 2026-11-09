@@ -421,7 +421,8 @@ const hasKeys = (o) => Boolean(o && Object.keys(o).length);
 // Model3CAN.dbc with the firmware overrides (server/dbc), checked against a
 // 2026 Model Y's logs: a signal whose layout is not known on newer firmware
 // (the 0x312 pack temperatures, the 0x3FE brake temperatures) is not here,
-// nor is one from the Screenmate's own buses (0x04F's position, on can3).
+// nor is the GPS position (0x04F, on the Model Y from the Screenmate's can3):
+// raw latitude and longitude are no stat to watch; they are in the full list.
 // A name in two messages has the message id after it (RCM_longitudinalAccel_111).
 // Battery power, efficiency, charging power and the like have no one signal:
 // they are worked out from others (calc.*, web/carCalc.js).

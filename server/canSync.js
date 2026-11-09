@@ -27,7 +27,7 @@
 
 const fsp = require('fs/promises');
 const path = require('path');
-const { FORMAT: INDEX_FORMAT } = require('./canIndex');
+const { CAR_FORMAT: INDEX_FORMAT } = require('./canIndex');
 
 const SIG = {
   speed: 'DI_vehicleSpeed', // kph
@@ -43,7 +43,8 @@ const GRID_MS = 5; // the CAN signals sampled this finely for the correlation
 const TEL_STEP = 50; // the footage's signals every 50 ms
 const ACCEL_STEPS = [5, 20]; // accelerator edges: crossing these (%)
 // what is kept (sync.json) is worked out from the index's signals: kept by the index's decoding
-// too (canIndex.js FORMAT), so a decoding fixed later has every offset worked out again
+// of the car's buses too (canIndex.js CAR_FORMAT: this reads nothing else), so a decoding fixed
+// later has every offset worked out again
 const FORMAT = `1/${INDEX_FORMAT}`;
 
 const median = (a) => {

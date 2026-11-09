@@ -30,7 +30,8 @@
 //     comes, or changes, after its log has the log indexed again with its bus map)
 //
 // Two versions, each about one thing: FORMAT is how the signals are decoded
-// (r2: the firmware overrides, named buses only, unique series names); it is
+// (r2: the firmware overrides, named buses only, unique series names; r3: the
+// GPS position from the Screenmate's internal bus as well, see below); it is
 // in each log's stamp in done.json, in each log's part of a minute (`fmt`), and
 // in signals.json. canFormat.js's ENC is only how a minute is laid out on disk
 // (c1: columns). A minute is current when it is ENC and every part of it is
@@ -39,9 +40,13 @@
 // every minute once: an older layout is written again as columns, and the
 // signals of a part still decoded by an older FORMAT (a log that could not be
 // decoded again: not stored any more, not usable, unreadable) are taken out,
-// so nothing an older decoding wrote stays in the index. The CAN sync
+// so nothing an older decoding wrote stays in the index. A part decoded by
+// CAR_FORMAT (r2) is not older in that sense: r3 decodes the car's own buses
+// as r2 did and only adds the internal bus's GPS, so such a part keeps its
+// signals (it has no GPS, that is all) and so does signals.json. The CAN sync
 // (canSync.js) and the archive gap check (archiveGap.js) keep their own
-// results by FORMAT too, and are told of every minute that changes.
+// results by CAR_FORMAT (they read only the car's buses), and are told of
+// every minute that changes.
 //
 // Indexing a log again replaces its own part of each minute: what it wrote
 // before (its frame counts, and its points within its own span of the
@@ -59,6 +64,16 @@
 // can2 and can3 among them), so a bus nobody named is counted, kept raw, and
 // not decoded. Signals are stored under their series name (canDbc.js), unique
 // per message.
+//
+// One narrow exception, by name (INTERNAL_BUS_MESSAGES): on an interface the
+// bus map calls internal (the CAN Bridge's "screenmate-internal" can3), 0x04F
+// is decoded, and only its GPSLatitude04F, GPSLongitude04F and GPSAccuracy04F.
+// On a 2026 Model Y the car's position comes there and on no car bus (checked
+// against the owner's frames: test/canModelY.js). It is stored under the same
+// series names as the chassis bus's 0x04F, which the place tags and Drives read
+// (recordingPlace.js). Where a log has 0x04F on a car bus too (a car that sends
+// it there), the car bus's wins: an internal frame is used only when the car
+// bus's has not come for INTERNAL_YIELD_MS, so two sources never interleave.
 
 const fs = require('fs');
 const fsp = require('fs/promises');
@@ -74,7 +89,17 @@ const RAW_PER_SEC = 10; // raw payload changes kept a second per id
 // the index format: r1 added the raw snapshots (an older stamp has none); r2 decodes with the
 // firmware overrides, only on named buses, and with unique series names (a log indexed by r1 is
 // decoded again, in the background, from its stored .log.xz)
-const FORMAT = 'r2';
+// r3: 0x04F's position from the internal bus as well (INTERNAL_BUS_MESSAGES); the car's buses as r2
+const FORMAT = 'r3';
+// the decoding of the car's own buses: r3 left it as r2 had it, so what r2 decoded stays right
+const CAR_FORMAT = 'r2';
+const stillRight = (f) => f === FORMAT || f === CAR_FORMAT;
+// on an interface the bus map calls internal: these messages only (by id), and only these signals
+// (series names). The Screenmate's other ids carry data of their own (its 0x3D9 is not the chassis bus's).
+const INTERNAL_BUS_MESSAGES = new Map([
+  [0x04F, new Set(['GPSLatitude04F', 'GPSLongitude04F', 'GPSAccuracy04F'])] // the car's GPS position (Model Y: only here)
+]);
+const INTERNAL_YIELD_MS = 2500; // a car bus's 0x04F came this recently: the internal one is not used (it is sent once a second)
 const KEEP_MS = 1000; // a point at least once a second
 // the interface is a plain name (can0, vcan1): anything else in a log line is not indexed, so a
 // crafted log cannot make up ids (each a key in the index) or put a formula into a CSV download
@@ -89,23 +114,37 @@ const minuteKey = (ms) => new Date(Math.floor(ms / 60000) * 60000).toISOString()
 const TRUST_RANK = { override: 0, unsigned: 1, verified: 2 };
 const worseTrust = (a, b) => (a === undefined ? b : b === undefined ? a : (TRUST_RANK[a] ?? 1) <= (TRUST_RANK[b] ?? 1) ? a : b);
 
+/** The sidecar's bus map as [interface, what it says (lower case)]. */
+function sideEntries(side) {
+  const map = side?.bus || side?.busMap || side?.buses || null;
+  if (!map || typeof map !== 'object') return [];
+  return Object.entries(map).map(([iface, v]) => [iface, String(typeof v === 'object' ? v?.dbcBus || v?.name || '' : v).toLowerCase()]);
+}
+const INTERNAL = /internal|screenmate/;
+
 /**
  * Which DBC bus each interface is: the sidecar's bus map, else can0 vehicle and can1 chassis.
  * An interface the map calls internal (the CAN Bridge's "screenmate-internal" can3) is no DBC bus.
  */
 function busMapOf(side) {
   const busOf = { ...DEFAULT_BUSES };
-  const map = side?.bus || side?.busMap || side?.buses || null;
-  if (map && typeof map === 'object') {
-    for (const [iface, v] of Object.entries(map)) {
-      const s = String(typeof v === 'object' ? v?.dbcBus || v?.name || '' : v).toLowerCase();
-      if (/internal|screenmate/.test(s)) delete busOf[iface];
-      else if (/vehicle/.test(s)) busOf[iface] = 'VehicleBus';
-      else if (/chassis/.test(s)) busOf[iface] = 'ChassisBus';
-      else if (/party/.test(s)) busOf[iface] = 'PartyBus';
-    }
+  for (const [iface, s] of sideEntries(side)) {
+    if (INTERNAL.test(s)) delete busOf[iface];
+    else if (/vehicle/.test(s)) busOf[iface] = 'VehicleBus';
+    else if (/chassis/.test(s)) busOf[iface] = 'ChassisBus';
+    else if (/party/.test(s)) busOf[iface] = 'PartyBus';
   }
   return busOf;
+}
+/** The interfaces the sidecar's bus map calls internal (none without one): INTERNAL_BUS_MESSAGES are decoded there. */
+function internalBusesOf(side) {
+  return sideEntries(side).filter(([iface, s]) => INTERNAL.test(s) && IFACE.test(iface)).map(([iface]) => iface).sort();
+}
+/** Whether a message (its DBC entry) is decoded on this interface: on its own bus, or allowed from an internal one. */
+function decodedOn(msg, id, iface, busOf, internal) {
+  if (!msg || !msg.signals.length) return false;
+  if (busOf[iface]) return msg.bus === busOf[iface];
+  return INTERNAL_BUS_MESSAGES.has(id) && internal.includes(iface);
 }
 
 const MINUTE_FILE = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})\.json\.gz$/;
@@ -286,8 +325,12 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
     const file = path.join(dir, key, 'signals.json');
     let all = {};
     try { all = JSON.parse(await fsp.readFile(file, 'utf8')) || {}; } catch { /* first */ }
-    // (what an older format wrote is dropped: its names can be gone, or mean something else now)
-    for (const [name, meta] of Object.entries(all)) if (meta?.fmt !== FORMAT) delete all[name];
+    // (what an older format wrote is dropped: its names can be gone, or mean something else now;
+    // CAR_FORMAT's are still right)
+    for (const [name, meta] of Object.entries(all)) {
+      if (!stillRight(meta?.fmt)) delete all[name];
+      else if (meta.fmt !== FORMAT) all[name] = { ...meta, fmt: FORMAT };
+    }
     for (const [name, meta] of seen) all[name] = meta;
     await fsp.mkdir(path.join(dir, key), { recursive: true });
     await writeAtomic(file, JSON.stringify(all));
@@ -299,6 +342,8 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
     let side = {};
     try { side = JSON.parse(await fsp.readFile(`${file}.json`, 'utf8')) || {}; } catch { /* no sidecar */ }
     const busOf = busMapOf(side);
+    const internal = internalBusesOf(side);
+    const carSent = new Map(); // INTERNAL_BUS_MESSAGES id -> when a car bus last sent it (that one wins)
     const { messages } = dbc();
     const seen = new Map();
     let minute = null;
@@ -354,7 +399,7 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
           const mk = minuteKey(minuteStart);
           minute = mk;
           bucket = { minute: mk, signals: {}, ids: {} };
-          rawLog = { span: [Math.round(t - minuteStart), Math.round(t - minuteStart)], buses: busOf, ids: {} };
+          rawLog = { span: [Math.round(t - minuteStart), Math.round(t - minuteStart)], buses: busOf, ...(internal.length ? { internal } : {}), ids: {} };
           rawBucket = { minute: mk, raw: {}, logs: { [name]: rawLog } };
           for (const s of last.values()) s.pt = -Infinity; // each minute starts with every signal's value
           for (const s of rawLast.values()) s.v = null; // ... and every id's payload
@@ -386,12 +431,24 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
         if (rawOnly) continue;
         const id = parseInt(m[4], 16);
         const msg = messages.get(id);
-        // only on a bus the map names, with that bus's message (can2, can3: not decoded)
+        // only on a bus the map names, with that bus's message (can2, can3: not decoded), but for
+        // INTERNAL_BUS_MESSAGES on an internal bus, when no car bus sends that message
+        if (!msg) continue;
         const want = busOf[iface];
-        if (!msg || !want || msg.bus !== want) continue;
+        let only = null;
+        if (want) {
+          if (msg.bus !== want) continue;
+          if (INTERNAL_BUS_MESSAGES.has(id)) carSent.set(id, t);
+        } else {
+          only = INTERNAL_BUS_MESSAGES.get(id);
+          if (!only || !internal.includes(iface)) continue;
+          const car = carSent.get(id);
+          if (car !== undefined && Math.abs(t - car) < INTERNAL_YIELD_MS) continue;
+        }
         const bytes = Buffer.from(m[5], 'hex');
         for (const [sig, v] of decodeFrame(msg, bytes)) {
           const nm = sig.series || sig.name;
+          if (only && !only.has(nm)) continue;
           if (!seen.has(nm)) seen.set(nm, { label: sig.comment || sig.name, signal: sig.name, unit: sig.unit || '', min: sig.min, max: sig.max, factor: sig.factor, offset: sig.offset, values: sig.values, bus: sig.bus, message: sig.message, id: sig.messageId, fmt: FORMAT });
           let s = last.get(nm);
           if (!s) { s = { pt: -Infinity, v: undefined, pending: null }; last.set(nm, s); }
@@ -598,7 +655,7 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
     const out = new Map();
     const entry = (idKey) => {
       let e = out.get(idKey);
-      if (!e) { e = { key: idKey, pts: [], frames: 0, ms: 0, bus: null }; out.set(idKey, e); }
+      if (!e) { e = { key: idKey, pts: [], frames: 0, ms: 0, bus: null, internal: false }; out.set(idKey, e); }
       return e;
     };
     for (const key of keys) {
@@ -616,6 +673,7 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
           for (const [idKey, n] of Object.entries(lg.ids || {})) {
             const e = entry(idKey);
             e.bus ||= lg.buses?.[idKey.split(':')[0]] || null;
+            e.internal ||= Array.isArray(lg.internal) && lg.internal.includes(idKey.split(':')[0]);
             if (inside) { e.frames += n; e.ms += span; }
           }
         }
@@ -632,8 +690,9 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
       if (!changes.length) continue;
       const [iface, hexId] = e.key.split(':');
       const msg = messages.get(parseInt(hexId, 16));
-      // (no bus mapped: not decoded, so not known; a message with no signals: its layout is not known)
-      const known = msg && msg.signals.length && e.bus && msg.bus === e.bus;
+      // (no bus mapped: not decoded, so not known, but for INTERNAL_BUS_MESSAGES on an internal bus;
+      // a message with no signals: its layout is not known)
+      const known = decodedOn(msg, parseInt(hexId, 16), iface, e.bus ? { [iface]: e.bus } : {}, e.internal ? [iface] : []);
       list.push({ key: e.key, bus: iface, id: hexId, name: known ? msg.name : null, hz: e.ms ? Math.round((e.frames / e.ms) * 10000) / 10 : 0, changes });
     }
     return list.sort((a, b) => parseInt(a.id, 16) - parseInt(b.id, 16) || a.bus.localeCompare(b.bus));
@@ -718,13 +777,17 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
   /** The top of a minute (logs, spans, id counts per log, trust, act), or null. */
   const headOf = (key, t) => fmt.readHead(path.join(dir, key, `${minuteKey(t)}.json.gz`));
 
-  /** The DBC message of an id ("can0:2E5") on a bus map, or null when the DBC does not know it there. */
-  function messageName(idKey, busOf = DEFAULT_BUSES) {
+  /**
+   * The DBC message of an id ("can0:2E5") on a bus map (and the interfaces it calls internal), or
+   * null when the DBC does not know it there.
+   */
+  function messageName(idKey, busOf = DEFAULT_BUSES, internal = []) {
     const [iface, hexId] = String(idKey).split(':');
-    const msg = dbc().messages.get(parseInt(hexId, 16));
-    const bus = busOf[iface] || null;
-    // (decoded only there: on a bus with no DBC name nothing is, and a message with no signals has no known layout)
-    return msg && msg.signals.length && bus && msg.bus === bus ? msg.name : null;
+    const id = parseInt(hexId, 16);
+    const msg = dbc().messages.get(id);
+    // (decoded only there: on a bus with no DBC name nothing is but INTERNAL_BUS_MESSAGES on an
+    // internal one, and a message with no signals has no known layout)
+    return decodedOn(msg, id, iface, busOf, internal) ? msg.name : null;
   }
 
   /**
@@ -740,7 +803,7 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
       if (!buses.has(name)) {
         let side = {};
         if (parseName(name)) { try { side = JSON.parse(await fsp.readFile(path.join(canDir, key, `${name}.json`), 'utf8')) || {}; } catch { /* none */ } }
-        buses.set(name, busMapOf(side));
+        buses.set(name, { busOf: busMapOf(side), internal: internalBusesOf(side) });
       }
       return buses.get(name);
     };
@@ -753,13 +816,13 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
         if (!part?.ids) continue;
         const [a, b] = Array.isArray(part.span) ? part.span : [0, 59_999];
         const ms = Math.max(1000, b - a);
-        const busOf = await busesOf(name);
+        const { busOf, internal } = await busesOf(name);
         for (const [idKey, n] of Object.entries(part.ids)) {
           if (!goodId(idKey)) continue;
           let e = out.get(idKey);
           if (!e) {
             const [iface, hexId] = idKey.split(':');
-            e = { key: idKey, bus: iface, id: hexId, name: messageName(idKey, busOf), frames: 0, ms: 0, firstSeen: t + a, lastSeen: t + b, minutes: new Set() };
+            e = { key: idKey, bus: iface, id: hexId, name: messageName(idKey, busOf, internal), frames: 0, ms: 0, firstSeen: t + a, lastSeen: t + b, minutes: new Set() };
             out.set(idKey, e);
           }
           e.frames += n;
@@ -848,8 +911,8 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
       return /"enc":"(\w+)"/.exec(head)?.[1] || null;
     } catch { return undefined; } finally { await fh?.close().catch(() => {}); }
   }
-  /** Whether a minute's parts were all decoded by this FORMAT (none from before the per-log records). */
-  const decodedNow = (logs) => Boolean(logs) && typeof logs === 'object' && !Object.hasOwn(logs, '') && Object.values(logs).every((p) => p?.fmt === FORMAT);
+  /** Whether a minute's parts were all decoded by this FORMAT or CAR_FORMAT (none from before the per-log records). */
+  const decodedNow = (logs) => Boolean(logs) && typeof logs === 'object' && !Object.hasOwn(logs, '') && Object.values(logs).every((p) => stillRight(p?.fmt));
   /** A minute file's state: 'ok', 'layout' (an older layout only), 'stale' (an older FORMAT's signals), or null (unreadable). */
   async function minuteState(file) {
     const head = await fmt.readHead(file);
@@ -896,8 +959,8 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
                 logs = { ...logs };
                 // only the points of the parts this FORMAT decoded (its frame counts stay; nothing of
                 // an older decoding is left)
-                signals = onlyInSpans(signals, Object.values(logs).filter((part) => part?.fmt === FORMAT));
-                for (const [ln, part] of Object.entries(logs)) if (part?.fmt !== FORMAT) logs[ln] = { ...part, fmt: FORMAT };
+                signals = onlyInSpans(signals, Object.values(logs).filter((part) => stillRight(part?.fmt)));
+                for (const [ln, part] of Object.entries(logs)) if (!stillRight(part?.fmt)) logs[ln] = { ...part, fmt: FORMAT };
               }
               const t = minuteOfFile(name);
               from = Math.min(from, t);
@@ -934,4 +997,4 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = bund
   return { kick, trustOf, indexLog, series, clipData, raw, signals, forget, removeLog, minutesIn, minuteTimes, idSummary, newIds, repack, messageName, generation: () => generation, status: () => ({ ...status }), pendingLogs };
 }
 
-module.exports = { createCanIndex, minuteKey, busMapOf, FORMAT, RAW_PER_SEC, CLIP_STEP_MS, IFACE };
+module.exports = { createCanIndex, minuteKey, busMapOf, internalBusesOf, FORMAT, CAR_FORMAT, INTERNAL_BUS_MESSAGES, INTERNAL_YIELD_MS, RAW_PER_SEC, CLIP_STEP_MS, IFACE };

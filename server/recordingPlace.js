@@ -43,8 +43,16 @@ function fixesOf(signals, t) {
   const lonAt = new Map(lon.map((p) => [p[0], p[1]]));
   const accAt = new Map(acc.map((p) => [p[0], p[1]]));
   const out = [];
+  const lonSorted = [...lon].sort((x, y) => x[0] - y[0]);
   for (const [ms, la] of lat) {
-    const lo = lonAt.get(ms);
+    let lo = lonAt.get(ms);
+    if (lo === undefined) {
+      // the longitude stayed the same (the index keeps a point when a value changes, else once a
+      // second): its last point, if it is within a second and a half before
+      let held;
+      for (const [m2, v] of lonSorted) { if (m2 > ms) break; held = ms - m2 <= 1500 ? v : undefined; }
+      lo = held;
+    }
     let ac = accAt.get(ms);
     if (ac === undefined) {
       // the nearest accuracy within a second (the same frame carries all three, so this is rare)

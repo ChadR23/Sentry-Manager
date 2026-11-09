@@ -12,9 +12,10 @@ const fsp = require('fs/promises');
 const net = require('net');
 const os = require('os');
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn, spawnSync, execFileSync } = require('child_process');
 const fmt = require('../server/canFormat');
-const { FORMAT } = require('../server/canIndex');
+const { FORMAT, createCanIndex } = require('../server/canIndex');
+const { PAGES, candump, gps04F } = require('./canModelY');
 const { fixesOf, frontClips, CAN_FIX_MAX_M } = require('../server/recordingPlace');
 
 const REPO = path.join(__dirname, '..');
@@ -46,11 +47,15 @@ test('fixesOf: lat, lon and accuracy of the same frame paired; poor, zero and mi
     'too inaccurate (15.2 m) and 0, 0 are not fixes; an accuracy 400 ms off is the same frame\'s');
   assert.deepEqual(fixesOf({ GPSLatitude04F: [[0, 41.9]], GPSLongitude04F: [[0, -87.7]] }, t), [], 'no accuracy: not known to be good');
   assert.deepEqual(fixesOf(undefined, t), []);
+  // a longitude that stayed the same has no point of its own (the index keeps one a second): its last one holds
+  assert.deepEqual(fixesOf({ GPSLatitude04F: [[0, 41.9], [700, 41.91]], GPSLongitude04F: [[0, -87.7]], GPSAccuracy04F: [[0, 2], [700, 2]] }, t),
+    [[t, 41.9, -87.7, 2], [t + 700, 41.91, -87.7, 2]]);
+  assert.deepEqual(fixesOf({ GPSLatitude04F: [[5000, 41.9]], GPSLongitude04F: [[0, -87.7]], GPSAccuracy04F: [[5000, 2]] }, t), [], 'not one from long before');
   assert.deepEqual(frontClips({ clipRels: ['R/2026-10-05_11-01-00-back.mp4', 'R/2026-10-05_11-01-00-front.mp4', 'R/2026-10-05_11-00-00-front.mp4'] }, new Map()).map((c) => c.stamp),
     ['2026-10-05_11-00-00', '2026-10-05_11-01-00']);
 });
 
-test('Footage: Recent recordings get place (parked), from and to (Home to Work); CAN GPS beats the cameras\' when good; drives prefer it too', { timeout: 120000 }, async () => {
+test('Footage: Recent recordings get place (parked), from and to (Home to Work); CAN GPS beats the cameras\' when good; drives prefer it too', { timeout: 120000, skip: spawnSync('xz', ['--version']).status !== 0 && 'needs xz' }, async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sm-recplace-'));
   const root = path.join(dir, 'footage');
   const recent = path.join(root, 'TeslaCam', 'RecentClips');
@@ -79,6 +84,11 @@ test('Footage: Recent recordings get place (parked), from and to (Home to Work);
   // 13:00-13:01 the cameras say Home, CAN Bridge GPS says Work but only to 20 m: not used
   await clip(`${DAY}_13-00-00`, parked, [at(HOME)]);
   await clip(`${DAY}_13-01-00`, parked, [at(HOME, 55)]);
+  // 23:00-23:01 the cameras say Home, the Model Y's CAN Bridge log (its position on can3 only) says Work, 2.4 m;
+  // 23:30 the cameras say Home, the log has the car's own garage frame (25 m: not used)
+  await clip(`${DAY}_23-00-00`, moving, [at(HOME)]);
+  await clip(`${DAY}_23-01-00`, moving, [at(HOME, 55)]);
+  await clip(`${DAY}_23-30-00`, parked, [at(HOME), at(HOME, 55)]);
   // 15:00 no GPS at all; 17:00 not read by the speed index yet
   await clip(`${DAY}_15-00-00`, parked, []);
   await clip(`${DAY}_17-00-00`, parked, [at(WORK)], false);
@@ -104,6 +114,20 @@ test('Footage: Recent recordings get place (parked), from and to (Home to Work);
     const [name, body] = await gpsMinute(Date.UTC(2026, 9, 5, hh, mm), p, acc);
     await fsp.writeFile(path.join(keyDir, `${name}.json.gz`), body);
   }
+
+  // and two real CAN Bridge logs (the car's frames, all four buses, its sidecar) through the index
+  const canK = path.join(data, 'can', 'K');
+  await fsp.mkdir(canK, { recursive: true });
+  const side = JSON.stringify({ bus: { can0: 'vehicle (inferred from IDs)', can1: 'chassis (inferred from IDs)', can3: 'screenmate-internal' } });
+  const logs = [
+    ['K_20261005T225950Z_1.log.xz', candump(Date.UTC(2026, 9, 5, 22, 59, 50), 1400, { ...PAGES, 'can3:04F': [gps04F(WORK.lat, WORK.lon, 2.4)] })],
+    ['K_20261005T232950Z_2.log.xz', candump(Date.UTC(2026, 9, 5, 23, 29, 50), 800)]
+  ];
+  for (const [name, text] of logs) {
+    await fsp.writeFile(path.join(canK, name), execFileSync('xz', ['-1', '-c'], { input: text }));
+    await fsp.writeFile(path.join(canK, `${name}.json`), side);
+  }
+  await createCanIndex({ canDir: path.join(data, 'can'), dir: path.join(data, 'can-index') }).kick();
 
   const port = await freePort();
   const child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', path.join(REPO, 'server', 'index.js')], {
@@ -139,7 +163,7 @@ test('Footage: Recent recordings get place (parked), from and to (Home to Work);
     }
     assert.equal((await call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' })).status, 200);
     for (let i = 0; i < 200; i++) {
-      if ((await call('GET', '/api/vehicles/daily-driver/recordings')).data.total >= 8) break;
+      if ((await call('GET', '/api/vehicles/daily-driver/recordings')).data.total >= 10) break;
       await new Promise((r) => setTimeout(r, 150));
     }
     const recs = async () => Object.fromEntries((await call('GET', '/api/vehicles/daily-driver/recordings')).data.recordings
@@ -148,7 +172,7 @@ test('Footage: Recent recordings get place (parked), from and to (Home to Work);
 
     // no saved places: no place fields at all
     let all = await recs();
-    assert.equal(Object.keys(all).length, 8, Object.keys(all).join(', '));
+    assert.equal(Object.keys(all).length, 10, Object.keys(all).join(', '));
     assert.ok(Object.values(all).every((r) => !('place' in r) && !('placeSource' in r)));
     assert.equal(all['11:00'].can, true, 'the CAN tag (the index covers 11:00)');
 
@@ -163,6 +187,9 @@ test('Footage: Recent recordings get place (parked), from and to (Home to Work);
     assert.deepEqual(pick(all['17:00']), { place: null, from: undefined, to: undefined, placeSource: undefined }, 'not indexed yet: no tag');
     assert.deepEqual(pick(all['event 19:30']), { place: 'Work', from: undefined, to: undefined, placeSource: 'can' }, 'CAN Bridge GPS at the event beats event.json');
     assert.deepEqual(pick(all['event 21:30']), { place: 'Home', from: undefined, to: undefined, placeSource: 'event' }, 'event.json as before');
+    assert.equal(all['23:00'].can, true);
+    assert.deepEqual(pick(all['23:00']), { place: 'Work', from: undefined, to: undefined, placeSource: 'can' }, 'the position from can3 (Model Y) beats the cameras\'');
+    assert.deepEqual(pick(all['23:30']), { place: 'Home', from: undefined, to: undefined, placeSource: 'video' }, 'the garage\'s 25 m fix is not used');
 
     // Drives: the 11:00 drive starts and ends at Work by CAN Bridge GPS (the cameras say Home)
     const drives = (await call('GET', '/api/vehicles/daily-driver/drives')).data.drives;
@@ -172,6 +199,9 @@ test('Footage: Recent recordings get place (parked), from and to (Home to Work);
     assert.deepEqual([d11.from?.place, d11.to?.place], ['Work', 'Work']);
     const d07 = drives.find((d) => d.start.slice(11, 16) === '07:00');
     assert.deepEqual([d07.from?.place, d07.to?.place, d07.can], ['Home', 'Work', false], 'no CAN data: the cameras\' GPS');
+    const d23 = drives.find((d) => d.start.slice(11, 16) === '23:00');
+    assert.ok(d23, JSON.stringify(drives.map((d) => d.start)));
+    assert.deepEqual([d23.from?.place, d23.to?.place, d23.can], ['Work', 'Work', true], 'the Model Y\'s can3 position');
   } catch (err) {
     console.error(output);
     throw err;
