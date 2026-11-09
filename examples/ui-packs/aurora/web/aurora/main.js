@@ -14,17 +14,19 @@ import bin from './pages/bin.js';
 import alerts from './pages/alerts.js';
 import settings from './pages/settings.js';
 import vehicles from './pages/vehicles.js';
+import drives from './pages/drives.js';
 import driving from './pages/driving.js';
 import map from './pages/map.js';
 import health from './pages/health.js';
 import account from './pages/account.js';
 
-const PAGES = { sky, footage, viewer, driving, map, encoder, vehicles, nodes, policies, jobs, bin, alerts, health, account, settings };
+const PAGES = { sky, footage, viewer, drives, driving, map, encoder, vehicles, nodes, policies, jobs, bin, alerts, health, account, settings };
 // [route, label, icon, key (g + key), primary on phones]
 const DOCK = [
   ['sky', 'Sky', 'sky', 's', true],
   ['footage', 'Footage', 'film', 'f', true],
   ['viewer', 'Viewer', 'cockpit', 'v', true],
+  ['drives', 'Drives', 'route', 'r', false],
   ['driving', 'Driving', 'speed', 'd', false],
   ['map', 'Map', 'pin', 'm', false],
   ['encoder', 'Encoder', 'orbit', 'e', true],

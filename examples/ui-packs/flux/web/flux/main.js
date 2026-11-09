@@ -11,6 +11,7 @@ import bin from './pages/bin.js';
 import notifications from './pages/notifications.js';
 import settings from './pages/settings.js';
 import vehicles from './pages/vehicles.js';
+import drives from './pages/drives.js';
 import driving from './pages/driving.js';
 import map from './pages/map.js';
 import health from './pages/health.js';
@@ -20,6 +21,7 @@ const PAGES = [
   { id: 'overview', label: 'Overview', icon: 'overview', key: 'o', mod: overview, group: 'Monitor' },
   { id: 'footage', label: 'Footage', icon: 'footage', key: 'f', mod: footage, group: 'Monitor' },
   { id: 'viewer', label: 'Viewer', icon: 'viewer', key: 'v', mod: viewer, group: 'Monitor' },
+  { id: 'drives', label: 'Drives', icon: 'route', key: 'r', mod: drives, group: 'Monitor' },
   { id: 'driving', label: 'Driving', icon: 'gauge', key: 'd', mod: driving, group: 'Monitor' },
   { id: 'map', label: 'Map', icon: 'clip', key: 'm', mod: map, group: 'Monitor' },
   { id: 'encoder', label: 'Encoder', icon: 'encoder', key: 'e', mod: encoder, group: 'Process' },
@@ -191,7 +193,7 @@ new MutationObserver(() => {
 bus.on('vehicle', () => {
   // pages showing one vehicle redraw for the new one
   if (mounted?.onVehicle) mounted.onVehicle();
-  else if (['footage', 'policies', 'jobs', 'bin', 'overview', 'driving', 'map'].includes(mountedId)) render();
+  else if (['footage', 'policies', 'jobs', 'bin', 'overview', 'drives', 'driving', 'map'].includes(mountedId)) render();
 });
 
 // ---------- live updates ----------

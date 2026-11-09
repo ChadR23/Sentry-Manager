@@ -131,6 +131,28 @@ rest, so a clip the Encoder skipped or could not convert is easy to find.
   and any vehicle, newest first; picking one opens it at that moment. Only
   clips with GPS that the speed index has read are found.
 
+## Drives
+
+A tab in every interface (next to the Viewer), like Sentry Studio's Drives
+tab, for the footage on the server: the selected car's trips, newest first
+and grouped by day. Clips back to back are one drive; a gap of more than 5
+minutes (or 2, 10, 15 or 30, picked on the page and remembered in the
+browser) starts the next. Only the car's own recording counts: Sentry and
+Saved events are not drives. Where the speed index has read the clips, a
+drive starts at the first second the car moves and ends at the last, and
+recording while parked (Sentry Mode keeps Recent clips going) is left out;
+clips not read yet count as a minute of driving each.
+
+Each drive shows its start and end time, how long it took (in days, hours
+and minutes: "1 h 25 min"), the distance, top speed, hard braking and
+swerves, a CAN tag when CAN Bridge data covers it, and where it started and
+ended: a saved place (Home, Work), else the street and town of a Sentry or
+Saved event there (from Tesla's event.json; nothing is looked up online),
+else the coordinates. Picking one plays it from its start in that
+interface's Viewer. Older drives load 40 at a time ("Show older drives").
+The same list is `GET /api/vehicles/:id/drives` (`limit`, `before`, `gap`),
+readable by watch-only accounts.
+
 ## Driving
 
 A page of its own in every interface: the selected car's driving week by

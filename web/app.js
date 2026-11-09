@@ -2142,8 +2142,8 @@
     });
   };
 
-  // Driving, Map, Account and Health: the same pages as every interface pack
-  // (web/driving.js, eventMap.js, account.js, health.js); the one showing is
+  // Drives, Driving, Map, Account and Health: the same pages as every interface pack
+  // (web/drives.js, driving.js, eventMap.js, account.js, health.js); the one showing is
   // taken down when the next page draws (render), so maps and polls stop
   let shared = null;
   async function mountShared(id, crumb, mod, make) {
@@ -2156,6 +2156,10 @@
   pages.driving = async () => {
     const v = current();
     await mountShared('dr-page', 'Driving', '/web/driving.js', (m, el) => m.createDrivingPage(el, { vehicleId: v?.id, vehicleName: v?.name }));
+  };
+  pages.drives = async () => {
+    const v = current();
+    await mountShared('dv-page', 'Drives', '/web/drives.js', (m, el) => m.createDrivesPage(el, { vehicleId: v?.id, vehicleName: v?.name, h24: () => clockPref.h24, open: (at) => openStudio('viewer', { date: at.day, at: `${at.clip}~${at.second}` }) }));
   };
   pages.map = async () => {
     const v = current();

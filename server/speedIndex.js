@@ -344,6 +344,49 @@ function createSpeedIndex({ dir, inventory, vehicles, telemetry, log, pauseMs = 
     return hits.sort((a, b) => (a.day === b.day ? b.rel.localeCompare(a.rel) : b.day.localeCompare(a.day))).slice(0, limit);
   }
 
+  // Drives (server/drives.js): each clip's speeds boiled down, cached per day
+  // like the place search's positions (until the day's file or its entries change)
+  const statsCache = new Map(); // `${vid}/${day}` -> { stamp, per: { rel: [size, mtimeMs, stats | null] } }
+  /**
+   * A day's clips in numbers: { rel: { n, d, m, v, f, l, a, z, b, t } }:
+   * n seconds with a speed, d metres (speed × 1 s), m seconds moving (over
+   * 0.5 m/s), v top speed, f and l the first and last second moving (-1 when
+   * it never moved), a and z the first and last position [lat, lon], b and t
+   * 1 when it had hard braking or a hard swerve (as Find moments counts them).
+   * Clips with no speeds (not indexed yet, no driving data) are left out.
+   */
+  async function clipStats(vid, d) {
+    if (!DAY.test(String(d || ''))) return {};
+    const key = `${vid}/${d}`;
+    const file = fileOf(vid, d);
+    let st;
+    try { st = await fsp.stat(file); } catch { st = null; }
+    const mem = days.get(key);
+    if (!st && !mem) return {};
+    const stamp = `${ver.get(key) || 0}|${st ? `${st.size}/${st.mtimeMs}` : '-'}`;
+    let had = statsCache.get(key);
+    if (!had || had.stamp !== stamp) {
+      let data = mem;
+      if (!data) {
+        try { data = JSON.parse(await fsp.readFile(file, 'utf8')); } catch { data = {}; }
+      }
+      const per = {};
+      for (const [rel, entry] of Object.entries(data || {})) {
+        if (Array.isArray(entry)) per[rel] = [entry[0], entry[1], statsOf(entry[2], entry[3])];
+      }
+      had = { stamp, per };
+    }
+    statsCache.delete(key); // newest use last
+    statsCache.set(key, had);
+    if (statsCache.size > 2000) statsCache.delete(statsCache.keys().next().value);
+    const out = {};
+    for (const [rel, [size, mtimeMs, s]] of Object.entries(had.per)) {
+      const f = inventory.get(vid)?.files?.get(rel);
+      if (s && f && f.size === size && Math.round(f.mtimeMs) === mtimeMs) out[rel] = s;
+    }
+    return out;
+  }
+
   /**
    * Read every indexed day into the place search's cache, newest first, a day
    * at a time with a pause between (after start-up, so the first search is as
@@ -392,7 +435,31 @@ function createSpeedIndex({ dir, inventory, vehicles, telemetry, log, pauseMs = 
     return sp;
   }
 
-  return { kick, day, summaries, moments, near, warm, clip, progress, status: () => ({ ...progress_ }), flush, stop() { stopped = true; } };
+  return { kick, day, summaries, moments, near, warm, clip, clipStats, progress, status: () => ({ ...progress_ }), flush, stop() { stopped = true; } };
 }
 
-module.exports = { createSpeedIndex, summarize };
+/** One clip's speeds and summary in numbers (clipStats), or null when it has no speed at all. */
+function statsOf(speeds, sum) {
+  if (!Array.isArray(speeds)) return null;
+  let n = 0; let d = 0; let m = 0; let v = 0; let f = -1; let l = -1;
+  for (let i = 0; i < speeds.length; i++) {
+    const x = speeds[i];
+    if (!Number.isFinite(x)) continue;
+    n++;
+    d += x;
+    if (x > 0.5) { m++; if (f < 0) f = i; l = i; }
+    if (x > v) v = x;
+  }
+  if (!n) return null;
+  const g = Array.isArray(sum?.g) ? sum.g : [];
+  const ends = g.length ? [g[0], g[g.length - 1]] : null;
+  return {
+    n, d: r2(d), m, v: r2(v), f, l,
+    a: ends ? [ends[0][1], ends[0][2]] : null,
+    z: ends ? [ends[1][1], ends[1][2]] : null,
+    b: sum?.b && sum.b[1] >= BRAKE ? 1 : 0,
+    t: sum?.t && sum.t[1] >= SWERVE ? 1 : 0
+  };
+}
+
+module.exports = { createSpeedIndex, summarize, statsOf };

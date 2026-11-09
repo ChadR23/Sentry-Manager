@@ -6,6 +6,7 @@ export const PAGES = [
   { id: 'dashboard', label: 'Dashboard', short: 'Dash', icon: 'dash' },
   { id: 'footage', label: 'Footage', icon: 'film' },
   { id: 'viewer', label: 'Viewer', icon: 'viewer' },
+  { id: 'drives', label: 'Drives', icon: 'route' },
   { id: 'encoder', label: 'Encoder', icon: 'engine' },
   { id: 'vehicles', label: 'Encoding per vehicle', short: 'Per car', icon: 'engine' },
   { id: 'nodes', label: 'Nodes', icon: 'nodes' },

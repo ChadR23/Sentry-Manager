@@ -893,10 +893,10 @@ export default {
     } else {
       // an event: start a little before it
       const ev = events[0];
-      // a link to a moment (search by place): ?at=<clip>~<second>
+      // a link to a moment (search by place): ?at=<clip>~<second>; a drive (Drives) plays at once: &autoplay=1
       const [atClip, atSec] = String(query?.get('at') || '').split('~');
       const atIdx = atClip ? clips.findIndex((c) => c.key === atClip) : -1;
-      if (atIdx >= 0) loadClip(atIdx, Math.max(0, (Number(atSec) || 0) - 3), false);
+      if (atIdx >= 0) loadClip(atIdx, Math.max(0, (Number(atSec) || 0) - 3), query?.get('autoplay') === '1');
       else if (ev && recId) loadClip(ev.clip, Math.max(0, ev.offset - 8), false);
       else loadClip(0, 0, false);
       moments.load(v.id, day || clips[0]?.key.slice(0, 10));

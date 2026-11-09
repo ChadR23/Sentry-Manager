@@ -54,6 +54,7 @@ const { createSnapshots, applyPendingRestore } = require('./snapshots');
 const { createIntegrity } = require('./integrity');
 const { createAccounts, viewerMay } = require('./accounts');
 const placesLib = require('./places');
+const drivesLib = require('./drives');
 const { writeZip, streamZip, waitDrain, ZIP_LIMIT } = require('./zip');
 const { createConverterHost } = require('./converterHost');
 const { createStats } = require('./stats');
@@ -1703,6 +1704,62 @@ async function main() {
     });
     out.sort((a, b) => String(b.startKey).localeCompare(String(a.startKey)));
     return { events: out, withoutPosition: recs.length - out.length };
+  });
+  // Drives (server/drives.js): the car's trips, newest first, a page at a
+  // time; each with its times, length, distance, where it started and ended
+  // (a saved place, else the street and town of a Sentry or Saved event
+  // there), CAN Bridge data, and where the Viewer starts it
+  const DRIVE_SPOTS = 3000;
+  const driveSpots = new WeakMap(); // recordings array -> event spots of that scan
+  async function eventSpotsOf(vid) {
+    const recsAll = inventory.get(vid)?.recordings;
+    if (!recsAll) return [];
+    let p = driveSpots.get(recsAll);
+    if (!p) {
+      p = (async () => {
+        const recs = recsAll.filter((x) => x.eventId).sort((a, b) => String(b.startKey).localeCompare(String(a.startKey))).slice(0, DRIVE_SPOTS);
+        const spots = [];
+        await eachLimit(recs, 6, async (rec) => {
+          const spot = await eventSpot(vid, rec).catch(() => null);
+          if (spot?.pos && (spot.info?.city || spot.info?.street)) spots.push({ ...spot.pos, city: spot.info.city || null, street: spot.info.street || null });
+        });
+        return spots;
+      })();
+      driveSpots.set(recsAll, p);
+    }
+    return p;
+  }
+  r.add('GET', '/api/vehicles/:id/drives', async (req, res, { params, query }) => {
+    const v = vehicleOr404(params.id);
+    const inv = inventory.get(v.id);
+    const gapMin = query.gap === undefined ? drivesLib.DEFAULT_GAP_S / 60 : Number(query.gap);
+    if (!Number.isFinite(gapMin) || gapMin < 1 || gapMin > 120) throw new HttpError(400, 'The gap is 1 to 120 minutes.');
+    const limit = Math.max(1, Math.min(200, Math.floor(Number(query.limit)) || 50));
+    const before = query.before ? String(query.before) : null;
+    if (before && !/^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$/.test(before)) throw new HttpError(400, 'before is a clip time (YYYY-MM-DD_HH-MM-SS).');
+    const clips = drivesLib.clipsOf(inv?.recordings);
+    const byDay = new Map();
+    const statsFor = (c) => {
+      const s = byDay.get(c.day);
+      return s ? s[c.rel] || null : null;
+    };
+    const { drives, more } = await drivesLib.group(clips, async (c) => {
+      if (!byDay.has(c.day)) byDay.set(c.day, await speedIndex.clipStats(v.id, c.day).catch(() => ({})));
+      return statsFor(c);
+    }, { gapS: gapMin * 60, limit, before });
+    const places = placeList();
+    const spots = drives.some((d) => d.clips.some((c) => statsFor(c)?.a)) ? await eventSpotsOf(v.id).catch(() => []) : [];
+    const label = drivesLib.labeller({ placeOf: (pos) => placesLib.placeOf(pos, places), spots, metres: placesLib.metres });
+    const hasCan = await canOf(v.id);
+    const list = drives.map((d) => drivesLib.describe(d, statsFor, { label, hasCan }));
+    return {
+      drives: list,
+      more,
+      next: more && list.length ? list[list.length - 1].id : null,
+      gap: gapMin,
+      scanning: Boolean(inv?.scanning),
+      indexing: Boolean(speedIndex.status().running)
+    };
   });
   // The Viewer's stats dashboards (web/statDash.js): each account's own
   // (list: every stat, scrolled, with its own search kept as `q`)
