@@ -343,6 +343,11 @@ test('Studio is served with the web shim; converter bridge enforces Quick and al
     assert.ok(!/<script>/.test(html.split('</head>')[0].split('<head>')[1].split('<title>')[0]), 'nothing inline is injected');
     assert.equal((await s.call('GET', '/shared/mapProviders.js', undefined, { raw: true })).status, 200);
     assert.equal((await s.call('GET', '/assets/pedal_brake.png', undefined, { raw: true })).headers.get('content-type'), 'image/png');
+    // a versioned Studio page's ../../assets/… lands on /v/assets/…: the same images
+    const pedal = await s.call('GET', '/v/assets/pedal_acc.png', undefined, { raw: true });
+    assert.equal(pedal.status, 200, 'the accelerator icon of the built-in Viewer');
+    assert.equal(pedal.headers.get('content-type'), 'image/png');
+    assert.ok([400, 404].includes((await s.call('GET', '/v/assets/..%2F..%2Fserver/index.js', undefined, { raw: true })).status), 'still only the assets folder');
     assert.ok([400, 404].includes((await s.call('GET', '/studio/..%2F..%2Fserver/index.js', undefined, { raw: true })).status));
 
     await waitFor(async () => (await s.call('POST', '/api/converter/invoke/getCapabilities')).data.ok);

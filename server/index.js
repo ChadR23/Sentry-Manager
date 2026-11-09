@@ -3169,6 +3169,10 @@ async function main() {
       // /v/<version>/<path>: <path>, kept for a year when the version is the
       // current one (versionLinks)
       let longCache = false;
+      // the Studio pages (served at /v/<version>/studio/) name the app's
+      // images as ../../assets/…, written for the desktop app's folders: from
+      // a versioned page that lands on /v/assets/…, so it is /assets/…
+      if (p.startsWith('/v/assets/')) p = p.slice(2);
       const versioned = VERSIONED.exec(p);
       if (versioned && !versioned[2].startsWith('/api/') && !versioned[2].startsWith('/v/')) {
         p = versioned[2];
