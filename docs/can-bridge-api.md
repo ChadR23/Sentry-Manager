@@ -479,6 +479,13 @@ one request longer than 10 minutes, is cut off. One address may hold at most
 6 connections at once (256 in all), and a connection that sends no request
 within 15 s is closed.
 
+Port 10000 can be opened to the internet on its own (for a bridge that
+uploads over LTE; never open the web port, 9000): it serves only this API,
+and with Sentry Manager's own HTTPS (the default) every upload is encrypted
+by it. With `TLS_MODE=off`, a forwarded `X-Forwarded-Proto: https` on port
+10000 counts only from an address on the local network (a reverse proxy
+there, with `TRUST_PROXY=true`), never from an internet address.
+
 **Reading a log.** Each log is unpacked once, line by line (a columns log is
 decoded to those lines first, see Log formats): a line longer than 512 bytes
 is skipped, and a candump text log that unpacks to more than 4 GB is stopped

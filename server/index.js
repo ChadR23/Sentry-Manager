@@ -69,6 +69,7 @@ const { createRealGuard, isInside } = require('./safePath');
 const { createLocalMounter, createIpcMounter } = require('./mounter');
 const { VERSIONS, DEFAULT_VERSION, securitySummary } = require('./mountSpec');
 const { TlsManager, localTlsSource, supervisorTlsSource, parseHostnames } = require('./tls');
+const { canUploadSecure } = require('./canSecure');
 const { Router, HttpError, sendJson, readJson, readRaw, serveFile, sendText } = require('./http');
 const { createStudioTranslations } = require('./studioTranslations');
 const { createUiPacks, originalPack, MAX_ZIP_BYTES: MAX_UI_PACK_BYTES } = require('./uiPacks');
@@ -2342,11 +2343,13 @@ async function main() {
   // every hour (footage the car or the archive removed, logs past the car's oldest footage); first after 10 minutes
   setTimeout(() => canPrune.sweep().catch(() => {}), 10 * 60_000).unref?.();
   setInterval(() => canPrune.sweep().catch(() => {}), 3600_000).unref?.();
+  // HTTPS for an upload (canSecure.js): on the CAN port a forwarded "https" counts only from the local network
+  const canSecure = (req) => canUploadSecure(req, { canPort: CAN_PORT, isSecure });
   canUploadRef = async (req, res, rawPath) => {
     const cfg = canCfg();
     const fail = (status, code, error, extra = {}) => sendJson(res, status, { error, code, ...extra });
     if (!cfg.enabled || !cfg.tokens.length) return fail(404, 'off', 'Not found');
-    if (!isSecure(req)) return fail(403, 'https_only', 'CAN logs are only taken over HTTPS.');
+    if (!canSecure(req)) return fail(403, 'https_only', 'CAN logs are only taken over HTTPS.');
     // on the CAN port the address is the connection's own (nothing there is behind a proxy, so a
     // forwarded header could only be a lie); on the web port it is the usual client address
     const ip = req.socket?.localPort === CAN_PORT ? req.socket.remoteAddress || '?' : clientKey(req);
