@@ -85,6 +85,7 @@ const { openCanLog, stopWhenStalled, FORMATS: CAN_FORMATS } = require('./canLogR
 const { createCanTrust } = require('./canTrust');
 const { createCanPort } = require('./canPort');
 const { createCanSync } = require('./canSync');
+const canCalc = require('./canCalc');
 const { createCanPrune } = require('./canPrune');
 const { createCanFootage } = require('./canFootage');
 const { createArchiveGap } = require('./archiveGap');
@@ -2616,10 +2617,12 @@ async function main() {
    * only changes, with a signal that stays the same once a minute (so "the same" can be told from
    * "stopped sending"). `last` carries each signal's last written point across minutes.
    */
-  const decodedRows = (data, t, from, to, only, every, last) => {
+  const decodedRows = (data, t, from, to, only, every, last, plan = null) => {
     const pts = [];
+    // (the computed stats' inputs are read too, and written only when asked for)
+    const read = plan ? new Set([...(only || []), ...plan.inputs]) : only;
     for (const [name, list] of Object.entries(data.signals || {})) {
-      if (only && !only.has(name)) continue;
+      if (read && !read.has(name)) continue;
       let l = last.get(name);
       for (const [ms, v] of list) {
         const at = t + ms;
@@ -2630,7 +2633,17 @@ async function main() {
         pts.push([at, name, v]);
       }
     }
-    return pts.sort((a, b) => a[0] - b[0] || (a[1] < b[1] ? -1 : 1));
+    const sorted = pts.sort((a, b) => a[0] - b[0] || (a[1] < b[1] ? -1 : 1));
+    if (!plan) return sorted;
+    // the computed stats (web/carCalc.js, as the Viewer shows them) from the inputs' latest values
+    const calc = canCalc.calcPoints(sorted, plan, plan.state, every, CAN_HEARTBEAT_MS);
+    const kept = only ? sorted.filter((p) => only.has(p[1])) : sorted;
+    return calc.length ? kept.concat(calc).sort((a, b) => a[0] - b[0] || (a[1] < b[1] ? -1 : 1)) : kept;
+  };
+  /** The computed stats an export writes (asked for by id, or all with every signal), with the state they carry across minutes. */
+  const decodedPlan = (only) => {
+    const plan = canCalc.calcPlan(only);
+    return plan.calcs.length ? { ...plan, state: {} } : null;
   };
 
   // the decoded signals of a car key over a time range (at most a day) as CSV, streamed minute by
@@ -2639,7 +2652,8 @@ async function main() {
   r.add('GET', '/api/can/export/decoded', async (req, res, { query, user }) => {
     const key = canKeyOr400(query.key);
     const { from, to } = canRange(key, query, CAN_DECODED_HOURS * 3_600_000, 'A decoded export');
-    const only = query.signals ? new Set(String(query.signals).split(',').map((x) => x.trim()).filter((x) => /^\w{1,80}$/.test(x)).slice(0, 200)) : null;
+    // (a computed stat by its id: calc.batteryPower)
+    const only = query.signals ? new Set(String(query.signals).split(',').map((x) => x.trim()).filter((x) => /^\w{1,80}$/.test(x) || canCalc.isCalc(x)).slice(0, 200)) : null;
     const every = query.mode === 'every' || (Boolean(only) && query.mode !== 'changes');
     const meta = await canIndex.signals([key]);
     if (query.check) {
@@ -2649,11 +2663,11 @@ async function main() {
       let rows = 0;
       for (const t of picks) {
         const data = (await canIndex.minutesIn(key, t, t).next()).value?.[1];
-        if (data) rows += decodedRows(data, t, -Infinity, Infinity, only, every, new Map()).length;
+        if (data) rows += decodedRows(data, t, -Infinity, Infinity, only, every, new Map(), decodedPlan(only)).length;
       }
       const estimatedRows = picks.length ? Math.round((rows / picks.length) * times.length) : 0;
       return {
-        ok: true, from, to, signals: only ? [...only].filter((x) => meta[x]).length : Object.keys(meta).length, mode: every ? 'every' : 'changes',
+        ok: true, from, to, signals: only ? [...only].filter((x) => meta[x] || canCalc.isCalc(x)).length : Object.keys(meta).length + canCalc.POINT.length, mode: every ? 'every' : 'changes',
         minutes: times.length, estimatedRows, rowLimit: CAN_DECODED_ROWS, willStop: estimatedRows > CAN_DECODED_ROWS
       };
     }
@@ -2676,12 +2690,13 @@ async function main() {
     };
     let rows = 0;
     const last = new Map();
+    const plan = decodedPlan(only);
     if (!(await put(csvLine(['timestamp_utc', 'signal', 'value', 'unit', 'value_name'])))) return undefined;
     outer: for await (const [t, data] of canIndex.minutesIn(key, from, to)) {
       let chunk = '';
-      for (const [at, name, v] of decodedRows(data, t, from, to, only, every, last)) {
+      for (const [at, name, v] of decodedRows(data, t, from, to, only, every, last, plan)) {
         if (rows >= CAN_DECODED_ROWS) { chunk += `# stopped at ${CAN_DECODED_ROWS} rows: export a shorter time, or fewer signals\n`; await put(chunk); break outer; }
-        const m = meta[name] || {};
+        const m = canCalc.isCalc(name) ? { unit: canCalc.calcUnit(name) } : meta[name] || {};
         chunk += csvLine([isoOf(at), name, v, m.unit || '', m.values?.[v] ?? '']);
         rows++;
       }

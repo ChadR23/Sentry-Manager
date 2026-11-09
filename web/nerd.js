@@ -552,7 +552,7 @@ export function openNerdPanel() {
         <label class="nd-lab">To<input class="nd-in" type="datetime-local" data-dl-to required></label>
       </div>
       <div class="nd-row">
-        <label class="nd-lab nd-grow">Signals for the decoded CSV (optional, comma separated)<input class="nd-in" data-dl-signals autocomplete="off" spellcheck="false" placeholder="All signals, e.g. DI_vehicleSpeed,BattVoltage132"></label>
+        <label class="nd-lab nd-grow">Signals for the decoded CSV (optional, comma separated)<input class="nd-in" data-dl-signals autocomplete="off" spellcheck="false" placeholder="All signals, e.g. DI_vehicleSpeed,BattVoltage132,calc.batteryPower" title="Signal names, or the computed stats: calc.batteryPower, calc.chargingPower, calc.lv12Power and the others the Viewer shows under Computed"></label>
       </div>
       <div class="nd-row">
         <button type="button" class="nd-btn" data-dl-bundle>Logs + ids.csv (.zip, up to 7 days)</button>

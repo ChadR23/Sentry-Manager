@@ -33,6 +33,12 @@
 //
 //   const dash = attachStatDash({ stage, videos: () => [...], main: () => video, over: false });
 //   dash.destroy();
+//
+// Battery power, charging power, efficiency and the like are worked out from
+// the car's own signals (web/carCalc.js, shared with the decoded CSV export):
+// "Computed" stats, each fetching the CAN signals it needs.
+
+import '/web/carCalc.js';
 
 const STYLE = `
 .sentry-sd{--sd-bg:rgba(18,20,24,.86);--sd-tile:rgba(255,255,255,.07);--sd-line:rgba(255,255,255,.14);--sd-fg:#f2f4f7;--sd-dim:rgba(242,244,247,.78);--sd-on:#43d17a;--sd-amber:#ffb547;--sd-blue:#4aa8ff;
@@ -231,6 +237,32 @@ const CAN_UNITS = {
   kPa: { metric: ['kPa', (v) => v], imperial: ['psi', (v) => v * 0.1450377] },
   bar: { metric: ['bar', (v) => v], imperial: ['psi', (v) => v * 14.50377] }
 };
+// ---- computed stats (web/carCalc.js): each from the CAN signals it `needs` (the bar
+// fetches them with it; the List has them all), counted as there when its inputs are
+const CALC_UNITS = {
+  kW: () => ['kW', (v) => v],
+  W: () => ['W', (v) => v],
+  kWh: () => ['kWh', (v) => v],
+  C: (m) => CAN_UNITS.C[m ? 'metric' : 'imperial'],
+  Cdelta: (m) => (m ? ['°C', (v) => v] : ['°F', (v) => v * 1.8]),
+  'Wh/mi': (m) => (m ? ['Wh/km', (v) => v / 1.609344] : ['Wh/mi', (v) => v]),
+  mi: (m) => (m ? ['km', (v) => v * 1.609344] : ['mi', (v) => v])
+};
+registerSignals((globalThis.SentryCarCalc?.CALCS || []).map((d) => {
+  const conv = CALC_UNITS[d.unit];
+  const inputs = d.uses.flat();
+  return {
+    id: d.id, label: d.label, group: 'Computed', kind: conv ? 'number' : 'text', source: 'calc', about: d.about,
+    uses: d.uses, inputs: [...new Set([...inputs, ...(d.also || [])])], needs: [...new Set([...inputs, ...(d.also || [])])],
+    unit: (c) => (conv ? conv(c.metric)[0] : ''),
+    value: (r, c) => {
+      const v = d.value(c.can, d.window ? { at: c.canAt, since: c.since } : null);
+      if (v == null) return null;
+      return conv && typeof v === 'number' ? conv(c.metric)[1](v) : v;
+    },
+    digits: d.digits ?? 1
+  };
+}));
 // a speed in the car's own units ("kph/mph": a speed limit, a set offset): UI_mapSpeedLimitUnits says which (0 mph, 1 km/h)
 const CAR_UNITS = 'UI_mapSpeedLimitUnits';
 function carSpeed(c, v) {
@@ -284,6 +316,32 @@ function canLabel(name, comment) {
     .trim();
   return words ? words[0].toUpperCase() + words.slice(1) : name;
 }
+// ---- value names in plain words: BMS_CHARGE_COMPLETE "Charge complete", LIGHT_OFF and
+// BRAKES_NOT_APPLIED "Off" (the DBC's own name stays in the tooltip)
+const ACRONYMS = new Set(['AC', 'DC', 'HV', 'LV', 'EVSE', 'PCS', 'BMS', 'DI', 'UI', 'FL', 'FR', 'RL', 'RR', 'CAN', 'USB', 'GPS', 'ABS', 'ESP', 'TPMS', 'AP', 'FSD', 'ID', 'OTA', 'PTC', 'HVAC', 'DCDC', 'SOC', 'LED', 'ECU', 'VIN', 'ACC', 'TC', 'NA', 'EU', 'US', 'CN']);
+const OFF_NAME = /^(OFF|DISABLED|INACTIVE|NOT_ACTIVE|NOT_APPLIED|NONE_APPLIED)$|_(OFF|NOT_APPLIED)$/;
+const ON_NAME = /^(ON|ENABLED|ACTIVE|APPLIED)$|_(ON|APPLIED)$/;
+/** One value name in words, after the words every name of the signal starts with (`drop`). */
+function prettyName(name, drop = 0) {
+  const raw = String(name);
+  if (!/^[A-Z0-9_]+$/.test(raw)) return raw; // (already words: "Error", "12vChg")
+  const words = raw.split('_').filter(Boolean).slice(drop);
+  const rest = words.join('_');
+  if (OFF_NAME.test(rest)) return 'Off';
+  if (ON_NAME.test(rest)) return 'On';
+  const out = words.map((w, k) => (ACRONYMS.has(w) || /\d/.test(w) ? w : k ? w.toLowerCase() : w[0] + w.slice(1).toLowerCase())).join(' ');
+  return out || raw;
+}
+/** A signal's value names in words: { raw value: words }, the words every name starts with left out. */
+export function prettyNames(named) {
+  const names = Object.values(named || {}).filter((t) => !SNA_NAME.test(t) && /^[A-Z0-9_]+$/.test(t));
+  let drop = 0;
+  if (names.length >= 2) {
+    const split = names.map((t) => t.split('_').filter(Boolean));
+    while (split.every((w) => w.length > drop + 1 && w[drop] === split[0][drop])) drop++;
+  }
+  return Object.fromEntries(Object.entries(named || {}).map(([k, t]) => [k, SNA_NAME.test(t) ? t : prettyName(t, drop)]));
+}
 function registerCanSignals(meta) {
   const list = [];
   for (const [name, m] of Object.entries(meta || {})) {
@@ -305,6 +363,7 @@ function registerCanSignals(meta) {
     const allNamed = Boolean(named) && span <= 16 && (scaled ? Math.abs(m.factor) === 1 && states >= 2 : true);
     // the raw values that mean "no value": no data, not a number (or a word)
     const noValue = allNamed ? sna : new Set([...sna, ...rawsNamed(NO_NUMBER)]);
+    const words = allNamed ? prettyNames(named) : null;
     // (a popular stat's signal with no readable name of its own, SOCUI292, takes the popular name;
     // a series named after its message too, UI_cpuTemperature_353, is read by its signal's name)
     const own = canLabel(m.signal || name, m.label);
@@ -319,10 +378,12 @@ function registerCanSignals(meta) {
         const v = c.can(name);
         if (v == null || noValue.has(rawOf(v))) return null;
         // (value names are for raw values: used for named states, whose scale is 1)
-        if (allNamed) return named[String(rawOf(v))] ?? String(v);
+        if (allNamed) return words[String(rawOf(v))] ?? String(v);
         if (speedInCarUnits) return carSpeed(c, v)[0];
         return conv ? conv[c.metric ? 'metric' : 'imperial'][1](v) : v;
       },
+      // (the DBC's own name for the value shown, for the tooltip)
+      rawName: allNamed ? (r, c) => { const v = c.can(name); return v == null ? null : named[String(rawOf(v))] ?? null; } : null,
       bool: (r, c) => { const v = c.can(name); return v != null && v !== 0 && !noValue.has(rawOf(v)); },
       digits: canDigits(m)
     });
@@ -362,14 +423,20 @@ const hasKeys = (o) => Boolean(o && Object.keys(o).length);
 // (the 0x312 pack temperatures, the 0x3FE brake temperatures) is not here,
 // nor is one from the Screenmate's own buses (0x04F's position, on can3).
 // A name in two messages has the message id after it (RCM_longitudinalAccel_111).
-// Battery power, live Wh/mi and charging power have no one signal (they are
-// worked out from others), so they are not here.
+// Battery power, efficiency, charging power and the like have no one signal:
+// they are worked out from others (calc.*, web/carCalc.js).
 const POPULAR = [
   ['Speed', 'dash.speed', 'can.DI_vehicleSpeed', 'can.UI_gpsVehicleSpeed'],
   ['Battery %', 'can.SOCUI292', 'can.UI_SOC', 'can.SOCave292'],
   ['Range', 'can.UI_Range', 'can.UI_idealRange'],
+  ['Battery power', 'calc.batteryPower'],
+  ['Efficiency now', 'calc.efficiency'],
+  ['Range at this efficiency', 'calc.rangeNow'],
   ['Rear motor power', 'can.RearPower266'],
   ['Front motor power', 'can.FrontPower2E5'],
+  ['Drive power', 'calc.drivePower'],
+  ['Regen power', 'calc.regenPower'],
+  ['Energy used (this clip)', 'calc.energyClip'],
   ['Gear', 'dash.gear', 'can.DI_gear'],
   ['Accelerator', 'dash.accelerator', 'can.DI_accelPedalPos'],
   ['Brake', 'dash.brake', 'can.DI_brakePedalState', 'can.IBST_driverBrakeApply', 'can.ESP_driverBrakeApply'],
@@ -379,13 +446,23 @@ const POPULAR = [
   ['Right blinker', 'dash.blinkRight', 'can.VCFRONT_turnSignalRightStatus', 'can.VCRIGHT_turnSignalStatus'],
   ['Battery voltage', 'can.BattVoltage132'],
   ['Battery current', 'can.SmoothBattCurrent132', 'can.RawBattCurrent132'],
+  ['Battery temp', 'calc.battTemp'],
   ['Battery temp (max)', 'can.BattBrickTempMax332'],
   ['Battery temp (min)', 'can.BattBrickTempMin332'],
+  ['Battery temp spread', 'calc.battTempSpread'],
   ['Outside temp', 'can.VCFRONT_tempAmbientFiltered', 'can.VCFRONT_tempAmbient', 'can.VCRIGHT_tempAmbientRaw'],
   ['Cabin temp', 'can.VCRIGHT_hvacCabinTempEst'],
+  ['Battery coolant temp', 'can.VCFRONT_tempCoolantBatInlet'],
+  ['Powertrain coolant temp', 'can.VCFRONT_tempCoolantPTInlet'],
   ['12V battery', 'can.v12vBattVoltage261'],
+  ['12V battery power', 'calc.lv12Power'],
+  ['12V battery state', 'calc.lv12State'],
+  ['12V battery temp', 'can.v12vBattTemp261'],
   ['Rear motor torque', 'can.DIR_torqueActual', 'can.RearTorque1D8'],
   ['Front motor torque', 'can.DIF_torqueActual', 'can.FrontTorque1D5'],
+  // (the hottest part each drive unit reports: its stator's end winding)
+  ['Rear motor temp', 'can.DIR_statorEndWindingTemp'],
+  ['Front motor temp', 'can.DIF_statorEndWindingTemp'],
   ['Odometer', 'can.UI_odometer', 'can.Odometer3B6'],
   // (a sensor slot, not a fixed wheel: which wheel each is, is not known yet on newer firmware)
   ['Tire pressure 1', 'can.VCSEC_TPMSPressure0'],
@@ -393,6 +470,8 @@ const POPULAR = [
   ['Tire pressure 3', 'can.VCSEC_TPMSPressure2'],
   ['Tire pressure 4', 'can.VCSEC_TPMSPressure3'],
   ['Charging', 'can.BMS_uiChargeStatus', 'can.CP_hvChargeStatus_13D', 'can.CP_hvChargeStatus_23D', 'can.PCS_hvChargeStatus'],
+  ['Charging power', 'calc.chargingPower'],
+  ['DC charger power', 'calc.dcChargerPower'],
   ['Charge time left', 'can.ChargeHoursRemaining132'],
   ['Energy remaining', 'can.BMS_nominalEnergyRemaining', 'can.BMS_expectedEnergyRemaining'],
   ['Full pack energy', 'can.BMS_nominalFullPackEnergy'],
@@ -1036,17 +1115,17 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     canBar.key = null;
     canAll.key = null;
   }
-  const ctx = (ms = null) => ({
-    metric: board?.metric ?? metricDefault(),
-    // a CAN signal's value at this moment of the clip shown: from the bar's
-    // answer (every point) when it has the signal, else from the List's
-    // (the server lines the CAN clock up with the footage: start, and the drift as rate)
-    can: (name) => {
+  const ctx = (ms = null) => {
+    // a CAN signal's value at this moment of the clip shown (dt ms from it: a computed stat over
+    // the last seconds): from the bar's answer (every point) when it has the signal, else from
+    // the List's (the server lines the CAN clock up with the footage: start, and the drift as rate)
+    const canAt = (name, dt) => {
       if (ms === null || !shownPath) return null;
       const a = canBar.of === shownPath && canBar.data?.series?.[name] ? canBar.data : listData();
-      return a ? canSeriesAt(a.series?.[name], canTime(a, ms)) : null;
-    }
-  });
+      return a ? canSeriesAt(a.series?.[name], canTime(a, ms) + dt) : null;
+    };
+    return { metric: board?.metric ?? metricDefault(), can: (name) => canAt(name, 0), canAt, since: ms };
+  };
   // how well the CAN data is lined up with the footage, small in the tools row
   function syncNote() {
     const node = el.querySelector('[data-sync]');
@@ -1072,7 +1151,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
    * The CAN signals the bar's blocks show (the List's come with its own answer), with the
    * signals a chosen one needs: a speed limit in the car's units needs the units.
    */
-  const barNames = () => [...new Set((board?.blocks || []).filter((b) => b.type !== 'list').flatMap((b) => b.signals).filter((id) => id.startsWith('can.')).flatMap((id) => [id.slice(4), ...(SIGNALS.get(id)?.needs || [])]))].sort();
+  const barNames = () => [...new Set((board?.blocks || []).filter((b) => b.type !== 'list').flatMap((b) => b.signals).flatMap((id) => [...(id.startsWith('can.') ? [id.slice(4)] : []), ...(SIGNALS.get(id)?.needs || [])]))].sort();
   /** Ask for one feed's answer for `path` (none: `want` false). A new clip empties it first: nothing of the last clip is shown as this one's. */
   function loadFeed(f, path, want, key, get) {
     if (key === f.key) return;
@@ -1465,9 +1544,11 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
   }
   /** A stat's value now: { text, unit } (text "—" when it has none). */
   function valueOf(s, r, c) {
-    const raw = s && (s.source === 'can' || r) ? s.value(r, c) : null;
+    const raw = s && (s.source === 'can' || s.source === 'calc' || r) ? s.value(r, c) : null;
     const text = raw == null ? '—' : typeof raw === 'number' ? fmt(raw, s.digits ?? 1) : typeof raw === 'boolean' ? (raw ? 'On' : 'Off') : String(raw);
-    return { text, unit: raw == null || !s?.unit || typeof raw !== 'number' ? '' : s.unit(c) };
+    // (a value in words says the DBC's own name in its tooltip)
+    const name = raw != null && s.rawName ? s.rawName(r, c) : null;
+    return { text, unit: raw == null || !s?.unit || typeof raw !== 'number' ? '' : s.unit(c), title: name && name !== text ? name : '' };
   }
 
   // The list block: every stat with data in this clip (or only those that
@@ -1503,7 +1584,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     d = { has: new Set(), moving: new Set() };
     const c0 = { metric: true, can: () => null };
     for (const s of SIGNALS.values()) {
-      if (s.source === 'can') continue;
+      if (s.source === 'can' || s.source === 'calc') continue;
       let first;
       for (const rec of recs) {
         const v = s.value(rec, c0);
@@ -1522,9 +1603,12 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     if (st.key === key && st.data === data && st.recs === recs) return st;
     const moving = b.changing ? changingNames(data) : null;
     const dash = dashStats();
+    const has = (n) => seriesLen(data?.series?.[n]) > 0;
     const shown = (s) => (s.source === 'can'
-      ? (moving ? moving.has(s.canName) : seriesLen(data?.series?.[s.canName]) > 0)
-      : (moving ? dash.moving.has(s.id) : dash.has.has(s.id)));
+      ? (moving ? moving.has(s.canName) : has(s.canName))
+      // (a computed stat: there when its inputs are; changing when one of them changes)
+      : s.source === 'calc' ? s.uses.every((alts) => alts.some(has)) && (!moving || s.inputs.some((n) => moving.has(n)))
+        : (moving ? dash.moving.has(s.id) : dash.has.has(s.id)));
     const found = searchSignals(b.q || '', shown);
     const rows = found.filter(shown);
     const pops = (b.q || '').trim() ? 0 : rows.filter((s) => s.popular).length;
@@ -1557,7 +1641,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
       pad.dataset.drawn = drawn;
       pad.style.height = `${n * ROW}px`;
       pad.innerHTML = n
-        ? st.rows.slice(first, last).map((s, k) => (s.head ? `<div class="sd-list-r sd-list-h" role="row" style="top:${(first + k) * ROW}px"><span class="sd-list-l" role="columnheader">${esc(s.head)}</span></div>` : `<div class="sd-list-r${s.popular ? ' sd-list-pop' : ''}" role="row" style="top:${(first + k) * ROW}px" data-row="${first + k}" title="${esc(`${s.label} (${s.group}${s.canName ? `, ${s.canName}` : ''})`)}"><span class="sd-list-l" role="cell">${esc(s.label)}</span><span class="sd-list-m" role="cell">${esc(s.popular && s.source === 'can' ? s.ownLabel : messageOf(s))}</span><span class="sd-list-v" role="cell" data-lv></span></div>`)).join('')
+        ? st.rows.slice(first, last).map((s, k) => (s.head ? `<div class="sd-list-r sd-list-h" role="row" style="top:${(first + k) * ROW}px"><span class="sd-list-l" role="columnheader">${esc(s.head)}</span></div>` : `<div class="sd-list-r${s.popular ? ' sd-list-pop' : ''}" role="row" style="top:${(first + k) * ROW}px" data-row="${first + k}" title="${esc(`${s.label} (${s.group}${s.canName ? `, ${s.canName}` : ''})${s.about ? `: ${s.about}` : ''}`)}"><span class="sd-list-l" role="cell">${esc(s.label)}</span><span class="sd-list-m" role="cell">${esc(s.popular && s.source === 'can' ? s.ownLabel : messageOf(s))}</span><span class="sd-list-v" role="cell" data-lv></span></div>`)).join('')
         : `<div class="sd-list-empty">${b.q ? `No stat with data here matches "${esc(b.q)}".` : b.changing ? 'Nothing changes in this clip.' : 'No car data for this clip yet.'}</div>`;
     }
     const nowMs = Date.now();
@@ -1570,6 +1654,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
       if (vEl && vEl.dataset.shown !== shown) {
         vEl.dataset.shown = shown;
         vEl.innerHTML = `${esc(v.text)}${v.unit ? `<small>${esc(v.unit)}</small>` : ''}`;
+        if (v.title) vEl.setAttribute('title', v.title); else vEl.removeAttribute?.('title');
       }
       const before = st.prev.get(s.id);
       st.prev.set(s.id, shown);
@@ -1602,10 +1687,10 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     const label = (s, k = 0) => esc(s?.label || String(b.signals[k] || '?').replace(/^can\./, ''));
     if (b.type === 'small') {
       const s = sigs[0];
-      return `<div class="sd-b sd-small" data-i="${i}">${editBar}<div><span class="sd-v" data-v="0"></span><span class="sd-u" data-u="0"></span></div><div class="sd-l">${label(s)}</div>${s?.bar ? '<div class="sd-bar"><i data-bar="0"></i></div>' : ''}${pick}</div>`;
+      return `<div class="sd-b sd-small" data-i="${i}">${editBar}<div><span class="sd-v" data-v="0"></span><span class="sd-u" data-u="0"></span></div><div class="sd-l"${s?.about ? ` title="${esc(s.about)}"` : ''}>${label(s)}</div>${s?.bar ? '<div class="sd-bar"><i data-bar="0"></i></div>' : ''}${pick}</div>`;
     }
     if (b.type === 'wide') {
-      return `<div class="sd-b sd-wide" data-i="${i}">${editBar}${sigs.map((s, k) => `<div class="sd-line"><span class="sd-l">${label(s, k)}</span><span><span class="sd-v" data-v="${k}"></span><span class="sd-u" data-u="${k}"></span></span></div>`).join('')}${pick}</div>`;
+      return `<div class="sd-b sd-wide" data-i="${i}">${editBar}${sigs.map((s, k) => `<div class="sd-line"><span class="sd-l"${s?.about ? ` title="${esc(s.about)}"` : ''}>${label(s, k)}</span><span><span class="sd-v" data-v="${k}"></span><span class="sd-u" data-u="${k}"></span></span></div>`).join('')}${pick}</div>`;
     }
     if (b.type === 'gauge') {
       return `<div class="sd-b sd-gauge" data-i="${i}">${editBar}<div class="sd-ring"><span class="sd-v" data-v="0"></span><span class="sd-u" data-u="0"></span><div class="sd-gears" data-gears></div></div><div class="sd-ap" data-ap></div>${pick}</div>`;
@@ -1695,7 +1780,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
         const vEl = node.querySelector(`[data-v="${k}"]`);
         const uEl = node.querySelector(`[data-u="${k}"]`);
         const v = valueOf(s, r, c);
-        if (vEl) vEl.textContent = v.text;
+        if (vEl) { vEl.textContent = v.text; if (v.title) vEl.setAttribute('title', v.title); else vEl.removeAttribute?.('title'); }
         if (uEl) uEl.textContent = v.unit;
         const bar = node.querySelector(`[data-bar="${k}"]`);
         if (bar && s?.bar) bar.style.width = `${Math.max(0, Math.min(1, r ? s.bar(r) : 0)) * 100}%`;

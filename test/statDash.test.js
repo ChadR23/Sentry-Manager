@@ -16,7 +16,8 @@ const { pathToFileURL } = require('url');
 // (the browser module, as an .mjs copy: the package itself is CommonJS)
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'statdash-'));
 const MODULE = path.join(TMP, 'statDash.mjs');
-fs.copyFileSync(path.join(__dirname, '..', 'web', 'statDash.js'), MODULE);
+// (its import of the shared computed stats, web/carCalc.js, pointed at the file)
+fs.writeFileSync(MODULE, fs.readFileSync(path.join(__dirname, '..', 'web', 'statDash.js'), 'utf8').replace("import '/web/carCalc.js';", `import ${JSON.stringify(pathToFileURL(path.join(__dirname, '..', 'web', 'carCalc.js')).href)};`));
 test.after(() => fs.rmSync(TMP, { recursive: true, force: true }));
 
 // ---- a stand-in DOM: just what the dashboard uses ---------------------------
@@ -503,7 +504,8 @@ test('the picker: a Popular group first, the first id there for each, then every
   assert.equal(heads[0], 'Popular');
   const opts = pop.querySelectorAll('[data-opt]').map((o) => o.children[0].textContent);
   // the built-in speed wins over the CAN one; SOCUI292 (first) over UI_SOC
-  assert.deepEqual(opts.slice(0, 4), ['Speed', 'Battery %', 'Range', 'Gear'], `opts: ${opts}`);
+  // (then the computed battery power: the picker offers every stat, with data here or not)
+  assert.deepEqual(opts.slice(0, 4), ['Speed', 'Battery %', 'Range', 'Battery power'], `opts: ${opts}`);
   assert.equal(opts.filter((x) => x === 'Speed').length, 1, 'the built-in speed is not listed again');
   assert.equal(opts.filter((x) => x === 'Steering').length, 1);
   const battery = pop.querySelectorAll('[data-opt]')[1];
@@ -742,7 +744,9 @@ test('CAN values: decimals from the DBC step, every unit converted, SNA and the 
   assert.equal(v.Elevation3D8, '636ft');
   assert.equal(v.DAS_leadVehDx, '100.1ft', '"m" in feet too');
   assert.equal(v.BattBrickModelTMin332, '—', 'raw 0 (-40 C) is no value');
-  assert.equal(v.VCRIGHT_hvacRecirc, 'FRESH', 'a state stays words');
+  assert.equal(v.VCRIGHT_hvacRecirc, 'Fresh', 'a state stays words, plain ones');
+  const recirc = d.dash.panel.querySelectorAll('.sd-list-r[data-row]').find((r) => /VCRIGHT_hvacRecirc/.test(r.getAttribute('title')));
+  assert.equal(recirc.querySelector('[data-lv]').getAttribute('title'), 'FRESH', "the DBC's own name in the tooltip");
   v = await at(11_000);
   assert.equal(v.DAS_fusedSpeedLimit, '56mph', '90 km/h when the car says km/h');
   v = await at(21_000);
@@ -1096,4 +1100,135 @@ test('a page that does not scroll, with no room for the List off the bar: the ba
   assert.ok(!inter(b, l), `not on each other: ${JSON.stringify([b, l])}`);
   for (const r of [b, l]) assert.ok(r.left >= 0 && r.left + r.width <= 900 && r.top >= 0 && r.top + r.height <= 932, 'within the frame');
   assert.deepEqual(l, rect(900 - 330, 62, 330, 460), 'the List at its spot');
+});
+
+// ---- computed stats (web/carCalc.js): battery power, charging power, 12 V power, ... ----
+const POWER = {
+  BattVoltage132: [[S - 1000, 395], [S + 10_000, 380]],
+  SmoothBattCurrent132: [[S - 1000, 2.2], [S + 10_000, -100]],
+  v12vBattVoltage261: [[S - 1000, 15.7]],
+  v12vBattCurrent261: [[S - 1000, -0.5]],
+  BMS_uiChargeStatus: [[S - 1000, 4], [S + 20_000, 3]]
+};
+test('computed stats: a tile fetches what it needs and shows battery power; charging power only while charging', async (t) => {
+  const asks = [];
+  const d = await dashboard({
+    rawOpen: false,
+    routes: {
+      boards: board([{ type: 'small', signals: ['calc.batteryPower'] }, { type: 'wide', signals: ['calc.chargingPower', 'calc.lv12Power', 'calc.battTemp'] }]),
+      '/api/can/signals': () => POP_META,
+      '/api/can/clip': (p, u) => { asks.push(u.searchParams.get('signals')); return { start: S, sync: { method: 'clock' }, series: POWER }; }
+    }
+  });
+  t.after(() => d.dash.destroy());
+  await d.frame();
+  // the bar asks for the inputs by name (no List: not every signal)
+  const names = asks.find((a) => a && a !== '*')?.split(',') || [];
+  for (const n of ['BattVoltage132', 'SmoothBattCurrent132', 'RawBattCurrent132', 'BMS_uiChargeStatus', 'v12vBattVoltage261', 'v12vBattCurrent261', 'BattBrickTempMax332']) assert.ok(names.includes(n), `${n} in ${names}`);
+  assert.ok(!asks.includes('*'));
+  const tile = () => [...d.el.querySelectorAll('[data-v]')].map((n) => n.textContent);
+  const units = () => [...d.el.querySelectorAll('[data-u]')].map((n) => n.textContent);
+  d.video.currentTime = 1;
+  await d.frame();
+  assert.deepEqual(tile(), ['0.9', '—', '8', '—'], 'parked: 0.9 kW out; not charging: no charging power (not 0); 12 V battery giving 8 W; no brick temps');
+  assert.deepEqual(units(), ['kW', '', 'W', '']);
+  const lab = d.el.querySelector('.sd-small').querySelector('.sd-l');
+  assert.equal(lab.textContent, 'Battery power');
+  assert.match(lab.getAttribute('title'), /volts x amps/, 'what it is, in its tooltip');
+  d.video.currentTime = 11;
+  await d.frame();
+  assert.deepEqual(tile().slice(0, 2), ['-38.0', '—'], 'regenerating (not charging): negative battery power, still no charging power');
+  d.video.currentTime = 21;
+  await d.frame();
+  assert.deepEqual(tile().slice(0, 2), ['-38.0', '38.0'], 'charging: 38 kW into the pack');
+  // kW and W stay kW and W in metric
+  fire(d.el.querySelector('[data-edit]'), 'click');
+  fire(d.el.querySelector('[data-units]'), 'click');
+  await d.frame();
+  assert.deepEqual(units().slice(0, 3), ['kW', 'kW', 'W']);
+});
+
+test('computed stats in the List: there when their inputs are, in the Popular order, and in "Changing only"', async (t) => {
+  const meta = { signals: { ...POP_META.signals,
+    v12vBattVoltage261: { unit: 'V', bus: 'VehicleBus', message: 'ID261_12vBattStatus' },
+    BMS_uiChargeStatus: { unit: '', bus: 'VehicleBus', message: 'ID212BMS_status', min: 0, max: 5, factor: 1, offset: 0, values: { 0: 'BMS_DISCONNECTED', 1: 'BMS_NO_POWER', 2: 'BMS_ABOUT_TO_CHARGE', 3: 'BMS_CHARGING', 4: 'BMS_CHARGE_COMPLETE', 5: 'BMS_CHARGE_STOPPED' } } } };
+  const d = await dashboard({
+    rawOpen: false,
+    routes: {
+      boards: board([{ type: 'list', signals: [], q: '', changing: false }, { type: 'small', signals: ['dash.speed'] }]),
+      '/api/can/signals': () => meta,
+      '/api/can/clip': () => ({ start: S, sync: { method: 'clock' }, series: { ...POWER, UI_Range: [[S - 1000, 250]], SOCUI292: [[S - 1000, 88]] } })
+    }
+  });
+  t.after(() => d.dash.destroy());
+  await d.frame();
+  d.video.currentTime = 1;
+  await d.frame();
+  const rows = listed(d);
+  const pop = rows.slice(1, rows.includes('# All stats') ? rows.indexOf('# All stats') : rows.length);
+  // battery power right after Battery % and Range (before the motors); charging power after Charging; 12 V after 12V battery
+  assert.deepEqual(pop.slice(0, 4), ['Battery %', 'Range', 'Battery power', 'Drive power'], `rows: ${rows}`);
+  assert.ok(pop.indexOf('Charging power') === pop.indexOf('Charging') + 1, `${pop}`);
+  assert.ok(pop.indexOf('12V battery power') === pop.indexOf('12V battery') + 1, `${pop}`);
+  assert.ok(pop.includes('12V battery state') && pop.includes('Regen power') && pop.includes('Energy used (this clip)'), `${pop}`);
+  // not there: what has no inputs here (no speed: no efficiency; no brick temps; no DC charger)
+  for (const x of ['Efficiency now', 'Range at this efficiency', 'Battery temp', 'DC charger power']) assert.ok(!rows.includes(x), `${x} has no data here`);
+  const value = (label) => d.dash.panel.querySelectorAll('.sd-list-r[data-row]').find((r) => r.children[0].textContent === label)?.querySelector('[data-lv]').textContent;
+  assert.equal(value('Battery power'), '0.9kW');
+  assert.equal(value('Charging power'), '—');
+  assert.equal(value('12V battery state'), 'Discharging');
+  assert.equal(value('Charging'), 'Charge complete', 'the value names in words');
+  const row = d.dash.panel.querySelectorAll('.sd-list-r[data-row]').find((r) => r.children[0].textContent === 'Battery power');
+  assert.match(row.getAttribute('title'), /Computed\): Pack volts x amps/);
+  assert.equal(row.children[1].textContent, 'Computed');
+  // "Changing only": a computed stat whose inputs change is kept; one whose inputs hold is not
+  const ch = d.dash.panel.querySelector('[data-list-changing]');
+  ch.checked = true;
+  fire(ch, 'change');
+  const moving = listed(d);
+  assert.ok(moving.includes('Battery power') && moving.includes('Charging power'), `${moving}`);
+  assert.ok(!moving.includes('12V battery power') && !moving.includes('Range'), `${moving}`);
+});
+
+test('efficiency now: battery power over speed for the last 10 s, Wh/mi or Wh/km, none when parked', async (t) => {
+  // 20 kW at 100 km/h from the start; parked from 30 s
+  const series = {
+    BattVoltage132: [[S - 1000, 400]],
+    SmoothBattCurrent132: [[S - 1000, 50], [S + 30_000, 2]],
+    DI_vehicleSpeed: [[S - 1000, 100], [S + 30_000, 0]],
+    BMS_nominalEnergyRemaining: [[S - 1000, 59.92]],
+    BMS_energyBuffer: [[S - 1000, 3.04]]
+  };
+  const d = await dashboard({
+    rawOpen: false,
+    routes: {
+      boards: board([{ type: 'wide', signals: ['calc.efficiency', 'calc.rangeNow', 'calc.energyClip'] }]),
+      '/api/can/signals': () => POP_META,
+      '/api/can/clip': () => ({ start: S, sync: { method: 'clock' }, series })
+    }
+  });
+  t.after(() => d.dash.destroy());
+  const tile = () => [...d.el.querySelectorAll('[data-v]')].map((n, k) => `${n.textContent}${d.el.querySelectorAll('[data-u]')[k].textContent}`);
+  d.video.currentTime = 20;
+  await d.frame();
+  assert.deepEqual(tile(), ['322Wh/mi', '177mi', '0.11kWh'], '200 Wh/km; 56.9 kWh usable; 20 kW for 20 s');
+  d.video.currentTime = 50;
+  await d.frame();
+  assert.deepEqual(tile().slice(0, 2), ['—', '—'], 'parked: no efficiency, no range');
+  fire(d.el.querySelector('[data-edit]'), 'click');
+  fire(d.el.querySelector('[data-units]'), 'click');
+  d.video.currentTime = 20;
+  await d.frame();
+  assert.deepEqual(tile(), ['200Wh/km', '284km', '0.11kWh']);
+});
+
+test('value names in words: the words every name starts with left out, off-like ones "Off"', async () => {
+  const mod = await import(`${pathToFileURL(MODULE).href}?n=${++instance}`);
+  assert.deepEqual(mod.prettyNames({ 0: 'BMS_DISCONNECTED', 1: 'BMS_NO_POWER', 3: 'BMS_CHARGING', 4: 'BMS_CHARGE_COMPLETE' }), { 0: 'Disconnected', 1: 'No power', 3: 'Charging', 4: 'Charge complete' });
+  assert.deepEqual(mod.prettyNames({ 0: 'BRAKES_NOT_APPLIED', 1: 'BRAKES_APPLIED' }), { 0: 'Off', 1: 'On' });
+  assert.deepEqual(mod.prettyNames({ 0: 'LIGHT_OFF', 1: 'LIGHT_ON', 2: 'LIGHT_FAULT' }), { 0: 'Off', 1: 'On', 2: 'Fault' });
+  assert.deepEqual(mod.prettyNames({ 0: 'DISABLED', 1: 'ENABLED' }), { 0: 'Off', 1: 'On' });
+  assert.deepEqual(mod.prettyNames({ 0: 'DI_GEAR_INVALID', 1: 'DI_GEAR_P', 2: 'DI_GEAR_R', 3: 'DI_GEAR_N', 4: 'DI_GEAR_D', 7: 'DI_GEAR_SNA' }), { 0: 'Invalid', 1: 'P', 2: 'R', 3: 'N', 4: 'D', 7: 'DI_GEAR_SNA' }, 'single letters; a "no value" name stays as it is (shown as no data)');
+  assert.deepEqual(mod.prettyNames({ 0: 'NO_CHARGER_PRESENT', 1: 'DC_CHARGER_PRESENT', 2: 'AC_CHARGER_PRESENT' }), { 0: 'No charger present', 1: 'DC charger present', 2: 'AC charger present' }, 'acronyms stay capitals');
+  assert.deepEqual(mod.prettyNames({ 0: 'Idle', 1: '12vChg' }), { 0: 'Idle', 1: '12vChg' }, 'names already in words stay');
 });

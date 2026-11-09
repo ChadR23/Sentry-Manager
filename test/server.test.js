@@ -1450,6 +1450,7 @@ test('CAN downloads (Nerd): a log as received, a bundle with ids.csv, decoded CS
       const t = t0 - 2 + i / 10;
       const b = Buffer.alloc(8);
       b.writeUInt16LE(Math.round((380 + i * 0.01) / 0.01), 0);
+      b.writeInt16LE(-25, 2); // SmoothBattCurrent132: 2.5 A out of the pack
       lines.push(`(${t.toFixed(6)}) can0 132#${b.toString('hex').toUpperCase()}`, `(${t.toFixed(6)}) can0 7EF#AA00${(i & 0xff).toString(16).padStart(2, '0').toUpperCase()}00`);
     }
     const file = execFileSync('xz', ['-6', '-c'], { input: `${lines.join('\n')}\n` });
@@ -1549,6 +1550,19 @@ test('CAN downloads (Nerd): a log as received, a bundle with ids.csv, decoded CS
     assert.equal(allDec.length, est.estimatedRows, 'the estimate of one minute is its count');
     const every = (await (await get('/api/can/export/decoded?key=MY-car&from=2020-01-01T08:00&to=2020-01-01T08:00&mode=every')).text()).trim().split('\n').slice(1);
     assert.ok(every.length >= allDec.length, `every point the index keeps (${every.length} >= ${allDec.length})`);
+    // the computed stats (as the Viewer shows them): with every signal, and by id
+    const calcAll = allDec.filter((l) => l.split(',')[1] === 'calc.batteryPower');
+    assert.ok(calcAll.length >= 1, 'battery power with every signal');
+    assert.match(calcAll[0], /^2020-01-01T08:00:00\.\d{3}Z,calc\.batteryPower,0\.95\d*,kW,$/, 'volts x amps, positive out of the pack');
+    assert.ok(!allDec.some((l) => l.split(',')[1] === 'calc.chargingPower'), 'no charging power while not charging (nothing says it charges)');
+    const byId = (await (await get('/api/can/export/decoded?key=MY-car&from=2020-01-01T08:00&to=2020-01-01T08:00:30&signals=calc.batteryPower,calc.lv12Power,BattVoltage132')).text()).trim().split('\n').slice(1);
+    assert.deepEqual([...new Set(byId.map((l) => l.split(',')[1]))].sort(), ['BattVoltage132', 'calc.batteryPower'], 'the inputs read, written only when asked for; no 12 V data, no 12 V power');
+    const v0 = Number(byId.find((l) => l.split(',')[1] === 'BattVoltage132').split(',')[2]);
+    const p0 = Number(byId.find((l) => l.split(',')[1] === 'calc.batteryPower').split(',')[2]);
+    assert.ok(Math.abs(p0 - (v0 * 2.5) / 1000) < 0.06, `${p0} kW from ${v0} V x 2.5 A`);
+    assert.equal(byId.filter((l) => l.split(',')[1] === 'calc.batteryPower').length, byId.filter((l) => l.split(',')[1] === 'BattVoltage132').length, 'one each time the volts change (every point, with a list)');
+    const estCalc = (await s.call('GET', '/api/can/export/decoded?key=MY-car&from=2020-01-01T08:00&to=2020-01-01T08:00&check=1&signals=calc.batteryPower', undefined, { headers: https })).data;
+    assert.equal(estCalc.signals, 1);
 
     // new ids since a date: JSON for the panel, CSV to download
     const fresh = (await s.call('GET', '/api/can/export/new-ids?key=MY-car&since=2019-12-31', undefined, { headers: https })).data;
