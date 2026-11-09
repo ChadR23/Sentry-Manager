@@ -242,8 +242,11 @@ function createArrivalChecksums({
     if (sameId(had, st)) return 'unchanged';
     if (holds(c.abs)) return 'held';
     if (busyNow().has(path.resolve(c.abs))) return 'busy';
-    // (renamed into place just now: ctime; still being written: mtime)
-    if (now() - Math.max(st.mtimeMs, st.ctimeMs || 0) < settleMs) return 'settling';
+    // (renamed into place just now: ctime; still being written: mtime; in
+    // whole milliseconds, as now(): a file time has a fraction of one, so a
+    // clip written in this very millisecond would otherwise be younger than
+    // 0 ms)
+    if (now() - Math.floor(Math.max(st.mtimeMs, st.ctimeMs || 0)) < settleMs) return 'settling';
     // encoded: our own conversion's output is noted by converted(); any other is not the Pi's bytes
     let codec;
     const known = inventory.codecs?.(v.id)?.get(c.rel);

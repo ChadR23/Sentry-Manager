@@ -202,9 +202,23 @@ test('arrival: an H.265 clip we did not convert is skipped (unknown origin); one
   const abs3 = await s.write(rel3, bytes3);
   await s.arrival.converted(abs3);
   await s.run();
-  // (a pass already under way when this one was asked for can finish first under load: wait for the line)
-  for (let i = 0; i < 50 && !(await s.lines()).length; i++) { await new Promise((r) => setTimeout(r, 100)); await s.run(); }
   assert.deepEqual(await s.lines(), [{ sha256: sha(bytes3), rel: rel3 }]);
+});
+
+test('arrival: a clip checked in the very millisecond it was written is not still settling (file times have a fraction of a millisecond)', async () => {
+  // now() is in whole milliseconds; the file's times are not: mtime X.5 ms with now() X
+  let clock = Date.now();
+  const s = await setup({ options: { now: () => clock } });
+  const rel = s.clipRel(name());
+  const bytes = crypto.randomBytes(1000);
+  const abs = await s.write(rel, bytes);
+  const x = Math.floor((await fsp.stat(abs)).ctimeMs) + 5000;
+  await fsp.utimes(abs, (x + 0.5) / 1000, (x + 0.5) / 1000);
+  const st = await fsp.stat(abs);
+  assert.ok(st.mtimeMs > x && st.mtimeMs < x + 1 && st.ctimeMs < x, 'a fraction of a millisecond into x');
+  clock = x;
+  await s.run();
+  assert.deepEqual(await s.lines(), [{ sha256: sha(bytes), rel }]);
 });
 
 test('arrival: mismatch copies, dot-named files and folders, converter temp/backup names and other folders are skipped', async () => {
