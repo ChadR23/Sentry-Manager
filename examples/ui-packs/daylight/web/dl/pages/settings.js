@@ -4,10 +4,12 @@
 import { api, upload, esc, enc, icon, bytes, plural, when, ago, chip, kv, details, emptyState, confirmDialog, modal, toast, fail, busy, store, fin, liveDraw, clockPref } from '../core.js';
 import { state, loadVehicles, shareHealth, setVehicle, vehicleById } from '../state.js';
 import { go, setTheme, currentTheme, signOut } from '../app.js';
+// Helper servers (Nodes) is a section here (#/settings/nodes; #/nodes opens it): its page module as it was, taken down with Settings.
+import * as nodesPage from './nodes.js';
 
 const SECTIONS = [
   ['vehicles', 'Vehicles', 'car'], ['places', 'Places', 'map'], ['account', 'Account', 'key'], ['look', 'Look', 'palette'], ['interface', 'Interface', 'grid'],
-  ['security', 'Security', 'lock'], ['updates', 'Updates', 'download'], ['system', 'System & power', 'server']
+  ['security', 'Security', 'lock'], ['updates', 'Updates', 'download'], ['system', 'System & power', 'server'], ['nodes', 'Helper servers', 'nodes']
 ];
 
 export async function render(ctx) {
@@ -33,6 +35,7 @@ export async function render(ctx) {
   if (section === 'interface') return iface(sub);
   if (section === 'security') return security(sub);
   if (section === 'updates') return updates(sub);
+  if (section === 'nodes') return nodesPage.render({ ...ctx, view: el });
   return system(sub);
 }
 

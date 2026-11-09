@@ -2,7 +2,8 @@
 
 // Pages moved inside others in every interface: Per car (Encoding per
 // vehicle) is a sub-tab of Policies (Policies | Per car, web/subTabs.js), and
-// its old addresses open it there; the page module is reused as it was.
+// its old addresses open it there; Nodes is a section of Settings. The page
+// modules are reused as they were.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -35,4 +36,25 @@ test('Per car: a sub-tab of Policies in every interface, not in the navigation; 
   // the keyboard: g c still opens it where it had a shortcut
   assert.match(shellOf('aurora'), /\['policies\/per-car', 'Encoding per vehicle \(Policies → Per car\)', 'c'\]/);
   assert.match(shellOf('flux'), /\['policies\/per-car', 'Encoding per vehicle \(Policies → Per car\)', 'encoder', 'c'\]/);
+});
+
+test('Nodes: inside Settings in every interface, not in the navigation; old addresses land on Settings → Nodes', () => {
+  const index = read('web', 'index.html');
+  assert.doesNotMatch(index, /data-route="nodes"/, 'not in the built-in navigation');
+  const app = read('web', 'app.js');
+  assert.match(app, /if \(sub === 'nodes' \|\| sub\?\.startsWith\('nodes\/'\)\) return pages\.nodes\(\);/, 'Settings shows the Nodes page');
+  assert.match(app, /nodes\\\/\?\(\\\?\.\*\)\?\$\/\.exec\(location\.hash\);\s+if \(nodesWas\) history\.replaceState\(null, '', `#\/settings\/nodes/);
+  assert.match(app, /!location\.hash\.startsWith\('#\/settings\/nodes'\)/, 'its live follow-up stops when it is left');
+  for (const pack of Object.keys(PACKS)) {
+    const shell = shellOf(pack);
+    assert.doesNotMatch(shell, /\['nodes', 'Nodes'|\{ id: 'nodes'|^\s+nodes: \{ label/m, `${pack}: Nodes is not in the navigation`);
+    assert.doesNotMatch(shell, /MORE_ROUTES = \[[^\]]*'nodes'/, `${pack}: nor in More`);
+    assert.match(shell, /nodes: 'settings\/nodes'/, `${pack}: #/nodes opens Settings → Nodes`);
+    const settings = read('examples', 'ui-packs', pack, 'web', PACKS[pack], 'pages', 'settings.js');
+    assert.match(settings, /import (\* as )?nodesPage from '\.\/nodes\.js';/, `${pack}: the Nodes page as it was`);
+    assert.match(settings, /\['nodes', '(Nodes|Helper servers)'/, `${pack}: a Settings section`);
+    if (pack !== 'daylight') assert.match(settings, /inner\?\.(destroy|unmount)\?\.\(\)/, `${pack}: its timers stop with Settings`);
+  }
+  assert.match(shellOf('aurora'), /\['settings\/nodes', 'Nodes \(Settings → Nodes\)', 'n'\]/);
+  assert.match(shellOf('flux'), /\['settings\/nodes', 'Nodes \(Settings → Nodes\)', 'nodes', 'n'\]/);
 });

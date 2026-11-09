@@ -8,7 +8,6 @@ export const PAGES = [
   { id: 'footage', label: 'Footage', icon: 'film' },
   { id: 'viewer', label: 'Viewer', icon: 'viewer' },
   { id: 'encoder', label: 'Encoder', icon: 'engine' },
-  { id: 'nodes', label: 'Nodes', icon: 'nodes' },
   { id: 'policies', label: 'Policies', icon: 'policy' },
   { id: 'jobs', label: 'Jobs', icon: 'jobs' },
   { id: 'bin', label: 'Recycle Bin', short: 'Bin', icon: 'bin' },
@@ -131,7 +130,7 @@ let seq = 0;
 let subText = '';
 
 // pages that moved inside another as its sub-tab: their old addresses open them there
-const MOVED = { driving: 'drives/driving', map: 'drives/map', vehicles: 'policies/per-car' };
+const MOVED = { driving: 'drives/driving', map: 'drives/map', vehicles: 'policies/per-car', nodes: 'settings/nodes' };
 function movedHash() {
   const was = /^#\/?([\w-]+)\/?(\?.*)?$/.exec(location.hash);
   if (was && MOVED[was[1]]) history.replaceState(null, '', `#/${MOVED[was[1]]}${was[2] || ''}`);

@@ -79,7 +79,7 @@ export async function render(ctx) {
       <section><h2 style="margin-bottom:14px">Helpers this server uses</h2>
         ${data.nodes.length ? `<ul class="grid grid-2" style="padding:0;margin:0">${data.nodes.map(nodeCard).join('')}</ul>` : emptyState({ art: 'nodes', title: 'No helpers yet', text: 'Pair another server below and conversions get faster.' })}
         <form class="card section stack" id="add-node"><h3>Pair a helper</h3>
-          <p class="muted small">On the other server, open Helper servers → “Let another server use this one” → Show pairing code.</p>
+          <p class="muted small">On the other server, open Settings → Helper servers → “Let another server use this one” → Show pairing code.</p>
           <div class="form-grid"><label class="field"><span>Its address</span><input class="input" name="address" placeholder="192.168.1.30 or nas.local:9000" autocomplete="off" autocapitalize="none" spellcheck="false" required></label>
             <label class="field"><span>Pairing code</span><input class="input mono" name="code" placeholder="ABCD-EFGH-JKLM" autocomplete="off" autocapitalize="characters" spellcheck="false" required></label></div>
           <div><button class="btn btn-primary" type="submit">${icon('plus')} Pair</button></div></form></section>
@@ -88,7 +88,7 @@ export async function render(ctx) {
           <label class="switch"><input type="checkbox" id="worker-on"${w.enabled ? ' checked' : ''}><span>Convert for paired main servers</span></label>
           <p class="muted small">You don’t need to set anything else here: the main server chooses which of this server’s graphics cards (and its processor) convert, and how many clips each does at once, on its own Encoder page.</p>
           ${pairing ? `<div class="note note-good" style="flex-direction:column"><span class="muted small">Pairing code (works once, ${plural(mins, 'minute')} left)</span><span class="pair-code">${esc(pairing.code)}</span>
-              <span class="small">On the main server: Helper servers → Pair a helper, with this server’s address <b class="mono">${esc(location.hostname)}${location.port && location.port !== '9000' ? `:${esc(location.port)}` : ''}</b> and this code.</span>
+              <span class="small">On the main server: Settings → Helper servers → Pair a helper, with this server’s address <b class="mono">${esc(location.hostname)}${location.port && location.port !== '9000' ? `:${esc(location.port)}` : ''}</b> and this code.</span>
               <button class="btn btn-sm" type="button" id="pair-cancel">Cancel the code</button></div>`
             : '<div><button class="btn" type="button" id="pair-start">Show pairing code</button></div>'}
           ${w.mains.length ? `<h3>Main servers using this one</h3><ul class="list">${w.mains.map((m) => `<li class="list-item"><div class="grow"><b>${esc(m.name)}</b><p class="muted small mono">${esc(m.address || '')}</p><p class="muted small">Paired ${esc(when(m.pairedAt))}${m.lastSeenAt ? ` · last seen ${esc(when(m.lastSeenAt))}` : ''}</p></div><div class="item-actions"><button class="btn btn-sm" type="button" data-revoke="${esc(m.id)}">Revoke</button></div></li>`).join('')}</ul>` : ''}`

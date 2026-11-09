@@ -4,7 +4,6 @@ import overview from './pages/overview.js';
 import footage from './pages/footage.js';
 import viewer from './pages/viewer.js';
 import encoder from './pages/encoder.js';
-import nodes from './pages/nodes.js';
 import policies from './pages/policies.js';
 import jobs from './pages/jobs.js';
 import bin from './pages/bin.js';
@@ -20,7 +19,6 @@ const PAGES = [
   { id: 'footage', label: 'Footage', icon: 'footage', key: 'f', mod: footage, group: 'Monitor' },
   { id: 'viewer', label: 'Viewer', icon: 'viewer', key: 'v', mod: viewer, group: 'Monitor' },
   { id: 'encoder', label: 'Encoder', icon: 'encoder', key: 'e', mod: encoder, group: 'Process' },
-  { id: 'nodes', label: 'Nodes', icon: 'nodes', key: 'n', mod: nodes, group: 'Process' },
   { id: 'policies', label: 'Policies', icon: 'policies', key: 'p', mod: policies, group: 'Process' },
   { id: 'jobs', label: 'Jobs', icon: 'jobs', key: 'j', mod: jobs, group: 'Process' },
   { id: 'bin', label: 'Recycle Bin', icon: 'bin', key: 'b', mod: bin, group: 'Process' },
@@ -32,7 +30,7 @@ const PAGES = [
 // Drives is hidden for now (web/hiddenTabs.js): no navigation; its addresses open the Overview
 const byId = Object.fromEntries([...PAGES, { id: 'drives', label: 'Drives', icon: 'route', mod: drives }].map((p) => [p.id, p]));
 // sub-tabs with their own shortcut: [address, label, icon, key (g + key)]
-const SUB_KEYS = [['policies/per-car', 'Encoding per vehicle (Policies → Per car)', 'encoder', 'c']];
+const SUB_KEYS = [['policies/per-car', 'Encoding per vehicle (Policies → Per car)', 'encoder', 'c'], ['settings/nodes', 'Nodes (Settings → Nodes)', 'nodes', 'n']];
 
 
 // ---------- sidebar ----------
@@ -135,7 +133,7 @@ let mountedId = null;
 const page = $('#page');
 
 // pages that moved inside another as its sub-tab: their old addresses open them there
-const MOVED = { driving: 'drives/driving', map: 'drives/map', vehicles: 'policies/per-car' };
+const MOVED = { driving: 'drives/driving', map: 'drives/map', vehicles: 'policies/per-car', nodes: 'settings/nodes' };
 function movedHash() {
   const was = /^#\/?([\w-]+)\/?(\?.*)?$/.exec(location.hash);
   if (was && MOVED[was[1]]) history.replaceState(null, '', `#/${MOVED[was[1]]}${was[2] || ''}`);

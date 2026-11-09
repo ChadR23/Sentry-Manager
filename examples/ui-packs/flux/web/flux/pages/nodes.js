@@ -62,7 +62,7 @@ export default {
                 <label class="field">Node address<input class="input mono" name="address" placeholder="192.168.1.30 or nas.local:9000" autocomplete="off" required></label>
                 <label class="field">Pairing code<input class="input mono" name="code" placeholder="ABCD-EFGH-JKLM" autocomplete="off" required></label>
               </div>
-              <p class="faint small">On the other server: Nodes → Let another server use this one → Show pairing code. Pairing asks for your password.</p>
+              <p class="faint small">On the other server: Settings → Nodes → Let another server use this one → Show pairing code. Pairing asks for your password.</p>
               <div class="row-actions"><button class="btn primary" type="submit">${icon('plus')}Pair node</button></div>
             </form>
             ${nodes.length ? '<p class="faint small">Each node is a group on the <a href="#/encoder">Encoder</a> page: open it to pick which of its GPUs (and its CPU) convert, and how many clips each takes at once.</p>' : ''}
@@ -77,7 +77,7 @@ export default {
               </div>
               <p class="small faint">Devices and clips at once are set on the main server: its Encoder picks which of this server's GPUs (and its CPU) encode, and how many each takes at once.</p>
               <p class="small faint">${worker.busy ? `${worker.busy} clip(s) converting for a main server now · ` : ''}name: <span class="mono">${esc(worker.name || '')}</span></p>
-              ${pairing ? `<div class="pair"><span class="small muted">Pairing code · one use · ${plural(mins, 'minute')} left</span><b class="mono pair-code">${esc(pairing.code)}</b><span class="small">On the main server: Nodes → Pair a node, address <b class="mono">${esc(location.hostname)}${location.port && location.port !== '9000' ? `:${esc(location.port)}` : ''}</b> and this code.</span><button class="btn sm" type="button" id="pair-cancel">Cancel code</button></div>`
+              ${pairing ? `<div class="pair"><span class="small muted">Pairing code · one use · ${plural(mins, 'minute')} left</span><b class="mono pair-code">${esc(pairing.code)}</b><span class="small">On the main server: Settings → Nodes → Pair a node, address <b class="mono">${esc(location.hostname)}${location.port && location.port !== '9000' ? `:${esc(location.port)}` : ''}</b> and this code.</span><button class="btn sm" type="button" id="pair-cancel">Cancel code</button></div>`
                 : '<div class="row-actions"><button class="btn" type="button" id="pair-start">Show pairing code</button></div>'}
               ${worker.mains.length ? `<div class="tscroll"><table class="dtable stack"><thead><tr><th>main server</th><th>paired</th><th></th></tr></thead><tbody>${worker.mains.map((m) => `<tr><td><b>${esc(m.name)}</b><div class="mono small faint">${esc(m.address || '')}</div></td><td class="small">${esc(when(m.pairedAt))}${m.lastSeenAt ? `<div class="faint">seen ${esc(ago(m.lastSeenAt))}</div>` : ''}</td><td class="r"><button class="btn sm danger" type="button" data-revoke="${esc(m.id)}">Revoke</button></td></tr>`).join('')}</tbody></table></div>` : '<p class="faint small">No main server uses this one yet.</p>'}`
                 : '<p class="muted">This server runs without its own HTTPS (TLS_MODE=off), so it cannot be a node.</p>'}

@@ -1,14 +1,18 @@
 // Settings: the garage (vehicles), places (Home, Work), account, interface packs, the background
 // effect, updates, security, system and the electricity price.
 import { h, ico, api, send, app, pickCar, loadCars, size, stampFull, toast, ask, act, ok, local, segs, onSegs, pill, panelHead, liveDraw, clockPref } from '../core.js';
+// Nodes is a section here (#/settings/nodes; #/nodes opens it): its page module as it was, taken down with Settings.
+import nodesPage from './nodes.js';
 
-const TABS = [['vehicles', 'Vehicles', 'car'], ['places', 'Places', 'map'], ['account', 'Account', 'lock'], ['interface', 'Interface', 'horizon'], ['display', 'Background', 'hud'], ['updates', 'Updates', 'download'], ['security', 'Security', 'shield'], ['system', 'System', 'info'], ['power', 'Electricity', 'bolt']];
+const TABS = [['vehicles', 'Vehicles', 'car'], ['places', 'Places', 'map'], ['account', 'Account', 'lock'], ['interface', 'Interface', 'horizon'], ['display', 'Background', 'hud'], ['updates', 'Updates', 'download'], ['security', 'Security', 'shield'], ['system', 'System', 'info'], ['power', 'Electricity', 'bolt'], ['nodes', 'Nodes', 'nodes']];
 const WEEK = [[1, 'Mon'], [2, 'Tue'], [3, 'Wed'], [4, 'Thu'], [5, 'Fri'], [6, 'Sat'], [0, 'Sun']];
 let system = null;
 
 export default {
-  async mount(el, { sub, params, go, status }) {
+  async mount(el, { sub, params, go, status, alive }) {
     const tab = TABS.some(([k]) => k === sub.split('/')[0]) ? sub.split('/')[0] : 'vehicles';
+    let inner = null; // the Nodes page, when that section shows
+    if (tab === 'nodes') document.title = 'Nodes · Settings · Horizon · Sentry Six Manager';
     el.innerHTML = `<section class="ptitle hud"><div><h1 class="chrome">Settings</h1><p><a class="btn sm" href="#/health">${ico('shield')}Health</a> <a class="btn sm" href="#/account">${ico('lock')}Account</a></p></div></section>
       <div class="settings">
         <nav class="stabs hud" aria-label="Settings sections">${TABS.map(([k, l, i]) => `<a href="#/settings/${k}" class="stab${k === tab ? ' on' : ''}"${k === tab ? ' aria-current="page"' : ''}>${ico(i)}<span>${l}</span></a>`).join('')}</nav>
@@ -17,10 +21,12 @@ export default {
     status(TABS.find(([k]) => k === tab)[1]);
     el.querySelector('.stab.on')?.scrollIntoView?.({ block: 'nearest', inline: 'center' });
     const box = el.querySelector('#sp');
-    const parts = { vehicles, places, account, interface: iface, display, updates, security, system: sys, power };
+    const parts = { vehicles, places, account, interface: iface, display, updates, security, system: sys, power, nodes: async (b) => { inner = await nodesPage.mount(b, { sub: '', params, go, alive, status: () => {} }); } };
     await parts[tab](box, { params, go });
     return {
+      unmount() { inner?.unmount?.(); },
       onTopics(t) {
+        inner?.onTopics?.(t);
         if (tab === 'vehicles' && t.includes('vehicles') && !box.querySelector('#v-form')) liveDraw(box, () => vehicles(box, { params: new URLSearchParams(), go }), 'hz:settings-vehicles');
       }
     };

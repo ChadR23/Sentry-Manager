@@ -1948,7 +1948,8 @@
         <td class="small">Paired ${when(m.pairedAt)}${m.lastSeenAt ? `<br><span class="muted">last seen ${when(m.lastSeenAt)}</span>` : ''}</td>
         <td class="actions"><button class="btn sm" data-revoke-main="${esc(m.id)}">Revoke</button></td></tr>`).join('');
 
-    page.innerHTML = head('Your servers', 'Nodes') + `
+    document.title = 'Nodes · Settings · Sentry Six Manager';
+    page.innerHTML = head('Your archive workspace', 'Settings') + settingsBar('nodes') + `
       <div class="card"><h2>Nodes this server uses</h2>
         <p class="muted" style="margin-top:6px">Other servers running Sentry Six Manager can encode clips for this one. This server reads each clip, sends it to the node over HTTPS and checks the encoded file before it saves anything, as with its own GPUs. Nodes never get your share passwords and never touch the footage.</p>
         ${nodes.length ? `<table class="table" style="margin-top:14px"><thead><tr><th>Node</th><th>Status</th><th>Encoders</th><th>Clips</th><th></th></tr></thead><tbody>${nodeRows}</tbody></table>
@@ -1958,7 +1959,7 @@
           <label class="field">Pairing code<input class="input mono" name="code" placeholder="ABCD-EFGH-JKLM" autocomplete="off" required></label>
           <div class="full form-actions" style="margin-top:0"><button class="btn solid" type="submit">${icon('plus')} Add node</button></div>
         </form>
-        <p class="muted small">On the other server, open Nodes → Let another server use this one → Show pairing code.</p>
+        <p class="muted small">On the other server, open Settings → Nodes → Let another server use this one → Show pairing code.</p>
       </div>
 
       <div class="card" style="margin-top:20px"><h2>Let another server use this one</h2>
@@ -1971,7 +1972,7 @@
         ${pairing ? `<div class="note green pair-code" style="margin-top:14px">
             <div class="muted small">Pairing code (one use, ${plural(mins, 'minute')} left)</div>
             <div class="mono pair-code-value">${esc(pairing.code)}</div>
-            <div class="small">On the main server: Nodes → Add node, with this server's address <b class="mono">${esc(location.hostname)}${location.port && location.port !== '9000' ? `:${esc(location.port)}` : ''}</b> and the code.</div>
+            <div class="small">On the main server: Settings → Nodes → Add node, with this server's address <b class="mono">${esc(location.hostname)}${location.port && location.port !== '9000' ? `:${esc(location.port)}` : ''}</b> and the code.</div>
             <button class="btn sm" id="pair-cancel" style="margin-top:10px">Cancel</button></div>`
           : '<div class="form-actions" style="margin-top:14px"><button class="btn" id="pair-start">Show pairing code</button></div>'}
         ${worker.mains.length ? `<table class="table" style="margin-top:16px"><thead><tr><th>Main server</th><th>Paired</th><th></th></tr></thead><tbody>${mainRows}</tbody></table>` : ''}
@@ -2037,7 +2038,7 @@
     if (benchRunning || nodes.length) {
       const every = benchRunning ? 2500 : 5000;
       const follow = () => {
-        if (seq !== renderSeq || !location.hash.startsWith('#/nodes')) return;
+        if (seq !== renderSeq || !location.hash.startsWith('#/settings/nodes')) return;
         // (nor a node address or pairing code typed and not sent yet)
         const typed = [...page.querySelectorAll('input[name="address"], input[name="code"]')].some((input) => input.value);
         if (document.hidden || typed || document.activeElement?.matches?.('input, select, textarea')) setTimeout(follow, every);
@@ -2185,7 +2186,10 @@
     await mountShared('hl-page', 'Health', '/web/health.js', (m, el) => m.createHealthPage(el));
   };
 
+  // Settings | Nodes: Nodes is Settings' own page (#/settings/nodes; #/nodes opens it there)
+  const settingsBar = (on) => `<nav class="sentry-subtabs pills" aria-label="Settings pages"><a class="pill${on === 'settings' ? ' active' : ''}" href="#/settings"${on === 'settings' ? ' aria-current="page"' : ''}>Settings</a><a class="pill${on === 'nodes' ? ' active' : ''}" href="#/settings/nodes"${on === 'nodes' ? ' aria-current="page"' : ''}>Nodes</a></nav>`;
   pages.settings = async (sub) => {
+    if (sub === 'nodes' || sub?.startsWith('nodes/')) return pages.nodes();
     const seq = renderSeq;
     const editing = sub?.startsWith('vehicle/') ? sub.slice(8) : sub === 'vehicle-new' ? 'new' : null;
     const [settings, upd, sys, sec, ui] = await Promise.all([api('/api/settings'), api('/api/updates'), api('/api/system').catch(() => null), api('/api/security').catch(() => null), api('/api/ui-packs').catch(() => null)]);
@@ -2195,7 +2199,7 @@
     // (the Logs are on the Overview)
     const sections = [['vehicles', 'Vehicles'], ['places', 'Places'], ['updates', 'Updates'], ['account', 'Account'], ui && ['interface', 'Interface'], sec && ['security', 'Security'], (sys || settings.power) && ['system', 'System']].filter(Boolean);
     const show = editing || !sections.some(([k]) => k === sub) ? 'vehicles' : sub;
-    let html = head('Your archive workspace', 'Settings');
+    let html = head('Your archive workspace', 'Settings') + settingsBar('settings');
     html += `<nav class="set-tabs" aria-label="Settings sections">${sections.map(([k, label]) => `<button type="button" data-tab="${k}">${label}</button>`).join('')}</nav>`;
     html += `<div class="card" data-section="vehicles"><div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap"><h2>Vehicles</h2><a class="btn" href="#/settings/vehicle-new">${icon('plus')} Add vehicle</a></div>
       ${state.vehicles.length ? `<table class="table" style="margin-top:14px"><thead><tr><th>Name</th><th>Footage</th><th>Status</th><th></th></tr></thead><tbody>
@@ -2697,6 +2701,9 @@
     // Encoding per vehicle is Policies > Per car now
     const perCarWas = /^#\/?encoder\/vehicles\/?(\?.*)?$/.exec(location.hash);
     if (perCarWas) history.replaceState(null, '', `#/policies/per-car${perCarWas[1] || ''}`);
+    // Nodes is in Settings now
+    const nodesWas = /^#\/?nodes\/?(\?.*)?$/.exec(location.hash);
+    if (nodesWas) history.replaceState(null, '', `#/settings/nodes${nodesWas[1] || ''}`);
     // Drives (and its Driving and Map) is hidden for now (web/hiddenTabs.js): its addresses open the Overview
     if (/^#\/?drives(\/|\?|$)/.test(location.hash)) {
       let show = false;

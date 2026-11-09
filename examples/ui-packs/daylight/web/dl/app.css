@@ -534,3 +534,5 @@ dialog.dlg[open] { animation: pop 240ms var(--ease) both; }
 .page.subtab-bar { padding-bottom: 0; }
 .page.subtab-bar .sentry-subtabs { margin: 0; }
 .page.subtab-bar + [data-subview] > .page { padding-top: 18px; }
+/* Settings → Helper servers: the Nodes page inside the section */
+#section > .page { padding: 0; max-width: none; margin: 0; }

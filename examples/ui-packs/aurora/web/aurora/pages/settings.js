@@ -4,10 +4,12 @@
 import {
   $, esc, icon, api, upload, state, loadVehicles, setVehicle, bytes, whenFull, fin, toast, confirmDialog, empty, clockPref, emit
 } from '../core.js';
+// Nodes is a section here (#/settings/nodes; #/nodes opens it): its page module as it was, taken down with Settings.
+import nodesPage from './nodes.js';
 
 const SECTIONS = [
   ['vehicles', 'Vehicles', 'car'], ['places', 'Places', 'pin'], ['account', 'Account', 'key'], ['interface', 'Interface', 'sparkle'], ['updates', 'Updates', 'download'],
-  ['security', 'Security', 'lock'], ['system', 'System', 'cpu'], ['power', 'Electricity', 'bolt']
+  ['security', 'Security', 'lock'], ['system', 'System', 'cpu'], ['power', 'Electricity', 'bolt'], ['nodes', 'Nodes', 'nodes']
 ];
 const WEEK = [[1, 'Mon'], [2, 'Tue'], [3, 'Wed'], [4, 'Thu'], [5, 'Fri'], [6, 'Sat'], [0, 'Sun']];
 const MAX_RATES = 12;
@@ -25,11 +27,14 @@ export default {
     const section = SECTIONS.some(([k]) => k === params[0]) ? params[0] : 'vehicles';
     const sub = params[1] || null;
     let dead = false;
+    let inner = null; // the Nodes page, when that section shows
+    if (section === 'nodes') document.title = 'Nodes · Settings · Sentry Six Manager';
     body.innerHTML = `<div class="set-layout"><nav class="set-nav" aria-label="Settings sections">${SECTIONS.map(([k, label, ico]) => `<a href="#/settings/${k}" class="${k === section ? 'on' : ''}"${k === section ? ' aria-current="page"' : ''}>${icon(ico)}${label}</a>`).join('')}</nav><div id="set-body"><p class="loading">Loading…</p></div></div>`;
     const box = $('#set-body', body);
     const draw = async () => {
       try {
-        await SECTION[section](box, sub, ctx);
+        if (section === 'nodes') inner = await nodesPage.mount({ ...ctx, body: box, params: [] });
+        else await SECTION[section](box, sub, ctx);
       } catch (err) {
         if (!dead) box.innerHTML = `<p class="note bad">${esc(err.message)}</p>`;
       }
@@ -39,8 +44,9 @@ export default {
       refresh() {
         // the vehicle list follows live; a form being filled in stays
         if (section === 'vehicles' && !sub) draw();
+        if (section === 'nodes') inner?.refresh?.();
       },
-      destroy() { dead = true; }
+      destroy() { dead = true; inner?.destroy?.(); }
     };
   }
 };

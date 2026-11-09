@@ -65,7 +65,7 @@ export default {
         </div>
         <p class="muted small" style="margin-top:10px">The main server picks which of this server’s GPUs (and its CPU) to use, and how many clips each one encodes at once, in its own Encoder.</p>
         ${p ? `<div class="note ok" style="margin-top:14px"><p class="small">Pairing code · one use · ${plural(mins, 'minute')} left</p><p class="pair-code">${esc(p.code)}</p>
-            <p class="small">On the main server: Nodes → Pair a node, with this server’s address <b class="mono">${esc(location.host)}</b> and this code.</p><div class="actions start"><button class="btn sm" type="button" id="pair-cancel">Cancel code</button></div></div>`
+            <p class="small">On the main server: Settings → Nodes → Pair a node, with this server’s address <b class="mono">${esc(location.host)}</b> and this code.</p><div class="actions start"><button class="btn sm" type="button" id="pair-cancel">Cancel code</button></div></div>`
           : `<div class="actions start"><button class="btn" type="button" id="pair-start">${icon('key')} Show a pairing code</button></div>`}
         ${w.mains.length ? `<h3 style="margin-top:18px">Main servers using this one</h3><div class="stack" style="margin-top:10px;gap:10px">${w.mains.map((m) => `<div class="bin-item"><div><b>${esc(m.name)}</b><br><span class="muted small">${esc(m.address || '')} · paired ${esc(when(m.pairedAt))}${m.lastSeenAt ? ` · seen ${esc(when(m.lastSeenAt))}` : ''}</span></div><div class="row"><button class="btn sm danger" type="button" data-revoke="${esc(m.id)}">Revoke</button></div></div>`).join('')}</div>` : ''}`;
     }
@@ -90,7 +90,7 @@ export default {
             <h3 class="full">Pair a node</h3>
             <label class="field">Node address<input class="input" id="n-addr" name="address" placeholder="192.168.1.30 or nas.local:9000" autocomplete="off" autocapitalize="none" spellcheck="false" required></label>
             <label class="field">Pairing code<input class="input mono" id="n-code" name="code" placeholder="ABCD-EFGH-JKLM" autocomplete="off" autocapitalize="characters" spellcheck="false" required></label>
-            <p class="muted small full">On the other server: Nodes → Let another server use this one → Show a pairing code.</p>
+            <p class="muted small full">On the other server: Settings → Nodes → Let another server use this one → Show a pairing code.</p>
             <div class="full actions" style="margin-top:0"><button class="btn primary" type="submit">${icon('plus')} Pair node</button></div>
           </form></section>
         <section class="panel"><div class="panel-head"><h2>Let another server use this one</h2></div>${workerHtml(d.worker)}</section></div>`;

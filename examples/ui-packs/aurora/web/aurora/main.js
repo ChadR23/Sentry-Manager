@@ -8,7 +8,6 @@ import sky from './pages/sky.js';
 import footage from './pages/footage.js';
 import viewer from './pages/viewer.js';
 import encoder from './pages/encoder.js';
-import nodes from './pages/nodes.js';
 import policies from './pages/policies.js';
 import jobs from './pages/jobs.js';
 import bin from './pages/bin.js';
@@ -18,7 +17,7 @@ import drives from './pages/drives.js';
 import health from './pages/health.js';
 import account from './pages/account.js';
 
-const PAGES = { sky, footage, viewer, drives, encoder, nodes, policies, jobs, bin, alerts, health, account, settings };
+const PAGES = { sky, footage, viewer, drives, encoder, policies, jobs, bin, alerts, health, account, settings };
 // [route, label, icon, key (g + key), primary on phones]
 const DOCK = [
   ['sky', 'Sky', 'sky', 's', true],
@@ -26,7 +25,6 @@ const DOCK = [
   ['viewer', 'Viewer', 'cockpit', 'v', true],
   ['encoder', 'Encoder', 'orbit', 'e', true],
   '|',
-  ['nodes', 'Nodes', 'nodes', 'n', false],
   ['policies', 'Policies', 'shield', 'p', false],
   ['jobs', 'Jobs', 'jobs', 'j', false],
   ['bin', 'Bin', 'trash', 'b', false],
@@ -37,7 +35,7 @@ const DOCK = [
   ['settings', 'Settings', 'gear', ',', false]
 ];
 // shortcuts to a sub-tab: [address, label, key (g + key)] (none now: Drives is hidden)
-const SUB_KEYS = [['policies/per-car', 'Encoding per vehicle (Policies → Per car)', 'c']];
+const SUB_KEYS = [['policies/per-car', 'Encoding per vehicle (Policies → Per car)', 'c'], ['settings/nodes', 'Nodes (Settings → Nodes)', 'n']];
 const LONG = { vehicles: 'Encoding per vehicle', bin: 'Recycle Bin', alerts: 'Notifications', sky: 'Sky (home)' };
 
 // ---------- the sky ----------
@@ -134,7 +132,7 @@ let pending = new Set();
 let seq = 0;
 
 // pages that moved inside another as its sub-tab: their old addresses open them there
-const MOVED = { driving: 'drives/driving', map: 'drives/map', vehicles: 'policies/per-car' };
+const MOVED = { driving: 'drives/driving', map: 'drives/map', vehicles: 'policies/per-car', nodes: 'settings/nodes' };
 function parseHash() {
   const was = /^#\/?([\w-]+)\/?(\?.*)?$/.exec(location.hash);
   if (was && MOVED[was[1]]) history.replaceState(null, '', `#/${MOVED[was[1]]}${was[2] || ''}`);
