@@ -77,8 +77,13 @@
 // One narrow exception, by name (INTERNAL_BUS_MESSAGES): on an interface the
 // bus map calls internal (the CAN Bridge's "screenmate-internal" can3), 0x04F
 // is decoded, and only its GPSLatitude04F, GPSLongitude04F and GPSAccuracy04F.
-// On a 2026 Model Y the car's position comes there and on no car bus (checked
-// against the owner's frames: test/canModelY.js). It is stored under the same
+// It is the Screenmate's own GPS receiver (10 a second), not the car's: on the
+// owner's 2022 Model Y (2026 firmware) no car bus carries 0x04F, and on a drive
+// the speed worked out from these positions matched the car's (CAN Bridge, SMO,
+// 2026-11-09). Its other ids are the receiver's and the CAN chip's own (0x3D9:
+// a 0..3 fix status in byte 0, NOT the chassis bus's GPS speed; 0x011 receiver
+// diagnostics; 0x021 the chip's frames a second per car bus): none decoded,
+// none car data. 0x04F is stored under the same
 // series names as the chassis bus's 0x04F, which the place tags and Drives read
 // (recordingPlace.js). Where a log has 0x04F on a car bus too (a car that sends
 // it there), the car bus's wins: an internal frame is used only when the car
@@ -115,11 +120,11 @@ const profileStamp = (profile) => (!profile || profile === DEFAULT_PROFILE ? '' 
 const partFormat = (profile) => `${FORMAT}${profileStamp(profile)}`;
 const stillRight = (f, profile = DEFAULT_PROFILE) => (profileStamp(profile) ? f === partFormat(profile) : DEFAULT_RIGHT.has(f));
 // on an interface the bus map calls internal: these messages only (by id), and only these signals
-// (series names). The Screenmate's other ids carry data of their own (its 0x3D9 is not the chassis bus's).
+// (series names). The Screenmate's other ids carry data of their own (its 0x3D9 is a fix status, not GPS speed).
 const INTERNAL_BUS_MESSAGES = new Map([
-  [0x04F, new Set(['GPSLatitude04F', 'GPSLongitude04F', 'GPSAccuracy04F'])] // the car's GPS position (Model Y: only here)
+  [0x04F, new Set(['GPSLatitude04F', 'GPSLongitude04F', 'GPSAccuracy04F'])] // the Screenmate's own GPS position (10 a second)
 ]);
-const INTERNAL_YIELD_MS = 2500; // a car bus's 0x04F came this recently: the internal one is not used (it is sent once a second)
+const INTERNAL_YIELD_MS = 2500; // a car bus's 0x04F came this recently: the internal one is not used (a car sends it once a second)
 const KEEP_MS = 1000; // a point at least once a second
 // the interface is a plain name (can0, vcan1): anything else in a log line is not indexed, so a
 // crafted log cannot make up ids (each a key in the index) or put a formula into a CSV download

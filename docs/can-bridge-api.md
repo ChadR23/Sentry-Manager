@@ -381,9 +381,14 @@ real car's logs (a message there with no signals has a layout not known yet and
 is not decoded; it shows as `unknown`). A frame is decoded only on a bus the
 sidecar's bus map (or the default: can0 vehicle, can1 chassis) names, with that
 bus's message; the Screenmate's own buses (can2, can3: "screenmate-internal")
-are kept and counted, not decoded, with one exception: the car's GPS position
-(0x04F: `GPSLatitude04F`, `GPSLongitude04F`, `GPSAccuracy04F`, nothing else of
-that bus), which a Model Y sends only there. It is decoded on an interface the
+are kept and counted, not decoded, with one exception: the GPS position from
+the Screenmate's own GPS receiver (0x04F at 10 a second: `GPSLatitude04F`,
+`GPSLongitude04F`, `GPSAccuracy04F`, nothing else of that bus), checked on a
+drive against the car's speed. The owner's Model Y sends no 0x04F on its own
+buses. The rest of can3 is the receiver's and the CAN chip's own (0x3D9 a 0..3
+fix status in byte 0, not GPS speed; 0x011 receiver diagnostics; 0x021 the
+chip's frames a second per car bus; 0x001, 0x031, 0x041, 0x051 constant), and
+is not decoded: no car data. It is decoded on an interface the
 sidecar's bus map calls internal and stored under the same names as the chassis
 bus's 0x04F, for the Footage place tags and Drives; where a car bus sends 0x04F
 too, the car bus's wins. A signal name that two messages share has
