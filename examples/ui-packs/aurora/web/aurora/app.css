@@ -873,3 +873,11 @@ body[data-route="viewer"] .win-body { display: flex; flex-direction: column; }
 .smb-test p { margin: 0; flex: 1 1 240px; }
 .smb-test [data-result="ok"] { color: var(--ok); }
 .smb-test [data-result="bad"] { color: var(--bad); }
+
+/* sub-tabs inside a page (Drives | Driving | Map, Policies | Per car): web/subTabs.js links in Aurora's segmented pill */
+.sentry-subtabs.seg { display: flex; width: max-content; max-width: 100%; margin: 0 0 18px; }
+.seg a { display: inline-flex; align-items: center; color: var(--ink-2); min-height: 40px; min-width: 44px; padding: 8px 16px; border-radius: 999px; font: 500 14px/1.2 var(--font); text-decoration: none; transition: background .18s, color .18s; }
+.touch .seg a { min-height: 44px; }
+.seg a:hover { color: var(--ink); background: rgba(255, 255, 255, .07); }
+.seg a.on { background: rgba(94, 242, 184, .18); color: #dbfff0; box-shadow: inset 0 0 0 1px rgba(94, 242, 184, .45); }
+.seg a:focus-visible { outline: 2px solid rgba(94, 242, 184, .8); outline-offset: 2px; }

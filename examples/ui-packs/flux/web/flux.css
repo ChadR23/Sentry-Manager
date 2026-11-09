@@ -700,3 +700,9 @@ label.sub-block { display: flex; gap: 8px; align-items: flex-start; }
 .smb-test p { margin: 0; flex: 1 1 240px; }
 .smb-test [data-result="ok"] { color: var(--green); }
 .smb-test [data-result="bad"] { color: var(--red); }
+
+/* sub-tabs inside a page (Drives | Driving | Map, Policies | Per car): web/subTabs.js links as Flux's underlined tabs */
+.sentry-subtabs.tabs { margin-bottom: 14px; flex-wrap: wrap; }
+.tabs a { color: var(--muted); padding: 8px 10px; font: 500 13px var(--sans); border-bottom: 2px solid transparent; text-decoration: none; }
+.tabs a:hover { color: var(--text); }
+.tabs a.on { color: var(--text); border-bottom-color: var(--violet); }

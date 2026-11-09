@@ -2144,28 +2144,31 @@
     });
   };
 
-  // Drives, Driving, Map, Account and Health: the same pages as every interface pack
-  // (web/drives.js, driving.js, eventMap.js, account.js, health.js); the one showing is
-  // taken down when the next page draws (render), so maps and polls stop
+  // Drives (with Driving and Map as its sub-tabs), Account and Health: the same pages as every
+  // interface pack (web/drives.js, driving.js, eventMap.js, account.js, health.js); the one showing
+  // is taken down when the next page draws (render), so maps and polls stop
   let shared = null;
-  async function mountShared(id, crumb, mod, make) {
+  async function mountShared(id, crumb, mod, make, extra = '') {
     const seq = renderSeq;
-    page.innerHTML = head('Your archive workspace', crumb) + `<div class="card" id="${id}"></div>`;
+    page.innerHTML = head('Your archive workspace', crumb) + extra + `<div class="card" id="${id}"></div>`;
     const m = await import(mod);
     if (seq !== renderSeq || !$(id)) return; // the user moved on while it loaded
     shared = make(m, $(id)) || null;
   }
-  pages.driving = async () => {
+  // Drives | Driving | Map (web/subTabs.js): #/drives/<tab>, #/drives the one used last
+  const DRIVES_TABS = [['trips', 'Drives'], ['driving', 'Driving'], ['map', 'Map']];
+  pages.drives = async (sub) => {
     const v = current();
-    await mountShared('dr-page', 'Driving', '/web/driving.js', (m, el) => m.createDrivingPage(el, { vehicleId: v?.id, vehicleName: v?.name }));
-  };
-  pages.drives = async () => {
-    const v = current();
-    await mountShared('dv-page', 'Drives', '/web/drives.js', (m, el) => m.createDrivesPage(el, { vehicleId: v?.id, vehicleName: v?.name, h24: () => clockPref.h24, open: (at) => openStudio('viewer', { date: at.day, at: `${at.clip}~${at.second}` }) }));
-  };
-  pages.map = async () => {
-    const v = current();
-    await mountShared('em-page', 'Map', '/web/eventMap.js', (m, el) => m.createEventMapPage(el, { vehicleId: v?.id, vehicleName: v?.name, openEvent: (ev) => openStudio('viewer', { date: ev.day, at: `${ev.startKey}~0` }) }));
+    const seq = renderSeq;
+    const { pickSubTab, subTabsHtml } = await import('/web/subTabs.js');
+    if (seq !== renderSeq) return;
+    const tab = pickSubTab('sentry-drives-tab', DRIVES_TABS.map(([k]) => k), sub);
+    const bar = subTabsHtml(DRIVES_TABS, tab, { href: (k) => `#/drives/${k}`, label: 'Drives sections', cls: 'pills', item: 'pill', on: 'active' });
+    const label = DRIVES_TABS.find(([k]) => k === tab)[1];
+    if (tab !== 'trips') document.title = `${label} · Drives · Sentry Six Manager`;
+    if (tab === 'driving') return mountShared('dr-page', 'Drives', '/web/driving.js', (m, el) => m.createDrivingPage(el, { vehicleId: v?.id, vehicleName: v?.name }), bar);
+    if (tab === 'map') return mountShared('em-page', 'Drives', '/web/eventMap.js', (m, el) => m.createEventMapPage(el, { vehicleId: v?.id, vehicleName: v?.name, openEvent: (ev) => openStudio('viewer', { date: ev.day, at: `${ev.startKey}~0` }) }), bar);
+    return mountShared('dv-page', 'Drives', '/web/drives.js', (m, el) => m.createDrivesPage(el, { vehicleId: v?.id, vehicleName: v?.name, h24: () => clockPref.h24, open: (at) => openStudio('viewer', { date: at.day, at: `${at.clip}~${at.second}` }) }), bar);
   };
   pages.account = async () => {
     await mountShared('ac-page', 'Account', '/web/account.js', (m, el) => m.createAccountPage(el));
@@ -2678,6 +2681,9 @@
     shared = null;
     // the Logs moved from Settings to the Overview: old links land there
     if (/^#\/?settings\/logs\/?$/.test(location.hash)) history.replaceState(null, '', '#/overview/logs');
+    // Driving and Map are sub-tabs of Drives now: their old addresses open them there
+    const moved = /^#\/?(driving|map)\/?(\?.*)?$/.exec(location.hash);
+    if (moved) history.replaceState(null, '', `#/drives/${moved[1]}${moved[2] || ''}`);
     // the shell's opening state (boot.js, index.html) ends here
     bootFrame?.remove();
     delete document.documentElement.dataset.boot;

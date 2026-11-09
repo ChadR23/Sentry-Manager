@@ -14,8 +14,6 @@ export const PAGES = [
   { id: 'jobs', label: 'Jobs', icon: 'jobs' },
   { id: 'bin', label: 'Recycle Bin', short: 'Bin', icon: 'bin' },
   { id: 'alerts', label: 'Notifications', short: 'Alerts', icon: 'bell' },
-  { id: 'driving', label: 'Driving', icon: 'tacho' },
-  { id: 'map', label: 'Map', icon: 'map' },
   // (not in the top bar, which they would overflow: the tuner and Settings reach them)
   { id: 'health', label: 'Health', icon: 'shield', bar: false },
   { id: 'account', label: 'Account', icon: 'lock', bar: false },
@@ -132,7 +130,14 @@ let mountedId = null;
 let seq = 0;
 let subText = '';
 
+// pages that moved inside another as its sub-tab: their old addresses open them there
+const MOVED = { driving: 'drives/driving', map: 'drives/map' };
+function movedHash() {
+  const was = /^#\/?([\w-]+)\/?(\?.*)?$/.exec(location.hash);
+  if (was && MOVED[was[1]]) history.replaceState(null, '', `#/${MOVED[was[1]]}${was[2] || ''}`);
+}
 export function parse() {
+  movedHash();
   const raw = location.hash.replace(/^#\/?/, '');
   const [path, query = ''] = raw.split('?');
   const [route, ...rest] = path.split('/');

@@ -12,8 +12,6 @@ import notifications from './pages/notifications.js';
 import settings from './pages/settings.js';
 import vehicles from './pages/vehicles.js';
 import drives from './pages/drives.js';
-import driving from './pages/driving.js';
-import map from './pages/map.js';
 import health from './pages/health.js';
 import account from './pages/account.js';
 
@@ -22,8 +20,6 @@ const PAGES = [
   { id: 'footage', label: 'Footage', icon: 'footage', key: 'f', mod: footage, group: 'Monitor' },
   { id: 'viewer', label: 'Viewer', icon: 'viewer', key: 'v', mod: viewer, group: 'Monitor' },
   { id: 'drives', label: 'Drives', icon: 'route', key: 'r', mod: drives, group: 'Monitor' },
-  { id: 'driving', label: 'Driving', icon: 'gauge', key: 'd', mod: driving, group: 'Monitor' },
-  { id: 'map', label: 'Map', icon: 'clip', key: 'm', mod: map, group: 'Monitor' },
   { id: 'encoder', label: 'Encoder', icon: 'encoder', key: 'e', mod: encoder, group: 'Process' },
   { id: 'vehicles', label: 'Encoding per vehicle', icon: 'encoder', key: 'c', mod: vehicles, group: 'Process' },
   { id: 'nodes', label: 'Nodes', icon: 'nodes', key: 'n', mod: nodes, group: 'Process' },
@@ -36,6 +32,9 @@ const PAGES = [
   { id: 'settings', label: 'Settings', icon: 'settings', key: 's', mod: settings, group: 'System' }
 ];
 const byId = Object.fromEntries(PAGES.map((p) => [p.id, p]));
+// sub-tabs with their own shortcut: [address, label, icon, key (g + key)]
+const SUB_KEYS = [['drives/driving', 'Driving (in Drives)', 'gauge', 'd'], ['drives/map', 'Map (in Drives)', 'clip', 'm']];
+
 
 // ---------- sidebar ----------
 const app = $('#app');
@@ -136,7 +135,14 @@ let mounted = null;
 let mountedId = null;
 const page = $('#page');
 
+// pages that moved inside another as its sub-tab: their old addresses open them there
+const MOVED = { driving: 'drives/driving', map: 'drives/map' };
+function movedHash() {
+  const was = /^#\/?([\w-]+)\/?(\?.*)?$/.exec(location.hash);
+  if (was && MOVED[was[1]]) history.replaceState(null, '', `#/${MOVED[was[1]]}${was[2] || ''}`);
+}
 export function parseHash() {
+  movedHash();
   const raw = location.hash.replace(/^#\/?/, '');
   const [path, query = ''] = raw.split('?');
   const [route, ...rest] = path.split('/');
@@ -193,7 +199,7 @@ new MutationObserver(() => {
 bus.on('vehicle', () => {
   // pages showing one vehicle redraw for the new one
   if (mounted?.onVehicle) mounted.onVehicle();
-  else if (['footage', 'policies', 'jobs', 'bin', 'overview', 'drives', 'driving', 'map'].includes(mountedId)) render();
+  else if (['footage', 'policies', 'jobs', 'bin', 'overview', 'drives'].includes(mountedId)) render();
 });
 
 // ---------- live updates ----------
@@ -234,6 +240,7 @@ let palIndex = 0;
 
 function baseCommands() {
   const cmds = PAGES.map((p) => ({ group: 'Go to', label: p.label, hint: `g ${p.key}`, icon: p.icon, run: () => go(`#/${p.id}`) }));
+  for (const [to, label, ico, key] of SUB_KEYS) cmds.push({ group: 'Go to', label, hint: `g ${key}`, icon: ico, run: () => go(`#/${to}`) });
   for (const v of state.vehicles) cmds.push({ group: 'Vehicle', label: `Switch to ${v.name}`, icon: 'car', run: () => setVehicle(v.id) });
   const v = current();
   cmds.push(
@@ -313,7 +320,8 @@ $('#cmdk-btn').querySelector('.cmdk-kbd').textContent = /Mac|iPhone|iPad/.test(n
 // ---------- shortcuts ----------
 const GLOBAL_KEYS = [
   ['Ctrl/⌘ K', 'Command palette'], ['?', 'This sheet'], ['[', 'Collapse / expand the sidebar'], ['/', 'Focus the page filter'],
-  ...PAGES.map((p) => [`g ${p.key}`, `Go to ${p.label}`])
+  ...PAGES.map((p) => [`g ${p.key}`, `Go to ${p.label}`]),
+  ...SUB_KEYS.map(([, label, , key]) => [`g ${key}`, `Go to ${label}`])
 ];
 const PAGE_KEYS = {
   Footage: [['j / k', 'Move the cursor down / up'], ['Shift + j / k', 'Extend the selection'], ['x or Space', 'Select the row'], ['Ctrl/⌘ A', 'Select every row shown'], ['Enter or o', 'Play the row'], ['i', 'Raw JSON inspector'], ['p', 'Protect / unprotect'], ['Delete', 'Move the selection to the Recycle Bin'], ['Esc', 'Clear the selection']],
@@ -348,7 +356,8 @@ document.addEventListener('keydown', (e) => {
   if (Date.now() - gPending < 1200) {
     gPending = 0;
     const p = PAGES.find((x) => x.key === e.key.toLowerCase());
-    if (p) { e.preventDefault(); go(`#/${p.id}`); }
+    const sk = SUB_KEYS.find((x) => x[3] === e.key.toLowerCase());
+    if (p) { e.preventDefault(); go(`#/${p.id}`); } else if (sk) { e.preventDefault(); go(`#/${sk[0]}`); }
     return;
   }
   if (mounted?.onKey?.(e)) { e.preventDefault(); return; }

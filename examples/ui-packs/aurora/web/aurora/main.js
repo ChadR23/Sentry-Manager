@@ -15,20 +15,16 @@ import alerts from './pages/alerts.js';
 import settings from './pages/settings.js';
 import vehicles from './pages/vehicles.js';
 import drives from './pages/drives.js';
-import driving from './pages/driving.js';
-import map from './pages/map.js';
 import health from './pages/health.js';
 import account from './pages/account.js';
 
-const PAGES = { sky, footage, viewer, drives, driving, map, encoder, vehicles, nodes, policies, jobs, bin, alerts, health, account, settings };
+const PAGES = { sky, footage, viewer, drives, encoder, vehicles, nodes, policies, jobs, bin, alerts, health, account, settings };
 // [route, label, icon, key (g + key), primary on phones]
 const DOCK = [
   ['sky', 'Sky', 'sky', 's', true],
   ['footage', 'Footage', 'film', 'f', true],
   ['viewer', 'Viewer', 'cockpit', 'v', true],
   ['drives', 'Drives', 'route', 'r', false],
-  ['driving', 'Driving', 'speed', 'd', false],
-  ['map', 'Map', 'pin', 'm', false],
   ['encoder', 'Encoder', 'orbit', 'e', true],
   ['vehicles', 'Per car', 'orbit', 'c', false],
   '|',
@@ -42,6 +38,8 @@ const DOCK = [
   ['account', 'Account', 'key', 'u', false],
   ['settings', 'Settings', 'gear', ',', false]
 ];
+// shortcuts to a sub-tab: [address, label, key (g + key)]
+const SUB_KEYS = [['drives/driving', 'Driving (in Drives)', 'd'], ['drives/map', 'Map (in Drives)', 'm']];
 const LONG = { vehicles: 'Encoding per vehicle', bin: 'Recycle Bin', alerts: 'Notifications', sky: 'Sky (home)' };
 
 // ---------- the sky ----------
@@ -137,7 +135,11 @@ let active = null; // { route, ctl, win }
 let pending = new Set();
 let seq = 0;
 
+// pages that moved inside another as its sub-tab: their old addresses open them there
+const MOVED = { driving: 'drives/driving', map: 'drives/map' };
 function parseHash() {
+  const was = /^#\/?([\w-]+)\/?(\?.*)?$/.exec(location.hash);
+  if (was && MOVED[was[1]]) history.replaceState(null, '', `#/${MOVED[was[1]]}${was[2] || ''}`);
   const raw = location.hash.replace(/^#\/?/, '');
   const [path, qs = ''] = raw.split('?');
   const parts = path.split('/').filter(Boolean).map((p) => {
@@ -333,7 +335,7 @@ document.addEventListener('keydown', (e) => {
   }
   if (chord && Date.now() - chord < 1200) {
     chord = 0;
-    const hit = DOCK.find((d) => d !== '|' && d[3] === e.key.toLowerCase());
+    const hit = DOCK.find((d) => d !== '|' && d[3] === e.key.toLowerCase()) || SUB_KEYS.find((d) => d[2] === e.key.toLowerCase());
     if (hit) {
       e.preventDefault();
       go(`#/${hit[0]}`);
@@ -348,6 +350,7 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     infoDialog('Keyboard shortcuts', `<table class="keys"><tbody>
       ${DOCK.filter((d) => d !== '|').map(([route, label, , key]) => `<tr><td><kbd>g</kbd> <kbd>${esc(key)}</kbd></td><td>${esc(LONG[route] || label)}</td></tr>`).join('')}
+      ${SUB_KEYS.map(([, label, key]) => `<tr><td><kbd>g</kbd> <kbd>${esc(key)}</kbd></td><td>${esc(label)}</td></tr>`).join('')}
       <tr><td><kbd>?</kbd></td><td>This list</td></tr>
       <tr><td colspan="2" class="muted small">Viewer: <kbd>Space</kbd> play/pause · <kbd>←</kbd> <kbd>→</kbd> 5 s · <kbd>,</kbd> <kbd>.</kbd> one frame · <kbd>[</kbd> <kbd>]</kbd> previous/next clip · <kbd>-</kbd> <kbd>+</kbd> speed · <kbd>1</kbd>–<kbd>6</kbd> focus a camera, <kbd>0</kbd> all · <kbd>t</kbd> telemetry · <kbd>m</kbd> mirror the rear view · <kbd>f</kbd> full screen</td></tr>
       <tr><td colspan="2" class="muted small">Footage: <kbd>←</kbd> <kbd>→</kbd> move along the filmstrip of days.</td></tr>

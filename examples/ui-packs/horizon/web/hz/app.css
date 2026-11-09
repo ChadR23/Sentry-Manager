@@ -857,3 +857,9 @@ fieldset:disabled { opacity: 0.6; }
 .smb-test [data-result="ok"] { color: var(--grn); }
 .smb-test [data-result="bad"] { color: var(--red); }
 
+
+/* sub-tabs inside a page (Drives | Driving | Map, Policies | Per car): web/subTabs.js links in Horizon's segment strip */
+.sentry-subtabs.segs { display: flex; width: max-content; margin: 0 0 14px; }
+.segs a { display: inline-flex; align-items: center; min-height: 44px; min-width: 44px; padding: 0 14px; border-radius: 3px; color: var(--dim); font: 700 14px var(--sans); text-decoration: none; }
+.segs a:hover { color: var(--ink); background: rgba(255, 255, 255, 0.06); }
+.segs a.on { background: linear-gradient(100deg, rgba(61, 240, 255, 0.24), rgba(255, 63, 180, 0.26)); color: #fff; box-shadow: inset 0 0 0 1px rgba(61, 240, 255, 0.55); }

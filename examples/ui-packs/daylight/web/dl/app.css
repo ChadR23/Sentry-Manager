@@ -525,3 +525,12 @@ dialog.dlg[open] { animation: pop 240ms var(--ease) both; }
 .smb-test p { margin: 0; flex: 1 1 240px; }
 .smb-test [data-result="ok"] { color: var(--good); }
 .smb-test [data-result="bad"] { color: var(--bad); }
+
+/* sub-tabs inside a page (Drives | Driving | Map, Cleanup rules | Per car): web/subTabs.js links in Daylight's segmented control */
+.sentry-subtabs.seg { display: flex; width: max-content; max-width: 100%; margin: 0 0 18px; }
+.seg a { display: inline-flex; align-items: center; justify-content: center; border-radius: 999px; padding: 8px 16px; min-height: 44px; min-width: 44px; font: 600 15px var(--font); color: var(--text-2); text-decoration: none; }
+.seg a[aria-current="page"] { background: var(--surface); color: var(--accent); box-shadow: var(--shadow-1); }
+.seg a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.page.subtab-bar { padding-bottom: 0; }
+.page.subtab-bar .sentry-subtabs { margin: 0; }
+.page.subtab-bar + [data-subview] > .page { padding-top: 18px; }

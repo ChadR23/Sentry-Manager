@@ -8,10 +8,8 @@ const ROUTES = {
   home: { label: 'Today', icon: 'home', group: 'main', load: () => import('./pages/home.js') },
   footage: { label: 'Footage', icon: 'film', group: 'main', load: () => import('./pages/footage.js') },
   viewer: { label: 'Viewer', icon: 'playOutline', group: 'main', load: () => import('./pages/viewer.js') },
-  drives: { label: 'Drives', icon: 'route', group: 'main', desc: 'Every trip, day by day: tap one to watch it', load: () => import('./pages/drives.js') },
+  drives: { label: 'Drives', icon: 'route', group: 'main', desc: 'Every trip, how far you drove each week, and the map of events', load: () => import('./pages/drives.js') },
   encoder: { label: 'Encoder', icon: 'encoder', group: 'main', load: () => import('./pages/encoder.js') },
-  map: { label: 'Map', icon: 'map', group: 'care', desc: 'Where Sentry and Saved events happened', load: () => import('./pages/map.js') },
-  driving: { label: 'Driving', icon: 'speed', group: 'care', desc: 'How far and how long you drove each week', load: () => import('./pages/driving.js') },
   vehicles: { label: 'Encoding per vehicle', icon: 'encoder', group: 'main', desc: 'What each vehicle converts with', load: () => import('./pages/vehicles.js') },
   more: { label: 'More', icon: 'more', group: 'phone', load: () => import('./pages/more.js') },
   bin: { label: 'Recycle Bin', icon: 'trash', group: 'care', desc: 'Restore or delete for good', load: () => import('./pages/bin.js') },
@@ -24,7 +22,7 @@ const ROUTES = {
   server: { label: 'Server & logs', icon: 'server', group: 'setup', desc: 'CPU, memory, disks, temperatures, logs', load: () => import('./pages/server.js') },
   settings: { label: 'Settings', icon: 'gear', group: 'setup', desc: 'Vehicles, places, account, look, security', load: () => import('./pages/settings.js') }
 };
-export const MORE_ROUTES = ['drives', 'map', 'driving', 'vehicles', 'bin', 'policies', 'jobs', 'notifications', 'nodes', 'health', 'account', 'server', 'settings'];
+export const MORE_ROUTES = ['drives', 'vehicles', 'bin', 'policies', 'jobs', 'notifications', 'nodes', 'health', 'account', 'server', 'settings'];
 export const routeInfo = (r) => ROUTES[r];
 
 // ---------- the look ----------
@@ -87,7 +85,14 @@ export function updateBadges() {
 const view = $('#view');
 const current = { route: 'home', cleanup: [], seq: 0 };
 
+// pages that moved inside another as its sub-tab: their old addresses open them there
+const MOVED = { driving: 'drives/driving', map: 'drives/map' };
+function movedHash() {
+  const was = /^#\/?([\w-]+)\/?(\?.*)?$/.exec(location.hash);
+  if (was && MOVED[was[1]]) history.replaceState(null, '', `#/${MOVED[was[1]]}${was[2] || ''}`);
+}
 function parseHash() {
+  movedHash();
   const raw = location.hash.replace(/^#\/?/, '');
   const [pathPart, queryPart = ''] = raw.split('?');
   const parts = pathPart.split('/').filter(Boolean).map((p) => { try { return decodeURIComponent(p); } catch { return p; } });
