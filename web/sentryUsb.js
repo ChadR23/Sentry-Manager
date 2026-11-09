@@ -257,6 +257,15 @@ function selecting(el) {
  * the server's; every 60 s while Sentry USB is sending. el stays empty and
  * hidden when there is nothing to show (no status file, an older server).
  */
+// open or closed as the viewer last left it (this browser), open at first
+const OPEN_KEY = 'sentryUsb.open';
+function openPref() {
+  try { return localStorage.getItem(OPEN_KEY) !== '0'; } catch { return true; }
+}
+function saveOpen(open) {
+  try { localStorage.setItem(OPEN_KEY, open ? '1' : '0'); } catch { /* not kept: fine */ }
+}
+
 export function mountSentryUsb(el, vehicle, { tagClass, h24 = () => false } = {}) {
   let timer = null;
   let dead = false;
@@ -266,7 +275,8 @@ export function mountSentryUsb(el, vehicle, { tagClass, h24 = () => false } = {}
   const draw = (s) => {
     if (dead || !el.isConnected) return;
     if (selecting(el)) { clearTimeout(timer); timer = setTimeout(() => draw(s), 2000); return; }
-    const open = Boolean(el.querySelector('details[data-usb]')?.open);
+    const shown = el.querySelector('details[data-usb]');
+    const open = shown ? shown.open : openPref();
     const view = sentryUsbView(s, { timeZone: vehicle?.timezone, h24: Boolean(h24()) });
     const html = sentryUsbHtml(view, { open, tagClass, note });
     if (html !== last) { el.innerHTML = html; last = html; }
@@ -309,6 +319,9 @@ export function mountSentryUsb(el, vehicle, { tagClass, h24 = () => false } = {}
     draw(cache.get(id)?.s || { present: false });
   };
   const submit = (ev) => { if (ev.target.closest?.('[data-usb-backfill]')) ev.preventDefault(); };
+  // toggle does not bubble: caught on the way down
+  const toggle = (ev) => { if (ev.target?.matches?.('details[data-usb]')) saveOpen(ev.target.open); };
+  el.addEventListener('toggle', toggle, true);
   el.addEventListener('submit', submit);
   el.addEventListener('change', change);
   addCss();
@@ -319,6 +332,6 @@ export function mountSentryUsb(el, vehicle, { tagClass, h24 = () => false } = {}
   load();
   return {
     refresh: load,
-    destroy() { dead = true; clearTimeout(timer); el.removeEventListener('submit', submit); el.removeEventListener('change', change); }
+    destroy() { dead = true; clearTimeout(timer); el.removeEventListener('submit', submit); el.removeEventListener('change', change); el.removeEventListener('toggle', toggle, true); }
   };
 }
