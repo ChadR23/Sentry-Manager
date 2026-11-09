@@ -4,8 +4,9 @@
 // and the files of each with their codecs and downloads.
 
 import {
-  $, $$, esc, icon, api, current, vehiclePicker, bytes, plural, dayParts, dayTitle, timeOf, humanize, toast, confirmDialog, empty, loadVehicles, footMinutes
+  $, $$, esc, icon, api, current, vehiclePicker, bytes, plural, dayParts, dayTitle, timeOf, humanize, toast, confirmDialog, empty, loadVehicles, footMinutes, hourOpts
 } from '../core.js';
+import { mountSentryUsb } from '/web/sentryUsb.js';
 
 // "Also delete its CAN data" in a footage delete confirmation: shown only when a CAN Bridge key is
 // mapped to the car (can: the server's count, null otherwise), unticked; those logs go for good, now
@@ -53,17 +54,23 @@ const ADVICE = 'Check the Sentry USB: its Logs page, its archive settings and it
 // the green "CAN" tag (the Nerd panel's green): CAN Bridge data covers the recording
 const CAN_TITLE = 'CAN Bridge data for this footage (car data in the Viewer)';
 
+// the Sentry USB line's tag, in this pack's chips (web/sentryUsb.js)
+const USB_TAG = { ok: 'chip green', busy: 'chip teal', wait: 'chip slate', bad: 'chip amber', stale: 'chip' };
+// the day's archive tag: still arriving, waiting for Sentry USB (the car left mid-transfer) or partly archived
+const gapLabel = (a) => (!a ? '' : a.state === 'partial' ? `Partly archived?${a.missingMinutes ? ` ~${a.missingMinutes} min missing` : ''}` : a.state === 'waiting' ? 'Waiting for Sentry USB' : 'Still arriving');
+const GAP_TONE = { partial: 'amber', waiting: 'slate' };
+
 function frame(v, d, on) {
   const p = dayParts(d.day);
   const cats = Object.entries(d.byCategory || {}).filter(([, n]) => n);
   const enc = d.encodedRecordings ? (d.encodedRecordings === d.recordings ? 'all encoded' : `${d.encodedRecordings}/${d.recordings} encoded`) : '';
   const ix = (d.speedIndex?.indexed ? (d.speedIndex.indexed >= d.speedIndex.clips ? 'Indexed' : `Indexed ${d.speedIndex.indexed}/${d.speedIndex.clips}`) : '');
   // footage the car recorded that is not on the share yet (the Sentry USB's archive)
-  const gap = d.archive ? (d.archive.state === 'partial' ? `Partly archived?${d.archive.missingMinutes ? ` ~${d.archive.missingMinutes} min missing` : ''}` : 'Still arriving') : '';
+  const gap = gapLabel(d.archive);
   return `<button class="frame${on ? ' on' : ''}" type="button" data-day="${esc(d.day)}" aria-pressed="${on}" aria-label="${esc(dayTitle(d.day))}: ${plural(d.recordings, 'recording')}, ${esc(bytes(d.bytes))}${gap ? `, ${esc(gap)}` : ''}">
     <div class="frame-pic">${d.thumbId ? `<img class="thumb-img" loading="lazy" alt="" src="${thumb(v, d.thumbId)}">` : ''}<div class="frame-date"><b>${esc(p.dd)}</b><span>${esc(p.mon)} · ${esc(p.wd)}</span></div></div>
     <div class="frame-info"><span class="frame-cats">${cats.map(([c, n]) => `<span class="chip ${CAT_CHIP[c] || ''}" style="padding:1px 8px;font-size:12px"><i class="dot cat-${esc(c)}"></i>${n}</span>`).join('')}</span>
-      <span class="muted">${footMinutes(d.minutes)} · ${esc(bytes(d.bytes))}${d.protected ? ` · ${d.protected} protected` : ''}${enc ? ` · ${enc}` : ''}</span>${ix ? `<span class="chip violet" style="padding:1px 8px;font-size:12px;align-self:flex-start" title="Speeds read for the Viewer's speed graph">${esc(ix)}</span>` : ''}${gap ? `<span class="chip gap ${d.archive.state === 'partial' ? 'amber' : 'teal'}" title="${esc(d.archive.summary)}">${esc(gap)}</span>` : ''}${d.canRecordings > 0 ? `<span class="chip can" style="padding:1px 8px;font-size:12px;align-self:flex-start" title="${esc(`CAN Bridge data for ${plural(d.canRecordings, 'recording')} of this day (car data in the Viewer)`)}">${d.canRecordings === d.recordings ? 'CAN' : `CAN ${d.canRecordings}/${d.recordings}`}</span>` : ''}</div>
+      <span class="muted">${footMinutes(d.minutes)} · ${esc(bytes(d.bytes))}${d.protected ? ` · ${d.protected} protected` : ''}${enc ? ` · ${enc}` : ''}</span>${ix ? `<span class="chip violet" style="padding:1px 8px;font-size:12px;align-self:flex-start" title="Speeds read for the Viewer's speed graph">${esc(ix)}</span>` : ''}${gap ? `<span class="chip gap ${GAP_TONE[d.archive.state] || 'teal'}" title="${esc(d.archive.summary)}">${esc(gap)}</span>` : ''}${d.canRecordings > 0 ? `<span class="chip can" style="padding:1px 8px;font-size:12px;align-self:flex-start" title="${esc(`CAN Bridge data for ${plural(d.canRecordings, 'recording')} of this day (car data in the Viewer)`)}">${d.canRecordings === d.recordings ? 'CAN' : `CAN ${d.canRecordings}/${d.recordings}`}</span>` : ''}</div>
   </button>`;
 }
 
@@ -129,6 +136,7 @@ export default {
         <label class="field" style="margin-left:auto">Jump to a date<input class="input" type="date" id="jump"></label>
       </div>
       <p class="muted small" id="foot-sum"></p>
+      <div id="foot-usb" hidden></div>
       <div class="filmstrip-wrap">
         <button class="btn icon strip-nav l glass" type="button" data-strip="-1" aria-label="Scroll to newer days">${icon('left')}</button>
         <div class="filmstrip" id="strip" role="group" aria-label="Days, newest first"></div>
@@ -137,6 +145,7 @@ export default {
       <div id="day"></div>`;
     const strip = $('#strip', body);
     const dayBox = $('#day', body);
+    const usb = mountSentryUsb($('#foot-usb', body), v, { tagClass: (tone) => USB_TAG[tone], h24: () => hourOpts().hour12 === false });
 
     const q = (extra = {}) => new URLSearchParams({ category: keep.category, ...extra });
 
@@ -196,7 +205,7 @@ export default {
           <button class="btn" type="button" data-select-all>${icon('select')} Select all</button>
           <button class="btn" type="button" data-trash-day="day">${icon('trash')} Delete this day</button>
           <button class="btn" type="button" data-trash-day="through">Delete through this date</button></div></div>
-        ${d?.archive ? `<p class="gap-note${d.archive.state === 'partial' ? ' amber' : ''}">${esc(d.archive.summary)}${d.archive.state === 'partial' ? ` ${esc(d.archive.advice || ADVICE)}` : ''}</p>` : ''}
+        ${d?.archive ? `<p class="gap-note${d.archive.state === 'partial' ? ' amber' : d.archive.state === 'waiting' ? ' slate' : ''}">${esc(d.archive.summary)}${d.archive.state === 'partial' ? ` ${esc(d.archive.advice || ADVICE)}` : ''}</p>` : ''}
         ${selected.size ? `<div class="selbar" role="region" aria-label="Selection"><b>${selected.size} selected</b><span class="spacer"></span>
           <button class="btn sm" type="button" data-bulk="protect">${icon('lock')} Protect</button>
           <button class="btn sm" type="button" data-bulk="unprotect"${sel.some((r) => r.protected) ? '' : ' disabled'}>${icon('unlock')} Unprotect</button>
@@ -374,10 +383,11 @@ export default {
     }
     return {
       async refresh() {
+        usb.refresh();
         await loadDays();
         await loadDay();
       },
-      destroy() { dead = true; }
+      destroy() { dead = true; usb.destroy(); }
     };
   }
 };

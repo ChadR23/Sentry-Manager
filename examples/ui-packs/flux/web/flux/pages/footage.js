@@ -1,7 +1,14 @@
 // Footage: days on the left, a dense sortable/filterable recordings table on the right,
 // keyboard bulk selection and a raw-JSON inspector drawer.
-import { esc, api, state, current, bytes, plural, dayTitle, ago, icon, toast, confirmDialog, busy, jsonHtml, debounce, store, CAMERAS, CAMERA_LABEL, CAMERA_SHORT, humanize, liveDraw, wall, wallDay, footMinutes, trackLength } from '../core.js';
+import { esc, api, state, current, bytes, plural, dayTitle, ago, icon, toast, confirmDialog, busy, jsonHtml, debounce, store, CAMERAS, CAMERA_LABEL, CAMERA_SHORT, humanize, liveDraw, wall, wallDay, footMinutes, trackLength, hourOpts } from '../core.js';
 import { split, seg, wireSeg, drawer, empty, chip } from '../ui.js';
+import { mountSentryUsb } from '/web/sentryUsb.js';
+
+// the Sentry USB line's tag, in this pack's chips (web/sentryUsb.js)
+const USB_TAG = { ok: 'chip green', busy: 'chip cyan', wait: 'chip slate', bad: 'chip amber', stale: 'chip' };
+// the day's archive tag: partly archived (amber), waiting for Sentry USB (the car left mid-transfer; neutral) or still arriving
+const GAP_TONE = { partial: ' amber', waiting: ' slate' };
+const gapLabel = (a) => (a.state === 'partial' ? `Partly archived?${a.missingMinutes ? ` ~${a.missingMinutes} min missing` : ''}` : a.state === 'waiting' ? 'Waiting for Sentry USB' : 'Still arriving');
 
 // "Also delete its CAN data" in a footage delete confirmation: shown only when a CAN Bridge key is
 // mapped to the car (can: the server's count, null otherwise), unticked; those logs go for good, now
@@ -75,6 +82,7 @@ export default {
           <a class="btn cyan" href="#/encoder?new=1">${icon('encoder')}Review conversion</a>
         </div>
       </div>
+      <div id="fo-usb" hidden></div>
       <div class="toolbar wrap" role="search">
         ${seg('cat', [['all', 'All'], ['Recent', 'Recent'], ['Sentry', 'Sentry'], ['Saved', 'Saved'], ['Other', 'Other']], f.category, 'Category')}
         ${seg('conv', [['all', 'Any codec'], ['no', 'Not converted'], ['yes', 'Converted']], f.conv, 'Converted')}
@@ -91,6 +99,7 @@ export default {
       </div>`;
     split(el.querySelector('#fo-split'), { id: 'footage', initial: 260, min: 230, max: 520 });
     const $ = (s) => el.querySelector(s);
+    const usb = mountSentryUsb($('#fo-usb'), v, { tagClass: (tone) => USB_TAG[tone], h24: () => hourOpts().hour12 === false });
 
     // ---------- loading ----------
     async function loadDays(live = false) {
@@ -155,8 +164,8 @@ export default {
             <div class="enc-line"><span class="enc-track"><span style="width:${encP.toFixed(1)}%"></span></span><span class="small faint num">${d.encoded}/${d.clips} encoded</span></div>
             ${ix ? `<div><span class="chip violet" title="Speeds read for the Viewer's speed graph">${ix}</span></div>` : ''}
             ${d.canRecordings > 0 ? `<div><span class="chip can" title="${esc(`CAN Bridge data for ${plural(d.canRecordings, 'recording')} of this day (car data in the Viewer)`)}">${(d.canRecordings === d.recordings ? 'CAN' : `CAN ${d.canRecordings}/${d.recordings}`)}</span></div>` : ''}
-            ${d.archive ? `<div><span class="chip gap${d.archive.state === 'partial' ? ' amber' : ''}" title="${esc(d.archive.summary)}">${d.archive.state === 'partial' ? `Partly archived?${d.archive.missingMinutes ? ` ~${d.archive.missingMinutes} min missing` : ''}` : 'Still arriving'}</span></div>` : ''}
-            ${d.archive && f.date === d.day ? `<p class="note small gap-note${d.archive.state === 'partial' ? ' amber' : ''}">${esc(d.archive.summary)}${d.archive.state === 'partial' ? ` ${esc(d.archive.advice || ARCHIVE_ADVICE)}` : ''}</p>` : ''}
+            ${d.archive ? `<div><span class="chip gap${GAP_TONE[d.archive.state] || ''}" title="${esc(d.archive.summary)}">${gapLabel(d.archive)}</span></div>` : ''}
+            ${d.archive && f.date === d.day ? `<p class="note small gap-note${GAP_TONE[d.archive.state] || ''}">${esc(d.archive.summary)}${d.archive.state === 'partial' ? ` ${esc(d.archive.advice || ARCHIVE_ADVICE)}` : ''}</p>` : ''}
             <div class="day-actions">
               <button class="btn sm" type="button" data-play-day="${esc(d.day)}" aria-label="Play ${esc(d.day)}">${icon('play')}Play</button>
               <button class="btn sm" type="button" data-del-day="${esc(d.day)}">Delete day</button>
@@ -451,8 +460,9 @@ export default {
     await Promise.all([loadDays(), loadRecs()]);
 
     return {
-      unmount() { alive = false; },
+      unmount() { alive = false; usb.destroy(); },
       onTopics(topics) {
+        if (topics.includes('inventory')) usb.refresh();
         if (topics.includes('inventory') || topics.includes('bin')) { loadDays(true); loadRecs(true); }
       },
       onKey(e) {

@@ -1,6 +1,13 @@
 // Footage as a music library: days are albums, recordings are the tracks of a
 // playlist, each with a play button and a duration.
-import { h, ico, api, car, size, count, since, dayName, words, wall, wallDay, toast, ask, sheet, act, local, segs, onSegs, pill, debounce, CAMS, CAM_NAME, CAM_TAG, CODEC_NAME, paint, liveDraw, footMinutes, trackLength } from '../core.js';
+import { h, ico, api, car, size, count, since, dayName, words, wall, wallDay, toast, ask, sheet, act, local, segs, onSegs, pill, debounce, CAMS, CAM_NAME, CAM_TAG, CODEC_NAME, paint, liveDraw, footMinutes, trackLength, hourOpts } from '../core.js';
+import { mountSentryUsb } from '/web/sentryUsb.js';
+
+// the Sentry USB line's tag, in this pack's pills (web/sentryUsb.js)
+const USB_TAG = { ok: 'pill grn', busy: 'pill cyan', wait: 'pill slate', bad: 'pill org', stale: 'pill' };
+// the day's archive tag: partly archived (orange), waiting for Sentry USB (the car left mid-transfer; neutral) or still arriving
+const GAP_TONE = { partial: 'org', waiting: 'slate' };
+const GAP_WORD = { partial: 'Partly archived?', waiting: 'Waiting for Sentry USB' };
 
 // "Also delete its CAN data" in a footage delete confirmation: shown only when a CAN Bridge key is
 // mapped to the car (can: the server's count, null otherwise), unticked; those logs go for good, now
@@ -60,6 +67,7 @@ export default {
         <div><h1 class="chrome">Footage</h1><p id="ft-sum">${h(v.name)} · loading the library…</p></div>
         <div class="pacts"><button class="btn" type="button" id="ft-scan">${ico('refresh')}Refresh inventory</button><button class="btn" type="button" id="ft-index" title="Read every clip's speed now, for the Viewer's speed graph">${ico('hud')}Index speeds</button><a class="btn" href="#/encoder?new=1">${ico('engine')}Convert</a></div>
       </section>
+      <div id="ft-usb" hidden></div>
       <section class="hud panel ft-filters" aria-label="Filters">
         <div class="row">
           ${segs('cat', [['all', 'All'], ['Recent', 'Recent'], ['Sentry', 'Sentry'], ['Saved', 'Saved'], ['Other', 'Other']], f.cat, 'Category')}
@@ -78,6 +86,7 @@ export default {
         </section>
       </div>`;
     const $ = (s) => el.querySelector(s);
+    const usb = mountSentryUsb($('#ft-usb'), v, { tagClass: (tone) => USB_TAG[tone], h24: () => hourOpts().hour12 === false });
 
     // ---------- data ----------
     async function loadDays(live = false) {
@@ -131,7 +140,7 @@ export default {
           // the speed graph's index for this day
           const ix = (d.speedIndex?.indexed ? (d.speedIndex.indexed >= d.speedIndex.clips ? 'Indexed' : `Indexed ${d.speedIndex.indexed}/${d.speedIndex.clips}`) : '');
           // footage the car recorded that is not on the share yet (the Sentry USB's archive)
-          const gap = d.archive ? `<span class="album-gap"><span class="pill ${d.archive.state === 'partial' ? 'org' : 'cyan'}" title="${h(d.archive.summary)}">${d.archive.state === 'partial' ? 'Partly archived?' : 'Still arriving'}</span>${d.archive.missingMinutes ? `<span class="tiny faint">~${d.archive.missingMinutes} min missing</span>` : ''}</span>` : '';
+          const gap = d.archive ? `<span class="album-gap"><span class="pill ${GAP_TONE[d.archive.state] || 'cyan'}" title="${h(d.archive.summary)}">${GAP_WORD[d.archive.state] || 'Still arriving'}</span>${d.archive.missingMinutes ? `<span class="tiny faint">~${d.archive.missingMinutes} min missing</span>` : ''}</span>` : '';
           return `<button type="button" class="album${f.day === d.day ? ' on' : ''}" data-day="${h(d.day)}" aria-pressed="${f.day === d.day}">
             <span class="album-art" aria-hidden="true">${d.thumbId ? `<img alt="" loading="lazy" src="${thumbUrl(v.id, d.thumbId)}">` : ico('film')}</span>
             <span class="album-t"><b>${h(dayName(d.day))}</b><span class="small dim">${count(d.recordings, 'track')} · ${footMinutes(d.minutes)} · ${size(d.bytes)}</span>
@@ -163,7 +172,7 @@ export default {
           <span class="tiny faint pl-kind">${f.day ? 'DAY' : 'LIBRARY'} · ${h(v.name)}</span>
           <h2 class="chrome pl-title">${h(f.day ? dayName(f.day, true) : 'All days')}</h2>
           <p class="small dim">${count(total, 'track')} · ${footMinutes(mins)} · ${size(b)}${f.cat !== 'all' ? ` · ${h(f.cat)} only` : ''}${f.prot ? ' · protected only' : ''}</p>
-          ${d?.archive ? `<p class="note small gap-note${d.archive.state === 'partial' ? ' org' : ''}">${h(d.archive.summary)}${d.archive.state === 'partial' ? ` ${h(d.archive.advice || ARCHIVE_ADVICE)}` : ''}</p>` : ''}
+          ${d?.archive ? `<p class="note small gap-note${d.archive.state === 'partial' ? ' org' : d.archive.state === 'waiting' ? ' slate' : ''}">${h(d.archive.summary)}${d.archive.state === 'partial' ? ` ${h(d.archive.advice || ARCHIVE_ADVICE)}` : ''}</p>` : ''}
           <div class="row">
             <button class="btn go" type="button" id="ft-playall"${recs.length ? '' : ' disabled'}>${ico('play')}${f.day ? 'Play day' : 'Play newest day'}</button>
             ${f.day ? `<button class="btn danger" type="button" id="ft-delday">${ico('bin')}Move day to Bin</button><button class="btn danger" type="button" id="ft-delthru">${ico('bin')}This day and older</button>` : ''}
@@ -355,8 +364,11 @@ export default {
       r?.querySelector('.tk-play')?.focus({ preventScroll: true });
     }
     return {
-      unmount() { alive = false; },
-      onTopics(t) { if (t.includes('inventory') || t.includes('bin')) { loadDays(true); loadRecs(true); } },
+      unmount() { alive = false; usb.destroy(); },
+      onTopics(t) {
+        if (t.includes('inventory')) usb.refresh();
+        if (t.includes('inventory') || t.includes('bin')) { loadDays(true); loadRecs(true); }
+      },
       keys: [['j / k', 'Next / previous track'], ['Enter', 'Play the track'], ['x', 'Select the track'], ['p', 'Protect / unprotect'], ['Delete', 'Move to the Recycle Bin'], ['i', 'Track details'], ['/', 'Search']],
       onKey(e) {
         const r = shown[f.cur];

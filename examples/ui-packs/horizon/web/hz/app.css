@@ -170,6 +170,13 @@
 .pill.grn { color: #b5ffd9; border-color: rgba(93, 255, 176, 0.6); background: rgba(93, 255, 176, 0.08); }
 .pill.red { color: #ffc2cf; border-color: rgba(255, 90, 120, 0.7); background: rgba(255, 90, 120, 0.12); }
 .pill.can { color: #7dff8a; border-color: #3c6b3f; background: #1f2a1f; } /* the Nerd panel's green: CAN Bridge data */
+.pill.slate { color: #d3dcec; border-color: rgba(160, 178, 210, 0.55); background: rgba(160, 178, 210, 0.1); } /* waiting for Sentry USB: neutral, nothing lost */
+.note.slate { border-color: #a0b2d2; background: rgba(160, 178, 210, 0.08); color: #dfe6f2; }
+/* the Sentry USB line under the title (web/sentryUsb.js): a slim HUD strip */
+.usb-status { margin: 0; background: var(--glass); border: 1px solid var(--line); border-radius: var(--r); box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.05); color: var(--dim); font-size: 14px; }
+.usb-status summary { padding: 9px 16px; }
+.usb-status .usb-details { padding: 2px 16px 14px; }
+.usb-status .usb-details dt { text-transform: uppercase; letter-spacing: 0.08em; font-size: 11px; }
 .bar { display: block; height: 8px; border-radius: 4px; background: rgba(255, 255, 255, 0.08); overflow: hidden; min-width: 40px; }
 .bar > i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--cyan), var(--mag)); transition: width 0.4s; }
 .bar.org > i { background: linear-gradient(90deg, var(--yel), var(--org)); }

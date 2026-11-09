@@ -1193,6 +1193,8 @@
     const v = current();
     const f = state.footage;
     let html = head('Your archive workspace', 'Footage') + pills();
+    f.usb?.destroy();
+    f.usb = null;
     if (!v) {
       page.innerHTML = `${html}<div class="empty">Add a vehicle in Settings first.</div>`;
       return;
@@ -1221,6 +1223,7 @@
         <label class="field">Capture date<input class="input" type="date" id="f-date" value="${esc(f.date)}"${data.dates.length ? ` min="${data.dates[data.dates.length - 1]}" max="${data.dates[0]}"` : ''}></label>
         ${f.date ? '<button class="btn ghost" id="f-clear">Clear date</button>' : ''}
       </div>
+      <div id="usb-status" hidden></div>
       <p class="hint">${plural(data.total, 'day')} · ${plural(data.recordings, 'recording')}${data.scanning ? ' · scanning…' : ''} · capture times use the vehicle timezone${data.scannedAt ? ` · inventory ${ago(data.scannedAt)}` : ''}</p>
       <div class="selpanel"><div class="row">
         <b class="count">${sel.length} selected</b>
@@ -1243,6 +1246,7 @@
       }
     }
     page.innerHTML = html;
+    mountUsb(v);
 
     $('f-cat').onchange = (e) => { f.category = e.target.value; f.offset = 0; render(); };
     $('f-date').onchange = (e) => { f.date = e.target.value; f.offset = 0; if (f.date) f.open.add(f.date); render(); };
@@ -1282,6 +1286,19 @@
     });
     for (const id of f.expanded) loadFiles(v, id);
   };
+
+  /** The Sentry USB line (web/sentryUsb.js): what the Pi in the car last archived, under the filters. */
+  const USB_TAG = { ok: 'green', busy: 'blue', wait: 'slate', bad: 'amber', stale: '' };
+  function mountUsb(v) {
+    const el = $('usb-status');
+    if (!el) return;
+    const f = state.footage;
+    import('/web/sentryUsb.js').then((m) => {
+      if (!el.isConnected) return;
+      f.usb?.destroy();
+      f.usb = m.mountSentryUsb(el, v, { tagClass: (tone) => `chip ${USB_TAG[tone] || ''}`, h24: () => clockPref.h24 });
+    }, () => {});
+  }
 
   const DAYS_PER_PAGE = 30;
   const CODEC_NAMES = { h265: 'H.265', av1: 'AV1', h264: 'H.264' };
@@ -1352,14 +1369,15 @@
   function dayArchiveChip(d, open) {
     const a = d.archive;
     if (!a) return '';
-    const label = a.state === 'filling' ? 'Still arriving' : `Partly archived?${a.missingMinutes ? ` ~${a.missingMinutes} min missing` : ''}`;
-    return `<button type="button" class="chip gap${a.state === 'filling' ? '' : ' amber'}" data-gap aria-expanded="${open}" aria-controls="gap-${esc(d.day)}" title="${esc(a.summary)}"><span class="cdot"></span>${esc(label)}</button>`;
+    const label = a.state === 'filling' ? 'Still arriving' : a.state === 'waiting' ? 'Waiting for Sentry USB' : `Partly archived?${a.missingMinutes ? ` ~${a.missingMinutes} min missing` : ''}`;
+    const tone = a.state === 'partial' ? ' amber' : a.state === 'waiting' ? ' wait' : '';
+    return `<button type="button" class="chip gap${tone}" data-gap aria-expanded="${open}" aria-controls="gap-${esc(d.day)}" title="${esc(a.summary)}"><span class="cdot"></span>${esc(label)}</button>`;
   }
   /** The evidence in words, in the opened day. */
   function dayArchiveNote(d) {
     const a = d.archive;
     if (!a) return '';
-    return `<p class="note gap-note${a.state === 'filling' ? '' : ' amber'}" id="gap-${esc(d.day)}">${esc(a.summary)}${a.state === 'partial' ? ` ${esc(a.advice || ARCHIVE_ADVICE)}` : ''}</p>`;
+    return `<p class="note gap-note${a.state === 'partial' ? ' amber' : a.state === 'waiting' ? ' wait' : ''}" id="gap-${esc(d.day)}">${esc(a.summary)}${a.state === 'partial' ? ` ${esc(a.advice || ARCHIVE_ADVICE)}` : ''}</p>`;
   }
 
   function dayCard(v, d) {

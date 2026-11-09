@@ -1,9 +1,14 @@
 // Footage: a calendar of days with pictures. Tap a day to see what the car
 // recorded, play it, keep it safe (protect) or move it to the Recycle Bin.
 
-import { api, esc, enc, icon, bytes, plural, dayTitle, dayShort, niceTime, CATEGORY, CODEC, humanize, chip, emptyState, confirmDialog, toast, fail, busy, ago, store, liveDraw, wall, footMinutes } from '../core.js';
+import { api, esc, enc, icon, bytes, plural, dayTitle, dayShort, niceTime, CATEGORY, CODEC, humanize, chip, emptyState, confirmDialog, toast, fail, busy, ago, store, liveDraw, wall, footMinutes, hourOpts } from '../core.js';
 import { state, vehicle, setVehicle, vehiclePicker, loadVehicles } from '../state.js';
 import { go } from '../app.js';
+import { mountSentryUsb } from '/web/sentryUsb.js';
+
+// the Sentry USB line's tag, in this pack's chips (web/sentryUsb.js)
+const USB_TAG = { ok: 'chip chip-good', busy: 'chip chip-teal', wait: 'chip chip-slate', bad: 'chip chip-warn', stale: 'chip chip-grey' };
+let usb = null;
 
 // "Also delete its CAN data" in a footage delete confirmation: shown only when a CAN Bridge key is
 // mapped to the car (can: the server's count, null otherwise), unticked; those logs go for good, now
@@ -167,13 +172,15 @@ function archiveChip(d) {
   const a = d.archive;
   if (!a) return '';
   if (a.state === 'filling') return `<span class="chip chip-grey chip-gap" title="${esc(a.summary)}">Still arriving</span>`;
+  // the car drove off mid-transfer: nothing is lost, the clips stay on the Pi (neutral, not a warning)
+  if (a.state === 'waiting') return `<span class="chip chip-slate chip-gap" title="${esc(a.summary)}">Waiting for Sentry USB</span>`;
   return `<span class="chip chip-warn chip-gap" title="${esc(a.summary)}">${icon('alert')}<span>Partly archived?${a.missingMinutes ? ` ~${a.missingMinutes} min missing` : ''}</span></span>`;
 }
 const ADVICE = 'Check the Sentry USB: its Logs page, its archive settings and its Wi-Fi to the NAS. Clips it recycles before copying them are lost.';
 /** The evidence in words, on the day's own page (a tag's tooltip never shows on a phone). */
 function archiveNote(a) {
   if (!a) return '';
-  return `<div class="card gap-note${a.state === 'partial' ? ' warn' : ''}" role="note">${a.state === 'partial' ? icon('alert') : ''}<p>${esc(a.summary)}${a.state === 'partial' ? ` ${esc(a.advice || ADVICE)}` : ''}</p></div>`;
+  return `<div class="card gap-note${a.state === 'partial' ? ' warn' : a.state === 'waiting' ? ' slate' : ''}" role="note">${a.state === 'partial' ? icon('alert') : ''}<p>${esc(a.summary)}${a.state === 'partial' ? ` ${esc(a.advice || ADVICE)}` : ''}</p></div>`;
 }
 
 function dayCard(v, d) {
@@ -229,6 +236,7 @@ async function renderDays(ctx, v) {
     view.innerHTML = `<div class="page">
       <div class="page-head"><div><h1>Footage</h1><p class="lede">${plural(data.total, 'day')} · ${plural(data.recordings, 'recording')}${data.scannedAt ? ` · up to date as of ${ago(data.scannedAt)}` : ''}${data.scanning ? ' · looking for new footage…' : ''}</p></div>
         <div class="head-actions">${vehiclePicker()}<button class="btn" type="button" id="scan">${icon('refresh')} <span>Refresh</span></button><button class="btn" type="button" id="speed-index" title="Read every clip's speed now, for the Viewer's speed graph">${icon('refresh')} <span>Index speeds</span></button></div></div>
+      <div id="dl-usb" hidden></div>
       <div class="toolbar"><div class="filter-chips" role="group" aria-label="Show">
         ${CATS.map(([k, label]) => `<button type="button" class="filter-chip" data-cat="${k}" aria-pressed="${view$.category === k}">${label}</button>`).join('')}
         <button type="button" class="filter-chip" id="only-prot" aria-pressed="${view$.onlyProtected}">${icon('lock')} Protected</button></div></div>
@@ -241,6 +249,8 @@ async function renderDays(ctx, v) {
         </div>
       </div></div>`;
     wire();
+    usb?.destroy();
+    usb = mountSentryUsb(view.querySelector('#dl-usb'), v, { tagClass: (tone) => USB_TAG[tone], h24: () => hourOpts().hour12 === false });
   };
   const refresh = async () => {
     try { data = await load(); } catch (err) { return fail(err); }
