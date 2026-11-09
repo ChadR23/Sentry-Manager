@@ -1705,11 +1705,22 @@ async function main() {
   const DASH_TYPES = { small: 1, wide: 3, gauge: 1, state: 1, list: 0 };
   // a box's spot for wide and narrow screens: x a share of the room across the page (0 to 1), y a
   // share of the room down it, and top its place on the page in px (the page, not the window: it
-  // scrolls with what is under it; a spot saved before has no top)
+  // scrolls with what is under it; a spot saved before has no top). The box is placed from its
+  // spot relative to the cameras, which
+  // reflow with the window: h (l, r, or R past their right) and v (t, b, or B below them), the
+  // corner of them nearest the box, dx and dy its px from that corner, over whether it was put on the video, and bar the same for a
+  // List put by a floating bar (web/statDash.js: spotFor). A spot may have either form, or both.
   const SCREENS = ['wide', 'narrow'];
   const share = (v) => Math.max(0, Math.min(1, v));
-  const cleanSpots = (o) => Object.fromEntries(SCREENS.map((k) => [k, o?.[k]]).filter(([, p]) => Number.isFinite(p?.x) && Number.isFinite(p?.y))
-    .map(([k, p]) => [k, { x: share(p.x), y: share(p.y), ...(Number.isFinite(p.top) ? { top: Math.round(Math.max(0, Math.min(100000, p.top))) } : {}) }]));
+  const px = (v) => Math.round(Math.max(-100000, Math.min(100000, v)));
+  const anchored = (a) => ['l', 'r', 'R'].includes(a?.h) && ['t', 'b', 'B'].includes(a?.v) && Number.isFinite(a?.dx) && Number.isFinite(a?.dy);
+  const cleanAnchor = (a) => ({ h: a.h, v: a.v, dx: px(a.dx), dy: px(a.dy) });
+  const cleanSpots = (o) => Object.fromEntries(SCREENS.map((k) => [k, o?.[k]]).filter(([, p]) => (Number.isFinite(p?.x) && Number.isFinite(p?.y)) || anchored(p))
+    .map(([k, p]) => [k, {
+      ...(Number.isFinite(p.x) && Number.isFinite(p.y) ? { x: share(p.x), y: share(p.y) } : {}),
+      ...(Number.isFinite(p.top) ? { top: Math.round(Math.max(0, Math.min(100000, p.top))) } : {}),
+      ...(anchored(p) ? { ...cleanAnchor(p), over: p.over === true, ...(anchored(p.bar) ? { bar: cleanAnchor(p.bar) } : {}) } : {})
+    }]));
   // a box's size for wide and narrow screens, in px (w only when it floats; either may be left out)
   const cleanSizes = (o) => Object.fromEntries(SCREENS.map((k) => [k, o?.[k]]).filter(([, z]) => Number.isFinite(z?.w) || Number.isFinite(z?.h))
     .map(([k, z]) => [k, { ...(Number.isFinite(z.w) ? { w: Math.round(Math.max(120, Math.min(8000, z.w))) } : {}), ...(Number.isFinite(z.h) ? { h: Math.round(Math.max(40, Math.min(8000, z.h))) } : {}) }]));

@@ -1661,6 +1661,16 @@ test('Viewer dashboards: kept per account, cleaned of anything that is not a blo
     assert.deepEqual(p0.size, { wide: { w: 640, h: 210 }, narrow: { h: 40 } });
     assert.deepEqual(p0.listSize, { wide: { w: 8000 } });
     assert.deepEqual([pg.data.boards[1].size, pg.data.boards[1].listSize], [{}, {}], 'old dashboards: today\'s sizes');
+    // spots anchored to the cameras (the nearest corner and the px from it, on the video or not,
+    // and a List's anchor to the bar), with or without the old shares; anything else dropped
+    const an = await s.call('PUT', '/api/dashboards', { boards: [{ id: 'a', placement: 'float', listPlacement: 'float',
+      float: { wide: { x: 0.5, y: 0.2, top: 700, h: 'r', v: 'b', dx: 20.4, dy: -190, over: true }, narrow: { h: 'l', v: 't', dx: 9e9, dy: -9e9, over: 'yes' } },
+      listFloat: { wide: { h: 'R', v: 't', dx: 20, dy: 0, over: false, bar: { h: 'l', v: 'B', dx: 0, dy: 8, extra: 1 } }, narrow: { h: 'x', v: 't', dx: 0, dy: 0 } },
+      blocks: [] }, { id: 'b', float: { wide: { h: 'l', v: 't', dx: 'far', dy: 0 } }, listFloat: { wide: { x: 0.1, y: 0.1, h: 'l', v: 't', dx: 1, dy: 2, bar: { h: 'q' } } }, blocks: [] }] });
+    const [a0, a1] = an.data.boards;
+    assert.deepEqual(a0.float, { wide: { x: 0.5, y: 0.2, top: 700, h: 'r', v: 'b', dx: 20, dy: -190, over: true }, narrow: { h: 'l', v: 't', dx: 100000, dy: -100000, over: false } });
+    assert.deepEqual(a0.listFloat, { wide: { h: 'R', v: 't', dx: 20, dy: 0, over: false, bar: { h: 'l', v: 'B', dx: 0, dy: 8 } } });
+    assert.deepEqual([a1.float, a1.listFloat], [{}, { wide: { x: 0.1, y: 0.1, h: 'l', v: 't', dx: 1, dy: 2, over: false } }]);
     // a list block: no stats of its own, its search and "changing only" kept
     const li = await s.call('PUT', '/api/dashboards', { boards: [{ id: 'l', blocks: [{ type: 'list', signals: ['a'], q: 'volt\u0007age', changing: true }, { type: 'toString', signals: [] }] }] });
     assert.deepEqual(li.data.boards[0].blocks, [{ type: 'list', signals: [], q: 'volt age', changing: true }]);

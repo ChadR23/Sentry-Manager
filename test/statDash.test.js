@@ -102,6 +102,10 @@ class El {
   getBoundingClientRect() {
     const L = globalThis.__layout;
     if (!L) return null;
+    if (this.isStage && L.stage) {
+      const { left, top, width, height } = L.stage;
+      return { left: left - globalThis.scrollX, top: top - globalThis.scrollY, width, height, right: left + width - globalThis.scrollX, bottom: top + height - globalThis.scrollY };
+    }
     if (!this.classList.contains('sentry-sd')) {
       const box = this.closest('.sentry-sd');
       const r = box ? box.getBoundingClientRect() : { left: 0, top: 0 };
@@ -179,6 +183,7 @@ async function dashboard({ rawOpen = true, routes = {}, clip = clipPath(1), befo
   const mod = await import(`${pathToFileURL(MODULE).href}?n=${++instance}`);
   const page = new El('main');
   const stage = page.appendChild(new El('div'));
+  stage.isStage = true;
   const video = { currentTime: 0, src: '', getAttribute: () => video.src };
   video.src = `/api/media?path=${encodeURIComponent(clip)}`;
   before?.();
@@ -187,7 +192,9 @@ async function dashboard({ rawOpen = true, routes = {}, clip = clipPath(1), befo
   const frame = async () => { const fn = frames.shift(); fn?.(); await settle(); };
   await settle();
   await frame();
-  return { dash, el: dash.el, stage, video, asked, frame, raw: () => dash.el.querySelector('.sd-raw'), rawButton: () => dash.el.querySelector('[data-raw]') };
+  // every animation frame waiting (a resize is put right on the next one)
+  const frames_ = () => { for (const fn of frames.splice(0)) fn(); };
+  return { dash, el: dash.el, stage, video, asked, frame, frames: frames_, raw: () => dash.el.querySelector('.sd-raw'), rawButton: () => dash.el.querySelector('[data-raw]') };
 }
 // the payload the raw view shows for one id right now
 const payload = (d, id) => {
@@ -757,10 +764,10 @@ test('CAN values: decimals from the DBC step, every unit converted, SNA and the 
 
 // ---- moving and resizing both boxes ----------------------------------------------
 /** A page 1400 x 3000 in a 1400 x 900 window, scrolled to scrollY; window listeners kept here. */
-function layoutPage(t, { scrollY = 0, width = 1400 } = {}) {
+function layoutPage(t, { scrollY = 0, width = 1400, stage = null } = {}) {
   const win = {};
   Object.assign(globalThis, {
-    __layout: { pageW: width, dockTop: 500 }, innerWidth: width, innerHeight: 900, scrollX: 0, scrollY,
+    __layout: { pageW: width, dockTop: 500, stage }, innerWidth: width, innerHeight: 900, scrollX: 0, scrollY,
     addEventListener: (type, fn) => { (win[type] ||= []).push(fn); },
     removeEventListener: (type, fn) => { win[type] = (win[type] || []).filter((f) => f !== fn); }
   });
@@ -780,7 +787,14 @@ async function pageDash(t, blocks, extra = {}, opts = {}) {
   const d = await dashboard({ rawOpen: false, routes: { boards: { boards: [{ id: 'b', name: 'B', placement: 'below', blocks, ...extra }], active: 'b' } }, before: page.finish });
   t.after(() => d.dash.destroy());
   const saved = async () => { await new Promise((r) => setTimeout(r, 600)); const put = d.asked.filter((a) => a.method === 'PUT').pop(); return put && JSON.parse(put.body).boards[0]; };
-  return { ...d, ...page, saved };
+  // the window resized (to w x h, when given): the boxes are put back on the next frame
+  const resize = (w, h) => {
+    if (w) { globalThis.innerWidth = w; document.documentElement.clientWidth = w; globalThis.__layout.pageW = w; }
+    if (h) { globalThis.innerHeight = h; document.documentElement.clientHeight = h; }
+    for (const fn of page.win.resize || []) fn();
+    d.frames();
+  };
+  return { ...d, ...page, saved, resize };
 }
 
 test('the bar: its Move handle pulls it out of its place to float on the page where dropped; Put back returns it', async (t) => {
@@ -802,10 +816,12 @@ test('the bar: its Move handle pulls it out of its place to float on the page wh
   const b = await d.saved();
   assert.equal(b.placement, 'float');
   assert.equal(b.barHome, 'below');
-  assert.deepEqual(b.float.wide, { x: 0.125, y: Math.round((400 / (3000 - 150)) * 1000) / 1000, top: 400 }, 'kept on the page: top in px');
+  const { x, y, top, ...anchored } = b.float.wide;
+  assert.deepEqual({ x, y, top }, { x: 0.125, y: Math.round((400 / (3000 - 150)) * 1000) / 1000, top: 400 }, 'kept on the page: top in px');
+  assert.deepEqual(Object.keys(anchored).sort(), ['dx', 'dy', 'h', 'over', 'v'], 'and anchored to the cameras');
   // scrolling leaves it on the page: a redraw after a scroll puts it at the same page spot
   globalThis.scrollY = 900;
-  for (const fn of d.win.resize || []) fn();
+  d.resize();
   assert.equal(bar.style.top, '400px');
   // after a drag that ended, a move with no button down does nothing
   d.send('pointermove', 500, 500);
@@ -868,15 +884,13 @@ test('the List box: resized from its grip (height docked, both floating), clampe
   assert.equal(b.listPlacement, 'float');
   assert.equal(Number.isFinite(b.listFloat.wide.top), true);
   // a narrow window has its own (none yet): today's size
-  globalThis.innerWidth = 500;
-  document.documentElement.clientWidth = 500;
-  for (const fn of d.win.resize || []) fn();
+  d.resize(500);
   assert.deepEqual([box.style.width, box.style.height], ['', '']);
-  // back to wide: the size again, within the window
-  globalThis.innerWidth = 1400;
-  document.documentElement.clientWidth = 1400;
-  for (const fn of d.win.resize || []) fn();
+  assert.ok(box.classList.contains('below') && !box.classList.contains('float'), 'and no spot there: docked, no spot made up');
+  // back to wide: the size again, within the window, where it was
+  d.resize(1400);
   assert.deepEqual([box.style.width, box.style.height], ['260px', '220px']);
+  assert.ok(box.classList.contains('float'));
   // Dock: back under the bar, its height kept
   fire(box.querySelector('[data-dock-list]'), 'click');
   assert.ok(box.classList.contains('below'));
@@ -886,7 +900,7 @@ test('the List box: resized from its grip (height docked, both floating), clampe
 test('a bar over a short video is no taller than the video: its grip, on its top, stays where it can be reached', async (t) => {
   const d = await pageDash(t, [{ type: 'small', signals: ['dash.speed'] }], { placement: 'over', size: { wide: { h: 600 } } });
   d.stage.clientHeight = 250;
-  for (const fn of d.win.resize || []) fn();
+  d.resize();
   assert.ok(d.el.classList.contains('over'));
   assert.equal(d.el.style.height, `${250 - 16}px`, 'as tall as the video, less its margins');
   // dragged up from the grip, it stops there too
@@ -894,4 +908,192 @@ test('a bar over a short video is no taller than the video: its grip, on its top
   d.send('pointermove', 100, -400);
   assert.equal(d.el.style.height, `${250 - 16}px`);
   d.send('pointerup', 100, -400);
+});
+
+// ---- floating boxes across window sizes: anchored to the cameras -----------------
+const rect = (left, top, width, height) => ({ left, top, width, height });
+const inter = (a, b) => a.left < b.left + b.width && b.left < a.left + a.width && a.top < b.top + b.height && b.top < a.top + a.height;
+const placing = () => import(`${pathToFileURL(MODULE).href}?math`);
+
+test('anchoring: a box keeps its corner of the cameras as they grow and shrink', async () => {
+  const { anchorOf, fromAnchor } = await placing();
+  const stage = rect(20, 100, 1000, 560);
+  // dropped at the cameras' bottom right, 30 px in from each edge
+  const box = rect(1020 - 30 - 300, 660 - 30 - 120, 300, 120);
+  const a = anchorOf(box, stage);
+  assert.deepEqual(a, { h: 'r', v: 'b', dx: 30, dy: 30 });
+  assert.deepEqual(fromAnchor(a, stage, 300, 120), box, 'the same spot back');
+  // the cameras shrink (a smaller window): still 30 px in from their bottom right
+  assert.deepEqual(fromAnchor(a, rect(20, 100, 640, 360), 300, 120), rect(660 - 30 - 300, 460 - 30 - 120, 300, 120));
+  // and grow
+  assert.deepEqual(fromAnchor(a, rect(20, 100, 1500, 840), 300, 120), rect(1520 - 30 - 300, 940 - 30 - 120, 300, 120));
+  // top left: from the top left
+  assert.deepEqual(anchorOf(rect(40, 110, 100, 50), stage), { h: 'l', v: 't', dx: 20, dy: 10 });
+  // beside the cameras (a column on their right): its left edge's px past their right edge
+  const side = anchorOf(rect(1040, 100, 340, 400), stage);
+  assert.deepEqual(side, { h: 'R', v: 't', dx: 20, dy: 0 });
+  // under them: its top's px below their bottom, whatever its height (shown shorter in a short window)
+  const under = anchorOf(rect(700, 700, 300, 500), stage);
+  assert.deepEqual(under, { h: 'r', v: 'B', dx: 20, dy: 40 });
+  assert.deepEqual(fromAnchor(under, rect(20, 100, 640, 360), 300, 300), rect(340, 500, 300, 300));
+  assert.equal(fromAnchor(side, rect(20, 100, 640, 360), 340, 400).left, 680, 'still just right of them');
+});
+
+test('placing: kept across the page, off the cameras unless put on them, off the other box', async () => {
+  const { placeFor, fitIn, clearOf, spotFor } = await placing();
+  const bounds = { left: 0, top: 0, right: 1000, bottom: 3000 };
+  // never off the page across, never above it
+  assert.deepEqual(fitIn(rect(900, -40, 300, 100), bounds), rect(700, 0, 300, 100));
+  assert.deepEqual(fitIn(rect(-50, 10, 300, 100), bounds), rect(0, 10, 300, 100));
+  // a box beside the cameras the cameras grew under: moved off them, the least it takes, not above them
+  const stage = rect(0, 100, 900, 500);
+  const beside = { ...spotFor(rect(1040, 100, 340, 400), rect(20, 100, 1000, 560)) };
+  assert.equal(beside.over, false);
+  const p = placeFor(beside, { width: 340, height: 400 }, { stage, bounds });
+  assert.ok(!inter(p, stage), 'not on the video');
+  assert.ok(p.left >= 0 && p.left + p.width <= 1000, 'on the page');
+  assert.equal(p.top, 600 + 8, 'below the cameras (no room beside them)');
+  // a box put on the video stays on it, at its spot on them
+  const onVideo = spotFor(rect(700, 500, 300, 120), rect(20, 100, 1000, 560));
+  assert.equal(onVideo.over, true);
+  assert.deepEqual(placeFor(onVideo, { width: 300, height: 120 }, { stage, bounds }), rect(900 - 20 - 300, 600 - 40 - 120, 300, 120));
+  // the other box: never on it
+  const bar = rect(100, 700, 600, 150);
+  const q = placeFor(spotFor(rect(300, 720, 340, 300), rect(0, 100, 900, 500)), { width: 340, height: 300 }, { stage, bounds, others: [bar] });
+  assert.ok(!inter(q, bar) && !inter(q, stage), 'off the bar and the cameras');
+  assert.ok(q.left >= 0 && q.left + 340 <= 1000);
+  // nowhere beside or around: below everything
+  const tight = clearOf(rect(0, 0, 1000, 50), [rect(0, 0, 1000, 100)], bounds);
+  assert.deepEqual(tight, rect(0, 108, 1000, 50));
+  // a List put by a floating bar goes along with it
+  const listSpot = spotFor(rect(100, 858, 340, 300), rect(0, 100, 900, 500), { bar });
+  assert.deepEqual(listSpot.bar, { h: 'l', v: 'B', dx: 0, dy: 8 });
+  const moved = rect(300, 1200, 600, 150);
+  assert.deepEqual(placeFor(listSpot, { width: 340, height: 300 }, { stage, bounds, bar: moved, others: [moved] }), rect(300, 1358, 340, 300));
+  // far from the bar: anchored to the cameras only
+  assert.equal(spotFor(rect(100, 1500, 340, 300), stage, { bar }).bar, undefined);
+});
+
+/** Both boxes floating: the bar under the cameras on the left, the List in the column on their right. */
+const BOTH = {
+  placement: 'float', listPlacement: 'float',
+  float: { wide: { x: 0, y: 0, h: 'l', v: 'b', dx: 0, dy: -170, over: false } },
+  listFloat: { wide: { x: 1, y: 0, h: 'r', v: 't', dx: -380, dy: 0, over: false } },
+  size: { wide: { w: 1300, h: 150 } }, listSize: { wide: { w: 340, h: 400 } }
+};
+const rectOfBox = (n) => { const r = n.getBoundingClientRect(); return rect(r.left + globalThis.scrollX, r.top + globalThis.scrollY, r.width, r.height); };
+const LIST_BLOCKS = [{ type: 'small', signals: ['dash.speed'] }, { type: 'list', signals: [], q: '', changing: false }];
+
+test('a resized window: both boxes keep their spot by the cameras, on the page, off each other; sizes shrink and come back', async (t) => {
+  const d = await pageDash(t, LIST_BLOCKS, { ...BOTH, size: { wide: { w: 600, h: 150 } } }, { stage: rect(20, 100, 1000, 560) });
+  const bar = d.el;
+  const list = d.dash.panel;
+  assert.ok(bar.classList.contains('float') && list.classList.contains('float'));
+  assert.deepEqual(rectOfBox(bar), rect(20, 680, 600, 150), 'under the cameras, on their left');
+  assert.deepEqual(rectOfBox(list), rect(1060, 100, 340, 400), 'in the column on their right');
+  // a smaller window: the cameras shrink, the column moves left with them
+  globalThis.__layout.stage = rect(20, 100, 640, 360);
+  d.resize(1000);
+  assert.deepEqual(rectOfBox(bar), rect(20, 480, 600, 150), 'still under them');
+  const l = rectOfBox(list);
+  assert.ok(l.left + l.width <= 1000 && l.left >= 660, `in the column, on the page: ${JSON.stringify(l)}`);
+  assert.equal(l.top, 100);
+  for (const b of [rectOfBox(bar), l]) assert.ok(!inter(b, globalThis.__layout.stage), 'neither on the video');
+  assert.ok(!inter(rectOfBox(bar), l), 'nor on each other');
+  // narrower than the List's spot allows: it stays on the page and off the bar and the video
+  globalThis.__layout.stage = rect(12, 150, 690, 390);
+  d.resize(720);
+  const l2 = rectOfBox(list);
+  const b2 = rectOfBox(bar);
+  assert.ok(l2.left >= 0 && l2.left + l2.width <= 720 && b2.left >= 0 && b2.left + b2.width <= 720, 'on the page');
+  assert.ok(!inter(l2, b2) && !inter(l2, globalThis.__layout.stage) && !inter(b2, globalThis.__layout.stage));
+  // back: where they were; nothing saved by the resizes
+  globalThis.__layout.stage = rect(20, 100, 1000, 560);
+  d.resize(1400);
+  assert.deepEqual(rectOfBox(bar), rect(20, 680, 600, 150));
+  assert.deepEqual(rectOfBox(list), rect(1060, 100, 340, 400));
+  assert.equal(d.asked.filter((a) => a.method === 'PUT').length, 0, 'a resize changes no spot');
+});
+
+test('a saved size wider than the window now: shown smaller, kept, and back with room again', async (t) => {
+  const d = await pageDash(t, LIST_BLOCKS, BOTH, { stage: rect(20, 100, 1000, 560) });
+  assert.equal(d.el.style.width, '1300px');
+  globalThis.__layout.stage = rect(20, 100, 640, 360);
+  d.resize(1000);
+  assert.equal(d.el.style.width, `${1000 - 16}px`, 'the page less its margins');
+  assert.ok(rectOfBox(d.el).left >= 0 && rectOfBox(d.el).left + 984 <= 1000);
+  globalThis.__layout.stage = rect(20, 100, 1000, 560);
+  d.resize(1400);
+  assert.equal(d.el.style.width, '1300px', 'its own size again');
+  assert.equal(d.asked.filter((a) => a.method === 'PUT').length, 0, 'the saved size is not changed');
+});
+
+test('a narrow window with no spot of its own docks both boxes; a spot kept there is its own', async (t) => {
+  const d = await pageDash(t, LIST_BLOCKS, BOTH, { stage: rect(20, 100, 1000, 560) });
+  globalThis.__layout.stage = rect(12, 150, 626, 450);
+  d.resize(650);
+  assert.ok(d.el.classList.contains('below') && !d.el.classList.contains('float'), 'the bar under the cameras');
+  assert.ok(d.dash.panel.classList.contains('below'), 'the List docked');
+  assert.equal(d.el.querySelector('[data-dock-bar]'), null, 'no Put back while docked');
+  // moved there: a narrow spot of its own; the wide one is untouched
+  fire(d.el.querySelector('[data-move-bar]'), 'keydown', { key: 'ArrowDown' });
+  assert.ok(d.el.classList.contains('float'));
+  const b = await d.saved();
+  assert.ok(b.float.narrow && Number.isFinite(b.float.narrow.dx), 'a narrow spot');
+  assert.deepEqual(b.float.wide, BOTH.float.wide);
+  globalThis.__layout.stage = rect(20, 100, 1000, 560);
+  d.resize(1400);
+  assert.deepEqual(rectOfBox(d.el), rect(20, 680, 1300, 150), 'wide: its wide spot');
+});
+
+test('a box put on the video stays on it, at its corner, as the cameras grow', async (t) => {
+  const d = await pageDash(t, [{ type: 'small', signals: ['dash.speed'] }], { placement: 'float', size: { wide: { w: 400, h: 120 } }, float: { wide: { x: 0, y: 0, h: 'r', v: 'b', dx: 20, dy: 20, over: true } } }, { stage: rect(20, 100, 1000, 560) });
+  assert.deepEqual(rectOfBox(d.el), rect(1020 - 20 - 400, 660 - 20 - 120, 400, 120));
+  globalThis.__layout.stage = rect(20, 100, 1300, 730);
+  d.resize();
+  assert.deepEqual(rectOfBox(d.el), rect(1320 - 20 - 400, 830 - 20 - 120, 400, 120), 'the cameras\' bottom right');
+});
+
+test('a spot saved before (shares and top) is anchored once to the cameras as they are, and stays put', async (t) => {
+  const old = { placement: 'float', float: { wide: { x: 0.5, y: 0.3, top: 700 } } };
+  const d = await pageDash(t, [{ type: 'small', signals: ['dash.speed'] }], old, { stage: rect(20, 100, 1000, 560) });
+  const at = rectOfBox(d.el);
+  assert.deepEqual(at, rect(0.5 * (1400 - 600), 700, 600, 150), 'where it was');
+  const b = await d.saved();
+  assert.deepEqual(b.float.wide, { x: 0.5, y: 0.3, top: 700, h: 'r', v: 'B', dx: 20, dy: 40, over: false }, 'anchored, the old fields kept');
+  // a page that opens with the converted spot: the same place
+  const d2 = await pageDash(t, [{ type: 'small', signals: ['dash.speed'] }], { placement: 'float', float: b.float }, { stage: rect(20, 100, 1000, 560) });
+  assert.deepEqual(rectOfBox(d2.el), at);
+  // an old spot on the video's middle is on the video; at its edge (the window was another size) it is moved off
+  const d3 = await pageDash(t, [{ type: 'small', signals: ['dash.speed'] }], { placement: 'float', float: { wide: { x: 0.5, y: 0, top: 600 } } }, { stage: rect(20, 100, 1000, 560) });
+  const r3 = rectOfBox(d3.el);
+  assert.ok(!inter(r3, rect(20, 100, 1000, 560)), `off the video: ${JSON.stringify(r3)}`);
+});
+
+test('dropped by a floating bar, the List goes along with the bar and never lands on it', async (t) => {
+  const d = await pageDash(t, LIST_BLOCKS, { placement: 'float', listPlacement: 'float', size: { wide: { w: 600, h: 150 } },
+    float: { wide: { x: 0, y: 0, h: 'l', v: 'b', dx: 0, dy: -170, over: false } },
+    listFloat: { wide: { x: 0, y: 0, h: 'l', v: 'b', dx: 0, dy: -500, over: false, bar: { h: 'l', v: 'b', dx: 0, dy: -408 } } },
+    listSize: { wide: { w: 340, h: 400 } } }, { stage: rect(20, 100, 1000, 560) });
+  assert.deepEqual(rectOfBox(d.dash.panel), rect(20, 838, 340, 400), 'just under the bar');
+  // the bar moved with the keys: the List follows
+  fire(d.el.querySelector('[data-move-bar]'), 'keydown', { key: 'ArrowRight', shiftKey: true });
+  assert.deepEqual(rectOfBox(d.dash.panel), rect(70, 838, 340, 400));
+  // the List moved onto the bar: moved off it
+  for (let i = 0; i < 4; i++) fire(d.dash.panel.querySelector('[data-move-list]'), 'keydown', { key: 'ArrowUp', shiftKey: true });
+  assert.ok(!inter(rectOfBox(d.dash.panel), rectOfBox(d.el)));
+});
+
+test('a page that does not scroll, with no room for the List off the bar: the bar moves off the List', async (t) => {
+  // (the built-in Viewer: the cameras fill a frame of 900 x 932 that does not scroll)
+  const d = await pageDash(t, LIST_BLOCKS, { placement: 'float', listPlacement: 'float', size: { wide: { w: 592, h: 166 } }, listSize: { wide: { w: 330, h: 460 } },
+    float: { wide: { h: 'l', v: 't', dx: 15, dy: 341, over: true } }, listFloat: { wide: { h: 'r', v: 't', dx: 0, dy: 62, over: true } } }, { width: 900, stage: rect(0, 0, 900, 872) });
+  globalThis.innerHeight = 932;
+  Object.assign(document.documentElement, { clientHeight: 932, scrollHeight: 932 });
+  d.resize();
+  const b = rectOfBox(d.el);
+  const l = rectOfBox(d.dash.panel);
+  assert.ok(!inter(b, l), `not on each other: ${JSON.stringify([b, l])}`);
+  for (const r of [b, l]) assert.ok(r.left >= 0 && r.left + r.width <= 900 && r.top >= 0 && r.top + r.height <= 932, 'within the frame');
+  assert.deepEqual(l, rect(900 - 330, 62, 330, 460), 'the List at its spot');
 });
