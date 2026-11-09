@@ -3,6 +3,9 @@
 import { createHealthPage } from '/web/health.js';
 
 export default {
+  title: 'Health',
+  kicker: 'Vital signs',
+  icon: 'check',
   topics: [],
   async mount(ctx) {
     ctx.body.innerHTML = '<div id="hl-page"></div>';

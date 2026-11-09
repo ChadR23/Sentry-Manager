@@ -2,6 +2,9 @@
 import { createAccountPage } from '/web/account.js';
 
 export default {
+  title: 'Account',
+  kicker: 'Keys',
+  icon: 'key',
   topics: [],
   async mount(ctx) {
     ctx.body.innerHTML = '<div id="ac-page"></div>';

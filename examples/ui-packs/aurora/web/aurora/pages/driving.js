@@ -3,6 +3,9 @@ import { current, vehiclePicker } from '../core.js';
 import { createDrivingPage } from '/web/driving.js';
 
 export default {
+  title: 'Driving',
+  kicker: 'Logbook',
+  icon: 'speed',
   topics: [],
   vehicle: true,
   async mount(ctx) {

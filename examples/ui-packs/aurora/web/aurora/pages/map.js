@@ -3,6 +3,9 @@ import { current, vehiclePicker } from '../core.js';
 import { createEventMapPage } from '/web/eventMap.js';
 
 export default {
+  title: 'Map',
+  kicker: 'Atlas',
+  icon: 'pin',
   topics: [],
   vehicle: true,
   async mount(ctx) {
