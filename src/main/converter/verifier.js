@@ -1008,6 +1008,22 @@ async function verifyOwnedSnapshot({ options, profileId, sourceBytes, outputByte
     }
   }
 
+  // Sentry USB's basic verification accepts an encode one frame off the
+  // original only when its length is within half the original's average
+  // frame (a frame lost from the end, a whole frame shorter, fails there).
+  // The same rule here, so a clip is never replaced by an encode the Pi
+  // would call unconfirmed: it keeps its original instead.
+  const oneOff = oneFrameOffLength(source.sourceTiming, outputTiming);
+  if (oneOff) {
+    return failure(VERIFICATION_REASONS.DURATION_MISMATCH, sourceBytes, outputBytes, {
+      kind: 'one-frame-off-length',
+      sourceFrames: source.sourceTiming.samples.length,
+      outputFrames: outputTiming.samples.length,
+      ...undecodable,
+      ...oneOff
+    });
+  }
+
   let inspected;
   try {
     inspected = expectedVideo.inspect(candidateSnapshotBytes);
@@ -1098,6 +1114,21 @@ async function verifyOwnedSnapshot({ options, profileId, sourceBytes, outputByte
       ...larger
     }
   };
+}
+
+/**
+ * For an encode whose frame count is one off the original's: null when its
+ * length is within half the original's average frame length, else what was
+ * measured ({ deltaUs, toleranceUs }). Any other frame count gives null (the
+ * frame count checks decide those).
+ */
+function oneFrameOffLength(sourceTiming, outputTiming) {
+  const sourceFrames = sourceTiming?.samples?.length;
+  const outputFrames = outputTiming?.samples?.length;
+  if (!Number.isSafeInteger(sourceFrames) || !Number.isSafeInteger(outputFrames) || Math.abs(sourceFrames - outputFrames) !== 1) return null;
+  const toleranceUs = Math.floor(sourceTiming.durationUs / sourceFrames / 2);
+  const deltaUs = Math.abs(sourceTiming.durationUs - outputTiming.durationUs);
+  return deltaUs > toleranceUs ? { deltaUs, toleranceUs } : null;
 }
 
 async function verifyCandidate(options) {
@@ -1220,4 +1251,4 @@ async function verifyCandidate(options) {
   };
 }
 
-module.exports = { VERIFICATION_REASONS, sanitizeInspectorDiagnostics, verifyCandidate, withoutToleratedStderr };
+module.exports = { VERIFICATION_REASONS, oneFrameOffLength, sanitizeInspectorDiagnostics, verifyCandidate, withoutToleratedStderr };
