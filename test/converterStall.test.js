@@ -86,7 +86,8 @@ async function setup({ concurrency = 2, outputMode = 'replace', events = 2, ffmp
     removeOwned: owned.removeOwned, network, autoConvert: false,
     // the same helper; a test can step in just before a clip replaces its original
     renameExclusive: Object.assign((...args) => owned.renameExclusive(...args), owned.renameExclusive, {
-      promote: async (...args) => { await hooks.rename?.(...args); return owned.renameExclusive.promote(...args); }
+      promote: async (...args) => { await hooks.rename?.(...args); return owned.renameExclusive.promote(...args); },
+      replaceOver: async (...args) => { await hooks.rename?.(...args); return owned.renameExclusive.replaceOver(...args); }
     }),
     gpuDecode: false, encodeStallMs,
     networkBackoff: { initialMs: 50, maximumMs: 200 }

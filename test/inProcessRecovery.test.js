@@ -18,11 +18,14 @@ const skip = spawnSync('ffmpeg', ['-version']).status === 0 && fs.existsSync(HEL
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // The first two moves onto the clip's name fail: the converted file's, then
-// the rollback's move of the original back.
-async function stoppedJob(base) {
+// the rollback's move of the original back. (On a share without hard links:
+// with them the original never leaves its name, so there is nothing to move
+// back; see the last test.)
+async function stoppedJob(base, { noLinks = true } = {}) {
   const folder = await makeBase(base);
   let refusals = 2;
   const env = await open(base, {
+    noLinks,
     onPromote: (request) => {
       if (path.basename(request.to) !== CLIP || refusals === 0) return;
       refusals -= 1;
@@ -69,6 +72,23 @@ test('a clip stopped mid-replacement: Cancel works without a restart and leaves 
     const done = await env.runtime.service.get(id);
     assert.equal(done.state, 'cancelled');
     assert.deepEqual(fs.readdirSync(folder), [CLIP]);
+  } finally {
+    await env.runtime.shutdown().catch(() => {});
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('with hard links the same refusals never leave the clip\'s name empty: the rename over it is refused, the second link goes, and the clip fails with its original kept (no decision needed)', { skip, timeout: 180_000 }, async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'inproc-links-'));
+  const { env, folder, job } = await stoppedJob(base, { noLinks: false });
+  try {
+    assert.equal(job.state, 'completed', JSON.stringify(job.recovery || null));
+    assert.equal(job.recovery ?? null, null, 'not parked for a decision');
+    assert.deepEqual(job.items.map((item) => `${item.state}/${item.resultCode}`), ['failed/replacement-failed']);
+    assert.deepEqual(fs.readdirSync(folder), [CLIP], 'no TEMP- or BACKUP- left');
+    const codec = String(spawnSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=codec_name', '-of', 'csv=p=0', path.join(folder, CLIP)]).stdout).trim();
+    assert.equal(codec, 'h264', 'the original, untouched');
+    assert.equal(fs.statSync(path.join(folder, CLIP)).nlink, 1);
   } finally {
     await env.runtime.shutdown().catch(() => {});
     fs.rmSync(base, { recursive: true, force: true });

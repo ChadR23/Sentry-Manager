@@ -40,7 +40,10 @@ function setup() {
     tempRoot,
     validatePublicationArtifact: async () => true,
     removeOwned: { ...owned.removeOwned, remove: (request) => { requests.push({ op: 'remove', ...request }); return owned.removeOwned.remove(request); } },
-    renameExclusive: { ...owned.renameExclusive, promote: (request) => { requests.push({ op: 'promote', ...request }); return owned.renameExclusive.promote(request); } },
+    renameExclusive: { ...owned.renameExclusive,
+      promote: (request) => { requests.push({ op: 'promote', ...request }); return owned.renameExclusive.promote(request); },
+      linkBackup: (request) => { requests.push({ op: 'linkBackup', ...request }); return owned.renameExclusive.linkBackup(request); },
+      replaceOver: (request) => { requests.push({ op: 'replaceOver', ...request }); return owned.renameExclusive.replaceOver(request); } },
     privateTempCleanup: 'identity'
   });
   const operation = {
@@ -74,11 +77,13 @@ test('prepare copies the conversion beside the original and records it on the wa
     assert.deepEqual(fs.readdirSync(env.footage), [path.basename(env.source)]);
     assert.deepEqual(Object.keys(result.ownedPaths), ['publicationSnapshot'], 'only the private snapshot is left to remove');
     // in the slot only the original is read: the copy (read back by prepare)
-    // and the backup (just hashed as it was moved aside) by identity and time
+    // and the backup (just hashed as it was linked) by identity and time.
+    // The original keeps its name throughout: linked to BACKUP-, then the
+    // copy is renamed over it in one step.
     const [backup, final, removal] = env.requests;
     assert.equal(env.requests.length, 3);
-    assert.ok(/^BACKUP-/.test(path.basename(backup.to)) && !backup.identityOnly, 'the original: its full check');
-    assert.ok(/^TEMP-/.test(path.basename(final.from)) && final.identityOnly === true && /^\d+$/.test(final.expectedSource.mtimeNs));
+    assert.ok(backup.op === 'linkBackup' && /^BACKUP-/.test(path.basename(backup.to)) && backup.from === env.source && !backup.identityOnly, 'the original: its full check');
+    assert.ok(final.op === 'replaceOver' && final.to === env.source && /^TEMP-/.test(path.basename(final.from)) && final.identityOnly === true && /^\d+$/.test(final.expectedSource.mtimeNs));
     assert.ok(removal.op === 'remove' && removal.identityOnly === true && removal.guard.identityOnly === true);
   } finally {
     env.done();

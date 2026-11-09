@@ -72,23 +72,26 @@ test('an original written to as it is moved aside is not removed by the quick ch
   let edited = null;
   try {
     env = await open(base, { networkMode: 'staging' });
-    const realPromote = env.renameExclusive.promote;
-    env.renameExclusive.promote = async (request) => {
-      const out = await realPromote(request);
-      if (!edited && /^BACKUP-/.test(path.basename(request.to))) {
-        // the adapter has just hashed and moved it; someone writes to it now
-        const fd = fs.openSync(request.to, 'r+');
-        const byte = Buffer.alloc(1);
-        fs.readSync(fd, byte, 0, 1, 64);
-        byte[0] ^= 0xff;
-        fs.writeSync(fd, byte, 0, 1, 64);
-        fs.closeSync(fd);
-        const later = new Date(Date.now() + 2000);
-        fs.utimesSync(request.to, later, later);
-        edited = fs.readFileSync(request.to);
-      }
-      return out;
-    };
+    // (the backup: a second link of the original, or the original moved aside)
+    for (const step of ['promote', 'linkBackup']) {
+      const realPromote = env.renameExclusive[step];
+      env.renameExclusive[step] = async (request) => {
+        const out = await realPromote(request);
+        if (!edited && /^BACKUP-/.test(path.basename(request.to))) {
+          // the adapter has just hashed and moved it; someone writes to it now
+          const fd = fs.openSync(request.to, 'r+');
+          const byte = Buffer.alloc(1);
+          fs.readSync(fd, byte, 0, 1, 64);
+          byte[0] ^= 0xff;
+          fs.writeSync(fd, byte, 0, 1, 64);
+          fs.closeSync(fd);
+          const later = new Date(Date.now() + 2000);
+          fs.utimesSync(request.to, later, later);
+          edited = fs.readFileSync(request.to);
+        }
+        return out;
+      };
+    }
     await env.runtime.start();
     const id = await env.runtime.service.start(env.config);
     const job = await env.runtime.service.whenIdle(id);

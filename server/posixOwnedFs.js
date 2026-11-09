@@ -223,6 +223,77 @@ function createPosixOwnedFs(options = {}) {
       } finally {
         await source.fh.close().catch(() => {});
       }
+    },
+    // Replacing an original without its name ever being missing (Sentry
+    // USB checks clips on the share by name, see docs/sentry-usb.md):
+    // linkBackup gives the verified original a second name (its backup),
+    // then replaceOver renames the verified conversion over the original's
+    // name with rename(2), which swaps the name in one step. The original's
+    // bytes stay at the backup name until the converter removes it.
+    replaceKeepingBackup: true,
+    /**
+     * A hard link `to` for the verified file `from` (never replaces).
+     * { linked: true } | { unsupported: true } (no hard links here: the caller
+     * moves the original aside instead) | { ownershipMismatch: true }.
+     */
+    async linkBackup({ from, to, expectedSource, identityOnly = false } = {}) {
+      if (!validPath(from) || !validPath(to) || path.resolve(from) === path.resolve(to)) {
+        throw errorWithCode('Linking requires two distinct absolute paths.', 'ENOTSUP');
+      }
+      if (!validExpected(expectedSource)) return { ownershipMismatch: true };
+      const source = await openVerified(from, expectedSource, { identityOnly: identityOnlyFor(expectedSource, identityOnly) });
+      if (source.status === 'missing') throw errorWithCode('Source is missing.', 'ENOENT');
+      if (source.status !== 'verified') return { ownershipMismatch: true };
+      try {
+        try {
+          await fsp.link(from, to); // EEXIST if taken: never replaces
+        } catch (err) {
+          if (['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS', 'EXDEV', 'EMLINK', 'EINVAL'].includes(err.code)) return { unsupported: true };
+          throw err;
+        }
+        const linked = await fsp.lstat(to, { bigint: true }).catch(() => null);
+        const named = await fsp.lstat(from, { bigint: true }).catch(() => null);
+        const same = (st) => st && st.isFile() && st.dev === source.stat.dev && st.ino === source.stat.ino;
+        if (!same(linked) || !same(named)) {
+          // a share that reports a new inode per name: no usable link
+          if (same(named) && linked && linked.isFile() && linked.size === source.stat.size) {
+            await fsp.unlink(to).catch(() => {});
+            return { unsupported: true };
+          }
+          return { ownershipMismatch: true };
+        }
+        return { linked: true };
+      } finally {
+        await source.fh.close().catch(() => {});
+      }
+    },
+    /**
+     * Rename the verified file `from` over `to`, which must still be the
+     * file `expectedTarget` names (device and inode) with that same file also
+     * at `keep` (its backup), so nothing but a second name is lost.
+     */
+    async replaceOver({ from, to, keep, expectedSource, expectedTarget, identityOnly = false } = {}) {
+      if (!validPath(from) || !validPath(to) || !validPath(keep) || new Set([from, to, keep].map((p) => path.resolve(p))).size !== 3) {
+        throw errorWithCode('Replacing requires three distinct absolute paths.', 'ENOTSUP');
+      }
+      if (!validExpected(expectedSource) || !expectedTarget || !/^\d+$/.test(String(expectedTarget.device)) || !/^\d+$/.test(String(expectedTarget.inode))) {
+        return { replaced: false, ownershipMismatch: true };
+      }
+      const source = await openVerified(from, expectedSource, { identityOnly: identityOnlyFor(expectedSource, identityOnly) });
+      if (source.status === 'missing') throw errorWithCode('Source is missing.', 'ENOENT');
+      if (source.status !== 'verified') return { replaced: false, ownershipMismatch: true };
+      try {
+        const [target, kept] = await Promise.all([fsp.lstat(to, { bigint: true }).catch(() => null), fsp.lstat(keep, { bigint: true }).catch(() => null)]);
+        if (!target || !kept || !target.isFile() || !kept.isFile() || !sameIdentity(target, expectedTarget) || !sameIdentity(kept, expectedTarget)) {
+          return { replaced: false, ownershipMismatch: true };
+        }
+        await fsp.rename(from, to);
+        const landed = await fsp.lstat(to, { bigint: true });
+        if (landed.dev !== source.stat.dev || landed.ino !== source.stat.ino) return { replaced: true, ownershipMismatch: true };
+        return { replaced: true };
+      } finally {
+        await source.fh.close().catch(() => {});
+      }
     }
   });
 

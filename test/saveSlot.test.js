@@ -107,14 +107,18 @@ test('while one clip holds the save slot, the next clip\'s copy to the share is 
     env = await open(base, { concurrency: 2, networkMode: 'staging' });
     assert.equal(env.runtime.stagingManager.capabilities.splitSave, true);
     // the first clip to move its original aside waits here, holding the slot
-    const realPromote = env.renameExclusive.promote;
-    env.renameExclusive.promote = async (request) => {
-      if (!holding && /^BACKUP-/.test(path.basename(request.to))) {
-        holding = path.basename(request.from);
-        await slotHeld;
-      }
-      return realPromote(request);
-    };
+    // (the backup is a second link of the original, or, without hard
+    // links, the original moved aside: either way the first step on it)
+    for (const step of ['promote', 'linkBackup']) {
+      const real = env.renameExclusive[step];
+      env.renameExclusive[step] = async (request) => {
+        if (!holding && /^BACKUP-/.test(path.basename(request.to))) {
+          holding = path.basename(request.from);
+          await slotHeld;
+        }
+        return real(request);
+      };
+    }
     await env.runtime.start();
     const id = await env.runtime.service.start(env.config);
     const other = () => fs.readdirSync(folder).find((name) => name.startsWith('TEMP-') && !name.endsWith(holding));
@@ -141,14 +145,18 @@ test('an original that changed after its copy was made beside it is kept, and th
     const slotHeld = new Promise((resolve) => { releaseSlot = resolve; });
     let holding = null;
     env = await open(base, { concurrency: 2, networkMode: 'staging' });
-    const realPromote = env.renameExclusive.promote;
-    env.renameExclusive.promote = async (request) => {
-      if (!holding && /^BACKUP-/.test(path.basename(request.to))) {
-        holding = path.basename(request.from);
-        await slotHeld;
-      }
-      return realPromote(request);
-    };
+    // (the backup is a second link of the original, or, without hard
+    // links, the original moved aside: either way the first step on it)
+    for (const step of ['promote', 'linkBackup']) {
+      const real = env.renameExclusive[step];
+      env.renameExclusive[step] = async (request) => {
+        if (!holding && /^BACKUP-/.test(path.basename(request.to))) {
+          holding = path.basename(request.from);
+          await slotHeld;
+        }
+        return real(request);
+      };
+    }
     await env.runtime.start();
     const id = await env.runtime.service.start(env.config);
     const waiting = () => fs.readdirSync(folder).find((name) => name.startsWith('TEMP-') && !name.endsWith(holding));
@@ -198,15 +206,18 @@ test('a put-back swap whose job record cannot be cleared stops the job there; th
       }
     } });
     // the first clip's final rename fails: the swap puts its original back
-    const realPromote = env.renameExclusive.promote;
+    // (the rename over the original, or the move onto its name without hard links)
     let failed = false;
-    env.renameExclusive.promote = async (request) => {
-      if (!failed && /^TEMP-/.test(path.basename(request.from))) {
-        failed = true;
-        throw Object.assign(new Error('refused'), { code: 'EPERM' });
-      }
-      return realPromote(request);
-    };
+    for (const step of ['promote', 'replaceOver']) {
+      const real = env.renameExclusive[step];
+      env.renameExclusive[step] = async (request) => {
+        if (!failed && /^TEMP-/.test(path.basename(request.from))) {
+          failed = true;
+          throw Object.assign(new Error('refused'), { code: 'EPERM' });
+        }
+        return real(request);
+      };
+    }
     await env.runtime.start();
     const id = await env.runtime.service.start(env.config);
     await Promise.race([env.runtime.service.whenIdle(id), sleep(120_000)]);

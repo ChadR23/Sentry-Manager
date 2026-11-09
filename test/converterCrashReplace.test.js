@@ -46,6 +46,18 @@ for (const [label, point] of CASES) {
   });
 }
 
+// A share without hard links: the original is moved to BACKUP- and the
+// conversion moved to its name (two renames, as before links were used).
+for (const [label, point] of [
+  ['the original was just moved to its backup name (not yet recorded)', 'backup-renamed'],
+  ['the conversion was about to take the original\'s name', 'before-final'],
+  ['the final rename failed and the original had just been put back', 'rolled-back']
+]) {
+  test(`replacing originals on a share without hard links, killed when ${label}: the job finishes by itself`, { skip, timeout: 180_000 }, async () => {
+    assertRecovered(await crashAndRecover({ point, noLinks: true }));
+  });
+}
+
 // The share as the converter sees an SMB one: every clip copied to local
 // staging first.
 for (const [label, point] of [

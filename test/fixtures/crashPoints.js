@@ -66,7 +66,9 @@ function die() {
 //  fsOpen(file, flags, handle): a file the converter opens (the telemetry
 //    writer, copies to the share, the staged copy)
 //  beforeWrite / afterWrite(manifest or patch): around a job-file write
-//  onPromote / afterPromote(request): around a no-replace move
+//  onPromote / afterPromote(request): around a no-replace move, and around
+//    the two steps of a replacement that keeps the original's name (the
+//    backup as a second link, then the copy renamed over the original)
 //  onRename(from, to): the native helper's moves (quarantine before a removal)
 //  ffmpeg: a wrapper that kills the converter when the encode starts
 const isTemp = (file) => /^TEMP-H265-/.test(path.basename(file));
@@ -188,7 +190,9 @@ function toolWrapper(base, name, body) {
 }
 
 // The runtime as server/converterHost.js composes it, with the kill point's hooks.
-async function open(base, { point = null, concurrency = 1, mode = 'replace', networkMode = 'direct', factories } = {}) {
+// noLinks: a share without hard links (the original is moved aside, the copy
+// moved in).
+async function open(base, { point = null, concurrency = 1, mode = 'replace', networkMode = 'direct', factories, noLinks = false } = {}) {
   process.env.SENTRY_NOREPLACE_RENAME = HELPER;
   const hooks = point ? POINTS[point] : {};
   if (point && !hooks) throw new Error(`unknown kill point ${point}`);
@@ -205,6 +209,20 @@ async function open(base, { point = null, concurrency = 1, mode = 'replace', net
       if (hooks.onPromote?.(request)) die();
       if (hooks.failPromote?.(request)) throw Object.assign(new Error('refused'), { code: 'EPERM' });
       const out = await owned.renameExclusive.promote(request);
+      if (hooks.afterPromote?.(request)) die();
+      return out;
+    },
+    linkBackup: async (request) => {
+      if (noLinks) return { unsupported: true };
+      if (hooks.onPromote?.(request)) die();
+      const out = await owned.renameExclusive.linkBackup(request);
+      if (hooks.afterPromote?.(request)) die();
+      return out;
+    },
+    replaceOver: async (request) => {
+      if (hooks.onPromote?.(request)) die();
+      if (hooks.failPromote?.(request)) throw Object.assign(new Error('refused'), { code: 'EPERM' });
+      const out = await owned.renameExclusive.replaceOver(request);
       if (hooks.afterPromote?.(request)) die();
       return out;
     }
@@ -262,10 +280,10 @@ async function open(base, { point = null, concurrency = 1, mode = 'replace', net
 
 // Runs a job in a child process (a process group of its own) that dies at the
 // kill point; resolves once it died.
-function crash(base, { point, concurrency = 1, mode = 'replace', networkMode = 'direct', timeout = 120_000 }) {
+function crash(base, { point, concurrency = 1, mode = 'replace', networkMode = 'direct', noLinks = false, timeout = 120_000 }) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [__filename], {
-      env: { ...process.env, BASE: base, POINT: point, CONCURRENCY: String(concurrency), MODE: mode, NETMODE: networkMode },
+      env: { ...process.env, BASE: base, POINT: point, CONCURRENCY: String(concurrency), MODE: mode, NETMODE: networkMode, NOLINKS: noLinks ? '1' : '' },
       detached: true, stdio: ['ignore', 'ignore', 'pipe']
     });
     let stderr = '';
@@ -307,14 +325,14 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // Dies at the point, starts again on the same folders, waits for the job.
 // Returns what a test checks: the job, each clip's codec (and whether a
 // separate run kept the original), and anything left behind.
-async function crashAndRecover({ point, mode = 'replace', networkMode = 'direct', concurrency = 1, clips = concurrency, beforeStart }) {
+async function crashAndRecover({ point, mode = 'replace', networkMode = 'direct', concurrency = 1, clips = concurrency, beforeStart, noLinks = false }) {
   const { base, folder } = await makeBase(clips);
   const names = fs.readdirSync(folder).sort();
   const before = Object.fromEntries(names.map((name) => [name, sha256(path.join(folder, name))]));
-  const died = await crash(base, { point, concurrency, mode, networkMode });
+  const died = await crash(base, { point, concurrency, mode, networkMode, noLinks });
   let env;
   try {
-    env = await open(base, { concurrency, mode, networkMode });
+    env = await open(base, { concurrency, mode, networkMode, noLinks });
     if (beforeStart) await beforeStart(env);
     await env.runtime.start();
     const [listed] = await env.runtime.service.list();
@@ -359,7 +377,8 @@ if (require.main === module) {
       point: process.env.POINT,
       concurrency: Number(process.env.CONCURRENCY || 1),
       mode: process.env.MODE || 'replace',
-      networkMode: process.env.NETMODE || 'direct'
+      networkMode: process.env.NETMODE || 'direct',
+      noLinks: process.env.NOLINKS === '1'
     });
     await env.runtime.start();
     const id = await env.runtime.service.start(env.config);

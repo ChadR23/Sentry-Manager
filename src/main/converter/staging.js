@@ -34,6 +34,7 @@ const ERROR_MESSAGES = Object.freeze({
   SOURCE_AUTHORITY_REQUIRED: 'The original input version is unknown. Preserve recovery files and restart safely.',
   REPLACEMENT_COLLISION: 'An unrelated replacement artifact already exists.',
   REPLACEMENT_FAILED: 'The original file could not be replaced safely.',
+  CHECKSUM_RECORD_FAILED: 'The original\'s checksum could not be recorded on the share before replacing it; the original was kept.',
   INSUFFICIENT_REPLACEMENT_SPACE: 'There is not enough free space beside the original for its verified replacement.',
   REPLACEMENT_SPACE_UNAVAILABLE: 'Free space on the original volume could not be checked safely.',
   FINAL_VALIDATION_FAILED: 'The replaced file did not pass final validation.',
@@ -920,6 +921,87 @@ function createFileTransaction(options = {}) {
     }
   }
 
+  // Replacing without the original's name ever missing: with an adapter
+  // that offers it (Sentry Six Manager's), the verified original gets its
+  // backup name as a second hard link and the verified copy is then renamed
+  // over the original's name in one step. A reader of the folder (Sentry
+  // USB checking its uploads by name) sees the original or the conversion,
+  // never neither. Afterwards the files are exactly as after moving the
+  // original aside and the copy in, so everything later is unchanged.
+  const replaceByLink = adapterVerifies && options.renameExclusive?.replaceKeepingBackup === true
+    && typeof options.renameExclusive.linkBackup === 'function' && typeof options.renameExclusive.replaceOver === 'function';
+
+  // The verified original's backup name as a second link. false: this
+  // filesystem has no hard links (the original is moved aside instead).
+  async function linkBackupAside(source, backup, expectedSource) {
+    let result;
+    try {
+      result = await options.renameExclusive.linkBackup({ from: source, to: backup, expectedSource });
+    } catch (error) {
+      if (error && ['EEXIST', 'EACCES'].includes(error.code)) throw transactionError('REPLACEMENT_COLLISION');
+      if (error && error.code === 'ENOENT') throw transactionError('SOURCE_CHANGED');
+      if (error instanceof FileTransactionError) throw error;
+      throw transactionError('REPLACEMENT_FAILED');
+    }
+    if (result?.ownershipMismatch) throw transactionError('SOURCE_CHANGED');
+    if (result?.unsupported) return false;
+    if (result?.linked !== true) throw transactionError('ATOMIC_PROMOTION_UNSUPPORTED');
+    await syncDirectory(pathApi.dirname(backup));
+    return true;
+  }
+
+  // The copy over the original's name (rename(2)); the original stays at
+  // its backup name, which the adapter checks first.
+  async function replaceOverOriginal(candidate, source, backup, expectedCandidate, identityOnly, expectedSource) {
+    let result;
+    try {
+      result = await options.renameExclusive.replaceOver({
+        from: candidate, to: source, keep: backup, expectedSource: expectedCandidate,
+        expectedTarget: { device: expectedSource.device, inode: expectedSource.inode },
+        ...(identityOnly ? { identityOnly: true } : {})
+      });
+    } catch (error) {
+      if (error instanceof FileTransactionError) throw error;
+      throw transactionError('REPLACEMENT_FAILED');
+    }
+    if (!result || result.replaced !== true) throw transactionError(result?.ownershipMismatch ? 'UNSAFE_OWNED_PATH' : 'REPLACEMENT_FAILED');
+    if (result.ownershipMismatch) throw transactionError('UNSAFE_OWNED_PATH');
+    await syncDirectory(pathApi.dirname(source));
+    return { finalCreated: true, sourceRemoved: true, cleanupPending: false };
+  }
+
+  // The backup name still a second link of the original at its own name (a
+  // stop between the link and the rename over it, or that rename refused):
+  // the extra name goes, nothing else changes. true when it went.
+  async function dropBackupAlias(source, backup) {
+    const [sourceStat, backupStat] = await Promise.all([lstatOrNull(source), lstatOrNull(backup)]);
+    if (!sourceStat || !backupStat || !isRegularFile(sourceStat) || !isRegularFile(backupStat)
+        || sourceStat.dev !== backupStat.dev || sourceStat.ino !== backupStat.ino) return false;
+    try {
+      await pfs.unlink(backup);
+    } catch (error) {
+      if (error?.code === 'ENOENT') return true;
+      throw transactionError('ROLLBACK_FAILED');
+    }
+    await syncDirectory(pathApi.dirname(backup));
+    forgetOwned(backup);
+    return true;
+  }
+
+  // Before the original is touched (Sentry Six Manager: the original's
+  // SHA-256 goes into the share's checksum record for Sentry USB). The hash
+  // is the one taken when the clip was staged; the adapter proves the
+  // original still has it, held open, before it is linked or moved. A
+  // failure here keeps the original as it is.
+  async function beforeReplace(source, sourceRoot, expectedSource, jobId, itemId) {
+    if (typeof options.beforeReplaceOriginal !== 'function') return;
+    try {
+      await options.beforeReplaceOriginal({ source, sourceRoot, sha256: expectedSource.sha256, size: expectedSource.size, jobId, itemId });
+    } catch (_error) {
+      throw transactionError('CHECKSUM_RECORD_FAILED');
+    }
+  }
+
   // The backup's record: the inode just moved there is the original the
   // adapter verified, so its hash is the converted version's (no read);
   // without such an adapter it is read back as before.
@@ -1723,6 +1805,9 @@ function createFileTransaction(options = {}) {
       }
       await persist(operation, transactionSnapshot({ phase: 'rollback-started', ownedPaths, ownedArtifacts,
         publicationArtifact: persistedArtifact }));
+      // stopped between linking the backup and the rename over the original:
+      // the original is still at its name, and its second name goes
+      await dropBackupAlias(source, backup);
       const sourceStat = await lstatOrNull(source);
       const backupStat = await lstatOrNull(backup);
       if (sourceStat && backupStat) {
@@ -1993,17 +2078,37 @@ function createFileTransaction(options = {}) {
       }
 
       const backupFacts = { provenMtimeNs: mtimeStamp(await lstatOrNull(source)) };
-      const backupPromotion = await promoteBackup(source, backup, expectedSource);
-      ownedArtifacts.replacementBackup = await backupRecord(backup, prepared.backupNonce, backupPromotion, expectedSource,
-        undefined, backupFacts);
-      await persist(operation, transactionSnapshot({ phase: 'original-backed-up', ownedPaths, ownedArtifacts,
-        publicationArtifact: artifact, cleanupPending: backupPromotion.sourceRemoved ? [] : ['replacementBackup'] }));
-      if (!backupPromotion.sourceRemoved) throw transactionError('REPLACEMENT_FAILED');
+      await beforeReplace(source, sourceRoot, expectedSource, jobId, itemId);
+      let candidatePromotion;
+      if (replaceByLink && await linkBackupAside(source, backup, expectedSource)) {
+        // the original at both names; the copy then takes the original's
+        ownedArtifacts.replacementBackup = await backupRecord(backup, prepared.backupNonce, { sourceRemoved: true }, expectedSource,
+          undefined, backupFacts);
+        await persist(operation, transactionSnapshot({ phase: 'original-backed-up', ownedPaths, ownedArtifacts,
+          publicationArtifact: artifact }));
+        try {
+          candidatePromotion = await replaceOverOriginal(candidate, source, backup,
+            candidateQuick || ownedArtifacts.replacementCandidate, Boolean(candidateQuick), expectedSource);
+        } catch (error) {
+          // still the original at its name: only the backup name goes
+          if (await dropBackupAlias(source, backup).catch(() => false)) {
+            ownedArtifacts.replacementBackup = artifactMetadata(backup, prepared.backupNonce, 'intent');
+          }
+          throw error;
+        }
+      } else {
+        const backupPromotion = await promoteBackup(source, backup, expectedSource);
+        ownedArtifacts.replacementBackup = await backupRecord(backup, prepared.backupNonce, backupPromotion, expectedSource,
+          undefined, backupFacts);
+        await persist(operation, transactionSnapshot({ phase: 'original-backed-up', ownedPaths, ownedArtifacts,
+          publicationArtifact: artifact, cleanupPending: backupPromotion.sourceRemoved ? [] : ['replacementBackup'] }));
+        if (!backupPromotion.sourceRemoved) throw transactionError('REPLACEMENT_FAILED');
 
-      const candidatePromotion = await promoteNoReplace(candidate, source, 'REPLACEMENT_COLLISION', {
-        expectedSource: candidateQuick || ownedArtifacts.replacementCandidate, removeSource: true,
-        identityOnly: Boolean(candidateQuick)
-      });
+        candidatePromotion = await promoteNoReplace(candidate, source, 'REPLACEMENT_COLLISION', {
+          expectedSource: candidateQuick || ownedArtifacts.replacementCandidate, removeSource: true,
+          identityOnly: Boolean(candidateQuick)
+        });
+      }
       if (!candidatePromotion.sourceRemoved) ownedArtifacts.replacementCandidate.state = 'cleanup-pending';
       await persist(operation, transactionSnapshot({ phase: 'candidate-promoted', ownedPaths, ownedArtifacts,
         publicationArtifact: artifact, cleanupPending: candidatePromotion.sourceRemoved ? [] : ['replacementCandidate'] }));
@@ -2223,6 +2328,15 @@ function createFileTransaction(options = {}) {
     if (persistedArtifact && !ownedArtifacts.publicationSnapshot) throw transactionError('INVALID_PUBLICATION_ARTIFACT');
     await validatePublicationCapability(artifact, 'reconcile', artifact);
 
+    // A stop between linking the backup name and renaming the copy over the
+    // original: the original is still at its own name. The second name goes
+    // and the replacement starts again from there ('backup-original').
+    if (await dropBackupAlias(sourceInfo.source, backup) && ownedArtifacts.replacementBackup) {
+      ownedArtifacts.replacementBackup = artifactMetadata(backup, ownedArtifacts.replacementBackup.nonce, 'intent');
+      await persist(operation, transactionSnapshot({ step: 'recovery-backup-alias-dropped', ownedPaths, ownedArtifacts,
+        publicationArtifact: persistedArtifact }));
+    }
+
     // A stop between moving the original to its backup name and recording
     // it: the backup is still only announced. The file there is the
     // original exactly when it has the original's identity and size; it is
@@ -2242,6 +2356,8 @@ function createFileTransaction(options = {}) {
     }
 
     if (action === 'backup-original') {
+      // (a backup name that is not a second link of the original: not ours to judge)
+      if (await lstatOrNull(backup)) throw transactionError('MANUAL_INTERVENTION');
       await assertSourceAuthority(sourceInfo.source, expectedSource, operation.signal);
       if (!await lstatOrNull(sourceInfo.source) || await lstatOrNull(backup)) throw transactionError('MANUAL_INTERVENTION');
       if (ownedArtifacts.replacementBackup?.state !== 'intent'
@@ -2250,6 +2366,35 @@ function createFileTransaction(options = {}) {
       }
       await persist(operation, transactionSnapshot({ step: 'recovery-backup-intent', ownedPaths, ownedArtifacts,
         publicationArtifact: persistedArtifact }));
+      await beforeReplace(sourceInfo.source, sourceInfo.sourceRoot, expectedSource, jobId, itemId);
+      if (replaceByLink && ownedArtifacts.replacementCandidate) {
+        // as in the swap: the copy is proven, the original gets its backup
+        // name as a second link, and the copy is renamed over its name
+        await completeRecoveredCopy({
+          operation, artifact, target: candidate, field: 'replacementCandidate', stepPrefix: 'recovery-candidate',
+          ownedPaths, ownedArtifacts, failureCode: 'PUBLICATION_ARTIFACT_CHANGED'
+        });
+        if (await linkBackupAside(sourceInfo.source, backup, expectedSource)) {
+          const linkedStat = await exactLstat(backup);
+          ownedArtifacts.replacementBackup = artifactMetadata(backup, ownedArtifacts.replacementBackup.nonce, 'owned',
+            linkedStat, expectedSource.sha256, expectedSource.size);
+          await persist(operation, transactionSnapshot({ phase: 'original-backed-up', ownedPaths, ownedArtifacts,
+            publicationArtifact: persistedArtifact }));
+          try {
+            await replaceOverOriginal(candidate, sourceInfo.source, backup, ownedArtifacts.replacementCandidate, false, expectedSource);
+          } catch (error) {
+            if (await dropBackupAlias(sourceInfo.source, backup).catch(() => false)) {
+              ownedArtifacts.replacementBackup = artifactMetadata(backup, ownedArtifacts.replacementBackup.nonce, 'intent');
+              await persist(operation, transactionSnapshot({ phase: 'candidate-written', ownedPaths, ownedArtifacts,
+                publicationArtifact: persistedArtifact })).catch(() => {});
+            }
+            throw error;
+          }
+          await persist(operation, transactionSnapshot({ phase: 'candidate-promoted', ownedPaths, ownedArtifacts,
+            publicationArtifact: persistedArtifact }));
+          return { phase: 'candidate-promoted', ownedPaths, ownedArtifacts };
+        }
+      }
       const promotion = await promoteNoReplace(sourceInfo.source, backup, 'REPLACEMENT_COLLISION', {
         expectedSource,
         removeSource: true
@@ -2276,6 +2421,8 @@ function createFileTransaction(options = {}) {
       });
       await persist(operation, transactionSnapshot({ step: 'recovery-promotion-intent', ownedPaths, ownedArtifacts,
         publicationArtifact: persistedArtifact }));
+      // (recorded before the stop already; once more does no harm)
+      await beforeReplace(sourceInfo.source, sourceInfo.sourceRoot, expectedSource, jobId, itemId);
       const promotion = await promoteNoReplace(candidate, sourceInfo.source, 'REPLACEMENT_COLLISION', {
         expectedSource: ownedArtifacts.replacementCandidate,
         removeSource: true

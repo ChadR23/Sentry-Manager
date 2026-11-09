@@ -31,13 +31,23 @@ async function makeBase(base) {
 
 // The runtime as server/converterHost.js composes it; onPromote / afterPromote
 // run around each no-replace move.
-async function open(base, { onPromote, afterPromote, ffprobePath = 'ffprobe', ffmpegPath = 'ffmpeg' } = {}) {
+// noLinks: a share without hard links (the original is moved aside first).
+async function open(base, { onPromote, afterPromote, ffprobePath = 'ffprobe', ffmpegPath = 'ffmpeg', noLinks = false } = {}) {
   process.env.SENTRY_NOREPLACE_RENAME = HELPER;
   const owned = createPosixOwnedFs();
   const renameExclusive = Object.assign((...args) => owned.renameExclusive(...args), owned.renameExclusive, {
     promote: async (request) => {
       await onPromote?.(request);
       const out = await owned.renameExclusive.promote(request);
+      await afterPromote?.(request);
+      return out;
+    },
+    // (the replacement that keeps the original's name renames the
+    // conversion over it: the same moment)
+    ...(noLinks ? { linkBackup: async () => ({ unsupported: true }) } : {}),
+    replaceOver: async (request) => {
+      await onPromote?.(request);
+      const out = await owned.renameExclusive.replaceOver(request);
       await afterPromote?.(request);
       return out;
     }

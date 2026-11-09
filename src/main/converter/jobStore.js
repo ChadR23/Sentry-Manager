@@ -106,14 +106,18 @@ const COPY_TRUTH_TABLE = Object.freeze({
   '100': 'resume-copy'
 });
 const REPLACEMENT_TRUTH_TABLES = Object.freeze({
+  // '1110': the original at its own name and at the backup name (one file,
+  // two links: a stop between linking the backup and renaming the copy over
+  // the original, staging.js replaceByLink). The backup name goes and the
+  // replacement goes on from the original at its name.
   'candidate-written': Object.freeze({
-    '1100': 'backup-original', '1010': 'promote-candidate',
+    '1100': 'backup-original', '1110': 'backup-original', '1010': 'promote-candidate',
     '0110': 'validate-final', '0100': 'restart-replacement',
     '0010': 'restore-backup', '0111': 'delete-backup',
     '0101': 'finish-replacement'
   }),
   'original-backed-up': Object.freeze({
-    '1010': 'promote-candidate', '0110': 'validate-final',
+    '1110': 'backup-original', '1010': 'promote-candidate', '0110': 'validate-final',
     '0010': 'restore-backup', '0111': 'delete-backup',
     '0101': 'finish-replacement'
   }),
@@ -139,13 +143,13 @@ const REPLACEMENT_TRUTH_TABLES = Object.freeze({
   // what the rollback was doing; it removes the candidate and checks the
   // backup against the original's recorded identity first.
   'rollback-started': Object.freeze({
-    '0100': 'rollback-complete', '0010': 'restore-backup', '1010': 'restore-backup'
+    '0100': 'rollback-complete', '0010': 'restore-backup', '1010': 'restore-backup', '1110': 'restore-backup'
   }),
   'backup-restored': Object.freeze({
-    '0100': 'rollback-complete', '0010': 'restore-backup', '1010': 'restore-backup'
+    '0100': 'rollback-complete', '0010': 'restore-backup', '1010': 'restore-backup', '1110': 'restore-backup'
   }),
   'rollback-failed': Object.freeze({
-    '0100': 'rollback-complete', '0010': 'restore-backup', '1010': 'restore-backup'
+    '0100': 'rollback-complete', '0010': 'restore-backup', '1010': 'restore-backup', '1110': 'restore-backup'
   })
 });
 const REPLACEMENT_ACTIONS_BY_PHASE = Object.freeze(Object.fromEntries(
