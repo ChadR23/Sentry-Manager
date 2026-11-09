@@ -24,7 +24,10 @@
         </svg>
         <b class="chrome brand-word">HORIZON</b>
       </a>
-      <nav class="dash-nav" id="nav-a" aria-label="Pages"></nav>
+      <div class="dash-navs" id="dash-navs">
+        <nav class="dash-nav" id="nav-a" aria-label="Pages"></nav>
+        <nav class="dash-nav" id="nav-b" aria-label="More pages"></nav>
+      </div>
       <div class="radio" role="group" aria-label="Page display">
         <button class="radio-seek" type="button" id="seek-prev" aria-label="Previous page ( [ )"><svg class="i" aria-hidden="true"><use href="#g-chev-l"/></svg></button>
         <div class="radio-face" aria-live="polite">
@@ -34,7 +37,6 @@
         </div>
         <button class="radio-seek" type="button" id="seek-next" aria-label="Next page ( ] )"><svg class="i" aria-hidden="true"><use href="#g-chev-r"/></svg></button>
       </div>
-      <nav class="dash-nav" id="nav-b" aria-label="More pages"></nav>
       <div class="dash-tools">
         <label class="car-pick" id="car-pick-wrap"><span class="sr-only">Vehicle</span><svg class="i" aria-hidden="true"><use href="#g-car"/></svg><select class="in" id="car-pick" aria-label="Vehicle"></select><span class="car-one" id="car-one"></span></label>
         <a class="btn icon ghost bell" href="#/alerts" id="bell" aria-label="Notifications"><svg class="i" aria-hidden="true"><use href="#g-bell"/></svg><span class="badge" id="bell-badge" hidden></span></a>

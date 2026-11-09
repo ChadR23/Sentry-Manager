@@ -55,6 +55,36 @@ function drawCarPick() {
   radioSub();
 }
 qs('#car-pick').addEventListener('change', (e) => pickCar(e.target.value));
+
+// ---------- the top bar: one row when everything fits, else two ----------
+// Each part is measured by what it holds, not by the room its column gives
+// it, so the answer is the same in either layout and never flips back and
+// forth: brand, both page groups, the radio and the tools (the car name
+// counted at most CAR_MIN wide, as it shortens with "…").
+const CAR_MIN = 110;
+const wide = matchMedia('(min-width: 1024px)');
+const w = (el) => (el && el.getClientRects().length ? el.getBoundingClientRect().width : 0);
+function inner(el, gap, size = w) {
+  const kids = [...el.children].filter((k) => k.getClientRects().length);
+  return kids.reduce((n, k) => n + size(k), 0) + gap * Math.max(0, kids.length - 1);
+}
+function fitBar() {
+  const dash = qs('#dash');
+  if (!wide.matches) { dash.classList.remove('two'); return; }
+  const pick = qs('#car-pick-wrap');
+  const carSize = (k) => (k.id === 'car-one' || k.id === 'car-pick' ? Math.min(k.scrollWidth, CAR_MIN) : w(k));
+  const tools = inner(qs('.dash-tools'), 4, (k) => (k === pick ? inner(pick, 6, carSize) : w(k)));
+  const cs = getComputedStyle(dash);
+  const room = dash.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+  const need = inner(qs('.dash-brand'), 10) + 6 + inner(qs('#nav-a'), 2) + w(qs('.radio')) + inner(qs('#nav-b'), 2) + tools + 4 * 10;
+  dash.classList.toggle('two', need > room);
+}
+new ResizeObserver(() => fitBar()).observe(qs('#dash'));
+wide.addEventListener('change', fitBar);
+document.fonts?.ready.then(fitBar);
+bus.on('cars', fitBar);
+bus.on('car', fitBar);
+fitBar();
 bus.on('cars', drawCarPick);
 bus.on('car', drawCarPick);
 
