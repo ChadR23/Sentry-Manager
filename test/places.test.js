@@ -124,3 +124,64 @@ test('coordinates pasted as Google and Apple Maps copy them', async () => {
     assert.equal(parseCoords(bad), null, bad);
   }
 });
+
+// ---- Settings > Places' map: a click drops a pin, "Set as Home" saves or moves Home, the radius drawn
+test('the map: a dropped pin fills the coordinates, Set as Home moves Home or saves it, the radius is drawn', async () => {
+  const { coordsText, circleRing, mapMarks, setAsRequest, parseCoords } = await import(pathToFileURL(MODULE).href);
+  // a click on the map fills "Add a place yourself" with 6 decimals, which the form reads back
+  const click = { lat: 41.87812345678, lon: -87.62984 };
+  assert.equal(coordsText(click.lat, click.lon), '41.878123, -87.629840');
+  assert.deepEqual(parseCoords(coordsText(click.lat, click.lon)), { lat: 41.878123, lon: -87.62984 });
+
+  // the radius as a circle: every point the radius away from the middle, closed
+  const ring = circleRing(HOME.lat, HOME.lon, 300);
+  assert.equal(ring.length, 65);
+  assert.deepEqual(ring[0], ring[64], 'closed');
+  for (const [lat, lon] of ring) assert.ok(Math.abs(P.metres({ lat, lon }, HOME) - 300) < 3, `${lat},${lon}`);
+
+  // what the map shows: places (with their radius), suggestions (their count) and the dropped pin (the form's radius)
+  const places = [{ id: 'h', name: 'Home', ...HOME, radius: 500 }, { id: 'w', name: 'Work', ...WORK }];
+  const suggestions = [{ lat: 41.95, lon: -87.65, count: 7, street: 'N Clark St' }];
+  let m = mapMarks({ places, suggestions, draft: click, radius: 150, canEdit: true });
+  assert.deepEqual(m.marks.map((k) => [k.kind, k.label ?? null, k.draggable ?? false]), [['place', 'Home', true], ['place', 'Work', true], ['sugg', '7', false], ['draft', null, true]]);
+  assert.deepEqual(m.shapes.map((x) => x.id), ['place-h', 'place-w', 'draft']);
+  const reach = (shape, at) => Math.round(P.metres({ lat: shape.coords[0][0], lon: shape.coords[0][1] }, at));
+  assert.equal(reach(m.shapes[0], HOME), 500, 'Home\'s own radius');
+  assert.equal(reach(m.shapes[1], WORK), 200, 'a place without a radius: 200 m');
+  assert.equal(reach(m.shapes[2], click), 150, 'the dropped pin: the radius typed');
+  m = mapMarks({ places, suggestions, draft: click, radius: 900, canEdit: true });
+  assert.equal(reach(m.shapes[2], click), 900, 'typing another radius redraws the circle');
+  assert.equal(reach(mapMarks({ draft: click, radius: 20 }).shapes[0], click), 200, 'one out of range: 200 m');
+  assert.ok(m.points.length > 100, 'the camera fits the circles and the suggestions');
+  // a saved place dragged and not yet saved is shown where it was dropped, its circle with it
+  const moved = mapMarks({ places, moving: { id: 'h', lat: 41.89, lon: -87.62 }, canEdit: true });
+  assert.deepEqual([moved.marks[0].lat, moved.marks[0].lon], [41.89, -87.62]);
+  assert.equal(reach(moved.shapes[0], { lat: 41.89, lon: -87.62 }), 500);
+  // watch-only: nothing to drag
+  assert.ok(mapMarks({ places, draft: click }).marks.every((k) => !k.draggable));
+
+  // "Set as Home": moves the Home there is (keeping its radius unless one was typed) ...
+  assert.deepEqual(setAsRequest(places, 'Home', click), { method: 'PATCH', url: '/api/places/h', body: { lat: 41.878123, lon: -87.62984 }, moves: places[0] });
+  assert.deepEqual(setAsRequest(places, 'home', click, 250).body, { lat: 41.878123, lon: -87.62984, radius: 250 }, 'any case');
+  // ... or saves a new one
+  assert.deepEqual(setAsRequest([places[1]], 'Home', click, 300), { method: 'POST', url: '/api/places', body: { name: 'Home', lat: 41.878123, lon: -87.62984, radius: 300 }, moves: null });
+  assert.equal(setAsRequest([], 'Work', click).body.radius, 200);
+  assert.equal(setAsRequest(places, 'Work', click).url, '/api/places/w');
+});
+
+test('the map in Settings > Places: the app\'s own map module, admins only to change, in every interface', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'web', 'placesSettings.js'), 'utf8');
+  assert.match(src, /import\('\/web\/viewerMap\.js'\)/, 'the map the Viewer and the Map page use, loaded with the section');
+  assert.doesNotMatch(src, /https?:\/\/(?!www\.w3)/, 'no other service');
+  assert.match(src, /if \(!canEdit \|\| moving\) return;/, 'a watch-only account drops no pin');
+  assert.match(src, /\.sentry-pl\.pl-ro \[data-add\],\.sentry-pl\.pl-ro button:not\(\.vm-btn\)/, 'and gets no buttons, but keeps the map\'s own');
+  const vm = fs.readFileSync(path.join(__dirname, '..', 'web', 'viewerMap.js'), 'utf8');
+  assert.match(vm, /setMarks\(list, markOpts = \{\}\)/);
+  assert.match(vm, /marker\.setDraggable\(true\)/);
+  assert.match(vm, /else opts\.onClick\?\.\(e\.lngLat\.lat, e\.lngLat\.lng\);/);
+  const packs = path.join(__dirname, '..', 'examples', 'ui-packs');
+  for (const f of ['horizon/web/hz', 'flux/web/flux', 'aurora/web/aurora', 'daylight/web/dl']) {
+    assert.match(fs.readFileSync(path.join(packs, f, 'pages', 'settings.js'), 'utf8'), /createPlacesSettings\(/, f);
+  }
+  assert.match(fs.readFileSync(path.join(__dirname, '..', 'web', 'app.js'), 'utf8'), /m\.createPlacesSettings\(box/);
+});

@@ -1768,32 +1768,41 @@ async function main() {
     if (r === null) throw new HttpError(400, `The radius is ${placesLib.MIN_RADIUS} to ${placesLib.MAX_RADIUS} m.`);
     return r;
   };
+  // a place's position, as POST and PATCH take it (numbers only, both)
+  const placePos = (b) => {
+    const lat = placesLib.coord(b?.lat);
+    const lon = placesLib.coord(b?.lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) throw new HttpError(400, 'That is not a place on the map.');
+    return { lat: Math.round(lat * 1e6) / 1e6, lon: Math.round(lon * 1e6) / 1e6 };
+  };
   r.add('POST', '/api/places', (req, res, { body }) => {
-    const lat = placesLib.coord(body?.lat);
-    const lon = placesLib.coord(body?.lon);
     const name = placeName(body?.name);
     if (!name) throw new HttpError(400, 'Give the place a name.');
-    if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) throw new HttpError(400, 'That is not a place on the map.');
+    const { lat, lon } = placePos(body);
     const radius = body?.radius === undefined || body?.radius === null ? placesLib.DEFAULT_RADIUS : placeRadius(body.radius);
     const list = placeList();
     if (list.length >= 200) throw new HttpError(400, 'There are 200 saved places already: remove some first.');
-    const place = { id: crypto.randomBytes(5).toString('hex'), name, lat: Math.round(lat * 1e6) / 1e6, lon: Math.round(lon * 1e6) / 1e6, radius };
+    const place = { id: crypto.randomBytes(5).toString('hex'), name, lat, lon, radius };
     db.set('places', [...list, place]);
     return { place };
   });
-  // a new name, a new radius, or both
+  // a new name, a new radius, a new position (lat and lon, from the map in
+  // Settings > Places), or any of them together
   r.add('PATCH', '/api/places/:id', (req, res, { params, body }) => {
     const list = placeList();
     const place = list.find((x) => x.id === params.id);
     if (!place) throw new HttpError(404, 'No such place.');
     const hasName = body?.name !== undefined;
     const hasRadius = body?.radius !== undefined;
-    if (!hasName && !hasRadius) throw new HttpError(400, 'Send a name or a radius.');
+    const hasAt = body?.lat !== undefined || body?.lon !== undefined;
+    if (!hasName && !hasRadius && !hasAt) throw new HttpError(400, 'Send a name, a radius or a position.');
     const name = hasName ? placeName(body.name) : place.name;
     if (!name) throw new HttpError(400, 'Give the place a name.');
     const radius = hasRadius ? placeRadius(body.radius) : null;
+    const at = hasAt ? placePos(body) : null;
     place.name = name;
     if (radius !== null) place.radius = radius;
+    if (at) Object.assign(place, at);
     db.set('places', list);
     return { place };
   });

@@ -21,6 +21,14 @@
 // onPlaceClip({ vehicle, day, clip, second, path }) so the pack opens it.
 // `clock("HH-MM-SS")` formats the times as the pack does.
 //
+// Marks (Settings > Places): `setMarks([{ id, kind: 'place' | 'sugg' |
+// 'draft', lat, lon, label, draggable }], { onPick, onDrag })` draws labelled
+// pins (dragged ones call onDrag(mark, lat, lon)), `setShapes([{ id, color,
+// coords: [[lat, lon], …] }])` outlined areas (a place's radius), and
+// `fit(points)` / `centre(point, zoom)` move the camera. With `always` the
+// map loads with nothing to show yet, `onClick(lat, lon)` gets a tap on the
+// map, and `heading: false` leaves out the heading-up button.
+//
 // The street-map / satellite choice and Map Labels are the Viewer's own
 // settings (/api/studio/settings), so a choice made in one interface holds
 // in the others. Light or dark follows the pack's look (`dark`).
@@ -32,7 +40,7 @@ import { timeAfter } from '/web/scrub.js';
 // needed: a route with GPS has come and the map is on screen (or nearly). A
 // clip without GPS, a map scrolled away on a phone, or a page left before
 // then never loads it.
-let createMap, htmlMarker, drawRoute, boundsOf, fitTo, centreOn, toLngLat, toRasterZoom;
+let createMap, htmlMarker, drawRoute, boundsOf, fitTo, centreOn, toLngLat, toRasterZoom, setOverlay;
 let mapLib = null;
 function loadMapLib() {
   if (!mapLib) {
@@ -45,7 +53,7 @@ function loadMapLib() {
       document.head.appendChild(link);
     }
     mapLib = import('/studio/scripts/ui/mapGl.js').then((m) => {
-      ({ createMap, htmlMarker, drawRoute, boundsOf, fitTo, centreOn, toLngLat, toRasterZoom } = m);
+      ({ createMap, htmlMarker, drawRoute, boundsOf, fitTo, centreOn, toLngLat, toRasterZoom, setOverlay } = m);
     });
   }
   return mapLib;
@@ -103,6 +111,13 @@ const CSS = `
 .vm-save{display:flex;gap:6px;padding:6px 10px}
 .vm-save input{flex:1;min-width:0;padding:4px 8px;border-radius:6px;border:1px solid var(--vm-btn-border,rgba(255,255,255,.3));background:transparent;color:inherit;font:inherit}
 .vm-spot{width:14px;height:14px;border-radius:50%;background:var(--vm-btn-active,#5ee9a0);border:2px solid #fff;box-shadow:0 0 0 6px rgba(94,233,160,.25)}
+.vm-mark{cursor:pointer;touch-action:none}
+.vm-mark.vm-drag{cursor:grab}
+.vm-mark-place{display:flex;align-items:center;gap:5px;font:700 12px/1.2 system-ui,sans-serif;color:#fff;white-space:nowrap}
+.vm-mark-place i{width:14px;height:14px;border-radius:4px;background:#ffd34a;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.55);box-sizing:border-box;flex:none}
+.vm-mark-place span{padding:2px 7px;border-radius:999px;background:rgba(11,14,19,.78)}
+.vm-mark-sugg{min-width:20px;height:20px;padding:0 5px;box-sizing:border-box;border-radius:999px;background:#6aa9ff;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.5);color:#0b1220;font:700 11px/16px system-ui,sans-serif;text-align:center}
+.vm-mark-draft .vm-spot{width:18px;height:18px}
 `;
 
 function addCss() {
@@ -153,11 +168,14 @@ export function createViewerMap(container, opts = {}) {
   const routes = new Map();
   let pos = null;
   let pins = null; // [pins, options] kept until the map is there
+  let marks = null; // [marks, options], the same
+  let shapes = null;
+  let view = null; // the last fit / centre asked for
   let dark = !!opts.dark;
   let real = null;
   let dead = false;
   let onScreen = typeof IntersectionObserver !== 'function';
-  const hasGps = () => hasFix(pos) || Boolean(pins?.[0]?.length) || [...routes.values()].some((records) => (records || []).some(hasFix));
+  const hasGps = () => !!opts.always || hasFix(pos) || Boolean(pins?.[0]?.length) || Boolean(marks?.[0]?.length) || [...routes.values()].some((records) => (records || []).some(hasFix));
   const io = onScreen ? null : new IntersectionObserver((entries) => {
     onScreen = entries.some((e) => e.isIntersecting);
     maybeLoad();
@@ -174,6 +192,9 @@ export function createViewerMap(container, opts = {}) {
       for (const [key, records] of routes) real.addRoute(key, records);
       if (pos) real.setPosition(pos);
       if (pins) real.setPins(...pins);
+      if (shapes) real.setShapes(shapes);
+      if (marks) real.setMarks(...marks);
+      if (view) real[view[0]](...view[1]);
     }).catch(() => {
       note.textContent = 'The map could not be loaded.';
       note.hidden = false;
@@ -186,6 +207,10 @@ export function createViewerMap(container, opts = {}) {
     setDark(on) { dark = !!on; real?.setDark(on); },
     /** Pins: [{ lat, lon, color, title }] and { onPick(pin) }; the map fits them when it has no route. */
     setPins(list, pinOpts = {}) { if (real) real.setPins(list, pinOpts); else { pins = [list || [], pinOpts]; maybeLoad(); } },
+    setMarks(list, markOpts = {}) { if (real) real.setMarks(list, markOpts); else { marks = [list || [], markOpts]; maybeLoad(); } },
+    setShapes(list) { if (real) real.setShapes(list); else shapes = list || []; },
+    fit(points, fitOpts = {}) { if (real) real.fit(points, fitOpts); else view = ['fit', [points, fitOpts]]; },
+    centre(point, zoom) { if (real) real.centre(point, zoom); else view = ['centre', [point, zoom]]; },
     resize() { real?.resize(); },
     destroy() {
       dead = true;
@@ -201,7 +226,7 @@ function buildViewerMap(container, opts = {}) {
     <div class="vm-note" hidden></div>
     <div class="vm-btns">
       <button type="button" class="vm-btn" data-vm="centre" title="Follow the car" aria-label="Follow the car" hidden>${ICON.centre}</button>
-      <button type="button" class="vm-btn" data-vm="heading" title="Heading up (tap for north up)" aria-label="Heading up" aria-pressed="true">${ICON.compass}</button>
+      ${opts.heading === false ? '' : `<button type="button" class="vm-btn" data-vm="heading" title="Heading up (tap for north up)" aria-label="Heading up" aria-pressed="true">${ICON.compass}</button>`}
       ${opts.onPlaceClip ? `<button type="button" class="vm-btn" data-vm="place" title="Find clips recorded at a place" aria-label="Find clips recorded at a place" aria-pressed="false">${ICON.pin}</button>` : ''}
       <button type="button" class="vm-btn" data-vm="layers" title="Satellite" aria-label="Satellite" aria-pressed="false">${ICON.layers}</button>
     </div>`;
@@ -218,14 +243,14 @@ function buildViewerMap(container, opts = {}) {
     note.textContent = 'The map needs WebGL, which this browser has turned off.';
     note.hidden = false;
     const dead = () => {};
-    return { addRoute: dead, clearRoute: dead, setPosition: dead, setDark: dead, resize: dead, setPins: dead, destroy: () => { container.innerHTML = ''; } };
+    return { addRoute: dead, clearRoute: dead, setPosition: dead, setDark: dead, resize: dead, setPins: dead, setMarks: dead, setShapes: dead, fit: dead, centre: dead, destroy: () => { container.innerHTML = ''; } };
   }
 
   let dark = !!opts.dark;
   let provider = P().DEFAULT_PROVIDER_ID;
   let labels = P().DEFAULT_LABELS_ENABLED;
   let applied = null;
-  let headingUp = true;
+  let headingUp = opts.heading !== false;
   let follow = true;
   let bearing = 0; // unwrapped, smoothed the short way round
   let arrow = null;
@@ -294,7 +319,7 @@ function buildViewerMap(container, opts = {}) {
 
   function showNote() {
     note.textContent = noGpsText;
-    note.hidden = !!(last || pinMarkers.length || routes.size && [...routes.values()].some((pts) => pts.length));
+    note.hidden = !!(opts.always || last || pinMarkers.length || markMarkers.length || routes.size && [...routes.values()].some((pts) => pts.length));
   }
 
   function setFollow(on) {
@@ -305,7 +330,7 @@ function buildViewerMap(container, opts = {}) {
   map.on('dragstart', () => setFollow(false));
 
   btn('centre').addEventListener('click', () => setFollow(true));
-  btn('heading').addEventListener('click', () => {
+  btn('heading')?.addEventListener('click', () => {
     headingUp = !headingUp;
     const b = btn('heading');
     b.setAttribute('aria-pressed', String(headingUp));
@@ -342,6 +367,54 @@ function buildViewerMap(container, opts = {}) {
     }
     showNote();
     if (pts.length && !routes.size && !last) fitTo(map, boundsOf(pts), { padding: 40, maxZoom: 15 });
+  }
+
+  // ---- marks (Settings > Places): places, suggestions and a dropped pin ----
+  let markMarkers = [];
+  function setMarks(list, { onPick = null, onDrag = null } = {}) {
+    for (const m of markMarkers) m.remove();
+    markMarkers = [];
+    for (const k of list || []) {
+      if (!hasFix(k)) continue;
+      const kind = ['place', 'sugg', 'draft'].includes(k.kind) ? k.kind : 'place';
+      const html = kind === 'place' ? `<i></i><span>${esc(k.label || '')}</span>` : kind === 'sugg' ? esc(k.label ?? '') : '<div class="vm-spot"></div>';
+      const marker = htmlMarker(map, [k.lat, k.lon], { className: `vm-mark vm-mark-${kind}${k.draggable ? ' vm-drag' : ''}`, html, title: k.title || '', anchor: kind === 'place' ? 'left' : 'center' });
+      if (kind === 'place') marker.setOffset([-7, 0]); // the square on the spot, the name beside it
+      const el = marker.getElement();
+      el.setAttribute('role', 'img');
+      el.setAttribute('aria-label', k.title || k.label || 'Place');
+      let dragged = false;
+      el.addEventListener('click', (e) => {
+        e.stopPropagation(); // not a tap on the map
+        if (dragged) { dragged = false; return; }
+        onPick?.(k);
+      });
+      if (k.draggable) {
+        marker.setDraggable(true);
+        marker.on('dragstart', () => { dragged = true; });
+        marker.on('dragend', () => {
+          const ll = marker.getLngLat();
+          setTimeout(() => { dragged = false; }, 0);
+          onDrag?.(k, ll.lat, ll.lng);
+        });
+      }
+      markMarkers.push(marker);
+    }
+    showNote();
+  }
+  // areas drawn under the marks: a light fill and an outline
+  function setShapes(list) {
+    const features = (list || []).filter((x) => x.coords?.length > 2).map((x) => ({
+      type: 'Feature', properties: { color: x.color || '#ffd34a' },
+      geometry: { type: 'Polygon', coordinates: [x.coords.map(toLngLat)] }
+    }));
+    setOverlay(map, 'sx-shapes', {
+      source: { type: 'geojson', data: { type: 'FeatureCollection', features } },
+      layers: [
+        { id: 'sx-shapes-fill', type: 'fill', paint: { 'fill-color': ['get', 'color'], 'fill-opacity': 0.14 } },
+        { id: 'sx-shapes-line', type: 'line', paint: { 'line-color': ['get', 'color'], 'line-width': 2, 'line-opacity': 0.9 } }
+      ]
+    });
   }
 
   // ---- saved places: labelled on the map, and places the search can use ----
@@ -441,10 +514,13 @@ function buildViewerMap(container, opts = {}) {
     panel.appendChild(ol);
   }
   btn('place')?.addEventListener('click', () => setPicking(!picking));
-  map.on('click', (e) => { if (picking) findAt(e.lngLat.lat, e.lngLat.lng); });
+  map.on('click', (e) => {
+    if (picking) findAt(e.lngLat.lat, e.lngLat.lng);
+    else opts.onClick?.(e.lngLat.lat, e.lngLat.lng);
+  });
 
   map.on('rotate', () => {
-    const svg = btn('heading').querySelector('svg');
+    const svg = btn('heading')?.querySelector('svg');
     if (svg) svg.style.transform = `rotate(${-map.getBearing()}deg)`;
   });
 
@@ -498,6 +574,15 @@ function buildViewerMap(container, opts = {}) {
       applyStyle();
     },
     setPins,
+    setMarks,
+    setShapes,
+    /** Fit the camera around points ([lat, lon]); maxZoom is a raster level. */
+    fit(points, { maxZoom = 16, padding = 48 } = {}) {
+      const b = boundsOf(points || []);
+      if (b) fitTo(map, b, { padding, maxZoom });
+    },
+    /** Centre on a point ([lat, lon]), at a raster zoom level (or the current one). */
+    centre(point, zoom) { centreOn(map, point, zoom, { animate: true }); },
     resize() { map.resize(); },
     destroy() {
       destroyed = true;

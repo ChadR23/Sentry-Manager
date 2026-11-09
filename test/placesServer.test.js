@@ -3,7 +3,8 @@
 // Settings > Places on the real server: suggestions from where the car's
 // Sentry and Saved events were (event.json est_lat / est_lon), a place's
 // radius checked and used for the Footage page's "at Home" tag, and a
-// watch-only account reading the suggestions.
+// watch-only account reading the suggestions. A place moved on the map
+// (PATCH lat and lon), by admins only.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -139,6 +140,18 @@ test('places: suggestions where the car parks, radius checked and used for the t
     assert.deepEqual([work.lat, work.lon, work.radius], [41.9, -87.7, 300]);
     assert.equal((await admin('GET', '/api/places/suggestions')).data.counts[work.id], 2);
 
+    // moved on the map (Settings > Places: "Set as Home" where Home is, or a pin dragged): lat and lon, checked as POST checks them
+    for (const bad of [{ lat: 41.9 }, { lon: -87.7 }, { lat: '', lon: '' }, { lat: '41.9 N', lon: -87.7 }, { lat: 91, lon: 0 }, { lat: 0, lon: 181 }, { lat: [41.9], lon: -87.7 }, { lat: null, lon: null }, { lat: 41.9, lon: -87.7, radius: 10 }]) {
+      assert.equal((await admin('PATCH', `/api/places/${work.id}`, bad)).status, 400, JSON.stringify(bad));
+    }
+    assert.deepEqual((await admin('GET', '/api/places')).data.places.find((x) => x.id === work.id), work, 'nothing changed by a bad one');
+    let movedWork = (await admin('PATCH', `/api/places/${work.id}`, { lat: '41.87812345', lon: -87.6298 })).data.place;
+    assert.deepEqual(movedWork, { ...work, lat: 41.878123, lon: -87.6298 }, 'the name and radius kept, 6 decimals');
+    assert.equal((await admin('GET', '/api/places/suggestions')).data.counts[work.id], 3, 'its events are counted where it is now (the three at Home, within its 300 m)');
+    movedWork = (await admin('PATCH', `/api/places/${work.id}`, { lat: 41.9, lon: -87.7, radius: 300 })).data.place;
+    assert.deepEqual(movedWork, work, 'moved back, with a radius');
+    assert.equal((await admin('PATCH', '/api/places/nothere', { lat: 41.9, lon: -87.7 })).status, 404);
+
     // a watch-only account reads the suggestions like the places, but cannot change places
     assert.equal((await admin('POST', '/api/accounts', { username: 'kid', password: 'watching only', role: 'viewer' })).status, 200);
     const kid = client();
@@ -147,6 +160,7 @@ test('places: suggestions where the car parks, radius checked and used for the t
     assert.equal((await kid('GET', '/api/places')).data.places.length, 2);
     assert.equal((await kid('POST', '/api/places', { name: 'Mine', lat: 41.9, lon: -87.6 })).status, 403, 'only admins add places');
     assert.equal((await kid('PATCH', `/api/places/${work.id}`, { name: 'Nope' })).status, 403, 'or rename them');
+    assert.equal((await kid('PATCH', `/api/places/${work.id}`, { lat: 41.8, lon: -87.6 })).status, 403, 'or move them');
     assert.equal((await kid('DELETE', `/api/places/${work.id}`)).status, 403, 'or remove them');
     assert.equal((await kid('GET', '/api/places')).data.places.length, 2, 'nothing changed');
     assert.equal((await kid('PUT', '/api/settings/power', { mode: 'flat' })).status, 403, 'other settings stay for admins');
