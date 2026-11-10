@@ -240,3 +240,12 @@ test('horizon: the top bar counts the car name and the vehicle picker at their r
   assert.equal(max, Number(/\.car-one \{[^}]*max-width: (\d+)px/.exec(css)?.[1]), 'CAR_MAX is .car-one\'s max-width');
   assert.match(main, /const carSize = \(k\) => \(k\.id === 'car-one' \? Math\.min\(k\.scrollWidth, CAR_MAX\) : w\(k\)\);/, 'the picker is not capped');
 });
+
+// Flux's top bar on a phone: one vehicle's name is held to the same width as
+// the picker of two, so a long name never pushes the bell and shortcuts
+// buttons off a 320-390 px screen.
+test('flux: a long vehicle name fits the phone top bar', () => {
+  const css = fs.readFileSync(path.join(ROOT, 'flux', 'web', 'flux.css'), 'utf8');
+  assert.match(css, /@media \(max-width: 860px\) \{[\s\S]*?\.veh-pick select, \.veh-name \{ max-width: 96px; \}/);
+  assert.match(css, /@media \(max-width: 360px\) \{[^}]*\}\s*\.veh-pick \.ico \{ display: none; \}\s*\.veh-pick select, \.veh-name \{ max-width: 80px; \}/);
+});

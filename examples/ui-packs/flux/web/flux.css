@@ -593,7 +593,7 @@ label.sub-block { display: flex; gap: 8px; align-items: flex-start; }
   .cmdk span, .cmdk kbd { display: none; }
   .livedot span { display: none; }
   .veh-pick { padding: 0 2px 0 8px; }
-  .veh-pick select { max-width: 96px; }
+  .veh-pick select, .veh-name { max-width: 96px; }
   .page { padding: 14px max(12px, env(safe-area-inset-right)) max(32px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); }
   .split { grid-template-columns: minmax(0, 1fr) !important; gap: 12px; }
   .gutter { display: none; }
@@ -633,6 +633,12 @@ label.sub-block { display: flex; gap: 8px; align-items: flex-start; }
 }
 @media (max-width: 420px) {
   .livedot { display: none; }
+}
+/* a 320 px phone: the menu, search, vehicle, bell and shortcuts buttons still fit side by side */
+@media (max-width: 360px) {
+  .top { gap: 4px; }
+  .veh-pick .ico { display: none; }
+  .veh-pick select, .veh-name { max-width: 80px; }
 }
 
 /* phones held sideways: the picture gets the room */
