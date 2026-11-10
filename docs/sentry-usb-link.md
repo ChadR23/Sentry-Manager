@@ -297,12 +297,12 @@ share, the web password itself), and the Pi always masks them over the link.
 
 | Route | What it does |
 |---|---|
-| `GET /api/sentryusb` | The devices, each with: id, name, paired, online, last seen, version, last status. Never the key. |
+| `GET /api/sentryusb` | The devices, each with: id, name, paired, online, last seen, version, last status. Never the key. The address it connects from and the networks it reports are shown to admins only. |
 | `POST /api/sentryusb/pair` | Takes `{name, username, password}` and opens a 15-minute pairing slot. Fresh admin password confirmation is needed, as for other risky actions. |
 | `DELETE /api/sentryusb/pair` | Cancels the slot. |
 | `PATCH /api/sentryusb/{id}` | Renames the device. |
 | `DELETE /api/sentryusb/{id}` | Unpairs: deletes the key and closes the link. |
-| `ANY /api/sentryusb/{id}/proxy/<allowlisted path>` | Sends one request over the link and returns the Pi's answer. It is checked against Manager's copy of the allowlist. Writes need an admin, and reads are allowed for any signed-in account. |
+| `ANY /api/sentryusb/{id}/proxy/<allowlisted path>` | Sends one request over the link and returns the Pi's answer. It is checked against Manager's copy of the allowlist. Writes need an admin. Reads are allowed for any signed-in account, except the Pi's logs, diagnostics, setup and notification settings, update source, keep-accessory config and backups list, which are for admins only (as Manager's own logs are). |
 
 **Logging:** Manager logs each action it sends (who, which Pi, which route),
 never bodies containing secrets.
@@ -546,7 +546,7 @@ browser as `502` (it is not Manager's sign-in).
 
 | Route | Who | What |
 |---|---|---|
-| `GET /api/sentryusb/:id/last-config` | signed in | the last setup config read from it (masked), for editing while away |
+| `GET /api/sentryusb/:id/last-config` | admin | the last setup config read from it (masked), for editing while away |
 | `GET/POST /api/sentryusb/:id/queue`, `DELETE /api/sentryusb/:id/queue/:qid` | read: signed in; write: admin | queued actions (6a) |
 | `GET /api/sentryusb/:id/files/:name` | admin | a fetched diagnostics report |
 | `GET /api/sentryusb/security`, `GET /api/sentryusb/security.csv`, `PUT /api/sentryusb/security/settings` | admin | the security log (6b) |

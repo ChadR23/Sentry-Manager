@@ -2667,11 +2667,16 @@ async function main() {
     return fp ? sentryUsbLinkLib.fpGroups(sentryUsbLinkLib.fpHex(fp)) : null;
   };
   const NO_HTTPS_TEXT = 'This server runs without its own HTTPS (TLS_MODE=off, behind a reverse proxy). A Sentry USB pins the certificate of the port it connects to, port 10000, so pairing needs Sentry Manager\'s own HTTPS: set TLS_MODE=auto (the default).';
-  r.add('GET', '/api/sentryusb', (req, res, { user }) => ({
-    https: Boolean(tlsSource), noHttpsText: tlsSource ? null : NO_HTTPS_TEXT, fingerprint: sentryFingerprint(),
-    port: { ...(canPort?.state() || { listening: false, error: null, port: CAN_PORT }) },
-    pairing: sentryLink.pairing(), devices: sentryLink.devices(), admin: adminHere(req, user), queueKinds: sentryQueue.KINDS
-  }));
+  r.add('GET', '/api/sentryusb', (req, res, { user }) => {
+    const admin = adminHere(req, user);
+    // where each Pi connects from and the networks it reports are for admins, as the security log is
+    const devices = sentryLink.devices().map((d) => (admin ? d : { ...d, address: null, net: null, home: null }));
+    return {
+      https: Boolean(tlsSource), noHttpsText: tlsSource ? null : NO_HTTPS_TEXT, fingerprint: sentryFingerprint(),
+      port: { ...(canPort?.state() || { listening: false, error: null, port: CAN_PORT }) },
+      pairing: sentryLink.pairing(), devices, admin, queueKinds: sentryQueue.KINDS
+    };
+  });
   r.add('POST', '/api/sentryusb/pair', async (req, res, { body, user }) => {
     sentryWriter(req, user);
     requireConfirmed(req);
@@ -2737,7 +2742,10 @@ async function main() {
     audit.warn(`Sentry USB "${name}" (${params.id}) unpaired: ${by(req, user)}`);
     return { ok: true };
   });
-  r.add('GET', '/api/sentryusb/:id/last-config', (req, res, { params }) => sentryLink.lastConfig(sentryOr404(params.id)));
+  r.add('GET', '/api/sentryusb/:id/last-config', (req, res, { params, user }) => {
+    sentryWriter(req, user); // its settings: admins, like the proxied read
+    return sentryLink.lastConfig(sentryOr404(params.id));
+  });
   // queued actions: run when the Pi is home (section 6a)
   r.add('GET', '/api/sentryusb/:id/queue', (req, res, { params }) => sentryQueue.list(sentryOr404(params.id)));
   r.add('POST', '/api/sentryusb/:id/queue', (req, res, { params, body, user }) => {
@@ -2775,7 +2783,11 @@ async function main() {
   // one request over the link, checked against Manager's copy of the allowlist
   // (the path comes from the raw request target: no %-escapes, dots or double slashes)
   const CONFIRM_ROUTES = new Set(['PUT /api/setup/config', 'POST /api/setup/run', 'PUT /api/system/update-source']);
-  const ADMIN_READS = []; // (reads an admin alone may make: none since backups stay on the Pi)
+  const ADMIN_READS = []; // (reads an admin alone may make, logged like changes: none since backups stay on the Pi)
+  // reads for admins only, as Manager's own logs and settings are: the Pi's
+  // logs (auth, syslog), diagnostics, its settings and notification settings
+  // (addresses, accounts, VINs, maybe tokens) and its backups list
+  const PRIVATE_READS = [/^\/api\/logs\//, /^\/api\/diagnostics$/, /^\/api\/setup\/config$/, /^\/api\/notifications\/settings$/, /^\/api\/system\/backups$/, /^\/api\/system\/update-source$/, /^\/api\/system\/keep-accessory-config$/];
   const proxyTo = async (req, res, { params, body, user }) => {
     const id = sentryOr404(params.id);
     const raw = String(req.url || '');
@@ -2788,7 +2800,7 @@ async function main() {
     if (target instanceof Error) throw new HttpError(target.status, target.message);
     // the Pi's rule: these characters and whole %XX escapes only
     if (query.length > 2048 || !/^(?:[A-Za-z0-9._~=&+,:-]|%[0-9A-Fa-f]{2})*$/.test(query)) throw new HttpError(400, 'Bad query.');
-    if (req.method !== 'GET' || ADMIN_READS.some((re) => re.test(target))) sentryWriter(req, user);
+    if (req.method !== 'GET' || ADMIN_READS.some((re) => re.test(target)) || PRIVATE_READS.some((re) => re.test(target))) sentryWriter(req, user);
     if (CONFIRM_ROUTES.has(`${req.method} ${target}`)) requireConfirmed(req);
     const name = sentryLink.name(id);
     if (req.method !== 'GET') audit.info(`Sentry USB "${name}": ${req.method} ${target}: ${by(req, user)}`);

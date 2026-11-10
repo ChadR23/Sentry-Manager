@@ -167,6 +167,15 @@ test('the Sentry USB link through the server', { skip: !hasOpenssl, timeout: 120
       assert.equal(r.status, 403, `viewer ${m} ${p}: ${r.text}`);
     }
     assert.equal(pi.state.reboots || 0, 0);
+    // its logs, diagnostics, settings and backups list are for admins, as Manager's own are
+    for (const p of [`${P}/logs/auth`, `${P}/logs/syslog/tail`, `${P}/diagnostics`, `${P}/setup/config`, `${P}/notifications/settings`, `${P}/system/backups`, `/api/sentryusb/${id}/last-config`]) {
+      const r = await s.call('GET', p, { cookie: viewer });
+      assert.equal(r.status, 403, `viewer GET ${p}: ${r.text}`);
+    }
+    // and where it connects from, with the networks it reports
+    const seen = (await s.call('GET', '/api/sentryusb', { cookie: viewer })).json.devices[0];
+    assert.deepEqual([seen.address, seen.net, seen.home], [null, null, null]);
+    assert.ok((await s.call('GET', '/api/sentryusb', { cookie: admin })).json.devices[0].address, 'an admin sees it');
 
     // a queued action (online: it runs at once); its fetched file downloads as an attachment
     const q = await s.call('POST', `/api/sentryusb/${id}/queue`, { cookie: admin, body: { kind: 'diagnostics' } });
