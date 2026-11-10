@@ -1242,3 +1242,13 @@ test('value names in words: the words every name starts with left out, off-like 
   assert.deepEqual(mod.prettyNames({ 0: 'NO_CHARGER_PRESENT', 1: 'DC_CHARGER_PRESENT', 2: 'AC_CHARGER_PRESENT' }), { 0: 'No charger present', 1: 'DC charger present', 2: 'AC charger present' }, 'acronyms stay capitals');
   assert.deepEqual(mod.prettyNames({ 0: 'Idle', 1: '12vChg' }), { 0: 'Idle', 1: '12vChg' }, 'names already in words stay');
 });
+
+test('a bar over the video stays inside the cameras, and while customized it is over the Viewer\'s floating panels', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'web', 'statDash.js'), 'utf8');
+  // (Customize makes it taller: its top went past the cameras' top, out of reach)
+  assert.match(src, /\.sentry-sd\.over\{max-height:calc\(100% - 16px\);overflow-y:auto\}/);
+  // (the Clips panel is z-index 90, the map 100 and the dashboard 101: they hid Done)
+  const z = Number(/\.sentry-sd\.over\.editing\{z-index:(\d+)\}/.exec(src)?.[1]);
+  assert.ok(z > 101, 'above the Clips panel, the map and the dashboard');
+  assert.ok(z < 2147481900, 'below the floating boxes and the stat picker');
+});

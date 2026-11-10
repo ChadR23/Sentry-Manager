@@ -48,6 +48,10 @@ const STYLE = `
 .sentry-sd.float{position:absolute;z-index:2147482000;left:0;top:0;max-width:min(96vw,1180px);background:rgba(18,20,24,.97);border:1px solid var(--sd-line);border-radius:16px;padding:6px;box-shadow:0 12px 32px rgba(0,0,0,.45)}
 .sentry-sd.moving{opacity:.92;box-shadow:0 16px 40px rgba(0,0,0,.6)}
 .sentry-sd.over{position:absolute;left:8px;right:8px;bottom:8px;z-index:11;background:rgba(10,12,15,.55);-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);border-radius:16px;padding:6px;pointer-events:auto}
+/* (no taller than the cameras: Customize's tools scroll in it instead of going past their top;
+   while customizing it is over the Viewer's own floating panels (Clips, map, dashboard), which hid Done) */
+.sentry-sd.over{max-height:calc(100% - 16px);overflow-y:auto}
+.sentry-sd.over.editing{z-index:102}
 .sentry-sd .sd-row{display:flex;flex-wrap:wrap;gap:6px;align-items:stretch}
 .sentry-sd .sd-b{position:relative;background:var(--sd-tile);border:1px solid var(--sd-line);border-radius:12px;padding:8px 12px;min-height:64px;display:flex;flex-direction:column;justify-content:center}
 .sentry-sd .sd-small{flex:1 1 104px;max-width:170px;align-items:center;text-align:center}
