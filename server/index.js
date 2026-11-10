@@ -2148,7 +2148,8 @@ async function main() {
   canFootageRef = createCanFootage({ keysFor: (vid) => canKeysFor(vid), minuteTimes: (key) => canIndex.minuteTimes(key), generation: () => canIndex.generation(), startOf: (v, name) => canStartOf(v, name) });
   recPlacesRef = createRecordingPlaces({
     keysFor: (vid) => canKeysFor(vid), canFile: minuteFileOf(path.join(DATA, 'can-index')), utcOf: (v, stamp) => canStartOf(v, stamp),
-    clipStats: (vid, day) => speedIndex.clipStats(vid, day), filesOf: (vid) => inventory.get(vid)?.files, generation: () => canIndex.generation()
+    clipStats: (vid, day) => speedIndex.clipStats(vid, day), clipsRead: (vid, day) => speedIndex.clipsRead(vid, day),
+    filesOf: (vid) => inventory.get(vid)?.files, generation: () => canIndex.generation()
   });
   // which car each CAN Bridge key is (a key of its own when there is one car)
   const canMap = () => db.get('can-vehicles', {}) || {};

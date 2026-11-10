@@ -435,7 +435,23 @@ function createSpeedIndex({ dir, inventory, vehicles, telemetry, log, pauseMs = 
     return sp;
   }
 
-  return { kick, day, summaries, moments, near, warm, clip, clipStats, progress, status: () => ({ ...progress_ }), flush, stop() { stopped = true; } };
+  /**
+   * The clips of a day the index has read as they are now (size and time unchanged), with
+   * or without driving data in them: a Set of rels. A parked clip carries no telemetry at
+   * all (no speed, no GPS), so clipStats leaves it out; this tells it from one not read yet.
+   */
+  async function clipsRead(vid, d) {
+    if (!DAY.test(String(d || ''))) return new Set();
+    const data = await load(vid, d);
+    const out = new Set();
+    for (const [rel, entry] of Object.entries(data || {})) {
+      const f = inventory.get(vid)?.files?.get(rel);
+      if (Array.isArray(entry) && f && f.size === entry[0] && Math.round(f.mtimeMs) === entry[1] && entry.length >= 4) out.add(rel);
+    }
+    return out;
+  }
+
+  return { kick, day, summaries, moments, near, warm, clip, clipStats, clipsRead, progress, status: () => ({ ...progress_ }), flush, stop() { stopped = true; } };
 }
 
 /** One clip's speeds and summary in numbers (clipStats), or null when it has no speed at all. */

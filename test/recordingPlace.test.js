@@ -67,7 +67,8 @@ test('Footage: Recent recordings get place (parked), from and to (Home to Work);
   const clip = async (key, sp, g, indexed = true) => {
     for (const cam of ['front', 'back']) await fsp.writeFile(path.join(recent, `${key}-${cam}.mp4`), crypto.randomBytes(2048));
     const st = await fsp.stat(path.join(recent, `${key}-front.mp4`));
-    if (indexed) speeds[`TeslaCam/RecentClips/${key}-front.mp4`] = [st.size, Math.round(st.mtimeMs), sp, { b: null, t: null, v: [0, Math.max(...sp)], g, k: 2 }];
+    // sp null: read, with no telemetry at all (the car writes none while parked)
+    if (indexed) speeds[`TeslaCam/RecentClips/${key}-front.mp4`] = sp === null ? [st.size, Math.round(st.mtimeMs), null, null] : [st.size, Math.round(st.mtimeMs), sp, { b: null, t: null, v: [0, Math.max(...sp)], g, k: 2 }];
   };
   const at = (p, s = 0) => [s, p.lat, p.lon];
   // 07:00-07:02 a drive from Home to Work (the cameras' GPS)
@@ -89,6 +90,12 @@ test('Footage: Recent recordings get place (parked), from and to (Home to Work);
   await clip(`${DAY}_23-00-00`, moving, [at(HOME)]);
   await clip(`${DAY}_23-01-00`, moving, [at(HOME, 55)]);
   await clip(`${DAY}_23-30-00`, parked, [at(HOME), at(HOME, 55)]);
+  // 20:00-20:02 parked (no telemetry), a drive from Work to Home, parked again: the parked clips are passed over
+  await clip(`${DAY}_20-00-00`, null, null);
+  await clip(`${DAY}_20-01-00`, moving, [at(WORK), at(HOME, 55)]);
+  await clip(`${DAY}_20-02-00`, null, null);
+  // 21:00 parked all through, no telemetry at all: where the car was last seen (Home, at 20:01)
+  await clip(`${DAY}_21-00-00`, null, null);
   // 15:00 no GPS at all; 17:00 not read by the speed index yet
   await clip(`${DAY}_15-00-00`, parked, []);
   await clip(`${DAY}_17-00-00`, parked, [at(WORK)], false);
@@ -172,7 +179,7 @@ test('Footage: Recent recordings get place (parked), from and to (Home to Work);
 
     // no saved places: no place fields at all
     let all = await recs();
-    assert.equal(Object.keys(all).length, 10, Object.keys(all).join(', '));
+    assert.equal(Object.keys(all).length, 12, Object.keys(all).join(', '));
     assert.ok(Object.values(all).every((r) => !('place' in r) && !('placeSource' in r)));
     assert.equal(all['11:00'].can, true, 'the CAN tag (the index covers 11:00)');
 
@@ -185,6 +192,8 @@ test('Footage: Recent recordings get place (parked), from and to (Home to Work);
     assert.deepEqual(pick(all['13:00']), { place: 'Home', from: undefined, to: undefined, placeSource: 'video' }, 'a 20 m CAN fix is not used');
     assert.deepEqual(pick(all['15:00']), { place: 'Work', from: undefined, to: undefined, placeSource: 'can' }, 'no camera GPS: the CAN Bridge\'s');
     assert.deepEqual(pick(all['17:00']), { place: null, from: undefined, to: undefined, placeSource: undefined }, 'not indexed yet: no tag');
+    assert.deepEqual(pick(all['20:00']), { place: null, from: 'Work', to: 'Home', placeSource: 'video' }, 'parked clips (no telemetry) at both ends are passed over');
+    assert.deepEqual(pick(all['21:00']), { place: 'Home', from: undefined, to: undefined, placeSource: 'video' }, 'parked all through: where the car was last seen');
     assert.deepEqual(pick(all['event 19:30']), { place: 'Home', from: undefined, to: undefined, placeSource: 'event' }, 'the car\'s event.json beats CAN Bridge GPS');
     assert.deepEqual(pick(all['event 21:30']), { place: 'Home', from: undefined, to: undefined, placeSource: 'event' }, 'event.json as before');
     assert.equal(all['23:00'].can, true);

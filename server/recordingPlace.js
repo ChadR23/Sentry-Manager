@@ -25,7 +25,7 @@ const { CLIP_MS } = require('./canFootage');
 
 const CAN_FIX_MAX_M = 15; // a CAN GPS fix counts when its accuracy is this or better (metres)
 const CAN_INWARD_MIN = 5; // minutes looked at from each end of a recording for a fix
-const VIDEO_INWARD_CLIPS = 5; // front clips looked at from each end for a position
+const PARKED_LOOKBACK_MS = 3 * 86400_000; // a recording with no GPS at all: the car's last position up to this long before
 const CAN_SLACK_MS = 30_000; // a fix this close outside the recording still counts (the car is where it was)
 const EVENT_NEAR_MS = 120_000; // a fix this close to an event's time is where the event was
 const FIXES_KEPT = 20_000; // minute files whose fixes are kept
@@ -88,7 +88,8 @@ const stampOf = (display) => (display && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/
  * -> the speed index's clip stats, filesOf(vid) -> the scan's file map,
  * generation() -> the CAN index's change counter.
  */
-function createRecordingPlaces({ keysFor, canFile, utcOf, clipStats, filesOf, generation = () => 0 }) {
+function createRecordingPlaces({ keysFor, canFile, utcOf, clipStats, clipsRead = null, filesOf, generation = () => 0 }) {
+  const fronts = new WeakMap(); // the scan's file map -> its front clips in time order
   const fixCache = new Map(); // file -> { stamp, fixes | promise }
   const recCache = new Map(); // `${vid}/${rec.id}` -> { sig, ends }
 
@@ -144,27 +145,81 @@ function createRecordingPlaces({ keysFor, canFile, utcOf, clipStats, filesOf, ge
     return best ? pos(best[1]) : null;
   }
 
-  /** The cameras' GPS at a recording's start and end: { a, z } ({ lat, lon } or null). */
+  /**
+   * The cameras' GPS at a recording's start and end: { a, z } ({ lat, lon } or null). The car
+   * writes telemetry (speed, GPS) only while it drives: a clip recorded parked has none at all.
+   * From each end inward, a clip read with no GPS is passed over; a clip not read yet stops
+   * that end (the index reads a day newest first, and would leave a start wrong otherwise).
+   * A recording read whole without any GPS (parked all through, Sentry Mode at Home, say) is
+   * where the car's footage before it last had a position (the car has not moved since).
+   */
   async function videoEnds(vid, rec) {
-    const clips = frontClips(rec, filesOf(vid));
+    const files = filesOf(vid);
+    const clips = frontClips(rec, files);
     if (!clips.length) return { a: null, z: null };
     const days = new Map();
+    const read = new Map();
     const statsOf = async (c) => {
       if (!days.has(c.day)) days.set(c.day, await clipStats(vid, c.day).catch(() => ({})));
       return days.get(c.day)[c.rel] || null;
     };
-    // from each end inward, over clips that were read (a clip not read yet: that end is not known yet,
-    // as the index reads a day newest first and would leave a start wrong otherwise)
-    const walk = async (list, key) => {
-      for (const c of list.slice(0, VIDEO_INWARD_CLIPS)) {
-        const s = await statsOf(c);
-        if (!s) return null;
-        const p = s[key];
-        if (Array.isArray(p) && goodPos(Number(p[0]), Number(p[1]))) return { lat: Number(p[0]), lon: Number(p[1]) };
-      }
-      return null;
+    const wasRead = async (c) => {
+      if (!clipsRead) return false;
+      if (!read.has(c.day)) read.set(c.day, await clipsRead(vid, c.day).catch(() => new Set()));
+      return read.get(c.day).has(c.rel);
     };
-    return { a: await walk(clips, 'a'), z: await walk([...clips].reverse(), 'z') };
+    const walk = async (list, key) => {
+      for (const c of list) {
+        const s = await statsOf(c);
+        if (s) {
+          const p = s[key];
+          if (Array.isArray(p) && goodPos(Number(p[0]), Number(p[1]))) return { lat: Number(p[0]), lon: Number(p[1]) };
+          continue; // read, with speeds but no position: the next one in
+        }
+        if (await wasRead(c)) continue; // read, no telemetry (parked)
+        return null; // not read yet: this end is not known yet
+      }
+      return 'none'; // every clip read, none with GPS
+    };
+    const a = await walk(clips, 'a');
+    const z = a === null ? null : await walk([...clips].reverse(), 'z');
+    if (a !== 'none') return { a, z: z === 'none' ? null : z };
+    // parked all through: where the car was last seen before it
+    const before = await lastBefore(vid, files, clips[0].stamp, statsOf, wasRead);
+    return { a: before, z: before, inferred: Boolean(before) };
+  }
+
+  /** The car's last camera position before clip stamp `stamp` (within PARKED_LOOKBACK_MS), or null. */
+  async function lastBefore(vid, files, stamp, statsOf, wasRead) {
+    let list = files ? fronts.get(files) : null;
+    if (!list && files) {
+      list = [];
+      for (const f of files.values()) {
+        if ((f?.camera || (/-front\.mp4$/i.test(f?.rel || '') ? 'front' : null)) !== 'front') continue;
+        const m = TS.exec(String(f.rel).split('/').pop());
+        if (m) list.push({ rel: f.rel, day: f.day || m[1].slice(0, 10), stamp: m[1] });
+      }
+      list.sort((x, y) => x.stamp.localeCompare(y.stamp));
+      fronts.set(files, list);
+    }
+    if (!list?.length) return null;
+    const limit = Date.parse(`${stamp.slice(0, 10)}T${stamp.slice(11).replace(/-/g, ':')}Z`) - PARKED_LOOKBACK_MS;
+    let lo = 0;
+    let hi = list.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (list[mid].stamp < stamp) lo = mid + 1; else hi = mid; }
+    for (let i = lo - 1; i >= 0; i--) {
+      const c = list[i];
+      if (Date.parse(`${c.stamp.slice(0, 10)}T${c.stamp.slice(11).replace(/-/g, ':')}Z`) < limit) break;
+      const s = await statsOf(c);
+      if (s) {
+        const p = s.z;
+        if (Array.isArray(p) && goodPos(Number(p[0]), Number(p[1]))) return { lat: Number(p[0]), lon: Number(p[1]) };
+        continue;
+      }
+      if (await wasRead(c)) continue;
+      return null; // not read yet: not known
+    }
+    return null;
   }
 
   /** A recording's CAN ends (cached until the index, the car's keys, its zone or its clips change). */
@@ -202,12 +257,14 @@ function createRecordingPlaces({ keysFor, canFile, utcOf, clipStats, filesOf, ge
       const can = keys.length && at ? await canNear(keys, utcOf(v, at)) : null;
       return can ? { place: name(can), placeSource: 'can' } : { place: null };
     }
-    const video = await videoEnds(v.id, rec);
-    const can = keys.length && (!video.a || !video.z) ? await canEndsOf(v, rec, keys) : { a: null, z: null };
+    let video = await videoEnds(v.id, rec);
+    const can = keys.length && (!video.a || !video.z || video.inferred) ? await canEndsOf(v, rec, keys) : { a: null, z: null };
+    // where the car was last seen (parked all through, no GPS of its own) yields to a CAN fix at the time
+    if (video.inferred && (can.a || can.z)) video = { a: null, z: null };
     const a = video.a || can.a;
     const z = video.z || can.z;
     if (!a || !z) return { place: null };
-    const placeSource = video.a && video.z ? 'video' : video.a || video.z ? 'video' : 'can';
+    const placeSource = video.a || video.z ? 'video' : 'can';
     const from = name(a);
     const to = name(z);
     if (from && from === to) return { place: from, placeSource };
