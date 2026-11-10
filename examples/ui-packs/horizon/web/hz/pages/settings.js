@@ -24,7 +24,14 @@ export default {
     el.querySelector('.stab.on')?.scrollIntoView?.({ block: 'nearest', inline: 'center' });
     const box = el.querySelector('#sp');
     const parts = { vehicles, places, account, interface: iface, display, updates, security, system: sys, power, nodes: async (b) => { inner = await nodesPage.mount(b, { sub: '', params, go, alive, status: () => {} }); } };
-    await parts[tab](box, { params, go });
+    // a section that can't load (a watch-only account's Security, say) says so in its own panel:
+    // the section list stays, so the other sections are a tap away
+    const draw = () => parts[tab](box, { params, go }).catch((err) => {
+      if (!box.isConnected) return;
+      box.innerHTML = `<div class="blank hud"><p>${h(err.message || 'This section could not load.')}</p><button class="btn" type="button" data-retry>${ico('refresh')}Try again</button></div>`;
+      box.querySelector('[data-retry]').onclick = () => { box.innerHTML = '<div class="loading"><i></i><i></i><i></i></div>'; draw(); };
+    });
+    await draw();
     return {
       unmount() { inner?.unmount?.(); },
       onTopics(t) {
