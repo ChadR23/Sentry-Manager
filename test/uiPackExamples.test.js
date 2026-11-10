@@ -221,3 +221,10 @@ test('horizon: the Footage track rows are laid out by the list\'s own width', ()
   // only the phone layout (the list as wide as the window) still goes by the window
   for (const m of css.matchAll(/@media \(max-width: (\d+)px\) \{\s*\.track \{/g)) assert.ok(Number(m[1]) <= 700, `a window-wide .track rule at ${m[1]} px`);
 });
+
+// Horizon's Viewer on a touch screen: the frame-step buttons of a paused video
+// sit at the sides, not over the speed and P R N D line along the bottom.
+test('horizon: the frame-step buttons leave the heads-up display readable', () => {
+  const css = fs.readFileSync(path.join(ROOT, 'horizon', 'web', 'hz', 'app.css'), 'utf8');
+  assert.match(css, /\.cam\.main \.sentry-x-steps \{ top: 50%; bottom: auto; transform: translateY\(-50%\); justify-content: space-between;/);
+});
