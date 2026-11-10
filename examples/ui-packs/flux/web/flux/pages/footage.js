@@ -10,9 +10,14 @@ const placeText = (r) => (r.place ? `at ${r.place}` : r.from && r.to ? `${r.from
 // the Sentry USB line's tag, in this pack's chips (web/sentryUsb.js)
 const USB_TAG = { ok: 'chip green', busy: 'chip cyan', wait: 'chip slate', bad: 'chip amber', stale: 'chip' };
 // the day's archive tag: partly archived (amber), waiting for Sentry USB (the car left mid-transfer; neutral) or still arriving
-const GAP_TONE = { partial: ' amber', waiting: ' slate' };
+// or "Car didn't record" (neutral): hours in Sentry Mode with no footage from a car that usually
+// records then; nothing is missing from the share, the car is what to check
+const GAP_TONE = { partial: ' amber', waiting: ' slate', car: ' slate' };
+const CAR_LABEL = 'Car didn\'t record';
+// the car note next to another tag
+const carChip = (a) => (a.state !== 'car' && a.sentryQuiet ? ` <span class="chip gap slate" title="${esc(a.sentryQuiet.note || '')}">${CAR_LABEL}</span>` : '');
 // ("Pi missed snapshots": the missing minutes are where the Pi took no snapshot in time)
-const gapLabel = (a) => (a.state === 'partial' ? `${a.missedSnapshots?.length ? 'Pi missed snapshots' : 'Partly archived?'}${a.missingMinutes ? ` ~${a.missingMinutes} min missing` : ''}` : a.state === 'waiting' ? 'Waiting for Sentry USB' : 'Still arriving');
+const gapLabel = (a) => (a.state === 'car' ? CAR_LABEL : a.state === 'partial' ? `${a.missedSnapshots?.length ? 'Pi missed snapshots' : 'Partly archived?'}${a.missingMinutes ? ` ~${a.missingMinutes} min missing` : ''}` : a.state === 'waiting' ? 'Waiting for Sentry USB' : 'Still arriving');
 
 // "Also delete its CAN data" in a footage delete confirmation: shown only when a CAN Bridge key is
 // mapped to the car (can: the server's count, null otherwise), unticked; those logs go for good, now
@@ -168,7 +173,7 @@ export default {
             <div class="enc-line"><span class="enc-track"><span style="width:${encP.toFixed(1)}%"></span></span><span class="small faint num">${d.encoded}/${d.clips} encoded</span></div>
             ${ix ? `<div><span class="chip violet" title="Speeds read for the Viewer's speed graph">${ix}</span></div>` : ''}
             ${d.canRecordings > 0 ? `<div><span class="chip can" title="${esc(`CAN Bridge data for ${plural(d.canRecordings, 'recording')} of this day (car data in the Viewer)`)}">${(d.canRecordings === d.recordings ? 'CAN' : `CAN ${d.canRecordings}/${d.recordings}`)}</span></div>` : ''}
-            ${d.archive ? `<div><span class="chip gap${GAP_TONE[d.archive.state] || ''}" title="${esc(d.archive.summary)}">${gapLabel(d.archive)}</span></div>` : ''}
+            ${d.archive ? `<div><span class="chip gap${GAP_TONE[d.archive.state] || ''}" title="${esc(d.archive.summary)}">${gapLabel(d.archive)}</span>${carChip(d.archive)}</div>` : ''}
             ${d.archive && f.date === d.day ? `<p class="note small gap-note${GAP_TONE[d.archive.state] || ''}">${esc(d.archive.summary)}${d.archive.state === 'partial' ? ` ${esc(d.archive.advice || ARCHIVE_ADVICE)}` : ''}</p>` : ''}
             <div class="day-actions">
               <button class="btn sm" type="button" data-play-day="${esc(d.day)}" aria-label="Play ${esc(d.day)}">${icon('play')}Play</button>

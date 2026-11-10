@@ -18,6 +18,15 @@
 //            in SentryClips), and can leave its USB drive untouched for hours
 //            (checked against a Sentry USB's log, 2026-11-09: every snapshot
 //            run while parked found the drive unchanged).
+//   car      (a note, not a gap) a car known to record while in Sentry Mode
+//            (most of its Sentry minutes have footage) that spent at least
+//            SENTRY_QUIET_MIN of a day in Sentry Mode with no footage at all:
+//            something on the car stopped it recording (Sentry Mode excluded
+//            at Home, Work or Favorites, the dashcam not writing to its USB
+//            drive). Nothing is missing from the share, so these minutes never
+//            count as missing, never make the day "partial" and never raise a
+//            notification; the day carries sentryQuiet for a neutral
+//            "Car didn't record" tag.
 //   cutoff   a drive whose footage stops while the car is moving (the speed
 //            index: the last seconds of its last front clip above 3 m/s), with
 //            the next footage minutes later. A car does not stop recording
@@ -80,6 +89,7 @@ const TS = /(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})/;
 const MINUTE_FILE = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})\.json\.gz$/;
 const KEY = /^[A-Za-z0-9-]{1,64}$/;
 const MAX_GAPS_SHOWN = 3; // missed-snapshot gaps named in a summary (the rest as "and N more")
+const SENTRY_QUIET_MIN = 60; // Sentry Mode minutes with no footage in a day before the "Car didn't record" note
 
 /** A clip name's wall-clock time as seconds, treating it as UTC (only differences matter). */
 function stampSec(name) {
@@ -217,7 +227,9 @@ const runList = (minutes) => runsOf(minutes).map(([a, b]) => ({ from: keyOfSec(a
  *   encoded      rels the converter has rewritten (their file times say nothing of the archive)
  *   speeds       Map(rel -> speeds a second, m/s) of indexed front clips
  *   canDriving   wall-clock seconds of minutes CAN Bridge shows driving with no footage, or null (no CAN data)
- *   canSentry    ignored: parked minutes (Sentry Mode included) are never missing RecentClips
+ *   canSentry    the same for minutes in Sentry Mode (only passed once the car is known to record in Sentry).
+ *                Never missing footage: SENTRY_QUIET_MIN of them in a day give the day a note
+ *                that the car did not record (sentryQuiet), and nothing else
  *   canMinutes   wall-clock seconds of every minute CAN Bridge has logged (the car awake), to see the zones match
  *   receivedMs   when the share last received new footage of this car (from the scans), if known
  *   lastRecentS  the newest Recent clip ever seen on the share (stampSec), if known
@@ -266,7 +278,7 @@ function analyze({ files, nowMs, tz = 'UTC', encoded = new Set(), speeds = new M
   }
   const catchingUp = received > 0 && nowMs - received < FILLING_MS;
   const days = {};
-  const dayOf = (d) => (days[d] ||= { day: d, missing: new Set(), can: [], sentry: [], cut: new Set(), cutoffs: [], partial: [], late: 0, maxLateMs: 0, lastArrival: 0, held: new Set(), piHeld: new Set() });
+  const dayOf = (d) => (days[d] ||= { day: d, missing: new Set(), quiet: new Set(), can: [], sentry: [], cut: new Set(), cutoffs: [], partial: [], late: 0, maxLateMs: 0, lastArrival: 0, held: new Set(), piHeld: new Set() });
   // Sentry USB is still copying this minute (its status file): not missing
   const pi = sentryUsb && sentryUsb.transferring && Number.isFinite(sentryUsb.firstS) ? sentryUsb : null;
   const piLast = pi ? (Number.isFinite(pi.lastS) ? pi.lastS : pi.firstS) : null;
@@ -284,17 +296,21 @@ function analyze({ files, nowMs, tz = 'UTC', encoded = new Set(), speeds = new M
   const frontAt = new Map(); // clip start -> its front clip's speeds
   for (const c of clips) if (c.f.camera === 'front' && Array.isArray(speeds.get(c.f.rel))) frontAt.set(c.s, valuesOf(c.f.rel));
 
-  // can, sentry: minutes CAN Bridge shows the car recording, with no footage
+  // can: minutes CAN Bridge shows the car driving, with no footage (missing); and
+  // car: minutes it shows Sentry Mode on with no footage (only a note, never missing)
   const tzShift = [];
   if (habit && canDriving) {
     const what = new Map();
     for (const m of canDriving || []) what.set(m, 'drive');
-    // (canSentry: parked minutes are not missing footage; kept as a parameter for older callers)
+    for (const m of canSentry || []) if (!what.has(m)) what.set(m, 'sentry');
     const perDay = new Map();
     for (const m of [...what.keys()].sort((a, b) => a - b)) {
       if (!inWindow(m) || covered(starts, m + 30)) continue;
-      if (piHolds(m)) { holdPi(m); continue; }
-      if (!due(m)) { hold(m); continue; }
+      // (a Sentry minute that is not due, or that Sentry USB is still copying, is simply left out:
+      // the note never holds a day as filling or waiting)
+      const drive = what.get(m) === 'drive';
+      if (piHolds(m)) { if (drive) holdPi(m); continue; }
+      if (!due(m)) { if (drive) hold(m); continue; }
       const day = dayOfSec(m);
       if (!perDay.has(day)) perDay.set(day, []);
       perDay.get(day).push(m);
@@ -329,7 +345,9 @@ function analyze({ files, nowMs, tz = 'UTC', encoded = new Set(), speeds = new M
       }
       if (shift) { tzShift.push({ day, hours: shift, minutes: list.length }); continue; }
       const d = dayOf(day);
-      for (const m of list) { d.missing.add(m); (what.get(m) === 'drive' ? d.can : d.sentry).push(m); }
+      for (const m of list) {
+        if (what.get(m) === 'drive') { d.missing.add(m); d.can.push(m); } else d.quiet.add(m);
+      }
     }
   }
 
@@ -445,11 +463,15 @@ function analyze({ files, nowMs, tz = 'UTC', encoded = new Set(), speeds = new M
     // one partial minute alone is not enough (a camera can miss a minute)
     const partial = missingMinutes > 0 || partialMinutes >= 2;
     const piDay = Boolean(pi) && (d.piHeld.size > 0 || d.piRange === true);
-    if (!partial && !late && !d.held.size && !piDay) continue;
+    // Sentry Mode on with no footage, for long enough: the car did not record (a note for the car)
+    const quietMins = [...d.quiet].filter((m) => !d.missing.has(m) && !d.cut.has(m)).sort((a, b) => a - b);
+    const sentryQuiet = quietMins.length >= SENTRY_QUIET_MIN ? { minutes: quietMins.length, runs: runList(quietMins) } : null;
+    if (!partial && !late && !d.held.size && !piDay && !sentryQuiet) continue;
     const finding = {
       day: d.day,
-      // waiting: Sentry USB's transfer is past its give-up time (nothing lost)
-      state: partial ? 'partial' : piDay && pi.overdue ? 'waiting' : 'filling',
+      // waiting: Sentry USB's transfer is past its give-up time (nothing lost);
+      // car: only the note that the car did not record in Sentry Mode (nothing lost either)
+      state: partial ? 'partial' : piDay && pi.overdue ? 'waiting' : late || d.held.size || piDay ? 'filling' : 'car',
       missingMinutes,
       partialMinutes,
       waitingMinutes: d.held.size,
@@ -479,6 +501,8 @@ function analyze({ files, nowMs, tz = 'UTC', encoded = new Set(), speeds = new M
     }));
     finding.missedSnapshotMinutes = [...explained.values()].reduce((a, b) => a + b, 0);
     finding.snapshotIntervalS = finding.missedSnapshots.length ? snapshots.intervalS ?? null : null;
+    if (sentryQuiet) sentryQuiet.note = carSentence({ day: d.day, sentryQuiet }, { clock24 });
+    finding.sentryQuiet = sentryQuiet;
     finding.summary = summarize(finding, { receivedMs: received, nowMs, clock24 });
     finding.advice = ADVICE;
     out[d.day] = finding;
@@ -527,15 +551,31 @@ function snapshotSentence(f, { clock24 = false } = {}) {
   return `${head}${rule}, and the car keeps only about an hour, so the footage from ${lost}${extra > 0 ? ' (and more)' : ''} was overwritten before it was copied${share}`;
 }
 
+/** Runs of minutes in words: "1:51–4:45 AM, 7:02–8:58 AM and 3 more stretches". */
+function runWords(runs, day, clock24) {
+  const shown = runs.slice(0, 3).map((r) => (r.minutes > 1 ? clockPair(r.from, r.to, { day, h24: clock24, joiner: '–' }) : clockOne(r.from, day, clock24)));
+  const extra = runs.length - 3;
+  const more = extra > 0 ? ` and ${extra} more stretch${extra === 1 ? '' : 'es'}` : '';
+  return `${shown.length > 1 && !more ? `${shown.slice(0, -1).join(', ')} and ${shown[shown.length - 1]}` : shown.join(', ')}${more}`;
+}
+
+/**
+ * The note for a day the car spent in Sentry Mode without recording (sentryQuiet),
+ * pointing at the car, not the archive; '' without one.
+ */
+function carSentence(f, { clock24 = false } = {}) {
+  const q = f.sentryQuiet;
+  if (!q?.minutes) return '';
+  return `The car was in Sentry Mode for ${footMinutes(q.minutes)} (${runWords(q.runs || [], f.day, clock24)}) but wrote no footage, though it usually records while parked in Sentry. `
+    + 'Check the car: Sentry Mode may be excluded at this place (Home, Work or Favorites), or its dashcam stopped writing to the USB drive (a grey dashcam icon or a USB warning on the car\'s screen).';
+}
+
 /** The evidence in plain words (for the tag and the notification). */
 function summarize(f, { receivedMs = 0, nowMs = Date.now(), clock24 = false } = {}) {
+  const car = carSentence(f, { clock24 });
+  if (f.state === 'car') return car;
   const bits = [];
-  const list = (runs) => {
-    const shown = runs.slice(0, 3).map((r) => (r.minutes > 1 ? clockPair(r.from, r.to, { day: f.day, h24: clock24, joiner: '–' }) : clockOne(r.from, f.day, clock24)));
-    const extra = runs.length - 3;
-    const more = extra > 0 ? ` and ${extra} more stretch${extra === 1 ? '' : 'es'}` : '';
-    return `${shown.length > 1 && !more ? `${shown.slice(0, -1).join(', ')} and ${shown[shown.length - 1]}` : shown.join(', ')}${more}`;
-  };
+  const list = (runs) => runWords(runs, f.day, clock24);
   if (f.can?.length) bits.push(`CAN Bridge shows the car driving ${list(f.can)} with no footage`);
   if (f.sentry?.length) bits.push(`CAN Bridge shows Sentry Mode on ${list(f.sentry)} with no footage`);
   for (const c of f.cutoffs.slice(0, 2)) {
@@ -563,7 +603,7 @@ function summarize(f, { receivedMs = 0, nowMs = Date.now(), clock24 = false } = 
   // (lower case after the colon, but not an acronym such as CAN)
   const first = /^[A-Z][a-z]/.test(text) && !text.startsWith('Sentry USB') ? text.charAt(0).toLowerCase() : text.charAt(0);
   const snap = snapshotSentence(f, { clock24 });
-  return `${head}${first}${text.slice(1)}.${snap ? ` ${snap}.` : ''}`;
+  return `${head}${first}${text.slice(1)}.${snap ? ` ${snap}.` : ''}${car ? ` ${car}` : ''}`;
 }
 
 const ADVICE = 'Check the Sentry USB (or whatever copies the car\'s USB drive to the share): its Logs page, its archive settings and its Wi-Fi to the NAS. Clips it recycles before copying them are lost.';
@@ -816,7 +856,7 @@ function createArchiveGap({ inventory, vehicles, notes, db, speedIndex = null, c
     /** { day: { state, missingMinutes, partialMinutes, summary, advice } } for the day cards (no check started). */
     forDays(vid) {
       const out = {};
-      for (const [d, f] of Object.entries(results.get(vid)?.days || {})) out[d] = { state: f.state, missingMinutes: f.missingMinutes, partialMinutes: f.partialMinutes, lateClips: f.lateClips, maxLateHours: f.maxLateHours, sentryUsb: f.sentryUsb || null, missedSnapshots: f.missedSnapshots?.length ? f.missedSnapshots : null, missedSnapshotMinutes: f.missedSnapshotMinutes || 0, summary: f.summary, advice: f.state === 'partial' ? ADVICE : null };
+      for (const [d, f] of Object.entries(results.get(vid)?.days || {})) out[d] = { state: f.state, missingMinutes: f.missingMinutes, partialMinutes: f.partialMinutes, lateClips: f.lateClips, maxLateHours: f.maxLateHours, sentryUsb: f.sentryUsb || null, missedSnapshots: f.missedSnapshots?.length ? f.missedSnapshots : null, missedSnapshotMinutes: f.missedSnapshotMinutes || 0, sentryQuiet: f.sentryQuiet || null, summary: f.summary, advice: f.state === 'partial' ? ADVICE : null };
       return out;
     },
     /** A CAN log was indexed: forget what was read of its minutes. */
@@ -840,4 +880,4 @@ function createArchiveGap({ inventory, vehicles, notes, db, speedIndex = null, c
   };
 }
 
-module.exports = { createArchiveGap, analyze, summarize, snapshotSentence, footMinutes, noteFor, classify, stampSec, covered, wallSec, utcOfWall, ADVICE };
+module.exports = { createArchiveGap, analyze, summarize, snapshotSentence, carSentence, SENTRY_QUIET_MIN, footMinutes, noteFor, classify, stampSec, covered, wallSec, utcOfWall, ADVICE };

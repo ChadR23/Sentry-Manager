@@ -59,9 +59,14 @@ const CAN_TITLE = 'CAN Bridge data for this footage (car data in the Viewer)';
 // the Sentry USB line's tag, in this pack's chips (web/sentryUsb.js)
 const USB_TAG = { ok: 'chip green', busy: 'chip teal', wait: 'chip slate', bad: 'chip amber', stale: 'chip' };
 // the day's archive tag: still arriving, waiting for Sentry USB (the car left mid-transfer) or partly
-// archived ("Pi missed snapshots" when the Pi took no snapshot in time for the missing minutes)
-const gapLabel = (a) => (!a ? '' : a.state === 'partial' ? `${a.missedSnapshots?.length ? 'Pi missed snapshots' : 'Partly archived?'}${a.missingMinutes ? ` ~${a.missingMinutes} min missing` : ''}` : a.state === 'waiting' ? 'Waiting for Sentry USB' : 'Still arriving');
-const GAP_TONE = { partial: 'amber', waiting: 'slate' };
+// archived ("Pi missed snapshots" when the Pi took no snapshot in time for the missing minutes);
+// "Car didn't record" (neutral) when the car spent hours in Sentry Mode with no footage, though it
+// usually records then: the car to check, nothing missing from the share
+const CAR_LABEL = 'Car didn\'t record';
+const gapLabel = (a) => (!a ? '' : a.state === 'car' ? CAR_LABEL : a.state === 'partial' ? `${a.missedSnapshots?.length ? 'Pi missed snapshots' : 'Partly archived?'}${a.missingMinutes ? ` ~${a.missingMinutes} min missing` : ''}` : a.state === 'waiting' ? 'Waiting for Sentry USB' : 'Still arriving');
+const GAP_TONE = { partial: 'amber', waiting: 'slate', car: 'slate' };
+// the car note on top of another tag
+const carChip = (a) => (a && a.state !== 'car' && a.sentryQuiet ? `<span class="chip gap slate" title="${esc(a.sentryQuiet.note || '')}">${CAR_LABEL}</span>` : '');
 
 function frame(v, d, on) {
   const p = dayParts(d.day);
@@ -73,7 +78,7 @@ function frame(v, d, on) {
   return `<button class="frame${on ? ' on' : ''}" type="button" data-day="${esc(d.day)}" aria-pressed="${on}" aria-label="${esc(dayTitle(d.day))}: ${plural(d.recordings, 'recording')}, ${esc(bytes(d.bytes))}${gap ? `, ${esc(gap)}` : ''}">
     <div class="frame-pic">${d.thumbId ? `<img class="thumb-img" loading="lazy" alt="" src="${thumb(v, d.thumbId)}">` : ''}<div class="frame-date"><b>${esc(p.dd)}</b><span>${esc(p.mon)} · ${esc(p.wd)}</span></div></div>
     <div class="frame-info"><span class="frame-cats">${cats.map(([c, n]) => `<span class="chip ${CAT_CHIP[c] || ''}" style="padding:1px 8px;font-size:12px"><i class="dot cat-${esc(c)}"></i>${n}</span>`).join('')}</span>
-      <span class="muted">${footMinutes(d.minutes)} · ${esc(bytes(d.bytes))}${d.protected ? ` · ${d.protected} protected` : ''}${enc ? ` · ${enc}` : ''}</span>${ix ? `<span class="chip violet" style="padding:1px 8px;font-size:12px;align-self:flex-start" title="Speeds read for the Viewer's speed graph">${esc(ix)}</span>` : ''}${gap ? `<span class="chip gap ${GAP_TONE[d.archive.state] || 'teal'}" title="${esc(d.archive.summary)}">${esc(gap)}</span>` : ''}${d.canRecordings > 0 ? `<span class="chip can" style="padding:1px 8px;font-size:12px;align-self:flex-start" title="${esc(`CAN Bridge data for ${plural(d.canRecordings, 'recording')} of this day (car data in the Viewer)`)}">${d.canRecordings === d.recordings ? 'CAN' : `CAN ${d.canRecordings}/${d.recordings}`}</span>` : ''}</div>
+      <span class="muted">${footMinutes(d.minutes)} · ${esc(bytes(d.bytes))}${d.protected ? ` · ${d.protected} protected` : ''}${enc ? ` · ${enc}` : ''}</span>${ix ? `<span class="chip violet" style="padding:1px 8px;font-size:12px;align-self:flex-start" title="Speeds read for the Viewer's speed graph">${esc(ix)}</span>` : ''}${gap ? `<span class="chip gap ${GAP_TONE[d.archive.state] || 'teal'}" title="${esc(d.archive.summary)}">${esc(gap)}</span>${carChip(d.archive)}` : ''}${d.canRecordings > 0 ? `<span class="chip can" style="padding:1px 8px;font-size:12px;align-self:flex-start" title="${esc(`CAN Bridge data for ${plural(d.canRecordings, 'recording')} of this day (car data in the Viewer)`)}">${d.canRecordings === d.recordings ? 'CAN' : `CAN ${d.canRecordings}/${d.recordings}`}</span>` : ''}</div>
   </button>`;
 }
 
@@ -208,7 +213,7 @@ export default {
           <button class="btn" type="button" data-select-all>${icon('select')} Select all</button>
           <button class="btn" type="button" data-trash-day="day">${icon('trash')} Delete this day</button>
           <button class="btn" type="button" data-trash-day="through">Delete through this date</button></div></div>
-        ${d?.archive ? `<p class="gap-note${d.archive.state === 'partial' ? ' amber' : d.archive.state === 'waiting' ? ' slate' : ''}">${esc(d.archive.summary)}${d.archive.state === 'partial' ? ` ${esc(d.archive.advice || ADVICE)}` : ''}</p>` : ''}
+        ${d?.archive ? `<p class="gap-note${d.archive.state === 'partial' ? ' amber' : d.archive.state === 'waiting' || d.archive.state === 'car' ? ' slate' : ''}">${esc(d.archive.summary)}${d.archive.state === 'partial' ? ` ${esc(d.archive.advice || ADVICE)}` : ''}</p>` : ''}
         ${selected.size ? `<div class="selbar" role="region" aria-label="Selection"><b>${selected.size} selected</b><span class="spacer"></span>
           <button class="btn sm" type="button" data-bulk="protect">${icon('lock')} Protect</button>
           <button class="btn sm" type="button" data-bulk="unprotect"${sel.some((r) => r.protected) ? '' : ' disabled'}>${icon('unlock')} Unprotect</button>

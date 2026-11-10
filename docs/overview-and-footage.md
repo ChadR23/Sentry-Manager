@@ -319,4 +319,20 @@ grey-blue **Waiting for Sentry USB** tag instead: nothing is lost, the clips
 stay on the Pi and arrive with the next archive. See [Sentry USB](sentry-usb.md)
 for the Sentry USB line at the top of the Footage page.
 
+**Car didn't record.** Some cars record while parked in Sentry Mode, some
+keep only Sentry events. Once the share shows that a car records while in
+Sentry Mode (most of its Sentry minutes, from its CAN Bridge logs, have
+footage), a day with at least an hour of Sentry Mode and no footage at all
+gets a grey-blue **Car didn't record** tag. Open the day to read when, for
+example "The car was in Sentry Mode for 14 h 20 min (1:51–4:45 AM,
+7:02–8:58 AM and 3 more stretches) but wrote no footage, though it usually
+records while parked in Sentry." Nothing is missing from the share here, so
+it is not counted as missing footage, never makes the day "Partly archived?"
+and sends no notification: the thing to check is the car. Sentry Mode may be
+excluded where it was parked (Home, Work or Favorites in the car's Sentry
+settings), or its dashcam stopped writing to the USB drive (a grey dashcam
+icon or a USB warning on the car's screen; reformatting or replacing the
+drive usually fixes it). A day that also has missing footage keeps its
+amber tag and gets this one next to it.
+
 The findings per day are at `GET /api/vehicles/:id/archive-gaps`.

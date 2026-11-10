@@ -171,9 +171,17 @@ function calendar(dates, month, selected) {
 }
 
 /** Footage the car recorded that is not on the share yet (the Sentry USB's archive; server/archiveGap.js). */
+// "Car didn't record": hours in Sentry Mode with no footage from a car that usually records then.
+// Nothing is missing from the share (the car to check), so neutral, alone or next to another tag
+const CAR_LABEL = 'Car didn\'t record';
+const carChip = (note) => `<span class="chip chip-slate chip-gap" title="${esc(note || '')}">${CAR_LABEL}</span>`;
 function archiveChip(d) {
   const a = d.archive;
   if (!a) return '';
+  if (a.state === 'car') return carChip(a.summary);
+  return archiveTag(a) + (a.sentryQuiet ? carChip(a.sentryQuiet.note) : '');
+}
+function archiveTag(a) {
   if (a.state === 'filling') return `<span class="chip chip-grey chip-gap" title="${esc(a.summary)}">Still arriving</span>`;
   // the car drove off mid-transfer: nothing is lost, the clips stay on the Pi (neutral, not a warning)
   if (a.state === 'waiting') return `<span class="chip chip-slate chip-gap" title="${esc(a.summary)}">Waiting for Sentry USB</span>`;
@@ -183,7 +191,7 @@ const ADVICE = 'Check the Sentry USB: its Logs page, its archive settings and it
 /** The evidence in words, on the day's own page (a tag's tooltip never shows on a phone). */
 function archiveNote(a) {
   if (!a) return '';
-  return `<div class="card gap-note${a.state === 'partial' ? ' warn' : a.state === 'waiting' ? ' slate' : ''}" role="note">${a.state === 'partial' ? icon('alert') : ''}<p>${esc(a.summary)}${a.state === 'partial' ? ` ${esc(a.advice || ADVICE)}` : ''}</p></div>`;
+  return `<div class="card gap-note${a.state === 'partial' ? ' warn' : a.state === 'waiting' || a.state === 'car' ? ' slate' : ''}" role="note">${a.state === 'partial' ? icon('alert') : ''}<p>${esc(a.summary)}${a.state === 'partial' ? ` ${esc(a.advice || ADVICE)}` : ''}</p></div>`;
 }
 
 function dayCard(v, d) {

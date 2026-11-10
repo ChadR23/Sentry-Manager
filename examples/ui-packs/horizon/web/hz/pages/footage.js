@@ -9,8 +9,13 @@ const placeText = (r) => (r.place ? `at ${r.place}` : r.from && r.to ? `${r.from
 // the Sentry USB line's tag, in this pack's pills (web/sentryUsb.js)
 const USB_TAG = { ok: 'pill grn', busy: 'pill cyan', wait: 'pill slate', bad: 'pill org', stale: 'pill' };
 // the day's archive tag: partly archived (orange), waiting for Sentry USB (the car left mid-transfer; neutral) or still arriving
-const GAP_TONE = { partial: 'org', waiting: 'slate' };
-const GAP_WORD = { partial: 'Partly archived?', waiting: 'Waiting for Sentry USB' };
+// or "Car didn't record" (neutral): hours in Sentry Mode with no footage from a car that usually
+// records then; nothing is missing from the share, the car is what to check
+const GAP_TONE = { partial: 'org', waiting: 'slate', car: 'slate' };
+const CAR_LABEL = 'Car didn\'t record';
+const GAP_WORD = { partial: 'Partly archived?', waiting: 'Waiting for Sentry USB', car: CAR_LABEL };
+// the car note next to another tag
+const carPill = (a) => (a.state !== 'car' && a.sentryQuiet ? `<span class="pill slate" title="${h(a.sentryQuiet.note || '')}">${CAR_LABEL}</span>` : '');
 // missing minutes where the Pi took no snapshot in time
 const gapWord = (a) => (a.state === 'partial' && a.missedSnapshots?.length ? 'Pi missed snapshots' : GAP_WORD[a.state] || 'Still arriving');
 
@@ -145,7 +150,7 @@ export default {
           // the speed graph's index for this day
           const ix = (d.speedIndex?.indexed ? (d.speedIndex.indexed >= d.speedIndex.clips ? 'Indexed' : `Indexed ${d.speedIndex.indexed}/${d.speedIndex.clips}`) : '');
           // footage the car recorded that is not on the share yet (the Sentry USB's archive)
-          const gap = d.archive ? `<span class="album-gap"><span class="pill ${GAP_TONE[d.archive.state] || 'cyan'}" title="${h(d.archive.summary)}">${gapWord(d.archive)}</span>${d.archive.missingMinutes ? `<span class="tiny faint">~${d.archive.missingMinutes} min missing</span>` : ''}</span>` : '';
+          const gap = d.archive ? `<span class="album-gap"><span class="pill ${GAP_TONE[d.archive.state] || 'cyan'}" title="${h(d.archive.summary)}">${gapWord(d.archive)}</span>${d.archive.missingMinutes ? `<span class="tiny faint">~${d.archive.missingMinutes} min missing</span>` : ''}${carPill(d.archive)}</span>` : '';
           return `<button type="button" class="album${f.day === d.day ? ' on' : ''}" data-day="${h(d.day)}" aria-pressed="${f.day === d.day}">
             <span class="album-art" aria-hidden="true">${d.thumbId ? `<img alt="" loading="lazy" src="${thumbUrl(v.id, d.thumbId)}">` : ico('film')}</span>
             <span class="album-t"><b>${h(dayName(d.day))}</b><span class="small dim">${count(d.recordings, 'track')} · ${footMinutes(d.minutes)} · ${size(d.bytes)}</span>
@@ -177,7 +182,7 @@ export default {
           <span class="tiny faint pl-kind">${f.day ? 'DAY' : 'LIBRARY'} · ${h(v.name)}</span>
           <h2 class="chrome pl-title">${h(f.day ? dayName(f.day, true) : 'All days')}</h2>
           <p class="small dim">${count(total, 'track')} · ${footMinutes(mins)} · ${size(b)}${f.cat !== 'all' ? ` · ${h(f.cat)} only` : ''}${f.prot ? ' · protected only' : ''}</p>
-          ${d?.archive ? `<p class="note small gap-note${d.archive.state === 'partial' ? ' org' : d.archive.state === 'waiting' ? ' slate' : ''}">${h(d.archive.summary)}${d.archive.state === 'partial' ? ` ${h(d.archive.advice || ARCHIVE_ADVICE)}` : ''}</p>` : ''}
+          ${d?.archive ? `<p class="note small gap-note${d.archive.state === 'partial' ? ' org' : d.archive.state === 'waiting' || d.archive.state === 'car' ? ' slate' : ''}">${h(d.archive.summary)}${d.archive.state === 'partial' ? ` ${h(d.archive.advice || ARCHIVE_ADVICE)}` : ''}</p>` : ''}
           <div class="row">
             <button class="btn go" type="button" id="ft-playall"${recs.length ? '' : ' disabled'}>${ico('play')}${f.day ? 'Play day' : 'Play newest day'}</button>
             ${f.day ? `<button class="btn danger" type="button" id="ft-delday">${ico('bin')}Move day to Bin</button><button class="btn danger" type="button" id="ft-delthru">${ico('bin')}This day and older</button>` : ''}

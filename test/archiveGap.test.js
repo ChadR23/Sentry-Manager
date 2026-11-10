@@ -437,6 +437,105 @@ test('parked Sentry Mode minutes with no footage are never missing footage (the 
   }
 });
 
+test('a car known to record in Sentry Mode, hours in Sentry with no footage: a note for the car, never missing footage or a notification', async () => {
+  const files = drive(new Map(), at(7, 0), at(7, 3)); // parked in Sentry 00:00-03:00, recorded and on the share
+  drive(files, at(7, 18), at(7, 18, 10));
+  const dir = await canFiles(sentryOn(at(7, 0), at(7, 6))); // Sentry on until 06:00: 03:00-06:00 nothing written
+  try {
+    const db = fakeDb();
+    const { gap } = service2({ files, db, dir, clock: { now: NOW } });
+    const d = (await gap.check('car')).days['2026-11-07'];
+    assert.equal(db.get('archive-gap:car').sentry, true, 'learned: this car records in Sentry Mode');
+    assert.equal(d.state, 'car', 'not partial');
+    assert.equal(d.missingMinutes, 0);
+    assert.deepEqual(d.sentry, []);
+    assert.deepEqual(d.sources, []);
+    assert.equal(d.sentryQuiet.minutes, 180);
+    assert.deepEqual(d.sentryQuiet.runs, [{ from: '2026-11-07_03-00-00', to: '2026-11-07_05-59-00', minutes: 180 }]);
+    assert.equal(d.summary, 'The car was in Sentry Mode for 3 h (3:00–5:59 AM) but wrote no footage, though it usually records while parked in Sentry. Check the car: Sentry Mode may be excluded at this place (Home, Work or Favorites), or its dashcam stopped writing to the USB drive (a grey dashcam icon or a USB warning on the car\'s screen).');
+    assert.equal(d.sentryQuiet.note, d.summary);
+    assert.equal(db.rows.length, 0, 'no notification');
+    const day = gap.forDays('car')['2026-11-07'];
+    assert.equal(day.state, 'car');
+    assert.equal(day.sentryQuiet.minutes, 180);
+    assert.equal(day.advice, null, 'nothing to check on the Sentry USB');
+    assert.match(day.summary, /^The car was in Sentry Mode for 3 h/);
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('the Sentry Mode note: under an hour, or a car not known to record in Sentry, gives nothing', () => {
+  const files = drive(new Map(), at(7, 0), at(7, 1));
+  drive(files, at(7, 18), at(7, 18, 10));
+  assert.deepEqual(analyze({ files, nowMs: NOW, canDriving: [], canSentry: range(at(7, 1), at(7, 1, 59)) }).days, {}, '59 minutes: nothing');
+  assert.equal(analyze({ files, nowMs: NOW, canDriving: [], canSentry: range(at(7, 1), at(7, 2)) }).days['2026-11-07'].sentryQuiet.minutes, 60, 'an hour: the note');
+  assert.deepEqual(analyze({ files, nowMs: NOW, canDriving: [], canSentry: [] }).days, {}, 'not known to record in Sentry: no Sentry minutes are passed');
+  assert.deepEqual(analyze({ files, nowMs: NOW, canDriving: null, canSentry: range(at(7, 1), at(7, 4)) }).days, {}, 'no CAN data in use');
+  assert.deepEqual(analyze({ files, nowMs: NOW, canDriving: [], canSentry: range(NOW - 2 * 3600_000, NOW) }).days, {}, 'within the grace time');
+});
+
+test('a car that saves only Sentry events is never told it did not record', async () => {
+  const events = drive(new Map(), at(7, 0), at(7, 0, 5)); // 5 of its Sentry minutes have footage
+  drive(events, at(7, 18), at(7, 18, 10));
+  const dir = await canFiles(sentryOn(at(7, 0), at(7, 4)));
+  try {
+    const db = fakeDb();
+    const { gap } = service2({ files: events, db, dir, clock: { now: NOW } });
+    assert.deepEqual((await gap.check('car')).days, {});
+    assert.notEqual(db.get('archive-gap:car').sentry, true, 'not learned');
+    assert.equal(db.rows.length, 0);
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('the Sentry Mode note names the stretches on the 12- or 24-hour clock', () => {
+  const files = drive(new Map(), at(7, 0), at(7, 0, 30));
+  drive(files, at(7, 18), at(7, 18, 10));
+  const sentry = [...range(at(7, 1), at(7, 2)), ...range(at(7, 13), at(7, 14)), ...range(at(7, 15), at(7, 15, 30)), ...range(at(7, 16), at(7, 16, 10)), ...range(at(7, 17), at(7, 17, 10))];
+  const d = analyze({ files, nowMs: NOW, canDriving: [], canSentry: sentry }).days['2026-11-07'];
+  assert.equal(d.sentryQuiet.minutes, 170);
+  assert.equal(d.sentryQuiet.runs.length, 5);
+  assert.match(d.summary, /^The car was in Sentry Mode for 2 h 50 min \(1:00–1:59 AM, 1:00–1:59 PM, 3:00–3:29 PM and 2 more stretches\) but wrote no footage/);
+  const h24 = analyze({ files, nowMs: NOW, canDriving: [], canSentry: sentry, clock24: true }).days['2026-11-07'];
+  assert.match(h24.summary, /^The car was in Sentry Mode for 2 h 50 min \(01:00–01:59, 13:00–13:59, 15:00–15:29 and 2 more stretches\) but/);
+  assert.doesNotMatch(h24.summary, /AM|PM/);
+});
+
+test('a day with driving missing and Sentry Mode with no footage: both told, the missing count is the driving only', () => {
+  const files = drive(new Map(), at(7, 8), at(7, 9));
+  drive(files, at(7, 18), at(7, 18, 10));
+  const d = analyze({ files, nowMs: NOW, canDriving: range(at(7, 9), at(7, 9, 30)), canSentry: range(at(7, 10), at(7, 12)) }).days['2026-11-07'];
+  assert.equal(d.state, 'partial');
+  assert.equal(d.missingMinutes, 30);
+  assert.equal(d.sentryQuiet.minutes, 120);
+  assert.match(d.summary, /^About 30 minutes the car recorded are not on the share: CAN Bridge shows the car driving 9:00–9:29 AM with no footage\. The car was in Sentry Mode for 2 h \(10:00–11:59 AM\) but wrote no footage, though it usually records while parked in Sentry\. Check the car: /);
+  assert.equal(d.partialMinutes, 0);
+});
+
+test('the neutral "Car didn\'t record" day tag and its note in all five interfaces, never "Partly archived?" for that day alone', () => {
+  const read = (...p) => require('fs').readFileSync(path.join(__dirname, '..', ...p), 'utf8');
+  const app = read('web', 'app.js');
+  const chip = app.match(/\n {2}function dayArchiveChip\([\s\S]*?\n {2}\}\n/)[0];
+  assert.match(app, /const CAR_LABEL = 'Car didn\\'t record';/);
+  assert.match(chip, /a\.state === 'car' \? CAR_LABEL :/, 'the day\'s only tag');
+  assert.match(chip, /a\.state === 'waiting' \|\| a\.state === 'car' \? ' wait'/, 'neutral, not amber');
+  assert.match(chip, /a\.state !== 'car' && a\.sentryQuiet \? `<span class="chip slate" title="\$\{esc\(a\.sentryQuiet\.note/, 'next to another tag');
+  assert.match(app.match(/\n {2}function dayArchiveNote\([\s\S]*?\n {2}\}\n/)[0], /a\.state === 'waiting' \|\| a\.state === 'car' \? ' wait'/);
+  const packs = {
+    aurora: ['aurora', [/const GAP_TONE = \{ partial: 'amber', waiting: 'slate', car: 'slate' \};/, /a\.state === 'car' \? CAR_LABEL :/, /\$\{carChip\(d\.archive\)\}/, /d\.archive\.state === 'car' \? ' slate'/]],
+    daylight: ['dl', [/if \(a\.state === 'car'\) return carChip\(a\.summary\);/, /chip-slate chip-gap/, /a\.sentryQuiet \? carChip\(a\.sentryQuiet\.note\)/, /a\.state === 'car' \? ' slate'/]],
+    flux: ['flux', [/const GAP_TONE = \{ partial: ' amber', waiting: ' slate', car: ' slate' \};/, /a\.state === 'car' \? CAR_LABEL :/, /\$\{carChip\(d\.archive\)\}/]],
+    horizon: ['hz', [/const GAP_TONE = \{ partial: 'org', waiting: 'slate', car: 'slate' \};/, /car: CAR_LABEL \};/, /\$\{carPill\(d\.archive\)\}/, /d\.archive\.state === 'car' \? ' slate'/]]
+  };
+  for (const [pack, [mod, res]] of Object.entries(packs)) {
+    const page = read('examples', 'ui-packs', pack, 'web', mod, 'pages', 'footage.js');
+    assert.match(page, /const CAR_LABEL = 'Car didn\\'t record';/, pack);
+    for (const re of res) assert.match(page, re, pack);
+  }
+});
+
 test('an unmapped CAN Bridge key counts for the only car once its CAN data has matched the car\'s footage', async () => {
   const files = drive(new Map(), at(7, 8), at(7, 9));
   drive(files, at(7, 18), at(7, 18, 10));

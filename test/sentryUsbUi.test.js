@@ -113,7 +113,7 @@ test('Built-in Footage page: the Sentry USB line under the filters, and the wait
   assert.match(app, /import\('\/web\/sentryUsb\.js'\)/);
   const chip = app.match(/\n {2}function dayArchiveChip\([\s\S]*?\n {2}\}\n/)[0];
   assert.match(chip, /a\.state === 'waiting' \? 'Waiting for Sentry USB'/);
-  assert.match(chip, /a\.state === 'partial' \? ' amber' : a\.state === 'waiting' \? ' wait' : ''/, 'amber only for partly archived');
+  assert.match(chip, /a\.state === 'partial' \? ' amber' : a\.state === 'waiting' \|\| a\.state === 'car' \? ' wait' : ''/, 'amber only for partly archived (neutral for waiting and the car note)');
   assert.match(chip, /title="\$\{esc\(a\.summary\)\}"/, 'the tooltip is the summary');
   const rule = css.match(/\.chip\.slate, \.chip\.gap\.wait \{([^}]*)\}/);
   assert.ok(rule, 'a neutral rule for the waiting tag');

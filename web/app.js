@@ -1368,19 +1368,24 @@
   /** The amber "Partly archived?" badge: footage the car recorded that is not on the share yet (server/archiveGap.js).
    *  A button: it opens the day, where the evidence and what to check are shown (no hover needed). */
   const ARCHIVE_ADVICE = 'Check the Sentry USB: its Logs page, its archive settings and its Wi-Fi to the NAS. Clips it recycles before copying them are lost.';
+  // "Car didn't record": the car was in Sentry Mode for hours with no footage, though it usually
+  // records then (state 'car', or a note on top of another state). Nothing is missing from the
+  // share, so it is neutral, not amber: the thing to check is the car.
+  const CAR_LABEL = 'Car didn\'t record';
   function dayArchiveChip(d, open) {
     const a = d.archive;
     if (!a) return '';
     // (missing minutes where the Pi took no snapshot in time: "Pi missed snapshots")
-    const label = a.state === 'filling' ? 'Still arriving' : a.state === 'waiting' ? 'Waiting for Sentry USB' : `${a.missedSnapshots?.length ? 'Pi missed snapshots' : 'Partly archived?'}${a.missingMinutes ? ` ~${a.missingMinutes} min missing` : ''}`;
-    const tone = a.state === 'partial' ? ' amber' : a.state === 'waiting' ? ' wait' : '';
-    return `<button type="button" class="chip gap${tone}" data-gap aria-expanded="${open}" aria-controls="gap-${esc(d.day)}" title="${esc(a.summary)}"><span class="cdot"></span>${esc(label)}</button>`;
+    const label = a.state === 'car' ? CAR_LABEL : a.state === 'filling' ? 'Still arriving' : a.state === 'waiting' ? 'Waiting for Sentry USB' : `${a.missedSnapshots?.length ? 'Pi missed snapshots' : 'Partly archived?'}${a.missingMinutes ? ` ~${a.missingMinutes} min missing` : ''}`;
+    const tone = a.state === 'partial' ? ' amber' : a.state === 'waiting' || a.state === 'car' ? ' wait' : '';
+    const car = a.state !== 'car' && a.sentryQuiet ? `<span class="chip slate" title="${esc(a.sentryQuiet.note || '')}"><span class="cdot"></span>${CAR_LABEL}</span>` : '';
+    return `<button type="button" class="chip gap${tone}" data-gap aria-expanded="${open}" aria-controls="gap-${esc(d.day)}" title="${esc(a.summary)}"><span class="cdot"></span>${esc(label)}</button>${car}`;
   }
   /** The evidence in words, in the opened day. */
   function dayArchiveNote(d) {
     const a = d.archive;
     if (!a) return '';
-    return `<p class="note gap-note${a.state === 'partial' ? ' amber' : a.state === 'waiting' ? ' wait' : ''}" id="gap-${esc(d.day)}">${esc(a.summary)}${a.state === 'partial' ? ` ${esc(a.advice || ARCHIVE_ADVICE)}` : ''}</p>`;
+    return `<p class="note gap-note${a.state === 'partial' ? ' amber' : a.state === 'waiting' || a.state === 'car' ? ' wait' : ''}" id="gap-${esc(d.day)}">${esc(a.summary)}${a.state === 'partial' ? ` ${esc(a.advice || ARCHIVE_ADVICE)}` : ''}</p>`;
   }
 
   function dayCard(v, d) {
