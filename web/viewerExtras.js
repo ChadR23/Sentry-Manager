@@ -8,7 +8,7 @@
 //   camera zooms into it at that spot, up to 6x, and dragging moves around
 //   (to read a number plate). Playing, or a double-click, resets it.
 // - Frame by frame on phones: while paused, large ‹ › buttons step one
-//   frame back or forward.
+//   frame back or forward (at the sides of a small camera, a little smaller).
 //
 //   const extras = attachViewerExtras({
 //     stage,                       // the element holding the cameras
@@ -38,6 +38,12 @@ const CSS = `
 .sentry-x-steps button{all:unset;pointer-events:auto;width:58px;height:58px;border-radius:50%;display:grid;place-items:center;cursor:pointer;
   background:rgba(0,0,0,.6);color:#fff;font:700 26px/1 system-ui,sans-serif;border:2px solid rgba(255,255,255,.75);-webkit-tap-highlight-color:transparent}
 .sentry-x-steps button:active{background:rgba(0,0,0,.85)}
+/* on a small camera (a phone, a grid of six) the two bubbles go to its sides, halfway up, and
+   smaller: in the middle of its bottom they covered most of the picture */
+.sentry-x-steps.sx-side{top:50%;bottom:auto;transform:translateY(-50%);justify-content:space-between;gap:0;padding:0 6px}
+.sentry-x-steps.sx-side button{width:44px;height:44px;font-size:22px;border-width:1.5px;background:rgba(0,0,0,.5)}
+.sentry-x-steps.sx-side.sx-tiny{padding:0 3px}
+.sentry-x-steps.sx-side.sx-tiny button{width:40px;height:40px;font-size:20px}
 .sentry-x-resume{position:fixed;left:50%;bottom:calc(18px + env(safe-area-inset-bottom));transform:translateX(-50%);z-index:2147483647;
   display:flex;gap:10px;align-items:center;flex-wrap:wrap;justify-content:center;max-width:calc(100vw - 24px);padding:10px 14px;border-radius:12px;
   background:rgba(20,22,28,.94);color:#fff;font:500 14px/1.35 system-ui,sans-serif;box-shadow:0 8px 28px rgba(0,0,0,.45)}
@@ -263,10 +269,21 @@ export function attachViewerExtras({ stage, videos: listVideos = () => [], main:
   // ---- frame by frame on phones (paused)
   let steps = null;
   const coarse = window.matchMedia('(pointer: coarse)');
+  // how big the camera they are on is: at its sides when it is small (not for the fixed ones)
+  const fitSteps = () => {
+    if (!steps || stepsFixed) return;
+    const r = steps.parentElement?.getBoundingClientRect?.();
+    if (!r || !r.width) return;
+    const side = r.width < 480 || r.height < 270;
+    steps.classList.toggle('sx-side', side);
+    steps.classList.toggle('sx-tiny', side && (r.width < 240 || r.height < 150));
+  };
+  const tileWatch = window.ResizeObserver ? new ResizeObserver(fitSteps) : null;
+  cleanups.push(() => tileWatch?.disconnect());
   function drawSteps() {
     const m = main();
     const want = step && coarse.matches && m && paused() && !m.hidden;
-    if (!want) { steps?.remove(); steps = null; return; }
+    if (!want) { steps?.remove(); steps = null; tileWatch?.disconnect(); return; }
     // (fixed: above everything, for a page whose panels float over the cameras)
     const host = stepsFixed ? document.body : m.parentElement;
     if (!host) return;
@@ -282,7 +299,10 @@ export function attachViewerExtras({ stage, videos: listVideos = () => [], main:
     if (steps.parentElement !== host) {
       if (!stepsFixed && getComputedStyle(host).position === 'static') host.style.position = 'relative';
       host.appendChild(steps);
+      tileWatch?.disconnect();
+      if (!stepsFixed) tileWatch?.observe(host);
     }
+    fitSteps();
   }
   cleanups.push(() => steps?.remove());
 

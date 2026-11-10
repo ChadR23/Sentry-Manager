@@ -109,3 +109,15 @@ test('Touch screens: the Viewer\'s small shared buttons are at least 40 px to ta
   assert.match(read('web/layouts.js'), /@media \(pointer:coarse\)\{\.sentry-ls button\{min-width:40px;height:40px/, 'layout slots 1 2 3');
   assert.match(read('web/viewerExtras.js'), /@media \(pointer:coarse\)\{\.sentry-x-btn\{min-width:40px;min-height:40px/, 'Pop out');
 });
+
+test('Viewer on a phone: the frame-step bubbles go to the sides of a small camera, still at least 40 px', () => {
+  const x = read('web/viewerExtras.js');
+  assert.match(x, /const side = r\.width < 480 \|\| r\.height < 270;/);
+  assert.match(x, /\.sentry-x-steps\.sx-side\{top:50%;bottom:auto;transform:translateY\(-50%\);justify-content:space-between/);
+  assert.match(x, /\.sentry-x-steps\.sx-side button\{width:44px;height:44px/);
+  assert.match(x, /\.sentry-x-steps\.sx-side\.sx-tiny button\{width:40px;height:40px/);
+  // (class names of their own: Daylight's side bar is .side)
+  assert.doesNotMatch(x, /\.sentry-x-steps\.side\b/);
+  // Horizon's own rule puts them at the sides of its main camera the same way
+  assert.match(read('examples/ui-packs/horizon/web/hz/app.css'), /\.cam\.main \.sentry-x-steps \{ top: 50%; bottom: auto; transform: translateY\(-50%\); justify-content: space-between;/);
+});
