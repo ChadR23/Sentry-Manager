@@ -92,7 +92,8 @@ ENV MALLOC_ARENA_MAX=2
 
 VOLUME ["/data"]
 EXPOSE 9000
-# the CAN Bridge's uploads, only while they are turned on (Nerd settings; CAN_PORT)
+# the device port (CAN_PORT): the CAN Bridge's uploads and the Sentry USB link,
+# only while one of them is in use
 EXPOSE 10000
 # /healthz answers on plain HTTP too (everything else there redirects to HTTPS)
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s \

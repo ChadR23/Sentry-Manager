@@ -15,7 +15,7 @@ export default {
     const tab = TABS.some(([k]) => k === sub.split('/')[0]) ? sub.split('/')[0] : 'vehicles';
     let inner = null; // the Nodes page, when that section shows
     if (tab === 'nodes') document.title = 'Nodes · Settings · Horizon · Sentry Six Manager';
-    el.innerHTML = `<section class="ptitle hud"><div><h1 class="chrome">Settings</h1><p><a class="btn sm" href="#/health">${ico('shield')}Health</a> <a class="btn sm" href="#/account">${ico('lock')}Account</a></p></div></section>
+    el.innerHTML = `<section class="ptitle hud"><div><h1 class="chrome">Settings</h1><p><a class="btn sm" href="#/health">${ico('shield')}Health</a> <a class="btn sm" href="#/account">${ico('lock')}Account</a> <a class="btn sm" href="#/sentryusb">${ico('usb')}Sentry USB</a></p></div></section>
       <div class="settings">
         <nav class="stabs hud" aria-label="Settings sections">${TABS.map(([k, l, i]) => `<a href="#/settings/${k}" class="stab${k === tab ? ' on' : ''}"${k === tab ? ' aria-current="page"' : ''}>${ico(i)}<span>${l}</span></a>`).join('')}</nav>
         <div class="spanel" id="sp"><div class="loading"><i></i><i></i><i></i></div></div>

@@ -30,7 +30,10 @@ function applyPendingRestore(dbFile, log) {
   return true;
 }
 
-function createSnapshots({ db, dbFile, dir, log, now = () => new Date(), keep = KEEP }) {
+// `secret`: settings keys whose values a snapshot must not keep, each with a
+// function that returns the value without its secrets (the Sentry USB link
+// keys: a restored snapshot shows those devices unpaired, to be paired again)
+function createSnapshots({ db, dbFile, dir, log, now = () => new Date(), keep = KEEP, secret = {} }) {
   const day = () => now().toISOString().slice(0, 10);
 
   function list() {
@@ -52,6 +55,22 @@ function createSnapshots({ db, dbFile, dir, log, now = () => new Date(), keep = 
     const tmp = path.join(dir, `.${name}.${process.pid}.tmp`);
     try { fs.unlinkSync(tmp); } catch { /* none */ }
     db.db.exec(`VACUUM INTO '${tmp.replace(/'/g, "''")}'`);
+    if (Object.keys(secret).length) {
+      const { DatabaseSync } = require('node:sqlite');
+      const copy = new DatabaseSync(tmp);
+      try {
+        for (const [key, strip] of Object.entries(secret)) {
+          const row = copy.prepare('SELECT value FROM settings WHERE key = ?').get(key);
+          if (!row) continue;
+          let value = null;
+          try { value = strip(JSON.parse(row.value)); } catch { value = null; }
+          copy.prepare('UPDATE settings SET value = ? WHERE key = ?').run(JSON.stringify(value), key);
+        }
+        copy.exec('VACUUM'); // the old values are not left in free pages
+      } finally {
+        copy.close();
+      }
+    }
     fs.renameSync(tmp, file);
     for (const old of list().slice(keep)) {
       try { fs.unlinkSync(path.join(dir, old.name)); } catch { /* gone */ }

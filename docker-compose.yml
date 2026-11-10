@@ -21,8 +21,9 @@ services:
     stop_grace_period: 1m
     ports:
       - "9000:9000"
-      # the Screenmate CAN Bridge uploads its CAN logs here; nothing listens
-      # until CAN uploads are turned on (Settings, hidden Nerd settings)
+      # the device port: the Screenmate CAN Bridge's uploads and the Sentry USB
+      # (the Pi in the car) management link; nothing listens until CAN uploads
+      # are on or a Sentry USB is paired (keep it published: the Pi connects here)
       - "10000:10000"
     env_file:
       - path: .env

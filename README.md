@@ -59,6 +59,10 @@ container (see [Vehicles and SMB shares](docs/vehicles-and-shares.md)).
 
 On TrueNAS SCALE, install it as a custom app: [TrueNAS](docs/truenas.md).
 
+The compose file publishes two ports: **9000**, the app, and **10000**, the
+device port the CAN Bridge and the Sentry USB in the car connect to. Keep both
+published; nothing listens on 10000 until one of them is set up.
+
 ## Update
 
 ```bash
@@ -82,6 +86,7 @@ on TrueNAS, see [TrueNAS](docs/truenas.md) for the update steps.
 | [Recycle Bin, policies and jobs](docs/recycle-bin-and-jobs.md) | Retention, restoring, and what the server is doing |
 | [Vehicles and SMB shares](docs/vehicles-and-shares.md) | Footage on a share or on the same machine, permissions |
 | [Sentry USB](docs/sentry-usb.md) | The Pi that archives the car's clips: its status on the Footage page, and converting without upsetting its checks |
+| [Sentry USB link](docs/sentry-usb-link.md) | Pairing the Pi and managing it from here (status, settings, updates, queued actions, security log): the contract both sides build to |
 | [Phones and tablets](docs/phones-and-tablets.md) | Supported devices |
 | [Updates](docs/updates.md) | Updating, critical updates, how images are built |
 | [Automatic updates](docs/auto-updates.md) | Watchtower, to install new versions for you |

@@ -1,7 +1,8 @@
 'use strict';
 
-// The CAN Bridge's own port (CAN_PORT, 10000): open while the uploads are on,
-// closed otherwise.
+// The device port (CAN_PORT, 10000): the CAN Bridge's uploads and the Sentry
+// USB management link. Open while CAN uploads are on or a Sentry USB is
+// paired or pairing, closed otherwise.
 //
 // Opening waits for the certificate, so two calls can overlap. They are run
 // one at a time, in the order they were made: however quickly the uploads are
@@ -23,7 +24,7 @@ function createCanPort({ port, host, make, log, url = '' }) {
 
   const failed = (err) => {
     state = { listening: false, error: err.code === 'EADDRINUSE' ? `Port ${port} is used by something else.` : err.message, port };
-    log.warn(`CAN Bridge port ${port}: ${err.message}`);
+    log.warn(`Device port ${port}: ${err.message}`);
   };
 
   // listens; the promise ends once it listens or could not
@@ -38,7 +39,7 @@ function createCanPort({ port, host, make, log, url = '' }) {
       srv.off('error', refused);
       srv.on('error', failed); // later errors are only reported
       state = { listening: true, error: null, port };
-      log.info(`CAN Bridge uploads on ${url || `port ${port}`}`);
+      log.info(`Device port open: ${url || `port ${port}`}`);
       resolve();
     });
   });
@@ -65,7 +66,7 @@ function createCanPort({ port, host, make, log, url = '' }) {
       srv.close(() => resolve());
       srv.closeAllConnections?.();
     });
-    log.info(`CAN Bridge port ${port} closed`);
+    log.info(`Device port ${port} closed`);
   };
 
   /** Opens (true) or closes (false) the port, after every earlier call. */

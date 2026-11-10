@@ -13,6 +13,7 @@ export const PAGES = [
   { id: 'bin', label: 'Recycle Bin', short: 'Bin', icon: 'bin' },
   { id: 'alerts', label: 'Notifications', short: 'Alerts', icon: 'bell' },
   // (not in the top bar, which they would overflow: the tuner and Settings reach them)
+  { id: 'sentryusb', label: 'Sentry USB', short: 'USB', icon: 'usb', bar: false },
   { id: 'health', label: 'Health', icon: 'shield', bar: false },
   { id: 'account', label: 'Account', icon: 'lock', bar: false },
   { id: 'settings', label: 'Settings', icon: 'gear' }

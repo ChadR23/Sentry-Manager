@@ -12,6 +12,7 @@ import settings from './pages/settings.js';
 import drives from './pages/drives.js';
 import health from './pages/health.js';
 import account from './pages/account.js';
+import sentryusb from './pages/sentryusb.js';
 import { hiddenRoute } from '/web/hiddenTabs.js';
 
 const PAGES = [
@@ -23,6 +24,7 @@ const PAGES = [
   { id: 'jobs', label: 'Jobs', icon: 'jobs', key: 'j', mod: jobs, group: 'Process' },
   { id: 'bin', label: 'Recycle Bin', icon: 'bin', key: 'b', mod: bin, group: 'Process' },
   { id: 'notifications', label: 'Notifications', icon: 'bell', key: 'a', mod: notifications, group: 'System' },
+  { id: 'sentryusb', label: 'Sentry USB', icon: 'usb', key: 'y', mod: sentryusb, group: 'System' },
   { id: 'health', label: 'Health', icon: 'check', key: 'h', mod: health, group: 'System' },
   { id: 'account', label: 'Account', icon: 'lock', key: 'u', mod: account, group: 'System' },
   { id: 'settings', label: 'Settings', icon: 'settings', key: 's', mod: settings, group: 'System' }

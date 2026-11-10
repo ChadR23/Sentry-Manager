@@ -16,8 +16,9 @@ import settings from './pages/settings.js';
 import drives from './pages/drives.js';
 import health from './pages/health.js';
 import account from './pages/account.js';
+import sentryusb from './pages/sentryusb.js';
 
-const PAGES = { sky, footage, viewer, drives, encoder, policies, jobs, bin, alerts, health, account, settings };
+const PAGES = { sky, footage, viewer, drives, encoder, policies, jobs, bin, alerts, health, account, sentryusb, settings };
 // [route, label, icon, key (g + key), primary on phones]
 const DOCK = [
   ['sky', 'Sky', 'sky', 's', true],
@@ -30,6 +31,7 @@ const DOCK = [
   ['bin', 'Bin', 'trash', 'b', false],
   ['alerts', 'Alerts', 'bell', 'a', true],
   '|',
+  ['sentryusb', 'Sentry USB', 'usb', 'y', false],
   ['health', 'Health', 'check', 'h', false],
   ['account', 'Account', 'key', 'u', false],
   ['settings', 'Settings', 'gear', ',', false]

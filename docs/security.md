@@ -118,10 +118,13 @@ is reachable from the internet. If you do open it:
    the proxy (or the router) hides the real address, and the rules would
    treat the whole internet as home; fix that before relying on them.
 
-Port **10000**, the CAN Bridge's uploads, is separate: it serves only the
-upload API with its own tokens, and can be opened on its own
+Port **10000**, the device port, is separate: it serves only the CAN
+Bridge's upload API with its own tokens and the Sentry USB management link
+(a WebSocket over TLS, where both sides prove a shared key; see
+[sentry-usb-link.md](sentry-usb-link.md)), and can be opened on its own
 ([CAN Bridge upload API](can-bridge-api.md#the-port)). Opening 9000 is not
-needed for the bridge.
+needed for either. It listens only while CAN uploads are on or a Sentry USB
+is paired or pairing, and tells a stranger nothing (404, no version).
 
 ### Which address a request comes from
 

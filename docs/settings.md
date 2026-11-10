@@ -26,7 +26,7 @@ All optional; put them in `.env` next to `docker-compose.yml`.
 | `EXTRA_ROOTS` | | More container folders the converter may write to (`:`-separated) |
 | `SCAN_INTERVAL_MINUTES` | `15` | How often every vehicle is re-scanned |
 | `PORT`, `DATA_PATH`, `LOG_LEVEL` | `9000`, `/data`, `info` | |
-| `CAN_PORT` | `10000` | The Screenmate CAN Bridge's uploads (only the CAN upload API, and only while CAN uploads are on) |
+| `CAN_PORT` | `10000` | The device port: the Screenmate CAN Bridge's uploads and the Sentry USB management link ([sentry-usb-link.md](sentry-usb-link.md)); open only while CAN uploads are on or a Sentry USB is paired or pairing |
 
 `./data` holds the account, settings, job history, thumbnails, the
 converter's work folder and the certificate authority. Keep it on a local
