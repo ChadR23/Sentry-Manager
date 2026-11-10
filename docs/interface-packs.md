@@ -36,3 +36,13 @@ and keyboard shortcuts for the numbers people. **Horizon** (`horizon.zip`) is a
 synthwave dashboard over a neon grid that scrolls toward a setting sun. **Aurora**
 (`aurora.zip`) floats glass windows over drifting northern lights, with a
 cockpit-style Viewer.
+
+Every page also gets the server's own bars at the top, whatever the pack: a
+red **critical update** bar (fixed to the top of the window) and an amber
+**startup check** bar (in the page, it scrolls away). While one shows, its
+height is on `<html>` as `--critical-update-bar` or `--startup-check-bar`
+(with the class `has-critical-update` or `has-startup-check`), so a pack's
+own bars can make room for them: a fixed top bar can sit at
+`top: var(--critical-update-bar, 0px)`, and one that should also follow the
+amber bar as it scrolls away measures where the bars end in the window (the
+Aurora and Daylight packs do: `#sentry-critical-update`, `#sentry-health-bar`).

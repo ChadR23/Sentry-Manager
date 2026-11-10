@@ -161,7 +161,10 @@
 // after every start failed (the database, the data folder, ffmpeg, the GPU
 // encoder, a footage share), an amber bar at the top of every page says what
 // and links to Health. It can be closed for this visit; it goes away by
-// itself once the next check passes.
+// itself once the next check passes. It is in the page (it scrolls away with
+// it), under the red bar's spacer. Like the red bar's --critical-update-bar,
+// its height is on <html> as --startup-check-bar (and the class
+// has-startup-check) while it shows, so an interface can make room for it.
 (() => {
   try {
     if (window.top !== window.self) return;
@@ -181,8 +184,21 @@
 @media (pointer:coarse){#${ID} a,#${ID} button{padding:8px 12px}}
 @media print{#${ID}{display:none}}`;
   let bar = null;
+  let watch = null;
   const key = (problems) => `sentry-health-closed:${problems.map((p) => p.label).join('|')}`;
-  function hide() { bar?.remove(); bar = null; }
+  const root = document.documentElement;
+  function fit() {
+    if (!bar?.isConnected) return;
+    root.style.setProperty('--startup-check-bar', `${Math.ceil(bar.getBoundingClientRect().height)}px`);
+  }
+  function hide() {
+    watch?.disconnect();
+    watch = null;
+    bar?.remove();
+    bar = null;
+    root.classList.remove('has-startup-check');
+    root.style.removeProperty('--startup-check-bar');
+  }
   function show(problems) {
     try { if (sessionStorage.getItem(key(problems))) return; } catch { /* shown */ }
     if (!document.getElementById(`${ID}-css`)) {
@@ -212,6 +228,10 @@
     close.setAttribute('aria-label', 'Close this bar for now');
     close.addEventListener('click', () => { try { sessionStorage.setItem(key(problems), '1'); } catch { /* until reload */ } hide(); });
     bar.append(text, open, close);
+    root.classList.add('has-startup-check');
+    fit();
+    // (its height changes as the window narrows and the text wraps)
+    if (!watch && window.ResizeObserver) { watch = new window.ResizeObserver(fit); watch.observe(bar); }
   }
   async function check() {
     try {
@@ -228,6 +248,7 @@
     check();
     setTimeout(check, 75_000); // the startup check runs a minute after the app starts
     setInterval(check, 10 * 60 * 1000);
+    window.addEventListener('resize', fit);
   }
   if (document.body) start();
   else document.addEventListener('DOMContentLoaded', start);
