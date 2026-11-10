@@ -74,3 +74,8 @@ test('Health and Settings > Security show times on the 12/24-hour clock chosen, 
   assert.match(app, /m\.createHealthPage\(el, \{ h24: \(\) => clockPref\.h24 \}\)/);
   assert.match(app, /m\.createAccessSettings\(box, \{[^}]*\}, h24: \(\) => clockPref\.h24 \}\)/);
 });
+
+test('Account: a long list of signed-in devices scrolls in its own box', () => {
+  const account = fs.readFileSync(path.join(__dirname, '..', 'web/account.js'), 'utf8');
+  assert.match(account, /\.sentry-acct \[data-sessions\] \.sa-scroll\{max-height:min\(480px,60vh\);overflow-y:auto;/);
+});

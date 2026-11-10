@@ -19,6 +19,8 @@ const STYLE = `
 .sentry-acct table{border-collapse:collapse;width:100%}
 .sentry-acct td{padding:8px 10px 8px 0;border-top:1px solid rgba(127,127,127,.2);vertical-align:middle}
 .sentry-acct .sa-scroll{overflow-x:auto}
+/* many signed-in devices (every browser and script that signed in) scroll in their own box, newest first, not down a page as long as the list */
+.sentry-acct [data-sessions] .sa-scroll{max-height:min(480px,60vh);overflow-y:auto;overscroll-behavior:contain}
 .sentry-acct code{font:600 15px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.06em;padding:4px 8px;border-radius:6px;background:rgba(127,127,127,.16);user-select:all;-webkit-user-select:all;overflow-wrap:anywhere}
 .sentry-acct .sa-codes{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:6px}
 .sentry-acct .sa-on{color:#3ddc84;font-weight:700}
