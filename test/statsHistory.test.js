@@ -171,7 +171,7 @@ test('a damaged, foreign or oversized history file is set aside quietly; a missi
       fs.writeFileSync(file, content);
       const s = setup(M.pi, { appPid: 20, dataDir, options: { log } });
       assert.doesNotThrow(() => s.stats.sampleNow());
-      assert.deepEqual(s.stats.energy(), { todayWh: 0, weekWh: 0, todayCost: null, weekCost: null, byJob: {} });
+      assert.deepEqual(s.stats.energy(), { todayWh: 0, weekWh: 0, todayCost: null, weekCost: null, byJob: {}, peakW: null });
       s.m.cleanup();
     }
     assert.equal(warnings.length, 1, 'unreadable JSON is reported once per start');

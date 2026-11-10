@@ -174,6 +174,12 @@ export default {
     const CPU_NA_SHORT = { windows: 'CPU n/a (Windows)', vm: 'CPU n/a (VM)' };
     // Nodes' power with this server's (/api/stats power.combined and
     // power.nodes): '' with no nodes
+    // A power bar is full at the most that server (or all of them) has
+    // drawn (/api/stats power.peakW, combined.peakW), so 100% is its own
+    // highest use, and the bar's scale grows when a new high is reached.
+    const peakOf = (w, peak) => Math.max(ok(peak) ? peak : 0, ok(w) ? w : 0);
+    const ofPeak = (w, peak) => (ok(w) && peakOf(w, peak) > 0 ? (w / peakOf(w, peak)) * 100 : ok(w) ? 0 : null);
+    const peakText = (w, peak) => (peakOf(w, peak) > 0 ? `peak ${watt(peakOf(w, peak))} = 100% · ` : '');
     function allServers(p, tot, cur) {
       const c = p.combined;
       if (!c || !p.nodes?.length) return '';
@@ -182,8 +188,8 @@ export default {
         return `${watt(w)}${parts.length ? ` (${parts.join(' · ')})` : ''}`;
       };
       const rows = [['This server', split(tot, p.cpuW, p.gpuW, p.cpuUnavailable)], ...p.nodes.map((n) => [n.name, !n.online ? 'offline' : ok(n.totalW) || CPU_NA_SHORT[n.cpuUnavailable] ? split(n.totalW, n.cpuW, n.gpuW, n.cpuUnavailable) : 'unknown'])];
-      return `<div class="meter"><div class="m-top"><span class="m-l">All servers</span><b class="m-v num">${h(watt(c.totalW))}</b></div>${bar(ok(c.totalW) ? Math.min(100, c.totalW / 6) : null, 'org')}`
-        + `<span class="m-s small faint">${rows.map(([k, v]) => `<span class="srv"><b>${h(k)}</b> ${h(v)}</span>`).join(' · ')}<br>today ${h(wh(c.todayWh))}${ok(c.todayCost) ? ` ${h(cash(c.todayCost, cur))}` : ''} · week ${h(wh(c.weekWh))}${ok(c.weekCost) ? ` ${h(cash(c.weekCost, cur))}` : ''}</span></div>`;
+      return `<div class="meter"><div class="m-top"><span class="m-l">All servers</span><b class="m-v num">${h(watt(c.totalW))}</b></div>${bar(ofPeak(c.totalW, c.peakW), 'org')}`
+        + `<span class="m-s small faint">${rows.map(([k, v]) => `<span class="srv"><b>${h(k)}</b> ${h(v)}</span>`).join(' · ')}<br>${h(peakText(c.totalW, c.peakW))}today ${h(wh(c.todayWh))}${ok(c.todayCost) ? ` ${h(cash(c.todayCost, cur))}` : ''} · week ${h(wh(c.weekWh))}${ok(c.weekCost) ? ` ${h(cash(c.weekCost, cur))}` : ''}</span></div>`;
     }
     function drawStats() {
       const s = stats;
@@ -207,7 +213,7 @@ export default {
         meter('GPU', g.length ? pc(last('gpu')) : 'none', last('gpu'), 'gpu', { max: 100, sub: g.length ? g.map((x) => x.name).join(', ') : 'No GPU visible: encodes use the CPU' }),
         // with nodes: every server's power together, then this one's own
         allServers(p, tot, cur),
-        meter(p.combined && p.nodes?.length ? 'This server' : 'Power', watt(tot), ok(tot) ? Math.min(100, tot / 3) : null, 'power', { tone: 'org', sub: ok(tot) || p.todayWh ? `today ${wh(p.todayWh)}${ok(p.todayCost) ? ` ${cash(p.todayCost, cur)}` : ''} · week ${wh(p.weekWh)}${ok(p.weekCost) ? ` ${cash(p.weekCost, cur)}` : ''}${perHour !== null ? ` · ≈${cash(perHour, cur)}/h` : ''}${ok(s.price?.now) ? ` · ${cash(s.price.now, cur)}/kWh` : ''}${!ok(p.cpuW) && CPU_NA_SHORT[p.cpuUnavailable] ? ` · ${CPU_NA_SHORT[p.cpuUnavailable]}` : ''}` : CPU_NA[p.cpuUnavailable] || 'No power sensor readable' }),
+        meter(p.combined && p.nodes?.length ? 'This server' : 'Power', watt(tot), ofPeak(tot, p.peakW), 'power', { tone: 'org', max: Math.max(peakOf(tot, p.peakW), ...hist.power.filter(ok)) || null, sub: ok(tot) || p.todayWh ? `${peakText(tot, p.peakW)}today ${wh(p.todayWh)}${ok(p.todayCost) ? ` ${cash(p.todayCost, cur)}` : ''} · week ${wh(p.weekWh)}${ok(p.weekCost) ? ` ${cash(p.weekCost, cur)}` : ''}${perHour !== null ? ` · ≈${cash(perHour, cur)}/h` : ''}${ok(s.price?.now) ? ` · ${cash(s.price.now, cur)}/kWh` : ''}${!ok(p.cpuW) && CPU_NA_SHORT[p.cpuUnavailable] ? ` · ${CPU_NA_SHORT[p.cpuUnavailable]}` : ''}` : CPU_NA[p.cpuUnavailable] || 'No power sensor readable' }),
         meter('Network', `↓ ${perSec(last('rx'))}`, null, 'rx', { rate: true, pair: 'tx', subHtml: true, sub: `<span class="k-cyan">↓ download</span> · <span class="k-org">↑ upload ${h(perSec(last('tx')))}</span> · ${h(`${(s.network?.interfaces || []).map((i) => `${i.name}${ok(i.speedMbps) ? ` ${i.speedMbps} Mb/s` : ''}`).join(', ')} · ${s.network?.scope === 'host' ? 'whole server' : 'this container'}${s.network?.today ? ` · today ↓${size(s.network.today.rxB)} ↑${size(s.network.today.txB)}` : ''}`)}` }),
         meter('Disks', `R ${perSec(last('dr'))}`, null, 'dr', { rate: true, pair: 'dw', subHtml: true, sub: `<span class="k-cyan">— read</span> · <span class="k-org">— write ${h(perSec(last('dw')))}</span>` }),
         meter('Hottest', ok(t) ? `${Math.round(t)} °C` : '—', ok(t) ? t : null, 'temp', { tone: 'org', max: 100, sub: ok(t) ? 'CPU, GPU, disks and sensors' : 'No temperature sensor readable' })

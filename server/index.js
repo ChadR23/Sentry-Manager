@@ -3290,6 +3290,12 @@ async function main() {
     // every node's power with this server's: "All servers" (nodePower.js);
     // with no nodes, nothing is added
     const nodePower = combinePower(snapshot.power, nodes.power(), priceNow);
+    // the most each server (and all of them together) has drawn: the power
+    // bars are full at it
+    if (nodePower.combined) {
+      nodePower.combined.peakW = stats.peak('all', nodePower.combined.totalW);
+      for (const n of nodePower.nodes) n.peakW = stats.peak(`node:${n.id}`, n.totalW);
+    }
     return {
       ...snapshot,
       ...(nodePower.combined ? { power: { ...snapshot.power, nodes: nodePower.nodes, combined: nodePower.combined } } : {}),

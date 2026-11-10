@@ -249,7 +249,7 @@ function createStats(options = {}) {
       cpu: { model: null, cores: null, threads: null, usage: null, perCore: [], freqMHz: null, tempC: null, load: null, app: { usage: null, ffmpegUsage: null, ffmpegCount: null }, throttling: false, sockets: 1, perSocket: null },
       memory: { totalB: null, usedB: null, availableB: null, cacheB: null, swapTotalB: null, swapUsedB: null, appB: null },
       gpus: [],
-      power: { totalW: null, cpuW: null, gpuW: null, chipW: null, discreteW: null, todayWh: null, weekWh: null, todayCost: null, weekCost: null, priceNow: null, cpuSource: null, gpuSource: null, cpuUnavailable: null },
+      power: { totalW: null, cpuW: null, gpuW: null, chipW: null, discreteW: null, todayWh: null, weekWh: null, todayCost: null, weekCost: null, priceNow: null, cpuSource: null, gpuSource: null, cpuUnavailable: null, peakW: null },
       disks: [],
       filesystems: [],
       network: { scope: 'container', interfaces: [], today: null, week: null, month: null },
@@ -302,7 +302,7 @@ function createStats(options = {}) {
       memory,
       gpus: gpus.map(({ powerSource, ...g }) => g),
       // (why the CPU's watts are missing: 'windows', 'vm' or null)
-      power: { ...pw, cpuUnavailable: cpuUnavailable({ cpuW: pw.cpuW, wsl: host.static?.wsl === true, virtual: cpu.info.virtual === true }), todayWh: es.todayWh, weekWh: es.weekWh, todayCost: es.todayCost, weekCost: es.weekCost, priceNow },
+      power: { ...pw, cpuUnavailable: cpuUnavailable({ cpuW: pw.cpuW, wsl: host.static?.wsl === true, virtual: cpu.info.virtual === true }), todayWh: es.todayWh, weekWh: es.weekWh, todayCost: es.todayCost, weekCost: es.weekCost, priceNow, peakW: es.peakW },
       disks: diskList,
       filesystems: fsList,
       network: { ...net, today: used.today, week: used.week, month: used.month },
@@ -408,6 +408,18 @@ function createStats(options = {}) {
     nodePower(nodeId, t, w, encoding) {
       energy.addNode(String(nodeId), Number(t), w, Boolean(encoding), price(Number(t)));
       dirty = true;
+    },
+
+    /**
+     * The highest W seen for 'all' (every server together) or 'node:<id>'
+     * (energy.js notePeak), after noting w (the reading now) for it.
+     */
+    peak(key, w) {
+      const before = energy.peak(key);
+      energy.notePeak(key, w, now());
+      const after = energy.peak(key);
+      if (after !== before) dirty = true;
+      return after;
     },
 
     history(range) {

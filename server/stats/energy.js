@@ -31,6 +31,10 @@ const r3 = (n) => Math.round(n * 1000) / 1000;
 // a few seconds of a few watts cost a millionth; the screens round for display
 const money = (n) => (n === null || n === undefined ? null : Math.round(n * 1e6) / 1e6);
 const finite = (n) => typeof n === 'number' && Number.isFinite(n) && n >= 0;
+// the highest watts kept per server (peak): a reading above this is a bad
+// sensor value, not a peak; and how many servers' peaks are kept
+const PEAK_MAX_W = 100_000;
+const PEAKS_KEPT = 64;
 
 /** A saved or reported baseline ({ clips, savedB, wh }), or null. */
 function cleanBase(base, maxWh = Infinity) {
@@ -59,6 +63,24 @@ class Energy {
     // job was just marked again (the time in between was not its own)
     this.seen = Object.create(null);
     this.marked = false;
+    // the highest watts seen: 'self' (this server), 'all' (every server
+    // together) and 'node:<id>', each { w, at }. The screens' power bars
+    // are full at the peak, so 100% is the most that server has drawn.
+    this.peaks = Object.create(null);
+  }
+
+  /** Remember w (W at time t) when it is the highest seen for key. */
+  notePeak(key, w, t) {
+    if (!finite(w) || w <= 0 || w > PEAK_MAX_W || typeof key !== 'string' || key.length > 200) return;
+    const p = this.peaks[key];
+    if (p && p.w >= w) return;
+    if (!p && Object.keys(this.peaks).length >= PEAKS_KEPT) return;
+    this.peaks[key] = { w: Math.round(w * 10) / 10, at: Number(t) || 0 };
+  }
+
+  /** The highest W seen for key, or null. */
+  peak(key) {
+    return this.peaks[key]?.w ?? null;
   }
 
   /** The job's clips and saved bytes now, or null. */
@@ -78,6 +100,7 @@ class Energy {
    */
   add(t, watts, pricePerKwh = null) {
     const w = finite(watts) ? watts : null;
+    if (w !== null) this.notePeak('self', w, t);
     const prev = this.last;
     this.last = w === null ? null : { t, w };
     const ms = prev && w !== null ? t - prev.t : NaN;
@@ -136,6 +159,7 @@ class Energy {
     if (!this.nodes) this.nodes = Object.create(null);
     const w = finite(watts) ? watts : null;
     const prev = this.nodes[nodeId];
+    if (w !== null) this.notePeak(`node:${nodeId}`, w, t);
     this.nodes[nodeId] = w === null ? null : { t, w, encoding, job: this.job };
     if (!prev || w === null || this.job === null || prev.job !== this.job) return;
     if (!prev.encoding && !encoding) return;
@@ -178,7 +202,8 @@ class Energy {
     }]));
     return {
       todayWh: r3(this.days[today] || 0), weekWh: r3(week),
-      todayCost: money(this.costs[today] ?? null), weekCost: money(weekCost), byJob
+      todayCost: money(this.costs[today] ?? null), weekCost: money(weekCost), byJob,
+      peakW: this.peak('self')
     };
   }
 
@@ -194,7 +219,7 @@ class Energy {
 
   toJSON() {
     this.trim();
-    return { days: this.days, costs: this.costs, jobs: this.jobs };
+    return { days: this.days, costs: this.costs, jobs: this.jobs, peaks: this.peaks };
   }
 
   load(data) {
@@ -214,6 +239,8 @@ class Energy {
     this.days = perDay(data.days);
     this.costs = perDay(data.costs);
     this.jobs = jobs;
+    this.peaks = Object.create(null);
+    for (const [k, p] of Object.entries(data.peaks && typeof data.peaks === 'object' ? data.peaks : {})) this.notePeak(k, p?.w, p?.at);
     this.trim();
   }
 }

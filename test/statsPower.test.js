@@ -125,7 +125,7 @@ test('energy per job, and what it cost at the price of each moment', () => {
   free.markJob('j');
   free.add(t, 80);
   free.add(t + 2000, 80);
-  assert.deepEqual(free.summary(t + 2000), { todayWh: 0.044, weekWh: 0.044, todayCost: null, weekCost: null, byJob: { j: { wh: 0.044, avgW: 80, seconds: 2, cost: null, base: null } } });
+  assert.deepEqual(free.summary(t + 2000), { todayWh: 0.044, weekWh: 0.044, todayCost: null, weekCost: null, byJob: { j: { wh: 0.044, avgW: 80, seconds: 2, cost: null, base: null } }, peakW: 80 });
   // job ids are data
   e.markJob('__proto__');
   e.add(t + 2000, 10);
@@ -406,4 +406,31 @@ test('the engine: costs at the price of each moment, from options.priceAt', asyn
   } finally {
     s.done();
   }
+});
+
+test('power peaks: the highest watts per server are kept across a restart, bad readings and extra servers left out', () => {
+  const e = new Energy({ intervalMs: 2000 });
+  let t = new Date(2026, 10, 10, 12, 0, 0).getTime();
+  assert.equal(e.summary(t).peakW, null, 'nothing measured yet');
+  for (const w of [40, 61.27, 55, null, 0, 200_000, -5, NaN]) e.add((t += 2000), w);
+  assert.equal(e.summary(t).peakW, 61.3, 'the highest real reading, to a tenth of a watt');
+  e.addNode('n1', t, 120, false);
+  e.addNode('n1', t + 30000, 90, false);
+  e.notePeak('all', 150, t);
+  e.notePeak('all', 140, t);
+  assert.equal(e.peak('node:n1'), 120);
+  assert.equal(e.peak('all'), 150);
+  const again = new Energy({ intervalMs: 2000 });
+  again.load(JSON.parse(JSON.stringify({ ...e.toJSON(), peaks: { ...e.toJSON().peaks, bad: { w: 'x' }, huge: { w: 1e9 } } })));
+  assert.equal(again.summary(t).peakW, 61.3);
+  assert.equal(again.peak('all'), 150);
+  assert.equal(again.peak('node:n1'), 120);
+  assert.equal(again.peak('bad'), null);
+  assert.equal(again.peak('huge'), null);
+  // a new high moves 100% up
+  again.add((t += 2000), 75);
+  assert.equal(again.summary(t).peakW, 75);
+  // only so many servers' peaks are kept
+  for (let i = 0; i < 100; i++) again.notePeak(`node:x${i}`, 10, t);
+  assert.ok(Object.keys(again.toJSON().peaks).length <= 64);
 });
