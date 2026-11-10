@@ -111,7 +111,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 26
 
       # The ffmpeg packages the tests need (63 MB) are kept between runs: the
       # Ubuntu mirror once took 21 minutes to send them.

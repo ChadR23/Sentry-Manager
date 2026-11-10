@@ -27,7 +27,7 @@ jobs:
           ref: main
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 26
       - name: Count downloads
         run: mkdir -p docs/badges && node tools/downloadsBadge.js "${{ github.repository_owner }}" "${{ github.event.repository.name }}" sentry-manager docs/badges/downloads.svg
       - name: Commit the badge if it changed

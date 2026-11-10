@@ -4,7 +4,7 @@
 #   docker build -t ghcr.io/skittles-fivem/sentry-manager:latest .
 
 # Official Node 24 build.
-FROM node:24-trixie-slim AS node
+FROM node:26-trixie-slim AS node
 
 # Small native helper: rename-without-replace (renameat2), used for safe
 # in-place replacement of originals on Linux / SMB.
