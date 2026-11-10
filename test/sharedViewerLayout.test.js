@@ -132,3 +132,13 @@ test('Viewer: a narrow List (a 320 px phone) shows each stat on two lines, its s
   // every row is placed at the row height in use
   assert.doesNotMatch(sd, /style="top:\$\{\(first \+ k\) \* ROW\}px"/);
 });
+
+test('Saved by converting: the chart is drawn at the width it is shown at, so its labels are 11-12 px on a phone card', () => {
+  const sv = read('web/savingsChart.js');
+  assert.match(sv, /const W = Math\.max\(220, Math\.round\(box\.clientWidth \|\| 600\)\);/);
+  assert.match(sv, /<svg viewBox="0 0 \$\{W\} \$\{H \+ 22\}" width="\$\{W\}" height="\$\{H \+ 22\}"/);
+  assert.match(sv, /\.sentry-sv svg text\{fill:currentColor;font-size:12px\}/);
+  assert.match(sv, /monthName\(m\.month, tight \? 'narrow' : 'short'\)/, 'a month\'s first letter where three do not fit');
+  assert.match(sv, /new ResizeObserver\(/, 'drawn again when the card changes width');
+  assert.match(sv, /resized\?\.disconnect\(\)/);
+});
