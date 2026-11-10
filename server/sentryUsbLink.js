@@ -30,7 +30,17 @@ const FAILS_PER_MINUTE = 10; // per address
 const ID_RE = /^[A-Za-z0-9_-]{8,128}$/;
 const HEX64 = /^[0-9a-f]{64}$/;
 
-const clean = (s, max) => String(s ?? '').replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ').trim().slice(0, max);
+// only a string or a number becomes text: String() of a deeply nested array
+// from the Pi recurses until the stack overflows, which would end the process
+const text = (v) => (typeof v === 'string' ? v : typeof v === 'number' && Number.isFinite(v) ? String(v) : '');
+/** True when v nests deeper than `max` (checked only that far down). */
+function tooDeep(v, max = 16) {
+  if (!v || typeof v !== 'object') return false;
+  if (max <= 0) return true;
+  for (const x of Array.isArray(v) ? v : Object.values(v)) if (tooDeep(x, max - 1)) return true;
+  return false;
+}
+const clean = (s, max) => text(s).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ').trim().slice(0, max);
 
 /** K: PBKDF2-HMAC-SHA256(password, "sentryusb-link|" + username, 200000, 32). */
 function pairingKey(username, password, iterations = PBKDF2_ITERATIONS) {
@@ -100,7 +110,7 @@ function proxyTarget(method, rawRest) {
 const SAFE_TYPES = new Set(['application/json', 'text/plain', 'application/zip', 'application/gzip', 'application/x-gzip', 'application/x-tar', 'application/octet-stream']);
 /** The Pi's content type, cut to a type the browser can be given safely. */
 function safeType(type) {
-  const t = String(type || '').split(';')[0].trim().toLowerCase();
+  const t = text(type).split(';')[0].trim().toLowerCase();
   return SAFE_TYPES.has(t) ? t : 'application/octet-stream';
 }
 
@@ -142,7 +152,7 @@ function maskConfig(cfg) {
     if (!/^[A-Z][A-Z0-9_]{0,63}$/.test(k.replace(/__set$/, ''))) continue;
     if (k.endsWith('__set')) { if (v === true || v?.value === true) out[k] = true; continue; }
     if (!v || typeof v !== 'object') continue;
-    const value = typeof v.value === 'string' ? v.value : v.value == null ? '' : String(v.value);
+    const value = typeof v.value === 'boolean' ? String(v.value) : text(v.value);
     const entry = { value: value.slice(0, 4096), active: Boolean(v.active) };
     // a Pi that masks sends secrets empty; one that sent a value is not trusted
     // to keep a secret it gets back empty, so the page will not save (__unmasked)
@@ -294,13 +304,15 @@ function createSentryUsbLink({
       failAll(502, 'The Sentry USB sent a broken answer.');
       link.drop(1008, 'protocol');
     };
+    link.violation = violation;
     const strayFrame = () => { if (++stray > 20) violation('answers for requests it was not asked'); };
     link.onMessage = (m) => {
       if (m.t === 'status') {
         const d = byId(id);
         if (!d) return;
         const text = JSON.stringify(m.body ?? null);
-        if (text.length > MAX_STATUS) return;
+        // (a status nested deeper than any real one would only break the page that shows it)
+        if (text.length > MAX_STATUS || tooDeep(m.body)) return;
         d.status = JSON.parse(text);
         d.statusAt = now();
         d.lastSeen = now();
@@ -320,7 +332,7 @@ function createSentryUsbLink({
         return;
       }
       if (m.t === 'alert') {
-        event({ type: 'alert', id, ip, port, kind: m.kind === 'fingerprint' || m.kind === 'proof' ? m.kind : 'other', seen: clean(m.seen, 128) || null, at: Number(m.at) || null });
+        event({ type: 'alert', id, ip, port, kind: m.kind === 'fingerprint' || m.kind === 'proof' ? m.kind : 'other', seen: clean(m.seen, 128) || null, at: typeof m.at === 'number' && Number.isFinite(m.at) ? m.at : null });
         return;
       }
       if (m.t === 'ping') { ws.send('{"t":"pong"}'); return; }
@@ -444,7 +456,13 @@ function createSentryUsbLink({
         if (!done) return deny('bad message', { kind: 'garbage' });
         return link?.onMessage({ t: '?' });
       }
-      if (link) return link.onMessage(m);
+      if (link) {
+        // whatever a Pi sends must not throw out of here (it would end the process): it is a broken link
+        try { return link.onMessage(m); } catch (err) {
+          log.warn(`Sentry USB ${link.id}: ${err.message}`);
+          return link.violation('a message that could not be handled');
+        }
+      }
       if (done) return undefined;
       if (m.t !== 'auth') return deny('bad message', { kind: 'garbage' });
       return auth(m);
