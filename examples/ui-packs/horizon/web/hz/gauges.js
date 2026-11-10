@@ -116,7 +116,10 @@ export function setRing(root, frac, read, sub) {
 /** A sparkline; values may contain nulls. */
 export function spark(values, { w = 160, h: ht = 36, max = null, tone = 'cyan' } = {}) {
   const v = values.filter(ok);
-  if (v.length < 2) return `<svg class="spark ${tone}" viewBox="0 0 ${w} ${ht}" preserveAspectRatio="none" aria-hidden="true"><line x1="0" y1="${ht - 1}" x2="${w}" y2="${ht - 1}" class="sp-base"/></svg>`;
+  // the zero line is always there (a reading of 0, the first seconds before two samples, a gap
+  // with no sample): the graph never goes blank and comes back
+  const zero = `<line x1="0" y1="${ht - 2}" x2="${w}" y2="${ht - 2}" class="sp-zero"/>`;
+  if (v.length < 2) return `<svg class="spark ${tone}" viewBox="0 0 ${w} ${ht}" preserveAspectRatio="none" aria-hidden="true">${zero}</svg>`;
   const top = max ?? (Math.max(...v) * 1.1 || 1);
   const n = values.length;
   let d = '';
@@ -128,5 +131,5 @@ export function spark(values, { w = 160, h: ht = 36, max = null, tone = 'cyan' }
     d += `${pen ? 'L' : 'M'}${px.toFixed(1)} ${py.toFixed(1)}`;
     pen = true;
   });
-  return `<svg class="spark ${tone}" viewBox="0 0 ${w} ${ht}" preserveAspectRatio="none" aria-hidden="true"><path d="${d}" class="sp-line"/></svg>`;
+  return `<svg class="spark ${tone}" viewBox="0 0 ${w} ${ht}" preserveAspectRatio="none" aria-hidden="true">${zero}<path d="${d}" class="sp-line"/></svg>`;
 }

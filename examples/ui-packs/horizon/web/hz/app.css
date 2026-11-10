@@ -322,6 +322,8 @@ text.tk-hot { fill: #ffb3c2; }
 .k-cyan { color: var(--cyan); }
 .k-org { color: var(--org); }
 .sp-base { stroke: rgba(255, 255, 255, 0.12); stroke-dasharray: 3 4; vector-effect: non-scaling-stroke; }
+.sp-zero { stroke: var(--cyan); stroke-width: 1.6; opacity: 0.55; vector-effect: non-scaling-stroke; }
+.spark.org .sp-zero { stroke: var(--org); }
 
 /* ---------- Dashboard ---------- */
 .cluster {
