@@ -479,6 +479,21 @@ text.tk-hot { fill: #ffb3c2; }
   .track { grid-template-columns: 44px 46px 64px minmax(0, 1fr) minmax(80px, auto) 156px auto; }
   .tk-n, .tk-cams { display: none; }
 }
+/* a narrow track list (the Days column beside it takes the room on a mid-size window): two lines
+   a row, the time, tags and folder across the whole row on top, codec, length and buttons under
+   them (by the list's own width: the window's says nothing about it) */
+.tracks { container: tracks / inline-size; }
+@container tracks (max-width: 860px) {
+  .track { grid-template-columns: 44px 46px 64px minmax(0, 1fr) auto auto; grid-template-areas: "sel play art t t t" "sel play art codec dur acts"; row-gap: 2px; }
+  .tk-n, .tk-cams { display: none; }
+  .tk-sel { grid-area: sel; }
+  .tk-play { grid-area: play; }
+  .tk-art { grid-area: art; }
+  .tk-t { grid-area: t; }
+  .tk-codec { grid-area: codec; justify-self: start; }
+  .tk-dur { grid-area: dur; }
+  .tk-acts { grid-area: acts; }
+}
 @media (max-width: 1023px) {
   .ft-body { grid-template-columns: 1fr; }
   .albums { position: relative; top: auto; max-height: none; padding: 10px; }
