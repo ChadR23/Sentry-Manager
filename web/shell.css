@@ -136,9 +136,11 @@ p { margin: 0; }
 .card p { color: var(--text-2); }
 .card h2 + p { margin-top: 12px; max-width: 560px; font-size: 15.5px; line-height: 1.6; color: var(--text); opacity: 0.88; }
 .alerts { list-style: none; padding: 0; margin: 16px 0 18px; display: flex; flex-direction: column; gap: 8px; }
-.alert-item { display: grid; grid-template-columns: 10px 1fr auto; gap: 12px; align-items: start; padding: 12px 14px; border-radius: 12px; background: var(--panel-2); border: 1px solid var(--border); }
+.alert-item { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; gap: 12px; align-items: start; padding: 12px 14px; border-radius: 12px; background: var(--panel-2); border: 1px solid var(--border); }
 .alert-item .dot { margin-top: 7px; }
 .alert-item b { display: block; }
+/* a long path or word in a notification wraps instead of pushing Dismiss off the page */
+.alert-item > div { overflow-wrap: anywhere; }
 .alert-item span { color: var(--text-2); font-size: 13px; }
 
 /* footage */
