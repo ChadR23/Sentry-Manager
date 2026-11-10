@@ -285,7 +285,9 @@ function securityHeaders(req, res, pathname = '') {
   const page = pathname.split('?')[0];
   res.setHeader('Content-Security-Policy', page.startsWith('/studio/') && page !== ENCODER_PAGE ? STUDIO_CSP
     : page === '/' || page === '/index.html' ? SHELL_CSP : CSP);
-  if (isSecure(req)) res.setHeader('Strict-Transport-Security', 'max-age=31536000');
+  // No HSTS: with Manager's own certificate it takes the browser's "continue"
+  // away on some devices and forces HTTPS on every port of the NAS's address;
+  // plain HTTP is already redirected here and never shows the app.
 }
 
 const escHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -3757,10 +3759,9 @@ async function main() {
   }
 
   // ---- listen: HTTPS, with plain HTTP on the same port. Plain HTTP never
-  // shows the app, so no password or footage ever goes over it: a browser
-  // gets a short page (web/continue.html) that explains the certificate
-  // warning it will see once and moves on by itself when the device already
-  // trusts the certificate; anything else is redirected.
+  // shows the app, so no password or footage ever goes over it: every
+  // request is redirected straight to the HTTPS address (the browser's own
+  // certificate warning is the only step on a new device).
   let httpsServer = null;
   const servers = [];
   if (!tlsSource) {
@@ -3777,9 +3778,7 @@ async function main() {
     // minutes: live updates send something every 20 s at most, so only
     // abandoned or deliberately held connections go.
     httpsServer.setTimeout(120_000);
-    const continuePage = fs.readFileSync(path.join(WEB, 'continue.html'), 'utf8');
-    const CONTINUE_FILES = new Set(['/web/continue.js', '/web/shell.css', '/web/icon.png']);
-    const redirect = http.createServer(async (req, res) => {
+    const redirect = http.createServer((req, res) => {
       let u;
       try {
         u = new URL(req.url, 'http://localhost');
@@ -3792,27 +3791,8 @@ async function main() {
       }
       const target = cleanHost(req) || `localhost:${PORT}`;
       const httpsUrl = `https://${target}${u.pathname}${u.search}`;
-      if (req.method === 'GET' && (CONTINUE_FILES.has(u.pathname) || (u.pathname.startsWith('/web/fonts/') && !u.pathname.slice(11).includes('/')))) {
-        if (!(await serveFile(req, res, WEB, u.pathname.slice(5)))) notFound(res);
-        return undefined;
-      }
-      if (req.method !== 'GET' || !/text\/html/.test(String(req.headers.accept || ''))) {
-        res.writeHead(308, { Location: httpsUrl, 'Cache-Control': 'no-store' });
-        return res.end();
-      }
-      let fingerprint = '';
-      try {
-        fingerprint = tlsSource.status().certificate?.fingerprint || '';
-      } catch {
-        // shown in the container log instead
-      }
-      const page = continuePage.replace('{{FINGERPRINT}}', escHtml(fingerprint || 'shown in the container log').replace(/:/g, ':<wbr>')).replace('{{HTTPS_URL}}', escHtml(httpsUrl));
-      res.writeHead(200, {
-        'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
-        'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'DENY',
-        'Content-Security-Policy': `default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; font-src 'self'; connect-src https://${target}; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`
-      });
-      return res.end(page);
+      res.writeHead(308, { Location: httpsUrl, 'Cache-Control': 'no-store' });
+      return res.end();
     });
     const front = net.createServer((socket) => {
       socket.setTimeout(15000, () => socket.destroy());

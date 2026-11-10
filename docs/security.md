@@ -6,9 +6,10 @@
 
 **HTTPS only.** Port 9000 speaks HTTPS (HTTP/2), so nobody on your network
 can read your password or footage, or change the page. Plain HTTP on the
-same port never shows the app: a browser gets a short page explaining the
-one-time certificate warning (it moves on by itself on devices that already
-trust the certificate), anything else is redirected.
+same port never shows the app: every request is redirected straight to the
+HTTPS address. Manager sends no HSTS header: with its own certificate it
+would remove the browser's "continue" button on some devices, and force
+HTTPS on every other port of the NAS's address.
 
 Sentry Six Manager makes its own certificate, so browsers don't know it:
 

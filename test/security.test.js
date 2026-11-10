@@ -106,23 +106,19 @@ test('HTTPS, the setup code, cookies and password confirmation', { skip: !hasOpe
     assert.equal(plain.status, 308);
     assert.equal(plain.headers.get('location'), `https://127.0.0.1:${s.port}/settings?x=1`);
     assert.equal((await fetch(`http://127.0.0.1:${s.port}/web/app.js`, { redirect: 'manual' })).status, 308, 'no app code over plain HTTP');
-    // ...and a browser gets the page that explains the one-time certificate warning
-    const intro = await fetch(`http://127.0.0.1:${s.port}/settings?x=1`, { headers: { Accept: 'text/html' }, redirect: 'manual' });
-    assert.equal(intro.status, 200);
-    const introHtml = await intro.text();
     const leafFp = new (require('crypto').X509Certificate)(fs.readFileSync(path.join(dir, 'data/tls/server.crt'))).fingerprint256;
-    assert.ok(introHtml.replace(/<wbr>/g, '').includes(leafFp), 'the certificate fingerprint to compare');
-    assert.ok(!/word-break:\s*break-all/.test(introHtml), 'the fingerprint breaks between bytes, not inside one');
-    assert.ok(introHtml.includes(`href="https://127.0.0.1:${s.port}/settings?x=1"`));
-    assert.doesNotMatch(introHtml, /<form|<input/i, 'nothing to type on plain HTTP');
-    assert.match(intro.headers.get('content-security-policy'), new RegExp(`connect-src https://127\\.0\\.0\\.1:${s.port};`));
-    assert.equal((await fetch(`http://127.0.0.1:${s.port}/web/continue.js`)).status, 200);
+    // ...and a browser goes straight to the HTTPS address too (no page of our own before the browser's warning)
+    const browser = await fetch(`http://127.0.0.1:${s.port}/settings?x=1`, { headers: { Accept: 'text/html' }, redirect: 'manual' });
+    assert.equal(browser.status, 308);
+    assert.equal(browser.headers.get('location'), `https://127.0.0.1:${s.port}/settings?x=1`);
+    assert.equal((await fetch(`http://127.0.0.1:${s.port}/web/continue.js`, { redirect: 'manual' })).status, 308);
 
     // the certificate verifies against our CA (no -k anywhere)
     const me = await httpsCall(s.port, ca, 'GET', '/api/auth/me');
     assert.equal(me.status, 200);
     assert.deepEqual([me.data.needsSetup, me.data.secure], [true, true]);
-    assert.match(me.headers['strict-transport-security'], /max-age=/);
+    // no HSTS at all (it would take the browser's "continue" away on some devices)
+    assert.equal(me.headers['strict-transport-security'], undefined);
 
     // HTTP/2 (all six cameras share one connection): pages, the API and the
     // live-update stream answer over it too
