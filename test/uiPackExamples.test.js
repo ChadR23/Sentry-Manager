@@ -209,3 +209,15 @@ for (const [pack, mod] of [['horizon', 'hz'], ['flux', 'flux'], ['aurora', 'auro
     assert.match(css, /\.hw3/, 'and laid out without them');
   });
 }
+
+// Horizon's Footage: the Days column beside the track list takes ~380 px from
+// a 1024 px window up, so the list's own width (a container query) picks the
+// row layout, never the window's: a 1300 px window has a ~920 px list.
+test('horizon: the Footage track rows are laid out by the list\'s own width', () => {
+  const css = fs.readFileSync(path.join(ROOT, 'horizon', 'web', 'hz', 'app.css'), 'utf8');
+  assert.match(css, /\.tracks \{ container: tracks \/ inline-size; \}/);
+  assert.match(css, /@container tracks \(max-width: 1100px\) \{\s*\.track \{ grid-template-columns: 44px 46px 64px minmax\(0, 1fr\)/, 'fewer columns below 1100 px of list');
+  assert.match(css, /@container tracks \(max-width: 860px\) \{\s*\.track \{[^}]*grid-template-areas:/, 'two lines a row below 860 px of list');
+  // only the phone layout (the list as wide as the window) still goes by the window
+  for (const m of css.matchAll(/@media \(max-width: (\d+)px\) \{\s*\.track \{/g)) assert.ok(Number(m[1]) <= 700, `a window-wide .track rule at ${m[1]} px`);
+});

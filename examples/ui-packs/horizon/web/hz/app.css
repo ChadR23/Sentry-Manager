@@ -477,14 +477,15 @@ text.tk-hot { fill: #ffb3c2; }
 .pl-foot { padding: 10px 14px; }
 .info-top { display: grid; grid-template-columns: minmax(0, 220px) minmax(0, 1fr); gap: 14px; align-items: start; }
 .info-art { width: 100%; border-radius: var(--r); }
-@media (max-width: 1279px) {
+/* the list's own width picks the layout, not the window's (the Days column beside it takes
+   ~380 px from 1024 px up): every column from 1100 px, then without the number and cameras */
+.tracks { container: tracks / inline-size; }
+@container tracks (max-width: 1100px) {
   .track { grid-template-columns: 44px 46px 64px minmax(0, 1fr) minmax(80px, auto) 156px auto; }
   .tk-n, .tk-cams { display: none; }
 }
-/* a narrow track list (the Days column beside it takes the room on a mid-size window): two lines
-   a row, the time, tags and folder across the whole row on top, codec, length and buttons under
-   them (by the list's own width: the window's says nothing about it) */
-.tracks { container: tracks / inline-size; }
+/* a narrow track list (the Days column beside it on a mid-size window): two lines a row, the
+   time, tags and folder across the whole row on top, codec, length and buttons under them */
 @container tracks (max-width: 860px) {
   .track { grid-template-columns: 44px 46px 64px minmax(0, 1fr) auto auto; grid-template-areas: "sel play art t t t" "sel play art codec dur acts"; row-gap: 2px; }
   .tk-n, .tk-cams { display: none; }
