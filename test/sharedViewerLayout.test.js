@@ -121,3 +121,14 @@ test('Viewer on a phone: the frame-step bubbles go to the sides of a small camer
   // Horizon's own rule puts them at the sides of its main camera the same way
   assert.match(read('examples/ui-packs/horizon/web/hz/app.css'), /\.cam\.main \.sentry-x-steps \{ top: 50%; bottom: auto; transform: translateY\(-50%\); justify-content: space-between;/);
 });
+
+test('Viewer: a narrow List (a 320 px phone) shows each stat on two lines, its source under its name, not cut to nothing', () => {
+  const sd = read('web/statDash.js');
+  assert.match(sd, /const two = \(scroll\.clientWidth \|\| Infinity\) < NARROW_LIST;/);
+  assert.match(sd, /const NARROW_LIST = 400;/);
+  assert.match(sd, /const ROW_TWO = 44;/);
+  assert.match(sd, /\.sentry-sd \.sd-list-two \.sd-list-m\{grid-area:2\/1\}/);
+  assert.match(sd, /\.sentry-sd \.sd-list-two \.sd-list-r\{height:44px\}/, 'the rows as tall as they are placed');
+  // every row is placed at the row height in use
+  assert.doesNotMatch(sd, /style="top:\$\{\(first \+ k\) \* ROW\}px"/);
+});

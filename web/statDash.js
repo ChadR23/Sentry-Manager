@@ -176,6 +176,11 @@ const STYLE = `
 .sentry-sd .sd-list-h{border-bottom-color:var(--sd-line);background:#1d2026}
 .sentry-sd .sd-list-h .sd-list-l{font:800 12px/1 system-ui,sans-serif;color:var(--sd-amber);letter-spacing:.04em;text-transform:uppercase}
 .sentry-sd .sd-list-empty{padding:12px;color:var(--sd-dim);font-size:14px}
+.sentry-sd .sd-list-two .sd-list-r{height:44px}
+.sentry-sd .sd-list-two .sd-list-r:not(.sd-list-h){display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:auto auto;align-content:center;column-gap:8px;row-gap:2px}
+.sentry-sd .sd-list-two .sd-list-l{grid-area:1/1}
+.sentry-sd .sd-list-two .sd-list-m{grid-area:2/1}
+.sentry-sd .sd-list-two .sd-list-v{grid-area:1/2/3/3;align-self:center;min-width:72px}
 /* touch screens: the resize grips and "Changing only" at least 40 px to tap (room kept for the grips) */
 @media (pointer:coarse){
   .sentry-sd button.sd-btn.sd-size{width:40px;height:40px;font-size:17px}
@@ -1678,6 +1683,10 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
   // built (thousands of CAN signals); a value that changes lights up for a
   // moment.
   const ROW = 30;
+  // a narrow List (a phone): each stat on two lines, its name over where it comes from, the
+  // value beside both; in one line of 320 px the middle column was cut to nothing
+  const ROW_TWO = 44;
+  const NARROW_LIST = 400;
   const lists = new WeakMap(); // block -> { key, data, recs, gen, rows, hidden, prev, hot }
   const changingOf = new WeakMap(); // the List's answer -> Set of names whose value changes
   let hotLeft = 0;
@@ -1752,15 +1761,18 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     if (!scroll || !pad) return;
     const n = st.rows.length;
     if (count) count.textContent = `${st.count.toLocaleString()} stat${st.count === 1 ? '' : 's'}${st.hidden ? ` · ${st.hidden.toLocaleString()} ${b.changing ? 'not changing or ' : ''}with no data here` : ''}`;
-    const first = Math.max(0, Math.floor((scroll.scrollTop || 0) / ROW) - 4);
-    const last = Math.min(n, first + Math.ceil((scroll.clientHeight || 15 * ROW) / ROW) + 8);
-    const drawn = `${st.gen}|${first}|${last}`;
+    const two = (scroll.clientWidth || Infinity) < NARROW_LIST;
+    const R = two ? ROW_TWO : ROW;
+    scroll.classList.toggle('sd-list-two', two);
+    const first = Math.max(0, Math.floor((scroll.scrollTop || 0) / R) - 4);
+    const last = Math.min(n, first + Math.ceil((scroll.clientHeight || 15 * R) / R) + 8);
+    const drawn = `${st.gen}|${first}|${last}|${R}`;
     // (kept on the element: a redraw of the bar gives a new, empty one)
     if (pad.dataset.drawn !== drawn) {
       pad.dataset.drawn = drawn;
-      pad.style.height = `${n * ROW}px`;
+      pad.style.height = `${n * R}px`;
       pad.innerHTML = n
-        ? st.rows.slice(first, last).map((s, k) => (s.head ? `<div class="sd-list-r sd-list-h" role="row" style="top:${(first + k) * ROW}px"><span class="sd-list-l" role="columnheader">${esc(s.head)}</span></div>` : `<div class="sd-list-r${s.popular ? ' sd-list-pop' : ''}" role="row" style="top:${(first + k) * ROW}px" data-row="${first + k}" title="${esc(`${s.label} (${s.group}${s.canName ? `, ${s.canName}` : ''})${s.about ? `: ${s.about}` : ''}`)}"><span class="sd-list-l" role="cell">${esc(s.label)}</span><span class="sd-list-m" role="cell">${esc(s.popular && s.source === 'can' ? s.ownLabel : messageOf(s))}</span><span class="sd-list-v" role="cell" data-lv></span></div>`)).join('')
+        ? st.rows.slice(first, last).map((s, k) => (s.head ? `<div class="sd-list-r sd-list-h" role="row" style="top:${(first + k) * R}px"><span class="sd-list-l" role="columnheader">${esc(s.head)}</span></div>` : `<div class="sd-list-r${s.popular ? ' sd-list-pop' : ''}" role="row" style="top:${(first + k) * R}px" data-row="${first + k}" title="${esc(`${s.label} (${s.group}${s.canName ? `, ${s.canName}` : ''})${s.about ? `: ${s.about}` : ''}`)}"><span class="sd-list-l" role="cell">${esc(s.label)}</span><span class="sd-list-m" role="cell">${esc(s.popular && s.source === 'can' ? s.ownLabel : messageOf(s))}</span><span class="sd-list-v" role="cell" data-lv></span></div>`)).join('')
         : `<div class="sd-list-empty">${b.q ? `No stat with data here matches "${esc(b.q)}".` : b.changing ? 'Nothing changes in this clip.' : 'No car data for this clip yet.'}</div>`;
     }
     const nowMs = Date.now();
