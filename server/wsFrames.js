@@ -14,6 +14,12 @@ const crypto = require('crypto');
 const { EventEmitter } = require('events');
 
 const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+// a message in more parts than this is refused (1009): empty continuation
+// frames cost a few bytes each to send, and would otherwise pile up unbounded
+const MAX_PARTS = 1024;
+// what may wait unsent for a peer that does not read (pongs to a ping flood):
+// over this the connection is dropped
+const MAX_UNSENT = 4 * 1024 * 1024;
 const acceptKey = (key) => crypto.createHash('sha1').update(`${key}${GUID}`).digest('base64');
 
 /** One frame: FIN set, the payload masked when `mask` (a client's frames). */
@@ -148,6 +154,7 @@ class WsConnection extends EventEmitter {
     }
     if (opcode === 0x0) {
       if (!this.frag) { this.fail(1002, 'stray continuation'); return; }
+      if (this.frag.parts.length >= MAX_PARTS) { this.fail(1009, 'too many fragments'); return; }
       this.frag.parts.push(payload);
       this.frag.bytes += payload.length;
       if (fin) {
@@ -168,6 +175,7 @@ class WsConnection extends EventEmitter {
 
   write(opcode, payload) {
     if (this.closed || this.socket.destroyed) return false;
+    if ((this.socket.writableLength || 0) > MAX_UNSENT) { this.terminate(); return false; }
     try {
       return this.socket.write(encodeFrame(opcode, payload, this.role === 'client'));
     } catch {
@@ -218,4 +226,4 @@ class WsConnection extends EventEmitter {
   }
 }
 
-module.exports = { WsConnection, encodeFrame, acceptKey };
+module.exports = { WsConnection, encodeFrame, acceptKey, MAX_PARTS, MAX_UNSENT };
