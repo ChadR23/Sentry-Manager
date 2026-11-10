@@ -217,3 +217,11 @@ test('fetched files: the newest 5 per Pi are kept; a Pi\'s error is the failure 
   q.forgetDevice(ID);
   assert.equal(q.list(ID).files.length, 0);
 });
+
+test('a queued settings change with a control character in a value is refused, as the proxy refuses it', () => {
+  const { q } = make({ link: fakeLink(fakeState(), { online: false }) });
+  for (const to of ['Home\nexport PATH=/tmp', 'a\rb', 'a\u0000b', 'a\u001bb', 'a\u007fb']) {
+    assert.throws(() => q.add(ID, { kind: 'settings', params: { changes: { SSID: { from: 'x', to }, WIFIPASS: { from: null, to: 'secret123' } } } }, 'admin'), /Bad value for SSID/, JSON.stringify(to));
+  }
+  assert.ok(q.add(ID, { kind: 'settings', params: { changes: { SSID: { from: 'x', to: 'Home 2' }, WIFIPASS: { from: null, to: 'secret123' } } } }, 'admin'));
+});

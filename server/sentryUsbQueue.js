@@ -125,7 +125,7 @@ function createSentryUsbQueue({ db, link, dir, log, notify = () => {}, onResult 
       if (!KEY_RE.test(k) || !c || typeof c !== 'object') throw Object.assign(new Error(`Bad setting ${k.slice(0, 64)}.`), { status: 400 });
       // the Pi's own rule, checked here too so a queued change cannot fail later for it
       if (!SETTABLE.has(k)) throw Object.assign(new Error(`${k} cannot be changed from Sentry Manager: change it on the Sentry USB.`), { status: 400, code: 'READ_ONLY', key: k });
-      const val = (v) => (v === null ? null : typeof v === 'string' && v.length <= 4096 && !/[\r\n]/.test(v) ? v : undefined);
+      const val = (v) => (v === null ? null : typeof v === 'string' && v.length <= 4096 && !/[\u0000-\u001f\u007f]/.test(v) ? v : undefined); // no control characters, as the proxy
       const from = val(c.from ?? null);
       const to = val(c.to ?? null);
       if (from === undefined || to === undefined) throw Object.assign(new Error(`Bad value for ${k}.`), { status: 400 });
