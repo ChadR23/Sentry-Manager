@@ -261,3 +261,17 @@ for (const [pack, mod] of [['horizon', 'hz'], ['flux', 'flux']]) {
     assert.match(src, /await draw\(\);/);
   });
 }
+
+// Flux's Footage: the Days column and the sidebar take the room beside the
+// recordings table on a mid-size window, so the table's own width (a container
+// query) drops Cams and Files, then puts each recording on three lines: the
+// buttons are never off the right edge behind a sideways scroll.
+test('flux: the recordings table fits its own width, never scrolled sideways for the buttons', () => {
+  const css = fs.readFileSync(path.join(ROOT, 'flux', 'web', 'flux.css'), 'utf8');
+  assert.match(css, /\.recs-pane \{ container: recs \/ inline-size;/);
+  assert.match(css, /@container recs \(max-width: 940px\) \{\s*\.recs td:nth-child\(6\)/);
+  assert.match(css, /@container recs \(max-width: 780px\) \{[\s\S]*?\.recs tr \{ display: grid;[^}]*grid-template-areas: "cb thumb start dur" "cb thumb type size" "cb prot acts acts";/);
+  const src = fs.readFileSync(path.join(ROOT, 'flux', 'web', 'flux', 'pages', 'footage.js'), 'utf8');
+  // the column order the rules count on: checkbox, thumbnail, start, type, length, cams, files, size, codec, lock, buttons
+  assert.match(src, /<td class="cb">[\s\S]*?<td class="thumbc">[\s\S]*?<td class="mono nowrap">[\s\S]*?<td><span class="cat[\s\S]*?trackLength[\s\S]*?camsCell[\s\S]*?r\.fileCount[\s\S]*?bytes\(r\.bytes\)[\s\S]*?codecCell[\s\S]*?class="prot"[\s\S]*?class="r nowrap acts"/);
+});

@@ -316,6 +316,29 @@ a.kpi:hover { border-color: var(--violet); transform: translateY(-1px); }
 .mini-meter span { display: block; height: 100%; background: var(--cyan); }
 .prot { color: var(--green); }
 .acts .btn { margin-left: 2px; }
+/* the recordings table by its own width (the Days column and the sidebar beside it take the room on a
+   mid-size window, the window's width says nothing about it): without Cams and Files a little narrower,
+   then each recording on three lines (time and length, type and size, the buttons), never scrolled
+   sideways to reach the buttons */
+.recs-pane { container: recs / inline-size; min-width: 0; }
+@container recs (max-width: 940px) {
+  .recs td:nth-child(6), .recs th:nth-child(6), .recs td:nth-child(7), .recs th:nth-child(7) { display: none; }
+}
+@container recs (max-width: 780px) {
+  .recs thead { display: none; }
+  .recs, .recs tbody { display: block; }
+  .recs tr { display: grid; grid-template-columns: auto 72px minmax(0, 1fr) auto; grid-template-areas: "cb thumb start dur" "cb thumb type size" "cb prot acts acts"; align-items: center; column-gap: 4px; border-bottom: 1px solid var(--line-soft); }
+  .recs td { border: 0; padding: 2px 6px; }
+  .recs td:nth-child(1) { grid-area: cb; } .recs td:nth-child(2) { grid-area: thumb; padding-top: 8px !important; }
+  .recs td:nth-child(3) { grid-area: start; white-space: normal; padding-top: 8px; } .recs td:nth-child(4) { grid-area: type; white-space: normal; }
+  .recs td:nth-child(5) { grid-area: dur; padding-top: 8px; } .recs td:nth-child(8) { grid-area: size; }
+  .recs td:nth-child(9) { display: none; } .recs td:nth-child(10) { grid-area: prot; text-align: center; } .recs td:nth-child(11) { grid-area: acts; padding-bottom: 6px; white-space: normal; }
+  .recs td[colspan] { grid-column: 1 / -1; }
+  .recs tr.sel { background: var(--violet-soft); }
+  .recs tr.cur { background: oklch(0.26 0.03 240 / 0.6); box-shadow: inset 3px 0 0 var(--cyan); }
+  .recs tr.sel.cur { background: oklch(0.3 0.06 285 / 0.7); }
+  .recs tr td, .recs tr.sel td, .recs tr.cur td, .recs tr.cur td:first-child { background: none; box-shadow: none; }
+}
 
 /* drawer */
 .drawer { position: fixed; top: 0; right: 0; bottom: 0; z-index: 60; width: min(520px, 100vw); display: flex; flex-direction: column; background: var(--panel); border-left: 1px solid var(--line); box-shadow: -30px 0 60px -30px #000; transform: translateX(105%); transition: transform var(--t) var(--ease); padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
