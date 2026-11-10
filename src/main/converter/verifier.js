@@ -1009,8 +1009,9 @@ async function verifyOwnedSnapshot({ options, profileId, sourceBytes, outputByte
   }
 
   // Sentry USB's basic verification accepts an encode one frame off the
-  // original only when its length is within half the original's average
-  // frame (a frame lost from the end, a whole frame shorter, fails there).
+  // original only when its length is within three quarters of the original's
+  // average frame (Sentry USB test.18 and later; real clips come out about 0.6
+  // of a frame off). A frame lost from the end, a whole frame shorter, fails.
   // The same rule here, so a clip is never replaced by an encode the Pi
   // would call unconfirmed: it keeps its original instead.
   const oneOff = oneFrameOffLength(source.sourceTiming, outputTiming);
@@ -1118,15 +1119,17 @@ async function verifyOwnedSnapshot({ options, profileId, sourceBytes, outputByte
 
 /**
  * For an encode whose frame count is one off the original's: null when its
- * length is within half the original's average frame length, else what was
+ * length is within three quarters of the original's average frame length (ONE_OFF_SHARE), else what was
  * measured ({ deltaUs, toleranceUs }). Any other frame count gives null (the
  * frame count checks decide those).
  */
+// how much of an average frame the length of a one-frame-off encode may differ (Sentry USB's basic mode)
+const ONE_OFF_SHARE = 0.75;
 function oneFrameOffLength(sourceTiming, outputTiming) {
   const sourceFrames = sourceTiming?.samples?.length;
   const outputFrames = outputTiming?.samples?.length;
   if (!Number.isSafeInteger(sourceFrames) || !Number.isSafeInteger(outputFrames) || Math.abs(sourceFrames - outputFrames) !== 1) return null;
-  const toleranceUs = Math.floor(sourceTiming.durationUs / sourceFrames / 2);
+  const toleranceUs = Math.floor((sourceTiming.durationUs / sourceFrames) * ONE_OFF_SHARE);
   const deltaUs = Math.abs(sourceTiming.durationUs - outputTiming.durationUs);
   return deltaUs > toleranceUs ? { deltaUs, toleranceUs } : null;
 }
