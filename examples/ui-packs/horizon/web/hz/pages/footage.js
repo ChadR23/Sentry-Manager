@@ -11,6 +11,8 @@ const USB_TAG = { ok: 'pill grn', busy: 'pill cyan', wait: 'pill slate', bad: 'p
 // the day's archive tag: partly archived (orange), waiting for Sentry USB (the car left mid-transfer; neutral) or still arriving
 const GAP_TONE = { partial: 'org', waiting: 'slate' };
 const GAP_WORD = { partial: 'Partly archived?', waiting: 'Waiting for Sentry USB' };
+// missing minutes where the Pi took no snapshot in time
+const gapWord = (a) => (a.state === 'partial' && a.missedSnapshots?.length ? 'Pi missed snapshots' : GAP_WORD[a.state] || 'Still arriving');
 
 // "Also delete its CAN data" in a footage delete confirmation: shown only when a CAN Bridge key is
 // mapped to the car (can: the server's count, null otherwise), unticked; those logs go for good, now
@@ -143,7 +145,7 @@ export default {
           // the speed graph's index for this day
           const ix = (d.speedIndex?.indexed ? (d.speedIndex.indexed >= d.speedIndex.clips ? 'Indexed' : `Indexed ${d.speedIndex.indexed}/${d.speedIndex.clips}`) : '');
           // footage the car recorded that is not on the share yet (the Sentry USB's archive)
-          const gap = d.archive ? `<span class="album-gap"><span class="pill ${GAP_TONE[d.archive.state] || 'cyan'}" title="${h(d.archive.summary)}">${GAP_WORD[d.archive.state] || 'Still arriving'}</span>${d.archive.missingMinutes ? `<span class="tiny faint">~${d.archive.missingMinutes} min missing</span>` : ''}</span>` : '';
+          const gap = d.archive ? `<span class="album-gap"><span class="pill ${GAP_TONE[d.archive.state] || 'cyan'}" title="${h(d.archive.summary)}">${gapWord(d.archive)}</span>${d.archive.missingMinutes ? `<span class="tiny faint">~${d.archive.missingMinutes} min missing</span>` : ''}</span>` : '';
           return `<button type="button" class="album${f.day === d.day ? ' on' : ''}" data-day="${h(d.day)}" aria-pressed="${f.day === d.day}">
             <span class="album-art" aria-hidden="true">${d.thumbId ? `<img alt="" loading="lazy" src="${thumbUrl(v.id, d.thumbId)}">` : ico('film')}</span>
             <span class="album-t"><b>${h(dayName(d.day))}</b><span class="small dim">${count(d.recordings, 'track')} · ${footMinutes(d.minutes)} · ${size(d.bytes)}</span>

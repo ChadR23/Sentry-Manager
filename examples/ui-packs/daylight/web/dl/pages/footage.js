@@ -177,7 +177,7 @@ function archiveChip(d) {
   if (a.state === 'filling') return `<span class="chip chip-grey chip-gap" title="${esc(a.summary)}">Still arriving</span>`;
   // the car drove off mid-transfer: nothing is lost, the clips stay on the Pi (neutral, not a warning)
   if (a.state === 'waiting') return `<span class="chip chip-slate chip-gap" title="${esc(a.summary)}">Waiting for Sentry USB</span>`;
-  return `<span class="chip chip-warn chip-gap" title="${esc(a.summary)}">${icon('alert')}<span>Partly archived?${a.missingMinutes ? ` ~${a.missingMinutes} min missing` : ''}</span></span>`;
+  return `<span class="chip chip-warn chip-gap" title="${esc(a.summary)}">${icon('alert')}<span>${a.missedSnapshots?.length ? 'Pi missed snapshots' : 'Partly archived?'}${a.missingMinutes ? ` ~${a.missingMinutes} min missing` : ''}</span></span>`;
 }
 const ADVICE = 'Check the Sentry USB: its Logs page, its archive settings and its Wi-Fi to the NAS. Clips it recycles before copying them are lost.';
 /** The evidence in words, on the day's own page (a tag's tooltip never shows on a phone). */

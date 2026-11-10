@@ -5,6 +5,7 @@
 //
 //   sentryUsbView(status, { timeZone, h24 })  -> null (nothing to show) or
 //     { tone: 'ok'|'busy'|'wait'|'bad'|'stale', text, line, details: [[label, value]], transferring,
+//       (details include "Snapshots" and "Missed snapshots (7 days)" when the Pi lists its snapshots)
 //       record: null | { text, older, backlog: null | { done, total, etaMinutes }, canBackfill } }
 //     (record: the checksums Sentry Manager records for the Pi, status.record)
 //   sentryUsbHtml(view, { open, tagClass })  -> '<details class="usb-status …">…' or ''
@@ -17,6 +18,15 @@ const esc = (t) => String(t ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 const num = (n) => (Number.isFinite(Number(n)) ? Number(n) : 0);
 const plural = (n, word) => `${num(n).toLocaleString('en-US')} ${word}${num(n) === 1 ? '' : 's'}`;
 const fin = (n) => typeof n === 'number' && Number.isFinite(n) && n > 0;
+// whole minutes as every interface writes lengths (web/duration.js footMinutes; this file is loaded on its own)
+function minutes(min) {
+  const m = Math.max(0, Math.round(num(min)));
+  const parts = [];
+  if (Math.floor(m / 1440)) parts.push(`${Math.floor(m / 1440)} ${Math.floor(m / 1440) === 1 ? 'day' : 'days'}`);
+  if (Math.floor((m % 1440) / 60)) parts.push(`${Math.floor((m % 1440) / 60)} h`);
+  if (m % 60 || !parts.length) parts.push(`${m % 60} min`);
+  return parts.join(' ');
+}
 
 function size(b) {
   const n = num(b);
@@ -70,7 +80,7 @@ function clock(timeZone, now, locale, h24) {
     if (t.day === ref) return cTime.format(t.ms);
     return `${(t.day.slice(0, 4) === year ? cDate : cDateY).format(t.ms)}, ${cTime.format(t.ms)}`;
   };
-  return { when, clip, today };
+  return { when, clip, today, hm: (ms) => time.format(ms) };
 }
 
 const RESULT = { ok: 'ok', failed: 'failed', nothing_new: 'nothing new', in_progress: 'in progress' };
@@ -78,7 +88,7 @@ const RESULT = { ok: 'ok', failed: 'failed', nothing_new: 'nothing new', in_prog
 /** What the line and its details say, or null when there is no status file to show. */
 export function sentryUsbView(s, { timeZone, now = Date.now(), locale, h24 = false } = {}) {
   if (!s || s.present !== true) return null;
-  const { when, clip, today } = clock(timeZone, now, locale, h24);
+  const { when, clip, today, hm } = clock(timeZone, now, locale, h24);
   const a = s.archive || {};
   const ver = s.verification || null;
   const t = s.transfer || null;
@@ -158,6 +168,14 @@ export function sentryUsbView(s, { timeZone, now = Date.now(), locale, h24 = fal
     }
     add('Still queued', num(ver.stillQueued).toLocaleString('en-US'));
     if (ver.stopped) add('Stopped', ver.stopped === true ? 'yes' : ver.stopped);
+  }
+  // the snapshots it lists (newer Sentry USB): how often, and the ones it missed
+  const snaps = s.snapshots && typeof s.snapshots === 'object' && Array.isArray(s.snapshots.missed) ? s.snapshots : null;
+  if (snaps) {
+    if (fin(snaps.interval)) add('Snapshots', `every ${minutes(snaps.interval / 60)}${snaps.intervalReported === false ? ' (Sentry USB\'s default)' : ''}`);
+    const missed = snaps.missed.filter((g) => g && fin(g.from) && fin(g.to));
+    const g = missed[missed.length - 1];
+    add('Missed snapshots (7 days)', g ? `${missed.length.toLocaleString('en-US')} · latest ${when(g.from)} to ${dayKey(g.from, timeZone) === dayKey(g.to, timeZone) ? hm(g.to) : when(g.to)} (${minutes(g.minutes ?? (g.to - g.from) / 60000)})` : 'none');
   }
   const record = recordView(s.record, when);
   if (record) add('Checksums recorded', record.text);

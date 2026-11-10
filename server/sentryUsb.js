@@ -14,7 +14,20 @@
 //   - say "waiting for Sentry USB" (not missing footage) once a transfer is
 //     past its give_up_unix: the car drove off mid-transfer, the clips stay on
 //     the Pi and the rest arrives at its next archive;
-//   - show the last archive and its checksum results per car.
+//   - show the last archive and its checksum results per car;
+//   - explain missing footage by the snapshots the Pi did not take (the
+//     optional snapshot_interval_s and snapshots fields, below).
+//
+// Snapshots. The Pi copies the car's USB drive every snapshot_interval_s
+// seconds (Sentry USB's default 3480, 58 min) and archives the copies later.
+// The car keeps only about the last hour of RecentClips, so when two
+// consecutive snapshots are more than the interval plus SNAP_MARGIN_S apart,
+// the footage from the earlier one up to about CAR_KEEPS_S before the later
+// one was overwritten before any snapshot caught it. "snapshots" lists every
+// snapshot of the last 7 days (at most 1000, oldest first), including ones
+// since released: [{ "name": "snap-000011", "started_unix": 1762731609 }].
+// A gap only explains missing minutes: before a gap the car may have been
+// asleep, recording nothing.
 //
 // The share root is the folder holding RecentClips/ (the vehicle's folder, or
 // a TeslaCam/ folder in it: vehicles.studioRoot). The file is read on each
@@ -27,12 +40,21 @@ const path = require('path');
 
 const DIR = '.sentryusb';
 const FILE = 'archive-status.json';
-const MAX_BYTES = 64 * 1024;
+const MAX_BYTES = 256 * 1024; // room for 1000 snapshots
 const POLL_MS = 60_000;
 const ARRIVED_MS = 1000; // a transfer's progress is counted at most this often
 const IDLE_LOOK_MS = 5000; // otherwise the file is looked at again at most this often when asked
 const RESULTS = new Set(['in_progress', 'ok', 'failed', 'nothing_new']);
 const TS_RE = /(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})/;
+const DEFAULT_INTERVAL_S = 3480; // Sentry USB's SNAPSHOT_INTERVAL when the file does not say
+const MIN_INTERVAL_S = 60;
+const MAX_INTERVAL_S = 86400;
+const SNAP_MARGIN_S = 7 * 60; // snapshots further apart than the interval and this: one was missed
+const CAR_KEEPS_S = 60 * 60; // the car keeps about this much RecentClips before overwriting it
+const MAX_SNAPSHOTS = 1000;
+const SNAP_NAME = /^[A-Za-z0-9._-]{1,64}$/;
+const SNAP_FROM_UNIX = 1262304000; // 2010: a snapshot time before this is not one
+const SNAP_TO_UNIX = 4102444800; // 2100
 
 const int = (v) => (Number.isSafeInteger(v) && v >= 0 ? v : null);
 const text = (v, max = 200) => (typeof v === 'string' && v.length <= 1024 ? v.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, max) : null);
@@ -43,6 +65,61 @@ function relpath(v) {
   return s;
 }
 const clipName = (rel) => (rel ? rel.split('/').pop() : null);
+
+/** snapshot_interval_s when it is sane, else null. */
+function intervalOf(v) {
+  return Number.isSafeInteger(v) && v >= MIN_INTERVAL_S && v <= MAX_INTERVAL_S ? v : null;
+}
+/**
+ * The "snapshots" list: [{ name, startedUnix }] sorted by time, one per time,
+ * the newest MAX_SNAPSHOTS; entries that are not one are left out. null when
+ * the file has no list (an older Sentry USB).
+ */
+function snapshotsOf(v) {
+  if (!Array.isArray(v)) return null;
+  const byTime = new Map();
+  for (const e of v.slice(0, MAX_SNAPSHOTS * 4)) {
+    if (!e || typeof e !== 'object' || Array.isArray(e)) continue;
+    const t = e.started_unix;
+    if (!Number.isSafeInteger(t) || t < SNAP_FROM_UNIX || t > SNAP_TO_UNIX) continue;
+    let name = null;
+    if (e.name !== undefined && e.name !== null) {
+      if (typeof e.name !== 'string' || !SNAP_NAME.test(e.name)) continue;
+      name = e.name;
+    }
+    if (!byTime.has(t) || (!byTime.get(t).name && name)) byTime.set(t, { name, startedUnix: t });
+  }
+  return [...byTime.values()].sort((a, b) => a.startedUnix - b.startedUnix).slice(-MAX_SNAPSHOTS);
+}
+
+/**
+ * Missed snapshots: consecutive snapshots more than intervalS + SNAP_MARGIN_S
+ * apart, oldest first, as { fromUnix, toUnix, seconds, lostToUnix }: the
+ * footage from fromUnix to lostToUnix (the later snapshot less CAR_KEEPS_S)
+ * was overwritten on the car before a snapshot caught it, if the car recorded
+ * it at all. lostToUnix is null when nothing can have been lost (an interval
+ * set below an hour, snapshots a little late).
+ */
+function snapshotGaps(snapshots, intervalS = DEFAULT_INTERVAL_S) {
+  if (!Array.isArray(snapshots) || snapshots.length < 2) return [];
+  const every = intervalOf(intervalS) ?? DEFAULT_INTERVAL_S;
+  const out = [];
+  for (let i = 1; i < snapshots.length; i++) {
+    const from = snapshots[i - 1].startedUnix;
+    const to = snapshots[i].startedUnix;
+    if (to - from <= every + SNAP_MARGIN_S) continue;
+    const lostTo = to - CAR_KEEPS_S;
+    out.push({ fromUnix: from, toUnix: to, seconds: to - from, lostToUnix: lostTo > from ? lostTo : null });
+  }
+  return out;
+}
+
+/** The status's snapshots for archiveGap.js: { intervalS, gaps }, or null when the file lists none. */
+function snapshotInfo(status) {
+  if (!status || !Array.isArray(status.snapshots)) return null;
+  const intervalS = status.snapshotIntervalS ?? DEFAULT_INTERVAL_S;
+  return { intervalS, reported: status.snapshotIntervalS !== null, count: status.snapshots.length, gaps: snapshotGaps(status.snapshots, intervalS) };
+}
 
 /** The file's JSON as a normalized status (schema 1), or null when it is not one. */
 function parseStatus(json) {
@@ -86,7 +163,10 @@ function parseStatus(json) {
       lastClip: relpath(t.last_clip),
       expectedFinishUnix: int(t.expected_finish_unix),
       giveUpUnix: int(t.give_up_unix)
-    } : null
+    } : null,
+    // optional (newer Sentry USB): how often it snapshots, and its snapshots of the last 7 days
+    snapshotIntervalS: intervalOf(raw.snapshot_interval_s),
+    snapshots: snapshotsOf(raw.snapshots)
   };
 }
 
@@ -211,8 +291,12 @@ const ms = (unix) => (Number.isSafeInteger(unix) ? unix * 1000 : null);
  * GET /api/vehicles/:id/sentry-usb: { present: false[, error] }, or
  * { present: true, readAt, writtenAt, device, state ('idle' | 'transferring'
  * | 'waiting': past give_up_unix), archive, verification, autoDeleteEnabled,
- * transfer, stale (written more than 24 h ago), summary, detail, tone }.
- * Times in milliseconds.
+ * transfer, stale (written more than 24 h ago), summary, detail, tone,
+ * snapshots }. Times in milliseconds. snapshots is null when the file lists
+ * none, else { interval (seconds; Sentry USB's default when the file does not
+ * say), intervalReported, count, firstAt, lastAt, times: [ms…] (oldest first),
+ * missed: [{ from, to, minutes, lostTo }] (oldest first; lostTo null when
+ * nothing can have been lost) }.
  */
 function apiView(status, { nowMs = Date.now(), tz = 'UTC', readAt = null, error = null } = {}) {
   if (!status) return error ? { present: false, error } : { present: false };
@@ -243,7 +327,23 @@ function apiView(status, { nowMs = Date.now(), tz = 'UTC', readAt = null, error 
     } : null,
     stale: writtenAt === null || nowMs - writtenAt > STALE_MS,
     // the same in words (for an interface that wants them)
-    summary: words.summary, detail: words.detail, tone: words.tone
+    summary: words.summary, detail: words.detail, tone: words.tone,
+    snapshots: snapshotsView(status)
+  };
+}
+
+function snapshotsView(status) {
+  const info = snapshotInfo(status);
+  if (!info) return null;
+  const list = status.snapshots;
+  return {
+    interval: info.intervalS,
+    intervalReported: info.reported,
+    count: list.length,
+    firstAt: list.length ? ms(list[0].startedUnix) : null,
+    lastAt: list.length ? ms(list[list.length - 1].startedUnix) : null,
+    times: list.map((x) => ms(x.startedUnix)),
+    missed: info.gaps.map((g) => ({ from: ms(g.fromUnix), to: ms(g.toUnix), minutes: Math.round(g.seconds / 60), lostTo: g.lostToUnix === null ? null : ms(g.lostToUnix) }))
   };
 }
 
@@ -388,6 +488,8 @@ function createSentryUsbStatus({ vehicles, now = () => Date.now(), log = null, o
     arrived(vid) { return countArrived(vid).catch(() => null); },
     /** The last status read (no I/O), or null. */
     get(vid) { return cache.get(vid)?.status || null; },
+    /** The snapshots the last status lists (snapshotInfo), or null. */
+    snapshots(vid) { return snapshotInfo(cache.get(vid)?.status || null); },
     /** interpret() of the last status, now. */
     now(vid) { return interpret(cache.get(vid)?.status || null, now()); },
     /** GET /api/vehicles/:id/sentry-usb (apiView), from the last read. */
@@ -425,4 +527,4 @@ function createSentryUsbStatus({ vehicles, now = () => Date.now(), log = null, o
   };
 }
 
-module.exports = { createSentryUsbStatus, parseStatus, interpret, inRange, describe, apiView, stampSec, DIR, FILE };
+module.exports = { createSentryUsbStatus, parseStatus, interpret, inRange, describe, apiView, stampSec, snapshotGaps, snapshotInfo, DIR, FILE, MAX_BYTES, DEFAULT_INTERVAL_S, SNAP_MARGIN_S, CAR_KEEPS_S, MAX_SNAPSHOTS };

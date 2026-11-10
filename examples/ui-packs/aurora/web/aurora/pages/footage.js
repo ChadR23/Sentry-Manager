@@ -58,8 +58,9 @@ const CAN_TITLE = 'CAN Bridge data for this footage (car data in the Viewer)';
 
 // the Sentry USB line's tag, in this pack's chips (web/sentryUsb.js)
 const USB_TAG = { ok: 'chip green', busy: 'chip teal', wait: 'chip slate', bad: 'chip amber', stale: 'chip' };
-// the day's archive tag: still arriving, waiting for Sentry USB (the car left mid-transfer) or partly archived
-const gapLabel = (a) => (!a ? '' : a.state === 'partial' ? `Partly archived?${a.missingMinutes ? ` ~${a.missingMinutes} min missing` : ''}` : a.state === 'waiting' ? 'Waiting for Sentry USB' : 'Still arriving');
+// the day's archive tag: still arriving, waiting for Sentry USB (the car left mid-transfer) or partly
+// archived ("Pi missed snapshots" when the Pi took no snapshot in time for the missing minutes)
+const gapLabel = (a) => (!a ? '' : a.state === 'partial' ? `${a.missedSnapshots?.length ? 'Pi missed snapshots' : 'Partly archived?'}${a.missingMinutes ? ` ~${a.missingMinutes} min missing` : ''}` : a.state === 'waiting' ? 'Waiting for Sentry USB' : 'Still arriving');
 const GAP_TONE = { partial: 'amber', waiting: 'slate' };
 
 function frame(v, d, on) {

@@ -44,6 +44,11 @@ A day whose clips were still being sent when the car drove off gets a grey-blue
 **Waiting for Sentry USB** tag instead of **Partly archived?**. Nothing is
 lost: the clips stay on the Pi, and the transfer carries on at the next archive.
 
+A day whose missing footage is explained by snapshots the Pi did not take
+gets an amber **Pi missed snapshots** tag instead of **Partly archived?**, and
+the details list **Snapshots** (`every 58 min`) and **Missed snapshots (7
+days)** (how many, and the latest, or `none`). See "Missed snapshots" below.
+
 ## Files on the share that belong to Sentry USB
 
 Sentry Six Manager never indexes, counts, converts or flags as missing:
@@ -186,7 +191,66 @@ Manager reads it to:
   warning;
 - **show the line above,** from `archive`, `verification`,
   `auto_delete_enabled` and `transfer`. A file older than 24 hours is shown as
-  "not heard from since".
+  "not heard from since";
+- **explain missing footage by missed snapshots,** from the optional
+  `snapshot_interval_s` and `snapshots` (below).
+
+The file may be up to 256 KiB; a larger one is not read.
+
+### Missed snapshots
+
+The Pi snapshots the car's USB drive every `SNAPSHOT_INTERVAL` (3480 s, 58
+min, by default) and archives the snapshots later. The car keeps only about
+the last hour of RecentClips, so when two snapshots in a row are much further
+apart than that, the footage in between was overwritten on the car before any
+snapshot caught it. Two optional fields (still schema 1; a file without them
+reads as before) let Sentry Six Manager say so:
+
+```json
+"snapshot_interval_s": 3480,
+"snapshots": [
+  { "name": "snap-000010", "started_unix": 1794217860 },
+  { "name": "snap-000011", "started_unix": 1794228300 }
+]
+```
+
+- `snapshot_interval_s`: the configured interval in seconds, an integer from
+  60 to 86400 (anything else is ignored, and 3480 is assumed).
+- `snapshots`: every snapshot the Pi took in the last 7 days, oldest first,
+  at most 1000, **including snapshots since released or deleted**: a
+  snapshot left out looks like a missed one. `started_unix` (an integer, Unix
+  seconds) is when the snapshot started; `name` is optional, at most 64
+  characters of `A-Z a-z 0-9 . _ -`. Entries that are not like that are left
+  out; the list is sorted, one entry per time, and only the newest 1000 kept.
+
+How Sentry Six Manager uses them:
+
+- Two consecutive snapshots more than the interval plus 7 minutes apart are a
+  **missed snapshot** gap. Its lost window is from the earlier snapshot's
+  start to the later one's start less 60 minutes (what the car keeps); a gap
+  of an hour or less loses nothing.
+- Missing minutes the archive check found (CAN Bridge shows the car driving
+  or in Sentry Mode with no footage, a drive cut off) that fall in a lost
+  window are explained by it: the day's tag reads **Pi missed snapshots**,
+  and its text adds, for example, "Sentry USB took no snapshot between
+  9:56 AM and 12:50 PM (2 h 54 min; it should take one every 58 min), and the
+  car keeps only about an hour, so the footage from 9:56 to about 11:50 AM was
+  overwritten before it was copied" (at most three gaps named, then "and N
+  more times"). The missing-minute count is unchanged.
+- A gap alone is not called missing footage: before the first snapshot after
+  a pause the car may have been asleep and recorded nothing. Only minutes
+  that other evidence shows missing are explained by it.
+- The Sentry USB details show the interval and the gaps of the last 7 days.
+
+The API gives them (in milliseconds) as `snapshots` in
+`GET /api/vehicles/:id/sentry-usb` (`null` when the file has no list):
+`{ interval, intervalReported, count, firstAt, lastAt, times, missed: [{ from,
+to, minutes, lostTo }] }` (`lostTo` is `null` for a gap that loses nothing).
+A day in `GET /api/vehicles/:id/days` whose missing minutes are explained has
+`archive.missedSnapshots`: `[{ from, to, lostTo, minutes, missingMinutes }]`
+(the car's clock, `YYYY-MM-DD_HH-MM-SS`; `minutes` the length of the gap,
+`missingMinutes` the day's missing minutes in it) and
+`archive.missedSnapshotMinutes`; both are `null` / `0` otherwise.
 
 The server gives the file, read and in milliseconds, at
 `GET /api/vehicles/:id/sentry-usb` (`{ "present": false }` when there is none),

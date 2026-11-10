@@ -669,7 +669,8 @@ test('server: GET /api/vehicles/:id/sentry-usb and /days carry the status; misma
         lastClip: 'RecentClips/2026-11-08/2026-11-08_12-59-00-front.mp4' },
       verification: { enabled: true, ran: true, matched: 118, converted: 2, resending: 0, noPiCopy: 0, stillQueued: 0, stopped: null },
       autoDeleteEnabled: false, transfer: null, stale: true,
-      summary: api.summary, detail: 'Checksums: 118 matched, 2 converted here.', tone: 'ok'
+      summary: api.summary, detail: 'Checksums: 118 matched, 2 converted here.', tone: 'ok',
+      snapshots: null // (an older Sentry USB lists none)
     });
     // a file that is not a status file: present false, with why
     fs.writeFileSync(path.join(T, '.sentryusb', 'archive-status.json'), '{ nope');

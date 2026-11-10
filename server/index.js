@@ -2167,7 +2167,10 @@ async function main() {
       const n = sentryUsb.now(vid);
       if (!n.transferring || !n.range) return null;
       return { transferring: true, overdue: n.overdue, firstS: clipStampSec(n.range.first), lastS: clipStampSec(n.range.last) };
-    }
+    },
+    // the snapshots Sentry USB lists (sentryUsb.js): missing minutes it did not catch in time
+    snapshotsFor: (vid) => sentryUsb.snapshots(vid),
+    clock24: () => Boolean(db.get('appearance', {}).clock24)
   });
   sentryUsb.start();
   // driveData is not started: the Drives tab is hidden, so drive-data.json is read

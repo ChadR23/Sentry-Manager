@@ -302,6 +302,15 @@ is cleared: the day is no longer checked. Turn it off in Settings → Health →
 Notification rules ("Footage the car recorded that has not reached the
 share").
 
+When the share has a Sentry USB that lists its snapshots (see
+[Sentry USB](sentry-usb.md#missed-snapshots)), missing minutes that fall
+where the Pi took no snapshot for longer than the car keeps its footage get
+the tag **Pi missed snapshots** instead, and the day's text says which
+snapshots were missed, for example "Sentry USB took no snapshot between
+9:56 AM and 12:50 PM (2 h 54 min; it should take one every 58 min), and the
+car keeps only about an hour, so the footage from 9:56 to about 11:50 AM was
+overwritten before it was copied." The minutes still count as missing.
+
 A day whose clips are still reaching the share hours after they were recorded
 also gets the grey **Still arriving** tag (no notification): the archive is
 behind, but working. This needs a share that reports when a file arrived (its

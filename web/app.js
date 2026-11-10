@@ -1371,7 +1371,8 @@
   function dayArchiveChip(d, open) {
     const a = d.archive;
     if (!a) return '';
-    const label = a.state === 'filling' ? 'Still arriving' : a.state === 'waiting' ? 'Waiting for Sentry USB' : `Partly archived?${a.missingMinutes ? ` ~${a.missingMinutes} min missing` : ''}`;
+    // (missing minutes where the Pi took no snapshot in time: "Pi missed snapshots")
+    const label = a.state === 'filling' ? 'Still arriving' : a.state === 'waiting' ? 'Waiting for Sentry USB' : `${a.missedSnapshots?.length ? 'Pi missed snapshots' : 'Partly archived?'}${a.missingMinutes ? ` ~${a.missingMinutes} min missing` : ''}`;
     const tone = a.state === 'partial' ? ' amber' : a.state === 'waiting' ? ' wait' : '';
     return `<button type="button" class="chip gap${tone}" data-gap aria-expanded="${open}" aria-controls="gap-${esc(d.day)}" title="${esc(a.summary)}"><span class="cdot"></span>${esc(label)}</button>`;
   }

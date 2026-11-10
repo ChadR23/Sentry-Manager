@@ -11,7 +11,8 @@ const placeText = (r) => (r.place ? `at ${r.place}` : r.from && r.to ? `${r.from
 const USB_TAG = { ok: 'chip green', busy: 'chip cyan', wait: 'chip slate', bad: 'chip amber', stale: 'chip' };
 // the day's archive tag: partly archived (amber), waiting for Sentry USB (the car left mid-transfer; neutral) or still arriving
 const GAP_TONE = { partial: ' amber', waiting: ' slate' };
-const gapLabel = (a) => (a.state === 'partial' ? `Partly archived?${a.missingMinutes ? ` ~${a.missingMinutes} min missing` : ''}` : a.state === 'waiting' ? 'Waiting for Sentry USB' : 'Still arriving');
+// ("Pi missed snapshots": the missing minutes are where the Pi took no snapshot in time)
+const gapLabel = (a) => (a.state === 'partial' ? `${a.missedSnapshots?.length ? 'Pi missed snapshots' : 'Partly archived?'}${a.missingMinutes ? ` ~${a.missingMinutes} min missing` : ''}` : a.state === 'waiting' ? 'Waiting for Sentry USB' : 'Still arriving');
 
 // "Also delete its CAN data" in a footage delete confirmation: shown only when a CAN Bridge key is
 // mapped to the car (can: the server's count, null otherwise), unticked; those logs go for good, now

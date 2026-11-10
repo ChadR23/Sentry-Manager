@@ -46,6 +46,13 @@
 // day's clip count went up, or the evidence has been gone for hours while every
 // check it rested on ran); one the owner dismissed comes back only when the gap
 // grows a good deal. A day that leaves the window has its notification resolved.
+//
+// Missed snapshots. A Sentry USB lists its snapshots of the car's drive in its
+// status file (sentryUsb.js). Missing minutes that fall where the Pi took no
+// snapshot for longer than the car keeps its footage (a lost window: from the
+// earlier snapshot to about an hour before the later one) are explained by
+// that: the summary says so and the day carries the gaps (missedSnapshots),
+// for a "Pi missed snapshots" tag. The minutes still count as missing.
 
 const fsp = require('fs/promises');
 const path = require('path');
@@ -72,6 +79,7 @@ const SHIFTS = Array.from({ length: 27 }, (_, i) => i - 12).filter((k) => k !== 
 const TS = /(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-(\d{2})/;
 const MINUTE_FILE = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})\.json\.gz$/;
 const KEY = /^[A-Za-z0-9-]{1,64}$/;
+const MAX_GAPS_SHOWN = 3; // missed-snapshot gaps named in a summary (the rest as "and N more")
 
 /** A clip name's wall-clock time as seconds, treating it as UTC (only differences matter). */
 function stampSec(name) {
@@ -92,6 +100,39 @@ const dayOfSec = (s) => {
   return d;
 };
 const hhmm = (k) => k.slice(11, 16).replace('-', ':');
+/** Whole minutes as the app writes lengths (web/duration.js footMinutes): "2 h 54 min", "1 day". */
+function footMinutes(min) {
+  const m = Math.max(0, Math.round(Number(min) || 0));
+  const days = Math.floor(m / 1440);
+  const hours = Math.floor((m % 1440) / 60);
+  const mins = m % 60;
+  const parts = [];
+  if (days) parts.push(`${days} ${days === 1 ? 'day' : 'days'}`);
+  if (hours) parts.push(`${hours} h`);
+  if (mins || !parts.length) parts.push(`${mins} min`);
+  return parts.join(' ');
+}
+/** A key's time of day: "9:56 AM" (or "09:56" on the 24-hour clock), with { time, ampm } apart. */
+function clockParts(k, h24) {
+  const h = Number(k.slice(11, 13));
+  const mm = k.slice(14, 16);
+  if (h24) return { time: `${k.slice(11, 13)}:${mm}`, ampm: '' };
+  return { time: `${h % 12 || 12}:${mm}`, ampm: h < 12 ? 'AM' : 'PM' };
+}
+const shortDay = (day) => {
+  try { return new Date(`${day}T12:00:00Z`).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' }); } catch { return day; }
+};
+/** Two times of the car's clock, "1:51 and 4:45 AM", "9:56 AM and 12:50 PM", with the date of one not on `day`. */
+function clockPair(a, b, { day, h24, joiner }) {
+  const pa = clockParts(a, h24);
+  const pb = clockParts(b, h24);
+  const da = a.slice(0, 10) !== day ? `${shortDay(a.slice(0, 10))} ` : '';
+  const db = b.slice(0, 10) !== day ? `${shortDay(b.slice(0, 10))} ` : '';
+  const sameHalf = !da && !db && pa.ampm === pb.ampm;
+  const left = `${da}${pa.time}${pa.ampm && !sameHalf ? ` ${pa.ampm}` : ''}`;
+  const right = `${db}${pb.time}${pb.ampm ? ` ${pb.ampm}` : ''}`;
+  return `${left}${joiner}${right}`;
+}
 
 const formats = new Map(); // time zone -> Intl.DateTimeFormat (or null: not a zone)
 /** The moment `ms` on a clock in `tz`, as seconds (stampSec's scale). */
@@ -181,9 +222,13 @@ const runList = (minutes) => runsOf(minutes).map(([a, b]) => ({ from: keyOfSec(a
  *                the first and last clip still arriving). Minutes in that range
  *                are still arriving, never missing; past its give-up time
  *                (overdue) every minute from firstS on waits for Sentry USB.
+ *   snapshots    Sentry USB's snapshots (sentryUsb.js snapshotInfo): { intervalS, gaps:
+ *                [{ fromUnix, toUnix, seconds, lostToUnix }] }, or null. Missing minutes
+ *                in a gap's lost window are explained by it (missedSnapshots).
+ *   clock24      times of day in the summary's snapshot sentence on the 24-hour clock
  * { days: { day: finding }, stalled, signals }
  */
-function analyze({ files, nowMs, tz = 'UTC', encoded = new Set(), speeds = new Map(), canDriving = null, canSentry = [], canMinutes = null, receivedMs = null, lastRecentS = null, windowDays = WINDOW_DAYS, sentryUsb = null }) {
+function analyze({ files, nowMs, tz = 'UTC', encoded = new Set(), speeds = new Map(), canDriving = null, canSentry = [], canMinutes = null, receivedMs = null, lastRecentS = null, windowDays = WINDOW_DAYS, sentryUsb = null, snapshots = null, clock24 = false }) {
   const now = wallSec(nowMs, tz);
   const offsets = new Map();
   const utc = (s) => utcOfWall(s, tz, offsets);
@@ -382,6 +427,12 @@ function analyze({ files, nowMs, tz = 'UTC', encoded = new Set(), speeds = new M
     const to = pi.overdue ? now : Math.min(now, piLast + MIN);
     for (let s = Math.max(pi.firstS, firstDaySec); s <= to; s = (Math.floor(s / 86400) + 1) * 86400) dayOf(dayOfSec(s)).piRange = true;
   }
+  // the lost windows of missed snapshots, on the car's clock (stampSec's scale)
+  const lostWindows = [];
+  for (const g of Array.isArray(snapshots?.gaps) ? snapshots.gaps : []) {
+    if (!Number.isFinite(g?.fromUnix) || !Number.isFinite(g?.toUnix) || !Number.isFinite(g?.lostToUnix) || g.lostToUnix <= g.fromUnix) continue;
+    lostWindows.push({ g, from: wallSec(g.fromUnix * 1000, tz), to: wallSec(g.toUnix * 1000, tz), lostTo: wallSec(g.lostToUnix * 1000, tz) });
+  }
   const out = {};
   for (const d of Object.values(days)) {
     const missingMinutes = d.missing.size;
@@ -411,7 +462,20 @@ function analyze({ files, nowMs, tz = 'UTC', encoded = new Set(), speeds = new M
       partial: d.partial.map((x) => ({ at: keyOfSec(x.at), cameras: x.has, of: x.of, lacking: x.lacking })),
       sources: [...(d.can.length ? ['can'] : []), ...(d.sentry.length ? ['can'] : []), ...(d.cutoffs.length ? ['speed'] : []), ...(partialMinutes ? ['partial'] : [])].filter((x, i, a) => a.indexOf(x) === i)
     };
-    finding.summary = summarize(finding, { receivedMs: received, nowMs });
+    // missing minutes where the Pi took no snapshot for longer than the car keeps its footage
+    const explained = new Map(); // window -> its missing minutes
+    if (lostWindows.length) {
+      for (const m of d.missing) {
+        const w = lostWindows.find((x) => m + MIN > x.from && m < x.lostTo);
+        if (w) explained.set(w, (explained.get(w) || 0) + 1);
+      }
+    }
+    finding.missedSnapshots = [...explained].sort((a, b) => a[0].from - b[0].from).map(([w, n]) => ({
+      from: keyOfSec(w.from), to: keyOfSec(w.to), lostTo: keyOfSec(w.lostTo), minutes: Math.round(w.g.seconds / MIN), missingMinutes: n
+    }));
+    finding.missedSnapshotMinutes = [...explained.values()].reduce((a, b) => a + b, 0);
+    finding.snapshotIntervalS = finding.missedSnapshots.length ? snapshots.intervalS ?? null : null;
+    finding.summary = summarize(finding, { receivedMs: received, nowMs, clock24 });
     finding.advice = ADVICE;
     out[d.day] = finding;
   }
@@ -437,8 +501,30 @@ function analyze({ files, nowMs, tz = 'UTC', encoded = new Set(), speeds = new M
   };
 }
 
+/**
+ * The missed snapshots of a day in words: "Sentry USB took no snapshot between
+ * 9:56 AM and 12:50 PM (2 h 54 min; it should take one every 58 min), and the
+ * car keeps only about an hour, so the footage from 9:56 to about 11:50 AM was
+ * overwritten before it was copied", or '' without any.
+ */
+function snapshotSentence(f, { clock24 = false } = {}) {
+  const gaps = f.missedSnapshots || [];
+  if (!gaps.length) return '';
+  const shown = gaps.slice(0, MAX_GAPS_SHOWN);
+  const extra = gaps.length - shown.length;
+  const join = (items) => (items.length > 1 ? `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}` : items[0]);
+  const every = f.snapshotIntervalS ? `it should take one every ${footMinutes(f.snapshotIntervalS / 60)}` : '';
+  const between = shown.map((g, i) => `${i ? 'between ' : ''}${clockPair(g.from, g.to, { day: f.day, h24: clock24, joiner: ' and ' })} (${footMinutes(g.minutes)}${shown.length === 1 && every ? `; ${every}` : ''})`);
+  const more = extra > 0 ? `, and ${extra} more ${extra === 1 ? 'time' : 'times'}` : '';
+  const lost = join(shown.map((g) => clockPair(g.from, g.lostTo, { day: f.day, h24: clock24, joiner: ' to about ' })));
+  const head = `Sentry USB took no snapshot between ${extra > 0 || shown.length === 1 ? between.join(', ') : join(between)}${more}`;
+  const rule = shown.length === 1 && every ? '' : every ? `; ${every}` : '';
+  const share = f.missedSnapshotMinutes && f.missedSnapshotMinutes < f.missingMinutes ? ` (${f.missedSnapshotMinutes} of the ${f.missingMinutes} minutes)` : '';
+  return `${head}${rule}, and the car keeps only about an hour, so the footage from ${lost}${extra > 0 ? ' (and more)' : ''} was overwritten before it was copied${share}`;
+}
+
 /** The evidence in plain words (for the tag and the notification). */
-function summarize(f, { receivedMs = 0, nowMs = Date.now() } = {}) {
+function summarize(f, { receivedMs = 0, nowMs = Date.now(), clock24 = false } = {}) {
   const bits = [];
   const list = (runs) => {
     const shown = runs.slice(0, 3).map((r) => (r.minutes > 1 ? `${hhmm(r.from)}–${hhmm(r.to)}` : hhmm(r.from)));
@@ -472,7 +558,8 @@ function summarize(f, { receivedMs = 0, nowMs = Date.now() } = {}) {
   const text = bits.join('; ');
   // (lower case after the colon, but not an acronym such as CAN)
   const first = /^[A-Z][a-z]/.test(text) && !text.startsWith('Sentry USB') ? text.charAt(0).toLowerCase() : text.charAt(0);
-  return `${head}${first}${text.slice(1)}.`;
+  const snap = snapshotSentence(f, { clock24 });
+  return `${head}${first}${text.slice(1)}.${snap ? ` ${snap}.` : ''}`;
 }
 
 const ADVICE = 'Check the Sentry USB (or whatever copies the car\'s USB drive to the share): its Logs page, its archive settings and its Wi-Fi to the NAS. Clips it recycles before copying them are lost.';
@@ -498,7 +585,7 @@ const scoreOf = (f) => f.missingMinutes + f.partialMinutes;
  *                     mapped to it explicitly (an unmapped key of the only car is used
  *                     once its CAN data has matched the car's footage)
  */
-function createArchiveGap({ inventory, vehicles, notes, db, speedIndex = null, canKeysFor = async () => [], canKeyMapped = () => true, canDir = null, log = null, now = () => Date.now(), soonMs = 30_000, sentryUsbFor = () => null }) {
+function createArchiveGap({ inventory, vehicles, notes, db, speedIndex = null, canKeysFor = async () => [], canKeyMapped = () => true, canDir = null, log = null, now = () => Date.now(), soonMs = 30_000, sentryUsbFor = () => null, snapshotsFor = () => null, clock24 = () => false }) {
   const results = new Map(); // vid -> analysis + checkedAt
   const running = new Map(); // vid -> { p, next }
   const generation = new Map(); // vid -> bumped by forget()
@@ -686,7 +773,9 @@ function createArchiveGap({ inventory, vehicles, notes, db, speedIndex = null, c
     const res = analyze({
       files: entry.files, nowMs, tz, encoded: encodedSet(vid), speeds,
       canDriving: can?.used ? can.driving : null, canSentry: can?.sentry || [], canMinutes: can?.used ? can.minutes : null, receivedMs, lastRecentS: st.lastRecentS,
-      sentryUsb: (() => { try { return sentryUsbFor(vid); } catch { return null; } })()
+      sentryUsb: (() => { try { return sentryUsbFor(vid); } catch { return null; } })(),
+      snapshots: (() => { try { return snapshotsFor(vid); } catch { return null; } })(),
+      clock24: (() => { try { return Boolean(clock24()); } catch { return false; } })()
     });
     // the car was removed while this ran: nothing of it is kept or raised
     if ((generation.get(vid) || 0) !== gen || !vehicles.get(vid)) return null;
@@ -723,7 +812,7 @@ function createArchiveGap({ inventory, vehicles, notes, db, speedIndex = null, c
     /** { day: { state, missingMinutes, partialMinutes, summary, advice } } for the day cards (no check started). */
     forDays(vid) {
       const out = {};
-      for (const [d, f] of Object.entries(results.get(vid)?.days || {})) out[d] = { state: f.state, missingMinutes: f.missingMinutes, partialMinutes: f.partialMinutes, lateClips: f.lateClips, maxLateHours: f.maxLateHours, sentryUsb: f.sentryUsb || null, summary: f.summary, advice: f.state === 'partial' ? ADVICE : null };
+      for (const [d, f] of Object.entries(results.get(vid)?.days || {})) out[d] = { state: f.state, missingMinutes: f.missingMinutes, partialMinutes: f.partialMinutes, lateClips: f.lateClips, maxLateHours: f.maxLateHours, sentryUsb: f.sentryUsb || null, missedSnapshots: f.missedSnapshots?.length ? f.missedSnapshots : null, missedSnapshotMinutes: f.missedSnapshotMinutes || 0, summary: f.summary, advice: f.state === 'partial' ? ADVICE : null };
       return out;
     },
     /** A CAN log was indexed: forget what was read of its minutes. */
@@ -747,4 +836,4 @@ function createArchiveGap({ inventory, vehicles, notes, db, speedIndex = null, c
   };
 }
 
-module.exports = { createArchiveGap, analyze, summarize, noteFor, classify, stampSec, covered, wallSec, utcOfWall, ADVICE };
+module.exports = { createArchiveGap, analyze, summarize, snapshotSentence, footMinutes, noteFor, classify, stampSec, covered, wallSec, utcOfWall, ADVICE };
