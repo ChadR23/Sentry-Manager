@@ -99,3 +99,13 @@ test('Viewer: the floating car-data boxes keep clear of the playback controls in
   assert.match(sd, /\.sentry-sd\.float\{position:absolute;z-index:var\(--sd-float-z,2147482000\)/);
   assert.match(read('examples/ui-packs/aurora/web/aurora/app.css'), /body > \.sentry-sd\.float, body > \.sentry-sd\.sd-listpanel\.float \{ z-index: 25; \}/);
 });
+
+test('Touch screens: the Viewer\'s small shared buttons are at least 40 px to tap', () => {
+  const sd = read('web/statDash.js');
+  const coarse = sd.slice(sd.indexOf('@media (pointer:coarse){'), sd.indexOf('@media (max-width:640px){'));
+  assert.match(coarse, /\.sentry-sd button\.sd-btn\.sd-size\{width:40px;height:40px/, 'the resize grips');
+  assert.match(coarse, /\.sentry-sd \.sd-list-ch\{min-height:40px/, '"Changing only"');
+  assert.match(coarse, /\.sentry-sd\.sd-listpanel\.below,\.sentry-sd\.sd-listpanel\.float\{padding-bottom:44px\}/, 'room for the List\'s grip');
+  assert.match(read('web/layouts.js'), /@media \(pointer:coarse\)\{\.sentry-ls button\{min-width:40px;height:40px/, 'layout slots 1 2 3');
+  assert.match(read('web/viewerExtras.js'), /@media \(pointer:coarse\)\{\.sentry-x-btn\{min-width:40px;min-height:40px/, 'Pop out');
+});

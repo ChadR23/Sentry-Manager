@@ -21,6 +21,8 @@ const CSS = `
 .sentry-ls button:focus-visible{outline:2px solid currentColor;outline-offset:2px}
 .sentry-ls .ls-msg{font-size:12px;opacity:.85;min-width:0}
 @media (max-width:700px){.sentry-ls>span:first-child{display:none}}
+/* touch screens: slots at least 40 px to tap */
+@media (pointer:coarse){.sentry-ls button{min-width:40px;height:40px;font-size:15px;line-height:38px}}
 `;
 const SLOTS = 3;
 

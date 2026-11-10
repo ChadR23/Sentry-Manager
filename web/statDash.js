@@ -176,6 +176,15 @@ const STYLE = `
 .sentry-sd .sd-list-h{border-bottom-color:var(--sd-line);background:#1d2026}
 .sentry-sd .sd-list-h .sd-list-l{font:800 12px/1 system-ui,sans-serif;color:var(--sd-amber);letter-spacing:.04em;text-transform:uppercase}
 .sentry-sd .sd-list-empty{padding:12px;color:var(--sd-dim);font-size:14px}
+/* touch screens: the resize grips and "Changing only" at least 40 px to tap (room kept for the grips) */
+@media (pointer:coarse){
+  .sentry-sd button.sd-btn.sd-size{width:40px;height:40px;font-size:17px}
+  .sentry-sd:not(.sd-listpanel):not(.over) > .sd-tools{padding-right:44px}
+  .sentry-sd.over:not(.sd-listpanel) > .sd-row{padding-right:44px}
+  .sentry-sd.sd-listpanel.below,.sentry-sd.sd-listpanel.float{padding-bottom:44px}
+  .sentry-sd .sd-list-ch{min-height:40px;padding:0 6px 0 2px;gap:8px}
+  .sentry-sd .sd-list-ch input{width:22px;height:22px;margin:0;flex:none}
+}
 @media (max-width:640px){
   .sentry-sd .sd-small{flex-basis:88px}
   .sentry-sd .sd-v{font-size:20px}
@@ -1395,7 +1404,8 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
         for (const hit of document.elementsFromPoint(Math.round(W * x), H - 3)) {
           if (ours(hit)) continue;
           const f = fixedOf(hit);
-          if (f && !ours(f)) found.add(f);
+          // (not a pile of notifications: they come and go)
+          if (f && !ours(f) && !f.closest?.('[aria-live], [role="status"], [role="alert"]')) found.add(f);
         }
       }
     }
