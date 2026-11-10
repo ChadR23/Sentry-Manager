@@ -679,6 +679,13 @@ body.theater-on .dash, body.theater-on .tuner { visibility: hidden; }
 }
 .vw { grid-template-rows: auto 1fr; }
 .vw-bar { align-self: start; }
+/* the car data docked under the video (web/statDash.js puts the bar and the List right after the
+   cameras): rows of their own under the controls, beside the side column, not under all of it */
+.vw:has(> .sentry-sd.below) { grid-template-areas: "stage side" "bar side" "sd side" "sdl side" ". side"; grid-template-rows: auto auto auto auto 1fr; }
+.vw > .sentry-sd.below { grid-area: sd; }
+.vw > .sentry-sd.sd-listpanel.below { grid-area: sdl; }
+@media (max-width: 1279px) { .vw:has(> .sentry-sd.below) { grid-template-areas: "stage" "bar" "sd" "sdl" "side"; grid-template-rows: none; } }
+.vw.theater:has(> .sentry-sd.below), .vw:fullscreen:has(> .sentry-sd.below) { grid-template-areas: "stage" "bar" "sd" "sdl"; grid-template-rows: none; }
 .vw-side .fld { margin-top: 10px; }
 .vw-map {
   height: 260px; margin-top: 10px; border-radius: var(--r); border: 1px solid var(--line);

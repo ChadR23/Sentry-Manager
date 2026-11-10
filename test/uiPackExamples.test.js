@@ -282,3 +282,17 @@ test('flux: the command palette fits a short window', () => {
   const css = fs.readFileSync(path.join(ROOT, 'flux', 'web', 'flux.css'), 'utf8');
   assert.match(css, /\.palette \{[^}]*max-height: min\(560px, calc\(88dvh - 16px\)\);[^}]*margin: 12vh auto auto;/);
 });
+
+// Horizon's Viewer: the car data docked under the video (web/statDash.js puts
+// it right after the cameras, inside the page's grid) gets rows of its own
+// under the controls, never an extra row below the whole side column.
+test('horizon: the docked car data sits right under the Viewer controls', () => {
+  const css = fs.readFileSync(path.join(ROOT, 'horizon', 'web', 'hz', 'app.css'), 'utf8');
+  assert.match(css, /\.vw:has\(> \.sentry-sd\.below\) \{ grid-template-areas: "stage side" "bar side" "sd side" "sdl side" "\. side";/);
+  assert.match(css, /\.vw > \.sentry-sd\.below \{ grid-area: sd; \}/);
+  assert.match(css, /\.vw > \.sentry-sd\.sd-listpanel\.below \{ grid-area: sdl; \}/);
+  assert.match(css, /@media \(max-width: 1279px\) \{ \.vw:has\(> \.sentry-sd\.below\) \{ grid-template-areas: "stage" "bar" "sd" "sdl" "side";/);
+  assert.match(css, /\.vw\.theater:has\(> \.sentry-sd\.below\), \.vw:fullscreen:has\(> \.sentry-sd\.below\) \{ grid-template-areas: "stage" "bar" "sd" "sdl";/);
+  const sd = fs.readFileSync(path.join(__dirname, '..', 'web', 'statDash.js'), 'utf8');
+  assert.match(sd, /stage\.after\(el\)/, 'the docked bar still goes right after the cameras');
+});
