@@ -657,7 +657,7 @@ body.theater-on .dash, body.theater-on .tuner { visibility: hidden; }
 @media (max-width: 700px) and (orientation: portrait) {
   .vw { gap: 10px; }
   .vw-stage { grid-template-columns: repeat(5, minmax(0, 1fr)); grid-template-rows: auto auto; padding: 3px; gap: 3px; }
-  .cam { grid-column: auto; grid-row: 2; aspect-ratio: 4 / 3; min-height: 48px; }
+  .cam { grid-column: auto; grid-row: 2; aspect-ratio: 4 / 3; min-height: 0; } /* (a minimum height would widen a tile past its fifth of a 320 px screen) */
   .cam.main { grid-column: 1 / -1; grid-row: 1; max-height: none; min-height: 0; }
   .cam figcaption { left: 2px; top: 2px; padding: 0 3px; }
   .cam figcaption span { display: none; }
