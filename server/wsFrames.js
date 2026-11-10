@@ -17,8 +17,9 @@ const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 // a message in more parts than this is refused (1009): empty continuation
 // frames cost a few bytes each to send, and would otherwise pile up unbounded
 const MAX_PARTS = 1024;
-// what may wait unsent for a peer that does not read (pongs to a ping flood):
-// over this the connection is dropped
+// what a server may leave unsent to a peer that does not read (pongs to a
+// ping flood), on top of 16 of its largest messages: over this the
+// connection is dropped (4 MiB before the link's handshake, about 36 MiB after)
 const MAX_UNSENT = 4 * 1024 * 1024;
 const acceptKey = (key) => crypto.createHash('sha1').update(`${key}${GUID}`).digest('base64');
 
@@ -175,7 +176,7 @@ class WsConnection extends EventEmitter {
 
   write(opcode, payload) {
     if (this.closed || this.socket.destroyed) return false;
-    if ((this.socket.writableLength || 0) > MAX_UNSENT) { this.terminate(); return false; }
+    if (this.role === 'server' && (this.socket.writableLength || 0) > MAX_UNSENT + 16 * this.maxMessage) { this.terminate(); return false; }
     try {
       return this.socket.write(encodeFrame(opcode, payload, this.role === 'client'));
     } catch {
