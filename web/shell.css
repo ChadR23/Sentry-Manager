@@ -55,6 +55,9 @@ p { margin: 0; }
 .side-card {
   height: 100%; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--border);
   border-radius: 22px; padding: 22px 12px 14px;
+  /* a short window (a laptop with the browser's bars): the sections scroll
+     inside the card instead of running past its bottom out of reach */
+  overflow-y: auto;
 }
 .brand { display: flex; align-items: center; gap: 12px; padding: 0 12px 24px; }
 .brand svg { width: 30px; height: 30px; color: var(--accent); stroke-width: 2; }
@@ -415,6 +418,10 @@ dialog p { color: var(--text-2); margin-bottom: 8px; }
 
 html.reduce-effects *, html.reduce-effects *::before { transition: none !important; animation: none !important; -webkit-backdrop-filter: none !important; backdrop-filter: none !important; box-shadow: none !important; }
 
+@media (max-height: 720px) and (min-width: 761px) {
+  .brand { padding-bottom: 14px; }
+  .nav a, .collapse { padding-top: 8px; padding-bottom: 8px; }
+}
 @media (max-width: 1100px) {
   .rec-top { grid-template-columns: 26px 110px minmax(0, 1fr); }
   .rec-actions { grid-column: 2 / -1; justify-content: flex-start; }
