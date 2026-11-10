@@ -178,6 +178,7 @@
 #${ID} span{flex:1 1 240px;min-width:0;overflow-wrap:anywhere}
 #${ID} a,#${ID} button{all:unset;cursor:pointer;font-weight:700;padding:4px 10px;border-radius:6px;border:1px solid rgba(255,255,255,.6)}
 #${ID} a:focus-visible,#${ID} button:focus-visible{outline:2px solid #fff;outline-offset:2px}
+@media (pointer:coarse){#${ID} a,#${ID} button{padding:8px 12px}}
 @media print{#${ID}{display:none}}`;
   let bar = null;
   const key = (problems) => `sentry-health-closed:${problems.map((p) => p.label).join('|')}`;

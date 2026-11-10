@@ -51,3 +51,12 @@ test('Footage > a recording\'s files: the event line wraps, and a phone shows ea
   const phone = media('(max-width: 760px)');
   assert.match(phone, /\.files li:not\(\.files-head\) > span:first-child \{ grid-column: 1 \/ -1; \}/);
 });
+
+test('The startup check bar names the vehicle a share check is for, and has finger-sized buttons on touch screens', () => {
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server/index.js'), 'utf8');
+  const route = server.slice(server.indexOf("r.add('GET', '/api/health/banner'"), server.indexOf("r.add('GET', '/api/snapshots'"));
+  assert.match(route, /\/\^Vehicle: \/\.test\(c\.group \|\| ''\) \? `\$\{c\.group\.slice\(9\)\}: \$\{c\.label\}` : c\.label/);
+  assert.match(route, /label: named\(c\)/);
+  const critical = fs.readFileSync(path.join(__dirname, '..', 'web/critical.js'), 'utf8');
+  assert.match(critical, /@media \(pointer:coarse\)\{#\$\{ID\} a,#\$\{ID\} button\{padding:8px 12px\}\}/);
+});

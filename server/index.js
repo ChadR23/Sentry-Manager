@@ -1258,9 +1258,12 @@ async function main() {
   r.add('GET', '/api/health', async () => health.last() || health.run());
   r.add('POST', '/api/health/run', async () => health.run());
   // for the amber bar (web/critical.js): what the startup check found broken
+  // (a vehicle's check says which vehicle: three cars on one full disk read
+  // "Free space on the share" three times)
   r.add('GET', '/api/health/banner', () => {
     const last = health.last();
-    return { problems: last ? last.checks.filter((c) => c.status === 'bad').map((c) => ({ label: c.label, detail: c.detail })) : [] };
+    const named = (c) => (/^Vehicle: /.test(c.group || '') ? `${c.group.slice(9)}: ${c.label}` : c.label);
+    return { problems: last ? last.checks.filter((c) => c.status === 'bad').map((c) => ({ label: named(c), detail: c.detail })) : [] };
   });
   r.add('GET', '/api/snapshots', () => ({ snapshots: snapshots.list(), keep: 7 }));
   r.add('POST', '/api/snapshots', (req, res, { user }) => {
