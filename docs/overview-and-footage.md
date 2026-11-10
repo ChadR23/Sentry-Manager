@@ -140,7 +140,7 @@ minutes (or 2, 10, 15 or 30, picked on the page and remembered in the
 browser) starts the next. Only the car's own recording counts: Sentry and
 Saved events are not drives. Where the speed index has read the clips, a
 drive starts at the first second the car moves and ends at the last, and
-recording while parked (Sentry Mode keeps Recent clips going) is left out;
+recording while parked is left out;
 clips not read yet count as a minute of driving each.
 
 Each drive shows its start and end time, how long it took (in days, hours
@@ -266,12 +266,10 @@ copied:
   or moving) in minutes with no footage at all. Only for cars with CAN Bridge
   logs; "awake" alone does not count (a car wakes to charge or for climate
   without recording), and a speed of "not available" is not moving.
-- **CAN Bridge, Sentry Mode:** the CAN logs show Sentry Mode on in minutes with
-  no footage, once the share has shown that this car records in Sentry Mode
-  (most of its Sentry minutes have footage; a car that keeps only Sentry
-  events is not checked). Without CAN Bridge logs, parked Sentry footage that
-  never reached the share cannot be told from a car asleep, so it is not
-  checked.
+- **Parked time never counts**, Sentry Mode included: a parked car does not
+  record Recent clips continuously (Sentry events go to SentryClips) and can
+  leave its USB drive untouched for hours, so minutes with the car in Park
+  and not moving are not missing footage.
 - **A drive cut off:** the footage stops while the car is moving (from the
   speed index) and the next footage comes minutes later.
 - **Minutes short a camera:** two or more minutes with only some of the

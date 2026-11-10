@@ -416,17 +416,15 @@ function service2({ files, db, dir, clock, keys = () => ['K'], mapped = () => tr
   return { gap, notes, inventory, vehicles };
 }
 
-test('Sentry Mode minutes with no footage count, once the share shows the car records in Sentry Mode', async () => {
+test('parked Sentry Mode minutes with no footage are never missing footage (the car does not record RecentClips while parked)', async () => {
   const files = drive(new Map(), at(7, 0), at(7, 1)); // parked in Sentry 00:00-01:00, on the share
   drive(files, at(7, 18), at(7, 18, 10));
-  const dir = await canFiles(sentryOn(at(7, 0), at(7, 1, 30))); // Sentry on until 01:30
+  const dir = await canFiles(sentryOn(at(7, 0), at(7, 1, 30))); // Sentry on until 01:30, nothing after 01:00 on the share
   try {
     const db = fakeDb();
     const { gap } = service2({ files, db, dir, clock: { now: NOW } });
-    const d = (await gap.check('car')).days['2026-11-07'];
-    assert.equal(d.missingMinutes, 30);
-    assert.match(d.summary, /CAN Bridge shows Sentry Mode on 1:00–1:29 AM with no footage/);
-    assert.equal(db.get('archive-gap:car').sentry, true, 'learned, and remembered');
+    assert.deepEqual((await gap.check('car')).days, {}, 'no day flagged: parked hours with an untouched drive are normal');
+    assert.equal(db.rows.length, 0, 'no notification');
     // a car that saves only Sentry events: most of its Sentry minutes have no footage, and that is normal
     const events = drive(new Map(), at(7, 0), at(7, 0, 5));
     drive(events, at(7, 18), at(7, 18, 10));

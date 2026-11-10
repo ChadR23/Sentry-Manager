@@ -13,11 +13,11 @@
 //            minutes with no footage at all. The strongest sign, only for cars
 //            with CAN logs. "Awake" alone is not enough: a car wakes to
 //            charge, for climate or for the app without recording.
-//   sentry   CAN Bridge logs show Sentry Mode on in minutes with no footage,
-//            once the share has shown that this car records while in Sentry
-//            Mode (most of its Sentry minutes have footage). Parked Sentry
-//            footage is most of a busy day, and without CAN logs it cannot be
-//            told from a car asleep.
+//            Parked time never counts, Sentry Mode included: a parked car
+//            does not record RecentClips continuously (it keeps Sentry events
+//            in SentryClips), and can leave its USB drive untouched for hours
+//            (checked against a Sentry USB's log, 2026-11-09: every snapshot
+//            run while parked found the drive unchanged).
 //   cutoff   a drive whose footage stops while the car is moving (the speed
 //            index: the last seconds of its last front clip above 3 m/s), with
 //            the next footage minutes later. A car does not stop recording
@@ -217,7 +217,7 @@ const runList = (minutes) => runsOf(minutes).map(([a, b]) => ({ from: keyOfSec(a
  *   encoded      rels the converter has rewritten (their file times say nothing of the archive)
  *   speeds       Map(rel -> speeds a second, m/s) of indexed front clips
  *   canDriving   wall-clock seconds of minutes CAN Bridge shows driving with no footage, or null (no CAN data)
- *   canSentry    the same for minutes in Sentry Mode (only passed once the car is known to record in Sentry)
+ *   canSentry    ignored: parked minutes (Sentry Mode included) are never missing RecentClips
  *   canMinutes   wall-clock seconds of every minute CAN Bridge has logged (the car awake), to see the zones match
  *   receivedMs   when the share last received new footage of this car (from the scans), if known
  *   lastRecentS  the newest Recent clip ever seen on the share (stampSec), if known
@@ -286,10 +286,10 @@ function analyze({ files, nowMs, tz = 'UTC', encoded = new Set(), speeds = new M
 
   // can, sentry: minutes CAN Bridge shows the car recording, with no footage
   const tzShift = [];
-  if (habit && (canDriving || canSentry?.length)) {
+  if (habit && canDriving) {
     const what = new Map();
     for (const m of canDriving || []) what.set(m, 'drive');
-    for (const m of canSentry || []) if (!what.has(m)) what.set(m, 'sentry');
+    // (canSentry: parked minutes are not missing footage; kept as a parameter for older callers)
     const perDay = new Map();
     for (const m of [...what.keys()].sort((a, b) => a - b)) {
       if (!inWindow(m) || covered(starts, m + 30)) continue;

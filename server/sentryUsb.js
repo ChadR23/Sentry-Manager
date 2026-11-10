@@ -26,6 +26,10 @@
 // one was overwritten before any snapshot caught it. "snapshots" lists every
 // snapshot of the last 7 days (at most 1000, oldest first), including ones
 // since released: [{ "name": "snap-000011", "started_unix": 1762731609 }].
+// Runs the Pi discarded because the drive had not changed (a parked car can
+// write nothing for hours) count too when listed (any extra field, such as
+// "kept": false, is ignored): a run that found nothing new is not a missed
+// snapshot.
 // A gap only explains missing minutes: before a gap the car may have been
 // asleep, recording nothing.
 //

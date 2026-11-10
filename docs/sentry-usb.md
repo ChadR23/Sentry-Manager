@@ -229,8 +229,12 @@ How Sentry Six Manager uses them:
   **missed snapshot** gap. Its lost window is from the earlier snapshot's
   start to the later one's start less 60 minutes (what the car keeps); a gap
   of an hour or less loses nothing.
+- List the runs that found the drive unchanged too (the Pi discards a copy
+  identical to the last one): parked, a car can write nothing to its drive
+  for hours, and such a run is not a missed snapshot. Any extra field on an
+  entry (`"kept": false`) is ignored.
 - Missing minutes the archive check found (CAN Bridge shows the car driving
-  or in Sentry Mode with no footage, a drive cut off) that fall in a lost
+  with no footage, a drive cut off; parked time never counts) that fall in a lost
   window are explained by it: the day's tag reads **Pi missed snapshots**,
   and its text adds, for example, "Sentry USB took no snapshot between
   9:56 AM and 12:50 PM (2 h 54 min; it should take one every 58 min), and the
