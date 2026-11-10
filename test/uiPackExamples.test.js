@@ -249,3 +249,15 @@ test('flux: a long vehicle name fits the phone top bar', () => {
   assert.match(css, /@media \(max-width: 860px\) \{[\s\S]*?\.veh-pick select, \.veh-name \{ max-width: 96px; \}/);
   assert.match(css, /@media \(max-width: 360px\) \{[^}]*\}\s*\.veh-pick \.ico \{ display: none; \}\s*\.veh-pick select, \.veh-name \{ max-width: 80px; \}/);
 });
+
+// Settings: a section that can't load (Security or Nodes for a watch-only
+// account) shows its error in the section's own panel, so the list of
+// sections stays on screen.
+for (const [pack, mod] of [['horizon', 'hz'], ['flux', 'flux']]) {
+  test(`${pack}: a Settings section that fails keeps the section list`, () => {
+    const src = fs.readFileSync(path.join(ROOT, pack, 'web', mod, 'pages', 'settings.js'), 'utf8');
+    assert.match(src, /const draw = \(\) => \w+\[tab\]\(box, \{ params, go \}\)\.catch\(\(err\) => \{/);
+    assert.match(src, /box\.querySelector\('\[data-retry\]'\)\.onclick = \(\) => \{[^}]*draw\(\); \};/);
+    assert.match(src, /await draw\(\);/);
+  });
+}
