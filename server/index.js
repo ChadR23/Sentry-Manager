@@ -2177,7 +2177,20 @@ async function main() {
   // only when the drives API asks (driveData.check there), and costs nothing otherwise
   // Sentry USB's last archive and checksum results, or what it is copying now
   // (record: the checksums Manager records for it, arrivalChecksums.js; canBackfill: this account may turn the older clips on or off)
-  const sentryUsbView = (v, user, req) => ({ ...sentryUsb.api(v.id), record: { ...arrivalRef.view(v.id), canBackfill: adminHere(req, user) } });
+  // missed snapshots that count: the ones that cost footage (the archive gap check found missing
+  // minutes in them, while the car drove or was in Sentry Mode); the others (the car most likely
+  // asleep or off) only as a number
+  const countedMisses = (vid, view) => {
+    const snaps = view?.snapshots;
+    if (!snaps || !Array.isArray(snaps.missed)) return view;
+    const costly = new Set();
+    try {
+      for (const d of Object.values(archiveGapRef?.forDays(vid) || {})) for (const g of d?.missedSnapshots || []) if (Number.isFinite(g.fromUnix)) costly.add(g.fromUnix * 1000);
+    } catch { /* no check yet: none counted */ }
+    const missed = snaps.missed.filter((g) => costly.has(g.from));
+    return { ...view, snapshots: { ...snaps, missed, missedIdle: snaps.missed.length - missed.length } };
+  };
+  const sentryUsbView = (v, user, req) => countedMisses(v.id, { ...sentryUsb.api(v.id), record: { ...arrivalRef.view(v.id), canBackfill: adminHere(req, user) } });
   r.add('GET', '/api/vehicles/:id/sentry-usb', async (req, res, { params, user }) => {
     const v = vehicleOr404(params.id);
     // while a transfer runs the page asks every second: the status file is

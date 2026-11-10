@@ -175,7 +175,10 @@ export function sentryUsbView(s, { timeZone, now = Date.now(), locale, h24 = fal
     if (fin(snaps.interval)) add('Snapshots', `every ${minutes(snaps.interval / 60)}${snaps.intervalReported === false ? ' (Sentry USB\'s default)' : ''}`);
     const missed = snaps.missed.filter((g) => g && fin(g.from) && fin(g.to));
     const g = missed[missed.length - 1];
-    add('Missed snapshots (7 days)', g ? `${missed.length.toLocaleString('en-US')} · latest ${when(g.from)} to ${dayKey(g.from, timeZone) === dayKey(g.to, timeZone) ? hm(g.to) : when(g.to)} (${minutes(g.minutes ?? (g.to - g.from) / 60000)})` : 'none');
+    // (only the ones that cost footage: the car drove or was in Sentry Mode; the rest it most likely slept through)
+    const idle = Number(snaps.missedIdle) > 0 ? Number(snaps.missedIdle) : 0;
+    const asleep = idle ? ` (${idle.toLocaleString('en-US')} more while the car was most likely asleep)` : '';
+    add('Missed snapshots that lost footage (7 days)', g ? `${missed.length.toLocaleString('en-US')} · latest ${when(g.from)} to ${dayKey(g.from, timeZone) === dayKey(g.to, timeZone) ? hm(g.to) : when(g.to)} (${minutes(g.minutes ?? (g.to - g.from) / 60000)})${asleep}` : `none${asleep}`);
   }
   const record = recordView(s.record, when);
   if (record) add('Checksums recorded', record.text);

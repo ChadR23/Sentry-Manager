@@ -151,25 +151,25 @@ test('archive gaps: missing minutes in a lost window are explained by the missed
   const d0 = before.days['2026-11-09'];
   assert.equal(d0.missingMinutes, 170);
   assert.deepEqual(d0.missedSnapshots, []);
-  assert.equal(d0.summary, 'About 170 minutes the car recorded are not on the share: CAN Bridge shows the car driving 10:00–11:39, 14:00–14:59 and 19:00–19:09 with no footage.', 'without the fields: as before');
+  assert.equal(d0.summary, 'About 170 minutes the car recorded are not on the share: CAN Bridge shows the car driving 10:00–11:39 AM, 2:00–2:59 PM and 7:00–7:09 PM with no footage.', 'without the fields: as before');
 
   const res = analyze({ files, nowMs: NOW, tz: TZ, canDriving: can, snapshots: snapshotInfo(parseStatus(WITH)) });
   const d = res.days['2026-11-09'];
   assert.equal(d.missingMinutes, 170, 'still missing');
   assert.equal(d.state, 'partial');
   assert.deepEqual(d.can, d0.can, 'the evidence lines kept');
-  assert.deepEqual(d.missedSnapshots, [
+  assert.deepEqual(d.missedSnapshots.map(({ fromUnix, ...g }) => (assert.ok(Number.isInteger(fromUnix), 'the gap\'s own time, for the panel'), g)), [
     { from: '2026-11-09_09-56-00', to: '2026-11-09_12-50-00', lostTo: '2026-11-09_11-50-00', minutes: 174, missingMinutes: 100 },
     { from: '2026-11-09_12-50-00', to: '2026-11-09_16-42-00', lostTo: '2026-11-09_15-42-00', minutes: 232, missingMinutes: 60 }
   ]);
   assert.equal(d.missedSnapshotMinutes, 160);
-  assert.equal(d.summary, 'About 170 minutes the car recorded are not on the share: CAN Bridge shows the car driving 10:00–11:39, 14:00–14:59 and 19:00–19:09 with no footage. '
+  assert.equal(d.summary, 'About 170 minutes the car recorded are not on the share: CAN Bridge shows the car driving 10:00–11:39 AM, 2:00–2:59 PM and 7:00–7:09 PM with no footage. '
     + 'Sentry USB took no snapshot between 9:56 AM and 12:50 PM (2 h 54 min) and between 12:50 and 4:42 PM (3 h 52 min); it should take one every 58 min, '
     + 'and the car keeps only about an hour, so the footage from 9:56 to about 11:50 AM and 12:50 to about 3:42 PM was overwritten before it was copied (160 of the 170 minutes).');
 
   // one gap, all of the missing minutes in it: the example sentence
   const one = analyze({ files, nowMs: NOW, tz: TZ, canDriving: minutes(wall('10:00'), wall('11:40')), snapshots: snapshotInfo(parseStatus(WITH)) }).days['2026-11-09'];
-  assert.equal(one.summary, 'About 100 minutes the car recorded are not on the share: CAN Bridge shows the car driving 10:00–11:39 with no footage. '
+  assert.equal(one.summary, 'About 100 minutes the car recorded are not on the share: CAN Bridge shows the car driving 10:00–11:39 AM with no footage. '
     + 'Sentry USB took no snapshot between 9:56 AM and 12:50 PM (2 h 54 min; it should take one every 58 min), and the car keeps only about an hour, so the footage from 9:56 to about 11:50 AM was overwritten before it was copied.');
   // on the 24-hour clock
   const h24 = analyze({ files, nowMs: NOW, tz: TZ, canDriving: minutes(wall('10:00'), wall('11:40')), snapshots: snapshotInfo(parseStatus(WITH)), clock24: true }).days['2026-11-09'];
@@ -256,17 +256,21 @@ test('Sentry USB details: the snapshot interval and the missed snapshots of 7 da
   const api = apiView(parseStatus(WITH), { nowMs: NOW, tz: TZ });
   const d = Object.fromEntries(sentryUsbView(api, { timeZone: TZ, now: NOW, locale: 'en-US' }).details);
   assert.equal(d.Snapshots, 'every 58 min');
-  assert.equal(d['Missed snapshots (7 days)'], '4 · latest Nov 9, 12:50 PM to 4:42 PM (3 h 52 min)');
+  assert.equal(d['Missed snapshots that lost footage (7 days)'], '4 · latest Nov 9, 12:50 PM to 4:42 PM (3 h 52 min)');
   const h24 = Object.fromEntries(sentryUsbView(api, { timeZone: TZ, now: NOW, locale: 'en-GB', h24: true }).details);
-  assert.match(h24['Missed snapshots (7 days)'], /^4 · latest 9 Nov, 12:50 to 16:42 \(3 h 52 min\)$/);
+  assert.match(h24['Missed snapshots that lost footage (7 days)'], /^4 · latest 9 Nov, 12:50 to 16:42 \(3 h 52 min\)$/);
   const none = Object.fromEntries(sentryUsbView(apiView(parseStatus({ ...WITH, snapshots: SNAPS.slice(0, 1) }), { nowMs: NOW, tz: TZ }), { timeZone: TZ, now: NOW, locale: 'en-US' }).details);
-  assert.equal(none['Missed snapshots (7 days)'], 'none');
+  assert.equal(none['Missed snapshots that lost footage (7 days)'], 'none');
   const assumed = Object.fromEntries(sentryUsbView(apiView(parseStatus({ ...WITH, snapshot_interval_s: undefined }), { nowMs: NOW, tz: TZ }), { timeZone: TZ, now: NOW, locale: 'en-US' }).details);
   assert.equal(assumed.Snapshots, 'every 58 min (Sentry USB\'s default)');
   const old = Object.fromEntries(sentryUsbView(apiView(parseStatus(BASE), { nowMs: NOW, tz: TZ }), { timeZone: TZ, now: NOW, locale: 'en-US' }).details);
-  assert.ok(!('Snapshots' in old) && !('Missed snapshots (7 days)' in old), 'an older Sentry USB: not shown');
+  assert.ok(!('Snapshots' in old) && !('Missed snapshots that lost footage (7 days)' in old), 'an older Sentry USB: not shown');
   const lengthy = Object.fromEntries(sentryUsbView({ ...api, snapshots: { ...api.snapshots, missed: [{ from: NOW - 2 * 86400_000, to: NOW - 86400_000, minutes: 1440 }] } }, { timeZone: TZ, now: NOW, locale: 'en-US' }).details);
-  assert.equal(lengthy['Missed snapshots (7 days)'], '1 · latest Nov 8, 12:00 PM to Nov 9, 12:00 PM (1 day)');
+  assert.equal(lengthy['Missed snapshots that lost footage (7 days)'], '1 · latest Nov 8, 12:00 PM to Nov 9, 12:00 PM (1 day)');  // the server counts only the ones that cost footage; the rest (the car most likely asleep) as a number
+  const some = Object.fromEntries(sentryUsbView({ ...api, snapshots: { ...api.snapshots, missed: api.snapshots.missed.slice(-1), missedIdle: 3 } }, { timeZone: TZ, now: NOW, locale: 'en-US' }).details);
+  assert.equal(some['Missed snapshots that lost footage (7 days)'], '1 · latest Nov 9, 12:50 PM to 4:42 PM (3 h 52 min) (3 more while the car was most likely asleep)');
+  const idleOnly = Object.fromEntries(sentryUsbView({ ...api, snapshots: { ...api.snapshots, missed: [], missedIdle: 4 } }, { timeZone: TZ, now: NOW, locale: 'en-US' }).details);
+  assert.equal(idleOnly['Missed snapshots that lost footage (7 days)'], 'none (4 more while the car was most likely asleep)');
 });
 
 test('the "Pi missed snapshots" day tag in all five interfaces, in place of "Partly archived?"', () => {

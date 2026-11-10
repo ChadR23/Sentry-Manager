@@ -99,7 +99,6 @@ const dayOfSec = (s) => {
   }
   return d;
 };
-const hhmm = (k) => k.slice(11, 16).replace('-', ':');
 /** Whole minutes as the app writes lengths (web/duration.js footMinutes): "2 h 54 min", "1 day". */
 function footMinutes(min) {
   const m = Math.max(0, Math.round(Number(min) || 0));
@@ -118,6 +117,11 @@ function clockParts(k, h24) {
   const mm = k.slice(14, 16);
   if (h24) return { time: `${k.slice(11, 13)}:${mm}`, ampm: '' };
   return { time: `${h % 12 || 12}:${mm}`, ampm: h < 12 ? 'AM' : 'PM' };
+}
+/** One time of the car's clock: "9:03 AM" (or "09:03"), with its date when not on `day`. */
+function clockOne(k, day, h24) {
+  const p = clockParts(k, h24);
+  return `${day && k.slice(0, 10) !== day ? `${shortDay(k.slice(0, 10))} ` : ''}${p.time}${p.ampm ? ` ${p.ampm}` : ''}`;
 }
 const shortDay = (day) => {
   try { return new Date(`${day}T12:00:00Z`).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' }); } catch { return day; }
@@ -471,7 +475,7 @@ function analyze({ files, nowMs, tz = 'UTC', encoded = new Set(), speeds = new M
       }
     }
     finding.missedSnapshots = [...explained].sort((a, b) => a[0].from - b[0].from).map(([w, n]) => ({
-      from: keyOfSec(w.from), to: keyOfSec(w.to), lostTo: keyOfSec(w.lostTo), minutes: Math.round(w.g.seconds / MIN), missingMinutes: n
+      from: keyOfSec(w.from), to: keyOfSec(w.to), lostTo: keyOfSec(w.lostTo), minutes: Math.round(w.g.seconds / MIN), missingMinutes: n, fromUnix: w.g.fromUnix
     }));
     finding.missedSnapshotMinutes = [...explained.values()].reduce((a, b) => a + b, 0);
     finding.snapshotIntervalS = finding.missedSnapshots.length ? snapshots.intervalS ?? null : null;
@@ -527,7 +531,7 @@ function snapshotSentence(f, { clock24 = false } = {}) {
 function summarize(f, { receivedMs = 0, nowMs = Date.now(), clock24 = false } = {}) {
   const bits = [];
   const list = (runs) => {
-    const shown = runs.slice(0, 3).map((r) => (r.minutes > 1 ? `${hhmm(r.from)}–${hhmm(r.to)}` : hhmm(r.from)));
+    const shown = runs.slice(0, 3).map((r) => (r.minutes > 1 ? clockPair(r.from, r.to, { day: f.day, h24: clock24, joiner: '–' }) : clockOne(r.from, f.day, clock24)));
     const extra = runs.length - 3;
     const more = extra > 0 ? ` and ${extra} more stretch${extra === 1 ? '' : 'es'}` : '';
     return `${shown.length > 1 && !more ? `${shown.slice(0, -1).join(', ')} and ${shown[shown.length - 1]}` : shown.join(', ')}${more}`;
@@ -535,12 +539,12 @@ function summarize(f, { receivedMs = 0, nowMs = Date.now(), clock24 = false } = 
   if (f.can?.length) bits.push(`CAN Bridge shows the car driving ${list(f.can)} with no footage`);
   if (f.sentry?.length) bits.push(`CAN Bridge shows Sentry Mode on ${list(f.sentry)} with no footage`);
   for (const c of f.cutoffs.slice(0, 2)) {
-    bits.push(`the footage stops at ${hhmm(c.at)} while the car was moving (${c.kph} km/h)${c.next ? `, and the next starts at ${hhmm(c.next)}` : ', and nothing later is on the share'}`);
+    bits.push(`the footage stops at ${clockOne(c.at, f.day, clock24)} while the car was moving (${c.kph} km/h)${c.next ? `, and the next starts at ${clockOne(c.next, f.day, clock24)}` : ', and nothing later is on the share'}`);
   }
   if (f.cutoffs.length > 2) bits.push(`${f.cutoffs.length - 2} more drives stop like that`);
   if (f.partialMinutes) {
     const p = f.partial[0];
-    bits.push(`${plural(f.partialMinutes, 'minute')} ${f.partialMinutes === 1 ? 'has' : 'have'} only some cameras${f.partialMinutes === 1 ? ` (${p.cameras} of ${p.of} at ${hhmm(p.at)})` : ''}`);
+    bits.push(`${plural(f.partialMinutes, 'minute')} ${f.partialMinutes === 1 ? 'has' : 'have'} only some cameras${f.partialMinutes === 1 ? ` (${p.cameras} of ${p.of} at ${clockOne(p.at, f.day, clock24)})` : ''}`);
   }
   if (f.waitingMinutes) {
     const ago = receivedMs ? Math.max(1, Math.round((nowMs - receivedMs) / 60000)) : null;

@@ -50,7 +50,7 @@ test('CAN Bridge shows driving with no footage: the minutes count as missing, on
   assert.equal(d.state, 'partial');
   assert.equal(d.missingMinutes, 60);
   assert.deepEqual(d.can, [{ from: '2026-11-07_09-00-00', to: '2026-11-07_09-59-00', minutes: 60 }]);
-  assert.match(d.summary, /About 60 minutes the car recorded are not on the share: CAN Bridge shows the car driving 09:00–09:59 with no footage\./);
+  assert.match(d.summary, /About 60 minutes the car recorded are not on the share: CAN Bridge shows the car driving 9:00–9:59 AM with no footage\./);
   assert.equal(res.signals.can, true);
 
   // a day still within the grace time: the last hour's minutes wait
@@ -85,7 +85,7 @@ test('a drive whose footage stops while moving, the next footage much later: cut
   assert.equal(d.cutoffs.length, 1);
   assert.equal(d.cutoffs[0].kph, 63);
   assert.equal(d.missingMinutes, 67, 'moving at both ends: every minute in between (14:03-15:09)');
-  assert.match(d.summary, /the footage stops at 14:03 while the car was moving \(63 km\/h\), and the next starts at 15:10/);
+  assert.match(d.summary, /the footage stops at 2:03 PM while the car was moving \(63 km\/h\), and the next starts at 3:10 PM/);
 
   // a drive that ends parked: nothing
   const parked = new Map();
@@ -220,7 +220,7 @@ test('the notification: raised once per car and day, muted by the rules, kept di
     assert.equal(open[0].level, 'warning');
     assert.equal(open[0].dedupeKey, 'archive:car:2026-11-07');
     assert.equal(open[0].title, 'Model Y: Sat 7 Nov looks only partly archived');
-    assert.match(open[0].message, /About 30 minutes the car recorded are not on the share: CAN Bridge shows the car driving 09:00–09:29 with no footage\. Check the Sentry USB .*Logs page, its archive settings and its Wi-Fi to the NAS\. Clips it recycles before copying them are lost\./);
+    assert.match(open[0].message, /About 30 minutes the car recorded are not on the share: CAN Bridge shows the car driving 9:00–9:29 AM with no footage\. Check the Sentry USB .*Logs page, its archive settings and its Wi-Fi to the NAS\. Clips it recycles before copying them are lost\./);
     assert.deepEqual(gap.forDays('car')['2026-11-07'].state, 'partial');
 
     await gap.check('car');
@@ -292,7 +292,7 @@ test('several CAN stretches read as one list', () => {
   const files = drive(new Map(), at(7, 8), at(7, 9));
   drive(files, at(7, 18), at(7, 18, 10));
   const can = [at(7, 9), at(7, 9, 1), at(7, 10), at(7, 11, 30), at(7, 11, 31)].map((t) => stampSec(key(t)));
-  assert.match(analyze({ files, nowMs: NOW, canDriving: can }).days['2026-11-07'].summary, /CAN Bridge shows the car driving 09:00–09:01, 10:00 and 11:30–11:31 with no footage\./);
+  assert.match(analyze({ files, nowMs: NOW, canDriving: can }).days['2026-11-07'].summary, /CAN Bridge shows the car driving 9:00–9:01 AM, 10:00 AM and 11:30–11:31 AM with no footage\./);
 });
 
 // ---- fixes from review
@@ -425,7 +425,7 @@ test('Sentry Mode minutes with no footage count, once the share shows the car re
     const { gap } = service2({ files, db, dir, clock: { now: NOW } });
     const d = (await gap.check('car')).days['2026-11-07'];
     assert.equal(d.missingMinutes, 30);
-    assert.match(d.summary, /CAN Bridge shows Sentry Mode on 01:00–01:29 with no footage/);
+    assert.match(d.summary, /CAN Bridge shows Sentry Mode on 1:00–1:29 AM with no footage/);
     assert.equal(db.get('archive-gap:car').sentry, true, 'learned, and remembered');
     // a car that saves only Sentry events: most of its Sentry minutes have no footage, and that is normal
     const events = drive(new Map(), at(7, 0), at(7, 0, 5));
