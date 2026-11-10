@@ -2782,7 +2782,7 @@ async function main() {
   });
   // one request over the link, checked against Manager's copy of the allowlist
   // (the path comes from the raw request target: no %-escapes, dots or double slashes)
-  const CONFIRM_ROUTES = new Set(['PUT /api/setup/config', 'POST /api/setup/run', 'PUT /api/system/update-source']);
+  const CONFIRM_ROUTES = new Set(['PUT /api/setup/config', 'POST /api/setup/run', 'PUT /api/system/update-source', 'PUT /api/notifications/settings']);
   const ADMIN_READS = []; // (reads an admin alone may make, logged like changes: none since backups stay on the Pi)
   // reads for admins only, as Manager's own logs and settings are: the Pi's
   // logs (auth, syslog), diagnostics, its settings and notification settings
@@ -2802,6 +2802,10 @@ async function main() {
     if (query.length > 2048 || !/^(?:[A-Za-z0-9._~=&+,:-]|%[0-9A-Fa-f]{2})*$/.test(query)) throw new HttpError(400, 'Bad query.');
     if (req.method !== 'GET' || ADMIN_READS.some((re) => re.test(target)) || PRIVATE_READS.some((re) => re.test(target))) sentryWriter(req, user);
     if (CONFIRM_ROUTES.has(`${req.method} ${target}`)) requireConfirmed(req);
+    if (req.method === 'PUT' && target === '/api/setup/config') {
+      const bad = sentryUsbLinkLib.badSetupBody(body);
+      if (bad) throw new HttpError(400, bad);
+    }
     const name = sentryLink.name(id);
     if (req.method !== 'GET') audit.info(`Sentry USB "${name}": ${req.method} ${target}: ${by(req, user)}`);
     else sentryAudit.debug(`"${name}": GET ${target} for ${user}`);
@@ -2810,7 +2814,8 @@ async function main() {
     if (req.method !== 'GET' || ADMIN_READS.some((re) => re.test(target))) securityLog.action({ deviceId: id, who: user, route: `${req.method} ${target}`, result: out.error ? `${out.status} ${out.error}` : String(out.status) });
     if (out.error) return sendJson(res, out.status, { error: out.error, code: out.status === 503 ? 'OFFLINE' : undefined });
     // the Pi's 401 would sign this browser out: it is the Pi's answer, not ours
-    const status = out.status === 401 || out.status === 407 ? 502 : out.status;
+    // (and a 1xx is no final answer: the browser would wait for one)
+    const status = sentryUsbLinkLib.answerStatus(out.status);
     if (target === '/api/setup/config' && req.method === 'GET' && status === 200 && out.type === 'application/json' && !out.buf) {
       // secrets masked here too, whatever the Pi sent; kept for editing while it is away
       const masked = sentryUsbLinkLib.maskConfig(out.body);

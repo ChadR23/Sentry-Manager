@@ -155,6 +155,11 @@ test('the Sentry USB link through the server', { skip: !hasOpenssl, timeout: 120
     const put = await s.call('PUT', `${P}/setup/config`, { cookie: admin, body: { SSID: 'x' } });
     assert.equal(put.status, 400);
     assert.match(put.json.error, /needs (WIFIPASS|SHARE_PASSWORD) sent again/);
+    // a value that would start a new line in sentryusb.conf stops here, before the Pi
+    const sent = pi.requests.length;
+    const nl = await s.call('PUT', `${P}/setup/config`, { cookie: admin, body: { SSID: 'Home\nexport LD_PRELOAD=/tmp/x.so' } });
+    assert.equal(nl.status, 400);
+    assert.equal(pi.requests.length, sent, 'not sent to the Pi');
 
     // a watch-only account reads, and cannot change anything
     assert.equal((await s.call('POST', '/api/accounts', { cookie: admin, body: { username: 'watcher', password: 'watching123', role: 'viewer' } })).status, 200);

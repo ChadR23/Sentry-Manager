@@ -170,3 +170,13 @@ test('a Pi\'s chunked answers together are held to 96 MiB, not 8 x 64 MiB', asyn
     assert.match(first.error, /too much at once/);
   } finally { await t.close(); }
 });
+
+test('proxy checks: the bluetooth log in every form, setup bodies that could start a new line, and 1xx answers', () => {
+  for (const p of ['/logs/bluetooth', '/logs/bluetooth/page', '/logs/bluetooth/tail']) assert.equal(L.proxyTarget('GET', p).status, 403, p);
+  assert.equal(L.proxyTarget('GET', '/logs/syslog'), '/api/logs/syslog');
+  assert.equal(L.badSetupBody({ SSID: 'Home', WIFIPASS: '', WIFIPASS__set: true, ARCHIVE_DELAY: 20, X: false }), null);
+  for (const b of [null, [], 'SSID=x', { SSID: 'Home\nexport PATH=/tmp' }, { SSID: 'a\rb' }, { SSID: 'a\u0000' }, { ssid: 'x' }, { 'A B': 'x' }, { SSID: { value: 'x' } }, { SSID: 'x'.repeat(5000) }]) {
+    assert.ok(L.badSetupBody(b), JSON.stringify(b).slice(0, 60));
+  }
+  assert.deepEqual([100, 101, 199, 200, 204, 401, 407, 404, 500].map(L.answerStatus), [502, 502, 502, 200, 204, 502, 502, 404, 500]);
+});

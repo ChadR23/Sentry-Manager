@@ -89,7 +89,7 @@ const ALLOW = [
   ['POST', '/api/system/backup'], ['GET', '/api/system/backups']
 ].map(([method, p]) => ({ method, re: new RegExp(`^${p}$`) }));
 // a few names the patterns above would let through but that are never meant
-const NEVER = [/^\/api\/logs\/bluetooth\//, /^\/api\/manager-link/, /\.\./];
+const NEVER = [/^\/api\/logs\/bluetooth(\/|$)/, /^\/api\/manager-link/, /\.\./];
 
 /**
  * The Pi path for a proxied request, from the raw request target after
@@ -109,6 +109,28 @@ function proxyTarget(method, rawRest) {
   if (!ALLOW.some((a) => a.method === method && a.re.test(p))) return bad(403, 'Not allowed over the Sentry Manager link.');
   return p;
 }
+
+/**
+ * Manager's own check of a proxied PUT /api/setup/config body (the Pi checks
+ * it too): an object of setup keys to plain values with no control
+ * characters, which could start a new line in sentryusb.conf. null when
+ * it is fine, else what is wrong.
+ */
+function badSetupBody(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return 'The settings must be an object.';
+  const keys = Object.keys(body);
+  if (keys.length > 500) return 'Too many settings.';
+  for (const k of keys) {
+    if (!/^[A-Z][A-Z0-9_]{0,63}(__set)?$/.test(k)) return `Bad setting ${k.slice(0, 64)}.`;
+    const v = body[k];
+    if (typeof v === 'boolean' || (typeof v === 'number' && Number.isFinite(v))) continue;
+    if (typeof v !== 'string' || v.length > 4096 || /[\u0000-\u001f\u007f]/.test(v)) return `Bad value for ${k}.`;
+  }
+  return null;
+}
+
+/** The Pi's status as this server answers it: an informational (1xx) one is no answer. */
+const answerStatus = (status) => (status === 401 || status === 407 || status < 200 ? 502 : status);
 
 const SAFE_TYPES = new Set(['application/json', 'text/plain', 'application/zip', 'application/gzip', 'application/x-gzip', 'application/x-tar', 'application/octet-stream']);
 /** The Pi's content type, cut to a type the browser can be given safely. */
@@ -610,6 +632,6 @@ function withoutKeys(value) {
 }
 
 module.exports = {
-  createSentryUsbLink, proxyTarget, maskConfig, isSecretKey, SETTABLE, SECRET_TARGETS, secretsNeeded, safeType, pairingKey, piProof, managerProof, sameHex, fpHex, fpGroups, withoutKeys,
+  createSentryUsbLink, proxyTarget, badSetupBody, answerStatus, maskConfig, isSecretKey, SETTABLE, SECRET_TARGETS, secretsNeeded, safeType, pairingKey, piProof, managerProof, sameHex, fpHex, fpGroups, withoutKeys,
   LINK_PATH, MAX_FRAME, MAX_HANDSHAKE_FRAME, MAX_ANSWER, MAX_BUFFERED, NOTICES, MAX_IN_FLIGHT, SLOT_FAILURES, FAILS_PER_MINUTE
 };
