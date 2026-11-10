@@ -76,7 +76,10 @@ p { margin: 0; }
 .nav .count.busy { background: var(--accent); color: var(--accent-ink); }
 .collapse { margin-top: auto; display: flex; align-items: center; gap: 12px; padding: 11px 14px; border: 0; background: none; color: var(--text-2); cursor: pointer; border-radius: 12px; font-weight: 500; }
 .collapse:hover { background: var(--panel-2); color: var(--text); }
-.app.collapsed .brand-name, .app.collapsed .nav a span, .app.collapsed .nav .count, .app.collapsed .collapse span { display: none; }
+.app.collapsed .brand-name, .app.collapsed .nav a span, .app.collapsed .collapse span { display: none; }
+/* icons only (collapsed, and the phone bar): a section's count sits on its
+   icon's corner, so unread notifications and running jobs still show */
+.app.collapsed .nav .count { position: absolute; top: 2px; right: 2px; margin: 0; min-width: 16px; height: 16px; padding: 0 4px; font-size: 10px; }
 .app.collapsed .nav a, .app.collapsed .collapse, .app.collapsed .brand { justify-content: center; padding-left: 0; padding-right: 0; }
 .app.collapsed .collapse .i { transform: rotate(180deg); }
 
@@ -436,7 +439,8 @@ html.reduce-effects *, html.reduce-effects *::before { transition: none !importa
   .side .brand-name, .collapse { display: none; }
   .nav { flex: 1; flex-direction: row; gap: 2px; }
   .nav a, .app.collapsed .nav a { flex: 1 1 0; justify-content: center; padding: 10px 0; }
-  .nav a span, .nav .count { display: none; }
+  .nav a span { display: none; }
+  .nav .count { position: absolute; top: 0; right: 0; margin: 0; min-width: 16px; height: 16px; padding: 0 4px; font-size: 10px; }
   .main { padding: 16px 16px 64px; }
   .topbar { margin-bottom: 20px; }
   h1 { font-size: 28px; }
@@ -501,6 +505,8 @@ html.reduce-effects *, html.reduce-effects *::before { transition: none !importa
   input, select, textarea { font-size: max(16px, 1em); }
   .nd-range button, .nd-head-right .btn.sm, .nd-actions .btn.sm, .nd-logs-actions .btn.sm, .days-pick span { min-height: 40px; }
   .nd-more { padding: 8px 0; }
+  /* a check box's whole line is the tap target (24-hour clock, Reduce visual effects, ...) */
+  .check { min-height: 32px; }
 }
 
 /* Nodes: the one-time pairing code, large enough to read across a room */
