@@ -988,6 +988,39 @@ test('placing: kept across the page, off the cameras unless put on them, off the
   assert.ok(!('down' in slid));
 });
 
+test('placing: the Viewer\'s playback controls are never covered, a box kept "just under the video" goes under them', async () => {
+  const { placeFor, controlsArea, spotFor } = await placing();
+  const bounds = { left: 0, top: 0, right: 1366, bottom: 2400 };
+  const stage = rect(360, 170, 1060, 400); // the cameras
+  // a timeline, then Play / frame step / Export under the cameras (Flux, Daylight, the built-in one)
+  const area = controlsArea(rect(360, 620, 1060, 60), stage);
+  assert.deepEqual(area, rect(360, 570, 1060, 110), 'from the cameras\' bottom: the timeline between is kept clear too');
+  // the demo board: 16 px under the video, at its left
+  const under = { h: 'l', v: 'B', dx: 0, dy: 16, over: false };
+  const p = placeFor(under, { width: 490, height: 122 }, { stage, bounds, keep: [area] });
+  assert.ok(!inter(p, area) && !inter(p, stage), 'off the controls and the cameras');
+  assert.equal(p.top, 680 + 8, 'right under the controls');
+  assert.equal(p.left, 360, 'same across');
+  // a box put on the video stays on it, but above controls that sit on the cameras (Aurora)
+  const onCams = controlsArea(rect(380, 500, 1000, 56), stage);
+  assert.deepEqual(onCams, rect(380, 500, 1000, 56), 'controls on the cameras: just their own box');
+  const low = spotFor(rect(400, 480, 300, 80), stage);
+  assert.equal(low.over, true);
+  const q = placeFor(low, { width: 300, height: 80 }, { stage, bounds, keep: [onCams] });
+  assert.ok(!inter(q, onCams), 'not on Play');
+  assert.ok(inter(q, stage), 'still on the video');
+  // a Viewer as tall as a window that does not scroll (the built-in Studio): no room off the cameras
+  // and the controls, so on the cameras above the controls, not over Play and Export
+  const studio = { left: 0, top: 0, right: 1142, bottom: 900 };
+  const cams = rect(0, 0, 1142, 840);
+  const ctl = controlsArea(rect(0, 840, 1142, 60), cams);
+  const r = placeFor({ h: 'r', v: 'B', dx: 0, dy: 16, over: false }, { width: 560, height: 565 }, { stage: cams, bounds: studio, keep: [ctl] });
+  assert.ok(!inter(r, ctl), 'off the controls');
+  assert.ok(r.top + r.height <= 900, 'on the page');
+  // no controls given: as before
+  assert.equal(controlsArea(null, stage), null);
+});
+
 /** Both boxes floating: the bar under the cameras on the left, the List in the column on their right. */
 const BOTH = {
   placement: 'float', listPlacement: 'float',

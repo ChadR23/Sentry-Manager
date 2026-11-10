@@ -299,7 +299,8 @@ export function attachViewerExtras({ stage, videos: listVideos = () => [], main:
   let dashGone = false;
   import('/web/statDash.js').then(({ attachStatDash }) => {
     if (dashGone) return;
-    dash = attachStatDash({ stage, videos, main, over: stepsFixed });
+    // (the row of buttons: the playback controls the floating boxes keep clear of)
+    dash = attachStatDash({ stage, videos, main, over: stepsFixed, controls: buttons });
   }).catch(() => { /* without it */ });
   cleanups.push(() => { dashGone = true; dash?.destroy(); });
 

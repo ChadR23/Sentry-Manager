@@ -45,7 +45,7 @@ const STYLE = `
   box-sizing:border-box;color:var(--sd-fg);font:14px/1.3 system-ui,-apple-system,"Segoe UI",sans-serif;-webkit-user-select:none;user-select:none}
 .sentry-sd *{box-sizing:border-box}
 .sentry-sd.below{position:relative;margin:8px 0;background:var(--sd-bg);border:1px solid var(--sd-line);border-radius:18px;padding:8px}
-.sentry-sd.float{position:absolute;z-index:2147482000;left:0;top:0;max-width:min(96vw,1180px);background:rgba(18,20,24,.97);border:1px solid var(--sd-line);border-radius:16px;padding:6px;box-shadow:0 12px 32px rgba(0,0,0,.45)}
+.sentry-sd.float{position:absolute;z-index:var(--sd-float-z,2147482000);left:0;top:0;max-width:min(96vw,1180px);background:rgba(18,20,24,.97);border:1px solid var(--sd-line);border-radius:16px;padding:6px;box-shadow:0 12px 32px rgba(0,0,0,.45)}
 .sentry-sd.moving{opacity:.92;box-shadow:0 16px 40px rgba(0,0,0,.6)}
 .sentry-sd.over{position:absolute;left:8px;right:8px;bottom:8px;z-index:11;background:rgba(10,12,15,.55);-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);border-radius:16px;padding:6px;pointer-events:auto}
 /* (no taller than the cameras: Customize's tools scroll in it instead of going past their top;
@@ -147,7 +147,7 @@ const STYLE = `
 .sentry-sd .sd-pop-none{padding:10px;color:var(--sd-dim);font-size:14px}
 .sentry-sd .sd-row:has(.sd-list){align-items:flex-start}
 .sentry-sd.sd-listpanel.below{position:relative;margin:8px 0;background:var(--sd-bg);border:1px solid var(--sd-line);border-radius:18px;padding:8px}
-.sentry-sd.sd-listpanel.float{position:absolute;z-index:2147481900;left:0;top:0;width:min(560px,calc(100vw - 16px));background:rgba(18,20,24,.97);border:1px solid var(--sd-line);border-radius:16px;padding:6px;box-shadow:0 12px 32px rgba(0,0,0,.45)}
+.sentry-sd.sd-listpanel.float{position:absolute;z-index:var(--sd-float-z,2147481900);left:0;top:0;width:min(560px,calc(100vw - 16px));background:rgba(18,20,24,.97);border:1px solid var(--sd-line);border-radius:16px;padding:6px;box-shadow:0 12px 32px rgba(0,0,0,.45)}
 .sentry-sd.sd-listpanel.moving{opacity:.92}
 .sentry-sd.sd-listpanel.below,.sentry-sd.sd-listpanel.float{padding-bottom:30px}
 .sentry-sd.sd-listpanel.sized{display:flex;flex-direction:column}
@@ -1020,16 +1020,17 @@ export function fitIn(box, b) {
 /**
  * A box moved the least it takes to cover none of `obstacles` ({ left, top, width, height,
  * above?: false }): beside one, below it, or above it (unless `above: false`), within `bounds`.
- * With no such place, below them all (past the bounds' bottom: see arrange).
+ * With no such place, below them all (past the bounds' bottom: see arrange). `down: false`:
+ * within the bounds' bottom too (a page that does not scroll).
  */
 export const within = (r, b) => r.left >= b.left - 0.5 && r.left + r.width <= b.right + 0.5 && r.top >= b.top - 0.5 && r.top + r.height <= (b.bottom ?? Infinity) + 0.5;
-export function clearOf(box, obstacles, bounds, gap = 8) {
+export function clearOf(box, obstacles, bounds, gap = 8, { down: mayGoDown = true } = {}) {
   const hit = (r) => obstacles.find((o) => overlaps(r, o));
   if (!hit(box)) return box;
   // straight down may run past the bounds' bottom (the page scrolls): a box the cameras grew
   // into (a wider window, taller cameras) slides down under them, as it was, rather than
   // jumping across the page to the one side where it fits in the window
-  const fits = (r) => within(r, r.down ? { ...bounds, bottom: Infinity } : bounds);
+  const fits = (r) => within(r, r.down && mayGoDown ? { ...bounds, bottom: Infinity } : bounds);
   const around = ({ down, ...r }, o) => [
     { ...r, left: o.left - gap - r.width }, { ...r, left: o.left + o.width + gap },
     { ...r, top: o.top + o.height + gap, down: true }, ...(o.above === false ? [] : [{ ...r, top: o.top - gap - r.height }])
@@ -1067,14 +1068,47 @@ export function spotFor(box, stage, { bar = null, migrated = false } = {}) {
  * across the page, on the cameras when it was put there, off them when it was not, and off
  * `others` (the other floating box). `stage` and `bounds` as on the page now.
  */
-export function placeFor(spot, { width, height }, { stage, bounds, bar = null, others = [] }) {
+export function placeFor(spot, { width, height }, { stage, bounds, bar = null, others = [], keep = [] }) {
   const r = fitIn(spot.bar && ANCHOR(spot.bar) && bar ? fromAnchor(spot.bar, bar, width, height) : fromAnchor(spot, stage, width, height), bounds);
-  const avoid = [...(spot.over || !(stage.width > 0) ? [] : [{ ...stage, above: false }]), ...others];
-  return avoid.length ? clearOf(r, avoid, bounds) : r;
+  // (keep: the Viewer's playback controls, never covered, also by a box put on the cameras)
+  const avoid = [...(spot.over || !(stage.width > 0) ? [] : [{ ...stage, above: false }]), ...keep, ...others];
+  if (!avoid.length) return r;
+  const placed = clearOf(r, avoid, bounds);
+  if (!keep.length || within(placed, bounds)) return placed;
+  // no room on the page off the cameras and the controls (a Viewer as tall as the window that
+  // does not scroll): on the cameras, rather than on Play and Export
+  const onCams = clearOf(r, [...keep, ...others], bounds, 8, { down: false });
+  return within(onCams, bounds) ? onCams : placed;
+}
+/**
+ * The page rect a floating box keeps clear of for the Viewer's playback controls (`ctl`, on the
+ * page), with the cameras (`stage`): from the cameras' bottom down to the controls' bottom when
+ * the controls are under them (a timeline between the two is covered too), across both; null
+ * without controls. A box "just under the video" (the cameras) then goes under the controls.
+ */
+export function controlsArea(ctl, stage) {
+  if (!ctl || !(ctl.width > 0) || !(ctl.height > 0)) return null;
+  const stageBottom = stage && stage.width > 0 ? stage.top + stage.height : null;
+  const under = stageBottom != null && ctl.top >= stageBottom - 2;
+  const left = under ? Math.min(ctl.left, stage.left) : ctl.left;
+  const right = under ? Math.max(ctl.left + ctl.width, stage.left + stage.width) : ctl.left + ctl.width;
+  const top = under ? Math.min(ctl.top, stageBottom) : ctl.top;
+  return { left, top, width: right - left, height: ctl.top + ctl.height - top };
+}
+/**
+ * The element holding a Viewer's playback controls, from the row the page gave (`row`, where the
+ * picture-in-picture button goes): the outermost box around that row that does not also hold the
+ * cameras (Play, the frame steps, the timeline and Export sit in it in every interface).
+ */
+export function controlsOf(row, stage) {
+  if (!row || !stage || row.contains?.(stage)) return null;
+  let n = row;
+  while (n.parentElement && n.parentElement !== document.body && !n.parentElement.contains(stage)) n = n.parentElement;
+  return n;
 }
 export const isAnchored = ANCHOR;
 
-export function attachStatDash({ stage, videos = () => [], main = () => null, over = false } = {}) {
+export function attachStatDash({ stage, videos = () => [], main = () => null, over = false, controls = null } = {}) {
   if (!stage) return { destroy() {} };
   if (!document.getElementById('sentry-sd-css')) {
     const s = document.createElement('style');
@@ -1338,12 +1372,69 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
   }
   const sizeOf = (node) => ({ width: node.offsetWidth, height: node.offsetHeight });
   const pageRect = (node) => ({ ...pageXY(node), ...sizeOf(node) });
-  /** The cameras on the page now, and where a box may go (the page across, from its top down). */
+  // What a floating box keeps clear of. The Viewer's playback controls (Play, the frame steps,
+  // the timeline, Export: `controls`, the row the page gave for its buttons): a box is moved off
+  // them, also one kept "just under the video" where the controls are. And bars fixed along the
+  // window's bottom (a pack's tab bar or dock, controls that float over the page): a box stays
+  // above them at the page's end, and goes under them (they are drawn over it) while the page
+  // scrolls, so they can always be tapped. (Not in fullscreen: only the boxes are there.)
+  const fixedOf = (n) => {
+    for (; n && n !== document.body && n !== document.documentElement; n = n.parentElement) {
+      if (globalThis.getComputedStyle?.(n).position === 'fixed') return n;
+    }
+    return null;
+  };
+  const ours = (n) => Boolean(n?.closest?.('.sentry-sd, .sentry-x-steps, .sentry-x-resume, #sentry-critical-update, #sentry-health-bar'));
+  /** Bars fixed along the window's bottom: how far up they reach (px) and the lowest z-index among them. */
+  function bottomBars() {
+    const H = winH();
+    const W = viewW();
+    const found = new Set();
+    if (H > 0 && W > 0 && document.elementsFromPoint) {
+      for (const x of [0.06, 0.5, 0.94]) {
+        for (const hit of document.elementsFromPoint(Math.round(W * x), H - 3)) {
+          if (ours(hit)) continue;
+          const f = fixedOf(hit);
+          if (f && !ours(f)) found.add(f);
+        }
+      }
+    }
+    const ctl = ctlNow();
+    const ctlFixed = ctl && fixedOf(ctl);
+    if (ctlFixed) found.add(ctlFixed);
+    let inset = 0;
+    let z = Infinity;
+    for (const f of found) {
+      const r = rectOf(f);
+      // (a bar: low in the window, not a panel taking most of it)
+      if (!(r.width > 0) || r.height > H * 0.45 || r.bottom < H * 0.6 || r.top < H * 0.4) continue;
+      inset = Math.max(inset, Math.ceil(H - r.top));
+      const zi = parseInt(globalThis.getComputedStyle?.(f).zIndex, 10);
+      if (Number.isFinite(zi) && zi > 1) z = Math.min(z, zi);
+    }
+    return { inset: Math.min(inset, Math.round(H * 0.5)), z: Number.isFinite(z) ? z : null };
+  }
+  const ctlNow = () => {
+    try { return controlsOf(typeof controls === 'function' ? controls() : controls, stage); } catch { return null; }
+  };
+  /** The cameras on the page now, where a box may go (the page across, from its top down), and what it keeps clear of. */
   function layoutNow(pb) {
     const r = rectOf(stage);
+    const st = { left: r.left + sx(), top: r.top + sy(), width: r.width || 0, height: r.height || 0 };
+    if (pb.fs) return { stage: st, bounds: { left: 0, top: 0, right: pb.w, bottom: pb.h }, keep: [] };
+    const ctl = ctlNow();
+    const c = ctl && !fixedOf(ctl) ? rectOf(ctl) : null;
+    const area = c ? controlsArea({ left: c.left + sx(), top: c.top + sy(), width: c.width || 0, height: c.height || 0 }, st) : null;
+    const bars = bottomBars();
+    // (drawn under the bars: a pack's own CSS for the boxes' z-index still wins)
+    for (const n of [el, panel]) {
+      if (bars.z != null) n.style.setProperty?.('--sd-float-z', String(bars.z - 1));
+      else n.style.removeProperty?.('--sd-float-z');
+    }
     return {
-      stage: { left: r.left + sx(), top: r.top + sy(), width: r.width || 0, height: r.height || 0 },
-      bounds: { left: 0, top: 0, right: pb.w, bottom: pb.h }
+      stage: st,
+      bounds: { left: 0, top: 0, right: pb.w, bottom: Math.max(0, pb.h - bars.inset) },
+      keep: area ? [area] : []
     };
   }
   const roomy = (st) => st.width > 40 && st.height > 40;
@@ -1364,7 +1455,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
       board[field] = { ...(board[field] || {}), [k]: s };
       saveBoards(state);
     }
-    return placeFor(s, size, { stage: roomy(lay.stage) ? lay.stage : { left: 0, top: 0, width: 0, height: 0 }, bounds: lay.bounds, bar, others });
+    return placeFor(s, size, { stage: roomy(lay.stage) ? lay.stage : { left: 0, top: 0, width: 0, height: 0 }, bounds: lay.bounds, bar, others, keep: lay.keep });
   }
   function applyFloat() {
     if (!board) return;
@@ -1395,7 +1486,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
       // no room for the List off the bar (a page that does not scroll): the List at its spot, the bar off it
       const l2 = placeOf(panel, 'listFloat', lay, barAt, []);
       const onVideo = board.float?.[screenKind()]?.over || !roomy(lay.stage);
-      const b2 = clearOf(barAt, [l2, ...(onVideo ? [] : [{ ...lay.stage, above: false }])], lay.bounds);
+      const b2 = clearOf(barAt, [l2, ...lay.keep, ...(onVideo ? [] : [{ ...lay.stage, above: false }])], lay.bounds);
       if (within(b2, lay.bounds) && !overlaps(b2, l2)) { barAt = b2; listAt = l2; }
     }
     if (bar) setPagePos(el, barAt.left, barAt.top, pb);
