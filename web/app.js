@@ -2189,7 +2189,7 @@
     await mountShared('ac-page', 'Account', '/web/account.js', (m, el) => m.createAccountPage(el));
   };
   pages.health = async () => {
-    await mountShared('hl-page', 'Health', '/web/health.js', (m, el) => m.createHealthPage(el));
+    await mountShared('hl-page', 'Health', '/web/health.js', (m, el) => m.createHealthPage(el, { h24: () => clockPref.h24 }));
   };
 
   // Settings | Nodes: Nodes is Settings' own page (#/settings/nodes; #/nodes opens it there)
@@ -2546,7 +2546,7 @@
     const box = $('sec-access');
     if (box) {
       import('/web/accessSettings.js').then((m) => {
-        if ($('sec-access') === box) m.createAccessSettings(box, { cls: { btn: 'btn sm', primary: 'btn sm solid', input: 'input' } });
+        if ($('sec-access') === box) m.createAccessSettings(box, { cls: { btn: 'btn sm', primary: 'btn sm solid', input: 'input' }, h24: () => clockPref.h24 });
       }).catch(() => { box.textContent = 'Sign-in protection could not load. Reload the page.'; });
     }
   }

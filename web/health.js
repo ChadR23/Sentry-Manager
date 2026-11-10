@@ -3,7 +3,10 @@
 // with a download, and the support bundle. Plain markup with classes
 // (sentry-health-*), colours inherited from the page.
 //
-//   const page = createHealthPage(el);   // page.destroy() when leaving
+//   const page = createHealthPage(el, { h24: () => bool });   // page.destroy() when leaving
+//
+// Times follow the 12/24-hour clock: h24() when the interface gives it, else
+// the one chosen for everyone (Settings > Appearance, /api/settings).
 
 const CSS = `
 .sentry-health{display:flex;flex-direction:column;gap:22px;font-size:14px;line-height:1.45}
@@ -43,7 +46,11 @@ const day = (d) => { try { return new Date(`${d}T12:00:00`).toLocaleDateString(u
 // a day on this device's calendar (the server reads From and To as local days too)
 const iso = (t) => { const d = new Date(t); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
 
-export function createHealthPage(el) {
+export function createHealthPage(el, { h24 = null } = {}) {
+  let clock24 = false;
+  if (typeof h24 !== 'function') api('/api/settings').then((st) => { clock24 = Boolean(st?.appearance?.clock24); if (alive && lastChecks) drawChecks(lastChecks); }).catch(() => {});
+  const stamp = (t) => new Date(t).toLocaleString(undefined, { hour12: !(typeof h24 === 'function' ? h24() : clock24) });
+  let lastChecks = null;
   if (!document.getElementById('sentry-health-css')) {
     const style = document.createElement('style');
     style.id = 'sentry-health-css';
@@ -85,7 +92,8 @@ export function createHealthPage(el) {
 
   function drawChecks(res) {
     if (!alive) return;
-    $('[data-when]').textContent = res?.at ? `last run ${new Date(res.at).toLocaleString()}` : '';
+    lastChecks = res;
+    $('[data-when]').textContent = res?.at ? `last run ${stamp(res.at)}` : '';
     const groups = new Map();
     for (const c of res?.checks || []) (groups.get(c.group) || groups.set(c.group, []).get(c.group)).push(c);
     const word = { ok: 'OK', warn: 'CHECK', bad: 'FAIL', skip: 'SKIP' };
@@ -124,7 +132,7 @@ export function createHealthPage(el) {
     box.textContent = 'Searching…';
     try {
       const { lines } = await api(logQuery(false));
-      box.innerHTML = lines.length ? lines.slice(0, 500).map((l) => `<div class="${esc(l.level)}">${esc(new Date(l.at).toLocaleString())} ${esc(l.level.toUpperCase())} [${esc(l.scope)}] ${esc(l.message)}</div>`).join('')
+      box.innerHTML = lines.length ? lines.slice(0, 500).map((l) => `<div class="${esc(l.level)}">${esc(stamp(l.at))} ${esc(l.level.toUpperCase())} [${esc(l.scope)}] ${esc(l.message)}</div>`).join('')
         + (lines.length > 500 ? `<div class="sh-muted">… ${lines.length - 500} more: download them.</div>` : '') : '<div class="sh-muted">No lines match.</div>';
     } catch (err) { box.textContent = err.message; }
   }

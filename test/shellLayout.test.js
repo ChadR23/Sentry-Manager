@@ -60,3 +60,17 @@ test('The startup check bar names the vehicle a share check is for, and has fing
   const critical = fs.readFileSync(path.join(__dirname, '..', 'web/critical.js'), 'utf8');
   assert.match(critical, /@media \(pointer:coarse\)\{#\$\{ID\} a,#\$\{ID\} button\{padding:8px 12px\}\}/);
 });
+
+test('Health and Settings > Security show times on the 12/24-hour clock chosen, in every interface', () => {
+  const read = (f) => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
+  const health = read('web/health.js');
+  assert.doesNotMatch(health, /toLocaleString\(\)/, 'no time in the browser\'s own clock');
+  assert.match(health, /hour12: !\(typeof h24 === 'function' \? h24\(\) : clock24\)/);
+  assert.match(health, /api\('\/api\/settings'\)\.then\(\(st\) => \{ clock24 = Boolean\(st\?\.appearance\?\.clock24\)/, 'a pack that passes no h24: the setting');
+  const access = read('web/accessSettings.js');
+  assert.match(access, /hour12: !h24/);
+  assert.match(access, /when\(b\.at, h24Now\(\)\)/);
+  const app = read('web/app.js');
+  assert.match(app, /m\.createHealthPage\(el, \{ h24: \(\) => clockPref\.h24 \}\)/);
+  assert.match(app, /m\.createAccessSettings\(box, \{[^}]*\}, h24: \(\) => clockPref\.h24 \}\)/);
+});

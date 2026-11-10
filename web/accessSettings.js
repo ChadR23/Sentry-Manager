@@ -6,7 +6,8 @@
 // markup (sentry-acc-*), colours inherited; the interface may pass its own
 // button and input classes.
 //
-//   const a = createAccessSettings(el, { cls: { btn, primary, input } });
+//   const a = createAccessSettings(el, { cls: { btn, primary, input }, h24: () => bool });
+//   (times follow h24() when given, else the 12/24-hour clock chosen in Settings > Appearance)
 //   a.destroy();
 
 const STYLE = `
@@ -50,17 +51,21 @@ async function api(url, opts = {}) {
   if (!r.ok) throw Object.assign(new Error(d.error || `That did not work (${r.status}).`), { code: d.code, status: r.status });
   return d;
 }
-const when = (t) => {
+const when = (t, h24) => {
   const d = new Date(t);
   const sameDay = d.toDateString() === new Date().toDateString();
-  return sameDay ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  const time = { hour: '2-digit', minute: '2-digit', hour12: !h24 };
+  return sameDay ? d.toLocaleTimeString([], time) : d.toLocaleString([], { month: 'short', day: 'numeric', ...time });
 };
 const left = (until) => {
   const m = Math.max(1, Math.round((until - Date.now()) / 60000));
   return m < 90 ? `${m} min` : `${Math.round(m / 60)} h`;
 };
 
-export function createAccessSettings(el, { cls = {} } = {}) {
+export function createAccessSettings(el, { cls = {}, h24 = null } = {}) {
+  let clock24 = false;
+  const h24Now = () => (typeof h24 === 'function' ? Boolean(h24()) : clock24);
+  if (typeof h24 !== 'function') api('/api/settings').then((st) => { clock24 = Boolean(st?.appearance?.clock24); }).catch(() => {});
   if (!document.getElementById('sentry-acc-css')) {
     const style = document.createElement('style');
     style.id = 'sentry-acc-css';
@@ -88,7 +93,7 @@ export function createAccessSettings(el, { cls = {} } = {}) {
     const you = v.you;
     const bans = v.bans.length
       ? `<ul class="sx-bans">${v.bans.map((b) => `<li><div class="sx-grow"><b class="sx-mono">${esc(b.key)}</b><br>
-          <span class="sx-muted">banned ${esc(when(b.at))} for ${esc(left(b.until))} more (until ${esc(when(b.until))}) · ${esc(b.failures)} failed attempts, last: ${esc(b.reason)}${b.offences > 1 ? ` · ban ${esc(b.offences)} this week` : ''}</span></div>
+          <span class="sx-muted">banned ${esc(when(b.at, h24Now()))} for ${esc(left(b.until))} more (until ${esc(when(b.until, h24Now()))}) · ${esc(b.failures)} failed attempts, last: ${esc(b.reason)}${b.offences > 1 ? ` · ban ${esc(b.offences)} this week` : ''}</span></div>
           <button type="button" class="${btn}" data-unban="${esc(b.key)}">Unban</button></li>`).join('')}</ul>`
       : `<p class="sx-muted">No address is banned.${v.watching ? ` Failed attempts are being counted for ${v.watching} address${v.watching === 1 ? '' : 'es'}.` : ''}</p>`;
     el.innerHTML = `<div class="sentry-acc">
