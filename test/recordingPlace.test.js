@@ -55,7 +55,7 @@ test('fixesOf: lat, lon and accuracy of the same frame paired; poor, zero and mi
     ['2026-10-05_11-00-00', '2026-10-05_11-01-00']);
 });
 
-test('Footage: Recent recordings get place (parked), from and to (Home to Work); CAN GPS beats the cameras\' when good; drives prefer it too', { timeout: 120000, skip: spawnSync('xz', ['--version']).status !== 0 && 'needs xz' }, async () => {
+test('Footage: Recent recordings get place (parked), from and to (Home to Work); the car\'s own GPS first, CAN Bridge GPS only where it has none; drives prefer CAN', { timeout: 120000, skip: spawnSync('xz', ['--version']).status !== 0 && 'needs xz' }, async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sm-recplace-'));
   const root = path.join(dir, 'footage');
   const recent = path.join(root, 'TeslaCam', 'RecentClips');
@@ -109,7 +109,7 @@ test('Footage: Recent recordings get place (parked), from and to (Home to Work);
   // the CAN index (one key, the only car's): good fixes at Work 11:00-11:01 and 19:29-19:30, poor ones 13:00-13:01
   const keyDir = path.join(data, 'can-index', 'K');
   await fsp.mkdir(keyDir, { recursive: true });
-  const minutes = [[11, 0, WORK, 3], [11, 1, WORK, 3], [13, 0, WORK, 20], [13, 1, WORK, 20], [19, 29, WORK, 2.2], [19, 30, WORK, 2.2]];
+  const minutes = [[11, 0, WORK, 3], [11, 1, WORK, 3], [13, 0, WORK, 20], [13, 1, WORK, 20], [15, 0, WORK, 3], [15, 1, WORK, 3], [19, 29, WORK, 2.2], [19, 30, WORK, 2.2]];
   for (const [hh, mm, p, acc] of minutes) {
     const [name, body] = await gpsMinute(Date.UTC(2026, 9, 5, hh, mm), p, acc);
     await fsp.writeFile(path.join(keyDir, `${name}.json.gz`), body);
@@ -181,14 +181,14 @@ test('Footage: Recent recordings get place (parked), from and to (Home to Work);
     all = await recs();
     assert.deepEqual(pick(all['07:00']), { place: null, from: 'Home', to: 'Work', placeSource: 'video' }, 'a drive from Home to Work');
     assert.deepEqual(pick(all['09:00']), { place: 'Work', from: undefined, to: undefined, placeSource: 'video' }, 'parked at Work');
-    assert.deepEqual(pick(all['11:00']), { place: 'Work', from: undefined, to: undefined, placeSource: 'can' }, 'CAN Bridge GPS beats the cameras\'');
+    assert.deepEqual(pick(all['11:00']), { place: 'Home', from: undefined, to: undefined, placeSource: 'video' }, 'the car\'s own GPS (the cameras) beats the Screenmate\'s (CAN Bridge)');
     assert.deepEqual(pick(all['13:00']), { place: 'Home', from: undefined, to: undefined, placeSource: 'video' }, 'a 20 m CAN fix is not used');
-    assert.deepEqual(pick(all['15:00']), { place: null, from: undefined, to: undefined, placeSource: undefined }, 'no GPS: no tag');
+    assert.deepEqual(pick(all['15:00']), { place: 'Work', from: undefined, to: undefined, placeSource: 'can' }, 'no camera GPS: the CAN Bridge\'s');
     assert.deepEqual(pick(all['17:00']), { place: null, from: undefined, to: undefined, placeSource: undefined }, 'not indexed yet: no tag');
-    assert.deepEqual(pick(all['event 19:30']), { place: 'Work', from: undefined, to: undefined, placeSource: 'can' }, 'CAN Bridge GPS at the event beats event.json');
+    assert.deepEqual(pick(all['event 19:30']), { place: 'Home', from: undefined, to: undefined, placeSource: 'event' }, 'the car\'s event.json beats CAN Bridge GPS');
     assert.deepEqual(pick(all['event 21:30']), { place: 'Home', from: undefined, to: undefined, placeSource: 'event' }, 'event.json as before');
     assert.equal(all['23:00'].can, true);
-    assert.deepEqual(pick(all['23:00']), { place: 'Work', from: undefined, to: undefined, placeSource: 'can' }, 'the position from can3 (Model Y) beats the cameras\'');
+    assert.deepEqual(pick(all['23:00']), { place: 'Home', from: undefined, to: undefined, placeSource: 'video' }, 'the cameras\' GPS beats the position from can3 (the Screenmate\'s receiver)');
     assert.deepEqual(pick(all['23:30']), { place: 'Home', from: undefined, to: undefined, placeSource: 'video' }, 'the garage\'s 25 m fix is not used');
 
     // Drives: the 11:00 drive starts and ends at Work by CAN Bridge GPS (the cameras say Home)

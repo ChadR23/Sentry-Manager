@@ -4,15 +4,16 @@
 // "Home → Work"): the car's position at the start and the end of the
 // recording, best source first:
 //
-//   1. CAN Bridge GPS (0x04F GPSLatitude04F / GPSLongitude04F, with
-//      GPSAccuracy04F in metres), when the recording has CAN data: only fixes
-//      of CAN_FIX_MAX_M or better, read from the CAN index's minute files at the
-//      recording's first and last minutes (a few minutes inward when those have
-//      no fix), each file read once while it does not change;
-//   2. the cameras' GPS from the speed index (the first indexed front clip's
-//      first position, the last one's last position);
-//   3. for Sentry and Saved events, Tesla's event.json estimate, which CAN GPS
-//      at the event time beats.
+//   1. the car's own GPS: the cameras' GPS from the speed index (the first
+//      indexed front clip's first position, the last one's last position), and
+//      for Sentry and Saved events Tesla's event.json estimate;
+//   2. CAN Bridge GPS (0x04F GPSLatitude04F / GPSLongitude04F, with
+//      GPSAccuracy04F in metres), only for an end the car gave no position for:
+//      on a Screenmate it is the Screenmate's own GPS receiver, not the car's
+//      (its accuracy tops out at 25.2 m, and indoors it keeps an old fix).
+//      Only fixes of CAN_FIX_MAX_M or better, read from the CAN index's minute
+//      files at the recording's first and last minutes (a few minutes inward
+//      when those have no fix), each file read once while it does not change.
 //
 // A recording is at a place when it starts and ends there (parked at Work, or
 // a loop from Home); otherwise from and to name where it started and ended.
@@ -193,20 +194,20 @@ function createRecordingPlaces({ keysFor, canFile, utcOf, clipStats, filesOf, ge
     const keys = hasCan && hasCan(rec) ? [...await keysFor(v.id)].sort() : [];
     const name = (p) => (p ? placeOf(p)?.name ?? null : null);
     if (rec.eventId) {
-      const at = stampOf(rec.eventAt);
-      const can = keys.length && at ? await canNear(keys, utcOf(v, at)) : null;
-      if (can) return { place: name(can), placeSource: 'can' };
       const ev = eventPos ? await eventPos(rec) : null;
       if (ev) return { place: name(ev), placeSource: 'event' };
       const { z } = await videoEnds(v.id, rec);
-      return z ? { place: name(z), placeSource: 'video' } : { place: null };
+      if (z) return { place: name(z), placeSource: 'video' };
+      const at = stampOf(rec.eventAt);
+      const can = keys.length && at ? await canNear(keys, utcOf(v, at)) : null;
+      return can ? { place: name(can), placeSource: 'can' } : { place: null };
     }
-    const can = keys.length ? await canEndsOf(v, rec, keys) : { a: null, z: null };
-    const video = can.a && can.z ? { a: null, z: null } : await videoEnds(v.id, rec);
-    const a = can.a || video.a;
-    const z = can.z || video.z;
+    const video = await videoEnds(v.id, rec);
+    const can = keys.length && (!video.a || !video.z) ? await canEndsOf(v, rec, keys) : { a: null, z: null };
+    const a = video.a || can.a;
+    const z = video.z || can.z;
     if (!a || !z) return { place: null };
-    const placeSource = can.a && can.z ? 'can' : 'video';
+    const placeSource = video.a && video.z ? 'video' : video.a || video.z ? 'video' : 'can';
     const from = name(a);
     const to = name(z);
     if (from && from === to) return { place: from, placeSource };
