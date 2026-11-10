@@ -1022,10 +1022,13 @@ export const within = (r, b) => r.left >= b.left - 0.5 && r.left + r.width <= b.
 export function clearOf(box, obstacles, bounds, gap = 8) {
   const hit = (r) => obstacles.find((o) => overlaps(r, o));
   if (!hit(box)) return box;
-  const fits = (r) => within(r, bounds);
-  const around = (r, o) => [
+  // straight down may run past the bounds' bottom (the page scrolls): a box the cameras grew
+  // into (a wider window, taller cameras) slides down under them, as it was, rather than
+  // jumping across the page to the one side where it fits in the window
+  const fits = (r) => within(r, r.down ? { ...bounds, bottom: Infinity } : bounds);
+  const around = ({ down, ...r }, o) => [
     { ...r, left: o.left - gap - r.width }, { ...r, left: o.left + o.width + gap },
-    { ...r, top: o.top + o.height + gap }, ...(o.above === false ? [] : [{ ...r, top: o.top - gap - r.height }])
+    { ...r, top: o.top + o.height + gap, down: true }, ...(o.above === false ? [] : [{ ...r, top: o.top - gap - r.height }])
   ];
   const cost = (r) => Math.abs(r.left - box.left) + Math.abs(r.top - box.top);
   let best = null;
@@ -1040,7 +1043,7 @@ export function clearOf(box, obstacles, bounds, gap = 8) {
     }
     frontier = next.slice(0, 64);
   }
-  if (best) return best;
+  if (best) { const { down, ...r } = best; return r; }
   const low = Math.max(...obstacles.map((o) => o.top + o.height));
   return { ...box, left: Math.max(bounds.left, Math.min(bounds.right - box.width, box.left)), top: low + gap };
 }
@@ -1368,6 +1371,10 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     const list = floating(panel) && panel !== held;
     if (!bar && !list) return;
     const pb = pageBox();
+    // measured at their own size: a box without a width of its own fits its contents, and one
+    // left near the window's right edge by the last layout is squeezed there (a narrower window
+    // made the bar half as wide, and it stayed so); from the page's left, each is its full size
+    for (const [node, on] of [[el, bar], [panel, list]]) if (on) node.style.left = `${Math.round(-pb.ox)}px`;
     if (pb.fs) {
       // in fullscreen: shares of the screen (the page's layout means nothing there)
       const spot = (field) => fsSpots[field] || board[field]?.[screenKind()];

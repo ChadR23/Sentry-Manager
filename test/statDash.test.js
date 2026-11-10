@@ -976,6 +976,16 @@ test('placing: kept across the page, off the cameras unless put on them, off the
   assert.deepEqual(placeFor(listSpot, { width: 340, height: 300 }, { stage, bounds, bar: moved, others: [moved] }), rect(300, 1358, 340, 300));
   // far from the bar: anchored to the cameras only
   assert.equal(spotFor(rect(100, 1500, 340, 300), stage, { bar }).bar, undefined);
+  // a wider window: the cameras grew down into a box put under them by the bar, and a window too
+  // short for it below them. It slides straight down under them (the page scrolls), it does not
+  // jump across the page to the one side where it fits (the owner's List went from the timeline
+  // at the bottom left to over the Map on the right)
+  const win = { left: 0, top: 0, right: 1900, bottom: 1080 };
+  const tall = rect(260, 140, 1030, 680); // the cameras, taller in the wider window
+  const listBox = rect(310, 765, 245, 400);
+  const slid = clearOf(listBox, [{ ...tall, above: false }], win);
+  assert.deepEqual(slid, rect(310, 140 + 680 + 8, 245, 400), 'straight down, same across');
+  assert.ok(!('down' in slid));
 });
 
 /** Both boxes floating: the bar under the cameras on the left, the List in the column on their right. */
