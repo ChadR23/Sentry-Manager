@@ -24,6 +24,9 @@ const MAX_HANDSHAKE_FRAME = 16 * 1024; // before the proof: no reason for more
 const MAX_CHUNK = MIB;
 const MAX_ANSWER = 64 * MIB;
 const MAX_IN_FLIGHT = 8;
+const MAX_BUFFERED = 96 * MIB; // chunked answers held at once for one Pi, all its requests together
+const NOTICES = 20; // net and alert frames a Pi may send in NOTICE_MS; more are ignored
+const NOTICE_MS = 10 * 60_000;
 const MAX_STATUS = 256 * 1024;
 const SLOT_FAILURES = 5; // a pairing slot closes after this many wrong proofs
 const FAILS_PER_MINUTE = 10; // per address
@@ -275,6 +278,18 @@ function createSentryUsbLink({
   function makeLink(ws, id, ip, port) {
     const pending = new Map(); // request id -> { resolve, timer, chunks, bytes, res }
     let stray = 0;
+    let notices = []; // times of its net and alert frames
+    // every frame of these is a database write, a security-log row and maybe a notification
+    const noticeOk = () => {
+      notices = notices.filter((t) => t > now() - NOTICE_MS);
+      if (notices.length >= NOTICES) {
+        if (notices.length === NOTICES) { notices.push(now()); log.warn(`Sentry USB ${id}: over ${NOTICES} network reports or alerts in 10 minutes, the rest ignored`); }
+        return false;
+      }
+      notices.push(now());
+      return true;
+    };
+    const buffered = () => { let n = 0; for (const p of pending.values()) n += p.bytes; return n; };
     const link = { ws, id, ip, port, since: now(), pending };
     const settle = (rid, out) => {
       const p = pending.get(rid);
@@ -323,6 +338,7 @@ function createSentryUsbLink({
         try { onStatus(id, link.statuses === 1); } catch (err) { log.warn(`Sentry USB ${id}: ${err.message}`); }
         return;
       }
+      if ((m.t === 'net' || m.t === 'alert') && !noticeOk()) return;
       if (m.t === 'net') {
         // untrusted detail for the log, never used to tell who the Pi is
         const d = byId(id);
@@ -362,6 +378,10 @@ function createSentryUsbLink({
         p.bytes += buf.length;
         if (p.bytes > MAX_ANSWER) {
           settle(m.id, { status: 502, error: 'The Sentry USB\'s answer is over 64 MiB.' });
+          return undefined;
+        }
+        if (buffered() > MAX_BUFFERED) {
+          settle(m.id, { status: 502, error: 'The Sentry USB is sending too much at once: try again in a moment.' });
           return undefined;
         }
         p.chunks.push(buf);
@@ -591,5 +611,5 @@ function withoutKeys(value) {
 
 module.exports = {
   createSentryUsbLink, proxyTarget, maskConfig, isSecretKey, SETTABLE, SECRET_TARGETS, secretsNeeded, safeType, pairingKey, piProof, managerProof, sameHex, fpHex, fpGroups, withoutKeys,
-  LINK_PATH, MAX_FRAME, MAX_HANDSHAKE_FRAME, MAX_ANSWER, MAX_IN_FLIGHT, SLOT_FAILURES, FAILS_PER_MINUTE
+  LINK_PATH, MAX_FRAME, MAX_HANDSHAKE_FRAME, MAX_ANSWER, MAX_BUFFERED, NOTICES, MAX_IN_FLIGHT, SLOT_FAILURES, FAILS_PER_MINUTE
 };

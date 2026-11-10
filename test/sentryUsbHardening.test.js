@@ -134,3 +134,39 @@ test('maskConfig: values that are not plain text are emptied, numbers and boolea
   const m = L.maskConfig({ A: { value: deep(150_000), active: true }, B: { value: 5, active: true }, C: { value: true, active: false } });
   assert.deepEqual(m, { A: { value: '', active: true }, B: { value: '5', active: true }, C: { value: 'true', active: false } });
 });
+
+test('a Pi that floods network reports and alerts: at most 20 in 10 minutes reach the database and the security log', async () => {
+  const t = await setup();
+  try {
+    await t.link.openPairing({ name: 'Car', username: 'pi', password: 'raspberry' });
+    const p = await t.pi({ mode: 'pair', username: 'pi', password: 'raspberry', net: false, status: false });
+    for (let i = 0; i < 100; i++) p.send({ t: i % 2 ? 'net' : 'alert', ssid: `Net${i}`, kind: 'proof', seen: `x${i}` });
+    await wait(300);
+    const notices = t.events.filter((e) => e.type === 'net' || e.type === 'alert');
+    assert.equal(notices.length, L.NOTICES);
+    assert.equal(t.link.devices()[0].online, true);
+  } finally { await t.close(); }
+});
+
+test('a Pi\'s chunked answers together are held to 96 MiB, not 8 x 64 MiB', async () => {
+  const t = await setup({ requestMs: 30_000 });
+  try {
+    await t.link.openPairing({ name: 'Car', username: 'pi', password: 'raspberry' });
+    const MIB = 1024 * 1024;
+    const part = Buffer.alloc(MIB, 7).toString('base64');
+    const p = await t.pi({
+      mode: 'pair', username: 'pi', password: 'raspberry', net: false, status: false,
+      onRequest: (m, me) => {
+        me.ws.send(JSON.stringify({ t: 'res', id: m.id, status: 200, type: 'application/zip', chunked: true }));
+        for (let seq = 0; seq < 50; seq++) me.ws.send(JSON.stringify({ t: 'chunk', id: m.id, seq, data: part }));
+        return false; // never ends
+      }
+    });
+    const id = p.auth.id;
+    const answers = [0, 1].map(() => t.link.request(id, { method: 'GET', path: '/api/system/backups' }));
+    const first = await Promise.race([...answers, wait(15_000).then(() => null)]);
+    assert.equal(first?.status, 502);
+    assert.ok(first, 'one of them was stopped');
+    assert.match(first.error, /too much at once/);
+  } finally { await t.close(); }
+});
