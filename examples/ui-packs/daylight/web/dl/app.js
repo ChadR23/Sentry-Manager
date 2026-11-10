@@ -81,6 +81,26 @@ export function updateBadges() {
   document.title = `${unread ? `(${unread}) ` : ''}${ROUTES[current.route]?.label || 'Today'} · Sentry Six`;
 }
 
+// ---------- the server's bars at the top of the page ----------
+// web/critical.js may show a red critical-update bar (fixed at the top) and an
+// amber startup-check bar (in the page, it scrolls away). The side bar and the
+// phone top bar move down under them (--bars-top) instead of hiding behind them.
+let barsRaf = 0;
+function fitUnderBars() {
+  barsRaf = 0;
+  let y = 0;
+  for (const id of ['sentry-critical-update', 'sentry-health-bar']) {
+    const el = document.getElementById(id);
+    if (el) y = Math.max(y, el.getBoundingClientRect().bottom);
+  }
+  document.documentElement.style.setProperty('--bars-top', `${Math.max(0, Math.round(y))}px`);
+}
+const fitUnderBarsSoon = () => { if (!barsRaf) barsRaf = requestAnimationFrame(fitUnderBars); };
+new MutationObserver(fitUnderBarsSoon).observe(document.body, { childList: true });
+addEventListener('scroll', fitUnderBarsSoon, { passive: true });
+addEventListener('resize', fitUnderBarsSoon);
+fitUnderBars();
+
 // ---------- router ----------
 const view = $('#view');
 const current = { route: 'home', cleanup: [], seq: 0 };

@@ -28,17 +28,28 @@ export async function render(ctx) {
   view.querySelector('.settings-nav a.active')?.scrollIntoView({ block: 'nearest', inline: 'center' });
   const el = view.querySelector('#section');
   const sub = { el, ctx };
-  if (section === 'vehicles') return vehicles(sub);
-  if (section === 'add-vehicle') return addVehicle(sub);
-  if (section === 'vehicle') return editVehicle(sub, params[1]);
-  if (section === 'places') return places(sub);
-  if (section === 'account') return account(sub);
-  if (section === 'look') return look(sub);
-  if (section === 'interface') return iface(sub);
-  if (section === 'security') return security(sub);
-  if (section === 'updates') return updates(sub);
-  if (section === 'nodes') return nodesPage.render({ ...ctx, view: el });
-  return system(sub);
+  const show = () => {
+    if (section === 'vehicles') return vehicles(sub);
+    if (section === 'add-vehicle') return addVehicle(sub);
+    if (section === 'vehicle') return editVehicle(sub, params[1]);
+    if (section === 'places') return places(sub);
+    if (section === 'account') return account(sub);
+    if (section === 'look') return look(sub);
+    if (section === 'interface') return iface(sub);
+    if (section === 'security') return security(sub);
+    if (section === 'updates') return updates(sub);
+    if (section === 'nodes') return nodesPage.render({ ...ctx, view: el });
+    return system(sub);
+  };
+  // a section that can't load (a watch-only account's Security or Helper servers, say) says so in
+  // its place: the Settings sections stay on screen to pick another
+  try {
+    return await show();
+  } catch (err) {
+    if (err?.status === 401 || !ctx.alive()) return undefined;
+    el.innerHTML = `<div class="note note-bad">${icon('alert')}<span>${esc(err?.message || String(err))}</span></div>`;
+    return undefined;
+  }
 }
 
 // ---------- vehicles ----------

@@ -8,7 +8,7 @@ html.calm *, html.calm *::before, html.calm *::after { animation-duration: .001m
 /* ---------- frame ---------- */
 .app { min-height: 100vh; min-height: 100dvh; }
 .side {
-  position: fixed; inset: 0 auto 0 0; width: 264px; display: flex; flex-direction: column; gap: 8px;
+  position: fixed; inset: var(--bars-top, 0px) auto 0 0; width: 264px; display: flex; flex-direction: column; gap: 8px;
   padding: 22px 16px 16px; background: var(--bg-tint); border-right: 1px solid var(--border); z-index: 20; overflow-y: auto;
 }
 .side .brand { padding: 4px 8px 18px; }
@@ -53,10 +53,12 @@ html.calm *, html.calm *::before, html.calm *::after { animation-duration: .001m
 
 /* ---------- phones ---------- */
 @media (max-width: 959px) {
+  /* a control reached with Tab scrolls clear of the top bar and the tab bar, not under them */
+  html { scroll-padding: calc(64px + var(--bars-top, 0px)) 0 calc(90px + env(safe-area-inset-bottom)); }
   .side { display: none; }
   .main { margin-left: 0; padding-bottom: calc(76px + env(safe-area-inset-bottom)); }
   .topbar {
-    display: flex; align-items: center; gap: 10px; position: sticky; top: 0; z-index: 30;
+    display: flex; align-items: center; gap: 10px; position: sticky; top: var(--bars-top, 0px); z-index: 30;
     padding: calc(8px + env(safe-area-inset-top)) 12px 8px 14px; background: color-mix(in srgb, var(--bg) 88%, transparent);
     backdrop-filter: saturate(1.4) blur(14px); -webkit-backdrop-filter: saturate(1.4) blur(14px); border-bottom: 1px solid var(--border);
   }
@@ -186,6 +188,8 @@ dialog.dlg[open] { animation: pop 240ms var(--ease) both; }
 .dlg-body { padding: 8px 24px 8px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
 .dlg-foot { display: flex; justify-content: flex-end; gap: 10px; padding: 16px 24px 22px; flex-wrap: wrap; }
 @media (max-width: 520px) { .dlg-foot .btn { flex: 1; } }
+/* a long button label ("Download the original to start from") wraps on a phone instead of widening the page */
+@media (max-width: 520px) { .btn { max-width: 100%; white-space: normal; text-align: center; } }
 
 #toasts { position: fixed; z-index: 200; left: 50%; transform: translateX(-50%); bottom: 24px; display: flex; flex-direction: column; gap: 10px; width: min(520px, calc(100vw - 24px)); pointer-events: none; }
 @media (max-width: 959px) { #toasts { bottom: calc(86px + env(safe-area-inset-bottom)); } }

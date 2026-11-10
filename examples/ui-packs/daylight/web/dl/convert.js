@@ -47,7 +47,7 @@ export const ERROR_WORDS = {
 };
 export const describe = (err) => {
   if (err?.code === 'DEVICE_UNSUPPORTED' && err.details?.device) return `${err.details.device} can’t encode ${CODEC_WORD[err.details.codec] || err.details.codec}. Set it to Off or pick another format.`;
-  return ERROR_WORDS[err?.code] || (err?.code ? `The converter said: ${String(err.code).toLowerCase().replace(/_/g, ' ')}.` : err?.message || 'Something went wrong.');
+  return ERROR_WORDS[err?.code] || (typeof err?.code === 'string' && /\s/.test(err.code) ? err.code : err?.code ? `The converter said: ${String(err.code).toLowerCase().replace(/_/g, ' ')}.` : err?.message || 'Something went wrong.');
 };
 
 /** Counts of a snapshot, whether its item list is complete or trimmed. */

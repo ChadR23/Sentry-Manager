@@ -254,7 +254,8 @@ async function overview(ctx) {
     const hours = Array.from({ length: 24 }, (_, h) => h);
     const hourName = (h) => new Date(2000, 0, 1, h).toLocaleTimeString([], hourOpts(clockPref.h24 ? { minute: '2-digit' } : {}));
     const running = st.active && typeof st.active === 'object' ? Object.keys(st.active) : [];
-    const statusLine = !s.enabled ? 'Off'
+    // (off: the chip says so; no second "Off" beside it)
+    const statusLine = !s.enabled ? ''
       : st.checking ? 'Checking for new clips…'
         : running.length ? `Converting new clips of ${running.map((r) => vehicleForRoot(r)?.name || 'a vehicle').join(', ')}`
           : st.nextCheckAt ? `Next check ${new Date(st.nextCheckAt).toLocaleTimeString([], hourOpts({ minute: '2-digit' }))}${st.lastCheckAt ? ` · last ${ago(st.lastCheckAt)}${Number.isSafeInteger(st.lastNewFiles) ? `, ${plural(st.lastNewFiles, 'new clip')}` : ''}` : ''}`

@@ -121,7 +121,7 @@ async function player(ctx, v, day, recId) {
   const cat = CATEGORY[rec.category] || CATEGORY.Other;
   const st = {
     seg: 0, focus: null, rate: store.get('rate', 1), playing: false,
-    units: store.get('units', /^en-US/.test(navigator.language) ? 'mph' : 'kmh'), tele: [], teleFor: null, wantPlay: false, scrubbing: false
+    units: store.get('units', /^en-(US|GB|LR|MM)$/i.test(navigator.language || '') ? 'mph' : 'kmh'), tele: [], teleFor: null, wantPlay: false, scrubbing: false
   };
   if (!SPEEDS.includes(st.rate)) st.rate = 1;
   const startAt = Number(new URLSearchParams(location.hash.split('?')[1] || '').get('seg'));
