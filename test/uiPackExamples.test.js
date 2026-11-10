@@ -275,3 +275,10 @@ test('flux: the recordings table fits its own width, never scrolled sideways for
   // the column order the rules count on: checkbox, thumbnail, start, type, length, cams, files, size, codec, lock, buttons
   assert.match(src, /<td class="cb">[\s\S]*?<td class="thumbc">[\s\S]*?<td class="mono nowrap">[\s\S]*?<td><span class="cat[\s\S]*?trackLength[\s\S]*?camsCell[\s\S]*?r\.fileCount[\s\S]*?bytes\(r\.bytes\)[\s\S]*?codecCell[\s\S]*?class="prot"[\s\S]*?class="r nowrap acts"/);
 });
+
+// Flux's command palette sits 12vh down: its height leaves room for that, so
+// a short window (1100 x 600, a phone on its side) shows it whole.
+test('flux: the command palette fits a short window', () => {
+  const css = fs.readFileSync(path.join(ROOT, 'flux', 'web', 'flux.css'), 'utf8');
+  assert.match(css, /\.palette \{[^}]*max-height: min\(560px, calc\(88dvh - 16px\)\);[^}]*margin: 12vh auto auto;/);
+});

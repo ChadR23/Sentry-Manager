@@ -566,7 +566,7 @@ label.sub-block { display: flex; gap: 8px; align-items: flex-start; }
 .kb-row { display: flex; justify-content: space-between; gap: 12px; padding: 4px 0; border-bottom: 1px solid var(--line-soft); font-size: 12.5px; }
 
 /* palette */
-.palette { width: min(620px, calc(100vw - 24px)); max-height: min(560px, calc(100dvh - 40px)); padding: 0; margin: 12vh auto auto; border: 1px solid var(--line); border-radius: 14px; background: oklch(0.19 0.016 275 / 0.97); color: var(--text); box-shadow: 0 40px 100px -30px #000, 0 0 0 1px oklch(0.72 0.19 295 / 0.2); overflow: hidden; }
+.palette { width: min(620px, calc(100vw - 24px)); max-height: min(560px, calc(88dvh - 16px)); padding: 0; margin: 12vh auto auto; /* (the top margin counted: a short window shows it whole) */ border: 1px solid var(--line); border-radius: 14px; background: oklch(0.19 0.016 275 / 0.97); color: var(--text); box-shadow: 0 40px 100px -30px #000, 0 0 0 1px oklch(0.72 0.19 295 / 0.2); overflow: hidden; }
 .palette[open] { display: flex; flex-direction: column; animation: rise .16s var(--ease); }
 .palette::backdrop { background: oklch(0.1 0.01 275 / 0.55); backdrop-filter: blur(4px); }
 .pal-head { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--line-soft); }
