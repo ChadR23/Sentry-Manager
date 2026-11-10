@@ -41,7 +41,7 @@ const ERRORS = {
 };
 export function explain(err) {
   if (err?.code === 'DEVICE_UNSUPPORTED' && err.details?.device) return `${err.details.device} can’t encode ${CODEC[err.details.codec] || err.details.codec}. Set it to 0 or pick another codec.`;
-  return ERRORS[err?.code] || (err?.code ? `The converter said: ${String(err.code).toLowerCase().replace(/_/g, ' ')}.` : 'Something went wrong.');
+  return ERRORS[err?.code] || (typeof err?.code === 'string' && /\s/.test(err.code) ? err.code : err?.code ? `The converter said: ${String(err.code).toLowerCase().replace(/_/g, ' ')}.` : 'Something went wrong.');
 }
 
 /** Counts of a snapshot, whether its item list is complete or trimmed. */

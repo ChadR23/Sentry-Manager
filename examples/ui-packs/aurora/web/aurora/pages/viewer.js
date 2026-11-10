@@ -4,7 +4,7 @@
 // All cameras play in sync from /api/media (any subset), clip after clip;
 // the driving data from /api/telemetry shows as a heads-up display.
 
-import { $, $$, esc, icon, api, state, current, setVehicle, vehiclePicker, plural, clock, wall, dayTitle, timeOf, humanize, store, empty, toast, fin, footMinutes } from '../core.js';
+import { $, $$, esc, icon, api, state, current, setVehicle, vehiclePicker, plural, clock, wall, dayTitle, dayParts, timeOf, humanize, store, empty, toast, fin, footMinutes } from '../core.js';
 import * as tele from '../telemetry.js';
 import { createViewerMap } from '/web/viewerMap.js';
 import { createExportPanel } from '/web/exportPanel.js';
@@ -63,7 +63,7 @@ export default {
   wide: true,
   topics: [],
   async mount(ctx) {
-    const { body, actions, params, query, go } = ctx;
+    const { body, params, query, go } = ctx;
     const sky = window.auroraSky;
     if (params[0] && state.vehicles.some((x) => x.id === params[0]) && params[0] !== state.vehicleId) {
       // a link to another vehicle's recording: that vehicle, without a re-render
@@ -71,12 +71,13 @@ export default {
       store.set('vehicle', params[0]);
     }
     const v = current();
-    actions.innerHTML = vehiclePicker();
+    // (the title bar is hidden on the Viewer: its vehicle picker is by the list of recordings)
     if (!v) {
       body.innerHTML = empty('No vehicle yet', 'Add one in Settings to watch its footage.', `<a class="btn primary" href="#/settings/vehicles/new">${icon('plus')} Add a vehicle</a>`);
       return {};
     }
-    const opts = { tele: store.get('hud', true), unit: store.get('unit', 'kmh'), mirror: store.get('mirror', false), speed: 1 };
+    // speed in the units of the car-data boxes under the cameras (web/statDash.js: mph where miles are the custom), until changed here
+    const opts = { tele: store.get('hud', true), unit: store.get('unit', /^en-(US|GB|LR|MM)$/i.test(navigator.language || '') ? 'mph' : 'kmh'), mirror: store.get('mirror', false), speed: 1 };
     let dead = false;
     let clips = [];
     let index = 0;
@@ -127,7 +128,7 @@ export default {
       </div>
       <p class="vw-meta" id="vw-meta"><span id="vw-why"></span><span class="clipline" id="clipline"></span></p>
       <section class="vw-mappanel panel"><div class="panel-head"><h3>${icon('pin')} Map</h3></div><div class="vw-map" id="vw-map" role="region" aria-label="Map of the drive"></div></section>
-      <section class="vw-side panel"><div class="panel-head"><h3 id="list-title">Recordings that day</h3></div><div class="vw-list" id="vw-list"></div></section>
+      <section class="vw-side panel"><div class="panel-head"><h3 id="list-title">Recordings that day</h3>${vehiclePicker('veh-pick-vw')}</div><div class="vw-list" id="vw-list"></div></section>
       <section class="vw-moments panel"><div class="panel-head"><h3>${icon('alert')} Moments</h3></div><div id="vw-moments"></div></section>`;
 
     const cockpit = q('#cockpit');
@@ -259,7 +260,11 @@ export default {
         : F;
       cockpit.classList.remove('lay-wide', 'lay-tall', 'lay-focus', 'lay-theatre');
       cockpit.classList.add(lay);
-      cockpit.classList.toggle('compact', lay === 'lay-theatre' && FH < 300);
+      // a small front camera (a phone, a short window) keeps only the speed of the HUD, so the
+      // picture is not hidden under the gear, blinker, pedal and GPS tags
+      const frontH = FH ?? F * 0.75;
+      cockpit.classList.toggle('compact', frontH < 300);
+      cockpit.classList.toggle('tiny', frontH < 160);
       const wasTheatre = root.classList.contains('vw-theatre');
       root.classList.toggle('vw-theatre', theatre);
       // the page's own padding changes with it: measure again
@@ -403,11 +408,13 @@ export default {
       return clips.length > 0;
     }
 
+    // "Fri 6 Nov": the date on a phone, beside the category
+    const shortDay = (d) => { const p = dayParts(d); return [p.wd, p.dd, p.mon].filter(Boolean).join(' '); };
     function title() {
       const c = clips[index];
       const rec = c?.rec;
       q('#vw-title').innerHTML = rec
-        ? `<span class="chip ${rec.category === 'Sentry' ? 'magenta' : rec.category === 'Saved' ? 'green' : 'teal'}">${esc(rec.category)}</span><span class="vw-date">${esc(dayTitle(rec.day))}</span><span class="muted">${esc(timeOf(rec.start))}${recId ? '' : ' · whole day'}</span>`
+        ? `<span class="chip ${rec.category === 'Sentry' ? 'magenta' : rec.category === 'Saved' ? 'green' : 'teal'}">${esc(rec.category)}</span><span class="vw-date"><span class="d-long">${esc(dayTitle(rec.day))}</span><span class="d-short">${esc(shortDay(rec.day))}</span></span><span class="muted">${esc(timeOf(rec.start))}${recId ? '' : ' · whole day'}</span>`
         : '';
       q('#vw-why').innerHTML = rec ? `${rec.event?.reason ? `<span class="chip">${esc(humanize(rec.event.reason))}</span>` : ''}${rec.event?.city ? `<span class="muted small">${icon('pin', 'ico-sm')} ${esc([rec.event.street, rec.event.city].filter(Boolean).join(', '))}</span>` : ''}` : '';
     }
@@ -889,6 +896,8 @@ export default {
       map.destroy();
       xp.destroy();
       q('.vw-mappanel')?.remove();
+      // (nothing loaded: no "Loading…" left in the title row)
+      if (q('#vw-title .muted')?.textContent === 'Loading…') q('#vw-title').innerHTML = `<span class="vw-date">${esc(v.name)}</span>`;
       q('#vw-stage').innerHTML = empty('Nothing to play yet', 'This vehicle has no recordings with camera clips here.', `<a class="btn" href="#/footage">${icon('film')} Footage</a>`);
     } else {
       // an event: start a little before it

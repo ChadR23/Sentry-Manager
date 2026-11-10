@@ -27,9 +27,12 @@ body::after {
 .skip { position: fixed; left: 12px; top: -80px; z-index: 100; padding: 12px 18px; border-radius: 12px; background: var(--glass-solid); color: var(--ink); min-height: 44px; }
 .skip:focus { top: calc(12px + var(--safe-t)); }
 
+/* a control reached with Tab scrolls clear of the fixed top bar and the dock, not under them */
+html { scroll-padding: calc(84px + var(--bars-top, 0px)) 0 calc(130px + var(--safe-b)); }
+
 /* ---------- top bar ---------- */
 .topbar {
-  position: fixed; top: 0; left: 0; right: 0; z-index: 30;
+  position: fixed; top: var(--bars-top, 0px); left: 0; right: 0; z-index: 30;
   display: flex; justify-content: space-between; align-items: center; gap: 12px;
   padding: calc(12px + var(--safe-t)) calc(16px + var(--safe-r)) 0 calc(16px + var(--safe-l));
   pointer-events: none;
@@ -80,9 +83,9 @@ body::after {
 
 .ico { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; flex: none; }
 
-.veh-pick { position: relative; display: inline-flex; align-items: center; }
+.veh-pick { position: relative; display: inline-flex; align-items: center; max-width: 100%; min-width: 0; }
 .veh-pick .ico { position: absolute; left: 14px; width: 18px; height: 18px; color: var(--accent-2); pointer-events: none; }
-.veh-pick select { padding-left: 42px; border-radius: 999px; min-width: 160px; background-color: rgba(4, 8, 22, .45); }
+.veh-pick select { padding-left: 42px; border-radius: 999px; min-width: 160px; max-width: 100%; text-overflow: ellipsis; background-color: rgba(4, 8, 22, .45); }
 
 /* ---------- surfaces ---------- */
 .panel {
@@ -317,6 +320,9 @@ kbd { font-family: var(--mono); font-size: 13px; padding: 2px 7px; border-radius
 .list { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
 .list li { display: flex; gap: 12px; align-items: flex-start; min-width: 0; }
 .list li > div { min-width: 0; flex: 1; }
+/* a long unbroken path or address in a message wraps instead of widening the page (a phone zoomed out) */
+.attn, .note-item { overflow-wrap: anywhere; }
+.attn > div { min-width: 0; }
 .attn { padding: 12px 14px; border-radius: 16px; background: rgba(255, 255, 255, .05); border: 1px solid var(--line); }
 .attn.critical, .attn.error { border-color: rgba(255, 143, 163, .45); background: rgba(255, 143, 163, .08); }
 .attn.warn, .attn.warning { border-color: rgba(255, 210, 122, .4); background: rgba(255, 210, 122, .07); }
@@ -429,6 +435,7 @@ body[data-route="viewer"] .win-body { display: flex; flex-direction: column; }
 .vw-stage { position: relative; }
 .vw-title > span { white-space: nowrap; }
 .vw-title .vw-date { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.vw-title .d-short { display: none; }
 .vw-meta { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin: 14px 0 0; min-height: 0; }
 .vw-meta #vw-why { display: contents; }
 .vw-days { flex-wrap: nowrap; flex: none; }
@@ -505,6 +512,11 @@ body[data-route="viewer"] .win-body { display: flex; flex-direction: column; }
 .cockpit.compact .hud .hud-row ~ .hud-row { display: none; }
 .cockpit.compact .hud-speed { padding: 4px 10px; }
 .cockpit.compact .hud-speed b { font-size: 24px; }
+.cockpit.tiny .hud { top: 6px; right: 6px; }
+.cockpit.tiny .hud .hud-row { display: none; }
+.cockpit.tiny .hud-speed { padding: 2px 8px; border-radius: 12px; }
+.cockpit.tiny .hud-speed b { font-size: 17px; }
+.cockpit.tiny .hud-speed span { font-size: 10px; }
 /* while it plays sideways the picture is all there is: the date, event and
    recordings rows come back on pause (or scroll down to them) */
 :root.vw-theatre.vw-playing body[data-route="viewer"] :is(.vw-top, .vw-meta, .vw-side, .vw-mappanel) { display: none; }
@@ -534,6 +546,11 @@ body[data-route="viewer"] .win-body { display: flex; flex-direction: column; }
   background: rgba(12, 19, 42, .78);
   transition: opacity .35s var(--ease), transform .35s var(--ease), visibility 0s;
 }
+/* the car-data bar and the List, floating on the page (web/statDash.js puts them on <body> above
+   everything), go under the control bar, the dock and the top bar like the rest of the page:
+   dropped low in the window they no longer hide play/pause and the dock (scroll to reach them;
+   they show while the bar and dock fade away during playback) */
+body > .sentry-sd.float, body > .sentry-sd.sd-listpanel.float { z-index: 25; }
 .ctrl-extra { display: contents; }
 #c-more { display: none; }
 .ctrl .time { min-width: 86px; text-align: right; }
@@ -565,7 +582,13 @@ body[data-route="viewer"] .win-body { display: flex; flex-direction: column; }
   body[data-route="viewer"] .topbar { display: none; }
   body[data-route="viewer"] .stage { padding-top: calc(10px + var(--safe-t)); }
   .vw-top { flex-wrap: nowrap; }
-  .vw-title { flex-wrap: nowrap; min-width: 0; font-size: 16px; }
+  /* the category and the date on the first line (the date cut short if it must), the time under
+     them: in one line the time pushed the date down to nothing and ran under the Day buttons */
+  .vw-title { flex-wrap: wrap; row-gap: 2px; min-width: 0; font-size: 16px; }
+  .vw-title .vw-date { flex: 1 1 0; }
+  .vw-title .d-long { display: none; }
+  .vw-title .d-short { display: inline; }
+  .vw-title > span.muted { flex-basis: 100%; }
 }
 .ctrl-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .ctrl .btn.icon { border-radius: 50%; }
@@ -828,6 +851,8 @@ body[data-route="viewer"] .win-body { display: flex; flex-direction: column; }
   .dock { padding-left: 4px; padding-right: 4px; }
   .status .clock { display: none; }
   .frame { width: 150px; }
+  .vw-title { column-gap: 6px; }
+  .vw-title .chip { padding: 2px 8px; font-size: 12px; }
 }
 /* short landscape phones: everything a little tighter */
 @media (max-height: 500px) and (orientation: landscape) {
