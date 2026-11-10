@@ -228,3 +228,15 @@ test('horizon: the frame-step buttons leave the heads-up display readable', () =
   const css = fs.readFileSync(path.join(ROOT, 'horizon', 'web', 'hz', 'app.css'), 'utf8');
   assert.match(css, /\.cam\.main \.sentry-x-steps \{ top: 50%; bottom: auto; transform: translateY\(-50%\); justify-content: space-between;/);
 });
+
+// Horizon's top bar picks one row or two by measuring each part; the car is
+// counted as wide as it really shows on one row (the name up to the CSS
+// max-width, the picker of two or more vehicles at its set width), or the left
+// page group slides under the brand on a 1300-1600 px window.
+test('horizon: the top bar counts the car name and the vehicle picker at their real width', () => {
+  const main = fs.readFileSync(path.join(ROOT, 'horizon', 'web', 'hz', 'main.js'), 'utf8');
+  const css = fs.readFileSync(path.join(ROOT, 'horizon', 'web', 'hz', 'app.css'), 'utf8');
+  const max = Number(/const CAR_MAX = (\d+);/.exec(main)?.[1]);
+  assert.equal(max, Number(/\.car-one \{[^}]*max-width: (\d+)px/.exec(css)?.[1]), 'CAR_MAX is .car-one\'s max-width');
+  assert.match(main, /const carSize = \(k\) => \(k\.id === 'car-one' \? Math\.min\(k\.scrollWidth, CAR_MAX\) : w\(k\)\);/, 'the picker is not capped');
+});

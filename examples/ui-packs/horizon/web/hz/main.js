@@ -57,9 +57,11 @@ qs('#car-pick').addEventListener('change', (e) => pickCar(e.target.value));
 // ---------- the top bar: one row when everything fits, else two ----------
 // Each part is measured by what it holds, not by the room its column gives
 // it, so the answer is the same in either layout and never flips back and
-// forth: brand, both page groups, the radio and the tools (the car name
-// counted at most CAR_MIN wide, as it shortens with "…").
-const CAR_MIN = 110;
+// forth: brand, both page groups, the radio and the tools. The car is counted
+// as wide as it shows on one row, where the page groups give way first: the
+// name up to its max-width in app.css (then "…"), the picker (two or more
+// vehicles) at its set width.
+const CAR_MAX = 160;
 const wide = matchMedia('(min-width: 1024px)');
 const w = (el) => (el && el.getClientRects().length ? el.getBoundingClientRect().width : 0);
 function inner(el, gap, size = w) {
@@ -70,7 +72,7 @@ function fitBar() {
   const dash = qs('#dash');
   if (!wide.matches) { dash.classList.remove('two'); return; }
   const pick = qs('#car-pick-wrap');
-  const carSize = (k) => (k.id === 'car-one' || k.id === 'car-pick' ? Math.min(k.scrollWidth, CAR_MIN) : w(k));
+  const carSize = (k) => (k.id === 'car-one' ? Math.min(k.scrollWidth, CAR_MAX) : w(k));
   const tools = inner(qs('.dash-tools'), 4, (k) => (k === pick ? inner(pick, 6, carSize) : w(k)));
   const cs = getComputedStyle(dash);
   const room = dash.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
