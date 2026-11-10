@@ -43,3 +43,11 @@ test('A short window: the sidebar sections scroll inside the card instead of run
 test('Touch screens: a check box line is at least 32 px tall', () => {
   assert.match(media('(pointer: coarse)'), /\.check \{ min-height: 32px; \}/);
 });
+
+test('Footage > a recording\'s files: the event line wraps, and a phone shows each clip\'s whole name on its own line', () => {
+  const app = fs.readFileSync(path.join(__dirname, '..', 'web/app.js'), 'utf8');
+  assert.match(app, /const ev = d\.event \? `<li class="files-event"><span>/);
+  assert.match(rule('.files li.files-event span:first-child'), /white-space: normal/);
+  const phone = media('(max-width: 760px)');
+  assert.match(phone, /\.files li:not\(\.files-head\) > span:first-child \{ grid-column: 1 \/ -1; \}/);
+});

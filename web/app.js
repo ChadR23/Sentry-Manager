@@ -1510,7 +1510,7 @@
     if (!el) return;
     try {
       const d = await api(`/api/vehicles/${v.id}/recordings/${id}`);
-      const ev = d.event ? `<li><span>${esc([humanize(d.event.reason), d.event.city, d.event.street].filter(Boolean).join(' · ') || 'Event')}</span><span></span><span></span></li>` : '';
+      const ev = d.event ? `<li class="files-event"><span>${esc([humanize(d.event.reason), d.event.city, d.event.street].filter(Boolean).join(' · ') || 'Event')}</span><span></span><span></span></li>` : '';
       const clips = d.files.filter((f) => 'codec' in f);
       const plain = clips.filter((f) => f.codec && !ENCODED_CODECS.has(f.codec)).length;
       const draw = (onlyPlain) => {

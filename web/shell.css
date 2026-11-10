@@ -224,6 +224,8 @@ details.more p { margin-top: 10px; color: var(--text-2); max-width: 760px; }
 .files li { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 14px; font-family: var(--mono); font-size: 12px; color: var(--text-2); padding: 6px 10px; border-radius: 8px; background: var(--panel-2); }
 .files li.files-head { grid-template-columns: minmax(0, 1fr) auto; font-family: var(--font); font-size: 12.5px; background: none; padding: 2px 10px 6px; }
 .files li.files-head span:first-child { direction: ltr; white-space: normal; overflow: visible; }
+/* the event's reason and place: words that wrap on a narrow screen, not a path cut short */
+.files li.files-event span:first-child { direction: ltr; white-space: normal; overflow: visible; }
 .ftag { font-family: var(--font); font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 5px; border: 1px solid var(--border-strong); }
 .ftag.enc { color: var(--info); border-color: rgba(90, 209, 242, 0.55); background: rgba(90, 209, 242, 0.12); }
 .ftag.plain { color: var(--warn); border-color: rgba(255, 159, 90, 0.55); background: var(--warn-bg); }
@@ -475,6 +477,11 @@ html.reduce-effects *, html.reduce-effects *::before { transition: none !importa
   .day-actions { grid-column: 1 / -1; flex-direction: row; flex-wrap: wrap; }
   .day-actions .btn { flex: 1 1 auto; }
   .day .recs { padding-left: 0; }
+  /* a clip's name on its own line (the left and right repeaters both showed
+     "…peater.mp4"), its codec, size and Download under it */
+  .files li:not(.files-head) { grid-template-columns: auto auto minmax(0, 1fr); row-gap: 4px; }
+  .files li:not(.files-head) > span:first-child { grid-column: 1 / -1; }
+  .files li:not(.files-head) > a { grid-column: 3; justify-self: end; }
   /* a line's time, level and scope share a row while they fit (the scope
      goes under them when it does not), the message gets the whole width:
      nothing is cut off and the box never scrolls sideways */
