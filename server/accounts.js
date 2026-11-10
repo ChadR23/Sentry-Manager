@@ -184,7 +184,10 @@ const VIEWER_POSTS = [
   /^\/api\/stars(\/[^/]+)?$/,
   /^\/api\/dashboards$/,
   /^\/api\/notifications\/[^/]+\/(read|dismiss)$/,
-  /^\/api\/notifications\/read$/
+  /^\/api\/notifications\/read$/,
+  // the Viewer's own file reads (POST only to carry the path): its clips, thumbnails
+  // and event files; Studio's delete (trashFolder) and settings stay for admins
+  /^\/api\/studio\/(readDir|readFile|exists|stat|thumbnail)$/
 ];
 // the CAN Bridge's logs, tokens and pairing are for admins; its signals, clips
 // and searches (what the Viewer shows) stay readable

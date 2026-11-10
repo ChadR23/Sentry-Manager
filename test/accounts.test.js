@@ -20,6 +20,9 @@ function memoryDb() {
 }
 
 test('watch-only accounts: exports and stars yes; settings, places and deleting no', () => {
+  for (const op of ['readDir', 'readFile', 'exists', 'stat', 'thumbnail']) assert.equal(viewerMay('POST', `/api/studio/${op}`), true, `the Viewer reads its clips (${op})`);
+  assert.equal(viewerMay('POST', '/api/studio/trashFolder'), false, 'no deleting from the Viewer');
+  assert.equal(viewerMay('POST', '/api/studio/settings'), false);
   assert.equal(viewerMay('POST', '/api/exports'), true);
   assert.equal(viewerMay('POST', '/api/vehicles/car/exports'), true);
   assert.equal(viewerMay('DELETE', '/api/exports/abc'), true);
