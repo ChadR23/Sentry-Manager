@@ -169,3 +169,23 @@ test('a Pi\'s alert frames (a wrong fingerprint, a failed Manager proof) become 
     await new Promise((r) => srv.close(r));
   }
 });
+
+test('a stranger cannot flood the log: made-up ids share a row, many addresses share one notification, and a flood evicts strangers\' rows before a Pi\'s history', () => {
+  const { a, notes, tick } = make({ opts: { maxRows: 30 } });
+  for (let i = 0; i < 200; i++) a.linkEvent({ type: 'fail', why: 'unknown id', ip: '203.0.113.9', claimed: `made-up-${i}` });
+  assert.equal(a.list({ limit: 1000 }).length, 1, 'one row for one address, whatever ids it claims');
+  assert.equal(a.list()[0].count, 200);
+  for (let i = 0; i < 100; i++) a.linkEvent({ type: 'fail', why: 'no slot', ip: `198.51.100.${i}` });
+  assert.equal(notes.filter((n) => n.always).length, 100, 'each first attempt is still raised');
+  assert.equal(new Set(notes.filter((n) => n.always).map((n) => n.dedupeKey)).size, 1, 'but as one open notification');
+  // the Pi's history, then a flood from many addresses
+  a.linkEvent({ type: 'paired', id: PI, ip: '192.168.1.57', port: 1 });
+  a.action({ deviceId: PI, who: 'admin', route: 'POST /api/system/reboot', result: '200' });
+  tick(1000);
+  for (let i = 0; i < 300; i++) a.linkEvent({ type: 'fail', why: 'timeout', ip: `10.9.${i >> 8}.${i & 255}` });
+  a.prune();
+  const rows = a.list({ limit: 1000 });
+  assert.ok(rows.length <= 30);
+  assert.ok(rows.some((r) => r.kind === 'pair-ok'), 'the pairing is kept');
+  assert.ok(rows.some((r) => r.kind === 'action'), 'the action is kept');
+});

@@ -68,7 +68,10 @@ function createSentryUsbAudit({ db, notify = () => {}, device = () => null, log 
       at, kind: KINDS[e.kind] ? e.kind : 'action', deviceId: clean(e.deviceId, 128), ip: plainIp(e.ip), port: Number.isInteger(e.port) ? e.port : null,
       who: clean(e.who, 64), detail: clean(e.detail, 300), flags: [...new Set(e.flags || [])].filter((f) => FLAGS[f])
     };
-    row.collapse = ATTEMPT(row.kind) || row.kind === 'net' || row.kind === 'open' ? [row.kind, row.ip, row.deviceId, row.detail, row.flags.join(',')].join('|') : null;
+    // a stranger's failures from one address share a row whatever id it claims
+    // (otherwise each made-up id is a new row and a new log line)
+    const stranger = ATTEMPT(row.kind) && !row.deviceId;
+    row.collapse = ATTEMPT(row.kind) || row.kind === 'net' || row.kind === 'open' ? [row.kind, row.ip, row.deviceId, stranger ? '' : row.detail, row.flags.join(',')].join('|') : null;
     let id = null;
     let fresh = true;
     if (row.collapse) {
@@ -92,8 +95,9 @@ function createSentryUsbAudit({ db, notify = () => {}, device = () => null, log 
   function raise(row, text) {
     const name = device(row.deviceId)?.name || 'a Sentry USB';
     if (row.flags.includes('hijack')) {
-      // always on: a warning, one open per Pi (or address) and kind at a time
-      notify({ kind: 'security', level: 'warning', always: true, dedupeKey: `sentryusb-hijack:${row.deviceId || row.ip}:${row.kind}`, title: `Possible hijack attempt on ${name}`, message: `${text}. Settings → Sentry USB → Security log has the details.` });
+      // always on: a warning, one open per Pi and kind at a time (strangers
+      // share one per kind: many addresses must not mean many notifications)
+      notify({ kind: 'security', level: 'warning', always: true, dedupeKey: `sentryusb-hijack:${row.deviceId || 'stranger'}:${row.kind}`, title: `Possible hijack attempt on ${name}`, message: `${text}. Settings → Sentry USB → Security log has the details.` });
     } else if ((row.flags.includes('new') || row.flags.includes('outside')) && device(row.deviceId)?.notifyNetwork !== false) {
       notify({ kind: 'sentryusb', level: 'info', dedupeKey: `sentryusb-net:${row.deviceId}:${row.flags.join(',')}:${row.ip}:${row.detail}`, title: `${name}: ${row.flags.map((f) => FLAGS[f]).join(', ')}`, message: text });
     }
@@ -199,7 +203,12 @@ function createSentryUsbAudit({ db, notify = () => {}, device = () => null, log 
   function prune() {
     q('DELETE FROM sentryusb_audit WHERE last_at < ?').run(now() - keepDays * DAY);
     const n = Number(q('SELECT COUNT(*) AS n FROM sentryusb_audit').get().n);
-    if (n > maxRows) q('DELETE FROM sentryusb_audit WHERE id IN (SELECT id FROM sentryusb_audit ORDER BY id ASC LIMIT ?)').run(n - maxRows);
+    if (n <= maxRows) return;
+    // over the cap: strangers' rows go first, so a flood from many addresses
+    // cannot push out the paired Pis' history (pairing, connections, actions)
+    const r = q('DELETE FROM sentryusb_audit WHERE id IN (SELECT id FROM sentryusb_audit WHERE device_id IS NULL ORDER BY id ASC LIMIT ?)').run(n - maxRows);
+    const left = n - maxRows - Number(r.changes);
+    if (left > 0) q('DELETE FROM sentryusb_audit WHERE id IN (SELECT id FROM sentryusb_audit ORDER BY id ASC LIMIT ?)').run(left);
   }
 
   return { record, linkEvent, action, list, csv, prune, home, FLAGS, KINDS, setKeepDays: (d) => { keepDays = Math.max(7, Math.min(Number(d) || 180, 3650)); } };
