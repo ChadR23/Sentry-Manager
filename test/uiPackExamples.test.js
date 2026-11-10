@@ -296,3 +296,20 @@ test('horizon: the docked car data sits right under the Viewer controls', () => 
   const sd = fs.readFileSync(path.join(__dirname, '..', 'web', 'statDash.js'), 'utf8');
   assert.match(sd, /stage\.after\(el\)/, 'the docked bar still goes right after the cameras');
 });
+
+// Flux's resizable panes (Overview, Footage, Viewer, Encoder) fit the window
+// again whenever it changes width: a Viewer opened on a wide window and then
+// narrowed no longer runs off the right edge, and the default (the page's
+// width less the side column) follows the window both ways.
+test('flux: the split panes follow the window\'s width', () => {
+  const ui = fs.readFileSync(path.join(ROOT, 'flux', 'web', 'flux', 'ui.js'), 'utf8');
+  assert.match(ui, /let want = store\.get\(`split:\$\{id\}`, null\);/);
+  assert.match(ui, /width = Math\.max\(0, Math\.min\(room - 320, Math\.max\(min, Math\.min\(max, want \?\? byDefault\(room\)\)\)\)\);/, 'the second pane keeps its room');
+  assert.match(ui, /new ResizeObserver\([\s\S]*?apply\(\);[\s\S]*?ro\.observe\(box\);/);
+  for (const page of ['viewer', 'overview']) {
+    const src = fs.readFileSync(path.join(ROOT, 'flux', 'web', 'flux', 'pages', `${page}.js`), 'utf8');
+    assert.match(src, /split\([^\n]*initial: \(room\) =>/, `${page}: the default is worked out from the room`);
+  }
+  const css = fs.readFileSync(path.join(ROOT, 'flux', 'web', 'flux.css'), 'utf8');
+  assert.match(css, /\.tchart canvas, \.heat canvas \{[^}]*max-width: 100%;/, 'a chart never holds its pane wide');
+});

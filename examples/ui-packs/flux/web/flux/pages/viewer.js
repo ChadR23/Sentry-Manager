@@ -145,7 +145,7 @@ export default {
         </aside>
       </div>`;
     const $ = (s) => el.querySelector(s);
-    split($('#vw-split'), { id: 'viewer', initial: Math.max(600, (el.clientWidth || 1200) - 360), min: 420, max: 2400 });
+    split($('#vw-split'), { id: 'viewer', initial: (room) => Math.max(600, room - 370), min: 420, max: 2400 });
     const stage = $('#vw-stage');
     const tiles = Object.fromEntries([...stage.querySelectorAll('.cam')].map((f) => [f.dataset.cam, { fig: f, video: f.querySelector('video') }]));
     // the drive on a map: Flux's violet for driving yourself, its cyan for Autopilot

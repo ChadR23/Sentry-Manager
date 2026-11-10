@@ -216,7 +216,7 @@ a.kpi:hover { border-color: var(--violet); transform: translateY(-1px); }
 
 /* charts */
 .tchart, .heat { position: relative; width: 100%; }
-.tchart canvas, .heat canvas { display: block; width: 100%; touch-action: pan-y; }
+.tchart canvas, .heat canvas { display: block; width: 100%; max-width: 100%; touch-action: pan-y; } /* (max-width: a narrower window shrinks the box, and the chart redraws to fit) */
 .tc-tip { position: absolute; z-index: 5; pointer-events: none; padding: 6px 8px; border-radius: 6px; background: oklch(0.13 0.01 275 / 0.94); border: 1px solid var(--line); font: 11px/1.45 var(--mono); box-shadow: 0 8px 24px -8px #000; min-width: 120px; }
 .tc-tip div { display: flex; align-items: center; gap: 6px; }
 .tc-tip i { width: 8px; height: 8px; border-radius: 2px; }

@@ -3,7 +3,10 @@ import { store, esc } from './core.js';
 
 /**
  * Makes `box` (with two element children) a resizable split.
- * The first pane's width is kept per `id` in this browser.
+ * The first pane's width is kept per `id` in this browser once dragged; until then it is
+ * `initial` (a number, or a function of the box's width). Either is fitted to the box again
+ * whenever the box changes width (a resized window, the sidebar collapsed), so the panes
+ * never run past the window and the wanted width comes back on a wider one.
  */
 export function split(box, { id, initial = 360, min = 220, max = 900 } = {}) {
   const [a, b] = box.children;
@@ -18,18 +21,27 @@ export function split(box, { id, initial = 360, min = 220, max = 900 } = {}) {
   gutter.setAttribute('aria-label', 'Resize panes (arrow keys)');
   gutter.innerHTML = '<i></i>';
   box.insertBefore(gutter, b);
-  let width = store.get(`split:${id}`, initial);
+  let want = store.get(`split:${id}`, null); // a width dragged to (null: the default)
+  let width = 0; // the width shown: the wanted one, fitted to the room
+  const byDefault = (room) => (typeof initial === 'function' ? initial(room) : initial);
   const apply = () => {
     const room = box.clientWidth || 1200;
-    width = Math.max(min, Math.min(Math.min(max, room - 320), width));
+    // (the second pane keeps 320 px even where that takes the first below its minimum)
+    width = Math.max(0, Math.min(room - 320, Math.max(min, Math.min(max, want ?? byDefault(room)))));
     box.style.setProperty('--split', `${Math.round(width)}px`);
     gutter.setAttribute('aria-valuenow', String(Math.round(width)));
   };
   apply();
+  let lastRoom = box.clientWidth;
+  const ro = new ResizeObserver(() => {
+    if (!box.isConnected) { ro.disconnect(); return; }
+    if (box.clientWidth !== lastRoom) { lastRoom = box.clientWidth; apply(); }
+  });
+  ro.observe(box);
   let startX = 0;
   let startW = 0;
   const move = (e) => {
-    width = startW + (e.clientX - startX);
+    want = startW + (e.clientX - startX);
     apply();
   };
   const up = () => {
@@ -50,14 +62,14 @@ export function split(box, { id, initial = 360, min = 220, max = 900 } = {}) {
   gutter.addEventListener('keydown', (e) => {
     if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
     e.preventDefault();
-    width += (e.key === 'ArrowLeft' ? -1 : 1) * (e.shiftKey ? 80 : 24);
+    want = width + (e.key === 'ArrowLeft' ? -1 : 1) * (e.shiftKey ? 80 : 24);
     apply();
     store.set(`split:${id}`, Math.round(width));
   });
   gutter.addEventListener('dblclick', () => {
-    width = initial;
+    want = null;
     apply();
-    store.set(`split:${id}`, Math.round(width));
+    store.set(`split:${id}`, null);
   });
   return { gutter };
 }

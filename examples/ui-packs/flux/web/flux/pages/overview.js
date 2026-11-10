@@ -65,7 +65,7 @@ export default {
         <details class="archives" id="log-arch"><summary>Cleared logs (archives)</summary><div id="log-arch-list" class="small muted">Loading…</div></details>
       </section>`;
 
-    split(el.querySelector('#ov-split'), { id: 'overview', initial: Math.max(560, Math.round((el.clientWidth || 1200) - 380)), min: 480, max: 2400 });
+    split(el.querySelector('#ov-split'), { id: 'overview', initial: (room) => Math.max(560, Math.round(room - 390)), min: 480, max: 2400 });
 
     const pctFmt = (v) => `${Math.round(v)}%`;
     const timeFmt = () => (range === '24h' ? (t) => tod(t) : null);
