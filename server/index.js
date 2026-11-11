@@ -803,10 +803,12 @@ async function main() {
   // Nothing is sent unless an admin turns sharing on or presses Send for one report.
   let reportDiagnosticsRef = async () => ({});
   let reportIdentifiersRef = async () => [];
+  let reportHeartbeatRef = async () => ({});
   const reports = createReports({
     db, dataDir: DATA, buildInfo, log: logger.scope('reports'),
     ui: () => uiPacks.active() || 'original',
     diagnostics: () => reportDiagnosticsRef(),
+    heartbeat: () => reportHeartbeatRef(),
     identifiers: () => reportIdentifiersRef()
   });
   // a crash is noted (locally, synchronously) before the process ends; it is sent
@@ -1378,6 +1380,7 @@ async function main() {
   // ---- Help & feedback (server/reports.js; admins only: VIEWER_HIDDEN in server/accounts.js)
   reportDiagnosticsRef = () => reportDiagnostics();
   reportIdentifiersRef = () => reportIdentifiers();
+  reportHeartbeatRef = () => reportHeartbeat();
   let ffmpegVersionText = null;
   async function reportDiagnostics() {
     const safe = async (fn) => { try { return await fn(); } catch (err) { return { error: String(err?.message || err).slice(0, 300) }; } };
@@ -1426,6 +1429,61 @@ async function main() {
     out.crashes = reports.recentCrashes();
     out.can = await safe(async () => canIndex.status());
     return out;
+  }
+  // The hourly heartbeat (sharing on only): numbers and yes/no, nothing that
+  // names anything. The same counts the Overview, Vehicles and Health pages
+  // show: footage and recordings from the inventory, "Space saved by
+  // conversions" from server/savings.js, warnings and problems from the last
+  // health check (the startup check, or the last run on the Health page).
+  /**
+   * The distance driven in all the footage of these vehicles, in metres: the
+   * speed index's one speed (m/s) a second, summed, as Driving by week adds
+   * up its "driven" figure (a total only).
+   */
+  async function drivenMetres(list) {
+    let m = 0;
+    if (!speedIndex) return 0;
+    for (const v of list) {
+      for (const d of inventory.footageDays(v.id)) {
+        for (const sp of Object.values(await speedIndex.day(v.id, d))) {
+          for (const x of sp || []) if (Number.isFinite(x) && x > 0) m += x;
+        }
+      }
+    }
+    return m;
+  }
+  async function reportHeartbeat() {
+    const list = vehicles.list();
+    const results = health.last() || await health.run().catch(() => null);
+    const checks = results?.checks || [];
+    let freeBytes = null;
+    let totalBytes = null;
+    for (const v of list) {
+      const st = vehicles.share(v.id)?.status?.() || {};
+      if (!Number.isFinite(st.freeBytes) || !Number.isFinite(st.totalBytes)) continue;
+      freeBytes = (freeBytes || 0) + st.freeBytes;
+      totalBytes = (totalBytes || 0) + st.totalBytes;
+    }
+    const sum = (fn) => list.reduce((n, v) => n + (Number(fn(v)) || 0), 0);
+    const gpu = await detectGpus().catch(() => null);
+    return {
+      uptimeSec: Math.round((Date.now() - startedAt) / 1000),
+      health: { warnings: checks.filter((c) => c.status === 'warn').length, problems: checks.filter((c) => c.status === 'bad').length },
+      vehicles: list.length,
+      footageBytes: sum((v) => inventory.totals(v.id)?.bytes),
+      recordings: sum((v) => inventory.totals(v.id)?.recordings),
+      spaceSavedBytes: sum((v) => savings.forVehicle(v.id)?.bytes),
+      distanceKm: (await drivenMetres(list).catch(() => 0)) / 1000,
+      freeBytes, totalBytes,
+      converting: converterRunning(),
+      // jobs not finished yet (running, or waiting their turn)
+      jobsQueued: db.jobs({ limit: 1000 }).filter((j) => j.status === 'running').length,
+      features: {
+        can: Boolean(db.get('can', null)?.enabled),
+        sentryUsbPaired: (sentryLink ? sentryLink.devices() : []).some((d) => d.paired),
+        gpu: Boolean(gpu && (gpu.gpus.some((g) => g.passedThrough && !g.virtual) || gpu.nvidia.length))
+      }
+    };
   }
   // what an anonymous report must not contain (replaced by ANON wherever it appears)
   async function reportIdentifiers() {

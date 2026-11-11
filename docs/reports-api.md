@@ -15,7 +15,7 @@ protocol the Manager speaks to it. What the user sees is in
 |---|---|
 | The endpoint and the receiver's key | `server/reportsConfig.js` (the one place to change them) |
 | The protocol (sealing, signing, proof of work, schema) | `server/reportsProtocol.js` (the receiver keeps its own copy; both change together) |
-| The sender: outbox, retries, crash notes, daily summary | `server/reports.js` |
+| The sender: outbox, retries, crash notes, daily summary, hourly heartbeat | `server/reports.js` |
 | Secrets out, identifiers to ANON | `server/reportsScrub.js` |
 
 ## Endpoints
@@ -92,7 +92,7 @@ opens it; anything on the way sees only ciphertext.
 
 ```js
 {
-  kind: 'feedback' | 'support' | 'crash' | 'daily',
+  kind: 'feedback' | 'support' | 'crash' | 'daily' | 'heartbeat',
   sentAt: '2026-11-11T18:40:19.475Z',
   install: '<32 hex: a random id made once per install>' | 'ANON',
   anonymous: true | false,          // true exactly when install is 'ANON'
@@ -101,7 +101,8 @@ opens it; anything on the way sees only ciphertext.
   message: '…',   // feedback: required, 1-5000; support: the optional "what's wrong" note, up to 1000
   contact: '…',   // feedback only, never when anonymous, up to 200
   crash: { at, name, message, stack, source: 'crash' | 'error' },   // crash only
-  diagnostics: { system, storage, counts, jobs, converter, settings, features, health, logs, crashes, can, sentryUsb, nodes, errors }
+  diagnostics: { system, storage, counts, jobs, converter, settings, features, health, logs, crashes, can, sentryUsb, nodes, errors },
+  heartbeat: { … }   // heartbeat only (and required there): see The heartbeat below
 }
 ```
 
@@ -110,7 +111,8 @@ module; the Manager checks its own reports with it before sealing, the
 receiver checks them after opening). `diagnostics` is required for support,
 crash and daily, optional for feedback; each part is free-form JSON within
 bounds (10 levels, 60,000 fields, strings up to 40,000 characters, lists up
-to 5,000).
+to 5,000). A heartbeat carries `heartbeat` and never `diagnostics`,
+`message`, `contact` or `crash`.
 
 What diagnostics hold: OS, kernel, architecture, CPU model and cores, memory,
 container limits (cgroup), GPUs and encoders, the ffmpeg and Node versions,
@@ -120,6 +122,46 @@ settings with every secret removed; which features are on (CAN, Sentry USB
 paired and its version, the interface pack, nodes, metrics, TLS mode); the
 health checks; the last 200 warnings and errors of the past week; recent
 crash stacks; the CAN index's status.
+
+### The heartbeat
+
+A few numbers, once an hour, while *Share diagnostics* is on. Besides the
+common fields (`kind: 'heartbeat'`, `sentAt`, `install`, `anonymous`, `build`,
+`ui`, all as above), exactly one more, `heartbeat`, with exactly these fields
+(any other field, a missing one or a wrong type is `SCHEMA`), and the whole
+payload is at most 4 KB as JSON (about 600 bytes in practice):
+
+| Field | Type and range | What it is |
+|---|---|---|
+| `uptimeSec` | integer, 0 to 3,153,600,000 | Seconds since the app started |
+| `health.overall` | `'ok'` \| `'warn'` \| `'problem'` | `'problem'` when `problems` > 0, else `'warn'` when `warnings` > 0, else `'ok'` (must match the counts) |
+| `health.warnings` | integer, 0 to 1,000 | Checks at *warn* in the last health check (the startup check, or the last run on the Health page) |
+| `health.problems` | integer, 0 to 1,000 | Checks failing (*bad*) in it |
+| `vehicles` | integer, 0 to 1,000 | Vehicles set up |
+| `footageBytes` | integer, 0 to 2^53-1 | Footage, all vehicles together |
+| `recordings` | integer, 0 to 1,000,000,000 | Recordings, all vehicles together |
+| `spaceSavedBytes` | integer, 0 to 2^53-1 | "Space saved by conversions", all vehicles together (`server/savings.js`) |
+| `distanceKm` | number, 0 to 10,000,000, in steps of 0.1 | Distance driven in all the footage (the speed index, as *Driving by week* adds it up), km to 0.1. A total only: never routes or places |
+| `freeBytes` | integer, 0 to 2^53-1, or null | Free space on the footage storage, summed over the vehicles; not more than `totalBytes` |
+| `totalBytes` | integer, 0 to 2^53-1, or null | Size of the footage storage, summed; null (with `freeBytes`) when no share has reported its size yet |
+| `converting` | boolean | A conversion is running |
+| `jobsQueued` | integer, 0 to 100,000 | Jobs not finished yet (running, or waiting their turn) |
+| `features.can` | boolean | CAN data is on |
+| `features.sentryUsbPaired` | boolean | A Sentry USB is paired |
+| `features.gpu` | boolean | A GPU is available to the container (passed in, or NVIDIA) |
+
+```json
+{ "kind": "heartbeat", "sentAt": "2026-11-11T21:04:07.112Z", "install": "ANON", "anonymous": true,
+  "build": { "build": 131, "sha": "9b50039", "builtAt": "2026-11-11T20:09:31Z", "tag": "latest" }, "ui": "horizon",
+  "heartbeat": { "uptimeSec": 7210, "health": { "overall": "warn", "warnings": 1, "problems": 0 }, "vehicles": 2,
+    "footageBytes": 812345678901, "recordings": 4210, "spaceSavedBytes": 301234567890, "distanceKm": 18234.7,
+    "freeBytes": 1200000000000, "totalBytes": 4000000000000, "converting": false, "jobsQueued": 0,
+    "features": { "can": true, "sentryUsbPaired": false, "gpu": true } } }
+```
+
+Nothing in a heartbeat names anything (no names, paths, hosts or places), so
+it is the same anonymous or not, except `install`. *Show a heartbeat* in
+Settings → Help & feedback shows the one it would send now.
 
 **Never in a report**, anonymous or not: passwords, tokens, keys, cookies,
 link keys, webhook URLs, share credentials, TLS private keys. Values under
@@ -143,13 +185,17 @@ well-known public one. No contact is sent.
 | support | An admin presses *Send diagnostics to support* | The same; at most 5 an hour |
 | crash | After a crash (noted locally as the process ends, sent after the restart) or an unhandled error in a request | *Share diagnostics* on; one report an hour for the same error, 6 a day |
 | daily | Once a day | *Share diagnostics* on (the first a day after turning it on) |
+| heartbeat | About 5 minutes (3 to 7) after a start or after turning sharing on, then every hour (56 to 64 minutes) | *Share diagnostics* on |
 
 A report that cannot be delivered waits, sealed (never plaintext), in
 `data/reports/outbox`: at most 20 reports and 50 MB, 7 days, retried with
 backoff (from a minute, doubling, up to 6 hours, or the receiver's
 `Retry-After`). A report refused for good (400 other than `POW`/`TIME`, 403,
-413) is dropped. Turning *Share diagnostics* off drops the crash and daily
-reports still waiting.
+413) is dropped. Turning *Share diagnostics* off drops the crash, daily and
+heartbeat reports still waiting. At most one heartbeat ever waits (the next
+replaces it), and a heartbeat never takes a real report's place: when the
+outbox is full, the heartbeat goes first. Heartbeats carry the same proof of
+work and signature as every other kind (the difficulty from `/v1/config`).
 
 ## What a sender can rely on
 

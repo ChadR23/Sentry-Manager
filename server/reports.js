@@ -6,9 +6,10 @@
 //   - presses Send for one feedback message ("Send feedback"),
 //   - presses "Send diagnostics to support" for one support report, or
 //   - turns on "Share diagnostics with the developers", which then sends a
-//     report after a crash or an unhandled error, and a health summary once
-//     a day. Turning it off stops that and drops the automatic reports still
-//     waiting to go.
+//     report after a crash or an unhandled error, a health summary once a
+//     day, and a short heartbeat every hour (the version, health, how much
+//     footage and space saved: numbers only, see heartbeat below). Turning it
+//     off stops that and drops the automatic reports still waiting to go.
 // "Send anonymously" replaces every identifier with "ANON" (server/
 // reportsScrub.js) and sends no contact. Secrets are never in a report,
 // anonymous or not.
@@ -42,7 +43,14 @@ const CONFIG_TTL_MS = 10 * 60_000;
 const MAX_BITS = 26; // a receiver asking for more is not followed (a stamp would take minutes)
 const MANUAL_PER_HOUR = 5;
 const DAY_MS = 86_400_000;
-const AUTO_KINDS = new Set(['crash', 'daily']);
+const AUTO_KINDS = new Set(['crash', 'daily', 'heartbeat']);
+// the heartbeat: about 5 minutes after a start (or after sharing is turned
+// on), then every hour, each give or take a little so installs spread out
+const HEARTBEAT_FIRST_MS = 5 * 60_000;
+const HEARTBEAT_FIRST_JITTER_MS = 2 * 60_000;
+const HEARTBEAT_EVERY_MS = 3600_000;
+const HEARTBEAT_JITTER_MS = 4 * 60_000;
+const defaultTimer = { set: (fn, ms) => setTimeout(fn, ms), clear: (t) => clearTimeout(t) };
 const NOT_SET_UP = "Reporting isn't set up in this build.";
 
 class ReportError extends Error {
@@ -95,13 +103,16 @@ const json = (buf) => { try { return JSON.parse(buf.toString('utf8')); } catch {
 
 /**
  * o: db, dataDir, buildInfo, ui() (the interface in use), diagnostics()
- * (async: the diagnostics object, its DIAG_KEYS), identifiers() (async:
+ * (async: the diagnostics object, its DIAG_KEYS), heartbeat() (async: the
+ * heartbeat's numbers, see normalizeHeartbeat), identifiers() (async:
  * strings an anonymous report must not contain), log, audit, env, now,
- * transport, pow (envHash, nonce, bits) => Promise<pow>.
+ * transport, pow (envHash, nonce, bits) => Promise<pow>, timer ({ set, clear }:
+ * the heartbeat's schedule), random () => [0, 1).
  */
 function createReports({
-  db, dataDir, buildInfo = {}, ui = () => 'original', diagnostics = async () => ({}), identifiers = async () => [],
-  log = { info() {}, warn() {}, error() {} }, env = process.env, now = () => Date.now(), transport = defaultTransport, pow = workerPow
+  db, dataDir, buildInfo = {}, ui = () => 'original', diagnostics = async () => ({}), heartbeat = async () => ({}), identifiers = async () => [],
+  log = { info() {}, warn() {}, error() {} }, env = process.env, now = () => Date.now(), transport = defaultTransport, pow = workerPow,
+  timer = defaultTimer, random = Math.random
 }) {
   const dir = path.join(dataDir, 'reports');
   const outboxDir = path.join(dir, 'outbox');
@@ -114,6 +125,9 @@ function createReports({
   let clockOffset = 0;
   let timers = [];
   let flushing = null;
+  let started = false;
+  let hbTimer = null;
+  let hbNextAt = null;
 
   const settings = () => ({ share: false, anonymous: false, ...(db.get('reports-settings', null) || {}) });
   const state = () => db.get('reports-state', null) || {};
@@ -178,18 +192,45 @@ function createReports({
     return file;
   }
   const dropEntry = (e) => { try { fs.unlinkSync(path.join(outboxDir, `${e.id}.json`)); } catch { /* gone */ } };
-  /** The outbox within its caps: older than 7 days out, then the oldest until 20 reports and 50 MB. */
+  /**
+   * The outbox within its caps: older than 7 days out; only the newest
+   * heartbeat; then, over 20 reports or 50 MB, that heartbeat first (a
+   * heartbeat never pushes a real report out), then the oldest.
+   */
   function trimOutbox() {
     let list = outbox();
     for (const e of list) if (now() - e.createdAt > OUTBOX_DAYS * DAY_MS) dropEntry(e);
     list = list.filter((e) => now() - e.createdAt <= OUTBOX_DAYS * DAY_MS);
+    const beats = list.filter((e) => e.kind === 'heartbeat');
+    for (const e of beats.slice(0, -1)) dropEntry(e);
+    list = list.filter((e) => e.kind !== 'heartbeat' || e === beats.at(-1));
     let bytes = list.reduce((s, e) => s + e.bytes, 0);
     while (list.length > OUTBOX_MAX || bytes > OUTBOX_BYTES) {
-      const e = list.shift();
+      const hb = list.findIndex((e) => e.kind === 'heartbeat');
+      const [e] = list.splice(hb >= 0 ? hb : 0, 1);
       bytes -= e.bytes;
       dropEntry(e);
     }
     return list;
+  }
+  /**
+   * Keeps an entry for a later try: only one still in the outbox (one the
+   * caps took out while it was being tried stays out), and a heartbeat only
+   * while there is room (see trimOutbox).
+   */
+  function keepForLater(e) {
+    if (!fs.existsSync(path.join(outboxDir, `${e.id}.json`))) return;
+    saveEntry(e);
+    if (e.kind === 'heartbeat') trimOutbox();
+  }
+  /** What the status shows: a heartbeat has its own line, and never hides the last real report or problem. */
+  function noteOutcome(e, { sent = null, error = null }) {
+    if (e.kind === 'heartbeat') {
+      const prev = state().lastHeartbeat || {};
+      setState({ lastHeartbeat: sent ? { at: sent.at, error: null } : { at: prev.at || null, error: error ? { at: now(), message: error } : null } });
+      return;
+    }
+    setState(sent ? { lastSent: sent, lastError: null } : { lastError: { at: now(), message: error } });
   }
 
   // ---- the receiver's settings (GET /v1/config), and a signed move
@@ -239,8 +280,8 @@ function createReports({
     if (res.status === 202 && d.ok) {
       dropEntry(e);
       const sent = { at: now(), kind: e.kind, ref: typeof d.ref === 'string' ? d.ref.slice(0, 20) : null, id: typeof d.id === 'string' ? d.id.slice(0, 40) : null };
-      setState({ lastSent: sent, lastError: null });
-      log.info(`Reports: ${e.kind} report sent${sent.ref ? ` (${sent.ref})` : ''}`);
+      noteOutcome(e, { sent });
+      if (e.kind !== 'heartbeat') log.info(`Reports: ${e.kind} report sent${sent.ref ? ` (${sent.ref})` : ''}`);
       return { result: 'sent', ...sent };
     }
     // the difficulty or the clock changed in between: once more with fresh settings
@@ -253,15 +294,15 @@ function createReports({
       const wait = Math.max(60, Math.min(6 * 3600, Number(res.headers?.['retry-after']) || Number(d.retryAfter) || 0));
       e.attempts = (e.attempts || 0) + 1;
       e.nextAt = now() + Math.max(wait * 1000, backoff(e.attempts));
-      saveEntry(e);
+      keepForLater(e);
       const msg = res.status === 429 ? 'The receiver is busy (too many reports): it will be tried again later.' : `The receiver answered ${res.status}: it will be tried again later.`;
-      setState({ lastError: { at: now(), message: msg } });
+      noteOutcome(e, { error: msg });
       return { result: 'retry', status: res.status, message: msg };
     }
     // refused for good (malformed, banned, too large): kept would never go
     dropEntry(e);
     const msg = `The receiver refused the report (${res.status}${d.error ? `: ${String(d.error).slice(0, 160)}` : ''}).`;
-    setState({ lastError: { at: now(), message: msg } });
+    noteOutcome(e, { error: msg });
     log.warn(`Reports: ${msg}`);
     return { result: 'dropped', status: res.status, message: msg };
   }
@@ -273,9 +314,9 @@ function createReports({
     } catch (err) {
       e.attempts = (e.attempts || 0) + 1;
       e.nextAt = now() + backoff(e.attempts);
-      saveEntry(e);
+      keepForLater(e);
       const msg = `Could not reach the receiver (${String(err.message || err).slice(0, 160)}): it will be tried again later.`;
-      setState({ lastError: { at: now(), message: msg } });
+      noteOutcome(e, { error: msg });
       return { result: 'retry', message: msg };
     }
   }
@@ -322,6 +363,13 @@ function createReports({
       if (m) p.message = m;
     }
     if (crash) p.crash = crash;
+    if (kind === 'heartbeat') {
+      // numbers, yes/no and fixed words only: nothing in it names anything
+      p.heartbeat = normalizeHeartbeat(await heartbeat());
+      const errs = P.validatePayload(p);
+      if (errs.length) throw new ReportError(500, `The heartbeat did not come out right: ${errs.slice(0, 3).join(', ')}`);
+      return p;
+    }
     if (kind !== 'feedback' || attach) p.diagnostics = await diagnostics({ kind });
     // contents through the scrubber (secrets always; identifiers when anonymous)
     const ids = anonymous ? [installId(), ...(await identifiers().catch(() => []))] : [];
@@ -419,6 +467,39 @@ function createReports({
     }
   }
 
+  // ---- the hourly heartbeat (sharing on only)
+  /**
+   * Sends one heartbeat now, when sharing is on: the one still waiting (if
+   * any) is replaced, so at most one is ever in the outbox.
+   */
+  async function sendHeartbeat() {
+    if (!configured || !settings().share) return null;
+    let payload;
+    try {
+      payload = await buildPayload({ kind: 'heartbeat' });
+    } catch (err) {
+      log.warn(`Reports: the heartbeat was not made: ${err.message}`);
+      return null;
+    }
+    if (!settings().share) return null; // turned off while it was made
+    for (const e of outbox()) if (e.kind === 'heartbeat') dropEntry(e);
+    return enqueue(payload);
+  }
+  const jitter = (ms) => Math.round((random() * 2 - 1) * ms);
+  /** The next heartbeat in `ms` (it reschedules itself an hour later). */
+  function scheduleHeartbeat(ms) {
+    if (hbTimer) timer.clear(hbTimer);
+    hbNextAt = now() + ms;
+    hbTimer = timer.set(() => {
+      hbTimer = null;
+      return sendHeartbeat().catch(() => null).finally(() => {
+        if (started && !hbTimer) scheduleHeartbeat(HEARTBEAT_EVERY_MS + jitter(HEARTBEAT_JITTER_MS));
+      });
+    }, ms);
+    hbTimer?.unref?.();
+  }
+  const firstHeartbeatIn = () => HEARTBEAT_FIRST_MS + jitter(HEARTBEAT_FIRST_JITTER_MS);
+
   // ---- what the routes call
   function status() {
     const list = configured ? outbox() : [];
@@ -426,6 +507,7 @@ function createReports({
     return {
       configured, notSetUpText: configured ? null : NOT_SET_UP, endpoint: configured ? endpoint() : null, kid: cfg.keys[0]?.kid || null,
       settings: settings(), lastSent: s.lastSent || null, lastError: s.lastError || null,
+      lastHeartbeat: s.lastHeartbeat || null, nextHeartbeatAt: configured && settings().share && started ? hbNextAt : null,
       outbox: { count: list.length, bytes: list.reduce((n, e) => n + e.bytes, 0) },
       manualPerHour: MANUAL_PER_HOUR
     };
@@ -442,11 +524,16 @@ function createReports({
     next.changedAt = now();
     db.set('reports-settings', next);
     if (before.share && !next.share) for (const e of outbox()) if (AUTO_KINDS.has(e.kind)) dropEntry(e);
-    // the first daily summary a day after turning it on
-    if (!before.share && next.share) setState({ lastDailyAt: now() });
+    // the first daily summary a day after turning it on; the first heartbeat in about 5 minutes
+    if (!before.share && next.share) {
+      setState({ lastDailyAt: now() });
+      if (started) scheduleHeartbeat(firstHeartbeatIn());
+    }
     return { before, after: next, by };
   }
   async function preview(opts) {
+    // a sample heartbeat, to look at (it is never sent by hand)
+    if (opts?.kind === 'heartbeat') return { previewId: null, sample: true, payload: await buildPayload({ kind: 'heartbeat' }) };
     const kind = opts?.kind === 'support' ? 'support' : 'feedback';
     const payload = await buildPayload({ kind, message: opts?.message, contact: opts?.contact, attach: opts?.attach !== false });
     for (const [k, v] of previews) if (v.until < now()) previews.delete(k);
@@ -475,13 +562,48 @@ function createReports({
     const t = setTimeout(() => { sendCrashes().catch(() => {}); dailyIfDue().catch(() => {}); }, 90_000);
     t.unref?.();
     timers.push(t);
+    started = true;
+    // ticks with sharing off send nothing (and keep the hour going for when it is on)
+    scheduleHeartbeat(firstHeartbeatIn());
   }
   function stop() {
     for (const t of timers) { clearInterval(t); clearTimeout(t); }
     timers = [];
+    started = false;
+    if (hbTimer) timer.clear(hbTimer);
+    hbTimer = null;
+    hbNextAt = null;
   }
 
-  return { configured, status, setSettings, preview, sendPreview, buildPayload, enqueue, flush, outbox, trimOutbox, noteCrash, recentCrashes, sendCrashes, dailyIfDue, installId, start, stop, endpoint, remoteConfig };
+  return { configured, status, setSettings, preview, sendPreview, buildPayload, enqueue, flush, outbox, trimOutbox, noteCrash, recentCrashes, sendCrashes, dailyIfDue, sendHeartbeat, installId, start, stop, endpoint, remoteConfig };
 }
 
-module.exports = { createReports, defaultTransport, workerPow, ReportError, NOT_SET_UP, OUTBOX_MAX, OUTBOX_BYTES, OUTBOX_DAYS, MANUAL_PER_HOUR, MAX_BITS };
+/**
+ * The heartbeat block, exactly the protocol's fields (reportsProtocol.js
+ * HEARTBEAT_FIELDS) from what the server counted: whole non-negative
+ * numbers, yes/no, and the overall health worked out from the counts.
+ * Anything else the caller had is left out.
+ */
+function normalizeHeartbeat(h = {}) {
+  const n = (x, max = Number.MAX_SAFE_INTEGER) => (Number.isFinite(Number(x)) && Number(x) > 0 ? Math.min(max, Math.round(Number(x))) : 0);
+  const warnings = n(h.health?.warnings, 1000);
+  const problems = n(h.health?.problems, 1000);
+  const known = Number.isFinite(h.freeBytes) && Number.isFinite(h.totalBytes) && h.totalBytes > 0;
+  const total = known ? n(h.totalBytes) : null;
+  return {
+    uptimeSec: n(h.uptimeSec, 100 * 365 * 86400),
+    health: { overall: P.healthOverall(warnings, problems), warnings, problems },
+    vehicles: n(h.vehicles, 1000),
+    footageBytes: n(h.footageBytes),
+    recordings: n(h.recordings, 1e9),
+    spaceSavedBytes: n(h.spaceSavedBytes),
+    distanceKm: Number.isFinite(Number(h.distanceKm)) && Number(h.distanceKm) > 0 ? Math.round(Math.min(10_000_000, Number(h.distanceKm)) * 10) / 10 : 0,
+    freeBytes: known ? Math.min(n(h.freeBytes), total) : null,
+    totalBytes: total,
+    converting: h.converting === true,
+    jobsQueued: n(h.jobsQueued, 100_000),
+    features: { can: h.features?.can === true, sentryUsbPaired: h.features?.sentryUsbPaired === true, gpu: h.features?.gpu === true }
+  };
+}
+
+module.exports = { createReports, normalizeHeartbeat, defaultTransport, workerPow, ReportError, NOT_SET_UP, OUTBOX_MAX, OUTBOX_BYTES, OUTBOX_DAYS, MANUAL_PER_HOUR, MAX_BITS, HEARTBEAT_FIRST_MS, HEARTBEAT_EVERY_MS };

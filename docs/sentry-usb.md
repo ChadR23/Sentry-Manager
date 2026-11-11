@@ -52,6 +52,10 @@ anything.
 The full contract both sides build to is in
 [Sentry USB link](sentry-usb-link.md).
 
+With *Share diagnostics with the developers* on (Settings → Help & feedback),
+the hourly heartbeat says only whether a Sentry USB is paired (yes or no):
+never its name, address, Wi-Fi or car data ([reports-api.md](reports-api.md#the-heartbeat)).
+
 ## What you see
 
 On the **Footage** page of every interface, a line under the heading says what

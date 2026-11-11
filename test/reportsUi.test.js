@@ -32,9 +32,20 @@ test('the shared module: feedback, support, the opt-in, anonymous, the preview, 
   // with no key every control is disabled
   assert.match(m, /const dis = off \? ' disabled' : ''/);
   // the JSON shown is the server's, exactly
-  assert.match(m, /\$\('\[data-pvjson\]'\)\.textContent = JSON\.stringify\(out\.payload, null, 2\)/);
+  assert.match(m, /\$\('\[data-pvjson\]'\)\.textContent = JSON\.stringify\(payload, null, 2\)/);
+  assert.match(m, /showPreview\(`What will be sent[^\n]*out\.payload, false\)/);
   // a changed message drops the preview (what is sent is what was shown)
   assert.match(m, /pending = null; \$\('\[data-pv\]'\)\.hidden = true;/);
+});
+
+test('the heartbeat: in the opt-in\'s words, "Last heartbeat" in Status, a sample in the preview (never sent by hand)', () => {
+  const m = read('web/reportsSettings.js');
+  assert.ok(m.includes('and a short heartbeat every hour (version, health, how much footage and space saved)'));
+  assert.ok(m.includes('<dt>Last heartbeat</dt>'));
+  assert.ok(m.includes('Show a heartbeat'));
+  assert.match(m, /JSON\.stringify\(\{ kind: 'heartbeat' \}\)/);
+  assert.match(m, /showPreview\([^\n]*a heartbeat \(a sample\)`, out\.payload, true\)/);
+  assert.match(m, /\$\('\[data-send\]'\)\.parentElement\.hidden = sample/, 'a sample has no Send button');
 });
 
 test('the built-in interface: a Help & feedback section, only when /api/reports answers (admins)', () => {

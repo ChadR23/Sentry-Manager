@@ -1,7 +1,8 @@
 // Settings → Help & feedback, the same in every interface (admins only:
 // /api/reports answers nobody else). Send feedback, send diagnostics to
 // support, the opt-in "Share diagnostics with the developers", "Send
-// anonymously", and what was sent last. Before anything is sent, "What
+// anonymously", what was sent last and the last hourly heartbeat ("Show a
+// heartbeat" shows a sample of one). Before anything is sent, "What
 // will be sent" shows the exact JSON (already made anonymous when that is
 // on); sending and every change ask for the password. Plain markup
 // (sentry-rep-*), colours inherited; the interface passes its own button
@@ -70,9 +71,13 @@ export function createReportsSettings(el, { cls = {}, h24 = null } = {}) {
   function statusHtml() {
     if (!st.configured) return `<p class="sr-muted">${NOT_SET_UP} Nothing is sent from it.</p>`;
     const last = st.lastSent;
-    const words = { feedback: 'feedback', support: 'diagnostics to support', crash: 'a crash report', daily: 'the daily summary' };
+    const words = { feedback: 'feedback', support: 'diagnostics to support', crash: 'a crash report', daily: 'the daily summary', heartbeat: 'a heartbeat' };
+    const hb = st.lastHeartbeat;
+    const hbText = hb?.at ? esc(stamp(hb.at)) : st.settings.share ? `none yet${st.nextHeartbeatAt ? ` (the first goes at about ${esc(stamp(st.nextHeartbeatAt))})` : ''}` : 'off (sharing is off)';
+    const hbErr = hb?.error ? ` <span class="sr-err">· not delivered: ${esc(hb.error.message)} <span class="sr-muted">(${esc(stamp(hb.error.at))})</span></span>` : '';
     return `<dl class="sr-kv">
       <dt>Last sent</dt><dd>${last ? `${esc(stamp(last.at))} · ${esc(words[last.kind] || last.kind)}${last.ref ? ` · <span class="sr-ref">${esc(last.ref)}</span>` : ''}` : 'nothing yet'}</dd>
+      <dt>Last heartbeat</dt><dd data-lasthb>${hbText}${hbErr}</dd>
       <dt>Waiting to go</dt><dd>${st.outbox.count ? `${st.outbox.count} report${st.outbox.count === 1 ? '' : 's'} (sealed; tried again by themselves, kept at most 7 days)` : 'none'}</dd>
       ${st.lastError ? `<dt>Last problem</dt><dd class="sr-err">${esc(st.lastError.message)} <span class="sr-muted">(${esc(stamp(st.lastError.at))})</span></dd>` : ''}
       <dt>Sent to</dt><dd><span class="sr-muted">${esc(st.endpoint)} · key ${esc(st.kid)}</span></dd></dl>`;
@@ -101,10 +106,12 @@ export function createReportsSettings(el, { cls = {}, h24 = null } = {}) {
       <section class="sr-preview" data-pv hidden aria-live="polite">
         <details open><summary data-pvtitle>What will be sent</summary><pre data-pvjson></pre></details>
         <div class="sr-row"><button type="button" class="${primary}" data-send>Send</button><button type="button" class="${btn}" data-cancelpv>Cancel</button></div>
+        <div class="sr-row" data-sampleclose hidden><span class="sr-muted sr-small">A sample: heartbeats go by themselves while sharing is on, never by hand.</span><button type="button" class="${btn}" data-cancelpv>Close</button></div>
       </section>
       <p data-result role="status" hidden></p>
       <section aria-labelledby="sr-opt"><h3 id="sr-opt">Sharing</h3>
-        <label class="sr-check"><input type="checkbox" data-k="share"${s.share ? ' checked' : ''}${dis}><span>Share diagnostics with the developers<small>Off unless you turn it on. Then a report goes after a crash or an unhandled error, and a health summary once a day. Turning it off stops that and drops the ones still waiting.</small></span></label>
+        <label class="sr-check"><input type="checkbox" data-k="share"${s.share ? ' checked' : ''}${dis}><span>Share diagnostics with the developers<small>Off unless you turn it on. Then a report goes after a crash or an unhandled error, a health summary once a day, and a short heartbeat every hour (version, health, how much footage and space saved). Turning it off stops that and drops the ones still waiting.</small></span></label>
+        <p class="sr-small"><a href="#" data-samplehb${dis}>Show a heartbeat</a> <span class="sr-muted">(what one would send now: numbers only, no names, paths or hosts)</span></p>
         <label class="sr-check"><input type="checkbox" data-k="anonymous"${s.anonymous ? ' checked' : ''}${dis}><span>Send anonymously<small>For every report: the install id, host name, addresses, account, vehicle and Sentry USB names, share paths, Wi-Fi names, VINs, e-mail addresses and places become ANON, and no contact is sent.</small></span></label>
       </section>
       <form class="sr-row sr-box" data-confirm hidden><span>Enter your password to confirm:</span><input class="${input}" style="width:auto;flex:1 1 180px" type="password" name="password" autocomplete="current-password" aria-label="Your password" required><button type="submit" class="${primary}">Confirm</button><button type="button" class="${btn}" data-cancel>Cancel</button></form>
@@ -139,6 +146,27 @@ export function createReportsSettings(el, { cls = {}, h24 = null } = {}) {
     }
   }
 
+  /** The preview box, for a report to send or for a sample heartbeat (nothing to send). */
+  function showPreview(title, payload, sample) {
+    $('[data-pvtitle]').textContent = title;
+    $('[data-pvjson]').textContent = JSON.stringify(payload, null, 2);
+    $('[data-send]').parentElement.hidden = sample;
+    $('[data-sampleclose]').hidden = !sample;
+    $('[data-pv]').hidden = false;
+    $('[data-pv]').scrollIntoView?.({ block: 'nearest' });
+  }
+
+  async function sampleHeartbeat() {
+    say('');
+    pending = null;
+    try {
+      const out = await api('/api/reports/preview', { method: 'POST', body: JSON.stringify({ kind: 'heartbeat' }) });
+      showPreview(`What will be sent${out.payload.anonymous ? ' (anonymous)' : ''}: a heartbeat (a sample)`, out.payload, true);
+    } catch (err) {
+      say(err.message, true);
+    }
+  }
+
   async function preview(kind) {
     say('');
     $('[data-result]').hidden = true;
@@ -151,10 +179,7 @@ export function createReportsSettings(el, { cls = {}, h24 = null } = {}) {
     try {
       const out = await api('/api/reports/preview', { method: 'POST', body: JSON.stringify(body) });
       pending = { kind, previewId: out.previewId };
-      $('[data-pvtitle]').textContent = `What will be sent${out.payload.anonymous ? ' (anonymous)' : ''}: ${kind === 'support' ? 'diagnostics to support' : 'feedback'}`;
-      $('[data-pvjson]').textContent = JSON.stringify(out.payload, null, 2);
-      $('[data-pv]').hidden = false;
-      $('[data-pv]').scrollIntoView?.({ block: 'nearest' });
+      showPreview(`What will be sent${out.payload.anonymous ? ' (anonymous)' : ''}: ${kind === 'support' ? 'diagnostics to support' : 'feedback'}`, out.payload, false);
     } catch (err) {
       say(err.message, true);
     }
@@ -202,7 +227,7 @@ export function createReportsSettings(el, { cls = {}, h24 = null } = {}) {
   el.addEventListener('change', (e) => {
     const box = e.target.closest('[data-k]');
     if (!box) return;
-    if (box.dataset.k === 'share' && box.checked && !window.confirm('Share diagnostics with the developers?\n\nA sealed report goes to them after a crash or an unhandled error, and a health summary once a day, until you turn it off. Passwords and keys are never in it.')) { box.checked = false; return; }
+    if (box.dataset.k === 'share' && box.checked && !window.confirm('Share diagnostics with the developers?\n\nA sealed report goes to them after a crash or an unhandled error, a health summary once a day, and a short heartbeat every hour (version, health, how much footage and space saved), until you turn it off. Passwords and keys are never in it.')) { box.checked = false; return; }
     setOption(box.dataset.k, box.checked, box);
   });
   el.addEventListener('click', (e) => {
@@ -210,6 +235,7 @@ export function createReportsSettings(el, { cls = {}, h24 = null } = {}) {
     const pv = t.closest('[data-preview]');
     if (pv) preview(pv.dataset.preview);
     if (t.closest('[data-send]')) send();
+    if (t.closest('[data-samplehb]')) { e.preventDefault(); if (!t.closest('[data-samplehb]').hasAttribute('disabled')) sampleHeartbeat(); }
     if (t.closest('[data-cancelpv]')) { pending = null; $('[data-pv]').hidden = true; }
     if (t.closest('[data-cancel]')) {
       $('[data-confirm]').hidden = true;

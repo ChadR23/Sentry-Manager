@@ -126,6 +126,18 @@ test('with a receiver: preview, password, send; watch-only refused; audit-logged
     // opt-in: off by default; turned on and off, audit-logged
     assert.equal((await admin('PUT', '/api/reports/settings', { share: true })).data.settings.share, true);
     assert.equal((await admin('PUT', '/api/reports/settings', { share: 'yes' })).status, 400);
+    // the heartbeat the real server would send (a sample: nothing to send by hand); anonymous here
+    const hb = (await admin('POST', '/api/reports/preview', { kind: 'heartbeat' })).data;
+    assert.equal(hb.previewId, null);
+    assert.equal(hb.payload.kind, 'heartbeat');
+    assert.equal(hb.payload.install, 'ANON');
+    assert.equal(hb.payload.heartbeat.vehicles, 1);
+    assert.ok(hb.payload.heartbeat.uptimeSec >= 0);
+    assert.ok(['ok', 'warn', 'problem'].includes(hb.payload.heartbeat.health.overall));
+    assert.ok(Buffer.byteLength(JSON.stringify(hb.payload)) < 4096);
+    for (const id of [os.hostname(), 'Daily Driver', dir, 'admin']) assert.doesNotMatch(JSON.stringify(hb.payload), word(id), `${id} is not in a heartbeat`);
+    const st2 = (await admin('GET', '/api/reports')).data;
+    assert.ok(st2.nextHeartbeatAt > Date.now(), 'the first heartbeat is scheduled once sharing is on');
 
     // watch-only: cannot see or change any of it
     assert.equal((await admin('POST', '/api/accounts', { username: 'kid', password: 'watching only', role: 'viewer' })).status, 200);

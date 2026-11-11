@@ -326,8 +326,11 @@ sends anything to anyone other than you, and only when you say so:
 - **Send diagnostics to support** sends one diagnostics report when you press
   Send, and shows a reference code (like `SR-7K2Q9F`) to quote.
 - **Share diagnostics with the developers** is off until you turn it on. Then
-  a report goes after a crash or an unhandled error, and a health summary once
-  a day. Turning it off stops that and drops the reports still waiting.
+  a report goes after a crash or an unhandled error, a health summary once
+  a day, and a short heartbeat every hour (the version, health, how much
+  footage and space saved, distance driven as one total, and a few yes/no
+  features: numbers only, no names, paths, hosts or places; *Show a heartbeat*
+  shows one). Turning it off stops that and drops the reports still waiting.
 - **Send anonymously** replaces every identifier with `ANON`: the install id,
   host name, IP and MAC addresses, account, vehicle and Sentry USB names, share
   hosts and paths, Wi-Fi names, VINs, e-mail addresses, GPS coordinates and

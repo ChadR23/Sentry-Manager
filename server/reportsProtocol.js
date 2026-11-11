@@ -29,7 +29,7 @@ const INFO = 'sentry-reports v1';
 const MAX_BODY = 8 * 1024 * 1024; // the POST body
 const MAX_PLAIN = 100 * 1024 * 1024; // what the gzip may open to (zip bombs stop here)
 const MAX_SKEW_MS = 10 * 60 * 1000; // a report's timestamp against the receiver's clock
-const KINDS = ['feedback', 'support', 'crash', 'daily'];
+const KINDS = ['feedback', 'support', 'crash', 'daily', 'heartbeat'];
 const ANON = 'ANON';
 
 const b64 = (buf) => Buffer.from(buf).toString('base64');
@@ -255,10 +255,62 @@ function boundedJson(value, errs, where) {
 const isStr = (x, max, min = 0) => typeof x === 'string' && x.length >= min && x.length <= max;
 const nullOr = (x, test) => x === null || test(x);
 
+// ---- the hourly heartbeat: a few numbers, exactly these, nothing free-form
+const HEARTBEAT_MAX_BYTES = 4096; // the whole heartbeat payload as JSON
+const HEALTH_OVERALL = ['ok', 'warn', 'problem'];
+/** The overall health for these counts: any problem is 'problem', else any warning 'warn', else 'ok'. */
+const healthOverall = (warnings, problems) => (problems > 0 ? 'problem' : warnings > 0 ? 'warn' : 'ok');
+const intIn = (x, max) => Number.isSafeInteger(x) && x >= 0 && x <= max;
+const BYTES_MAX = Number.MAX_SAFE_INTEGER;
+const HEARTBEAT_FIELDS = {
+  uptimeSec: (x) => intIn(x, 100 * 365 * 86400),
+  health: null, // below
+  vehicles: (x) => intIn(x, 1000),
+  footageBytes: (x) => intIn(x, BYTES_MAX),
+  recordings: (x) => intIn(x, 1e9),
+  spaceSavedBytes: (x) => intIn(x, BYTES_MAX),
+  // total distance driven in all the footage, in km to 0.1 (a total only: never routes or places)
+  distanceKm: (x) => typeof x === 'number' && Number.isFinite(x) && x >= 0 && x <= 10_000_000 && Math.abs(x * 10 - Math.round(x * 10)) < 1e-6,
+  freeBytes: (x) => x === null || intIn(x, BYTES_MAX),
+  totalBytes: (x) => x === null || intIn(x, BYTES_MAX),
+  converting: (x) => typeof x === 'boolean',
+  jobsQueued: (x) => intIn(x, 100_000),
+  features: null // below
+};
+const HEARTBEAT_FEATURES = ['can', 'sentryUsbPaired', 'gpu'];
+const isObj = (x) => Boolean(x) && typeof x === 'object' && !Array.isArray(x);
+/** Errors in a heartbeat block (pushed onto errs). */
+function checkHeartbeat(h, errs) {
+  if (!isObj(h)) { errs.push('heartbeat'); return; }
+  for (const k of Object.keys(h)) if (!(k in HEARTBEAT_FIELDS)) errs.push(`unknown field heartbeat.${k.slice(0, 40)}`);
+  for (const [k, test] of Object.entries(HEARTBEAT_FIELDS)) {
+    if (!(k in h)) { errs.push(`heartbeat.${k} missing`); continue; }
+    if (test && !test(h[k])) errs.push(`heartbeat.${k}`);
+  }
+  if (h.freeBytes !== null && h.totalBytes !== null && intIn(h.freeBytes, BYTES_MAX) && intIn(h.totalBytes, BYTES_MAX) && h.freeBytes > h.totalBytes) errs.push('heartbeat.freeBytes (more than totalBytes)');
+  if ((h.freeBytes === null) !== (h.totalBytes === null)) errs.push('heartbeat.freeBytes and totalBytes (both or neither)');
+  const hl = h.health;
+  if (!isObj(hl)) errs.push('heartbeat.health');
+  else {
+    for (const k of Object.keys(hl)) if (!['overall', 'warnings', 'problems'].includes(k)) errs.push(`unknown field heartbeat.health.${k.slice(0, 40)}`);
+    const okCounts = intIn(hl.warnings, 1000) && intIn(hl.problems, 1000);
+    if (!intIn(hl.warnings, 1000)) errs.push('heartbeat.health.warnings');
+    if (!intIn(hl.problems, 1000)) errs.push('heartbeat.health.problems');
+    if (!HEALTH_OVERALL.includes(hl.overall)) errs.push('heartbeat.health.overall');
+    else if (okCounts && hl.overall !== healthOverall(hl.warnings, hl.problems)) errs.push('heartbeat.health.overall (does not match the counts)');
+  }
+  const f = h.features;
+  if (!isObj(f)) errs.push('heartbeat.features');
+  else {
+    for (const k of Object.keys(f)) if (!HEARTBEAT_FEATURES.includes(k)) errs.push(`unknown field heartbeat.features.${k.slice(0, 40)}`);
+    for (const k of HEARTBEAT_FEATURES) if (typeof f[k] !== 'boolean') errs.push(`heartbeat.features.${k}`);
+  }
+}
+
 /**
  * Errors in a payload (an empty list when it is right). Exactly these
  * fields, of these types and lengths:
- *   kind: feedback | support | crash | daily; sentAt: ISO time;
+ *   kind: feedback | support | crash | daily | heartbeat; sentAt: ISO time;
  *   install: 32 hex (a random id made once per install) or "ANON";
  *   anonymous: true exactly when install is "ANON";
  *   build: { build: number|null, sha: hex|null, builtAt: string|null, tag: string|null };
@@ -266,13 +318,16 @@ const nullOr = (x, test) => x === null || test(x);
  *   message: feedback (required, 1-5000) or support (the "what's wrong" note, up to 1000);
  *   contact: feedback only, never when anonymous (up to 200);
  *   crash: crash only, { at, name, message, stack };
- *   diagnostics: required for support, crash and daily, optional for feedback;
- *     an object of the DIAG_KEYS, each free-form JSON within bounds.
+ *   diagnostics: required for support, crash and daily, optional for feedback,
+ *     never in a heartbeat; an object of the DIAG_KEYS, each free-form JSON
+ *     within bounds;
+ *   heartbeat: heartbeat only (and required there), exactly the
+ *     HEARTBEAT_FIELDS (checkHeartbeat); a heartbeat is at most 4 KB as JSON.
  */
 function validatePayload(p) {
   if (!p || typeof p !== 'object' || Array.isArray(p)) return ['not an object'];
   const errs = [];
-  const allowed = new Set(['kind', 'sentAt', 'install', 'anonymous', 'build', 'ui', 'message', 'contact', 'crash', 'diagnostics']);
+  const allowed = new Set(['kind', 'sentAt', 'install', 'anonymous', 'build', 'ui', 'message', 'contact', 'crash', 'diagnostics', 'heartbeat']);
   for (const k of Object.keys(p)) if (!allowed.has(k)) errs.push(`unknown field ${k.slice(0, 40)}`);
   if (!KINDS.includes(p.kind)) errs.push('kind');
   if (!isStr(p.sentAt, LIMITS.sentAt, 10) || !Number.isFinite(Date.parse(p.sentAt))) errs.push('sentAt');
@@ -311,6 +366,15 @@ function validatePayload(p) {
       if (c.source !== undefined && !['crash', 'error'].includes(c.source)) errs.push('crash.source');
     }
   } else if (p.crash !== undefined) errs.push('crash (crash reports only)');
+  if (p.kind === 'heartbeat') {
+    checkHeartbeat(p.heartbeat, errs);
+    if (p.diagnostics !== undefined) errs.push('diagnostics (never in a heartbeat)');
+    let size = Infinity;
+    try { size = Buffer.byteLength(JSON.stringify(p)); } catch { /* not JSON */ }
+    if (size > HEARTBEAT_MAX_BYTES) errs.push(`heartbeat: larger than ${HEARTBEAT_MAX_BYTES} bytes`);
+    return errs;
+  }
+  if (p.heartbeat !== undefined) errs.push('heartbeat (heartbeats only)');
   if (p.diagnostics === undefined) {
     if (p.kind !== 'feedback') errs.push('diagnostics missing');
   } else if (!p.diagnostics || typeof p.diagnostics !== 'object' || Array.isArray(p.diagnostics)) errs.push('diagnostics');
@@ -358,7 +422,7 @@ function normalizeRef(text) {
 }
 
 module.exports = {
-  V, INFO, MAX_BODY, MAX_PLAIN, MAX_SKEW_MS, KINDS, ANON, LIMITS, DIAG_KEYS,
+  V, INFO, MAX_BODY, MAX_PLAIN, MAX_SKEW_MS, KINDS, ANON, LIMITS, DIAG_KEYS, HEARTBEAT_MAX_BYTES, HEARTBEAT_FIELDS, HEARTBEAT_FEATURES, healthOverall,
   b64, unb64, sha256, kidOf, publicKeyFromRaw, rawPublic, rawPrivate, parseKeyLine, normalizeKey, keyLine,
   seal, open, envelopeHash, signedBytes, leadingZeroBits, powOk, solvePow, sign, validateBody, verifySig, validatePayload,
   signMoved, verifyMoved, refCode, normalizeRef

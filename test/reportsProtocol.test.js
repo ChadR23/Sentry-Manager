@@ -171,3 +171,59 @@ test('config: the built-in endpoint, keys from one line, https only', () => {
   assert.equal(bad.keys.length, 0, 'a bad key turns reporting off');
   assert.throws(() => P.normalizeKey({ kid: '0'.repeat(16), publicKey: a }), /does not match/);
 });
+
+test('heartbeat schema: exactly its fields, strict types and ranges, no diagnostics, under 4 KB', () => {
+  const hb = (h = {}, extra = {}) => ({
+    kind: 'heartbeat', sentAt: new Date().toISOString(), install: 'b'.repeat(32), anonymous: false, build: { build: 130, sha: '1345348', builtAt: null, tag: 'latest' }, ui: 'horizon',
+    heartbeat: {
+      uptimeSec: 3600, health: { overall: 'warn', warnings: 2, problems: 0 }, vehicles: 2, footageBytes: 812345678901, recordings: 4210,
+      spaceSavedBytes: 301234567890, distanceKm: 18234.7, freeBytes: 1200000000000, totalBytes: 4000000000000, converting: false, jobsQueued: 1,
+      features: { can: true, sentryUsbPaired: false, gpu: true }, ...h
+    },
+    ...extra
+  });
+  const good = hb();
+  assert.deepEqual(P.validatePayload(good), []);
+  assert.ok(Buffer.byteLength(JSON.stringify(good)) < 1024, 'compact');
+  assert.deepEqual(P.validatePayload(hb({}, { install: 'ANON', anonymous: true })), []);
+  assert.deepEqual(P.validatePayload(hb({ freeBytes: null, totalBytes: null, distanceKm: 0 })), [], 'no storage known yet');
+  assert.ok(P.KINDS.includes('heartbeat'));
+  const bad = (h, extra, re) => assert.ok(P.validatePayload(hb(h, extra)).some((e) => re.test(e)), `${re}: ${JSON.stringify(P.validatePayload(hb(h, extra)))}`);
+  // extra fields, anywhere
+  bad({ hostname: 'tower' }, {}, /unknown field heartbeat\.hostname/);
+  bad({ health: { overall: 'ok', warnings: 0, problems: 0, list: [] } }, {}, /heartbeat\.health\.list/);
+  bad({ features: { can: true, sentryUsbPaired: true, gpu: true, nodes: true } }, {}, /heartbeat\.features\.nodes/);
+  bad({}, { diagnostics: {} }, /never in a heartbeat/);
+  bad({}, { message: 'hi' }, /^message/);
+  bad({}, { contact: 'me@x.org' }, /feedback only/);
+  assert.ok(P.validatePayload({ ...hb(), heartbeat: undefined }).includes('heartbeat'));
+  assert.ok(P.validatePayload(payload({ heartbeat: good.heartbeat })).some((e) => /heartbeats only/.test(e)), 'not in other kinds');
+  // missing fields
+  const { recordings: _r, ...noRec } = good.heartbeat;
+  assert.ok(P.validatePayload({ ...good, heartbeat: noRec }).includes('heartbeat.recordings missing'));
+  // wrong types and ranges
+  bad({ uptimeSec: -1 }, {}, /heartbeat\.uptimeSec/);
+  bad({ vehicles: 1.5 }, {}, /heartbeat\.vehicles/);
+  bad({ vehicles: 1001 }, {}, /heartbeat\.vehicles/);
+  bad({ footageBytes: '12' }, {}, /heartbeat\.footageBytes/);
+  bad({ footageBytes: 2 ** 60 }, {}, /heartbeat\.footageBytes/);
+  bad({ recordings: null }, {}, /heartbeat\.recordings/);
+  bad({ spaceSavedBytes: -5 }, {}, /heartbeat\.spaceSavedBytes/);
+  bad({ distanceKm: 12.34 }, {}, /heartbeat\.distanceKm/);
+  bad({ distanceKm: 10_000_000.1 }, {}, /heartbeat\.distanceKm/);
+  bad({ distanceKm: -0.1 }, {}, /heartbeat\.distanceKm/);
+  bad({ distanceKm: '5' }, {}, /heartbeat\.distanceKm/);
+  bad({ converting: 1 }, {}, /heartbeat\.converting/);
+  bad({ jobsQueued: 100_001 }, {}, /heartbeat\.jobsQueued/);
+  bad({ freeBytes: 5, totalBytes: 4 }, {}, /more than totalBytes/);
+  bad({ freeBytes: null, totalBytes: 4 }, {}, /both or neither/);
+  bad({ health: { overall: 'bad', warnings: 0, problems: 1 } }, {}, /health\.overall/);
+  bad({ health: { overall: 'ok', warnings: 0, problems: 1 } }, {}, /does not match the counts/);
+  bad({ health: { overall: 'ok', warnings: -1, problems: 0 } }, {}, /health\.warnings/);
+  bad({ features: { can: 'yes', sentryUsbPaired: false, gpu: false } }, {}, /features\.can/);
+  bad({ features: { can: true, gpu: false } }, {}, /features\.sentryUsbPaired/);
+  // oversize: strings past their limits, and the whole payload past 4 KB
+  bad({}, { ui: 'x'.repeat(81) }, /^ui$/);
+  bad({}, { build: { build: 1, sha: null, builtAt: null, tag: 'x'.repeat(121) } }, /build\.tag/);
+  assert.equal(P.HEARTBEAT_MAX_BYTES, 4096);
+});
