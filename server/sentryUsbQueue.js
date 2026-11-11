@@ -247,7 +247,7 @@ function createSentryUsbQueue({ db, link, dir, log, notify = () => {}, onResult 
       const made = (await call(d, 'POST', '/api/system/backup')).body || {};
       if (made.skipped) return { message: 'No changes since the last backup.' };
       const date = typeof made.date === 'string' ? made.date.slice(0, 40) : '';
-      return { message: `Backup ${date} made${made.location === 'archive' ? ' on the archive share' : made.location === 'ssd' ? ' on the Sentry USB' : ''}.` };
+      return { message: `Backup ${date ? `${date} ` : ''}made${made.location === 'archive' ? ' on the archive share' : made.location === 'ssd' ? ' on the Sentry USB' : ''}.` };
     },
     async settings(d, it) {
       const cur = (await call(d, 'GET', '/api/setup/config')).body;

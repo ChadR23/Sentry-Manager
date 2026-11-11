@@ -511,7 +511,8 @@ also covers a man in the middle with another certificate), `no pairing open`,
 Manager closes with WebSocket code 1008.
 
 **Close codes.** 4000 replaced by a newer connection for the same id; 4001
-unpaired; 1001 silent for 90 s or Manager shutting down; 1008 denied or a
+unpaired (from either side: a Pi unpaired on itself closes with 4001, and
+Manager then forgets it, its queue too, logs it and raises a notice); 1001 silent for 90 s or Manager shutting down; 1008 denied or a
 protocol violation; 1009 a frame over the limit; 1002 an unmasked or malformed
 frame; 1003 a binary frame; 1007 text that is not UTF-8.
 
@@ -575,9 +576,8 @@ rules on the server.
 **Queued actions (6a).** Archive busy is read from the last status: any of
 `archiving`, `archive_running`, `archive_work_running`, `uploading`,
 `upload_running` true (or `"yes"`), or `archive.running`/`archive.active`.
-**The Pi's status has none of these today**, so until it adds one
-(`archiving` and `archive_work_running`, as `/api/drives` already reports),
-update and reboot do not wait. Settings changes store `{from, to}` per field
+The Pi's status sends `archiving` (archive work running: copying,
+uploading, verifying), so update and reboot wait while it is true. Settings changes store `{from, to}` per field
 (`null` = commented out); a secret is always applied (it reads back empty, so it
 cannot be compared). The PUT sends every active line, with secrets empty
 (keep), plus the changes, since the Pi's PUT replaces the whole config.

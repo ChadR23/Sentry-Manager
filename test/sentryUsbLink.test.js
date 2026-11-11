@@ -350,6 +350,27 @@ test('unpair deletes the key and closes the link; the next handshake fails', asy
   } finally { await t.close(); }
 });
 
+test('unpaired on the Pi: its close with 4001 makes Manager forget it too; a 1000 close does not', async () => {
+  const events = [];
+  const t = await setup({ onEvent: (e) => events.push(e) });
+  try {
+    await t.link.openPairing({ name: 'Car', username: 'pi', password: 'raspberry' });
+    const p = await t.pi({ mode: 'pair', username: 'pi', password: 'raspberry' });
+    // an ordinary close (the Pi turned off, a settings change): still paired
+    p.close();
+    await until(() => p.ws.closed);
+    await until(() => !t.link.devices()[0]?.online);
+    assert.equal(t.link.devices()[0].paired, true);
+    const q = await t.pi({ mode: 'key', key: p.linkKey, id: p.auth.id });
+    assert.equal(q.result, 'ok');
+    q.ws.close(4001, 'unpaired');
+    await until(() => t.link.devices().length === 0);
+    const un = events.find((e) => e.type === 'unpaired');
+    assert.deepEqual([un.id, un.byPi], [p.auth.id, true]);
+    assert.equal((await t.pi({ mode: 'key', key: p.linkKey, id: p.auth.id })).why, 'not paired');
+  } finally { await t.close(); }
+});
+
 test('K and the proofs are computed as the contract says (fixed values)', async () => {
   const k = await L.pairingKey('pi', 'raspberry');
   const again = crypto.pbkdf2Sync('raspberry', 'sentryusb-link|pi', 200000, 32, 'sha256');

@@ -17,6 +17,7 @@ const { WsConnection, acceptKey } = require('./wsFrames');
 
 const V = 1;
 const LINK_PATH = '/api/sentryusb/link';
+const UNPAIRED_CLOSE = 4001; // either side: the link key is gone
 const PBKDF2_ITERATIONS = 200_000;
 const MIB = 1024 * 1024;
 const MAX_FRAME = 2 * MIB; // a 1 MiB chunk in base64 inside JSON, with room
@@ -291,7 +292,7 @@ function createSentryUsbLink({
     store.devices = store.devices.filter((x) => x.id !== id);
     save();
     const l = links.get(id);
-    if (l) l.drop(4001, 'unpaired');
+    if (l) l.drop(UNPAIRED_CLOSE, 'unpaired');
     changed();
     return true;
   }
@@ -469,7 +470,7 @@ function createSentryUsbLink({
     const shake = setTimeout(() => deny('timeout'), handshakeMs);
     shake.unref?.();
     let beat = null;
-    ws.on('close', (code) => {
+    ws.on('close', (code, _reason, byPeer) => {
       clearTimeout(shake);
       clearInterval(beat);
       if (!link && !done) {
@@ -488,6 +489,13 @@ function createSentryUsbLink({
         if (d) { d.lastSeen = now(); save(); }
         log.info(`Sentry USB "${d?.name || link.id}" disconnected`);
         event({ type: 'disconnected', id: link.id, ip, port, reason: `code ${code}` });
+        // unpaired on the Pi: it has no key and never connects again, so forget it here too
+        if (byPeer && code === UNPAIRED_CLOSE && d) {
+          log.warn(`Sentry USB "${d.name}" (${link.id}) was unpaired on the Sentry USB itself`);
+          event({ type: 'unpaired', id: link.id, ip, port, byPi: true });
+          store.devices = store.devices.filter((x) => x.id !== link.id);
+          save();
+        }
         changed();
       }
     });

@@ -2646,7 +2646,14 @@ async function main() {
     db, log: sentryAudit,
     onChange: () => { announce('sentryusb'); syncDevicePort(); },
     onStatus: (id, first) => { if (first) sentryQueue?.kick(id); },
-    onEvent: (e) => securityLog.linkEvent(e)
+    onEvent: (e) => {
+      if (e.type === 'unpaired' && e.byPi) {
+        // (still known here: the record goes right after this event)
+        notes.raise({ kind: 'sentryusb', level: 'info', dedupeKey: `sentryusb-unpaired:${e.id}:${Date.now()}`, title: `${sentryLink.name(e.id) || 'A Sentry USB'} was unpaired on the Sentry USB itself`, message: 'Sentry Manager forgot it and what was queued for it. Pair it again from Settings → Sentry USB.' });
+        sentryQueue.forgetDevice(e.id);
+      }
+      return securityLog.linkEvent(e);
+    }
   });
   const sentryQueue = createSentryUsbQueue({
     db, link: sentryLink, dir: path.join(DATA, 'sentryusb'), log: sentryAudit, onChange: () => announce('sentryusb'),

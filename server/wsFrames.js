@@ -138,10 +138,11 @@ class WsConnection extends EventEmitter {
         code = payload.readUInt16BE(0);
         try { reason = utf8.decode(payload.subarray(2)); } catch { reason = ''; }
       }
-      if (!this.closing) this.write(0x8, payload.length >= 2 ? payload.subarray(0, 2) : Buffer.alloc(0));
+      const byPeer = !this.closing; // the other side closed first (not an answer to ours)
+      if (byPeer) this.write(0x8, payload.length >= 2 ? payload.subarray(0, 2) : Buffer.alloc(0));
       this.closing = true;
       this.socket.end();
-      this.gone(code, reason);
+      this.gone(code, reason, byPeer);
       return;
     }
     if (opcode === 0x9) { this.write(0xA, payload); return; }
@@ -217,13 +218,13 @@ class WsConnection extends EventEmitter {
     this.gone(1006, '');
   }
 
-  gone(code, reason) {
+  gone(code, reason, byPeer = false) {
     if (this.closed) return;
     this.closed = true;
     this.chunks = [];
     this.have = 0;
     this.frag = null;
-    this.emit('close', code, reason);
+    this.emit('close', code, reason, byPeer);
   }
 }
 

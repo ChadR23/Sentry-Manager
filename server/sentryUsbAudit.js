@@ -145,7 +145,7 @@ function createSentryUsbAudit({ db, notify = () => {}, device = () => null, log 
       }
       case 'disconnected': return record({ ...base, kind: 'disconnected', detail: ev.reason || null });
       case 'replaced': return record({ ...base, kind: 'replaced' });
-      case 'unpaired': return record({ ...base, kind: 'unpaired', who: ev.who });
+      case 'unpaired': return record({ ...base, kind: 'unpaired', who: ev.who || null, detail: ev.byPi ? 'unpaired on the Sentry USB itself' : null });
       case 'net': {
         const n = { ssid: clean(ev.ssid, 64), iface: clean(ev.iface, 16), ip: clean(ev.netIp, 64), gw: clean(ev.gw, 64) };
         const flags = [];
