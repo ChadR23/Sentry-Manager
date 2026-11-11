@@ -445,7 +445,11 @@ test('arrival: a pass stops at its cap and the next one carries on; the rate lim
 test('arrival: the index is compact and written in batches (a journal), not rewritten per clip; a v1 index is read', async () => {
   const s = await setup({ options: { saveEvery: 10, compactMin: 25 } });
   const dataDir = path.join(s.base, '..', `${path.basename(s.base)}-data`);
-  for (let i = 0; i < 12; i++) await s.write(s.clipRel(name(i * 60_000)), crypto.randomBytes(200));
+  // the 12 clips must share one day's folder: an hour before now can be just
+  // before midnight, so start 13 minutes earlier when 12 minutes would cross it
+  const crosses = name(0).slice(0, 10) !== name(11 * 60_000).slice(0, 10);
+  const first = crosses ? -13 * 60_000 : 0;
+  for (let i = 0; i < 12; i++) await s.write(s.clipRel(name(first + i * 60_000)), crypto.randomBytes(200));
   await s.run();
   const snap = JSON.parse(await fsp.readFile(path.join(dataDir, 'car1.json'), 'utf8'));
   assert.equal(snap.v, 2);
