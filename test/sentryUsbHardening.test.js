@@ -92,7 +92,11 @@ async function setup(opts = {}) {
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
   const port = srv.address().port;
   const pis = [];
-  const pi = async (o) => { const p = await connectFakePi({ port, iterations: 1000, ...o }); pis.push(p); return p; };
+  // a pair-mode Pi types the code of the slot opened last, as the owner would
+  let code = null;
+  const open = link.openPairing;
+  link.openPairing = async (o) => { const r = await open(o); code = r.code; return r; };
+  const pi = async (o) => { const p = await connectFakePi({ port, iterations: 1000, ...(o?.mode === 'pair' ? { code } : {}), ...o }); pis.push(p); return p; };
   const close = async () => { link.close(); for (const p of pis) p.ws?.terminate(); srv.closeAllConnections?.(); await new Promise((r) => srv.close(r)); };
   return { db, link, port, pi, close, events };
 }

@@ -38,6 +38,9 @@ const CSS = `
 .sentry-sul .sul-dot.on{background:#3ddc84}
 .sentry-sul .sul-fp{font:600 13px/1.7 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:.04em;display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,250px),1fr));gap:0 14px;padding:6px 10px;border-radius:7px;background:rgba(127,127,127,.14);user-select:all;-webkit-user-select:all}
 .sentry-sul .sul-count{font:700 22px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace}
+.sentry-sul .sul-code{display:flex;flex-wrap:wrap;gap:0 .2em;font:700 clamp(20px,6vw,48px)/1.15 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:.04em;padding:10px 12px;border-radius:10px;background:rgba(127,127,127,.16);user-select:all;-webkit-user-select:all;align-self:flex-start;max-width:100%;box-sizing:border-box}
+.sentry-sul .sul-code span{white-space:nowrap}
+.sentry-sul .sul-code i{font-style:normal;opacity:.45}
 .sentry-sul .sul-devs{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,240px),1fr));gap:10px}
 .sentry-sul .sul-dev{all:unset;box-sizing:border-box;cursor:pointer;border:1px solid rgba(127,127,127,.3);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:2px;min-width:0}
 .sentry-sul .sul-dev[aria-pressed="true"]{border-color:currentColor;background:rgba(127,127,127,.12)}
@@ -100,12 +103,19 @@ const ago = (t) => {
 const clockLeft = (ms) => { const s = Math.max(0, Math.round(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
 const uptime = (secs) => { const s = num(secs); if (s === null) return '—'; const d = Math.floor(s / 86400); const hh = Math.floor((s % 86400) / 3600); const m = Math.floor((s % 3600) / 60); return d ? `${d} d ${hh} h` : hh ? `${hh} h ${m} min` : `${m} min`; };
 
-// why pairing did not work, in plain words
+// why pairing did not work, in plain words: [headline, what to do]. A wrong code and a
+// wrong password are one message, so neither is revealed (the proof cannot tell them apart).
+const WRONG = 'Wrong pairing code or password';
 const PAIR_WHY = {
-  'wrong password': 'The Sentry USB answered, but the username or password does not match its web login (Settings on the Sentry USB). Check both and start again. (A different certificate fingerprint on the Sentry USB means something between the two changed the connection.)',
-  'too many tries': 'Five wrong passwords: pairing was stopped. Check the username and password and start again.',
-  expired: 'No Sentry USB connected within 15 minutes. Check on the Sentry USB that "Managed by Sentry Manager" is on and its address is this server. It must reach port 10000 here: check the NAS firewall and that Docker publishes port 10000 (10000:10000).'
+  'wrong password': [WRONG, 'Check the code typed on the Sentry USB, and the web username and password entered here (its web login), then start again.'],
+  'too many tries': [WRONG, 'Five tries with a wrong pairing code or password: pairing was stopped. Check them and start again for a new code.'],
+  expired: ['Pairing window expired', 'No Sentry USB paired within 15 minutes. Start pairing again for a new code. The Sentry USB must reach port 10000 here: check the NAS firewall and that Docker publishes port 10000 (10000:10000).'],
+  version: ['The Sentry USB needs updating', 'Update Sentry USB to test.30 or later, then start pairing again.']
 };
+/** [headline, detail] for a failed pairing (last.why from the server). */
+export const pairWhy = (why) => PAIR_WHY[why] || ['Pairing did not work', `The Sentry USB was refused: ${why}.`];
+// the device port's address as the owner types it on the Sentry USB
+export const pairInstruction = (port = 10000) => `On the Sentry USB, open Settings → System → Sentry Manager, enter this Sentry Manager's address (the computer it runs on, port ${port}, for example 192.168.1.5:${port}) and this code, then press Pair.`;
 
 // the Pi's setup config in groups (field names from its setup)
 const GROUPS = [
@@ -254,23 +264,42 @@ export function createSentryUsbPage(el, { h24 = null } = {}) {
     // 16 groups of 4, as the Sentry USB shows it, in four rows
     const groups4 = info.fingerprint ? info.fingerprint.split(' ') : [];
     const fp = groups4.length ? [0, 4, 8, 12].map((i) => h('span', {}, groups4.slice(i, i + 4).join(' '))) : null;
-    const fpBlock = fp ? [h('p', { class: 'sul-muted' }, 'Sentry Manager\'s certificate fingerprint (SHA-256). The Sentry USB shows the one it saw after pairing: they must match.'), h('div', { class: 'sul-fp', 'aria-label': 'Certificate fingerprint' }, fp)] : null;
+    // for reference only: the pairing code is what proves it is this server, nothing has to be compared
+    const fpBlock = fp ? [h('p', { class: 'sul-muted' }, 'For reference: Sentry Manager\'s certificate fingerprint (SHA-256). After pairing the Sentry USB shows the one it saved; nothing has to be compared.'), h('div', { class: 'sul-fp', 'aria-label': 'Certificate fingerprint' }, fp)] : null;
+    const devicePort = info.port?.port || 10000;
     const portLine = info.port?.error ? h('p', { class: 'sul-bad' }, `Port ${info.port.port} could not open: ${info.port.error}`) : null;
     const last = pr.last;
     const result = last ? (last.ok
-      ? h('div', { class: 'sul-box' }, h('p', { class: 'sul-ok' }, `Paired: ${last.name || 'Sentry USB'} is connected.`), h('p', { class: 'sul-muted' }, 'Check that the fingerprint the Sentry USB shows matches the one below.'))
-      : h('div', { class: 'sul-box' }, h('p', { class: 'sul-bad' }, 'Pairing did not work'), h('p', {}, PAIR_WHY[last.why] || `The Sentry USB was refused: ${last.why}.`))) : null;
+      ? h('div', { class: 'sul-box' }, h('p', { class: 'sul-ok' }, `Paired: ${last.name || 'Sentry USB'} is connected.`))
+      : h('div', { class: 'sul-box' }, h('p', { class: 'sul-bad' }, pairWhy(last.why)[0]), h('p', {}, pairWhy(last.why)[1]))) : null;
     if (pr.open) {
       const left = h('span', { class: 'sul-count', 'aria-live': 'polite' }, clockLeft(pr.expiresAt - Date.now()));
       clearInterval(countdown);
       countdown = setInterval(() => { if (!alive) return; left.textContent = clockLeft(pr.expiresAt - Date.now()); }, 1000);
       timers.add(countdown);
+      // the code: only the admin who opened the slot gets it (never a watch-only account)
+      const codeEl = pr.code ? h('div', { class: 'sul-code', 'aria-label': `Pairing code ${pr.code.split('').join(' ')}` },
+        pr.code.split('-').map((g, i) => [i ? h('i', { 'aria-hidden': 'true' }, '-') : null, h('span', {}, g)])) : null;
+      const copied = h('span', { class: 'sul-muted', 'aria-live': 'polite' });
+      const copy = pr.code ? btn('Copy code', async () => {
+        try { await navigator.clipboard.writeText(pr.code); copied.textContent = 'Copied.'; } catch {
+          // no clipboard (plain HTTP, an old browser): select it to copy by hand
+          const r = document.createRange(); r.selectNodeContents(codeEl); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r);
+          copied.textContent = 'Selected: copy it with Ctrl+C (or long-press).';
+        }
+        setTimeout(() => { copied.textContent = ''; }, 4000);
+      }) : null;
+      const wrongNow = last && !last.ok && last.why === 'version' ? h('p', { class: 'sul-bad' }, `${pairWhy('version')[0]}. ${pairWhy('version')[1]}`) : null;
       fill(pairBox, h('h2', { id: 'sul-add' }, 'Add a Sentry USB'),
         h('div', { class: 'sul-box' },
-          h('p', {}, h('b', {}, `Waiting for "${pr.name}" to connect…`)),
+          h('p', {}, h('b', {}, `Pairing code for "${pr.name}"`)),
+          codeEl || h('p', { class: 'sul-muted' }, 'The pairing code is shown only to the admin who started pairing.'),
+          h('div', { class: 'sul-row' }, copy, copied),
+          h('p', {}, pairInstruction(devicePort)),
           h('div', { class: 'sul-row' }, left, h('span', { class: 'sul-muted' }, 'left'), btn('Cancel', () => guarded(async () => { await api('/api/sentryusb/pair', { method: 'DELETE' }); await load(); }))),
-          pr.failures ? h('p', { class: 'sul-warn' }, `${pr.failures} wrong password${pr.failures === 1 ? '' : 's'} so far (pairing stops after 5).`) : null,
-          h('p', { class: 'sul-muted' }, 'On the Sentry USB: Settings → Sentry Manager → turn on "Managed by Sentry Manager", or press Pair if it is on already. It then tries for 15 minutes and connects within seconds.')),
+          pr.failures ? h('p', { class: 'sul-warn' }, `${WRONG}: ${pr.failures} of 5 tries used (pairing stops after 5).`) : null,
+          wrongNow,
+          h('p', { class: 'sul-muted' }, 'The code works once, for 15 minutes. It is not saved anywhere: cancel or let it run out and start again for a new one.')),
         portLine, fpBlock);
       return;
     }
@@ -283,13 +312,13 @@ export function createSentryUsbPage(el, { h24 = null } = {}) {
     form.addEventListener('submit', (e) => {
       e.preventDefault();
       const body = JSON.stringify({ name: form.name.value, username: form.username.value, password: form.password.value });
-      guarded(async () => { await api('/api/sentryusb/pair', { method: 'POST', body }); form.reset(); await load(); });
+      guarded(async () => { await api('/api/sentryusb/pair', { method: 'POST', body }); form.reset(); pairDrawn = ''; await load(); });
     });
     const many = info.devices.length > 0;
     const steps = h('ol', { class: 'sul-steps' },
-      h('li', {}, h('b', {}, 'On the Sentry USB'), ', open ', h('b', {}, 'Settings → Sentry Manager'), ' and turn on ', h('b', {}, 'Managed by Sentry Manager'), ' (or press ', h('b', {}, 'Pair'), ' if it is on). That opens 15 minutes for pairing. The address is filled in from its archive server; the port is 10000. (A Sentry USB without a web password cannot pair: set one there first.)'),
-      h('li', {}, h('b', {}, 'Here'), ', enter a name and the Sentry USB\'s web username and password, then press Start pairing. They are used once and not kept.', form),
-      h('li', {}, 'Sentry Manager waits up to 15 minutes for it to connect, and says here whether it worked.'));
+      h('li', {}, h('b', {}, 'Here'), ', enter a name and the Sentry USB\'s web username and password, then press Start pairing. They are used once and not kept. (A Sentry USB without a web password cannot pair: set one there first.)', form),
+      h('li', {}, 'Sentry Manager shows a ', h('b', {}, 'pairing code'), ' for 15 minutes. ', h('b', {}, 'On the Sentry USB'), ', open ', h('b', {}, 'Settings → System → Sentry Manager'), `, enter this Sentry Manager's address (the computer it runs on, port ${devicePort}, for example 192.168.1.5:${devicePort}) and the code, then press `, h('b', {}, 'Pair'), '.'),
+      h('li', {}, 'Both sides then show Paired. Nothing has to be compared.'));
     const body = [h('h2', { id: 'sul-add' }, many ? 'Add another Sentry USB' : 'Add a Sentry USB'), result, steps, portLine, fpBlock];
     // with one paired: the steps fold away under "Add another"
     if (many && last?.ok !== false) fill(pairBox, result, h('details', {}, h('summary', {}, 'Add another Sentry USB'), h('div', { class: 'sul-box' }, steps, fpBlock)));

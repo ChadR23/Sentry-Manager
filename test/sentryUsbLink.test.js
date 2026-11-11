@@ -45,7 +45,11 @@ async function setup(opts = {}) {
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
   const port = srv.address().port;
   const pis = [];
-  const pi = async (o) => { const p = await connectFakePi({ port, iterations: ITER, ...o }); pis.push(p); return p; };
+  // a pair-mode Pi types the code of the slot opened last, as the owner would (unless the test gives one)
+  let code = null;
+  const open = link.openPairing;
+  link.openPairing = async (o) => { const r = await open(o); code = r.code; return r; };
+  const pi = async (o) => { const p = await connectFakePi({ port, iterations: ITER, ...(o?.mode === 'pair' ? { code } : {}), ...o }); pis.push(p); return p; };
   const close = async () => { link.close(); for (const p of pis) p.ws?.terminate(); srv.closeAllConnections?.(); await new Promise((r) => srv.close(r)); };
   return { db, link, port, pi, close };
 }
@@ -62,7 +66,7 @@ test('pairing: the Pi proves K, gets a link key; later connections use the key, 
     const p = await t.pi({ mode: 'pair', username: 'pi', password: 'raspberry' });
     assert.equal(p.result, 'ok', 'the Pi checked Manager\'s proof too');
     assert.match(p.linkKey, /^[0-9a-f]{64}$/);
-    assert.equal(p.hello.v, 1);
+    assert.equal(p.hello.v, 2);
     assert.equal(p.hello.fp, p.fp, 'hello carries the certificate the TLS session uses');
     assert.equal(t.link.pairing().open, false, 'the slot is used once');
     assert.equal(t.link.pairing().last.ok, true);
@@ -155,8 +159,8 @@ test('handshake: replays, other ids, bad versions, early frames and silence are 
     const replay = await t.pi({ id: 'pi-aaaaaaaaaaaaaaaa', mode: 'key', key: '00'.repeat(32), tamper: { proof: a.auth.proof, nonce: a.auth.nonce } });
     assert.equal(replay.why, 'not paired');
     // the Pi's nonce may not be Manager's own (a reflected hello)
-    const v2 = await t.pi({ mode: 'key', key: a.linkKey, id: 'pi-aaaaaaaaaaaaaaaa', tamper: { v: 2 } });
-    assert.equal(v2.why, 'version');
+    const v3 = await t.pi({ mode: 'key', key: a.linkKey, id: 'pi-aaaaaaaaaaaaaaaa', tamper: { v: 3 } });
+    assert.equal(v3.why, 'version');
     const early = await t.pi({ mode: 'key', key: a.linkKey, tamper: { frameFirst: true } });
     assert.equal(early.why, 'bad message');
     // connects and says nothing: closed after the handshake time
@@ -408,6 +412,126 @@ test('the contract\'s test vectors: K, both proofs in pair and key mode, the fin
   assert.equal(L.fpGroups(fp), '61EC B687 2005 D76F 9C85 B9AB EE8C 635C 4133 8110 3BF5 DF25 1EC2 63FC 331D 6C27');
   // upper-case hex is not the same proof: only lower case is accepted
   assert.equal(L.sameHex('1425DF08A1362D43A7D44A6059BA7F078DF99375D282BC35221CCD364ACEBBCF', '1425df08a1362d43a7d44a6059ba7f078df99375d282bc35221ccd364acebbcf'), false);
+});
+
+// ---- protocol v2: the pairing code (docs/sentry-usb-link.md, section 2)
+test('pairing code: 12 Crockford base32 characters from crypto.randomInt, shown in three groups', () => {
+  const seen = new Set();
+  for (let i = 0; i < 2000; i++) {
+    const c = L.newPairingCode();
+    assert.match(c, /^[0-9A-HJKMNP-TV-Z]{12}$/);
+    seen.add(c);
+  }
+  assert.equal(seen.size, 2000, 'no repeats');
+  assert.equal(L.CODE_ALPHABET, '0123456789ABCDEFGHJKMNPQRSTVWXYZ');
+  assert.equal(L.CODE_ALPHABET.length, 32, '5 bits a character, 60 bits in all');
+  assert.equal(L.codeGroups('K7QPM2XD9WRT'), 'K7QP-M2XD-9WRT');
+  assert.equal(L.CODE_INVALID, 'That isn\'t a valid pairing code');
+});
+
+test('pairing code: normalized as both sides do (case, dashes, spaces, O/0 and I/L/1), else invalid', () => {
+  const n = L.normalizePairingCode;
+  assert.equal(n('K7QP-M2XD-9WRT'), 'K7QPM2XD9WRT');
+  assert.equal(n('k7qp-m2xd-9wrt'), 'K7QPM2XD9WRT', 'lower case');
+  assert.equal(n('K7QPM2XD9WRT'), 'K7QPM2XD9WRT', 'no dashes');
+  assert.equal(n(' k7qp m2xd 9wrt '), 'K7QPM2XD9WRT', 'spaces');
+  assert.equal(n('K7QP--M2XD - 9WRT'), 'K7QPM2XD9WRT');
+  assert.equal(n('OOOO-IIII-LLLL'), '000011111111', 'O is 0, I and L are 1');
+  assert.equal(n('oooo-iiii-llll'), '000011111111');
+  for (const bad of ['K7QP-M2XD-9WR', 'K7QP-M2XD-9WRTX', '', '-----', 'K7QP-M2XD-9WRU', 'K7QP-M2XD-9WR*', 'K7QP_M2XD_9WRT', 'K7QP.M2XD.9WRT', 'Ä7QP-M2XD-9WRT', null, undefined, 123456789012, 'K'.repeat(100)]) {
+    assert.equal(n(bad), null, JSON.stringify(bad));
+  }
+});
+
+test('pairing: a wrong code with the right password and the right code with a wrong password fail the same way', async () => {
+  const t = await setup();
+  try {
+    const { code } = await t.link.openPairing({ name: 'Car', username: 'pi', password: 'raspberry' });
+    assert.match(code, /^[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$/);
+    const other = code === '0000-0000-0000' ? '1111-1111-1111' : '0000-0000-0000';
+    const wrongCode = await t.pi({ mode: 'pair', username: 'pi', password: 'raspberry', code: other });
+    const lastA = t.link.pairing().last;
+    const wrongPass = await t.pi({ mode: 'pair', username: 'pi', password: 'nope', code });
+    const lastB = t.link.pairing().last;
+    assert.deepEqual([wrongCode.result, wrongCode.why], ['denied', 'wrong password']);
+    assert.deepEqual([wrongPass.result, wrongPass.why], [wrongCode.result, wrongCode.why], 'the Pi is told the same');
+    assert.equal(lastA.why, lastB.why, 'the page is told the same');
+    assert.equal(t.link.pairing().failures, 2);
+    // the page shows one message for both
+    const page = await import(`data:text/javascript,${encodeURIComponent(fs.readFileSync(path.join(__dirname, '..', 'web', 'sentryUsbLink.js'), 'utf8'))}`);
+    assert.equal(page.pairWhy(lastA.why)[0], 'Wrong pairing code or password');
+    assert.equal(page.pairWhy('too many tries')[0], 'Wrong pairing code or password');
+    assert.equal(page.pairWhy('expired')[0], 'Pairing window expired');
+    assert.equal(page.pairWhy('version')[0], 'The Sentry USB needs updating');
+    assert.equal(page.pairInstruction(10000), 'On the Sentry USB, open Settings → System → Sentry Manager, enter this Sentry Manager\'s address (the computer it runs on, port 10000, for example 192.168.1.5:10000) and this code, then press Pair.');
+    // K alone (a v1 proof) does not pair either
+    const k = await L.pairingKey('pi', 'raspberry', ITER);
+    const kOnly = await t.pi({ mode: 'pair', username: 'pi', password: 'raspberry', tamper: { secret: k } });
+    assert.equal(kOnly.why, 'wrong password');
+    // typed in lower case without dashes, it pairs
+    const ok = await t.pi({ mode: 'pair', username: 'pi', password: 'raspberry', code: code.toLowerCase().replace(/-/g, ' ') });
+    assert.equal(ok.result, 'ok');
+    assert.equal(t.link.pairing().open, false, 'the code is used once');
+    assert.equal(t.link.pairing().code, undefined, 'and forgotten');
+  } finally { await t.close(); }
+});
+
+test('pairing code: a new slot gets a new code; it is shown only to the admin who opened the slot, and never stored', async () => {
+  const t = await setup();
+  try {
+    const a = await t.link.openPairing({ name: 'Car', username: 'pi', password: 'raspberry', by: 'admin' });
+    assert.equal(t.link.pairing({ codeFor: 'admin' }).code, a.code);
+    assert.equal(t.link.pairing().code, undefined, 'not without asking for it (a watch-only account)');
+    assert.equal(t.link.pairing({ codeFor: 'other-admin' }).code, undefined, 'not another admin');
+    const b = await t.link.openPairing({ name: 'Car', username: 'pi', password: 'raspberry', by: 'admin' });
+    assert.notEqual(a.code, b.code, 'a new slot, a new code');
+    const old = await t.pi({ mode: 'pair', username: 'pi', password: 'raspberry', code: a.code });
+    assert.equal(old.why, 'wrong password', 'the replaced slot\'s code is gone');
+    const ok = await t.pi({ mode: 'pair', username: 'pi', password: 'raspberry', code: b.code });
+    assert.equal(ok.result, 'ok');
+    const raw = JSON.stringify([...t.db.raw.values()]);
+    for (const c of [a.code, b.code]) {
+      assert.equal(raw.includes(c), false);
+      assert.equal(raw.includes(c.replace(/-/g, '')), false);
+    }
+    // cancelled or expired: forgotten
+    await t.link.openPairing({ name: 'Car', username: 'pi', password: 'raspberry', by: 'admin' });
+    t.link.cancelPairing();
+    assert.equal(t.link.pairing({ codeFor: 'admin' }).code, undefined);
+  } finally { await t.close(); }
+});
+
+test('protocol v2: Manager says v 2, and a v1 Pi is refused with version (and the page says to update it)', async () => {
+  const t = await setup();
+  try {
+    await t.link.openPairing({ name: 'Car', username: 'pi', password: 'raspberry' });
+    const v1 = await t.pi({ mode: 'pair', username: 'pi', password: 'raspberry', tamper: { v: 1 } });
+    assert.equal(v1.hello.v, 2);
+    assert.deepEqual([v1.result, v1.why], ['denied', 'version']);
+    assert.equal(t.link.pairing().last.why, 'version');
+    assert.equal(t.link.pairing().open, true, 'the slot stays open for the updated Pi');
+    assert.equal(t.link.pairing().failures, 0, 'not a wrong proof');
+    const v1key = await t.pi({ mode: 'key', key: '11'.repeat(32), tamper: { v: 1 } });
+    assert.equal(v1key.why, 'version');
+  } finally { await t.close(); }
+});
+
+// Appendix A, pair mode in v2 (S = P): the Pi's docs/sentry-manager-link.md lists the same values
+test('the contract\'s v2 test vectors: the code K7QP-M2XD-9WRT normalized, P and both pair-mode proofs', async () => {
+  const k = await L.pairingKey('admin', 'correct horse battery staple');
+  const code = L.normalizePairingCode('K7QP-M2XD-9WRT');
+  assert.equal(code, 'K7QPM2XD9WRT');
+  const p = L.pairCodeSecret(k, code);
+  assert.equal(p.toString('hex'), 'ae8f34df1f97c33455555600e278f5e25fa728f6cb4d612e0f4b6befe88cb7cf');
+  assert.equal(p.toString('hex'), crypto.createHmac('sha256', k).update('pair-code|K7QPM2XD9WRT').digest('hex'));
+  const mn = '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f';
+  const pn = '202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f';
+  const fp = '61ecb6872005d76f9c85b9abee8c635c413381103bf5df251ec263fc331d6c27';
+  const id = '0123456789abcdef0123456789abcdef';
+  assert.equal(L.piProof(p, mn, pn, fp, id), 'a81633f8e74b24df86d3b5064bab2a7cd6705f884f8cf1d3baef7347e1ace662');
+  assert.equal(L.managerProof(p, mn, pn, fp, id), 'd50cde97a5b18afcc5e8221803b93e8dc9163a9ec5bddf3e06aa04436ecbf6f0');
+  // the same code typed any accepted way gives the same P
+  for (const typed of ['k7qp-m2xd-9wrt', 'K7QP M2XD 9WRT', 'k7qpm2xd9wrt']) assert.ok(L.pairCodeSecret(k, L.normalizePairingCode(typed)).equals(p), typed);
 });
 
 test('an answer the Pi ends with an error ("too large", "read failed") fails; a JSON ping is answered', async () => {

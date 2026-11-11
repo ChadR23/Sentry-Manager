@@ -105,6 +105,19 @@ test('the Sentry USB link through the server', { skip: !hasOpenssl, timeout: 120
     assert.equal(pair.json.pairing.open, true);
     assert.match(pair.json.fingerprint, /^([0-9A-F]{4} ){15}[0-9A-F]{4}$/, '16 groups of 4, as the Pi shows it');
     assert.equal(pair.text.includes('raspberry'), false, 'the password is not sent back');
+    // the pairing code: in the admin's answer, in three groups
+    const code = pair.json.pairing.code;
+    assert.match(code, /^[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$/);
+    const codeForms = [code, code.replace(/-/g, '')];
+    assert.equal((await s.call('GET', '/api/sentryusb', { cookie: admin })).json.pairing.code, code, 'the admin who opened it sees it on the page');
+    // a watch-only account never sees it
+    assert.equal((await s.call('POST', '/api/accounts', { cookie: admin, body: { username: 'watcher', password: 'watching123', role: 'viewer' } })).status, 200);
+    const viewer = await s.login('watcher', 'watching123');
+    const watching = await s.call('GET', '/api/sentryusb', { cookie: viewer });
+    assert.equal(watching.status, 200);
+    assert.equal(watching.json.pairing.open, true);
+    assert.equal(watching.json.pairing.code, undefined);
+    for (const c of codeForms) assert.equal(watching.text.includes(c), false, 'not in a watch-only answer');
 
     // the device port now listens, and says nothing to a stranger
     const stranger = await req(s.canPort, 'GET', '/');
@@ -116,7 +129,12 @@ test('the Sentry USB link through the server', { skip: !hasOpenssl, timeout: 120
     const onMain = await connectFakePi({ port: s.port, mode: 'pair', username: 'pi', password: 'raspberry' }).catch((err) => ({ result: err.message }));
     assert.notEqual(onMain.result, 'ok');
 
-    pi = await connectFakePi({ port: s.canPort, mode: 'pair', username: 'pi', password: 'raspberry' });
+    // a v1 Pi is told to update; the wrong code is refused like a wrong password
+    const old = await connectFakePi({ port: s.canPort, mode: 'pair', username: 'pi', password: 'raspberry', code, tamper: { v: 1 } });
+    assert.equal(old.why, 'version');
+    const badCode = await connectFakePi({ port: s.canPort, mode: 'pair', username: 'pi', password: 'raspberry', code: code === '0000-0000-0000' ? '1111-1111-1111' : '0000-0000-0000' });
+    assert.equal(badCode.why, 'wrong password');
+    pi = await connectFakePi({ port: s.canPort, mode: 'pair', username: 'pi', password: 'raspberry', code: code.toLowerCase() });
     const piSince = Date.now();
     assert.equal(pi.result, 'ok');
     assert.equal(pi.fp, pair.json.fingerprint.replace(/ /g, '').toLowerCase(), 'the fingerprint shown is the device port\'s certificate');
@@ -126,6 +144,7 @@ test('the Sentry USB link through the server', { skip: !hasOpenssl, timeout: 120
     assert.equal(d.online, true);
     assert.equal(d.name, 'Model 3');
     assert.equal(list.json.pairing.last.ok, true);
+    assert.equal(list.json.pairing.code, undefined, 'used once, then forgotten');
     assert.equal(list.text.includes(pi.linkKey), false, 'the key is in no answer');
     const id = d.id;
     const P = `/api/sentryusb/${id}/proxy`;
@@ -162,8 +181,6 @@ test('the Sentry USB link through the server', { skip: !hasOpenssl, timeout: 120
     assert.equal(pi.requests.length, sent, 'not sent to the Pi');
 
     // a watch-only account reads, and cannot change anything
-    assert.equal((await s.call('POST', '/api/accounts', { cookie: admin, body: { username: 'watcher', password: 'watching123', role: 'viewer' } })).status, 200);
-    const viewer = await s.login('watcher', 'watching123');
     assert.equal((await s.call('GET', '/api/sentryusb', { cookie: viewer })).status, 200);
     assert.equal((await s.call('GET', `${P}/status`, { cookie: viewer })).status, 200);
     for (const [m, p] of [['POST', `${P}/system/reboot`], ['PUT', `${P}/setup/config`], ['DELETE', `${P}/snapshots/snap-000041`], ['POST', '/api/sentryusb/pair'],
@@ -195,16 +212,29 @@ test('the Sentry USB link through the server', { skip: !hasOpenssl, timeout: 120
     // the key is in no log and no support bundle
     const bundle = await s.call('GET', '/api/support-bundle', { cookie: admin });
     assert.equal(bundle.status, 200);
-    for (const e of readZip(bundle.buf)) assert.equal(e.data.toString('utf8').includes(pi.linkKey), false, e.name);
+    for (const e of readZip(bundle.buf)) {
+      assert.equal(e.data.toString('utf8').includes(pi.linkKey), false, e.name);
+      for (const c of codeForms) assert.equal(e.data.toString('utf8').includes(c), false, `no pairing code in ${e.name}`);
+    }
+    // nor in the security log
+    const sec = await s.call('GET', '/api/sentryusb/security.csv', { cookie: admin });
+    assert.equal(sec.status, 200);
+    for (const c of codeForms) assert.equal(sec.text.includes(c), false, 'no pairing code in the security log');
     await wait(300);
     const logs = fs.readFileSync(path.join(s.dir, 'data', 'logs', 'manager.log'), 'utf8') + s.output();
     assert.equal(logs.includes(pi.linkKey), false, 'no key in the logs');
     assert.equal(logs.includes('raspberry'), false, 'no Pi password in the logs');
+    for (const c of codeForms) assert.equal(logs.includes(c), false, 'no pairing code in the logs');
+    assert.match(logs, /Sentry USB pairing opened for "Model 3"/, 'the opening is logged, without the code');
     assert.match(logs, /Sentry USB "Model 3": POST \/api\/diagnostics\/download: admin/, 'actions are logged: who, which Pi, which route');
     // a database snapshot keeps no key
     assert.equal((await s.call('POST', '/api/snapshots', { cookie: admin, body: {} })).status, 200);
     const snapDir = path.join(s.dir, 'data', 'snapshots');
-    for (const n of fs.readdirSync(snapDir)) assert.equal(fs.readFileSync(path.join(snapDir, n)).includes(Buffer.from(pi.linkKey)), false, n);
+    for (const n of fs.readdirSync(snapDir)) {
+      const bytes = fs.readFileSync(path.join(snapDir, n));
+      assert.equal(bytes.includes(Buffer.from(pi.linkKey)), false, n);
+      for (const c of codeForms) assert.equal(bytes.includes(Buffer.from(c)), false, `no pairing code in snapshot ${n}`);
+    }
 
     // a link outlives the device port's 15-second first-request timer (TLS: cleared by the upgrade)
     while (Date.now() - piSince < 16_500) await wait(250);
@@ -239,7 +269,7 @@ test('the Sentry USB link through the server', { skip: !hasOpenssl, timeout: 120
     const dataDir = path.join(s.dir, 'data');
     for (const n of fs.readdirSync(dataDir).filter((n) => n.startsWith('manager.db'))) {
       const bytes = fs.readFileSync(path.join(dataDir, n));
-      for (const secret of ['queued-wifi-pass-77', 'queued-share-pass-78', 'live-wifi-pass-31']) assert.equal(bytes.includes(Buffer.from(secret)), false, `${secret} in ${n}`);
+      for (const secret of ['queued-wifi-pass-77', 'queued-share-pass-78', 'live-wifi-pass-31', ...codeForms]) assert.equal(bytes.includes(Buffer.from(secret)), false, `${secret} in ${n}`);
     }
 
     // unpair: the key goes, the link closes, the port closes (nothing else needs it)

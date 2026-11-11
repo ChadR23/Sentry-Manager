@@ -143,8 +143,8 @@ test('a Pi\'s alert frames (a wrong fingerprint, a failed Manager proof) become 
     // a pairing attempt with nothing open
     const early = await connectFakePi({ port, iterations: 1000, mode: 'pair', username: 'pi', password: 'raspberry' });
     assert.equal(early.why, 'no pairing open');
-    await link.openPairing({ name: 'Model 3', username: 'pi', password: 'raspberry' });
-    const pi = await connectFakePi({ port, iterations: 1000, mode: 'pair', username: 'pi', password: 'raspberry', net: { ssid: '<img src=x onerror=alert(1)>' },
+    const { code } = await link.openPairing({ name: 'Model 3', username: 'pi', password: 'raspberry' });
+    const pi = await connectFakePi({ port, iterations: 1000, mode: 'pair', username: 'pi', password: 'raspberry', code, net: { ssid: '<img src=x onerror=alert(1)>' },
       alerts: [{ kind: 'fingerprint', seen: 'AB:CD:EF', at: 1_762_000_000 }, { kind: 'proof', at: 1_762_000_100 }] });
     assert.equal(pi.result, 'ok');
     for (let i = 0; i < 100 && a.list({ filter: 'attempts' }).filter((r) => r.kind === 'alert').length < 2; i++) await new Promise((r) => setTimeout(r, 20));

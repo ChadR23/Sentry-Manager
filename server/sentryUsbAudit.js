@@ -34,7 +34,7 @@ const KINDS = {
   open: 'connection opened', 'fail-proof': 'handshake failed: bad proof', 'fail-id': 'handshake failed: unknown Sentry USB id',
   'fail-version': 'handshake failed: wrong version', 'fail-noslot': 'pairing with no pairing open', 'fail-timeout': 'handshake timed out',
   'fail-garbage': 'handshake failed: garbage frame', 'fail-oversized': 'handshake failed: oversized frame', 'fail-rate': 'refused: too many failures',
-  'pair-ok': 'paired', 'pair-fail': 'pairing failed: wrong password', connected: 'connected', disconnected: 'disconnected', replaced: 'replaced by a newer connection',
+  'pair-ok': 'paired', 'pair-fail': 'pairing failed: wrong pairing code or password', connected: 'connected', disconnected: 'disconnected', replaced: 'replaced by a newer connection',
   unpaired: 'unpaired', net: 'network', alert: 'the Sentry USB reported', action: 'action', queued: 'queued action'
 };
 const ATTEMPT = (k) => k.startsWith('fail-') || k === 'pair-fail' || k === 'alert';

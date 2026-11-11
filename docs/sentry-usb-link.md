@@ -36,50 +36,92 @@ The **Pi connects out to Manager**; Manager never connects to the Pi:
 TLS. TLS 1.2 is the minimum, and 1.3 is preferred.
 
 The Pi pins Manager's certificate by its SHA-256 fingerprint (section 2). A
-Pi with no fingerprint saved accepts the certificate only during pairing.
+Pi with no fingerprint saved accepts the certificate only during pairing, while
+the owner has opened its pairing window by entering a pairing code.
 
-## 2. Pairing: the Pi's username and password, never stored by Manager
+## 2. Pairing: a one-time code, plus the Pi's username and password (protocol v2)
 
 The Pi already has a web username and password: `WEB_USERNAME` and
-`WEB_PASSWORD` from its setup. Pairing uses them once, then both sides switch to
-a random link key. Manager never stores the Pi's password, and neither side ever
-sends it over the link.
+`WEB_PASSWORD` from its setup. Pairing uses them once, together with a one-time
+**pairing code** that Manager shows and the owner types on the Pi. Then both
+sides switch to a random link key. Manager never stores the Pi's password or
+the code, and neither side ever sends either over the link.
 
-1. **On the Pi, under Settings → Sentry Manager:**
-   - Turn on "Managed by Sentry Manager".
-   - Enter Manager's address. It defaults to the archive server's host, port
-     10000.
-   - A Pi with no web password set cannot pair; the UI says to set one first.
-2. **In Manager, under Settings → Sentry USB → Add a Sentry USB:**
-   - Enter a name, plus the Pi's web username and password.
-   - These go to Manager over Manager's HTTPS, like every password.
-   - Manager derives the pairing key at once:
-     `K = PBKDF2-HMAC-SHA256(password, salt = "sentryusb-link|" + username, 200000 iterations, 32 bytes)`.
-   - Manager keeps K **in memory only**, for at most 15 minutes, and forgets
-     the password at once.
+Why a code: the old step, comparing Manager's fingerprint on the Pi, showed
+only 8 hex characters large (32 bits), which an attacker can match by
+generating certificates, after which the pairing proof keyed by the password
+alone could be cracked offline. The code has 60 random bits, is used once and
+never crosses the network.
+
+1. **In Manager, under Sentry USB → Add a Sentry USB:**
+   - Enter a name, plus the Pi's web username and password, then press Start
+     pairing. These go to Manager over Manager's HTTPS, like every password.
+   - Manager derives
+     `K = PBKDF2-HMAC-SHA256(password, salt = "sentryusb-link|" + username, 200000 iterations, 32 bytes)`
+     at once, generates the pairing code, and keeps only
+     `P = HMAC-SHA256(key = K, message = "pair-code|" + normalizedCode)` and the
+     code, **in memory only**, for at most 15 minutes. The password and K are
+     forgotten at once.
+   - Manager shows the code very large, monospace, in three groups (for
+     example `K7QP-M2XD-9WRT`) with a copy button and the countdown, and its
+     address hint: the device port, 10000.
    - While this pairing slot is open, the device port is open.
-3. **The Pi connects** to the device port, and both sides prove they hold K
+2. **On the Pi, under Settings → System → Sentry Manager** (behind the Pi's
+   web login):
+   - Enter Manager's address (nothing is filled in automatically; the hint is
+     `192.168.1.5:10000`) and the pairing code, then press **Pair**.
+   - That opens the Pi's 15-minute pairing window; the code is kept in memory
+     only.
+   - A Pi with no web password set cannot pair; the UI says to set one first.
+3. **The Pi connects** to the device port, and both sides prove they hold P
    (section 3).
-   - The Pi only tries pair mode during a 15-minute pairing window that the
-     owner opens on the Pi: turning the link on, or pressing "Pair". Outside
-     it, it only uses key mode, so nothing on the network can make a paired
-     Pi fall back to pairing, and a Pi that was never paired doesn't offer its
-     pairing proof to whoever answers at Manager's address.
+   - The Pi only tries pair mode during the window the owner opened with a
+     code. Outside it, it only uses key mode, so nothing on the network can
+     make a paired Pi fall back to pairing, and a Pi that was never paired
+     doesn't offer a pairing proof to whoever answers at Manager's address.
    - While pairing it retries every 5 to 15 seconds, so pairing completes
-     within seconds of the owner adding the Pi in Manager (and stays under
-     Manager's 10 failures a minute).
+     within seconds (and stays under Manager's 10 failures a minute).
    - "Pair again" on an already paired Pi keeps the saved fingerprint, so it
      can only re-pair with the same Manager. "Unpair" clears both.
    - On success, Manager generates a random 32-byte **link key**.
    - Manager sends it inside the TLS channel, and both sides save it.
-   - Manager forgets K.
-   - The Pi saves Manager's certificate fingerprint and shows it in its UI, and
-     Manager shows its own fingerprint, so you can compare the two.
+   - Manager forgets P and the code.
+   - Both sides show "Paired". The Pi saves Manager's certificate fingerprint
+     and shows it small, "for reference"; Manager shows its own, also for
+     reference. Nothing has to be compared: there is no "It matches" step, no
+     `confirm_fingerprint` state and no connection that only reads the
+     fingerprint.
 4. **Afterwards, every connection uses the link key** and never the password.
    - Changing the Pi's web password doesn't unpair it.
    - "Unpair" on either side deletes the key on that side, and the other side's
      next handshake fails.
    - A failed handshake is reported as "not paired" on both sides.
+
+**The code.**
+
+- **Generation:** Manager draws 12 characters from Crockford base32
+  (`0123456789ABCDEFGHJKMNPQRSTVWXYZ`, 60 bits) with `crypto.randomInt`.
+- **Display:** three groups of 4 joined by `-`.
+- **Normalization, on both sides before use:** upper case; drop spaces and `-`;
+  `O` becomes `0`, `I` and `L` become `1`. The result must be exactly 12
+  characters from the alphabet, otherwise "That isn't a valid pairing code".
+- **Lifetime:** one code per open slot, a new slot gets a new code, and the
+  code is forgotten when the slot closes: success, cancel, 15 minutes, or 5
+  failed proofs.
+- **Never stored or logged:** not on disk, not in the database, a snapshot, the
+  support bundle, the security log or any log, on either side. Manager returns
+  it only to the admin who opened the slot: in the answer to
+  `POST /api/sentryusb/pair` and in the slot status of `GET /api/sentryusb`
+  while the slot is open. A watch-only account (or another admin) never gets
+  it.
+
+**Certificates in pair mode.** The Pi accepts whatever certificate is served,
+but only while its window is open. The proof still covers the `fp` the Pi saw,
+and after success the Pi pins it. A man in the middle with its own certificate
+cannot finish: its `fp` differs, so the real Manager's proof doesn't verify,
+and it can't compute one without P. If it plays Manager outright, it receives a
+Pi proof keyed by P; cracking that needs the 60-bit code as well as the
+password.
 
 **Storage:**
 
@@ -94,17 +136,18 @@ sends it over the link.
 Every message is one JSON text frame. Binary data travels as base64 inside JSON.
 
 1. **Manager sends `hello`:**
-   `{"t":"hello","v":1,"nonce":"<32 random bytes, hex>","fp":"<Manager cert sha256, hex>"}`
+   `{"t":"hello","v":2,"nonce":"<32 random bytes, hex>","fp":"<Manager cert sha256, hex>"}`
 2. **The Pi replies with `auth`:**
 
    ```
-   {"t":"auth","v":1,"id":"<Pi device id>","mode":"pair"|"key","nonce":"<32 random bytes hex>",
+   {"t":"auth","v":2,"id":"<Pi device id>","mode":"pair"|"key","nonce":"<32 random bytes hex>",
     "name":"<hostname>","version":"<Sentry USB version>",
     "proof":hex(HMAC-SHA256(S, "pi|" + managerNonce + "|" + piNonce + "|" + fp + "|" + id))}
    ```
 
    - `id` is a stable random id the Pi generates once and keeps.
-   - `S` is K in pair mode and the link key in key mode.
+   - `S` is P (section 2) in pair mode and the link key in key mode. (In v1 it
+     was K; the formulas are otherwise unchanged.)
    - `fp` is the fingerprint the Pi actually saw in the TLS session. A
      man-in-the-middle with another certificate therefore fails, even in pair
      mode.
@@ -117,8 +160,8 @@ Every message is one JSON text frame. Binary data travels as base64 inside JSON.
 
    - On failure Manager sends `{"t":"denied","why":"..."}` and closes.
    - Failures are rate-limited per address: at most 10 a minute.
-4. **The Pi checks Manager's proof.** If it's wrong, the Pi closes and doesn't
-   save anything.
+4. **The Pi checks Manager's proof**, keyed by P in pair mode, before it saves
+   anything. If it's wrong, the Pi closes and doesn't save anything.
 
 **Encoding (both sides):** nonces, fingerprints, proofs and the link key are
 exactly 64 **lowercase** hex characters; anything else fails. The fingerprint
@@ -298,7 +341,7 @@ share, the web password itself), and the Pi always masks them over the link.
 | Route | What it does |
 |---|---|
 | `GET /api/sentryusb` | The devices, each with: id, name, paired, online, last seen, version, last status. Never the key. The address it connects from and the networks it reports are shown to admins only. |
-| `POST /api/sentryusb/pair` | Takes `{name, username, password}` and opens a 15-minute pairing slot. Fresh admin password confirmation is needed, as for other risky actions. |
+| `POST /api/sentryusb/pair` | Takes `{name, username, password}` and opens a 15-minute pairing slot; the answer's `pairing.code` is the pairing code (only here and in that admin's `GET /api/sentryusb`). Fresh admin password confirmation is needed, as for other risky actions. |
 | `DELETE /api/sentryusb/pair` | Cancels the slot. |
 | `PATCH /api/sentryusb/{id}` | Renames the device. |
 | `DELETE /api/sentryusb/{id}` | Unpairs: deletes the key and closes the link. |
@@ -443,9 +486,12 @@ password or request body is ever logged.
 
 ## 7. Versioning
 
-- `v` in `hello` and `auth` is 1.
-- A side that gets a newer `v` it doesn't know closes the connection with
-  `{"t":"denied","why":"version"}`, and both UIs say to update.
+- `v` in `hello` and `auth` is **2** (pair mode keyed by P).
+- A side that gets any other `v`, v1 included, answers
+  `{"t":"denied","why":"version"}` and closes. Both UIs then say to update the
+  other side: Sentry USB to test.30 or later ("The Sentry USB needs updating"),
+  or Sentry Manager to the newest version.
+- No device paired with v1, so there is no migration.
 
 ## Appendix A. Test vectors
 
@@ -466,12 +512,26 @@ independently with Python's `hashlib.pbkdf2_hmac` and `hmac`.
 | id | `0123456789abcdef0123456789abcdef` |
 | linkKey | `404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f` |
 
-**Pair mode (S = K):**
+**Pair mode in v1 (S = K), kept for reference; v2 uses P below:**
 
 - Pi proof, `HMAC(K, "pi|" + managerNonce + "|" + piNonce + "|" + fp + "|" + id)`:
   `1425df08a1362d43a7d44a6059ba7f078df99375d282bc35221ccd364acebbcf`
 - Manager proof, `HMAC(K, "mgr|" + piNonce + "|" + managerNonce + "|" + fp + "|" + id)`:
   `2f864f5224cad380d328c3b8fa62104855ca1ce1eaaccf5dc12a49535cd2ce1e`
+
+**Pair mode in v2 (S = P), with the code `K7QP-M2XD-9WRT`:**
+
+| Input | Value |
+|---|---|
+| code as shown | `K7QP-M2XD-9WRT` |
+| normalized code | `K7QPM2XD9WRT` |
+| P, `HMAC(K, "pair-code|K7QPM2XD9WRT")` | `ae8f34df1f97c33455555600e278f5e25fa728f6cb4d612e0f4b6befe88cb7cf` |
+| Pi proof, `HMAC(P, "pi|" + managerNonce + "|" + piNonce + "|" + fp + "|" + id)` | `a81633f8e74b24df86d3b5064bab2a7cd6705f884f8cf1d3baef7347e1ace662` |
+| Manager proof, `HMAC(P, "mgr|" + piNonce + "|" + managerNonce + "|" + fp + "|" + id)` | `d50cde97a5b18afcc5e8221803b93e8dc9163a9ec5bddf3e06aa04436ecbf6f0` |
+
+`k7qp-m2xd-9wrt`, `K7QP M2XD 9WRT` and `k7qpm2xd9wrt` normalize to the same
+code and give the same P. Checked by Manager's `test/sentryUsbLink.test.js`,
+and computed independently with Python's `hashlib` and `hmac`.
 
 **Key mode (S = linkKey):**
 
@@ -488,8 +548,10 @@ What Manager does where the sections above leave a choice (server/sentryUsbLink.
 server/sentryUsbQueue.js, server/sentryUsbAudit.js, web/sentryUsbLink.js).
 
 **Using it.** Every interface has a **Sentry USB** page (in the navigation next
-to Health): the guided "Add a Sentry USB" steps with a countdown and the reason
-when pairing fails, the device list (online, or away with when it was last
+to Health): the guided "Add a Sentry USB" steps, the pairing code (large, in
+three groups, with a copy button and the countdown) and the reason when pairing
+fails ("Wrong pairing code or password", the same for both; "Pairing window
+expired"; "The Sentry USB needs updating"), the device list (online, or away with when it was last
 seen), and per device the tabs Status, Settings, Diagnostics, Logs, Updates,
 Actions, Snapshots, Backups, Waiting for the Pi, Security log, and Name and unpair.
 While a Pi is away, Update, Reboot, Sync, Diagnostics and Backup become
@@ -512,8 +574,9 @@ While a Pi is away, Update, Reboot, Sync, Diagnostics and Backup become
 - `v` must be a number; anything else is `bad message`.
 
 **`denied` reasons** (the `why` Manager sends): `not paired` (key mode: unknown
-id or wrong key), `wrong password` (pair mode: the proof did not match K, which
-also covers a man in the middle with another certificate), `no pairing open`,
+id or wrong key), `wrong password` (pair mode: the proof did not match P, so a wrong
+pairing code or a wrong password, which are not told apart; it also covers a
+man in the middle with another certificate; the name stays as in v1), `no pairing open`,
 `version`, `timeout` (no `auth` within 10 s), `bad message`. After `denied`
 Manager closes with WebSocket code 1008.
 
@@ -538,8 +601,10 @@ connections per address and 256 in all on the device port (shared with the CAN
 Bridge), and a connection that sends nothing for 15 s is closed. After 10
 failed handshakes in a minute an address gets HTTP 429 on the upgrade.
 
-**Pairing slot.** One slot at a time (a new one replaces it). It closes after
-the first success, after 15 minutes, or after 5 wrong proofs (any address).
+**Pairing slot.** One slot at a time (a new one replaces it, with a new code).
+It closes after the first success, after 15 minutes, or after 5 wrong proofs
+(any address), and forgets P and the code. A `version` refusal while it is open
+is shown on the page and does not count as a wrong proof.
 Pairing an id that is already paired replaces its key (the admin typed that
 Pi's password).
 
@@ -611,7 +676,10 @@ to Manager's log (log search) and the newest 1000 to the support bundle as
 `sentryusb-security.csv`, with addresses replaced. CSV cells starting with
 `= + - @`, tab or CR get a leading `'`.
 
-**Where the key is not.** No API answer, log line, support bundle, security
+**Where the key and the code are not.** No log line, support bundle,
+security log, database row or snapshot holds a pairing code (it lives only in
+the slot, in memory), and no API answer holds it except for the admin who
+opened the slot. No API answer, log line, support bundle, security
 log or database snapshot holds a link key: a snapshot drops the keys (a
 restored one shows the Pi unpaired) and the queue (a restored one would run
 actions again that already ran).

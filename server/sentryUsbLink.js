@@ -6,16 +6,19 @@
 // Manager sends requests and the Pi answers them and pushes its status.
 //
 // Pairing: an admin enters the Pi's web username and password; Manager
-// derives K from them at once (PBKDF2), keeps only K, in memory, for 15
-// minutes, and forgets the password. The first Pi that proves it holds K gets
-// a random link key, stored with its device record; every later connection
-// proves the link key instead. The key never leaves this module except inside
+// derives K from them at once (PBKDF2), makes a one-time pairing code (60
+// random bits) and keeps only P = HMAC(K, "pair-code|" + code) and the code,
+// in memory, for 15 minutes; the password and K are forgotten at once. The
+// owner types the code on the Pi. The first Pi that proves it holds P gets a
+// random link key, stored with its device record; every later connection
+// proves the link key instead. The code is shown only to the admin who opened
+// the slot and is never stored or logged. The key never leaves this module except inside
 // the TLS channel to its Pi: devices() and every API answer leave it out.
 
 const crypto = require('crypto');
 const { WsConnection, acceptKey } = require('./wsFrames');
 
-const V = 1;
+const V = 2; // 2: pair mode is keyed by the pairing code (P), not K
 const LINK_PATH = '/api/sentryusb/link';
 const UNPAIRED_CLOSE = 4001; // either side: the link key is gone
 const PBKDF2_ITERATIONS = 200_000;
@@ -52,6 +55,27 @@ function pairingKey(username, password, iterations = PBKDF2_ITERATIONS) {
     crypto.pbkdf2(Buffer.from(String(password), 'utf8'), Buffer.from(`sentryusb-link|${username}`, 'utf8'), iterations, 32, 'sha256', (err, key) => (err ? reject(err) : resolve(key)));
   });
 }
+// ---- the pairing code: 12 characters of Crockford base32 (60 bits), shown as XXXX-XXXX-XXXX
+const CODE_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+const CODE_RE = /^[0-9A-HJKMNP-TV-Z]{12}$/;
+const CODE_INVALID = 'That isn\'t a valid pairing code';
+/** A new code, 12 characters from CODE_ALPHABET (crypto.randomInt). */
+function newPairingCode() {
+  let c = '';
+  for (let i = 0; i < 12; i++) c += CODE_ALPHABET[crypto.randomInt(CODE_ALPHABET.length)];
+  return c;
+}
+/** As both sides use it: upper case, no spaces or dashes, O -> 0, I and L -> 1; null unless 12 alphabet characters. */
+function normalizePairingCode(input) {
+  if (typeof input !== 'string' || input.length > 64) return null;
+  const c = input.toUpperCase().replace(/[\s-]/g, '').replace(/O/g, '0').replace(/[IL]/g, '1');
+  return CODE_RE.test(c) ? c : null;
+}
+/** For people: three groups of 4 joined by "-". */
+const codeGroups = (code) => (code.match(/.{1,4}/g) || []).join('-');
+/** P = HMAC-SHA256(K, "pair-code|" + normalized code): the pair-mode secret. */
+const pairCodeSecret = (k, code) => crypto.createHmac('sha256', k).update(`pair-code|${code}`, 'utf8').digest();
+
 const piProof = (secret, managerNonce, piNonce, fp, id) => crypto.createHmac('sha256', secret).update(`pi|${managerNonce}|${piNonce}|${fp}|${id}`, 'utf8').digest('hex');
 const managerProof = (secret, managerNonce, piNonce, fp, id) => crypto.createHmac('sha256', secret).update(`mgr|${piNonce}|${managerNonce}|${fp}|${id}`, 'utf8').digest('hex');
 /** Constant time; false for anything that is not 64 hex digits. */
@@ -213,7 +237,7 @@ function createSentryUsbLink({
   const save = () => db.set(KEY, store);
   const byId = (id) => store.devices.find((d) => d.id === id) || null;
 
-  let slot = null; // { name, k, expiresAt, failures, timer }
+  let slot = null; // { name, p, code, by, expiresAt, failures, timer }; p and code in memory only
   let lastPairing = null; // { ok, why, deviceId, name, at } shown to the admin
   const links = new Map(); // device id -> link
   const failures = new Map(); // address -> [times]
@@ -235,30 +259,39 @@ function createSentryUsbLink({
   function closeSlot(why) {
     if (!slot) return;
     clearTimeout(slot.timer);
-    slot.k.fill(0);
+    slot.p.fill(0);
     if (why) lastPairing = { ok: false, why, name: slot.name, at: now() };
     slot = null;
     changed();
   }
 
-  async function openPairing({ name, username, password }) {
+  async function openPairing({ name, username, password, by = null }) {
     const label = clean(name, 40);
     if (!label) throw Object.assign(new Error('Give it a name.'), { status: 400 });
     if (typeof username !== 'string' || !username || username.length > 128) throw Object.assign(new Error('Enter the Pi\'s web username.'), { status: 400 });
     if (typeof password !== 'string' || !password || password.length > 1024) throw Object.assign(new Error('Enter the Pi\'s web password. A Pi with no web password cannot be paired: set one on the Pi first.'), { status: 400 });
     const k = await pairingKey(username, password, iterations);
-    if (slot) { clearTimeout(slot.timer); slot.k.fill(0); }
+    // a new slot, a new code; K is not kept, only P
+    const code = newPairingCode();
+    const p = pairCodeSecret(k, code);
+    k.fill(0);
+    if (slot) { clearTimeout(slot.timer); slot.p.fill(0); }
     const expiresAt = now() + slotMs;
     const timer = setTimeout(() => closeSlot('expired'), slotMs);
     timer.unref?.();
-    slot = { name: label, k, expiresAt, failures: 0, timer };
+    slot = { name: label, p, code, by: by ?? null, expiresAt, failures: 0, timer };
     lastPairing = null;
     changed();
-    return pairing();
+    return pairing({ codeFor: slot.by });
   }
 
-  const pairing = () => ({
+  /**
+   * The slot's state. The code is in it only for the admin who opened the
+   * slot: pass codeFor (that account's name) when the caller is an admin.
+   */
+  const pairing = ({ codeFor } = {}) => ({
     open: Boolean(slot), name: slot?.name || null, expiresAt: slot?.expiresAt || null, failures: slot?.failures || 0,
+    ...(slot && codeFor !== undefined && codeFor === slot.by ? { code: codeGroups(slot.code) } : {}),
     last: lastPairing && lastPairing.at > now() - 30 * 60_000 ? { ...lastPairing } : null
   });
 
@@ -521,7 +554,11 @@ function createSentryUsbLink({
 
     function auth(m) {
       if (typeof m.v !== 'number' || m.v < 1) return deny('bad message', { kind: 'garbage' });
-      if (m.v > V) return deny('version', { count: false, id: typeof m.id === 'string' ? m.id : null });
+      // v1 (pair mode keyed by K) and anything newer: the other side needs updating
+      if (m.v !== V) {
+        if (slot) { lastPairing = { ok: false, why: 'version', name: slot.name, at: now() }; changed(); }
+        return deny('version', { count: false, id: typeof m.id === 'string' ? m.id : null });
+      }
       const id = typeof m.id === 'string' && ID_RE.test(m.id) ? m.id : null;
       const piNonce = typeof m.nonce === 'string' && HEX64.test(m.nonce) && m.nonce !== managerNonce ? m.nonce : null;
       if (!id || !piNonce || (m.mode !== 'pair' && m.mode !== 'key')) return deny('bad message', { kind: 'garbage' });
@@ -538,15 +575,16 @@ function createSentryUsbLink({
         log.warn(`Sentry USB link: ${ip} asked to pair with no pairing open`);
         return deny('no pairing open', { kind: 'no slot', id });
       }
-      if (!sameHex(m.proof, piProof(slot.k, managerNonce, piNonce, fp, id))) {
+      // (one answer for a wrong code and a wrong password: the proof cannot tell them apart, and neither is revealed)
+      if (!sameHex(m.proof, piProof(slot.p, managerNonce, piNonce, fp, id))) {
         slot.failures += 1;
-        log.warn(`Sentry USB link: pairing from ${ip} refused (wrong username or password, ${slot.failures} of ${SLOT_FAILURES})`);
+        log.warn(`Sentry USB link: pairing from ${ip} refused (wrong pairing code or password, ${slot.failures} of ${SLOT_FAILURES})`);
         lastPairing = { ok: false, why: 'wrong password', name: slot.name, at: now() };
         if (slot.failures >= SLOT_FAILURES) closeSlot('too many tries');
         else changed();
         return deny('wrong password', { id });
       }
-      const k = slot.k;
+      const k = slot.p;
       const name = slot.name;
       clearTimeout(slot.timer);
       slot = null; // used once
@@ -640,6 +678,6 @@ function withoutKeys(value) {
 }
 
 module.exports = {
-  createSentryUsbLink, proxyTarget, badSetupBody, answerStatus, maskConfig, isSecretKey, SETTABLE, SECRET_TARGETS, secretsNeeded, safeType, pairingKey, piProof, managerProof, sameHex, fpHex, fpGroups, withoutKeys,
+  createSentryUsbLink, newPairingCode, normalizePairingCode, codeGroups, pairCodeSecret, CODE_ALPHABET, CODE_INVALID, V, proxyTarget, badSetupBody, answerStatus, maskConfig, isSecretKey, SETTABLE, SECRET_TARGETS, secretsNeeded, safeType, pairingKey, piProof, managerProof, sameHex, fpHex, fpGroups, withoutKeys,
   LINK_PATH, MAX_FRAME, MAX_HANDSHAKE_FRAME, MAX_ANSWER, MAX_BUFFERED, NOTICES, MAX_IN_FLIGHT, SLOT_FAILURES, FAILS_PER_MINUTE
 };

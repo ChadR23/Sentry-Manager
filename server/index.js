@@ -2693,7 +2693,8 @@ async function main() {
     return {
       https: Boolean(tlsSource), noHttpsText: tlsSource ? null : NO_HTTPS_TEXT, fingerprint: sentryFingerprint(),
       port: { ...(canPort?.state() || { listening: false, error: null, port: CAN_PORT }) },
-      pairing: sentryLink.pairing(), devices, admin, queueKinds: sentryQueue.KINDS
+      // the pairing code only for the admin who opened the slot; never for a watch-only account
+      pairing: sentryLink.pairing(admin ? { codeFor: user ?? null } : {}), devices, admin, queueKinds: sentryQueue.KINDS
     };
   });
   r.add('POST', '/api/sentryusb/pair', async (req, res, { body, user }) => {
@@ -2702,10 +2703,11 @@ async function main() {
     if (!tlsSource) throw Object.assign(new HttpError(409, NO_HTTPS_TEXT), { code: 'NO_HTTPS', expose: true });
     let out;
     try {
-      out = await sentryLink.openPairing({ name: body?.name, username: body?.username, password: body?.password });
+      out = await sentryLink.openPairing({ name: body?.name, username: body?.username, password: body?.password, by: user ?? null });
     } catch (err) {
       throw new HttpError(err.status || 500, err.message);
     }
+    // (the code is in the answer only: never in a log)
     audit.warn(`Sentry USB pairing opened for "${out.name}" (15 minutes): ${by(req, user)}`);
     await syncDevicePort();
     return { pairing: out, fingerprint: sentryFingerprint(), port: canPort?.state() || null };

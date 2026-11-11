@@ -2,22 +2,23 @@
 
 // A fake Sentry USB (the Pi) for tests and development: it connects to
 // Manager's device port like the real Pi (docs/sentry-usb-link.md), proves
-// it holds K or the link key, pushes its status and answers allowlisted
+// it holds P (from K and the pairing code Manager showed, protocol v2) or the
+// link key, pushes its status and answers allowlisted
 // requests with JSON shaped like the real handlers (sentry-usb
 // crates/api/src: status.rs, setup.rs, update.rs, healthcheck.rs, logs.rs,
 // snapshots.rs, backup.rs, system.rs).
 //
-//   const pi = await connectFakePi({ port, mode: 'pair', username, password });
+//   const pi = await connectFakePi({ port, mode: 'pair', username, password, code });
 //   pi.result  'ok' | 'denied';  pi.why;  pi.linkKey;  pi.close()
 //
 // From a shell (development, screenshots):
-//   node test/fixtures/fakeSentryUsb.js --port 10076 --user pi --password raspberry --state /tmp/pi.json
+//   node test/fixtures/fakeSentryUsb.js --port 10076 --user pi --password raspberry --code K7QP-M2XD-9WRT --state /tmp/pi.json
 
 const tls = require('tls');
 const crypto = require('crypto');
 const fs = require('fs');
 const { WsConnection } = require('../../server/wsFrames');
-const { pairingKey, piProof, managerProof, sameHex, fpHex, isSecretKey, SETTABLE, secretsNeeded } = require('../../server/sentryUsbLink');
+const { pairingKey, pairCodeSecret, normalizePairingCode, piProof, managerProof, sameHex, fpHex, isSecretKey, SETTABLE, secretsNeeded, V } = require('../../server/sentryUsbLink');
 
 const MIB = 1024 * 1024;
 const now = () => Math.floor(Date.now() / 1000);
@@ -179,11 +180,18 @@ function answer(st, { method, path, query, body }) {
   return json({ error: 'Not allowed over the Sentry Manager link' }, 403);
 }
 
+/** The pair-mode secret as the Pi derives it: P = HMAC(K, "pair-code|" + normalized code). */
+async function pairSecret(username, password, code, iterations) {
+  const k = await pairingKey(username, password, iterations);
+  // a code the Pi would refuse ("That isn't a valid pairing code") still gives a (wrong) secret here, for tests
+  return pairCodeSecret(k, normalizePairingCode(code) || String(code ?? ''));
+}
+
 /**
  * Connects once. Options: port, host, id, mode ('pair'|'key'), username,
- * password, key (hex), pin (fingerprint hex the Pi saved), answer (override),
+ * password, code (the pairing code Manager shows, pair mode), key (hex), pin (fingerprint hex the Pi saved), answer (override),
  * state, status (send a status push after ok, default true),
- * tamper: { fp, proof, v, frameFirst } for tests.
+ * tamper: { fp, proof, v, nonce, secret, frameFirst } for tests.
  */
 function connectFakePi(o = {}) {
   const st = o.state || fakeState();
@@ -222,10 +230,12 @@ function connectFakePi(o = {}) {
           if (m.t === 'hello') {
             out.hello = m;
             mNonce = m.nonce;
+            // as the Pi: a Manager on another protocol version is told so
+            if (m.v !== V) { out.result = 'denied by pi'; out.why = 'version'; ws.send(JSON.stringify({ t: 'denied', why: 'version' })); ws.close(1008, 'denied'); return done(out); }
             if (o.tamper?.frameFirst) return ws.send(JSON.stringify({ t: 'status', body: {} }));
-            secret = o.mode === 'key' ? Buffer.from(o.key, 'hex') : await pairingKey(o.username, o.password, o.iterations);
+            secret = o.tamper?.secret ? o.tamper.secret : o.mode === 'key' ? Buffer.from(o.key, 'hex') : await pairSecret(o.username, o.password, o.code, o.iterations);
             const fp = o.tamper?.fp || out.fp; // the fingerprint the Pi saw
-            const auth = { t: 'auth', v: o.tamper?.v ?? 1, id, mode: o.mode || 'pair', nonce: o.tamper?.nonce || piNonce, name: 'sentryusb-model3', version: st.version, proof: o.tamper?.proof || piProof(secret, mNonce, piNonce, fp, id) };
+            const auth = { t: 'auth', v: o.tamper?.v ?? V, id, mode: o.mode || 'pair', nonce: o.tamper?.nonce || piNonce, name: 'sentryusb-model3', version: st.version, proof: o.tamper?.proof || piProof(secret, mNonce, piNonce, fp, id) };
             out.auth = auth;
             return ws.send(JSON.stringify(auth));
           }
@@ -267,7 +277,7 @@ function sendAnswer(ws, id, a) {
   return ws.send(JSON.stringify({ t: 'end', id }));
 }
 
-module.exports = { connectFakePi, fakeState, answer, statusBody, sendAnswer };
+module.exports = { connectFakePi, pairSecret, fakeState, answer, statusBody, sendAnswer };
 
 // ---- from a shell: pair once (or use the saved key) and stay connected, pushing status
 if (require.main === module) {
@@ -283,7 +293,7 @@ if (require.main === module) {
       // an alert is sent once, on the first good connection (the Pi clears it after sending)
       const alerts = arg('alert', null) && !loop.alerted ? [{ kind: 'fingerprint', seen: crypto.createHash('sha256').update('another certificate').digest('hex'), at: Math.floor(Date.now() / 1000) - 3600 }] : [];
       loop.alerted = true;
-      const pi = await connectFakePi({ port, host: arg('host', '127.0.0.1'), id, state: st, alerts, net: arg('ssid', null) ? { ssid: arg('ssid'), gw: arg('gw', '10.0.0.1') } : undefined, ...(saved.key ? { mode: 'key', key: saved.key, pin: saved.fp } : { mode: 'pair', username: arg('user', 'pi'), password: arg('password', 'raspberry') }), onClose: () => setTimeout(loop, delay) });
+      const pi = await connectFakePi({ port, host: arg('host', '127.0.0.1'), id, state: st, alerts, net: arg('ssid', null) ? { ssid: arg('ssid'), gw: arg('gw', '10.0.0.1') } : undefined, ...(saved.key ? { mode: 'key', key: saved.key, pin: saved.fp } : { mode: 'pair', username: arg('user', 'pi'), password: arg('password', 'raspberry'), code: arg('code', '') }), onClose: () => setTimeout(loop, delay) });
       console.log(`fake Pi ${id}: ${pi.result}${pi.why ? ` (${pi.why})` : ''}`);
       if (pi.result === 'ok') {
         delay = 1000;
