@@ -189,7 +189,7 @@ async function pairSecret(username, password, code, iterations) {
 
 /**
  * Connects once. Options: port, host, id, mode ('pair'|'key'), username,
- * password, code (the pairing code Manager shows, pair mode), key (hex), pin (fingerprint hex the Pi saved), answer (override),
+ * password, code (the pairing code Manager shows, pair mode), key (hex), pin (fingerprint hex the Pi saved), name (its host name), answer (override),
  * state, status (send a status push after ok, default true),
  * tamper: { fp, proof, v, nonce, secret, frameFirst } for tests.
  */
@@ -235,7 +235,7 @@ function connectFakePi(o = {}) {
             if (o.tamper?.frameFirst) return ws.send(JSON.stringify({ t: 'status', body: {} }));
             secret = o.tamper?.secret ? o.tamper.secret : o.mode === 'key' ? Buffer.from(o.key, 'hex') : await pairSecret(o.username, o.password, o.code, o.iterations);
             const fp = o.tamper?.fp || out.fp; // the fingerprint the Pi saw
-            const auth = { t: 'auth', v: o.tamper?.v ?? V, id, mode: o.mode || 'pair', nonce: o.tamper?.nonce || piNonce, name: 'sentryusb-model3', version: st.version, proof: o.tamper?.proof || piProof(secret, mNonce, piNonce, fp, id) };
+            const auth = { t: 'auth', v: o.tamper?.v ?? V, id, mode: o.mode || 'pair', nonce: o.tamper?.nonce || piNonce, name: o.name || 'sentryusb-model3', version: st.version, proof: o.tamper?.proof || piProof(secret, mNonce, piNonce, fp, id) };
             out.auth = auth;
             return ws.send(JSON.stringify(auth));
           }
