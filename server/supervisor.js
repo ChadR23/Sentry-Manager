@@ -26,6 +26,7 @@ const path = require('path');
 const { spawn, spawnSync } = require('child_process');
 const { createLocalMounter, serveMountRequests } = require('./mounter');
 const { TlsManager, exportForApp, parseHostnames } = require('./tls');
+const { acmeConfigFromEnv } = require('./acme');
 
 const DATA = path.resolve(process.env.DATA_PATH || '/data');
 const IMAGE_ROOT = path.resolve(__dirname, '..');
@@ -322,6 +323,8 @@ function launch() {
   }
   child = spawn(cmd, args, opts);
   for (const line of early.splice(0)) child.send(line, () => {});
+  // a restarted app gets the Let's Encrypt tokens still waiting for their check
+  for (const [token, keyAuthorization] of tls?.acme?.pending || []) child.send({ type: 'acme-challenge', token, keyAuthorization }, () => {});
   if (isRoot) {
     serveMountRequests(child, createLocalMounter({ footageRoot: FOOTAGE_ROOT, credDir: ROOT_RUN, uid: separate ? PUID : 0, gid: separate ? PGID : 0 }),
       { log: (m) => log(String(m).replace(/^\[supervisor\]\s*/, '')), error: (m) => warn(String(m).replace(/^\[supervisor\]\s*/, '')) });
@@ -373,10 +376,17 @@ for (const sig of ['SIGTERM', 'SIGINT']) {
   }
   if (TLS_MODE !== 'off' && separate) {
     try {
+      let acme = null;
+      try {
+        acme = acmeConfigFromEnv(process.env);
+      } catch (err) {
+        warn(`Let's Encrypt is off: ${err.message}`);
+      }
       tls = new TlsManager({
         dir: path.join(DATA, 'tls'), log: { info: log, warn },
         hostnames: parseHostnames(process.env.TLS_HOSTNAMES || ''),
-        certFile: process.env.TLS_CERT_FILE || null, keyFile: process.env.TLS_KEY_FILE || null
+        certFile: process.env.TLS_CERT_FILE || null, keyFile: process.env.TLS_KEY_FILE || null,
+        acme: acme && { ...acme, host: process.env.HOST || null }
       });
       await exportTls();
       setInterval(() => {
@@ -388,4 +398,15 @@ for (const sig of ['SIGTERM', 'SIGINT']) {
     }
   }
   launch();
+  // Let's Encrypt runs here, next to the TLS directory; the app only answers
+  // the check with the tokens it is sent, and reloads on tls-updated
+  if (tls?.acme) {
+    const tell = (m) => child?.connected && child.send(m, () => {});
+    tls.startAcme({
+      delayMs: 3000,
+      publish: (token, keyAuthorization) => tell({ type: 'acme-challenge', token, keyAuthorization }),
+      unpublish: (token) => tell({ type: 'acme-challenge-done', token }),
+      onChange: ({ certChanged }) => exportTls().then(() => certChanged && tell({ type: 'tls-updated' }), (err) => warn(`exporting the certificate failed: ${err.message}`))
+    });
+  }
 })();

@@ -2512,6 +2512,9 @@
       <dt>Server process</dt><dd>${sec.runningAsRoot ? 'runs as root (not supervised; fine for development, not for the Docker image)' : 'runs as an unprivileged user; only the supervisor can mount shares'}</dd>`;
     if (sec.tlsMode === 'off') {
       body += '<dt>HTTPS</dt><dd>turned off (TLS_MODE=off): only use this behind a reverse proxy that does HTTPS.</dd></dl>';
+    } else if (tls.mode === 'acme') {
+      body += `<dt>Certificate</dt><dd>${esc(tls.summary || '')}</dd>
+        <dt>Fingerprint</dt><dd class="mono small">${esc(tls.certificate?.fingerprint || '?').replace(/:/g, ':<wbr>')}</dd></dl>`;
     } else if (tls.mode === 'own') {
       body += `<dt>Certificate</dt><dd>your own (TLS_CERT_FILE) · ${esc((tls.certificate?.names || []).join(', '))} · valid until ${esc(tls.certificate?.validTo || '?')}</dd>
         <dt>Fingerprint</dt><dd class="mono small">${esc(tls.certificate?.fingerprint || '?')}</dd></dl>`;

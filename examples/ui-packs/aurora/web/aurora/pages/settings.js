@@ -340,6 +340,7 @@ async function security(box) {
   let html = `<dl class="kv"><dt>This connection</dt><dd>${sec.https ? 'HTTPS (encrypted)' : '<b style="color:var(--bad)">not encrypted</b>: others on the network could read your password and the footage. Use https://.'}</dd>
     <dt>Server process</dt><dd>${sec.runningAsRoot ? 'runs as root (not supervised; fine for development, not for the Docker image)' : 'runs as an unprivileged user; only the supervisor can mount shares'}</dd>`;
   if (sec.tlsMode === 'off') html += '<dt>HTTPS</dt><dd>turned off (TLS_MODE=off): only behind a reverse proxy that does HTTPS.</dd></dl>';
+  else if (tls.mode === 'acme') html += `<dt>Certificate</dt><dd>${esc(tls.summary || '')}</dd><dt>Fingerprint</dt><dd class="mono small">${fp(tls.certificate?.fingerprint)}</dd></dl>`;
   else if (tls.mode === 'own') html += `<dt>Certificate</dt><dd>your own (TLS_CERT_FILE) · ${esc((tls.certificate?.names || []).join(', '))} · valid until ${esc(tls.certificate?.validTo || '?')}</dd><dt>Fingerprint</dt><dd class="mono small">${fp(tls.certificate?.fingerprint)}</dd></dl>`;
   else if (tls.error) html += `<dt>Certificate</dt><dd>${esc(tls.error)}</dd></dl>`;
   else {

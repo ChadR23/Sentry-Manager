@@ -385,6 +385,7 @@ async function security({ el }) {
   };
   let certBody;
   if (sec.tlsMode === 'off') certBody = '<p>HTTPS is turned off on this server (TLS_MODE=off). Only use it behind a reverse proxy that does HTTPS.</p>';
+  else if (tls.mode === 'acme') certBody = kv([['Certificate', esc(tls.summary || '')], ['Fingerprint', `<span class="mono small">${esc(tls.certificate?.fingerprint || '?')}</span>`]]);
   else if (tls.mode === 'own') certBody = kv([['Certificate', `Your own · ${esc((tls.certificate?.names || []).join(', '))}`], ['Valid until', esc(tls.certificate?.validTo || '?')], ['Fingerprint', `<span class="mono small">${esc(tls.certificate?.fingerprint || '?')}</span>`]]);
   else if (tls.error) certBody = `<p>${esc(tls.error)}</p>`;
   else {

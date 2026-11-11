@@ -69,6 +69,7 @@ const { createRealGuard, isInside } = require('./safePath');
 const { createLocalMounter, createIpcMounter } = require('./mounter');
 const { VERSIONS, DEFAULT_VERSION, securitySummary } = require('./mountSpec');
 const { TlsManager, localTlsSource, supervisorTlsSource, parseHostnames } = require('./tls');
+const { acmeConfigFromEnv, CHALLENGE_PREFIX } = require('./acme');
 const { canUploadSecure } = require('./canSecure');
 const { Router, HttpError, sendJson, readJson, readRaw, serveFile, sendText } = require('./http');
 const { createStudioTranslations } = require('./studioTranslations');
@@ -618,7 +619,17 @@ async function main() {
     ? supervisorTlsSource({ dir: process.env.SENTRY_TLS_DIR, channel: process })
     : localTlsSource(new TlsManager({
       dir: path.join(DATA, 'tls'), log: logger.scope('tls'), hostnames: parseHostnames(process.env.TLS_HOSTNAMES || ''),
-      certFile: process.env.TLS_CERT_FILE || null, keyFile: process.env.TLS_KEY_FILE || null
+      certFile: process.env.TLS_CERT_FILE || null, keyFile: process.env.TLS_KEY_FILE || null,
+      // supervised, the root supervisor runs Let's Encrypt; here only when the app holds the TLS directory itself
+      acme: SUPERVISED ? null : (() => {
+        try {
+          const cfg = acmeConfigFromEnv(process.env);
+          return cfg && { ...cfg, host: HOST };
+        } catch (err) {
+          logger.scope('tls').warn(`Let's Encrypt is off: ${err.message}`);
+          return null;
+        }
+      })()
     }));
 
   // Nodes > Benchmark: sample clips lent to a node, timed from here
@@ -3714,6 +3725,18 @@ async function main() {
     return { path: real, parent: atRoot ? null : path.dirname(real), entries };
   });
 
+  // Let's Encrypt's HTTP-01 check (server/acme.js): only the exact tokens of a
+  // pending order, on plain HTTP and on HTTPS (behind Cloudflare's "Always Use
+  // HTTPS" the check arrives redirected to https://); anything else is not this
+  const acmeAnswer = (req, res, pathname) => {
+    if (!tlsSource?.challenge || (req.method !== 'GET' && req.method !== 'HEAD') || !pathname.startsWith(CHALLENGE_PREFIX)) return false;
+    const keyAuth = tlsSource.challenge(pathname.slice(CHALLENGE_PREFIX.length));
+    if (!keyAuth) return false;
+    res.writeHead(200, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store', 'Content-Length': Buffer.byteLength(keyAuth) });
+    res.end(req.method === 'HEAD' ? undefined : keyAuth);
+    return true;
+  };
+
   // ---- HTTP handler
   const PUBLIC_STATIC = new Set(['/login', '/web/login.js', '/web/shell.css', '/web/icon.png', '/login/code', '/web/login-code.js', '/web/login-two-factor.js']);
   // the sign-in steps a banned address is refused, signed in or not
@@ -3747,6 +3770,7 @@ async function main() {
       // CAN Bridge uploads (docs/can-bridge-api.md): opt-in, HTTPS only, a
       // write-only token; no cookies, so the page checks below do not apply
       if (rawPath === '/api/can/logs' || rawPath.startsWith('/api/can/logs/')) return canUpload(req, res, rawPath);
+      if (acmeAnswer(req, res, rawPath)) return undefined;
       if (rawPath === '/healthz') {
         // readable cross-origin: the plain-HTTP page checks with it whether this device trusts the certificate
         res.writeHead(200, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store', 'Cross-Origin-Resource-Policy': 'cross-origin' });
@@ -4041,6 +4065,8 @@ async function main() {
         res.writeHead(200, { 'Content-Type': 'text/plain' });
         return res.end('ok');
       }
+      if (acmeAnswer(req, res, u.pathname)) return undefined;
+      // a Host without a port (http://example.com, port 80) goes to https://example.com/ (port 443)
       const target = cleanHost(req) || `localhost:${PORT}`;
       const httpsUrl = `https://${target}${u.pathname}${u.search}`;
       res.writeHead(308, { Location: httpsUrl, 'Cache-Control': 'no-store' });
@@ -4246,17 +4272,20 @@ async function main() {
     // (light: unchanged folders keep what they knew; see inventory.scan)
     for (const v of vehicles.list()) if (vehicles.share(v.id)?.isHealthy()) inventory.scan(v.id, { light: true }).then(() => announce('inventory')).catch(() => {});
   }, Number(process.env.SCAN_INTERVAL_MINUTES || 15) * 60 * 1000).unref();
-  // renew the HTTPS certificate before it expires (checked daily)
+  // renew the HTTPS certificate before it expires (checked daily), and swap in
+  // a new one (Let's Encrypt) without a restart
   if (tlsSource) {
-    setInterval(async () => {
+    const reloadTls = async () => {
       try {
         const m = await tlsSource.load();
-        httpsServer?.setSecureContext({ key: m.key, cert: m.cert });
-        canPort?.server()?.setSecureContext?.({ key: m.key, cert: m.cert });
+        httpsServer?.setSecureContext({ key: m.key, cert: m.cert, minVersion: 'TLSv1.2' });
+        canPort?.server()?.setSecureContext?.({ key: m.key, cert: m.cert, minVersion: 'TLSv1.2' });
       } catch (err) {
         log.warn(`HTTPS certificate check failed: ${err.message}`);
       }
-    }, 24 * 3600 * 1000).unref();
+    };
+    setInterval(reloadTls, 24 * 3600 * 1000).unref();
+    tlsSource.start?.(({ certChanged } = {}) => { if (certChanged) reloadTls(); });
   }
 
   let stopping = false;

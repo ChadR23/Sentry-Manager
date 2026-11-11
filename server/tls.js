@@ -25,6 +25,7 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const { run, tail } = require('./proc');
+const { AcmeManager, TOKEN_RE, KEY_AUTH_RE } = require('./acme');
 
 // The certificate stays the same for over two years: a device that tapped
 // "Continue" past the browser's warning trusts exactly this certificate, so
@@ -106,11 +107,14 @@ function certInfo(pem) {
 }
 
 class TlsManager {
-  constructor({ dir, log, hostnames = [], certFile = null, keyFile = null }) {
+  constructor({ dir, log, hostnames = [], certFile = null, keyFile = null, acme = null }) {
     this.dir = dir;
     this.log = log;
     this.extraHostnames = hostnames;
     this.ownCert = certFile && keyFile ? { certFile, keyFile } : null;
+    if (acme && this.ownCert) log?.warn('TLS_CERT_FILE/TLS_KEY_FILE are set, so TLS_ACME_DOMAIN is ignored.');
+    // Let's Encrypt (server/acme.js); the self-signed certificate below covers its names too, until the first one is issued
+    this.acme = acme && !this.ownCert ? new AcmeManager({ ...acme, dir, log }) : null;
     this.files = {
       caKey: path.join(dir, 'ca.key'), caCrt: path.join(dir, 'ca.crt'),
       key: path.join(dir, 'server.key'), crt: path.join(dir, 'server.crt'), names: path.join(dir, 'hostnames.json')
@@ -127,7 +131,7 @@ class TlsManager {
 
   /** Every name the server certificate covers. */
   hostnames() {
-    const names = ['localhost', '127.0.0.1', '::1', ...this.extraHostnames, ...this.storedHostnames()];
+    const names = ['localhost', '127.0.0.1', '::1', ...this.extraHostnames, ...(this.acme?.domains || []), ...this.storedHostnames()];
     return [...new Set(names.map(canonicalName))];
   }
 
@@ -135,6 +139,12 @@ class TlsManager {
   async ensure() {
     if (this.ownCert) {
       return { key: await fsp.readFile(this.ownCert.keyFile), cert: await fsp.readFile(this.ownCert.certFile), own: true };
+    }
+    const issued = this.acme?.current();
+    if (issued) {
+      if (this.lastServed !== issued.info.fingerprint) this.log?.info(`HTTPS certificate: Let's Encrypt for ${this.acme.domains.join(', ')}, fingerprint (SHA-256) ${issued.info.fingerprint}`);
+      this.lastServed = issued.info.fingerprint;
+      return { key: issued.key, cert: issued.cert, own: false, acme: true };
     }
     await fsp.mkdir(this.dir, { recursive: true, mode: 0o700 });
     await fsp.chmod(this.dir, 0o700).catch(() => {});
@@ -241,10 +251,41 @@ class TlsManager {
     return { ...out, caReplaced: before !== after };
   }
 
+  /** Let's Encrypt's HTTP-01 answer for an exact pending token, else null. */
+  challenge(token) {
+    return this.acme ? this.acme.challenge(token) : null;
+  }
+
+  /** Start issuing and renewing the Let's Encrypt certificate (no-op without TLS_ACME_DOMAIN). */
+  startAcme(hooks) {
+    this.acme?.start(hooks);
+  }
+
   status() {
     if (this.ownCert) {
       const cert = certInfo(fs.readFileSync(this.ownCert.certFile, 'utf8'));
       return { mode: 'own', certificate: cert, ca: null, hostnames: cert?.names || [] };
+    }
+    if (this.acme) {
+      const issued = this.acme.current();
+      const read = (f) => {
+        try {
+          return certInfo(fs.readFileSync(f, 'utf8'));
+        } catch {
+          return null;
+        }
+      };
+      const st = this.acme.status();
+      const day = (iso) => (iso ? iso.slice(0, 10) : '?');
+      const names = st.domains.join(', ');
+      const summary = issued
+        ? `Let's Encrypt${st.staging ? ' (staging, not trusted by browsers)' : ''} for ${names}, renews on ${day(st.renewsAt)} (valid until ${day(st.validTo)})`
+        : `Let's Encrypt for ${names}: not issued yet${st.working ? ' (working on it)' : ''}.${st.lastError ? ` ${st.lastError}` : ''}${st.nextAttemptAt ? ` Next try ${st.nextAttemptAt.replace('T', ' ').slice(0, 16)} UTC.` : ''} The self-signed certificate is served until then.`;
+      return {
+        mode: 'acme', acme: st, summary, serving: issued ? 'acme' : 'self-signed',
+        certificate: issued ? certInfo(issued.cert.toString('utf8')) : read(this.files.crt), ca: read(this.files.caCrt),
+        hostnames: this.hostnames(), editable: this.storedHostnames(), fromEnv: this.extraHostnames, containerHostname: os.hostname()
+      };
     }
     const ca = certInfo(fs.readFileSync(this.files.caCrt, 'utf8'));
     return {
@@ -265,7 +306,10 @@ function localTlsSource(manager) {
     load: () => manager.ensure(),
     status: () => manager.status(),
     caPem: () => manager.caPem(),
-    setHostnames: (list) => manager.setHostnames(list)
+    setHostnames: (list) => manager.setHostnames(list),
+    challenge: (token) => manager.challenge(token),
+    // the app runs Let's Encrypt itself; onChange reloads the certificate
+    start: (onChange) => manager.startAcme({ onChange, delayMs: 3000 })
   };
 }
 
@@ -305,7 +349,15 @@ async function exportForApp(manager, outDir, { uid, gid } = {}) {
 /** App side when supervised: read the exported files; name changes go through the supervisor. */
 function supervisorTlsSource({ dir, channel = process, timeoutMs = 120000 }) {
   const read = async () => ({ key: await fsp.readFile(path.join(dir, 'server.key')), cert: await fsp.readFile(path.join(dir, 'server.crt')) });
+  // Let's Encrypt's pending tokens, from the supervisor (which runs the ACME client)
+  const challenges = new Map();
+  channel.on?.('message', (m) => {
+    if (m?.type === 'acme-challenge' && TOKEN_RE.test(String(m.token)) && KEY_AUTH_RE.test(String(m.keyAuthorization)) && challenges.size < 50) challenges.set(m.token, m.keyAuthorization);
+    else if (m?.type === 'acme-challenge-done') challenges.delete(String(m.token));
+  });
   return {
+    challenge: (token) => (typeof token === 'string' && TOKEN_RE.test(token) ? challenges.get(token) ?? null : null),
+    start: () => {}, // the supervisor renews and says so with tls-updated
     load: read,
     status: () => JSON.parse(fs.readFileSync(path.join(dir, 'status.json'), 'utf8')),
     caPem: () => {
