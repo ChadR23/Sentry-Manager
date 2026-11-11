@@ -102,7 +102,9 @@ const { createSentryUsbStatus, stampSec: clipStampSec } = require('./sentryUsb')
 const { createOriginalChecksums } = require('./originalChecksums');
 const { createArrivalChecksums } = require('./arrivalChecksums');
 const { createCanSearch, createSearchQueue, footageAt, clipStamps, localTime, parseWhen } = require('./canSearch');
-const { clientAddress, fromTrustedProxy, proxyMatcher, banKey } = require('./clientAddress');
+const { clientAddress, fromTrustedProxy, proxyMatcher, cloudflareMatcher, banKey } = require('./clientAddress');
+const { createAttackLog } = require('./attackLog');
+const { createOwnerPage, readGateways, loadDemoMode } = require('./ownerPage');
 const { createAccess, validate: validateAccess } = require('./access');
 
 /** A wall-clock time in an IANA time zone (as a TeslaCam clip is named) in UTC milliseconds. */
@@ -143,7 +145,13 @@ const TRUST_PROXY = process.env.TRUST_PROXY === 'true';
 // which connections may say who the client is (X-Forwarded-For, -Proto,
 // -Host): TRUSTED_PROXIES when given, else any address on the local network
 // (server/clientAddress.js)
-const PROXY = { trustProxy: TRUST_PROXY, trusted: proxyMatcher(process.env.TRUSTED_PROXIES) };
+// Behind Cloudflare's proxy (TRUST_CLOUDFLARE=1): CF-Connecting-IP is the
+// client, only from Cloudflare's own addresses (built in, or CLOUDFLARE_IPS)
+const TRUST_CLOUDFLARE = process.env.TRUST_CLOUDFLARE === '1' || process.env.TRUST_CLOUDFLARE === 'true';
+const PROXY = { trustProxy: TRUST_PROXY, trusted: proxyMatcher(process.env.TRUSTED_PROXIES), cloudflare: TRUST_CLOUDFLARE ? cloudflareMatcher(process.env.CLOUDFLARE_IPS) : null };
+// the public demo (DEMO=1) and its owner page (DEMO_OWNER_PASSWORD): the attack log is kept only for them
+const DEMO_OWNER_PASSWORD = process.env.DEMO_OWNER_PASSWORD || '';
+const ATTACK_LOG_ON = process.env.DEMO === '1' || process.env.DEMO === 'true' || Boolean(DEMO_OWNER_PASSWORD);
 const SUPERVISED = process.env.SENTRY_SUPERVISED === '1' && typeof process.send === 'function';
 const TRUSTED_HOSTS = (process.env.TRUSTED_HOSTS || '').split(/[\s,]+/).filter(Boolean).map((h) => h.toLowerCase());
 
@@ -801,9 +809,19 @@ async function main() {
   // Settings → Security: bans, two-step rules, the home network (server/access.js)
   const access = createAccess({ db, audit });
   const fromHome = (req) => access.isHome(clientKey(req));
+  // the public demo's attack log (server/attackLog.js) and owner page (server/ownerPage.js)
+  const attackLog = ATTACK_LOG_ON ? createAttackLog({ db, log: logger.scope('attacks'), addressOf: clientKey }) : null;
+  const ownerPage = createOwnerPage({
+    password: DEMO_OWNER_PASSWORD, attackLog, clientKey, proxy: PROXY,
+    listedProxies: process.env.TRUSTED_PROXIES ? PROXY.trusted : null, gateways: readGateways(),
+    isSecure, hostOf: cleanHost, throttle: auth, access, failedAttempt: (req, reason) => failedAttempt(req, reason), audit, webDir: WEB,
+    sessionsActive: () => Number(db.q('SELECT COUNT(*) AS n FROM sessions WHERE expires_at > ?').get(Date.now()).n),
+    tlsStatus: () => (tlsSource ? { mode: TLS_MODE, ...tlsSource.status() } : null), resetMinutes: Number(process.env.DEMO_RESET_MINUTES || 60), demoMode: loadDemoMode
+  });
   /** A banned address gets this on every sign-in step. */
   const refuseBanned = (req) => {
     if (!access.banned(clientKey(req))) return;
+    attackLog?.note('ban', req, 'refused while banned');
     throw Object.assign(new HttpError(429, BANNED_TEXT), { code: 'BANNED', expose: true });
   };
   /**
@@ -813,6 +831,7 @@ async function main() {
    */
   const failedAttempt = (req, reason, { session = false } = {}) => {
     const b = access.fail(clientKey(req), reason);
+    if (b) attackLog?.note('ban', req, reason);
     if (b && session) {
       const h = auth.sessionHash(req);
       if (h) db.deleteSession(h);
@@ -883,9 +902,13 @@ async function main() {
     // elsewhere never lock the owner out
     const keys = [clientKey(req), `user:${String(body?.username || '').toLowerCase().slice(0, 64)}@${clientKey(req)}`];
     const wait = Math.max(...keys.map((k) => auth.throttled(k)));
-    if (wait) throw new HttpError(429, `Too many attempts. Try again in ${wait} s.`);
+    if (wait) {
+      attackLog?.note('rate-limit', req, `sign-in as ${String(body?.username || '').slice(0, 64)}`);
+      throw new HttpError(429, `Too many attempts. Try again in ${wait} s.`);
+    }
     if (!(await guarded(keys, () => auth.check(body?.username, body?.password)))) {
       keys.forEach((k) => auth.noteFailure(k));
+      attackLog?.note('login', req, String(body?.username || ''));
       audit.warn(`Sign-in failed for "${String(body?.username || '').slice(0, 64)}" from ${clientKey(req)}`);
       // (the same for a name that does not exist)
       if (failedAttempt(req, 'wrong password')) throw Object.assign(new HttpError(429, BANNED_TEXT), { code: 'BANNED', expose: true });
@@ -916,12 +939,16 @@ async function main() {
     refuseBanned(req);
     const key = `code:${clientKey(req)}`;
     const wait = auth.throttled(key);
-    if (wait) throw new HttpError(429, `Too many attempts. Try again in ${wait} s.`);
+    if (wait) {
+      attackLog?.note('rate-limit', req, 'two-step code');
+      throw new HttpError(429, `Too many attempts. Try again in ${wait} s.`);
+    }
     let username;
     try {
       username = accounts.finishPending(pendingToken(req), body?.code);
     } catch (err) {
       auth.noteFailure(key);
+      attackLog?.note('login', req, '(two-step code)');
       if (err.expired) res.setHeader('Set-Cookie', pendingCookie(req, '', 0));
       audit.warn(`Two-step code wrong from ${clientKey(req)}`);
       if (failedAttempt(req, 'wrong two-step code')) throw Object.assign(new HttpError(429, BANNED_TEXT), { code: 'BANNED', expose: true });
@@ -994,12 +1021,16 @@ async function main() {
     refuseBanned(req);
     const key = `setup:${clientKey(req)}`;
     const wait = auth.throttled(key);
-    if (wait) throw new HttpError(429, `Too many attempts. Try again in ${wait} s.`);
+    if (wait) {
+      attackLog?.note('rate-limit', req, 'setup code');
+      throw new HttpError(429, `Too many attempts. Try again in ${wait} s.`);
+    }
     try {
       auth.setup(String(body?.username || ''), String(body?.password || ''), body?.code);
     } catch (err) {
       if (err.status === 403) {
         auth.noteFailure(key);
+        attackLog?.note('login', req, '(setup code)');
         audit.warn(`Account setup with a wrong setup code from ${clientKey(req)}`);
         if (failedAttempt(req, 'wrong setup code')) throw Object.assign(new HttpError(429, BANNED_TEXT), { code: 'BANNED', expose: true });
       }
@@ -3748,9 +3779,14 @@ async function main() {
     try {
       url = new URL(req.url, 'http://localhost');
     } catch {
+      if (!attackLog?.inspect(req)) attackLog?.note('malformed', req, String(req.url || ''));
       return sendJson(res, 400, { error: 'Bad request' });
     }
     const rawPath = url.pathname;
+    // the public demo: every real address counts as a visitor, and scanner
+    // paths and exploit patterns in the URL are noted (server/attackLog.js)
+    attackLog?.seen(req);
+    const attacked = attackLog?.inspect(req) || null;
     try {
       securityHeaders(req, res, rawPath);
       // Metrics for the owner's own monitoring (Prometheus): off unless turned
@@ -3789,9 +3825,15 @@ async function main() {
       try {
         p = decodeURIComponent(rawPath);
       } catch {
+        if (!attacked) attackLog?.note('malformed', req, String(req.url || ''));
         return sendJson(res, 400, { error: 'Bad request' });
       }
-      if (p.includes('\0') || p.includes('\\') || path.posix.normalize(p) !== p) return sendJson(res, 400, { error: 'Bad request' });
+      if (p.includes('\0') || p.includes('\\') || path.posix.normalize(p) !== p) {
+        if (!attacked) attackLog?.note('malformed', req, String(req.url || ''));
+        return sendJson(res, 400, { error: 'Bad request' });
+      }
+      // the demo's owner page (server/ownerPage.js): only with DEMO_OWNER_PASSWORD, else an unknown path
+      if (await ownerPage.handle(req, res, p, url)) return undefined;
       // /v/<version>/<path>: <path>, kept for a year when the version is the
       // current one (versionLinks)
       let longCache = false;
@@ -3810,6 +3852,7 @@ async function main() {
       // a banned address: every sign-in step (and anything else without a
       // session) is refused; a session it already has keeps working
       if (isApi && p !== '/api/auth/me' && (!user || BAN_STEPS.has(p)) && access.banned(clientKey(req))) {
+        attackLog?.note('ban', req, `refused while banned: ${p}`);
         return sendJson(res, 429, { error: BANNED_TEXT, code: 'BANNED' });
       }
       // the two-step rules (Settings → Security), checked on every request,
@@ -3927,6 +3970,7 @@ async function main() {
           return sendJson(res, 200, { ok: true, pack });
         }
         const body = req.method === 'GET' ? undefined : await readJson(req, p.startsWith('/api/converter/') ? 256 * 1024 : 1024 * 1024);
+        attackLog?.inspectFields(req, body);
         const out = await m.route.handler(req, res, { params: m.params, query: Object.fromEntries(url.searchParams), body, user });
         if (out !== undefined && !res.headersSent) sendJson(res, 200, out);
         return undefined;
@@ -4024,6 +4068,7 @@ async function main() {
       return notFound(res);
     } catch (err) {
       const status = err.status || 500;
+      if (status === 413) attackLog?.note('malformed', req, `too large: ${req.method} ${rawPath}`);
       if (status >= 500) log.error(`${req.method} ${rawPath}: ${err.stack || err.message}`);
       if (!res.headersSent) sendJson(res, status, { error: status >= 500 && !err.status ? 'Internal error' : err.message || 'Error', ...(err.expose && err.code ? { code: err.code } : {}) });
       else res.end();

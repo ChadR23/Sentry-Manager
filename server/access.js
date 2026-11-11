@@ -179,6 +179,11 @@ function createAccess({ db, audit = null, now = () => Date.now() }) {
     return { ...b };
   }
 
+  /** Ban an address now (the owner page's one-tap ban), the same as one too many failures. */
+  function banNow(ip, reason = 'banned by the owner') {
+    return ban(banKey(ip), reason, 0);
+  }
+
   /** Lift a ban (and forget its history and failures). */
   function unban(key, who) {
     const k = String(key || '').trim();
@@ -205,7 +210,7 @@ function createAccess({ db, audit = null, now = () => Date.now() }) {
     return n;
   };
 
-  return { get, set, isHome, banned, fail, unban, list, watching };
+  return { get, set, isHome, banned, fail, banNow, unban, list, watching };
 }
 
 module.exports = { createAccess, validate, withDefaults, DEFAULTS, LIMITS };
