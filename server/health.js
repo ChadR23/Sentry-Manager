@@ -125,7 +125,13 @@ function createHealth({
     add({ id: 'ffmpeg', group: 'Video', label: 'ffmpeg runs', status: ff.ok ? 'ok' : 'bad', detail: ff.ok ? ff.line.replace(/ Copyright.*/, '') : ff.error, hint: ff.ok ? '' : 'The image is damaged: pull it again (docker compose pull && docker compose up -d).' });
     const fp = await firstLine(ffprobePath, ['-hide_banner', '-version'], { spawn });
     add({ id: 'ffprobe', group: 'Video', label: 'ffprobe runs', status: fp.ok ? 'ok' : 'bad', detail: fp.ok ? '' : fp.error, hint: fp.ok ? '' : 'The image is damaged: pull it again.' });
-    const gpus = await detectGpus().catch(() => []);
+    // detectGpus() gives { gpus, nvidia, hints }: the GPUs this container can
+    // use are the passed-in /dev/dri ones (not virtual) and NVIDIA in the container
+    const found = await detectGpus().catch(() => null);
+    const gpus = Array.isArray(found) ? found : [
+      ...(found?.gpus || []).filter((g) => g && g.passedThrough && !g.virtual && g.vendor !== 'nvidia'),
+      ...(found?.nvidia || [])
+    ];
     const rt = runtime();
     if (!rt) {
       add({ id: 'encoder', group: 'Video', label: 'Converter', status: 'warn', detail: 'The converter has not started.', hint: 'See the logs below for why.' });
