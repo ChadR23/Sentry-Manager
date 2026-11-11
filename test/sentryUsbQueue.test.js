@@ -286,3 +286,39 @@ test('the settings page splits a change as the server does, in the same words', 
   assert.deepEqual(Object.keys(a.keep).sort(), ['NOTIFICATION_TITLE', 'TIME_ZONE']);
   assert.equal(JSON.stringify(a.keep).includes('sekrit'), false, 'the page never sends a password to the queue');
 });
+
+test('a queued update installs a newer test build when there is no stable release (the Pi lists it under prerelease)', async () => {
+  const link = fakeLink();
+  const bodies = [];
+  const real = link.request;
+  link.request = async (id, req) => {
+    if (req.path === '/api/system/check-update') {
+      link.sent.push(`${req.method} ${req.path}`);
+      return { status: 200, type: 'application/json', body: { current_version: 'v3.28.10-test.30', checked_at: '2026-11-11T05:56:00Z', update_available: false, prerelease: { version: 'v3.28.10-test.31', available: true } } };
+    }
+    if (req.path === '/api/system/update') bodies.push(req.body);
+    return real(id, req);
+  };
+  const { q, notes } = make({ link });
+  q.add(ID, { kind: 'update' }, 'admin');
+  await q.kick(ID);
+  assert.deepEqual(link.sent, ['POST /api/system/check-update', 'POST /api/system/update']);
+  const sent = bodies[0] && (Buffer.isBuffer(bodies[0]) ? JSON.parse(bodies[0]) : typeof bodies[0] === 'string' ? JSON.parse(bodies[0]) : bodies[0]);
+  assert.equal(sent.version, 'v3.28.10-test.31');
+  assert.match(q.list(ID).results.find((x) => x.kind === 'update').result.message, /test\.31 started/);
+  assert.ok(notes.length >= 0);
+});
+
+test('a queued update with no stable release and no newer test build says it is up to date', async () => {
+  const link = fakeLink();
+  const real = link.request;
+  link.request = async (id, req) => {
+    if (req.path === '/api/system/check-update') { link.sent.push(`${req.method} ${req.path}`); return { status: 200, type: 'application/json', body: { current_version: 'v3.28.10-test.31', checked_at: '2026-11-11T05:56:00Z', update_available: false, prerelease: { version: 'v3.28.10-test.31', available: false } } }; }
+    return real(id, req);
+  };
+  const { q } = make({ link });
+  q.add(ID, { kind: 'update' }, 'admin');
+  await q.kick(ID);
+  assert.deepEqual(link.sent, ['POST /api/system/check-update']);
+  assert.match(q.list(ID).results.find((x) => x.kind === 'update').result.message, /Already up to date \(v3\.28\.10-test\.31\)/);
+});

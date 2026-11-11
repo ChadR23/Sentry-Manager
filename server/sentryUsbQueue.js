@@ -264,9 +264,14 @@ function createSentryUsbQueue({ db, link, dir, log, notify = () => {}, onResult 
     async update(d) {
       const check = (await call(d, 'POST', '/api/system/check-update')).body || {};
       if (check.error) throw new Error(String(check.error).slice(0, 300));
-      if (!check.update_available) return { message: `Already up to date (${String(check.current_version || 'unknown').slice(0, 40)}).` };
-      await call(d, 'POST', '/api/system/update');
-      return { message: `Update to ${String(check.latest_version || 'the latest version').slice(0, 40)} started.` };
+      // a stable release first; else a newer test build (the Pi lists those under prerelease)
+      const pre = check.prerelease && typeof check.prerelease === 'object' ? check.prerelease : null;
+      const tag = (v) => (typeof v === 'string' && /^(?!.*\.\.)[A-Za-z0-9._+-]{1,64}$/.test(v) ? v : null);
+      const target = check.update_available ? { version: tag(check.latest_version), body: null }
+        : pre?.available && tag(pre.version) ? { version: tag(pre.version), body: { version: tag(pre.version) } } : null;
+      if (!target) return { message: `Already up to date (${String(check.current_version || 'unknown').slice(0, 40)}).` };
+      await call(d, 'POST', '/api/system/update', target.body || undefined);
+      return { message: `Update to ${String(target.version || 'the latest version').slice(0, 40)} started.` };
     },
     async diagnostics(d) {
       await call(d, 'POST', '/api/diagnostics/refresh');

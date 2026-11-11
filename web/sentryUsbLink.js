@@ -629,19 +629,26 @@ export function createSentryUsbPage(el, { h24 = null } = {}) {
     const box = h('div', { class: 'sul-box' }, 'Loading…');
     const progress = h('p', { 'aria-live': 'polite' });
     const draw = (v, st) => {
-      const avail = Boolean(st?.update_available);
+      // the Pi gives the latest stable release as latest_version, and test builds under prerelease
+      const pre = st?.prerelease && typeof st.prerelease === 'object' && st.prerelease.version ? st.prerelease : null;
+      const stableAvail = Boolean(st?.update_available);
+      const target = stableAvail ? String(st.latest_version || '') : pre?.available ? String(pre.version) : null;
+      const avail = Boolean(target);
+      const line = (label, version, newer) => h('p', {}, h('b', {}, label), String(version), newer ? h('span', { class: 'sul-ok' }, '  (newer)') : ' (up to date)');
+      const checked = Boolean(st?.checked_at);
       fill(box,
         h('p', {}, h('b', {}, 'Installed: '), String(v?.version || d.version || 'unknown'), v?.sbc_model ? ` · ${v.sbc_model}` : ''),
-        st?.latest_version ? h('p', {}, h('b', {}, 'Latest: '), String(st.latest_version), avail ? h('span', { class: 'sul-ok' }, '  (newer)') : ' (up to date)') : h('p', { class: 'sul-muted' }, 'Not checked yet.'),
+        st?.latest_version ? line('Latest: ', st.latest_version, stableAvail) : checked ? h('p', { class: 'sul-muted' }, 'No stable release yet.') : h('p', { class: 'sul-muted' }, 'Not checked yet.'),
+        pre ? line('Latest test build: ', pre.version, Boolean(pre.available)) : null,
         st?.checked_at ? h('p', { class: 'sul-muted' }, `Checked ${stamp(Date.parse(st.checked_at))}${st.source_repo ? ` · from ${st.source_repo}` : ''}`) : null,
         st?.error ? h('p', { class: 'sul-err' }, String(st.error)) : null,
         st?.release_notes ? h('details', {}, h('summary', {}, 'What is new'), h('pre', {}, String(st.release_notes))) : null,
         h('div', { class: 'sul-row' },
           btn('Check now', () => guarded(async () => { fill(box, 'Checking…'); draw(v, await post('/system/check-update')); }), { cls: 'sul-main' }),
           btn('Install update', () => guarded(async () => {
-            if (!confirm(`Install ${st?.latest_version || 'the update'} on the Sentry USB? It restarts when done and is away for a few minutes.`)) return;
+            if (!confirm(`Install ${target || 'the update'} on the Sentry USB? It restarts when done and is away for a few minutes.`)) return;
             // the Pi takes no body (the latest) or a plain version tag
-            await post('/system/update', typeof st?.latest_version === 'string' && UPDATE_TAG.test(st.latest_version) ? { version: st.latest_version } : null);
+            await post('/system/update', typeof target === 'string' && UPDATE_TAG.test(target) ? { version: target } : null);
             follow(v?.boot_id || null);
           }), { disabled: !avail })),
         progress);
