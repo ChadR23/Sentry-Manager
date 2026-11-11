@@ -12,18 +12,18 @@ const ROUTES = {
   // hidden for now (web/hiddenTabs.js): in no group, so in no navigation; its addresses open Today
   drives: { label: 'Drives', icon: 'route', group: 'hidden', desc: 'Every trip, how far you drove each week, and the map of events', load: () => import('./pages/drives.js') },
   encoder: { label: 'Encoder', icon: 'encoder', group: 'main', load: () => import('./pages/encoder.js') },
+  sentryusb: { label: 'Sentry USB', icon: 'usb', group: 'main', desc: 'The Pi in the car: pair it, its status, settings and updates', load: () => import('./pages/sentryusb.js') },
   more: { label: 'More', icon: 'more', group: 'phone', load: () => import('./pages/more.js') },
-  bin: { label: 'Recycle Bin', icon: 'trash', group: 'care', desc: 'Restore or delete for good', load: () => import('./pages/bin.js') },
   policies: { label: 'Cleanup rules', icon: 'rules', group: 'care', desc: 'Keep footage for as long as you like, and what each vehicle converts with', load: () => import('./pages/policies.js') },
+  bin: { label: 'Recycle Bin', icon: 'trash', group: 'care', desc: 'Restore or delete for good', load: () => import('./pages/bin.js') },
   jobs: { label: 'Activity', icon: 'activity', group: 'care', desc: 'What the server has been doing', load: () => import('./pages/jobs.js') },
   notifications: { label: 'Alerts', icon: 'bell', group: 'care', desc: 'Things that may need you', load: () => import('./pages/notifications.js') },
   account: { label: 'Account', icon: 'key', group: 'setup', desc: 'Two-step sign-in, devices, other accounts', load: () => import('./pages/account.js') },
-  sentryusb: { label: 'Sentry USB', icon: 'usb', group: 'setup', desc: 'The Pi in the car: pair it, its status, settings and updates', load: () => import('./pages/sentryusb.js') },
   health: { label: 'Health', icon: 'shieldCheck', group: 'setup', desc: 'Checks, database snapshots, log search', load: () => import('./pages/health.js') },
   server: { label: 'Server & logs', icon: 'server', group: 'setup', desc: 'CPU, memory, disks, temperatures, logs', load: () => import('./pages/server.js') },
   settings: { label: 'Settings', icon: 'gear', group: 'setup', desc: 'Vehicles, places, account, look, security, helper servers', load: () => import('./pages/settings.js') }
 };
-export const MORE_ROUTES = ['bin', 'policies', 'jobs', 'notifications', 'sentryusb', 'health', 'account', 'server', 'settings'];
+export const MORE_ROUTES = ['sentryusb', 'policies', 'bin', 'jobs', 'notifications', 'health', 'account', 'server', 'settings'];
 export const routeInfo = (r) => ROUTES[r];
 
 // ---------- the look ----------

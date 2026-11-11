@@ -8,12 +8,13 @@ export const PAGES = [
   { id: 'footage', label: 'Footage', icon: 'film' },
   { id: 'viewer', label: 'Viewer', icon: 'viewer' },
   { id: 'encoder', label: 'Encoder', icon: 'engine' },
+  { id: 'sentryusb', label: 'Sentry USB', icon: 'usb' },
+  // the right-hand group of the top bar starts here (nav-b)
   { id: 'policies', label: 'Policies', icon: 'policy' },
   { id: 'jobs', label: 'Jobs', icon: 'jobs' },
   { id: 'bin', label: 'Recycle Bin', short: 'Bin', icon: 'bin' },
   { id: 'alerts', label: 'Notifications', short: 'Alerts', icon: 'bell' },
   // (not in the top bar, which they would overflow: the tuner and Settings reach them)
-  { id: 'sentryusb', label: 'Sentry USB', short: 'USB', icon: 'usb', bar: false },
   { id: 'health', label: 'Health', icon: 'shield', bar: false },
   { id: 'account', label: 'Account', icon: 'lock', bar: false },
   { id: 'settings', label: 'Settings', icon: 'gear' }
@@ -24,8 +25,9 @@ const RUNNING = new Set(['discovering', 'waiting', 'staging', 'encoding', 'writi
 
 // ---------- navigation markup ----------
 const navItem = (p) => `<a href="#/${p.id}" data-route="${p.id}" class="nav-i"><span class="nav-ico">${ico(p.icon)}<span class="badge" data-badge="${p.id}" hidden></span></span><span class="nav-l">${h(p.short || p.label)}</span></a>`;
-qs('#nav-a').innerHTML = PAGES.slice(0, 5).map(navItem).join('');
-qs('#nav-b').innerHTML = PAGES.slice(5).filter((p) => p.bar !== false).map(navItem).join('');
+const SPLIT = PAGES.findIndex((p) => p.id === 'policies');
+qs('#nav-a').innerHTML = PAGES.slice(0, SPLIT).map(navItem).join('');
+qs('#nav-b').innerHTML = PAGES.slice(SPLIT).filter((p) => p.bar !== false).map(navItem).join('');
 qs('#tuner').innerHTML = `<div class="tuner-track" id="tuner-track">${PAGES.map((p) => `<a href="#/${p.id}" data-route="${p.id}" class="tune">${ico(p.icon)}<span>${h(p.short || p.label)}</span><span class="badge" data-badge="${p.id}" hidden></span></a>`).join('')}</div>`;
 
 export function setBadge(id, text, tone = '') {

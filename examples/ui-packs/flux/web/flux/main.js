@@ -20,11 +20,11 @@ const PAGES = [
   { id: 'footage', label: 'Footage', icon: 'footage', key: 'f', mod: footage, group: 'Monitor' },
   { id: 'viewer', label: 'Viewer', icon: 'viewer', key: 'v', mod: viewer, group: 'Monitor' },
   { id: 'encoder', label: 'Encoder', icon: 'encoder', key: 'e', mod: encoder, group: 'Process' },
-  { id: 'policies', label: 'Policies', icon: 'policies', key: 'p', mod: policies, group: 'Process' },
+  { id: 'sentryusb', label: 'Sentry USB', icon: 'usb', key: 'y', mod: sentryusb, group: 'Process' },
   { id: 'jobs', label: 'Jobs', icon: 'jobs', key: 'j', mod: jobs, group: 'Process' },
   { id: 'bin', label: 'Recycle Bin', icon: 'bin', key: 'b', mod: bin, group: 'Process' },
   { id: 'notifications', label: 'Notifications', icon: 'bell', key: 'a', mod: notifications, group: 'System' },
-  { id: 'sentryusb', label: 'Sentry USB', icon: 'usb', key: 'y', mod: sentryusb, group: 'System' },
+  { id: 'policies', label: 'Policies', icon: 'policies', key: 'p', mod: policies, group: 'System' },
   { id: 'health', label: 'Health', icon: 'check', key: 'h', mod: health, group: 'System' },
   { id: 'account', label: 'Account', icon: 'lock', key: 'u', mod: account, group: 'System' },
   { id: 'settings', label: 'Settings', icon: 'settings', key: 's', mod: settings, group: 'System' }

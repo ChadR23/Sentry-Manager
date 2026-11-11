@@ -58,3 +58,32 @@ test('Nodes: inside Settings in every interface, not in the navigation; old addr
   assert.match(shellOf('aurora'), /\['settings\/nodes', 'Nodes \(Settings → Nodes\)', 'n'\]/);
   assert.match(shellOf('flux'), /\['settings\/nodes', 'Nodes \(Settings → Nodes\)', 'nodes', 'n'\]/);
 });
+
+test('Sentry USB: in the main navigation where Policies was, Policies further along, in every interface', () => {
+  const order = (src, re) => [...src.matchAll(re)].map((m) => m[1]);
+  const index = read('web', 'index.html');
+  const builtin = order(index.slice(index.indexOf('id="nav"'), index.indexOf('</nav>', index.indexOf('id="nav"'))), /data-route="([\w-]+)"/g);
+  assert.deepEqual(builtin.slice(0, 5), ['overview', 'footage', 'viewer', 'encoder', 'sentryusb']);
+  assert.equal(builtin[builtin.indexOf('notifications') + 1], 'policies', 'built-in: Policies where Sentry USB was');
+  // Horizon: Sentry USB ends the left group of the top bar; Policies starts the right one
+  const hz = shellOf('horizon');
+  const hzPages = order(hz.slice(hz.indexOf('export const PAGES'), hz.indexOf('];', hz.indexOf('export const PAGES'))), /\{ id: '([\w-]+)'/g);
+  assert.deepEqual(hzPages.slice(0, 6), ['dashboard', 'footage', 'viewer', 'encoder', 'sentryusb', 'policies']);
+  assert.match(hz, /\{ id: 'sentryusb', label: 'Sentry USB', icon: 'usb' \}/, 'horizon: in the top bar');
+  assert.match(hz, /const SPLIT = PAGES\.findIndex\(\(p\) => p\.id === 'policies'\);/);
+  assert.doesNotMatch(read('examples', 'ui-packs', 'horizon', 'web', 'hz', 'pages', 'settings.js'), /href="#\/sentryusb"/, 'horizon: not twice');
+  // Aurora: first of the dock's middle group; Policies first of the last
+  const au = shellOf('aurora');
+  const groups = au.slice(au.indexOf('const DOCK'), au.indexOf('];', au.indexOf('const DOCK'))).split("'|'").map((g) => order(g, /\['([\w-]+)'/g));
+  assert.equal(groups[1][0], 'sentryusb');
+  assert.equal(groups[2][0], 'policies');
+  // Flux: after Encoder in Process; Policies after Notifications in System
+  const fx = shellOf('flux');
+  assert.match(fx, /id: 'encoder'[^\n]+\n\s+\{ id: 'sentryusb'[^\n]+group: 'Process' \}/);
+  assert.match(fx, /id: 'notifications'[^\n]+\n\s+\{ id: 'policies'[^\n]+group: 'System' \}/);
+  // Daylight: in the side bar's main group after Encoder, first under More on phones; Cleanup rules first under Looking after
+  const dl = shellOf('daylight');
+  assert.match(dl, /sentryusb: \{ label: 'Sentry USB', icon: 'usb', group: 'main'/);
+  assert.match(dl, /group: 'phone'[^\n]+\n\s+policies: \{ label: 'Cleanup rules', icon: 'rules', group: 'care'/);
+  assert.match(dl, /MORE_ROUTES = \['sentryusb', 'policies',/);
+});
