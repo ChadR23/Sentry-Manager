@@ -96,11 +96,11 @@ test('the CSR verifies and names every domain', { skip: !hasOpenssl }, async () 
 
 test('settings from the environment: domains, staging switch, directory', () => {
   assert.equal(acme.acmeConfigFromEnv({}), null);
-  const c = acme.acmeConfigFromEnv({ TLS_ACME_DOMAIN: 'Demo.Skittles.live, www.skittles.live', TLS_ACME_EMAIL: 'a@b.co' });
-  assert.deepEqual(c.domains, ['demo.skittles.live', 'www.skittles.live']);
+  const c = acme.acmeConfigFromEnv({ TLS_ACME_DOMAIN: 'Shop.Example.com, www.example.com', TLS_ACME_EMAIL: 'a@b.co' });
+  assert.deepEqual(c.domains, ['shop.example.com', 'www.example.com']);
   assert.equal(c.directory, 'https://acme-v02.api.letsencrypt.org/directory');
   assert.equal(c.staging, false);
-  const s = acme.acmeConfigFromEnv({ TLS_ACME_DOMAIN: 'demo.skittles.live', TLS_ACME_STAGING: 'true' });
+  const s = acme.acmeConfigFromEnv({ TLS_ACME_DOMAIN: 'shop.example.com', TLS_ACME_STAGING: 'true' });
   assert.equal(s.directory, 'https://acme-staging-v02.api.letsencrypt.org/directory');
   assert.equal(s.staging, true);
   assert.equal(acme.acmeConfigFromEnv({ TLS_ACME_DOMAIN: 'a.example', TLS_ACME_DIRECTORY: 'https://127.0.0.1:1/directory' }).directory, 'https://127.0.0.1:1/directory');
