@@ -52,12 +52,44 @@ test('the overrides: every page of 0x243, 0x261, 0x352 and 0x219 reads right, or
   assert.deepEqual([b.BattBrickTempMax332, b.BattBrickTempMin332], [21.5, 21]);
   assert.equal(decode(0x332, PAGES['can0:332'][1]).BattBrickVoltageMax332, 4.104);
   // layouts not known on this firmware: nothing read
-  for (const id of [0x312, 0x3FE, 0x122, 0x123, 0x315, 0x376, 0x37D, 0x3A1, 0x3C3, 0x72A, 0x201, 0x2A8, 0x2B4]) {
+  for (const id of [0x312, 0x3FE, 0x122, 0x123, 0x315, 0x376, 0x37D, 0x3A1, 0x3C3, 0x72A, 0x201, 0x2A8]) {
     assert.equal(bundledDbc().messages.get(id).signals.length, 0, `0x${id.toString(16)}`);
   }
   // the base's value names still name what stays (0x261's battery states), the override's win (0x352's SNA)
   assert.equal(bundledDbc().messages.get(0x261).signals.find((s) => s.name === 'VCFRONT_batterySMState').values[3], 'STANDBY');
   assert.deepEqual(bundledDbc().messages.get(0x352).signals.find((s) => s.name === 'BMS_nominalEnergyRemaining').values, { 65535: 'SNA' });
+});
+
+// The same moment of a drive on 2026-11-09 (12:18:32 UTC, 96 km/h), frames byte for byte
+// from the car's log: the DC-DC (0x2B4), the 12 V battery's pages 0 and 1 (0x261), the pack (0x132).
+const DRIVE = {
+  dcdc: ['3F06010FEC020000', '4106070F1D030000'],
+  battPage0: '0010A7FFFF4FE009',
+  battPage1: '311847FF514BF848',
+  pack: 'D49534FD943A0000'
+};
+// and parked with the cabin kept warm (2026-11-08 01:18:48 UTC)
+const PARKED_DCDC = '3906680F9F010000';
+
+test('0x2B4: the DC-DC gives the 12 V system tens of amps while the 12 V battery\'s own current is near 0', () => {
+  const d = decode(0x2B4, DRIVE.dcdc[0]);
+  assert.deepEqual(d, { PCS_dcdcLvBusVolt: 15.99, PCS_dcdcHvBusVolt: 384.1, PCS_dcdcLvOutputCurrent: 74.8 });
+  assert.equal(decode(0x2B4, DRIVE.dcdc[1]).PCS_dcdcLvOutputCurrent, 79.7, 'about 80 A, as another logger showed for this drive');
+  // the HV input is the pack's voltage (0x132), the 12 V bus a little above the battery's (0x261)
+  const pack = decode(0x132, DRIVE.pack);
+  assert.ok(near(d.PCS_dcdcHvBusVolt, pack.BattVoltage132, 1.5), `${d.PCS_dcdcHvBusVolt} V vs the pack's ${pack.BattVoltage132} V`);
+  const lv = decode(0x261, DRIVE.battPage1).v12vBattVoltage261;
+  assert.ok(d.PCS_dcdcLvBusVolt > lv && d.PCS_dcdcLvBusVolt - lv < 0.5, `${d.PCS_dcdcLvBusVolt} V vs the battery's ${lv} V`);
+  // the 12 V battery's own current: under half an amp (what "12V Battery Current" showed)
+  const own = decode(0x261, DRIVE.battPage0).v12vBattCurrent261;
+  assert.equal(own, -0.445);
+  // parked, cabin kept warm: about 40 A (read with the base's 10/12/12 bits this frame gave a
+  // 22 V bus and 386 A)
+  assert.deepEqual(decode(0x2B4, PARKED_DCDC), { PCS_dcdcLvBusVolt: 15.93, PCS_dcdcHvBusVolt: 394.4, PCS_dcdcLvOutputCurrent: 41.5 });
+  // named for what they are (the base's comments called the battery's current "12V Battery Current")
+  const msg = (id) => bundledDbc().messages.get(id).signals;
+  assert.equal(msg(0x2B4).find((s) => s.name === 'PCS_dcdcLvOutputCurrent').comment, '12V system current');
+  assert.equal(msg(0x261).find((s) => s.name === 'v12vBattCurrent261').comment, "12V battery's own current");
 });
 
 test('series names: one per signal, the message id after a name two messages share', () => {

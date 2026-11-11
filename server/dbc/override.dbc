@@ -136,8 +136,24 @@ BO_ 1834 ID72ABMS_serialNumber: 8 VehicleBus
 BO_ 513 ID201VCFRONT_loggingAndVitals10H: 8 VehicleBus
 // 0x2A8: the state bits the base reads are in the frame's last byte, which counts
 BO_ 680 ID2A8CMPD_state: 8 VehicleBus
-// 0x2B4: read as the base says, the 12 V bus was 22 V and the current jumped 1.5/360 A
+// 0x2B4, the DC-DC converter (PCS): three little-endian fields now, 8 bytes. Read as the
+// base says (10/12/12 bits from bit 0) the 12 V bus was 22 V and the current jumped
+// between 1.5 and 360 A. Checked on a Model Y's logs (2026-11-08 parked, 11-09 driving):
+// bits 0-11 the 12 V bus, 0.01 V (15.80-16.08 V, 0.2 V above 0x261's battery voltage);
+// bits 16-27 the HV bus, 0.1 V (394.5 V parked with BattVoltage132 at 393.8 V, 377.5 V
+// driving with 378.2 V); bits 32-43 the current the DC-DC gives the 12 V system, 0.1 A:
+// 24-48 A parked with the cabin kept warm, 72-92 A driving, while the 12 V battery's own
+// current (0x261) stayed within half an amp. Bits 44-63 were always 0.
 BO_ 692 ID2B4PCS_dcdcRailStatus: 8 VehicleBus
+ SG_ PCS_dcdcLvBusVolt : 0|12@1+ (0.01,0) [0|40.95] "V"  Receiver
+ SG_ PCS_dcdcHvBusVolt : 16|12@1+ (0.1,0) [0|409.5] "V"  Receiver
+ SG_ PCS_dcdcLvOutputCurrent : 32|12@1+ (0.1,0) [0|409.5] "A"  Receiver
+
+CM_ SG_ 692 PCS_dcdcLvOutputCurrent "12V system current";
+CM_ SG_ 692 PCS_dcdcLvBusVolt "12V system voltage";
+CM_ SG_ 692 PCS_dcdcHvBusVolt "DC-DC HV input voltage";
+// (the 12 V battery's own current, in or out: near 0 while the DC-DC supplies the car)
+CM_ SG_ 609 v12vBattCurrent261 "12V battery's own current";
 
 VAL_ 579 VCRIGHT_hvacStatusIndex 0 "STATUS_UI" 1 "STATUS_VCFRONT" 2 "STATUS_VCFRONT2" ;
 VAL_ 850 BMS_energyStatusIndex 0 "ENERGY" 1 "CHARGE" ;

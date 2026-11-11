@@ -1244,6 +1244,48 @@ test('computed stats in the List: there when their inputs are, in the Popular or
   assert.ok(!moving.includes('12V battery power') && !moving.includes('Range'), `${moving}`);
 });
 
+test('the 12 V stats: the system\'s current is the DC-DC\'s output (tens of amps driving), the battery\'s own is apart', async (t) => {
+  // a drive's values (2026-11-09, 96 km/h: test/canFirmware.test.js decodes these from the car's frames),
+  // the signals named as the index names them (their DBC comments)
+  const sig = (signal, label, unit, message, factor, min, max) => ({ signal, label, unit, bus: 'VehicleBus', message, factor, offset: 0, min, max });
+  const meta = { signals: {
+    PCS_dcdcLvOutputCurrent: sig('PCS_dcdcLvOutputCurrent', '12V system current', 'A', 'ID2B4PCS_dcdcRailStatus', 0.1, 0, 409.5),
+    PCS_dcdcLvBusVolt: sig('PCS_dcdcLvBusVolt', '12V system voltage', 'V', 'ID2B4PCS_dcdcRailStatus', 0.01, 0, 40.95),
+    v12vBattCurrent261: sig('v12vBattCurrent261', "12V battery's own current", 'A', 'ID261_12vBattStatus', 0.005, -163.84, 163.835),
+    v12vBattVoltage261: sig('v12vBattVoltage261', '12V Battery Voltage', 'V', 'ID261_12vBattStatus', 0.00544368, 0, 22.29)
+  } };
+  const series = {
+    PCS_dcdcLvOutputCurrent: [[S - 1000, 74.8]], PCS_dcdcLvBusVolt: [[S - 1000, 15.99]],
+    v12vBattCurrent261: [[S - 1000, -0.445]], v12vBattVoltage261: [[S - 1000, 15.77]]
+  };
+  const d = await dashboard({
+    rawOpen: false,
+    routes: {
+      boards: board([{ type: 'list', signals: [], q: '', changing: false }, { type: 'small', signals: ['can.PCS_dcdcLvOutputCurrent'] }]),
+      '/api/can/signals': () => meta,
+      '/api/can/clip': () => ({ start: S, sync: { method: 'clock' }, series })
+    }
+  });
+  t.after(() => d.dash.destroy());
+  await d.frame();
+  d.video.currentTime = 1;
+  await d.frame();
+  const rows = listed(d);
+  const pop = rows.slice(1, rows.indexOf('# All stats'));
+  assert.deepEqual(pop, ['12V system current', '12V system power', '12V battery', '12V battery charge/discharge current', '12V battery power', '12V battery state'], `rows: ${rows}`);
+  const value = (label) => d.dash.panel.querySelectorAll('.sd-list-r[data-row]').find((r) => r.children[0].textContent === label)?.querySelector('[data-lv]').textContent;
+  assert.equal(value('12V system current'), '74.8A');
+  assert.equal(value('12V system power'), '1,196W');
+  assert.equal(value('12V battery charge/discharge current'), '-0.445A', 'the battery\'s own: near 0 while the DC-DC supplies the car');
+  assert.equal(value('12V battery power'), '7W');
+  // the tile: named for what it is
+  const tile = d.el.querySelector('.sd-small');
+  assert.equal(tile.querySelector('.sd-l').textContent, '12V system current');
+  assert.equal(tile.querySelector('[data-v]').textContent, '74.8');
+  // the 12 V system voltage is in the full list under its own name
+  assert.ok(rows.includes('12V system voltage'), `${rows}`);
+});
+
 test('efficiency now: battery power over speed for the last 10 s, Wh/mi or Wh/km, none when parked', async (t) => {
   // 20 kW at 100 km/h from the start; parked from 30 s
   const series = {

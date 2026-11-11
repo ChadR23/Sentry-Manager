@@ -65,6 +65,15 @@ test('the 12 V battery: its power (positive giving) and state; battery temperatu
   const st = calc('calc.lv12State');
   assert.deepEqual([3, -3, 0.1, -0.1].map((i) => st.value(getter({ v12vBattCurrent261: i }))), ['Charging', 'Discharging', 'Resting', 'Resting']);
   assert.equal(st.value(getter({})), null);
+  // the 12 V system: what the DC-DC gives it (a drive's frames, test/canFirmware.test.js: 15.99 V,
+  // 74.8 A, the battery's own -0.445 A), its 12 V bus first, else the battery's volts
+  const sys = calc('calc.lv12SystemPower');
+  const drive = { PCS_dcdcLvBusVolt: 15.99, PCS_dcdcLvOutputCurrent: 74.8, v12vBattVoltage261: 15.77, v12vBattCurrent261: -0.445 };
+  assert.ok(near(sys.value(getter(drive)), 1196.05, 0.01), 'about 1.2 kW driving');
+  assert.ok(near(p.value(getter(drive)), 7.02, 0.01), 'the battery itself: 7 W');
+  assert.ok(near(sys.value(getter({ v12vBattVoltage261: 15.77, PCS_dcdcLvOutputCurrent: 74.8 })), 1179.6, 0.01), 'the battery\'s volts stand in');
+  assert.equal(sys.value(getter({ PCS_dcdcLvBusVolt: 15.99, v12vBattCurrent261: -0.445 })), null, 'not from the battery\'s current');
+  assert.equal(canCalc.calcUnit('calc.lv12SystemPower'), 'W');
   assert.equal(calc('calc.battTemp').value(getter({ BattBrickTempMax332: 22, BattBrickTempMin332: 21 })), 21.5);
   assert.equal(calc('calc.battTempSpread').value(getter({ BattBrickTempMax332: 22, BattBrickTempMin332: 20.5 })), 1.5);
   assert.equal(calc('calc.battTemp').value(getter({ BattBrickTempMax332: 22 })), null);
@@ -179,6 +188,25 @@ test('real logs: battery power agrees with the car\'s own discharge counter; 12 
     const lvMean = lvW.reduce((a, b) => a + b, 0) / lvW.length;
     t.diagnostic(`12 V battery: mean ${lvMean.toFixed(2)} W, from ${Math.min(...lvW).toFixed(1)} to ${Math.max(...lvW).toFixed(1)} W over ${lvW.length} s`);
     assert.ok(lvW.length > 300 && Math.abs(lvMean) < 50 && lvW.every((w) => Math.abs(w) < 200), 'small: the DC-DC carries the 12 V loads');
+    // the 12 V system's current is the DC-DC's: tens of amps (24-48 A on the owner's car, cabin kept
+    // warm), its power some hundreds of watts; the battery's own current stays under a few amps
+    const sysA = [];
+    const sysW = [];
+    const ownA = [];
+    for (let ms = from; ms < to; ms += 1000) {
+      const get = (name) => at(name, ms);
+      const a = get('PCS_dcdcLvOutputCurrent');
+      if (a !== null) sysA.push(a);
+      const w = calc('calc.lv12SystemPower').value(get);
+      if (w !== null) sysW.push(w);
+      const o = get('v12vBattCurrent261');
+      if (o !== null) ownA.push(Math.abs(o));
+    }
+    const mean = (xs) => xs.reduce((x, y) => x + y, 0) / xs.length;
+    t.diagnostic(`12 V system: mean ${mean(sysA).toFixed(1)} A (${Math.min(...sysA)}-${Math.max(...sysA)} A), ${mean(sysW).toFixed(0)} W; the battery's own: mean |${mean(ownA).toFixed(2)}| A`);
+    assert.ok(sysA.length > 300 && mean(sysA) > 10 && mean(sysA) < 150, 'tens of amps');
+    assert.ok(mean(sysW) > 150 && mean(sysW) < 2500, 'hundreds of watts');
+    assert.ok(mean(ownA) < 2 && mean(sysA) > 10 * mean(ownA), 'the battery\'s own current is a small part of it');
     const temp = calc('calc.battTemp').value((name) => at(name, to));
     assert.ok(temp > 0 && temp < 45, `battery temp ${temp}`);
     assert.equal(calc('calc.chargingPower').value((name) => at(name, to)), null, 'charge complete: no charging power');

@@ -42,9 +42,9 @@
 // signals of a part still decoded by an older FORMAT (a log that could not be
 // decoded again: not stored any more, not usable, unreadable) are taken out,
 // so nothing an older decoding wrote stays in the index. A part decoded by
-// CAR_FORMAT (r2) or r3 is not older in that sense: r3 and r4 decode every
-// signal r2 decoded as r2 did (r3 added the internal bus's GPS, r4 added
-// signals), so such a part keeps its signals (it lacks the new ones, that is
+// CAR_FORMAT (r2), r3 or r4 is not older in that sense: r3, r4 and r5 decode
+// every signal r2 decoded as r2 did (r3 added the internal bus's GPS, r4 and
+// r5 added signals), so such a part keeps its signals (it lacks the new ones, that is
 // all) and so does signals.json. The CAN sync (canSync.js) and the archive gap
 // check (archiveGap.js) keep their own results by CAR_FORMAT (they read only
 // the car's buses), and are told of every minute that changes.
@@ -108,11 +108,13 @@ const RAW_PER_SEC = 10; // raw payload changes kept a second per id
 // r4: a DBC set per kind of car (canDbc.js PROFILES, carModels.js), and in the Model 3/Y set the
 // messages model3dbc lacks from opendbc (0x370, 0x488, 0x343: checked on a Model Y); every signal
 // r3 decoded is decoded as before (test/canModels.test.js), so what r2 and r3 wrote stays right
-const FORMAT = 'r4';
-// the decoding of the car's own buses that the CAN sync and the archive gap check read: r3 and r4
-// left it as r2 had it (r4 only adds signals), so what r2 decoded stays right
+// r5: 0x2B4's DC-DC fields in the Model 3/Y set (the 12 V system's voltage and current, the HV
+// input), whose layout was not known before (no signals): only adds signals, as r4 did
+const FORMAT = 'r5';
+// the decoding of the car's own buses that the CAN sync and the archive gap check read: r3, r4
+// and r5 left it as r2 had it (r4 and r5 only add signals), so what r2 decoded stays right
 const CAR_FORMAT = 'r2';
-const DEFAULT_RIGHT = new Set([FORMAT, 'r3', CAR_FORMAT]);
+const DEFAULT_RIGHT = new Set([FORMAT, 'r4', 'r3', CAR_FORMAT]);
 // A car decoded with another set than the default one has it in its stamps and parts ("r4/tesla-sx-
 // legacy"): a log is decoded again when its car's set changes (a VIN found, the setting changed),
 // and only that set's own parts are right for it. The default set's stamps stay as they were.

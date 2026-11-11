@@ -1700,6 +1700,38 @@ test('Viewer dashboards: kept per account, cleaned of anything that is not a blo
   }
 });
 
+test('Viewer dashboards: "12V Battery Current" saved before shows the 12 V system\'s current; the battery\'s own can still be picked', async () => {
+  const dir = await tmp();
+  const { ManagerDB } = require(path.join(REPO, 'server', 'db'));
+  const seed = new ManagerDB(path.join(dir, 'data', 'manager.db'));
+  // (saved before the revision: no rev)
+  seed.set('dash:admin', { active: 'd', boards: [{ id: 'd', name: 'Drive', placement: 'below', blocks: [
+    { type: 'small', signals: ['can.v12vBattCurrent261'] },
+    { type: 'wide', signals: ['dash.speed', 'can.v12vBattCurrent261', 'can.v12vBattVoltage261'] },
+    { type: 'list', signals: [], q: '12v', changing: false }
+  ] }] });
+  seed.close();
+  const s = await startServer(dir);
+  try {
+    await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
+    const got = (await s.call('GET', '/api/dashboards')).data;
+    assert.equal(got.rev, 2);
+    assert.deepEqual(got.boards[0].blocks, [
+      { type: 'small', signals: ['can.PCS_dcdcLvOutputCurrent'] },
+      { type: 'wide', signals: ['dash.speed', 'can.PCS_dcdcLvOutputCurrent', 'can.v12vBattVoltage261'] },
+      { type: 'list', signals: [], q: '12v', changing: false }
+    ], 'the same place, the 12 V system\'s current; everything else as it was');
+    // saved by today's page: the battery's own current, picked now, stays what it is
+    const put = await s.call('PUT', '/api/dashboards', { active: 'd', boards: [{ id: 'd', blocks: [{ type: 'small', signals: ['can.v12vBattCurrent261'] }, { type: 'gauge', signals: ['can.PCS_dcdcLvOutputCurrent'] }] }] });
+    assert.equal(put.data.rev, 2);
+    const again = (await s.call('GET', '/api/dashboards')).data;
+    assert.deepEqual(again.boards[0].blocks.map((b) => b.signals[0]), ['can.v12vBattCurrent261', 'can.PCS_dcdcLvOutputCurrent']);
+  } finally {
+    await s.stop();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('early data: the calls the main page made the last two times it opened are asked for at once the next time', async () => {
   const dir = await tmp();
   const s = await startServer(dir);

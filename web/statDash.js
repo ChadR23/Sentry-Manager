@@ -493,7 +493,12 @@ const POPULAR = [
   ['Cabin temp', 'can.VCRIGHT_hvacCabinTempEst'],
   ['Battery coolant temp', 'can.VCFRONT_tempCoolantBatInlet'],
   ['Powertrain coolant temp', 'can.VCFRONT_tempCoolantPTInlet'],
+  // (the 12 V system's current is the DC-DC converter's output, tens of amps while the car is on;
+  // the 12 V battery's own current is near 0 then: it was the one shown as "12V Battery Current")
+  ['12V system current', 'can.PCS_dcdcLvOutputCurrent'],
+  ['12V system power', 'calc.lv12SystemPower'],
   ['12V battery', 'can.v12vBattVoltage261'],
+  ['12V battery charge/discharge current', 'can.v12vBattCurrent261'],
   ['12V battery power', 'calc.lv12Power'],
   ['12V battery state', 'calc.lv12State'],
   ['12V battery temp', 'can.v12vBattTemp261'],

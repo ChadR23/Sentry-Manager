@@ -17,6 +17,10 @@
 // positive while the 12 V battery is charged (its voltage is higher then, and
 // it went negative when a big load dipped the bus): the 12 V battery's power is
 // shown the same way as the pack's, positive = the battery gives power.
+// That battery's current is near 0 while the car is on (within half an amp
+// driving on 2026-11-09): the DC-DC converter supplies the 12 V system, 24-48
+// A parked with the cabin kept warm and 72-92 A driving (PCS_dcdcLvOutputCurrent,
+// 0x2B4). The 12 V system's power is the DC-DC's: its 12 V bus x that current.
 //
 // Each stat: { id, label, unit (a key the Viewer converts: kW, W, C, Cdelta,
 // Wh/mi, mi, kWh, or '' for a word), digits, uses: [[a name, or the names that
@@ -45,6 +49,9 @@
   const CHARGE_NAMES = CHARGE.map(([n]) => n);
   const LV_VOLTS = ['v12vBattVoltage261'];
   const LV_AMPS = ['v12vBattCurrent261'];
+  // the 12 V system: what the DC-DC converter gives it, at its 12 V bus (else the battery's volts)
+  const SYS_VOLTS = ['PCS_dcdcLvBusVolt', 'v12vBattVoltage261'];
+  const SYS_AMPS = ['PCS_dcdcLvOutputCurrent'];
   // (a legacy Model S/X's after the Model 3/Y one: server/dbc/sx-legacy.dbc, in km/h too)
   const SPEED = ['DI_vehicleSpeed', 'DI_vehicleSpeed_116', 'DI_vehicleSpeed_118']; // km/h
   const KMH_PER_MPH = 1.609344;
@@ -126,7 +133,10 @@
       about: 'What a DC fast charger says it gives (its volts x amps); no value otherwise' },
     { id: 'calc.lv12Power', label: '12V battery power', unit: 'W', digits: 0, uses: [LV_VOLTS, LV_AMPS],
       value: (get) => { const v = first(get, LV_VOLTS); const i = lvAmps(get); return v === null || i === null ? null : -(v * i); },
-      about: "The 12 V battery's own power (its volts x amps): positive while it gives power, negative while it is charged. The DC-DC converter's output is not readable on newer firmware" },
+      about: "The 12 V battery's own power (its volts x amps): positive while it gives power, negative while it is charged. Near 0 while the car is on: the DC-DC converter supplies the 12 V system then (12V system power)" },
+    { id: 'calc.lv12SystemPower', label: '12V system power', unit: 'W', digits: 0, uses: [SYS_VOLTS, SYS_AMPS],
+      value: (get) => { const v = first(get, SYS_VOLTS); const i = first(get, SYS_AMPS); return v === null || i === null ? null : v * i; },
+      about: "The power the 12 V system takes from the DC-DC converter (its 12 V bus volts x its output amps): about 1.2 kW driving" },
     { id: 'calc.lv12State', label: '12V battery state', unit: '', uses: [LV_AMPS],
       value: (get) => { const i = lvAmps(get); if (i === null) return null; return Math.abs(i) < 0.2 ? 'Resting' : i > 0 ? 'Charging' : 'Discharging'; },
       about: 'From the 12 V battery current: charging, discharging, or resting (under 0.2 A)' },

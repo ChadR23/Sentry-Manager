@@ -463,6 +463,18 @@ files (no license that allows copying them). Index r4 added the sets and the
 three opendbc messages: every stored log is decoded again once for them, and
 every signal r3 decoded comes out the same (test/canModels.test.js, also on
 the owner's whole logs), so the sync's and the gap check's answers stay.
+Index r5 added the DC-DC converter's 0x2B4 in the Model 3/Y set (its layout
+changed: read as model3dbc says, the 12 V bus was 22 V and the current jumped
+between 1.5 and 360 A): `PCS_dcdcLvOutputCurrent` (0.1 A, bits 32-43), the
+current the 12 V system takes, 72-92 A on a Model Y driving and 20-50 A parked
+with the cabin warm; `PCS_dcdcLvBusVolt` (0.01 V, bits 0-11) and
+`PCS_dcdcHvBusVolt` (0.1 V, bits 16-27). It only adds signals, so the logs are
+decoded again once and what r4 wrote stays. The Viewer shows the first as
+"12V system current" (and "12V system power", its volts x amps); the 12 V
+battery's own current (`v12vBattCurrent261`, near 0 A while the DC-DC supplies
+the car) is "12V battery charge/discharge current". A dashboard saved before
+with "12V Battery Current" (that battery's own) shows the 12 V system's current
+in its place.
 
 Times are ISO with a zone, or the car's own clock (`YYYY-MM-DD[THH:MM]`).
 `check=1` on the bundle and decoded routes answers what they would hold

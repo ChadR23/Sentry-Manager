@@ -2049,9 +2049,25 @@ async function main() {
     }));
     if (!boards.length) throw new HttpError(400, 'Send at least one dashboard.');
     const active = boards.some((b) => b.id === body?.active) ? body.active : boards[0].id;
-    return { boards, active };
+    // (a page sends its stats by today's ids: saved as this revision)
+    return { boards, active, rev: DASH_REV };
   };
-  r.add('GET', '/api/dashboards', (req, res, { user }) => db.get(`dash:${user}`, null) || { boards: [], active: null });
+  // A stat whose id now means something else, or whose meaning moved to another id: a dashboard
+  // saved before that revision (no rev: 1) is shown with the new id, until the page saves it again.
+  // Rev 2: "12V Battery Current" (can.v12vBattCurrent261) was the 12 V battery's own current, near
+  // 0 A while the car is on; what was wanted there is the current the 12 V system takes, the DC-DC
+  // converter's output (tens of amps), now "12V system current". The battery's own stays as
+  // "12V battery charge/discharge current" for a dashboard that picks it from now on.
+  const DASH_REV = 2;
+  const DASH_RENAMED = [[2, new Map([['can.v12vBattCurrent261', 'can.PCS_dcdcLvOutputCurrent']])]];
+  const upgradeBoards = (d) => {
+    const rev = Number.isInteger(d?.rev) ? d.rev : 1;
+    if (rev >= DASH_REV || !Array.isArray(d?.boards)) return d;
+    const renames = DASH_RENAMED.filter(([at]) => rev < at).map(([, m]) => m);
+    const renamed = (id) => renames.reduce((x, m) => m.get(x) ?? x, id);
+    return { ...d, rev: DASH_REV, boards: d.boards.map((b) => ({ ...b, blocks: (Array.isArray(b?.blocks) ? b.blocks : []).map((x) => (Array.isArray(x?.signals) ? { ...x, signals: x.signals.map(renamed) } : x)) })) };
+  };
+  r.add('GET', '/api/dashboards', (req, res, { user }) => upgradeBoards(db.get(`dash:${user}`, null)) || { boards: [], active: null });
   r.add('PUT', '/api/dashboards', (req, res, { body, user }) => {
     const clean = cleanBoards(body);
     db.set(`dash:${user}`, clean);
