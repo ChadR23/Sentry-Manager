@@ -85,7 +85,10 @@ function fitBar() {
   const need = inner(qs('.dash-brand'), 10) + 6 + 2 * side + w(qs('.radio')) + tools + 4 * 10;
   dash.classList.toggle('two', need > room);
 }
-new ResizeObserver(() => fitBar()).observe(qs('#dash'));
+// the phone/tablet tuner sticks right under the header, whatever height it has
+const dashH = () => document.documentElement.style.setProperty('--dash-h', `${Math.round(qs('#dash').getBoundingClientRect().height)}px`);
+new ResizeObserver(() => { fitBar(); dashH(); }).observe(qs('#dash'));
+dashH();
 wide.addEventListener('change', fitBar);
 document.fonts?.ready.then(fitBar);
 bus.on('cars', fitBar);

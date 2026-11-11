@@ -116,12 +116,12 @@
   .car-pick .in { min-width: 0; width: 120px; }
   .car-one { display: none; }
   .tuner {
-    display: block; position: sticky; top: calc(64px + var(--safe-t)); z-index: 19;
+    display: block; position: sticky; top: var(--dash-h, calc(64px + var(--safe-t))); z-index: 19;
     background: rgba(10, 5, 30, 0.95); border-bottom: 1px solid rgba(61, 240, 255, 0.28);
     padding: 0 var(--safe-r) 0 var(--safe-l);
   }
   .tuner-track {
-    display: flex; gap: 6px; overflow-x: auto; overscroll-behavior-x: contain; scroll-snap-type: x proximity;
+    display: flex; gap: 6px; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scroll-snap-type: x proximity;
     padding: 7px 12px; scrollbar-width: none; -webkit-overflow-scrolling: touch;
   }
   .tuner-track::-webkit-scrollbar { display: none; }
@@ -866,7 +866,22 @@ fieldset:disabled { opacity: 0.6; }
 .day input:focus-visible + span { outline: 2px solid var(--cyan); outline-offset: 2px; }
 @media (max-width: 1023px) {
   .settings { grid-template-columns: minmax(0, 1fr); }
-  .stabs { position: relative; top: auto; display: flex; overflow-x: auto; scrollbar-width: none; padding: 6px; }
+  .stabs { position: relative; top: auto; display: flex; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scrollbar-width: none; padding: 6px; }
+  /* the corner brackets as the strip's own background, so they stay put while its tabs scroll */
+  .stabs.hud::before { display: none; }
+  .stabs.hud {
+    --c: var(--mag);
+    background:
+      linear-gradient(var(--c), var(--c)) top left / 16px 2px no-repeat,
+      linear-gradient(var(--c), var(--c)) top left / 2px 16px no-repeat,
+      linear-gradient(var(--c), var(--c)) top right / 16px 2px no-repeat,
+      linear-gradient(var(--c), var(--c)) top right / 2px 16px no-repeat,
+      linear-gradient(var(--c), var(--c)) bottom left / 16px 2px no-repeat,
+      linear-gradient(var(--c), var(--c)) bottom left / 2px 16px no-repeat,
+      linear-gradient(var(--c), var(--c)) bottom right / 16px 2px no-repeat,
+      linear-gradient(var(--c), var(--c)) bottom right / 2px 16px no-repeat,
+      var(--glass);
+  }
   .stab { flex: none; }
   .stab.on { box-shadow: inset 0 -3px 0 var(--mag); }
 }
