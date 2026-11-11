@@ -1552,6 +1552,7 @@ async function main() {
     await vehicles.remove(params.id);
     savings.forget(params.id);
     archiveGapRef?.forget(params.id);
+    bin.deletedClips.forget(params.id);
     sentryUsb.forget(params.id);
     driveData.forget(params.id);
     arrivalRef?.forget(params.id);
@@ -2195,6 +2196,8 @@ async function main() {
     // Recycle Bin (on the share as far as that list goes)
     carFilesFor: (vid) => sentryUsb.carFiles(vid),
     binnedFor: (vid) => { try { return db.binItems(vid).flatMap((i) => (i.files || []).map((f) => f.rel)); } catch { return []; } },
+    // and the clips Manager deleted for good (never "Pi missed")
+    deletedFor: (vid) => bin.deletedClips.list(vid),
     clock24: () => Boolean(db.get('appearance', {}).clock24)
   });
   sentryUsb.start();

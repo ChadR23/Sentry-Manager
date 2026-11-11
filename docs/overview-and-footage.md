@@ -352,7 +352,9 @@ and each marked stretch in words, for example "8:40–8:49 AM: The car wrote
 these clips, but Sentry USB didn't keep or upload them." **Unknown** minutes
 are ones the list can't speak for (Sentry USB was off or restarting, or the
 list doesn't cover that time yet); they are only counted, never a warning.
-Parked time, Sentry Mode included, is never marked. Details:
+Clips you deleted for good in Sentry Six Manager (emptying the Recycle Bin,
+or a policy) are never "Pi missed": they show only as a neutral **Deleted in
+Manager** count. Parked time, Sentry Mode included, is never marked. Details:
 [Sentry USB](sentry-usb.md#what-the-car-wrote-car-filestsv).
 
 The findings per day are at `GET /api/vehicles/:id/archive-gaps`.

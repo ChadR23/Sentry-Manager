@@ -1401,7 +1401,7 @@
   function dayCarFilesNote(d) {
     const c = d.carFiles;
     if (!c) return '';
-    const counts = [c.piMissed ? `Pi missed ${c.piMissed} min` : '', c.carMissed ? `Car didn't record ${c.carMissed} min` : '', c.unknown ? `Unknown ${c.unknown} min` : '', c.waiting ? `On its way ${c.waiting} min` : ''].filter(Boolean);
+    const counts = [c.piMissed ? `Pi missed ${c.piMissed} min` : '', c.carMissed ? `Car didn't record ${c.carMissed} min` : '', c.unknown ? `Unknown ${c.unknown} min` : '', c.waiting ? `On its way ${c.waiting} min` : '', c.deleted ? `Deleted in Manager ${c.deleted} min` : ''].filter(Boolean);
     const cover = c.coverage === 'none' ? ' Sentry USB\'s list doesn\'t cover this day (it starts with Sentry USB test.27), so it can\'t tell what the car wrote.' : c.coverage === 'partial' ? ' The list covers only part of this day.' : '';
     const runs = (c.runs || []).map((r) => `<li class="cf-run ${esc(r.kind)}"><span class="cf-when">${esc(r.when)}</span> <span class="chip ${r.kind === 'pi' ? 'amber' : 'slate'}">${esc(CF_KIND[r.kind] || r.kind)}</span> <span class="cf-why">${esc(r.why)}</span></li>`).join('');
     return `<div class="note carfiles-note" id="cf-${esc(d.day)}">

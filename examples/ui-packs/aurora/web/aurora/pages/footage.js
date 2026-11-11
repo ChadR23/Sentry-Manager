@@ -75,7 +75,7 @@ const carChip = (a) => (a && a.state !== 'car' && (a.sentryQuiet || a.carFiles?.
 const CF_KIND = { pi: ['Pi missed', 'amber'], car: [CAR_LABEL, 'slate'], unknown: ['Unknown', ''], waiting: ['On its way', 'teal'] };
 function carFilesNote(c) {
   if (!c) return '';
-  const counts = [c.piMissed ? `Pi missed ${c.piMissed} min` : '', c.carMissed ? `${CAR_LABEL} ${c.carMissed} min` : '', c.unknown ? `Unknown ${c.unknown} min` : '', c.waiting ? `On its way ${c.waiting} min` : ''].filter(Boolean);
+  const counts = [c.piMissed ? `Pi missed ${c.piMissed} min` : '', c.carMissed ? `${CAR_LABEL} ${c.carMissed} min` : '', c.unknown ? `Unknown ${c.unknown} min` : '', c.waiting ? `On its way ${c.waiting} min` : '', c.deleted ? `Deleted in Manager ${c.deleted} min` : ''].filter(Boolean);
   const cover = c.coverage === 'none' ? ' Sentry USB\'s list doesn\'t cover this day, so it can\'t tell what the car wrote.' : c.coverage === 'partial' ? ' The list covers only part of this day.' : '';
   return `<div class="gap-note cf-note"><dl class="cf-counts"><dt>The car wrote</dt><dd>${esc(c.carText)}</dd><dt>On the share</dt><dd>${esc(c.shareText)}</dd></dl>
     <p class="cf-sum">${esc(counts.length ? `${counts.join(' · ')}.` : 'Every clip the car wrote is here.')}${esc(cover)}</p>

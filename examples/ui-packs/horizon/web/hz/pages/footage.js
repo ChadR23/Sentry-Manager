@@ -26,7 +26,7 @@ const gapWord = (a) => (a.state === 'partial' && a.carFiles?.piMissed ? 'Pi miss
 const CF_KIND = { pi: ['Pi missed', 'org'], car: [CAR_LABEL, 'slate'], unknown: ['Unknown', ''], waiting: ['On its way', 'cyan'] };
 const carFilesNote = (c) => {
   if (!c) return '';
-  const counts = [c.piMissed ? `Pi missed ${c.piMissed} min` : '', c.carMissed ? `${CAR_LABEL} ${c.carMissed} min` : '', c.unknown ? `Unknown ${c.unknown} min` : '', c.waiting ? `On its way ${c.waiting} min` : ''].filter(Boolean);
+  const counts = [c.piMissed ? `Pi missed ${c.piMissed} min` : '', c.carMissed ? `${CAR_LABEL} ${c.carMissed} min` : '', c.unknown ? `Unknown ${c.unknown} min` : '', c.waiting ? `On its way ${c.waiting} min` : '', c.deleted ? `Deleted in Manager ${c.deleted} min` : ''].filter(Boolean);
   const cover = c.coverage === 'none' ? ' Sentry USB\'s list doesn\'t cover this day, so it can\'t tell what the car wrote.' : c.coverage === 'partial' ? ' The list covers only part of this day.' : '';
   return `<div class="note small cf-note"><p><span class="faint">Car wrote</span> ${h(c.carText)}</p><p><span class="faint">On the share</span> ${h(c.shareText)}</p>
     <p class="cf-sum">${h(counts.length ? `${counts.join(' · ')}.` : 'Every clip the car wrote is here.')}${h(cover)}</p>

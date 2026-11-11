@@ -22,6 +22,7 @@ const fsp = require('fs/promises');
 const path = require('path');
 const { safeJoin, TYPE_BY_FOLDER } = require('./footage');
 const { renameInside, unlinkInside, rmdirInside, mkdirpInside, rmrfInside } = require('./safeFs');
+const { createDeletedClips } = require('./deletedClips');
 
 const BIN_DIR = '.sentry-recycle-bin';
 const JUNK_RE = /^(\._.+|\.DS_Store|Thumbs\.db|desktop\.ini)$/i;
@@ -74,8 +75,10 @@ function skipWhy(skipped) {
 
 class RecycleBin {
   // onDeleted(item): an item was deleted for good (its CAN logs may go with it: canPrune.js)
-  constructor({ db, vehicles, inventory, jobs, log, busyPaths = () => new Set(), onDeleted = () => {} }) {
+  constructor({ db, vehicles, inventory, jobs, log, busyPaths = () => new Set(), onDeleted = () => {}, deletedClips = null }) {
     Object.assign(this, { db, vehicles, inventory, jobs, log, busyPaths, onDeleted });
+    // the clips deleted for good, so the archive check never calls them "Pi missed" (deletedClips.js)
+    this.deletedClips = deletedClips || createDeletedClips({ db });
     this.locks = new Map(); // vehicle id -> tail of its lock chain
   }
 
@@ -296,6 +299,7 @@ class RecycleBin {
     }
     await rmrfInside(root, safeJoin(root, `${BIN_DIR}/${itemId}`));
     this.db.removeBinItem(itemId);
+    try { this.deletedClips.add(item.vehicleId, item.files.map((f) => f.rel)); } catch (err) { this.log.warn(`Deleted-clips record: ${err.message}`); }
     // every delete for good comes here (by hand, emptying the bin, the bin emptied after N days)
     try { this.onDeleted(item); } catch (err) { this.log.warn(`After deleting ${item.label}: ${err.message}`); }
     return { bytes };

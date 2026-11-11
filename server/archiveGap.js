@@ -80,6 +80,9 @@
 //            never as "car didn't record".
 //   waiting  in the list, not on the share, but the Pi has not archived since:
 //            not missing yet.
+//   deleted  in the list, and deleted for good in Manager (the Recycle Bin
+//            emptied, a policy; deletedClips.js): gone on purpose, never
+//            missing, only a neutral count.
 // Parked minutes are never looked at (only CAN driving is), Sentry included.
 // Clips are matched by name (a Recent clip by its file name: the car's folder
 // is flat, the share's has date folders; an event clip by its event folder and
@@ -280,9 +283,10 @@ const runList = (minutes) => runsOf(minutes).map(([a, b]) => ({ from: keyOfSec(a
  *   carFiles     Sentry USB's list of what the car wrote (sentryUsb.js carFiles()): { list
  *                (carFiles.js parseCarFiles), fileUnix, archivedUnix }, or null without one
  *   binned       rels of clips in the Recycle Bin (on the share as far as the list goes)
+ *   deleted      rels of clips Manager deleted for good lately (deletedClips.js): never missing
  * { days: { day: finding }, stalled, signals, carFiles: null | { present, error, days: { day: … } } }
  */
-function analyze({ files, nowMs, tz = 'UTC', encoded = new Set(), speeds = new Map(), canDriving = null, canSentry = [], canMinutes = null, receivedMs = null, lastRecentS = null, windowDays = WINDOW_DAYS, sentryUsb = null, snapshots = null, clock24 = false, carFiles = null, binned = null }) {
+function analyze({ files, nowMs, tz = 'UTC', encoded = new Set(), speeds = new Map(), canDriving = null, canSentry = [], canMinutes = null, receivedMs = null, lastRecentS = null, windowDays = WINDOW_DAYS, sentryUsb = null, snapshots = null, clock24 = false, carFiles = null, binned = null, deleted = null }) {
   const now = wallSec(nowMs, tz);
   const offsets = new Map();
   const utc = (s) => utcOfWall(s, tz, offsets);
@@ -481,7 +485,7 @@ function analyze({ files, nowMs, tz = 'UTC', encoded = new Set(), speeds = new M
     d.lastArrival = Math.max(d.lastArrival, arrival);
   }
 
-  const carFilesOut = carFilesPass({ carFiles, binned, clips, days, dayOf, firstDaySec, now, tz, habit, piHolds, holdPi, snapshots, clock24 });
+  const carFilesOut = carFilesPass({ carFiles, binned, deleted, clips, days, dayOf, firstDaySec, now, tz, habit, piHolds, holdPi, snapshots, clock24 });
 
   // the days of the range Sentry USB is copying (to its last clip; past its
   // give-up time to now) are tagged as such, evidence or not
@@ -611,7 +615,7 @@ const countsText = (c) => {
  * piMissedClips, carMissed, unknown, waiting, runs: [{ kind, from, to, minutes,
  * when, why }] } } }, or null without a list.
  */
-function carFilesPass({ carFiles, binned, clips, days, dayOf, firstDaySec, now, tz, habit, piHolds, holdPi, snapshots, clock24 }) {
+function carFilesPass({ carFiles, binned, deleted, clips, days, dayOf, firstDaySec, now, tz, habit, piHolds, holdPi, snapshots, clock24 }) {
   if (!carFiles) return null;
   const list = carFiles.list;
   if (!list) return { present: true, error: carFiles.error || 'unreadable', coveredFrom: null, coveredTo: null, days: {} };
@@ -625,6 +629,9 @@ function carFilesPass({ carFiles, binned, clips, days, dayOf, firstDaySec, now, 
     shareTypes.add(c.f.type);
   }
   for (const rel of binned || []) { const k = keyOfRel(rel); if (k) onShare.add(k); }
+  // deleted for good in Manager (the bin emptied, a policy): gone on purpose, never missing
+  const gone = new Set();
+  for (const rel of deleted || []) { const k = keyOfRel(rel); if (k) gone.add(k); }
   // the stretch the list can speak for: from its first line to its last listing
   // before the share's copy was written, less the Pi's time off (snapshot gaps)
   const fromS = list.firstSeenUnix === null ? null : wallSec(list.firstSeenUnix * 1000, tz);
@@ -639,7 +646,7 @@ function carFilesPass({ carFiles, binned, clips, days, dayOf, firstDaySec, now, 
   const archived = Number.isFinite(carFiles.archivedUnix) ? carFiles.archivedUnix : null;
   const cfOf = (day) => {
     const d = dayOf(day);
-    return (d.cf ||= { pi: new Set(), piClips: 0, car: new Set(), unknown: new Map(), waiting: new Set() });
+    return (d.cf ||= { pi: new Set(), piClips: 0, car: new Set(), unknown: new Map(), waiting: new Set(), deleted: new Set(), deletedClips: 0 });
   };
   // the car's clips of the window, by minute
   const listed = new Set();
@@ -658,6 +665,7 @@ function carFilesPass({ carFiles, binned, clips, days, dayOf, firstDaySec, now, 
     const k = matchKey(e.type, e.event, e.name);
     if (!k || onShare.has(k)) continue;
     const s = stampSec(e.name);
+    if (gone.has(k)) { const cf = cfOf(dayOfSec(s)); cf.deleted.add(floor(s)); cf.deletedClips++; continue; }
     if (now - s < GRACE_S) continue;
     if (piHolds(s)) { holdPi(s); continue; }
     const m = floor(s);
@@ -674,7 +682,7 @@ function carFilesPass({ carFiles, binned, clips, days, dayOf, firstDaySec, now, 
       const m = floor(raw);
       const cf = cfOf(d.day);
       if (cf.pi.has(m)) continue;
-      if (cf.waiting.has(m)) { d.missing.delete(raw); continue; }
+      if (cf.waiting.has(m) || cf.deleted.has(m)) { d.missing.delete(raw); continue; }
       if (listed.has(m)) continue; // listed and not on the share, but not checked (above): as before
       if (inList(m) && !isOff(m)) {
         // the car wrote nothing then: nothing is missing from the share. "Car didn't record" only
@@ -703,7 +711,7 @@ function carFilesPass({ carFiles, binned, clips, days, dayOf, firstDaySec, now, 
     let coverage = 'full';
     if (fromS === null || end <= fromS || s >= toS) coverage = 'none';
     else if (s < fromS || end > toS || off.some((w) => w.to > s && w.from < end)) coverage = 'partial';
-    const anything = car.recentFiles || car.sentryEvents || car.savedEvents || share.recentFiles || share.sentryEvents || share.savedEvents || (cf && (cf.pi.size || cf.car.size || cf.unknown.size || cf.waiting.size));
+    const anything = car.recentFiles || car.sentryEvents || car.savedEvents || share.recentFiles || share.sentryEvents || share.savedEvents || (cf && (cf.pi.size || cf.car.size || cf.unknown.size || cf.waiting.size || cf.deleted.size));
     if (!anything) continue;
     const runs = [];
     const add = (kind, minutes, whyKind = kind) => {
@@ -723,7 +731,9 @@ function carFilesPass({ carFiles, binned, clips, days, dayOf, firstDaySec, now, 
     out[day] = {
       day, coverage, car, share, carText: countsText(car), shareText: countsText(share),
       piMissed: cf?.pi.size || 0, piMissedClips: cf?.piClips || 0, carMissed: cf?.car.size || 0,
-      unknown: cf?.unknown.size || 0, waiting: cf?.waiting.size || 0, runs
+      unknown: cf?.unknown.size || 0, waiting: cf?.waiting.size || 0,
+      // deleted for good in Manager: a neutral count, never missing
+      deleted: cf?.deleted.size || 0, deletedClips: cf?.deletedClips || 0, runs
     };
   }
   return { present: true, error: null, coveredFrom: list.firstSeenUnix, coveredTo: fromS === null ? null : toUnix, days: out };
@@ -848,7 +858,7 @@ const scoreOf = (f) => f.missingMinutes + f.partialMinutes;
  *                     mapped to it explicitly (an unmapped key of the only car is used
  *                     once its CAN data has matched the car's footage)
  */
-function createArchiveGap({ inventory, vehicles, notes, db, speedIndex = null, canKeysFor = async () => [], canKeyMapped = () => true, canDir = null, log = null, now = () => Date.now(), soonMs = 30_000, sentryUsbFor = () => null, snapshotsFor = () => null, carFilesFor = () => null, binnedFor = () => null, clock24 = () => false }) {
+function createArchiveGap({ inventory, vehicles, notes, db, speedIndex = null, canKeysFor = async () => [], canKeyMapped = () => true, canDir = null, log = null, now = () => Date.now(), soonMs = 30_000, sentryUsbFor = () => null, snapshotsFor = () => null, carFilesFor = () => null, binnedFor = () => null, deletedFor = () => null, clock24 = () => false }) {
   const results = new Map(); // vid -> analysis + checkedAt
   const running = new Map(); // vid -> { p, next }
   const generation = new Map(); // vid -> bumped by forget()
@@ -1040,6 +1050,7 @@ function createArchiveGap({ inventory, vehicles, notes, db, speedIndex = null, c
       snapshots: (() => { try { return snapshotsFor(vid); } catch { return null; } })(),
       carFiles: (() => { try { return carFilesFor(vid); } catch { return null; } })(),
       binned: (() => { try { return binnedFor(vid); } catch { return null; } })(),
+      deleted: (() => { try { return deletedFor(vid); } catch { return null; } })(),
       clock24: (() => { try { return Boolean(clock24()); } catch { return false; } })()
     });
     // the car was removed while this ran: nothing of it is kept or raised

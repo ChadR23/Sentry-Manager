@@ -314,6 +314,13 @@ What it tells, per day and minute of the last 7 days (the archive check,
 | **Car didn't record** | CAN Bridge shows the car driving, the list covers that minute, and has no clip for it | grey-blue **Car didn't record ~N min**; nothing is missing from the share, so no notification |
 | **Unknown** | CAN Bridge shows driving with no footage, but the list can't speak for that minute: before its first line, after its last update, or while the Pi was off or restarting (a gap in the status file's `snapshots`) | only counted in the opened day; never "car didn't record" |
 | On its way | in the list, not on the share, and the Pi has not archived since | only counted |
+| Deleted in Manager | in the list, and deleted for good in Sentry Six Manager (the Recycle Bin emptied by hand or after N days, or a policy) | only counted, never missing |
+
+Every delete for good in Sentry Six Manager goes through the Recycle Bin, and
+each one is recorded (the clip's path and the time, in the database, kept 8
+days and at most 50,000 entries; only clips at most 9 days old when deleted,
+since older ones are out of the Pi's list anyway). "Delete its CAN data"
+removes CAN logs only, never clips.
 
 Parked minutes (gear P or no speed, Sentry Mode included) are never looked
 at: the car writes no RecentClips then. Without the file (older Sentry USB),
@@ -329,7 +336,8 @@ the clip's name) and shows it beside its own count of the share.
 In the API, each day of `GET /api/vehicles/:id/days` has `carFiles` (`null`
 without the file): `{ coverage: 'full' | 'partial' | 'none', car, share
 ({ recentFiles, minutes, sentryEvents, savedEvents }), carText, shareText,
-piMissed, piMissedClips, carMissed, unknown, waiting, runs: [{ kind ('pi' |
+piMissed, piMissedClips, carMissed, unknown, waiting, deleted, deletedClips,
+runs: [{ kind ('pi' |
 'car' | 'unknown' | 'waiting'), from, to, minutes, when, why }] }`, and a
 day's `archive.carFiles` has the counts and runs. `GET
 /api/vehicles/:id/archive-gaps` adds `carFiles: { present, error,
