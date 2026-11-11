@@ -38,8 +38,7 @@ const gzipAsync = require('util').promisify(zlib.gzip);
 const { spawn } = require('child_process');
 const { Logger } = require('./log');
 const { ManagerDB } = require('./db');
-const { Auth, parseCookies, hashPassword } = require('./auth');
-const demoMode = require('./demoMode');
+const { Auth, parseCookies } = require('./auth');
 const { VehicleManager } = require('./vehicles');
 const carModels = require('./carModels');
 const { Inventory } = require('./inventory');
@@ -154,9 +153,6 @@ const PROXY = { trustProxy: TRUST_PROXY, trusted: proxyMatcher(process.env.TRUST
 const DEMO_OWNER_PASSWORD = process.env.DEMO_OWNER_PASSWORD || '';
 const ATTACK_LOG_ON = process.env.DEMO === '1' || process.env.DEMO === 'true' || Boolean(DEMO_OWNER_PASSWORD);
 const SUPERVISED = process.env.SENTRY_SUPERVISED === '1' && typeof process.send === 'function';
-// the public demo (server/demoMode.js): off unless DEMO=1
-const DEMO = demoMode.isDemo();
-const DEMO_FOOTAGE = DEMO ? path.resolve(process.env.DEMO_FOOTAGE_PATH || process.env.FOOTAGE_PATH || FOOTAGE_ROOT) : null;
 const TRUSTED_HOSTS = (process.env.TRUSTED_HOSTS || '').split(/[\s,]+/).filter(Boolean).map((h) => h.toLowerCase());
 
 const CONVERTER_ACTIVE = new Set(['discovering', 'waiting', 'staging', 'encoding', 'writing-telemetry', 'verifying', 'copying', 'replacing', 'paused', 'paused_network']);
@@ -211,15 +207,6 @@ function studioHtml(html) {
 // serves, the built-in ones and every interface pack's, so no interface can
 // leave it out. The login page has no status to show yet.
 const CRITICAL_TAG = '<script src="/web/critical.js" defer></script>';
-// the demo's banner and sign-in hint (web/demo.js), first in <head> so it
-// sees every fetch the page makes (a refused demo feature shows a notice)
-const DEMO_TAG = '<script src="/web/demo.js"></script>';
-function withDemo(html) {
-  if (html.includes(DEMO_TAG)) return html;
-  if (/<head[^>]*>/i.test(html)) return html.replace(/<head[^>]*>/i, (m) => `${m}\n${DEMO_TAG}`);
-  return `${DEMO_TAG}\n${html}`;
-}
-
 function withCriticalBar(html) {
   if (html.includes(CRITICAL_TAG)) return html;
   if (/<\/head>/i.test(html)) return html.replace(/<\/head>/i, (m) => `${CRITICAL_TAG}\n${m}`);
@@ -338,10 +325,6 @@ async function main() {
   const log = logger.scope('server');
   fs.mkdirSync(DATA, { recursive: true });
   const buildInfo = readBuildInfo();
-  // the demo's reset, asked for before the restart: before anything opens the data folder
-  if (DEMO) {
-    try { demoMode.applyPendingReset({ dataDir: DATA, footageDir: DEMO_FOOTAGE, log }); } catch (err) { log.error(`Demo reset failed: ${err.stack || err.message}`); }
-  }
   // a snapshot chosen in Settings → Health takes the database's place first
   try { applyPendingRestore(path.join(DATA, 'manager.db'), log); } catch (err) { log.error(`Restoring the database snapshot failed: ${err.message}`); }
   const db = new ManagerDB(path.join(DATA, 'manager.db'));
@@ -354,8 +337,6 @@ async function main() {
   const auth = new Auth({ db, log: logger.scope('auth'), isSecure, setupFile: path.join(DATA, 'setup-code.txt') });
   const accounts = createAccounts({ db });
   auth.bootstrap();
-  if (DEMO && demoMode.ensureDemoAccount({ db, accounts, hashPassword })) log.info(`Demo: account "${demoMode.DEMO_USER}" created`);
-  const demoLimits = DEMO ? demoMode.createRateLimits() : null;
   const jobs = new Jobs({ db });
   // a scan or a move to the Recycle Bin that a restart stopped: interrupted
   const stoppedJobs = jobs.interruptLeftovers();
@@ -590,8 +571,6 @@ async function main() {
     },
     dataDir: path.join(DATA, 'converter'),
     tempDir: path.join(DATA, 'converter-temp'),
-    // the demo: a few clips per run, no follow-up part, at the lowest CPU priority
-    ...(DEMO ? { jobClipLimit: demoMode.CONVERT.maxClips, continueParts: false, nice: demoMode.CONVERT.nice } : {}),
     ffmpegPath: FFMPEG,
     ffprobePath: FFPROBE,
     log: logger.scope('converter'),
@@ -762,11 +741,6 @@ async function main() {
     if (!v) throw new HttpError(404, 'No such vehicle.');
     return v;
   };
-  // a feature the public demo turns off (server/demoMode.js)
-  const demoLocked = (req, res, feature) => {
-    attackLog?.note('locked-feature', req, feature);
-    return sendJson(res, 403, { error: demoMode.LOCKED_TEXT, code: 'DEMO_LOCKED', feature });
-  };
   const requireConfirmed = (req) => {
     if (!auth.recentlyConfirmed(req)) throw confirmRequired();
   };
@@ -906,8 +880,7 @@ async function main() {
     return {
       user, role: user ? roleFor(req, user) : accounts.roleOf(user), twoFactor: user ? accounts.twoFactorOn(user) : false, needsSetup: auth.needsSetup(), secure: isSecure(req), fingerprint: req.socket?.encrypted ? certFingerprint() : null,
       // where the server sees this device: the home network or not, and what that limits
-      homeNetwork: home, ...(limited ? { adminLimited: limited } : {}), ...(user && twoFactorState(user, home) === 'setup' ? { twoFactorSetupRequired: true } : {}),
-      ...(DEMO ? { demo: demoMode.hint() } : {})
+      homeNetwork: home, ...(limited ? { adminLimited: limited } : {}), ...(user && twoFactorState(user, home) === 'setup' ? { twoFactorSetupRequired: true } : {})
     };
   }, { public: true });
   // two-step sign-in: the password was right, the code is still to come
@@ -925,11 +898,6 @@ async function main() {
   };
   r.add('POST', '/api/auth/login', async (req, res, { body }) => {
     refuseBanned(req);
-    const demoWait = demoLimits?.take('login', clientKey(req));
-    if (demoWait) {
-      attackLog?.note('rate-limit', req, 'login');
-      throw new HttpError(429, `Too many attempts. Try again in ${demoWait} s.`);
-    }
     // per address, and per account from that address: wrong guesses from
     // elsewhere never lock the owner out
     const keys = [clientKey(req), `user:${String(body?.username || '').toLowerCase().slice(0, 64)}@${clientKey(req)}`];
@@ -3689,20 +3657,7 @@ async function main() {
   // Converter (Encoder tab) — the Studio converter UI talks to these.
   r.add('POST', '/api/converter/invoke/:name', async (req, res, { params, body }) => {
     if (!bridge) return { ok: false, error: { code: host.lastError?.code || 'CONVERTER_STARTING' } };
-    let payload = body;
-    if (DEMO) {
-      const rule = demoMode.converterRule(params.name, body);
-      if (rule.error) return demoLocked(req, res, rule.error);
-      payload = rule.payload;
-      if (params.name === 'start') {
-        const wait = demoLimits.take('convert', clientKey(req)) || demoLimits.take('convertAll', 'all');
-        if (wait) {
-          attackLog?.note('rate-limit', req, 'conversions');
-          return sendJson(res, 429, { error: `The demo allows ${demoMode.CONVERT.perHour} conversions an hour. Try again in ${Math.ceil(wait / 60)} min.` });
-        }
-      }
-    }
-    return bridge.invoke(params.name, payload, req.headers['x-client-id']);
+    return bridge.invoke(params.name, body, req.headers['x-client-id']);
   });
 
   // Viewer (Studio) file access, confined to the vehicle shares.
@@ -3832,9 +3787,6 @@ async function main() {
       securityHeaders(req, res, rawPath);
       // Metrics for the owner's own monitoring (Prometheus): off unless turned
       // on in Health, then only with the token made there (read-only numbers)
-      if (DEMO && (rawPath === '/metrics' || rawPath === '/api/can/logs' || rawPath.startsWith('/api/can/logs/') || rawPath.startsWith('/node/v1/'))) {
-        return demoLocked(req, res, rawPath === '/metrics' ? 'metrics' : rawPath.startsWith('/node/') ? 'nodes' : 'CAN Bridge uploads');
-      }
       if (rawPath === '/metrics') {
         const cfg = db.get('metrics', null);
         if (!cfg?.enabled || !cfg.tokenHash) return sendJson(res, 404, { error: 'Not found' });
@@ -3937,7 +3889,7 @@ async function main() {
           }
         }
       }
-      const publicStatic = PUBLIC_STATIC.has(p) || (DEMO && p === '/web/demo.js') || (p.startsWith('/web/fonts/') && !p.slice(11).includes('/'));
+      const publicStatic = PUBLIC_STATIC.has(p) || (p.startsWith('/web/fonts/') && !p.slice(11).includes('/'));
 
       if (isApi) {
         const m = r.match(req.method, rawPath);
@@ -3955,19 +3907,6 @@ async function main() {
             }
             if (originHost !== reqHost) return sendJson(res, 403, { error: 'Cross-site request refused.' });
           }
-        }
-        if (DEMO) {
-          // the API per client (video parts and scrub previews are many: not counted)
-          if (p !== '/api/media' && p !== '/api/scrub') {
-            const wait = demoLimits.take('api', clientKey(req));
-            if (wait) {
-              if (demoLimits.firstOver('api', clientKey(req))) attackLog?.note('rate-limit', req, 'api');
-              res.setHeader('Retry-After', String(wait));
-              return sendJson(res, 429, { error: `Too many requests. Try again in ${wait} s.` });
-            }
-          }
-          const feature = demoMode.lockedFeature(req.method, p);
-          if (feature) return demoLocked(req, res, feature);
         }
         if (p === '/api/events') {
           // a signed-in page may hold one; a cap stops a buggy or hostile
@@ -4028,10 +3967,6 @@ async function main() {
         }
         const body = req.method === 'GET' ? undefined : await readJson(req, p.startsWith('/api/converter/') ? 256 * 1024 : 1024 * 1024);
         attackLog?.inspectFields(req, body);
-        if (DEMO) {
-          const feature = demoMode.lockedFeature(req.method, p, body);
-          if (feature) return demoLocked(req, res, feature);
-        }
         const out = await m.route.handler(req, res, { params: m.params, query: Object.fromEntries(url.searchParams), body, user });
         if (out !== undefined && !res.headersSent) sendJson(res, 200, out);
         return undefined;
@@ -4077,8 +4012,7 @@ async function main() {
           const critical = rel !== 'login.html'; // the login page has no status to show yet
           opts = { ...opts, transform: (html) => {
             const page = inner ? inner(html) : html;
-            const shown = critical ? withCriticalBar(page) : page;
-            return versionLinks(DEMO ? withDemo(shown) : shown, pageDir, version);
+            return versionLinks(critical ? withCriticalBar(page) : page, pageDir, version);
           } };
         }
         const own = originalOnly(req) ? null : uiPacks.root(kind);
@@ -4097,7 +4031,6 @@ async function main() {
       if (p === '/login/two-factor') return serve(WEB, 'login-two-factor.html');
       // always the built-in one: an interface pack cannot replace the bar
       if (p === '/web/critical.js') return serve(WEB, 'critical.js');
-      if (p === '/web/demo.js') return DEMO ? serve(WEB, 'demo.js') : notFound(res);
       if (p.startsWith('/web/')) return ui('web', WEB, p.slice(5), { cache: p.includes('/fonts/') ? 'public, max-age=604800' : 'no-cache' });
       if (p === '/studio' || p === '/studio/') {
         res.writeHead(302, { Location: `/studio/index.html${url.search}` });
@@ -4397,7 +4330,7 @@ async function main() {
   }
 
   let stopping = false;
-  const shutdown = async (signal, exitCode = 0) => {
+  const shutdown = async (signal) => {
     if (stopping) return;
     stopping = true;
     log.info(`${signal}: shutting down`);
@@ -4414,33 +4347,8 @@ async function main() {
     await vehicles.stopAll();
     db.close();
     log.info('Stopped cleanly');
-    process.exit(exitCode);
+    process.exit(0);
   };
-  if (DEMO) {
-    // the pristine copy, once the demo's data is there (the first start)
-    try {
-      if (demoMode.takeSeed({ dataDir: DATA, db, footageDir: DEMO_FOOTAGE })) log.info(`Demo: seed copy taken in ${demoMode.seedDir(DATA)}`);
-    } catch (err) { log.error(`Demo: could not take the seed copy: ${err.message}`); }
-    // a reset: marked, then a restart (applied before the next start opens anything)
-    demoMode.provide({
-      reset: async () => {
-        demoMode.markReset(DATA);
-        log.info('Demo reset: restarting');
-        setTimeout(() => shutdown('demo reset', demoMode.RESET_EXIT_CODE), 200).unref?.();
-        return { ok: true, scope: demoMode.resetScope() };
-      },
-      // the stand-in Sentry USB: a pairing slot opened by the server itself (its code)
-      pairStandIn: async ({ name = 'Demo Sentry USB', username = null, password = null } = {}) => {
-        if (!sentryLink) throw new Error('The Sentry USB link is not running.');
-        const out = await sentryLink.openPairing({ name, username, password, by: 'demo' });
-        await syncDevicePort();
-        return out;
-      }
-    });
-    const every = demoMode.resetMinutes() * 60_000;
-    setInterval(() => demoMode.reset().catch((err) => log.error(`Demo reset: ${err.message}`)), every).unref?.();
-    log.info(`Demo mode: locked features refused, reset every ${demoMode.resetMinutes()} min`);
-  }
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
   if (SUPERVISED) {

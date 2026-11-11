@@ -8,7 +8,6 @@
 
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
 const { spawn } = require('child_process');
 const { createPosixOwnedFs } = require('./posixOwnedFs');
 const { gpuDisplayName } = require('./stats/gpu');
@@ -63,7 +62,7 @@ function createNetwork() {
  * @param {string} o.tempDir   persistent local dir for staging / verification
  * @param {(runtime) => void} [o.onReady]
  */
-function createConverterHost({ dataDir, tempDir, ffmpegPath = 'ffmpeg', ffprobePath = 'ffprobe', log, onClipConverted, owned = createPosixOwnedFs(), powerMeter = null, isCheapNow = null, remoteNodes = null, beforeReplaceOriginal = null, holdDiscovered = null, jobClipLimit = null, continueParts = true, nice = 0 }) {
+function createConverterHost({ dataDir, tempDir, ffmpegPath = 'ffmpeg', ffprobePath = 'ffprobe', log, onClipConverted, owned = createPosixOwnedFs(), powerMeter = null, isCheapNow = null, remoteNodes = null, beforeReplaceOriginal = null, holdDiscovered = null }) {
   fs.mkdirSync(dataDir, { recursive: true });
   fs.mkdirSync(tempDir, { recursive: true });
   let runtime = null;
@@ -77,12 +76,7 @@ function createConverterHost({ dataDir, tempDir, ffmpegPath = 'ffmpeg', ffprobeP
         tempPath: fs.realpathSync(tempDir),
         ffmpegPath,
         ffprobePath,
-        // (the public demo: every encoder at a low CPU priority)
-        spawn: nice ? (...args) => {
-          const child = spawn(...args);
-          try { if (child.pid) os.setPriority(child.pid, nice); } catch (_) { /* normal priority */ }
-          return child;
-        } : spawn,
+        spawn,
         fs,
         pathApi: path,
         platform: process.platform,
@@ -106,9 +100,6 @@ function createConverterHost({ dataDir, tempDir, ffmpegPath = 'ffmpeg', ffprobeP
         // the share held back
         ...(beforeReplaceOriginal ? { beforeReplaceOriginal } : {}),
         ...(holdDiscovered ? { holdDiscovered } : {}),
-        // at most this many clips a job, and (continueParts false) no follow-up part for the rest
-        ...(jobClipLimit ? { jobClipLimit } : {}),
-        ...(continueParts === false ? { continueParts: false } : {}),
         onClipConverted: (outputPath) => onClipConverted?.(outputPath),
         onError: (error) => log?.error(`Converter recovery failed: ${error?.code || error?.message || 'RECOVERY_FAILED'}${error?.field ? ` (field ${String(error.field).slice(0, 80)})` : ''}`)
       });

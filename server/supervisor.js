@@ -350,11 +350,6 @@ function launch() {
     child = null;
     rapl(false);
     if (stopping) process.exit(code ?? 0);
-    // 75: the public demo's reset (server/demoMode.js), started again at once
-    if (code === 75 && (process.env.DEMO === '1' || String(process.env.DEMO || '').toLowerCase() === 'true')) {
-      warn('server restarting for the demo reset');
-      return setImmediate(launch);
-    }
     warn(`server exited (${code ?? signal}); restarting in 5 s`);
     setTimeout(launch, 5000);
   });
