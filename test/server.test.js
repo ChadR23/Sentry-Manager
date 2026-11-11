@@ -1501,7 +1501,7 @@ test('CAN downloads (Nerd): a log as received, a bundle with ids.csv, decoded CS
     // ranges: both ends, in order, at most a week (a day for decoded)
     assert.equal((await get('/api/can/export/bundle?key=MY-car&from=2020-01-01')).status, 400);
     assert.equal((await get('/api/can/export/bundle?key=MY-car&from=2020-01-02&to=2020-01-01')).status, 400);
-    assert.equal((await get('/api/can/export/bundle?key=MY-car&from=2020-01-01&to=2020-01-09')).status, 400, 'over 7 days');
+    assert.notEqual((await get('/api/can/export/bundle?key=MY-car&from=2020-01-01&to=2020-01-09')).status, 400, 'any range: no 7-day limit');
     assert.equal((await get('/api/can/export/bundle?key=MY-car&from=2020-01-01&to=nope')).status, 400);
     assert.equal((await get('/api/can/export/decoded?key=MY-car&from=2020-01-01&to=2020-01-03')).status, 400, 'over a day');
     assert.equal((await get('/api/can/export/bundle?key=MY-car&from=2021-01-01&to=2021-01-02')).status, 404, 'no logs then');

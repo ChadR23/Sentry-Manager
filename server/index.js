@@ -3037,11 +3037,8 @@ async function main() {
   // a bundle of a car key's logs over a time range with every CAN id seen (new ones stand out), the
   // decoded signals as CSV, and the ids new since a date.
   const CAN_KEY = /^[A-Za-z0-9-]{1,64}$/;
-  const CAN_BUNDLE_DAYS = 7;
-  // logs (and as many sidecars): a bridge logs a minute a file around the clock (it used to be 10
-  // minutes), so the longest range is 10,080 logs; a quarter more leaves room for logs split early
-  // (seq) and still stops a runaway count
-  const CAN_BUNDLE_FILES = CAN_BUNDLE_DAYS * 24 * 60 * 1.25;
+  // A bundle may cover any time range and any number of logs (the owner downloads on the local
+  // network); the one limit left is the zip format's 4 GB (no zip64), checked below
   const CAN_DECODED_HOURS = 24;
   // rows of one decoded export (gzip makes them about 8 times smaller on the wire); by default only
   // changes are written (each signal is kept once a second in the index even when it stays the same)
@@ -3219,7 +3216,7 @@ async function main() {
   // a car key's logs and sidecars over a time range (at most a week), with ids.csv, as one .zip streamed as it is read
   r.add('GET', '/api/can/export/bundle', async (req, res, { query, user }) => {
     const key = canKeyOr400(query.key);
-    const { from, to } = canRange(key, query, CAN_BUNDLE_DAYS * 86_400_000, 'A bundle');
+    const { from, to } = canRange(key, query, Infinity, 'A bundle');
     let names = [];
     try { names = await fs.promises.readdir(path.join(DATA, 'can', key)); } catch { /* no logs */ }
     const logs = names.map((nm) => ({ nm, n: parseCanName(nm) })).filter((x) => x.n && !x.n.sidecar && x.n.vehicleKey === key).sort((a, b) => a.n.startedAt - b.n.startedAt || a.n.seq - b.n.seq);
@@ -3229,7 +3226,6 @@ async function main() {
     const before = logs.filter((x) => x.n.startedAt < from && x.n.startedAt >= from - 30 * 60_000).pop();
     const picked = before ? [before, ...inside] : inside;
     if (!picked.length) throw new HttpError(404, 'No logs of this car key in that time.');
-    if (picked.length > CAN_BUNDLE_FILES) throw new HttpError(413, `That is ${picked.length} logs: at most ${CAN_BUNDLE_FILES} go in one bundle. Take a shorter time.`);
     // candump=1: each log's candump text too (<name>.log, made as it streams), beside the log as received
     const withText = query.candump === '1' || query.candump === 'true';
     const entries = [];

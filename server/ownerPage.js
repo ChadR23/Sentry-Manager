@@ -1,5 +1,8 @@
 'use strict';
 
+// Reset now works only when this server runs the demo (DEMO=1): demoMode.reset otherwise throws
+const canReset = (dm) => typeof dm?.reset === 'function' && (typeof dm.isDemo !== 'function' || dm.isDemo());
+
 // The public demo's owner page: GET /owner and /api/owner/* (docs/security.md,
 // "The demo's owner page"). It shows the attack log (server/attackLog.js),
 // visitor counts, the demo reset and the certificate.
@@ -191,7 +194,7 @@ function createOwnerPage({
           stats: attackLog ? attackLog.stats() : null,
           visitors: { today: attackLog ? attackLog.stats().visitorsToday : 0, sessions: sessionsActive() },
           bans: access ? access.list().map((b) => ({ key: b.key, until: b.until, reason: b.reason })) : [],
-          demo: { resetMinutes, resetAvailable: typeof dm?.reset === 'function' },
+          demo: { resetMinutes, resetAvailable: canReset(dm) },
           tls: tls(),
           you: clientKey(req)
         });
@@ -217,7 +220,7 @@ function createOwnerPage({
       }
       if (p === '/api/owner/reset' && post) {
         const dm = demoMode();
-        if (typeof dm?.reset !== 'function') throw new HttpError(409, 'This build has no demo reset.');
+        if (!canReset(dm)) throw new HttpError(409, 'The demo is not running here, so there is nothing to reset.');
         await dm.reset();
         audit?.warn(`Owner page: demo reset now from ${clientKey(req)}`);
         sendJson(res, 200, { ok: true });
