@@ -38,7 +38,7 @@ const gzipAsync = require('util').promisify(zlib.gzip);
 const { spawn } = require('child_process');
 const { Logger } = require('./log');
 const { ManagerDB } = require('./db');
-const { Auth, parseCookies, hashPassword, SECURE_COOKIE } = require('./auth');
+const { Auth, parseCookies, hashPassword } = require('./auth');
 const demoMode = require('./demoMode');
 const { VehicleManager } = require('./vehicles');
 const carModels = require('./carModels');
@@ -356,8 +356,6 @@ async function main() {
   auth.bootstrap();
   if (DEMO && demoMode.ensureDemoAccount({ db, accounts, hashPassword })) log.info(`Demo: account "${demoMode.DEMO_USER}" created`);
   const demoLimits = DEMO ? demoMode.createRateLimits() : null;
-  const demoSessions = DEMO ? demoMode.createDemoSessions({ db }) : null;
-  if (DEMO) setInterval(() => demoSessions.prune(), 10 * 60_000).unref?.();
   const jobs = new Jobs({ db });
   // a scan or a move to the Recycle Bin that a restart stopped: interrupted
   const stoppedJobs = jobs.interruptLeftovers();
@@ -3895,28 +3893,6 @@ async function main() {
 
       let user = auth.user(req);
       const isApi = p.startsWith('/api/');
-      // the demo: an idle demo session ends; a visitor without one gets one,
-      // over HTTPS only (plain HTTP was sent to HTTPS before any of this)
-      if (DEMO && user && demoSessions.idle(db.getSession(auth.sessionHash(req)))) user = null;
-      if (DEMO && !user && isSecure(req) && demoMode.autoSignIn(p)) {
-        const token = demoSessions.start(clientKey(req), { agent: String(req.headers['user-agent'] || '').slice(0, 300) || null });
-        if (!token) {
-          attackLog?.note('rate-limit', req, 'demo sessions');
-          if (isApi) return sendJson(res, 429, { error: 'Too many demo visits from this address. Try again later.' });
-          res.writeHead(429, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', 'Retry-After': '3600' });
-          return res.end('Too many demo visits from this address. Try again in an hour.');
-        }
-        res.setHeader('Set-Cookie', `${SECURE_COOKIE}=${token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${7 * 24 * 3600}`);
-        // this request already counts as signed in
-        const others = String(req.headers.cookie || '').split(';').map((c) => c.trim()).filter((c) => c && !c.startsWith(`${SECURE_COOKIE}=`));
-        req.headers.cookie = [...others, `${SECURE_COOKIE}=${token}`].join('; ');
-        user = demoMode.DEMO_USER;
-      }
-      // (no sign-in page in the demo)
-      if (DEMO && user && p === '/login') {
-        res.writeHead(302, { Location: '/', 'Cache-Control': 'no-store' });
-        return res.end();
-      }
       // a banned address: every sign-in step (and anything else without a
       // session) is refused; a session it already has keeps working
       if (isApi && p !== '/api/auth/me' && (!user || BAN_STEPS.has(p)) && access.banned(clientKey(req))) {

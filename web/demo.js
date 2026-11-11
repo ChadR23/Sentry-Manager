@@ -1,9 +1,9 @@
 'use strict';
 
-// The public demo (DEMO=1 only; server/demoMode.js): visitors are signed in
-// automatically; this adds a small banner on every page and a notice when a
-// feature the demo turns off is refused. Loaded first in <head> by the
-// server, in every interface.
+// The public demo (DEMO=1 only; server/demoMode.js): a small banner on every
+// page, the demo account on the sign-in page of every interface with a
+// "Try the demo" button, and a notice when a feature the demo turns off is
+// refused. Loaded first in <head> by the server, in every interface.
 
 (() => {
   const origFetch = window.fetch.bind(window);
@@ -50,10 +50,48 @@
     document.body.appendChild(b);
   }
 
+  function loginHint(demo) {
+    const user = document.querySelector('input[name="username"]');
+    const pass = document.querySelector('input[name="password"]');
+    const form = user?.form;
+    if (!user || !pass || !form || document.getElementById('demo-hint')) return;
+    const box = css(document.createElement('div'), {
+      display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap', margin: '0 0 16px',
+      padding: '10px 12px', borderRadius: '12px', border: '1px solid rgba(120,160,255,.45)', background: 'rgba(80,120,255,.12)', font: `500 13.5px/1.4 ${font}`, color: 'inherit'
+    });
+    box.id = 'demo-hint';
+    const text = document.createElement('span');
+    text.append('Demo: user ');
+    const u = document.createElement('b');
+    u.textContent = demo.username;
+    text.append(u, ', password ');
+    const p = document.createElement('b');
+    p.textContent = demo.password;
+    text.append(p);
+    const btn = css(document.createElement('button'), {
+      font: `600 13.5px/1 ${font}`, padding: '9px 14px', borderRadius: '9px', border: '0', background: '#3d6bff', color: '#fff', cursor: 'pointer'
+    });
+    btn.type = 'button';
+    btn.id = 'demo-try';
+    btn.textContent = 'Try the demo';
+    btn.addEventListener('click', () => {
+      user.value = demo.username;
+      pass.value = demo.password;
+      for (const el of [user, pass]) el.dispatchEvent(new Event('input', { bubbles: true }));
+      if (typeof form.requestSubmit === 'function') form.requestSubmit();
+      else form.dispatchEvent(new Event('submit', { cancelable: true }));
+    });
+    box.append(text, btn);
+    form.parentNode.insertBefore(box, form);
+  }
+
   const onReady = (fn) => (document.readyState === 'loading' ? document.addEventListener('DOMContentLoaded', fn, { once: true }) : fn());
   onReady(async () => {
     const demo = await ready;
     if (!demo) return;
     banner(demo.resetMinutes);
+    loginHint(demo);
+    // (an interface that draws its sign-in form later)
+    if (!document.getElementById('demo-hint')) setTimeout(() => loginHint(demo), 600);
   });
 })();
