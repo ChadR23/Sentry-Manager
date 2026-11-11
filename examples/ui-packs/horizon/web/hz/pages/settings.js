@@ -5,6 +5,7 @@ import { h, ico, api, send, app, pickCar, loadCars, size, stampFull, toast, ask,
 import nodesPage from './nodes.js';
 // the vehicle's car model and year (shared with every interface)
 import { carModelFields, wireCarModel, readCarModel } from '/web/carModelField.js';
+import { buildText, buildTip, behindText, latestText, latestTip } from '/web/buildLabel.js';
 
 const TABS = [['vehicles', 'Vehicles', 'car'], ['places', 'Places', 'map'], ['account', 'Account', 'lock'], ['interface', 'Interface', 'horizon'], ['display', 'Background', 'hud'], ['updates', 'Updates', 'download'], ['security', 'Security', 'shield'], ['system', 'System', 'info'], ['power', 'Electricity', 'bolt'], ['nodes', 'Nodes', 'nodes']];
 const WEEK = [[1, 'Mon'], [2, 'Tue'], [3, 'Wed'], [4, 'Thu'], [5, 'Fri'], [6, 'Sat'], [0, 'Sun']];
@@ -281,12 +282,15 @@ async function display(box) {
 async function updates(box) {
   const u = await api('/api/updates');
   const cur = u.current || {};
-  const running = `${cur.sha ? `${cur.sha.slice(0, 7)}${u.tag ? ` (${u.tag})` : ''}` : 'built from source'}${cur.builtAt ? ` · built ${String(cur.builtAt).slice(0, 10)}` : ''}`;
+  // "Build 128 · Nov 11, 2026", the commit in its tooltip (web/buildLabel.js)
+  const running = `${buildText(cur)}${u.tag && u.tag !== 'latest' ? ` (${u.tag})` : ''}`;
   const l = u.latest;
+  const behind = u.updateAvailable && behindText(u);
   box.innerHTML = `<section class="panel hud">${panelHead(`${ico('download')}Updates`, u.updateAvailable ? pill('update available', 'grn') : '')}
     <p class="small dim">${u.enabled ? 'Updates come as a new image. To install one, run <code>docker compose pull &amp;&amp; docker compose up -d</code> where you set up Sentry Six Manager. Settings, footage and the Recycle Bin stay.' : u.image ? 'Checking for updates is turned off (UPDATE_CHECK=off). To update, run <code>docker compose pull &amp;&amp; docker compose up -d</code>.' : 'This copy was built from source. To update it, build the image again from the new code.'}</p>
-    <dl class="kv" style="margin-top:12px"><dt>Running</dt><dd class="mono">${h(running)}</dd>${u.image ? `<dt>Image</dt><dd class="mono">${h(u.image)}</dd>` : ''}
-      ${u.enabled ? `<dt>Newest</dt><dd class="mono">${l ? h(`${l.revision ? `${l.revision.slice(0, 7)} · ` : ''}published ${String(l.created || '').slice(0, 10)}`) : h(u.error || 'not checked yet')}</dd><dt>Checked</dt><dd>${h(stampFull(u.checkedAt))}</dd>` : ''}</dl>
+    ${behind ? `<p class="small">${h(behind)}.</p>` : ''}
+    <dl class="kv" style="margin-top:12px"><dt>Running</dt><dd class="mono" title="${h(buildTip(cur, u.tag))}">${h(running)}</dd>${u.image ? `<dt>Image</dt><dd class="mono">${h(u.image)}</dd>` : ''}
+      ${u.enabled ? `<dt>Newest</dt><dd class="mono"${l && latestTip(l) ? ` title="${h(latestTip(l))}"` : ''}>${l ? h(latestText(l)) : h(u.error || 'not checked yet')}</dd><dt>Checked</dt><dd>${h(stampFull(u.checkedAt))}</dd>` : ''}</dl>
     ${u.enabled ? `<div class="row" style="margin-top:12px"><button class="btn" type="button" id="upd">${ico('refresh')}Check now</button></div>` : ''}</section>`;
   box.querySelector('#upd')?.addEventListener('click', (e) => act(e.currentTarget, async () => {
     const out = await api('/api/updates/check', { body: {} });
@@ -352,7 +356,7 @@ async function sys(box) {
   const caps = s.converter?.capabilities || {};
   const gpus = [...(s.gpu?.nvidia || []).map((g) => `${g.name} (driver ${g.driver})`), ...(s.gpu?.gpus || []).filter((g) => g.vendor !== 'nvidia').map((g) => `${g.name || g.vendorName} · ${g.node}${g.virtual ? ' · not a GPU' : g.passedThrough ? (g.encodes ? ` · encodes ${Object.entries(g.encodes).filter(([, x]) => x).map(([k]) => k.toUpperCase()).join(', ') || 'nothing'}` : '') : ' · not passed into the container'}`)];
   box.innerHTML = `<section class="panel hud">${panelHead(`${ico('info')}System`)}<dl class="kv">
-    <dt>Version</dt><dd class="mono">${h(st.host?.version || s.version?.sha || 'dev')}</dd>
+    <dt>Version</dt><dd class="mono" title="${h(buildTip(s.version || {}))}">${h(buildText(s.version, st.host?.version || 'dev'))}</dd>
     <dt>Converter</dt><dd>${s.converter?.ready ? `ready · replace originals ${h(caps.replacement)} · cleanup ${h(caps.ownershipCleanup)} · publication ${h(caps.separatePublication)}` : `not ready (${h(s.converter?.error || 'starting')})`}</dd>
     <dt>Safe rename helper</dt><dd>${s.nativeHelper ? 'installed' : 'missing (link + unlink fallback)'}</dd>
     <dt>GPUs</dt><dd>${gpus.length ? gpus.map(h).join('<br>') : 'none visible (the CPU encoders are used)'}</dd>

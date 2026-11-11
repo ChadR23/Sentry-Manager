@@ -2,10 +2,17 @@ name: Image
 
 # Builds the Sentry Six Manager Docker image and publishes it to GitHub's
 # registry, ghcr.io/<owner>/<repo>, for amd64 and arm64.
-#   - A push to main publishes `latest` and `sha-<commit>` (pin a `sha-` tag
-#     with SENTRY_TAG to stay on, or go back to, a version).
+#   - Every image gets a build number: this workflow's run number, which
+#     only ever goes up (runs that published nothing leave gaps). The app
+#     shows it as "Build N"; it is in /app/BUILD_INFO.json and the label
+#     org.opencontainers.image.version=build-N, which Settings > Updates
+#     reads to tell how many builds behind a server is.
+#   - A push to main publishes `latest`, `build-N` and `sha-<commit>` (pin a
+#     `build-` or `sha-` tag with SENTRY_TAG to stay on, or go back to, a
+#     version).
 #   - Running it by hand for another branch (Actions > Image > Run workflow)
-#     publishes an image tagged with that branch's name.
+#     publishes an image tagged with that branch's name and `sha-<commit>`
+#     (no `build-N` tag: those are only for releases from main).
 #   - Nothing is built on a timer: a new image only ever comes from a push
 #     to main or a run by hand, so an "update available" always means the
 #     owner released something. Each build fetches the latest Debian, Node
@@ -49,6 +56,7 @@ jobs:
       sha: ${{ steps.names.outputs.sha }}
       short: ${{ steps.names.outputs.short }}
       created: ${{ steps.names.outputs.created }}
+      build: ${{ steps.names.outputs.build }}
       week: ${{ steps.names.outputs.week }}
       critical: ${{ steps.critical.outputs.critical }}
       critical_level: ${{ steps.critical.outputs.critical_level }}
@@ -69,6 +77,7 @@ jobs:
             echo "sha=$sha"
             echo "short=${sha:0:7}"
             echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "build=$GITHUB_RUN_NUMBER"
             echo "week=$(date -u +%G-W%V)"
           } >> "$GITHUB_OUTPUT"
       # CRITICAL_UPDATE.txt: `level: N` and `reason: text`. Every image
@@ -167,6 +176,7 @@ jobs:
             BUILD_DATE=${{ needs.names.outputs.created }}
             IMAGE=${{ needs.names.outputs.image }}
             IMAGE_TAG=${{ needs.names.outputs.tag }}
+            BUILD_NUMBER=${{ needs.names.outputs.build }}
             APT_REFRESH=${{ needs.names.outputs.week }}
           cache-from: type=gha,scope=${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
@@ -212,6 +222,7 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ needs.names.outputs.sha }}
             org.opencontainers.image.created=${{ needs.names.outputs.created }}
+            org.opencontainers.image.version=build-${{ needs.names.outputs.build }}
             ${{ needs.names.outputs.critical != '' && format('io.sentry-six.critical={0}', needs.names.outputs.critical) || '' }}
             ${{ needs.names.outputs.critical != '' && format('io.sentry-six.critical-level={0}', needs.names.outputs.critical_level) || '' }}
           build-args: |
@@ -220,6 +231,7 @@ jobs:
             BUILD_DATE=${{ needs.names.outputs.created }}
             IMAGE=${{ needs.names.outputs.image }}
             IMAGE_TAG=${{ needs.names.outputs.tag }}
+            BUILD_NUMBER=${{ needs.names.outputs.build }}
             APT_REFRESH=${{ needs.names.outputs.week }}
           cache-from: type=gha,scope=${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
@@ -265,8 +277,8 @@ jobs:
         run: |
           image="${{ needs.names.outputs.image }}"
           test "$(ls | wc -l)" -eq 2
-          docker buildx imagetools create \
-            -t "$image:${{ needs.names.outputs.tag }}" \
-            -t "$image:sha-${{ needs.names.outputs.short }}" \
-            $(printf "$image@sha256:%s " *)
+          tags=(-t "$image:${{ needs.names.outputs.tag }}" -t "$image:sha-${{ needs.names.outputs.short }}")
+          # build-N only for a release (main): a branch run by hand is not one
+          if [ "${{ needs.names.outputs.tag }}" = latest ]; then tags+=(-t "$image:build-${{ needs.names.outputs.build }}"); fi
+          docker buildx imagetools create "${tags[@]}" $(printf "$image@sha256:%s " *)
           docker buildx imagetools inspect "$image:${{ needs.names.outputs.tag }}"

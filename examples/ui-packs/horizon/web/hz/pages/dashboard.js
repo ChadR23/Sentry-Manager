@@ -195,7 +195,7 @@ export default {
       const s = stats;
       if (!s) return;
       const hst = s.host || {};
-      $('#d-host').innerHTML = [hst.hostname, hst.os, hst.kernel && `kernel ${hst.kernel}`, hst.arch, ok(hst.uptimeS) && `up ${span(hst.uptimeS * 1000)}`, ok(hst.appUptimeS) && `app ${span(hst.appUptimeS * 1000)}`, hst.version && `v${hst.version}`, hst.ffmpeg && `ffmpeg ${hst.ffmpeg}`].filter(Boolean).map((x) => `<span class="mono">${h(x)}</span>`).join(' · ') + (statErr ? ` · <span class="badtx">not updating: ${h(statErr)}</span>` : '');
+      $('#d-host').innerHTML = [hst.hostname, hst.os, hst.kernel && `kernel ${hst.kernel}`, hst.arch, ok(hst.uptimeS) && `up ${span(hst.uptimeS * 1000)}`, ok(hst.appUptimeS) && `app ${span(hst.appUptimeS * 1000)}`, hst.version && (/^Build \d/.test(hst.version) ? hst.version : `v${hst.version}`), hst.ffmpeg && `ffmpeg ${hst.ffmpeg}`].filter(Boolean).map((x) => `<span class="mono">${h(x)}</span>`).join(' · ') + (statErr ? ` · <span class="badtx">not updating: ${h(statErr)}</span>` : '');
       const cpu = s.cpu || {};
       const m = s.memory || {};
       const memP = ok(m.usedB) && m.totalB ? (m.usedB / m.totalB) * 100 : null;

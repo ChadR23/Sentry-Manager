@@ -69,8 +69,9 @@ published; nothing listens on 10000 until one of them is set up.
 docker compose pull && docker compose up -d
 ```
 
-**Settings → Updates** says when a newer version is out; it never installs
-anything itself. Your account, settings and footage stay, and a conversion
+**Settings → Updates** shows the build you run (for example *Build 128 ·
+Nov 11, 2026*: give this number when you ask for help) and says when a newer
+one is out; it never installs anything itself. Your account, settings and footage stay, and a conversion
 that was running carries on by itself. More in [Updates](docs/updates.md);
 on TrueNAS, run `sudo docker pull ghcr.io/skittles-fivem/sentry-manager:latest`
 in *System → Shell*, then stop and start the app ([TrueNAS](docs/truenas.md#updating)).

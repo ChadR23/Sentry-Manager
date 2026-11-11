@@ -160,7 +160,7 @@ export async function render(ctx) {
     if (!ctx.alive()) return;
     const h = snap?.host;
     $('#host-line').innerHTML = error && !snap ? `<span style="color:var(--bad)">Can’t get the numbers: ${esc(error)}</span>`
-      : h ? esc([h.hostname, h.os, h.kernel && `kernel ${h.kernel}`, fin(h.uptimeS) && `on for ${span(h.uptimeS)}`, fin(h.appUptimeS) && `Sentry Six up ${span(h.appUptimeS)}`, h.version && `version ${h.version}`].filter(Boolean).join(' · ')) + (error ? ' · <span style="color:var(--warn)">not updating right now</span>' : '') : 'Asking the server…';
+      : h ? esc([h.hostname, h.os, h.kernel && `kernel ${h.kernel}`, fin(h.uptimeS) && `on for ${span(h.uptimeS)}`, fin(h.appUptimeS) && `Sentry Six up ${span(h.appUptimeS)}`, h.version && (/^Build \d/.test(h.version) ? h.version : `version ${h.version}`)].filter(Boolean).join(' · ')) + (error ? ' · <span style="color:var(--warn)">not updating right now</span>' : '') : 'Asking the server…';
     if (!snap) return;
     $('#alerts').innerHTML = (snap.alerts || []).filter((a) => a?.message).map((a) => `<div class="note note-${a.level === 'error' ? 'bad' : 'warn'}" style="margin-bottom:12px">${icon('alert')}<span><b>${a.level === 'error' ? 'Problem' : 'Worth a look'}:</b> ${esc(a.message)}</span></div>`).join('');
     $('#tiles').innerHTML = tiles(snap, range === '24h' ? hist : null, showAll) || '<p class="muted">The server has no numbers to show here.</p>';

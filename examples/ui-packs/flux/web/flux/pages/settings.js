@@ -2,6 +2,7 @@
 import { esc, api, upload, state, current, setVehicle, loadVehicles, bytes, isoish, icon, toast, confirmDialog, busy, fin, store, liveDraw, clockPref } from '../core.js';
 // the vehicle's car model and year (shared with every interface)
 import { carModelFields, wireCarModel, readCarModel } from '/web/carModelField.js';
+import { buildText, buildTip, behindText, latestText, latestTip } from '/web/buildLabel.js';
 import { seg, wireSeg, chip } from '../ui.js';
 // Nodes is a section here (#/settings/nodes; #/nodes opens it): its page module as it was, taken down with Settings.
 import nodesPage from './nodes.js';
@@ -237,12 +238,15 @@ async function iface(box) {
 async function updates(box) {
   const u = await api('/api/updates');
   const cur = u.current || {};
-  const running = `${cur.sha ? `${cur.sha.slice(0, 7)}${u.tag ? ` (${u.tag})` : ''}` : 'built from source'}${cur.builtAt ? ` · built ${String(cur.builtAt).slice(0, 10)}` : ''}`;
+  // "Build 128 · Nov 11, 2026", the commit in its tooltip (web/buildLabel.js)
+  const running = `${buildText(cur)}${u.tag && u.tag !== 'latest' ? ` (${u.tag})` : ''}`;
   const l = u.latest;
+  const behind = u.updateAvailable && behindText(u);
   box.innerHTML = `<section class="card"><header class="card-h"><h2>Updates</h2>${u.updateAvailable ? chip('update available', 'green') : ''}</header>
     <p class="small muted">${u.enabled ? 'Updates come as a new image. To install one, run <code>docker compose pull &amp;&amp; docker compose up -d</code> where you set up Sentry Six Manager. Settings, footage and the Recycle Bin stay.' : u.image ? 'Checking for updates is turned off (UPDATE_CHECK=off). To update, run <code>docker compose pull &amp;&amp; docker compose up -d</code>.' : 'This copy was built from source. To update it, build the image again from the new code.'}</p>
-    <dl class="kv"><dt>running</dt><dd class="mono">${esc(running)}</dd>${u.image ? `<dt>image</dt><dd class="mono">${esc(u.image)}</dd>` : ''}
-      ${u.enabled ? `<dt>newest</dt><dd class="mono">${l ? esc(`${l.revision ? `${l.revision.slice(0, 7)} · ` : ''}published ${String(l.created || '').slice(0, 10)}`) : esc(u.error || 'not checked yet')}</dd><dt>checked</dt><dd>${esc(isoish(u.checkedAt))}</dd>` : ''}</dl>
+    ${behind ? `<p class="small">${esc(behind)}.</p>` : ''}
+    <dl class="kv"><dt>running</dt><dd class="mono" title="${esc(buildTip(cur, u.tag))}">${esc(running)}</dd>${u.image ? `<dt>image</dt><dd class="mono">${esc(u.image)}</dd>` : ''}
+      ${u.enabled ? `<dt>newest</dt><dd class="mono"${l && latestTip(l) ? ` title="${esc(latestTip(l))}"` : ''}>${l ? esc(latestText(l)) : esc(u.error || 'not checked yet')}</dd><dt>checked</dt><dd>${esc(isoish(u.checkedAt))}</dd>` : ''}</dl>
     ${u.enabled ? `<div class="row-actions"><button class="btn" type="button" id="upd-check">${icon('refresh')}Check now</button></div>` : ''}</section>`;
   box.querySelector('#upd-check')?.addEventListener('click', (e) => busy(e.currentTarget, async () => {
     const out = await api('/api/updates/check', { body: {} });
@@ -308,7 +312,7 @@ async function system(box) {
   const caps = sys.converter?.capabilities || {};
   const gpus = [...(sys.gpu?.nvidia || []).map((g) => `${g.name} (driver ${g.driver})`), ...(sys.gpu?.gpus || []).filter((g) => g.vendor !== 'nvidia').map((g) => `${g.name || g.vendorName} · ${g.node}${g.virtual ? ' · not a GPU' : g.passedThrough ? (g.encodes ? ` · encodes ${Object.entries(g.encodes).filter(([, x]) => x).map(([k]) => k.toUpperCase()).join(', ') || 'nothing'}` : '') : ' · not passed into the container'}`)];
   box.innerHTML = `<section class="card"><header class="card-h"><h2>System</h2></header><dl class="kv">
-    <dt>version</dt><dd class="mono">${esc(ctx.host?.version || sys.version?.sha || 'dev')}</dd>
+    <dt>version</dt><dd class="mono" title="${esc(buildTip(sys.version || {}))}">${esc(buildText(sys.version, ctx.host?.version || 'dev'))}</dd>
     <dt>converter</dt><dd>${sys.converter?.ready ? `ready · replace originals ${esc(caps.replacement)} · cleanup ${esc(caps.ownershipCleanup)} · publication ${esc(caps.separatePublication)}` : `not ready (${esc(sys.converter?.error || 'starting')})`}</dd>
     <dt>safe rename helper</dt><dd>${sys.nativeHelper ? 'installed' : 'missing (link + unlink fallback)'}</dd>
     <dt>GPUs</dt><dd>${gpus.length ? gpus.map(esc).join('<br>') : 'none visible (the CPU encoders are used)'}</dd>

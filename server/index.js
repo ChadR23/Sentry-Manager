@@ -48,6 +48,7 @@ const { createScrubPrepare } = require('./scrubPrepare');
 const { Policies, dayInZone } = require('./policies');
 const { Jobs, Notifications } = require('./activity');
 const { ImageUpdates, criticalFromFile } = require('./imageUpdates');
+const { readBuildInfo: readBuildInfoFrom, buildName } = require('./buildInfo');
 const { Thumbnails } = require('./thumbnails');
 const { detectGpus } = require('./gpu');
 const { createHealth } = require('./health');
@@ -182,11 +183,7 @@ const STUDIO_CSP = cspWith({ script: "'self' 'unsafe-eval'", img: `'self' data: 
 const ENCODER_PAGE = '/studio/encoder.html';
 
 function readBuildInfo() {
-  try {
-    return JSON.parse(fs.readFileSync(path.join(APP_ROOT, 'BUILD_INFO.json'), 'utf8'));
-  } catch {
-    return {};
-  }
+  return readBuildInfoFrom(APP_ROOT);
 }
 
 function studioHtml(html) {
@@ -4097,7 +4094,7 @@ async function main() {
     // more open connections than a household's devices ever need are refused
     front.maxConnections = 1024;
     servers.push(front, httpsServer, redirect);
-    front.listen(PORT, HOST, () => log.info(`Sentry Six Manager on https://${HOST}:${PORT} (${buildInfo.sha ? buildInfo.sha.slice(0, 7) : 'dev'})`));
+    front.listen(PORT, HOST, () => log.info(`Sentry Six Manager on https://${HOST}:${PORT} (${buildName(buildInfo) || 'dev'})`));
   }
   // The CAN Bridge's port (CAN_PORT, 10000): only the CAN upload API
   // (/api/can/logs…), with the same certificate; it listens only while the

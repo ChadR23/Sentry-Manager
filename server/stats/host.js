@@ -8,6 +8,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { readLine, readText, join } = require('./util');
+const { readBuildInfo, cleanBuild } = require('../buildInfo');
 
 const APP_ROOT = path.join(__dirname, '..', '..');
 
@@ -25,14 +26,15 @@ function osFromKernel(release, version) {
   return release ? 'Linux' : null;
 }
 
-/** The running build: the commit from BUILD_INFO.json (release images), else version.json. */
+/**
+ * The running build: "Build N" from BUILD_INFO.json (release images; the
+ * commit for one from before build numbers), else version.json.
+ */
 function appVersion(root = APP_ROOT) {
-  try {
-    const sha = JSON.parse(fs.readFileSync(join(root, 'BUILD_INFO.json'), 'utf8')).sha;
-    if (sha) return String(sha).slice(0, 7);
-  } catch {
-    // a development checkout
-  }
+  const info = readBuildInfo(root);
+  const n = cleanBuild(info.build);
+  if (n) return `Build ${n}`;
+  if (info.sha) return String(info.sha).slice(0, 7);
   try {
     return JSON.parse(fs.readFileSync(join(root, 'version.json'), 'utf8')).version || null;
   } catch {

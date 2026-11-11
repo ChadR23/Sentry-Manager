@@ -8,6 +8,7 @@ import {
 import nodesPage from './nodes.js';
 // the vehicle's car model and year (shared with every interface)
 import { carModelFields, wireCarModel, readCarModel } from '/web/carModelField.js';
+import { buildText, buildTip, behindText, latestText, latestTip } from '/web/buildLabel.js';
 
 const SECTIONS = [
   ['vehicles', 'Vehicles', 'car'], ['places', 'Places', 'pin'], ['account', 'Account', 'key'], ['interface', 'Interface', 'sparkle'], ['updates', 'Updates', 'download'],
@@ -312,13 +313,17 @@ async function iface(box) {
 async function updates(box) {
   const u = await api('/api/updates');
   const cur = u.current || {};
-  const running = `${cur.sha ? `${esc(cur.sha.slice(0, 7))}${u.tag ? ` (${esc(u.tag)})` : ''}` : 'built from source'}${cur.builtAt ? ` · built ${esc(String(cur.builtAt).slice(0, 10))}` : ''}`;
+  // "Build 128 · Nov 11, 2026", the commit in its tooltip (web/buildLabel.js)
+  const tip = buildTip(cur, u.tag);
+  const running = `<span${tip ? ` title="${esc(tip)}"` : ''}>${esc(buildText(cur))}${u.tag && u.tag !== 'latest' ? ` (${esc(u.tag)})` : ''}</span>`;
   const how = '<code>docker compose pull &amp;&amp; docker compose up -d</code>';
   const l = u.latest;
+  const behind = u.updateAvailable && behindText(u);
   box.innerHTML = `<section class="panel"><div class="panel-head"><h2>Updates</h2>${u.updateAvailable ? '<span class="chip green">Update available</span>' : ''}</div>
     <p class="lead">${!u.enabled ? (u.image ? `Checking for updates is turned off (UPDATE_CHECK=off). To update, run ${how} where you set up Sentry Six Manager.` : 'This copy was built from source. To update it, build the image again from the new code.') : `Updates come as a new image: run ${how} where you set up Sentry Six Manager. Settings, footage and the Recycle Bin stay as they are.`}</p>
+    ${behind ? `<p><b>${esc(behind)}.</b></p>` : ''}
     <dl class="kv" style="margin-top:16px"><dt>Running</dt><dd class="mono">${running}</dd>
-      ${u.enabled ? `<dt>Newest</dt><dd>${l ? `<span class="mono">${l.revision ? `${esc(l.revision.slice(0, 7))} · ` : ''}published ${esc(String(l.created || '').slice(0, 10) || '?')}</span>` : u.error ? esc(u.error) : 'not checked yet'}${u.checkedAt ? ` <span class="muted">(checked ${esc(whenFull(u.checkedAt))})</span>` : ''}</dd>` : ''}</dl>
+      ${u.enabled ? `<dt>Newest</dt><dd>${l ? `<span class="mono"${latestTip(l) ? ` title="${esc(latestTip(l))}"` : ''}>${esc(latestText(l))}</span>` : u.error ? esc(u.error) : 'not checked yet'}${u.checkedAt ? ` <span class="muted">(checked ${esc(whenFull(u.checkedAt))})</span>` : ''}</dd>` : ''}</dl>
     ${u.enabled ? `<div class="actions start"><button class="btn" type="button" id="upd">${icon('refresh')} Check now</button></div>` : ''}</section>`;
   $('#upd', box)?.addEventListener('click', async (e) => {
     e.target.disabled = true;
@@ -391,7 +396,7 @@ async function system(box) {
     ...(g.gpus || []).filter((x) => x.vendor !== 'nvidia').map((x) => (x.virtual ? `${esc(x.name)} · ${esc(x.node)} · not a GPU` : `${esc(x.name || x.vendorName)} · ${esc(x.node)}${x.passedThrough ? (x.encodes ? ` · encodes ${Object.entries(x.encodes).filter(([, y]) => y).map(([k]) => k.toUpperCase()).join(', ') || 'nothing'}` : '') : ' · not passed into the container'}`))];
   const v = sys.version || {};
   box.innerHTML = `<section class="panel"><div class="panel-head"><h2>System</h2></div><dl class="kv">
-    <dt>Version</dt><dd class="mono">${esc(v.version || v.sha || 'development')}${v.builtAt ? ` · ${esc(String(v.builtAt).slice(0, 10))}` : ''}</dd>
+    <dt>Version</dt><dd class="mono"${buildTip(v) ? ` title="${esc(buildTip(v))}"` : ''}>${esc(buildText(v, v.version || 'development'))}</dd>
     <dt>Converter</dt><dd>${sys.converter?.ready ? `ready · replace originals ${esc(caps.replacement)} · cleanup ${esc(caps.ownershipCleanup)}` : `not ready (${esc(sys.converter?.error || 'starting')})`}</dd>
     <dt>Safe rename helper</dt><dd>${sys.nativeHelper ? 'installed' : 'missing (link + unlink fallback)'}</dd>
     <dt>GPUs</dt><dd>${gpus.length ? gpus.join('<br>') : 'none visible (the CPU encoders are used)'}</dd>

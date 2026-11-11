@@ -26,7 +26,7 @@ function fakeNotes() {
 }
 
 /** A registry that wants a token first and serves one tag for two architectures. */
-function fakeRegistry({ revision = 'c'.repeat(40), created = '2026-10-20T04:00:00Z', critical, level, tokenStatus = 200, realm = 'https://ghcr.io/token' } = {}) {
+function fakeRegistry({ revision = 'c'.repeat(40), created = '2026-10-20T04:00:00Z', version, critical, level, tokenStatus = 200, realm = 'https://ghcr.io/token' } = {}) {
   const calls = [];
   const json = (status, body, headers = {}) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } });
   const fetchImpl = async (url, opts = {}) => {
@@ -49,7 +49,7 @@ function fakeRegistry({ revision = 'c'.repeat(40), created = '2026-10-20T04:00:0
       return json(200, { config: { digest: digest('c') } });
     }
     if (u.pathname === `/v2/owner/sentry-six-manager/blobs/${digest('c')}`) {
-      return json(200, { created, config: { Labels: { 'org.opencontainers.image.revision': revision, 'org.opencontainers.image.created': created, ...(critical !== undefined ? { 'io.sentry-six.critical': critical } : {}), ...(level !== undefined ? { 'io.sentry-six.critical-level': String(level) } : {}) } } });
+      return json(200, { created, config: { Labels: { 'org.opencontainers.image.revision': revision, 'org.opencontainers.image.created': created, ...(version !== undefined ? { 'org.opencontainers.image.version': version } : {}), ...(critical !== undefined ? { 'io.sentry-six.critical': critical } : {}), ...(level !== undefined ? { 'io.sentry-six.critical-level': String(level) } : {}) } } });
     }
     return json(404, {});
   };
@@ -122,6 +122,52 @@ test('checks are spaced out, and the result survives a restart', async () => {
   assert.equal(after.status().updateAvailable, true);
   await after.tick(); // checked less than 12 hours ago
   assert.equal(reg.calls.length, n);
+});
+
+test('build numbers: the label tells how many builds behind, and the notice names the build', async () => {
+  const notes = fakeNotes();
+  const u = new ImageUpdates({ db: fakeDb(), notes, buildInfo: build({ build: 128 }), fetchImpl: fakeRegistry({ version: 'build-131' }).fetchImpl });
+  const st = await u.check();
+  assert.deepEqual(st.current, { sha: SHA, build: 128, builtAt: '2026-10-13T04:00:00Z' });
+  assert.equal(st.latest.build, 131);
+  assert.equal(st.buildsBehind, 3);
+  assert.equal(st.updateAvailable, true);
+  assert.match(notes.open.get('image-update').message, /A newer latest image \(Build 131\) was published/);
+});
+
+test('build numbers: the same or a lower number is not an update, whatever the commit and date say', async () => {
+  for (const [version, behind] of [['build-128', 0], ['build-120', 0]]) {
+    const notes = fakeNotes();
+    // another commit, built later: by revision and date alone this would be an update
+    const u = new ImageUpdates({ db: fakeDb(), notes, buildInfo: build({ build: 128 }), fetchImpl: fakeRegistry({ version, created: '2026-10-30T04:00:00Z' }).fetchImpl });
+    const st = await u.check();
+    assert.equal(st.buildsBehind, behind, version);
+    assert.equal(st.updateAvailable, false, version);
+    assert.equal(notes.open.size, 0);
+  }
+});
+
+test('build numbers: without one on either side the commit and date decide, as before', async () => {
+  // the newest image has no version label (built before build numbers)
+  const noLabel = new ImageUpdates({ db: fakeDb(), buildInfo: build({ build: 128 }), fetchImpl: fakeRegistry().fetchImpl });
+  let st = await noLabel.check();
+  assert.equal(st.latest.build, null);
+  assert.equal(st.buildsBehind, null);
+  assert.equal(st.updateAvailable, true, 'another commit');
+  const same = new ImageUpdates({ db: fakeDb(), buildInfo: build({ build: 128 }), fetchImpl: fakeRegistry({ revision: SHA, created: '2026-10-13T04:00:00Z' }).fetchImpl });
+  assert.equal((await same.check()).updateAvailable, false);
+  // this server's image has no number (an image from before them), the newest has one
+  const old = new ImageUpdates({ db: fakeDb(), buildInfo: build(), fetchImpl: fakeRegistry({ version: 'build-131' }).fetchImpl });
+  st = await old.check();
+  assert.equal(st.current.build, null);
+  assert.equal(st.latest.build, 131);
+  assert.equal(st.buildsBehind, null);
+  assert.equal(st.updateAvailable, true);
+  // a strange label is no number
+  for (const version of ['131', 'build-', 'build-1x', 'v2026.1', 'build-0']) {
+    const u = new ImageUpdates({ db: fakeDb(), buildInfo: build({ build: 128 }), fetchImpl: fakeRegistry({ version }).fetchImpl });
+    assert.equal((await u.check()).latest.build, null, version);
+  }
 });
 
 test('parseChallenge reads Bearer challenges only', () => {

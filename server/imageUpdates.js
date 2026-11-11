@@ -5,14 +5,18 @@
 //
 // The release build records which image and tag it made (BUILD_INFO.json).
 // Twice a day this asks that registry, anonymously, which image the tag
-// points to now and compares its revision and build time with ours: a new
-// release (images are only built for one, never on a timer). Nothing is downloaded or installed and no token is stored.
+// points to now and compares its build number (the image's
+// org.opencontainers.image.version label, `build-N`) with ours; an image
+// from before build numbers is compared by revision and build time. Either
+// way a newer one is a new release (images are only built for one, never on
+// a timer). Nothing is downloaded or installed and no token is stored.
 // UPDATE_CHECK=off turns it off; images built locally have no tag to check.
 
 const CHECK_MS = 12 * 3600 * 1000;
 // soon after a start too (not only 12 hours after the last check): a critical
 // update shows within minutes of the server coming up
 const STARTUP_CHECK_MS = 10 * 60 * 1000;
+const VERSION_LABEL = 'org.opencontainers.image.version';
 const CRITICAL_LABEL = 'io.sentry-six.critical';
 const CRITICAL_LEVEL_LABEL = 'io.sentry-six.critical-level';
 const MAX_LEVEL = 999999;
@@ -28,6 +32,8 @@ const ACCEPT = [
 const IMAGE_RE = /^([a-z0-9.-]+\.[a-z]{2,}(?::\d+)?)\/([a-z0-9._/-]+)$/;
 const TAG_RE = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/;
 const DIGEST_RE = /^sha256:[a-f0-9]{64}$/;
+const { cleanBuild } = require('./buildInfo');
+
 const ARCH = { x64: 'amd64', arm64: 'arm64' }[process.arch] || process.arch;
 
 /** The parameters of a `Bearer realm="…",service="…",scope="…"` challenge. */
@@ -80,7 +86,7 @@ class ImageUpdates {
     this.registry = m?.[1] || null;
     this.repo = m?.[2] || null;
     this.tag = TAG_RE.test(String(buildInfo.tag || '')) ? buildInfo.tag : null;
-    this.current = { sha: buildInfo.sha || null, builtAt: buildInfo.builtAt || null };
+    this.current = { sha: buildInfo.sha || null, build: cleanBuild(buildInfo.build), builtAt: buildInfo.builtAt || null };
     this.enabled = enabled && Boolean(this.registry && this.repo && this.tag);
     this.state = db.get('image-updates', { latest: null, checkedAt: 0, error: null });
     this.lastCheck = 0;
@@ -100,6 +106,7 @@ class ImageUpdates {
       checkedAt: this.state.checkedAt || null,
       error: this.state.error,
       updateAvailable: this.updateAvailable(),
+      buildsBehind: this.buildsBehind(),
       critical: this.critical()
     };
   }
@@ -117,9 +124,21 @@ class ImageUpdates {
     return { level: cleanLevel(c.level), reason: cleanCritical(c.reason) || 'A critical fix is out.', created: c.created || null };
   }
 
+  /** How many build numbers the tag's image is ahead of this one (gaps count), or null when either has none. */
+  buildsBehind() {
+    const latest = cleanBuild(this.state.latest?.build);
+    const mine = this.current.build;
+    if (!this.enabled || !latest || !mine) return null;
+    return Math.max(0, latest - mine);
+  }
+
   updateAvailable() {
     const latest = this.state.latest;
     if (!this.enabled || !latest) return false;
+    // both have build numbers: only a higher one is newer (a lower one is an
+    // older image put back on the tag, or this one runs ahead of it)
+    const behind = this.buildsBehind();
+    if (behind !== null) return behind > 0;
     if (latest.revision && this.current.sha && latest.revision !== this.current.sha) return true;
     const a = Date.parse(latest.created || '');
     const b = Date.parse(this.current.builtAt || '');
@@ -171,7 +190,7 @@ class ImageUpdates {
     this.notes.raise({
       kind: 'update', level: 'info', dedupeKey: 'image-update',
       title: 'An update is available',
-      message: `A newer ${this.tag} image was published${l.created ? ` on ${l.created.slice(0, 10)}` : ''}. To install it, run "docker compose pull && docker compose up -d" where you set up Sentry Six Manager.`
+      message: `A newer ${this.tag} image${cleanBuild(l.build) ? ` (Build ${cleanBuild(l.build)})` : ''} was published${l.created ? ` on ${l.created.slice(0, 10)}` : ''}. To install it, run "docker compose pull && docker compose up -d" where you set up Sentry Six Manager.`
     });
     return undefined;
   }
@@ -222,6 +241,8 @@ class ImageUpdates {
     return {
       digest: DIGEST_RE.test(digest || '') ? digest : configDigest,
       revision: /^[a-f0-9]{7,64}$/.test(revision || '') ? revision : null,
+      // `build-N` (images from before build numbers have none)
+      build: /^build-\d{1,9}$/i.test(String(labels[VERSION_LABEL] || '').trim()) ? cleanBuild(labels[VERSION_LABEL]) : null,
       created: labels['org.opencontainers.image.created'] || config.created || null,
       ...(() => {
         const reason = cleanCritical(labels[CRITICAL_LABEL]);
@@ -232,4 +253,4 @@ class ImageUpdates {
   }
 }
 
-module.exports = { ImageUpdates, parseChallenge, cleanCritical, cleanLevel, criticalFromFile, CRITICAL_LABEL, CRITICAL_LEVEL_LABEL };
+module.exports = { ImageUpdates, VERSION_LABEL, parseChallenge, cleanCritical, cleanLevel, criticalFromFile, CRITICAL_LABEL, CRITICAL_LEVEL_LABEL };

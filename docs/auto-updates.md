@@ -187,6 +187,6 @@ in [Updates](updates.md).
 
 ## If you pin a version
 
-If `.env` has `SENTRY_TAG=sha-…` to stay on one release, Watchtower keeps you
+If `.env` has `SENTRY_TAG=build-…` (or `sha-…`) to stay on one release, Watchtower keeps you
 on exactly that image and never moves you to a newer one. Remove the line
 (or set it to `latest`) to get updates.

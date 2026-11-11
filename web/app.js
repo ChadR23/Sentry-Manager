@@ -747,7 +747,7 @@
   function hostLine(h) {
     if (!h) return '';
     return [h.hostname, h.os, h.kernel && `kernel ${h.kernel}`, fin(h.uptimeS) && `up ${span(h.uptimeS)}`,
-      fin(h.appUptimeS) && `app up ${span(h.appUptimeS)}`, h.version && `version ${h.version}`].filter(Boolean).map((part) => `<span class="nd-nb">${esc(part)}</span>`).join(' · ');
+      fin(h.appUptimeS) && `app up ${span(h.appUptimeS)}`, h.version && (/^Build \d/.test(h.version) ? h.version : `version ${h.version}`)].filter(Boolean).map((part) => `<span class="nd-nb">${esc(part)}</span>`).join(' · ');
   }
 
   function alertChip(alerts) {
@@ -2226,7 +2226,7 @@
     if (sub === 'nodes' || sub?.startsWith('nodes/')) return pages.nodes();
     const seq = renderSeq;
     const editing = sub?.startsWith('vehicle/') ? sub.slice(8) : sub === 'vehicle-new' ? 'new' : null;
-    const [settings, upd, sys, sec, ui] = await Promise.all([api('/api/settings'), api('/api/updates'), api('/api/system').catch(() => null), api('/api/security').catch(() => null), api('/api/ui-packs').catch(() => null)]);
+    const [settings, upd, sys, sec, ui, bl] = await Promise.all([api('/api/settings'), api('/api/updates'), api('/api/system').catch(() => null), api('/api/security').catch(() => null), api('/api/ui-packs').catch(() => null), import('/web/buildLabel.js')]);
     if (seq !== renderSeq) return; // the user moved on while this loaded
     state.system = sys || state.system;
     state.power = settings.power || state.power || null;
@@ -2246,7 +2246,7 @@
     // Places: Home, Work (web/placesSettings.js, the same in every interface)
     html += '<div class="card" data-section="places"><h2>Places</h2><div id="places-box" style="margin-top:12px"></div></div>';
 
-    html += updatesCard(upd);
+    html += updatesCard(upd, bl);
 
     html += `<div class="card" data-section="account"><h2>Account</h2><form id="pw" class="form" style="margin-top:16px">
         <label class="field">Current password<input class="input" type="password" name="current" autocomplete="current-password" required></label>
@@ -2400,9 +2400,11 @@
     pick(show);
   }
 
-  function updatesCard(u) {
+  // "Build 128 · Nov 11, 2026", the commit in its tooltip (web/buildLabel.js)
+  function updatesCard(u, bl) {
     const cur = u.current || {};
-    const running = `${cur.sha ? `${esc(cur.sha.slice(0, 7))}${u.tag ? ` (${esc(u.tag)})` : ''}` : 'built from source'}${cur.builtAt ? ` · built ${esc(String(cur.builtAt).slice(0, 10))}` : ''}`;
+    const tip = bl.buildTip(cur, u.tag);
+    const running = `<span${tip ? ` title="${esc(tip)}"` : ''}>${esc(bl.buildText(cur))}${u.tag && u.tag !== 'latest' ? ` (${esc(u.tag)})` : ''}</span>`;
     const how = '<code>docker compose pull &amp;&amp; docker compose up -d</code>';
     if (!u.enabled) {
       return `<div class="card" data-section="updates"><h2>Updates</h2>
@@ -2410,12 +2412,13 @@
         <dl class="kv" style="margin-top:16px"><dt>Running</dt><dd class="mono">${running}</dd></dl></div>`;
     }
     const l = u.latest;
-    const latest = l ? `${l.revision ? `${esc(l.revision.slice(0, 7))} · ` : ''}published ${esc(String(l.created || '').slice(0, 10) || '?')}` : u.error ? esc(u.error) : 'not checked yet';
+    const latest = l ? `<span${bl.latestTip(l) ? ` title="${esc(bl.latestTip(l))}"` : ''}>${esc(bl.latestText(l))}</span>` : u.error ? esc(u.error) : 'not checked yet';
+    const behind = u.updateAvailable && bl.behindText(u);
     return `<div class="card" data-section="updates"><h2>Updates</h2>
       <p>Updates come as a new image. To install one, run ${how} where you set up Sentry Six Manager. Settings, footage and the Recycle Bin stay as they are.</p>
       <dl class="kv" style="margin-top:16px"><dt>Running</dt><dd class="mono">${running}</dd>
         <dt>Newest</dt><dd${l ? ' class="mono"' : ''}>${latest}${u.checkedAt ? ` <span class="muted">(checked ${when(u.checkedAt)})</span>` : ''}</dd></dl>
-      ${u.updateAvailable ? '<div class="note green">An update is available.</div>' : ''}
+      ${u.updateAvailable ? `<div class="note green">${behind ? `${esc(behind)}.` : 'An update is available.'}</div>` : ''}
       <div class="form-actions"><button class="btn" id="upd-check" type="button">Check now</button></div></div>`;
   }
 

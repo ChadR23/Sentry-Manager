@@ -45,3 +45,62 @@ test('CUDA\'s GPU order is not changed for the whole container', () => {
   const dockerfile = fs.readFileSync(path.join(REPO, 'Dockerfile'), 'utf8');
   assert.doesNotMatch(dockerfile, /CUDA_DEVICE_ORDER/, 'only an ffmpeg that names an NVIDIA GPU by index gets PCI order');
 });
+
+test('every image gets the run number as its build number: build arg, label and a build-N tag on releases', () => {
+  const workflow = fs.readFileSync(path.join(REPO, '.github/workflows/image.yml'), 'utf8');
+  assert.match(workflow, /echo "build=\$GITHUB_RUN_NUMBER"/);
+  assert.match(workflow, /^\s+build: \$\{\{ steps\.names\.outputs\.build \}\}$/m);
+  assert.equal((workflow.match(/BUILD_NUMBER=\$\{\{ needs\.names\.outputs\.build \}\}/g) || []).length, 2, 'the checked build and the published one');
+  assert.equal((workflow.match(/GIT_SHA=\$\{\{ needs\.names\.outputs\.sha \}\}/g) || []).length, 2);
+  assert.match(workflow, /org\.opencontainers\.image\.version=build-\$\{\{ needs\.names\.outputs\.build \}\}/);
+  const publish = workflow.slice(workflow.indexOf('\n  publish:'));
+  assert.match(publish, /-t "\$image:\$\{\{ needs\.names\.outputs\.tag \}\}" -t "\$image:sha-\$\{\{ needs\.names\.outputs\.short \}\}"/, 'the old tags stay');
+  assert.match(publish, /if \[ "\$\{\{ needs\.names\.outputs\.tag \}\}" = latest \]; then tags\+=\(-t "\$image:build-\$\{\{ needs\.names\.outputs\.build \}\}"\); fi/, 'build-N only for a release');
+  assert.match(publish, /imagetools create "\$\{tags\[@\]\}"/, 'put on at the end, with the others');
+});
+
+test('BUILD_INFO.json has "build" as a number, and none for a local build', () => {
+  const { readBuildInfo, buildName } = require('../server/buildInfo');
+  const { appVersion } = require('../server/stats/host');
+  const dockerfile = fs.readFileSync(path.join(REPO, 'Dockerfile'), 'utf8');
+  assert.match(dockerfile, /^ARG BUILD_NUMBER=""$/m);
+  const start = dockerfile.indexOf('\nRUN build=""');
+  assert.ok(start > 0);
+  const end = dockerfile.indexOf('/app/BUILD_INFO.json', start) + '/app/BUILD_INFO.json'.length;
+  const dir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'sm-build-'));
+  // the Dockerfile's own RUN step, under the image's /bin/sh
+  const step = dockerfile.slice(start + 5, end).replace(/\\\n/g, ' ').replace('/app/BUILD_INFO.json', JSON.stringify(path.join(dir, 'BUILD_INFO.json')));
+  const run = (BUILD_NUMBER) => {
+    require('child_process').execFileSync('sh', ['-c', step], { env: { ...process.env, GIT_SHA: 'cb593ca'.padEnd(40, '0'), GIT_BRANCH: 'main', BUILD_DATE: '2026-11-11T04:00:00Z', IMAGE: 'ghcr.io/o/r', IMAGE_TAG: 'latest', BUILD_NUMBER } });
+    return fs.readFileSync(path.join(dir, 'BUILD_INFO.json'), 'utf8');
+  };
+  try {
+    assert.deepEqual(JSON.parse(run('128')), { sha: 'cb593ca'.padEnd(40, '0'), branch: 'main', builtAt: '2026-11-11T04:00:00Z', image: 'ghcr.io/o/r', tag: 'latest', build: 128 });
+    assert.deepEqual(readBuildInfo(dir).build, 128);
+    assert.equal(buildName(readBuildInfo(dir)), 'Build 128 (cb593ca)');
+    assert.equal(appVersion(dir), 'Build 128');
+    for (const n of ['', '0', '012', '12a', '1;2']) {
+      const info = JSON.parse(run(n));
+      assert.equal('build' in info, false, JSON.stringify(n));
+      assert.equal(info.sha, 'cb593ca'.padEnd(40, '0'));
+    }
+    assert.equal(buildName(readBuildInfo(dir)), 'cb593ca', 'an image from before build numbers: its commit');
+    assert.equal(appVersion(dir), 'cb593ca');
+    fs.writeFileSync(path.join(dir, 'BUILD_INFO.json'), JSON.stringify({ sha: 'abc', build: 'build-7x' }));
+    assert.deepEqual(readBuildInfo(dir), { sha: 'abc' }, 'a strange build is dropped');
+    fs.writeFileSync(path.join(dir, 'BUILD_INFO.json'), JSON.stringify({ build: '42' }));
+    assert.deepEqual(readBuildInfo(dir), { build: 42 });
+    fs.rmSync(path.join(dir, 'BUILD_INFO.json'));
+    assert.deepEqual(readBuildInfo(dir), {}, 'a copy built from source');
+    assert.equal(buildName({}), null);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the startup line names the build and its commit', () => {
+  const src = fs.readFileSync(path.join(REPO, 'server', 'index.js'), 'utf8');
+  assert.match(src, /log\.info\(`Sentry Six Manager on https:\/\/\$\{HOST\}:\$\{PORT\} \(\$\{buildName\(buildInfo\) \|\| 'dev'\}\)`\)/);
+  assert.match(src, /version: buildInfo,/, '/api/system has the whole BUILD_INFO (the build, the full commit)');
+  assert.match(src, /made: new Date\(\)\.toISOString\(\), version: buildInfo,/, 'and the support bundle');
+});

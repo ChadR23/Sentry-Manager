@@ -184,7 +184,7 @@ export default {
       const s = snap;
       if (!s) return;
       const h = s.host || {};
-      $('#ov-host').innerHTML = `${[h.hostname, h.os, h.kernel && `kernel ${h.kernel}`, h.arch, fin(h.uptimeS) && `up ${dur(h.uptimeS * 1000)}`, fin(h.appUptimeS) && `app ${dur(h.appUptimeS * 1000)}`, h.version && `v${h.version}`, h.node && `node ${h.node}`, h.ffmpeg && `ffmpeg ${h.ffmpeg}`].filter(Boolean).map((x) => `<span class="mono">${esc(x)}</span>`).join(' · ')}${error ? ' · <span class="bad-text">not updating right now</span>' : ''}`;
+      $('#ov-host').innerHTML = `${[h.hostname, h.os, h.kernel && `kernel ${h.kernel}`, h.arch, fin(h.uptimeS) && `up ${dur(h.uptimeS * 1000)}`, fin(h.appUptimeS) && `app ${dur(h.appUptimeS * 1000)}`, h.version && (/^Build \d/.test(h.version) ? h.version : `v${h.version}`), h.node && `node ${h.node}`, h.ffmpeg && `ffmpeg ${h.ffmpeg}`].filter(Boolean).map((x) => `<span class="mono">${esc(x)}</span>`).join(' · ')}${error ? ' · <span class="bad-text">not updating right now</span>' : ''}`;
       // CPU
       const cpu = s.cpu || {};
       $('#cpu-big').textContent = pct(cpu.usage);

@@ -21,6 +21,20 @@ whether a newer image is out. It only tells you and never installs anything
 you, follow [Automatic updates](auto-updates.md) (Watchtower, for Compose
 and TrueNAS).
 
+## Build numbers
+
+Each published image has a build number that only ever goes up. The app
+shows it as **Build 128 · Nov 11, 2026** (Settings → Updates in every
+interface, and the server line and Version row where an interface has
+them), so when you ask for
+help, "Build 128" says how old your copy is. Hover it for the full commit,
+which is also in the support bundle and `/api/system`. When a newer build is
+out, Settings → Updates says so with both numbers, for example *Build 131 is
+out: you have Build 128 (3 builds behind)*. Numbers can skip (a build that
+was not published still used one), so "3 builds behind" counts numbers, not
+releases. A copy you built yourself has no number and shows "built from
+source" (or "development").
+
 ## Critical updates
 
 [`CRITICAL_UPDATE.txt`](../CRITICAL_UPDATE.txt) holds a `level` (0 = no
@@ -38,10 +52,24 @@ until it installs that release or any later one. A server also remembers the
 highest level it has seen, so even an image that lost the labels does not
 hide it. Only change the file for the next critical release.
 
+## How images are built
+
 Images are built by GitHub Actions for amd64 and arm64
 ([`image.yml`](../.github/workflows/image.yml)) and published to
-`ghcr.io/skittles-fivem/sentry-manager`. `latest` follows `main`, every
-commit also gets a `sha-<commit>` tag you can pin with `SENTRY_TAG`.
+`ghcr.io/skittles-fivem/sentry-manager`. The build number is the workflow's
+run number. `latest` follows `main`, and every release from `main` is also
+tagged `build-<number>` and `sha-<commit>`; the image carries the label
+`org.opencontainers.image.version=build-<number>`, which is how Settings →
+Updates learns the newest build number. To stay on a version, or go back to
+one, pin its tag in `.env`:
+
+```bash
+SENTRY_TAG=build-128
+```
+
+then `docker compose pull && docker compose up -d`. Remove the line (or set
+it to `latest`) to follow releases again. A `sha-<commit>` tag works the
+same way.
 Images are only built for a release (nothing is rebuilt on a timer), so
 "update available" always means there is a new release; each build takes
 the latest Debian, Node and ffmpeg security fixes.

@@ -77,13 +77,17 @@ COPY examples/ui-packs ./ui-packs
 
 # Set by the release build (.github/workflows/image.yml); IMAGE and
 # IMAGE_TAG let Settings > Updates check the registry for a newer image.
+# BUILD_NUMBER is the Image workflow's run number ("Build N" in the app); a
+# local build has none, and then "build" is left out.
 ARG GIT_SHA=""
 ARG GIT_BRANCH=""
 ARG BUILD_DATE=""
 ARG IMAGE=""
 ARG IMAGE_TAG=""
-RUN printf '{"sha":"%s","branch":"%s","builtAt":"%s","image":"%s","tag":"%s"}\n' "$GIT_SHA" "$GIT_BRANCH" \
-      "${BUILD_DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" "$IMAGE" "$IMAGE_TAG" > /app/BUILD_INFO.json
+ARG BUILD_NUMBER=""
+RUN build=""; case "$BUILD_NUMBER" in ''|0*|*[!0-9]*) ;; *) build=",\"build\":$BUILD_NUMBER" ;; esac; \
+    printf '{"sha":"%s","branch":"%s","builtAt":"%s","image":"%s","tag":"%s"%s}\n' "$GIT_SHA" "$GIT_BRANCH" \
+      "${BUILD_DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" "$IMAGE" "$IMAGE_TAG" "$build" > /app/BUILD_INFO.json
 
 # Two malloc arenas for the Node processes (the supervisor and the app):
 # with one per thread, memory freed after a large conversion job stayed with

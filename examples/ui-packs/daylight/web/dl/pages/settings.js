@@ -8,6 +8,7 @@ import { go, setTheme, currentTheme, signOut } from '../app.js';
 import * as nodesPage from './nodes.js';
 // the vehicle's car model and year (shared with every interface)
 import { carModelFields, wireCarModel, readCarModel } from '/web/carModelField.js';
+import { buildText, buildTip, behindText, latestText, latestTip } from '/web/buildLabel.js';
 
 const SECTIONS = [
   ['vehicles', 'Vehicles', 'car'], ['places', 'Places', 'map'], ['account', 'Account', 'key'], ['look', 'Look', 'palette'], ['interface', 'Interface', 'grid'],
@@ -418,13 +419,16 @@ async function security({ el }) {
 async function updates({ el }) {
   const draw = (u) => {
     const cur = u.current || {};
-    const running = `${cur.sha ? `${esc(cur.sha.slice(0, 7))}${u.tag ? ` (${esc(u.tag)})` : ''}` : 'built from source'}${cur.builtAt ? ` · built ${esc(String(cur.builtAt).slice(0, 10))}` : ''}`;
+    // "Build 128 · Nov 11, 2026", the commit in its tooltip (web/buildLabel.js)
+    const tip = buildTip(cur, u.tag);
+    const running = `<span class="mono"${tip ? ` title="${esc(tip)}"` : ''}>${esc(buildText(cur))}${u.tag && u.tag !== 'latest' ? ` (${esc(u.tag)})` : ''}</span>`;
+    const behind = u.updateAvailable && behindText(u);
     const how = '<code>docker compose pull &amp;&amp; docker compose up -d</code>';
     el.innerHTML = `<div class="card stack"><h2>Updates</h2>
-      ${u.updateAvailable ? `<div class="note note-good">${icon('sparkle')}<span><b>An update is ready.</b> Run ${how} where you set up Sentry Six Manager. Settings, footage and the Recycle Bin stay as they are.</span></div>`
+      ${u.updateAvailable ? `<div class="note note-good">${icon('sparkle')}<span><b>${behind ? `${esc(behind)}.` : 'An update is ready.'}</b> Run ${how} where you set up Sentry Six Manager. Settings, footage and the Recycle Bin stay as they are.</span></div>`
         : u.enabled ? `<div class="note note-good">${icon('checkCircle')}<span>You’re up to date${u.checkedAt ? ` (checked ${esc(ago(u.checkedAt))})` : ''}.</span></div>`
           : `<div class="note">${icon('info')}<span>${u.image ? `Checking for updates is turned off (UPDATE_CHECK=off). To update, run ${how}.` : 'This copy was built from source. To update it, build the image again from the new code.'}</span></div>`}
-      ${kv([['Running', `<span class="mono">${running}</span>`], u.enabled ? ['Newest', u.latest ? `<span class="mono">${esc(u.latest.revision ? u.latest.revision.slice(0, 7) : '')}</span> · published ${esc(String(u.latest.created || '').slice(0, 10))}` : esc(u.error || 'not checked yet')] : null])}
+      ${kv([['Running', running], u.enabled ? ['Newest', u.latest ? `<span class="mono"${latestTip(u.latest) ? ` title="${esc(latestTip(u.latest))}"` : ''}>${esc(latestText(u.latest))}</span>` : esc(u.error || 'not checked yet')] : null])}
       ${u.enabled ? '<div><button class="btn" type="button" id="check">Check now</button></div>' : ''}</div>`;
     el.querySelector('#check')?.addEventListener('click', (e) => busy(e.currentTarget, async () => {
       try {
@@ -473,7 +477,7 @@ async function system({ el }) {
         ['Cleanup', esc(sys.converter.capabilities?.ownershipCleanup || '—')],
         ['Safe rename helper', sys.nativeHelper ? 'installed' : 'missing (a slower fallback is used)'],
         ['GPU hints', (sys.gpu?.hints || []).map(esc).join('<br>')],
-        ['Version', esc(sys.version?.sha ? sys.version.sha.slice(0, 7) : 'development')]
+        ['Version', `<span${buildTip(sys.version || {}) ? ` title="${esc(buildTip(sys.version))}"` : ''}>${esc(buildText(sys.version, 'development'))}</span>`]
       ])) : ''}</div>
     <form class="card stack" id="power" novalidate><h2>Electricity price</h2>
       <p class="muted">Shows what converting costs, next to the energy used. Leave it empty to show energy only.</p>
