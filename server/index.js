@@ -57,7 +57,7 @@ const { createAccounts, viewerMay } = require('./accounts');
 const placesLib = require('./places');
 const drivesLib = require('./drives');
 const driveDataLib = require('./driveData');
-const { writeZip, streamZip, waitDrain, ZIP_LIMIT } = require('./zip');
+const { writeZip, streamZip, waitDrain } = require('./zip');
 const { createConverterHost } = require('./converterHost');
 const { createStats } = require('./stats');
 const { encoderBlock, jobProgress, RUNNING: CONVERTER_RUNNING } = require('./encoderStats');
@@ -2972,8 +2972,8 @@ async function main() {
   // a bundle of a car key's logs over a time range with every CAN id seen (new ones stand out), the
   // decoded signals as CSV, and the ids new since a date.
   const CAN_KEY = /^[A-Za-z0-9-]{1,64}$/;
-  // A bundle may cover any time range and any number of logs (the owner downloads on the local
-  // network); the one limit left is the zip format's 4 GB (no zip64), checked below
+  // A bundle may cover any time range, any number of logs and any size (the owner downloads on the
+  // local network; the zip is Zip64 when it passes 4 GB or 65,535 files, which Windows opens too)
   const CAN_DECODED_HOURS = 24;
   // rows of one decoded export (gzip makes them about 8 times smaller on the wire); by default only
   // changes are written (each signal is kept once a second in the index even when it stays the same)
@@ -3148,7 +3148,7 @@ async function main() {
     ...ids.map((e) => csvLine([e.bus, `0x${e.id}`, e.name || 'unknown', e.name ? '' : 'UNKNOWN', e.frames, e.hz, isoOf(e.firstSeen), isoOf(e.lastSeen), e.minutes]))
   ].join('');
 
-  // a car key's logs and sidecars over a time range (at most a week), with ids.csv, as one .zip streamed as it is read
+  // a car key's logs and sidecars over a time range, with ids.csv, as one .zip streamed as it is read
   r.add('GET', '/api/can/export/bundle', async (req, res, { query, user }) => {
     const key = canKeyOr400(query.key);
     const { from, to } = canRange(key, query, Infinity, 'A bundle');
@@ -3180,18 +3180,16 @@ async function main() {
       if (withText && log) {
         const most = await candumpEstimate(log, format);
         textBytes += most + 400; // (and the note when it is cut, and the zip's headers)
-        entries.push({ name: `${key}/${nm.replace(/\.xz$/, '')}`, size: null, mtime: log.mtime, open: () => { const rd = openCanLog(log.file, { pool: 'download' }); return require('stream').Readable.from(canCandumpText(rd, rd.chunks(), { maxBytes: most })); } });
+        entries.push({ name: `${key}/${nm.replace(/\.xz$/, '')}`, size: null, maxSize: most + 400, mtime: log.mtime, open: () => { const rd = openCanLog(log.file, { pool: 'download' }); return require('stream').Readable.from(canCandumpText(rd, rd.chunks(), { maxBytes: most })); } });
       }
       const rec = await canTrust.record(key, nm).catch(() => null);
       manifest.push({ name: nm, startedAt: isoOf(parseCanName(nm).startedAt), bytes: log?.size ?? null, sidecar: Boolean(await canFileOf(`${nm}.json`)), format: typeof format === 'string' ? format.slice(0, 64) : null, check: rec?.status || 'waiting', ...(rec?.reason ? { reason: rec.reason } : {}) });
     }
-    if (total + textBytes > ZIP_LIMIT - 64 * 1024 * 1024) throw new HttpError(413, `That bundle would be over 4 GB${withText ? ' with the candump text' : ''}: take a shorter time.`);
     // check=1: what it would hold (the panel asks first, so a mistake is a message, not a downloaded error)
     if (query.check) return { logs: picked.length, files: entries.length, bytes: total, ...(withText ? { candumpBytes: textBytes } : {}), from, to };
     const file = `can-${key}-${isoOf(from).slice(0, 16).replace(/[-:]/g, '')}-to-${isoOf(to).slice(0, 16).replace(/[-:]/g, '')}.zip`;
     // the logs go first, so the download starts at once; ids.csv and manifest.json (made from the
-    // index while the logs stream, only the top of each minute read) come last. The sizes were
-    // checked with 64 MB to spare, far more than the two small files need.
+    // index while the logs stream, only the top of each minute read) come last.
     let ids = null;
     const idsOf = async () => (ids ||= await canIndex.idSummary(key, from, to, { stop: () => res.destroyed }));
     res.writeHead(200, { 'Content-Type': 'application/zip', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': attachment(file) });

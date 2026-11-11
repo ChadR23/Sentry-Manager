@@ -1,9 +1,12 @@
 'use strict';
 
-// Just enough of the .zip format for UI packs: read an uploaded archive
-// (stored or deflated files, no encryption, no zip64) and write one. Every
-// size is checked against limits before anything is inflated, and each file
-// is inflated to at most its declared size and checked against its CRC.
+// Just enough of the .zip format for UI packs and CAN bundles: read an
+// uploaded archive (stored or deflated files, no encryption) and write one.
+// Every size is checked against limits before anything is inflated, and each
+// file is inflated to at most its declared size and checked against its CRC.
+// Zip64 (APPNOTE 4.3.9, 4.4.1.4, 4.5.3) is written only when it is needed: a
+// file or an offset of 4 GiB or more, or 65,535 files or more; an archive
+// without any of those is the classic format, byte for byte as before.
 
 const zlib = require('zlib');
 
@@ -12,6 +15,101 @@ class ZipError extends Error {}
 const EOCD = 0x06054b50;
 const CENTRAL = 0x02014b50;
 const LOCAL = 0x04034b50;
+const DESCRIPTOR = 0x08074b50;
+const ZIP64_END = 0x06064b50;
+const ZIP64_LOCATOR = 0x07064b50;
+const MAX16 = 0xffff;
+const MAX32 = 0xffffffff;
+
+/** A Zip64 extended information extra field (0x0001) holding these 8-byte values. */
+function zip64Extra(values) {
+  const b = Buffer.alloc(4 + 8 * values.length);
+  b.writeUInt16LE(0x0001, 0);
+  b.writeUInt16LE(8 * values.length, 2);
+  values.forEach((v, i) => b.writeBigUInt64LE(BigInt(v), 4 + 8 * i));
+  return b;
+}
+
+/**
+ * A local file header and its name. `zip64`: both sizes are 0xFFFFFFFF and
+ * the extra field holds them, uncompressed first (APPNOTE 4.5.3: the local
+ * one always has both); with a data descriptor (flag 8) they are zeros there,
+ * and the descriptor after the data has 8-byte sizes (4.3.9.2).
+ */
+function localHeader({ nameBuf, flags, method, time, date, crc = 0, csize = 0, usize = 0, zip64 = false }) {
+  const extra = zip64 ? zip64Extra([usize, csize]) : Buffer.alloc(0);
+  const head = Buffer.alloc(30);
+  head.writeUInt32LE(LOCAL, 0);
+  head.writeUInt16LE(zip64 ? 45 : 20, 4);
+  head.writeUInt16LE(flags, 6);
+  head.writeUInt16LE(method, 8);
+  head.writeUInt16LE(time, 10);
+  head.writeUInt16LE(date, 12);
+  head.writeUInt32LE(crc >>> 0, 14);
+  head.writeUInt32LE(zip64 ? MAX32 : csize, 18);
+  head.writeUInt32LE(zip64 ? MAX32 : usize, 22);
+  head.writeUInt16LE(nameBuf.length, 26);
+  head.writeUInt16LE(extra.length, 28);
+  return Buffer.concat([head, nameBuf, extra]);
+}
+
+/**
+ * A central directory record and its name. A size or offset of 0xFFFFFFFF or
+ * more is written as 0xFFFFFFFF and its value goes in a Zip64 extra field,
+ * which holds only those, in APPNOTE order (uncompressed, compressed, offset).
+ */
+function centralRecord({ nameBuf, flags, method, time, date, crc, csize, usize, offset }) {
+  const big = [usize, csize, offset].filter((v) => v >= MAX32);
+  const extra = big.length ? zip64Extra(big) : Buffer.alloc(0);
+  const version = big.length ? 45 : 20;
+  const entry = Buffer.alloc(46);
+  entry.writeUInt32LE(CENTRAL, 0);
+  entry.writeUInt16LE(version, 4); // made by (MS-DOS attributes, none set)
+  entry.writeUInt16LE(version, 6); // needed: 4.5 for Zip64
+  entry.writeUInt16LE(flags, 8);
+  entry.writeUInt16LE(method, 10);
+  entry.writeUInt16LE(time, 12);
+  entry.writeUInt16LE(date, 14);
+  entry.writeUInt32LE(crc >>> 0, 16);
+  entry.writeUInt32LE(Math.min(csize, MAX32), 20);
+  entry.writeUInt32LE(Math.min(usize, MAX32), 24);
+  entry.writeUInt16LE(nameBuf.length, 28);
+  entry.writeUInt16LE(extra.length, 30);
+  entry.writeUInt32LE(Math.min(offset, MAX32), 42);
+  return Buffer.concat([entry, nameBuf, extra]);
+}
+
+/**
+ * The end of the archive, for `count` files and a central directory of
+ * `cdSize` bytes at `cdAt`. When one of them does not fit the classic end
+ * record, the Zip64 end record and its locator come first (on one disk: the
+ * locator says 1 disk in all, which Windows needs), and each classic field
+ * that does not fit is 0xFFFF or 0xFFFFFFFF.
+ */
+function endRecords(count, cdSize, cdAt) {
+  const tail = Buffer.alloc(22);
+  tail.writeUInt32LE(EOCD, 0);
+  tail.writeUInt16LE(Math.min(count, MAX16), 8);
+  tail.writeUInt16LE(Math.min(count, MAX16), 10);
+  tail.writeUInt32LE(Math.min(cdSize, MAX32), 12);
+  tail.writeUInt32LE(Math.min(cdAt, MAX32), 16);
+  if (count < MAX16 && cdSize < MAX32 && cdAt < MAX32) return tail;
+  const end64 = Buffer.alloc(56);
+  end64.writeUInt32LE(ZIP64_END, 0);
+  end64.writeBigUInt64LE(44n, 4); // the size of the rest of this record
+  end64.writeUInt16LE(45, 12); // made by
+  end64.writeUInt16LE(45, 14); // needed
+  // (this disk and the one the central directory starts on: 0)
+  end64.writeBigUInt64LE(BigInt(count), 24);
+  end64.writeBigUInt64LE(BigInt(count), 32);
+  end64.writeBigUInt64LE(BigInt(cdSize), 40);
+  end64.writeBigUInt64LE(BigInt(cdAt), 48);
+  const locator = Buffer.alloc(20);
+  locator.writeUInt32LE(ZIP64_LOCATOR, 0);
+  locator.writeBigUInt64LE(BigInt(cdAt + cdSize), 8); // where the Zip64 end record is
+  locator.writeUInt32LE(1, 16); // disks in all
+  return Buffer.concat([end64, locator, tail]);
+}
 
 /**
  * The files in a .zip (a Buffer): [{ name, data }]. Folders and symbolic
@@ -25,29 +123,56 @@ function readZip(buf, { maxFiles = 5000, maxTotal = 256 * 1024 * 1024, maxFile =
     if (buf.readUInt32LE(i) === EOCD) { end = i; break; }
   }
   if (end < 0) throw new ZipError('That is not a .zip file.');
-  const count = buf.readUInt16LE(end + 10);
-  const cdSize = buf.readUInt32LE(end + 12);
-  const cdOffset = buf.readUInt32LE(end + 16);
-  if (count === 0xffff || cdOffset === 0xffffffff) throw new ZipError('Zip64 archives are not supported: make a smaller pack.');
+  let count = buf.readUInt16LE(end + 10);
+  let cdSize = buf.readUInt32LE(end + 12);
+  let cdOffset = buf.readUInt32LE(end + 16);
+  let cdEnd = end;
+  if ((count === MAX16 || cdSize === MAX32 || cdOffset === MAX32) && end >= 20 && buf.readUInt32LE(end - 20) === ZIP64_LOCATOR) {
+    // Zip64: the counts and the central directory's place are in the Zip64 end record
+    const at = Number(buf.readBigUInt64LE(end - 12));
+    if (at + 56 > end - 20 || buf.readUInt32LE(at) !== ZIP64_END) throw new ZipError('The .zip file is damaged.');
+    count = Number(buf.readBigUInt64LE(at + 32));
+    cdSize = Number(buf.readBigUInt64LE(at + 40));
+    cdOffset = Number(buf.readBigUInt64LE(at + 48));
+    cdEnd = at;
+  }
   if (count > maxFiles) throw new ZipError(`Too many files (over ${maxFiles}).`);
-  if (cdOffset + cdSize > end) throw new ZipError('The .zip file is damaged.');
+  if (cdOffset + cdSize > cdEnd) throw new ZipError('The .zip file is damaged.');
   const files = [];
   let total = 0;
   let at = cdOffset;
   for (let n = 0; n < count; n++) {
-    if (at + 46 > end || buf.readUInt32LE(at) !== CENTRAL) throw new ZipError('The .zip file is damaged.');
+    if (at + 46 > cdEnd || buf.readUInt32LE(at) !== CENTRAL) throw new ZipError('The .zip file is damaged.');
     const flags = buf.readUInt16LE(at + 8);
     const method = buf.readUInt16LE(at + 10);
     const crc = buf.readUInt32LE(at + 16);
-    const csize = buf.readUInt32LE(at + 20);
-    const usize = buf.readUInt32LE(at + 24);
+    let csize = buf.readUInt32LE(at + 20);
+    let usize = buf.readUInt32LE(at + 24);
     const nameLen = buf.readUInt16LE(at + 28);
     const extraLen = buf.readUInt16LE(at + 30);
     const commentLen = buf.readUInt16LE(at + 32);
     const madeBy = buf.readUInt16LE(at + 4) >> 8;
     const attrs = buf.readUInt32LE(at + 38);
-    const local = buf.readUInt32LE(at + 42);
+    let local = buf.readUInt32LE(at + 42);
     const name = buf.toString(flags & 0x800 ? 'utf8' : 'latin1', at + 46, at + 46 + nameLen);
+    if (at + 46 + nameLen + extraLen + commentLen > cdEnd) throw new ZipError('The .zip file is damaged.');
+    if (usize === MAX32 || csize === MAX32 || local === MAX32) {
+      // the Zip64 extra field holds the fields set to 0xFFFFFFFF, in this order
+      let x = at + 46 + nameLen;
+      const xEnd = x + extraLen;
+      while (x + 4 <= xEnd && buf.readUInt16LE(x) !== 0x0001) x += 4 + buf.readUInt16LE(x + 2);
+      if (x + 4 > xEnd) throw new ZipError('The .zip file is damaged.');
+      let v = x + 4;
+      const fieldEnd = Math.min(xEnd, v + buf.readUInt16LE(x + 2));
+      const next = () => {
+        if (v + 8 > fieldEnd) throw new ZipError('The .zip file is damaged.');
+        v += 8;
+        return Number(buf.readBigUInt64LE(v - 8));
+      };
+      if (usize === MAX32) usize = next();
+      if (csize === MAX32) csize = next();
+      if (local === MAX32) local = next();
+    }
     at += 46 + nameLen + extraLen + commentLen;
     if (name.endsWith('/')) continue;
     // (a Unix symbolic link: its target is the content)
@@ -84,43 +209,14 @@ function writeZip(files) {
   for (const { name, data } of files) {
     const nameBuf = Buffer.from(name, 'utf8');
     const packed = zlib.deflateRawSync(data);
-    const crc = zlib.crc32(data);
-    const head = Buffer.alloc(30);
-    head.writeUInt32LE(LOCAL, 0);
-    head.writeUInt16LE(20, 4);
-    head.writeUInt16LE(0x800, 6);
-    head.writeUInt16LE(8, 8);
-    head.writeUInt16LE(time, 10);
-    head.writeUInt16LE(date, 12);
-    head.writeUInt32LE(crc, 14);
-    head.writeUInt32LE(packed.length, 18);
-    head.writeUInt32LE(data.length, 22);
-    head.writeUInt16LE(nameBuf.length, 26);
-    parts.push(head, nameBuf, packed);
-    const entry = Buffer.alloc(46);
-    entry.writeUInt32LE(CENTRAL, 0);
-    entry.writeUInt16LE(20, 4);
-    entry.writeUInt16LE(20, 6);
-    entry.writeUInt16LE(0x800, 8);
-    entry.writeUInt16LE(8, 10);
-    entry.writeUInt16LE(time, 12);
-    entry.writeUInt16LE(date, 14);
-    entry.writeUInt32LE(crc, 16);
-    entry.writeUInt32LE(packed.length, 20);
-    entry.writeUInt32LE(data.length, 24);
-    entry.writeUInt16LE(nameBuf.length, 28);
-    entry.writeUInt32LE(offset, 42);
-    central.push(entry, nameBuf);
-    offset += head.length + nameBuf.length + packed.length;
+    const rec = { nameBuf, flags: 0x800, method: 8, time, date, crc: zlib.crc32(data), csize: packed.length, usize: data.length };
+    const head = localHeader({ ...rec, zip64: packed.length >= MAX32 || data.length >= MAX32 });
+    parts.push(head, packed);
+    central.push(centralRecord({ ...rec, offset }));
+    offset += head.length + packed.length;
   }
   const cd = Buffer.concat(central);
-  const tail = Buffer.alloc(22);
-  tail.writeUInt32LE(EOCD, 0);
-  tail.writeUInt16LE(files.length, 8);
-  tail.writeUInt16LE(files.length, 10);
-  tail.writeUInt32LE(cd.length, 12);
-  tail.writeUInt32LE(offset, 16);
-  return Buffer.concat([...parts, cd, tail]);
+  return Buffer.concat([...parts, cd, endRecords(files.length, cd.length, offset)]);
 }
 
 /** A date and time as a .zip keeps it (DOS, local fields taken as UTC). */
@@ -152,8 +248,6 @@ function waitDrain(out) {
   });
 }
 
-const ZIP_LIMIT = 0xffffffff - 64 * 1024 * 1024; // no zip64: the whole archive stays under 4 GiB
-
 /**
  * Stream a .zip to `out` (an HTTP response) without holding the files: each
  * entry is stored as it is (a .log.xz is packed already), its CRC worked out
@@ -161,11 +255,13 @@ const ZIP_LIMIT = 0xffffffff - 64 * 1024 * 1024; // no zip64: the whole archive 
  * `entries`: [{ name, data: Buffer } | { name, size, mtime, open: () => Readable }
  * | { name, mtime, make: async () => Buffer }] (made when its turn comes, so
  * a summary can go last and the download starts at once).
- * The caller checks that the sizes add up to less than ZIP_LIMIT. `size: null`:
- * not known before it is read (made while it streams, as a log's candump text):
- * whatever it gives is taken, and the archive stops when it would pass the limit. Resolves
- * when it is written; rejects (out destroyed) when a file changed size or
- * could not be read, or the reader went away.
+ * There is no limit on sizes or the number of files: Zip64 is used where it
+ * is needed. `size: null`: not known before it is read (made while it streams,
+ * as a log's candump text): whatever it gives is taken. Such an entry is
+ * written as Zip64 from its local header on (the sizes after it in 8 bytes)
+ * unless `maxSize` says it stays under 4 GiB. Resolves when it is written;
+ * rejects (out destroyed) when a file changed size or could not be read, or
+ * the reader went away.
  */
 async function streamZip(out, entries) {
   let offset = 0;
@@ -185,17 +281,11 @@ async function streamZip(out, entries) {
     const { time, date } = dosTime(e.mtime);
     const known = e.data || e.size !== null;
     let size = e.data ? e.data.length : e.size;
-    if (known && offset + size > ZIP_LIMIT) throw new ZipError('The archive would be too large.');
+    const zip64 = known ? size >= MAX32 : !(e.maxSize < MAX32);
     const at = offset;
-    const head = Buffer.alloc(30);
-    head.writeUInt32LE(LOCAL, 0);
-    head.writeUInt16LE(20, 4);
-    head.writeUInt16LE(0x808, 6); // UTF-8 names, sizes and CRC in the descriptor after the data
-    head.writeUInt16LE(0, 8); // stored
-    head.writeUInt16LE(time, 10);
-    head.writeUInt16LE(date, 12);
-    head.writeUInt16LE(nameBuf.length, 26);
-    await write(Buffer.concat([head, nameBuf]));
+    // UTF-8 names, sizes and CRC in the descriptor after the data; stored
+    const rec = { nameBuf, flags: 0x808, method: 0, time, date };
+    await write(localHeader({ ...rec, zip64 }));
     let crc = 0;
     let n = 0;
     if (e.data) {
@@ -209,44 +299,31 @@ async function streamZip(out, entries) {
           crc = zlib.crc32(chunk, crc);
           n += chunk.length;
           if (known && n > size) break;
-          if (!known && offset + chunk.length > ZIP_LIMIT) throw new ZipError('The archive would be too large.');
+          if (!zip64 && n >= MAX32) throw new ZipError(`${e.name} is larger than it was said to be.`);
           await write(chunk);
         }
       } finally { src.destroy?.(); }
       if (!known) size = n;
     }
     if (n !== size) throw new ZipError(`${e.name} changed while it was being sent.`);
-    const desc = Buffer.alloc(16);
-    desc.writeUInt32LE(0x08074b50, 0);
+    const desc = Buffer.alloc(zip64 ? 24 : 16);
+    desc.writeUInt32LE(DESCRIPTOR, 0);
     desc.writeUInt32LE(crc >>> 0, 4);
-    desc.writeUInt32LE(size, 8);
-    desc.writeUInt32LE(size, 12);
+    if (zip64) {
+      desc.writeBigUInt64LE(BigInt(size), 8);
+      desc.writeBigUInt64LE(BigInt(size), 16);
+    } else {
+      desc.writeUInt32LE(size, 8);
+      desc.writeUInt32LE(size, 12);
+    }
     await write(desc);
-    const entry = Buffer.alloc(46);
-    entry.writeUInt32LE(CENTRAL, 0);
-    entry.writeUInt16LE(20, 4);
-    entry.writeUInt16LE(20, 6);
-    entry.writeUInt16LE(0x808, 8);
-    entry.writeUInt16LE(0, 10);
-    entry.writeUInt16LE(time, 12);
-    entry.writeUInt16LE(date, 14);
-    entry.writeUInt32LE(crc >>> 0, 16);
-    entry.writeUInt32LE(size, 20);
-    entry.writeUInt32LE(size, 24);
-    entry.writeUInt16LE(nameBuf.length, 28);
-    entry.writeUInt32LE(at, 42);
-    central.push(entry, nameBuf);
+    central.push(centralRecord({ ...rec, crc, csize: size, usize: size, offset: at }));
   }
   const cd = Buffer.concat(central);
   const cdAt = offset;
   await write(cd);
-  const tail = Buffer.alloc(22);
-  tail.writeUInt32LE(EOCD, 0);
-  tail.writeUInt16LE(entries.length, 8);
-  tail.writeUInt16LE(entries.length, 10);
-  tail.writeUInt32LE(cd.length, 12);
-  tail.writeUInt32LE(cdAt, 16);
-  await write(tail);
+  await write(endRecords(entries.length, cd.length, cdAt));
 }
 
-module.exports = { readZip, writeZip, streamZip, waitDrain, ZIP_LIMIT, ZipError };
+// (the record builders: for tests)
+module.exports = { readZip, writeZip, streamZip, waitDrain, ZipError, zipRecords: { localHeader, centralRecord, endRecords } };

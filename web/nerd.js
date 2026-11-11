@@ -555,7 +555,7 @@ export function openNerdPanel() {
         <label class="nd-lab nd-grow">Signals for the decoded CSV (optional, comma separated)<input class="nd-in" data-dl-signals autocomplete="off" spellcheck="false" placeholder="All signals, e.g. DI_vehicleSpeed,BattVoltage132,calc.batteryPower" title="Signal names, or the computed stats: calc.batteryPower, calc.chargingPower, calc.lv12Power and the others the Viewer shows under Computed"></label>
       </div>
       <div class="nd-row">
-        <button type="button" class="nd-btn" data-dl-bundle>Logs + ids.csv (.zip, any range up to 4 GB)</button>
+        <button type="button" class="nd-btn" data-dl-bundle>Logs + ids.csv (.zip, any range)</button>
         <label class="nd-lab nd-check"><input type="checkbox" data-dl-bundle-text> with each log as candump text too (.log, for SavvyCAN and cantools; about 10 MB a minute)</label>
         <button type="button" class="nd-btn" data-dl-decoded>Decoded signals (.csv, up to 24 hours)</button>
       </div>
