@@ -14,6 +14,7 @@
 // start: reset() marks it and restarts the server (the supervisor starts it
 // again at once), so no module ever runs on files changed under it.
 
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
@@ -142,7 +143,56 @@ function ensureDemoAccount({ db, accounts, hashPassword }) {
   accounts.setRole(DEMO_USER, 'admin');
   return true;
 }
-const hint = (env = process.env) => ({ username: DEMO_USER, password: DEMO_PASSWORD, resetMinutes: resetMinutes(env) });
+// (only the banner's interval: visitors are signed in automatically, the password is shown nowhere)
+const hint = (env = process.env) => ({ resetMinutes: resetMinutes(env) });
+
+// ---- automatic demo sessions: every visitor is signed in as "demo"
+const DEMO_SESSION = { perAddressHour: 20, total: 2000, idleMs: 2 * 3600_000 };
+/** Pages and calls that sign a visitor in (never the owner page, nodes or the device port). */
+function autoSignIn(p) {
+  if (p === '/owner' || p.startsWith('/owner/') || p.startsWith('/api/owner')) return false;
+  return p === '/' || p === '/index.html' || p === '/login' || p === '/api/auth/me' || /^\/[^/]*\.html?$/i.test(p) || p === '/studio' || p.startsWith('/studio/');
+}
+/**
+ * New demo sessions, capped per address an hour and in total (the oldest
+ * go first), and ended after DEMO_SESSION.idleMs without use.
+ */
+function createDemoSessions({ db, now = Date.now, limits = DEMO_SESSION } = {}) {
+  const made = new Map(); // address -> { n, until }
+  const q = (sql) => db.db.prepare(sql);
+  const lastUse = 'COALESCE(seen_at, created_at)';
+  function prune() {
+    q(`DELETE FROM sessions WHERE username = ? AND (expires_at <= ? OR ${lastUse} < ?)`).run(DEMO_USER, now(), now() - limits.idleMs);
+  }
+  /** Whether this session (a sessions row) has been idle too long: then it is ended. */
+  function idle(row) {
+    if (!row || row.username !== DEMO_USER) return false;
+    if (Math.max(row.seen_at || 0, row.created_at || 0) >= now() - limits.idleMs) return false;
+    q('DELETE FROM sessions WHERE token_hash = ?').run(row.token_hash);
+    return true;
+  }
+  /** A new session for this address: its token, or null when the address has had its share. */
+  function start(address, { agent = null } = {}) {
+    const t = now();
+    let m = made.get(address);
+    if (!m || m.until <= t) {
+      if (made.size > 50_000) for (const [k, v] of made) if (v.until <= t) made.delete(k);
+      m = { n: 0, until: t + 3600_000 };
+      made.set(address, m);
+    }
+    if (m.n >= limits.perAddressHour) return null;
+    m.n += 1;
+    prune();
+    const live = q('SELECT count(*) AS n FROM sessions WHERE username = ?').get(DEMO_USER).n;
+    if (live >= limits.total) {
+      q(`DELETE FROM sessions WHERE token_hash IN (SELECT token_hash FROM sessions WHERE username = ? ORDER BY ${lastUse} ASC LIMIT ?)`).run(DEMO_USER, live - limits.total + 1);
+    }
+    const token = crypto.randomBytes(32).toString('base64url');
+    db.addSession(crypto.createHash('sha256').update(token).digest('hex'), DEMO_USER, t + 7 * 24 * 3600_000, { agent, ip: address });
+    return token;
+  }
+  return { start, idle, prune };
+}
 
 // ---- seed and reset
 function copyTree(from, to) {
@@ -301,5 +351,5 @@ const resetScope = () => ({
 
 module.exports = {
   isDemo, resetMinutes, seedDir, LOCKED_TEXT, RESET_EXIT_CODE, lockedFeature, converterRule, CONVERT, createRateLimits,
-  ensureDemoAccount, hint, DEMO_USER, DEMO_PASSWORD, takeSeed, markReset, applyPendingReset, provide, reset, pairStandIn, resetScope, KEPT
+  ensureDemoAccount, hint, autoSignIn, createDemoSessions, DEMO_SESSION, DEMO_USER, DEMO_PASSWORD, takeSeed, markReset, applyPendingReset, provide, reset, pairStandIn, resetScope, KEPT
 };
