@@ -142,8 +142,8 @@ payload is at most 4 KB as JSON (about 600 bytes in practice):
 | `recordings` | integer, 0 to 1,000,000,000 | Recordings, all vehicles together |
 | `spaceSavedBytes` | integer, 0 to 2^53-1 | "Space saved by conversions", all vehicles together (`server/savings.js`) |
 | `distanceKm` | number, 0 to 10,000,000, in steps of 0.1 | Distance driven in all the footage (the speed index, as *Driving by week* adds it up), km to 0.1. A total only: never routes or places |
-| `freeBytes` | integer, 0 to 2^53-1, or null | Free space on the footage storage, summed over the vehicles; not more than `totalBytes` |
-| `totalBytes` | integer, 0 to 2^53-1, or null | Size of the footage storage, summed; null (with `freeBytes`) when no share has reported its size yet |
+| `freeBytes` | integer, 0 to 2^53-1, or null | Free space on the footage storage, summed over the vehicles, each SMB share (server and share name) or local disk counted once; not more than `totalBytes` |
+| `totalBytes` | integer, 0 to 2^53-1, or null | Size of the footage storage, summed the same way; null (with `freeBytes`) when no share has reported its size yet |
 | `converting` | boolean | A conversion is running |
 | `jobsQueued` | integer, 0 to 100,000 | Jobs not finished yet (running, or waiting their turn) |
 | `features.can` | boolean | CAN data is on |

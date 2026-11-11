@@ -51,6 +51,7 @@ const { ImageUpdates, criticalFromFile } = require('./imageUpdates');
 const { readBuildInfo: readBuildInfoFrom, buildName } = require('./buildInfo');
 const { Thumbnails } = require('./thumbnails');
 const { detectGpus } = require('./gpu');
+const { storageTotals } = require('./storageTotals');
 const { createHealth } = require('./health');
 const { createSnapshots, applyPendingRestore } = require('./snapshots');
 const { createIntegrity } = require('./integrity');
@@ -1456,14 +1457,8 @@ async function main() {
     const list = vehicles.list();
     const results = health.last() || await health.run().catch(() => null);
     const checks = results?.checks || [];
-    let freeBytes = null;
-    let totalBytes = null;
-    for (const v of list) {
-      const st = vehicles.share(v.id)?.status?.() || {};
-      if (!Number.isFinite(st.freeBytes) || !Number.isFinite(st.totalBytes)) continue;
-      freeBytes = (freeBytes || 0) + st.freeBytes;
-      totalBytes = (totalBytes || 0) + st.totalBytes;
-    }
+    // each share or disk once, however many vehicles use it
+    const { freeBytes, totalBytes } = storageTotals(list, { statusOf: (v) => vehicles.share(v.id)?.status?.(), rootOf: (v) => vehicles.rootOf(v) });
     const sum = (fn) => list.reduce((n, v) => n + (Number(fn(v)) || 0), 0);
     const gpu = await detectGpus().catch(() => null);
     return {
