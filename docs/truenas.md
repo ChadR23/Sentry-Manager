@@ -29,15 +29,31 @@ app already on port 9000 (MinIO uses it): change the left number of
 `9000:9000`. *Replace originals* works on ZFS datasets (the app tests it when
 it opens the folder).
 
-To update (**Settings → Updates** says when a newer image is out): TrueNAS
-often keeps the copy of `latest` it already has, so fetch the new one in
-*System → Shell* and restart the app:
+**Sentry USB and the CAN Bridge.** Keep port `10000` in the file: the Sentry
+USB (the Pi in the car) and the Screenmate CAN Bridge connect to TrueNAS on it.
+Nothing listens there until one of them is set up. To pair a Sentry USB, see
+[Sentry USB → Managing it from here](sentry-usb.md#managing-it-from-here); the
+address you give the Pi is `<truenas>:10000`.
+
+**A certificate for a public name (optional).** For Let's Encrypt, point a DNS
+record at TrueNAS, forward ports 80 and 443 on your router, and turn on the
+`80:9000` / `443:9000` lines and `TLS_ACME_DOMAIN` / `TLS_ACME_EMAIL` in the
+file (*Edit*, *Save*). TrueNAS's own web UI uses 80 and 443 by default: move it
+first (*System → General → GUI*) or leave this off. More in
+[Security](security.md).
+
+## Updating
+
+**Settings → Updates** says when a newer image is out. TrueNAS often keeps the
+copy of `latest` it already has, so fetch the new one in *System → Shell*. The
+shell is not root, so it needs `sudo` (it asks for your TrueNAS password):
 
 ```bash
-docker pull ghcr.io/skittles-fivem/sentry-manager:latest
+sudo docker pull ghcr.io/skittles-fivem/sentry-manager:latest
 ```
 
-then *Apps → Installed → sentry-six-manager → Stop*, then *Start*. The version
+Then *Apps → Installed → sentry-six-manager → Stop*, then *Start*. The version
 on **Overview → Server** shows the update took; if it didn't, *Edit* the app
 and *Save* to have TrueNAS recreate it. Your settings stay in the `/data`
-dataset.
+dataset. To have updates installed for you, see
+[Automatic updates](auto-updates.md#truenas-scale).

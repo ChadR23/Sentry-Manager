@@ -165,6 +165,13 @@ its schedule:
 docker run --rm -v /var/run/docker.sock:/var/run/docker.sock nickfedor/watchtower:1.24 --run-once --cleanup sentry-six-manager
 ```
 
+On TrueNAS, run it in *System → Shell* with `sudo` in front (the shell is not
+root):
+
+```bash
+sudo docker run --rm -v /var/run/docker.sock:/var/run/docker.sock nickfedor/watchtower:1.24 --run-once --cleanup sentry-six-manager
+```
+
 ## Turning it off
 
 Compose:

@@ -72,7 +72,8 @@ docker compose pull && docker compose up -d
 **Settings → Updates** says when a newer version is out; it never installs
 anything itself. Your account, settings and footage stay, and a conversion
 that was running carries on by itself. More in [Updates](docs/updates.md);
-on TrueNAS, see [TrueNAS](docs/truenas.md) for the update steps.
+on TrueNAS, run `sudo docker pull ghcr.io/skittles-fivem/sentry-manager:latest`
+in *System → Shell*, then stop and start the app ([TrueNAS](docs/truenas.md#updating)).
 
 ## Documentation
 
@@ -85,8 +86,9 @@ on TrueNAS, see [TrueNAS](docs/truenas.md) for the update steps.
 | [Export a video](docs/export.md) | Making one video of a stretch of footage, and its limits |
 | [Recycle Bin, policies and jobs](docs/recycle-bin-and-jobs.md) | Retention, restoring, and what the server is doing |
 | [Vehicles and SMB shares](docs/vehicles-and-shares.md) | Footage on a share or on the same machine, permissions |
-| [Sentry USB](docs/sentry-usb.md) | The Pi that archives the car's clips: its status on the Footage page, and converting without upsetting its checks |
+| [Sentry USB](docs/sentry-usb.md) | The Pi that archives the car's clips: pairing it and managing it from the Sentry USB tab (status, the car's battery, temperatures and tires, settings, updates), and converting without upsetting its checks |
 | [Sentry USB link](docs/sentry-usb-link.md) | Pairing the Pi and managing it from here (status, settings, updates, queued actions, security log): the contract both sides build to |
+| [CAN Bridge](docs/can-bridge-api.md) | The car's own data (speed, battery, 12 V system, temperatures…) from a Screenmate One, synced to the footage in the Viewer |
 | [Phones and tablets](docs/phones-and-tablets.md) | Supported devices |
 | [Updates](docs/updates.md) | Updating, critical updates, how images are built |
 | [Automatic updates](docs/auto-updates.md) | Watchtower, to install new versions for you |

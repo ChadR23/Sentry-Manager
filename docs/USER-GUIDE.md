@@ -440,10 +440,11 @@ docker compose up -d
 Your account, settings, footage and Recycle Bin stay. Updating during a
 conversion is fine: it carries on by itself afterwards.
 
-TrueNAS: in *System → Shell* run
+TrueNAS: in *System → Shell* run (with `sudo`: the shell is not root, and
+it asks for your TrueNAS password)
 
 ```bash
-docker pull ghcr.io/skittles-fivem/sentry-manager:latest
+sudo docker pull ghcr.io/skittles-fivem/sentry-manager:latest
 ```
 
 then *Apps → Installed → sentry-six-manager → Stop*, then *Start*. If

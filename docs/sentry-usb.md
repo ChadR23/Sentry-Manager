@@ -10,6 +10,48 @@ Sentry USB's side is in its own repository (`run/archiveloop` and
 `run/rsync_archive/archive-clips.sh`). Sentry USB `v3.28.10-test.5` or later
 is needed for the checks below.
 
+## Managing it from here
+
+The **Sentry USB** tab (in the top tabs, where Policies used to be) pairs the
+Pi with Sentry Six Manager and then manages it, at home or away. The Pi
+connects out to this server on port **10000** over an encrypted link, so keep
+that port published (`10000:10000`, already in both compose files).
+
+**Pairing** (once per Pi; Sentry USB `v3.28.10-test.30` or later):
+
+1. Here, on the **Sentry USB** tab, enter a name and the Sentry USB's **web
+   username and password**, then press **Start pairing**. They are used once
+   and not kept.
+2. Sentry Six Manager shows a **pairing code** for 15 minutes. On the Sentry
+   USB, open **Settings → System → Sentry Manager**, enter this server's
+   address with port 10000 (for example `192.168.1.5:10000`) and the code,
+   then press **Pair**.
+3. Both sides show **Paired**. Nothing has to be compared.
+
+**The tabs** for a paired Sentry USB:
+
+| Tab | What it does |
+| --- | --- |
+| Status | Online or away, version, USB drives, free space, Wi-Fi, CPU, uptime, archiving, and the **Car** card |
+| Settings | The Sentry USB's settings, checked before they are sent |
+| Diagnostics, Logs | Fetch its diagnostics and read its logs |
+| Updates | Check for and install a newer Sentry USB; on test builds it shows the latest test build |
+| Actions, Snapshots, Backups | Sync, reboot, snapshots and config backups |
+| Waiting for the Pi | Actions queued while it is away (updates and reboots wait for the archive to finish) |
+| Security log | Pairing, refused requests, new networks and addresses |
+| Name and unpair | Rename it, or unpair it |
+
+**The Car card** (Sentry USB `v3.28.10-test.31` or later, with its Tesla BLE
+telemetry set up) shows the car's battery and whether it is charging, the
+inside and outside temperature, each tire's pressure with how old the reading
+is, the overall tire state, and whether the car is parked or driving. It
+never shows where the car is. Until the Pi sends any of it, the card says
+"No car data yet". Watch-only accounts can see it; only admins can change
+anything.
+
+The full contract both sides build to is in
+[Sentry USB link](sentry-usb-link.md).
+
 ## What you see
 
 On the **Footage** page of every interface, a line under the heading says what

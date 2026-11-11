@@ -8,6 +8,9 @@
 # fingerprint are in the app's logs (Apps > Installed > sentry-six-manager >
 # Workloads > the log icon).
 #
+# Update (System > Shell, it asks for your password), then Stop and Start the app:
+#   sudo docker pull ghcr.io/skittles-fivem/sentry-manager:latest
+#
 # OPTIONAL lines start with # in the first column. To turn one on, delete only
 # that # (nothing else): the rest of the line is already lined up.
 
@@ -22,8 +25,15 @@ services:
       # another app already on 9000 (MinIO uses it): change the left number
       - "9000:9000"
       # the device port: CAN Bridge uploads and the Sentry USB link (closed
-      # until one is in use; keep it: the Pi in the car connects here)
+      # until one is in use; keep it: the Pi in the car connects here, the
+      # address you give it is <truenas>:10000)
       - "10000:10000"
+      # OPTIONAL: Let's Encrypt at a public domain (docs/security.md): a DNS
+      # record to TrueNAS, ports 80 and 443 forwarded on the router, these two
+      # lines, and TLS_ACME_DOMAIN below. TrueNAS's own web UI uses 80/443:
+      # move it first (System > General > GUI).
+#      - "80:9000"
+#      - "443:9000"
 
     environment:
       TZ: America/Chicago
@@ -34,6 +44,9 @@ services:
       # OPTIONAL: the names / addresses you reach TrueNAS by, for the
       # certificate (more in Settings > Security)
 #      TLS_HOSTNAMES: 192.168.1.20,truenas.local
+      # OPTIONAL: Let's Encrypt (with the 80 and 443 lines above)
+#      TLS_ACME_DOMAIN: example.com
+#      TLS_ACME_EMAIL: you@example.com
       # OPTIONAL: create a first vehicle from the footage dataset below
 #      VEHICLE_NAME: My Car
 #      FOOTAGE_PATH: /footage/my-car
