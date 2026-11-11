@@ -105,6 +105,7 @@ const { createArrivalChecksums } = require('./arrivalChecksums');
 const { createCanSearch, createSearchQueue, footageAt, clipStamps, localTime, parseWhen } = require('./canSearch');
 const { clientAddress, fromTrustedProxy, proxyMatcher, banKey } = require('./clientAddress');
 const { createAccess, validate: validateAccess } = require('./access');
+const { createReports } = require('./reports');
 
 /** A wall-clock time in an IANA time zone (as a TeslaCam clip is named) in UTC milliseconds. */
 function zonedToUtc(y, mo, d, h, mi, sec, timeZone) {
@@ -798,6 +799,19 @@ async function main() {
   // Settings → Security: bans, two-step rules, the home network (server/access.js)
   const access = createAccess({ db, audit });
   const fromHome = (req) => access.isHome(clientKey(req));
+  // ---- Settings → Help & feedback: opt-in reports to the developers (server/reports.js).
+  // Nothing is sent unless an admin turns sharing on or presses Send for one report.
+  let reportDiagnosticsRef = async () => ({});
+  let reportIdentifiersRef = async () => [];
+  const reports = createReports({
+    db, dataDir: DATA, buildInfo, log: logger.scope('reports'),
+    ui: () => uiPacks.active() || 'original',
+    diagnostics: () => reportDiagnosticsRef(),
+    identifiers: () => reportIdentifiersRef()
+  });
+  // a crash is noted (locally, synchronously) before the process ends; it is sent
+  // after the restart only when sharing is on. Node's own handling is unchanged.
+  process.on('uncaughtExceptionMonitor', (err) => reports.noteCrash(err, 'crash'));
   /** A banned address gets this on every sign-in step. */
   const refuseBanned = (req) => {
     if (!access.banned(clientKey(req))) return;
@@ -1310,6 +1324,20 @@ async function main() {
     res.end(`${text}\n`);
     return undefined;
   });
+  // the set-up in short, for the support bundle and the diagnostics reports
+  async function systemSummary(nameOf = (v) => v.name) {
+    const list = vehicles.list();
+    return {
+      made: new Date().toISOString(), version: buildInfo, node: process.version, platform: `${process.platform} ${process.arch}`,
+      supervised: SUPERVISED, tlsMode: TLS_MODE, trustProxy: TRUST_PROXY, timezone: process.env.TZ || null,
+      gpus: await detectGpus().catch(() => []), converter: host.runtime ? host.runtime.capabilities : { ready: false },
+      vehicles: list.map((v, i) => {
+        const st = vehicles.share(v.id)?.status?.() || {};
+        return { vehicle: nameOf(v, i), type: v.source?.type, healthy: st.healthy, writable: st.writable, freeBytes: st.freeBytes, totalBytes: st.totalBytes, recordings: inventory.totals(v.id)?.recordings ?? null, policy: policies.get(v.id) };
+      }),
+      uiPack: uiPacks.active()
+    };
+  }
   // Support bundle: what someone helping needs, without passwords (already
   // masked in the logs), footage paths, share names, IP addresses or e-mails
   r.add('GET', '/api/support-bundle', async (req, res) => {
@@ -1332,16 +1360,7 @@ async function main() {
     const week = Date.now() - 7 * 86400000;
     const lines = await logger.search({ from: week, minLevel: 'info', limit: 50000 });
     const results = health.last() || await health.run();
-    const system = {
-      made: new Date().toISOString(), version: buildInfo, node: process.version, platform: `${process.platform} ${process.arch}`,
-      supervised: SUPERVISED, tlsMode: TLS_MODE, trustProxy: TRUST_PROXY, timezone: process.env.TZ || null,
-      gpus: await detectGpus().catch(() => []), converter: host.runtime ? host.runtime.capabilities : { ready: false },
-      vehicles: list.map((v, i) => {
-        const st = vehicles.share(v.id)?.status?.() || {};
-        return { vehicle: `<vehicle-${i + 1}>`, type: v.source?.type, healthy: st.healthy, writable: st.writable, freeBytes: st.freeBytes, totalBytes: st.totalBytes, recordings: inventory.totals(v.id)?.recordings ?? null, policy: policies.get(v.id) };
-      }),
-      uiPack: uiPacks.active()
-    };
+    const system = await systemSummary((v, i) => `<vehicle-${i + 1}>`);
     const files = [
       { name: 'README.txt', data: Buffer.from('Sentry Six Manager support bundle.\nsystem.json: version, GPUs, converter, shares (no paths or names).\nhealth.json: Settings > Health checks.\nlogs.txt: the last 7 days of logs.\nsentryusb-security.csv: the Sentry USB security log (the newest 1000 rows).\nPasswords are masked in logs; footage paths, share names, vehicle names, IP addresses and e-mail addresses are replaced with <placeholders>.\n') },
       { name: 'system.json', data: Buffer.from(scrub(JSON.stringify(system, null, 2))) },
@@ -1354,6 +1373,92 @@ async function main() {
     res.writeHead(200, { 'Content-Type': 'application/zip', 'Content-Length': zip.length, 'Cache-Control': 'no-store', 'Content-Disposition': `attachment; filename="sentry-six-manager-support-${new Date().toISOString().slice(0, 10)}.zip"` });
     res.end(zip);
     return undefined;
+  });
+
+  // ---- Help & feedback (server/reports.js; admins only: VIEWER_HIDDEN in server/accounts.js)
+  reportDiagnosticsRef = () => reportDiagnostics();
+  reportIdentifiersRef = () => reportIdentifiers();
+  let ffmpegVersionText = null;
+  async function reportDiagnostics() {
+    const safe = async (fn) => { try { return await fn(); } catch (err) { return { error: String(err?.message || err).slice(0, 300) }; } };
+    const list = vehicles.list();
+    const readText = (f) => { try { return fs.readFileSync(f, 'utf8').trim(); } catch { return null; } };
+    const out = {};
+    out.system = await safe(async () => {
+      if (ffmpegVersionText === null) ffmpegVersionText = await run(FFMPEG, ['-hide_banner', '-version'], { timeoutMs: 10_000 }).then((x) => String(x.stdout || '').split('\n')[0].slice(0, 200)).catch(() => '');
+      const osName = /PRETTY_NAME="?([^"\n]*)"?/.exec(readText('/etc/os-release') || '')?.[1] || null;
+      const cpus = os.cpus();
+      return {
+        ...(await systemSummary()), hostname: os.hostname(), os: osName, kernel: os.release(), arch: os.arch(), cpu: cpus[0]?.model || null, cores: cpus.length,
+        memory: { total: os.totalmem(), free: os.freemem(), process: process.memoryUsage().rss },
+        container: { memoryMax: readText('/sys/fs/cgroup/memory.max'), cpuMax: readText('/sys/fs/cgroup/cpu.max'), pidsMax: readText('/sys/fs/cgroup/pids.max') },
+        ffmpeg: ffmpegVersionText || null, uptime: { app: Math.round((Date.now() - startedAt) / 1000), system: Math.round(os.uptime()) }, build: buildName(buildInfo)
+      };
+    });
+    out.storage = await safe(async () => ({
+      data: await diskSpace(fs.promises, DATA).catch(() => null),
+      footage: list.map((v) => { const st = vehicles.share(v.id)?.status?.() || {}; return { vehicle: v.id, root: vehicles.rootOf(v), healthy: st.healthy ?? null, writable: st.writable ?? null, free: st.freeBytes ?? null, total: st.totalBytes ?? null, footage: inventory.totals(v.id)?.bytes ?? null }; })
+    }));
+    out.counts = await safe(async () => {
+      const recent = db.jobs({ limit: 500 });
+      const byStatus = {};
+      for (const j of recent) byStatus[j.status] = (byStatus[j.status] || 0) + 1;
+      return { vehicles: list.length, recordings: list.reduce((n, v) => n + (inventory.totals(v.id)?.recordings || 0), 0), jobs: byStatus, binItems: list.reduce((n, v) => n + db.binItems(v.id).length, 0), notificationsOpen: db.notifications({ open: true, limit: 1000 }).length };
+    });
+    out.jobs = await safe(async () => db.jobs({ limit: 25 }).map((j) => ({ type: j.type, status: j.status, title: String(j.title || '').slice(0, 200), detail: String(j.detail || '').slice(0, 400), startedAt: j.startedAt ?? j.started_at ?? null, finishedAt: j.finishedAt ?? j.finished_at ?? null })));
+    out.converter = await safe(async () => ({ ready: Boolean(host.runtime), running: converterRunning(), capabilities: host.runtime?.capabilities || null, error: host.lastError?.code || null, settings: db.get('studio-settings', null) }));
+    out.settings = await safe(async () => ({
+      appearance: db.get('appearance', null), power: db.get('power', null), prefetch: db.get('prefetch', null), notifyMuted: db.get('notify-muted', null), imageUpdates: db.get('image-updates', null),
+      canKeep: db.get('can-keep', null), access: access.get(), policies: Object.fromEntries(list.map((v) => [v.id, policies.get(v.id)])), placesCount: placeList().length
+    }));
+    out.features = await safe(async () => {
+      const can = db.get('can', null) || {};
+      const devs = sentryLink ? sentryLink.devices() : [];
+      return {
+        can: { enabled: Boolean(can.enabled), vehicles: Object.keys(db.get('can-vehicles', {}) || {}).length },
+        sentryUsb: { paired: devs.some((d) => d.paired), devices: devs.map((d) => ({ name: d.name, hostname: d.hostname, address: d.address, version: d.version, online: d.online, net: d.net })) },
+        uiPack: uiPacks.active() || 'original', metrics: Boolean(db.get('metrics', null)?.enabled), nodes: (db.get('nodes', []) || []).length,
+        tls: { mode: TLS_MODE, trustProxy: TRUST_PROXY, hostnames: process.env.TLS_HOSTNAMES || null, acme: process.env.TLS_ACME_DOMAIN || null }
+      };
+    });
+    out.health = await safe(async () => health.last() || await health.run());
+    out.logs = await safe(async () => (await logger.search({ from: Date.now() - 7 * 86400000, minLevel: 'warn', limit: 200 })).map((l) => `${new Date(l.at).toISOString()} ${l.level.toUpperCase()} [${l.scope}] ${String(l.message).slice(0, 2000)}`));
+    out.crashes = reports.recentCrashes();
+    out.can = await safe(async () => canIndex.status());
+    return out;
+  }
+  // what an anonymous report must not contain (replaced by ANON wherever it appears)
+  async function reportIdentifiers() {
+    const ids = [os.hostname(), DATA, FOOTAGE_ROOT];
+    for (const v of vehicles.list()) {
+      ids.push(v.id, v.name, vehicles.rootOf(v), vehicles.studioRoot?.(v), v.source?.path, v.source?.share, v.source?.username, v.source?.domain);
+      const host = /^[\\/]{2}([^\\/]+)/.exec(String(v.source?.share || ''))?.[1];
+      if (host) ids.push(host);
+    }
+    for (const a of accounts.list()) ids.push(a.username);
+    for (const d of sentryLink ? sentryLink.devices() : []) ids.push(d.id, d.name, d.hostname, d.address, d.home?.ssid, d.home?.gw, d.net?.ssid, d.net?.ip, d.net?.gateway);
+    for (const p of placeList()) ids.push(p?.name, p?.label);
+    ids.push(...parseHostnames(process.env.TLS_HOSTNAMES || ''), process.env.TLS_ACME_DOMAIN, process.env.TLS_ACME_EMAIL);
+    return ids.filter((x) => typeof x === 'string' && x.length >= 3);
+  }
+  r.add('GET', '/api/reports', () => reports.status());
+  r.add('PUT', '/api/reports/settings', (req, res, { body, user }) => {
+    // it decides what leaves this server: the password again
+    requireConfirmed(req);
+    const { before, after } = reports.setSettings({ share: body?.share, anonymous: body?.anonymous });
+    const word = (x) => (x ? 'on' : 'off');
+    if (before.share !== after.share) audit.warn(`Share diagnostics with the developers turned ${word(after.share)}: ${by(req, user)}`);
+    if (before.anonymous !== after.anonymous) audit.warn(`Send reports anonymously turned ${word(after.anonymous)}: ${by(req, user)}`);
+    return reports.status();
+  });
+  r.add('POST', '/api/reports/preview', async (req, res, { body }) => reports.preview({ kind: body?.kind, message: body?.message, contact: body?.contact, attach: body?.attach }));
+  r.add('POST', '/api/reports/send', async (req, res, { body, user }) => {
+    // one report, by hand: what was previewed, after the password
+    requireConfirmed(req);
+    const out = await reports.sendPreview(body?.previewId);
+    // (a warning: something left this server)
+    audit.warn(`${out.kind === 'support' ? 'Diagnostics sent to support' : 'Feedback sent to the developers'}${out.ref ? ` (${out.ref})` : ''}${out.result !== 'sent' ? ` (${out.result})` : ''}: ${by(req, user)}`);
+    return { ...out, status: reports.status() };
   });
 
   r.add('GET', '/api/vehicles', async () => {
@@ -4032,6 +4137,7 @@ async function main() {
     } catch (err) {
       const status = err.status || 500;
       if (status >= 500) log.error(`${req.method} ${rawPath}: ${err.stack || err.message}`);
+      if (status >= 500 && !err.status) reports.noteCrash(err, 'error');
       if (!res.headersSent) sendJson(res, status, { error: status >= 500 && !err.status ? 'Internal error' : err.message || 'Error', ...(err.expose && err.code ? { code: err.code } : {}) });
       else res.end();
       return undefined;
@@ -4305,6 +4411,7 @@ async function main() {
     try { stats.stop(); } catch { /* history is saved on a best-effort basis */ }
     nodeWorker.close();
     sentryLink?.close();
+    reports.stop();
     exporter.stop();
     scrubPrepare.stop();
     driveData.stop();
@@ -4315,6 +4422,7 @@ async function main() {
     log.info('Stopped cleanly');
     process.exit(0);
   };
+  reports.start();
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
   if (SUPERVISED) {

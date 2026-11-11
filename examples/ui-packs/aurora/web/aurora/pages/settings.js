@@ -12,8 +12,10 @@ import { buildText, buildTip, behindText, latestText, latestTip } from '/web/bui
 
 const SECTIONS = [
   ['vehicles', 'Vehicles', 'car'], ['places', 'Places', 'pin'], ['account', 'Account', 'key'], ['interface', 'Interface', 'sparkle'], ['updates', 'Updates', 'download'],
-  ['security', 'Security', 'lock'], ['system', 'System', 'cpu'], ['power', 'Electricity', 'bolt'], ['nodes', 'Nodes', 'nodes']
+  ['security', 'Security', 'lock'], ['system', 'System', 'cpu'], ['power', 'Electricity', 'bolt'], ['nodes', 'Nodes', 'nodes'], ['help', 'Help & feedback', 'chat']
 ];
+// Help & feedback is for admins only (a watch-only account does not see it, and /api/reports refuses it)
+const isAdmin = () => fetch('/api/auth/me', { credentials: 'same-origin' }).then((r) => r.json()).then((m) => m?.role === 'admin').catch(() => false);
 const WEEK = [[1, 'Mon'], [2, 'Tue'], [3, 'Wed'], [4, 'Thu'], [5, 'Fri'], [6, 'Sat'], [0, 'Sun']];
 const MAX_RATES = 12;
 const priceText = (n) => (fin(n) ? String(n) : '');
@@ -27,12 +29,13 @@ export default {
   topics: ['vehicles'],
   async mount(ctx) {
     const { body, params } = ctx;
-    const section = SECTIONS.some(([k]) => k === params[0]) ? params[0] : 'vehicles';
+    const shown = (await isAdmin()) ? SECTIONS : SECTIONS.filter(([k]) => k !== 'help');
+    const section = shown.some(([k]) => k === params[0]) ? params[0] : 'vehicles';
     const sub = params[1] || null;
     let dead = false;
     let inner = null; // the Nodes page, when that section shows
     if (section === 'nodes') document.title = 'Nodes · Settings · Sentry Six Manager';
-    body.innerHTML = `<div class="set-layout"><nav class="set-nav" aria-label="Settings sections">${SECTIONS.map(([k, label, ico]) => `<a href="#/settings/${k}" class="${k === section ? 'on' : ''}"${k === section ? ' aria-current="page"' : ''}>${icon(ico)}${label}</a>`).join('')}</nav><div id="set-body"><p class="loading">Loading…</p></div></div>`;
+    body.innerHTML = `<div class="set-layout"><nav class="set-nav" aria-label="Settings sections">${shown.map(([k, label, ico]) => `<a href="#/settings/${k}" class="${k === section ? 'on' : ''}"${k === section ? ' aria-current="page"' : ''}>${icon(ico)}${label}</a>`).join('')}</nav><div id="set-body"><p class="loading">Loading…</p></div></div>`;
     const box = $('#set-body', body);
     const draw = async () => {
       try {
@@ -482,7 +485,14 @@ async function power(box) {
   });
 }
 
-const SECTION = { vehicles, places, account, interface: iface, updates, security, system, power };
+// ---------- Help & feedback (web/reportsSettings.js, the same in every interface; admins only) ----------
+async function help(box) {
+  box.innerHTML = `<section class="panel"><div class="panel-head"><h2>${icon('chat')} Help &amp; feedback</h2></div><p class="lead">Tell the developers what you think, or send them a diagnostics report when something is wrong.</p><div id="rep-box" style="margin-top:14px"></div></section>`;
+  const { createReportsSettings } = await import('/web/reportsSettings.js');
+  if ($('#rep-box', box)) createReportsSettings($('#rep-box', box), { cls: { btn: 'btn sm', primary: 'btn primary', input: 'input' }, h24: () => clockPref.h24 });
+}
+
+const SECTION = { vehicles, places, account, interface: iface, updates, security, system, power, help };
 
 // Test connection: the SMB details as typed, checked by the server with a
 // one-off mount; nothing is saved

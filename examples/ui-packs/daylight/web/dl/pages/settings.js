@@ -12,17 +12,20 @@ import { buildText, buildTip, behindText, latestText, latestTip } from '/web/bui
 
 const SECTIONS = [
   ['vehicles', 'Vehicles', 'car'], ['places', 'Places', 'map'], ['account', 'Account', 'key'], ['look', 'Look', 'palette'], ['interface', 'Interface', 'grid'],
-  ['security', 'Security', 'lock'], ['updates', 'Updates', 'download'], ['system', 'System & power', 'server'], ['nodes', 'Helper servers', 'nodes']
+  ['security', 'Security', 'lock'], ['updates', 'Updates', 'download'], ['system', 'System & power', 'server'], ['nodes', 'Helper servers', 'nodes'], ['help', 'Help & feedback', 'chat']
 ];
+// Help & feedback is for admins only (a watch-only account does not see it, and /api/reports refuses it)
+const isAdmin = () => fetch('/api/auth/me', { credentials: 'same-origin' }).then((r) => r.json()).then((m) => m?.role === 'admin').catch(() => false);
 
 export async function render(ctx) {
   const { view, params } = ctx;
+  const shown = (await isAdmin()) ? SECTIONS : SECTIONS.filter(([k]) => k !== 'help');
   let section = params[0] || 'vehicles';
-  if (section === 'add-vehicle' || section === 'vehicle') { /* vehicle pages */ } else if (!SECTIONS.some(([k]) => k === section)) section = 'vehicles';
+  if (section === 'add-vehicle' || section === 'vehicle') { /* vehicle pages */ } else if (!shown.some(([k]) => k === section)) section = 'vehicles';
   const navKey = section === 'add-vehicle' || section === 'vehicle' ? 'vehicles' : section;
   view.innerHTML = `<div class="page">
     <div class="page-head"><div><h1>Settings</h1></div><div class="head-actions"><button class="btn btn-ghost" type="button" id="signout">${icon('logout')} Sign out</button></div></div>
-    <div class="settings-layout"><nav class="settings-nav" aria-label="Settings sections">${SECTIONS.map(([k, label, ic]) => `<a href="#/settings/${k}" class="${k === navKey ? 'active' : ''}"${k === navKey ? ' aria-current="page"' : ''}>${icon(ic)} ${label}</a>`).join('')}</nav>
+    <div class="settings-layout"><nav class="settings-nav" aria-label="Settings sections">${shown.map(([k, label, ic]) => `<a href="#/settings/${k}" class="${k === navKey ? 'active' : ''}"${k === navKey ? ' aria-current="page"' : ''}>${icon(ic)} ${label}</a>`).join('')}</nav>
       <div id="section"><div class="loading"><span class="spin"></span><span>Loading…</span></div></div></div></div>`;
   view.querySelector('#signout').onclick = signOut;
   // keep the chosen tab in view on phones
@@ -38,6 +41,7 @@ export async function render(ctx) {
     if (section === 'look') return look(sub);
     if (section === 'interface') return iface(sub);
     if (section === 'security') return security(sub);
+    if (section === 'help') return help(sub);
     if (section === 'updates') return updates(sub);
     if (section === 'nodes') return nodesPage.render({ ...ctx, view: el });
     return system(sub);
@@ -366,6 +370,13 @@ async function iface({ el, ctx }) {
     };
   };
   draw();
+}
+
+// ---------- Help & feedback (web/reportsSettings.js, the same in every interface; admins only) ----------
+async function help({ el }) {
+  el.innerHTML = `<div class="card stack"><h2>Help &amp; feedback</h2><p class="small">Tell the developers what you think, or send them a diagnostics report when something is wrong.</p><div id="rep-box"></div></div>`;
+  const { createReportsSettings } = await import('/web/reportsSettings.js');
+  if (el.querySelector('#rep-box')) createReportsSettings(el.querySelector('#rep-box'), { cls: { btn: 'btn btn-sm', primary: 'btn btn-primary', input: 'input' }, h24: () => clockPref.h24 });
 }
 
 // ---------- security ----------

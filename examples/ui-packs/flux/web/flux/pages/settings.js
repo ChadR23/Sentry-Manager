@@ -7,21 +7,24 @@ import { seg, wireSeg, chip } from '../ui.js';
 // Nodes is a section here (#/settings/nodes; #/nodes opens it): its page module as it was, taken down with Settings.
 import nodesPage from './nodes.js';
 
-const TABS = [['vehicles', 'Vehicles'], ['places', 'Places'], ['account', 'Account'], ['interface', 'Interface'], ['updates', 'Updates'], ['security', 'Security'], ['system', 'System'], ['power', 'Electricity'], ['appearance', 'Appearance'], ['nodes', 'Nodes']];
+const TABS = [['vehicles', 'Vehicles'], ['places', 'Places'], ['account', 'Account'], ['interface', 'Interface'], ['updates', 'Updates'], ['security', 'Security'], ['system', 'System'], ['power', 'Electricity'], ['appearance', 'Appearance'], ['nodes', 'Nodes'], ['help', 'Help & feedback']];
+// Help & feedback is for admins only (a watch-only account does not see it, and /api/reports refuses it)
+const isAdmin = () => fetch('/api/auth/me', { credentials: 'same-origin' }).then((r) => r.json()).then((m) => m?.role === 'admin').catch(() => false);
 const WEEK = [[1, 'Mon'], [2, 'Tue'], [3, 'Wed'], [4, 'Thu'], [5, 'Fri'], [6, 'Sat'], [0, 'Sun']];
 
 export default {
   async mount(el, { sub, params, go, seq }) {
-    const tab = TABS.some(([k]) => k === sub.split('/')[0]) ? sub.split('/')[0] : 'vehicles';
+    const shown = (await isAdmin()) ? TABS : TABS.filter(([k]) => k !== 'help');
+    const tab = shown.some(([k]) => k === sub.split('/')[0]) ? sub.split('/')[0] : 'vehicles';
     let inner = null; // the Nodes page, when that section shows
     if (tab === 'nodes') document.title = 'Nodes · Settings · Flux · Sentry Six Manager';
     el.innerHTML = `<div class="phead"><div><h1>Settings</h1></div></div>
       <div class="settings">
-        <nav class="stabs" aria-label="Settings sections">${TABS.map(([k, l]) => `<a href="#/settings/${k}" class="${k === tab ? 'on' : ''}"${k === tab ? ' aria-current="page"' : ''}>${l}</a>`).join('')}</nav>
+        <nav class="stabs" aria-label="Settings sections">${shown.map(([k, l]) => `<a href="#/settings/${k}" class="${k === tab ? 'on' : ''}"${k === tab ? ' aria-current="page"' : ''}>${l}</a>`).join('')}</nav>
         <div class="spanel" id="sp"><div class="loading"><i></i><i></i><i></i></div></div>
       </div>`;
     const box = el.querySelector('#sp');
-    const sections = { vehicles, places, account, interface: iface, updates, security, system, power, appearance, nodes: async (b) => { inner = await nodesPage.mount(b, { sub: '', params, go, seq }); } };
+    const sections = { vehicles, places, account, interface: iface, updates, security, system, power, appearance, help, nodes: async (b) => { inner = await nodesPage.mount(b, { sub: '', params, go, seq }); } };
     // a section that can't load (a watch-only account's Security, say) says so in its own panel:
     // the section list stays, so the other sections are a click away
     const draw = () => sections[tab](box, { params, go }).catch((err) => {
@@ -253,6 +256,13 @@ async function updates(box) {
     toast(out.error || (out.updateAvailable ? 'An update is available.' : 'This is the newest version.'), out.error ? 'bad' : 'ok');
     updates(box);
   }));
+}
+
+// ---------- Help & feedback (web/reportsSettings.js, the same in every interface; admins only) ----------
+async function help(box) {
+  box.innerHTML = `<section class="card"><header class="card-h"><h2>Help &amp; feedback</h2></header><p class="small muted">Tell the developers what you think, or send them a diagnostics report when something is wrong.</p><div id="rep-box" style="margin-top:12px"></div></section>`;
+  const { createReportsSettings } = await import('/web/reportsSettings.js');
+  if (box.querySelector('#rep-box')) createReportsSettings(box.querySelector('#rep-box'), { cls: { btn: 'btn sm', primary: 'btn primary', input: 'input' }, h24: () => clockPref.h24 });
 }
 
 // ---------- security ----------

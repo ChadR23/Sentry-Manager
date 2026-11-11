@@ -7,24 +7,27 @@ import nodesPage from './nodes.js';
 import { carModelFields, wireCarModel, readCarModel } from '/web/carModelField.js';
 import { buildText, buildTip, behindText, latestText, latestTip } from '/web/buildLabel.js';
 
-const TABS = [['vehicles', 'Vehicles', 'car'], ['places', 'Places', 'map'], ['account', 'Account', 'lock'], ['interface', 'Interface', 'horizon'], ['display', 'Background', 'hud'], ['updates', 'Updates', 'download'], ['security', 'Security', 'shield'], ['system', 'System', 'info'], ['power', 'Electricity', 'bolt'], ['nodes', 'Nodes', 'nodes']];
+const TABS = [['vehicles', 'Vehicles', 'car'], ['places', 'Places', 'map'], ['account', 'Account', 'lock'], ['interface', 'Interface', 'horizon'], ['display', 'Background', 'hud'], ['updates', 'Updates', 'download'], ['security', 'Security', 'shield'], ['system', 'System', 'info'], ['power', 'Electricity', 'bolt'], ['nodes', 'Nodes', 'nodes'], ['help', 'Help & feedback', 'chat']];
+// Help & feedback is for admins only (a watch-only account does not see it, and /api/reports refuses it)
+const isAdmin = () => fetch('/api/auth/me', { credentials: 'same-origin' }).then((r) => r.json()).then((m) => m?.role === 'admin').catch(() => false);
 const WEEK = [[1, 'Mon'], [2, 'Tue'], [3, 'Wed'], [4, 'Thu'], [5, 'Fri'], [6, 'Sat'], [0, 'Sun']];
 let system = null;
 
 export default {
   async mount(el, { sub, params, go, status, alive }) {
-    const tab = TABS.some(([k]) => k === sub.split('/')[0]) ? sub.split('/')[0] : 'vehicles';
+    const shown = (await isAdmin()) ? TABS : TABS.filter(([k]) => k !== 'help');
+    const tab = shown.some(([k]) => k === sub.split('/')[0]) ? sub.split('/')[0] : 'vehicles';
     let inner = null; // the Nodes page, when that section shows
     if (tab === 'nodes') document.title = 'Nodes · Settings · Horizon · Sentry Six Manager';
     el.innerHTML = `<section class="ptitle hud"><div><h1 class="chrome">Settings</h1><p><a class="btn sm" href="#/health">${ico('shield')}Health</a> <a class="btn sm" href="#/account">${ico('lock')}Account</a></p></div></section>
       <div class="settings">
-        <nav class="stabs hud" aria-label="Settings sections">${TABS.map(([k, l, i]) => `<a href="#/settings/${k}" class="stab${k === tab ? ' on' : ''}"${k === tab ? ' aria-current="page"' : ''}>${ico(i)}<span>${l}</span></a>`).join('')}</nav>
+        <nav class="stabs hud" aria-label="Settings sections">${shown.map(([k, l, i]) => `<a href="#/settings/${k}" class="stab${k === tab ? ' on' : ''}"${k === tab ? ' aria-current="page"' : ''}>${ico(i)}<span>${l}</span></a>`).join('')}</nav>
         <div class="spanel" id="sp"><div class="loading"><i></i><i></i><i></i></div></div>
       </div>`;
-    status(TABS.find(([k]) => k === tab)[1]);
+    status(shown.find(([k]) => k === tab)[1]);
     el.querySelector('.stab.on')?.scrollIntoView?.({ block: 'nearest', inline: 'center' });
     const box = el.querySelector('#sp');
-    const parts = { vehicles, places, account, interface: iface, display, updates, security, system: sys, power, nodes: async (b) => { inner = await nodesPage.mount(b, { sub: '', params, go, alive, status: () => {} }); } };
+    const parts = { vehicles, places, account, interface: iface, display, updates, security, system: sys, power, help, nodes: async (b) => { inner = await nodesPage.mount(b, { sub: '', params, go, alive, status: () => {} }); } };
     // a section that can't load (a watch-only account's Security, say) says so in its own panel:
     // the section list stays, so the other sections are a tap away
     const draw = () => parts[tab](box, { params, go }).catch((err) => {
@@ -297,6 +300,13 @@ async function updates(box) {
     toast(out.error || (out.updateAvailable ? 'An update is available.' : 'This is the newest version.'), out.error ? 'bad' : 'ok');
     updates(box);
   }));
+}
+
+// ---------- Help & feedback (web/reportsSettings.js, the same in every interface; admins only) ----------
+async function help(box) {
+  box.innerHTML = `<section class="panel hud">${panelHead(`${ico('chat')}Help &amp; feedback`, '')}<p class="small dim">Tell the developers what you think, or send them a diagnostics report when something is wrong.</p><div id="rep-box" style="margin-top:12px"></div></section>`;
+  const { createReportsSettings } = await import('/web/reportsSettings.js');
+  if (box.querySelector('#rep-box')) createReportsSettings(box.querySelector('#rep-box'), { cls: { btn: 'btn sm', primary: 'btn go', input: 'in' }, h24: () => clockPref.h24 });
 }
 
 // ---------- security ----------

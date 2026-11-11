@@ -315,6 +315,41 @@ The Account page lists where your account is signed in (browser and system,
 address, when it was last used), and signs out one of them, or everywhere
 but here.
 
+## Reports to the developers (off by default)
+
+**Settings → Help & feedback** (admins only; watch-only accounts don't see it
+and the API refuses them). This is the one place where Sentry Six Manager
+sends anything to anyone other than you, and only when you say so:
+
+- **Send feedback** sends one message (with diagnostics attached if you tick
+  the box) when you press Send.
+- **Send diagnostics to support** sends one diagnostics report when you press
+  Send, and shows a reference code (like `SR-7K2Q9F`) to quote.
+- **Share diagnostics with the developers** is off until you turn it on. Then
+  a report goes after a crash or an unhandled error, and a health summary once
+  a day. Turning it off stops that and drops the reports still waiting.
+- **Send anonymously** replaces every identifier with `ANON`: the install id,
+  host name, IP and MAC addresses, account, vehicle and Sentry USB names, share
+  hosts and paths, Wi-Fi names, VINs, e-mail addresses, GPS coordinates and
+  place names, in every field and in log lines and stack traces. No contact is
+  sent, and anonymous reports are signed with a separate key, so the
+  developers cannot tie them to your install.
+
+Before anything is sent, **What will be sent** shows the exact JSON. Sending
+and every change ask for your password, and changes are in the audit log.
+Passwords, tokens, keys, cookies, link keys, webhook URLs, share credentials
+and TLS private keys are never in a report, anonymous or not.
+
+Reports go only to the developers' private receiver (`https://reports.skittles.live`,
+set in `server/reportsConfig.js`). Each one is sealed to the receiver's key
+inside Sentry Six Manager before it leaves (X25519 + AES-256-GCM), so nothing
+on the way can read it; it is sent over HTTPS with
+normal certificate checks, and redirects are never followed. A report that
+cannot go yet waits, still sealed, in `data/reports/outbox` (at most 20
+reports, 50 MB, 7 days). A build without the receiver's key says "Reporting
+isn't set up in this build" and sends nothing. The protocol is in
+[reports-api.md](reports-api.md).
+
 ## Metrics (off by default)
 
 For your own monitoring (Prometheus, Grafana, Home Assistant): Health →

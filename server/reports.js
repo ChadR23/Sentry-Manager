@@ -1,0 +1,487 @@
+'use strict';
+
+// Feedback and diagnostics for the developers (Settings → Help & feedback).
+//
+// OPT-IN ONLY. Nothing leaves this server unless an admin:
+//   - presses Send for one feedback message ("Send feedback"),
+//   - presses "Send diagnostics to support" for one support report, or
+//   - turns on "Share diagnostics with the developers", which then sends a
+//     report after a crash or an unhandled error, and a health summary once
+//     a day. Turning it off stops that and drops the automatic reports still
+//     waiting to go.
+// "Send anonymously" replaces every identifier with "ANON" (server/
+// reportsScrub.js) and sends no contact. Secrets are never in a report,
+// anonymous or not.
+//
+// Where they go: only the developers' private receiver (server/
+// reportsConfig.js). Each report is sealed to the
+// receiver's key before it leaves this process (server/reportsProtocol.js),
+// signed with this install's own key (data/reports/install-key.pem; a second
+// key, anon-key.pem, signs anonymous ones so they cannot be tied to the
+// install), and carries a small proof of work. HTTPS only, the system's
+// certificate checks, 20 s, redirects never followed.
+//
+// A report that cannot go now waits, sealed, in data/reports/outbox (at most
+// 20 reports, 50 MB, 7 days; never plaintext) and is tried again with
+// backoff. Without a receiver key in this build nothing is ever built or sent.
+
+const crypto = require('crypto');
+const fs = require('fs');
+const http = require('http');
+const https = require('https');
+const path = require('path');
+const P = require('./reportsProtocol');
+const { reportsConfig, checkEndpoint } = require('./reportsConfig');
+const { cleanReport } = require('./reportsScrub');
+
+const OUTBOX_MAX = 20;
+const OUTBOX_BYTES = 50 * 1024 * 1024;
+const OUTBOX_DAYS = 7;
+const TIMEOUT_MS = 20_000;
+const CONFIG_TTL_MS = 10 * 60_000;
+const MAX_BITS = 26; // a receiver asking for more is not followed (a stamp would take minutes)
+const MANUAL_PER_HOUR = 5;
+const DAY_MS = 86_400_000;
+const AUTO_KINDS = new Set(['crash', 'daily']);
+const NOT_SET_UP = "Reporting isn't set up in this build.";
+
+class ReportError extends Error {
+  constructor(status, message, code) {
+    super(message);
+    this.status = status;
+    if (code) { this.code = code; this.expose = true; }
+  }
+}
+
+/** POST/GET over HTTPS with no redirects: { status, headers, body }. */
+function defaultTransport({ method, url, headers = {}, body = null, timeoutMs = TIMEOUT_MS }) {
+  const u = new URL(url);
+  const mod = u.protocol === 'https:' ? https : http;
+  return new Promise((resolve, reject) => {
+    let done = false;
+    const finish = (fn, v) => { if (!done) { done = true; fn(v); } };
+    const req = mod.request(u, { method, headers: { 'User-Agent': 'sentry-six-manager-reports', ...headers, ...(body ? { 'Content-Length': body.length } : {}) }, timeout: timeoutMs }, (res) => {
+      const chunks = [];
+      let n = 0;
+      res.on('data', (c) => {
+        n += c.length;
+        if (n > 256 * 1024) { res.destroy(); finish(reject, new Error('The receiver answered too much.')); return; }
+        chunks.push(c);
+      });
+      res.on('end', () => finish(resolve, { status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));
+      res.on('error', (err) => finish(reject, err));
+    });
+    req.on('timeout', () => req.destroy(new Error('The receiver did not answer in time.')));
+    req.on('error', (err) => finish(reject, err));
+    req.end(body || undefined);
+  });
+}
+
+/** The proof of work, in a worker thread so the event loop keeps going. */
+function workerPow(envHash, nonce, bits) {
+  const { Worker } = require('worker_threads');
+  return new Promise((resolve, reject) => {
+    const w = new Worker(`const { parentPort, workerData } = require('worker_threads');
+      const { solvePow } = require(workerData.protocol);
+      parentPort.postMessage(solvePow(Buffer.from(workerData.h, 'hex'), workerData.nonce, workerData.bits));`,
+    { eval: true, workerData: { protocol: path.join(__dirname, 'reportsProtocol.js'), h: envHash.toString('hex'), nonce, bits } });
+    w.once('message', (pow) => { resolve(pow); w.terminate(); });
+    w.once('error', reject);
+    w.once('exit', (code) => { if (code) reject(new Error('The proof of work stopped.')); });
+  });
+}
+
+const json = (buf) => { try { return JSON.parse(buf.toString('utf8')); } catch { return {}; } };
+
+/**
+ * o: db, dataDir, buildInfo, ui() (the interface in use), diagnostics()
+ * (async: the diagnostics object, its DIAG_KEYS), identifiers() (async:
+ * strings an anonymous report must not contain), log, audit, env, now,
+ * transport, pow (envHash, nonce, bits) => Promise<pow>.
+ */
+function createReports({
+  db, dataDir, buildInfo = {}, ui = () => 'original', diagnostics = async () => ({}), identifiers = async () => [],
+  log = { info() {}, warn() {}, error() {} }, env = process.env, now = () => Date.now(), transport = defaultTransport, pow = workerPow
+}) {
+  const dir = path.join(dataDir, 'reports');
+  const outboxDir = path.join(dir, 'outbox');
+  const crashFile = path.join(dir, 'crashes.json');
+  const cfg = reportsConfig(env);
+  if (cfg.error) log.warn(`Reports: ${cfg.error} Reporting is off.`);
+  const configured = cfg.keys.length > 0;
+  const previews = new Map(); // id -> { payload, until, kind }
+  let remote = null; // { endpoint, at, data }
+  let clockOffset = 0;
+  let timers = [];
+  let flushing = null;
+
+  const settings = () => ({ share: false, anonymous: false, ...(db.get('reports-settings', null) || {}) });
+  const state = () => db.get('reports-state', null) || {};
+  const setState = (patch) => db.set('reports-state', { ...state(), ...patch });
+
+  function ensureDir(d) {
+    fs.mkdirSync(d, { recursive: true, mode: 0o700 });
+    try { fs.chmodSync(d, 0o700); } catch { /* not ours */ }
+  }
+  function installId() {
+    let id = state().installId;
+    if (!/^[0-9a-f]{32}$/.test(id || '')) {
+      id = crypto.randomBytes(16).toString('hex');
+      setState({ installId: id });
+    }
+    return id;
+  }
+  /** The install's signing key (or the anonymous one), made once, mode 600. */
+  function signingKey(anonymous) {
+    ensureDir(dir);
+    const file = path.join(dir, anonymous ? 'anon-key.pem' : 'install-key.pem');
+    try {
+      return crypto.createPrivateKey(fs.readFileSync(file));
+    } catch { /* none yet */ }
+    const { privateKey } = crypto.generateKeyPairSync('ed25519');
+    fs.writeFileSync(file, privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600, flag: 'w' });
+    fs.chmodSync(file, 0o600);
+    return privateKey;
+  }
+  function endpoint() {
+    if (cfg.fromEnv.url) return cfg.endpoint;
+    const m = state().moved;
+    if (m?.url) {
+      try { return checkEndpoint(m.url, env); } catch { /* a bad one is ignored */ }
+    }
+    return cfg.endpoint;
+  }
+
+  // ---- the outbox: sealed envelopes only
+  function outbox() {
+    let names = [];
+    try { names = fs.readdirSync(outboxDir).filter((n) => /^[0-9a-f]{24}\.json$/.test(n)); } catch { return []; }
+    const out = [];
+    for (const n of names) {
+      const file = path.join(outboxDir, n);
+      try {
+        const e = JSON.parse(fs.readFileSync(file, 'utf8'));
+        out.push({ ...e, file, bytes: fs.statSync(file).size });
+      } catch {
+        try { fs.unlinkSync(file); } catch { /* gone */ }
+      }
+    }
+    return out.sort((a, b) => a.createdAt - b.createdAt);
+  }
+  function saveEntry(e) {
+    ensureDir(outboxDir);
+    const { file: _f, bytes: _b, ...keep } = e;
+    const file = path.join(outboxDir, `${e.id}.json`);
+    const tmp = `${file}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(keep), { mode: 0o600 });
+    fs.renameSync(tmp, file);
+    return file;
+  }
+  const dropEntry = (e) => { try { fs.unlinkSync(path.join(outboxDir, `${e.id}.json`)); } catch { /* gone */ } };
+  /** The outbox within its caps: older than 7 days out, then the oldest until 20 reports and 50 MB. */
+  function trimOutbox() {
+    let list = outbox();
+    for (const e of list) if (now() - e.createdAt > OUTBOX_DAYS * DAY_MS) dropEntry(e);
+    list = list.filter((e) => now() - e.createdAt <= OUTBOX_DAYS * DAY_MS);
+    let bytes = list.reduce((s, e) => s + e.bytes, 0);
+    while (list.length > OUTBOX_MAX || bytes > OUTBOX_BYTES) {
+      const e = list.shift();
+      bytes -= e.bytes;
+      dropEntry(e);
+    }
+    return list;
+  }
+
+  // ---- the receiver's settings (GET /v1/config), and a signed move
+  async function remoteConfig(force = false) {
+    const ep = endpoint();
+    if (!force && remote && remote.endpoint === ep && now() - remote.at < CONFIG_TTL_MS) return remote.data;
+    const res = await transport({ method: 'GET', url: `${ep}/v1/config`, headers: { Accept: 'application/json' } });
+    if (res.status !== 200) throw Object.assign(new Error(`The receiver answered ${res.status} for its settings.`), { retry: true, status: res.status });
+    const data = json(res.body);
+    if (!Number.isInteger(data.difficulty) || data.difficulty < 0) throw Object.assign(new Error('The receiver sent no difficulty.'), { retry: true });
+    if (Number.isFinite(data.time)) {
+      const off = data.time - now();
+      clockOffset = Math.abs(off) > 60_000 ? off : 0;
+    }
+    if (data.moved && !cfg.fromEnv.url) {
+      const prev = state().moved;
+      if (P.verifyMoved(data.moved, cfg.keys) && !(prev?.at >= data.moved.at)) {
+        try {
+          const url = checkEndpoint(data.moved.url, env);
+          if (url !== ep) {
+            setState({ moved: { url, at: data.moved.at } });
+            log.warn(`Reports: the receiver moved to ${url} (signed by its key)`);
+            remote = null;
+            return remoteConfig(true);
+          }
+        } catch (err) {
+          log.warn(`Reports: a move notice was ignored: ${err.message}`);
+        }
+      } else if (!P.verifyMoved(data.moved, cfg.keys)) log.warn('Reports: a move notice with no valid signature was ignored');
+    }
+    remote = { endpoint: ep, at: now(), data };
+    return data;
+  }
+
+  /** One delivery attempt: 'sent' | 'retry' | 'dropped'. */
+  async function deliver(e, again = true) {
+    const conf = await remoteConfig(!again);
+    const bits = conf.difficulty;
+    if (bits > MAX_BITS) throw Object.assign(new Error(`The receiver asks for a proof of work of ${bits} bits (more than ${MAX_BITS}).`), { retry: true });
+    const ts = Math.round(now() + clockOffset);
+    const nonce = P.b64(crypto.randomBytes(16));
+    const env0 = e.env;
+    const stamp = await pow(P.envelopeHash(env0), nonce, bits);
+    const body = P.sign(env0, signingKey(e.anonymous), { ts, nonce, pow: stamp, bits });
+    const res = await transport({ method: 'POST', url: `${endpoint()}/v1/report`, headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: Buffer.from(JSON.stringify(body)) });
+    const d = json(res.body);
+    if (res.status === 202 && d.ok) {
+      dropEntry(e);
+      const sent = { at: now(), kind: e.kind, ref: typeof d.ref === 'string' ? d.ref.slice(0, 20) : null, id: typeof d.id === 'string' ? d.id.slice(0, 40) : null };
+      setState({ lastSent: sent, lastError: null });
+      log.info(`Reports: ${e.kind} report sent${sent.ref ? ` (${sent.ref})` : ''}`);
+      return { result: 'sent', ...sent };
+    }
+    // the difficulty or the clock changed in between: once more with fresh settings
+    if (res.status === 400 && (d.code === 'POW' || d.code === 'TIME') && again) {
+      remote = null;
+      if (Number.isFinite(d.time)) clockOffset = d.time - now();
+      return deliver(e, false);
+    }
+    if (res.status === 429 || res.status >= 500 || res.status === 408) {
+      const wait = Math.max(60, Math.min(6 * 3600, Number(res.headers?.['retry-after']) || Number(d.retryAfter) || 0));
+      e.attempts = (e.attempts || 0) + 1;
+      e.nextAt = now() + Math.max(wait * 1000, backoff(e.attempts));
+      saveEntry(e);
+      const msg = res.status === 429 ? 'The receiver is busy (too many reports): it will be tried again later.' : `The receiver answered ${res.status}: it will be tried again later.`;
+      setState({ lastError: { at: now(), message: msg } });
+      return { result: 'retry', status: res.status, message: msg };
+    }
+    // refused for good (malformed, banned, too large): kept would never go
+    dropEntry(e);
+    const msg = `The receiver refused the report (${res.status}${d.error ? `: ${String(d.error).slice(0, 160)}` : ''}).`;
+    setState({ lastError: { at: now(), message: msg } });
+    log.warn(`Reports: ${msg}`);
+    return { result: 'dropped', status: res.status, message: msg };
+  }
+  const backoff = (n) => Math.min(6 * 3600_000, 60_000 * 2 ** Math.min(n, 10)) * (0.8 + Math.random() * 0.4);
+
+  async function attempt(e) {
+    try {
+      return await deliver(e);
+    } catch (err) {
+      e.attempts = (e.attempts || 0) + 1;
+      e.nextAt = now() + backoff(e.attempts);
+      saveEntry(e);
+      const msg = `Could not reach the receiver (${String(err.message || err).slice(0, 160)}): it will be tried again later.`;
+      setState({ lastError: { at: now(), message: msg } });
+      return { result: 'retry', message: msg };
+    }
+  }
+
+  /** Every waiting report that is due (one pass at a time). */
+  function flush({ all = false } = {}) {
+    if (!configured) return Promise.resolve([]);
+    if (flushing) return flushing;
+    flushing = (async () => {
+      const out = [];
+      for (const e of trimOutbox()) {
+        if (AUTO_KINDS.has(e.kind) && !settings().share) { dropEntry(e); continue; }
+        if (!all && e.nextAt > now()) continue;
+        out.push(await attempt(e));
+      }
+      return out;
+    })().finally(() => { flushing = null; });
+    return flushing;
+  }
+
+  // ---- building a report
+  function buildBlock() {
+    const sha = typeof buildInfo.sha === 'string' && /^[0-9a-f]{7,64}$/.test(buildInfo.sha) ? buildInfo.sha : null;
+    const str = (x, n) => (typeof x === 'string' && x ? x.slice(0, n) : null);
+    return { build: Number.isSafeInteger(buildInfo.build) && buildInfo.build > 0 ? buildInfo.build : null, sha, builtAt: str(buildInfo.builtAt, 40), tag: str(buildInfo.tag, 120) };
+  }
+
+  /** The payload exactly as it would be sealed (cleaned, checked). */
+  async function buildPayload({ kind, message, contact, attach = true, crash = null }) {
+    if (!configured) throw new ReportError(409, NOT_SET_UP, 'NOT_SET_UP');
+    const anonymous = Boolean(settings().anonymous);
+    const p = { kind, sentAt: new Date(now()).toISOString(), install: anonymous ? P.ANON : installId(), anonymous, build: buildBlock(), ui: String(ui() || 'original').slice(0, P.LIMITS.ui) };
+    if (kind === 'feedback') {
+      const m = String(message ?? '').trim();
+      if (!m) throw new ReportError(400, 'Write a message first.');
+      if (m.length > P.LIMITS.message) throw new ReportError(400, `The message is longer than ${P.LIMITS.message} characters.`);
+      p.message = m;
+      const c = String(contact ?? '').trim();
+      if (c.length > P.LIMITS.contact) throw new ReportError(400, `The contact is longer than ${P.LIMITS.contact} characters.`);
+      if (c && !anonymous) p.contact = c;
+    } else if (kind === 'support') {
+      const m = String(message ?? '').trim();
+      if (m.length > P.LIMITS.note) throw new ReportError(400, `The note is longer than ${P.LIMITS.note} characters.`);
+      if (m) p.message = m;
+    }
+    if (crash) p.crash = crash;
+    if (kind !== 'feedback' || attach) p.diagnostics = await diagnostics({ kind });
+    // contents through the scrubber (secrets always; identifiers when anonymous)
+    const ids = anonymous ? [installId(), ...(await identifiers().catch(() => []))] : [];
+    for (const k of ['message', 'crash', 'diagnostics']) {
+      if (p[k] !== undefined) p[k] = cleanReport(p[k], { anonymous, identifiers: ids });
+    }
+    if (p.crash) {
+      p.crash.message = String(p.crash.message ?? '').slice(0, P.LIMITS.crashMessage);
+      p.crash.stack = String(p.crash.stack ?? '').slice(0, P.LIMITS.crashStack);
+      p.crash.name = String(p.crash.name ?? 'Error').slice(0, 120);
+    }
+    if (p.message !== undefined && kind === 'feedback' && !p.message.trim()) p.message = P.ANON;
+    const errs = P.validatePayload(p);
+    if (errs.length) throw new ReportError(500, `The report did not come out right: ${errs.slice(0, 3).join(', ')}`);
+    return p;
+  }
+
+  /** Seals a payload into the outbox and tries it now: { result, ref?, message? }. */
+  async function enqueue(payload) {
+    const key = cfg.keys[0];
+    const e = { id: crypto.randomBytes(12).toString('hex'), kind: payload.kind, anonymous: payload.anonymous, createdAt: now(), attempts: 0, nextAt: now(), env: P.seal(payload, key) };
+    if (Buffer.byteLength(JSON.stringify(e.env)) > P.MAX_BODY - 4096) throw new ReportError(413, 'This report is too large to send.');
+    saveEntry(e);
+    trimOutbox();
+    return attempt(e);
+  }
+
+  function takeManual(kind) {
+    const t = now();
+    const all = state().manual || {};
+    const list = (all[kind] || []).filter((x) => t - x < 3600_000);
+    if (list.length >= MANUAL_PER_HOUR) {
+      const wait = Math.ceil((list[0] + 3600_000 - t) / 60_000);
+      throw new ReportError(429, `That is ${MANUAL_PER_HOUR} in the last hour already. Try again in ${wait} minute${wait === 1 ? '' : 's'}.`);
+    }
+    list.push(t);
+    setState({ manual: { ...all, [kind]: list } });
+  }
+
+  // ---- crashes and unhandled errors (kept locally; sent only when sharing is on)
+  function readCrashes() {
+    try {
+      const list = JSON.parse(fs.readFileSync(crashFile, 'utf8'));
+      return Array.isArray(list) ? list : [];
+    } catch { return []; }
+  }
+  /** Notes a crash or an unhandled error, synchronously (it may be the process's last act). */
+  function noteCrash(err, source = 'crash') {
+    try {
+      ensureDir(dir);
+      const list = readCrashes().filter((c) => now() - Date.parse(c.at) < OUTBOX_DAYS * DAY_MS).slice(-19);
+      const e = err instanceof Error ? err : new Error(String(err));
+      list.push({ at: new Date(now()).toISOString(), name: String(e.name || 'Error').slice(0, 120), message: String(e.message || '').slice(0, P.LIMITS.crashMessage), stack: String(e.stack || '').slice(0, P.LIMITS.crashStack), source, sent: false });
+      const tmp = `${crashFile}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(list), { mode: 0o600 });
+      fs.renameSync(tmp, crashFile);
+    } catch { /* nothing more to do */ }
+    if (source === 'error') setTimeout(() => sendCrashes().catch(() => {}), 5_000).unref?.();
+  }
+  /** The recent crash stacks for diagnostics (the newest 5). */
+  const recentCrashes = () => readCrashes().slice(-5).map(({ sent: _s, ...c }) => c);
+  /** Sends what was noted and not sent yet: at most one report an hour for the same error, 6 a day. */
+  async function sendCrashes() {
+    if (!configured || !settings().share) return [];
+    const list = readCrashes();
+    const st = state();
+    const sentLog = (st.crashSent || []).filter((x) => now() - x.at < DAY_MS);
+    const out = [];
+    for (const c of list) {
+      if (c.sent) continue;
+      c.sent = true;
+      const sig = crypto.createHash('sha256').update(`${c.name}|${c.message}|${String(c.stack).split('\n').slice(0, 3).join('|')}`).digest('hex').slice(0, 16);
+      if (sentLog.length >= 6 || sentLog.some((x) => x.sig === sig && now() - x.at < 3600_000)) continue;
+      sentLog.push({ sig, at: now() });
+      try {
+        out.push(await enqueue(await buildPayload({ kind: 'crash', crash: { at: c.at, name: c.name, message: c.message, stack: c.stack, source: c.source === 'error' ? 'error' : 'crash' } })));
+      } catch (err) {
+        log.warn(`Reports: the crash report was not made: ${err.message}`);
+      }
+    }
+    try { fs.writeFileSync(crashFile, JSON.stringify(list), { mode: 0o600 }); } catch { /* next time */ }
+    setState({ crashSent: sentLog });
+    return out;
+  }
+  async function dailyIfDue() {
+    if (!configured || !settings().share) return null;
+    const last = state().lastDailyAt || 0;
+    if (now() - last < DAY_MS - 60_000) return null;
+    setState({ lastDailyAt: now() });
+    try {
+      return await enqueue(await buildPayload({ kind: 'daily' }));
+    } catch (err) {
+      log.warn(`Reports: the daily summary was not made: ${err.message}`);
+      return null;
+    }
+  }
+
+  // ---- what the routes call
+  function status() {
+    const list = configured ? outbox() : [];
+    const s = state();
+    return {
+      configured, notSetUpText: configured ? null : NOT_SET_UP, endpoint: configured ? endpoint() : null, kid: cfg.keys[0]?.kid || null,
+      settings: settings(), lastSent: s.lastSent || null, lastError: s.lastError || null,
+      outbox: { count: list.length, bytes: list.reduce((n, e) => n + e.bytes, 0) },
+      manualPerHour: MANUAL_PER_HOUR
+    };
+  }
+  function setSettings(patch, by = '') {
+    if (!configured) throw new ReportError(409, NOT_SET_UP, 'NOT_SET_UP');
+    const before = settings();
+    const next = { ...before };
+    for (const k of ['share', 'anonymous']) {
+      if (patch?.[k] === undefined) continue;
+      if (typeof patch[k] !== 'boolean') throw new ReportError(400, `${k} is on or off.`);
+      next[k] = patch[k];
+    }
+    next.changedAt = now();
+    db.set('reports-settings', next);
+    if (before.share && !next.share) for (const e of outbox()) if (AUTO_KINDS.has(e.kind)) dropEntry(e);
+    // the first daily summary a day after turning it on
+    if (!before.share && next.share) setState({ lastDailyAt: now() });
+    return { before, after: next, by };
+  }
+  async function preview(opts) {
+    const kind = opts?.kind === 'support' ? 'support' : 'feedback';
+    const payload = await buildPayload({ kind, message: opts?.message, contact: opts?.contact, attach: opts?.attach !== false });
+    for (const [k, v] of previews) if (v.until < now()) previews.delete(k);
+    while (previews.size >= 10) previews.delete(previews.keys().next().value);
+    const id = crypto.randomBytes(12).toString('hex');
+    previews.set(id, { payload, until: now() + 10 * 60_000 });
+    return { previewId: id, payload };
+  }
+  /** Sends exactly what a preview showed (one feedback message or one support report). */
+  async function sendPreview(previewId) {
+    if (!configured) throw new ReportError(409, NOT_SET_UP, 'NOT_SET_UP');
+    const p = previews.get(String(previewId || ''));
+    if (!p || p.until < now()) throw new ReportError(409, 'The preview is too old: look at what will be sent again.');
+    if (p.payload.anonymous !== Boolean(settings().anonymous)) throw new ReportError(409, '"Send anonymously" changed since the preview: look at what will be sent again.');
+    takeManual(p.payload.kind);
+    previews.delete(String(previewId));
+    const r = await enqueue(p.payload);
+    return { kind: p.payload.kind, ...r };
+  }
+
+  function start() {
+    if (!configured) return;
+    const every = (ms, fn) => { const t = setInterval(() => fn().catch(() => {}), ms); t.unref?.(); timers.push(t); };
+    every(60_000, () => flush());
+    every(3600_000, () => dailyIfDue());
+    const t = setTimeout(() => { sendCrashes().catch(() => {}); dailyIfDue().catch(() => {}); }, 90_000);
+    t.unref?.();
+    timers.push(t);
+  }
+  function stop() {
+    for (const t of timers) { clearInterval(t); clearTimeout(t); }
+    timers = [];
+  }
+
+  return { configured, status, setSettings, preview, sendPreview, buildPayload, enqueue, flush, outbox, trimOutbox, noteCrash, recentCrashes, sendCrashes, dailyIfDue, installId, start, stop, endpoint, remoteConfig };
+}
+
+module.exports = { createReports, defaultTransport, workerPow, ReportError, NOT_SET_UP, OUTBOX_MAX, OUTBOX_BYTES, OUTBOX_DAYS, MANUAL_PER_HOUR, MAX_BITS };

@@ -36,6 +36,13 @@ any stray branch.
 
 - Everything stays inside the one Docker container: no external services,
   no extra containers (no Glances, Netdata, socket proxies, cloud APIs).
+  The one owner-approved exception: opt-in feedback and diagnostics reports
+  (Settings → Help & feedback) to the developers' private receiver
+  (`https://reports.skittles.live`). Nothing is sent unless an admin turns
+  sharing on or presses Send for one report; never to a third party. See
+  docs/security.md and docs/reports-api.md.
+- The reports receiver lives in its own private repository; never add
+  receiver code, its deployment or owner page to this public repo.
 - Passwords only over HTTPS; never plain HTTP with passwords.
 - No co-author trailers in commits, no model names in commits or code.
 - No pull requests unless the owner asks.
