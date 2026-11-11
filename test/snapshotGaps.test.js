@@ -280,10 +280,10 @@ test('the "Pi missed snapshots" day tag in all five interfaces, in place of "Par
   assert.match(chip, /a\.missedSnapshots\?\.length \? 'Pi missed snapshots' : 'Partly archived\?'/);
   assert.match(chip, /title="\$\{esc\(a\.summary\)\}"/);
   const packs = {
-    aurora: ['aurora', /const gapLabel = \(a\) => \(!a \? '' : a\.state === 'car' \? CAR_LABEL : a\.state === 'partial' \? `\$\{a\.missedSnapshots\?\.length \? 'Pi missed snapshots' : 'Partly archived\?'\}/],
+    aurora: ['aurora', /const gapLabel = \(a\) => \(!a \? '' : a\.state === 'car' \? `\$\{CAR_LABEL\}\$\{carMin\(a\)\}` : a\.state === 'partial' \? \(a\.carFiles\?\.piMissed \? `Pi missed ~\$\{a\.carFiles\.piMissed\} min` : `\$\{a\.missedSnapshots\?\.length \? 'Pi missed snapshots' : 'Partly archived\?'\}/],
     daylight: ['dl', /chip-warn chip-gap[^\n]*\$\{a\.missedSnapshots\?\.length \? 'Pi missed snapshots' : 'Partly archived\?'\}/],
-    flux: ['flux', /const gapLabel = \(a\) => \(a\.state === 'car' \? CAR_LABEL : a\.state === 'partial' \? `\$\{a\.missedSnapshots\?\.length \? 'Pi missed snapshots' : 'Partly archived\?'\}/],
-    horizon: ['hz', /const gapWord = \(a\) => \(a\.state === 'partial' && a\.missedSnapshots\?\.length \? 'Pi missed snapshots' : GAP_WORD\[a\.state\] \|\| 'Still arriving'\);/]
+    flux: ['flux', /const gapLabel = \(a\) => \(a\.state === 'car' \? `\$\{CAR_LABEL\}\$\{carMin\(a\)\}` : a\.state === 'partial' \? \(a\.carFiles\?\.piMissed \? `Pi missed ~\$\{a\.carFiles\.piMissed\} min` : `\$\{a\.missedSnapshots\?\.length \? 'Pi missed snapshots' : 'Partly archived\?'\}/],
+    horizon: ['hz', /const gapWord = \(a\) => \(a\.state === 'partial' && a\.carFiles\?\.piMissed \? 'Pi missed' : a\.state === 'partial' && a\.missedSnapshots\?\.length \? 'Pi missed snapshots' :/]
   };
   for (const [pack, [mod, re]] of Object.entries(packs)) {
     const page = read('examples', 'ui-packs', pack, 'web', mod, 'pages', 'footage.js');

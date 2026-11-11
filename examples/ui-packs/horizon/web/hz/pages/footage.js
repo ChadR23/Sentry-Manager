@@ -15,9 +15,23 @@ const GAP_TONE = { partial: 'org', waiting: 'slate', car: 'slate' };
 const CAR_LABEL = 'Car didn\'t record';
 const GAP_WORD = { partial: 'Partly archived?', waiting: 'Waiting for Sentry USB', car: CAR_LABEL };
 // the car note next to another tag
-const carPill = (a) => (a.state !== 'car' && a.sentryQuiet ? `<span class="pill slate" title="${h(a.sentryQuiet.note || '')}">${CAR_LABEL}</span>` : '');
-// missing minutes where the Pi took no snapshot in time
-const gapWord = (a) => (a.state === 'partial' && a.missedSnapshots?.length ? 'Pi missed snapshots' : GAP_WORD[a.state] || 'Still arriving');
+// (with Sentry USB's list of what the car wrote: "Car didn't record ~N min" while driving)
+const carMin = (a) => (a.carFiles?.carMissed ? ` ~${a.carFiles.carMissed} min` : '');
+const carPill = (a) => (a.state !== 'car' && (a.sentryQuiet || a.carFiles?.carMissed) ? `<span class="pill slate" title="${h(a.sentryQuiet?.note || '')}">${CAR_LABEL}${carMin(a)}</span>` : '');
+// missing minutes where the Pi took no snapshot in time; "Pi missed": Sentry USB's list shows
+// the car wrote them and the Pi didn't keep or upload them
+const gapWord = (a) => (a.state === 'partial' && a.carFiles?.piMissed ? 'Pi missed' : a.state === 'partial' && a.missedSnapshots?.length ? 'Pi missed snapshots' : a.state === 'car' ? `${CAR_LABEL}${carMin(a)}` : GAP_WORD[a.state] || 'Still arriving');
+// what Sentry USB's list says the car wrote that day (the open day's header): the car's counts
+// beside the share's, and the minutes it marks in words; unknown minutes only counted
+const CF_KIND = { pi: ['Pi missed', 'org'], car: [CAR_LABEL, 'slate'], unknown: ['Unknown', ''], waiting: ['On its way', 'cyan'] };
+const carFilesNote = (c) => {
+  if (!c) return '';
+  const counts = [c.piMissed ? `Pi missed ${c.piMissed} min` : '', c.carMissed ? `${CAR_LABEL} ${c.carMissed} min` : '', c.unknown ? `Unknown ${c.unknown} min` : '', c.waiting ? `On its way ${c.waiting} min` : ''].filter(Boolean);
+  const cover = c.coverage === 'none' ? ' Sentry USB\'s list doesn\'t cover this day, so it can\'t tell what the car wrote.' : c.coverage === 'partial' ? ' The list covers only part of this day.' : '';
+  return `<div class="note small cf-note"><p><span class="faint">Car wrote</span> ${h(c.carText)}</p><p><span class="faint">On the share</span> ${h(c.shareText)}</p>
+    <p class="cf-sum">${h(counts.length ? `${counts.join(' · ')}.` : 'Every clip the car wrote is here.')}${h(cover)}</p>
+    ${(c.runs || []).map((r) => `<p class="cf-run"><span class="pill ${CF_KIND[r.kind]?.[1] || ''}">${h(CF_KIND[r.kind]?.[0] || r.kind)}</span> <b>${h(r.when)}</b> ${h(r.why)}</p>`).join('')}</div>`;
+};
 
 // "Also delete its CAN data" in a footage delete confirmation: shown only when a CAN Bridge key is
 // mapped to the car (can: the server's count, null otherwise), unticked; those logs go for good, now
@@ -150,7 +164,7 @@ export default {
           // the speed graph's index for this day
           const ix = (d.speedIndex?.indexed ? (d.speedIndex.indexed >= d.speedIndex.clips ? 'Indexed' : `Indexed ${d.speedIndex.indexed}/${d.speedIndex.clips}`) : '');
           // footage the car recorded that is not on the share yet (the Sentry USB's archive)
-          const gap = d.archive ? `<span class="album-gap"><span class="pill ${GAP_TONE[d.archive.state] || 'cyan'}" title="${h(d.archive.summary)}">${gapWord(d.archive)}</span>${d.archive.missingMinutes ? `<span class="tiny faint">~${d.archive.missingMinutes} min missing</span>` : ''}${carPill(d.archive)}</span>` : '';
+          const gap = d.archive ? `<span class="album-gap"><span class="pill ${GAP_TONE[d.archive.state] || 'cyan'}" title="${h(d.archive.summary)}">${gapWord(d.archive)}</span>${d.archive.state === 'partial' && d.archive.carFiles?.piMissed ? `<span class="tiny faint">~${d.archive.carFiles.piMissed} min</span>` : d.archive.missingMinutes ? `<span class="tiny faint">~${d.archive.missingMinutes} min missing</span>` : ''}${carPill(d.archive)}</span>` : '';
           return `<button type="button" class="album${f.day === d.day ? ' on' : ''}" data-day="${h(d.day)}" aria-pressed="${f.day === d.day}">
             <span class="album-art" aria-hidden="true">${d.thumbId ? `<img alt="" loading="lazy" src="${thumbUrl(v.id, d.thumbId)}">` : ico('film')}</span>
             <span class="album-t"><b>${h(dayName(d.day))}</b><span class="small dim">${count(d.recordings, 'track')} · ${footMinutes(d.minutes)} · ${size(d.bytes)}</span>
@@ -183,6 +197,7 @@ export default {
           <h2 class="chrome pl-title">${h(f.day ? dayName(f.day, true) : 'All days')}</h2>
           <p class="small dim">${count(total, 'track')} · ${footMinutes(mins)} · ${size(b)}${f.cat !== 'all' ? ` · ${h(f.cat)} only` : ''}${f.prot ? ' · protected only' : ''}</p>
           ${d?.archive ? `<p class="note small gap-note${d.archive.state === 'partial' ? ' org' : d.archive.state === 'waiting' || d.archive.state === 'car' ? ' slate' : ''}">${h(d.archive.summary)}${d.archive.state === 'partial' ? ` ${h(d.archive.advice || ARCHIVE_ADVICE)}` : ''}</p>` : ''}
+          ${carFilesNote(d?.carFiles)}
           <div class="row">
             <button class="btn go" type="button" id="ft-playall"${recs.length ? '' : ' disabled'}>${ico('play')}${f.day ? 'Play day' : 'Play newest day'}</button>
             ${f.day ? `<button class="btn danger" type="button" id="ft-delday">${ico('bin')}Move day to Bin</button><button class="btn danger" type="button" id="ft-delthru">${ico('bin')}This day and older</button>` : ''}

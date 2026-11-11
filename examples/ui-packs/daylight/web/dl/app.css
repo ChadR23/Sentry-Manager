@@ -116,6 +116,16 @@ html.calm *, html.calm *::before, html.calm *::after { animation-duration: .001m
 /* waiting for Sentry USB: neutral, nothing is lost */
 .chip-slate { background: rgba(110, 130, 160, .16); color: var(--text-2); }
 .gap-note.slate { background: rgba(110, 130, 160, .1); }
+/* what Sentry USB's list says the car wrote, on the day's page */
+.cf-note { margin: 0 0 18px; }
+.cf-note h3 { margin: 0 0 8px; }
+.cf-counts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; margin: 0; }
+.cf-counts dt { color: var(--text-2); }
+.cf-counts dd { margin: 0; }
+.cf-sum { margin: 10px 0 0; color: var(--text-2); }
+.cf-runs { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.cf-runs .chip { padding: 2px 9px; font-size: 12.5px; }
+@media (max-width: 560px) { .cf-counts { grid-template-columns: 1fr; } .cf-counts dd { margin-bottom: 6px; } }
 /* the Sentry USB line under the heading (web/sentryUsb.js) */
 .usb-status { margin: -10px 0 22px; border: 0; border-radius: 18px; background: var(--surface); box-shadow: var(--shadow-1); color: var(--text-2); font-size: 15px; }
 .usb-status summary { padding: 12px 16px; min-height: 44px; box-sizing: border-box; }

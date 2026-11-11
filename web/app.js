@@ -1376,9 +1376,13 @@
     const a = d.archive;
     if (!a) return '';
     // (missing minutes where the Pi took no snapshot in time: "Pi missed snapshots")
-    const label = a.state === 'car' ? CAR_LABEL : a.state === 'filling' ? 'Still arriving' : a.state === 'waiting' ? 'Waiting for Sentry USB' : `${a.missedSnapshots?.length ? 'Pi missed snapshots' : 'Partly archived?'}${a.missingMinutes ? ` ~${a.missingMinutes} min missing` : ''}`;
+    // (Sentry USB's list of what the car wrote: clips it had and didn't keep, "Pi missed";
+    // driving minutes the car never wrote, "Car didn't record")
+    const cf = a.carFiles || {};
+    const carMin = cf.carMissed ? ` ~${cf.carMissed} min` : '';
+    const label = a.state === 'car' ? `${CAR_LABEL}${carMin}` : a.state === 'filling' ? 'Still arriving' : a.state === 'waiting' ? 'Waiting for Sentry USB' : cf.piMissed ? `Pi missed ~${cf.piMissed} min` : `${a.missedSnapshots?.length ? 'Pi missed snapshots' : 'Partly archived?'}${a.missingMinutes ? ` ~${a.missingMinutes} min missing` : ''}`;
     const tone = a.state === 'partial' ? ' amber' : a.state === 'waiting' || a.state === 'car' ? ' wait' : '';
-    const car = a.state !== 'car' && a.sentryQuiet ? `<span class="chip slate" title="${esc(a.sentryQuiet.note || '')}"><span class="cdot"></span>${CAR_LABEL}</span>` : '';
+    const car = a.state !== 'car' && (a.sentryQuiet || cf.carMissed) ? `<span class="chip slate" title="${esc(a.sentryQuiet?.note || '')}"><span class="cdot"></span>${CAR_LABEL}${carMin}</span>` : '';
     return `<button type="button" class="chip gap${tone}" data-gap aria-expanded="${open}" aria-controls="gap-${esc(d.day)}" title="${esc(a.summary)}"><span class="cdot"></span>${esc(label)}</button>${car}`;
   }
   /** The evidence in words, in the opened day. */
@@ -1386,6 +1390,25 @@
     const a = d.archive;
     if (!a) return '';
     return `<p class="note gap-note${a.state === 'partial' ? ' amber' : a.state === 'waiting' || a.state === 'car' ? ' wait' : ''}" id="gap-${esc(d.day)}">${esc(a.summary)}${a.state === 'partial' ? ` ${esc(a.advice || ARCHIVE_ADVICE)}` : ''}</p>`;
+  }
+
+  /**
+   * What Sentry USB's list says the car wrote that day (server/archiveGap.js carFilesPass), in
+   * the opened day: the car's counts beside the share's, and the minutes it marks, in words.
+   * Unknown minutes are only counted, never shown as a problem; parked time is never marked.
+   */
+  const CF_KIND = { pi: 'Pi missed', car: 'Car didn\'t record', unknown: 'Unknown', waiting: 'On its way' };
+  function dayCarFilesNote(d) {
+    const c = d.carFiles;
+    if (!c) return '';
+    const counts = [c.piMissed ? `Pi missed ${c.piMissed} min` : '', c.carMissed ? `Car didn't record ${c.carMissed} min` : '', c.unknown ? `Unknown ${c.unknown} min` : '', c.waiting ? `On its way ${c.waiting} min` : ''].filter(Boolean);
+    const cover = c.coverage === 'none' ? ' Sentry USB\'s list doesn\'t cover this day (it starts with Sentry USB test.27), so it can\'t tell what the car wrote.' : c.coverage === 'partial' ? ' The list covers only part of this day.' : '';
+    const runs = (c.runs || []).map((r) => `<li class="cf-run ${esc(r.kind)}"><span class="cf-when">${esc(r.when)}</span> <span class="chip ${r.kind === 'pi' ? 'amber' : 'slate'}">${esc(CF_KIND[r.kind] || r.kind)}</span> <span class="cf-why">${esc(r.why)}</span></li>`).join('');
+    return `<div class="note carfiles-note" id="cf-${esc(d.day)}">
+      <dl class="cf-counts"><dt>The car wrote</dt><dd>${esc(c.carText)}</dd><dt>On the share</dt><dd>${esc(c.shareText)}</dd></dl>
+      <p class="cf-sum">${counts.length ? esc(`${counts.join(' · ')}.`) : 'Every clip the car wrote is here.'}${esc(cover)}</p>
+      ${runs ? `<ul class="cf-runs">${runs}</ul>` : ''}
+    </div>`;
   }
 
   function dayCard(v, d) {
@@ -1414,6 +1437,7 @@
       </div>
       <button class="day-toggle" type="button" data-toggle aria-expanded="${open}">${open ? '▾ Hide recordings' : `▸ Show ${plural(d.recordings, 'recording')}`}</button>
       ${open ? dayArchiveNote(d) : ''}
+      ${open ? dayCarFilesNote(d) : ''}
       ${open ? `<div class="recs">${recs.map((r) => recCard(v, r)).join('') || '<p class="muted">No recordings.</p>'}</div>` : ''}
     </article>`;
   }

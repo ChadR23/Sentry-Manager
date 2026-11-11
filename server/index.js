@@ -1603,7 +1603,9 @@ async function main() {
     const idx = await speedIndex.progress(params.id, shown.map((d) => d.day)).catch(() => ({}));
     // footage that looks only partly copied to the share yet (the "Partly archived?" tag)
     const gaps = archiveGapRef ? archiveGapRef.forDays(params.id) : {};
-    for (const d of shown) { d.speedIndex = idx[d.day] || { clips: 0, indexed: 0 }; d.archive = gaps[d.day] || null; }
+    // what Sentry USB's list says the car wrote that day, beside the share's own counts
+    const carFiles = archiveGapRef ? archiveGapRef.carFiles(params.id) : null;
+    for (const d of shown) { d.speedIndex = idx[d.day] || { clips: 0, indexed: 0 }; d.archive = gaps[d.day] || null; d.carFiles = carFiles?.days?.[d.day] || null; }
     // how many of each day's recordings have CAN Bridge data (the green "CAN" tag)
     const hasCan = await canOf(params.id);
     if (hasCan) {
@@ -2189,6 +2191,10 @@ async function main() {
     },
     // the snapshots Sentry USB lists (sentryUsb.js): missing minutes it did not catch in time
     snapshotsFor: (vid) => sentryUsb.snapshots(vid),
+    // what the car wrote (Sentry USB's car-files.tsv, carFiles.js), and the clips in the
+    // Recycle Bin (on the share as far as that list goes)
+    carFilesFor: (vid) => sentryUsb.carFiles(vid),
+    binnedFor: (vid) => { try { return db.binItems(vid).flatMap((i) => (i.files || []).map((f) => f.rel)); } catch { return []; } },
     clock24: () => Boolean(db.get('appearance', {}).clock24)
   });
   sentryUsb.start();
@@ -2234,8 +2240,11 @@ async function main() {
   r.add('GET', '/api/vehicles/:id/archive-gaps', async (req, res, { params }) => {
     const v = vehicleOr404(params.id);
     const out = await archiveGapRef.results(v.id);
+    const cf = out.carFiles || null;
     return { vehicleId: v.id, timezone: v.timezone || 'UTC', checkedAt: out.checkedAt || null, signals: out.signals || {}, stalled: out.stalled || null,
-      days: Object.values(out.days || {}).sort((a, b) => b.day.localeCompare(a.day)) };
+      days: Object.values(out.days || {}).sort((a, b) => b.day.localeCompare(a.day)),
+      // Sentry USB's list of what the car wrote, per day (null: the share has none)
+      carFiles: cf ? { present: true, error: cf.error, coveredFrom: cf.coveredFrom ? cf.coveredFrom * 1000 : null, coveredTo: cf.coveredTo ? cf.coveredTo * 1000 : null, days: Object.values(cf.days || {}).sort((a, b) => b.day.localeCompare(a.day)) } : null };
   });
   /** A clip's start in UTC from its name (the car's zone), or null. */
   const canStartOf = (v, name) => {

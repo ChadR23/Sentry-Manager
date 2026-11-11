@@ -184,6 +184,16 @@ details.more p { margin-top: 10px; color: var(--text-2); max-width: 760px; }
 /* "Waiting for Sentry USB": nothing is lost, the clips are still on the Pi (neutral, not amber) */
 .chip.slate, .chip.gap.wait { color: #b9c6d8; border-color: rgba(148, 163, 184, 0.55); background: rgba(148, 163, 184, 0.12); }
 .note.wait { border-color: rgba(148, 163, 184, 0.45); }
+/* what Sentry USB's list says the car wrote, in the opened day */
+.note.carfiles-note { margin: 10px 0 0; max-width: 760px; }
+.cf-counts { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 0; }
+.cf-counts dt { color: var(--muted); }
+.cf-counts dd { margin: 0; color: var(--text); }
+.cf-sum { margin: 8px 0 0; }
+.cf-runs { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.cf-run .cf-when { font-weight: 600; color: var(--text); white-space: nowrap; }
+.cf-run .chip { font-size: 11.5px; padding: 1px 8px; vertical-align: 1px; }
+@media (max-width: 560px) { .cf-counts { grid-template-columns: 1fr; } .cf-counts dd { margin-bottom: 4px; } }
 /* the Sentry USB line under the filters (web/sentryUsb.js) */
 .usb-status { background: var(--panel); border-color: var(--border-strong); margin: 0 0 14px; }
 .usb-status .usb-text { color: var(--text-2); }

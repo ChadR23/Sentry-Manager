@@ -15,9 +15,23 @@ const USB_TAG = { ok: 'chip green', busy: 'chip cyan', wait: 'chip slate', bad: 
 const GAP_TONE = { partial: ' amber', waiting: ' slate', car: ' slate' };
 const CAR_LABEL = 'Car didn\'t record';
 // the car note next to another tag
-const carChip = (a) => (a.state !== 'car' && a.sentryQuiet ? ` <span class="chip gap slate" title="${esc(a.sentryQuiet.note || '')}">${CAR_LABEL}</span>` : '');
-// ("Pi missed snapshots": the missing minutes are where the Pi took no snapshot in time)
-const gapLabel = (a) => (a.state === 'car' ? CAR_LABEL : a.state === 'partial' ? `${a.missedSnapshots?.length ? 'Pi missed snapshots' : 'Partly archived?'}${a.missingMinutes ? ` ~${a.missingMinutes} min missing` : ''}` : a.state === 'waiting' ? 'Waiting for Sentry USB' : 'Still arriving');
+// (with Sentry USB's list of what the car wrote: "Car didn't record ~N min" while driving)
+const carMin = (a) => (a.carFiles?.carMissed ? ` ~${a.carFiles.carMissed} min` : '');
+const carChip = (a) => (a.state !== 'car' && (a.sentryQuiet || a.carFiles?.carMissed) ? ` <span class="chip gap slate" title="${esc(a.sentryQuiet?.note || '')}">${CAR_LABEL}${carMin(a)}</span>` : '');
+// ("Pi missed snapshots": the missing minutes are where the Pi took no snapshot in time;
+// "Pi missed ~N min": Sentry USB's list shows the car wrote them and the Pi didn't keep or upload them)
+const gapLabel = (a) => (a.state === 'car' ? `${CAR_LABEL}${carMin(a)}` : a.state === 'partial' ? (a.carFiles?.piMissed ? `Pi missed ~${a.carFiles.piMissed} min` : `${a.missedSnapshots?.length ? 'Pi missed snapshots' : 'Partly archived?'}${a.missingMinutes ? ` ~${a.missingMinutes} min missing` : ''}`) : a.state === 'waiting' ? 'Waiting for Sentry USB' : 'Still arriving');
+// what Sentry USB's list says the car wrote that day (the selected day): the car's counts beside
+// the share's, and the minutes it marks in words; unknown minutes only counted, never a warning
+const CF_KIND = { pi: ['Pi missed', 'amber'], car: [CAR_LABEL, 'slate'], unknown: ['Unknown', ''], waiting: ['On its way', 'cyan'] };
+const carFilesNote = (c) => {
+  if (!c) return '';
+  const counts = [c.piMissed ? `Pi missed ${c.piMissed} min` : '', c.carMissed ? `${CAR_LABEL} ${c.carMissed} min` : '', c.unknown ? `Unknown ${c.unknown} min` : '', c.waiting ? `On its way ${c.waiting} min` : ''].filter(Boolean);
+  const cover = c.coverage === 'none' ? ' Sentry USB\'s list doesn\'t cover this day, so it can\'t tell what the car wrote.' : c.coverage === 'partial' ? ' The list covers only part of this day.' : '';
+  return `<div class="note small cf-note"><div><span class="faint">Car wrote</span> ${esc(c.carText)}</div><div><span class="faint">On the share</span> ${esc(c.shareText)}</div>
+    <div class="cf-sum">${esc(counts.length ? `${counts.join(' · ')}.` : 'Every clip the car wrote is here.')}${esc(cover)}</div>
+    ${(c.runs || []).map((r) => `<div class="cf-run"><span class="chip ${CF_KIND[r.kind]?.[1] || ''}">${esc(CF_KIND[r.kind]?.[0] || r.kind)}</span> <b class="num">${esc(r.when)}</b> ${esc(r.why)}</div>`).join('')}</div>`;
+};
 
 // "Also delete its CAN data" in a footage delete confirmation: shown only when a CAN Bridge key is
 // mapped to the car (can: the server's count, null otherwise), unticked; those logs go for good, now
@@ -175,6 +189,7 @@ export default {
             ${d.canRecordings > 0 ? `<div><span class="chip can" title="${esc(`CAN Bridge data for ${plural(d.canRecordings, 'recording')} of this day (car data in the Viewer)`)}">${(d.canRecordings === d.recordings ? 'CAN' : `CAN ${d.canRecordings}/${d.recordings}`)}</span></div>` : ''}
             ${d.archive ? `<div><span class="chip gap${GAP_TONE[d.archive.state] || ''}" title="${esc(d.archive.summary)}">${gapLabel(d.archive)}</span>${carChip(d.archive)}</div>` : ''}
             ${d.archive && f.date === d.day ? `<p class="note small gap-note${GAP_TONE[d.archive.state] || ''}">${esc(d.archive.summary)}${d.archive.state === 'partial' ? ` ${esc(d.archive.advice || ARCHIVE_ADVICE)}` : ''}</p>` : ''}
+            ${f.date === d.day ? carFilesNote(d.carFiles) : ''}
             <div class="day-actions">
               <button class="btn sm" type="button" data-play-day="${esc(d.day)}" aria-label="Play ${esc(d.day)}">${icon('play')}Play</button>
               <button class="btn sm" type="button" data-del-day="${esc(d.day)}">Delete day</button>

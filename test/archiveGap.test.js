@@ -519,14 +519,14 @@ test('the neutral "Car didn\'t record" day tag and its note in all five interfac
   const app = read('web', 'app.js');
   const chip = app.match(/\n {2}function dayArchiveChip\([\s\S]*?\n {2}\}\n/)[0];
   assert.match(app, /const CAR_LABEL = 'Car didn\\'t record';/);
-  assert.match(chip, /a\.state === 'car' \? CAR_LABEL :/, 'the day\'s only tag');
+  assert.match(chip, /a\.state === 'car' \? `\$\{CAR_LABEL\}\$\{carMin\}` :/, 'the day\'s only tag');
   assert.match(chip, /a\.state === 'waiting' \|\| a\.state === 'car' \? ' wait'/, 'neutral, not amber');
-  assert.match(chip, /a\.state !== 'car' && a\.sentryQuiet \? `<span class="chip slate" title="\$\{esc\(a\.sentryQuiet\.note/, 'next to another tag');
+  assert.match(chip, /a\.state !== 'car' && \(a\.sentryQuiet \|\| cf\.carMissed\) \? `<span class="chip slate" title="\$\{esc\(a\.sentryQuiet\?\.note/, 'next to another tag');
   assert.match(app.match(/\n {2}function dayArchiveNote\([\s\S]*?\n {2}\}\n/)[0], /a\.state === 'waiting' \|\| a\.state === 'car' \? ' wait'/);
   const packs = {
-    aurora: ['aurora', [/const GAP_TONE = \{ partial: 'amber', waiting: 'slate', car: 'slate' \};/, /a\.state === 'car' \? CAR_LABEL :/, /\$\{carChip\(d\.archive\)\}/, /d\.archive\.state === 'car' \? ' slate'/]],
-    daylight: ['dl', [/if \(a\.state === 'car'\) return carChip\(a\.summary\);/, /chip-slate chip-gap/, /a\.sentryQuiet \? carChip\(a\.sentryQuiet\.note\)/, /a\.state === 'car' \? ' slate'/]],
-    flux: ['flux', [/const GAP_TONE = \{ partial: ' amber', waiting: ' slate', car: ' slate' \};/, /a\.state === 'car' \? CAR_LABEL :/, /\$\{carChip\(d\.archive\)\}/]],
+    aurora: ['aurora', [/const GAP_TONE = \{ partial: 'amber', waiting: 'slate', car: 'slate' \};/, /a\.state === 'car' \? `\$\{CAR_LABEL\}\$\{carMin\(a\)\}` :/, /\$\{carChip\(d\.archive\)\}/, /d\.archive\.state === 'car' \? ' slate'/]],
+    daylight: ['dl', [/if \(a\.state === 'car'\) return carChip\(a\.summary, carMin\);/, /chip-slate chip-gap/, /a\.sentryQuiet \|\| carMin \? carChip\(a\.sentryQuiet\?\.note \|\| '', carMin\)/, /a\.state === 'car' \? ' slate'/]],
+    flux: ['flux', [/const GAP_TONE = \{ partial: ' amber', waiting: ' slate', car: ' slate' \};/, /a\.state === 'car' \? `\$\{CAR_LABEL\}\$\{carMin\(a\)\}` :/, /\$\{carChip\(d\.archive\)\}/]],
     horizon: ['hz', [/const GAP_TONE = \{ partial: 'org', waiting: 'slate', car: 'slate' \};/, /car: CAR_LABEL \};/, /\$\{carPill\(d\.archive\)\}/, /d\.archive\.state === 'car' \? ' slate'/]]
   };
   for (const [pack, [mod, res]] of Object.entries(packs)) {

@@ -53,7 +53,9 @@ days)** (how many, and the latest, or `none`). See "Missed snapshots" below.
 
 Sentry Six Manager never indexes, counts, converts or flags as missing:
 
-- `.sentryusb/` (Sentry USB's status file, below),
+- `.sentryusb/` (Sentry USB's status file and its list of what the car
+  wrote, below; Sentry Six Manager reads those two on purpose, but never
+  indexes them as footage),
 - `.sentryusb-partial/` folders inside clip folders (an upload that was cut
   off and resumes later),
 - `.sentryusbtmp/` (the temporary folder of SMB and NFS uploads),
@@ -267,6 +269,71 @@ the 7 days: `{ total, done, left, failed, bytesLeft, etaMinutes }` (`done` of
 measured speed with the pauses between passes). `pending` counts the clips of
 the last 7 days still waiting. `canBackfill`: this account may change the
 setting (admins).
+
+## What the car wrote (`car-files.tsv`)
+
+From Sentry USB test.27 on, the Pi also writes `.sentryusb/car-files.tsv`
+beside the status file. Every 10 minutes it lists the clips on the car's USB
+drive (from an instant read-only copy, independent of its snapshots) and adds
+each clip it has not seen yet, or that grew since. UTF-8, tab-separated, one
+header line starting with `#`:
+
+```
+# first_seen_unix	path	size	mtime_unix
+1762800000	RecentClips/2026-11-10_12-00-00-front.mp4	30000000	1762790000
+```
+
+- The path is the car's own layout: RecentClips is flat
+  (`RecentClips/<name>.mp4`), while the share has
+  `RecentClips/<YYYY-MM-DD>/<name>.mp4`. Sentry and Saved clips keep their
+  event folder (`SentryClips/<event>/<name>.mp4`) on both.
+- `.mp4` only, the last 7 days, and clips the car later deleted stay listed.
+  A clip listed again with a later first-seen time grew: the largest size
+  counts.
+
+How Sentry Six Manager reads it:
+
+- At most 32 MiB; a larger file is not read. It is parsed again only when its
+  size or modification time changed (the Pi rewrites it every 10 minutes).
+- A line that is not four fields of the right kind is skipped quietly, and so
+  is a path that is absolute, has `..` or empty parts, a backslash, or is not a
+  Tesla clip name. A header naming the four columns in another order is
+  followed.
+- Clips are matched to the share **by name, never by size** (Sentry Six
+  Manager re-encodes clips, so sizes differ): a Recent clip by its file name,
+  an event clip by its event folder and file name. Clips in the Recycle Bin
+  count as on the share.
+
+What it tells, per day and minute of the last 7 days (the archive check,
+`server/archiveGap.js`):
+
+| | When | Shown as |
+|---|---|---|
+| Fine | in the list and on the share | nothing |
+| **Pi missed** | in the list, not on the share, and the Pi has archived since it saw the clip (an archive that went through started after the clip's last first-seen time; while a transfer runs, the clips it is still sending are left alone) | amber **Pi missed ~N min**; counted as missing footage, as before |
+| **Car didn't record** | CAN Bridge shows the car driving, the list covers that minute, and has no clip for it | grey-blue **Car didn't record ~N min**; nothing is missing from the share, so no notification |
+| **Unknown** | CAN Bridge shows driving with no footage, but the list can't speak for that minute: before its first line, after its last update, or while the Pi was off or restarting (a gap in the status file's `snapshots`) | only counted in the opened day; never "car didn't record" |
+| On its way | in the list, not on the share, and the Pi has not archived since | only counted |
+
+Parked minutes (gear P or no speed, Sentry Mode included) are never looked
+at: the car writes no RecentClips then. Without the file (older Sentry USB),
+everything works as before. Minutes a drive cut off is guessed to have lost
+(the speed index) are dropped when the list shows the car wrote nothing then,
+but never called "car didn't record" without CAN Bridge data.
+
+The Pi logs a daily line ("Car files for 2026-11-10: 1234 RecentClips file(s)
+covering 310 minute(s), 3 Sentry event(s), 1 saved clip(s)"). Sentry Six
+Manager can't read that log, so it counts the same from the list (per day of
+the clip's name) and shows it beside its own count of the share.
+
+In the API, each day of `GET /api/vehicles/:id/days` has `carFiles` (`null`
+without the file): `{ coverage: 'full' | 'partial' | 'none', car, share
+({ recentFiles, minutes, sentryEvents, savedEvents }), carText, shareText,
+piMissed, piMissedClips, carMissed, unknown, waiting, runs: [{ kind ('pi' |
+'car' | 'unknown' | 'waiting'), from, to, minutes, when, why }] }`, and a
+day's `archive.carFiles` has the counts and runs. `GET
+/api/vehicles/:id/archive-gaps` adds `carFiles: { present, error,
+coveredFrom, coveredTo, days: [...] }`.
 
 ## Checking that it all works
 

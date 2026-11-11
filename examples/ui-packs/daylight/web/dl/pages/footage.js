@@ -174,18 +174,35 @@ function calendar(dates, month, selected) {
 // "Car didn't record": hours in Sentry Mode with no footage from a car that usually records then.
 // Nothing is missing from the share (the car to check), so neutral, alone or next to another tag
 const CAR_LABEL = 'Car didn\'t record';
-const carChip = (note) => `<span class="chip chip-slate chip-gap" title="${esc(note || '')}">${CAR_LABEL}</span>`;
+// With Sentry USB's list of what the car wrote: "Car didn't record ~N min" while driving, and
+// "Pi missed ~N min" (the car wrote them, the Pi didn't keep or upload them)
+const carChip = (note, min = 0) => `<span class="chip chip-slate chip-gap" title="${esc(note || '')}">${CAR_LABEL}${min ? ` ~${min} min` : ''}</span>`;
 function archiveChip(d) {
   const a = d.archive;
   if (!a) return '';
-  if (a.state === 'car') return carChip(a.summary);
-  return archiveTag(a) + (a.sentryQuiet ? carChip(a.sentryQuiet.note) : '');
+  const carMin = a.carFiles?.carMissed || 0;
+  if (a.state === 'car') return carChip(a.summary, carMin);
+  return archiveTag(a) + (a.sentryQuiet || carMin ? carChip(a.sentryQuiet?.note || '', carMin) : '');
 }
 function archiveTag(a) {
   if (a.state === 'filling') return `<span class="chip chip-grey chip-gap" title="${esc(a.summary)}">Still arriving</span>`;
   // the car drove off mid-transfer: nothing is lost, the clips stay on the Pi (neutral, not a warning)
   if (a.state === 'waiting') return `<span class="chip chip-slate chip-gap" title="${esc(a.summary)}">Waiting for Sentry USB</span>`;
-  return `<span class="chip chip-warn chip-gap" title="${esc(a.summary)}">${icon('alert')}<span>${a.missedSnapshots?.length ? 'Pi missed snapshots' : 'Partly archived?'}${a.missingMinutes ? ` ~${a.missingMinutes} min missing` : ''}</span></span>`;
+  return `<span class="chip chip-warn chip-gap" title="${esc(a.summary)}">${icon('alert')}<span>${a.carFiles?.piMissed ? `Pi missed ~${a.carFiles.piMissed} min` : `${a.missedSnapshots?.length ? 'Pi missed snapshots' : 'Partly archived?'}${a.missingMinutes ? ` ~${a.missingMinutes} min missing` : ''}`}</span></span>`;
+}
+/**
+ * What Sentry USB's list says the car wrote that day, on the day's own page: the car's counts
+ * beside the share's, and the minutes it marks in words. Unknown minutes are only counted.
+ */
+const CF_KIND = { pi: ['Pi missed', 'chip-warn'], car: [CAR_LABEL, 'chip-slate'], unknown: ['Unknown', 'chip-grey'], waiting: ['On its way', 'chip-teal'] };
+function carFilesNote(c) {
+  if (!c) return '';
+  const counts = [c.piMissed ? `Pi missed ${c.piMissed} min` : '', c.carMissed ? `${CAR_LABEL} ${c.carMissed} min` : '', c.unknown ? `Unknown ${c.unknown} min` : '', c.waiting ? `On its way ${c.waiting} min` : ''].filter(Boolean);
+  const cover = c.coverage === 'none' ? ' Sentry USB\'s list doesn\'t cover this day, so it can\'t tell what the car wrote.' : c.coverage === 'partial' ? ' The list covers only part of this day.' : '';
+  return `<div class="card cf-note" role="note"><h3>What the car wrote</h3>
+    <dl class="cf-counts"><dt>The car (Sentry USB's list)</dt><dd>${esc(c.carText)}</dd><dt>On the share</dt><dd>${esc(c.shareText)}</dd></dl>
+    <p class="cf-sum">${esc(counts.length ? `${counts.join(' · ')}.` : 'Every clip the car wrote is here.')}${esc(cover)}</p>
+    ${(c.runs || []).length ? `<ul class="cf-runs">${c.runs.map((r) => `<li><span class="chip ${CF_KIND[r.kind]?.[1] || 'chip-grey'}">${esc(CF_KIND[r.kind]?.[0] || r.kind)}</span> <b>${esc(r.when)}</b> <span>${esc(r.why)}</span></li>`).join('')}</ul>` : ''}</div>`;
 }
 const ADVICE = 'Check the Sentry USB: its Logs page, its archive settings and its Wi-Fi to the NAS. Clips it recycles before copying them are lost.';
 /** The evidence in words, on the day's own page (a tag's tooltip never shows on a phone). */
@@ -321,6 +338,7 @@ async function renderDay(ctx, v, day) {
   let recs = [];
   let selecting = false;
   let gap = null; // footage of the day that looks only partly archived
+  let carFiles = null; // what Sentry USB's list says the car wrote that day
   const selected = new Set();
   const load = async () => {
     const q = new URLSearchParams({ date: day, category: view$.category, limit: '500' });
@@ -330,6 +348,7 @@ async function renderDay(ctx, v, day) {
     ]);
     recs = out.recordings;
     gap = (gaps?.days || []).find((x) => x.day === day) || null;
+    carFiles = (gaps?.carFiles?.days || []).find((x) => x.day === day) || null;
     for (const id of [...selected]) if (!recs.some((r) => r.id === id)) selected.delete(id);
   };
   await load();
@@ -349,6 +368,7 @@ async function renderDay(ctx, v, day) {
           ${recs.length ? `<button class="btn" type="button" id="select-mode" aria-pressed="${selecting}">${icon('select')} ${selecting ? 'Done selecting' : 'Select'}</button>` : ''}
         </div></div>
       ${archiveNote(gap)}
+      ${carFilesNote(carFiles)}
       ${recs.length ? `<div class="rec-list">${sorted.map((r) => recCard(v, r, selecting, selected.has(r.id))).join('')}</div>`
         : emptyState({ art: 'film', title: 'Nothing left on this day', text: 'It may have moved to the Recycle Bin.', action: '<a class="btn btn-soft" href="#/bin">Open Recycle Bin</a>' })}
       ${recs.length ? `<div class="card" style="margin-top:22px"><h3>Tidy up this day</h3>

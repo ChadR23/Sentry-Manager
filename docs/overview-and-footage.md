@@ -335,4 +335,24 @@ icon or a USB warning on the car's screen; reformatting or replacing the
 drive usually fixes it). A day that also has missing footage keeps its
 amber tag and gets this one next to it.
 
+**What the car wrote.** A Sentry USB from test.27 on also leaves a list of
+every clip the car wrote to its USB drive in the last 7 days. With it, the
+day's tags tell who lost what:
+
+- **Pi missed ~N min** (amber): the car wrote those clips, but Sentry USB
+  didn't keep or upload them. Check the Sentry USB.
+- **Car didn't record ~N min** (grey-blue): CAN Bridge shows the car driving,
+  but the car didn't save video to the USB drive (a car or USB drive problem).
+  Nothing is missing from the share, so this sends no notification.
+
+Open the day to see the car's own count beside the share's ("The car wrote:
+320 RecentClips files covering 80 minutes, 2 Sentry events, 0 saved clips /
+On the share: 280 …"), the minutes Pi missed, Car didn't record and Unknown,
+and each marked stretch in words, for example "8:40–8:49 AM: The car wrote
+these clips, but Sentry USB didn't keep or upload them." **Unknown** minutes
+are ones the list can't speak for (Sentry USB was off or restarting, or the
+list doesn't cover that time yet); they are only counted, never a warning.
+Parked time, Sentry Mode included, is never marked. Details:
+[Sentry USB](sentry-usb.md#what-the-car-wrote-car-filestsv).
+
 The findings per day are at `GET /api/vehicles/:id/archive-gaps`.

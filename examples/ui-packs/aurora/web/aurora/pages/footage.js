@@ -63,10 +63,24 @@ const USB_TAG = { ok: 'chip green', busy: 'chip teal', wait: 'chip slate', bad: 
 // "Car didn't record" (neutral) when the car spent hours in Sentry Mode with no footage, though it
 // usually records then: the car to check, nothing missing from the share
 const CAR_LABEL = 'Car didn\'t record';
-const gapLabel = (a) => (!a ? '' : a.state === 'car' ? CAR_LABEL : a.state === 'partial' ? `${a.missedSnapshots?.length ? 'Pi missed snapshots' : 'Partly archived?'}${a.missingMinutes ? ` ~${a.missingMinutes} min missing` : ''}` : a.state === 'waiting' ? 'Waiting for Sentry USB' : 'Still arriving');
+// With Sentry USB's list of what the car wrote: "Pi missed ~N min" (the car wrote them, the Pi
+// didn't keep or upload them) and "Car didn't record ~N min" (driving, and the car wrote nothing)
+const carMin = (a) => (a?.carFiles?.carMissed ? ` ~${a.carFiles.carMissed} min` : '');
+const gapLabel = (a) => (!a ? '' : a.state === 'car' ? `${CAR_LABEL}${carMin(a)}` : a.state === 'partial' ? (a.carFiles?.piMissed ? `Pi missed ~${a.carFiles.piMissed} min` : `${a.missedSnapshots?.length ? 'Pi missed snapshots' : 'Partly archived?'}${a.missingMinutes ? ` ~${a.missingMinutes} min missing` : ''}`) : a.state === 'waiting' ? 'Waiting for Sentry USB' : 'Still arriving');
 const GAP_TONE = { partial: 'amber', waiting: 'slate', car: 'slate' };
 // the car note on top of another tag
-const carChip = (a) => (a && a.state !== 'car' && a.sentryQuiet ? `<span class="chip gap slate" title="${esc(a.sentryQuiet.note || '')}">${CAR_LABEL}</span>` : '');
+const carChip = (a) => (a && a.state !== 'car' && (a.sentryQuiet || a.carFiles?.carMissed) ? `<span class="chip gap slate" title="${esc(a.sentryQuiet?.note || '')}">${CAR_LABEL}${carMin(a)}</span>` : '');
+// what Sentry USB's list says the car wrote that day (the chosen day): the car's counts beside the
+// share's, and the minutes it marks in words; unknown minutes only counted, never a warning
+const CF_KIND = { pi: ['Pi missed', 'amber'], car: [CAR_LABEL, 'slate'], unknown: ['Unknown', ''], waiting: ['On its way', 'teal'] };
+function carFilesNote(c) {
+  if (!c) return '';
+  const counts = [c.piMissed ? `Pi missed ${c.piMissed} min` : '', c.carMissed ? `${CAR_LABEL} ${c.carMissed} min` : '', c.unknown ? `Unknown ${c.unknown} min` : '', c.waiting ? `On its way ${c.waiting} min` : ''].filter(Boolean);
+  const cover = c.coverage === 'none' ? ' Sentry USB\'s list doesn\'t cover this day, so it can\'t tell what the car wrote.' : c.coverage === 'partial' ? ' The list covers only part of this day.' : '';
+  return `<div class="gap-note cf-note"><dl class="cf-counts"><dt>The car wrote</dt><dd>${esc(c.carText)}</dd><dt>On the share</dt><dd>${esc(c.shareText)}</dd></dl>
+    <p class="cf-sum">${esc(counts.length ? `${counts.join(' · ')}.` : 'Every clip the car wrote is here.')}${esc(cover)}</p>
+    ${(c.runs || []).map((r) => `<p class="cf-run"><span class="chip ${CF_KIND[r.kind]?.[1] || ''}">${esc(CF_KIND[r.kind]?.[0] || r.kind)}</span> <b>${esc(r.when)}</b> ${esc(r.why)}</p>`).join('')}</div>`;
+}
 
 function frame(v, d, on) {
   const p = dayParts(d.day);
@@ -214,6 +228,7 @@ export default {
           <button class="btn" type="button" data-trash-day="day">${icon('trash')} Delete this day</button>
           <button class="btn" type="button" data-trash-day="through">Delete through this date</button></div></div>
         ${d?.archive ? `<p class="gap-note${d.archive.state === 'partial' ? ' amber' : d.archive.state === 'waiting' || d.archive.state === 'car' ? ' slate' : ''}">${esc(d.archive.summary)}${d.archive.state === 'partial' ? ` ${esc(d.archive.advice || ADVICE)}` : ''}</p>` : ''}
+        ${carFilesNote(d?.carFiles)}
         ${selected.size ? `<div class="selbar" role="region" aria-label="Selection"><b>${selected.size} selected</b><span class="spacer"></span>
           <button class="btn sm" type="button" data-bulk="protect">${icon('lock')} Protect</button>
           <button class="btn sm" type="button" data-bulk="unprotect"${sel.some((r) => r.protected) ? '' : ' disabled'}>${icon('unlock')} Unprotect</button>

@@ -438,6 +438,10 @@ text.tk-hot { fill: #ffb3c2; }
 .album-gap { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; margin-top: 4px; }
 .album-gap .pill { white-space: normal; }
 .pl-info .gap-note { margin: 6px 0 2px; max-width: 720px; }
+/* what Sentry USB's list says the car wrote (the open day) */
+.pl-info .cf-note { margin: 6px 0 2px; max-width: 720px; display: flex; flex-direction: column; gap: 4px; }
+.pl-info .cf-note p { margin: 0; }
+.pl-info .cf-note .pill { font-size: 11px; padding: 1px 8px; }
 .catbar { display: flex; height: 4px; border-radius: 2px; overflow: hidden; background: rgba(255, 255, 255, 0.08); margin: 3px 0 1px; }
 .catbar i { display: block; }
 .c-Recent { background: var(--cyan); } .c-Sentry { background: var(--org); } .c-Saved { background: var(--grn); } .c-Other { background: var(--violet); }

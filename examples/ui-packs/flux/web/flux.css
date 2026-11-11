@@ -128,6 +128,10 @@ td.ell { display: table-cell; }
 /* "Partly archived? ~N min missing" wraps in a narrow day list (server/archiveGap.js) */
 .chip.gap { height: auto; min-height: 21px; white-space: normal; padding: 2px 8px; line-height: 1.3; }
 .note.gap-note { margin: 2px 0 4px; white-space: normal; }
+/* what Sentry USB's list says the car wrote (the selected day) */
+.note.cf-note { margin: 2px 0 4px; white-space: normal; display: flex; flex-direction: column; gap: 4px; }
+.cf-note .cf-sum { color: var(--text); }
+.cf-note .cf-run .chip { height: 18px; font-size: 10.5px; }
 .chip.cyan { background: var(--cyan-soft); color: var(--cyan); }
 .chip.violet { background: var(--violet-soft); color: var(--violet); }
 /* waiting for Sentry USB: neutral, nothing is lost */

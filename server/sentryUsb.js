@@ -41,6 +41,7 @@
 
 const fsp = require('fs/promises');
 const path = require('path');
+const { createCarFilesReader } = require('./carFiles');
 
 const DIR = '.sentryusb';
 const FILE = 'archive-status.json';
@@ -288,6 +289,21 @@ function describe(status, { nowMs = Date.now(), tz = 'UTC', readAt = null } = {}
   };
 }
 
+/**
+ * When the Pi's newest archive that went through started (unix), or null: an
+ * archive takes a fresh snapshot when it starts, so a clip the Pi saw before
+ * then should be on the share once it is done. While a transfer runs, its
+ * start (the clips it is still sending are held apart, by name); a failed
+ * archive that left files behind, or one still in progress, gives none.
+ */
+function archivedSince(status) {
+  if (!status) return null;
+  if (status.state === 'transferring') return status.transfer?.startedUnix ?? null;
+  const a = status.archive || {};
+  if (a.result === 'ok' || a.result === 'nothing_new' || (a.result === 'failed' && a.filesNotArchived === 0)) return a.startedUnix ?? null;
+  return null;
+}
+
 const STALE_MS = 24 * 3600 * 1000;
 const ms = (unix) => (Number.isSafeInteger(unix) ? unix * 1000 : null);
 
@@ -357,6 +373,9 @@ function snapshotsView(status) {
  */
 function createSentryUsbStatus({ vehicles, now = () => Date.now(), log = null, onChange = () => {}, pollMs = POLL_MS, timers = { setInterval, clearInterval } } = {}) {
   const cache = new Map(); // vid -> { file, size, mtimeMs, status, readAt }
+  // the car's own list of what it wrote, beside the status file (carFiles.js)
+  const carFilesReader = createCarFilesReader({ log });
+  const carFiles = new Map(); // vid -> { file, size, mtimeMs, list, error } or null
   let timer = null;
 
   function filesOf(v) {
@@ -399,9 +418,19 @@ function createSentryUsbStatus({ vehicles, now = () => Date.now(), log = null, o
       next = { file: found.file, size: found.st.size, mtimeMs: found.st.mtimeMs, status, error, readAt: now() };
     }
     cache.set(vid, next);
+    // car-files.tsv beside it (in the status file's folder first)
+    const dirs = [...new Set([...(found ? [path.dirname(found.file)] : []), ...filesOf(v).map((f) => path.dirname(f))])];
+    const cfBefore = carFiles.get(vid) || null;
+    let cf = null;
+    for (const dir of dirs) {
+      cf = await carFilesReader.read(dir).catch(() => null);
+      if (cf) break;
+    }
+    carFiles.set(vid, cf);
     const was = before?.status ? JSON.stringify(before.status) : null;
     const is = next.status ? JSON.stringify(next.status) : null;
-    if (was !== is) {
+    const cfChanged = (cfBefore?.file || null) !== (cf?.file || null) || (cfBefore?.mtimeMs ?? null) !== (cf?.mtimeMs ?? null) || (cfBefore?.size ?? null) !== (cf?.size ?? null);
+    if (was !== is || cfChanged) {
       try { onChange(vid, next.status); } catch { /* observers are advisory */ }
     }
     return next.status;
@@ -492,6 +521,18 @@ function createSentryUsbStatus({ vehicles, now = () => Date.now(), log = null, o
     arrived(vid) { return countArrived(vid).catch(() => null); },
     /** The last status read (no I/O), or null. */
     get(vid) { return cache.get(vid)?.status || null; },
+    /**
+     * The car's list of what it wrote (carFiles.js), for archiveGap.js: null
+     * without the file, else { present, error, fileUnix (when the share's copy
+     * was written), list (parseCarFiles, null when unreadable), archivedUnix:
+     * the start of the Pi's newest archive that went through (its fresh snapshot;
+     * clips it saw before then should be on the share), or null }.
+     */
+    carFiles(vid) {
+      const cf = carFiles.get(vid);
+      if (!cf) return null;
+      return { present: true, error: cf.error || null, fileUnix: Math.floor(cf.mtimeMs / 1000), list: cf.list, archivedUnix: archivedSince(cache.get(vid)?.status || null) };
+    },
     /** The snapshots the last status lists (snapshotInfo), or null. */
     snapshots(vid) { return snapshotInfo(cache.get(vid)?.status || null); },
     /** interpret() of the last status, now. */
@@ -527,8 +568,8 @@ function createSentryUsbStatus({ vehicles, now = () => Date.now(), log = null, o
       if (timer) timers.clearInterval(timer);
       timer = null;
     },
-    forget(vid) { cache.delete(vid); arrivedOf.delete(vid); }
+    forget(vid) { cache.delete(vid); arrivedOf.delete(vid); carFiles.delete(vid); }
   };
 }
 
-module.exports = { createSentryUsbStatus, parseStatus, interpret, inRange, describe, apiView, stampSec, snapshotGaps, snapshotInfo, DIR, FILE, MAX_BYTES, DEFAULT_INTERVAL_S, SNAP_MARGIN_S, CAR_KEEPS_S, MAX_SNAPSHOTS };
+module.exports = { createSentryUsbStatus, archivedSince, parseStatus, interpret, inRange, describe, apiView, stampSec, snapshotGaps, snapshotInfo, DIR, FILE, MAX_BYTES, DEFAULT_INTERVAL_S, SNAP_MARGIN_S, CAR_KEEPS_S, MAX_SNAPSHOTS };
