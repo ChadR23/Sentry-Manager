@@ -1260,9 +1260,10 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
   // In fullscreen only the fullscreen element is drawn: what floats goes in it
   // (not the page's body), and when the cameras themselves are fullscreen (the
   // stage), the bar goes over them and the docked List floats over them too.
+  // (the whole page full screen is the page as it is: laid out as in a window that size)
   const fsHost = () => {
     const f = globalThis.document?.fullscreenElement || globalThis.document?.webkitFullscreenElement || null;
-    return f && (f === stage || f.contains?.(stage)) ? f : null;
+    return f && f !== document.documentElement && f !== document.body && (f === stage || f.contains?.(stage)) ? f : null;
   };
   const floatHost = () => fsHost() || document.body;
   const stageFull = () => fsHost() === stage;
@@ -1343,21 +1344,20 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     }
     return { w, h, ox, oy };
   }
-  /** Put a floating box at (left, top) on the page, kept on the page; where it went. */
-  function setPagePos(node, left, top, pb = pageBox()) {
-    const L = Math.max(0, Math.min(pb.w - node.offsetWidth, left));
-    const T = Math.max(0, Math.min(pb.h - node.offsetHeight, top));
+  /** Put a floating box at (left, top) on the page, kept on the page (`grow`: the page may grow down to hold it); where it went. */
+  function setPagePos(node, left, top, pb = pageBox(), { grow = false } = {}) {
+    // (in fullscreen: on the fullscreen element, wherever the page under it is scrolled to)
+    const x0 = pb.fs ? pb.ox : 0;
+    const y0 = pb.fs ? pb.oy : 0;
+    const L = Math.max(x0, Math.min(x0 + pb.w - node.offsetWidth, left));
+    const T = Math.max(y0, grow ? top : Math.min(y0 + pb.h - node.offsetHeight, top));
     node.style.left = `${Math.round(L - pb.ox)}px`;
     node.style.top = `${Math.round(T - pb.oy)}px`;
     return { left: L, top: T };
   }
   const pageXY = (node) => { const r = rectOf(node); return { left: r.left + sx(), top: r.top + sy() }; };
-  function floatTo(node, p, pb) {
-    const left = p.x * Math.max(0, pb.w - node.offsetWidth);
-    // (in fullscreen: y, a share of the screen's room; the page's top means nothing there)
-    const top = Number.isFinite(p.top) && !pb.fs ? p.top : p.y * Math.max(0, (pb.fs ? pb.h : winH()) - node.offsetHeight);
-    setPagePos(node, left, top, pb);
-  }
+  /** Where a floating box goes in fullscreen: `p`, shares of the screen's room across and down. */
+  const fsRect = (node, p, pb) => ({ left: pb.ox + p.x * Math.max(0, pb.w - node.offsetWidth), top: pb.oy + p.y * Math.max(0, pb.h - node.offsetHeight), width: node.offsetWidth, height: node.offsetHeight });
   // sizes: both boxes resize from their corner grip; width only while floating (docked boxes
   // are as wide as the page), never more than the window; kept per dashboard and screen kind
   const MIN = { bar: { w: 220, h: 64 }, list: { w: 260, h: 170 } };
@@ -1381,7 +1381,12 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     const c = clampSize(node, w ?? 0, h ?? 0);
     node.style.width = w == null ? '' : `${c.w}px`;
     node.style.maxWidth = w == null ? '' : 'none';
-    node.style.height = h == null ? '' : `${c.h}px`;
+    // the bar's height is the most it takes: its blocks fit in fewer rows in a wider window (or
+    // full screen) and it is then no taller than they are, with no empty space under them; the
+    // List's is its height (its rows scroll in it)
+    const most = node === el;
+    node.style.height = h == null || most ? '' : `${c.h}px`;
+    node.style.maxHeight = h == null || !most ? '' : `${c.h}px`;
     node.classList.toggle('sized', h != null);
   }
   const sizeOf = (node) => ({ width: node.offsetWidth, height: node.offsetHeight });
@@ -1429,6 +1434,39 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     }
     return { inset: Math.min(inset, Math.round(H * 0.5)), z: Number.isFinite(z) ? z : null };
   }
+  /** Bars fixed (or stuck) along the window's top, a pack's header: how far down they reach (px). */
+  function topBars() {
+    const H = winH();
+    const W = viewW();
+    if (!(H > 0 && W > 0) || !document.elementsFromPoint) return 0;
+    let inset = 0;
+    // (down the window's top quarter: a header can sit under a notice that scrolls away)
+    for (let y = 3; y < H * 0.25; y += 24) {
+      for (const x of [0.06, 0.5, 0.94]) {
+        for (const hit of document.elementsFromPoint(Math.round(W * x), y)) {
+          if (hit.closest?.('.sentry-sd')) continue;
+          for (let n = hit; n && n !== document.body && n !== document.documentElement; n = n.parentElement) {
+            const pos = globalThis.getComputedStyle?.(n).position;
+            if (pos !== 'fixed' && pos !== 'sticky') continue;
+            const r = rectOf(n);
+            // (a bar across the top, not a side column or a panel taking most of the window)
+            if (r.top < H * 0.25 && r.height > 0 && r.height < H * 0.3 && r.width > W * 0.5) inset = Math.max(inset, Math.ceil(r.bottom));
+            break;
+          }
+        }
+      }
+    }
+    return inset;
+  }
+  /**
+   * Whether the page grows to hold a box put below its end (it scrolls: html and body do not
+   * hide what overflows them). The built-in Viewer's frame does not: there a box with no room
+   * off the cameras goes on them (placeFor).
+   */
+  function pageGrows() {
+    const hides = (n) => { const o = n && globalThis.getComputedStyle?.(n)?.overflowY; return o === 'hidden' || o === 'clip'; };
+    try { return Boolean(globalThis.getComputedStyle) && !hides(document.documentElement) && !hides(document.body); } catch { return false; }
+  }
   const ctlNow = () => {
     try { return controlsOf(typeof controls === 'function' ? controls() : controls, stage); } catch { return null; }
   };
@@ -1436,8 +1474,13 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
   function layoutNow(pb) {
     const r = rectOf(stage);
     const st = { left: r.left + sx(), top: r.top + sy(), width: r.width || 0, height: r.height || 0 };
-    if (pb.fs) return { stage: st, bounds: { left: 0, top: 0, right: pb.w, bottom: pb.h }, keep: [] };
     const ctl = ctlNow();
+    if (pb.fs) {
+      // (the screen; the playback controls when they are full screen too)
+      const fc = ctl && fsHost()?.contains?.(ctl) ? rectOf(ctl) : null;
+      const fa = fc ? controlsArea({ left: fc.left + sx(), top: fc.top + sy(), width: fc.width || 0, height: fc.height || 0 }, st) : null;
+      return { stage: st, bounds: { left: pb.ox, top: pb.oy, right: pb.ox + pb.w, bottom: pb.oy + pb.h }, keep: fa ? [fa] : [] };
+    }
     const c = ctl && !fixedOf(ctl) ? rectOf(ctl) : null;
     const area = c ? controlsArea({ left: c.left + sx(), top: c.top + sy(), width: c.width || 0, height: c.height || 0 }, st) : null;
     const bars = bottomBars();
@@ -1446,10 +1489,17 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
       if (bars.z != null) n.style.setProperty?.('--sd-float-z', String(bars.z - 1));
       else n.style.removeProperty?.('--sd-float-z');
     }
+    // A page that scrolls grows under a box kept below its end now (a box under the controls of a
+    // Viewer as tall as a maximized or full-screen window): it stays there, under the controls, and
+    // is not put on the cameras for want of room (unless bars are fixed along the window's
+    // bottom: a box stays above them at the page's end). Under a header along the window's top.
+    const grow = bars.inset === 0 && pageGrows();
+    const top = Math.min(topBars(), Math.max(0, st.top));
     return {
       stage: st,
-      bounds: { left: 0, top: 0, right: pb.w, bottom: Math.max(0, pb.h - bars.inset) },
-      keep: area ? [area] : []
+      bounds: { left: 0, top, right: pb.w, bottom: grow ? Infinity : Math.max(0, pb.h - bars.inset) },
+      keep: area ? [area] : [],
+      grow
     };
   }
   const roomy = (st) => st.width > 40 && st.height > 40;
@@ -1489,8 +1539,17 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
       // in fullscreen: shares of the screen (the page's layout means nothing there)
       const spot = (field) => fsSpots[field] || board[field]?.[screenKind()];
       const share = (p, d) => (Number.isFinite(p?.x) && Number.isFinite(p?.y) ? { x: p.x, y: p.y } : d);
-      if (bar) floatTo(el, share(spot('float'), { x: 0.5, y: 0.94 }), pb);
-      if (list) floatTo(panel, share(spot('listFloat'), { x: 0.98, y: 0.3 }), pb);
+      // a big change of size (into fullscreen, or out of it) put the spots kept on the page on
+      // other things: each box is moved off the playback controls, and the List off the bar
+      const lay = layoutNow(pb);
+      const off = (r, obstacles) => {
+        if (!obstacles.length) return r;
+        const c = clearOf(r, obstacles, lay.bounds, 8, { down: false });
+        return within(c, lay.bounds) ? c : r;
+      };
+      const b = bar ? off(fsRect(el, share(spot('float'), { x: 0.5, y: 0.94 }), pb), lay.keep) : barFloats ? pageRect(el) : null;
+      if (bar) setPagePos(el, b.left, b.top, pb);
+      if (list) { const l = off(fsRect(panel, share(spot('listFloat'), { x: 0.98, y: 0.3 }), pb), [...lay.keep, ...(b ? [b] : [])]); setPagePos(panel, l.left, l.top, pb); }
       return;
     }
     const lay = layoutNow(pb);
@@ -1504,8 +1563,8 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
       const b2 = clearOf(barAt, [l2, ...lay.keep, ...(onVideo ? [] : [{ ...lay.stage, above: false }])], lay.bounds);
       if (within(b2, lay.bounds) && !overlaps(b2, l2)) { barAt = b2; listAt = l2; }
     }
-    if (bar) setPagePos(el, barAt.left, barAt.top, pb);
-    if (listAt) setPagePos(panel, listAt.left, listAt.top, pb);
+    if (bar) setPagePos(el, barAt.left, barAt.top, pb, lay);
+    if (listAt) setPagePos(panel, listAt.left, listAt.top, pb, lay);
   }
   /** Keep a floating box where it is now (after a drag, a nudge or a resize): anchored to the cameras. */
   function keepFloat(left, top, node = el) {
@@ -1516,7 +1575,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     // kept is the page's (a spot on the screen would put it somewhere else on the page)
     const r3 = (v) => Math.round(Math.max(0, Math.min(1, v)) * 1000) / 1000;
     const field = node === panel ? 'listFloat' : 'float';
-    const shares = { x: r3(at.left / Math.max(1, pb.w - node.offsetWidth)), y: r3(at.top / Math.max(1, pb.h - node.offsetHeight)) };
+    const shares = { x: r3((at.left - (pb.fs ? pb.ox : 0)) / Math.max(1, pb.w - node.offsetWidth)), y: r3((at.top - (pb.fs ? pb.oy : 0)) / Math.max(1, pb.h - node.offsetHeight)) };
     if (pb.fs) { fsSpots[field] = shares; return; }
     const lay = layoutNow(pb);
     const box = { ...at, ...sizeOf(node) };
@@ -1550,7 +1609,8 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
   const onSettle = (e) => { if (e.target === stage || e.target?.contains?.(stage)) onResize(); };
   for (const type of ['transitionend', 'animationend']) document.addEventListener?.(type, onSettle, true);
   // into fullscreen and out: the boxes move to where they can be seen (an open picker closes)
-  const onFullscreen = () => { if (!alive || !board) return; if (!fsHost()) fsSpots = {}; closePick(false); place(); placePanel(); applyFloat(); };
+  // (and once more on the next frame: the window and the cameras may take their new size after the event)
+  const onFullscreen = () => { if (!alive || !board) return; if (!fsHost()) fsSpots = {}; closePick(false); place(); placePanel(); applyFloat(); onResize(); };
   for (const type of ['fullscreenchange', 'webkitfullscreenchange']) document.addEventListener?.(type, onFullscreen);
   // the page grows as it loads (a box kept low on the page waits for it) or shrinks: put them back
   const reflow = () => {
@@ -2073,6 +2133,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     if (g.kind === 'size' && g.moved) {
       const r = rectOf(g.node);
       keepSize(g.node, Math.round(r.width), Math.round(r.height));
+      applySize(g.node);
       if (floating(g.node)) { const p = pageXY(g.node); keepFloat(p.left, p.top, g.node); }
       redrawLists();
     }

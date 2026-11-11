@@ -84,6 +84,7 @@ class El {
     }
     return true;
   }
+  contains(n) { for (; n; n = n.parentElement) if (n === this) return true; return false; }
   closest(sel) { for (let n = this; n; n = n.parentElement) if (n.matches(sel)) return n; return null; }
   addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
   focus() {}
@@ -103,8 +104,8 @@ class El {
   getBoundingClientRect() {
     const L = globalThis.__layout;
     if (!L) return null;
-    if (this.isStage && L.stage) {
-      const { left, top, width, height } = L.stage;
+    if ((this.isStage && L.stage) || (this.isCtl && L.controls)) {
+      const { left, top, width, height } = this.isStage ? L.stage : L.controls;
       return { left: left - globalThis.scrollX, top: top - globalThis.scrollY, width, height, right: left + width - globalThis.scrollX, bottom: top + height - globalThis.scrollY };
     }
     if (!this.classList.contains('sentry-sd')) {
@@ -115,9 +116,12 @@ class El {
     const list = this.classList.contains('sd-listpanel');
     const float = this.classList.contains('float');
     const width = parseFloat(this.style.width) || (float ? (list ? 560 : 600) : L.pageW);
-    const height = parseFloat(this.style.height) || (list ? 400 : 150);
-    const left = (float ? parseFloat(this.style.left) || 0 : 0) - globalThis.scrollX;
-    const top = (float ? parseFloat(this.style.top) || 0 : list ? L.dockTop + 160 : L.dockTop) - globalThis.scrollY;
+    // (the bar: its blocks' height, L.barContent or 150, no more than its max-height)
+    const height = parseFloat(this.style.height) || (list ? 400 : Math.min(L.barContent ?? 150, parseFloat(this.style.maxHeight) || Infinity));
+    // (in a fullscreen element: placed on the screen, wherever the page under it is scrolled to)
+    const fs = float && this.parentElement && this.parentElement === globalThis.document?.fullscreenElement;
+    const left = (float ? parseFloat(this.style.left) || 0 : 0) - (fs ? 0 : globalThis.scrollX);
+    const top = (float ? parseFloat(this.style.top) || 0 : list ? L.dockTop + 160 : L.dockTop) - (fs ? 0 : globalThis.scrollY);
     return { left, top, width, height, right: left + width, bottom: top + height };
   }
   get offsetWidth() { return this.getBoundingClientRect()?.width ?? 0; }
@@ -168,7 +172,7 @@ function server(routes) {
   return asked;
 }
 let instance = 0;
-async function dashboard({ rawOpen = true, routes = {}, clip = clipPath(1), before = null } = {}) {
+async function dashboard({ rawOpen = true, routes = {}, clip = clipPath(1), before = null, controls = false } = {}) {
   const store = new Map([['sentry-sd-raw', rawOpen ? '1' : '0']]);
   const frames = [];
   Object.assign(globalThis, {
@@ -187,8 +191,10 @@ async function dashboard({ rawOpen = true, routes = {}, clip = clipPath(1), befo
   stage.isStage = true;
   const video = { currentTime: 0, src: '', getAttribute: () => video.src };
   video.src = `/api/media?path=${encodeURIComponent(clip)}`;
+  // (the playback controls under the cameras: Play, the timeline, Export; at __layout.controls)
+  const ctl = controls ? Object.assign(page.appendChild(new El('div')), { isCtl: true }) : null;
   before?.();
-  const dash = mod.attachStatDash({ stage, main: () => video, videos: () => [video] });
+  const dash = mod.attachStatDash({ stage, main: () => video, videos: () => [video], controls: ctl });
   // one animation frame (the dashboard's loop), then whatever it asked for
   const frame = async () => { const fn = frames.shift(); fn?.(); await settle(); };
   await settle();
@@ -768,10 +774,10 @@ test('CAN values: decimals from the DBC step, every unit converted, SNA and the 
 
 // ---- moving and resizing both boxes ----------------------------------------------
 /** A page 1400 x 3000 in a 1400 x 900 window, scrolled to scrollY; window listeners kept here. */
-function layoutPage(t, { scrollY = 0, width = 1400, stage = null } = {}) {
+function layoutPage(t, { scrollY = 0, width = 1400, stage = null, controls = null } = {}) {
   const win = {};
   Object.assign(globalThis, {
-    __layout: { pageW: width, dockTop: 500, stage }, innerWidth: width, innerHeight: 900, scrollX: 0, scrollY,
+    __layout: { pageW: width, dockTop: 500, stage, controls }, innerWidth: width, innerHeight: 900, scrollX: 0, scrollY,
     addEventListener: (type, fn) => { (win[type] ||= []).push(fn); },
     removeEventListener: (type, fn) => { win[type] = (win[type] || []).filter((f) => f !== fn); }
   });
@@ -788,7 +794,7 @@ function layoutPage(t, { scrollY = 0, width = 1400, stage = null } = {}) {
 }
 async function pageDash(t, blocks, extra = {}, opts = {}) {
   const page = layoutPage(t, opts);
-  const d = await dashboard({ rawOpen: false, routes: { boards: { boards: [{ id: 'b', name: 'B', placement: 'below', blocks, ...extra }], active: 'b' } }, before: page.finish });
+  const d = await dashboard({ rawOpen: false, routes: { boards: { boards: [{ id: 'b', name: 'B', placement: 'below', blocks, ...extra }], active: 'b' } }, before: page.finish, controls: Boolean(opts.controls) });
   t.after(() => d.dash.destroy());
   const saved = async () => { await new Promise((r) => setTimeout(r, 600)); const put = d.asked.filter((a) => a.method === 'PUT').pop(); return put && JSON.parse(put.body).boards[0]; };
   // the window resized (to w x h, when given): the boxes are put back on the next frame
@@ -904,9 +910,11 @@ test('the List box: resized from its grip (height docked, both floating), clampe
 test('a bar over a short video is no taller than the video: its grip, on its top, stays where it can be reached', async (t) => {
   const d = await pageDash(t, [{ type: 'small', signals: ['dash.speed'] }], { placement: 'over', size: { wide: { h: 600 } } });
   d.stage.clientHeight = 250;
+  globalThis.__layout.barContent = 700; // (blocks that need more than that)
   d.resize();
   assert.ok(d.el.classList.contains('over'));
-  assert.equal(d.el.style.height, `${250 - 16}px`, 'as tall as the video, less its margins');
+  assert.equal(d.el.style.maxHeight, `${250 - 16}px`, 'as tall as the video, less its margins');
+  assert.equal(rectOfBox(d.el).height, 250 - 16);
   // dragged up from the grip, it stops there too
   fire(d.el.querySelector('[data-size-bar]'), 'pointerdown', { pointerId: 1, clientX: 100, clientY: 100, button: 0 });
   d.send('pointermove', 100, -400);
@@ -1137,6 +1145,8 @@ test('a page that does not scroll, with no room for the List off the bar: the ba
     float: { wide: { h: 'l', v: 't', dx: 15, dy: 341, over: true } }, listFloat: { wide: { h: 'r', v: 't', dx: 0, dy: 62, over: true } } }, { width: 900, stage: rect(0, 0, 900, 872) });
   globalThis.innerHeight = 932;
   Object.assign(document.documentElement, { clientHeight: 932, scrollHeight: 932 });
+  // (its body hides what overflows it: the page cannot grow)
+  globalThis.getComputedStyle = (n) => ({ position: n === document.body ? 'static' : 'relative', transform: 'none', overflowY: n === document.body ? 'hidden' : 'visible' });
   d.resize();
   const b = rectOfBox(d.el);
   const l = rectOfBox(d.dash.panel);
@@ -1284,4 +1294,92 @@ test('a bar over the video stays inside the cameras, and while customized it is 
   const z = Number(/\.sentry-sd\.over\.editing\{z-index:(\d+)\}/.exec(src)?.[1]);
   assert.ok(z > 101, 'above the Clips panel, the map and the dashboard');
   assert.ok(z < 2147481900, 'below the floating boxes and the stat picker');
+});
+
+// ---- the window maximized or full screen, and back (Horizon: the owner's screenshots) --------
+/** The bar under the playback controls at the left, the List under them at the right, both resized. */
+const UNDER = {
+  placement: 'float', listPlacement: 'float',
+  float: { wide: { h: 'l', v: 'B', dx: 0, dy: 150, over: false } },
+  listFloat: { wide: { h: 'r', v: 'B', dx: 0, dy: 150, over: false } },
+  // (the bar made taller while its blocks took two rows: now they take one, 166 px)
+  size: { wide: { w: 940, h: 400 } }, listSize: { wide: { w: 300, h: 500 } }
+};
+/** A Horizon Viewer: cameras and controls as at w x h; the page as tall as the window when `fits`. */
+function horizonAt(d, w, h, fits) {
+  const big = w > 1600;
+  globalThis.__layout.stage = big ? rect(20, 150, 1580, 640) : rect(20, 150, 970, 450);
+  globalThis.__layout.controls = big ? rect(20, 800, 1580, 130) : rect(20, 610, 970, 130);
+  d.resize(w, h);
+  document.documentElement.scrollHeight = fits ? h : 2000;
+  d.resize();
+}
+test('maximized and back: the boxes stay under the playback controls, off the cameras, off each other, no taller than their blocks', async (t) => {
+  const d = await pageDash(t, LIST_BLOCKS, UNDER, { width: 1366, stage: rect(20, 150, 970, 450), controls: rect(20, 610, 970, 130) });
+  globalThis.__layout.barContent = 166;
+  const bar = d.el;
+  const list = d.dash.panel;
+  const check = (tag) => {
+    const { stage, controls } = globalThis.__layout;
+    const b = rectOfBox(bar);
+    const l = rectOfBox(list);
+    const ctl = rect(controls.left, stage.top + stage.height, controls.width, controls.top + controls.height - stage.top - stage.height);
+    for (const [k, r] of [['bar', b], ['List', l]]) {
+      assert.ok(!inter(r, stage), `${tag}: the ${k} is not on the cameras: ${JSON.stringify(r)}`);
+      assert.ok(!inter(r, ctl), `${tag}: the ${k} is not on the controls: ${JSON.stringify(r)}`);
+      assert.ok(r.left >= 0 && r.left + r.width <= globalThis.innerWidth && r.top >= 0, `${tag}: the ${k} is on the page`);
+      assert.ok(r.top >= ctl.top + ctl.height, `${tag}: the ${k} is under the controls`);
+    }
+    assert.ok(!inter(b, l), `${tag}: not on each other`);
+    assert.equal(b.height, 166, `${tag}: the bar is as tall as its blocks, not its old 400 px`);
+    return { b, l };
+  };
+  horizonAt(d, 1366, 768, false);
+  const before = check('a normal window');
+  assert.equal(before.b.top, 600 + 150, 'its spot: 150 px under the cameras');
+  // maximized: the Viewer fits the window, so the page ends at the controls (it was put on the cameras)
+  horizonAt(d, 1920, 1080, true);
+  const big = check('maximized');
+  assert.equal(big.b.top, 790 + 150, 'still its spot under the controls: the page grows to hold it');
+  assert.equal(big.l.left + big.l.width, 1600, 'the List at the cameras\' right');
+  // back to the normal window: where they were
+  horizonAt(d, 1366, 768, false);
+  assert.deepEqual(check('back'), before);
+  assert.equal(d.asked.filter((a) => a.method === 'PUT').length, 0, 'nothing saved by the resizes');
+});
+
+test('full screen (the Viewer\'s own button) and back: the boxes are off the controls and each other, then where they were', async (t) => {
+  // (the List's spot also kept as shares of the room, as a full screen uses them: the middle)
+  const spots = { ...UNDER, listFloat: { wide: { ...UNDER.listFloat.wide, x: 0.5, y: 0.5 } } };
+  const d = await pageDash(t, LIST_BLOCKS, spots, { width: 1366, stage: rect(20, 150, 970, 450), controls: rect(20, 610, 970, 130), scrollY: 48 });
+  globalThis.__layout.barContent = 166;
+  const fsChange = () => { for (const fn of document.listeners.fullscreenchange || []) fn(); d.frames(); };
+  horizonAt(d, 1366, 768, false);
+  const before = [rectOfBox(d.el), rectOfBox(d.dash.panel)];
+  // the Viewer (cameras and controls) full screen on a 1600 x 1000 screen, the page under it scrolled by 48
+  const viewer = d.stage.parentElement;
+  document.fullscreenElement = viewer;
+  globalThis.__layout.stage = rect(10, 48 + 10, 1580, 700);
+  globalThis.__layout.controls = rect(10, 48 + 720, 1580, 130);
+  Object.assign(globalThis, { innerWidth: 1600, innerHeight: 1000 });
+  Object.assign(document.documentElement, { clientWidth: 1600, clientHeight: 1000 });
+  fsChange();
+  assert.equal(d.el.parentElement, viewer, 'in the fullscreen element');
+  const b = rectOfBox(d.el);
+  const l = rectOfBox(d.dash.panel);
+  const ctl = rect(10, 48 + 710, 1580, 140);
+  for (const r of [b, l]) {
+    assert.ok(!inter(r, ctl), `not on Play and Export: ${JSON.stringify(r)}`);
+    assert.ok(r.top >= 48 && r.top + r.height <= 48 + 1000 && r.left >= 0 && r.left + r.width <= 1600, `on the screen: ${JSON.stringify(r)}`);
+  }
+  assert.ok(!inter(b, l), `not on each other: ${JSON.stringify([b, l])}`);
+  // out of full screen: back at their spots on the page
+  document.fullscreenElement = null;
+  Object.assign(globalThis, { innerWidth: 1366, innerHeight: 768 });
+  Object.assign(document.documentElement, { clientWidth: 1366, clientHeight: 768 });
+  globalThis.__layout.stage = rect(20, 150, 970, 450);
+  globalThis.__layout.controls = rect(20, 610, 970, 130);
+  fsChange();
+  assert.equal(d.el.parentElement, document.body);
+  assert.deepEqual([rectOfBox(d.el), rectOfBox(d.dash.panel)], before);
 });
