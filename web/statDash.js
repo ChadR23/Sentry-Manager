@@ -45,6 +45,11 @@ const STYLE = `
   box-sizing:border-box;color:var(--sd-fg);font:14px/1.3 system-ui,-apple-system,"Segoe UI",sans-serif;-webkit-user-select:none;user-select:none}
 .sentry-sd *{box-sizing:border-box}
 .sentry-sd.below{position:relative;margin:8px 0;background:var(--sd-bg);border:1px solid var(--sd-line);border-radius:18px;padding:8px}
+.sentry-sd.below.sd-tight{flex:0 0 auto;margin:6px 8px}
+.sentry-sd.sd-listpanel.below.sd-tight{display:flex;flex-direction:column;flex:0 1 auto;min-height:230px;max-height:max(230px,36vh);margin:0 8px 6px}
+.sentry-sd.sd-listpanel.below.sd-tight > .sd-row{flex:1 1 auto;min-height:0;align-items:stretch}
+.sentry-sd.sd-listpanel.below.sd-tight .sd-list{max-width:none}
+.sentry-sd.sd-listpanel.below.sd-tight .sd-list-scroll{height:auto;flex:1 1 0;min-height:60px}
 .sentry-sd.float{position:absolute;z-index:var(--sd-float-z,2147482000);left:0;top:0;max-width:min(96vw,1180px);background:rgba(18,20,24,.97);border:1px solid var(--sd-line);border-radius:16px;padding:6px;box-shadow:0 12px 32px rgba(0,0,0,.45)}
 .sentry-sd.moving{opacity:.92;box-shadow:0 16px 40px rgba(0,0,0,.6)}
 .sentry-sd.over{position:absolute;left:8px;right:8px;bottom:8px;z-index:11;background:rgba(10,12,15,.55);-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);border-radius:16px;padding:6px;pointer-events:auto}
@@ -301,11 +306,19 @@ function canDigits(m) {
   if (Number.isFinite(f) && f > 0) return f >= 1 ? 0 : Math.min(6, Math.ceil(-Math.log10(f) - 1e-9));
   return Math.abs((m.max ?? 0) - (m.min ?? 0)) > 200 ? 0 : 1;
 }
+// A log that starts a moment into the clip (the bridge woke up, or the log was cut at the
+// minute while the footage, lined up, starts a few seconds earlier) has no value for the first
+// seconds: there the first value read is shown, up to CAN_LEAD_MS before it (every signal of
+// the demo's drive was "—" with the Viewer paused at 0 s, its first frames 2.7 s in). Further
+// back it is no data. (A log that runs on from before the clip has the value before its start:
+// the server sends it.)
+export const CAN_LEAD_MS = 5000;
 /** A series' value at `ms`: [[ms, value], …] pairs, or { t: Float64Array, v } columns (the List's answer). */
-const canSeriesAt = (pts, ms) => {
+export const canSeriesAt = (pts, ms) => {
   if (pts && !Array.isArray(pts)) {
     const { t, v } = pts;
-    if (!t.length || ms < t[0]) return null;
+    if (!t.length) return null;
+    if (ms < t[0]) return t[0] - ms <= CAN_LEAD_MS ? v[0] : null;
     let lo = 0;
     let hi = t.length - 1;
     while (lo < hi) {
@@ -314,7 +327,8 @@ const canSeriesAt = (pts, ms) => {
     }
     return v[lo];
   }
-  if (!pts?.length || ms < pts[0][0]) return null;
+  if (!pts?.length) return null;
+  if (ms < pts[0][0]) return pts[0][0] - ms <= CAN_LEAD_MS ? pts[0][1] : null;
   let lo = 0;
   let hi = pts.length - 1;
   while (lo < hi) {
@@ -1124,6 +1138,12 @@ export const isAnchored = ANCHOR;
 
 export function attachStatDash({ stage, videos = () => [], main = () => null, over = false, controls = null } = {}) {
   if (!stage) return { destroy() {} };
+  // `over`: a Viewer whose own panels (Clips, the map, its dashboard) float over the cameras
+  // and which does not scroll (the Original). The bar still goes under the cameras there by
+  // default: over them it was under those panels, and a docked List squashed the cameras until
+  // the bar sat on them at the top. A docked List there takes at most about a third of the
+  // window (its rows scroll) and the cameras the rest.
+  const tight = Boolean(over);
   if (!document.getElementById('sentry-sd-css')) {
     const s = document.createElement('style');
     s.id = 'sentry-sd-css';
@@ -1256,7 +1276,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
   const spotOf = (field) => (fsHost() && fsSpots[field]) || board?.[field]?.[screenKind()] || null;
   const floatsNow = (field, node) => Boolean(spotOf(field)) || loose.has(node);
   const whereNow = () => (board?.placement === 'float' && floatsNow('float', el) ? 'float'
-    : over || board?.placement === 'over' || (board?.placement === 'float' && board?.barHome === 'over') ? 'over' : 'below');
+    : board?.placement === 'over' || (board?.placement === 'float' && board?.barHome === 'over') ? 'over' : 'below');
   // In fullscreen only the fullscreen element is drawn: what floats goes in it
   // (not the page's body), and when the cameras themselves are fullscreen (the
   // stage), the bar goes over them and the docked List floats over them too.
@@ -1268,6 +1288,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
   const floatHost = () => fsHost() || document.body;
   const stageFull = () => fsHost() === stage;
   function place() {
+    el.classList.toggle('sd-tight', tight);
     const where = whereNow() === 'below' && stageFull() ? 'over' : whereNow();
     el.classList.toggle('over', where === 'over');
     el.classList.toggle('below', where === 'below');
@@ -1291,6 +1312,8 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     if (!has) { panel.remove(); return; }
     panel.classList.toggle('float', panelFloats());
     panel.classList.toggle('below', !panelFloats());
+    // (docked in a Viewer that does not scroll: no taller than leaves the cameras most of it)
+    panel.classList.toggle('sd-tight', tight && !panelFloats());
     if (panelFloats()) {
       if (panel.parentElement !== floatHost()) floatHost().appendChild(panel);
     } else {
@@ -1897,7 +1920,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
   }
   const MOVE_BAR = '<button type="button" class="sd-btn sd-move" data-move-bar aria-label="Move the car data: drag it anywhere, or use the arrow keys" title="Drag to move it anywhere (arrow keys work too)">⠿ Move</button>';
   const DOCK_LIST = '<button type="button" class="sd-btn" data-dock-list title="Put the list back under the car data">Dock</button>';
-  const putBack = () => `<button type="button" class="sd-btn" data-dock-bar title="Put the car data back ${board.barHome === 'over' || over ? 'over the video' : 'under the cameras'}">Put back</button>`;
+  const putBack = () => `<button type="button" class="sd-btn" data-dock-bar title="Put the car data back ${board.barHome === 'over' ? 'over the video' : 'under the cameras'}">Put back</button>`;
   function draw() {
     if (pop && (!editing || hidden || !board.blocks[pop.pick])) closePick(false);
     kindDrawn = screenKind();
@@ -1924,7 +1947,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
           <button type="button" class="sd-btn" data-add="small">+ Small</button><button type="button" class="sd-btn" data-add="wide">+ Wide (3)</button>
           <button type="button" class="sd-btn" data-add="gauge">+ Gauge</button><button type="button" class="sd-btn" data-add="state">+ Light</button><button type="button" class="sd-btn" data-add="list">+ List (every stat)</button>
           <select data-placement aria-label="Where the car data is">
-            ${over ? '' : `<option value="below"${whereNow() === 'below' ? ' selected' : ''}>Below the cameras</option>`}
+            <option value="below"${whereNow() === 'below' ? ' selected' : ''}>Below the cameras</option>
             <option value="over"${whereNow() === 'over' ? ' selected' : ''}>Over the video</option>
             <option value="float"${whereNow() === 'float' ? ' selected' : ''}>Anywhere (drag it)</option></select>
           <button type="button" class="sd-btn" data-units>${ctx().metric ? 'km/h' : 'mph'}</button>

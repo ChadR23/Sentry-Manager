@@ -129,8 +129,8 @@ export function createGridResizer({ grid, getLayoutId, getColumns }) {
 
     let apply = function applyTracks() {
         const { tracks } = current();
-        grid.style.gridTemplateColumns = tracks.columns.map((share) => `${share}fr`).join(' ');
-        grid.style.gridTemplateRows = tracks.rows.map((share) => `${share}fr`).join(' ');
+        grid.style.gridTemplateColumns = tracks.columns.map((share) => `minmax(0, ${share}fr)`).join(' ');
+        grid.style.gridTemplateRows = tracks.rows.map((share) => `minmax(0, ${share}fr)`).join(' ');
         requestAnimationFrame(positionHandles);
     };
 
@@ -178,8 +178,8 @@ export function createGridResizer({ grid, getLayoutId, getColumns }) {
         tracks[drag.axis][drag.index] = first;
         tracks[drag.axis][drag.index + 1] = drag.pair - first;
         drag.latest = tracks;
-        grid.style.gridTemplateColumns = tracks.columns.map((share) => `${share}fr`).join(' ');
-        grid.style.gridTemplateRows = tracks.rows.map((share) => `${share}fr`).join(' ');
+        grid.style.gridTemplateColumns = tracks.columns.map((share) => `minmax(0, ${share}fr)`).join(' ');
+        grid.style.gridTemplateRows = tracks.rows.map((share) => `minmax(0, ${share}fr)`).join(' ');
         positionHandles();
     }
 

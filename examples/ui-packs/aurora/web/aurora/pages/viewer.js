@@ -184,6 +184,7 @@ export default {
     // Every camera must sit above where the bar and the dock rest, so the
     // cameras are sized from the room between the title row and the bar.
     const GAP = 10;
+    const carData = () => { const n = stageEl.nextElementSibling; return n?.matches?.('.sentry-sd.below:not(.sd-listpanel)') ? n : null; };
     let fitRaf = 0;
     function fit() {
       cancelAnimationFrame(fitRaf);
@@ -198,8 +199,6 @@ export default {
       const ctrlTop = innerHeight - bottom - ctrlEl.offsetHeight;
       const r = cockpit.getBoundingClientRect();
       const top = fs ? r.top : r.top + scrollY;
-      // a little room for the angled side windows' perspective
-      const availH = (ctrlTop - top - 8) * 0.97;
       const availW = stageEl.clientWidth * 0.98;
       const g = GAP;
       // every camera stays a 44 px tap target: the mirror strip and small side
@@ -218,6 +217,15 @@ export default {
         }
         return lo;
       };
+      // the car data (web/statDash.js) docked under the cameras: they make room for it above the
+      // bar, so the bar does not cover it, when the front camera stays at least 300 px wide that
+      // way (a big window); else they keep the room and the car data is under them, scrolled to
+      const room = ctrlTop - top - 8;
+      const data = fs || focus ? null : carData();
+      const less = data ? room - data.offsetHeight - 16 : room;
+      const frontFor = (h) => Math.max(biggest((f) => hWide(f) <= h, (f) => wWide(f) <= availW), biggest((f) => hTall(f) <= h, (f) => f <= availW && (f - 3 * g) / 4 >= T));
+      // (a little room for the angled side windows' perspective)
+      const availH = (less < room && frontFor(less * 0.97) >= 300 ? less : room) * 0.97;
       let lay;
       let F;
       let FH = null;
@@ -285,6 +293,17 @@ export default {
     sizes.observe(ctrlEl);
     sizes.observe(stageEl);
     sizes.observe(q('.vw-top'));
+    // (the car data's bar comes, goes and changes size: the cameras fit again)
+    let dataSeen = null;
+    const dataWatch = new MutationObserver(() => {
+      const d = carData();
+      if (d === dataSeen) return;
+      if (dataSeen) sizes.unobserve(dataSeen);
+      dataSeen = d;
+      if (d) sizes.observe(d);
+      fit();
+    });
+    if (stageEl.parentElement) dataWatch.observe(stageEl.parentElement, { childList: true });
     addEventListener('resize', fit);
 
     // ---------- the bar and the dock hide while playing ----------
@@ -940,6 +959,7 @@ export default {
         root.style.removeProperty('--ctrl-bottom');
         safeProbe.remove();
         sizes.disconnect();
+        dataWatch.disconnect();
         removeEventListener('resize', fit);
         for (const t of ACTIVITY) document.removeEventListener(t, wake, { capture: true });
         document.removeEventListener('click', swallow, true);

@@ -68,6 +68,7 @@ class El {
   remove() { if (this.parentElement) { const p = this.parentElement; p.children.splice(p.children.indexOf(this), 1); this.parentElement = null; } }
   after(node) { node.remove(); const p = this.parentElement; p.children.splice(p.children.indexOf(this) + 1, 0, node); node.parentElement = p; }
   get previousElementSibling() { const p = this.parentElement; if (!p) return null; return p.children[p.children.indexOf(this) - 1] || null; }
+  get nextElementSibling() { const p = this.parentElement; if (!p) return null; return p.children[p.children.indexOf(this) + 1] || null; }
   get lastElementChild() { return this.children[this.children.length - 1] || null; }
   all() { return this.children.flatMap((c) => [c, ...c.all()]); }
   querySelectorAll(sel) { return this.all().filter((n) => n.matches(sel)); }
@@ -172,7 +173,7 @@ function server(routes) {
   return asked;
 }
 let instance = 0;
-async function dashboard({ rawOpen = true, routes = {}, clip = clipPath(1), before = null, controls = false } = {}) {
+async function dashboard({ rawOpen = true, routes = {}, clip = clipPath(1), before = null, controls = false, over = false } = {}) {
   const store = new Map([['sentry-sd-raw', rawOpen ? '1' : '0']]);
   const frames = [];
   Object.assign(globalThis, {
@@ -194,7 +195,7 @@ async function dashboard({ rawOpen = true, routes = {}, clip = clipPath(1), befo
   // (the playback controls under the cameras: Play, the timeline, Export; at __layout.controls)
   const ctl = controls ? Object.assign(page.appendChild(new El('div')), { isCtl: true }) : null;
   before?.();
-  const dash = mod.attachStatDash({ stage, main: () => video, videos: () => [video], controls: ctl });
+  const dash = mod.attachStatDash({ stage, main: () => video, videos: () => [video], controls: ctl, over });
   // one animation frame (the dashboard's loop), then whatever it asked for
   const frame = async () => { const fn = frames.shift(); fn?.(); await settle(); };
   await settle();
@@ -1382,4 +1383,56 @@ test('full screen (the Viewer\'s own button) and back: the boxes are off the con
   fsChange();
   assert.equal(d.el.parentElement, document.body);
   assert.deepEqual([rectOfBox(d.el), rectOfBox(d.dash.panel)], before);
+});
+
+// ---- the Original's Viewer (Studio): its own panels float over the cameras, the page does not scroll ----
+test('the Original: the bar is under the cameras (not over them, under the Clips panel and the map); "Over the video" still puts it there', async (t) => {
+  t.after(() => { delete globalThis.fetch; });
+  const wide = { type: 'wide', signals: ['dash.speed', 'dash.accelerator', 'dash.steering'] };
+  const list = { type: 'list', signals: [], q: '', changing: true };
+  const d = await dashboard({ over: true, routes: { boards: { boards: [{ id: 'b', name: 'B', placement: 'below', listPlacement: 'dock', blocks: [wide, wide, wide, list] }], active: 'b' } } });
+  const panel = d.el.nextElementSibling;
+  assert.equal(d.stage.nextElementSibling, d.el, 'right after the cameras, in the page');
+  assert.notEqual(d.el.parentElement, d.stage, 'not on the cameras');
+  assert.ok(d.el.classList.contains('below') && !d.el.classList.contains('over'));
+  assert.ok(d.el.classList.contains('sd-tight'));
+  // the docked List under it, kept short (its rows scroll) so the cameras keep most of the Viewer
+  assert.ok(panel.classList.contains('sd-listpanel') && panel.classList.contains('below') && panel.classList.contains('sd-tight'));
+  // "Below the cameras" is offered there too
+  fire(d.el.querySelector('[data-edit]'), 'click');
+  assert.match(d.el.querySelector('[data-placement]').textContent, /Below the cameras/);
+  d.dash.destroy();
+  const o = await dashboard({ over: true, routes: { boards: { boards: [{ id: 'b', name: 'B', placement: 'over', blocks: [wide] }], active: 'b' } } });
+  assert.equal(o.el.parentElement, o.stage, 'chosen: over the video');
+  assert.ok(o.el.classList.contains('over'));
+  o.dash.destroy();
+});
+
+test('the Original: a docked List there is no taller than about a third of the window, and the cameras\' grid shrinks to what is left', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'web', 'statDash.js'), 'utf8');
+  assert.match(src, /\.sentry-sd\.sd-listpanel\.below\.sd-tight\{[^}]*max-height:max\(230px,36vh\)/);
+  assert.match(src, /\.sentry-sd\.below\.sd-tight\{flex:0 0 auto/);
+  // (rows of 0.5fr each took the first row's video height: the second row was cut off)
+  const grid = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'scripts', 'ui', 'playbackLayout.js'), 'utf8');
+  assert.doesNotMatch(grid, /=> `\$\{share\}fr`/);
+  assert.equal((grid.match(/minmax\(0, \$\{share\}fr\)/g) || []).length, 4);
+});
+
+test('a CAN log that starts a moment into the clip: its first value from the clip\'s start, up to 5 s before it', async () => {
+  const mod = await import(`${pathToFileURL(MODULE).href}?n=${++instance}`);
+  const { canSeriesAt, CAN_LEAD_MS } = mod;
+  assert.equal(CAN_LEAD_MS, 5000);
+  // (the demo's drive: every signal's first frame 2.7 s after the clip's 0 s, so all was "—" while paused there)
+  const pairs = [[S + 2700, 86.5], [S + 30_000, 86.3]];
+  const cols = { t: Float64Array.from([S + 2700, S + 30_000]), v: Float64Array.from([86.5, 86.3]) };
+  for (const pts of [pairs, cols]) {
+    assert.equal(canSeriesAt(pts, S), 86.5, 'at 0 s: the first value read');
+    assert.equal(canSeriesAt(pts, S + 2700 - 5000), 86.5);
+    assert.equal(canSeriesAt(pts, S + 2700 - 5001), null, 'further back: no data');
+    assert.equal(canSeriesAt(pts, S + 29_999), 86.5);
+    assert.equal(canSeriesAt(pts, S + 40_000), 86.3);
+  }
+  assert.equal(canSeriesAt([], S), null);
+  assert.equal(canSeriesAt({ t: new Float64Array(0), v: [] }, S), null);
+  assert.equal(canSeriesAt(undefined, S), null);
 });
