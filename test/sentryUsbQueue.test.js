@@ -9,7 +9,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { createSentryUsbQueue, archiveBusy } = require('../server/sentryUsbQueue');
+const { createSentryUsbQueue, archiveBusy, splitSecrets, SECRETS_ONLINE_TEXT } = require('../server/sentryUsbQueue');
 const { fakeState, answer, statusBody } = require('./fixtures/fakeSentryUsb');
 
 const quiet = { info() {}, warn() {}, debug() {} };
@@ -103,29 +103,28 @@ test('settings: only the changed fields are applied; a field changed on the Pi t
   q.add(ID, {
     kind: 'settings', params: {
       apply: true,
-      changes: { SSID: { from: 'HomeNet', to: 'WorkNet' }, ARCHIVE_DELAY: { from: '20', to: '30' }, WIFIPASS: { from: null, to: 'newwifipass', secret: true }, DISCORD_ENABLED: { from: null, to: 'true' } }
+      changes: { TIME_ZONE: { from: 'America/Los_Angeles', to: 'Europe/Paris' }, ARCHIVE_DELAY: { from: '20', to: '30' }, DISCORD_ENABLED: { from: null, to: 'true' } }
     }
   }, 'admin');
   // meanwhile, on the Pi: ARCHIVE_DELAY (the same field) and SNAPSHOT_INTERVAL (another one)
   st.config.ARCHIVE_DELAY = '45';
   st.config.SNAPSHOT_INTERVAL = '600';
-  assert.deepEqual(q.list(ID).queued[0].params, { apply: true, fields: ['SSID', 'ARCHIVE_DELAY', 'WIFIPASS', 'DISCORD_ENABLED'] }, 'values are not shown');
+  assert.deepEqual(q.list(ID).queued[0].params, { apply: true, fields: ['TIME_ZONE', 'ARCHIVE_DELAY', 'DISCORD_ENABLED'] }, 'values are not shown');
   link.on = true;
   await q.kick(ID);
   const r = q.list(ID).results[0];
   assert.equal(r.state, 'done');
   assert.deepEqual(r.result.skipped, ['ARCHIVE_DELAY']);
-  assert.deepEqual(r.result.applied.sort(), ['DISCORD_ENABLED', 'SSID', 'WIFIPASS']);
+  assert.deepEqual(r.result.applied.sort(), ['DISCORD_ENABLED', 'TIME_ZONE']);
   assert.match(r.result.message, /Skipped ARCHIVE_DELAY/);
-  assert.equal(st.config.SSID, 'WorkNet');
+  assert.equal(st.config.TIME_ZONE, 'Europe/Paris');
   assert.equal(st.config.ARCHIVE_DELAY, '45', 'the Pi\'s own change stays');
   assert.equal(st.config.SNAPSHOT_INTERVAL, '600', 'another field changed on the Pi is not overwritten');
   assert.equal(st.config.DISCORD_ENABLED, 'true', 'a commented line can be turned on');
-  assert.equal(st.config.WIFIPASS, 'newwifipass');
   assert.equal(st.config.SHARE_PASSWORD, 'smbpass', 'a secret sent back empty is kept');
-  assert.equal(st.lastPut.SHARE_PASSWORD, '', 'other secrets go back empty: kept');
+  assert.equal(st.lastPut.SHARE_PASSWORD, '', 'secrets go back empty: kept');
+  assert.equal(st.lastPut.WIFIPASS, '');
   assert.equal(st.setupRuns, 1, 'and setup re-ran');
-  assert.equal(JSON.stringify(q.list(ID)).includes('newwifipass'), false, 'the new password is not in the list');
   // everything conflicting: nothing written
   st.lastPut = null;
   q.add(ID, { kind: 'settings', params: { changes: { ARCHIVE_DELAY: { from: '20', to: '70' } } } }, 'admin');
@@ -135,8 +134,54 @@ test('settings: only the changed fields are applied; a field changed on the Pi t
   // the Pi's rules, checked when queueing: read-only keys, and a secret that must follow its destination
   assert.throws(() => q.add(ID, { kind: 'settings', params: { changes: { CAM_SIZE: { from: '40G', to: '60G' } } } }), /CAM_SIZE cannot be changed/);
   assert.throws(() => q.add(ID, { kind: 'settings', params: { changes: { WEB_PASSWORD: { from: null, to: 'x', secret: true } } } }), /WEB_PASSWORD cannot be changed/);
-  assert.throws(() => q.add(ID, { kind: 'settings', params: { changes: { ARCHIVE_SERVER: { from: 'nas.local', to: 'evil.example' } } } }), /needs SHARE_PASSWORD entered again/);
+  assert.throws(() => q.add(ID, { kind: 'settings', params: { changes: { ARCHIVE_SERVER: { from: 'nas.local', to: 'evil.example' } } } }), /needs SHARE_PASSWORD entered again\. Password changes need the Sentry USB online/);
   assert.throws(() => q.add(ID, { kind: 'settings', params: { changes: { SSID: { from: 'WorkNet', to: 'Other' } } } }), /needs WIFIPASS/);
+});
+
+test('a queued settings change never holds a secret: refused alone, split from a mix, dropped from an old saved queue', async () => {
+  const db = memDb();
+  const st = fakeState();
+  const link = fakeLink(st, { online: false });
+  const { q } = make({ db, link });
+  // refused: every field Manager masks, flagged or not
+  for (const k of ['WIFIPASS', 'SHARE_PASSWORD', 'AP_PASS', 'TELEGRAM_BOT_TOKEN', 'DISCORD_WEBHOOK_URL', 'NTFY_URL', 'IFTTT_KEY', 'AWS_SECRET_ACCESS_KEY', 'PUSHOVER_APP_KEY']) {
+    assert.throws(() => q.add(ID, { kind: 'settings', params: { changes: { [k]: { from: null, to: 'sekrit-2' } } } }, 'admin'),
+      (err) => err.code === 'SECRET_ONLINE' && err.message === SECRETS_ONLINE_TEXT, k);
+  }
+  assert.throws(() => q.add(ID, { kind: 'settings', params: { changes: { TIME_ZONE: { from: null, to: 'UTC' }, X_ENABLED: { from: null, to: 'x', secret: true } } } }, 'admin'));
+  assert.equal(SECRETS_ONLINE_TEXT, 'Password changes need the Sentry USB online. Save them while it\'s connected.');
+  // split: the secrets and what must go with them wait; the rest is queued
+  const s = splitSecrets({
+    TIME_ZONE: { from: 'America/Los_Angeles', to: 'UTC' }, SSID: { from: 'HomeNet', to: 'WorkNet' }, WIFIPASS: { from: null, to: 'sekrit-2', secret: true },
+    ARCHIVE_DELAY: { from: '20', to: '25' }, MATRIX_PASSWORD: { from: null, to: 'sekrit-3' }
+  });
+  assert.deepEqual(Object.keys(s.keep), ['TIME_ZONE', 'ARCHIVE_DELAY']);
+  assert.deepEqual(s.held, ['WIFIPASS', 'MATRIX_PASSWORD', 'SSID']);
+  assert.equal(s.note, `${SECRETS_ONLINE_TEXT} Also left for then: SSID goes with WIFIPASS.`);
+  assert.deepEqual(splitSecrets({ TIME_ZONE: { from: null, to: 'UTC' } }), { keep: { TIME_ZONE: { from: null, to: 'UTC' } }, held: [], note: null });
+  q.add(ID, { kind: 'settings', params: { changes: s.keep } }, 'admin');
+  assert.equal(JSON.stringify(db.get('sentryusb-queue')).includes('sekrit'), false, 'nothing secret is stored');
+  link.on = true;
+  await q.kick(ID);
+  assert.equal(st.config.TIME_ZONE, 'UTC');
+  assert.equal(st.lastPut.WIFIPASS, '', 'the Wi-Fi password is kept as it was');
+
+  // a queue an older Manager saved with a secret in it: dropped at start, never sent
+  const old = memDb();
+  old.set('sentryusb-queue', { items: [
+    { id: 'a1', seq: 1, deviceId: ID, kind: 'settings', state: 'queued', createdAt: 1, expiresAt: Date.now() + 86_400_000, params: { apply: false, changes: { WIFIPASS: { from: null, to: 'old-secret-1', secret: true } } } },
+    { id: 'a2', seq: 2, deviceId: ID, kind: 'settings', state: 'queued', createdAt: 2, expiresAt: Date.now() + 86_400_000, params: { apply: false, changes: { TIME_ZONE: { from: 'America/Los_Angeles', to: 'Europe/Rome' }, SHARE_PASSWORD: { from: null, to: 'old-secret-2' } } } },
+    { id: 'a3', seq: 3, deviceId: ID, kind: 'settings', state: 'running', createdAt: 3, expiresAt: Date.now() + 86_400_000, params: { apply: false, changes: { SSID: { from: 'a', to: 'b' }, WIFIPASS: { from: null, to: 'old-secret-3' } } } }
+  ] });
+  const st2 = fakeState();
+  const b = make({ db: old, link: fakeLink(st2) });
+  assert.equal(JSON.stringify(old.get('sentryusb-queue')).includes('old-secret'), false, JSON.stringify(old.get('sentryusb-queue')));
+  const l = b.q.list(ID);
+  assert.deepEqual(l.queued.map((x) => [x.id, x.params.fields, x.note]), [['a2', ['TIME_ZONE'], `SHARE_PASSWORD left out. ${SECRETS_ONLINE_TEXT}`]]);
+  assert.deepEqual(l.results.map((x) => [x.id, x.state]).sort(), [['a1', 'cancelled'], ['a3', 'interrupted']]);
+  await b.q.kick(ID);
+  assert.equal(st2.config.TIME_ZONE, 'Europe/Rome');
+  assert.equal(st2.lastPut.SHARE_PASSWORD, '');
 });
 
 test('update and reboot wait for the archive to finish, at most 2 hours, then stay queued', async () => {
@@ -221,7 +266,23 @@ test('fetched files: the newest 5 per Pi are kept; a Pi\'s error is the failure 
 test('a queued settings change with a control character in a value is refused, as the proxy refuses it', () => {
   const { q } = make({ link: fakeLink(fakeState(), { online: false }) });
   for (const to of ['Home\nexport PATH=/tmp', 'a\rb', 'a\u0000b', 'a\u001bb', 'a\u007fb']) {
-    assert.throws(() => q.add(ID, { kind: 'settings', params: { changes: { SSID: { from: 'x', to }, WIFIPASS: { from: null, to: 'secret123' } } } }, 'admin'), /Bad value for SSID/, JSON.stringify(to));
+    assert.throws(() => q.add(ID, { kind: 'settings', params: { changes: { NOTIFICATION_TITLE: { from: 'x', to } } } }, 'admin'), /Bad value for NOTIFICATION_TITLE/, JSON.stringify(to));
   }
-  assert.ok(q.add(ID, { kind: 'settings', params: { changes: { SSID: { from: 'x', to: 'Home 2' }, WIFIPASS: { from: null, to: 'secret123' } } } }, 'admin'));
+  assert.ok(q.add(ID, { kind: 'settings', params: { changes: { NOTIFICATION_TITLE: { from: 'x', to: 'Home 2' } } } }, 'admin'));
+});
+
+test('the settings page splits a change as the server does, in the same words', async () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'web', 'sentryUsbLink.js'), 'utf8');
+  const page = await import(`data:text/javascript,${encodeURIComponent(src)}`);
+  assert.equal(page.SECRETS_ONLINE_TEXT, SECRETS_ONLINE_TEXT);
+  const c = {
+    TIME_ZONE: { from: 'UTC', to: 'Europe/Paris', secret: false }, SSID: { from: 'a', to: 'b', secret: false }, WIFIPASS: { from: null, to: 'sekrit-9', secret: true },
+    ARCHIVE_SERVER: { from: 'nas', to: 'nas2', secret: false }, GOTIFY_APP_TOKEN: { from: null, to: 'sekrit-10', secret: true }, NOTIFICATION_TITLE: { from: 'x', to: 'y', secret: false }
+  };
+  const a = page.splitHeld(c);
+  const b = splitSecrets(c);
+  assert.deepEqual(Object.keys(a.keep).sort(), Object.keys(b.keep).sort());
+  assert.deepEqual(a.held.sort(), b.held.sort());
+  assert.deepEqual(Object.keys(a.keep).sort(), ['NOTIFICATION_TITLE', 'TIME_ZONE']);
+  assert.equal(JSON.stringify(a.keep).includes('sekrit'), false, 'the page never sends a password to the queue');
 });

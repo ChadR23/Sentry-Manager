@@ -136,6 +136,22 @@ const SECRET_TARGETS = {
   GOTIFY_APP_TOKEN: ['GOTIFY_DOMAIN'], NTFY_TOKEN: ['NTFY_URL'], AWS_SECRET_ACCESS_KEY: ['AWS_REGION', 'AWS_ACCESS_KEY_ID']
 };
 const UPDATE_TAG = /^(?!.*\.\.)[A-Za-z0-9._+-]{1,64}$/;
+// passwords are never queued (server/sentryUsbQueue.js has the same words)
+export const SECRETS_ONLINE_TEXT = 'Password changes need the Sentry USB online. Save them while it\'s connected.';
+// a change split for the queue: secrets, and the fields that must go with one, wait for the Pi
+export function splitHeld(c) {
+  const keep = {};
+  const held = [];
+  for (const [k, v] of Object.entries(c)) {
+    if (v.secret || isSecretKey(k)) held.push(k);
+    else keep[k] = { from: v.from, to: v.to };
+  }
+  const tied = [];
+  for (const [sec, targets] of Object.entries(SECRET_TARGETS)) {
+    for (const t of targets) if (t in keep) { delete keep[t]; held.push(t); tied.push(`${t} goes with ${sec}`); }
+  }
+  return { keep, held, note: `${SECRETS_ONLINE_TEXT}${tied.length ? ` Also left for then: ${tied.join(', ')}.` : ''}` };
+}
 
 // the Pi's logs (fixed names: it has no route that lists them)
 const LOG_NAMES = ['archiveloop', 'manager-link', 'setup', 'diagnostics', 'syslog', 'kern', 'auth', 'daemon', 'sentryusb', 'sentryusb-ble'];
@@ -466,8 +482,22 @@ export function createSentryUsbPage(el, { h24 = null } = {}) {
       const queueIt = (apply) => guarded(async () => {
         const c = changes();
         if (!Object.keys(c).length) { status.textContent = 'Nothing changed.'; return; }
-        if (!check(c)) return;
-        await api(`/api/sentryusb/${encodeURIComponent(selected)}/queue`, { method: 'POST', body: JSON.stringify({ kind: 'settings', params: { changes: c, apply } }) }).catch(named);
+        // passwords are never sent to the queue: they stay in their fields, the rest is queued
+        const { keep, held, note } = splitHeld(c);
+        // the fields left for later are outlined; the note is brought into view
+        const showHeld = (text) => {
+          for (const { wrap } of inputs.values()) wrap.style.outline = '';
+          for (const k of held) { const f = inputs.get(k); if (f) { f.wrap.style.outline = '2px solid #e0a030'; f.wrap.style.outlineOffset = '3px'; } }
+          status.textContent = text;
+          status.scrollIntoView({ block: 'center' });
+        };
+        if (!Object.keys(keep).length) { showHeld(note); return; }
+        await api(`/api/sentryusb/${encodeURIComponent(selected)}/queue`, { method: 'POST', body: JSON.stringify({ kind: 'settings', params: { changes: keep, apply } }) }).catch(named);
+        if (held.length) {
+          const n = Object.keys(keep).length;
+          showHeld(`Queued ${n} change${n === 1 ? '' : 's'} for when it is home; ${held.join(', ')} left as typed. ${note}`);
+          return;
+        }
         tab = 'queue';
         drawDetail();
       });
@@ -475,7 +505,7 @@ export function createSentryUsbPage(el, { h24 = null } = {}) {
     }
     fill(pane,
       d.online ? h('p', { class: 'sul-muted' }, 'The Sentry USB\'s setup settings. Passwords are never shown: leave one empty to keep it. Untick a setting to stop using it. Settings marked "on the Pi only" (the web login, drive sizes and a few more) can only be changed on the Sentry USB itself.')
-        : h('p', { class: 'sul-muted' }, `Away: these are its settings as read ${stamp(from)}. Changes are queued; only the fields you change are applied when it is home, and a field changed on the Sentry USB meanwhile is left alone.`),
+        : h('p', { class: 'sul-muted' }, `Away: these are its settings as read ${stamp(from)}. Changes are queued; only the fields you change are applied when it is home, and a field changed on the Sentry USB meanwhile is left alone. ${SECRETS_ONLINE_TEXT}`),
       [...groups].map(([g, ks]) => h('details', { open: g === 'Wi-Fi and network' || g === 'Archive (where clips go)' }, h('summary', {}, `${g} (${ks.length})`), h('div', { class: 'sul-cfg' }, ks.map(field)))),
       actionsRow, status);
     return undefined;

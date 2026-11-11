@@ -325,6 +325,13 @@ normal link the next time the Pi connects, using the same allowlisted routes.
   and re-runs setup if asked. A change made on the Pi meanwhile to another
   field is not overwritten. If the same field was changed on the Pi too,
   Manager skips that field and reports it.
+- **Never a password:** password changes need the Sentry USB online. A queued
+  change refuses every secret field (the list Manager masks, section 5) and
+  every field whose secret must be sent with it (5a: a new SSID needs
+  WIFIPASS, a new archive server SHARE_PASSWORD). A mix saved while the Pi is
+  away queues the other fields and leaves those untouched on the page, with
+  "Password changes need the Sentry USB online. Save them while it's
+  connected." Nothing secret is stored in the queue.
 - **Order and timing:**
   - Actions run in the order queued, one at a time, after the handshake and
     the first status push.
@@ -569,7 +576,8 @@ save its settings (an empty field would wipe the secret on a Pi that does not
 treat empty as "keep"). Masked fields may come as `"<KEY>__set": true` at the
 top level of the config object. The editor shows keys off the Pi's settable
 list (section 5a) as "on the Pi only" and never changes them; before saving or
-queueing it asks for the secret a changed destination needs (5a), and a `400`
+queueing it asks for the secret a changed destination needs (5a; queued, that
+field waits for the Pi to be online with its secret), and a `400`
 from the Pi that names a key outlines that field. Queueing checks the same two
 rules on the server.
 
@@ -578,8 +586,10 @@ rules on the server.
 `upload_running` true (or `"yes"`), or `archive.running`/`archive.active`.
 The Pi's status sends `archiving` (archive work running: copying,
 uploading, verifying), so update and reboot wait while it is true. Settings changes store `{from, to}` per field
-(`null` = commented out); a secret is always applied (it reads back empty, so it
-cannot be compared). The PUT sends every active line, with secrets empty
+(`null` = commented out), never a secret: `POST …/queue` holds those back and
+answers `held` (the field names) and `note`; with nothing else left it is a
+`400` (`SECRET_ONLINE`). A queue saved by an older Manager has its secret values
+dropped at start-up. The PUT sends every active line, with secrets empty
 (keep), plus the changes, since the Pi's PUT replaces the whole config.
 The Updates tab sends `{"version": latest_version}` with Install when the tag
 is a plain version tag (else no body); the queued update posts no body (latest
@@ -603,7 +613,8 @@ to Manager's log (log search) and the newest 1000 to the support bundle as
 
 **Where the key is not.** No API answer, log line, support bundle, security
 log or database snapshot holds a link key: a snapshot drops the keys (a
-restored one shows the Pi unpaired) and every queued settings value.
+restored one shows the Pi unpaired) and the queue (a restored one would run
+actions again that already ran).
 
 **Where this differs from the first draft.** The Pi's final contract above
 replaced the draft: no log list, no backup download, the web login read-only

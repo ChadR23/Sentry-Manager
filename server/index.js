@@ -89,7 +89,7 @@ const { openCanLog, stopWhenStalled, FORMATS: CAN_FORMATS } = require('./canLogR
 const { createCanTrust } = require('./canTrust');
 const { createCanPort } = require('./canPort');
 const sentryUsbLinkLib = require('./sentryUsbLink');
-const { createSentryUsbQueue } = require('./sentryUsbQueue');
+const { createSentryUsbQueue, splitSecrets } = require('./sentryUsbQueue');
 const { createSentryUsbAudit } = require('./sentryUsbAudit');
 const { createCanSync } = require('./canSync');
 const canCalc = require('./canCalc');
@@ -319,7 +319,7 @@ async function main() {
   // a snapshot chosen in Settings → Health takes the database's place first
   try { applyPendingRestore(path.join(DATA, 'manager.db'), log); } catch (err) { log.error(`Restoring the database snapshot failed: ${err.message}`); }
   const db = new ManagerDB(path.join(DATA, 'manager.db'));
-  // (a snapshot keeps no Sentry USB link key, nor a queued settings change's values)
+  // (a snapshot keeps no Sentry USB link key, nor the queue: a restored one would run actions again)
   const snapshots = createSnapshots({
     db, dbFile: path.join(DATA, 'manager.db'), dir: path.join(DATA, 'snapshots'), log: logger.scope('snapshots'),
     secret: { sentryusb: sentryUsbLinkLib.withoutKeys, 'sentryusb-queue': () => ({ items: [] }) }
@@ -2758,12 +2758,21 @@ async function main() {
   r.add('POST', '/api/sentryusb/:id/queue', (req, res, { params, body, user }) => {
     sentryWriter(req, user);
     sentryOr404(params.id);
-    if (body?.kind === 'settings') requireConfirmed(req); // it can carry passwords
+    let qparams = body?.params;
+    let held = { held: [], note: null };
+    if (body?.kind === 'settings') {
+      requireConfirmed(req); // where clips go, which Wi-Fi it joins
+      // passwords are never queued: they wait for the Pi to be online, the rest is queued
+      const { keep, ...h } = splitSecrets(qparams?.changes);
+      held = h;
+      if (held.held.length && !Object.keys(keep).length) throw Object.assign(new HttpError(400, held.note), { code: 'SECRET_ONLINE', expose: true, key: held.held[0] });
+      qparams = { ...qparams, changes: keep };
+    }
     let qid;
-    try { qid = sentryQueue.add(params.id, { kind: body?.kind, params: body?.params, expiresInDays: body?.expiresInDays ?? 14 }, user); } catch (err) { throw new HttpError(err.status || 400, err.message); }
+    try { qid = sentryQueue.add(params.id, { kind: body?.kind, params: qparams, expiresInDays: body?.expiresInDays ?? 14 }, user); } catch (err) { throw new HttpError(err.status || 400, err.message); }
     securityLog.action({ deviceId: params.id, who: user, route: `queued ${String(sentryQueue.KINDS[body.kind]).toLowerCase()}`, result: 'waiting', queued: true });
-    audit.info(`Sentry USB "${sentryLink.name(params.id)}": queued ${String(sentryQueue.KINDS[body.kind]).toLowerCase()}${body.kind === 'settings' ? ` (${Object.keys(body.params?.changes || {}).join(', ').slice(0, 300)})` : ''}: ${by(req, user)}`);
-    return { ok: true, id: qid, ...sentryQueue.list(params.id) };
+    audit.info(`Sentry USB "${sentryLink.name(params.id)}": queued ${String(sentryQueue.KINDS[body.kind]).toLowerCase()}${body.kind === 'settings' ? ` (${Object.keys(qparams?.changes || {}).join(', ').slice(0, 300)})${held.held.length ? `, left for when it is online: ${held.held.join(', ')}` : ''}` : ''}: ${by(req, user)}`);
+    return { ok: true, id: qid, ...held, ...sentryQueue.list(params.id) };
   });
   r.add('DELETE', '/api/sentryusb/:id/queue/:qid', (req, res, { params, user }) => {
     sentryWriter(req, user);

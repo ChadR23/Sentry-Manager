@@ -211,6 +211,37 @@ test('the Sentry USB link through the server', { skip: !hasOpenssl, timeout: 120
     assert.equal(pi.ws.closed, false, 'still connected after 16 s');
     assert.equal((await s.call('GET', '/api/sentryusb', { cookie: admin })).json.devices[0].online, true);
 
+    // a live save with a password still works (the page sends every active line)
+    const cur = (await s.call('GET', `${P}/setup/config`, { cookie: admin })).json;
+    const all = Object.fromEntries(Object.entries(cur).filter(([k, v]) => !k.endsWith('__set') && v && typeof v === 'object' && v.active).map(([k, v]) => [k, v.value]));
+    const live = await s.call('PUT', `${P}/setup/config`, { cookie: admin, body: { ...all, SSID: 'CabinNet', WIFIPASS: 'live-wifi-pass-31' } });
+    assert.equal(live.status, 200, live.text);
+    assert.deepEqual([pi.state.config.SSID, pi.state.config.WIFIPASS], ['CabinNet', 'live-wifi-pass-31']);
+
+    // away: password changes are never queued; a mix queues the rest and says why
+    pi.ws.terminate();
+    for (let i = 0; i < 50; i++) { if (!(await s.call('GET', '/api/sentryusb', { cookie: admin })).json.devices[0].online) break; await wait(100); }
+    const Q = `/api/sentryusb/${id}/queue`;
+    const only = await s.call('POST', Q, { cookie: admin, body: { kind: 'settings', params: { changes: { WIFIPASS: { from: null, to: 'queued-wifi-pass-77', secret: true } } } } });
+    assert.equal(only.status, 400);
+    assert.equal(only.json.code, 'SECRET_ONLINE');
+    assert.equal(only.json.error, 'Password changes need the Sentry USB online. Save them while it\'s connected.');
+    const mix = await s.call('POST', Q, { cookie: admin, body: { kind: 'settings', params: { changes: {
+      TIME_ZONE: { from: 'Europe/London', to: 'Europe/Paris' }, SSID: { from: 'CabinNet', to: 'WorkNet' },
+      WIFIPASS: { from: null, to: 'queued-wifi-pass-77', secret: true }, SHARE_PASSWORD: { from: null, to: 'queued-share-pass-78' }
+    } } } });
+    assert.equal(mix.status, 200, mix.text);
+    assert.deepEqual(mix.json.held.sort(), ['SHARE_PASSWORD', 'SSID', 'WIFIPASS']);
+    assert.match(mix.json.note, /^Password changes need the Sentry USB online\. Save them while it's connected\. Also left for then: SSID goes with WIFIPASS\.$/);
+    assert.deepEqual(mix.json.queued[0].params.fields, ['TIME_ZONE'], 'only the other field is queued');
+    // nothing secret reaches the database (nor its write-ahead log)
+    await wait(300);
+    const dataDir = path.join(s.dir, 'data');
+    for (const n of fs.readdirSync(dataDir).filter((n) => n.startsWith('manager.db'))) {
+      const bytes = fs.readFileSync(path.join(dataDir, n));
+      for (const secret of ['queued-wifi-pass-77', 'queued-share-pass-78', 'live-wifi-pass-31']) assert.equal(bytes.includes(Buffer.from(secret)), false, `${secret} in ${n}`);
+    }
+
     // unpair: the key goes, the link closes, the port closes (nothing else needs it)
     assert.equal((await s.call('DELETE', `/api/sentryusb/${id}`, { cookie: admin })).status, 200);
     for (let i = 0; i < 50 && !pi.ws.closed; i++) await wait(50);

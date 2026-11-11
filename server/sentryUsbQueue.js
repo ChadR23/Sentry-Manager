@@ -23,6 +23,8 @@ const KINDS = {
   update: 'Install update',
   reboot: 'Reboot'
 };
+// passwords and other secrets are never queued: they wait for the Pi to be online
+const SECRETS_ONLINE_TEXT = 'Password changes need the Sentry USB online. Save them while it\'s connected.';
 const LAST = ['update', 'reboot']; // always last in a batch, in this order
 const WAITS_FOR_IDLE = new Set(['update', 'reboot']);
 const DAY = 86_400_000;
@@ -30,6 +32,25 @@ const KEEP_FILES = 5;
 const KEEP_RESULTS = 100;
 const MAX_QUEUED = 50;
 const KEY_RE = /^[A-Z][A-Z0-9_]{0,63}$/;
+
+/**
+ * A settings change split for the queue: { keep, held, note }. Secrets, and
+ * fields whose secret must be sent with them (SECRET_TARGETS), are held back
+ * for when the Pi is online; the rest can be queued.
+ */
+function splitSecrets(changes) {
+  const keep = {};
+  const held = [];
+  for (const [k, c] of Object.entries(changes && typeof changes === 'object' ? changes : {})) {
+    if (isSecretKey(k) || c?.secret) held.push(k);
+    else keep[k] = c;
+  }
+  const tied = [];
+  for (const [sec, hit] of secretsNeeded(new Set(Object.keys(keep)), () => false)) {
+    for (const t of hit) if (t in keep) { delete keep[t]; held.push(t); tied.push(`${t} goes with ${sec}`); }
+  }
+  return { keep, held, note: held.length ? `${SECRETS_ONLINE_TEXT}${tied.length ? ` Also left for then: ${tied.join(', ')}.` : ''}` : null };
+}
 
 /** True when the Pi's status says an archive or upload is running. */
 function archiveBusy(status) {
@@ -58,13 +79,26 @@ function createSentryUsbQueue({ db, link, dir, log, notify = () => {}, onResult 
   const changed = () => { try { onChange(); } catch { /* the caller's */ } };
   const running = new Map(); // device id -> its batch under way
 
+  // a finished settings change keeps its field names, not its values
+  const forget = (it) => (it.kind === 'settings' ? { apply: it.params?.apply, changes: Object.fromEntries(Object.keys(it.params?.changes || {}).map((k) => [k, {}])) } : it.params);
   // Manager stopped in the middle of an action: reported, never sent again
   let fixed = false;
   for (const it of store.items) {
     if (it.state === 'running') {
-      Object.assign(it, { state: 'interrupted', finishedAt: now(), result: { message: 'Sentry Manager restarted while this ran, so it is not known whether it finished. It is not run again.' } });
+      Object.assign(it, { state: 'interrupted', finishedAt: now(), params: forget(it), result: { message: 'Sentry Manager restarted while this ran, so it is not known whether it finished. It is not run again.' } });
       fixed = true;
     }
+  }
+  // a queue saved before secrets were refused: its secret values are dropped, never sent
+  for (const it of store.items) {
+    const ch = it.state === 'queued' && it.kind === 'settings' && it.params?.changes;
+    if (!ch) continue;
+    const gone = Object.keys(ch).filter((k) => isSecretKey(k) || ch[k]?.secret);
+    if (!gone.length) continue;
+    for (const k of gone) delete ch[k];
+    if (!Object.keys(ch).length) Object.assign(it, { state: 'cancelled', finishedAt: now(), params: forget(it), result: { message: SECRETS_ONLINE_TEXT } });
+    else it.note = `${gone.join(', ')} left out. ${SECRETS_ONLINE_TEXT}`;
+    fixed = true;
   }
   if (fixed) save();
 
@@ -81,8 +115,7 @@ function createSentryUsbQueue({ db, link, dir, log, notify = () => {}, onResult 
       files: files(deviceId)
     };
   }
-  // settings changes: the field names and whether a value is set, never the values
-  // (a change can carry a password)
+  // settings changes: the field names, not the values (watch-only accounts read this list)
   function publicParams(it) {
     if (it.kind !== 'settings') return null;
     return { apply: Boolean(it.params?.apply), fields: Object.keys(it.params?.changes || {}) };
@@ -115,8 +148,8 @@ function createSentryUsbQueue({ db, link, dir, log, notify = () => {}, onResult 
     return it.id;
   }
 
-  // { changes: { KEY: { from: string|null, to: string|null, secret?: bool } }, apply }
-  // (null: the line is commented out, "not set")
+  // { changes: { KEY: { from: string|null, to: string|null } }, apply }
+  // (null: the line is commented out, "not set"); never a secret
   function settingsParams(params) {
     const changes = {};
     const given = params?.changes;
@@ -125,17 +158,19 @@ function createSentryUsbQueue({ db, link, dir, log, notify = () => {}, onResult 
       if (!KEY_RE.test(k) || !c || typeof c !== 'object') throw Object.assign(new Error(`Bad setting ${k.slice(0, 64)}.`), { status: 400 });
       // the Pi's own rule, checked here too so a queued change cannot fail later for it
       if (!SETTABLE.has(k)) throw Object.assign(new Error(`${k} cannot be changed from Sentry Manager: change it on the Sentry USB.`), { status: 400, code: 'READ_ONLY', key: k });
+      if (isSecretKey(k) || c.secret) throw Object.assign(new Error(SECRETS_ONLINE_TEXT), { status: 400, code: 'SECRET_ONLINE', key: k });
       const val = (v) => (v === null ? null : typeof v === 'string' && v.length <= 4096 && !/[\u0000-\u001f\u007f]/.test(v) ? v : undefined); // no control characters, as the proxy
       const from = val(c.from ?? null);
       const to = val(c.to ?? null);
       if (from === undefined || to === undefined) throw Object.assign(new Error(`Bad value for ${k}.`), { status: 400 });
-      changes[k] = { from, to, secret: Boolean(c.secret) || isSecretKey(k) };
+      changes[k] = { from, to };
     }
-    // a stored secret cannot follow a changed destination (a share password to another server)
-    const missing = secretsNeeded(new Set(Object.keys(changes).filter((k) => !changes[k].secret)), (sec) => typeof changes[sec]?.to === 'string' && changes[sec].to !== '');
+    // a stored secret cannot follow a changed destination (a share password to another server),
+    // and the secret cannot be queued: the destination waits for the Pi to be online too
+    const missing = secretsNeeded(new Set(Object.keys(changes)), () => false);
     if (missing.length) {
       const [sec, hit] = missing[0];
-      throw Object.assign(new Error(`Changing ${hit.join(', ')} needs ${sec} entered again.`), { status: 400, code: 'SECRET_NEEDED', key: sec });
+      throw Object.assign(new Error(`Changing ${hit.join(', ')} needs ${sec} entered again. ${SECRETS_ONLINE_TEXT}`), { status: 400, code: 'SECRET_NEEDED', key: sec });
     }
     if (!Object.keys(changes).length) throw Object.assign(new Error('No changes.'), { status: 400 });
     if (Object.keys(changes).length > 200) throw Object.assign(new Error('Too many changes.'), { status: 400 });
@@ -151,8 +186,6 @@ function createSentryUsbQueue({ db, link, dir, log, notify = () => {}, onResult 
     changed();
     return true;
   }
-  // a finished settings change keeps its field names, not its values
-  const forget = (it) => (it.kind === 'settings' ? { apply: it.params?.apply, changes: Object.fromEntries(Object.keys(it.params?.changes || {}).map((k) => [k, {}])) } : it.params);
 
   function expire() {
     let any = false;
@@ -253,18 +286,15 @@ function createSentryUsbQueue({ db, link, dir, log, notify = () => {}, onResult 
       const cur = (await call(d, 'GET', '/api/setup/config')).body;
       if (!cur || typeof cur !== 'object') throw new Error('The Sentry USB sent no settings.');
       // what the Pi has now, per field: its value, or null when not set (commented out)
-      const isSet = (k) => cur[`${k}__set`] === true || cur[`${k}__set`]?.value === true || cur[k]?.set === true || cur[k]?.__set === true;
       const valueOf = (k) => (cur[k] && typeof cur[k] === 'object' && cur[k].active ? String(cur[k].value ?? '') : null);
       const out = {};
-      // every active line as it is (a secret comes back empty: empty keeps it)
+      // every active line as it is (a secret comes back empty: empty keeps it, and none is ever queued)
       for (const [k, v] of Object.entries(cur)) if (KEY_RE.test(k) && v && typeof v === 'object' && v.active) out[k] = String(v.value ?? '');
       const applied = [];
       const skipped = [];
       for (const [k, c] of Object.entries(it.params.changes)) {
         const now0 = valueOf(k);
-        // a secret reads back empty, so it cannot be compared: it is set as asked
-        const comparable = !(c.secret || isSet(k));
-        if (comparable && now0 !== c.from && now0 !== c.to) { skipped.push(k); continue; }
+        if (now0 !== c.from && now0 !== c.to) { skipped.push(k); continue; }
         if (c.to === null) delete out[k];
         else out[k] = c.to;
         applied.push(k);
@@ -358,4 +388,4 @@ function createSentryUsbQueue({ db, link, dir, log, notify = () => {}, onResult 
   return { list, add, cancel, kick, expire, file, files, forgetDevice, busy: (id) => running.has(id), KINDS };
 }
 
-module.exports = { createSentryUsbQueue, archiveBusy, QUEUE_KINDS: KINDS };
+module.exports = { createSentryUsbQueue, archiveBusy, splitSecrets, SECRETS_ONLINE_TEXT, QUEUE_KINDS: KINDS };
