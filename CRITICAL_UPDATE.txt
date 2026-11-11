@@ -6,5 +6,5 @@
 # of plain text, up to 300 characters), then push to main. Every server
 # running an image built with a lower level shows a red "Critical update:
 # install now" bar on every page until it installs this release or a later one.
-level: 1
-reason: Combined power from all nodes and copying text that stays selected during live updates. Install this update.
+level: 2
+reason: New version update
