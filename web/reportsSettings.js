@@ -120,6 +120,9 @@ export function createReportsSettings(el, { cls = {}, h24 = null } = {}) {
     </div>`;
   }
   const say = (msg, bad) => { const e = $('[data-say]'); if (e) { e.textContent = msg; e.className = bad ? 'sr-err' : ''; } };
+  // a problem with a preview or a send, shown next to its buttons (the line at the
+  // bottom is far below them on a phone, so a refused Send looked like nothing happened)
+  const tell = (msg, scroll = true) => { const r = $('[data-result]'); if (!r) return; r.hidden = !msg; r.className = 'sr-err'; r.textContent = msg; if (msg && scroll) r.scrollIntoView?.({ block: 'center' }); };
 
   async function load() {
     try {
@@ -130,17 +133,17 @@ export function createReportsSettings(el, { cls = {}, h24 = null } = {}) {
     }
   }
 
-  async function guarded(fn, onCancel = null) {
+  async function guarded(fn, onCancel = null, onError = (msg) => say(msg, true)) {
     try {
       return await fn();
     } catch (err) {
       if (err.code === 'CONFIRM_PASSWORD') {
-        retry = { fn, onCancel };
+        retry = { fn, onCancel, onError };
         $('[data-confirm]').hidden = false;
         $('[data-confirm] input').focus();
         return undefined;
       }
-      say(err.message, true);
+      onError(err.message);
       onCancel?.();
       return undefined;
     }
@@ -158,12 +161,13 @@ export function createReportsSettings(el, { cls = {}, h24 = null } = {}) {
 
   async function sampleHeartbeat() {
     say('');
+    tell('');
     pending = null;
     try {
       const out = await api('/api/reports/preview', { method: 'POST', body: JSON.stringify({ kind: 'heartbeat' }) });
       showPreview(`What will be sent${out.payload.anonymous ? ' (anonymous)' : ''}: a heartbeat (a sample)`, out.payload, true);
     } catch (err) {
-      say(err.message, true);
+      tell(err.message);
     }
   }
 
@@ -173,7 +177,7 @@ export function createReportsSettings(el, { cls = {}, h24 = null } = {}) {
     const body = kind === 'feedback'
       ? { kind, message: $('[data-msg]').value, contact: $('[data-contact]').value, attach: $('[data-attach]').checked }
       : { kind, message: $('[data-note]').value };
-    if (kind === 'feedback' && !body.message.trim()) { say('Write a message first.', true); $('[data-msg]').focus(); return; }
+    if (kind === 'feedback' && !body.message.trim()) { tell('Write a message first.', false); $('[data-msg]').focus(); return; }
     const b = $(`[data-preview="${kind}"]`);
     b.disabled = true;
     try {
@@ -181,7 +185,7 @@ export function createReportsSettings(el, { cls = {}, h24 = null } = {}) {
       pending = { kind, previewId: out.previewId };
       showPreview(`What will be sent${out.payload.anonymous ? ' (anonymous)' : ''}: ${kind === 'support' ? 'diagnostics to support' : 'feedback'}`, out.payload, false);
     } catch (err) {
-      say(err.message, true);
+      tell(err.message);
     }
     b.disabled = false;
   }
@@ -191,7 +195,7 @@ export function createReportsSettings(el, { cls = {}, h24 = null } = {}) {
     const p = pending;
     const b = $('[data-send]');
     b.disabled = true;
-    const out = await guarded(() => api('/api/reports/send', { method: 'POST', body: JSON.stringify({ previewId: p.previewId }) }), () => { b.disabled = false; });
+    const out = await guarded(() => api('/api/reports/send', { method: 'POST', body: JSON.stringify({ previewId: p.previewId }) }), () => { b.disabled = false; }, tell);
     if (!out || !alive) return;
     pending = null;
     st = out.status;
@@ -254,7 +258,7 @@ export function createReportsSettings(el, { cls = {}, h24 = null } = {}) {
       const again = retry;
       retry = null;
       if (again) {
-        const out = await guarded(again.fn, again.onCancel);
+        const out = await guarded(again.fn, again.onCancel, again.onError);
         if (out && alive) {
           if (out.status && out.kind) { // a send
             pending = null;

@@ -79,3 +79,15 @@ test('watch-only accounts: /api/reports is hidden and refused', () => {
     assert.equal(viewerMay('PUT', p), false, p);
   }
 });
+
+test('a refused preview or Send says why next to its buttons, not only in the line at the bottom', () => {
+  const m = read('web/reportsSettings.js');
+  // the line under the preview and its Send button, scrolled into view
+  assert.match(m, /const tell = \(msg, scroll = true\) => \{ const r = \$\('\[data-result\]'\);[^\n]*r\.scrollIntoView\?\.\(\{ block: 'center' \}\)/);
+  assert.match(m, /api\('\/api\/reports\/send'[^\n]*\(\) => \{ b\.disabled = false; \}, tell\);/, 'a refused Send (too many in the hour, say) shows by the Send button');
+  assert.match(m, /retry = \{ fn, onCancel, onError \}/, 'and the same after the password is asked for');
+  assert.match(m, /guarded\(again\.fn, again\.onCancel, again\.onError\)/);
+  assert.match(m, /tell\('Write a message first\.', false\)/);
+  const html = m.slice(m.indexOf('data-pv hidden'), m.indexOf('aria-labelledby="sr-opt"'));
+  assert.ok(html.includes('data-result'), 'the result line sits right under the preview');
+});
