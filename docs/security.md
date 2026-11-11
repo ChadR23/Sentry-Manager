@@ -157,28 +157,6 @@ carriers use for shared addresses (CGNAT). Admins can add more addresses
 and ranges (at most 32, no wider than /8 or /32 for IPv6), for example the
 fixed address of an office.
 
-### Behind Cloudflare's proxy (`TRUST_CLOUDFLARE`)
-
-A site behind Cloudflare's proxy (the orange cloud) sees every visitor as one
-of Cloudflare's addresses, so a ban or a sign-in slow-down would hit
-everyone at once. Set `TRUST_CLOUDFLARE=1` and the client is the
-`CF-Connecting-IP` header, but **only when the connection comes from
-Cloudflare's published ranges** (or, with `TRUST_PROXY`, when the hop that
-reached a trusted local proxy is one of them). From any other address the
-header is ignored, so nobody can name their own address by sending it; a
-header that is not an address leaves Cloudflare's address in place.
-
-- The ranges are built in (copied from https://www.cloudflare.com/ips/,
-  dated in `server/clientAddress.js`). They are never fetched at run time.
-  If Cloudflare adds a range, set `CLOUDFLARE_IPS` to the full comma list
-  until the next build.
-- Use Cloudflare's SSL mode **Full (strict)** (or Full): Cloudflare then
-  talks HTTPS to Sentry Six Manager. With *Flexible* the last leg is plain
-  HTTP, which this app redirects to HTTPS (and passwords would cross the
-  internet unencrypted), so it does not work, on purpose.
-- A request through Cloudflare never counts as the home network, whatever
-  address it carries.
-
 ### Bans after failed sign-ins
 
 On by default. Wrong passwords (for any user name, existing or not), wrong
@@ -311,55 +289,6 @@ With the Cloudflare proxy (orange cloud) in front:
 - Every request then comes from a Cloudflare address: see
   [Which address a request comes from](#which-address-a-request-comes-from)
   before relying on bans and the home-network rules.
-
-## The public demo's owner page
-
-The public demo (`DEMO=1`) keeps an **attack log** and has an **owner page**
-at `/owner`. Both are off for every normal install.
-
-**The attack log** (`server/attackLog.js`) records, by the real client
-address (the rules above, Cloudflare included): failed sign-ins (with the
-user name tried, failed two-step and setup codes too), public visits to
-`/owner` and `/api/owner/*`, scanner paths (`/wp-admin`, `/wp-login.php`,
-`/.env`, `/.git/`, `/phpmyadmin`, `/cgi-bin/`, `/boaform`, `/HNAP1`,
-`/actuator`, `/vendor/phpunit`, `/server-status`, `.php` and similar),
-exploit patterns in the path, query or form fields (traversal, `<script`,
-SQL tautologies and `UNION SELECT`, `${jndi:`, shell command sequences,
-null bytes), oversized or malformed requests, locked demo features,
-rate-limit hits and bans. Each address and kind is one row with a count,
-the first and last time, the last sample (clipped, control characters
-escaped) and the user agent (clipped). **No password or request body is
-ever kept**: password, token and code fields are not even looked at. At most
-20,000 rows, none older than 30 days. Signing in, and pages that load, are
-never logged.
-
-**The owner page** exists only when `DEMO_OWNER_PASSWORD` is set (without
-it, `/owner` is an unknown path like any other). It opens only:
-
-- **from the local network:** `10/8`, `172.16/12`, `192.168/16`, `127/8`,
-  `::1`, `fc00::/7`, `fe80::/10`. Anything through Cloudflare is public, and
-  so is the container's default gateway (read from `/proc/net/route`):
-  Docker's userland proxy makes every visitor from outside appear as the
-  bridge gateway (`172.17.0.1`, or the gateway of the container's own
-  network). Any other address gets an ordinary 302 to `/`, with no hint,
-  and is logged as `owner-probe`. To see LAN addresses in the container,
-  run it with `network_mode: host` (`--network host`), or turn Docker's
-  userland proxy off (`"userland-proxy": false` in
-  `/etc/docker/daemon.json`). A reverse proxy you run on the gateway counts
-  only when `TRUSTED_PROXIES` names it;
-- **over HTTPS** (plain HTTP gets the normal redirect);
-- **with `DEMO_OWNER_PASSWORD`**, compared in constant time, slowed down
-  after wrong guesses and counted towards bans like any sign-in. It gives a
-  session cookie for `/owner` and `/api/owner` only (`HttpOnly`, `Secure`,
-  `SameSite=Strict`, 8 hours).
-
-It shows the log grouped by address (filter by kind, newest or most active
-first), a one-tap ban (the same bans as above), a CSV export (every cell
-quoted; cells that start with `=`, `+`, `-`, `@`, tab, CR, `|` or `%` get a
-leading `'` so a spreadsheet never runs them), visitor counts (distinct
-real addresses today, sessions active), **Reset now** for the demo, and the
-reset interval (`DEMO_RESET_MINUTES`) and certificate, read-only. Every
-string an attacker sent is shown as text, never as markup.
 
 ## Accounts and roles
 

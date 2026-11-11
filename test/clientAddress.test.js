@@ -98,31 +98,3 @@ test('ban keys: an IPv4 address, or an IPv6 /64', () => {
   assert.equal(banKey('2001:db8:1:2:bbbb::9'), '2001:db8:1:2::/64');
   assert.equal(banKey('2001:db8::1'), '2001:db8::/64');
 });
-
-test('TRUST_CLOUDFLARE: CF-Connecting-IP only from Cloudflare\'s ranges; an invalid header leaves the peer', () => {
-  const { cloudflareMatcher, viaCloudflare } = require('../server/clientAddress');
-  const cf = { cloudflare: cloudflareMatcher() };
-  const cfReq = (from, header, extra = {}) => req(from, undefined, { 'cf-connecting-ip': header, ...extra });
-  // a spoofed header straight from the internet, or from home, is ignored
-  assert.equal(clientAddress(cfReq('203.0.113.9', '192.168.1.5'), cf), '203.0.113.9');
-  assert.equal(clientAddress(cfReq('192.168.1.20', '198.51.100.7'), cf), '192.168.1.20');
-  // from Cloudflare (IPv4 and IPv6): the visitor
-  assert.equal(clientAddress(cfReq('173.245.48.10', '198.51.100.7'), cf), '198.51.100.7');
-  assert.equal(clientAddress(cfReq('::ffff:104.16.1.1', '2001:db8::5'), cf), '2001:db8::5');
-  assert.equal(clientAddress(cfReq('2606:4700::1', '198.51.100.7'), cf), '198.51.100.7');
-  // an invalid or missing header: the peer
-  for (const bad of ['<script>', '1.2.3', '', undefined]) assert.equal(clientAddress(cfReq('173.245.48.10', bad), cf), '173.245.48.10', String(bad));
-  // off: the header never counts
-  assert.equal(clientAddress(cfReq('173.245.48.10', '198.51.100.7')), '173.245.48.10');
-  // behind a local reverse proxy that Cloudflare reached
-  assert.equal(clientAddress(req('172.17.0.1', '173.245.48.10', { 'cf-connecting-ip': '198.51.100.7' }), { ...proxied, ...cf }), '198.51.100.7');
-  // CLOUDFLARE_IPS replaces the list
-  const own = cloudflareMatcher('192.0.2.0/24');
-  assert.equal(own('192.0.2.9'), true);
-  assert.equal(own('173.245.48.10'), false);
-  assert.throws(() => cloudflareMatcher('nope'), /CLOUDFLARE_IPS/);
-  // through Cloudflare (its peer, or its headers at all): never home
-  assert.equal(viaCloudflare(req('173.245.48.10'), cf), true);
-  assert.equal(viaCloudflare(cfReq('192.168.1.20', '192.168.1.20'), cf), true);
-  assert.equal(viaCloudflare(req('192.168.1.20'), cf), false);
-});

@@ -18,26 +18,7 @@
 // carriers' shared NAT range, and fd7a:115c:a1e0::/48) only when the setting
 // says so, and any extra ranges an admin lists.
 
-// Cloudflare (TRUST_CLOUDFLARE=1): a site behind Cloudflare's proxy sees
-// every visitor as one of Cloudflare's addresses. With the setting on, and
-// only when the connection (or, behind a trusted local proxy, the hop that
-// reached it) comes from Cloudflare's published ranges, the client is the
-// CF-Connecting-IP header. From any other address the header is ignored:
-// anyone can send it. The ranges are built in (below) or CLOUDFLARE_IPS (a
-// comma list); they are never fetched at run time.
-
 const net = require('net');
-
-// Cloudflare's ranges as published at https://www.cloudflare.com/ips/
-// (ips-v4 and ips-v6). Written down 2026-11-11 from the list as it has stood
-// since 2023: check it against that page when updating. CLOUDFLARE_IPS
-// replaces it without a new build.
-const CLOUDFLARE_V4 = [
-  '173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22', '103.31.4.0/22', '141.101.64.0/18', '108.162.192.0/18',
-  '190.93.240.0/20', '188.114.96.0/20', '197.234.240.0/22', '198.41.128.0/17', '162.158.0.0/15', '104.16.0.0/13',
-  '104.24.0.0/14', '172.64.0.0/13', '131.0.72.0/22'
-];
-const CLOUDFLARE_V6 = ['2400:cb00::/32', '2606:4700::/32', '2803:f800::/32', '2405:b500::/32', '2405:8100::/32', '2a06:98c0::/29', '2c0f:f248::/32'];
 
 const LOCAL_V4 = [['127.0.0.0', 8], ['10.0.0.0', 8], ['172.16.0.0', 12], ['192.168.0.0', 16], ['169.254.0.0', 16]];
 const LOCAL_V6 = [['::1', 128], ['fc00::', 7], ['fe80::', 10]];
@@ -123,25 +104,6 @@ function proxyMatcher(list = '') {
   };
 }
 
-/**
- * Whether an address is one of Cloudflare's: the built-in ranges, or the
- * comma list given (CLOUDFLARE_IPS). A bad entry is an error at start-up.
- */
-function cloudflareMatcher(list = '') {
-  const given = String(list || '').split(/[\s,]+/).filter(Boolean);
-  const entries = given.length ? given : [...CLOUDFLARE_V4, ...CLOUDFLARE_V6];
-  const ranges = entries.map((e) => {
-    const c = parseCidr(e);
-    if (!c) throw new Error(`CLOUDFLARE_IPS: "${e}" is not an address or a range.`);
-    return [c.address, c.prefix, c.family];
-  });
-  const bl = blockList(ranges);
-  return (ip) => {
-    const a = normalizeIp(ip);
-    return Boolean(a) && bl.check(a, familyOf(a));
-  };
-}
-
 /** The X-Forwarded-For hops, left (the first client) to right (the last proxy). */
 function forwardedHops(req) {
   const raw = req.headers?.['x-forwarded-for'];
@@ -153,12 +115,13 @@ function forwardedHops(req) {
 const socketAddress = (req) => normalizeIp(req.socket?.remoteAddress);
 
 /**
- * The address that reached us: the socket's, or behind a trusted proxy the
- * rightmost X-Forwarded-For hop that is not one of the proxies. A hop that
- * is not an address ends the walk (it is reported cleaned, and never counts
- * as home).
+ * The client's address for every decision (sign-in throttling, bans, the
+ * home network, the audit log). A hop that is not an address ends the walk
+ * (it is reported cleaned, and never counts as home).
+ *
+ * @param {{ trustProxy?: boolean, trusted?: (ip: string) => boolean }} o
  */
-function peerAddress(req, { trustProxy = false, trusted = isLocalNetwork } = {}) {
+function clientAddress(req, { trustProxy = false, trusted = isLocalNetwork } = {}) {
   const sock = socketAddress(req);
   if (!sock) return '?';
   if (!trustProxy || !trusted(sock)) return sock;
@@ -170,40 +133,6 @@ function peerAddress(req, { trustProxy = false, trusted = isLocalNetwork } = {})
     if (i === 0) return ip; // every hop a proxy on the local network: the first is the client
   }
   return sock;
-}
-
-/** The CF-Connecting-IP header as an address, or null. */
-function cfHeader(req) {
-  const raw = req.headers?.['cf-connecting-ip'];
-  return normalizeIp(Array.isArray(raw) ? raw[0] : raw);
-}
-
-/**
- * The client's address for every decision (sign-in throttling, bans, the
- * home network, the audit log, the attack log, the owner page).
- * cloudflare: null (TRUST_CLOUDFLARE off) or a test for Cloudflare's
- * addresses; when the peer is one, CF-Connecting-IP is the client (an
- * invalid header leaves the peer).
- *
- * @param {{ trustProxy?: boolean, trusted?: (ip: string) => boolean, cloudflare?: ((ip: string) => boolean) | null }} o
- */
-function clientAddress(req, o = {}) {
-  const peer = peerAddress(req, o);
-  if (o.cloudflare && o.cloudflare(peer)) return cfHeader(req) || peer;
-  return peer;
-}
-
-/**
- * Whether a request came through Cloudflare: its peer is one of Cloudflare's
- * addresses, or it carries Cloudflare's headers at all (a tunnel on the
- * local network forwards them too). Such a request is never from home.
- */
-let defaultCloudflare = null;
-function viaCloudflare(req, o = {}) {
-  if (req.headers?.['cf-connecting-ip'] !== undefined || req.headers?.['cf-ray'] !== undefined) return true;
-  const peer = peerAddress(req, o);
-  defaultCloudflare ||= cloudflareMatcher();
-  return Boolean((o.cloudflare || defaultCloudflare)(peer));
 }
 
 /** Whether a header the proxy sets (X-Forwarded-Proto, -Host) may be believed. */
@@ -248,4 +177,4 @@ function expandV6(a) {
   return [...h, ...fill, ...t].map((g) => g || '0');
 }
 
-module.exports = { normalizeIp, parseCidr, isLocalNetwork, proxyMatcher, clientAddress, peerAddress, viaCloudflare, cloudflareMatcher, CLOUDFLARE_V4, CLOUDFLARE_V6, fromTrustedProxy, homeMatcher, banKey, forwardedHops };
+module.exports = { normalizeIp, parseCidr, isLocalNetwork, proxyMatcher, clientAddress, fromTrustedProxy, homeMatcher, banKey, forwardedHops };
