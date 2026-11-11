@@ -45,13 +45,3 @@ test('CUDA\'s GPU order is not changed for the whole container', () => {
   const dockerfile = fs.readFileSync(path.join(REPO, 'Dockerfile'), 'utf8');
   assert.doesNotMatch(dockerfile, /CUDA_DEVICE_ORDER/, 'only an ffmpeg that names an NVIDIA GPU by index gets PCI order');
 });
-
-test('a run by hand may publish a typed tag (the demo), never latest or a sha- tag, read from env not inlined', () => {
-  const wf = require('fs').readFileSync(require('path').join(__dirname, '..', '.github', 'workflows', 'image.yml'), 'utf8');
-  assert.match(wf, /workflow_dispatch:\n\s+inputs:\n\s+tag:/);
-  assert.match(wf, /INPUT_TAG: \$\{\{ inputs\.tag \}\}/, 'the input reaches the script through env');
-  assert.doesNotMatch(wf, /run: \|[^]*\$\{\{ inputs\.tag \}\}[^]*?\n\s+- /, 'never interpolated into a script');
-  assert.match(wf, /"\$asked" = latest/);
-  assert.match(wf, /"\$asked" == sha-\*/);
-  assert.match(wf, /if \[ "\$branch" = main \]; then tag=latest/);
-});

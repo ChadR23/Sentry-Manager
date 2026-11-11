@@ -5,9 +5,7 @@ name: Image
 #   - A push to main publishes `latest` and `sha-<commit>` (pin a `sha-` tag
 #     with SENTRY_TAG to stay on, or go back to, a version).
 #   - Running it by hand for another branch (Actions > Image > Run workflow)
-#     publishes an image tagged with that branch's name, or with the tag
-#     typed in (e.g. `demo` for the public demo from release/next-update);
-#     `latest` only ever comes from main.
+#     publishes an image tagged with that branch's name.
 #   - Nothing is built on a timer: a new image only ever comes from a push
 #     to main or a run by hand, so an "update available" always means the
 #     owner released something. Each build fetches the latest Debian, Node
@@ -26,11 +24,6 @@ on:
     branches: [main]
     paths-ignore: ['README.md', 'docs/**', 'truenas/**']
   workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Image tag to publish (e.g. demo); empty: the branch name. Never latest.'
-        required: false
-        type: string
 
 # Read-only by default; only the jobs that push images may write packages.
 permissions:
@@ -65,19 +58,9 @@ jobs:
           persist-credentials: false
       - name: Image name and tag
         id: names
-        env:
-          INPUT_TAG: ${{ inputs.tag }}
         run: |
           branch="$GITHUB_REF_NAME"
           if [ "$branch" = main ]; then tag=latest; else tag="${branch//[^A-Za-z0-9_.-]/-}"; tag="${tag#[.-]}"; fi
-          # a tag typed in for a run by hand (e.g. demo): letters, digits, . _ -, never latest or sha-*
-          asked="$INPUT_TAG"
-          if [ -n "$asked" ]; then
-            if [[ ! "$asked" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ ]] || [ "$asked" = latest ] || [[ "$asked" == sha-* ]]; then
-              echo "::error::'$asked' can't be used as an image tag (latest and sha-* come only from main)"; exit 1
-            fi
-            tag="$asked"
-          fi
           sha="$(git rev-parse HEAD)"
           {
             echo "image=ghcr.io/${GITHUB_REPOSITORY,,}"
