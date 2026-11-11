@@ -258,10 +258,61 @@ Test vectors are in Appendix A.
 **Status pushed by the Pi, without being asked:**
 
 - Every 30 seconds while connected, and at once after a change, the Pi sends
-  `{"t":"status","body":<the same JSON as GET /api/status>}`. "A change" is
-  any successful non-GET request over the link.
+  `{"t":"status","body":<the same JSON as GET /api/status, plus "car">}`.
+  "A change" is any successful non-GET request over the link, or a change in
+  the car's readings (below).
 - Manager keeps the last one, with its time, so the page shows status
   instantly and a "last seen" time when the Pi is away.
+
+### The car (`car` in the status body)
+
+Sentry USB test.31 and later add a `car` object: the car's battery,
+temperatures, tires and whether it is parked, from the Tesla BLE telemetry the
+Pi already reads (the same readings as its own dashboard's car card). It is
+only what the Pi has: there is no new request to the car, and never the car's
+place, position, odometer or VIN.
+
+```json
+"car": {
+  "battery":  {"pct": 89, "charging": false, "at": 1762800000},
+  "interior": {"c": 9.4, "at": 1762800000},
+  "exterior": {"c": 7.8, "at": 1762799940},
+  "tires": {
+    "fl": {"kpa": 290.3, "at": 1762792800}, "fr": {"kpa": 289.6, "at": 1762792800},
+    "rl": {"kpa": 288.9, "at": 1762771200}, "rr": {"kpa": 291.6, "at": 1762771200},
+    "state": "optimal"
+  },
+  "drive": {"state": "parked", "since": 1762791000, "at": 1762799990},
+  "units": {"temp": "F", "pressure": "psi"}
+}
+```
+
+| Field | Type, unit, range | Notes |
+|---|---|---|
+| `battery.pct` | number, %, 0 to 100 | state of charge |
+| `battery.charging` | boolean, optional | true while charging; left out when the Pi doesn't know |
+| `interior.c`, `exterior.c` | number, °C, -60 to 100 inside, -70 to 70 outside | one decimal |
+| `tires.fl`, `.fr`, `.rl`, `.rr` | `{kpa}`: number, kPa, 0 to 1000 | front left, front right, rear left, rear right; one decimal (the Pi reads psi: kPa = psi × 6.894757) |
+| `tires.state` | `"optimal"`, `"check"` or `"unsafe"`, optional | the worst tire against the owner's bands on the Pi (`TIRE_PSI_BANDS`, default 28, 36, 45, 50 psi), as the Pi's dashboard shows it ("Optimal", "Check tires", "Unsafe") |
+| `drive.state` | `"parked"` or `"driving"` | driving: a gear reading at most 2 minutes old says D, R or N; parked: it says P, or there is none and a drive has ended |
+| `drive.since` | integer, Unix seconds, optional | parked: when the last drive ended |
+| `units.temp`, `units.pressure` | `"F"`/`"C"`, `"psi"`/`"bar"` | how the Pi's own dashboard shows them (its TEMPERATURE_UNIT and PRESSURE_UNIT); display only, the values above stay °C and kPa |
+| `at` (in each reading) | integer, Unix seconds, optional | when that reading was taken; for a tire, when the car last heard its sensor (parked, the sensors sleep and the car keeps the last pressure) |
+
+- **Everything is optional.** A reading the Pi doesn't have is left out, and a
+  Pi with no reading at all (no Tesla BLE set up) sends no `car`.
+- **How often:** with every status push (30 s), and the Pi checks the readings
+  every 15 s and pushes status at once when a value changed (a newer reading
+  of the same value is not a change). So a car change sends at most one
+  extra status every 15 s.
+- **Manager checks it** (server/sentryUsbCar.js): only the keys above are
+  kept, each with its type and range; a reading with a wrong type, an
+  out-of-range value or a bad time (before 2017, or more than a day ahead
+  of Manager's clock) is dropped, the others are kept; a `car` with no valid
+  reading left is not kept. It is stored with the rest of the status and
+  shown on the Status tab's Car card to every signed-in account, watch-only
+  ones included. Manager has no unit settings of its own, so the card uses
+  `units`, else °F and psi.
 
 ## 5. The allowlist (Pi side, deny by default)
 

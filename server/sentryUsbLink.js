@@ -17,6 +17,7 @@
 
 const crypto = require('crypto');
 const { WsConnection, acceptKey } = require('./wsFrames');
+const { cleanCar } = require('./sentryUsbCar');
 
 const V = 2; // 2: pair mode is keyed by the pairing code (P), not K
 const LINK_PATH = '/api/sentryusb/link';
@@ -385,6 +386,11 @@ function createSentryUsbLink({
         // (a status nested deeper than any real one would only break the page that shows it)
         if (text.length > MAX_STATUS || tooDeep(m.body)) return;
         d.status = JSON.parse(text);
+        // the car readings (section 4, "The car"): known keys in range only
+        if (d.status && typeof d.status === 'object' && !Array.isArray(d.status) && 'car' in d.status) {
+          const car = cleanCar(d.status.car, { now: now() });
+          if (car) d.status.car = car; else delete d.status.car;
+        }
         d.statusAt = now();
         d.lastSeen = now();
         // kept in memory at once; written at most once a minute

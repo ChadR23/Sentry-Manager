@@ -13,6 +13,7 @@
 //
 // From a shell (development, screenshots):
 //   node test/fixtures/fakeSentryUsb.js --port 10076 --user pi --password raspberry --code K7QP-M2XD-9WRT --state /tmp/pi.json
+//   (--no-car: a Pi without Tesla BLE readings, so no car object)
 
 const tls = require('tls');
 const crypto = require('crypto');
@@ -35,7 +36,19 @@ function fakeState() {
   };
   const commented = { RSYNC_USER: '', RSYNC_SERVER: '', RCLONE_DRIVE: '', BOOMBOX_SIZE: '100M', USE_EXFAT: 'true', DISCORD_ENABLED: 'true', DISCORD_WEBHOOK_URL: '', TELEGRAM_BOT_TOKEN: '', CPU_GOVERNOR: 'conservative' };
   // config and commented hold the real values, secrets included; reads mask them as the Pi does
-  return { config, commented, drives: true, archiving: false, version: 'v3.28.10-test.7', snapshots: makeSnapshots(), updateStatus: null };
+  return { config, commented, drives: true, archiving: false, version: 'v3.28.10-test.7', snapshots: makeSnapshots(), updateStatus: null, car: makeCar() };
+}
+
+// the status push's car object (Sentry USB test.31+, docs/sentry-usb-link.md "The car"):
+// parked 2 h 30 min, 89 %, 49 °F inside and 46 °F outside, tires heard 2 h and 8 h ago
+function makeCar() {
+  const t = now();
+  const kpa = (psi) => Math.round(psi * 6.894757 * 10) / 10;
+  return {
+    battery: { pct: 89, charging: false, at: t - 60 }, interior: { c: 9.4, at: t - 60 }, exterior: { c: 7.8, at: t - 120 },
+    tires: { fl: { kpa: kpa(42), at: t - 7200 }, fr: { kpa: kpa(42), at: t - 7200 }, rl: { kpa: kpa(41), at: t - 28800 }, rr: { kpa: kpa(42), at: t - 28800 }, state: 'optimal' },
+    drive: { state: 'parked', since: t - 9000 }, units: { temp: 'F', pressure: 'psi' }
+  };
 }
 
 function makeSnapshots() {
@@ -56,7 +69,8 @@ function statusBody(st) {
     sbc_model: 'Raspberry Pi 4 Model B Rev 1.5', fan_speed: '', supply_voltage: 5.08, wifi_rx_bps: 21_000, wifi_tx_bps: 4_000, ether_rx_bps: 0, ether_tx_bps: 0,
     wifi_rate_state: 'ok', ether_rate_state: 'disconnected', wifi_sample_age_ms: 900, ether_sample_age_ms: null, sampled_at: now(),
     storage_health: { state: 'ok', message: 'Storage healthy', reserve_bytes: 4_000_000_000, free_bytes: 61_294_219_264, total_bytes: 118_274_580_480, cleanup_state: 'idle', cleanup_sampled_at: now() - 120 },
-    device_suffix: 'model3', archiving: st.archiving
+    device_suffix: 'model3', archiving: st.archiving,
+    ...(st.car ? { car: st.car } : {})
   };
 }
 
@@ -277,7 +291,7 @@ function sendAnswer(ws, id, a) {
   return ws.send(JSON.stringify({ t: 'end', id }));
 }
 
-module.exports = { connectFakePi, pairSecret, fakeState, answer, statusBody, sendAnswer };
+module.exports = { connectFakePi, pairSecret, fakeState, makeCar, answer, statusBody, sendAnswer };
 
 // ---- from a shell: pair once (or use the saved key) and stay connected, pushing status
 if (require.main === module) {
@@ -286,6 +300,7 @@ if (require.main === module) {
   const file = arg('state', null);
   const saved = file && fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {};
   const st = fakeState();
+  if (process.argv.includes('--no-car')) st.car = null;
   const id = arg('id', saved.id || crypto.randomBytes(16).toString('hex'));
   let delay = 1000;
   const loop = async () => {

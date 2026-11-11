@@ -197,6 +197,9 @@ test('the Sentry USB link through the server', { skip: !hasOpenssl, timeout: 120
     // and where it connects from, with the networks it reports
     const seen = (await s.call('GET', '/api/sentryusb', { cookie: viewer })).json.devices[0];
     assert.deepEqual([seen.address, seen.net, seen.home], [null, null, null]);
+    // the car's readings it does see (the Status tab's Car card), checked by the server
+    assert.equal(seen.status.car.battery.pct, 89);
+    assert.deepEqual(Object.keys(seen.status.car.tires), ['fl', 'fr', 'rl', 'rr', 'state']);
     assert.ok((await s.call('GET', '/api/sentryusb', { cookie: admin })).json.devices[0].address, 'an admin sees it');
 
     // a queued action (online: it runs at once); its fetched file downloads as an attachment

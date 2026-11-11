@@ -560,3 +560,6 @@ html.reduce-effects *, html.reduce-effects *::before { transition: none !importa
 .smb-test p { margin: 0; flex: 1 1 260px; }
 .smb-test .smb-ok { color: var(--accent); }
 .smb-test .smb-bad { color: var(--danger); }
+
+/* Sentry USB Status tab: the Car card (web/sentryUsbLink.js), in this interface's panels and lime */
+.sentry-sul { --sul-car-bg: var(--panel-2); --sul-car-tile: var(--panel-3); --sul-car-line: var(--border-strong); --sul-car-radius: var(--radius); --sul-car-tile-radius: 12px; --sul-car-accent: var(--accent); --sul-car-ok: var(--accent); --sul-car-warn: var(--warn); --sul-car-bad: var(--danger); --sul-car-body: var(--border-strong); --sul-car-glass: var(--accent-bg); }
