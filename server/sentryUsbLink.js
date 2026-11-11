@@ -553,8 +553,8 @@ function createSentryUsbLink({
     ws.send(JSON.stringify({ t: 'hello', v: V, nonce: managerNonce, fp }));
 
     function auth(m) {
-      if (typeof m.v !== 'number' || m.v < 1) return deny('bad message', { kind: 'garbage' });
-      // v1 (pair mode keyed by K) and anything newer: the other side needs updating
+      if (typeof m.v !== 'number') return deny('bad message', { kind: 'garbage' });
+      // any v other than 2 (v1, pair mode keyed by K, a newer one, or nonsense such as 0): the other side needs updating
       if (m.v !== V) {
         if (slot) { lastPairing = { ok: false, why: 'version', name: slot.name, at: now() }; changed(); }
         return deny('version', { count: false, id: typeof m.id === 'string' ? m.id : null });

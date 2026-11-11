@@ -513,6 +513,14 @@ test('protocol v2: Manager says v 2, and a v1 Pi is refused with version (and th
     assert.equal(t.link.pairing().failures, 0, 'not a wrong proof');
     const v1key = await t.pi({ mode: 'key', key: '11'.repeat(32), tamper: { v: 1 } });
     assert.equal(v1key.why, 'version');
+    // any number but 2 is a version mismatch, not only a newer one
+    for (const v of [0, -1, 2.5, 3]) {
+      const r = await t.pi({ mode: 'pair', username: 'pi', password: 'raspberry', tamper: { v } });
+      assert.equal(r.why, 'version', `v ${v}`);
+    }
+    assert.equal(t.link.pairing().failures, 0, 'none of them is a wrong proof');
+    const str = await t.pi({ mode: 'key', key: '11'.repeat(32), tamper: { v: '2' } });
+    assert.equal(str.why, 'bad message');
   } finally { await t.close(); }
 });
 
