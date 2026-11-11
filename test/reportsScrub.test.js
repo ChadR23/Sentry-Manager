@@ -111,3 +111,16 @@ test('cleanReport: secrets always, identifiers only when anonymous', () => {
   assert.deepEqual(cleanReport(v), { hostname: 'tower', password: REMOVED, log: 'login from 10.0.0.9 token=[removed]' });
   assert.deepEqual(cleanReport(v, { anonymous: true }), { hostname: ANON, password: REMOVED, log: 'login from ANON token=[removed]' });
 });
+
+test('secrets inside JSON text and cifs pass= are removed (an error message or a log line quoting a settings object)', () => {
+  const t = stripSecretText('Mount failed: {"username":"bob","password":"hunter 2","smbPass": "x9"} -o username=bob,pass=hunter2,vers=3.0');
+  assert.doesNotMatch(t, /hunter|x9/);
+  assert.match(t, /"username":"bob"/, 'the rest stays');
+  assert.match(t, /vers=3\.0/);
+});
+
+test('anonymous: an IPv6 address right after a word and a colon (ip:2001:db8::1) becomes ANON; times and line numbers stay', () => {
+  const anon = makeAnonymizer([]);
+  assert.equal(anon('ip:2001:db8::1 peer:fe80::1%eth0'), 'ip:ANON peer:ANON');
+  assert.equal(anon('10:00:00 at x.js:10:5 2026-11-11T10:00:00.000Z'), '10:00:00 at x.js:10:5 2026-11-11T10:00:00.000Z');
+});

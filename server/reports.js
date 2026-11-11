@@ -67,8 +67,16 @@ function defaultTransport({ method, url, headers = {}, body = null, timeoutMs = 
   const mod = u.protocol === 'https:' ? https : http;
   return new Promise((resolve, reject) => {
     let done = false;
-    const finish = (fn, v) => { if (!done) { done = true; fn(v); } };
-    const req = mod.request(u, { method, headers: { 'User-Agent': 'sentry-six-manager-reports', ...headers, ...(body ? { 'Content-Length': body.length } : {}) }, timeout: timeoutMs }, (res) => {
+    let req = null;
+    // the whole exchange within timeoutMs (the socket's own timeout is only
+    // for silence: a receiver sending a byte now and then would hold it for ever)
+    const deadline = setTimeout(() => {
+      finish(reject, new Error('The receiver did not answer in time.'));
+      req?.destroy();
+    }, timeoutMs);
+    deadline.unref?.();
+    const finish = (fn, v) => { if (!done) { done = true; clearTimeout(deadline); fn(v); } };
+    req = mod.request(u, { method, headers: { 'User-Agent': 'sentry-six-manager-reports', ...headers, ...(body ? { 'Content-Length': body.length } : {}) }, timeout: timeoutMs }, (res) => {
       const chunks = [];
       let n = 0;
       res.on('data', (c) => {
@@ -99,7 +107,13 @@ function workerPow(envHash, nonce, bits) {
   });
 }
 
-const json = (buf) => { try { return JSON.parse(buf.toString('utf8')); } catch { return {}; } };
+/** The receiver's answer as an object ({} for anything else: junk, null, a list). */
+const json = (buf) => {
+  try {
+    const d = JSON.parse(buf.toString('utf8'));
+    return d && typeof d === 'object' && !Array.isArray(d) ? d : {};
+  } catch { return {}; }
+};
 
 /**
  * o: db, dataDir, buildInfo, ui() (the interface in use), diagnostics()
@@ -274,6 +288,12 @@ function createReports({
     const nonce = P.b64(crypto.randomBytes(16));
     const env0 = e.env;
     const stamp = await pow(P.envelopeHash(env0), nonce, bits);
+    // sharing turned off while this one was on its way (the settings asked
+    // for, or the proof of work): an automatic report does not go after all
+    if (AUTO_KINDS.has(e.kind) && !settings().share) {
+      dropEntry(e);
+      return { result: 'dropped', message: 'Sharing is off.' };
+    }
     const body = P.sign(env0, signingKey(e.anonymous), { ts, nonce, pow: stamp, bits });
     const res = await transport({ method: 'POST', url: `${endpoint()}/v1/report`, headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: Buffer.from(JSON.stringify(body)) });
     const d = json(res.body);

@@ -44,7 +44,9 @@ const SECRET_TEXT = [
   [/\b(Bearer|Basic|Token)\s+[A-Za-z0-9._~+/=-]{8,}/g, `$1 ${REMOVED}`],
   [/\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*/g, REMOVED],
   [/\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/g, REMOVED],
-  [/\b([A-Za-z_]*(?:password|passwd|pwd|passphrase|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|link[_-]?key|psk|cookie|session|sid|auth)[A-Za-z_]*)(\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s,;&)}\]]+)/gi, `$1$2${REMOVED}`]
+  // name=value, name: value, and JSON's "name": value (a settings object in an
+  // error message or a log line); pass= is a cifs mount option
+  [/\b([A-Za-z_]*(?:password|passwd|pwd|passphrase|pass|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|link[_-]?key|psk|cookie|session|sid|auth)[A-Za-z_]*)(["']?\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s,;&)}\]]+)/gi, `$1$2${REMOVED}`]
 ];
 function stripSecretText(text) {
   let t = String(text);
@@ -81,7 +83,8 @@ const TESLA_VIN = /\b(?:5YJ|7SA|LRW|XP7|7G2|SFZ|5YJ|7FC)[A-HJ-NPR-Z0-9]{14}\b/gi
 const EMAIL = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b/g;
 const MAC = /\b[0-9A-Fa-f]{2}(?:([:-])[0-9A-Fa-f]{2})(?:\1[0-9A-Fa-f]{2}){4}\b/g;
 const IPV4 = /\b(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\b/g;
-const IPV6_CANDIDATE = /(?<![0-9A-Za-z:])\[?((?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}(?:\.\d{1,3}){0,3}(?:%[A-Za-z0-9_.-]+)?)\]?(?![0-9A-Za-z:])/g;
+// (after a colon only when that colon follows a word, as in ip:2001:db8::1)
+const IPV6_CANDIDATE = /(?<![0-9A-Za-z])(?<![0-9A-Fa-f:]:)\[?((?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}(?:\.\d{1,3}){0,3}(?:%[A-Za-z0-9_.-]+)?)\]?(?![0-9A-Za-z:])/g;
 const COORD_PAIR = /-?\b\d{1,3}\.\d{3,}\s*,\s*-?\d{1,3}\.\d{3,}\b/g;
 const COORD_NAMED = /\b(lat|lon|lng|latitude|longitude)(["']?\s*[:=]\s*)-?\d{1,3}(?:\.\d+)?/gi;
 const LOCAL_HOST = /\b(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+(?:local|lan|home|home\.arpa|internal|localdomain|ts\.net|fritz\.box)\b/gi;

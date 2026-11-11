@@ -259,3 +259,54 @@ test('the install key is made once and kept private', async () => {
     assert.ok(P.b64(P.rawPublic(k)));
   } finally { await r.close(); }
 });
+
+test('the transport gives up after its timeout even while the receiver keeps sending a byte now and then', async () => {
+  const http = require('http');
+  const srv = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    const t = setInterval(() => res.write(' '), 50);
+    res.on('close', () => clearInterval(t));
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  try {
+    const t0 = Date.now();
+    await assert.rejects(defaultTransport({ method: 'GET', url: `http://127.0.0.1:${srv.address().port}/v1/config`, timeoutMs: 400 }), /in time/);
+    assert.ok(Date.now() - t0 < 3000, 'within about the timeout');
+  } finally {
+    srv.closeAllConnections?.();
+    srv.close();
+  }
+});
+
+test('an automatic report on its way when sharing is turned off is not sent', async () => {
+  const r = await startReceiver();
+  try {
+    const calls = [];
+    const realPow = require('../server/reports').workerPow;
+    // sharing is turned off while the proof of work runs
+    const rep2 = createReports({
+      db: memoryDb(), dataDir: tmp(), log: quiet, env: { NODE_ENV: 'test', REPORTS_URL: r.url, REPORTS_PUBLIC_KEY: r.rec.keys.publicInfo().line },
+      diagnostics: async () => ({}), heartbeat: async () => ({}),
+      transport: (req) => { calls.push(req); return defaultTransport(req); },
+      pow: async (h, n, b) => { rep2.setSettings({ share: false }); return realPow(h, n, b); }
+    });
+    rep2.setSettings({ share: true });
+    const before = r.rec.index.length;
+    const out = await rep2.sendHeartbeat();
+    assert.equal(out.result, 'dropped');
+    assert.equal(r.rec.index.length, before, 'nothing reached the receiver');
+    assert.equal(calls.filter((c) => c.method === 'POST').length, 0);
+    assert.equal(rep2.outbox().length, 0, 'and nothing waits');
+  } finally {
+    await r.close();
+  }
+});
+
+test('a receiver answering null or a list is junk, not a crash: the report waits for a later try', async () => {
+  const transport = async (req) => ({ status: req.method === 'GET' ? 200 : 400, headers: {}, body: Buffer.from(req.method === 'GET' ? '{"difficulty":0}' : 'null') });
+  const rep = createReports({ db: memoryDb(), dataDir: tmp(), log: quiet, env: { NODE_ENV: 'test', REPORTS_PUBLIC_KEY: P.keyLine({ publicKey: P.b64(P.rawPublic(crypto.generateKeyPairSync('x25519').publicKey)) }) }, transport, diagnostics: async () => ({}), pow: async () => P.b64(Buffer.alloc(8)) });
+  const pv = await rep.preview({ kind: 'support' });
+  const out = await rep.sendPreview(pv.previewId);
+  assert.equal(out.result, 'dropped', 'a 400 is refused for good, read as such');
+  assert.match(out.message, /400/);
+});
