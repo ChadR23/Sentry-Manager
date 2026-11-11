@@ -763,6 +763,8 @@ async function createConverterRuntime(options = {}) {
     // a job takes at most this many clips, then a follow-up part carries on
     // (jobService's default; tests set a small one)
     jobClipLimit: options.jobClipLimit,
+    // false: a job that reached its clip limit ends there (no follow-up part)
+    continueParts: options.continueParts,
     // How long ffmpeg may go without reporting progress before it counts
     // as stuck (jobService's default when unset).
     encodeStallMs: options.encodeStallMs,

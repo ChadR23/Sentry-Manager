@@ -2805,7 +2805,7 @@ function createConverterJobService(deps) {
     // the job reached its clip limit: the next part carries on after its last
     // clip (an automatic job's next part comes from automatic conversion,
     // which skips what it has handled)
-    if (runtime.manifest.moreAfter && runtime.manifest.config.autoConvert !== true) {
+    if (runtime.manifest.moreAfter && runtime.manifest.config.autoConvert !== true && deps.continueParts !== false) {
       const { resumeAfter: _was, part, ...config } = runtime.manifest.config;
       setImmediate(() => {
         start({ ...config, resumeAfter: runtime.manifest.moreAfter, part: (part || 1) + 1 })
