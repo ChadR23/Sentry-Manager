@@ -28,6 +28,7 @@ All optional; put them in `.env` next to `docker-compose.yml`.
 | `PORT`, `DATA_PATH`, `LOG_LEVEL` | `9000`, `/data`, `info` | |
 | `CAN_PORT` | `10000` | The device port: the Screenmate CAN Bridge's uploads and the Sentry USB management link ([sentry-usb-link.md](sentry-usb-link.md)); open only while CAN uploads are on or a Sentry USB is paired or pairing |
 | `REPORTS_URL` / `REPORTS_PUBLIC_KEY` | (built in) | Another receiver for the opt-in feedback and diagnostics reports (Settings → Help & feedback), and its key line; https only ([reports-api.md](reports-api.md)) |
+| `REPORTS` | (on) | `off`: no feedback or diagnostics reports from this server at all; Help & feedback says reporting is turned off |
 
 `./data` holds the account, settings, job history, thumbnails, the
 converter's work folder and the certificate authority. Keep it on a local

@@ -134,6 +134,7 @@ function createReports({
   const cfg = reportsConfig(env);
   if (cfg.error) log.warn(`Reports: ${cfg.error} Reporting is off.`);
   const configured = cfg.keys.length > 0;
+  const offText = cfg.off ? 'Reporting is turned off on this server (REPORTS=off).' : NOT_SET_UP;
   const previews = new Map(); // id -> { payload, until, kind }
   let remote = null; // { endpoint, at, data }
   let clockOffset = 0;
@@ -366,7 +367,7 @@ function createReports({
 
   /** The payload exactly as it would be sealed (cleaned, checked). */
   async function buildPayload({ kind, message, contact, attach = true, crash = null }) {
-    if (!configured) throw new ReportError(409, NOT_SET_UP, 'NOT_SET_UP');
+    if (!configured) throw new ReportError(409, offText, 'NOT_SET_UP');
     const anonymous = Boolean(settings().anonymous);
     const p = { kind, sentAt: new Date(now()).toISOString(), install: anonymous ? P.ANON : installId(), anonymous, build: buildBlock(), ui: String(ui() || 'original').slice(0, P.LIMITS.ui) };
     if (kind === 'feedback') {
@@ -525,7 +526,7 @@ function createReports({
     const list = configured ? outbox() : [];
     const s = state();
     return {
-      configured, notSetUpText: configured ? null : NOT_SET_UP, endpoint: configured ? endpoint() : null, kid: cfg.keys[0]?.kid || null,
+      configured, notSetUpText: configured ? null : offText, endpoint: configured ? endpoint() : null, kid: cfg.keys[0]?.kid || null,
       settings: settings(), lastSent: s.lastSent || null, lastError: s.lastError || null,
       lastHeartbeat: s.lastHeartbeat || null, nextHeartbeatAt: configured && settings().share && started ? hbNextAt : null,
       outbox: { count: list.length, bytes: list.reduce((n, e) => n + e.bytes, 0) },
@@ -533,7 +534,7 @@ function createReports({
     };
   }
   function setSettings(patch, by = '') {
-    if (!configured) throw new ReportError(409, NOT_SET_UP, 'NOT_SET_UP');
+    if (!configured) throw new ReportError(409, offText, 'NOT_SET_UP');
     const before = settings();
     const next = { ...before };
     for (const k of ['share', 'anonymous']) {
@@ -564,7 +565,7 @@ function createReports({
   }
   /** Sends exactly what a preview showed (one feedback message or one support report). */
   async function sendPreview(previewId) {
-    if (!configured) throw new ReportError(409, NOT_SET_UP, 'NOT_SET_UP');
+    if (!configured) throw new ReportError(409, offText, 'NOT_SET_UP');
     const p = previews.get(String(previewId || ''));
     if (!p || p.until < now()) throw new ReportError(409, 'The preview is too old: look at what will be sent again.');
     if (p.payload.anonymous !== Boolean(settings().anonymous)) throw new ReportError(409, '"Send anonymously" changed since the preview: look at what will be sent again.');

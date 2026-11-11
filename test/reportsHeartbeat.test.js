@@ -198,14 +198,14 @@ test('outbox: only the latest heartbeat waits; it never pushes a real report out
   } finally { await rec.close(); }
 });
 
-test('sharing off or no key: sendHeartbeat makes no call', async () => {
+test('sharing off or reporting turned off: sendHeartbeat makes no call', async () => {
   const rec = await startReceiver();
   try {
     const { rep, calls } = client(rec);
     assert.equal(await rep.sendHeartbeat(), null);
     assert.equal(calls.length, 0);
   } finally { await rec.close(); }
-  const off = createReports({ db: memoryDb(), dataDir: tmp(), log: quiet, env: { NODE_ENV: 'test', REPORTS_URL: '', REPORTS_PUBLIC_KEY: '' }, heartbeat: async () => NUMBERS, timer: fakeTimer() });
+  const off = createReports({ db: memoryDb(), dataDir: tmp(), log: quiet, env: { NODE_ENV: 'test', REPORTS: 'off' }, heartbeat: async () => NUMBERS, timer: fakeTimer() });
   assert.equal(await off.sendHeartbeat(), null);
-  await assert.rejects(off.preview({ kind: 'heartbeat' }), /isn't set up/);
+  await assert.rejects(off.preview({ kind: 'heartbeat' }), /turned off/);
 });

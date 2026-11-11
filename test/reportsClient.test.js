@@ -123,13 +123,13 @@ test('opt-in off: crashes and daily summaries make no network call at all', asyn
   } finally { await r.close(); }
 });
 
-test('no receiver key in this build: "not set up", nothing is built or sent', async () => {
-  const { rep, calls } = client(null, { env: { REPORTS_URL: '', REPORTS_PUBLIC_KEY: '' } });
+test('reporting turned off (REPORTS=off): nothing is built or sent', async () => {
+  const { rep, calls } = client(null, { env: { REPORTS: 'off' } });
   const s = rep.status();
   assert.equal(s.configured, false);
-  assert.equal(s.notSetUpText, "Reporting isn't set up in this build.");
-  await assert.rejects(rep.preview({ kind: 'feedback', message: 'x' }), /isn't set up/);
-  assert.throws(() => rep.setSettings({ share: true }), /isn't set up/);
+  assert.equal(s.notSetUpText, 'Reporting is turned off on this server (REPORTS=off).');
+  await assert.rejects(rep.preview({ kind: 'feedback', message: 'x' }), /turned off/);
+  assert.throws(() => rep.setSettings({ share: true }), /turned off/);
   rep.noteCrash(new Error('x'));
   assert.deepEqual(await rep.sendCrashes(), []);
   assert.deepEqual(await rep.flush({ all: true }), []);
@@ -309,4 +309,12 @@ test('a receiver answering null or a list is junk, not a crash: the report waits
   const out = await rep.sendPreview(pv.previewId);
   assert.equal(out.result, 'dropped', 'a 400 is refused for good, read as such');
   assert.match(out.message, /400/);
+});
+
+test('this build has the receiver key for reports.skittles.live', () => {
+  const { reportsConfig } = require('../server/reportsConfig');
+  const c = reportsConfig({});
+  assert.equal(c.endpoint, 'https://reports.skittles.live');
+  assert.equal(c.keys[0].kid, '208993f9bb2c38d1');
+  assert.equal(c.error, null);
 });

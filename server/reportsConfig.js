@@ -18,6 +18,7 @@
 // "Reporting isn't set up in this build" and nothing is ever sent.
 //
 // Overrides without a new build (environment):
+//   REPORTS=off         no reporting on this server at all (Help & feedback says it is off)
 //   REPORTS_URL         another receiver (https:// only; http://localhost only in tests)
 //   REPORTS_PUBLIC_KEY  its key line(s), "sr1:<publicKey>:<signingKey>", newest first
 //
@@ -32,7 +33,8 @@ const { normalizeKey, parseKeyLine } = require('./reportsProtocol');
 const DEFAULT_ENDPOINT = 'https://reports.skittles.live';
 
 const RECEIVER_KEYS = [
-  // (none yet: the owner gives the receiver's key line, and it goes here)
+  // reports.skittles.live, first key (sr1:vwM+s1D0…:cy6caX77…)
+  { kid: '208993f9bb2c38d1', publicKey: 'vwM+s1D0pRqmxCJn8usIqDpkRp1yWIi61FptVfk88Sg=', signingKey: 'cy6caX77BNO5cPuE1GA6d/D68zl2zwXZL2HV4G8AA/k=' }
 ];
 
 /** The endpoint and keys in force: { endpoint, keys, fromEnv, error }. */
@@ -43,6 +45,8 @@ function reportsConfig(env = process.env) {
       out.endpoint = checkEndpoint(env.REPORTS_URL, env);
       out.fromEnv.url = true;
     }
+    // REPORTS=off: no reporting at all on this server, whatever the build has
+    if (/^(off|false|0|no)$/i.test(String(env.REPORTS || ''))) { out.off = true; return out; }
     out.keys = env.REPORTS_PUBLIC_KEY ? parseKeyLine(env.REPORTS_PUBLIC_KEY) : RECEIVER_KEYS.map(normalizeKey);
     out.fromEnv.key = Boolean(env.REPORTS_PUBLIC_KEY);
   } catch (err) {

@@ -69,14 +69,14 @@ async function setup() {
   return dir;
 }
 
-test('no receiver key in this build: "not set up", nothing can be sent', { timeout: 60000 }, async () => {
-  const s = await startServer(await setup());
+test('reporting turned off (REPORTS=off): nothing can be sent', { timeout: 60000 }, async () => {
+  const s = await startServer(await setup(), { REPORTS: 'off' });
   try {
     await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
     await s.call('POST', '/api/auth/confirm', { password: 'correct horse' });
     const st = (await s.call('GET', '/api/reports')).data;
     assert.equal(st.configured, false);
-    assert.equal(st.notSetUpText, "Reporting isn't set up in this build.");
+    assert.equal(st.notSetUpText, 'Reporting is turned off on this server (REPORTS=off).');
     assert.equal(st.settings.share, false, 'off by default');
     assert.equal((await s.call('POST', '/api/reports/preview', { kind: 'feedback', message: 'x' })).status, 409);
     assert.equal((await s.call('PUT', '/api/reports/settings', { share: true })).status, 409);
