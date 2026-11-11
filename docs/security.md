@@ -94,6 +94,9 @@ is reachable from the internet. If you do open it:
    - Get a domain name that points at your home (a domain of your own, or a
      free dynamic DNS name such as DuckDNS, kept up to date by the router or
      a DDNS client when your home address changes).
+   - **Or let Sentry Six Manager get it itself:** set `TLS_ACME_DOMAIN`
+     and map ports 80 and 443 to 9000; see
+     [Let's Encrypt certificates](#lets-encrypt-certificates-built-in).
    - **A reverse proxy in front (recommended):** Caddy or Nginx Proxy Manager
      (both are TrueNAS apps) gets and renews the certificate by itself. Point
      it at `http://<nas>:9000` and run Sentry Six Manager with
@@ -213,6 +216,79 @@ Both off by default:
 
 Changing any of these rules needs your password again, and is an `[audit]`
 line with what changed.
+
+## Let's Encrypt certificates (built in)
+
+For a server at a public domain name, Sentry Six Manager can get and renew a
+Let's Encrypt certificate by itself, inside its one container (Let's Encrypt
+is the only outside service it talks to). One line:
+
+```sh
+docker run -d --name sentry-manager --restart unless-stopped -p 80:9000 -p 443:9000 -v sentry-manager:/data -e TLS_ACME_DOMAIN=example.com ghcr.io/skittles-fivem/sentry-manager:latest
+```
+
+**Before you start:**
+
+- a DNS **A** (and/or **AAAA**) record for the name pointing at the
+  server's public IP address;
+- ports **80 and 443** forwarded on the router to the server, and mapped to
+  the container's port 9000 (`-p 80:9000 -p 443:9000`): Let's Encrypt checks
+  the name with a plain-HTTP request to port 80.
+
+| Setting | |
+| --- | --- |
+| `TLS_ACME_DOMAIN` | the name, or several separated by commas (`example.com,www.example.com`); no IP addresses or wildcards |
+| `TLS_ACME_EMAIL` | optional: Let's Encrypt's notices about the account |
+| `TLS_ACME_STAGING=true` | optional: Let's Encrypt's staging server, for trying the setup (its certificates are not trusted by browsers, and its rate limits are much higher) |
+
+**How it works.** Port 9000 already speaks HTTPS and plain HTTP. Plain HTTP
+still never shows the app: everything is redirected to `https://` (to
+`https://example.com/` without a port when the browser asked for
+`http://example.com`), except Let's Encrypt's check,
+`/.well-known/acme-challenge/<token>`, which is answered only for the exact
+tokens of an order that is waiting for it (on HTTPS too, for a proxy that
+redirects the check to `https://`). In the Docker image the root supervisor
+runs the Let's Encrypt client next to the root-only `data/tls` folder; the
+web app only gets the pending tokens and the finished certificate.
+
+- **Until the first certificate arrives** (normally within a minute of
+  starting), the self-signed certificate is served, so the page works with a
+  browser warning. The log says what is happening; when it fails, it says
+  why, for example *Let's Encrypt couldn't reach
+  http://example.com/.well-known/acme-challenge/…: check DNS points here and
+  port 80 is forwarded to 9000*.
+- **Renewal**: checked daily, renewed when less than 30 days are left, and
+  swapped into the running server and the device port without a restart.
+- **Failures** wait 15 minutes, then 1, 4 and 12 hours, then a day between
+  attempts (longer when Let's Encrypt asks for it), also across restarts, so
+  Let's Encrypt's rate limits are never hit by a loop.
+- **Files** in `data/tls`, all readable by root only (0600):
+  `acme-account.key` (the account), `acme.key` and `acme.crt` (the
+  certificate), `acme-state.json`.
+- **Settings → Security** shows the source, for example *Let's Encrypt for
+  example.com, renews on 2027-01-10*, or why there is none yet.
+- `TLS_CERT_FILE`/`TLS_KEY_FILE` win over `TLS_ACME_DOMAIN` when both are set.
+
+### Behind Cloudflare
+
+With the Cloudflare proxy (orange cloud) in front:
+
+- **SSL/TLS mode:** **Full** until the Let's Encrypt certificate is issued
+  (Cloudflare then accepts the self-signed one), then **Full (strict)**.
+  Never Flexible: it would send the password to the server unencrypted.
+- "Always Use HTTPS" is fine: Let's Encrypt follows the redirect to
+  `https://` and the check is answered there as well.
+- **Or skip Let's Encrypt:** create a Cloudflare **Origin Certificate**
+  (SSL/TLS → Origin Server), save it and its key in a folder you mount, and
+  set `TLS_CERT_FILE` and `TLS_KEY_FILE` instead of `TLS_ACME_DOMAIN`, with
+  Full (strict). Only Cloudflare trusts that certificate, so the server is
+  then reachable only through Cloudflare.
+- Cloudflare only proxies certain ports (here 80 and 443), so the device
+  port 10000 is not reachable through it. Connect a Sentry USB or CAN Bridge
+  over a name that is not proxied (grey cloud), or on the home network.
+- Every request then comes from a Cloudflare address: see
+  [Which address a request comes from](#which-address-a-request-comes-from)
+  before relying on bans and the home-network rules.
 
 ## Accounts and roles
 

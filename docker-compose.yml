@@ -21,6 +21,11 @@ services:
     stop_grace_period: 1m
     ports:
       - "9000:9000"
+      # OPTIONAL: Let's Encrypt at a public domain (docs/security.md): a DNS
+      # A/AAAA record to this server, ports 80 and 443 forwarded on the
+      # router, these two lines, and TLS_ACME_DOMAIN below
+#      - "80:9000"
+#      - "443:9000"
       # the device port: the Screenmate CAN Bridge's uploads and the Sentry USB
       # (the Pi in the car) management link; nothing listens until CAN uploads
       # are on or a Sentry USB is paired (keep it published: the Pi connects here)
@@ -28,6 +33,10 @@ services:
     env_file:
       - path: .env
         required: false
+    # OPTIONAL: Let's Encrypt (with the 80 and 443 lines above), or set them in .env
+#    environment:
+#      TLS_ACME_DOMAIN: example.com
+#      TLS_ACME_EMAIL: you@example.com
 
     volumes:
       # accounts, settings, journals, thumbnails and converter staging
