@@ -192,7 +192,7 @@ export default {
       const c = tally();
       const fps = (enc?.workers || []).reduce((n, w) => n + (ok(w.fps) ? w.fps : 0), 0) || live?.fps || 0;
       peak = Math.max(peak, fps);
-      const want = TACH.find((x) => x >= Math.max(fps, peak) * 1.15) || TACH[TACH.length - 1];
+      const top = Math.max(fps, peak); const want = top * 1.15 <= 960 ? (TACH.find((x) => x >= top * 1.15) || 960) : Math.ceil((top + 1000) / 1000) * 1000;
       if (want !== tachMax || !$('#e-tach').firstChild) {
         tachMax = want;
         $('#e-tach').innerHTML = dial({ max: tachMax, majors: 6, label: 'Throughput', unit: 'fps', red: 0.85, fmt: (x) => (tachMax >= 1000 ? `${(x / 1000).toFixed(1)}k` : String(Math.round(x))), cls: 'tach' });
