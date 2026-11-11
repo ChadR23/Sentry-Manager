@@ -4,7 +4,7 @@
 // anonymously", what was sent last and the last hourly heartbeat ("Show a
 // heartbeat" shows a sample of one). Before anything is sent, "What
 // will be sent" shows the exact JSON (already made anonymous when that is
-// on); sending and every change ask for the password. Plain markup
+// on); sending asks for the password, the two switches save in one click. Plain markup
 // (sentry-rep-*), colours inherited; the interface passes its own button
 // and input classes.
 //
@@ -231,7 +231,7 @@ export function createReportsSettings(el, { cls = {}, h24 = null } = {}) {
   el.addEventListener('change', (e) => {
     const box = e.target.closest('[data-k]');
     if (!box) return;
-    if (box.dataset.k === 'share' && box.checked && !window.confirm('Share diagnostics with the developers?\n\nA sealed report goes to them after a crash or an unhandled error, a health summary once a day, and a short heartbeat every hour (version, health, how much footage and space saved), until you turn it off. Passwords and keys are never in it.')) { box.checked = false; return; }
+    // one click: the switch saves at once (its text says what it sends)
     setOption(box.dataset.k, box.checked, box);
   });
   el.addEventListener('click', (e) => {

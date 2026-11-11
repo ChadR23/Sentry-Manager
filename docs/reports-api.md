@@ -185,7 +185,7 @@ well-known public one. No contact is sent.
 | support | An admin presses *Send diagnostics to support* | The same; at most 5 an hour |
 | crash | After a crash (noted locally as the process ends, sent after the restart) or an unhandled error in a request | *Share diagnostics* on; one report an hour for the same error, 6 a day |
 | daily | Once a day | *Share diagnostics* on (the first a day after turning it on) |
-| heartbeat | About 5 minutes (3 to 7) after a start or after turning sharing on, then every hour (56 to 64 minutes) | *Share diagnostics* on |
+| heartbeat | Right away when sharing is turned on; about 5 minutes (3 to 7) after a restart, so many servers updating at once do not report in the same second; then every hour (56 to 64 minutes) | *Share diagnostics* on |
 
 A report that cannot be delivered waits, sealed (never plaintext), in
 `data/reports/outbox`: at most 20 reports and 50 MB, 7 days, retried with

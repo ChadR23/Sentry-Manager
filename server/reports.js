@@ -545,10 +545,16 @@ function createReports({
     next.changedAt = now();
     db.set('reports-settings', next);
     if (before.share && !next.share) for (const e of outbox()) if (AUTO_KINDS.has(e.kind)) dropEntry(e);
-    // the first daily summary a day after turning it on; the first heartbeat in about 5 minutes
+    // the first daily summary a day after turning it on; the first heartbeat
+    // right away (then hourly from now). Only after a restart does the first
+    // one wait 3-7 minutes, so a fleet updating at once does not report in
+    // the same second.
     if (!before.share && next.share) {
       setState({ lastDailyAt: now() });
-      if (started) scheduleHeartbeat(firstHeartbeatIn());
+      if (started) {
+        scheduleHeartbeat(HEARTBEAT_EVERY_MS + jitter(HEARTBEAT_JITTER_MS));
+        sendHeartbeat().then(() => flush()).catch(() => null);
+      }
     }
     return { before, after: next, by };
   }

@@ -24,11 +24,11 @@ test('the shared module: feedback, support, the opt-in, anonymous, the preview, 
   assert.match(m, /'\/api\/reports\/preview'/);
   assert.match(m, /'\/api\/reports\/send'/);
   assert.match(m, /'\/api\/reports\/settings'/);
-  assert.match(m, /err\.code === 'CONFIRM_PASSWORD'/, 'changes and sends ask for the password like other security settings');
+  assert.match(m, /err\.code === 'CONFIRM_PASSWORD'/, 'sending asks for the password like other security settings');
   assert.match(m, /'\/api\/auth\/confirm'/);
-  // the opt-in is off unless checked by the saved setting, and asks first
+  // the opt-in is off unless checked by the saved setting, and turns on in one click (no pop-up)
   assert.match(m, /data-k="share"\$\{s\.share \? ' checked' : ''\}/);
-  assert.match(m, /window\.confirm\('Share diagnostics with the developers\?/);
+  assert.doesNotMatch(m, /window\.confirm/);
   // with no key every control is disabled
   assert.match(m, /const dis = off \? ' disabled' : ''/);
   // the JSON shown is the server's, exactly

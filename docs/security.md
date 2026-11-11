@@ -339,7 +339,8 @@ sends anything to anyone other than you, and only when you say so:
   developers cannot tie them to your install.
 
 Before anything is sent, **What will be sent** shows the exact JSON. Sending
-and every change ask for your password, and changes are in the audit log.
+asks for your password. The two switches (sharing and anonymous) are admin
+only and save in one click, and every change is in the audit log.
 Passwords, tokens, keys, cookies, link keys, webhook URLs, share credentials
 and TLS private keys are never in a report, anonymous or not.
 

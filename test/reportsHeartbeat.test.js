@@ -69,7 +69,7 @@ test('normalizeHeartbeat: exactly the protocol fields, whole numbers, distance t
   assert.equal(normalizeHeartbeat({ distanceKm: 3e7 }).distanceKm, 10_000_000);
 });
 
-test('scheduled: about 5 minutes after the start, then hourly, only while sharing is on; off stops it', async () => {
+test('scheduled: about 5 minutes after a start, at once when sharing is turned on, then hourly; off stops it', async () => {
   const rec = await startReceiver({ difficulty: 4 });
   const { rep, calls, timer } = client(rec);
   try {
@@ -81,13 +81,13 @@ test('scheduled: about 5 minutes after the start, then hourly, only while sharin
     assert.equal(timer.pending[0].ms, HEARTBEAT_EVERY_MS);
     assert.equal(rep.status().nextHeartbeatAt, null);
     assert.equal(rep.status().lastHeartbeat, null);
-    // turned on: the next one in about 5 minutes, not an hour
+    // turned on: the first heartbeat goes right away, the next an hour from now
     rep.setSettings({ share: true });
     assert.equal(timer.pending.length, 1);
-    assert.equal(timer.pending[0].ms, HEARTBEAT_FIRST_MS);
+    assert.equal(timer.pending[0].ms, HEARTBEAT_EVERY_MS);
     assert.ok(rep.status().nextHeartbeatAt > Date.now());
-    await timer.fire();
-    assert.equal(posts(calls), 1);
+    for (let i = 0; i < 400 && !(rec.index.length >= 1 && rep.status().lastHeartbeat); i++) await new Promise((r) => setTimeout(r, 25));
+    assert.equal(posts(calls), 1, 'sent at once, without waiting for a timer');
     const e = rec.index.at(-1);
     assert.equal(e.kind, 'heartbeat');
     const p = rec.openReport(e);

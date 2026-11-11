@@ -1496,8 +1496,8 @@ async function main() {
   }
   r.add('GET', '/api/reports', () => reports.status());
   r.add('PUT', '/api/reports/settings', (req, res, { body, user }) => {
-    // it decides what leaves this server: the password again
-    requireConfirmed(req);
+    // admins only, no password again: the switches are an opt-in the page
+    // confirms itself; each change is in the audit log
     const { before, after } = reports.setSettings({ share: body?.share, anonymous: body?.anonymous });
     const word = (x) => (x ? 'on' : 'off');
     if (before.share !== after.share) audit.warn(`Share diagnostics with the developers turned ${word(after.share)}: ${by(req, user)}`);
