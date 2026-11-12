@@ -459,8 +459,12 @@ test('Recycle Bin: protecting a recording while a trash run is going keeps it', 
 });
 
 const canSeparate = process.getuid?.() === 0 && spawnSync('setpriv', ['--version']).status === 0;
+// the app runs as uid 1000: it must be able to read the code and reach the temp folder
+// (a checkout or TMPDIR inside a root-only folder cannot run this test, and is not a failure)
+const reachable = canSeparate && spawnSync('setpriv', ['--reuid', '1000', '--regid', '1000', '--clear-groups', 'sh', '-c', 'test -r "$1" && test -x "$2"', 'sh', SERVER, os.tmpdir()]).status === 0;
+const separateSkip = !canSeparate ? true : !reachable ? `uid 1000 cannot read ${REPO} or reach ${os.tmpdir()}` : false;
 
-test('the supervisor runs the app unprivileged and keeps mounts and the CA to itself', { skip: !canSeparate || !hasOpenssl, timeout: 120000 }, async () => {
+test('the supervisor runs the app unprivileged and keeps mounts and the CA to itself', { skip: separateSkip || !hasOpenssl, timeout: 120000 }, async () => {
   const dir = await tmp();
   await fsp.chmod(dir, 0o755);
   const footage = path.join(dir, 'footage');

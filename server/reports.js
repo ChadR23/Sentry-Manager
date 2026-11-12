@@ -43,6 +43,7 @@ const TIMEOUT_MS = 20_000;
 const CONFIG_TTL_MS = 10 * 60_000;
 const MAX_BITS = 26; // a receiver asking for more is not followed (a stamp would take minutes)
 const MANUAL_PER_HOUR = 5;
+const SENT_REFS_KEPT = 20; // reference codes kept for Settings to list
 const DAY_MS = 86_400_000;
 const AUTO_KINDS = new Set(['crash', 'daily', 'heartbeat']);
 // the heartbeat: 10 to 60 seconds after a start (right away when sharing is
@@ -247,7 +248,11 @@ function createReports({
       setState({ lastHeartbeat: sent ? { at: sent.at, error: null } : { at: prev.at || null, error: error ? { at: now(), message: error } : null } });
       return;
     }
-    setState(sent ? { lastSent: sent, lastError: null } : { lastError: { at: now(), message: error } });
+    if (!sent) return setState({ lastError: { at: now(), message: error } });
+    // the reference codes, newest first, so Settings can list them to quote (to ask
+    // for a report's data to be deleted, for one)
+    const refs = sent.ref ? [{ at: sent.at, kind: e.kind, ref: sent.ref, anonymous: Boolean(e.anonymous) }, ...(state().sentRefs || [])].slice(0, SENT_REFS_KEPT) : state().sentRefs;
+    setState({ lastSent: sent, lastError: null, ...(refs ? { sentRefs: refs } : {}) });
   }
 
   // ---- the receiver's settings (GET /v1/config), and a signed move
@@ -544,7 +549,11 @@ function createReports({
       settings: settings(), lastSent: s.lastSent || null, lastError: s.lastError || null,
       lastHeartbeat: s.lastHeartbeat || null, nextHeartbeatAt: configured && settings().share && started ? hbNextAt : null,
       outbox: { count: list.length, bytes: list.reduce((n, e) => n + e.bytes, 0) },
-      manualPerHour: MANUAL_PER_HOUR
+      manualPerHour: MANUAL_PER_HOUR,
+      // the code to quote to ask the developers to delete this install's data: the
+      // first 8 characters of the install id, as the receiver's owner page shows it
+      installCode: installId().slice(0, 8),
+      sentRefs: Array.isArray(s.sentRefs) ? s.sentRefs : []
     };
   }
   function setSettings(patch, by = '') {

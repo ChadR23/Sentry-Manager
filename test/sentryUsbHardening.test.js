@@ -100,7 +100,8 @@ async function setup(opts = {}) {
   const close = async () => { link.close(); for (const p of pis) p.ws?.terminate(); srv.closeAllConnections?.(); await new Promise((r) => srv.close(r)); };
   return { db, link, port, pi, close, events };
 }
-const deep = (n) => JSON.parse(`${'['.repeat(n)}${']'.repeat(n)}`);
+const deepText = (n) => `${'['.repeat(n)}${']'.repeat(n)}`;
+const deep = (n) => JSON.parse(deepText(n));
 
 test('a Pi that sends deeply nested arrays where text belongs does not end the process; its link is closed or the value dropped', async () => {
   const t = await setup();
@@ -108,11 +109,13 @@ test('a Pi that sends deeply nested arrays where text belongs does not end the p
     await t.link.openPairing({ name: 'Car', username: 'pi', password: 'raspberry' });
     const p = await t.pi({ mode: 'pair', username: 'pi', password: 'raspberry', net: false, status: false });
     const id = p.auth.id;
-    const nest = deep(150_000);
+    // the JSON text written by hand: JSON.stringify of 150,000 levels overflows the
+    // test's own stack on some Node versions, before the app sees anything
+    const nest = deepText(150_000);
     // each of these used to throw "Maximum call stack size exceeded" out of the socket's data handler
-    p.send({ t: 'net', ssid: nest, iface: nest, ip: nest, gw: nest });
-    p.send({ t: 'alert', kind: 'fingerprint', seen: nest, at: nest });
-    p.send({ t: 'status', body: { deep: deep(5000) } });
+    p.send(`{"t":"net","ssid":${nest},"iface":${nest},"ip":${nest},"gw":${nest}}`);
+    p.send(`{"t":"alert","kind":"fingerprint","seen":${nest},"at":${nest}}`);
+    p.send(`{"t":"status","body":{"deep":${deepText(5000)}}}`);
     await wait(200);
     assert.equal(t.link.devices()[0].online, true, 'still connected: the values were only dropped');
     assert.equal(t.link.devices()[0].net.ssid, null);
@@ -121,13 +124,13 @@ test('a Pi that sends deeply nested arrays where text belongs does not end the p
     assert.equal(alert.seen, null);
     assert.equal(alert.at, null);
     // an answer whose type is a nested array: the answer gets a safe type
-    const q = await t.pi({ mode: 'key', key: p.linkKey, id, net: false, status: false, answer: () => null, onRequest: (m, me) => { me.ws.send(JSON.stringify({ t: 'res', id: m.id, status: 200, type: nest, body: { ok: true } })); return false; } });
+    const q = await t.pi({ mode: 'key', key: p.linkKey, id, net: false, status: false, answer: () => null, onRequest: (m, me) => { me.ws.send(`{"t":"res","id":${JSON.stringify(m.id)},"status":200,"type":${nest},"body":{"ok":true}}`); return false; } });
     const r = await t.link.request(id, { method: 'GET', path: '/api/status' });
     assert.equal(r.status, 200);
     assert.equal(r.type, 'application/octet-stream');
     // and one that ends a chunked answer with a nested error
     q.ws.close();
-    const s = await t.pi({ mode: 'key', key: p.linkKey, id, net: false, status: false, onRequest: (m, me) => { me.ws.send(JSON.stringify({ t: 'res', id: m.id, status: 200, type: 'text/plain', chunked: true })); me.ws.send(JSON.stringify({ t: 'end', id: m.id, error: nest })); return false; } });
+    const s = await t.pi({ mode: 'key', key: p.linkKey, id, net: false, status: false, onRequest: (m, me) => { me.ws.send(JSON.stringify({ t: 'res', id: m.id, status: 200, type: 'text/plain', chunked: true })); me.ws.send(`{"t":"end","id":${JSON.stringify(m.id)},"error":${nest}}`); return false; } });
     const e = await t.link.request(id, { method: 'GET', path: '/api/status' });
     assert.equal(e.status, 502);
     s.ws.close();

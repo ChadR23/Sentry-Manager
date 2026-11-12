@@ -382,9 +382,11 @@ function createSentryUsbLink({
       if (m.t === 'status') {
         const d = byId(id);
         if (!d) return;
+        // (a status nested deeper than any real one would only break the page that shows it;
+        // checked first, as stringifying one thousands deep can overflow the stack)
+        if (tooDeep(m.body)) return;
         const text = JSON.stringify(m.body ?? null);
-        // (a status nested deeper than any real one would only break the page that shows it)
-        if (text.length > MAX_STATUS || tooDeep(m.body)) return;
+        if (text.length > MAX_STATUS) return;
         d.status = JSON.parse(text);
         // the car readings (section 4, "The car"): known keys in range only
         if (d.status && typeof d.status === 'object' && !Array.isArray(d.status) && 'car' in d.status) {

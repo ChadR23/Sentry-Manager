@@ -348,8 +348,14 @@ only and save in one click, and every change is in the audit log.
 Passwords, tokens, keys, cookies, link keys, webhook URLs, share credentials
 and TLS private keys are never in a report, anonymous or not.
 
-Reports go only to the developers' private receiver (`https://reports.skittles.live`,
-set in `server/reportsConfig.js`). Each one is sealed to the receiver's key
+Reports go to the developers' private receiver (`https://reports.skittles.live`,
+set in `server/reportsConfig.js`). From there a short notice of each report
+(and a support report in full, secrets stripped again) goes to a private
+staff channel on Discord, a support assistant built on Anthropic's Claude
+triages support reports, and staff may file a public GitHub issue with the
+relevant, scrubbed evidence of a bug; Cloudflare carries the connection and
+sees only sealed data. Reports are not sold or given to anyone else. Who sees
+what, and for how long, is in [privacy.md](privacy.md). Each one is sealed to the receiver's key
 inside Sentry Six Manager before it leaves (X25519 + AES-256-GCM), so nothing
 on the way can read it; it is sent over HTTPS with
 normal certificate checks, and redirects are never followed. A report that

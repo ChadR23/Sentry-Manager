@@ -192,9 +192,14 @@ Reports are not sold, not used for advertising, and not given to anyone else.
 - **Send anonymously** so that reports can't be tied to your install.
 - **Check before sending:** **What will be sent** and **Show a heartbeat**
   show the exact JSON.
-- **Ask for deletion.** Quote a reference code (`SR-…`) from a report you
-  sent, and the developers will remove that install's reports and heartbeat
-  history.
+- **Ask for deletion.** Settings → Help & feedback → **Your data** shows
+  this install's **install code** (8 characters, with a Copy button) and the
+  reference codes (`SR-…`) of the reports it sent. Quote either one, and the
+  developers will remove that install's reports and heartbeat history.
+  Heartbeats have no reference code, so for a server that only shares
+  heartbeats the install code is the way. Anonymous reports and heartbeats
+  can't be tied to an install: an anonymous report can only be found by its
+  own reference code.
 
 The full technical description is in [reports-api.md](reports-api.md), and
 the settings are explained in

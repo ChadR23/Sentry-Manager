@@ -7,8 +7,11 @@ Sentry Six Manager can send feedback and diagnostics to its developers.
 diagnostics with the developers* (Settings → Help & feedback, or the same
 box on the first-start page, unticked by default: `POST /api/auth/setup`
 takes an optional `reports: { share, anonymous }`, both booleans) or presses
-Send for one feedback message or one support report. Reports go only to the
-developers' receiver, never to a third party. The receiver is the owner's
+Send for one feedback message or one support report. Reports go to the
+developers' receiver; who else sees what (Cloudflare carrying the
+connection, a private staff channel on Discord, Anthropic's Claude triaging
+support reports, staff-approved public GitHub issues with scrubbed evidence
+only) and how long it is kept is in [privacy.md](privacy.md). The receiver is the owner's
 private service and is not part of this repository; this page is the wire
 protocol the Manager speaks to it. What the user sees is in
 [security.md](security.md#reports-to-the-developers-off-by-default).

@@ -32,12 +32,13 @@ const STYLE = `
 .sentry-rep .sr-box{padding:12px 14px;border-radius:9px;border:1px solid rgba(127,127,127,.3)}
 .sentry-rep .sr-off{padding:12px 14px;border-radius:9px;background:rgba(255,170,60,.16);border:1px solid rgba(255,170,60,.45);font-weight:600}
 .sentry-rep .sr-ok{color:#2fa56a}.sentry-rep .sr-err{color:#e5484d}
-.sentry-rep .sr-ref{font:700 15px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:.04em;padding:2px 8px;border-radius:6px;background:rgba(127,127,127,.16)}
+.sentry-rep .sr-ref{white-space:nowrap;font:700 15px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:.04em;padding:2px 8px;border-radius:6px;background:rgba(127,127,127,.16)}
 .sentry-rep .sr-preview summary{cursor:pointer;font-weight:600}
 .sentry-rep .sr-preview pre{margin:8px 0 0;max-height:340px;overflow:auto;font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere;padding:8px 10px;border-radius:7px;border:1px solid rgba(127,127,127,.3)}
 .sentry-rep .sr-kv{display:grid;grid-template-columns:max-content 1fr;gap:4px 14px;margin:0}
 .sentry-rep .sr-kv dt{opacity:.74}.sentry-rep .sr-kv dd{margin:0;overflow-wrap:anywhere}
 .sentry-rep .sr-count{font-size:12px;opacity:.7;text-align:right}
+.sentry-rep .sr-col{display:flex;flex-direction:column;gap:8px;min-width:0}
 .sentry-rep [hidden]{display:none!important}
 `;
 const esc = (t) => String(t ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -83,13 +84,39 @@ export function createReportsSettings(el, { cls = {}, h24 = null } = {}) {
       <dt>Sent to</dt><dd><span class="sr-muted">${esc(st.endpoint)} · key ${esc(st.kid)}</span></dd></dl>`;
   }
 
+  // the code to quote to ask the developers to delete this install's data, and the
+  // reference codes of the reports it sent
+  function yourDataHtml() {
+    const words = { feedback: 'Feedback', support: 'Diagnostics to support', crash: 'Crash report', daily: 'Daily summary' };
+    const refs = st.sentRefs || [];
+    return `<div class="sr-row"><span>Install code</span><span class="sr-ref" data-code>${esc(st.installCode || '')}</span><button type="button" class="${btn}" data-copycode>Copy</button><span class="sr-muted sr-small" data-copied role="status"></span></div>
+      <p class="sr-muted sr-small">Quote this to ask the developers to delete your data. Heartbeats get no reference code, so for an install that only shares heartbeats this code is the only way to find it.</p>
+      ${st.settings.anonymous ? '<p class="sr-small">"Send anonymously" is on: anonymous reports and heartbeats can\'t be tied to this install, so there is nothing to delete by this code. An anonymous report can only be found by its own reference code below.</p>' : ''}
+      <p class="sr-small" style="font-weight:600;margin-top:6px">Reports sent</p>
+      ${refs.length ? `<dl class="sr-kv">${refs.map((r) => `<dt>${esc(stamp(r.at))}</dt><dd>${esc(words[r.kind] || r.kind)} · <span class="sr-ref">${esc(r.ref)}</span>${r.anonymous ? ' <span class="sr-muted">(anonymous)</span>' : ''}</dd>`).join('')}</dl>` : '<p class="sr-muted sr-small">None yet. Each report you send gets a reference code (SR-…), listed here, the last 20.</p>'}`;
+  }
+  async function copyCode() {
+    const code = st.installCode || '';
+    const done = (ok) => { const e = $('[data-copied]'); if (e) e.textContent = ok ? 'Copied.' : 'Select the code and copy it.'; };
+    try {
+      await navigator.clipboard.writeText(code);
+      done(true);
+    } catch {
+      // no clipboard (plain HTTP, an old browser): select it for a manual copy
+      const c = $('[data-code]');
+      const r = document.createRange();
+      if (c) { r.selectNodeContents(c); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); }
+      done(false);
+    }
+  }
+
   function draw() {
     const off = !st.configured;
     const dis = off ? ' disabled' : '';
     const s = st.settings;
     el.innerHTML = `<div class="sentry-rep">
       ${off ? `<p class="sr-off" role="status">${NOT_SET_UP} The buttons below are off and nothing is ever sent.</p>` : ''}
-      <p class="sr-muted">Reports go only to the developers of Sentry Six Manager, sealed so only they can read them. Nothing is sent unless you press Send here, or turn on sharing below. Passwords, keys, tokens, cookies and share credentials are never in a report.</p>
+      <p class="sr-muted">Reports go to the developers of Sentry Six Manager, sealed so only they can read them. Nothing is sent unless you press Send here, or turn on sharing below. Passwords, keys, tokens, cookies and share credentials are never in a report. <a href="https://github.com/skittles-fivem/Sentry-Manager/blob/main/docs/privacy.md" target="_blank" rel="noopener">Where reports go and who sees them</a></p>
       <section aria-labelledby="sr-fb"><h3 id="sr-fb">Send feedback</h3>
         <label class="sr-f">Message<textarea class="${input}" data-msg maxlength="5000" required placeholder="What works, what doesn't, what you'd like…"${dis}></textarea></label>
         <div class="sr-count" data-msgcount>0 / 5000</div>
@@ -115,6 +142,7 @@ export function createReportsSettings(el, { cls = {}, h24 = null } = {}) {
         <label class="sr-check"><input type="checkbox" data-k="anonymous"${s.anonymous ? ' checked' : ''}${dis}><span>Send anonymously<small>For every report: the install id, host name, addresses, account, vehicle and Sentry USB names, share paths, Wi-Fi names, VINs, e-mail addresses and places become ANON, and no contact is sent.</small></span></label>
       </section>
       <form class="sr-row sr-box" data-confirm hidden><span>Enter your password to confirm:</span><input class="${input}" style="width:auto;flex:1 1 180px" type="password" name="password" autocomplete="current-password" aria-label="Your password" required><button type="submit" class="${primary}">Confirm</button><button type="button" class="${btn}" data-cancel>Cancel</button></form>
+      <section aria-labelledby="sr-yd"><h3 id="sr-yd">Your data</h3><div class="sr-col" data-yourdata>${yourDataHtml()}</div></section>
       <section aria-labelledby="sr-st"><h3 id="sr-st">Status</h3><div data-status>${statusHtml()}</div></section>
       <p data-say role="status"></p>
     </div>`;
@@ -239,6 +267,7 @@ export function createReportsSettings(el, { cls = {}, h24 = null } = {}) {
     const pv = t.closest('[data-preview]');
     if (pv) preview(pv.dataset.preview);
     if (t.closest('[data-send]')) send();
+    if (t.closest('[data-copycode]')) copyCode();
     if (t.closest('[data-samplehb]')) { e.preventDefault(); if (!t.closest('[data-samplehb]').hasAttribute('disabled')) sampleHeartbeat(); }
     if (t.closest('[data-cancelpv]')) { pending = null; $('[data-pv]').hidden = true; }
     if (t.closest('[data-cancel]')) {

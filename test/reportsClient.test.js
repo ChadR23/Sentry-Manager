@@ -67,6 +67,9 @@ test('feedback and support: sealed, signed, stamped, received; the support repor
     assert.equal(r.rec.index.at(-1).trust, 'verified', 'the same install and key as before');
     assert.equal(rep.status().lastSent.ref, s2.ref);
     assert.equal(rep.status().outbox.count, 0);
+    // Settings → Your data: the install code and the reference codes, newest first
+    assert.equal(rep.status().installCode, pv.payload.install.slice(0, 8));
+    assert.deepEqual(rep.status().sentRefs.map((x) => [x.kind, x.ref, x.anonymous]), [['support', s2.ref, false], ['feedback', sent.ref, false]]);
   } finally { await r.close(); }
 });
 
@@ -90,6 +93,7 @@ test('anonymous: ANON install, no contact, identifiers gone everywhere, a separa
     assert.equal(anon.trust, 'anon');
     assert.equal(anon.install, 'ANON');
     assert.notEqual(anon.key, named.key, 'signed with a key of its own: not linkable to the install');
+    assert.deepEqual(rep.status().sentRefs.map((x) => [x.ref, x.anonymous]).slice(0, 1), [[sent.ref, true]], 'kept locally, marked anonymous');
     // the preview no longer matches when the toggle changes in between
     const again = await rep.preview({ kind: 'support' });
     rep.setSettings({ anonymous: false });
