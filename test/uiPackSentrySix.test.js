@@ -379,6 +379,13 @@ function browserModule(file) {
   const src = read('web/s6/' + file).replace(
     /(from\s*|import\()(['"])([^'"]+)\2/g,
     (all, lead, quote, spec) => {
+      if (spec === '/web/buildLabel.js')
+        return lead + JSON.stringify('data:text/javascript,export const buildText=()=>"test"');
+      if (spec === '/web/savingsChart.js')
+        return (
+          lead +
+          JSON.stringify('data:text/javascript,export const createSavingsChart=()=>({destroy(){}})')
+        );
       if (spec === '/web/account.js')
         return (
           lead +
@@ -1500,4 +1507,285 @@ test('r4 Viewer: an explicit request for the same recording seeks again', async 
   m.hideStudio();
   m.showStudio('viewer', v, { folder: '/car/recording' });
   assert.equal(host.appended.length, 2);
+});
+
+for (const stage of ['save', 'preview', 'dialog'])
+  test('r5 cleanup: editing during ' + stage + ' cancels the saved run', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const held = deferred(),
+      posts = [];
+    let reads = 0,
+      binDays = '1';
+    const response = {
+      policy: { keepDays: {}, binDays: 1 },
+      preview: { recordings: 3, bytes: 100 },
+    };
+    await browserEnv(t, (url, opts) => {
+      if (url.endsWith('/run')) posts.push(url);
+      if (stage === 'save' && opts.method === 'PUT') return held.promise;
+      if (opts.method === 'GET' && ++reads === 2 && stage === 'preview') return held.promise;
+      return response;
+    });
+    const saved = globalThis.FormData;
+    globalThis.FormData = class {
+      get(k) {
+        return k === 'binDays' ? binDays : '';
+      }
+    };
+    t.after(() => (globalThis.FormData = saved));
+    const el = element(),
+      query = el.querySelector.bind(el);
+    el.querySelector = (s) => query(s.replace('#', '[id=') + (s.startsWith('#') ? ']' : ''));
+    const stop = await (
+      await import(browserModule('pages/settings/cleanup.js'))
+    ).render(el, context('r5-edit'));
+    t.cleanupFns.push(stop);
+    const pending = el.querySelector('#pol-run').onclick();
+    await tick();
+    binDays = '';
+    el.querySelector('#pol').oninput?.();
+    held.resolve(response);
+    await tick();
+    const open = document.body.appended.filter((d) => d.open);
+    open.forEach((d) => d.close('ok'));
+    await pending;
+    assert.deepEqual(posts, []);
+    assert.equal(open.length, 0);
+  });
+
+test('r5 cleanup: confirmation uses normalized saved expiry and warns of permanent deletion', async (t) => {
+  await browserEnv(t, () => ({
+    policy: { keepDays: {}, binDays: 2 },
+    preview: { recordings: 3, bytes: 100 },
+  }));
+  const saved = globalThis.FormData;
+  globalThis.FormData = class {
+    get(k) {
+      return k === 'binDays' ? '1' : '';
+    }
+  };
+  t.after(() => (globalThis.FormData = saved));
+  const el = element(),
+    query = el.querySelector.bind(el);
+  el.querySelector = (s) => query(s.replace('#', '[id=') + (s.startsWith('#') ? ']' : ''));
+  const stop = await (
+    await import(browserModule('pages/settings/cleanup.js'))
+  ).render(el, context('r5-warning'));
+  t.cleanupFns.push(stop);
+  const pending = el.querySelector('#pol-run').onclick();
+  await tick();
+  const dlg = document.body.appended.find((d) => d.open),
+    html = dlg.innerHTML;
+  dlg.close('cancel');
+  await pending;
+  assert.match(html, /older than 2 days will be deleted for good/);
+});
+
+test('r5 Viewer: URL cannot replace the selected vehicle or its root', async (t) => {
+  await browserEnv(t, () => ({}));
+  const { studioUrl } = await import(browserModule('studio.js'));
+  const q = new URL(
+    studioUrl('viewer', { id: 'B', root: '/B' }, { vehicle: 'A', root: '/A', date: '2026-11-10' }),
+    'http://localhost',
+  ).searchParams;
+  assert.equal(q.get('vehicle'), 'B');
+  assert.equal(q.get('root'), '/B');
+  assert.equal(q.get('date'), '2026-11-10');
+});
+
+for (const action of ['cars', 'worker'])
+  test('r5 helpers: aborted ' + action + ' save never renders the next page', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    let rendered = 0,
+      requested = false;
+    await browserEnv(t, (url, opts) => {
+      if (opts.method !== 'GET') {
+        requested = true;
+        return new Promise((resolve, reject) =>
+          opts.signal.addEventListener(
+            'abort',
+            () => reject(new DOMException('Cancelled', 'AbortError')),
+            { once: true },
+          ),
+        );
+      }
+      return url === '/api/nodes'
+        ? { nodes: [{ id: 'n', cars: [] }], worker: { available: true, mains: [] } }
+        : { vehicles: [] };
+    });
+    const el = element(),
+      query = el.querySelector.bind(el),
+      add = element();
+    add.dataset.carAdd = 'n';
+    add.value = 'B';
+    el.querySelector = (s) => query(s.replace('#', '[id=') + (s.startsWith('#') ? ']' : ''));
+    el.querySelectorAll = (s) => (s === '[data-car-add]' ? [add] : []);
+    const stop = await (
+      await import(browserModule('pages/settings/helpers.js'))
+    ).render(
+      el,
+      context('r5-helper', {
+        render() {
+          rendered++;
+        },
+      }),
+    );
+    t.cleanupFns.push(stop);
+    const pending =
+      action === 'worker' ? el.querySelector('#worker-on').onchange() : add.onchange();
+    await tick();
+    assert.ok(requested);
+    stop();
+    await pending;
+    await tick();
+    assert.equal(rendered, 0);
+  });
+
+test('r5 converter: leaving Activity cancels retry and stale hello requests', async (t) => {
+  const posts = [],
+    sources = [];
+  await browserEnv(t, (url, opts) => {
+    if (opts.method === 'POST') posts.push({ url, signal: opts.signal });
+    return { ok: true, value: null };
+  });
+  globalThis.EventSource = class {
+    static CLOSED = 2;
+    handlers = {};
+    readyState = 2;
+    constructor() {
+      sources.push(this);
+    }
+    addEventListener(k, fn) {
+      this.handlers[k] = fn;
+    }
+    close() {}
+  };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { scope } = await import(browserModule('core.js')),
+    owner = scope();
+  const m = await import(browserModule('convert.js'));
+  const stop = m.follow(() => {}, owner);
+  await Promise.resolve();
+  await Promise.resolve();
+  const first = sources.at(-1);
+  first.handlers.error();
+  owner.abort();
+  stop();
+  const count = posts.length;
+  t.mock.timers.tick(30000);
+  await first.handlers.hello();
+  assert.equal(sources.length, 1);
+  assert.equal(posts.length, count);
+  assert.ok(posts.every((p) => p.signal));
+});
+
+test('r5 server: configured EUR reaches energy costs and tiles have a single grid', async (t) => {
+  await browserEnv(t, (url) =>
+    url === '/api/stats'
+      ? { power: { totalW: 20, todayWh: 12, todayCost: 0.5 } }
+      : { role: 'admin' },
+  );
+  document.addEventListener = document.removeEventListener = () => {};
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const el = element();
+  const stop = await (
+    await import(browserModule('pages/server.js'))
+  ).render(el, context('eur', { state: { power: { currency: 'EUR' } } }));
+  t.cleanupFns.push(stop);
+  assert.match(el.querySelector('[data-stats]').innerHTML, /EUR/);
+  assert.doesNotMatch(el.querySelector('[data-stats]').innerHTML, /\$0\.50/);
+  assert.doesNotMatch(el.innerHTML, /class="nd-grid" data-stats/);
+});
+
+test('r5 server: renderer container leaves the footer outside the tile grid', () => {
+  assert.doesNotMatch(read('web/s6/pages/server.js'), /class="nd-grid" data-stats/);
+});
+
+test('r5 Viewer: known deep-link vehicle switches selection, scope and root; unknown ids are ignored', async (t) => {
+  const vehicles = [
+    { id: 'A', root: '/A' },
+    { id: 'B', studioRoot: '/B' },
+  ];
+  await browserEnv(t, (url) => (url === '/api/vehicles' ? { vehicles } : {}));
+  const elements = new Map();
+  document.getElementById = (id) => {
+    if (!elements.has(id)) {
+      const el = element();
+      el.replaceChildren = () => {};
+      elements.set(id, el);
+    }
+    return elements.get(id);
+  };
+  document.querySelectorAll = () => [];
+  document.querySelector = () => element();
+  document.documentElement = element();
+  const previous = {
+    MutationObserver: globalThis.MutationObserver,
+    requestAnimationFrame: globalThis.requestAnimationFrame,
+  };
+  globalThis.MutationObserver = class {
+    observe() {}
+  };
+  globalThis.requestAnimationFrame = () => {};
+  t.after(() => Object.assign(globalThis, previous));
+  location.hash = '#/viewer?vehicle=B&day=2026-11-10';
+  const m = await import(browserModule('main.js'));
+  assert.equal(m.current().id, 'B');
+  const host = document.getElementById('frames');
+  assert.match(host.appended.at(-1).dataset.src, /root=%2FB&vehicle=B/);
+  assert.match(host.appended.at(-1).dataset.src, /date=2026-11-10/);
+  const { scope } = await import(browserModule('core.js'));
+  const owner = scope(() => [m.current().id]);
+  t.cleanupFns.push(owner.abort);
+  location.hash = '#/viewer?vehicle=A';
+  await m.render();
+  assert.equal(m.current().id, 'A');
+  assert.equal(owner.alive(), false);
+  location.hash = '#/viewer?vehicle=missing';
+  await m.render();
+  assert.equal(m.current().id, 'A');
+  assert.match(host.appended.at(-1).dataset.src, /root=%2FA&vehicle=A/);
+});
+
+test('r5 converter: a hello awaiting subscribe cannot request or deliver after its owner leaves', async (t) => {
+  const held = deferred(),
+    posts = [],
+    sources = [];
+  await browserEnv(t, (url, opts) => {
+    posts.push({ url, signal: opts.signal });
+    return url.endsWith('/subscribeProgress') ? held.promise : { ok: true, value: null };
+  });
+  globalThis.EventSource = class {
+    handlers = {};
+    constructor() {
+      sources.push(this);
+    }
+    addEventListener(k, fn) {
+      this.handlers[k] = fn;
+    }
+    close() {}
+  };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { scope } = await import(browserModule('core.js')),
+    owner = scope();
+  const m = await import(browserModule('convert.js'));
+  let delivered = 0;
+  const stop = m.follow(() => delivered++, owner);
+  await tick();
+  const first = sources.at(-1),
+    pending = first.handlers.hello();
+  await tick();
+  owner.abort();
+  stop();
+  const count = posts.length,
+    before = delivered;
+  held.resolve({ ok: true, value: null });
+  await pending;
+  first.handlers['converter:progress']({
+    data: JSON.stringify({ snapshot: { id: 'late', state: 'encoding' } }),
+  });
+  t.mock.timers.tick(30000);
+  assert.equal(posts.length, count);
+  assert.equal(delivered, before);
+  assert.ok(posts.every((p) => p.signal?.aborted));
 });

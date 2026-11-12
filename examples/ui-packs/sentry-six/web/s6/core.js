@@ -200,8 +200,9 @@ export function scope(keyParts = () => [], { signal, alive = () => true } = {}) 
       if (valid()) toast(...args);
     },
     fetch: guarded((url, options = {}) => fetch(url, { ...options, signal: controller.signal })),
-    invoke: async (name, payload) => {
+    invoke: async (name, payload, options = {}) => {
       const out = await request('/api/converter/invoke/' + name, {
+        ...options,
         method: 'POST',
         body: payload,
         headers: { 'X-Client-Id': clientId },

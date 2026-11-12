@@ -795,7 +795,7 @@ pre {
 .nd-grid {
   display: grid;
   grid-auto-flow: row dense;
-  grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
   gap: 14px;
   margin-top: 16px;
 }
@@ -807,7 +807,7 @@ pre {
   min-width: 0;
 }
 .nd-wide {
-  grid-column: span 2;
+  grid-column: 1 / -1;
 }
 .nd-title {
   display: flex;
@@ -1113,7 +1113,7 @@ pre {
 /* the selected vehicle's two tiles at the top of the section: side by side,
    each half the width, their buttons on one line at the bottom */
 .nd-vgrid {
-  grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
 }
 .nd-vgrid .nd-tile {
   display: flex;
@@ -2134,4 +2134,6 @@ input.toggle-switch:focus-visible {
   text-overflow: ellipsis;
 }
 
-.savings .sentry-sv { color: var(--accent, #34d399); }
+.savings .sentry-sv {
+  color: var(--accent, #34d399);
+}

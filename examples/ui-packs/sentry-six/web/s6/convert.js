@@ -1,7 +1,7 @@
 // the converter, as data. One live stream (Server-Sent Events) is
 // shared by every page that wants it; snapshots are merged as they arrive.
 
-import { invoke, clientId } from './core.js';
+import { scope, clientId } from './core.js';
 
 export const ACTIVE = new Set([
   'discovering',
@@ -214,82 +214,129 @@ export function applySnapshot(next) {
   deliver();
 }
 
+// Each connection has a generation and scope; no callback survives close().
+let generation = 0,
+  retryTimer = null,
+  stream = null;
+const subscribers = new Map();
+const hasSubscribers = () => [...subscribers.values()].some((owner) => owner.alive());
+function close() {
+  generation++;
+  clearTimeout(retryTimer);
+  retryTimer = null;
+  stream?.abort();
+  stream = null;
+  live.source?.close();
+  live.source = null;
+  live.subscribed = false;
+}
 function openStream() {
-  if (live.source) return;
+  if (live.source || !hasSubscribers()) return;
+  clearTimeout(retryTimer);
+  retryTimer = null;
+  const ticket = ++generation;
+  const owner = scope([], { alive: () => ticket === generation && hasSubscribers() });
+  stream = owner;
+  const valid = () => ticket === generation && owner.alive();
+  const invoke = (name) => {
+    owner.check();
+    const caller = [...subscribers.values()].find((s) => s.alive());
+    return caller.invoke(name, undefined, { signal: owner.signal });
+  };
   const es = new EventSource(`/api/converter/events?client=${encodeURIComponent(clientId)}`);
   live.source = es;
+  const snapshot = async () => {
+    const next = await invoke('getCurrent');
+    if (valid()) applySnapshot(next);
+  };
   es.addEventListener('hello', async () => {
+    if (!valid()) return;
     live.retry = 1000;
     try {
       await invoke('subscribeProgress');
+      if (!valid()) return;
       live.subscribed = true;
-      applySnapshot(await invoke('getCurrent'));
+      await snapshot();
     } catch {
-      /* the converter is starting: the next hello catches up */
+      /* Closing or a converter still starting needs no follow-up. */
     }
   });
   es.addEventListener('converter:progress', (e) => {
+    if (!valid()) return;
     try {
       applySnapshot(JSON.parse(e.data).snapshot);
     } catch {
-      /* ignore */
+      /* ignore malformed data */
     }
   });
   es.addEventListener('converter:benchmarkProgress', (e) => {
-    let p;
+    if (!valid()) return;
     try {
-      p = JSON.parse(e.data);
+      for (const fn of [...live.bench]) fn(JSON.parse(e.data));
     } catch {
-      return;
+      /* ignore malformed data */
     }
-    for (const fn of [...live.bench]) fn(p);
   });
   es.addEventListener('error', () => {
-    if (es.readyState !== EventSource.CLOSED) return;
-    live.source = null;
-    if (live.listeners.size || live.bench.size) setTimeout(openStream, live.retry);
+    if (!valid() || es.readyState !== EventSource.CLOSED) return;
+    close();
+    const retryGeneration = generation;
+    if (hasSubscribers())
+      retryTimer = setTimeout(() => {
+        retryTimer = null;
+        if (retryGeneration === generation && hasSubscribers()) openStream();
+      }, live.retry);
     live.retry = Math.min(live.retry * 2, 30000);
   });
+  snapshot().catch(() => {
+    if (valid()) deliver();
+  });
 }
-
-function closeStreamIfIdle() {
-  if (live.listeners.size || live.bench.size || !live.source) return;
-  live.source.close();
-  live.source = null;
-  if (live.subscribed) invoke('unsubscribeProgress').catch(() => {});
-  live.subscribed = false;
-}
-
-/** Follow the converter; fn(snapshot, nodeWaiting) on every change. Returns stop(). */
-export function follow(fn) {
-  live.listeners.add(fn);
-  openStream();
-  if (live.known) fn(live.snap, live.nodeWaiting);
-  else
-    invoke('getCurrent')
-      .then(applySnapshot)
-      .catch(() => fn(null, null));
-  return () => {
-    live.listeners.delete(fn);
-    setTimeout(closeStreamIfIdle, 0);
+function subscribe(set, fn, owner) {
+  const ownScope = !owner;
+  owner ||= scope();
+  const listener = (...args) => {
+    if (owner.alive()) fn(...args);
   };
-}
-export function onBenchmark(fn) {
-  live.bench.add(fn);
-  openStream();
-  return () => {
-    live.bench.delete(fn);
-    setTimeout(closeStreamIfIdle, 0);
+  const stop = () => {
+    owner.signal.removeEventListener('abort', stop);
+    set.delete(listener);
+    subscribers.delete(listener);
+    if (ownScope) owner.abort();
+    if (!hasSubscribers()) close();
   };
+  if (!owner.alive()) return stop;
+  set.add(listener);
+  subscribers.set(listener, owner);
+  owner.signal.addEventListener('abort', stop, { once: true });
+  openStream();
+  if (set === live.listeners && live.known) listener(live.snap, live.nodeWaiting);
+  return stop;
 }
-/** Waits until the stream is open (the benchmark's progress needs it). */
-export function streamReady() {
+/** Follow the converter while the caller's page scope is alive. */
+export function follow(fn, owner) {
+  return subscribe(live.listeners, fn, owner);
+}
+export function onBenchmark(fn, owner) {
+  return subscribe(live.bench, fn, owner);
+}
+/** Wait for subscription, without leaving a timer behind on navigation. */
+export function streamReady(owner) {
+  owner.check();
   openStream();
   return new Promise((resolve) => {
-    if (live.subscribed) return resolve();
-    const t0 = Date.now();
-    const check = () =>
-      live.subscribed || Date.now() - t0 > 4000 ? resolve() : setTimeout(check, 100);
+    let timer;
+    const end = () => {
+      clearTimeout(timer);
+      owner.signal.removeEventListener('abort', end);
+      resolve();
+    };
+    owner.signal.addEventListener('abort', end, { once: true });
+    const deadline = Date.now() + 4000;
+    const check = () => {
+      if (!owner.alive() || !hasSubscribers() || live.subscribed || Date.now() >= deadline) end();
+      else timer = setTimeout(check, 100);
+    };
     check();
   });
 }

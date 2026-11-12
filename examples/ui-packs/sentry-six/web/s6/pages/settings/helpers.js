@@ -291,7 +291,7 @@ async function renderPage(page, ctx) {
       method: 'PUT',
       body: { cars: list },
     }).catch((err) => toast(err.message, true));
-    render();
+    if (ctx.alive()) render();
   });
   const carsOf = (id) => [...(nodes.find((x) => x.id === id)?.cars || [])];
   page.querySelectorAll('[data-car-add]').forEach((sel) => {
@@ -367,7 +367,7 @@ async function renderPage(page, ctx) {
     } catch (err) {
       toast(err.message, true);
     }
-    render();
+    if (ctx.alive()) render();
   };
   $('worker-on').onchange = saveWorker;
   if ($('pair-start'))

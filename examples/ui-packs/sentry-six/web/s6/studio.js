@@ -22,10 +22,11 @@ export function hideStudio() {
   }
 }
 export function studioUrl(kind, vehicle, extra = {}, vehicleChanged = false) {
+  const { vehicle: ignoredVehicle, root: ignoredRoot, ...params } = extra;
   const q = new URLSearchParams({
     embed: kind,
     ...(vehicle ? { root: vehicle.studioRoot || vehicle.root, vehicle: vehicle.id } : {}),
-    ...(vehicleChanged ? {} : extra),
+    ...(vehicleChanged ? {} : params),
   });
   return `/studio/${kind === 'encoder' ? 'encoder' : 'index'}.html?${q}`;
 }

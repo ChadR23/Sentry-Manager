@@ -51,6 +51,17 @@ const page = document.getElementById('page');
 let cleanup = () => {},
   seq = 0,
   renderScope;
+// The picker, Studio messages and deep links all switch the same shell state.
+export function selectVehicle(id) {
+  if (id === state.vehicleId || !state.vehicles.some((v) => v.id === id)) return false;
+  renderScope?.abort();
+  clearFootageSelections();
+  state.vehicleId = id;
+  localStorage.setItem('s6:vehicle', id);
+  const picker = document.getElementById('car');
+  if (picker) picker.value = id;
+  return true;
+}
 export const pages = {};
 export async function render(vehicleChanged = false) {
   const ticket = ++seq;
@@ -99,6 +110,7 @@ export async function render(vehicleChanged = false) {
   renderScope = owner;
   try {
     if (['viewer', 'encoder'].includes(key)) {
+      if (vehicleChanged !== true) selectVehicle(q.get('vehicle'));
       showStudio(
         key,
         current(),
@@ -154,10 +166,8 @@ async function refresh() {
       ? `<label class="sr-only" for="car">Vehicle</label><select id="car">${state.vehicles.map((v) => `<option value="${esc(v.id)}" ${v.id === state.vehicleId ? 'selected' : ''}>${esc(v.name)}</option>`).join('')}</select>`
       : '';
   pick.querySelector('select')?.addEventListener('change', (e) => {
-    clearFootageSelections();
+    selectVehicle(e.target.value);
     history.replaceState(null, '', location.hash.split('?')[0]);
-    state.vehicleId = e.target.value;
-    localStorage.setItem('s6:vehicle', state.vehicleId);
     render(true);
   });
   document.getElementById('bell').innerHTML =
@@ -171,10 +181,8 @@ window.addEventListener('message', (e) => {
   if (e.origin !== location.origin || e.data?.source !== 'sentry-studio') return;
   if (e.data.type === 'showInFolder') location.hash = '#/footage';
   if (e.data.type === 'select-vehicle' && state.vehicles.some((v) => v.id === e.data.id)) {
-    clearFootageSelections();
+    selectVehicle(e.data.id);
     history.replaceState(null, '', location.hash.split('?')[0]);
-    state.vehicleId = e.data.id;
-    localStorage.setItem('s6:vehicle', e.data.id);
     render(true);
   }
 });

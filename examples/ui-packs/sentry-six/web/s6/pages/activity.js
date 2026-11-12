@@ -109,7 +109,7 @@ async function renderPage(el, ctx) {
   const stop = follow((s) => {
       snapshot = s;
       draw();
-    }),
+    }, ctx.scope),
     timer = setInterval(load, 5000);
   return () => {
     stopped = true;

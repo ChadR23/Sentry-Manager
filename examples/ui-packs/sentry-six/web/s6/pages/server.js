@@ -15,7 +15,7 @@ async function renderPage(el, ctx) {
   const more = {},
     seen = new Map();
   el.innerHTML =
-    '<a class="back" href="#/health">‹ Health</a><h2>Server details</h2><p data-host></p><div class="toolbar"><div class="segments"><button data-range="15m" class="active">15 min</button><button data-range="24h">24 h</button></div><a data-csv download>Download CSV</a></div><section class="card savings"><h3>Space saved by converting</h3><div data-savings></div></section><div class="nd-grid" data-stats>Reading the server…</div>';
+    '<a class="back" href="#/health">‹ Health</a><h2>Server details</h2><p data-host></p><div class="toolbar"><div class="segments"><button data-range="15m" class="active">15 min</button><button data-range="24h">24 h</button></div><a data-csv download>Download CSV</a></div><section class="card savings"><h3>Space saved by converting</h3><div data-savings></div></section><div data-stats>Reading the server…</div>';
   const savings = createSavingsChart(el.querySelector('[data-savings]'), {
     vehicleId: ctx.current()?.id,
   });
@@ -26,7 +26,14 @@ async function renderPage(el, ctx) {
     if (stopped || !ctx.alive()) return;
     el.querySelector('[data-host]').innerHTML = hostLine(snap?.host);
     el.querySelector('[data-stats]').innerHTML = snap
-      ? serverBody(snap, { admin, range, hist, more, seen })
+      ? serverBody(snap, {
+          admin,
+          range,
+          hist,
+          more,
+          seen,
+          currency: snap.price?.currency || ctx.state.power?.currency || '$',
+        })
       : 'Waiting for a sample…';
     el.querySelector('[data-csv]').href = '/api/stats/export.csv?range=' + range;
     el.querySelectorAll('[data-range]').forEach((b) =>

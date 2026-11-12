@@ -1,4 +1,4 @@
-import { ownedRender } from '../../core.js';
+import { ownedRender, scope } from '../../core.js';
 import { esc } from '../../core.js';
 import { plural, size as bytes, ago as when } from '../../format.js';
 async function renderPage(page, ctx) {
@@ -38,8 +38,11 @@ async function renderPage(page, ctx) {
       maxGB: fd.get('maxGB') || null,
     };
   };
+  let running = null;
+  form.oninput = form.onchange = () => running?.abort();
   form.onsubmit = async (e) => {
     e.preventDefault();
+    running?.abort();
     try {
       await api(`/api/vehicles/${v.id}/policy`, {
         method: 'PUT',
@@ -52,27 +55,40 @@ async function renderPage(page, ctx) {
     }
   };
   $('pol-run').onclick = async () => {
+    if (running?.alive()) return;
+    const flow = scope(read, { signal: ctx.scope.signal });
+    running = flow;
     try {
-      await api(`/api/vehicles/${v.id}/policy`, {
+      await flow.api(`/api/vehicles/${v.id}/policy`, {
         method: 'PUT',
         body: read(),
       });
-      const p = await api(`/api/vehicles/${v.id}/policy`);
-      if (!p.preview.recordings && !read().binDays) return toast('Nothing to move right now.');
+      const p = await flow.api(`/api/vehicles/${v.id}/policy`);
+      const saved = p.policy;
+      if (!saved) throw new Error('Could not read the saved policy. Try again.');
+      if (!p.preview.recordings && !saved.binDays) return toast('Nothing to move right now.');
       if (
-        !(await confirmDialog({
+        !(await flow.confirmDialog({
           title: 'Run the policy now?',
-          body: `<p>${plural(p.preview.recordings, 'recording')} (${bytes(p.preview.bytes)}) will move to the Recycle Bin. You can restore them from there.</p>${read().binDays ? '<p>Items already in the Recycle Bin older than ' + esc(read().binDays) + ' days are deleted permanently. This cannot be undone.</p>' : ''}`,
+          body: `<p>${plural(p.preview.recordings, 'recording')} (${bytes(p.preview.bytes)}) will move to the Recycle Bin. You can restore them from there.</p>${saved.binDays ? '<p>Items already in the Recycle Bin older than ' + esc(saved.binDays) + ' days will be deleted for good. This cannot be undone.</p>' : ''}`,
           ok: 'Run now',
+          danger: !!saved.binDays,
         }))
       )
         return;
-      const out = await api(`/api/vehicles/${v.id}/policy/run`, { body: {} });
+      const out = await flow.api(`/api/vehicles/${v.id}/policy/run`, { body: {} });
       toast(`${plural(out.moved.length, 'recording')} moved to the Recycle Bin.`);
       if (ctx.alive()) render();
     } catch (err) {
-      toast(err.message, true);
+      if (err.name !== 'AbortError') flow.toast(err.message, true);
+    } finally {
+      flow.abort();
+      if (running === flow) running = null;
     }
+  };
+  return () => {
+    form.oninput = form.onchange = null;
+    running?.abort();
   };
 }
 
