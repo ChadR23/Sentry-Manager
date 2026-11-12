@@ -131,7 +131,7 @@ export async function render(vehicleChanged = false) {
       return;
     }
     if (key === 'sentryusb') {
-      const m = await import('/web/sentryUsbLink.js');
+      const m = await import('/web/sentryUsbInfo.js');
       if (ticket !== seq) return;
       const p = m.createSentryUsbPage(mount, { h24: () => state.h24 });
       cleanup = () => p?.destroy?.();

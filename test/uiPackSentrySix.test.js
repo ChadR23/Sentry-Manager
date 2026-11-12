@@ -1945,3 +1945,11 @@ test('format: large counts in server messages and job progress retain separators
   assert.equal(f.countText('2477 clips and 4809 recording(s)'), '2,477 clips and 4,809 recordings');
   assert.equal(j.jobProgress({ detail: 'Rendering 2477 of 4809 (51%)' }).text, '2,477 of 4,809');
 });
+
+test('sentry usb: the pack mounts the Sentry USB module the server ships', () => {
+  const main = fs.readFileSync(path.join(__dirname, '..', 'examples', 'ui-packs', 'sentry-six', 'web', 's6', 'main.js'), 'utf8');
+  const mods = [...main.matchAll(/import\('\/web\/(sentryUsb[A-Za-z]*\.js)'\)/g)].map((m) => m[1]);
+  assert.deepEqual(mods, ['sentryUsbInfo.js']);
+  for (const m of mods) assert.ok(fs.existsSync(path.join(__dirname, '..', 'web', m)), `web/${m} exists`);
+  assert.match(fs.readFileSync(path.join(__dirname, '..', 'web', 'sentryUsbInfo.js'), 'utf8'), /export function createSentryUsbPage\(/);
+});
