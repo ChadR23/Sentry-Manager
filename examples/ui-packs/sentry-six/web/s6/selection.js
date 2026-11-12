@@ -57,3 +57,11 @@ export function longPress(root, selector, action) {
     root.removeEventListener('click', click, true);
   };
 }
+
+/** Changing the footage scope invalidates both visible and hidden selections. */
+export function changeScope(f, next) {
+  if (!Object.entries(next).some(([key, value]) => f[key] !== value)) return;
+  Object.assign(f, next, { offset: 0, selecting: false });
+  f.selection.clear();
+  f.dayRecs.clear();
+}

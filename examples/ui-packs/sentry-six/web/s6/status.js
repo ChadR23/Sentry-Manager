@@ -1,4 +1,4 @@
-import { dayKey as key, dayLabel as label, size as bytes } from './format.js';
+import { countText, plural, dayKey as key, dayLabel as label, size as bytes } from './format.js';
 export function strip(days = [], now = new Date(), length = 36) {
   const by = new Map(days.map((d) => [d.day, d]));
   return Array.from({ length }, (_, i) => {
@@ -36,9 +36,13 @@ export function attentionItems({
     if (n.kind === 'disk' || (n.vehicleId && n.vehicleId !== vid)) continue;
     out.push({
       kind: n.kind || 'notification',
-      tone: n.level === 'critical' || n.severity === 'error' ? 'bad' : 'warn',
-      title: n.title || 'Notification',
-      text: n.message || n.text || '',
+      tone: ['critical', 'error'].includes(n.level || n.severity)
+        ? 'bad'
+        : ['warning', 'warn'].includes(n.level || n.severity)
+          ? 'warn'
+          : 'info',
+      title: countText(n.title || 'Notification'),
+      text: countText(n.message || n.text || ''),
       action: { label: 'View notification', href: '#/notifications' },
     });
   }
@@ -64,7 +68,7 @@ export function attentionItems({
         Number.isFinite(s.free) &&
         s.total > 0 &&
         Number.isFinite(s.perDay)
-          ? `${bytes(s.free)} free (${((100 * s.free) / s.total).toFixed(1)}%). Footage grows about ${bytes(s.perDay)} a day${s.daysLeft != null ? `, so it fills up in about ${s.daysLeft} days` : ''}.`
+          ? `${bytes(s.free)} free (${((100 * s.free) / s.total).toFixed(1)}%). Footage grows about ${bytes(s.perDay)} a day${s.daysLeft != null ? `, so it fills up in about ${plural(s.daysLeft, 'day')}` : ''}.`
           : c.hint || c.detail || '',
       action: {
         label: c.id === 'space-' + vid ? 'Free up space' : 'Open Health',
@@ -88,7 +92,7 @@ export function attentionItems({
     out.push({
       kind: 'missing',
       tone: 'warn',
-      title: `No footage on ${missing.length} recent ${missing.length === 1 ? 'day' : 'days'}`,
+      title: `No footage on ${plural(missing.length, 'recent day')}`,
       text: `${missing.map((d) => label(d.day, now)).join(', ')}. If the car was driven then, its footage didn't reach the share.`,
       action: { label: 'Show days', href: '#/footage' },
     });
@@ -128,7 +132,7 @@ export function overviewStatus({
   else first = 'Your footage is safe. The newest is from ' + label(inv.lastDay, now) + '.';
   const second = attention.length
     ? attention[0].kind === 'space-' + vehicle.id && vehicle.storage?.daysLeft != null
-      ? `Space runs out in about ${vehicle.storage.daysLeft} days.`
+      ? `Space runs out in about ${plural(vehicle.storage.daysLeft, 'day')}.`
       : attention[0].title + '.'
     : 'Nothing needs you right now.';
   return { tone, first, second, sub };

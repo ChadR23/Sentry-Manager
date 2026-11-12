@@ -1,9 +1,8 @@
 import { api, esc, toast, confirmDialog } from '../../core.js';
-import { size as bytes, ago as when } from '../../format.js';
+import { plural, size as bytes, ago as when } from '../../format.js';
 export async function render(page, ctx) {
   const { current, render } = ctx,
-    $ = (id) => page.querySelector('#' + id),
-    plural = (n, s) => `${n} ${s}${n === 1 ? '' : 's'}`;
+    $ = (id) => page.querySelector('#' + id);
   const v = current();
   let html = '';
   if (!v) {
@@ -15,10 +14,10 @@ export async function render(page, ctx) {
       <p>Recordings older than the number of days below are moved to the Recycle Bin once a day. Protected recordings are always skipped, and nothing is deleted for good unless you set the Recycle Bin to empty itself after some days. Leave a field empty to keep that category forever.</p>
       <form id="pol" style="margin-top:22px">
         <label class="check" style="margin-bottom:18px"><input type="checkbox" name="enabled"${policy.enabled ? ' checked' : ''}> Run this policy every day</label>
-        <div class="keep">${['Recent', 'Sentry', 'Saved', 'Other'].map((c) => `<label class="field">Keep ${c} clips (days)<input class="input" type="number" min="1" max="3650" name="keep-${c}" value="${policy.keepDays[c] ?? ''}" placeholder="forever"></label>`).join('')}</div>
+        <div class="keep">${['Recent', 'Sentry', 'Saved', 'Other'].map((c) => `<label class="field">Keep ${plural(c, 'clip')} (days)<input class="input" type="number" min="1" max="3650" name="keep-${c}" value="${esc(policy.keepDays[c] ?? '')}" placeholder="forever"></label>`).join('')}</div>
         <div class="form" style="margin-top:16px"><label class="field">Run at (server time)<input class="input" type="time" name="runAt" value="${esc(policy.runAt)}"></label>
-          <label class="field">Empty the Recycle Bin after (days)<input class="input" type="number" min="1" max="365" name="binDays" value="${policy.binDays ?? ''}" placeholder="never: you empty it"></label>
-          <label class="field">Keep the footage under (GB)<input class="input" type="number" min="1" step="any" name="maxGB" value="${policy.maxGB ?? ''}" placeholder="no limit"></label></div>
+          <label class="field">Empty the Recycle Bin after (days)<input class="input" type="number" min="1" max="365" name="binDays" value="${esc(policy.binDays ?? '')}" placeholder="never: you empty it"></label>
+          <label class="field">Keep the footage under (GB)<input class="input" type="number" min="1" step="any" name="maxGB" value="${esc(policy.maxGB ?? '')}" placeholder="no limit"></label></div>
         <div class="note${preview.recordings ? ' amber' : ''}">${preview.recordings ? `With these settings, the next run moves ${plural(preview.recordings, 'recording')} (${bytes(preview.bytes)}) to the Recycle Bin.` : 'With these settings, nothing would be moved right now.'}
           ${policy.lastRunAt ? `<br>Last run ${when(policy.lastRunAt)}: ${policy.lastResult?.error ? esc(policy.lastResult.error) : `${policy.lastResult?.moved ?? 0} moved, ${policy.lastResult?.skipped ?? 0} skipped`}.` : ''}</div>
         <div class="form-actions"><button class="btn" type="button" id="pol-run">Run now</button><button class="btn solid" type="submit">Save policy</button></div>

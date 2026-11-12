@@ -1,7 +1,7 @@
 import { api, esc, act, toast, confirmDialog, sheet } from '../core.js';
-import { binNote, expiresIn } from '../bin.js';
+import { binNote, expiresIn, restoreResult } from '../bin.js';
 import { createSelection, longPress } from '../selection.js';
-import { dayLabel, timeLabel, dayKey, size } from '../format.js';
+import { plural, dayLabel, timeLabel, dayKey, size } from '../format.js';
 import { icon } from '../icons.js';
 export async function render(el, { current, state, alive }) {
   const v = current();
@@ -31,7 +31,7 @@ export async function render(el, { current, state, alive }) {
       action === 'delete' &&
       !(await confirmDialog({
         title: 'Delete forever?',
-        body: `<p>${ids.length} items will be permanently deleted. This cannot be undone.</p>`,
+        body: `<p>${plural(ids.length, 'item')} will be permanently deleted. This cannot be undone.</p>`,
         ok: 'Delete forever',
         danger: true,
       }))
@@ -39,11 +39,16 @@ export async function render(el, { current, state, alive }) {
       return;
     busy = true;
     try {
+      const results = [];
       for (let i = 0; i < ids.length; i++) {
-        await api('/api/bin/' + encodeURIComponent(ids[i]) + '/' + action, {
+        const result = await api('/api/bin/' + encodeURIComponent(ids[i]) + '/' + action, {
           body: action === 'delete' ? { confirm: true } : {},
         });
-        toast(`${action === 'restore' ? 'Restored' : 'Deleted'} ${i + 1} of ${ids.length}`);
+        results.push(result);
+        if (action === 'restore') {
+          const summary = restoreResult(results);
+          toast(summary.text, summary.bad);
+        } else toast(`Deleted ${i + 1} of ${ids.length}`);
       }
       selection.clear();
       await load();
@@ -68,7 +73,7 @@ export async function render(el, { current, state, alive }) {
       if (!groups.has(group)) groups.set(group, []);
       groups.get(group).push(i);
     }
-    el.innerHTML = `<div class="toolbar"><span class="grow"></span>${selecting ? `<button data-all>Select all</button><b>${selection.count()} selected</b>` : ''}<button data-select>${selecting ? 'Done' : 'Select'}</button></div>${items.length ? `<section class="card"><div class="number">${items.length} items · ${size(total)}</div><p>Emptying the bin frees ${size(total)} on the share${v.storage?.perDay > 0 ? (total < v.storage.perDay ? ', less than one more day of recording' : ', about ' + Math.floor(total / v.storage.perDay) + ' more days of recording') : ''}.</p><div class="row"><button data-restore-all>Restore all</button><button class="danger" data-empty>Empty Recycle Bin</button></div></section>` : '<div class="empty"><h2>The Recycle Bin is empty</h2><p>Footage moved here can be restored until it is deleted permanently.</p></div>'}<div class="segments">${[
+    el.innerHTML = `<div class="toolbar"><span class="grow"></span>${selecting ? `<button data-all>Select all</button><b>${selection.count()} selected</b>` : ''}<button data-select>${selecting ? 'Done' : 'Select'}</button></div>${items.length ? `<section class="card"><div class="number">${plural(items.length, 'item')} · ${size(total)}</div><p>Emptying the bin frees ${size(total)} on the share${v.storage?.perDay > 0 ? (total < v.storage.perDay ? ', less than one more day of recording' : ', about ' + Math.floor(total / v.storage.perDay) + ' more days of recording') : ''}.</p><div class="row"><button data-restore-all>Restore all</button><button class="danger" data-empty>Empty Recycle Bin</button></div></section>` : '<div class="empty"><h2>The Recycle Bin is empty</h2><p>Footage moved here can be restored until it is deleted permanently.</p></div>'}<div class="segments">${[
       ['', 'All'],
       ['manual', 'Moved by you'],
       ['policy', 'Cleanup rules'],
@@ -84,7 +89,7 @@ export async function render(el, { current, state, alive }) {
           `<h3>${esc(g)}</h3><section class="card">${rows
             .map((i) => {
               const expiry = expiresIn(i, policy);
-              return `<div class="recording row" data-bin-row="${esc(i.id)}">${selecting ? `<input data-id="${esc(i.id)}" type="checkbox" aria-label="Select item" ${selection.has(i.id) ? 'checked' : ''}>` : ''}<span class="bin-thumb">${icon(i.category === 'Recent' ? 'videocam' : 'shield')}<img alt="" src="/api/bin/${encodeURIComponent(i.id)}/thumbnail"></span><div class="grow"><b>${i.category === 'Recent' ? 'Driving' : esc(i.category)} · ${dayLabel(i.startAt?.slice(0, 10))}</b><p>${timeLabel(i.startAt, state.h24)} · ${i.fileCount ?? i.files?.length ?? 0} files · ${size(i.bytes)}</p>${expiry != null ? `<p class="${expiry < 3 ? 'warn' : ''}">Deleted for good in about ${expiry} days</p>` : ''}</div><button data-restore="${esc(i.id)}">Restore</button><button data-more="${esc(i.id)}" aria-label="Item actions">⋯</button></div>`;
+              return `<div class="recording row" data-bin-row="${esc(i.id)}">${selecting ? `<input data-id="${esc(i.id)}" type="checkbox" aria-label="Select item" ${selection.has(i.id) ? 'checked' : ''}>` : ''}<span class="bin-thumb">${icon(i.category === 'Recent' ? 'videocam' : 'shield')}<img alt="" src="/api/bin/${encodeURIComponent(i.id)}/thumbnail"></span><div class="grow"><b>${i.category === 'Recent' ? 'Driving' : esc(i.category)} · ${dayLabel(i.startAt?.slice(0, 10))}</b><p>${timeLabel(i.startAt, state.h24)} · ${plural(i.fileCount ?? i.files?.length ?? 0, 'file')} · ${size(i.bytes)}</p>${expiry != null ? `<p class="${expiry < 3 ? 'warn' : ''}">Deleted for good in about ${plural(expiry, 'day')}</p>` : ''}</div><button data-restore="${esc(i.id)}">Restore</button><button data-more="${esc(i.id)}" aria-label="Item actions">⋯</button></div>`;
             })
             .join('')}</section>`,
       )
@@ -132,7 +137,7 @@ export async function render(el, { current, state, alive }) {
         if (
           !(await confirmDialog({
             title: 'Empty Recycle Bin?',
-            body: `<p>${items.length} items will be permanently deleted from this vehicle's share. This cannot be undone.</p>`,
+            body: `<p>${plural(items.length, 'item')} will be permanently deleted from this vehicle's share. This cannot be undone.</p>`,
             ok: 'Empty Recycle Bin',
             danger: true,
           }))

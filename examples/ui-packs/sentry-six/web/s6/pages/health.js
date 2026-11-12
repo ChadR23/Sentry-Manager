@@ -1,6 +1,6 @@
 import { api, esc, act, toast, confirmDialog, confirmPassword } from '../core.js';
 import { healthSummary } from '../status.js';
-import { dayKey, dayLabel, timeLabel, size, ago } from '../format.js';
+import { plural, dayKey, dayLabel, timeLabel, size, ago } from '../format.js';
 import * as datepicker from './datepicker.js';
 import { icon } from '../icons.js';
 export async function render(el, ctx) {
@@ -30,7 +30,7 @@ export async function render(el, ctx) {
         rows
           .map(
             ({ v, r }) =>
-              `<section class="card"><div class="row"><h3 class="grow">${esc(v.name)}</h3><button data-check="${esc(v.id)}" ${r.running ? 'disabled' : ''}>${r.running ? 'Checking…' : r.checked ? 'Check again' : 'Check now'}</button></div><p>${r.running ? `${r.done} of ${r.total} files checked` : r.checked ? `${r.checked} of ${r.files} files checked · ${(r.problems?.length || 0) + (r.more || 0)} problems` : 'Not checked yet.'}</p>${(
+              `<section class="card"><div class="row"><h3 class="grow">${esc(v.name)}</h3><button data-check="${esc(v.id)}" ${r.running ? 'disabled' : ''}>${r.running ? 'Checking…' : r.checked ? 'Check again' : 'Check now'}</button></div><p>${r.running ? `${r.done} of ${plural(r.total, 'file')} checked` : r.checked ? `${r.checked} of ${plural(r.files, 'file')} checked · ${plural((r.problems?.length || 0) + (r.more || 0), 'problem')}` : 'Not checked yet.'}</p>${(
                 r.problems || []
               )
                 .slice(0, 100)
@@ -148,7 +148,7 @@ export async function render(el, ctx) {
       const d = await api(run ? '/api/health/run' : '/api/health', run ? { method: 'POST' } : {});
       if (!alive()) return;
       const h = healthSummary(d.checks || []);
-      el.innerHTML = `<div class="hero">${h.problems.some((c) => ['bad', 'fail'].includes(c.status)) ? 'Your server needs a look.' : 'Your server is working.'} ${h.problems.length ? `<span class="warn">${h.problems.length} ${h.problems.length === 1 ? 'thing needs' : 'things need'} a look.</span>` : ''}</div><div class="toolbar"><p class="grow">${h.total} checks · last run ${ago(d.at)}</p><button data-run>Run again</button></div>${h.problems.length ? `<section class="card health-problems">${h.problems.map((c) => check(c) + `<a href="${c.id?.startsWith('space-') ? '#/settings/cleanup' : c.group === 'Access' ? '#/settings/security' : '#/health/logs'}">${c.id?.startsWith('space-') ? 'Review cleanup rules' : c.group === 'Access' ? 'Security settings' : 'View logs'} →</a>`).join('')}</section>` : ''}<div class="row health-section-title"><h3 class="grow muted">Checks</h3><span class="muted">${h.passed} of ${h.total} passed</span></div><section class="card health-groups">${
+      el.innerHTML = `<div class="hero">${h.problems.some((c) => ['bad', 'fail'].includes(c.status)) ? 'Your server needs a look.' : 'Your server is working.'} ${h.problems.length ? `<span class="warn">${h.problems.length} ${h.problems.length === 1 ? 'thing needs' : 'things need'} a look.</span>` : ''}</div><div class="toolbar"><p class="grow">${plural(h.total, 'check')} · last run ${ago(d.at)}</p><button data-run>Run again</button></div>${h.problems.length ? `<section class="card health-problems">${h.problems.map((c) => check(c) + `<a href="${c.id?.startsWith('space-') ? '#/settings/cleanup' : c.group === 'Access' ? '#/settings/security' : '#/health/logs'}">${c.id?.startsWith('space-') ? 'Review cleanup rules' : c.group === 'Access' ? 'Security settings' : 'View logs'} →</a>`).join('')}</section>` : ''}<div class="row health-section-title"><h3 class="grow muted">Checks</h3><span class="muted">${h.passed} of ${h.total} passed</span></div><section class="card health-groups">${
         h.groups
           .map(
             (g) =>
@@ -158,7 +158,7 @@ export async function render(el, ctx) {
                 .join('')}</details>`,
           )
           .join('') || '<p>No results yet. Run the checks to get started.</p>'
-      }</section><h3 class="muted health-section-title">More</h3><div class="health-links">${[
+      }</section><h3 class="muted health-section-title">More</h3><div class="card health-links">${[
         ['server', 'Server details', 'CPU, graphics, power, memory and storage', 'monitoring'],
         ['footage-check', 'Footage check', 'Find files that will not play', 'video_file'],
         ['logs', 'Logs', 'Search what happened on your server', 'article'],
@@ -166,7 +166,7 @@ export async function render(el, ctx) {
       ]
         .map(
           ([path, title, text, glyph]) =>
-            `<a class="card" href="#/health/${path}"><span class="group-icon">${icon(glyph)}</span><span class="grow"><h3>${title}</h3><p>${text}</p></span><span class="muted">›</span></a>`,
+            `<a class="health-more-row" href="#/health/${path}"><span class="group-icon">${icon(glyph)}</span><span class="grow"><h3>${title}</h3><p>${text}</p></span><span class="muted">›</span></a>`,
         )
         .join('')}</div>`;
       el.querySelector('[data-run]').onclick = act(async (e) => {

@@ -346,3 +346,319 @@ test('job history: restore titles do not expose raw recording folder dates', asy
   assert.equal(out.title, 'Restored footage from the Recycle Bin');
   assert.match(out.outcome, /1.0 KB/);
 });
+
+// Load the real browser modules with only the shared Account mount substituted.
+function browserModule(file) {
+  const src = read('web/s6/' + file).replace(
+    /(from\s*|import\()(['"])([^'"]+)\2/g,
+    (all, lead, quote, spec) => {
+      if (spec === '/web/account.js')
+        return (
+          lead +
+          JSON.stringify('data:text/javascript,export const createAccountPage=()=>({destroy(){}})')
+        );
+      if (!spec.startsWith('.')) return all;
+      return (
+        lead +
+        JSON.stringify(
+          browserModule(path.posix.normalize(path.posix.join(path.posix.dirname(file), spec))),
+        )
+      );
+    },
+  );
+  return 'data:text/javascript,' + encodeURIComponent(src);
+}
+function element() {
+  const children = new Map();
+  return {
+    innerHTML: '',
+    textContent: '',
+    classList: { toggle() {}, remove() {} },
+    style: { setProperty() {} },
+    addEventListener() {},
+    removeEventListener() {},
+    append() {},
+    remove() {},
+    querySelectorAll: () => [],
+    querySelector(key) {
+      if (key.startsWith('#')) return null;
+      if (!children.has(key)) children.set(key, element());
+      return children.get(key);
+    },
+  };
+}
+async function browserEnv(t, reply) {
+  const saved = {};
+  for (const key of [
+    'window',
+    'document',
+    'location',
+    'history',
+    'fetch',
+    'EventSource',
+    'localStorage',
+  ])
+    saved[key] = globalThis[key];
+  globalThis.window = { addEventListener() {}, removeEventListener() {} };
+  globalThis.document = {
+    body: element(),
+    getElementById: () => null,
+    querySelector: () => null,
+    createElement: element,
+  };
+  globalThis.location = { hash: '#/footage', href: '' };
+  globalThis.history = {
+    replaceState(a, b, hash) {
+      location.hash = hash;
+    },
+  };
+  globalThis.localStorage = { getItem() {}, setItem() {} };
+  globalThis.EventSource = class {
+    addEventListener() {}
+    close() {}
+  };
+  globalThis.fetch = async (url, opts) => {
+    const data = await reply(url, opts);
+    return { ok: data?.status !== 403, status: data?.status || 200, json: async () => data };
+  };
+  t.after(() => {
+    for (const [key, value] of Object.entries(saved)) globalThis[key] = value;
+  });
+}
+test('footage: a linked range change drops hidden selections and select mode', async (t) => {
+  await browserEnv(t, (url) =>
+    url.includes('/days?')
+      ? { days: [], total: 0, dates: [] }
+      : url.includes('/recordings?')
+        ? { recordings: [{ id: 'old' }], total: 1 }
+        : {},
+  );
+  const m = await import(browserModule('pages/footage.js')),
+    el = element();
+  const ctx = {
+    current: () => ({ id: 'range-test', share: { healthy: true } }),
+    state: {},
+    alive: () => true,
+  };
+  let stop = await m.render(el, ctx);
+  const click = async (key) =>
+    el.onclick({
+      target: { closest: () => ({ dataset: {}, hasAttribute: (a) => a === 'data-' + key }) },
+    });
+  await click('select');
+  await click('all');
+  assert.match(el.innerHTML, /1 selected/);
+  stop();
+  location.hash = '#/footage?from=2026-11-11&to=2026-11-11';
+  stop = await m.render(el, ctx);
+  try {
+    assert.doesNotMatch(el.innerHTML, /1 selected|data-all/);
+    await click('select');
+    assert.match(el.innerHTML, /0 selected/);
+  } finally {
+    stop();
+  }
+});
+test('activity: job title and progress text render as text, never HTML', async (t) => {
+  const attack = '<img src=x onerror=alert(1)>';
+  await browserEnv(t, (url) =>
+    url.startsWith('/api/jobs')
+      ? {
+          jobs: [{ title: attack, detail: `Rendering ${attack} of 3:00 (44%)`, status: 'running' }],
+        }
+      : {},
+  );
+  const m = await import(browserModule('pages/activity.js')),
+    el = element();
+  const stop = await m.render(el, { current: () => null, state: {}, alive: () => true });
+  try {
+    assert.doesNotMatch(el.innerHTML, /<img/);
+    assert.match(el.innerHTML, /&lt;img/);
+  } finally {
+    stop();
+  }
+});
+test('footage: recording Play uses the detail folder, day Play uses the date', async (t) => {
+  await browserEnv(t, (url) => ({
+    folderPath: url.endsWith('/drive')
+      ? '/root/RecentClips'
+      : '/root/SentryClips/2026-11-11_18-00-00',
+  }));
+  const m = await import(browserModule('pages/footage.js'));
+  assert.deepEqual(await m.playParams('/api/vehicles/car', '2026-11-11', { id: 'drive' }), {
+    folder: '/root/RecentClips',
+  });
+  assert.deepEqual(await m.playParams('/api/vehicles/car', '2026-11-11', { id: 'event' }), {
+    folder: '/root/SentryClips/2026-11-11_18-00-00',
+  });
+  assert.deepEqual(await m.playParams('/api/vehicles/car', '2026-11-11'), { day: '2026-11-11' });
+});
+test('settings: viewer Account renders without requesting admin endpoints and signs out', async (t) => {
+  const calls = [];
+  await browserEnv(t, (url) => {
+    calls.push(url);
+    return url === '/api/auth/me'
+      ? { user: 'watcher', role: 'viewer' }
+      : { status: 403, error: 'Forbidden' };
+  });
+  const m = await import(browserModule('pages/settings.js')),
+    el = element();
+  const stop = await m.render(el, {
+    sub: 'account',
+    state: { vehicles: [] },
+    current: () => null,
+    alive: () => true,
+  });
+  assert.deepEqual(calls, ['/api/auth/me']);
+  assert.match(el.querySelector('[data-detail]').innerHTML, /data-signout/);
+  globalThis.fetch = async (url) => {
+    calls.push(url);
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  await el.querySelector('[data-detail]').querySelector('[data-signout]').onclick();
+  assert.equal(location.href, '/login');
+  stop();
+});
+test('bin: restore result counts files and marks conflicts as a failure', async () => {
+  const m = await mod('bin');
+  assert.deepEqual(
+    m.restoreResult([
+      { restored: 2, conflicts: 1 },
+      { restored: 0, conflicts: 3 },
+    ]),
+    {
+      text: 'Restored 2 files; 4 could not be restored (a file with that name exists).',
+      bad: true,
+    },
+  );
+  assert.deepEqual(m.restoreResult([{ restored: 1, conflicts: 0 }]), {
+    text: 'Restored 1 file.',
+    bad: false,
+  });
+});
+test('format: singular, plural and fixed category order', async () => {
+  const m = await mod('format');
+  for (const noun of [
+    'drive',
+    'recording',
+    'Sentry event',
+    'item',
+    'file',
+    'clip',
+    'check',
+    'day',
+  ]) {
+    assert.equal(m.plural(1, noun), '1 ' + noun);
+    assert.equal(m.plural(2, noun), '2 ' + noun + 's');
+  }
+  assert.equal(m.plural(1, 'saved', 'saved'), '1 saved');
+  assert.deepEqual(
+    m.categoryEntries({ Saved: 1, Sentry: 2, Recent: 3 }).map(([k]) => k),
+    ['Recent', 'Sentry', 'Saved'],
+  );
+});
+test('activity: numeric progressClips is a count; live devices name the GPU and encoder', async (t) => {
+  await browserEnv(t, () => ({}));
+  const m = await import(browserModule('convert.js'));
+  assert.match(
+    m.hardwareLabel(
+      { id: 'a', progressClips: 12 },
+      {
+        jobId: 'a',
+        devices: [{ id: 'nvidia:0', name: 'RTX 4070', encoder: 'hevc_nvenc', hardware: true }],
+      },
+    ),
+    /RTX 4070.*hevc_nvenc/,
+  );
+  assert.doesNotMatch(
+    m.hardwareLabel(
+      { id: 'b', progressClips: 12 },
+      { jobId: 'a', device: { gpuName: 'RTX 4070', encoder: 'hevc_nvenc' } },
+    ),
+    /RTX|nvenc/,
+  );
+});
+
+test('overview: one attention group, ordered singular categories and a complete display total', async (t) => {
+  await browserEnv(t, (url) =>
+    url.includes('/days?')
+      ? {
+          days: [
+            { day: '2026-11-11', byCategory: { Saved: 1, Sentry: 1, Recent: 1 }, recordings: 3 },
+          ],
+        }
+      : { checks: [], jobs: [] },
+  );
+  const m = await import(browserModule('pages/overview.js')),
+    el = element();
+  await m.render(el, {
+    current: () => ({
+      id: 'v',
+      share: { healthy: true },
+      inventory: {
+        recordings: 1,
+        days: 1,
+        firstDay: '2026-11-11',
+        byCategory: {
+          Saved: { recordings: 1 },
+          Sentry: { recordings: 1 },
+          Recent: { recordings: 1 },
+        },
+      },
+      binItems: 0,
+    }),
+    state: {
+      notes: [
+        { title: 'Check it', message: 'Check now', level: 'warning' },
+        { title: 'Another', message: 'Details', level: 'critical' },
+      ],
+    },
+    alive: () => true,
+  });
+  assert.match(el.innerHTML, /class="card attention-group"/);
+  assert.match(el.innerHTML, /class="number">1 recording<\/div>/);
+  assert.match(el.innerHTML, /1 drive.*1 Sentry event.*1 saved/);
+  assert.match(el.innerHTML, /class="muted" href="#\/bin">Recycle Bin is empty/);
+});
+
+test('footage: changing vehicles clears every remembered selection', async (t) => {
+  await browserEnv(t, (url) =>
+    url.includes('/days?')
+      ? { days: [], total: 0, dates: [] }
+      : url.includes('/recordings?')
+        ? { recordings: [{ id: 'old' }], total: 1 }
+        : {},
+  );
+  const m = await import(browserModule('pages/footage.js')),
+    el = element(),
+    ctx = {
+      current: () => ({ id: 'car-reset', share: { healthy: true } }),
+      state: {},
+      alive: () => true,
+    };
+  let stop = await m.render(el, ctx);
+  const click = (key) =>
+    el.onclick({
+      target: { closest: () => ({ dataset: {}, hasAttribute: (a) => a === 'data-' + key }) },
+    });
+  await click('select');
+  await click('all');
+  stop();
+  m.clearFootageSelections();
+  stop = await m.render(el, ctx);
+  try {
+    assert.doesNotMatch(el.innerHTML, /1 selected|data-all/);
+  } finally {
+    stop();
+  }
+});
+
+test('attention: informational rows are grey and legacy count labels use real plurals', async () => {
+  const m = await mod('status');
+  const items = m.attentionItems({
+    notes: [{ level: 'info', title: '1 clip(s) checked', message: '2 recording(s) read' }],
+  });
+  assert.equal(items[0].tone, 'info');
+  assert.equal(items[0].title, '1 clip checked');
+  assert.equal(items[0].text, '2 recordings read');
+});

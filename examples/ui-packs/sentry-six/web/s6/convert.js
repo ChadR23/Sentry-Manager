@@ -294,3 +294,22 @@ export function streamReady() {
   });
 }
 export const currentSnapshot = () => live.snap;
+
+/** Hardware comes from /api/stats.encoder, never the numeric clip counter. */
+export function hardwareLabel(snapshot, encoder) {
+  if (encoder?.jobId !== snapshot?.id) return '';
+  const devices = encoder.devices?.length
+    ? encoder.devices
+    : encoder.device
+      ? [encoder.device]
+      : [];
+  return [
+    ...new Set(
+      devices.map((d) =>
+        [d.name || d.gpuName || (d.hardware ? d.node || 'GPU' : 'CPU'), d.encoder]
+          .filter(Boolean)
+          .join(' · '),
+      ),
+    ),
+  ].join(', ');
+}

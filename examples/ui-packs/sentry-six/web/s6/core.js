@@ -21,7 +21,7 @@ export async function api(path, { method, body, ...rest } = {}, retried = false)
     await confirmPassword();
     return api(path, { method, body, ...rest }, true);
   }
-  if (!res.ok) throw new Error(data.error || res.statusText);
+  if (!res.ok) throw Object.assign(new Error(data.error || res.statusText), { status: res.status });
   return data;
 }
 export function toast(text, bad = false) {

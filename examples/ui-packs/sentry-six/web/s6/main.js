@@ -1,3 +1,4 @@
+import { clearFootageSelections } from './pages/footage.js';
 import { api, esc, sheet, act, toast } from './core.js';
 import { icon } from './icons.js';
 import { showStudio, hideStudio } from './studio.js';
@@ -139,6 +140,7 @@ async function refresh() {
       ? `<label class="sr-only" for="car">Vehicle</label><select id="car">${state.vehicles.map((v) => `<option value="${esc(v.id)}" ${v.id === state.vehicleId ? 'selected' : ''}>${esc(v.name)}</option>`).join('')}</select>`
       : '';
   pick.querySelector('select')?.addEventListener('change', (e) => {
+    clearFootageSelections();
     state.vehicleId = e.target.value;
     localStorage.setItem('s6:vehicle', state.vehicleId);
     render();
@@ -154,6 +156,7 @@ window.addEventListener('message', (e) => {
   if (e.origin !== location.origin || e.data?.source !== 'sentry-studio') return;
   if (e.data.type === 'showInFolder') location.hash = '#/footage';
   if (e.data.type === 'select-vehicle' && state.vehicles.some((v) => v.id === e.data.id)) {
+    clearFootageSelections();
     state.vehicleId = e.data.id;
     localStorage.setItem('s6:vehicle', e.data.id);
     render();

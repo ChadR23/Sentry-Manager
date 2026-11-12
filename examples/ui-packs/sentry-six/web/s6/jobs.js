@@ -1,4 +1,4 @@
-import { size } from './format.js';
+import { countText, plural, size } from './format.js';
 export function describeJob(job) {
   const status = job.status || 'running',
     r = job.result || {},
@@ -6,7 +6,7 @@ export function describeJob(job) {
   let title = job.title || job.type || 'Job',
     outcome = job.detail || '';
   if (job.type === 'trash' && status === 'done') {
-    title = `Moved ${n} recordings to the Recycle Bin`;
+    title = `Moved ${plural(n, 'recording')} to the Recycle Bin`;
     outcome = `${Number.isFinite(r.bytes) ? size(r.bytes) + ' · ' : ''}you can restore them`;
   }
   if (job.type === 'restore')
@@ -31,8 +31,8 @@ export function describeJob(job) {
         scan: 'folder_open',
         export: 'videocam',
       }[job.type] || 'task',
-    title,
-    outcome,
+    title: countText(title),
+    outcome: countText(outcome),
     status,
     statusText:
       {

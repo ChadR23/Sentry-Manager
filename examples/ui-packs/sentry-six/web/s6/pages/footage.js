@@ -1,8 +1,29 @@
 import { api, esc, act, toast, sheet, confirmDialog } from '../core.js';
-import { dayLabel, timeRange, timeLabel, size, duration } from '../format.js';
-import { createSelection, longPress } from '../selection.js';
+import {
+  dayLabel,
+  timeRange,
+  timeLabel,
+  size,
+  duration,
+  plural,
+  categoryEntries,
+  categoryCount,
+} from '../format.js';
+import { createSelection, longPress, changeScope } from '../selection.js';
 import { open as datepicker } from './datepicker.js';
 const memories = new Map();
+let lastVehicle;
+export function clearFootageSelections() {
+  for (const saved of memories.values()) {
+    saved.selection.clear();
+    saved.selecting = false;
+  }
+}
+export async function playParams(base, day, rec) {
+  if (!rec) return { day };
+  const detail = await api(base + '/recordings/' + encodeURIComponent(rec.id));
+  return { folder: detail.folderPath };
+}
 export async function render(el, { current, state, alive }) {
   let v = current();
   if (!v) {
@@ -13,6 +34,10 @@ export async function render(el, { current, state, alive }) {
   const id = encodeURIComponent(v.id),
     base = `/api/vehicles/${id}`,
     query = new URLSearchParams(location.hash.split('?')[1] || '');
+  if (lastVehicle !== v.id) {
+    clearFootageSelections();
+    lastVehicle = v.id;
+  }
   let f = memories.get(v.id);
   if (!f) {
     f = {
@@ -29,9 +54,7 @@ export async function render(el, { current, state, alive }) {
     memories.set(v.id, f);
   }
   if (query.has('from') || query.has('to')) {
-    f.from = query.get('from') || '';
-    f.to = query.get('to') || '';
-    f.offset = 0;
+    changeScope(f, { from: query.get('from') || '', to: query.get('to') || '' });
     history.replaceState(null, '', '#/footage');
   }
   let stopped = false,
@@ -46,10 +69,11 @@ export async function render(el, { current, state, alive }) {
       ...extra,
     });
   async function allRecords(extra = {}) {
-    const all = [];
+    const all = [],
+      scope = params().toString();
     for (let offset = 0; ; ) {
       const r = await api(`${base}/recordings?${params({ limit: 500, offset, ...extra })}`);
-      if (!valid()) return [];
+      if (!valid() || params().toString() !== scope) return [];
       all.push(...r.recordings);
       offset += r.recordings.length;
       if (offset >= r.total || !r.recordings.length) return all;
@@ -60,6 +84,15 @@ export async function render(el, { current, state, alive }) {
     return f.dayRecs.get(day);
   }
   async function protect(ids, on) {
+    if (
+      !ids.length ||
+      !(await confirmDialog({
+        title: on ? 'Protect recordings?' : 'Unprotect recordings?',
+        body: `<p>${plural(ids.length, 'recording')} will be ${on ? 'protected' : 'unprotected'}.</p>`,
+        ok: on ? 'Protect' : 'Unprotect',
+      }))
+    )
+      return;
     await api(base + '/protect', { body: { ids, protected: on } });
     f.dayRecs.clear();
     await draw();
@@ -78,7 +111,7 @@ export async function render(el, { current, state, alive }) {
     }
     const yes = await confirmDialog({
       title: through ? 'Move this day and older?' : 'Move to Recycle Bin?',
-      body: `<p>${preview.recordings} recordings move to the Recycle Bin. Protected recordings stay. You can restore the footage until the bin is emptied.</p>${can ? `<label><input type="checkbox" name="withCan" ${can.skip ? 'disabled' : ''}> Also delete its CAN data (${Number(can.logs || 0)} logs)</label><p class="danger">${can.skip ? esc(can.skip) : 'CAN data is permanently deleted now. It does not come back if you restore the footage.'}</p>` : ''}`,
+      body: `<p>${plural(preview.recordings, 'recording')} move to the Recycle Bin. Protected recordings stay. You can restore the footage until the bin is emptied.</p>${can ? `<label><input type="checkbox" name="withCan" ${can.skip ? 'disabled' : ''}> Also delete its CAN data (${Number(can.logs || 0)} logs)</label><p class="danger">${can.skip ? esc(can.skip) : 'CAN data is permanently deleted now. It does not come back if you restore the footage.'}</p>` : ''}`,
       ok: 'Move to Recycle Bin',
       danger: true,
       onConfirm: (form) => {
@@ -92,7 +125,7 @@ export async function render(el, { current, state, alive }) {
     toast(
       day
         ? 'Moving footage to the Recycle Bin. Activity shows progress.'
-        : `${out.moved?.length || 0} recordings moved to the Recycle Bin.${out.skipped?.length ? ' ' + out.skipped.length + ' skipped.' : ''}${out.can?.skip ? ' CAN data was not deleted: ' + out.can.skip : out.can ? ' ' + out.can.removed + ' CAN logs permanently deleted.' : ''}`,
+        : `${plural(out.moved?.length, 'recording')} moved to the Recycle Bin.${out.skipped?.length ? ' ' + out.skipped.length + ' skipped.' : ''}${out.can?.skip ? ' CAN data was not deleted: ' + out.can.skip : out.can ? ' ' + out.can.removed + ' CAN logs permanently deleted.' : ''}`,
     );
     await draw();
   }
@@ -117,13 +150,9 @@ export async function render(el, { current, state, alive }) {
     }
     const close = sheet(panel, { anchor });
   }
-  const play = (day, rec) => {
-    location.hash =
-      '#/viewer?' +
-      new URLSearchParams({
-        day,
-        ...(rec?.start ? { at: rec.start.replace(' ', '_').replace(/:/g, '-') + '~0' } : {}),
-      });
+  const play = async (day, rec) => {
+    const params = await playParams(base, day, rec);
+    if (valid()) location.hash = '#/viewer?' + new URLSearchParams(params);
   };
   function recording(r) {
     return `<div class="recording row">${f.selecting ? `<input type="checkbox" data-rec="${esc(r.id)}" aria-label="Select recording at ${esc(timeLabel(r.start, state.h24))}" ${f.selection.has(r.id) ? 'checked' : ''}>` : ''}<img alt="" src="${base}/recordings/${encodeURIComponent(r.id)}/thumbnail"><div class="grow"><b>${esc(timeRange(r.start, r.end || r.start, state.h24))}</b> <span class="tag category-${esc(r.category)}">${r.category === 'Recent' ? 'Driving' : esc(r.category)}</span><p>${r.eventAt ? 'Event at ' + esc(timeLabel(r.eventAt, state.h24)) + ' · ' : ''}${duration(r.minutes)} · ${size(r.bytes)}${r.can ? ' · CAN' : ''}${r.protected ? ' · Protected' : ''}</p></div><button class="play-button" data-play-rec="${esc(r.id)}" aria-label="Play recording">▶</button><button data-menu-rec="${esc(r.id)}" aria-label="Recording actions">⋯</button></div>`;
@@ -138,26 +167,29 @@ export async function render(el, { current, state, alive }) {
     if (!valid() || ticket !== drawSeq) return;
     const pager = () =>
       `<div class="row pager"><span class="grow">Days ${d.total ? f.offset + 1 : 0}–${Math.min(f.offset + 30, d.total)} of ${d.total}</span><button data-prev ${f.offset === 0 ? 'disabled' : ''} aria-label="Previous days">‹</button><button data-next ${f.offset + 30 >= d.total ? 'disabled' : ''} aria-label="Next days">›</button></div>`;
-    el.innerHTML = `${!v.share?.healthy ? `<div class="card bad">Can't reach your footage share. ${esc(v.share?.lastError || '')}</div>` : ''}<div class="toolbar"><a data-index href="#/activity" hidden></a><div class="grow"></div><a href="#/drives">Trips & map</a>${f.selecting ? `<button data-all>Select all</button><b>${f.selection.count()} selected</b>` : ''}<button data-select>${f.selecting ? 'Done' : 'Select'}</button></div><div class="toolbar footage-filters"><div class="segments">${['all', 'Recent', 'Sentry', 'Saved', ...(v.inventory?.byCategory?.Other ? ['Other'] : [])].map((k) => `<button data-category="${k}" class="${f.category === k ? 'active' : ''}">${k === 'all' ? 'All' : k === 'Recent' ? 'Driving' : k} <small>${k === 'all' ? v.inventory?.recordings || 0 : v.inventory?.byCategory?.[k]?.recordings || 0}</small></button>`).join('')}</div><button data-date>${f.from || f.to ? esc((f.from ? dayLabel(f.from) : 'Any start') + ' – ' + (f.to ? dayLabel(f.to) : 'Any end')) : 'Any date'}</button>${f.from || f.to ? '<button data-clear-date aria-label="Clear date range">×</button>' : ''}${pager()}</div>${d.days.length ? '' : '<div class="empty">No footage matches these filters.</div>'}${d.days
+    el.innerHTML = `${!v.share?.healthy ? `<div class="card bad">Can't reach your footage share. ${esc(v.share?.lastError || '')}</div>` : ''}<div class="toolbar footage-actions"><a data-index href="#/activity" hidden></a><div class="grow"></div><a href="#/drives">Trips & map</a>${f.selecting ? `<button data-all>Select all</button><b>${f.selection.count()} selected</b>` : ''}<button data-select>${f.selecting ? 'Done' : 'Select'}</button></div><div class="toolbar footage-filters"><div class="segments">${['all', 'Recent', 'Sentry', 'Saved', ...(v.inventory?.byCategory?.Other ? ['Other'] : [])].map((k) => `<button data-category="${k}" class="${f.category === k ? 'active' : ''}">${k === 'all' ? 'All' : k === 'Recent' ? 'Driving' : k} <small>${k === 'all' ? v.inventory?.recordings || 0 : v.inventory?.byCategory?.[k]?.recordings || 0}</small></button>`).join('')}</div><button data-date>${f.from || f.to ? esc((f.from ? dayLabel(f.from) : 'Any start') + ' – ' + (f.to ? dayLabel(f.to) : 'Any end')) : 'Any date'}</button>${f.from || f.to ? '<button data-clear-date aria-label="Clear date range">×</button>' : ''}${pager()}</div>${d.days.length ? '' : '<div class="empty">No footage matches these filters.</div>'}${d.days
       .map((day) => {
         const recs = f.dayRecs.get(day.day) || [],
           ids = recs.map((r) => r.id),
           selected = f.selection.dayState(ids),
           limit = f.limits.get(day.day) || 5;
-        return `<article class="card day" data-day="${day.day}"><div class="row">${f.selecting ? `<input type="checkbox" data-day-check="${day.day}" data-mixed="${selected === 'some'}" ${selected === 'all' ? 'checked' : ''} aria-label="Select ${esc(dayLabel(day.day))}">` : ''}<img class="day-thumb" alt="" src="${base}/recordings/${encodeURIComponent(day.thumbId)}/thumbnail"><button class="grow day-toggle" data-expand="${day.day}" aria-expanded="${f.expanded.has(day.day)}"><b>${esc(dayLabel(day.day))}</b><p>${Object.entries(
+        return `<article class="card day" data-day="${day.day}"><div class="row">${f.selecting ? `<input type="checkbox" data-day-check="${day.day}" data-mixed="${selected === 'some'}" ${selected === 'all' ? 'checked' : ''} aria-label="Select ${esc(dayLabel(day.day))}">` : ''}<img class="day-thumb" alt="" src="${base}/recordings/${encodeURIComponent(day.thumbId)}/thumbnail"><button class="grow day-toggle" data-expand="${day.day}" aria-expanded="${f.expanded.has(day.day)}"><b>${esc(dayLabel(day.day))}</b><p>${categoryEntries(
           day.byCategory,
         )
           .map(
-            ([k, n]) =>
-              `<span class="tag category-${esc(k)}">● ${n} ${k === 'Recent' ? (n === 1 ? 'drive' : 'drives') : k === 'Sentry' ? (n === 1 ? 'Sentry event' : 'Sentry events') : k === 'Saved' ? 'saved' : esc(k)}</span>`,
+            ([k, n]) => `<span class="tag category-${esc(k)}">● ${esc(categoryCount(k, n))}</span>`,
           )
           .join(
             '',
-          )}${day.archive?.state === 'filling' ? '<span class="tag arriving">Still arriving</span>' : ''}${day.protected ? '<span class="tag">' + day.protected + ' protected</span>' : ''}${day.canRecordings ? '<span class="tag">CAN</span>' : ''}${day.speedIndex?.clips ? '<span class="tag">' + (day.speedIndex.indexed >= day.speedIndex.clips ? '✓ Indexed' : 'Indexing ' + Math.round((100 * day.speedIndex.indexed) / day.speedIndex.clips) + '%') + '</span>' : ''}</p><small>${duration(day.minutes)} · ${day.cameras} cameras · ${size(day.bytes)}</small></button><button class="play-button" data-play-day="${day.day}" aria-label="Play day">▶</button><button data-menu-day="${day.day}" aria-label="Day actions">⋯</button></div><button class="expand-count" data-expand="${day.day}">${f.expanded.has(day.day) ? '⌄' : '›'} ${day.recordings} recordings</button>${f.expanded.has(day.day) ? `<div>${recs.slice(0, limit).map(recording).join('')}${recs.length > limit ? `<button data-show-more="${day.day}">Show ${recs.length - limit} more recordings</button>` : ''}</div>` : ''}</article>`;
+          )}${day.archive?.state === 'filling' ? '<span class="tag arriving">Still arriving</span>' : ''}${day.protected ? '<span class="tag">' + day.protected + ' protected</span>' : ''}${day.canRecordings ? '<span class="tag">CAN</span>' : ''}${day.speedIndex?.clips ? '<span class="tag">' + (day.speedIndex.indexed >= day.speedIndex.clips ? '✓ Indexed' : 'Indexing ' + Math.round((100 * day.speedIndex.indexed) / day.speedIndex.clips) + '%') + '</span>' : ''}</p><small>${duration(day.minutes)} · ${plural(day.cameras, 'camera')} · ${size(day.bytes)}</small></button><button class="play-button" data-play-day="${day.day}" aria-label="Play day">▶</button><button data-menu-day="${day.day}" aria-label="Day actions">⋯</button></div><button class="expand-count" data-expand="${day.day}">${f.expanded.has(day.day) ? '⌄' : '›'} ${plural(day.recordings, 'recording')}</button>${f.expanded.has(day.day) ? `<div>${recs.slice(0, limit).map(recording).join('')}${recs.length > limit ? `<button data-show-more="${day.day}">Show ${plural(recs.length - limit, 'more recording')}</button>` : ''}</div>` : ''}</article>`;
       })
       .join(
         '',
       )}${pager()}${f.selecting ? `<div class="selection-bar"><b>${f.selection.count()} selected</b><button data-protect>Protect</button><button data-unprotect>Unprotect</button><button data-move>Move to Recycle Bin</button><button data-deselect>Deselect all</button></div>` : ''}`;
+    const headerActions = document.getElementById('page-actions');
+    if (headerActions) {
+      headerActions.replaceChildren(el.querySelector('.footage-actions'));
+    }
     document.body.classList.toggle('selecting', f.selecting);
     el.querySelectorAll('[data-mixed=true]').forEach((x) => (x.indeterminate = true));
     el.querySelectorAll('img').forEach(
@@ -177,10 +209,7 @@ export async function render(el, { current, state, alive }) {
       } else if (has('all')) f.selection.add((await allRecords()).map((r) => r.id));
       else if (has('deselect')) f.selection.clear();
       else if (has('category')) {
-        f.category = b.dataset.category;
-        f.offset = 0;
-        f.dayRecs.clear();
-        f.selection.clear();
+        changeScope(f, { category: b.dataset.category });
       } else if (has('prev')) f.offset = Math.max(0, f.offset - 30);
       else if (has('next')) f.offset += 30;
       else if (has('expand')) {
@@ -199,20 +228,15 @@ export async function render(el, { current, state, alive }) {
             return { days: out.total, recordings: out.recordings };
           },
           onApply: (range) => {
-            Object.assign(f, range, { offset: 0 });
-            f.selection.clear();
-            f.dayRecs.clear();
+            changeScope(f, range);
             draw().catch((e) => toast(e.message, true));
           },
         });
         return;
       } else if (has('clear-date')) {
-        f.from = f.to = '';
-        f.offset = 0;
-        f.selection.clear();
-        f.dayRecs.clear();
+        changeScope(f, { from: '', to: '' });
       } else if (has('play-day')) {
-        play(day);
+        await play(day);
         return;
       } else if (has('menu-day')) {
         menu(b, [
@@ -251,7 +275,7 @@ export async function render(el, { current, state, alive }) {
           .flat()
           .find((r) => r.id === (b.dataset.menuRec || b.dataset.playRec));
         if (!r) return;
-        if (has('play-rec')) play(r.day, r);
+        if (has('play-rec')) await play(r.day, r);
         else
           menu(b, [
             [r.protected ? 'Unprotect' : 'Protect', () => protect([r.id], !r.protected)],
@@ -262,6 +286,7 @@ export async function render(el, { current, state, alive }) {
       } else return;
       await draw();
     });
+    if (headerActions) headerActions.onclick = el.onclick;
     el.onchange = act(async (e) => {
       const x = e.target;
       if (x.dataset.dayCheck) {
@@ -278,7 +303,8 @@ export async function render(el, { current, state, alive }) {
     if (!valid()) return;
     try {
       const s = await api('/api/speeds/status');
-      const chip = el.querySelector('[data-index]');
+      const chip =
+        document.querySelector('#page-actions [data-index]') || el.querySelector('[data-index]');
       if (!chip || !valid()) return;
       chip.hidden = !s.running;
       chip.textContent = s.running
@@ -311,6 +337,11 @@ export async function render(el, { current, state, alive }) {
     stopped = true;
     clearInterval(poll);
     document.body.classList.remove('selecting');
+    const actions = document.getElementById('page-actions');
+    if (actions) {
+      actions.replaceChildren();
+      actions.onclick = null;
+    }
     el.onclick = el.onchange = null;
   };
 }

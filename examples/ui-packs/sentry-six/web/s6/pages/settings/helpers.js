@@ -1,10 +1,9 @@
 import { api, esc, toast, confirmDialog } from '../../core.js';
 import { icon } from '../../icons.js';
-import { ago as when } from '../../format.js';
+import { plural, ago as when } from '../../format.js';
 export async function render(page, ctx) {
   const render = ctx.render,
-    $ = (id) => page.querySelector('#' + id) || document.getElementById(id),
-    plural = (n, s) => `${n} ${s}${n === 1 ? '' : 's'}`;
+    $ = (id) => page.querySelector('#' + id) || document.getElementById(id);
   let nodeSaving = false;
 
   const [{ nodes, worker }, { vehicles: cars = [] }] = await Promise.all([
@@ -31,7 +30,7 @@ export async function render(page, ctx) {
     const rows = b.results
       .map(
         (r) =>
-          `<tr${r.level === b.suggested ? ' class="is-best"' : ''}><td>${r.level} at once</td><td>${r.failed ? `${r.failed} failed` : `${r.clipsPerMinute} clips/min`}</td><td class="muted small">${r.clips} clips in ${r.seconds} s</td></tr>`,
+          `<tr${r.level === b.suggested ? ' class="is-best"' : ''}><td>${r.level} at once</td><td>${r.failed ? `${r.failed} failed` : `${r.clipsPerMinute} clips/min`}</td><td class="muted small">${plural(r.clips, 'clip')} in ${r.seconds} s</td></tr>`,
       )
       .join('');
     return `<tr class="node-bench-row"><td colspan="5"><div class="node-bench">

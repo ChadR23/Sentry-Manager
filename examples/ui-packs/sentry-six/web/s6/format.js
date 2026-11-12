@@ -54,8 +54,31 @@ export function ago(ms, now = new Date()) {
   return n < 1
     ? 'just now'
     : n < 60
-      ? `${Math.round(n)} minutes ago`
+      ? `${plural(Math.round(n), 'minute')} ago`
       : n < 1440
-        ? `${Math.floor(n / 60)} hours ago`
-        : `${Math.floor(n / 1440)} days ago`;
+        ? `${plural(Math.floor(n / 60), 'hour')} ago`
+        : `${plural(Math.floor(n / 1440), 'day')} ago`;
 }
+
+export const plural = (n, one, many = one + 's') =>
+  `${Number(n || 0).toLocaleString()} ${Number(n) === 1 ? one : many}`;
+export function categoryEntries(categories = {}) {
+  const order = ['Recent', 'Sentry', 'Saved'];
+  return Object.entries(categories).sort(
+    ([a], [b]) =>
+      (order.includes(a) ? order.indexOf(a) : 3) - (order.includes(b) ? order.indexOf(b) : 3),
+  );
+}
+export const categoryCount = (k, n) =>
+  plural(
+    n,
+    k === 'Recent' ? 'drive' : k === 'Sentry' ? 'Sentry event' : k === 'Saved' ? 'saved' : k,
+    k === 'Saved' ? 'saved' : undefined,
+  );
+
+/** Older server messages use "clip(s)"; present them with the same count rule. */
+export const countText = (text) =>
+  String(text ?? '').replace(
+    /\b(\d+) (drive|recording|Sentry event|item|file|clip|check|day)\(s\)/g,
+    (_, n, noun) => plural(Number(n), noun),
+  );

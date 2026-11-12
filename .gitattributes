@@ -1,0 +1,5 @@
+# Keep the built-in Sentry Six archive identical to its source files on every platform.
+examples/ui-packs/sentry-six/**/*.js text eol=lf
+examples/ui-packs/sentry-six/**/*.css text eol=lf
+examples/ui-packs/sentry-six/**/*.html text eol=lf
+examples/ui-packs/sentry-six/*.json text eol=lf

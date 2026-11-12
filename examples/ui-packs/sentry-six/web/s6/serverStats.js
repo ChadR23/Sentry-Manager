@@ -1,6 +1,6 @@
+import { plural } from './format.js';
 // Drawing helpers retained from Original so all measurements remain reachable.
 import { esc } from './core.js';
-const plural = (n, s) => `${n} ${s}${n === 1 ? '' : 's'}`;
 
 const fin = (n) => typeof n === 'number' && Number.isFinite(n);
 const clampPct = (n) => Math.max(0, Math.min(100, Math.round((fin(n) ? n : 0) * 10) / 10));

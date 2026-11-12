@@ -1945,3 +1945,188 @@ time {
     flex-basis: calc(100% - 80px);
   }
 }
+
+/* Review alignment with the approved family mockup. */
+.number {
+  font-family: Inter, system-ui, sans-serif;
+  font-weight: 600;
+  letter-spacing: -0.025em;
+}
+.strip-cell.none {
+  border: 1px dashed rgba(248, 113, 113, 0.7);
+  background: repeating-linear-gradient(
+    135deg,
+    transparent,
+    transparent 4px,
+    rgba(248, 113, 113, 0.06) 4px,
+    rgba(248, 113, 113, 0.06) 7px
+  );
+}
+.strip-cell.today {
+  border: 1px solid var(--border);
+  background: transparent;
+}
+.strip-cell.today > span {
+  display: none;
+}
+.attention-group {
+  padding: 0 20px;
+}
+.attention-row {
+  padding: 18px 0;
+}
+.attention-row + .attention-row,
+.health-more-row + .health-more-row {
+  border-top: 1px solid var(--border);
+}
+.attention-row h3,
+.health-more-row h3 {
+  color: var(--text);
+}
+.attention-row p {
+  margin: 5px 0 0;
+}
+.attention-icon {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  flex: none;
+  border-radius: 12px;
+  background: rgba(148, 163, 184, 0.12);
+  color: #94a3b8;
+}
+.attention-icon.warn {
+  color: var(--warn);
+  background: rgba(251, 191, 36, 0.12);
+}
+.attention-icon.bad {
+  color: var(--bad);
+  background: rgba(248, 113, 113, 0.12);
+}
+.health-links {
+  display: block;
+  padding: 0 20px;
+}
+.health-links .health-more-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 18px 0;
+  color: var(--text);
+}
+#page .sentry-sul section:empty,
+#page .sentry-sul .sul-car:empty {
+  display: none;
+}
+input[type='range'] {
+  accent-color: var(--accent);
+}
+input[type='range']::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 6px;
+  background: linear-gradient(90deg, var(--accent), rgba(74, 222, 128, 0.25));
+}
+input[type='range']::-webkit-slider-thumb {
+  margin-top: -5px;
+}
+input[type='range']::-moz-range-track {
+  height: 6px;
+  border-radius: 6px;
+  background: rgba(74, 222, 128, 0.25);
+}
+input[type='range']::-moz-range-progress {
+  height: 6px;
+  background: var(--accent);
+}
+input.toggle-switch {
+  appearance: none;
+  width: 40px;
+  height: 22px;
+  min-width: 40px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  position: relative;
+  cursor: pointer;
+}
+input.toggle-switch::after {
+  content: '';
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  left: 2px;
+  top: 2px;
+  background: white;
+  border-radius: 50%;
+  transition: transform 0.15s;
+}
+input.toggle-switch:checked {
+  background: var(--solid);
+  border-color: var(--solid);
+}
+input.toggle-switch:checked::after {
+  transform: translateX(18px);
+}
+input.toggle-switch:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+.pack-card.in-use {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(74, 222, 128, 0.15);
+}
+.pack-card.in-use button:disabled {
+  opacity: 1;
+}
+.pack-card.in-use small {
+  color: var(--accent);
+}
+#page-actions:empty {
+  display: none;
+}
+#page-actions .footage-actions {
+  margin: 0;
+  gap: 12px;
+}
+#page-actions .grow {
+  display: none;
+}
+#page-actions [data-index] {
+  font-size: 11px;
+}
+@media (max-width: 760px) {
+  #workspace > header {
+    gap: 6px;
+  }
+  #workspace > header:has(.footage-actions) #title {
+    font-size: 18px;
+  }
+  #page-actions .footage-actions {
+    gap: 6px;
+    font-size: 11px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+  #page-actions button {
+    padding: 6px;
+    font-size: 11px;
+  }
+  .attention-row {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .attention-row .grow {
+    flex-basis: calc(100% - 60px);
+  }
+  .attention-row .btn {
+    margin-left: 52px;
+  }
+}
+
+.attention-row p {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

@@ -1,5 +1,5 @@
 import { esc, sheet } from '../core.js';
-import { dayKey } from '../format.js';
+import { plural, dayKey } from '../format.js';
 export function open(anchor, { from = '', to = '', daysWithFootage = null, getSummary, onApply }) {
   const el = document.createElement('section'),
     now = new Date();
@@ -26,14 +26,14 @@ export function open(anchor, { from = '', to = '', daysWithFootage = null, getSu
     const count = [...(daysWithFootage || [])].filter(
       (d) => (!a.value || d >= a.value) && (!b.value || d <= b.value),
     ).length;
-    el.querySelector('[data-summary]').textContent = `${count} days with footage`;
+    el.querySelector('[data-summary]').textContent = `${plural(count, 'day')} with footage`;
     if (getSummary) {
       const ticket = ++summarySeq;
       getSummary({ from: a.value, to: b.value })
         .then((s) => {
           if (ticket === summarySeq && el.isConnected)
             el.querySelector('[data-summary]').textContent =
-              `${s.days} days · ${s.recordings} recordings`;
+              `${plural(s.days, 'day')} · ${plural(s.recordings, 'recording')}`;
         })
         .catch(() => {});
     }

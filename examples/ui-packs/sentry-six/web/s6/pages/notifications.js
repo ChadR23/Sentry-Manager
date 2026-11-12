@@ -1,5 +1,5 @@
 import { api, esc, sheet, act } from '../core.js';
-import { ago } from '../format.js';
+import { countText, ago } from '../format.js';
 export async function notifications(anchor) {
   const el = document.createElement('section');
   const close = sheet(el, { anchor });
@@ -11,7 +11,7 @@ export async function notifications(anchor) {
       (data.notifications || [])
         .map(
           (n) =>
-            `<article class="health-check"><h3>${esc(globalThis.SentryUnits?.text?.(n.title) || n.title)}</h3><p>${esc(globalThis.SentryUnits?.text?.(n.message) || n.message || '')}</p><p>${ago(n.createdAt)}${n.resolvedAt ? ' · Resolved' : ''}</p>${!n.resolvedAt ? `<button data-dismiss="${n.id}">Dismiss</button>` : ''}</article>`,
+            `<article class="health-check"><h3>${esc(countText(globalThis.SentryUnits?.text?.(n.title) || n.title))}</h3><p>${esc(countText(globalThis.SentryUnits?.text?.(n.message) || n.message || ''))}</p><p>${ago(n.createdAt)}${n.resolvedAt ? ' · Resolved' : ''}</p>${!n.resolvedAt ? `<button data-dismiss="${esc(n.id)}">Dismiss</button>` : ''}</article>`,
         )
         .join('');
     if (!data.notifications?.length) el.innerHTML += '<p>Nothing needs you right now.</p>';
