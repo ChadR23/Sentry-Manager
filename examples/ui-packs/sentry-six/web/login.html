@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Sign in · Sentry Six Manager</title>
+  <link rel="icon" type="image/png" href="/web/icon.png">
+  <link rel="stylesheet" href="/web/s6/login.css">
+  
+</head>
+<body>
+  <main class="login">
+<div class="signin-brand"><span class="shield-tile"><svg class="i " viewBox="0 -960 960 960" aria-hidden="true"><path d="M480-81q-140-35-230-162.5T160-523v-238l320-120 320 120v238q0 152-90 279.5T480-81Zm0-62q115-38 187.5-143.5T740-523v-196l-260-98-260 98v196q0 131 72.5 236.5T480-143Zm0-337Z"/></svg></span><h1>Sentry Six</h1></div>
+    <h2 id="title" class="signin-title">Sign in</h2>
+    <p class="muted small" id="lead" style="margin:6px 0 20px">Sign in to Sentry Six Manager.</p>
+    <div class="error-wrap"><svg class="i " viewBox="0 -960 960 960" aria-hidden="true"><path d="M503.5-289.48q9.5-9.48 9.5-23.5t-9.48-23.52q-9.48-9.5-23.5-9.5t-23.52 9.48q-9.5 9.48-9.5 23.5t9.48 23.52q9.48 9.5 23.5 9.5t23.52-9.48ZM453-433h60v-253h-60v253Zm27.27 353q-82.74 0-155.5-31.5Q252-143 197.5-197.5t-86-127.34Q80-397.68 80-480.5t31.5-155.66Q143-709 197.5-763t127.34-85.5Q397.68-880 480.5-880t155.66 31.5Q709-817 763-763t85.5 127Q880-563 880-480.27q0 82.74-31.5 155.5Q817-252 763-197.68q-54 54.31-127 86Q563-80 480.27-80Zm.23-60Q622-140 721-239.5t99-241Q820-622 721.19-721T480-820q-141 0-240.5 98.81T140-480q0 141 99.5 240.5t241 99.5Zm-.5-340Z"/></svg><p class="err" id="err" role="alert"></p></div>
+<form id="form">
+      <label class="field">Username<input class="input" name="username" autocomplete="username" required placeholder="Username"></label>
+      <label class="field">Password<input class="input" name="password" type="password" autocomplete="current-password" required minlength="1"></label>
+      <label class="field" id="confirm-row" hidden>Confirm password<input class="input" name="confirm" type="password" autocomplete="new-password"></label>
+      <label class="field" id="code-row" hidden>Setup code<input class="input" name="code" autocomplete="one-time-code" spellcheck="false" placeholder="XXXXX-XXXXX-XXXXX"><span class="muted small">Printed in the container log: <code>docker logs sentry-six-manager</code></span></label>
+      <div class="setup-optin" id="reports-row" hidden><label class="check"><input type="checkbox" name="share"><span><b>Share diagnostics with the developers</b><span class="optin-note muted small">Crash reports, a daily summary and an hourly heartbeat (version, health, footage size, space saved, miles driven). Never passwords or keys. You can change this any time in Settings → Help &amp; feedback.</span></span></label><label class="check optin-anon"><input type="checkbox" name="anonymous" disabled><span>Send anonymously</span></label></div>
+      <p class="note amber small" id="insecure" hidden>This page is not using HTTPS, so your password could be seen by others on the network. Open it with https:// instead.</p>
+      
+      <button class="btn solid" type="submit" id="submit"><svg class="i login-glyph" viewBox="0 -960 960 960" aria-hidden="true"><path d="M481-120v-60h299v-600H481v-60h299q24 0 42 18t18 42v600q0 24-18 42t-42 18H481Zm-55-185-43-43 102-102H120v-60h363L381-612l43-43 176 176-174 174Z"/></svg><span>Sign In</span><svg class="i spinner" viewBox="0 -960 960 960" aria-hidden="true"><path d="M323-111q-73-31-127-85t-85-127q-31-73-31-157t31-157q31-73 85-127t127-85q73-31 157-31 12 0 21 9t9 21q0 12-9 21t-21 9q-141 0-240.5 99.5T140-480q0 141 99.5 240.5T480-140q141 0 240.5-99.5T820-480q0-12 9-21t21-9q12 0 21 9t9 21q0 84-31 157t-85 127q-54 54-127 85T480-80q-84 0-157-31Z"/></svg></button>
+    </form>
+    <p class="muted small" id="fingerprint" hidden style="margin-top:18px">This server's certificate (SHA-256): <span class="mono"></span><br>The same as in <code>docker logs sentry-six-manager</code> and in your browser's certificate details.</p>
+  </main>
+  <script src="/web/login.js"></script>
+</body>
+</html>

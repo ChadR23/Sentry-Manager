@@ -3834,7 +3834,7 @@ async function main() {
   };
 
   // ---- HTTP handler
-  const PUBLIC_STATIC = new Set(['/login', '/web/login.js', '/web/shell.css', '/web/icon.png', '/login/code', '/web/login-code.js', '/web/login-two-factor.js']);
+  const PUBLIC_STATIC = new Set(['/web/s6/login.css', '/login', '/web/login.js', '/web/shell.css', '/web/icon.png', '/login/code', '/web/login-code.js', '/web/login-two-factor.js']);
   // the sign-in steps a banned address is refused, signed in or not
   const BAN_STEPS = new Set(['/api/auth/login', '/api/auth/2fa/code', '/api/auth/setup', '/api/auth/confirm', '/api/auth/password']);
   // all a session may do while its account still has to set up two-step sign-in
@@ -4081,10 +4081,10 @@ async function main() {
         return ui('web', WEB, 'index.html', { transform: (html) => withPrefetch(html, key) });
       }
       if (p === '/login') return ui('web', WEB, 'login.html');
-      // the two-step code page: always the built-in one, for every interface
-      if (p === '/login/code') return serve(WEB, 'login-code.html');
-      // setting up two-step sign-in when every account needs it: the built-in page too
-      if (p === '/login/two-factor') return serve(WEB, 'login-two-factor.html');
+      // Pack markup uses the existing two-step authentication scripts.
+      if (p === '/login/code') return ui('web', WEB, 'login-code.html');
+      // Setting up two-step sign-in when every account needs it.
+      if (p === '/login/two-factor') return ui('web', WEB, 'login-two-factor.html');
       // always the built-in one: an interface pack cannot replace the bar
       if (p === '/web/critical.js') return serve(WEB, 'critical.js');
       if (p.startsWith('/web/')) return ui('web', WEB, p.slice(5), { cache: p.includes('/fonts/') ? 'public, max-age=604800' : 'no-cache' });

@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Set up two-step sign-in</title>
+<link rel="icon" href="/web/icon.png">
+
+<link rel="stylesheet" href="/web/s6/login.css">
+</head>
+<body>
+<main class="login"><div class="signin-brand"><span class="shield-tile"><svg class="i " viewBox="0 -960 960 960" aria-hidden="true"><path d="M480-81q-140-35-230-162.5T160-523v-238l320-120 320 120v238q0 152-90 279.5T480-81Zm0-62q115-38 187.5-143.5T740-523v-196l-260-98-260 98v196q0 131 72.5 236.5T480-143Zm0-337Z"/></svg></span><h1>Sentry Six</h1></div>
+  <h1>Set up two-step sign-in</h1>
+  <p id="lead">Every account on this server needs two-step sign-in (an admin turned it on in Settings → Security). Set it up now: you need an authenticator app on your phone.</p>
+  <div class="error-wrap"><svg class="i " viewBox="0 -960 960 960" aria-hidden="true"><path d="M503.5-289.48q9.5-9.48 9.5-23.5t-9.48-23.52q-9.48-9.5-23.5-9.5t-23.52 9.48q-9.5 9.48-9.5 23.5t9.48 23.52q9.48 9.5 23.5 9.5t23.52-9.48ZM453-433h60v-253h-60v253Zm27.27 353q-82.74 0-155.5-31.5Q252-143 197.5-197.5t-86-127.34Q80-397.68 80-480.5t31.5-155.66Q143-709 197.5-763t127.34-85.5Q397.68-880 480.5-880t155.66 31.5Q709-817 763-763t85.5 127Q880-563 880-480.27q0 82.74-31.5 155.5Q817-252 763-197.68q-54 54.31-127 86Q563-80 480.27-80Zm.23-60Q622-140 721-239.5t99-241Q820-622 721.19-721T480-820q-141 0-240.5 98.81T140-480q0 141 99.5 240.5t241 99.5Zm-.5-340Z"/></svg><p class="err" id="err" role="alert"></p></div>
+<form id="pw-form" hidden autocomplete="off">
+    <label for="pw">Your password, to confirm</label>
+    <input id="pw" class="pw" type="password" autocomplete="current-password" required>
+    <button type="submit">Continue</button>
+  </form>
+  <div id="start-box"><button type="button" id="start">Start</button></div>
+  <form id="code-form" hidden autocomplete="off">
+    <ol>
+      <li>In an authenticator app (Google Authenticator, Microsoft Authenticator, 1Password, Bitwarden, Aegis…), add an account with this setup key:<span class="key" id="key"></span><span class="alt" style="text-align:left;margin:0">On this phone? <a id="uri" href="#">Open it in the authenticator app</a>.</span></li>
+      <li>Type the 6-digit code it shows:</li>
+    </ol>
+    <input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required>
+    <button type="submit">Turn on</button>
+  </form>
+  <div id="done" hidden>
+    <p><b style="color:var(--accent)">Two-step sign-in is on.</b> Keep these recovery codes somewhere safe: each signs in once without the phone. They are not shown again.</p>
+    <div class="codes" id="codes"></div>
+    <a class="btn2" id="download" download="sentry-six-manager-recovery-codes.txt" href="#">Download them</a>
+    <button type="button" id="continue">Continue to Sentry Six Manager</button>
+  </div>
+  
+  <span class="alt"><a href="#" id="logout">Sign out</a></span>
+</main>
+<script src="/web/login-two-factor.js"></script>
+</body>
+</html>

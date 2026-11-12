@@ -846,6 +846,13 @@ test('Interface: a pack uploaded in Settings serves its files for everyone, swit
     assert.equal((await s.call('PUT', '/api/ui-packs/active', { id: 'daylight' })).status, 200);
     assert.equal((await text('/')).split(BAR).length, 2, 'a built-in pack\'s page has it, once');
     assert.equal(await text('/web/login.js'), fs.readFileSync(path.join(REPO, 'examples', 'ui-packs', 'daylight', 'web', 'login.js'), 'utf8'), 'a built-in pack serves its own files');
+    assert.equal((await s.call('PUT', '/api/ui-packs/active', { id: 'sentry-six' })).status, 200);
+    const loginCss = await fetch(s.base + '/web/s6/login.css', { redirect: 'manual' });
+    assert.equal(loginCss.status, 200, 'the chosen pack login stylesheet is public');
+    assert.match(await loginCss.text(), /shield-tile/);
+    for (const route of ['/login', '/login/code', '/login/two-factor']) assert.match(await text(route, route.endsWith('two-factor') ? s.getCookie() : ''), /s6\/login\.css/, route);
+    assert.equal(await text('/web/login-code.js', ''), fs.readFileSync(path.join(REPO, 'web/login-code.js'), 'utf8'));
+
     assert.equal((await s.call('PUT', '/api/ui-packs/active', { id: null })).status, 200);
     assert.equal(await text('/web/shell.css'), builtCss, 'installed, not chosen yet');
     // a bad pack is refused with its reason
