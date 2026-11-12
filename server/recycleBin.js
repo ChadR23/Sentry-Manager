@@ -176,6 +176,28 @@ class RecycleBin {
     return result;
   }
 
+  /** Locate a readable thumbnail without requiring write access to the share. */
+  async thumbnailSource(itemId) {
+    const item = this.db.binItem(itemId);
+    if (!item) return null;
+    const vehicle = this.vehicles.get(item.vehicleId);
+    if (!vehicle) return null;
+    const root = this.vehicles.rootOf(vehicle);
+    const itemRoot = safeJoin(root, BIN_DIR + '/' + item.id);
+    const realItem = await fsp.realpath(itemRoot).catch(() => null);
+    const realRoot = await fsp.realpath(root).catch(() => null);
+    if (!realItem || !realRoot || !realItem.startsWith(realRoot + path.sep)) return null;
+    const candidates = [...item.files.filter(f => /(^|\/)thumb\.png$/i.test(f.rel)), ...item.files.filter(f => /-front\.mp4$/i.test(f.rel))];
+    for (const f of candidates) {
+      if (f.pending || !f.binRel.startsWith(BIN_DIR + '/' + item.id + '/')) continue;
+      const abs = await fsp.realpath(safeJoin(root, f.binRel)).catch(() => null);
+      if (!abs || !abs.startsWith(realItem + path.sep)) continue;
+      if (!(await fsp.stat(abs).catch(() => null))?.isFile()) continue;
+      return { kind: /thumb\.png$/i.test(f.rel) ? 'image' : 'clip', abs };
+    }
+    return null;
+  }
+
   list(vehicleId) {
     return this.db.binItems(vehicleId);
   }

@@ -50,6 +50,7 @@ async function makeFootage(root) {
   await writeClip(path.join(T, 'SentryClips/2020-01-02_12-30-00/2020-01-02_12-29-00-front.mp4'));
   await fsp.writeFile(path.join(T, 'SentryClips/2020-01-02_12-30-00/event.json'), JSON.stringify({ city: 'Austin', reason: 'sentry_aware_object_detection' }));
   await writeClip(path.join(T, 'SavedClips/2020-01-03_10-00-00/2020-01-03_09-59-00-front.mp4'));
+  await fsp.writeFile(path.join(T, 'SentryClips/2020-01-02_12-30-00/thumb.png'), Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1sAAAAASUVORK5CYII=', 'base64'));
   await fsp.writeFile(path.join(root, 'notes.txt'), 'not footage');
 }
 
@@ -283,12 +284,24 @@ test('footage, protect, Recycle Bin and policies never lose files', { timeout: 1
     assert.equal(fs.existsSync(path.join(root, 'TeslaCam/SentryClips/2020-01-02_12-30-00')), false, 'empty event folder removed');
     assert.ok(fs.existsSync(path.join(root, 'TeslaCam/SentryClips')), 'clip folders kept');
     const binFiles = execFileSync('find', [path.join(root, '.sentry-recycle-bin'), '-type', 'f']).toString().trim().split('\n');
-    assert.equal(binFiles.length, 5);
+    assert.equal(binFiles.length, 6);
     assert.ok(binFiles.every((f) => f.endsWith('.binned')), 'binned files are invisible to the converter');
     const rootListing = await s.call('POST', '/api/studio/readDir', { path: root });
     assert.ok(!rootListing.data.some((e) => e.name === '.sentry-recycle-bin'), 'viewer never sees the bin');
     const { data: { items } } = await s.call('GET', '/api/bin?vehicle=daily-driver');
     assert.equal(items.length, 2);
+    const withThumb = items.find(i => i.category === 'Sentry');
+    const thumbnail = await s.call('GET', '/api/bin/' + withThumb.id + '/thumbnail', undefined, { raw: true });
+    assert.equal(thumbnail.status, 200);
+    assert.equal(thumbnail.headers.get('content-type'), 'image/png');
+    assert.ok((await thumbnail.arrayBuffer()).byteLength > 0);
+    assert.equal((await s.call('GET', '/api/bin/does-not-exist/thumbnail', undefined, { raw: true })).status, 404);
+    if (hasFfmpeg) {
+      const drive = items.find(i => i.category === 'Recent');
+      const frame = await s.call('GET', '/api/bin/' + drive.id + '/thumbnail', undefined, { raw: true });
+      assert.equal(frame.status, 200, 'ffmpeg reads the .binned front clip');
+      assert.equal(frame.headers.get('content-type'), 'image/jpeg');
+    }
 
     // restore -> byte-identical
     for (const item of items) assert.equal((await s.call('POST', `/api/bin/${item.id}/restore`, {})).status, 200);

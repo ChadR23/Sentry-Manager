@@ -91,7 +91,7 @@ async function readTextConfined(abs, fdInside, maxBytes) {
 // remote connection's time on round trips.
 const MEDIA_CHUNK = 1024 * 1024;
 
-async function sendMedia(req, res, abs, fdInside = async () => true) {
+async function sendMedia(req, res, abs, fdInside = async () => true, contentType) {
   const opened = await openConfined(abs, fdInside);
   if (!opened) {
     res.writeHead(404);
@@ -106,7 +106,7 @@ async function sendMedia(req, res, abs, fdInside = async () => true) {
     return undefined;
   }
   const etag = `"${st.size.toString(36)}-${Math.floor(st.mtimeMs).toString(36)}-${st.ino.toString(36)}"`;
-  const type = MIME[path.extname(abs).toLowerCase()] || 'application/octet-stream';
+  const type = contentType || MIME[path.extname(abs).toLowerCase()] || 'application/octet-stream';
   const headers = { 'Content-Type': type, 'Accept-Ranges': 'bytes', ETag: etag, 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff' };
   let start = 0;
   let end = st.size - 1;

@@ -3533,6 +3533,18 @@ async function main() {
     return { recordings: recs.length, can: recs.length ? await canWith(params.id, { rels: recs.flatMap((r) => r.files) }) : null };
   });
 
+  r.add('GET', '/api/bin/:item/thumbnail', async (req, res, { params }) => {
+    const item = db.binItem(params.item);
+    if (!item) throw new HttpError(404, 'No thumbnail');
+    vehicleOr404(item.vehicleId);
+    const source = await bin.thumbnailSource(params.item);
+    const real = source && await allowed.resolve(source.abs);
+    if (!real) throw new HttpError(404, 'No thumbnail');
+    const file = source.kind === 'image' ? real : await thumbs.forClip(real);
+    if (!file) throw new HttpError(404, 'No thumbnail');
+    await sendMedia(req, res, file, studioReadable.fdInside, source.kind === 'image' ? 'image/png' : undefined);
+    return undefined;
+  });
   r.add('GET', '/api/bin', (req, res, { query }) => ({ items: bin.list(query.vehicle || null) }));
   r.add('POST', '/api/bin/:item/restore', async (req, res, { params }) => {
     const out = await bin.restore(params.item);
