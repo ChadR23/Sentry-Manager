@@ -10,3 +10,111 @@
 .calendar{display:grid;grid-template-columns:repeat(7,1fr);gap:4px;text-align:center;clear:both}.calendar button{padding:8px 3px}.calendar small{display:block}.calendar .active{background:var(--accent);color:#07090c}.day-thumb{width:100px;height:62px;border-radius:12px}.day-toggle{text-align:left;border:0;background:none;padding:0}.day-toggle p{font-size:13px}.pager{margin:18px 0}.recording{padding:14px 0;border-top:1px solid var(--border);margin-top:12px}.recording img{width:90px;height:55px;border-radius:10px}.recording p{font-size:13px}.selection-bar{position:fixed;bottom:20px;left:calc(50% + 123px);transform:translateX(-50%);z-index:35;display:flex;align-items:center;gap:10px;padding:12px;background:#18231e;border:1px solid var(--border);border-radius:18px;max-width:calc(100vw - 280px);flex-wrap:wrap}.day input[type=checkbox]{width:20px;height:20px;accent-color:var(--accent)}@media(max-width:760px){.day-thumb{width:64px;height:48px}.day .row{gap:8px}.day-toggle{flex-basis:calc(100% - 100px)}.recording img{width:58px;height:42px}.recording .grow{flex-basis:calc(100% - 100px)}.selection-bar{left:12px;right:12px;bottom:12px;max-width:none;transform:none;gap:6px;padding:10px}.selection-bar button{font-size:12px;padding:7px}.selecting #phone-nav{display:none}}
 
 .bin-thumb{position:relative;width:90px;height:55px;display:grid;place-items:center;background:rgba(255,255,255,.05);border-radius:10px}.bin-thumb img{position:absolute;inset:0;width:100%;height:100%}
+
+/* Overview > Server ("nerd stats"): from the approved mockup (the server monitor plan, in git history) */
+.nd-server { container-type: inline-size; }
+.nd-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+.nd-head > div:first-child { min-width: 0; }
+.nd-sub { overflow-wrap: anywhere; }
+/* "Not updating right now" keeps its room while the numbers are fresh */
+.nd-stale.off { visibility: hidden; }
+.nd-head-right { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.nd-chipbox:empty { display: none; }
+.nd-range button { padding: 6px 11px; font-size: 12.5px; }
+.nd-head-right .btn.sm { min-height: 32px; }
+.nd-alert { margin-top: 14px; padding: 10px 14px; border-radius: 12px; border: 1px solid rgba(255, 159, 90, 0.45); background: rgba(255, 159, 90, 0.1); font-size: 14px; overflow-wrap: anywhere; }
+.nd-alert b { color: var(--warn); margin-right: 8px; }
+.nd-alert.bad { border-color: rgba(248, 113, 113, 0.5); background: var(--danger-bg); }
+.nd-alert.bad b { color: var(--danger); }
+.nd-grid { display: grid; grid-auto-flow: row dense; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 14px; margin-top: 16px; }
+.nd-tile { background: var(--panel-2); border: 1px solid var(--border); border-radius: 14px; padding: 16px; min-width: 0; }
+.nd-wide { grid-column: span 2; }
+.nd-title { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 700; }
+.nd-title > span:first-child { flex: none; }
+.nd-title .muted { min-width: 0; text-transform: none; letter-spacing: 0; font-weight: 500; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nd-big { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 8px; margin-top: 10px; }
+.nd-big b { font-size: 30px; font-weight: 700; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* Network: the arrows match their lines (download blue, upload purple) */
+.nd-big .nd-down { color: var(--info); }
+.nd-big .nd-up { color: var(--upload); }
+.nd-spark { width: 100%; height: 40px; display: block; margin-top: 8px; }
+.nd-axis { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; margin-top: 2px; }
+.nd-cores { display: grid; grid-template-columns: repeat(var(--cols, 12), minmax(0, 1fr)); grid-auto-rows: 26px; gap: 3px; margin-top: 10px; }
+.nd-cores.dense { grid-auto-rows: 12px; gap: 2px; }
+.nd-cores i { background: linear-gradient(to top, var(--accent) var(--v), rgba(255, 255, 255, 0.06) var(--v)); border-radius: 3px; }
+/* two or more CPU sockets: "CPU 1  45%  61 °C  85 W" per socket, wrapping on narrow phones */
+.nd-sockets { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; margin-top: 10px; font-size: 13px; }
+.nd-sockets > div { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 12px; min-width: 0; }
+.nd-sockets > div > span { min-width: 3.4em; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.nd-sockets > div > span:first-child { color: var(--muted); }
+.nd-kv { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 12px; margin: 12px 0 0; font-size: 13px; }
+.nd-kv dt { color: var(--muted); }
+.nd-kv dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+/* Power with nodes: every server's together, above this server's own */
+.nd-servers { padding-bottom: 12px; margin-bottom: 2px; border-bottom: 1px solid var(--border); }
+.nd-kv-servers dt { min-width: 0; max-width: 14em; overflow-wrap: anywhere; }
+.nd-rows { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; margin-top: 12px; font-size: 13px; }
+.nd-rows > div { display: grid; grid-template-columns: 92px minmax(0, 1fr) auto; align-items: center; gap: 10px; }
+.nd-rows b { font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.nd-bar { height: 6px; border-radius: 99px; background: rgba(255, 255, 255, 0.07); overflow: hidden; margin-top: 8px; }
+.nd-rows .nd-bar { margin-top: 0; }
+.nd-bar span { display: block; height: 100%; background: var(--accent); border-radius: 99px; }
+.nd-bar.hot span { background: var(--warn); }
+.nd-bar.bad span { background: var(--danger); }
+.nd-disks { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; margin-top: 12px; }
+.nd-disk > div { display: flex; justify-content: space-between; align-items: baseline; gap: 4px 10px; flex-wrap: wrap; }
+.nd-disk > div b { overflow-wrap: anywhere; }
+.nd-disk > div .muted { overflow-wrap: anywhere; }
+.nd-disk .small { display: block; margin-top: 6px; color: var(--text-2); }
+.nd-disk .small.nd-beat { margin-top: 2px; color: var(--muted); }
+.nd-warn { color: var(--warn) !important; font-weight: 600; }
+.nd-bad { color: var(--danger) !important; font-weight: 600; }
+/* the header, 8 rows and half of the ninth (set from the rows' real height);
+   the rest of the list scrolls inside the tile */
+.nd-procs-box { margin-top: 10px; max-height: 324px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.nd-procs-box:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.nd-procs { width: 100%; border-collapse: collapse; font-size: 13px; }
+.nd-procs th { text-align: left; color: var(--muted); font-weight: 600; font-size: 12px; padding: 6px 0; position: sticky; top: 0; z-index: 1; background: var(--panel-2); }
+.nd-procs td { padding: 7px 0; border-top: 1px solid var(--border); overflow-wrap: anywhere; }
+.nd-procs td + td, .nd-procs th + th { text-align: right; padding-left: 12px; white-space: nowrap; }
+/* a process on one line, so a row is always one line tall: a long name ends
+   in … before its count (×3); the cell's title has it all */
+.nd-procs td:first-child { width: 100%; max-width: 0; }
+.nd-pname { display: flex; min-width: 0; }
+.nd-pname > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nd-pname > span + span { flex: none; margin-left: 0.3em; white-space: nowrap; }
+/* the rows kept for processes that come and go: room, without lines */
+.nd-procs tr.nd-pad td { border-top-color: transparent; }
+.nd-more { all: unset; box-sizing: border-box; margin-top: 10px; color: var(--accent); font-size: 12.5px; font-weight: 600; cursor: pointer; }
+.nd-more:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.nd-none { margin-top: 14px; }
+.nd-foot { margin-top: 14px; overflow-wrap: anywhere; }
+.nd-foot p { color: var(--muted); }
+.nd-foot ul { margin: 4px 0; padding-left: 18px; }
+/* a compose line stays whole when it fits a line, and wraps only when it is longer */
+.nd-foot code { display: inline-block; max-width: 100%; font-family: var(--mono); font-size: 12px; color: var(--text-2); }
+.nd-nb { white-space: nowrap; }
+/* the selected vehicle's two tiles at the top of the section: side by side,
+   each half the width, their buttons on one line at the bottom */
+.nd-vgrid { grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); }
+.nd-vgrid .nd-tile { display: flex; flex-direction: column; }
+.nd-vgrid .nd-big .chip { align-self: center; }
+.nd-note { margin-top: 10px; font-size: 13.5px; }
+.nd-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: auto; padding-top: 14px; }
+.nd-actions .btn.sm { min-height: 34px; }
+/* the logs: the last tile of the section, the whole width */
+.nd-logs { margin-top: 16px; }
+.nd-logs-bar { display: flex; justify-content: space-between; align-items: center; gap: 10px 16px; flex-wrap: wrap; margin-top: 10px; }
+.nd-logs-bar p { flex: 1 1 320px; min-width: 0; overflow-wrap: anywhere; }
+.nd-logs-bar code { font-family: var(--mono); font-size: 12px; color: var(--text-2); }
+.nd-logs-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.nd-logs .logbox { background: var(--panel); }
+/* one column: the wide tiles too (no implicit second column) */
+@container (max-width: 553px) { .nd-wide { grid-column: auto; } }
+/* browsers without container queries (Safari 15): no wide tiles below desktop widths */
+@supports not (container-type: inline-size) {
+  @media (max-width: 1100px) { .nd-wide { grid-column: auto; } }
+}
+
+
+.nd-tile{background:linear-gradient(150deg,rgba(255,255,255,.075),rgba(255,255,255,.03) 55%,rgba(255,255,255,.05));border:1px solid var(--border);border-radius:24px;backdrop-filter:blur(22px) saturate(185%)}.health-check{padding:16px 0;border-top:1px solid var(--border)}.health-links{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.health-links .card{margin:0}.log-lines{max-height:500px;overflow:auto;font:12px/1.6 'JetBrains Mono',monospace;white-space:pre-wrap;overflow-wrap:anywhere}.back{display:inline-block;margin-bottom:18px}@media(max-width:760px){.health-links{grid-template-columns:1fr}.nd-grid{grid-template-columns:1fr}.nd-tile{min-width:0}}

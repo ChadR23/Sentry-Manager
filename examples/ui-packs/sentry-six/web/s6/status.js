@@ -17,3 +17,9 @@ export function overviewStatus({vehicle,notes=[],checks=[],days=[],now=new Date(
  else if(inv.lastDay>=key(previous)||days.find(d=>d.day===inv.lastDay)?.archive?.state==='filling')first='Your footage is safe and up to date.';
  else first='Your footage is safe. The newest is from '+label(inv.lastDay,now)+'.';
  const second=attention.length?(attention[0].kind==='space-'+vehicle.id&&vehicle.storage?.daysLeft!=null?`Space runs out in about ${vehicle.storage.daysLeft} days.`:attention[0].title+'.'):'Nothing needs you right now.';return{tone,first,second,sub};}
+
+export function healthSummary(checks=[]){
+ const groups=new Map(), problems=checks.filter(c=>['warn','fail','bad'].includes(c.status));
+ for(const c of checks){if(!groups.has(c.group))groups.set(c.group,[]);groups.get(c.group).push(c);}
+ return {total:checks.length,passed:checks.filter(c=>c.status==='ok').length,problems,groups:[...groups].map(([name,list])=>{const ok=list.filter(c=>c.status==='ok').length,worst=list.some(c=>['fail','bad'].includes(c.status))?'fail':list.some(c=>c.status==='warn')?'warn':'ok';return {name,ok,total:list.length,worst,line:ok===list.length?`✓ All ${ok} passed`:`${ok} of ${list.length} passed`};})};
+}
