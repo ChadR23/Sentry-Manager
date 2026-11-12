@@ -60,7 +60,8 @@ async function startServer(dir, env = {}) {
     env: {
       ...process.env, PORT: String(port), HOST: '127.0.0.1', DATA_PATH: path.join(dir, 'data'), FOOTAGE_PATH: path.join(dir, 'footage'),
       VEHICLE_NAME: 'Daily Driver', RUN_DIR: path.join(dir, 'run'), UI_PASSWORD: 'correct horse', TZ: 'UTC',
-      SENTRY_NOREPLACE_RENAME: HELPER, LOG_LEVEL: 'warn', TLS_MODE: 'off', ...env
+      // these tests check the built-in interface (Original); Sentry Six is the default otherwise
+      SENTRY_NOREPLACE_RENAME: HELPER, LOG_LEVEL: 'warn', TLS_MODE: 'off', DEFAULT_UI: 'original', ...env
     },
     stdio: ['ignore', 'pipe', 'pipe']
   });
@@ -1953,4 +1954,24 @@ test('bin thumbnails reject item symlinks into other folders of the vehicle shar
     const b=new RecycleBin({db:{binItem:()=>({id:'item',vehicleId:'v',files:[{rel:'thumb.png',binRel:'.sentry-recycle-bin/item/thumb.png.binned'}]})},vehicles:{get:()=>({}),rootOf:()=>dir},deletedClips:{}});
     assert.equal(await b.thumbnailSource('item'),null);
   } finally { await fsp.rm(dir,{recursive:true,force:true}); }
+});
+
+test('the default interface: a fresh server serves Sentry Six; choosing Original keeps Original after a restart', async () => {
+  const dir = await tmp();
+  await makeFootage(path.join(dir, 'footage'));
+  let s = await startServer(dir, { DEFAULT_UI: '' }); // as an install without the setting
+  try {
+    await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
+    assert.equal((await s.call('GET', '/api/ui-packs')).data.active, 'sentry-six');
+    const home = await (await fetch(`${s.base}/`, { headers: { Cookie: s.getCookie() } })).text();
+    assert.match(home, /s6\//, 'the Sentry Six page');
+    await s.call('POST', '/api/auth/confirm', { password: 'correct horse' });
+    assert.equal((await s.call('PUT', '/api/ui-packs/active', { id: null, password: 'correct horse' })).status, 200);
+    assert.equal((await s.call('GET', '/api/ui-packs')).data.active, null);
+  } finally { await s.stop(); }
+  s = await startServer(dir, { DEFAULT_UI: '' });
+  try {
+    await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
+    assert.equal((await s.call('GET', '/api/ui-packs')).data.active, null, 'Original was chosen: still Original');
+  } finally { await s.stop(); await fsp.rm(dir, { recursive: true, force: true }); }
 });
