@@ -14,6 +14,14 @@
     .login form { display: flex; flex-direction: column; gap: 14px; }
     .login .input { width: 100%; }
     .login .err { color: var(--danger); min-height: 20px; font-size: 13.5px; }
+    /* the reporting opt-in on the first-run page (off unless ticked) */
+    .setup-optin { display: grid; gap: 10px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel-2); }
+    .setup-optin[hidden] { display: none; }
+    .setup-optin .check { align-items: flex-start; font-size: 14px; }
+    .setup-optin .check input { margin-top: 2px; flex: none; }
+    .setup-optin .optin-note { display: block; margin-top: 3px; }
+    .setup-optin .optin-anon { margin-left: 27px; }
+    .setup-optin .optin-anon:has(input:disabled) { opacity: .55; cursor: default; }
   </style>
 </head>
 <body>
@@ -29,6 +37,7 @@
       <label class="field">Password<input class="input" name="password" type="password" autocomplete="current-password" required minlength="1"></label>
       <label class="field" id="confirm-row" hidden>Confirm password<input class="input" name="confirm" type="password" autocomplete="new-password"></label>
       <label class="field" id="code-row" hidden>Setup code<input class="input" name="code" autocomplete="one-time-code" spellcheck="false" placeholder="XXXXX-XXXXX-XXXXX"><span class="muted small">Printed in the container log: <code>docker logs sentry-six-manager</code></span></label>
+      <div class="setup-optin" id="reports-row" hidden><label class="check"><input type="checkbox" name="share"><span><b>Share diagnostics with the developers</b><span class="optin-note muted small">Crash reports, a daily summary and an hourly heartbeat (version, health, footage size, space saved, miles driven). Never passwords or keys. You can change this any time in Settings → Help &amp; feedback.</span></span></label><label class="check optin-anon"><input type="checkbox" name="anonymous" disabled><span>Send anonymously</span></label></div>
       <p class="note amber small" id="insecure" hidden>This page is not using HTTPS, so your password could be seen by others on the network. Open it with https:// instead.</p>
       <p class="err" id="err" role="alert"></p>
       <button class="btn solid" type="submit" id="submit">Sign in</button>

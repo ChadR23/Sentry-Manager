@@ -325,7 +325,10 @@ sends anything to anyone other than you, and only when you say so:
   the box) when you press Send.
 - **Send diagnostics to support** sends one diagnostics report when you press
   Send, and shows a reference code (like `SR-7K2Q9F`) to quote.
-- **Share diagnostics with the developers** is off until you turn it on. Then
+- **Share diagnostics with the developers** is off until you turn it on,
+  here or on the first-start page (where the box, and *Send anonymously*,
+  start unticked; the choice is in the audit log as "turned on at setup").
+  Then
   a report goes after a crash or an unhandled error, a health summary once
   a day, and a short heartbeat every hour (the version, health, how much
   footage and space saved, distance driven as one total, and a few yes/no

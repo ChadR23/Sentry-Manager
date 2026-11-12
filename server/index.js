@@ -874,6 +874,8 @@ async function main() {
     const limited = user && accounts.roleOf(user) === 'admin' && !home ? (rules.homeOnly.adminPages ? 'pages' : rules.homeOnly.adminChanges ? 'changes' : null) : null;
     return {
       user, role: user ? roleFor(req, user) : accounts.roleOf(user), twoFactor: user ? accounts.twoFactorOn(user) : false, needsSetup: auth.needsSetup(), secure: isSecure(req), fingerprint: req.socket?.encrypted ? certFingerprint() : null,
+      // the first-run page offers the reporting opt-in only when this build can report (a receiver key, not REPORTS=off)
+      ...(auth.needsSetup() ? { reports: { configured: reports.configured } } : {}),
       // where the server sees this device: the home network or not, and what that limits
       homeNetwork: home, ...(limited ? { adminLimited: limited } : {}), ...(user && twoFactorState(user, home) === 'setup' ? { twoFactorSetupRequired: true } : {})
     };
@@ -1004,11 +1006,23 @@ async function main() {
     audit.warn(`Account "${params.name}" removed: ${by(req, user)}`);
     return { accounts: accounts.list() };
   });
+  /**
+   * The optional reporting opt-in of the first-run page: { share, anonymous },
+   * both on or off. Checked before the account is made, so a bad one makes nothing.
+   */
+  const setupReports = (v) => {
+    if (v === undefined) return null;
+    if (!v || typeof v !== 'object' || Array.isArray(v)) throw new HttpError(400, 'reports is { share, anonymous }.');
+    for (const k of Object.keys(v)) if (k !== 'share' && k !== 'anonymous') throw new HttpError(400, `reports has no "${k}".`);
+    for (const k of ['share', 'anonymous']) if (v[k] !== undefined && typeof v[k] !== 'boolean') throw new HttpError(400, `reports.${k} is on or off.`);
+    return { share: v.share === true, anonymous: v.anonymous === true };
+  };
   r.add('POST', '/api/auth/setup', async (req, res, { body }) => {
     refuseBanned(req);
     const key = `setup:${clientKey(req)}`;
     const wait = auth.throttled(key);
     if (wait) throw new HttpError(429, `Too many attempts. Try again in ${wait} s.`);
+    const optIn = setupReports(body?.reports);
     try {
       auth.setup(String(body?.username || ''), String(body?.password || ''), body?.code);
     } catch (err) {
@@ -1021,6 +1035,17 @@ async function main() {
     }
     auth.login(req, res, body.username, { ip: clientKey(req) });
     audit.info(`Account "${body.username}" created with the setup code: ${by(req, body.username)}`);
+    // the opt-in chosen on the first-run page (off unless ticked); ignored when this build cannot report
+    if (optIn && reports.configured) {
+      try {
+        const { before, after } = reports.setSettings(optIn);
+        const word = (x) => (x ? 'on' : 'off');
+        if (before.share !== after.share) audit.warn(`Share diagnostics with the developers turned ${word(after.share)} at setup: ${by(req, body.username)}`);
+        if (before.anonymous !== after.anonymous) audit.warn(`Send reports anonymously turned ${word(after.anonymous)} at setup: ${by(req, body.username)}`);
+      } catch (err) {
+        log.warn(`The reporting choice at setup was not saved: ${err.message}`);
+      }
+    }
     return { ok: true };
   }, { public: true });
   r.add('POST', '/api/auth/logout', (req, res, { user }) => {

@@ -32,7 +32,18 @@
     document.querySelector('[name=password]').autocomplete = 'new-password';
     document.querySelector('[name=password]').minLength = 8;
     document.querySelector('[name=code]').required = true;
+    // the reporting opt-in: only when this build can report; off unless ticked,
+    // "Send anonymously" only with sharing on
+    if (me.reports?.configured) {
+      const optin = $('form');
+      $('reports-row').hidden = false;
+      optin.share.addEventListener('change', () => {
+        optin.anonymous.disabled = !optin.share.checked;
+        if (!optin.share.checked) optin.anonymous.checked = false;
+      });
+    }
   }
+  const optIn = () => ($('reports-row').hidden ? {} : { reports: { share: $('form').share.checked, anonymous: $('form').share.checked && $('form').anonymous.checked } });
   $('form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const f = new FormData(e.target);
@@ -44,7 +55,7 @@
     const res = await fetch(setup ? '/api/auth/setup' : '/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'sentry-six-manager' },
-      body: JSON.stringify({ username: f.get('username'), password: f.get('password'), ...(setup ? { code: f.get('code') } : {}) })
+      body: JSON.stringify({ username: f.get('username'), password: f.get('password'), ...(setup ? { code: f.get('code'), ...optIn() } : {}) })
     }).catch(() => null);
     $('submit').disabled = false;
     if (res && res.ok) return location.replace(safeNext);

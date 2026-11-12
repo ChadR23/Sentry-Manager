@@ -53,7 +53,9 @@ docker logs sentry-six-manager
 ```
 
 Open `https://<server>:9000`, continue past the one-time certificate
-warning, and create your account with the **setup code** from the log. Then
+warning, and create your account with the **setup code** from the log (the
+same page has an unticked *Share diagnostics with the developers* box: leave
+it off, or tick it to send crash reports and an hourly heartbeat). Then
 **Settings → Add vehicle**: an SMB share, or a folder you mount into the
 container (see [Vehicles and SMB shares](docs/vehicles-and-shares.md)).
 

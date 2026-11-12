@@ -4,7 +4,9 @@
 
 Sentry Six Manager can send feedback and diagnostics to its developers.
 **It is opt-in only**: nothing is sent unless an admin turns on *Share
-diagnostics with the developers* (Settings → Help & feedback) or presses
+diagnostics with the developers* (Settings → Help & feedback, or the same
+box on the first-start page, unticked by default: `POST /api/auth/setup`
+takes an optional `reports: { share, anonymous }`, both booleans) or presses
 Send for one feedback message or one support report. Reports go only to the
 developers' receiver, never to a third party. The receiver is the owner's
 private service and is not part of this repository; this page is the wire

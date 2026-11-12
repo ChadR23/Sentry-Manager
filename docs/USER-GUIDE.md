@@ -264,6 +264,10 @@ On Windows, open the app at `https://localhost:9000` on the PC itself.
    Write the user name and password down: there is no "forgot password"
    (the only way back in is [Start over](#start-over-completely), which
    resets the account and settings).
+   Below the setup code, **Share diagnostics with the developers** (and
+   **Send anonymously**) are unticked: leave them off, or tick them to send
+   crash reports, a daily summary and an hourly heartbeat. You can change
+   this any time in Settings → Help & feedback.
 
    ![The first-start page](images/guide/first-start.png)
 
