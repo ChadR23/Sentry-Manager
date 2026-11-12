@@ -96,6 +96,7 @@ in *System → Shell*, then stop and start the app ([TrueNAS](docs/truenas.md#up
 | [Updates](docs/updates.md) | Updating, critical updates, how images are built |
 | [Automatic updates](docs/auto-updates.md) | Watchtower, to install new versions for you |
 | [Security](docs/security.md) | HTTPS and the certificate, sign-in, what runs as root |
+| [Privacy](docs/privacy.md) | Everything that leaves your server: what goes out by itself, and what the developers get only if you opt in |
 | [Your own interface](docs/interface-packs.md) | The four interface packs, and making your own |
 | [Settings](docs/settings.md) | Every `.env` setting |
 | [Development](docs/development.md) | Building and testing |
