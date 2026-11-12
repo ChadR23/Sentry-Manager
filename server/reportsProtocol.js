@@ -307,6 +307,9 @@ function exactKeys(o, keys, where, errs) {
   return true;
 }
 const HL = HEARTBEAT_LIMITS;
+// the kind of host the Manager runs on (server/hostInfo.js works it out):
+// one of these words or null, never the kernel string or a host name
+const HEARTBEAT_HOST_OS = ['truenas', 'unraid', 'synology', 'qnap', 'wsl', 'macos', 'raspberry-pi', 'ubuntu', 'debian', 'fedora', 'linux'];
 const HEARTBEAT_OPTIONAL = {
   // the length of all the footage, in seconds (the Dash's "footage hours" x 3600)
   footageSeconds: (x, errs) => { if (!intIn(x, HL.footageSeconds)) errs.push('heartbeat.footageSeconds'); },
@@ -336,7 +339,13 @@ const HEARTBEAT_OPTIONAL = {
     if ('fps' in x && !nullOr(x.fps, (n) => typeof n === 'number' && Number.isFinite(n) && n >= 0 && n <= HL.fps && Math.abs(n * 10 - Math.round(n * 10)) < 1e-6)) errs.push('heartbeat.convert.fps');
     for (const k of ['encoder', 'device', 'api', 'codec']) if (k in x && !plainOrNull(x[k], HL[k])) errs.push(`heartbeat.convert.${k}`);
   },
-  crashes24h: (x, errs) => { if (!intIn(x, HL.crashes)) errs.push('heartbeat.crashes24h'); }
+  crashes24h: (x, errs) => { if (!intIn(x, HL.crashes)) errs.push('heartbeat.crashes24h'); },
+  // { os: one of HEARTBEAT_HOST_OS or null, docker: in a container }
+  host: (x, errs) => {
+    if (!exactKeys(x, ['os', 'docker'], 'heartbeat.host', errs)) return;
+    if ('os' in x && !(x.os === null || HEARTBEAT_HOST_OS.includes(x.os))) errs.push('heartbeat.host.os');
+    if ('docker' in x && typeof x.docker !== 'boolean') errs.push('heartbeat.host.docker');
+  }
 };
 /** Errors in a heartbeat block (pushed onto errs). */
 function checkHeartbeat(h, errs) {
@@ -484,7 +493,7 @@ function normalizeRef(text) {
 }
 
 module.exports = {
-  V, INFO, MAX_BODY, MAX_PLAIN, MAX_SKEW_MS, KINDS, ANON, LIMITS, DIAG_KEYS, HEARTBEAT_MAX_BYTES, HEARTBEAT_FIELDS, HEARTBEAT_FEATURES, HEARTBEAT_OPTIONAL, HEARTBEAT_LIMITS, isPlain, healthOverall,
+  V, INFO, MAX_BODY, MAX_PLAIN, MAX_SKEW_MS, KINDS, ANON, LIMITS, DIAG_KEYS, HEARTBEAT_MAX_BYTES, HEARTBEAT_FIELDS, HEARTBEAT_FEATURES, HEARTBEAT_OPTIONAL, HEARTBEAT_LIMITS, HEARTBEAT_HOST_OS, isPlain, healthOverall,
   b64, unb64, sha256, kidOf, publicKeyFromRaw, rawPublic, rawPrivate, parseKeyLine, normalizeKey, keyLine,
   seal, open, envelopeHash, signedBytes, leadingZeroBits, powOk, solvePow, sign, validateBody, verifySig, validatePayload,
   signMoved, verifyMoved, refCode, normalizeRef

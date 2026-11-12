@@ -673,7 +673,7 @@ function normalizeHeartbeat(h = {}) {
     ...optionalHeartbeat(h)
   };
 }
-/** The optional fields (all of them; platform and arch only when known). */
+/** The optional fields (all of them; platform, arch and host only when known). */
 function optionalHeartbeat(h) {
   const out = { footageSeconds: countIn(h.footageSeconds, HL.footageSeconds) };
   const platform = plainText(h.platform, HL.platform);
@@ -691,6 +691,8 @@ function optionalHeartbeat(h) {
     encoder: plainText(c.encoder, HL.encoder), device: plainText(c.device, HL.device), api: plainText(c.api, HL.api), codec: plainText(c.codec, HL.codec)
   };
   out.crashes24h = countIn(h.crashes24h, HL.crashes);
+  // the kind of host (server/hostInfo.js): a word from the list only, when told
+  if (h.host && typeof h.host === 'object') out.host = { os: P.HEARTBEAT_HOST_OS.includes(h.host.os) ? h.host.os : null, docker: h.host.docker === true };
   return out;
 }
 

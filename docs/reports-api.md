@@ -144,7 +144,7 @@ end; control, format, private-use and non-ASCII characters are refused (the
 Manager drops them, turns letters with accents into plain ones and runs of
 spaces into one, and trims, before it checks). So a character is one byte as
 JSON, and the worst case of every field at its limit (the common fields at
-theirs) is 3,768 bytes: under the 4 KB. The list and length limits below are
+theirs) is 3,812 bytes: under the 4 KB. The list and length limits below are
 lower than first planned for that reason (`HEARTBEAT_LIMITS` in the protocol
 module).
 
@@ -182,6 +182,9 @@ module).
 | `convert.api` | text, 1 to 12, or null | `'nvenc'`, `'vaapi'`, `'qsv'`, `'amf'`, `'videotoolbox'` or `'cpu'` |
 | `convert.codec` | text, 1 to 10, or null | `'h265'` or `'av1'` (`'h264'` if ever) |
 | `crashes24h` | *optional*; integer, 0 to 10,000 | Crashes and unhandled errors the app noted in the last 24 hours (its crash notes keep the latest 20) |
+| `host` | *optional*; exactly `{ os, docker }` | The kind of host the Manager runs on (`server/hostInfo.js`, worked out once at start). Only the word: never the kernel string, the host name or a version |
+| `host.os` | `'truenas'` \| `'unraid'` \| `'synology'` \| `'qnap'` \| `'wsl'` \| `'macos'` \| `'raspberry-pi'` \| `'ubuntu'` \| `'debian'` \| `'fedora'` \| `'linux'`, or null (`HEARTBEAT_HOST_OS`; any other value is `SCHEMA`) | In a container, from the host's kernel string (`os.release()`, else `/proc/version`): `truenas` (`-production+truenas`), `unraid` (`-Unraid`), `wsl` (`microsoft-standard-WSL2`: Docker Desktop on Windows, WSL2), `linuxkit` is Docker Desktop's own VM and a guess: `macos` on arm64 (Apple Silicon), else `wsl` (Windows with the Hyper-V backend; an Intel Mac reads as `wsl` too), `raspberry-pi` (a Raspberry Pi device-tree model, or `rpi`/`raspi` in the kernel), `synology` (`synology` in the kernel or `/proc/version`, or DSM's `/proc/sys/kernel/syno_hw_version`), `qnap`, else `linux`. Outside a container, the same kernel and device-tree signs first (TrueNAS SCALE and Raspberry Pi OS call themselves Debian), then `/etc/os-release` `ID`, else the first known `ID_LIKE` (`raspbian` is `raspberry-pi`; Linux Mint is `ubuntu`, Rocky is `fedora`), else `linux`; `macos` on macOS; null on any other platform |
+| `host.docker` | boolean | Runs in a container: `/.dockerenv` exists, or `/proc/1/cgroup` or `/proc/self/mountinfo` names docker, containerd, kubepods or libpod |
 
 ```json
 { "kind": "heartbeat", "sentAt": "2026-11-11T21:04:07.112Z", "install": "ANON", "anonymous": true,
@@ -194,7 +197,7 @@ module).
     "gpus": ["NVIDIA GeForce RTX 4070"], "cars": [{ "model": "Model Y", "firmware": null }, { "model": null, "firmware": null }],
     "clips24h": { "sentry": 40, "dashcam": 1200 },
     "convert": { "fps": 412.3, "encoder": "hevc_nvenc", "device": "NVIDIA GeForce RTX 4070", "api": "nvenc", "codec": "h265" },
-    "crashes24h": 0 } }
+    "crashes24h": 0, "host": { "os": "truenas", "docker": true } } }
 ```
 
 Nothing in a heartbeat names anything (no names, paths, hosts, places or

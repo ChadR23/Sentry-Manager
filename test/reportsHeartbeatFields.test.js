@@ -29,7 +29,8 @@ const OLD = {
 const NEW = {
   footageSeconds: 912345, platform: 'linux', arch: 'x64', cpu: 'AMD Ryzen 7 5800X 8-Core Processor', gpus: ['NVIDIA GeForce RTX 4070', 'AMD Radeon Graphics (renoir)'],
   cars: [{ model: 'Model Y', firmware: '2025.14.3.1' }, { model: null, firmware: null }], clips24h: { sentry: 40, dashcam: 1200 },
-  convert: { fps: 412.3, encoder: 'hevc_nvenc', device: 'NVIDIA GeForce RTX 4070', api: 'nvenc', codec: 'h265' }, crashes24h: 2
+  convert: { fps: 412.3, encoder: 'hevc_nvenc', device: 'NVIDIA GeForce RTX 4070', api: 'nvenc', codec: 'h265' }, crashes24h: 2,
+  host: { os: 'truenas', docker: true }
 };
 const payload = (heartbeat) => ({
   kind: 'heartbeat', sentAt: '2026-11-11T21:04:07.112Z', install: 'ANON', anonymous: true,
@@ -46,7 +47,10 @@ test('one with every new field is right; any subset of them is right too', () =>
   assert.deepEqual(errsOf({ ...clone(OLD), ...clone(NEW) }), []);
   for (const k of Object.keys(NEW)) assert.deepEqual(errsOf({ ...clone(OLD), [k]: clone(NEW[k]) }), [], k);
   // the nullable ones as null, and empty lists
-  assert.deepEqual(errsOf({ ...clone(OLD), cpu: null, gpus: [], cars: [], convert: { fps: null, encoder: null, device: null, api: null, codec: null } }), []);
+  assert.deepEqual(errsOf({ ...clone(OLD), cpu: null, gpus: [], cars: [], convert: { fps: null, encoder: null, device: null, api: null, codec: null }, host: { os: null, docker: false } }), []);
+  // every host word is right, in a container or not
+  for (const os of P.HEARTBEAT_HOST_OS) for (const docker of [true, false]) assert.deepEqual(errsOf({ ...clone(OLD), host: { os, docker } }), [], os);
+  assert.deepEqual(P.HEARTBEAT_HOST_OS, ['truenas', 'unraid', 'synology', 'qnap', 'wsl', 'macos', 'raspberry-pi', 'ubuntu', 'debian', 'fedora', 'linux']);
   assert.deepEqual(Object.keys(P.HEARTBEAT_OPTIONAL).sort(), Object.keys(NEW).sort());
 });
 
@@ -64,7 +68,11 @@ const BAD = {
     type: [[], 'nvenc', null, { ...NEW.convert, fps: '400' }, { ...NEW.convert, encoder: 5 }, { ...NEW.convert, device: [] }, { ...NEW.convert, api: true }, { ...NEW.convert, codec: {} }],
     range: [{ ...NEW.convert, fps: -1 }, { ...NEW.convert, fps: 100_000.1 }, { ...NEW.convert, fps: 1.23 }, { ...NEW.convert, fps: NaN }, { ...NEW.convert, encoder: s(L.encoder + 1) }, { ...NEW.convert, device: s(L.device + 1) }, { ...NEW.convert, api: s(L.api + 1) }, { ...NEW.convert, codec: s(L.codec + 1) }]
   },
-  crashes24h: { type: ['0', null, false], range: [-1, 10_001, 0.5] }
+  crashes24h: { type: ['0', null, false], range: [-1, 10_001, 0.5] },
+  host: {
+    type: [[], 'truenas', null, true, { os: 1, docker: true }, { os: ['wsl'], docker: false }, { os: 'wsl', docker: 'true' }, { os: 'wsl', docker: null }, { os: 'wsl', docker: 1 }],
+    range: [{ os: 'windows', docker: false }, { os: 'TrueNAS', docker: true }, { os: '', docker: false }, { os: '6.6.44-production+truenas', docker: true }, { os: 'linux ', docker: false }]
+  }
 };
 
 for (const [k, { type, range }] of Object.entries(BAD)) {
@@ -87,6 +95,10 @@ test('extra keys are refused at every level', () => {
   // and a missing key in an object with exact keys
   assert.match(errsOf({ ...clone(OLD), ...clone(NEW), cars: [{ model: 'Model Y' }] }).join(), /heartbeat\.cars\[0\]\.firmware missing/);
   assert.match(errsOf({ ...clone(OLD), ...clone(NEW), clips24h: { sentry: 1 } }).join(), /heartbeat\.clips24h\.dashcam missing/);
+  assert.match(errsOf({ ...clone(OLD), ...clone(NEW), host: { os: 'wsl', docker: true, kernel: '5.15.153.1-microsoft-standard-WSL2' } }).join(), /unknown field heartbeat\.host\.kernel/);
+  assert.match(errsOf({ ...clone(OLD), ...clone(NEW), host: { os: 'wsl', docker: true, hostname: 'tower' } }).join(), /unknown field heartbeat\.host\.hostname/);
+  assert.match(errsOf({ ...clone(OLD), ...clone(NEW), host: { os: 'wsl' } }).join(), /heartbeat\.host\.docker missing/);
+  assert.match(errsOf({ ...clone(OLD), ...clone(NEW), host: { docker: true } }).join(), /heartbeat\.host\.os missing/);
   const { codec: _c, ...noCodec } = NEW.convert;
   assert.match(errsOf({ ...clone(OLD), ...clone(NEW), convert: noCodec }).join(), /heartbeat\.convert\.codec missing/);
 });
@@ -120,13 +132,16 @@ test('the worst case of every field at its limit (the common fields at theirs to
       features: { can: false, sentryUsbPaired: false, gpu: false },
       footageSeconds: 1e12, platform: s(L.platform), arch: s(L.arch), cpu: s(L.cpu), gpus: Array(L.gpus).fill(s(L.gpu)),
       cars: Array(L.cars).fill({ model: s(L.model), firmware: s(L.firmware) }), clips24h: { sentry: 1e6, dashcam: 1e6 },
-      convert: { fps: 99999.9, encoder: s(L.encoder), device: s(L.device), api: s(L.api), codec: s(L.codec) }, crashes24h: 10_000
+      convert: { fps: 99999.9, encoder: s(L.encoder), device: s(L.device), api: s(L.api), codec: s(L.codec) }, crashes24h: 10_000,
+      // the longest host word
+      host: { os: [...P.HEARTBEAT_HOST_OS].sort((a, b) => b.length - a.length)[0], docker: false }
     }
   };
   assert.equal(p.sentAt.length, P.LIMITS.sentAt);
   assert.deepEqual(P.validatePayload(p), []);
   const size = Buffer.byteLength(JSON.stringify(p));
   assert.ok(size <= P.HEARTBEAT_MAX_BYTES, `${size} bytes`);
+  assert.equal(size, 3812, 'the worst case docs/reports-api.md gives');
   // one more of anything that can grow is refused, not sent larger
   assert.ok(P.validatePayload({ ...p, heartbeat: { ...p.heartbeat, cars: [...p.heartbeat.cars, { model: null, firmware: null }] } }).length > 0);
 });
@@ -135,7 +150,8 @@ test('normalizeHeartbeat fills in every optional field, plain and within the lim
   const h = normalizeHeartbeat({
     ...OLD, footageSeconds: 12.6, platform: 'linux', arch: 'arm64', cpu: ' Cortex-A76 ', gpus: ['A', '', null, 'B', 'C', 'D', 'E'],
     cars: [{ model: 'Y', firmware: '2025.14.3.1', vin: '7SAYGDEE1PA000001', name: 'Daily Driver' }, { model: 'Daily Driver', firmware: '/footage/car' }, { model: 'cybertruck' }],
-    clips24h: { sentry: 3.4, dashcam: -2 }, convert: { fps: 1e9, encoder: 'libx265', device: 'AMD Ryzen', api: 'cpu', codec: 'h265', node: 'Garage PC' }, crashes24h: 99_999, hostname: 'tower'
+    clips24h: { sentry: 3.4, dashcam: -2 }, convert: { fps: 1e9, encoder: 'libx265', device: 'AMD Ryzen', api: 'cpu', codec: 'h265', node: 'Garage PC' }, crashes24h: 99_999, hostname: 'tower',
+    host: { os: 'unraid', docker: 1, kernel: '6.1.106-Unraid' }
   });
   assert.deepEqual(errsOf(h), []);
   assert.equal(h.footageSeconds, 13);
@@ -146,6 +162,8 @@ test('normalizeHeartbeat fills in every optional field, plain and within the lim
   assert.deepEqual(h.convert, { fps: 100_000, encoder: 'libx265', device: 'AMD Ryzen', api: 'cpu', codec: 'h265' });
   assert.equal(h.crashes24h, L.crashes);
   assert.equal(h.hostname, undefined);
+  assert.deepEqual(h.host, { os: 'unraid', docker: false }, 'exactly os and docker; docker only when true');
+  assert.deepEqual(normalizeHeartbeat({ host: { os: '6.6.44-production+truenas', docker: true } }).host, { os: null, docker: true }, 'a word from the list only');
   // more cars than the limit: the first ones
   assert.equal(normalizeHeartbeat({ cars: Array(100).fill({ model: '3' }) }).cars.length, L.cars);
   // from nothing: still right (zeros, nulls, empty lists; no platform or arch it was not told)
@@ -153,6 +171,7 @@ test('normalizeHeartbeat fills in every optional field, plain and within the lim
   assert.deepEqual(errsOf(empty), []);
   assert.deepEqual(empty.convert, { fps: null, encoder: null, device: null, api: null, codec: null });
   assert.equal('platform' in empty, false);
+  assert.equal('host' in empty, false);
   assert.equal(empty.crashes24h, 0);
 });
 

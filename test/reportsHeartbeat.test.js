@@ -25,7 +25,7 @@ const NUMBERS = {
   // the optional fields
   footageSeconds: 912345, platform: 'linux', arch: 'x64', cpu: '  AMD Ryzen 7 5800X 8-Core Processor   ', gpus: ['NVIDIA GeForce RTX 4070'],
   cars: [{ model: 'Y', firmware: null, name: 'Daily Driver', vin: '7SAYGDEE1PA000001' }], clips24h: { sentry: 40, dashcam: 1200 },
-  convert: { fps: 412.34, encoder: 'hevc_nvenc', device: 'NVIDIA GeForce RTX 4070', api: 'nvenc', codec: 'h265' },
+  convert: { fps: 412.34, encoder: 'hevc_nvenc', device: 'NVIDIA GeForce RTX 4070', api: 'nvenc', codec: 'h265' }, host: { os: 'wsl', docker: true },
   // whatever else the caller had is left out
   hostname: 'tower', vehicleNames: ['Daily Driver']
 };

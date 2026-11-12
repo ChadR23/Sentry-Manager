@@ -16,6 +16,7 @@ const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 const { startReceiver } = require('./fixtures/reportsReceiver');
+const { hostInfo } = require('../server/hostInfo');
 
 const REPO = path.join(__dirname, '..');
 const SERVER = path.join(REPO, 'server', 'index.js');
@@ -138,7 +139,7 @@ test('with a receiver: preview, password, send; watch-only refused; audit-logged
     assert.ok(firstBeat, 'the first heartbeat went at once');
     const fb = rec.openReport(firstBeat);
     assert.equal(fb.install, 'ANON');
-    for (const k of ['footageSeconds', 'platform', 'arch', 'cpu', 'gpus', 'cars', 'clips24h', 'convert', 'crashes24h']) assert.ok(k in fb.heartbeat, k);
+    for (const k of ['footageSeconds', 'platform', 'arch', 'cpu', 'gpus', 'cars', 'clips24h', 'convert', 'crashes24h', 'host']) assert.ok(k in fb.heartbeat, k);
     assert.equal((await admin('PUT', '/api/reports/settings', { share: 'yes' })).status, 400);
     // the heartbeat the real server would send (a sample: nothing to send by hand); anonymous here
     // (once the footage is scanned)
@@ -166,6 +167,9 @@ test('with a receiver: preview, password, send; watch-only refused; audit-logged
     assert.deepEqual(h.cars, [{ model: 'Model Y', firmware: null }]);
     assert.deepEqual(h.convert, { fps: null, encoder: null, device: null, api: null, codec: null }, 'nothing converted yet');
     assert.equal(h.crashes24h, 0);
+    // the kind of host, as server/hostInfo.js works it out here (a word and yes/no only)
+    assert.deepEqual(h.host, hostInfo());
+    assert.deepEqual(Object.keys(h.host), ['os', 'docker']);
     for (const id of [os.hostname(), 'Daily Driver', dir, 'admin']) assert.doesNotMatch(JSON.stringify(hb.payload), word(id), `${id} is not in a heartbeat`);
     const st2 = (await admin('GET', '/api/reports')).data;
     assert.ok(st2.nextHeartbeatAt > Date.now(), 'the first heartbeat is scheduled once sharing is on');

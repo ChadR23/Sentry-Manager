@@ -64,6 +64,7 @@ const { createConverterHost } = require('./converterHost');
 const { createStats } = require('./stats');
 const { encoderBlock, jobProgress, gpuFor, RUNNING: CONVERTER_RUNNING } = require('./encoderStats');
 const { createConvertStats } = require('./convertStats');
+const { hostInfo } = require('./hostInfo');
 const { createSavings } = require('./savings');
 const { parsePowerSettings, priceAt, rateNameAt, isCheapest, PriceError } = require('./powerPrice');
 const { createConverterBridge } = require('./converterBridge');
@@ -1512,6 +1513,8 @@ async function main() {
     return {
       footageSeconds: sum((v) => inventory.totals(v.id)?.minutes) * 60,
       platform: process.platform, arch: process.arch, cpu: cpuModel(),
+      // the kind of host (TrueNAS, Unraid, WSL...) and whether in a container: a word only
+      host: hostInfo(),
       // the GPUs this container can use: the set the Health check counts
       gpus: usableGpus(gpu).map((g) => g.name),
       cars, clips24h,
