@@ -41,12 +41,6 @@ function rules(body) {
       key: `disk-temp:${d.name}`, level: 'warn', value: d.tempC, raise: limit, clear: limit - 5, above: true,
       message: () => `${DISK_KIND[d.kind] || 'Disk'} ${d.name} at ${round(d.tempC, 0)} °C`
     });
-    // the disk's own failed reads or writes in the last 10 minutes (only those that came while it
-    // moved data, see disks.js), five or more; clears once 10 minutes pass without
-    out.push({
-      key: `disk-errors:${d.name}`, level: 'warn', value: d.ioErrorsRecent ?? null, raise: 5, clear: 1, above: true,
-      message: () => `${DISK_KIND[d.kind] || 'Disk'} ${d.name}${d.model ? ` (${d.model})` : ''}: ${d.ioErrorsRecent} reads or writes failed in the last 10 minutes. This is the kernel's error count, not SMART: check SMART on the NAS, and if it is clean, the disk's cable, power and controller`
-    });
   }
   for (const f of body.filesystems || []) {
     // a vehicle's share already has its own notifications for full and offline
