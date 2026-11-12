@@ -228,7 +228,7 @@ export function createSentryUsbPage(el, { h24 = () => false } = {}) {
     if (!list.length) {
       root.replaceChildren(h('section', {},
         h('h2', {}, 'No Sentry USB found yet'),
-        h('p', {}, 'Nothing to pair: Sentry USB shows here on its own once it is home and has written its info file to a car\'s share (Sentry USB v3.28.10-test.32 or later).'),
+        h('p', {}, 'Nothing to pair: Sentry USB shows here on its own once it is home and has written its info file to a car\'s share (Sentry USB v3.28.10-test.35 or later).'),
         h('p', { class: 'sul-muted' }, 'It writes .sentryusb/device-status.json in the share it archives to, next to its archive status. Its own settings, updates and logs stay on its own web page.')));
       return;
     }

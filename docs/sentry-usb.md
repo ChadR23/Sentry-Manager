@@ -47,11 +47,16 @@ next to `archive-status.json`), replaced atomically (written to
 - every 5 minutes while the share is reachable, and
 - at most once a minute when a car reading changes while it is reachable.
 
+With rsync or rclone archiving nothing stays mounted, so the Pi sends the file
+only at the start and the end of each archive cycle (rsync uses its own
+temporary name instead of `device-status.json.tmp`). Sentry USB
+`v3.28.10-test.35` or later writes it.
+
 ```json
 {
   "schema": 1,
   "written_unix": 1762800000,
-  "version": "v3.28.10-test.32",
+  "version": "v3.28.10-test.35",
   "storage": { "total_bytes": 256060514304, "used_bytes": 98100000000, "free_bytes": 157960514304 },
   "drives": [
     { "name": "cam", "size_bytes": 64424509440 },
