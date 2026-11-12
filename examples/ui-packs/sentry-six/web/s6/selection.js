@@ -1,0 +1,1 @@
+export function createSelection(){const selected=new Set();return{add:ids=>ids.forEach(id=>selected.add(id)),remove:ids=>ids.forEach(id=>selected.delete(id)),has:id=>selected.has(id),count:()=>selected.size,clear:()=>selected.clear(),ids:()=>[...selected],dayState:ids=>{const n=ids.filter(id=>selected.has(id)).length;return n===0?'none':n===ids.length?'all':'some';}};}
