@@ -166,6 +166,7 @@ export default {
     });
     // pop out, resume, zoom a still, frame by frame on phones (web/viewerExtras.js)
     const extras = attachViewerExtras({
+      carData: true, // the car-data bar: Horizon is the only interface with it
       stage: $('#vw-stage'), videos: () => active(), main: () => master(), buttons: $('#vw-export').parentElement, step,
       where: () => { const c = st.clips[st.i]; const m = master(); return c && m ? { vehicle: v.id, day: c.key.slice(0, 10), clip: c.key, second: m.currentTime } : null; },
       resumeTo: (pos) => go(`#/viewer?day=${encodeURIComponent(pos.day)}&at=${encodeURIComponent(`${pos.clip}~${pos.second}`)}&autoplay=0`),

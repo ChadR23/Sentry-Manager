@@ -28,10 +28,10 @@ token, asks for the password and shows:
 
 The Viewer's car-data bar (the stat blocks under the cameras, the *Every
 stat* List, with Move, Customize and Hide; `web/statDash.js`) is part of the
-CAN Bridge: **off by default**, in every interface (the built-in one and the
-four packs). While off it is not made at all: no bar, no List, no *Show car
-data* button, no room kept for it. The interfaces' own telemetry panels and
-on-video overlays stay as they are.
+CAN Bridge, **only in the Horizon interface**, and **off by default** there.
+Sentry Six, Aurora, Daylight and Flux never show it (each keeps its own
+telemetry panel and on-video overlay). While off it is not made at all: no
+bar, no List, no *Show car data* button, no room kept for it.
 
 An admin turns it on with the **Car data in the Viewer** switch in the Nerd
 settings (one click, no password). It is one setting for the whole server

@@ -449,12 +449,12 @@ export function openNerdPanel() {
       }).join('')}` : ''}`;
   }
 
-  // "Car data in the Viewer": the stat blocks and Every stat List under the cameras, in every interface (off by default)
+  // "Car data in the Viewer": the stat blocks and Every stat List under the cameras, in the Horizon interface only (off by default)
   function carDataHtml() {
     const on = st.viewerCarData?.enabled === true;
     return `<h3>Car data in the Viewer</h3>
       <label class="nd-lab nd-check"><input type="checkbox" data-cardata${on ? ' checked' : ''}> Car data in the Viewer</label>
-      <p class="nd-muted">Shows the CAN stats bar and the Every stat list under the cameras (every interface, everyone on this server).</p>`;
+      <p class="nd-muted">Shows the CAN stats bar and the Every stat list under the cameras, in the Horizon interface only (everyone on this server who uses Horizon).</p>`;
   }
 
   // "Delete CAN logs with their footage" (canPrune.js), and what its last look at each car did

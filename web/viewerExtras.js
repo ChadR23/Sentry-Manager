@@ -140,7 +140,7 @@ export function followCarData(attach, { load = () => import('/web/statDash.js') 
   return () => { gone = true; off(); dash?.destroy(); dash = null; };
 }
 
-export function attachViewerExtras({ stage, videos: listVideos = () => [], main: mainVideo = () => null, buttons = null, step = null, where: whereNow = null, resumeTo = null, offerResume = true, stepsFixed = false } = {}) {
+export function attachViewerExtras({ stage, videos: listVideos = () => [], main: mainVideo = () => null, buttons = null, step = null, where: whereNow = null, resumeTo = null, offerResume = true, stepsFixed = false, carData = false } = {}) {
   addCss();
   // a page may attach this before everything it asks about exists yet
   const videos = () => { try { return (listVideos() || []).filter(Boolean); } catch { return []; } };
@@ -376,7 +376,8 @@ export function attachViewerExtras({ stage, videos: listVideos = () => [], main:
   // "Car data in the Viewer" is on (the Nerd settings; off by default): while off
   // nothing of it is made, not even its Show button. Turned on or off, it comes or
   // goes here at once (the interface's live updates), else at the next Viewer.
-  cleanups.push(followCarData(({ attachStatDash, primeBoards }, d) => {
+  // Only in an interface that asks for it (carData: true): Horizon alone.
+  if (carData) cleanups.push(followCarData(({ attachStatDash, primeBoards }, d) => {
     primeBoards(d); // (its dashboards came with the answer: not asked for again)
     // (the row of buttons: the playback controls the floating boxes keep clear of)
     return attachStatDash({ stage, videos, main, over: stepsFixed, controls: buttons });

@@ -264,7 +264,8 @@ test('the Viewer: on from the start, the bar is made with the answer; an answer 
 test('every interface\'s Viewer makes the car data only through followCarData; each shell passes its live updates on', () => {
   const x = read('web/viewerExtras.js');
   // the one place the bar is made: inside followCarData, never at the module's import
-  assert.match(x, /cleanups\.push\(followCarData\(\(\{ attachStatDash, primeBoards \}, d\) => \{\s*primeBoards\(d\);[\s\S]*?return attachStatDash\(/);
+  assert.match(x, /if \(carData\) cleanups\.push\(followCarData\(\(\{ attachStatDash, primeBoards \}, d\) => \{\s*primeBoards\(d\);[\s\S]*?return attachStatDash\(/, 'only when the interface asks for it');
+  assert.match(x, /carData = false \} = \{\}\) \{/, 'off unless asked');
   assert.equal((x.match(/attachStatDash\(/g) || []).length, 1, 'statDash attached in one place');
   assert.equal((x.match(/import\('\/web\/statDash\.js'\)/g) || []).length, 1, 'and loaded in one place (followCarData\'s load)');
   assert.match(x, /if \(!carDataOn\(d\)\) \{ dash\?\.destroy\(\); dash = null; return null; \}\s*if \(dash\) return null;\s*return load\(\)/, 'loaded only when on');
@@ -280,6 +281,8 @@ test('every interface\'s Viewer makes the car data only through followCarData; e
   for (const [name, file] of Object.entries(viewers)) {
     const src = read(file);
     assert.match(src, /attachViewerExtras\(\{/, `${name}: the shared Viewer parts`);
+    // the car-data bar: Horizon alone asks for it (Sentry Six uses the built-in Viewer)
+    assert.equal(/carData: true/.test(src), name === 'horizon', `${name}: car data ${name === 'horizon' ? 'on' : 'off'}`);
     assert.equal(/import\(['"]\/web\/statDash\.js['"]\)|from ['"]\/web\/statDash\.js['"]|attachStatDash/.test(src), false, `${name}: never the bar on its own`);
   }
   // nothing else in any interface makes it
