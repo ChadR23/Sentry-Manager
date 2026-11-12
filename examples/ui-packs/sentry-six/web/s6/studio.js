@@ -1,0 +1,8 @@
+import {esc} from './core.js';
+const frames={};
+function fit(){const wrap=frames.viewer,frame=wrap?.querySelector('iframe');if(!frame||wrap.hidden)return;const width=wrap.clientWidth,s=width<900?width/900:1;Object.assign(frame.style,{width:s<1?'900px':'100%',height:s<1?`${wrap.clientHeight/s}px`:'100%',transform:s<1?`scale(${s})`:'',transformOrigin:'0 0'});}
+window.addEventListener('resize',fit);
+export function hideStudio(){for(const wrap of Object.values(frames)){if(!wrap.hidden)wrap.querySelector('iframe').contentWindow?.postMessage({type:'pause'},location.origin);wrap.hidden=true;}}
+export function showStudio(kind,vehicle,extra={}){hideStudio();const q=new URLSearchParams({embed:kind,...(vehicle?{root:vehicle.studioRoot||vehicle.root,vehicle:vehicle.id}:{}),...extra});const url=`/studio/${kind==='encoder'?'encoder':'index'}.html?${q}`;
+ if(!frames[kind]||frames[kind].dataset.src!==url){frames[kind]?.remove();const wrap=document.createElement('div');wrap.className='frame-wrap';wrap.dataset.src=url;wrap.innerHTML=`<iframe title="Sentry Studio ${kind}" src="${esc(url)}" allow="fullscreen; clipboard-write"></iframe>`;document.getElementById('frames').append(wrap);frames[kind]=wrap;}
+ frames[kind].hidden=false;frames[kind].querySelector('iframe').contentWindow?.postMessage({type:'shown'},location.origin);fit();}

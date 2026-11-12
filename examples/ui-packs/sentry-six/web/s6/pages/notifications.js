@@ -1,0 +1,2 @@
+import {api,esc,sheet,act} from '../core.js';
+export async function notifications(anchor){const data=await api('/api/notifications?open=1');const el=document.createElement('section');el.innerHTML='<h2>Notifications</h2>'+(data.notifications||[]).map(n=>`<article class="card"><h3>${esc(n.title)}</h3><p>${esc(n.message||n.text)}</p></article>`).join('');if(!(data.notifications||[]).length)el.innerHTML+='<p>Nothing needs you right now.</p>';return sheet(el,{anchor});}
