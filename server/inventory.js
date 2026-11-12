@@ -310,9 +310,31 @@ class Inventory {
       lastDay: days[days.length - 1] || null,
       files: e.files.size,
       bytes: e.recordings.reduce((n, r) => n + r.bytes, 0),
+      // the length of all the footage in minutes (one a clip minute: the days' minutes, the Dash's "footage hours" x 60)
+      minutes: e.recordings.reduce((n, r) => n + (r.minutes || 0), 0),
       byCategory: by,
       scannedAt: e.scannedAt
     };
+  }
+
+  /**
+   * The clips (one a camera file) that reached the share since `sinceMs`:
+   * { sentry (SentryClips), dashcam (everything else: RecentClips, SavedClips, ...) }.
+   * When a clip arrived is its birth time, else its ctime (the archive keeps
+   * the car's mtime), as arrivalChecksums.js reads it.
+   */
+  arrivedClips(vehicleId, sinceMs) {
+    const out = { sentry: 0, dashcam: 0 };
+    const e = this.state.get(vehicleId);
+    if (!e?.files) return out;
+    for (const f of e.files.values()) {
+      if (f.kind !== 'clip') continue;
+      const at = f.birthtimeMs > 0 ? f.birthtimeMs : f.ctimeMs || 0;
+      if (!(at >= sinceMs)) continue;
+      if (f.type === 'SentryClips') out.sentry++;
+      else out.dashcam++;
+    }
+    return out;
   }
 
   /** The days ("YYYY-MM-DD", oldest first) with any recording of a vehicle. */

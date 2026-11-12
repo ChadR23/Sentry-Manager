@@ -66,6 +66,10 @@ async function startServer(dir, env = {}) {
 async function setup() {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sm-reports-srv-'));
   await fsp.mkdir(path.join(dir, 'footage', 'TeslaCam', 'RecentClips'), { recursive: true });
+  // two minutes of recent clips (two cameras) and one Sentry event clip, all just arrived
+  for (const f of ['RecentClips/2026-11-10_10-00-00-front.mp4', 'RecentClips/2026-11-10_10-00-00-back.mp4', 'RecentClips/2026-11-10_10-01-00-front.mp4']) await fsp.writeFile(path.join(dir, 'footage', 'TeslaCam', f), 'x');
+  await fsp.mkdir(path.join(dir, 'footage', 'TeslaCam', 'SentryClips', '2026-11-10_12-00-00'), { recursive: true });
+  await fsp.writeFile(path.join(dir, 'footage', 'TeslaCam', 'SentryClips', '2026-11-10_12-00-00', '2026-11-10_11-59-00-front.mp4'), 'x');
   return dir;
 }
 
@@ -123,11 +127,27 @@ test('with a receiver: preview, password, send; watch-only refused; audit-logged
     assert.equal(sup.result, 'sent');
     assert.equal(rec.index[1].trust, 'anon');
 
+    // the car's model, set by hand (its VIN would tell it with CAN data)
+    const vid = (await admin('GET', '/api/vehicles')).data.vehicles[0].id;
+    assert.equal((await admin('PUT', `/api/vehicles/${vid}`, { car: { model: 'Y', generation: 'auto' } })).status, 200);
     // opt-in: off by default; turned on and off, audit-logged
     assert.equal((await admin('PUT', '/api/reports/settings', { share: true })).data.settings.share, true);
+    // turning it on sends the first heartbeat right away, new fields and all, and the receiver takes it
+    for (let i = 0; i < 400 && !rec.index.some((e) => e.kind === 'heartbeat'); i++) await new Promise((r) => setTimeout(r, 25));
+    const firstBeat = rec.index.find((e) => e.kind === 'heartbeat');
+    assert.ok(firstBeat, 'the first heartbeat went at once');
+    const fb = rec.openReport(firstBeat);
+    assert.equal(fb.install, 'ANON');
+    for (const k of ['footageSeconds', 'platform', 'arch', 'cpu', 'gpus', 'cars', 'clips24h', 'convert', 'crashes24h']) assert.ok(k in fb.heartbeat, k);
     assert.equal((await admin('PUT', '/api/reports/settings', { share: 'yes' })).status, 400);
     // the heartbeat the real server would send (a sample: nothing to send by hand); anonymous here
-    const hb = (await admin('POST', '/api/reports/preview', { kind: 'heartbeat' })).data;
+    // (once the footage is scanned)
+    let hb = null;
+    for (let i = 0; i < 100; i++) {
+      hb = (await admin('POST', '/api/reports/preview', { kind: 'heartbeat' })).data;
+      if (hb.payload?.heartbeat?.footageSeconds > 0) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
     assert.equal(hb.previewId, null);
     assert.equal(hb.payload.kind, 'heartbeat');
     assert.equal(hb.payload.install, 'ANON');
@@ -135,6 +155,17 @@ test('with a receiver: preview, password, send; watch-only refused; audit-logged
     assert.ok(hb.payload.heartbeat.uptimeSec >= 0);
     assert.ok(['ok', 'warn', 'problem'].includes(hb.payload.heartbeat.health.overall));
     assert.ok(Buffer.byteLength(JSON.stringify(hb.payload)) < 4096);
+    // the new fields, from the server's own sources (anonymous, and still there)
+    const h = hb.payload.heartbeat;
+    assert.equal(h.footageSeconds, 3 * 60, 'three clip minutes (as the Dash counts footage hours)');
+    assert.deepEqual(h.clips24h, { sentry: 1, dashcam: 3 });
+    assert.equal(h.platform, process.platform);
+    assert.equal(h.arch, process.arch);
+    assert.equal(h.cpu, os.cpus()[0]?.model?.trim().replace(/\s+/g, ' ') || null);
+    assert.ok(Array.isArray(h.gpus));
+    assert.deepEqual(h.cars, [{ model: 'Model Y', firmware: null }]);
+    assert.deepEqual(h.convert, { fps: null, encoder: null, device: null, api: null, codec: null }, 'nothing converted yet');
+    assert.equal(h.crashes24h, 0);
     for (const id of [os.hostname(), 'Daily Driver', dir, 'admin']) assert.doesNotMatch(JSON.stringify(hb.payload), word(id), `${id} is not in a heartbeat`);
     const st2 = (await admin('GET', '/api/reports')).data;
     assert.ok(st2.nextHeartbeatAt > Date.now(), 'the first heartbeat is scheduled once sharing is on');

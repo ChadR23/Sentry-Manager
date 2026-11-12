@@ -12,6 +12,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn: realSpawn } = require('child_process');
+const { usableGpus } = require('./gpu');
 
 const GB = 1024 ** 3;
 
@@ -127,11 +128,7 @@ function createHealth({
     add({ id: 'ffprobe', group: 'Video', label: 'ffprobe runs', status: fp.ok ? 'ok' : 'bad', detail: fp.ok ? '' : fp.error, hint: fp.ok ? '' : 'The image is damaged: pull it again.' });
     // detectGpus() gives { gpus, nvidia, hints }: the GPUs this container can
     // use are the passed-in /dev/dri ones (not virtual) and NVIDIA in the container
-    const found = await detectGpus().catch(() => null);
-    const gpus = Array.isArray(found) ? found : [
-      ...(found?.gpus || []).filter((g) => g && g.passedThrough && !g.virtual && g.vendor !== 'nvidia'),
-      ...(found?.nvidia || [])
-    ];
+    const gpus = usableGpus(await detectGpus().catch(() => null));
     const rt = runtime();
     if (!rt) {
       add({ id: 'encoder', group: 'Video', label: 'Converter', status: 'warn', detail: 'The converter has not started.', hint: 'See the logs below for why.' });

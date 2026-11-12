@@ -34,6 +34,7 @@ const path = require('path');
 const P = require('./reportsProtocol');
 const { reportsConfig, checkEndpoint } = require('./reportsConfig');
 const { cleanReport } = require('./reportsScrub');
+const { MODELS: CAR_MODELS } = require('./carModels');
 
 const OUTBOX_MAX = 20;
 const OUTBOX_BYTES = 50 * 1024 * 1024;
@@ -44,10 +45,11 @@ const MAX_BITS = 26; // a receiver asking for more is not followed (a stamp woul
 const MANUAL_PER_HOUR = 5;
 const DAY_MS = 86_400_000;
 const AUTO_KINDS = new Set(['crash', 'daily', 'heartbeat']);
-// the heartbeat: about 5 minutes after a start (or after sharing is turned
-// on), then every hour, each give or take a little so installs spread out
-const HEARTBEAT_FIRST_MS = 5 * 60_000;
-const HEARTBEAT_FIRST_JITTER_MS = 2 * 60_000;
+// the heartbeat: 10 to 60 seconds after a start (right away when sharing is
+// turned on), then every hour, each give or take a little so installs that
+// update at once spread out
+const HEARTBEAT_FIRST_MS = 35_000;
+const HEARTBEAT_FIRST_JITTER_MS = 25_000;
 const HEARTBEAT_EVERY_MS = 3600_000;
 const HEARTBEAT_JITTER_MS = 4 * 60_000;
 const defaultTimer = { set: (fn, ms) => setTimeout(fn, ms), clear: (t) => clearTimeout(t) };
@@ -385,8 +387,18 @@ function createReports({
     }
     if (crash) p.crash = crash;
     if (kind === 'heartbeat') {
-      // numbers, yes/no and fixed words only: nothing in it names anything
-      p.heartbeat = normalizeHeartbeat(await heartbeat());
+      // numbers, yes/no, fixed words and the hardware's and cars' model
+      // names: nothing in it names anyone. Its text goes through the
+      // scrubber all the same, as an anonymous report's does whether this
+      // one is anonymous or not (no host, path, name or address ever belongs
+      // in a heartbeat), then normalizeHeartbeat keeps only plain text of
+      // the protocol's lengths (a car's model only from the list of models).
+      const raw = { ...((await heartbeat()) || {}) };
+      const text = {};
+      for (const k of HEARTBEAT_TEXT) if (raw[k] !== undefined) text[k] = raw[k];
+      const ids = [installId(), ...(await identifiers().catch(() => []))];
+      Object.assign(raw, cleanReport(text, { anonymous: true, identifiers: ids }), { crashes24h: crashes24h() });
+      p.heartbeat = normalizeHeartbeat(raw);
       const errs = P.validatePayload(p);
       if (errs.length) throw new ReportError(500, `The heartbeat did not come out right: ${errs.slice(0, 3).join(', ')}`);
       return p;
@@ -450,6 +462,8 @@ function createReports({
     } catch { /* nothing more to do */ }
     if (source === 'error') setTimeout(() => sendCrashes().catch(() => {}), 5_000).unref?.();
   }
+  /** Crashes and unhandled errors noted in the last 24 hours (the heartbeat's crashes24h). */
+  const crashes24h = () => readCrashes().filter((c) => now() - Date.parse(c.at) < DAY_MS).length;
   /** The recent crash stacks for diagnostics (the newest 5). */
   const recentCrashes = () => readCrashes().slice(-5).map(({ sent: _s, ...c }) => c);
   /** Sends what was noted and not sent yet: at most one report an hour for the same error, 6 a day. */
@@ -546,9 +560,9 @@ function createReports({
     db.set('reports-settings', next);
     if (before.share && !next.share) for (const e of outbox()) if (AUTO_KINDS.has(e.kind)) dropEntry(e);
     // the first daily summary a day after turning it on; the first heartbeat
-    // right away (then hourly from now). Only after a restart does the first
-    // one wait 3-7 minutes, so a fleet updating at once does not report in
-    // the same second.
+    // right away (then hourly from now). After a restart the first one waits
+    // 10 to 60 seconds, so a fleet updating at once does not report in the
+    // same second.
     if (!before.share && next.share) {
       setState({ lastDailyAt: now() });
       if (started) {
@@ -605,11 +619,37 @@ function createReports({
   return { configured, status, setSettings, preview, sendPreview, buildPayload, enqueue, flush, outbox, trimOutbox, noteCrash, recentCrashes, sendCrashes, dailyIfDue, sendHeartbeat, installId, start, stop, endpoint, remoteConfig };
 }
 
+// the heartbeat's fields with text in them (through the scrubber before normalizeHeartbeat)
+const HEARTBEAT_TEXT = ['platform', 'arch', 'cpu', 'gpus', 'cars', 'convert'];
+const HL = P.HEARTBEAT_LIMITS;
+/**
+ * Text as the protocol takes it (reportsProtocol.js isPlain), or null: letters
+ * with accents lose them, other characters outside printable ASCII (and " and
+ * \) go, runs of spaces become one, at most `max` characters, trimmed.
+ */
+function plainText(x, max) {
+  if (typeof x !== 'string') return null;
+  const t = x.normalize('NFKD').replace(/\s+/g, ' ').replace(/[^\x20\x21\x23-\x5b\x5d-\x7e]/g, '').replace(/ {2,}/g, ' ').trim().slice(0, max).trim();
+  return t || null;
+}
+// a car's model: one of these names only (a code '3', 'Y', 'S', 'X' becomes its name)
+const MODEL_NAMES = [...Object.values(CAR_MODELS), 'Cybertruck'];
+function modelName(x) {
+  const s = typeof x === 'string' ? x.trim() : '';
+  if (Object.hasOwn(CAR_MODELS, s)) return CAR_MODELS[s];
+  return MODEL_NAMES.find((m) => m.toLowerCase() === s.toLowerCase()) || null;
+}
+// a Tesla software version (2025.14.3.1, maybe with its build hash): nothing else
+const FIRMWARE_RE = /^20\d\d\.\d{1,2}(?:\.\d{1,3}){0,3}(?: [0-9a-f]{4,12})?$/;
+const firmwareText = (x) => { const t = plainText(x, HL.firmware); return t && FIRMWARE_RE.test(t) ? t : null; };
+const countIn = (x, max) => (Number.isFinite(Number(x)) && Number(x) > 0 ? Math.min(max, Math.round(Number(x))) : 0);
+
 /**
  * The heartbeat block, exactly the protocol's fields (reportsProtocol.js
- * HEARTBEAT_FIELDS) from what the server counted: whole non-negative
- * numbers, yes/no, and the overall health worked out from the counts.
- * Anything else the caller had is left out.
+ * HEARTBEAT_FIELDS, and the HEARTBEAT_OPTIONAL ones this Manager always
+ * fills in) from what the server counted: whole non-negative numbers,
+ * yes/no, the overall health worked out from the counts, and plain text cut
+ * to the protocol's lengths. Anything else the caller had is left out.
  */
 function normalizeHeartbeat(h = {}) {
   const n = (x, max = Number.MAX_SAFE_INTEGER) => (Number.isFinite(Number(x)) && Number(x) > 0 ? Math.min(max, Math.round(Number(x))) : 0);
@@ -629,8 +669,29 @@ function normalizeHeartbeat(h = {}) {
     totalBytes: total,
     converting: h.converting === true,
     jobsQueued: n(h.jobsQueued, 100_000),
-    features: { can: h.features?.can === true, sentryUsbPaired: h.features?.sentryUsbPaired === true, gpu: h.features?.gpu === true }
+    features: { can: h.features?.can === true, sentryUsbPaired: h.features?.sentryUsbPaired === true, gpu: h.features?.gpu === true },
+    ...optionalHeartbeat(h)
   };
 }
+/** The optional fields (all of them; platform and arch only when known). */
+function optionalHeartbeat(h) {
+  const out = { footageSeconds: countIn(h.footageSeconds, HL.footageSeconds) };
+  const platform = plainText(h.platform, HL.platform);
+  const arch = plainText(h.arch, HL.arch);
+  if (platform) out.platform = platform;
+  if (arch) out.arch = arch;
+  out.cpu = plainText(h.cpu, HL.cpu);
+  out.gpus = (Array.isArray(h.gpus) ? h.gpus : []).map((g) => plainText(g, HL.gpu)).filter(Boolean).slice(0, HL.gpus);
+  out.cars = (Array.isArray(h.cars) ? h.cars : []).slice(0, HL.cars).map((c) => ({ model: modelName(c?.model), firmware: firmwareText(c?.firmware) }));
+  out.clips24h = { sentry: countIn(h.clips24h?.sentry, HL.clips), dashcam: countIn(h.clips24h?.dashcam, HL.clips) };
+  const c = h.convert || {};
+  const fps = Number(c.fps);
+  out.convert = {
+    fps: c.fps !== null && c.fps !== undefined && Number.isFinite(fps) && fps >= 0 ? Math.round(Math.min(HL.fps, fps) * 10) / 10 : null,
+    encoder: plainText(c.encoder, HL.encoder), device: plainText(c.device, HL.device), api: plainText(c.api, HL.api), codec: plainText(c.codec, HL.codec)
+  };
+  out.crashes24h = countIn(h.crashes24h, HL.crashes);
+  return out;
+}
 
-module.exports = { createReports, normalizeHeartbeat, defaultTransport, workerPow, ReportError, NOT_SET_UP, OUTBOX_MAX, OUTBOX_BYTES, OUTBOX_DAYS, MANUAL_PER_HOUR, MAX_BITS, HEARTBEAT_FIRST_MS, HEARTBEAT_EVERY_MS };
+module.exports = { createReports, normalizeHeartbeat, plainText, defaultTransport, workerPow, ReportError, NOT_SET_UP, OUTBOX_MAX, OUTBOX_BYTES, OUTBOX_DAYS, MANUAL_PER_HOUR, MAX_BITS, HEARTBEAT_FIRST_MS, HEARTBEAT_EVERY_MS };

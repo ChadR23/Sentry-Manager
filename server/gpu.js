@@ -136,4 +136,20 @@ async function detectGpus({ driDir = '/dev/dri', sysDrm = '/sys/class/drm', dxg 
   return { gpus, nvidia, hints };
 }
 
-module.exports = { detectGpus, parseVainfo, nameFromDriver };
+/**
+ * The GPUs this container can use, from detectGpus()'s { gpus, nvidia } (or
+ * a plain list, which is taken as it is): the /dev/dri ones passed in (not
+ * Windows' graphics bridge; NVIDIA's are left to nvidia-smi) and the NVIDIA
+ * ones in the container. The set the Health check counts and the heartbeat
+ * names: [{ name, vendor }].
+ */
+function usableGpus(found) {
+  if (Array.isArray(found)) return found.filter(Boolean);
+  return [
+    ...(found?.gpus || []).filter((g) => g && g.passedThrough && !g.virtual && g.vendor !== 'nvidia')
+      .map((g) => ({ ...g, name: g.name || `${g.vendorName || 'Unknown'} GPU` })),
+    ...(found?.nvidia || []).filter(Boolean).map((g) => ({ ...g, name: g.name || 'NVIDIA GPU', vendor: 'nvidia' }))
+  ];
+}
+
+module.exports = { detectGpus, parseVainfo, nameFromDriver, usableGpus };

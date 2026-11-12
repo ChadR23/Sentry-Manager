@@ -279,14 +279,75 @@ const HEARTBEAT_FIELDS = {
 };
 const HEARTBEAT_FEATURES = ['can', 'sentryUsbPaired', 'gpu'];
 const isObj = (x) => Boolean(x) && typeof x === 'object' && !Array.isArray(x);
+
+// The optional heartbeat fields (added later: a heartbeat without
+// any of them is still right, so older Managers keep working). Each one, when
+// present, is checked as strictly as the required ones: exactly these keys at
+// every level, these types and these limits. Text is plain: printable ASCII
+// (space to ~) without " and \ (so a character is one byte as JSON), 1 to
+// `max` characters, no space at either end; nothing else (no control,
+// format, private-use or non-ASCII characters). The limits keep the worst
+// case of every field at its limit (with the common fields at theirs) under
+// HEARTBEAT_MAX_BYTES (test/reportsHeartbeatFields.test.js builds it).
+const HEARTBEAT_LIMITS = {
+  footageSeconds: 1e12, platform: 32, arch: 16, cpu: 120,
+  gpus: 4, gpu: 80, // GPU names (at most 4 of them)
+  cars: 12, model: 16, firmware: 24, // { model, firmware } per vehicle (at most 12)
+  clips: 1e6, fps: 100_000, encoder: 40, device: 80, api: 12, codec: 10, crashes: 10_000
+};
+const PLAIN_RE = /^[\x20\x21\x23-\x5b\x5d-\x7e]+$/;
+/** Whether x is plain text of 1 to max characters (see HEARTBEAT_LIMITS above). */
+const isPlain = (x, max) => typeof x === 'string' && x.length >= 1 && x.length <= max && PLAIN_RE.test(x) && x.trim() === x;
+const plainOrNull = (x, max) => x === null || isPlain(x, max);
+/** An object with exactly these keys (errors for any other or a missing one); false when it is no object. */
+function exactKeys(o, keys, where, errs) {
+  if (!isObj(o)) { errs.push(where); return false; }
+  for (const k of Object.keys(o)) if (!keys.includes(k)) errs.push(`unknown field ${where}.${k.slice(0, 40)}`);
+  for (const k of keys) if (!(k in o)) errs.push(`${where}.${k} missing`);
+  return true;
+}
+const HL = HEARTBEAT_LIMITS;
+const HEARTBEAT_OPTIONAL = {
+  // the length of all the footage, in seconds (the Dash's "footage hours" x 3600)
+  footageSeconds: (x, errs) => { if (!intIn(x, HL.footageSeconds)) errs.push('heartbeat.footageSeconds'); },
+  platform: (x, errs) => { if (!isPlain(x, HL.platform)) errs.push('heartbeat.platform'); },
+  arch: (x, errs) => { if (!isPlain(x, HL.arch)) errs.push('heartbeat.arch'); },
+  cpu: (x, errs) => { if (!plainOrNull(x, HL.cpu)) errs.push('heartbeat.cpu'); },
+  gpus: (x, errs) => {
+    if (!Array.isArray(x) || x.length > HL.gpus) { errs.push('heartbeat.gpus'); return; }
+    x.forEach((g, i) => { if (!isPlain(g, HL.gpu)) errs.push(`heartbeat.gpus[${i}]`); });
+  },
+  cars: (x, errs) => {
+    if (!Array.isArray(x) || x.length > HL.cars) { errs.push('heartbeat.cars'); return; }
+    x.forEach((c, i) => {
+      const where = `heartbeat.cars[${i}]`;
+      if (!exactKeys(c, ['model', 'firmware'], where, errs)) return;
+      if ('model' in c && !plainOrNull(c.model, HL.model)) errs.push(`${where}.model`);
+      if ('firmware' in c && !plainOrNull(c.firmware, HL.firmware)) errs.push(`${where}.firmware`);
+    });
+  },
+  clips24h: (x, errs) => {
+    if (!exactKeys(x, ['sentry', 'dashcam'], 'heartbeat.clips24h', errs)) return;
+    for (const k of ['sentry', 'dashcam']) if (k in x && !intIn(x[k], HL.clips)) errs.push(`heartbeat.clips24h.${k}`);
+  },
+  convert: (x, errs) => {
+    if (!exactKeys(x, ['fps', 'encoder', 'device', 'api', 'codec'], 'heartbeat.convert', errs)) return;
+    // frames a second, to 0.1
+    if ('fps' in x && !nullOr(x.fps, (n) => typeof n === 'number' && Number.isFinite(n) && n >= 0 && n <= HL.fps && Math.abs(n * 10 - Math.round(n * 10)) < 1e-6)) errs.push('heartbeat.convert.fps');
+    for (const k of ['encoder', 'device', 'api', 'codec']) if (k in x && !plainOrNull(x[k], HL[k])) errs.push(`heartbeat.convert.${k}`);
+  },
+  crashes24h: (x, errs) => { if (!intIn(x, HL.crashes)) errs.push('heartbeat.crashes24h'); }
+};
 /** Errors in a heartbeat block (pushed onto errs). */
 function checkHeartbeat(h, errs) {
   if (!isObj(h)) { errs.push('heartbeat'); return; }
-  for (const k of Object.keys(h)) if (!(k in HEARTBEAT_FIELDS)) errs.push(`unknown field heartbeat.${k.slice(0, 40)}`);
+  for (const k of Object.keys(h)) if (!(k in HEARTBEAT_FIELDS) && !(k in HEARTBEAT_OPTIONAL)) errs.push(`unknown field heartbeat.${k.slice(0, 40)}`);
   for (const [k, test] of Object.entries(HEARTBEAT_FIELDS)) {
     if (!(k in h)) { errs.push(`heartbeat.${k} missing`); continue; }
     if (test && !test(h[k])) errs.push(`heartbeat.${k}`);
   }
+  // the optional ones: each checked when it is there
+  for (const [k, check] of Object.entries(HEARTBEAT_OPTIONAL)) if (Object.hasOwn(h, k)) check(h[k], errs);
   if (h.freeBytes !== null && h.totalBytes !== null && intIn(h.freeBytes, BYTES_MAX) && intIn(h.totalBytes, BYTES_MAX) && h.freeBytes > h.totalBytes) errs.push('heartbeat.freeBytes (more than totalBytes)');
   if ((h.freeBytes === null) !== (h.totalBytes === null)) errs.push('heartbeat.freeBytes and totalBytes (both or neither)');
   const hl = h.health;
@@ -322,7 +383,8 @@ function checkHeartbeat(h, errs) {
  *     never in a heartbeat; an object of the DIAG_KEYS, each free-form JSON
  *     within bounds;
  *   heartbeat: heartbeat only (and required there), exactly the
- *     HEARTBEAT_FIELDS (checkHeartbeat); a heartbeat is at most 4 KB as JSON.
+ *     HEARTBEAT_FIELDS, plus any of the HEARTBEAT_OPTIONAL ones
+ *     (checkHeartbeat); a heartbeat is at most 4 KB as JSON.
  */
 function validatePayload(p) {
   if (!p || typeof p !== 'object' || Array.isArray(p)) return ['not an object'];
@@ -422,7 +484,7 @@ function normalizeRef(text) {
 }
 
 module.exports = {
-  V, INFO, MAX_BODY, MAX_PLAIN, MAX_SKEW_MS, KINDS, ANON, LIMITS, DIAG_KEYS, HEARTBEAT_MAX_BYTES, HEARTBEAT_FIELDS, HEARTBEAT_FEATURES, healthOverall,
+  V, INFO, MAX_BODY, MAX_PLAIN, MAX_SKEW_MS, KINDS, ANON, LIMITS, DIAG_KEYS, HEARTBEAT_MAX_BYTES, HEARTBEAT_FIELDS, HEARTBEAT_FEATURES, HEARTBEAT_OPTIONAL, HEARTBEAT_LIMITS, isPlain, healthOverall,
   b64, unb64, sha256, kidOf, publicKeyFromRaw, rawPublic, rawPrivate, parseKeyLine, normalizeKey, keyLine,
   seal, open, envelopeHash, signedBytes, leadingZeroBits, powOk, solvePow, sign, validateBody, verifySig, validatePayload,
   signMoved, verifyMoved, refCode, normalizeRef

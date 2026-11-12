@@ -40,7 +40,7 @@ test('the shared module: feedback, support, the opt-in, anonymous, the preview, 
 
 test('the heartbeat: in the opt-in\'s words, "Last heartbeat" in Status, a sample in the preview (never sent by hand)', () => {
   const m = read('web/reportsSettings.js');
-  assert.ok(m.includes('and a short heartbeat every hour (version, health, how much footage and space saved)'));
+  assert.ok(m.includes('and a short heartbeat every hour (version, health, how much footage and space saved, and the CPU, GPU and car models)'));
   assert.ok(m.includes('<dt>Last heartbeat</dt>'));
   assert.ok(m.includes('Show a heartbeat'));
   assert.match(m, /JSON\.stringify\(\{ kind: 'heartbeat' \}\)/);

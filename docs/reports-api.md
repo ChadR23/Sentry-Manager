@@ -130,8 +130,23 @@ crash stacks; the CAN index's status.
 A few numbers, once an hour, while *Share diagnostics* is on. Besides the
 common fields (`kind: 'heartbeat'`, `sentAt`, `install`, `anonymous`, `build`,
 `ui`, all as above), exactly one more, `heartbeat`, with exactly these fields
-(any other field, a missing one or a wrong type is `SCHEMA`), and the whole
-payload is at most 4 KB as JSON (about 600 bytes in practice):
+(any other field, a missing required one or a wrong type is `SCHEMA`), and the
+whole payload is at most 4 KB as JSON (about 1 KB in practice). The fields
+marked *optional* came later: a heartbeat without any of them is still right
+(older Managers send none), and each one that is there is checked as strictly
+as the others (exact keys inside it too). This Manager always sends all of
+them except `platform` and `arch` when Node does not know them (it always
+does).
+
+**Text** in the optional fields is plain: printable ASCII (space to `~`)
+without `"` and `\`, 1 character up to the field's limit, no space at either
+end; control, format, private-use and non-ASCII characters are refused (the
+Manager drops them, turns letters with accents into plain ones and runs of
+spaces into one, and trims, before it checks). So a character is one byte as
+JSON, and the worst case of every field at its limit (the common fields at
+theirs) is 3,768 bytes: under the 4 KB. The list and length limits below are
+lower than first planned for that reason (`HEARTBEAT_LIMITS` in the protocol
+module).
 
 | Field | Type and range | What it is |
 |---|---|---|
@@ -151,6 +166,22 @@ payload is at most 4 KB as JSON (about 600 bytes in practice):
 | `features.can` | boolean | CAN data is on |
 | `features.sentryUsbPaired` | boolean | A Sentry USB is paired |
 | `features.gpu` | boolean | A GPU is available to the container (passed in, or NVIDIA) |
+| `footageSeconds` | *optional*; integer, 0 to 1,000,000,000,000 | The length of all the footage, all vehicles together, in seconds: one minute per Tesla clip minute, as the Dash counts its "footage hours" (hours x 3600) |
+| `platform` | *optional*; text, 1 to 32 | The OS Node runs on (`process.platform`), e.g. `'linux'` |
+| `arch` | *optional*; text, 1 to 16 | The CPU architecture (`process.arch`), e.g. `'x64'`, `'arm64'` |
+| `cpu` | *optional*; text, 1 to 120, or null | The CPU's model name (`os.cpus()[0].model`, trimmed); null when Node reports none |
+| `gpus` | *optional*; a list of at most 4 texts, each 1 to 80 | The model names of the GPUs the container can use: the /dev/dri ones passed in (not Windows' WSL graphics bridge) and the NVIDIA ones, the set the Health check counts (`usableGpus` in `server/gpu.js`); `[]` when none |
+| `cars` | *optional*; a list of at most 12 objects, exactly `{ model, firmware }` | One per vehicle (the first 12, in the vehicles' order); `[]` with none. Never a name, VIN or id |
+| `cars[].model` | text, 1 to 16, or null | `'Model 3'`, `'Model Y'`, `'Model S'`, `'Model X'` or `'Cybertruck'` (the Manager sends nothing else): the vehicle's *Car model* setting, else what its CAN data's VIN says; null when neither is known |
+| `cars[].firmware` | text, 1 to 24, or null | The Tesla software version (e.g. `'2025.14.3.1'`, maybe with its build hash). No source of it yet (the CAN data, Sentry USB and the clips' metadata carry none this Manager reads), so null for now; the Manager sends only a version of that shape |
+| `clips24h` | *optional*; exactly `{ sentry, dashcam }`, each an integer, 0 to 1,000,000 | Clips (one per camera file) that reached the footage in the last 24 hours, from the inventory: `sentry` in SentryClips, `dashcam` everything else (RecentClips, SavedClips, ...). When a clip arrived is its birth time on the share, else its ctime, as the Sentry USB checksum record reads it |
+| `convert` | *optional*; exactly `{ fps, encoder, device, api, codec }` | How this server's own conversions ran (a node's clips are left out). The Manager always sends it: all five null when nothing has converted yet |
+| `convert.fps` | number, 0 to 100,000, in steps of 0.1, or null | The average speed of the last 24 hours of converting (frames a second of all the clips encoding at once, sampled every 30 s); after a day without converting, the last average |
+| `convert.encoder` | text, 1 to 40, or null | The ffmpeg encoder of the latest conversion, e.g. `'hevc_nvenc'`, `'libx265'` |
+| `convert.device` | text, 1 to 80, or null | The GPU it ran on (as the Encoder's Hardware panel names it), or the CPU's model name for a CPU encoder; null when the GPU had no name |
+| `convert.api` | text, 1 to 12, or null | `'nvenc'`, `'vaapi'`, `'qsv'`, `'amf'`, `'videotoolbox'` or `'cpu'` |
+| `convert.codec` | text, 1 to 10, or null | `'h265'` or `'av1'` (`'h264'` if ever) |
+| `crashes24h` | *optional*; integer, 0 to 10,000 | Crashes and unhandled errors the app noted in the last 24 hours (its crash notes keep the latest 20) |
 
 ```json
 { "kind": "heartbeat", "sentAt": "2026-11-11T21:04:07.112Z", "install": "ANON", "anonymous": true,
@@ -158,11 +189,21 @@ payload is at most 4 KB as JSON (about 600 bytes in practice):
   "heartbeat": { "uptimeSec": 7210, "health": { "overall": "warn", "warnings": 1, "problems": 0 }, "vehicles": 2,
     "footageBytes": 812345678901, "recordings": 4210, "spaceSavedBytes": 301234567890, "distanceKm": 18234.7,
     "freeBytes": 1200000000000, "totalBytes": 4000000000000, "converting": false, "jobsQueued": 0,
-    "features": { "can": true, "sentryUsbPaired": false, "gpu": true } } }
+    "features": { "can": true, "sentryUsbPaired": false, "gpu": true },
+    "footageSeconds": 912345, "platform": "linux", "arch": "x64", "cpu": "AMD Ryzen 7 5800X 8-Core Processor",
+    "gpus": ["NVIDIA GeForce RTX 4070"], "cars": [{ "model": "Model Y", "firmware": null }, { "model": null, "firmware": null }],
+    "clips24h": { "sentry": 40, "dashcam": 1200 },
+    "convert": { "fps": 412.3, "encoder": "hevc_nvenc", "device": "NVIDIA GeForce RTX 4070", "api": "nvenc", "codec": "h265" },
+    "crashes24h": 0 } }
 ```
 
-Nothing in a heartbeat names anything (no names, paths, hosts or places), so
-it is the same anonymous or not, except `install`. *Show a heartbeat* in
+Nothing in a heartbeat names anything (no names, paths, hosts, places or
+VINs): numbers, yes/no, fixed words, and the models of the hardware and the
+cars, which are not personal and stay in an anonymous one too. Its text goes
+through the scrubber all the same, as an anonymous report's does, whether it
+is anonymous or not (a host, path, address or vehicle name that turned up in a
+CPU or GPU name would become `ANON`), and a car's model is only ever one of the
+names above. So it is the same anonymous or not, except `install`. *Show a heartbeat* in
 Settings → Help & feedback shows the one it would send now.
 
 **Never in a report**, anonymous or not: passwords, tokens, keys, cookies,
@@ -187,7 +228,7 @@ well-known public one. No contact is sent.
 | support | An admin presses *Send diagnostics to support* | The same; at most 5 an hour |
 | crash | After a crash (noted locally as the process ends, sent after the restart) or an unhandled error in a request | *Share diagnostics* on; one report an hour for the same error, 6 a day |
 | daily | Once a day | *Share diagnostics* on (the first a day after turning it on) |
-| heartbeat | Right away when sharing is turned on; about 5 minutes (3 to 7) after a restart, so many servers updating at once do not report in the same second; then every hour (56 to 64 minutes) | *Share diagnostics* on |
+| heartbeat | Right away when sharing is turned on; 10 to 60 seconds after a start (a restart or an update), at random, so many servers updating at once do not report in the same second; then every hour (56 to 64 minutes) | *Share diagnostics* on |
 
 A report that cannot be delivered waits, sealed (never plaintext), in
 `data/reports/outbox`: at most 20 reports and 50 MB, 7 days, retried with

@@ -1,7 +1,7 @@
 'use strict';
 
 // The hourly heartbeat (server/reports.js): sent only while "Share
-// diagnostics with the developers" is on, the first about 5 minutes after a
+// diagnostics with the developers" is on, the first 10 to 60 seconds after a
 // start then every hour (each with a little jitter), stopped when sharing is
 // turned off; anonymous when "Send anonymously" is on; at most one waiting in
 // the outbox, and never pushing a real report out of it; the stand-in
@@ -22,6 +22,10 @@ const quiet = { info() {}, warn() {}, error() {} };
 const NUMBERS = {
   uptimeSec: 7200.4, health: { warnings: 1, problems: 0 }, vehicles: 2, footageBytes: 812345678901, recordings: 4210, spaceSavedBytes: 301234567890,
   distanceKm: 18234.71, freeBytes: 1.2e12, totalBytes: 4e12, converting: true, jobsQueued: 3, features: { can: true, sentryUsbPaired: true, gpu: false },
+  // the optional fields
+  footageSeconds: 912345, platform: 'linux', arch: 'x64', cpu: '  AMD Ryzen 7 5800X 8-Core Processor   ', gpus: ['NVIDIA GeForce RTX 4070'],
+  cars: [{ model: 'Y', firmware: null, name: 'Daily Driver', vin: '7SAYGDEE1PA000001' }], clips24h: { sentry: 40, dashcam: 1200 },
+  convert: { fps: 412.34, encoder: 'hevc_nvenc', device: 'NVIDIA GeForce RTX 4070', api: 'nvenc', codec: 'h265' },
   // whatever else the caller had is left out
   hostname: 'tower', vehicleNames: ['Daily Driver']
 };
@@ -54,7 +58,11 @@ const posts = (calls) => calls.filter((c) => c.method === 'POST').length;
 
 test('normalizeHeartbeat: exactly the protocol fields, whole numbers, distance to 0.1 km, overall from the counts', () => {
   const h = normalizeHeartbeat(NUMBERS);
-  assert.deepEqual(Object.keys(h), Object.keys(P.HEARTBEAT_FIELDS));
+  assert.deepEqual(Object.keys(h).filter((k) => !(k in P.HEARTBEAT_OPTIONAL)), Object.keys(P.HEARTBEAT_FIELDS));
+  assert.deepEqual(Object.keys(h).filter((k) => k in P.HEARTBEAT_OPTIONAL).sort(), Object.keys(P.HEARTBEAT_OPTIONAL).sort(), 'every optional field filled in');
+  assert.equal(h.cpu, 'AMD Ryzen 7 5800X 8-Core Processor');
+  assert.deepEqual(h.cars, [{ model: 'Model Y', firmware: null }], 'a car is its model and firmware only');
+  assert.equal(h.convert.fps, 412.3);
   assert.equal(h.uptimeSec, 7200);
   assert.deepEqual(h.health, { overall: 'warn', warnings: 1, problems: 0 });
   assert.equal(h.distanceKm, 18234.7);
@@ -69,7 +77,7 @@ test('normalizeHeartbeat: exactly the protocol fields, whole numbers, distance t
   assert.equal(normalizeHeartbeat({ distanceKm: 3e7 }).distanceKm, 10_000_000);
 });
 
-test('scheduled: about 5 minutes after a start, at once when sharing is turned on, then hourly; off stops it', async () => {
+test('scheduled: 10 to 60 seconds after a start, at once when sharing is turned on, then hourly; off stops it', async () => {
   const rec = await startReceiver({ difficulty: 4 });
   const { rep, calls, timer } = client(rec);
   try {
@@ -114,10 +122,10 @@ test('scheduled: about 5 minutes after a start, at once when sharing is turned o
   } finally { rep.stop(); await rec.close(); }
 });
 
-test('the schedule has jitter: the first in 3 to 7 minutes, then 56 to 64 minutes', async () => {
+test('the schedule has jitter: the first in 10 to 60 seconds, then 56 to 64 minutes', async () => {
   const rec = await startReceiver();
   try {
-    for (const [r, first, every] of [[0, HEARTBEAT_FIRST_MS - 120_000, HEARTBEAT_EVERY_MS - 240_000], [1, HEARTBEAT_FIRST_MS + 120_000, HEARTBEAT_EVERY_MS + 240_000]]) {
+    for (const [r, first, every] of [[0, 10_000, HEARTBEAT_EVERY_MS - 240_000], [1, 60_000, HEARTBEAT_EVERY_MS + 240_000]]) {
       const { rep, timer } = client(rec, { random: () => r });
       rep.start();
       assert.equal(await timer.fire(), first);

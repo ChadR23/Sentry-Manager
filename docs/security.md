@@ -331,9 +331,10 @@ sends anything to anyone other than you, and only when you say so:
   Then
   a report goes after a crash or an unhandled error, a health summary once
   a day, and a short heartbeat every hour (the version, health, how much
-  footage and space saved, distance driven as one total, and a few yes/no
-  features: numbers only, no names, paths, hosts or places; *Show a heartbeat*
-  shows one). Turning it off stops that and drops the reports still waiting.
+  footage and space saved, distance driven as one total, a few yes/no
+  features, clips and crashes of the last day, conversion speed, and the
+  models of the CPU, GPUs and cars with the OS and architecture: no names,
+  paths, hosts, places or VINs; *Show a heartbeat* shows one). Turning it off stops that and drops the reports still waiting.
 - **Send anonymously** replaces every identifier with `ANON`: the install id,
   host name, IP and MAC addresses, account, vehicle and Sentry USB names, share
   hosts and paths, Wi-Fi names, VINs, e-mail addresses, GPS coordinates and

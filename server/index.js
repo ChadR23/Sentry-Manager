@@ -50,7 +50,7 @@ const { Jobs, Notifications } = require('./activity');
 const { ImageUpdates, criticalFromFile } = require('./imageUpdates');
 const { readBuildInfo: readBuildInfoFrom, buildName } = require('./buildInfo');
 const { Thumbnails } = require('./thumbnails');
-const { detectGpus } = require('./gpu');
+const { detectGpus, usableGpus } = require('./gpu');
 const { storageTotals } = require('./storageTotals');
 const { createHealth } = require('./health');
 const { createSnapshots, applyPendingRestore } = require('./snapshots');
@@ -62,7 +62,8 @@ const driveDataLib = require('./driveData');
 const { writeZip, streamZip, waitDrain } = require('./zip');
 const { createConverterHost } = require('./converterHost');
 const { createStats } = require('./stats');
-const { encoderBlock, jobProgress, RUNNING: CONVERTER_RUNNING } = require('./encoderStats');
+const { encoderBlock, jobProgress, gpuFor, RUNNING: CONVERTER_RUNNING } = require('./encoderStats');
+const { createConvertStats } = require('./convertStats');
 const { createSavings } = require('./savings');
 const { parsePowerSettings, priceAt, rateNameAt, isCheapest, PriceError } = require('./powerPrice');
 const { createConverterBridge } = require('./converterBridge');
@@ -1478,8 +1479,30 @@ async function main() {
     }
     return m;
   }
+  // the heartbeat's convert block: how this server's own conversions ran (the
+  // GPU named as the Encoder's Hardware panel names it, the CPU by its model)
+  const cpuModel = () => os.cpus()[0]?.model?.trim() || null;
+  const convertStats = createConvertStats({
+    db, cpuName: cpuModel,
+    deviceName: (e) => gpuFor(stats.snapshot()?.gpus, e.device)?.name || null
+  });
   async function reportHeartbeat() {
     const list = vehicles.list();
+    const dayAgo = Date.now() - 86_400_000;
+    const clips24h = { sentry: 0, dashcam: 0 };
+    for (const v of list) {
+      const c = inventory.arrivedClips(v.id, dayAgo);
+      clips24h.sentry += c.sentry;
+      clips24h.dashcam += c.dashcam;
+    }
+    // each car's model (its setting, else what its CAN data's VIN says) and
+    // its software version: no source of it yet (CAN, Sentry USB and the
+    // clips carry none this server reads), so null. Never a name, VIN or id.
+    const cars = [];
+    for (const v of list) {
+      const c = carSummaryRef ? await carSummaryRef(v).catch(() => null) : null;
+      cars.push({ model: c?.modelLabel || null, firmware: null });
+    }
     const results = health.last() || await health.run().catch(() => null);
     const checks = results?.checks || [];
     // each share or disk once, however many vehicles use it
@@ -1487,6 +1510,12 @@ async function main() {
     const sum = (fn) => list.reduce((n, v) => n + (Number(fn(v)) || 0), 0);
     const gpu = await detectGpus().catch(() => null);
     return {
+      footageSeconds: sum((v) => inventory.totals(v.id)?.minutes) * 60,
+      platform: process.platform, arch: process.arch, cpu: cpuModel(),
+      // the GPUs this container can use: the set the Health check counts
+      gpus: usableGpus(gpu).map((g) => g.name),
+      cars, clips24h,
+      convert: convertStats.summary(),
       uptimeSec: Math.round((Date.now() - startedAt) / 1000),
       health: { warnings: checks.filter((c) => c.status === 'warn').length, problems: checks.filter((c) => c.status === 'bad').length },
       vehicles: list.length,
@@ -4347,6 +4376,11 @@ async function main() {
     const { createClipThumbnails } = require(path.join(SRC, 'main/clipThumbnails'));
     clipThumbs = createClipThumbnails({ directory: path.join(DATA, 'clip-thumbnails'), ffmpegPath: FFMPEG, ffprobePath: FFPROBE, spawn });
     runtime.service.subscribe((event) => {
+      // the heartbeat's conversion speed and device (convertStats.js; at most a sample every 30 s)
+      if (event?.type === 'progress') {
+        try { convertStats.sample(() => runtime.service.activeEncodes?.() || []); } catch { /* next one */ }
+        return;
+      }
       if (event?.type !== 'snapshot' || !event.snapshot) return;
       converterJobs.set(event.snapshot.id, event.snapshot);
       // (while a benchmark measures, its own account is marked; the job's
