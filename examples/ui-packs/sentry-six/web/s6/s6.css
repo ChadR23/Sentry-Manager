@@ -2380,11 +2380,6 @@ input.toggle-switch:focus-visible {
     justify-content: space-between;
     font-size: 14px;
   }
-  body.selecting .footage-actions .selected-count::before,
-  body.selecting .footage-actions .selected-count::after {
-    content: ' · ';
-    color: var(--muted);
-  }
   .selection-bar {
     bottom: max(12px, env(safe-area-inset-bottom));
     min-height: 68px;
