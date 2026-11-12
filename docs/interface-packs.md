@@ -3,8 +3,11 @@
 [← Back to the README](../README.md)
 
 Settings → Interface sets how Sentry Six Manager looks and works for
-everyone who signs in. **Original** is the built-in interface; the drop-down
-also lists every interface pack you uploaded. A switch applies at once:
+everyone who signs in. **Sentry Six** is the default: every server gets it
+until an admin chooses another one. **Original** is the classic built-in
+interface; the drop-down also lists the other interfaces that come with the
+app and every pack you uploaded. A choice is kept, Original included (set
+`DEFAULT_UI=original` to start new installs on Original instead). A switch applies at once:
 open pages reload by themselves, with no restart.
 
 A pack is a `.zip` whose files take the place of the built-in files with the
@@ -35,7 +38,7 @@ are always in the drop-down (their source and zips are in
 and keyboard shortcuts for the numbers people. **Horizon** (`horizon.zip`) is a
 synthwave dashboard over a neon grid that scrolls toward a setting sun. **Aurora**
 (`aurora.zip`) floats glass windows over drifting northern lights, with a
-cockpit-style Viewer. **Sentry Six** (`sentry-six.zip`) uses the family's dark Liquid Glass theme, a quieter Overview, date-range footage browsing, and grouped Settings. It keeps the shared Viewer, Encoder and Sentry USB behavior. Original remains the default.
+cockpit-style Viewer. **Sentry Six** (`sentry-six.zip`) uses the family's dark Liquid Glass theme, a quieter Overview, date-range footage browsing, and grouped Settings. It keeps the shared Viewer, Encoder and Sentry USB behavior. It is the default interface.
 
 Every page also gets the server's own bars at the top, whatever the pack: a
 red **critical update** bar (fixed to the top of the window) and an amber

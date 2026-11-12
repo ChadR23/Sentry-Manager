@@ -129,3 +129,21 @@ test('packs: the original download is a pack that installs as is', async () => {
     await fsp.rm(dir, { recursive: true, force: true });
   }
 });
+
+test('the default interface: Sentry Six until an admin chooses; choosing Original stays Original', async () => {
+  const dir = await tmp();
+  try {
+    const builtinDir = path.join(__dirname, '..', 'examples', 'ui-packs');
+    const db = memDb();
+    const packs = createUiPacks({ dir, db, log: quiet, builtinDir, defaultId: 'sentry-six' });
+    assert.equal(packs.active(), 'sentry-six', 'nothing chosen yet: the default');
+    assert.ok(packs.root('web'), 'its files are served');
+    packs.setActive(null);
+    assert.equal(packs.active(), null, 'Original chosen: kept, not replaced by the default');
+    packs.setActive('horizon');
+    assert.equal(packs.active(), 'horizon');
+    // an install that never chose, with the default missing or turned off: Original
+    assert.equal(createUiPacks({ dir, db: memDb(), log: quiet, builtinDir, defaultId: 'nope' }).active(), null);
+    assert.equal(createUiPacks({ dir, db: memDb(), log: quiet, builtinDir }).active(), null);
+  } finally { await fsp.rm(dir, { recursive: true, force: true }); }
+});

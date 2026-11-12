@@ -525,7 +525,10 @@ async function main() {
   // Settings > Interface: an interface of the owner's own (server/uiPacks.js)
   // (the packs that come with the app: ui-packs in the image, examples/ui-packs in a checkout)
   const builtinPacks = [path.join(APP_ROOT, 'ui-packs'), path.join(APP_ROOT, 'examples', 'ui-packs')].find((d) => fs.existsSync(d)) || null;
-  const uiPacks = createUiPacks({ dir: path.join(DATA, 'ui-packs'), db, log: logger.scope('ui'), builtinDir: builtinPacks });
+  // the interface everyone gets until an admin chooses one (Settings → Interface):
+  // Sentry Six; DEFAULT_UI=original (or another pack's id) changes that
+  const DEFAULT_UI = String(process.env.DEFAULT_UI || 'sentry-six').trim().toLowerCase();
+  const uiPacks = createUiPacks({ dir: path.join(DATA, 'ui-packs'), db, log: logger.scope('ui'), builtinDir: builtinPacks, defaultId: DEFAULT_UI === 'original' ? null : DEFAULT_UI });
   // (the browser opened /original: the built-in interface there)
   const UI_COOKIE = 'sm_ui_original';
   const originalOnly = (req) => parseCookies(req.headers.cookie || '')[UI_COOKIE] === '1';

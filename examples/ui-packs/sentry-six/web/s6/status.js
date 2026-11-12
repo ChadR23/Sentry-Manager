@@ -51,13 +51,15 @@ export function attentionItems({
       );
     return problems.find((c) => c.kind === n.kind && c.vehicleId === n.vehicleId)?.id;
   };
+  // as Original says it: days under two months, then months, then years
+  const fillIn = (d) => (d < 1 ? 'under a day' : d < 60 ? plural(Math.round(d), 'day') : d < 730 ? `${Math.round(d / 30.4)} months` : `${Math.round(d / 365).toLocaleString()} years`);
   const storageText = (fallback = '') => {
     const s = vehicle?.storage;
     if (!s || !Number.isFinite(s.free) || !(s.total > 0)) return fallback;
     return (
       `${bytes(s.free)} free (${((100 * s.free) / s.total).toFixed(1)}%).` +
       (Number.isFinite(s.perDay)
-        ? ` Footage grows about ${bytes(s.perDay)} a day${s.daysLeft != null ? `, so it fills up in about ${plural(s.daysLeft, 'day')}` : ''}.`
+        ? ` Footage grows about ${bytes(s.perDay)} a day${Number.isFinite(s.daysLeft) ? `, so it fills up in about ${fillIn(s.daysLeft)}` : ''}.`
         : '')
     );
   };

@@ -100,7 +100,9 @@ function readBuiltin(folder) {
   return out;
 }
 
-function createUiPacks({ dir, db, log = console, builtinDir = null }) {
+const NEVER_CHOSEN = Symbol('never chosen'); // db.get's fallback when no choice was ever saved
+
+function createUiPacks({ dir, db, log = console, builtinDir = null, defaultId = null }) {
   const metaFile = (id) => path.join(dir, id, 'pack.json');
   let installing = false;
   const builtin = builtinDir ? readBuiltin(builtinDir) : new Map();
@@ -128,9 +130,15 @@ function createUiPacks({ dir, db, log = console, builtinDir = null }) {
     return [...[...builtin.values()].map(publicMeta), ...uploaded];
   }
 
-  /** The chosen pack's id, or null for the built-in interface. */
+  /**
+   * The chosen pack's id, or null for the built-in interface (Original). An
+   * install where nobody has chosen yet (no saved choice at all) gets
+   * `defaultId` when that pack is there; choosing Original saves null, which
+   * stays Original.
+   */
   function active() {
-    const id = db.get('ui-pack', null);
+    const saved = db.get('ui-pack', NEVER_CHOSEN);
+    const id = saved === NEVER_CHOSEN ? defaultId : saved;
     return typeof id === 'string' && ID.test(id) && readMeta(id) ? id : null;
   }
 
