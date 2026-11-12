@@ -193,6 +193,15 @@ test('footage, protect, Recycle Bin and policies never lose files', { timeout: 1
       return d.days.length === 3 && d.days.every((x) => x.unknown === 0) ? d : null;
     });
     assert.deepEqual(days.days.map((d) => d.day), ['2020-01-03', '2020-01-02', '2020-01-01']);
+    // Inclusive bounds, invalid values, and the legacy exact-date precedence.
+    const ranged = (await s.call('GET', '/api/vehicles/daily-driver/days?from=2020-01-02&to=2020-01-02')).data;
+    assert.deepEqual(ranged.days.map(d => d.day), ['2020-01-02']);
+    assert.equal((await s.call('GET', '/api/vehicles/daily-driver/days?from=2020-01-01&to=2020-01-03')).data.total, days.total);
+    assert.equal((await s.call('GET', '/api/vehicles/daily-driver/days?from=nonsense')).data.total, days.total);
+    assert.deepEqual((await s.call('GET', '/api/vehicles/daily-driver/days?to=2020-01-01')).data.days.map(d => d.day), ['2020-01-01']);
+    assert.deepEqual((await s.call('GET', '/api/vehicles/daily-driver/days?date=2020-01-01&from=2020-01-03')).data.days.map(d => d.day), ['2020-01-01']);
+    const recs = (await s.call('GET', '/api/vehicles/daily-driver/recordings?from=2020-01-02&to=2020-01-02')).data.recordings;
+    assert.ok(recs.length && recs.every(r => r.day === '2020-01-02'));
     const jan1 = days.days[2];
     assert.deepEqual([jan1.recordings, jan1.byCategory, jan1.minutes, jan1.encodedRecordings], [2, { Recent: 2 }, 3, 0]);
     assert.equal(jan1.thumbId, by['Recent 2020-01-01 08:00:00'].id);

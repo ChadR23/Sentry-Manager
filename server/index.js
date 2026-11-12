@@ -1851,6 +1851,11 @@ async function main() {
     let list = inventory.get(vehicleId)?.recordings || [];
     if (query.category && query.category !== 'all') list = list.filter((x) => x.category === query.category);
     if (query.date) list = list.filter((x) => x.day === query.date);
+    else {
+      const valid = (value) => /^\d{4}-\d{2}-\d{2}$/.test(value || '');
+      if (valid(query.from)) list = list.filter((x) => x.day >= query.from);
+      if (valid(query.to)) list = list.filter((x) => x.day <= query.to);
+    }
     return list;
   };
   // Footage by day: the day cards (their recordings come from /recordings?date=)
