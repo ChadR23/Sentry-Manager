@@ -21,14 +21,17 @@ export function hideStudio() {
     wrap.hidden = true;
   }
 }
-export function showStudio(kind, vehicle, extra = {}) {
-  hideStudio();
+export function studioUrl(kind, vehicle, extra = {}, vehicleChanged = false) {
   const q = new URLSearchParams({
     embed: kind,
     ...(vehicle ? { root: vehicle.studioRoot || vehicle.root, vehicle: vehicle.id } : {}),
-    ...extra,
+    ...(vehicleChanged ? {} : extra),
   });
-  const url = `/studio/${kind === 'encoder' ? 'encoder' : 'index'}.html?${q}`;
+  return `/studio/${kind === 'encoder' ? 'encoder' : 'index'}.html?${q}`;
+}
+export function showStudio(kind, vehicle, extra = {}, vehicleChanged = false) {
+  hideStudio();
+  const url = studioUrl(kind, vehicle, extra, vehicleChanged);
   if (!frames[kind] || frames[kind].dataset.src !== url) {
     frames[kind]?.remove();
     const wrap = document.createElement('div');

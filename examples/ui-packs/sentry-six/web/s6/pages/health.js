@@ -4,6 +4,12 @@ import { plural, dayKey, dayLabel, timeLabel, size, ago } from '../format.js';
 import * as datepicker from './datepicker.js';
 import { icon } from '../icons.js';
 export async function render(el, ctx) {
+  const admin = (await api('/api/auth/me')).role === 'admin';
+  if (!admin && ['logs', 'backups'].includes(ctx.sub)) {
+    el.innerHTML =
+      '<p>This page is available to administrators.</p><a href="#/health">Back to Health</a>';
+    return;
+  }
   if (ctx.sub === 'server') return (await import('./server.js')).render(el, ctx);
   let stopped = false,
     timer;
@@ -30,7 +36,7 @@ export async function render(el, ctx) {
         rows
           .map(
             ({ v, r }) =>
-              `<section class="card"><div class="row"><h3 class="grow">${esc(v.name)}</h3><button data-check="${esc(v.id)}" ${r.running ? 'disabled' : ''}>${r.running ? 'Checking…' : r.checked ? 'Check again' : 'Check now'}</button></div><p>${r.running ? `${r.done} of ${plural(r.total, 'file')} checked` : r.checked ? `${r.checked} of ${plural(r.files, 'file')} checked · ${plural((r.problems?.length || 0) + (r.more || 0), 'problem')}` : 'Not checked yet.'}</p>${(
+              `<section class="card"><div class="row"><h3 class="grow">${esc(v.name)}</h3>${admin ? `<button data-check="${esc(v.id)}" ${r.running ? 'disabled' : ''}>${r.running ? 'Checking…' : r.checked ? 'Check again' : 'Check now'}</button>` : ''}</div><p>${r.running ? `${r.done} of ${plural(r.total, 'file')} checked` : r.checked ? `${r.checked} of ${plural(r.files, 'file')} checked · ${plural((r.problems?.length || 0) + (r.more || 0), 'problem')}` : 'Not checked yet.'}</p>${(
                 r.problems || []
               )
                 .slice(0, 100)
@@ -40,7 +46,7 @@ export async function render(el, ctx) {
                 )
                 .join(
                   '',
-                )}${r.more ? '<a href="/api/support-bundle">Download all results in a support bundle</a>' : ''}</section>`,
+                )}${admin && r.more ? '<a href="/api/support-bundle">Download all results in a support bundle</a>' : ''}</section>`,
           )
           .join('');
       if (rows.some((x) => x.r.running))
@@ -48,7 +54,7 @@ export async function render(el, ctx) {
     }
     el.onclick = act(async (e) => {
       const b = e.target.closest('[data-check]');
-      if (b) {
+      if (b && admin) {
         b.disabled = true;
         await api(`/api/vehicles/${encodeURIComponent(b.dataset.check)}/integrity`, {
           method: 'POST',
@@ -148,7 +154,7 @@ export async function render(el, ctx) {
       const d = await api(run ? '/api/health/run' : '/api/health', run ? { method: 'POST' } : {});
       if (!alive()) return;
       const h = healthSummary(d.checks || []);
-      el.innerHTML = `<div class="hero">${h.problems.some((c) => ['bad', 'fail'].includes(c.status)) ? 'Your server needs a look.' : 'Your server is working.'} ${h.problems.length ? `<span class="warn">${h.problems.length} ${h.problems.length === 1 ? 'thing needs' : 'things need'} a look.</span>` : ''}</div><div class="toolbar"><p class="grow">${plural(h.total, 'check')} · last run ${ago(d.at)}</p><button data-run>Run again</button></div>${h.problems.length ? `<section class="card health-problems">${h.problems.map((c) => check(c) + `<a href="${c.id?.startsWith('space-') ? '#/settings/cleanup' : c.group === 'Access' ? '#/settings/security' : '#/health/logs'}">${c.id?.startsWith('space-') ? 'Review cleanup rules' : c.group === 'Access' ? 'Security settings' : 'View logs'} →</a>`).join('')}</section>` : ''}<div class="row health-section-title"><h3 class="grow muted">Checks</h3><span class="muted">${h.passed} of ${h.total} passed</span></div><section class="card health-groups">${
+      el.innerHTML = `<div class="hero">${h.problems.some((c) => ['bad', 'fail'].includes(c.status)) ? 'Your server needs a look.' : 'Your server is working.'} ${h.problems.length ? `<span class="warn">${h.problems.length} ${h.problems.length === 1 ? 'thing needs' : 'things need'} a look.</span>` : ''}</div><div class="toolbar"><p class="grow">${plural(h.total, 'check')} · last run ${ago(d.at)}</p>${admin ? `<button data-run>Run again</button>` : ''}</div>${h.problems.length ? `<section class="card health-problems">${h.problems.map((c) => check(c) + (admin ? `<a href="${c.id?.startsWith('space-') ? '#/settings/cleanup' : c.group === 'Access' ? '#/settings/security' : '#/health/logs'}">${c.id?.startsWith('space-') ? 'Review cleanup rules' : c.group === 'Access' ? 'Security settings' : 'View logs'} →</a>` : '')).join('')}</section>` : ''}<div class="row health-section-title"><h3 class="grow muted">Checks</h3><span class="muted">${h.passed} of ${h.total} passed</span></div><section class="card health-groups">${
         h.groups
           .map(
             (g) =>
@@ -164,20 +170,22 @@ export async function render(el, ctx) {
         ['logs', 'Logs', 'Search what happened on your server', 'article'],
         ['backups', 'Backups', 'Restore accounts, settings and stars', 'backup'],
       ]
+        .filter(([path]) => admin || !['logs', 'backups'].includes(path))
         .map(
           ([path, title, text, glyph]) =>
             `<a class="health-more-row" href="#/health/${path}"><span class="group-icon">${icon(glyph)}</span><span class="grow"><h3>${title}</h3><p>${text}</p></span><span class="muted">›</span></a>`,
         )
         .join('')}</div>`;
-      el.querySelector('[data-run]').onclick = act(async (e) => {
-        e.target.disabled = true;
-        e.target.textContent = 'Checking…';
-        try {
-          await load(true);
-        } finally {
-          if (alive()) el.querySelector('[data-run]').disabled = false;
-        }
-      });
+      if (admin)
+        el.querySelector('[data-run]').onclick = act(async (e) => {
+          e.target.disabled = true;
+          e.target.textContent = 'Checking…';
+          try {
+            await load(true);
+          } finally {
+            if (alive()) el.querySelector('[data-run]').disabled = false;
+          }
+        });
     }
     await load();
   }

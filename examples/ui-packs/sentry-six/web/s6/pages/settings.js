@@ -1,6 +1,6 @@
 import { api, esc, toast, act, confirmDialog, confirmPassword } from '../core.js';
 import { icon } from '../icons.js';
-import { size, ago } from '../format.js';
+import { size, ago, plural } from '../format.js';
 import { forms } from './settings/forms.js';
 const groups = [
   [
@@ -49,6 +49,7 @@ export async function render(el, ctx) {
     notifications: ['/api/notification-rules'],
   };
   let unavailable = !admin && key !== 'account';
+  let loadError = '';
   const data = {};
   if (!unavailable)
     await Promise.all(
@@ -56,8 +57,8 @@ export async function render(el, ctx) {
         try {
           data[path] = await api(path);
         } catch (e) {
-          if (e.status === 403) unavailable = true;
-          else throw e;
+          unavailable = true;
+          loadError = e.status === 403 ? '' : e.message;
         }
       }),
     );
@@ -72,34 +73,68 @@ export async function render(el, ctx) {
   if (settings.power) state.power = settings.power;
   const values = {
     vehicles: state.vehicles.map((v) => v.name).join(', ') || 'Add a vehicle',
-    encoding: 'Per vehicle',
-    notifications: rules.rules.filter((r) => r.on).length + ' on',
     look: 'Sentry Six',
-    updates: upd.updateAvailable
-      ? 'Update available'
-      : upd.enabled
-        ? upd.latest
-          ? 'Up to date'
-          : 'Not checked'
-        : 'Source build',
-    security: sec.https ? 'HTTPS' : 'HTTP',
-    system: sys.converter?.ready ? 'Ready' : 'Starting',
-    power:
-      settings.power?.pricePerKwh != null
-        ? `${settings.power.currency} ${settings.power.pricePerKwh}/kWh`
-        : settings.power?.mode === 'tou'
-          ? 'Time of use'
-          : 'Not set',
-    advanced: 'Monitoring',
   };
-  el.innerHTML = `<div class="settings-layout ${sub ? 'detail-open' : ''}"><nav class="settings-nav" aria-label="Settings"><a class="account-card" href="#/settings/account"><span class="avatar">${esc((me.user || '?')[0].toUpperCase())}</span><span><b>${esc(me.user || 'Account')}</b><small>${esc(me.role || '')}</small></span><span>›</span></a>${(admin ? groups : []).map(([g, rows]) => `<h3>${g}</h3><div class="settings-group">${rows.map(([k, label, glyph]) => `<a href="#/settings/${k}" class="${key === k ? 'active' : ''}">${icon(glyph)}<span>${label}</span><small>${esc(k === key || k === 'vehicles' || k === 'look' ? values[k] || '' : '')}</small><span>›</span></a>`).join('')}</div>`).join('')}</nav><section class="settings-detail"><a class="settings-back" href="#/settings">‹ Settings</a><div data-detail></div></section></div>`;
+  el.innerHTML = `<div class="settings-layout ${sub ? 'detail-open' : ''}"><nav class="settings-nav" aria-label="Settings"><a class="account-card" href="#/settings/account"><span class="avatar">${esc((me.user || '?')[0].toUpperCase())}</span><span><b>${esc(me.user || 'Account')}</b><small>${esc(me.role || '')}</small></span><span>›</span></a>${(admin ? groups : []).map(([g, rows]) => `<h3>${g}</h3><div class="settings-group">${rows.map(([k, label, glyph]) => `<a href="#/settings/${k}" class="${key === k ? 'active' : ''}">${icon(glyph)}<span>${label}</span><small data-summary="${k}">${esc(k === 'vehicles' || k === 'look' ? values[k] || '' : '')}</small><span>›</span></a>`).join('')}</div>`).join('')}</nav><section class="settings-detail"><a class="settings-back" href="#/settings">‹ Settings</a><div data-detail></div></section></div>`;
+  // Summary failures and slow endpoints never hold up the list or Account.
+  let summariesStopped = false;
+  const vehicle = ctx.current();
+  const summaries = {
+    places: ['/api/places', (d) => `${(d.places || []).length} saved`],
+    ...(vehicle
+      ? {
+          cleanup: [
+            `/api/vehicles/${encodeURIComponent(vehicle.id)}/policy`,
+            (d) => (d.policy?.enabled ? 'On' : 'Off'),
+          ],
+        }
+      : {}),
+    encoding: ['/api/vehicles', (d) => plural((d.vehicles || []).length, 'vehicle')],
+    notifications: [
+      '/api/notification-rules',
+      (d) => `${(d.rules || []).filter((r) => r.on).length} on`,
+    ],
+    helpers: ['/api/nodes', (d) => `${(d.nodes || []).length} paired`],
+    updates: [
+      '/api/updates',
+      (d) =>
+        d.updateAvailable
+          ? 'Update available'
+          : d.enabled
+            ? d.latest
+              ? 'Up to date'
+              : 'Not checked'
+            : 'Source build',
+    ],
+    security: ['/api/security', (d) => (d.https ? 'HTTPS' : 'HTTP')],
+    system: ['/api/system', (d) => (d.converter?.ready ? 'Ready' : 'Starting')],
+    power: [
+      '/api/settings',
+      (d) =>
+        d.power?.mode === 'tou'
+          ? 'Time of use'
+          : d.power?.pricePerKwh != null
+            ? `${d.power.currency} ${d.power.pricePerKwh}/kWh`
+            : 'Not set',
+    ],
+    advanced: ['/api/metrics/settings', (d) => (d.enabled ? 'On' : 'Off')],
+    help: ['/api/reports', (d) => (d.settings?.share ? 'Sharing on' : 'Off')],
+  };
+  if (admin)
+    void Promise.allSettled(
+      Object.entries(summaries).map(async ([key, [path, label]]) => {
+        const result = await api(path);
+        if (!ctx.alive() || summariesStopped) return;
+        const row = el.querySelector(`[data-summary="${key}"]`);
+        if (row) row.textContent = label(result);
+      }),
+    );
   const box = el.querySelector('[data-detail]'),
     f = forms(box, ctx);
   let shared;
   try {
     if (unavailable) {
-      box.innerHTML =
-        '<div class="card">This page is not available to this account. <a href="#/settings/account">Open Account</a></div>';
+      box.innerHTML = `<div class="card">${esc(loadError || 'This page is not available to this account.')} <a href="#/settings/account">Open Account</a></div>`;
     } else if (key === 'vehicles') {
       box.innerHTML = `<div class="card"><div class="row"><h2 class="grow">Vehicles</h2><a class="btn" href="#/settings/vehicle-new">Add vehicle</a></div>${state.vehicles.map((v) => `<div class="health-check row"><div class="grow"><b>${esc(v.name)}</b><p>${esc(v.timezone)} · ${v.share?.healthy ? (v.share.writable === false ? 'Read-only' : 'Connected') : 'Unavailable'}</p><p>${esc(v.source.type === 'smb' ? v.source.share : v.source.path)}</p></div><a href="#/settings/vehicle/${encodeURIComponent(v.id)}">Edit</a></div>`).join('') || '<p>Add the car and the folder where its footage arrives.</p>'}${editing ? f.vehicleForm(editing === 'new' ? null : state.vehicles.find((v) => v.id === editing)) : ''}</div>`;
       f.wireSettings(editing);
@@ -167,7 +202,10 @@ export async function render(el, ctx) {
       box.innerHTML = '<div class="card"><h2>Help & feedback</h2><div data-shared></div></div>';
       shared = (await import('/web/reportsSettings.js')).createReportsSettings(
         box.querySelector('[data-shared]'),
-        { cls: { btn: 'btn', primary: 'btn primary', input: 'input' }, h24: () => state.h24 },
+        {
+          cls: { btn: 'btn', primary: 'btn primary', input: 'input' },
+          h24: () => state.h24,
+        },
       );
     } else if (key === 'encoding') {
       box.innerHTML = '<div data-shared></div>';
@@ -262,7 +300,10 @@ authorization: { credentials: '${esc(token)}' }</pre><p>For HTTPS, install the <
       box.innerHTML = `<div class="card"><h2>Look & interface</h2><label class="setting-row">Glass effect <input type="range" min="0" max="100" value="${state.glass}" data-glass></label><label class="setting-row">24-hour clock <input type="checkbox" class="toggle-switch" role="switch" data-clock ${state.h24 ? 'checked' : ''}></label><label class="setting-row">Reduce motion and effects <input type="checkbox" class="toggle-switch" role="switch" data-reduce ${settings.appearance?.reduceEffects ? 'checked' : ''}></label><label class="setting-row">Units <select data-units><option value="mi">Miles · °F · psi</option><option value="km" ${globalThis.SentryUnits.metric() ? 'selected' : ''}>Kilometres · °C · bar</option></select></label></div><h3>Interface for everyone</h3><div class="pack-grid">${[{ id: '', name: 'Original', description: 'The built-in interface' }, ...ui.packs].map((p, i) => `<div class="pack-card ${p.id === (ui.active || '') ? 'in-use' : ''}"><button data-pack="${esc(p.id)}" ${p.id === (ui.active || '') ? 'disabled' : ''}><span class="pack-preview" style="--preview-hue:${[145, 150, 260, 210, 35, 175][i % 6]}"><i></i><span><b></b><b></b><b></b></span></span><strong>${esc(p.name)}</strong><small>${p.id === (ui.active || '') ? '✓ In use' : 'Use this interface'}</small></button><p>${esc(p.description || '')}</p>${p.builtin === false ? `<button class="danger" data-delete-pack="${esc(p.id)}">Delete pack</button>` : ''}</div>`).join('')}</div><div class="toolbar"><input type="file" accept=".zip,application/zip" hidden data-file><button data-upload>Upload a pack…</button><a href="/api/ui-packs/original.zip" download>Download Original</a></div><p>Something wrong? <a href="/original">Open Original in this browser</a>.</p>`;
       const use = async (id) => {
         await confirmPassword();
-        await api('/api/ui-packs/active', { method: 'PUT', body: { id: id || null } });
+        await api('/api/ui-packs/active', {
+          method: 'PUT',
+          body: { id: id || null },
+        });
         location.reload();
       };
       box.querySelector('[data-glass]').oninput = (e) => {
@@ -338,11 +379,10 @@ authorization: { credentials: '${esc(token)}' }</pre><p>For HTTPS, install the <
       });
     } else box.innerHTML = '<div class="card">Choose a Settings page.</div>';
   } catch (e) {
-    if (e.status !== 403) throw e;
-    box.innerHTML =
-      '<div class="card">This page is not available to this account. <a href="#/settings/account">Open Account</a></div>';
+    box.innerHTML = `<div class="card">${esc(e.status === 403 ? 'This page is not available to this account.' : e.message)} <a href="#/settings/account">Open Account</a></div>`;
   }
   return () => {
+    summariesStopped = true;
     shared?.destroy?.();
     box.onclick = null;
     box.onchange = null;

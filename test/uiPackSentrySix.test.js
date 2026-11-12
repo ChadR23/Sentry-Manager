@@ -377,7 +377,19 @@ function element() {
     style: { setProperty() {} },
     addEventListener() {},
     removeEventListener() {},
-    append() {},
+    appended: [],
+    append(...els) {
+      this.appended.push(...els);
+    },
+    showModal() {
+      this.open = true;
+    },
+    close(value) {
+      this.open = false;
+      this.returnValue = value;
+      this.onclose?.();
+    },
+    elements: { withCan: { checked: true } },
     remove() {},
     querySelectorAll: () => [],
     querySelector(key) {
@@ -389,6 +401,7 @@ function element() {
 }
 async function browserEnv(t, reply) {
   const saved = {};
+  t.cleanupFns = [];
   for (const key of [
     'window',
     'document',
@@ -400,9 +413,10 @@ async function browserEnv(t, reply) {
   ])
     saved[key] = globalThis[key];
   globalThis.window = { addEventListener() {}, removeEventListener() {} };
+  const toasts = element();
   globalThis.document = {
     body: element(),
-    getElementById: () => null,
+    getElementById: (id) => (id === 'toasts' ? toasts : null),
     querySelector: () => null,
     createElement: element,
   };
@@ -419,9 +433,15 @@ async function browserEnv(t, reply) {
   };
   globalThis.fetch = async (url, opts) => {
     const data = await reply(url, opts);
-    return { ok: data?.status !== 403, status: data?.status || 200, json: async () => data };
+    if (url === '/api/auth/me' && !data?.role) data.role = 'admin';
+    return {
+      ok: !(data?.status >= 400),
+      status: data?.status || 200,
+      json: async () => data,
+    };
   };
   t.after(() => {
+    for (const stop of t.cleanupFns) stop();
     for (const [key, value] of Object.entries(saved)) globalThis[key] = value;
   });
 }
@@ -661,4 +681,392 @@ test('attention: informational rows are grey and legacy count labels use real pl
   assert.equal(items[0].tone, 'info');
   assert.equal(items[0].title, '1 clip checked');
   assert.equal(items[0].text, '2 recordings read');
+});
+
+const clickAction = (el, key, dataset = {}) =>
+  el.onclick({
+    target: {
+      closest: () => ({ dataset, hasAttribute: (a) => a === 'data-' + key }),
+    },
+  });
+const tick = () => new Promise((resolve) => setImmediate(resolve));
+const context = (id, extra = {}) => ({
+  current: () => ({ id, name: 'Tesla', share: { healthy: true } }),
+  state: { vehicles: [] },
+  alive: () => true,
+  ...extra,
+});
+
+for (const change of ['category', 'deselect', 'leave', 'confirm']) {
+  test('r3 footage: pending Move aborts on ' + change, async (t) => {
+    let resolvePreview;
+    const posts = [];
+    await browserEnv(t, (url, opts) => {
+      if (url.endsWith('/trash-preview'))
+        return new Promise((r) => {
+          resolvePreview = r;
+        });
+      if (url.endsWith('/trash')) {
+        posts.push(JSON.parse(opts.body));
+        return { moved: ['A', 'B'] };
+      }
+      if (url.includes('/days?')) return { days: [], total: 0, dates: [] };
+      if (url.includes('/recordings?'))
+        return {
+          recordings: [
+            { id: 'A', category: 'Recent' },
+            { id: 'B', category: 'Saved' },
+          ],
+          total: 2,
+        };
+      return { role: 'admin' };
+    });
+    const m = await import(browserModule('pages/footage.js')),
+      el = element();
+    const stop = await m.render(el, context('race-' + change));
+    t.cleanupFns.push(stop);
+    await clickAction(el, 'select');
+    await clickAction(el, 'all');
+    const pending = clickAction(el, 'move');
+    while (!resolvePreview) await tick();
+    if (change === 'confirm') {
+      resolvePreview({ recordings: 2, can: { logs: 2 } });
+      await tick();
+      assert.match(document.body.appended.at(-1).innerHTML, /2 recordings/);
+    }
+    if (change === 'leave') stop();
+    else
+      await clickAction(el, change === 'confirm' ? 'category' : change, {
+        category: 'Saved',
+      });
+    if (change !== 'confirm') resolvePreview({ recordings: 2, can: { logs: 2 } });
+    await tick();
+    const dialogs = document.body.appended.filter((x) => x.open);
+    // Accept a stale dialog if one survived: it must never submit.
+    for (const dlg of dialogs) dlg.close('ok');
+    await pending;
+    assert.equal(posts.length, 0);
+    assert.equal(dialogs.length, 0, 'scope change must close or prevent confirmation');
+  });
+}
+
+test('r3 cleanup: retention labels match their field names', async (t) => {
+  await browserEnv(t, () => ({ policy: { keepDays: {} }, preview: {} }));
+  const el = element(),
+    query = el.querySelector.bind(el);
+  el.querySelector = (s) => query(s.replace('#', '[id=') + (s.startsWith('#') ? ']' : ''));
+  await (await import(browserModule('pages/settings/cleanup.js'))).render(el, context('labels'));
+  for (const [key, name] of [
+    ['Recent', 'Driving'],
+    ['Sentry', 'Sentry'],
+    ['Saved', 'Saved'],
+    ['Other', 'other'],
+  ])
+    assert.match(
+      el.innerHTML,
+      new RegExp('Keep ' + name + ' clips [(]days[)]<input[^>]+name="keep-' + key + '"'),
+    );
+});
+
+test('r3 studio: vehicle changes discard all recording parameters', async (t) => {
+  await browserEnv(t, () => ({}));
+  const m = await import(browserModule('studio.js'));
+  assert.equal(typeof m.studioUrl, 'function');
+  const extra = {
+    folder: '/old',
+    date: '2026-11-11',
+    at: 'clip~1',
+    recording: 'A',
+  };
+  const v = { id: 'new', studioRoot: '/new' };
+  const q = new URL(m.studioUrl('viewer', v, extra, true), 'https://local').searchParams;
+  assert.deepEqual([...q.keys()], ['embed', 'root', 'vehicle']);
+  assert.equal(q.get('root'), '/new');
+  assert.equal(
+    new URL(m.studioUrl('viewer', v, extra), 'https://local').searchParams.get('folder'),
+    '/old',
+  );
+});
+
+for (const action of ['restore', 'delete'])
+  test('r3 bin: partial ' + action + ' refreshes and retries only failures', async (t) => {
+    const calls = [];
+    let remaining = ['A', 'B'];
+    let fail = true;
+    await browserEnv(t, (url) => {
+      if (url.startsWith('/api/bin?')) {
+        calls.push('refresh');
+        return {
+          items: remaining.map((id) => ({ id, bytes: 1, reason: 'manual' })),
+        };
+      }
+      if (url.endsWith('/' + action)) {
+        const id = url.split('/')[3];
+        calls.push(id);
+        if (id === 'B' && fail) return { status: 500, error: 'disk busy' };
+        remaining = remaining.filter((x) => x !== id);
+        return { restored: 1 };
+      }
+      return { role: 'admin' };
+    });
+    const el = element(),
+      stop = await (await import(browserModule('pages/bin.js'))).render(el, context('bin'));
+    t.cleanupFns.push(stop);
+    calls.length = 0;
+    await clickAction(el, 'select');
+    await clickAction(el, 'all');
+    const run = async () => {
+      const pending = clickAction(el, action + '-selected');
+      await tick();
+      document.body.appended.filter((x) => x.open).forEach((x) => x.close('ok'));
+      await pending;
+    };
+    await run();
+    assert.deepEqual(calls, ['A', 'B', 'refresh']);
+    assert.match(el.innerHTML, /0 selected/);
+    const notice = document.getElementById('toasts').appended.at(-1);
+    assert.match(notice.textContent, /(?:Restored|Deleted) 1; 1 failed: disk busy/);
+    assert.match(notice.className, /bad/);
+    fail = false;
+    calls.length = 0;
+    await clickAction(el, 'all');
+    await run();
+    assert.deepEqual(calls, ['B', 'refresh']);
+  });
+
+for (const page of [
+  'footage',
+  'bin',
+  'activity',
+  'health',
+  'health/backups',
+  'health/footage-check',
+  'settings',
+])
+  test('r3 permissions: viewer ' + page + ' hides admin controls', async (t) => {
+    await browserEnv(t, (url) => {
+      if (url === '/api/auth/me') return { role: 'viewer', user: 'Watcher' };
+      if (url.includes('/days?')) return { days: [], total: 0, dates: [] };
+      if (url.startsWith('/api/bin?')) return { items: [{ id: 'A', bytes: 1 }] };
+      return { checks: [], jobs: [], snapshots: [], policy: {} };
+    });
+    const el = element(),
+      stop = await (
+        await import(browserModule('pages/' + page.split('/')[0] + '.js'))
+      ).render(el, context('viewer', { sub: page.split('/')[1] || '' }));
+    t.cleanupFns.push(() => stop?.());
+    assert.doesNotMatch(
+      el.innerHTML,
+      /data-(?:select|protect|unprotect|move|restore|empty|clear|command|run|make)\b|href="#\/settings\/(?:vehicles|cleanup|helpers|security)"/,
+    );
+  });
+
+test('r3 footage: shrinking totals clamp the final page', async (t) => {
+  let total = 31;
+  const offsets = [];
+  await browserEnv(t, (url) => {
+    if (url.includes('/days?')) {
+      const offset = Number(new URL(url, 'https://local').searchParams.get('offset'));
+      offsets.push(offset);
+      return {
+        days: offset < total ? [{ day: '2026-11-11', recordings: 1, byCategory: {} }] : [],
+        total,
+        dates: [],
+      };
+    }
+    return { role: 'admin', recordings: [], total: 0 };
+  });
+  const el = element(),
+    stop = await (await import(browserModule('pages/footage.js'))).render(el, context('paging'));
+  t.cleanupFns.push(stop);
+  await clickAction(el, 'next');
+  total = 30;
+  await clickAction(el, 'select');
+  assert.deepEqual(offsets.slice(-2), [30, 0]);
+  assert.match(el.innerHTML, /Days 1–30 of 30/);
+  assert.doesNotMatch(el.innerHTML, /No footage matches/);
+});
+
+test('r3 settings: independent summaries survive nodes 403 and keep Account usable', async (t) => {
+  const calls = [];
+  await browserEnv(t, (url) => {
+    calls.push(url);
+    return (
+      {
+        '/api/auth/me': { role: 'admin', user: 'Owner' },
+        '/api/nodes': { status: 403 },
+        '/api/updates': { enabled: true, latest: '1' },
+        '/api/settings': {},
+        '/api/vehicles/car/policy': { policy: { enabled: false } },
+      }[url] || {}
+    );
+  });
+  const el = element(),
+    stop = await (
+      await import(browserModule('pages/settings.js'))
+    ).render(
+      el,
+      context('car', {
+        sub: 'account',
+        state: { vehicles: [{ id: 'car', name: 'Tesla' }] },
+      }),
+    );
+  t.cleanupFns.push(() => stop?.());
+  await tick();
+  assert.ok(calls.includes('/api/nodes'));
+  assert.match(el.querySelector('[data-detail]').innerHTML, /Sign out/);
+  assert.match(el.querySelector('[data-summary="updates"]').textContent, /Up to date/);
+  assert.match(el.querySelector('[data-summary="cleanup"]').textContent, /Off/);
+  assert.equal(el.querySelector('[data-summary="helpers"]').textContent, '');
+});
+
+for (const action of ['protect', 'unprotect'])
+  test('r3 footage: ' + action + ' confirmation closes on selection clear', async (t) => {
+    const posts = [];
+    await browserEnv(t, (url, opts) => {
+      if (url.endsWith('/protect')) posts.push(opts);
+      if (url.includes('/days?')) return { days: [], dates: [], total: 0 };
+      if (url.includes('/recordings?')) return { recordings: [{ id: 'A' }], total: 1 };
+      return { role: 'admin' };
+    });
+    const el = element(),
+      stop = await (await import(browserModule('pages/footage.js'))).render(el, context(action));
+    t.cleanupFns.push(stop);
+    await clickAction(el, 'select');
+    await clickAction(el, 'all');
+    const pending = clickAction(el, action);
+    await tick();
+    const dlg = document.body.appended.at(-1);
+    assert.equal(dlg.open, true);
+    await clickAction(el, 'deselect');
+    await pending;
+    assert.equal(dlg.open, false);
+    assert.deepEqual(posts, []);
+  });
+test('r3 actions: an aborted request is silent', async (t) => {
+  await browserEnv(t, () => ({}));
+  const { act } = await import(browserModule('core.js'));
+  await act(async () => {
+    throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
+  })();
+  assert.equal(document.getElementById('toasts').appended.length, 0);
+});
+test('r3 bin: scope change closes pending Delete forever', async (t) => {
+  const posts = [];
+  await browserEnv(t, (url, opts) => {
+    if (opts.method === 'POST') posts.push(url);
+    return url.startsWith('/api/bin?')
+      ? { items: [{ id: 'A', reason: 'manual', bytes: 1 }] }
+      : { role: 'admin' };
+  });
+  const el = element(),
+    stop = await (await import(browserModule('pages/bin.js'))).render(el, context('delete-race'));
+  t.cleanupFns.push(stop);
+  await clickAction(el, 'select');
+  await clickAction(el, 'all');
+  const pending = clickAction(el, 'delete-selected');
+  await tick();
+  const dlg = document.body.appended.at(-1);
+  await clickAction(el, 'reason', { reason: 'policy' });
+  const survived = dlg.open;
+  if (survived) dlg.close('ok');
+  await pending;
+  assert.equal(survived, false);
+  assert.deepEqual(posts, []);
+});
+
+for (const action of ['move', 'protect', 'unprotect'])
+  test(
+    'r3 footage: confirmed ' + action + ' submits only selected ids still in scope',
+    async (t) => {
+      let reads = 0;
+      const posts = [];
+      await browserEnv(t, (url, opts) => {
+        if (url.includes('/days?')) return { days: [], total: 0, dates: [] };
+        if (url.includes('/recordings?')) {
+          const recordings = ++reads === 1 ? [{ id: 'A' }, { id: 'B' }] : [{ id: 'B' }];
+          return { recordings, total: recordings.length };
+        }
+        if (url.endsWith('/trash-preview')) return { recordings: 1, can: { logs: 1 } };
+        if (url.endsWith('/trash') || url.endsWith('/protect')) {
+          posts.push(JSON.parse(opts.body));
+          return { moved: ['B'] };
+        }
+        return { role: 'admin' };
+      });
+      const el = element(),
+        stop = await (
+          await import(browserModule('pages/footage.js'))
+        ).render(el, context('success-' + action));
+      t.cleanupFns.push(stop);
+      await clickAction(el, 'select');
+      await clickAction(el, 'all');
+      const pending = clickAction(el, action);
+      await tick();
+      const dlg = document.body.appended.at(-1);
+      assert.match(dlg.innerHTML, /1 (?:selected )?recording/);
+      assert.doesNotMatch(dlg.innerHTML, /2 recordings/);
+      dlg.close('ok');
+      await pending;
+      assert.deepEqual(posts, [
+        action === 'move'
+          ? { ids: ['B'], withCan: true }
+          : { ids: ['B'], protected: action === 'protect' },
+      ]);
+    },
+  );
+
+test('r3 bin: a failed middle item does not prevent later restores', async (t) => {
+  let remaining = ['A', 'B', 'C'];
+  const calls = [];
+  await browserEnv(t, (url) => {
+    if (url.startsWith('/api/bin?')) {
+      calls.push('refresh');
+      return { items: remaining.map((id) => ({ id, bytes: 1 })) };
+    }
+    if (url.endsWith('/restore')) {
+      const id = url.split('/')[3];
+      calls.push(id);
+      if (id === 'B') return { status: 500, error: 'disk busy' };
+      remaining = remaining.filter((x) => x !== id);
+      return { restored: 1 };
+    }
+    return { role: 'admin' };
+  });
+  const el = element(),
+    stop = await (await import(browserModule('pages/bin.js'))).render(el, context('middle'));
+  t.cleanupFns.push(stop);
+  calls.length = 0;
+  await clickAction(el, 'restore-all');
+  assert.deepEqual(calls, ['A', 'B', 'C', 'refresh']);
+  assert.match(
+    document.getElementById('toasts').appended.at(-1).textContent,
+    /Restored 2; 1 failed: disk busy/,
+  );
+});
+
+test('r3 settings: a failed selected page keeps the Settings list and Account link', async (t) => {
+  await browserEnv(t, (url) =>
+    url === '/api/auth/me'
+      ? { role: 'admin', user: 'Owner' }
+      : { status: 500, error: 'Temporarily unavailable' },
+  );
+  const el = element();
+  const stop = await (
+    await import(browserModule('pages/settings.js'))
+  ).render(el, context('settings-error', { sub: 'updates' }));
+  t.cleanupFns.push(() => stop?.());
+  assert.match(el.innerHTML, /aria-label="Settings"/);
+  assert.match(el.innerHTML, /href="#\/settings\/account"/);
+  assert.match(el.querySelector('[data-detail]').innerHTML, /Temporarily unavailable/);
+});
+
+test('r3 permissions: viewer empty Footage and check results have no admin links', async (t) => {
+  await browserEnv(t, url => url === '/api/auth/me' ? { role: 'viewer' } : { more: 1, problems: [], checked: 1 });
+  const el = element();
+  await (await import(browserModule('pages/footage.js'))).render(el, context('empty', { current: () => null }));
+  assert.doesNotMatch(el.innerHTML, /href="#\/settings\/vehicles"/);
+  const stop = await (await import(browserModule('pages/health.js'))).render(el, context('viewer-check', { sub: 'footage-check', state: { vehicles: [{id:'car',name:'Tesla'}] } }));
+  t.cleanupFns.push(stop);
+  assert.doesNotMatch(el.innerHTML, /support-bundle|data-check=/);
 });

@@ -51,7 +51,7 @@ const page = document.getElementById('page');
 let cleanup = () => {},
   seq = 0;
 export const pages = {};
-export async function render() {
+export async function render(vehicleChanged = false) {
   const ticket = ++seq;
   cleanup?.();
   cleanup = () => {};
@@ -92,6 +92,7 @@ export async function render() {
         key,
         current(),
         Object.fromEntries([...q].map(([k, v]) => [k === 'day' ? 'date' : k, v])),
+        vehicleChanged === true,
       );
       return;
     }
@@ -141,9 +142,10 @@ async function refresh() {
       : '';
   pick.querySelector('select')?.addEventListener('change', (e) => {
     clearFootageSelections();
+    history.replaceState(null, '', location.hash.split('?')[0]);
     state.vehicleId = e.target.value;
     localStorage.setItem('s6:vehicle', state.vehicleId);
-    render();
+    render(true);
   });
   document.getElementById('bell').innerHTML =
     icon('notifications') +
@@ -157,9 +159,10 @@ window.addEventListener('message', (e) => {
   if (e.data.type === 'showInFolder') location.hash = '#/footage';
   if (e.data.type === 'select-vehicle' && state.vehicles.some((v) => v.id === e.data.id)) {
     clearFootageSelections();
+    history.replaceState(null, '', location.hash.split('?')[0]);
     state.vehicleId = e.data.id;
     localStorage.setItem('s6:vehicle', e.data.id);
-    render();
+    render(true);
   }
 });
 Promise.all([api('/api/updates'), import('/web/buildLabel.js'), api('/api/auth/me')])
@@ -203,5 +206,7 @@ function fitUnderBarsSoon() {
 }
 window.addEventListener('scroll', fitUnderBarsSoon, { passive: true });
 window.addEventListener('resize', fitUnderBarsSoon);
-new MutationObserver(fitUnderBarsSoon).observe(document.body, { childList: true });
+new MutationObserver(fitUnderBarsSoon).observe(document.body, {
+  childList: true,
+});
 fitUnderBarsSoon();

@@ -21,7 +21,10 @@ export async function api(path, { method, body, ...rest } = {}, retried = false)
     await confirmPassword();
     return api(path, { method, body, ...rest }, true);
   }
-  if (!res.ok) throw Object.assign(new Error(data.error || res.statusText), { status: res.status });
+  if (!res.ok)
+    throw Object.assign(new Error(data.error || res.statusText), {
+      status: res.status,
+    });
   return data;
 }
 export function toast(text, bad = false) {
@@ -31,13 +34,17 @@ export function toast(text, bad = false) {
   document.getElementById('toasts').append(el);
   setTimeout(() => el.remove(), 6000);
 }
-export function confirmDialog({ title, body, ok = 'Confirm', danger = false, onConfirm }) {
+export function confirmDialog({ title, body, ok = 'Confirm', danger = false, onConfirm, signal }) {
   return new Promise((resolve) => {
+    if (signal?.aborted) return resolve(false);
     const dlg = document.createElement('dialog');
     dlg.innerHTML = `<form method="dialog"><h2>${esc(title)}</h2><div>${body}</div><footer><button value="cancel" type="button">Cancel</button><button value="ok" class="${danger ? 'danger' : 'primary'}">${esc(ok)}</button></footer></form>`;
     document.body.append(dlg);
     dlg.querySelector('[value=cancel]').onclick = () => dlg.close('cancel');
+    const abort = () => dlg.close('cancel');
+    signal?.addEventListener('abort', abort, { once: true });
     dlg.onclose = () => {
+      signal?.removeEventListener('abort', abort);
       const yes = dlg.returnValue === 'ok';
       if (yes) onConfirm?.(dlg.querySelector('form'));
       dlg.remove();
@@ -98,6 +105,7 @@ export const act = (fn) => async (e) => {
   try {
     await fn(e);
   } catch (err) {
+    if (err.name === 'AbortError') return;
     toast(err.message, true);
   }
 };

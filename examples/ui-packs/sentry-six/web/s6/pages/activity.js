@@ -4,6 +4,7 @@ import { plural, dayLabel, dayKey, timeLabel, duration, size } from '../format.j
 import { icon } from '../icons.js';
 import { follow, counts, ACTIVE, PAUSED, Pace, workingMs, hardwareLabel } from '../convert.js';
 export async function render(el, { current, state, alive }) {
+  const admin = (await api('/api/auth/me')).role === 'admin';
   const v = current();
   let stopped = false,
     busy = false,
@@ -39,7 +40,7 @@ export async function render(el, { current, state, alive }) {
       if (!groups.has(day)) groups.set(day, []);
       groups.get(day).push(j);
     }
-    el.innerHTML = `<div class="toolbar"><span class="grow"></span><button data-clear ${!history.length ? 'disabled' : ''}>Clear finished</button></div>${running.length || mine || speed.running ? '<h2>Now</h2>' : '<p>Nothing running right now</p>'}${mine ? `<section class="card"><h3>Converting ${esc(v.name)}</h3><p>${esc(hardware || 'Preparing the encoder')} · started ${timeLabel(mine.createdAt, state.h24)}</p>${c.total ? `<progress value="${c.done}" max="${c.total}" aria-label="Conversion progress"></progress><p>${c.done} of ${plural(c.total, 'clip')} · ${Math.round((100 * c.done) / c.total)}%</p>` : '<p>Looking for clips…</p>'}${p.leftMs != null ? `<p>About ${duration(p.leftMs / 60000)} left</p>` : ''}${Number.isFinite(mine.counters?.savedBytes) ? `<p>${size(mine.counters.savedBytes)} saved so far</p>` : ''}${p.perMinute ? `<p>${p.perMinute.toFixed(1)} clips/min</p>` : ''}${mine.discoveryComplete === false ? '<p>Still looking for clips; the total may grow.</p>' : ''}<div class="row"><button data-command="${PAUSED.has(mine.state) ? 'resume' : 'pause'}">${PAUSED.has(mine.state) ? 'Resume' : 'Pause'}</button><button data-command="cancel">Stop</button><a href="#/encoder">Open Encoder</a></div></section>` : ''}${speed.running ? `<section class="card"><h3>Indexing speed data</h3>${speed.total ? `<progress value="${speed.done}" max="${speed.total}"></progress><p>${speed.done} of ${plural(speed.total, 'clip')} read</p>` : '<p>Reading clips…</p>'}${speed.day ? `<p>Working on ${dayLabel(speed.day)}</p>` : ''}</section>` : ''}${running
+    el.innerHTML = `<div class="toolbar"><span class="grow"></span>${admin ? `<button data-clear ${!history.length ? 'disabled' : ''}>Clear finished</button>` : ''}</div>${running.length || mine || speed.running ? '<h2>Now</h2>' : '<p>Nothing running right now</p>'}${mine ? `<section class="card"><h3>Converting ${esc(v.name)}</h3><p>${esc(hardware || 'Preparing the encoder')} · started ${timeLabel(mine.createdAt, state.h24)}</p>${c.total ? `<progress value="${c.done}" max="${c.total}" aria-label="Conversion progress"></progress><p>${c.done} of ${plural(c.total, 'clip')} · ${Math.round((100 * c.done) / c.total)}%</p>` : '<p>Looking for clips…</p>'}${p.leftMs != null ? `<p>About ${duration(p.leftMs / 60000)} left</p>` : ''}${Number.isFinite(mine.counters?.savedBytes) ? `<p>${size(mine.counters.savedBytes)} saved so far</p>` : ''}${p.perMinute ? `<p>${p.perMinute.toFixed(1)} clips/min</p>` : ''}${mine.discoveryComplete === false ? '<p>Still looking for clips; the total may grow.</p>' : ''}<div class="row">${admin ? `<button data-command="${PAUSED.has(mine.state) ? 'resume' : 'pause'}">${PAUSED.has(mine.state) ? 'Resume' : 'Pause'}</button><button data-command="cancel">Stop</button>` : ''}<a href="#/encoder">Open Encoder</a></div></section>` : ''}${speed.running ? `<section class="card"><h3>Indexing speed data</h3>${speed.total ? `<progress value="${speed.done}" max="${speed.total}"></progress><p>${speed.done} of ${plural(speed.total, 'clip')} read</p>` : '<p>Reading clips…</p>'}${speed.day ? `<p>Working on ${dayLabel(speed.day)}</p>` : ''}</section>` : ''}${running
       .filter((j) => !mine || j.type !== 'conversion')
       .map(row)
       .join(
@@ -47,10 +48,12 @@ export async function render(el, { current, state, alive }) {
       )}${[...groups].map(([day, list]) => `<h2>${dayLabel(day)}</h2>${list.map(row).join('')}`).join('')}`;
     el.onclick = act(async (e) => {
       const b = e.target.closest('button');
-      if (!b) return;
+      if (!b || !admin) return;
       if (b.hasAttribute('data-clear')) {
         const body = v ? { vehicle: v.id } : {};
-        const preview = await api('/api/jobs/clear', { body: { ...body, preview: true } });
+        const preview = await api('/api/jobs/clear', {
+          body: { ...body, preview: true },
+        });
         if (!preview.jobs) return;
         if (
           !(await confirmDialog({

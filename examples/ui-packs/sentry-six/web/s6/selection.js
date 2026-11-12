@@ -1,11 +1,31 @@
 export function createSelection() {
+  let generation = 0;
+  const listeners = new Set();
+  const changed = () => {
+    generation++;
+    for (const fn of listeners) fn();
+  };
   const selected = new Set();
   return {
-    add: (ids) => ids.forEach((id) => selected.add(id)),
-    remove: (ids) => ids.forEach((id) => selected.delete(id)),
+    add: (ids) => {
+      changed();
+      ids.forEach((id) => selected.add(id));
+    },
+    remove: (ids) => {
+      changed();
+      ids.forEach((id) => selected.delete(id));
+    },
     has: (id) => selected.has(id),
     count: () => selected.size,
-    clear: () => selected.clear(),
+    clear: () => {
+      changed();
+      selected.clear();
+    },
+    generation: () => generation,
+    subscribe: (fn) => {
+      listeners.add(fn);
+      return () => listeners.delete(fn);
+    },
     ids: () => [...selected],
     dayState: (ids) => {
       const n = ids.filter((id) => selected.has(id)).length;
