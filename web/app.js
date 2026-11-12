@@ -2842,6 +2842,8 @@
         location.reload();
         return;
       }
+      // every topic for the shared Viewer parts too (web/viewerExtras.js: "Car data in the Viewer")
+      window.dispatchEvent(new CustomEvent('sentry:changed', { detail: { topics } }));
       if (topics.includes('vehicles') || topics.includes('inventory') || topics.includes('bin')) await loadVehicles().catch(() => {});
       if (topics.includes('notifications')) await loadNotes().catch(() => {});
       const affects = {

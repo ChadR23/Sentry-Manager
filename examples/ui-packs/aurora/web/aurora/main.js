@@ -292,6 +292,8 @@ function connect() {
       location.reload();
       return;
     }
+    // every topic for the shared Viewer parts too (web/viewerExtras.js: "Car data in the Viewer")
+    window.dispatchEvent(new CustomEvent('sentry:changed', { detail: { topics } }));
     if (topics.some((t) => ['vehicles', 'inventory', 'bin'].includes(t))) await loadVehicles().catch(() => {});
     if (topics.includes('notifications')) await loadNotes().catch(() => {});
     if (topics.includes('jobs')) refreshJobsBadge();

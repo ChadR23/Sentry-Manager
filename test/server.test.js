@@ -1649,7 +1649,7 @@ test('Viewer dashboards: kept per account, cleaned of anything that is not a blo
   const s = await startServer(dir);
   try {
     await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
-    assert.deepEqual((await s.call('GET', '/api/dashboards')).data, { boards: [], active: null }, 'none yet: the page uses its default');
+    assert.deepEqual((await s.call('GET', '/api/dashboards')).data, { boards: [], active: null, carData: { enabled: false } }, 'none yet: the page uses its default (and car data in the Viewer is off on a new install)');
     const put = await s.call('PUT', '/api/dashboards', { active: 'b2', boards: [
       { id: 'b1', name: 'Drive', placement: 'below', blocks: [{ type: 'gauge', signals: ['dash.speed'] }, { type: 'wide', signals: ['a', 'b', 'c', 'd'] }, { type: 'evil', signals: ['x'] }] },
       { id: 'b2', name: '  Battery\nnerd ', placement: 'sideways', metric: true, blocks: [{ type: 'small', signals: ['can.BattVoltage132', '<script>'] }] }

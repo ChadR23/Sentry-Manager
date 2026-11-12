@@ -221,6 +221,8 @@ function connect() {
     let topics = [];
     try { ({ topics } = JSON.parse(e.data)); } catch { return; }
     if (topics.includes('interface')) { location.reload(); return; }
+    // every topic for the shared Viewer parts too (web/viewerExtras.js: "Car data in the Viewer")
+    window.dispatchEvent(new CustomEvent('sentry:changed', { detail: { topics } }));
     live.classList.add('pulse');
     setTimeout(() => live.classList.remove('pulse'), 600);
     if (topics.some((t) => ['vehicles', 'inventory', 'bin'].includes(t))) await loadVehicles().catch(() => {});

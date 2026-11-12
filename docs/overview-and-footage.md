@@ -126,6 +126,12 @@ rest, so a clip the Encoder skipped or could not convert is easy to find.
   plate. Playing or a double-click resets it.
 - **Frame by frame on phones**: while paused, large ‹ › buttons on the main
   camera step one frame back or forward.
+- **Car data** (CAN Bridge, off by default): the stat blocks under the
+  cameras and the *Every stat* List, with Move, Customize and Hide. They are
+  a CAN feature: an admin turns them on with *Car data in the Viewer* in the
+  Nerd settings ([CAN Bridge](can-bridge-api.md#car-data-in-the-viewer)).
+  While off, no interface shows them (not even a *Show car data* button);
+  each interface's own telemetry and on-video overlay stay.
 - **Find clips at a place** (the pin on the map, every interface pack):
   tap a spot and every clip recorded within 150 m of it is listed, any day
   and any vehicle, newest first; picking one opens it at that moment. Only

@@ -84,6 +84,62 @@ function saveResume(pos) {
   } catch { /* private window: no resume */ }
 }
 
+// ---- "Car data in the Viewer" (the Nerd settings): whether the Viewer shows
+// the car-data bar (web/statDash.js) at all. It comes with the bar's own
+// dashboards (GET /api/dashboards, carData), asked once per page and again
+// when it changes (the 'carData' topic of /api/events, which each interface's
+// shell passes on as a 'sentry:changed' event; the Studio Viewer, in a frame,
+// hears its page's).
+let carDataAsk = null; // Promise<the /api/dashboards answer, or null>
+function carDataAnswer() {
+  carDataAsk ||= fetch('/api/dashboards', { credentials: 'same-origin' }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+  return carDataAsk;
+}
+/** Whether a /api/dashboards answer says the Viewer shows the car data (off when unknown). */
+export const carDataOn = (d) => d?.carData?.enabled === true;
+const carDataWatchers = new Set();
+function carDataTopics(e) {
+  if (!Array.isArray(e?.detail?.topics) || !e.detail.topics.includes('carData')) return;
+  carDataAsk = null;
+  for (const fn of [...carDataWatchers]) { try { fn(); } catch { /* the next one still */ } }
+}
+let carDataHeard = false;
+function onCarDataChange(fn) {
+  if (!carDataHeard) {
+    carDataHeard = true;
+    const wins = [globalThis.window];
+    try { if (globalThis.window?.top && globalThis.window.top !== globalThis.window && globalThis.window.top.document) wins.push(globalThis.window.top); } catch { /* another site's frame */ }
+    for (const w of wins) { try { w?.addEventListener?.('sentry:changed', carDataTopics); } catch { /* not this one */ } }
+  }
+  carDataWatchers.add(fn);
+  return () => carDataWatchers.delete(fn);
+}
+
+/**
+ * The car-data bar while "Car data in the Viewer" is on: attach(statDash module, answer)
+ * makes it (once on), and it is destroyed when it is turned off. Returns a stop function.
+ */
+export function followCarData(attach, { load = () => import('/web/statDash.js') } = {}) {
+  let dash = null;
+  let gone = false;
+  let turn = 0;
+  const sync = () => {
+    const mine = ++turn;
+    carDataAnswer().then((d) => {
+      if (gone || mine !== turn) return null;
+      if (!carDataOn(d)) { dash?.destroy(); dash = null; return null; }
+      if (dash) return null;
+      return load().then((mod) => {
+        if (gone || mine !== turn || dash) return;
+        dash = attach(mod, d);
+      });
+    }).catch(() => { /* without it */ });
+  };
+  sync();
+  const off = onCarDataChange(sync);
+  return () => { gone = true; off(); dash?.destroy(); dash = null; };
+}
+
 export function attachViewerExtras({ stage, videos: listVideos = () => [], main: mainVideo = () => null, buttons = null, step = null, where: whereNow = null, resumeTo = null, offerResume = true, stepsFixed = false } = {}) {
   addCss();
   // a page may attach this before everything it asks about exists yet
@@ -316,15 +372,15 @@ export function attachViewerExtras({ stage, videos: listVideos = () => [], main:
   setTimeout(sync, 0);
 
   // ---- the car's data at this moment, in blocks you choose (web/statDash.js);
-  // over the cameras where a page's panels float over them (Studio)
-  let dash = null;
-  let dashGone = false;
-  import('/web/statDash.js').then(({ attachStatDash }) => {
-    if (dashGone) return;
+  // over the cameras where a page's panels float over them (Studio). Only when
+  // "Car data in the Viewer" is on (the Nerd settings; off by default): while off
+  // nothing of it is made, not even its Show button. Turned on or off, it comes or
+  // goes here at once (the interface's live updates), else at the next Viewer.
+  cleanups.push(followCarData(({ attachStatDash, primeBoards }, d) => {
+    primeBoards(d); // (its dashboards came with the answer: not asked for again)
     // (the row of buttons: the playback controls the floating boxes keep clear of)
-    dash = attachStatDash({ stage, videos, main, over: stepsFixed, controls: buttons });
-  }).catch(() => { /* without it */ });
-  cleanups.push(() => { dashGone = true; dash?.destroy(); });
+    return attachStatDash({ stage, videos, main, over: stepsFixed, controls: buttons });
+  }));
 
   return {
     destroy() {

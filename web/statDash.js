@@ -979,6 +979,10 @@ function frontPathOf(videos) {
 // ---- saved dashboards (per account, on the server)
 const H = { 'Content-Type': 'application/json', 'X-Requested-With': 'sentry-six-manager' };
 let saved = null; // Promise<{ boards, active }>
+/** The dashboards from a /api/dashboards answer the page has already (web/viewerExtras.js asks it first, for carData). */
+export function primeBoards(d) {
+  if (!saved && d) saved = Promise.resolve(d?.boards?.length ? d : { boards: [DEFAULT_BOARD()], active: 'default' });
+}
 function loadBoards() {
   saved ||= fetch('/api/dashboards', { credentials: 'same-origin' }).then((r) => (r.ok ? r.json() : null)).catch(() => null)
     .then((d) => (d?.boards?.length ? d : { boards: [DEFAULT_BOARD()], active: 'default' }));

@@ -2314,7 +2314,8 @@ async function main() {
     const renamed = (id) => renames.reduce((x, m) => m.get(x) ?? x, id);
     return { ...d, rev: DASH_REV, boards: d.boards.map((b) => ({ ...b, blocks: (Array.isArray(b?.blocks) ? b.blocks : []).map((x) => (Array.isArray(x?.signals) ? { ...x, signals: x.signals.map(renamed) } : x)) })) };
   };
-  r.add('GET', '/api/dashboards', (req, res, { user }) => upgradeBoards(db.get(`dash:${user}`, null)) || { boards: [], active: null });
+  // (carData: whether the Viewer shows them at all, the Nerd settings' "Car data in the Viewer")
+  r.add('GET', '/api/dashboards', (req, res, { user }) => ({ ...(upgradeBoards(db.get(`dash:${user}`, null)) || { boards: [], active: null }), carData: viewerCarData() }));
   r.add('PUT', '/api/dashboards', (req, res, { body, user }) => {
     const clean = cleanBoards(body);
     db.set(`dash:${user}`, clean);
@@ -2702,6 +2703,30 @@ async function main() {
     return { ...c, tokens: Array.isArray(c.tokens) ? c.tokens : [] };
   };
   const saveCanCfg = (c) => db.set('can', { enabled: Boolean(c.enabled), at: c.at || null, tokens: c.tokens });
+  // ---- the Viewer's car data (web/statDash.js: the stat blocks under the cameras and the
+  // "Every stat" List): a CAN feature, off by default, turned on in the Nerd settings.
+  // db 'viewerCarData': { enabled, at }. A database from before it had the bar on for
+  // everyone: there it starts on once, when it holds CAN data (CAN Bridge logs, a CAN
+  // Bridge token) or a saved car-data dashboard, so a bar in use stays; else off.
+  const hasCanLogs = () => {
+    const root = path.join(DATA, 'can');
+    try {
+      return fs.readdirSync(root, { withFileTypes: true }).some((d) => {
+        if (!d.isDirectory()) return false;
+        try { return fs.readdirSync(path.join(root, d.name)).some((f) => f.endsWith('.log.xz')); } catch { return false; }
+      });
+    } catch { return false; }
+  };
+  const hasDashboards = () => Boolean(db.q("SELECT 1 AS x FROM settings WHERE key LIKE 'dash:%' LIMIT 1").get());
+  const viewerCarData = () => {
+    const c = db.get('viewerCarData', null);
+    if (c && typeof c.enabled === 'boolean') return { enabled: c.enabled };
+    const why = [hasCanLogs() && 'CAN Bridge logs', canCfg().tokens.length && 'a CAN Bridge token', hasDashboards() && 'saved car-data dashboards'].filter(Boolean);
+    db.set('viewerCarData', { enabled: why.length > 0, at: Date.now(), migrated: true });
+    if (why.length) log.info(`Car data in the Viewer: on (this server has ${why.join(', ')})`);
+    return { enabled: why.length > 0 };
+  };
+  viewerCarData();
   const tokenHash = (t) => crypto.createHash('sha256').update(String(t)).digest('hex');
   /** The token a request carries (compared in constant time with every token), or null. */
   const canTokenOf = (req) => {
@@ -2864,8 +2889,17 @@ async function main() {
       keys, map: canMap(), vehicles: vehicles.list().map((v) => ({ id: v.id, name: v.name })), index: canIndex.status(),
       tokens: cfg.tokens.map((t) => ({ id: t.id, label: t.label, vehicleId: t.vehicleId, key: t.key, createdAt: t.createdAt, lastUsedAt: t.lastUsedAt })),
       trust: await Promise.all(keys.map((k) => canTrust.summary(k))),
-      keep: canPrune.status()
+      keep: canPrune.status(),
+      viewerCarData: viewerCarData()
     };
+  });
+  // "Car data in the Viewer" (admins): the Viewer's stat blocks and Every stat List, in every interface
+  r.add('POST', '/api/can/viewer-car-data', (req, res, { body, user }) => {
+    if (typeof body?.enabled !== 'boolean') throw new HttpError(400, 'Send { "enabled": true | false }.');
+    db.set('viewerCarData', { enabled: body.enabled, at: Date.now() });
+    audit.info(`Car data in the Viewer turned ${body.enabled ? 'on' : 'off'}: ${by(req, user)}`);
+    announce('carData');
+    return viewerCarData();
   });
   // "Delete CAN logs with their footage" (on by default)
   r.add('POST', '/api/can/keep', (req, res, { body, user }) => {

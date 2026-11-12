@@ -406,6 +406,7 @@ export function openNerdPanel() {
            <div class="nd-row"><button type="button" class="nd-btn nd-danger" data-off>Turn off…</button></div>`
         : `<p>Off: port ${port} is closed, and the upload address answers "not found".</p>
            <div class="nd-row"><button type="button" class="nd-btn" data-on>Turn on…</button></div>`}
+      ${carDataHtml()}
       ${https || st.port?.https ? '' : '<p class="nd-warn">This page is on plain HTTP. The app only uploads over HTTPS: open Sentry Six Manager with https:// for the address and the certificate it pins.</p>'}
 
       <h3>Tokens (one per car)</h3>
@@ -446,6 +447,14 @@ export function openNerdPanel() {
           ${t.pin ? `<div class="nd-row"><button type="button" class="nd-btn" data-forget="${esc(k)}">Forget the pairing…</button></div>` : ''}
         </div>`;
       }).join('')}` : ''}`;
+  }
+
+  // "Car data in the Viewer": the stat blocks and Every stat List under the cameras, in every interface (off by default)
+  function carDataHtml() {
+    const on = st.viewerCarData?.enabled === true;
+    return `<h3>Car data in the Viewer</h3>
+      <label class="nd-lab nd-check"><input type="checkbox" data-cardata${on ? ' checked' : ''}> Car data in the Viewer</label>
+      <p class="nd-muted">Shows the CAN stats bar and the Every stat list under the cameras (every interface, everyone on this server).</p>`;
   }
 
   // "Delete CAN logs with their footage" (canPrune.js), and what its last look at each car did
@@ -717,11 +726,17 @@ export function openNerdPanel() {
     es.addEventListener('changed', (e) => {
       let topics = [];
       try { ({ topics } = JSON.parse(e.data)); } catch { return; }
-      if (topics.includes('can') || topics.includes('vehicles')) live();
+      if (topics.includes('can') || topics.includes('vehicles') || topics.includes('carData')) live();
     });
   } catch { /* no live updates: the panel still works */ }
 
   body.addEventListener('change', async (e) => {
+    const car = e.target.closest('[data-cardata]');
+    if (car) {
+      await confirmThen('/api/can/viewer-car-data', post('', { enabled: car.checked }));
+      await draw();
+      return;
+    }
     const keep = e.target.closest('[data-keep]');
     if (keep) {
       const on = keep.checked;

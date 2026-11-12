@@ -24,6 +24,30 @@ token, asks for the password and shows:
 - the token, once (only its SHA-256 is stored);
 - the server certificate's SHA-256 fingerprint, for the app to pin.
 
+## Car data in the Viewer
+
+The Viewer's car-data bar (the stat blocks under the cameras, the *Every
+stat* List, with Move, Customize and Hide; `web/statDash.js`) is part of the
+CAN Bridge: **off by default**, in every interface (the built-in one and the
+four packs). While off it is not made at all: no bar, no List, no *Show car
+data* button, no room kept for it. The interfaces' own telemetry panels and
+on-video overlays stay as they are.
+
+An admin turns it on with the **Car data in the Viewer** switch in the Nerd
+settings (one click, no password). It is one setting for the whole server
+(`viewerCarData` in the database), audit-logged, and goes to every account
+with the bar's own dashboards: `GET /api/dashboards` answers
+`carData: { "enabled": true | false }` (watch-only accounts read it too;
+`POST /api/can/viewer-car-data` `{ "enabled": true | false }` changes it,
+admins only). A Viewer that is open shows or drops the bar at once (the
+`carData` topic of `/api/events`), else at the next Viewer. Each browser can
+still hide the bar with its own *Hide* button, as before.
+
+A server that had the bar before this setting: the first start with it turns
+it **on** once when the server already has CAN data (a CAN Bridge log, a CAN
+Bridge token) or a car-data dashboard saved by any account, so a bar in use
+stays; otherwise it starts off. After that the choice is kept as set.
+
 ## Tokens: one per car
 
 Each token is for one car. The owner makes it for a car in the Nerd settings

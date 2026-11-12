@@ -213,6 +213,8 @@ function connect() {
         location.reload();
         return;
       }
+      // every topic for the shared Viewer parts too (web/viewerExtras.js: "Car data in the Viewer")
+      window.dispatchEvent(new CustomEvent('sentry:changed', { detail: { topics } }));
       const jobs = [];
       if (topics.some((t) => ['vehicles', 'inventory', 'bin'].includes(t))) jobs.push(loadVehicles().catch(() => {}));
       if (topics.includes('notifications')) jobs.push(loadNotes().catch(() => {}));
