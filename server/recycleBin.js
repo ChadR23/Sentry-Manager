@@ -186,7 +186,8 @@ class RecycleBin {
     const itemRoot = safeJoin(root, BIN_DIR + '/' + item.id);
     const realItem = await fsp.realpath(itemRoot).catch(() => null);
     const realRoot = await fsp.realpath(root).catch(() => null);
-    if (!realItem || !realRoot || !realItem.startsWith(realRoot + path.sep)) return null;
+    const realBin = await fsp.realpath(path.join(root, BIN_DIR)).catch(() => null);
+    if (!realItem || !realRoot || !realBin || !realBin.startsWith(realRoot + path.sep) || !realItem.startsWith(realBin + path.sep)) return null;
     const candidates = [...item.files.filter(f => /(^|\/)thumb\.png$/i.test(f.rel)), ...item.files.filter(f => /-front\.mp4$/i.test(f.rel))];
     for (const f of candidates) {
       if (f.pending || !f.binRel.startsWith(BIN_DIR + '/' + item.id + '/')) continue;

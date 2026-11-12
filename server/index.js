@@ -4065,7 +4065,7 @@ async function main() {
           const inner = opts.transform;
           const version = assetVersion(req);
           const pageDir = p.endsWith('/') ? p : `${path.posix.dirname(p)}/`;
-          const critical = rel !== 'login.html'; // the login page has no status to show yet
+          const critical = !['login.html', 'login-code.html', 'login-two-factor.html'].includes(rel); // sign-in pages have no authenticated status yet
           opts = { ...opts, transform: (html) => {
             const page = inner ? inner(html) : html;
             return versionLinks(critical ? withCriticalBar(page) : page, pageDir, version);

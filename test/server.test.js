@@ -1919,3 +1919,28 @@ test('CAN bundle: a full week of a bridge logging every 10 minutes around the cl
     await fsp.rm(dir, { recursive: true, force: true });
   }
 });
+
+
+test('sign-in pages never load the authenticated critical-update script', async () => {
+  const dir = await tmp(), s = await startServer(dir);
+  try {
+    for (const route of ['/login','/login/code']) {
+      const r = await s.call('GET',route,undefined,{raw:true});
+      assert.equal(r.status,200); assert.doesNotMatch(await r.text(), /critical\.js/);
+    }
+    await s.call('POST','/api/auth/login',{username:'admin',password:'correct horse'});
+    const r=await s.call('GET','/login/two-factor',undefined,{raw:true});
+    assert.equal(r.status,200); assert.doesNotMatch(await r.text(), /critical\.js/);
+  } finally { await s.stop(); await fsp.rm(dir,{recursive:true,force:true}); }
+});
+test('bin thumbnails reject item symlinks into other folders of the vehicle share', async (t) => {
+  const dir=await tmp();
+  try {
+    const bin=path.join(dir,'.sentry-recycle-bin'), outside=path.join(dir,'private');
+    await fsp.mkdir(bin); await fsp.mkdir(outside); await fsp.writeFile(path.join(outside,'thumb.png.binned'),'private');
+    try { await fsp.symlink(outside,path.join(bin,'item'),'dir'); } catch(e) { if(['EPERM','ENOTSUP'].includes(e.code)) return t.skip('Directory symlinks unavailable'); throw e; }
+    const {RecycleBin}=require('../server/recycleBin');
+    const b=new RecycleBin({db:{binItem:()=>({id:'item',vehicleId:'v',files:[{rel:'thumb.png',binRel:'.sentry-recycle-bin/item/thumb.png.binned'}]})},vehicles:{get:()=>({}),rootOf:()=>dir},deletedClips:{}});
+    assert.equal(await b.thumbnailSource('item'),null);
+  } finally { await fsp.rm(dir,{recursive:true,force:true}); }
+});
