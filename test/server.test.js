@@ -835,7 +835,7 @@ test('Interface: a pack uploaded in Settings serves its files for everyone, swit
     assert.deepEqual([list.active, list.original], [null, false]);
     // the packs that come with the app are listed first, without an upload, and cannot be deleted
     const builtin = list.packs.filter((x) => x.builtin).map((x) => x.id);
-    assert.deepEqual(builtin, ['aurora', 'daylight', 'flux', 'horizon']);
+    assert.deepEqual(builtin, ['aurora', 'daylight', 'flux', 'horizon', 'sentry-six']);
     assert.ok(list.packs.some((x) => x.id === meta.id && !x.builtin));
     assert.equal((await s.call('DELETE', '/api/ui-packs/flux')).status, 400);
     // the critical-update bar is in every page the server serves, not the sign-in page
@@ -881,7 +881,7 @@ test('Interface: a pack uploaded in Settings serves its files for everyone, swit
     // deleting the pack
     assert.equal((await s.call('DELETE', `/api/ui-packs/${meta.id}`)).status, 200);
     list = (await s.call('GET', '/api/ui-packs')).data;
-    assert.deepEqual(list.packs.map((x) => x.id), ['aurora', 'daylight', 'flux', 'horizon']);
+    assert.deepEqual(list.packs.map((x) => x.id), ['aurora', 'daylight', 'flux', 'horizon', 'sentry-six']);
   } finally {
     await s.stop();
     await fsp.rm(dir, { recursive: true, force: true });
