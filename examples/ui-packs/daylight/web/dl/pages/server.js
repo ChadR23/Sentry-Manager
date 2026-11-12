@@ -3,9 +3,12 @@
 
 import { api, esc, icon, bytes, pct, fin, meter, when, chip, details, confirmDialog, toast, fail, busy, store, plural, liveDraw } from '../core.js';
 import { state } from '../state.js';
+import '/web/units.js';
 
 const rate = (bps) => (fin(bps) ? `${bytes(bps)}/s` : '—');
-const temp = (c) => `${Math.round(c)} °C`;
+// in the one unit choice (web/units.js): °F with miles, °C with kilometres
+const temp = (c) => globalThis.SentryUnits.tempText(c);
+const unitText = (t) => globalThis.SentryUnits.inText(t);
 const watts = (w) => `${w >= 10 ? Math.round(w) : w.toFixed(1)} W`;
 const span = (s) => {
   const d = Math.floor(s / 86400);
@@ -162,7 +165,7 @@ export async function render(ctx) {
     $('#host-line').innerHTML = error && !snap ? `<span style="color:var(--bad)">Can’t get the numbers: ${esc(error)}</span>`
       : h ? esc([h.hostname, h.os, h.kernel && `kernel ${h.kernel}`, fin(h.uptimeS) && `on for ${span(h.uptimeS)}`, fin(h.appUptimeS) && `Sentry Six up ${span(h.appUptimeS)}`, h.version && (/^Build \d/.test(h.version) ? h.version : `version ${h.version}`)].filter(Boolean).join(' · ')) + (error ? ' · <span style="color:var(--warn)">not updating right now</span>' : '') : 'Asking the server…';
     if (!snap) return;
-    $('#alerts').innerHTML = (snap.alerts || []).filter((a) => a?.message).map((a) => `<div class="note note-${a.level === 'error' ? 'bad' : 'warn'}" style="margin-bottom:12px">${icon('alert')}<span><b>${a.level === 'error' ? 'Problem' : 'Worth a look'}:</b> ${esc(a.message)}</span></div>`).join('');
+    $('#alerts').innerHTML = (snap.alerts || []).filter((a) => a?.message).map((a) => `<div class="note note-${a.level === 'error' ? 'bad' : 'warn'}" style="margin-bottom:12px">${icon('alert')}<span><b>${a.level === 'error' ? 'Problem' : 'Worth a look'}:</b> ${esc(unitText(a.message))}</span></div>`).join('');
     $('#tiles').innerHTML = tiles(snap, range === '24h' ? hist : null, showAll) || '<p class="muted">The server has no numbers to show here.</p>';
     const unlock = (snap.unlock || []).filter((u) => u?.adds);
     $('#unlock').innerHTML = unlock.length ? `More numbers are available with one optional line each in docker-compose.yml: ${unlock.map((u) => `${esc(u.adds)}${u.compose ? ` (<code>${esc(u.compose)}</code>)` : ''}`).join('; ')}. Every number stays on this server.` : 'Every number stays on this server.';

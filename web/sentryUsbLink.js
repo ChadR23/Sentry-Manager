@@ -9,6 +9,11 @@
 // Everything the Pi sends is untrusted: it is only ever put on the page as
 // text (textContent, text nodes), never as markup.
 
+import '/web/units.js';
+
+// the one unit choice (web/units.js): miles shows °F and psi, kilometres °C and bar
+const UNITS = globalThis.SentryUnits;
+
 const CSS = `
 .sentry-sul{display:flex;flex-direction:column;gap:20px;font-size:14px;line-height:1.45;min-width:0}
 .sentry-sul section{display:flex;flex-direction:column;gap:8px;min-width:0}
@@ -128,8 +133,10 @@ const uptime = (secs) => { const s = num(secs); if (s === null) return '—'; co
 
 // ---- the car (docs/sentry-usb-link.md section 4, "The car"), checked by the
 // server (server/sentryUsbCar.js) and checked again here: in °C, kPa and Unix
-// seconds on the wire, shown in the units the Pi's own dashboard uses (its
-// `units`), else °F and psi. Manager has no unit settings of its own.
+// seconds on the wire, shown in the Manager's own units (web/units.js), as the
+// Viewer shows speed and the car's temperatures: miles means °F and psi,
+// kilometres °C and bar. The Pi's own `units` (its dashboard's) are not used:
+// a card in °C next to a Viewer in mph was the very mix-up this avoids.
 const KPA_PER_PSI = 6.894757;
 const TIRE_NAMES = { fl: 'Front left', fr: 'Front right', rl: 'Rear left', rr: 'Rear right' };
 const TIRE_STATE = { optimal: 'Optimal', check: 'Check tires', unsafe: 'Unsafe' };
@@ -146,12 +153,11 @@ export function carAge(atS, now = Date.now()) {
 const span = (s) => { const m = Math.max(0, Math.floor(s / 60)); const d = Math.floor(m / 1440); const hh = Math.floor((m % 1440) / 60); return d ? `${d} d ${hh} h` : hh ? `${hh} h ${m % 60} min` : `${m} min`; };
 
 /** What the Car card says, as text: null when there is no car data. */
-export function carView(car, { now = Date.now() } = {}) {
+export function carView(car, { now = Date.now(), metric = UNITS.metric() } = {}) {
   if (!car || typeof car !== 'object' || Array.isArray(car)) return null;
-  const u = car.units && typeof car.units === 'object' ? car.units : {};
-  const tempF = u.temp !== 'C';
-  const bar = u.pressure === 'bar';
-  const temp = (c) => (tempF ? `${Math.round(c * 9 / 5 + 32)}°F` : `${Math.round(c)}°C`);
+  const tempF = !metric;
+  const bar = Boolean(metric);
+  const temp = (c) => UNITS.tempText(c, { m: metric, space: false });
   const pressure = (kpa) => (bar ? `${(kpa / 100).toFixed(2)} bar` : `${Math.round(kpa / KPA_PER_PSI)} psi`);
   const get = (o, k, lo, hi) => (o && typeof o === 'object' && finite(o[k]) && o[k] >= lo && o[k] <= hi ? o[k] : null);
   const v = { units: `${tempF ? '°F' : '°C'} · ${bar ? 'bar' : 'psi'}`, state: null, battery: null, interior: null, exterior: null, tires: null };
@@ -489,7 +495,7 @@ export function createSentryUsbPage(el, { h24 = null } = {}) {
         stat('Address', s.wifi_ip || s.ether_ip || d.address),
         net ? stat('Network (it says)', net) : null,
         stat('Connects from', d.address),
-        stat('CPU', `${temp !== null ? `${(temp / 1000).toFixed(1)} °C` : '—'}${num(s.cpu_percent) !== null ? ` · ${Math.round(s.cpu_percent)}%` : ''}`),
+        stat('CPU', `${temp !== null ? UNITS.tempText(temp / 1000, { digits: 1 }) : '—'}${num(s.cpu_percent) !== null ? ` · ${Math.round(s.cpu_percent)}%` : ''}`),
         stat('Supply', num(s.supply_voltage) !== null ? `${Number(s.supply_voltage).toFixed(2)} V` : '—'),
         stat('Up for', uptime(s.uptime)),
         stat('Board', s.sbc_model))
@@ -921,5 +927,7 @@ export function createSentryUsbPage(el, { h24 = null } = {}) {
 
   load();
   every(load, 5000);
-  return { destroy() { alive = false; for (const t of timers) clearInterval(t); clearInterval(countdown); el.replaceChildren(); } };
+  // mph/km/h changed (here or on another page): the Car card and the CPU temperature with it
+  const offUnits = UNITS.onChange(() => { if (alive) refreshOverviewOnly(); });
+  return { destroy() { alive = false; offUnits(); for (const t of timers) clearInterval(t); clearInterval(countdown); el.replaceChildren(); } };
 }

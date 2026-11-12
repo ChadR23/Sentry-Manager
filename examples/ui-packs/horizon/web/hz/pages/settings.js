@@ -6,6 +6,8 @@ import nodesPage from './nodes.js';
 // the vehicle's car model and year (shared with every interface)
 import { carModelFields, wireCarModel, readCarModel } from '/web/carModelField.js';
 import { buildText, buildTip, behindText, latestText, latestTip } from '/web/buildLabel.js';
+// the one mph/km/h choice of every page: temperatures and tire pressures follow it
+import '/web/units.js';
 
 const TABS = [['vehicles', 'Vehicles', 'car'], ['places', 'Places', 'map'], ['account', 'Account', 'lock'], ['interface', 'Interface', 'horizon'], ['display', 'Background', 'hud'], ['updates', 'Updates', 'download'], ['security', 'Security', 'shield'], ['system', 'System', 'info'], ['power', 'Electricity', 'bolt'], ['nodes', 'Nodes', 'nodes'], ['help', 'Help & feedback', 'chat']];
 // Help & feedback is for admins only (a watch-only account does not see it, and /api/reports refuses it)
@@ -260,7 +262,7 @@ async function display(box) {
     ${panelHead(`${ico('gear')}Motion for everyone`)}
     <label class="chk"><input type="checkbox" id="calm"${calm ? ' checked' : ''}> Reduce effects for everyone (no page animations; saved on the server)</label>
     <label class="chk"><input type="checkbox" id="clock24"${clockPref.h24 ? ' checked' : ''}> 24-hour clock (for everyone; saved on the server)</label>
-    <label class="chk"><input type="checkbox" id="units"${local.get('vw.units', 'mph') === 'kmh' ? ' checked' : ''}> Show speed in km/h in the Viewer (this browser)</label>
+    <label class="chk"><input type="checkbox" id="units"${globalThis.SentryUnits.metric() ? ' checked' : ''}> Kilometres: km/h, °C and bar (otherwise miles: mph, °F and psi; everywhere, this browser)</label>
     <p class="small faint">Keyboard: press <kbd>?</kbd> anywhere for the shortcuts, <kbd>[</kbd> and <kbd>]</kbd> tune to the previous and next page.</p>
   </section>`;
   onSegs(box, 'sky', (m) => {
@@ -278,7 +280,7 @@ async function display(box) {
     clockPref.h24 = e.target.checked;
     toast('Saved.');
   });
-  box.querySelector('#units').onchange = (e) => { local.set('vw.units', e.target.checked ? 'kmh' : 'mph'); toast('Saved.'); };
+  box.querySelector('#units').onchange = (e) => { globalThis.SentryUnits.set(e.target.checked); toast('Saved.'); };
 }
 
 // ---------- updates ----------

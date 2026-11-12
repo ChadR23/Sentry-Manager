@@ -1,6 +1,10 @@
 // Notifications: list, mark read, dismiss. The unread badge lives in the shell.
 import { esc, api, state, loadNotes, ago, isoish, icon, toast, busy, plural, liveDraw } from '../core.js';
 import { seg, wireSeg, empty, chip } from '../ui.js';
+// a server's words with a temperature ("CPU at 92 °C") in the one unit choice (web/units.js)
+import '/web/units.js';
+
+const unitText = (t) => globalThis.SentryUnits.inText(t);
 
 const TONE = { critical: 'red', warning: 'amber', info: 'cyan' };
 
@@ -20,8 +24,8 @@ export default {
       $('#nt-read').disabled = !unread;
       $('#nt-list').innerHTML = list.map((n) => `<li class="note-item ${esc(n.level)}${n.readAt ? '' : ' unread'}${n.resolvedAt ? ' resolved' : ''}" data-id="${n.id}">
         <i class="lvl" aria-hidden="true"></i>
-        <div class="note-body"><div class="note-top"><b>${esc(n.title)}</b>${chip(n.level, TONE[n.level] || '')}${n.kind ? `<span class="faint small mono">${esc(n.kind)}</span>` : ''}${n.readAt ? '' : '<span class="dotnew" title="unread"></span>'}</div>
-          <p class="small muted">${esc(n.message || '')}</p>
+        <div class="note-body"><div class="note-top"><b>${esc(unitText(n.title))}</b>${chip(n.level, TONE[n.level] || '')}${n.kind ? `<span class="faint small mono">${esc(n.kind)}</span>` : ''}${n.readAt ? '' : '<span class="dotnew" title="unread"></span>'}</div>
+          <p class="small muted">${esc(unitText(n.message || ''))}</p>
           <p class="faint small num">${esc(isoish(n.createdAt))} · ${esc(ago(n.updatedAt || n.createdAt))}${n.resolvedAt ? ` · resolved ${esc(ago(n.resolvedAt))}` : ''}</p></div>
         <div class="note-acts">${n.readAt ? '' : '<button class="btn sm" type="button" data-read>Mark read</button>'}${n.resolvedAt ? '' : '<button class="btn sm" type="button" data-dismiss>Dismiss</button>'}</div></li>`).join('') || `<li>${empty(show === 'open' ? 'No open notifications. All clear.' : 'Nothing here.')}</li>`;
     }

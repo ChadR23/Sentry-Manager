@@ -17,7 +17,10 @@ const { pathToFileURL } = require('url');
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'statdash-'));
 const MODULE = path.join(TMP, 'statDash.mjs');
 // (its import of the shared computed stats, web/carCalc.js, pointed at the file)
-fs.writeFileSync(MODULE, fs.readFileSync(path.join(__dirname, '..', 'web', 'statDash.js'), 'utf8').replace("import '/web/carCalc.js';", `import ${JSON.stringify(pathToFileURL(path.join(__dirname, '..', 'web', 'carCalc.js')).href)};`));
+// (and of the one unit choice, web/units.js)
+fs.writeFileSync(MODULE, fs.readFileSync(path.join(__dirname, '..', 'web', 'statDash.js'), 'utf8')
+  .replace("import '/web/carCalc.js';", `import ${JSON.stringify(pathToFileURL(path.join(__dirname, '..', 'web', 'carCalc.js')).href)};`)
+  .replace("import '/web/units.js';", `import ${JSON.stringify(pathToFileURL(path.join(__dirname, '..', 'web', 'units.js')).href)};`));
 test.after(() => fs.rmSync(TMP, { recursive: true, force: true }));
 
 // ---- a stand-in DOM: just what the dashboard uses ---------------------------
@@ -771,6 +774,95 @@ test('CAN values: decimals from the DBC step, every unit converted, SNA and the 
   assert.equal(cpu.children[0].textContent, 'Cpu Temperature');
   assert.equal(cpu.querySelector('[data-lv]').textContent, '86°F');
   d.dash.destroy();
+});
+
+// ---- temperature follows mph/km/h, however the DBC spells °C ------------------------
+test('temperatures follow the one mph/km/h choice: every spelling of °C, CAN and computed stats, flipped live', async (t) => {
+  const meta = {
+    // the owner's car: "deg C" (stayed °C with mph before), and the other spellings DBCs use
+    UI_tegraCoreTemperature: { unit: 'deg C', bus: 'VehicleBus', message: 'ID3B0UI_tegra', min: -40, max: 215, factor: 1, offset: -40 },
+    UI_tegraAmbientTemperature: { unit: 'deg C', bus: 'VehicleBus', message: 'ID3B0UI_tegra', min: -40, max: 215, factor: 1, offset: -40 },
+    TempDegC: { unit: 'degC', bus: 'VehicleBus', message: 'ID001A', min: -40, max: 100, factor: 1, offset: 0 },
+    TempDegree: { unit: '°C', bus: 'VehicleBus', message: 'ID001A', min: -40, max: 100, factor: 1, offset: 0 },
+    TempUpper: { unit: 'DegC', bus: 'VehicleBus', message: 'ID001A', min: -40, max: 100, factor: 1, offset: 0 },
+    TempWord: { unit: 'Celsius', bus: 'VehicleBus', message: 'ID001A', min: -40, max: 100, factor: 1, offset: 0 },
+    TempC: { unit: 'C', bus: 'VehicleBus', message: 'ID001A', min: -40, max: 100, factor: 1, offset: 0 },
+    // a speed spelled "KPH " and a distance "Km"
+    SpeedOdd: { unit: 'KPH ', bus: 'VehicleBus', message: 'ID001A', min: 0, max: 300, factor: 1, offset: 0 },
+    DistOdd: { unit: 'Km', bus: 'VehicleBus', message: 'ID001A', min: 0, max: 1000, factor: 1, offset: 0 },
+    BattBrickTempMax332: { label: 'Max Batt Brick Temp', unit: 'C', bus: 'VehicleBus', message: 'ID332BattBrickMinMax', min: -40, max: 87.5, factor: 0.5, offset: -40 },
+    BattBrickTempMin332: { label: 'Min Batt Brick Temp', unit: 'C', bus: 'VehicleBus', message: 'ID332BattBrickMinMax', min: -40, max: 87.5, factor: 0.5, offset: -40 }
+  };
+  const series = {
+    UI_tegraCoreTemperature: [[S - 1000, 50]],
+    UI_tegraAmbientTemperature: [[S - 1000, 35]],
+    TempDegC: [[S - 1000, 20]], TempDegree: [[S - 1000, 20]], TempUpper: [[S - 1000, 20]], TempWord: [[S - 1000, 20]], TempC: [[S - 1000, 20]],
+    SpeedOdd: [[S - 1000, 100]],
+    DistOdd: [[S - 1000, 100]],
+    BattBrickTempMax332: [[S - 1000, 25]],
+    BattBrickTempMin332: [[S - 1000, 20]]
+  };
+  const d = await dashboard({
+    rawOpen: false,
+    routes: {
+      boards: board([{ type: 'list', signals: [], q: '', changing: false }, { type: 'small', signals: ['dash.speed'] }, { type: 'wide', signals: ['can.UI_tegraCoreTemperature', 'calc.battTemp', 'calc.battTempSpread'] }]),
+      '/api/can/signals': () => ({ signals: meta }),
+      '/api/can/clip': () => ({ start: S, sync: { method: 'clock' }, series })
+    }
+  });
+  t.after(() => d.dash.destroy());
+  await d.frame();
+  await d.frame();
+  const rows = () => Object.fromEntries(d.dash.panel.querySelectorAll('.sd-list-r[data-row]').map((r) => [r.getAttribute('title').match(/, (\w+)\)$/)?.[1] || r.children[0].textContent, r.querySelector('[data-lv]').textContent]));
+  const tiles = () => [...d.el.querySelector('.sd-wide').querySelectorAll('[data-v]')].map((n, i) => `${n.textContent}${d.el.querySelector('.sd-wide').querySelectorAll('[data-u]')[i]?.textContent ?? ''}`);
+  d.video.currentTime = 1;
+  await d.frame();
+  // nothing chosen, a US browser: mph, so °F everywhere
+  assert.equal(d.el.querySelector('[data-units]').textContent, 'mph');
+  let v = rows();
+  assert.equal(v.UI_tegraCoreTemperature, '122°F', '"deg C" is °C: in °F with mph');
+  assert.equal(v.UI_tegraAmbientTemperature, '95°F');
+  for (const k of ['TempDegC', 'TempDegree', 'TempUpper', 'TempWord', 'TempC']) assert.equal(v[k], '68°F', `${meta[k].unit} in °F`);
+  assert.equal(v.SpeedOdd, '62mph', '"KPH " in mph');
+  assert.equal(v.DistOdd, '62mi', '"Km" in miles');
+  assert.deepEqual(tiles(), ['122°F', '72.5°F', '9.0°F'], 'the bar: a CAN temperature, the battery temp and its spread (a difference: no +32)');
+  // km/h on the bar's button: °C, km and km/h, at once
+  fire(d.el.querySelector('[data-edit]'), 'click');
+  fire(d.el.querySelector('[data-units]'), 'click');
+  await d.frame();
+  assert.equal(globalThis.SentryUnits.metric(), true, 'the one choice changed');
+  assert.equal(localStorage.getItem('sentry-driving-units'), 'km', 'kept where every page reads it');
+  fire(d.el.querySelector('[data-edit]'), 'click');
+  await d.frame();
+  v = rows();
+  assert.equal(v.UI_tegraCoreTemperature, '50°C');
+  for (const k of ['TempDegC', 'TempDegree', 'TempUpper', 'TempWord', 'TempC']) assert.equal(v[k], '20°C', `${meta[k].unit} in °C`);
+  assert.equal(v.SpeedOdd, '100km/h');
+  assert.equal(v.DistOdd, '100km');
+  assert.deepEqual(tiles(), ['50°C', '22.5°C', '5.0°C']);
+  // flipped on another page (the Viewer's own mph button, the Driving page): the bar follows without a click here
+  globalThis.SentryUnits.set(false);
+  await d.frame();
+  assert.equal(rows().UI_tegraCoreTemperature, '122°F');
+  assert.deepEqual(tiles(), ['122°F', '72.5°F', '9.0°F']);
+  d.dash.destroy();
+});
+
+test('an older board\'s own km/h is kept only when no choice was made yet', async (t) => {
+  const old = { boards: [{ id: 'b', name: 'B', placement: 'below', metric: true, blocks: [{ type: 'small', signals: ['dash.speed'] }] }], active: 'b' };
+  const d = await dashboard({ rawOpen: false, routes: { boards: old } });
+  t.after(() => d.dash.destroy());
+  await d.frame();
+  assert.equal(globalThis.SentryUnits.metric(), true, 'adopted');
+  assert.equal(d.el.querySelector('[data-units]').textContent, 'km/h');
+  d.dash.destroy();
+  // chosen (miles) before: the board's km/h does not win
+  const d2 = await dashboard({ rawOpen: false, routes: { boards: old }, before: () => localStorage.setItem('sentry-driving-units', 'mi') });
+  t.after(() => d2.dash.destroy());
+  await d2.frame();
+  assert.equal(globalThis.SentryUnits.metric(), false);
+  assert.equal(d2.el.querySelector('[data-units]').textContent, 'mph');
+  d2.dash.destroy();
 });
 
 // ---- moving and resizing both boxes ----------------------------------------------

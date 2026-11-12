@@ -11,6 +11,12 @@ import { createLayoutSlots } from '/web/layouts.js';
 import { syncTo, readyTogether, clipAhead } from '/web/camSync.js';
 import { TimeChart, C } from '../charts.js';
 import { split, seg, wireSeg, empty } from '../ui.js';
+import '/web/units.js';
+
+// mph or km/h: the one choice of every page (web/units.js); the car data under the
+// cameras shows °F with mph and °C with km/h. This Viewer's own older choice counts until one is made.
+const UNITS = globalThis.SentryUnits;
+const savedUnits = () => { const u = store.get('vw:units', null); return u === 'kmh' ? true : u === 'mph' ? false : undefined; };
 
 const CLIP_RE = /(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})-([a-z0-9_]+)\.mp4$/i;
 const LAYOUTS = [['grid', 'Grid'], ['focus', 'Focus'], ['duo', 'Front + Back'], ['single', 'Single']];
@@ -52,7 +58,7 @@ export default {
       layout: store.get('vw:layout', 'grid'),
       focus: store.get('vw:focus', 'front'),
       speed: store.get('vw:speed', 1),
-      units: store.get('vw:units', 'mph'),
+      units: UNITS.adopt(savedUnits()) ? 'kmh' : 'mph',
       tele: store.get('vw:tele', true),
       segs: [],
       idx: 0,
@@ -593,14 +599,18 @@ export default {
         ['frame', fin(r.frame) ? String(r.frame) : '—']
       ].map(([k, x]) => `<dt>${esc(k)}</dt><dd class="num">${esc(x)}</dd>`).join('') : '';
     }
-    wireSeg(el, 'units', (u) => {
+    const setUnits = (u) => {
       st.units = u;
-      store.set('vw:units', u);
+      if (UNITS.metric() !== (u === 'kmh')) UNITS.set(u === 'kmh');
+      el.querySelectorAll('[data-seg="units"] button').forEach((b) => { b.classList.toggle('on', b.dataset.v === u); b.setAttribute('aria-checked', String(b.dataset.v === u)); });
       moments.refresh();
       $('#t-unit').textContent = u === 'mph' ? 'mph' : 'km/h';
       const s = st.segs[st.idx];
       if (s) loadTelemetry(s);
-    });
+    };
+    wireSeg(el, 'units', setUnits);
+    // (flipped on the car data's button, another page or another tab)
+    const offUnits = UNITS.onChange((m) => { if (alive && (st.units === 'kmh') !== m) setUnits(m ? 'kmh' : 'mph'); });
 
     // ---------- layout ----------
     function setLayout(l) {
@@ -684,7 +694,7 @@ export default {
     } catch (err) {
       el.querySelector('.vw-main').innerHTML = empty(esc(err.message));
       // everything made above is taken down when leaving, as after a start
-      return { unmount() { alive = false; tip.destroy(); moments.destroy(); extras.destroy(); slots.destroy(); cancelAnimationFrame(raf); chart.destroy(); map.destroy(); xp.destroy(); ahead.destroy(); } };
+      return { unmount() { alive = false; offUnits(); tip.destroy(); moments.destroy(); extras.destroy(); slots.destroy(); cancelAnimationFrame(raf); chart.destroy(); map.destroy(); xp.destroy(); ahead.destroy(); } };
     }
     $('#vw-title').textContent = st.title || 'no footage';
     drawPick(info);
@@ -755,6 +765,7 @@ export default {
     return {
       unmount() {
         alive = false;
+        offUnits();
         tip.destroy();
         moments.destroy();
         extras.destroy();

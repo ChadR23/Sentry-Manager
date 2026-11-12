@@ -14,6 +14,7 @@
 //     h24: () => false          // the interface's 24-hour clock setting
 //   });
 import { footMinutes } from '/web/duration.js';
+import '/web/units.js';
 
 const CSS = `
 .sentry-drives{display:flex;flex-direction:column;gap:14px;font-size:14px;line-height:1.45;min-width:0}
@@ -65,13 +66,12 @@ const CSS = `
 `;
 
 const esc = (t) => String(t ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-// the same choice as the Driving page
-const UNIT_KEY = 'sentry-driving-units';
 const GAP_KEY = 'sentry-drives-gap';
 const GAPS = [2, 5, 10, 15, 30];
 const read = (k, d) => { try { return localStorage.getItem(k) ?? d; } catch { return d; } };
 const write = (k, v) => { try { localStorage.setItem(k, v); } catch { /* for this visit then */ } };
-const units = () => (read(UNIT_KEY, 'mi') === 'km' ? 'km' : 'mi');
+// miles or kilometres: the one choice every page uses (web/units.js), as the Driving page
+const units = () => (globalThis.SentryUnits.metric() ? 'km' : 'mi');
 const gapMin = () => { const g = Number(read(GAP_KEY, 5)); return GAPS.includes(g) ? g : 5; };
 const fmtDist = (m, u) => { const x = u === 'km' ? m / 1000 : m / 1609.344; return `${x >= 100 ? Math.round(x) : x.toFixed(1)} ${u}`; };
 const speed = (mps, u) => (u === 'km' ? `${Math.round(mps * 3.6)} km/h` : `${Math.round(mps * 2.23694)} mph`);
@@ -226,7 +226,7 @@ export function createDrivesPage(el, { vehicleId, vehicleName = '', open = () =>
 
   root.addEventListener('click', (e) => {
     const b = e.target.closest('[data-u]');
-    if (b) { write(UNIT_KEY, b.dataset.u); draw(); return; }
+    if (b) { globalThis.SentryUnits.set(b.dataset.u === 'km'); draw(); return; }
     if (e.target.closest('[data-more]')) { if (!loading) load(true); return; }
     const row = e.target.closest('.sv-drive');
     if (row) {

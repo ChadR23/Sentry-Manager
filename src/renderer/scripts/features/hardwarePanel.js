@@ -11,7 +11,10 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 const fin = (n) => typeof n === 'number' && Number.isFinite(n);
 const clampPct = (n) => Math.max(0, Math.min(100, Math.round((fin(n) ? n : 0) * 10) / 10));
 const pct = (n) => `${Math.round(n)}%`;
-const temp = (c) => `${Math.round(c)} °C`;
+// °F with miles, °C with kilometres: the one unit choice of the web app (web/units.js)
+const units = () => (typeof window !== 'undefined' && window.SentryUnits) || null;
+const temp = (c) => (units() ? units().tempText(c) : `${Math.round(c)} °C`);
+const tempNum = (c) => Math.round(units() ? units().temp(c) : c);
 const watts = (w) => `${w >= 10 ? Math.round(w) : w.toFixed(1).replace(/\.0$/, '')} W`;
 const base = (p) => String(p || '').split(/[\\/]/).pop();
 const group = (n) => Math.round(n).toLocaleString('en-US');
@@ -191,7 +194,7 @@ export function renderHardware(stats, memo = null) {
         .map((g) => g?.tempC).filter(fin);
     const temps = [gpuTemps.length && ['GPU', Math.max(...gpuTemps)], fin(cpu.tempC) && ['CPU', cpu.tempC]].filter(Boolean);
     const hot = temps.length ? Math.max(...temps.map(([, t]) => t)) : null;
-    tile('temps', temps.length && `<div${hot >= 90 ? ' class="hot"' : ''}><span>Temperatures</span><b>${temp(temps[0][1])}</b><small>${temps.map(([k, t]) => `${k} ${Math.round(t)}`).join(' · ')}</small></div>`,
+    tile('temps', temps.length && `<div${hot >= 90 ? ' class="hot"' : ''}><span>Temperatures</span><b>${temp(temps[0][1])}</b><small>${temps.map(([k, t]) => `${k} ${tempNum(t)}`).join(' · ')}</small></div>`,
         '<div><span>Temperatures</span><b>—</b><small>&nbsp;</small></div>');
 
     // energy per clip and per GB saved, when the server could measure power:

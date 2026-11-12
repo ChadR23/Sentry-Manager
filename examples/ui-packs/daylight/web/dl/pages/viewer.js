@@ -14,6 +14,12 @@ import { createMoments } from '/web/moments.js';
 import { attachViewerExtras, savedPosition } from '/web/viewerExtras.js';
 import { createLayoutSlots } from '/web/layouts.js';
 import { syncTo, readyTogether, clipAhead } from '/web/camSync.js';
+import '/web/units.js';
+
+// mph or km/h: the one choice of every page (web/units.js); the car data under the
+// cameras shows °F with mph and °C with km/h. This Viewer's own older choice counts until one is made.
+const UNITS = globalThis.SentryUnits;
+const savedUnits = () => { const u = store.get('units', null); return u === 'kmh' ? true : u === 'mph' ? false : undefined; };
 
 // laid out like the car: pillars and front on top, repeaters and back below
 const CAMS = ['left_pillar', 'front', 'right_pillar', 'left_repeater', 'back', 'right_repeater'];
@@ -121,7 +127,7 @@ async function player(ctx, v, day, recId) {
   const cat = CATEGORY[rec.category] || CATEGORY.Other;
   const st = {
     seg: 0, focus: null, rate: store.get('rate', 1), playing: false,
-    units: store.get('units', /^en-(US|GB|LR|MM)$/i.test(navigator.language || '') ? 'mph' : 'kmh'), tele: [], teleFor: null, wantPlay: false, scrubbing: false
+    units: UNITS.adopt(savedUnits()) ? 'kmh' : 'mph', tele: [], teleFor: null, wantPlay: false, scrubbing: false
   };
   if (!SPEEDS.includes(st.rate)) st.rate = 1;
   const startAt = Number(new URLSearchParams(location.hash.split('?')[1] || '').get('seg'));
@@ -533,13 +539,17 @@ async function player(ctx, v, day, recId) {
       if (m?.webkitEnterFullscreen) m.webkitEnterFullscreen();
     }
   };
-  $('#units').onclick = (e) => {
-    st.units = st.units === 'mph' ? 'kmh' : 'mph';
-    store.set('units', st.units);
-    e.currentTarget.textContent = `Show speed in ${st.units === 'mph' ? 'km/h' : 'mph'}`;
+  const setUnits = (u) => {
+    st.units = u;
+    if (UNITS.metric() !== (u === 'kmh')) UNITS.set(u === 'kmh');
+    const b = $('#units');
+    if (b) b.textContent = `Show speed in ${st.units === 'mph' ? 'km/h' : 'mph'}`;
     moments.refresh();
     updateTime();
   };
+  $('#units').onclick = () => setUnits(st.units === 'mph' ? 'kmh' : 'mph');
+  // (flipped on the car data's button, another page or another tab)
+  ctx.cleanup(UNITS.onChange((m) => { if (ctx.alive() && (st.units === 'kmh') !== m) setUnits(m ? 'kmh' : 'mph'); }));
   $('#protect').onclick = async (e) => {
     if (await setProtected(v, [rec.id], !rec.protected)) ctx.rerender();
     e.currentTarget.blur();

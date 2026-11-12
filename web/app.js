@@ -343,7 +343,10 @@
   };
   const pct = (n) => `${Math.round(n)}%`;
   const watts = (w) => `${w >= 10 ? Math.round(w) : w.toFixed(1).replace(/\.0$/, '')} W`;
-  const temp = (c) => `${Math.round(c)} °C`;
+  // in the one unit choice (web/units.js): °F with miles, °C with kilometres
+  // a server's words with a temperature in them ("CPU at 92 °C") in the chosen unit
+  const unitText = (t) => (globalThis.SentryUnits ? SentryUnits.inText(t) : t);
+  const temp = (c) => (globalThis.SentryUnits ? SentryUnits.tempText(c) : `${Math.round(c)} °C`);
   const clock = (mhz) => (mhz >= 1000 ? `${Number((mhz / 1000).toFixed(2))} GHz` : `${Math.round(mhz)} MHz`);
   // "12.4 Wh" below 100 Wh, so a run's first minutes visibly count up; "412 Wh"; then "5.2 kWh"
   const energyText = (wh) => {
@@ -857,7 +860,7 @@
       sensorsTile(s.sensors, more.sensors, Number(s.cpu?.sockets) || 1, seen), processTile(s.processes, s.encoder, list.length > 0, seen)
     ].join('');
     // (Logs: the last tile of the same section)
-    const alerts = (Array.isArray(s.alerts) ? s.alerts : []).filter((a) => a && a.message).map((a) => `<div class="nd-alert${a.level === 'error' ? ' bad' : ''}"><b>${a.level === 'error' ? 'Problem' : 'Warning'}</b>${esc(a.message)} · <a href="#/overview/logs">Logs</a></div>`).join('');
+    const alerts = (Array.isArray(s.alerts) ? s.alerts : []).filter((a) => a && a.message).map((a) => `<div class="nd-alert${a.level === 'error' ? ' bad' : ''}"><b>${a.level === 'error' ? 'Problem' : 'Warning'}</b>${esc(unitText(a.message))} · <a href="#/overview/logs">Logs</a></div>`).join('');
     const unlock = (Array.isArray(s.unlock) ? s.unlock : []).filter((u) => u && u.adds);
     const foot = unlock.length
       ? `<p>Shown only when the server provides it. More with one optional line each in <code>docker-compose.yml</code>:</p>
@@ -2172,7 +2175,7 @@
     const { notifications } = await api('/api/notifications');
     page.innerHTML = head('Your archive workspace', 'Notifications') + `<div class="card">
       ${notifications.length ? `<ul class="alerts" style="margin:0">${notifications.map((n) => `<li class="alert-item" style="${n.resolvedAt ? 'opacity:.6' : ''}"><span class="dot ${n.resolvedAt ? '' : n.level === 'critical' ? 'bad' : n.level === 'info' ? 'ok' : 'warn'}"></span>
-        <div><b>${esc(n.title)}</b><span>${esc(n.message || '')}</span><br><span class="muted small">${when(n.createdAt)}${n.resolvedAt ? ` · resolved ${when(n.resolvedAt)}` : ''}</span></div>
+        <div><b>${esc(unitText(n.title))}</b><span>${esc(unitText(n.message || ''))}</span><br><span class="muted small">${when(n.createdAt)}${n.resolvedAt ? ` · resolved ${when(n.resolvedAt)}` : ''}</span></div>
         ${n.resolvedAt ? '<span></span>' : `<button class="btn sm" data-dismiss="${n.id}">Dismiss</button>`}</li>`).join('')}</ul>` : '<p>No notifications.</p>'}</div>`;
     page.querySelectorAll('[data-dismiss]').forEach((b) => {
       b.onclick = async () => {

@@ -412,7 +412,11 @@ const valSeq = $('valSeq');
 // Constants
 const MPS_TO_MPH = 2.23694;
 const MPS_TO_KMH = 3.6;
-let useMetric = false; // Will be loaded from settings
+// mph or km/h: in the web app the one choice of every page (web/units.js, loaded
+// before this script), so the dashboard, the car data under it (°F with mph, °C
+// with km/h) and the Manager's pages always agree
+const sharedUnits = window.SentryUnits || null;
+let useMetric = sharedUnits ? sharedUnits.metric() : false; // Will be loaded from settings
 
 // Initialize
 (async function init() {
@@ -760,12 +764,24 @@ let useMetric = false; // Will be loaded from settings
         updateMapVisibility();
     };
 
+    // the speed unit everywhere it is shown (the dashboards, the toggles)
+    function showUnits() {
+        telemetryDirty.reset();
+        const metricToggle = $('metricToggle');
+        if (metricToggle) metricToggle.checked = useMetric;
+        const settingsMetricToggle = $('settingsMetricToggle');
+        if (settingsMetricToggle) settingsMetricToggle.checked = useMetric;
+        if (speedUnit) speedUnit.textContent = useMetric ? 'KM/H' : 'MPH';
+        if (speedUnitCompact) speedUnitCompact.textContent = useMetric ? 'KM/H' : 'MPH';
+    }
+
     // Metric toggle (hidden, controlled via settings modal)
     const metricToggle = $('metricToggle');
     if (metricToggle) {
         metricToggle.checked = useMetric;
         metricToggle.onchange = () => {
             useMetric = metricToggle.checked;
+            if (sharedUnits && sharedUnits.metric() !== useMetric) sharedUnits.set(useMetric);
             telemetryDirty.reset();
             if (window.electronAPI?.setSetting) {
                 window.electronAPI.setSetting('useMetric', useMetric);
@@ -805,11 +821,12 @@ let useMetric = false; // Will be loaded from settings
             updateMapVisibility();
         });
         window.electronAPI.getSetting('useMetric').then(saved => {
-            useMetric = saved === true;
-            const metricToggle = $('metricToggle');
-            if (metricToggle) metricToggle.checked = useMetric;
-            if (speedUnit) speedUnit.textContent = useMetric ? 'KM/H' : 'MPH';
+            // (Studio's own saved choice counts only until one is made on any page)
+            useMetric = sharedUnits ? sharedUnits.adopt(typeof saved === 'boolean' ? saved : undefined) : saved === true;
+            showUnits();
         });
+        // flipped on another page, the car data's button or another tab: the dashboard follows
+        sharedUnits?.onChange((m) => { if (m !== useMetric) { useMetric = m; showUnits(); } });
         window.electronAPI.getSetting('accelPedMode').then(saved => {
             const mode = saved || 'iconbar';
             if (window.updateAccelPedMode) {

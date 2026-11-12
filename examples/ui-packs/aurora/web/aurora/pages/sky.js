@@ -8,6 +8,11 @@ import {
 } from '../core.js';
 import { follow, counts, STATE_TEXT, ACTIVE, CODEC } from '../conv.js';
 import { fullIn } from '/web/fullIn.js';
+import '/web/units.js';
+
+// temperatures in the one unit choice (web/units.js): °F with miles, °C with kilometres
+const deg = (c) => globalThis.SentryUnits.tempText(c);
+const unitText = (t) => globalThis.SentryUnits.inText(t);
 
 const CATS = [['Recent', 'teal', 'drive', 'drives'], ['Sentry', 'magenta', 'Sentry event', 'Sentry events'], ['Saved', 'green', 'saved clip', 'saved clips'], ['Other', 'violet', 'other recording', 'other recordings']];
 
@@ -81,8 +86,8 @@ function attention(stats) {
   const notes = state.notes.slice(0, 5);
   const alerts = (stats?.alerts || []).filter((a) => !notes.some((n) => n.title === a.message));
   if (!notes.length && !alerts.length) return `<div class="empty" style="padding:16px 0"><div class="empty-orb">${icon('check')}</div><p class="muted">All calm. Nothing needs you.</p></div>`;
-  return `<ul class="list">${notes.map((n) => `<li class="attn ${esc(n.level)}"><span class="dot ${n.level === 'critical' ? 'bad' : n.level === 'info' ? 'ok' : 'warn'}" style="margin-top:7px"></span><div><b>${esc(n.title)}</b><br><span class="muted small">${esc(n.message || '')} · ${esc(ago(n.createdAt))}</span></div><button class="btn ghost icon" type="button" data-dismiss="${esc(n.id)}" aria-label="Dismiss ${esc(n.title)}">${icon('x')}</button></li>`).join('')}
-    ${alerts.map((a) => `<li class="attn ${esc(a.level)}"><span class="dot ${a.level === 'error' ? 'bad' : 'warn'}" style="margin-top:7px"></span><div>${esc(a.message)}<br><span class="muted small">from the server monitor</span></div></li>`).join('')}</ul>`;
+  return `<ul class="list">${notes.map((n) => `<li class="attn ${esc(n.level)}"><span class="dot ${n.level === 'critical' ? 'bad' : n.level === 'info' ? 'ok' : 'warn'}" style="margin-top:7px"></span><div><b>${esc(unitText(n.title))}</b><br><span class="muted small">${esc(unitText(n.message || ''))} · ${esc(ago(n.createdAt))}</span></div><button class="btn ghost icon" type="button" data-dismiss="${esc(n.id)}" aria-label="Dismiss ${esc(n.title)}">${icon('x')}</button></li>`).join('')}
+    ${alerts.map((a) => `<li class="attn ${esc(a.level)}"><span class="dot ${a.level === 'error' ? 'bad' : 'warn'}" style="margin-top:7px"></span><div>${esc(unitText(a.message))}<br><span class="muted small">from the server monitor</span></div></li>`).join('')}</ul>`;
 }
 
 // why a server's CPU watts are missing (/api/stats power.cpuUnavailable)
@@ -118,7 +123,7 @@ function serverHtml(s, hist) {
   const cpuHist = hist?.cpu || [];
   return `<div class="stat-grid">
       <div class="stat"><span class="stat-label"><span>${icon('cpu', 'ico-sm')} CPU</span><span>${esc(cpu.model || '')}</span></span>
-        <span class="stat-val">${pct(cpu.usage)}${fin(cpu.tempC) ? ` · ${num(cpu.tempC)} °C` : ''}</span>${meter(cpu.usage)}
+        <span class="stat-val">${pct(cpu.usage)}${fin(cpu.tempC) ? ` · ${deg(cpu.tempC)}` : ''}</span>${meter(cpu.usage)}
         ${cpu.perCore?.length ? `<div class="cores" aria-label="Per core">${cpu.perCore.map((c) => `<i title="${pct(c)}"><b style="height:${Math.max(0, Math.min(100, c))}%"></b></i>`).join('')}</div>` : ''}
         <span class="muted tiny">Load ${(cpu.load || []).map((x) => num(x, 2)).join(' · ') || '—'} · ${plural(cpu.threads || cpu.cores || 0, 'thread')}${cpu.throttling ? ' · <b style="color:var(--warn)">throttling</b>' : ''}</span>
         ${spark(cpuHist.slice(-90), 'l', true, 100)}</div>
@@ -135,15 +140,15 @@ function serverHtml(s, hist) {
         <span class="stat-val">${fin(p.totalW) ? watts(p.totalW) : 'not measured'}</span>
         <span class="muted tiny">${fin(p.cpuW) ? `CPU ${watts(p.cpuW)} · ` : ''}${fin(p.gpuW) ? `GPU ${watts(p.gpuW)} · ` : ''}today ${energy(p.todayWh)}${fin(p.todayCost) ? ` (${money(p.todayCost, cur)})` : ''} · week ${energy(p.weekWh)}${fin(p.weekCost) ? ` (${money(p.weekCost, cur)})` : ''}${CPU_NA[p.cpuUnavailable] ? `<br>${esc(CPU_NA[p.cpuUnavailable])}` : ''}</span></div>
     </div>
-    ${(s.gpus || []).length ? `<hr class="soft"><div class="stat-grid">${s.gpus.map((g) => `<div class="stat"><span class="stat-label"><span>GPU · ${esc(g.name || g.vendor || g.id)}</span><span>${fin(g.tempC) ? `${num(g.tempC)} °C` : ''}</span></span>
+    ${(s.gpus || []).length ? `<hr class="soft"><div class="stat-grid">${s.gpus.map((g) => `<div class="stat"><span class="stat-label"><span>GPU · ${esc(g.name || g.vendor || g.id)}</span><span>${fin(g.tempC) ? `${deg(g.tempC)}` : ''}</span></span>
         <span class="stat-val">${pct(g.busy)} busy${fin(g.video) ? ` · video ${pct(g.video)}` : ''}</span>${meter(g.busy)}${fin(g.video) ? meter(g.video, 'violet') : ''}
         <span class="muted tiny">${fin(g.vramTotalB) ? `VRAM ${bytes(g.vramUsedB)} / ${bytes(g.vramTotalB)}` : ''}${fin(g.powerW) ? ` · ${watts(g.powerW)}` : ''}${fin(g.clockMHz) ? ` · ${num(g.clockMHz)} MHz` : ''}</span></div>`).join('')}</div>` : ''}
     ${disks.length || fss.length ? `<hr class="soft"><div class="stat-grid">
       ${fss.map((f) => `<div class="stat"><span class="stat-label"><span>${icon('disk', 'ico-sm')} ${esc(f.label)}</span><span>${f.reachable === false ? '<b style="color:var(--bad)">unreachable</b>' : fin(f.latencyMs) ? `${num(f.latencyMs)} ms` : ''}</span></span>
         <span class="stat-val">${bytes(f.freeB)} free</span>${meter(f.totalB ? (f.usedB / f.totalB) * 100 : 0, f.totalB && f.freeB / f.totalB < 0.05 ? 'hot' : '')}<span class="muted tiny">${bytes(f.usedB)} of ${bytes(f.totalB)}${f.fsType ? ` · ${esc(f.fsType)}` : ''}${f.smbVersion ? ` · SMB ${esc(f.smbVersion)}` : ''}</span></div>`).join('')}
-      ${disks.map((d) => `<div class="stat"><span class="stat-label"><span>${icon('disk', 'ico-sm')} ${esc(d.name)}${d.model ? ` · ${esc(d.model)}` : ''}</span><span>${fin(d.tempC) ? `${num(d.tempC)} °C` : ''}</span></span>
+      ${disks.map((d) => `<div class="stat"><span class="stat-label"><span>${icon('disk', 'ico-sm')} ${esc(d.name)}${d.model ? ` · ${esc(d.model)}` : ''}</span><span>${fin(d.tempC) ? `${deg(d.tempC)}` : ''}</span></span>
         <span class="stat-val">R ${rate(d.readBps)} · W ${rate(d.writeBps)}</span>${fin(d.busy) ? meter(d.busy) : ''}</div>`).join('')}</div>` : ''}
-    ${temps.length ? `<details class="more-info"><summary>${icon('temp', 'ico-sm')} Temperatures${hottest ? ` · hottest ${esc(hottest.label)} ${num(hottest.value)} °C` : ''}</summary><div class="row" style="margin-top:6px">${temps.map((t) => `<span class="chip${t.value >= 80 ? ' red' : t.value >= 65 ? ' amber' : ''}">${esc(t.label)} ${num(t.value)} °C</span>`).join('')}</div></details>` : ''}
+    ${temps.length ? `<details class="more-info"><summary>${icon('temp', 'ico-sm')} Temperatures${hottest ? ` · hottest ${esc(hottest.label)} ${deg(hottest.value)}` : ''}</summary><div class="row" style="margin-top:6px">${temps.map((t) => `<span class="chip${t.value >= 80 ? ' red' : t.value >= 65 ? ' amber' : ''}">${esc(t.label)} ${deg(t.value)}</span>`).join('')}</div></details>` : ''}
     ${(s.processes?.top || []).length ? `<details class="more-info"><summary>Busiest processes (${esc(s.processes.scope || '')})</summary><div class="table-wrap"><table class="tbl stack-sm"><thead><tr><th>Process</th><th>CPU</th><th>Memory</th></tr></thead><tbody>${s.processes.top.slice(0, 8).map((x) => `<tr><td data-label="Process">${esc(x.name)} <span class="muted tiny">${esc(x.pid)}</span></td><td data-label="CPU">${pct(x.cpu, 1)}</td><td data-label="Memory">${bytes(x.memB)}</td></tr>`).join('')}</tbody></table></div></details>` : ''}
     ${(s.unlock || []).length ? `<details class="more-info"><summary>See more of the server</summary><ul class="list small">${s.unlock.map((u) => `<li><div>${esc(u.adds)}: add <code>${esc(u.compose)}</code> to the compose file.</div></li>`).join('')}</ul></details>` : ''}
     <p class="muted tiny" style="margin-top:12px">${esc(s.host?.hostname || '')} · ${esc(s.host?.os || '')} ${esc(s.host?.kernel || '')} · up ${esc(Math.round((s.host?.uptimeS || 0) / 3600))} h · Sentry Six ${esc(s.host?.version || '')}</p><div class="actions start"><a class="btn sm" href="/api/stats/export.csv?range=24h" download>${icon('download')} Export 24 h (CSV)</a><a class="btn sm" href="/api/stats/export.csv?range=15m" download>Last 15 min</a></div>`;

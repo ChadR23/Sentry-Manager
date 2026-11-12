@@ -54,10 +54,12 @@ test('aurora Viewer: a vehicle picker where it can be seen (the title bar is hid
   const js = read('aurora/web/aurora/pages/viewer.js');
   assert.match(read('aurora/web/aurora/app.css'), /body\[data-route="viewer"\] \.win-head \{ display: none; \}/);
   assert.match(js, /<h3 id="list-title">Recordings that day<\/h3>\$\{vehiclePicker\('veh-pick-vw'\)\}/);
+  // one choice for both and the car-data boxes (web/units.js, its default by the language as before)
   for (const f of ['aurora/web/aurora/pages/viewer.js', 'daylight/web/dl/pages/viewer.js']) {
-    assert.match(read(f), /\/\^en-\(US\|GB\|LR\|MM\)\$\/i\.test\(navigator\.language \|\| ''\) \? 'mph' : 'kmh'/, f);
+    assert.match(read(f), /UNITS\.adopt\(savedUnits\(\)\) \? 'kmh' : 'mph'/, f);
   }
-  assert.match(fs.readFileSync(path.join(__dirname, '..', 'web', 'statDash.js'), 'utf8'), /const metricDefault = \(\) => !\/\^en-\(US\|GB\|LR\|MM\)\$\/i\.test/, 'the same rule as the car-data boxes');
+  assert.match(fs.readFileSync(path.join(__dirname, '..', 'web', 'statDash.js'), 'utf8'), /return \{ metric: UNITS\.metric\(\), can:/, 'the same choice as the car-data boxes');
+  assert.match(fs.readFileSync(path.join(__dirname, '..', 'web', 'units.js'), 'utf8'), /const MILES_LANG = \/\^en\(-\(US\|GB\|LR\|MM\)\)\?\$\/i;/, 'mph where miles are the custom');
 });
 
 test('aurora and daylight: long words wrap instead of widening a phone page', () => {

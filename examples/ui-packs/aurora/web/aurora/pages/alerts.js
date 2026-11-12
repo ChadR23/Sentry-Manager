@@ -2,6 +2,10 @@
 // mark them read (the dock badge counts the unread open ones).
 
 import { $, esc, icon, api, state, plural, whenFull, ago, toast, empty, loadNotes } from '../core.js';
+// a server's words with a temperature ("CPU at 92 °C") in the one unit choice (web/units.js)
+import '/web/units.js';
+
+const unitText = (t) => globalThis.SentryUnits.inText(t);
 
 const LEVEL = { critical: ['bad', 'Critical'], warning: ['warn', 'Warning'], warn: ['warn', 'Warning'], info: ['ok', 'Info'] };
 
@@ -31,8 +35,8 @@ export default {
         const veh = state.vehicles.find((v) => v.id === n.vehicleId)?.name;
         return `<article class="note-item${n.resolvedAt ? ' resolved' : ''}${!n.readAt && !n.resolvedAt ? ' unread' : ''}" data-id="${esc(n.id)}">
           <span class="dot ${dot}" aria-hidden="true"></span>
-          <div><div class="row" style="gap:8px"><b>${esc(n.title)}</b><span class="chip ${dot === 'bad' ? 'red' : dot === 'ok' ? 'green' : 'amber'}">${esc(word)}</span>${!n.readAt && !n.resolvedAt ? '<span class="chip magenta">New</span>' : ''}</div>
-            ${n.message ? `<p>${esc(n.message)}</p>` : ''}
+          <div><div class="row" style="gap:8px"><b>${esc(unitText(n.title))}</b><span class="chip ${dot === 'bad' ? 'red' : dot === 'ok' ? 'green' : 'amber'}">${esc(word)}</span>${!n.readAt && !n.resolvedAt ? '<span class="chip magenta">New</span>' : ''}</div>
+            ${n.message ? `<p>${esc(unitText(n.message))}</p>` : ''}
             <p class="muted tiny">${veh ? `${esc(veh)} · ` : ''}${esc(whenFull(n.createdAt))} (${esc(ago(n.createdAt))})${n.resolvedAt ? ` · resolved ${esc(whenFull(n.resolvedAt))}` : ''}</p></div>
           ${n.resolvedAt ? '' : `<div class="row">${n.readAt ? '' : `<button class="btn sm" type="button" data-read>Mark read</button>`}<button class="btn sm" type="button" data-dismiss>${icon('x')} Dismiss</button></div>`}
         </article>`;

@@ -17,6 +17,10 @@ const { TlsManager } = require('../server/tls');
 const L = require('../server/sentryUsbLink');
 const { encodeFrame } = require('../server/wsFrames');
 const { connectFakePi, sendAnswer } = require('./fixtures/fakeSentryUsb');
+// the shared page module (web/sentryUsbLink.js) as text for a data: import, its import of
+// the one unit choice (web/units.js) pointed at the file
+const linkSource = () => fs.readFileSync(path.join(__dirname, '..', 'web', 'sentryUsbLink.js'), 'utf8')
+  .replace("import '/web/units.js';", `import ${JSON.stringify(require('node:url').pathToFileURL(path.join(__dirname, '..', 'web', 'units.js')).href)};`);
 
 const quiet = { info() {}, warn() {}, debug() {} };
 const memDb = () => {
@@ -458,7 +462,7 @@ test('pairing: a wrong code with the right password and the right code with a wr
     assert.equal(lastA.why, lastB.why, 'the page is told the same');
     assert.equal(t.link.pairing().failures, 2);
     // the page shows one message for both
-    const page = await import(`data:text/javascript,${encodeURIComponent(fs.readFileSync(path.join(__dirname, '..', 'web', 'sentryUsbLink.js'), 'utf8'))}`);
+    const page = await import(`data:text/javascript,${encodeURIComponent(linkSource())}`);
     assert.equal(page.pairWhy(lastA.why)[0], 'Wrong pairing code or password');
     assert.equal(page.pairWhy('too many tries')[0], 'Wrong pairing code or password');
     assert.equal(page.pairWhy('expired')[0], 'Pairing window expired');

@@ -296,7 +296,7 @@ place, position, odometer or VIN.
 | `tires.state` | `"optimal"`, `"check"` or `"unsafe"`, optional | the worst tire against the owner's bands on the Pi (`TIRE_PSI_BANDS`, default 28, 36, 45, 50 psi), as the Pi's dashboard shows it ("Optimal", "Check tires", "Unsafe") |
 | `drive.state` | `"parked"` or `"driving"` | driving: a gear reading at most 2 minutes old says D, R or N; parked: it says P, or there is none and a drive has ended |
 | `drive.since` | integer, Unix seconds, optional | parked: when the last drive ended |
-| `units.temp`, `units.pressure` | `"F"`/`"C"`, `"psi"`/`"bar"` | how the Pi's own dashboard shows them (its TEMPERATURE_UNIT and PRESSURE_UNIT); display only, the values above stay °C and kPa |
+| `units.temp`, `units.pressure` | `"F"`/`"C"`, `"psi"`/`"bar"` | how the Pi's own dashboard shows them (its TEMPERATURE_UNIT and PRESSURE_UNIT); the values above stay °C and kPa, and Manager shows them in its own units |
 | `at` (in each reading) | integer, Unix seconds, optional | when that reading was taken; for a tire, when the car last heard its sensor (parked, the sensors sleep and the car keeps the last pressure) |
 
 - **Everything is optional.** A reading the Pi doesn't have is left out, and a
@@ -311,8 +311,10 @@ place, position, odometer or VIN.
   of Manager's clock) is dropped, the others are kept; a `car` with no valid
   reading left is not kept. It is stored with the rest of the status and
   shown on the Status tab's Car card to every signed-in account, watch-only
-  ones included. Manager has no unit settings of its own, so the card uses
-  `units`, else °F and psi.
+  ones included. The card uses Manager's own unit choice (web/units.js, the
+  same one as the Viewer's mph/km/h and the Driving page's miles/kilometres):
+  miles shows °F and psi, kilometres °C and bar. The Pi's `units` are kept on
+  the wire but not used for the card, so it never shows °C next to a Viewer in mph.
 
 ## 5. The allowlist (Pi side, deny by default)
 

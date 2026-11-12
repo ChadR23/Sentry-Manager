@@ -191,8 +191,9 @@ function readBuildInfo() {
 }
 
 function studioHtml(html) {
-  // Runs before any Studio script: marks web mode and installs window.electronAPI.
-  const inject = '<meta name="color-scheme" content="dark">\n<script src="/web/webFlag.js"></script>\n<script src="/web/electronApiShim.js"></script>\n<script src="/web/studioTouch.js"></script>\n<link rel="stylesheet" href="/web/studioEmbed.css">';
+  // Runs before any Studio script: marks web mode and installs window.electronAPI
+  // (and the one mph/km/h choice of every page, web/units.js: the Viewer's dashboard follows it).
+  const inject = '<meta name="color-scheme" content="dark">\n<script src="/web/webFlag.js"></script>\n<script src="/web/electronApiShim.js"></script>\n<script src="/web/units.js"></script>\n<script src="/web/studioTouch.js"></script>\n<link rel="stylesheet" href="/web/studioEmbed.css">';
   return html.replace(/<head([^>]*)>/i, (m) => `${m}\n${inject}`);
 }
 
@@ -251,7 +252,7 @@ function encoderHtml(html) {
   // skeleton): the scripts are deferred (they still run before encoder.js, in
   // order) and the stylesheet is preloaded, then applied by encoder.js with
   // the page's own. No touch drags on this page.
-  const inject = '<meta name="color-scheme" content="dark">\n<script src="/web/webFlag.js" defer></script>\n<script src="/web/electronApiShim.js" defer></script>\n<link rel="preload" href="/web/studioEmbed.css" as="style">';
+  const inject = '<meta name="color-scheme" content="dark">\n<script src="/web/webFlag.js" defer></script>\n<script src="/web/electronApiShim.js" defer></script>\n<script src="/web/units.js" defer></script>\n<link rel="preload" href="/web/studioEmbed.css" as="style">';
   // The skeleton's stylesheet goes inline: it paints with the first bytes.
   let skeleton = null;
   try {

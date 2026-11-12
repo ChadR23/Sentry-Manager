@@ -39,6 +39,10 @@
 // "Computed" stats, each fetching the CAN signals it needs.
 
 import '/web/carCalc.js';
+import '/web/units.js';
+
+// the one unit choice (miles: mph, °F, psi; kilometres: km/h, °C, bar), shared by every page
+const UNITS = globalThis.SentryUnits;
 
 const STYLE = `
 .sentry-sd{--sd-bg:rgba(18,20,24,.86);--sd-tile:rgba(255,255,255,.07);--sd-line:rgba(255,255,255,.14);--sd-fg:#f2f4f7;--sd-dim:rgba(242,244,247,.78);--sd-on:#43d17a;--sd-amber:#ffb547;--sd-blue:#4aa8ff;
@@ -239,29 +243,27 @@ registerSignals([
 ]);
 
 // ---- CAN signals (CAN Bridge logs, indexed on the server: /api/can/signals, /api/can/clip)
+// keyed by the unit's one spelling (web/units.js canonUnit: "C", "degC", "deg C", "°C",
+// "Celsius" are all C; "kph", "KPH", "km/hr" are km/h): a spelling the DBC uses that is
+// not here stayed °C with miles chosen (UI_tegraCoreTemperature's "deg C")
 const CAN_UNITS = {
   C: { metric: ['°C', (v) => v], imperial: ['°F', (v) => v * 1.8 + 32] },
-  degC: { metric: ['°C', (v) => v], imperial: ['°F', (v) => v * 1.8 + 32] },
-  kph: { metric: ['km/h', (v) => v], imperial: ['mph', (v) => v / 1.609344] },
+  F: { metric: ['°C', (v) => (v - 32) / 1.8], imperial: ['°F', (v) => v] },
   'km/h': { metric: ['km/h', (v) => v], imperial: ['mph', (v) => v / 1.609344] },
-  KPH: { metric: ['km/h', (v) => v], imperial: ['mph', (v) => v / 1.609344] },
   km: { metric: ['km', (v) => v], imperial: ['mi', (v) => v / 1.609344] },
-  KM: { metric: ['km', (v) => v], imperial: ['mi', (v) => v / 1.609344] },
   mi: { metric: ['km', (v) => v * 1.609344], imperial: ['mi', (v) => v] },
-  M: { metric: ['m', (v) => v], imperial: ['ft', (v) => v * 3.28084] },
   m: { metric: ['m', (v) => v], imperial: ['ft', (v) => v * 3.28084] },
   'm/s': { metric: ['km/h', (v) => v * MPS_KMH], imperial: ['mph', (v) => v * MPS_MPH] },
   mph: { metric: ['km/h', (v) => v * 1.609344], imperial: ['mph', (v) => v] },
-  MPH: { metric: ['km/h', (v) => v * 1.609344], imperial: ['mph', (v) => v] },
-  'km/hr': { metric: ['km/h', (v) => v], imperial: ['mph', (v) => v / 1.609344] },
   deg: { metric: ['°', (v) => v], imperial: ['°', (v) => v] },
-  Deg: { metric: ['°', (v) => v], imperial: ['°', (v) => v] },
-  KWh: { metric: ['kWh', (v) => v], imperial: ['kWh', (v) => v] },
   kWh: { metric: ['kWh', (v) => v], imperial: ['kWh', (v) => v] },
-  NM: { metric: ['Nm', (v) => v], imperial: ['Nm', (v) => v] },
+  Nm: { metric: ['Nm', (v) => v], imperial: ['Nm', (v) => v] },
   kPa: { metric: ['kPa', (v) => v], imperial: ['psi', (v) => v * 0.1450377] },
-  bar: { metric: ['bar', (v) => v], imperial: ['psi', (v) => v * 14.50377] }
+  bar: { metric: ['bar', (v) => v], imperial: ['psi', (v) => v * 14.50377] },
+  psi: { metric: ['bar', (v) => v / 14.50377], imperial: ['psi', (v) => v] }
 };
+/** The conversion for a DBC unit, however it is spelled, or undefined. */
+export const canUnit = (u) => CAN_UNITS[UNITS.canonUnit(u)];
 // ---- computed stats (web/carCalc.js): each from the CAN signals it `needs` (the bar
 // fetches them with it; the List has them all), counted as there when its inputs are
 const CALC_UNITS = {
@@ -269,7 +271,7 @@ const CALC_UNITS = {
   W: () => ['W', (v) => v],
   kWh: () => ['kWh', (v) => v],
   C: (m) => CAN_UNITS.C[m ? 'metric' : 'imperial'],
-  Cdelta: (m) => (m ? ['°C', (v) => v] : ['°F', (v) => v * 1.8]),
+  Cdelta: (m) => (m ? ['°C', (v) => v] : ['°F', (v) => UNITS.tempDelta(v, false)]),
   'Wh/mi': (m) => (m ? ['Wh/km', (v) => v / 1.609344] : ['Wh/mi', (v) => v]),
   mi: (m) => (m ? ['km', (v) => v * 1.609344] : ['mi', (v) => v])
 };
@@ -381,7 +383,7 @@ function registerCanSignals(meta) {
   for (const [name, m] of Object.entries(meta || {})) {
     const id = `can.${name}`;
     if (SIGNALS.has(id)) continue;
-    const conv = CAN_UNITS[m.unit];
+    const conv = canUnit(m.unit);
     const speedInCarUnits = m.unit === 'kph/mph';
     const named = m.values && Object.keys(m.values).length ? m.values : null;
     const span = Number.isFinite(m.max) && Number.isFinite(m.min) ? m.max - m.min : Infinity;
@@ -869,7 +871,7 @@ function createRawView({ onAvailable = () => {}, syncFor = () => null, onData = 
 }
 
 const DEFAULT_BOARD = () => ({
-  id: 'default', name: 'Drive', placement: 'below', metric: null,
+  id: 'default', name: 'Drive', placement: 'below',
   blocks: [
     { type: 'state', signals: ['dash.blinkLeft'] },
     { type: 'small', signals: ['dash.accelerator'] },
@@ -1005,7 +1007,6 @@ function flushBoards() {
 }
 globalThis.addEventListener?.('pagehide', flushBoards);
 globalThis.document?.addEventListener?.('visibilitychange', () => { if (document.visibilityState === 'hidden') flushBoards(); });
-const metricDefault = () => !/^en-(US|GB|LR|MM)$/i.test(navigator.language || '');
 
 // ---- where a floating box goes (rects on the page: { left, top, width, height }) ----
 // A floating box is kept relative to the Viewer's layout, not to the raw page: to the cameras
@@ -1211,7 +1212,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
       const a = canBar.of === shownPath && canBar.data?.series?.[name] ? canBar.data : listData();
       return a ? canSeriesAt(a.series?.[name], canTime(a, ms) + dt) : null;
     };
-    return { metric: board?.metric ?? metricDefault(), can: (name) => canAt(name, 0), canAt, since: ms };
+    return { metric: UNITS.metric(), can: (name) => canAt(name, 0), canAt, since: ms };
   };
   // how well the CAN data is lined up with the footage, small in the tools row
   function syncNote() {
@@ -2055,7 +2056,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
       return;
     }
 
-    if (t.matches('[data-units]')) { board.metric = !ctx().metric; change(); return; }
+    if (t.matches('[data-units]')) { UNITS.set(!UNITS.metric()); return; }
     if (t.matches('[data-new]')) {
       const name = (prompt('Name of the new dashboard:', 'My dashboard') || '').trim().slice(0, 40);
       if (!name) return;
@@ -2279,9 +2280,13 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
     if (!alive) return;
     state = { boards: d.boards.map((x) => ({ ...DEFAULT_BOARD(), ...x, blocks: (x.blocks || []).filter((b) => Object.hasOwn(SLOTS, String(b?.type))).map((b) => ({ ...(b.type === 'list' ? { q: String(b.q || ''), changing: b.changing === true } : {}), type: b.type, signals: [...(b.signals || [])].concat(DEFAULT_SIGNAL[b.type]).slice(0, SLOTS[b.type]).map((id) => (SIGNALS.has(id) || String(id).startsWith('can.') ? id : DEFAULT_SIGNAL[b.type][0])) })) })), active: d.active };
     board = state.boards.find((x) => x.id === state.active) || state.boards[0];
+    // (a board's own mph/km/h from before the one choice: kept when nothing is chosen yet)
+    if (typeof board?.metric === 'boolean') UNITS.adopt(board.metric);
     draw();
     raf = requestAnimationFrame(loop);
   });
+  // mph/km/h changed here, on another page's button or in another tab: every value and its unit with it
+  const offUnits = UNITS.onChange(() => { if (alive && state) draw(); });
   return {
     el,
     panel, // the list box (outside the bar)
@@ -2291,6 +2296,7 @@ export function attachStatDash({ stage, videos = () => [], main = () => null, ov
       // a List filter typed in the last moment is kept (its save waits for the typing to stop)
       if (listSave) { clearTimeout(listSave); listSave = null; if (state) saveBoards(state); }
       flushBoards(); // (and any save still waiting: the page is going)
+      offUnits();
       alive = false; cancelAnimationFrame(raf); cancelAnimationFrame(reflowRaf); pageWatch?.disconnect();
       clearTimeout(canBar.retry); clearTimeout(canAll.retry); globalThis.removeEventListener?.('resize', onResize);
       for (const type of ['transitionend', 'animationend']) document.removeEventListener?.(type, onSettle, true);

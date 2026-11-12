@@ -3,6 +3,11 @@
 import { h, ico, api, app, car, size, perSec, pc, fixed, count, span, since, stampFull, watt, wh, cash, ok, toast, ask, act, local, segs, onSegs, pill, bar, panelHead, debounce, liveDraw } from '../core.js';
 import { dial, setDial, fuel, setFuel, spark } from '../gauges.js';
 import { fullIn } from '/web/fullIn.js';
+import '/web/units.js';
+
+// temperatures in the one unit choice (web/units.js): °F with miles, °C with kilometres
+const deg = (c) => globalThis.SentryUnits.tempText(c);
+const unitText = (t) => globalThis.SentryUnits.inText(t);
 
 const KEEP = 180; // samples kept for the sparklines (6 min at 2 s)
 
@@ -117,7 +122,7 @@ export default {
         ['refresh', 'Scanning', v?.scanning ? 'cyan' : '', v?.scanning ? 'busy' : 'idle'],
         ['bin', 'Bin', v?.binItems ? 'mag' : '', v?.binItems ? count(v.binItems, 'item') : 'empty'],
         ['policy', 'Policy', v?.policy?.enabled ? 'grn' : '', v?.policy?.enabled ? 'daily' : 'off'],
-        ['temp', 'Heat', stats?.cpu?.throttling || (ok(stats?.cpu?.tempC) && stats.cpu.tempC >= 90) ? 'red' : '', ok(stats?.cpu?.tempC) ? `${Math.round(stats.cpu.tempC)} °C` : 'n/a']
+        ['temp', 'Heat', stats?.cpu?.throttling || (ok(stats?.cpu?.tempC) && stats.cpu.tempC >= 90) ? 'red' : '', ok(stats?.cpu?.tempC) ? deg(stats.cpu.tempC) : 'n/a']
       ];
       $('#d-lamps').innerHTML = lamps.map(([i, l, tone, s]) => `<div class="lamp ${tone ? `lit ${tone}` : ''}" role="listitem">${ico(i)}<b>${h(l)}</b><span>${h(s)}</span></div>`).join('');
     }
@@ -216,9 +221,9 @@ export default {
         meter(p.combined && p.nodes?.length ? 'This server' : 'Power', watt(tot), ofPeak(tot, p.peakW), 'power', { tone: 'org', max: Math.max(peakOf(tot, p.peakW), ...hist.power.filter(ok)) || null, sub: ok(tot) || p.todayWh ? `${peakText(tot, p.peakW)}today ${wh(p.todayWh)}${ok(p.todayCost) ? ` ${cash(p.todayCost, cur)}` : ''} · week ${wh(p.weekWh)}${ok(p.weekCost) ? ` ${cash(p.weekCost, cur)}` : ''}${perHour !== null ? ` · ≈${cash(perHour, cur)}/h` : ''}${ok(s.price?.now) ? ` · ${cash(s.price.now, cur)}/kWh` : ''}${!ok(p.cpuW) && CPU_NA_SHORT[p.cpuUnavailable] ? ` · ${CPU_NA_SHORT[p.cpuUnavailable]}` : ''}` : CPU_NA[p.cpuUnavailable] || 'No power sensor readable' }),
         meter('Network', `↓ ${perSec(last('rx'))}`, null, 'rx', { rate: true, pair: 'tx', subHtml: true, sub: `<span class="k-cyan">↓ download</span> · <span class="k-org">↑ upload ${h(perSec(last('tx')))}</span> · ${h(`${(s.network?.interfaces || []).map((i) => `${i.name}${ok(i.speedMbps) ? ` ${i.speedMbps} Mb/s` : ''}`).join(', ')} · ${s.network?.scope === 'host' ? 'whole server' : 'this container'}${s.network?.today ? ` · today ↓${size(s.network.today.rxB)} ↑${size(s.network.today.txB)}` : ''}`)}` }),
         meter('Disks', `R ${perSec(last('dr'))}`, null, 'dr', { rate: true, pair: 'dw', subHtml: true, sub: `<span class="k-cyan">— read</span> · <span class="k-org">— write ${h(perSec(last('dw')))}</span>` }),
-        meter('Hottest', ok(t) ? `${Math.round(t)} °C` : '—', ok(t) ? t : null, 'temp', { tone: 'org', max: 100, sub: ok(t) ? 'CPU, GPU, disks and sensors' : 'No temperature sensor readable' })
+        meter('Hottest', ok(t) ? deg(t) : '—', ok(t) ? t : null, 'temp', { tone: 'org', max: 100, sub: ok(t) ? 'CPU, GPU, disks and sensors' : 'No temperature sensor readable' })
       ].join('');
-      const alerts = (s.alerts || []).map((a) => `<div class="note ${a.level === 'error' ? 'red' : 'org'}">${h(a.message)}</div>`).join('');
+      const alerts = (s.alerts || []).map((a) => `<div class="note ${a.level === 'error' ? 'red' : 'org'}">${h(unitText(a.message))}</div>`).join('');
       const unlock = (s.unlock || []).length ? `<details class="arch" id="d-unlock"${unlockOpen ? ' open' : ''}><summary>${count(s.unlock.length, 'more reading')} available with one line in docker-compose.yml</summary>${s.unlock.map((u) => `<p class="small"><b>${h(u.adds)}</b> <code>${h(u.compose || '')}</code></p>`).join('')}</details>` : '';
       // (only when it changed: a redraw closed the readings box as it was read)
       const alertsHtml = alerts + unlock;
@@ -231,11 +236,11 @@ export default {
       const sensors = (s.sensors || []).filter((x) => ok(x.value));
       $('#d-gpu').innerHTML = (g.length ? g.map((x) => `<div class="gpu"><div class="row"><b>${h(x.name || x.id)}</b><span class="faint small">${h([x.vendor, x.driver, x.node].filter(Boolean).join(' · '))}</span></div>
           <div class="gpu-b"><span class="small">busy</span>${bar(x.busy)}<b class="num small">${pc(x.busy)}</b><span class="small">video</span>${bar(x.video, 'org')}<b class="num small">${pc(x.video)}</b>${ok(x.vramTotalB) ? `<span class="small">VRAM</span>${bar((x.vramUsedB / x.vramTotalB) * 100)}<b class="num small">${size(x.vramUsedB)}</b>` : ''}</div>
-          <p class="small faint">${[ok(x.clockMHz) && `${x.clockMHz} MHz`, ok(x.tempC) && `${x.tempC} °C`, ok(x.powerW) && watt(x.powerW), ok(x.clients) && `${x.clients} clients`].filter(Boolean).join(' · ')}</p></div>`).join('') : '<p class="small dim">No GPU is passed into the container, so conversions use the CPU.</p>')
-        + (sensors.length ? `<dl class="kv sensors">${sensors.slice(0, 16).map((x) => `<dt>${h(`${x.chip} ${x.label}`)}</dt><dd class="num${x.kind === 'temp' && x.value >= 85 ? ' badtx' : ''}">${x.kind === 'fan' ? `${Math.round(x.value)} rpm` : `${Math.round(x.value)} °C`}</dd>`).join('')}</dl>` : '<p class="small faint">No temperature or fan sensors are readable here.</p>');
+          <p class="small faint">${[ok(x.clockMHz) && `${x.clockMHz} MHz`, ok(x.tempC) && deg(x.tempC), ok(x.powerW) && watt(x.powerW), ok(x.clients) && `${x.clients} clients`].filter(Boolean).join(' · ')}</p></div>`).join('') : '<p class="small dim">No GPU is passed into the container, so conversions use the CPU.</p>')
+        + (sensors.length ? `<dl class="kv sensors">${sensors.slice(0, 16).map((x) => `<dt>${h(`${x.chip} ${x.label}`)}</dt><dd class="num${x.kind === 'temp' && x.value >= 85 ? ' badtx' : ''}">${x.kind === 'fan' ? `${Math.round(x.value)} rpm` : deg(x.value)}</dd>`).join('')}</dl>` : '<p class="small faint">No temperature or fan sensors are readable here.</p>');
       const disks = s.disks || [];
       const procs = s.processes?.top || [];
-      $('#d-procs').innerHTML = `<div class="tblwrap"><table class="tbl"><thead><tr><th>Disk</th><th class="r">Read</th><th class="r">Write</th><th class="r">Busy</th><th class="r">Temp</th></tr></thead><tbody>${disks.map((d) => `<tr><td><span class="mono">${h(d.name)}</span><div class="faint small">${h([d.model, d.kind].filter(Boolean).join(' · '))}</div></td><td class="r num">${perSec(d.readBps)}</td><td class="r num">${perSec(d.writeBps)}</td><td class="r num">${pc(d.busy)}</td><td class="r num">${ok(d.tempC) ? `${d.tempC} °C` : '—'}</td></tr>`).join('') || '<tr><td colspan="5" class="dim">No disks reported.</td></tr>'}</tbody></table></div>
+      $('#d-procs').innerHTML = `<div class="tblwrap"><table class="tbl"><thead><tr><th>Disk</th><th class="r">Read</th><th class="r">Write</th><th class="r">Busy</th><th class="r">Temp</th></tr></thead><tbody>${disks.map((d) => `<tr><td><span class="mono">${h(d.name)}</span><div class="faint small">${h([d.model, d.kind].filter(Boolean).join(' · '))}</div></td><td class="r num">${perSec(d.readBps)}</td><td class="r num">${perSec(d.writeBps)}</td><td class="r num">${pc(d.busy)}</td><td class="r num">${ok(d.tempC) ? deg(d.tempC) : '—'}</td></tr>`).join('') || '<tr><td colspan="5" class="dim">No disks reported.</td></tr>'}</tbody></table></div>
         <h3 class="sub-h">Top processes <span class="faint tiny">${s.processes?.scope === 'host' ? 'whole server' : 'this container'}</span></h3>
         <div class="tblwrap"><table class="tbl"><thead><tr><th>Process</th><th class="r">CPU</th><th class="r">Memory</th><th class="r">GPU</th></tr></thead><tbody>${procs.slice(0, 8).map((x) => `<tr><td><span class="mono">${h(x.name)}</span> <span class="faint small">${h(x.pid)}</span></td><td class="r num">${pc(x.cpu, 1)}</td><td class="r num">${size(x.memB)}</td><td class="r num">${ok(x.gpuVideo) ? pc(x.gpuVideo) : '—'}</td></tr>`).join('')}</tbody></table></div>`;
       // encoder + storage
@@ -279,7 +284,7 @@ export default {
     }
     function drawAttn() {
       const open = app.notes.filter((n) => !n.resolvedAt).slice(0, 5);
-      $('#d-attn').innerHTML = open.length ? open.map((n) => `<div class="attn ${h(n.level)}"><span class="attn-dot" aria-hidden="true"></span><div><b>${h(n.title)}</b><p class="small dim">${h(n.message || '')}</p><p class="tiny faint">${h(since(n.createdAt))}</p></div></div>`).join('') : '<p class="dim small">All clear. Nothing needs you right now.</p>';
+      $('#d-attn').innerHTML = open.length ? open.map((n) => `<div class="attn ${h(n.level)}"><span class="attn-dot" aria-hidden="true"></span><div><b>${h(unitText(n.title))}</b><p class="small dim">${h(unitText(n.message || ''))}</p><p class="tiny faint">${h(since(n.createdAt))}</p></div></div>`).join('') : '<p class="dim small">All clear. Nothing needs you right now.</p>';
     }
 
     // ---------- black box ----------

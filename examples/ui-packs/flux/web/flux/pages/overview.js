@@ -3,6 +3,11 @@ import { esc, api, state, current, bytes, rate, pct, num, watts, energy, money, 
 import { TimeChart, HeatStrip, C, PALETTE, coreBars } from '../charts.js';
 import { split, seg, wireSeg, meter, chip } from '../ui.js';
 import { fullIn } from '/web/fullIn.js';
+import '/web/units.js';
+
+// temperatures in the one unit choice (web/units.js): °F with miles, °C with kilometres
+const deg = (c, o) => globalThis.SentryUnits.tempText(c, o);
+const unitText = (t) => globalThis.SentryUnits.inText(t);
 
 const MAX_POINTS = 450;
 
@@ -77,7 +82,7 @@ export default {
     charts.net = new TimeChart(el.querySelector('#ch-net'), { height: 110, floor: 64 * 1024, format: (v) => rate(v), series: [{ key: 'rx', label: '↓ down', color: C.cyan }, { key: 'tx', label: '↑ up', color: C.violet }] });
     charts.disk = new TimeChart(el.querySelector('#ch-disk'), { height: 110, floor: 1024 * 1024, format: (v) => rate(v), series: [{ key: 'diskR', label: 'read', color: C.green }, { key: 'diskW', label: 'write', color: C.amber }] });
     charts.diskBusy = new TimeChart(el.querySelector('#ch-diskbusy'), { height: 110, max: 100, format: pctFmt, legend: true, series: [{ key: 'diskBusy', label: 'busy / wait %', color: C.red }] });
-    charts.temp = new TimeChart(el.querySelector('#ch-temp'), { height: 110, floor: 50, format: (v) => `${Math.round(v)}°C`, series: [{ key: 'temp', label: 'Hottest', color: C.orange }] });
+    charts.temp = new TimeChart(el.querySelector('#ch-temp'), { height: 110, floor: 50, format: (v) => deg(v, { space: false }), series: [{ key: 'temp', label: 'Hottest', color: C.orange }] });
 
     // ---- data ----
     function push(key, v) {
@@ -193,7 +198,7 @@ export default {
       $('#cpu-kv').innerHTML = kv([
         ['load 1/5/15', Array.isArray(cpu.load) ? cpu.load.map((x) => (fin(x) ? x.toFixed(2) : '—')).join(' / ') : null],
         ['clock', fin(cpu.freqMHz) ? `${(cpu.freqMHz / 1000).toFixed(2)} GHz` : null],
-        ['temp', fin(cpu.tempC) ? `${Math.round(cpu.tempC)} °C` : null, cpu.tempC >= 90 ? 'bad-text' : ''],
+        ['temp', fin(cpu.tempC) ? deg(cpu.tempC) : null, cpu.tempC >= 90 ? 'bad-text' : ''],
         ['this app', fin(cpu.app?.usage) ? pct(cpu.app.usage, 1) : null],
         ['ffmpeg', cpu.app?.ffmpegCount ? `${cpu.app.ffmpegCount} × · ${pct(cpu.app.ffmpegUsage, 1)}` : '0'],
         ['throttling', cpu.throttling ? 'yes' : 'no', cpu.throttling ? 'bad-text' : ''],
@@ -206,7 +211,7 @@ export default {
       $('#gpu-rows').innerHTML = gpus.map((g) => `<div class="gpu-row"><b>${esc(g.name || g.id)}</b><span class="muted small">${esc([g.vendor, g.driver, g.node].filter(Boolean).join(' · '))}</span>
         <div class="bars"><span>busy</span>${meter(g.busy, 'pink')}<b class="num">${pct(g.busy)}</b><span>video</span>${meter(g.video, 'cyan')}<b class="num">${pct(g.video)}</b>
         ${fin(g.vramTotalB) ? `<span>vram</span>${meter((g.vramUsedB / g.vramTotalB) * 100, 'violet')}<b class="num">${bytes(g.vramUsedB)} / ${bytes(g.vramTotalB)}</b>` : ''}</div>
-        <dl class="kv tight">${kv([['clock', fin(g.clockMHz) ? `${g.clockMHz} MHz` : null], ['temp', fin(g.tempC) ? `${g.tempC} °C` : null], ['power', fin(g.powerW) ? watts(g.powerW) : null], ['clients', fin(g.clients) ? String(g.clients) : null]])}</dl></div>`).join('') || '<p class="muted small">The GPU chart fills in when a GPU is passed into the container.</p>';
+        <dl class="kv tight">${kv([['clock', fin(g.clockMHz) ? `${g.clockMHz} MHz` : null], ['temp', fin(g.tempC) ? deg(g.tempC) : null], ['power', fin(g.powerW) ? watts(g.powerW) : null], ['clients', fin(g.clients) ? String(g.clients) : null]])}</dl></div>`).join('') || '<p class="muted small">The GPU chart fills in when a GPU is passed into the container.</p>';
       // power
       const p = s.power || {};
       const cur = s.price?.currency || state.power?.currency || '$';
@@ -251,19 +256,19 @@ export default {
       // disks
       const disks = s.disks || [];
       $('#disk-big').textContent = `${rate(buf.diskR[buf.diskR.length - 1])} r · ${rate(buf.diskW[buf.diskW.length - 1])} w`;
-      $('#disk-table').innerHTML = `<thead><tr><th>disk</th><th>kind</th><th class="r">read</th><th class="r">write</th><th class="r">busy</th><th class="r">temp</th></tr></thead><tbody>${disks.map((d) => `<tr><td class="mono">${esc(d.name)}<div class="faint small">${esc(d.model || '')}</div></td><td>${esc(d.kind || '')}</td><td class="r num">${rate(d.readBps)}</td><td class="r num">${rate(d.writeBps)}</td><td class="r num">${pct(d.busy)}</td><td class="r num">${fin(d.tempC) ? `${d.tempC} °C` : '—'}</td></tr>`).join('')}</tbody>`;
+      $('#disk-table').innerHTML = `<thead><tr><th>disk</th><th>kind</th><th class="r">read</th><th class="r">write</th><th class="r">busy</th><th class="r">temp</th></tr></thead><tbody>${disks.map((d) => `<tr><td class="mono">${esc(d.name)}<div class="faint small">${esc(d.model || '')}</div></td><td>${esc(d.kind || '')}</td><td class="r num">${rate(d.readBps)}</td><td class="r num">${rate(d.writeBps)}</td><td class="r num">${pct(d.busy)}</td><td class="r num">${fin(d.tempC) ? deg(d.tempC) : '—'}</td></tr>`).join('')}</tbody>`;
       // temps
       const sensors = (s.sensors || []).filter((x) => fin(x.value));
       const t = buf.temp[buf.temp.length - 1];
-      $('#temp-big').textContent = fin(t) ? `${Math.round(t)} °C` : '—';
+      $('#temp-big').textContent = fin(t) ? deg(t) : '—';
       $('#temp-sub').textContent = sensors.length ? `${sensors.length} sensors` : 'no temperature sensors readable';
-      $('#temp-kv').innerHTML = kv(sensors.slice(0, 14).map((x) => [`${x.chip} ${x.label}`, x.kind === 'fan' ? `${Math.round(x.value)} rpm` : `${Math.round(x.value)} °C`, x.kind === 'temp' && x.value >= 85 ? 'bad-text' : '']));
+      $('#temp-kv').innerHTML = kv(sensors.slice(0, 14).map((x) => [`${x.chip} ${x.label}`, x.kind === 'fan' ? `${Math.round(x.value)} rpm` : deg(x.value), x.kind === 'temp' && x.value >= 85 ? 'bad-text' : '']));
       // processes
       const procs = s.processes?.top || [];
       $('#proc-sub').textContent = s.processes?.scope === 'host' ? 'whole server' : 'this container';
       $('#proc-table').innerHTML = `<thead><tr><th>pid</th><th>name</th><th class="r">cpu</th><th class="r">mem</th><th class="r">gpu</th></tr></thead><tbody>${procs.slice(0, 12).map((x) => `<tr><td class="num faint">${esc(x.pid)}</td><td class="mono">${esc(x.name)}</td><td class="r num">${pct(x.cpu, 1)}</td><td class="r num">${bytes(x.memB)}</td><td class="r num">${fin(x.gpuVideo) ? pct(x.gpuVideo) : '—'}</td></tr>`).join('')}</tbody>`;
       // alerts / unlock hints
-      const alerts = (s.alerts || []).map((a) => `<div class="alert ${a.level === 'error' ? 'bad' : 'warn'}">${icon('alert')}<span>${esc(a.message)}</span></div>`).join('');
+      const alerts = (s.alerts || []).map((a) => `<div class="alert ${a.level === 'error' ? 'bad' : 'warn'}">${icon('alert')}<span>${esc(unitText(a.message))}</span></div>`).join('');
       const unlock = (s.unlock || []).length ? `<details class="unlock"><summary>${plural(s.unlock.length, 'more number')} available with one line in docker-compose.yml</summary>${s.unlock.map((u) => `<div class="small"><b>${esc(u.adds)}</b> <code>${esc(u.compose || '')}</code></div>`).join('')}</details>` : '';
       // (kept open across redraws: it closed every few seconds as it was read)
       const box = $('#ov-alerts');
@@ -349,7 +354,7 @@ export default {
 
     function drawAttention() {
       const open = state.notes.filter((n) => !n.resolvedAt).slice(0, 6);
-      $('#ov-attn').innerHTML = open.length ? open.map((n) => `<div class="attn ${n.level}"><i></i><div><b>${esc(n.title)}</b><div class="small muted">${esc(n.message || '')}</div><div class="faint small">${ago(n.createdAt)}</div></div></div>`).join('') : '<p class="muted small">All clear. Nothing needs you.</p>';
+      $('#ov-attn').innerHTML = open.length ? open.map((n) => `<div class="attn ${n.level}"><i></i><div><b>${esc(unitText(n.title))}</b><div class="small muted">${esc(unitText(n.message || ''))}</div><div class="faint small">${ago(n.createdAt)}</div></div></div>`).join('') : '<p class="muted small">All clear. Nothing needs you.</p>';
     }
 
     // ---- logs ----

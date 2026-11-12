@@ -3,6 +3,10 @@
 
 import { api, esc, icon, when, emptyState, toast, fail, busy, liveDraw } from '../core.js';
 import { loadNotes, vehicleById, state } from '../state.js';
+// a server's words with a temperature ("CPU at 92 °C") in the one unit choice (web/units.js)
+import '/web/units.js';
+
+const unitText = (t) => globalThis.SentryUnits.inText(t);
 
 const TONE = { critical: ['bad', 'alert'], warning: ['warn', 'alert'], info: ['info', 'info'] };
 
@@ -26,8 +30,8 @@ export async function render(ctx) {
       const [tone, ic] = TONE[n.level] || TONE.warning;
       const vname = n.vehicleId && state.vehicles.length > 1 ? vehicleById(n.vehicleId)?.name : '';
       return `<li class="list-item" data-id="${n.id}"><div class="note note-${n.resolvedAt ? 'info' : tone}" style="flex:1;align-items:flex-start">${icon(n.resolvedAt ? 'checkCircle' : ic)}
-        <div class="grow" style="flex:1;min-width:0"><b>${esc(n.title)}</b>${!n.readAt && !n.resolvedAt ? ' <span class="chip chip-teal">New</span>' : ''}
-          ${n.message ? `<p style="margin-top:4px">${esc(n.message)}</p>` : ''}
+        <div class="grow" style="flex:1;min-width:0"><b>${esc(unitText(n.title))}</b>${!n.readAt && !n.resolvedAt ? ' <span class="chip chip-teal">New</span>' : ''}
+          ${n.message ? `<p style="margin-top:4px">${esc(unitText(n.message))}</p>` : ''}
           <p class="muted small" style="margin-top:4px">${esc(vname ? `${vname} · ` : '')}${esc(when(n.createdAt))}${n.resolvedAt ? ` · sorted itself out ${esc(when(n.resolvedAt))}` : ''}</p></div>
         ${n.resolvedAt ? '' : `<button class="btn btn-sm" type="button" data-dismiss="${n.id}">Dismiss</button>`}</div></li>`;
     };

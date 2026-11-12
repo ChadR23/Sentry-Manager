@@ -272,7 +272,9 @@ test('a queued settings change with a control character in a value is refused, a
 });
 
 test('the settings page splits a change as the server does, in the same words', async () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'web', 'sentryUsbLink.js'), 'utf8');
+  // (its import of the one unit choice, web/units.js, pointed at the file)
+  const src = fs.readFileSync(path.join(__dirname, '..', 'web', 'sentryUsbLink.js'), 'utf8')
+    .replace("import '/web/units.js';", `import ${JSON.stringify(require('node:url').pathToFileURL(path.join(__dirname, '..', 'web', 'units.js')).href)};`);
   const page = await import(`data:text/javascript,${encodeURIComponent(src)}`);
   assert.equal(page.SECRETS_ONLINE_TEXT, SECRETS_ONLINE_TEXT);
   const c = {

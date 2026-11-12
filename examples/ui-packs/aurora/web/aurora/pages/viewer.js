@@ -13,6 +13,12 @@ import { createMoments } from '/web/moments.js';
 import { attachViewerExtras } from '/web/viewerExtras.js';
 import { createLayoutSlots } from '/web/layouts.js';
 import { syncTo, readyTogether, clipAhead } from '/web/camSync.js';
+import '/web/units.js';
+
+// mph or km/h: the one choice of every page (web/units.js); the car data under the
+// cameras shows °F with mph and °C with km/h. This Viewer's own older choice counts until one is made.
+const UNITS = globalThis.SentryUnits;
+const savedUnits = () => { const u = store.get('unit', null); return u === 'kmh' ? true : u === 'mph' ? false : undefined; };
 
 const CAMS = ['front', 'back', 'left_repeater', 'right_repeater', 'left_pillar', 'right_pillar'];
 // on small tiles the labels shrink to these codes (one line, never wrapping)
@@ -76,8 +82,8 @@ export default {
       body.innerHTML = empty('No vehicle yet', 'Add one in Settings to watch its footage.', `<a class="btn primary" href="#/settings/vehicles/new">${icon('plus')} Add a vehicle</a>`);
       return {};
     }
-    // speed in the units of the car-data boxes under the cameras (web/statDash.js: mph where miles are the custom), until changed here
-    const opts = { tele: store.get('hud', true), unit: store.get('unit', /^en-(US|GB|LR|MM)$/i.test(navigator.language || '') ? 'mph' : 'kmh'), mirror: store.get('mirror', false), speed: 1 };
+    // speed in the units of every page (web/units.js: mph where miles are the custom, until changed on any of them)
+    const opts = { tele: store.get('hud', true), unit: UNITS.adopt(savedUnits()) ? 'kmh' : 'mph', mirror: store.get('mirror', false), speed: 1 };
     let dead = false;
     let clips = [];
     let index = 0;
@@ -829,13 +835,7 @@ export default {
         t.closest('#c-hud').setAttribute('aria-pressed', String(opts.tele));
         return paintHud();
       }
-      if (t.closest('#c-unit')) {
-        opts.unit = opts.unit === 'mph' ? 'kmh' : 'mph';
-        store.set('unit', opts.unit);
-        t.closest('#c-unit').textContent = opts.unit === 'mph' ? 'mph' : 'km/h';
-        moments.refresh();
-        return paintHud();
-      }
+      if (t.closest('#c-unit')) return setUnit(opts.unit === 'mph' ? 'kmh' : 'mph');
       if (t.closest('#c-mirror')) {
         opts.mirror = !opts.mirror;
         store.set('mirror', opts.mirror);
@@ -934,9 +934,21 @@ export default {
       loadRoute();
     }
 
+    function setUnit(u) {
+      opts.unit = u;
+      if (UNITS.metric() !== (u === 'kmh')) UNITS.set(u === 'kmh');
+      const b = q('#c-unit');
+      if (b) b.textContent = u === 'mph' ? 'mph' : 'km/h';
+      moments.refresh();
+      return paintHud();
+    }
+    // (flipped on the car data's button, another page or another tab)
+    const offUnits = UNITS.onChange((m) => { if (!dead && (opts.unit === 'kmh') !== m) setUnit(m ? 'kmh' : 'mph'); });
+
     return {
       destroy() {
         dead = true;
+        offUnits();
         tip.destroy();
         moments.destroy();
         extras.destroy();

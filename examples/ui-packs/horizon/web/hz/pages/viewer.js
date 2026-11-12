@@ -10,6 +10,12 @@ import { createMoments } from '/web/moments.js';
 import { attachViewerExtras } from '/web/viewerExtras.js';
 import { createLayoutSlots } from '/web/layouts.js';
 import { syncTo, readyTogether, clipAhead } from '/web/camSync.js';
+import '/web/units.js';
+
+// mph or km/h: the one choice of every page (web/units.js); the car data under the
+// cameras shows °F with mph and °C with km/h. This Viewer's own older choice counts until one is made.
+const UNITS = globalThis.SentryUnits;
+const savedUnits = () => { const u = local.get('vw.units', null); return u === 'kmh' ? true : u === 'mph' ? false : undefined; };
 
 const FILE_RE = /(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})-([a-z0-9_]+)\.mp4$/i;
 const SPEEDS = [0.25, 0.5, 1, 1.5, 2, 4];
@@ -42,7 +48,7 @@ export default {
       main: local.get('vw.main', 'front'),
       grid: local.get('vw.grid', false),
       hud: local.get('vw.hud', true),
-      units: local.get('vw.units', 'mph'),
+      units: UNITS.adopt(savedUnits()) ? 'kmh' : 'mph',
       speed: local.get('vw.speed', 1),
       clips: [],
       i: 0,
@@ -668,7 +674,7 @@ export default {
     }
     function setUnits(u) {
       st.units = u;
-      local.set('vw.units', u);
+      if (UNITS.metric() !== (u === 'kmh')) UNITS.set(u === 'kmh');
       $('#vw-units').textContent = u === 'mph' ? 'mph' : 'km/h';
       $('#h-unit').textContent = u === 'mph' ? 'MPH' : 'KM/H';
       moments.refresh();
@@ -698,6 +704,8 @@ export default {
     $('#vw-next').onclick = () => open(Math.min(st.clips.length - 1, st.i + 1), 0, st.playing);
     $('#vw-speed').onchange = (e) => setSpeed(Number(e.target.value));
     $('#vw-units').onclick = () => setUnits(st.units === 'mph' ? 'kmh' : 'mph');
+    // (flipped on the car data's button, Settings or another tab)
+    const offUnits = UNITS.onChange((m) => { if (alive && (st.units === 'kmh') !== m) setUnits(m ? 'kmh' : 'mph'); });
     $('#vw-hudb').onclick = () => setHud(!st.hud);
     $('#vw-gridb').onclick = () => setGrid(!st.grid);
     const box = $('#vw');
@@ -717,7 +725,7 @@ export default {
       info = await build();
     } catch (err) {
       say(`<b>${h(err.message)}</b>`);
-      return { unmount() { alive = false; tip.destroy(); moments.destroy(); slots.destroy(); extras.destroy(); map.destroy(); xp.destroy(); ahead.destroy(); spdSize.disconnect(); document.removeEventListener('visibilitychange', onVis); } };
+      return { unmount() { alive = false; offUnits(); tip.destroy(); moments.destroy(); slots.destroy(); extras.destroy(); map.destroy(); xp.destroy(); ahead.destroy(); spdSize.disconnect(); document.removeEventListener('visibilitychange', onVis); } };
     }
     drawPick(info);
     // HW3 or HW4 from the footage itself, as the built-in Viewer does: only
@@ -758,6 +766,7 @@ export default {
     return {
       unmount() {
         alive = false;
+        offUnits();
         tip.destroy();
         moments.destroy();
         extras.destroy();

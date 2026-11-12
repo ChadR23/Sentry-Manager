@@ -1,5 +1,9 @@
 // Notifications as warning lights: open, unread, resolved; mark read or dismiss.
 import { h, ico, api, app, loadNotes, since, stampFull, toast, act, count, segs, onSegs, pill, blank, paint, liveDraw } from '../core.js';
+// a server's words with a temperature ("CPU at 92 °C") in the one unit choice (web/units.js)
+import '/web/units.js';
+
+const unitText = (t) => globalThis.SentryUnits.inText(t);
 
 const TONE = { critical: 'red', warning: 'org', info: 'cyan' };
 
@@ -20,8 +24,8 @@ export default {
       $('#a-read').disabled = !unread;
       paint($('#a-list'), list.map((n) => `<li class="alert-i ${h(n.level)}${n.readAt ? '' : ' unread'}${n.resolvedAt ? ' done' : ''}" data-id="${n.id}">
           <span class="alamp ${TONE[n.level] || ''}" aria-hidden="true">${ico(n.level === 'info' ? 'info' : 'warn')}</span>
-          <div class="al-main"><div class="row"><b>${h(n.title)}</b>${pill(n.level, TONE[n.level] || '')}${n.readAt ? '' : pill('new', 'mag')}${n.kind ? `<span class="tiny faint mono">${h(n.kind)}</span>` : ''}</div>
-            <p class="small dim">${h(n.message || '')}</p>
+          <div class="al-main"><div class="row"><b>${h(unitText(n.title))}</b>${pill(n.level, TONE[n.level] || '')}${n.readAt ? '' : pill('new', 'mag')}${n.kind ? `<span class="tiny faint mono">${h(n.kind)}</span>` : ''}</div>
+            <p class="small dim">${h(unitText(n.message || ''))}</p>
             <p class="tiny faint num">${h(stampFull(n.createdAt))} · ${h(since(n.updatedAt || n.createdAt))}${n.resolvedAt ? ` · resolved ${h(since(n.resolvedAt))}` : ''}</p></div>
           <div class="row al-acts">${n.readAt ? '' : '<button class="btn sm" type="button" data-read>Mark read</button>'}${n.resolvedAt ? '' : '<button class="btn sm" type="button" data-dismiss>Dismiss</button>'}</div></li>`).join('') || `<li>${blank(show === 'open' ? 'No open notifications. All lights are off.' : 'Nothing here.')}</li>`);
     }

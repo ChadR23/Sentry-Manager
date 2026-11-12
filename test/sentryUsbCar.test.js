@@ -16,6 +16,10 @@ const { cleanCar } = require('../server/sentryUsbCar');
 const { TlsManager } = require('../server/tls');
 const L = require('../server/sentryUsbLink');
 const { connectFakePi, makeCar } = require('./fixtures/fakeSentryUsb');
+// the shared page module (web/sentryUsbLink.js) as text for a data: import, its import of
+// the one unit choice (web/units.js) pointed at the file
+const linkSource = () => fs.readFileSync(path.join(__dirname, '..', 'web', 'sentryUsbLink.js'), 'utf8')
+  .replace("import '/web/units.js';", `import ${JSON.stringify(require('node:url').pathToFileURL(path.join(__dirname, '..', 'web', 'units.js')).href)};`);
 
 const REPO = path.join(__dirname, '..');
 const NOW = Date.parse('2026-11-10T18:00:00Z');
@@ -137,24 +141,39 @@ test('link: the car is stored with the status, checked; a bad one is not stored'
 });
 
 // ---- the Car card's words (the same module in every interface)
-const page = () => import(`data:text/javascript,${encodeURIComponent(fs.readFileSync(path.join(REPO, 'web', 'sentryUsbLink.js'), 'utf8'))}`);
+const page = () => import(`data:text/javascript,${encodeURIComponent(linkSource())}`);
 
-test('Car card: battery, temperatures and four tires with their ages, in the Pi\'s units', async () => {
+test('Car card: battery, temperatures and four tires with their ages, in the Manager\'s units (not the Pi\'s)', async () => {
   const { carView } = await page();
-  const v = carView(GOOD, { now: NOW });
-  assert.equal(v.state, 'Parked · 2 h 30 min');
-  assert.deepEqual(v.battery, { label: 'Battery', value: '89%', age: 'just now', charging: false });
-  assert.deepEqual([v.interior.value, v.exterior.value], ['49°F', '46°F']);
-  assert.deepEqual(['fl', 'fr', 'rl', 'rr'].map((p) => [v.tires[p].label, v.tires[p].value, v.tires[p].age]), [
-    ['Front left', '42 psi', '2h ago'], ['Front right', '42 psi', '2h ago'], ['Rear left', '41 psi', '8h ago'], ['Rear right', '42 psi', '8h ago']
-  ]);
-  assert.deepEqual(v.tires.state, { kind: 'optimal', label: 'Optimal' });
-  assert.equal(v.units, '°F · psi');
-  // °C and bar when the Pi shows those
-  const m = carView({ ...GOOD, units: { temp: 'C', pressure: 'bar' } }, { now: NOW });
-  assert.deepEqual([m.interior.value, m.exterior.value, m.tires.fl.value, m.units], ['9°C', '8°C', '2.90 bar', '°C · bar']);
-  // no units sent: °F and psi, as the Pi's dashboard shows them by default for this owner
-  assert.equal(carView({ ...GOOD, units: undefined }, { now: NOW }).units, '°F · psi');
+  const U = globalThis.SentryUnits;
+  const store = new Map();
+  globalThis.localStorage = { getItem: (k) => store.get(k) ?? null, setItem: (k, v) => store.set(k, String(v)) };
+  try {
+    const v = carView(GOOD, { now: NOW });
+    assert.equal(v.state, 'Parked · 2 h 30 min');
+    assert.deepEqual(v.battery, { label: 'Battery', value: '89%', age: 'just now', charging: false });
+    // nothing chosen yet, a US browser: miles, so °F and psi
+    assert.deepEqual([v.interior.value, v.exterior.value], ['49°F', '46°F']);
+    assert.deepEqual(['fl', 'fr', 'rl', 'rr'].map((p) => [v.tires[p].label, v.tires[p].value, v.tires[p].age]), [
+      ['Front left', '42 psi', '2h ago'], ['Front right', '42 psi', '2h ago'], ['Rear left', '41 psi', '8h ago'], ['Rear right', '42 psi', '8h ago']
+    ]);
+    assert.deepEqual(v.tires.state, { kind: 'optimal', label: 'Optimal' });
+    assert.equal(v.units, '°F · psi');
+    // the Pi's own °C and bar do not change it: the Manager is on miles
+    const pi = carView({ ...GOOD, units: { temp: 'C', pressure: 'bar' } }, { now: NOW });
+    assert.deepEqual([pi.interior.value, pi.exterior.value, pi.tires.fl.value, pi.units], ['49°F', '46°F', '42 psi', '°F · psi']);
+    // kilometres chosen (any page's mph/km/h button): °C and bar, whatever the Pi says
+    U.set(true);
+    const m = carView({ ...GOOD, units: { temp: 'F', pressure: 'psi' } }, { now: NOW });
+    assert.deepEqual([m.interior.value, m.exterior.value, m.tires.fl.value, m.units], ['9°C', '8°C', '2.90 bar', '°C · bar']);
+    // and back to miles
+    U.set(false);
+    assert.equal(carView(GOOD, { now: NOW }).units, '°F · psi');
+    // asked for one (as the page does after a change)
+    assert.equal(carView(GOOD, { now: NOW, metric: true }).interior.value, '9°C');
+  } finally {
+    delete globalThis.localStorage;
+  }
   // charging, driving, a tire missing, a check state
   const c = carView({ ...GOOD, battery: { pct: 61.6, charging: true, at: T - 30 }, drive: { state: 'driving', at: T }, tires: { ...GOOD.tires, rr: undefined, state: 'check' } }, { now: NOW });
   assert.deepEqual([c.battery.label, c.battery.value, c.battery.age, c.state], ['Charging', '62%', 'just now', 'Driving · charging']);

@@ -6,6 +6,7 @@
 //
 //   const page = createDrivingPage(el, { vehicleId, vehicleName });
 import { footMinutes } from '/web/duration.js';
+import '/web/units.js';
 
 
 const CSS = `
@@ -31,9 +32,9 @@ const CSS = `
 `;
 
 const esc = (t) => String(t ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-const UNIT_KEY = 'sentry-driving-units';
-function units() { try { return localStorage.getItem(UNIT_KEY) === 'km' ? 'km' : 'mi'; } catch { return 'mi'; } }
-function setUnits(u) { try { localStorage.setItem(UNIT_KEY, u); } catch { /* per visit then */ } }
+// miles or kilometres: the one choice every page uses (web/units.js; speed and temperature follow it)
+const units = () => (globalThis.SentryUnits.metric() ? 'km' : 'mi');
+const setUnits = (u) => globalThis.SentryUnits.set(u === 'km');
 const dist = (m, u) => (u === 'km' ? m / 1000 : m / 1609.344);
 const fmtDist = (m, u) => { const x = dist(m, u); return `${x >= 100 ? Math.round(x) : x.toFixed(1)} ${u}`; };
 const speed = (mps, u) => (u === 'km' ? `${Math.round(mps * 3.6)} km/h` : `${Math.round(mps * 2.23694)} mph`);
