@@ -4,13 +4,21 @@
 // /proc/diskstats deltas, model and kind from /sys/block, temperature from
 // the disk's own sensor (drivetemp / nvme hwmon, see sensors.js), and the
 // I/O errors the kernel counted on it since this app started
-// (device/ioerr_cnt, SATA and SAS disks): errors that keep coming are an
-// early sign of a failing disk. Errors that reach most disks in the same
-// moment, or arrive across a stall (the server frozen for a while), are the
-// controller's or the whole server's (commands timed out while everything
-// waited, a bus reset, the NAS's own SMART polling): they are counted apart
-// (ioErrorsShared) and are not the disk's own. Full SMART needs root and the raw disk,
-// which this container does not have; the NAS itself checks SMART.
+// (device/ioerr_cnt, SATA and SAS disks).
+//
+// That counter is not SMART and not only failed reads and writes: it counts
+// every command the disk ended with an error, including harmless ones, such
+// as a SMART or power query the disk does not support (the NAS's own SMART
+// polling, one disk at a time, every 30 minutes or so), a command sent while
+// it sleeps, a bus reset. So a disk's errors count as its own (ioErrors) only
+// when they come while the app is watching and the disk is moving data in
+// that same moment: such queries are not counted as reads or writes in
+// /proc/diskstats, a failing read or write is. Everything else (no traffic,
+// came while nobody watched, across a stall, or on most disks in the same
+// moment) is counted apart (ioErrorsShared). ioErrorsRecent is the disk's own
+// in the last 10 minutes, which the alert uses: a failing disk errs in
+// bursts, retries included. Full SMART needs root and the raw disk, which this
+// container does not have; the NAS itself checks SMART.
 
 const { readText, readLine, readNum, listDir, round, clampPct, join } = require('./util');
 
@@ -49,7 +57,9 @@ class DisksProvider {
     this.prevAt = null;
     this.errBase = new Map(); // disk -> its error count when first read
     this.errLast = new Map(); // disk -> its count since start at the last sample
-    this.errShared = new Map(); // disk -> errors that came with most disks at once, or across a stall
+    this.errShared = new Map(); // disk -> errors that are not the disk's own (see the top)
+    this.errOwn = new Map(); // disk -> its own errors since start
+    this.errRecent = new Map(); // disk -> [{ at, n }] of its own, the last RECENT_MS
   }
 
   /** I/O errors on the disk since this app started (null: not counted). */
@@ -105,7 +115,7 @@ class DisksProvider {
       }
       out.push({ name: d.name, model: d.model, readBps, writeBps, tempC: this.sensors.diskTemp(d.name), kind: d.kind, busy });
     }
-    this.splitErrors(out, dt);
+    this.splitErrors(out, dt, t);
     if (stats.size) {
       this.prev = stats;
       this.prevAt = t;
@@ -116,8 +126,10 @@ class DisksProvider {
 
 /** Disks a stall is judged by: a sample this long after the last one means the server was frozen. */
 const STALL_S = 60;
+/** How far back ioErrorsRecent looks. */
+const RECENT_MS = 10 * 60 * 1000;
 
-DisksProvider.prototype.splitErrors = function splitErrors(out, dt) {
+DisksProvider.prototype.splitErrors = function splitErrors(out, dt, t) {
   const counted = [];
   for (const d of out) {
     const total = this.errorsSince(d.name);
@@ -130,11 +142,24 @@ DisksProvider.prototype.splitErrors = function splitErrors(out, dt) {
   // the same moment on most disks (two or more, at least half of them), or a stall: not one disk's fault
   const shared = (rising.length >= 2 && rising.length * 2 >= counted.length) || (rising.length > 0 && dt > STALL_S);
   for (const x of counted) {
-    if (shared && x.rise) this.errShared.set(x.d.name, (this.errShared.get(x.d.name) || 0) + x.rise);
-    const sharedN = Math.min(x.total, this.errShared.get(x.d.name) || 0);
-    x.d.ioErrors = x.total - sharedN;
+    // moving data in this same moment (a rate is known: not the first sample after idle)
+    const inUse = x.d.readBps > 0 || x.d.writeBps > 0;
+    if (x.rise) {
+      if (shared || !inUse) this.errShared.set(x.d.name, (this.errShared.get(x.d.name) || 0) + x.rise);
+      else {
+        this.errOwn.set(x.d.name, (this.errOwn.get(x.d.name) || 0) + x.rise);
+        const list = this.errRecent.get(x.d.name) || [];
+        list.push({ at: t, n: x.rise });
+        this.errRecent.set(x.d.name, list);
+      }
+    }
+    const recent = (this.errRecent.get(x.d.name) || []).filter((e) => t - e.at < RECENT_MS);
+    this.errRecent.set(x.d.name, recent);
+    x.d.ioErrors = this.errOwn.get(x.d.name) || 0;
+    x.d.ioErrorsRecent = recent.reduce((a, e) => a + e.n, 0);
+    const sharedN = this.errShared.get(x.d.name) || 0;
     if (sharedN) x.d.ioErrorsShared = sharedN;
   }
 };
 
-module.exports = { DisksProvider, parseDiskstats, kindOf };
+module.exports = { DisksProvider, parseDiskstats, kindOf, RECENT_MS };

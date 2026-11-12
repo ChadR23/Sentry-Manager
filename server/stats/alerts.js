@@ -41,11 +41,11 @@ function rules(body) {
       key: `disk-temp:${d.name}`, level: 'warn', value: d.tempC, raise: limit, clear: limit - 5, above: true,
       message: () => `${DISK_KIND[d.kind] || 'Disk'} ${d.name} at ${round(d.tempC, 0)} °C`
     });
-    // the disk's own read or write errors since the app started (not those that came with
-    // most disks at once or across a stall, see disks.js), two or more: stays until the next start
+    // the disk's own failed reads or writes in the last 10 minutes (only those that came while it
+    // moved data, see disks.js), five or more; clears once 10 minutes pass without
     out.push({
-      key: `disk-errors:${d.name}`, level: 'error', value: d.ioErrors ?? null, raise: 2, clear: 1.5, above: true,
-      message: () => `${DISK_KIND[d.kind] || 'Disk'} ${d.name}${d.model ? ` (${d.model})` : ''} keeps reporting read/write errors (${d.ioErrors} of its own since the app started): check its health (SMART) on the NAS and that your footage is backed up`
+      key: `disk-errors:${d.name}`, level: 'warn', value: d.ioErrorsRecent ?? null, raise: 5, clear: 1, above: true,
+      message: () => `${DISK_KIND[d.kind] || 'Disk'} ${d.name}${d.model ? ` (${d.model})` : ''}: ${d.ioErrorsRecent} reads or writes failed in the last 10 minutes. This is the kernel's error count, not SMART: check SMART on the NAS, and if it is clean, the disk's cable, power and controller`
     });
   }
   for (const f of body.filesystems || []) {

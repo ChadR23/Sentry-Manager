@@ -222,10 +222,15 @@ Also a page in every interface:
 
 **A share that drops** (a NAS restarting, a Wi-Fi blip) is retried quietly,
 waiting longer between tries; the *share is offline* alert only comes when it
-is still down after 10 minutes. **Disk errors**: when a disk the server can
-see reports read or write errors while the app runs, an alert says which
-disk. Full SMART health needs root and raw access to the disks, which the
-container does not have; your NAS (TrueNAS) checks SMART itself.
+is still down after 10 minutes. **Disk errors**: when five or more reads or
+writes fail on one disk within 10 minutes while it is moving data, a warning
+says which disk; it clears after 10 minutes without. This is the kernel's
+error count, not SMART. That count also includes harmless rejected commands
+(for example your NAS's own SMART checks on a disk that does not support one
+of them), so errors on an idle disk, errors on most disks at once and errors
+that came while nobody had the app open are not counted. Full SMART health
+needs root and raw access to the disks, which the container does not have;
+your NAS (TrueNAS) checks SMART itself.
 
 ## Map
 
