@@ -34,7 +34,16 @@ document.getElementById('phone-nav').innerHTML =
 document.getElementById('more').onclick = (e) => {
   const el = document.createElement('nav');
   el.className = 'more-list';
-  el.innerHTML = [nav[3], nav[4], nav[6], nav[7], nav[8]].map(link).join('');
+  el.innerHTML = [
+    ['drives', 'Trips & map', 'conversion_path'],
+    nav[3],
+    nav[4],
+    nav[6],
+    nav[7],
+    nav[8],
+  ]
+    .map(link)
+    .join('');
   const close = sheet(el, { anchor: e.currentTarget });
   el.onclick = (ev) => {
     if (ev.target.closest('a')) close();
@@ -92,7 +101,8 @@ export async function render(vehicleChanged = false) {
   const [name, sub] = route.split('/'),
     q = new URLSearchParams((sub || name).split('?')[1] || ''),
     key = name.split('?')[0];
-  document.getElementById('title').textContent = nav.find((n) => n[0] === key)?.[1] || 'Sentry Six';
+  document.getElementById('title').textContent =
+    (key === 'drives' ? 'Trips & map' : nav.find((n) => n[0] === key)?.[1]) || 'Sentry Six';
   document.querySelectorAll('[data-route]').forEach((a) => {
     const active = a.dataset.route === key;
     a.classList.toggle('active', active);
@@ -173,7 +183,7 @@ async function refresh() {
   document.getElementById('bell').innerHTML =
     icon('notifications') +
     (state.notes.some((n) => !n.readAt)
-      ? `<span class="badge">${state.notes.filter((n) => !n.readAt).length}</span>`
+      ? `<span class="badge">${state.notes.filter((n) => !n.readAt).length.toLocaleString()}</span>`
       : '');
 }
 window.addEventListener('hashchange', render);

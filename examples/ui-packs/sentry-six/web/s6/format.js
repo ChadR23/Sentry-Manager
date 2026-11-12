@@ -36,7 +36,7 @@ export function duration(minutes) {
   if (!Number.isFinite(minutes)) return '—';
   const m = Math.max(0, Math.round(minutes)),
     h = Math.floor(m / 60);
-  return `${h ? h + ' h ' : ''}${m % 60 || !h ? (m % 60) + ' min' : ''}`.trim();
+  return `${h ? h.toLocaleString() + ' h ' : ''}${m % 60 || !h ? (m % 60) + ' min' : ''}`.trim();
 }
 export function size(bytes) {
   if (bytes == null || !Number.isFinite(Number(bytes))) return '—';
@@ -78,7 +78,12 @@ export const categoryCount = (k, n) =>
 
 /** Older server messages use "clip(s)"; present them with the same count rule. */
 export const countText = (text) =>
-  String(text ?? '').replace(
-    /\b(\d+) (drive|recording|Sentry event|item|file|clip|check|day)\(s\)/g,
-    (_, n, noun) => plural(Number(n), noun),
-  );
+  String(text ?? '')
+    .replace(
+      /\b(\d+) (drive|recording|Sentry event|item|file|clip|check|day)\(s\)/g,
+      (_, n, noun) => plural(Number(n), noun),
+    )
+    .replace(
+      /\b\d{4,}(?= (?:drives?|recordings?|Sentry events?|items?|files?|clips?|checks?|days?|logs?)\b)/g,
+      (n) => Number(n).toLocaleString(),
+    );

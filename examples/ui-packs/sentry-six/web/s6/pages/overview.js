@@ -1,6 +1,6 @@
 import { ownedRender } from '../core.js';
 import { esc } from '../core.js';
-import { overviewStatus, attentionItems, strip } from '../status.js';
+import { overviewStatus, attentionItems, strip, spaceTone } from '../status.js';
 import { icon } from '../icons.js';
 import {
   dayLabel,
@@ -28,7 +28,13 @@ async function renderPage(el, ctx) {
   if (!alive()) return;
   const days = d.days || [],
     checks = h.checks || [],
-    status = overviewStatus({ vehicle: v, notes: state.notes, checks, days }),
+    status = overviewStatus({
+      vehicle: v,
+      notes: state.notes,
+      checks,
+      days,
+      vehicleCount: state.vehicles?.length || 1,
+    }),
     items = attentionItems({ vehicle: v, notes: state.notes, checks, days }),
     inv = v.inventory || {},
     s = v.storage,
@@ -38,7 +44,7 @@ async function renderPage(el, ctx) {
       (j) => j.vehicleId === v.id && ['running', 'waiting', 'paused'].includes(j.status),
     );
   el.innerHTML = `<h2 class="hero ${status.tone === 'bad' ? 'bad' : ''}">${esc(status.first)} <span class="${status.tone === 'warn' ? 'warn' : ''}">${esc(status.second)}</span></h2><p class="hero-sub">${status.sub ? esc(status.sub) + ' · ' : ''}${plural(inv.recordings, 'recording')} over ${plural(inv.days, 'day')} · checked ${ago(inv.scannedAt)}</p>
- <section class="card"><div class="row"><h3 class="grow">What happened lately</h3><a href="#/footage">Open Footage</a></div><div class="day-strip">${cells.map((c) => `<a class="strip-cell ${c.state}" title="${esc(dayLabel(c.day))}" aria-label="${esc(dayLabel(c.day))}: ${plural(c.drives + c.other, 'recording')}" href="#/footage?from=${c.day}&to=${c.day}"><span style="height:${(100 * c.saved) / max}%;background:var(--saved)"></span><span style="height:${(100 * c.sentry) / max}%;background:var(--sentry)"></span><span style="height:${(100 * c.drives) / max}%;background:var(--driving)"></span></a>`).join('')}</div><div class="row muted"><small class="grow">${dayLabel(cells[0].day)}</small><small>Today</small></div><p><span style="color:var(--driving)">●</span> Driving　<span style="color:var(--sentry)">●</span> Sentry　<span style="color:var(--saved)">●</span> Saved　◌ No footage</p><div class="latest-days">${days
+ <section class="card"><div class="row"><h3 class="grow">What happened lately</h3><a href="#/footage">Open Footage</a></div><div class="day-strip">${cells.map((c) => `<a class="strip-cell ${c.state}" title="${esc(dayLabel(c.day))}" aria-label="${esc(dayLabel(c.day))}: ${plural(c.drives + c.other, 'recording')}" href="#/footage?from=${c.day}&to=${c.day}"><span style="height:${(100 * c.saved) / max}%;background:var(--saved)"></span><span style="height:${(100 * c.sentry) / max}%;background:var(--sentry)"></span><span style="height:${(100 * c.drives) / max}%;background:var(--driving)"></span></a>`).join('')}</div><div class="row muted"><small class="grow">${dayLabel(cells[0].day)}</small><small>Today</small></div><p class="strip-legend"><span><i style="color:var(--driving)">●</i> Driving</span><span><i style="color:var(--sentry)">●</i> Sentry</span><span><i style="color:var(--saved)">●</i> Saved</span><span>◌ No footage</span></p><div class="latest-days">${days
    .slice(0, 5)
    .map(
      (d) =>
@@ -51,7 +57,7 @@ async function renderPage(el, ctx) {
          )} · ${duration(d.minutes)}</p>${d.archive?.state === 'filling' ? '<small>Still arriving</small>' : ''}</div></a>`,
    )
    .join('')}</div></section>
- ${items.length ? `<section><div class="row"><h2 class="grow">Needs your attention</h2><small>${plural(items.length, 'item')}</small></div><div class="card attention-group">${items.map((i) => `<article class="attention-row row"><span class="attention-icon ${i.tone}">${icon(i.tone === 'bad' ? 'error' : i.tone === 'warn' ? 'warning' : 'info')}</span><div class="grow"><h3>${esc(i.title)}</h3><p title="${esc(i.text)}">${esc(i.text)}</p></div><a class="btn" href="${esc(i.action.href)}">${esc(i.action.label)}</a></article>`).join('')}</div></section>` : ''}
+ ${items.length ? `<section><div class="row"><h2 class="grow">Needs your attention</h2><small>${plural(items.length, 'item')}</small></div><div class="card attention-group">${items.map((i, index) => `<article class="attention-row row"><span class="attention-icon ${i.tone}">${icon(i.tone === 'bad' ? 'error' : i.tone === 'warn' ? 'warning' : 'info')}</span><div class="grow"><h3>${esc(i.title)}</h3><p class="attention-text" id="attention-${index}">${esc(i.text)}</p><button class="attention-more" aria-expanded="false" aria-controls="attention-${index}" hidden>Show more</button></div><a class="btn" href="${esc(i.action.href)}">${esc(i.action.label)}</a></article>`).join('')}</div></section>` : ''}
  <div class="grid"><section class="card"><div class="row"><h3 class="grow">Footage</h3><a href="#/footage">Browse</a></div><div class="number">${plural(inv.recordings, 'recording')}</div><p>over ${plural(inv.days, 'day')}${inv.firstDay ? ', since ' + dayLabel(inv.firstDay) : ''}</p><div class="category-bar">${categoryEntries(
    inv.byCategory || {},
  )
@@ -59,11 +65,33 @@ async function renderPage(el, ctx) {
    .join('')}</div>${categoryEntries(inv.byCategory || {})
    .map(
      ([k, c]) =>
-       `<div class="row"><span class="grow category-text-${esc(k)}">${k === 'Recent' ? 'Driving' : esc(k)}</span><span class="mono">${c.recordings} · ${size(c.bytes)}</span></div>`,
+       `<div class="row"><span class="grow category-text-${esc(k)}">${k === 'Recent' ? 'Driving' : esc(k)}</span><span class="mono">${Number(c.recordings || 0).toLocaleString()} · ${size(c.bytes)}</span></div>`,
    )
    .join(
      '',
-   )}</section><section class="card"><h3>Space</h3>${s ? `<div class="space-heading"><span class="space-ring" style="--used:${Math.max(0, Math.min(100, 100 * (1 - s.free / s.total)))}%" aria-label="${Math.round((100 * s.free) / s.total)}% free"></span><div><div class="number">${size(s.free)} free</div><p>of ${size(s.total)} on the share</p></div></div><p>Grows about ${size(s.perDay)} a day</p>${s.daysLeft != null ? `<span class="tag">About ${plural(s.daysLeft, 'day')} left</span>` : ''}` : '<p>Space information is unavailable.</p>'}</section><section class="card"><div class="row"><h3 class="grow">Activity</h3><a href="#/activity">See all</a></div><div class="number">${jobs.length ? 'Running' : 'Idle'}</div><p>${jobs.length ? `${plural(jobs.length, 'active job')}` : 'Nothing is running right now'}</p><p>${size(v.saved?.bytes || 0)} saved by converting ${plural(v.saved?.clips, 'clip')}</p><a class="muted" href="#/bin">${v.binItems ? `Recycle Bin: ${plural(v.binItems, 'item')} · ${size(v.binBytes || 0)}` : 'Recycle Bin is empty'}</a><p>Last scan ${ago(inv.scannedAt)}</p></section></div>`;
+   )}</section><section class="card space-card space-${spaceTone(v, checks)}"><h3>Space</h3>${s ? `<div class="space-heading"><span class="space-ring" style="--used:${Math.max(0, Math.min(100, 100 * (1 - s.free / s.total)))}%" aria-label="${Math.round((100 * s.free) / s.total)}% free"></span><div><div class="number">${size(s.free)} free</div><p>of ${size(s.total)} on the share</p></div></div><p>Grows about ${size(s.perDay)} a day</p>${s.daysLeft != null ? `<span class="tag">About ${plural(s.daysLeft, 'day')} left</span>` : ''}` : '<p>Space information is unavailable.</p>'}</section><section class="card"><div class="row"><h3 class="grow">Activity</h3><a href="#/activity">See all</a></div><div class="number">${jobs.length ? 'Running' : 'Idle'}</div><p>${jobs.length ? `${plural(jobs.length, 'active job')}` : 'Nothing is running right now'}</p><p>${size(v.saved?.bytes || 0)} saved by converting ${plural(v.saved?.clips, 'clip')}</p><a class="muted" href="#/bin">${v.binItems ? `Recycle Bin: ${plural(v.binItems, 'item')} · ${size(v.binBytes || 0)}` : 'Recycle Bin is empty'}</a><p>Last scan ${ago(inv.scannedAt)}</p></section></div>`;
+  const updateText = () =>
+    el.querySelectorAll('.attention-more').forEach((button) => {
+      const text = button.previousElementSibling;
+      button.hidden =
+        text.scrollHeight <= text.clientHeight && button.getAttribute('aria-expanded') !== 'true';
+    });
+  el.querySelectorAll('.attention-more').forEach((button) => {
+    button.onclick = () => {
+      const expanded = button.getAttribute('aria-expanded') !== 'true';
+      button.setAttribute('aria-expanded', String(expanded));
+      button.textContent = expanded ? 'Show less' : 'Show more';
+      button.previousElementSibling.classList.toggle('expanded', expanded);
+    };
+  });
+  if (typeof ResizeObserver !== 'undefined') {
+    const observer = new ResizeObserver(updateText);
+    el.querySelectorAll('.attention-text').forEach((text) => observer.observe(text));
+    ctx.scope.signal.addEventListener('abort', () => observer.disconnect(), {
+      once: true,
+    });
+  }
+  updateText();
   el.querySelectorAll('img').forEach(
     (img) =>
       (img.onerror = () => {

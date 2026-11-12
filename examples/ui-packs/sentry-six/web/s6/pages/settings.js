@@ -82,7 +82,7 @@ async function renderPage(el, ctx) {
   let summariesStopped = false;
   const vehicle = ctx.current();
   const summaries = {
-    places: ['/api/places', (d) => `${(d.places || []).length} saved`],
+    places: ['/api/places', (d) => `${(d.places || []).length.toLocaleString()} saved`],
     ...(vehicle
       ? {
           cleanup: [
@@ -94,9 +94,9 @@ async function renderPage(el, ctx) {
     encoding: ['/api/vehicles', (d) => plural((d.vehicles || []).length, 'vehicle')],
     notifications: [
       '/api/notification-rules',
-      (d) => `${(d.rules || []).filter((r) => r.on).length} on`,
+      (d) => `${(d.rules || []).filter((r) => r.on).length.toLocaleString()} on`,
     ],
-    helpers: ['/api/nodes', (d) => `${(d.nodes || []).length} paired`],
+    helpers: ['/api/nodes', (d) => `${(d.nodes || []).length.toLocaleString()} paired`],
     updates: [
       '/api/updates',
       (d) =>

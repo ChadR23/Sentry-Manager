@@ -172,7 +172,7 @@ async function renderPage(el, ctx) {
     }
     const yes = await confirmDialog({
       title: through ? 'Move this day and older?' : 'Move to Recycle Bin?',
-      body: `<p>${plural(flow.ids.length, 'selected recording')} submitted; ${plural(preview.recordings, 'recording')} move to the Recycle Bin. Protected recordings stay. You can restore the footage until the bin is emptied.</p>${can ? `<label><input type="checkbox" name="withCan" ${can.skip ? 'disabled' : ''}> Also delete its CAN data (${Number(can.logs || 0)} logs)</label><p class="danger">${can.skip ? esc(can.skip) : 'CAN data is permanently deleted now. It does not come back if you restore the footage.'}</p>` : ''}`,
+      body: `<p>${plural(flow.ids.length, 'selected recording')} submitted; ${plural(preview.recordings, 'recording')} move to the Recycle Bin. Protected recordings stay. You can restore the footage until the bin is emptied.</p>${can ? `<label><input type="checkbox" name="withCan" ${can.skip ? 'disabled' : ''}> Also delete its CAN data (${Number(can.logs || 0).toLocaleString()} logs)</label><p class="danger">${can.skip ? esc(can.skip) : 'CAN data is permanently deleted now. It does not come back if you restore the footage.'}</p>` : ''}`,
       ok: 'Move to Recycle Bin',
       danger: true,
       signal: flow.signal,
@@ -219,7 +219,7 @@ async function renderPage(el, ctx) {
     if (valid()) location.hash = '#/viewer?' + new URLSearchParams(params);
   };
   function recording(r) {
-    return `<div class="recording row">${f.selecting ? `<input type="checkbox" data-rec="${esc(r.id)}" aria-label="Select recording at ${esc(timeLabel(r.start, state.h24))}" ${f.selection.has(r.id) ? 'checked' : ''}>` : ''}<img alt="" src="${base}/recordings/${encodeURIComponent(r.id)}/thumbnail"><div class="grow"><b>${esc(timeRange(r.start, r.end || r.start, state.h24))}</b> <span class="tag category-${esc(r.category)}">${r.category === 'Recent' ? 'Driving' : esc(r.category)}</span><p>${r.eventAt ? 'Event at ' + esc(timeLabel(r.eventAt, state.h24)) + ' · ' : ''}${duration(r.minutes)} · ${size(r.bytes)}${r.can ? ' · CAN' : ''}${r.protected ? ' · Protected' : ''}</p></div><button class="play-button" data-play-rec="${esc(r.id)}" aria-label="Play recording">▶</button><button data-menu-rec="${esc(r.id)}" aria-label="Recording actions">⋯</button></div>`;
+    return `<div class="recording row">${f.selecting ? `<input type="checkbox" data-rec="${esc(r.id)}" aria-label="Select recording at ${esc(timeLabel(r.start, state.h24))}" ${f.selection.has(r.id) ? 'checked' : ''}>` : ''}<button class="thumb-play recording-thumb" data-play-rec="${esc(r.id)}" aria-label="Play recording"><img alt="" src="${base}/recordings/${encodeURIComponent(r.id)}/thumbnail"><span aria-hidden="true">▶</span></button><div class="grow"><b>${esc(timeRange(r.start, r.end || r.start, state.h24))}</b> <span class="tag category-${esc(r.category)}">${r.category === 'Recent' ? 'Driving' : esc(r.category)}</span><p>${r.eventAt ? 'Event at ' + esc(timeLabel(r.eventAt, state.h24)) + ' · ' : ''}<span class="value">${duration(r.minutes)}</span> · <span class="value">${size(r.bytes)}</span>${r.can ? ' · CAN' : ''}${r.protected ? ' · Protected' : ''}</p></div><button class="play-button" data-play-rec="${esc(r.id)}" aria-label="Play recording">▶</button><button data-menu-rec="${esc(r.id)}" aria-label="Recording actions">⋯</button></div>`;
   }
   async function draw() {
     const ticket = ++drawSeq;
@@ -235,14 +235,14 @@ async function renderPage(el, ctx) {
     }
     if (!valid() || ticket !== drawSeq) return;
     const pager = () =>
-      `<div class="row pager"><span class="grow">Days ${d.total ? f.offset + 1 : 0}–${Math.min(f.offset + 30, d.total)} of ${d.total}</span><button data-prev ${f.offset === 0 ? 'disabled' : ''} aria-label="Previous days">‹</button><button data-next ${f.offset + 30 >= d.total ? 'disabled' : ''} aria-label="Next days">›</button></div>`;
-    el.innerHTML = `${!v.share?.healthy ? `<div class="card bad">Can't reach your footage share. ${esc(v.share?.lastError || '')}</div>` : ''}<div class="toolbar footage-actions"><a data-index href="#/activity" hidden></a><div class="grow"></div><a href="#/drives">Trips & map</a>${f.selecting ? `<button data-all>Select all</button><b>${f.selection.count()} selected</b>` : ''}${admin ? `<button data-select>${f.selecting ? 'Done' : 'Select'}</button>` : ''}</div><div class="toolbar footage-filters"><div class="segments">${['all', 'Recent', 'Sentry', 'Saved', ...(v.inventory?.byCategory?.Other ? ['Other'] : [])].map((k) => `<button data-category="${k}" class="${f.category === k ? 'active' : ''}">${k === 'all' ? 'All' : k === 'Recent' ? 'Driving' : k} <small>${k === 'all' ? v.inventory?.recordings || 0 : v.inventory?.byCategory?.[k]?.recordings || 0}</small></button>`).join('')}</div><button data-date>${f.from || f.to ? esc((f.from ? dayLabel(f.from) : 'Any start') + ' – ' + (f.to ? dayLabel(f.to) : 'Any end')) : 'Any date'}</button>${f.from || f.to ? '<button data-clear-date aria-label="Clear date range">×</button>' : ''}${pager()}</div>${d.days.length ? '' : '<div class="empty">No footage matches these filters.</div>'}${d.days
+      `<div class="row pager"><span class="grow">Days ${(d.total ? f.offset + 1 : 0).toLocaleString()}–${Math.min(f.offset + 30, d.total).toLocaleString()} of ${d.total.toLocaleString()}</span><button data-prev ${f.offset === 0 ? 'disabled' : ''} aria-label="Previous days">‹</button><button data-next ${f.offset + 30 >= d.total ? 'disabled' : ''} aria-label="Next days">›</button></div>`;
+    el.innerHTML = `${!v.share?.healthy ? `<div class="card bad">Can't reach your footage share. ${esc(v.share?.lastError || '')}</div>` : ''}<div class="toolbar footage-actions"><a class="index-pill index-desktop" data-index href="#/activity" hidden></a><div class="grow"></div><a class="trips-link" href="#/drives">Trips & map</a>${f.selecting ? `<button data-all>Select all</button><b class="selected-count">${f.selection.count().toLocaleString()} selected</b>` : ''}${admin ? `<button data-select>${f.selecting ? 'Done' : 'Select'}</button>` : ''}</div><div class="toolbar footage-filters"><div class="segments">${['all', 'Recent', 'Sentry', 'Saved', ...(v.inventory?.byCategory?.Other ? ['Other'] : [])].map((k) => `<button data-category="${k}" class="${f.category === k ? 'active' : ''}">${k === 'all' ? 'All' : k === 'Recent' ? 'Driving' : k} <small>${Number(k === 'all' ? v.inventory?.recordings || 0 : v.inventory?.byCategory?.[k]?.recordings || 0).toLocaleString()}</small></button>`).join('')}</div><button data-date>${f.from || f.to ? esc((f.from ? dayLabel(f.from) : 'Any start') + ' – ' + (f.to ? dayLabel(f.to) : 'Any end')) : 'Any date'}</button>${f.from || f.to ? '<button data-clear-date aria-label="Clear date range">×</button>' : ''}${pager()}</div><a class="index-pill index-phone" data-index href="#/activity" hidden></a>${d.days.length ? '' : '<div class="empty">No footage matches these filters.</div>'}${d.days
       .map((day) => {
         const recs = f.dayRecs.get(day.day) || [],
           ids = recs.map((r) => r.id),
           selected = f.selection.dayState(ids),
           limit = f.limits.get(day.day) || 5;
-        return `<article class="card day" data-day="${day.day}"><div class="row">${f.selecting ? `<input type="checkbox" data-day-check="${day.day}" data-mixed="${selected === 'some'}" ${selected === 'all' ? 'checked' : ''} aria-label="Select ${esc(dayLabel(day.day))}">` : ''}<img class="day-thumb" alt="" src="${base}/recordings/${encodeURIComponent(day.thumbId)}/thumbnail"><button class="grow day-toggle" data-expand="${day.day}" aria-expanded="${f.expanded.has(day.day)}"><b>${esc(dayLabel(day.day))}</b><p>${categoryEntries(
+        return `<article class="card day" data-day="${day.day}"><div class="row day-summary">${f.selecting ? `<input type="checkbox" data-day-check="${day.day}" data-mixed="${selected === 'some'}" ${selected === 'all' ? 'checked' : ''} aria-label="Select ${esc(dayLabel(day.day))}">` : ''}<button class="thumb-play day-thumb" data-play-day="${day.day}" aria-label="Play day"><img alt="" src="${base}/recordings/${encodeURIComponent(day.thumbId)}/thumbnail"><span aria-hidden="true">▶</span></button><button class="grow day-toggle" data-expand="${day.day}" aria-expanded="${f.expanded.has(day.day)}"><b>${esc(dayLabel(day.day))}</b><p>${categoryEntries(
           day.byCategory,
         )
           .map(
@@ -250,11 +250,11 @@ async function renderPage(el, ctx) {
           )
           .join(
             '',
-          )}${day.archive?.state === 'filling' ? '<span class="tag arriving">Still arriving</span>' : ''}${day.protected ? '<span class="tag">' + day.protected + ' protected</span>' : ''}${day.canRecordings ? '<span class="tag">CAN</span>' : ''}${day.speedIndex?.clips ? '<span class="tag">' + (day.speedIndex.indexed >= day.speedIndex.clips ? '✓ Indexed' : 'Indexing ' + Math.round((100 * day.speedIndex.indexed) / day.speedIndex.clips) + '%') + '</span>' : ''}</p><small>${duration(day.minutes)} · ${plural(day.cameras, 'camera')} · ${size(day.bytes)}</small></button><button class="play-button" data-play-day="${day.day}" aria-label="Play day">▶</button><button data-menu-day="${day.day}" aria-label="Day actions">⋯</button></div><button class="expand-count" data-expand="${day.day}">${f.expanded.has(day.day) ? '⌄' : '›'} ${plural(day.recordings, 'recording')}</button>${f.expanded.has(day.day) ? `<div>${recs.slice(0, limit).map(recording).join('')}${recs.length > limit ? `<button data-show-more="${day.day}">Show ${plural(recs.length - limit, 'more recording')}</button>` : ''}</div>` : ''}</article>`;
+          )}${day.archive?.state === 'filling' ? '<span class="tag arriving">Still arriving</span>' : ''}${day.protected ? '<span class="tag">' + Number(day.protected).toLocaleString() + ' protected</span>' : ''}${day.canRecordings ? '<span class="tag">CAN</span>' : ''}${day.speedIndex?.clips ? '<span class="tag">' + (day.speedIndex.indexed >= day.speedIndex.clips ? '✓ Indexed' : 'Indexing ' + Math.round((100 * day.speedIndex.indexed) / day.speedIndex.clips) + '%') + '</span>' : ''}</p><small><span class="value">${duration(day.minutes)}</span> · <span class="value">${plural(day.cameras, 'camera')}</span> · <span class="value">${size(day.bytes)}</span></small></button><button class="play-button" data-play-day="${day.day}" aria-label="Play day">▶</button><button data-menu-day="${day.day}" aria-label="Day actions">⋯</button></div><button class="expand-count" data-expand="${day.day}">${f.expanded.has(day.day) ? '⌄' : '›'} ${plural(day.recordings, 'recording')}</button>${f.expanded.has(day.day) ? `<div>${recs.slice(0, limit).map(recording).join('')}${recs.length > limit ? `<button data-show-more="${day.day}">Show ${plural(recs.length - limit, 'more recording')}</button>` : ''}</div>` : ''}</article>`;
       })
       .join(
         '',
-      )}${pager()}${f.selecting ? `<div class="selection-bar"><b>${f.selection.count()} selected</b><button data-protect>Protect</button><button data-unprotect>Unprotect</button><button data-move>Move to Recycle Bin</button><button data-deselect>Deselect all</button></div>` : ''}`;
+      )}${pager()}${f.selecting ? `<div class="selection-bar"><b class="selected-count">${f.selection.count().toLocaleString()} selected</b><button data-protect ${f.selection.count() ? '' : 'disabled'}>Protect</button><button data-unprotect ${f.selection.count() ? '' : 'disabled'}>Unprotect</button><button data-move ${f.selection.count() ? '' : 'disabled'}><span class="desktop-label">Move to Recycle Bin</span><span class="phone-label">Move to Bin</span></button><button data-deselect ${f.selection.count() ? '' : 'disabled'}>Deselect all</button></div>` : ''}`;
     const headerActions = document.getElementById('page-actions');
     if (headerActions) {
       headerActions.replaceChildren(el.querySelector('.footage-actions'));
@@ -385,14 +385,14 @@ async function renderPage(el, ctx) {
     if (!valid()) return;
     try {
       const s = await api('/api/speeds/status');
-      const chip =
-        document.querySelector('#page-actions [data-index]') || el.querySelector('[data-index]');
-      if (!chip || !valid()) return;
-      chip.hidden = !s.running;
-      chip.textContent = s.running
-        ? 'Indexing speed data' +
-          (s.total ? ' · ' + Math.round((100 * s.done) / s.total) + '%' : '…')
-        : '';
+      for (const chip of document.querySelectorAll('[data-index]')) {
+        if (!valid()) return;
+        chip.hidden = !s.running;
+        chip.textContent = s.running
+          ? 'Indexing speed data' +
+            (s.total ? ' · ' + Math.round((100 * s.done) / s.total) + '%' : '…')
+          : '';
+      }
     } catch {}
   }
   const changed = () => {

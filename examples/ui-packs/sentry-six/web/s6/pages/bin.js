@@ -98,7 +98,7 @@ async function renderPage(el, ctx) {
         }
         if (valid()) {
           busy = false;
-          outcome = `${action === 'restore' ? 'Restored' : 'Deleted'} ${completed}; ${failures.length} failed${failures.length ? ': ' + [...new Set(failures)].join('; ') : ''}`;
+          outcome = `${action === 'restore' ? 'Restored' : 'Deleted'} ${completed.toLocaleString()}; ${failures.length.toLocaleString()} failed${failures.length ? ': ' + [...new Set(failures)].join('; ') : ''}`;
           draw();
           toast(outcome, failures.length > 0);
         }
@@ -123,7 +123,7 @@ async function renderPage(el, ctx) {
       if (!groups.has(group)) groups.set(group, []);
       groups.get(group).push(i);
     }
-    el.innerHTML = `<div class="toolbar"><span class="grow"></span>${selecting ? `<button data-all>Select all</button><b>${selection.count()} selected</b>` : ''}${admin ? `<button data-select>${selecting ? 'Done' : 'Select'}</button>` : ''}</div>${items.length || progress || outcome ? `<section class="card"><div class="number">${plural(items.length, 'item')} · ${size(total)}</div><p>Emptying the bin frees ${size(total)} on the share${v.storage?.perDay > 0 ? (total < v.storage.perDay ? ', less than one more day of recording' : ', about ' + Math.floor(total / v.storage.perDay) + ' more days of recording') : ''}.</p>${admin ? `<div class="row"><button data-restore-all ${busy ? 'disabled' : ''}>Restore all</button><button class="danger" data-empty ${busy ? 'disabled' : ''}>Empty Recycle Bin</button></div>` : ''}${progress ? `<div role="status" aria-live="polite"><p>${progress.action === 'restore' ? 'Restoring' : 'Deleting'} ${progress.at} of ${progress.total}…</p><progress value="${progress.at - 1}" max="${progress.total}"></progress></div>` : outcome ? `<p role="status">${esc(outcome)}</p>` : ''}</section>` : '<div class="empty"><h2>The Recycle Bin is empty</h2><p>Footage moved here can be restored until it is deleted permanently.</p></div>'}<div class="segments">${[
+    el.innerHTML = `<div class="toolbar"><span class="grow"></span>${selecting ? `<button data-all>Select all</button><b>${selection.count().toLocaleString()} selected</b>` : ''}${admin ? `<button data-select>${selecting ? 'Done' : 'Select'}</button>` : ''}</div>${items.length || progress || outcome ? `<section class="card"><div class="number">${plural(items.length, 'item')} · ${size(total)}</div><p>Emptying the bin frees ${size(total)} on the share${v.storage?.perDay > 0 ? (total < v.storage.perDay ? ', less than one more day of recording' : ', about ' + Math.floor(total / v.storage.perDay) + ' more days of recording') : ''}.</p>${admin ? `<div class="row"><button data-restore-all ${busy ? 'disabled' : ''}>Restore all</button><button class="danger" data-empty ${busy ? 'disabled' : ''}>Empty Recycle Bin</button></div>` : ''}${progress ? `<div role="status" aria-live="polite"><p>${progress.action === 'restore' ? 'Restoring' : 'Deleting'} ${progress.at.toLocaleString()} of ${progress.total.toLocaleString()}…</p><progress value="${progress.at - 1}" max="${progress.total.toLocaleString()}"></progress></div>` : outcome ? `<p role="status">${esc(outcome)}</p>` : ''}</section>` : '<div class="empty"><h2>The Recycle Bin is empty</h2><p>Footage moved here can be restored until it is deleted permanently.</p></div>'}<div class="segments bin-segments">${[
       ['', 'All'],
       ['manual', 'Moved by you'],
       ['policy', 'Cleanup rules'],
@@ -131,7 +131,7 @@ async function renderPage(el, ctx) {
     ]
       .map(
         ([r, l]) =>
-          `<button data-reason="${r}" class="${reason === r ? 'active' : ''}">${l}</button>`,
+          `<button data-reason="${r}" class="${reason === r ? 'active' : ''}">${r === 'manual' || r === 'policy' ? `<span class="desktop-label">${l}</span><span class="phone-label">${r === 'manual' ? 'By you' : 'Rules'}</span>` : l}</button>`,
       )
       .join('')}</div><p>${esc(binNote(policy))}</p>${[...groups]
       .map(
@@ -145,7 +145,7 @@ async function renderPage(el, ctx) {
       )
       .join(
         '',
-      )}${selecting ? `<div class="selection-bar"><b>${selection.count()} selected</b><button data-restore-selected ${busy ? 'disabled' : ''}>Restore</button><button data-delete-selected class="danger" ${busy ? 'disabled' : ''}>Delete forever</button></div>` : ''}`;
+      )}${selecting ? `<div class="selection-bar"><b>${selection.count().toLocaleString()} selected</b><button data-restore-selected ${busy || !selection.count() ? 'disabled' : ''}>Restore</button><button data-delete-selected class="danger" ${busy || !selection.count() ? 'disabled' : ''}>Delete forever</button></div>` : ''}`;
     document.body.classList.toggle('selecting', selecting);
     el.querySelectorAll('img').forEach(
       (i) =>

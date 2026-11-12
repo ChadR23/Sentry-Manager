@@ -1800,3 +1800,148 @@ test('cleanup: Run now sends the rule it confirmed, and the server compares rule
   assert.notEqual(ruleKey(base), ruleKey({ ...base, keepDays: { Recent: 7 } }));
   assert.notEqual(ruleKey(base), ruleKey({ ...base, maxGB: 500 }));
 });
+
+test('overview: storage and mapped health notifications describe one problem per vehicle', async () => {
+  const m = await mod('status');
+  const vehicle = {
+    id: 'tesla',
+    name: 'Tesla',
+    storage: { free: 100, total: 1000, perDay: 4, daysLeft: 26 },
+  };
+  const notes = [
+    {
+      vehicleId: 'tesla',
+      kind: 'storage',
+      title: 'Tesla: share running low on space',
+    },
+    {
+      vehicleId: 'other',
+      kind: 'storage',
+      title: 'Other: share running low on space',
+    },
+    {
+      vehicleId: 'tesla',
+      kind: 'share',
+      dedupeKey: 'readonly:tesla',
+      title: 'Tesla: share is read-only',
+    },
+    {
+      kind: 'health',
+      dedupeKey: 'health:write-tesla',
+      title: 'Startup check: write',
+    },
+  ];
+  const checks = [
+    { id: 'space-tesla', status: 'warn' },
+    { id: 'write-tesla', status: 'warn', label: 'Read-only' },
+    { id: 'space-other', status: 'fail' },
+  ];
+  const items = m.attentionItems({ vehicle, notes, checks });
+  assert.equal(items.length, 2);
+  assert.equal(items.filter((i) => i.title === 'The share is almost full').length, 1);
+  assert.equal(items[0].action.label, 'Free up space');
+  assert.match(items[0].text, /100 B free.*26 days/);
+  assert.equal(
+    m.attentionItems({ vehicle, notes: notes.slice(0, 1) })[0].title,
+    'The share is almost full',
+  );
+});
+
+test('overview: status sentences use plain storage wording and single-vehicle titles', async () => {
+  const m = await mod('status');
+  const vehicle = {
+    id: 'tesla',
+    name: 'Tesla',
+    share: { healthy: true, writable: true },
+    storage: { daysLeft: 26 },
+  };
+  const notes = [
+    {
+      vehicleId: 'tesla',
+      kind: 'storage',
+      title: 'Tesla: share running low on space',
+    },
+  ];
+  assert.equal(m.overviewStatus({ vehicle, notes }).second, 'Space runs out in about 26 days.');
+  assert.equal(
+    m.overviewStatus({ vehicle: { ...vehicle, storage: {} }, notes }).second,
+    'Space is running low.',
+  );
+  const other = [
+    {
+      vehicleId: 'tesla',
+      kind: 'conversion',
+      title: 'Tesla: Conversion needs a look.',
+    },
+  ];
+  assert.equal(
+    m.overviewStatus({ vehicle, notes: other, vehicleCount: 1 }).second,
+    'Conversion needs a look.',
+  );
+  assert.equal(
+    m.overviewStatus({ vehicle, notes: other, vehicleCount: 2 }).second,
+    'Tesla: Conversion needs a look.',
+  );
+});
+
+test('overview: missing dates collapse consecutive days and limit visible ranges', async () => {
+  const { missingDaySummary } = await mod('status');
+  const dates = [
+    '2026-10-08',
+    '2026-10-09',
+    '2026-10-10',
+    '2026-10-11',
+    '2026-10-12',
+    '2026-10-13',
+    '2026-11-04',
+  ];
+  assert.equal(missingDaySummary(dates), 'Oct 8 – 13 and Nov 4');
+  assert.equal(
+    missingDaySummary(['2026-11-01', '2026-11-03', '2026-11-05', '2026-11-07', '2026-11-09']),
+    'Nov 1, Nov 3 and Nov 5 +2 more',
+  );
+});
+
+test('overview: space warning colors use health and days-left thresholds', async () => {
+  const { spaceTone } = await mod('status');
+  const v = { id: 'v', storage: { daysLeft: 61 } };
+  assert.equal(spaceTone(v, []), 'ok');
+  assert.equal(spaceTone(v, [{ id: 'space-v', status: 'warn' }]), 'warn');
+  for (const n of [60, 26, 14]) assert.equal(spaceTone({ ...v, storage: { daysLeft: n } }), 'warn');
+  for (const n of [13, 0]) assert.equal(spaceTone({ ...v, storage: { daysLeft: n } }), 'bad');
+  assert.equal(spaceTone({ id: 'v' }), 'ok');
+});
+
+test('overview and footage: large category and pager counts use thousands separators', async (t) => {
+  const inv = {
+    recordings: 4809,
+    days: 2477,
+    byCategory: { Recent: { recordings: 2477, bytes: 1000 } },
+  };
+  await browserEnv(t, (url) =>
+    url.includes('/days?') ? { days: [], total: 2477, dates: [] } : { checks: [], jobs: [] },
+  );
+  const ctx = {
+    current: () => ({
+      id: 'counts',
+      inventory: inv,
+      share: { healthy: true, writable: true },
+    }),
+    state: { notes: [] },
+    alive: () => true,
+  };
+  const el = element();
+  await (await import(browserModule('pages/overview.js'))).render(el, ctx);
+  assert.match(el.innerHTML, /2,477 ·/);
+  const stop = await (await import(browserModule('pages/footage.js'))).render(el, ctx);
+  t.cleanupFns.push(stop);
+  assert.match(el.innerHTML, /<small>4,809<\/small>/);
+  assert.match(el.innerHTML, /of 2,477/);
+});
+
+test('format: large counts in server messages and job progress retain separators', async () => {
+  const f = await mod('format'),
+    j = await mod('jobs');
+  assert.equal(f.countText('2477 clips and 4809 recording(s)'), '2,477 clips and 4,809 recordings');
+  assert.equal(j.jobProgress({ detail: 'Rendering 2477 of 4809 (51%)' }).text, '2,477 of 4,809');
+});

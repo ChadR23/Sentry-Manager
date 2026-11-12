@@ -49,6 +49,11 @@ export function describeJob(job) {
 export function jobProgress(job) {
   const m = /Rendering (.+?) of (.+?) \((\d+(?:\.\d+)?)%\)/.exec(job.detail || '');
   return m && Number(m[3]) >= 0 && Number(m[3]) <= 100
-    ? { pct: Number(m[3]), text: m[1] + ' of ' + m[2] }
+    ? {
+        pct: Number(m[3]),
+        text: [m[1], m[2]]
+          .map((n) => (/^\d[\d,]*$/.test(n) ? Number(n.replaceAll(',', '')).toLocaleString() : n))
+          .join(' of '),
+      }
     : null;
 }
