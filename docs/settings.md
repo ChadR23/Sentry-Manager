@@ -19,7 +19,7 @@ All optional; put them in `.env` next to `docker-compose.yml`.
 | `TRUSTED_PROXIES` | | With `TRUST_PROXY`: the reverse proxy's addresses or ranges (`172.18.0.5`, `10.0.0.0/8`), when it is not on the local network (a proxy reached over Tailscale, `100.64.0.0/10`) or to trust only it; default: any address on the local network |
 | `TRUSTED_HOSTS` | | If set, refuse requests for any other host name |
 | `SENTRY_TAG` | `latest` | Which image to follow; `build-128` (or `sha-<commit>`) stays on that build ([Updates](updates.md#how-images-are-built)) |
-| `DEFAULT_UI` | `sentry-six` | The interface used until an admin chooses one in Settings → Interface: `sentry-six`, `original`, or another built-in pack's id (`horizon`, `aurora`, `daylight`, `flux`). A choice made in Settings always wins |
+| `DEFAULT_UI` | `sentry-six` | The main interface, used until an admin chooses another in Settings → Interface: `sentry-six`, or another built-in pack's id (`horizon`, `aurora`, `daylight`, `flux`). `original` brings back the classic interface as the main one (it is otherwise only the `/original` fallback) |
 | `UPDATE_CHECK` | `on` | `off` = don't check for newer images |
 | `EXPORT_ENCODER` | `auto` | `cpu` = render exports on the CPU even when a GPU could |
 | `CPU_ENCODER_PRESET` | `medium` | `fast` or `faster` = quicker conversions on the CPU, a little less detail ([Encoder](encoder.md#gpu)) |

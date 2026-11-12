@@ -322,10 +322,10 @@ async function iface({ el, ctx }) {
   const draw = () => {
     const active = ui.packs.find((p) => p.id === ui.active);
     el.innerHTML = `<div class="card stack"><h2>Interface</h2>
-      <p class="muted">How Sentry Six Manager looks and works for everyone who signs in. <b>Original</b> is the built-in interface; the others are packs that were uploaded. You’re using <b>${esc(active ? active.name : 'Original')}</b>.</p>
+      <p class="muted">How Sentry Six Manager looks and works for everyone who signs in. <b>Sentry Six</b> is the main interface; the others come with the app or were uploaded. You’re using <b>${esc(active ? active.name : 'Original')}</b>.</p>
       ${ui.original ? `<div class="note note-info">${icon('info')}<span>This browser shows the original interface because <span class="mono">/original</span> was opened${active ? `; everyone else sees ${esc(active.name)}` : ''}. <a class="btn btn-sm" href="/original?off=1">Show the chosen interface</a></span></div>` : ''}
       <label class="field" style="max-width:420px"><span>Interface for everyone</span><select class="input" id="ui-pick">
-        <option value=""${ui.active ? '' : ' selected'}>Original</option>${ui.packs.map((p) => `<option value="${esc(p.id)}"${p.id === ui.active ? ' selected' : ''}>${esc(p.name)}</option>`).join('')}</select></label>
+        ${ui.packs.map((p) => `<option value="${esc(p.id)}"${p.id === ui.active ? ' selected' : ''}>${esc(p.name)}</option>`).join('')}</select></label>
       ${ui.packs.length ? `<ul class="list">${ui.packs.map((p) => `<li class="list-item"><div class="grow"><b>${esc(p.name)}</b> ${p.id === ui.active ? chip('In use', 'good') : ''}
           ${p.description ? `<p class="small" style="margin-top:4px">${esc(p.description)}</p>` : ''}
           <p class="muted small" style="margin-top:4px">${p.author ? `by ${esc(p.author)} · ` : ''}${esc(p.replaces.map((k) => (k === 'web' ? 'pages' : 'Viewer and Encoder')).join(', '))} · ${plural(p.files, 'file')} · uploaded ${esc(new Date(p.uploadedAt).toLocaleDateString())}</p></div>

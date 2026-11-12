@@ -2438,10 +2438,9 @@
   function interfaceCard(ui) {
     const day = (iso) => (iso ? new Date(iso).toLocaleDateString() : '');
     return `<div class="card" data-section="interface"><h2>Interface</h2>
-      <p class="muted small" style="margin-top:6px">How Sentry Six Manager looks and works for everyone who signs in. <b>Original</b> is the built-in interface; Daylight, Flux, Horizon and Aurora come with the app, and you can upload packs of your own.</p>
+      <p class="muted small" style="margin-top:6px">How Sentry Six Manager looks and works for everyone who signs in. <b>Sentry Six</b> is the main interface; Daylight, Flux, Horizon and Aurora come with the app, and you can upload packs of your own. (This page is the classic interface, kept as the fallback at /original.)</p>
       ${ui.original ? `<div class="ui-original-note"><p>This browser shows the <b>original</b> interface, as you opened <span class="mono">/original</span>${ui.active ? `; everyone else sees <b>${esc(ui.packs.find((x) => x.id === ui.active)?.name || '')}</b>` : ''}.</p><a class="btn sm" href="/original?off=1">Show the chosen interface</a></div>` : ''}
       <div class="form" style="margin-top:14px"><label class="field">Interface<select class="input" id="ui-pick">
-        <option value=""${ui.active ? '' : ' selected'}>Original</option>
         ${ui.packs.map((x) => `<option value="${esc(x.id)}"${x.id === ui.active ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}
       </select></label></div>
       ${ui.packs.length ? `<table class="table ui-packs" style="margin-top:14px"><thead><tr><th>Pack</th><th>Changes</th><th>Added</th><th></th></tr></thead><tbody>

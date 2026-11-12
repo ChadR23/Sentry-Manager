@@ -3,11 +3,13 @@
 [← Back to the README](../README.md)
 
 Settings → Interface sets how Sentry Six Manager looks and works for
-everyone who signs in. **Sentry Six** is the default: every server gets it
-until an admin chooses another one. **Original** is the classic built-in
-interface; the drop-down also lists the other interfaces that come with the
-app and every pack you uploaded. A choice is kept, Original included (set
-`DEFAULT_UI=original` to start new installs on Original instead). A switch applies at once:
+everyone who signs in. **Sentry Six** (by Chad, ChadR23) is the main
+interface: every server uses it until an admin chooses another. Four more
+come with the app (Aurora, Daylight, Flux and Horizon), and the list also
+shows every pack you uploaded. The classic interface (Original) is no longer
+offered: a server that was on it moves to Sentry Six. It stays as the
+fallback: `/original` opens it in one browser if an interface ever breaks,
+and `DEFAULT_UI=original` makes it the main one again. A switch applies at once:
 open pages reload by themselves, with no restart.
 
 A pack is a `.zip` whose files take the place of the built-in files with the

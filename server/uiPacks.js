@@ -100,8 +100,6 @@ function readBuiltin(folder) {
   return out;
 }
 
-const NEVER_CHOSEN = Symbol('never chosen'); // db.get's fallback when no choice was ever saved
-
 function createUiPacks({ dir, db, log = console, builtinDir = null, defaultId = null }) {
   const metaFile = (id) => path.join(dir, id, 'pack.json');
   let installing = false;
@@ -127,19 +125,21 @@ function createUiPacks({ dir, db, log = console, builtinDir = null, defaultId = 
       ids = [];
     }
     const uploaded = ids.map(readMeta).filter(Boolean).sort((a, b) => String(b.uploadedAt).localeCompare(String(a.uploadedAt)));
-    return [...[...builtin.values()].map(publicMeta), ...uploaded];
+    // the main interface first, then the others that come with the app, then uploaded ones
+    const own = [...builtin.values()].map(publicMeta).sort((a, b) => (b.id === defaultId) - (a.id === defaultId));
+    return [...own, ...uploaded];
   }
 
   /**
-   * The chosen pack's id, or null for the built-in interface (Original). An
-   * install where nobody has chosen yet (no saved choice at all) gets
-   * `defaultId` when that pack is there; choosing Original saves null, which
-   * stays Original.
+   * The chosen pack's id, or `defaultId` (Sentry Six, the main interface)
+   * when none is chosen: nothing saved yet, or null saved (Original, which is
+   * no longer offered: only /original reaches it, as the fallback). null only
+   * without a default (DEFAULT_UI=original) or when the default is missing.
    */
   function active() {
-    const saved = db.get('ui-pack', NEVER_CHOSEN);
-    const id = saved === NEVER_CHOSEN ? defaultId : saved;
-    return typeof id === 'string' && ID.test(id) && readMeta(id) ? id : null;
+    const saved = db.get('ui-pack', null);
+    for (const id of [saved, defaultId]) if (typeof id === 'string' && ID.test(id) && readMeta(id)) return id;
+    return null;
   }
 
   function setActive(id) {

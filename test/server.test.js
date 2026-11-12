@@ -1956,7 +1956,7 @@ test('bin thumbnails reject item symlinks into other folders of the vehicle shar
   } finally { await fsp.rm(dir,{recursive:true,force:true}); }
 });
 
-test('the default interface: a fresh server serves Sentry Six; choosing Original keeps Original after a restart', async () => {
+test('the main interface: a fresh server serves Sentry Six; a server that was on Original moves to it; /original still works', async () => {
   const dir = await tmp();
   await makeFootage(path.join(dir, 'footage'));
   let s = await startServer(dir, { DEFAULT_UI: '' }); // as an install without the setting
@@ -1967,11 +1967,13 @@ test('the default interface: a fresh server serves Sentry Six; choosing Original
     assert.match(home, /s6\//, 'the Sentry Six page');
     await s.call('POST', '/api/auth/confirm', { password: 'correct horse' });
     assert.equal((await s.call('PUT', '/api/ui-packs/active', { id: null, password: 'correct horse' })).status, 200);
-    assert.equal((await s.call('GET', '/api/ui-packs')).data.active, null);
+    assert.equal((await s.call('GET', '/api/ui-packs')).data.active, 'sentry-six', 'Original saved: Sentry Six all the same');
+    const classic = await (await fetch(`${s.base}/original`, { headers: { Cookie: s.getCookie() }, redirect: 'manual' })).status;
+    assert.ok([200, 302, 303].includes(classic), `the fallback still answers (${classic})`);
   } finally { await s.stop(); }
   s = await startServer(dir, { DEFAULT_UI: '' });
   try {
     await s.call('POST', '/api/auth/login', { username: 'admin', password: 'correct horse' });
-    assert.equal((await s.call('GET', '/api/ui-packs')).data.active, null, 'Original was chosen: still Original');
+    assert.equal((await s.call('GET', '/api/ui-packs')).data.active, 'sentry-six', 'after a restart too');
   } finally { await s.stop(); await fsp.rm(dir, { recursive: true, force: true }); }
 });

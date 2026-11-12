@@ -130,7 +130,7 @@ test('packs: the original download is a pack that installs as is', async () => {
   }
 });
 
-test('the default interface: Sentry Six until an admin chooses; choosing Original stays Original', async () => {
+test('the main interface: Sentry Six until an admin chooses another; Original (null) is Sentry Six too; listed first', async () => {
   const dir = await tmp();
   try {
     const builtinDir = path.join(__dirname, '..', 'examples', 'ui-packs');
@@ -138,11 +138,13 @@ test('the default interface: Sentry Six until an admin chooses; choosing Origina
     const packs = createUiPacks({ dir, db, log: quiet, builtinDir, defaultId: 'sentry-six' });
     assert.equal(packs.active(), 'sentry-six', 'nothing chosen yet: the default');
     assert.ok(packs.root('web'), 'its files are served');
+    assert.equal(packs.list()[0].id, 'sentry-six', 'listed first');
+    assert.deepEqual(packs.list().filter((p) => p.builtin).map((p) => p.id).sort(), ['aurora', 'daylight', 'flux', 'horizon', 'sentry-six'], 'five that come with the app');
     packs.setActive(null);
-    assert.equal(packs.active(), null, 'Original chosen: kept, not replaced by the default');
+    assert.equal(packs.active(), 'sentry-six', 'Original is no longer a choice: someone on it gets Sentry Six');
     packs.setActive('horizon');
     assert.equal(packs.active(), 'horizon');
-    // an install that never chose, with the default missing or turned off: Original
+    // with the default missing or turned off (DEFAULT_UI=original): Original
     assert.equal(createUiPacks({ dir, db: memDb(), log: quiet, builtinDir, defaultId: 'nope' }).active(), null);
     assert.equal(createUiPacks({ dir, db: memDb(), log: quiet, builtinDir }).active(), null);
   } finally { await fsp.rm(dir, { recursive: true, force: true }); }

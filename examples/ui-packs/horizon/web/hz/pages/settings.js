@@ -192,9 +192,9 @@ async function iface(box) {
   const activeName = ui.packs.find((x) => x.id === ui.active)?.name;
   box.innerHTML = `<section class="panel hud cyan">
     ${panelHead(`${ico('horizon')}Interface`, pill(ui.active ? activeName || 'pack' : 'Original', 'mag'))}
-    <p class="small dim">How Sentry Six Manager looks and works for everyone who signs in. <b>Original</b> is the built-in interface; the others are packs you uploaded.</p>
+    <p class="small dim">How Sentry Six Manager looks and works for everyone who signs in. <b>Sentry Six</b> is the main interface; the others come with the app or were uploaded.</p>
     ${ui.original ? `<div class="note org" style="margin-top:10px">This browser shows the original interface because you opened <span class="mono">/original</span>${ui.active ? `; everyone else sees <b>${h(activeName || '')}</b>` : ''}. <a href="/original?off=1">Show the chosen interface</a></div>` : ''}
-    <label class="fld" style="max-width:420px;margin-top:12px">Interface for everyone<select class="in" id="ui-pick"><option value=""${ui.active ? '' : ' selected'}>Original (built-in)</option>${ui.packs.map((x) => `<option value="${h(x.id)}"${x.id === ui.active ? ' selected' : ''}>${h(x.name)}</option>`).join('')}</select></label>
+    <label class="fld" style="max-width:420px;margin-top:12px">Interface for everyone<select class="in" id="ui-pick">${ui.packs.map((x) => `<option value="${h(x.id)}"${x.id === ui.active ? ' selected' : ''}>${h(x.name)}</option>`).join('')}</select></label>
     ${ui.packs.length ? `<ul class="packs">${ui.packs.map((x) => `<li class="pack"><div class="grow"><b>${h(x.name)}</b> ${x.id === ui.active ? pill('in use', 'grn') : ''}${x.description ? `<p class="small dim">${h(x.description)}</p>` : ''}<p class="small faint">${x.author ? `by ${h(x.author)} · ` : ''}${h((x.replaces || []).map((k) => (k === 'web' ? 'pages' : 'Studio pages')).join(', '))} · ${h(x.files)} files · ${size(x.bytes)} · uploaded ${h(stampFull(Date.parse(x.uploadedAt)))}</p></div>
       <div class="row">${x.id === ui.active ? '' : `<button class="btn sm" type="button" data-use="${h(x.id)}">Use</button>`}<button class="btn sm danger" type="button" data-del="${h(x.id)}">${ico('bin')}Delete</button></div></li>`).join('')}</ul>` : ''}
     <div class="row" style="margin-top:12px">
