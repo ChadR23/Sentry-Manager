@@ -12,6 +12,13 @@ function defaultPolicy() {
   return { enabled: false, runAt: '03:30', keepDays: { Recent: null, Sentry: null, Saved: null, Other: null }, binDays: null, maxGB: null, lastRunAt: null, lastResult: null };
 }
 
+/** What decides what a run moves or deletes: equal keys mean the same rule. */
+function ruleKey(p) {
+  const n = (v) => (v === undefined || v === '' ? null : v === null ? null : Number(v));
+  const keep = (p && p.keepDays) || {};
+  return JSON.stringify({ keepDays: CATEGORIES.map((c) => n(keep[c])), binDays: n(p && p.binDays), maxGB: n(p && p.maxGB) });
+}
+
 function normalizePolicy(input, prev = defaultPolicy()) {
   const out = { ...prev, keepDays: { ...prev.keepDays } };
   if (input.enabled !== undefined) out.enabled = Boolean(input.enabled);
@@ -116,11 +123,23 @@ class Policies {
     return { recordings: hit.length, bytes: hit.reduce((n, r) => n + r.bytes, 0), byCategory, overLimit, ids: hit.map((r) => r.id) };
   }
 
-  async run(vehicleId) {
+  /**
+   * Run the vehicle's policy now. `expect` (optional) is the policy the person
+   * confirmed: when the saved one has changed since (another tab or person
+   * saved it), nothing runs, so a confirmation never stands for a different
+   * rule, least of all one that empties the Recycle Bin for good.
+   */
+  async run(vehicleId, { expect } = {}) {
+    const unchanged = () => !expect || ruleKey(this.get(vehicleId)) === ruleKey(expect);
+    const changed = () => Object.assign(new Error('The cleanup rule changed after you confirmed. Check it and run it again.'), { status: 409 });
+    if (!unchanged()) throw changed();
     await this.inventory.scan(vehicleId);
+    if (!unchanged()) throw changed();
     const { ids } = this.preview(vehicleId);
     const result = ids.length ? await this.bin.trash(vehicleId, ids, { reason: 'policy' }) : { moved: [], skipped: [], bytes: 0 };
     const policy = this.get(vehicleId);
+    // checked again right before anything is deleted for good
+    if (!unchanged()) throw changed();
     const emptied = policy.binDays ? await this.emptyOld(vehicleId, policy.binDays) : null;
     this.db.set(`policy:${vehicleId}`, {
       ...policy, lastRunAt: Date.now(),
@@ -166,4 +185,4 @@ class Policies {
   }
 }
 
-module.exports = { Policies, selectExpired, normalizePolicy, defaultPolicy, dayInZone, CATEGORIES };
+module.exports = { Policies, selectExpired, normalizePolicy, defaultPolicy, dayInZone, ruleKey, CATEGORIES };

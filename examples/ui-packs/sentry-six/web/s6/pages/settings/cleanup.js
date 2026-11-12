@@ -76,7 +76,7 @@ async function renderPage(page, ctx) {
         }))
       )
         return;
-      const out = await flow.api(`/api/vehicles/${v.id}/policy/run`, { body: {} });
+      const out = await flow.api(`/api/vehicles/${v.id}/policy/run`, { body: { expect: saved } });
       toast(`${plural(out.moved.length, 'recording')} moved to the Recycle Bin.`);
       if (ctx.alive()) render();
     } catch (err) {

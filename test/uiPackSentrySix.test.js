@@ -1789,3 +1789,14 @@ test('r5 converter: a hello awaiting subscribe cannot request or deliver after i
   assert.equal(delivered, before);
   assert.ok(posts.every((p) => p.signal?.aborted));
 });
+
+test('cleanup: Run now sends the rule it confirmed, and the server compares rules by what they move or delete', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'examples', 'ui-packs', 'sentry-six', 'web', 's6', 'pages', 'settings', 'cleanup.js'), 'utf8');
+  assert.match(src, /policy\/run`, \{ body: \{ expect: saved \} \}/);
+  const { ruleKey } = require('../server/policies');
+  const base = { keepDays: { Recent: 30, Sentry: null, Saved: undefined }, binDays: null, maxGB: null, enabled: false, runAt: '03:30', lastRunAt: 1 };
+  assert.equal(ruleKey(base), ruleKey({ ...base, keepDays: { Recent: '30', Other: null }, enabled: true, runAt: '04:00', lastRunAt: 2 }), 'schedule and bookkeeping do not count');
+  assert.notEqual(ruleKey(base), ruleKey({ ...base, binDays: 1 }), 'emptying the bin is a different rule');
+  assert.notEqual(ruleKey(base), ruleKey({ ...base, keepDays: { Recent: 7 } }));
+  assert.notEqual(ruleKey(base), ruleKey({ ...base, maxGB: 500 }));
+});

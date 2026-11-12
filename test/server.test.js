@@ -324,6 +324,16 @@ test('footage, protect, Recycle Bin and policies never lose files', { timeout: 1
     const pol = await s.call('PUT', '/api/vehicles/daily-driver/policy', { enabled: false, keepDays: { Recent: 30, Sentry: 30, Saved: 30 } });
     assert.equal(pol.data.preview.recordings, 3, 'everything from 2020 except the protected one');
     assert.equal((await s.call('PUT', '/api/vehicles/daily-driver/policy', { keepDays: { Recent: 0 } })).status, 400);
+    // a run confirmed for one rule is refused once another tab saved a different one: nothing moves or is deleted
+    const confirmed = (await s.call('GET', '/api/vehicles/daily-driver/policy')).data.policy;
+    const binBefore = (await s.call('GET', '/api/bin')).data.items.length;
+    assert.equal((await s.call('PUT', '/api/vehicles/daily-driver/policy', { binDays: 1 })).status, 200);
+    r = await s.call('POST', '/api/vehicles/daily-driver/policy/run', { expect: confirmed });
+    assert.equal(r.status, 409);
+    assert.match(r.data.error, /changed after you confirmed/);
+    assert.equal((await s.call('GET', '/api/bin')).data.items.length, binBefore, 'nothing moved');
+    assert.equal((await s.call('GET', '/api/vehicles/daily-driver/recordings')).data.total, 4, 'nothing moved');
+    assert.equal((await s.call('PUT', '/api/vehicles/daily-driver/policy', { binDays: null })).status, 200);
     r = await s.call('POST', '/api/vehicles/daily-driver/policy/run', {});
     assert.equal(r.data.moved.length, 3);
     assert.ok(fs.existsSync(path.join(root, 'TeslaCam/SavedClips/2020-01-03_10-00-00/2020-01-03_09-59-00-front.mp4')), 'protected kept');

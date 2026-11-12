@@ -3579,9 +3579,11 @@ async function main() {
     const policy = policies.set(params.id, body || {});
     return { policy, preview: policies.preview(params.id) };
   });
-  r.add('POST', '/api/vehicles/:id/policy/run', async (req, res, { params }) => {
+  r.add('POST', '/api/vehicles/:id/policy/run', async (req, res, { params, body }) => {
     vehicleOr404(params.id);
-    const out = await policies.run(params.id);
+    // `expect`: the policy the person confirmed (Sentry Six sends it); a changed one is refused
+    const expect = body && typeof body.expect === 'object' && body.expect ? body.expect : undefined;
+    const out = await policies.run(params.id, { expect });
     announce('inventory');
     announce('bin');
     return out;
