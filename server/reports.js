@@ -620,7 +620,7 @@ function createReports({
 }
 
 // the heartbeat's fields with text in them (through the scrubber before normalizeHeartbeat)
-const HEARTBEAT_TEXT = ['platform', 'arch', 'cpu', 'gpus', 'cars', 'convert'];
+const HEARTBEAT_TEXT = ['platform', 'arch', 'cpu', 'gpus', 'cars', 'convert', 'nodes'];
 const HL = P.HEARTBEAT_LIMITS;
 /**
  * Text as the protocol takes it (reportsProtocol.js isPlain), or null: letters
@@ -673,6 +673,15 @@ function normalizeHeartbeat(h = {}) {
     ...optionalHeartbeat(h)
   };
 }
+/** A convert block { fps, encoder, device, api, codec } within the limits (device of at most deviceMax). */
+function convertBlock(value, deviceMax) {
+  const c = value && typeof value === 'object' ? value : {};
+  const fps = Number(c.fps);
+  return {
+    fps: c.fps !== null && c.fps !== undefined && Number.isFinite(fps) && fps >= 0 ? Math.round(Math.min(HL.fps, fps) * 10) / 10 : null,
+    encoder: plainText(c.encoder, HL.encoder), device: plainText(c.device, deviceMax), api: plainText(c.api, HL.api), codec: plainText(c.codec, HL.codec)
+  };
+}
 /** The optional fields (all of them; platform, arch and host only when known). */
 function optionalHeartbeat(h) {
   const out = { footageSeconds: countIn(h.footageSeconds, HL.footageSeconds) };
@@ -684,12 +693,14 @@ function optionalHeartbeat(h) {
   out.gpus = (Array.isArray(h.gpus) ? h.gpus : []).map((g) => plainText(g, HL.gpu)).filter(Boolean).slice(0, HL.gpus);
   out.cars = (Array.isArray(h.cars) ? h.cars : []).slice(0, HL.cars).map((c) => ({ model: modelName(c?.model), firmware: firmwareText(c?.firmware) }));
   out.clips24h = { sentry: countIn(h.clips24h?.sentry, HL.clips), dashcam: countIn(h.clips24h?.dashcam, HL.clips) };
-  const c = h.convert || {};
-  const fps = Number(c.fps);
-  out.convert = {
-    fps: c.fps !== null && c.fps !== undefined && Number.isFinite(fps) && fps >= 0 ? Math.round(Math.min(HL.fps, fps) * 10) / 10 : null,
-    encoder: plainText(c.encoder, HL.encoder), device: plainText(c.device, HL.device), api: plainText(c.api, HL.api), codec: plainText(c.codec, HL.codec)
-  };
+  out.convert = convertBlock(h.convert, HL.device);
+  // each paired node: its hardware and its conversions, exactly these keys
+  // (whatever else the caller had, a name, address or id, is left out)
+  out.nodes = (Array.isArray(h.nodes) ? h.nodes : []).slice(0, HL.nodes).map((x) => ({
+    cpu: plainText(x?.cpu, HL.nodeCpu),
+    gpus: (Array.isArray(x?.gpus) ? x.gpus : []).map((g) => plainText(g, HL.nodeGpu)).filter(Boolean).slice(0, HL.nodeGpus),
+    convert: convertBlock(x?.convert, HL.nodeDevice)
+  }));
   out.crashes24h = countIn(h.crashes24h, HL.crashes);
   // the kind of host (server/hostInfo.js): a word from the list only, when told
   if (h.host && typeof h.host === 'object') out.host = { os: P.HEARTBEAT_HOST_OS.includes(h.host.os) ? h.host.os : null, docker: h.host.docker === true };

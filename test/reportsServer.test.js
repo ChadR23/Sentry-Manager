@@ -167,6 +167,7 @@ test('with a receiver: preview, password, send; watch-only refused; audit-logged
     assert.deepEqual(h.cars, [{ model: 'Model Y', firmware: null }]);
     assert.deepEqual(h.convert, { fps: null, encoder: null, device: null, api: null, codec: null }, 'nothing converted yet');
     assert.equal(h.crashes24h, 0);
+    assert.deepEqual(h.nodes, [], 'no nodes paired');
     // the kind of host, as server/hostInfo.js works it out here (a word and yes/no only)
     assert.deepEqual(h.host, hostInfo());
     assert.deepEqual(Object.keys(h.host), ['os', 'docker']);

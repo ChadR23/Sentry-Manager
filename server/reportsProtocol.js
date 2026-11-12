@@ -256,7 +256,9 @@ const isStr = (x, max, min = 0) => typeof x === 'string' && x.length >= min && x
 const nullOr = (x, test) => x === null || test(x);
 
 // ---- the hourly heartbeat: a few numbers, exactly these, nothing free-form
-const HEARTBEAT_MAX_BYTES = 4096; // the whole heartbeat payload as JSON
+// the whole heartbeat payload as JSON (8 KB since `nodes`: eight nodes' hardware
+// and speeds do not fit in the 4 KB before it at any useful length)
+const HEARTBEAT_MAX_BYTES = 8192;
 const HEALTH_OVERALL = ['ok', 'warn', 'problem'];
 /** The overall health for these counts: any problem is 'problem', else any warning 'warn', else 'ok'. */
 const healthOverall = (warnings, problems) => (problems > 0 ? 'problem' : warnings > 0 ? 'warn' : 'ok');
@@ -289,11 +291,16 @@ const isObj = (x) => Boolean(x) && typeof x === 'object' && !Array.isArray(x);
 // format, private-use or non-ASCII characters). The limits keep the worst
 // case of every field at its limit (with the common fields at theirs) under
 // HEARTBEAT_MAX_BYTES (test/reportsHeartbeatFields.test.js builds it).
+// convert.device is the name of one of `gpus` or the `cpu` exactly, so it
+// is as long as the longer of them may be (and a node's as its own).
 const HEARTBEAT_LIMITS = {
   footageSeconds: 1e12, platform: 32, arch: 16, cpu: 120,
   gpus: 4, gpu: 80, // GPU names (at most 4 of them)
   cars: 12, model: 16, firmware: 24, // { model, firmware } per vehicle (at most 12)
-  clips: 1e6, fps: 100_000, encoder: 40, device: 80, api: 12, codec: 10, crashes: 10_000
+  clips: 1e6, fps: 100_000, encoder: 40, device: 120, api: 12, codec: 10, crashes: 10_000,
+  // { cpu, gpus, convert } per paired encoding node (at most 8): shorter
+  // names than this server's own, so eight of them fit
+  nodes: 8, nodeCpu: 60, nodeGpus: 4, nodeGpu: 60, nodeDevice: 60
 };
 const PLAIN_RE = /^[\x20\x21\x23-\x5b\x5d-\x7e]+$/;
 /** Whether x is plain text of 1 to max characters (see HEARTBEAT_LIMITS above). */
@@ -307,6 +314,19 @@ function exactKeys(o, keys, where, errs) {
   return true;
 }
 const HL = HEARTBEAT_LIMITS;
+/** A list of at most `count` GPU names of 1 to `max` characters each. */
+function checkGpus(x, count, max, where, errs) {
+  if (!Array.isArray(x) || x.length > count) { errs.push(where); return; }
+  x.forEach((g, i) => { if (!isPlain(g, max)) errs.push(`${where}[${i}]`); });
+}
+/** A convert block { fps, encoder, device, api, codec } (device of 1 to deviceMax characters). */
+function checkConvert(x, deviceMax, where, errs) {
+  if (!exactKeys(x, ['fps', 'encoder', 'device', 'api', 'codec'], where, errs)) return;
+  // frames a second, to 0.1
+  if ('fps' in x && !nullOr(x.fps, (n) => typeof n === 'number' && Number.isFinite(n) && n >= 0 && n <= HL.fps && Math.abs(n * 10 - Math.round(n * 10)) < 1e-6)) errs.push(`${where}.fps`);
+  const max = { encoder: HL.encoder, device: deviceMax, api: HL.api, codec: HL.codec };
+  for (const k of ['encoder', 'device', 'api', 'codec']) if (k in x && !plainOrNull(x[k], max[k])) errs.push(`${where}.${k}`);
+}
 // the kind of host the Manager runs on (server/hostInfo.js works it out):
 // one of these words or null, never the kernel string or a host name
 const HEARTBEAT_HOST_OS = ['truenas', 'unraid', 'synology', 'qnap', 'wsl', 'macos', 'raspberry-pi', 'ubuntu', 'debian', 'fedora', 'linux'];
@@ -316,10 +336,7 @@ const HEARTBEAT_OPTIONAL = {
   platform: (x, errs) => { if (!isPlain(x, HL.platform)) errs.push('heartbeat.platform'); },
   arch: (x, errs) => { if (!isPlain(x, HL.arch)) errs.push('heartbeat.arch'); },
   cpu: (x, errs) => { if (!plainOrNull(x, HL.cpu)) errs.push('heartbeat.cpu'); },
-  gpus: (x, errs) => {
-    if (!Array.isArray(x) || x.length > HL.gpus) { errs.push('heartbeat.gpus'); return; }
-    x.forEach((g, i) => { if (!isPlain(g, HL.gpu)) errs.push(`heartbeat.gpus[${i}]`); });
-  },
+  gpus: (x, errs) => checkGpus(x, HL.gpus, HL.gpu, 'heartbeat.gpus', errs),
   cars: (x, errs) => {
     if (!Array.isArray(x) || x.length > HL.cars) { errs.push('heartbeat.cars'); return; }
     x.forEach((c, i) => {
@@ -333,18 +350,27 @@ const HEARTBEAT_OPTIONAL = {
     if (!exactKeys(x, ['sentry', 'dashcam'], 'heartbeat.clips24h', errs)) return;
     for (const k of ['sentry', 'dashcam']) if (k in x && !intIn(x[k], HL.clips)) errs.push(`heartbeat.clips24h.${k}`);
   },
-  convert: (x, errs) => {
-    if (!exactKeys(x, ['fps', 'encoder', 'device', 'api', 'codec'], 'heartbeat.convert', errs)) return;
-    // frames a second, to 0.1
-    if ('fps' in x && !nullOr(x.fps, (n) => typeof n === 'number' && Number.isFinite(n) && n >= 0 && n <= HL.fps && Math.abs(n * 10 - Math.round(n * 10)) < 1e-6)) errs.push('heartbeat.convert.fps');
-    for (const k of ['encoder', 'device', 'api', 'codec']) if (k in x && !plainOrNull(x[k], HL[k])) errs.push(`heartbeat.convert.${k}`);
-  },
+  // how this server's own conversions ran (its device: one of `gpus`, or the `cpu`)
+  convert: (x, errs) => checkConvert(x, HL.device, 'heartbeat.convert', errs),
   crashes24h: (x, errs) => { if (!intIn(x, HL.crashes)) errs.push('heartbeat.crashes24h'); },
   // { os: one of HEARTBEAT_HOST_OS or null, docker: in a container }
   host: (x, errs) => {
     if (!exactKeys(x, ['os', 'docker'], 'heartbeat.host', errs)) return;
     if ('os' in x && !(x.os === null || HEARTBEAT_HOST_OS.includes(x.os))) errs.push('heartbeat.host.os');
     if ('docker' in x && typeof x.docker !== 'boolean') errs.push('heartbeat.host.docker');
+  },
+  // one { cpu, gpus, convert } per paired encoding node (Nodes): its
+  // hardware and how the clips it converted ran, never its name, address
+  // or id; its convert.device is one of its own gpus, or its cpu
+  nodes: (x, errs) => {
+    if (!Array.isArray(x) || x.length > HL.nodes) { errs.push('heartbeat.nodes'); return; }
+    x.forEach((n, i) => {
+      const where = `heartbeat.nodes[${i}]`;
+      if (!exactKeys(n, ['cpu', 'gpus', 'convert'], where, errs)) return;
+      if ('cpu' in n && !plainOrNull(n.cpu, HL.nodeCpu)) errs.push(`${where}.cpu`);
+      if ('gpus' in n) checkGpus(n.gpus, HL.nodeGpus, HL.nodeGpu, `${where}.gpus`, errs);
+      if ('convert' in n) checkConvert(n.convert, HL.nodeDevice, `${where}.convert`, errs);
+    });
   }
 };
 /** Errors in a heartbeat block (pushed onto errs). */
@@ -393,7 +419,7 @@ function checkHeartbeat(h, errs) {
  *     within bounds;
  *   heartbeat: heartbeat only (and required there), exactly the
  *     HEARTBEAT_FIELDS, plus any of the HEARTBEAT_OPTIONAL ones
- *     (checkHeartbeat); a heartbeat is at most 4 KB as JSON.
+ *     (checkHeartbeat); a heartbeat is at most 8 KB as JSON.
  */
 function validatePayload(p) {
   if (!p || typeof p !== 'object' || Array.isArray(p)) return ['not an object'];

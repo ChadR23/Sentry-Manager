@@ -152,4 +152,46 @@ function usableGpus(found) {
   ];
 }
 
-module.exports = { detectGpus, parseVainfo, nameFromDriver, usableGpus };
+// the vendor an encoder API runs on, when it says (nvenc NVIDIA, qsv Intel, amf AMD)
+const API_VENDOR = { nvenc: 'nvidia', qsv: 'intel', amf: 'amd' };
+
+/**
+ * The name of the GPU an encode used, exactly as usableGpus(found) names it
+ * (the heartbeat's `gpus`), so `convert.device` is one of them:
+ * - device: the render node it opened ('/dev/dri/renderD128': VA-API, or
+ *   QSV/AMF on a chosen GPU) or an NVIDIA GPU by index ('nvidia1', the
+ *   converter's -gpu); api: its encoder's API (nvenc, vaapi, qsv, amf, ...);
+ *   vendor: the GPU's maker when known (amd, intel, nvidia).
+ * - without a device: the GPU ffmpeg takes by default for that API (the first
+ *   NVIDIA GPU for NVENC, renderD128 for VA-API, the first Intel/AMD one for
+ *   QSV/AMF), and the only GPU there is when it is just one.
+ * - no match: a generic "NVIDIA GPU" / "Intel GPU" / "AMD GPU" / "GPU".
+ */
+function encodeGpuName(found, { device = null, api = null, vendor = null } = {}) {
+  const usable = usableGpus(found);
+  const nvidia = usable.filter((g) => g.vendor === 'nvidia');
+  const dri = usable.filter((g) => g.vendor !== 'nvidia' && typeof g.node === 'string');
+  const dev = typeof device === 'string' ? device : '';
+  const nv = /^nvidia(\d+)$/.exec(dev);
+  if (nv && nvidia[Number(nv[1])]) return nvidia[Number(nv[1])].name;
+  const render = /(?:^|\/)(renderD\d+)$/.exec(dev)?.[1];
+  if (render) {
+    const g = dri.find((x) => path.basename(x.node) === render);
+    if (g) return g.name;
+  }
+  if (!dev) {
+    const maker = API_VENDOR[api] || null;
+    const pick = maker === 'nvidia' ? nvidia[0]
+      : maker ? dri.find((g) => g.vendor === maker)
+        : api === 'vaapi' ? dri.find((g) => path.basename(g.node) === 'renderD128') || dri[0]
+          : null;
+    if (pick) return pick.name;
+    // a GPU of that maker (or any, when the API does not say) and only one
+    const same = usable.filter((g) => !maker || g.vendor === maker);
+    if (usable.length === 1 && same.length === 1) return usable[0].name;
+  }
+  const maker = vendor || API_VENDOR[api] || null;
+  return VENDOR_NAMES[maker] ? `${VENDOR_NAMES[maker]} GPU` : 'GPU';
+}
+
+module.exports = { detectGpus, parseVainfo, nameFromDriver, usableGpus, encodeGpuName };

@@ -50,7 +50,7 @@ const { Jobs, Notifications } = require('./activity');
 const { ImageUpdates, criticalFromFile } = require('./imageUpdates');
 const { readBuildInfo: readBuildInfoFrom, buildName } = require('./buildInfo');
 const { Thumbnails } = require('./thumbnails');
-const { detectGpus, usableGpus } = require('./gpu');
+const { detectGpus, usableGpus, encodeGpuName } = require('./gpu');
 const { storageTotals } = require('./storageTotals');
 const { createHealth } = require('./health');
 const { createSnapshots, applyPendingRestore } = require('./snapshots');
@@ -62,8 +62,8 @@ const driveDataLib = require('./driveData');
 const { writeZip, streamZip, waitDrain } = require('./zip');
 const { createConverterHost } = require('./converterHost');
 const { createStats } = require('./stats');
-const { encoderBlock, jobProgress, gpuFor, RUNNING: CONVERTER_RUNNING } = require('./encoderStats');
-const { createConvertStats } = require('./convertStats');
+const { encoderBlock, jobProgress, RUNNING: CONVERTER_RUNNING } = require('./encoderStats');
+const { createConvertStats, heartbeatHardware } = require('./convertStats');
 const { hostInfo } = require('./hostInfo');
 const { createSavings } = require('./savings');
 const { parsePowerSettings, priceAt, rateNameAt, isCheapest, PriceError } = require('./powerPrice');
@@ -639,6 +639,22 @@ async function main() {
     nodes, vehicles, run, ffprobePath: FFPROBE, workDir: path.join(DATA, 'converter-temp', 'node-benchmark'), log: logger.scope('nodes')
   });
 
+  // This server's CPU model and the GPUs it can use (detectGpus()), as its
+  // heartbeat names them; for a main it encodes for, reused for 10 minutes
+  // (a main asks every 30 s and detectGpus runs vainfo).
+  let ownHardwareCache = null; // { at, value } | { pending }
+  function ownHardware() {
+    if (ownHardwareCache?.value && Date.now() - ownHardwareCache.at < 10 * 60_000) return Promise.resolve(ownHardwareCache.value);
+    if (ownHardwareCache?.pending) return ownHardwareCache.pending;
+    const pending = detectGpus().catch(() => null).then((found) => {
+      const value = { cpu: os.cpus()[0]?.model?.trim() || null, found };
+      ownHardwareCache = { at: Date.now(), value };
+      return value;
+    });
+    ownHardwareCache = { pending };
+    return pending;
+  }
+
   // Nodes, the other way: a main server's clips encoded here (server/nodeWorker.js).
   // Needs this server's own HTTPS: the main pins its certificate.
   const nodeWorker = createNodeWorker({
@@ -652,6 +668,22 @@ async function main() {
       statsAskedAt = Date.now();
       stats.touch(45_000);
       return powerReport(stats.snapshot());
+    },
+    // its hardware for the main's heartbeat (`nodes`): the CPU model, the
+    // GPUs as this server's own heartbeat names them, and which one each of
+    // its devices is (the CPU's model for the CPU)
+    hardware: async (devices) => {
+      const { cpu, found } = await ownHardware();
+      return {
+        cpu, gpus: usableGpus(found).map((g) => g.name),
+        devices: devices.map((d) => ({
+          id: d.id,
+          name: d.id === 'cpu' ? cpu : encodeGpuName(found, {
+            device: d.device?.kind === 'nvidia' && Number.isSafeInteger(d.device.index) ? `nvidia${d.device.index}` : d.device?.node || null,
+            vendor: d.device?.vendor || null
+          })
+        }))
+      };
     }
   });
 
@@ -1481,13 +1513,11 @@ async function main() {
     }
     return m;
   }
-  // the heartbeat's convert block: how this server's own conversions ran (the
-  // GPU named as the Encoder's Hardware panel names it, the CPU by its model)
+  // the heartbeat's convert block: how this server's own conversions ran
+  // (the device by the same name as in its `gpus`, or its `cpu`), and each
+  // node's (by the names that node gave its hardware)
   const cpuModel = () => os.cpus()[0]?.model?.trim() || null;
-  const convertStats = createConvertStats({
-    db, cpuName: cpuModel,
-    deviceName: (e) => gpuFor(stats.snapshot()?.gpus, e.device)?.name || null
-  });
+  const convertStats = createConvertStats({ db, cpuName: cpuModel });
   async function reportHeartbeat() {
     const list = vehicles.list();
     const dayAgo = Date.now() - 86_400_000;
@@ -1513,13 +1543,15 @@ async function main() {
     const gpu = await detectGpus().catch(() => null);
     return {
       footageSeconds: sum((v) => inventory.totals(v.id)?.minutes) * 60,
-      platform: process.platform, arch: process.arch, cpu: cpuModel(),
+      platform: process.platform, arch: process.arch,
       // the kind of host (TrueNAS, Unraid, WSL...) and whether in a container: a word only
       host: hostInfo(),
-      // the GPUs this container can use: the set the Health check counts
-      gpus: usableGpus(gpu).map((g) => g.name),
+      // cpu; gpus: the GPUs this container can use (the set the Health check
+      // counts); convert: how its own conversions ran, its device exactly
+      // one of gpus (the GPU the encode opened) or the cpu; nodes: each
+      // paired node's (at most 8) the same way, never its name, address or id
+      ...heartbeatHardware({ found: gpu, cpu: cpuModel(), stats: convertStats, paired: nodes.hardware() }),
       cars, clips24h,
-      convert: convertStats.summary(),
       uptimeSec: Math.round((Date.now() - startedAt) / 1000),
       health: { warnings: checks.filter((c) => c.status === 'warn').length, problems: checks.filter((c) => c.status === 'bad').length },
       vehicles: list.length,
@@ -1547,6 +1579,8 @@ async function main() {
       if (host) ids.push(host);
     }
     for (const a of accounts.list()) ids.push(a.username);
+    // the paired nodes' names and addresses (a heartbeat's `nodes` names none)
+    for (const n of db.get('nodes', []) || []) ids.push(n?.name, n?.host);
     for (const d of sentryLink ? sentryLink.devices() : []) ids.push(d.id, d.name, d.hostname, d.address, d.home?.ssid, d.home?.gw, d.net?.ssid, d.net?.ip, d.net?.gateway);
     for (const p of placeList()) ids.push(p?.name, p?.label);
     ids.push(...parseHostnames(process.env.TLS_HOSTNAMES || ''), process.env.TLS_ACME_DOMAIN, process.env.TLS_ACME_EMAIL);

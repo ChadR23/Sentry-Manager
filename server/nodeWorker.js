@@ -17,7 +17,9 @@
 //   GET    /info                  name, encoders, slots, and `devices`: this
 //                                  server's own GPUs and its CPU, each with its
 //                                  encoders and clips at once; `power`: its
-//                                  live watts and energy (numbers only)
+//                                  live watts and energy (numbers only);
+//                                  `hardware`: its CPU model, its GPUs and
+//                                  each device's name (the main's heartbeat)
 //   POST   /jobs                  the clip as the body, settings in X-Node-Job
 //                                  (with `device`: encoded on that GPU or CPU)
 //   POST   /slots                 clips at once: { slots: n } (older mains, the
@@ -126,7 +128,7 @@ function parseJobSettings(raw) {
  * or null, workDir, ffmpegPath, spawn, runtime: () => converter runtime
  * (selectEncoder, cpuEncoder), name, now }
  */
-function createNodeWorker({ db, log, audit = log, authority = () => null, workDir, ffmpegPath = 'ffmpeg', spawn = require('child_process').spawn, runtime, name = os.hostname(), platform = process.platform, now = Date.now, power = null }) {
+function createNodeWorker({ db, log, audit = log, authority = () => null, workDir, ffmpegPath = 'ffmpeg', spawn = require('child_process').spawn, runtime, name = os.hostname(), platform = process.platform, now = Date.now, power = null, hardware = null }) {
   let pairing = null; // { code, expiresAt, tries, byAddress }
   const jobs = new Map(); // id -> job
   const waiting = []; // uploaded jobs waiting for a slot, oldest first
@@ -363,6 +365,11 @@ function createNodeWorker({ db, log, audit = log, authority = () => null, workDi
     // the main's "All servers" total; a node without it is "unknown" there
     if (typeof power === 'function') {
       try { out.power = power(); } catch { /* not measured */ }
+    }
+    // this server's hardware as its own heartbeat names it (its CPU model,
+    // its GPUs, and which of those each device is), for the main's heartbeat
+    if (typeof hardware === 'function') {
+      try { out.hardware = await hardware(list || []); } catch { /* not known */ }
     }
     if (list) {
       const fallback = defaultDeviceOf(list);

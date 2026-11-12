@@ -131,7 +131,9 @@ A few numbers, once an hour, while *Share diagnostics* is on. Besides the
 common fields (`kind: 'heartbeat'`, `sentAt`, `install`, `anonymous`, `build`,
 `ui`, all as above), exactly one more, `heartbeat`, with exactly these fields
 (any other field, a missing required one or a wrong type is `SCHEMA`), and the
-whole payload is at most 4 KB as JSON (about 1 KB in practice). The fields
+whole payload is at most 8 KB as JSON (about 1 KB in practice; it was 4 KB
+before `nodes`, which at any useful length does not fit in 4 KB for eight
+nodes). The fields
 marked *optional* came later: a heartbeat without any of them is still right
 (older Managers send none), and each one that is there is checked as strictly
 as the others (exact keys inside it too). This Manager always sends all of
@@ -144,9 +146,21 @@ end; control, format, private-use and non-ASCII characters are refused (the
 Manager drops them, turns letters with accents into plain ones and runs of
 spaces into one, and trims, before it checks). So a character is one byte as
 JSON, and the worst case of every field at its limit (the common fields at
-theirs) is 3,812 bytes: under the 4 KB. The list and length limits below are
-lower than first planned for that reason (`HEARTBEAT_LIMITS` in the protocol
-module).
+theirs, and eight nodes at theirs) is 8,062 bytes: under the 8 KB (without
+`nodes`, 3,852). The list and length limits below are lower than first
+planned for that reason, a node's shorter than this server's own
+(`HEARTBEAT_LIMITS` in the protocol module).
+
+**One name for a GPU.** `convert.device` is always exactly one of the strings
+in `gpus` (the GPU the encode opened: its render node, `/dev/dri/renderD*`,
+for VA-API, or QSV and AMF on a chosen GPU; its NVIDIA index, `-gpu N`, for
+NVENC; without either, the one ffmpeg takes by default for that API:
+renderD128, the first NVIDIA, Intel or AMD GPU, or the only GPU there is), or
+exactly the `cpu` for a CPU encoder (`encodeGpuName` in `server/gpu.js`,
+named the way `usableGpus` names `gpus`). Only when no GPU of `gpus` matches
+is it a generic `'NVIDIA GPU'`, `'Intel GPU'`, `'AMD GPU'` or `'GPU'`. Each
+node's `convert.device` is one of that node's `gpus` or its `cpu` the same
+way (the node names its own devices).
 
 | Field | Type and range | What it is |
 |---|---|---|
@@ -175,16 +189,20 @@ module).
 | `cars[].model` | text, 1 to 16, or null | `'Model 3'`, `'Model Y'`, `'Model S'`, `'Model X'` or `'Cybertruck'` (the Manager sends nothing else): the vehicle's *Car model* setting, else what its CAN data's VIN says; null when neither is known |
 | `cars[].firmware` | text, 1 to 24, or null | The Tesla software version (e.g. `'2025.14.3.1'`, maybe with its build hash). No source of it yet (the CAN data, Sentry USB and the clips' metadata carry none this Manager reads), so null for now; the Manager sends only a version of that shape |
 | `clips24h` | *optional*; exactly `{ sentry, dashcam }`, each an integer, 0 to 1,000,000 | Clips (one per camera file) that reached the footage in the last 24 hours, from the inventory: `sentry` in SentryClips, `dashcam` everything else (RecentClips, SavedClips, ...). When a clip arrived is its birth time on the share, else its ctime, as the Sentry USB checksum record reads it |
-| `convert` | *optional*; exactly `{ fps, encoder, device, api, codec }` | How this server's own conversions ran (a node's clips are left out). The Manager always sends it: all five null when nothing has converted yet |
+| `convert` | *optional*; exactly `{ fps, encoder, device, api, codec }` | How this server's own conversions ran (a node's clips are counted in `nodes`, not here). The Manager always sends it: all five null when nothing has converted yet |
 | `convert.fps` | number, 0 to 100,000, in steps of 0.1, or null | The average speed of the last 24 hours of converting (frames a second of all the clips encoding at once, sampled every 30 s); after a day without converting, the last average |
 | `convert.encoder` | text, 1 to 40, or null | The ffmpeg encoder of the latest conversion, e.g. `'hevc_nvenc'`, `'libx265'` |
-| `convert.device` | text, 1 to 80, or null | The GPU it ran on (as the Encoder's Hardware panel names it), or the CPU's model name for a CPU encoder; null when the GPU had no name |
+| `convert.device` | text, 1 to 120, or null | The GPU it ran on, exactly as that GPU is named in `gpus`, or exactly the `cpu` for a CPU encoder (see *One name for a GPU* above; a generic name only when no GPU matches); null when nothing has converted yet, or the CPU has no name |
 | `convert.api` | text, 1 to 12, or null | `'nvenc'`, `'vaapi'`, `'qsv'`, `'amf'`, `'videotoolbox'` or `'cpu'` |
 | `convert.codec` | text, 1 to 10, or null | `'h265'` or `'av1'` (`'h264'` if ever) |
 | `crashes24h` | *optional*; integer, 0 to 10,000 | Crashes and unhandled errors the app noted in the last 24 hours (its crash notes keep the latest 20) |
 | `host` | *optional*; exactly `{ os, docker }` | The kind of host the Manager runs on (`server/hostInfo.js`, worked out once at start). Only the word: never the kernel string, the host name or a version |
 | `host.os` | `'truenas'` \| `'unraid'` \| `'synology'` \| `'qnap'` \| `'wsl'` \| `'macos'` \| `'raspberry-pi'` \| `'ubuntu'` \| `'debian'` \| `'fedora'` \| `'linux'`, or null (`HEARTBEAT_HOST_OS`; any other value is `SCHEMA`) | In a container, from the host's kernel string (`os.release()`, else `/proc/version`): `truenas` (`-production+truenas`), `unraid` (`-Unraid`), `wsl` (`microsoft-standard-WSL2`: Docker Desktop on Windows, WSL2), `linuxkit` is Docker Desktop's own VM and a guess: `macos` on arm64 (Apple Silicon), else `wsl` (Windows with the Hyper-V backend; an Intel Mac reads as `wsl` too), `raspberry-pi` (a Raspberry Pi device-tree model, or `rpi`/`raspi` in the kernel), `synology` (`synology` in the kernel or `/proc/version`, or DSM's `/proc/sys/kernel/syno_hw_version`), `qnap`, else `linux`. Outside a container, the same kernel and device-tree signs first (TrueNAS SCALE and Raspberry Pi OS call themselves Debian), then `/etc/os-release` `ID`, else the first known `ID_LIKE` (`raspbian` is `raspberry-pi`; Linux Mint is `ubuntu`, Rocky is `fedora`), else `linux`; `macos` on macOS; null on any other platform |
 | `host.docker` | boolean | Runs in a container: `/.dockerenv` exists, or `/proc/1/cgroup` or `/proc/self/mountinfo` names docker, containerd, kubepods or libpod |
+| `nodes` | *optional*; a list of at most 8 objects, exactly `{ cpu, gpus, convert }` | One per paired encoding node (Nodes), in the order they were paired; `[]` with none. Only its hardware and its conversions: never its name, host name, address, id or certificate. Each node reports its hardware itself (`hardware` in its `/node/v1/info`); a node of an older version, or one not heard from since this server started, is `{ cpu: null, gpus: [], convert: ... }` |
+| `nodes[].cpu` | text, 1 to 60, or null | The node's CPU model, as its own heartbeat's `cpu` (cut to 60) |
+| `nodes[].gpus` | a list of at most 4 texts, each 1 to 60 | The node's GPUs, as its own heartbeat's `gpus` (cut to 60) |
+| `nodes[].convert` | exactly `{ fps, encoder, device, api, codec }` | How this server's clips ran on that node, as `convert` above: `fps` the average of the last 24 hours of the clips it encoded at once (its speed as this server saw it), `encoder`, `api` and `codec` of the latest, `device` (text, 1 to 60, or null) one of that node's `gpus` or its `cpu`; all five null when it has converted nothing for this server |
 
 ```json
 { "kind": "heartbeat", "sentAt": "2026-11-11T21:04:07.112Z", "install": "ANON", "anonymous": true,
@@ -197,7 +215,13 @@ module).
     "gpus": ["NVIDIA GeForce RTX 4070"], "cars": [{ "model": "Model Y", "firmware": null }, { "model": null, "firmware": null }],
     "clips24h": { "sentry": 40, "dashcam": 1200 },
     "convert": { "fps": 412.3, "encoder": "hevc_nvenc", "device": "NVIDIA GeForce RTX 4070", "api": "nvenc", "codec": "h265" },
-    "crashes24h": 0, "host": { "os": "truenas", "docker": true } } }
+    "crashes24h": 0, "host": { "os": "truenas", "docker": true },
+    "nodes": [
+      { "cpu": "Intel(R) Core(TM) i5-12400", "gpus": ["Intel Arc A380"],
+        "convert": { "fps": 180.5, "encoder": "hevc_qsv", "device": "Intel Arc A380", "api": "qsv", "codec": "h265" } },
+      { "cpu": "AMD Ryzen 5 3600 6-Core Processor", "gpus": [],
+        "convert": { "fps": 35.5, "encoder": "libx265", "device": "AMD Ryzen 5 3600 6-Core Processor", "api": "cpu", "codec": "h265" } }
+    ] } }
 ```
 
 Nothing in a heartbeat names anything (no names, paths, hosts, places or
@@ -205,7 +229,8 @@ VINs): numbers, yes/no, fixed words, and the models of the hardware and the
 cars, which are not personal and stay in an anonymous one too. Its text goes
 through the scrubber all the same, as an anonymous report's does, whether it
 is anonymous or not (a host, path, address or vehicle name that turned up in a
-CPU or GPU name would become `ANON`), and a car's model is only ever one of the
+CPU or GPU name would become `ANON`; the paired nodes' names and addresses are
+among what it looks for), and a car's model is only ever one of the
 names above. So it is the same anonymous or not, except `install`. *Show a heartbeat* in
 Settings → Help & feedback shows the one it would send now.
 

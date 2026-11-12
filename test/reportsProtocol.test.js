@@ -172,7 +172,7 @@ test('config: the built-in endpoint, keys from one line, https only', () => {
   assert.throws(() => P.normalizeKey({ kid: '0'.repeat(16), publicKey: a }), /does not match/);
 });
 
-test('heartbeat schema: exactly its fields, strict types and ranges, no diagnostics, under 4 KB', () => {
+test('heartbeat schema: exactly its fields, strict types and ranges, no diagnostics, under 8 KB', () => {
   const hb = (h = {}, extra = {}) => ({
     kind: 'heartbeat', sentAt: new Date().toISOString(), install: 'b'.repeat(32), anonymous: false, build: { build: 130, sha: '1345348', builtAt: null, tag: 'latest' }, ui: 'horizon',
     heartbeat: {
@@ -222,8 +222,13 @@ test('heartbeat schema: exactly its fields, strict types and ranges, no diagnost
   bad({ health: { overall: 'ok', warnings: -1, problems: 0 } }, {}, /health\.warnings/);
   bad({ features: { can: 'yes', sentryUsbPaired: false, gpu: false } }, {}, /features\.can/);
   bad({ features: { can: true, gpu: false } }, {}, /features\.sentryUsbPaired/);
-  // oversize: strings past their limits, and the whole payload past 4 KB
+  // oversize: strings past their limits, and the whole payload past 8 KB
   bad({}, { ui: 'x'.repeat(81) }, /^ui$/);
   bad({}, { build: { build: 1, sha: null, builtAt: null, tag: 'x'.repeat(121) } }, /build\.tag/);
-  assert.equal(P.HEARTBEAT_MAX_BYTES, 4096);
+  assert.equal(P.HEARTBEAT_MAX_BYTES, 8192);
+  bad({ hostname: 'x'.repeat(8192) }, {}, /larger than 8192 bytes/);
+  // a heartbeat with nodes, and one without (an older Manager's), both right
+  assert.deepEqual(P.validatePayload(hb({ nodes: [{ cpu: 'AMD Ryzen 5 3600 6-Core Processor', gpus: ['NVIDIA GeForce RTX 3060'], convert: { fps: 410.2, encoder: 'hevc_nvenc', device: 'NVIDIA GeForce RTX 3060', api: 'nvenc', codec: 'h265' } }] })), []);
+  assert.deepEqual(P.validatePayload(hb()), []);
+  bad({ nodes: [{ cpu: null, gpus: [], convert: null, name: 'Garage PC' }] }, {}, /unknown field heartbeat\.nodes\[0\]\.name/);
 });

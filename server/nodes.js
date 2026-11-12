@@ -262,6 +262,23 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
     }
     return list.length ? list : null;
   }
+  // A node's hardware as it names it (`hardware` in /node/v1/info; null: a
+  // node of an older version): its CPU model, its GPUs as its own heartbeat
+  // names them, and the name of each of its devices (one of those, or the
+  // CPU's), for this server's heartbeat (`nodes`). Text for the heartbeat only.
+  function parseHardware(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const devices = [];
+    for (const d of Array.isArray(value.devices) ? value.devices.slice(0, MAX_NODE_DEVICES) : []) {
+      if (!d || typeof d.id !== 'string' || !LOCAL_DEVICE_ID.test(d.id) || devices.some((x) => x.id === d.id)) continue;
+      devices.push({ id: d.id, name: peerText(d.name, 160) || null });
+    }
+    return {
+      cpu: peerText(value.cpu, 160) || null,
+      gpus: (Array.isArray(value.gpus) ? value.gpus.slice(0, MAX_NODE_DEVICES) : []).map((g) => peerText(g, 160)).filter(Boolean),
+      devices
+    };
+  }
   // the device a whole-node lane, a plain number and the benchmark use: its
   // first GPU, else its CPU
   const defaultDeviceOf = (devices) => (devices || []).find((d) => d.id !== 'cpu')?.id || (devices?.length ? 'cpu' : null);
@@ -283,7 +300,7 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
         slots: Number.isSafeInteger(r.json.slots) ? Math.min(Math.max(r.json.slots, 1), MAX_SLOTS) : null,
         busy: Number.isSafeInteger(r.json.busy) ? r.json.busy : null,
         encoding: Number.isSafeInteger(r.json.encoding) ? r.json.encoding : null,
-        devices
+        devices, hardware: parseHardware(r.json.hardware)
       });
       notePower(node.id, r.json);
       // remembered with the node when they change, for when it does not answer
@@ -298,7 +315,7 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
     } catch (err) {
       // offline: its devices as last known, so their lanes stay
       const known = before?.devices || (Array.isArray(byId(node.id)?.devices) ? byId(node.id).devices.map((d) => ({ ...d, encoders: { h265: null, av1: null }, slots: null })) : null);
-      info.set(node.id, { at: Date.now(), online: false, error: err.message, encoders: {}, slots: null, busy: null, devices: known });
+      info.set(node.id, { at: Date.now(), online: false, error: err.message, encoders: {}, slots: null, busy: null, devices: known, hardware: before?.hardware || null });
     }
     return info.get(node.id);
   }
@@ -355,6 +372,19 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
       const p = powers.get(node.id);
       const online = i?.online === true;
       return { id: node.id, name: node.name, online, power: online && p && t - p.at <= POWER_STALE_MS ? p.power : null };
+    });
+  }
+
+  /**
+   * Each paired node's hardware as it last named it, for the heartbeat:
+   * [{ id, hardware: { cpu, gpus, devices: [{ id, name }] } | null }] (null:
+   * not known yet, or a node of an older version). Never waits: a node not
+   * asked for 30 s is asked now, for the next call.
+   */
+  function hardware() {
+    return stored().map((node) => {
+      fresh(node);
+      return { id: node.id, hardware: info.get(node.id)?.hardware || null };
     });
   }
 
@@ -695,7 +725,7 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
     return info.get(node.id);
   }
 
-  return { list, overview, power, add, rename, setCars, forgetCar, setTrusted, trusted, carLists, remove, encode, setSlots, has: (id) => Boolean(byId(id)), refresh: (id) => (byId(id) ? refresh(byId(id)) : null) };
+  return { list, overview, power, hardware, add, rename, setCars, forgetCar, setTrusted, trusted, carLists, remove, encode, setSlots, has: (id) => Boolean(byId(id)), refresh: (id) => (byId(id) ? refresh(byId(id)) : null) };
 }
 
 module.exports = { createNodes, parseAddress, connectPinned, pinMatches, takeUploadSlot };

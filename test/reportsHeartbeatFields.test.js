@@ -4,7 +4,7 @@
 // HEARTBEAT_OPTIONAL, docs/reports-api.md "The heartbeat"): a heartbeat
 // without them is still right (older Managers); each one, when there, is
 // checked strictly (exact keys at every level, types, limits, plain text);
-// the worst case of every field at its limit fits in 4096 bytes; the Manager
+// the worst case of every field at its limit fits in 8192 bytes; the Manager
 // fills them in (normalizeHeartbeat, buildPayload: crashes from its own
 // notes, text through the scrubber), anonymous ones included, with no
 // identifiers; and convertStats.js gives the convert block.
@@ -30,8 +30,13 @@ const NEW = {
   footageSeconds: 912345, platform: 'linux', arch: 'x64', cpu: 'AMD Ryzen 7 5800X 8-Core Processor', gpus: ['NVIDIA GeForce RTX 4070', 'AMD Radeon Graphics (renoir)'],
   cars: [{ model: 'Model Y', firmware: '2025.14.3.1' }, { model: null, firmware: null }], clips24h: { sentry: 40, dashcam: 1200 },
   convert: { fps: 412.3, encoder: 'hevc_nvenc', device: 'NVIDIA GeForce RTX 4070', api: 'nvenc', codec: 'h265' }, crashes24h: 2,
-  host: { os: 'truenas', docker: true }
+  host: { os: 'truenas', docker: true },
+  nodes: [
+    { cpu: 'Intel(R) Core(TM) i5-12400', gpus: ['Intel Arc A380'], convert: { fps: 180.5, encoder: 'hevc_qsv', device: 'Intel Arc A380', api: 'qsv', codec: 'h265' } },
+    { cpu: 'AMD Ryzen 5 3600 6-Core Processor', gpus: [], convert: { fps: null, encoder: null, device: null, api: null, codec: null } }
+  ]
 };
+const NODE = NEW.nodes[0];
 const payload = (heartbeat) => ({
   kind: 'heartbeat', sentAt: '2026-11-11T21:04:07.112Z', install: 'ANON', anonymous: true,
   build: { build: 131, sha: '9b50039', builtAt: '2026-11-11T20:09:31Z', tag: 'latest' }, ui: 'horizon', heartbeat
@@ -47,7 +52,9 @@ test('one with every new field is right; any subset of them is right too', () =>
   assert.deepEqual(errsOf({ ...clone(OLD), ...clone(NEW) }), []);
   for (const k of Object.keys(NEW)) assert.deepEqual(errsOf({ ...clone(OLD), [k]: clone(NEW[k]) }), [], k);
   // the nullable ones as null, and empty lists
-  assert.deepEqual(errsOf({ ...clone(OLD), cpu: null, gpus: [], cars: [], convert: { fps: null, encoder: null, device: null, api: null, codec: null }, host: { os: null, docker: false } }), []);
+  assert.deepEqual(errsOf({ ...clone(OLD), cpu: null, gpus: [], cars: [], convert: { fps: null, encoder: null, device: null, api: null, codec: null }, host: { os: null, docker: false }, nodes: [] }), []);
+  assert.deepEqual(errsOf({ ...clone(OLD), nodes: [{ cpu: null, gpus: [], convert: { fps: null, encoder: null, device: null, api: null, codec: null } }] }), [], 'a node not known yet');
+  assert.deepEqual(errsOf({ ...clone(OLD), nodes: Array(L.nodes).fill(NODE) }), [], `${L.nodes} nodes`);
   // every host word is right, in a container or not
   for (const os of P.HEARTBEAT_HOST_OS) for (const docker of [true, false]) assert.deepEqual(errsOf({ ...clone(OLD), host: { os, docker } }), [], os);
   assert.deepEqual(P.HEARTBEAT_HOST_OS, ['truenas', 'unraid', 'synology', 'qnap', 'wsl', 'macos', 'raspberry-pi', 'ubuntu', 'debian', 'fedora', 'linux']);
@@ -72,6 +79,12 @@ const BAD = {
   host: {
     type: [[], 'truenas', null, true, { os: 1, docker: true }, { os: ['wsl'], docker: false }, { os: 'wsl', docker: 'true' }, { os: 'wsl', docker: null }, { os: 'wsl', docker: 1 }],
     range: [{ os: 'windows', docker: false }, { os: 'TrueNAS', docker: true }, { os: '', docker: false }, { os: '6.6.44-production+truenas', docker: true }, { os: 'linux ', docker: false }]
+  },
+  nodes: {
+    type: [{}, 'Garage PC', null, true, [null], ['Garage PC'], [[]], [{ ...NODE, cpu: 5 }], [{ ...NODE, gpus: 'Intel Arc A380' }], [{ ...NODE, gpus: [1] }], [{ ...NODE, gpus: [null] }],
+      [{ ...NODE, convert: null }], [{ ...NODE, convert: 'qsv' }], [{ ...NODE, convert: { ...NODE.convert, fps: '180' } }], [{ ...NODE, convert: { ...NODE.convert, device: 1 } }]],
+    range: [Array(L.nodes + 1).fill(NODE), [{ ...NODE, cpu: '' }], [{ ...NODE, cpu: s(L.nodeCpu + 1) }], [{ ...NODE, gpus: Array(L.nodeGpus + 1).fill('GPU') }], [{ ...NODE, gpus: [s(L.nodeGpu + 1)] }], [{ ...NODE, gpus: [''] }],
+      [{ ...NODE, convert: { ...NODE.convert, device: s(L.nodeDevice + 1) } }], [{ ...NODE, convert: { ...NODE.convert, encoder: s(L.encoder + 1) } }], [{ ...NODE, convert: { ...NODE.convert, fps: -1 } }], [{ ...NODE, convert: { ...NODE.convert, fps: 1.23 } }]]
   }
 };
 
@@ -99,6 +112,15 @@ test('extra keys are refused at every level', () => {
   assert.match(errsOf({ ...clone(OLD), ...clone(NEW), host: { os: 'wsl', docker: true, hostname: 'tower' } }).join(), /unknown field heartbeat\.host\.hostname/);
   assert.match(errsOf({ ...clone(OLD), ...clone(NEW), host: { os: 'wsl' } }).join(), /heartbeat\.host\.docker missing/);
   assert.match(errsOf({ ...clone(OLD), ...clone(NEW), host: { docker: true } }).join(), /heartbeat\.host\.os missing/);
+  // a node: its hardware and numbers only, never its name, address or id
+  for (const k of ['name', 'id', 'host', 'address', 'hostname']) {
+    assert.match(errsOf({ ...clone(OLD), nodes: [{ ...NODE, [k]: 'Garage PC' }] }).join(), new RegExp(`unknown field heartbeat\\.nodes\\[0\\]\\.${k}`), k);
+  }
+  assert.match(errsOf({ ...clone(OLD), nodes: [{ ...NODE, convert: { ...NODE.convert, node: 'Garage PC' } }] }).join(), /unknown field heartbeat\.nodes\[0\]\.convert\.node/);
+  const { gpus: _g, ...noGpus } = NODE;
+  assert.match(errsOf({ ...clone(OLD), nodes: [noGpus] }).join(), /heartbeat\.nodes\[0\]\.gpus missing/);
+  const { fps: _f, ...noFps } = NODE.convert;
+  assert.match(errsOf({ ...clone(OLD), nodes: [{ ...NODE, convert: noFps }] }).join(), /heartbeat\.nodes\[0\]\.convert\.fps missing/);
   const { codec: _c, ...noCodec } = NEW.convert;
   assert.match(errsOf({ ...clone(OLD), ...clone(NEW), convert: noCodec }).join(), /heartbeat\.convert\.codec missing/);
 });
@@ -106,7 +128,8 @@ test('extra keys are refused at every level', () => {
 test('text: control, format and non-ASCII characters, quotes, backslashes and untrimmed text are refused', () => {
   const bad = ['line\nbreak', 'tab\there', 'nul\u0000', 'del\u007f', 'c1\u0085', 'zero​width', 'bidi‮override', 'line sep', 'Radeon™', 'café', 'quote"d', 'back\\slash', ' lead', 'trail ', '\ud800'];
   for (const t of bad) {
-    for (const h of [{ cpu: t }, { platform: t }, { arch: t }, { gpus: [t] }, { cars: [{ model: t, firmware: null }] }, { cars: [{ model: null, firmware: t }] }, { convert: { ...NEW.convert, device: t } }, { convert: { ...NEW.convert, encoder: t } }]) {
+    for (const h of [{ cpu: t }, { platform: t }, { arch: t }, { gpus: [t] }, { cars: [{ model: t, firmware: null }] }, { cars: [{ model: null, firmware: t }] }, { convert: { ...NEW.convert, device: t } }, { convert: { ...NEW.convert, encoder: t } },
+      { nodes: [{ ...NODE, cpu: t }] }, { nodes: [{ ...NODE, gpus: [t] }] }, { nodes: [{ ...NODE, convert: { ...NODE.convert, device: t } }] }, { nodes: [{ ...NODE, convert: { ...NODE.convert, api: t } }] }]) {
       assert.ok(errsOf({ ...clone(OLD), ...h }).length > 0, `${JSON.stringify(h)} should be refused`);
     }
   }
@@ -119,7 +142,7 @@ test('text: control, format and non-ASCII characters, quotes, backslashes and un
   assert.equal(plainText(s(200), 120).length, 120);
 });
 
-test('the worst case of every field at its limit (the common fields at theirs too) fits in 4096 bytes', () => {
+test('the worst case of every field at its limit (the common fields at theirs too, eight nodes at theirs) fits in 8192 bytes', () => {
   const big = Number.MAX_SAFE_INTEGER;
   // a control character is 6 bytes as JSON: the common text fields' worst case
   const esc = (n) => '\u0001'.repeat(n);
@@ -134,16 +157,25 @@ test('the worst case of every field at its limit (the common fields at theirs to
       cars: Array(L.cars).fill({ model: s(L.model), firmware: s(L.firmware) }), clips24h: { sentry: 1e6, dashcam: 1e6 },
       convert: { fps: 99999.9, encoder: s(L.encoder), device: s(L.device), api: s(L.api), codec: s(L.codec) }, crashes24h: 10_000,
       // the longest host word
-      host: { os: [...P.HEARTBEAT_HOST_OS].sort((a, b) => b.length - a.length)[0], docker: false }
+      host: { os: [...P.HEARTBEAT_HOST_OS].sort((a, b) => b.length - a.length)[0], docker: false },
+      nodes: Array(L.nodes).fill({
+        cpu: s(L.nodeCpu), gpus: Array(L.nodeGpus).fill(s(L.nodeGpu)),
+        convert: { fps: 99999.9, encoder: s(L.encoder), device: s(L.nodeDevice), api: s(L.api), codec: s(L.codec) }
+      })
     }
   };
   assert.equal(p.sentAt.length, P.LIMITS.sentAt);
   assert.deepEqual(P.validatePayload(p), []);
   const size = Buffer.byteLength(JSON.stringify(p));
   assert.ok(size <= P.HEARTBEAT_MAX_BYTES, `${size} bytes`);
-  assert.equal(size, 3812, 'the worst case docs/reports-api.md gives');
+  assert.equal(size, 8062, 'the worst case docs/reports-api.md gives');
+  assert.equal(P.HEARTBEAT_MAX_BYTES, 8192);
   // one more of anything that can grow is refused, not sent larger
   assert.ok(P.validatePayload({ ...p, heartbeat: { ...p.heartbeat, cars: [...p.heartbeat.cars, { model: null, firmware: null }] } }).length > 0);
+  assert.ok(P.validatePayload({ ...p, heartbeat: { ...p.heartbeat, nodes: [...p.heartbeat.nodes, p.heartbeat.nodes[0]] } }).length > 0);
+  assert.ok(P.validatePayload({ ...p, heartbeat: { ...p.heartbeat, nodes: [{ ...p.heartbeat.nodes[0], gpus: [...p.heartbeat.nodes[0].gpus, 'GPU'] }] } }).length > 0);
+  // and a convert.device holds any cpu or GPU name in full (it is one of them)
+  assert.ok(L.device >= L.cpu && L.device >= L.gpu && L.nodeDevice >= L.nodeCpu && L.nodeDevice >= L.nodeGpu);
 });
 
 test('normalizeHeartbeat fills in every optional field, plain and within the limits, and nothing else', () => {
