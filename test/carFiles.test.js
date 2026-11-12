@@ -196,6 +196,18 @@ test('in the list but the Pi has not archived since: waiting, not missed', () =>
   }
 });
 
+test('in the list, not on the share and too new to judge: on its way, so the counts add up', () => {
+  // the car wrote 10:00-10:30 on the 10th (under three hours before NOW); the share has 10:00-10:10
+  const files = drive(new Map(), at(10, 10), at(10, 10, 10));
+  const lines = carLines(at(10, 10), at(10, 10, 30));
+  const res = analyze({ files, nowMs: NOW, canDriving: null, carFiles: listOf(lines, { archivedUnix: U(at(10, 11)) }) });
+  const day = res.carFiles.days['2026-11-10'];
+  assert.equal(day.car.recentFiles - day.share.recentFiles, 80, 'the car wrote 20 more minutes than the share has');
+  assert.equal(day.waiting, 20, 'those minutes are on their way, not silently left out');
+  assert.equal(day.piMissed, 0);
+  assert.equal(res.days['2026-11-10'], undefined, 'nothing missing yet');
+});
+
 test('car didn\'t record: CAN driving, the list covers the time and has nothing; not missing from the share', () => {
   const files = drive(new Map(), at(9, 17), at(9, 17, 30));
   drive(files, at(9, 20), at(9, 20, 5));

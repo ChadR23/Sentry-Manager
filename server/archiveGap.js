@@ -666,10 +666,12 @@ function carFilesPass({ carFiles, binned, deleted, clips, days, dayOf, firstDayS
     if (!k || onShare.has(k)) continue;
     const s = stampSec(e.name);
     if (gone.has(k)) { const cf = cfOf(dayOfSec(s)); cf.deleted.add(floor(s)); cf.deletedClips++; continue; }
-    if (now - s < GRACE_S) continue;
-    if (piHolds(s)) { holdPi(s); continue; }
     const m = floor(s);
     const cf = cfOf(dayOfSec(s));
+    // too new to judge: still on its way, not skipped. (Skipping it left the car's
+    // count above the share's while the day said "Every clip the car wrote is here".)
+    if (now - s < GRACE_S) { cf.waiting.add(m); continue; }
+    if (piHolds(s)) { holdPi(s); continue; }
     if (archived === null || archived < e.lastSeenUnix + CF_ARCHIVE_MARGIN_S) { cf.waiting.add(m); continue; }
     cf.piClips++;
     cf.pi.add(m);
