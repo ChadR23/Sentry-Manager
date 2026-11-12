@@ -1,5 +1,5 @@
 import { clearFootageSelections } from './pages/footage.js';
-import { api, esc, sheet, act, toast } from './core.js';
+import { api, esc, sheet, act, toast, scope } from './core.js';
 import { icon } from './icons.js';
 import { showStudio, hideStudio } from './studio.js';
 import { notifications } from './pages/notifications.js';
@@ -40,7 +40,7 @@ document.getElementById('more').onclick = (e) => {
     if (ev.target.closest('a')) close();
   };
 };
-document.getElementById('bell').onclick = act((e) => notifications(e.currentTarget));
+document.getElementById('bell').onclick = act((e) => notifications(e.currentTarget, current));
 export function applyGlass() {
   document.documentElement.classList.toggle('no-glass', state.glass === 0);
   document.documentElement.style.setProperty('--lg-glass', String(state.glass / 50));
@@ -49,10 +49,12 @@ export function applyGlass() {
 applyGlass();
 const page = document.getElementById('page');
 let cleanup = () => {},
-  seq = 0;
+  seq = 0,
+  renderScope;
 export const pages = {};
 export async function render(vehicleChanged = false) {
   const ticket = ++seq;
+  renderScope?.abort();
   cleanup?.();
   cleanup = () => {};
   hideStudio();
@@ -73,7 +75,8 @@ export async function render(vehicleChanged = false) {
     const notes = route === 'notifications';
     history.replaceState(null, '', '#/' + aliases[route]);
     route = aliases[route];
-    if (notes) notifications(document.getElementById('bell')).catch((e) => toast(e.message, true));
+    if (notes)
+      notifications(document.getElementById('bell'), current).catch((e) => toast(e.message, true));
   }
   const [name, sub] = route.split('/'),
     q = new URLSearchParams((sub || name).split('?')[1] || ''),
@@ -86,6 +89,14 @@ export async function render(vehicleChanged = false) {
     else a.removeAttribute('aria-current');
   });
   page.innerHTML = '';
+  document.body.classList.remove('selecting');
+  const header = document.getElementById('page-actions');
+  header.replaceChildren();
+  header.onclick = null;
+  const mount = document.createElement('div');
+  page.append(mount);
+  const owner = scope(() => [current()?.id], { alive: () => ticket === seq });
+  renderScope = owner;
   try {
     if (['viewer', 'encoder'].includes(key)) {
       showStudio(
@@ -94,12 +105,13 @@ export async function render(vehicleChanged = false) {
         Object.fromEntries([...q].map(([k, v]) => [k === 'day' ? 'date' : k, v])),
         vehicleChanged === true,
       );
+      if ([...q].length) history.replaceState(null, '', '#/' + key);
       return;
     }
     if (key === 'sentryusb') {
       const m = await import('/web/sentryUsbLink.js');
       if (ticket !== seq) return;
-      const p = m.createSentryUsbPage(page, { h24: () => state.h24 });
+      const p = m.createSentryUsbPage(mount, { h24: () => state.h24 });
       cleanup = () => p?.destroy?.();
       return;
     }
@@ -109,7 +121,8 @@ export async function render(vehicleChanged = false) {
     if (ticket !== seq) return;
     pages[key] = m.render;
     const teardown =
-      (await m.render(page, {
+      (await m.render(mount, {
+        scope: owner,
         state,
         current,
         render,

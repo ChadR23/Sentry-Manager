@@ -1,4 +1,5 @@
-import { api, esc, toast, act, confirmDialog, confirmPassword } from '../core.js';
+import { ownedRender } from '../core.js';
+import { esc, act } from '../core.js';
 import { icon } from '../icons.js';
 import { size, ago, plural } from '../format.js';
 import { forms } from './settings/forms.js';
@@ -32,7 +33,8 @@ const groups = [
   ],
   ['Support', [['help', 'Help & feedback', 'help']]],
 ];
-export async function render(el, ctx) {
+async function renderPage(el, ctx) {
+  const { api, confirmDialog, confirmPassword, toast, fetch } = ctx.scope;
   const { state } = ctx;
   const me = await api('/api/auth/me');
   const admin = me.role === 'admin';
@@ -141,18 +143,27 @@ export async function render(el, ctx) {
     } else if (key === 'account') {
       box.innerHTML =
         '<div class="card"><div class="row"><h2 class="grow">Account</h2><button data-signout>Sign out</button></div><form id="pw" class="form"><label class="field">Current password<input type="password" name="current" autocomplete="current-password" required></label><label class="field">New password<input type="password" name="next" autocomplete="new-password" minlength="8" required></label><div class="full"><button class="primary">Change password</button></div></form></div><div class="card" data-shared></div>';
-      shared = (await import('/web/account.js')).createAccountPage(
+      shared = (await ctx.scope.wait(import('/web/account.js'))).createAccountPage(
         box.querySelector('[data-shared]'),
+        {
+          scope: ctx.scope,
+        },
       );
       f.wireSettings(null);
       box.querySelector('[data-signout]').onclick = act(async () => {
         await api('/api/auth/logout', { method: 'POST' });
         location.href = '/login';
       });
-    } else if (key === 'cleanup') await (await import('./settings/cleanup.js')).render(box, ctx);
-    else if (key === 'helpers') await (await import('./settings/helpers.js')).render(box, ctx);
+    } else if (key === 'cleanup')
+      shared = {
+        destroy: await (await ctx.scope.wait(import('./settings/cleanup.js'))).render(box, ctx),
+      };
+    else if (key === 'helpers')
+      shared = {
+        destroy: await (await ctx.scope.wait(import('./settings/helpers.js'))).render(box, ctx),
+      };
     else if (key === 'updates') {
-      box.innerHTML = f.updatesCard(upd, await import('/web/buildLabel.js'));
+      box.innerHTML = f.updatesCard(upd, await ctx.scope.wait(import('/web/buildLabel.js')));
       f.wireSettings(null);
     } else if (key === 'security') {
       box.innerHTML = f.securityCard(sec);
@@ -184,9 +195,10 @@ export async function render(el, ctx) {
       }${(g.hints || []).map((h) => `<p>${esc(h)}</p>`).join('')}</dd></dl><a href="#/health/server">Server details →</a></div>`;
     } else if (key === 'places') {
       box.innerHTML = '<div class="card"><h2>Places</h2><div data-shared></div></div>';
-      shared = (await import('/web/placesSettings.js')).createPlacesSettings(
+      shared = (await ctx.scope.wait(import('/web/placesSettings.js'))).createPlacesSettings(
         box.querySelector('[data-shared]'),
         {
+          scope: ctx.scope,
           cls: {
             btn: 'btn',
             primary: 'btn primary',
@@ -200,9 +212,10 @@ export async function render(el, ctx) {
       );
     } else if (key === 'help') {
       box.innerHTML = '<div class="card"><h2>Help & feedback</h2><div data-shared></div></div>';
-      shared = (await import('/web/reportsSettings.js')).createReportsSettings(
+      shared = (await ctx.scope.wait(import('/web/reportsSettings.js'))).createReportsSettings(
         box.querySelector('[data-shared]'),
         {
+          scope: ctx.scope,
           cls: { btn: 'btn', primary: 'btn primary', input: 'input' },
           h24: () => state.h24,
         },
@@ -219,6 +232,7 @@ export async function render(el, ctx) {
         });
       if (ctx.alive()) {
         shared = window.SentryVehicleEncoding.mount(box.querySelector('[data-shared]'), {
+          scope: ctx.scope,
           classes: {
             card: 'card',
             btn: 'btn',
@@ -347,7 +361,7 @@ authorization: { credentials: '${esc(token)}' }</pre><p>For HTTPS, install the <
           await api('/api/ui-packs/' + encodeURIComponent(del.dataset.deletePack), {
             method: 'DELETE',
           });
-          ctx.render();
+          ctx.alive() && ctx.render();
         }
       });
       box.querySelector('[data-file]').onchange = act(async (e) => {
@@ -366,6 +380,7 @@ authorization: { credentials: '${esc(token)}' }</pre><p>For HTTPS, install the <
             body: file,
           }),
           d = await r.json();
+        ctx.scope.check();
         if (!r.ok) throw new Error(d.error || 'Upload failed');
         if (
           await confirmDialog({
@@ -375,12 +390,17 @@ authorization: { credentials: '${esc(token)}' }</pre><p>For HTTPS, install the <
           })
         )
           await use(d.pack.id);
-        else ctx.render();
+        else ctx.alive() && ctx.render();
       });
     } else box.innerHTML = '<div class="card">Choose a Settings page.</div>';
   } catch (e) {
+    if (!ctx.alive()) return;
     box.innerHTML = `<div class="card">${esc(e.status === 403 ? 'This page is not available to this account.' : e.message)} <a href="#/settings/account">Open Account</a></div>`;
   }
+  ctx.scope.signal.addEventListener('abort', () => shared?.destroy?.(), {
+    once: true,
+  });
+  if (!ctx.alive()) shared?.destroy?.();
   return () => {
     summariesStopped = true;
     shared?.destroy?.();
@@ -388,3 +408,5 @@ authorization: { credentials: '${esc(token)}' }</pre><p>For HTTPS, install the <
     box.onchange = null;
   };
 }
+
+export const render = ownedRender(renderPage);

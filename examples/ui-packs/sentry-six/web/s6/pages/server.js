@@ -1,6 +1,11 @@
-﻿import { api, esc, act, toast } from '../core.js';
+import { ownedRender } from '../core.js';
+import { esc, act } from '../core.js';
 import { serverBody, hostLine } from '../serverStats.js';
-export async function render(el, ctx) {
+async function renderPage(el, ctx) {
+  const { api, toast } = ctx.scope;
+  const admin = (await api('/api/auth/me')).role === 'admin';
+  const { createSavingsChart } = await ctx.scope.wait(import('/web/savingsChart.js'));
+  if (!ctx.alive()) return;
   let range = '15m',
     snap = null,
     hist = null,
@@ -10,12 +15,18 @@ export async function render(el, ctx) {
   const more = {},
     seen = new Map();
   el.innerHTML =
-    '<a class="back" href="#/health">‹ Health</a><h2>Server details</h2><p data-host></p><div class="toolbar"><div class="segments"><button data-range="15m" class="active">15 min</button><button data-range="24h">24 h</button></div><a data-csv download>Download CSV</a></div><div class="nd-grid" data-stats>Reading the server…</div>';
+    '<a class="back" href="#/health">‹ Health</a><h2>Server details</h2><p data-host></p><div class="toolbar"><div class="segments"><button data-range="15m" class="active">15 min</button><button data-range="24h">24 h</button></div><a data-csv download>Download CSV</a></div><section class="card savings"><h3>Space saved by converting</h3><div data-savings></div></section><div class="nd-grid" data-stats>Reading the server…</div>';
+  const savings = createSavingsChart(el.querySelector('[data-savings]'), {
+    vehicleId: ctx.current()?.id,
+  });
+  ctx.scope.signal.addEventListener('abort', () => savings.destroy(), {
+    once: true,
+  });
   function draw() {
     if (stopped || !ctx.alive()) return;
     el.querySelector('[data-host]').innerHTML = hostLine(snap?.host);
     el.querySelector('[data-stats]').innerHTML = snap
-      ? serverBody(snap, { range, hist, more, seen })
+      ? serverBody(snap, { admin, range, hist, more, seen })
       : 'Waiting for a sample…';
     el.querySelector('[data-csv]').href = '/api/stats/export.csv?range=' + range;
     el.querySelectorAll('[data-range]').forEach((b) =>
@@ -67,3 +78,5 @@ export async function render(el, ctx) {
     document.removeEventListener('visibilitychange', visible);
   };
 }
+
+export const render = ownedRender(renderPage);

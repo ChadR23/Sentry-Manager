@@ -1,6 +1,8 @@
-import { api, esc, toast, confirmDialog } from '../../core.js';
+import { ownedRender } from '../../core.js';
+import { esc } from '../../core.js';
 import { plural, size as bytes, ago as when } from '../../format.js';
-export async function render(page, ctx) {
+async function renderPage(page, ctx) {
+  const { api, confirmDialog, toast } = ctx.scope;
   const { current, render } = ctx,
     $ = (id) => page.querySelector('#' + id);
   const v = current();
@@ -44,7 +46,7 @@ export async function render(page, ctx) {
         body: read(),
       });
       toast('Policy saved.');
-      render();
+      if (ctx.alive()) render();
     } catch (err) {
       toast(err.message, true);
     }
@@ -67,9 +69,11 @@ export async function render(page, ctx) {
         return;
       const out = await api(`/api/vehicles/${v.id}/policy/run`, { body: {} });
       toast(`${plural(out.moved.length, 'recording')} moved to the Recycle Bin.`);
-      render();
+      if (ctx.alive()) render();
     } catch (err) {
       toast(err.message, true);
     }
   };
 }
+
+export const render = ownedRender(renderPage);

@@ -1,9 +1,16 @@
-﻿const test = require('node:test'),
+const test = require('node:test'),
   assert = require('node:assert/strict'),
   fs = require('fs'),
   path = require('path');
 const root = path.join(__dirname, '../examples/ui-packs/sentry-six');
-const read = (f) => fs.readFileSync(path.join(root, f), 'utf8');
+const read = (f) =>
+  process.env.S6_RACE_BASELINE
+    ? require('child_process').execFileSync(
+        'git',
+        ['show', process.env.S6_RACE_BASELINE + ':examples/ui-packs/sentry-six/' + f],
+        { encoding: 'utf8' },
+      )
+    : fs.readFileSync(path.join(root, f), 'utf8');
 const moduleUrl = (f) =>
   'data:text/javascript,' +
   encodeURIComponent(
@@ -110,7 +117,10 @@ test('overviewStatus: fresh install, share down, read-only, recent and older foo
   assert.equal(down.tone, 'bad');
   assert.match(down.sub, /Host is down/);
   assert.equal(
-    m.overviewStatus({ vehicle: { ...v, share: { healthy: true, writable: false } }, now }).first,
+    m.overviewStatus({
+      vehicle: { ...v, share: { healthy: true, writable: false } },
+      now,
+    }).first,
     'Your footage is readable, but the share is read-only.',
   );
   const recent = m.overviewStatus({
@@ -121,7 +131,10 @@ test('overviewStatus: fresh install, share down, read-only, recent and older foo
   assert.equal(recent.first, 'Your footage is safe and up to date.');
   assert.equal(recent.second, 'Space runs out in about 27 days.');
   assert.equal(recent.tone, 'warn');
-  const old = m.overviewStatus({ vehicle: { ...v, inventory: { lastDay: '2026-11-07' } }, now });
+  const old = m.overviewStatus({
+    vehicle: { ...v, inventory: { lastDay: '2026-11-07' } },
+    now,
+  });
   assert.equal(old.first, 'Your footage is safe. The newest is from Sat, Nov 7.');
   assert.equal(old.second, 'Nothing needs you right now.');
 });
@@ -133,7 +146,11 @@ test('attentionItems: missing footage is neutral; no disk-error alerts', async (
     const day = d.toISOString().slice(0, 10);
     if (day !== '2026-11-04') days.push({ day, recordings: 1 });
   }
-  const items = m.attentionItems({ days, now, notes: [{ kind: 'disk', title: 'Disk errors' }] });
+  const items = m.attentionItems({
+    days,
+    now,
+    notes: [{ kind: 'disk', title: 'Disk errors' }],
+  });
   assert.ok(items.some((i) => i.title === 'No footage on 1 recent day'));
   assert.ok(items.every((i) => i.kind !== 'disk'));
   assert.ok(items.find((i) => i.kind === 'missing').text.includes('If the car was driven then'));
@@ -204,7 +221,11 @@ test('healthSummary: folds passing checks per group, normalizes server bad statu
       group: 'Data folder',
       status: 'ok',
     })),
-    ...Array.from({ length: 3 }, (_, i) => ({ id: 'video' + i, group: 'Video', status: 'ok' })),
+    ...Array.from({ length: 3 }, (_, i) => ({
+      id: 'video' + i,
+      group: 'Video',
+      status: 'ok',
+    })),
     { id: 'https', group: 'Access', status: 'ok' },
     { id: 'share-tesla', group: 'Tesla', status: 'ok' },
     { id: 'write-tesla', group: 'Tesla', status: 'ok' },
@@ -262,7 +283,13 @@ test('sentry usb: theme sets its variables and button styling', () => {
 test('overview strip: category counts remain separate and measured', async () => {
   const { strip } = await mod('status');
   const cell = strip(
-    [{ day: '2026-11-12', recordings: 6, byCategory: { Recent: 3, Sentry: 2, Saved: 1 } }],
+    [
+      {
+        day: '2026-11-12',
+        recordings: 6,
+        byCategory: { Recent: 3, Sentry: 2, Saved: 1 },
+      },
+    ],
     new Date('2026-11-12T12:00:00'),
   ).at(-1);
   assert.equal(cell.sentry, 2);
@@ -371,6 +398,7 @@ function browserModule(file) {
 function element() {
   const children = new Map();
   return {
+    dataset: {},
     innerHTML: '',
     textContent: '',
     classList: { toggle() {}, remove() {} },
@@ -402,6 +430,17 @@ function element() {
 async function browserEnv(t, reply) {
   const saved = {};
   t.cleanupFns = [];
+  const intervals = new Set(),
+    originalInterval = globalThis.setInterval;
+  globalThis.setInterval = (...args) => {
+    const id = originalInterval(...args);
+    intervals.add(id);
+    return id;
+  };
+  t.after(() => {
+    intervals.forEach(clearInterval);
+    globalThis.setInterval = originalInterval;
+  });
   for (const key of [
     'window',
     'document',
@@ -463,7 +502,12 @@ test('footage: a linked range change drops hidden selections and select mode', a
   let stop = await m.render(el, ctx);
   const click = async (key) =>
     el.onclick({
-      target: { closest: () => ({ dataset: {}, hasAttribute: (a) => a === 'data-' + key }) },
+      target: {
+        closest: () => ({
+          dataset: {},
+          hasAttribute: (a) => a === 'data-' + key,
+        }),
+      },
     });
   await click('select');
   await click('all');
@@ -484,13 +528,23 @@ test('activity: job title and progress text render as text, never HTML', async (
   await browserEnv(t, (url) =>
     url.startsWith('/api/jobs')
       ? {
-          jobs: [{ title: attack, detail: `Rendering ${attack} of 3:00 (44%)`, status: 'running' }],
+          jobs: [
+            {
+              title: attack,
+              detail: `Rendering ${attack} of 3:00 (44%)`,
+              status: 'running',
+            },
+          ],
         }
       : {},
   );
   const m = await import(browserModule('pages/activity.js')),
     el = element();
-  const stop = await m.render(el, { current: () => null, state: {}, alive: () => true });
+  const stop = await m.render(el, {
+    current: () => null,
+    state: {},
+    alive: () => true,
+  });
   try {
     assert.doesNotMatch(el.innerHTML, /<img/);
     assert.match(el.innerHTML, /&lt;img/);
@@ -511,7 +565,9 @@ test('footage: recording Play uses the detail folder, day Play uses the date', a
   assert.deepEqual(await m.playParams('/api/vehicles/car', '2026-11-11', { id: 'event' }), {
     folder: '/root/SentryClips/2026-11-11_18-00-00',
   });
-  assert.deepEqual(await m.playParams('/api/vehicles/car', '2026-11-11'), { day: '2026-11-11' });
+  assert.deepEqual(await m.playParams('/api/vehicles/car', '2026-11-11'), {
+    day: '2026-11-11',
+  });
 });
 test('settings: viewer Account renders without requesting admin endpoints and signs out', async (t) => {
   const calls = [];
@@ -585,7 +641,14 @@ test('activity: numeric progressClips is a count; live devices name the GPU and 
       { id: 'a', progressClips: 12 },
       {
         jobId: 'a',
-        devices: [{ id: 'nvidia:0', name: 'RTX 4070', encoder: 'hevc_nvenc', hardware: true }],
+        devices: [
+          {
+            id: 'nvidia:0',
+            name: 'RTX 4070',
+            encoder: 'hevc_nvenc',
+            hardware: true,
+          },
+        ],
       },
     ),
     /RTX 4070.*hevc_nvenc/,
@@ -604,7 +667,11 @@ test('overview: one attention group, ordered singular categories and a complete 
     url.includes('/days?')
       ? {
           days: [
-            { day: '2026-11-11', byCategory: { Saved: 1, Sentry: 1, Recent: 1 }, recordings: 3 },
+            {
+              day: '2026-11-11',
+              byCategory: { Saved: 1, Sentry: 1, Recent: 1 },
+              recordings: 3,
+            },
           ],
         }
       : { checks: [], jobs: [] },
@@ -659,7 +726,12 @@ test('footage: changing vehicles clears every remembered selection', async (t) =
   let stop = await m.render(el, ctx);
   const click = (key) =>
     el.onclick({
-      target: { closest: () => ({ dataset: {}, hasAttribute: (a) => a === 'data-' + key }) },
+      target: {
+        closest: () => ({
+          dataset: {},
+          hasAttribute: (a) => a === 'data-' + key,
+        }),
+      },
     });
   await click('select');
   await click('all');
@@ -676,7 +748,13 @@ test('footage: changing vehicles clears every remembered selection', async (t) =
 test('attention: informational rows are grey and legacy count labels use real plurals', async () => {
   const m = await mod('status');
   const items = m.attentionItems({
-    notes: [{ level: 'info', title: '1 clip(s) checked', message: '2 recording(s) read' }],
+    notes: [
+      {
+        level: 'info',
+        title: '1 clip(s) checked',
+        message: '2 recording(s) read',
+      },
+    ],
   });
   assert.equal(items[0].tone, 'info');
   assert.equal(items[0].title, '1 clip checked');
@@ -1062,11 +1140,364 @@ test('r3 settings: a failed selected page keeps the Settings list and Account li
 });
 
 test('r3 permissions: viewer empty Footage and check results have no admin links', async (t) => {
-  await browserEnv(t, url => url === '/api/auth/me' ? { role: 'viewer' } : { more: 1, problems: [], checked: 1 });
+  await browserEnv(t, (url) =>
+    url === '/api/auth/me' ? { role: 'viewer' } : { more: 1, problems: [], checked: 1 },
+  );
   const el = element();
-  await (await import(browserModule('pages/footage.js'))).render(el, context('empty', { current: () => null }));
+  await (
+    await import(browserModule('pages/footage.js'))
+  ).render(el, context('empty', { current: () => null }));
   assert.doesNotMatch(el.innerHTML, /href="#\/settings\/vehicles"/);
-  const stop = await (await import(browserModule('pages/health.js'))).render(el, context('viewer-check', { sub: 'footage-check', state: { vehicles: [{id:'car',name:'Tesla'}] } }));
+  const stop = await (
+    await import(browserModule('pages/health.js'))
+  ).render(
+    el,
+    context('viewer-check', {
+      sub: 'footage-check',
+      state: { vehicles: [{ id: 'car', name: 'Tesla' }] },
+    }),
+  );
   t.cleanupFns.push(stop);
   assert.doesNotMatch(el.innerHTML, /support-bundle|data-check=/);
+});
+
+const deferred = () => {
+  let resolve;
+  const promise = new Promise((r) => (resolve = r));
+  return { promise, resolve };
+};
+
+test('r4 bin: leaving during password confirmation prevents delete retry and next batch item', async (t) => {
+  const posts = [];
+  await browserEnv(t, (url, opts) => {
+    if (url.startsWith('/api/bin?')) return { items: ['A', 'B'].map((id) => ({ id, bytes: 1 })) };
+    if (opts.method === 'POST') {
+      posts.push(url);
+      if (url.endsWith('/A/delete') && posts.length === 1)
+        return { status: 403, code: 'CONFIRM_PASSWORD' };
+    }
+    return { role: 'admin' };
+  });
+  const el = element();
+  const stop = await (await import(browserModule('pages/bin.js'))).render(el, context('password'));
+  t.cleanupFns.push(stop);
+  const pending = clickAction(el, 'empty');
+  await tick();
+  document.body.appended.at(-1).close('ok');
+  await tick();
+  const password = document.body.appended.at(-1);
+  assert.match(password.innerHTML, /password/);
+  stop();
+  const survived = password.open;
+  if (survived) password.close('ok');
+  await pending;
+  assert.deepEqual(posts, ['/api/bin/A/delete']);
+  assert.equal(survived, false);
+});
+
+for (const stage of ['preview', 'dialog'])
+  test('r4 cleanup: vehicle change during ' + stage + ' prevents run', async (t) => {
+    const held = deferred();
+    let reads = 0,
+      vehicle = 'A';
+    const posts = [];
+    await browserEnv(t, (url, opts) => {
+      if (url.endsWith('/run')) posts.push(url);
+      if (opts.method === 'GET' && ++reads === 2) return held.promise;
+      return { policy: { keepDays: {} }, preview: { recordings: 3 } };
+    });
+    const oldFormData = globalThis.FormData;
+    globalThis.FormData = class {
+      get() {
+        return '';
+      }
+    };
+    t.after(() => (globalThis.FormData = oldFormData));
+    const el = element(),
+      query = el.querySelector.bind(el);
+    el.querySelector = (s) => query(s.replace('#', '[id=') + (s.startsWith('#') ? ']' : ''));
+    const stop = await (
+      await import(browserModule('pages/settings/cleanup.js'))
+    ).render(el, context('A', { current: () => ({ id: vehicle }), render() {} }));
+    t.cleanupFns.push(() => stop?.());
+    const pending = el.querySelector('#pol-run').onclick();
+    await tick();
+    if (stage === 'preview') vehicle = 'B';
+    held.resolve({ preview: { recordings: 3 } });
+    await tick();
+    if (stage === 'dialog') {
+      vehicle = 'B';
+      await new Promise((r) => setTimeout(r, 40));
+    }
+    const dialogs = document.body.appended.filter((d) => d.open);
+    dialogs.forEach((d) => d.close('ok'));
+    await pending;
+    assert.deepEqual(posts, []);
+    assert.equal(dialogs.length, 0);
+  });
+
+test('r4 footage: delayed Select all cannot reverse Deselect all', async (t) => {
+  const held = deferred();
+  let waiting = false;
+  await browserEnv(t, (url) => {
+    if (url.includes('/days?')) return { days: [], total: 0 };
+    if (url.includes('/recordings?')) {
+      if (url.includes('offset=500')) {
+        waiting = true;
+        return held.promise;
+      }
+      return {
+        recordings: Array.from({ length: 500 }, (_, i) => ({ id: String(i) })),
+        total: 501,
+      };
+    }
+    return { role: 'admin' };
+  });
+  const el = element(),
+    stop = await (await import(browserModule('pages/footage.js'))).render(el, context('501'));
+  t.cleanupFns.push(stop);
+  await clickAction(el, 'select');
+  const pending = clickAction(el, 'all');
+  await tick();
+  assert.ok(waiting);
+  await clickAction(el, 'deselect');
+  held.resolve({ recordings: [{ id: '500' }], total: 501 });
+  await pending;
+  assert.match(el.innerHTML, /0 selected/);
+  assert.doesNotMatch(el.innerHTML, /501 selected/);
+});
+
+test('r4 render: late Footage teardown preserves newer header handlers', async (t) => {
+  const held = deferred();
+  let first = true,
+    live = true;
+  await browserEnv(t, (url) =>
+    url.includes('/days?')
+      ? first
+        ? ((first = false), held.promise)
+        : { days: [], total: 0 }
+      : { role: 'admin' },
+  );
+  const header = element(),
+    get = document.getElementById;
+  header.replaceChildren = () => {
+    header.innerHTML = '';
+  };
+  document.getElementById = (id) => (id === 'page-actions' ? header : get(id));
+  const m = await import(browserModule('pages/footage.js')),
+    el = element();
+  const a = m.render(el, context('slow', { alive: () => live }));
+  await tick();
+  live = false;
+  const stopB = await m.render(el, context('fast'));
+  t.cleanupFns.push(stopB);
+  const handler = header.onclick;
+  assert.equal(typeof handler, 'function');
+  held.resolve({ days: [], total: 0 });
+  (await a)?.();
+  assert.equal(header.onclick, handler);
+});
+
+for (const action of ['restore', 'delete'])
+  test(
+    'r4 bin: ' + action + ' retry after refresh failure excludes successful items',
+    async (t) => {
+      const calls = [];
+      let reads = 0;
+      await browserEnv(t, (url) => {
+        if (url.startsWith('/api/bin?'))
+          return ++reads === 1
+            ? { items: ['A', 'B'].map((id) => ({ id, bytes: 1 })) }
+            : { status: 500, error: 'refresh unavailable' };
+        if (url.endsWith('/' + action)) {
+          const id = url.split('/')[3];
+          calls.push(id);
+          return id === 'A' ? {} : { status: 500, error: 'busy' };
+        }
+        return { role: 'admin' };
+      });
+      const el = element(),
+        stop = await (
+          await import(browserModule('pages/bin.js'))
+        ).render(el, context('refresh-' + action));
+      t.cleanupFns.push(stop);
+      const run = async () => {
+        const p = clickAction(el, action === 'restore' ? 'restore-all' : 'empty');
+        await tick();
+        document.body.appended.filter((d) => d.open).forEach((d) => d.close('ok'));
+        await p;
+      };
+      await run();
+      await run();
+      assert.deepEqual(calls, ['A', 'B', 'B']);
+    },
+  );
+for (const action of ['restore', 'delete'])
+  test(
+    'r4 bin: ' + action + ' batch reports live progress and blocks duplicate clicks',
+    async (t) => {
+      const held = deferred();
+      const calls = [];
+      await browserEnv(t, (url) => {
+        if (url.startsWith('/api/bin?'))
+          return { items: ['A', 'B', 'C'].map((id) => ({ id, bytes: 1 })) };
+        if (url.endsWith('/' + action)) {
+          calls.push(url);
+          return held.promise;
+        }
+        return { role: 'admin' };
+      });
+      const el = element(),
+        stop = await (
+          await import(browserModule('pages/bin.js'))
+        ).render(el, context('progress-' + action));
+      t.cleanupFns.push(stop);
+      const key = action === 'restore' ? 'restore-all' : 'empty',
+        pending = clickAction(el, key);
+      await tick();
+      document.body.appended.filter((d) => d.open).forEach((d) => d.close('ok'));
+      await tick();
+      const html = el.innerHTML;
+      await clickAction(el, key);
+      stop();
+      held.resolve({});
+      await pending;
+      assert.match(html, new RegExp((action === 'restore' ? 'Restoring' : 'Deleting') + ' 1 of 3'));
+      assert.match(html, /<progress/);
+      assert.match(html, /data-restore-all[^>]*disabled/);
+      assert.equal(calls.length, 1);
+    },
+  );
+test('r4 Viewer: same vehicle without a pending URL reuses the playing frame', async (t) => {
+  await browserEnv(t, () => ({}));
+  const host = element(),
+    get = document.getElementById;
+  document.getElementById = (id) => (id === 'frames' ? host : get(id));
+  const m = await import(browserModule('studio.js')),
+    v = { id: 'car', root: '/car' };
+  m.showStudio('viewer', v, { folder: '/car/recording' });
+  const frame = host.appended.at(-1);
+  m.hideStudio();
+  m.showStudio('viewer', v);
+  assert.equal(host.appended.length, 1);
+  assert.equal(host.appended[0], frame);
+  assert.equal(frame.hidden, false);
+});
+test('r4 server: monthly savings chart remains reachable and dead vehicle tiles are removed', () => {
+  const server = read('web/s6/pages/server.js');
+  assert.match(server, /savingsChart\.js/);
+  assert.match(server, /createSavingsChart/);
+  assert.doesNotMatch(read('web/s6/serverStats.js'), /function vehicleTiles\(/);
+});
+test('r4 server: viewers do not receive admin Logs links in alerts', async () => {
+  const m = await import(browserModule('serverStats.js'));
+  const html = m.serverBody({ alerts: [{ message: 'hot', level: 'warn' }] }, { admin: false });
+  assert.doesNotMatch(html, /#\/health\/logs/);
+});
+
+test('r4 core: scope checks keys at password retry even before its watcher runs', async (t) => {
+  let vehicle = 'A';
+  const posts = [];
+  await browserEnv(t, (url) => {
+    posts.push(url);
+    return url === '/mutate' ? { status: 403, code: 'CONFIRM_PASSWORD' } : {};
+  });
+  const { scope } = await import(browserModule('core.js'));
+  const flow = scope(() => [vehicle]);
+  t.cleanupFns.push(flow.abort);
+  const pending = flow.api('/mutate', { body: {} });
+  await tick();
+  vehicle = 'B';
+  document.body.appended.at(-1).close('ok');
+  await assert.rejects(pending, { name: 'AbortError' });
+  assert.deepEqual(posts, ['/mutate']);
+});
+
+test('r4 render: a nested Health subpage retains its parent scope', async (t) => {
+  await browserEnv(t, () => ({}));
+  const { ownedRender } = await import(browserModule('core.js'));
+  const el = element();
+  let mounted = false;
+  const child = ownedRender(async (el, ctx) => {
+    await ctx.scope.api('/api/stats');
+    mounted = true;
+    el.innerHTML = 'Server details';
+  });
+  const parent = ownedRender(async (el, ctx) => child(el, ctx));
+  const stop = await parent(el, context('nested'));
+  t.cleanupFns.push(stop);
+  assert.equal(mounted, true);
+  assert.equal(el.innerHTML, 'Server details');
+});
+
+test('r4 bin: batch stays disabled while its final refresh is pending', async (t) => {
+  const held = deferred();
+  let reads = 0;
+  const calls = [];
+  await browserEnv(t, (url) => {
+    if (url.startsWith('/api/bin?'))
+      return ++reads === 1 ? { items: [{ id: 'A', bytes: 1 }] } : held.promise;
+    if (url.endsWith('/restore')) {
+      calls.push(url);
+      return { status: 500, error: 'busy' };
+    }
+    return { role: 'admin' };
+  });
+  const el = element(),
+    stop = await (await import(browserModule('pages/bin.js'))).render(el, context('refresh-busy'));
+  t.cleanupFns.push(stop);
+  const pending = clickAction(el, 'restore-all');
+  await tick();
+  const html = el.innerHTML;
+  const duplicate = clickAction(el, 'restore-all');
+  await tick();
+  held.resolve({ items: [{ id: 'A', bytes: 1 }] });
+  await Promise.all([pending, duplicate]);
+  assert.equal(calls.length, 1);
+  assert.match(html, /data-restore-all[^>]*disabled/);
+});
+
+test('r4 settings: adding a vehicle refreshes before changing its own scope', async (t) => {
+  const calls = [];
+  const state = { vehicles: [{ id: 'A' }], vehicleId: 'A' };
+  await browserEnv(t, (url, opts) => {
+    calls.push([url, opts.method]);
+    return opts.method === 'POST' ? { id: 'B' } : { vehicles: [{ id: 'A' }, { id: 'B' }] };
+  });
+  const saved = globalThis.FormData;
+  globalThis.FormData = class {
+    get() {
+      return '';
+    }
+  };
+  t.after(() => (globalThis.FormData = saved));
+  const page = element(),
+    form = element();
+  page.querySelector = (s) => (s === '#veh' ? form : null);
+  form.querySelector = () => null;
+  const { scope } = await import(browserModule('core.js')),
+    flow = scope(() => [state.vehicleId]);
+  t.cleanupFns.push(flow.abort);
+  const { forms } = await import(browserModule('pages/settings/forms.js'));
+  forms(page, { state, scope: flow, alive: flow.alive }).wireSettings('new');
+  await form.onsubmit({ preventDefault() {} });
+  assert.deepEqual(calls, [
+    ['/api/vehicles', 'POST'],
+    ['/api/vehicles', 'GET'],
+  ]);
+  assert.equal(state.vehicleId, 'B');
+  assert.equal(location.hash, '#/settings');
+});
+
+test('r4 Viewer: an explicit request for the same recording seeks again', async (t) => {
+  await browserEnv(t, () => ({}));
+  const host = element(),
+    get = document.getElementById;
+  document.getElementById = (id) => (id === 'frames' ? host : get(id));
+  const m = await import(browserModule('studio.js')),
+    v = { id: 'explicit', root: '/car' };
+  m.showStudio('viewer', v, { folder: '/car/recording' });
+  m.hideStudio();
+  m.showStudio('viewer', v, { folder: '/car/recording' });
+  assert.equal(host.appended.length, 2);
 });

@@ -1,9 +1,12 @@
-import { api, esc, act, toast, confirmDialog, sheet } from '../core.js';
+import { ownedRender, scope } from '../core.js';
+import { esc, act, sheet } from '../core.js';
 import { binNote, expiresIn } from '../bin.js';
 import { createSelection, longPress } from '../selection.js';
 import { plural, dayLabel, timeLabel, dayKey, size } from '../format.js';
 import { icon } from '../icons.js';
-export async function render(el, { current, state, alive }) {
+async function renderPage(el, ctx) {
+  const { api, confirmDialog, toast } = ctx.scope;
+  const { current, state, alive } = ctx;
   const admin = (await api('/api/auth/me')).role === 'admin';
   const v = current();
   if (!v) {
@@ -20,7 +23,9 @@ export async function render(el, { current, state, alive }) {
     reason = '',
     items = [],
     policy = {},
-    busy = false;
+    busy = false,
+    progress = null,
+    outcome = '';
   async function load() {
     const [b, p] = await Promise.all([
       api('/api/bin?vehicle=' + encodeURIComponent(v.id)),
@@ -34,13 +39,12 @@ export async function render(el, { current, state, alive }) {
   async function run(ids, action) {
     if (!admin || busy || !valid()) return;
     cancel();
-    const controller = new AbortController();
+    const controller = scope(() => [current()?.id, reason, selection.generation()], {
+      signal: ctx.scope.signal,
+      alive: valid,
+    });
     pending = controller;
-    const token = JSON.stringify([current()?.id, reason, selection.generation()]);
-    const active = () =>
-      valid() &&
-      !controller.signal.aborted &&
-      token === JSON.stringify([current()?.id, reason, selection.generation()]);
+    const active = controller.alive;
     if (
       action === 'delete' &&
       !(await confirmDialog({
@@ -54,33 +58,51 @@ export async function render(el, { current, state, alive }) {
       return;
     if (!active()) return;
     busy = true;
+    outcome = '';
+    progress = { action, total: ids.length, at: 0 };
+    draw();
     let completed = 0;
     const failures = [];
     try {
       for (const id of ids) {
+        if (!active()) break;
+        progress.at++;
+        draw();
         try {
           const result = await api('/api/bin/' + encodeURIComponent(id) + '/' + action, {
             body: action === 'delete' ? { confirm: true } : {},
+            signal: controller.signal,
           });
+          if (!active()) break;
           if (action === 'restore' && result.conflicts) {
             failures.push('a file with that name exists');
-          } else completed++;
+          } else {
+            completed++;
+            items = items.filter((item) => item.id !== id);
+          }
         } catch (e) {
+          if (!active()) break;
           failures.push(e.message);
         }
       }
     } finally {
-      selection.clear();
-      try {
-        await load();
-      } catch (e) {
-        failures.push('Could not refresh: ' + e.message);
+      controller.abort();
+      progress = null;
+      if (valid()) {
+        selection.clear();
+        draw(); // Retain successful removals even if the subsequent GET fails.
+        try {
+          await load();
+        } catch (e) {
+          if (valid()) failures.push('Could not refresh: ' + e.message);
+        }
+        if (valid()) {
+          busy = false;
+          outcome = `${action === 'restore' ? 'Restored' : 'Deleted'} ${completed}; ${failures.length} failed${failures.length ? ': ' + [...new Set(failures)].join('; ') : ''}`;
+          draw();
+          toast(outcome, failures.length > 0);
+        }
       }
-      busy = false;
-      toast(
-        `${action === 'restore' ? 'Restored' : 'Deleted'} ${completed}; ${failures.length} failed${failures.length ? ': ' + [...new Set(failures)].join('; ') : ''}`,
-        failures.length > 0,
-      );
     }
   }
 
@@ -101,7 +123,7 @@ export async function render(el, { current, state, alive }) {
       if (!groups.has(group)) groups.set(group, []);
       groups.get(group).push(i);
     }
-    el.innerHTML = `<div class="toolbar"><span class="grow"></span>${selecting ? `<button data-all>Select all</button><b>${selection.count()} selected</b>` : ''}${admin ? `<button data-select>${selecting ? 'Done' : 'Select'}</button>` : ''}</div>${items.length ? `<section class="card"><div class="number">${plural(items.length, 'item')} · ${size(total)}</div><p>Emptying the bin frees ${size(total)} on the share${v.storage?.perDay > 0 ? (total < v.storage.perDay ? ', less than one more day of recording' : ', about ' + Math.floor(total / v.storage.perDay) + ' more days of recording') : ''}.</p>${admin ? `<div class="row"><button data-restore-all>Restore all</button><button class="danger" data-empty>Empty Recycle Bin</button></div>` : ''}</section>` : '<div class="empty"><h2>The Recycle Bin is empty</h2><p>Footage moved here can be restored until it is deleted permanently.</p></div>'}<div class="segments">${[
+    el.innerHTML = `<div class="toolbar"><span class="grow"></span>${selecting ? `<button data-all>Select all</button><b>${selection.count()} selected</b>` : ''}${admin ? `<button data-select>${selecting ? 'Done' : 'Select'}</button>` : ''}</div>${items.length || progress || outcome ? `<section class="card"><div class="number">${plural(items.length, 'item')} · ${size(total)}</div><p>Emptying the bin frees ${size(total)} on the share${v.storage?.perDay > 0 ? (total < v.storage.perDay ? ', less than one more day of recording' : ', about ' + Math.floor(total / v.storage.perDay) + ' more days of recording') : ''}.</p>${admin ? `<div class="row"><button data-restore-all ${busy ? 'disabled' : ''}>Restore all</button><button class="danger" data-empty ${busy ? 'disabled' : ''}>Empty Recycle Bin</button></div>` : ''}${progress ? `<div role="status" aria-live="polite"><p>${progress.action === 'restore' ? 'Restoring' : 'Deleting'} ${progress.at} of ${progress.total}…</p><progress value="${progress.at - 1}" max="${progress.total}"></progress></div>` : outcome ? `<p role="status">${esc(outcome)}</p>` : ''}</section>` : '<div class="empty"><h2>The Recycle Bin is empty</h2><p>Footage moved here can be restored until it is deleted permanently.</p></div>'}<div class="segments">${[
       ['', 'All'],
       ['manual', 'Moved by you'],
       ['policy', 'Cleanup rules'],
@@ -123,7 +145,7 @@ export async function render(el, { current, state, alive }) {
       )
       .join(
         '',
-      )}${selecting ? `<div class="selection-bar"><b>${selection.count()} selected</b><button data-restore-selected>Restore</button><button data-delete-selected class="danger">Delete forever</button></div>` : ''}`;
+      )}${selecting ? `<div class="selection-bar"><b>${selection.count()} selected</b><button data-restore-selected ${busy ? 'disabled' : ''}>Restore</button><button data-delete-selected class="danger" ${busy ? 'disabled' : ''}>Delete forever</button></div>` : ''}`;
     document.body.classList.toggle('selecting', selecting);
     el.querySelectorAll('img').forEach(
       (i) =>
@@ -132,7 +154,7 @@ export async function render(el, { current, state, alive }) {
         }),
     );
     el.onchange = (e) => {
-      if (!e.target.dataset.id) return;
+      if (busy || !e.target.dataset.id) return;
       e.target.checked
         ? selection.add([e.target.dataset.id])
         : selection.remove([e.target.dataset.id]);
@@ -140,7 +162,7 @@ export async function render(el, { current, state, alive }) {
     };
     el.onclick = act(async (e) => {
       const b = e.target.closest('button');
-      if (!b) return;
+      if (!b || busy) return;
       const has = (k) => b.hasAttribute('data-' + k);
       if (!admin && !has('reason')) return;
       if (has('select')) {
@@ -182,18 +204,22 @@ export async function render(el, { current, state, alive }) {
     });
   }
   const stopPress = longPress(el, '[data-bin-row]', (row) => {
-    if (!admin) return;
+    if (!admin || busy) return;
     selecting = true;
     selection.add([row.dataset.binRow]);
     draw();
   });
-  await load();
-  return () => {
+  const teardown = () => {
     stopped = true;
     cancel();
     unsubscribe();
     stopPress();
-    document.body.classList.remove('selecting');
+    if (el.isConnected) document.body.classList.remove('selecting');
     el.onclick = el.onchange = null;
   };
+  ctx.scope.signal.addEventListener('abort', teardown, { once: true });
+  await load();
+  return teardown;
 }
+
+export const render = ownedRender(renderPage);

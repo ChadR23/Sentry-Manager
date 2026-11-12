@@ -1,7 +1,8 @@
-import { api, esc, toast, confirmDialog } from '../../core.js';
+import { esc } from '../../core.js';
 import { icon } from '../../icons.js';
 import { size as bytes, ago as when } from '../../format.js';
 export function forms(page, ctx) {
+  const { api, confirmDialog, toast } = ctx.scope;
   const { state, render } = ctx,
     $ = (id) => page.querySelector('#' + id) || document.getElementById(id),
     clockPref = { h24: state.h24 },
@@ -78,7 +79,12 @@ export function forms(page, ctx) {
         'beforeend',
         rateRow(
           count()
-            ? { label: 'Peak', from: '16:00', to: '21:00', days: [1, 2, 3, 4, 5] }
+            ? {
+                label: 'Peak',
+                from: '16:00',
+                to: '21:00',
+                days: [1, 2, 3, 4, 5],
+              }
             : { label: 'Off-peak' },
         ),
       );
@@ -223,7 +229,9 @@ export function forms(page, ctx) {
         );
         // the browser has to pick up the new certificate; a page that clicked
         // past a warning would otherwise fail every request from now on
-        setTimeout(() => location.reload(), 2500);
+        setTimeout(() => {
+          if (ctx.alive()) location.reload();
+        }, 2500);
       } catch (err) {
         toast(err.message, true);
       }
@@ -414,11 +422,14 @@ export function forms(page, ctx) {
           const saved =
             editing === 'new'
               ? await api('/api/vehicles', { body })
-              : await api(`/api/vehicles/${encodeURIComponent(editing)}`, { method: 'PUT', body });
-          state.vehicleId = saved.id;
-          store.set('vehicle', saved.id);
+              : await api(`/api/vehicles/${encodeURIComponent(editing)}`, {
+                  method: 'PUT',
+                  body,
+                });
           toast('Saved. Connecting to the footage…');
           await loadVehicles();
+          state.vehicleId = saved.id;
+          store.set('vehicle', saved.id);
           location.hash = '#/settings';
         } catch (err) {
           toast(err.message, true);
@@ -455,9 +466,9 @@ export function forms(page, ctx) {
             }))
           )
             return;
-          await api(`/api/vehicles/${encodeURIComponent(editing)}`, { method: 'DELETE' }).catch(
-            (err) => toast(err.message, true),
-          );
+          await api(`/api/vehicles/${encodeURIComponent(editing)}`, {
+            method: 'DELETE',
+          }).catch((err) => toast(err.message, true));
           await loadVehicles();
           location.hash = '#/settings';
         };
@@ -477,7 +488,7 @@ export function forms(page, ctx) {
         } catch (err) {
           toast(err.message, true);
         }
-        render();
+        if (ctx.alive()) render();
       };
     }
     if ($('pw'))

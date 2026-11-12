@@ -3,7 +3,9 @@ export const esc = (s) =>
     /[&<>"']/g,
     (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c],
   );
-export async function api(path, { method, body, ...rest } = {}, retried = false) {
+export async function api(path, { method, body, check = () => {}, ...rest } = {}, retried = false) {
+  check();
+  rest.signal?.throwIfAborted();
   const res = await fetch(path, {
     ...rest,
     method: method || (body === undefined ? 'GET' : 'POST'),
@@ -16,10 +18,15 @@ export async function api(path, { method, body, ...rest } = {}, retried = false)
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   const data = await res.json().catch(() => ({}));
+  check();
+  rest.signal?.throwIfAborted();
   if (res.status === 401 && !path.startsWith('/api/auth/')) location.href = '/login';
   if (res.status === 403 && data.code === 'CONFIRM_PASSWORD' && !retried) {
-    await confirmPassword();
-    return api(path, { method, body, ...rest }, true);
+    if (!(await confirmPassword({ signal: rest.signal, check })))
+      throw new DOMException('Cancelled', 'AbortError');
+    check();
+    rest.signal?.throwIfAborted();
+    return api(path, { method, body, check, ...rest }, true);
   }
   if (!res.ok)
     throw Object.assign(new Error(data.error || res.statusText), {
@@ -45,7 +52,7 @@ export function confirmDialog({ title, body, ok = 'Confirm', danger = false, onC
     signal?.addEventListener('abort', abort, { once: true });
     dlg.onclose = () => {
       signal?.removeEventListener('abort', abort);
-      const yes = dlg.returnValue === 'ok';
+      const yes = !signal?.aborted && dlg.returnValue === 'ok';
       if (yes) onConfirm?.(dlg.querySelector('form'));
       dlg.remove();
       resolve(yes);
@@ -53,26 +60,21 @@ export function confirmDialog({ title, body, ok = 'Confirm', danger = false, onC
     dlg.showModal();
   });
 }
-export async function confirmPassword() {
+export async function confirmPassword({ signal, check = () => {} } = {}) {
   let password = '';
-  const yes = await new Promise((resolve) => {
-    const dlg = document.createElement('dialog');
-    dlg.innerHTML =
-      '<form method="dialog"><h2>Confirm with your password</h2><label>Password<input type="password" autocomplete="current-password" name="password" required></label><footer><button type="button">Cancel</button><button value="ok" class="primary">Confirm</button></footer></form>';
-    document.body.append(dlg);
-    dlg.querySelector('button').onclick = () => dlg.close();
-    dlg.querySelector('form').onsubmit = () => {
-      password = dlg.querySelector('input').value;
-      dlg.returnValue = 'ok';
-    };
-    dlg.onclose = () => {
-      resolve(dlg.returnValue === 'ok');
-      dlg.remove();
-    };
-    dlg.showModal();
+  const yes = await confirmDialog({
+    signal,
+    title: 'Confirm with your password',
+    body: '<label>Password<input type="password" autocomplete="current-password" name="password" required></label>',
+    onConfirm: (form) => {
+      password = form.querySelector('input').value;
+    },
   });
-  if (!yes) throw new Error('Not changed: password not confirmed.');
-  await api('/api/auth/confirm', { body: { password } }, true);
+  if (!yes || signal?.aborted) return false;
+  check();
+  await api('/api/auth/confirm', { body: { password }, signal, check }, true);
+  signal?.throwIfAborted();
+  return true;
 }
 export function sheet(el, { anchor, popover = false } = {}) {
   const dlg = document.createElement('dialog');
@@ -119,4 +121,128 @@ export async function invoke(name, payload) {
   });
   if (!out?.ok) throw new Error(out?.error?.code || 'Converter request failed');
   return out.value;
+}
+
+// A scope owns all asynchronous work started for one route, vehicle and local state.
+// The watcher closes prompts immediately when a key changes; checks at request
+// boundaries also cover changes made before the next browser event/timer turn.
+export function scope(keyParts = () => [], { signal, alive = () => true } = {}) {
+  const controller = new AbortController();
+  const key = () =>
+    JSON.stringify([
+      location.hash.split('?')[0],
+      typeof keyParts === 'function' ? keyParts() : keyParts,
+    ]);
+  const initial = key();
+  const abort = () => controller.abort();
+  const valid = () => {
+    if (!controller.signal.aborted && (signal?.aborted || !alive() || key() !== initial)) abort();
+    return !controller.signal.aborted;
+  };
+  const check = () => {
+    valid();
+    controller.signal.throwIfAborted();
+  };
+  signal?.addEventListener('abort', abort, { once: true });
+  const timer = setInterval(valid, 20);
+  timer.unref?.();
+  window.addEventListener('hashchange', valid);
+  controller.signal.addEventListener(
+    'abort',
+    () => {
+      clearInterval(timer);
+      signal?.removeEventListener('abort', abort);
+      window.removeEventListener('hashchange', valid);
+    },
+    { once: true },
+  );
+  const guarded =
+    (fn) =>
+    async (...args) => {
+      check();
+      const out = await fn(...args);
+      check();
+      return out;
+    };
+  const request = guarded((path, options = {}) =>
+    api(path, {
+      ...options,
+      check,
+      signal: options.signal
+        ? AbortSignal.any([controller.signal, options.signal])
+        : controller.signal,
+    }),
+  );
+  const dialog = async (options) => {
+    if (!valid()) return false;
+    const yes = await confirmDialog({
+      ...options,
+      signal: options.signal
+        ? AbortSignal.any([controller.signal, options.signal])
+        : controller.signal,
+    });
+    return valid() && yes;
+  };
+  return {
+    signal: controller.signal,
+    alive: valid,
+    check,
+    abort,
+    api: request,
+    wait: guarded((promise) => promise),
+    confirmDialog: dialog,
+    confirmPassword: guarded(async () => {
+      if (!(await confirmPassword({ signal: controller.signal, check })))
+        throw new DOMException('Cancelled', 'AbortError');
+      return true;
+    }),
+    toast: (...args) => {
+      if (valid()) toast(...args);
+    },
+    fetch: guarded((url, options = {}) => fetch(url, { ...options, signal: controller.signal })),
+    invoke: async (name, payload) => {
+      const out = await request('/api/converter/invoke/' + name, {
+        method: 'POST',
+        body: payload,
+        headers: { 'X-Client-Id': clientId },
+      });
+      if (!out?.ok) throw new Error(out?.error?.code || 'Converter request failed');
+      return out.value;
+    },
+  };
+}
+
+const owners = new WeakMap();
+export function ownedRender(renderPage) {
+  return async (el, ctx) => {
+    const previous = owners.get(el);
+    if (previous !== ctx.scope) previous?.abort();
+    const owner = scope(() => [ctx.current?.()?.id], {
+      signal: ctx.scope?.signal,
+      alive: ctx.alive,
+    });
+    owners.set(el, owner);
+    const child = { ...ctx, scope: owner, alive: owner.alive };
+    let teardown,
+      disposed = false;
+    const dispose = () => {
+      if (teardown && !disposed) {
+        disposed = true;
+        teardown();
+      }
+    };
+    owner.signal.addEventListener('abort', dispose, { once: true });
+    try {
+      teardown = await renderPage(el, child);
+    } catch (err) {
+      owner.abort();
+      if (err.name !== 'AbortError') throw err;
+    }
+    const stop = () => {
+      owner.abort();
+      dispose();
+    };
+    if (!owner.alive()) stop();
+    return stop;
+  };
 }

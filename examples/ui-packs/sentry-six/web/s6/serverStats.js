@@ -598,9 +598,13 @@ function sensorName(s, multiSocket = false) {
   if (/^(amdgpu|i915|xe|nouveau|radeon)$/.test(chip)) {
     if (s.kind === 'fan') return 'GPU fan';
     return (
-      { edge: 'GPU', pkg: 'GPU', junction: 'GPU hotspot', mem: 'GPU memory', vram: 'GPU memory' }[
-        label
-      ] || `GPU ${label}`
+      {
+        edge: 'GPU',
+        pkg: 'GPU',
+        junction: 'GPU hotspot',
+        mem: 'GPU memory',
+        vram: 'GPU memory',
+      }[label] || `GPU ${label}`
     );
   }
   if ((m = /^fan(\d+)$/.exec(label))) return `Fan ${m[1]}`;
@@ -636,7 +640,12 @@ function sensorsTile(sensors, all, sockets = 1, seen = null) {
       const row = coreMax.get(s.chip);
       if (row) row.value = Math.max(row.value, s.value);
       else {
-        const fresh = { name: 'Core max', kind: 'temp', chip: s.chip, value: s.value };
+        const fresh = {
+          name: 'Core max',
+          kind: 'temp',
+          chip: s.chip,
+          value: s.value,
+        };
         coreMax.set(s.chip, fresh);
         rows.push(fresh);
       }
@@ -675,7 +684,13 @@ function processTile(procs, enc, hasGpu = false, seen = null) {
   // the same program several times (ffmpeg ×4) is one row
   const groups = new Map();
   for (const p of top) {
-    const g = groups.get(p.name) || { name: p.name, n: 0, cpu: 0, memB: 0, gpu: null };
+    const g = groups.get(p.name) || {
+      name: p.name,
+      n: 0,
+      cpu: 0,
+      memB: 0,
+      gpu: null,
+    };
     g.n++;
     g.cpu += fin(p.cpu) ? p.cpu : 0;
     g.memB += fin(p.memB) ? p.memB : 0;
@@ -693,7 +708,11 @@ function processTile(procs, enc, hasGpu = false, seen = null) {
     return Math.floor(g.cpu / 5);
   };
   const rows = [...groups.values()]
-    .map((g) => ({ ...g, band: bandOf(g), at: before.get(g.name)?.at ?? Infinity }))
+    .map((g) => ({
+      ...g,
+      band: bandOf(g),
+      at: before.get(g.name)?.at ?? Infinity,
+    }))
     .sort((a, b) => b.band - a.band || a.at - b.at || b.cpu - a.cpu || b.memB - a.memB);
   if (seen) seen.set('procs', new Map(rows.map((r, i) => [r.name, { band: r.band, at: i }])));
   // with a GPU, its column stays while no process uses it
@@ -751,7 +770,10 @@ function alertChip(alerts) {
 /** Space saved by conversions (a vehicle's `saved`, or all of theirs together). */
 const savedTotal = (list) =>
   list.reduce(
-    (t, v) => ({ bytes: t.bytes + (v.saved?.bytes || 0), clips: t.clips + (v.saved?.clips || 0) }),
+    (t, v) => ({
+      bytes: t.bytes + (v.saved?.bytes || 0),
+      clips: t.clips + (v.saved?.clips || 0),
+    }),
     { bytes: 0, clips: 0 },
   );
 const savedText = (sv) =>
@@ -773,63 +795,6 @@ function fullInText(st) {
   const tone = d < 7 ? 'red' : d < 30 ? 'amber' : '';
   return `${tone ? `<span class="chip ${tone}">${t}</span>` : t} <span class="muted small">at ${size(st.perDay)} a day</span>`;
 }
-function vehicleTiles(v, at = Date.now(), all = [v], allDays = null) {
-  if (!v) {
-    return `<div class="nd-grid nd-vgrid">${ndTile('Vehicles', 'none yet', '<p class="nd-note">Each vehicle has its own footage share (SMB) or folder. Add one in Settings to start.</p><div class="nd-actions"><a class="btn sm solid" href="#/settings">Open settings</a></div>')}</div>`;
-  }
-  const s = v.share || {};
-  const inv = v.inventory;
-  const known = fin(s.totalBytes) && s.totalBytes > 0 && fin(s.freeBytes);
-  const used = known ? (1 - s.freeBytes / s.totalBytes) * 100 : null;
-  const problem = !s.healthy
-    ? '<span class="chip red">Share unavailable</span>'
-    : s.writable === false
-      ? '<span class="chip amber">Read-only share</span>'
-      : '';
-  const scanned = v.scanning ? 'scanning…' : inv ? sinceText(inv.scannedAt, at) || '—' : 'not yet';
-  const inventory = ndTile(
-    'Inventory',
-    'last discovered',
-    ndBig(inv && fin(inv.bytes) ? size(inv.bytes) : '—', 'all categories') +
-      ndKv([
-        ['Recordings', inv ? Number(inv.recordings || 0).toLocaleString() : '—'],
-        ['Space saved', savedText(v.saved)],
-        ...(all.length > 1 ? [['All vehicles saved', savedText(savedTotal(all))]] : []),
-        // days with any footage, and since when
-        [
-          'Days of footage',
-          inv && fin(inv.days)
-            ? `${inv.days.toLocaleString()}${inv.firstDay ? ` <span class="muted small">since ${esc(new Date(`${inv.firstDay}T12:00:00`).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }))}</span>` : ''}`
-            : '—',
-        ],
-        ...(all.length > 1 && fin(allDays)
-          ? [['All vehicles, days', allDays.toLocaleString()]]
-          : []),
-        ['Scanned', esc(scanned)],
-        ['Time zone', esc(v.timezone || '—')],
-      ]) +
-      // saved by converting, month by month (web/savingsChart.js fills it)
-      `<div data-savings-chart="${esc(v.id)}" style="margin-top:12px"></div>` +
-      '<div class="nd-actions"><button type="button" class="btn sm" id="refresh-inv">Refresh inventory</button></div>',
-  );
-  const free = ndTile(
-    'Free space',
-    `last observed on ${v.name}`,
-    `<div class="nd-big"><b>${fin(s.freeBytes) ? size(s.freeBytes) : '—'}</b><span class="muted small">free</span>${problem}</div>` +
-      // (no capacity known: an empty meter keeps the tile's height)
-      ndBar(used ?? 0, used > 85, used > 95) +
-      ndKv([
-        ['Capacity', known ? size(s.totalBytes) : 'unknown'],
-        ['Used', known ? pct(used) : '—'],
-        ['Recycle Bin', fin(v.binBytes) && v.binBytes > 0 ? size(v.binBytes) : 'empty'],
-        // days until full at the footage added lately (as web/fullIn.js words it)
-        ['Full in', fullInText(v.storage)],
-      ]) +
-      `<div class="nd-actions"><a class="btn sm" href="#/settings/vehicle/${esc(v.id)}">Vehicle settings</a></div>`,
-  );
-  return `<div class="nd-grid nd-vgrid">${inventory}${free}</div>`;
-}
-
 /** Everything under the section's head: alerts, tiles, and what optional compose lines would add. */
 /**
  * `seen` (optional, kept by the caller while the page is open) keeps rows
@@ -837,7 +802,7 @@ function vehicleTiles(v, at = Date.now(), all = [v], allDays = null) {
  */
 function serverBody(
   s,
-  { range = '15m', hist = null, currency = '$', more = {}, seen = null } = {},
+  { admin = true, range = '15m', hist = null, currency = '$', more = {}, seen = null } = {},
 ) {
   const day = range === '24h' && hist?.series ? hist.series : null;
   const usable = (pts) => Array.isArray(pts) && pts.filter(fin).length > 1;
@@ -902,7 +867,7 @@ function serverBody(
     .filter((a) => a && a.message)
     .map(
       (a) =>
-        `<div class="nd-alert${a.level === 'error' ? ' bad' : ''}"><b>${a.level === 'error' ? 'Problem' : 'Warning'}</b>${esc(unitText(a.message))} · <a href="#/health/logs">Logs</a></div>`,
+        `<div class="nd-alert${a.level === 'error' ? ' bad' : ''}"><b>${a.level === 'error' ? 'Problem' : 'Warning'}</b>${esc(unitText(a.message))}${admin ? ' · <a href="#/health/logs">Logs</a>' : ''}</div>`,
     )
     .join('');
   const unlock = (Array.isArray(s.unlock) ? s.unlock : []).filter((u) => u && u.adds);

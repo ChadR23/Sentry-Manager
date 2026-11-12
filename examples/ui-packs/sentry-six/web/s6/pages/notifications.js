@@ -1,8 +1,11 @@
-import { api, esc, sheet, act } from '../core.js';
+import { api, esc, sheet, act, scope } from '../core.js';
 import { countText, ago } from '../format.js';
-export async function notifications(anchor) {
+export async function notifications(anchor, current = () => null) {
   const el = document.createElement('section');
   const close = sheet(el, { anchor });
+  const flow = scope(() => [current()?.id], { alive: () => el.isConnected });
+  const { api } = flow;
+  flow.signal.addEventListener('abort', close, { once: true });
   async function draw() {
     const data = await api('/api/notifications');
     if (!el.isConnected) return;
@@ -21,7 +24,9 @@ export async function notifications(anchor) {
   el.onclick = act(async (e) => {
     const b = e.target.closest('[data-dismiss]');
     if (b) {
-      await api('/api/notifications/' + b.dataset.dismiss + '/dismiss', { body: {} });
+      await api('/api/notifications/' + b.dataset.dismiss + '/dismiss', {
+        body: {},
+      });
       await draw();
     }
   });

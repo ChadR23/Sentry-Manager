@@ -1,7 +1,9 @@
-import { api, esc, toast, confirmDialog } from '../../core.js';
+import { ownedRender } from '../../core.js';
+import { esc } from '../../core.js';
 import { icon } from '../../icons.js';
 import { plural, ago as when } from '../../format.js';
-export async function render(page, ctx) {
+async function renderPage(page, ctx) {
+  const { api, confirmDialog, toast } = ctx.scope;
   const render = ctx.render,
     $ = (id) => page.querySelector('#' + id) || document.getElementById(id);
   let nodeSaving = false;
@@ -160,9 +162,11 @@ export async function render(page, ctx) {
     const btn = e.target.querySelector('button[type=submit]');
     btn.disabled = true;
     try {
-      await api('/api/nodes', { body: { address: f.get('address'), code: f.get('code') } });
+      await api('/api/nodes', {
+        body: { address: f.get('address'), code: f.get('code') },
+      });
       toast('Node paired. Set its clips under Encoder → Parallel conversions.');
-      render();
+      if (ctx.alive()) render();
     } catch (err) {
       toast(err.message, true);
       btn.disabled = false;
@@ -178,7 +182,7 @@ export async function render(page, ctx) {
       } catch (err) {
         toast(err.message, true);
       }
-      render();
+      if (ctx.alive()) render();
     };
   });
   page.querySelectorAll('[data-bench-cancel]').forEach((b) => {
@@ -186,7 +190,7 @@ export async function render(page, ctx) {
       await api(`/api/nodes/${encodeURIComponent(b.dataset.benchCancel)}/benchmark`, {
         method: 'DELETE',
       }).catch(() => {});
-      render();
+      if (ctx.alive()) render();
     };
   });
   page.querySelectorAll('[data-bench-use]').forEach((b) => {
@@ -218,7 +222,7 @@ export async function render(page, ctx) {
       } catch (err) {
         toast(err.message, true);
       }
-      render();
+      if (ctx.alive()) render();
     };
   });
   // follow a running benchmark, and the nodes' clips (converting, waiting)
@@ -278,7 +282,7 @@ export async function render(page, ctx) {
         } catch (err) {
           toast(err.message, true);
         }
-        render();
+        if (ctx.alive()) render();
       }),
     );
   });
@@ -334,7 +338,7 @@ export async function render(page, ctx) {
         method: 'PUT',
         body: { name },
       }).catch((err) => toast(err.message, true));
-      render();
+      if (ctx.alive()) render();
     });
   });
   page.querySelectorAll('[data-remove-node]').forEach((b) => {
@@ -351,13 +355,15 @@ export async function render(page, ctx) {
       await api(`/api/nodes/${encodeURIComponent(b.dataset.removeNode)}`, {
         method: 'DELETE',
       }).catch((err) => toast(err.message, true));
-      render();
+      if (ctx.alive()) render();
     });
   });
   if (!worker.available) return;
   const saveWorker = async () => {
     try {
-      await api('/api/nodes/worker', { body: { enabled: $('worker-on').checked } });
+      await api('/api/nodes/worker', {
+        body: { enabled: $('worker-on').checked },
+      });
     } catch (err) {
       toast(err.message, true);
     }
@@ -371,12 +377,12 @@ export async function render(page, ctx) {
       } catch (err) {
         toast(err.message, true);
       }
-      render();
+      if (ctx.alive()) render();
     };
   if ($('pair-cancel'))
     $('pair-cancel').onclick = async () => {
       await api('/api/nodes/worker/pair', { method: 'DELETE' }).catch(() => {});
-      render();
+      if (ctx.alive()) render();
     };
   page.querySelectorAll('[data-revoke-main]').forEach((b) => {
     b.onclick = async () => {
@@ -393,7 +399,9 @@ export async function render(page, ctx) {
       await api(`/api/nodes/worker/mains/${encodeURIComponent(b.dataset.revokeMain)}`, {
         method: 'DELETE',
       }).catch((err) => toast(err.message, true));
-      render();
+      if (ctx.alive()) render();
     };
   });
 }
+
+export const render = ownedRender(renderPage);

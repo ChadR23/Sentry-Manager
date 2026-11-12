@@ -1,9 +1,12 @@
-import { api, esc, act, confirmDialog, toast, invoke } from '../core.js';
+import { ownedRender } from '../core.js';
+import { esc, act } from '../core.js';
 import { describeJob, jobProgress } from '../jobs.js';
 import { plural, dayLabel, dayKey, timeLabel, duration, size } from '../format.js';
 import { icon } from '../icons.js';
 import { follow, counts, ACTIVE, PAUSED, Pace, workingMs, hardwareLabel } from '../convert.js';
-export async function render(el, { current, state, alive }) {
+async function renderPage(el, ctx) {
+  const { api, confirmDialog, toast, invoke } = ctx.scope;
+  const { current, state, alive } = ctx;
   const admin = (await api('/api/auth/me')).role === 'admin';
   const v = current();
   let stopped = false,
@@ -114,3 +117,5 @@ export async function render(el, { current, state, alive }) {
     clearInterval(timer);
   };
 }
+
+export const render = ownedRender(renderPage);

@@ -163,15 +163,15 @@
    * Save one vehicle. `automatic` on: its automatic settings (setAuto);
    * off: saved only (and its automatic conversion turned off if it was on).
    */
-  async function save({ state, folder, config, automatic, schedule }) {
+  async function save({ state, folder, config, automatic, schedule, invoke: send = invoke }) {
     const was = savedFor(state, folder);
-    if (automatic) return invoke('setAuto', { enabled: true, ...shared(state?.settings, schedule), config });
+    if (automatic) return send('setAuto', { enabled: true, ...shared(state?.settings, schedule), config });
     let out = state;
     if (was?.automatic) {
       const others = (state.settings.configs || []).filter((c) => c.sourceRoot !== folder).length;
-      out = await invoke('setAuto', { enabled: others > 0, ...shared(state.settings, schedule), removeSource: folder });
+      out = await send('setAuto', { enabled: others > 0, ...shared(state.settings, schedule), removeSource: folder });
     }
-    return invoke('saveVehicle', { config });
+    return send('saveVehicle', { config });
   }
 
   function defaults(folder, replaceOk) {
@@ -230,6 +230,7 @@
    * open for editing), onLoadEncoder(vehicle) (optional "Open in Encoder").
    */
   function mount(el, opts = {}) {
+    const send = opts.scope?.invoke || invoke;
     injectCss(el.ownerDocument);
     const k = { ...DEFAULT_CLASSES, ...(opts.classes || {}) };
     const toast = opts.toast || (() => {});
@@ -239,8 +240,9 @@
 
     async function load() {
       const [vs, st, caps, devs] = await Promise.all([
-        vehicles(), invoke('getAuto'), invoke('getCapabilities').catch(() => ({})), invoke('devices').catch(() => ({}))
+        vehicles(), send('getAuto'), send('getCapabilities').catch(() => ({})), send('devices').catch(() => ({}))
       ]);
+      opts.scope?.check();
       cars = vs; state = st; devices = devs?.devices || []; replaceOk = caps?.replacement === 'available';
     }
 
@@ -412,7 +414,7 @@
       const button = form.querySelector('[type=submit]');
       button.disabled = true;
       try {
-        state = await save({ state, folder, config: configOf(c, folder), automatic: c._automatic, schedule });
+        state = await save({ state, folder, config: configOf(c, folder), automatic: c._automatic, schedule, invoke: send });
         editing = null; draft = null;
         toast(`${v.name}: encoding settings saved.`);
         draw();
@@ -446,7 +448,7 @@
         const v = cars.find((x) => x.id === t.dataset.veForget);
         if (!v || !(await confirmFn(`Forget ${v.name}’s saved encoding settings? The Encoder’s own settings are not changed.`))) return;
         try {
-          state = await invoke('forgetVehicle', { forgetSource: folderOf(v) });
+          state = await send('forgetVehicle', { forgetSource: folderOf(v) });
           editing = null; draft = null; draw();
         } catch (err) { toast(errorText(err), true); }
       }

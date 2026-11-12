@@ -29,7 +29,7 @@ const STYLE = `
 `;
 const esc = (t) => String(t ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const H = { 'Content-Type': 'application/json', 'X-Requested-With': 'sentry-six-manager' };
-async function api(url, opts = {}) {
+async function request(url, opts = {}) {
   const r = await fetch(url, { credentials: 'same-origin', ...opts, headers: { ...H, ...(opts.headers || {}) } });
   const d = await r.json().catch(() => ({}));
   if (!r.ok) throw Object.assign(new Error(d.error || `That did not work (${r.status}).`), { code: d.code });
@@ -48,7 +48,12 @@ function device(agent) {
   return `${browser}${os ? ` on ${os}` : ''}`;
 }
 
-export function createAccountPage(el) {
+export function createAccountPage(el, { scope } = {}) {
+  const api = async (url, opts = {}) => {
+    scope?.check();
+    try { return await request(url, { ...opts, signal: scope?.signal }); }
+    finally { scope?.check(); }
+  };
   if (!document.getElementById('sentry-acct-css')) {
     const style = document.createElement('style');
     style.id = 'sentry-acct-css';
@@ -73,7 +78,7 @@ export function createAccountPage(el) {
   let alive = true;
   let retry = null; // the action to run again once the password is confirmed
 
-  const fail = (err) => { $('[data-err]').textContent = err?.message || ''; };
+  const fail = (err) => { if (!alive || scope?.signal.aborted) return; $('[data-err]').textContent = err?.message || ''; };
   // run an action; one that needs the password again asks for it, then runs again
   async function guarded(fn) {
     fail(null);

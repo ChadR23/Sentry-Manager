@@ -43,7 +43,7 @@ const STYLE = `
 `;
 const esc = (t) => String(t ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const H = { 'Content-Type': 'application/json', 'X-Requested-With': 'sentry-six-manager' };
-async function api(url, opts = {}) {
+async function request(url, opts = {}) {
   const r = await fetch(url, { credentials: 'same-origin', ...opts, headers: { ...H, ...(opts.headers || {}) } });
   const d = await r.json().catch(() => ({}));
   if (!r.ok) throw Object.assign(new Error(d.error || `That did not work (${r.status}).`), { code: d.code, status: r.status });
@@ -51,7 +51,12 @@ async function api(url, opts = {}) {
 }
 const NOT_SET_UP = "Reporting isn't set up in this build.";
 
-export function createReportsSettings(el, { cls = {}, h24 = null } = {}) {
+export function createReportsSettings(el, { cls = {}, h24 = null, scope } = {}) {
+  const api = async (url, opts = {}) => {
+    scope?.check();
+    try { return await request(url, { ...opts, signal: scope?.signal }); }
+    finally { scope?.check(); }
+  };
   if (!document.getElementById('sentry-rep-css')) {
     const style = document.createElement('style');
     style.id = 'sentry-rep-css';
@@ -155,9 +160,9 @@ export function createReportsSettings(el, { cls = {}, h24 = null } = {}) {
   async function load() {
     try {
       st = await api('/api/reports');
-      if (alive) draw();
+      if (alive && !scope?.signal.aborted) draw();
     } catch (err) {
-      if (alive) el.innerHTML = `<p class="sr-err">${esc(err.status === 403 ? 'Only admin accounts can see Help & feedback.' : err.message)}</p>`;
+      if (alive && !scope?.signal.aborted) el.innerHTML = `<p class="sr-err">${esc(err.status === 403 ? 'Only admin accounts can see Help & feedback.' : err.message)}</p>`;
     }
   }
 

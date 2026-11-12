@@ -1,4 +1,5 @@
-import { api, esc } from '../core.js';
+import { ownedRender } from '../core.js';
+import { esc } from '../core.js';
 import { overviewStatus, attentionItems, strip } from '../status.js';
 import { icon } from '../icons.js';
 import {
@@ -10,7 +11,9 @@ import {
   categoryEntries,
   categoryCount,
 } from '../format.js';
-export async function render(el, { current, state, alive }) {
+async function renderPage(el, ctx) {
+  const { api } = ctx.scope;
+  const { current, state, alive } = ctx;
   const v = current();
   if (!v) {
     el.innerHTML =
@@ -68,3 +71,5 @@ export async function render(el, { current, state, alive }) {
       }),
   );
 }
+
+export const render = ownedRender(renderPage);

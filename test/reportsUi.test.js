@@ -15,7 +15,7 @@ const PACKS = { aurora: 'aurora', daylight: 'dl', flux: 'flux', horizon: 'hz' };
 
 test('the shared module: feedback, support, the opt-in, anonymous, the preview, the password, "not set up"', () => {
   const m = read('web/reportsSettings.js');
-  assert.match(m, /export function createReportsSettings\(el, \{ cls = \{\}, h24 = null \} = \{\}\)/);
+  assert.match(m, /export function createReportsSettings\(el, \{ cls = \{\}, h24 = null, scope \} = \{\}\)/);
   for (const text of ['Send feedback', 'Send diagnostics to support', 'Share diagnostics with the developers', 'Send anonymously', 'What will be sent', "Reporting isn't set up in this build.", 'Attach diagnostics', 'Contact (optional)', "What's wrong (optional)", 'Your reference']) {
     assert.ok(m.includes(text), text);
   }

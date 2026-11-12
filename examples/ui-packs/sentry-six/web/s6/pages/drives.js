@@ -1,5 +1,7 @@
+import { ownedRender } from '../core.js';
 import { esc } from '../core.js';
-export async function render(el, ctx) {
+async function renderPage(el, ctx) {
+  const {} = ctx.scope;
   const key = ctx.sub || 'trips',
     v = ctx.current();
   el.innerHTML =
@@ -15,12 +17,12 @@ export async function render(el, ctx) {
   const box = el.querySelector('[data-shared]');
   let page;
   if (key === 'driving')
-    page = (await import('/web/driving.js')).createDrivingPage(box, {
+    page = (await ctx.scope.wait(import('/web/driving.js'))).createDrivingPage(box, {
       vehicleId: v?.id,
       vehicleName: v?.name,
     });
   else if (key === 'map')
-    page = (await import('/web/eventMap.js')).createEventMapPage(box, {
+    page = (await ctx.scope.wait(import('/web/eventMap.js'))).createEventMapPage(box, {
       vehicleId: v?.id,
       vehicleName: v?.name,
       openEvent: (ev) => {
@@ -28,7 +30,7 @@ export async function render(el, ctx) {
       },
     });
   else
-    page = (await import('/web/drives.js')).createDrivesPage(box, {
+    page = (await ctx.scope.wait(import('/web/drives.js'))).createDrivesPage(box, {
       vehicleId: v?.id,
       vehicleName: v?.name,
       h24: () => ctx.state.h24,
@@ -43,3 +45,5 @@ export async function render(el, ctx) {
     });
   return () => page?.destroy?.();
 }
+
+export const render = ownedRender(renderPage);

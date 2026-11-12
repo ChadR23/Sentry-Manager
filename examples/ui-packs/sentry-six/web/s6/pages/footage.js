@@ -1,4 +1,5 @@
-import { api, esc, act, toast, sheet, confirmDialog } from '../core.js';
+import { ownedRender, scope } from '../core.js';
+import { api, esc, act, sheet } from '../core.js';
 import {
   dayLabel,
   timeRange,
@@ -24,12 +25,15 @@ export async function playParams(base, day, rec) {
   const detail = await api(base + '/recordings/' + encodeURIComponent(rec.id));
   return { folder: detail.folderPath };
 }
-export async function render(el, { current, state, alive }) {
+async function renderPage(el, ctx) {
+  const { api, confirmDialog, toast } = ctx.scope;
+  const { current, state, alive } = ctx;
   const admin = (await api('/api/auth/me')).role === 'admin';
   let v = current();
   if (!v) {
-    el.innerHTML =
-      admin ? '<h2>Add your first vehicle to get started.</h2><a href="#/settings/vehicles">Add a vehicle</a>' : '<h2>No vehicles yet.</h2><p>An administrator can add a vehicle.</p>';
+    el.innerHTML = admin
+      ? '<h2>Add your first vehicle to get started.</h2><a href="#/settings/vehicles">Add a vehicle</a>'
+      : '<h2>No vehicles yet.</h2><p>An administrator can add a vehicle.</p>';
     return;
   }
   const id = encodeURIComponent(v.id),
@@ -76,6 +80,11 @@ export async function render(el, { current, state, alive }) {
       ...(f.to ? { to: f.to } : {}),
       ...extra,
     });
+  async function selectRecords(load) {
+    const generation = f.selection.generation();
+    const rows = await load();
+    if (valid() && generation === f.selection.generation()) f.selection.add(rows.map((r) => r.id));
+  }
   async function allRecords(extra = {}) {
     const all = [],
       scope = params().toString();
@@ -88,7 +97,12 @@ export async function render(el, { current, state, alive }) {
     }
   }
   async function records(day) {
-    if (!f.dayRecs.has(day)) f.dayRecs.set(day, await allRecords({ date: day }));
+    if (!f.dayRecs.has(day)) {
+      const stamp = params().toString();
+      const rows = await allRecords({ date: day });
+      if (!valid() || stamp !== params().toString()) return [];
+      f.dayRecs.set(day, rows);
+    }
     return f.dayRecs.get(day);
   }
   let pendingAction;
@@ -110,7 +124,10 @@ export async function render(el, { current, state, alive }) {
       f.selection.add(wanted.map((r) => r.id));
     }
     const selected = wanted.filter((r) => f.selection.has(r.id));
-    const controller = new AbortController();
+    const controller = scope(scopeToken, {
+      signal: ctx.scope.signal,
+      alive: valid,
+    });
     pendingAction = controller;
     const stamp = scopeToken();
     const active = () => valid() && !controller.signal.aborted && stamp === scopeToken();
@@ -259,7 +276,7 @@ export async function render(el, { current, state, alive }) {
       if (has('select')) {
         f.selecting = !f.selecting;
         if (!f.selecting) f.selection.clear();
-      } else if (has('all')) f.selection.add((await allRecords()).map((r) => r.id));
+      } else if (has('all')) await selectRecords(() => allRecords());
       else if (has('deselect')) f.selection.clear();
       else if (has('category')) {
         changeScope(f, { category: b.dataset.category });
@@ -306,7 +323,7 @@ export async function render(el, { current, state, alive }) {
                   'Select this day',
                   async () => {
                     f.selecting = true;
-                    f.selection.add((await records(day)).map((r) => r.id));
+                    await selectRecords(() => records(day));
                     await draw();
                   },
                 ],
@@ -353,7 +370,9 @@ export async function render(el, { current, state, alive }) {
     el.onchange = act(async (e) => {
       const x = e.target;
       if (x.dataset.dayCheck) {
+        const generation = f.selection.generation();
         const ids = (await records(x.dataset.dayCheck)).map((r) => r.id);
+        if (!valid() || generation !== f.selection.generation()) return;
         x.checked ? f.selection.add(ids) : f.selection.remove(ids);
       } else if (x.dataset.rec) {
         x.checked ? f.selection.add([x.dataset.rec]) : f.selection.remove([x.dataset.rec]);
@@ -386,28 +405,32 @@ export async function render(el, { current, state, alive }) {
   const stopPress = longPress(el, '[data-day]', (row) => {
     if (!admin) return;
     f.selecting = true;
-    records(row.dataset.day)
-      .then((recs) => {
-        f.selection.add(recs.map((r) => r.id));
+    selectRecords(() => records(row.dataset.day))
+      .then(() => {
         return draw();
       })
       .catch((e) => toast(e.message, true));
   });
-  await draw();
-  poll = setInterval(indexStatus, 5000);
-  return () => {
+  const teardown = () => {
     cancelAction();
     unsubscribeSelection();
     stopPress();
     window.removeEventListener('s6:changed', changed);
     stopped = true;
     clearInterval(poll);
-    document.body.classList.remove('selecting');
     const actions = document.getElementById('page-actions');
-    if (actions) {
+    if (actions && actions.onclick === el.onclick) {
+      document.body.classList.remove('selecting');
       actions.replaceChildren();
       actions.onclick = null;
     }
     el.onclick = el.onchange = null;
   };
+  ctx.scope.signal.addEventListener('abort', teardown, { once: true });
+  await draw();
+  if (!valid()) return teardown;
+  poll = setInterval(indexStatus, 5000);
+  return teardown;
 }
+
+export const render = ownedRender(renderPage);

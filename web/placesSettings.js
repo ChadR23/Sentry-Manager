@@ -188,7 +188,7 @@ function dayText(at) {
   return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: d.getFullYear() === new Date().getFullYear() ? undefined : 'numeric' });
 }
 
-export function createPlacesSettings(el, { cls = {}, toast = () => {}, confirm = async () => window.confirm('Remove this place?'), dark } = {}) {
+export function createPlacesSettings(el, { cls = {}, toast = () => {}, confirm = async () => window.confirm('Remove this place?'), dark, scope } = {}) {
   if (!document.getElementById('sentry-pl-css')) {
     const style = document.createElement('style');
     style.id = 'sentry-pl-css';
@@ -244,8 +244,10 @@ export function createPlacesSettings(el, { cls = {}, toast = () => {}, confirm =
 
   const radiusOk = (v) => Number.isFinite(v) && v >= MIN_R && v <= MAX_R;
   async function call(method, url, body) {
-    const r = await fetch(url, { method, credentials: 'same-origin', headers: H, body: body === undefined ? undefined : JSON.stringify(body) });
+    scope?.check();
+    const r = await fetch(url, { signal: scope?.signal, method, credentials: 'same-origin', headers: H, body: body === undefined ? undefined : JSON.stringify(body) });
     const data = await r.json().catch(() => ({}));
+    scope?.check();
     if (!r.ok) throw new Error(data.error || `The server said ${r.status}.`);
     return data;
   }

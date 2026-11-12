@@ -1,16 +1,18 @@
-import { api, esc, act, toast, confirmDialog, confirmPassword } from '../core.js';
+import { ownedRender } from '../core.js';
+import { esc, act } from '../core.js';
 import { healthSummary } from '../status.js';
 import { plural, dayKey, dayLabel, timeLabel, size, ago } from '../format.js';
 import * as datepicker from './datepicker.js';
 import { icon } from '../icons.js';
-export async function render(el, ctx) {
+async function renderPage(el, ctx) {
+  const { api, confirmDialog, confirmPassword, toast } = ctx.scope;
   const admin = (await api('/api/auth/me')).role === 'admin';
   if (!admin && ['logs', 'backups'].includes(ctx.sub)) {
     el.innerHTML =
       '<p>This page is available to administrators.</p><a href="#/health">Back to Health</a>';
     return;
   }
-  if (ctx.sub === 'server') return (await import('./server.js')).render(el, ctx);
+  if (ctx.sub === 'server') return (await ctx.scope.wait(import('./server.js'))).render(el, ctx);
   let stopped = false,
     timer;
   const alive = () => !stopped && ctx.alive();
@@ -145,7 +147,9 @@ export async function render(el, ctx) {
           method: 'POST',
         });
         toast('Restoring. The app will restart.');
-        setTimeout(() => location.reload(), 15000);
+        setTimeout(() => {
+          if (ctx.alive()) location.reload();
+        }, 15000);
       }
     });
     await load();
@@ -195,3 +199,5 @@ export async function render(el, ctx) {
     el.onclick = null;
   };
 }
+
+export const render = ownedRender(renderPage);

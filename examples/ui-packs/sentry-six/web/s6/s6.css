@@ -1225,6 +1225,9 @@ pre {
   .nd-grid {
     grid-template-columns: 1fr;
   }
+  .nd-wide {
+    grid-column: 1 / -1;
+  }
   .nd-tile {
     min-width: 0;
   }
@@ -2130,3 +2133,5 @@ input.toggle-switch:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+.savings .sentry-sv { color: var(--accent, #34d399); }

@@ -32,11 +32,17 @@ export function studioUrl(kind, vehicle, extra = {}, vehicleChanged = false) {
 export function showStudio(kind, vehicle, extra = {}, vehicleChanged = false) {
   hideStudio();
   const url = studioUrl(kind, vehicle, extra, vehicleChanged);
-  if (!frames[kind] || frames[kind].dataset.src !== url) {
+  if (
+    !frames[kind] ||
+    frames[kind].dataset.vehicle !== vehicle?.id ||
+    vehicleChanged ||
+    Object.keys(extra).length > 0
+  ) {
     frames[kind]?.remove();
     const wrap = document.createElement('div');
     wrap.className = 'frame-wrap';
     wrap.dataset.src = url;
+    wrap.dataset.vehicle = vehicle?.id;
     wrap.innerHTML = `<div class="studio-loading"><span>Opening ${kind === 'encoder' ? 'Encoder' : 'Viewer'}…</span><i></i><i></i><i></i></div><iframe title="Sentry Studio ${kind}" src="${esc(url)}" allow="fullscreen; clipboard-write"></iframe>`;
     document.getElementById('frames').append(wrap);
     frames[kind] = wrap;
