@@ -1,1 +1,1 @@
-export {createAccountPage} from '/web/account.js';
+export { createAccountPage } from '/web/account.js';

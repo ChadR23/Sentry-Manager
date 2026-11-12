@@ -1,8 +1,26 @@
-import {api,esc,toast,confirmDialog} from '../../core.js';
-import {icon} from '../../icons.js';
-import {size as bytes,ago as when} from '../../format.js';
-export function forms(page,ctx){const {state,render}=ctx,$=id=>page.querySelector('#'+id)||document.getElementById(id),clockPref={h24:state.h24},store={set:(k,v)=>localStorage.setItem('s6:'+k,v)},loadVehicles=async()=>{state.vehicles=(await api('/api/vehicles')).vehicles;};
-const fin=n=>typeof n==='number'&&Number.isFinite(n),WEEK=[[1,'Mon'],[2,'Tue'],[3,'Wed'],[4,'Thu'],[5,'Fri'],[6,'Sat'],[0,'Sun']],MAX_RATES=12,priceValue=n=>fin(n)?String(n):'';
+import { api, esc, toast, confirmDialog } from '../../core.js';
+import { icon } from '../../icons.js';
+import { size as bytes, ago as when } from '../../format.js';
+export function forms(page, ctx) {
+  const { state, render } = ctx,
+    $ = (id) => page.querySelector('#' + id) || document.getElementById(id),
+    clockPref = { h24: state.h24 },
+    store = { set: (k, v) => localStorage.setItem('s6:' + k, v) },
+    loadVehicles = async () => {
+      state.vehicles = (await api('/api/vehicles')).vehicles;
+    };
+  const fin = (n) => typeof n === 'number' && Number.isFinite(n),
+    WEEK = [
+      [1, 'Mon'],
+      [2, 'Tue'],
+      [3, 'Wed'],
+      [4, 'Thu'],
+      [5, 'Fri'],
+      [6, 'Sat'],
+      [0, 'Sun'],
+    ],
+    MAX_RATES = 12,
+    priceValue = (n) => (fin(n) ? String(n) : '');
   function rateRow(r = {}) {
     const days = new Set(Array.isArray(r.days) ? r.days : [0, 1, 2, 3, 4, 5, 6]);
     return `<div class="rate" data-rate>
@@ -46,14 +64,24 @@ const fin=n=>typeof n==='number'&&Number.isFinite(n),WEEK=[[1,'Mon'],[2,'Tue'],[
           x.classList.toggle('on', x === b);
           x.setAttribute('aria-pressed', String(x === b));
         });
-        form.querySelectorAll('[data-plan]').forEach((x) => { x.hidden = x.dataset.plan !== mode; });
-        if (mode === 'tou' && !count()) list.insertAdjacentHTML('beforeend', rateRow({ label: 'Off-peak' }));
+        form.querySelectorAll('[data-plan]').forEach((x) => {
+          x.hidden = x.dataset.plan !== mode;
+        });
+        if (mode === 'tou' && !count())
+          list.insertAdjacentHTML('beforeend', rateRow({ label: 'Off-peak' }));
         add.disabled = count() >= MAX_RATES;
       };
     });
     add.onclick = () => {
       if (count() >= MAX_RATES) return;
-      list.insertAdjacentHTML('beforeend', rateRow(count() ? { label: 'Peak', from: '16:00', to: '21:00', days: [1, 2, 3, 4, 5] } : { label: 'Off-peak' }));
+      list.insertAdjacentHTML(
+        'beforeend',
+        rateRow(
+          count()
+            ? { label: 'Peak', from: '16:00', to: '21:00', days: [1, 2, 3, 4, 5] }
+            : { label: 'Off-peak' },
+        ),
+      );
       add.disabled = count() >= MAX_RATES;
       list.lastElementChild.querySelector('input')?.focus();
     };
@@ -66,24 +94,42 @@ const fin=n=>typeof n==='number'&&Number.isFinite(n),WEEK=[[1,'Mon'],[2,'Tue'],[
     form.onsubmit = async (e) => {
       e.preventDefault();
       const fd = new FormData(form);
-      const num = (v) => (String(v ?? '').trim() === '' ? null : Number(String(v).replace(',', '.')));
+      const num = (v) =>
+        String(v ?? '').trim() === '' ? null : Number(String(v).replace(',', '.'));
       const rates = [...list.querySelectorAll('[data-rate]')].map((row) => {
         const v = (k) => row.querySelector(`[data-k="${k}"]`).value;
-        return { label: v('label').trim(), price: num(v('price')), from: v('from'), to: v('to'), days: [...row.querySelectorAll('.days-pick input:checked')].map((x) => Number(x.value)) };
+        return {
+          label: v('label').trim(),
+          price: num(v('price')),
+          from: v('from'),
+          to: v('to'),
+          days: [...row.querySelectorAll('.days-pick input:checked')].map((x) => Number(x.value)),
+        };
       });
-      const prices = mode === 'tou' ? [num(fd.get('defaultPrice')), ...rates.map((r) => r.price)] : [num(fd.get('pricePerKwh'))];
+      const prices =
+        mode === 'tou'
+          ? [num(fd.get('defaultPrice')), ...rates.map((r) => r.price)]
+          : [num(fd.get('pricePerKwh'))];
       if (prices.some(Number.isNaN)) return toast('Enter prices as numbers, like 0.15.', true);
       const body = {
-        currency: String(fd.get('currency') || '').trim() || '$', mode,
-        pricePerKwh: num(fd.get('pricePerKwh')), defaultPrice: num(fd.get('defaultPrice')),
+        currency: String(fd.get('currency') || '').trim() || '$',
+        mode,
+        pricePerKwh: num(fd.get('pricePerKwh')),
+        defaultPrice: num(fd.get('defaultPrice')),
         // one price keeps the saved plan for later; a plan sends what is on screen
-        rates: mode === 'tou' ? rates : (saved.rates || [])
+        rates: mode === 'tou' ? rates : saved.rates || [],
       };
       try {
         const next = await api('/api/settings/power', { method: 'PUT', body });
         state.power = next;
         Object.assign(saved, next);
-        toast(mode === 'tou' ? 'Saved. Costs follow the plan from now on.' : body.pricePerKwh === null ? 'Saved. Energy is shown without a cost.' : 'Saved. Costs use this price from now on.');
+        toast(
+          mode === 'tou'
+            ? 'Saved. Costs follow the plan from now on.'
+            : body.pricePerKwh === null
+              ? 'Saved. Energy is shown without a cost.'
+              : 'Saved. Costs use this price from now on.',
+        );
       } catch (err) {
         toast(err.message, true);
       }
@@ -100,7 +146,11 @@ const fin=n=>typeof n==='number'&&Number.isFinite(n),WEEK=[[1,'Mon'],[2,'Tue'],[
         <dl class="kv" style="margin-top:16px"><dt>Running</dt><dd class="mono">${running}</dd></dl></div>`;
     }
     const l = u.latest;
-    const latest = l ? `<span${bl.latestTip(l) ? ` title="${esc(bl.latestTip(l))}"` : ''}>${esc(bl.latestText(l))}</span>` : u.error ? esc(u.error) : 'not checked yet';
+    const latest = l
+      ? `<span${bl.latestTip(l) ? ` title="${esc(bl.latestTip(l))}"` : ''}>${esc(bl.latestText(l))}</span>`
+      : u.error
+        ? esc(u.error)
+        : 'not checked yet';
     const behind = u.updateAvailable && bl.behindText(u);
     return `<div class="card" data-section="updates"><h2>Updates</h2>
       <p>Updates come as a new image. To install one, run ${how} where you set up Sentry Six Manager. Settings, footage and the Recycle Bin stay as they are.</p>
@@ -113,12 +163,14 @@ const fin=n=>typeof n==='number'&&Number.isFinite(n),WEEK=[[1,'Mon'],[2,'Tue'],[
     const tls = sec.tls || {};
     const ca = tls.ca;
     const host = (sec.currentHost || '').replace(/:\d+$/, '').replace(/^\[|\]$/g, '');
-    const covered = !host || (tls.hostnames || []).map((h) => h.toLowerCase()).includes(host.toLowerCase());
+    const covered =
+      !host || (tls.hostnames || []).map((h) => h.toLowerCase()).includes(host.toLowerCase());
     let body = `<dl class="kv" style="margin-top:16px">
       <dt>This connection</dt><dd>${sec.https ? 'HTTPS (encrypted)' : '<b class="bad-text">not encrypted</b>: others on the network could read your password and the footage. Use https:// or a reverse proxy that does HTTPS.'}</dd>
       <dt>Server process</dt><dd>${sec.runningAsRoot ? 'runs as root (not supervised; fine for development, not for the Docker image)' : 'runs as an unprivileged user; only the supervisor can mount shares'}</dd>`;
     if (sec.tlsMode === 'off') {
-      body += '<dt>HTTPS</dt><dd>turned off (TLS_MODE=off): only use this behind a reverse proxy that does HTTPS.</dd></dl>';
+      body +=
+        '<dt>HTTPS</dt><dd>turned off (TLS_MODE=off): only use this behind a reverse proxy that does HTTPS.</dd></dl>';
     } else if (tls.mode === 'acme') {
       body += `<dt>Certificate</dt><dd>${esc(tls.summary || '')}</dd>
         <dt>Fingerprint</dt><dd class="mono small">${esc(tls.certificate?.fingerprint || '?').replace(/:/g, ':<wbr>')}</dd></dl>`;
@@ -157,13 +209,18 @@ const fin=n=>typeof n==='number'&&Number.isFinite(n),WEEK=[[1,'Mon'],[2,'Tue'],[
     const save = async (names) => {
       const ok = await confirmDialog({
         title: 'Make a new certificate?',
-        body: '<p>The certificate will cover the new names. Every phone, tablet and computer that continued past the browser\'s warning before will see it once more; devices with the certificate authority installed won\'t.</p>',
-        ok: 'Save names'
+        body: "<p>The certificate will cover the new names. Every phone, tablet and computer that continued past the browser's warning before will see it once more; devices with the certificate authority installed won't.</p>",
+        ok: 'Save names',
       });
       if (!ok) return;
       try {
-        const out = await api('/api/security/hostnames', { method: 'PUT', body: { hostnames: names } });
-        toast(`${out.caReplaced ? 'Saved. The certificate authority was replaced: install the new one on your devices.' : 'Saved. The certificate now covers those names.'} Reloading the page for the new certificate…`);
+        const out = await api('/api/security/hostnames', {
+          method: 'PUT',
+          body: { hostnames: names },
+        });
+        toast(
+          `${out.caReplaced ? 'Saved. The certificate authority was replaced: install the new one on your devices.' : 'Saved. The certificate now covers those names.'} Reloading the page for the new certificate…`,
+        );
         // the browser has to pick up the new certificate; a page that clicked
         // past a warning would otherwise fail every request from now on
         setTimeout(() => location.reload(), 2500);
@@ -175,21 +232,42 @@ const fin=n=>typeof n==='number'&&Number.isFinite(n),WEEK=[[1,'Mon'],[2,'Tue'],[
     if (form) {
       form.onsubmit = (e) => {
         e.preventDefault();
-        save(String(new FormData(form).get('hostnames') || '').split(/[\s,]+/).filter(Boolean));
+        save(
+          String(new FormData(form).get('hostnames') || '')
+            .split(/[\s,]+/)
+            .filter(Boolean),
+        );
       };
     }
     const add = $('sec-add-host');
     if (add) add.onclick = () => save([...(sec.tls?.editable || []), add.dataset.host]);
     const box = $('sec-access');
     if (box) {
-      import('/web/accessSettings.js').then((m) => {
-        if ($('sec-access') === box) m.createAccessSettings(box, { cls: { btn: 'btn sm', primary: 'btn sm solid', input: 'input' }, h24: () => clockPref.h24 });
-      }).catch(() => { box.textContent = 'Sign-in protection could not load. Reload the page.'; });
+      import('/web/accessSettings.js')
+        .then((m) => {
+          if ($('sec-access') === box)
+            m.createAccessSettings(box, {
+              cls: { btn: 'btn sm', primary: 'btn sm solid', input: 'input' },
+              h24: () => clockPref.h24,
+            });
+        })
+        .catch(() => {
+          box.textContent = 'Sign-in protection could not load. Reload the page.';
+        });
     }
   }
   function vehicleForm(v) {
-    const versions = state.system?.smbVersions || { '3.1.1': 'SMB 3.1.1 (recommended)', '3.02': 'SMB 3.02', '3.0': 'SMB 3.0', 3: 'SMB 3.0 or newer' };
-    const s = v?.source || { type: 'smb', version: state.system?.smbDefaultVersion || '3.1.1', encrypt: true };
+    const versions = state.system?.smbVersions || {
+      '3.1.1': 'SMB 3.1.1 (recommended)',
+      3.02: 'SMB 3.02',
+      '3.0': 'SMB 3.0',
+      3: 'SMB 3.0 or newer',
+    };
+    const s = v?.source || {
+      type: 'smb',
+      version: state.system?.smbDefaultVersion || '3.1.1',
+      encrypt: true,
+    };
     return `<form id="veh" class="form" style="margin-top:22px;padding-top:22px;border-top:1px solid var(--border)">
       <h3 class="full">${v ? `Edit ${esc(v.name)}` : 'Add a vehicle'}</h3>
       <label class="field">Name<input class="input" name="name" required value="${esc(v?.name || '')}" placeholder="Daily Driver"></label>
@@ -201,7 +279,14 @@ const fin=n=>typeof n==='number'&&Number.isFinite(n),WEEK=[[1,'Mon'],[2,'Tue'],[
         <label class="field">User name<input class="input" name="username" value="${esc(s.username || '')}" autocomplete="off"></label>
         <label class="field">Password<input class="input" name="password" type="password" placeholder="${s.passwordSet ? 'saved — leave empty to keep' : ''}" autocomplete="new-password"></label>
         <label class="field">Domain (optional)<input class="input" name="domain" value="${esc(s.domain || '')}"></label>
-        <label class="field">SMB version<select class="input" name="version">${Object.entries(versions).map(([x, label]) => `<option value="${esc(x)}"${String(s.version || '3.1.1') === x ? ' selected' : ''}>${esc(label)}</option>`).join('')}</select></label>
+        <label class="field">SMB version<select class="input" name="version">${Object.entries(
+          versions,
+        )
+          .map(
+            ([x, label]) =>
+              `<option value="${esc(x)}"${String(s.version || '3.1.1') === x ? ' selected' : ''}>${esc(label)}</option>`,
+          )
+          .join('')}</select></label>
         <label class="field">Port (optional)<input class="input" name="port" inputmode="numeric" value="${esc(s.port || '')}" placeholder="445"></label>
         <label class="check full"><input type="checkbox" name="encrypt"${s.encrypt === false ? '' : ' checked'}> Encrypt the connection (recommended). Without it the connection is still signed, so nobody can change the footage, but others on the network could watch it.</label>
         <div class="full smb-test"><button class="btn" type="button" id="smb-test">Test connection</button><p class="small" id="smb-test-result" role="status" aria-live="polite"></p></div>
@@ -221,19 +306,28 @@ const fin=n=>typeof n==='number'&&Number.isFinite(n),WEEK=[[1,'Mon'],[2,'Tue'],[
       let carField = null;
       const slot = veh.querySelector('[data-car-slot]');
       if (slot) {
-        import('/web/carModelField.js').then((m) => {
-          if (!slot.isConnected) return;
-          carField = m;
-          slot.innerHTML = m.carModelFields(state.vehicles.find((x) => x.id === editing), { hint: 'muted small full' });
-          m.wireCarModel(veh);
-        }).catch(() => {});
+        import('/web/carModelField.js')
+          .then((m) => {
+            if (!slot.isConnected) return;
+            carField = m;
+            slot.innerHTML = m.carModelFields(
+              state.vehicles.find((x) => x.id === editing),
+              { hint: 'muted small full' },
+            );
+            m.wireCarModel(veh);
+          })
+          .catch(() => {});
       }
       let type = veh.querySelector('#src-type .on')?.dataset.type || 'smb';
       veh.querySelectorAll('#src-type button').forEach((b) => {
         b.onclick = () => {
           type = b.dataset.type;
-          veh.querySelectorAll('#src-type button').forEach((x) => x.classList.toggle('on', x === b));
-          veh.querySelectorAll('[data-src]').forEach((x) => { x.hidden = x.dataset.src !== type; });
+          veh
+            .querySelectorAll('#src-type button')
+            .forEach((x) => x.classList.toggle('on', x === b));
+          veh.querySelectorAll('[data-src]').forEach((x) => {
+            x.hidden = x.dataset.src !== type;
+          });
         };
       });
       // Test connection: the details as typed, nothing saved
@@ -246,14 +340,26 @@ const fin=n=>typeof n==='number'&&Number.isFinite(n),WEEK=[[1,'Mon'],[2,'Tue'],[
           out.className = 'small muted';
           out.textContent = 'Connecting to the NAS…';
           try {
-            const r = await api('/api/vehicles/test-smb', { body: {
-              vehicleId: editing !== 'new' ? editing : null,
-              source: { type: 'smb', share: fd.get('share'), username: fd.get('username'), password: fd.get('password') || undefined, domain: fd.get('domain'), version: fd.get('version'), encrypt: fd.get('encrypt') === 'on', port: fd.get('port') || null }
-            } });
+            const r = await api('/api/vehicles/test-smb', {
+              body: {
+                vehicleId: editing !== 'new' ? editing : null,
+                source: {
+                  type: 'smb',
+                  share: fd.get('share'),
+                  username: fd.get('username'),
+                  password: fd.get('password') || undefined,
+                  domain: fd.get('domain'),
+                  version: fd.get('version'),
+                  encrypt: fd.get('encrypt') === 'on',
+                  port: fd.get('port') || null,
+                },
+              },
+            });
             if (!out.isConnected) return;
             if (r.ok) {
               out.className = 'small smb-ok';
-              out.textContent = `Connected: the user name and password work. ${r.footage ? `Tesla footage found${r.footage === '.' ? '' : ` in ${r.footage}`}.` : 'No TeslaCam folder found yet (empty share, or the footage is deeper than 3 folders).'} ${r.writable ? '' : `${r.writeProblem || 'Read-only for this account: the Recycle Bin, Protect and replacing originals need write access.'}`}`.trim();
+              out.textContent =
+                `Connected: the user name and password work. ${r.footage ? `Tesla footage found${r.footage === '.' ? '' : ` in ${r.footage}`}.` : 'No TeslaCam folder found yet (empty share, or the footage is deeper than 3 folders).'} ${r.writable ? '' : `${r.writeProblem || 'Read-only for this account: the Recycle Bin, Protect and replacing originals need write access.'}`}`.trim();
             } else {
               out.className = 'small smb-bad';
               out.textContent = `${r.stage === 'details' ? '' : 'Could not connect: '}${r.error}${r.hint ? ` ${r.hint}` : ''}`;
@@ -271,21 +377,44 @@ const fin=n=>typeof n==='number'&&Number.isFinite(n),WEEK=[[1,'Mon'],[2,'Tue'],[
       veh.onsubmit = async (e) => {
         e.preventDefault();
         const fd = new FormData(veh);
-        const body = { name: fd.get('name'), timezone: fd.get('timezone'), source: type === 'path'
-          ? { type: 'path', path: fd.get('path') }
-          : { type: 'smb', share: fd.get('share'), username: fd.get('username'), password: fd.get('password') || undefined, domain: fd.get('domain'), version: fd.get('version'), encrypt: fd.get('encrypt') === 'on', port: fd.get('port') || null } };
+        const body = {
+          name: fd.get('name'),
+          timezone: fd.get('timezone'),
+          source:
+            type === 'path'
+              ? { type: 'path', path: fd.get('path') }
+              : {
+                  type: 'smb',
+                  share: fd.get('share'),
+                  username: fd.get('username'),
+                  password: fd.get('password') || undefined,
+                  domain: fd.get('domain'),
+                  version: fd.get('version'),
+                  encrypt: fd.get('encrypt') === 'on',
+                  port: fd.get('port') || null,
+                },
+        };
         if (carField) body.car = carField.readCarModel(veh);
         // only send the source when it changed, so a rename needs no password
         if (editing !== 'new') {
           const was = state.vehicles.find((x) => x.id === editing)?.source || {};
-          const same = type === was.type && (type === 'path'
-            ? body.source.path === was.path
-            : ['share', 'username', 'domain', 'version'].every((k) => String(body.source[k] ?? '') === String(was[k] ?? ''))
-              && body.source.encrypt === (was.encrypt !== false) && String(body.source.port ?? '') === String(was.port ?? '') && !body.source.password);
+          const same =
+            type === was.type &&
+            (type === 'path'
+              ? body.source.path === was.path
+              : ['share', 'username', 'domain', 'version'].every(
+                  (k) => String(body.source[k] ?? '') === String(was[k] ?? ''),
+                ) &&
+                body.source.encrypt === (was.encrypt !== false) &&
+                String(body.source.port ?? '') === String(was.port ?? '') &&
+                !body.source.password);
           if (same) delete body.source;
         }
         try {
-          const saved = editing === 'new' ? await api('/api/vehicles', { body }) : await api(`/api/vehicles/${encodeURIComponent(editing)}`, { method: 'PUT', body });
+          const saved =
+            editing === 'new'
+              ? await api('/api/vehicles', { body })
+              : await api(`/api/vehicles/${encodeURIComponent(editing)}`, { method: 'PUT', body });
           state.vehicleId = saved.id;
           store.set('vehicle', saved.id);
           toast('Saved. Connecting to the footage…');
@@ -297,15 +426,38 @@ const fin=n=>typeof n==='number'&&Number.isFinite(n),WEEK=[[1,'Mon'],[2,'Tue'],[
       };
       if ($('veh-saved')) {
         $('veh-saved').onclick = async () => {
-          if (!(await confirmDialog({ title: 'Reset space saved?', body: '<p>The total of space saved by conversions starts again from zero for this vehicle, for example after its footage was deleted. No footage or conversion is touched.</p>', ok: 'Reset', danger: true }))) return;
-          await api(`/api/vehicles/${encodeURIComponent(editing)}/saved`, { method: 'DELETE' }).then(() => toast('Space saved starts again from zero.'), (err) => toast(err.message, true));
+          if (
+            !(await confirmDialog({
+              title: 'Reset space saved?',
+              body: '<p>The total of space saved by conversions starts again from zero for this vehicle, for example after its footage was deleted. No footage or conversion is touched.</p>',
+              ok: 'Reset',
+              danger: true,
+            }))
+          )
+            return;
+          await api(`/api/vehicles/${encodeURIComponent(editing)}/saved`, {
+            method: 'DELETE',
+          }).then(
+            () => toast('Space saved starts again from zero.'),
+            (err) => toast(err.message, true),
+          );
           await loadVehicles();
         };
       }
       if ($('veh-del')) {
         $('veh-del').onclick = async () => {
-          if (!(await confirmDialog({ title: 'Remove this vehicle?', body: '<p>Sentry Six Manager forgets the vehicle and unmounts its share. No footage is deleted.</p>', ok: 'Remove', danger: true }))) return;
-          await api(`/api/vehicles/${encodeURIComponent(editing)}`, { method: 'DELETE' }).catch((err) => toast(err.message, true));
+          if (
+            !(await confirmDialog({
+              title: 'Remove this vehicle?',
+              body: '<p>Sentry Six Manager forgets the vehicle and unmounts its share. No footage is deleted.</p>',
+              ok: 'Remove',
+              danger: true,
+            }))
+          )
+            return;
+          await api(`/api/vehicles/${encodeURIComponent(editing)}`, { method: 'DELETE' }).catch(
+            (err) => toast(err.message, true),
+          );
           await loadVehicles();
           location.hash = '#/settings';
         };
@@ -317,23 +469,39 @@ const fin=n=>typeof n==='number'&&Number.isFinite(n),WEEK=[[1,'Mon'],[2,'Tue'],[
         check.disabled = true;
         try {
           const out = await api('/api/updates/check', { body: {} });
-          toast(out.error || (out.updateAvailable ? 'An update is available.' : 'This is the latest version.'), Boolean(out.error));
+          toast(
+            out.error ||
+              (out.updateAvailable ? 'An update is available.' : 'This is the latest version.'),
+            Boolean(out.error),
+          );
         } catch (err) {
           toast(err.message, true);
         }
         render();
       };
     }
-    if ($('pw')) $('pw').onsubmit = async (e) => {
-      e.preventDefault();
-      const fd = new FormData(e.target);
-      try {
-        await api('/api/auth/password', { body: { current: fd.get('current'), next: fd.get('next') } });
-        toast('Password changed.');
-        e.target.reset();
-      } catch (err) {
-        toast(err.message, true);
-      }
-    };
+    if ($('pw'))
+      $('pw').onsubmit = async (e) => {
+        e.preventDefault();
+        const fd = new FormData(e.target);
+        try {
+          await api('/api/auth/password', {
+            body: { current: fd.get('current'), next: fd.get('next') },
+          });
+          toast('Password changed.');
+          e.target.reset();
+        } catch (err) {
+          toast(err.message, true);
+        }
+      };
   }
-return {powerCard,wirePower,updatesCard,securityCard,wireSecurity,vehicleForm,wireSettings};}
+  return {
+    powerCard,
+    wirePower,
+    updatesCard,
+    securityCard,
+    wireSecurity,
+    vehicleForm,
+    wireSettings,
+  };
+}

@@ -27,7 +27,7 @@ that browser then shows the built-in interface (until you press **Show the
 chosen interface**), and Settings → Interface can switch back for everyone.
 Packs are kept in `./data/ui-packs`.
 
-Four complete packs, every page rebuilt from scratch, come with the app and
+Five interface packs come with the app and
 are always in the drop-down (their source and zips are in
 [`examples/ui-packs`](../examples/ui-packs)): **Daylight**
 (`daylight.zip`), a calm, light-first interface for everyday use, and
@@ -35,7 +35,7 @@ are always in the drop-down (their source and zips are in
 and keyboard shortcuts for the numbers people. **Horizon** (`horizon.zip`) is a
 synthwave dashboard over a neon grid that scrolls toward a setting sun. **Aurora**
 (`aurora.zip`) floats glass windows over drifting northern lights, with a
-cockpit-style Viewer.
+cockpit-style Viewer. **Sentry Six** (`sentry-six.zip`) uses the family's dark Liquid Glass theme, a quieter Overview, date-range footage browsing, and grouped Settings. It keeps the shared Viewer, Encoder and Sentry USB behavior. Original remains the default.
 
 Every page also gets the server's own bars at the top, whatever the pack: a
 red **critical update** bar (fixed to the top of the window) and an amber
