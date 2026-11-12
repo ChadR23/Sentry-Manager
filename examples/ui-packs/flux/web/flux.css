@@ -740,6 +740,6 @@ label.sub-block { display: flex; gap: 8px; align-items: flex-start; }
 .tabs a:hover { color: var(--text); }
 .tabs a.on { color: var(--text); border-bottom-color: var(--violet); }
 
-/* Sentry USB Status tab: the Car card (web/sentryUsbLink.js) in Flux's panels with cyan and green */
+/* Sentry USB tab: the Car card (web/sentryUsbInfo.js) in Flux's panels with cyan and green */
 .sentry-sul { --sul-car-bg: var(--panel); --sul-car-tile: oklch(0.24 0.018 275); --sul-car-line: var(--line); --sul-car-radius: var(--r); --sul-car-tile-radius: var(--r); --sul-car-accent: var(--cyan); --sul-car-ok: var(--green); --sul-car-warn: var(--amber); --sul-car-bad: var(--red); --sul-car-body: var(--cyan); --sul-car-glass: var(--cyan-soft); }
 .sentry-sul .sul-car-chip b, .sentry-sul .sul-tire b { font-family: var(--mono); }

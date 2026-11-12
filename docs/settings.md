@@ -26,7 +26,7 @@ All optional; put them in `.env` next to `docker-compose.yml`.
 | `EXTRA_ROOTS` | | More container folders the converter may write to (`:`-separated) |
 | `SCAN_INTERVAL_MINUTES` | `15` | How often every vehicle is re-scanned |
 | `PORT`, `DATA_PATH`, `LOG_LEVEL` | `9000`, `/data`, `info` | |
-| `CAN_PORT` | `10000` | The device port: the Screenmate CAN Bridge's uploads and the Sentry USB management link ([sentry-usb-link.md](sentry-usb-link.md)); open only while CAN uploads are on or a Sentry USB is paired or pairing |
+| `CAN_PORT` | `10000` | The device port: the Screenmate CAN Bridge's uploads; open only while CAN uploads are on |
 | `REPORTS_URL` / `REPORTS_PUBLIC_KEY` | (built in) | Another receiver for the opt-in feedback and diagnostics reports (Settings → Help & feedback), and its key line; https only ([reports-api.md](reports-api.md)) |
 | `REPORTS` | (on) | `off`: no feedback or diagnostics reports from this server at all; Help & feedback says reporting is turned off |
 

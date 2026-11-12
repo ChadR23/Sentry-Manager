@@ -1,11 +1,11 @@
 'use strict';
 
-// The `car` object in a Sentry USB's status push (docs/sentry-usb-link.md,
-// section 4, "The car"): battery, temperatures, tire pressures and parked or
-// driving, from the Pi's Tesla BLE telemetry. Everything in it is untrusted:
-// only the keys below are kept, each with its type and range checked, and a
-// reading with anything wrong in it is dropped (the rest are kept). A car
-// with no valid reading left is no car.
+// The `car` object in a Sentry USB's info file on the share (docs/sentry-usb.md,
+// "The info file"; read by sentryUsbDevice.js): battery, temperatures, tire
+// pressures and parked or driving, from the Pi's Tesla BLE telemetry.
+// Everything in it is untrusted: only the keys below are kept, each with its
+// type and range checked, and a reading with anything wrong in it is dropped
+// (the rest are kept). A car with no valid reading left is no car.
 //
 //   const car = cleanCar(status.car, { now: Date.now() });   // object | null
 

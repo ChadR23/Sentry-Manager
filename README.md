@@ -89,8 +89,7 @@ in *System → Shell*, then stop and start the app ([TrueNAS](docs/truenas.md#up
 | [Export a video](docs/export.md) | Making one video of a stretch of footage, and its limits |
 | [Recycle Bin, policies and jobs](docs/recycle-bin-and-jobs.md) | Retention, restoring, and what the server is doing |
 | [Vehicles and SMB shares](docs/vehicles-and-shares.md) | Footage on a share or on the same machine, permissions |
-| [Sentry USB](docs/sentry-usb.md) | The Pi that archives the car's clips: pairing it and managing it from the Sentry USB tab (status, the car's battery, temperatures and tires, settings, updates), and converting without upsetting its checks |
-| [Sentry USB link](docs/sentry-usb-link.md) | Pairing the Pi and managing it from here (status, settings, updates, queued actions, security log): the contract both sides build to |
+| [Sentry USB](docs/sentry-usb.md) | The Pi that archives the car's clips: the Sentry USB tab (its storage and version, the car's battery, temperatures and tires, read from the share, no pairing), the files both sides write on the share, and converting without upsetting its checks |
 | [CAN Bridge](docs/can-bridge-api.md) | The car's own data (speed, battery, 12 V system, temperatures…) from a Screenmate One, synced to the footage in the Viewer (its car-data bar is off until turned on in the Nerd settings) |
 | [Phones and tablets](docs/phones-and-tablets.md) | Supported devices |
 | [Updates](docs/updates.md) | Updating, critical updates, how images are built |

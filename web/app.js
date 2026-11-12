@@ -2215,9 +2215,9 @@
   pages.account = async () => {
     await mountShared('ac-page', 'Account', '/web/account.js', (m, el) => m.createAccountPage(el));
   };
-  // Sentry USB, the Pi in the car: pairing and management over its link (web/sentryUsbLink.js)
+  // Sentry USB, the Pi in the car: what it last wrote to its share (web/sentryUsbInfo.js)
   pages.sentryusb = async () => {
-    await mountShared('su-page', 'Sentry USB', '/web/sentryUsbLink.js', (m, el) => m.createSentryUsbPage(el, { h24: () => clockPref.h24 }));
+    await mountShared('su-page', 'Sentry USB', '/web/sentryUsbInfo.js', (m, el) => m.createSentryUsbPage(el, { h24: () => clockPref.h24 }));
   };
   pages.health = async () => {
     await mountShared('hl-page', 'Health', '/web/health.js', (m, el) => m.createHealthPage(el, { h24: () => clockPref.h24 }));

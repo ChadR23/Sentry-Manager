@@ -181,7 +181,7 @@ way (the node names its own devices).
 | `converting` | boolean | A conversion is running |
 | `jobsQueued` | integer, 0 to 100,000 | Jobs not finished yet (running, or waiting their turn) |
 | `features.can` | boolean | CAN data is on |
-| `features.sentryUsbPaired` | boolean | A Sentry USB is paired |
+| `features.sentryUsbPaired` | boolean | A Sentry USB info file is on any car's share (the name is from when Sentry USB was paired) |
 | `features.gpu` | boolean | A GPU is available to the container (passed in, or NVIDIA) |
 | `footageSeconds` | *optional*; integer, 0 to 1,000,000,000,000 | The length of all the footage, all vehicles together, in seconds: one minute per Tesla clip minute, as the Dash counts its "footage hours" (hours x 3600) |
 | `platform` | *optional*; text, 1 to 32 | The OS Node runs on (`process.platform`), e.g. `'linux'` |

@@ -122,12 +122,11 @@ is reachable from the internet. If you do open it:
    treat the whole internet as home; fix that before relying on them.
 
 Port **10000**, the device port, is separate: it serves only the CAN
-Bridge's upload API with its own tokens and the Sentry USB management link
-(a WebSocket over TLS, where both sides prove a shared key; see
-[sentry-usb-link.md](sentry-usb-link.md)), and can be opened on its own
+Bridge's upload API with its own tokens, and can be opened on its own
 ([CAN Bridge upload API](can-bridge-api.md#the-port)). Opening 9000 is not
-needed for either. It listens only while CAN uploads are on or a Sentry USB
-is paired or pairing, and tells a stranger nothing (404, no version).
+needed for it. It listens only while CAN uploads are on, and tells a
+stranger nothing (404, no version). Sentry USB needs no port at all: it is
+read from the share it archives to ([sentry-usb.md](sentry-usb.md)).
 
 ### Which address a request comes from
 

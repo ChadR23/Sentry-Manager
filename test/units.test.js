@@ -97,7 +97,7 @@ test('the choice: miles in the US by default (as speed was), kept, told to every
 // ---- every place a temperature is shown reads the one choice ----------------
 const PACKS = ['aurora', 'daylight', 'flux', 'horizon'];
 const TEMP_FILES = [
-  'web/app.js', 'web/sentryUsbLink.js', 'web/statDash.js', 'src/renderer/scripts/features/hardwarePanel.js',
+  'web/app.js', 'web/sentryUsbInfo.js', 'web/statDash.js', 'src/renderer/scripts/features/hardwarePanel.js',
   'examples/ui-packs/flux/web/flux/pages/overview.js', 'examples/ui-packs/horizon/web/hz/pages/dashboard.js',
   'examples/ui-packs/aurora/web/aurora/pages/sky.js', 'examples/ui-packs/daylight/web/dl/pages/server.js'
 ];
@@ -124,7 +124,7 @@ test('the one choice is loaded where each interface needs it, and every Viewer\'
   assert.match(studio, /sharedUnits\.adopt\(typeof saved === 'boolean' \? saved : undefined\)/, 'Studio\'s saved useMetric only until a choice is made');
   assert.match(studio, /sharedUnits\.set\(useMetric\)/, 'its toggle sets the one choice');
   assert.match(studio, /sharedUnits\?\.onChange\(/, 'and follows it');
-  for (const f of ['web/statDash.js', 'web/sentryUsbLink.js', 'web/driving.js', 'web/drives.js']) assert.match(read(f), /^import '\/web\/units\.js';$/m, f);
+  for (const f of ['web/statDash.js', 'web/sentryUsbInfo.js', 'web/driving.js', 'web/drives.js']) assert.match(read(f), /^import '\/web\/units\.js';$/m, f);
   assert.match(read('web/statDash.js'), /if \(t\.matches\('\[data-units\]'\)\) \{ UNITS\.set\(!UNITS\.metric\(\)\); return; \}/, 'the car data\'s mph/km/h button');
   assert.match(read('web/statDash.js'), /const conv = canUnit\(m\.unit\);/, 'a CAN unit by its one spelling');
   for (const pack of PACKS) {

@@ -42,6 +42,7 @@
 const fsp = require('fs/promises');
 const path = require('path');
 const { createCarFilesReader } = require('./carFiles');
+const device = require('./sentryUsbDevice');
 
 const DIR = '.sentryusb';
 const FILE = 'archive-status.json';
@@ -376,7 +377,35 @@ function createSentryUsbStatus({ vehicles, now = () => Date.now(), log = null, o
   // the car's own list of what it wrote, beside the status file (carFiles.js)
   const carFilesReader = createCarFilesReader({ log });
   const carFiles = new Map(); // vid -> { file, size, mtimeMs, list, error } or null
+  // the Pi's info file, beside the status file (sentryUsbDevice.js)
+  const devices = new Map(); // vid -> { file, size, mtimeMs, info, error } or null
   let timer = null;
+
+  /** The info file in the first of `dirs` that has one: re-read only when its size or time changed. */
+  async function readDevice(vid, dirs) {
+    const before = devices.get(vid) || null;
+    for (const dir of dirs) {
+      const file = path.join(dir, device.FILE);
+      let st;
+      try { st = await fsp.stat(file); } catch { continue; }
+      if (!st.isFile()) continue;
+      if (before && before.file === file && before.size === st.size && before.mtimeMs === st.mtimeMs) return before;
+      let info = null;
+      let error = null;
+      try {
+        if (st.size > device.MAX_BYTES) error = 'too large';
+        else {
+          info = device.parseDevice(await fsp.readFile(file, 'utf8'), { now: now() });
+          if (!info) error = 'not a schema 1 info file';
+        }
+      } catch (err) {
+        error = 'unreadable';
+        log?.debug?.(`Sentry USB info ${file}: ${err.message}`);
+      }
+      return { file, size: st.size, mtimeMs: st.mtimeMs, info, error };
+    }
+    return null;
+  }
 
   function filesOf(v) {
     const out = [];
@@ -427,10 +456,14 @@ function createSentryUsbStatus({ vehicles, now = () => Date.now(), log = null, o
       if (cf) break;
     }
     carFiles.set(vid, cf);
+    const devBefore = devices.get(vid) || null;
+    const dev = await readDevice(vid, dirs).catch(() => null);
+    devices.set(vid, dev);
+    const devChanged = (devBefore?.file || null) !== (dev?.file || null) || (devBefore?.mtimeMs ?? null) !== (dev?.mtimeMs ?? null) || (devBefore?.size ?? null) !== (dev?.size ?? null);
     const was = before?.status ? JSON.stringify(before.status) : null;
     const is = next.status ? JSON.stringify(next.status) : null;
     const cfChanged = (cfBefore?.file || null) !== (cf?.file || null) || (cfBefore?.mtimeMs ?? null) !== (cf?.mtimeMs ?? null) || (cfBefore?.size ?? null) !== (cf?.size ?? null);
-    if (was !== is || cfChanged) {
+    if (was !== is || cfChanged || devChanged) {
       try { onChange(vid, next.status); } catch { /* observers are advisory */ }
     }
     return next.status;
@@ -533,6 +566,15 @@ function createSentryUsbStatus({ vehicles, now = () => Date.now(), log = null, o
       if (!cf) return null;
       return { present: true, error: cf.error || null, fileUnix: Math.floor(cf.mtimeMs / 1000), list: cf.list, archivedUnix: archivedSince(cache.get(vid)?.status || null) };
     },
+    /**
+     * The Pi's info file (parseDevice, plus when it was read), or null when the
+     * share has none: { present, error, info, readAt }.
+     */
+    device(vid) {
+      const d = devices.get(vid);
+      if (!d) return null;
+      return { present: true, error: d.error || null, info: d.info, readAt: cache.get(vid)?.readAt ?? null };
+    },
     /** The snapshots the last status lists (snapshotInfo), or null. */
     snapshots(vid) { return snapshotInfo(cache.get(vid)?.status || null); },
     /** interpret() of the last status, now. */
@@ -568,7 +610,7 @@ function createSentryUsbStatus({ vehicles, now = () => Date.now(), log = null, o
       if (timer) timers.clearInterval(timer);
       timer = null;
     },
-    forget(vid) { cache.delete(vid); arrivedOf.delete(vid); carFiles.delete(vid); }
+    forget(vid) { cache.delete(vid); arrivedOf.delete(vid); carFiles.delete(vid); devices.delete(vid); }
   };
 }
 

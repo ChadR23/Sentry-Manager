@@ -551,6 +551,6 @@ dialog.dlg[open] { animation: pop 240ms var(--ease) both; }
 /* Settings → Helper servers: the Nodes page inside the section */
 #section > .page { padding: 0; max-width: none; margin: 0; }
 
-/* Sentry USB Status tab: the Car card (web/sentryUsbLink.js) on Daylight's paper surfaces */
+/* Sentry USB tab: the Car card (web/sentryUsbInfo.js) on Daylight's paper surfaces */
 .sentry-sul { --sul-car-bg: var(--surface); --sul-car-tile: var(--bg-tint); --sul-car-line: var(--border); --sul-car-radius: var(--radius); --sul-car-tile-radius: var(--radius-sm); --sul-car-accent: var(--accent); --sul-car-ok: var(--good); --sul-car-warn: var(--warn); --sul-car-bad: var(--bad); --sul-car-body: var(--accent); --sul-car-glass: var(--accent-soft); }
 .sentry-sul .sul-car-chip, .sentry-sul .sul-tire { border-color: transparent; }

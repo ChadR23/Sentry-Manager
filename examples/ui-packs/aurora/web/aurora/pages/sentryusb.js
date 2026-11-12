@@ -1,5 +1,5 @@
-// Sentry USB: pair the Pi in the car and manage it over its link (web/sentryUsbLink.js).
-import { createSentryUsbPage } from '/web/sentryUsbLink.js';
+// Sentry USB: what the Pi in the car last wrote to its share (web/sentryUsbInfo.js).
+import { createSentryUsbPage } from '/web/sentryUsbInfo.js';
 import { clockPref } from '../core.js';
 
 export default {

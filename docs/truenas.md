@@ -29,11 +29,11 @@ app already on port 9000 (MinIO uses it): change the left number of
 `9000:9000`. *Replace originals* works on ZFS datasets (the app tests it when
 it opens the folder).
 
-**Sentry USB and the CAN Bridge.** Keep port `10000` in the file: the Sentry
-USB (the Pi in the car) and the Screenmate CAN Bridge connect to TrueNAS on it.
-Nothing listens there until one of them is set up. To pair a Sentry USB, see
-[Sentry USB → Managing it from here](sentry-usb.md#managing-it-from-here); the
-address you give the Pi is `<truenas>:10000`.
+**The CAN Bridge.** Keep port `10000` in the file: the Screenmate CAN Bridge
+connects to TrueNAS on it. Nothing listens there until CAN uploads are on.
+Sentry USB (the Pi in the car) needs no port and no pairing: it shows on the
+**Sentry USB** tab once it has written to its share
+([Sentry USB](sentry-usb.md#the-sentry-usb-tab)).
 
 **A certificate for a public name (optional).** For Let's Encrypt, point a DNS
 record at TrueNAS, forward ports 80 and 443 on your router, and turn on the

@@ -1,9 +1,10 @@
 'use strict';
 
-// The car in a Sentry USB's status push (docs/sentry-usb-link.md section 4,
-// "The car"): the server keeps only known keys with sane values
-// (server/sentryUsbCar.js), stores it with the status, and the Status tab's
-// Car card (web/sentryUsbLink.js) says it in the Pi's units, in every interface.
+// Sentry USB's info file on the share (docs/sentry-usb.md, "The info file"):
+// the server keeps only known keys with sane values (server/sentryUsbCar.js,
+// server/sentryUsbDevice.js), reads it beside the status file
+// (server/sentryUsb.js), and the Sentry USB tab (web/sentryUsbInfo.js) shows
+// it in the Manager's own units, in every interface. No pairing, no link.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -11,14 +12,12 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
-const https = require('node:https');
 const { cleanCar } = require('../server/sentryUsbCar');
-const { TlsManager } = require('../server/tls');
-const L = require('../server/sentryUsbLink');
-const { connectFakePi, makeCar } = require('./fixtures/fakeSentryUsb');
-// the shared page module (web/sentryUsbLink.js) as text for a data: import, its import of
+const { parseDevice } = require('../server/sentryUsbDevice');
+const { createSentryUsbStatus } = require('../server/sentryUsb');
+// the shared page module (web/sentryUsbInfo.js) as text for a data: import, its import of
 // the one unit choice (web/units.js) pointed at the file
-const linkSource = () => fs.readFileSync(path.join(__dirname, '..', 'web', 'sentryUsbLink.js'), 'utf8')
+const pageSource = () => fs.readFileSync(path.join(__dirname, '..', 'web', 'sentryUsbInfo.js'), 'utf8')
   .replace("import '/web/units.js';", `import ${JSON.stringify(require('node:url').pathToFileURL(path.join(__dirname, '..', 'web', 'units.js')).href)};`);
 
 const REPO = path.join(__dirname, '..');
@@ -80,68 +79,83 @@ test('car: no car, a broken car or one with nothing valid left is no car', () =>
   for (const v of [undefined, null, 0, 'car', [], [GOOD], {}, { battery: { pct: 200 } }, { tires: { fl: { kpa: 'x' } } }]) assert.equal(clean(v), null, JSON.stringify(v));
 });
 
-// ---- the link: a Pi pushes it, Manager keeps the checked one with the status
-const quiet = { info() {}, warn() {}, debug() {} };
-const memDb = () => {
-  const m = new Map();
-  return { get: (k, f = null) => (m.has(k) ? structuredClone(m.get(k)) : f), set: (k, v) => m.set(k, structuredClone(v)), raw: m };
-};
-async function setup() {
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sm-car-'));
-  const tls = new TlsManager({ dir: path.join(dir, 'tls'), log: quiet, hostnames: ['127.0.0.1'] });
-  await tls.ensure();
-  const link = L.createSentryUsbLink({ db: memDb(), log: quiet, iterations: 1000 });
-  const srv = https.createServer({ key: fs.readFileSync(path.join(dir, 'tls', 'server.key')), cert: fs.readFileSync(path.join(dir, 'tls', 'server.crt')) }, (req, res) => { res.writeHead(404); res.end(); });
-  srv.on('upgrade', (req, socket, head) => link.handleUpgrade(req, socket, head));
-  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
-  const pis = [];
-  const close = async () => { link.close(); for (const p of pis) p.ws?.terminate(); srv.closeAllConnections?.(); await new Promise((r) => srv.close(r)); };
-  const pair = async (state) => {
-    const { code } = await link.openPairing({ name: 'Car', username: 'pi', password: 'raspberry' });
-    const p = await connectFakePi({ port: srv.address().port, iterations: 1000, mode: 'pair', username: 'pi', password: 'raspberry', code, state, net: false });
-    pis.push(p);
-    return p;
-  };
-  return { link, pair, close };
-}
-const until = async (fn, ms = 5000) => { const end = Date.now() + ms; while (!fn()) { if (Date.now() > end) throw new Error('timed out'); await new Promise((r) => setTimeout(r, 20)); } };
+// ---- the info file
+const FILE = (over = {}) => ({
+  schema: 1, written_unix: T - 300, version: 'v3.28.10-test.32',
+  storage: { total_bytes: 256e9, used_bytes: 98.1e9, free_bytes: 157.9e9 },
+  drives: [{ name: 'cam', size_bytes: 64e9 }, { name: 'music', size_bytes: 4e9 }],
+  cpu_temp_c: 51.24, car: GOOD, ...over
+});
 
-test('link: the car is stored with the status, checked; a bad one is not stored', async () => {
-  const t = await setup();
+test('info file: a good one is kept; the car checked as the Car card wants it', () => {
+  const d = parseDevice(JSON.stringify(FILE()), { now: NOW });
+  assert.deepEqual(d, {
+    writtenUnix: T - 300, version: 'v3.28.10-test.32',
+    storage: { totalBytes: 256e9, usedBytes: 98.1e9, freeBytes: 157.9e9 },
+    drives: [{ name: 'cam', sizeBytes: 64e9 }, { name: 'music', sizeBytes: 4e9 }],
+    cpuTempC: 51.2, car: (() => { const c = clean(GOOD); delete c.units; return c; })()
+  });
+  // only schema and written_unix are needed
+  assert.deepEqual(parseDevice({ schema: 1, written_unix: T }, { now: NOW }), { writtenUnix: T, version: null, storage: null, drives: [], cpuTempC: null, car: null });
+});
+
+test('info file: anything wrong is dropped, field by field; no schema or a bad time is no file', () => {
+  for (const bad of ['', 'not json', '[]', JSON.stringify({ written_unix: T }), JSON.stringify(FILE({ schema: 2 })),
+    JSON.stringify(FILE({ written_unix: 1000 })), JSON.stringify(FILE({ written_unix: T + 3 * 86400 })), JSON.stringify(FILE({ written_unix: 'now' }))]) {
+    assert.equal(parseDevice(bad, { now: NOW }), null, bad.slice(0, 60));
+  }
+  const d = parseDevice(FILE({
+    version: 'v1\u0000<b>x</b>'.padEnd(200, 'y'),
+    storage: { total_bytes: 10, used_bytes: 50, free_bytes: -1 },
+    drives: [{ name: 'cam', size_bytes: 5 }, { name: 'cam', size_bytes: 6 }, { name: 'secret', size_bytes: 1 }, { name: 'music', size_bytes: 'big' }, 'x'],
+    cpu_temp_c: 900, car: { battery: 'full' }, extra: { deep: true }
+  }), { now: NOW });
+  assert.equal(d.version.length, 64, 'capped');
+  assert.doesNotMatch(d.version, /\u0000/);
+  assert.deepEqual(d.storage, { totalBytes: null, usedBytes: 50, freeBytes: null }, 'a total smaller than what it holds is not believed; negative bytes dropped');
+  assert.deepEqual(d.drives, [{ name: 'cam', sizeBytes: 5 }], 'known names, once each, sizes as numbers');
+  assert.equal(d.cpuTempC, null);
+  assert.equal(d.car, null);
+  assert.equal('extra' in d, false);
+});
+
+test('reader: the info file beside the status file, re-read only when it changes; gone when it goes', async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'su-info-'));
   try {
-    const { fakeState } = require('./fixtures/fakeSentryUsb');
-    const st = fakeState();
-    const p = await t.pair(st);
-    assert.equal(p.result, 'ok');
-    await until(() => t.link.devices()[0]?.status);
-    const car = t.link.devices()[0].status.car;
-    assert.equal(car.battery.pct, 89);
-    assert.equal(car.drive.state, 'parked');
-    assert.deepEqual(car.units, { temp: 'F', pressure: 'psi' });
-
-    // a Pi sending junk in its car: the junk is not kept, the rest of the status is
-    st.car = { ...makeCar(), battery: { pct: 1e9 }, extra: { deep: 'x' }, tires: { fl: { kpa: 290, sneaky: '<img src=x onerror=alert(1)>' } } };
-    const sent = t.link.devices()[0].statusAt;
-    p.pushStatus();
-    await until(() => t.link.devices()[0].statusAt !== sent);
-    const s2 = t.link.devices()[0].status;
-    assert.equal(s2.drives_active, 'yes');
-    assert.equal(s2.car.battery, undefined);
-    assert.equal(s2.car.extra, undefined);
-    assert.deepEqual(s2.car.tires, { fl: { kpa: 290 } });
-    assert.doesNotMatch(JSON.stringify(s2), /onerror|sneaky/);
-
-    // nothing valid: no car key at all
-    st.car = { battery: 'full' };
-    const sent2 = t.link.devices()[0].statusAt;
-    p.pushStatus();
-    await until(() => t.link.devices()[0].statusAt !== sent2);
-    assert.equal('car' in t.link.devices()[0].status, false);
-  } finally { await t.close(); }
+    const dir = path.join(root, '.sentryusb');
+    await fsp.mkdir(dir);
+    const v = { id: 'car1', name: 'Daily', timezone: 'UTC' };
+    const vehicles = { get: (id) => (id === v.id ? v : null), list: () => [v], rootOf: () => root };
+    const changes = [];
+    const su = createSentryUsbStatus({ vehicles, now: () => NOW, onChange: (vid) => changes.push(vid), timers: { setInterval: () => null, clearInterval() {} } });
+    await su.refresh('car1');
+    assert.equal(su.device('car1'), null, 'no file: nothing');
+    await fsp.writeFile(path.join(dir, 'device-status.json'), JSON.stringify(FILE()));
+    await su.refresh('car1');
+    const d = su.device('car1');
+    assert.equal(d.present, true);
+    assert.equal(d.error, null);
+    assert.equal(d.info.version, 'v3.28.10-test.32');
+    assert.equal(d.info.car.tires.fl.kpa, 289.6);
+    assert.deepEqual(changes, ['car1']);
+    await su.refresh('car1');
+    assert.equal(su.device('car1').info, d.info, 'unchanged: not parsed again');
+    assert.deepEqual(changes, ['car1']);
+    await fsp.writeFile(path.join(dir, 'device-status.json'), '{"schema":9}');
+    await fsp.utimes(path.join(dir, 'device-status.json'), new Date(), new Date(Date.now() + 5000));
+    await su.refresh('car1');
+    assert.deepEqual([su.device('car1').info, su.device('car1').error], [null, 'not a schema 1 info file']);
+    await fsp.writeFile(path.join(dir, 'device-status.json'), 'x'.repeat(17 * 1024));
+    await su.refresh('car1');
+    assert.equal(su.device('car1').error, 'too large');
+    await fsp.rm(path.join(dir, 'device-status.json'));
+    await su.refresh('car1');
+    assert.equal(su.device('car1'), null);
+  } finally { await fsp.rm(root, { recursive: true, force: true }); }
 });
 
 // ---- the Car card's words (the same module in every interface)
-const page = () => import(`data:text/javascript,${encodeURIComponent(linkSource())}`);
+const page = () => import(`data:text/javascript,${encodeURIComponent(pageSource())}`);
 
 test('Car card: battery, temperatures and four tires with their ages, in the Manager\'s units (not the Pi\'s)', async () => {
   const { carView } = await page();
@@ -183,12 +197,33 @@ test('Car card: battery, temperatures and four tires with their ages, in the Man
   for (const none of [null, undefined, {}, [], 'x', { units: { temp: 'F' } }]) assert.equal(carView(none, { now: NOW }), null, JSON.stringify(none));
 });
 
-test('Car card: on the Status tab, text only, styled in every interface', () => {
-  const src = fs.readFileSync(path.join(REPO, 'web', 'sentryUsbLink.js'), 'utf8');
-  assert.match(src, /carCard\(s\.car\)/, 'the Status tab shows it');
+test('Sentry USB tab: storage, version and CPU as of when the Pi wrote them; stale after a day', async () => {
+  const { infoView, bytesText } = await page();
+  const info = parseDevice(FILE(), { now: NOW });
+  const v = infoView(info, { now: NOW, metric: false });
+  assert.deepEqual(v, {
+    version: 'v3.28.10-test.32', asOf: '5 min ago', stale: false, used: '98.1 GB', free: '158 GB', total: '256 GB', pct: 38,
+    drives: [{ label: 'Dashcam', value: '64.0 GB' }, { label: 'Music', value: '4.0 GB' }], cpu: '124°F'
+  });
+  assert.equal(infoView(info, { now: NOW, metric: true }).cpu, '51°C');
+  assert.equal(infoView({ ...info, writtenUnix: T - 2 * 86400 }, { now: NOW }).stale, true);
+  // only free and total: used worked out
+  assert.deepEqual((({ used, free, pct }) => ({ used, free, pct }))(infoView({ ...info, storage: { totalBytes: 100e9, usedBytes: null, freeBytes: 25e9 } }, { now: NOW })), { used: '75.0 GB', free: '25.0 GB', pct: 75 });
+  assert.deepEqual([bytesText(512), bytesText(1.4e12), bytesText(null)], ['512 B', '1.4 TB', '—']);
+});
+
+test('Sentry USB tab: no pairing anywhere; text only; styled in every interface; no link left on the server', () => {
+  const src = fs.readFileSync(path.join(REPO, 'web', 'sentryUsbInfo.js'), 'utf8');
+  assert.match(src, /carCard\(d\.info\.car\)/, 'the tab shows the Car card');
   assert.match(src, /'No car data yet'/);
-  const card = src.slice(src.indexOf('function carCard'), src.indexOf('// why pairing did not work'));
-  assert.doesNotMatch(card, /innerHTML|insertAdjacentHTML|outerHTML/, 'the Pi\'s values go in as text');
+  assert.match(src, /fetch\(url/);
+  assert.doesNotMatch(src, /\/pair|pairing code|method:/i, 'read-only, no pairing');
+  assert.doesNotMatch(src, /innerHTML|insertAdjacentHTML|outerHTML/, 'the Pi\'s values go in as text');
+  for (const f of ['web/app.js', 'examples/ui-packs/aurora/web/aurora/pages/sentryusb.js', 'examples/ui-packs/daylight/web/dl/pages/sentryusb.js', 'examples/ui-packs/flux/web/flux/pages/sentryusb.js', 'examples/ui-packs/horizon/web/hz/pages/sentryusb.js']) {
+    const page = fs.readFileSync(path.join(REPO, f), 'utf8');
+    assert.match(page, /\/web\/sentryUsbInfo\.js/, f);
+    assert.doesNotMatch(page, /sentryUsbLink|pair it, see its status/, f);
+  }
   const sheets = {
     'built-in': 'web/shell.css', aurora: 'examples/ui-packs/aurora/web/aurora/app.css', daylight: 'examples/ui-packs/daylight/web/dl/app.css',
     flux: 'examples/ui-packs/flux/web/flux.css', horizon: 'examples/ui-packs/horizon/web/hz/app.css'
@@ -197,4 +232,7 @@ test('Car card: on the Status tab, text only, styled in every interface', () => 
     const css = fs.readFileSync(path.join(REPO, f), 'utf8');
     for (const v of ['--sul-car-bg', '--sul-car-accent', '--sul-car-ok', '--sul-car-warn', '--sul-car-bad']) assert.match(css, new RegExp(`${v}:`), `${name} sets ${v}`);
   }
+  const server = fs.readFileSync(path.join(REPO, 'server', 'index.js'), 'utf8');
+  assert.doesNotMatch(server, /sentryusb\/pair|sentryusb\/:id\/proxy|handleUpgrade/);
+  for (const gone of ['sentryUsbLink.js', 'sentryUsbQueue.js', 'sentryUsbAudit.js', 'wsFrames.js']) assert.equal(fs.existsSync(path.join(REPO, 'server', gone)), false, gone);
 });

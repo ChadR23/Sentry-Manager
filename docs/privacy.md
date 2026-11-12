@@ -85,7 +85,7 @@ Diagnostics are part of support, daily and crash reports. They hold:
 - **Counts:** vehicles, recordings and jobs, with how recent jobs ended.
 - **The converter's** state and settings.
 - **Your settings**, with every secret removed.
-- **Which features are on:** CAN, a paired Sentry USB and its version, the
+- **Which features are on:** CAN, whether a Sentry USB info file is on a share and its version, the
   interface pack, nodes, metrics and the TLS mode.
 - **The health checks** and the CAN index's status.
 - **The last 200 warnings and errors** from the past week, and recent crash
@@ -116,7 +116,7 @@ would send now.
 - **Storage:** free and total size.
 - **Converting:** whether a conversion is running, and how many jobs are
   waiting.
-- **Features:** CAN on or off, Sentry USB paired or not, GPU available or not.
+- **Features:** CAN on or off, a Sentry USB info file on a share or not, GPU available or not.
 - **Clips:** how many arrived in the last 24 hours, Sentry and dashcam
   counted separately.
 - **Crashes:** how many in the last 24 hours.

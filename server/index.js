@@ -93,9 +93,6 @@ const { createCanIndex, CLIP_STEP_MS: CAN_CLIP_STEP_MS } = require('./canIndex')
 const { openCanLog, stopWhenStalled, FORMATS: CAN_FORMATS } = require('./canLogReader');
 const { createCanTrust } = require('./canTrust');
 const { createCanPort } = require('./canPort');
-const sentryUsbLinkLib = require('./sentryUsbLink');
-const { createSentryUsbQueue, splitSecrets } = require('./sentryUsbQueue');
-const { createSentryUsbAudit } = require('./sentryUsbAudit');
 const { createCanSync } = require('./canSync');
 const canCalc = require('./canCalc');
 const { createCanPrune } = require('./canPrune');
@@ -322,10 +319,15 @@ async function main() {
   // a snapshot chosen in Settings → Health takes the database's place first
   try { applyPendingRestore(path.join(DATA, 'manager.db'), log); } catch (err) { log.error(`Restoring the database snapshot failed: ${err.message}`); }
   const db = new ManagerDB(path.join(DATA, 'manager.db'));
-  // (a snapshot keeps no Sentry USB link key, nor the queue: a restored one would run actions again)
+  // the old Sentry USB pairing link's saved keys, queue and security log settings: gone
+  // (Sentry USB is read from its share now; docs/sentry-usb.md)
+  try {
+    db.q("DELETE FROM settings WHERE key = 'sentryusb' OR key LIKE 'sentryusb-%'").run();
+    db.q('DROP TABLE IF EXISTS sentryusb_audit').run();
+    fs.rmSync(path.join(DATA, 'sentryusb'), { recursive: true, force: true });
+  } catch (err) { log.warn(`Removing the old Sentry USB link's data: ${err.message}`); }
   const snapshots = createSnapshots({
-    db, dbFile: path.join(DATA, 'manager.db'), dir: path.join(DATA, 'snapshots'), log: logger.scope('snapshots'),
-    secret: { sentryusb: sentryUsbLinkLib.withoutKeys, 'sentryusb-queue': () => ({ items: [] }) }
+    db, dbFile: path.join(DATA, 'manager.db'), dir: path.join(DATA, 'snapshots'), log: logger.scope('snapshots')
   });
   snapshots.start();
   const auth = new Auth({ db, log: logger.scope('auth'), isSecure, setupFile: path.join(DATA, 'setup-code.txt') });
@@ -369,9 +371,8 @@ async function main() {
     return { logs: r.logs || 0, kept: r.kept || 0, ...(r.skip ? { skip: r.skip } : {}) };
   };
   let canPort = null; // opens or closes the CAN Bridge's own port, one call at a time (set where the servers start)
-  // the device port (CAN_PORT) listens while CAN uploads are on, or a Sentry USB is paired or pairing
-  let sentryLink = null;
-  const devicePortWanted = () => Boolean(db.get('can', null)?.enabled) || Boolean(sentryLink?.wanted());
+  // the device port (CAN_PORT) listens while CAN uploads are on
+  const devicePortWanted = () => Boolean(db.get('can', null)?.enabled);
   const syncDevicePort = () => canPort?.set(devicePortWanted()).catch((err) => log.warn(`Device port: ${err.message}`));
   const canUpload = (req, res, p) => (canUploadRef ? canUploadRef(req, res, p) : sendJson(res, 404, { error: 'Not found' }));
   // Sentry USB's status file on each car's share (sentryUsb.js): read on every
@@ -380,6 +381,9 @@ async function main() {
     vehicles, log: logger.scope('sentry-usb'),
     onChange: (vid) => { archiveGapRef?.check(vid); announce('inventory'); }
   });
+  // the Pi info files read from the shares (heartbeat and diagnostics: whether any, versions)
+  const sentryUsbInfos = () => vehicles.list().map((v) => sentryUsb.device(v.id)?.info).filter(Boolean);
+
   const inventory = new Inventory({ vehicles, db, log: logger.scope('inventory'), onChange: () => announce('inventory'), onScanned: (vid) => {
     speedIndex?.kick(); scrubPrepare?.kick(); integrityRef?.resume(vid);
     // (the gap check and the checksum record read the status the scan just found)
@@ -1425,12 +1429,10 @@ async function main() {
     const results = health.last() || await health.run();
     const system = await systemSummary((v, i) => `<vehicle-${i + 1}>`);
     const files = [
-      { name: 'README.txt', data: Buffer.from('Sentry Six Manager support bundle.\nsystem.json: version, GPUs, converter, shares (no paths or names).\nhealth.json: Settings > Health checks.\nlogs.txt: the last 7 days of logs.\nsentryusb-security.csv: the Sentry USB security log (the newest 1000 rows).\nPasswords are masked in logs; footage paths, share names, vehicle names, IP addresses and e-mail addresses are replaced with <placeholders>.\n') },
+      { name: 'README.txt', data: Buffer.from('Sentry Six Manager support bundle.\nsystem.json: version, GPUs, converter, shares (no paths or names).\nhealth.json: Settings > Health checks.\nlogs.txt: the last 7 days of logs.\nPasswords are masked in logs; footage paths, share names, vehicle names, IP addresses and e-mail addresses are replaced with <placeholders>.\n') },
       { name: 'system.json', data: Buffer.from(scrub(JSON.stringify(system, null, 2))) },
       { name: 'health.json', data: Buffer.from(scrub(JSON.stringify(results, null, 2))) },
-      { name: 'logs.txt', data: Buffer.from(scrub(lines.map((l) => `${new Date(l.at).toISOString()} ${l.level.toUpperCase().padEnd(5)} [${l.scope}] ${l.message}`).join('\n'))) },
-      // the Sentry USB security log (no keys or passwords are ever in it; addresses become <ip>)
-      { name: 'sentryusb-security.csv', data: Buffer.from(scrub(securityLog.csv(securityLog.list({ limit: 1000 }), (id) => sentryLink.name(id) || id))) }
+      { name: 'logs.txt', data: Buffer.from(scrub(lines.map((l) => `${new Date(l.at).toISOString()} ${l.level.toUpperCase().padEnd(5)} [${l.scope}] ${l.message}`).join('\n'))) }
     ];
     const zip = writeZip(files);
     res.writeHead(200, { 'Content-Type': 'application/zip', 'Content-Length': zip.length, 'Cache-Control': 'no-store', 'Content-Disposition': `attachment; filename="sentry-six-manager-support-${new Date().toISOString().slice(0, 10)}.zip"` });
@@ -1477,10 +1479,11 @@ async function main() {
     }));
     out.features = await safe(async () => {
       const can = db.get('can', null) || {};
-      const devs = sentryLink ? sentryLink.devices() : [];
+      const devs = sentryUsbInfos();
       return {
         can: { enabled: Boolean(can.enabled), vehicles: Object.keys(db.get('can-vehicles', {}) || {}).length },
-        sentryUsb: { paired: devs.some((d) => d.paired), devices: devs.map((d) => ({ name: d.name, hostname: d.hostname, address: d.address, version: d.version, online: d.online, net: d.net })) },
+        // Sentry USB info files on the shares (versions and when written; no car data)
+        sentryUsb: { found: devs.length > 0, devices: devs.map((d) => ({ version: d.version, written: new Date(d.writtenUnix * 1000).toISOString() })) },
         uiPack: uiPacks.active() || 'original', metrics: Boolean(db.get('metrics', null)?.enabled), nodes: (db.get('nodes', []) || []).length,
         tls: { mode: TLS_MODE, trustProxy: TRUST_PROXY, hostnames: process.env.TLS_HOSTNAMES || null, acme: process.env.TLS_ACME_DOMAIN || null }
       };
@@ -1565,7 +1568,8 @@ async function main() {
       jobsQueued: db.jobs({ limit: 1000 }).filter((j) => j.status === 'running').length,
       features: {
         can: Boolean(db.get('can', null)?.enabled),
-        sentryUsbPaired: (sentryLink ? sentryLink.devices() : []).some((d) => d.paired),
+        // (the field's old name: now whether any share has a Sentry USB info file)
+        sentryUsbPaired: sentryUsbInfos().length > 0,
         gpu: Boolean(gpu && (gpu.gpus.some((g) => g.passedThrough && !g.virtual) || gpu.nvidia.length))
       }
     };
@@ -1581,7 +1585,6 @@ async function main() {
     for (const a of accounts.list()) ids.push(a.username);
     // the paired nodes' names and addresses (a heartbeat's `nodes` names none)
     for (const n of db.get('nodes', []) || []) ids.push(n?.name, n?.host);
-    for (const d of sentryLink ? sentryLink.devices() : []) ids.push(d.id, d.name, d.hostname, d.address, d.home?.ssid, d.home?.gw, d.net?.ssid, d.net?.ip, d.net?.gateway);
     for (const p of placeList()) ids.push(p?.name, p?.label);
     ids.push(...parseHostnames(process.env.TLS_HOSTNAMES || ''), process.env.TLS_ACME_DOMAIN, process.env.TLS_ACME_EMAIL);
     return ids.filter((x) => typeof x === 'string' && x.length >= 3);
@@ -2946,232 +2949,17 @@ async function main() {
     syncDevicePort();
     return { enabled: false };
   });
-  // ---- Sentry USB, the Pi in the car: the management link (docs/sentry-usb-link.md).
-  // The Pi connects to the device port; these routes (main port) list it, pair it
-  // and send it requests. Reads for every signed-in account, writes for admins.
-  const sentryAudit = logger.scope('sentryusb');
-  // the security log (6b): every device-port event and action, with its flags;
-  // a possible hijack attempt is always notified, network notices per Pi
-  const securityLog = createSentryUsbAudit({
-    db, log: logger.scope('sentryusb-security'), device: (id) => sentryLink?.info(id) || null,
-    keepDays: Number(db.get('sentryusb-audit-days', 180)) || 180,
-    notify: ({ always, ...n }) => {
-      if (!always) return notes.raise(n);
-      const nid = db.notify(n);
-      notes.emit('changed', nid);
-      return nid;
+  // ---- Sentry USB, the Pi in the car: what its info file on each car's share says
+  // (docs/sentry-usb.md, "The Sentry USB tab"); no pairing, no link. Every signed-in account.
+  r.add('GET', '/api/sentryusb', async () => {
+    const out = [];
+    for (const v of vehicles.list()) {
+      await sentryUsb.fresh(v.id);
+      const d = sentryUsb.device(v.id);
+      if (d) out.push({ vehicle: { id: v.id, name: v.name }, error: d.error, info: d.info, readAt: d.readAt });
     }
+    return { devices: out, now: Date.now() };
   });
-  sentryLink = sentryUsbLinkLib.createSentryUsbLink({
-    db, log: sentryAudit,
-    onChange: () => { announce('sentryusb'); syncDevicePort(); },
-    onStatus: (id, first) => { if (first) sentryQueue?.kick(id); },
-    onEvent: (e) => {
-      if (e.type === 'unpaired' && e.byPi) {
-        // (still known here: the record goes right after this event)
-        notes.raise({ kind: 'sentryusb', level: 'info', dedupeKey: `sentryusb-unpaired:${e.id}:${Date.now()}`, title: `${sentryLink.name(e.id) || 'A Sentry USB'} was unpaired on the Sentry USB itself`, message: 'Sentry Manager forgot it and what was queued for it. Pair it again from Settings → Sentry USB.' });
-        sentryQueue.forgetDevice(e.id);
-      }
-      return securityLog.linkEvent(e);
-    }
-  });
-  const sentryQueue = createSentryUsbQueue({
-    db, link: sentryLink, dir: path.join(DATA, 'sentryusb'), log: sentryAudit, onChange: () => announce('sentryusb'),
-    notify: (n) => notes.raise(n),
-    onResult: (r) => securityLog.action({ deviceId: r.deviceId, who: r.by, route: `queued ${r.label.toLowerCase()}`, result: `${r.ok ? 'done' : 'failed'}${r.message ? `: ${r.message}` : ''}`, queued: true })
-  });
-  setInterval(() => sentryQueue.expire(), 60_000).unref();
-  setInterval(() => securityLog.prune(), 3600_000).unref();
-  const sentryOr404 = (id) => {
-    if (!sentryLink.has(id)) throw new HttpError(404, 'No such Sentry USB.');
-    return id;
-  };
-  const sentryWriter = (req, user) => {
-    if (!adminHere(req, user)) throw new HttpError(403, 'This account can only watch. An admin account can do this.');
-  };
-  const sentryFingerprint = () => {
-    const fp = certFingerprint();
-    return fp ? sentryUsbLinkLib.fpGroups(sentryUsbLinkLib.fpHex(fp)) : null;
-  };
-  const NO_HTTPS_TEXT = 'This server runs without its own HTTPS (TLS_MODE=off, behind a reverse proxy). A Sentry USB pins the certificate of the port it connects to, port 10000, so pairing needs Sentry Manager\'s own HTTPS: set TLS_MODE=auto (the default).';
-  r.add('GET', '/api/sentryusb', (req, res, { user }) => {
-    const admin = adminHere(req, user);
-    // where each Pi connects from and the networks it reports are for admins, as the security log is
-    const devices = sentryLink.devices().map((d) => (admin ? d : { ...d, address: null, net: null, home: null }));
-    return {
-      https: Boolean(tlsSource), noHttpsText: tlsSource ? null : NO_HTTPS_TEXT, fingerprint: sentryFingerprint(),
-      port: { ...(canPort?.state() || { listening: false, error: null, port: CAN_PORT }) },
-      // the pairing code only for the admin who opened the slot; never for a watch-only account
-      pairing: sentryLink.pairing(admin ? { codeFor: user ?? null } : {}), devices, admin, queueKinds: sentryQueue.KINDS
-    };
-  });
-  r.add('POST', '/api/sentryusb/pair', async (req, res, { body, user }) => {
-    sentryWriter(req, user);
-    requireConfirmed(req);
-    if (!tlsSource) throw Object.assign(new HttpError(409, NO_HTTPS_TEXT), { code: 'NO_HTTPS', expose: true });
-    let out;
-    try {
-      out = await sentryLink.openPairing({ name: body?.name, username: body?.username, password: body?.password, by: user ?? null });
-    } catch (err) {
-      throw new HttpError(err.status || 500, err.message);
-    }
-    // (the code is in the answer only: never in a log)
-    audit.warn(`Sentry USB pairing opened for "${out.name}" (15 minutes): ${by(req, user)}`);
-    await syncDevicePort();
-    return { pairing: out, fingerprint: sentryFingerprint(), port: canPort?.state() || null };
-  });
-  r.add('DELETE', '/api/sentryusb/pair', (req, res, { user }) => {
-    sentryWriter(req, user);
-    sentryLink.cancelPairing();
-    audit.info(`Sentry USB pairing cancelled: ${by(req, user)}`);
-    return { pairing: sentryLink.pairing() };
-  });
-  // the security log: admins (it holds addresses), filters, CSV
-  r.add('GET', '/api/sentryusb/security', (req, res, { query, user }) => {
-    sentryWriter(req, user);
-    return { rows: securityLog.list({ filter: query.filter, deviceId: query.device || null, limit: query.limit, before: query.before }), keepDays: Number(db.get('sentryusb-audit-days', 180)) || 180, flags: securityLog.FLAGS };
-  });
-  r.add('GET', '/api/sentryusb/security.csv', (req, res, { query, user }) => {
-    sentryWriter(req, user);
-    const text = securityLog.csv(securityLog.list({ filter: query.filter, deviceId: query.device || null, limit: 1000 }), (id) => sentryLink.name(id) || id);
-    res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': `attachment; filename="sentryusb-security-${new Date().toISOString().slice(0, 10)}.csv"` });
-    res.end(`\ufeff${text}`);
-    return undefined;
-  });
-  r.add('PUT', '/api/sentryusb/security/settings', (req, res, { body, user }) => {
-    sentryWriter(req, user);
-    const days = Math.round(Number(body?.days));
-    if (!(days >= 7 && days <= 3650)) throw new HttpError(400, 'Keep it 7 to 3650 days.');
-    db.set('sentryusb-audit-days', days);
-    securityLog.setKeepDays(days);
-    audit.info(`Sentry USB security log kept ${days} days: ${by(req, user)}`);
-    return { keepDays: days };
-  });
-  r.add('PATCH', '/api/sentryusb/:id', (req, res, { params, body, user }) => {
-    sentryWriter(req, user);
-    sentryOr404(params.id);
-    let name = sentryLink.name(params.id);
-    if (body?.name !== undefined) {
-      try { name = sentryLink.rename(params.id, body.name); } catch (err) { throw new HttpError(err.status || 400, err.message); }
-      audit.info(`Sentry USB ${params.id} renamed "${name}": ${by(req, user)}`);
-    }
-    let net = null;
-    if (body?.notifyNetwork !== undefined || body?.home !== undefined) {
-      net = sentryLink.configure(params.id, { notifyNetwork: typeof body.notifyNetwork === 'boolean' ? body.notifyNetwork : undefined, home: body.home === undefined ? undefined : body.home });
-      audit.info(`Sentry USB "${name}": network notices ${net.notifyNetwork ? 'on' : 'off'}, home network ${net.home ? 'set by hand' : 'learned'}: ${by(req, user)}`);
-    }
-    return { ok: true, name, ...(net || {}) };
-  });
-  r.add('DELETE', '/api/sentryusb/:id', (req, res, { params, user }) => {
-    sentryWriter(req, user);
-    requireConfirmed(req);
-    const name = sentryLink.name(sentryOr404(params.id));
-    sentryLink.unpair(params.id, user);
-    sentryQueue.forgetDevice(params.id);
-    audit.warn(`Sentry USB "${name}" (${params.id}) unpaired: ${by(req, user)}`);
-    return { ok: true };
-  });
-  r.add('GET', '/api/sentryusb/:id/last-config', (req, res, { params, user }) => {
-    sentryWriter(req, user); // its settings: admins, like the proxied read
-    return sentryLink.lastConfig(sentryOr404(params.id));
-  });
-  // queued actions: run when the Pi is home (section 6a)
-  r.add('GET', '/api/sentryusb/:id/queue', (req, res, { params }) => sentryQueue.list(sentryOr404(params.id)));
-  r.add('POST', '/api/sentryusb/:id/queue', (req, res, { params, body, user }) => {
-    sentryWriter(req, user);
-    sentryOr404(params.id);
-    let qparams = body?.params;
-    let held = { held: [], note: null };
-    if (body?.kind === 'settings') {
-      requireConfirmed(req); // where clips go, which Wi-Fi it joins
-      // passwords are never queued: they wait for the Pi to be online, the rest is queued
-      const { keep, ...h } = splitSecrets(qparams?.changes);
-      held = h;
-      if (held.held.length && !Object.keys(keep).length) throw Object.assign(new HttpError(400, held.note), { code: 'SECRET_ONLINE', expose: true, key: held.held[0] });
-      qparams = { ...qparams, changes: keep };
-    }
-    let qid;
-    try { qid = sentryQueue.add(params.id, { kind: body?.kind, params: qparams, expiresInDays: body?.expiresInDays ?? 14 }, user); } catch (err) { throw new HttpError(err.status || 400, err.message); }
-    securityLog.action({ deviceId: params.id, who: user, route: `queued ${String(sentryQueue.KINDS[body.kind]).toLowerCase()}`, result: 'waiting', queued: true });
-    audit.info(`Sentry USB "${sentryLink.name(params.id)}": queued ${String(sentryQueue.KINDS[body.kind]).toLowerCase()}${body.kind === 'settings' ? ` (${Object.keys(qparams?.changes || {}).join(', ').slice(0, 300)})${held.held.length ? `, left for when it is online: ${held.held.join(', ')}` : ''}` : ''}: ${by(req, user)}`);
-    return { ok: true, id: qid, ...held, ...sentryQueue.list(params.id) };
-  });
-  r.add('DELETE', '/api/sentryusb/:id/queue/:qid', (req, res, { params, user }) => {
-    sentryWriter(req, user);
-    sentryOr404(params.id);
-    let ok;
-    try { ok = sentryQueue.cancel(params.id, params.qid); } catch (err) { throw new HttpError(err.status || 400, err.message); }
-    if (!ok) throw new HttpError(404, 'No such queued action.');
-    audit.info(`Sentry USB "${sentryLink.name(params.id)}": queued action cancelled: ${by(req, user)}`);
-    return { ok: true, ...sentryQueue.list(params.id) };
-  });
-  // fetched diagnostics reports (admins)
-  r.add('GET', '/api/sentryusb/:id/files/:name', (req, res, { params, user }) => {
-    sentryWriter(req, user);
-    const f = sentryQueue.file(sentryOr404(params.id), params.name);
-    if (!f) throw new HttpError(404, 'No such file.');
-    const data = fs.readFileSync(f);
-    res.writeHead(200, {
-      'Content-Type': params.name.endsWith('.json') ? 'application/json' : 'text/plain; charset=utf-8', 'Content-Length': data.length, 'Cache-Control': 'no-store',
-      'Content-Disposition': `attachment; filename="sentryusb-${params.name}"`, 'Content-Security-Policy': "sandbox; default-src 'none'", 'X-Content-Type-Options': 'nosniff'
-    });
-    res.end(data);
-    return undefined;
-  });
-  // one request over the link, checked against Manager's copy of the allowlist
-  // (the path comes from the raw request target: no %-escapes, dots or double slashes)
-  const CONFIRM_ROUTES = new Set(['PUT /api/setup/config', 'POST /api/setup/run', 'PUT /api/system/update-source', 'PUT /api/notifications/settings']);
-  const ADMIN_READS = []; // (reads an admin alone may make, logged like changes: none since backups stay on the Pi)
-  // reads for admins only, as Manager's own logs and settings are: the Pi's
-  // logs (auth, syslog), diagnostics, its settings and notification settings
-  // (addresses, accounts, VINs, maybe tokens) and its backups list
-  const PRIVATE_READS = [/^\/api\/logs\//, /^\/api\/diagnostics$/, /^\/api\/setup\/config$/, /^\/api\/notifications\/settings$/, /^\/api\/system\/backups$/, /^\/api\/system\/update-source$/, /^\/api\/system\/keep-accessory-config$/];
-  const proxyTo = async (req, res, { params, body, user }) => {
-    const id = sentryOr404(params.id);
-    const raw = String(req.url || '');
-    const q = raw.indexOf('?');
-    const rawPath = q < 0 ? raw : raw.slice(0, q);
-    const query = q < 0 ? '' : raw.slice(q + 1);
-    const prefix = `/api/sentryusb/${id}/proxy`;
-    if (!rawPath.startsWith(`${prefix}/`)) throw new HttpError(400, 'Bad path.');
-    const target = sentryUsbLinkLib.proxyTarget(req.method, rawPath.slice(prefix.length));
-    if (target instanceof Error) throw new HttpError(target.status, target.message);
-    // the Pi's rule: these characters and whole %XX escapes only
-    if (query.length > 2048 || !/^(?:[A-Za-z0-9._~=&+,:-]|%[0-9A-Fa-f]{2})*$/.test(query)) throw new HttpError(400, 'Bad query.');
-    if (req.method !== 'GET' || ADMIN_READS.some((re) => re.test(target)) || PRIVATE_READS.some((re) => re.test(target))) sentryWriter(req, user);
-    if (CONFIRM_ROUTES.has(`${req.method} ${target}`)) requireConfirmed(req);
-    if (req.method === 'PUT' && target === '/api/setup/config') {
-      const bad = sentryUsbLinkLib.badSetupBody(body);
-      if (bad) throw new HttpError(400, bad);
-    }
-    const name = sentryLink.name(id);
-    if (req.method !== 'GET') audit.info(`Sentry USB "${name}": ${req.method} ${target}: ${by(req, user)}`);
-    else sentryAudit.debug(`"${name}": GET ${target} for ${user}`);
-    const out = await sentryLink.request(id, { method: req.method, path: target, query, body: req.method === 'GET' ? null : body ?? null });
-    // the security log: every change (reads are many: only logged at debug)
-    if (req.method !== 'GET' || ADMIN_READS.some((re) => re.test(target))) securityLog.action({ deviceId: id, who: user, route: `${req.method} ${target}`, result: out.error ? `${out.status} ${out.error}` : String(out.status) });
-    if (out.error) return sendJson(res, out.status, { error: out.error, code: out.status === 503 ? 'OFFLINE' : undefined });
-    // the Pi's 401 would sign this browser out: it is the Pi's answer, not ours
-    // (and a 1xx is no final answer: the browser would wait for one)
-    const status = sentryUsbLinkLib.answerStatus(out.status);
-    if (target === '/api/setup/config' && req.method === 'GET' && status === 200 && out.type === 'application/json' && !out.buf) {
-      // secrets masked here too, whatever the Pi sent; kept for editing while it is away
-      const masked = sentryUsbLinkLib.maskConfig(out.body);
-      sentryLink.keepConfig(id, masked);
-      return sendJson(res, 200, masked);
-    }
-    if (out.type === 'application/json' && !out.buf) return sendJson(res, status, out.body);
-    const data = out.buf || Buffer.from(typeof out.body === 'string' ? out.body : JSON.stringify(out.body ?? null), 'utf8');
-    const ext = { 'application/json': 'json', 'text/plain': 'txt', 'application/zip': 'zip', 'application/gzip': 'gz', 'application/x-gzip': 'gz', 'application/x-tar': 'tar' }[out.type] || 'bin';
-    const slug = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'sentryusb';
-    res.writeHead(status, {
-      'Content-Type': out.type === 'text/plain' ? 'text/plain; charset=utf-8' : out.type, 'Content-Length': data.length, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
-      'Content-Disposition': `attachment; filename="sentryusb-${slug(name)}-${slug(target.slice(5))}.${ext}"`, 'Content-Security-Policy': "sandbox; default-src 'none'"
-    });
-    res.end(data);
-    return undefined;
-  };
-  for (const m of ['GET', 'POST', 'PUT', 'DELETE']) r.add(m, '/api/sentryusb/:id/proxy/.+', proxyTo);
 
   r.add('POST', '/api/can/tokens', (req, res, { user, body }) => {
     requireConfirmed(req);
@@ -4385,7 +4173,7 @@ async function main() {
   // (/api/can/logs…), with the same certificate; it listens only while the
   // uploads are on (the Nerd settings), so the port is closed otherwise
   canPort = createCanPort({
-    port: CAN_PORT, host: HOST, log, url: `${tlsSource ? 'https' : 'http'}://${HOST}:${CAN_PORT} (CAN Bridge uploads at /api/can/logs${tlsSource ? ', Sentry USB link at wss://…/api/sentryusb/link' : ''})`,
+    port: CAN_PORT, host: HOST, log, url: `${tlsSource ? 'https' : 'http'}://${HOST}:${CAN_PORT} (CAN Bridge uploads at /api/can/logs)`,
     make: async () => {
       const only = (req, res) => {
         const p = String(req.url || '').split('?')[0];
@@ -4398,14 +4186,10 @@ async function main() {
         const m = await tlsSource.load();
         srv = https.createServer({ key: m.key, cert: m.cert, minVersion: 'TLSv1.2' }, only);
       } else srv = http.createServer(only); // behind a reverse proxy that does HTTPS
-      // the Sentry USB management link (docs/sentry-usb-link.md): TLS only, its
-      // proof covers this port's certificate; nothing else upgrades
-      srv.on('upgrade', (req, socket, head) => {
-        if (!tlsSource || !sentryLink) {
-          socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
-          return socket.destroy();
-        }
-        return sentryLink.handleUpgrade(req, socket, head);
+      // nothing upgrades on this port
+      srv.on('upgrade', (req, socket) => {
+        socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+        return socket.destroy();
       });
       srv.setTimeout(120_000);
       // a client that sends its headers slowly, or a body for ever, is cut off (TLS 1.2 and 1.3 are both accepted)
@@ -4594,7 +4378,6 @@ async function main() {
     for (const s of servers) s.close();
     try { stats.stop(); } catch { /* history is saved on a best-effort basis */ }
     nodeWorker.close();
-    sentryLink?.close();
     reports.stop();
     exporter.stop();
     scrubPrepare.stop();

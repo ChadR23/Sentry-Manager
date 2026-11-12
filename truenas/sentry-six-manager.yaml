@@ -24,9 +24,8 @@ services:
     ports:
       # another app already on 9000 (MinIO uses it): change the left number
       - "9000:9000"
-      # the device port: CAN Bridge uploads and the Sentry USB link (closed
-      # until one is in use; keep it: the Pi in the car connects here, the
-      # address you give it is <truenas>:10000)
+      # the device port: CAN Bridge uploads (closed until they are turned on;
+      # Sentry USB needs no port: it is read from its share)
       - "10000:10000"
       # OPTIONAL: Let's Encrypt at a public domain (docs/security.md): a DNS
       # record to TrueNAS, ports 80 and 443 forwarded on the router, these two

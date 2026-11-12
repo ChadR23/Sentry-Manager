@@ -10,51 +10,93 @@ Sentry USB's side is in its own repository (`run/archiveloop` and
 `run/rsync_archive/archive-clips.sh`). Sentry USB `v3.28.10-test.5` or later
 is needed for the checks below.
 
-## Managing it from here
+## The Sentry USB tab
 
-The **Sentry USB** tab (in the top tabs, where Policies used to be) pairs the
-Pi with Sentry Six Manager and then manages it, at home or away. The Pi
-connects out to this server on port **10000** over an encrypted link, so keep
-that port published (`10000:10000`, already in both compose files).
+There is no pairing and no link: everything comes from the share. Each time
+the Pi is home and reaches its archive share, it writes a small file of basic
+information there (below), and the **Sentry USB** tab (in the top tabs, where
+Policies used to be) shows it for each car whose share has one:
 
-**Pairing** (once per Pi; Sentry USB `v3.28.10-test.30` or later):
+- the Sentry USB's version, and **as of** when the Pi wrote the file (the Pi
+  writes only while it reaches the share, so away from home this is the last
+  time it was home);
+- its storage: **space used** and **space left**, and the size of the car's
+  drives on it (cam, music, light shows, boombox);
+- the **Car** card (Sentry USB with its Tesla BLE telemetry set up): the
+  battery and whether it is charging, the inside and outside temperature, each
+  tire's pressure with how old the reading is, the overall tire state, and
+  whether the car is parked or driving. It never shows where the car is.
 
-1. Here, on the **Sentry USB** tab, enter a name and the Sentry USB's **web
-   username and password**, then press **Start pairing**. They are used once
-   and not kept.
-2. Sentry Six Manager shows a **pairing code** for 15 minutes. On the Sentry
-   USB, open **Settings → System → Sentry Manager**, enter this server's
-   address with port 10000 (for example `192.168.1.5:10000`) and the code,
-   then press **Pair**.
-3. Both sides show **Paired**. Nothing has to be compared.
-
-**The tabs** for a paired Sentry USB:
-
-| Tab | What it does |
-| --- | --- |
-| Status | Online or away, version, USB drives, free space, Wi-Fi, CPU, uptime, archiving, and the **Car** card |
-| Settings | The Sentry USB's settings, checked before they are sent |
-| Diagnostics, Logs | Fetch its diagnostics and read its logs |
-| Updates | Check for and install a newer Sentry USB; on test builds it shows the latest test build |
-| Actions, Snapshots, Backups | Sync, reboot, snapshots and config backups |
-| Waiting for the Pi | Actions queued while it is away (updates and reboots wait for the archive to finish) |
-| Security log | Pairing, refused requests, new networks and addresses |
-| Name and unpair | Rename it, or unpair it |
-
-**The Car card** (Sentry USB `v3.28.10-test.31` or later, with its Tesla BLE
-telemetry set up) shows the car's battery and whether it is charging, the
-inside and outside temperature, each tire's pressure with how old the reading
-is, the overall tire state, and whether the car is parked or driving. It
-never shows where the car is. Until the Pi sends any of it, the card says
-"No car data yet". Watch-only accounts can see it; only admins can change
-anything.
-
-The full contract both sides build to is in
-[Sentry USB link](sentry-usb-link.md).
+Temperatures and pressures use the app's own unit choice: miles shows °F and
+psi, kilometres °C and bar. Watch-only accounts see the tab too; nothing on it
+changes anything on the Pi. Sentry USB's own settings, updates and logs are on
+its own web page.
 
 With *Share diagnostics with the developers* on (Settings → Help & feedback),
-the hourly heartbeat says only whether a Sentry USB is paired (yes or no):
-never its name, address, Wi-Fi or car data ([reports-api.md](reports-api.md#the-heartbeat)).
+the hourly heartbeat says only whether any share has a Sentry USB info file
+(yes or no): never its name, version, storage or car data
+([reports-api.md](reports-api.md#the-heartbeat)).
+
+### The info file: `.sentryusb/device-status.json`
+
+Written by Sentry USB at the share root (the folder holding `RecentClips/`,
+next to `archive-status.json`), replaced atomically (written to
+`device-status.json.tmp` in the same folder, then renamed):
+
+- at the start and the end of every archive cycle, and
+- every 5 minutes while the share is reachable, and
+- at most once a minute when a car reading changes while it is reachable.
+
+```json
+{
+  "schema": 1,
+  "written_unix": 1762800000,
+  "version": "v3.28.10-test.32",
+  "storage": { "total_bytes": 256060514304, "used_bytes": 98100000000, "free_bytes": 157960514304 },
+  "drives": [
+    { "name": "cam", "size_bytes": 64424509440 },
+    { "name": "music", "size_bytes": 4294967296 }
+  ],
+  "cpu_temp_c": 51.2,
+  "car": {
+    "battery":  { "pct": 89, "charging": false, "at": 1762800000 },
+    "interior": { "c": 9.4, "at": 1762800000 },
+    "exterior": { "c": 7.8, "at": 1762799940 },
+    "tires": {
+      "fl": { "kpa": 290.3, "at": 1762792800 }, "fr": { "kpa": 289.6, "at": 1762792800 },
+      "rl": { "kpa": 288.9, "at": 1762771200 }, "rr": { "kpa": 291.6, "at": 1762771200 },
+      "state": "optimal"
+    },
+    "drive": { "state": "parked", "since": 1762791000, "at": 1762799990 }
+  }
+}
+```
+
+| Field | Type, unit, range | Notes |
+|---|---|---|
+| `schema` | integer, `1` | a file with another schema is not read |
+| `written_unix` | integer, Unix seconds | when the Pi wrote it ("as of"); a time before 2017 or more than a day ahead of the server's clock makes the file unreadable |
+| `version` | string, at most 64 characters, optional | the Sentry USB version |
+| `storage.total_bytes`, `.used_bytes`, `.free_bytes` | integers, bytes, optional | the Pi's own storage that holds the car's drives and snapshots |
+| `drives[]` | at most 8 of `{ name, size_bytes }`, optional | `name` is `cam`, `music`, `lightshow` or `boombox`; `size_bytes` the drive's size as the car sees it |
+| `cpu_temp_c` | number, °C, -40 to 125, optional | the Pi's CPU temperature |
+| `car` | object, optional | exactly the readings, types and ranges of the Car card (below); a reading with a wrong type, an out-of-range value or a bad time is dropped, the others are kept |
+
+`car` fields: `battery.pct` (0 to 100) and `battery.charging` (boolean,
+optional); `interior.c` (-60 to 100) and `exterior.c` (-70 to 70), °C; tires
+`fl`, `fr`, `rl`, `rr` as `{ kpa }` (0 to 1000; kPa = psi × 6.894757) and
+`tires.state` (`optimal`, `check` or `unsafe`, the worst tire against the
+Pi's `TIRE_PSI_BANDS`); `drive.state` (`parked` or `driving`) and
+`drive.since` (parked: when the last drive ended). Each reading may carry
+`at`, Unix seconds, when it was taken (for a tire: when the car last heard
+its sensor). Never the car's place, position, odometer or VIN.
+
+**Everything except `schema` and `written_unix` is optional**: what the Pi
+does not have, it leaves out. The file may be up to 16 KiB; a larger one is
+not read. Sentry Six Manager reads it on every scan of the share and when the
+tab is opened (re-reading only when its size or time changed), never writes
+it, and never indexes it as footage. A file older than 24 hours is shown as
+"not heard from since".
 
 ## What you see
 
@@ -99,9 +141,9 @@ days)** (how many, and the latest, or `none`). See "Missed snapshots" below.
 
 Sentry Six Manager never indexes, counts, converts or flags as missing:
 
-- `.sentryusb/` (Sentry USB's status file and its list of what the car
-  wrote, below; Sentry Six Manager reads those two on purpose, but never
-  indexes them as footage),
+- `.sentryusb/` (Sentry USB's status file, its info file and its list of
+  what the car wrote; Sentry Six Manager reads those three on purpose, but
+  never indexes them as footage),
 - `.sentryusb-partial/` folders inside clip folders (an upload that was cut
   off and resumes later),
 - `.sentryusbtmp/` (the temporary folder of SMB and NFS uploads),

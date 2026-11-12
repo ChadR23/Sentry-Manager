@@ -26,9 +26,8 @@ services:
       # router, these two lines, and TLS_ACME_DOMAIN below
 #      - "80:9000"
 #      - "443:9000"
-      # the device port: the Screenmate CAN Bridge's uploads and the Sentry USB
-      # (the Pi in the car) management link; nothing listens until CAN uploads
-      # are on or a Sentry USB is paired (keep it published: the Pi connects here)
+      # the device port: the Screenmate CAN Bridge's uploads; nothing listens
+      # until CAN uploads are on (Sentry USB needs no port: it is read from its share)
       - "10000:10000"
     env_file:
       - path: .env
