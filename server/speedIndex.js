@@ -4,9 +4,12 @@
 // under /data/speeds so the viewer's speed graph for a whole day comes in one
 // small request instead of reading the day's clips while you wait.
 //
-// It fills in the background, newest days first, one clip at a time
-// (server/speedReader.js reads a few KB of each; the full telemetry read is
-// the fallback). A clip is read again only when its size or time changes,
+// It fills in the background, newest days first. How many clips it reads at
+// once is the pace's (server/backgroundPace.js): one while the server is
+// strained or the Viewer plays, more while it keeps up, each from another
+// day (a day's clips mostly sit on one disk). server/speedReader.js reads the
+// heads of a clip's frames, in short reads or a few long ones, whichever has
+// been faster here; the full telemetry read is the fallback. A clip is read again only when its size or time changes,
 // as when it is converted. One file per vehicle and day:
 //   /data/speeds/<vehicleId>/<YYYY-MM-DD>.json  { rel: [size, mtimeMs, speeds | null, summary | null] }
 //
@@ -24,6 +27,7 @@ const fsp = require('fs/promises');
 const path = require('path');
 const { readSamples } = require('./speedReader');
 const { speedsOf } = require('./telemetry');
+const { fixedPace } = require('./backgroundPace');
 
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
 const GPS_EVERY = 5;
@@ -72,7 +76,7 @@ function summarize(samples) {
   return { b, t, v, g, k: SUMMARY_VERSION };
 }
 
-function createSpeedIndex({ dir, inventory, vehicles, telemetry, log, pauseMs = 100, idle = () => true }) {
+function createSpeedIndex({ dir, inventory, vehicles, telemetry, log, pauseMs = 0, idle = () => true, pace = fixedPace(() => !idle()) }) {
   const days = new Map(); // `${vid}/${day}` -> { rel: [size, mtimeMs, speeds] }
   const dirty = new Set();
   const ver = new Map(); // `${vid}/${day}` -> changes made here, for the place search's cache
@@ -85,17 +89,25 @@ function createSpeedIndex({ dir, inventory, vehicles, telemetry, log, pauseMs = 
 
   const fileOf = (vid, day) => path.join(dir, String(vid).replace(/[^\w-]/g, '_'), `${day}.json`);
 
+  const loading = new Map(); // one read of a day's file at a time
+  const reading = new Map(); // day -> clips of it being read: the day stays in memory
   async function load(vid, day) {
     const key = `${vid}/${day}`;
     if (days.has(key)) return days.get(key);
-    let data = {};
-    try {
-      const parsed = JSON.parse(await fsp.readFile(fileOf(vid, day), 'utf8'));
-      if (parsed && typeof parsed === 'object') data = parsed;
-    } catch { /* not indexed yet */ }
-    days.set(key, data);
-    if (days.size > 400) days.delete(days.keys().next().value);
-    return data;
+    if (!loading.has(key)) {
+      loading.set(key, (async () => {
+        let data = {};
+        try {
+          const parsed = JSON.parse(await fsp.readFile(fileOf(vid, day), 'utf8'));
+          if (parsed && typeof parsed === 'object') data = parsed;
+        } catch { /* not indexed yet */ }
+        days.set(key, data);
+        // the oldest day not waiting to be written or being read leaves memory
+        if (days.size > 400) for (const k of days.keys()) if (!dirty.has(k) && !reading.has(k) && k !== key) { days.delete(k); break; }
+        return data;
+      })().finally(() => loading.delete(key)));
+    }
+    return loading.get(key);
   }
 
   let flushing = Promise.resolve();
@@ -124,9 +136,9 @@ function createSpeedIndex({ dir, inventory, vehicles, telemetry, log, pauseMs = 
   }
 
   /** Speeds and summary for one clip: the quick read, else the dashboard's full read (speeds only). */
-  async function speedsFor(real, size) {
+  async function speedsFor(real, size, mode) {
     try {
-      const samples = await readSamples(real);
+      const samples = await readSamples(real, { mode });
       if (!samples) return [null, null];
       const speeds = samples.map((x) => (x && x.v !== null ? r2(x.v) : null));
       return [speeds, summarize(samples)];
@@ -161,6 +173,8 @@ function createSpeedIndex({ dir, inventory, vehicles, telemetry, log, pauseMs = 
     for (const k of names.get(nameOf(c.rel)) || []) {
       const e = data[k];
       if (k === c.rel || !e || e[0] !== c.size || e[1] !== c.mtimeMs) continue;
+      // still a clip of its own (both paths exist): not a move
+      if (inventory.get(c.vid)?.files?.has(k)) continue;
       // one path ends with the other: the folder moved, not another copy of the clip
       if (!(c.rel.endsWith('/' + k) || k.endsWith('/' + c.rel))) continue;
       delete data[k];
@@ -204,22 +218,105 @@ function createSpeedIndex({ dir, inventory, vehicles, telemetry, log, pauseMs = 
     let done = 0;
     Object.assign(progress_, { done: 0, total: todo.length, day: null });
     const started = Date.now();
+    // a queue per day, newest first; each reader takes the newest day no other is on
+    const queues = new Map();
     for (const c of todo) {
-      if (stopped) return done;
-      while (!idle() && !stopped) await new Promise((r) => setTimeout(r, 2000));
-      const data = await load(c.vid, c.day);
-      data[c.rel] = [c.size, c.mtimeMs, ...(await speedsFor(path.join(c.root, c.rel), c.size))];
-      touch(`${c.vid}/${c.day}`);
-      Object.assign(progress_, { done: done + 1, day: c.day });
-      if (++done % 100 === 0) await flush();
-      if (done % 250 === 0 && done < todo.length) {
-        const left = Math.round(((Date.now() - started) / done) * (todo.length - done) / 60000);
-        log?.info(`Speed index: ${done} of ${todo.length} clips (now on ${c.day}, about ${left} min left)`);
-      }
-      if (pauseMs) await new Promise((r) => setTimeout(r, pauseMs));
+      const key = `${c.vid}/${c.day}`;
+      if (!queues.has(key)) queues.set(key, []);
+      queues.get(key).push(c);
     }
+    const order = [...queues.keys()];
+    let left = todo.length;
+    let first = 0; // days before this are done
+    const next = () => {
+      while (first < order.length && !queues.get(order[first]).length) first++;
+      let pick = null;
+      for (let i = first; i < order.length; i++) {
+        const key = order[i];
+        if (!queues.get(key).length) continue;
+        if (!reading.has(key)) { pick = key; break; }
+        pick = pick || key;
+      }
+      if (!pick) return null;
+      left--;
+      return queues.get(pick).shift();
+    };
+    const inFlight = new Set();
+    let lastFlush = 0;
+    const read = async (c) => {
+      const key = `${c.vid}/${c.day}`;
+      reading.set(key, (reading.get(key) || 0) + 1);
+      try {
+        const data = await load(c.vid, c.day);
+        const mode = pickMode();
+        const t0 = Date.now();
+        const result = await speedsFor(path.join(c.root, c.rel), c.size, mode);
+        const ms = Date.now() - t0;
+        pace.done(ms);
+        modeDone(mode, ms);
+        // changed while it was read (converted, say): the next pass reads it again
+        const f = inventory.get(c.vid)?.files?.get(c.rel);
+        if (f && f.size === c.size && Math.round(f.mtimeMs) === c.mtimeMs) {
+          data[c.rel] = [c.size, c.mtimeMs, ...result];
+          byName.delete(data);
+          touch(key);
+        }
+        done++;
+        Object.assign(progress_, { done, day: c.day });
+        if (done % 250 === 0 && done < todo.length) {
+          const min = Math.round(((Date.now() - started) / done) * (todo.length - done) / 60000);
+          log?.info(`Speed index: ${done} of ${todo.length} clips (now on ${c.day}, about ${min} min left, ${pace.status().limit} at a time)`);
+        }
+      } finally {
+        const n = reading.get(key) - 1;
+        if (n > 0) reading.set(key, n);
+        else reading.delete(key);
+      }
+    };
+    while (!stopped) {
+      pace.demand(inFlight.size, left > 0);
+      const cap = pace.allowed();
+      while (inFlight.size < cap && left > 0 && !stopped) {
+        const c = next();
+        if (!c) break;
+        const job = { c };
+        job.p = read(c).catch((err) => log?.warn(`Speed index: ${err.message}`)).finally(() => {
+          inFlight.delete(job);
+          pace.demand(inFlight.size, left > 0);
+        });
+        inFlight.add(job);
+        pace.demand(inFlight.size, left > 0);
+        if (pauseMs) await new Promise((r) => setTimeout(r, pauseMs));
+      }
+      if (!inFlight.size && left <= 0) break;
+      if (done - lastFlush >= 100) {
+        lastFlush = done;
+        await flush();
+      }
+      // a read ends, or a moment passes for the pace to change
+      let wake;
+      const moment = new Promise((r) => { wake = setTimeout(r, inFlight.size ? 1000 : 2000); });
+      await Promise.race([...[...inFlight].map((j) => j.p), moment]);
+      clearTimeout(wake);
+    }
+    await Promise.all([...inFlight].map((j) => j.p));
     await flush();
     return done;
+  }
+
+  // short reads or a few long ones (speedReader): recent ms a clip for each;
+  // the faster is used, the other tried again every 40 clips
+  const modes = { short: null, straight: null };
+  let modeCount = 0;
+  function pickMode() {
+    modeCount++;
+    if (modes.short === null) return 'short';
+    if (modes.straight === null) return 'straight';
+    const faster = modes.straight < modes.short ? 'straight' : 'short';
+    return modeCount % 40 === 0 ? (faster === 'straight' ? 'short' : 'straight') : faster;
+  }
+  function modeDone(mode, ms) {
+    modes[mode] = modes[mode] === null ? ms : modes[mode] * 0.8 + ms * 0.2;
   }
 
   /** Index what is new; again after this pass if more changed meanwhile. */
@@ -463,9 +560,13 @@ function createSpeedIndex({ dir, inventory, vehicles, telemetry, log, pauseMs = 
   async function clip(vid, rel, real, size, mtimeMs) {
     const f = inventory.get(vid)?.files?.get(rel);
     const [sp, sum] = await speedsFor(real, size);
-    if (f && f.day && DAY.test(f.day) && f.camera === 'front') {
+    // changed while it was read (converted, say): not kept over what the index has now
+    const now = inventory.get(vid)?.files?.get(rel);
+    const same = now && now.size === size && Math.round(now.mtimeMs) === Math.round(mtimeMs);
+    if (same && f && f.day && DAY.test(f.day) && f.camera === 'front') {
       const data = await load(vid, f.day);
       data[rel] = [size, Math.round(mtimeMs), sp, sum];
+      byName.delete(data);
       touch(`${vid}/${f.day}`);
       if (!running) flush().catch(() => {});
     }
@@ -488,7 +589,13 @@ function createSpeedIndex({ dir, inventory, vehicles, telemetry, log, pauseMs = 
     return out;
   }
 
-  return { kick, day, summaries, moments, near, warm, clip, clipStats, clipsRead, progress, status: () => ({ ...progress_ }), flush, stop() { stopped = true; } };
+  return { kick, day, summaries, moments, near, warm, clip, clipStats, clipsRead, progress, status: () => ({ ...progress_, limit: pace.status().limit, readMode: modes.straight !== null && modes.short !== null ? (modes.straight < modes.short ? 'straight' : 'short') : null }), flush,
+    /** Stop: no new reads; resolves once the reads in progress ended and all is written. */
+    async stop() {
+      stopped = true;
+      await (running || Promise.resolve()).catch(() => {});
+      await flush().catch(() => {});
+    } };
 }
 
 /** One clip's speeds and summary in numbers (clipStats), or null when it has no speed at all. */

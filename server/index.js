@@ -87,6 +87,7 @@ const { createNodeBenchmark } = require('./nodeBenchmark');
 const { run } = require('./proc');
 const { Telemetry } = require('./telemetry');
 const { createSpeedIndex } = require('./speedIndex');
+const { createBackgroundPace } = require('./backgroundPace');
 const { createExporter } = require('./exporter');
 const { createCanLogs, parseName: parseCanName } = require('./canLogs');
 const { createCanIndex, CLIP_STEP_MS: CAN_CLIP_STEP_MS } = require('./canIndex');
@@ -403,7 +404,11 @@ async function main() {
   // Sentry USB's drive-data.json on each car's share (driveData.js): read when
   // the drives API asks and it changed, kept boiled down under the data folder
   driveData = driveDataLib.createDriveData({ dir: path.join(DATA, 'drive-data'), vehicles, log: logger.scope('drives'), idle: () => !speedIndexBusy() });
-  speedIndex = createSpeedIndex({ dir: path.join(DATA, 'speeds'), inventory, vehicles, telemetry, log: logger.scope('speeds'), idle: () => !speedIndexBusy() });
+  // how many clips the speed index reads at once: more while the server keeps
+  // up, fewer when it strains or the Viewer plays (backgroundPace.js)
+  const backgroundPace = createBackgroundPace({ busy: () => speedIndexBusy() });
+  backgroundPace.start();
+  speedIndex = createSpeedIndex({ dir: path.join(DATA, 'speeds'), inventory, vehicles, telemetry, log: logger.scope('speeds'), idle: () => !speedIndexBusy(), pace: backgroundPace });
   // the place search's cache, filled quietly half a minute after start
   setTimeout(() => speedIndex.warm(vehicles.list().map((v) => v.id)).catch((err) => log.warn(`Place search: ${err.message}`)), 30_000).unref?.();
 
@@ -613,7 +618,8 @@ async function main() {
   const prepareDays = Number.parseInt(process.env.SCRUB_PREPARE_DAYS ?? '2', 10);
   scrubPrepare = createScrubPrepare({
     inventory, vehicles, scrubFrames, days: Number.isFinite(prepareDays) ? Math.max(0, Math.min(prepareDays, 30)) : 2,
-    idle: () => !converterRunning() && benchmarking === null, log: logger.scope('scrub')
+    // and not while the server strains: previews wait for the disks to calm
+    idle: () => !converterRunning() && benchmarking === null && !backgroundPace.strained(), log: logger.scope('scrub')
   });
 
   const updates = new ImageUpdates({
@@ -3998,6 +4004,8 @@ async function main() {
         if (p === '/api/media') {
           const real = await studioReadable.resolve(url.searchParams.get('path') || '');
           if (!real || hiddenPath(real)) return sendJson(res, 403, { error: 'Outside the vehicle shares.' });
+          // footage playing: background reading slows to one clip at a time
+          backgroundPace.viewer(res);
           return sendMedia(req, res, real, studioReadable.fdInside);
         }
         if (p === '/api/scrub') {
@@ -4403,6 +4411,9 @@ async function main() {
     reports.stop();
     exporter.stop();
     scrubPrepare.stop();
+    // the speed index writes what it read before the process ends
+    await Promise.race([speedIndex?.stop(), new Promise((r) => setTimeout(r, 15_000))]).catch(() => {});
+    backgroundPace.stop();
     driveData.stop();
     snapshots.stop();
     await host.stop().catch(() => {});
