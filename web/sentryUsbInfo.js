@@ -33,9 +33,6 @@ const CSS = `
 .sentry-sul .sul-stat span{display:block;font-size:12px;opacity:.72}
 .sentry-sul .sul-stat b{display:block;font-size:17px;line-height:1.25;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
 .sentry-sul .sul-stat small{display:block;font-size:11.5px;opacity:.68}
-.sentry-sul .sul-bar{height:8px;border-radius:999px;background:rgba(127,127,127,.22);overflow:hidden}
-.sentry-sul .sul-bar i{display:block;height:100%;border-radius:inherit;background:var(--sul-car-accent,currentColor);opacity:.85}
-.sentry-sul .sul-bar.full i{background:var(--sul-car-warn,#e0a030)}
 .sentry-sul .sul-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr));gap:14px;align-items:start}
 .sentry-sul .sul-car{border:1px solid var(--sul-car-line,rgba(127,127,127,.3));border-radius:var(--sul-car-radius,10px);padding:12px;display:flex;flex-direction:column;gap:12px;min-width:0;background:var(--sul-car-bg,transparent)}
 .sentry-sul .sul-car-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px}
@@ -205,7 +202,6 @@ function infoCard(info, h24) {
       stat('Space left', v.free),
       v.version ? stat('Version', v.version) : null,
       v.cpu ? stat('CPU', v.cpu) : null),
-    v.pct !== null ? h('div', { class: `sul-bar${v.pct >= 90 ? ' full' : ''}`, role: 'img', 'aria-label': `${v.pct}% used` }, h('i', { style: `width:${v.pct}%` })) : null,
     v.drives.length ? h('div', {}, h('h3', {}, 'Drives the car sees'),
       h('div', { class: 'sul-grid' }, v.drives.map((d) => stat(d.label, d.value)))) : null);
 }
