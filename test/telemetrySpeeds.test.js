@@ -44,6 +44,8 @@ test('speed graph: the quick reader finds one record a second without reading th
   });
   await createTeslaH264Fixture({ ffmpegPath: 'ffmpeg', outputPath: clip, telemetryPattern: pattern, size: '160x120' });
   assert.deepEqual(await readSpeeds(clip), [0, 12, null, 36]);
+  // the straight read (a few long reads) finds the same
+  assert.deepEqual(await readSpeeds(clip, { mode: 'straight' }), [0, 12, null, 36]);
   // not an MP4: the caller falls back to the full read
   const junk = path.join(dir, 'junk.mp4');
   fs.writeFileSync(junk, Buffer.alloc(100, 7));
@@ -82,5 +84,6 @@ test('speed graph: the quick reader reads converted H.265 and AV1 clips like the
     const frames = JSON.parse(await full.read(out, fs.statSync(out).size)).frames;
     assert.ok(frames.length > 40, `${codec}: the full read found the records`);
     assert.deepEqual(await readSpeeds(out), [0.3, 6.3, 12.3, 18.3], codec);
+    assert.deepEqual(await readSpeeds(out, { mode: 'straight' }), [0.3, 6.3, 12.3, 18.3], codec + ' straight');
   }
 });

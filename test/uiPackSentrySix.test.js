@@ -669,7 +669,7 @@ test('activity: numeric progressClips is a count; live devices name the GPU and 
   );
 });
 
-test('overview: one attention group, ordered singular categories and a complete display total', async (t) => {
+test('overview: no attention list (the bell carries it), ordered singular categories and a complete display total', async (t) => {
   await browserEnv(t, (url) =>
     url.includes('/days?')
       ? {
@@ -709,7 +709,7 @@ test('overview: one attention group, ordered singular categories and a complete 
     },
     alive: () => true,
   });
-  assert.match(el.innerHTML, /class="card attention-group"/);
+  assert.doesNotMatch(el.innerHTML, /attention-group|Needs your attention/);
   assert.match(el.innerHTML, /class="number">1 recording<\/div>/);
   assert.match(el.innerHTML, /1 drive.*1 Sentry event.*1 saved/);
   assert.match(el.innerHTML, /class="muted" href="#\/bin">Recycle Bin is empty/);
@@ -766,6 +766,17 @@ test('attention: informational rows are grey and legacy count labels use real pl
   assert.equal(items[0].tone, 'info');
   assert.equal(items[0].title, '1 clip checked');
   assert.equal(items[0].text, '2 recordings read');
+});
+
+test('bell: plain for news, yellow for a warning, red for something critical', async () => {
+  const m = await mod('status');
+  assert.equal(m.bellTone([]), '');
+  assert.equal(m.bellTone([{ level: 'info' }]), '');
+  assert.equal(m.bellTone([{ level: 'info' }, { level: 'warning', readAt: 1 }]), 'warn');
+  assert.equal(m.bellTone([{ kind: 'storage' }]), 'warn');
+  assert.equal(m.bellTone([{ kind: 'storage', level: 'info' }]), '');
+  assert.equal(m.bellTone([{ level: 'warning' }, { level: 'critical', readAt: 1 }]), 'bad');
+  assert.equal(m.bellTone([{ level: 'critical', resolvedAt: 1 }, { level: 'info' }]), '');
 });
 
 const clickAction = (el, key, dataset = {}) =>
@@ -1418,6 +1429,44 @@ test('r4 core: scope checks keys at password retry even before its watcher runs'
   document.body.appended.at(-1).close('ok');
   await assert.rejects(pending, { name: 'AbortError' });
   assert.deepEqual(posts, ['/mutate']);
+});
+
+test('api: a dropped read is tried again quietly; a dropped change is not repeated', async (t) => {
+  const calls = [];
+  await browserEnv(t, (url, opts) => {
+    calls.push(opts.method + ' ' + url);
+    if (calls.filter((c) => c === opts.method + ' ' + url).length === 1) throw new TypeError('Failed to fetch');
+    return { ok: 1 };
+  });
+  const { api, offline } = await import(browserModule('core.js'));
+  assert.deepEqual(await api('/api/read'), { ok: 1 });
+  assert.deepEqual(calls, ['GET /api/read', 'GET /api/read']);
+  const err = await api('/api/change', { body: {} }).catch((e) => e);
+  assert.ok(offline(err));
+  assert.match(err.message, /Can't reach Sentry Six Manager/);
+  assert.deepEqual(calls.slice(2), ['POST /api/change']);
+  // a connection that drops while the answer arrives is a dropped read too
+  let bodyDrops = 1;
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => {
+      if (bodyDrops-- > 0) throw new TypeError('network error');
+      return { vehicles: [1] };
+    },
+  });
+  assert.deepEqual(await api('/api/vehicles'), { vehicles: [1] });
+  globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => JSON.parse('<html>') });
+  assert.deepEqual(await api('/api/not-json'), {});
+  // leaving the page cancels a read that is waiting to be tried again
+  globalThis.fetch = async () => {
+    throw new TypeError('Failed to fetch');
+  };
+  const ctrl = new AbortController();
+  const pending = api('/api/aborted', { signal: ctrl.signal });
+  await tick();
+  ctrl.abort();
+  await assert.rejects(pending, { name: 'AbortError' });
 });
 
 test('r4 render: a nested Health subpage retains its parent scope', async (t) => {
