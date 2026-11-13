@@ -2932,3 +2932,29 @@ select option:disabled {
     grid-column: 1 / -1;
   }
 }
+
+/* ---- MacBook audit ---- */
+/* switches keep their own size in a settings row (the row's checkbox rule made
+   them 20 px), and the knob is centred whatever the height */
+.setting-row input.toggle-switch {
+  width: 40px;
+  height: 22px;
+}
+input.toggle-switch::after {
+  top: calc(50% - 8px);
+}
+/* dropdowns: the theme's own box and arrow in every browser (Safari kept a grey
+   native face, 8 px taller than Chrome's) */
+select:not([multiple]):not([size]),
+#page .sentry-sul select,
+#page .sentry-acct select {
+  -webkit-appearance: none;
+  appearance: none;
+  padding-right: 34px;
+  background-color: #141a22;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5l5 5 5-5' fill='none' stroke='%239aa4b2' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 12px 8px;
+  line-height: 1.3;
+}
