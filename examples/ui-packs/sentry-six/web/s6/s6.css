@@ -2650,3 +2650,96 @@ input.toggle-switch:focus-visible {
     overflow-wrap: anywhere;
   }
 }
+
+/* Sliders: a slim track filled to the value, a white thumb; no box around them */
+input[type='range'] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+}
+input[type='range']::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent) 0 var(--fill, 50%), rgba(255, 255, 255, 0.14) var(--fill, 50%) 100%);
+}
+input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  margin-top: -7px;
+  border: 0;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45), 0 0 0 0.5px rgba(0, 0, 0, 0.2);
+}
+input[type='range']::-moz-range-track {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+}
+input[type='range']::-moz-range-progress {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+input[type='range']::-moz-range-thumb {
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+}
+input[type='range']:focus-visible {
+  outline: none;
+}
+input[type='range']:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 4px oklch(0.82 0.18 150 / 0.35), 0 1px 4px rgba(0, 0, 0, 0.45);
+}
+input[type='range']:focus-visible::-moz-range-thumb {
+  box-shadow: 0 0 0 4px oklch(0.82 0.18 150 / 0.35), 0 1px 4px rgba(0, 0, 0, 0.45);
+}
+
+/* Dropdowns: the open list in the dark theme too (a see-through select gives a white one) */
+select {
+  background-color: #141a22;
+}
+select option,
+select optgroup {
+  background-color: #141a22;
+  color: #e6e9ef;
+}
+select option:checked {
+  background-color: #1f3a2b;
+  color: #fff;
+}
+select option:disabled {
+  color: #6b7480;
+}
+
+/* A card's heading row with a button: room before the first divider */
+.card > .row:first-child:has(> .btn, > button, > a.btn) {
+  margin-bottom: 12px;
+}
+
+/* Interface cards: a picture of the interface */
+.pack-preview.shot {
+  height: auto;
+  aspect-ratio: 16 / 10;
+  padding: 0;
+  overflow: hidden;
+  background: #0b0f14;
+}
+.pack-preview.shot img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: top left;
+  display: block;
+}
