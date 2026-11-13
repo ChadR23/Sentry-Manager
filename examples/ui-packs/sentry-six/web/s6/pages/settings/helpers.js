@@ -35,7 +35,7 @@ async function renderPage(page, ctx) {
           `<tr${r.level === b.suggested ? ' class="is-best"' : ''}><td>${r.level} at once</td><td>${r.failed ? `${r.failed} failed` : `${r.clipsPerMinute} clips/min`}</td><td class="muted small">${plural(r.clips, 'clip')} in ${r.seconds} s</td></tr>`,
       )
       .join('');
-    return `<tr class="node-bench-row"><td colspan="5"><div class="node-bench">
+    return `<div class="node-panel node-bench">
         <div><b>Benchmark, ${codec}${on}</b> <span class="muted small">${b.state === 'running' ? esc(b.phase || 'Running') + '…' : b.state === 'failed' ? `failed: ${esc(b.error || '')}` : b.state === 'cancelled' ? 'cancelled' : `done${b.samples ? ` · ${plural(b.samples, 'sample clip')} from your footage, only read${b.converted ? ' (already converted ones: no originals are left)' : ''}` : ''}`}</span></div>
         ${rows ? `<table class="table" style="margin-top:8px"><tbody>${rows}</tbody></table>` : ''}
         <div class="form-actions" style="margin-top:8px">
@@ -44,7 +44,7 @@ async function renderPage(page, ctx) {
               ? `<button class="btn sm" data-bench-cancel="${esc(n.id)}">Cancel</button>`
               : `${b.suggested ? `<button class="btn sm solid" data-bench-use="${esc(n.id)}" data-level="${b.suggested}">Use ${b.suggested} at once${on}</button>` : ''}<button class="btn sm" data-bench-start="${esc(n.id)}" data-codec="${esc(b.codec)}">Run again</button>`
           }
-        </div></div></td></tr>`;
+        </div></div>`;
   };
   // the vehicles a node converts for first, in order (automatic conversion)
   const carName = (id) => cars.find((v) => v.id === id)?.name || id;
@@ -55,26 +55,26 @@ async function renderPage(page, ctx) {
     const items = list
       .map(
         (id, i) =>
-          `<li><span class="node-car-rank">${i + 1}</span>${esc(carName(id))}${i > 0 ? `<button class="btn sm ghost" data-car-up="${esc(n.id)}" data-car="${esc(id)}" aria-label="Move ${esc(carName(id))} up">↑</button>` : ''}<button class="btn sm ghost" data-car-remove="${esc(n.id)}" data-car="${esc(id)}" aria-label="Remove ${esc(carName(id))}">✕</button></li>`,
+          `<li><span class="node-car-rank">${i + 1}</span><span class="grow">${esc(carName(id))}</span>${i > 0 ? `<button class="btn sm ghost" data-car-up="${esc(n.id)}" data-car="${esc(id)}" aria-label="Move ${esc(carName(id))} up">↑</button>` : ''}<button class="btn sm ghost" data-car-remove="${esc(n.id)}" data-car="${esc(id)}" aria-label="Remove ${esc(carName(id))}">✕</button></li>`,
       )
       .join('');
-    return `<tr class="node-bench-row"><td colspan="5"><div class="node-cars">
+    return `<div class="node-panel node-cars">
         <b>Vehicles first</b> <span class="muted small">${list.length ? "Automatic conversion sends this node these vehicles' new clips first, in this order; with none waiting, it helps the others." : 'None: it helps whichever vehicle is converting.'}</span>
         ${items ? `<ol class="node-car-list">${items}</ol>` : ''}
         ${left.length ? `<select class="input node-car-add" data-car-add="${esc(n.id)}" aria-label="Add a vehicle for ${esc(n.name)}"><option value="">Add a vehicle…</option>${left.map((v) => `<option value="${esc(v.id)}">${esc(v.name)}</option>`).join('')}</select>` : ''}
-      </div></td></tr>`;
+      </div>`;
   };
   // a node of your own: its encodes skip the picture check (faster, less safe)
   const trustPanel = (
     n,
-  ) => `<tr class="node-bench-row"><td colspan="5"><label class="check node-trust">
+  ) => `<div class="node-panel"><label class="check node-trust">
         <input type="checkbox" data-node-trust="${esc(n.id)}"${n.trusted ? ' checked' : ''}>
         <span><b>Trusted</b> <span class="muted small">${
           n.trusted
             ? 'Its encodes replace originals without the picture check (streams, length, frames and telemetry are still verified). Turn off if anyone else could change this computer.'
             : 'Its encodes get the picture check here: a few random stretches of each clip compared with the original. Trust only a computer of your own: it skips that check.'
         }</span></span>
-      </label></td></tr>`;
+      </label></div>`;
   const encodersText = (e) =>
     [
       ['H.265', e?.h265],
@@ -95,12 +95,12 @@ async function renderPage(page, ctx) {
       : encodersText(n.encoders);
   const nodeRows = nodes
     .map(
-      (n) => `<tr>
-        <td class="words"><b>${esc(n.name)}</b><br><span class="muted small mono">${esc(n.address)}</span></td>
-        <td>${n.online ? '<span class="chip green"><span class="dot ok"></span>Online</span>' : `<span class="chip red"><span class="dot bad"></span>Offline</span><br><span class="muted small words">${esc(n.error || '')}</span>`}</td>
-        <td class="small">${nodeEncoders(n)}</td>
-        <td class="small">${n.online && n.slots ? (n.encoding === null ? `${n.busy ?? 0} of ${n.slots} busy` : `${n.encoding} of ${n.slots} converting${n.busy > n.encoding ? ` · ${n.busy - n.encoding} waiting` : ''}`) : '—'}</td>
-        <td class="actions">${n.online && !benches[n.id] ? `<button class="btn sm" data-bench-start="${esc(n.id)}" data-codec="h265"${benchRunning ? ' disabled' : ''}>Benchmark</button>${n.encoders?.av1 ? `<button class="btn sm" data-bench-start="${esc(n.id)}" data-codec="av1"${benchRunning ? ' disabled' : ''}>Benchmark AV1</button>` : ''}` : ''}<button class="btn sm" data-rename-node="${esc(n.id)}">Rename</button><button class="btn sm" data-remove-node="${esc(n.id)}">Remove</button></td></tr>${carsPanel(n)}${trustPanel(n)}${benchPanel(n)}`,
+      (n) => `<section class="node"><div class="node-head">
+        <div class="node-name"><b>${esc(n.name)}</b><span class="muted small mono">${esc(n.address)}</span></div>
+        <div>${n.online ? '<span class="chip green"><span class="dot ok"></span>Online</span>' : `<span class="chip red"><span class="dot bad"></span>Offline</span><div class="muted small words">${esc(n.error || '')}</div>`}</div>
+        <div class="small node-encoders">${nodeEncoders(n)}</div>
+        <div class="small node-clips">${n.online && n.slots ? (n.encoding === null ? `${n.busy ?? 0} of ${n.slots} busy` : `${n.encoding} of ${n.slots} converting${n.busy > n.encoding ? ` · ${n.busy - n.encoding} waiting` : ''}`) : '—'}</div>
+        <div class="node-actions">${n.online && !benches[n.id] ? `<button class="btn sm" data-bench-start="${esc(n.id)}" data-codec="h265"${benchRunning ? ' disabled' : ''}>Benchmark</button>${n.encoders?.av1 ? `<button class="btn sm" data-bench-start="${esc(n.id)}" data-codec="av1"${benchRunning ? ' disabled' : ''}>Benchmark AV1</button>` : ''}` : ''}<button class="btn sm" data-rename-node="${esc(n.id)}">Rename</button><button class="btn sm" data-remove-node="${esc(n.id)}">Remove</button></div></div>${benchPanel(n)}${carsPanel(n)}${trustPanel(n)}</section>`,
     )
     .join('');
   const pairing = worker.pairing;
@@ -120,7 +120,7 @@ async function renderPage(page, ctx) {
         <p class="muted" style="margin-top:6px">Other servers running Sentry Six Manager can encode clips for this one. This server reads each clip, sends it to the node over HTTPS and checks the encoded file before it saves anything, as with its own GPUs. Nodes never get your share passwords and never touch the footage.</p>
         ${
           nodes.length
-            ? `<table class="table" style="margin-top:14px"><thead><tr><th>Node</th><th>Status</th><th>Encoders</th><th>Clips</th><th></th></tr></thead><tbody>${nodeRows}</tbody></table>
+            ? `<div class="node-list">${nodeRows}</div>
           <p class="muted small" style="margin-top:10px">Each node is a group under <a href="#/encoder">Encoder</a> → Parallel conversions: open it to pick which of its GPUs (and its CPU) convert, and how many clips each converts at once.</p>`
             : '<p style="margin-top:12px">No nodes yet.</p>'
         }

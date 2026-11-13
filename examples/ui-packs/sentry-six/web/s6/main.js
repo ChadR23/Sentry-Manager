@@ -58,6 +58,17 @@ export function applyGlass() {
 }
 applyGlass();
 const page = document.getElementById('page');
+// a slider's track is filled up to its value (--fill), wherever one appears
+const fillRange = (el) => {
+  const min = Number(el.min || 0),
+    max = Number(el.max || 100);
+  el.style.setProperty('--fill', (100 * (Number(el.value) - min)) / (max - min || 1) + '%');
+};
+document.addEventListener?.('input', (e) => e.target.matches?.('input[type="range"]') && fillRange(e.target));
+if (typeof MutationObserver !== 'undefined' && document.body) new MutationObserver(() => document.querySelectorAll('input[type="range"]:not([data-filled])').forEach((el) => {
+  el.dataset.filled = '';
+  fillRange(el);
+})).observe(document.body, { childList: true, subtree: true });
 let cleanup = () => {},
   shown = false, // the page on screen is a finished render
   seq = 0,
