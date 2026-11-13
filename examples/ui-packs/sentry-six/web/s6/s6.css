@@ -2855,3 +2855,53 @@ select option:disabled {
     height: 60px;
   }
 }
+
+/* ---- iPhone audit ---- */
+/* the sidebar scrolls when it is taller than the screen (a phone on its side) */
+#sidebar {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+}
+#sidebar::-webkit-scrollbar {
+  display: none;
+}
+/* any touch screen, whatever its width (phones on their side, tablets) */
+@media (pointer: coarse) {
+  /* 16 px in fields: iOS zooms the page into a smaller one on focus */
+  input:not([type='checkbox']):not([type='radio']):not([type='range']),
+  select,
+  textarea {
+    font-size: 16px;
+  }
+  input:not([type='checkbox']):not([type='radio']):not([type='range']):not(.toggle-switch),
+  select {
+    min-height: 40px;
+  }
+  /* things a finger can hit: 40 px at least */
+  .expand-count,
+  .settings-back,
+  .footage-filters .segments button,
+  .bin-segments button,
+  .footage-actions button,
+  .footage-filters > button,
+  .pager button,
+  dialog [data-prev],
+  dialog [data-next] {
+    min-height: 40px;
+  }
+  .pager button,
+  dialog [data-prev],
+  dialog [data-next] {
+    min-width: 40px;
+  }
+  .settings-back {
+    display: inline-flex;
+    align-items: center;
+  }
+  .day > .day-actions .icon-button,
+  .day .recording > .icon-button {
+    width: 40px;
+    height: 40px;
+  }
+}
