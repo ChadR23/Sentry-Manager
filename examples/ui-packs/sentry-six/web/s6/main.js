@@ -1,5 +1,5 @@
 import { clearFootageSelections } from './pages/footage.js';
-import { api, esc, sheet, act, toast, scope } from './core.js';
+import { api, esc, sheet, act, toast, scope, offline, OFFLINE_TEXT } from './core.js';
 import { icon } from './icons.js';
 import { showStudio, hideStudio } from './studio.js';
 import { notifications } from './pages/notifications.js';
@@ -59,6 +59,7 @@ export function applyGlass() {
 applyGlass();
 const page = document.getElementById('page');
 let cleanup = () => {},
+  shown = false, // the page on screen is a finished render
   seq = 0,
   renderScope;
 // The picker, Studio messages and deep links all switch the same shell state.
@@ -73,8 +74,13 @@ export function selectVehicle(id) {
   return true;
 }
 export const pages = {};
-export async function render(vehicleChanged = false) {
+// quiet: a redraw after a live update; the page on screen stays until the new
+// one is ready, and stays as it is when the server can't be reached
+export async function render(vehicleChanged = false, { quiet = false } = {}) {
   const ticket = ++seq;
+  // nothing finished to keep (a first load, or one still on its way): draw as usual
+  if (!shown) quiet = false;
+  if (!quiet) shown = false;
   renderScope?.abort();
   cleanup?.();
   cleanup = () => {};
@@ -110,12 +116,13 @@ export async function render(vehicleChanged = false) {
     if (active) a.setAttribute('aria-current', 'page');
     else a.removeAttribute('aria-current');
   });
-  page.innerHTML = '';
+  if (!quiet) page.innerHTML = '';
   document.body.classList.remove('selecting');
   const header = document.getElementById('page-actions');
   header.replaceChildren();
   header.onclick = null;
   const mount = document.createElement('div');
+  mount.hidden = quiet;
   page.append(mount);
   const owner = scope(() => [current()?.id], { alive: () => ticket === seq });
   renderScope = owner;
@@ -152,11 +159,21 @@ export async function render(vehicleChanged = false) {
         sub: route.split('/').slice(1).join('/'),
         alive: () => ticket === seq,
       })) || (() => {});
-    if (ticket === seq) cleanup = teardown;
-    else teardown();
+    if (ticket === seq) {
+      cleanup = teardown;
+      if (quiet) {
+        [...page.children].forEach((c) => c !== mount && c.remove());
+        mount.hidden = false;
+      }
+      shown = true;
+    } else teardown();
   } catch (e) {
-    if (ticket === seq)
-      page.innerHTML = `<div class="card"><p>${esc(e.message)}</p><a href="/original">Open Original</a></div>`;
+    if (ticket !== seq || e?.name === 'AbortError' || quiet) return;
+    page.innerHTML = `<div class="card"><p>${esc(offline(e) ? OFFLINE_TEXT : e.message)}</p><div class="form-actions">${offline(e) ? '<button class="btn solid" data-again>Try again</button>' : ''}<a class="btn" href="/original">Open Original</a></div></div>`;
+    page.querySelector('[data-again]')?.addEventListener('click', () => render());
+  } finally {
+    // a quiet redraw that was not kept (failed, or overtaken by another)
+    if (mount.hidden) mount.remove();
   }
 }
 async function refresh() {
@@ -229,9 +246,10 @@ events.addEventListener('changed', (event) => {
     refresh()
       .then(() => {
         window.dispatchEvent(new CustomEvent('s6:changed', { detail: topics }));
-        if (location.hash.startsWith('#/overview') || !location.hash) render();
+        if (location.hash.startsWith('#/overview') || !location.hash) render(false, { quiet: true });
       })
-      .catch((e) => toast(e.message, true));
+      // a live update the server could not answer: the next one tries again
+      .catch((e) => offline(e) || toast(e.message, true));
 });
 // Keep the shell below the shared startup and critical-update bars.
 function fitUnderBarsSoon() {

@@ -1431,6 +1431,44 @@ test('r4 core: scope checks keys at password retry even before its watcher runs'
   assert.deepEqual(posts, ['/mutate']);
 });
 
+test('api: a dropped read is tried again quietly; a dropped change is not repeated', async (t) => {
+  const calls = [];
+  await browserEnv(t, (url, opts) => {
+    calls.push(opts.method + ' ' + url);
+    if (calls.filter((c) => c === opts.method + ' ' + url).length === 1) throw new TypeError('Failed to fetch');
+    return { ok: 1 };
+  });
+  const { api, offline } = await import(browserModule('core.js'));
+  assert.deepEqual(await api('/api/read'), { ok: 1 });
+  assert.deepEqual(calls, ['GET /api/read', 'GET /api/read']);
+  const err = await api('/api/change', { body: {} }).catch((e) => e);
+  assert.ok(offline(err));
+  assert.match(err.message, /Can't reach Sentry Six Manager/);
+  assert.deepEqual(calls.slice(2), ['POST /api/change']);
+  // a connection that drops while the answer arrives is a dropped read too
+  let bodyDrops = 1;
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => {
+      if (bodyDrops-- > 0) throw new TypeError('network error');
+      return { vehicles: [1] };
+    },
+  });
+  assert.deepEqual(await api('/api/vehicles'), { vehicles: [1] });
+  globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => JSON.parse('<html>') });
+  assert.deepEqual(await api('/api/not-json'), {});
+  // leaving the page cancels a read that is waiting to be tried again
+  globalThis.fetch = async () => {
+    throw new TypeError('Failed to fetch');
+  };
+  const ctrl = new AbortController();
+  const pending = api('/api/aborted', { signal: ctrl.signal });
+  await tick();
+  ctrl.abort();
+  await assert.rejects(pending, { name: 'AbortError' });
+});
+
 test('r4 render: a nested Health subpage retains its parent scope', async (t) => {
   await browserEnv(t, () => ({}));
   const { ownedRender } = await import(browserModule('core.js'));
