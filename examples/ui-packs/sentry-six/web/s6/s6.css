@@ -2453,3 +2453,293 @@ input.toggle-switch:focus-visible {
     background: var(--solid);
   }
 }
+
+/* Day cards: play and actions sit beside the whole card (summary and the
+   recordings count), centred on it; their marks are drawn icons, centred in
+   their circles (a text ▶ or ⋯ sits off centre in every font) */
+.day {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 12px;
+  align-items: center;
+}
+.day > .day-summary,
+.day > .expand-count {
+  grid-column: 1;
+}
+.day > .day-actions {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: center;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.day > .day-recs {
+  grid-column: 1 / -1;
+}
+.play-button,
+.icon-button {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+}
+.play-button .icon {
+  width: 22px;
+  height: 22px;
+}
+.icon-button {
+  width: 40px;
+  height: 40px;
+  padding: 0;
+}
+.icon-button .icon {
+  width: 22px;
+  height: 22px;
+}
+.expand-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  justify-self: start;
+  line-height: 1;
+}
+.expand-count .icon {
+  width: 20px;
+  height: 20px;
+  margin-left: -4px;
+}
+.thumb-play > span .icon {
+  width: 16px;
+  height: 16px;
+}
+@media (max-width: 760px) {
+  .day-summary {
+    grid-template-columns: 96px minmax(0, 1fr);
+  }
+  .day > .day-actions {
+    align-self: start;
+  }
+  .day > .day-actions .icon-button,
+  .day .recording > .icon-button {
+    width: 28px;
+    height: 28px;
+  }
+}
+
+/* Helper servers: one card per node; its benchmark, vehicles and trust inside it */
+.node-list {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+}
+.node {
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: 16px 18px;
+  background: rgba(255, 255, 255, 0.03);
+}
+.node-head {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) auto minmax(200px, 2fr) auto;
+  gap: 12px 24px;
+  align-items: start;
+}
+.node-name {
+  display: grid;
+  gap: 2px;
+}
+.node-encoders .words {
+  display: inline-block;
+  margin-bottom: 4px;
+}
+.node-clips {
+  white-space: nowrap;
+}
+.node-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.node-panel {
+  border-top: 1px solid var(--border);
+  margin-top: 14px;
+  padding-top: 14px;
+}
+.node-cars .node-car-list {
+  list-style: none;
+  padding: 0;
+  margin: 10px 0 0;
+  display: grid;
+  gap: 6px;
+  max-width: 420px;
+}
+.node-cars .node-car-list li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 6px 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.node-car-rank {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  margin: 0;
+  border-radius: 50%;
+  background: oklch(0.82 0.18 150 / 0.15);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+}
+.node-car-add {
+  margin-top: 10px;
+  max-width: 260px;
+}
+.btn.ghost {
+  background: none;
+  border-color: transparent;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+.node-bench .table tr.is-best td {
+  color: var(--accent);
+}
+.pair-code-value {
+  font-size: 28px;
+  letter-spacing: 0.08em;
+  margin: 6px 0;
+}
+@media (max-width: 760px) {
+  .node-head {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .node-encoders,
+  .node-clips {
+    grid-column: 1 / -1;
+  }
+}
+.expand-count:hover,
+.expand-count:focus,
+.expand-count:active {
+  background: none;
+}
+.expand-count:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+@media (max-width: 760px) {
+  .node-head {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+  .node-name .mono {
+    overflow-wrap: anywhere;
+  }
+}
+
+/* Sliders: a slim track filled to the value, a white thumb; no box around them */
+input[type='range'] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+}
+input[type='range']::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent) 0 var(--fill, 50%), rgba(255, 255, 255, 0.14) var(--fill, 50%) 100%);
+}
+input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  margin-top: -7px;
+  border: 0;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45), 0 0 0 0.5px rgba(0, 0, 0, 0.2);
+}
+input[type='range']::-moz-range-track {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+}
+input[type='range']::-moz-range-progress {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+input[type='range']::-moz-range-thumb {
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+}
+input[type='range']:focus-visible {
+  outline: none;
+}
+input[type='range']:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 4px oklch(0.82 0.18 150 / 0.35), 0 1px 4px rgba(0, 0, 0, 0.45);
+}
+input[type='range']:focus-visible::-moz-range-thumb {
+  box-shadow: 0 0 0 4px oklch(0.82 0.18 150 / 0.35), 0 1px 4px rgba(0, 0, 0, 0.45);
+}
+
+/* Dropdowns: the open list in the dark theme too (a see-through select gives a white one) */
+select {
+  background-color: #141a22;
+}
+select option,
+select optgroup {
+  background-color: #141a22;
+  color: #e6e9ef;
+}
+select option:checked {
+  background-color: #1f3a2b;
+  color: #fff;
+}
+select option:disabled {
+  color: #6b7480;
+}
+
+/* A card's heading row with a button: room before the first divider */
+.card > .row:first-child:has(> .btn, > button, > a.btn) {
+  margin-bottom: 12px;
+}
+
+/* Interface cards: a picture of the interface */
+.pack-preview.shot {
+  height: auto;
+  aspect-ratio: 16 / 10;
+  padding: 0;
+  overflow: hidden;
+  background: #0b0f14;
+}
+.pack-preview.shot img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: top left;
+  display: block;
+}
