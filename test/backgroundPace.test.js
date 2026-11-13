@@ -139,7 +139,7 @@ test('speed index: several clips at once, each from another day, all kept', asyn
     },
   };
   const pace = { allowed: () => 3, demand() {}, done() {}, status: () => ({ limit: 3 }) };
-  const idx = createSpeedIndex({ dir: path.join(dir, 'speeds'), inventory: { get: () => ({ files }) }, vehicles: { list: () => [{ id: 'v1' }], rootOf: () => dir }, telemetry, pace });
+  const idx = createSpeedIndex({ dir: path.join(dir, 'speeds'), inventory: { get: () => ({ files }) }, vehicles: { list: () => [{ id: 'v1' }], rootOf: () => dir }, telemetry, pace, pauseMs: 0 });
   await idx.kick();
   assert.equal(idx.status().done, 12);
   assert.equal(most, 3);

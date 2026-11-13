@@ -76,7 +76,7 @@ function summarize(samples) {
   return { b, t, v, g, k: SUMMARY_VERSION };
 }
 
-function createSpeedIndex({ dir, inventory, vehicles, telemetry, log, pauseMs = 0, idle = () => true, pace = fixedPace(() => !idle()) }) {
+function createSpeedIndex({ dir, inventory, vehicles, telemetry, log, pauseMs = 100, idle = () => true, pace = fixedPace(() => !idle()) }) {
   const days = new Map(); // `${vid}/${day}` -> { rel: [size, mtimeMs, speeds] }
   const dirty = new Set();
   const ver = new Map(); // `${vid}/${day}` -> changes made here, for the place search's cache
