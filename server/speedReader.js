@@ -187,8 +187,36 @@ async function topBoxes(fh, fileSize) {
   return out;
 }
 
-/** One speed a second (m/s; null for a second without a record) for the clip at real. */
-async function readRecords(real) {
+// "straight": the frames' heads come from a few long reads, front to back, the
+// gaps between them read and dropped. On spinning disks (and through Unraid's
+// share layer) that beats one short read a second, each a seek; on fast
+// storage the short reads win. The speed index measures both and uses the faster.
+const STRAIGHT_GAP = 4 * 1024 * 1024; // read over gaps up to this
+const STRAIGHT_SPAN = 16 * 1024 * 1024; // at most this in one read
+
+/** The heads of the picked frames: Map offset -> Buffer, from long reads that cover several. */
+async function headsStraight(fh, picks) {
+  const want = picks.filter(Boolean).map((s) => ({ at: Number(s.offset), len: Math.min(s.size, HEAD) })).sort((a, b) => a.at - b.at);
+  const out = new Map();
+  for (let i = 0; i < want.length;) {
+    const first = want[i].at;
+    let end = first + want[i].len;
+    let j = i + 1;
+    while (j < want.length && want[j].at - end <= STRAIGHT_GAP && want[j].at + want[j].len - first <= STRAIGHT_SPAN) {
+      end = Math.max(end, want[j].at + want[j].len);
+      j++;
+    }
+    const buf = await readAt(fh, first, end - first);
+    for (; i < j; i++) out.set(want[i].at, Buffer.from(buf.subarray(want[i].at - first, want[i].at - first + want[i].len)));
+  }
+  return out;
+}
+
+/**
+ * One speed a second (m/s; null for a second without a record) for the clip at real.
+ * mode 'straight' reads the frames' heads in a few long reads (see headsStraight).
+ */
+async function readRecords(real, { mode } = {}) {
   const fh = await fsp.open(real, 'r');
   try {
     const { size: fileSize } = await fh.stat();
@@ -238,6 +266,7 @@ async function readRecords(real) {
       carrier = groups;
     }
 
+    const heads = !carrier && mode === 'straight' ? await headsStraight(fh, picks) : null;
     const out = [];
     for (let sec = 0; sec < picks.length; sec++) {
       const s = picks[sec];
@@ -246,7 +275,7 @@ async function readRecords(real) {
       if (carrier) rec = carrier[s.index];
       else {
         const offset = Number(s.offset);
-        let list = nals(await readAt(fh, offset, Math.min(s.size, HEAD)), lengthSize);
+        let list = nals(heads?.get(offset) || (await readAt(fh, offset, Math.min(s.size, HEAD))), lengthSize);
         rec = recordIn(list, codec);
         if (rec === undefined && list.cut) {
           list = nals(await readAt(fh, offset, s.size), lengthSize);
@@ -262,8 +291,8 @@ async function readRecords(real) {
 }
 
 /** One speed a second (m/s, null where a second has none), or null for none at all. */
-async function readSpeeds(real) {
-  const out = (await readRecords(real)).map((rec) => {
+async function readSpeeds(real, opts) {
+  const out = (await readRecords(real, opts)).map((rec) => {
     const v = rec ? speedOfBytes(rec) : null;
     return v === null || !Number.isFinite(v) ? null : Math.round(v * 100) / 100;
   });
@@ -271,8 +300,8 @@ async function readSpeeds(real) {
 }
 
 /** The record of each second as sampleOfBytes reads it (null where none), or null for none at all. */
-async function readSamples(real) {
-  const out = (await readRecords(real)).map((rec) => (rec ? sampleOfBytes(rec) : null));
+async function readSamples(real, opts) {
+  const out = (await readRecords(real, opts)).map((rec) => (rec ? sampleOfBytes(rec) : null));
   return out.some((x) => x && x.v !== null) ? out : null;
 }
 
