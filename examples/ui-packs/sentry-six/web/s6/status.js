@@ -23,6 +23,18 @@ export function strip(days = [], now = new Date(), length = 36) {
     };
   });
 }
+/** How bad one notification is: 'bad' (critical), 'warn' (a warning) or '' (just news). */
+export function noteTone(n = {}) {
+  const level = n.level || n.severity;
+  if (['critical', 'error'].includes(level)) return 'bad';
+  if (['warning', 'warn'].includes(level) || (!level && n.kind === 'storage')) return 'warn';
+  return '';
+}
+/** The bell's colour: the worst open notification, read or not. */
+export function bellTone(notes = []) {
+  const tones = notes.filter((n) => !n.resolvedAt).map(noteTone);
+  return tones.includes('bad') ? 'bad' : tones.includes('warn') ? 'warn' : '';
+}
 export function attentionItems({
   vehicle,
   notes = [],

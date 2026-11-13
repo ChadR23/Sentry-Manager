@@ -1,5 +1,7 @@
 import { api, esc, sheet, act, scope } from '../core.js';
 import { countText, ago } from '../format.js';
+import { noteTone } from '../status.js';
+import { icon } from '../icons.js';
 export async function notifications(anchor, current = () => null) {
   const el = document.createElement('section');
   const close = sheet(el, { anchor });
@@ -14,7 +16,7 @@ export async function notifications(anchor, current = () => null) {
       (data.notifications || [])
         .map(
           (n) =>
-            `<article class="health-check"><h3>${esc(countText(globalThis.SentryUnits?.text?.(n.title) || n.title))}</h3><p>${esc(countText(globalThis.SentryUnits?.text?.(n.message) || n.message || ''))}</p><p>${ago(n.createdAt)}${n.resolvedAt ? ' · Resolved' : ''}</p>${!n.resolvedAt ? `<button data-dismiss="${esc(n.id)}">Dismiss</button>` : ''}</article>`,
+            `<article class="health-check note-row"><span class="attention-icon ${n.resolvedAt ? '' : noteTone(n)}">${icon(n.resolvedAt ? 'info' : noteTone(n) === 'bad' ? 'error' : noteTone(n) === 'warn' ? 'warning' : 'info')}</span><div><h3>${esc(countText(globalThis.SentryUnits?.text?.(n.title) || n.title))}</h3><p>${esc(countText(globalThis.SentryUnits?.text?.(n.message) || n.message || ''))}</p><p>${ago(n.createdAt)}${n.resolvedAt ? ' · Resolved' : ''}</p>${!n.resolvedAt ? `<button data-dismiss="${esc(n.id)}">Dismiss</button>` : ''}</div></article>`,
         )
         .join('');
     if (!data.notifications?.length) el.innerHTML += '<p>Nothing needs you right now.</p>';

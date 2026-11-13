@@ -265,6 +265,25 @@ header h1 {
 .avatar {
   background: oklch(0.82 0.18 150 / 0.15);
 }
+/* the bell takes the colour of the worst open notification */
+#bell.warn {
+  color: var(--warn);
+  background: rgba(251, 191, 36, 0.14);
+  border-color: rgba(251, 191, 36, 0.45);
+}
+#bell.bad {
+  color: var(--bad);
+  background: rgba(248, 113, 113, 0.14);
+  border-color: rgba(248, 113, 113, 0.5);
+}
+.note-row {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+}
+.note-row > div {
+  min-width: 0;
+}
 .badge {
   position: absolute;
   right: -2px;

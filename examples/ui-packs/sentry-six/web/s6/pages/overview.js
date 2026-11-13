@@ -1,7 +1,6 @@
 import { ownedRender } from '../core.js';
 import { esc } from '../core.js';
-import { overviewStatus, attentionItems, strip, spaceTone } from '../status.js';
-import { icon } from '../icons.js';
+import { overviewStatus, strip, spaceTone } from '../status.js';
 import {
   dayLabel,
   size,
@@ -35,7 +34,6 @@ async function renderPage(el, ctx) {
       days,
       vehicleCount: state.vehicles?.length || 1,
     }),
-    items = attentionItems({ vehicle: v, notes: state.notes, checks, days }),
     inv = v.inventory || {},
     s = v.storage,
     cells = strip(days),
@@ -57,7 +55,6 @@ async function renderPage(el, ctx) {
          )} · ${duration(d.minutes)}</p>${d.archive?.state === 'filling' ? '<small>Still arriving</small>' : ''}</div></a>`,
    )
    .join('')}</div></section>
- ${items.length ? `<section><div class="row"><h2 class="grow">Needs your attention</h2><small>${plural(items.length, 'item')}</small></div><div class="card attention-group">${items.map((i, index) => `<article class="attention-row row"><span class="attention-icon ${i.tone}">${icon(i.tone === 'bad' ? 'error' : i.tone === 'warn' ? 'warning' : 'info')}</span><div class="grow"><h3>${esc(i.title)}</h3><p class="attention-text" id="attention-${index}">${esc(i.text)}</p><button class="attention-more" aria-expanded="false" aria-controls="attention-${index}" hidden>Show more</button></div><a class="btn" href="${esc(i.action.href)}">${esc(i.action.label)}</a></article>`).join('')}</div></section>` : ''}
  <div class="grid"><section class="card"><div class="row"><h3 class="grow">Footage</h3><a href="#/footage">Browse</a></div><div class="number">${plural(inv.recordings, 'recording')}</div><p>over ${plural(inv.days, 'day')}${inv.firstDay ? ', since ' + dayLabel(inv.firstDay) : ''}</p><div class="category-bar">${categoryEntries(
    inv.byCategory || {},
  )
@@ -70,28 +67,6 @@ async function renderPage(el, ctx) {
    .join(
      '',
    )}</section><section class="card space-card space-${spaceTone(v, checks)}"><h3>Space</h3>${s ? `<div class="space-heading"><span class="space-ring" style="--used:${Math.max(0, Math.min(100, 100 * (1 - s.free / s.total)))}%" aria-label="${Math.round((100 * s.free) / s.total)}% free"></span><div><div class="number">${size(s.free)} free</div><p>of ${size(s.total)} on the share</p></div></div><p>Grows about ${size(s.perDay)} a day</p>${s.daysLeft != null ? `<span class="tag">About ${plural(s.daysLeft, 'day')} left</span>` : ''}` : '<p>Space information is unavailable.</p>'}</section><section class="card"><div class="row"><h3 class="grow">Activity</h3><a href="#/activity">See all</a></div><div class="number">${jobs.length ? 'Running' : 'Idle'}</div><p>${jobs.length ? `${plural(jobs.length, 'active job')}` : 'Nothing is running right now'}</p><p>${size(v.saved?.bytes || 0)} saved by converting ${plural(v.saved?.clips, 'clip')}</p><a class="muted" href="#/bin">${v.binItems ? `Recycle Bin: ${plural(v.binItems, 'item')} · ${size(v.binBytes || 0)}` : 'Recycle Bin is empty'}</a><p>Last scan ${ago(inv.scannedAt)}</p></section></div>`;
-  const updateText = () =>
-    el.querySelectorAll('.attention-more').forEach((button) => {
-      const text = button.previousElementSibling;
-      button.hidden =
-        text.scrollHeight <= text.clientHeight && button.getAttribute('aria-expanded') !== 'true';
-    });
-  el.querySelectorAll('.attention-more').forEach((button) => {
-    button.onclick = () => {
-      const expanded = button.getAttribute('aria-expanded') !== 'true';
-      button.setAttribute('aria-expanded', String(expanded));
-      button.textContent = expanded ? 'Show less' : 'Show more';
-      button.previousElementSibling.classList.toggle('expanded', expanded);
-    };
-  });
-  if (typeof ResizeObserver !== 'undefined') {
-    const observer = new ResizeObserver(updateText);
-    el.querySelectorAll('.attention-text').forEach((text) => observer.observe(text));
-    ctx.scope.signal.addEventListener('abort', () => observer.disconnect(), {
-      once: true,
-    });
-  }
-  updateText();
   el.querySelectorAll('img').forEach(
     (img) =>
       (img.onerror = () => {

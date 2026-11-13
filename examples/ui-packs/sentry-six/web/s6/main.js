@@ -3,6 +3,7 @@ import { api, esc, sheet, act, toast, scope } from './core.js';
 import { icon } from './icons.js';
 import { showStudio, hideStudio } from './studio.js';
 import { notifications } from './pages/notifications.js';
+import { bellTone } from './status.js';
 export const state = {
   vehicles: [],
   vehicleId: localStorage.getItem('s6:vehicle'),
@@ -180,11 +181,19 @@ async function refresh() {
     history.replaceState(null, '', location.hash.split('?')[0]);
     render(true);
   });
-  document.getElementById('bell').innerHTML =
+  const bell = document.getElementById('bell'),
+    tone = bellTone(state.notes),
+    unread = state.notes.filter((n) => !n.readAt).length;
+  bell.className = tone;
+  bell.setAttribute(
+    'aria-label',
+    'Notifications' +
+      (unread ? `, ${unread.toLocaleString()} new` : '') +
+      (tone === 'bad' ? ', something is wrong' : tone === 'warn' ? ', a warning' : ''),
+  );
+  bell.innerHTML =
     icon('notifications') +
-    (state.notes.some((n) => !n.readAt)
-      ? `<span class="badge">${state.notes.filter((n) => !n.readAt).length.toLocaleString()}</span>`
-      : '');
+    (unread ? `<span class="badge">${unread.toLocaleString()}</span>` : '');
 }
 window.addEventListener('hashchange', render);
 window.addEventListener('message', (e) => {
