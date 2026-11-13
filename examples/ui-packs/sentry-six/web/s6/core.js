@@ -132,12 +132,29 @@ export function sheet(el, { anchor, popover = false } = {}) {
   });
   dlg.showModal();
   if (popover && anchor && matchMedia('(min-width:761px)').matches) {
-    const rect = anchor.getBoundingClientRect();
-    Object.assign(dlg.style, {
-      position: 'fixed',
-      margin: '0',
-      left: Math.max(12, Math.min(rect.left, innerWidth - dlg.offsetWidth - 12)) + 'px',
-      top: Math.max(12, Math.min(rect.bottom + 8, innerHeight - dlg.offsetHeight - 12)) + 'px',
+    // below its button, inside the window; placed again whenever its content
+    // or the window changes size (a date picker fills in after it opens), and
+    // never taller than the room left below its top, so its end can be scrolled to
+    const place = () => {
+      if (!dlg.isConnected) return;
+      const rect = anchor.getBoundingClientRect();
+      dlg.style.maxHeight = '';
+      const top = Math.max(12, Math.min(rect.bottom + 8, innerHeight - dlg.offsetHeight - 12));
+      Object.assign(dlg.style, {
+        position: 'fixed',
+        margin: '0',
+        left: Math.max(12, Math.min(rect.left, innerWidth - dlg.offsetWidth - 12)) + 'px',
+        top: top + 'px',
+        maxHeight: Math.max(120, innerHeight - top - 12) + 'px',
+      });
+    };
+    place();
+    const watch = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(place) : null;
+    watch?.observe(el);
+    addEventListener('resize', place);
+    dlg.addEventListener('close', () => {
+      watch?.disconnect();
+      removeEventListener('resize', place);
     });
   }
   return () => dlg.close();
