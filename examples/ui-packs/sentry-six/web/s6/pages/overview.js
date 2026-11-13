@@ -36,13 +36,14 @@ async function renderPage(el, ctx) {
     }),
     inv = v.inventory || {},
     s = v.storage,
-    cells = strip(days),
+    // a phone shows two weeks, wide enough to tap a day; wider screens five weeks
+    cells = strip(days, new Date(), globalThis.matchMedia?.('(max-width: 760px)').matches ? 14 : 36),
     max = Math.max(1, ...cells.map((c) => c.drives + c.other)),
     jobs = (j.jobs || []).filter(
       (j) => j.vehicleId === v.id && ['running', 'waiting', 'paused'].includes(j.status),
     );
   el.innerHTML = `<h2 class="hero ${status.tone === 'bad' ? 'bad' : ''}">${esc(status.first)} <span class="${status.tone === 'warn' ? 'warn' : ''}">${esc(status.second)}</span></h2><p class="hero-sub">${status.sub ? esc(status.sub) + ' · ' : ''}${plural(inv.recordings, 'recording')} over ${plural(inv.days, 'day')} · checked ${ago(inv.scannedAt)}</p>
- <section class="card"><div class="row"><h3 class="grow">What happened lately</h3><a href="#/footage">Open Footage</a></div><div class="day-strip">${cells.map((c) => `<a class="strip-cell ${c.state}" title="${esc(dayLabel(c.day))}" aria-label="${esc(dayLabel(c.day))}: ${plural(c.drives + c.other, 'recording')}" href="#/footage?from=${c.day}&to=${c.day}"><span style="height:${(100 * c.saved) / max}%;background:var(--saved)"></span><span style="height:${(100 * c.sentry) / max}%;background:var(--sentry)"></span><span style="height:${(100 * c.drives) / max}%;background:var(--driving)"></span></a>`).join('')}</div><div class="row muted"><small class="grow">${dayLabel(cells[0].day)}</small><small>Today</small></div><p class="strip-legend"><span><i style="color:var(--driving)">●</i> Driving</span><span><i style="color:var(--sentry)">●</i> Sentry</span><span><i style="color:var(--saved)">●</i> Saved</span><span>◌ No footage</span></p><div class="latest-days">${days
+ <section class="card"><div class="row"><h3 class="grow">What happened lately</h3><a href="#/footage">Open Footage</a></div><div class="day-strip" style="--strip-days:${cells.length}">${cells.map((c) => `<a class="strip-cell ${c.state}" title="${esc(dayLabel(c.day))}" aria-label="${esc(dayLabel(c.day))}: ${plural(c.drives + c.other, 'recording')}" href="#/footage?from=${c.day}&to=${c.day}"><span style="height:${(100 * c.saved) / max}%;background:var(--saved)"></span><span style="height:${(100 * c.sentry) / max}%;background:var(--sentry)"></span><span style="height:${(100 * c.drives) / max}%;background:var(--driving)"></span></a>`).join('')}</div><div class="row muted"><small class="grow">${dayLabel(cells[0].day)}</small><small>Today</small></div><p class="strip-legend"><span><i style="color:var(--driving)">●</i> Driving</span><span><i style="color:var(--sentry)">●</i> Sentry</span><span><i style="color:var(--saved)">●</i> Saved</span><span>◌ No footage</span></p><div class="latest-days">${days
    .slice(0, 5)
    .map(
      (d) =>
