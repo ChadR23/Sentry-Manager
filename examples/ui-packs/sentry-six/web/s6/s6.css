@@ -2980,3 +2980,21 @@ select:not([multiple]):not([size]),
   height: auto;
   aspect-ratio: 16 / 9;
 }
+
+/* ---- Edge-case audit ---- */
+/* a long name or message with no spaces (a node, a place, a job, a share
+   error) breaks where it must instead of running out of its card */
+#page,
+dialog {
+  overflow-wrap: anywhere;
+}
+/* the vehicle picker: a long name is cut with an ellipsis inside the control
+   (Safari let its text widen the whole page) */
+#vehicles {
+  min-width: 0;
+}
+#vehicles select {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
