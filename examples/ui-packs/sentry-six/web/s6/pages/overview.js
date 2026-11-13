@@ -10,6 +10,12 @@ import {
   categoryEntries,
   categoryCount,
 } from '../format.js';
+function stripDays() {
+  const mq = (q) => globalThis.matchMedia?.(q).matches;
+  if (mq('(max-width: 760px)')) return 14;
+  if (mq('(pointer: coarse)')) return mq('(min-width: 1101px)') ? 21 : 14;
+  return 36;
+}
 async function renderPage(el, ctx) {
   const { api } = ctx.scope;
   const { current, state, alive } = ctx;
@@ -36,8 +42,9 @@ async function renderPage(el, ctx) {
     }),
     inv = v.inventory || {},
     s = v.storage,
-    // a phone shows two weeks, wide enough to tap a day; wider screens five weeks
-    cells = strip(days, new Date(), globalThis.matchMedia?.('(max-width: 760px)').matches ? 14 : 36),
+    // days wide enough to tap: a phone or a tablet shows two weeks (the largest
+    // tablets three), a screen with a mouse five weeks
+    cells = strip(days, new Date(), stripDays()),
     max = Math.max(1, ...cells.map((c) => c.drives + c.other)),
     jobs = (j.jobs || []).filter(
       (j) => j.vehicleId === v.id && ['running', 'waiting', 'paused'].includes(j.status),
