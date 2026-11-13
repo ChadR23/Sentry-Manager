@@ -65,6 +65,56 @@ test('speed index: indexes front clips once, and again when they change', { time
   assert.deepEqual(await again.day('v1', 'nonsense'), {});
 });
 
+test('speed index: a footage folder set a level up or down keeps what was read', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'speedmove-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const day = '2026-10-11';
+  const entry = (rel) => ({ rel, kind: 'clip', camera: 'front', day, size: 1000, mtimeMs: 5000.4 });
+  const sum = { b: null, t: null, v: [3, 20], g: [], k: 2 };
+  fs.mkdirSync(path.join(dir, 'speeds', 'v1'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'speeds', 'v1', day + '.json'), JSON.stringify({
+    'RecentClips/2026-10-11_10-00-11-front.mp4': [1000, 5000, [1, 2], sum],
+    // another copy of a clip with the same name (a saved event): not this file
+    'SavedClips/2026-10-11_10-05-00/2026-10-11_10-00-11-front.mp4': [1000, 5000, [9], sum],
+  }));
+  // the car's folder is now the one above TeslaCam
+  const files = new Map([
+    ['TeslaCam/RecentClips/2026-10-11_10-00-11-front.mp4', entry('TeslaCam/RecentClips/2026-10-11_10-00-11-front.mp4')],
+  ]);
+  const read = [];
+  const idx = createSpeedIndex({
+    dir: path.join(dir, 'speeds'),
+    inventory: { get: () => ({ files }) },
+    vehicles: { list: () => [{ id: 'v1' }], rootOf: () => dir },
+    telemetry: { limit: (fn) => fn(), read: async (real) => { read.push(real); throw new Error('no'); } },
+    pauseMs: 0,
+  });
+  await idx.kick();
+  assert.equal(idx.status().total, 0, 'nothing to read again');
+  assert.deepEqual(read, []);
+  assert.deepEqual(await idx.day('v1', day), { 'TeslaCam/RecentClips/2026-10-11_10-00-11-front.mp4': [1, 2] });
+  const saved = JSON.parse(fs.readFileSync(path.join(dir, 'speeds', 'v1', day + '.json'), 'utf8'));
+  assert.deepEqual(Object.keys(saved).sort(), [
+    'SavedClips/2026-10-11_10-05-00/2026-10-11_10-00-11-front.mp4',
+    'TeslaCam/RecentClips/2026-10-11_10-00-11-front.mp4',
+  ]);
+
+  // a clip under its old path that has changed since (size or time) is read again
+  files.set('TeslaCam/RecentClips/2026-10-11_11-00-00-front.mp4', { ...entry('TeslaCam/RecentClips/2026-10-11_11-00-00-front.mp4'), size: 2000 });
+  const data = JSON.parse(fs.readFileSync(path.join(dir, 'speeds', 'v1', day + '.json'), 'utf8'));
+  data['RecentClips/2026-10-11_11-00-00-front.mp4'] = [1000, 5000, [4], sum];
+  fs.writeFileSync(path.join(dir, 'speeds', 'v1', day + '.json'), JSON.stringify(data));
+  const fresh = createSpeedIndex({
+    dir: path.join(dir, 'speeds'),
+    inventory: { get: () => ({ files }) },
+    vehicles: { list: () => [{ id: 'v1' }], rootOf: () => dir },
+    telemetry: { limit: (fn) => fn(), read: async (real) => { read.push(real); throw new Error('no'); } },
+    pauseMs: 0,
+  });
+  await fresh.kick();
+  assert.equal(fresh.status().total, 1);
+});
+
 test('speed index: every finished footage scan starts an indexing pass', async () => {
   const { Inventory } = require('../server/inventory');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'speedscan-'));

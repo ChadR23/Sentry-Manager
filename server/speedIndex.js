@@ -141,15 +141,51 @@ function createSpeedIndex({ dir, inventory, vehicles, telemetry, log, pauseMs = 
     }
   }
 
+  // A day's entries by file name, to find a clip read under another path
+  // (the car's folder set a level up or down: RecentClips/x.mp4 is now
+  // TeslaCam/RecentClips/x.mp4, the same file).
+  const byName = new WeakMap();
+  const nameOf = (rel) => rel.slice(rel.lastIndexOf('/') + 1);
+  /** The entry of the same file read under an older path (same size and time), moved to rel; else undefined. */
+  function moved(data, c) {
+    let names = byName.get(data);
+    if (!names) {
+      names = new Map();
+      for (const k of Object.keys(data)) {
+        const n = nameOf(k);
+        if (!names.has(n)) names.set(n, []);
+        names.get(n).push(k);
+      }
+      byName.set(data, names);
+    }
+    for (const k of names.get(nameOf(c.rel)) || []) {
+      const e = data[k];
+      if (k === c.rel || !e || e[0] !== c.size || e[1] !== c.mtimeMs) continue;
+      // one path ends with the other: the folder moved, not another copy of the clip
+      if (!(c.rel.endsWith('/' + k) || k.endsWith('/' + c.rel))) continue;
+      delete data[k];
+      data[c.rel] = e;
+      names.get(nameOf(c.rel)).push(c.rel);
+      return e;
+    }
+    return undefined;
+  }
+
   async function pass() {
     // what is left to read, so the log can say how far along it is
     const todo = [];
     let upgraded = 0;
+    let relocated = 0;
     for (const v of vehicles.list()) {
       const root = vehicles.rootOf(v);
       if (!root) continue;
       for (const c of fronts(v.id)) {
-        const had = (await load(c.vid, c.day))[c.rel];
+        const data = await load(c.vid, c.day);
+        let had = data[c.rel];
+        if (!had && (had = moved(data, c))) {
+          touch(`${c.vid}/${c.day}`);
+          relocated++;
+        }
         const same = had && had[0] === c.size && had[1] === c.mtimeMs && had.length >= 4;
         if (same && (had[3] === null || had[3]?.k === SUMMARY_VERSION)) continue;
         // an older summary whose speeds show no slowing second gives the same summary read again: upgraded in place
@@ -162,7 +198,8 @@ function createSpeedIndex({ dir, inventory, vehicles, telemetry, log, pauseMs = 
         todo.push({ ...c, root });
       }
     }
-    if (upgraded) await flush();
+    if (upgraded || relocated) await flush();
+    if (relocated) log?.info(`Speed index: ${relocated} clip(s) kept from before the footage folder moved`);
     if (todo.length) log?.info(`Speed index: ${todo.length} clip(s) to read, newest days first${upgraded ? ` (${upgraded} kept as they were: no slowing second)` : ''}`);
     let done = 0;
     Object.assign(progress_, { done: 0, total: todo.length, day: null });
