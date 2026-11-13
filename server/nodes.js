@@ -384,7 +384,11 @@ function createNodes({ db, log, audit = log, name = os.hostname(), pollMs = POLL
   function hardware() {
     return stored().map((node) => {
       fresh(node);
-      return { id: node.id, hardware: info.get(node.id)?.hardware || null };
+      const i = info.get(node.id);
+      // its devices as last listed (an offline node's too, kept with the node):
+      // the heartbeat names an older node's hardware from them
+      const devices = i?.devices || (Array.isArray(node.devices) ? node.devices : null);
+      return { id: node.id, hardware: i?.hardware || null, devices: devices ? devices.map((d) => ({ id: d.id, kind: d.kind, name: d.name })) : null };
     });
   }
 

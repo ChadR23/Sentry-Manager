@@ -183,6 +183,29 @@ function nodeDeviceName(hw, ref) {
 }
 
 /**
+ * A node's hardware from the devices it lists (/node/v1/info `devices`, which
+ * every node version sends), for a node too old to send `hardware`: its GPUs
+ * by name, its CPU when the CPU entry names a real model (not "CPU" or "CPU
+ * (software encoder)"), and each device's name for nodeDeviceName. null
+ * without a usable list.
+ */
+const GENERIC_CPU = /^cpu\b|software encoder/i;
+// a bus address some runtimes add to a name ("Intel GPU (0000:03:00.0)"): not hardware, not sent
+const BUS_ADDRESS = /\s*\((?:[0-9a-f]{4}:)?[0-9a-f]{2}:[0-9a-f]{2}\.[0-9a-f]\)\s*$/i;
+function hardwareFromDevices(devices) {
+  if (!Array.isArray(devices) || !devices.length) return null;
+  const named = devices
+    .filter((d) => d && typeof d.id === 'string' && typeof d.name === 'string' && d.name.trim() && d.name !== d.id)
+    .map((d) => ({ id: d.id, name: d.name.replace(BUS_ADDRESS, '').trim() }))
+    .filter((d) => d.name);
+  const cpuEntry = named.find((d) => d.id === 'cpu');
+  const gpus = named.filter((d) => d.id !== 'cpu').map((d) => d.name);
+  const cpu = cpuEntry && !GENERIC_CPU.test(cpuEntry.name) ? cpuEntry.name : null;
+  if (!gpus.length && !cpu) return null;
+  return { cpu, gpus, devices: named };
+}
+
+/**
  * The heartbeat's hardware and conversion fields (server/index.js
  * reportHeartbeat): { cpu, gpus, convert, nodes } from found (detectGpus()),
  * cpu (this server's CPU model), stats (createConvertStats) and paired
@@ -197,12 +220,16 @@ function heartbeatHardware({ found = null, cpu = null, stats, paired = [], maxNo
     cpu,
     gpus: usableGpus(found).map((g) => g.name),
     convert: stats.summary((ref) => (ref.hardware ? encodeGpuName(found, ref) : cpu)),
-    nodes: list.slice(0, maxNodes).map(({ id, hardware: hw }) => ({
-      cpu: hw?.cpu || null,
-      gpus: Array.isArray(hw?.gpus) ? hw.gpus : [],
-      convert: stats.nodeSummary(id, (ref) => nodeDeviceName(hw, ref))
-    }))
+    // a node too old to send its hardware: named from the devices it lists (or listed last)
+    nodes: list.slice(0, maxNodes).map(({ id, hardware, devices }) => {
+      const hw = hardware || hardwareFromDevices(devices);
+      return {
+        cpu: hw?.cpu || null,
+        gpus: Array.isArray(hw?.gpus) ? hw.gpus : [],
+        convert: stats.nodeSummary(id, (ref) => nodeDeviceName(hw, ref))
+      };
+    })
   };
 }
 
-module.exports = { createConvertStats, heartbeatHardware, nodeDeviceName, apiOf, codecOf };
+module.exports = { createConvertStats, heartbeatHardware, hardwareFromDevices, nodeDeviceName, apiOf, codecOf };

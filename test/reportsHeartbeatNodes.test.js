@@ -16,7 +16,7 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const P = require('../server/reportsProtocol');
 const { createReports, normalizeHeartbeat } = require('../server/reports');
-const { createConvertStats, heartbeatHardware, nodeDeviceName } = require('../server/convertStats');
+const { createConvertStats, heartbeatHardware, hardwareFromDevices, nodeDeviceName } = require('../server/convertStats');
 const { usableGpus, encodeGpuName } = require('../server/gpu');
 const { startReceiver } = require('./fixtures/reportsReceiver');
 
@@ -168,6 +168,42 @@ test('reportHeartbeat\'s nodes: from the paired nodes\' hardware and their clips
   for (const id of [GARAGE.id, OFFICE.id, OLDER.id, 'Garage PC', 'pci:', 'node:']) assert.ok(!text.includes(id), `${id} is not in the heartbeat`);
 });
 
+test('an older node (no `hardware`): named from the devices it lists, online or as last listed; generic only without a list', () => {
+  const t = 9_000_000;
+  const cs = createConvertStats({ db: memoryDb(), now: () => t });
+  const id = 'node00000077';
+  const devices = [
+    { id: 'pci:0000:01:00.0', kind: 'nvidia', name: 'NVIDIA GeForce RTX 4070 Ti' },
+    { id: 'cpu', kind: 'cpu', name: 'CPU (software encoder)' }
+  ];
+  cs.sample([{ encoder: 'hevc_nvenc', hardware: true, device: null, remote: true, started: true, deviceId: `node:${id}@pci:0000:01:00.0`, fps: 310 }]);
+  const node = (extra) => heartbeatHardware({ found: null, cpu: null, stats: cs, paired: [{ id, hardware: null, ...extra }] }).nodes[0];
+  assert.deepEqual(node({ devices }), { cpu: null, gpus: ['NVIDIA GeForce RTX 4070 Ti'], convert: { fps: 310, encoder: 'hevc_nvenc', device: 'NVIDIA GeForce RTX 4070 Ti', api: 'nvenc', codec: 'h265' } },
+    'the GPU by its real name, not "NVIDIA GPU"; the CPU entry is not a model name, so no cpu');
+  // a CPU entry that names its model is the cpu
+  assert.equal(hardwareFromDevices([{ id: 'cpu', name: 'AMD Ryzen 9 7950X 16-Core Processor' }]).cpu, 'AMD Ryzen 9 7950X 16-Core Processor');
+  for (const generic of ['CPU', 'CPU (software encoder)', 'cpu']) assert.equal(hardwareFromDevices([{ id: 'cpu', name: generic }]), null, generic);
+  // a device listed only by its id (no name) is not a name
+  assert.equal(hardwareFromDevices([{ id: 'pci:0000:02:00.0', name: 'pci:0000:02:00.0' }]), null);
+  // no list at all: the generic name, as before
+  assert.equal(node({ devices: null }).convert.device, 'NVIDIA GPU');
+  assert.deepEqual(node({ devices: null }).gpus, []);
+  // the hardware a newer node sends still wins over its list
+  assert.deepEqual(node({ hardware: { cpu: 'Intel(R) Core(TM) i7-13700K', gpus: ['NVIDIA GeForce RTX 4070 Ti'], devices: [{ id: 'pci:0000:01:00.0', name: 'NVIDIA GeForce RTX 4070 Ti' }] }, devices }).cpu, 'Intel(R) Core(TM) i7-13700K');
+  // through normalizeHeartbeat: valid, within the 60-character limits
+  const long = [{ id: 'pci:0000:01:00.0', name: `NVIDIA ${'X'.repeat(90)}` }];
+  const h = normalizeHeartbeat({ ...OLD, cpu: null, gpus: [], convert: null, nodes: [node({ devices }), heartbeatHardware({ found: null, cpu: null, stats: cs, paired: [{ id, hardware: null, devices: long }] }).nodes[0]] });
+  assert.deepEqual(errsOf(h), []);
+  assert.ok(h.nodes[1].gpus[0].length <= L.nodeGpu && h.nodes[1].convert.device.length <= L.nodeDevice);
+});
+
+test('nodes.hardware(): a node\'s devices go with it, from its last answer or, offline after a restart, from what was kept with the node', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'server', 'nodes.js'), 'utf8');
+  const fn = src.slice(src.indexOf('function hardware()'), src.indexOf('/** What the Nodes page shows. */'));
+  assert.match(fn, /i\?\.devices \|\| \(Array\.isArray\(node\.devices\) \? node\.devices : null\)/);
+  assert.match(fn, /hardware: i\?\.hardware \|\| null, devices:/);
+});
+
 test('normalizeHeartbeat: nodes are cut to their limits, keep only cpu, gpus and convert, and the device keeps the same truncation as the name it is', () => {
   const long = `Intel(R) Xeon(R) Gold 6338N CPU @ 2.20GHz with a very long marketing suffix`;
   const gpu = 'NVIDIA GeForce RTX 4090 Laptop GPU with an even longer name than usual';
@@ -270,22 +306,26 @@ test('a node reports its hardware in /node/v1/info; the main keeps it (an older 
     await nodes.refresh(a.id);
     await nodes.refresh(b.id);
     const listed = nodes.hardware();
-    assert.deepEqual(listed, [
+    assert.deepEqual(listed.map(({ id, hardware }) => ({ id, hardware })), [
       { id: a.id, hardware: { cpu: 'Intel(R) Core(TM) i5-12400', gpus: ['Intel graphics (iHD)'], devices: [{ id: GPU.id, name: 'Intel graphics (iHD)' }, { id: 'cpu', name: 'Intel(R) Core(TM) i5-12400' }] } },
       { id: b.id, hardware: null }
     ]);
+    // the older node's devices come along: the heartbeat names its hardware from them
+    assert.ok(listed[1].devices.some((d) => d.id !== 'cpu' && d.name));
     // the heartbeat of a main converting on that node's GPU
     const cs = createConvertStats({ db: memoryDb() });
     cs.sample([{ encoder: 'hevc_vaapi', hardware: true, remote: true, started: true, node: 'garage-pc', deviceId: `node:${a.id}@${GPU.id}`, fps: 90 }]);
     const hw = heartbeatHardware({ found: null, cpu: null, stats: cs, paired: listed });
     assert.deepEqual(hw.nodes[0], { cpu: 'Intel(R) Core(TM) i5-12400', gpus: ['Intel graphics (iHD)'], convert: { fps: 90, encoder: 'hevc_vaapi', device: 'Intel graphics (iHD)', api: 'vaapi', codec: 'h265' } });
-    assert.deepEqual(hw.nodes[1], { cpu: null, gpus: [], convert: { fps: null, encoder: null, device: null, api: null, codec: null } });
+    assert.deepEqual(hw.nodes[1].gpus, listed[1].devices.filter((d) => d.id !== 'cpu').map((d) => d.name.replace(/\s*\([0-9a-f:.]+\)$/i, '')), 'the older node: its GPUs by the names it lists');
+    assert.ok(!JSON.stringify(hw.nodes[1]).match(/\d{4}:\d{2}:\d{2}\.\d/), 'no bus address');
     assert.ok(!JSON.stringify(hw.nodes).includes(a.id) && !JSON.stringify(hw.nodes).includes('garage-pc'));
     // offline: as last known
     w.server.close();
     w.server.closeAllConnections?.();
     await nodes.refresh(a.id);
     assert.equal(nodes.hardware()[0].hardware.cpu, 'Intel(R) Core(TM) i5-12400');
+    assert.ok(nodes.hardware()[0].devices.length, 'offline: its devices as last listed too');
   } finally {
     w.server.close();
     old.server.close();
