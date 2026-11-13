@@ -3,21 +3,57 @@ export const esc = (s) =>
     /[&<>"']/g,
     (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c],
   );
+/** A request that never reached the server (connection dropped, server busy or restarting). */
+export const OFFLINE_TEXT = "Can't reach Sentry Six Manager right now. Check the connection and try again.";
+export const offline = (e) =>
+  !!e?.offline || (e instanceof TypeError && /fetch|import|network|load failed/i.test(e.message || ''));
+const wait = (ms, signal) =>
+  new Promise((resolve, reject) => {
+    const t = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(t);
+        reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+      },
+      { once: true },
+    );
+  });
 export async function api(path, { method, body, check = () => {}, ...rest } = {}, retried = false) {
   check();
   rest.signal?.throwIfAborted();
-  const res = await fetch(path, {
-    ...rest,
-    method: method || (body === undefined ? 'GET' : 'POST'),
-    credentials: 'same-origin',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Requested-With': 'sentry-six-manager',
-      ...rest.headers,
-    },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-  });
-  const data = await res.json().catch(() => ({}));
+  const verb = method || (body === undefined ? 'GET' : 'POST');
+  let res, data;
+  // a busy server can drop a connection now and then: reads are tried again
+  // quietly; a change (POST, PUT, DELETE) is not, so it never happens twice
+  for (let attempt = 0; ; attempt++) {
+    try {
+      res = await fetch(path, {
+        ...rest,
+        method: verb,
+        credentials: 'same-origin',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'sentry-six-manager',
+          ...rest.headers,
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+      // the connection can also drop while the answer arrives; only an
+      // answer that isn't JSON counts as empty
+      data = await res.json().catch((e) => {
+        if (e?.name === 'SyntaxError') return {};
+        throw e;
+      });
+      break;
+    } catch (e) {
+      if (e?.name === 'AbortError' || rest.signal?.aborted) throw e;
+      if (verb !== 'GET' || attempt >= 3)
+        throw Object.assign(new Error(OFFLINE_TEXT), { offline: true, cause: e });
+      await wait([500, 1500, 4000][attempt], rest.signal);
+      check();
+    }
+  }
   check();
   rest.signal?.throwIfAborted();
   if (res.status === 401 && !path.startsWith('/api/auth/')) location.href = '/login';
@@ -37,7 +73,10 @@ export async function api(path, { method, body, check = () => {}, ...rest } = {}
 export function toast(text, bad = false) {
   const el = document.createElement('div');
   el.className = 'toast ' + (bad ? 'bad' : '');
-  el.textContent = text;
+  // the browser's own words for a dropped connection (a raw fetch, a page module)
+  el.textContent = /^(Failed to fetch|NetworkError|Load failed|network error)/i.test(String(text))
+    ? OFFLINE_TEXT
+    : text;
   document.getElementById('toasts').append(el);
   setTimeout(() => el.remove(), 6000);
 }
