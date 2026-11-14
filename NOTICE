@@ -1,4 +1,76 @@
+Sentry Six Manager
+Copyright 2025-2026 Jhoan Romero
+
+This product is licensed under the PolyForm Noncommercial License 1.0.0 (see
+LICENSE), EXCEPT for the earlier releases and the files listed below, which
+remain under their original licenses (MIT or Apache 2.0, as noted per
+section). The PolyForm Noncommercial terms do NOT apply to those; the terms
+named in each section below do.
+
+If a file is not listed below, it is original work of the Sentry Six Manager
+authors and is covered by the PolyForm Noncommercial License 1.0.0.
+
+================================================================================
+1. Earlier releases  --  MIT License
+================================================================================
+
+Sentry Six Manager was released under the MIT License up to and including
+commit 0688e30 (2026-11-13). Copies of those releases keep the MIT terms
+below. Code carried over from them keeps this copyright notice, as the MIT
+License requires:
+
+  MIT License
+
+  Copyright (c) 2025-2026 Chad and Scott Vandereems
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+
+================================================================================
+2. Sentry Studio (the Viewer and converter)  --  MIT License
+================================================================================
+
+The Viewer and converter under src/ come from Sentry Studio
+(https://github.com/ChadR23/Sentry-Six), Copyright (c) 2025-2026 Chad and
+Scott Vandereems, and remain under the MIT License reproduced in section 1.
+
+  src/
+
+================================================================================
+3. CAN databases  --  MIT License
+================================================================================
+
+The CAN signal databases under server/dbc/ come from other projects and
+remain under their own MIT licenses, each kept beside them:
+
+  server/dbc/Model3CAN.dbc             model3dbc, Copyright (c) 2019 Josh Wardell
+                                       (server/dbc/LICENSE-model3dbc.txt)
+  server/dbc/opendbc-tesla_can.dbc     commaai/opendbc, Copyright (c) 2020 Comma.ai, Inc.
+  server/dbc/opendbc-tesla_powertrain.dbc
+  server/dbc/model3y-opendbc.dbc       (server/dbc/LICENSE-opendbc.txt)
+  server/dbc/sx-legacy.dbc             Open Vehicle Monitoring System (OVMS)
+                                       (server/dbc/LICENSE-ovms.txt)
+
+================================================================================
+4. Google Material Symbols  --  Apache License 2.0
+================================================================================
+
 Google Material Symbols (outlined, weight 400)
-Copyright Google LLC. Licensed under Apache License 2.0.
+Copyright Google LLC. Licensed under the Apache License 2.0.
 Vendored SVG paths from @material-symbols/svg-400 0.48.3 via Sentry USB.
 https://github.com/google/material-design-icons

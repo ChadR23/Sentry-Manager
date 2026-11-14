@@ -3,7 +3,7 @@
   "version": "0.2.0",
   "description": "Sentry Six Manager - Sentry Studio viewer and converter as a self-hosted web app with footage management",
   "private": true,
-  "license": "MIT",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "type": "commonjs",
   "engines": {
     "node": ">=22.13"
