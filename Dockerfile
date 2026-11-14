@@ -68,6 +68,8 @@ ENV NODE_ENV=production \
 
 WORKDIR /app
 COPY version.json CRITICAL_UPDATE.txt ./
+# the license and the notices of what keeps its own license (NOTICE), with the code
+COPY LICENSE NOTICE ./
 COPY assets ./assets
 COPY src ./src
 COPY server ./server
