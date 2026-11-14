@@ -110,9 +110,10 @@ in *System → Shell*, then stop and start the app ([TrueNAS](docs/truenas.md#up
 
 ## Credits and license
 
-Sentry Six Manager was created by [skittles](https://github.com/skittles-fivem),
-who started it and built it up before handing it to the Sentry Six project.
-Thank you, skittles.
+Sentry Six Manager is built on [Sentry Studio](https://github.com/ChadR23/Sentry-Six),
+the Sentry Six viewer and converter. [skittles](https://github.com/skittles-fivem)
+turned it into this server app and built much of it before handing it to the
+Sentry Six project. Thank you, skittles.
 
 The viewer and converter are [Sentry Studio](https://github.com/ChadR23/Sentry-Six)
 by Chad and Scott Vandereems.
