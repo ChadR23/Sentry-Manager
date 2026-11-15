@@ -15,6 +15,7 @@ pub mod av1;
 pub mod contracts;
 pub mod converted_index;
 pub mod ctx;
+pub mod devices;
 pub mod error;
 pub mod frame_num;
 pub mod h265;
