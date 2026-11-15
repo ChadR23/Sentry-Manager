@@ -14,11 +14,11 @@
       "public": 6,
       "signed-in": 77
     },
-    "uiCallSites": 792,
-    "uiDistinctCalls": 202,
+    "uiCallSites": 793,
+    "uiDistinctCalls": 203,
     "uiCallSitesBySource": {
       "aurora": 104,
-      "built-in": 235,
+      "built-in": 236,
       "daylight": 110,
       "flux": 113,
       "horizon": 110,
@@ -30,7 +30,7 @@
     "liveEventTypes": 5,
     "converterIpcChannels": 22,
     "uiCallsWithoutRoute": 0,
-    "routesNoUiCalls": 13,
+    "routesNoUiCalls": 12,
     "routesNoUiCallsExternal": 10,
     "liveTopicsUiOnly": 0
   },
@@ -1656,8 +1656,10 @@
       "response": "json",
       "query": [],
       "source": "server/index.js:2068",
-      "callSites": 0,
-      "calledFrom": []
+      "callSites": 1,
+      "calledFrom": [
+        "built-in"
+      ]
     },
     {
       "method": "DELETE",
@@ -4536,7 +4538,7 @@
       "method": "GET",
       "path": "/api/vehicles/{…}/recordings/{…}",
       "raw": "/api/vehicles/${…}/recordings/${…}",
-      "source": "examples/ui-packs/aurora/web/aurora/pages/viewer.js:379",
+      "source": "examples/ui-packs/aurora/web/aurora/pages/viewer.js:381",
       "how": "api",
       "route": "GET /api/vehicles/:id/recordings/:rid"
     },
@@ -4544,7 +4546,7 @@
       "method": "GET",
       "path": "/api/vehicles/{…}/recordings",
       "raw": "/api/vehicles/${…}/recordings?date=${…}&limit=500",
-      "source": "examples/ui-packs/aurora/web/aurora/pages/viewer.js:383",
+      "source": "examples/ui-packs/aurora/web/aurora/pages/viewer.js:385",
       "how": "api",
       "route": "GET /api/vehicles/:id/recordings"
     },
@@ -4552,7 +4554,7 @@
       "method": "GET",
       "path": "/api/vehicles/{…}/recordings/{…}/thumbnail",
       "raw": "/api/vehicles/${…}/recordings/${…}/thumbnail",
-      "source": "examples/ui-packs/aurora/web/aurora/pages/viewer.js:392",
+      "source": "examples/ui-packs/aurora/web/aurora/pages/viewer.js:394",
       "how": "html link",
       "route": "GET /api/vehicles/:id/recordings/:rid/thumbnail"
     },
@@ -4560,7 +4562,7 @@
       "method": "GET",
       "path": "/api/vehicles/{…}/recordings",
       "raw": "/api/vehicles/${…}/recordings?limit=1",
-      "source": "examples/ui-packs/aurora/web/aurora/pages/viewer.js:414",
+      "source": "examples/ui-packs/aurora/web/aurora/pages/viewer.js:416",
       "how": "api",
       "route": "GET /api/vehicles/:id/recordings"
     },
@@ -4568,7 +4570,7 @@
       "method": "GET",
       "path": "/api/vehicles/{…}/speeds",
       "raw": "/api/vehicles/${…}/speeds?date=${…}",
-      "source": "examples/ui-packs/aurora/web/aurora/pages/viewer.js:644",
+      "source": "examples/ui-packs/aurora/web/aurora/pages/viewer.js:646",
       "how": "api",
       "route": "GET /api/vehicles/:id/speeds"
     },
@@ -9669,7 +9671,7 @@
       "method": "GET",
       "path": "/api/stars",
       "raw": "/api/stars?vehicle=${…}",
-      "source": "web/moments.js:138",
+      "source": "web/moments.js:152",
       "how": "fetch",
       "route": "GET /api/stars"
     },
@@ -9677,15 +9679,23 @@
       "method": "DELETE",
       "path": "/api/stars/{…}",
       "raw": "/api/stars/${…}",
-      "source": "web/moments.js:158",
+      "source": "web/moments.js:175",
       "how": "send(method, url)",
       "route": "DELETE /api/stars/:id"
+    },
+    {
+      "method": "PATCH",
+      "path": "/api/stars/{…}",
+      "raw": "/api/stars/${…}",
+      "source": "web/moments.js:197",
+      "how": "send(method, url)",
+      "route": "PATCH /api/stars/:id"
     },
     {
       "method": "POST",
       "path": "/api/stars",
       "raw": "/api/stars",
-      "source": "web/moments.js:178",
+      "source": "web/moments.js:217",
       "how": "send(method, url)",
       "route": "POST /api/stars"
     },
@@ -9693,7 +9703,7 @@
       "method": "GET",
       "path": "/api/vehicles/{…}/moments",
       "raw": "/api/vehicles/${…}/moments?date=${…}",
-      "source": "web/moments.js:202",
+      "source": "web/moments.js:241",
       "how": "fetch",
       "route": "GET /api/vehicles/:id/moments"
     },
@@ -10269,13 +10279,6 @@
         "path": "/api/exports",
         "access": "signed-in",
         "source": "server/index.js:1670",
-        "external": false
-      },
-      {
-        "method": "PATCH",
-        "path": "/api/stars/:id",
-        "access": "signed-in",
-        "source": "server/index.js:2068",
         "external": false
       },
       {

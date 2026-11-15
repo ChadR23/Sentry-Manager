@@ -203,6 +203,8 @@ export default {
       const bottom = fs ? 12 : Math.round(innerHeight - dockEl.offsetTop + 10);
       root.style.setProperty('--ctrl-bottom', `${bottom}px`);
       const ctrlTop = innerHeight - bottom - ctrlEl.offsetHeight;
+      // the page scrolls far enough that its end (Moments, Starred) clears the bar
+      if (!fs) root.style.setProperty('--ctrl-room', `${bottom + ctrlEl.offsetHeight + 16}px`);
       const r = cockpit.getBoundingClientRect();
       const top = fs ? r.top : r.top + scrollY;
       const availW = stageEl.clientWidth * 0.98;
@@ -969,6 +971,7 @@ export default {
         cancelAnimationFrame(fitRaf);
         root.classList.remove('vw-idle', 'vw-theatre', 'vw-playing');
         root.style.removeProperty('--ctrl-bottom');
+        root.style.removeProperty('--ctrl-room');
         safeProbe.remove();
         sizes.disconnect();
         dataWatch.disconnect();
