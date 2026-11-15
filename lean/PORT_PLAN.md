@@ -79,7 +79,75 @@ folder, plus one line in `src/api.rs` (its routes) and its dependencies in
 | --- | --- |
 | footage list, recordings, media ranges, speeds, MP4/SEI reading | first slice done (see README.md) |
 | supervisor | ported, see below and `src/supervisor/README.md` |
+| converter | the file-safety and telemetry core ported and tested; job store, job service, IPC and runtime still to do (see below) |
 | everything else | not started |
+
+## Converter
+
+Done (`src/converter/`, library only: nothing is wired into `api.rs` yet,
+so no route answers and nothing can touch footage from the lean server):
+
+- `owned.rs` (server/posixOwnedFs.js, native/noreplace-rename.c): remove,
+  promote, linkBackup, replaceOver. Device, inode, size and a SHA-256 taken
+  with the file held open and unchanged while hashed (or identity and mtime
+  for content just proven), removal through a quarantine name with the inode
+  checked again there, a guard file held open, renameat2(RENAME_NOREPLACE)
+  called directly (link + unlink fallback where it is unsupported).
+- `mp4w.rs` (mp4.js, whole-file tree and chunk-offset rewrite), `tesla_sei.rs`,
+  `timeline.rs` (telemetryTimeline.js), `lead_in.rs`, `frame_num.rs`
+  (frameNumGaps.js), `h265.rs`, `av1.rs` (inject and inspect), `adapters.rs`
+  (outputTiming, the in-place telemetry writer with its identity checks).
+- `verifier.rs` (verifier.js): every check in Node's order, same reasons and
+  details; `snapshot.rs` (verificationSnapshot.js and the runtime's snapshot
+  registry: structural ownership, consume-once, reconcile).
+- `staging/` (staging.js): stageSource, reserve/adoptEncodeOutput, copyAsset,
+  publishSeparate, prepare/commitPublication, prepare/swapReplacement,
+  replaceOriginal, rollbackReplacement, recoverReplacement (all actions),
+  recoverCopy, cleanupOwnedArtifacts, the journal snapshots (same JSON as
+  Node's), classifyPath / checkStagingSpace / chooseStagingMode.
+  Ported for the server's configuration only (posix adapters, private temp
+  cleanup by identity, replace by link); the desktop branches are left out.
+- `recovery.rs` (jobStore.js REPLACEMENT_TRUTH_TABLES / replacementAction and
+  runtime.js createRecoveryInspector), `planner.rs` (encoderPlanner.js),
+  `process.rs` (the bounded runner: timeout, output cap, cancel, SIGTERM,
+  CUDA_DEVICE_ORDER), `contracts.rs` (profiles, size rules, verify modes,
+  device ids).
+
+Tests (`cargo test`): test/posixOwnedFs, ownedCleanup, stagingSplit,
+verifierRepeatedMessage, leadIn (encode arguments) and frameNumGaps (the
+rule) ported; a crash-point test kills a replacement before each of its
+journal records (a panic, so no rollback runs) and recovers as jobService
+does, asserting the original's name always holds the original or the
+verified conversion and nothing unproven is removed. Parity with Node
+(`src/converter/testdata/*.js`, needs node + ffmpeg; set
+`LEAN_CONVERTER_FIXTURES=<dir>` to reuse fixtures): timelines of 7
+Tesla-like originals (keyframe first, lead-in, frame_num gaps, unknown gap,
+no keyframe), the H.265 and AV1 writer outputs byte-identical (12 files),
+inspections identical, 168 verifier verdicts identical (good, raw,
+truncated, tampered; Quick and Full; with and without a size profile), and
+buildEncodeArgs / decodeAccelArgs over every encoder and option.
+
+Not done yet, in order:
+
+1. jobStore.js (manifest files, journal, validation, transitions) and the
+   manifest folding of transaction snapshots; reading jobs Node wrote.
+2. jobService.js (the pipeline: discover, stage, encode with progress
+   parsing, telemetry, verify, size retry, save slot, recovery loop,
+   pause/cancel, lanes), runtime.js composition (volume info, device list,
+   lifecycle), scanner.js, convertedIndex.js, mp4Header.js, pictureCheck.js.
+3. ipc.js (22 channels) behind `POST /api/converter/invoke/:name` and the
+   `/api/converter/events` SSE (converterBridge.js: verify never Off, the
+   path guard), converterHost.js.
+4. autoConvert.js, benchmark.js, encodeDevices.js, server/gpu.js,
+   stats/gpu.js, encoderStats.js, convertStats.js.
+5. Helper servers: server/nodes.js, nodeWorker.js, `/node/v1/*`, pinning,
+   tokens.
+6. The Node crash suites (test/converterCrash*, replaceCrash, crashPoints)
+   need the job service; port them with it.
+
+Proposed differences (need the owner's OK): a nested box literally named
+`root` is serialized as a box (Node's writer would treat it as the tree
+root); io error texts are Rust's where Node logs its own.
 
 ## Supervisor
 
