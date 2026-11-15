@@ -35,10 +35,10 @@ impl Ctx for AppCtx {
         self.app.app_root.clone()
     }
     fn vehicles(&self) -> Vec<VehicleRef> {
-        self.app.vehicles.iter().map(|v| VehicleRef { id: v.id.clone(), name: v.name.clone(), timezone: v.timezone.clone(), root: v.root.clone() }).collect()
+        self.app.vehicles.list().into_iter().map(|v| VehicleRef { id: v.id.clone(), name: v.name.clone(), timezone: v.timezone.clone(), root: v.root.clone() }).collect()
     }
     fn studio_root(&self, id: &str) -> Option<PathBuf> {
-        self.app.vehicle(id).map(|v| self.app.studio_root(v))
+        self.app.vehicle(id).map(|v| self.app.studio_root(&v))
     }
     fn files(&self, id: &str) -> Option<Files> {
         let stamp = self.scan_stamp(id)?;

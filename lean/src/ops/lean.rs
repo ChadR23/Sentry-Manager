@@ -109,14 +109,14 @@ impl OpsCtx for LeanCtx {
     fn vehicles(&self) -> Vec<VehicleInfo> {
         self.app
             .vehicles
-            .iter()
+            .list().into_iter()
             .map(|v| {
                 let st = self.app.state_of(&v.id);
                 let totals = st.as_ref().filter(|s| s.scanned).map(|s| crate::inventory::totals(&s.recordings, s.files, s.scanned_at.unwrap_or(0.0)));
                 VehicleInfo {
                     id: v.id.clone(),
                     name: v.name.clone(),
-                    roots: vec![v.root.to_string_lossy().into_owned(), self.app.studio_root(v).to_string_lossy().into_owned()],
+                    roots: vec![v.root.to_string_lossy().into_owned(), self.app.studio_root(&v).to_string_lossy().into_owned()],
                     source_type: Some("path".into()),
                     status: Some(folder_status(&v.root)),
                     footage_bytes: totals.as_ref().and_then(|t| t["bytes"].as_f64()),
