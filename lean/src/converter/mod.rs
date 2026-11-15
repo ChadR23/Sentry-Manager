@@ -24,6 +24,7 @@ pub mod lead_in;
 pub mod mp4_header;
 pub mod mp4w;
 pub mod owned;
+pub mod picture_check;
 pub mod planner;
 pub mod process;
 pub mod recovery;
