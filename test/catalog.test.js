@@ -245,3 +245,30 @@ test('the codecs of an older database move from the settings value into the cata
     again.db.close();
   }
 });
+
+test('files moved without a scan (Recycle Bin, restore) reach the catalog at once', async () => {
+  const root = await fixture();
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sm-catalog-db-'));
+  const { db, inv } = setup(root, path.join(dir, 'manager.db'));
+  try {
+    await inv.scan('car');
+    const files = inv.get('car').files;
+    const rels = [...files.keys()].filter((rel) => rel.startsWith('TeslaCam/SentryClips/'));
+    assert.ok(rels.length > 0);
+    const kept = rels.map((rel) => files.get(rel));
+    // moved to the Recycle Bin: recycleBin.js deletes them from the map, then rebuilds
+    for (const rel of rels) files.delete(rel);
+    inv.rebuild('car');
+    let rows = new Set(db.catalog.files('car').map((r) => r.rel));
+    assert.equal(rows.size, files.size);
+    for (const rel of rels) assert.ok(!rows.has(rel), `${rel} left the catalog`);
+    // restored: back in the map, then rebuilt
+    for (const f of kept) files.set(f.rel, f);
+    inv.rebuild('car');
+    rows = new Map(db.catalog.files('car').map((r) => [r.rel, r]));
+    assert.equal(rows.size, files.size);
+    for (const f of kept) assert.equal(rows.get(f.rel)?.size, f.size, `${f.rel} is back`);
+  } finally {
+    db.close();
+  }
+});

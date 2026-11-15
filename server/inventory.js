@@ -388,6 +388,16 @@ class Inventory {
     const entry = this.state.get(vehicleId);
     if (!entry?.files) return;
     entry.recordings = buildRecordings(entry.files, { vehicleId, protectedRels: this.db.protectedSet(vehicleId) });
+    // the catalog too, so it doesn't wait for the next scan (a failure only means the next scan writes every file)
+    const cat = this.catalog;
+    if (cat && !this.catalogBehind.has(vehicleId)) {
+      try {
+        cat.syncFiles(vehicleId, entry.files);
+      } catch (err) {
+        this.catalogBehind.add(vehicleId);
+        this.log.warn(`Footage catalog not updated: ${err.message}`);
+      }
+    }
   }
 
   recording(vehicleId, id) {

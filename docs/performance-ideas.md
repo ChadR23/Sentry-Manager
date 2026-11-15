@@ -33,7 +33,8 @@ day / camera / event strings, the codec on the entry). Measured with
 `node --expose-gc tools/inventoryMemory.js` (made-up Tesla archive, all six
 cameras): 22,000 files took 10.9 MB of heap (519 bytes a file), now 7.6 MB
 (360); 100,000 files took 47.6 MB, now 32.1 MB. The catalog was never the
-bulk of the server's memory.
+bulk of the server's memory. Files moved to the Recycle Bin or restored reach
+the catalog straight away (the inventory's rebuild), not only at the next scan.
 
 Still in memory, and why: the scan's file map (`inventory.get(id).files`,
 about 290 bytes a file), because a dozen modules read it as a Map

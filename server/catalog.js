@@ -72,6 +72,22 @@ class Catalog {
     return gone.length;
   }
 
+  /**
+   * Bring a car's rows in line with the inventory's files (a Map rel -> entry)
+   * after files moved without a scan (Recycle Bin, restore): rows for files no
+   * longer there go, files without a row get one. Returns { added, removed }.
+   */
+  syncFiles(vehicleId, files) {
+    const have = new Set();
+    for (const r of this.q('SELECT rel FROM catalog_files WHERE vehicle_id = ?').all(vehicleId)) have.add(r.rel);
+    const gone = [...have].filter((rel) => !files.has(rel));
+    const added = [];
+    for (const [rel, f] of files) if (!have.has(rel)) added.push(f);
+    this.removeFiles(vehicleId, gone);
+    this.putFiles(vehicleId, added);
+    return { added: added.length, removed: gone.length };
+  }
+
   /** Every file of a car, as the inventory holds them (sorted by path). */
   files(vehicleId) {
     return this.q('SELECT * FROM catalog_files WHERE vehicle_id = ? ORDER BY rel').all(vehicleId).map((r) => ({
