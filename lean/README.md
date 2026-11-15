@@ -115,14 +115,9 @@ Checked on this image: it builds; with an archive mounted `:ro` and `--network h
 
 ## What is missing (the rest of the plan, in order)
 
-1. **Viewer data.** Not done yet:
-   - the dashboard's telemetry route (`/api/telemetry`). The reader is done (`src/telemetry.rs`, the speed index's fallback uses it); the route, its cache in `DATA_PATH/telemetry` and its sweep are not;
-   - moments (`/moments`);
-   - scrub previews (`/api/scrub`);
-   - thumbnails for the Recycle Bin (`/api/bin/:item/thumbnail`) and Studio's (`/api/studio/thumbnail`, clip-thumbnails);
-   - the Studio file API (`/api/studio/*`) and the HTML rewriting the Node server does (versioned links, critical bar, prefetch).
-2. **Drives, places and map.** Not done yet: `/driving`, `/event-map`, `/api/places*`, the place tags on recordings, stars and dashboards.
-3. **Sentry USB.** Not done yet: the status file (`sentryUsb` in the day list), archive gaps (`archive`) and the car's file list (`carFiles`).
+1. **Viewer data, drives, places and map.** Done in `src/viewer/` (see PORT_PLAN.md, "Viewer"): `/api/telemetry`, `/api/scrub`, the speed index in Node's day files, moments, driving, drives (clips and Sentry USB's drive data), places, the event map, the place tags, archive gaps without CAN and Sentry USB, work limits and the Studio routes. Not done yet: the Recycle Bin's thumbnails (`/api/bin/:item/thumbnail`), `/api/studio/trashFolder`, stars and dashboards, the HTML rewriting (versioned links, critical bar, prefetch), and everything that needs CAN logs or Sentry USB's status.
+2. (merged into 1)
+3. **Sentry USB.** Not done yet: the status file (`sentryUsb` in the day list), archive gaps' Sentry USB evidence and the car's file list (`carFiles`).
 4. **Accounts, sessions and HTTPS.** Not done yet:
    - sign-in, two-step codes, viewer and admin roles, the CSRF and origin checks on every write, host names;
    - TLS on the same port with the plain-HTTP explainer page.

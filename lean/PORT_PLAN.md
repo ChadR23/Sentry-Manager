@@ -81,6 +81,7 @@ folder, plus one line in `src/api.rs` (its routes) and its dependencies in
 | supervisor | ported, see below and `src/supervisor/README.md` |
 | converter | the file-safety and telemetry core ported and tested; job store, job service, IPC and runtime still to do (see below) |
 | ops | most of it ported, see below |
+| viewer | ported except where it needs CAN, Sentry USB status, notifications or accounts; see below |
 | everything else | not started |
 
 ## Converter
@@ -251,7 +252,71 @@ Not done yet:
   routes always ask for the password (no accounts yet);
 - the share status (warning, read-only) comes from footage/shares;
   ops/lean.rs works out a local folder's.
+## Viewer
+
+Done (`src/viewer/`, handlers on the small `viewer::ctx::Ctx` trait;
+`viewer/glue.rs` implements it on today's `App`):
+
+- `/api/telemetry` (cache `DATA/telemetry/<sha1 "t2|path|size|mtime">.json`,
+  ETag, 304, gzip, `telemetryReads` at once; the reader is `src/telemetry.rs`),
+  `/api/scrub` (scrubFrames.js + scrubKeyframes.js: keyframes only for a clip
+  with one every 1.1 s, else every frame; ffmpeg at nice 10, 60 s timeout;
+  cache `DATA/scrub`, 6,000 kept, next clip prepared, scrubPrepare.js after
+  every scan, `SCRUB_PREPARE_DAYS`);
+- the speed index (speedIndex.js) in Node's own day files
+  `DATA/speeds/<vid>/<day>.json`: passes newest day first, a queue per day,
+  straight/short read modes measured, the full read as fallback, folder
+  moves kept, older summaries upgraded in place, summaries, moments, near()
+  with the Float32 packed cache, warm(), clipStats, clipsRead, progress,
+  clip(); `/api/vehicles/:id/speeds`, `/moments`, `/driving`,
+  `/api/speeds/status`, `POST /api/speeds/index`, `POST /api/telemetry/speeds`;
+- backgroundPace.js (lag from a 20 ms sleeper thread instead of the event
+  loop; `/api/media` holds the Viewer slot while it answers) and
+  workLimits.js with `GET/PUT /api/settings/work-limits`;
+- places.js and the places routes (`/api/places` CRUD, `/near`,
+  `/suggestions`), event spots, `/api/vehicles/:id/event-map`, the place
+  tags on recordings (recordingPlace.js, cameras' GPS and event.json);
+- drives.js and driveData.js (streaming tokenizer, reduce, grouping, Park
+  splits, Autopilot shares, tags, cache `DATA/drive-data/<vid>.json`),
+  `/api/vehicles/:id/drives`;
+- archiveGap.js analyze for cut-off drives, partial minutes, late clips and a
+  quiet share, its `archive-gap:<vid>` state and notification keys,
+  `/api/vehicles/:id/archive-gaps`;
+- Studio: `/api/studio/context`, `settings` (GET/POST), `readDir`,
+  `readFile`, `exists`, `stat`, `thumbnail` (clipThumbnails.js filmstrips,
+  `DATA/clip-thumbnails`), `browse`, through a port of safePath.js
+  createRealGuard (deny list included).
+
+Checked: 52 viewer unit tests (ports of test/backgroundPace, workLimits,
+speedIndex, telemetrySpeeds, scrubKeyframes, scrubFrames, driveData, drives,
+places, recordingPlace, archiveGap). Against goldens recorded from
+`tools/contract/fixture.js`: every viewer route answers the same except
+`/api/speeds/status` `readMode` (which read mode measured faster on that
+run). `lean/parity/compare.js` now also covers the viewer routes and a saved
+place: 217 requests the same. The caches the two servers write
+(speeds, telemetry, scrub grids) are byte for byte the same, and each reads
+the other's.
+
+
+- CAN Bridge evidence everywhere it is used: recording place tags and drive
+  ends from CAN GPS, `can` on drives, archive gaps' CAN driving/Sentry and
+  time zone shifts (needs the CAN index);
+- Sentry USB in archive gaps (status file, snapshots, car-files.tsv: carFilesPass,
+  `carFiles` in the answer and the day cards' `archive`/`carFiles`);
+- archive-gap notifications are only raised once `Ctx::raise_note` is
+  implemented (ops); `forDays` for the day cards is not wired;
+- arrival times: the lean scan keeps no birth time, so archive gaps use the
+  change time (Node prefers the birth time);
+- time zones other than UTC and the server's own `TZ` (driving's "this
+  week", archive gaps' wall clock) need a zone table (core);
+- `POST /api/studio/trashFolder` (Recycle Bin, footage area);
+- admin-only routes call `Ctx::refuse_admin`, which core implements; the
+  audit line names "local" until accounts exist; `announce` has no hub yet;
+- the coordinator keeps one speed index: `app.rs` skips its SQLite index
+  while the viewer runs, and the old `/api/speeds*` code in `api.rs` is
+  shadowed by the viewer's routes.
 
 ## Known differences
 
-None accepted yet.
+None accepted yet. Proposed (needs the owner's OK): `/api/speeds/status`
+`readMode` follows this server's own timing, as Node's does.
