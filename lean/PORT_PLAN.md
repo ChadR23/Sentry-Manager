@@ -78,7 +78,36 @@ folder, plus one line in `src/api.rs` (its routes) and its dependencies in
 | Module | State |
 | --- | --- |
 | footage list, recordings, media ranges, speeds, MP4/SEI reading | first slice done (see README.md) |
+| supervisor | ported, see below and `src/supervisor/README.md` |
 | everything else | not started |
+
+## Supervisor
+
+Done (`src/supervisor/`, binary `sentry-lean-supervisor`): supervisor.js
+(folders and their owners, setpriv launch as PUID:PGID with GPU groups, the
+app's environment, restart 5 s after a crash, SIGTERM/SIGINT forwarding and
+exit code, `shutdown` without CAP_KILL, log forwarding with the early
+buffer, RAPL readings, TLS export modes, `tls-hostnames`, ACME token
+relaying, a `healthcheck` subcommand for Docker), mounter.js (local
+mounter, per-vehicle queue, IPC mounter), mountSpec.js (same accepted and
+refused input, same option string and credentials file), proc.js. The IPC
+channel is JSON lines over a socketpair on fd 3 (`SENTRY_SUPERVISOR_FD`),
+as Node's was; the messages are in `src/supervisor/README.md`.
+
+Not done yet:
+
+- core implements `supervisor::ctx::Tls` (tls.js TlsManager, exportForApp,
+  parseHostnames, acme.js) and passes it in `src/supervisor/bin.rs`; until
+  then the supervisor warns "HTTPS setup failed" and runs without TLS;
+- the app (`sentry-lean`) does not use the link yet: core wires
+  `ipc::take_from_env`, `Link` (shutdown on disconnect/`shutdown`, the
+  `supervisor-log` lines, `rapl-reading`, `tls-updated`) and
+  `link::drop_malloc_arena_max`; footage uses `IpcMounter`;
+- lean/Dockerfile: run as root with the supervisor as CMD under tini, with
+  setpriv, cifs-utils and tini installed.
+
+Proposed difference (needs the owner's OK): file system error texts that are
+only logged ("mount car: ...") read like Rust's, not Node's.
 
 ## Known differences
 

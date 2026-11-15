@@ -14,3 +14,4 @@ pub mod sei;
 pub mod speeds;
 pub mod telemetry;
 pub mod thumbnails;
+pub mod supervisor;

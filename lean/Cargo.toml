@@ -10,9 +10,13 @@ publish = false
 name = "sentry-lean"
 path = "src/main.rs"
 
+[[bin]]
+name = "sentry-lean-supervisor"
+path = "src/supervisor/bin.rs"
+
 [dependencies]
 axum = { version = "0.7", default-features = false, features = ["http1", "tokio", "query", "json"] }
-tokio = { version = "1", features = ["rt-multi-thread", "net", "fs", "macros", "signal", "sync", "time", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "fs", "macros", "signal", "sync", "time", "io-util", "process"] }
 tokio-util = { version = "0.7", features = ["io"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
