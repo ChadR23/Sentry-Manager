@@ -26,7 +26,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
-pub use ops::Prepared;
+pub use ops::{Adopted, Prepared, Reserved, Staged};
+pub use recover::{Cleaned, Recovered};
 
 pub const OWNED_PATH_FIELDS: [&str; 6] = ["stagedSource", "encodedCandidate", "publicationSnapshot", "destinationPartial", "replacementCandidate", "replacementBackup"];
 const DIRECTORY_SYNC_UNSUPPORTED: [&str; 6] = ["EISDIR", "EINVAL", "EPERM", "EACCES", "ENOSYS", "ENOTSUP"];
@@ -621,6 +622,11 @@ impl Tx {
             staged: Mutex::new(vec![]),
             encoded: Mutex::new(vec![]),
         })
+    }
+
+    /// the converter's private temp folder
+    pub fn temp_root(&self) -> &Path {
+        &self.temp_root
     }
 
     /// capabilities (the server's: every guarantee available)
