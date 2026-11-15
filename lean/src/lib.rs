@@ -17,6 +17,7 @@ pub mod speeds;
 pub mod telemetry;
 pub mod thumbnails;
 pub mod supervisor;
+pub mod ui;
 pub mod viewer;
 
 // (moved into footage/; the old paths still work)
