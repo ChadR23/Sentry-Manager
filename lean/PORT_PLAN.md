@@ -297,6 +297,7 @@ place: 217 requests the same. The caches the two servers write
 (speeds, telemetry, scrub grids) are byte for byte the same, and each reads
 the other's.
 
+Not done yet:
 
 - CAN Bridge evidence everywhere it is used: recording place tags and drive
   ends from CAN GPS, `can` on drives, archive gaps' CAN driving/Sentry and

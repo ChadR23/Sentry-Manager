@@ -386,11 +386,13 @@ fn ops_route(app: &Arc<App>, method: &Method, path: &str, q: &HashMap<String, St
     let mut b = Response::builder().status(reply.status);
     for (k, v) in &reply.headers {
         b = b.header(k.as_str(), v.as_str());
+    }
     if !reply.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("x-content-type-options")) {
         b = b.header("X-Content-Type-Options", "nosniff");
+    }
     b.body(Body::from(reply.body)).unwrap()
+}
 
-fn api(app: &Arc<App>, method: &Method, path: &str, q: &HashMap<String, String>, headers: &HeaderMap) -> Res {
 fn api(app: &Arc<App>, method: &Method, path: &str, q: &HashMap<String, String>, headers: &HeaderMap, body: &[u8]) -> Res {
     let seg: Vec<&str> = path.trim_start_matches("/api/").split('/').collect();
     let get = method == Method::GET || method == Method::HEAD;
@@ -482,13 +484,6 @@ pub async fn handle(State(app): State<Arc<App>>, req: Request<Body>) -> Res {
     let raw = req.uri().path().to_string();
     let q = query_of(req.uri().query());
     let Some(p) = clean_path(&raw) else { return error(StatusCode::BAD_REQUEST, "Bad request") };
-    // the ops area's routes (src/ops): notifications, health, stats, reports, ...
-    if crate::ops::access(method.as_str(), &p).is_some() {
-        let body = axum::body::to_bytes(req.into_body(), 1024 * 1024).await.unwrap_or_default();
-        return tokio::task::spawn_blocking(move || ops_route(&app, &method, &p, &q, &headers, &body))
-            .await
-            .unwrap_or_else(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "Internal error"));
-    }
     let body = if method == Method::GET || method == Method::HEAD {
         bytes::Bytes::new()
     } else {
@@ -497,6 +492,12 @@ pub async fn handle(State(app): State<Arc<App>>, req: Request<Body>) -> Res {
             Err(_) => return error(StatusCode::PAYLOAD_TOO_LARGE, "Request body too large"),
         }
     };
+    // the ops area's routes (src/ops): notifications, health, stats, reports, ...
+    if crate::ops::access(method.as_str(), &p).is_some() {
+        return tokio::task::spawn_blocking(move || ops_route(&app, &method, &p, &q, &headers, &body))
+            .await
+            .unwrap_or_else(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "Internal error"));
+    }
     // file work happens off the async threads
     tokio::task::spawn_blocking(move || if p.starts_with("/api/") { api(&app, &method, &p, &q, &headers, &body) } else { web(&app, &method, &headers, &p) })
         .await
