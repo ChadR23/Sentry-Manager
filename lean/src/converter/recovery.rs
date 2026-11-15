@@ -42,6 +42,12 @@ fn table(phase: &str) -> Option<&'static [(&'static str, &'static str)]> {
     })
 }
 
+/// The actions recovery may record for a phase (REPLACEMENT_ACTIONS_BY_PHASE,
+/// without 'manual-intervention', which every phase allows).
+pub fn phase_actions(phase: &str) -> Option<Vec<&'static str>> {
+    table(phase).map(|t| t.iter().map(|(_, a)| *a).collect())
+}
+
 /// The phases a replacing job may record.
 pub fn is_replacement_phase(p: &str) -> bool {
     table(p).is_some()

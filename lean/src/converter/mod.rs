@@ -16,6 +16,7 @@ pub mod contracts;
 pub mod error;
 pub mod frame_num;
 pub mod h265;
+pub mod jobstore;
 pub mod lead_in;
 pub mod mp4w;
 pub mod owned;
