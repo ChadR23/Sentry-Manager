@@ -39,7 +39,7 @@ two days in the background (not while converting) and otherwise when a clip
 is first opened; it keeps at most about 1 GB and drops the least recently used first.
 Deleting it is safe: previews are made again when needed.
 
-## Background work (Settings → Advanced)
+## Background work (Settings → System or Advanced)
 
 How many clips the background jobs handle at once is picked from the memory
 and CPUs the container really has: a Docker or Kubernetes limit
@@ -53,9 +53,20 @@ host has. The server takes the smaller of its memory size and its CPU size:
 | Mid-size | 3–7 GB | 3 | 2 | 4 | 2 | 1 | 2 |
 | Full-size | 7 GB or more | 4 or more | 4 | 8 | 3 | 2 | 2 |
 
-A full-size server gets the numbers every server had before. Settings →
-Advanced → Background work (Settings → System in the Original interface)
-shows the numbers in use and the memory and CPUs they were picked from; an
+A full-size server gets the numbers every server had before. The
+Background work card shows the numbers in use and the memory and CPUs they were picked from; an
 admin can type any of them (an empty box stays automatic) and they apply at
 once, without a restart. The start-up log has the same line
 (`Background work: ...`).
+
+Where the card is, in every interface (admins only; a watch-only account
+does not see it):
+
+| Interface | Where |
+| --- | --- |
+| Original | Settings → System |
+| Sentry Six | Settings → Advanced |
+| Aurora | Settings → System |
+| Daylight | Settings → System & power |
+| Flux | Settings → System |
+| Horizon | Settings → System |

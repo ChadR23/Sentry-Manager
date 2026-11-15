@@ -28,12 +28,12 @@ None.
 
 | Method | Path | Access | Defined | For |
 | --- | --- | --- | --- | --- |
-| GET | `/api/exports` | signed-in | server/index.js:1668 | no page (check) |
-| PATCH | `/api/stars/:id` | signed-in | server/index.js:2066 | no page (check) |
-| GET | `/healthz` | public | server/index.js:3906 | no page (check) |
-| GET | `/api/can/logs/ping` | can-token | server/index.js:2865 | other programs |
-| POST | `/api/can/logs/status` | can-token | server/index.js:2870 | other programs |
-| POST | `/api/can/logs/:name` | can-token | server/index.js:2885 | other programs |
+| GET | `/api/exports` | signed-in | server/index.js:1670 | no page (check) |
+| PATCH | `/api/stars/:id` | signed-in | server/index.js:2068 | no page (check) |
+| GET | `/healthz` | public | server/index.js:3913 | no page (check) |
+| GET | `/api/can/logs/ping` | can-token | server/index.js:2867 | other programs |
+| POST | `/api/can/logs/status` | can-token | server/index.js:2872 | other programs |
+| POST | `/api/can/logs/:name` | can-token | server/index.js:2887 | other programs |
 | POST | `/node/v1/pair` | public | server/nodeWorker.js:672 | other programs |
 | GET | `/node/v1/info` | node-token | server/nodeWorker.js:683 | other programs |
 | POST | `/node/v1/jobs` | node-token | server/nodeWorker.js:684 | other programs |
@@ -75,267 +75,267 @@ Server-Sent Events, signed-in. Keep-alive: ": ping" comment every 15 s. Limit: 2
 
 | Method | Path | Access | Answer | Query | Defined | Called from |
 | --- | --- | --- | --- | --- | --- | --- |
-| GET | `/api/accounts` | admin | json |  | server/index.js:1041 | built-in |
-| POST | `/api/accounts` | admin 🔑 | json |  | server/index.js:1042 | built-in |
-| DELETE | `/api/accounts/:name` | admin 🔑 | json |  | server/index.js:1058 | built-in |
-| PATCH | `/api/accounts/:name` | admin 🔑 | json |  | server/index.js:1051 | built-in |
-| GET | `/api/auth/2fa` | signed-in | json |  | server/index.js:1010 | built-in |
-| POST | `/api/auth/2fa/code` | public | json |  | server/index.js:987 | built-in |
-| POST | `/api/auth/2fa/disable` | signed-in 🔑 | json |  | server/index.js:1017 | built-in |
-| POST | `/api/auth/2fa/enable` | signed-in | json |  | server/index.js:1012 | built-in |
-| POST | `/api/auth/2fa/start` | signed-in 🔑 | json |  | server/index.js:1011 | built-in |
-| POST | `/api/auth/confirm` | signed-in | json |  | server/index.js:1112 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| POST | `/api/auth/login` | public | json |  | server/index.js:952 | aurora, built-in, daylight, flux, horizon |
-| POST | `/api/auth/logout` | signed-in | json |  | server/index.js:1107 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| GET | `/api/auth/me` | public | json |  | server/index.js:926 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| POST | `/api/auth/password` | signed-in | json |  | server/index.js:1127 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| GET | `/api/auth/sessions` | signed-in | json |  | server/index.js:1023 | built-in |
-| POST | `/api/auth/sessions-end-others` | signed-in | json |  | server/index.js:1034 | built-in |
-| POST | `/api/auth/sessions/:id/end` | signed-in | json |  | server/index.js:1027 | built-in |
-| POST | `/api/auth/setup` | public | json |  | server/index.js:1076 | aurora, built-in, daylight, flux, horizon |
+| GET | `/api/accounts` | admin | json |  | server/index.js:1043 | built-in |
+| POST | `/api/accounts` | admin 🔑 | json |  | server/index.js:1044 | built-in |
+| DELETE | `/api/accounts/:name` | admin 🔑 | json |  | server/index.js:1060 | built-in |
+| PATCH | `/api/accounts/:name` | admin 🔑 | json |  | server/index.js:1053 | built-in |
+| GET | `/api/auth/2fa` | signed-in | json |  | server/index.js:1012 | built-in |
+| POST | `/api/auth/2fa/code` | public | json |  | server/index.js:989 | built-in |
+| POST | `/api/auth/2fa/disable` | signed-in 🔑 | json |  | server/index.js:1019 | built-in |
+| POST | `/api/auth/2fa/enable` | signed-in | json |  | server/index.js:1014 | built-in |
+| POST | `/api/auth/2fa/start` | signed-in 🔑 | json |  | server/index.js:1013 | built-in |
+| POST | `/api/auth/confirm` | signed-in | json |  | server/index.js:1114 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| POST | `/api/auth/login` | public | json |  | server/index.js:954 | aurora, built-in, daylight, flux, horizon |
+| POST | `/api/auth/logout` | signed-in | json |  | server/index.js:1109 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| GET | `/api/auth/me` | public | json |  | server/index.js:928 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| POST | `/api/auth/password` | signed-in | json |  | server/index.js:1129 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| GET | `/api/auth/sessions` | signed-in | json |  | server/index.js:1025 | built-in |
+| POST | `/api/auth/sessions-end-others` | signed-in | json |  | server/index.js:1036 | built-in |
+| POST | `/api/auth/sessions/:id/end` | signed-in | json |  | server/index.js:1029 | built-in |
+| POST | `/api/auth/setup` | public | json |  | server/index.js:1078 | aurora, built-in, daylight, flux, horizon |
 
 ### HTTPS certificates (6)
 
 | Method | Path | Access | Answer | Query | Defined | Called from |
 | --- | --- | --- | --- | --- | --- | --- |
-| GET | `/api/security` | admin | json |  | server/index.js:1164 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| GET | `/api/security/access` | admin | json |  | server/index.js:1206 | built-in |
-| PUT | `/api/security/access` | admin 🔑 | json |  | server/index.js:1207 | built-in |
-| GET | `/api/security/ca.crt` | admin | raw (application/x-x509-ca-cert) |  | server/index.js:1187 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| PUT | `/api/security/hostnames` | admin 🔑 | json |  | server/index.js:1177 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| POST | `/api/security/unban` | admin | json |  | server/index.js:1228 | built-in |
+| GET | `/api/security` | admin | json |  | server/index.js:1166 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| GET | `/api/security/access` | admin | json |  | server/index.js:1208 | built-in |
+| PUT | `/api/security/access` | admin 🔑 | json |  | server/index.js:1209 | built-in |
+| GET | `/api/security/ca.crt` | admin | raw (application/x-x509-ca-cert) |  | server/index.js:1189 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| PUT | `/api/security/hostnames` | admin 🔑 | json |  | server/index.js:1179 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| POST | `/api/security/unban` | admin | json |  | server/index.js:1230 | built-in |
 
 ### Live updates (2)
 
 | Method | Path | Access | Answer | Query | Defined | Called from |
 | --- | --- | --- | --- | --- | --- | --- |
-| GET | `/api/converter/events` | signed-in | text/event-stream: Server-Sent Events stream | client | server/index.js:4018 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| GET | `/api/events` | signed-in | text/event-stream: Server-Sent Events stream |  | server/index.js:4004 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| GET | `/api/converter/events` | signed-in | text/event-stream: Server-Sent Events stream | client | server/index.js:4025 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| GET | `/api/events` | signed-in | text/event-stream: Server-Sent Events stream |  | server/index.js:4011 | aurora, built-in, daylight, flux, horizon, sentry-six |
 
 ### Sentry USB (3)
 
 | Method | Path | Access | Answer | Query | Defined | Called from |
 | --- | --- | --- | --- | --- | --- | --- |
-| GET | `/api/sentryusb` | signed-in | json |  | server/index.js:2976 | built-in |
-| GET | `/api/vehicles/:id/sentry-usb` | signed-in | json |  | server/index.js:2522 | built-in |
-| POST | `/api/vehicles/:id/sentry-usb/record` | admin | json |  | server/index.js:2533 | built-in |
+| GET | `/api/sentryusb` | signed-in | json |  | server/index.js:2978 | built-in |
+| GET | `/api/vehicles/:id/sentry-usb` | signed-in | json |  | server/index.js:2524 | built-in |
+| POST | `/api/vehicles/:id/sentry-usb/record` | admin | json |  | server/index.js:2535 | built-in |
 
 ### Drives (driving and trips) (2)
 
 | Method | Path | Access | Answer | Query | Defined | Called from |
 | --- | --- | --- | --- | --- | --- | --- |
-| GET | `/api/vehicles/:id/drives` | signed-in | json | before, gap, limit | server/index.js:2204 | built-in |
-| GET | `/api/vehicles/:id/driving` | signed-in | json | weeks | server/index.js:2094 | built-in |
+| GET | `/api/vehicles/:id/drives` | signed-in | json | before, gap, limit | server/index.js:2206 | built-in |
+| GET | `/api/vehicles/:id/driving` | signed-in | json | weeks | server/index.js:2096 | built-in |
 
 ### Feedback and diagnostics reports (4)
 
 | Method | Path | Access | Answer | Query | Defined | Called from |
 | --- | --- | --- | --- | --- | --- | --- |
-| GET | `/api/reports` | admin | json |  | server/index.js:1609 | built-in, sentry-six |
-| POST | `/api/reports/preview` | admin | json |  | server/index.js:1619 | built-in |
-| POST | `/api/reports/send` | admin 🔑 | json |  | server/index.js:1620 | built-in |
-| PUT | `/api/reports/settings` | admin | json |  | server/index.js:1610 | built-in |
+| GET | `/api/reports` | admin | json |  | server/index.js:1611 | built-in, sentry-six |
+| POST | `/api/reports/preview` | admin | json |  | server/index.js:1621 | built-in |
+| POST | `/api/reports/send` | admin 🔑 | json |  | server/index.js:1622 | built-in |
+| PUT | `/api/reports/settings` | admin | json |  | server/index.js:1612 | built-in |
 
 ### Places and map (6)
 
 | Method | Path | Access | Answer | Query | Defined | Called from |
 | --- | --- | --- | --- | --- | --- | --- |
-| GET | `/api/places` | signed-in | json |  | server/index.js:2353 | built-in, sentry-six |
-| POST | `/api/places` | admin | json |  | server/index.js:2366 | built-in |
-| DELETE | `/api/places/:id` | admin | json |  | server/index.js:2397 | built-in |
-| PATCH | `/api/places/:id` | admin | json |  | server/index.js:2379 | built-in |
-| GET | `/api/places/near` | signed-in | json | lat, lon, radius | server/index.js:3453 | built-in |
-| GET | `/api/places/suggestions` | signed-in | json |  | server/index.js:2409 | built-in |
+| GET | `/api/places` | signed-in | json |  | server/index.js:2355 | built-in, sentry-six |
+| POST | `/api/places` | admin | json |  | server/index.js:2368 | built-in |
+| DELETE | `/api/places/:id` | admin | json |  | server/index.js:2399 | built-in |
+| PATCH | `/api/places/:id` | admin | json |  | server/index.js:2381 | built-in |
+| GET | `/api/places/near` | signed-in | json | lat, lon, radius | server/index.js:3455 | built-in |
+| GET | `/api/places/suggestions` | signed-in | json |  | server/index.js:2411 | built-in |
 
 ### Events (6)
 
 | Method | Path | Access | Answer | Query | Defined | Called from |
 | --- | --- | --- | --- | --- | --- | --- |
-| GET | `/api/stars` | signed-in | json | vehicle | server/index.js:2040 | built-in |
-| POST | `/api/stars` | signed-in | json |  | server/index.js:2046 | built-in |
-| DELETE | `/api/stars/:id` | signed-in | json |  | server/index.js:2074 | built-in |
-| PATCH | `/api/stars/:id` | signed-in | json |  | server/index.js:2066 | — |
-| GET | `/api/vehicles/:id/event-map` | signed-in | json |  | server/index.js:2155 | built-in |
-| GET | `/api/vehicles/:id/moments` | signed-in | json | date | server/index.js:2008 | built-in |
+| GET | `/api/stars` | signed-in | json | vehicle | server/index.js:2042 | built-in |
+| POST | `/api/stars` | signed-in | json |  | server/index.js:2048 | built-in |
+| DELETE | `/api/stars/:id` | signed-in | json |  | server/index.js:2076 | built-in |
+| PATCH | `/api/stars/:id` | signed-in | json |  | server/index.js:2068 | — |
+| GET | `/api/vehicles/:id/event-map` | signed-in | json |  | server/index.js:2157 | built-in |
+| GET | `/api/vehicles/:id/moments` | signed-in | json | date | server/index.js:2010 | built-in |
 
 ### Cleanup (policies and Move to trash) (8)
 
 | Method | Path | Access | Answer | Query | Defined | Called from |
 | --- | --- | --- | --- | --- | --- | --- |
-| GET | `/api/vehicles/:id/policy` | signed-in | json |  | server/index.js:3594 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| PUT | `/api/vehicles/:id/policy` | admin | json |  | server/index.js:3595 | built-in, daylight, flux, horizon, sentry-six |
-| POST | `/api/vehicles/:id/policy/run` | admin | json |  | server/index.js:3599 | built-in, daylight, flux, horizon, sentry-six |
-| POST | `/api/vehicles/:id/protect` | admin | json |  | server/index.js:3521 | aurora, built-in, daylight, flux, horizon |
-| DELETE | `/api/vehicles/:id/saved` | admin | json |  | server/index.js:1819 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| POST | `/api/vehicles/:id/trash` | admin | json |  | server/index.js:3530 | aurora, built-in, daylight, flux, horizon |
-| POST | `/api/vehicles/:id/trash-days` | admin | json |  | server/index.js:1912 | aurora, built-in, daylight, flux, horizon |
-| POST | `/api/vehicles/:id/trash-preview` | admin | json |  | server/index.js:3546 | aurora, built-in, daylight, flux, horizon |
+| GET | `/api/vehicles/:id/policy` | signed-in | json |  | server/index.js:3596 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| PUT | `/api/vehicles/:id/policy` | admin | json |  | server/index.js:3597 | built-in, daylight, flux, horizon, sentry-six |
+| POST | `/api/vehicles/:id/policy/run` | admin | json |  | server/index.js:3601 | built-in, daylight, flux, horizon, sentry-six |
+| POST | `/api/vehicles/:id/protect` | admin | json |  | server/index.js:3523 | aurora, built-in, daylight, flux, horizon |
+| DELETE | `/api/vehicles/:id/saved` | admin | json |  | server/index.js:1821 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| POST | `/api/vehicles/:id/trash` | admin | json |  | server/index.js:3532 | aurora, built-in, daylight, flux, horizon |
+| POST | `/api/vehicles/:id/trash-days` | admin | json |  | server/index.js:1914 | aurora, built-in, daylight, flux, horizon |
+| POST | `/api/vehicles/:id/trash-preview` | admin | json |  | server/index.js:3548 | aurora, built-in, daylight, flux, horizon |
 
 ### Recycle Bin (5)
 
 | Method | Path | Access | Answer | Query | Defined | Called from |
 | --- | --- | --- | --- | --- | --- | --- |
-| GET | `/api/bin` | signed-in | json | vehicle | server/index.js:3565 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| POST | `/api/bin/:item/delete` | admin 🔑 | json |  | server/index.js:3572 | aurora, built-in, daylight, flux, horizon |
-| POST | `/api/bin/:item/restore` | admin | json |  | server/index.js:3566 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| GET | `/api/bin/:item/thumbnail` | signed-in | raw |  | server/index.js:3553 | sentry-six |
-| POST | `/api/bin/empty` | admin 🔑 | json |  | server/index.js:3583 | aurora, built-in, daylight, flux, horizon |
+| GET | `/api/bin` | signed-in | json | vehicle | server/index.js:3567 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| POST | `/api/bin/:item/delete` | admin 🔑 | json |  | server/index.js:3574 | aurora, built-in, daylight, flux, horizon |
+| POST | `/api/bin/:item/restore` | admin | json |  | server/index.js:3568 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| GET | `/api/bin/:item/thumbnail` | signed-in | raw |  | server/index.js:3555 | sentry-six |
+| POST | `/api/bin/empty` | admin 🔑 | json |  | server/index.js:3585 | aurora, built-in, daylight, flux, horizon |
 
 ### Power price and savings (2)
 
 | Method | Path | Access | Answer | Query | Defined | Called from |
 | --- | --- | --- | --- | --- | --- | --- |
-| PUT | `/api/settings/power` | admin | json |  | server/index.js:3723 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| GET | `/api/vehicles/:id/savings-by-month` | signed-in | json | months | server/index.js:3447 | built-in |
+| PUT | `/api/settings/power` | admin | json |  | server/index.js:3725 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| GET | `/api/vehicles/:id/savings-by-month` | signed-in | json | months | server/index.js:3449 | built-in |
 
 ### Viewer, clip ranges, telemetry and speed (17)
 
 | Method | Path | Access | Answer | Query | Defined | Called from |
 | --- | --- | --- | --- | --- | --- | --- |
-| GET | `/api/media` | signed-in | raw: file bytes (Range requests), ?path= | path | server/index.js:4029 | aurora, built-in, daylight, flux, horizon, sentry-six, studio |
-| GET | `/api/scrub` | signed-in | raw (image/jpeg): file bytes (Range requests), ?path= | path | server/index.js:4036 | built-in |
-| POST | `/api/speeds/index` | admin | json |  | server/index.js:3471 | aurora, built-in, daylight, flux, horizon |
-| GET | `/api/speeds/status` | signed-in | json |  | server/index.js:3470 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| POST | `/api/studio/browse` | admin | json |  | server/index.js:3849 | aurora, built-in, daylight |
-| GET | `/api/studio/context` | signed-in | json |  | server/index.js:3844 | aurora, built-in, daylight |
-| POST | `/api/studio/exists` | signed-in | json |  | server/index.js:3788 | built-in |
-| POST | `/api/studio/readDir` | signed-in | json |  | server/index.js:3774 | built-in |
-| POST | `/api/studio/readFile` | signed-in | json |  | server/index.js:3782 | built-in |
-| GET | `/api/studio/settings` | signed-in | json |  | server/index.js:3825 | built-in |
-| POST | `/api/studio/settings` | admin | json |  | server/index.js:3826 | built-in |
-| POST | `/api/studio/stat` | signed-in | json |  | server/index.js:3792 | built-in |
-| POST | `/api/studio/thumbnail` | signed-in | json |  | server/index.js:3796 | built-in |
-| POST | `/api/studio/trashFolder` | admin | json |  | server/index.js:3806 | built-in |
-| GET | `/api/telemetry` | signed-in | raw (application/json; charset=utf-8) | path | server/index.js:1982 | aurora, built-in, daylight, flux, horizon, studio |
-| POST | `/api/telemetry/speeds` | signed-in | json |  | server/index.js:3477 | horizon |
-| GET | `/api/vehicles/:id/speeds` | signed-in | json | date | server/index.js:2000 | aurora, flux, horizon |
+| GET | `/api/media` | signed-in | raw: file bytes (Range requests), ?path= | path | server/index.js:4036 | aurora, built-in, daylight, flux, horizon, sentry-six, studio |
+| GET | `/api/scrub` | signed-in | raw (image/jpeg): file bytes (Range requests), ?path= | path | server/index.js:4043 | built-in |
+| POST | `/api/speeds/index` | admin | json |  | server/index.js:3473 | aurora, built-in, daylight, flux, horizon |
+| GET | `/api/speeds/status` | signed-in | json |  | server/index.js:3472 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| POST | `/api/studio/browse` | admin | json |  | server/index.js:3856 | aurora, built-in, daylight |
+| GET | `/api/studio/context` | signed-in | json |  | server/index.js:3851 | aurora, built-in, daylight |
+| POST | `/api/studio/exists` | signed-in | json |  | server/index.js:3795 | built-in |
+| POST | `/api/studio/readDir` | signed-in | json |  | server/index.js:3781 | built-in |
+| POST | `/api/studio/readFile` | signed-in | json |  | server/index.js:3789 | built-in |
+| GET | `/api/studio/settings` | signed-in | json |  | server/index.js:3832 | built-in |
+| POST | `/api/studio/settings` | admin | json |  | server/index.js:3833 | built-in |
+| POST | `/api/studio/stat` | signed-in | json |  | server/index.js:3799 | built-in |
+| POST | `/api/studio/thumbnail` | signed-in | json |  | server/index.js:3803 | built-in |
+| POST | `/api/studio/trashFolder` | admin | json |  | server/index.js:3813 | built-in |
+| GET | `/api/telemetry` | signed-in | raw (application/json; charset=utf-8) | path | server/index.js:1984 | aurora, built-in, daylight, flux, horizon, studio |
+| POST | `/api/telemetry/speeds` | signed-in | json |  | server/index.js:3479 | horizon |
+| GET | `/api/vehicles/:id/speeds` | signed-in | json | date | server/index.js:2002 | aurora, flux, horizon |
 
 ### Footage and catalog (14)
 
 | Method | Path | Access | Answer | Query | Defined | Called from |
 | --- | --- | --- | --- | --- | --- | --- |
-| GET | `/api/exports` | signed-in | json | vehicle | server/index.js:1668 | — |
-| POST | `/api/exports` | signed-in | json |  | server/index.js:1661 | built-in |
-| DELETE | `/api/exports/:id` | signed-in | json |  | server/index.js:1674 | built-in |
-| GET | `/api/exports/:id` | signed-in | json |  | server/index.js:1669 | built-in |
-| GET | `/api/exports/:id/file` | signed-in | raw (video/mp4) |  | server/index.js:1675 | built-in |
-| GET | `/api/vehicles/:id/archive-gaps` | signed-in | json |  | server/index.js:2543 | daylight |
-| GET | `/api/vehicles/:id/days` | signed-in | json | limit, offset | server/index.js:1879 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| POST | `/api/vehicles/:id/exports` | signed-in | json |  | server/index.js:1659 | built-in |
-| GET | `/api/vehicles/:id/integrity` | signed-in | json |  | server/index.js:2438 | built-in, sentry-six |
-| POST | `/api/vehicles/:id/integrity` | admin | json |  | server/index.js:2439 | built-in, sentry-six |
-| GET | `/api/vehicles/:id/recordings` | signed-in | json | limit, offset, protected | server/index.js:1947 | aurora, built-in, daylight, flux, horizon |
-| GET | `/api/vehicles/:id/recordings/:rid` | signed-in | json |  | server/index.js:3494 | aurora, built-in, daylight, flux, horizon |
-| GET | `/api/vehicles/:id/recordings/:rid/thumbnail` | signed-in | raw |  | server/index.js:3508 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| POST | `/api/vehicles/:id/scan` | admin | json |  | server/index.js:1848 | aurora, built-in, daylight, flux, horizon |
+| GET | `/api/exports` | signed-in | json | vehicle | server/index.js:1670 | — |
+| POST | `/api/exports` | signed-in | json |  | server/index.js:1663 | built-in |
+| DELETE | `/api/exports/:id` | signed-in | json |  | server/index.js:1676 | built-in |
+| GET | `/api/exports/:id` | signed-in | json |  | server/index.js:1671 | built-in |
+| GET | `/api/exports/:id/file` | signed-in | raw (video/mp4) |  | server/index.js:1677 | built-in |
+| GET | `/api/vehicles/:id/archive-gaps` | signed-in | json |  | server/index.js:2545 | daylight |
+| GET | `/api/vehicles/:id/days` | signed-in | json | limit, offset | server/index.js:1881 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| POST | `/api/vehicles/:id/exports` | signed-in | json |  | server/index.js:1661 | built-in |
+| GET | `/api/vehicles/:id/integrity` | signed-in | json |  | server/index.js:2440 | built-in, sentry-six |
+| POST | `/api/vehicles/:id/integrity` | admin | json |  | server/index.js:2441 | built-in, sentry-six |
+| GET | `/api/vehicles/:id/recordings` | signed-in | json | limit, offset, protected | server/index.js:1949 | aurora, built-in, daylight, flux, horizon |
+| GET | `/api/vehicles/:id/recordings/:rid` | signed-in | json |  | server/index.js:3496 | aurora, built-in, daylight, flux, horizon |
+| GET | `/api/vehicles/:id/recordings/:rid/thumbnail` | signed-in | raw |  | server/index.js:3510 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| POST | `/api/vehicles/:id/scan` | admin | json |  | server/index.js:1850 | aurora, built-in, daylight, flux, horizon |
 
 ### Vehicles and shares (6)
 
 | Method | Path | Access | Answer | Query | Defined | Called from |
 | --- | --- | --- | --- | --- | --- | --- |
-| GET | `/api/vehicles` | signed-in | json |  | server/index.js:1629 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| POST | `/api/vehicles` | admin 🔑 | json |  | server/index.js:1790 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| DELETE | `/api/vehicles/:id` | admin 🔑 | json |  | server/index.js:1827 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| PUT | `/api/vehicles/:id` | admin 🔑 | json |  | server/index.js:1796 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| POST | `/api/vehicles/:id/reconnect` | admin | json |  | server/index.js:1843 | aurora, daylight, flux, horizon |
-| POST | `/api/vehicles/test-smb` | admin | json |  | server/index.js:1783 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| GET | `/api/vehicles` | signed-in | json |  | server/index.js:1631 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| POST | `/api/vehicles` | admin 🔑 | json |  | server/index.js:1792 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| DELETE | `/api/vehicles/:id` | admin 🔑 | json |  | server/index.js:1829 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| PUT | `/api/vehicles/:id` | admin 🔑 | json |  | server/index.js:1798 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| POST | `/api/vehicles/:id/reconnect` | admin | json |  | server/index.js:1845 | aurora, daylight, flux, horizon |
+| POST | `/api/vehicles/test-smb` | admin | json |  | server/index.js:1785 | aurora, built-in, daylight, flux, horizon, sentry-six |
 
 ### Notifications (5)
 
 | Method | Path | Access | Answer | Query | Defined | Called from |
 | --- | --- | --- | --- | --- | --- | --- |
-| GET | `/api/notification-rules` | signed-in | json |  | server/index.js:1345 | built-in, sentry-six |
-| PUT | `/api/notification-rules` | admin | json |  | server/index.js:1349 | built-in, sentry-six |
-| GET | `/api/notifications` | signed-in | json | open, vehicle | server/index.js:3707 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| POST | `/api/notifications/:id/dismiss` | signed-in | json |  | server/index.js:3708 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| POST | `/api/notifications/read` | signed-in | json |  | server/index.js:3712 | aurora, daylight, flux, horizon, sentry-six |
+| GET | `/api/notification-rules` | signed-in | json |  | server/index.js:1347 | built-in, sentry-six |
+| PUT | `/api/notification-rules` | admin | json |  | server/index.js:1351 | built-in, sentry-six |
+| GET | `/api/notifications` | signed-in | json | open, vehicle | server/index.js:3709 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| POST | `/api/notifications/:id/dismiss` | signed-in | json |  | server/index.js:3710 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| POST | `/api/notifications/read` | signed-in | json |  | server/index.js:3714 | aurora, daylight, flux, horizon, sentry-six |
 
 ### Activity (jobs) (2)
 
 | Method | Path | Access | Answer | Query | Defined | Called from |
 | --- | --- | --- | --- | --- | --- | --- |
-| GET | `/api/jobs` | signed-in | json | limit, vehicle | server/index.js:3609 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| POST | `/api/jobs/clear` | admin | json |  | server/index.js:3624 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| GET | `/api/jobs` | signed-in | json | limit, vehicle | server/index.js:3611 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| POST | `/api/jobs/clear` | admin | json |  | server/index.js:3626 | aurora, built-in, daylight, flux, horizon, sentry-six |
 
 ### Health, stats and logs (19)
 
 | Method | Path | Access | Answer | Query | Defined | Called from |
 | --- | --- | --- | --- | --- | --- | --- |
-| GET | `/api/health` | signed-in | json |  | server/index.js:1377 | built-in, sentry-six |
-| GET | `/api/health/banner` | signed-in | json |  | server/index.js:1382 | built-in |
-| POST | `/api/health/run` | admin | json |  | server/index.js:1378 | built-in, sentry-six |
-| GET | `/api/logs` | admin | json | level, limit | server/index.js:1235 | aurora, built-in, daylight, flux, horizon |
-| GET | `/api/logs/archive` | admin | json |  | server/index.js:1278 | aurora, built-in, daylight, flux, horizon |
-| GET | `/api/logs/archive/:name` | admin | raw (text/plain; charset=utf-8) |  | server/index.js:1279 | aurora, built-in, daylight, flux, horizon |
-| POST | `/api/logs/clear` | admin | json |  | server/index.js:1273 | aurora, built-in, daylight, flux, horizon |
-| GET | `/api/logs/download` | admin | raw (text/plain; charset=utf-8) |  | server/index.js:1289 | aurora, built-in, daylight, flux, horizon |
-| GET | `/api/logs/search` | admin | raw (text/plain; charset=utf-8) | download, from, level, q, to | server/index.js:1402 | built-in, sentry-six |
-| POST | `/api/metrics/disable` | admin 🔑 | json |  | server/index.js:1337 | built-in, sentry-six |
-| POST | `/api/metrics/enable` | admin 🔑 | json |  | server/index.js:1330 | built-in, sentry-six |
-| GET | `/api/metrics/settings` | admin | json |  | server/index.js:1329 | built-in, sentry-six |
-| GET | `/api/stats` | signed-in | json |  | server/index.js:3666 | aurora, built-in, daylight, flux, horizon, sentry-six, studio |
-| GET | `/api/stats/export.csv` | signed-in | raw (text/csv; charset=utf-8) | range | server/index.js:3698 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| GET | `/api/stats/history` | signed-in | json | range | server/index.js:3694 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| GET | `/api/support-bundle` | admin | raw (application/zip) |  | server/index.js:1427 | built-in, sentry-six |
-| GET | `/api/system` | signed-in | json |  | server/index.js:1149 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| GET | `/healthz` | public | json: plain "ok" |  | server/index.js:3906 | — |
-| GET | `/metrics` | metrics-token | json: Prometheus text; Bearer token made in Health; 404 while off |  | server/index.js:3890 | built-in |
+| GET | `/api/health` | signed-in | json |  | server/index.js:1379 | built-in, sentry-six |
+| GET | `/api/health/banner` | signed-in | json |  | server/index.js:1384 | built-in |
+| POST | `/api/health/run` | admin | json |  | server/index.js:1380 | built-in, sentry-six |
+| GET | `/api/logs` | admin | json | level, limit | server/index.js:1237 | aurora, built-in, daylight, flux, horizon |
+| GET | `/api/logs/archive` | admin | json |  | server/index.js:1280 | aurora, built-in, daylight, flux, horizon |
+| GET | `/api/logs/archive/:name` | admin | raw (text/plain; charset=utf-8) |  | server/index.js:1281 | aurora, built-in, daylight, flux, horizon |
+| POST | `/api/logs/clear` | admin | json |  | server/index.js:1275 | aurora, built-in, daylight, flux, horizon |
+| GET | `/api/logs/download` | admin | raw (text/plain; charset=utf-8) |  | server/index.js:1291 | aurora, built-in, daylight, flux, horizon |
+| GET | `/api/logs/search` | admin | raw (text/plain; charset=utf-8) | download, from, level, q, to | server/index.js:1404 | built-in, sentry-six |
+| POST | `/api/metrics/disable` | admin 🔑 | json |  | server/index.js:1339 | built-in, sentry-six |
+| POST | `/api/metrics/enable` | admin 🔑 | json |  | server/index.js:1332 | built-in, sentry-six |
+| GET | `/api/metrics/settings` | admin | json |  | server/index.js:1331 | built-in, sentry-six |
+| GET | `/api/stats` | signed-in | json |  | server/index.js:3668 | aurora, built-in, daylight, flux, horizon, sentry-six, studio |
+| GET | `/api/stats/export.csv` | signed-in | raw (text/csv; charset=utf-8) | range | server/index.js:3700 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| GET | `/api/stats/history` | signed-in | json | range | server/index.js:3696 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| GET | `/api/support-bundle` | admin | raw (application/zip) |  | server/index.js:1429 | built-in, sentry-six |
+| GET | `/api/system` | signed-in | json |  | server/index.js:1151 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| GET | `/healthz` | public | json: plain "ok" |  | server/index.js:3913 | — |
+| GET | `/metrics` | metrics-token | json: Prometheus text; Bearer token made in Health; 404 while off |  | server/index.js:3897 | built-in |
 
 ### Converter and encoder (1)
 
 | Method | Path | Access | Answer | Query | Defined | Called from |
 | --- | --- | --- | --- | --- | --- | --- |
-| POST | `/api/converter/invoke/:name` | admin | json |  | server/index.js:3763 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| POST | `/api/converter/invoke/:name` | admin | json |  | server/index.js:3765 | aurora, built-in, daylight, flux, horizon, sentry-six |
 
 ### CAN logs (28)
 
 | Method | Path | Access | Answer | Query | Defined | Called from |
 | --- | --- | --- | --- | --- | --- | --- |
-| GET | `/api/can/clip` | signed-in | raw (application/json; charset=utf-8) | cols, path, signals, step | server/index.js:2598 | built-in |
-| POST | `/api/can/disable` | admin 🔑 | json |  | server/index.js:2966 | built-in |
-| POST | `/api/can/enable` | admin 🔑 | json |  | server/index.js:2954 | built-in |
-| GET | `/api/can/export/bundle` | admin | raw (application/zip) | candump, check, key | server/index.js:3259 | built-in |
-| GET | `/api/can/export/decoded` | admin | raw (text/csv; charset=utf-8) | check, key, mode, signals | server/index.js:3362 | built-in |
-| GET | `/api/can/export/new-ids` | admin | raw (text/csv; charset=utf-8) | format, key, since | server/index.js:3421 | built-in |
-| GET | `/api/can/files` | admin | json | limit | server/index.js:3051 | built-in |
-| DELETE | `/api/can/files/:name` | admin 🔑 | json |  | server/index.js:3063 | built-in |
-| GET | `/api/can/files/:name/candump` | admin | raw (text/plain; charset=us-ascii) |  | server/index.js:3225 | built-in |
-| GET | `/api/can/files/:name/download` | admin | raw |  | server/index.js:3210 | built-in |
-| POST | `/api/can/files/:name/use` | admin 🔑 | json |  | server/index.js:3039 | built-in |
-| GET | `/api/can/id-events` | signed-in | json | before, from, gap, id, limit, resume, to | server/index.js:2689 | built-in |
-| POST | `/api/can/keep` | admin 🔑 | json |  | server/index.js:2930 | built-in |
-| POST | `/api/can/logs/:name` | can-token | json: CAN Bridge API (also on CAN_PORT); Bearer upload token, HTTPS only |  | server/index.js:2885 | — |
-| GET | `/api/can/logs/ping` | can-token | json: CAN Bridge API (also on CAN_PORT); Bearer upload token, HTTPS only |  | server/index.js:2865 | — |
-| POST | `/api/can/logs/status` | can-token | json: CAN Bridge API (also on CAN_PORT); Bearer upload token, HTTPS only |  | server/index.js:2870 | — |
-| POST | `/api/can/pairing/:key/could-not-sign` | admin 🔑 | json |  | server/index.js:3026 | built-in |
-| POST | `/api/can/pairing/:key/forget` | admin 🔑 | json |  | server/index.js:3016 | built-in |
-| POST | `/api/can/pairing/:key/trust` | admin 🔑 | json |  | server/index.js:3005 | built-in |
-| GET | `/api/can/raw` | signed-in | json | from, path, probe, to | server/index.js:2693 | built-in |
-| GET | `/api/can/search` | signed-in | json | all, from, limit, op, resume, signal, to, value | server/index.js:2686 | built-in |
-| GET | `/api/can/settings` | admin | json |  | server/index.js:2908 | built-in |
-| GET | `/api/can/signals` | signed-in | json | path | server/index.js:2573 | built-in |
-| POST | `/api/can/tokens` | admin 🔑 | json |  | server/index.js:2986 | built-in |
-| DELETE | `/api/can/tokens/:id` | admin 🔑 | json |  | server/index.js:2994 | built-in |
-| POST | `/api/can/vehicle-map` | admin 🔑 | json |  | server/index.js:2708 | built-in |
-| GET | `/api/can/vehicle-signals` | signed-in | json | vehicle | server/index.js:2684 | built-in |
-| POST | `/api/can/viewer-car-data` | admin | json |  | server/index.js:2922 | built-in |
+| GET | `/api/can/clip` | signed-in | raw (application/json; charset=utf-8) | cols, path, signals, step | server/index.js:2600 | built-in |
+| POST | `/api/can/disable` | admin 🔑 | json |  | server/index.js:2968 | built-in |
+| POST | `/api/can/enable` | admin 🔑 | json |  | server/index.js:2956 | built-in |
+| GET | `/api/can/export/bundle` | admin | raw (application/zip) | candump, check, key | server/index.js:3261 | built-in |
+| GET | `/api/can/export/decoded` | admin | raw (text/csv; charset=utf-8) | check, key, mode, signals | server/index.js:3364 | built-in |
+| GET | `/api/can/export/new-ids` | admin | raw (text/csv; charset=utf-8) | format, key, since | server/index.js:3423 | built-in |
+| GET | `/api/can/files` | admin | json | limit | server/index.js:3053 | built-in |
+| DELETE | `/api/can/files/:name` | admin 🔑 | json |  | server/index.js:3065 | built-in |
+| GET | `/api/can/files/:name/candump` | admin | raw (text/plain; charset=us-ascii) |  | server/index.js:3227 | built-in |
+| GET | `/api/can/files/:name/download` | admin | raw |  | server/index.js:3212 | built-in |
+| POST | `/api/can/files/:name/use` | admin 🔑 | json |  | server/index.js:3041 | built-in |
+| GET | `/api/can/id-events` | signed-in | json | before, from, gap, id, limit, resume, to | server/index.js:2691 | built-in |
+| POST | `/api/can/keep` | admin 🔑 | json |  | server/index.js:2932 | built-in |
+| POST | `/api/can/logs/:name` | can-token | json: CAN Bridge API (also on CAN_PORT); Bearer upload token, HTTPS only |  | server/index.js:2887 | — |
+| GET | `/api/can/logs/ping` | can-token | json: CAN Bridge API (also on CAN_PORT); Bearer upload token, HTTPS only |  | server/index.js:2867 | — |
+| POST | `/api/can/logs/status` | can-token | json: CAN Bridge API (also on CAN_PORT); Bearer upload token, HTTPS only |  | server/index.js:2872 | — |
+| POST | `/api/can/pairing/:key/could-not-sign` | admin 🔑 | json |  | server/index.js:3028 | built-in |
+| POST | `/api/can/pairing/:key/forget` | admin 🔑 | json |  | server/index.js:3018 | built-in |
+| POST | `/api/can/pairing/:key/trust` | admin 🔑 | json |  | server/index.js:3007 | built-in |
+| GET | `/api/can/raw` | signed-in | json | from, path, probe, to | server/index.js:2695 | built-in |
+| GET | `/api/can/search` | signed-in | json | all, from, limit, op, resume, signal, to, value | server/index.js:2688 | built-in |
+| GET | `/api/can/settings` | admin | json |  | server/index.js:2910 | built-in |
+| GET | `/api/can/signals` | signed-in | json | path | server/index.js:2575 | built-in |
+| POST | `/api/can/tokens` | admin 🔑 | json |  | server/index.js:2988 | built-in |
+| DELETE | `/api/can/tokens/:id` | admin 🔑 | json |  | server/index.js:2996 | built-in |
+| POST | `/api/can/vehicle-map` | admin 🔑 | json |  | server/index.js:2710 | built-in |
+| GET | `/api/can/vehicle-signals` | signed-in | json | vehicle | server/index.js:2686 | built-in |
+| POST | `/api/can/viewer-car-data` | admin | json |  | server/index.js:2924 | built-in |
 
 ### Helper servers (nodes) (19)
 
 | Method | Path | Access | Answer | Query | Defined | Called from |
 | --- | --- | --- | --- | --- | --- | --- |
-| GET | `/api/nodes` | admin | json |  | server/index.js:1687 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| POST | `/api/nodes` | admin 🔑 | json |  | server/index.js:1691 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| DELETE | `/api/nodes/:id` | admin | json |  | server/index.js:1754 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| PUT | `/api/nodes/:id` | admin 🔑 | json |  | server/index.js:1719 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| DELETE | `/api/nodes/:id/benchmark` | admin | json |  | server/index.js:1709 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| GET | `/api/nodes/:id/benchmark` | admin | json |  | server/index.js:1702 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| POST | `/api/nodes/:id/benchmark` | admin | json |  | server/index.js:1703 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| POST | `/api/nodes/:id/slots` | admin | json |  | server/index.js:1710 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| POST | `/api/nodes/worker` | admin | json |  | server/index.js:1760 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| DELETE | `/api/nodes/worker/mains/:id` | admin | json |  | server/index.js:1775 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| DELETE | `/api/nodes/worker/pair` | admin | json |  | server/index.js:1774 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| POST | `/api/nodes/worker/pair` | admin 🔑 | json |  | server/index.js:1767 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| GET | `/api/nodes` | admin | json |  | server/index.js:1689 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| POST | `/api/nodes` | admin 🔑 | json |  | server/index.js:1693 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| DELETE | `/api/nodes/:id` | admin | json |  | server/index.js:1756 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| PUT | `/api/nodes/:id` | admin 🔑 | json |  | server/index.js:1721 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| DELETE | `/api/nodes/:id/benchmark` | admin | json |  | server/index.js:1711 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| GET | `/api/nodes/:id/benchmark` | admin | json |  | server/index.js:1704 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| POST | `/api/nodes/:id/benchmark` | admin | json |  | server/index.js:1705 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| POST | `/api/nodes/:id/slots` | admin | json |  | server/index.js:1712 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| POST | `/api/nodes/worker` | admin | json |  | server/index.js:1762 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| DELETE | `/api/nodes/worker/mains/:id` | admin | json |  | server/index.js:1777 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| DELETE | `/api/nodes/worker/pair` | admin | json |  | server/index.js:1776 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| POST | `/api/nodes/worker/pair` | admin 🔑 | json |  | server/index.js:1769 | aurora, built-in, daylight, flux, horizon, sentry-six |
 | GET | `/node/v1/info` | node-token | json: HTTPS only; a paired main server's token |  | server/nodeWorker.js:683 | — |
 | POST | `/node/v1/jobs` | node-token | json: HTTPS only; a paired main server's token |  | server/nodeWorker.js:684 | — |
 | DELETE | `/node/v1/jobs/:id` | node-token | json: HTTPS only; :id is 32 hex characters |  | server/nodeWorker.js:714 | — |
@@ -348,20 +348,20 @@ Server-Sent Events, signed-in. Keep-alive: ": ping" comment every 15 s. Limit: 2
 
 | Method | Path | Access | Answer | Query | Defined | Called from |
 | --- | --- | --- | --- | --- | --- | --- |
-| GET | `/api/dashboards` | signed-in | json |  | server/index.js:2343 | built-in |
-| PUT | `/api/dashboards` | signed-in | json |  | server/index.js:2344 | built-in |
-| GET | `/api/settings` | signed-in | json |  | server/index.js:3717 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| PUT | `/api/settings/appearance` | admin | json |  | server/index.js:3736 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| GET | `/api/settings/work-limits` | admin | json |  | server/index.js:3746 | built-in |
-| PUT | `/api/settings/work-limits` | admin | json |  | server/index.js:3747 | built-in |
-| GET | `/api/snapshots` | admin | json |  | server/index.js:1387 | built-in, sentry-six |
-| POST | `/api/snapshots` | admin | json |  | server/index.js:1388 | built-in, sentry-six |
-| POST | `/api/snapshots/:name/restore` | admin 🔑 | json |  | server/index.js:1393 | built-in, sentry-six |
-| GET | `/api/ui-packs` | signed-in | json |  | server/index.js:1241 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| DELETE | `/api/ui-packs/:id` | admin | json |  | server/index.js:1256 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| PUT | `/api/ui-packs/active` | admin 🔑 | json |  | server/index.js:1242 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| GET | `/api/ui-packs/original.zip` | admin | raw (application/zip) |  | server/index.js:1265 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| POST | `/api/ui-packs/upload` | admin 🔑 | json |  | server/index.js:4047 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| GET | `/api/updates` | signed-in | json |  | server/index.js:3759 | aurora, built-in, daylight, flux, horizon, sentry-six |
-| POST | `/api/updates/check` | admin | json |  | server/index.js:3760 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| GET | `/api/dashboards` | signed-in | json |  | server/index.js:2345 | built-in |
+| PUT | `/api/dashboards` | signed-in | json |  | server/index.js:2346 | built-in |
+| GET | `/api/settings` | signed-in | json |  | server/index.js:3719 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| PUT | `/api/settings/appearance` | admin | json |  | server/index.js:3738 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| GET | `/api/settings/work-limits` | admin | json |  | server/index.js:3748 | built-in |
+| PUT | `/api/settings/work-limits` | admin | json |  | server/index.js:3749 | built-in |
+| GET | `/api/snapshots` | admin | json |  | server/index.js:1389 | built-in, sentry-six |
+| POST | `/api/snapshots` | admin | json |  | server/index.js:1390 | built-in, sentry-six |
+| POST | `/api/snapshots/:name/restore` | admin 🔑 | json |  | server/index.js:1395 | built-in, sentry-six |
+| GET | `/api/ui-packs` | signed-in | json |  | server/index.js:1243 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| DELETE | `/api/ui-packs/:id` | admin | json |  | server/index.js:1258 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| PUT | `/api/ui-packs/active` | admin 🔑 | json |  | server/index.js:1244 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| GET | `/api/ui-packs/original.zip` | admin | raw (application/zip) |  | server/index.js:1267 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| POST | `/api/ui-packs/upload` | admin 🔑 | json |  | server/index.js:4054 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| GET | `/api/updates` | signed-in | json |  | server/index.js:3761 | aurora, built-in, daylight, flux, horizon, sentry-six |
+| POST | `/api/updates/check` | admin | json |  | server/index.js:3762 | aurora, built-in, daylight, flux, horizon, sentry-six |
 
