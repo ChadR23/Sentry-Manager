@@ -28,6 +28,7 @@ bytes = "1"
 unicode-normalization = "0.1"
 sha2 = "0.10"
 indexmap = { version = "2", features = ["serde"] }
+ureq = { version = "2", default-features = false, features = ["tls"] }
 
 [profile.release]
 opt-level = 3
