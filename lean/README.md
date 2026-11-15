@@ -1,49 +1,60 @@
 # sentry-lean: the lean backend
 
-A start on a second backend for Sentry Six Manager, in Rust: one small
-binary that answers the **same API** as the Node server (`server/`), so the
-stock UIs in `web/` and `src/renderer/` work on either. It is built in the
-order the plan gives, read-only parts first. This is the first slice: the
-footage list and recording details. Everything else is still the Node
-server's job.
+The Rust port of the Sentry Six Manager server: one binary that answers the
+**same API** as the Node server (`server/`), so the stock UIs in `web/`,
+`src/renderer/` and the interface packs work on either. The Node code is the
+specification (`PORT_PLAN.md`). Node stays the shipped app until this one
+answers every route the same way.
 
-The footage is read-only. The lean server never writes, moves or deletes
-anything in a footage folder. It only lists folders, stats files and reads
-files. Its own state lives in `DATA_PATH`: the catalog in
-`lean-catalog.sqlite`, thumbnails made from clips in `thumbnails/`.
+Every area is served through core: core's `AppState` (config, manager.db,
+accounts and sessions, access rules, HTTPS, logs, the live-update hub, jobs)
+and its `Router` are the one entry point; `src/wire/` makes each area on
+core's state and puts its routes into core's router (PORT_PLAN.md,
+"Integration"). Sign-in is required and HTTPS is on by default (the same
+`/data/tls` and manager.db as Node: either server can take over the other's
+data folder). Passwords only go over HTTPS.
 
-## What works
+Footage is read-only except where Node writes (Recycle Bin, cleanup,
+restore), with the same checks. The server's own state is in `DATA_PATH`:
+`manager.db` (settings, accounts, sessions, jobs, notifications, the Recycle
+Bin, the footage catalog in its `catalog_*` tables), and Node's caches
+(`speeds/`, `telemetry/`, `scrub/`, `thumbnails/`, `clip-thumbnails/`,
+`drive-data/`, `can-index/`, `exports/`, `ui-packs/`, `tls/`).
 
-| Part | Where | Notes |
+## What is in it
+
+| Area | Where | State |
 | --- | --- | --- |
-| HTTP server | `src/main.rs`, `src/api.rs` | Axum on Tokio. File work runs on blocking threads. |
-| Footage catalog | `src/catalog.rs` | SQLite in WAL mode (rusqlite, bundled). Holds every file of the last scan, folder times, clip codecs and the speed index. |
-| Scan | `src/scanner.rs`, `src/footage.rs` | Builds the catalog from directory listings and stats only, without opening videos. Tesla file names give the time and camera. Rescans are incremental: a folder whose modified time has not changed keeps its files. A light rescan runs at start-up and every 15 minutes, and every sixth rescan is a full one. Same classification as `server/footage.js` and `server/scanner.js`. The files come out in the order the Node scan sees them (see Ties below). |
-| Recordings and days | `src/inventory.rs` | Events and drives (a gap of more than 90 s starts a new drive), day cards, totals, `event.json` fields. A port of `server/inventory.js`, including its quirks (for example, a clip dated Feb 30 counts as Mar 2 when drives are grouped). |
-| Vehicle | `src/app.rs` | One vehicle from `FOOTAGE_PATH`. Its name is kept as `server/vehicles.js` keeps it (JavaScript's trim, at most 60 UTF-16 units) and its id made the same way (`slug`: lower case, NFKD, every other run of characters one dash), so `Café` is `cafe` and `Ölçü` is `o-lc-u`, as on Node. |
-| MP4 metadata | `src/mp4.rs` | Reads only the box headers and `moov`: sample offsets and sizes, decode and presentation times, timescale, duration, codec and keyframes (`stss`). It never reads media data and never runs ffprobe. Same checks as `src/main/converter/mp4.js`. The lenient codec read of `server/mp4codec.js` is here too. |
-| Telemetry, quick read | `src/sei.rs` | Reads one record a second without reading the whole clip. It strips emulation-prevention bytes and looks for SEI payload type 5 with Tesla's `42…42 69` marker. H.264 records come before the picture. H.265 uses the `66 01` compatibility records. AV1 keeps all records in the first `mdat`, each ended by `61 01 80`. A port of `server/speedReader.js` (`teslaPayload`, `recordIn`, `sampleOfBytes`). |
-| Telemetry, full read | `src/telemetry.rs` | Every frame's records with their times, as the dashboard reads them: `server/telemetry.js` `readRecords` with Studio's parser (`src/renderer/scripts/data/dashcam-mp4.js`), ported check for check. The file is read 4 KB pages at a time (at most 256 kept): the index and, of each frame, the records ahead of the picture, never a picture's bytes. |
-| Speed index | `src/speeds.rs` | One speed a second and a summary (`summarize`) for every front clip, cached in SQLite. A clip is read again only when its size or time changes. When the quick read gives up (more than 64 top-level boxes, an edit list it does not take, a fragmented file, and so on), the full read gives the speeds, averaged per second, and a summary of those, as `server/speedIndex.js` `speedsFor` does. |
-| Thumbnails | `src/thumbnails.rs` | Tesla's `thumb.png` as it is. Without one, one frame of the front clip, one second in (else its first frame), 320 pixels wide: `ffmpeg` runs as a child process (`FFMPEG_PATH`, two at a time, 60 s at most), with the Node server's arguments, and the JPEG is cached in `DATA_PATH/thumbnails` under the Node server's name for it. ffmpeg only reads the clip; nothing is written next to the footage. Without ffmpeg: "No thumbnail" (404), as on Node. |
-| Job queue | `src/jobs.rs` | One queue with priorities: scans first, then codec reads, then the speed index. The number of threads comes from the machine (two to four). A job that is already waiting is not queued twice. |
-| Media | `src/media.rs` | `/api/media` with Range support, at most 1 MiB per answer, and the same ETag as the Node server. Files are opened with `O_NOFOLLOW` and checked through `/proc/self/fd` to be inside a vehicle folder. |
-| Pages and interfaces | `src/ui/` | Every page and file as the Node server serves it (ETag, 304, brotli or gzip, security headers and CSP, versioned links, the critical-update bar, the early-data hint, the Studio translations, `/original`), interface packs, exports and the settings routes. See PORT_PLAN.md (ui). |
+| core | `src/core/` | config, manager.db, accounts, two-step sign-in, sessions, access rules, the client address, HTTPS with its own CA and Let's Encrypt, logs, `/api/events`, jobs, the router and the request checks in Node's order (`src/core/README.md`) |
+| supervisor | `src/supervisor/` | the root supervisor (`sentry-lean-supervisor`): starts the app as PUID:PGID, SMB mounts, restarts, TLS export; the app takes its fd-3 link (`src/supervisor/README.md`) |
+| footage | `src/footage/`, `src/api.rs` | vehicles (several, folder and SMB), shares and their health, scans and the catalog, recordings and days, Recycle Bin, cleanup policies, protect, stars, footage check |
+| viewer | `src/viewer/` | telemetry, the speed index, moments, scrub previews, filmstrips, places, the event map, drives and driving, archive gaps, work limits, the Studio file routes, `/api/media` |
+| ops | `src/ops/` | notifications and rules, health and the startup check, snapshots, power price and savings, image updates, metrics, the opt-in reports, system info, stats, the support bundle |
+| ui | `src/ui/` | every page and file as Node serves it, versioned links, the critical bar, early-data hints, interface packs, exports, settings and dashboards |
+| can | `src/can/` | CAN Bridge uploads (web port and core's device port), the CAN index, trust, search, sync, prune, downloads, Sentry USB files |
+| converter | `src/converter/` | library only: file safety (owned files, staging, recovery), MP4 writing, H.265/AV1 telemetry, verifier, planner. Its routes answer as Node does while its converter starts |
+| MP4 and telemetry readers | `src/mp4.rs`, `src/sei.rs`, `src/telemetry.rs`, `src/media.rs`, `src/thumbnails.rs` | box headers only, the quick and the full telemetry read, Range answers, thumbnails with ffmpeg |
 
-Routes answered, field for field as `server/index.js` answers them:
-
-- `GET /api/vehicles`. The footage parts are the same: id, name, source, root, studioRoot, inventory totals, scanning, bin counts, default policy, savings. `share`, `storage`, `car` and `carModels` are placeholders for now.
-- `GET /api/vehicles/:id/days` with `category`, `date`, `from`, `to`, `offset` and `limit`. It includes the speed-index progress per day (`speedIndex`). `archive`, `carFiles` and `sentryUsb` are always empty, and `canRecordings` is always 0.
-- `GET /api/vehicles/:id/recordings` with the same filters plus `protected`.
-- `GET /api/vehicles/:id/recordings/:rid`: files with sizes and codecs, plus the `event.json` fields.
-- `GET /api/vehicles/:id/recordings/:rid/thumbnail`: Tesla's `thumb.png`, else one made from the front clip with ffmpeg.
-- `GET /api/vehicles/:id/speeds?date=` and `GET /api/speeds/status`.
-- `POST /api/vehicles/:id/scan`. It needs the `X-Requested-With: sentry-six-manager` header, as on the Node server.
-- `GET|HEAD /api/media?path=`.
-- `/healthz` and the static pages: `/`, `/login`, `/web/…`, `/studio/…`, `/shared/…` and `/assets/…`.
-- `GET /api/auth/me` returns a fixed local admin. There are no accounts yet (see below).
+Not in it yet: the converter's job store, job service and IPC; the helper
+servers (`/api/nodes*` answer 501 "Not in this server yet.", `/node/v1/*`
+404); `POST /api/studio/trashFolder` (501); arrival checksums; CAN and
+Sentry USB evidence in archive gaps, drives and place tags; some stats
+parts. PORT_PLAN.md lists each.
 
 ## How it is checked
+
+On the integrated server (PORT_PLAN.md, "Integration", has the numbers):
+
+- `cargo test --release` in `lean/`;
+- `node lean/parity/contractAll.js`: the whole API contract, the Node
+  fixture against lean (both over HTTPS, signed in), every route;
+- per area: `compare.js` (footage lists, viewer, media), `compareFootage.js`
+  (the footage area's writes), `canCompare.js`, `opsCompare.js`,
+  `uiCompare.js`, `contractUi.js`, `uiPages.js` (Chromium),
+  `contractFootage.js`. Each signs in on lean as on Node.
+
+The first slice's checks, still run by `compare.js`:
+
 
 - `cargo test --release` in `lean/` runs unit tests, `tests/mp4_parity.rs` and `tests/slug_parity.rs`.
   - `mp4_parity.rs` runs `parity/mp4Fixtures.js`, which makes 49 MP4 fixtures. Some are real ffmpeg encodes: Tesla-like H.264 with telemetry, the same clip converted to H.265 and to AV1 the way the converter does it, and plain encodes. Others are synthetic, built with `test/fixtures/fixtureBuilders.js`: NAL length sizes 1, 2 and 4, co64, extended boxes, several chunks, an audio track, ctts, a record placed after the first 4 KB, odd protobufs, a dozen broken files, and twelve made for the speed index's fallback (real and synthetic clips with more than 64 top-level boxes, an edit list, one cut short). The script stores what the Node code gets from each file: `videoCodec`, `readSamples`, `readSpeeds`, `summarize`, the `mp4.js` sample index with timescale, duration and keyframes, every record `telemetry.js` `readRecords` lists with its time, and what the speed index itself (`createSpeedIndex`, its full read in a worker as on the server) keeps for the clip. The Rust output must match all of it exactly, including which files fail. It does: 49 fixtures, 7 readers, no differences. On 30 fixtures the quick read gives up and the fallback runs; on 11 of them it finds speeds.
@@ -58,7 +69,7 @@ Two recordings that start at the same time are listed in the order the scan saw 
 `compare.js` checks it strictly: it runs Node's `scanFootage` and `buildRecordings` 40 times and the lean order must equal the one Node gives most often. In the comparison of the two servers' answers, where the Node server's own scan happened to come out another way, it lets another order through only between genuinely tied items (the same recordings at the same places, a recording shown by another of its own tied clips of the same kind, a day's picture from another recording with the same start and kind), and counts them.
 - `node lean/parity/measure.js [N]` measures memory and readiness for both servers.
 
-## Measured
+## Measured (the first slice, before the other areas)
 
 Release binary: 3.6 MiB (3,734,840 bytes), stripped, linked against glibc only; the static musl one in the image is 3.7 MiB (3,902,384 bytes).
 
@@ -76,13 +87,15 @@ One synthetic archive of 4,059 files (sparse 30 MB clips over 9 days, 130 record
 
 ```sh
 cd lean && cargo build --release
-FOOTAGE_PATH=/path/to/footage VEHICLE_NAME="My car" TZ=Europe/Berlin \
+FOOTAGE_PATH=/path/to/footage VEHICLE_NAME="My car" TZ=Europe/Berlin UI_PASSWORD='a long password' \
   DATA_PATH=/tmp/lean-data APP_ROOT=$PWD/.. PORT=9000 target/release/sentry-lean
+# https://<host>:9000 (its own certificate authority: DATA_PATH/tls/ca.crt)
 ```
 
-It uses the Node server's environment names: `PORT`, `HOST`, `DATA_PATH`, `APP_ROOT`, `FOOTAGE_PATH`, `VEHICLE_NAME`, `TZ` and `FFMPEG_PATH`. It has one vehicle, created from `FOOTAGE_PATH`.
-
-There is no sign-in yet, so the server listens only on loopback. It refuses any other `HOST` (exit code 2) unless `LEAN_NO_AUTH_ANYWHERE=1` is set, which is only for a trusted test network. When accounts arrive they arrive with HTTPS: passwords never go over plain HTTP.
+It reads the Node server's environment (src/core/config.rs lists every
+name). `TLS_MODE=off` serves plain HTTP, only behind a reverse proxy that
+does HTTPS. In the image, `sentry-lean-supervisor` is the entrypoint
+(`src/supervisor/README.md`).
 
 ### The image
 
@@ -100,43 +113,4 @@ docker build -f lean/Dockerfile --secret id=build_ca,src=/path/to/ca-bundle.crt 
 | `sentry-lean` (with ffmpeg 6.1) | 205 MB | 55.7 MB |
 | `sentry-lean:slim` (`FFMPEG=0`) | 25.6 MB | 7.3 MB |
 
-The binary in it is 3.9 MB (static). ffmpeg and its libraries are most of the full image.
-
-Inside the container `HOST` is `127.0.0.1`: the container's own loopback, which nothing outside it can reach. To try it on one machine, share the host's network; it then listens on the host's loopback only:
-
-```sh
-docker run --rm --network host -e PORT=9000 -e VEHICLE_NAME="My car" -e TZ=Europe/Berlin \
-  -v /path/to/footage:/footage:ro -v sentry-lean-data:/data sentry-lean
-curl http://127.0.0.1:9000/healthz
-```
-
-(On a trusted test machine, `-e HOST=0.0.0.0 -e LEAN_NO_AUTH_ANYWHERE=1 -p 127.0.0.1:9000:9000` also works: published on the host's loopback only, but reachable from other containers on the same Docker network.) Always mount the footage read-only (`:ro`). A bind-mounted data folder must be writable by user 1000.
-
-Checked on this image: it builds; with an archive mounted `:ro` and `--network host`, `/healthz`, `/api/vehicles`, days, recordings, details, speeds (the fallback clips included), `/api/media` ranges, `POST …/scan`, the UI, thumbnails (Tesla's, made with ffmpeg into `/data/thumbnails`, the 500 of a clip under a second) answer; the health check reports healthy; a write to `/footage` fails (read-only); the port is not reachable from the Docker bridge address; `HOST=0.0.0.0` without `LEAN_NO_AUTH_ANYWHERE=1` exits with code 2; the slim image answers "No thumbnail".
-
-## What is missing (the rest of the plan, in order)
-
-1. **Viewer data, drives, places and map.** Done in `src/viewer/` (see PORT_PLAN.md, "Viewer"): `/api/telemetry`, `/api/scrub`, the speed index in Node's day files, moments, driving, drives (clips and Sentry USB's drive data), places, the event map, the place tags, archive gaps without CAN and Sentry USB, work limits and the Studio routes. Not done yet: the Recycle Bin's thumbnails (`/api/bin/:item/thumbnail`), `/api/studio/trashFolder`, stars and dashboards, the HTML rewriting (versioned links, critical bar, prefetch), and everything that needs CAN logs or Sentry USB's status.
-2. (merged into 1)
-3. **Sentry USB.** Not done yet: the status file (`sentryUsb` in the day list), archive gaps' Sentry USB evidence and the car's file list (`carFiles`).
-4. **Accounts, sessions and HTTPS.** Not done yet:
-   - sign-in, two-step codes, viewer and admin roles, the CSRF and origin checks on every write, host names;
-   - TLS on the same port with the plain-HTTP explainer page.
-   
-   Passwords only go over HTTPS. Until this step is done the lean server stays on loopback.
-5. **Notifications, health, cleanup and Recycle Bin.** Not done yet:
-   - `/api/notifications*`, `/api/health*`, `/api/jobs`, `/api/events` (SSE), logs and snapshots;
-   - policies, protect, trash and restore. These are the first routes that write to footage folders, and they will need the same safeguards as `server/recycleBin.js`;
-   - share mounting and health (`share`, `storage`).
-6. **Converter.** Last. Encoding with ffmpeg, the H.265 and AV1 telemetry injection, verification and the staging and recovery steps (`src/main/converter/`). This is the largest piece.
-7. **CAN logs, helpers and power price.** Not done yet: CAN Bridge uploads and the indexes (`/api/can/*`), worker nodes, power price and savings, updates and the reports opt-in. (Pages, UI packs, exports and the settings routes: done, `src/ui/`.)
-
-Smaller differences in this slice:
-
-- Vehicles come from `FOOTAGE_PATH` only. Node's settings store, SMB shares and more than one vehicle are not supported yet.
-- `protected` is always false, because the protect list lives in the Node server's database.
-- Tied recordings: the lean server always gives the order Node's scan gives most often; Node itself now and then gives another (see Ties).
-- A vehicle name cut at 60 UTF-16 units through a character outside the BMP (an emoji, say) keeps half of it on Node; here the character is left out. The id is the same.
-- The thumbnail cache is not swept, as on Node (it grows with the clips that get a card).
-- A thumbnail of a clip under a second: ffmpeg ends well without a frame and both servers answer 500 "Internal error" (the Node behaviour, kept).
-- The stock UI loads, and the footage pages get real data. Its other pages call routes that are not here yet and get "Not found".
+These sizes are the first slice's; the integrated binary is larger (HTTPS, accounts, every area: about 17 MB). The Dockerfile is still the first slice's sketch: it has to run the supervisor as root under tini (`sentry-lean-supervisor` as CMD, with setpriv and cifs-utils; src/supervisor/README.md) before it is the image to ship. Always mount the footage read-only (`:ro`) until the Recycle Bin is wanted.

@@ -24,7 +24,7 @@ live-update streams, the converter's 22 IPC channels over
 ## Layout
 
 One crate, `lean/`, binary `sentry-lean`. Each area is a module folder with
-its own routes, merged in `src/api.rs`:
+its own routes, all put into core's router by `src/wire/`:
 
 | Module | Area (contract groups) | Node source to port |
 | --- | --- | --- |
@@ -45,8 +45,8 @@ implements the traits on core's `AppState` when merging. Keep handler logic
 in plain functions that are testable without HTTP.
 
 Shared types live in `core/`. An area module only adds files in its own
-folder, plus one line in `src/api.rs` (its routes) and its dependencies in
-`Cargo.toml`; the coordinator merges those.
+folder, plus its dependencies in `Cargo.toml`; the coordinator wires it in
+`src/wire/` (its context on core's state, its routes in `wire/routes.rs`).
 
 ## How an area is done
 
@@ -75,23 +75,88 @@ folder, plus one line in `src/api.rs` (its routes) and its dependencies in
 
 ## Status
 
+One server: core's `AppState` and `Router` are the one entry point, and every
+area is served through them (`src/wire/`, see "Integration" below).
+
 | Module | State |
 | --- | --- |
-| footage list, recordings, media ranges, speeds, MP4/SEI reading | first slice done (see README.md) |
-| supervisor | ported, see below and `src/supervisor/README.md` |
-| converter | the file-safety and telemetry core ported and tested; job store, job service, IPC and runtime still to do (see below) |
-| ops | most of it ported, see below |
-| viewer | ported except where it needs CAN, Sentry USB status, notifications or accounts; see below |
 | core | ported, see below and `src/core/README.md` |
-| `footage/` | ported, with what is left listed below |
-| ui (pages, static files, interface packs, exports, settings) | ported, see below |
-| can | ported (routes, index, trust, search, sync, prune, Sentry USB files), see below |
-| everything else | not started |
+| supervisor | ported, see below and `src/supervisor/README.md`; TLS and the fd-3 link wired by core |
+| footage (`src/footage/`, with the first slice's lists in `api.rs`) | ported; arrival checksums left (see below) |
+| viewer | ported except CAN and Sentry USB evidence in archive gaps, drives and place tags (see below) |
+| ops | most of it ported; stats parts and the converter's numbers left (see below) |
+| ui (pages, static files, interface packs, exports, settings) | ported |
+| can (CAN logs, uploads, device port, Sentry USB files) | ported |
+| converter | the file-safety and telemetry core ported and tested (library); job store, job service, IPC and runtime still to do: its two routes answer as Node does while the converter starts |
+| helper servers (nodes) | not started: `/api/nodes*` answer 501, `/node/v1/*` 404 |
+
+Same answers, the whole contract (`node lean/parity/contractAll.js`: the Node
+fixture and lean on copies of the same archive, both with HTTPS and a
+password; record.js goldens of every GET route and one request for each other
+route from `lean/parity/contractAllow.json`, replayed by compare.js): see
+"Integration".
+
+## Integration (`src/wire/`)
+
+`main.rs` opens core's state (after ops' pending snapshot restore), attaches
+the supervisor's link, then `wire::build` makes every area on core's state and
+puts their routes into core's router, and `wire::start` starts their
+background work. What each area needs from the rest is its context trait,
+implemented on core's state:
+
+| Area | Context | What it gets |
+| --- | --- | --- |
+| footage | `wire/footage.rs` `FootageCtx` (`footage::ctx::Ctx`) | manager.db through core's connection (`ManagerDb::of_core`), announce, audit, logs, core's jobs, the supervisor's `IpcMounter` when supervised (else the `LocalMounter`), ops' share alerts (`sync_share`) and savings, the CAN area's `car_summary`, `has_can` (CAN tags, `canRecordings`), `delete_with` (trash-preview `can`, `withCan`), `footage_gone` (Recycle Bin deletes), Sentry USB (`sentryUsb` in days), forgetting a removed vehicle |
+| ops | `wire/ops.rs` `CoreOps` (`OpsCtx`) | core's connection, logs and audit, log search, the hub, vehicles and shares from footage (bin bytes, days left, policy), core's TLS status, shutdown; the reports hooks of `/api/auth/me` and the setup page |
+| viewer | `wire/viewer.rs` `CoreViewer` (`viewer::ctx::Ctx`) | settings, the hub, audit lines naming who asked, ops' notifications for archive gaps (`raise_note`, `resolve_note`, `open_notes`), the CAN keys, footage's scans (files with birth times), codecs; admin checks are core's (viewerMay, home-only) before the route runs |
+| ui | `wire/ui.rs` `CoreUi` (`UiCtx`) | settings, the hub, audit and logs, core's jobs, who asks (session, confirm window, HTTPS, client address), footage's vehicles, the viewer's speed index for exports, the CAN area's car-data switch; core's `note_start_call` hook feeds prefetch learning |
+| can | `wire/can.rs` `CoreCan` (`CanCtx`) | settings, dashboards, the hub, audit, footage's vehicles, scans, bin items, protect list, bin lock, TRUST_PROXY and the client address, the certificate fingerprint; uploads through core's raw paths on the web port and core's device port (TLS, 6 per address, 256 in all, 15 s / 20 s) |
+
+Who asks: footage, ops and CAN take it as a value made from core's `Ctx`;
+the viewer and ui ask their context, which reads the request this thread
+answers (`wire::Who`, set around each call).
+
+Routes: `wire/routes.rs` lists every route of the Node router that core does
+not register itself (from docs/api-contract.json, in its order) with the area
+answering it; each goes into core's router, so core's checks (session, role,
+home network, two-step, CSRF, origin) run before every one, in Node's order.
+The paths index.js answers by hand after those checks (`/api/media`,
+`/api/scrub`, `/api/converter/events`, `/api/ui-packs/upload`) are core's
+`Router::api_raw`; the token paths (`/metrics`, `/api/can/logs…`) are
+`Router::raw`; pages are `Router::web` (ui). JSON answers over 1 KB go gzipped
+(`wire::gzip_json`), as sendJson.
+
+One of each: the speed index is the viewer's (Node's day files; the old
+SQLite index, `speeds.rs` and the first slice's `/api/speeds*` are gone, the
+summary moved to `viewer/speed_index.rs`); work limits are the viewer's
+(`GET|PUT /api/settings/work-limits`; the ui area's copy is gone); vehicles
+are footage's `Vehicles` (manager.db `vehicles` setting); security headers,
+CSP and `/healthz` are core's (the ui copies are gone). The footage catalog
+is in manager.db's `catalog_files`, `catalog_dirs`, `catalog_scans` and
+`clip_codecs`, with catalog.js's columns, FORMAT 1 and batches (its own
+connection to the file, WAL), so either server resumes from the other's last
+scan; `lean-catalog.sqlite` is no longer read or written (an old one can be
+deleted). The stand-alone contexts are gone (ops `LeanCtx`, ui `LocalCtx`,
+viewer `AppCtx`, CAN `lean.rs` and its plain-HTTP device port, the temporary
+`/api/studio/context`); footage's `LocalCore` stays as the tests' stand-in.
+
+Checked (all on the integrated server):
+
+- `cargo test --release`: every unit and integration test passes;
+- `lean/parity/compare.js`: 217 requests the same; `compareFootage.js`: 97
+  writing requests the same; `canCompare.js`: 151 requests, no differences;
+  `uiCompare.js`: 2871 of 2871 answers the same; `opsCompare.js`: 13 of 15
+  (the two left are the converter's: the Encoder health check and
+  `/api/system` `converter`);
+- `contractAll.js`: RESULTS_HERE
 
 ## Converter
 
-Done (`src/converter/`, library only: nothing is wired into `api.rs` yet,
-so no route answers and nothing can touch footage from the lean server):
+Done (`src/converter/`, library only: nothing of it is behind a route, so
+nothing can touch footage from the lean server. `POST /api/converter/invoke/:name`
+answers `{ ok: false, error: { code: "CONVERTER_STARTING" } }` and
+`/api/converter/events` 503 "Converter is starting", as Node does before its
+converter runs; ops reports the converter as not started):
 
 - `owned.rs` (server/posixOwnedFs.js, native/noreplace-rename.c): remove,
   promote, linkBackup, replaceOver. Device, inode, size and a SHA-256 taken
@@ -174,7 +239,7 @@ Not done yet:
   passed in `bin.rs`; the app takes fd 3 and `core::supervised::attach`
   handles disconnect/`shutdown`, `supervisor-log`, `rapl-reading` (hook for
   ops), `tls-updated`, the ACME tokens and `tls-hostnames`)
-- footage uses `IpcMounter` (`state.supervisor` holds the link);
+- (done: footage mounts through `IpcMounter` when the supervisor started the app)
 - lean/Dockerfile: run as root with the supervisor as CMD under tini, with
   setpriv, cifs-utils and tini installed.
 
@@ -184,9 +249,7 @@ only logged ("mount car: ...") read like Rust's, not Node's.
 ## Ops
 
 Done (`src/ops/`, handlers over the `ops::ctx::OpsCtx` trait; routes in
-`ops/routes.rs`, wired in `api.rs` before the slice's own routes, started
-from `main.rs`; until core lands `ops/lean.rs` implements the trait on
-`App` with its own connection to `DATA_PATH/manager.db`, same schema):
+`ops/routes.rs`; the trait on core's state in `src/wire/ops.rs`):
 
 - notifications: db.js notify/resolve/resolveId/markRead/list (an unchanged
   repeat changes nothing and announces nothing), activity.js Notifications
@@ -197,8 +260,8 @@ from `main.rs`; until core lands `ops/lean.rs` implements the trait on
   the banner, the startup self-check a minute after the start with its
   notifications and log line;
 - snapshots.js (VACUUM INTO, 7 kept, restore at the next start through
-  `snapshots::apply_pending_restore`, which core must call before it opens
-  manager.db; ops/lean.rs does);
+  `snapshots::apply_pending_restore`, which main.rs calls before core opens
+  manager.db);
 - powerPrice.js and savings.js exactly (local time, overnight rates,
   backfill, by month), PUT /api/settings/power, savings-by-month;
 - buildInfo.js, hostInfo.js, imageUpdates.js (registry token, multi-arch
@@ -245,19 +308,18 @@ Not done yet:
   (converter area, `OpsCtx::encoder_block`), the `tick()` housekeeping;
 - savings.record from the converter's job snapshots (converter calls
   `power::record`) and the backfill at start;
-- the real diagnostics, heartbeat numbers and identifiers (index.js
-  reportDiagnostics, reportHeartbeat, reportIdentifiers) need the other
-  areas through `OpsCtx`; ops/lean.rs gives a small version;
-- crash notes from 500s (`Reports::note_crash`) need core's error path;
-- the live-update hub (`announce`), the audit log, log search and sign-in
-  are core's; on the stand-alone server they print to stderr, and the 🔑
-  routes always ask for the password (no accounts yet);
-- the share status (warning, read-only) comes from footage/shares;
-  ops/lean.rs works out a local folder's.
+- the full diagnostics and heartbeat (index.js reportDiagnostics,
+  reportHeartbeat): `wire/ops.rs` gives the system summary, vehicles and
+  CAN on/off; converter, GPU and node numbers wait for those areas;
+- crash notes from 500s (`Reports::note_crash`) need a hook in core's error path;
+- the supervisor's `rapl-reading` (core's `rapl_reading` hook) has no
+  `Stats` setter to go to yet.
+- (done: hub, audit, log search, sign-in and the 🔑 window are core's; share
+  status comes from footage's shares.)
 ## Viewer
 
-Done (`src/viewer/`, handlers on the small `viewer::ctx::Ctx` trait;
-`viewer/glue.rs` implements it on today's `App`):
+Done (`src/viewer/`, handlers on the small `viewer::ctx::Ctx` trait,
+implemented on core's state in `src/wire/viewer.rs`):
 
 - `/api/telemetry` (cache `DATA/telemetry/<sha1 "t2|path|size|mtime">.json`,
   ETag, 304, gzip, `telemetryReads` at once; the reader is `src/telemetry.rs`),
@@ -306,28 +368,22 @@ Not done yet:
   time zone shifts (needs the CAN index);
 - Sentry USB in archive gaps (status file, snapshots, car-files.tsv: carFilesPass,
   `carFiles` in the answer and the day cards' `archive`/`carFiles`);
-- archive-gap notifications are only raised once `Ctx::raise_note` is
-  implemented (ops); `forDays` for the day cards is not wired;
-- arrival times: the lean scan keeps no birth time, so archive gaps use the
-  change time (Node prefers the birth time);
+- `forDays` for the day cards (`archive`) is not wired (always null);
 - time zones other than UTC and the server's own `TZ` (driving's "this
   week", archive gaps' wall clock) need a zone table (core);
-- `POST /api/studio/trashFolder` (Recycle Bin, footage area);
-- admin-only routes call `Ctx::refuse_admin`, which core implements; the
-  audit line names "local" until accounts exist; `announce` has no hub yet;
-- the coordinator keeps one speed index: `app.rs` skips its SQLite index
-  while the viewer runs, and the old `/api/speeds*` code in `api.rs` is
-  shadowed by the viewer's routes.
+- `POST /api/studio/trashFolder` (Recycle Bin, footage area): answers 501;
+- (done: archive-gap notifications through ops, arrival from the birth time
+  where the share has one, admin checks by core, audit lines naming who
+  asked, the hub; one speed index.)
 ## Footage (`src/footage/`)
 
 What it needs from core is `footage/ctx.rs` (`Ctx`: the manager database,
 announce, audit, logs, jobs, the converter's clips in hand, the supervisor's
 `Mounter`, and hooks for the CAN, savings, notifications and Sentry USB
-areas; `Caller` for who asks). `LocalCore` stands in until core lands: it
-opens `DATA_PATH/manager.db` with server/db.js's tables (settings,
-protected, bin_items, jobs). Routes: `footage/routes.rs` `handle`, called
-from `api.rs` (`footage_routes`); access checks (admin, viewer, CSRF origin)
-are core's, `Caller::require_confirmed` is the 🔑.
+areas; `Caller` for who asks), implemented on core's state in
+`src/wire/footage.rs`; `LocalCore` is the tests' stand-in. Routes:
+`footage/routes.rs` `handle`, called through core's router; access checks
+(admin, viewer, CSRF origin) are core's, `Caller::require_confirmed` is the 🔑.
 
 Moved here, unchanged at first (later commits edit them in place):
 `src/footage.rs` -> `footage/names.rs` (re-exported as `crate::footage::*`),
@@ -367,28 +423,18 @@ Left to do:
   (`birthtime_ms`, `arrived_clips` are there).
 - `archiveGap.js`: the viewer area's per the table above (the day list's
   `archive` and `carFiles`); `deleted_clips::list` is what it reads from here.
-- The catalog stays in `lean-catalog.sqlite` with its own tables, not Node's
-  `catalog_files` / `clip_codecs` / `catalog_dirs` / `catalog_scans` in
-  manager.db: after the switch the first scan is a full one (and codecs are
-  read once more). Port the Node tables if that matters.
-- Core wiring: `Caller` from the session (now always the local admin, its
-  password counted as given), jobs into core's job list, `announce` onto
-  `/api/events`, audit into the audit log, the CAN hooks (`can_with`,
-  `can_delete_with`, `on_deleted` -> canPrune, the car-model change kicking
-  the CAN index), savings (`saved`, `reset_saved`), notifications
-  (`share_status` -> syncShare), `vehicle_removed` (savings, archive gaps,
-  Sentry USB, drive data, nodes).
-- Share mounts go through the supervisor's `Mounter` (`ctx::SupervisorMounter`
-  wraps `supervisor::mounter::Mounter`): main.rs gives the `LocalMounter`, as
-  index.js does without the supervisor; when core wires the supervisor link it
-  passes `IpcMounter` the same way (`LocalCore::set_mounter`).
+- (done: the catalog is in manager.db's catalog tables; core wiring of
+  `Caller`, jobs, announce, audit, the CAN hooks, savings, share alerts,
+  `vehicle_removed` for savings and Sentry USB; `IpcMounter` when supervised.)
+- The car-model change does not kick the CAN index yet; `vehicle_removed`
+  does not yet forget archive gaps and drive data.
 - Stars are sorted by clip with byte order; Node uses `localeCompare`
   (ICU). The same for clip keys (YYYY-MM-DD_HH-MM-SS), which is all a star
   can hold.
 ## ui
 
-Done (`src/ui/`, what it needs from core in `src/ui/ctx.rs`, implemented for
-today's lean server by `src/ui/local.rs`):
+Done (`src/ui/`, what it needs from core in `src/ui/ctx.rs`, implemented on
+core in `src/wire/ui.rs`):
 
 - static files as `server/http.js` serves them (`ui/http.rs`): the same MIME
   types, weak ETag from size and time, 304, brotli (quality 5) or gzip for
@@ -435,14 +481,9 @@ the five packs, main page, Settings, Viewer, Encoder, sign-in page: 30 of
 
 Not done yet:
 
-- core implements `ui::ctx::UiCtx` on its AppState (settings in manager.db,
-  sessions, `recentlyConfirmed`, `isSecure`, clientKey, two-step state, the
-  jobs list, the `/api/events` hub for `interface`, audit and logs, the
-  vehicle guard for exports, the speed index, `viewerCarData` with the CAN
-  area) and replaces `LocalCtx`; core also takes over `sendJson` for every
-  JSON answer (gzip over 1 KB: `ui::http::send_json`), the Host check (421),
-  the CSRF and origin checks and the viewer/home-only checks before the
-  ui's routes (the ui checks X-Requested-With and Origin again itself);
+- (done: `UiCtx` on core; core's checks run before the ui routes, which no
+  longer check X-Requested-With and Origin themselves; the work limits are
+  the viewer's.)
 - `streamZip` (the CAN bundles' streamed zip) is the CAN area's;
 - `GET /api/settings` shows the power price; its PUT is the power-price area's;
 - original.zip is deflated by flate2 (miniz), not zlib: the files are the
@@ -491,37 +532,22 @@ Sentry USB's files on the share: 151 requests, the same answers; the
 server's own times, per-instance data folders, and the Sentry USB `record`
 part are normalised).
 
-The area's needs from core are `ctx.rs` (`CanCtx`); `lean.rs` implements
-it on today's lean App until core lands (settings in
-`DATA_PATH/lean-settings.json`, a fixed local admin, live updates and audit
-lines to the log).
+The area's needs from core are `ctx.rs` (`CanCtx`), implemented on core in
+`src/wire/can.rs`.
 
 Not done yet:
 
-- core: `CanCtx` on AppState (manager.db settings, `announce` on
-  /api/events, audit, `requireConfirmed`, `by(req, user)`, clientKey,
-  isSecure/TRUST_PROXY, cert fingerprint), access per route (admin, 🔑,
-  watch-only 403 on files/export), JSON compression of answers over 1 KB;
-- the device port over TLS (TLS 1.2/1.3, the certificate renewed in
-  place), its per-address (6) and total (256) connection limits, the 15 s
-  first-request and 20 s header timeouts; until then it is plain HTTP;
-- the footage area calls `Can::car_summary` (`car` and `carModels` in
-  /api/vehicles), `Can::has_can` (`canRecordings`, `can: true` tags), and
-  `CanPrune::delete_with`/`footage_gone` (trash-preview `can`, `withCan`,
-  the Recycle Bin's deletes); the Recycle Bin lock, bin items and the
-  protect list come through `CanCtx`;
-- the viewer/footage areas use `SentryUsb` (`sentryUsb` in days, the
-  transfer range for conversions and archive gaps, `car_files` for
-  archiveGap.js) and give the `record` part of the Sentry USB view
-  (arrivalChecksums.js) and the costly missed snapshots (archiveGap
-  forDays) through `CanCtx`;
+- (done: `CanCtx` on core, access per route by core, JSON gzip over 1 KB,
+  the device port on core's listener with TLS and its limits, the footage
+  hooks `car_summary`, `has_can`, `delete_with`, `footage_gone`, Sentry USB
+  in the days answer.)
+- the Sentry USB `record` part comes from arrivalChecksums.js, which is not
+  ported: it is the view of a car with no record yet; the transfer range for
+  conversions, `car_files` and the costly missed snapshots for archive gaps
+  wait for archiveGap's Sentry USB pass;
 - recordingPlace.js (place tags from the CAN GPS) is the viewer area's; it
   can read the minute files with `format.rs`.
 
-## Known differences
-
-None accepted yet. Proposed (needs the owner's OK): `/api/speeds/status`
-`readMode` follows this server's own timing, as Node's does.
 ## Core
 
 Done (`src/core/`, see its README for how an area plugs in): config/env
@@ -562,11 +588,8 @@ Not done yet:
   header-read timeout only.
 - supervised `set_hostnames` blocks a blocking thread while waiting for the
   supervisor (up to 120 s).
-- `/api/system`, `/api/support-bundle`, `/metrics` content and the other
-  Health routes are ops'; `/api/converter/events` is the converter's;
-  `/api/studio/context` in main.rs is a stand-in for the contract tools'
-  discovery until the ui area has it.
-- web/prefetch.js learning (noteStartCall) is a hook for ui.
+- (done: the ops, converter, viewer and ui routes and hooks are wired; the
+  `/api/studio/context` stand-in is gone.)
 
 ## Known differences
 
@@ -574,5 +597,7 @@ None accepted yet. Proposed (need the owner's OK):
 
 - core: a JSON body over 1 MB gets `413 {"error":"Request body too large"}`;
   Node destroys the connection (the client sees "socket hang up").
-- static files from the first slice (`api::web`) lack `Vary: Accept-Encoding`
-  (ui area).
+- viewer: `/api/speeds/status` `readMode` follows this server's own timing,
+  as Node's does.
+- core and ui: each server makes its own certificate authority, so the
+  certificate details differ (the contract compares their shape).

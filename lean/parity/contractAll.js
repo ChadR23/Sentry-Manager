@@ -47,7 +47,7 @@ async function startLean(dir, settleMs) {
     env: {
       ...process.env, PORT: String(port), HOST: '127.0.0.1', DATA_PATH: path.join(dir, 'data'), FOOTAGE_PATH: path.join(dir, 'footage'),
       VEHICLE_NAME: 'Contract Car', RUN_DIR: path.join(dir, 'run'), UI_PASSWORD: PASSWORD, TZ: 'UTC', LOG_LEVEL: 'warn', TLS_MODE: 'auto',
-      APP_ROOT: REPO, CAN_PORT: String(await freePort())
+      APP_ROOT: REPO
     },
     stdio: ['ignore', 'ignore', fs.openSync(path.join(dir, 'lean.log'), 'a')]
   });
