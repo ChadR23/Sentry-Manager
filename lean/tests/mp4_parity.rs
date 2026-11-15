@@ -1,13 +1,14 @@
 //! The Rust MP4 and telemetry readers against the Node ones, on the same
 //! files: lean/parity/mp4Fixtures.js writes the fixtures (real ffmpeg
 //! encodes and synthetic ones from test/fixtures/fixtureBuilders.js) and
-//! what server/mp4codec.js, server/speedReader.js and src/main/converter/mp4.js
-//! read from each (and server/speedIndex.js summarize of the samples);
+//! what server/mp4codec.js, server/speedReader.js, src/main/converter/mp4.js and
+//! server/telemetry.js (the full read) get from each, and what server/speedIndex.js keeps
+//! for it (the quick read, else the full one) and its summarize of the samples;
 //! every value here must match exactly.
 //!
 //! Skipped (with a note) when node or ffmpeg is not installed.
 
-use sentry_lean::{mp4, sei, speeds};
+use sentry_lean::{mp4, sei, speeds, telemetry};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -64,7 +65,14 @@ fn rust_side(file: &Path) -> Value {
         }),
         Err(_) => error(),
     };
-    json!({ "codec": codec, "samples": samples, "summary": summary, "speeds": speeds, "info": info })
+    let size = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
+    let records = match telemetry::read_records(file, size) {
+        Ok(r) => json!(r.iter().map(|(t, rec)| json!([t, rec.iter().map(|b| format!("{b:02x}")).collect::<String>()])).collect::<Vec<_>>()),
+        Err(_) => error(),
+    };
+    let (sp, sum) = speeds::speeds_for(file, size);
+    let index = json!([sp, sum]);
+    json!({ "codec": codec, "samples": samples, "summary": summary, "speeds": speeds, "info": info, "records": records, "index": index })
 }
 
 #[test]
@@ -75,7 +83,7 @@ fn mp4_and_telemetry_match_node() {
     let mut failures = Vec::new();
     for (name, want) in &expected {
         let got = rust_side(&dir.join(name));
-        for key in ["codec", "samples", "summary", "speeds", "info"] {
+        for key in ["codec", "samples", "summary", "speeds", "info", "records", "index"] {
             let (w, g) = (norm(want[key].clone()), norm(got[key].clone()));
             if w != g {
                 let show = |v: &Value| v.to_string().chars().take(400).collect::<String>();
@@ -85,7 +93,7 @@ fn mp4_and_telemetry_match_node() {
     }
     let _ = std::fs::remove_dir_all(&dir);
     assert!(failures.is_empty(), "{} differences:\n{}", failures.len(), failures.join("\n"));
-    eprintln!("{} fixtures x 5 readers: identical", expected.len());
+    eprintln!("{} fixtures x 7 readers: identical", expected.len());
 }
 
 #[test]

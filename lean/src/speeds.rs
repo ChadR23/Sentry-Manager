@@ -6,6 +6,7 @@
 use crate::catalog::{Catalog, Front};
 use crate::inventory::num;
 use crate::sei::{self, js_round, r2, Sample};
+use crate::telemetry;
 use serde_json::{json, Value};
 use std::path::Path;
 
@@ -64,16 +65,38 @@ pub fn summarize(samples: &[Option<Sample>]) -> Value {
     json!({ "b": pair(b), "t": pair(t), "v": pair(v), "g": g, "k": SUMMARY_VERSION })
 }
 
-/// Speeds (JSON) and summary (JSON) of one clip; (None, None) when it has none or cannot be read.
-pub fn read_clip(path: &Path) -> (Option<String>, Option<String>) {
+fn speeds_json(speeds: &[Option<f64>]) -> String {
+    Value::Array(speeds.iter().map(|v| v.map_or(Value::Null, num)).collect()).to_string()
+}
+
+/// Speeds and summary of one clip (speedIndex.js speedsFor): the quick read, else the
+/// dashboard's full read (telemetry.rs), which gives speeds only; (None, None) when it has
+/// none or cannot be read. `size`: the size the scan found.
+pub fn speeds_for(path: &Path, size: u64) -> (Option<Vec<Option<f64>>>, Option<Value>) {
     match sei::read_samples(path) {
         Ok(Some(samples)) => {
-            let speeds: Vec<Value> = samples.iter().map(|x| x.and_then(|x| x.v).map_or(Value::Null, |v| num(r2(v)))).collect();
-            (Some(Value::Array(speeds).to_string()), Some(summarize(&samples).to_string()))
+            let speeds: Vec<Option<f64>> = samples.iter().map(|x| x.and_then(|x| x.v).map(r2)).collect();
+            (Some(speeds), Some(summarize(&samples)))
         }
-        // (Node falls back to reading the whole clip here; not done yet)
-        _ => (None, None),
+        Ok(None) => (None, None),
+        Err(_) => match telemetry::read_records(path, size) {
+            Ok(frames) => match telemetry::speeds_of(&frames) {
+                Some(speeds) => {
+                    let samples: Vec<Option<Sample>> = speeds.iter().map(|&v| Some(Sample { v, ..Sample::default() })).collect();
+                    let sum = summarize(&samples);
+                    (Some(speeds), Some(sum))
+                }
+                None => (None, None),
+            },
+            Err(_) => (None, None),
+        },
     }
+}
+
+/// speeds_for as the catalog keeps it: (speeds JSON, summary JSON).
+pub fn read_clip(path: &Path, size: u64) -> (Option<String>, Option<String>) {
+    let (sp, sum) = speeds_for(path, size);
+    (sp.as_deref().map(speeds_json), sum.map(|s| s.to_string()))
 }
 
 /// Index what is new or changed: returns how many clips were read.
@@ -81,7 +104,7 @@ pub fn pass(catalog: &Catalog, vehicle: &str, root: &Path, progress: &dyn Fn(usi
     let todo: Vec<Front> = catalog.fronts(vehicle)?.into_iter().filter(|(_, had)| !had).map(|(f, _)| f).collect();
     let total = todo.len();
     for (i, f) in todo.iter().enumerate() {
-        let (sp, sum) = read_clip(&root.join(&f.rel));
+        let (sp, sum) = read_clip(&root.join(&f.rel), f.size);
         catalog.put_speeds(vehicle, f, sp.as_deref(), sum.as_deref())?;
         progress(i + 1, total, &f.day);
     }

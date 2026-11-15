@@ -3,14 +3,15 @@
 //! Environment (the Node server's names):
 //!   PORT (9000), HOST (127.0.0.1), DATA_PATH (/data), APP_ROOT (/app: web/, src/, assets/),
 //!   FOOTAGE_PATH and VEHICLE_NAME (the vehicle), TZ (its time zone, and the day of
-//!   files named without a time).
+//!   files named without a time), FFMPEG_PATH (ffmpeg: thumbnails made from clips,
+//!   none without it).
 //!
 //! There are no accounts yet, so it only listens on this machine (loopback)
 //! unless LEAN_NO_AUTH_ANYWHERE=1 says otherwise. When accounts come they
 //! come with HTTPS: passwords never go over plain HTTP.
 
-use sentry_lean::app::{slug, App, Vehicle};
-use sentry_lean::{api, catalog::Catalog};
+use sentry_lean::app::{slug, vehicle_name, App, Vehicle};
+use sentry_lean::{api, catalog::Catalog, thumbnails::Thumbnails};
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -34,13 +35,17 @@ async fn main() {
     if let Ok(p) = std::env::var("FOOTAGE_PATH") {
         let root = PathBuf::from(&p);
         if root.is_absolute() && root.exists() {
-            let name = env("VEHICLE_NAME", "My car");
-            vehicles.push(Vehicle { id: slug(&name), name, timezone: env("TZ", "UTC"), root });
+            match vehicle_name(&env("VEHICLE_NAME", "My car")) {
+                Some(name) => vehicles.push(Vehicle { id: slug(&name), name, timezone: env("TZ", "UTC"), root }),
+                None => eprintln!("Could not create the vehicle from the environment: Give the vehicle a name."),
+            }
         } else {
             eprintln!("FOOTAGE_PATH {p} is not there: no vehicle");
         }
     }
-    let app = App::new(vehicles, catalog, PathBuf::from(env("APP_ROOT", "/app")));
+    // (two at once, as the Node server's default)
+    let thumbnails = Thumbnails::new(data.join("thumbnails"), env("FFMPEG_PATH", "ffmpeg"), 2);
+    let app = App::new(vehicles, catalog, PathBuf::from(env("APP_ROOT", "/app")), thumbnails);
     for v in &app.vehicles {
         app.scan(&v.id, true);
     }

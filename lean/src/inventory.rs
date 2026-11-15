@@ -114,7 +114,7 @@ fn finish(out: &mut Vec<Recording>, vehicle: &str, key: String, typ: &'static st
 
 /// Group a scan's files into recordings, newest first (inventory.js buildRecordings).
 pub fn build_recordings(files: &[FileEntry], vehicle: &str) -> Vec<Recording> {
-    // (folders in name order; Node keeps the order files were seen in)
+    // (folders and files in the order the scan saw them, as Node: scanner.rs node_order)
     let mut events: Vec<(&str, Vec<&FileEntry>)> = Vec::new();
     let mut loose: Vec<(&str, Vec<(&FileEntry, &str)>)> = Vec::new();
     let mut ev_at: HashMap<&str, usize> = HashMap::new();

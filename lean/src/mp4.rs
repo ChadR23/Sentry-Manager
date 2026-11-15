@@ -71,6 +71,11 @@ pub struct TopBox {
 
 /// The top-level boxes of a file (speedReader.js topBoxes).
 pub fn top_boxes(file: &File, file_size: u64) -> Result<Vec<TopBox>> {
+    top_boxes_up_to(file, file_size, MAX_TOP_BOXES)
+}
+
+/// The top-level boxes, at most `most` of them.
+fn top_boxes_up_to(file: &File, file_size: u64, most: usize) -> Result<Vec<TopBox>> {
     let mut out = Vec::new();
     let mut pos = 0u64;
     while pos < file_size {
@@ -96,7 +101,7 @@ pub fn top_boxes(file: &File, file_size: u64) -> Result<Vec<TopBox>> {
         }
         out.push(TopBox { typ, start: pos, size, header, declared });
         pos += size;
-        if out.len() > MAX_TOP_BOXES {
+        if out.len() > most {
             return err("Too many top-level boxes");
         }
     }
@@ -226,8 +231,13 @@ fn node_checks(typ: &[u8; 4]) -> Result<()> {
 /// Read the top-level headers and moov of a file and parse them (mp4.js parseMp4 of
 /// speedReader.js' "image": every box header, moov whole, media left empty).
 pub fn open_tree(file: &File) -> Result<Tree> {
+    open_tree_up_to(file, MAX_TOP_BOXES)
+}
+
+/// open_tree with at most `most` top-level boxes (mp4.js parseMp4 of a whole file has no limit).
+fn open_tree_up_to(file: &File, most: usize) -> Result<Tree> {
     let file_size = file.metadata().map_err(|e| Mp4Error(e.to_string()))?.len();
-    let top = top_boxes(file, file_size)?;
+    let top = top_boxes_up_to(file, file_size, most)?;
     let moov = top.iter().find(|b| &b.typ == b"moov").cloned();
     let Some(moov) = moov else { return err("No usable moov") };
     if moov.size > MAX_MOOV {
@@ -545,7 +555,7 @@ pub struct ClipInfo {
 
 pub fn clip_info(path: &Path) -> Result<ClipInfo> {
     let file = File::open(path).map_err(|e| Mp4Error(e.to_string()))?;
-    let tree = open_tree(&file)?;
+    let tree = open_tree_up_to(&file, usize::MAX)?;
     let (track, track_id) = video_track(&tree)?;
     let samples = sample_index(&tree, track)?;
     let Some(mdhd) = track.first(b"mdhd") else { return err("No mdhd") };

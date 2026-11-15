@@ -12,3 +12,5 @@ pub mod mp4;
 pub mod scanner;
 pub mod sei;
 pub mod speeds;
+pub mod telemetry;
+pub mod thumbnails;

@@ -7,6 +7,16 @@
 //! files changed in the last two hours: one still being copied grows
 //! without touching its folder), so a quiet share costs one listing per
 //! folder instead of a stat per file.
+//!
+//! The files come back in the order the Node server sees them, which decides
+//! the order of recordings that start at the same time and which clip
+//! stands for an event without a front camera. Node lists each folder
+//! sorted by name (libuv's scandir sorts with strcmp), queues one folder
+//! read and one stat per entry in that order, and keeps each file when its
+//! stat answers: a breadth-first walk, with files kept from the last scan
+//! taken the moment their folder is listed. Its stats run in parallel, so
+//! now and then an answer comes early; this is the order it gives when
+//! they answer in turn, which is what it gives most of the time.
 
 use crate::footage::{self, Class};
 use std::collections::{HashMap, VecDeque};
@@ -65,9 +75,17 @@ struct Queue {
     busy: usize,
 }
 
+/// A folder's entries that take part in the scan, in Node's order.
+enum Child {
+    Dir(String),
+    Stat(String),
+    Kept(String),
+}
+
 #[derive(Default)]
 struct Out {
     files: Vec<FileEntry>,
+    tree: HashMap<String, Vec<Child>>,
     dirs: HashMap<String, f64>,
     errors: Vec<(String, String)>,
     reused: usize,
@@ -101,8 +119,11 @@ pub fn scan(root: &Path, previous: Option<&Previous>, concurrency: usize) -> Sca
         let unchanged = previous.filter(|p| mtime.is_some() && p.dirs.get(&rel) == mtime.as_ref());
         let mut batch = Vec::new();
         let mut kept = Vec::new();
-        for ent in list.flatten() {
-            let Ok(name) = ent.file_name().into_string() else { continue };
+        let mut children = Vec::new();
+        let mut list: Vec<(String, std::fs::DirEntry)> = list.flatten().filter_map(|e| e.file_name().into_string().ok().map(|n| (n, e))).collect();
+        // (libuv: strcmp, the bytes of the names)
+        list.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        for (name, ent) in list {
             let child = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
             let Ok(ft) = ent.file_type() else { continue };
             if ft.is_symlink() {
@@ -110,6 +131,7 @@ pub fn scan(root: &Path, previous: Option<&Previous>, concurrency: usize) -> Sca
             }
             if ft.is_dir() {
                 if !footage::should_skip_dir(&name) {
+                    children.push(Child::Dir(child.clone()));
                     more.push(Task::Dir(child));
                 }
                 continue;
@@ -120,10 +142,12 @@ pub fn scan(root: &Path, previous: Option<&Previous>, concurrency: usize) -> Sca
             let Some(class) = footage::classify(&child) else { continue };
             if let Some(known) = unchanged.and_then(|p| p.files.get(&child)) {
                 if started - known.mtime_ms > RECENT_MS {
+                    children.push(Child::Kept(child));
                     kept.push(known.clone());
                     continue;
                 }
             }
+            children.push(Child::Stat(child.clone()));
             batch.push((child, class));
             if batch.len() == STAT_BATCH {
                 more.push(Task::Stat(std::mem::take(&mut batch)));
@@ -132,8 +156,9 @@ pub fn scan(root: &Path, previous: Option<&Previous>, concurrency: usize) -> Sca
         if !batch.is_empty() {
             more.push(Task::Stat(batch));
         }
+        let mut o = out.lock().unwrap();
+        o.tree.insert(rel, children);
         if !kept.is_empty() {
-            let mut o = out.lock().unwrap();
             o.reused += kept.len();
             o.files.extend(kept);
         }
@@ -186,8 +211,72 @@ pub fn scan(root: &Path, previous: Option<&Previous>, concurrency: usize) -> Sca
         }
     });
 
-    let o = out.into_inner().unwrap();
-    let mut files = o.files;
-    files.sort_by(|a, b| a.rel.cmp(&b.rel));
+    let mut o = out.into_inner().unwrap();
+    let files = node_order(o.files, &mut o.tree);
     ScanResult { files, dirs: o.dirs, errors: o.errors, reused: o.reused, scanned_at: now_ms(), duration_ms: now_ms() - started }
+}
+
+/// The files in the order the Node server's scan sees them (see the top of this file).
+fn node_order(mut files: Vec<FileEntry>, tree: &mut HashMap<String, Vec<Child>>) -> Vec<FileEntry> {
+    let mut seq: HashMap<String, usize> = HashMap::with_capacity(files.len());
+    let seen = |rel: String, seq: &mut HashMap<String, usize>| {
+        let n = seq.len();
+        seq.entry(rel).or_insert(n);
+    };
+    let mut queue: VecDeque<Child> = VecDeque::from([Child::Dir(String::new())]);
+    while let Some(item) = queue.pop_front() {
+        match item {
+            Child::Dir(rel) => {
+                for c in tree.remove(&rel).unwrap_or_default() {
+                    match c {
+                        Child::Kept(r) => seen(r, &mut seq),
+                        other => queue.push_back(other),
+                    }
+                }
+            }
+            Child::Stat(r) | Child::Kept(r) => seen(r, &mut seq),
+        }
+    }
+    files.sort_by_key(|f| seq.get(&f.rel).copied().unwrap_or(usize::MAX));
+    files
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn files_come_in_node_order() {
+        let root = std::env::temp_dir().join(format!("lean-scan-order-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        // made in another order than the names
+        for rel in [
+            "T/SentryClips/2025-01-01_10-09-00/2025-01-01_10-00-00-front.mp4",
+            "T/RecentClips/2025-01-02_10-00-00-front.mp4",
+            "T/RecentClips/2025-01-02/2025-01-02_10-00-00-front.mp4",
+            "T/SentryClips/2025-01-01_10-01-00/2025-01-01_10-00-00-back.mp4",
+            "T/SentryClips/2025-01-01_10-01-00/2025-01-01_10-00-00-front.mp4",
+            "T/Other/2025-01-02_10-00-00-front.mp4",
+        ] {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, b"x").unwrap();
+        }
+        let order = |res: &ScanResult| res.files.iter().map(|f| f.rel.as_str()).collect::<Vec<_>>().join(" ");
+        // folder by folder, each in name order: a folder's own files before those of its subfolders
+        let want = "T/Other/2025-01-02_10-00-00-front.mp4 T/RecentClips/2025-01-02_10-00-00-front.mp4 \
+            T/RecentClips/2025-01-02/2025-01-02_10-00-00-front.mp4 T/SentryClips/2025-01-01_10-01-00/2025-01-01_10-00-00-back.mp4 \
+            T/SentryClips/2025-01-01_10-01-00/2025-01-01_10-00-00-front.mp4 T/SentryClips/2025-01-01_10-09-00/2025-01-01_10-00-00-front.mp4";
+        let first = scan(&root, None, 4);
+        assert_eq!(order(&first), want);
+        // a light rescan: files kept from the last scan come when their folder is listed
+        let prev = Previous {
+            files: first.files.iter().map(|f| (f.rel.clone(), FileEntry { mtime_ms: 0.0, ..f.clone() })).collect(),
+            dirs: first.dirs.clone(),
+        };
+        let again = scan(&root, Some(&prev), 4);
+        assert_eq!(again.reused, 6);
+        assert_eq!(order(&again), want);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }

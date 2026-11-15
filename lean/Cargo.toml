@@ -21,6 +21,7 @@ sha1_smol = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 libc = "0.2"
 bytes = "1"
+unicode-normalization = "0.1"
 
 [profile.release]
 opt-level = 3

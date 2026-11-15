@@ -105,6 +105,38 @@ async function main() {
   write('RecentClips/2025-03-08_10-00-00/event.json', '{}');
   write('RecentClips/2025-03-08_10-00-00/2025-03-08_09-59-00-front.mp4', junk());
 
+  // Ties: recordings that start at the same time keep the order the scan saw their files in
+  // (an old day, so the paged queries never cut through them). Four Sentry events and a Saved
+  // one whose first clip is the same minute,
+  for (const ev of ['SentryClips/2025-02-20_10-05-00', 'SentryClips/2025-02-20_10-02-00', 'SentryClips/2025-02-20_10-09-00',
+    'SentryClips/2025-02-20_10-01-00', 'SavedClips/2025-02-20_10-03-00']) {
+    write(`${ev}/2025-02-20_10-00-00-back.mp4`, junk());
+    if (ev.startsWith('Sentry')) write(`${ev}/2025-02-20_10-00-00-front.mp4`, junk());
+  }
+  // an event without a front clip (the first clip seen stands for it),
+  for (const cam of ['right_repeater', 'left_repeater', 'back', 'right_pillar', 'left_pillar']) {
+    write(`SentryClips/2025-02-21_10-00-00/2025-02-21_09-59-00-${cam}.mp4`, junk());
+  }
+  // drives in three folders and an event without clips, all at 10:00
+  write('RecentClips/2025-02-22_10-00-00-front.mp4', junk());
+  write('Other/2025-02-22_10-00-00-front.mp4', junk());
+  write('RecentClips/2025-02-22/2025-02-22_10-00-00-front.mp4', junk());
+  write('SavedClips/2025-02-22_10-00-00/event.json', '{"city":"Tie"}');
+
+  // Clips the speed index's quick read gives up on and the full read does not (more than 64
+  // top-level boxes): the fallback. And thumbnails made from clips: an event without thumb.png,
+  // a clip under a second (no frame at one second: ffmpeg ends well and writes nothing).
+  const frees = Buffer.concat(Array.from({ length: 70 }, () => Buffer.from([0, 0, 0, 12, 0x66, 0x72, 0x65, 0x65, 0, 0, 0, 0])));
+  write('RecentClips/2025-03-09_08-00-00-front.mp4', Buffer.concat([real(src), frees]));
+  if (fs.existsSync(h265)) write('RecentClips/2025-03-09_08-01-00-front.mp4', Buffer.concat([real(h265), frees]));
+  if (fs.existsSync(av1)) write('RecentClips/2025-03-09_08-02-00-front.mp4', Buffer.concat([real(av1), frees]));
+  write('SavedClips/2025-03-09_12-00-00/2025-03-09_11-59-00-front.mp4', real(src2));
+  write('SavedClips/2025-03-09_12-00-00/2025-03-09_11-59-00-back.mp4', real(src));
+  write('SavedClips/2025-03-09_12-00-00/event.json', '{"city":"No thumb"}');
+  const short = path.join(cache, 'short.mp4');
+  if (!fs.existsSync(short)) await teslaH264(short, { seconds: 0.5, fps: 12, pattern: drivePattern(6, { seed: 4 }) });
+  write('RecentClips/2025-03-09_15-00-00-front.mp4', real(short));
+
   // the measurement archive: four cameras a minute, ten-minute drives with gaps
   for (let i = 0; i < many; i += 4) {
     const minute = Math.floor(i / 4);

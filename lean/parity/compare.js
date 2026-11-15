@@ -32,12 +32,12 @@ function freePort() {
   });
 }
 
-async function start(kind, work, footage) {
+async function start(kind, work, footage, extra = {}, tag = '') {
   const port = await freePort();
   const env = {
-    ...process.env, PORT: String(port), HOST: '127.0.0.1', DATA_PATH: path.join(work, `${kind}-data`), FOOTAGE_PATH: footage,
-    VEHICLE_NAME: 'Daily Driver', TZ: 'UTC', APP_ROOT: REPO, RUN_DIR: path.join(work, `${kind}-run`), UI_PASSWORD: 'correct horse',
-    LOG_LEVEL: 'warn', TLS_MODE: 'off'
+    ...process.env, PORT: String(port), HOST: '127.0.0.1', DATA_PATH: path.join(work, `${kind}${tag}-data`), FOOTAGE_PATH: footage,
+    VEHICLE_NAME: 'Daily Driver', TZ: 'UTC', APP_ROOT: REPO, RUN_DIR: path.join(work, `${kind}${tag}-run`), UI_PASSWORD: 'correct horse',
+    LOG_LEVEL: 'warn', TLS_MODE: 'off', ...extra
   };
   const child = kind === 'node'
     ? spawn(process.execPath, ['--disable-warning=ExperimentalWarning', path.join(REPO, 'server', 'index.js')], { env, stdio: ['ignore', 'pipe', 'pipe'] })
@@ -65,7 +65,12 @@ async function start(kind, work, footage) {
     const text = await res.text();
     try { return { status: res.status, body: JSON.parse(text) }; } catch { return { status: res.status, body: text }; }
   };
-  return { kind, child, get, json, log: () => log, stop: () => new Promise((r) => { child.once('exit', r); child.kill('SIGTERM'); }) };
+  const stop = () => new Promise((r) => {
+    if (child.exitCode !== null || child.signalCode !== null) return r();
+    child.once('exit', r);
+    child.kill('SIGTERM');
+  });
+  return { kind, child, get, json, log: () => log, stop };
 }
 
 /** Both settled: the scan, the clip codecs and the speed index are done. */
@@ -78,6 +83,16 @@ async function settled(s) {
     await new Promise((r) => setTimeout(r, 200));
   }
   throw new Error(`${s.kind} did not settle:\n${s.log()}`);
+}
+
+/** The scan alone is done. */
+async function scannedOnly(s) {
+  for (let i = 0; i < 600; i++) {
+    const days = (await s.json(`/api/vehicles/${VID}/days?limit=100`)).body;
+    if (days.scannedAt && !days.scanning) return;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  throw new Error(`${s.kind} did not scan:\n${s.log()}`);
 }
 
 const diffs = [];
@@ -98,6 +113,103 @@ function compare(where, a, b, ignore = new Set()) {
   return undefined;
 }
 
+// Ties. Recordings that start at the same time are in the order the scan saw their files,
+// and a recording is shown by its first front clip seen (the first clip seen without one).
+// Node's scan answers its stats in parallel, so now and then that order differs from one scan
+// to the next; the lean server always gives the order Node gives when they answer in turn
+// (lean/src/scanner.rs), and the strict check below holds it to that. Only in the answers of
+// the two servers, and only between genuinely tied items, is another order let through, and
+// counted: the same recordings at the same places, a recording shown by another of its own
+// clips of the same kind (front, or any when it has none), a day's picture from another
+// recording of the same start and kind.
+let tolerated = 0;
+let orderNote = '';
+function untie(a, b, byId) {
+  if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return;
+  const noFront = (x, y) => {
+    if (x.frontRel === y.frontRel || x.id !== y.id || typeof x.frontRel !== 'string' || typeof y.frontRel !== 'string') return;
+    const front = (x.cameras || []).includes('front');
+    const kind = (rel) => !front || /-front\.mp4$/i.test(rel);
+    // (an event's files are in the order seen; a drive's clips by time, only one minute's tied)
+    const stamp = (rel) => (x.eventId ? '' : path.posix.basename(rel).slice(0, 19));
+    if (x.frontRel.startsWith(`${x.folder}/`) && y.frontRel.startsWith(`${x.folder}/`) && kind(x.frontRel) && kind(y.frontRel)
+      && stamp(x.frontRel) === stamp(y.frontRel)) {
+      y.frontRel = x.frontRel;
+      tolerated++;
+    }
+  };
+  if (Array.isArray(a.recordings) && Array.isArray(b.recordings) && a.recordings.length === b.recordings.length) {
+    const [x, y] = [a.recordings, b.recordings];
+    for (let i = 0; i < x.length;) {
+      let j = i + 1;
+      while (j < x.length && x[j].startKey === x[i].startKey) j++;
+      if (j - i > 1 && y.slice(i, j).every((r) => r.startKey === x[i].startKey)) {
+        const ids = x.slice(i, j).map((r) => r.id);
+        const run = y.slice(i, j);
+        if (run.map((r) => r.id).join() !== ids.join() && [...ids].sort().join() === run.map((r) => r.id).sort().join()) {
+          y.splice(i, j - i, ...ids.map((id) => run.find((r) => r.id === id)));
+          tolerated++;
+        }
+      }
+      i = j;
+    }
+    for (let i = 0; i < x.length; i++) noFront(x[i], y[i]);
+  }
+  if (a.id && a.files) noFront(a, b);
+  if (Array.isArray(a.days) && Array.isArray(b.days) && a.days.length === b.days.length) {
+    const event = (r) => r.category === 'Sentry' || r.category === 'Saved';
+    for (let i = 0; i < a.days.length; i++) {
+      const [p, q] = [byId.get(a.days[i].thumbId), byId.get(b.days[i].thumbId)];
+      if (p && q && p !== q && p.startKey === q.startKey && p.day === q.day && event(p) === event(q)) {
+        b.days[i].thumbId = a.days[i].thumbId;
+        tolerated++;
+      }
+    }
+  }
+}
+
+/**
+ * The order Node's own scan gives most often: server/scanner.js and inventory.js
+ * buildRecordings run `runs` times on the archive; the most common list of recordings
+ * (key and frontRel each) and how many of the runs gave it.
+ */
+function nodeMostOften(footage, runs = 40) {
+  const script = `
+    const { scanFootage } = require(${JSON.stringify(path.join(REPO, 'server', 'scanner.js'))});
+    const { buildRecordings } = require(${JSON.stringify(path.join(REPO, 'server', 'inventory.js'))});
+    (async () => {
+      const seen = new Map();
+      for (let i = 0; i < ${runs}; i++) {
+        const recs = buildRecordings((await scanFootage(process.argv[1])).files, { vehicleId: ${JSON.stringify(VID)} });
+        const k = JSON.stringify(recs.map((r) => [r.key, r.frontRel]));
+        seen.set(k, (seen.get(k) || 0) + 1);
+      }
+      const [order, n] = [...seen].sort((a, b) => b[1] - a[1])[0];
+      console.log(JSON.stringify({ order: JSON.parse(order), n, kinds: seen.size }));
+    })();`;
+  const r = spawnSync(process.execPath, ['-e', script, footage], { encoding: 'utf8' });
+  if (r.status !== 0) throw new Error(r.stderr);
+  return JSON.parse(r.stdout);
+}
+
+/** Every file and folder under dir with its size and times: the lean server must not change the footage. */
+function snapshot(dir) {
+  const out = [];
+  const walk = (d) => {
+    for (const name of fs.readdirSync(d).sort()) {
+      // (the Node server's own record of the originals' checksums, server/originalChecksums.js: Node writes it)
+      if (name === '.sentrymanager') continue;
+      const p = path.join(d, name);
+      const st = fs.lstatSync(p);
+      // (a folder by its name and inode: what is added to or taken from it shows as its entries)
+      out.push(st.isDirectory() ? `${path.relative(dir, p)}/ ${st.ino}` : `${path.relative(dir, p)} ${st.size} ${st.mtimeMs} ${st.ctimeMs} ${st.ino}`);
+      if (st.isDirectory()) walk(p);
+    }
+  };
+  walk(dir);
+  return out.join('\n');
+}
+
 async function main() {
   if (!fs.existsSync(LEAN)) {
     console.error(`No lean binary at ${LEAN} (cargo build --release in lean/)`);
@@ -110,6 +222,7 @@ async function main() {
     const r = spawnSync(process.execPath, [path.join(__dirname, 'makeArchive.js'), footage], { stdio: 'inherit' });
     if (r.status !== 0) process.exit(2);
   }
+  const before = snapshot(footage);
   const node = await start('node', work, footage);
   const lean = await start('lean', work, footage);
   let checked = 0;
@@ -119,12 +232,16 @@ async function main() {
       checked++;
       return Promise.all([node.json(p), lean.json(p)]);
     };
+    const byId = new Map();
     const same = async (p, ignore) => {
       const [a, b] = await both(p);
       if (a.status !== b.status) diffs.push(`${p}: status node ${a.status} / lean ${b.status}`);
+      untie(a.body, b.body, byId);
       compare(p, a.body, b.body, ignore);
       return a.body;
     };
+    // (every recording first: what a day's picture may be)
+    for (const r of (await node.json(`/api/vehicles/${VID}/recordings?limit=500`)).body.recordings || []) byId.set(r.id, r);
 
     // the vehicle list: the footage parts (shares, savings, car models are other steps)
     {
@@ -144,6 +261,14 @@ async function main() {
     const all = await same(`${base}/recordings?limit=500`, scanned);
     for (const q of ['', '?limit=2&offset=1', '?category=Recent', '?date=2025-03-01', '?protected=1', '?from=2025-03-03', '?limit=1e1', '?limit=0x2']) {
       await same(`${base}/recordings${q}`, scanned);
+    }
+    // ties, strictly: the lean order is the one Node's scan gives most often
+    {
+      checked++;
+      const most = nodeMostOften(footage);
+      const leanOrder = (await lean.json(`${base}/recordings?limit=500`)).body.recordings.map((r) => [r.key, r.frontRel]);
+      compare(`tie order (Node's most common of 40 scans: ${most.n} of them; ${most.kinds} different)`, most.order, leanOrder);
+      orderNote = `; tie order as Node's most common (${most.n} of 40 scans)`;
     }
     for (const rec of all.recordings) await same(`${base}/recordings/${rec.id}`);
     await same(`${base}/recordings/nope`);
@@ -186,12 +311,24 @@ async function main() {
       const where = `media ${path.relative(root, file) || file} ${JSON.stringify(headers)}`;
       compare(where, await view(node, media(file), headers), await view(lean, media(file), headers));
     }
-    const event = all.recordings.find((r) => r.thumbRel);
-    if (event) {
-      checked++;
-      const p = `${base}/recordings/${event.id}/thumbnail`;
-      compare(`thumbnail ${event.id}`, await view(node, p, {}), await view(lean, p, {}));
-    }
+    // thumbnails: Tesla's thumb.png as it is, else one made from the front clip with ffmpeg
+    // (the same bytes from the same ffmpeg; the cached file's ETag is its own on each side)
+    const thumbs = async (a, b, label) => {
+      for (const rec of [...all.recordings, { id: 'nope' }]) {
+        checked++;
+        const p = `${base}/recordings/${rec.id}/thumbnail`;
+        const [x, y] = [await view(a, p, {}), await view(b, p, {})];
+        if (!rec.thumbRel && x.status === 200) {
+          made++;
+          if (x.headers.etag && y.headers.etag) y.headers.etag = x.headers.etag;
+        }
+        compare(`${label} ${rec.id} ${rec.key || ''}`, x, y);
+      }
+    };
+    let made = 0;
+    await thumbs(node, lean, 'thumbnail');
+    if (!made) diffs.push('no thumbnail was made from a clip (is ffmpeg there?)');
+    if (!fs.existsSync(path.join(work, 'lean-data', 'thumbnails'))) diffs.push('lean: no thumbnails in DATA_PATH/thumbnails');
     // the stock UI's files, as they are
     for (const p of ['/web/app.js', '/web/shell.css', '/studio/scripts/app.js']) {
       checked++;
@@ -199,15 +336,34 @@ async function main() {
       if (a.status !== b.status) diffs.push(`${p}: status node ${a.status} / lean ${b.status}`);
       else if (a.ok && sha(Buffer.from(await a.arrayBuffer())) !== sha(Buffer.from(await b.arrayBuffer()))) diffs.push(`${p}: the bytes differ`);
     }
+    await Promise.all([node.stop(), lean.stop()]);
+
+    // without ffmpeg: no thumbnail made from a clip, on both (a second pair, scan only)
+    const none = { FFMPEG_PATH: path.join(work, 'no-ffmpeg-here') };
+    const [n2, l2] = [await start('node', work, footage, none, 'noff'), await start('lean', work, footage, none, 'noff')];
+    try {
+      await Promise.all([scannedOnly(n2), scannedOnly(l2)]);
+      await thumbs(n2, l2, 'thumbnail without ffmpeg');
+    } finally {
+      await Promise.all([n2.stop(), l2.stop()]);
+    }
   } finally {
     await Promise.all([node.stop(), lean.stop()]);
+    const after = snapshot(footage);
+    if (after !== before) {
+      const was = new Set(before.split('\n'));
+      const now = new Set(after.split('\n'));
+      const changed = [...[...was].filter((l) => !now.has(l)).map((l) => `- ${l}`), ...[...now].filter((l) => !was.has(l)).map((l) => `+ ${l}`)];
+      diffs.push(`the footage changed while the servers ran:\n${changed.slice(0, 10).join('\n')}`);
+    }
     if (!process.argv.includes('--keep')) fs.rmSync(work, { recursive: true, force: true });
   }
   if (diffs.length) {
     console.log(`${diffs.length} difference(s) in ${checked} requests:\n${diffs.join('\n')}`);
     process.exit(1);
   }
-  console.log(`${checked} requests: the Node and lean servers answer the same`);
+  const ties = tolerated ? ` (${tolerated} tied item(s) in another order: Node's scan order varies)` : '';
+  console.log(`${checked} requests: the Node and lean servers answer the same${ties}${orderNote}; the footage is unchanged`);
 }
 
 if (require.main === module) {

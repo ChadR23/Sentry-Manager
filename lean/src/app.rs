@@ -5,6 +5,7 @@ use crate::catalog::Catalog;
 use crate::inventory::{self, Codecs, Recording};
 use crate::jobs::{par_each, Jobs, Priority};
 use crate::scanner::{self, FileEntry};
+use crate::thumbnails::Thumbnails;
 use crate::{footage, mp4, speeds};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -55,15 +56,33 @@ pub struct App {
     pub state: RwLock<HashMap<String, VehicleState>>,
     pub speeds: Mutex<SpeedStatus>,
     pub app_root: PathBuf,
+    pub thumbnails: Thumbnails,
     studio_roots: Mutex<HashMap<String, (f64, PathBuf)>>,
 }
 
-/// vehicles.js slug
+/// A vehicle's name as vehicles.js normalizeVehicle keeps it: `String(name).trim().slice(0, 60)`
+/// (JavaScript's white space, 60 UTF-16 units); None when nothing is left (Node refuses it).
+/// (A cut through a character outside the BMP leaves half of it in Node; here it is left out.)
+pub fn vehicle_name(raw: &str) -> Option<String> {
+    let js_space = |c: char| matches!(c, '\u{9}'..='\u{d}' | ' ' | '\u{a0}' | '\u{1680}' | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}' | '\u{feff}');
+    let mut units = 0;
+    let name: String = raw.trim_matches(js_space).chars().take_while(|c| {
+        units += c.len_utf16();
+        units <= 60
+    }).collect();
+    (!name.is_empty()).then_some(name)
+}
+
+/// vehicles.js slug:`String(name || 'vehicle').toLowerCase().normalize('NFKD')`, every run
+/// of other characters than a-z and 0-9 one dash, no dash at either end, at most 40
+/// characters (a cut can end on a dash, as in Node), else "vehicle". The NFKD step splits
+/// an accented letter into its base letter and the accent, so é gives e.
 pub fn slug(name: &str) -> String {
-    let lower = name.to_lowercase();
+    use unicode_normalization::UnicodeNormalization;
+    let name = if name.is_empty() { "vehicle" } else { name };
     let mut out = String::new();
     let mut dash = false;
-    for c in lower.chars() {
+    for c in name.to_lowercase().nfkd() {
         if c.is_ascii_lowercase() || c.is_ascii_digit() {
             if dash && !out.is_empty() {
                 out.push('-');
@@ -74,7 +93,6 @@ pub fn slug(name: &str) -> String {
             dash = true;
         }
     }
-    // (no NFKD step: an accented letter is dropped, where Node keeps its base letter)
     let s: String = out.chars().take(40).collect();
     if s.is_empty() { "vehicle".into() } else { s }
 }
@@ -121,7 +139,8 @@ pub fn find_clip_root(root: &Path) -> Option<PathBuf> {
 }
 
 impl App {
-    pub fn new(vehicles: Vec<Vehicle>, catalog: Catalog, app_root: PathBuf) -> Arc<App> {
+    /// `thumbnails`: made from clips with ffmpeg, cached in DATA_PATH/thumbnails.
+    pub fn new(vehicles: Vec<Vehicle>, catalog: Catalog, app_root: PathBuf, thumbnails: Thumbnails) -> Arc<App> {
         Arc::new(App {
             vehicles,
             catalog,
@@ -129,6 +148,7 @@ impl App {
             state: RwLock::new(HashMap::new()),
             speeds: Mutex::new(SpeedStatus::default()),
             app_root,
+            thumbnails,
             studio_roots: Mutex::new(HashMap::new()),
         })
     }

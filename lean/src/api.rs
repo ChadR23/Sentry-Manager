@@ -329,12 +329,17 @@ fn thumbnail(app: &App, v: &Vehicle, rid: &str, method: &Method, headers: &Heade
     let st = app.state_of(&v.id);
     let rec = st.as_ref().and_then(|s| s.recordings.iter().find(|r| r.id == rid).cloned());
     let Some(rec) = rec else { return error(StatusCode::NOT_FOUND, "Not found") };
-    // only Tesla's own thumb.png: making one from a clip needs ffmpeg (not here yet)
-    let Some(thumb) = rec.thumb_rel else { return error(StatusCode::NOT_FOUND, "No thumbnail") };
+    // Tesla's own thumb.png, else one frame of the front clip (thumbnails.rs, with ffmpeg)
+    let Some(source) = rec.thumb_rel.as_ref().or(rec.front_rel.as_ref()) else { return error(StatusCode::NOT_FOUND, "No thumbnail") };
     let roots = roots(app);
-    match media::resolve_inside(&join(&v.root, &thumb), &roots) {
-        Some(real) => media::send_media(method, headers, &real, &roots),
-        None => error(StatusCode::NOT_FOUND, "No thumbnail"),
+    let Some(real) = media::resolve_inside(&join(&v.root, source), &roots) else { return error(StatusCode::NOT_FOUND, "No thumbnail") };
+    if rec.thumb_rel.is_some() {
+        return media::send_media(method, headers, &real, &roots);
+    }
+    match app.thumbnails.for_clip(&real) {
+        Ok(Some(file)) => media::send_media(method, headers, &file, std::slice::from_ref(&app.thumbnails.dir)),
+        Ok(None) => error(StatusCode::NOT_FOUND, "No thumbnail"),
+        Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "Internal error"),
     }
 }
 

@@ -10,6 +10,9 @@
 //   summary  server/speedIndex.js summarize of those samples (what the speed index keeps)
 //   info     src/main/converter/mp4.js: the video track's sample index,
 //            timescale, durations and sync samples (keyframes)
+//   records  server/telemetry.js readRecords (Studio's parser): every record with its time
+//   index    what server/speedIndex.js keeps for the clip, [speeds, summary]: the quick
+//            read, else the full read (the fallback-* fixtures are made for that)
 //
 // A call that throws is recorded as { error: true }.
 //
@@ -24,7 +27,8 @@ const { parseMp4, findBoxes, selectVideoTrack, buildSampleIndex } = require(path
 const { injectAv1Telemetry } = require(path.join(REPO, 'src/main/converter/av1Telemetry'));
 const { readSamples, readSpeeds } = require(path.join(REPO, 'server/speedReader'));
 const { videoCodec } = require(path.join(REPO, 'server/mp4codec'));
-const { summarize } = require(path.join(REPO, 'server/speedIndex'));
+const { summarize, createSpeedIndex } = require(path.join(REPO, 'server/speedIndex'));
+const { Telemetry, loadParser, readRecords: readTelemetry } = require(path.join(REPO, 'server/telemetry'));
 const { record, drivePattern, teslaH264, converted, plain } = require('./clips');
 
 const dir = path.resolve(process.argv[2] || '');
@@ -184,20 +188,85 @@ async function main() {
   noScale.writeUInt32BE(0, mdhdAt + 12);
   add('bad-timescale.mp4', noScale);
 
+  // ---- the quick read gives up, the full read (telemetry.js) does not: the speed index's fallback
+  // more than 64 top-level boxes (speedReader.js stops there; the parser reads on)
+  const frees = Buffer.concat(Array.from({ length: 70 }, () => B.box('free', Buffer.alloc(4))));
+  for (const src of ['tesla-src.mp4', 'tesla-h265.mp4', 'tesla-av1.mp4', 'tesla-h264-long.mp4', 'syn-h264-len2.mp4', 'syn-h264-ctts.mp4', 'syn-h264-odd-records.mp4', 'syn-h264-no-speed.mp4', 'syn-h265.mp4', 'syn-av1.mp4']) {
+    if (cases.includes(src)) add(`fallback-${src}`, Buffer.concat([fs.readFileSync(path.join(dir, src)), frees]));
+  }
+  // an edit list the quick read does not take, records in every frame
+  const edts = Buffer.from(fs.readFileSync(path.join(dir, 'syn-h264-len4.mp4')));
+  const trakAt = edts.indexOf(Buffer.from('trak')) - 4;
+  if (trakAt > 0) {
+    const elst = B.fullBox('elst', 0, 0, Buffer.concat([B.u32(1), B.u32(3000), B.u32(1500), B.u32(0x10000)]));
+    const edtsBox = B.box('edts', elst);
+    const moovAt = edts.indexOf(Buffer.from('moov')) - 4;
+    const grow = (buf, at) => buf.writeUInt32BE(buf.readUInt32BE(at) + edtsBox.length, at);
+    grow(edts, moovAt);
+    grow(edts, trakAt);
+    // (the moov comes first here: the media moves along)
+    const withEdts = Buffer.concat([edts.subarray(0, trakAt + 8), edtsBox, edts.subarray(trakAt + 8)]);
+    const stco = withEdts.indexOf(Buffer.from('stco')) + 12;
+    if (moovAt < withEdts.indexOf(Buffer.from('mdat'))) {
+      for (let i = 0, n = withEdts.readUInt32BE(stco - 4); i < n; i++) withEdts.writeUInt32BE(withEdts.readUInt32BE(stco + i * 4) + edtsBox.length, stco + i * 4);
+    }
+    add('fallback-edit-list.mp4', withEdts);
+  }
+  // cut short: both reads fail
+  add('fallback-cut.mp4', Buffer.concat([fs.readFileSync(path.join(dir, 'syn-h264-len4.mp4')), frees]).subarray(0, 3000));
+
+  const Reader = loadParser(path.join(REPO, 'src'));
+  const index = speedIndex(dir);
   const expected = {};
   for (const name of cases) {
     const file = path.join(dir, name);
     const samples = await attempt(() => readSamples(file));
+    // the dashboard's read: every record with its time (hex here), or a note
+    const records = await attempt(async () => {
+      const out = await readTelemetry(Reader, file, fs.statSync(file).size);
+      return JSON.parse(out.body).frames.map(([t, b64]) => [t, Buffer.from(b64, 'base64').toString('hex')]);
+    });
     expected[name] = {
       codec: await attempt(() => videoCodec(file)),
       samples,
       summary: Array.isArray(samples) ? summarize(samples) : null,
       speeds: await attempt(() => readSpeeds(file)),
-      info: await attempt(() => info(file))
+      info: await attempt(() => info(file)),
+      records,
+      // what the speed index keeps for the clip: [speeds, summary] (speedIndex.js speedsFor)
+      index: await index.entry(file)
     };
   }
   fs.writeFileSync(path.join(dir, 'expected.json'), JSON.stringify(expected, null, 1));
   console.log(`${cases.length} fixtures in ${dir}`);
+}
+
+/**
+ * The speed index itself (server/speedIndex.js, its full read in a worker as on the server)
+ * on one clip at a time: clip() indexes it, flush() writes the day, the entry is read back.
+ */
+function speedIndex(dir) {
+  const work = fs.mkdtempSync(path.join(require('os').tmpdir(), 'lean-index-'));
+  const files = new Map();
+  const index = createSpeedIndex({
+    dir: path.join(work, 'speeds'),
+    inventory: { get: () => ({ files }) },
+    vehicles: { list: () => [], rootOf: () => dir },
+    telemetry: new Telemetry({ srcRoot: path.join(REPO, 'src'), cacheDir: path.join(work, 'telemetry') }),
+    log: null
+  });
+  let n = 0;
+  return {
+    async entry(file) {
+      const st = fs.statSync(file);
+      const rel = `RecentClips/2025-01-01_00-00-${String(n++ % 60).padStart(2, '0')}-front.mp4`;
+      files.set(rel, { rel, day: '2025-01-01', camera: 'front', kind: 'clip', size: st.size, mtimeMs: st.mtimeMs });
+      await index.clip('v', rel, file, st.size, st.mtimeMs);
+      await index.flush();
+      const day = JSON.parse(fs.readFileSync(path.join(work, 'speeds', 'v', '2025-01-01.json'), 'utf8'));
+      return day[rel].slice(2);
+    }
+  };
 }
 
 main().catch((err) => {
