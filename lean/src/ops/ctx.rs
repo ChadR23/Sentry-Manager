@@ -150,4 +150,54 @@ pub trait OpsCtx: Send + Sync + 'static {
     fn jobs_queued(&self) -> usize {
         0
     }
+    /// TLS_MODE (auto | off), core's
+    fn tls_mode(&self) -> String {
+        std::env::var("TLS_MODE").map(|s| s.to_lowercase()).ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "auto".into())
+    }
+    /// run by the root supervisor (SENTRY_SUPERVISED=1 and its IPC channel)
+    fn supervised(&self) -> bool {
+        false
+    }
+    /// mountSpec.js VERSIONS and DEFAULT_VERSION (supervisor area). Note the
+    /// key order: "3" is an integer-like key, so JSON.stringify puts it first.
+    fn smb_versions(&self) -> (Value, Value) {
+        let mut m = serde_json::Map::new();
+        for (k, v) in [("3", "SMB 3.0 or newer (best the server offers)"), ("3.1.1", "SMB 3.1.1 (recommended)"), ("3.02", "SMB 3.02"), ("3.0", "SMB 3.0")] {
+            m.insert(k.into(), Value::String(v.into()));
+        }
+        (Value::Object(m), Value::String("3.1.1".into()))
+    }
+    /// log.js search: lines from `from_ms` at `min_level` or above, oldest first
+    fn log_search(&self, _from_ms: i64, _min_level: Level, _limit: usize) -> Vec<LogLine> {
+        Vec::new()
+    }
+    /// index.js systemSummary(): the set-up in short; `placeholders` names the
+    /// vehicles <vehicle-1>, <vehicle-2>, ... (the support bundle)
+    fn system_summary(&self, _placeholders: bool) -> Value {
+        Value::Null
+    }
+    /// encoderStats.js encoderBlock for /api/stats (converter area); null while idle
+    fn encoder_block(&self) -> Value {
+        Value::Null
+    }
+}
+
+/// One log line (log.js).
+#[derive(Clone, Debug)]
+pub struct LogLine {
+    pub at: i64,
+    pub level: Level,
+    pub scope: String,
+    pub message: String,
+}
+
+impl Level {
+    pub fn name(self) -> &'static str {
+        match self {
+            Level::Debug => "debug",
+            Level::Info => "info",
+            Level::Warn => "warn",
+            Level::Error => "error",
+        }
+    }
 }
