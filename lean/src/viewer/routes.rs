@@ -112,6 +112,10 @@ impl Viewer {
                 Err(r) => r,
             },
             ["vehicles", id, "drives"] if get => self.drives(&dec(id), req.query),
+            ["vehicles", id, "archive-gaps"] if get => match self.vehicle_or_404(&dec(id)) {
+                Ok(v) => ok(self.archive.route(&v)),
+                Err(r) => r,
+            },
             _ => return None,
         })
     }

@@ -9,6 +9,7 @@
 //! either server reads what the other wrote: speeds/, telemetry/, scrub/,
 //! clip-thumbnails/, drive-data/.
 
+pub mod archive_gap;
 pub mod ctx;
 pub mod drive_data;
 pub mod drives;
@@ -44,6 +45,7 @@ pub struct Viewer {
     pub strips: Arc<studio::ClipStrips>,
     pub drive_data: Arc<drive_data::DriveData>,
     pub spots: places::EventSpots,
+    pub archive: Arc<archive_gap::ArchiveGap>,
 }
 
 static VIEWER: OnceLock<Arc<Viewer>> = OnceLock::new();
@@ -85,7 +87,8 @@ impl Viewer {
         let strips = studio::ClipStrips::new(data.join("clip-thumbnails"), ctx.ffmpeg(), ctx.ffprobe().unwrap_or_else(|| "ffprobe".into()));
         let drive_data = drive_data::DriveData::new(data.join("drive-data"), ctx.clone());
         let _ = std::fs::create_dir_all(data.join("converted"));
-        Arc::new(Viewer { ctx, resources, limits, pace, speed_index, telemetry, scrub, prepare, strips, drive_data, spots: places::EventSpots::default() })
+        let archive = archive_gap::ArchiveGap::new(ctx.clone(), speed_index.clone());
+        Arc::new(Viewer { ctx, resources, limits, pace, speed_index, telemetry, scrub, prepare, strips, drive_data, spots: places::EventSpots::default(), archive })
     }
 
     /// Start the background work and make this the server's viewer: the pace's clock,
@@ -107,6 +110,8 @@ impl Viewer {
                             seen.insert(veh.id.clone(), stamp);
                             w.speed_index.kick();
                             w.prepare.kick();
+                            let (a, id) = (w.archive.clone(), veh.id.clone());
+                            std::thread::spawn(move || a.check(&id));
                         }
                     }
                     std::thread::sleep(Duration::from_millis(500));

@@ -67,6 +67,19 @@ pub trait Ctx: Send + Sync + 'static {
     fn can_keys(&self, _id: &str) -> Vec<String> {
         Vec::new()
     }
+    /// the clips the converter rewrote (H.265 / AV1): their file times say nothing of the archive
+    fn encoded(&self, _id: &str) -> std::collections::HashSet<String> {
+        std::collections::HashSet::new()
+    }
+    /// the dedupe keys of a car's open notifications of a kind (notes.list({ open, vehicleId }))
+    fn open_notes(&self, _id: &str, _kind: &str) -> Vec<String> {
+        Vec::new()
+    }
+    /// raise or update a notification; false when it is muted (or there are none yet)
+    fn raise_note(&self, _note: &Value) -> bool {
+        false
+    }
+    fn resolve_note(&self, _dedupe_key: &str) {}
     /// ffmpeg and ffprobe (FFMPEG_PATH, FFPROBE_PATH)
     fn ffmpeg(&self) -> String {
         std::env::var("FFMPEG_PATH").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "ffmpeg".into())

@@ -79,6 +79,9 @@ impl Ctx for AppCtx {
         }
         a.push(topic.to_string());
     }
+    fn encoded(&self, id: &str) -> std::collections::HashSet<String> {
+        self.app.state_of(id).map(|s| s.codecs.iter().filter(|(_, c)| matches!(c.as_deref(), Some("h265") | Some("av1"))).map(|(r, _)| r.clone()).collect()).unwrap_or_default()
+    }
     fn audit(&self, line: &str) {
         eprintln!("audit: {line}");
     }
