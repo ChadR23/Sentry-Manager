@@ -32,7 +32,7 @@
     "uiCallsWithoutRoute": 0,
     "routesNoUiCalls": 13,
     "routesNoUiCallsExternal": 10,
-    "liveTopicsUiOnly": 1
+    "liveTopicsUiOnly": 0
   },
   "routes": [
     {
@@ -3721,9 +3721,6 @@
           "examples/ui-packs/sentry-six/web/s6/main.js",
           "web/app.js"
         ],
-        "share": [
-          "examples/ui-packs/sentry-six/web/s6/main.js"
-        ],
         "vehicles": [
           "examples/ui-packs/aurora/web/aurora/main.js",
           "examples/ui-packs/aurora/web/aurora/pages/sky.js",
@@ -3737,9 +3734,7 @@
           "web/nerd.js"
         ]
       },
-      "uiTopicsUnknown": [
-        "share"
-      ],
+      "uiTopicsUnknown": [],
       "topicsNoUi": []
     },
     {
@@ -10361,14 +10356,6 @@
         "external": true
       }
     ],
-    "liveTopicsUiOnly": [
-      {
-        "channel": "/api/events",
-        "topic": "share",
-        "listenedIn": [
-          "examples/ui-packs/sentry-six/web/s6/main.js"
-        ]
-      }
-    ]
+    "liveTopicsUiOnly": []
   }
 }
