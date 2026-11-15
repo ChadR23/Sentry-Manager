@@ -17,3 +17,6 @@ pub mod testkit;
 pub mod places;
 pub mod drives;
 pub mod drive_data;
+pub mod scrub;
+pub mod studio;
+pub mod recording_place;
