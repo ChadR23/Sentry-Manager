@@ -178,8 +178,50 @@ fn error_response(state: &AppState, e: &HttpError, method: &Method, raw_path: &s
     r
 }
 
+/// The path as `new URL(req.url, 'http://localhost').pathname` gives it: `\` is `/`, and dot
+/// segments (also written %2e) are worked out. Every decision in Node starts from this.
+pub fn whatwg_path(raw: &str) -> String {
+    let p = raw.replace('\\', "/");
+    let body = p.strip_prefix('/').unwrap_or(&p);
+    let parts: Vec<&str> = body.split('/').collect();
+    let mut out: Vec<&str> = Vec::new();
+    let n = parts.len();
+    for (i, s) in parts.iter().enumerate() {
+        let l = s.to_ascii_lowercase();
+        let last = i + 1 == n;
+        if matches!(l.as_str(), ".." | ".%2e" | "%2e." | "%2e%2e") {
+            out.pop();
+            if last {
+                out.push("");
+            }
+        } else if matches!(l.as_str(), "." | "%2e") {
+            if last {
+                out.push("");
+            }
+        } else {
+            out.push(s);
+        }
+    }
+    format!("/{}", out.join("/"))
+}
+
 /// The whole request handler.
-pub async fn dispatch(state: Arc<AppState>, req: Request<Body>, conn: ConnInfo) -> Res {
+pub async fn dispatch(state: Arc<AppState>, mut req: Request<Body>, conn: ConnInfo) -> Res {
+    let path = req.uri().path();
+    if path.contains('\\') || path.split('/').any(|s| s == "." || s == ".." || s.to_ascii_lowercase().contains("%2e")) {
+        let fixed = whatwg_path(path);
+        let pq = match req.uri().query() {
+            Some(q) => format!("{fixed}?{q}"),
+            None => fixed,
+        };
+        let mut parts = req.uri().clone().into_parts();
+        if let Ok(v) = pq.parse() {
+            parts.path_and_query = Some(v);
+            if let Ok(u) = axum::http::Uri::from_parts(parts) {
+                *req.uri_mut() = u;
+            }
+        }
+    }
     let raw_path = req.uri().path().to_string();
     let mut res = handle(state, req, conn).await;
     // securityHeaders first in Node: a handler's own header of the same name wins
@@ -209,7 +251,9 @@ async fn handle(state: Arc<AppState>, req: Request<Body>, conn: ConnInfo) -> Res
         return f(RawReq { state: state.clone(), req, conn, client, secure }).await;
     }
     if RESERVED_RAW.iter().any(|r| if r.ends_with('/') { raw_path.starts_with(r) } else { raw_path == *r }) {
-        return error_json(404, "Not found", None, &accept);
+        // (CAN uploads without the can area: as Node answers while they are off)
+        let off = raw_path == "/api/can/logs" || raw_path.starts_with("/api/can/logs/");
+        return error_json(404, "Not found", off.then_some("off"), &accept);
     }
     if let Some(r) = acme_answer(&state, &method, &raw_path) {
         return r;
@@ -383,7 +427,7 @@ async fn handle(state: Arc<AppState>, req: Request<Body>, conn: ConnInfo) -> Res
 
 /// The plain-HTTP side of the HTTPS port: /healthz, Let's Encrypt's check, else a redirect to HTTPS.
 pub fn plain_redirect(state: &AppState, req: &Request<Body>, conn: &ConnInfo) -> Res {
-    let path = req.uri().path();
+    let path = &whatwg_path(req.uri().path());
     if path == "/healthz" {
         return text(200, "ok", &[]);
     }
@@ -625,4 +669,24 @@ pub fn install(state: &Arc<AppState>, router: Router) {
 
 pub fn not_found_status() -> axum::http::StatusCode {
     status(404)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paths_as_whatwg_url() {
+        // values from new URL(p, 'http://localhost').pathname
+        for (p, want) in [("/web/%2e%2e/x", "/x"), ("/a/.", "/a/"), ("/a/..", "/"), ("/..", "/"), ("/a\\b", "/a/b"), ("/a/%2E/b", "/a/b"), ("/a//b/../c", "/a//c"), ("/", "/"), ("/x", "/x")] {
+            assert_eq!(whatwg_path(p), want, "{p}");
+        }
+    }
+
+    #[test]
+    fn versioned_paths() {
+        assert_eq!(unversion("/v/abc123/web/app.js".into()), ("/web/app.js".into(), Some("abc123".into())));
+        assert_eq!(unversion("/v/abc/api/jobs".into()), ("/v/abc/api/jobs".into(), None));
+        assert_eq!(unversion("/v/assets/x.png".into()), ("/assets/x.png".into(), None));
+    }
 }

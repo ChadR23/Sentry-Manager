@@ -37,6 +37,20 @@ fn footage_routes(r: &mut core::Router, app: Arc<App>) {
         let a = app.clone();
         r.add(m, "/api/media", Access::SignedIn, move |c| Ok(Reply::Raw(api::api(&a, &c.method, &c.path, &c.query, &c.headers, &[]))));
     }
+    // (index.js /api/studio/context, enough for the contract tools' discovery until the ui area has it)
+    let a = app.clone();
+    r.get("/api/studio/context", move |c| {
+        let version = std::fs::read_to_string(a.app_root.join("version.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .and_then(|v| v["version"].as_str().filter(|s| !s.is_empty()).map(|s| format!("{s} (web)")))
+            .unwrap_or_else(|| "web".into());
+        let vehicles: Vec<serde_json::Value> =
+            a.vehicles.iter().map(|v| serde_json::json!({ "id": v.id, "name": v.name, "root": v.root.to_string_lossy(), "timezone": v.timezone })).collect();
+        let mut roots = vec![c.state.config.converted_dir().to_string_lossy().into_owned()];
+        roots.extend(c.state.config.extra_roots.iter().cloned());
+        Ok(Reply::json(serde_json::json!({ "version": version, "vehicles": vehicles, "outputRoots": roots })))
+    });
     let a = app.clone();
     r.web(move |w| {
         let a = a.clone();
