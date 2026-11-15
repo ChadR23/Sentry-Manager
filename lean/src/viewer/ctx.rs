@@ -50,6 +50,15 @@ pub trait Ctx: Send + Sync + 'static {
     fn busy(&self) -> bool {
         false
     }
+    /// None when the caller may use an admin route, else the refusal (status, message);
+    /// core's accounts and access rules decide (there is one local admin until then)
+    fn refuse_admin(&self, _headers: &axum::http::HeaderMap) -> Option<(u16, String)> {
+        None
+    }
+    /// who made a change, for an audit line (index.js by(req, user))
+    fn who(&self) -> String {
+        "local".into()
+    }
     /// EXTRA_ROOTS
     fn extra_roots(&self) -> Vec<PathBuf> {
         std::env::var("EXTRA_ROOTS").unwrap_or_default().split(':').filter(|s| !s.is_empty()).map(PathBuf::from).collect()

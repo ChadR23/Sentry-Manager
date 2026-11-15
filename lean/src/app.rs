@@ -248,7 +248,10 @@ impl App {
         }
         let app = self.clone();
         let id = vid.to_string();
-        self.jobs.submit(format!("speeds:{vid}"), Priority::Low, move || app.index_speeds(&id));
+        // (the viewer area keeps the speed index in the Node server's day files when it runs)
+        if crate::viewer::get().is_none() {
+            self.jobs.submit(format!("speeds:{vid}"), Priority::Low, move || app.index_speeds(&id));
+        }
     }
 
     fn index_speeds(self: &Arc<Self>, vid: &str) {

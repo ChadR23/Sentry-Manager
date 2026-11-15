@@ -46,6 +46,8 @@ async fn main() {
     // (two at once, as the Node server's default)
     let thumbnails = Thumbnails::new(data.join("thumbnails"), env("FFMPEG_PATH", "ffmpeg"), 2);
     let app = App::new(vehicles, catalog, PathBuf::from(env("APP_ROOT", "/app")), thumbnails);
+    // the viewer area (src/viewer): telemetry, the speed index, previews, places, drives, Studio
+    sentry_lean::viewer::Viewer::start(sentry_lean::viewer::glue::AppCtx::new(app.clone(), data.clone()));
     for v in &app.vehicles {
         app.scan(&v.id, true);
     }

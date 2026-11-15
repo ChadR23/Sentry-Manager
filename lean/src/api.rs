@@ -210,7 +210,10 @@ fn days(app: &App, v: &Vehicle, q: &HashMap<String, String>) -> Res {
     let (offset, limit) = paging(q, 100.0, 30.0);
     let mut shown = slice(&all, offset, offset + limit);
     let wanted: Vec<String> = shown.iter().map(|d| d["day"].as_str().unwrap_or("").to_string()).collect();
-    let idx = app.catalog.progress(&v.id, &wanted).unwrap_or_default();
+    let idx = match crate::viewer::get() {
+        Some(viewer) => viewer.speed_index.progress(&v.id, &wanted),
+        None => app.catalog.progress(&v.id, &wanted).unwrap_or_default(),
+    };
     for d in &mut shown {
         let (clips, indexed) = idx.get(d["day"].as_str().unwrap_or("")).copied().unwrap_or((0, 0));
         d.insert("speedIndex".into(), json!({ "clips": clips, "indexed": indexed }));
@@ -248,7 +251,13 @@ fn recordings(app: &App, v: &Vehicle, q: &HashMap<String, String>) -> Res {
     out.insert("limit".into(), num(limit));
     state_fields(st.as_ref(), &mut out);
     out.insert("dates".into(), json!(dates(&recs)));
-    out.insert("recordings".into(), Value::Array(page.iter().map(|r| Value::Object(inventory::public(r, &codecs))).collect()));
+    let mut tagged: Vec<Map<String, Value>> = page.iter().map(|r| inventory::public(r, &codecs)).collect();
+    if let Some(tags) = crate::viewer::get().and_then(|viewer| viewer.place_tags(&v.id, &page)) {
+        for (t, extra) in tagged.iter_mut().zip(tags) {
+            t.extend(extra);
+        }
+    }
+    out.insert("recordings".into(), Value::Array(tagged.into_iter().map(Value::Object).collect()));
     ok(Value::Object(out))
 }
 
@@ -317,6 +326,8 @@ fn roots(app: &App) -> Vec<PathBuf> {
 }
 
 fn media(app: &App, method: &Method, headers: &HeaderMap, q: &HashMap<String, String>) -> Res {
+    // footage playing: background reading slows to one clip at a time
+    let _watching = crate::viewer::get().map(|viewer| viewer.watching());
     let p = q.get("path").cloned().unwrap_or_default();
     let roots = roots(app);
     match media::resolve_inside(&p, &roots) {
@@ -375,18 +386,21 @@ fn ops_route(app: &Arc<App>, method: &Method, path: &str, q: &HashMap<String, St
     let mut b = Response::builder().status(reply.status);
     for (k, v) in &reply.headers {
         b = b.header(k.as_str(), v.as_str());
-    }
     if !reply.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("x-content-type-options")) {
         b = b.header("X-Content-Type-Options", "nosniff");
-    }
     b.body(Body::from(reply.body)).unwrap()
-}
 
 fn api(app: &Arc<App>, method: &Method, path: &str, q: &HashMap<String, String>, headers: &HeaderMap) -> Res {
+fn api(app: &Arc<App>, method: &Method, path: &str, q: &HashMap<String, String>, headers: &HeaderMap, body: &[u8]) -> Res {
     let seg: Vec<&str> = path.trim_start_matches("/api/").split('/').collect();
     let get = method == Method::GET || method == Method::HEAD;
     if method != Method::GET && method != Method::HEAD && headers.get("x-requested-with").and_then(|v| v.to_str().ok()) != Some("sentry-six-manager") {
         return error(StatusCode::FORBIDDEN, "Missing X-Requested-With header.");
+    }
+    if let Some(viewer) = crate::viewer::get() {
+        if let Some(res) = viewer.route(&crate::viewer::routes::Req { method, path, query: q, headers, body }) {
+            return res;
+        }
     }
     let vehicle = |id: &str| app.vehicle(&decode(id, false).unwrap_or_default()).cloned();
     match (get, seg.as_slice()) {
@@ -475,8 +489,16 @@ pub async fn handle(State(app): State<Arc<App>>, req: Request<Body>) -> Res {
             .await
             .unwrap_or_else(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "Internal error"));
     }
+    let body = if method == Method::GET || method == Method::HEAD {
+        bytes::Bytes::new()
+    } else {
+        match axum::body::to_bytes(req.into_body(), 1024 * 1024).await {
+            Ok(b) => b,
+            Err(_) => return error(StatusCode::PAYLOAD_TOO_LARGE, "Request body too large"),
+        }
+    };
     // file work happens off the async threads
-    tokio::task::spawn_blocking(move || if p.starts_with("/api/") { api(&app, &method, &p, &q, &headers) } else { web(&app, &method, &headers, &p) })
+    tokio::task::spawn_blocking(move || if p.starts_with("/api/") { api(&app, &method, &p, &q, &headers, &body) } else { web(&app, &method, &headers, &p) })
         .await
         .unwrap_or_else(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "Internal error"))
 }
