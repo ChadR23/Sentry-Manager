@@ -1,12 +1,12 @@
 //! Files over HTTP: footage with Range requests (server/studioApi.js
 //! sendMedia: at most 1 MiB an answer, so six cameras never hog a
-//! connection) and the stock UI's static files as they are (server/http.js
-//! serveFile, without compression or page rewriting). Footage is opened
+//! connection). (The app's static files: ui/http.rs.)
+//! Footage is opened
 //! read-only, never through a symlink, and checked to be inside a vehicle's
 //! folder through the open descriptor.
 
 use axum::body::Body;
-use axum::http::{header, HeaderMap, HeaderValue, Method, Response, StatusCode};
+use axum::http::{header, HeaderMap, Method, Response, StatusCode};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -24,27 +24,6 @@ fn media_type(p: &Path) -> &'static str {
         Some("jpg" | "jpeg") => "image/jpeg",
         Some("json") => "application/json",
         Some("txt" | "ass") => "text/plain; charset=utf-8",
-        _ => "application/octet-stream",
-    }
-}
-
-fn static_type(p: &Path) -> &'static str {
-    match p.extension().map(|e| e.to_string_lossy().to_lowercase()).as_deref() {
-        Some("html") => "text/html; charset=utf-8",
-        Some("js" | "mjs" | "cjs") => "text/javascript; charset=utf-8",
-        Some("css") => "text/css; charset=utf-8",
-        Some("json") => "application/json; charset=utf-8",
-        Some("png") => "image/png",
-        Some("jpg" | "jpeg") => "image/jpeg",
-        Some("svg") => "image/svg+xml",
-        Some("ico") => "image/x-icon",
-        Some("woff2") => "font/woff2",
-        Some("woff") => "font/woff",
-        Some("ttf") => "font/ttf",
-        Some("proto" | "txt" | "md") => "text/plain; charset=utf-8",
-        Some("map") => "application/json",
-        Some("gif") => "image/gif",
-        Some("webp") => "image/webp",
         _ => "application/octet-stream",
     }
 }
@@ -155,33 +134,4 @@ pub fn send_media(method: &Method, headers: &HeaderMap, abs: &Path, roots: &[Pat
     // the whole of a big file: streamed from the descriptor that was checked
     let reader = tokio::io::AsyncReadExt::take(tokio::fs::File::from_std(file), len);
     b.body(Body::from_stream(tokio_util::io::ReaderStream::new(reader))).unwrap()
-}
-
-/// A static file of the app (http.js serveFile); None when there is none.
-pub fn serve_static(method: &Method, headers: &HeaderMap, root: &Path, rel: &str, cache: &str) -> Option<Response<Body>> {
-    if rel.contains('\0') || rel.split('/').any(|s| s == "..") {
-        return None;
-    }
-    let abs = root.join(rel.trim_start_matches('/'));
-    if !abs.starts_with(root) {
-        return None;
-    }
-    let md = std::fs::symlink_metadata(&abs).ok()?;
-    if !md.is_file() {
-        return None;
-    }
-    let mtime = crate::sei::js_round(crate::scanner::ms_of(md.mtime(), md.mtime_nsec())) as u64;
-    let etag = format!("W/\"{}-{}\"", base36(md.size()), base36(mtime));
-    let b = Response::builder()
-        .header(header::CONTENT_TYPE, static_type(&abs))
-        .header(header::CACHE_CONTROL, cache)
-        .header(header::ETAG, &etag)
-        .header("X-Content-Type-Options", "nosniff");
-    let none_match = headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()).unwrap_or("");
-    if none_match.split(',').any(|t| t.trim() == etag) {
-        return Some(b.status(StatusCode::NOT_MODIFIED).body(Body::empty()).unwrap());
-    }
-    let data = std::fs::read(&abs).ok()?;
-    let b = b.header(header::CONTENT_LENGTH, HeaderValue::from(data.len()));
-    Some(b.status(StatusCode::OK).body(if method == Method::HEAD { Body::empty() } else { Body::from(data) }).unwrap())
 }

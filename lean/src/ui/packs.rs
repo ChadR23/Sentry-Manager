@@ -438,3 +438,183 @@ pub fn original_pack(web: &Path, studio: &Path, version: &str) -> Vec<u8> {
     files.extend(files_under(studio, "studio/"));
     write_zip(&files)
 }
+
+#[cfg(test)]
+pub mod tests {
+    use super::*;
+    use crate::ui::ctx::{Level, ReqInfo, VehicleRef};
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    /// A settings table in memory, for tests.
+    #[derive(Default)]
+    pub struct MemCtx(pub Mutex<HashMap<String, Value>>);
+    impl UiCtx for MemCtx {
+        fn setting(&self, key: &str) -> Option<Value> {
+            self.0.lock().unwrap().get(key).cloned()
+        }
+        fn set_setting(&self, key: &str, value: &Value) {
+            self.0.lock().unwrap().insert(key.into(), value.clone());
+        }
+        fn has_setting_prefix(&self, p: &str) -> bool {
+            self.0.lock().unwrap().keys().any(|k| k.starts_with(p))
+        }
+        fn announce(&self, _: &str) {}
+        fn audit(&self, _: Level, _: &str) {}
+        fn log(&self, _: Level, _: &str, _: &str) {}
+        fn user(&self, _: &ReqInfo) -> Option<String> {
+            Some("admin".into())
+        }
+        fn session_hash(&self, _: &ReqInfo) -> Option<String> {
+            None
+        }
+        fn recently_confirmed(&self, _: &ReqInfo) -> bool {
+            true
+        }
+        fn is_secure(&self, _: &ReqInfo) -> bool {
+            false
+        }
+        fn client_key(&self, _: &ReqInfo) -> String {
+            "test".into()
+        }
+        fn pending_code(&self, _: &ReqInfo) -> bool {
+            false
+        }
+        fn setup_only(&self, _: &ReqInfo) -> bool {
+            false
+        }
+        fn job_start(&self, _: Value) -> Value {
+            json!(1)
+        }
+        fn job_update(&self, _: &Value, _: Value) {}
+        fn job_finish(&self, _: &Value, _: Value) {}
+        fn vehicle(&self, _: &str) -> Option<VehicleRef> {
+            None
+        }
+        fn resolve_footage(&self, _: &str) -> Option<(PathBuf, VehicleRef)> {
+            None
+        }
+        fn speeds_for(&self, _: &Path) -> Option<Vec<Option<f64>>> {
+            None
+        }
+        fn viewer_car_data(&self) -> Value {
+            json!({ "enabled": false })
+        }
+    }
+
+    fn tmp() -> PathBuf {
+        let d = std::env::temp_dir().join(format!("sm-ui-test-{}", random_hex(6)));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+    fn zip(files: &[(&str, &[u8])]) -> Vec<u8> {
+        write_zip(&files.iter().map(|(n, d)| Entry { name: n.to_string(), data: d.to_vec() }).collect::<Vec<_>>())
+    }
+    fn names(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        v.sort();
+        v
+    }
+    fn repo() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..")
+    }
+
+    // test/uiPacks.test.js
+    #[test]
+    fn pack_paths_stay_in_the_pack() {
+        for bad in ["../x", "web/../../x", "/etc/passwd", "web\\..\\x", "web//x", "web/./x", "C:/x", "", "a\0b"] {
+            assert_eq!(safe_rel(bad), None, "{bad}");
+        }
+        assert_eq!(safe_rel("web/fonts/a.woff2").as_deref(), Some("web/fonts/a.woff2"));
+    }
+
+    #[test]
+    fn install_choose_serve_delete() {
+        let dir = tmp();
+        let db = Arc::new(MemCtx::default());
+        let packs = Packs::new(dir.clone(), db.clone(), None, None);
+        packs.tidy().unwrap();
+        assert_eq!(packs.active(), None);
+        assert_eq!(packs.root("web"), None);
+        let meta = packs
+            .install(
+                &zip(&[
+                    ("Dark Mint/ui.json", br#"{"name":"Dark Mint\n","description":"Greener","author":"Sam"}"#),
+                    ("Dark Mint/web/shell.css", b"body{background:#012}"),
+                    ("Dark Mint/README.md", b"ignored"),
+                    ("__MACOSX/Dark Mint/._shell.css", b"junk"),
+                    ("Dark Mint/.DS_Store", b"junk"),
+                ]),
+                "whatever.zip",
+            )
+            .unwrap();
+        assert_eq!(meta["name"], "Dark Mint");
+        assert_eq!(meta["author"], "Sam");
+        assert_eq!(meta["replaces"], json!(["web"]));
+        assert_eq!(meta["files"], 1);
+        let id = meta["id"].as_str().unwrap().to_string();
+        assert!(id.starts_with("dark-mint-") && id.len() == "dark-mint-".len() + 6);
+        assert_eq!(packs.list().iter().map(|m| m["id"].clone()).collect::<Vec<_>>(), [json!(id)]);
+        assert_eq!(packs.active(), None, "installing does not switch");
+        packs.set_active(Some(&id)).unwrap();
+        assert_eq!(packs.active().as_deref(), Some(id.as_str()));
+        assert_eq!(std::fs::read_to_string(packs.root("web").unwrap().join("shell.css")).unwrap(), "body{background:#012}");
+        assert_eq!(packs.root("studio"), None);
+        assert!(packs.set_active(Some("nope")).unwrap_err().0.contains("No such"));
+        assert!(packs.set_active(Some("../x")).unwrap_err().0.contains("No such"));
+        let second = packs.install(&zip(&[("studio/styles/x.css", b"a{}")]), "Night Viewer.zip").unwrap();
+        assert_eq!(second["name"], "Night Viewer");
+        assert!(packs.install(&zip(&[("web/../../evil.js", b"x")]), "").unwrap_err().0.contains("not a path"));
+        assert!(packs.install(&zip(&[("readme.txt", b"x")]), "").unwrap_err().0.contains("no files in web/ or studio/"));
+        assert!(packs.install(&b"nope".repeat(10), "").unwrap_err().0.contains("not a .zip"));
+        assert!(packs.install(&zip(&[("ui.json", b"{"), ("web/a", b"x")]), "").unwrap_err().0.contains("ui.json"));
+        let mut both = vec![id.clone(), second["id"].as_str().unwrap().to_string()];
+        both.sort();
+        assert_eq!(names(&dir), both, "no half-unpacked pack is left");
+        packs.remove(&id).unwrap();
+        assert_eq!(packs.active(), None);
+        assert!(packs.remove(&id).unwrap_err().0.contains("No such"));
+        std::fs::create_dir_all(dir.join(".incoming-abcd")).unwrap();
+        packs.tidy().unwrap();
+        assert_eq!(names(&dir), [second["id"].as_str().unwrap()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_original_installs_as_is() {
+        let dir = tmp();
+        let buf = original_pack(&repo().join("web"), &repo().join("src/renderer"), "");
+        let files = read_zip(&buf, &Limits::default()).unwrap();
+        let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
+        for n in ["README.txt", "ui.json", "web/index.html", "web/app.js", "web/shell.css", "studio/index.html", "studio/encoder.html"] {
+            assert!(names.contains(&n), "{n}");
+        }
+        assert_eq!(files.iter().find(|f| f.name == "web/app.js").unwrap().data, std::fs::read(repo().join("web/app.js")).unwrap());
+        let packs = Packs::new(dir.clone(), Arc::new(MemCtx::default()), None, None);
+        let meta = packs.install(&buf, "").unwrap();
+        assert_eq!(meta["name"], "My interface");
+        assert_eq!(meta["replaces"], json!(["web", "studio"]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sentry_six_is_the_main_interface() {
+        let dir = tmp();
+        let builtin = repo().join("examples/ui-packs");
+        let packs = Packs::new(dir.clone(), Arc::new(MemCtx::default()), Some(&builtin), Some("sentry-six".into()));
+        assert_eq!(packs.active().as_deref(), Some("sentry-six"));
+        assert!(packs.root("web").is_some());
+        assert_eq!(packs.list()[0]["id"], "sentry-six");
+        let mut ids: Vec<String> = packs.list().iter().filter(|p| p["builtin"] == true).map(|p| p["id"].as_str().unwrap().to_string()).collect();
+        ids.sort();
+        assert_eq!(ids, ["aurora", "daylight", "flux", "horizon", "sentry-six"]);
+        packs.set_active(None).unwrap();
+        assert_eq!(packs.active().as_deref(), Some("sentry-six"), "Original saved: Sentry Six all the same");
+        packs.set_active(Some("horizon")).unwrap();
+        assert_eq!(packs.active().as_deref(), Some("horizon"));
+        assert!(packs.remove("flux").unwrap_err().0.contains("comes with"));
+        assert_eq!(Packs::new(dir.clone(), Arc::new(MemCtx::default()), Some(&builtin), Some("nope".into())).active(), None);
+        assert_eq!(Packs::new(dir.clone(), Arc::new(MemCtx::default()), Some(&builtin), None).active(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

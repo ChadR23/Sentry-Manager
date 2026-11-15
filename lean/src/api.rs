@@ -1,5 +1,5 @@
 //! The HTTP side: the routes of server/index.js this slice answers, field
-//! for field, and the stock UI's files. Everything else under /api/ is
+//! for field; the pages and the ui area's routes go to ui/. Everything else under /api/ is
 //! "Not found", as on the Node server.
 
 use crate::app::{App, Vehicle};
