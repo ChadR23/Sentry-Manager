@@ -42,6 +42,7 @@ struct CarMinutes {
     sig: Option<String>,
     minutes: Vec<f64>,
     zone: String,
+    #[allow(dead_code)]
     stamps: HashMap<String, Option<f64>>,
 }
 

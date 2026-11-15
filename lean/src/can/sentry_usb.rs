@@ -162,6 +162,7 @@ pub struct Transfer {
 fn opt_i(v: Option<i64>) -> Value {
     v.map(Value::from).unwrap_or(Value::Null)
 }
+#[allow(dead_code)]
 fn opt_s(v: &Option<String>) -> Value {
     v.clone().map(Value::String).unwrap_or(Value::Null)
 }

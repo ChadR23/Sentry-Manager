@@ -85,6 +85,7 @@ folder, plus one line in `src/api.rs` (its routes) and its dependencies in
 | core | ported, see below and `src/core/README.md` |
 | `footage/` | ported, with what is left listed below |
 | ui (pages, static files, interface packs, exports, settings) | ported, see below |
+| can | ported (routes, index, trust, search, sync, prune, Sentry USB files), see below |
 | everything else | not started |
 
 ## Converter
@@ -452,6 +453,70 @@ Not done yet:
 Node quirks kept as they are: a board without an id gets the id
 "undefined"; the hourly exports tidy can remove the work folder of an
 export that is rendering (its folder name is not an export id).
+## CAN (`src/can/`)
+
+Done: every route of the "CAN logs" (28) and "Sentry USB" (3) groups and
+the CAN Bridge upload API (`/api/can/logs`: ping, status, chunked uploads
+with their checks, token binding, wrong-token and per-token limits), on the
+web port and on the device port (`port.rs`, CAN_PORT, opened and closed with
+the uploads). Behind them, ports of: canLogs (names, resumable uploads,
+catalogue), canLogReader + canColumns (`xz -dc`, both formats, the same
+bounds and refusal texts, one decoder slot for the index, one for
+downloads), canDbc + the `server/dbc/` sets, carModels (VIN, the car
+setting, which set decodes a car), canFormat, canIndex (minute files,
+raw snapshots, signals.json, car.json, ids-<day>.json, done.json,
+packed.json, repacking, removing a log), canTrust (ECDSA P-256 with the
+`p256` crate, pairing, the chain with restarts, judged again after a rule
+change), canSearch + the search queue (45 s budget, resume tokens, one per
+user, 429 past four waiting, stopped when the page closes), canSync (the
+speed correlation, edges, drive fit) and its cache, canPrune, canFootage
+(the CAN tag: `Can::has_can`), canCalc + carCalc's point stats, the
+bundle zip (Zip64), the decoded CSV (gzip), the candump download (stalled
+reader ended after 60 s), sentryUsb + sentryUsbDevice + sentryUsbCar +
+carFiles. JSON is written as JavaScript writes it (`json.rs`: number form,
+integer keys first), times in a car's zone come from the system's zoneinfo
+(`tz.rs`). The index's files are the Node server's (a Node data folder is
+read as it is, and the Rust index writes the same files).
+
+Checked: `cargo test` (`tests/can_parity.rs`: `parity/canFixtures.js`
+indexes 12 logs with Node, both formats, broken and cut-off ones, an
+internal GPS bus, a VIN, a legacy Model S, the bridge's own test file; the
+Rust index writes byte-for-byte the same unpacked files and gives the same
+clipData, raw, signals, idSummary, newIds, messageName and heads, before and
+after removeLog + repack; `tests/can_units.rs`: trust with real
+signatures, the chain, the columns sample, query times, prune spans, the
+upload checks, the Sentry USB files) and `node lean/parity/canCompare.js`
+(Node and lean on the parity archive with those logs at its drive and
+Sentry USB's files on the share: 151 requests, the same answers; the
+server's own times, per-instance data folders, and the Sentry USB `record`
+part are normalised).
+
+The area's needs from core are `ctx.rs` (`CanCtx`); `lean.rs` implements
+it on today's lean App until core lands (settings in
+`DATA_PATH/lean-settings.json`, a fixed local admin, live updates and audit
+lines to the log).
+
+Not done yet:
+
+- core: `CanCtx` on AppState (manager.db settings, `announce` on
+  /api/events, audit, `requireConfirmed`, `by(req, user)`, clientKey,
+  isSecure/TRUST_PROXY, cert fingerprint), access per route (admin, 🔑,
+  watch-only 403 on files/export), JSON compression of answers over 1 KB;
+- the device port over TLS (TLS 1.2/1.3, the certificate renewed in
+  place), its per-address (6) and total (256) connection limits, the 15 s
+  first-request and 20 s header timeouts; until then it is plain HTTP;
+- the footage area calls `Can::car_summary` (`car` and `carModels` in
+  /api/vehicles), `Can::has_can` (`canRecordings`, `can: true` tags), and
+  `CanPrune::delete_with`/`footage_gone` (trash-preview `can`, `withCan`,
+  the Recycle Bin's deletes); the Recycle Bin lock, bin items and the
+  protect list come through `CanCtx`;
+- the viewer/footage areas use `SentryUsb` (`sentryUsb` in days, the
+  transfer range for conversions and archive gaps, `car_files` for
+  archiveGap.js) and give the `record` part of the Sentry USB view
+  (arrivalChecksums.js) and the costly missed snapshots (archiveGap
+  forDays) through `CanCtx`;
+- recordingPlace.js (place tags from the CAN GPS) is the viewer area's; it
+  can read the minute files with `format.rs`.
 
 ## Known differences
 
