@@ -478,6 +478,17 @@ pub async fn handle(State(app): State<Arc<App>>, req: Request<Body>) -> Res {
     let raw = req.uri().path().to_string();
     let q = query_of(req.uri().query());
     let Some(p) = clean_path(&raw) else { return error(StatusCode::BAD_REQUEST, "Bad request") };
+    // the CAN area (src/can/): its routes, with their bodies
+    if crate::can::lean::owns(&raw) {
+        let body = match axum::body::to_bytes(req.into_body(), 17 * 1024 * 1024).await {
+            Ok(b) => b,
+            Err(_) => return error(StatusCode::PAYLOAD_TOO_LARGE, "That file is too large."),
+        };
+        let (a, m, r, qq, h) = (app.clone(), method.clone(), raw.clone(), q.clone(), headers.clone());
+        if let Ok(Some(res)) = tokio::task::spawn_blocking(move || crate::can::lean::handle(&a, &m, &r, &qq, &h, body)).await {
+            return res;
+        }
+    }
     let body = if method == Method::GET || method == Method::HEAD {
         bytes::Bytes::new()
     } else {

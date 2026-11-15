@@ -143,6 +143,8 @@ async fn run(fd: Option<std::os::fd::OwnedFd>) {
         }
     });
 
+    // the CAN area: its background work and the device port (src/can/)
+    sentry_lean::can::lean::instance(&app);
     // the ops area's background work (startup self-check, snapshots, update check, opt-in reports)
     api::ops_of(&app).start();
     let mut router = core::router();

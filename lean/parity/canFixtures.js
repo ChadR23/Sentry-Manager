@@ -105,7 +105,7 @@ function writeLog(key, name, lines, { columns = false, side = null } = {}) {
   if (side) fs.writeFileSync(path.join(CAN, key, `${name}.json`), JSON.stringify(side));
 }
 
-const T = Date.UTC(2026, 10, 8, 14, 30, 0); // 2026-11-08 14:30 UTC
+const T = process.env.CAN_T0 ? Date.parse(process.env.CAN_T0) : Date.UTC(2026, 10, 8, 14, 30, 0); // 2026-11-08 14:30 UTC
 const stamp = (ms) => new Date(ms).toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z';
 const name = (key, ms, seq) => `${key}_${stamp(ms)}_${seq}.log.xz`;
 
