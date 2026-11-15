@@ -276,9 +276,12 @@ fn a_copy_that_is_not_the_conversion_or_another_file_is_never_removed() {
     let e = env.cleanup(vec![("replacementCandidate", cand.clone())], vec![("replacementCandidate", rec.clone())]).err().unwrap();
     assert_eq!(e.code, "UNSAFE_OWNED_PATH", "not a prefix of the conversion");
     assert!(Path::new(&cand).exists());
-    fs::remove_file(&cand).unwrap();
-    fs::write(env.footage.join("other"), "x").unwrap();
-    fs::write(&cand, &env.conversion[..50_000]).unwrap();
+    // the same bytes in another file at that name: written beside it while the
+    // recorded one still exists, then renamed over it, so it can never reuse the
+    // recorded inode (deleting first and writing again could, on a busy machine)
+    let other = env.footage.join("other");
+    fs::write(&other, &env.conversion[..50_000]).unwrap();
+    fs::rename(&other, &cand).unwrap();
     let e = env.cleanup(vec![("replacementCandidate", cand.clone())], vec![("replacementCandidate", rec)]).err().unwrap();
     assert_eq!(e.code, "UNSAFE_OWNED_PATH", "not the recorded file");
     assert!(Path::new(&cand).exists());
