@@ -27,7 +27,8 @@ files. Its own state lives in `DATA_PATH`: the catalog in
 | Speed index | `src/speeds.rs` | One speed a second and a summary (`summarize`) for every front clip, cached in SQLite. A clip is read again only when its size or time changes. When the quick read gives up (more than 64 top-level boxes, an edit list it does not take, a fragmented file, and so on), the full read gives the speeds, averaged per second, and a summary of those, as `server/speedIndex.js` `speedsFor` does. |
 | Thumbnails | `src/thumbnails.rs` | Tesla's `thumb.png` as it is. Without one, one frame of the front clip, one second in (else its first frame), 320 pixels wide: `ffmpeg` runs as a child process (`FFMPEG_PATH`, two at a time, 60 s at most), with the Node server's arguments, and the JPEG is cached in `DATA_PATH/thumbnails` under the Node server's name for it. ffmpeg only reads the clip; nothing is written next to the footage. Without ffmpeg: "No thumbnail" (404), as on Node. |
 | Job queue | `src/jobs.rs` | One queue with priorities: scans first, then codec reads, then the speed index. The number of threads comes from the machine (two to four). A job that is already waiting is not queued twice. |
-| Media | `src/media.rs` | `/api/media` with Range support, at most 1 MiB per answer, and the same ETag as the Node server. Files are opened with `O_NOFOLLOW` and checked through `/proc/self/fd` to be inside a vehicle folder. Static UI files are served as they are. |
+| Media | `src/media.rs` | `/api/media` with Range support, at most 1 MiB per answer, and the same ETag as the Node server. Files are opened with `O_NOFOLLOW` and checked through `/proc/self/fd` to be inside a vehicle folder. |
+| Pages and interfaces | `src/ui/` | Every page and file as the Node server serves it (ETag, 304, brotli or gzip, security headers and CSP, versioned links, the critical-update bar, the early-data hint, the Studio translations, `/original`), interface packs, exports and the settings routes. See PORT_PLAN.md (ui). |
 
 Routes answered, field for field as `server/index.js` answers them:
 
@@ -128,7 +129,7 @@ Checked on this image: it builds; with an archive mounted `:ro` and `--network h
    - policies, protect, trash and restore. These are the first routes that write to footage folders, and they will need the same safeguards as `server/recycleBin.js`;
    - share mounting and health (`share`, `storage`).
 6. **Converter.** Last. Encoding with ffmpeg, the H.265 and AV1 telemetry injection, verification and the staging and recovery steps (`src/main/converter/`). This is the largest piece.
-7. **CAN logs, helpers and power price.** Not done yet: CAN Bridge uploads and the indexes (`/api/can/*`), worker nodes, power price and savings, UI packs, updates and the reports opt-in.
+7. **CAN logs, helpers and power price.** Not done yet: CAN Bridge uploads and the indexes (`/api/can/*`), worker nodes, power price and savings, updates and the reports opt-in. (Pages, UI packs, exports and the settings routes: done, `src/ui/`.)
 
 Smaller differences in this slice:
 

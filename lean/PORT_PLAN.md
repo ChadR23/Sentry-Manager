@@ -84,6 +84,7 @@ folder, plus one line in `src/api.rs` (its routes) and its dependencies in
 | viewer | ported except where it needs CAN, Sentry USB status, notifications or accounts; see below |
 | core | ported, see below and `src/core/README.md` |
 | `footage/` | ported, with what is left listed below |
+| ui (pages, static files, interface packs, exports, settings) | ported, see below |
 | everything else | not started |
 
 ## Converter
@@ -383,6 +384,74 @@ Left to do:
 - Stars are sorted by clip with byte order; Node uses `localeCompare`
   (ICU). The same for clip keys (YYYY-MM-DD_HH-MM-SS), which is all a star
   can hold.
+## ui
+
+Done (`src/ui/`, what it needs from core in `src/ui/ctx.rs`, implemented for
+today's lean server by `src/ui/local.rs`):
+
+- static files as `server/http.js` serves them (`ui/http.rs`): the same MIME
+  types, weak ETag from size and time, 304, brotli (quality 5) or gzip for
+  text over 1 KB from a cached copy (48 MB), transformed pages never kept,
+  versioned scripts kept per version; `sendText`; `sendJson` (gzip over 1 KB);
+- index.js's page side (`ui/mod.rs`): the security headers and the three CSPs
+  on every answer, `/healthz`, `/original` and its cookie, the two-step and
+  sign-in redirects (through the ctx), `/v/<version>/…` and `/v/assets/…`
+  with the year-long cache only for the current version, the asset version
+  (sha256 of build sha or start time and the interface), versioned links in
+  every page, versioned imports in versioned scripts, the critical-update bar
+  (never on the sign-in pages, never a pack's own `critical.js`), the Studio
+  and Encoder shims (the skeleton CSS inline), the early-data hint
+  (`prefetch.js`: learning per session for 2 s, hints kept in the `prefetch`
+  setting), `/studio` and `?embed=encoder` redirects, the Studio
+  translations (`ui/translations.rs`: the literal file is evaluated without
+  a JS engine), the chosen pack's file first, else the built-in one;
+- `server/uiPacks.js` (`ui/packs.rs`) and `server/zip.js` reading and
+  writing (`ui/zip.rs`, Zip64 read and written where needed); the routes
+  `GET /api/ui-packs`, `PUT /api/ui-packs/active` (password confirmation,
+  `interface` topic, audit, the /original cookie cleared),
+  `DELETE /api/ui-packs/:id`, `GET /api/ui-packs/original.zip`,
+  `POST /api/ui-packs/upload` (405, confirmation, 413, X-File-Name);
+- `server/exporter.js` (`ui/exporter.rs`): checks, layout, ASS overlay,
+  ffmpeg arguments, GPU encoder probe with CPU fallback, one at a time with
+  a queue, cancel, tidy every hour, jobs through the ctx; the routes
+  `POST /api/vehicles/:id/exports`, `POST /api/exports`, `GET /api/exports`,
+  `GET|DELETE /api/exports/:id`, `GET /api/exports/:id/file`;
+- settings (`ui/settings.rs`): `GET /api/settings`,
+  `PUT /api/settings/appearance`, `GET|PUT /api/dashboards` (cleanBoards,
+  upgradeBoards rev 2), `GET|PUT /api/settings/work-limits` (workLimits.js,
+  cgroup v1/v2).
+
+Checked: `cargo test` (zip, packs, exporter, settings and dashboards, work
+limits, translations, HTML rewriting, JS conversions);
+`node lean/parity/uiCompare.js` (Node fixture over HTTPS against lean: every
+file in every interface plain, versioned, br, gzip, HEAD and 304, the
+security headers, all the routes above including an upload, a real export
+and a privacy export, the early-data hint: 2871 of 2871 answers the same);
+`node lean/parity/contractUi.js` (record.js goldens for these routes,
+replayed: 17 of 17); `node lean/parity/uiPages.js` (Chromium, Original and
+the five packs, main page, Settings, Viewer, Encoder, sign-in page: 30 of
+30 load the same, no file or script error only on lean).
+
+Not done yet:
+
+- core implements `ui::ctx::UiCtx` on its AppState (settings in manager.db,
+  sessions, `recentlyConfirmed`, `isSecure`, clientKey, two-step state, the
+  jobs list, the `/api/events` hub for `interface`, audit and logs, the
+  vehicle guard for exports, the speed index, `viewerCarData` with the CAN
+  area) and replaces `LocalCtx`; core also takes over `sendJson` for every
+  JSON answer (gzip over 1 KB: `ui::http::send_json`), the Host check (421),
+  the CSRF and origin checks and the viewer/home-only checks before the
+  ui's routes (the ui checks X-Requested-With and Origin again itself);
+- `streamZip` (the CAN bundles' streamed zip) is the CAN area's;
+- `GET /api/settings` shows the power price; its PUT is the power-price area's;
+- original.zip is deflated by flate2 (miniz), not zlib: the files are the
+  same, the bytes of the archive differ (the contract ignores its body);
+- the uploaded pack is written at upload time, so its files' ETags differ
+  between servers (as between any two Node servers).
+
+Node quirks kept as they are: a board without an id gets the id
+"undefined"; the hourly exports tidy can remove the work folder of an
+export that is rendering (its folder name is not an export id).
 
 ## Known differences
 
