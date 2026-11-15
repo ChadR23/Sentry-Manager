@@ -6,7 +6,7 @@
 //! certificate (TLS_CERT_FILE/TLS_KEY_FILE), or Let's Encrypt (acme.rs).
 
 use super::acme::{AcmeConfig, AcmeManager};
-use super::log::Scope;
+use super::log::LogTo as Scope;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::net::IpAddr;
@@ -476,20 +476,54 @@ impl TlsManager {
     }
 }
 
+/// The app's side when the root supervisor holds the certificate authority
+/// (tls.js supervisorTlsSource): the files it exported (server.key,
+/// server.crt, status.json, ca.crt), Let's Encrypt's pending tokens it sends,
+/// and name changes asked of it over the channel.
+pub struct Supervised {
+    pub dir: PathBuf,
+    challenges: Mutex<std::collections::HashMap<String, String>>,
+    link: std::sync::OnceLock<Arc<crate::supervisor::link::Link>>,
+}
+
+impl Supervised {
+    pub fn new(dir: PathBuf) -> Supervised {
+        Supervised { dir, challenges: Mutex::new(Default::default()), link: std::sync::OnceLock::new() }
+    }
+
+    pub fn set_link(&self, link: Arc<crate::supervisor::link::Link>) {
+        let _ = self.link.set(link);
+    }
+
+    /// A message from the supervisor: `acme-challenge` / `acme-challenge-done`.
+    pub fn on_message(&self, m: &Value) {
+        let t = m["type"].as_str().unwrap_or("");
+        let mut c = self.challenges.lock().unwrap();
+        if t == "acme-challenge" {
+            let token = super::accounts::js_string(m.get("token"));
+            let ka = super::accounts::js_string(m.get("keyAuthorization"));
+            if super::acme::token_ok(&token) && super::acme::key_auth_ok(&ka) && c.len() < 50 {
+                c.insert(token, ka);
+            }
+        } else if t == "acme-challenge-done" {
+            c.remove(&super::accounts::js_string(m.get("token")));
+        }
+    }
+}
+
 /// Where the certificate comes from: this process (standalone, tests) or the root supervisor's export.
 pub enum TlsSource {
     Local(TlsManager),
-    /// the files the supervisor exported (server.key, server.crt, status.json, ca.crt); names change through it
-    Supervised(PathBuf),
+    Supervised(Supervised),
 }
 
 impl TlsSource {
     pub fn load(&self) -> Result<Material, String> {
         match self {
             TlsSource::Local(m) => m.ensure(),
-            TlsSource::Supervised(d) => Ok(Material {
-                key: std::fs::read(d.join("server.key")).map_err(|e| e.to_string())?,
-                cert: std::fs::read(d.join("server.crt")).map_err(|e| e.to_string())?,
+            TlsSource::Supervised(s) => Ok(Material {
+                key: std::fs::read(s.dir.join("server.key")).map_err(|e| e.to_string())?,
+                cert: std::fs::read(s.dir.join("server.crt")).map_err(|e| e.to_string())?,
                 own: false,
                 acme: false,
             }),
@@ -499,31 +533,75 @@ impl TlsSource {
     pub fn status(&self) -> Result<Value, String> {
         match self {
             TlsSource::Local(m) => m.status(),
-            TlsSource::Supervised(d) => std::fs::read_to_string(d.join("status.json")).map_err(|e| e.to_string()).and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string())),
+            TlsSource::Supervised(s) => std::fs::read_to_string(s.dir.join("status.json")).map_err(|e| e.to_string()).and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string())),
         }
     }
 
     pub fn ca_pem(&self) -> Option<Vec<u8>> {
         match self {
             TlsSource::Local(m) => m.ca_pem(),
-            TlsSource::Supervised(d) => std::fs::read(d.join("ca.crt")).ok(),
+            TlsSource::Supervised(s) => std::fs::read(s.dir.join("ca.crt")).ok(),
         }
     }
 
     pub fn challenge(&self, token: &str) -> Option<String> {
         match self {
             TlsSource::Local(m) => m.challenge(token),
-            // (the supervisor's pending tokens come over its IPC channel: supervisor area)
-            TlsSource::Supervised(_) => None,
+            TlsSource::Supervised(s) => {
+                if !super::acme::token_ok(token) {
+                    return None;
+                }
+                s.challenges.lock().unwrap().get(token).cloned()
+            }
         }
     }
 
+    /// Change the names (blocking: call from a blocking thread).
     pub fn set_hostnames(&self, list: &[String]) -> Result<(Material, bool), super::http::HttpError> {
+        use super::http::HttpError;
         match self {
             TlsSource::Local(m) => m.set_hostnames(list),
-            TlsSource::Supervised(_) => Err(super::http::HttpError::internal("The supervisor did not answer.")),
+            TlsSource::Supervised(s) => {
+                let Some(link) = s.link.get().cloned() else { return Err(HttpError::internal("The supervisor did not answer.")) };
+                let names = list.to_vec();
+                let rt = tokio::runtime::Handle::try_current().map_err(|e| HttpError::internal(e.to_string()))?;
+                let r = rt.block_on(async move { link.tls_hostnames(&names).await });
+                match r {
+                    Ok(ca_replaced) => Ok((self.load().map_err(HttpError::internal)?, ca_replaced)),
+                    Err((Some(st), msg)) => Err(HttpError::new(st, msg)),
+                    Err((None, msg)) => Err(HttpError::internal(msg)),
+                }
+            }
         }
     }
+}
+
+/// tls.js exportForApp: what the unprivileged app may have (the server key and
+/// certificate, the public CA certificate and a status summary) into `out`,
+/// each a fresh temp file (never through a link) renamed into place. The CA
+/// key never leaves the TLS folder. The supervisor then sets owner and modes.
+pub fn export_for_app(m: &TlsManager, out: &Path) -> Result<Material, String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let material = m.ensure()?;
+    std::fs::DirBuilder::new().recursive(true).create(out).map_err(|e| e.to_string())?;
+    let _ = std::fs::set_permissions(out, std::fs::Permissions::from_mode(0o700));
+    let status = serde_json::to_string(&m.status()?).unwrap_or_default();
+    let mut files: Vec<(&str, Vec<u8>, u32)> = vec![("server.key", material.key.clone(), 0o600), ("server.crt", material.cert.clone(), 0o644), ("status.json", status.into_bytes(), 0o644)];
+    if let Some(ca) = m.ca_pem() {
+        files.push(("ca.crt", ca, 0o644));
+    }
+    for (name, data, mode) in files {
+        let file = out.join(name);
+        let tmp = out.join(format!("{name}.{}.tmp", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).custom_flags(libc::O_NOFOLLOW).mode(mode).open(&tmp).map_err(|e| e.to_string())?;
+        f.write_all(&data).map_err(|e| e.to_string())?;
+        f.set_permissions(std::fs::Permissions::from_mode(mode)).map_err(|e| e.to_string())?;
+        drop(f);
+        std::fs::rename(&tmp, &file).map_err(|e| e.to_string())?;
+    }
+    Ok(material)
 }
 
 /// A rustls server configuration for this key and chain (HTTP/2 and HTTP/1.1, TLS 1.2 and 1.3).

@@ -4,7 +4,7 @@
 //! same backoff (15 min to a day, kept across restarts) and renewal (30 days
 //! before the end, or a third of a short lifetime).
 
-use super::log::Scope;
+use super::log::LogTo as Scope;
 use base64::Engine;
 use p256::ecdsa::signature::Signer;
 use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey, LineEnding};
@@ -733,6 +733,8 @@ pub struct AcmeManager {
     running: Mutex<bool>,
     generation: Mutex<u64>,
     on_change: Mutex<Option<Hook>>,
+    /// publish / unpublish: whoever serves port 9000's plain HTTP hears of each token (the supervisor's app)
+    share: Mutex<Option<(Arc<dyn Fn(String, String) + Send + Sync>, Arc<dyn Fn(String) + Send + Sync>)>>,
     pub ready_timeout_ms: i64,
     /// how often an order is polled (Node: 2 s)
     pub poll_ms: u64,
@@ -744,7 +746,7 @@ fn iso(ms: i64) -> String {
 
 impl AcmeManager {
     pub fn new(config: AcmeConfig, dir: PathBuf, log: Option<Scope>) -> AcmeManager {
-        AcmeManager { config, dir, log, pending: Mutex::new(Default::default()), running: Mutex::new(false), generation: Mutex::new(0), on_change: Mutex::new(None), ready_timeout_ms: 120_000, poll_ms: 2000 }
+        AcmeManager { config, dir, log, pending: Mutex::new(Default::default()), running: Mutex::new(false), generation: Mutex::new(0), on_change: Mutex::new(None), share: Mutex::new(None), ready_timeout_ms: 120_000, poll_ms: 2000 }
     }
 
     fn file(&self, n: &str) -> PathBuf {
@@ -790,10 +792,27 @@ impl AcmeManager {
             return;
         }
         p.insert(t.into(), ka.into());
+        drop(p);
+        if let Some((publish, _)) = self.share.lock().unwrap().clone() {
+            publish(t.into(), ka.into());
+        }
     }
 
     fn unpublish(&self, t: &str) {
         self.pending.lock().unwrap().remove(t);
+        if let Some((_, unpublish)) = self.share.lock().unwrap().clone() {
+            unpublish(t.into());
+        }
+    }
+
+    /// The tokens still waiting for their check (`acme.pending`).
+    pub fn pending_list(&self) -> Vec<(String, String)> {
+        self.pending.lock().unwrap().iter().map(|(a, b)| (a.clone(), b.clone())).collect()
+    }
+
+    /// Tell someone else of every token published and withdrawn (supervisor.js start hooks).
+    pub fn share_tokens(&self, publish: Arc<dyn Fn(String, String) + Send + Sync>, unpublish: Arc<dyn Fn(String) + Send + Sync>) {
+        *self.share.lock().unwrap() = Some((publish, unpublish));
     }
 
     pub fn status(&self) -> Value {

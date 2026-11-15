@@ -662,6 +662,22 @@ pub fn sync_device_port(state: &Arc<AppState>) {
     }
 }
 
+/// index.js shutdown(signal): every live stream ends, the areas' shutdown work runs, the process exits 0.
+pub fn shutdown(state: &AppState, why: &str) {
+    static STOPPING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if STOPPING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    state.log.info(format!("{why}: shutting down"));
+    state.hub.close_all();
+    let work: Vec<_> = std::mem::take(&mut *state.hooks.on_shutdown.lock().unwrap());
+    for f in work {
+        f();
+    }
+    state.log.info("Stopped cleanly");
+    std::process::exit(0);
+}
+
 /// The router every request goes through (set once, before listening).
 pub fn install(state: &Arc<AppState>, router: Router) {
     let _ = state.router.set(Arc::new(router));

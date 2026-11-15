@@ -58,9 +58,18 @@ fn footage_routes(r: &mut core::Router, app: Arc<App>) {
     });
 }
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
-async fn main() {
-    let config = core::Config::from_env();
+fn main() {
+    // before any thread: as the top of server/index.js, and the supervisor's channel (fd 3)
+    sentry_lean::supervisor::link::drop_malloc_arena_max();
+    let fd = sentry_lean::supervisor::ipc::take_from_env();
+    tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("runtime").block_on(run(fd));
+}
+
+async fn run(fd: Option<std::os::fd::OwnedFd>) {
+    let link = sentry_lean::supervisor::link::Link::from_fd(fd).map(Arc::new);
+    let mut config = core::Config::from_env();
+    // (Node: supervised only with SENTRY_SUPERVISED=1 and a channel to the supervisor)
+    config.supervised &= link.is_some();
     let state = match core::AppState::open(config) {
         Ok(s) => s,
         Err(e) => {
@@ -114,6 +123,9 @@ async fn main() {
     let mut router = core::router();
     footage_routes(&mut router, app);
     core::server::install(&state, router);
+    if let Some(l) = link {
+        core::supervised::attach(&state, l);
+    }
     core::server::sync_device_port(&state);
 
     // housekeeping (index.js): expired sessions go every minute
@@ -130,14 +142,7 @@ async fn main() {
     tokio::spawn(async move {
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("signal");
         let which = tokio::select! { _ = tokio::signal::ctrl_c() => "SIGINT", _ = term.recv() => "SIGTERM" };
-        st.log.info(format!("{which}: shutting down"));
-        st.hub.close_all();
-        let work: Vec<_> = std::mem::take(&mut *st.hooks.on_shutdown.lock().unwrap());
-        for f in work {
-            f();
-        }
-        st.log.info("Stopped cleanly");
-        std::process::exit(0);
+        core::server::shutdown(&st, which);
     });
     if let Err(e) = core::server::serve(state.clone()).await {
         state.log.error(format!("listen: {e}"));

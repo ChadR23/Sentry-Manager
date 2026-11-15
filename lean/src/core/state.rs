@@ -46,6 +46,8 @@ pub struct Hooks {
     pub reports_setup: Hook<dyn Fn(bool, bool) -> Result<(serde_json::Value, serde_json::Value), String> + Send + Sync>,
     /// ui: the page-start learning of web/prefetch.js (session hash, path + search, headers) for signed-in GETs under /api/
     pub note_start_call: Hook<dyn Fn(&str, &str, &axum::http::HeaderMap) + Send + Sync>,
+    /// ops: a `rapl-reading` from the supervisor (stats.setRapl)
+    pub rapl_reading: Hook<dyn Fn(&serde_json::Value) + Send + Sync>,
     /// shutdown work of the areas, run in order before the process ends
     pub on_shutdown: Mutex<Vec<Box<dyn FnOnce() + Send>>>,
 }
@@ -75,6 +77,8 @@ pub struct AppState {
     pub(crate) device_port: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// every area's routes (server::install sets it once, before listening)
     pub(crate) router: std::sync::OnceLock<Arc<super::http::Router>>,
+    /// the link to the root supervisor (fd 3), when it started this app: footage's IpcMounter, ops' rapl_on
+    pub supervisor: std::sync::OnceLock<Arc<crate::supervisor::link::Link>>,
 }
 
 impl AppState {
@@ -115,7 +119,7 @@ impl AppState {
         let tls = if !config.tls_on() {
             None
         } else if config.supervised && config.sentry_tls_dir.is_some() {
-            Some(TlsSource::Supervised(config.sentry_tls_dir.clone().unwrap()))
+            Some(TlsSource::Supervised(super::tls::Supervised::new(config.sentry_tls_dir.clone().unwrap())))
         } else {
             let hostnames = super::tls::parse_hostnames(&config.tls_hostnames).map_err(|e| e.message)?;
             let acme = match super::acme::config_from_env(&config.env) {
@@ -125,7 +129,7 @@ impl AppState {
                     None
                 }
             };
-            Some(TlsSource::Local(TlsManager::new(config.tls_dir(), Some(logger.scope("tls")), hostnames, config.tls_cert_file.clone(), config.tls_key_file.clone(), acme)))
+            Some(TlsSource::Local(TlsManager::new(config.tls_dir(), Some(logger.scope("tls").into()), hostnames, config.tls_cert_file.clone(), config.tls_key_file.clone(), acme)))
         };
         Ok(Arc::new(AppState {
             config,
@@ -146,6 +150,7 @@ impl AppState {
             seen_at: Mutex::new(HashMap::new()),
             device_port: Mutex::new(None),
             router: std::sync::OnceLock::new(),
+            supervisor: std::sync::OnceLock::new(),
         }))
     }
 

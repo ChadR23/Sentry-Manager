@@ -106,6 +106,32 @@ pub struct Scope {
     name: String,
 }
 
+/// Where a part that runs in either process logs to: a scope of the app's log,
+/// or the supervisor's log (its console and the app's Logs).
+#[derive(Clone)]
+pub struct LogTo(Arc<dyn Fn(&'static str, String) + Send + Sync>);
+
+impl LogTo {
+    pub fn new(f: impl Fn(&'static str, String) + Send + Sync + 'static) -> LogTo {
+        LogTo(Arc::new(f))
+    }
+    pub fn info(&self, m: impl Into<String>) {
+        (self.0)("info", m.into());
+    }
+    pub fn warn(&self, m: impl Into<String>) {
+        (self.0)("warn", m.into());
+    }
+    pub fn error(&self, m: impl Into<String>) {
+        (self.0)("error", m.into());
+    }
+}
+
+impl From<Scope> for LogTo {
+    fn from(s: Scope) -> LogTo {
+        LogTo::new(move |level, m| s.logger.write(level, &s.name, &m, true))
+    }
+}
+
 impl Scope {
     pub fn debug(&self, m: impl AsRef<str>) {
         self.logger.write("debug", &self.name, m.as_ref(), true);

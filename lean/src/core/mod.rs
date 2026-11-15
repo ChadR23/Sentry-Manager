@@ -20,6 +20,7 @@ pub mod log;
 pub mod routes;
 pub mod server;
 pub mod state;
+pub mod supervised;
 pub mod tls;
 
 pub use config::Config;

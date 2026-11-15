@@ -30,8 +30,8 @@ fn main() {
                 }
             });
         }
-        // the HTTPS certificate authority is core's (supervisor/ctx.rs): none yet
-        Supervisor::new(Config::from_env(), None).run(rx).await
+        // the HTTPS certificate authority and Let's Encrypt: core's (core/supervised.rs)
+        Supervisor::new(Config::from_env(), Some(sentry_lean::core::supervised::tls_factory())).run(rx).await
     });
     std::process::exit(code);
 }
