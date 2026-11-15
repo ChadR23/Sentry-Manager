@@ -530,6 +530,9 @@ impl Stats {
             }
         }
         e.last_sample_at = Some(t);
+        // (the background reads answer between samples, never in the middle of one)
+        let reads = e.reads.clone();
+        let _gate = reads.hold();
         if e.probed_at.is_none_or(|p| t - p >= REPROBE_MS) {
             self.probe(e, t);
         }
@@ -863,7 +866,7 @@ impl Stats {
         };
         reads.wait_idle(Duration::from_secs(2));
         let e = self.e.lock().unwrap();
-        e.filesystems.wait_idle(Duration::from_millis(500));
+        e.filesystems.wait_idle(Duration::from_millis(200));
     }
 
     pub fn stop(&self) {

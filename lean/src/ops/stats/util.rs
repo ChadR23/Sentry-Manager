@@ -219,6 +219,8 @@ pub struct BackgroundReads {
     limit: usize,
     state: Mutex<ReadsState>,
     idle: Condvar,
+    /// held for a whole sample: answers land between samples, never inside one (as Node's promises)
+    gate: Mutex<()>,
 }
 
 impl BackgroundReads {
@@ -229,6 +231,7 @@ impl BackgroundReads {
             limit,
             state: Mutex::new(ReadsState { entries: HashMap::new(), queue: VecDeque::new(), running: 0 }),
             idle: Condvar::new(),
+            gate: Mutex::new(()),
         })
     }
 
@@ -264,6 +267,7 @@ impl BackgroundReads {
             let me = Arc::clone(self);
             std::thread::spawn(move || {
                 let text = (me.read_file)(&file);
+                let _gate = me.gate.lock().unwrap_or_else(|e| e.into_inner());
                 let mut s = me.state.lock().unwrap();
                 if let Some(e) = s.entries.get_mut(&file) {
                     e.prev_text = e.text.take();
@@ -279,6 +283,11 @@ impl BackgroundReads {
                 }
             });
         }
+    }
+
+    /// Held by a sample from its start to its end: no answer lands inside it.
+    pub fn hold(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.gate.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Returns once no read is queued or in flight (or after `most`).
