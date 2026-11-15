@@ -79,15 +79,16 @@ folder, plus one line in `src/api.rs` (its routes) and its dependencies in
 | --- | --- |
 | footage list, recordings, media ranges, speeds, MP4/SEI reading | first slice done (see README.md) |
 | supervisor | ported, see below and `src/supervisor/README.md` |
-| converter | the file-safety and telemetry core ported and tested; job store, job service, IPC and runtime still to do (see below) |
+| converter | file safety, telemetry, job store, job service, runtime and the 22 channels ported and tested (library, not mounted); lanes, auto, benchmark, helper servers still to do (see below) |
 | ops | ported; the encoder block and the wiring are the converter's and core's, see below |
 | viewer | ported except where it needs CAN, Sentry USB status, notifications or accounts; see below |
 | everything else | not started |
 
 ## Converter
 
-Done (`src/converter/`, library only: nothing is wired into `api.rs` yet,
-so no route answers and nothing can touch footage from the lean server):
+Done, round 1 (`src/converter/`, library only: nothing is wired into
+`api.rs` yet, so no route answers and nothing can touch footage from the
+lean server):
 
 - `owned.rs` (server/posixOwnedFs.js, native/noreplace-rename.c): remove,
   promote, linkBackup, replaceOver. Device, inode, size and a SHA-256 taken
@@ -129,29 +130,134 @@ inspections identical, 168 verifier verdicts identical (good, raw,
 truncated, tampered; Quick and Full; with and without a size profile), and
 buildEncodeArgs / decodeAccelArgs over every encoder and option.
 
+Round 2 (also library only; the integrator mounts it, see "Mounting"):
+
+- `jobstore/` (jobStore.js): job.json + job.journal (append, replay, the
+  1,000-record / 16 MiB limits, a torn last line ignored), every manifest
+  rule of normalizeManifest in Node's order with Node's error codes, the
+  normalized keys in Node's order (so the files are byte for byte Node's),
+  preflight limits, quarantine of a corrupt job.json or journal, create /
+  save / load / list (ICU order) / summaries (summary.json with Node's
+  stamp) / transition (the store's own clips are not checked again: an
+  `Item` only exists normalized) / recover (the recovery truth tables) /
+  discard. Kill-point hooks (`StoreHooks`) as crashPoints.js wraps the store.
+- `scanner.rs` (scanner.js, teslaFilename.mjs): the same clips in the same
+  order (groups in groupOrder, then names by UTF-16 code unit), the same
+  skips (hidden, TEMP-/BACKUP-, symbolic links, outside the real source,
+  the destination inside the source), compareScanPaths.
+- `service/` (jobService.js): start (one job at a time unless automatic jobs
+  on separate devices), discovery in batches with follow-up parts at the
+  clip limit, the workers (concurrency, raised and lowered while running),
+  the lead and save-slot rules for job-level fields, per clip: ffprobe,
+  staging or direct, the original's fingerprint, encode (ffmpeg -progress
+  parsed exactly as Node, activeEncodes' live numbers, the stall watch),
+  the telemetry writer, verify, size retries, the under-source retries
+  (85 %, 60 %) and "keep the original" when nothing is saved, the split save
+  (prepare outside the slot, swap/commit in it, rollback record), cleanup
+  by recorded identity, failures, pause (settles when every worker parks),
+  resume, cancel, discard, retry failed, dismiss summary, network waits
+  (paused_network with its recovery record, backoff, "gone while the share
+  answers"), shutdown (the stop record), recovery (every action of
+  performRecovery: resume-queue/discovery/network, copies, replacements
+  step by step through the truth tables, cleanup-and-restart), events and
+  throttled snapshots (publicSnapshot / summaries).
+- `runtime.rs` (runtime.js for the server): `<data>/converter-jobs`, the
+  real temp path, `<temp>/sentry-six-converter`, startup recovery (deferred,
+  then one job after the other), the startup sweeps (unreferenced
+  verification folders, leftover work folders and encodes older than an hour).
+- `ipc.rs` + `ctx.rs` (ipc.js + converterBridge.js): the 22 channels with
+  their checks, error codes and answers (sanitizeSnapshot with the 256-clip
+  cut, sanitizeLiveProgress, responseError), verification never Off for a
+  server start, every folder through the footage guard
+  (`ConverterCtx::resolve_path`), the SSE live updates.
+
+Checked (`cargo test --lib converter`; the end-to-end ones need ffmpeg with
+libx265 and node, `LEAN_CONVERTER_JOB_FIXTURES=<dir>` reuses the clip):
+
+- job store parity (`lean/parity/converterStore.js`): the same scenarios
+  run by both stores give byte-identical job.json and job.journal; each
+  lists and loads the other's jobs (job.json + journal) as its own and
+  continues them (two rounds, each way); summaries equal, Node's
+  summary.json reused; recover() with the same facts takes the same step;
+  7,842 damaged manifests (every field removed, nulled, retyped; unknown
+  and private fields) get the same answer (the same code, or the same job);
+  journalDiscovery and snapshotReuse rules;
+- scanner parity (`lean/parity/converterScan.js`) on a tree with every skip;
+- conversions (`lean/parity/converterJobs.js`): replace direct, replace
+  through staging, separate; the same job (states, result codes, attempts,
+  encoder, counters, summary), the same events (but live-update counts) and
+  byte-identical outputs as Node's run on a copy; Node reads Rust's job;
+- the crash suites (converterCrashReplace, converterCrashSeparate,
+  converterCrashParallel, replaceCrash, crashPoints.js): the converter
+  killed with SIGKILL (its process group) at encode, verify,
+  snapshot-unrecorded, save-recorded, copy-recorded, slot-entered,
+  backup-renamed, backup-recorded, before-final, after-final,
+  final-recorded, quarantined, rolled-back, before-result, after-result,
+  cleanup-unrecorded; on a share without hard links; through staging;
+  separate; three at once; restarted by Rust, and by Node (Rust's
+  interrupted jobs finished by the Node converter). Every time the job
+  finishes by itself, every clip holds its verified H.265 conversion, the
+  original was at its name or its backup at the moment of the kill, and
+  nothing is left behind;
+- restartResume (stopped between clips carries on; paused stays paused and
+  Resume finishes it), a cancel; ffmpeg progress lines; formatBytes ties.
+- bridge parity (`lean/parity/converterBridge.js`): 104 requests (start
+  configs of every kind, ids, folders outside the guard, chooseFolder,
+  oversized payloads, unknown channels) answered the same by Node's bridge
+  and this one on the same stand-in service.
+
+### Mounting (for the integrator)
+
+```rust
+let conv = converter::runtime::Converter::open(converter::runtime::RuntimeOptions {
+    data_path, temp_path, ffmpeg, ffprobe,
+    before_replace_original: Some(/* Sentry USB checksum hook */),
+    tools: None, tune: None, hooks: None,
+})?;
+conv.start()?;                       // recovers unfinished jobs
+let bridge = converter::ipc::Bridge::new(
+    Arc::new(conv.service.clone()), ctx /* Arc<dyn ConverterCtx> */,
+    converter::ipc::capabilities(&conv.staging.capabilities()));
+// POST /api/converter/invoke/:name  -> bridge.invoke(name, body (None if empty), client)  (blocking: spawn_blocking)
+// GET  /api/converter/events?client= -> bridge.attach_events(client, sink); bridge.detach(client) on close
+// on exit: conv.shutdown()
+```
+`ConverterCtx` (ctx.rs): data/temp paths, tool paths, the footage guard,
+the Sentry USB hook, clip_converted (previews), log lines. `Service` also
+answers `active_encodes()`, `slots_of(id)`, `live_jobs()` for stats/ops.
+
 Not done yet, in order:
 
-1. jobStore.js (manifest files, journal, validation, transitions) and the
-   manifest folding of transaction snapshots; reading jobs Node wrote.
-2. jobService.js (the pipeline: discover, stage, encode with progress
-   parsing, telemetry, verify, size retry, save slot, recovery loop,
-   pause/cancel, lanes), runtime.js composition (volume info, device list,
-   lifecycle), scanner.js, convertedIndex.js, mp4Header.js, pictureCheck.js.
-3. ipc.js (22 channels) behind `POST /api/converter/invoke/:name` and the
-   `/api/converter/events` SSE (converterBridge.js: verify never Off, the
-   path guard), converterHost.js.
-4. autoConvert.js, benchmark.js, encodeDevices.js, encoderStats.js
-   (`OpsCtx::encoder_block`), convertStats.js (`OpsCtx::heartbeat_hardware`).
+1. Lanes per GPU (`setLanes`, `devices`, resolveLanes, the device list):
+   a job's lanes are kept and it runs with their total at once on the
+   planner's encoder, as Node does when none of its GPUs is found; GPU
+   decode tiers (zero-copy, GPU, CPU) are not used (CPU decode).
+2. convertedIndex.js and mp4Header.js (discovery skips converted clips
+   without opening them): today every clip is probed in a worker; the
+   result is the same ('already-converted'), it is slower on big archives.
+   pictureCheck.js (only for helper servers).
+3. autoConvert.js (the auto channels answer AUTO_UNAVAILABLE), benchmark.js
+   (runBenchmark answers BENCHMARK_UNAVAILABLE before checking its
+   payload), encodeDevices.js, encoderStats.js (`OpsCtx::encoder_block`),
+   convertStats.js (`OpsCtx::heartbeat_hardware`), holdDiscovered (Sentry
+   USB copies in progress: `Options::skip_discovered` is there for it).
    server/gpu.js and stats/gpu.js are ported in ops (`ops::gpu`,
    `ops::stats::gpu`) for the converter to call.
-5. Helper servers: server/nodes.js, nodeWorker.js, `/node/v1/*`, pinning,
-   tokens.
-6. The Node crash suites (test/converterCrash*, replaceCrash, crashPoints)
-   need the job service; port them with it.
+4. Helper servers: server/nodes.js, nodeWorker.js, `/node/v1/*`, pinning,
+   tokens, remote encodes.
+5. The crash points inside a file copy (temp-created, temp-torn,
+   temp-complete, temp-readback, writer, staging-copy) need an fs hook in
+   staging; round 1's journal crash test covers those records, not a kill.
+   The 'lowered' point (several at once, then one) is not run.
+6. sweepEmptySnapshotFolders (empty verification folders removed while
+   idle) and the converter lifecycle's start retries (converterHost).
 
 Proposed differences (need the owner's OK): a nested box literally named
 `root` is serialized as a box (Node's writer would treat it as the tree
-root); io error texts are Rust's where Node logs its own.
+root); io error texts are Rust's where Node logs its own; Resume of a job
+parked mid-replacement answers once that clip is settled (Node's answer
+waits for the whole relaunched job); a job file holding a lone UTF-16
+surrogate (never written from file names) is read as corrupt.
 
 ## Supervisor
 
