@@ -106,6 +106,13 @@ async function main() {
   const footage = path.join(work, 'footage');
   if (spawnSync(process.execPath, [path.join(__dirname, 'makeArchive.js'), footage], { stdio: 'inherit' }).status !== 0) process.exit(2);
   if (spawnSync(process.execPath, [path.join(__dirname, 'canFixtures.js'), path.join(work, 'fx')], { stdio: 'inherit', env: { ...process.env, CAN_T0: T0 } }).status !== 0) process.exit(2);
+  // every log gets a sidecar (one without waits 10 minutes for it before it is judged)
+  for (const key of fs.readdirSync(path.join(work, 'fx', 'can'))) {
+    for (const f of fs.readdirSync(path.join(work, 'fx', 'can', key))) {
+      const side = path.join(work, 'fx', 'can', key, `${f}.json`);
+      if (f.endsWith('.log.xz') && !fs.existsSync(side)) fs.writeFileSync(side, JSON.stringify({ format: 'canbridge-candump-xz/1', frames: 100, closed_because: 'stop' }));
+    }
+  }
   // Sentry USB's files at the share root (the folder holding RecentClips/)
   const share = fs.existsSync(path.join(footage, 'TeslaCam')) ? path.join(footage, 'TeslaCam') : footage;
   const su = path.join(share, '.sentryusb');
@@ -143,8 +150,10 @@ async function main() {
       checked++;
       const [a, b] = await Promise.all([node.get(p, { 'Accept-Encoding': 'identity' }), lean.get(p, { 'Accept-Encoding': 'identity' })]);
       if (a.status !== b.status) diffs.push(`${p}: status node ${a.status} / lean ${b.status}`);
-      for (const h of ['content-type', 'content-disposition', 'content-length']) if (a.headers.get(h) !== b.headers.get(h) && !(h === 'content-length' && a.status !== 200)) diffs.push(`${p}: ${h} node ${a.headers.get(h)} / lean ${b.headers.get(h)}`);
-      const [x, y] = [Buffer.from(await a.arrayBuffer()), Buffer.from(await b.arrayBuffer())];
+      // (a length Node leaves to chunked encoding is not part of the answer)
+      for (const h of ['content-type', 'content-disposition', 'content-length']) if (a.headers.get(h) !== b.headers.get(h) && !(h === 'content-length' && (a.status !== 200 || a.headers.get(h) === null))) diffs.push(`${p}: ${h} node ${a.headers.get(h)} / lean ${b.headers.get(h)}`);
+      // (each server's own data folder in a message)
+      const [x, y] = [Buffer.from((await a.arrayBuffer())), Buffer.from(await b.arrayBuffer())].map((buf, i) => (buf.includes(`${[node, lean][i].data}`) ? Buffer.from(buf.toString('latin1').split([node, lean][i].data).join('{data}'), 'latin1') : buf));
       if (how === 'sha' && !x.equals(y)) diffs.push(`${p}: the bytes differ (${x.length} / ${y.length}): ${x.toString().slice(0, 120)} / ${y.toString().slice(0, 120)}`);
       return [x, y];
     };
@@ -231,6 +240,23 @@ async function main() {
     ]) {
       const [u, v] = await both(m, p, body);
       compare(`${m} ${p}`, u, v, OWN);
+    }
+    // uploads on (a token each), over plain HTTP: refused; tokens made and revoked; off again
+    {
+      const [u, v] = await both('POST', '/api/can/enable', { vehicleId: VID });
+      compare('POST /api/can/enable', u, v, new Set([...OWN, 'token', 'tokenId', 'fingerprint', 'port']));
+      for (const [s, tok] of [[node, u.token], [lean, v.token]]) s.tok = tok;
+      checked++;
+      const pings = await Promise.all([node, lean].map(async (s) => { const r = await s.get('/api/can/logs/ping', { Authorization: `Bearer ${s.tok}` }); return { status: r.status, body: await r.json() }; }));
+      compare('ping over plain HTTP', pings[0], pings[1]);
+      const [a, b] = await both('POST', '/api/can/tokens', { label: 'Second\u0001 car' });
+      compare('POST /api/can/tokens', a, b, new Set([...OWN, 'token', 'id', 'fingerprint', 'port']));
+      const st = await Promise.all([node.json('/api/can/settings'), lean.json('/api/can/settings')]);
+      compare('/api/can/settings (on)', st[0].body, st[1].body, new Set([...OWN, 'port', 'id', 'createdAt']));
+      const [x, y] = await Promise.all([node.send('DELETE', `/api/can/tokens/${a.id}`), lean.send('DELETE', `/api/can/tokens/${b.id}`)]);
+      compare('DELETE token', await x.json(), await y.json());
+      const [c, d] = await both('POST', '/api/can/disable', {});
+      compare('POST /api/can/disable', c, d);
     }
   } finally {
     await Promise.all([node.stop(), lean.stop()]);

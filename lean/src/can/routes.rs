@@ -21,7 +21,7 @@ use super::tz;
 use super::util;
 use super::zip;
 use axum::body::{Body, Bytes};
-use axum::http::{header, HeaderMap, HeaderValue, Method, Response, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, Method, Response};
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1486,7 +1486,7 @@ impl Can {
                 if times.is_empty() {
                     break;
                 }
-                let t = times[((times.len() - 1).min((f * (times.len() - 1) as f64).floor() as usize))];
+                let t = times[(times.len() - 1).min((f * (times.len() - 1) as f64).floor() as usize)];
                 if !picks.contains(&t) {
                     picks.push(t);
                 }
@@ -1903,7 +1903,7 @@ fn decoded_rows(d: &super::format::Minute, t: f64, from: f64, to: f64, only: Opt
         (Some(p), o) => Some(o.cloned().unwrap_or_default().into_iter().chain(p.inputs.iter().map(|s| s.to_string())).collect()),
         (None, o) => o.cloned(),
     };
-    let read = if plan.is_some() && only.is_none() { None } else { read };
+    // (as Node: with a plan and no list, only the plan's inputs are read)
     let mut pts: Vec<(f64, String, f64)> = Vec::new();
     for (name, list) in &d.signals {
         if read.as_ref().is_some_and(|r| !r.contains(name)) {
