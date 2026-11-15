@@ -10,8 +10,8 @@
 //                   starts at one and adds one while the server keeps up)
 //   codecChecks     clips whose codec is read at once after a scan (inventory.js)
 //   scrubPreviews   Viewer scrub previews made at once (scrubFrames.js)
-//   telemetryReads  clips read whole for their car data at once (telemetry.js;
-//                   each holds one clip in memory)
+//   telemetryReads  clips whose car data (every frame) is read at once (telemetry.js;
+//                   each keeps a worker thread busy)
 //   thumbnails      recording card thumbnails made at once (thumbnails.js)
 //
 // An admin can set any of them by hand (Settings → Advanced → Background
