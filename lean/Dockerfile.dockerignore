@@ -1,0 +1,11 @@
+# The build context of lean/Dockerfile (in place of the repository's .dockerignore):
+# only the lean sources and the stock UI's files.
+*
+!lean/Cargo.toml
+!lean/Cargo.lock
+!lean/src
+!web
+!src/renderer
+!src/shared
+!assets
+**/.DS_Store
