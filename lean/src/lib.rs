@@ -4,20 +4,20 @@
 pub mod api;
 pub mod app;
 pub mod arrival;
-pub mod catalog;
 pub mod converter;
 pub mod core;
 pub mod footage;
-pub mod inventory;
 pub mod jobs;
 pub mod media;
 pub mod mp4;
 pub mod nodes;
 pub mod ops;
-pub mod scanner;
 pub mod sei;
 pub mod speeds;
 pub mod telemetry;
 pub mod thumbnails;
 pub mod supervisor;
 pub mod viewer;
+
+// (moved into footage/; the old paths still work)
+pub use footage::{catalog, inventory, scanner};
