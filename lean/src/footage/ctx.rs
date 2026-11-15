@@ -109,6 +109,49 @@ pub trait Mounter: Send + Sync {
     fn target(&self, id: &str) -> PathBuf;
 }
 
+/// The supervisor's mounter (`supervisor::mounter::Mounter`: `LocalMounter`, or
+/// `IpcMounter` when the root supervisor runs the app) as the footage area calls it,
+/// from the shares' own threads. An error is a failed mount with its message, as
+/// share.js `mount` and smbTest.js treat a mounter that throws.
+pub struct SupervisorMounter {
+    inner: Arc<dyn crate::supervisor::mounter::Mounter>,
+    rt: tokio::runtime::Handle,
+}
+
+impl SupervisorMounter {
+    /// `rt`: the server's runtime (the calls block a share's thread, never a runtime thread).
+    pub fn new(inner: Arc<dyn crate::supervisor::mounter::Mounter>, rt: tokio::runtime::Handle) -> SupervisorMounter {
+        SupervisorMounter { inner, rt }
+    }
+
+    fn answer(r: Result<Value, crate::supervisor::mounter::MountError>) -> MountResult {
+        match r {
+            Ok(v) => MountResult {
+                code: v.get("code").and_then(Value::as_i64).unwrap_or(-1) as i32,
+                output: v.get("output").and_then(Value::as_str).unwrap_or("").to_string(),
+                not_found: v.get("notFound").and_then(Value::as_bool).unwrap_or(false),
+                timed_out: v.get("timedOut").and_then(Value::as_bool).unwrap_or(false),
+            },
+            Err(e) => MountResult { code: -1, output: e.message(), ..Default::default() },
+        }
+    }
+}
+
+impl Mounter for SupervisorMounter {
+    fn mount(&self, id: &str, smb: &Value) -> MountResult {
+        Self::answer(self.rt.block_on(self.inner.mount(id, smb)))
+    }
+    fn unmount(&self, id: &str, lazy: bool) -> MountResult {
+        Self::answer(self.rt.block_on(self.inner.unmount(id, lazy)))
+    }
+    fn forget(&self, id: &str) {
+        let _ = self.rt.block_on(self.inner.forget(id));
+    }
+    fn target(&self, id: &str) -> PathBuf {
+        self.inner.target(id).unwrap_or_default()
+    }
+}
+
 pub trait Ctx: Send + Sync {
     /// The manager database (server/db.js schema): settings, protected, bin_items.
     fn db(&self) -> &ManagerDb;
@@ -162,6 +205,7 @@ pub trait Ctx: Send + Sync {
 pub struct LocalCore {
     db: ManagerDb,
     data: PathBuf,
+    mounter: Mutex<Option<Arc<dyn Mounter>>>,
     pub topics: Mutex<Vec<String>>,
     pub audits: Mutex<Vec<String>>,
     quiet: bool,
@@ -169,12 +213,18 @@ pub struct LocalCore {
 
 impl LocalCore {
     pub fn open(data: &Path) -> rusqlite::Result<LocalCore> {
-        Ok(LocalCore { db: ManagerDb::open(&data.join("manager.db"))?, data: data.to_path_buf(), topics: Mutex::new(Vec::new()), audits: Mutex::new(Vec::new()), quiet: false })
+        Ok(LocalCore { db: ManagerDb::open(&data.join("manager.db"))?, data: data.to_path_buf(), mounter: Mutex::new(None), topics: Mutex::new(Vec::new()), audits: Mutex::new(Vec::new()), quiet: false })
     }
+    /// The mounter SMB vehicles are mounted with (main.rs: the local one, as index.js
+    /// createLocalMounter; core gives the supervisor's IpcMounter when supervised).
+    pub fn set_mounter(&self, m: Arc<dyn Mounter>) {
+        *self.mounter.lock().unwrap() = Some(m);
+    }
+
     /// In memory, no log lines (tests).
     pub fn memory() -> LocalCore {
         let data = std::env::temp_dir().join(format!("lean-core-{}-{}", std::process::id(), super::random_hex(4)));
-        LocalCore { db: ManagerDb::memory(), data, topics: Mutex::new(Vec::new()), audits: Mutex::new(Vec::new()), quiet: true }
+        LocalCore { db: ManagerDb::memory(), data, mounter: Mutex::new(None), topics: Mutex::new(Vec::new()), audits: Mutex::new(Vec::new()), quiet: true }
     }
 }
 
@@ -184,6 +234,9 @@ impl Ctx for LocalCore {
     }
     fn data_dir(&self) -> PathBuf {
         self.data.clone()
+    }
+    fn mounter(&self) -> Option<Arc<dyn Mounter>> {
+        self.mounter.lock().unwrap().clone()
     }
     fn announce(&self, topic: &str) {
         let mut t = self.topics.lock().unwrap();
@@ -206,5 +259,23 @@ impl Ctx for LocalCore {
     }
     fn job_finish(&self, id: i64, status: &str, detail: &str, result: Option<Value>) {
         self.db.job_finish(id, status, detail, result.as_ref());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn supervisor_mounter_answers_as_share_js_reads_them() {
+        let ok = SupervisorMounter::answer(Ok(serde_json::json!({ "code": 32, "output": "mount error(13): Permission denied", "notFound": false, "timedOut": true })));
+        assert_eq!((ok.code, ok.output.as_str(), ok.timed_out, ok.not_found), (32, "mount error(13): Permission denied", true, false));
+        let err = SupervisorMounter::answer(Err(crate::supervisor::mounter::MountError::InvalidId));
+        assert_eq!((err.code, err.output.as_str()), (-1, "Invalid vehicle id."));
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let local = crate::supervisor::mounter::LocalMounter::new("/footage", "/run/x", 0, 0);
+        let m = SupervisorMounter::new(Arc::new(local), rt.handle().clone());
+        assert_eq!(m.target("car"), PathBuf::from("/footage/car"));
+        assert_eq!(m.mount("../etc", &Value::Null).output, "Invalid vehicle id.");
     }
 }

@@ -13,7 +13,7 @@
 use axum::http::Method;
 use sentry_lean::app::App;
 use sentry_lean::core::{self, Access, Reply};
-use sentry_lean::footage::{self, ctx::{Ctx, LocalCore}, vehicles::{Options, Vehicles}};
+use sentry_lean::footage::{self, ctx::{Ctx, LocalCore, SupervisorMounter}, vehicles::{Options, Vehicles}};
 use sentry_lean::{api, catalog::Catalog, thumbnails::Thumbnails};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -85,8 +85,17 @@ async fn run(fd: Option<std::os::fd::OwnedFd>) {
     let catalog = Catalog::open(&data.join("lean-catalog.sqlite")).expect("catalog");
     let app_root = cfg.app_root.clone();
     // (the manager database, logs and jobs: footage/ctx.rs LocalCore until core/ lands)
-    let core: Arc<dyn Ctx> = Arc::new(LocalCore::open(&data).expect("manager database"));
-    let vehicles = Vehicles::new(core.clone(), Options::from_env(&data, &app_root));
+    let local = Arc::new(LocalCore::open(&data).expect("manager database"));
+    let options = Options::from_env(&data, &app_root);
+    // SMB vehicles are mounted by a local mounter, as index.js does when it runs without the
+    // root supervisor (createLocalMounter: PUID / PGID, credentials in RUN_DIR); with the
+    // supervisor, core passes its IpcMounter here instead (src/supervisor/README.md)
+    let uid = std::env::var("PUID").ok().and_then(|v| v.parse().ok()).unwrap_or(unsafe { libc::getuid() });
+    let gid = std::env::var("PGID").ok().and_then(|v| v.parse().ok()).unwrap_or(unsafe { libc::getgid() });
+    let mounter = sentry_lean::supervisor::mounter::LocalMounter::new(options.footage_root.clone(), PathBuf::from(std::env::var("RUN_DIR").ok().filter(|v| !v.is_empty()).unwrap_or_else(|| "/run/sentry-six-manager".into())), uid, gid);
+    local.set_mounter(Arc::new(SupervisorMounter::new(Arc::new(mounter), tokio::runtime::Handle::current())));
+    let core: Arc<dyn Ctx> = local;
+    let vehicles = Vehicles::new(core.clone(), options);
     // (two at once, as the Node server's default)
     let thumbnails = Thumbnails::new(data.join("thumbnails"), cfg.ffmpeg.clone(), 2);
     let app = App::new(vehicles, core, catalog, app_root, thumbnails);

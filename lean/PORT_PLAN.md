@@ -376,8 +376,10 @@ Left to do:
   the CAN index), savings (`saved`, `reset_saved`), notifications
   (`share_status` -> syncShare), `vehicle_removed` (savings, archive gaps,
   Sentry USB, drive data, nodes).
-- The supervisor's `Mounter` (mounter.js / the IPC mounter); without one an
-  SMB vehicle's share says "Mount failed: An SMB vehicle needs a mounter.".
+- Share mounts go through the supervisor's `Mounter` (`ctx::SupervisorMounter`
+  wraps `supervisor::mounter::Mounter`): main.rs gives the `LocalMounter`, as
+  index.js does without the supervisor; when core wires the supervisor link it
+  passes `IpcMounter` the same way (`LocalCore::set_mounter`).
 - Stars are sorted by clip with byte order; Node uses `localeCompare`
   (ICU). The same for clip keys (YYYY-MM-DD_HH-MM-SS), which is all a star
   can hold.
