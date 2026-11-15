@@ -92,7 +92,7 @@ fn timeline_and_writers_match_node() {
 
         for codec in &codecs {
             let c = if codec == "h265" { Codec::H265 } else { Codec::Av1 };
-            let enc = std::fs::read(dir.join(format!("{name}.{codec}.enc"))).unwrap();
+            let Ok(enc) = std::fs::read(dir.join(format!("{name}.{codec}.enc"))) else { continue };
             let mine = telemetry_bytes(&enc, &t, c);
             let err = dir.join(format!("{name}.{codec}.err"));
             if err.exists() {

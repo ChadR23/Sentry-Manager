@@ -76,6 +76,8 @@ async function main() {
     const timeline = extractH264TelemetryTimeline(source);
     fs.writeFileSync(path.join(dir, `${name}.json`), json(summary(timeline)));
     for (const [codec, encoder, inject, inspect] of codecs) {
+      // (SVT-AV1 can stall on a clip of a few frames; the H.265 case covers it)
+      if (codec === 'av1' && timeline.samples.length < 10) continue;
       const enc = path.join(dir, `${name}.${codec}.enc`);
       const args = buildEncodeArgs({ codec, encoder, bitrate: 200_000, holdFrames: leadInHoldFrames(timeline) });
       const r = await runProcess('ffmpeg', ['-nostdin', '-v', 'error', '-y', '-i', file, ...args, '-an', '-f', 'mp4', enc]);

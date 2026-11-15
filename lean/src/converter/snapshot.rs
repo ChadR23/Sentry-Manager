@@ -237,6 +237,12 @@ impl Registry {
         Ok(s)
     }
 
+    /// A snapshot this process made earlier, known again (tests, and a
+    /// runtime that hands over its own artifacts).
+    pub fn insert_live(&self, a: Artifact) {
+        self.live.lock().unwrap().insert(a.token.clone(), a);
+    }
+
     /// validate(artifact, { mode })
     pub fn validate(&self, a: &Artifact, mode: Validate) -> bool {
         if !self.structurally_owned(a) {
