@@ -83,6 +83,7 @@ folder, plus one line in `src/api.rs` (its routes) and its dependencies in
 | ops | most of it ported, see below |
 | viewer | ported except where it needs CAN, Sentry USB status, notifications or accounts; see below |
 | core | ported, see below and `src/core/README.md` |
+| `footage/` | ported, with what is left listed below |
 | everything else | not started |
 
 ## Converter
@@ -315,6 +316,71 @@ Not done yet:
 - the coordinator keeps one speed index: `app.rs` skips its SQLite index
   while the viewer runs, and the old `/api/speeds*` code in `api.rs` is
   shadowed by the viewer's routes.
+## Footage (`src/footage/`)
+
+What it needs from core is `footage/ctx.rs` (`Ctx`: the manager database,
+announce, audit, logs, jobs, the converter's clips in hand, the supervisor's
+`Mounter`, and hooks for the CAN, savings, notifications and Sentry USB
+areas; `Caller` for who asks). `LocalCore` stands in until core lands: it
+opens `DATA_PATH/manager.db` with server/db.js's tables (settings,
+protected, bin_items, jobs). Routes: `footage/routes.rs` `handle`, called
+from `api.rs` (`footage_routes`); access checks (admin, viewer, CSRF origin)
+are core's, `Caller::require_confirmed` is the 🔑.
+
+Moved here, unchanged at first (later commits edit them in place):
+`src/footage.rs` -> `footage/names.rs` (re-exported as `crate::footage::*`),
+`src/catalog.rs`, `src/inventory.rs`, `src/scanner.rs` -> `footage/`
+(re-exported from `lib.rs` as `crate::catalog`, `crate::inventory`,
+`crate::scanner`). `app::Vehicle` is `footage::vehicles::Vehicle` now and
+`App.vehicles` the vehicle manager.
+
+| File | Node | State |
+| --- | --- | --- |
+| `vehicles.rs` | vehicles.js | done: several vehicles in the `vehicles` setting, folder and SMB sources, checkFolder / overlap / protected folders, ids, add / update / remove, publicView, studioRoot, bootstrap from FOOTAGE_PATH / SMB_SHARE |
+| `smb.rs` | mountSpec.js (parseShare, normalizeSmb, securitySummary) | done; mountArgs and the credentials file are the supervisor's |
+| `share.rs` | share.js | done: health every 30 s, the write check step by step, read-only mounts (mount table or EROFS) never written, remount after two failures, backoff, status and health events; the mount goes through `ctx::Mounter` |
+| `routes.rs` test-smb | smbTest.js | done (rate limit, one at a time); needs the supervisor's mounter to connect |
+| `cars.rs` | web/carModels.js normalizeCar, choices, resolveCar without CAN | done; the VIN from CAN logs is the CAN area's (`Ctx::car_summary`) |
+| `scanner.rs`, `catalog.rs`, `inventory.rs` | scanner.js, catalog.js, inventory.js | done: light rescans (every sixth full, every SCAN_INTERVAL_MINUTES), the first scan resumed from the catalog's last finished scan of the same folder (`scans` row: root, totals), birth times, protected, rebuild after moves (the catalog follows), arrivedClips, totals, days, footageDays, codecs |
+| `bin.rs` | recycleBin.js | done: trash (pending record first, protection read again under the lock, clips in hand refused, put back on failure, empty folders removed), reconcile (settle pending, adopt unlisted), restore (conflicts stay), delete forever, empty, thumbnail source |
+| `safe_fs.rs` | safeFs.js | done: O_NOFOLLOW walk from the real root, *at calls on the pinned folder |
+| `deleted_clips.rs` | deletedClips.js | done |
+| `policies.rs` | policies.js | done: normalize, ruleKey, preview (keepDays, maxGB), run with `expect`, empty after N days, the minute tick |
+| `stars.rs` | index.js /api/stars | done |
+| `integrity.rs` | integrity.js | done (results in `DATA_PATH/integrity`, resumed after a restart) |
+| `tz.rs` | Intl time zones | IANA names (any case) and offsets, chrono-tz |
+
+Checked: `cargo test` (unit tests in each file and `tests/footage.rs` on
+generated archives); `node lean/parity/compareFootage.js` (97 writing
+requests to Node and lean, each on its own copy of the archive: no
+differences); `node lean/parity/contractFootage.js` against goldens from
+`tools/contract/fixture.js` + `record.js` (30 of 30 the same);
+`node lean/parity/compare.js` still 133 of 133.
+
+Left to do:
+
+- `arrivalChecksums.js`: not ported. It writes the Sentry USB checksum record
+  through `originalChecksums.js` (the converter's) and asks `sentryUsb.holds`
+  (the Sentry USB area); port it with those, on `inventory` file entries
+  (`birthtime_ms`, `arrived_clips` are there).
+- `archiveGap.js`: the viewer area's per the table above (the day list's
+  `archive` and `carFiles`); `deleted_clips::list` is what it reads from here.
+- The catalog stays in `lean-catalog.sqlite` with its own tables, not Node's
+  `catalog_files` / `clip_codecs` / `catalog_dirs` / `catalog_scans` in
+  manager.db: after the switch the first scan is a full one (and codecs are
+  read once more). Port the Node tables if that matters.
+- Core wiring: `Caller` from the session (now always the local admin, its
+  password counted as given), jobs into core's job list, `announce` onto
+  `/api/events`, audit into the audit log, the CAN hooks (`can_with`,
+  `can_delete_with`, `on_deleted` -> canPrune, the car-model change kicking
+  the CAN index), savings (`saved`, `reset_saved`), notifications
+  (`share_status` -> syncShare), `vehicle_removed` (savings, archive gaps,
+  Sentry USB, drive data, nodes).
+- The supervisor's `Mounter` (mounter.js / the IPC mounter); without one an
+  SMB vehicle's share says "Mount failed: An SMB vehicle needs a mounter.".
+- Stars are sorted by clip with byte order; Node uses `localeCompare`
+  (ICU). The same for clip keys (YYYY-MM-DD_HH-MM-SS), which is all a star
+  can hold.
 
 ## Known differences
 
