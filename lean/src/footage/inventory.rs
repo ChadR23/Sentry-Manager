@@ -329,3 +329,24 @@ pub fn event_pick(data: &Value) -> Option<Map<String, Value>> {
     }
     Some(pick)
 }
+
+/// A recording is protected when any of its files is (inventory.js buildRecordings protectedRels).
+pub fn mark_protected(recs: &mut [Recording], protected: &std::collections::HashSet<String>) {
+    for r in recs {
+        r.protected = !protected.is_empty() && r.files.iter().any(|(rel, _)| protected.contains(rel));
+    }
+}
+
+/// inventory.js arrivedClips: the clips that reached the share since `since_ms` (their birth
+/// time, else ctime): (sentry, dashcam).
+pub fn arrived_clips(files: &[FileEntry], since_ms: f64) -> (usize, usize) {
+    let (mut sentry, mut dashcam) = (0, 0);
+    for f in files.iter().filter(|f| f.kind == Kind::Clip) {
+        let at = if f.birthtime_ms > 0.0 { f.birthtime_ms } else { f.ctime_ms };
+        if !(at >= since_ms) {
+            continue;
+        }
+        if f.typ == "SentryClips" { sentry += 1 } else { dashcam += 1 }
+    }
+    (sentry, dashcam)
+}

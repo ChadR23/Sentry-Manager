@@ -3,6 +3,7 @@
 //! "Not found", as on the Node server.
 
 use crate::app::{App, Vehicle};
+use crate::footage;
 use crate::inventory::{self, num, Recording};
 use crate::media;
 use axum::body::Body;
@@ -159,41 +160,6 @@ fn join(root: &Path, rel: &str) -> String {
     path_str(&root.join(rel))
 }
 
-fn policy_default() -> Value {
-    json!({ "enabled": false, "runAt": "03:30", "keepDays": { "Recent": null, "Sentry": null, "Saved": null, "Other": null },
-        "binDays": null, "maxGB": null, "lastRunAt": null, "lastResult": null })
-}
-
-/// (free, total) bytes of the file system holding p.
-fn disk_space(p: &Path) -> Option<(u64, u64)> {
-    let c = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()).ok()?;
-    let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
-    if unsafe { libc::statvfs(c.as_ptr(), &mut s) } != 0 {
-        return None;
-    }
-    Some((s.f_bavail as u64 * s.f_frsize as u64, s.f_blocks as u64 * s.f_frsize as u64))
-}
-
-fn vehicle_summary(app: &App, v: &Vehicle) -> Value {
-    let st = app.state_of(&v.id);
-    let root = path_str(&v.root);
-    let readable = std::fs::read_dir(&v.root).is_ok();
-    let space = disk_space(&v.root);
-    json!({
-        "id": v.id, "name": v.name, "timezone": v.timezone,
-        "source": { "type": "path", "path": root }, "root": root, "studioRoot": path_str(&app.studio_root(v)),
-        // (the lean server never writes to the footage, so it does not test whether it could)
-        "share": { "mode": "local", "share": null, "path": root, "healthy": readable, "mounted": false, "readable": readable, "writable": null,
-            "totalBytes": space.map(|s| s.1), "freeBytes": space.map(|s| s.0), "lastError": null, "network": false },
-        "security": null,
-        "inventory": st.as_ref().filter(|s| s.scanned).map(|s| inventory::totals(&s.recordings, s.files, s.scanned_at.unwrap_or(0.0))),
-        "scanning": st.as_ref().is_some_and(|s| s.scanning),
-        "binBytes": 0, "binItems": 0, "policy": policy_default(), "saved": { "bytes": 0, "clips": 0 },
-        "storage": space.map(|(free, total)| json!({ "free": free, "total": total, "perDay": 0, "daysLeft": null, "capped": false })),
-        "car": null
-    })
-}
-
 fn state_fields(st: Option<&crate::app::VehicleState>, out: &mut Map<String, Value>) {
     out.insert("scannedAt".into(), st.and_then(|s| s.scanned_at).filter(|t| *t != 0.0).map_or(Value::Null, num));
     out.insert("scanning".into(), json!(st.is_some_and(|s| s.scanning)));
@@ -322,7 +288,7 @@ fn day_speeds(app: &App, v: &Vehicle, q: &HashMap<String, String>) -> Res {
 }
 
 fn roots(app: &App) -> Vec<PathBuf> {
-    app.vehicles.iter().map(|v| v.root.clone()).collect()
+    app.vehicles.list().into_iter().map(|v| v.root).collect()
 }
 
 fn media(app: &App, method: &Method, headers: &HeaderMap, q: &HashMap<String, String>) -> Res {
@@ -393,6 +359,36 @@ fn ops_route(app: &Arc<App>, method: &Method, path: &str, q: &HashMap<String, St
     b.body(Body::from(reply.body)).unwrap()
 }
 
+/// The footage area's routes (footage/routes.rs), as the router would answer them.
+fn footage_routes(app: &Arc<App>, method: &Method, seg: &[&str], q: &HashMap<String, String>, headers: &HeaderMap, body: Option<&Value>) -> Option<Res> {
+    // (router.js: each part decoded; one that does not decode matches no route)
+    let parts: Option<Vec<String>> = seg.iter().map(|s| decode(s, false)).collect();
+    let parts = parts?;
+    let refs: Vec<&str> = parts.iter().map(String::as_str).collect();
+    let m = if method == Method::HEAD { "GET" } else { method.as_str() };
+    // (no accounts yet: the one local admin, its password counted as given; see README.md)
+    let who = footage::ctx::Caller { user: Some("local".into()), client: "127.0.0.1".into(), admin_here: true, confirmed: true };
+    let answer = footage::routes::handle(app, &who, m, &refs, q, body)?;
+    Some(match answer {
+        Ok(footage::routes::Reply::Json(v)) => ok(v),
+        Ok(footage::routes::Reply::Thumbnail { file, clip }) => {
+            let roots = roots(app);
+            if !clip {
+                return Some(media::send_media(method, headers, &file, &roots));
+            }
+            match app.thumbnails.for_clip(&file) {
+                Ok(Some(t)) => media::send_media(method, headers, &t, std::slice::from_ref(&app.thumbnails.dir)),
+                Ok(None) => error(StatusCode::NOT_FOUND, "No thumbnail"),
+                Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "Internal error"),
+            }
+        }
+        Err(f) => {
+            let (status, v) = f.body();
+            json_response(StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), &v)
+        }
+    })
+}
+
 pub fn api(app: &Arc<App>, method: &Method, path: &str, q: &HashMap<String, String>, headers: &HeaderMap, body: &[u8]) -> Res {
     let seg: Vec<&str> = path.trim_start_matches("/api/").split('/').collect();
     let get = method == Method::GET || method == Method::HEAD;
@@ -404,17 +400,19 @@ pub fn api(app: &Arc<App>, method: &Method, path: &str, q: &HashMap<String, Stri
             return res;
         }
     }
-    let vehicle = |id: &str| app.vehicle(&decode(id, false).unwrap_or_default()).cloned();
+    // http.js readJson: an empty body is none
+    let json_body: Option<Value> = if String::from_utf8_lossy(body).trim().is_empty() { None } else {
+        match serde_json::from_slice(body) { Ok(v) => Some(v), Err(_) => return error(StatusCode::BAD_REQUEST, "Invalid JSON") }
+    };
+    if let Some(r) = footage_routes(app, method, &seg, q, headers, json_body.as_ref()) {
+        return r;
+    }
+    let vehicle = |id: &str| app.vehicle(&decode(id, false).unwrap_or_default());
     match (get, seg.as_slice()) {
         (true, ["auth", "me"]) => ok(json!({ "user": "local", "role": "admin", "twoFactor": false, "needsSetup": false, "secure": false, "fingerprint": null })),
-        (true, ["vehicles"]) => {
-            let days: std::collections::BTreeSet<String> =
-                app.vehicles.iter().filter_map(|v| app.state_of(&v.id)).flat_map(|s| inventory::footage_days(&s.recordings)).collect();
-            ok(json!({ "vehicles": app.vehicles.iter().map(|v| vehicle_summary(app, v)).collect::<Vec<_>>(), "footageDays": days.len(), "carModels": [] }))
-        }
         (_, ["vehicles", id, rest @ ..]) => {
             let Some(v) = vehicle(id) else {
-                return if matches!((get, rest), (true, ["days"] | ["recordings"] | ["recordings", _] | ["recordings", _, "thumbnail"] | ["speeds"]) | (false, ["scan"])) {
+                return if matches!((get, rest), (true, ["days"] | ["recordings"] | ["recordings", _] | ["recordings", _, "thumbnail"] | ["speeds"])) {
                     error(StatusCode::NOT_FOUND, "No such vehicle.")
                 } else {
                     error(StatusCode::NOT_FOUND, "Not found")
@@ -426,10 +424,6 @@ pub fn api(app: &Arc<App>, method: &Method, path: &str, q: &HashMap<String, Stri
                 (true, ["recordings", rid]) => recording(app, &v, &decode(rid, false).unwrap_or_default()),
                 (true, ["recordings", rid, "thumbnail"]) => thumbnail(app, &v, &decode(rid, false).unwrap_or_default(), method, headers),
                 (true, ["speeds"]) => day_speeds(app, &v, q),
-                (false, ["scan"]) if method == Method::POST => {
-                    app.scan(&v.id, false);
-                    ok(json!({ "ok": true, "jobId": format!("scan:{}", v.id) }))
-                }
                 _ => error(StatusCode::NOT_FOUND, "Not found"),
             }
         }

@@ -112,6 +112,8 @@ pub trait Mounter: Send + Sync {
 pub trait Ctx: Send + Sync {
     /// The manager database (server/db.js schema): settings, protected, bin_items.
     fn db(&self) -> &ManagerDb;
+    /// DATA_PATH: the footage check keeps its results in <data>/integrity.
+    fn data_dir(&self) -> PathBuf;
     /// A live-update topic for /api/events (batched by core).
     fn announce(&self, topic: &str);
     /// A line in the audit log (logger.scope('audit')).
@@ -138,6 +140,8 @@ pub trait Ctx: Send + Sync {
     fn saved(&self, _vehicle_id: &str) -> Value {
         serde_json::json!({ "bytes": 0, "clips": 0 })
     }
+    /// Space saved starts over for a vehicle (savings.js reset).
+    fn reset_saved(&self, _vehicle_id: &str) {}
     /// The car a vehicle is (index.js withCar's `car`), from the CAN area.
     fn car_summary(&self, _vehicle: &Value) -> Value {
         Value::Null
@@ -157,6 +161,7 @@ pub trait Ctx: Send + Sync {
 /// The stand-in core (see the top of this file).
 pub struct LocalCore {
     db: ManagerDb,
+    data: PathBuf,
     pub topics: Mutex<Vec<String>>,
     pub audits: Mutex<Vec<String>>,
     quiet: bool,
@@ -164,17 +169,21 @@ pub struct LocalCore {
 
 impl LocalCore {
     pub fn open(data: &Path) -> rusqlite::Result<LocalCore> {
-        Ok(LocalCore { db: ManagerDb::open(&data.join("manager.db"))?, topics: Mutex::new(Vec::new()), audits: Mutex::new(Vec::new()), quiet: false })
+        Ok(LocalCore { db: ManagerDb::open(&data.join("manager.db"))?, data: data.to_path_buf(), topics: Mutex::new(Vec::new()), audits: Mutex::new(Vec::new()), quiet: false })
     }
     /// In memory, no log lines (tests).
     pub fn memory() -> LocalCore {
-        LocalCore { db: ManagerDb::memory(), topics: Mutex::new(Vec::new()), audits: Mutex::new(Vec::new()), quiet: true }
+        let data = std::env::temp_dir().join(format!("lean-core-{}-{}", std::process::id(), super::random_hex(4)));
+        LocalCore { db: ManagerDb::memory(), data, topics: Mutex::new(Vec::new()), audits: Mutex::new(Vec::new()), quiet: true }
     }
 }
 
 impl Ctx for LocalCore {
     fn db(&self) -> &ManagerDb {
         &self.db
+    }
+    fn data_dir(&self) -> PathBuf {
+        self.data.clone()
     }
     fn announce(&self, topic: &str) {
         let mut t = self.topics.lock().unwrap();

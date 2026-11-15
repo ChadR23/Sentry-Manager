@@ -6,6 +6,8 @@ use crate::inventory::{self, Codecs, Recording};
 use crate::jobs::{par_each, Jobs, Priority};
 use crate::scanner::{self, FileEntry};
 use crate::thumbnails::Thumbnails;
+use crate::footage::ctx::{Ctx, Fail, Level, Res};
+use crate::footage::vehicles::Vehicles;
 use crate::{footage, mp4, speeds};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -17,13 +19,8 @@ const SCAN_THREADS: usize = 16;
 /// Every sixth background rescan looks at every file (inventory.js).
 const LIGHT_SCANS: u32 = 5;
 
-#[derive(Debug, Clone)]
-pub struct Vehicle {
-    pub id: String,
-    pub name: String,
-    pub timezone: String,
-    pub root: PathBuf,
-}
+// (vehicles live in the footage area now: footage/vehicles.rs)
+pub use crate::footage::vehicles::Vehicle;
 
 #[derive(Default, Clone)]
 pub struct VehicleState {
@@ -37,6 +34,10 @@ pub struct VehicleState {
     pub scanned: bool,
     pub light_scans: u32,
     pub error_count: usize,
+    /// every file of the last scan, in the scan's order (inventory.js entry.files)
+    pub file_list: Arc<Vec<FileEntry>>,
+    pub dirs: Arc<HashMap<String, f64>>,
+    pub started_at: f64,
 }
 
 #[derive(Default, Clone)]
@@ -50,14 +51,17 @@ pub struct SpeedStatus {
 }
 
 pub struct App {
-    pub vehicles: Vec<Vehicle>,
+    pub vehicles: Arc<Vehicles>,
+    /// what the footage area needs from core (footage/ctx.rs)
+    pub core: Arc<dyn Ctx>,
+    /// the footage area's own state (Recycle Bin locks, footage checks, scans running)
+    pub footage: footage::State,
     pub catalog: Catalog,
     pub jobs: Arc<Jobs>,
     pub state: RwLock<HashMap<String, VehicleState>>,
     pub speeds: Mutex<SpeedStatus>,
     pub app_root: PathBuf,
     pub thumbnails: Thumbnails,
-    studio_roots: Mutex<HashMap<String, (f64, PathBuf)>>,
 }
 
 /// A vehicle's name as vehicles.js normalizeVehicle keeps it: `String(name).trim().slice(0, 60)`
@@ -140,21 +144,22 @@ pub fn find_clip_root(root: &Path) -> Option<PathBuf> {
 
 impl App {
     /// `thumbnails`: made from clips with ffmpeg, cached in DATA_PATH/thumbnails.
-    pub fn new(vehicles: Vec<Vehicle>, catalog: Catalog, app_root: PathBuf, thumbnails: Thumbnails) -> Arc<App> {
+    pub fn new(vehicles: Arc<Vehicles>, core: Arc<dyn Ctx>, catalog: Catalog, app_root: PathBuf, thumbnails: Thumbnails) -> Arc<App> {
         Arc::new(App {
             vehicles,
+            core,
+            footage: footage::State::default(),
             catalog,
             jobs: Jobs::start(0),
             state: RwLock::new(HashMap::new()),
             speeds: Mutex::new(SpeedStatus::default()),
             app_root,
             thumbnails,
-            studio_roots: Mutex::new(HashMap::new()),
         })
     }
 
-    pub fn vehicle(&self, id: &str) -> Option<&Vehicle> {
-        self.vehicles.iter().find(|v| v.id == id)
+    pub fn vehicle(&self, id: &str) -> Option<Vehicle> {
+        self.vehicles.get(id)
     }
 
     pub fn state_of(&self, id: &str) -> Option<VehicleState> {
@@ -163,61 +168,112 @@ impl App {
 
     /// vehicles.js studioRoot (kept a minute)
     pub fn studio_root(&self, v: &Vehicle) -> PathBuf {
-        let now = scanner::now_ms();
-        if let Some((at, p)) = self.studio_roots.lock().unwrap().get(&v.id) {
-            if now - at < 60_000.0 {
-                return p.clone();
-            }
-        }
-        let p = find_clip_root(&v.root).unwrap_or_else(|| v.root.clone());
-        self.studio_roots.lock().unwrap().insert(v.id.clone(), (now, p.clone()));
-        p
+        self.vehicles.studio_root(v)
     }
 
     /// Queue a scan of a vehicle (light: reuse unchanged folders). Returns whether it was queued.
     pub fn scan(self: &Arc<Self>, id: &str, light: bool) -> bool {
         let app = self.clone();
         let vid = id.to_string();
-        self.jobs.submit(format!("scan:{id}"), Priority::High, move || app.run_scan(&vid, light))
+        self.jobs.submit(format!("scan:{id}"), Priority::High, move || {
+            let _ = app.scan_now(&vid, light);
+            app.core.announce("inventory");
+        })
     }
 
-    fn run_scan(self: &Arc<Self>, vid: &str, light: bool) {
-        let Some(v) = self.vehicle(vid).cloned() else { return };
-        let lights = {
+    /// inventory.js scan, on this thread: a scan already running is waited for, not run twice.
+    /// `light`: the background rescan (unchanged folders keep what they knew; every sixth is
+    /// full); the first light scan after a start begins from the catalog's last scan of the
+    /// same folder.
+    pub fn scan_now(self: &Arc<Self>, vid: &str, light: bool) -> Res<VehicleState> {
+        let v = self.vehicle(vid).ok_or_else(|| Fail::new(404, "No such vehicle."))?;
+        if self.vehicles.share(vid).is_some_and(|s| !s.is_healthy()) {
+            return Err(Fail::new(503, format!("{}: the share is not available.", v.name)));
+        }
+        let lock = self.footage.scan_lock(vid);
+        let asked = lock.done.load(std::sync::atomic::Ordering::SeqCst);
+        let _one = lock.running.lock().unwrap();
+        if lock.done.load(std::sync::atomic::Ordering::SeqCst) != asked {
+            // (one finished while this waited: its answer is this one's)
+            return self.state_of(vid).ok_or_else(|| Fail::internal("no scan"));
+        }
+        let prev = {
             let mut st = self.state.write().unwrap();
             let e = st.entry(vid.to_string()).or_default();
             e.scanning = true;
-            e.light_scans
+            e.clone()
         };
-        let reuse = light && lights < LIGHT_SCANS;
-        let prev = if reuse { self.catalog.previous(vid).ok().filter(|p| !p.files.is_empty() || !p.dirs.is_empty()) } else { None };
-        let res = scanner::scan(&v.root, prev.as_ref(), SCAN_THREADS);
-        drop(prev);
-        let recs = inventory::build_recordings(&res.files, vid);
-        if let Err(e) = self.catalog.save_scan(vid, &res) {
-            eprintln!("{}: saving the catalog failed: {e}", v.name);
+        let root = v.root.to_string_lossy().into_owned();
+        let mut lights = prev.light_scans;
+        let mut resumed = false;
+        let previous = if light && prev.scanned && lights < LIGHT_SCANS {
+            Some(scanner::Previous { files: prev.file_list.iter().map(|f| (f.rel.clone(), f.clone())).collect(), dirs: (*prev.dirs).clone(), started_ms: None })
+        } else if light && !prev.scanned {
+            let p = self.catalog.resume(vid, &root).unwrap_or_else(|e| {
+                self.core.log("inventory", Level::Warn, &format!("Footage catalog not read: {e}"));
+                None
+            });
+            if p.is_some() {
+                lights = 0;
+                resumed = true;
+            }
+            p
+        } else {
+            None
+        };
+        let reuse = previous.is_some();
+        let res = scanner::scan(&v.root, previous.as_ref(), SCAN_THREADS);
+        drop(previous);
+        let mut recs = inventory::build_recordings(&res.files, vid);
+        inventory::mark_protected(&mut recs, &self.core.db().protected_set(vid));
+        if let Err(e) = self.catalog.save_scan(vid, &root, &res) {
+            self.core.log("inventory", Level::Warn, &format!("Footage catalog not updated: {e}"));
         }
         let codecs = self.codec_map(vid);
-        eprintln!("{}: {} recordings, {} files ({:.1}s{})", v.name, recs.len(), res.files.len(), res.duration_ms / 1000.0, if reuse { format!(", {} unchanged", res.reused) } else { String::new() });
-        {
-            let mut st = self.state.write().unwrap();
-            let e = st.entry(vid.to_string()).or_default();
-            *e = VehicleState {
-                recordings: Arc::new(recs),
-                codecs: Arc::new(codecs),
-                files: res.files.len(),
-                scanned_at: Some(res.scanned_at),
-                scanning: false,
-                last_error: None,
-                scanned: true,
-                light_scans: if reuse { lights + 1 } else { 0 },
-                error_count: res.errors.len(),
-            };
-        }
+        self.core.log("inventory", Level::Info, &format!("{}: {} recordings, {} files ({:.1}s{})", v.name, recs.len(), res.files.len(), res.duration_ms / 1000.0,
+            if reuse { format!(", {} unchanged{}", res.reused, if resumed { " since the last run" } else { "" }) } else { String::new() }));
+        let files = Arc::new(res.files);
+        let entry = VehicleState {
+            recordings: Arc::new(recs),
+            codecs: Arc::new(codecs),
+            files: files.len(),
+            scanned_at: Some(res.scanned_at),
+            scanning: false,
+            last_error: None,
+            scanned: true,
+            light_scans: if reuse { lights + 1 } else { 0 },
+            error_count: res.errors.len(),
+            file_list: files.clone(),
+            dirs: Arc::new(res.dirs),
+            started_at: res.started_at,
+        };
+        self.state.write().unwrap().insert(vid.to_string(), entry.clone());
+        lock.done.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let app = self.clone();
         let id = vid.to_string();
-        let files = Arc::new(res.files);
         self.jobs.submit(format!("codecs:{vid}"), Priority::Normal, move || app.probe_codecs(&id, &files));
+        footage::integrity::resume(self, vid);
+        Ok(entry)
+    }
+
+    /// inventory.js rebuild: the recordings again after files moved (trash, restore, protect),
+    /// without a scan; the catalog follows.
+    pub fn rebuild(&self, vid: &str, files: Option<Vec<FileEntry>>) {
+        let protected = self.core.db().protected_set(vid);
+        let mut st = self.state.write().unwrap();
+        let Some(e) = st.get_mut(vid).filter(|e| e.scanned) else { return };
+        if let Some(f) = files {
+            e.file_list = Arc::new(f);
+            e.files = e.file_list.len();
+        }
+        let mut recs = inventory::build_recordings(&e.file_list, vid);
+        inventory::mark_protected(&mut recs, &protected);
+        e.recordings = Arc::new(recs);
+        let list = e.file_list.clone();
+        drop(st);
+        if let Err(err) = self.catalog.sync_files(vid, &list) {
+            self.core.log("inventory", Level::Warn, &format!("Footage catalog not updated: {err}"));
+        }
     }
 
     fn codec_map(&self, vid: &str) -> Codecs {
@@ -226,7 +282,7 @@ impl App {
 
     /// Read the codec of every clip that is new or changed since it was last read; forget clips that are gone.
     fn probe_codecs(self: &Arc<Self>, vid: &str, files: &[FileEntry]) {
-        let Some(v) = self.vehicle(vid).cloned() else { return };
+        let Some(v) = self.vehicle(vid) else { return };
         let known = self.catalog.codecs(vid).unwrap_or_default();
         let present: HashSet<&str> = files.iter().map(|f| f.rel.as_str()).collect();
         let gone: Vec<String> = known.keys().filter(|r| !present.contains(r.as_str())).cloned().collect();
@@ -245,6 +301,9 @@ impl App {
             if let Some(e) = self.state.write().unwrap().get_mut(vid) {
                 e.codecs = Arc::new(codecs);
             }
+            if !set.is_empty() {
+                self.core.announce("inventory");
+            }
         }
         let app = self.clone();
         let id = vid.to_string();
@@ -255,7 +314,7 @@ impl App {
     }
 
     fn index_speeds(self: &Arc<Self>, vid: &str) {
-        let Some(v) = self.vehicle(vid).cloned() else { return };
+        let Some(v) = self.vehicle(vid) else { return };
         {
             let mut s = self.speeds.lock().unwrap();
             s.running = true;

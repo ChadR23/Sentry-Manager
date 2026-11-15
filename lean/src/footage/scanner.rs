@@ -34,6 +34,8 @@ pub struct FileEntry {
     pub size: u64,
     pub mtime_ms: f64,
     pub ctime_ms: f64,
+    /// when it reached the share (statx birth time; 0 where the file system has none)
+    pub birthtime_ms: f64,
     pub kind: footage::Kind,
     pub typ: &'static str,
     pub day: String,
@@ -45,6 +47,8 @@ pub struct FileEntry {
 pub struct Previous {
     pub files: HashMap<String, FileEntry>,
     pub dirs: HashMap<String, f64>,
+    /// when the scan these come from started (scanner.js previous.startedMs)
+    pub started_ms: Option<f64>,
 }
 
 pub struct ScanResult {
@@ -52,6 +56,7 @@ pub struct ScanResult {
     pub dirs: HashMap<String, f64>,
     pub errors: Vec<(String, String)>,
     pub reused: usize,
+    pub started_at: f64,
     pub scanned_at: f64,
     pub duration_ms: f64,
 }
@@ -94,11 +99,18 @@ struct Out {
 fn entry(rel: String, md: &std::fs::Metadata, c: Class) -> FileEntry {
     let mtime_ms = ms_of(md.mtime(), md.mtime_nsec());
     let day = c.day.unwrap_or_else(|| footage::local_day(mtime_ms));
-    FileEntry { rel, size: md.size(), mtime_ms, ctime_ms: ms_of(md.ctime(), md.ctime_nsec()), kind: c.kind, typ: c.typ, day, camera: c.camera, event_id: c.event_id }
+    FileEntry { rel, size: md.size(), mtime_ms, ctime_ms: ms_of(md.ctime(), md.ctime_nsec()), birthtime_ms: birth_ms(md), kind: c.kind, typ: c.typ, day, camera: c.camera, event_id: c.event_id }
+}
+
+/// Node's birthtimeMs: the statx birth time, 0 without one.
+fn birth_ms(md: &std::fs::Metadata) -> f64 {
+    md.created().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0.0, |d| ms_of(d.as_secs() as i64, d.subsec_nanos() as i64))
 }
 
 pub fn scan(root: &Path, previous: Option<&Previous>, concurrency: usize) -> ScanResult {
     let started = now_ms();
+    // "the last two hours" reach back from when the previous scan started (the first after a restart)
+    let recent_from = started.min(previous.and_then(|p| p.started_ms).unwrap_or(started)) - RECENT_MS;
     let queue = Mutex::new(Queue { tasks: VecDeque::from([Task::Dir(String::new())]), busy: 0 });
     let wake = Condvar::new();
     let out = Mutex::new(Out::default());
@@ -141,7 +153,7 @@ pub fn scan(root: &Path, previous: Option<&Previous>, concurrency: usize) -> Sca
             }
             let Some(class) = footage::classify(&child) else { continue };
             if let Some(known) = unchanged.and_then(|p| p.files.get(&child)) {
-                if started - known.mtime_ms > RECENT_MS {
+                if known.mtime_ms < recent_from {
                     children.push(Child::Kept(child));
                     kept.push(known.clone());
                     continue;
@@ -213,7 +225,7 @@ pub fn scan(root: &Path, previous: Option<&Previous>, concurrency: usize) -> Sca
 
     let mut o = out.into_inner().unwrap();
     let files = node_order(o.files, &mut o.tree);
-    ScanResult { files, dirs: o.dirs, errors: o.errors, reused: o.reused, scanned_at: now_ms(), duration_ms: now_ms() - started }
+    ScanResult { files, dirs: o.dirs, errors: o.errors, reused: o.reused, started_at: started, scanned_at: now_ms(), duration_ms: now_ms() - started }
 }
 
 /// The files in the order the Node server's scan sees them (see the top of this file).
@@ -273,6 +285,7 @@ mod tests {
         let prev = Previous {
             files: first.files.iter().map(|f| (f.rel.clone(), FileEntry { mtime_ms: 0.0, ..f.clone() })).collect(),
             dirs: first.dirs.clone(),
+            started_ms: None,
         };
         let again = scan(&root, Some(&prev), 4);
         assert_eq!(again.reused, 6);

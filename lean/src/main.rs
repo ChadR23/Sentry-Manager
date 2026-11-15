@@ -3,14 +3,17 @@
 //! The environment is the Node server's (see src/core/config.rs for every
 //! variable): PORT (9000), HOST (0.0.0.0), DATA_PATH (/data), APP_ROOT,
 //! TLS_MODE, FOOTAGE_PATH and VEHICLE_NAME (the vehicle), TZ, ...
+//! FOOTAGE_PATH or SMB_SHARE and VEHICLE_NAME make the vehicle on a first start; the
+//! vehicles are kept in DATA_PATH/manager.db.
 //!
 //! Accounts, sessions and HTTPS come from core (the same manager.db and
 //! /data/tls as Node): passwords only go over HTTPS. TLS_MODE=off serves
 //! plain HTTP, only for running behind a reverse proxy that does HTTPS.
 
 use axum::http::Method;
-use sentry_lean::app::{slug, vehicle_name, App, Vehicle};
+use sentry_lean::app::App;
 use sentry_lean::core::{self, Access, Reply};
+use sentry_lean::footage::{self, ctx::{Ctx, LocalCore}, vehicles::{Options, Vehicles}};
 use sentry_lean::{api, catalog::Catalog, thumbnails::Thumbnails};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -46,7 +49,7 @@ fn footage_routes(r: &mut core::Router, app: Arc<App>) {
             .and_then(|v| v["version"].as_str().filter(|s| !s.is_empty()).map(|s| format!("{s} (web)")))
             .unwrap_or_else(|| "web".into());
         let vehicles: Vec<serde_json::Value> =
-            a.vehicles.iter().map(|v| serde_json::json!({ "id": v.id, "name": v.name, "root": v.root.to_string_lossy(), "timezone": v.timezone })).collect();
+            a.vehicles.list().iter().map(|v| serde_json::json!({ "id": v.id, "name": v.name, "root": v.root.to_string_lossy(), "timezone": v.timezone })).collect();
         let mut roots = vec![c.state.config.converted_dir().to_string_lossy().into_owned()];
         roots.extend(c.state.config.extra_roots.iter().cloned());
         Ok(Reply::json(serde_json::json!({ "version": version, "vehicles": vehicles, "outputRoots": roots })))
@@ -80,27 +83,23 @@ async fn run(fd: Option<std::os::fd::OwnedFd>) {
     let cfg = &state.config;
     let data = cfg.data.clone();
     let catalog = Catalog::open(&data.join("lean-catalog.sqlite")).expect("catalog");
-    let mut vehicles = Vec::new();
-    if let Some(p) = &cfg.footage_path {
-        let root = PathBuf::from(p);
-        if root.is_absolute() && root.exists() {
-            match vehicle_name(cfg.vehicle_name.as_deref().unwrap_or("My car")) {
-                Some(name) => vehicles.push(Vehicle { id: slug(&name), name, timezone: cfg.tz.clone().unwrap_or_else(|| "UTC".into()), root }),
-                None => state.log.warn("Could not create the vehicle from the environment: Give the vehicle a name."),
-            }
-        } else {
-            state.log.warn(format!("FOOTAGE_PATH {p} is not there: no vehicle"));
-        }
-    }
+    let app_root = cfg.app_root.clone();
+    // (the manager database, logs and jobs: footage/ctx.rs LocalCore until core/ lands)
+    let core: Arc<dyn Ctx> = Arc::new(LocalCore::open(&data).expect("manager database"));
+    let vehicles = Vehicles::new(core.clone(), Options::from_env(&data, &app_root));
     // (two at once, as the Node server's default)
     let thumbnails = Thumbnails::new(data.join("thumbnails"), cfg.ffmpeg.clone(), 2);
-    let app = App::new(vehicles, catalog, cfg.app_root.clone(), thumbnails);
+    let app = App::new(vehicles, core, catalog, app_root, thumbnails);
     // the viewer area (src/viewer): telemetry, the speed index, previews, places, drives, Studio
     sentry_lean::viewer::Viewer::start(sentry_lean::viewer::glue::AppCtx::new(app.clone(), data.clone()));
-    for v in &app.vehicles {
-        app.scan(&v.id, true);
-    }
-    // a light rescan every SCAN_INTERVAL_MINUTES (inventory.js: every sixth looks at every file)
+    // share events: a share that is healthy settles its Recycle Bin and is scanned (the first
+    // scan resumes from the catalog); then the vehicle of FOOTAGE_PATH / SMB_SHARE on a first
+    // start, and every vehicle's share
+    footage::routes::wire(&app);
+    app.vehicles.bootstrap_from_env();
+    app.vehicles.start_all();
+    // a light rescan of every healthy share every SCAN_INTERVAL_MINUTES (15; inventory.js:
+    // every sixth looks at every file)
     let every = app.clone();
     let minutes = if cfg.scan_interval_minutes.is_finite() && cfg.scan_interval_minutes > 0.0 { cfg.scan_interval_minutes } else { 15.0 };
     tokio::spawn(async move {
@@ -108,8 +107,10 @@ async fn run(fd: Option<std::os::fd::OwnedFd>) {
         tick.tick().await;
         loop {
             tick.tick().await;
-            for v in &every.vehicles {
-                every.scan(&v.id, true);
+            for v in every.vehicles.list() {
+                if every.vehicles.share(&v.id).is_some_and(|s| s.is_healthy()) {
+                    every.scan(&v.id, true);
+                }
             }
         }
     });
@@ -117,6 +118,21 @@ async fn run(fd: Option<std::os::fd::OwnedFd>) {
         let a = app.clone();
         state.hooks.vehicle_exists.set(Arc::new(move |id: &str| a.vehicle(id).is_some()));
     }
+    // the cleanup policies whose time has come, every minute
+    let policies = app.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(60));
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            let a = policies.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                footage::policies::tick(&a, chrono::Local::now());
+                a.core.announce("bin");
+            })
+            .await;
+        }
+    });
 
     // the ops area's background work (startup self-check, snapshots, update check, opt-in reports)
     api::ops_of(&app).start();
