@@ -465,3 +465,90 @@ fn crash_in_rust_recovered_by_node() {
         crash_and_recover(point, "replace", "direct", 1, true);
     }
 }
+
+// ---- test/restartResume.test.js and a cancel ------------------------------------
+
+fn holding_probe(base: &Path) -> String {
+    let b = base.to_string_lossy();
+    wrapper(base, "ffprobe", &format!("case \"$*\" in *07-42-00-front*) [ -f \"{b}/released\" ] || {{ touch \"{b}/reached\"; while [ ! -f \"{b}/released\" ]; do sleep 0.05; done; }} ;; esac"))
+}
+
+fn until(mut f: impl FnMut() -> bool, ms: u64) -> bool {
+    let end = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+    while std::time::Instant::now() < end {
+        if f() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    false
+}
+
+#[test]
+fn stopped_between_two_clips_the_job_carries_on_after_the_restart() {
+    if !available() {
+        eprintln!("skipped: needs ffmpeg with libx265 and node");
+        return;
+    }
+    let base = make_base("restart", 4);
+    let probe = holding_probe(&base);
+    let c = open(&base, "ffmpeg", &probe, None);
+    c.start().unwrap();
+    let id = c.service.start(&config(&base, "replace", "direct", 1)).unwrap();
+    assert!(until(|| base.join("reached").exists(), 60_000), "the third clip is reached");
+    c.shutdown();
+    let stopped = c.service.get(&id).unwrap();
+    assert_eq!(stopped["state"], "paused");
+    assert!(stopped.get("activeItemId").map_or(true, Value::is_null), "no clip was half done");
+    assert_eq!(stopped["recovery"], json!({ "fromState": "waiting", "action": "resume-queue" }));
+    fs::write(base.join("released"), b"").unwrap();
+    let c = open(&base, "ffmpeg", "ffprobe", None);
+    c.start().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let job = c.service.when_idle(&id).unwrap();
+    assert_eq!(job["state"], "completed", "no Resume or Cancel needed");
+    assert_eq!(job["items"].as_array().unwrap().iter().filter(|i| i["state"] == "completed").count(), 4);
+    c.shutdown();
+    fs::remove_dir_all(&base).unwrap();
+}
+
+#[test]
+fn a_paused_job_stays_paused_through_a_restart_and_resume_finishes_it() {
+    if !available() {
+        eprintln!("skipped: needs ffmpeg with libx265 and node");
+        return;
+    }
+    let base = make_base("paused", 4);
+    let probe = holding_probe(&base);
+    let c = open(&base, "ffmpeg", &probe, None);
+    c.start().unwrap();
+    let id = c.service.start(&config(&base, "replace", "direct", 1)).unwrap();
+    assert!(until(|| base.join("reached").exists(), 60_000));
+    c.service.pause(&id).unwrap();
+    fs::write(base.join("released"), b"").unwrap();
+    assert!(until(|| c.service.get(&id).unwrap()["state"] == "paused", 60_000), "paused");
+    c.shutdown();
+    let c = open(&base, "ffmpeg", "ffprobe", None);
+    c.start().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    assert_eq!(c.service.get(&id).unwrap()["state"], "paused", "still paused after the restart");
+    c.service.resume(&id).unwrap();
+    let job = c.service.when_idle(&id).unwrap();
+    assert_eq!(job["state"], "completed");
+    c.shutdown();
+    // a cancel: the clips not done are cancelled, the converted ones kept
+    let base2 = make_base("cancel", 4);
+    let probe = holding_probe(&base2);
+    let c = open(&base2, "ffmpeg", &probe, None);
+    c.start().unwrap();
+    let id = c.service.start(&config(&base2, "replace", "direct", 1)).unwrap();
+    assert!(until(|| base2.join("reached").exists(), 60_000));
+    let job = c.service.cancel(&id).unwrap();
+    assert_eq!(job["state"], "cancelled");
+    let states: Vec<&str> = job["items"].as_array().unwrap().iter().map(|i| i["state"].as_str().unwrap()).collect();
+    assert_eq!(states, vec!["completed", "completed", "cancelled", "cancelled"]);
+    assert_eq!(leftovers(&base2), Vec::<String>::new());
+    c.shutdown();
+    fs::remove_dir_all(&base).unwrap();
+    fs::remove_dir_all(&base2).unwrap();
+}
