@@ -16,6 +16,7 @@ pub mod notes;
 pub mod power;
 pub mod reports;
 pub mod snapshots;
+pub mod stats;
 pub mod store;
 pub mod sys;
 pub mod updates;
