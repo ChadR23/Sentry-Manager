@@ -262,12 +262,16 @@ test('telemetry read: what is read does not grow with the size of the pictures',
   assert.ok(counts.big < bigSize / 20, `read ${counts.big} of ${bigSize} bytes`);
   assert.ok(counts.big < counts.small * 4, `read ${counts.big} bytes of the big clip, ${counts.small} of the small one`);
 
-  // and the reading process's peak memory stays about the same
+  // and the reading process's peak memory stays about the same. On Linux the
+  // peak is the child's own (VmHWM): its maxRSS also counts what this test
+  // process held when the child was started (it can be the 64 MB clip just
+  // made), so it sometimes came out ~120 MB higher for one of the two clips.
   const peak = (file) => {
     const code = `const t = require(${JSON.stringify(path.join(__dirname, '..', 'server', 'telemetry'))});
       const R = t.loadParser(${JSON.stringify(SRC)});
+      const own = () => { try { return Number(/^VmHWM:\\s+(\\d+) kB/m.exec(require('fs').readFileSync('/proc/self/status', 'utf8'))[1]); } catch { return null; } };
       t.readRecords(R, process.argv[1], require('fs').statSync(process.argv[1]).size)
-        .then(() => console.log(process.resourceUsage().maxRSS));`;
+        .then(() => console.log(own() ?? process.resourceUsage().maxRSS));`;
     const r = spawnSync(process.execPath, ['-e', code, file], { encoding: 'utf8' });
     assert.equal(r.status, 0, r.stderr);
     return Number(r.stdout.trim()) * 1024;
