@@ -97,7 +97,7 @@ pub fn normalize(input: &Value, prev: &Value) -> Res<Value> {
 }
 
 fn day_ms(day: &str) -> f64 {
-    chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").map_or(f64::NAN, |d| d.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_millis() as f64)
+    js::day_ms(day)
 }
 
 /// daysBetween(a, b): whole days from a to b (NaN for a day that is not one)

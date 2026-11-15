@@ -103,7 +103,7 @@ fn storage_of(app: &App, v: &Vehicle) -> Value {
     }
     let span = match &first {
         Some(d) => {
-            let t = chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").map_or(f64::NAN, |x| x.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_millis() as f64);
+            let t = js::day_ms(d);
             ((now - t) / DAY).round().max(1.0).min(14.0)
         }
         None => 14.0,

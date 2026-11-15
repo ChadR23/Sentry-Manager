@@ -126,6 +126,21 @@ pub fn num(x: f64) -> Value {
     }
 }
 
+/// Date.parse(`${day}T00:00:00Z`) for "YYYY-MM-DD": NaN unless month 1-12 and day 1-31,
+/// and a day past the month's end rolls over (V8: Feb 30 is Mar 2).
+pub fn day_ms(day: &str) -> f64 {
+    let b = day.as_bytes();
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' || !b.iter().enumerate().all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit()) {
+        return f64::NAN;
+    }
+    let (y, m, d): (i32, u32, i64) = (day[0..4].parse().unwrap(), day[5..7].parse().unwrap(), day[8..10].parse().unwrap());
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return f64::NAN;
+    }
+    let first = chrono::NaiveDate::from_ymd_opt(y, m, 1).unwrap();
+    ((first + chrono::Duration::days(d - 1)).and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_millis()) as f64
+}
+
 /// Date.now() as JavaScript has it.
 pub fn now() -> f64 {
     super::scanner::now_ms()
