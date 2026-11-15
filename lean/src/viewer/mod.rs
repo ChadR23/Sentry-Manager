@@ -14,3 +14,6 @@ pub mod speed_index;
 pub mod telemetry_api;
 #[cfg(test)]
 pub mod testkit;
+pub mod places;
+pub mod drives;
+pub mod drive_data;
