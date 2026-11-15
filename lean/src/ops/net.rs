@@ -39,19 +39,14 @@ pub trait Transport: Send + Sync {
     fn request(&self, r: &HttpReq) -> Result<HttpRes, String>;
 }
 
-/// The real one: HTTPS with the system's certificate checks (webpki roots),
-/// through the environment's proxy when one is set.
+/// The real one: HTTPS with the certificate checks of the Mozilla roots
+/// (webpki), as Node's bundled ones; plain http only where the caller allows it.
 pub struct Https;
 
 impl Transport for Https {
     fn request(&self, r: &HttpReq) -> Result<HttpRes, String> {
-        let mut b = ureq::AgentBuilder::new().timeout(Duration::from_millis(r.timeout_ms)).redirects(if r.follow_redirects { 5 } else { 0 });
-        if let Some(p) = ["HTTPS_PROXY", "https_proxy"].iter().find_map(|k| std::env::var(k).ok()).filter(|p| !p.is_empty()) {
-            if let Ok(proxy) = ureq::Proxy::new(&p) {
-                b = b.proxy(proxy);
-            }
-        }
-        let agent = b.build();
+        // (no proxy from the environment: Node's https and fetch use none either)
+        let agent = ureq::AgentBuilder::new().timeout(Duration::from_millis(r.timeout_ms)).redirects(if r.follow_redirects { 5 } else { 0 }).build();
         let mut req = agent.request(&r.method, &r.url);
         for (k, v) in &r.headers {
             req = req.set(k, v);

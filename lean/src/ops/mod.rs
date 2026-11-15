@@ -9,13 +9,17 @@
 
 pub mod build;
 pub mod ctx;
+pub mod health;
 pub mod js;
 pub mod net;
 pub mod notes;
 pub mod power;
+pub mod reports;
 pub mod snapshots;
 pub mod store;
+pub mod sys;
 pub mod updates;
 
-#[cfg(test)]
+/// A fake of the rest of the server, for the ops tests (unit and tests/).
+#[doc(hidden)]
 pub mod testing;
