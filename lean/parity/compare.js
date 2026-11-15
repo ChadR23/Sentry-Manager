@@ -65,12 +65,17 @@ async function start(kind, work, footage, extra = {}, tag = '') {
     const text = await res.text();
     try { return { status: res.status, body: JSON.parse(text) }; } catch { return { status: res.status, body: text }; }
   };
+  const post = async (p, body) => {
+    const res = await fetch(base + p, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'sentry-six-manager', ...(cookie ? { Cookie: cookie } : {}) }, body: JSON.stringify(body) });
+    const text = await res.text();
+    try { return { status: res.status, body: JSON.parse(text) }; } catch { return { status: res.status, body: text }; }
+  };
   const stop = () => new Promise((r) => {
     if (child.exitCode !== null || child.signalCode !== null) return r();
     child.once('exit', r);
     child.kill('SIGTERM');
   });
-  return { kind, child, get, json, log: () => log, stop };
+  return { kind, child, get, json, post, log: () => log, stop };
 }
 
 /** Both settled: the scan, the clip codecs and the speed index are done. */
@@ -233,6 +238,7 @@ async function main() {
       return Promise.all([node.json(p), lean.json(p)]);
     };
     const byId = new Map();
+    const sha = (buf) => crypto.createHash('sha256').update(buf).digest('hex').slice(0, 16);
     const same = async (p, ignore) => {
       const [a, b] = await both(p);
       if (a.status !== b.status) diffs.push(`${p}: status node ${a.status} / lean ${b.status}`);
@@ -282,6 +288,58 @@ async function main() {
       for (const k of ['running', 'done', 'total', 'last', 'limit']) compare(`/api/speeds/status .${k}`, a.body[k], b.body[k]);
     }
 
+    // the viewer area (lean/src/viewer): moments, driving, drives, the maps, places, Studio
+    for (const d of days) await same(`${base}/moments?date=${d}`);
+    await same(`${base}/driving?weeks=12`);
+    await same(`${base}/driving`);
+    for (const q of ['', '?gap=1', '?gap=0', '?gap=abc', '?limit=1', '?before=2025-03-03_10-00-00', '?before=bad']) await same(`${base}/drives${q}`);
+    await same(`${base}/event-map`);
+    await same('/api/vehicles/nope/moments?date=2025-03-01');
+    await same('/api/vehicles/nope/drives');
+    await same('/api/places');
+    await same('/api/places/suggestions');
+    for (const q of ['', '?lat=37.7749&lon=-122.4194', '?lat=37.7749&lon=-122.4194&radius=5000', '?lat=91&lon=0', '?lat=x&lon=1']) await same(`/api/places/near${q}`);
+    await same('/api/studio/settings');
+    await same('/api/settings/work-limits');
+    {
+      const [a, b] = await both('/api/studio/context');
+      compare('/api/studio/context', { ...a.body, outputRoots: a.body.outputRoots?.length }, { ...b.body, outputRoots: b.body.outputRoots?.length }, new Set(['version']));
+    }
+    const fronts = [];
+    for (const rec of all.recordings) for (const f of (await node.json(`${base}/recordings/${rec.id}`)).body.files || []) if (/-front\.mp4$/i.test(f.rel)) fronts.push(f.path);
+    for (const p of [...fronts, '/etc/passwd', 'relative.mp4']) await same(`/api/telemetry?path=${encodeURIComponent(p)}`);
+    for (const p of [...fronts.slice(0, 2), '/etc/passwd']) {
+      checked++;
+      const [a, b] = await Promise.all([node.get(`/api/scrub?path=${encodeURIComponent(p)}`), lean.get(`/api/scrub?path=${encodeURIComponent(p)}`)]);
+      compare(`scrub ${p}`, [a.status, a.headers.get('content-type')], [b.status, b.headers.get('content-type')]);
+      if (a.ok && b.ok && sha(Buffer.from(await a.arrayBuffer())) !== sha(Buffer.from(await b.arrayBuffer()))) diffs.push(`scrub ${p}: the grids differ`);
+    }
+    {
+      const p = fronts[0] || '/nope';
+      for (const [route, body] of [['/api/studio/exists', { path: p }], ['/api/studio/exists', { path: '/etc/passwd' }], ['/api/studio/stat', { path: p }], ['/api/studio/stat', {}],
+        ['/api/studio/readDir', { path: path.dirname(p) }], ['/api/studio/readDir', { path: '/etc' }], ['/api/studio/readFile', { path: '/etc/passwd' }], ['/api/telemetry/speeds', { paths: [p, '/etc/passwd', 3] }]]) {
+        checked++;
+        const [a, b] = await Promise.all([node.post(route, body), lean.post(route, body)]);
+        compare(`POST ${route} ${JSON.stringify(body)}`, a, b);
+      }
+    }
+
+    // a saved place, then what names it: the event map, the place tags on recordings, the drives, suggestions
+    {
+      const noId = new Set(['id']);
+      for (const body of [{ name: 'Home', lat: '30.2672', lon: -97.7431, radius: '300' }, { name: '', lat: 1, lon: 1 }, { name: 'X', lat: 91, lon: 0 }, { name: 'X', lat: 1, lon: 1, radius: 10 }]) {
+        checked++;
+        const [a, b] = await Promise.all([node.post('/api/places', body), lean.post('/api/places', body)]);
+        compare(`POST /api/places ${JSON.stringify(body)}`, a, b, noId);
+      }
+      const ids = await Promise.all([node.json('/api/places'), lean.json('/api/places')]);
+      compare('/api/places after one was saved', ids[0], ids[1], noId);
+      await same(`${base}/event-map`);
+      await same(`${base}/recordings?limit=500`, scanned);
+      await same(`${base}/drives`);
+      await same('/api/places/suggestions', new Set(['counts']));
+    }
+
     // footage bytes: ranges, refusals
     const root = all.recordings.length ? (await node.json(`${base}/recordings/${all.recordings[0].id}`)).body.root : footage;
     const clip = path.join(root, 'TeslaCam/RecentClips/2025-03-01_08-00-00-front.mp4');
@@ -296,7 +354,6 @@ async function main() {
     ];
     const big = path.join(root, 'TeslaCam/RecentClips/2025-03-03_10-01-00-back.mp4');
     cases.push([big, { Range: 'bytes=1000-' }]);
-    const sha = (buf) => crypto.createHash('sha256').update(buf).digest('hex').slice(0, 16);
     const view = async (s, p, headers) => {
       const res = await s.get(p, headers);
       const body = Buffer.from(await res.arrayBuffer());

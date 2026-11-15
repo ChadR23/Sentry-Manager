@@ -124,8 +124,10 @@ fn converter_part(name: &str) -> bool {
 /// readDir: symlinks, the bin and the converter's work files left out
 pub fn read_dir(dir: &Path) -> std::io::Result<Vec<Value>> {
     let mut out = Vec::new();
-    for e in std::fs::read_dir(dir)? {
-        let e = e?;
+    // (libuv's scandir lists names sorted, byte by byte)
+    let mut list: Vec<std::fs::DirEntry> = std::fs::read_dir(dir)?.collect::<std::io::Result<_>>()?;
+    list.sort_by(|a, b| a.file_name().as_encoded_bytes().cmp(b.file_name().as_encoded_bytes()));
+    for e in list {
         let t = e.file_type()?;
         let name = e.file_name().to_string_lossy().into_owned();
         let p = dir.join(&name);
