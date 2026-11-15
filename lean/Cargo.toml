@@ -55,6 +55,8 @@ webpki-roots = "0.26"
 regex = "1"
 p256 = { version = "0.13", features = ["ecdsa", "pkcs8", "pem"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# time zones (vehicles.js validTimezone, policies.js dayInZone), the IANA data built in
+chrono-tz = { version = "0.10", default-features = false, features = ["std", "case-insensitive"] }
 
 [profile.release]
 opt-level = 3

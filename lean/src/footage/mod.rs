@@ -9,3 +9,13 @@ pub use names::*;
 pub mod catalog;
 pub mod inventory;
 pub mod scanner;
+
+pub mod cars;
+pub mod ctx;
+pub mod js;
+pub mod mdb;
+pub mod safe_fs;
+pub mod share;
+pub mod smb;
+pub mod tz;
+pub mod vehicles;
