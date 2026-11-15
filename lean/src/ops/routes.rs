@@ -238,19 +238,10 @@ impl Ops {
             return Some(self.metrics(r.authorization));
         }
         if route("GET", "/api/stats").is_some() {
-            self.stats.touch();
-            let mut snap = self.stats.snapshot();
-            let pw = store::get(&ctx.db(), "power").unwrap_or(Value::Null);
-            let t = now_ms();
-            snap["price"] = match power::price_at(&pw, t) {
-                None => Value::Null,
-                Some(now) => json!({ "currency": pw["currency"], "mode": pw["mode"], "now": num(now), "rate": power::rate_name_at(&pw, t) }),
-            };
-            snap["encoder"] = ctx.encoder_block();
-            return Some(Reply::ok(snap));
+            return Some(Reply::ok(self.stats_answer()));
         }
         if route("GET", "/api/stats/history").is_some() {
-            self.stats.touch();
+            self.stats.touch(None);
             return Some(Reply::ok(self.stats.history(r.query.get("range").is_some_and(|x| x == "24h"))));
         }
         if route("GET", "/api/stats/export.csv").is_some() {

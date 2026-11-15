@@ -23,6 +23,8 @@ pub struct FakeCtx {
     pub diagnostics: Mutex<Value>,
     pub heartbeat: Mutex<Value>,
     pub shutdowns: Mutex<Vec<String>>,
+    pub node_powers: Mutex<Vec<super::node_power::NodeRow>>,
+    pub rapl_requests: Mutex<usize>,
 }
 
 impl FakeCtx {
@@ -47,8 +49,11 @@ impl FakeCtx {
             tls: Mutex::new(None),
             ffmpeg: Mutex::new("/nonexistent/ffmpeg".into()),
             identifiers: Mutex::new(Vec::new()),
-            diagnostics: Mutex::new(json!({})),
-            heartbeat: Mutex::new(json!({})),
+            // (null: ops::diag builds them, as in the server)
+            diagnostics: Mutex::new(Value::Null),
+            heartbeat: Mutex::new(Value::Null),
+            node_powers: Mutex::new(Vec::new()),
+            rapl_requests: Mutex::new(0),
             shutdowns: Mutex::new(Vec::new()),
         })
     }
@@ -125,5 +130,11 @@ impl OpsCtx for FakeCtx {
     }
     fn shutdown(&self, reason: &str) {
         self.shutdowns.lock().unwrap().push(reason.to_string());
+    }
+    fn node_powers(&self) -> Vec<super::node_power::NodeRow> {
+        self.node_powers.lock().unwrap().clone()
+    }
+    fn request_rapl(&self) {
+        *self.rapl_requests.lock().unwrap() += 1;
     }
 }

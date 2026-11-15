@@ -75,6 +75,10 @@ pub struct VehicleInfo {
     pub days_left: Option<f64>,
     /// `policies.get(id)`
     pub policy: Value,
+    /// `inventory.totals(id).minutes` (the heartbeat's footageSeconds)
+    pub footage_minutes: Option<f64>,
+    /// `db.binItems(id).length` (diagnostics counts)
+    pub bin_items: Option<f64>,
 }
 
 /// The converter as ops sees it (`host.runtime`).
@@ -137,13 +141,23 @@ pub trait OpsCtx: Send + Sync + 'static {
     fn ffprobe_path(&self) -> String;
     /// the interface pack in use (`uiPacks.active()`)
     fn ui_pack(&self) -> String;
-    /// strings an anonymous report must not contain (index.js identifiers()):
-    /// host names, account names, node names, place names, TLS host names
-    fn identifiers(&self) -> Vec<String>;
-    /// the diagnostics object of a report (index.js diagnostics(), its DIAG_KEYS)
-    fn diagnostics(&self, kind: &str) -> Value;
-    /// the heartbeat's raw numbers (index.js heartbeat(); normalised by ops)
-    fn heartbeat(&self) -> Value;
+    /// strings an anonymous report must not contain that only other areas
+    /// know: account names (core), place names and labels (viewer),
+    /// FOOTAGE_ROOT. Ops adds the host name, DATA, the vehicles' names, ids,
+    /// roots and shares, the paired nodes and the TLS host names itself
+    /// (ops::diag::identifiers, index.js reportIdentifiers).
+    fn identifiers(&self) -> Vec<String> {
+        Vec::new()
+    }
+    /// A test hook only: when Ops runs, the report's diagnostics are built by
+    /// ops::diag::diagnostics from the calls below. Null: build them.
+    fn diagnostics(&self, _kind: &str) -> Value {
+        Value::Null
+    }
+    /// A test hook only, as `diagnostics` (ops::diag::heartbeat builds the real one).
+    fn heartbeat(&self) -> Value {
+        Value::Null
+    }
     /// the whole server stops (a snapshot restore); the supervisor starts it again
     fn shutdown(&self, reason: &str);
     /// conversions in the queue (for metrics and the heartbeat)
@@ -176,9 +190,78 @@ pub trait OpsCtx: Send + Sync + 'static {
     fn system_summary(&self, _placeholders: bool) -> Value {
         Value::Null
     }
-    /// encoderStats.js encoderBlock for /api/stats (converter area); null while idle
-    fn encoder_block(&self) -> Value {
+    /// encoderStats.js encoderBlock for /api/stats (converter area): the
+    /// running job's clips, workers and energy, from the stats `snapshot` and
+    /// `energy` (Stats::energy(): byJob with each job's baseline); null while idle
+    fn encoder_block(&self, _snapshot: &Value, _energy: &Value) -> Value {
         Value::Null
+    }
+
+    // ---- the server monitor (/api/stats) and what it needs from others
+
+    /// every paired node's power (nodes.js power(): id, name, online and its
+    /// checked report, node_power::clean_report) for "All servers"
+    fn node_powers(&self) -> Vec<super::node_power::NodeRow> {
+        Vec::new()
+    }
+    /// every running ffmpeg (a benchmark's too): pid and encoder, to name processes and GPU clients
+    fn active_encodes(&self) -> Vec<super::stats::ActiveEncode> {
+        Vec::new()
+    }
+    /// where a conversion job stands (encoderStats.js jobProgress): (clips, savedB)
+    fn job_progress(&self, _job: &str) -> Option<(f64, f64)> {
+        None
+    }
+    /// a conversion or a benchmark runs: the monitor keeps sampling without a page
+    fn stats_busy(&self) -> bool {
+        self.converter().running
+    }
+    /// asks the root supervisor for RAPL readings (`{ type: 'rapl', on: true }`
+    /// on the link); its `rapl-reading` answers go to `Ops::rapl_reading`
+    fn request_rapl(&self) {}
+
+    // ---- the report's diagnostics and heartbeat (index.js reportDiagnostics, reportHeartbeat)
+
+    /// db.jobs({ limit }): the newest jobs, each { type, status, title, detail, startedAt, finishedAt } (core)
+    fn recent_jobs(&self, _limit: usize) -> Vec<Value> {
+        Vec::new()
+    }
+    /// access.get(): the home network and access settings (core)
+    fn access_settings(&self) -> Value {
+        Value::Null
+    }
+    /// placeList().length (viewer)
+    fn places_count(&self) -> usize {
+        0
+    }
+    /// Sentry USB info files on the shares: (version, written as unix seconds) (can area)
+    fn sentry_usb_infos(&self) -> Vec<(Value, f64)> {
+        Vec::new()
+    }
+    /// canIndex.status() (can area)
+    fn can_status(&self) -> Value {
+        serde_json::json!({})
+    }
+    /// each vehicle's model label (carSummary(v).modelLabel), in vehicles() order (can area)
+    fn car_models(&self) -> Vec<Option<String>> {
+        self.vehicles().iter().map(|_| None).collect()
+    }
+    /// clips that arrived since `since_ms`, all vehicles: (sentry, dashcam) (footage)
+    fn clips_arrived(&self, _since_ms: i64) -> (f64, f64) {
+        (0.0, 0.0)
+    }
+    /// the distance driven in all the footage, in metres (viewer: the speed index)
+    fn driven_metres(&self) -> f64 {
+        0.0
+    }
+    /// convertStats.js heartbeatHardware: { cpu, gpus, convert, nodes } (converter area)
+    fn heartbeat_hardware(&self) -> Value {
+        let gpus: Vec<Value> = super::gpu::usable_gpus(&self.detect_gpus()).iter().map(|g| g["name"].clone()).collect();
+        serde_json::json!({ "cpu": super::diag::cpu_model(), "gpus": gpus, "convert": { "fps": null, "encoder": null, "device": null, "api": null, "codec": null }, "nodes": [] })
+    }
+    /// TRUST_PROXY (core)
+    fn trust_proxy(&self) -> bool {
+        false
     }
 }
 

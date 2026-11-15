@@ -209,6 +209,15 @@ pub struct Reports {
     clock_offset: Mutex<i64>,
     flushing: Mutex<()>,
     sched: Mutex<Sched>,
+    sources: std::sync::OnceLock<Sources>,
+}
+
+/// Where a report's diagnostics, heartbeat and identifiers come from: set by
+/// `Ops` (ops::diag); without them, the context's test hooks answer.
+pub struct Sources {
+    pub diagnostics: Box<dyn Fn(&str) -> Value + Send + Sync>,
+    pub heartbeat: Box<dyn Fn() -> Value + Send + Sync>,
+    pub identifiers: Box<dyn Fn() -> Vec<String> + Send + Sync>,
 }
 
 fn rand_hex(n: usize) -> String {
@@ -301,6 +310,7 @@ impl Reports {
             clock_offset: Mutex::new(0),
             flushing: Mutex::new(()),
             sched: Mutex::new(Sched::default()),
+            sources: std::sync::OnceLock::new(),
         })
     }
 
@@ -658,8 +668,34 @@ impl Reports {
 
     fn identifiers(&self) -> Vec<String> {
         let mut ids = vec![self.install_id()];
-        ids.extend(self.ctx.identifiers());
+        match self.sources.get() {
+            Some(s) => ids.extend((s.identifiers)()),
+            None => ids.extend(self.ctx.identifiers()),
+        }
         ids
+    }
+
+    /// Where diagnostics, the heartbeat and the identifiers come from (once).
+    pub fn set_sources(&self, s: Sources) {
+        let _ = self.sources.set(s);
+    }
+
+    fn diagnostics_of(&self, kind: &str) -> Value {
+        let hook = self.ctx.diagnostics(kind);
+        match (self.sources.get(), hook.is_null()) {
+            (Some(s), true) => (s.diagnostics)(kind),
+            (_, false) => hook,
+            (None, true) => json!({}),
+        }
+    }
+
+    fn heartbeat_of(&self) -> Value {
+        let hook = self.ctx.heartbeat();
+        match (self.sources.get(), hook.is_null()) {
+            (Some(s), true) => (s.heartbeat)(),
+            (_, false) => hook,
+            (None, true) => json!({}),
+        }
     }
 
     /// The payload exactly as it would be sealed (cleaned, checked).
@@ -702,7 +738,7 @@ impl Reports {
             pl["crash"] = c;
         }
         if kind == "heartbeat" {
-            let mut raw = match self.ctx.heartbeat() {
+            let mut raw = match self.heartbeat_of() {
                 Value::Object(o) => Value::Object(o),
                 _ => json!({}),
             };
@@ -725,7 +761,7 @@ impl Reports {
             return Ok(pl);
         }
         if kind != "feedback" || attach {
-            pl["diagnostics"] = self.ctx.diagnostics(kind);
+            pl["diagnostics"] = self.diagnostics_of(kind);
         }
         let ids = if anonymous { self.identifiers() } else { Vec::new() };
         for k in ["message", "crash", "diagnostics"] {

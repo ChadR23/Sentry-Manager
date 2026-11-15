@@ -135,10 +135,11 @@ impl OpsCtx for LeanCtx {
         None
     }
     fn detect_gpus(&self) -> Value {
-        json!({ "gpus": [], "nvidia": [], "hints": [] })
+        // (the converter area's own, once it lands: server/gpu.js)
+        super::gpu::detect_gpus(&super::gpu::DetectOptions::default(), &super::gpu::run)
     }
     fn usable_gpus(&self) -> usize {
-        0
+        super::gpu::usable_gpus(&self.detect_gpus()).len()
     }
     fn tls(&self) -> Option<TlsInfo> {
         Some(TlsInfo { mode: self.tls_mode(), ..Default::default() })
@@ -153,27 +154,11 @@ impl OpsCtx for LeanCtx {
         "original".into()
     }
     fn identifiers(&self) -> Vec<String> {
-        let mut ids = vec![std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default().trim().to_string(), self.data.to_string_lossy().into_owned()];
-        for v in self.vehicles() {
-            ids.push(v.id);
-            ids.push(v.name);
-            ids.extend(v.roots);
-        }
-        ids.into_iter().filter(|s| s.encode_utf16().count() >= 3).collect()
+        // (the rest: ops::diag::identifiers)
+        std::env::var("FOOTAGE_ROOT").ok().into_iter().collect()
     }
-    fn diagnostics(&self, _kind: &str) -> Value {
-        json!({ "system": self.system_summary(false) })
-    }
-    fn heartbeat(&self) -> Value {
-        let list = self.vehicles();
-        let sum = |f: &dyn Fn(&VehicleInfo) -> Option<f64>| list.iter().map(|v| f(v).unwrap_or(0.0)).sum::<f64>();
-        let (platform, arch) = super::build::platform_arch();
-        let (os, docker) = super::build::host_info();
-        json!({
-            "platform": platform, "arch": arch, "host": { "os": os, "docker": docker },
-            "vehicles": list.len(), "footageBytes": sum(&|v| v.footage_bytes), "recordings": sum(&|v| v.recordings),
-            "converting": false, "jobsQueued": 0, "features": { "can": false, "sentryUsbPaired": false, "gpu": false }
-        })
+    fn jobs_queued(&self) -> usize {
+        0
     }
     fn shutdown(&self, reason: &str) {
         eprintln!("INFO  [server] Stopping ({reason})");
