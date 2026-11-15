@@ -58,6 +58,10 @@ pub struct Dbc {
     pub buses: Vec<(String, String)>,
 }
 
+/// A pattern over the text's bytes, in Unicode mode as JavaScript reads the DBC text (\s any
+/// white space, [^"] any character), with \d and \w spelled out as JavaScript's ASCII ones.
+/// (regex 1.13's captures can miss in ASCII-only mode with a class that takes the bytes
+/// 0x80-0xFF when its Unicode feature is on, as it is for core's patterns.)
 fn rx(s: &str) -> Regex {
     Regex::new(s).unwrap()
 }
@@ -66,11 +70,11 @@ fn res() -> &'static [Regex; 5] {
     static R: OnceLock<[Regex; 5]> = OnceLock::new();
     R.get_or_init(|| {
         [
-            rx(r"(?-u)^BO_\s+(\d+)\s+(\w+)\s*:\s*(\d+)\s+(\w+)"),
-            rx(r#"(?-u)^\s+SG_\s+(\w+)\s*(M|m\d+)?\s*:\s*(\d+)\|(\d+)@([01])([+-])\s*\(\s*([-+0-9.eE]+)\s*,\s*([-+0-9.eE]+)\s*\)\s*\[\s*([-+0-9.eE]+)\s*\|\s*([-+0-9.eE]+)\s*\]\s*"([^"]*)""#),
-            rx(r#"(?m-u)^VAL_\s+(\d+)\s+(\w+)\s+((?:-?\d+\s+"[^"]*"\s*)+);"#),
-            rx(r#"(?-u)(-?\d+)\s+"([^"]*)""#),
-            rx(r#"(?m-u)^CM_\s+SG_\s+(\d+)\s+(\w+)\s+"((?:[^"\\]|\\.)*)"\s*;"#),
+            rx(r"^BO_\s+([0-9]+)\s+([0-9A-Za-z_]+)\s*:\s*([0-9]+)\s+([0-9A-Za-z_]+)"),
+            rx(r#"^\s+SG_\s+([0-9A-Za-z_]+)\s*(M|m[0-9]+)?\s*:\s*([0-9]+)\|([0-9]+)@([01])([+-])\s*\(\s*([-+0-9.eE]+)\s*,\s*([-+0-9.eE]+)\s*\)\s*\[\s*([-+0-9.eE]+)\s*\|\s*([-+0-9.eE]+)\s*\]\s*"([^"]*)""#),
+            rx(r#"(?m)^VAL_\s+([0-9]+)\s+([0-9A-Za-z_]+)\s+((?:-?[0-9]+\s+"[^"]*"\s*)+);"#),
+            rx(r#"(-?[0-9]+)\s+"([^"]*)""#),
+            rx(r#"(?m)^CM_\s+SG_\s+([0-9]+)\s+([0-9A-Za-z_]+)\s+"((?:[^"\\]|\\.)*)"\s*;"#),
         ]
     })
 }
@@ -275,7 +279,7 @@ pub fn dbc_for(profile: &str) -> Arc<Dbc> {
         return d.clone();
     }
     let (files, buses) = profile_files(name);
-    let bo_line = Regex::new(r"(?m-u)^(BO_\s+\d+\s+\w+\s*:\s*\d+\s+)\w+").unwrap();
+    let bo_line = Regex::new(r"(?m)^(BO_\s+[0-9]+\s+[0-9A-Za-z_]+\s*:\s*[0-9]+\s+)[0-9A-Za-z_]+").unwrap();
     let dir = dbc_dir();
     let mut parts = Vec::new();
     for (file, bus) in files {
