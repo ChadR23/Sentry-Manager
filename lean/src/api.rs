@@ -343,6 +343,45 @@ fn thumbnail(app: &App, v: &Vehicle, rid: &str, method: &Method, headers: &Heade
     }
 }
 
+/// The ops area, on its stand-alone context (ops::lean) until core lands.
+pub fn ops_of(app: &Arc<App>) -> &'static Arc<crate::ops::Ops> {
+    static OPS: std::sync::OnceLock<Arc<crate::ops::Ops>> = std::sync::OnceLock::new();
+    OPS.get_or_init(|| {
+        let data = PathBuf::from(std::env::var("DATA_PATH").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/data".into()));
+        let ctx = crate::ops::lean::LeanCtx::open(app.clone(), &data).expect("manager.db");
+        crate::ops::Ops::new(ctx, Arc::new(crate::ops::net::Https), crate::ops::Ops::process_env())
+    })
+}
+
+fn ops_route(app: &Arc<App>, method: &Method, path: &str, q: &HashMap<String, String>, headers: &HeaderMap, body: &[u8]) -> Res {
+    let get = method == Method::GET || method == Method::HEAD;
+    if !get && headers.get("x-requested-with").and_then(|v| v.to_str().ok()) != Some("sentry-six-manager") {
+        return error(StatusCode::FORBIDDEN, "Missing X-Requested-With header.");
+    }
+    let json_body = if String::from_utf8_lossy(body).trim().is_empty() {
+        Value::Null
+    } else {
+        match serde_json::from_slice(body) {
+            Ok(v) => v,
+            Err(_) => return error(StatusCode::BAD_REQUEST, "Invalid JSON"),
+        }
+    };
+    // no accounts yet: the fixed local admin of /api/auth/me, never "confirmed"
+    // (the 🔑 routes wait for core's sign-in, which comes with HTTPS)
+    let caller = crate::ops::ctx::Caller { user: Some("local".into()), client: "127.0.0.1".into(), confirmed: false, https: false };
+    let auth = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok());
+    let r = crate::ops::Request { method: method.as_str(), path, query: q, body: &json_body, caller: &caller, authorization: auth };
+    let Some(reply) = ops_of(app).handle(&r) else { return error(StatusCode::NOT_FOUND, "Not found") };
+    let mut b = Response::builder().status(reply.status);
+    for (k, v) in &reply.headers {
+        b = b.header(k.as_str(), v.as_str());
+    }
+    if !reply.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("x-content-type-options")) {
+        b = b.header("X-Content-Type-Options", "nosniff");
+    }
+    b.body(Body::from(reply.body)).unwrap()
+}
+
 fn api(app: &Arc<App>, method: &Method, path: &str, q: &HashMap<String, String>, headers: &HeaderMap) -> Res {
     let seg: Vec<&str> = path.trim_start_matches("/api/").split('/').collect();
     let get = method == Method::GET || method == Method::HEAD;
@@ -429,6 +468,13 @@ pub async fn handle(State(app): State<Arc<App>>, req: Request<Body>) -> Res {
     let raw = req.uri().path().to_string();
     let q = query_of(req.uri().query());
     let Some(p) = clean_path(&raw) else { return error(StatusCode::BAD_REQUEST, "Bad request") };
+    // the ops area's routes (src/ops): notifications, health, stats, reports, ...
+    if crate::ops::access(method.as_str(), &p).is_some() {
+        let body = axum::body::to_bytes(req.into_body(), 1024 * 1024).await.unwrap_or_default();
+        return tokio::task::spawn_blocking(move || ops_route(&app, &method, &p, &q, &headers, &body))
+            .await
+            .unwrap_or_else(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "Internal error"));
+    }
     // file work happens off the async threads
     tokio::task::spawn_blocking(move || if p.starts_with("/api/") { api(&app, &method, &p, &q, &headers) } else { web(&app, &method, &headers, &p) })
         .await

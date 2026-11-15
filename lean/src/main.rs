@@ -62,6 +62,8 @@ async fn main() {
         }
     });
 
+    // the ops area's background work (startup self-check, snapshots, update check, opt-in reports)
+    api::ops_of(&app).start();
     let router = axum::Router::new().fallback(api::handle).with_state(app);
     let addr = SocketAddr::new(host, port);
     let listener = tokio::net::TcpListener::bind(addr).await.expect("listen");

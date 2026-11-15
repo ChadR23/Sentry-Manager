@@ -11,6 +11,7 @@ pub mod build;
 pub mod ctx;
 pub mod health;
 pub mod js;
+pub mod lean;
 pub mod net;
 pub mod notes;
 pub mod power;
