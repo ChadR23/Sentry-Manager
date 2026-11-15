@@ -13,9 +13,11 @@
 pub mod adapters;
 pub mod av1;
 pub mod contracts;
+pub mod ctx;
 pub mod error;
 pub mod frame_num;
 pub mod h265;
+pub mod ipc;
 pub mod jobstore;
 pub mod lead_in;
 pub mod mp4w;
