@@ -33,6 +33,9 @@ pub mod testing;
 pub mod routes;
 pub mod zip;
 
+#[cfg(test)]
+mod hooks_tests;
+
 pub use routes::{access, Access, Reply, Request};
 
 use ctx::{Level, OpsCtx};
@@ -150,7 +153,8 @@ impl Ops {
         let updates = Arc::new(updates::ImageUpdates::new(ctx.clone(), Some(notes.clone()), transport.clone(), &build_info, !update_off, own));
         updates.announce();
         let reports = reports::Reports::new(ctx.clone(), env, build_info.clone(), transport, None);
-        let version = build::build_name(&build_info).map_or(Value::Null, Value::String);
+        // (the server line's version: stats/host.js appVersion)
+        let version = build::app_version(&ctx.app_root()).map_or(Value::Null, Value::String);
         // Server alerts from before a restart: the new run raises them again if they still hold
         store::resolve_prefix(&ctx.db(), "server:");
         let converting = Arc::new(Mutex::new(Converting::default()));

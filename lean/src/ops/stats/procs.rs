@@ -161,7 +161,7 @@ impl ProcessTable {
                 list.push(p);
             }
         }
-        // (readdir order is the kernel's: by pid)
+        // (in readdirSync's order: the names sorted as text, as libuv does)
         let mut next = HashMap::new();
         let born_after = self.prev_uptime.map_or(f64::INFINITY, |u| u * HZ);
         let tt = total_ticks.unwrap_or(f64::NAN);

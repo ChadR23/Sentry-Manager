@@ -41,6 +41,64 @@ function freePort() {
   });
 }
 
+/** GET /api/stats twice (3 s apart: the second has rates) and GET /api/health, as bodies. */
+async function bodies(client) {
+  const get = async (p) => lib.parseJson((await client.request('GET', p)).body);
+  await get('/api/stats');
+  await new Promise((r) => setTimeout(r, 3000));
+  return { stats: await get('/api/stats'), health: await get('/api/health') };
+}
+
+const kind = (v) => (v === null ? 'null' : Array.isArray(v) ? 'array' : typeof v);
+
+/** Every key path of a body with its kind (null and a number count as one: a reading may be missing). */
+function shapeOf(v, at = '', out = new Map()) {
+  const k = kind(v);
+  out.set(at || '.', k === 'null' ? 'number?' : k === 'number' ? 'number?' : k);
+  if (k === 'object') for (const [key, x] of Object.entries(v)) shapeOf(x, `${at}.${key}`, out);
+  if (k === 'array' && v.length) shapeOf(v[0], `${at}[]`, out);
+  return out;
+}
+
+/**
+ * The fields of GET /api/stats that are the machine's, not the moment's
+ * (host, CPU model and counts, memory size, GPUs, power sources, disks,
+ * shares, interfaces, sensors' names, scopes, hints), and the health checks'
+ * ids, groups, labels and states. The app's own process, uptimes, rates and
+ * readings are left out.
+ */
+function deepCompare(a, b, data) {
+  const out = { stats: [], health: [] };
+  const push = (list, p, x, y) => { if (JSON.stringify(x) !== JSON.stringify(y)) list.push({ path: p, golden: x, actual: y }); };
+  const sa = shapeOf(a.stats);
+  const sb = shapeOf(b.stats);
+  for (const [p, k] of sa) if (sb.get(p) !== k && !(k === 'array' && !sb.has(p))) push(out.stats, `shape ${p}`, k, sb.get(p) ?? 'missing');
+  for (const [p, k] of sb) if (!sa.has(p)) push(out.stats, `shape ${p}`, 'missing', k);
+  const own = (s, root) => ({
+    intervalMs: s.intervalMs,
+    host: { hostname: s.host.hostname, os: s.host.os, kernel: s.host.kernel, arch: s.host.arch, version: s.host.version, ffmpeg: s.host.ffmpeg },
+    cpu: { model: s.cpu.model, cores: s.cpu.cores, threads: s.cpu.threads, sockets: s.cpu.sockets, perCore: s.cpu.perCore.length, perSocket: s.cpu.perSocket && s.cpu.perSocket.map((x) => x.socket) },
+    memory: { totalB: s.memory.totalB, swapTotalB: s.memory.swapTotalB },
+    gpus: s.gpus.map((g) => [g.id, g.name, g.vendor, g.driver, g.node, g.vramTotalB, g.integrated]),
+    power: { cpuSource: s.power.cpuSource, gpuSource: s.power.gpuSource, cpuUnavailable: s.power.cpuUnavailable, priceNow: s.power.priceNow },
+    disks: s.disks.map((d) => [d.name, d.model, d.kind]),
+    filesystems: s.filesystems.map((f) => [f.label, String(f.path).split(root).join('<data>'), f.vehicle, f.totalB === null, f.fsType, f.source && String(f.source).split(root).join('<data>'), f.disk, f.smbVersion, f.mounted, f.checkEveryMs]),
+    network: { scope: s.network.scope, interfaces: s.network.interfaces.map((i) => [i.name, i.speedMbps]) },
+    sensors: s.sensors.map((x) => [x.chip, x.label, x.kind]),
+    processes: s.processes.scope,
+    unlock: s.unlock,
+    alerts: s.alerts,
+    price: s.price,
+    encoder: s.encoder
+  });
+  const x = own(a.stats, data.node);
+  const y = own(b.stats, data.lean);
+  for (const k of Object.keys(x)) push(out.stats, k, x[k], y[k]);
+  const checks = (h) => (h?.checks || []).map((c) => [c.id, c.group, c.label, c.status]);
+  push(out.health, 'checks', checks(a.health), checks(b.health));
+  return out;
+}
+
 async function main() {
   const dir = path.resolve(arg('dir', path.join(require('os').tmpdir(), 'sm-ops-compare')));
   const bin = path.resolve(arg('bin', path.join(REPO, 'lean/target/debug/sentry-lean')));
@@ -50,8 +108,17 @@ async function main() {
   // 1. the Node fixture, settled (the startup self-check and the first snapshot have run)
   const node = await fixture.start({ dir: path.join(dir, 'node'), settleMs: Number(arg('settle', 75)) * 1000 });
   process.env.SM_PASSWORD = process.env.SM_CONTRACT_PASSWORD || 'contract fixture password';
+  const deep = {};
   try {
     await record({ base: node.base, ca: path.join(node.ca, 'ca.crt'), out: goldens, only: OPS.source });
+    // the whole bodies too, for the field-by-field pass below (a first
+    // request starts the sampler; the second, 3 s on, has its rates)
+    const c = await lib.connect({ base: node.base, ca: path.join(node.ca, 'ca.crt') });
+    try {
+      deep.node = await bodies(c);
+    } finally {
+      c.close();
+    }
   } finally {
     node.child.kill('SIGTERM');
     await new Promise((r) => node.child.once('exit', r));
@@ -87,10 +154,19 @@ async function main() {
       const r = (report.byRoute[golden.route] ||= { same: 0, different: 0, answers: [] });
       if (diffs.length) { report.different++; r.different++; r.answers.push({ label: g.label, diffs }); } else { report.same++; r.same++; }
     }
+    deep.lean = await bodies(client);
   } finally {
     client.close();
     lean.kill('SIGTERM');
   }
+  // GET /api/stats and /api/health field by field, where the answer does not
+  // depend on the moment (both servers run on this machine)
+  const deepDiffs = deepCompare(deep.node, deep.lean, { node: path.join(dir, 'node', 'data'), lean: data });
+  fs.writeFileSync(path.join(dir, 'deep.json'), `${JSON.stringify({ ...deep, diffs: deepDiffs }, null, 2)}\n`);
+  const r = (report.byRoute['GET /api/stats (fields)'] = { same: deepDiffs.stats.length ? 0 : 1, different: deepDiffs.stats.length ? 1 : 0, answers: deepDiffs.stats.length ? [{ label: '/api/stats', diffs: deepDiffs.stats }] : [] });
+  const h = (report.byRoute['GET /api/health (checks)'] = { same: deepDiffs.health.length ? 0 : 1, different: deepDiffs.health.length ? 1 : 0, answers: deepDiffs.health.length ? [{ label: '/api/health', diffs: deepDiffs.health }] : [] });
+  report.same += r.same + h.same;
+  report.different += r.different + h.different;
   for (const [route, r] of Object.entries(report.byRoute).sort()) {
     if (!r.different) { console.log(`ok    ${route}${r.same > 1 ? ` (${r.same} answers)` : ''}`); continue; }
     console.log(`DIFF  ${route} (${r.different} of ${r.same + r.different} answers differ)`);

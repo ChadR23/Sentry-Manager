@@ -66,7 +66,6 @@ fn chip_files(dir: &Path) -> (HashSet<String>, Vec<Input>, Vec<Input>) {
 
 #[derive(Clone, Debug)]
 struct Zone {
-    id: String,
     type_: String,
     file: PathBuf,
 }
@@ -119,7 +118,7 @@ impl SensorsProvider {
         let zone_dir = self.sys_root.join("class/thermal");
         let mut zones: Vec<String> = list_dir(&zone_dir, 4096).into_iter().filter(|n| re!(r"^thermal_zone\d+$").is(n)).collect();
         zones.sort_by_key(|n| n[12..].parse::<u64>().unwrap_or(0));
-        self.zones = zones.into_iter().map(|z| Zone { type_: read_line(zone_dir.join(&z).join("type")).unwrap_or_else(|| z.clone()), file: zone_dir.join(&z).join("temp"), id: z }).collect();
+        self.zones = zones.into_iter().map(|z| Zone { type_: read_line(zone_dir.join(&z).join("type")).unwrap_or_else(|| z.clone()), file: zone_dir.join(&z).join("temp") }).collect();
         self.cpu_zone = self.zones.iter().position(|z| z.type_.contains("x86_pkg_temp")).or_else(|| self.zones.iter().position(|z| re!(r"(?i)x86_pkg_temp|cpu|soc").is(&z.type_)));
     }
 
@@ -266,7 +265,6 @@ impl SensorsProvider {
                 }
             }
         }
-        let _ = self.zones.iter().map(|z| &z.id).count();
         out
     }
 }

@@ -41,6 +41,21 @@ pub fn build_name(info: &Value) -> Option<String> {
     (!sha.is_empty()).then_some(sha)
 }
 
+/// stats/host.js appVersion: "Build N" from BUILD_INFO.json (release images;
+/// the commit for one from before build numbers), else version.json's version.
+pub fn app_version(root: &Path) -> Option<String> {
+    let info = read_build_info(root);
+    if let Some(n) = clean_build(&info["build"]) {
+        return Some(format!("Build {n}"));
+    }
+    if super::js::truthy(&info["sha"]) {
+        return Some(super::js::to_string(&info["sha"]).chars().take(7).collect());
+    }
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(root.join("version.json")).ok()?).ok()?;
+    let version = &v["version"];
+    super::js::truthy(version).then(|| super::js::to_string(version))
+}
+
 // ---- the host
 
 pub const HOST_OS: [&str; 11] = ["truenas", "unraid", "synology", "qnap", "wsl", "macos", "raspberry-pi", "ubuntu", "debian", "fedora", "linux"];

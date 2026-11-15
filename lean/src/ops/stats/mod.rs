@@ -539,24 +539,9 @@ impl Stats {
         let c = e.cpu.sample();
         e.procs.sample(c.total_ticks);
         let encoders: HashMap<i64, ActiveEncode> = (self.o.active_encodes)().into_iter().map(|x| (x.pid, x)).collect();
+        // the whole server's memory, and the resident size of the app and its children
         let mut memory = host::read_memory(&self.o.proc_root);
-        if memory.total_b.is_some() {
-            let mut app_b: Option<f64> = None;
-            for pid in &e.procs.app {
-                if let Some(b) = e.procs.get(*pid).map(|p| p.mem_b).filter(|b| b.is_finite()) {
-                    app_b = Some(app_b.unwrap_or(0.0) + b);
-                }
-            }
-            memory.app_b = app_b;
-        } else {
-            let mut app_b: Option<f64> = None;
-            for pid in &e.procs.app {
-                if let Some(b) = e.procs.get(*pid).map(|p| p.mem_b).filter(|b| b.is_finite()) {
-                    app_b = Some(app_b.unwrap_or(0.0) + b);
-                }
-            }
-            memory.app_b = app_b;
-        }
+        memory.app_b = util::sum_of(e.procs.app.iter().map(|pid| e.procs.get(*pid).map(|p| p.mem_b)));
         let Engine { gpu, procs, .. } = e;
         let mut gpus = gpu.sample(t, Some(procs));
         let gp: Vec<power::GpuPower> = gpus.iter().map(|g| power::GpuPower { power_w: g["powerW"].as_f64(), integrated: g["integrated"].as_bool() == Some(true), source: g["powerSource"].as_str().map(str::to_string) }).collect();
@@ -860,10 +845,7 @@ impl Stats {
 
     /// Returns when no background read or share check is in flight (tests; at most 2 s).
     pub fn settle(&self) {
-        let (reads, ()) = {
-            let e = self.e.lock().unwrap();
-            (e.reads.clone(), ())
-        };
+        let reads = self.e.lock().unwrap().reads.clone();
         reads.wait_idle(Duration::from_secs(2));
         let e = self.e.lock().unwrap();
         e.filesystems.wait_idle(Duration::from_millis(200));
