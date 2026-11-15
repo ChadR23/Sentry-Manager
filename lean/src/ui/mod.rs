@@ -619,7 +619,7 @@ impl Ui {
                     .unwrap()
             }
             ("DELETE", ["ui-packs", _]) => {
-                let id = param(2).unwrap();
+                let id = param(1).unwrap();
                 let name = self.packs.name_of(&id).unwrap_or_else(|| "undefined".into());
                 let was_active = self.packs.active().as_deref() == Some(id.as_str());
                 if let Err(e) = self.packs.remove(&id) {
@@ -632,7 +632,7 @@ impl Ui {
                 ok(json!({ "ok": true, "active": self.packs.active() }))
             }
             ("POST", ["vehicles", _, "exports"]) => {
-                let Some(v) = self.ctx.vehicle(&param(2).unwrap()) else { return Some(error(h, StatusCode::NOT_FOUND, "No such vehicle.")) };
+                let Some(v) = self.ctx.vehicle(&param(1).unwrap()) else { return Some(error(h, StatusCode::NOT_FOUND, "No such vehicle.")) };
                 match self.exporter.start(&v, body.as_ref().unwrap_or(&Value::Null)) {
                     Ok(x) => ok(x),
                     Err(e) => bad(&e.0),
