@@ -80,7 +80,7 @@ folder, plus one line in `src/api.rs` (its routes) and its dependencies in
 | footage list, recordings, media ranges, speeds, MP4/SEI reading | first slice done (see README.md) |
 | supervisor | ported, see below and `src/supervisor/README.md` |
 | converter | the file-safety and telemetry core ported and tested; job store, job service, IPC and runtime still to do (see below) |
-| ops | most of it ported, see below |
+| ops | ported; the encoder block and the wiring are the converter's and core's, see below |
 | viewer | ported except where it needs CAN, Sentry USB status, notifications or accounts; see below |
 | everything else | not started |
 
@@ -140,8 +140,10 @@ Not done yet, in order:
 3. ipc.js (22 channels) behind `POST /api/converter/invoke/:name` and the
    `/api/converter/events` SSE (converterBridge.js: verify never Off, the
    path guard), converterHost.js.
-4. autoConvert.js, benchmark.js, encodeDevices.js, server/gpu.js,
-   stats/gpu.js, encoderStats.js, convertStats.js.
+4. autoConvert.js, benchmark.js, encodeDevices.js, encoderStats.js
+   (`OpsCtx::encoder_block`), convertStats.js (`OpsCtx::heartbeat_hardware`).
+   server/gpu.js and stats/gpu.js are ported in ops (`ops::gpu`,
+   `ops::stats::gpu`) for the converter to call.
 5. Helper servers: server/nodes.js, nodeWorker.js, `/node/v1/*`, pinning,
    tokens.
 6. The Node crash suites (test/converterCrash*, replaceCrash, crashPoints)
@@ -198,7 +200,10 @@ from `main.rs`; until core lands `ops/lean.rs` implements the trait on
   `snapshots::apply_pending_restore`, which core must call before it opens
   manager.db; ops/lean.rs does);
 - powerPrice.js and savings.js exactly (local time, overnight rates,
-  backfill, by month), PUT /api/settings/power, savings-by-month;
+  backfill, by month), PUT /api/settings/power, savings-by-month; savings
+  recorded from the converter's job snapshots (`Ops::job_snapshot`) and the
+  backfill run at the start from the jobs table (`ops::month_of_job`,
+  db.jobByExternal);
 - buildInfo.js, hostInfo.js, imageUpdates.js (registry token, multi-arch
   index, build numbers, sticky critical levels, the 12 h / 10 min checks,
   notifications);
@@ -208,50 +213,106 @@ from `main.rs`; until core lands `ops/lean.rs` implements the trait on
   caps, backoff, 429/POW/TIME, the per-hour manual limit, crashes, daily,
   heartbeat and normalizeHeartbeat, install and anonymous keys kept in
   Node's PKCS#8 form). Only `https://reports.skittles.live` (or an https://
-  REPORTS_URL; http only to localhost under NODE_ENV=test);
+  REPORTS_URL; http only to localhost under NODE_ENV=test). The content:
+  `ops/diag.rs` builds index.js reportDiagnostics, reportHeartbeat and
+  reportIdentifiers (and storageTotals.js) from ops' own parts and the
+  `OpsCtx` calls below; crash notes from 500s and panics through
+  `Ops::note_server_error` / `Ops::note_crash`;
 - /api/system, /api/support-bundle (zip, same scrubbing), /api/updates;
-- stats: history.js exactly (the same stats-history.json; its energy,
-  traffic and shares parts are kept as they are), the CSV, CPU, memory,
-  host and network rates; every part of the answer in Node's shape.
+- the server monitor, all of server/stats/* (`ops/stats/`, one file per
+  Node file): history, CPU (sockets, throttling, clock), memory, host (OS
+  from the kernel, appVersion), the process table (reaped children, page
+  size, the app's tree), GPUs (DRM cards, fdinfo engine use per client and
+  per process, amdgpu/i915/xe sysfs and hwmon, runtime suspend, the held
+  numbers, pci.ids names, the long-running nvidia-smi with its backoff,
+  WSL's /dev/dxg), power (RAPL read here or the supervisor's `rapl-reading`
+  through `Ops::rapl_reading`, the wrap-around, per socket, APUs), energy
+  and costs per day and per job with baselines and peaks, data used per day
+  (traffic.js: scopes, splits over midnight, restarts), disks, file systems
+  and share answer times (mountinfo, SMB versions, not-mounted shares,
+  hung checks), sensors (hwmon, thermal zones, fans, per socket), alerts
+  with hysteresis as `server:` notifications, unlock hints, background
+  reads (at most 4 at once, answers land between samples), sampling only
+  while watched or busy, the once-a-day `tick()`, the RAPL keep-alive;
+  nodePower.js (`ops/node_power.rs`: powerReport, cleanReport, combine) and
+  GET /api/stats as index.js builds it (`Ops::stats_answer`: "All
+  servers", peaks, price, the encoder block); server/gpu.js detectGpus,
+  usableGpus, encodeGpuName (`ops/gpu.rs`, for the converter area to use).
 
-Tests: `cargo test` (94 unit tests, including ports of notifyUnchanged,
+Hooks other areas call (methods on `Ops`): `rapl_reading(msg)` (core's
+supervisor link), `note_server_error(name, message, stack)` (core's error
+path for a 500), `note_crash(...)` (a panic hook), `job_snapshot(&JobSnapshot)`
+(converter: each job snapshot, and the jobs listed at the start),
+`job_energy(id)` (core's Jobs keeps it with a finished conversion),
+`meter_start()` / `meter_stop(token)` (the benchmark's power meter),
+`node_power(id, at, w, encoding)` (nodes.js onPower).
+
+`OpsCtx` calls added in round 2, all with defaults so they can be
+implemented one area at a time: `encoder_block(snapshot, energy)` (now takes
+the stats snapshot and energy), `node_powers()`, `active_encodes()`,
+`job_progress(job)`, `stats_busy()`, `request_rapl()` (send
+`{ type: 'rapl', on: true }` to the supervisor), `recent_jobs(limit)`,
+`access_settings()`, `places_count()`, `sentry_usb_infos()`,
+`can_status()`, `car_models()`, `clips_arrived(since)`, `driven_metres()`,
+`heartbeat_hardware()` (convertStats.js; the default names the usable GPUs
+and the CPU), `trust_proxy()`; `VehicleInfo` gained `footage_minutes` and
+`bin_items`. `identifiers()` now only adds what other areas know (account,
+place names, FOOTAGE_ROOT); `diagnostics()` / `heartbeat()` stay as test
+hooks (null: ops builds them).
+
+Tests: `cargo test` (114 ops unit tests): ports of notifyUnchanged,
 powerPrice, savings, savingsByMonth, snapshots, imageUpdates, hostInfo,
-healthGpu, reportsScrub, reportsProtocol, reportsClient and statsHistory)
-and `tests/reports_parity.rs`: the scrubber, the payload schema and the
-heartbeat against the Node code on a corpus, and the Rust client against
-the local fake receiver (test/fixtures/reportsReceiver.js through
-`parity/reports.js`): reports sent, opened and validated by the Node
-protocol code, trust new/verified/anon, heartbeat, crash, a raised
-difficulty, 429, a signed and a forged move. Nothing goes anywhere but
-127.0.0.1.
+healthGpu, reportsScrub, reportsProtocol, reportsClient, statsHistory, gpu,
+nodePower, statsPower, statsSockets (cpuinfo, RAPL per socket),
+statsTraffic, statsAlerts, statsShares, statsGpu (parsers, fdinfo,
+nvidia-smi backoff), statsLifecycle and stats.test.js (the reaped ffmpeg,
+garbage in every file, this machine, the hung sensor), and the hooks above.
+The engine is replayed against Node: `node lean/parity/opsStats.js` runs the
+Node engine on the fake machines of test/fixtures/stats/machines.js (Intel +
+Arc, with and without pci.ids, a 25-sample alert run, AMD, NVIDIA through a
+fake nvidia-smi, Raspberry Pi, a bare container, dual Xeon, a VM, WSL,
+Unraid's bridge, a NAS that hangs, a share that comes back, RAPL from the
+supervisor with a price and a job) and records each tree, phase by phase,
+with Node's GET /api/stats body (`src/ops/stats/testdata/*.json.gz`, 116 KB);
+`ops::stats::tests::the_same_answers_as_node_on_every_fake_machine` builds
+the same trees on the same clock and compares every field of every sample:
+all the same (15 scenarios, 101 recorded samples; `host.node` is null here). Also
+`tests/reports_parity.rs` as before. Nothing goes anywhere but 127.0.0.1.
 
 Same answers: `node lean/parity/opsCompare.js` records goldens of the ops
 GET routes from the Node fixture and replays them against the lean server on
-a copy of its data folder: 10 of 15 the same. The rest belongs to other
-areas or to the machine: the encoder check and the `/api/system` converter
-(converter area), `security.https` (core's TLS), and the disk's free space,
-which changed between the two runs (it is in notification titles and the
-banner, which the spec does not normalise).
+a copy of its data folder, and compares GET /api/stats and /api/health
+field by field where the answer is the machine's and not the moment's
+(the shape of every field; host, CPU, memory size, GPUs, power sources,
+disks, shares, interfaces, sensor names, scopes, hints, alerts, price,
+encoder; the checks' ids, labels and states): 13 of 17 the same, and the
+stats fields differ only in `host.node`. The rest belongs to
+other areas or to the machine: the encoder check and the `/api/system`
+converter (converter area), `security.https` (core's TLS), the disk's free
+space, which can change between the two runs (in notification titles and the
+banner), and, in one run of two, the order the share's space alert and the
+startup check's notification were made in (the share status comes from
+footage/shares).
 
 Not done yet:
 
-- stats: GPUs (gpu.js, nvidia-smi), power and RAPL (power.js; the
-  supervisor's `rapl-reading` must reach `Stats` once core wires the link),
-  energy and costs (energy.js), data used per day (traffic.js), disks, file
-  systems and share answer times, sensors, the process table and the app's
-  CPU, alerts, unlock hints, node power (nodePower.js), the encoder block
-  (converter area, `OpsCtx::encoder_block`), the `tick()` housekeeping;
-- savings.record from the converter's job snapshots (converter calls
-  `power::record`) and the backfill at start;
-- the real diagnostics, heartbeat numbers and identifiers (index.js
-  reportDiagnostics, reportHeartbeat, reportIdentifiers) need the other
-  areas through `OpsCtx`; ops/lean.rs gives a small version;
-- crash notes from 500s (`Reports::note_crash`) need core's error path;
+- the encoder block itself (encoderStats.js, converter area, through
+  `OpsCtx::encoder_block`) and heartbeatHardware/convertStats (converter);
+- core wires the hooks above (the supervisor link's `rapl-reading` and the
+  `rapl` request, the 500 path, a panic hook) and implements the new
+  `OpsCtx` calls; the converter calls `job_snapshot` and the meter;
 - the live-update hub (`announce`), the audit log, log search and sign-in
   are core's; on the stand-alone server they print to stderr, and the 🔑
   routes always ask for the password (no accounts yet);
 - the share status (warning, read-only) comes from footage/shares;
   ops/lean.rs works out a local folder's.
+
+Proposed differences (need the owner's OK): `host.node` in /api/stats is
+null (there is no Node: Node puts process.version there); a share check's
+answer that lands during the same sample shows from the next one, as in
+Node, but a background read's answer now always waits for the sample to end
+(Node's promises do the same; noted because Rust's threads could be faster).
+
 ## Viewer
 
 Done (`src/viewer/`, handlers on the small `viewer::ctx::Ctx` trait;
@@ -320,4 +381,5 @@ Not done yet:
 ## Known differences
 
 None accepted yet. Proposed (needs the owner's OK): `/api/speeds/status`
-`readMode` follows this server's own timing, as Node's does.
+`readMode` follows this server's own timing, as Node's does; `/api/stats`
+`host.node` is null (no Node runs; Node puts process.version there).
