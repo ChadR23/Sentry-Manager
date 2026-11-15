@@ -122,3 +122,61 @@ fn timeline_and_writers_match_node() {
     }
     eprintln!("telemetry parity: {checked} outputs byte-identical to Node's");
 }
+
+/// testdata/verifierFixtures.js: the Node verifier's verdict on good,
+/// raw (no telemetry), truncated and tampered candidates, Quick and Full,
+/// with and without a size profile. The Rust verifier must decide the same,
+/// reason and details included.
+#[test]
+fn verifier_matches_node() {
+    let Some(dir) = fixtures() else { return };
+    let vdir = dir.join("verify");
+    if !vdir.join("list.json").exists() {
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/converter/testdata/verifierFixtures.js");
+        let out = Command::new("node").arg(script).arg(dir).output().expect("run node");
+        assert!(out.status.success(), "verifierFixtures.js failed: {}", String::from_utf8_lossy(&out.stderr));
+    }
+    let runner = super::process::BoundedRunner { timeout_ms: 120_000, max_output_bytes: 4 * 1024 * 1024 };
+    let snaps = std::env::temp_dir().join(format!("lean-verifier-parity-{}", std::process::id()));
+    std::fs::create_dir_all(&snaps).unwrap();
+    let registry = super::snapshot::Registry::new(snaps.clone());
+    let list = read_json(&vdir.join("list.json"));
+    let mut n = 0;
+    for e in list.as_array().unwrap() {
+        let s = |k: &str| e[k].as_str().unwrap().to_string();
+        let o = super::verifier::VerifyOptions {
+            source: dir.join(s("source")),
+            candidate: vdir.join(s("candidate")),
+            codec: if s("codec") == "h265" { Codec::H265 } else { Codec::Av1 },
+            profile_id: s("profileId"),
+            verify_mode: Some(s("mode")),
+            keep_off_target: false,
+            allow_larger: false,
+            trusted_snapshot: false,
+            adopt_candidate: false,
+            decode_accel: vec![],
+            source_duration_us: None,
+            source_timeline: None,
+            ffprobe_path: "ffprobe".into(),
+            ffmpeg_path: "ffmpeg".into(),
+            run_ffprobe: &runner,
+            run_full_decode: &runner,
+            registry: &registry,
+            on_decode_accel_fallback: None,
+            cancel: None,
+        };
+        let v = super::verifier::verify_candidate(&o);
+        if let Some(a) = &v.publication_artifact {
+            assert!(Path::new(&a.path).exists() && a.path.starts_with(&*snaps.to_string_lossy()));
+            let _ = std::process::Command::new("chmod").arg("-R").arg("u+w").arg(&snaps).status();
+            let _ = std::fs::remove_dir_all(Path::new(&a.path).parent().unwrap());
+        }
+        let mut mine = v.to_json();
+        mine.as_object_mut().unwrap().remove("publicationArtifact");
+        let node = read_json(&vdir.join(s("file")));
+        assert_eq!(norm(mine), norm(node), "{}", s("file"));
+        n += 1;
+    }
+    let _ = std::fs::remove_dir_all(&snaps);
+    eprintln!("verifier parity: {n} verdicts the same as Node's");
+}
