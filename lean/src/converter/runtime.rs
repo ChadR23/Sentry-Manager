@@ -82,8 +82,10 @@ impl Converter {
         if let Some(r) = &*started {
             return Ok(r.clone());
         }
+        let summaries = self.store.summaries()?;
+        self.sweep_unreferenced_snapshot_folders(&summaries);
         let mut recovered = Vec::new();
-        for m in self.store.summaries()? {
+        for m in summaries.iter() {
             if !ACTIVE_RECOVERY_STATES.contains(&m["state"].as_str().unwrap_or("")) {
                 continue;
             }
@@ -101,8 +103,119 @@ impl Converter {
                 let _ = service.when_idle(&id);
             }
         });
+        self.sweep_leftover_snapshot_folders(&summaries);
+        self.sweep_leftover_encodes(&summaries);
         *started = Some(recovered.clone());
         Ok(recovered)
+    }
+
+    /// every path a saved job (its summary) still names
+    fn owned_paths(jobs: &[Arc<Value>]) -> Vec<PathBuf> {
+        let mut owned = vec![];
+        for job in jobs {
+            let mut collect = |holder: &Value| {
+                for v in holder.get("ownedPaths").and_then(Value::as_object).into_iter().flat_map(|o| o.values()) {
+                    if let Some(p) = v.as_str() {
+                        owned.push(super::owned::resolve(Path::new(p)));
+                    }
+                }
+                for v in holder.get("ownedArtifacts").and_then(Value::as_object).into_iter().flat_map(|o| o.values()) {
+                    if let Some(p) = v.get("path").and_then(Value::as_str) {
+                        owned.push(super::owned::resolve(Path::new(p)));
+                    }
+                }
+                if let Some(p) = holder.get("publicationArtifact").and_then(|a| a.get("path")).and_then(Value::as_str) {
+                    owned.push(super::owned::resolve(Path::new(p)));
+                }
+            };
+            collect(job);
+            for item in job.get("items").and_then(Value::as_array).into_iter().flatten() {
+                collect(item);
+            }
+        }
+        owned
+    }
+
+    fn snapshot_folders(&self, older_than_ms: Option<u64>) -> Vec<PathBuf> {
+        let Ok(rd) = std::fs::read_dir(&self.temp_path) else { return vec![] };
+        let cutoff = older_than_ms.map(|ms| super::jobstore::now_ms().saturating_sub(ms) as f64);
+        rd.filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with(super::snapshot::SNAPSHOT_PREFIX))
+            .filter(|e| {
+                let Ok(st) = std::fs::symlink_metadata(e.path()) else { return false };
+                st.is_dir() && !st.file_type().is_symlink() && cutoff.map_or(true, |c| super::jobstore::mtime_ms(&st) <= c)
+            })
+            .map(|e| e.path())
+            .collect()
+    }
+
+    /// sweepUnreferencedSnapshotFolders: at startup nothing converts yet, so
+    /// a verification folder no saved job records is a leftover
+    fn sweep_unreferenced_snapshot_folders(&self, jobs: &[Arc<Value>]) {
+        let owned = Self::owned_paths(jobs);
+        let mut removed = 0;
+        for folder in self.snapshot_folders(None) {
+            let f = super::owned::resolve(&folder);
+            if owned.iter().any(|o| *o == f || o.starts_with(&f)) {
+                continue;
+            }
+            if std::fs::remove_dir_all(&folder).is_ok() {
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            eprintln!("[CONVERTER] Removed {removed} leftover verification folder(s) from before the restart");
+        }
+    }
+
+    /// sweepLeftoverSnapshotFolders: with no unfinished job, folders older than an hour
+    fn sweep_leftover_snapshot_folders(&self, jobs: &[Arc<Value>]) {
+        if jobs.iter().any(|j| !["completed", "failed", "cancelled"].contains(&j["state"].as_str().unwrap_or(""))) {
+            return;
+        }
+        let owned = Self::owned_paths(jobs);
+        let mut removed = 0;
+        for folder in self.snapshot_folders(Some(60 * 60_000)) {
+            let f = super::owned::resolve(&folder);
+            if owned.iter().any(|o| *o == f || o.starts_with(&f)) {
+                continue;
+            }
+            if std::fs::remove_dir_all(&folder).is_ok() {
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            eprintln!("[CONVERTER] Removed {removed} leftover work folder(s) from an earlier session");
+        }
+    }
+
+    /// sweepLeftoverEncodes: partial encodes no job names, older than an hour
+    fn sweep_leftover_encodes(&self, jobs: &[Arc<Value>]) {
+        let owned = Self::owned_paths(jobs);
+        let root = self.staging.temp_root().to_path_buf();
+        let Ok(rd) = std::fs::read_dir(&root) else { return };
+        let cutoff = super::jobstore::now_ms().saturating_sub(60 * 60_000) as f64;
+        let mut removed = 0;
+        for e in rd.filter_map(|e| e.ok()) {
+            let name = e.file_name().to_string_lossy().to_lowercase();
+            if !["-encoded.mp4", "-encoded.mkv", "-encoded.mov"].iter().any(|x| name.ends_with(x)) {
+                continue;
+            }
+            let file = super::owned::resolve(&e.path());
+            if owned.contains(&file) {
+                continue;
+            }
+            let Ok(st) = std::fs::symlink_metadata(&file) else { continue };
+            if !st.is_file() || super::jobstore::mtime_ms(&st) > cutoff {
+                continue;
+            }
+            if std::fs::remove_file(&file).is_ok() {
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            eprintln!("[CONVERTER] Removed {removed} partial encode(s) left from an earlier stop");
+        }
     }
 
     pub fn shutdown(&self) {

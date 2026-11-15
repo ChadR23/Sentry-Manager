@@ -285,6 +285,7 @@ pub fn remove(target: &Path, expected: &Expected, guard: Option<Guard>, identity
     let dir = target.parent().unwrap_or(Path::new("/"));
     let quarantine = dir.join(format!(".sentry-owned-remove-{}", random_hex(8)));
     move_noreplace(target, &quarantine)?;
+    test_hook("quarantined", target, &quarantine)?;
     let moved = lstat(&quarantine);
     if !moved.as_ref().is_some_and(|m| m.is_file() && m.dev() == victim.1.dev() && m.ino() == victim.1.ino()) {
         // Something replaced the path between the check and the rename: put it back.
@@ -329,7 +330,37 @@ pub struct PromoteResult {
 }
 
 /// renameExclusive.promote({ from, to, expectedSource, removeSource, identityOnly })
+
+/// Kill points for the crash tests (crashPoints.js wraps renameExclusive and
+/// the no-replace rename the same way): called around each move.
+#[cfg(test)]
+pub type TestHook = std::sync::Arc<dyn Fn(&str, &Path, &Path) -> io::Result<()> + Send + Sync>;
+#[cfg(test)]
+pub static TEST_HOOK: std::sync::RwLock<Option<TestHook>> = std::sync::RwLock::new(None);
+
+#[cfg(test)]
+fn test_hook(event: &str, from: &Path, to: &Path) -> io::Result<()> {
+    let h = TEST_HOOK.read().unwrap().clone();
+    match h {
+        Some(h) => h(event, from, to),
+        None => Ok(()),
+    }
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn test_hook(_event: &str, _from: &Path, _to: &Path) -> io::Result<()> {
+    Ok(())
+}
+
 pub fn promote(from: &Path, to: &Path, expected: Option<&Expected>, remove_source: bool, identity_only: bool) -> io::Result<PromoteResult> {
+    test_hook("promote-before", from, to)?;
+    let r = promote_inner(from, to, expected, remove_source, identity_only)?;
+    test_hook("promote-after", from, to)?;
+    Ok(r)
+}
+
+fn promote_inner(from: &Path, to: &Path, expected: Option<&Expected>, remove_source: bool, identity_only: bool) -> io::Result<PromoteResult> {
     if !valid_path(from) || !valid_path(to) || resolve(from) == resolve(to) {
         return Err(code_err("ENOTSUP", "Promotion requires two distinct absolute paths."));
     }
@@ -369,6 +400,17 @@ pub enum LinkResult {
 
 /// renameExclusive.linkBackup({ from, to, expectedSource, identityOnly })
 pub fn link_backup(from: &Path, to: &Path, expected: &Expected, identity_only: bool) -> io::Result<LinkResult> {
+    match test_hook("link-before", from, to) {
+        Err(e) if e.kind() == io::ErrorKind::Unsupported => return Ok(LinkResult::Unsupported),
+        Err(e) => return Err(e),
+        Ok(()) => {}
+    }
+    let r = link_backup_inner(from, to, expected, identity_only)?;
+    test_hook("link-after", from, to)?;
+    Ok(r)
+}
+
+fn link_backup_inner(from: &Path, to: &Path, expected: &Expected, identity_only: bool) -> io::Result<LinkResult> {
     if !valid_path(from) || !valid_path(to) || resolve(from) == resolve(to) {
         return Err(code_err("ENOTSUP", "Linking requires two distinct absolute paths."));
     }
@@ -410,6 +452,14 @@ pub struct ReplaceResult {
 /// rename(2) the verified `from` over `to`, which must still be the file
 /// `expected_target` names (device, inode) with that same file at `keep`.
 pub fn replace_over(from: &Path, to: &Path, keep: &Path, expected: &Expected, target_dev: &str, target_ino: &str, identity_only: bool) -> io::Result<ReplaceResult> {
+    test_hook("replace-before", from, to)?;
+    let r = replace_over_inner(from, to, keep, expected, target_dev, target_ino, identity_only)?;
+    test_hook("replace-after", from, to)?;
+    Ok(r)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn replace_over_inner(from: &Path, to: &Path, keep: &Path, expected: &Expected, target_dev: &str, target_ino: &str, identity_only: bool) -> io::Result<ReplaceResult> {
     let distinct = {
         let (a, b, c) = (resolve(from), resolve(to), resolve(keep));
         a != b && b != c && a != c

@@ -291,6 +291,7 @@ impl StoreHooks for Point {
                 matches!(s, Some("owned") | Some("cleanup-pending")) && i.get("replacementPhase").is_none() && m["state"] != "copying"
             }),
             "after-result" => items(&m).iter().any(|i| i["state"] == "completed" && !items(&prev).iter().any(|e| e["id"] == i["id"] && e["state"] == "completed")),
+            "rolled-back" => m["replacementPhase"] == "backup-restored",
             _ => false,
         };
         if hit {
@@ -321,6 +322,25 @@ fn crash_child_entry() {
     let concurrency: i64 = std::env::var("LEAN_CRASH_CONCURRENCY").ok().and_then(|c| c.parse().ok()).unwrap_or(1);
     let ffmpeg = if point == "encode" { wrapper(&base, "ffmpeg", "case \"$*\" in *-progress*) kill -9 -$(ps -o pgid= $PPID | tr -d ' ') 2>/dev/null; kill -9 $PPID; exit 1;; esac") } else { "ffmpeg".into() };
     let ffprobe = if point == "verify" { wrapper(&base, "ffprobe", "case \"$*\" in *sentry-six-verification-*) kill -9 $PPID; exit 1;; esac") } else { "ffprobe".into() };
+    let no_links = std::env::var("LEAN_CRASH_NOLINKS").is_ok_and(|v| v == "1");
+    let p2 = point.clone();
+    let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    *super::super::owned::TEST_HOOK.write().unwrap() = Some(Arc::new(move |event: &str, from: &Path, to: &Path| {
+        let (f, t) = (name(from), name(to));
+        let to_backup = t.starts_with("BACKUP-");
+        let final_move = !to_backup && t.ends_with("front.mp4");
+        if event == "link-before" && no_links {
+            return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "no links"));
+        }
+        match (p2.as_str(), event) {
+            ("backup-renamed", "promote-after" | "link-after") if to_backup => die(),
+            ("before-final", "promote-before" | "replace-before") if final_move => die(),
+            ("after-final", "promote-after" | "replace-after") if final_move => die(),
+            ("quarantined", "quarantined") if f.starts_with("BACKUP-") && t.starts_with(".sentry-owned-remove-") => die(),
+            ("rolled-back", "promote-before" | "replace-before") if f.starts_with("TEMP-") && t.ends_with("front.mp4") => Err(std::io::Error::from_raw_os_error(libc::EPERM)),
+            _ => Ok(()),
+        }
+    }));
     let c = open(&base, &ffmpeg, &ffprobe, Some(Arc::new(Point(point.clone()))));
     c.start().unwrap();
     let id = c.service.start(&config(&base, &mode, &network, concurrency)).unwrap();
@@ -329,7 +349,7 @@ fn crash_child_entry() {
     std::process::exit(3);
 }
 
-fn crash(base: &Path, point: &str, mode: &str, network: &str, concurrency: usize) -> std::process::Output {
+fn crash(base: &Path, point: &str, mode: &str, network: &str, concurrency: usize, no_links: bool) -> std::process::Output {
     let exe = std::env::current_exe().unwrap();
     Command::new(exe)
         .args(["--exact", "converter::service::tests::crash_child_entry", "--nocapture", "--test-threads=1"])
@@ -338,14 +358,20 @@ fn crash(base: &Path, point: &str, mode: &str, network: &str, concurrency: usize
         .env("LEAN_CRASH_MODE", mode)
         .env("LEAN_CRASH_NET", network)
         .env("LEAN_CRASH_CONCURRENCY", concurrency.to_string())
+        .env("LEAN_CRASH_NOLINKS", if no_links { "1" } else { "" })
         .output()
         .unwrap()
 }
 
 fn crash_and_recover(point: &str, mode: &str, network: &str, concurrency: usize, by_node: bool) {
+    crash_and_recover_on(point, mode, network, concurrency, by_node, false)
+}
+
+fn crash_and_recover_on(point: &str, mode: &str, network: &str, concurrency: usize, by_node: bool, no_links: bool) {
+    eprintln!("kill point {point} ({mode}, {network}, {concurrency} at once, {} restarts it)", if by_node { "Node" } else { "Rust" });
     let base = make_base(&format!("crash-{point}"), concurrency.max(1));
     let (names, before) = names_and_hashes(&base);
-    let died = crash(&base, point, mode, network, concurrency);
+    let died = crash(&base, point, mode, network, concurrency, no_links);
     use std::os::unix::process::ExitStatusExt;
     assert_eq!(died.status.signal(), Some(libc::SIGKILL), "the converter died at {point}: {}", String::from_utf8_lossy(&died.stderr).chars().take(600).collect::<String>());
     // nothing of the original was lost at the moment of the crash: it is at
@@ -385,6 +411,23 @@ fn crash_replacing_originals_finishes_by_itself() {
     for point in &REPLACE_POINTS[..11] {
         crash_and_recover(point, "replace", "direct", 1, false);
     }
+}
+
+#[test]
+fn crash_in_the_moves_of_a_replacement() {
+    if !available() {
+        eprintln!("skipped: needs ffmpeg with libx265 and node");
+        return;
+    }
+    for point in ["backup-renamed", "before-final", "after-final", "quarantined", "rolled-back"] {
+        crash_and_recover(point, "replace", "direct", 1, false);
+    }
+    // a share without hard links: the original moved aside, the copy moved in
+    for point in ["backup-renamed", "before-final", "rolled-back"] {
+        crash_and_recover_on(point, "replace", "direct", 1, false, true);
+    }
+    crash_and_recover("after-final", "replace", "staging", 1, false);
+    crash_and_recover("before-final", "replace", "direct", 1, true);
 }
 
 #[test]

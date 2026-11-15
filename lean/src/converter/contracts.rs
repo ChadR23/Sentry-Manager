@@ -353,7 +353,7 @@ mod tests {
         assert_eq!(format_bytes(1152.0), "1.13 KiB", "an exact tie rounds up as toFixed does");
         assert_eq!(format_bytes(1536.0), "1.5 KiB");
         assert_eq!(format_bytes(1048575.0), "1024 KiB");
-        assert_eq!(format_bytes(5.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0), "6144 PiB");
+        assert_eq!(format_bytes(5.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0), "5120 PiB");
         let v = serde_json::json!([{ "device": "pci:0000:03:00.0", "concurrency": 3 }, { "device": "cpu", "concurrency": 0 }]);
         assert_eq!(normalize_lanes(&v).unwrap().unwrap(), serde_json::json!([{ "device": "pci:0000:03:00.0", "concurrency": 3 }]));
         for bad in [serde_json::json!([]), serde_json::json!([{ "device": "cpu", "concurrency": 0 }]), serde_json::json!([{ "device": "cpu", "concurrency": 1, "x": 1 }]), serde_json::json!([{ "device": "gpu", "concurrency": 1 }]), serde_json::json!([{ "device": "cpu", "concurrency": 1 }, { "device": "cpu", "concurrency": 1 }]), serde_json::json!([{ "device": "cpu", "concurrency": 65 }]), serde_json::json!({})] {
