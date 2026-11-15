@@ -23,6 +23,7 @@ pub mod owned;
 pub mod planner;
 pub mod process;
 pub mod recovery;
+pub mod scanner;
 pub mod snapshot;
 pub mod staging;
 pub mod tesla_sei;
