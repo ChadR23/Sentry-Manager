@@ -84,10 +84,10 @@ area is served through them (`src/wire/`, see "Integration" below).
 | supervisor | ported, see below and `src/supervisor/README.md`; TLS and the fd-3 link wired by core |
 | footage (`src/footage/`, with the first slice's lists in `api.rs`) | ported; arrival checksums left (see below) |
 | viewer | ported except CAN and Sentry USB evidence in archive gaps, drives and place tags (see below) |
-| ops | most of it ported; stats parts and the converter's numbers left (see below) |
+| ops | ported, the server monitor included; the converter's encoder block, node power and a few report numbers left (see below) |
 | ui (pages, static files, interface packs, exports, settings) | ported |
 | can (CAN logs, uploads, device port, Sentry USB files) | ported |
-| converter | the file-safety and telemetry core ported and tested (library); job store, job service, IPC and runtime still to do: its two routes answer as Node does while the converter starts |
+| converter | ported and mounted: job store, scanner, job service, runtime, the 22 channels behind `/api/converter/invoke/:name` and `/api/converter/events`; lanes per GPU, auto convert, the benchmark, the converted index left (see below) |
 | helper servers (nodes) | not started: `/api/nodes*` answer 501, `/node/v1/*` 404 |
 
 Same answers, the whole contract (`node lean/parity/contractAll.js`: the Node
@@ -152,11 +152,26 @@ Checked (all on the integrated server):
 
 ## Converter
 
-Done (`src/converter/`, library only: nothing of it is behind a route, so
-nothing can touch footage from the lean server. `POST /api/converter/invoke/:name`
-answers `{ ok: false, error: { code: "CONVERTER_STARTING" } }` and
-`/api/converter/events` 503 "Converter is starting", as Node does before its
-converter runs; ops reports the converter as not started):
+Mounted (`src/wire/converter.rs`): the runtime opens `DATA/converter-jobs`
+with `DATA/converter-temp`, recovers unfinished jobs at the start, and the
+bridge answers `POST /api/converter/invoke/:name` (blocking thread) and
+`/api/converter/events` (SSE, `hello` first, 200 streams at most, the client
+forgotten when the stream closes); verification is never Off and every
+folder goes through the footage guard (`ConverterCtx::resolve_path`:
+index.js `allowed`, the vehicles' folders with an SMB one only inside
+FOOTAGE_ROOT, the output folders, the deny list; a destination may not exist
+yet, safePath.js realOrNearest). Every job snapshot gives Activity its line
+(mirrorConverterJob: started, updated when the line changes, finished with
+the job's energy, a notification for failed clips), and ops its
+`job_snapshot` (savings, the stats' job mark); `conv.shutdown()` at exit;
+ops' `converter()`, `active_encodes()`, `job_progress()`, `jobs_queued()`
+read the runtime. Not wired yet: the Sentry USB checksum hook
+(`before_replace_original`: arrival checksums are not ported, so nothing is
+recorded before a replace in place), `clip_converted` only announces
+`inventory` (the viewer's previews are made again when asked), core's
+`conversions_active` / `settle_conversions` hooks for Clear jobs.
+
+Done, round 1 (`src/converter/`):
 
 - `owned.rs` (server/posixOwnedFs.js, native/noreplace-rename.c): remove,
   promote, linkBackup, replaceOver. Device, inode, size and a SHA-256 taken
@@ -198,27 +213,134 @@ inspections identical, 168 verifier verdicts identical (good, raw,
 truncated, tampered; Quick and Full; with and without a size profile), and
 buildEncodeArgs / decodeAccelArgs over every encoder and option.
 
+Round 2 (mounted as above, see "Mounting"):
+
+- `jobstore/` (jobStore.js): job.json + job.journal (append, replay, the
+  1,000-record / 16 MiB limits, a torn last line ignored), every manifest
+  rule of normalizeManifest in Node's order with Node's error codes, the
+  normalized keys in Node's order (so the files are byte for byte Node's),
+  preflight limits, quarantine of a corrupt job.json or journal, create /
+  save / load / list (ICU order) / summaries (summary.json with Node's
+  stamp) / transition (the store's own clips are not checked again: an
+  `Item` only exists normalized) / recover (the recovery truth tables) /
+  discard. Kill-point hooks (`StoreHooks`) as crashPoints.js wraps the store.
+- `scanner.rs` (scanner.js, teslaFilename.mjs): the same clips in the same
+  order (groups in groupOrder, then names by UTF-16 code unit), the same
+  skips (hidden, TEMP-/BACKUP-, symbolic links, outside the real source,
+  the destination inside the source), compareScanPaths.
+- `service/` (jobService.js): start (one job at a time unless automatic jobs
+  on separate devices), discovery in batches with follow-up parts at the
+  clip limit, the workers (concurrency, raised and lowered while running),
+  the lead and save-slot rules for job-level fields, per clip: ffprobe,
+  staging or direct, the original's fingerprint, encode (ffmpeg -progress
+  parsed exactly as Node, activeEncodes' live numbers, the stall watch),
+  the telemetry writer, verify, size retries, the under-source retries
+  (85 %, 60 %) and "keep the original" when nothing is saved, the split save
+  (prepare outside the slot, swap/commit in it, rollback record), cleanup
+  by recorded identity, failures, pause (settles when every worker parks),
+  resume, cancel, discard, retry failed, dismiss summary, network waits
+  (paused_network with its recovery record, backoff, "gone while the share
+  answers"), shutdown (the stop record), recovery (every action of
+  performRecovery: resume-queue/discovery/network, copies, replacements
+  step by step through the truth tables, cleanup-and-restart), events and
+  throttled snapshots (publicSnapshot / summaries).
+- `runtime.rs` (runtime.js for the server): `<data>/converter-jobs`, the
+  real temp path, `<temp>/sentry-six-converter`, startup recovery (deferred,
+  then one job after the other), the startup sweeps (unreferenced
+  verification folders, leftover work folders and encodes older than an hour).
+- `ipc.rs` + `ctx.rs` (ipc.js + converterBridge.js): the 22 channels with
+  their checks, error codes and answers (sanitizeSnapshot with the 256-clip
+  cut, sanitizeLiveProgress, responseError), verification never Off for a
+  server start, every folder through the footage guard
+  (`ConverterCtx::resolve_path`), the SSE live updates.
+
+Checked (`cargo test --lib converter`; the end-to-end ones need ffmpeg with
+libx265 and node, `LEAN_CONVERTER_JOB_FIXTURES=<dir>` reuses the clip):
+
+- job store parity (`lean/parity/converterStore.js`): the same scenarios
+  run by both stores give byte-identical job.json and job.journal; each
+  lists and loads the other's jobs (job.json + journal) as its own and
+  continues them (two rounds, each way); summaries equal, Node's
+  summary.json reused; recover() with the same facts takes the same step;
+  7,842 damaged manifests (every field removed, nulled, retyped; unknown
+  and private fields) get the same answer (the same code, or the same job);
+  journalDiscovery and snapshotReuse rules;
+- scanner parity (`lean/parity/converterScan.js`) on a tree with every skip;
+- conversions (`lean/parity/converterJobs.js`): replace direct, replace
+  through staging, separate; the same job (states, result codes, attempts,
+  encoder, counters, summary), the same events (but live-update counts) and
+  byte-identical outputs as Node's run on a copy; Node reads Rust's job;
+- the crash suites (converterCrashReplace, converterCrashSeparate,
+  converterCrashParallel, replaceCrash, crashPoints.js): the converter
+  killed with SIGKILL (its process group) at encode, verify,
+  snapshot-unrecorded, save-recorded, copy-recorded, slot-entered,
+  backup-renamed, backup-recorded, before-final, after-final,
+  final-recorded, quarantined, rolled-back, before-result, after-result,
+  cleanup-unrecorded; on a share without hard links; through staging;
+  separate; three at once; restarted by Rust, and by Node (Rust's
+  interrupted jobs finished by the Node converter). Every time the job
+  finishes by itself, every clip holds its verified H.265 conversion, the
+  original was at its name or its backup at the moment of the kill, and
+  nothing is left behind;
+- restartResume (stopped between clips carries on; paused stays paused and
+  Resume finishes it), a cancel; ffmpeg progress lines; formatBytes ties.
+- bridge parity (`lean/parity/converterBridge.js`): 104 requests (start
+  configs of every kind, ids, folders outside the guard, chooseFolder,
+  oversized payloads, unknown channels) answered the same by Node's bridge
+  and this one on the same stand-in service.
+
+### Mounting (for the integrator)
+
+```rust
+let conv = converter::runtime::Converter::open(converter::runtime::RuntimeOptions {
+    data_path, temp_path, ffmpeg, ffprobe,
+    before_replace_original: Some(/* Sentry USB checksum hook */),
+    tools: None, tune: None, hooks: None,
+})?;
+conv.start()?;                       // recovers unfinished jobs
+let bridge = converter::ipc::Bridge::new(
+    Arc::new(conv.service.clone()), ctx /* Arc<dyn ConverterCtx> */,
+    converter::ipc::capabilities(&conv.staging.capabilities()));
+// POST /api/converter/invoke/:name  -> bridge.invoke(name, body (None if empty), client)  (blocking: spawn_blocking)
+// GET  /api/converter/events?client= -> bridge.attach_events(client, sink); bridge.detach(client) on close
+// on exit: conv.shutdown()
+```
+`ConverterCtx` (ctx.rs): data/temp paths, tool paths, the footage guard,
+the Sentry USB hook, clip_converted (previews), log lines. `Service` also
+answers `active_encodes()`, `slots_of(id)`, `live_jobs()` for stats/ops.
+
 Not done yet, in order:
 
-1. jobStore.js (manifest files, journal, validation, transitions) and the
-   manifest folding of transaction snapshots; reading jobs Node wrote.
-2. jobService.js (the pipeline: discover, stage, encode with progress
-   parsing, telemetry, verify, size retry, save slot, recovery loop,
-   pause/cancel, lanes), runtime.js composition (volume info, device list,
-   lifecycle), scanner.js, convertedIndex.js, mp4Header.js, pictureCheck.js.
-3. ipc.js (22 channels) behind `POST /api/converter/invoke/:name` and the
-   `/api/converter/events` SSE (converterBridge.js: verify never Off, the
-   path guard), converterHost.js.
-4. autoConvert.js, benchmark.js, encodeDevices.js, server/gpu.js,
-   stats/gpu.js, encoderStats.js, convertStats.js.
-5. Helper servers: server/nodes.js, nodeWorker.js, `/node/v1/*`, pinning,
-   tokens.
-6. The Node crash suites (test/converterCrash*, replaceCrash, crashPoints)
-   need the job service; port them with it.
+1. Lanes per GPU (`setLanes`, `devices`, resolveLanes, the device list):
+   a job's lanes are kept and it runs with their total at once on the
+   planner's encoder, as Node does when none of its GPUs is found; GPU
+   decode tiers (zero-copy, GPU, CPU) are not used (CPU decode).
+2. convertedIndex.js and mp4Header.js (discovery skips converted clips
+   without opening them): today every clip is probed in a worker; the
+   result is the same ('already-converted'), it is slower on big archives.
+   pictureCheck.js (only for helper servers).
+3. autoConvert.js (the auto channels answer AUTO_UNAVAILABLE), benchmark.js
+   (runBenchmark answers BENCHMARK_UNAVAILABLE before checking its
+   payload), encodeDevices.js, encoderStats.js (`OpsCtx::encoder_block`),
+   convertStats.js (`OpsCtx::heartbeat_hardware`), holdDiscovered (Sentry
+   USB copies in progress: `Options::skip_discovered` is there for it).
+   server/gpu.js and stats/gpu.js are ported in ops (`ops::gpu`,
+   `ops::stats::gpu`) for the converter to call.
+4. Helper servers: server/nodes.js, nodeWorker.js, `/node/v1/*`, pinning,
+   tokens, remote encodes.
+5. The crash points inside a file copy (temp-created, temp-torn,
+   temp-complete, temp-readback, writer, staging-copy) need an fs hook in
+   staging; round 1's journal crash test covers those records, not a kill.
+   The 'lowered' point (several at once, then one) is not run.
+6. sweepEmptySnapshotFolders (empty verification folders removed while
+   idle) and the converter lifecycle's start retries (converterHost).
 
 Proposed differences (need the owner's OK): a nested box literally named
 `root` is serialized as a box (Node's writer would treat it as the tree
-root); io error texts are Rust's where Node logs its own.
+root); io error texts are Rust's where Node logs its own; Resume of a job
+parked mid-replacement answers once that clip is settled (Node's answer
+waits for the whole relaunched job); a job file holding a lone UTF-16
+surrogate (never written from file names) is read as corrupt.
 
 ## Supervisor
 
@@ -263,7 +385,10 @@ Done (`src/ops/`, handlers over the `ops::ctx::OpsCtx` trait; routes in
   `snapshots::apply_pending_restore`, which main.rs calls before core opens
   manager.db);
 - powerPrice.js and savings.js exactly (local time, overnight rates,
-  backfill, by month), PUT /api/settings/power, savings-by-month;
+  backfill, by month), PUT /api/settings/power, savings-by-month; savings
+  recorded from the converter's job snapshots (`Ops::job_snapshot`) and the
+  backfill run at the start from the jobs table (`ops::month_of_job`,
+  db.jobByExternal);
 - buildInfo.js, hostInfo.js, imageUpdates.js (registry token, multi-arch
   index, build numbers, sticky critical levels, the 12 h / 10 min checks,
   notifications);
@@ -273,49 +398,116 @@ Done (`src/ops/`, handlers over the `ops::ctx::OpsCtx` trait; routes in
   caps, backoff, 429/POW/TIME, the per-hour manual limit, crashes, daily,
   heartbeat and normalizeHeartbeat, install and anonymous keys kept in
   Node's PKCS#8 form). Only `https://reports.skittles.live` (or an https://
-  REPORTS_URL; http only to localhost under NODE_ENV=test);
+  REPORTS_URL; http only to localhost under NODE_ENV=test). The content:
+  `ops/diag.rs` builds index.js reportDiagnostics, reportHeartbeat and
+  reportIdentifiers (and storageTotals.js) from ops' own parts and the
+  `OpsCtx` calls below; crash notes from 500s and panics through
+  `Ops::note_server_error` / `Ops::note_crash`;
 - /api/system, /api/support-bundle (zip, same scrubbing), /api/updates;
-- stats: history.js exactly (the same stats-history.json; its energy,
-  traffic and shares parts are kept as they are), the CSV, CPU, memory,
-  host and network rates; every part of the answer in Node's shape.
+- the server monitor, all of server/stats/* (`ops/stats/`, one file per
+  Node file): history, CPU (sockets, throttling, clock), memory, host (OS
+  from the kernel, appVersion), the process table (reaped children, page
+  size, the app's tree), GPUs (DRM cards, fdinfo engine use per client and
+  per process, amdgpu/i915/xe sysfs and hwmon, runtime suspend, the held
+  numbers, pci.ids names, the long-running nvidia-smi with its backoff,
+  WSL's /dev/dxg), power (RAPL read here or the supervisor's `rapl-reading`
+  through `Ops::rapl_reading`, the wrap-around, per socket, APUs), energy
+  and costs per day and per job with baselines and peaks, data used per day
+  (traffic.js: scopes, splits over midnight, restarts), disks, file systems
+  and share answer times (mountinfo, SMB versions, not-mounted shares,
+  hung checks), sensors (hwmon, thermal zones, fans, per socket), alerts
+  with hysteresis as `server:` notifications, unlock hints, background
+  reads (at most 4 at once, answers land between samples), sampling only
+  while watched or busy, the once-a-day `tick()`, the RAPL keep-alive;
+  nodePower.js (`ops/node_power.rs`: powerReport, cleanReport, combine) and
+  GET /api/stats as index.js builds it (`Ops::stats_answer`: "All
+  servers", peaks, price, the encoder block); server/gpu.js detectGpus,
+  usableGpus, encodeGpuName (`ops/gpu.rs`, for the converter area to use).
 
-Tests: `cargo test` (94 unit tests, including ports of notifyUnchanged,
+Hooks other areas call (methods on `Ops`): `rapl_reading(msg)` (core's
+supervisor link), `note_server_error(name, message, stack)` (core's error
+path for a 500), `note_crash(...)` (a panic hook), `job_snapshot(&JobSnapshot)`
+(converter: each job snapshot, and the jobs listed at the start),
+`job_energy(id)` (core's Jobs keeps it with a finished conversion),
+`meter_start()` / `meter_stop(token)` (the benchmark's power meter),
+`node_power(id, at, w, encoding)` (nodes.js onPower).
+
+`OpsCtx` calls added in round 2, all with defaults so they can be
+implemented one area at a time: `encoder_block(snapshot, energy)` (now takes
+the stats snapshot and energy), `node_powers()`, `active_encodes()`,
+`job_progress(job)`, `stats_busy()`, `request_rapl()` (send
+`{ type: 'rapl', on: true }` to the supervisor), `recent_jobs(limit)`,
+`access_settings()`, `places_count()`, `sentry_usb_infos()`,
+`can_status()`, `car_models()`, `clips_arrived(since)`, `driven_metres()`,
+`heartbeat_hardware()` (convertStats.js; the default names the usable GPUs
+and the CPU), `trust_proxy()`; `VehicleInfo` gained `footage_minutes` and
+`bin_items`. `identifiers()` now only adds what other areas know (account,
+place names, FOOTAGE_ROOT); `diagnostics()` / `heartbeat()` stay as test
+hooks (null: ops builds them).
+
+Tests: `cargo test` (114 ops unit tests): ports of notifyUnchanged,
 powerPrice, savings, savingsByMonth, snapshots, imageUpdates, hostInfo,
-healthGpu, reportsScrub, reportsProtocol, reportsClient and statsHistory)
-and `tests/reports_parity.rs`: the scrubber, the payload schema and the
-heartbeat against the Node code on a corpus, and the Rust client against
-the local fake receiver (test/fixtures/reportsReceiver.js through
-`parity/reports.js`): reports sent, opened and validated by the Node
-protocol code, trust new/verified/anon, heartbeat, crash, a raised
-difficulty, 429, a signed and a forged move. Nothing goes anywhere but
-127.0.0.1.
+healthGpu, reportsScrub, reportsProtocol, reportsClient, statsHistory, gpu,
+nodePower, statsPower, statsSockets (cpuinfo, RAPL per socket),
+statsTraffic, statsAlerts, statsShares, statsGpu (parsers, fdinfo,
+nvidia-smi backoff), statsLifecycle and stats.test.js (the reaped ffmpeg,
+garbage in every file, this machine, the hung sensor), and the hooks above.
+The engine is replayed against Node: `node lean/parity/opsStats.js` runs the
+Node engine on the fake machines of test/fixtures/stats/machines.js (Intel +
+Arc, with and without pci.ids, a 25-sample alert run, AMD, NVIDIA through a
+fake nvidia-smi, Raspberry Pi, a bare container, dual Xeon, a VM, WSL,
+Unraid's bridge, a NAS that hangs, a share that comes back, RAPL from the
+supervisor with a price and a job) and records each tree, phase by phase,
+with Node's GET /api/stats body (`src/ops/stats/testdata/*.json.gz`, 116 KB);
+`ops::stats::tests::the_same_answers_as_node_on_every_fake_machine` builds
+the same trees on the same clock and compares every field of every sample:
+all the same (15 scenarios, 101 recorded samples; `host.node` is null here). Also
+`tests/reports_parity.rs` as before. Nothing goes anywhere but 127.0.0.1.
 
 Same answers: `node lean/parity/opsCompare.js` records goldens of the ops
 GET routes from the Node fixture and replays them against the lean server on
-a copy of its data folder: 10 of 15 the same. The rest belongs to other
-areas or to the machine: the encoder check and the `/api/system` converter
-(converter area), `security.https` (core's TLS), and the disk's free space,
-which changed between the two runs (it is in notification titles and the
-banner, which the spec does not normalise).
+a copy of its data folder, and compares GET /api/stats and /api/health
+field by field where the answer is the machine's and not the moment's
+(the shape of every field; host, CPU, memory size, GPUs, power sources,
+disks, shares, interfaces, sensor names, scopes, hints, alerts, price,
+encoder; the checks' ids, labels and states): 13 of 17 the same, and the
+stats fields differ only in `host.node`. The rest belongs to
+other areas or to the machine: the encoder check and the `/api/system`
+converter (converter area), `security.https` (core's TLS), the disk's free
+space, which can change between the two runs (in notification titles and the
+banner), and, in one run of two, the order the share's space alert and the
+startup check's notification were made in (the share status comes from
+footage/shares).
+
+Wired on core (`src/wire/`): `rapl_reading` from the supervisor's link
+(core's hook) and `request_rapl()` sends `rapl` on it; `note_server_error`
+from core's 500 path (a new `server_error` hook, unexpected errors only, as
+`!err.status`); `note_crash` from a panic hook; `job_snapshot` from every
+converter snapshot and the jobs listed at the start; `job_energy` with a
+finished conversion's Activity row; the `OpsCtx` calls `converter()`,
+`active_encodes()`, `job_progress()`, `jobs_queued()`, `request_rapl()`,
+`recent_jobs()`, `access_settings()`, `places_count()`, `can_status()`,
+`car_models()`, `clips_arrived()`, `trust_proxy()`, `identifiers()`
+(accounts, places, FOOTAGE_ROOT), GPU detection through `ops::gpu`;
+`VehicleInfo` with `footage_minutes` and `bin_items`; hub, audit, log
+search, sign-in and the 🔑 window are core's; share status is footage's.
 
 Not done yet:
 
-- stats: GPUs (gpu.js, nvidia-smi), power and RAPL (power.js; the
-  supervisor's `rapl-reading` must reach `Stats` once core wires the link),
-  energy and costs (energy.js), data used per day (traffic.js), disks, file
-  systems and share answer times, sensors, the process table and the app's
-  CPU, alerts, unlock hints, node power (nodePower.js), the encoder block
-  (converter area, `OpsCtx::encoder_block`), the `tick()` housekeeping;
-- savings.record from the converter's job snapshots (converter calls
-  `power::record`) and the backfill at start;
-- the full diagnostics and heartbeat (index.js reportDiagnostics,
-  reportHeartbeat): `wire/ops.rs` gives the system summary, vehicles and
-  CAN on/off; converter, GPU and node numbers wait for those areas;
-- crash notes from 500s (`Reports::note_crash`) need a hook in core's error path;
-- the supervisor's `rapl-reading` (core's `rapl_reading` hook) has no
-  `Stats` setter to go to yet.
-- (done: hub, audit, log search, sign-in and the 🔑 window are core's; share
-  status comes from footage's shares.)
+- the encoder block itself (encoderStats.js, converter area, through
+  `OpsCtx::encoder_block`) and heartbeatHardware/convertStats (converter);
+  the benchmark's meter (`meter_start`/`meter_stop`: the benchmark is not
+  ported);
+- `node_powers()` and `node_power` (helper servers are not ported),
+  `sentry_usb_infos()` (CAN area's Sentry USB info files),
+  `driven_metres()` (the viewer's speed index): their defaults (none, 0).
+
+Proposed differences (need the owner's OK): `host.node` in /api/stats is
+null (there is no Node: Node puts process.version there); a share check's
+answer that lands during the same sample shows from the next one, as in
+Node, but a background read's answer now always waits for the sample to end
+(Node's promises do the same; noted because Rust's threads could be faster).
+
 ## Viewer
 
 Done (`src/viewer/`, handlers on the small `viewer::ctx::Ctx` trait,

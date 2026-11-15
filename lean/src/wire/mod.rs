@@ -13,6 +13,7 @@
 //! the request this thread is answering (`Who`, set around each call).
 
 pub mod can;
+pub mod converter;
 pub mod footage;
 pub mod ops;
 pub mod routes;
@@ -55,9 +56,13 @@ pub struct Server {
     viewer: OnceLock<Arc<crate::viewer::Viewer>>,
     ui: OnceLock<Arc<crate::ui::Ui>>,
     can: OnceLock<Arc<crate::can::routes::Can>>,
+    converter: OnceLock<Arc<converter::Conv>>,
 }
 
 impl Server {
+    pub fn converter(&self) -> Option<&Arc<converter::Conv>> {
+        self.converter.get()
+    }
     pub fn app(&self) -> &Arc<App> {
         self.app.get().expect("footage area")
     }
@@ -184,6 +189,7 @@ pub fn build(state: Arc<AppState>, r: &mut Router) -> Arc<Server> {
         viewer: OnceLock::new(),
         ui: OnceLock::new(),
         can: OnceLock::new(),
+        converter: OnceLock::new(),
     });
     // footage first: every other area reads its vehicles and scans
     let _ = srv.app.set(footage::make(&srv));
@@ -191,6 +197,9 @@ pub fn build(state: Arc<AppState>, r: &mut Router) -> Arc<Server> {
     let _ = srv.viewer.set(viewer::make(&srv));
     let _ = srv.can.set(can::make(&srv));
     let _ = srv.ui.set(ui::make(&srv));
+    if let Some(c) = converter::make(&srv) {
+        let _ = srv.converter.set(c);
+    }
     hooks(&srv);
     register(&srv, r);
     srv
@@ -239,6 +248,9 @@ pub fn start(srv: &Arc<Server>) {
     if let Some(can) = srv.can() {
         can.start();
     }
+    if let Some(conv) = srv.converter() {
+        converter::start(srv, conv);
+    }
 }
 
 fn hooks(srv: &Arc<Server>) {
@@ -246,6 +258,19 @@ fn hooks(srv: &Arc<Server>) {
     let s = srv.clone();
     st.hooks.vehicle_exists.set(Arc::new(move |id: &str| s.app().vehicle(id).is_some()));
     if let Some(ops) = srv.ops().cloned() {
+        // the supervisor's RAPL readings (stats.setRapl), a 500's crash note, a panic's
+        let o = ops.clone();
+        st.hooks.rapl_reading.set(Arc::new(move |m: &serde_json::Value| o.rapl_reading(m)));
+        let o = ops.clone();
+        st.hooks.server_error.set(Arc::new(move |name: &str, message: &str, stack: &str| o.note_server_error(name, message, stack)));
+        let o = ops.clone();
+        let default = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let message = info.payload().downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| info.payload().downcast_ref::<String>().cloned()).unwrap_or_else(|| "panic".into());
+            let at = info.location().map(|l| format!("    at {}:{}:{}", l.file(), l.line(), l.column())).unwrap_or_default();
+            o.note_crash("Panic", &message, &at);
+            default(info);
+        }));
         let o = ops.clone();
         st.hooks.reports_configured.set(Arc::new(move || o.reports.status()["configured"] == json!(true)));
         let o = ops.clone();
@@ -267,6 +292,9 @@ fn hooks(srv: &Arc<Server>) {
         }
         if let Some(ops) = s.ops() {
             ops.stop();
+        }
+        if let Some(conv) = s.converter() {
+            conv.runtime.shutdown();
         }
         if let Some(app) = s.app.get() {
             app.vehicles.stop_all();
@@ -301,9 +329,10 @@ fn register(srv: &Arc<Server>, r: &mut Router) {
             tokio::task::spawn_blocking(move || viewer::scrub(&s, &c)).await.unwrap_or_else(|_| internal())
         })
     });
-    r.api_raw("/api/converter/events", |a: ApiRaw| {
-        // (the converter's runtime is not in this server yet: as Node while it starts)
-        Box::pin(async move { crate::core::http::error_json(503, "Converter is starting", None, a.ctx.accept_encoding()) })
+    let s = srv.clone();
+    r.api_raw("/api/converter/events", move |a: ApiRaw| {
+        let s = s.clone();
+        Box::pin(async move { converter::events(s, a).await })
     });
     let s = srv.clone();
     r.api_raw("/api/ui-packs/upload", move |a: ApiRaw| {
@@ -344,8 +373,7 @@ fn answer(srv: &Arc<Server>, area: Area, c: &mut Ctx) -> Result<Reply, HttpError
         Area::Viewer => viewer::answer(srv, c),
         Area::Ui => ui::answer(srv, c),
         Area::Can => can::answer(srv, c),
-        // (the converter's runtime and IPC are not in this server yet: as Node while it starts)
-        Area::Converter => Ok(Reply::json(json!({ "ok": false, "error": { "code": "CONVERTER_STARTING" } }))),
+        Area::Converter => converter::invoke(srv, c),
         Area::None => Err(HttpError::new(501, "Not in this server yet.")),
     }
 }

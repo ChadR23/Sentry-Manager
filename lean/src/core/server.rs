@@ -167,6 +167,11 @@ fn reply_response(r: Reply, accept: &str) -> Res {
 fn error_response(state: &AppState, e: &HttpError, method: &Method, raw_path: &str, accept: &str) -> Res {
     if e.status >= 500 {
         state.log.error(format!("{method} {raw_path}: {}", e.message));
+        if !e.explicit {
+            if let Some(f) = state.hooks.server_error.get() {
+                f("Error", &e.message, &format!("    at {method} {raw_path}"));
+            }
+        }
     }
     let msg = if !e.explicit { "Internal error" } else if e.message.is_empty() { "Error" } else { e.message.as_str() };
     let mut r = error_json(e.status, msg, e.code.as_deref(), accept);

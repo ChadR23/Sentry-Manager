@@ -57,6 +57,8 @@ pub fn vehicle_info(srv: &Server, id: &str) -> Option<VehicleInfo> {
         bin_bytes: Some(crate::footage::bin::bin_bytes(app, &v.id) as f64),
         days_left: summary["storage"]["daysLeft"].as_f64(),
         policy: crate::footage::policies::get(app, &v.id),
+        footage_minutes: totals.as_ref().and_then(|t| t["minutes"].as_f64()),
+        bin_items: Some(srv.state.db.bin_items(Some(&v.id)).len() as f64),
     })
 }
 
@@ -100,17 +102,27 @@ impl OpsCtx for CoreOps {
         srv.app().vehicles.list().iter().filter_map(|v| vehicle_info(&srv, &v.id)).collect()
     }
     fn converter(&self) -> ConverterInfo {
-        // (the converter's runtime is not in this server yet: as Node while it starts)
-        ConverterInfo { ready: false, error: Some("CONVERTER_STARTING".into()), ..Default::default() }
+        let Some(conv) = self.srv().and_then(|s| s.converter().cloned()) else {
+            return ConverterInfo { ready: false, error: Some("CONVERTER_STARTING".into()), ..Default::default() };
+        };
+        let running = conv.jobs.lock().unwrap().values().any(|st| super::converter::RUNNING.contains(&st.as_str()));
+        ConverterInfo {
+            ready: true,
+            capabilities: crate::converter::ipc::capabilities(&conv.runtime.staging.capabilities()),
+            error: None,
+            encoding_now: !conv.runtime.service.active_encodes().is_empty(),
+            running,
+            native_helper: true,
+        }
     }
     fn select_encoder(&self) -> Option<Encoder> {
         None
     }
     fn detect_gpus(&self) -> Value {
-        json!({ "gpus": [], "nvidia": [], "hints": [] })
+        crate::ops::gpu::detect_gpus(&crate::ops::gpu::DetectOptions::default(), &crate::ops::gpu::run)
     }
     fn usable_gpus(&self) -> usize {
-        0
+        crate::ops::gpu::usable_gpus(&self.detect_gpus()).len()
     }
     fn tls(&self) -> Option<TlsInfo> {
         let error = self.state.tls.as_ref().and_then(|t| match t.status() {
@@ -129,38 +141,75 @@ impl OpsCtx for CoreOps {
         self.srv().and_then(|s| s.ui().and_then(|u| u.packs.active())).unwrap_or_else(|| "original".into())
     }
     fn identifiers(&self) -> Vec<String> {
-        let mut ids = vec![std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default().trim().to_string(), self.state.config.data.to_string_lossy().into_owned()];
-        for (name, _) in self.state.db.list_users() {
-            ids.push(name);
-        }
-        for v in self.vehicles() {
-            ids.push(v.id);
-            ids.push(v.name);
-            ids.extend(v.roots);
-        }
+        // (what only other areas know: account names, place names and labels, FOOTAGE_ROOT;
+        // ops::diag::identifiers adds the rest)
+        let mut ids: Vec<String> = self.state.db.list_users().into_iter().map(|(n, _)| n).collect();
         if let Some(Value::Array(places)) = self.state.db.get("places") {
-            ids.extend(places.iter().filter_map(|p| p["name"].as_str().map(String::from)));
+            for p in places {
+                for k in ["name", "label"] {
+                    if let Some(x) = p[k].as_str() {
+                        ids.push(x.to_string());
+                    }
+                }
+            }
         }
-        ids.extend(crate::core::tls::parse_hostnames(&self.state.config.tls_hostnames).unwrap_or_default());
-        ids.into_iter().filter(|s| s.encode_utf16().count() >= 3).collect()
+        if let Some(r) = self.state.config.env.get("FOOTAGE_ROOT").filter(|r| !r.is_empty()) {
+            ids.push(r.clone());
+        }
+        ids
     }
-    fn diagnostics(&self, _kind: &str) -> Value {
-        json!({ "system": self.system_summary(false) })
-    }
-    fn heartbeat(&self) -> Value {
-        let list = self.vehicles();
-        let sum = |f: &dyn Fn(&VehicleInfo) -> Option<f64>| list.iter().map(|v| f(v).unwrap_or(0.0)).sum::<f64>();
-        let (platform, arch) = crate::ops::build::platform_arch();
-        let (os, docker) = crate::ops::build::host_info();
-        let can = self.state.db.get("can").is_some_and(|c| c["enabled"] == json!(true));
-        json!({
-            "platform": platform, "arch": arch, "host": { "os": os, "docker": docker },
-            "vehicles": list.len(), "footageBytes": sum(&|v| v.footage_bytes), "recordings": sum(&|v| v.recordings),
-            "converting": false, "jobsQueued": 0, "features": { "can": can, "sentryUsbPaired": false, "gpu": false }
-        })
+    fn jobs_queued(&self) -> usize {
+        self.srv().and_then(|s| s.converter().map(|c| c.jobs.lock().unwrap().values().filter(|st| st.as_str() == "waiting").count())).unwrap_or(0)
     }
     fn shutdown(&self, reason: &str) {
         crate::core::server::shutdown(&self.state, reason);
+    }
+    fn active_encodes(&self) -> Vec<crate::ops::stats::ActiveEncode> {
+        let Some(conv) = self.srv().and_then(|s| s.converter().cloned()) else { return Vec::new() };
+        conv.runtime.service.active_encodes().iter().filter_map(|e| Some(crate::ops::stats::ActiveEncode { pid: e["pid"].as_i64()?, encoder: e["encoder"].as_str().map(String::from) })).collect()
+    }
+    fn job_progress(&self, job: &str) -> Option<(f64, f64)> {
+        let conv = self.srv()?.converter()?.clone();
+        let s = conv.runtime.service.get(job).ok()?;
+        Some(super::converter::job_progress(&s))
+    }
+    fn request_rapl(&self) {
+        if let Some(link) = self.state.supervisor.get() {
+            link.rapl_on();
+        }
+    }
+    fn recent_jobs(&self, limit: usize) -> Vec<Value> {
+        self.state.db.jobs(limit as i64, None).into_iter().map(|j| json!({ "type": j.kind, "status": j.status, "title": j.title, "detail": j.detail, "startedAt": j.started_at, "finishedAt": j.finished_at })).collect()
+    }
+    fn access_settings(&self) -> Value {
+        self.state.access.get()
+    }
+    fn places_count(&self) -> usize {
+        self.state.db.get("places").and_then(|p| p.as_array().map(|a| a.len())).unwrap_or(0)
+    }
+    fn can_status(&self) -> Value {
+        self.srv().and_then(|s| s.can().map(|c| c.index.status().to_json())).unwrap_or_else(|| json!({}))
+    }
+    fn car_models(&self) -> Vec<Option<String>> {
+        let Some(s) = self.srv() else { return Vec::new() };
+        let app = s.app();
+        app.vehicles.list().iter().map(|v| s.can().and_then(|c| c.car_summary(&super::footage::car_of(app, v))["modelLabel"].as_str().map(String::from))).collect()
+    }
+    fn clips_arrived(&self, since_ms: i64) -> (f64, f64) {
+        let Some(s) = self.srv() else { return (0.0, 0.0) };
+        let app = s.app();
+        let (mut a, mut b) = (0.0, 0.0);
+        for v in app.vehicles.list() {
+            if let Some(st) = app.state_of(&v.id) {
+                let (x, y) = crate::inventory::arrived_clips(&st.file_list, since_ms as f64);
+                a += x as f64;
+                b += y as f64;
+            }
+        }
+        (a, b)
+    }
+    fn trust_proxy(&self) -> bool {
+        self.state.config.trust_proxy
     }
     fn tls_mode(&self) -> String {
         self.state.config.tls_mode.clone()
@@ -184,7 +233,7 @@ impl OpsCtx for CoreOps {
         json!({
             "made": crate::ops::js::iso(crate::ops::store::now_ms()), "version": build, "node": null, "platform": format!("{platform} {arch}"),
             "supervised": self.supervised(), "tlsMode": self.tls_mode(), "trustProxy": self.state.config.trust_proxy, "timezone": self.state.config.tz,
-            "gpus": self.detect_gpus(), "converter": { "ready": false },
+            "gpus": self.detect_gpus(), "converter": { "ready": self.converter().ready },
             "vehicles": self.vehicles().iter().enumerate().map(|(i, v)| {
                 let st = v.status.clone().unwrap_or_default();
                 json!({ "vehicle": if placeholders { format!("<vehicle-{}>", i + 1) } else { v.name.clone() }, "type": v.source_type, "healthy": st.healthy, "writable": st.writable, "freeBytes": st.free_bytes, "totalBytes": st.total_bytes, "recordings": v.recordings, "policy": v.policy })

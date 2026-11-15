@@ -1,0 +1,298 @@
+//! The converter on core: `ConverterCtx` on core's state (the data and temp
+//! folders, the tools, the footage guard every folder goes through, log
+//! lines), the runtime started with its recovery, the bridge behind
+//! `POST /api/converter/invoke/:name` and `/api/converter/events`, and what
+//! index.js does with every job snapshot: Activity's line for the job
+//! (mirrorConverterJob), the space saved and the stats' job mark (ops).
+
+use super::Server;
+use crate::converter::ctx::ConverterCtx;
+use crate::converter::ipc::Bridge;
+use crate::converter::runtime::{Converter, RuntimeOptions};
+use crate::core::db::{JobUpdate, NewJob, NewNotification};
+use crate::core::http::{error_json, ApiRaw, Res};
+use crate::core::{Ctx as CoreCtx, HttpError, Reply};
+use axum::body::Body;
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, Weak};
+
+/// index.js CONVERTER_ACTIVE and encoderStats.js RUNNING
+pub const ACTIVE: [&str; 10] = ["discovering", "waiting", "staging", "encoding", "writing-telemetry", "verifying", "copying", "replacing", "paused", "paused_network"];
+pub const RUNNING: [&str; 8] = ["discovering", "waiting", "staging", "encoding", "writing-telemetry", "verifying", "copying", "replacing"];
+/// index.js MAX_EVENT_CLIENTS
+const MAX_STREAMS: usize = 200;
+
+pub struct Conv {
+    pub runtime: Converter,
+    pub bridge: Arc<Bridge>,
+    streams: Mutex<usize>,
+    /// jobId -> the Activity line last written (mirrorConverterJob's mirroredLines)
+    lines: Mutex<HashMap<i64, String>>,
+    /// the jobs the converter knows: id -> state
+    pub jobs: Mutex<HashMap<String, String>>,
+}
+
+pub struct CoreConverter {
+    srv: Weak<Server>,
+    state: Arc<crate::core::AppState>,
+}
+
+impl ConverterCtx for CoreConverter {
+    fn data_path(&self) -> PathBuf {
+        self.state.config.data.clone()
+    }
+    fn temp_path(&self) -> PathBuf {
+        // index.js: path.join(DATA, 'converter-temp'), the container's own
+        self.state.config.data.join("converter-temp")
+    }
+    fn ffmpeg_path(&self) -> String {
+        self.state.config.ffmpeg.clone()
+    }
+    fn ffprobe_path(&self) -> String {
+        self.state.config.ffprobe.clone()
+    }
+    fn resolve_path(&self, path: &str, must_exist: bool) -> Option<String> {
+        // index.js allowed: createRealGuard(allowedRoots: the vehicles' folders (an SMB one only
+        // inside FOOTAGE_ROOT) and the output folders, deny DATA, APP_ROOT, RUN_DIR and the system's)
+        let s = self.srv.upgrade()?;
+        let cfg = &self.state.config;
+        let mut roots: Vec<PathBuf> = s
+            .app()
+            .vehicles
+            .roots()
+            .into_iter()
+            .filter(|(root, within)| {
+                let Ok(real) = std::fs::canonicalize(root) else { return false };
+                within.iter().filter_map(|w| std::fs::canonicalize(w).ok()).any(|h| real.starts_with(&h))
+            })
+            .map(|(root, _)| root)
+            .collect();
+        roots.push(cfg.converted_dir());
+        roots.extend(cfg.extra_roots.iter().map(PathBuf::from));
+        let mut deny = vec![cfg.data.clone(), cfg.app_root.clone(), cfg.run_dir.clone()];
+        deny.extend(["/proc", "/sys", "/dev", "/etc", "/root", "/run", "/boot"].map(PathBuf::from));
+        let guard = crate::viewer::studio::Guard { roots, deny };
+        guard.resolve_with(path, must_exist).map(|p| p.to_string_lossy().into_owned())
+    }
+    fn clip_converted(&self, output_path: &str) {
+        // (the viewer's previews and filmstrips of that clip are made again when asked)
+        let _ = output_path;
+        self.state.announce("inventory");
+    }
+    fn log_error(&self, line: &str) {
+        self.state.logger.scope("converter").error(line);
+    }
+    fn log_info(&self, line: &str) {
+        self.state.logger.scope("converter").info(line);
+    }
+}
+
+fn counts(s: &Value) -> (u64, u64, u64) {
+    if let (Some(c), true) = (s.get("itemCounts").filter(|c| c.is_object()), s["items"].as_array().is_none_or(|a| a.is_empty())) {
+        let n = |k: &str| c[k].as_u64().unwrap_or(0);
+        return (n("converted"), n("skipped"), n("failed"));
+    }
+    let (mut ok, mut skipped, mut failed) = (0, 0, 0);
+    for it in s["items"].as_array().into_iter().flatten() {
+        if it["kind"] != "video" {
+            continue;
+        }
+        match it["state"].as_str() {
+            Some("completed") if it["eligibleVideo"] != json!(false) => ok += 1,
+            Some("skipped") => skipped += 1,
+            Some("failed") => failed += 1,
+            _ => {}
+        }
+    }
+    (ok, skipped, failed)
+}
+
+/// encoderStats.js jobProgress
+pub fn job_progress(s: &Value) -> (f64, f64) {
+    let saved = s["counters"]["savedBytes"].as_f64().unwrap_or(0.0);
+    if let (Some(p), true) = (s["progressClips"].as_u64(), s["items"].as_array().is_none_or(|a| a.is_empty())) {
+        return (p as f64, saved);
+    }
+    (counts(s).0 as f64, saved)
+}
+
+fn vehicle_of(srv: &Server, src: &str) -> Option<crate::footage::vehicles::Vehicle> {
+    if src.is_empty() {
+        return None;
+    }
+    srv.app().vehicles.vehicle_for_path(std::path::Path::new(src))
+}
+
+/// What index.js does with each job snapshot.
+fn on_snapshot(srv: &Server, conv: &Conv, s: &Value) {
+    let Some(id) = s["id"].as_str() else { return };
+    let st = s["state"].as_str().unwrap_or("");
+    conv.jobs.lock().unwrap().insert(id.to_string(), st.to_string());
+    let src = s["config"]["sourceRoot"].as_str().unwrap_or("");
+    let v = vehicle_of(srv, src);
+    if let Some(ops) = srv.ops() {
+        let (clips, saved) = job_progress(s);
+        ops.job_snapshot(&crate::ops::JobSnapshot { id: id.to_string(), running: RUNNING.contains(&st), vehicle_id: v.as_ref().map(|v| v.id.clone()), saved_bytes: saved, clips });
+    }
+    mirror(srv, conv, s, id, st, src, v.as_ref());
+}
+
+/// index.js mirrorConverterJob: the job's line in Activity (jobs), its end, a notification for failed clips.
+fn mirror(srv: &Server, conv: &Conv, s: &Value, id: &str, st: &str, src: &str, v: Option<&crate::footage::vehicles::Vehicle>) {
+    let state = &srv.state;
+    let external = format!("converter:{id}");
+    let (ok, skipped, failed) = counts(s);
+    let saved = s["counters"]["savedBytes"].as_f64().unwrap_or(0.0);
+    let detail = format!("{ok} converted, {skipped} skipped, {failed} failed{}", if saved > 0.0 { format!(" · {} saved", crate::footage::bin::format_bytes(saved)) } else { String::new() });
+    let terminal = !ACTIVE.contains(&st);
+    let mut job = state.db.job_by_external(&external);
+    if job.is_none() && terminal && state.db.job_cleared(&external) {
+        return;
+    }
+    if job.is_none() {
+        let codec = s["config"]["codec"].as_str().unwrap_or("");
+        let label = match codec {
+            "h265" => "H.265".to_string(),
+            "av1" => "AV1".to_string(),
+            c => c.to_uppercase(),
+        };
+        let part = s["config"]["part"].as_f64().filter(|p| *p > 1.0).map(|p| format!(" (part {p})")).unwrap_or_default();
+        let title = format!("Convert {} to {label}{part}", v.map_or(src.to_string(), |v| v.name.clone()));
+        state.jobs.start(NewJob { kind: "conversion".into(), vehicle_id: v.map(|v| v.id.clone()), title, detail: None, external_id: Some(external.clone()) });
+        job = state.db.job_by_external(&external);
+    }
+    let Some(job) = job else { return };
+    if terminal && job.status == "running" {
+        let status = if failed > 0 || st == "failed" { "failed" } else if st == "cancelled" { "cancelled" } else { "done" };
+        let energy = srv.ops().map(|o| o.job_energy(id)).filter(|e| !e.is_null());
+        state.jobs.finish(job.id, Some(status), Some(detail), energy.map(|e| json!({ "energy": e })));
+        if failed > 0 {
+            state.notes.raise(NewNotification {
+                kind: "conversion".into(),
+                level: Some("warning".into()),
+                vehicle_id: v.map(|v| v.id.clone()),
+                title: format!("{failed} clip(s) could not be converted"),
+                message: Some("The originals were kept. Open the Encoder tab for details and Retry failed.".into()),
+                dedupe_key: Some(format!("conversion-failed:{id}")),
+            });
+        }
+    } else if !terminal {
+        let line = format!("{st}: {detail}");
+        let mut lines = conv.lines.lock().unwrap();
+        if lines.get(&job.id) != Some(&line) {
+            lines.insert(job.id, line.clone());
+            drop(lines);
+            state.jobs.update(job.id, JobUpdate { detail: Some(line), ..Default::default() });
+        }
+    }
+    if terminal {
+        conv.lines.lock().unwrap().remove(&job.id);
+    }
+}
+
+/// The runtime (recovering unfinished jobs) and its bridge; None when it cannot start (logged,
+/// and the routes answer as Node does while its converter starts).
+pub fn make(srv: &Arc<Server>) -> Option<Arc<Conv>> {
+    let st = &srv.state;
+    let ctx = Arc::new(CoreConverter { srv: Arc::downgrade(srv), state: st.clone() });
+    let temp = ctx.temp_path();
+    let _ = std::fs::create_dir_all(&temp);
+    let temp = std::fs::canonicalize(&temp).unwrap_or(temp);
+    let runtime = match Converter::open(RuntimeOptions {
+        data_path: st.config.data.clone(),
+        temp_path: temp,
+        ffmpeg: st.config.ffmpeg.clone(),
+        ffprobe: st.config.ffprobe.clone(),
+        // (arrival checksums for Sentry USB are not ported: nothing to record)
+        before_replace_original: None,
+        tools: None,
+        tune: None,
+        hooks: None,
+    }) {
+        Ok(r) => r,
+        Err(e) => {
+            st.logger.scope("converter").error(format!("Converter did not start: {e}"));
+            return None;
+        }
+    };
+    let caps = crate::converter::ipc::capabilities(&runtime.staging.capabilities());
+    let bridge = Bridge::new(Arc::new(runtime.service.clone()), ctx, caps);
+    let conv = Arc::new(Conv { runtime, bridge, streams: Mutex::new(0), lines: Mutex::new(HashMap::new()), jobs: Mutex::new(HashMap::new()) });
+    let (w, c) = (Arc::downgrade(srv), Arc::downgrade(&conv));
+    conv.runtime.service.subscribe(Arc::new(move |event: &Value| {
+        if event["type"] != "snapshot" || !event["snapshot"].is_object() {
+            return;
+        }
+        if let (Some(srv), Some(conv)) = (w.upgrade(), c.upgrade()) {
+            on_snapshot(&srv, &conv, &event["snapshot"]);
+        }
+    }));
+    Some(conv)
+}
+
+/// Start it: recovery of jobs from before a restart, then the jobs listed for savings and Activity.
+pub fn start(srv: &Arc<Server>, conv: &Arc<Conv>) {
+    let (s, c) = (srv.clone(), conv.clone());
+    std::thread::spawn(move || {
+        if let Err(e) = c.runtime.start() {
+            s.state.logger.scope("converter").error(format!("Converter recovery: {e}"));
+        }
+        if let Ok(list) = c.runtime.service.list_summaries() {
+            for job in list {
+                on_snapshot(&s, &c, &job);
+            }
+        }
+    });
+}
+
+/// POST /api/converter/invoke/:name
+pub fn invoke(srv: &Arc<Server>, c: &mut CoreCtx) -> Result<Reply, HttpError> {
+    let Some(conv) = srv.converter() else { return Ok(Reply::json(json!({ "ok": false, "error": { "code": "CONVERTER_STARTING" } }))) };
+    let name = c.params.get("name").cloned().unwrap_or_default();
+    let client = c.headers.get("x-client-id").and_then(|v| v.to_str().ok()).map(String::from);
+    Ok(Reply::json(conv.bridge.invoke(&name, c.body.take(), client.as_deref())))
+}
+
+struct Stream {
+    conv: Arc<Conv>,
+    client: String,
+}
+
+impl Drop for Stream {
+    fn drop(&mut self) {
+        self.conv.bridge.detach(&self.client);
+        *self.conv.streams.lock().unwrap() -= 1;
+    }
+}
+
+/// GET /api/converter/events?client=<id>: the live updates (Server-Sent Events).
+pub async fn events(srv: Arc<Server>, a: ApiRaw) -> Res {
+    let accept = a.ctx.accept_encoding().to_string();
+    let Some(conv) = srv.converter().cloned() else { return error_json(503, "Converter is starting", None, &accept) };
+    {
+        let mut n = conv.streams.lock().unwrap();
+        if *n >= MAX_STREAMS {
+            return error_json(503, "Too many open connections.", None, &accept);
+        }
+        *n += 1;
+    }
+    let client: String = a.ctx.query.get("client").map(|c| c.encode_utf16().take(64).collect::<Vec<u16>>()).map(|u| String::from_utf16_lossy(&u)).unwrap_or_default();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let _ = tx.send("event: hello\ndata: {}\n\n".into());
+    conv.bridge.attach_events(&client, Box::new(move |text: &str| tx.send(text.to_string()).is_ok()));
+    let guard = Stream { conv, client };
+    // (the stream ends when the page goes: the receiver is dropped, the bridge forgets the client)
+    let body = futures_util::stream::unfold((rx, guard), |(mut rx, guard)| async move {
+        let text = rx.recv().await?;
+        Some((Ok::<_, std::convert::Infallible>(bytes::Bytes::from(text)), (rx, guard)))
+    });
+    axum::http::Response::builder()
+        .status(200)
+        .header("content-type", "text/event-stream")
+        .header("cache-control", "no-store")
+        .header("x-accel-buffering", "no")
+        .body(Body::from_stream(body))
+        .unwrap()
+}

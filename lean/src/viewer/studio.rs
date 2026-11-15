@@ -73,6 +73,36 @@ impl Guard {
         self.allowed_in(&real, &roots).then_some(real)
     }
 
+    /// resolve(p, { mustExist }): with `must_exist` false a path whose last parts do not
+    /// exist yet is allowed (safePath.js realOrNearest: the nearest real folder, then the rest).
+    pub fn resolve_with(&self, p: &str, must_exist: bool) -> Option<PathBuf> {
+        if must_exist {
+            return self.resolve(p);
+        }
+        if p.is_empty() || p.contains('\0') || !p.starts_with('/') {
+            return None;
+        }
+        let abs = resolve_abs(p);
+        let roots = self.real_roots(Some(&abs));
+        if roots.is_empty() {
+            return None;
+        }
+        let mut rest: Vec<std::ffi::OsString> = Vec::new();
+        let mut cur = abs.clone();
+        let real = loop {
+            match std::fs::canonicalize(&cur) {
+                Ok(r) => break rest.iter().rev().fold(r, |acc, x| acc.join(x)),
+                Err(e) if matches!(e.raw_os_error(), Some(libc::ENOENT) | Some(libc::ENOTDIR)) => {
+                    let parent = cur.parent()?.to_path_buf();
+                    rest.push(cur.file_name()?.to_os_string());
+                    cur = parent;
+                }
+                Err(_) => return None,
+            }
+        };
+        self.allowed_in(&real, &roots).then_some(real)
+    }
+
     /// Is an open file still inside a root (a swap after resolve)?
     pub fn fd_inside(&self, f: &std::fs::File) -> bool {
         use std::os::fd::AsRawFd;

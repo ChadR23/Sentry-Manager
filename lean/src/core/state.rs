@@ -46,6 +46,8 @@ pub struct Hooks {
     pub reports_setup: Hook<dyn Fn(bool, bool) -> Result<(serde_json::Value, serde_json::Value), String> + Send + Sync>,
     /// ui: the page-start learning of web/prefetch.js (session hash, path + search, headers) for signed-in GETs under /api/
     pub note_start_call: Hook<dyn Fn(&str, &str, &axum::http::HeaderMap) + Send + Sync>,
+    /// ops: a 500's crash note (reports.noteCrash from the error path: name, message, stack)
+    pub server_error: Hook<dyn Fn(&str, &str, &str) + Send + Sync>,
     /// ops: a `rapl-reading` from the supervisor (stats.setRapl)
     pub rapl_reading: Hook<dyn Fn(&serde_json::Value) + Send + Sync>,
     /// shutdown work of the areas, run in order before the process ends

@@ -29,13 +29,14 @@ Bin, the footage catalog in its `catalog_*` tables), and Node's caches
 | supervisor | `src/supervisor/` | the root supervisor (`sentry-lean-supervisor`): starts the app as PUID:PGID, SMB mounts, restarts, TLS export; the app takes its fd-3 link (`src/supervisor/README.md`) |
 | footage | `src/footage/`, `src/api.rs` | vehicles (several, folder and SMB), shares and their health, scans and the catalog, recordings and days, Recycle Bin, cleanup policies, protect, stars, footage check |
 | viewer | `src/viewer/` | telemetry, the speed index, moments, scrub previews, filmstrips, places, the event map, drives and driving, archive gaps, work limits, the Studio file routes, `/api/media` |
-| ops | `src/ops/` | notifications and rules, health and the startup check, snapshots, power price and savings, image updates, metrics, the opt-in reports, system info, stats, the support bundle |
+| ops | `src/ops/` | notifications and rules, health and the startup check, snapshots, power price and savings, image updates, metrics, the opt-in reports, system info, the server monitor (`/api/stats`: GPUs, power and RAPL, energy, data used, disks, shares, sensors, processes, alerts), the support bundle |
 | ui | `src/ui/` | every page and file as Node serves it, versioned links, the critical bar, early-data hints, interface packs, exports, settings and dashboards |
 | can | `src/can/` | CAN Bridge uploads (web port and core's device port), the CAN index, trust, search, sync, prune, downloads, Sentry USB files |
-| converter | `src/converter/` | library only: file safety (owned files, staging, recovery), MP4 writing, H.265/AV1 telemetry, verifier, planner. Its routes answer as Node does while its converter starts |
+| converter | `src/converter/` | the job store, scanner, job service and runtime (encode, telemetry, verify, size retries, save, pause/cancel/resume, recovery after a crash), file safety (owned files, staging, recovery), MP4 writing, H.265/AV1 telemetry, verifier, planner; the 22 channels behind `/api/converter/invoke/:name` and `/api/converter/events` |
 | MP4 and telemetry readers | `src/mp4.rs`, `src/sei.rs`, `src/telemetry.rs`, `src/media.rs`, `src/thumbnails.rs` | box headers only, the quick and the full telemetry read, Range answers, thumbnails with ffmpeg |
 
-Not in it yet: the converter's job store, job service and IPC; the helper
+Not in it yet: the converter's lanes per GPU, auto convert, benchmark and
+converted index; the helper
 servers (`/api/nodes*` answer 501 "Not in this server yet.", `/node/v1/*`
 404); `POST /api/studio/trashFolder` (501); arrival checksums; CAN and
 Sentry USB evidence in archive gaps, drives and place tags; some stats
