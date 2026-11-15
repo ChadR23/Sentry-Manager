@@ -53,12 +53,14 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 rustls-pemfile = "2"
 webpki-roots = "0.26"
 regex = "1"
-p256 = { version = "0.13", features = ["ecdsa", "pkcs8", "pem"] }
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8", "pem", "std"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 # time zones (vehicles.js validTimezone, policies.js dayInZone), the IANA data built in
 chrono-tz = { version = "0.10", default-features = false, features = ["std", "case-insensitive"] }
 # ui/: brotli for static files (flate2, regex, sha2 above serve it too)
 brotli = { version = "7", default-features = false, features = ["std"] }
+# CAN logs (src/can/; regex, flate2, sha2, p256, base64, indexmap above serve it too)
+futures-core = "0.3"
 
 [profile.release]
 opt-level = 3
