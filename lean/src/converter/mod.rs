@@ -19,6 +19,7 @@ pub mod h265;
 pub mod lead_in;
 pub mod mp4w;
 pub mod owned;
+pub mod planner;
 pub mod process;
 pub mod recovery;
 pub mod snapshot;
