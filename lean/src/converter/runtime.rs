@@ -40,6 +40,7 @@ pub struct Converter {
     pub registry: Arc<Registry>,
     pub temp_path: PathBuf,
     started: Mutex<Option<Vec<Value>>>,
+    pub converted_index: Arc<super::converted_index::ConvertedIndex>,
 }
 
 impl Converter {
@@ -69,11 +70,15 @@ impl Converter {
             Some(t) => t,
             None => Arc::new(RealTools::new(&o.ffmpeg, &o.ffprobe, registry.clone())),
         };
+        // clips known to be converted already (an optimisation only)
+        let converted_index = super::converted_index::ConvertedIndex::new(super::converted_index::Options::new(o.data_path.join("converter-index").join("converted-clips.json")));
+        converted_index.load();
         let mut so = Options::new(store.clone(), staging.clone(), tools);
+        so.converted_index = Some(converted_index.clone());
         if let Some(t) = o.tune {
             t(&mut so);
         }
-        Ok(Converter { service: Service::new(so), store, staging, registry, temp_path, started: Mutex::new(None) })
+        Ok(Converter { service: Service::new(so), store, staging, registry, temp_path, started: Mutex::new(None), converted_index })
     }
 
     /// start(): every unfinished job reconciled, then recovered one after the other
@@ -220,6 +225,7 @@ impl Converter {
 
     pub fn shutdown(&self) {
         self.service.shutdown();
+        self.converted_index.close();
     }
 
     pub fn jobs_root(&self) -> &Path {

@@ -394,6 +394,7 @@ impl Service {
                     .set("publicationArtifact", completed.get("publicationArtifact").cloned().unwrap_or(Value::Null)).set("replacementPhase", Value::Null)
                     .items(with_item(&s.manifest, &item_id, |_| completed.clone())))
             })?;
+            self.remember_converted(final_path, recovered.config()["codec"].as_str().unwrap_or("h265"));
             self.relaunch(rt);
             Ok(())
         };

@@ -67,9 +67,12 @@ pub trait Tools: Send + Sync {
     fn inspect_recovery(&self, m: &Manifest, cancel: &AtomicBool) -> CResult<Facts> {
         inspect_recovery(m, cancel)
     }
-    /// readMp4VideoCodec for discovery: 'h265' / 'av1' / other (None skips)
-    fn read_video_codec(&self, _source: &str, _size: u64) -> Option<String> {
-        None
+    /// readMp4VideoCodec for discovery (mp4Header.js): 'h264' / 'h265' /
+    /// 'av1', None for anything else; file system errors are returned so
+    /// discovery waits for the share
+    fn read_video_codec(&self, source: &str, size: u64, cancel: &AtomicBool) -> std::io::Result<Option<String>> {
+        let o = super::super::mp4_header::ReadOptions { size: Some(size), cancel: Some(cancel), ..Default::default() };
+        Ok(super::super::mp4_header::read_mp4_video_codec(Path::new(source), &o)?.map(str::to_string))
     }
 }
 
@@ -255,9 +258,6 @@ impl Tools for RealTools {
     }
     fn ffmpeg_path(&self) -> &str {
         &self.ffmpeg
-    }
-    fn read_video_codec(&self, _source: &str, _size: u64) -> Option<String> {
-        None
     }
 }
 

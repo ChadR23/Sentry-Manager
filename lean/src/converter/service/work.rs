@@ -529,10 +529,10 @@ impl Service {
                 return false;
             }
             known.insert(key);
-            let converted = if d.value["kind"] == "video" {
-                self.0.o.tools.read_video_codec(d.value["sourcePath"].as_str().unwrap_or(""), d.value["sourceBytes"].as_u64().unwrap_or(0)).filter(|c| c == "h265" || c == "av1")
-            } else {
-                None
+            let converted = {
+                let mut found = d.value.clone();
+                found["ino"] = json!(d.ino);
+                self.converted_codec_of(rt, &found)
             };
             if converted.is_some() {
                 pending.push(Self::create_queue_item(rt, &d.value, vec![("state", json!("skipped")), ("eligibleVideo", json!(false)), ("resultCode", json!("already-converted"))]));
@@ -564,6 +564,11 @@ impl Service {
                         None => p,
                     })
                 })?;
+                if let Some(index) = self.0.o.converted_index.clone() {
+                    std::thread::spawn(move || {
+                        index.flush();
+                    });
+                }
             }
             Ok(())
         });
@@ -582,6 +587,83 @@ impl Service {
             }
         }
         Ok(())
+    }
+
+    /// convertedCodecOf(runtime, discovered): 'h265' / 'av1' for a clip that
+    /// is converted already, from the index (no file access) or else from its
+    /// MP4 header; None leaves it to the normal path, as does anything
+    /// unexpected. A share that drops meanwhile is waited for.
+    pub fn converted_codec_of(&self, rt: &Arc<Runtime>, discovered: &Value) -> Option<String> {
+        if discovered["kind"] != "video" {
+            return None;
+        }
+        if let Some(index) = &self.0.o.converted_index {
+            if let Some(c) = index.has(discovered) {
+                return Some(c);
+            }
+        }
+        let source = discovered["sourcePath"].as_str()?.to_string();
+        let size = discovered["sourceBytes"].as_u64().unwrap_or(0);
+        let mut quick = 0;
+        let codec = loop {
+            if rt.aborted() {
+                return None;
+            }
+            // withTimeout(..., headerCheckTimeoutMs): a read stuck on a share is left behind
+            let (tx, rx) = std::sync::mpsc::channel();
+            let tools = self.0.o.tools.clone();
+            let signal = rt.signal();
+            let src = source.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(tools.read_video_codec(&src, size, &signal));
+            });
+            match rx.recv_timeout(std::time::Duration::from_millis(self.0.o.header_check_timeout_ms)) {
+                Ok(Ok(c)) => break c,
+                Ok(Err(e)) => {
+                    let code = super::super::owned::code_of(&e);
+                    if !tools::is_retryable(code) || rt.aborted() {
+                        return None;
+                    }
+                    match self.wait_for_network(rt, &source, false, None, None, None, None) {
+                        Ok(true) => quick = 0,
+                        Ok(false) => {
+                            quick += 1;
+                            if quick > QUICK_RETRY_LIMIT {
+                                return None;
+                            }
+                        }
+                        Err(_) => return None,
+                    }
+                }
+                Err(_) => return None,
+            }
+        };
+        let codec = codec.filter(|c| c == "h265" || c == "av1")?;
+        if let Some(index) = &self.0.o.converted_index {
+            index.add(discovered, &codec);
+        }
+        Some(codec)
+    }
+
+    /// rememberConverted(target, codec): the converted clip's new file goes
+    /// into the index (best effort, off the worker's path)
+    pub fn remember_converted(&self, target: &str, codec: &str) {
+        let Some(index) = self.0.o.converted_index.clone() else { return };
+        let (target, codec) = (target.to_string(), codec.to_string());
+        std::thread::spawn(move || {
+            let Ok(st) = std::fs::metadata(&target) else { return };
+            if !st.is_file() {
+                return;
+            }
+            use std::os::unix::fs::MetadataExt;
+            index.add(&json!({ "sourcePath": target, "sourceBytes": st.len(), "mtimeMs": super::super::jobstore::normalize::num(super::super::jobstore::mtime_ms(&st)), "ino": st.ino() }), &codec);
+        });
+    }
+
+    pub fn flush_converted_index(&self) {
+        if let Some(index) = &self.0.o.converted_index {
+            index.flush();
+        }
     }
 
     // ---- pause
@@ -805,6 +887,7 @@ impl Service {
             } else {
                 let _ = me.finalize(&rt2);
             }
+            me.flush_converted_index();
         };
         if from_recovery {
             // (inside the recovery run: it waits for this one)
@@ -988,6 +1071,10 @@ impl Service {
         let inspected = self.0.o.tools.inspect_video(&item.s("sourcePath"), &signal).map_err(Fail::from)?;
         timing.mark("inspect");
         if inspected.codec == "h265" || inspected.codec == "av1" {
+            // its header could not tell: remembered now, the next run skips it
+            if let Some(index) = &self.0.o.converted_index {
+                index.add(&item.v, &inspected.codec);
+            }
             self.item_patch(rt, &id, vec![("state", Some(json!("skipped"))), ("eligibleVideo", Some(json!(false))), ("resultCode", Some(json!("already-converted")))], vec![("state", json!("waiting")), ("activeItemId", Value::Null)])?;
             return Ok(());
         }
@@ -1353,8 +1440,8 @@ impl Service {
         ];
         fields.push(("phases", phases));
         fields.push(("totalMs", json!(total)));
+        self.remember_converted(&published.final_path, codec);
         self.emit(rt, "item_timing", fields);
-        let _ = codec;
         Ok(())
     }
 

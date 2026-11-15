@@ -13,6 +13,7 @@
 pub mod adapters;
 pub mod av1;
 pub mod contracts;
+pub mod converted_index;
 pub mod ctx;
 pub mod error;
 pub mod frame_num;
@@ -20,6 +21,7 @@ pub mod h265;
 pub mod ipc;
 pub mod jobstore;
 pub mod lead_in;
+pub mod mp4_header;
 pub mod mp4w;
 pub mod owned;
 pub mod planner;
@@ -36,3 +38,5 @@ pub mod verifier;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub mod testutil;

@@ -291,6 +291,10 @@ pub struct Options {
     pub skip_discovered: Option<Arc<dyn Fn(&Value, &Value) -> bool + Send + Sync>>,
     /// for tests: called with each encode's arguments before it starts
     pub on_spawn: Option<Arc<dyn Fn(&[String]) + Send + Sync>>,
+    /// convertedIndex.js: clips known to be converted (only the real service has one)
+    pub converted_index: Option<Arc<super::converted_index::ConvertedIndex>>,
+    /// how long one MP4 header check may take before the clip takes the normal path
+    pub header_check_timeout_ms: u64,
 }
 
 impl Options {
@@ -310,6 +314,8 @@ impl Options {
             discovery_flush_ms: 250,
             skip_discovered: None,
             on_spawn: None,
+            converted_index: None,
+            header_check_timeout_ms: 20_000,
         }
     }
 }
