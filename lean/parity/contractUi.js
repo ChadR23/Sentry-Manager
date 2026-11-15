@@ -53,13 +53,16 @@ async function main() {
     spawnSync('cp', ['-a', path.join(dir, 'node', 'footage'), path.join(leanDir, 'footage')]);
     const bin = [path.join(REPO, 'lean/target/release/sentry-lean'), path.join(REPO, 'lean/target/debug/sentry-lean')].find((f) => fs.existsSync(f));
     const port = 20000 + Math.floor(Math.random() * 20000);
-    lean = spawn(bin, [], { env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', DATA_PATH: path.join(leanDir, 'data'), APP_ROOT: REPO, FOOTAGE_PATH: path.join(leanDir, 'footage'), VEHICLE_NAME: 'Contract Car', TZ: 'UTC', DEFAULT_UI: '' }, stdio: 'ignore' });
-    // (no sign-in on the lean server yet: a cookie, never a password over plain HTTP)
-    const client = lib.createClient({ base: `http://127.0.0.1:${port}`, cookie: 'sm_session=none' });
-    for (let i = 0; i < 100; i++) {
-      try { if ((await client.request('GET', '/healthz')).status === 200) break; } catch { /* not yet */ }
-      await new Promise((r) => setTimeout(r, 100));
-    }
+    lean = spawn(bin, [], { env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', DATA_PATH: path.join(leanDir, 'data'), APP_ROOT: REPO, FOOTAGE_PATH: path.join(leanDir, 'footage'), VEHICLE_NAME: 'Contract Car', TZ: 'UTC', DEFAULT_UI: '', UI_PASSWORD: PASSWORD, RUN_DIR: path.join(leanDir, 'run'), LOG_LEVEL: 'warn' }, stdio: 'ignore' });
+    // (core's HTTPS with its own certificate authority: the password only goes over it)
+    const base = `https://127.0.0.1:${port}`;
+    const up = () => new Promise((resolve) => {
+      const req = require('https').get(`${base}/healthz`, { rejectUnauthorized: false }, (res) => { res.resume(); resolve(res.statusCode === 200); });
+      req.on('error', () => resolve(false));
+    });
+    for (let i = 0; i < 100 && !(await up()); i++) await new Promise((r) => setTimeout(r, 100));
+    process.env.SM_PASSWORD = PASSWORD;
+    const client = await lib.connect({ base, ca: path.join(leanDir, 'data', 'tls', 'ca.crt') });
     const vehicles = lib.parseJson((await client.request('GET', '/api/vehicles')).body).vehicles;
     const folders = spec.folders({ vehicles: vehicles.map((v) => ({ id: v.id, root: v.root })), data: null });
     const index = JSON.parse(fs.readFileSync(path.join(goldens, 'index.json'), 'utf8'));

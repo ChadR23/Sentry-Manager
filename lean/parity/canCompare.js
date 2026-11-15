@@ -52,9 +52,10 @@ async function start(kind, work, footage) {
     await new Promise((r) => setTimeout(r, 100));
   }
   let cookie = '';
-  if (kind === 'node') {
+  {
+    // (both servers have accounts: lean signs in through core as Node does)
     const res = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'sentry-six-manager' }, body: JSON.stringify({ username: 'admin', password: 'correct horse' }) });
-    if (!res.ok) throw new Error(`Node sign-in failed: ${res.status} ${log}`);
+    if (!res.ok) throw new Error(`${kind} sign-in failed: ${res.status} ${log}`);
     cookie = res.headers.get('set-cookie').split(';')[0];
   }
   const get = (p, headers = {}) => fetch(base + p, { headers: { ...(cookie ? { Cookie: cookie } : {}), ...headers } });

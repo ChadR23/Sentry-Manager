@@ -17,7 +17,7 @@
 //
 // What changes by itself is normalised: each server's /v/<version>/ (its
 // start time is in it), ids and times made at the moment, the Secure flag of
-// cookies (the lean server has no HTTPS yet), compressed lengths.
+// cookies, compressed lengths. Both servers have HTTPS and sign-in.
 //
 //   node lean/parity/uiCompare.js [--keep DIR] [--json FILE]
 //
@@ -89,10 +89,12 @@ async function startLean(dir, footage) {
   if (!bin) throw new Error('Build the lean server first (cd lean && cargo build)');
   const port = await freePort();
   const child = spawn(bin, [], {
-    env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', DATA_PATH: path.join(dir, 'data'), APP_ROOT: REPO, FOOTAGE_PATH: footage, VEHICLE_NAME: 'Contract Car', TZ: 'UTC', DEFAULT_UI: '' },
+    env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', DATA_PATH: path.join(dir, 'data'), APP_ROOT: REPO, FOOTAGE_PATH: footage, VEHICLE_NAME: 'Contract Car', TZ: 'UTC', DEFAULT_UI: '',
+      UI_PASSWORD: PASSWORD, RUN_DIR: path.join(dir, 'run'), LOG_LEVEL: 'warn', TLS_MODE: 'auto' },
     stdio: ['ignore', 'ignore', process.env.LEAN_LOG ? 'inherit' : 'ignore']
   });
-  const base = `http://127.0.0.1:${port}`;
+  // (core's HTTPS, as the Node fixture's: the password only goes over it)
+  const base = `https://127.0.0.1:${port}`;
   for (let i = 0; i < 100; i++) {
     try { if ((await client(base).request('GET', '/healthz')).status === 200) break; } catch { /* not yet */ }
     await sleep(100);
@@ -226,9 +228,16 @@ async function main() {
     const set = [].concat(login.headers['set-cookie'] || []).map((s) => s.split(';')[0]).find((s) => /^[^=]+=.{8,}/.test(s));
     if (!set) throw new Error(`sign-in on the Node server failed (${login.status})`);
     N.setSession(set);
+    // (both servers have accounts: lean signs in through core as Node does)
+    const leanLogin = await L.request('POST', '/api/auth/login', { body: { username: 'admin', password: PASSWORD } });
+    const leanSet = [].concat(leanLogin.headers['set-cookie'] || []).map((s) => s.split(';')[0]).find((s) => /^[^=]+=.{8,}/.test(s));
+    if (!leanSet) throw new Error(`sign-in on the lean server failed (${leanLogin.status})`);
+    L.setSession(leanSet);
     const confirm = async () => {
-      const r = await N.request('POST', '/api/auth/confirm', { body: { password: PASSWORD } });
-      if (r.status !== 200) throw new Error(`confirm failed: ${r.status} ${r.body}`);
+      for (const c of [N, L]) {
+        const r = await c.request('POST', '/api/auth/confirm', { body: { password: PASSWORD } });
+        if (r.status !== 200) throw new Error(`confirm failed: ${r.status} ${r.body}`);
+      }
     };
     await confirm();
 

@@ -9,9 +9,10 @@
 //
 //   node lean/parity/opsCompare.js [--dir /tmp/sm-ops] [--bin lean/target/debug/sentry-lean] [--settle 75] [--json out.json]
 //
-// The fixture's password goes only over its own HTTPS (record.js refuses
-// plain HTTP); the lean server has no sign-in yet and is asked over loopback
-// HTTP. Nothing is sent anywhere else. Exits 1 when an answer differs.
+// The password goes only over HTTPS (record.js refuses plain HTTP): the
+// fixture's, and the lean server's own (core's TLS on the copied data
+// folder's certificate authority), where it signs in as on Node. Nothing is
+// sent anywhere else. Exits 1 when an answer differs.
 
 const fs = require('fs');
 const net = require('net');
@@ -101,7 +102,7 @@ function deepCompare(a, b, data) {
 
 async function main() {
   const dir = path.resolve(arg('dir', path.join(require('os').tmpdir(), 'sm-ops-compare')));
-  const bin = path.resolve(arg('bin', path.join(REPO, 'lean/target/debug/sentry-lean')));
+  const bin = path.resolve(arg('bin', process.env.LEAN_BIN || [path.join(REPO, 'lean/target/release/sentry-lean'), path.join(REPO, 'lean/target/debug/sentry-lean')].find((f) => fs.existsSync(f))));
   const goldens = path.join(dir, 'goldens');
   fs.mkdirSync(dir, { recursive: true });
 
@@ -130,14 +131,16 @@ async function main() {
   fs.cpSync(path.join(dir, 'node', 'data'), data, { recursive: true, filter: (src) => !/[\\/](scrub|thumbnails|converter-temp|logs)$/.test(src) });
   const port = await freePort();
   const footage = path.join(dir, 'node', 'footage');
-  const lean = spawn(bin, [], { env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', DATA_PATH: data, FOOTAGE_PATH: footage, VEHICLE_NAME: 'Contract Car', TZ: 'UTC', APP_ROOT: REPO }, stdio: ['ignore', 'ignore', 'inherit'] });
-  const client = lib.createClient({ base: `http://127.0.0.1:${port}` });
+  const lean = spawn(bin, [], { env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', DATA_PATH: data, FOOTAGE_PATH: footage, VEHICLE_NAME: 'Contract Car', TZ: 'UTC', APP_ROOT: REPO, RUN_DIR: path.join(dir, 'lean-run'), LOG_LEVEL: 'warn' }, stdio: ['ignore', 'ignore', 'inherit'] });
+  const base = `https://127.0.0.1:${port}`;
+  const up = () => new Promise((resolve) => {
+    const req = require('https').get(`${base}/healthz`, { rejectUnauthorized: false }, (res) => { res.resume(); resolve(res.statusCode === 200); });
+    req.on('error', () => resolve(false));
+  });
+  for (let i = 0; i < 100 && !(await up()); i++) await new Promise((r) => setTimeout(r, 100));
+  const client = await lib.connect({ base, ca: path.join(data, 'tls', 'ca.crt') });
   const report = { same: 0, different: 0, byRoute: {} };
   try {
-    for (let i = 0; i < 100; i++) {
-      try { if ((await client.request('GET', '/healthz')).status === 200) break; } catch { /* not yet */ }
-      await new Promise((r) => setTimeout(r, 100));
-    }
     // what a server does by itself a minute after it starts (the startup
     // self-check, the first snapshot): done before comparing, as for the fixture
     await new Promise((r) => setTimeout(r, Number(arg('lean-settle', 65)) * 1000));

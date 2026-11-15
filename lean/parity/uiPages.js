@@ -30,13 +30,15 @@ const UI_API = /^\/api\/(ui-packs|exports|settings(\/appearance|\/work-limits)?$
 async function startLean(dir, footage) {
   const bin = process.env.LEAN_BIN || [path.join(REPO, 'lean/target/release/sentry-lean'), path.join(REPO, 'lean/target/debug/sentry-lean')].find((f) => fs.existsSync(f));
   const port = 20000 + Math.floor(Math.random() * 20000);
-  const child = spawn(bin, [], { env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', DATA_PATH: path.join(dir, 'data'), APP_ROOT: REPO, FOOTAGE_PATH: footage, VEHICLE_NAME: 'Contract Car', TZ: 'UTC', DEFAULT_UI: '' }, stdio: ['ignore', 'ignore', fs.openSync(path.join(dir, 'lean.log'), 'a')] });
+  const child = spawn(bin, [], { env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', DATA_PATH: path.join(dir, 'data'), APP_ROOT: REPO, FOOTAGE_PATH: footage, VEHICLE_NAME: 'Contract Car', TZ: 'UTC', DEFAULT_UI: '', UI_PASSWORD: PASSWORD, RUN_DIR: path.join(dir, 'run'), LOG_LEVEL: 'warn' }, stdio: ['ignore', 'ignore', fs.openSync(path.join(dir, 'lean.log'), 'a')] });
   child.on('exit', (code, sig) => console.log(`lean server exited: ${code} ${sig}`));
-  const base = `http://127.0.0.1:${port}`;
-  for (let i = 0; i < 100; i++) {
-    try { if ((await fetch(`${base}/healthz`)).ok) break; } catch { /* not yet */ }
-    await sleep(100);
-  }
+  // (core's HTTPS, as the Node fixture's: the password only goes over it)
+  const base = `https://127.0.0.1:${port}`;
+  const up = () => new Promise((resolve) => {
+    const req = require('https').get(`${base}/healthz`, { rejectUnauthorized: false }, (res) => { res.resume(); resolve(res.statusCode === 200); });
+    req.on('error', () => resolve(false));
+  });
+  for (let i = 0; i < 100 && !(await up()); i++) await sleep(100);
   return { base, child };
 }
 
@@ -89,13 +91,12 @@ async function main() {
     const servers = { node: { base: node.base }, lean: { base: lean.base } };
     for (const [name, s] of Object.entries(servers)) {
       s.context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1366, height: 900 } });
-      if (name === 'node') {
-        const r = await s.context.request.post(`${s.base}/api/auth/login`, { data: { username: 'admin', password: PASSWORD }, headers: { 'X-Requested-With': 'sentry-six-manager' } });
-        if (!r.ok()) throw new Error(`sign-in: ${r.status()}`);
-      }
+      // (both servers have accounts: lean signs in through core as Node does)
+      const r = await s.context.request.post(`${s.base}/api/auth/login`, { data: { username: 'admin', password: PASSWORD }, headers: { 'X-Requested-With': 'sentry-six-manager' } });
+      if (!r.ok()) throw new Error(`${name} sign-in: ${r.status()}`);
     }
     const choose = async (s, name, id) => {
-      if (name === 'node') await s.context.request.post(`${s.base}/api/auth/confirm`, { data: { password: PASSWORD }, headers: { 'X-Requested-With': 'sentry-six-manager' } });
+      await s.context.request.post(`${s.base}/api/auth/confirm`, { data: { password: PASSWORD }, headers: { 'X-Requested-With': 'sentry-six-manager' } });
       const r = await s.context.request.put(`${s.base}/api/ui-packs/active`, { data: { id }, headers: { 'X-Requested-With': 'sentry-six-manager' } });
       if (!r.ok()) throw new Error(`${name}: choosing ${id}: ${r.status()} ${await r.text()}`);
     };
