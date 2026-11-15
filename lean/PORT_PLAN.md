@@ -80,6 +80,7 @@ folder, plus one line in `src/api.rs` (its routes) and its dependencies in
 | footage list, recordings, media ranges, speeds, MP4/SEI reading | first slice done (see README.md) |
 | supervisor | ported, see below and `src/supervisor/README.md` |
 | converter | the file-safety and telemetry core ported and tested; job store, job service, IPC and runtime still to do (see below) |
+| ops | most of it ported, see below |
 | everything else | not started |
 
 ## Converter
@@ -176,6 +177,80 @@ Not done yet:
 
 Proposed difference (needs the owner's OK): file system error texts that are
 only logged ("mount car: ...") read like Rust's, not Node's.
+
+## Ops
+
+Done (`src/ops/`, handlers over the `ops::ctx::OpsCtx` trait; routes in
+`ops/routes.rs`, wired in `api.rs` before the slice's own routes, started
+from `main.rs`; until core lands `ops/lean.rs` implements the trait on
+`App` with its own connection to `DATA_PATH/manager.db`, same schema):
+
+- notifications: db.js notify/resolve/resolveId/markRead/list (an unchanged
+  repeat changes nothing and announces nothing), activity.js Notifications
+  (muted kinds, share, read-only and space alerts with the 10-minute
+  grace), the rules, all 5 routes. Node has no outbound channels (no e-mail
+  or webhooks), so there are none here;
+- health.js checks (same order, key order and texts), one run at a time,
+  the banner, the startup self-check a minute after the start with its
+  notifications and log line;
+- snapshots.js (VACUUM INTO, 7 kept, restore at the next start through
+  `snapshots::apply_pending_restore`, which core must call before it opens
+  manager.db; ops/lean.rs does);
+- powerPrice.js and savings.js exactly (local time, overnight rates,
+  backfill, by month), PUT /api/settings/power, savings-by-month;
+- buildInfo.js, hostInfo.js, imageUpdates.js (registry token, multi-arch
+  index, build numbers, sticky critical levels, the 12 h / 10 min checks,
+  notifications);
+- metrics: settings, enable, disable and `/metrics` with its token;
+- reports: reportsConfig, reportsScrub, reportsProtocol (seal and open,
+  sign, proof of work, schema, moved notices), reports.js (opt-in, outbox
+  caps, backoff, 429/POW/TIME, the per-hour manual limit, crashes, daily,
+  heartbeat and normalizeHeartbeat, install and anonymous keys kept in
+  Node's PKCS#8 form). Only `https://reports.skittles.live` (or an https://
+  REPORTS_URL; http only to localhost under NODE_ENV=test);
+- /api/system, /api/support-bundle (zip, same scrubbing), /api/updates;
+- stats: history.js exactly (the same stats-history.json; its energy,
+  traffic and shares parts are kept as they are), the CSV, CPU, memory,
+  host and network rates; every part of the answer in Node's shape.
+
+Tests: `cargo test` (94 unit tests, including ports of notifyUnchanged,
+powerPrice, savings, savingsByMonth, snapshots, imageUpdates, hostInfo,
+healthGpu, reportsScrub, reportsProtocol, reportsClient and statsHistory)
+and `tests/reports_parity.rs`: the scrubber, the payload schema and the
+heartbeat against the Node code on a corpus, and the Rust client against
+the local fake receiver (test/fixtures/reportsReceiver.js through
+`parity/reports.js`): reports sent, opened and validated by the Node
+protocol code, trust new/verified/anon, heartbeat, crash, a raised
+difficulty, 429, a signed and a forged move. Nothing goes anywhere but
+127.0.0.1.
+
+Same answers: `node lean/parity/opsCompare.js` records goldens of the ops
+GET routes from the Node fixture and replays them against the lean server on
+a copy of its data folder: 10 of 15 the same. The rest belongs to other
+areas or to the machine: the encoder check and the `/api/system` converter
+(converter area), `security.https` (core's TLS), and the disk's free space,
+which changed between the two runs (it is in notification titles and the
+banner, which the spec does not normalise).
+
+Not done yet:
+
+- stats: GPUs (gpu.js, nvidia-smi), power and RAPL (power.js; the
+  supervisor's `rapl-reading` must reach `Stats` once core wires the link),
+  energy and costs (energy.js), data used per day (traffic.js), disks, file
+  systems and share answer times, sensors, the process table and the app's
+  CPU, alerts, unlock hints, node power (nodePower.js), the encoder block
+  (converter area, `OpsCtx::encoder_block`), the `tick()` housekeeping;
+- savings.record from the converter's job snapshots (converter calls
+  `power::record`) and the backfill at start;
+- the real diagnostics, heartbeat numbers and identifiers (index.js
+  reportDiagnostics, reportHeartbeat, reportIdentifiers) need the other
+  areas through `OpsCtx`; ops/lean.rs gives a small version;
+- crash notes from 500s (`Reports::note_crash`) need core's error path;
+- the live-update hub (`announce`), the audit log, log search and sign-in
+  are core's; on the stand-alone server they print to stderr, and the 🔑
+  routes always ask for the password (no accounts yet);
+- the share status (warning, read-only) comes from footage/shares;
+  ops/lean.rs works out a local folder's.
 
 ## Known differences
 
