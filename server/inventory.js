@@ -431,9 +431,10 @@ class Inventory {
     const entry = this.state.get(vehicleId);
     if (!entry?.files) return;
     entry.recordings = buildRecordings(entry.files, { vehicleId, protectedRels: this.db.protectedSet(vehicleId) });
-    // the catalog too, so it doesn't wait for the next scan (a failure only means the next scan writes every file)
+    // the catalog too, so it doesn't wait for the next scan (a failure only means the next scan writes every file);
+    // not while a scan runs: its rows are already that scan's, and its map replaces this one when it ends
     const cat = this.catalog;
-    if (cat && !this.catalogBehind.has(vehicleId)) {
+    if (cat && !this.catalogBehind.has(vehicleId) && !this.scans.has(vehicleId)) {
       try {
         cat.syncFiles(vehicleId, entry.files);
       } catch (err) {

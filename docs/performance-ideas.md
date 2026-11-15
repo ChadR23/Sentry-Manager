@@ -73,4 +73,22 @@ time, each with a before/after test:
    checks each case against a full scan.
 2. Consumers that only count or sum (storage's last 14 days, arrivedClips,
    canPrune's clip list) query the catalog (`catalog.summary`, by day).
+   Looked at (November 2026), none switched yet: the catalog gives the same
+   answers (`test/catalogAnswers.test.js` compares all three after scans, a
+   restart, a Recycle Bin move, a restore and a move during a scan), but
+   while the map is in memory it is the quicker of the two. Measured on the
+   made-up 20,000-file archive: storage's last 14 days (12,788 files in
+   range) 0.5-0.6 ms from the map against 4.9 ms as one indexed query (and
+   11-13 ms through `catalog.summary`, which groups the whole car);
+   arrivedClips 0.3-0.5 ms against 4-5 ms (no index on arrival times, so
+   every row is read); canPrune's clip list 0.3-0.5 ms against 7-9 ms (it
+   needs every clip's path, so every row comes back as a string). Each query
+   also holds the event loop for those milliseconds. So they move with step
+   3, when the map goes and the query is what is left (storage's can then be
+   kept per scan, as now). Found on the way and fixed: a Recycle Bin move
+   while a scan ran (its rebuild) brought the catalog in line with the map
+   from before the scan, dropping rows the scan had just written for new
+   files (a scan writes them 1,000 at a time as it goes), and later scans,
+   seeing those files unchanged, never wrote them back; a rebuild now leaves
+   the catalog to the running scan, whose map replaces the old one anyway.
 3. Then the file map can hold only what the light rescan needs, or nothing.
