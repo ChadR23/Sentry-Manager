@@ -10,3 +10,7 @@ pub mod js;
 pub mod pace;
 pub mod speed_reader;
 pub mod work_limits;
+pub mod speed_index;
+pub mod telemetry_api;
+#[cfg(test)]
+pub mod testkit;
