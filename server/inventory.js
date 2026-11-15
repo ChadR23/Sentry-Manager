@@ -13,9 +13,9 @@
 const crypto = require('crypto');
 const fsp = require('fs/promises');
 const path = require('path');
-const { scanFootage, limiter } = require('./scanner');
+const { scanFootage, limiter, fileEntry, interner } = require('./scanner');
 const { BATCH } = require('./catalog');
-const { safeJoin } = require('./footage');
+const { safeJoin, classify } = require('./footage');
 const { videoCodec } = require('./mp4codec');
 
 const TS_RE = /(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})-(\d{2})/;
@@ -293,7 +293,10 @@ class Inventory {
   // `light`: the background rescan (index.js, every 15 minutes) reuses what
   // the last scan knew of unchanged folders (scanner.js); every sixth, about
   // every 90 minutes, and every other scan (Refresh, a policy, a restore)
-  // looks at every file.
+  // looks at every file. A light scan with nothing in memory (the first
+  // after a restart) starts from the catalog's last finished scan of the
+  // same folder (resumed below), else it looks at every file; it counts as
+  // one of the five, so a full scan still follows within the 90 minutes.
   scan(vehicleId, { light = false } = {}) {
     if (this.scans.has(vehicleId)) return this.scans.get(vehicleId);
     const p = (async () => {
@@ -304,14 +307,18 @@ class Inventory {
       const prev = this.state.get(vehicleId);
       this.state.set(vehicleId, { ...(prev || {}), scanning: true });
       try {
-        const lights = prev?.lightScans || 0;
-        const reuse = light && prev?.files && prev?.dirs && lights < 5;
-        const toCatalog = this.catalogWriter(vehicleId, prev?.files);
-        const res = await scanFootage(this.vehicles.rootOf(vehicle), {
-          onFile: toCatalog?.add,
-          ...(reuse ? { previous: { files: prev.files, dirs: prev.dirs } } : {})
-        });
-        toCatalog?.finish(res.files);
+        const root = this.vehicles.rootOf(vehicle);
+        let lights = prev?.lightScans || 0;
+        let previous = light && prev?.files && prev?.dirs && lights < 5 ? { files: prev.files, dirs: prev.dirs } : null;
+        const resumed = light && !prev?.files ? this.resume(vehicleId, root) : null;
+        if (resumed) {
+          previous = resumed;
+          lights = 0;
+        }
+        const reuse = Boolean(previous);
+        const toCatalog = this.catalogWriter(vehicleId, previous?.files || prev?.files, root);
+        const res = await scanFootage(root, { onFile: toCatalog?.add, ...(previous ? { previous } : {}) });
+        toCatalog?.finish(res);
         const entry = {
           files: res.files,
           dirs: res.dirs,
@@ -324,7 +331,7 @@ class Inventory {
         };
         entry.recordings = buildRecordings(res.files, { vehicleId, protectedRels: this.db.protectedSet(vehicleId) });
         this.state.set(vehicleId, entry);
-        this.log.info(`${vehicle.name}: ${entry.recordings.length} recordings, ${res.files.size} files (${(res.durationMs / 1000).toFixed(1)}s${reuse ? `, ${res.reused} unchanged` : ''})`);
+        this.log.info(`${vehicle.name}: ${entry.recordings.length} recordings, ${res.files.size} files (${(res.durationMs / 1000).toFixed(1)}s${reuse ? `, ${res.reused} unchanged${resumed ? ' since the last run' : ''}` : ''})`);
         this.probeCodecs(vehicleId);
         this.onScanned(vehicleId);
         return entry;
@@ -340,12 +347,41 @@ class Inventory {
   }
 
   /**
+   * The catalog's last finished scan of this root as a light rescan's
+   * `previous` (scanner.js): its files as file entries (kind, day, camera and
+   * event worked out from the path again, as a scan does) and its folders'
+   * modified times. Null, so the scan looks at every file, when there is no
+   * catalog, its last write failed, or catalog.resume finds nothing it can
+   * vouch for (another version, another folder, a write cut short).
+   */
+  resume(vehicleId, root) {
+    const cat = this.catalog;
+    if (!cat || this.catalogBehind.has(vehicleId)) return null;
+    let last;
+    try {
+      last = cat.resume(vehicleId, root);
+    } catch (err) {
+      this.log.warn(`Footage catalog not read: ${err.message}`);
+      return null;
+    }
+    if (!last) return null;
+    const files = new Map();
+    const intern = interner();
+    for (const r of last.rows) {
+      const info = classify(r.rel);
+      if (!info) continue;
+      files.set(r.rel, fileEntry(r.rel, r, info, intern));
+    }
+    return { files, dirs: last.dirs, startedMs: last.startedMs };
+  }
+
+  /**
    * Keeps the catalog in step with a scan: the files it looks at afresh are
    * written in batches as it goes (unless the last scan saw them just so),
    * and at the end the files it did not find are forgotten. A failure here
    * never fails the scan: the catalog is caught up by the next one.
    */
-  catalogWriter(vehicleId, prevFiles) {
+  catalogWriter(vehicleId, prevFiles, root = null) {
     const cat = this.catalog;
     if (!cat) return null;
     // the last write failed: this scan writes every file, not only what changed
@@ -367,6 +403,8 @@ class Inventory {
       batch = [];
       if (list.length) write(() => cat.putFiles(vehicleId, list));
     };
+    // until this scan has finished writing, the rows vouch for no scan (resume)
+    write(() => cat.invalidate(vehicleId));
     return {
       add: (f) => {
         const was = prevFiles?.get(f.rel);
@@ -375,9 +413,14 @@ class Inventory {
         batch.push(f);
         if (batch.length >= BATCH) flush();
       },
-      finish: (files) => {
+      finish: (res) => {
+        const { files } = res;
         flush();
         write(() => cat.keepOnly(vehicleId, (rel) => files.has(rel)));
+        // (a folder or file it could not read has no row, so the next scan reads it again)
+        if (root !== null) {
+          write(() => cat.putScan(vehicleId, { root, startedMs: res.startedAt, scannedAt: res.scannedAt, dirs: res.dirs }));
+        }
         if (!failed) this.catalogBehind.delete(vehicleId);
       }
     };

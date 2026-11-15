@@ -43,8 +43,34 @@ scrubPrepare, recycleBin, index.js) and the Recycle Bin deletes from it; the
 recordings, built from it after each scan. Next steps, one consumer at a
 time, each with a before/after test:
 
-1. The first scan after a restart reads the catalog (and its folder times)
-   as the light rescan's `previous`, instead of a stat of every file.
+1. Done (November 2026): the first scan after a restart reads the catalog
+   (and its folder times) as the light rescan's `previous`, instead of a
+   stat of every file. Each finished scan now also writes its folders'
+   modified times (`catalog_dirs`) and a row saying the catalog holds one
+   finished scan of that folder (`catalog_scans`: a format number, the root,
+   when it started, and the files and bytes it wrote). The row is removed
+   before any scan or Recycle Bin move writes and put back only when the
+   write is done, so a scan cut short, a failed write, another version (a
+   different format, or a catalog from before this one, which has no row),
+   another footage folder, or rows that no longer add up to the files and
+   bytes it wrote all mean a full scan. A resumed scan sees every file added
+   or removed (every folder is still listed), every file replaced by a rename
+   (its folder's time changes), and looks again at every file changed within
+   two hours of when the last scan *started*, however long the server was
+   down (a clip still being copied then). What it cannot see is what no light
+   rescan sees: a file rewritten in place (no rename) in an unchanged folder.
+   So it counts as one of the five light scans, and the full scan that
+   follows within about 90 minutes catches that, as before. Only a light
+   scan with nothing in memory starts from the catalog: the one on the
+   share's first healthy moment after a start (index.js), or a background
+   rescan; Refresh, a policy, a restore or a share coming back are full as
+   before. Measured with a made-up archive of 20,000 files in 67 folders
+   (local disk, a busy shared machine): the first scan after a restart made
+   20,071 stat calls and took 1.2-1.8 s; now 71 (one per folder) and
+   0.34-0.44 s (reading the rows and building the recordings; it also no
+   longer rewrites every catalog row). With 2 ms added to each stat (a NAS
+   round trip), 3.4-3.5 s against 0.35 s. `test/catalogResume.test.js`
+   checks each case against a full scan.
 2. Consumers that only count or sum (storage's last 14 days, arrivedClips,
    canPrune's clip list) query the catalog (`catalog.summary`, by day).
 3. Then the file map can hold only what the light rescan needs, or nothing.

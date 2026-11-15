@@ -780,7 +780,8 @@ async function main() {
     // footage mounted read-only has no Recycle Bin to settle: only its scan
     const readOnly = vehicles.share(id)?.status?.()?.readOnly === true;
     (readOnly ? Promise.resolve() : bin.reconcile(id).catch((err) => log.warn(`Recycle Bin check of ${id}: ${err.message}`)))
-      .then(() => inventory.scan(id)).then(() => announce('inventory'), () => {});
+      // (the first scan since the server started may start from the footage catalog's last one: inventory.scan)
+      .then(() => inventory.scan(id, { light: !inventory.get(id)?.files })).then(() => announce('inventory'), () => {});
   });
 
   // ---- routes

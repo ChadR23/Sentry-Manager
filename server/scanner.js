@@ -93,6 +93,10 @@ const fileEntry = (rel, st, info, intern) => new FileEntry(rel, st, info, intern
 // in) changes the folder's time, so such a folder is looked at in full. On a
 // quiet share that is one call per folder instead of one per file (48,000
 // files: 48,000 round trips to the NAS every 15 minutes).
+// `previous.startedMs`, when it is older than two hours (the first scan after
+// a restart starts from the catalog's last scan, inventory.js): "the last two
+// hours" reach back from when that scan started, so a clip that was still
+// being copied then is looked at again however long the server was down.
 const RECENT_MS = 2 * 3600 * 1000;
 async function scanFootage(root, { concurrency = 16, onProgress, onFile = null, previous = null } = {}) {
   const started = Date.now();
@@ -103,6 +107,7 @@ async function scanFootage(root, { concurrency = 16, onProgress, onFile = null, 
   let seen = 0;
   let reused = 0;
   const intern = interner();
+  const recentFrom = Math.min(started, Number.isFinite(previous?.startedMs) ? previous.startedMs : started) - RECENT_MS;
 
   async function visit(relDir) {
     let entries;
@@ -132,7 +137,7 @@ async function scanFootage(root, { concurrency = 16, onProgress, onFile = null, 
       const info = classify(rel);
       if (!info) continue;
       const known = unchanged ? previous.files.get(rel) : null;
-      if (known && started - known.mtimeMs > RECENT_MS) {
+      if (known && known.mtimeMs < recentFrom) {
         files.set(rel, known);
         seen++;
         reused++;
@@ -156,7 +161,7 @@ async function scanFootage(root, { concurrency = 16, onProgress, onFile = null, 
   }
 
   await visit('');
-  return { files, dirs, errors, reused, light: Boolean(previous), scannedAt: Date.now(), durationMs: Date.now() - started };
+  return { files, dirs, errors, reused, light: Boolean(previous), startedAt: started, scannedAt: Date.now(), durationMs: Date.now() - started };
 }
 
 module.exports = { scanFootage, limiter, fileEntry, interner, FileEntry };
