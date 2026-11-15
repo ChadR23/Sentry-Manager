@@ -310,7 +310,7 @@ fn split_url(url: &str) -> Result<(String, u16, String, String), AcmeError> {
 }
 
 /// One request (only https://, only to the directory's own origin), the answer cut at 256 KB.
-pub async fn request(url: &str, method: &str, body: Option<&Value>, roots: Arc<rustls::RootCertStore>, origin: Option<&str>, accept: &str) -> Result<HttpAnswer, AcmeError> {
+pub async fn request(url: &str, method: &str, body: Option<&Value>, roots: Arc<rustls::ClientConfig>, origin: Option<&str>, accept: &str) -> Result<HttpAnswer, AcmeError> {
     let (host, port, path, o) = split_url(url)?;
     if let Some(want) = origin {
         if o != want {
@@ -320,14 +320,8 @@ pub async fn request(url: &str, method: &str, body: Option<&Value>, roots: Arc<r
     let work = async {
         let net = |e: String| AcmeError { message: e, network: true, ..Default::default() };
         let tcp = tokio::net::TcpStream::connect((host.as_str(), port)).await.map_err(|e| net(e.to_string()))?;
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let cfg = rustls::ClientConfig::builder_with_provider(provider)
-            .with_safe_default_protocol_versions()
-            .map_err(|e| net(e.to_string()))?
-            .with_root_certificates(roots)
-            .with_no_client_auth();
         let name = rustls::pki_types::ServerName::try_from(host.clone()).map_err(|e| net(e.to_string()))?;
-        let tls = tokio_rustls::TlsConnector::from(Arc::new(cfg)).connect(name, tcp).await.map_err(|e| net(e.to_string()))?;
+        let tls = tokio_rustls::TlsConnector::from(roots).connect(name, tcp).await.map_err(|e| net(e.to_string()))?;
         let (mut send, conn) = hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(tls)).await.map_err(|e| net(e.to_string()))?;
         tokio::spawn(conn);
         let data = body.map(|b| b.to_string().into_bytes());
@@ -372,10 +366,10 @@ pub struct AcmeClient {
     pub directory_url: String,
     origin: String,
     key: p256::SecretKey,
-    roots: Arc<rustls::RootCertStore>,
+    roots: Arc<rustls::ClientConfig>,
     email: Option<String>,
     pub kid: Option<String>,
-    poll_ms: u64,
+    pub poll_ms: u64,
     max_poll_ms: u64,
     port: u16,
     log: Option<Scope>,
@@ -384,7 +378,7 @@ pub struct AcmeClient {
 }
 
 impl AcmeClient {
-    pub fn new(directory: &str, key: p256::SecretKey, roots: Arc<rustls::RootCertStore>, email: Option<String>, kid: Option<String>, port: u16, log: Option<Scope>) -> Result<AcmeClient, AcmeError> {
+    pub fn new(directory: &str, key: p256::SecretKey, roots: Arc<rustls::ClientConfig>, email: Option<String>, kid: Option<String>, port: u16, log: Option<Scope>) -> Result<AcmeClient, AcmeError> {
         let (_, _, _, origin) = split_url(directory)?;
         Ok(AcmeClient { directory_url: directory.into(), origin, key, roots, email, kid, poll_ms: 2000, max_poll_ms: 180_000, port, log, dir: None, nonce: None })
     }
@@ -670,6 +664,58 @@ pub fn backoff_ms(failures: i64) -> i64 {
     BACKOFF_MS[(failures.max(1) as usize).min(BACKOFF_MS.len()) - 1]
 }
 
+/// The roots' usual check, plus: a server certificate that is itself listed in the CA file is trusted
+/// for the names it carries (as OpenSSL does with a self-signed certificate given as `ca`).
+#[derive(Debug)]
+struct Pinned {
+    pinned: Vec<Vec<u8>>,
+    inner: Arc<rustls::client::WebPkiServerVerifier>,
+}
+
+fn cert_has_name(der: &[u8], name: &rustls::pki_types::ServerName) -> bool {
+    let Ok((_, c)) = x509_parser::parse_x509_certificate(der) else { return false };
+    let Ok(Some(san)) = c.subject_alternative_name() else { return false };
+    let want = match name {
+        rustls::pki_types::ServerName::DnsName(d) => d.as_ref().to_lowercase(),
+        rustls::pki_types::ServerName::IpAddress(ip) => std::net::IpAddr::from(*ip).to_string(),
+        _ => return false,
+    };
+    san.value.general_names.iter().any(|g| match g {
+        x509_parser::extensions::GeneralName::DNSName(d) => d.to_lowercase() == want,
+        x509_parser::extensions::GeneralName::IPAddress(b) => match b.len() {
+            4 => std::net::IpAddr::from([b[0], b[1], b[2], b[3]]).to_string() == want,
+            16 => <[u8; 16]>::try_from(*b).map(|a| std::net::IpAddr::from(a).to_string() == want).unwrap_or(false),
+            _ => false,
+        },
+        _ => false,
+    })
+}
+
+impl rustls::client::danger::ServerCertVerifier for Pinned {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        server_name: &rustls::pki_types::ServerName<'_>,
+        ocsp: &[u8],
+        now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        if self.pinned.iter().any(|p| p.as_slice() == end_entity.as_ref()) && cert_has_name(end_entity.as_ref(), server_name) {
+            return Ok(rustls::client::danger::ServerCertVerified::assertion());
+        }
+        self.inner.verify_server_cert(end_entity, intermediates, server_name, ocsp, now)
+    }
+    fn verify_tls12_signature(&self, m: &[u8], c: &rustls::pki_types::CertificateDer<'_>, d: &rustls::DigitallySignedStruct) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls12_signature(m, c, d)
+    }
+    fn verify_tls13_signature(&self, m: &[u8], c: &rustls::pki_types::CertificateDer<'_>, d: &rustls::DigitallySignedStruct) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls13_signature(m, c, d)
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.inner.supported_verify_schemes()
+    }
+}
+
 pub struct Issued {
     pub key: Vec<u8>,
     pub cert: Vec<u8>,
@@ -688,6 +734,8 @@ pub struct AcmeManager {
     generation: Mutex<u64>,
     on_change: Mutex<Option<Hook>>,
     pub ready_timeout_ms: i64,
+    /// how often an order is polled (Node: 2 s)
+    pub poll_ms: u64,
 }
 
 fn iso(ms: i64) -> String {
@@ -696,7 +744,7 @@ fn iso(ms: i64) -> String {
 
 impl AcmeManager {
     pub fn new(config: AcmeConfig, dir: PathBuf, log: Option<Scope>) -> AcmeManager {
-        AcmeManager { config, dir, log, pending: Mutex::new(Default::default()), running: Mutex::new(false), generation: Mutex::new(0), on_change: Mutex::new(None), ready_timeout_ms: 120_000 }
+        AcmeManager { config, dir, log, pending: Mutex::new(Default::default()), running: Mutex::new(false), generation: Mutex::new(0), on_change: Mutex::new(None), ready_timeout_ms: 120_000, poll_ms: 2000 }
     }
 
     fn file(&self, n: &str) -> PathBuf {
@@ -823,19 +871,31 @@ impl AcmeManager {
         *self.running.lock().unwrap() = false;
     }
 
-    fn roots(&self) -> Result<Arc<rustls::RootCertStore>, AcmeError> {
+    /// The TLS client for the ACME server: Let's Encrypt's roots, or only TLS_ACME_CA_FILE's
+    /// (Node: a `ca` replaces the default roots; OpenSSL also trusts a self-signed server certificate listed there).
+    fn roots(&self) -> Result<Arc<rustls::ClientConfig>, AcmeError> {
         let mut roots = rustls::RootCertStore::empty();
+        let mut pinned = Vec::new();
         match &self.config.ca_file {
-            // (Node: a `ca` replaces the default roots)
             Some(f) => {
                 let pem = read_small(Path::new(f), 256 * 1024).map_err(|e| aerr(e.to_string()))?;
                 for c in super::tls::pem_ders(&pem) {
-                    let _ = roots.add(rustls::pki_types::CertificateDer::from(c));
+                    let _ = roots.add(rustls::pki_types::CertificateDer::from(c.clone()));
+                    pinned.push(c);
                 }
             }
             None => roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned()),
         }
-        Ok(Arc::new(roots))
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let inner = rustls::client::WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider.clone()).build().map_err(|e| aerr(e.to_string()))?;
+        let verifier = Arc::new(Pinned { pinned, inner });
+        let cfg = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .map_err(|e| aerr(e.to_string()))?
+            .dangerous()
+            .with_custom_certificate_verifier(verifier)
+            .with_no_client_auth();
+        Ok(Arc::new(cfg))
     }
 
     fn account_key(&self) -> p256::SecretKey {
@@ -896,6 +956,7 @@ impl AcmeManager {
             let roots = self.roots()?;
             let kid = s.get("accounts").and_then(|a| a.get(&self.config.directory)).and_then(Value::as_str).map(String::from);
             let mut client = AcmeClient::new(&self.config.directory, key, roots, self.config.email.clone(), kid.clone(), self.config.port, self.log.clone())?;
+            client.poll_ms = self.poll_ms;
             let cert_key = new_key();
             let key_pem_text = key_pem(&cert_key);
             let chain = client.issue(&self.config.domains, &cert_key, self).await;
@@ -1029,5 +1090,97 @@ mod tests {
         assert_eq!(retry_after_at(Some("120"), 1000), Some(121_000));
         assert_eq!(retry_after_at(Some(""), 1000), None);
         assert_eq!(clean("a\u{1}\u{2}b  ", 300), "a b");
+    }
+}
+
+#[cfg(test)]
+mod live {
+    use super::*;
+    use std::io::BufRead;
+
+    /// A plain-HTTP answerer for the challenge (the plain side of port 9000, in small).
+    async fn front(mgr: Arc<std::sync::OnceLock<Arc<AcmeManager>>>) -> u16 {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((s, _)) = l.accept().await else { return };
+                let mgr = mgr.clone();
+                tokio::spawn(async move {
+                    let svc = hyper::service::service_fn(move |req: axum::http::Request<hyper::body::Incoming>| {
+                        let mgr = mgr.clone();
+                        async move {
+                            let p = req.uri().path().to_string();
+                            let ka = p.strip_prefix(CHALLENGE_PREFIX).and_then(|t| mgr.get().and_then(|m| m.challenge(t)));
+                            let r = match ka {
+                                Some(k) => axum::http::Response::builder().status(200).body(http_body_util::Full::new(bytes::Bytes::from(k))).unwrap(),
+                                None => axum::http::Response::builder().status(308).body(http_body_util::Full::new(bytes::Bytes::new())).unwrap(),
+                            };
+                            Ok::<_, std::convert::Infallible>(r)
+                        }
+                    });
+                    let _ = hyper::server::conn::http1::Builder::new().serve_connection(hyper_util::rt::TokioIo::new(s), svc).await;
+                });
+            }
+        });
+        port
+    }
+
+    /// Against test/fixtures/fakeAcme.js (Node's own test server for acme.js): a real order, start to finish.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn issues_against_the_fake_acme_server() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+        let fixture = repo.join("test/fixtures/fakeAcme.js");
+        if !fixture.exists() || std::process::Command::new("node").arg("--version").output().is_err() {
+            eprintln!("skipped: no node or no fake ACME server");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("lean-acme-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cell: Arc<std::sync::OnceLock<Arc<AcmeManager>>> = Arc::new(std::sync::OnceLock::new());
+        let port = front(cell.clone()).await;
+        let script = format!(
+            "require({:?}).startFakeAcme({:?}, {{ validate: {{ httpBase: 'http://127.0.0.1:{port}' }} }}).then((f) => console.log(JSON.stringify({{ directory: f.directory, caFile: f.caFile }})))",
+            fixture.to_string_lossy(),
+            dir.join("fake").to_string_lossy()
+        );
+        let mut child = std::process::Command::new("node").arg("-e").arg(&script).stdout(std::process::Stdio::piped()).spawn().unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
+        let f: Value = serde_json::from_str(&line).unwrap();
+        let config = AcmeConfig {
+            domains: vec!["demo.example.test".into()],
+            email: Some("owner@example.test".into()),
+            staging: false,
+            directory: f["directory"].as_str().unwrap().into(),
+            ca_file: Some(f["caFile"].as_str().unwrap().into()),
+            port,
+            host: "127.0.0.1".into(),
+        };
+        let tls = dir.join("tls");
+        std::fs::create_dir_all(&tls).unwrap();
+        let mut m = AcmeManager::new(config, tls.clone(), None);
+        m.poll_ms = 50;
+        m.ready_timeout_ms = 5000;
+        let m = Arc::new(m);
+        let _ = cell.set(m.clone());
+        assert!(m.current().is_none());
+        let ok = m.attempt("test").await;
+        let _ = child.kill();
+        assert!(ok, "{:?}", m.state());
+        let cur = m.current().expect("issued");
+        assert!(cur.info.valid_to > super::super::db::now_ms());
+        use std::os::unix::fs::PermissionsExt;
+        for n in ["acme-account.key", "acme.key", "acme.crt", "acme-state.json"] {
+            assert_eq!(std::fs::metadata(tls.join(n)).unwrap().permissions().mode() & 0o777, 0o600, "{n}");
+        }
+        let st = m.status();
+        assert_eq!(st["issued"], true);
+        assert_eq!(st["failures"], 0);
+        assert!(m.pending.lock().unwrap().is_empty());
+        // nothing due now: a renewal waits
+        assert!(!m.due().0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

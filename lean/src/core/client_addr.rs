@@ -308,6 +308,65 @@ mod tests {
         assert!(proxy_matcher(Some("nope")).is_err());
     }
 
+    /// test/clientAddress.test.js, case for case
+    #[test]
+    fn node_client_address_tests() {
+        assert_eq!(normalize_ip("::FFFF:7f00:1").as_deref(), Some("127.0.0.1"));
+        assert_eq!(normalize_ip("[2001:DB8:0:0::1]:443").as_deref(), Some("2001:db8::1"));
+        assert_eq!(normalize_ip("198.51.100.7:51234").as_deref(), Some("198.51.100.7"));
+        for junk in ["", "unknown", "1.2.3", "<script>", &"a".repeat(200)] {
+            assert_eq!(normalize_ip(junk), None, "{junk}");
+        }
+        assert_eq!(parse_cidr("10.1.0.0/16"), Some(Cidr { address: "10.1.0.0".into(), prefix: 16, v6: false, text: "10.1.0.0/16".into() }));
+        assert_eq!(parse_cidr("2001:db8::/48").unwrap().text, "2001:db8::/48");
+        for ip in ["127.0.0.1", "10.2.3.4", "172.16.0.1", "172.31.255.254", "192.168.1.5", "169.254.1.1", "::1", "fd00::5", "fe80::1", "::ffff:10.0.0.1"] {
+            assert!(is_local_network(ip), "{ip}");
+        }
+        for ip in ["100.64.0.1", "100.100.100.100", "172.32.0.1", "8.8.8.8", "203.0.113.9", "2001:db8::1", "2600::1", "junk"] {
+            assert!(!is_local_network(ip), "{ip}");
+        }
+        let plain = Proxy { trust_proxy: false, trusted: proxy_matcher(None).unwrap() };
+        let proxied = Proxy { trust_proxy: true, trusted: proxy_matcher(None).unwrap() };
+        let ca = |from: &str, xff: Option<&str>, p: &Proxy| client_address(Some(from), &xff.map(h).unwrap_or_default(), p);
+        assert_eq!(ca("203.0.113.9", Some("192.168.1.5"), &plain), "203.0.113.9");
+        assert_eq!(ca("::ffff:198.51.100.7", Some("127.0.0.1"), &plain), "198.51.100.7");
+        assert_eq!(ca("127.0.0.1", Some("203.0.113.9"), &plain), "127.0.0.1");
+        assert_eq!(ca("203.0.113.9", Some("192.168.1.5"), &proxied), "203.0.113.9");
+        assert_eq!(ca("2001:db8::66", Some("127.0.0.1, 10.0.0.1"), &proxied), "2001:db8::66");
+        assert!(!from_trusted_proxy(Some("203.0.113.9"), &proxied));
+        assert_eq!(ca("100.70.1.2", Some("192.168.1.5"), &proxied), "100.70.1.2");
+        assert_eq!(ca("172.17.0.1", Some("203.0.113.9"), &proxied), "203.0.113.9");
+        assert_eq!(ca("::ffff:172.17.0.1", Some("::ffff:198.51.100.7"), &proxied), "198.51.100.7");
+        assert_eq!(ca("172.17.0.1", Some("192.168.1.5, 203.0.113.9"), &proxied), "203.0.113.9");
+        assert_eq!(ca("127.0.0.1", Some("1.1.1.1, 203.0.113.9, 10.0.0.2"), &proxied), "203.0.113.9");
+        assert_eq!(ca("172.17.0.1", Some("192.168.1.20"), &proxied), "192.168.1.20");
+        assert_eq!(ca("172.17.0.1", Some("10.0.0.5, 192.168.1.20"), &proxied), "10.0.0.5");
+        let mut two = HeaderMap::new();
+        two.append("x-forwarded-for", "192.168.1.5".parse().unwrap());
+        two.append("x-forwarded-for", "203.0.113.9".parse().unwrap());
+        assert_eq!(client_address(Some("172.17.0.1"), &two, &proxied), "203.0.113.9");
+        assert_eq!(ca("172.17.0.1", None, &proxied), "172.17.0.1");
+        let odd = ca("172.17.0.1", Some("192.168.1.5, <evil>"), &proxied);
+        assert!(odd.starts_with("unknown("));
+        assert!(!home_matcher(false, &[]).check(&odd));
+        assert!(from_trusted_proxy(Some("172.17.0.1"), &proxied));
+        assert!(!from_trusted_proxy(Some("172.17.0.1"), &plain));
+        let o = Proxy { trust_proxy: true, trusted: proxy_matcher(Some("10.0.0.2, 100.64.0.0/10")).unwrap() };
+        assert_eq!(ca("10.0.0.2", Some("203.0.113.9"), &o), "203.0.113.9");
+        assert_eq!(ca("100.101.1.1", Some("203.0.113.9"), &o), "203.0.113.9");
+        assert_eq!(ca("127.0.0.1", Some("192.168.1.5"), &o), "127.0.0.1");
+        assert_eq!(ca("10.0.0.3", Some("8.8.8.8"), &o), "10.0.0.3");
+        assert!(proxy_matcher(Some("nonsense")).unwrap_err().contains("TRUSTED_PROXIES"));
+        let home = home_matcher(false, &[]);
+        assert!(home.check("192.168.1.5") && home.check("::ffff:10.1.1.1") && !home.check("100.101.1.1") && !home.check("203.0.113.9"));
+        let ts = home_matcher(true, &[]);
+        assert!(ts.check("100.101.1.1") && ts.check("fd7a:115c:a1e0::1234"));
+        let extra = home_matcher(false, &["198.51.100.0/24".into(), "2001:db8:aa::/48".into(), "203.0.113.77".into()]);
+        assert!(extra.check("198.51.100.200") && extra.check("2001:db8:aa:1::5") && extra.check("203.0.113.77") && !extra.check("203.0.113.78"));
+        assert_eq!(ban_key("2001:db8:1:2:aaaa::1"), "2001:db8:1:2::/64");
+        assert_eq!(ban_key("2001:db8:1:2:bbbb::9"), "2001:db8:1:2::/64");
+    }
+
     #[test]
     fn ban_keys() {
         assert_eq!(ban_key("::ffff:1.2.3.4"), "1.2.3.4");

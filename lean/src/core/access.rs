@@ -353,6 +353,117 @@ mod tests {
         assert_eq!(ok["home"]["extra"], json!(["203.0.113.0/24", "2001:db8::/48"]));
     }
 
+    /// test/access.test.js
+    #[test]
+    fn node_repeat_offenders() {
+        let clock = Arc::new(AtomicI64::new(1_794_225_600_000));
+        let (_db, a) = access(clock.clone());
+        a.set(&validate(&json!({ "bans": { "maxFailures": 3, "banMinutes": 60, "maxBanHours": 3 } }), &a.get()).unwrap());
+        let mut lengths = Vec::new();
+        for _ in 0..4 {
+            let mut b = None;
+            for _ in 0..3 {
+                b = a.fail("203.0.113.9", "wrong two-step code");
+            }
+            let b = b.unwrap();
+            lengths.push((b["until"].as_i64().unwrap() - b["at"].as_i64().unwrap()) / 60_000);
+            clock.store(b["until"].as_i64().unwrap() + 1, Ordering::SeqCst);
+        }
+        assert_eq!(lengths, vec![60, 120, 180, 180]);
+        clock.fetch_add(8 * 24 * 3_600_000, Ordering::SeqCst);
+        let mut b = None;
+        for _ in 0..3 {
+            b = a.fail("203.0.113.9", "x");
+        }
+        let b = b.unwrap();
+        assert_eq!((b["until"].as_i64().unwrap() - b["at"].as_i64().unwrap()) / 60_000, 60);
+    }
+
+    #[test]
+    fn node_home_exempt_and_off() {
+        let (_db, a) = access(Arc::new(AtomicI64::new(1_794_225_600_000)));
+        for _ in 0..30 {
+            assert!(a.fail("192.168.1.5", "wrong password").is_none());
+        }
+        a.set(&validate(&json!({ "bans": { "exemptHome": false } }), &a.get()).unwrap());
+        let mut b = None;
+        for _ in 0..10 {
+            b = a.fail("192.168.1.5", "wrong password");
+        }
+        assert!(b.is_some());
+        assert!(a.banned("192.168.1.5").is_some());
+        a.set(&validate(&json!({ "bans": { "exemptHome": true } }), &a.get()).unwrap());
+        assert!(a.banned("192.168.1.5").is_none());
+        a.set(&validate(&json!({ "home": { "extra": ["198.51.100.0/24"] } }), &a.get()).unwrap());
+        for _ in 0..20 {
+            assert!(a.fail("198.51.100.9", "x").is_none());
+        }
+        a.set(&validate(&json!({ "bans": { "enabled": false } }), &a.get()).unwrap());
+        for _ in 0..20 {
+            assert!(a.fail("203.0.113.50", "x").is_none());
+        }
+    }
+
+    #[test]
+    fn node_store_bounded() {
+        let (db, a) = access(Arc::new(AtomicI64::new(1_794_225_600_000)));
+        a.set(&validate(&json!({ "bans": { "maxFailures": 3 } }), &a.get()).unwrap());
+        for n in 0..2100 {
+            let ip = format!("198.18.{}.{}", n >> 8, n & 255);
+            for _ in 0..3 {
+                a.fail(&ip, "x");
+            }
+        }
+        assert!(db.get(KEY_BANS).unwrap().as_array().unwrap().len() <= 2000);
+        assert!(a.banned("198.18.8.51").is_some());
+    }
+
+    #[test]
+    fn node_validation() {
+        let cur = validate(&json!({}), &defaults()).unwrap();
+        assert_eq!(cur, defaults());
+        assert_eq!(validate(&json!({ "twoFactor": { "outside": true } }), &cur).unwrap()["bans"]["maxFailures"], 10);
+        let many: Vec<String> = (0..33).map(|i| format!("198.51.100.{i}")).collect();
+        for (bad, msg) in [
+            (json!({ "bans": { "maxFailures": 2 } }), "from 3 to 100"),
+            (json!({ "bans": { "maxFailures": 4.5 } }), "whole number"),
+            (json!({ "bans": { "windowMinutes": 0 } }), "from 1 to 1440"),
+            (json!({ "bans": { "banMinutes": 120, "maxBanHours": 1 } }), "cannot be shorter"),
+            (json!({ "bans": { "enabled": "yes" } }), "true or false"),
+            (json!({ "twoFactor": { "sometimes": true } }), "Unknown setting"),
+            (json!({ "other": {} }), "Unknown setting"),
+            (json!({ "home": { "extra": ["not-an-ip"] } }), "not an address"),
+            (json!({ "home": { "extra": ["0.0.0.0/0"] } }), "too wide"),
+            (json!({ "home": { "extra": ["::/0"] } }), "too wide"),
+            (json!({ "home": { "extra": many } }), "At most 32"),
+            (Value::Null, "object"),
+        ] {
+            let e = validate(&bad, &cur).unwrap_err();
+            assert!(e.message.contains(msg), "{bad}: {}", e.message);
+        }
+        let ok = validate(&json!({ "home": { "extra": "198.51.100.0/24\n2001:DB8::/48, 198.51.100.0/24 203.0.113.5/32" } }), &cur).unwrap();
+        assert_eq!(ok["home"]["extra"], json!(["198.51.100.0/24", "2001:db8::/48", "203.0.113.5"]));
+    }
+
+    #[test]
+    fn node_unban_audit_line() {
+        let db = Arc::new(Db::memory().unwrap());
+        let logger = super::super::log::Logger::with("debug", 100, true, None, 1);
+        let a = Access::new(db.clone(), Some(logger.scope("audit")));
+        for _ in 0..10 {
+            a.fail("2001:db8:5:6::1", "wrong password");
+        }
+        let line = logger.recent(1.0, "debug")[0].message.clone();
+        let re = regex::Regex::new(r"^Banned 2001:db8:5:6::/64 for 1 h \(until .*\) after 10 failed attempts in 60 min \(last: wrong password\)$").unwrap();
+        assert!(re.is_match(&line), "{line}");
+        let again = Access::new(db, Some(logger.scope("audit")));
+        assert!(again.banned("2001:db8:5:6:ffff::2").is_some());
+        assert_eq!(again.list()[0]["key"], "2001:db8:5:6::/64");
+        assert!(again.unban("203.0.113.1", "").unwrap_err().message.contains("not banned"));
+        again.unban("2001:db8:5:6::1", "admin from 192.168.1.5").unwrap();
+        assert_eq!(logger.recent(1.0, "debug")[0].message, "Unbanned 2001:db8:5:6::/64: admin from 192.168.1.5");
+    }
+
     #[test]
     fn bans_double_and_persist() {
         let clock = Arc::new(AtomicI64::new(1_000_000_000_000));
