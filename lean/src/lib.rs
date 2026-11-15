@@ -17,3 +17,4 @@ pub mod speeds;
 pub mod telemetry;
 pub mod thumbnails;
 pub mod supervisor;
+pub mod viewer;
