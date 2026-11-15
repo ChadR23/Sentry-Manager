@@ -6,6 +6,7 @@ pub mod app;
 pub mod arrival;
 pub mod catalog;
 pub mod converter;
+pub mod core;
 pub mod footage;
 pub mod inventory;
 pub mod jobs;

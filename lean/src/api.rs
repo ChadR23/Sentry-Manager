@@ -393,7 +393,7 @@ fn ops_route(app: &Arc<App>, method: &Method, path: &str, q: &HashMap<String, St
     b.body(Body::from(reply.body)).unwrap()
 }
 
-fn api(app: &Arc<App>, method: &Method, path: &str, q: &HashMap<String, String>, headers: &HeaderMap, body: &[u8]) -> Res {
+pub fn api(app: &Arc<App>, method: &Method, path: &str, q: &HashMap<String, String>, headers: &HeaderMap, body: &[u8]) -> Res {
     let seg: Vec<&str> = path.trim_start_matches("/api/").split('/').collect();
     let get = method == Method::GET || method == Method::HEAD;
     if method != Method::GET && method != Method::HEAD && headers.get("x-requested-with").and_then(|v| v.to_str().ok()) != Some("sentry-six-manager") {
@@ -452,7 +452,7 @@ fn not_found() -> Res {
     error(StatusCode::NOT_FOUND, "Not found")
 }
 
-fn web(app: &App, method: &Method, headers: &HeaderMap, p: &str) -> Res {
+pub fn web(app: &App, method: &Method, headers: &HeaderMap, p: &str) -> Res {
     let root = &app.app_root;
     let serve = |dir: PathBuf, rel: &str, cache: &str| media::serve_static(method, headers, &dir, rel, cache).unwrap_or_else(not_found);
     match p {
