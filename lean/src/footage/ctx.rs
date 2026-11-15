@@ -1,9 +1,9 @@
 //! What the footage area needs from the rest of the server (PORT_PLAN.md:
 //! areas are written against a small trait until `core/` lands; the
-//! coordinator then implements it on core's state). `LocalCore` is the
-//! stand-in until then: the manager database in DATA_PATH/manager.db with
+//! coordinator then implements it on core's state: `src/wire/footage.rs`).
+//! `LocalCore` is the tests' stand-in: a manager database of its own with
 //! the Node server's schema, logs on stderr, topics and jobs kept in memory
-//! and the database.
+//! and that database.
 
 use super::mdb::ManagerDb;
 use serde_json::Value;
@@ -199,9 +199,18 @@ pub trait Ctx: Send + Sync {
     }
     /// A vehicle was removed: the other areas forget it (savings, archive gaps, Sentry USB, nodes).
     fn vehicle_removed(&self, _vehicle_id: &str) {}
+    /// The green "CAN" tag (canFootage.js forVehicle): which recordings have CAN Bridge data;
+    /// None without the CAN area.
+    fn has_can(&self, _vehicle_id: &str) -> Option<Box<dyn Fn(&super::inventory::Recording) -> bool>> {
+        None
+    }
+    /// sentryUsb.api(id): Sentry USB's status file on the share (the day list's `sentryUsb`).
+    fn sentry_usb(&self, _vehicle_id: &str) -> Value {
+        serde_json::json!({ "present": false })
+    }
 }
 
-/// The stand-in core (see the top of this file).
+/// The tests' stand-in core (see the top of this file); the server uses core's state.
 pub struct LocalCore {
     db: ManagerDb,
     data: PathBuf,

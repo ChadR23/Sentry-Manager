@@ -1,14 +1,13 @@
-//! The HTTP side: the routes of server/index.js this slice answers, field
-//! for field; the pages and the ui area's routes go to ui/. Everything else under /api/ is
-//! "Not found", as on the Node server.
+//! The first slice's routes, field for field as server/index.js answers
+//! them: a vehicle's days, its recordings, one recording and its thumbnail,
+//! and /api/media (src/wire puts them in core's router). Also the
+//! percent-decoding every area uses.
 
 use crate::app::{App, Vehicle};
-use crate::footage;
 use crate::inventory::{self, num, Recording};
 use crate::media;
 use axum::body::Body;
-use axum::extract::State;
-use axum::http::{header, HeaderMap, Method, Request, Response, StatusCode};
+use axum::http::{header, HeaderMap, Method, Response, StatusCode};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -71,16 +70,6 @@ pub fn decode(s: &str, query: bool) -> Option<String> {
         }
     }
     if query { Some(String::from_utf8_lossy(&out).into_owned()) } else { String::from_utf8(out).ok() }
-}
-
-/// Object.fromEntries(url.searchParams): the last of a repeated key wins.
-fn query_of(q: Option<&str>) -> HashMap<String, String> {
-    let mut out = HashMap::new();
-    for pair in q.unwrap_or("").split('&').filter(|p| !p.is_empty()) {
-        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-        out.insert(decode(k, true).unwrap_or_default(), decode(v, true).unwrap_or_default());
-    }
-    out
 }
 
 /// JavaScript's Number(string): NaN as None.
@@ -176,20 +165,30 @@ fn days(app: &App, v: &Vehicle, q: &HashMap<String, String>) -> Res {
     let (offset, limit) = paging(q, 100.0, 30.0);
     let mut shown = slice(&all, offset, offset + limit);
     let wanted: Vec<String> = shown.iter().map(|d| d["day"].as_str().unwrap_or("").to_string()).collect();
-    let idx = match crate::viewer::get() {
-        Some(viewer) => viewer.speed_index.progress(&v.id, &wanted),
-        None => app.catalog.progress(&v.id, &wanted).unwrap_or_default(),
-    };
+    let idx = crate::viewer::get().map(|viewer| viewer.speed_index.progress(&v.id, &wanted)).unwrap_or_default();
+    // how many of each day's recordings have CAN Bridge data (the green "CAN" tag)
+    let has_can = app.core.has_can(&v.id);
+    let mut can_days: HashMap<&str, u64> = HashMap::new();
+    if let Some(f) = &has_can {
+        for r in &list {
+            if wanted.iter().any(|d| *d == r.day) && f(r) {
+                *can_days.entry(r.day.as_str()).or_insert(0) += 1;
+            }
+        }
+    }
     for d in &mut shown {
         let (clips, indexed) = idx.get(d["day"].as_str().unwrap_or("")).copied().unwrap_or((0, 0));
         d.insert("speedIndex".into(), json!({ "clips": clips, "indexed": indexed }));
         d.insert("archive".into(), Value::Null);
         d.insert("carFiles".into(), Value::Null);
-        // (no CAN Bridge data here: no recording has any)
-        d.insert("canRecordings".into(), json!(0));
+        if has_can.is_some() {
+            let n = can_days.get(d["day"].as_str().unwrap_or("")).copied().unwrap_or(0);
+            d.insert("canRecordings".into(), json!(n));
+        }
     }
     let mut out = Map::new();
-    out.insert("sentryUsb".into(), json!({ "present": false }));
+    // Sentry USB's status file on this share (as GET /api/vehicles/:id/sentry-usb)
+    out.insert("sentryUsb".into(), app.core.sentry_usb(&v.id));
     out.insert("total".into(), json!(all.len()));
     out.insert("recordings".into(), json!(all.iter().map(|d| d["recordings"].as_u64().unwrap_or(0)).sum::<u64>()));
     out.insert("offset".into(), num(offset));
@@ -218,6 +217,13 @@ fn recordings(app: &App, v: &Vehicle, q: &HashMap<String, String>) -> Res {
     state_fields(st.as_ref(), &mut out);
     out.insert("dates".into(), json!(dates(&recs)));
     let mut tagged: Vec<Map<String, Value>> = page.iter().map(|r| inventory::public(r, &codecs)).collect();
+    if let Some(has_can) = app.core.has_can(&v.id) {
+        for (t, r) in tagged.iter_mut().zip(page.iter()) {
+            if has_can(r) {
+                t.insert("can".into(), json!(true));
+            }
+        }
+    }
     if let Some(tags) = crate::viewer::get().and_then(|viewer| viewer.place_tags(&v.id, &page)) {
         for (t, extra) in tagged.iter_mut().zip(tags) {
             t.extend(extra);
@@ -270,23 +276,6 @@ fn recording(app: &App, v: &Vehicle, rid: &str) -> Res {
     ok(Value::Object(out))
 }
 
-fn speeds_status(app: &App) -> Res {
-    let s = app.speeds.lock().unwrap().clone();
-    ok(json!({ "running": s.running, "done": s.done, "total": s.total, "day": s.day, "finishedAt": s.finished_at.map(num),
-        "last": s.last, "limit": 1, "readMode": if s.finished_at.is_some() { json!("short") } else { Value::Null } }))
-}
-
-fn day_speeds(app: &App, v: &Vehicle, q: &HashMap<String, String>) -> Res {
-    let day = q.get("date").cloned().unwrap_or_default();
-    let mut out = Map::new();
-    if crate::footage::is_day_shape(&day) {
-        for (rel, sp) in app.catalog.day_speeds(&v.id, &day).unwrap_or_default() {
-            out.insert(join(&v.root, &rel), sp.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(Value::Null));
-        }
-    }
-    ok(json!({ "speeds": out }))
-}
-
 fn roots(app: &App) -> Vec<PathBuf> {
     app.vehicles.list().into_iter().map(|v| v.root).collect()
 }
@@ -320,191 +309,30 @@ fn thumbnail(app: &App, v: &Vehicle, rid: &str, method: &Method, headers: &Heade
     }
 }
 
-/// The ops area, on its stand-alone context (ops::lean) until core lands.
-pub fn ops_of(app: &Arc<App>) -> &'static Arc<crate::ops::Ops> {
-    static OPS: std::sync::OnceLock<Arc<crate::ops::Ops>> = std::sync::OnceLock::new();
-    OPS.get_or_init(|| {
-        let data = PathBuf::from(std::env::var("DATA_PATH").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/data".into()));
-        let ctx = crate::ops::lean::LeanCtx::open(app.clone(), &data).expect("manager.db");
-        crate::ops::Ops::new(ctx, Arc::new(crate::ops::net::Https), crate::ops::Ops::process_env())
-    })
-}
-
-fn ops_route(app: &Arc<App>, method: &Method, path: &str, q: &HashMap<String, String>, headers: &HeaderMap, body: &[u8]) -> Res {
-    let get = method == Method::GET || method == Method::HEAD;
-    if !get && headers.get("x-requested-with").and_then(|v| v.to_str().ok()) != Some("sentry-six-manager") {
-        return error(StatusCode::FORBIDDEN, "Missing X-Requested-With header.");
-    }
-    let json_body = if String::from_utf8_lossy(body).trim().is_empty() {
-        Value::Null
-    } else {
-        match serde_json::from_slice(body) {
-            Ok(v) => v,
-            Err(_) => return error(StatusCode::BAD_REQUEST, "Invalid JSON"),
-        }
-    };
-    // no accounts yet: the fixed local admin of /api/auth/me, never "confirmed"
-    // (the 🔑 routes wait for core's sign-in, which comes with HTTPS)
-    let caller = crate::ops::ctx::Caller { user: Some("local".into()), client: "127.0.0.1".into(), confirmed: false, https: false };
-    let auth = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok());
-    let r = crate::ops::Request { method: method.as_str(), path, query: q, body: &json_body, caller: &caller, authorization: auth };
-    let Some(reply) = ops_of(app).handle(&r) else { return error(StatusCode::NOT_FOUND, "Not found") };
-    let mut b = Response::builder().status(reply.status);
-    for (k, v) in &reply.headers {
-        b = b.header(k.as_str(), v.as_str());
-    }
-    if !reply.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("x-content-type-options")) {
-        b = b.header("X-Content-Type-Options", "nosniff");
-    }
-    b.body(Body::from(reply.body)).unwrap()
-}
-
-/// The footage area's routes (footage/routes.rs), as the router would answer them.
-fn footage_routes(app: &Arc<App>, method: &Method, seg: &[&str], q: &HashMap<String, String>, headers: &HeaderMap, body: Option<&Value>) -> Option<Res> {
-    // (router.js: each part decoded; one that does not decode matches no route)
-    let parts: Option<Vec<String>> = seg.iter().map(|s| decode(s, false)).collect();
-    let parts = parts?;
-    let refs: Vec<&str> = parts.iter().map(String::as_str).collect();
-    let m = if method == Method::HEAD { "GET" } else { method.as_str() };
-    // (no accounts yet: the one local admin, its password counted as given; see README.md)
-    let who = footage::ctx::Caller { user: Some("local".into()), client: "127.0.0.1".into(), admin_here: true, confirmed: true };
-    let answer = footage::routes::handle(app, &who, m, &refs, q, body)?;
-    Some(match answer {
-        Ok(footage::routes::Reply::Json(v)) => ok(v),
-        Ok(footage::routes::Reply::Thumbnail { file, clip }) => {
-            let roots = roots(app);
-            if !clip {
-                return Some(media::send_media(method, headers, &file, &roots));
-            }
-            match app.thumbnails.for_clip(&file) {
-                Ok(Some(t)) => media::send_media(method, headers, &t, std::slice::from_ref(&app.thumbnails.dir)),
-                Ok(None) => error(StatusCode::NOT_FOUND, "No thumbnail"),
-                Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "Internal error"),
-            }
-        }
-        Err(f) => {
-            let (status, v) = f.body();
-            json_response(StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), &v)
-        }
-    })
-}
-
-pub fn api(app: &Arc<App>, method: &Method, path: &str, q: &HashMap<String, String>, headers: &HeaderMap, body: &[u8]) -> Res {
-    let seg: Vec<&str> = path.trim_start_matches("/api/").split('/').collect();
-    let get = method == Method::GET || method == Method::HEAD;
-    if method != Method::GET && method != Method::HEAD && headers.get("x-requested-with").and_then(|v| v.to_str().ok()) != Some("sentry-six-manager") {
-        return error(StatusCode::FORBIDDEN, "Missing X-Requested-With header.");
-    }
-    if let Some(viewer) = crate::viewer::get() {
-        if let Some(res) = viewer.route(&crate::viewer::routes::Req { method, path, query: q, headers, body }) {
-            return res;
-        }
-    }
-    // http.js readJson: an empty body is none
-    let json_body: Option<Value> = if String::from_utf8_lossy(body).trim().is_empty() { None } else {
-        match serde_json::from_slice(body) { Ok(v) => Some(v), Err(_) => return error(StatusCode::BAD_REQUEST, "Invalid JSON") }
-    };
-    if let Some(r) = footage_routes(app, method, &seg, q, headers, json_body.as_ref()) {
-        return r;
-    }
-    let vehicle = |id: &str| app.vehicle(&decode(id, false).unwrap_or_default());
-    match (get, seg.as_slice()) {
-        (true, ["auth", "me"]) => ok(json!({ "user": "local", "role": "admin", "twoFactor": false, "needsSetup": false, "secure": false, "fingerprint": null })),
-        (_, ["vehicles", id, rest @ ..]) => {
-            let Some(v) = vehicle(id) else {
-                return if matches!((get, rest), (true, ["days"] | ["recordings"] | ["recordings", _] | ["recordings", _, "thumbnail"] | ["speeds"])) {
-                    error(StatusCode::NOT_FOUND, "No such vehicle.")
-                } else {
-                    error(StatusCode::NOT_FOUND, "Not found")
-                };
-            };
-            match (get, rest) {
-                (true, ["days"]) => days(app, &v, q),
-                (true, ["recordings"]) => recordings(app, &v, q),
-                (true, ["recordings", rid]) => recording(app, &v, &decode(rid, false).unwrap_or_default()),
-                (true, ["recordings", rid, "thumbnail"]) => thumbnail(app, &v, &decode(rid, false).unwrap_or_default(), method, headers),
-                (true, ["speeds"]) => day_speeds(app, &v, q),
-                _ => error(StatusCode::NOT_FOUND, "Not found"),
-            }
-        }
-        (true, ["speeds", "status"]) => speeds_status(app),
-        (true, ["media"]) => media(app, method, headers, q),
-        _ => error(StatusCode::NOT_FOUND, "Not found"),
-    }
-}
-
-/// One decoded, normalized path for every decision (no %2F tricks), as index.js.
-fn clean_path(raw: &str) -> Option<String> {
-    let p = decode(raw, false)?;
-    if p.contains('\0') || p.contains('\\') || p.contains("//") || p.split('/').any(|s| s == "." || s == "..") {
+/// The first slice's routes core sends here: a vehicle's days, recordings, one recording and
+/// its thumbnail (`raw_path`: as sent; each part is decoded as the router decodes params).
+/// None for any other path.
+pub fn slice_route(app: &Arc<App>, method: &Method, raw_path: &str, q: &HashMap<String, String>, headers: &HeaderMap) -> Option<Res> {
+    if method != Method::GET && method != Method::HEAD {
         return None;
     }
-    Some(p)
+    let parts: Vec<String> = raw_path.trim_start_matches("/api/").split('/').map(|s| decode(s, false)).collect::<Option<_>>()?;
+    let seg: Vec<&str> = parts.iter().map(String::as_str).collect();
+    let ["vehicles", id, rest @ ..] = seg.as_slice() else { return None };
+    if !matches!(rest, ["days"] | ["recordings"] | ["recordings", _] | ["recordings", _, "thumbnail"]) {
+        return None;
+    }
+    let Some(v) = app.vehicle(id) else { return Some(error(StatusCode::NOT_FOUND, "No such vehicle.")) };
+    Some(match rest {
+        ["days"] => days(app, &v, q),
+        ["recordings"] => recordings(app, &v, q),
+        ["recordings", rid] => recording(app, &v, rid),
+        ["recordings", rid, "thumbnail"] => thumbnail(app, &v, rid, method, headers),
+        _ => return None,
+    })
 }
 
-fn not_found() -> Res {
-    error(StatusCode::NOT_FOUND, "Not found")
-}
-
-pub fn web(app: &App, method: &Method, headers: &HeaderMap, p: &str) -> Res {
-    let root = &app.app_root;
-    let serve = |dir: PathBuf, rel: &str, cache: &str| media::serve_static(method, headers, &dir, rel, cache).unwrap_or_else(not_found);
-    match p {
-        "/" | "/index.html" => serve(root.join("web"), "index.html", "no-cache"),
-        "/login" => serve(root.join("web"), "login.html", "no-cache"),
-        "/login/code" => serve(root.join("web"), "login-code.html", "no-cache"),
-        "/healthz" => Response::builder().header(header::CONTENT_TYPE, "text/plain").header(header::CACHE_CONTROL, "no-store").body(Body::from("ok")).unwrap(),
-        "/studio" | "/studio/" => Response::builder().status(StatusCode::FOUND).header(header::LOCATION, "/studio/index.html").body(Body::empty()).unwrap(),
-        _ => {
-            let cache = if p.contains("/fonts/") { "public, max-age=604800" } else { "no-cache" };
-            if let Some(rel) = p.strip_prefix("/web/") {
-                serve(root.join("web"), rel, cache)
-            } else if let Some(rel) = p.strip_prefix("/studio/") {
-                serve(root.join("src/renderer"), rel, cache)
-            } else if let Some(rel) = p.strip_prefix("/shared/") {
-                serve(root.join("src/shared"), rel, cache)
-            } else if let Some(rel) = p.strip_prefix("/assets/") {
-                serve(root.join("assets"), rel, cache)
-            } else {
-                not_found()
-            }
-        }
-    }
-}
-
-pub async fn handle(State(app): State<Arc<App>>, req: Request<Body>) -> Res {
-    let method = req.method().clone();
-    let headers = req.headers().clone();
-    let raw = req.uri().path().to_string();
-    let q = query_of(req.uri().query());
-    let Some(p) = clean_path(&raw) else { return error(StatusCode::BAD_REQUEST, "Bad request") };
-    // the CAN area (src/can/): its routes, with their bodies
-    if crate::can::lean::owns(&raw) {
-        let body = match axum::body::to_bytes(req.into_body(), 17 * 1024 * 1024).await {
-            Ok(b) => b,
-            Err(_) => return error(StatusCode::PAYLOAD_TOO_LARGE, "That file is too large."),
-        };
-        let (a, m, r, qq, h) = (app.clone(), method.clone(), raw.clone(), q.clone(), headers.clone());
-        if let Ok(Some(res)) = tokio::task::spawn_blocking(move || crate::can::lean::handle(&a, &m, &r, &qq, &h, body)).await {
-            return res;
-        }
-    }
-    let body = if method == Method::GET || method == Method::HEAD {
-        bytes::Bytes::new()
-    } else {
-        match axum::body::to_bytes(req.into_body(), 1024 * 1024).await {
-            Ok(b) => b,
-            Err(_) => return error(StatusCode::PAYLOAD_TOO_LARGE, "Request body too large"),
-        }
-    };
-    // the ops area's routes (src/ops): notifications, health, stats, reports, ...
-    if crate::ops::access(method.as_str(), &p).is_some() {
-        return tokio::task::spawn_blocking(move || ops_route(&app, &method, &p, &q, &headers, &body))
-            .await
-            .unwrap_or_else(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "Internal error"));
-    }
-    // file work happens off the async threads
-    tokio::task::spawn_blocking(move || if p.starts_with("/api/") { api(&app, &method, &p, &q, &headers, &body) } else { web(&app, &method, &headers, &p) })
-        .await
-        .unwrap_or_else(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "Internal error"))
+/// /api/media: a clip's bytes with Range support, inside a vehicle's folder only.
+pub fn media_route(app: &App, method: &Method, headers: &HeaderMap, q: &HashMap<String, String>) -> Res {
+    media(app, method, headers, q)
 }

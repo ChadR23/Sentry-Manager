@@ -8,7 +8,9 @@
 //!
 //! Skipped (with a note) when node or ffmpeg is not installed.
 
-use sentry_lean::{mp4, sei, speeds, telemetry};
+use sentry_lean::viewer::speed_index::{speeds_for, summarize};
+use sentry_lean::viewer::{speed_reader::Mode, telemetry_api::Limiter};
+use sentry_lean::{mp4, sei, telemetry};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -49,7 +51,7 @@ fn rust_side(file: &Path) -> Value {
         Err(_) => error(),
     };
     let (samples, summary) = match sei::read_samples(file) {
-        Ok(Some(s)) => (serde_json::to_value(&s).unwrap(), speeds::summarize(&s)),
+        Ok(Some(s)) => (serde_json::to_value(&s).unwrap(), summarize(&s)),
         Ok(None) => (Value::Null, Value::Null),
         Err(_) => (error(), Value::Null),
     };
@@ -70,7 +72,7 @@ fn rust_side(file: &Path) -> Value {
         Ok(r) => json!(r.iter().map(|(t, rec)| json!([t, rec.iter().map(|b| format!("{b:02x}")).collect::<String>()])).collect::<Vec<_>>()),
         Err(_) => error(),
     };
-    let (sp, sum) = speeds::speeds_for(file, size);
+    let (sp, sum) = speeds_for(file, size, Mode::Short, &Limiter::new(|| 1));
     let index = json!([sp, sum]);
     json!({ "codec": codec, "samples": samples, "summary": summary, "speeds": speeds, "info": info, "records": records, "index": index })
 }

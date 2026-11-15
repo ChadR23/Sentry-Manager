@@ -14,12 +14,12 @@ pub mod mp4;
 pub mod nodes;
 pub mod ops;
 pub mod sei;
-pub mod speeds;
 pub mod telemetry;
 pub mod thumbnails;
 pub mod supervisor;
 pub mod ui;
 pub mod viewer;
+pub mod wire;
 
 // (moved into footage/; the old paths still work)
 pub use footage::{catalog, inventory, scanner};

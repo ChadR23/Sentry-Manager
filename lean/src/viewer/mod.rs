@@ -13,7 +13,7 @@ pub mod archive_gap;
 pub mod ctx;
 pub mod drive_data;
 pub mod drives;
-pub mod glue;
+
 pub mod js;
 pub mod pace;
 pub mod places;

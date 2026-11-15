@@ -8,10 +8,10 @@ use crate::scanner::{self, FileEntry};
 use crate::thumbnails::Thumbnails;
 use crate::footage::ctx::{Ctx, Fail, Level, Res};
 use crate::footage::vehicles::Vehicles;
-use crate::{footage, mp4, speeds};
+use crate::{footage, mp4};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 
 /// Clip codec reads at once (inventory.js limiter(8)); scan threads (scanner.js concurrency 16).
 const PROBE_THREADS: usize = 8;
@@ -40,16 +40,6 @@ pub struct VehicleState {
     pub started_at: f64,
 }
 
-#[derive(Default, Clone)]
-pub struct SpeedStatus {
-    pub running: bool,
-    pub done: usize,
-    pub total: usize,
-    pub day: Option<String>,
-    pub finished_at: Option<f64>,
-    pub last: usize,
-}
-
 pub struct App {
     pub vehicles: Arc<Vehicles>,
     /// what the footage area needs from core (footage/ctx.rs)
@@ -59,7 +49,6 @@ pub struct App {
     pub catalog: Catalog,
     pub jobs: Arc<Jobs>,
     pub state: RwLock<HashMap<String, VehicleState>>,
-    pub speeds: Mutex<SpeedStatus>,
     pub app_root: PathBuf,
     pub thumbnails: Thumbnails,
 }
@@ -152,7 +141,6 @@ impl App {
             catalog,
             jobs: Jobs::start(0),
             state: RwLock::new(HashMap::new()),
-            speeds: Mutex::new(SpeedStatus::default()),
             app_root,
             thumbnails,
         })
@@ -305,36 +293,6 @@ impl App {
                 self.core.announce("inventory");
             }
         }
-        let app = self.clone();
-        let id = vid.to_string();
-        // (the viewer area keeps the speed index in the Node server's day files when it runs)
-        if crate::viewer::get().is_none() {
-            self.jobs.submit(format!("speeds:{vid}"), Priority::Low, move || app.index_speeds(&id));
-        }
-    }
-
-    fn index_speeds(self: &Arc<Self>, vid: &str) {
-        let Some(v) = self.vehicle(vid) else { return };
-        {
-            let mut s = self.speeds.lock().unwrap();
-            s.running = true;
-            s.done = 0;
-            s.total = 0;
-            s.day = None;
-        }
-        let progress = |done: usize, total: usize, day: &str| {
-            let mut s = self.speeds.lock().unwrap();
-            s.done = done;
-            s.total = total;
-            s.day = Some(day.to_string());
-        };
-        let n = speeds::pass(&self.catalog, vid, &v.root, &progress).unwrap_or_else(|e| {
-            eprintln!("Speed index: {e}");
-            0
-        });
-        let mut s = self.speeds.lock().unwrap();
-        s.running = false;
-        s.finished_at = Some(scanner::now_ms());
-        s.last = n;
+        // (the speed index is the viewer area's: speeds in the Node server's day files)
     }
 }

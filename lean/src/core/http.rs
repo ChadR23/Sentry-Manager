@@ -170,7 +170,7 @@ impl Reply {
 }
 
 /// Whether this answer goes gzipped (http.js encodingFor: br or gzip accepted).
-fn accepts_compression(accept: &str) -> bool {
+pub fn accepts_compression(accept: &str) -> bool {
     let word = |w: &str| {
         accept.match_indices(w).any(|(i, _)| {
             let before = accept[..i].chars().next_back().is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_'));
@@ -268,6 +268,8 @@ pub struct ConnInfo {
     pub peer: Option<std::net::SocketAddr>,
     /// TLS on this connection
     pub encrypted: bool,
+    /// it came in on the device port (CAN_PORT), not the web port
+    pub device: bool,
 }
 
 impl ConnInfo {
@@ -390,6 +392,16 @@ pub struct WebReq {
 
 pub type WebFn = dyn Fn(WebReq) -> BoxFuture<'static, Res> + Send + Sync;
 
+/// An API path index.js answers by hand after the sign-in and CSRF checks, for any method
+/// (/api/media, /api/scrub, /api/converter/events, /api/ui-packs/upload): the checked
+/// request (`body` is None in `ctx`) and the body as it came.
+pub struct ApiRaw {
+    pub ctx: Ctx,
+    pub body: Body,
+}
+
+pub type ApiRawFn = dyn Fn(ApiRaw) -> BoxFuture<'static, Res> + Send + Sync;
+
 /// The routes of every area, and the special paths.
 #[derive(Clone, Default)]
 pub struct Router {
@@ -397,6 +409,8 @@ pub struct Router {
     /// exact paths and prefixes (ending in `/`) answered before any check; see RESERVED
     pub raw: Vec<(String, Arc<RawFn>)>,
     pub web: Option<Arc<WebFn>>,
+    /// decoded API paths answered by hand (see ApiRaw), before the router's routes
+    pub api_raw: Vec<(String, Arc<ApiRawFn>)>,
 }
 
 /// The paths core answers 404 for when no area has claimed them (index.js answers them before the host and session checks).
@@ -463,6 +477,16 @@ impl Router {
     pub fn raw(&mut self, path: &str, f: impl Fn(RawReq) -> BoxFuture<'static, Res> + Send + Sync + 'static) -> &mut Self {
         self.raw.push((path.to_string(), Arc::new(f)));
         self
+    }
+
+    /// An API path answered by hand after the sign-in and CSRF checks, any method (see ApiRaw).
+    pub fn api_raw(&mut self, path: &str, f: impl Fn(ApiRaw) -> BoxFuture<'static, Res> + Send + Sync + 'static) -> &mut Self {
+        self.api_raw.push((path.to_string(), Arc::new(f)));
+        self
+    }
+
+    pub fn api_raw_for(&self, path: &str) -> Option<Arc<ApiRawFn>> {
+        self.api_raw.iter().find(|(p, _)| p == path).map(|(_, f)| f.clone())
     }
 
     /// Pages and files (after the sign-in checks).

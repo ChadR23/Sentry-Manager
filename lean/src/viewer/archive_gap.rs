@@ -6,12 +6,11 @@
 //! quiet. The answer and the state kept between checks (`archive-gap:<vid>`)
 //! are Node's.
 //!
-//! Not here yet, as their areas have not landed: the CAN Bridge evidence (the
-//! CAN index), Sentry USB's status file, snapshots and list of what the car
-//! wrote, and the notifications (raised through `Ctx::raise_note`, which does
-//! nothing until the ops area lands). The analysis is then what Node gives a
-//! car without CAN logs and without a Sentry USB. A clip's arrival is its
-//! change time: the scan here keeps no birth time.
+//! Not here yet: the CAN Bridge evidence (the CAN index), Sentry USB's status
+//! file, snapshots and list of what the car wrote. The analysis is then what
+//! Node gives a car without CAN logs and without a Sentry USB. Notifications
+//! go through `Ctx::raise_note` (ops' notifications). A clip's arrival is its
+//! birth time where the share has one, else its change time (arrivalOf).
 
 use super::ctx::{Ctx, Files};
 use super::js::{self, num};
@@ -189,7 +188,7 @@ pub fn analyze(files: &Files, now_ms: f64, tz: &str, encoded: &HashSet<String>, 
         let name = f.rel.rsplit('/').next().unwrap_or(&f.rel);
         let Some(s) = stamp_sec(name) else { continue };
         let dir = f.rel.rfind('/').map_or(".", |i| &f.rel[..i]);
-        clips.push(C { rel: &f.rel, s, dir, recent: f.typ == "RecentClips", camera: f.camera.as_deref(), arrival: (f.ctime_ms > 0.0).then_some(f.ctime_ms), mtime: f.mtime_ms });
+        clips.push(C { rel: &f.rel, s, dir, recent: f.typ == "RecentClips", camera: f.camera.as_deref(), arrival: if f.birthtime_ms > 0.0 { Some(f.birthtime_ms) } else { (f.ctime_ms > 0.0).then_some(f.ctime_ms) }, mtime: f.mtime_ms });
     }
     let mut starts: Vec<f64> = clips.iter().map(|c| c.s).collect();
     starts.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -597,7 +596,7 @@ mod tests {
     fn files(list: &[(&str, &str, f64)]) -> Files {
         Arc::new(list.iter().map(|(rel, cam, arrival)| {
             let typ = if rel.contains("RecentClips") { "RecentClips" } else { "SavedClips" };
-            (rel.to_string(), FileEntry { rel: rel.to_string(), size: 100, mtime_ms: *arrival, ctime_ms: *arrival, kind: Kind::Clip, typ, day: rel.split('/').last().unwrap()[..10].into(), camera: Some(cam.to_string()), event_id: None })
+            (rel.to_string(), FileEntry { rel: rel.to_string(), size: 100, mtime_ms: *arrival, ctime_ms: *arrival, birthtime_ms: 0.0, kind: Kind::Clip, typ, day: rel.split('/').last().unwrap()[..10].into(), camera: Some(cam.to_string()), event_id: None })
         }).collect())
     }
 

@@ -9,7 +9,7 @@ use crate::viewer::testkit::{self, Car, Rec};
 
 fn entry(rel: &str, day: &str, size: u64, mtime: f64) -> (String, FileEntry) {
     let cam = if rel.contains("front") { Some("front".to_string()) } else { Some("back".to_string()) };
-    (rel.to_string(), FileEntry { rel: rel.into(), size, mtime_ms: mtime, ctime_ms: mtime, kind: Kind::Clip, typ: "RecentClips", day: day.into(), camera: cam, event_id: None })
+    (rel.to_string(), FileEntry { rel: rel.into(), size, mtime_ms: mtime, ctime_ms: mtime, birthtime_ms: 0.0, kind: Kind::Clip, typ: "RecentClips", day: day.into(), camera: cam, event_id: None })
 }
 
 fn set_files(car: &Car, list: Vec<(String, FileEntry)>) {

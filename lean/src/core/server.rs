@@ -341,7 +341,8 @@ async fn handle(state: Arc<AppState>, req: Request<Body>, conn: ConnInfo) -> Res
     if is_api {
         let m = router.find(&method, &raw_path);
         let is_events = p == "/api/events";
-        if m.is_none() && !is_events {
+        let by_hand = if m.is_none() { router.api_raw_for(&p) } else { None };
+        if m.is_none() && !is_events && by_hand.is_none() {
             return error_json(404, "Not found", None, &accept);
         }
         let public = m.as_ref().is_some_and(|(r, _)| r.access == super::http::Access::Public);
@@ -369,6 +370,10 @@ async fn handle(state: Arc<AppState>, req: Request<Body>, conn: ConnInfo) -> Res
                 .header("x-accel-buffering", "no")
                 .body(events::stream_body(sub))
                 .unwrap();
+        }
+        if let Some(f) = by_hand {
+            let ctx = Ctx { state: state.clone(), method: method.clone(), raw_path: raw_path.clone(), path: p, params: HashMap::new(), query, raw_query, headers, body: None, user, conn, client, secure };
+            return f(super::http::ApiRaw { ctx, body: req.into_body() }).await;
         }
         let (route, params) = m.unwrap();
         let route = route.clone();
@@ -482,7 +487,7 @@ pub async fn serve(state: Arc<AppState>) -> std::io::Result<()> {
             let (sock, peer) = listener.accept().await?;
             let st = state.clone();
             tokio::spawn(async move {
-                let conn = ConnInfo { peer: Some(peer), encrypted: false };
+                let conn = ConnInfo { peer: Some(peer), encrypted: false, device: false };
                 let mut b = hyper::server::conn::http1::Builder::new();
                 b.timer(hyper_util::rt::TokioTimer::new()).header_read_timeout(Duration::from_secs(120));
                 let _ = b.serve_connection(hyper_util::rt::TokioIo::new(sock), service(st, conn, false)).await;
@@ -544,10 +549,10 @@ pub async fn serve(state: Arc<AppState>) -> std::io::Result<()> {
             if first[0] == 0x16 {
                 let Some(cfg) = st.tls_config.read().unwrap().clone() else { return };
                 let Ok(Ok(tls)) = tokio::time::timeout(Duration::from_secs(15), tokio_rustls::TlsAcceptor::from(cfg).accept(sock)).await else { return };
-                let conn = ConnInfo { peer: Some(peer), encrypted: true };
+                let conn = ConnInfo { peer: Some(peer), encrypted: true, device: false };
                 let _ = auto_builder().serve_connection(hyper_util::rt::TokioIo::new(tls), service(st, conn, false)).await;
             } else {
-                let conn = ConnInfo { peer: Some(peer), encrypted: false };
+                let conn = ConnInfo { peer: Some(peer), encrypted: false, device: false };
                 let mut b = hyper::server::conn::http1::Builder::new();
                 b.timer(hyper_util::rt::TokioTimer::new()).header_read_timeout(Duration::from_secs(20));
                 let _ = b.serve_connection(hyper_util::rt::TokioIo::new(sock), service(st, conn, true)).await;
@@ -612,7 +617,7 @@ async fn device_listen(state: Arc<AppState>) {
                     let st = st.clone();
                     hyper::service::service_fn(move |req: Request<hyper::body::Incoming>| {
                         let st = st.clone();
-                        async move { Ok::<_, std::convert::Infallible>(device_request(st, req.map(Body::new), ConnInfo { peer: Some(peer), encrypted }).await) }
+                        async move { Ok::<_, std::convert::Infallible>(device_request(st, req.map(Body::new), ConnInfo { peer: Some(peer), encrypted, device: true }).await) }
                     })
                 }
             };

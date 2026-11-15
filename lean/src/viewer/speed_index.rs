@@ -11,7 +11,7 @@
 //! moments and the place search read (speeds.rs summarize).
 
 use super::ctx::{Ctx, Files};
-use super::js::{self, locale_cmp, num, r2};
+use super::js::{self, locale_cmp, num, r2, r5};
 use super::pace::Pace;
 use super::speed_reader::{self, Mode};
 use crate::footage::{is_day_shape, Kind};
@@ -179,6 +179,57 @@ fn now_of(files: Option<&Files>, rel: &str) -> Option<(f64, f64)> {
     files.and_then(|f| f.get(rel)).map(|f| (f.size as f64, js::js_round(f.mtime_ms)))
 }
 
+const GPS_EVERY: usize = 5;
+
+
+/// A clip's summary from its seconds (speedIndex.js summarize).
+pub fn summarize(samples: &[Option<Sample>]) -> Value {
+    let mut b: Option<(usize, f64)> = None;
+    let mut t: Option<(usize, f64)> = None;
+    let mut v: Option<(usize, f64)> = None;
+    let mut g = Vec::new();
+    for s in 0..samples.len() {
+        let Some(x) = samples[s] else { continue };
+        if let Some(xv) = x.v {
+            if v.map_or(true, |v| xv > v.1) {
+                v = Some((s, r2(xv)));
+            }
+        }
+        let n = samples.get(s + 1).copied().flatten();
+        let p = if s > 0 { samples[s - 1] } else { None };
+        let lost_next = match (x.v, n.and_then(|n| n.v)) {
+            (Some(a), Some(c)) => a - c,
+            _ => 0.0,
+        };
+        let lost_prev = match (x.v, p.and_then(|p| p.v)) {
+            (Some(a), Some(c)) => c - a,
+            _ => 0.0,
+        };
+        if x.v.is_some() && n.and_then(|n| n.v).is_some() && lost_next > 0.0 && b.map_or(true, |b| lost_next > b.1) {
+            b = Some((s, r2(lost_next)));
+        }
+        let dec = match x.ax {
+            Some(ax) if ax.is_finite() && ax < 0.0 => -ax,
+            _ => 0.0,
+        };
+        if dec > 0.0 && (lost_next > 0.3 || lost_prev > 0.3) && lost_next.max(lost_prev) >= 0.4 * dec && b.map_or(true, |b| dec > b.1) {
+            b = Some((s, r2(dec)));
+        }
+        if let Some(ay) = x.ay {
+            if t.map_or(true, |t| ay.abs() > t.1) {
+                t = Some((s, r2(ay.abs())));
+            }
+        }
+        if let (Some(lat), Some(lon)) = (x.lat, x.lon) {
+            if s % GPS_EVERY == 0 && (lat != 0.0 || lon != 0.0) && lat.abs() <= 90.0 && lon.abs() <= 180.0 {
+                g.push(json!([s, num(r5(lat)), num(r5(lon))]));
+            }
+        }
+    }
+    let pair = |p: Option<(usize, f64)>| p.map(|(s, x)| json!([s, num(x)]));
+    json!({ "b": pair(b), "t": pair(t), "v": pair(v), "g": g, "k": num(SUMMARY_VERSION) })
+}
+
 fn same(e: &Value, f: Option<(f64, f64)>) -> bool {
     matches!(f, Some((s, m)) if entry_num(e, 0) == Some(s) && entry_num(e, 1) == Some(m))
 }
@@ -189,7 +240,7 @@ pub fn speeds_for(real: &Path, size: u64, mode: Mode, full: &super::telemetry_ap
         Ok(None) => (Value::Null, Value::Null),
         Ok(Some(samples)) => {
             let speeds: Vec<Value> = samples.iter().map(|x| x.and_then(|x| x.v).map_or(Value::Null, |v| num(r2(v)))).collect();
-            (Value::Array(speeds), crate::speeds::summarize(&samples))
+            (Value::Array(speeds), summarize(&samples))
         }
         Err(err) => {
             let _slot = full.take();
@@ -197,7 +248,7 @@ pub fn speeds_for(real: &Path, size: u64, mode: Mode, full: &super::telemetry_ap
                 Ok(frames) => match crate::telemetry::speeds_of(&frames) {
                     Some(sp) => {
                         let samples: Vec<Option<Sample>> = sp.iter().map(|&v| Some(Sample { v, ..Sample::default() })).collect();
-                        (Value::Array(sp.iter().map(|v| v.map_or(Value::Null, num)).collect()), crate::speeds::summarize(&samples))
+                        (Value::Array(sp.iter().map(|v| v.map_or(Value::Null, num)).collect()), summarize(&samples))
                     }
                     None => (Value::Null, Value::Null),
                 },

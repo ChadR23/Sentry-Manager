@@ -5,18 +5,17 @@
 //! versioned links (/v/<version>/…), the critical-update bar, the early-data
 //! hint, the Studio translations, the /original switch, interface packs
 //! (Settings → Interface), exports (server/exporter.js) and the settings
-//! routes of the "Other" group (general settings, look, dashboards, work
-//! limits).
+//! routes of the "Other" group (general settings, look, dashboards; the work
+//! limits are the viewer area's, which applies them).
 //!
-//! What it needs from core is the small trait in `ctx.rs`; `local.rs`
-//! implements it for today's lean server.
+//! What it needs from core is the small trait in `ctx.rs`, implemented on
+//! core's state in `src/wire/ui.rs`.
 
 pub mod ctx;
 pub mod exporter;
 pub mod html;
 pub mod http;
 pub mod js;
-pub mod local;
 pub mod packs;
 pub mod settings;
 pub mod translations;
@@ -39,70 +38,7 @@ const PREFETCH_WINDOW_MS: u64 = 2000;
 const LOGIN_PAGES: [&str; 3] = ["login.html", "login-code.html", "login-two-factor.html"];
 const PUBLIC_STATIC: [&str; 8] = ["/web/s6/login.css", "/login", "/web/login.js", "/web/shell.css", "/web/icon.png", "/login/code", "/web/login-code.js", "/web/login-two-factor.js"];
 
-// ---- security headers (index.js securityHeaders)
-
-const MAP_HOSTS: &str = "https://tiles.openfreemap.org https://*.google.com";
-
-fn csp_with(script: &str, img: &str, connect: &str) -> String {
-    [
-        "default-src 'self'".to_string(),
-        format!("script-src {script}"),
-        "style-src 'self' 'unsafe-inline'".into(),
-        format!("img-src {img}"),
-        "media-src 'self' blob:".into(),
-        "font-src 'self' data:".into(),
-        format!("connect-src {connect}"),
-        "worker-src 'self' blob:".into(),
-        "frame-src 'self'".into(),
-        "frame-ancestors 'self'".into(),
-        "object-src 'none'".into(),
-        "base-uri 'self'".into(),
-        "form-action 'self'".into(),
-    ]
-    .join("; ")
-}
-
-/// The Content-Security-Policy for a path: the Studio pages (not the Encoder's) may
-/// eval and draw the map; the main page draws an interface pack's map; the rest neither.
-pub fn csp_for(raw_path: &str) -> String {
-    let page = raw_path.split('?').next().unwrap_or("");
-    if page.starts_with("/studio/") && page != ENCODER_PAGE {
-        csp_with("'self' 'unsafe-eval'", &format!("'self' data: blob: {MAP_HOSTS}"), &format!("'self' {MAP_HOSTS}"))
-    } else if page == "/" || page == "/index.html" {
-        csp_with("'self'", &format!("'self' data: blob: {MAP_HOSTS}"), &format!("'self' {MAP_HOSTS}"))
-    } else {
-        csp_with("'self'", "'self' data: blob:", "'self'")
-    }
-}
-
-/// securityHeaders on every answer of the main handler (an answer's own value wins, as
-/// writeHead's do over setHeader's).
-pub fn security_headers(raw_path: &str, h: &mut HeaderMap) {
-    let set = |h: &mut HeaderMap, k: &'static str, v: &str| {
-        if !h.contains_key(k) {
-            if let Ok(v) = HeaderValue::from_str(v) {
-                h.insert(k, v);
-            }
-        }
-    };
-    set(h, "x-content-type-options", "nosniff");
-    set(h, "referrer-policy", "no-referrer");
-    set(h, "x-frame-options", "SAMEORIGIN");
-    set(h, "cross-origin-opener-policy", "same-origin");
-    set(h, "cross-origin-resource-policy", "same-origin");
-    set(h, "permissions-policy", "camera=(), microphone=(), geolocation=(), usb=(), serial=(), payment=(), fullscreen=(self)");
-    set(h, "content-security-policy", &csp_for(raw_path));
-}
-
-/// /healthz: readable cross-origin (the plain-HTTP page checks the certificate with it).
-pub fn healthz(head: bool) -> Res {
-    Response::builder()
-        .header(header::CONTENT_TYPE, "text/plain")
-        .header(header::CACHE_CONTROL, "no-store")
-        .header("Cross-Origin-Resource-Policy", "cross-origin")
-        .body(if head { Body::empty() } else { Body::from("ok") })
-        .unwrap()
-}
+// (the security headers, CSP and /healthz are core's: core/http.rs security_headers, core/server.rs)
 
 /// parseCookies (server/auth.js): the first of a repeated name wins.
 pub fn parse_cookies(header: &str) -> HashMap<String, String> {
@@ -193,8 +129,6 @@ pub struct Ui {
     boot_id: String,
     prefetch: Arc<Mutex<Prefetch>>,
     original_zip: Mutex<Option<Arc<Vec<u8>>>>,
-    resources: settings::Resources,
-    work: Mutex<Value>,
 }
 
 fn list_of(v: Option<&Value>) -> Vec<String> {
@@ -235,8 +169,6 @@ impl Ui {
         let boot_id = cfg.build_sha.clone().unwrap_or_else(|| format!("start-{}", chrono::Utc::now().timestamp_millis()));
         // (index.js works out once at start whether the Viewer shows car data)
         ctx.viewer_car_data();
-        let resources = settings::detect_resources();
-        let work = settings::pick_limits(&resources, ctx.setting("work-limits").as_ref());
         Arc::new(Ui {
             translations: translations::Translations::new(cfg.app_root.join("src/renderer/scripts/data/translations.js")),
             cfg,
@@ -247,8 +179,6 @@ impl Ui {
             boot_id,
             prefetch: Arc::new(Mutex::new(prefetch)),
             original_zip: Mutex::new(None),
-            resources,
-            work: Mutex::new(work),
         })
     }
 
@@ -305,12 +235,18 @@ impl Ui {
             return;
         }
         let Some(h) = self.ctx.session_hash(&info) else { return };
+        self.note_start_call(&h, p, &req.search, &req.headers);
+    }
+
+    /// noteStartCall as core's request handler calls it (a signed-in GET under /api/ of the
+    /// session `h`): `p` the decoded path, `search` "?a=1" or "".
+    pub fn note_start_call(&self, h: &str, p: &str, search: &str, headers: &HeaderMap) {
         let mut g = self.prefetch.lock().unwrap();
-        let Some(l) = g.learning.get_mut(&h) else { return };
+        let Some(l) = g.learning.get_mut(h) else { return };
         if std::time::Instant::now() > l.until || l.urls.len() >= 20 {
             return;
         }
-        if req.header("sec-fetch-dest") != Some("empty") {
+        if headers.get("sec-fetch-dest").and_then(|v| v.to_str().ok()) != Some("empty") {
             return;
         }
         for skip in ["/api/events", "/api/media", "/api/scrub", "/api/converter/events"] {
@@ -320,7 +256,7 @@ impl Ui {
                 }
             }
         }
-        let u = format!("{p}{}", req.search);
+        let u = format!("{p}{search}");
         if !l.urls.contains(&u) {
             l.urls.push(u);
         }
@@ -534,7 +470,6 @@ impl Ui {
                 | ("GET", ["exports", _, "file"])
                 | ("GET", ["settings"])
                 | ("PUT", ["settings", "appearance"])
-                | ("GET" | "PUT", ["settings", "work-limits"])
                 | ("GET" | "PUT", ["dashboards"])
         );
         // (the upload is answered by hand: any method reaches it, as on the Node server)
@@ -543,19 +478,8 @@ impl Ui {
         }
         let h = &req.headers;
         let info = req.info();
+        // (core checked the session, the role, X-Requested-With and the origin before this)
         let Some(user) = self.ctx.user(&info) else { return Some(error(h, StatusCode::UNAUTHORIZED, "Sign in first.")) };
-        if m != Method::GET && m != Method::HEAD {
-            if req.header("x-requested-with") != Some("sentry-six-manager") {
-                return Some(error(h, StatusCode::FORBIDDEN, "Missing X-Requested-With header."));
-            }
-            if let Some(origin) = req.header("origin").filter(|o| *o != "null") {
-                let origin_host = origin.split_once("://").map(|(_, r)| r.split(['/', '?', '#']).next().unwrap_or("").to_lowercase());
-                let host = req.header("host").map(str::to_lowercase);
-                if origin_host.is_none() || origin_host != host {
-                    return Some(error(h, StatusCode::FORBIDDEN, "Cross-site request refused."));
-                }
-            }
-        }
         if p == "/api/ui-packs/upload" {
             return Some(self.upload(req));
         }
@@ -678,20 +602,6 @@ impl Ui {
                     ok(next)
                 }
                 Err(()) => self.internal(req, "appearance: not an object"),
-            },
-            ("GET", ["settings", "work-limits"]) => ok(self.work.lock().unwrap().clone()),
-            ("PUT", ["settings", "work-limits"]) => match settings::parse_override(body.as_ref()) {
-                Ok(next) => {
-                    let next = Value::Object(next);
-                    self.ctx.set_setting("work-limits", &next);
-                    let view = settings::pick_limits(&self.resources, Some(&next));
-                    *self.work.lock().unwrap() = view.clone();
-                    self.ctx.work_limits_changed(&view["limits"]);
-                    let what = next.as_object().filter(|o| !o.is_empty()).map_or("automatic".to_string(), |o| o.iter().map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join(", "));
-                    self.ctx.audit(Level::Info, &format!("Background work limits set to {what}: {}", self.by(req)));
-                    ok(view)
-                }
-                Err(e) => bad(&e),
             },
             ("GET", ["dashboards"]) => ok(settings::dashboards(self.ctx.setting(&format!("dash:{user}")), self.ctx.viewer_car_data())),
             ("PUT", ["dashboards"]) => match settings::clean_boards(body.as_ref()) {

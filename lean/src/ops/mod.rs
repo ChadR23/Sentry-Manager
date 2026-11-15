@@ -15,7 +15,7 @@ pub mod diag;
 pub mod gpu;
 pub mod health;
 pub mod js;
-pub mod lean;
+
 pub mod net;
 pub mod node_power;
 pub mod notes;

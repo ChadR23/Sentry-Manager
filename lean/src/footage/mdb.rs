@@ -1,7 +1,7 @@
 //! The parts of the manager database (server/db.js, the same schema and the
 //! same SQL) the footage area reads and writes: settings values (JSON text),
 //! the protected clips and the Recycle Bin items. The jobs table is here for
-//! LocalCore only (core owns it).
+//! the test stand-in only (core owns it in the server).
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
@@ -26,7 +26,13 @@ CREATE TABLE IF NOT EXISTS jobs (
 ";
 
 pub struct ManagerDb {
-    conn: Mutex<Connection>,
+    conn: Conn,
+}
+
+/// Its own connection (tests), or core's one connection to manager.db (the server).
+enum Conn {
+    Own(Mutex<Connection>),
+    Core(std::sync::Arc<crate::core::db::Db>),
 }
 
 /// One file of a bin item (db.js stores the list as JSON).
@@ -125,35 +131,47 @@ impl ManagerDb {
     fn with(conn: Connection) -> rusqlite::Result<ManagerDb> {
         conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;")?;
         conn.execute_batch(SCHEMA)?;
-        Ok(ManagerDb { conn: Mutex::new(conn) })
+        Ok(ManagerDb { conn: Conn::Own(Mutex::new(conn)) })
+    }
+
+    /// The server's: core's connection (core made these tables with the rest of db.js's schema).
+    pub fn of_core(db: std::sync::Arc<crate::core::db::Db>) -> ManagerDb {
+        ManagerDb { conn: Conn::Core(db) }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
+        match &self.conn {
+            Conn::Own(c) => c.lock().unwrap_or_else(|e| e.into_inner()),
+            Conn::Core(db) => db.conn(),
+        }
     }
 
     // ---- settings (db.js get / set / del)
     pub fn get(&self, key: &str) -> Option<Value> {
-        let c = self.conn.lock().unwrap();
+        let c = self.lock();
         let text: Option<String> = c.query_row("SELECT value FROM settings WHERE key = ?", [key], |r| r.get(0)).optional().ok().flatten();
         text.and_then(|t| serde_json::from_str(&t).ok())
     }
 
     pub fn set(&self, key: &str, value: &Value) {
-        let c = self.conn.lock().unwrap();
+        let c = self.lock();
         let _ = c.execute("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", params![key, value.to_string()]);
     }
 
     pub fn del(&self, key: &str) {
-        let c = self.conn.lock().unwrap();
+        let c = self.lock();
         let _ = c.execute("DELETE FROM settings WHERE key = ?", [key]);
     }
 
     // ---- protected clips
     pub fn protected_set(&self, vehicle: &str) -> HashSet<String> {
-        let c = self.conn.lock().unwrap();
+        let c = self.lock();
         let mut q = c.prepare_cached("SELECT rel FROM protected WHERE vehicle_id = ?").unwrap();
         q.query_map([vehicle], |r| r.get::<_, String>(0)).map(|rows| rows.flatten().collect()).unwrap_or_default()
     }
 
     pub fn set_protected(&self, vehicle: &str, rels: &[String], on: bool) {
-        let mut c = self.conn.lock().unwrap();
+        let mut c = self.lock();
         let Ok(tx) = c.transaction() else { return };
         for rel in rels {
             let _ = if on {
@@ -167,7 +185,7 @@ impl ManagerDb {
 
     // ---- recycle bin
     pub fn add_bin_item(&self, item: &BinItem) {
-        let c = self.conn.lock().unwrap();
+        let c = self.lock();
         let _ = c.execute(
             "INSERT INTO bin_items (id, vehicle_id, label, category, start_at, bytes, files, trashed_at, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             params![item.id, item.vehicle_id, item.label, item.category, item.start_at, item.bytes as i64, files_json(&item.files), item.trashed_at as i64, item.reason],
@@ -175,7 +193,7 @@ impl ManagerDb {
     }
 
     pub fn bin_items(&self, vehicle: Option<&str>) -> Vec<BinItem> {
-        let c = self.conn.lock().unwrap();
+        let c = self.lock();
         let rows = match vehicle {
             Some(v) => c.prepare_cached("SELECT * FROM bin_items WHERE vehicle_id = ? ORDER BY trashed_at DESC").and_then(|mut q| q.query_map([v], bin_row)?.collect()),
             None => c.prepare_cached("SELECT * FROM bin_items ORDER BY trashed_at DESC").and_then(|mut q| q.query_map([], bin_row)?.collect()),
@@ -184,29 +202,29 @@ impl ManagerDb {
     }
 
     pub fn bin_item(&self, id: &str) -> Option<BinItem> {
-        let c = self.conn.lock().unwrap();
+        let c = self.lock();
         c.query_row("SELECT * FROM bin_items WHERE id = ?", [id], bin_row).optional().ok().flatten()
     }
 
     pub fn remove_bin_item(&self, id: &str) {
-        let c = self.conn.lock().unwrap();
+        let c = self.lock();
         let _ = c.execute("DELETE FROM bin_items WHERE id = ?", [id]);
     }
 
     pub fn update_bin_files(&self, id: &str, files: &[BinFile], bytes: u64) {
-        let c = self.conn.lock().unwrap();
+        let c = self.lock();
         let _ = c.execute("UPDATE bin_items SET files = ?, bytes = ? WHERE id = ?", params![files_json(files), bytes as i64, id]);
     }
 
-    // ---- jobs (LocalCore only: db.js startJob / updateJob)
+    // ---- jobs (the test stand-in only: db.js startJob / updateJob; the server uses core's)
     pub fn job_start(&self, typ: &str, vehicle: Option<&str>, title: &str) -> i64 {
-        let c = self.conn.lock().unwrap();
+        let c = self.lock();
         let _ = c.execute("INSERT INTO jobs (type, vehicle_id, status, title, detail, started_at, external_id) VALUES (?, ?, 'running', ?, NULL, ?, NULL)", params![typ, vehicle, title, now_ms()]);
         c.last_insert_rowid()
     }
 
     pub fn job_finish(&self, id: i64, status: &str, detail: &str, result: Option<&Value>) {
-        let c = self.conn.lock().unwrap();
+        let c = self.lock();
         let _ = c.execute(
             "UPDATE jobs SET status = ?, detail = ?, result = COALESCE(?, result), finished_at = ? WHERE id = ?",
             params![status, detail, result.map(|r| r.to_string()), now_ms(), id],
@@ -215,7 +233,7 @@ impl ManagerDb {
 
     /// (tests) the jobs as (type, status, title, detail)
     pub fn jobs(&self) -> Vec<(String, String, String, Option<String>)> {
-        let c = self.conn.lock().unwrap();
+        let c = self.lock();
         let mut q = c.prepare("SELECT type, status, title, detail FROM jobs ORDER BY id").unwrap();
         q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).unwrap().flatten().collect()
     }

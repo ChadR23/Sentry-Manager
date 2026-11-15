@@ -1,12 +1,18 @@
-//! The footage catalog in SQLite (WAL): every file of the last scan, the
-//! folders' modified times (for light rescans), each clip's codec and the
-//! speed index. Only the manager's own data folder is written; the footage
-//! is only ever listed and read.
+//! The footage catalog (server/catalog.js) in the manager's database: every
+//! file of the last scan (`catalog_files`), the folders' modified times
+//! (`catalog_dirs`, for light rescans), the last finished scan
+//! (`catalog_scans`: the first scan after a restart starts from it) and each
+//! clip's codec (`clip_codecs`). The same tables, columns and FORMAT as Node,
+//! so either server resumes from the other's last scan. Only the manager's
+//! own data folder is written; the footage is only ever listed and read.
+//!
+//! It has its own connection to manager.db (WAL: the scan's writes do not
+//! hold up core's), and writes in batches as catalog.js does.
 
 use crate::footage::Kind;
 use crate::scanner::{FileEntry, Previous, ScanResult};
-use rusqlite::{params, Connection};
-use std::collections::HashMap;
+use rusqlite::{params, Connection, OptionalExtension};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -14,32 +20,18 @@ pub struct Catalog {
     db: Mutex<Connection>,
 }
 
-const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS files (
-  vehicle TEXT NOT NULL, rel TEXT NOT NULL, size INTEGER NOT NULL, mtime_ms REAL NOT NULL, ctime_ms REAL NOT NULL,
-  kind TEXT NOT NULL, type TEXT NOT NULL, day TEXT NOT NULL, camera TEXT, event_id TEXT,
-  PRIMARY KEY (vehicle, rel)) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS files_day ON files (vehicle, day);
-CREATE TABLE IF NOT EXISTS dirs (vehicle TEXT NOT NULL, rel TEXT NOT NULL, mtime_ms REAL NOT NULL, PRIMARY KEY (vehicle, rel)) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS codecs (vehicle TEXT NOT NULL, rel TEXT NOT NULL, size INTEGER NOT NULL, mtime_ms REAL NOT NULL, codec TEXT,
-  PRIMARY KEY (vehicle, rel)) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS speeds (vehicle TEXT NOT NULL, rel TEXT NOT NULL, day TEXT NOT NULL, size INTEGER NOT NULL, mtime INTEGER NOT NULL,
-  speeds TEXT, summary TEXT, PRIMARY KEY (vehicle, rel)) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS speeds_day ON speeds (vehicle, day);
-CREATE TABLE IF NOT EXISTS scans (vehicle TEXT PRIMARY KEY, root TEXT NOT NULL, started_ms REAL NOT NULL, files INTEGER NOT NULL, bytes INTEGER NOT NULL);
-";
+/// catalog.js FORMAT: what a scan row vouches for (Node's rows and these are the same).
+const FORMAT: i64 = 1;
+/// rows per transaction (catalog.js BATCH)
+const BATCH: usize = 1000;
 
-const INSERT_FILE: &str = "INSERT INTO files (vehicle, rel, size, mtime_ms, ctime_ms, kind, type, day, camera, event_id, birthtime_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)";
+const UPSERT_FILE: &str = "INSERT INTO catalog_files (vehicle_id, rel, size, mtime_ms, ctime_ms, birthtime_ms, kind, type, day, camera, event_id)
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+      ON CONFLICT(vehicle_id, rel) DO UPDATE SET size = excluded.size, mtime_ms = excluded.mtime_ms, ctime_ms = excluded.ctime_ms,
+        birthtime_ms = excluded.birthtime_ms, kind = excluded.kind, type = excluded.type, day = excluded.day, camera = excluded.camera,
+        event_id = excluded.event_id";
 
 pub type CodecMap = HashMap<String, (u64, f64, Option<String>)>;
-
-/// A front-camera clip for the speed index.
-pub struct Front {
-    pub day: String,
-    pub rel: String,
-    pub size: u64,
-    pub mtime: i64,
-}
 
 fn type_of(s: &str) -> &'static str {
     match s {
@@ -50,34 +42,107 @@ fn type_of(s: &str) -> &'static str {
     }
 }
 
+struct LastScan {
+    format: i64,
+    root: String,
+    started_ms: f64,
+    scanned_at: f64,
+    files: i64,
+    bytes: i64,
+}
+
 impl Catalog {
+    /// `path`: DATA_PATH/manager.db (the tables are made as catalog.js makes them when missing).
     pub fn open(path: &Path) -> rusqlite::Result<Catalog> {
         let db = Connection::open(path)?;
         db.pragma_update(None, "journal_mode", "WAL")?;
         db.pragma_update(None, "synchronous", "NORMAL")?;
+        db.busy_timeout(std::time::Duration::from_secs(10))?;
         // a small page cache: the catalog is read in a few big queries
         db.pragma_update(None, "cache_size", -2000)?;
-        db.execute_batch(SCHEMA)?;
-        // (added later: a catalog from before has the column made, 0 until the next scan)
-        let _ = db.execute_batch("ALTER TABLE files ADD COLUMN birthtime_ms REAL NOT NULL DEFAULT 0");
+        db.execute_batch(crate::core::db::CATALOG_SCHEMA)?;
         Ok(Catalog { db: Mutex::new(db) })
     }
 
-    /// What the last scan of a vehicle found, for a light rescan and for start-up.
+    fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.db.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// catalog.js each: the list in transactions of BATCH rows.
+    fn each<T>(&self, list: &[T], sql: &str, f: impl Fn(&mut rusqlite::Statement, &T) -> rusqlite::Result<()>) -> rusqlite::Result<()> {
+        for part in list.chunks(BATCH) {
+            let mut c = self.conn();
+            let tx = c.transaction()?;
+            {
+                let mut st = tx.prepare_cached(sql)?;
+                for x in part {
+                    f(&mut st, x)?;
+                }
+            }
+            tx.commit()?;
+        }
+        Ok(())
+    }
+
+    fn put_files(&self, vehicle: &str, files: &[&FileEntry]) -> rusqlite::Result<()> {
+        self.each(files, UPSERT_FILE, |st, f| {
+            st.execute(params![vehicle, f.rel, f.size as i64, f.mtime_ms, f.ctime_ms, f.birthtime_ms, f.kind.as_str(), f.typ, f.day, f.camera, f.event_id]).map(|_| ())
+        })
+    }
+
+    fn remove_files(&self, vehicle: &str, rels: &[String]) -> rusqlite::Result<()> {
+        self.each(rels, "DELETE FROM catalog_files WHERE vehicle_id = ?1 AND rel = ?2", |st, rel| st.execute(params![vehicle, rel]).map(|_| ()))
+    }
+
+    fn rels(&self, vehicle: &str) -> rusqlite::Result<HashSet<String>> {
+        let c = self.conn();
+        let mut q = c.prepare("SELECT rel FROM catalog_files WHERE vehicle_id = ?1")?;
+        let rows = q.query_map([vehicle], |r| r.get::<_, String>(0))?;
+        rows.collect()
+    }
+
+    fn invalidate(&self, vehicle: &str) -> rusqlite::Result<()> {
+        self.conn().execute("DELETE FROM catalog_scans WHERE vehicle_id = ?1", [vehicle]).map(|_| ())
+    }
+
+    fn totals(&self, vehicle: &str) -> rusqlite::Result<(i64, i64)> {
+        self.conn().query_row("SELECT COUNT(*), COALESCE(SUM(size), 0) FROM catalog_files WHERE vehicle_id = ?1", [vehicle], |r| Ok((r.get(0)?, r.get(1)?)))
+    }
+
+    fn mark_scan(&self, vehicle: &str, root: &str, started_ms: f64, scanned_at: f64) -> rusqlite::Result<()> {
+        let (files, bytes) = self.totals(vehicle)?;
+        self.conn().execute(
+            "INSERT INTO catalog_scans (vehicle_id, format, root, started_ms, scanned_at, files, bytes) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(vehicle_id) DO UPDATE SET format = excluded.format, root = excluded.root, started_ms = excluded.started_ms,
+               scanned_at = excluded.scanned_at, files = excluded.files, bytes = excluded.bytes",
+            params![vehicle, FORMAT, root, started_ms, scanned_at, files, bytes],
+        )?;
+        Ok(())
+    }
+
+    fn last_scan(&self, vehicle: &str) -> rusqlite::Result<Option<LastScan>> {
+        self.conn()
+            .query_row("SELECT format, root, started_ms, scanned_at, files, bytes FROM catalog_scans WHERE vehicle_id = ?1", [vehicle], |r| {
+                Ok(LastScan { format: r.get(0)?, root: r.get(1)?, started_ms: r.get(2)?, scanned_at: r.get(3)?, files: r.get(4)?, bytes: r.get(5)? })
+            })
+            .optional()
+    }
+
+    /// Every file and folder the catalog has for a vehicle.
     pub fn previous(&self, vehicle: &str) -> rusqlite::Result<Previous> {
-        let db = self.db.lock().unwrap();
+        let c = self.conn();
         let mut prev = Previous::default();
-        let mut q = db.prepare("SELECT rel, size, mtime_ms, ctime_ms, kind, type, day, camera, event_id, birthtime_ms FROM files WHERE vehicle = ?1")?;
+        let mut q = c.prepare("SELECT rel, size, mtime_ms, ctime_ms, kind, type, day, camera, event_id, birthtime_ms FROM catalog_files WHERE vehicle_id = ?1")?;
         let rows = q.query_map([vehicle], |r| {
             Ok(FileEntry {
                 rel: r.get(0)?,
                 size: r.get::<_, i64>(1)? as u64,
                 mtime_ms: r.get(2)?,
-                ctime_ms: r.get(3)?,
-                birthtime_ms: r.get(9)?,
+                ctime_ms: r.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
+                birthtime_ms: r.get::<_, Option<f64>>(9)?.unwrap_or(0.0),
                 kind: if r.get::<_, String>(4)? == "clip" { Kind::Clip } else { Kind::Asset },
-                typ: type_of(&r.get::<_, String>(5)?),
-                day: r.get(6)?,
+                typ: type_of(&r.get::<_, Option<String>>(5)?.unwrap_or_default()),
+                day: r.get::<_, Option<String>>(6)?.unwrap_or_default(),
                 camera: r.get(7)?,
                 event_id: r.get(8)?,
             })
@@ -86,7 +151,7 @@ impl Catalog {
             let f = f?;
             prev.files.insert(f.rel.clone(), f);
         }
-        let mut q = db.prepare("SELECT rel, mtime_ms FROM dirs WHERE vehicle = ?1")?;
+        let mut q = c.prepare("SELECT rel, mtime_ms FROM catalog_dirs WHERE vehicle_id = ?1")?;
         for d in q.query_map([vehicle], |r| Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?)))? {
             let (rel, m) = d?;
             prev.dirs.insert(rel, m);
@@ -95,159 +160,79 @@ impl Catalog {
     }
 
     /// What the last finished scan of this root knew, for the first scan after a restart
-    /// (catalog.js resume): None for another root, or rows that do not add up to that scan.
+    /// (catalog.js resume): None for another root or format, or rows that do not add up to that scan.
     pub fn resume(&self, vehicle: &str, root: &str) -> rusqlite::Result<Option<Previous>> {
-        let row: Option<(String, f64, i64, i64)> = {
-            let db = self.db.lock().unwrap();
-            let mut q = db.prepare("SELECT root, started_ms, files, bytes FROM scans WHERE vehicle = ?1")?;
-            let mut rows = q.query_map([vehicle], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
-            rows.next().transpose()?
-        };
-        let Some((at, started, files, bytes)) = row else { return Ok(None) };
-        if at != root {
+        let Some(last) = self.last_scan(vehicle)? else { return Ok(None) };
+        if last.format != FORMAT || last.root != root {
+            return Ok(None);
+        }
+        if self.totals(vehicle)? != (last.files, last.bytes) {
             return Ok(None);
         }
         let mut prev = self.previous(vehicle)?;
-        if prev.files.len() as i64 != files || prev.files.values().map(|f| f.size as i64).sum::<i64>() != bytes || prev.dirs.is_empty() {
+        if prev.dirs.is_empty() {
             return Ok(None);
         }
-        prev.started_ms = Some(started);
+        prev.started_ms = Some(last.started_ms);
         Ok(Some(prev))
     }
 
-    /// Replace a vehicle's files and folders with a scan's of `root`.
+    /// A finished scan of `root`: its files (only what changed is written), its folders
+    /// and the scan row, written last (inventory.js and catalog.js putScan).
     pub fn save_scan(&self, vehicle: &str, root: &str, scan: &ScanResult) -> rusqlite::Result<()> {
-        let mut db = self.db.lock().unwrap();
-        let tx = db.transaction()?;
-        tx.execute("DELETE FROM files WHERE vehicle = ?1", [vehicle])?;
-        tx.execute("DELETE FROM dirs WHERE vehicle = ?1", [vehicle])?;
-        tx.execute("DELETE FROM scans WHERE vehicle = ?1", [vehicle])?;
-        {
-            let mut ins = tx.prepare(INSERT_FILE)?;
-            for f in &scan.files {
-                ins.execute(params![vehicle, f.rel, f.size as i64, f.mtime_ms, f.ctime_ms, f.kind.as_str(), f.typ, f.day, f.camera, f.event_id, f.birthtime_ms])?;
-            }
-            let mut ins = tx.prepare("INSERT INTO dirs VALUES (?1, ?2, ?3)")?;
-            for (rel, m) in &scan.dirs {
-                ins.execute(params![vehicle, rel, m])?;
-            }
-            let bytes: i64 = scan.files.iter().map(|f| f.size as i64).sum();
-            tx.execute("INSERT INTO scans VALUES (?1, ?2, ?3, ?4, ?5)", params![vehicle, root, scan.started_at, scan.files.len() as i64, bytes])?;
-        }
-        tx.commit()
+        // (the scan row goes first and comes back last: a write that stops halfway leaves none)
+        self.invalidate(vehicle)?;
+        let known = self.previous(vehicle)?;
+        let present: HashSet<&str> = scan.files.iter().map(|f| f.rel.as_str()).collect();
+        let gone: Vec<String> = known.files.keys().filter(|r| !present.contains(r.as_str())).cloned().collect();
+        let changed: Vec<&FileEntry> = scan.files.iter().filter(|f| known.files.get(&f.rel).is_none_or(|k| !same_entry(k, f))).collect();
+        self.remove_files(vehicle, &gone)?;
+        self.put_files(vehicle, &changed)?;
+        self.conn().execute("DELETE FROM catalog_dirs WHERE vehicle_id = ?1", [vehicle])?;
+        let dirs: Vec<(&String, &f64)> = scan.dirs.iter().collect();
+        self.each(&dirs, "INSERT INTO catalog_dirs (vehicle_id, rel, mtime_ms) VALUES (?1, ?2, ?3)", |st, (rel, m)| st.execute(params![vehicle, rel, m]).map(|_| ()))?;
+        self.mark_scan(vehicle, root, scan.started_at, scan.scanned_at)
     }
 
     /// The files moved without a scan (Recycle Bin, restore): the rows follow the inventory's
     /// files, and the scan row its totals (catalog.js syncFiles).
     pub fn sync_files(&self, vehicle: &str, files: &[FileEntry]) -> rusqlite::Result<()> {
-        let mut db = self.db.lock().unwrap();
-        let tx = db.transaction()?;
-        let have: std::collections::HashSet<String> = {
-            let mut q = tx.prepare("SELECT rel FROM files WHERE vehicle = ?1")?;
-            let rows = q.query_map([vehicle], |r| r.get::<_, String>(0))?;
-            rows.collect::<rusqlite::Result<_>>()?
-        };
-        let now: std::collections::HashSet<&str> = files.iter().map(|f| f.rel.as_str()).collect();
-        {
-            let mut del = tx.prepare("DELETE FROM files WHERE vehicle = ?1 AND rel = ?2")?;
-            for rel in have.iter().filter(|r| !now.contains(r.as_str())) {
-                del.execute(params![vehicle, rel])?;
-            }
-            let mut ins = tx.prepare(INSERT_FILE)?;
-            for f in files.iter().filter(|f| !have.contains(&f.rel)) {
-                ins.execute(params![vehicle, f.rel, f.size as i64, f.mtime_ms, f.ctime_ms, f.kind.as_str(), f.typ, f.day, f.camera, f.event_id, f.birthtime_ms])?;
-            }
-            let bytes: i64 = files.iter().map(|f| f.size as i64).sum();
-            tx.execute("UPDATE scans SET files = ?2, bytes = ?3 WHERE vehicle = ?1", params![vehicle, files.len() as i64, bytes])?;
+        let have = self.rels(vehicle)?;
+        let now: HashSet<&str> = files.iter().map(|f| f.rel.as_str()).collect();
+        let gone: Vec<String> = have.iter().filter(|r| !now.contains(r.as_str())).cloned().collect();
+        let added: Vec<&FileEntry> = files.iter().filter(|f| !have.contains(&f.rel)).collect();
+        if gone.is_empty() && added.is_empty() {
+            return Ok(());
         }
-        tx.commit()
+        let last = self.last_scan(vehicle)?;
+        self.invalidate(vehicle)?;
+        self.remove_files(vehicle, &gone)?;
+        self.put_files(vehicle, &added)?;
+        if let Some(l) = last.filter(|l| l.format == FORMAT) {
+            self.mark_scan(vehicle, &l.root, l.started_ms, l.scanned_at)?;
+        }
+        Ok(())
     }
 
     /// The clip codecs read so far: rel -> (size, mtime, codec).
     pub fn codecs(&self, vehicle: &str) -> rusqlite::Result<CodecMap> {
-        let db = self.db.lock().unwrap();
-        let mut q = db.prepare("SELECT rel, size, mtime_ms, codec FROM codecs WHERE vehicle = ?1")?;
+        let c = self.conn();
+        let mut q = c.prepare("SELECT rel, size, mtime_ms, codec FROM clip_codecs WHERE vehicle_id = ?1")?;
         let rows = q.query_map([vehicle], |r| Ok((r.get::<_, String>(0)?, (r.get::<_, i64>(1)? as u64, r.get::<_, f64>(2)?, r.get::<_, Option<String>>(3)?))))?;
         rows.collect()
     }
 
     pub fn update_codecs(&self, vehicle: &str, set: &[(String, u64, f64, Option<String>)], gone: &[String]) -> rusqlite::Result<()> {
-        let mut db = self.db.lock().unwrap();
-        let tx = db.transaction()?;
-        {
-            let mut del = tx.prepare("DELETE FROM codecs WHERE vehicle = ?1 AND rel = ?2")?;
-            for rel in gone {
-                del.execute(params![vehicle, rel])?;
-            }
-            let mut ins = tx.prepare("INSERT OR REPLACE INTO codecs VALUES (?1, ?2, ?3, ?4, ?5)")?;
-            for (rel, size, m, codec) in set {
-                ins.execute(params![vehicle, rel, *size as i64, m, codec])?;
-            }
-        }
-        tx.commit()
+        self.each(gone, "DELETE FROM clip_codecs WHERE vehicle_id = ?1 AND rel = ?2", |st, rel| st.execute(params![vehicle, rel]).map(|_| ()))?;
+        self.each(
+            set,
+            "INSERT INTO clip_codecs (vehicle_id, rel, size, mtime_ms, codec) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(vehicle_id, rel) DO UPDATE SET size = excluded.size, mtime_ms = excluded.mtime_ms, codec = excluded.codec",
+            |st, (rel, size, m, codec)| st.execute(params![vehicle, rel, *size as i64, m, codec]).map(|_| ()),
+        )
     }
+}
 
-    /// Front-camera clips with a size, newest day first (speedIndex.js fronts), with
-    /// whether the index already has them as they are now.
-    pub fn fronts(&self, vehicle: &str) -> rusqlite::Result<Vec<(Front, bool)>> {
-        let db = self.db.lock().unwrap();
-        let mut q = db.prepare(
-            "SELECT f.day, f.rel, f.size, f.mtime_ms, s.size, s.mtime FROM files f
-             LEFT JOIN speeds s ON s.vehicle = f.vehicle AND s.rel = f.rel
-             WHERE f.vehicle = ?1 AND f.kind = 'clip' AND f.camera = 'front' AND f.size > 0",
-        )?;
-        let rows = q.query_map([vehicle], |r| {
-            let mtime = crate::sei::js_round(r.get::<_, f64>(3)?) as i64;
-            let size = r.get::<_, i64>(2)? as u64;
-            let had = r.get::<_, Option<i64>>(4)? == Some(size as i64) && r.get::<_, Option<i64>>(5)? == Some(mtime);
-            Ok((Front { day: r.get(0)?, rel: r.get(1)?, size, mtime }, had))
-        })?;
-        let mut out: Vec<(Front, bool)> = rows.collect::<rusqlite::Result<_>>()?;
-        out.retain(|(f, _)| crate::footage::is_day_shape(&f.day));
-        out.sort_by(|(a, _), (b, _)| if a.day == b.day { b.rel.cmp(&a.rel) } else { b.day.cmp(&a.day) });
-        Ok(out)
-    }
-
-    pub fn put_speeds(&self, vehicle: &str, f: &Front, speeds: Option<&str>, summary: Option<&str>) -> rusqlite::Result<()> {
-        let db = self.db.lock().unwrap();
-        db.execute("INSERT OR REPLACE INTO speeds VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", params![vehicle, f.rel, f.day, f.size as i64, f.mtime, speeds, summary])?;
-        Ok(())
-    }
-
-    /// How far each day is indexed: day -> (front clips, indexed).
-    pub fn progress(&self, vehicle: &str, days: &[String]) -> rusqlite::Result<HashMap<String, (u64, u64)>> {
-        let mut out = HashMap::new();
-        for (f, had) in self.fronts(vehicle)? {
-            if days.contains(&f.day) {
-                let e = out.entry(f.day).or_insert((0, 0));
-                e.0 += 1;
-                if had {
-                    e.1 += 1;
-                }
-            }
-        }
-        Ok(out)
-    }
-
-    /// A day's indexed speeds (the clip as it is now): rel -> speeds JSON (or None).
-    pub fn day_speeds(&self, vehicle: &str, day: &str) -> rusqlite::Result<Vec<(String, Option<String>)>> {
-        let db = self.db.lock().unwrap();
-        let mut q = db.prepare(
-            "SELECT s.rel, s.speeds, s.size, s.mtime, f.size, f.mtime_ms FROM speeds s
-             JOIN files f ON f.vehicle = s.vehicle AND f.rel = s.rel
-             WHERE s.vehicle = ?1 AND s.day = ?2",
-        )?;
-        let rows = q.query_map(params![vehicle, day], |r| {
-            let same = r.get::<_, i64>(2)? == r.get::<_, i64>(4)? && r.get::<_, i64>(3)? == crate::sei::js_round(r.get::<_, f64>(5)?) as i64;
-            Ok((same, r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
-        })?;
-        let mut out = Vec::new();
-        for row in rows {
-            let (same, rel, sp) = row?;
-            if same {
-                out.push((rel, sp));
-            }
-        }
-        Ok(out)
-    }
+fn same_entry(a: &FileEntry, b: &FileEntry) -> bool {
+    a.size == b.size && a.mtime_ms == b.mtime_ms && a.ctime_ms == b.ctime_ms && a.birthtime_ms == b.birthtime_ms && a.kind == b.kind && a.typ == b.typ && a.day == b.day && a.camera == b.camera && a.event_id == b.event_id
 }

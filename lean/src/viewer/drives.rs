@@ -209,7 +209,7 @@ mod tests {
         for (folder, stamp) in list {
             let rel = format!("TeslaCam/{folder}/{stamp}-front.mp4");
             let c = crate::footage::classify(&rel).unwrap();
-            files.push(FileEntry { rel, size: 10, mtime_ms: 0.0, ctime_ms: 0.0, kind: c.kind, typ: c.typ, day: c.day.unwrap_or_else(|| stamp[..10].into()), camera: c.camera, event_id: c.event_id });
+            files.push(FileEntry { rel, size: 10, mtime_ms: 0.0, ctime_ms: 0.0, birthtime_ms: 0.0, kind: c.kind, typ: c.typ, day: c.day.unwrap_or_else(|| stamp[..10].into()), camera: c.camera, event_id: c.event_id });
         }
         crate::inventory::build_recordings(&files, "v1")
     }
