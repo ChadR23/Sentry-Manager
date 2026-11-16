@@ -164,9 +164,10 @@ pub struct EncodeArgs<'a> {
     pub cpu_preset: Option<&'a str>,
 }
 
-/// buildEncodeArgs
+/// buildEncodeArgs (cpuPreset defaults to CPU_ENCODER_PRESET, as in Node)
 pub fn build_encode_args(a: &EncodeArgs) -> Result<Vec<String>, String> {
-    let (x265, svt, aom) = cpu_preset(a.cpu_preset);
+    let from_env = std::env::var("CPU_ENCODER_PRESET").ok();
+    let (x265, svt, aom) = cpu_preset(a.cpu_preset.or(from_env.as_deref()));
     require_family(a.codec)?;
     if a.quality.is_none() && !a.bitrate.is_some_and(|b| b.is_finite() && b > 0.0) {
         return Err("bitrate must be a positive finite number".into());
