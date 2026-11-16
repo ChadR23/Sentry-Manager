@@ -13,6 +13,48 @@ pub const NODE_SEND_AHEAD: usize = 15;
 /// the most a helper server converts at once
 pub const NODE_MAX_AT_ONCE: i64 = 8;
 
+/// A remote encode as the job service sees it: ffmpeg's -progress lines and
+/// the close, and a kill.
+pub struct RemoteEncode {
+    pub events: std::sync::mpsc::Receiver<crate::nodes::main_side::ChildEvent>,
+    pub kill: Arc<dyn Fn(&str) + Send + Sync>,
+}
+
+/// What the job service uses of the helper servers (index.js remoteNodes).
+/// `FromNodes` adapts `nodes::lanes::RemoteNodes`; tests stand in their own.
+pub trait NodeLanes: Send + Sync {
+    fn list(&self) -> Vec<Value>;
+    fn encode(&self, request: crate::nodes::main_side::EncodeRequest) -> Result<RemoteEncode, String>;
+    fn trusted(&self, device: &str) -> bool;
+    fn set_slots(&self, device: &str, slots: &Value) -> Result<(), String>;
+    /// { 'node:<id>': [sourceRoot, ...] }
+    fn priorities(&self) -> Value;
+}
+
+pub struct FromNodes(pub Arc<dyn crate::nodes::lanes::RemoteNodes>);
+
+impl NodeLanes for FromNodes {
+    fn list(&self) -> Vec<Value> {
+        self.0.list()
+    }
+    fn encode(&self, request: crate::nodes::main_side::EncodeRequest) -> Result<RemoteEncode, String> {
+        let child = self.0.encode(request).map_err(|e| e.code.to_string())?;
+        let killer = child.killer.clone();
+        Ok(RemoteEncode { events: child.events, kill: Arc::new(move |signal: &str| {
+            killer.kill(signal);
+        }) })
+    }
+    fn trusted(&self, device: &str) -> bool {
+        self.0.trusted(device)
+    }
+    fn set_slots(&self, device: &str, slots: &Value) -> Result<(), String> {
+        self.0.set_slots(device, slots).map_err(|e| e.code.to_string())
+    }
+    fn priorities(&self) -> Value {
+        json!(self.0.priorities())
+    }
+}
+
 /// resolveLanes' answer: { fallback, limits, base, devices }
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LanePlan {
@@ -240,6 +282,7 @@ impl Service {
             if running() {
                 rt.lock().lane_plan = Some(plan);
                 self.start_missing_workers(rt);
+                self.withdraw_from_nodes(rt);
             }
         }
         Ok(public_snapshot(&rt.manifest()))

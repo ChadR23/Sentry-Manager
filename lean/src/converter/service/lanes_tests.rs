@@ -127,6 +127,9 @@ pub struct FakeTools {
     pub planner: Arc<Planner<Arc<FakeProbe>>>,
     pub ffmpeg: String,
     pub verify_ok: bool,
+    /// the snapshot registry a passing verdict records its snapshot in
+    pub registry: OnceLock<Arc<crate::converter::snapshot::Registry>>,
+    pub verified: Mutex<Vec<String>>,
 }
 impl Tools for FakeTools {
     fn inspect_video(&self, _s: &str, _c: &Arc<AtomicBool>) -> CResult<Inspected> {
@@ -139,7 +142,21 @@ impl Tools for FakeTools {
         Ok(())
     }
     fn verify(&self, _r: &VerifyRequest) -> Verdict {
-        Verdict { ok: false, reason: Some(if self.verify_ok { "decode-failed" } else { "decode-failed" }), retryable: false, source_bytes: None, output_bytes: None, details: json!({}), publication_artifact: None }
+        self.verified.lock().unwrap().push(_r.candidate.to_string());
+        let fail = Verdict { ok: false, reason: Some("decode-failed"), retryable: false, source_bytes: None, output_bytes: None, details: json!({}), publication_artifact: None };
+        if !self.verify_ok || fs::read(_r.candidate).map_or(true, |b| b.is_empty() || b == b"bad") {
+            return fail;
+        }
+        // a passing verdict: the candidate adopted into a snapshot, as the verifier does
+        let bytes = fs::read(_r.candidate).unwrap();
+        let sha = crate::converter::tesla_sei::hex(&<sha2::Sha256 as sha2::Digest>::digest(&bytes));
+        let Some(reg) = self.registry.get() else { return fail };
+        let Ok(mut snap) = reg.create(&bytes, &sha, Some(Path::new(_r.candidate)), true) else { return fail };
+        if snap.transfer().is_err() {
+            return fail;
+        }
+        let artifact = crate::converter::snapshot::Artifact { path: snap.path.to_string_lossy().into_owned(), token: snap.token.clone(), sha256: sha, size: bytes.len() as u64 };
+        Verdict { ok: true, reason: None, retryable: false, source_bytes: Some(4000), output_bytes: Some(bytes.len() as u64), details: json!({}), publication_artifact: Some(artifact) }
     }
     fn select(&self, codec: &str) -> CResult<Selected> {
         match self.planner.select(codec, true) {
@@ -177,7 +194,7 @@ if [ -e "$CTL/fail-if" ]; then
   case "$*" in *"$pat"*) code=1 ;; esac
 fi
 printf 'fps=100\nprogress=end\n'
-[ "$code" = 0 ] && : > "$last"
+[ "$code" = 0 ] && printf 'encoded' > "$last"
 touch "$CTL/done/$$"
 exit $code
 "#;
@@ -202,11 +219,14 @@ pub struct HarnessOptions {
     pub works: Works,
     pub hold: bool,
     pub default_device: Option<Option<String>>,
+    pub verify_ok: bool,
+    pub nodes: Option<Arc<dyn super::lanes::NodeLanes>>,
+    pub compare: Option<Arc<dyn Fn(&str, &str, &Arc<AtomicBool>, Option<f64>) -> Value + Send + Sync>>,
 }
 
 impl Default for HarnessOptions {
     fn default() -> Self {
-        HarnessOptions { clips: 6, devices: vec![arc(), uhd(), cpu()], works: desktop_works(), hold: true, default_device: None }
+        HarnessOptions { clips: 6, devices: vec![arc(), uhd(), cpu()], works: desktop_works(), hold: true, default_device: None, verify_ok: false, nodes: None, compare: None }
     }
 }
 
@@ -238,7 +258,8 @@ impl Harness {
         }
         let probe = Arc::new(FakeProbe { works: o.works.clone(), calls: AtomicUsize::new(0), advertised: None });
         let planner = Arc::new(Planner::new(probe.clone(), "linux", "ffmpeg"));
-        let tools = Arc::new(FakeTools { planner: planner.clone(), ffmpeg: ffmpeg.to_string_lossy().to_string(), verify_ok: false });
+        let tools = Arc::new(FakeTools { planner: planner.clone(), ffmpeg: ffmpeg.to_string_lossy().to_string(), verify_ok: o.verify_ok, registry: OnceLock::new(), verified: Mutex::new(vec![]) });
+        let tools2 = tools.clone();
         let devices = o.devices.clone();
         let resolved = Arc::new(Mutex::new(vec![]));
         let r2 = resolved.clone();
@@ -251,7 +272,14 @@ impl Harness {
         let dev3 = devices.clone();
         disc.fixed = Some(Arc::new(move || dev3.clone()));
         ro.discovery = Some(disc);
+        let (nodes, compare) = (o.nodes.clone(), o.compare.clone());
         ro.tune = Some(Box::new(move |so| {
+            if let Some(n) = nodes {
+                let n2 = n.clone();
+                so.set_node_slots = Some(Arc::new(move |id: &str, s: &Value| n2.set_slots(id, s)));
+                so.remote_nodes = Some(n);
+            }
+            so.compare_picture = compare;
             so.resolve_device = Some(Arc::new(move |id: &str| {
                 r2.lock().unwrap().push(id.to_string());
                 dev2.iter().find(|d| d["id"] == id).cloned()
@@ -260,6 +288,7 @@ impl Harness {
             so.encode_stall_ms = 60_000;
         }));
         let conv = Converter::open(ro).unwrap();
+        let _ = tools2.registry.set(conv.registry.clone());
         conv.start().unwrap();
         Harness { dir, conv, ctl, probe, resolved }
     }

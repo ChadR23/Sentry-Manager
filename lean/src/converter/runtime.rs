@@ -46,14 +46,14 @@ pub struct RuntimeOptions {
     pub is_cheap_now: Option<Arc<dyn Fn(i64) -> Option<bool> + Send + Sync>>,
     /// automatic conversion ticks on its own (false in tests)
     pub auto_timer: bool,
-    /// the helper servers' devices and which vehicles each takes first (the nodes port)
-    pub remote_nodes: Option<Arc<dyn Fn() -> Vec<Value> + Send + Sync>>,
-    pub node_priorities: Option<Arc<dyn Fn() -> Value + Send + Sync>>,
+    /// the helper servers (nodes::main_side::Nodes): their devices as lanes,
+    /// remote encodes, trust, slots and each one's vehicles first
+    pub nodes: Option<Arc<dyn super::service::lanes::NodeLanes>>,
 }
 
 impl RuntimeOptions {
     pub fn new(data_path: PathBuf, temp_path: PathBuf, ffmpeg: &str, ffprobe: &str) -> RuntimeOptions {
-        RuntimeOptions { data_path, temp_path, ffmpeg: ffmpeg.into(), ffprobe: ffprobe.into(), before_replace_original: None, tools: None, tune: None, hooks: None, encoders: None, discovery: None, gpu_decode: true, hold_discovered: None, power_meter: None, is_cheap_now: None, auto_timer: true, remote_nodes: None, node_priorities: None }
+        RuntimeOptions { data_path, temp_path, ffmpeg: ffmpeg.into(), ffprobe: ffprobe.into(), before_replace_original: None, tools: None, tune: None, hooks: None, encoders: None, discovery: None, gpu_decode: true, hold_discovered: None, power_meter: None, is_cheap_now: None, auto_timer: true, nodes: None }
     }
 }
 
@@ -125,6 +125,10 @@ impl Converter {
             .map_err(|e| CError::new(&e.code, e.message))?,
         );
         let planner = Arc::new(super::planner::Planner::new(super::process::BoundedRunner::host(), "linux", &o.ffmpeg));
+        let planner_for_pictures: Arc<dyn super::devices::Encoders> = match &o.encoders {
+            Some(e) => e.clone(),
+            None => planner.clone(),
+        };
         let tools: Arc<dyn Tools> = match o.tools {
             Some(t) => t,
             None => Arc::new(RealTools::with_planner(&o.ffmpeg, &o.ffprobe, registry.clone(), planner.clone())),
@@ -135,7 +139,9 @@ impl Converter {
             discovery.name_of = Some(super::devices::stats_name_of());
         }
         let mut reg = super::devices::Registry::new(discovery, encoders);
-        reg.remote_nodes = o.remote_nodes.clone();
+        if let Some(n) = o.nodes.clone() {
+            reg.remote_nodes = Some(Arc::new(move || n.list()));
+        }
         let devices = Arc::new(reg);
         // clips known to be converted already (an optimisation only)
         let converted_index = super::converted_index::ConvertedIndex::new(super::converted_index::Options::new(o.data_path.join("converter-index").join("converted-clips.json")));
@@ -148,6 +154,50 @@ impl Converter {
         so.default_device = Some(Arc::new(move |codec: &str| d3.default_device(codec)));
         if o.gpu_decode {
             so.decode_accel = Some(Arc::new(|encoder: &str, zero_copy: bool, device: Option<&super::planner::Device>| super::planner::decode_accel_args(encoder, "linux", None, zero_copy, device).ok().flatten()));
+        }
+        if let Some(n) = o.nodes.clone() {
+            so.remote_nodes = Some(n.clone());
+            let n2 = n.clone();
+            so.set_node_slots = Some(Arc::new(move |id: &str, slots: &Value| n2.set_slots(id, slots)));
+            // the pictures of a node's encode, decoded on this server's GPU when it has one
+            let planner2 = planner_for_pictures.clone();
+            let ffmpeg = o.ffmpeg.clone();
+            let gpu = o.gpu_decode;
+            so.compare_picture = Some(Arc::new(move |source: &str, candidate: &str, cancel: &Arc<AtomicBool>, duration: Option<f64>| {
+                let accel: Option<Arc<dyn Fn() -> Option<Vec<String>> + Send + Sync>> = if gpu {
+                    let p = planner2.clone();
+                    Some(Arc::new(move || {
+                        let e = p.select("h265", true).ok().flatten().filter(|e| e.hardware)?;
+                        let dev = e.device.as_ref().filter(|d| d.kind != "cpu");
+                        super::planner::decode_accel_args(&e.codec, "linux", None, false, dev).ok().flatten()
+                    }))
+                } else {
+                    None
+                };
+                let decode = crate::nodes::picture::ffmpeg_decoder(crate::nodes::picture::ffmpeg_runner(ffmpeg.clone(), std::time::Duration::from_secs(30 * 60)), accel);
+                let signal = crate::nodes::cancel::Cancel::new();
+                let (c2, s2, done) = (cancel.clone(), signal.clone(), Arc::new(AtomicBool::new(false)));
+                let d2 = done.clone();
+                std::thread::spawn(move || {
+                    while !d2.load(Ordering::SeqCst) {
+                        if c2.load(Ordering::SeqCst) {
+                            s2.abort();
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                });
+                let mut seed = super::jobstore::now_ms() ^ (std::process::id() as u64) << 20;
+                let mut random = move || {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    (seed >> 11) as f64 / (1u64 << 53) as f64
+                };
+                let r = crate::nodes::picture::compare_pictures(Path::new(source), Path::new(candidate), &signal, &decode, duration, &mut random);
+                done.store(true, Ordering::SeqCst);
+                r
+            }));
         }
         // skipDiscovered: clips an earlier automatic run handled, and clips the host holds back
         let hold = o.hold_discovered.clone();
@@ -172,7 +222,9 @@ impl Converter {
         ao.devices = Some(Arc::new(move || Ok(d4.recent())));
         let h3 = held.clone();
         ao.hold_discovered = Some(Arc::new(move |c: &Value, d: &Value| h3(c, d)));
-        ao.node_priorities = o.node_priorities.clone();
+        if let Some(n) = o.nodes.clone() {
+            ao.node_priorities = Some(Arc::new(move || n.priorities()));
+        }
         ao.is_cheap_now = o.is_cheap_now.clone();
         ao.timer = o.auto_timer;
         let auto = super::auto_convert::Auto::new(ao);
@@ -664,5 +716,26 @@ impl Converter {
             devices.push(json!({ "device": named, "codecs": codecs }));
         }
         Ok(json!({ "devices": devices }))
+    }
+}
+
+/// The converter as a helper server's worker uses it (nodes::ctx::WorkerRuntime):
+/// the encoder this server uses for a codec, the CPU encoder, its own
+/// devices and the encoder one of them proves, whether it encodes now.
+impl crate::nodes::ctx::WorkerRuntime for Converter {
+    fn select_encoder(&self, family: &str) -> Result<Option<super::planner::Selected>, String> {
+        self.devices.encoders.select(family, true)
+    }
+    fn cpu_encoder(&self, family: &str) -> Result<super::planner::Selected, String> {
+        self.devices.encoders.select_cpu_fallback(family)
+    }
+    fn local_devices(&self) -> Option<Result<Vec<super::planner::Device>, String>> {
+        Some(Ok(self.devices.local_devices().iter().map(super::devices::device_of).collect()))
+    }
+    fn select_encoder_for(&self, family: &str, device: &super::planner::Device, probe: bool) -> Option<Result<Option<super::planner::Selected>, String>> {
+        Some(self.devices.encoders.select_for(family, device, probe))
+    }
+    fn encoding_now(&self) -> bool {
+        Converter::encoding_now(self)
     }
 }

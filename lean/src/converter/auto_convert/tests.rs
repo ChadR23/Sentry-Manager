@@ -330,3 +330,72 @@ fn plan_lanes_gives_own_devices_to_the_local_holder_and_nodes_by_priority() {
     assert!(plan["/a"].is_empty());
     let _ = Fail::default();
 }
+
+// ---- test/nodePriority.test.js (planning)
+
+const GPU: &str = "pci:0000:03:00.0";
+const N2: &str = "node:aaaaaaaaaaaa";
+const N3: &str = "node:bbbbbbbbbbbb";
+const NODE_KEY: &str = "node:cccccccccccc";
+
+fn pcar(name: &str, lanes: Value) -> Value {
+    json!({ "sourceRoot": format!("/cars/{name}"), "destinationRoot": null, "codec": "h265", "profileId": "balanced", "networkMode": "direct", "outputMode": "replace",
+        "includedGroups": ["RecentClips"], "replacementConfirmed": true, "concurrency": 2, "verifyMode": "quick", "lanes": lanes })
+}
+
+fn roots(r: &[&str]) -> Vec<String> {
+    r.iter().map(|x| format!("/cars/{x}")).collect()
+}
+
+#[test]
+fn planning_a_node_serves_its_first_vehicle_else_helps_and_never_one_that_set_it_off() {
+    let devices = vec![json!({ "id": GPU, "kind": "gpu" }), json!({ "id": N2, "kind": "node", "online": true, "slots": 2 }), json!({ "id": N3, "kind": "node", "online": true, "slots": 3 })];
+    let a = pcar("a", json!([{ "device": GPU, "concurrency": 2 }, { "device": N2, "concurrency": 2 }]));
+    let b = pcar("b", json!([{ "device": GPU, "concurrency": 1 }]));
+    let cars = vec![a.clone(), b.clone()];
+    let pr = json!({ N2: ["/cars/b"] });
+    let plan = plan_lanes(&cars, &roots(&["a", "b"]), Some("/cars/a"), &devices, &pr);
+    assert_eq!(plan["/cars/a"], vec![json!({ "device": GPU, "concurrency": 2 })]);
+    assert_eq!(plan["/cars/b"], vec![json!({ "device": N2, "concurrency": 2 })]);
+    let plan = plan_lanes(&cars, &roots(&["a"]), Some("/cars/a"), &devices, &pr);
+    assert_eq!(plan["/cars/a"], vec![json!({ "device": GPU, "concurrency": 2 }), json!({ "device": N2, "concurrency": 2 })]);
+    assert!(!plan["/cars/a"].iter().any(|l| l["device"] == N3));
+    let plan = plan_lanes(&cars, &roots(&["b"]), None, &[json!({ "id": N2, "kind": "node", "online": false })], &pr);
+    assert!(plan["/cars/b"].is_empty());
+    let mut off = pcar("a", json!([{ "device": GPU, "concurrency": 2 }]));
+    off["nodesOff"] = json!([N2]);
+    let b1 = pcar("b", json!([{ "device": N2, "concurrency": 1 }]));
+    let plan = plan_lanes(&[off, b1], &roots(&["a", "b"]), Some("/cars/a"), &devices, &json!({ N2: ["/cars/a", "/cars/b"] }));
+    assert_eq!(plan["/cars/a"], vec![json!({ "device": GPU, "concurrency": 2 })]);
+    assert_eq!(plan["/cars/b"], vec![json!({ "device": N2, "concurrency": 1 })]);
+}
+
+#[test]
+fn planning_with_a_nodes_devices_the_node_goes_to_one_vehicle_as_a_whole() {
+    let ngpu = format!("{NODE_KEY}@pci:0000:01:00.0");
+    let ncpu = format!("{NODE_KEY}@cpu");
+    let node_gpu = json!({ "id": ngpu, "kind": "node", "isDefault": true, "online": true, "slots": 2 });
+    let node_cpu = json!({ "id": ncpu, "kind": "node", "isDefault": false, "online": true, "slots": 0 });
+    let devices = vec![json!({ "id": GPU, "kind": "gpu" }), node_gpu.clone(), node_cpu.clone()];
+    let a = pcar("a", json!([{ "device": GPU, "concurrency": 2 }, { "device": ngpu, "concurrency": 2 }, { "device": ncpu, "concurrency": 1 }]));
+    let b = pcar("b", json!([{ "device": GPU, "concurrency": 1 }]));
+    let pr = json!({ NODE_KEY: ["/cars/b"] });
+    let plan = plan_lanes(&[a.clone(), b.clone()], &roots(&["a", "b"]), Some("/cars/a"), &devices, &pr);
+    assert_eq!(plan["/cars/b"], vec![json!({ "device": ngpu, "concurrency": 2 })]);
+    assert_eq!(plan["/cars/a"], vec![json!({ "device": GPU, "concurrency": 2 })]);
+    let plan = plan_lanes(&[a.clone(), b.clone()], &roots(&["a"]), Some("/cars/a"), &devices, &pr);
+    assert_eq!(plan["/cars/a"], vec![json!({ "device": GPU, "concurrency": 2 }), json!({ "device": ngpu, "concurrency": 2 }), json!({ "device": ncpu, "concurrency": 1 })]);
+    let mut off = a.clone();
+    off["nodesOff"] = json!([NODE_KEY]);
+    let plan = plan_lanes(&[off, b.clone()], &roots(&["a"]), Some("/cars/a"), &devices, &json!({ NODE_KEY: ["/cars/a"] }));
+    assert_eq!(plan["/cars/a"], vec![json!({ "device": GPU, "concurrency": 2 })]);
+    let old = pcar("old", json!([{ "device": GPU, "concurrency": 1 }, { "device": NODE_KEY, "concurrency": 3 }]));
+    let plan = plan_lanes(&[old], &roots(&["old"]), Some("/cars/old"), &devices, &json!({}));
+    assert_eq!(plan["/cars/old"], vec![json!({ "device": GPU, "concurrency": 1 }), json!({ "device": ngpu, "concurrency": 3 })]);
+    let mut g2 = node_gpu.clone();
+    g2["online"] = json!(false);
+    let mut c2 = node_cpu.clone();
+    c2["online"] = json!(false);
+    let plan = plan_lanes(&[a], &roots(&["a"]), Some("/cars/a"), &[json!({ "id": GPU, "kind": "gpu" }), g2, c2], &json!({}));
+    assert_eq!(plan["/cars/a"], vec![json!({ "device": GPU, "concurrency": 2 })]);
+}

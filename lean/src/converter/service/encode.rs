@@ -85,6 +85,7 @@ pub enum Progress {
     Speed(Value),
     Bitrate(Value),
     Phase(String),
+    Queued,
     Nothing,
 }
 
@@ -117,6 +118,8 @@ pub fn parse_progress_line(line: &str) -> Progress {
         "speed" => Progress::Speed(progress_rate(value, 100.0)),
         "bitrate" => Progress::Bitrate(progress_rate(value, 10.0)),
         "progress" if value == "continue" || value == "end" => Progress::Phase(value.to_string()),
+        // waiting in a node's queue (a clip sent ahead): not converting yet
+        "queued" => Progress::Queued,
         _ => Progress::Nothing,
     }
 }
@@ -160,8 +163,11 @@ pub struct EncodeRequest<'a> {
 }
 
 impl Service {
+    /// liveCounts: clips waiting on a node, and those encoding now (here, or started on a node)
     fn live_counts(s: &RtState) -> (usize, usize) {
-        (0, s.encodes.len())
+        let waiting = s.encodes.iter().filter(|(_, l)| l["waitingOnNode"] == true).count();
+        let now = s.encodes.iter().filter(|(_, l)| l["waitingOnNode"] != true && (l["remote"] != true || l["started"] == true)).count();
+        (waiting, now)
     }
 
     fn note_waiting(&self, rt: &Arc<Runtime>) {
@@ -185,6 +191,9 @@ impl Service {
     /// runChild: Ok(()) or the failure code ('encoder-start-failed',
     /// 'encoder-failed', 'encoder-stalled', 'cancelled').
     pub fn run_child(&self, rt: &Arc<Runtime>, item_id: &str, r: &EncodeRequest) -> Result<(), &'static str> {
+        if r.encoder.remote {
+            return self.run_remote(rt, item_id, r);
+        }
         let device = if r.encoder.hardware { r.encoder.device.as_ref() } else { None };
         let encode_args = super::super::planner::build_encode_args(&super::super::planner::EncodeArgs {
             codec: r.codec,
@@ -222,7 +231,7 @@ impl Service {
         let pid = child.id() as i32;
         let live = {
             let mut s = rt.lock();
-            s.children.insert(item_id.to_string(), ChildEntry { pid, termination_requested: false });
+            s.children.insert(item_id.to_string(), ChildEntry { pid, termination_requested: false, remote: None, withdrawn: false });
             let rel = s.manifest.item(item_id).and_then(|i| i.str("relativePath").map(str::to_string));
             let live = json!({
                 "jobId": s.manifest.id(), "itemId": item_id, "relativePath": rel, "encoder": r.encoder.codec,
@@ -292,6 +301,7 @@ impl Service {
                                     l["outTimeUs"] = json!(t);
                                 }
                             }
+                            Progress::Queued => {}
                             Progress::Fps(f) => {
                                 s.encode_fps.insert(id2.clone(), f);
                                 if let Some(l) = live {
@@ -376,6 +386,194 @@ impl Service {
         }
         self.note_waiting(rt);
         result
+    }
+}
+
+impl Service {
+    /// runChild for a lane on another server (Nodes): the clip is sent there
+    /// and the encoded file comes back to `target`; the progress, stall and
+    /// cancel handling is ffmpeg's; reading, telemetry, verification and
+    /// saving stay here.
+    fn run_remote(&self, rt: &Arc<Runtime>, item_id: &str, r: &EncodeRequest) -> Result<(), &'static str> {
+        let Some(nodes) = self.0.o.remote_nodes.clone() else { return Err("encoder-start-failed") };
+        let device = r.encoder.device.as_ref().map(|d| d.id.clone()).unwrap_or_default();
+        let child = nodes
+            .encode(crate::nodes::main_side::EncodeRequest {
+                device: device.clone(),
+                source: r.source.into(),
+                target: r.target.into(),
+                codec: r.codec.into(),
+                bitrate: r.bitrate,
+                quality: r.quality.map(str::to_string),
+                hold_frames: r.hold_frames,
+                duration_us: r.duration_us.map(|d| d as f64),
+                benchmark: false,
+            })
+            .map_err(|_| "encoder-start-failed")?;
+        let kill = child.kill.clone();
+        let name = r.encoder.device.as_ref().and_then(|d| d.name.clone()).unwrap_or(device);
+        {
+            let mut s = rt.lock();
+            s.children.insert(item_id.to_string(), ChildEntry { pid: 0, termination_requested: false, remote: Some(kill.clone()), withdrawn: false });
+            let rel = s.manifest.item(item_id).and_then(|i| i.str("relativePath").map(str::to_string));
+            let live = json!({
+                "jobId": s.manifest.id(), "itemId": item_id, "relativePath": rel, "encoder": r.encoder.codec,
+                "hardware": r.encoder.hardware, "decode": "cpu", "device": null, "node": name,
+                "deviceId": r.lane_id, "remote": true, "started": false, "pid": null, "fps": null, "speed": null,
+                "bitrateKbps": null, "frame": null, "outTimeUs": null,
+                "durationUs": r.duration_us.filter(|d| *d > 0), "dropFrames": null, "dupFrames": null, "totalSizeB": null
+            });
+            s.encodes.push((item_id.to_string(), live));
+            if s.cancel_requested || s.stop_requested || s.recovery_required {
+                if let Some(c) = s.children.get_mut(item_id) {
+                    c.termination_requested = true;
+                }
+                kill("SIGTERM");
+            }
+        }
+        let stall = Duration::from_millis(self.0.o.encode_stall_ms.max(1));
+        let mut last = Instant::now();
+        let mut buffered = String::new();
+        let mut progress = Map::new();
+        let result = loop {
+            match child.events.recv_timeout(Duration::from_millis(100)) {
+                Ok(crate::nodes::main_side::ChildEvent::Stdout(text)) => {
+                    last = Instant::now();
+                    buffered.push_str(&text);
+                    let mut lines: Vec<String> = buffered.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l).to_string()).collect();
+                    buffered = lines.pop().unwrap_or_default();
+                    for line in lines {
+                        self.remote_line(rt, item_id, &line, &mut progress);
+                    }
+                }
+                Ok(crate::nodes::main_side::ChildEvent::Close { code, signal }) => {
+                    let s = rt.lock();
+                    let controlled = s.cancel_requested || s.stop_requested || s.recovery_required;
+                    let withdrawn = s.children.get(item_id).is_some_and(|c| c.withdrawn);
+                    break if withdrawn && !controlled {
+                        Err("withdrawn")
+                    } else if controlled || signal.is_some() {
+                        Err("cancelled")
+                    } else if code == Some(0) {
+                        Ok(())
+                    } else {
+                        Err("encoder-failed")
+                    };
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if last.elapsed() >= stall {
+                        if let Some(c) = rt.lock().children.get_mut(item_id) {
+                            c.termination_requested = true;
+                        }
+                        kill("SIGKILL");
+                        break Err("encoder-stalled");
+                    }
+                }
+                // (gone without a close: as a kill)
+                Err(_) => {
+                    let s = rt.lock();
+                    let controlled = s.cancel_requested || s.stop_requested || s.recovery_required;
+                    break if s.children.get(item_id).is_some_and(|c| c.withdrawn) && !controlled { Err("withdrawn") } else { Err("cancelled") };
+                }
+            }
+        };
+        {
+            let mut s = rt.lock();
+            s.children.remove(item_id);
+            s.encodes.retain(|(i, _)| i != item_id);
+            s.encode_fps.remove(item_id);
+        }
+        self.note_waiting(rt);
+        result
+    }
+
+    fn remote_line(&self, rt: &Arc<Runtime>, id: &str, line: &str, progress: &mut Map<String, Value>) {
+        let p = parse_progress_line(line);
+        let mut note = false;
+        let mut emit_progress = None;
+        {
+            let mut s = rt.lock();
+            let s = &mut *s;
+            let is_lead = s.is_lead(id);
+            let live = s.encodes.iter_mut().find(|(i, _)| i == id).map(|(_, v)| v);
+            let Some(l) = live else { return };
+            match p {
+                Progress::Queued => {
+                    if l["waitingOnNode"] != true {
+                        l["waitingOnNode"] = json!(true);
+                        note = true;
+                    }
+                }
+                Progress::OutTime(t) => {
+                    progress.insert("outTimeUs".into(), json!(t));
+                    l["outTimeUs"] = json!(t);
+                    if l["waitingOnNode"] == true || l["started"] != true {
+                        l["waitingOnNode"] = json!(false);
+                        l["started"] = json!(true);
+                        note = true;
+                    }
+                }
+                Progress::Fps(f) => {
+                    s.encode_fps.insert(id.to_string(), f);
+                    l["fps"] = super::super::jobstore::normalize::num(round_to(f, 10.0));
+                }
+                Progress::Counter(k, v) => l[k] = v,
+                Progress::Speed(v) => l["speed"] = v,
+                Progress::Bitrate(v) => l["bitrateKbps"] = v,
+                Progress::Phase(ph) => {
+                    progress.insert("phase".into(), json!(ph));
+                    if is_lead {
+                        let fps: f64 = s.encode_fps.values().sum();
+                        let mut lp = progress.clone();
+                        lp.insert("fps".into(), super::super::jobstore::normalize::num(round_to(fps, 10.0)));
+                        s.last_progress = Some(Value::Object(lp.clone()));
+                        let (w, e) = Self::live_counts(s);
+                        lp.insert("waitingOnNode".into(), json!(w));
+                        lp.insert("encodingNow".into(), json!(e));
+                        emit_progress = Some(Value::Object(lp));
+                    }
+                }
+                Progress::Nothing => {}
+            }
+        }
+        if note {
+            self.note_waiting(rt);
+            // (sent while its row was being set lower: it comes back)
+            self.withdraw_from_nodes(rt);
+        }
+        if let Some(p) = emit_progress {
+            self.emit(rt, "progress", vec![("progress", p)]);
+        }
+    }
+
+    /// withdrawFromNodes(runtime): a node's row set lower or Off: the clips
+    /// sent ahead that still wait in its queue come back, the last sent first
+    pub fn withdraw_from_nodes(&self, rt: &Runtime) {
+        let mut s = rt.lock();
+        let s = &mut *s;
+        let mut by_lane: indexmap::IndexMap<String, Vec<(String, bool)>> = Default::default();
+        for (item, live) in &s.encodes {
+            let Some(lane) = live["deviceId"].as_str().filter(|d| d.starts_with("node:")) else { continue };
+            if s.children.get(item).is_some_and(|c| !c.withdrawn) {
+                by_lane.entry(lane.to_string()).or_default().push((item.clone(), live["waitingOnNode"] == true));
+            }
+        }
+        for (lane, list) in by_lane {
+            let mut over = list.len() as i64 - s.lane_limit(&Some(lane)) as i64;
+            for (item, _) in list.iter().filter(|(_, w)| *w).rev() {
+                if over <= 0 {
+                    break;
+                }
+                over -= 1;
+                if let Some(c) = s.children.get_mut(item) {
+                    c.withdrawn = true;
+                    c.termination_requested = true;
+                    if let Some(k) = &c.remote {
+                        k("SIGTERM");
+                    }
+                }
+            }
+        }
     }
 }
 

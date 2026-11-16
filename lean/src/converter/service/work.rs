@@ -1182,6 +1182,13 @@ impl Service {
         }
         .map_err(Fail::from)?;
         let mut used_cpu_fallback = !selected.hardware;
+        // set once a node gave the clip back (or its lane landed here because
+        // the node has no encoder for the codec): its encodes here wait their turn
+        let mut from_node = lane.is_some_and(|l| l.id.starts_with("node:")) && !selected.remote;
+        if from_node && rt.lock().own_lanes_off() {
+            return Err(service_error("NODE_NO_ENCODER"));
+        }
+        let mut check: Option<CheckSlot> = None;
         let zero_copy = hold_frames == 0;
         let mut tiers = self.encode_decode_tiers(&selected, zero_copy);
         let mut failed_tiers: Vec<String> = vec![];
@@ -1201,6 +1208,10 @@ impl Service {
             tier_retry = false;
             attempts = attempts.min(MAX_RECORDED_ATTEMPTS);
             self.item_patch(rt, &id, vec![("attempts", Some(json!(attempts))), ("encoder", Some(json!(selected.codec)))], vec![("state", json!("encoding")), ("activeItemId", json!(id))])?;
+            // its node's row was set to Off while the clip was being read: back to the queue
+            if selected.remote && lane.is_some_and(|l| rt.lock().lane_limit(&Some(l.id.clone())) == 0) {
+                return Err(service_error("NODE_WITHDRAWN"));
+            }
             let persist = self.persistence(rt, &id, false);
             let mut op = self.op(rt, &id, &signal, &persist);
             op.extension = Some(".mp4".into());
@@ -1213,7 +1224,9 @@ impl Service {
                 if d != 0 { Some(d) } else { None }
             };
             let used_tier = tiers.first().cloned();
+            let fallback = if from_node { Some(self.take_fallback_slot(rt)?) } else { None };
             let encoded = self.run_child(rt, &id, &EncodeRequest { source, target: &reserved.path, codec: &codec, encoder: &selected, bitrate, quality: quality.as_deref(), duration_us, hold_frames, decode: used_tier.as_ref().map(|t| t.1.as_slice()), lane_id: lane.map(|l| l.id.as_str()) });
+            drop(fallback);
             timing.mark("encode");
             if let Err(code) = encoded {
                 let settle = if code == "cancelled" { timeout_flag(15_000) } else { rt.signal() };
@@ -1234,11 +1247,26 @@ impl Service {
                 if code == "cancelled" {
                     return Err(service_error("CANCELLED"));
                 }
+                // taken back from a node's queue: queued here again (see failItem)
+                if code == "withdrawn" {
+                    return Err(service_error("NODE_WITHDRAWN"));
+                }
                 // the same GPU encoder with a slower decode before giving up on it
                 if let Some(t) = used_tier {
                     failed_tiers.push(t.0);
                     tiers.remove(0);
                     tier_retry = true;
+                    continue;
+                }
+                // a node that failed: this server's own encoder takes the clip, then the CPU
+                if selected.remote {
+                    if rt.lock().own_lanes_off() {
+                        return Err(service_error("NODE_ENCODE_FAILED"));
+                    }
+                    from_node = true;
+                    selected = self.local_encoder(&codec)?;
+                    tiers = self.encode_decode_tiers(&selected, zero_copy);
+                    used_cpu_fallback = !selected.hardware;
                     continue;
                 }
                 if selected.hardware && !used_cpu_fallback {
@@ -1277,6 +1305,43 @@ impl Service {
             Self::compose_into(rt, &id, &adopted_own);
             timing.mark("metadata");
             self.item_patch(rt, &id, vec![], vec![("state", json!("verifying")), ("activeItemId", json!(id))])?;
+            // Encoded on another server: its pictures must match the original's
+            // before anything else is checked or saved (unless the node is trusted)
+            let node_id = selected.device.as_ref().map(|d| d.id.clone()).unwrap_or_default();
+            let trusted = selected.remote && self.0.o.remote_nodes.as_ref().is_some_and(|n| n.trusted(&node_id));
+            if selected.remote && !trusted {
+                if check.is_none() {
+                    check = Some(self.take_check_slot(rt, lane)?);
+                }
+                timing.mark("checkWait");
+                let same = match &self.0.o.compare_picture {
+                    Some(f) => f(source, &adopted.path, &signal, Some(inspected.duration_seconds)),
+                    None => json!({ "ok": false, "reason": "no-picture-check" }),
+                };
+                timing.mark("picture");
+                if rt.aborted() || rt.lock().stopped() {
+                    return Err(service_error("CANCELLED"));
+                }
+                if same["ok"] != true {
+                    let here = !rt.lock().own_lanes_off();
+                    let shown = selected.device.as_ref().and_then(|d| d.name.clone()).unwrap_or_else(|| "a node".into());
+                    eprintln!("[CONVERTER] The encode from {shown} does not show the original's pictures; {}: {} {}", if here { "encoding it on this server instead" } else { "not encoded here (this server is set to Off)" }, item.s("relativePath"), same.to_string().chars().take(200).collect::<String>());
+                    let cleanup = self.cleanup_ownership(rt, &id, Some(&adopted_own), None, false);
+                    if !cleanup.cleaned {
+                        Self::compose_into(rt, &id, &adopted_own);
+                        return Err(service_error("OWNED_CLEANUP_FAILED"));
+                    }
+                    if !here {
+                        return Err(service_error("NODE_PICTURE_MISMATCH"));
+                    }
+                    from_node = true;
+                    drop(check.take());
+                    selected = self.local_encoder(&codec)?;
+                    tiers = self.encode_decode_tiers(&selected, zero_copy);
+                    used_cpu_fallback = !selected.hardware;
+                    continue;
+                }
+            }
             let verify_mode = contracts::effective_verify_mode(config["verifyMode"].as_str(), config["outputMode"].as_str());
             let verify_accel = if verify_mode == "full" { self.verify_decode_accel(&selected) } else { None };
             let verified_key = Self::decode_key(&selected);
@@ -1296,6 +1361,7 @@ impl Service {
                 on_decode_accel_fallback: Some(Arc::new(move || me.note_verify_fallback(&verified_key))),
             });
             timing.mark("verify");
+            drop(check.take());
             let details = verdict.details.clone();
             if verdict.ok && details.get("larger") == Some(&json!(true)) {
                 eprintln!("[CONVERTER] Kept although larger (option on): {} {} bytes larger than the original", item.s("relativePath"), details["largerBytes"]);
@@ -1339,6 +1405,16 @@ impl Service {
                         continue;
                     }
                     return Err(service_error("KEEP_ORIGINAL"));
+                }
+                // a node's encode that does not verify: encoded here instead
+                if selected.remote && !rt.lock().own_lanes_off() {
+                    let shown = selected.device.as_ref().and_then(|d| d.name.clone()).unwrap_or_else(|| "a node".into());
+                    eprintln!("[CONVERTER] The encode from {shown} did not verify ({}); encoding it on this server instead: {} {}", verdict.reason.unwrap_or("unknown"), item.s("relativePath"), details.to_string().chars().take(300).collect::<String>());
+                    from_node = true;
+                    selected = self.local_encoder(&codec)?;
+                    tiers = self.encode_decode_tiers(&selected, zero_copy);
+                    used_cpu_fallback = !selected.hardware;
+                    continue;
                 }
                 eprintln!("[CONVERTER] Verification failed: {} {} {}", item.s("relativePath"), verdict.reason.unwrap_or("unknown"), details.to_string().chars().take(600).collect::<String>());
                 return Err(Fail { code: Some(verdict.reason.unwrap_or("VERIFICATION_FAILED").into()), retryable: verdict.retryable, ..Default::default() });
@@ -1565,7 +1641,8 @@ impl Service {
             let s = rt.lock();
             (s.recovery_required && s.recovery_item_id.as_deref() != Some(item_id), s.stop_requested, s.cancel_requested)
         };
-        let stopped = (stop_requested || halted_by_recovery) && !cancel_requested;
+        let withdrawn = e.is("NODE_WITHDRAWN") && !cancel_requested && cleanup.cleaned;
+        let stopped = (stop_requested || halted_by_recovery || withdrawn) && !cancel_requested;
         let terminally = cancel_requested;
         let own = ownership.clone().unwrap_or_default();
         let changes: Changes = vec![
@@ -1584,6 +1661,18 @@ impl Service {
             ("publicationArtifact", if !cleanup.cleaned { own.publication.clone().unwrap_or(Value::Null) } else { Value::Null }),
             ("replacementPhase", if !cleanup.cleaned { phase } else { Value::Null }),
         ])?;
+        if withdrawn {
+            let attempts = rt.lock().item(item_id).and_then(|i| i["attempts"].as_i64()).unwrap_or(0);
+            if attempts > 0 {
+                self.item_patch(rt, item_id, vec![("attempts", Some(json!(attempts - 1)))], vec![])?;
+            }
+            let mut s = rt.lock();
+            if !s.stop_requested && !s.recovery_required {
+                s.queue.push_front(item_id.to_string());
+                drop(s);
+                rt.cv.notify_all();
+            }
+        }
         Ok(())
     }
 
@@ -1793,6 +1882,87 @@ impl DestinationGuard {
             }
         }
         Ok(())
+    }
+}
+
+/// a slot of a bounded counter, released when dropped
+pub struct CheckSlot {
+    rt: Arc<Runtime>,
+    key: String,
+}
+
+impl Drop for CheckSlot {
+    fn drop(&mut self) {
+        let mut s = self.rt.lock();
+        if let Some(n) = s.node_checks.get_mut(&self.key) {
+            *n = n.saturating_sub(1);
+        }
+        drop(s);
+        self.rt.cv.notify_all();
+    }
+}
+
+pub struct FallbackSlot(Arc<(Mutex<usize>, Condvar)>);
+
+impl Drop for FallbackSlot {
+    fn drop(&mut self) {
+        let (m, cv) = &*self.0;
+        *m.lock().unwrap() -= 1;
+        cv.notify_all();
+    }
+}
+
+/// NODE_FALLBACK_AT_ONCE: clips a node gave back, encoded here at once
+pub const NODE_FALLBACK_AT_ONCE: usize = 2;
+/// NODE_CHECK_EXTRA: a node's clips checked here beyond its own number at once
+pub const NODE_CHECK_EXTRA: usize = 2;
+
+impl Service {
+    /// localEncoder(codec): this server's own encoder, never a node
+    fn local_encoder(&self, codec: &str) -> SResult<Selected> {
+        match self.0.o.tools.select(codec) {
+            Ok(s) if !s.remote => Ok(s),
+            _ => self.0.o.tools.select_cpu_fallback(codec).map_err(Fail::from),
+        }
+    }
+
+    /// takeFallbackSlot(signal)
+    fn take_fallback_slot(&self, rt: &Runtime) -> SResult<FallbackSlot> {
+        let slots = self.0.fallbacks.clone();
+        let (m, cv) = &*slots;
+        let mut n = m.lock().unwrap();
+        while *n >= NODE_FALLBACK_AT_ONCE {
+            if rt.aborted() {
+                return Err(service_error("CANCELLED"));
+            }
+            n = cv.wait_timeout(n, Duration::from_millis(100)).unwrap().0;
+        }
+        if rt.aborted() {
+            return Err(service_error("CANCELLED"));
+        }
+        *n += 1;
+        drop(n);
+        Ok(FallbackSlot(slots.clone()))
+    }
+
+    /// takeCheckSlot(runtime, lane, signal): per node, its own number plus NODE_CHECK_EXTRA
+    fn take_check_slot(&self, rt: &Arc<Runtime>, lane: Option<&super::lanes::Lane>) -> SResult<CheckSlot> {
+        let lane_id = lane.map(|l| l.id.clone()).unwrap_or_else(|| "node".into());
+        let key = contracts::node_key_of(&lane_id).map(str::to_string).unwrap_or(lane_id);
+        let mut s = rt.lock();
+        loop {
+            let own: usize = s.lane_plan.as_ref().map(|p| p.base.iter().filter(|(id, _)| contracts::node_key_of(id).map_or(id.as_str() == key, |k| k == key)).map(|(_, n)| *n).sum()).unwrap_or(0);
+            let limit = own.max(1) + NODE_CHECK_EXTRA;
+            if rt.aborted() {
+                return Err(service_error("CANCELLED"));
+            }
+            let busy = s.node_checks.get(&key).copied().unwrap_or(0);
+            if busy < limit {
+                s.node_checks.insert(key.clone(), busy + 1);
+                return Ok(CheckSlot { rt: rt.clone(), key });
+            }
+            s = rt.cv.wait_timeout(s, Duration::from_millis(100)).unwrap_or_else(|p| p.into_inner()).0;
+        }
     }
 }
 

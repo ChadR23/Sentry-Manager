@@ -19,6 +19,8 @@ mod work;
 mod tests;
 #[cfg(test)]
 pub mod lanes_tests;
+#[cfg(test)]
+mod node_tests;
 
 pub use encode::{parse_progress_line, Progress};
 
@@ -306,6 +308,11 @@ pub struct Options {
     pub default_device: Option<Arc<dyn Fn(&str) -> Option<String> + Send + Sync>>,
     /// setNodeSlots(nodeKey, slots): a helper server told how many it converts at once
     pub set_node_slots: Option<Arc<dyn Fn(&str, &Value) -> Result<(), String> + Send + Sync>>,
+    /// the helper servers (index.js remoteNodes): a node lane's clip is encoded there
+    pub remote_nodes: Option<Arc<dyn lanes::NodeLanes>>,
+    /// comparePicture(source, candidate, cancel, durationSeconds): a node's
+    /// encode shows the original's pictures (nodes::picture::compare_pictures)
+    pub compare_picture: Option<Arc<dyn Fn(&str, &str, &Arc<AtomicBool>, Option<f64>) -> Value + Send + Sync>>,
     /// decodeAccel(encoder, zeroCopy, device): GPU decode arguments (None: CPU decode)
     pub decode_accel: Option<Arc<dyn Fn(&str, bool, Option<&super::planner::Device>) -> Option<Vec<String>> + Send + Sync>>,
 }
@@ -333,6 +340,8 @@ impl Options {
             default_device: None,
             set_node_slots: None,
             decode_accel: None,
+            remote_nodes: None,
+            compare_picture: None,
         }
     }
 }
@@ -340,10 +349,14 @@ impl Options {
 pub type Listener = Arc<dyn Fn(&Value) + Send + Sync>;
 
 /// One running ffmpeg (activeEncodes)
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ChildEntry {
     pub pid: i32,
     pub termination_requested: bool,
+    /// a helper server's encode (no process here)
+    pub remote: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    /// taken back from a node's queue (its row set lower)
+    pub withdrawn: bool,
 }
 
 /// The runtime of one job (runtimeFor).
@@ -390,6 +403,8 @@ pub struct RtState {
     pub default_lane: Option<Option<String>>,
     /// consume() runs (Node: runtime.addWorker is set)
     pub consuming: bool,
+    /// a node's clips being checked here, per node (takeCheckSlot)
+    pub node_checks: HashMap<String, usize>,
 }
 
 pub struct Runtime {
@@ -442,6 +457,7 @@ impl Runtime {
                 lane_plan: None,
                 default_lane: None,
                 consuming: false,
+                node_checks: HashMap::new(),
             }),
             cv: Condvar::new(),
             persist: Mutex::new(()),
@@ -508,6 +524,8 @@ pub struct Inner {
     pub command: Mutex<()>,
     pub owner_seq: AtomicU64,
     pub reads: Arc<(Mutex<usize>, Condvar)>,
+    /// clips a node gave back, encoded here at once (NODE_FALLBACK_AT_ONCE, every job)
+    pub fallbacks: Arc<(Mutex<usize>, Condvar)>,
     /// decode tiers found broken per GPU and encoder (encodeDecodeBroken)
     pub decode_broken: Mutex<std::collections::HashSet<String>>,
     /// verify decodes that fell back to the CPU, per GPU and encoder
@@ -533,6 +551,7 @@ impl Service {
             command: Mutex::new(()),
             owner_seq: AtomicU64::new(1),
             reads: Arc::new((Mutex::new(0), Condvar::new())),
+            fallbacks: Arc::new((Mutex::new(0), Condvar::new())),
             decode_broken: Mutex::new(Default::default()),
             verify_fallbacks: Mutex::new(HashMap::new()),
         }))
@@ -1163,6 +1182,10 @@ impl Service {
                 continue;
             }
             c.termination_requested = true;
+            if let Some(k) = &c.remote {
+                k("SIGTERM");
+                continue;
+            }
             // SAFETY: a signal to the ffmpeg this job started
             unsafe {
                 libc::kill(c.pid, libc::SIGTERM);
