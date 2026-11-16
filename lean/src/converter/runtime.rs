@@ -75,6 +75,8 @@ pub struct Converter {
     power_meter: Option<Arc<dyn super::benchmark::PowerMeter>>,
     bench: Arc<Bench>,
     shut: AtomicBool,
+    /// the Encoder's Hardware panel's memory across polls (encoderStats.js)
+    pub encoder_stats: super::stats::EncoderStats,
 }
 
 /// The benchmark running now (one at a time) and its services.
@@ -186,7 +188,7 @@ impl Converter {
                 });
             }
         }));
-        Ok(Converter { service, store, staging, registry, temp_path, started: Mutex::new(None), converted_index, devices, auto, template, ffprobe: o.ffprobe.clone(), power_meter: o.power_meter.clone(), bench, shut: AtomicBool::new(false) })
+        Ok(Converter { service, store, staging, registry, temp_path, started: Mutex::new(None), converted_index, devices, auto, template, ffprobe: o.ffprobe.clone(), power_meter: o.power_meter.clone(), bench, shut: AtomicBool::new(false), encoder_stats: Default::default() })
     }
 
     /// start(): every unfinished job reconciled, then recovered one after the other
@@ -363,6 +365,16 @@ impl Converter {
         if let Some(c) = self.bench.cancel.lock().unwrap().as_ref() {
             c.store(true, Ordering::SeqCst);
         }
+    }
+
+    /// encoderBlock for GET /api/stats (OpsCtx::encoder_block): the jobs as
+    /// this process holds them (summaries), every live encode, the slots
+    pub fn encoder_block(&self, snapshot: &Value, energy: &Value) -> Value {
+        let jobs = self.service.list_summaries().unwrap_or_default();
+        let workers = self.active_encodes();
+        let service = self.service.clone();
+        let slots = move |id: &str| service.slots_of(id).map(|n| n as i64);
+        self.encoder_stats.encoder_block(snapshot, &jobs, &workers, energy, Some(&slots))
     }
 
     /// devices(): the `converter:devices` answer

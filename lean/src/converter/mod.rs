@@ -36,6 +36,7 @@ pub mod scanner;
 pub mod service;
 pub mod snapshot;
 pub mod staging;
+pub mod stats;
 pub mod tesla_sei;
 pub mod timeline;
 pub mod verifier;
