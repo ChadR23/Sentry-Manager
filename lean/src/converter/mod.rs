@@ -12,6 +12,7 @@
 
 pub mod adapters;
 pub mod auto_convert;
+pub mod benchmark;
 pub mod av1;
 pub mod contracts;
 pub mod converted_index;
