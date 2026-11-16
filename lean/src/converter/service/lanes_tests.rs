@@ -370,6 +370,9 @@ impl Drop for Harness {
             }
         }
         self.conv.shutdown();
+        // (a job thread's last write may land after when_idle: let it, then remove the folder)
+        std::thread::sleep(Duration::from_millis(300));
+        let _ = fs::remove_dir_all(self.dir.path());
     }
 }
 

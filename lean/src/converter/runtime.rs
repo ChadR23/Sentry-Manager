@@ -236,7 +236,10 @@ impl Converter {
                 let (s, b, t) = (s4.clone(), b4.clone(), t4.clone());
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_secs(1));
-                    sweep_empty_snapshot_folders(&s, &b, &t);
+                    // (not once the converter has stopped)
+                    if !s.0.shutting_down.load(Ordering::SeqCst) {
+                        sweep_empty_snapshot_folders(&s, &b, &t);
+                    }
                 });
             }
         }));
