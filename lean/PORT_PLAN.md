@@ -142,13 +142,37 @@ viewer `AppCtx`, CAN `lean.rs` and its plain-HTTP device port, the temporary
 
 Checked (all on the integrated server):
 
-- `cargo test --release`: every unit and integration test passes;
+- `cargo test --release`: 448 tests pass (413 in the library: every area's
+  ports of Node's tests and their parity runs against the Node code, among
+  them the converter's store, scanner, jobs, crash suites and bridge, ops'
+  stats replay, the arrival checksums and the helper servers);
 - `lean/parity/compare.js`: 217 requests the same; `compareFootage.js`: 97
   writing requests the same; `canCompare.js`: 151 requests, no differences;
-  `uiCompare.js`: 2871 of 2871 answers the same; `opsCompare.js`: 13 of 15
-  (the two left are the converter's: the Encoder health check and
-  `/api/system` `converter`);
-- `contractAll.js`: RESULTS_HERE
+  `uiCompare.js`: 2871 of 2871 answers the same; `contractUi.js`: 17 of 17;
+  `uiPages.js` (Chromium): 30 of 30 pages load the same; `opsCompare.js`:
+  12 of 17, the rest the machine's or proposed below (the share's free
+  space changed between the two runs, in the banner and two notification
+  titles; `host.node`; `nativeHelper`);
+- `contractAll.js` (all 189 routes): 163 answer the same, 10 differ, 16 are
+  not compared. Not compared: the live streams (`/api/events`,
+  `/api/converter/events`), the token routes the recorder never calls
+  (`/metrics`, `/api/can/logs/ping`, `GET /node/v1/*` x3), and the requests
+  whose answers are random or end the session (2fa/start, logout,
+  metrics/enable, snapshots, updates/check, can/enable, can/tokens,
+  nodes/worker, speeds/index). Differ: each server's own CA in
+  `PUT /api/security/hostnames` and the archive's name in
+  `POST /api/logs/clear` (per-instance values the replay does not
+  normalise); the pairing code in `POST /api/nodes/worker/pair` (random);
+  `/api/speeds/status` `readMode` (timing, proposed below);
+  `POST /api/studio/trashFolder` (501, not ported); `/api/system`
+  `nativeHelper` (proposed below); `/api/health`'s snapshot check (the
+  startup check and the first snapshot run at the same minute: which comes
+  first is the moment's); and three helper-server answers that are the
+  nodes area's: `DELETE /api/nodes/worker/pair` after a pairing code
+  (`enabled` false here, true on Node), `POST /node/v1/pair` with no pairing
+  open (400 "Bad pairing request." here, 403 "not waiting to be paired" on
+  Node) and `DELETE /node/v1/jobs/:id` unpaired (404 here, 401 "Not
+  paired." on Node).
 
 ## Converter
 
@@ -922,3 +946,6 @@ None accepted yet. Proposed (need the owner's OK):
   as Node's does.
 - core and ui: each server makes its own certificate authority, so the
   certificate details differ (the contract compares their shape).
+- ops: `/api/system` `nativeHelper` is true: the no-replace rename is called
+  directly (renameat2), where Node reports whether its helper program was
+  built.
