@@ -95,6 +95,16 @@ fn one(tcp: TcpStream, config: Arc<ServerConfig>, handler: Handler, served: &[u8
         let mut req = WorkerRequest { method: &method, path: &path, headers: &headers, address: &address, served_cert: Some(served), body: &mut body };
         handler(&mut req)
     };
+    // what was not read of the body is drained (closing with it unread resets the
+    // connection, and the main would never see the answer)
+    let began = std::time::Instant::now();
+    let mut sink = [0u8; 64 * 1024];
+    while began.elapsed() < std::time::Duration::from_secs(5) {
+        match body.read(&mut sink) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+    }
     drop(body);
     drop(r);
     if matches!(reply.body, ReplyBody::Close) {
