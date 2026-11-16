@@ -593,7 +593,7 @@ fn is_marker(nal: &Nal) -> bool {
 pub fn read_records(path: &Path, size: u64) -> R<Vec<(f64, Vec<u8>)>> {
     let file = File::open(path).map_err(|e| Fail::Io(e.to_string()))?;
     let mut p = Parser { b: Bytes { file, len: size as i64, pages: HashMap::new(), order: VecDeque::new(), skip: false }, mdats: Vec::new(), samples: Vec::new(), other: Vec::new(), config: None };
-    let frames = match p.frames() {
+    let mut frames = match p.frames() {
         Ok(f) => f,
         Err(Fail::Io(e)) => return Err(Fail::Io(e)),
         Err(Fail::Parse(_)) => Vec::new(),
@@ -601,6 +601,8 @@ pub fn read_records(path: &Path, size: u64) -> R<Vec<(f64, Vec<u8>)>> {
     if p.b.file.metadata().map_or(true, |m| m.len() < size) {
         return Err(Fail::Io("The clip changed while it was read".into()));
     }
+    // in the order shown (frames come in file order; with B-frames that differs)
+    frames.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
     Ok(frames)
 }
 

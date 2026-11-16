@@ -264,6 +264,8 @@ async function readRecords(Reader, real, size, stats = null) {
   // every record of each frame (Reader.recordsOf: a converted clip's last picture also
   // carries Tesla's closing record, served where that sample was, one frame later)
   for (const f of frames) for (const [t, sei] of Reader.recordsOf(f)) records.push([t, Buffer.from(sei).toString('base64')]);
+  // in the order shown (frames come in file order; with B-frames that differs)
+  records.sort((a, b) => a[0] - b[0]);
   return { body: JSON.stringify({ v: 1, frames: records }), note };
 }
 

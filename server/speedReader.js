@@ -244,12 +244,13 @@ async function readRecords(real, { mode } = {}) {
     else if (cfgAt >= 0 && (codec === 'hvc1' || codec === 'hev1')) lengthSize = (desc[cfgAt + 25] & 3) + 1;
     else if (codec !== 'av01') throw new Error(`Unsupported codec ${codec}`);
 
-    // the first frame of each second
+    // the first frame shown in each second (with B-frames a frame can be
+    // stored before frames shown ahead of it)
     const picks = [];
     for (const s of samples) {
-      const sec = Math.floor(Number(s.dts) / scale);
-      if (sec > 7200) break;
-      if (picks[sec] === undefined) picks[sec] = s;
+      const sec = Math.floor(Number(s.pts) / scale);
+      if (sec < 0 || sec > 7200) continue;
+      if (picks[sec] === undefined || s.pts < picks[sec].pts) picks[sec] = s;
     }
 
     let carrier = null;

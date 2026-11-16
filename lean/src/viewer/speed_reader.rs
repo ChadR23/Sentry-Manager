@@ -129,19 +129,7 @@ pub fn read_records(path: &Path, mode: Mode) -> Result<Vec<Option<Vec<u8>>>> {
     } else {
         return err(format!("Unsupported codec {}", String::from_utf8_lossy(&codec)));
     };
-    let mut picks: Vec<Option<&mp4::Sample>> = Vec::new();
-    for s in &samples {
-        let sec = (s.dts / scale) as usize;
-        if sec > 7200 {
-            break;
-        }
-        if picks.len() <= sec {
-            picks.resize(sec + 1, None);
-        }
-        if picks[sec].is_none() {
-            picks[sec] = Some(s);
-        }
-    }
+    let picks = crate::sei::first_shown_each_second(&samples, scale);
     let heads = heads_straight(&file, &picks)?;
     let mut out = Vec::with_capacity(picks.len());
     for pick in picks {

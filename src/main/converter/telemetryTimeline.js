@@ -270,19 +270,30 @@ function nearestTimestampDistance(sortedTimestamps, targetPtsUs) {
   return distance;
 }
 
+// The output samples in the order their pictures are shown (by time; equal
+// times keep file order). With B-frames an encoder stores a frame before the
+// ones shown ahead of it, so the n-th frame shown is not the n-th sample.
+function displayOrder(outputSamples) {
+  return outputSamples
+    .map((sample, index) => ({ ptsUs: sample.ptsUs, index }))
+    .sort((left, right) => left.ptsUs - right.ptsUs || left.index - right.index)
+    .map((sample) => sample.index);
+}
+
 function mapTimelineToOutput(sourceTimeline, outputSamples) {
   if (!sourceTimeline || !Array.isArray(sourceTimeline.events)) throw new TypeError('Source timeline must contain an events array');
   if (!Array.isArray(outputSamples)) throw new TypeError('Output samples must be an array');
   for (const sample of outputSamples) if (!sample || !Number.isFinite(sample.ptsUs)) throw new TypeError('Every output sample must have a finite ptsUs');
   const mapped = outputSamples.map(({ ptsUs }) => ({ ptsUs, pictureMarker: true, seiNals: [] }));
+  const shown = displayOrder(outputSamples);
   // Tesla clips can contain one terminal zero-duration bookkeeping sample.
   // When the encoder preserves the real frame count, ordinal mapping is more
   // reliable than timestamp matching because VFR/duplicate PTS values can
   // otherwise leave valid SEI records unmapped.
   const sourceSamples = Array.isArray(sourceTimeline.samples) ? sourceTimeline.samples : [];
   // Samples no decoder outputs (frameNumGaps.js): every other sample maps to
-  // its output frame in order, and a dropped sample's records go to the frame
-  // before it, after that frame's own, so no record is lost or added.
+  // its output frame in the order shown, and a dropped sample's records go to
+  // the frame before it, after that frame's own, so no record is lost or added.
   const dropped = undecodableFrames(sourceTimeline) > 0 ? new Set(sourceTimeline.undecodable.samples) : null;
   const tail = sourceSamples.at(-1)?.durationUs === 0 ? 1 : 0;
   if (dropped && [...dropped].every((index) => index < sourceSamples.length - tail)
@@ -291,7 +302,7 @@ function mapTimelineToOutput(sourceTimeline, outputSamples) {
     sourceSamples.forEach((sample, index) => {
       if (index < sourceSamples.length - tail && !dropped.has(index)) output += 1;
       for (const record of sample?.seiNals || []) {
-        mapped[output].seiNals.push({ nal: Buffer.from(record.nal), fingerprint: record.fingerprint });
+        mapped[shown[output]].seiNals.push({ nal: Buffer.from(record.nal), fingerprint: record.fingerprint });
       }
     });
     return mapped;
@@ -303,15 +314,16 @@ function mapTimelineToOutput(sourceTimeline, outputSamples) {
   if (ordinalCount > 0) {
     for (let index = 0; index < ordinalCount; index += 1) {
       for (const record of sourceSamples[index]?.seiNals || []) {
-        mapped[index].seiNals.push({ nal: Buffer.from(record.nal), fingerprint: record.fingerprint });
+        mapped[shown[index]].seiNals.push({ nal: Buffer.from(record.nal), fingerprint: record.fingerprint });
       }
     }
     // No picture is emitted for a zero-duration tail, but its SEI can contain
-    // a distinct final measurement. Carry every record after the last picture's
-    // normal telemetry, in source order, without adding a synthetic frame.
+    // a distinct final measurement. Carry every record after the last shown
+    // picture's normal telemetry, in source order, without adding a synthetic
+    // frame.
     if (sourceSamples.length === ordinalCount + 1 && sourceSamples.at(-1)?.durationUs === 0) {
       for (const record of sourceSamples.at(-1).seiNals || []) {
-        mapped.at(-1).seiNals.push({ nal: Buffer.from(record.nal), fingerprint: record.fingerprint });
+        mapped[shown.at(-1)].seiNals.push({ nal: Buffer.from(record.nal), fingerprint: record.fingerprint });
       }
     }
     return mapped;
