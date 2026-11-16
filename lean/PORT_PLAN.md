@@ -142,18 +142,18 @@ viewer `AppCtx`, CAN `lean.rs` and its plain-HTTP device port, the temporary
 
 Checked (all on the integrated server):
 
-- `cargo test --release`: 448 tests pass (413 in the library: every area's
-  ports of Node's tests and their parity runs against the Node code, among
-  them the converter's store, scanner, jobs, crash suites and bridge, ops'
-  stats replay, the arrival checksums and the helper servers);
+- `cargo test --release`: 498 tests pass (every area's ports of Node's
+  tests and their parity runs against the Node code, among them the
+  converter's store, scanner, jobs, lanes, automatic conversion, benchmark,
+  crash suites and bridge, ops' stats replay, the arrival checksums and the
+  helper servers);
 - `lean/parity/compare.js`: 217 requests the same; `compareFootage.js`: 97
   writing requests the same; `canCompare.js`: 151 requests, no differences;
   `uiCompare.js`: 2871 of 2871 answers the same; `contractUi.js`: 17 of 17;
   `uiPages.js` (Chromium): 30 of 30 pages load the same; `opsCompare.js`:
-  12 of 17, the rest the machine's or proposed below (the share's free
-  space changed between the two runs, in the banner and two notification
-  titles; `host.node`; `nativeHelper`);
-- `contractAll.js` (all 189 routes): 163 answer the same, 10 differ, 16 are
+  16 of 17 (`host.node`, proposed below; on another run the share's free
+  space can change between the two servers' runs);
+- `contractAll.js` (all 189 routes): 165 answer the same, 8 differ, 16 are
   not compared. Not compared: the live streams (`/api/events`,
   `/api/converter/events`), the token routes the recorder never calls
   (`/metrics`, `/api/can/logs/ping`, `GET /node/v1/*` x3), and the requests
@@ -164,15 +164,13 @@ Checked (all on the integrated server):
   `POST /api/logs/clear` (per-instance values the replay does not
   normalise); the pairing code in `POST /api/nodes/worker/pair` (random);
   `/api/speeds/status` `readMode` (timing, proposed below);
-  `POST /api/studio/trashFolder` (501, not ported); `/api/system`
-  `nativeHelper` (proposed below); `/api/health`'s snapshot check (the
-  startup check and the first snapshot run at the same minute: which comes
-  first is the moment's); and three helper-server answers that are the
-  nodes area's: `DELETE /api/nodes/worker/pair` after a pairing code
-  (`enabled` false here, true on Node), `POST /node/v1/pair` with no pairing
-  open (400 "Bad pairing request." here, 403 "not waiting to be paired" on
-  Node) and `DELETE /node/v1/jobs/:id` unpaired (404 here, 401 "Not
-  paired." on Node).
+  `POST /api/studio/trashFolder` (501, not ported); and three helper-server
+  answers that are the nodes area's: `DELETE /api/nodes/worker/pair` after
+  a pairing code (`enabled` false here, true on Node), `POST /node/v1/pair`
+  with no pairing open (400 "Bad pairing request." here, 403 "not waiting
+  to be paired" on Node) and `DELETE /node/v1/jobs/:id` unpaired (404 here,
+  401 "Not paired." on Node);
+- `npm test` passes.
 
 ## Converter
 
