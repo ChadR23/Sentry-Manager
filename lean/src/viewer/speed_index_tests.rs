@@ -1,6 +1,7 @@
 // test/speedIndex.test.js, the parts that hold in Rust
 
 use super::*;
+use serde_json::Map;
 use crate::footage::Kind;
 use crate::scanner::FileEntry;
 use crate::viewer::pace::Pace;

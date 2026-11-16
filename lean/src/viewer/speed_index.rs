@@ -13,26 +13,27 @@
 use super::ctx::{Ctx, Files};
 use super::js::{self, locale_cmp, num, r2, r5};
 use super::pace::Pace;
+use super::speed_entry::{self as entry, Entries, Entry};
 use super::speed_reader::{self, Mode};
 use crate::footage::{is_day_shape, Kind};
 use crate::sei::Sample;
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-const BRAKE: f64 = 3.9;
-const SWERVE: f64 = 4.0;
+pub(super) const BRAKE: f64 = 3.9;
+pub(super) const SWERVE: f64 = 4.0;
 const SUMMARY_VERSION: f64 = 2.0;
 const DAYS_KEPT: usize = 400;
 const GEO_MAX: usize = 3_000_000;
 
-type Day = Arc<Mutex<Map<String, Value>>>;
+type Day = Arc<Mutex<Entries>>;
 
 /// A summary of an older version needs the clip read again only if its speeds have a slowing second.
-fn can_brake(sp: &Value) -> bool {
+pub(super) fn can_brake(sp: &Value) -> bool {
     let Some(a) = sp.as_array() else { return false };
     (0..a.len()).any(|i| match (a[i].as_f64(), a.get(i + 1).and_then(Value::as_f64)) {
         (Some(x), Some(y)) => (x - y).abs() >= 0.29,
@@ -170,10 +171,6 @@ fn name_of(rel: &str) -> &str {
     rel.rsplit('/').next().unwrap_or(rel)
 }
 
-fn entry_num(e: &Value, i: usize) -> Option<f64> {
-    e.get(i).and_then(Value::as_f64)
-}
-
 /// The file of a clip as the scan saw it: (size, Math.round(mtimeMs))
 fn now_of(files: Option<&Files>, rel: &str) -> Option<(f64, f64)> {
     files.and_then(|f| f.get(rel)).map(|f| (f.size as f64, js::js_round(f.mtime_ms)))
@@ -230,8 +227,8 @@ pub fn summarize(samples: &[Option<Sample>]) -> Value {
     json!({ "b": pair(b), "t": pair(t), "v": pair(v), "g": g, "k": num(SUMMARY_VERSION) })
 }
 
-fn same(e: &Value, f: Option<(f64, f64)>) -> bool {
-    matches!(f, Some((s, m)) if entry_num(e, 0) == Some(s) && entry_num(e, 1) == Some(m))
+fn same(e: &Entry, f: Option<(f64, f64)>) -> bool {
+    matches!(f, Some((s, m)) if e.num(0) == Some(s) && e.num(1) == Some(m))
 }
 
 /// speedsFor: the quick read, else the dashboard's full read (speeds only).
@@ -308,10 +305,7 @@ impl SpeedIndex {
         if let Some(d) = inner.days.get(&key) {
             return d.clone();
         }
-        let data = std::fs::read_to_string(self.file_of(vid, day)).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| match v {
-            Value::Object(o) => Some(o),
-            _ => None,
-        });
+        let data = std::fs::read_to_string(self.file_of(vid, day)).ok().and_then(|t| entry::parse_day(&t));
         let d: Day = Arc::new(Mutex::new(data.unwrap_or_default()));
         inner.days.insert(key.clone(), d.clone());
         inner.order.push_back(key.clone());
@@ -341,7 +335,8 @@ impl SpeedIndex {
             let Some(data) = data else { continue };
             let (vid, day) = key.split_once('/').unwrap();
             let file = self.file_of(vid, day);
-            let text = Value::Object(data.lock().unwrap().clone()).to_string();
+            let value = entry::day_value(&data.lock().unwrap());
+            let text = value.to_string();
             let _ = std::fs::create_dir_all(file.parent().unwrap());
             let tmp = PathBuf::from(format!("{}.{}.tmp", file.display(), std::process::id()));
             if std::fs::write(&tmp, text).is_ok() {
@@ -363,7 +358,7 @@ impl SpeedIndex {
     }
 
     /// The entry of the same file read under an older path (the folder set a level up or down), moved to rel.
-    fn moved(&self, data: &mut Map<String, Value>, key: &str, vid: &str, rel: &str, size: u64, mtime: f64, files: Option<&Files>) -> bool {
+    fn moved(&self, data: &mut Entries, key: &str, vid: &str, rel: &str, size: u64, mtime: f64, files: Option<&Files>) -> bool {
         let ver = self.inner.lock().unwrap().ver.get(key).copied().unwrap_or(0);
         let mut names = self.names.lock().unwrap();
         let fresh = names.get(key).is_some_and(|(v, _)| *v == ver);
@@ -377,7 +372,7 @@ impl SpeedIndex {
         let list = names.get(key).unwrap().1.get(name_of(rel)).cloned().unwrap_or_default();
         for k in list {
             let Some(e) = data.get(&k) else { continue };
-            if k == rel || entry_num(e, 0) != Some(size as f64) || entry_num(e, 1) != Some(mtime) {
+            if k == rel || e.num(0) != Some(size as f64) || e.num(1) != Some(mtime) {
                 continue;
             }
             if files.is_some_and(|f| f.contains_key(&k)) {
@@ -433,7 +428,7 @@ impl SpeedIndex {
         // changed while it was read (converted, say): the next pass reads it again
         let files = self.ctx.files(&c.vid);
         if now_of(files.as_ref(), &c.rel) == Some((c.size as f64, c.mtime)) {
-            data.lock().unwrap().insert(c.rel.clone(), json!([c.size, num(c.mtime), sp, sum]));
+            data.lock().unwrap().insert(c.rel.clone(), Entry::from_value(json!([c.size, num(c.mtime), sp, sum])));
             let mut inner = self.inner.lock().unwrap();
             Self::touch(&mut inner, &key);
         }
@@ -453,22 +448,16 @@ impl SpeedIndex {
                 let key = key_of(&v.id, &day);
                 let data = self.load(&v.id, &day);
                 let mut d = data.lock().unwrap();
-                let mut had = d.get(&rel).cloned();
-                if had.is_none() && self.moved(&mut d, &key, &v.id, &rel, size, mtime, files.as_ref()) {
-                    had = d.get(&rel).cloned();
+                if !d.contains_key(&rel) && self.moved(&mut d, &key, &v.id, &rel, size, mtime, files.as_ref()) {
                     Self::touch(&mut self.inner.lock().unwrap(), &key);
                     relocated += 1;
                 }
-                let same = had.as_ref().is_some_and(|e| entry_num(e, 0) == Some(size as f64) && entry_num(e, 1) == Some(mtime) && e.as_array().is_some_and(|a| a.len() >= 4));
-                if same {
-                    let e = had.as_ref().unwrap();
-                    if e[3].is_null() || e[3].get("k").and_then(Value::as_f64) == Some(SUMMARY_VERSION) {
+                if let Some(e) = d.get_mut(&rel).filter(|e| e.num(0) == Some(size as f64) && e.num(1) == Some(mtime) && e.complete()) {
+                    if e.summary_is_null() || e.summary_version() == Some(SUMMARY_VERSION) {
                         continue;
                     }
-                    if e[3].is_object() && !can_brake(&e[2]) {
-                        let mut e = e.clone();
-                        e[3]["k"] = json!(2);
-                        d.insert(rel.clone(), e);
+                    if e.summary_is_object() && !e.can_brake() {
+                        e.mark_version_2();
                         Self::touch(&mut self.inner.lock().unwrap(), &key);
                         upgraded += 1;
                         continue;
@@ -668,7 +657,7 @@ impl SpeedIndex {
         let data = self.load(vid, d);
         let files = self.ctx.files(vid);
         let data = data.lock().unwrap();
-        data.iter().filter(|(rel, e)| same(e, now_of(files.as_ref(), rel))).map(|(rel, e)| (rel.clone(), e.get(2).cloned().unwrap_or(Value::Null))).collect()
+        data.iter().filter(|(rel, e)| same(e, now_of(files.as_ref(), rel))).map(|(rel, e)| (rel.clone(), e.speeds())).collect()
     }
 
     /// A day's clip summaries (clips with one, as they are now).
@@ -680,8 +669,8 @@ impl SpeedIndex {
         let files = self.ctx.files(vid);
         let data = data.lock().unwrap();
         data.iter()
-            .filter(|(rel, e)| e.get(3).is_some_and(|s| !s.is_null() && s != &json!(false) && s != &json!(0) && s != &json!("")) && same(e, now_of(files.as_ref(), rel)))
-            .map(|(rel, e)| (rel.clone(), e[3].clone()))
+            .filter(|(rel, e)| e.summary_truthy() && same(e, now_of(files.as_ref(), rel)))
+            .map(|(rel, e)| (rel.clone(), e.summary()))
             .collect()
     }
 
@@ -734,20 +723,25 @@ impl SpeedIndex {
         Some((format!("{ver}|{s}"), mem))
     }
 
-    fn data_of(mem: Option<Day>, file: &Path) -> Option<Map<String, Value>> {
+    fn data_of(mem: Option<Day>, file: &Path) -> Option<Day> {
         match mem {
-            Some(d) => Some(d.lock().unwrap().clone()),
-            None => std::fs::read_to_string(file).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).map(|v| v.as_object().cloned().unwrap_or_default()),
+            Some(d) => Some(d),
+            None => std::fs::read_to_string(file).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).map(|v| match v {
+                Value::Object(o) => Arc::new(Mutex::new(o.into_iter().map(|(k, v)| (k, Entry::from_value(v))).collect())),
+                _ => Day::default(),
+            }),
         }
     }
 
-    fn pack(data: &Map<String, Value>) -> (Vec<String>, Vec<usize>, Vec<f64>, Vec<f32>) {
+    fn pack(data: &Entries) -> (Vec<String>, Vec<usize>, Vec<f64>, Vec<f32>) {
         let (mut rels, mut at, mut bbox, mut pts) = (Vec::new(), vec![0usize], Vec::new(), Vec::new());
         for (rel, e) in data {
-            let Some(g) = e.get(3).and_then(|s| s.get("g")).and_then(Value::as_array).filter(|g| !g.is_empty()) else { continue };
+            let g = e.positions();
+            if g.is_empty() {
+                continue;
+            }
             let (mut a0, mut a1, mut o0, mut o1) = (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
-            for p in g {
-                let (sec, a, o) = (js::number(p.get(0)), js::number(p.get(1)), js::number(p.get(2)));
+            for &[sec, a, o] in g.iter() {
                 pts.extend([sec as f32, a as f32, o as f32]);
                 a0 = a0.min(a);
                 a1 = a1.max(a);
@@ -775,7 +769,7 @@ impl SpeedIndex {
             }
         }
         let data = Self::data_of(mem, file)?;
-        let (rels, at, bbox, pts) = Self::pack(&data);
+        let (rels, at, bbox, pts) = Self::pack(&data.lock().unwrap());
         let packed = Arc::new(Packed { stamp, rels, at, bbox, pts });
         let mut inner = self.inner.lock().unwrap();
         if let Some(had) = inner.geo.remove(&key) {
@@ -879,10 +873,13 @@ impl SpeedIndex {
             None => {
                 let data = Self::data_of(mem, &file).unwrap_or_default();
                 let mut per = HashMap::new();
-                for (rel, e) in &data {
-                    if let Some(a) = e.as_array() {
+                for (rel, e) in data.lock().unwrap().iter() {
+                    if let Entry::Raw(v) = e {
+                        let Some(a) = v.as_array() else { continue };
                         let st = stats_of(a.get(2).unwrap_or(&Value::Null), a.get(3).unwrap_or(&Value::Null));
                         per.insert(rel.clone(), (js::number(a.first()), js::number(a.get(1)), st));
+                    } else {
+                        per.insert(rel.clone(), (e.num(0).unwrap_or(f64::NAN), e.num(1).unwrap_or(f64::NAN), e.stats()));
                     }
                 }
                 Arc::new(per)
@@ -911,7 +908,7 @@ impl SpeedIndex {
         let data = self.load(vid, d);
         let files = self.ctx.files(vid);
         let data = data.lock().unwrap();
-        data.iter().filter(|(rel, e)| e.as_array().is_some_and(|a| a.len() >= 4) && same(e, now_of(files.as_ref(), rel))).map(|(r, _)| r.clone()).collect()
+        data.iter().filter(|(rel, e)| e.complete() && same(e, now_of(files.as_ref(), rel))).map(|(r, _)| r.clone()).collect()
     }
 
     /// How far each day is indexed: { day: (clips, indexed) } (front-camera clips).
@@ -928,7 +925,7 @@ impl SpeedIndex {
         for (d, fs) in per {
             let data = self.load(vid, &d);
             let data = data.lock().unwrap();
-            let indexed = fs.iter().filter(|(rel, s, m)| data.get(rel).is_some_and(|e| entry_num(e, 0) == Some(*s) && entry_num(e, 1) == Some(*m) && e.as_array().is_some_and(|a| a.len() >= 4))).count();
+            let indexed = fs.iter().filter(|(rel, s, m)| data.get(rel).is_some_and(|e| e.num(0) == Some(*s) && e.num(1) == Some(*m) && e.complete())).count();
             out.insert(d, (fs.len() as u64, indexed as u64));
         }
         out
@@ -944,7 +941,7 @@ impl SpeedIndex {
         let same = now_of(now.as_ref(), rel) == Some((size as f64, js::js_round(mtime_ms)));
         if let Some(f) = f.filter(|f| same && is_day_shape(&f.day) && f.camera.as_deref() == Some("front")) {
             let data = self.load(vid, &f.day);
-            data.lock().unwrap().insert(rel.to_string(), json!([size, num(js::js_round(mtime_ms)), sp.clone(), sum]));
+            data.lock().unwrap().insert(rel.to_string(), Entry::from_value(json!([size, num(js::js_round(mtime_ms)), sp.clone(), sum])));
             Self::touch(&mut self.inner.lock().unwrap(), &key_of(vid, &f.day));
             if !self.running() {
                 self.flush();
