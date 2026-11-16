@@ -1154,7 +1154,7 @@ impl Nodes {
                 if expected.is_some_and(|e| e > limit) {
                     return Err(large());
                 }
-                use std::io::{Read, Write};
+                use std::io::Write;
                 use std::os::unix::fs::OpenOptionsExt;
                 let mut out = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&out_path)
                     .map_err(|e| NodeError::new(format!("{}: {e}", client::errno_name(&e)), 500, "NODE_ERROR"))?;

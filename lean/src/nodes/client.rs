@@ -349,13 +349,13 @@ pub fn request(node: &Target, o: Options) -> Result<Answer, NodeError> {
     let reason: Arc<Mutex<Option<NodeError>>> = Arc::new(Mutex::new(None));
     let shut = {
         let reason = reason.clone();
-        let tcp = tcp.try_clone().ok();
+        let tcp = Arc::new(tcp.try_clone().ok());
         move |why: NodeError| {
             let mut g = reason.lock().unwrap();
             if g.is_none() {
                 *g = Some(why);
             }
-            if let Some(t) = &tcp {
+            if let Some(t) = tcp.as_ref() {
                 let _ = t.shutdown(Shutdown::Both);
             }
         }

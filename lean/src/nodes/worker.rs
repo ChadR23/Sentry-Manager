@@ -423,9 +423,6 @@ fn default_device_of(list: Option<&Vec<WorkerDevice>>) -> String {
     list.and_then(|l| l.iter().find(|d| d.id != "cpu")).map(|d| d.id.clone()).unwrap_or_else(|| "cpu".into())
 }
 
-fn device_json(d: &Device) -> Value {
-    json!({ "id": d.id, "kind": d.kind, "vendor": d.vendor, "name": d.name, "node": d.node, "index": d.index })
-}
 
 impl NodeWorker {
     pub fn new(ctx: Arc<dyn NodesCtx>, o: WorkerOptions) -> NodeWorker {
@@ -1402,8 +1399,4 @@ fn running(st: &State, pool: Option<&str>) -> usize {
 
 fn encoding(st: &State, pool: Option<&str>) -> usize {
     st.jobs.values().filter(|j| j.state() == "encoding" && pool.is_none_or(|p| j.pool() == p)).count()
-}
-
-pub(crate) fn device_value(d: &Device) -> Value {
-    device_json(d)
 }

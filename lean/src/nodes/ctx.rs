@@ -29,7 +29,7 @@ pub trait NodesCtx: Send + Sync {
     /// db.set(key, value)
     fn set_setting(&self, key: &str, value: &Value);
     /// logger.scope('audit')
-    fn audit(&self, level: Level, line: &str) {
+    fn audit(&self, _level: Level, line: &str) {
         eprintln!("[audit] {line}");
     }
     /// logger.scope('nodes')
