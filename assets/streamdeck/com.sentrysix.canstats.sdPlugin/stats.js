@@ -1,5 +1,6 @@
-// The stats GET /api/can/now gives (server/canNow.js STATS), for the key picker.
-window.CAN_STATS = [
+// The stats GET /api/can/now gives (server/canNow.js STATS), for the key picker
+// (pi.html) and the plugin (bin/plugin.js, Node).
+var CAN_STATS = [
   ['speed', 'Speed'], ['battery', 'Battery'], ['range', 'Range'], ['batteryPower', 'Battery power'], ['gear', 'Gear'],
   ['batteryVoltage', 'Battery voltage'], ['batteryCurrent', 'Battery current'], ['batteryTemp', 'Battery temp'],
   ['outsideTemp', 'Outside temp'], ['cabinTemp', 'Cabin temp'], ['batteryInletTemp', 'Battery inlet temp'],
@@ -11,3 +12,5 @@ window.CAN_STATS = [
   ['energyRemaining', 'Energy remaining'], ['odometer', 'Odometer'], ['setSpeed', 'Set speed'],
   ['speedLimit', 'Speed limit'], ['elevation', 'Elevation']
 ];
+if (typeof window !== 'undefined') window.CAN_STATS = CAN_STATS;
+if (typeof module !== 'undefined' && module.exports) module.exports = { CAN_STATS };

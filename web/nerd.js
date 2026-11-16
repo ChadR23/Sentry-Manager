@@ -466,7 +466,8 @@ export function openNerdPanel() {
     if (!deck) return '';
     const base = `${location.origin}/api/can/now`;
     const tok = deckToken ? encodeURIComponent(deckToken) : '<token>';
-    const ex = (stat) => `${base}/${stat}?token=${tok}`;
+    // (pin=: the server's certificate, so the plugin trusts it without installing it)
+    const ex = (stat) => `${base}/${stat}?token=${tok}${deck.pin ? `&pin=${deck.pin}` : ''}`;
     return `<h3>Stream Deck</h3>
       <p class="nd-muted">Your car's newest CAN values on Stream Deck keys (paired with footage or not), as fresh as the CAN Bridge's last upload, from this same address: no other port. Install the plugin, make a link here, and paste the link into any key's settings; then pick a stat for each key.</p>
       <div class="nd-row"><a class="nd-btn" href="/api/can/stream-deck/plugin" download>Download the Stream Deck plugin</a></div>

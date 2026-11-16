@@ -95,10 +95,19 @@ A key shows the stat's name, its value big, the unit and how old it is
 reason when the server cannot be reached or the link is wrong. Pressing a key
 asks again at once. All keys share one request.
 
+The plugin runs on Stream Deck's own Node.js, so Sentry Six Manager's own
+certificate needs nothing installed: the link carries a pin
+(`pin=ca:<SHA-256>`, the server's local certificate authority; `pin=cert:` for
+a certificate of your own; none with Let's Encrypt). The plugin fetches the
+authority's certificate once from `/api/can/now/ca.crt` (public, no token;
+only while a link is on), keeps it only when its fingerprint is the pin, and
+checks every connection's certificate against it before the token is sent.
+A key that cannot trust the server says *cert changed* (make a new link after
+the certificate authority was replaced) or *cert?*.
+
 Any other plugin that shows the text a web address returns works too, one
-key per stat. With Sentry Six Manager's own certificate (TLS_MODE=auto),
-install its local certificate authority on that computer first (Settings →
-Security & HTTPS), or Stream Deck may refuse the connection.
+key per stat; for those, install the local certificate authority on that
+computer first (Settings → Security & HTTPS).
 
 ## Tokens: one per car
 

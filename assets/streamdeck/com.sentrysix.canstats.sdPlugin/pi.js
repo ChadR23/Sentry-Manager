@@ -11,20 +11,20 @@ const send = (o) => { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o));
 
 for (const [id, label] of CAN_STATS) $('stat').add(new Option(label, id));
 
-/** { server, token } from a link like https://host:9000/api/can/now/battery?token=… */
+/** { server, token, pin } from a link like https://host:9000/api/can/now/battery?token=…&pin=ca:… */
 function fromLink(text) {
   try {
     const u = new URL(String(text).trim());
     const token = u.searchParams.get('token');
     if (!token) return null;
-    return { server: u.origin, token };
+    return { server: u.origin, token, pin: u.searchParams.get('pin') || '' };
   } catch { return null; }
 }
 function show() {
   $('units').value = global.units === 'km' ? 'km' : 'mi';
   $('every').value = global.every || 5;
   $('car').value = global.car || '';
-  if (global.server && global.token && !$('link').value) $('link').value = `${global.server}/api/can/now?token=${global.token}`;
+  if (global.server && global.token && !$('link').value) $('link').value = `${global.server}/api/can/now?token=${global.token}${global.pin ? `&pin=${global.pin}` : ''}`;
   $('saved').textContent = global.server && global.token ? `Connected to ${global.server}.` : 'Not set up yet: paste the link.';
 }
 function saveGlobal() {

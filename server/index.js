@@ -1346,6 +1346,14 @@ async function main() {
     const cfg = db.get('can-now', null);
     if (!cfg?.tokenHash) return sendJson(res, 404, { error: 'Not found' });
     if (req.method !== 'GET' && req.method !== 'HEAD') return sendJson(res, 405, { error: 'GET only' });
+    // the local certificate authority's certificate (public, no token): the plugin fetches it
+    // once and keeps it only when its fingerprint is the link's pin
+    if (url.pathname === '/api/can/now/ca.crt') {
+      const pem = tlsSource?.caPem();
+      if (!pem) return sendJson(res, 404, { error: 'No local certificate authority.' });
+      res.writeHead(200, { 'Content-Type': 'application/x-x509-ca-cert', 'Cache-Control': 'no-store' });
+      return res.end(pem);
+    }
     const given = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '') || String(url.searchParams.get('token') || '');
     const hash = crypto.createHash('sha256').update(given).digest('hex');
     if (!given || !crypto.timingSafeEqual(Buffer.from(hash), Buffer.from(cfg.tokenHash))) {
@@ -1386,10 +1394,23 @@ async function main() {
 
   // ---- Live CAN stats for a Stream Deck (server/canNow.js): GET /api/can/now with its own
   // read-only token, made here (admins, the Nerd panel). Off until a link is made.
+  // what the plugin pins (the link's pin=): the local certificate authority while the server's
+  // certificate comes from it, else the server's own certificate; none with a certificate every
+  // computer already trusts (Let's Encrypt) or without HTTPS of its own
+  const deckPin = () => {
+    try {
+      const st = tlsSource?.status();
+      if (!st) return null;
+      const hex = (fp) => String(fp || '').replace(/:/g, '').toLowerCase();
+      if (st.mode === 'acme' && st.serving === 'acme') return null;
+      if (st.mode === 'own') return st.certificate?.fingerprint ? `cert:${hex(st.certificate.fingerprint)}` : null;
+      return st.ca?.fingerprint ? `ca:${hex(st.ca.fingerprint)}` : null;
+    } catch { return null; }
+  };
   r.add('GET', '/api/can/stream-deck', (req, res, { user }) => {
     if (!adminHere(req, user)) throw new HttpError(403, 'Only an admin can manage the Stream Deck link.');
     const cfg = db.get('can-now', null);
-    return { enabled: Boolean(cfg?.tokenHash), at: cfg?.at || null, stats: canNow.STATS.map(({ id, label }) => ({ id, label })) };
+    return { enabled: Boolean(cfg?.tokenHash), at: cfg?.at || null, pin: deckPin(), stats: canNow.STATS.map(({ id, label }) => ({ id, label })) };
   });
   r.add('POST', '/api/can/stream-deck', (req, res, { user }) => {
     if (!adminHere(req, user)) throw new HttpError(403, 'Only an admin can manage the Stream Deck link.');
@@ -1397,7 +1418,7 @@ async function main() {
     db.set('can-now', { tokenHash: crypto.createHash('sha256').update(token).digest('hex'), at: Date.now() });
     canNowCache.clear();
     audit.warn(`Stream Deck link made (new token; any older link stops working): ${by(req, user)}`);
-    return { enabled: true, token, stats: canNow.STATS.map(({ id, label }) => ({ id, label })) };
+    return { enabled: true, token, pin: deckPin(), stats: canNow.STATS.map(({ id, label }) => ({ id, label })) };
   });
   // the Stream Deck plugin (assets/streamdeck), zipped as the .streamDeckPlugin file Stream Deck installs
   r.add('GET', '/api/can/stream-deck/plugin', async (req, res, { user }) => {

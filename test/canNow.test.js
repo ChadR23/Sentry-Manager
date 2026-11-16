@@ -132,7 +132,8 @@ test('GET /api/can/now: off until a link is made in the Nerd panel; only with it
     assert.match(plugin.headers.get('content-disposition'), /\.streamDeckPlugin/);
     const { readZip } = require('../server/zip');
     const names = readZip(Buffer.from(await plugin.arrayBuffer())).map((e) => e.name);
-    assert.ok(names.includes('com.sentrysix.canstats.sdPlugin/manifest.json') && names.includes('com.sentrysix.canstats.sdPlugin/images/key@2x.png'), names.join(' '));
+    assert.ok(['manifest.json', 'bin/plugin.js', 'stats.js', 'pi.html', 'images/key@2x.png'].every((f) => names.includes(`com.sentrysix.canstats.sdPlugin/${f}`)), names.join(' '));
+    assert.equal((await call('GET', '/api/can/stream-deck')).data.pin, null, 'no pin without HTTPS of its own (TLS_MODE=off)');
     assert.equal((await fetch(`${base}/api/can/stream-deck/plugin`)).status, 401, 'signed in only');
     // a new link: the old token stops
     const again = await call('POST', '/api/can/stream-deck');
@@ -155,65 +156,121 @@ test('the Stream Deck section is only in the CAN Nerd panel', () => {
   assert.match(nerd, /href="\/api\/can\/stream-deck\/plugin" download/);
 });
 
-// ---- the Stream Deck plugin (assets/streamdeck): run in a pretend Stream Deck
+// ---- the Stream Deck plugin (assets/streamdeck), run by Stream Deck's Node.js
 const PLUGIN = path.join(REPO, 'assets', 'streamdeck', 'com.sentrysix.canstats.sdPlugin');
+const { createPlugin, pinOf } = require(path.join(PLUGIN, 'bin', 'plugin.js'));
 
-test('the plugin: a valid manifest and every file it names', () => {
+test('the plugin: a valid manifest (Node), every file it names, and the server\'s stats', () => {
   const m = JSON.parse(fs.readFileSync(path.join(PLUGIN, 'manifest.json'), 'utf8'));
-  assert.equal(m.CodePath, 'index.html');
-  for (const f of [m.CodePath, m.PropertyInspectorPath, 'plugin.js', 'pi.js', 'stats.js']) assert.ok(fs.existsSync(path.join(PLUGIN, f)), f);
+  assert.equal(m.CodePath, 'bin/plugin.js');
+  assert.ok(m.Nodejs?.Version);
+  for (const f of [m.CodePath, m.PropertyInspectorPath, 'pi.js', 'stats.js']) assert.ok(fs.existsSync(path.join(PLUGIN, f)), f);
   for (const img of [m.Icon, m.CategoryIcon, m.Actions[0].Icon, m.Actions[0].States[0].Image]) {
     for (const suffix of ['.png', '@2x.png']) assert.ok(fs.existsSync(path.join(PLUGIN, `${img}${suffix}`)), `${img}${suffix}`);
   }
-  // the key picker lists exactly the server's stats
-  const win = {};
-  win.window = win;
-  require('vm').runInNewContext(fs.readFileSync(path.join(PLUGIN, 'stats.js'), 'utf8'), win);
-  assert.deepEqual([...win.CAN_STATS.map(([id]) => id)], STAT_IDS);
+  assert.deepEqual(require(path.join(PLUGIN, 'stats.js')).CAN_STATS.map(([id]) => id), STAT_IDS);
+  assert.deepEqual(pinOf(`ca:${'a'.repeat(64)}`), { kind: 'ca', fp: 'a'.repeat(64) });
+  assert.equal(pinOf('ca:short'), null);
 });
 
-test('the plugin: registers, asks once for all keys, and draws each key\'s stat (and errors) on it', async () => {
-  const vm = require('vm');
+test('the plugin: draws each key\'s stat, Set up without a link, ! with a reason, text never as markup', async () => {
   const sent = [];
-  let socket = null;
-  class FakeWS {
-    constructor(url) { this.url = url; this.readyState = 1; socket = this; setTimeout(() => this.onopen?.(), 0); }
-    send(t) { sent.push(JSON.parse(t)); }
-  }
-  const asked = [];
-  let answer = { status: 200, body: { car: 'Daily Driver', at: '2026-11-16T18:00:00Z', ageSec: 40, stale: false, units: 'mi', stats: { battery: { label: 'Battery', value: 78, unit: '%', text: '78%' }, speed: { label: 'Speed', value: 62, unit: 'mph', text: '62 mph' } } } };
-  const fakeFetch = async (url) => { asked.push(url); return { status: answer.status, ok: answer.status === 200, json: async () => answer.body }; };
-  const ctx = { WebSocket: FakeWS, fetch: fakeFetch, AbortController, URLSearchParams, setTimeout, clearTimeout, setInterval: () => 1, clearInterval: () => {}, encodeURIComponent };
-  ctx.window = ctx; // (in a browser, window is the global object)
-  const win = ctx;
-  vm.createContext(ctx);
-  vm.runInContext(fs.readFileSync(path.join(PLUGIN, 'stats.js'), 'utf8'), ctx);
-  vm.runInContext(fs.readFileSync(path.join(PLUGIN, 'plugin.js'), 'utf8'), ctx);
-  win.connectElgatoStreamDeckSocket(28196, 'PLUGIN', 'registerPlugin', '{}');
-  await new Promise((r) => setTimeout(r, 5));
-  assert.deepEqual(sent.slice(0, 2), [{ event: 'registerPlugin', uuid: 'PLUGIN' }, { event: 'getGlobalSettings', context: 'PLUGIN' }]);
-  const msg = (o) => socket.onmessage({ data: JSON.stringify(o) });
-  const imageOf = (ctxId) => decodeURIComponent([...sent].reverse().find((m) => m.event === 'setImage' && m.context === ctxId).payload.image.split(',')[1]);
-  // a key before the link is set: "Set up"
-  msg({ event: 'willAppear', context: 'K1', payload: { settings: { stat: 'battery' } } });
+  let answer = { data: { at: 'x', ageSec: 40, stale: false, stats: { battery: { value: 78, unit: '%', text: '78%' }, speed: { value: 62, unit: 'mph', text: '62 mph' } } } };
+  const p = createPlugin({ send: (o) => sent.push(o), fetch: async () => answer, setTimer: () => 1, clearTimer: () => {} });
+  const imageOf = (c) => decodeURIComponent([...sent].reverse().find((m) => m.event === 'setImage' && m.context === c).payload.image.split(',')[1]);
+  p.onMessage({ event: 'willAppear', context: 'K1', payload: { settings: { stat: 'battery' } } });
   assert.match(imageOf('K1'), /Set up/);
-  // the link set (global settings): one request, with the token and units
-  msg({ event: 'didReceiveGlobalSettings', payload: { settings: { server: 'https://nas.local:9000/', token: 'TOK', units: 'mi', every: 5 } } });
-  msg({ event: 'willAppear', context: 'K2', payload: { settings: { stat: 'speed' } } });
-  await new Promise((r) => setTimeout(r, 5));
-  assert.ok(asked.every((u) => u.startsWith('https://nas.local:9000/api/can/now?token=TOK&units=mi')), asked.join(' '));
+  p.onMessage({ event: 'didReceiveGlobalSettings', payload: { settings: { server: 'https://nas:9000', token: 'T' } } });
+  await p.ask();
+  p.onMessage({ event: 'willAppear', context: 'K2', payload: { settings: { stat: 'speed' } } });
+  await p.ask();
   assert.match(imageOf('K1'), />78%</);
   assert.match(imageOf('K2'), />62</);
   assert.match(imageOf('K2'), />mph</);
-  assert.match(imageOf('K2'), /now/);
-  // a wrong token: the key says so
-  answer = { status: 401, body: {} };
-  msg({ event: 'keyDown', context: 'K1' });
-  await new Promise((r) => setTimeout(r, 5));
+  answer = { error: 'link token?' };
+  p.onMessage({ event: 'keyDown', context: 'K1' });
+  await p.ask();
   assert.match(imageOf('K1'), /link token\?/);
-  // text from the server goes in as text, never markup
-  answer = { status: 200, body: { at: 'x', ageSec: 5, stats: { battery: { value: 'x', unit: '', text: '<script>' } } } };
-  msg({ event: 'keyDown', context: 'K1' });
-  await new Promise((r) => setTimeout(r, 5));
+  answer = { data: { at: 'x', ageSec: 5, stats: { battery: { value: 'x', unit: '', text: '<script>' } } } };
+  await p.ask();
   assert.ok(!imageOf('K1').includes('<script>') && imageOf('K1').includes('&lt;script&gt;'));
+});
+
+test('the plugin end to end: Stream Deck\'s socket, Sentry Six Manager\'s own certificate trusted by the pin, never the token to another', { timeout: 60_000 }, async () => {
+  const crypto = require('crypto');
+  const http = require('http');
+  const https = require('https');
+  const { TlsManager } = require('../server/tls');
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'deck-'));
+  const quiet = { info() {}, warn() {}, error() {} };
+  const servers = [];
+  const kids = [];
+  try {
+    // two servers with certificates of their own local authorities: ours, and an impostor
+    const make = async (name) => {
+      const t = new TlsManager({ dir: path.join(dir, name), log: quiet, hostnames: ['127.0.0.1'] });
+      const m = await t.ensure();
+      const seen = [];
+      const srv = https.createServer({ key: m.key, cert: m.cert }, (req, res) => {
+        seen.push(req.url);
+        if (req.url === '/api/can/now/ca.crt') { res.writeHead(200); return res.end(t.caPem()); }
+        if (!req.url.includes('token=TOK')) { res.writeHead(401); return res.end('no'); }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ at: 'x', ageSec: 30, stale: false, stats: { battery: { value: 81, unit: '%', text: '81%' } } }));
+      });
+      await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+      servers.push(srv);
+      const fp = new crypto.X509Certificate(t.caPem()).fingerprint256.replace(/:/g, '').toLowerCase();
+      return { url: `https://127.0.0.1:${srv.address().port}`, fp, seen };
+    };
+    const ours = await make('ours');
+    const other = await make('other');
+    // a pretend Stream Deck: the WebSocket server side (frames from the plugin are masked)
+    const sd = http.createServer();
+    const fromPlugin = [];
+    let toPlugin = null;
+    sd.on('upgrade', (req, socket) => {
+      const accept = crypto.createHash('sha1').update(`${req.headers['sec-websocket-key']}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
+      socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+      let buf = Buffer.alloc(0);
+      socket.on('data', (d) => {
+        buf = Buffer.concat([buf, d]);
+        for (;;) {
+          if (buf.length < 2) return;
+          let len = buf[1] & 127; let off = 2;
+          if (len === 126) { if (buf.length < 4) return; len = buf.readUInt16BE(2); off = 4; } else if (len === 127) { if (buf.length < 10) return; len = Number(buf.readBigUInt64BE(2)); off = 10; }
+          if (buf.length < off + 4 + len) return;
+          const mask = buf.subarray(off, off + 4);
+          const p = Buffer.from(buf.subarray(off + 4, off + 4 + len));
+          for (let k = 0; k < p.length; k++) p[k] ^= mask[k & 3];
+          buf = buf.subarray(off + 4 + len);
+          fromPlugin.push(JSON.parse(p.toString('utf8')));
+        }
+      });
+      toPlugin = (o) => { const p = Buffer.from(JSON.stringify(o)); const head = p.length < 126 ? Buffer.from([0x81, p.length]) : Buffer.from([0x81, 126, p.length >> 8, p.length & 255]); socket.write(Buffer.concat([head, p])); };
+    });
+    await new Promise((r) => sd.listen(0, '127.0.0.1', r));
+    servers.push(sd);
+    const kid = spawn(process.execPath, [path.join(PLUGIN, 'bin', 'plugin.js'), '-port', String(sd.address().port), '-pluginUUID', 'PLUG', '-registerEvent', 'registerPlugin', '-info', '{}'], { stdio: 'ignore' });
+    kids.push(kid);
+    const image = () => { const m = [...fromPlugin].reverse().find((x) => x.event === 'setImage'); return m ? decodeURIComponent(m.payload.image.split(',')[1]) : ''; };
+    const until = async (fn, ms = 15000) => { const end = Date.now() + ms; while (!fn()) { if (Date.now() > end) throw new Error(`timed out; the key: ${image().replace(/\s+/g, ' ').slice(-400)} images: ${fromPlugin.filter((m) => m.event === 'setImage').map((m) => (/font-weight="700"[^>]*>([^<]*)</.exec(decodeURIComponent(m.payload.image.split(',')[1])) || [])[1] + '/' + (/font-size="13"[^>]*>([^<]*)</.exec(decodeURIComponent(m.payload.image.split(',')[1])) || [])[1]).join(' | ')}`); await new Promise((r) => setTimeout(r, 25)); } };
+    await until(() => fromPlugin.length >= 2);
+    assert.deepEqual(fromPlugin.slice(0, 2), [{ event: 'registerPlugin', uuid: 'PLUG' }, { event: 'getGlobalSettings', context: 'PLUG' }]);
+    toPlugin({ event: 'willAppear', context: 'K1', payload: { settings: { stat: 'battery' } } });
+    // the link with our pin: the value
+    toPlugin({ event: 'didReceiveGlobalSettings', payload: { settings: { server: ours.url, token: 'TOK', pin: `ca:${ours.fp}`, every: 60 } } });
+    await until(() => />81%</.test(image()));
+    // the impostor with our pin: refused, and the token never sent to it
+    toPlugin({ event: 'didReceiveGlobalSettings', payload: { settings: { server: other.url, token: 'TOK', pin: `ca:${ours.fp}`, every: 60 } } });
+    await until(() => /cert changed/.test(image()));
+    assert.ok(other.seen.every((u) => !u.includes('TOK')), other.seen.join(' '));
+    // no pin and a certificate this computer does not trust: refused too
+    toPlugin({ event: 'didReceiveGlobalSettings', payload: { settings: { server: ours.url, token: 'TOK', every: 60 } } });
+    await until(() => /cert\?|can't reach/.test(image()));
+  } finally {
+    for (const k of kids) k.kill();
+    for (const s of servers) s.close();
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
 });
