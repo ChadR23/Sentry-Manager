@@ -83,8 +83,8 @@ area is served through them (`src/wire/`, see "Integration" below).
 | core | ported, see below and `src/core/README.md` |
 | supervisor | ported, see below and `src/supervisor/README.md`; TLS and the fd-3 link wired by core |
 | footage (`src/footage/`, with the first slice's lists in `api.rs`; arrival checksums in `src/arrival/`) | ported |
-| viewer | ported except CAN and Sentry USB evidence in archive gaps, drives and place tags (see below) |
-| ops | ported, the server monitor included; the converter's encoder block, node power and a few report numbers left (see below) |
+| viewer | ported (archive gaps with CAN Bridge and Sentry USB evidence, CAN GPS in place tags and drives, Studio's trashFolder) |
+| ops | ported, the server monitor included |
 | ui (pages, static files, interface packs, exports, settings) | ported |
 | can (CAN logs, uploads, device port, Sentry USB files) | ported |
 | converter | ported and mounted: job store, scanner, job service, lanes per GPU and per helper server, automatic conversion, benchmark, converted index, stats, runtime, the 22 channels behind `/api/converter/invoke/:name` and `/api/converter/events` |
@@ -196,10 +196,17 @@ the job's energy, a notification for failed clips), and ops its
 area; ops' `encoder_block` and `heartbeat_hardware`, `converter()`,
 `active_encodes()`, `job_progress()`, `jobs_queued()` and the helper
 servers' `WorkerRuntime` are the running converter; `host.stop()` at exit.
-Not wired yet: core's `conversions_active` / `settle_conversions` hooks for
-Clear jobs; `ConvertStats`' device names (the heartbeat names the encoder,
-not the GPU); the viewer's previews of a converted clip are made again only
-when asked.
+Also wired: core's `settle_conversions` / `conversions_active` hooks for
+Clear jobs (index.js settleConversionRows: once the converter has listed its
+jobs, a conversion row still "running" for a job it no longer runs gets the
+job's end, or "interrupted" when it no longer has the job; the jobs under way
+are kept), the jobs as index.js keeps them (slimJob; a job listed at the start
+is not mirrored, as Node), the heartbeat's device names (heartbeat_hardware
+names the GPU by the encode's render node or NVIDIA index, encodeGpuName).
+The converter's data folder is Node's: `DATA/converter` (its job store
+`converter-jobs`, the converted index, automatic conversion), the temp folder
+`DATA/converter-temp`, so either server takes over the other's jobs. The
+viewer's previews of a converted clip are made again only when asked.
 
 
 Done, round 1 (`src/converter/`, library only: nothing is wired into
@@ -662,15 +669,13 @@ search, sign-in and the 🔑 window are core's; share status is footage's.
 
 Not done yet:
 
-- the encoder block itself (encoderStats.js, converter area, through
-  `OpsCtx::encoder_block`) and heartbeatHardware/convertStats (converter);
-  the benchmark's meter (`meter_start`/`meter_stop`: the benchmark is not
-  ported);
-- (node power comes from the helper servers on core;)
-  `sentry_usb_infos()` (CAN area's Sentry USB info files),
-  `driven_metres()` (the viewer's speed index): their defaults (none, 0).
+- (done: the encoder block and heartbeatHardware/convertStats are the
+  converter's, the benchmark's meter is ops'; `sentry_usb_infos()` reads the
+  CAN area's Sentry USB info files, `driven_metres()` sums the speed index's
+  days (index.js drivenMetres), and the helper servers' power calls count as
+  a page asking for the stats (statsAskedAt, the RAPL keep-alive).)
 
-Proposed differences (need the owner's OK): `host.node` in /api/stats is
+Accepted differences (the owner's OK): `host.node` in /api/stats is
 null (there is no Node: Node puts process.version there); a share check's
 answer that lands during the same sample shows from the next one, as in
 Node, but a background read's answer now always waits for the sample to end
@@ -723,18 +728,30 @@ the other's.
 
 Not done yet:
 
-- CAN Bridge evidence everywhere it is used: recording place tags and drive
-  ends from CAN GPS, `can` on drives, archive gaps' CAN driving/Sentry and
-  time zone shifts (needs the CAN index);
-- Sentry USB in archive gaps (status file, snapshots, car-files.tsv: carFilesPass,
-  `carFiles` in the answer and the day cards' `archive`/`carFiles`);
-- `forDays` for the day cards (`archive`) is not wired (always null);
-- time zones other than UTC and the server's own `TZ` (driving's "this
-  week", archive gaps' wall clock) need a zone table (core);
-- `POST /api/studio/trashFolder` (Recycle Bin, footage area): answers 501;
+- (done: archive gaps whole (archiveGap.js analyze, carFilesPass and the
+  sentences): CAN Bridge driving and Sentry minutes from the CAN index's
+  minute files (`act` at the top, else read whole; the keys learned, the
+  Sentry habit, CAR_FORMAT), wrong time zones, Sentry USB's transfer range,
+  missed snapshots, the list of what the car wrote (Pi missed, car didn't
+  record, waiting, deleted, unknown), the Recycle Bin, the day cards'
+  `archive` and `carFiles`, `soon()` after the CAN index indexes a key's
+  logs, `forget` with the vehicle; checked by `tests/archive_gap_parity.rs`
+  (lean/parity/archiveGap.js: every analyze() call of Node's own tests
+  test/archiveGap, carFiles, deletedClips, sentryUsb and snapshotGaps, 77
+  calls, the answers field for field the same);
+- (done: CAN Bridge GPS in recording place tags and drive ends
+  (recordingPlace.js fixesOf, canEnds, canNear), `can` on drives;
+  `lean/parity/placeTags.js` (test/recordingPlace.test.js's footage, speed
+  index and CAN index on both servers): recordings, days and drives the same;)
+- (done: any time zone (Intl's, through chrono-tz) for driving's "this week"
+  and the archive gaps' wall clock;)
+- (done: `POST /api/studio/trashFolder` through the footage area's Recycle
+  Bin, in index.js's order: the allowed guard, the vehicle, a scan when there
+  is none, the recordings in the folder, the bin's checks;)
 - (done: archive-gap notifications through ops, arrival from the birth time
   where the share has one, admin checks by core, audit lines naming who
   asked, the hub; one speed index.)
+
 ## Footage (`src/footage/`)
 
 What it needs from core is `footage/ctx.rs` (`Ctx`: the manager database,
@@ -840,8 +857,8 @@ Left to do:
 - (done: the catalog is in manager.db's catalog tables; core wiring of
   `Caller`, jobs, announce, audit, the CAN hooks, savings, share alerts,
   `vehicle_removed` for savings and Sentry USB; `IpcMounter` when supervised.)
-- The car-model change does not kick the CAN index yet; `vehicle_removed`
-  does not yet forget archive gaps and drive data.
+- The car-model change does not kick the CAN index yet. (`vehicle_removed`
+  forgets the archive gaps and the drive data now.)
 - Stars are sorted by clip with byte order; Node uses `localeCompare`
   (ICU). The same for clip keys (YYYY-MM-DD_HH-MM-SS), which is all a star
   can hold.
@@ -1006,7 +1023,7 @@ Not done yet:
 
 ## Known differences
 
-None accepted yet. Proposed (need the owner's OK):
+Accepted by the owner (2026-11-16), with the earlier ones:
 
 - core: a JSON body over 1 MB gets `413 {"error":"Request body too large"}`;
   Node destroys the connection (the client sees "socket hang up").
@@ -1017,3 +1034,7 @@ None accepted yet. Proposed (need the owner's OK):
 - ops: `/api/system` `nativeHelper` is true: the no-replace rename is called
   directly (renameat2), where Node reports whether its helper program was
   built.
+- ops: `host.node` in /api/stats is null (there is no Node).
+- the other areas' proposed differences above (helper servers' TLS error
+  texts, the supervisor's logged file system errors, the encoder and stats
+  details listed there).
