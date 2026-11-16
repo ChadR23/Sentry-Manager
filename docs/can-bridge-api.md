@@ -84,11 +84,21 @@ removes it; each is in the audit log. Only a fingerprint of the token is kept.
   car sends.
 - Answers are worked out at most every 3 seconds.
 
-On the Stream Deck, use a plugin that shows the text a web address returns
-(for example *API Ticker*), one key per stat, polling every few seconds. With
-Sentry Six Manager's own certificate (TLS_MODE=auto), install its local
-certificate authority on that computer first (Settings → Security & HTTPS),
-or the plugin may refuse the connection.
+**The Stream Deck plugin** (*Download the Stream Deck plugin* in the same
+section; its source is `assets/streamdeck/`): open the downloaded
+`Sentry Six CAN Stats.streamDeckPlugin` to install it, drag its **CAN stat**
+action onto a key, paste the link into the key's settings, and pick the stat
+for that key. The link, the units, an optional car and how often to ask
+(5 seconds by default) are shared by every key; each key picks its own stat.
+A key shows the stat's name, its value big, the unit and how old it is
+(dimmed when stale); *Set up* until a link is pasted, and *!* with a short
+reason when the server cannot be reached or the link is wrong. Pressing a key
+asks again at once. All keys share one request.
+
+Any other plugin that shows the text a web address returns works too, one
+key per stat. With Sentry Six Manager's own certificate (TLS_MODE=auto),
+install its local certificate authority on that computer first (Settings →
+Security & HTTPS), or Stream Deck may refuse the connection.
 
 ## Tokens: one per car
 

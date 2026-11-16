@@ -1341,6 +1341,8 @@ async function main() {
   };
   /** GET /api/can/now[/<stat>][?token=…&car=…&units=mi|km]: the newest CAN values, or one as plain text. */
   async function canNowAnswer(req, res, url) {
+    // read by the Stream Deck plugin from its own origin: allowed, as only the token lets it in (no cookies)
+    res.setHeader('Access-Control-Allow-Origin', '*');
     const cfg = db.get('can-now', null);
     if (!cfg?.tokenHash) return sendJson(res, 404, { error: 'Not found' });
     if (req.method !== 'GET' && req.method !== 'HEAD') return sendJson(res, 405, { error: 'GET only' });
@@ -1396,6 +1398,22 @@ async function main() {
     canNowCache.clear();
     audit.warn(`Stream Deck link made (new token; any older link stops working): ${by(req, user)}`);
     return { enabled: true, token, stats: canNow.STATS.map(({ id, label }) => ({ id, label })) };
+  });
+  // the Stream Deck plugin (assets/streamdeck), zipped as the .streamDeckPlugin file Stream Deck installs
+  r.add('GET', '/api/can/stream-deck/plugin', async (req, res, { user }) => {
+    if (!adminHere(req, user)) throw new HttpError(403, 'Only an admin can download the Stream Deck plugin.');
+    const root = path.join(APP_ROOT, 'assets', 'streamdeck');
+    const folder = 'com.sentrysix.canstats.sdPlugin';
+    const walk = async (rel) => (await fs.promises.readdir(path.join(root, rel), { withFileTypes: true })).flatMap((e) => (e.isDirectory() ? [{ dir: `${rel}/${e.name}` }] : [`${rel}/${e.name}`]));
+    const files = [];
+    const todo = [folder];
+    while (todo.length) {
+      for (const x of await walk(todo.shift())) if (typeof x === 'string') files.push(x); else todo.push(x.dir);
+    }
+    const zip = writeZip(await Promise.all(files.sort().map(async (name) => ({ name, data: await fs.promises.readFile(path.join(root, name)) }))));
+    res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': zip.length, 'Cache-Control': 'no-store', 'Content-Disposition': attachment('Sentry Six CAN Stats.streamDeckPlugin') });
+    res.end(zip);
+    return undefined;
   });
   r.add('DELETE', '/api/can/stream-deck', (req, res, { user }) => {
     if (!adminHere(req, user)) throw new HttpError(403, 'Only an admin can manage the Stream Deck link.');

@@ -126,6 +126,14 @@ test('GET /api/can/now: off until a link is made in the Nerd panel; only with it
     assert.equal(bearer.status, 200, 'or as a Bearer header');
     assert.equal((await bare(`/api/can/now/nope?token=${tok}`)).status, 404);
     assert.equal((await call('GET', '/api/can/stream-deck')).data.enabled, true);
+    assert.equal((await fetch(`${base}/api/can/now?token=${tok}`)).headers.get('access-control-allow-origin'), '*', 'the plugin reads it from its own origin');
+    const plugin = await fetch(`${base}/api/can/stream-deck/plugin`, { headers: { Cookie: cookie, 'X-Forwarded-Proto': 'https' } });
+    assert.equal(plugin.status, 200);
+    assert.match(plugin.headers.get('content-disposition'), /\.streamDeckPlugin/);
+    const { readZip } = require('../server/zip');
+    const names = readZip(Buffer.from(await plugin.arrayBuffer())).map((e) => e.name);
+    assert.ok(names.includes('com.sentrysix.canstats.sdPlugin/manifest.json') && names.includes('com.sentrysix.canstats.sdPlugin/images/key@2x.png'), names.join(' '));
+    assert.equal((await fetch(`${base}/api/can/stream-deck/plugin`)).status, 401, 'signed in only');
     // a new link: the old token stops
     const again = await call('POST', '/api/can/stream-deck');
     assert.equal((await bare(`/api/can/now?token=${tok}`)).status, 401);
@@ -144,4 +152,68 @@ test('the Stream Deck section is only in the CAN Nerd panel', () => {
   assert.match(nerd, /\$\{carDataHtml\(\)\}\s*\$\{deckHtml\(\)\}/);
   const walk = (d) => fs.readdirSync(path.join(REPO, d), { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(`${d}/${e.name}`) : /\.(js|html)$/.test(e.name) ? [`${d}/${e.name}`] : []));
   for (const f of [...walk('web'), ...walk('examples/ui-packs')]) if (f !== 'web/nerd.js') assert.equal(/stream-deck|api\/can\/now/.test(fs.readFileSync(path.join(REPO, f), 'utf8')), false, f);
+  assert.match(nerd, /href="\/api\/can\/stream-deck\/plugin" download/);
+});
+
+// ---- the Stream Deck plugin (assets/streamdeck): run in a pretend Stream Deck
+const PLUGIN = path.join(REPO, 'assets', 'streamdeck', 'com.sentrysix.canstats.sdPlugin');
+
+test('the plugin: a valid manifest and every file it names', () => {
+  const m = JSON.parse(fs.readFileSync(path.join(PLUGIN, 'manifest.json'), 'utf8'));
+  assert.equal(m.CodePath, 'index.html');
+  for (const f of [m.CodePath, m.PropertyInspectorPath, 'plugin.js', 'pi.js', 'stats.js']) assert.ok(fs.existsSync(path.join(PLUGIN, f)), f);
+  for (const img of [m.Icon, m.CategoryIcon, m.Actions[0].Icon, m.Actions[0].States[0].Image]) {
+    for (const suffix of ['.png', '@2x.png']) assert.ok(fs.existsSync(path.join(PLUGIN, `${img}${suffix}`)), `${img}${suffix}`);
+  }
+  // the key picker lists exactly the server's stats
+  const win = {};
+  win.window = win;
+  require('vm').runInNewContext(fs.readFileSync(path.join(PLUGIN, 'stats.js'), 'utf8'), win);
+  assert.deepEqual([...win.CAN_STATS.map(([id]) => id)], STAT_IDS);
+});
+
+test('the plugin: registers, asks once for all keys, and draws each key\'s stat (and errors) on it', async () => {
+  const vm = require('vm');
+  const sent = [];
+  let socket = null;
+  class FakeWS {
+    constructor(url) { this.url = url; this.readyState = 1; socket = this; setTimeout(() => this.onopen?.(), 0); }
+    send(t) { sent.push(JSON.parse(t)); }
+  }
+  const asked = [];
+  let answer = { status: 200, body: { car: 'Daily Driver', at: '2026-11-16T18:00:00Z', ageSec: 40, stale: false, units: 'mi', stats: { battery: { label: 'Battery', value: 78, unit: '%', text: '78%' }, speed: { label: 'Speed', value: 62, unit: 'mph', text: '62 mph' } } } };
+  const fakeFetch = async (url) => { asked.push(url); return { status: answer.status, ok: answer.status === 200, json: async () => answer.body }; };
+  const ctx = { WebSocket: FakeWS, fetch: fakeFetch, AbortController, URLSearchParams, setTimeout, clearTimeout, setInterval: () => 1, clearInterval: () => {}, encodeURIComponent };
+  ctx.window = ctx; // (in a browser, window is the global object)
+  const win = ctx;
+  vm.createContext(ctx);
+  vm.runInContext(fs.readFileSync(path.join(PLUGIN, 'stats.js'), 'utf8'), ctx);
+  vm.runInContext(fs.readFileSync(path.join(PLUGIN, 'plugin.js'), 'utf8'), ctx);
+  win.connectElgatoStreamDeckSocket(28196, 'PLUGIN', 'registerPlugin', '{}');
+  await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual(sent.slice(0, 2), [{ event: 'registerPlugin', uuid: 'PLUGIN' }, { event: 'getGlobalSettings', context: 'PLUGIN' }]);
+  const msg = (o) => socket.onmessage({ data: JSON.stringify(o) });
+  const imageOf = (ctxId) => decodeURIComponent([...sent].reverse().find((m) => m.event === 'setImage' && m.context === ctxId).payload.image.split(',')[1]);
+  // a key before the link is set: "Set up"
+  msg({ event: 'willAppear', context: 'K1', payload: { settings: { stat: 'battery' } } });
+  assert.match(imageOf('K1'), /Set up/);
+  // the link set (global settings): one request, with the token and units
+  msg({ event: 'didReceiveGlobalSettings', payload: { settings: { server: 'https://nas.local:9000/', token: 'TOK', units: 'mi', every: 5 } } });
+  msg({ event: 'willAppear', context: 'K2', payload: { settings: { stat: 'speed' } } });
+  await new Promise((r) => setTimeout(r, 5));
+  assert.ok(asked.every((u) => u.startsWith('https://nas.local:9000/api/can/now?token=TOK&units=mi')), asked.join(' '));
+  assert.match(imageOf('K1'), />78%</);
+  assert.match(imageOf('K2'), />62</);
+  assert.match(imageOf('K2'), />mph</);
+  assert.match(imageOf('K2'), /now/);
+  // a wrong token: the key says so
+  answer = { status: 401, body: {} };
+  msg({ event: 'keyDown', context: 'K1' });
+  await new Promise((r) => setTimeout(r, 5));
+  assert.match(imageOf('K1'), /link token\?/);
+  // text from the server goes in as text, never markup
+  answer = { status: 200, body: { at: 'x', ageSec: 5, stats: { battery: { value: 'x', unit: '', text: '<script>' } } } };
+  msg({ event: 'keyDown', context: 'K1' });
+  await new Promise((r) => setTimeout(r, 5));
+  assert.ok(!imageOf('K1').includes('<script>') && imageOf('K1').includes('&lt;script&gt;'));
 });

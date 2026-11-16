@@ -468,7 +468,8 @@ export function openNerdPanel() {
     const tok = deckToken ? encodeURIComponent(deckToken) : '<token>';
     const ex = (stat) => `${base}/${stat}?token=${tok}`;
     return `<h3>Stream Deck</h3>
-      <p class="nd-muted">A read-only link to the newest CAN values received (paired with footage or not), as fresh as the CAN Bridge's last upload. Each stat answers as plain text for a Stream Deck key (a plugin that shows a web address's text, such as API Ticker), on this same address: no other port.</p>
+      <p class="nd-muted">Your car's newest CAN values on Stream Deck keys (paired with footage or not), as fresh as the CAN Bridge's last upload, from this same address: no other port. Install the plugin, make a link here, and paste the link into any key's settings; then pick a stat for each key.</p>
+      <div class="nd-row"><a class="nd-btn" href="/api/can/stream-deck/plugin" download>Download the Stream Deck plugin</a></div>
       ${deck.enabled
         ? `${deckToken
             ? `<p><b>Your link</b> (the token is shown once: copy it now):</p><div class="nd-box nd-mono" data-deck-url>${esc(ex('battery'))}</div>`

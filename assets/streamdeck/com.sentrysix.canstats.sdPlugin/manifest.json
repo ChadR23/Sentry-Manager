@@ -1,0 +1,28 @@
+{
+  "SDKVersion": 2,
+  "Name": "Sentry Six CAN Stats",
+  "Version": "1.0.0.0",
+  "Author": "Sentry Six Manager",
+  "Description": "Your car's newest CAN values from Sentry Six Manager on Stream Deck keys: speed, battery, power, temperatures, tire pressures and more.",
+  "URL": "https://github.com/skittles-fivem/Sentry-Manager/blob/main/docs/can-bridge-api.md#live-stats-for-a-stream-deck",
+  "Icon": "images/plugin",
+  "Category": "Sentry Six",
+  "CategoryIcon": "images/category",
+  "CodePath": "index.html",
+  "PropertyInspectorPath": "pi.html",
+  "OS": [
+    { "Platform": "windows", "MinimumVersion": "10" },
+    { "Platform": "mac", "MinimumVersion": "10.15" }
+  ],
+  "Software": { "MinimumVersion": "6.0" },
+  "Actions": [
+    {
+      "UUID": "com.sentrysix.canstats.stat",
+      "Name": "CAN stat",
+      "Tooltip": "One of your car's CAN values. Press to refresh.",
+      "Icon": "images/action",
+      "SupportedInMultiActions": false,
+      "States": [{ "Image": "images/key", "ShowTitle": false }]
+    }
+  ]
+}
