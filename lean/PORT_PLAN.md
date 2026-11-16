@@ -79,7 +79,7 @@ folder, plus one line in `src/api.rs` (its routes) and its dependencies in
 | --- | --- |
 | footage list, recordings, media ranges, speeds, MP4/SEI reading | first slice done (see README.md) |
 | supervisor | ported, see below and `src/supervisor/README.md` |
-| converter | file safety, telemetry, job store, job service, runtime and the 22 channels ported and tested (library, not mounted); lanes, auto, benchmark, helper servers still to do (see below) |
+| converter | ported and tested (library, not mounted): file safety, telemetry, job store, job service, lanes per GPU, automatic conversion, benchmark, the helper servers' side, the 22 channels; see below |
 | ops | ported; the encoder block and the wiring are the converter's and core's, see below |
 | viewer | ported except where it needs CAN, Sentry USB status, notifications or accounts; see below |
 | footage: arrival checksums | ported and tested with parity (`src/arrival/`, library, not mounted); see "Footage" below |
@@ -208,52 +208,111 @@ libx265 and node, `LEAN_CONVERTER_JOB_FIXTURES=<dir>` reuses the clip):
   oversized payloads, unknown channels) answered the same by Node's bridge
   and this one on the same stand-in service.
 
+Round 3 (also library only):
+
+- Lanes per GPU (`service/lanes.rs`, jobService.js): resolveLanes (each
+  lane's device from the device list; a missing one logged and skipped; a
+  whole-node lane finds the node's default device; helper servers told
+  their number, at most 8, and sent 15 clips ahead in proportion), workers
+  per lane with laneLimit / deviceActive / the default lane (a switch
+  between no lanes and lanes never runs a GPU above its number), setLanes,
+  setConcurrency on a lanes job (its one GPU still here, else no lanes),
+  slotsOf; `planner.selectFor` per lane; the decode tiers (zero-copy, GPU,
+  then CPU), a tier that failed and a slower one fixed recorded broken per
+  GPU and encoder; GPU decode for a Full verify with its fallback count.
+- `devices.rs` (encodeDevices.js + runtime.js): render nodes by PCI slot
+  (char device numbers, else /sys/class/drm), nvidia-smi with its deadline
+  (a wedged one is not joined by another), the CPU last; `Registry`: one
+  lookup at a time, an answer reused 2 s, resolveDevice, defaultDeviceOf,
+  devices() (each device's proven encoder per codec, nothing tested with
+  fewer than two GPUs or while something encodes).
+- `converted_index.rs` + `mp4_header.rs` (convertedIndex.js, mp4Header.js):
+  discovery skips converted clips from the index or their MP4 header (a
+  share error waited for, 20 s per check), converted outputs recorded, the
+  same JSON file as Node's.
+- `auto_convert.rs` (autoConvert.js): settings, the per-vehicle configs and
+  saved-only vehicles, the give-up index (revision 5), the schedule and
+  rounds, the time window (hours or off-peak), holdManual, one job per
+  vehicle on devices of its own (planLanes with the helper servers'
+  priorities and Off), setLanes / setConcurrency follow a running job,
+  saveVehicle / forgetVehicle, restart adoption; the same files as Node's.
+- `benchmark.rs` (benchmark.js) and `Converter::run_benchmark` (runtime.js):
+  every level, bad clips left out, energy per level, the verify comparison;
+  originals found in a mostly converted archive; isolated level runs; every
+  GPU alone; progress as `converter:benchmarkProgress` on the asking
+  window's `/api/converter/events`.
+- `stats.rs` (encoderStats.js, convertStats.js), `host.rs` (converterHost
+  start retries), sweepEmptySnapshotFolders (after a job ends and at start),
+  holdDiscovered (`RuntimeOptions::hold_discovered`), the channels setLanes,
+  devices (DEVICE_UNSUPPORTED on start), getAuto / setAuto / saveVehicle /
+  forgetVehicle / checkAutoNow, runBenchmark / cancelBenchmark.
+- The helper servers' side (`service/encode.rs` run_remote, `work.rs`):
+  a node lane's clip is encoded there (ffmpeg's progress, "queued", stall
+  and kill handling), its pictures checked here (`nodes::picture`) unless
+  the node is trusted, verified and saved here; a node that fails, sends
+  other pictures or an encode that does not verify gives the clip to this
+  server's own GPU first (two at a time, NODE_FALLBACK_AT_ONCE); with this
+  server Off the clip fails (NODE_ENCODE_FAILED / NODE_PICTURE_MISMATCH /
+  NODE_NO_ENCODER); a row set lower takes back the clips waiting in the
+  node's queue (re-queued first, the try not counted); checks per node at
+  its number + 2. `nodes::ctx::WorkerRuntime` is implemented on `Converter`.
+- Probes, verifies and telemetry runs have converterHost's 30-minute limit
+  (they had 30 s: a loaded machine failed a verify Node waits for; that was
+  the cause of `conversions_as_node_runs_them` failing once under load).
+
+Checked (round 3): test/lanes (the job service's part, with an ffmpeg
+stand-in script and the real planner over a fake probe), encodeDevices,
+convertedIndex, mp4Header, autoGiveUp, autoPerVehicle, nodePriority
+(planning), benchmark, encoderStats, the picture-check and converter tests
+of nodes.test.js; the crash points inside a file copy (temp-created,
+temp-torn, temp-complete, temp-readback, writer, staging-copy, through a
+test-only fs hook, `fs_hook.rs`) and 'lowered', each killed with SIGKILL
+(replace and separate, direct and staging, three at once, one restarted
+by Node): every job finishes by itself, the original never lost. Parity
+(`lean/parity/converterAuto.js`): automatic conversion over a 51-step
+scenario (every state, every call to the job service, the files written,
+byte for byte), the benchmark's events and results (5 scenarios), the
+device list (fake /dev and /sys, three nvidia-smi answers) and devices() /
+resolveDevice over 8 GPU sets, all equal to Node's.
+
 ### Mounting (for the integrator)
 
 ```rust
-let conv = converter::runtime::Converter::open(converter::runtime::RuntimeOptions {
-    data_path, temp_path, ffmpeg, ffprobe,
-    before_replace_original: Some(/* Sentry USB checksum hook */),
-    tools: None, tune: None, hooks: None,
-})?;
-conv.start()?;                       // recovers unfinished jobs
-let bridge = converter::ipc::Bridge::new(
-    Arc::new(conv.service.clone()), ctx /* Arc<dyn ConverterCtx> */,
+let mut o = converter::runtime::RuntimeOptions::new(data_path, temp_path, &ffmpeg, &ffprobe);
+o.before_replace_original = Some(/* arrival::Area::before_replace_fn */);
+o.hold_discovered = Some(/* Sentry USB copies in progress */);
+o.power_meter = Some(/* energy per benchmark level */);
+o.is_cheap_now = Some(/* off-peak rate now (ops power price) */);
+o.nodes = Some(Arc::new(converter::service::lanes::FromNodes(nodes_api.nodes.clone() /* Arc<dyn RemoteNodes> */)));
+let host = converter::host::Host::default();
+let conv = host.start(&|| converter::runtime::Converter::open(make_options()), &*ctx, 5, Duration::from_secs(2))?;
+let bridge = converter::ipc::Bridge::new(Arc::new(conv.service.clone()), ctx.clone(),
     converter::ipc::capabilities(&conv.staging.capabilities()));
+bridge.mount_runtime(&conv);         // devices, automatic conversion, the benchmark
 // POST /api/converter/invoke/:name  -> bridge.invoke(name, body (None if empty), client)  (blocking: spawn_blocking)
 // GET  /api/converter/events?client= -> bridge.attach_events(client, sink); bridge.detach(client) on close
-// on exit: conv.shutdown()
+// OpsCtx::encoder_block(snapshot, energy) -> conv.encoder_block(snapshot, energy)
+// OpsCtx::heartbeat_hardware -> converter::stats::heartbeat_hardware(&found, cpu, &convert_stats, &paired, 8),
+//   with a ConvertStats (settings get/set) sampled from conv.active_encodes() every poll
+// NodesCtx::runtime -> Some(conv.clone()) (WorkerRuntime)
+// on exit: host.stop()
 ```
-`ConverterCtx` (ctx.rs): data/temp paths, tool paths, the footage guard,
-the Sentry USB hook, clip_converted (previews), log lines. `Service` also
-answers `active_encodes()`, `slots_of(id)`, `live_jobs()` for stats/ops.
+`RuntimeOptions::new` fills the rest (tools, tune, hooks, encoders,
+discovery: tests; gpu_decode true; auto_timer true). `ConverterCtx` (ctx.rs):
+data/temp paths, tool paths, the footage guard, the Sentry USB hook,
+clip_converted (previews), log lines. `Converter` also answers
+`active_encodes()` (a benchmark's included), `encoding_now()`,
+`devices_answer()`; `Service` answers `slots_of(id)`, `live_jobs()`.
 
-Not done yet, in order:
+Not done yet:
 
-1. Lanes per GPU (`setLanes`, `devices`, resolveLanes, the device list):
-   a job's lanes are kept and it runs with their total at once on the
-   planner's encoder, as Node does when none of its GPUs is found; GPU
-   decode tiers (zero-copy, GPU, CPU) are not used (CPU decode).
-2. convertedIndex.js and mp4Header.js (discovery skips converted clips
-   without opening them): today every clip is probed in a worker; the
-   result is the same ('already-converted'), it is slower on big archives.
-   pictureCheck.js (only for helper servers).
-3. autoConvert.js (the auto channels answer AUTO_UNAVAILABLE), benchmark.js
-   (runBenchmark answers BENCHMARK_UNAVAILABLE before checking its
-   payload), encodeDevices.js, encoderStats.js (`OpsCtx::encoder_block`),
-   convertStats.js (`OpsCtx::heartbeat_hardware`), holdDiscovered (Sentry
-   USB copies in progress: `Options::skip_discovered` is there for it).
-   server/gpu.js and stats/gpu.js are ported in ops (`ops::gpu`,
-   `ops::stats::gpu`) for the converter to call.
-4. Helper servers: ported in `src/nodes/` (see "Helper servers" below); the
-   converter's part is left: node lanes in jobService through
-   `nodes::lanes::RemoteNodes`, and `WorkerRuntime` on its planner.
-5. The crash points inside a file copy (temp-created, temp-torn,
-   temp-complete, temp-readback, writer, staging-copy) need an fs hook in
-   staging; round 1's journal crash test covers those records, not a kill.
-   The 'lowered' point (several at once, then one) is not run.
-6. sweepEmptySnapshotFolders (empty verification folders removed while
-   idle) and the converter lifecycle's start retries (converterHost).
+1. Parity of runBenchmark through the whole runtime (real clips, the
+   isolated level services) against Node's: only runConverterBenchmark is
+   compared (its events and results); the runtime's part is tested here.
+   (pictureCheck has one Rust copy, `nodes::picture`, used by the converter.)
+2. The node side is tested with a stand-in node (lanes, failover, Off,
+   15 ahead, withdraw); an end-to-end run against a real `nodes` worker
+   (nodes.test.js "a real remote encode") is not.
 
 Proposed differences (need the owner's OK): a nested box literally named
 `root` is serialized as a box (Node's writer would treat it as the tree
