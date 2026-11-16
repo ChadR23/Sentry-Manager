@@ -278,6 +278,7 @@ pub fn output_path(config: &Value, item: &Value) -> String {
 
 // ---- the service -------------------------------------------------------------
 
+#[derive(Clone)]
 pub struct Options {
     pub store: Arc<JobStore>,
     pub staging: Arc<Tx>,
