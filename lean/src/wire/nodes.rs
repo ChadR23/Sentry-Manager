@@ -6,7 +6,7 @@
 //! path on its HTTPS port with the certificate this connection was served with.
 
 use super::Server;
-use crate::converter::planner::{Device, Planner, Selected};
+use crate::converter::planner::Planner;
 use crate::converter::process::BoundedRunner;
 use crate::core::http::{RawReq, Res};
 use crate::core::{Ctx as CoreCtx, HttpError, Reply};
@@ -19,26 +19,6 @@ use serde_json::Value;
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Weak};
-
-/// The worker's runtime: the converter's planner (selectEncoder, cpuEncoder, selectEncoderFor).
-pub struct PlannerRuntime {
-    srv: Weak<Server>,
-}
-
-impl WorkerRuntime for PlannerRuntime {
-    fn select_encoder(&self, family: &str) -> Result<Option<Selected>, String> {
-        self.srv.upgrade().ok_or("stopping")?.planner().select(family, true)
-    }
-    fn cpu_encoder(&self, family: &str) -> Result<Selected, String> {
-        self.srv.upgrade().ok_or("stopping")?.planner().select_cpu_fallback(family)
-    }
-    fn select_encoder_for(&self, family: &str, device: &Device, probe: bool) -> Option<Result<Option<Selected>, String>> {
-        Some(self.srv.upgrade()?.planner().select_for(family, device, probe))
-    }
-    fn encoding_now(&self) -> bool {
-        self.srv.upgrade().and_then(|s| s.converter().map(|c| !c.runtime.service.active_encodes().is_empty())).unwrap_or(false)
-    }
-}
 
 pub struct CoreNodes {
     srv: Weak<Server>,
@@ -112,10 +92,9 @@ impl NodesCtx for CoreNodes {
         self.state.config.ffprobe.clone()
     }
     fn runtime(&self) -> Option<Arc<dyn WorkerRuntime>> {
-        // (None while the converter starts: the worker answers "The converter is starting.")
-        let s = self.srv.upgrade()?;
-        s.converter()?;
-        Some(Arc::new(PlannerRuntime { srv: Arc::downgrade(&s) }))
+        // the converter itself (None while it starts: the worker answers "The converter is starting.")
+        let rt: Arc<dyn WorkerRuntime> = self.srv.upgrade()?.converter()?.runtime.clone();
+        Some(rt)
     }
 }
 
@@ -124,7 +103,7 @@ pub fn make(srv: &Arc<Server>) -> Arc<NodesApi> {
     Arc::new(NodesApi::new(ctx, crate::nodes::routes::ApiOptions { work_dir: None, bench_dir: None, poll_ms: None, spawn: None }))
 }
 
-/// The planner the health check, the worker and its runtime share.
+/// The planner of the health check's encoder test.
 pub fn planner(ffmpeg: &str) -> Planner<BoundedRunner> {
     Planner::new(BoundedRunner::default(), "linux", ffmpeg)
 }

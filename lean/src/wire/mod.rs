@@ -219,9 +219,6 @@ pub fn build(state: Arc<AppState>, r: &mut Router) -> Arc<Server> {
     let _ = srv.ui.set(ui::make(&srv));
     // (before the converter: its hook records the original's checksum before a replace)
     let _ = srv.arrival.set(arrival::make(&srv));
-    if let Some(c) = converter::make(&srv) {
-        let _ = srv.converter.set(c);
-    }
     let _ = srv.nodes.set(nodes::make(&srv));
     hooks(&srv);
     register(&srv, r);
@@ -271,9 +268,8 @@ pub fn start(srv: &Arc<Server>) {
     if let Some(can) = srv.can() {
         can.start();
     }
-    if let Some(conv) = srv.converter() {
-        converter::start(srv, conv);
-    }
+    // (after the helper servers: its node lanes are theirs)
+    converter::spawn(srv);
     if let Some(a) = srv.arrival() {
         a.start();
     }
@@ -344,7 +340,7 @@ fn hooks(srv: &Arc<Server>) {
             ops.stop();
         }
         if let Some(conv) = s.converter() {
-            conv.runtime.shutdown();
+            conv.stop();
         }
         if let Some(a) = s.arrival() {
             a.arrival.stop();

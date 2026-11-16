@@ -25,8 +25,11 @@ pub const RUNNING: [&str; 8] = ["discovering", "waiting", "staging", "encoding",
 const MAX_STREAMS: usize = 200;
 
 pub struct Conv {
-    pub runtime: Converter,
+    host: crate::converter::host::Host,
+    pub runtime: Arc<Converter>,
     pub bridge: Arc<Bridge>,
+    /// convertStats.js: the heartbeat's conversion speed per device
+    pub convert_stats: crate::converter::stats::ConvertStats,
     streams: Mutex<usize>,
     /// jobId -> the Activity line last written (mirrorConverterJob's mirroredLines)
     lines: Mutex<HashMap<i64, String>>,
@@ -40,6 +43,10 @@ pub struct CoreConverter {
 }
 
 impl Conv {
+    /// converterHost stop(): the lifecycle's beforeQuit
+    pub fn stop(&self) {
+        self.host.stop();
+    }
     /// a conversion runs now (encoderStats.js RUNNING)
     pub fn running(&self) -> bool {
         self.jobs.lock().unwrap().values().any(|st| RUNNING.contains(&st.as_str()))
@@ -219,59 +226,99 @@ fn mirror(srv: &Server, conv: &Conv, s: &Value, id: &str, st: &str, src: &str, v
     }
 }
 
-/// The runtime (recovering unfinished jobs) and its bridge; None when it cannot start (logged,
-/// and the routes answer as Node does while its converter starts).
-pub fn make(srv: &Arc<Server>) -> Option<Arc<Conv>> {
-    let st = &srv.state;
-    let ctx = Arc::new(CoreConverter { srv: Arc::downgrade(srv), state: st.clone() });
-    let temp = ctx.temp_path();
-    let _ = std::fs::create_dir_all(&temp);
-    let temp = std::fs::canonicalize(&temp).unwrap_or(temp);
-    let runtime = match Converter::open(RuntimeOptions {
-        data_path: st.config.data.clone(),
-        temp_path: temp,
-        ffmpeg: st.config.ffmpeg.clone(),
-        ffprobe: st.config.ffprobe.clone(),
-        // the Sentry USB checksum record of the original, before it is replaced in place
-        before_replace_original: srv.arrival().map(|a| a.before_replace_fn()),
-        tools: None,
-        tune: None,
-        hooks: None,
-    }) {
-        Ok(r) => r,
-        Err(e) => {
-            st.logger.scope("converter").error(format!("Converter did not start: {e}"));
-            return None;
-        }
-    };
-    let caps = crate::converter::ipc::capabilities(&runtime.staging.capabilities());
-    let bridge = Bridge::new(Arc::new(runtime.service.clone()), ctx, caps);
-    let conv = Arc::new(Conv { runtime, bridge, streams: Mutex::new(0), lines: Mutex::new(HashMap::new()), jobs: Mutex::new(HashMap::new()) });
-    let (w, c) = (Arc::downgrade(srv), Arc::downgrade(&conv));
-    conv.runtime.service.subscribe(Arc::new(move |event: &Value| {
-        if event["type"] != "snapshot" || !event["snapshot"].is_object() {
-            return;
-        }
-        if let (Some(srv), Some(conv)) = (w.upgrade(), c.upgrade()) {
-            on_snapshot(&srv, &conv, &event["snapshot"]);
-        }
-    }));
-    Some(conv)
+/// The benchmark's power meter (index.js powerMeter: ops' account of the energy).
+struct OpsMeter {
+    srv: Weak<Server>,
+    tokens: Mutex<(u64, HashMap<u64, crate::ops::MeterToken>)>,
 }
 
-/// Start it: recovery of jobs from before a restart, then the jobs listed for savings and Activity.
-pub fn start(srv: &Arc<Server>, conv: &Arc<Conv>) {
-    let (s, c) = (srv.clone(), conv.clone());
-    std::thread::spawn(move || {
-        if let Err(e) = c.runtime.start() {
-            s.state.logger.scope("converter").error(format!("Converter recovery: {e}"));
-        }
-        if let Ok(list) = c.runtime.service.list_summaries() {
-            for job in list {
-                on_snapshot(&s, &c, &job);
+impl crate::converter::benchmark::PowerMeter for OpsMeter {
+    fn start(&self) -> Result<Value, String> {
+        let ops = self.srv.upgrade().and_then(|s| s.ops().cloned()).ok_or("no stats")?;
+        let t = ops.meter_start();
+        let mut g = self.tokens.lock().unwrap();
+        g.0 += 1;
+        let id = g.0;
+        g.1.insert(id, t);
+        Ok(json!(id))
+    }
+    fn stop(&self, token: &Value) -> Result<Option<Value>, String> {
+        let ops = self.srv.upgrade().and_then(|s| s.ops().cloned()).ok_or("no stats")?;
+        let Some(t) = token.as_u64().and_then(|id| self.tokens.lock().unwrap().1.remove(&id)) else { return Ok(None) };
+        Ok(ops.meter_stop(t).map(|(wh, avg_w)| json!({ "wh": wh, "avgW": avg_w })))
+    }
+}
+
+/// The converter as converterHost.js starts it, on its own thread (open, then start with its
+/// recovery, up to 5 attempts 2 s apart); until it is up, its routes answer as Node does while
+/// the converter starts. Then the bridge (with devices, automatic conversion, the benchmark),
+/// the snapshots to Activity and ops, the conversion speed samples, and the jobs listed.
+pub fn spawn(srv: &Arc<Server>) {
+    let s = srv.clone();
+    std::thread::Builder::new()
+        .name("converter-start".into())
+        .spawn(move || {
+            let st = s.state.clone();
+            let ctx = Arc::new(CoreConverter { srv: Arc::downgrade(&s), state: st.clone() });
+            let temp = ctx.temp_path();
+            let _ = std::fs::create_dir_all(&temp);
+            let temp = std::fs::canonicalize(&temp).unwrap_or(temp);
+            let meter: Arc<dyn crate::converter::benchmark::PowerMeter> = Arc::new(OpsMeter { srv: Arc::downgrade(&s), tokens: Mutex::new((0, HashMap::new())) });
+            let open = || {
+                let mut o = RuntimeOptions::new(st.config.data.clone(), temp.clone(), &st.config.ffmpeg, &st.config.ffprobe);
+                // the Sentry USB checksum record of the original, before it is replaced in place
+                o.before_replace_original = s.arrival().map(|a| a.before_replace_fn());
+                // clips Sentry USB is still copying are held back (sentryUsb.holds)
+                let w = Arc::downgrade(&s);
+                o.hold_discovered = Some(Arc::new(move |_config: &Value, discovered: &Value| {
+                    w.upgrade().is_some_and(|srv| super::arrival::holds(&srv, discovered["sourcePath"].as_str().unwrap_or("")))
+                }));
+                o.power_meter = Some(meter.clone());
+                let db = st.db.clone();
+                o.is_cheap_now = Some(Arc::new(move |ms: i64| crate::ops::power::is_cheapest(&db.get("power").unwrap_or(Value::Null), ms)));
+                o.nodes = s.nodes().map(|n| {
+                    let remote: Arc<dyn crate::nodes::lanes::RemoteNodes> = Arc::new(n.nodes.clone());
+                    Arc::new(crate::converter::service::lanes::FromNodes(remote)) as Arc<dyn crate::converter::service::lanes::NodeLanes>
+                });
+                Converter::open(o)
+            };
+            let host = crate::converter::host::Host::default();
+            let runtime = match host.start(&open, &*ctx, 5, std::time::Duration::from_secs(2)) {
+                Ok(r) => r,
+                Err(e) => {
+                    st.logger.scope("converter").error(format!("Converter did not start: {e}"));
+                    return;
+                }
+            };
+            let caps = crate::converter::ipc::capabilities(&runtime.staging.capabilities());
+            let bridge = Bridge::new(Arc::new(runtime.service.clone()), ctx, caps);
+            bridge.mount_runtime(&runtime);
+            let (get_db, set_db) = (st.db.clone(), st.db.clone());
+            let mut stats = crate::converter::stats::ConvertStats::new(Some(Arc::new(move |k: &str| get_db.get(k))), Some(Arc::new(move |k: &str, v: &Value| set_db.set(k, v))));
+            stats.cpu_name = Arc::new(crate::ops::diag::cpu_model);
+            let conv = Arc::new(Conv { host, runtime, bridge, convert_stats: stats, streams: Mutex::new(0), lines: Mutex::new(HashMap::new()), jobs: Mutex::new(HashMap::new()) });
+            let (w, c) = (Arc::downgrade(&s), Arc::downgrade(&conv));
+            conv.runtime.service.subscribe(Arc::new(move |event: &Value| {
+                let (Some(srv), Some(conv)) = (w.upgrade(), c.upgrade()) else { return };
+                // the heartbeat's conversion speed and device (convertStats.js; at most a sample every 30 s)
+                if event["type"] == "progress" {
+                    let rt = conv.runtime.clone();
+                    conv.convert_stats.sample(&|| rt.active_encodes());
+                    return;
+                }
+                if event["type"] == "snapshot" && event["snapshot"].is_object() {
+                    on_snapshot(&srv, &conv, &event["snapshot"]);
+                }
+            }));
+            let _ = s.converter.set(conv.clone());
+            // jobs from before a restart (a paused one still owns its clips)
+            if let Ok(list) = conv.runtime.service.list_summaries() {
+                for job in list {
+                    on_snapshot(&s, &conv, &job);
+                }
             }
-        }
-    });
+        })
+        .ok();
 }
 
 /// POST /api/converter/invoke/:name

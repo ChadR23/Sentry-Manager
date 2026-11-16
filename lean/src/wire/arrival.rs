@@ -53,11 +53,7 @@ impl ArrivalCtx for CoreArrival {
         Some(KnownCodec { size, mtime_ms, codec })
     }
     fn holds(&self, abs: &str) -> bool {
-        // sentryUsb.holds: the vehicle's status file says this clip is still being copied
-        let Some(s) = self.srv() else { return false };
-        let (Some(can), Some(v)) = (s.can().cloned(), s.app().vehicles.vehicle_for_path(std::path::Path::new(abs))) else { return false };
-        let status = can.usb.get(&v.id).and_then(|st| crate::arrival::holds::TransferStatus::parse(&st.raw_json));
-        crate::arrival::holds::holds(status.as_ref(), crate::scanner::now_ms(), abs)
+        self.srv().is_some_and(|s| holds(&s, abs))
     }
     fn busy_paths(&self) -> Vec<String> {
         self.srv().and_then(|s| s.converter().map(|c| c.busy_paths())).unwrap_or_default()
@@ -98,6 +94,13 @@ impl ArrivalCtx for CoreArrival {
             _ => s.info(line),
         }
     }
+}
+
+/// sentryUsb.holds(abs): the vehicle's status file says this clip is still being copied.
+pub fn holds(s: &Server, abs: &str) -> bool {
+    let (Some(can), Some(v)) = (s.can().cloned(), s.app().vehicles.vehicle_for_path(std::path::Path::new(abs))) else { return false };
+    let status = can.usb.get(&v.id).and_then(|st| crate::arrival::holds::TransferStatus::parse(&st.raw_json));
+    crate::arrival::holds::holds(status.as_ref(), crate::scanner::now_ms(), abs)
 }
 
 pub fn make(srv: &Arc<Server>) -> Arc<crate::arrival::Area> {

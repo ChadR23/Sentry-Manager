@@ -115,7 +115,7 @@ impl OpsCtx for CoreOps {
                 c
             },
             error: None,
-            encoding_now: !conv.runtime.service.active_encodes().is_empty(),
+            encoding_now: conv.runtime.encoding_now(),
             running,
             // (renameat2(RENAME_NOREPLACE) is called directly: no helper program is needed)
             native_helper: true,
@@ -175,7 +175,7 @@ impl OpsCtx for CoreOps {
     }
     fn active_encodes(&self) -> Vec<crate::ops::stats::ActiveEncode> {
         let Some(conv) = self.srv().and_then(|s| s.converter().cloned()) else { return Vec::new() };
-        conv.runtime.service.active_encodes().iter().filter_map(|e| Some(crate::ops::stats::ActiveEncode { pid: e["pid"].as_i64()?, encoder: e["encoder"].as_str().map(String::from) })).collect()
+        conv.runtime.active_encodes().iter().filter_map(|e| Some(crate::ops::stats::ActiveEncode { pid: e["pid"].as_i64()?, encoder: e["encoder"].as_str().map(String::from) })).collect()
     }
     fn job_progress(&self, job: &str) -> Option<(f64, f64)> {
         let conv = self.srv()?.converter()?.clone();
@@ -221,11 +221,20 @@ impl OpsCtx for CoreOps {
         self.srv().and_then(|s| s.nodes().map(|n| n.nodes.power_rows())).unwrap_or_default()
     }
     fn heartbeat_hardware(&self) -> Value {
-        // convertStats.js heartbeatHardware without the converter's speed sample: the CPU, the
-        // usable GPUs and the paired nodes' hardware
-        let gpus: Vec<Value> = crate::ops::gpu::usable_gpus(&self.detect_gpus()).iter().map(|g| g["name"].clone()).collect();
-        let nodes = self.srv().and_then(|s| s.nodes().map(|n| n.nodes.hardware())).unwrap_or_default();
-        json!({ "cpu": crate::ops::diag::cpu_model(), "gpus": gpus, "convert": { "fps": null, "encoder": null, "device": null, "api": null, "codec": null }, "nodes": nodes })
+        // convertStats.js heartbeatHardware: the CPU, the usable GPUs, the conversion speed, the paired nodes
+        let Some(s) = self.srv() else { return Value::Null };
+        let nodes = s.nodes().map(|n| n.nodes.hardware()).unwrap_or_default();
+        let cpu = crate::ops::diag::cpu_model();
+        match s.converter() {
+            Some(c) => crate::converter::stats::heartbeat_hardware(&self.detect_gpus(), cpu.as_deref(), &c.convert_stats, &nodes, 8),
+            None => {
+                let gpus: Vec<Value> = crate::ops::gpu::usable_gpus(&self.detect_gpus()).iter().map(|g| g["name"].clone()).collect();
+                json!({ "cpu": cpu, "gpus": gpus, "convert": { "fps": null, "encoder": null, "device": null, "api": null, "codec": null }, "nodes": nodes })
+            }
+        }
+    }
+    fn encoder_block(&self, snapshot: &Value, energy: &Value) -> Value {
+        self.srv().and_then(|s| s.converter().map(|c| c.runtime.encoder_block(snapshot, energy))).unwrap_or(Value::Null)
     }
     fn trust_proxy(&self) -> bool {
         self.state.config.trust_proxy
