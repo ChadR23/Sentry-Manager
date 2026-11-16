@@ -914,19 +914,21 @@ impl SpeedIndex {
     /// How far each day is indexed: { day: (clips, indexed) } (front-camera clips).
     pub fn progress(&self, vid: &str, list: &[String]) -> HashMap<String, (u64, u64)> {
         let Some(files) = self.ctx.files(vid) else { return HashMap::new() };
-        let mut per: HashMap<String, Vec<(String, f64, f64)>> = HashMap::new();
+        let mut wanted: Vec<&str> = list.iter().map(String::as_str).collect();
+        wanted.sort_unstable();
+        let mut per: HashMap<&str, Vec<(&str, f64, f64)>> = HashMap::new();
         for f in files.values() {
-            if f.kind != Kind::Clip || f.camera.as_deref() != Some("front") || f.size == 0 || !list.contains(&f.day) {
+            if f.kind != Kind::Clip || f.camera.as_deref() != Some("front") || f.size == 0 || wanted.binary_search(&f.day.as_str()).is_err() {
                 continue;
             }
-            per.entry(f.day.clone()).or_default().push((f.rel.clone(), f.size as f64, js::js_round(f.mtime_ms)));
+            per.entry(f.day.as_str()).or_default().push((f.rel.as_str(), f.size as f64, js::js_round(f.mtime_ms)));
         }
         let mut out = HashMap::new();
         for (d, fs) in per {
-            let data = self.load(vid, &d);
+            let data = self.load(vid, d);
             let data = data.lock().unwrap();
-            let indexed = fs.iter().filter(|(rel, s, m)| data.get(rel).is_some_and(|e| e.num(0) == Some(*s) && e.num(1) == Some(*m) && e.complete())).count();
-            out.insert(d, (fs.len() as u64, indexed as u64));
+            let indexed = fs.iter().filter(|(rel, s, m)| data.get(*rel).is_some_and(|e| e.num(0) == Some(*s) && e.num(1) == Some(*m) && e.complete())).count();
+            out.insert(d.to_string(), (fs.len() as u64, indexed as u64));
         }
         out
     }

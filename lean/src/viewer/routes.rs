@@ -255,7 +255,7 @@ impl Viewer {
         let (clips, indexed) = self.speed_index.progress(&v.id, std::slice::from_ref(&day)).get(&day).copied().unwrap_or((0, 0));
         let (mut distance, mut driving, mut top) = (0.0, 0u64, 0.0);
         for (_, sp) in self.speed_index.day(&v.id, &day) {
-            for x in sp.as_array().cloned().unwrap_or_default() {
+            for x in sp.as_array().into_iter().flatten() {
                 let Some(x) = x.as_f64().filter(|x| x.is_finite()) else { continue };
                 distance += x;
                 if x > 0.5 {
@@ -295,7 +295,7 @@ impl Viewer {
             let Some(w) = out.get_mut(&js::monday(&d)) else { continue };
             let mut moved = false;
             for (_, sp) in self.speed_index.day(&v.id, &d) {
-                for x in sp.as_array().cloned().unwrap_or_default() {
+                for x in sp.as_array().into_iter().flatten() {
                     let Some(x) = x.as_f64().filter(|x| x.is_finite()) else { continue };
                     w.0 += x;
                     if x > 0.5 {

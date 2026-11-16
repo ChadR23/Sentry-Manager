@@ -87,20 +87,25 @@ pub fn utc_seconds(y: i64, mo: i64, d: i64, h: i64, mi: i64, s: i64) -> f64 {
 
 /// Seconds of a YYYY-MM-DD_HH-MM-SS found in text (as if UTC), with the stamp; None without one.
 pub fn stamp_in(text: &str) -> Option<(String, f64)> {
+    let i = stamp_at(text)?;
+    let stamp = &text[i..i + 19];
+    Some((stamp.to_string(), stamp_seconds(stamp)))
+}
+
+/// where the first YYYY-MM-DD_HH-MM-SS in text starts
+pub fn stamp_at(text: &str) -> Option<usize> {
     let b = text.as_bytes();
-    if b.len() < 19 {
-        return None;
-    }
-    for i in 0..=b.len() - 19 {
+    (0..(b.len() + 1).saturating_sub(19)).find(|&i| {
         let w = &b[i..i + 19];
         let dig = |r: std::ops::Range<usize>| w[r].iter().all(u8::is_ascii_digit);
-        if dig(0..4) && w[4] == b'-' && dig(5..7) && w[7] == b'-' && dig(8..10) && w[10] == b'_' && dig(11..13) && w[13] == b'-' && dig(14..16) && w[16] == b'-' && dig(17..19) {
-            let n = |r: std::ops::Range<usize>| std::str::from_utf8(&w[r]).unwrap().parse::<i64>().unwrap();
-            let t = utc_seconds(n(0..4), n(5..7), n(8..10), n(11..13), n(14..16), n(17..19));
-            return Some((String::from_utf8(w.to_vec()).unwrap(), t));
-        }
-    }
-    None
+        dig(0..4) && w[4] == b'-' && dig(5..7) && w[7] == b'-' && dig(8..10) && w[10] == b'_' && dig(11..13) && w[13] == b'-' && dig(14..16) && w[16] == b'-' && dig(17..19)
+    })
+}
+
+/// the seconds of a stamp_at stamp (as if UTC)
+pub fn stamp_seconds(stamp: &str) -> f64 {
+    let n = |r: std::ops::Range<usize>| stamp[r].parse::<i64>().unwrap();
+    utc_seconds(n(0..4), n(5..7), n(8..10), n(11..13), n(14..16), n(17..19))
 }
 
 /// "YYYY-MM-DD HH:MM:SS" of wall seconds (as if UTC)
