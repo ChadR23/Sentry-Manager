@@ -48,6 +48,48 @@ it **on** once when the server already has CAN data (a CAN Bridge log, a CAN
 Bridge token) or a car-data dashboard saved by any account, so a bar in use
 stays; otherwise it starts off. After that the choice is kept as set.
 
+## Live stats for a Stream Deck
+
+`GET /api/can/now` gives the car's newest CAN values, so a Stream Deck (or
+anything else that reads a web address) can show them on its keys. It is on
+the app's own address and port (9000), not the CAN Bridge's port: nothing new
+to open. The values are the newest the CAN index has decoded, whether or not
+the log is paired with footage yet, so they are as fresh as the CAN Bridge's
+last upload (a log is about a minute).
+
+**Off until an admin makes a link** in the CAN Nerd panel (*Stream Deck* →
+*Make a link*). The link carries its own read-only token, shown once: it can
+only read these values, not footage, logs or settings, and it works without
+signing in. *New link* replaces it (the old one stops working) and *Turn off*
+removes it; each is in the audit log. Only a fingerprint of the token is kept.
+
+| Request | Answer |
+|---|---|
+| `GET /api/can/now/<stat>?token=…` | One stat as plain text, with its unit (`78%`, `62 mph`, `42 psi`, `D`); `—` when there is no value yet |
+| `GET /api/can/now?token=…` | Every stat as JSON: `{ car, at, ageSec, stale, units, stats: { <stat>: { label, value, unit, text } } }` |
+
+- `units=km` gives km/h, °C and bar (default `mi`: mph, °F and psi).
+- `car=` a vehicle's name or id (or a CAN key) for one car; without it, the
+  car with the newest data.
+- The token can also go in an `Authorization: Bearer` header.
+- `stale` is true when the newest value is more than 5 minutes old (the car
+  is off or out of reach of the upload).
+- Stats: `speed`, `battery`, `range`, `batteryPower`, `gear`,
+  `batteryVoltage`, `batteryCurrent`, `batteryTemp`, `outsideTemp`,
+  `cabinTemp`, `rearMotorPower`, `frontMotorPower`, `rearMotorTemp`,
+  `frontMotorTemp`, `lv12Current`, `lv12Power`, `lv12Voltage`, `lv12State`,
+  `tire1` to `tire4`, `charging`, `chargingPower`, `chargeTimeLeft`,
+  `energyRemaining`, `odometer`, `setSpeed`, `speedLimit`, `elevation`. Each
+  is the Viewer's stat of the same name, from the first of its signals the
+  car sends.
+- Answers are worked out at most every 3 seconds.
+
+On the Stream Deck, use a plugin that shows the text a web address returns
+(for example *API Ticker*), one key per stat, polling every few seconds. With
+Sentry Six Manager's own certificate (TLS_MODE=auto), install its local
+certificate authority on that computer first (Settings → Security & HTTPS),
+or the plugin may refuse the connection.
+
 ## Tokens: one per car
 
 Each token is for one car. The owner makes it for a car in the Nerd settings
