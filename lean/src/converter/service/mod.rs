@@ -17,6 +17,8 @@ pub mod tools;
 mod work;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub mod lanes_tests;
 
 pub use encode::{parse_progress_line, Progress};
 

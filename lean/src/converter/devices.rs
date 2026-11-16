@@ -79,6 +79,8 @@ pub struct Discovery {
     pub rdev: Rdev,
     pub name_of: Option<Arc<dyn Fn(&NameInfo) -> Option<String> + Send + Sync>>,
     pub nvidia_deadline_ms: u64,
+    /// a fixed list instead of /dev and /sys (tests)
+    pub fixed: Option<Arc<dyn Fn() -> Vec<Value> + Send + Sync>>,
     /// an nvidia-smi still stuck past its deadline: no other one is started
     stuck: Arc<AtomicBool>,
 }
@@ -104,7 +106,7 @@ pub fn stats_name_of() -> Arc<dyn Fn(&NameInfo) -> Option<String> + Send + Sync>
 
 impl Discovery {
     pub fn new(run: Option<Arc<dyn Runner>>) -> Discovery {
-        Discovery { platform: std::env::consts::OS.into(), dev_root: "/dev".into(), sys_root: "/sys".into(), run, rdev: Rdev::Stat, name_of: None, nvidia_deadline_ms: NVIDIA_DEADLINE_MS, stuck: Arc::new(AtomicBool::new(false)) }
+        Discovery { platform: std::env::consts::OS.into(), dev_root: "/dev".into(), sys_root: "/sys".into(), run, rdev: Rdev::Stat, name_of: None, nvidia_deadline_ms: NVIDIA_DEADLINE_MS, fixed: None, stuck: Arc::new(AtomicBool::new(false)) }
     }
 
     fn read_line(p: &Path) -> Option<String> {
@@ -210,6 +212,9 @@ impl Discovery {
 
     /// list(): DRI GPUs, NVIDIA GPUs (those not already listed), the CPU
     pub fn list(&self) -> Vec<Value> {
+        if let Some(f) = &self.fixed {
+            return f();
+        }
         if self.platform != "linux" {
             return vec![cpu_device()];
         }
