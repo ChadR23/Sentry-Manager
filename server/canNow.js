@@ -25,6 +25,8 @@ const STATS = [
   ['batteryTemp', 'Battery temp', ['calc.battTemp', 'BattTemp102']],
   ['outsideTemp', 'Outside temp', ['VCFRONT_tempAmbientFiltered', 'VCFRONT_tempAmbient', 'VCRIGHT_tempAmbientRaw']],
   ['cabinTemp', 'Cabin temp', ['VCRIGHT_hvacCabinTempEst']],
+  ['batteryInletTemp', 'Battery inlet temp', ['VCFRONT_tempCoolantBatInlet']],
+  ['powertrainInletTemp', 'Powertrain inlet temp', ['VCFRONT_tempCoolantPTInlet']],
   ['rearMotorPower', 'Rear motor power', ['RearPower266']],
   ['frontMotorPower', 'Front motor power', ['FrontPower2E5']],
   ['rearMotorTemp', 'Rear motor temp', ['DIR_statorEndWindingTemp', 'MotorTemp306']],

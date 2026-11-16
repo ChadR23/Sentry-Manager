@@ -76,7 +76,7 @@ removes it; each is in the audit log. Only a fingerprint of the token is kept.
   is off or out of reach of the upload).
 - Stats: `speed`, `battery`, `range`, `batteryPower`, `gear`,
   `batteryVoltage`, `batteryCurrent`, `batteryTemp`, `outsideTemp`,
-  `cabinTemp`, `rearMotorPower`, `frontMotorPower`, `rearMotorTemp`,
+  `cabinTemp`, `batteryInletTemp`, `powertrainInletTemp`, `rearMotorPower`, `frontMotorPower`, `rearMotorTemp`,
   `frontMotorTemp`, `lv12Current`, `lv12Power`, `lv12Voltage`, `lv12State`,
   `tire1` to `tire4`, `charging`, `chargingPower`, `chargeTimeLeft`,
   `energyRemaining`, `odometer`, `setSpeed`, `speedLimit`, `elevation`. Each
