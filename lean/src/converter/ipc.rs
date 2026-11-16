@@ -23,7 +23,7 @@ pub const CHANNELS: [&str; 22] = [
 ];
 const GROUPS: [&str; 3] = ["RecentClips", "SavedClips", "SentryClips"];
 const ACTIVE_STATES: [&str; 10] = ["discovering", "waiting", "staging", "encoding", "writing-telemetry", "verifying", "copying", "replacing", "paused", "paused_network"];
-const PROFILE_IDS: [&str; 5] = ["conservative", "balanced", "aggressive", "custom", "quality"];
+const PROFILE_IDS: [&str; 6] = ["conservative", "balanced", "aggressive", "custom", "quality", "smallest"];
 const ITEM_STATE_KEYS: [&str; 4] = ["queued", "completed", "skipped", "failed"];
 const PRIVATE_WORDS: [&str; 12] = ["telemetry", "sei", "nal", "payload", "owned", "publication", "stdout", "stderr", "stack", "exception", "process", "runner"];
 pub const MAX_PAYLOAD_BYTES: usize = 64 * 1024;
@@ -429,7 +429,7 @@ pub fn validate_start_config(p: Option<&Value>, replacement: &str) -> R<Value> {
     if has("concurrency") && !contracts::is_valid_concurrency(&m["concurrency"]) {
         return fail("INVALID_CONCURRENCY");
     }
-    let no_target = profile == "custom" || profile == "quality";
+    let no_target = profile == "custom" || profile == "quality" || profile == contracts::SMALLEST_PROFILE_ID;
     if has("keepOffTarget") && (!m["keepOffTarget"].is_boolean() || (m["keepOffTarget"] == true && no_target)) {
         return fail("INVALID_KEEP_OFF_TARGET");
     }
@@ -452,6 +452,10 @@ pub fn validate_start_config(p: Option<&Value>, replacement: &str) -> R<Value> {
     if !PROFILE_IDS.contains(&profile) || !m["profileId"].is_string() {
         return fail("INVALID_PROFILE");
     }
+    // Smallest (CPU only) is an x265 setting: H.265 only
+    if profile == contracts::SMALLEST_PROFILE_ID && m["codec"] != "h265" {
+        return fail("INVALID_CODEC");
+    }
     if !m["networkMode"].as_str().is_some_and(|c| ["auto", "staging", "direct"].contains(&c)) {
         return fail("INVALID_NETWORK_MODE");
     }
@@ -467,10 +471,16 @@ pub fn validate_start_config(p: Option<&Value>, replacement: &str) -> R<Value> {
     }
     let (source_abs, source_real) = canonical_directory(m.get("sourceRoot"))?;
     let mut out = m.clone();
+    // Smallest (CPU only) runs on this server's CPU: its lanes become their total
+    let cpu_only = profile == contracts::SMALLEST_PROFILE_ID;
     let with_lanes = |mut o: Map<String, Value>| -> Value {
         match &lanes {
             Some(l) => {
-                o.insert("lanes".into(), l.clone());
+                if cpu_only {
+                    o.shift_remove("lanes");
+                } else {
+                    o.insert("lanes".into(), l.clone());
+                }
                 o.insert("concurrency".into(), json!(contracts::lanes_total(l)));
             }
             None => {
@@ -906,6 +916,9 @@ impl Bridge {
             None | Some(Value::Null) => "balanced".to_string(),
             Some(v) => v.as_str().filter(|x| PROFILE_IDS.contains(x)).map(str::to_string).map_or_else(|| fail("INVALID_PROFILE"), Ok)?,
         };
+        if profile == contracts::SMALLEST_PROFILE_ID && codecs.iter().any(|c| c != "h265") {
+            return fail("INVALID_CODEC");
+        }
         let bitrate_ok = m.get("bitrateKbps").and_then(super::jobstore::normalize::safe_int_of).is_some_and(|b| (contracts::CUSTOM_BITRATE_KBPS_MIN..=contracts::CUSTOM_BITRATE_KBPS_MAX).contains(&b));
         if if profile == "custom" { !bitrate_ok } else { m.contains_key("bitrateKbps") } {
             return fail("INVALID_BITRATE");
@@ -1111,6 +1124,8 @@ mod tests {
         let requests: Value = serde_json::from_slice(&corpus.stdout).unwrap();
         let caps = capabilities(&json!({ "separatePublication": "native-atomic", "ownershipCleanup": "atomic-expected-ownership", "replacement": "available" }));
         let bridge = Bridge::new(Arc::new(Fake::default()), Arc::new(Guard(base.clone())), caps);
+        // (the DEVICES of converterBridge.js: a GPU that cannot encode H.265)
+        bridge.set_extras(Extras { devices: Some(Arc::new(|| json!({ "devices": [{ "id": "pci:0000:01:00.0", "kind": "dri", "name": "Old GPU", "encoders": { "h265": null, "av1": null } }] }))), auto: None, benchmark: None });
         let mut differences = vec![];
         for (n, r) in requests.as_array().unwrap().iter().enumerate() {
             let mine = bridge.invoke(r["name"].as_str().unwrap(), r.get("payload").cloned(), None);
@@ -1119,6 +1134,22 @@ mod tests {
             }
         }
         assert!(differences.is_empty(), "{} of {} differ:\n{}", differences.len(), requests.as_array().unwrap().len(), differences.join("\n"));
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn smallest_keeps_only_the_total_of_its_lanes() {
+        let base = std::env::temp_dir().join(format!("lean-smallest-lanes-{}", std::process::id()));
+        std::fs::create_dir_all(base.join("src")).unwrap();
+        let lanes = json!([{ "device": "pci:0000:01:00.0", "concurrency": 1 }, { "device": "cpu", "concurrency": 2 }]);
+        let config = |profile: &str| json!({
+            "sourceRoot": base.join("src"), "destinationRoot": null, "codec": "h265", "profileId": profile, "networkMode": "direct",
+            "outputMode": "replace", "includedGroups": ["RecentClips"], "replacementConfirmed": true, "lanes": lanes
+        });
+        let smallest = validate_start_config(Some(&config("smallest")), "available").unwrap();
+        assert_eq!((smallest.get("lanes"), &smallest["concurrency"]), (None, &json!(3)));
+        let balanced = validate_start_config(Some(&config("balanced")), "available").unwrap();
+        assert_eq!((&balanced["lanes"], &balanced["concurrency"]), (&lanes, &json!(3)));
         std::fs::remove_dir_all(&base).unwrap();
     }
 

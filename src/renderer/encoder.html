@@ -198,12 +198,14 @@
                             <option value="aggressive" data-i18n="ui.converter.profileOptionSmaller">Smaller — approximately 50% smaller</option>
                             <option value="custom" data-i18n="ui.converter.profileOptionCustom">Custom bitrate…</option>
                             <option value="quality" data-i18n="ui.converter.profileOptionQuality">Constant quality — size varies by scene…</option>
+                            <option value="smallest" data-i18n="ui.converter.profileOptionSmallest">Smallest (CPU only): x265 with B-frames, H.265 only…</option>
                         </select>
                         <label id="converterCustomBitrateRow" class="converter-field converter-custom-bitrate" for="converterCustomBitrate" hidden>
                             <span class="converter-field-label" data-i18n="ui.converter.customBitrateLabel">Video bitrate (Mbps)</span>
                             <input id="converterCustomBitrate" class="converter-select" type="number" min="0.25" max="100" step="0.25" value="2.5" inputmode="decimal">
                             <small class="converter-disclosure" data-i18n="ui.converter.customBitrateHint">Tesla clips are recorded at roughly 3–6 Mbps. Pick a lower value to save space; a clip whose result is not smaller than its original keeps the original.</small>
                         </label>
+                        <small id="converterSmallestHint" class="converter-disclosure" data-i18n="ui.converter.smallestHint" hidden>x265 on this server's CPU at a constant quality (CRF 27, veryfast), with B-frames and peaks capped at 60% of each clip's own bitrate: the smallest files at about the same visual quality. GPUs and nodes are not used. A clip that would not get smaller is encoded again under its original bitrate.</small>
                         <label id="converterQualityRow" class="converter-field converter-custom-bitrate" for="converterQualityLevel" hidden>
                             <span class="converter-field-label" data-i18n="ui.converter.qualityLevelLabel">Quality level</span>
                             <select id="converterQualityLevel" class="converter-select">

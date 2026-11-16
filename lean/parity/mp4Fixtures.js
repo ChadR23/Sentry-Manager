@@ -96,6 +96,8 @@ async function main() {
   made('tesla-src.mp4');
   if (await converted(full, path.join(dir, 'tesla-h265.mp4'), 'h265')) made('tesla-h265.mp4');
   if (await converted(full, path.join(dir, 'tesla-av1.mp4'), 'av1')) made('tesla-av1.mp4');
+  // B-frames (Smallest (CPU only)): stored out of the order shown
+  if (await converted(path.join(dir, 'tesla-h264-long.mp4'), path.join(dir, 'tesla-h265-bframes.mp4'), 'h265', { smallest: true })) made('tesla-h265-bframes.mp4');
   for (const [name, enc, faststart] of [['plain-h264-moov-end.mp4', 'libx264', false], ['plain-h264-fast.mp4', 'libx264', true],
     ['plain-h265.mp4', 'libx265', false], ['plain-av1.mp4', 'libsvtav1', false]]) {
     if (await plain(path.join(dir, name), enc, { faststart })) made(name);

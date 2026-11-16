@@ -73,6 +73,11 @@ pub struct Lane {
 
 /// lanesOf(manifest)
 pub fn lanes_of(m: &Manifest) -> Option<Value> {
+    // Smallest (CPU only) encodes on this server's CPU: no GPU or node lanes,
+    // the job's own number of conversions at once
+    if m.config()["profileId"] == super::super::contracts::SMALLEST_PROFILE_ID {
+        return None;
+    }
     m.config().get("lanes").filter(|l| l.as_array().is_some_and(|a| !a.is_empty())).cloned()
 }
 

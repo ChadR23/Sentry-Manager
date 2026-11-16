@@ -782,3 +782,49 @@ fn lanes_find_their_gpus_with_one_lookup_and_callers_share_it() {
     assert!(calls.load(Ordering::SeqCst) <= 2);
     let _ = Path::new("");
 }
+
+#[test]
+fn smallest_encodes_every_clip_with_libx265_here_never_on_its_gpu_lanes() {
+    if !ok_ffmpeg() {
+        return;
+    }
+    let h = Harness::new(HarnessOptions { clips: 4, hold: false, verify_ok: true, ..Default::default() });
+    let (a, u) = (id_of(arc()), id_of(uhd()));
+    let smallest = |over: Value| {
+        let mut c = h.config(over);
+        c.as_object_mut().unwrap().remove("bitrateKbps");
+        c
+    };
+    assert!(h.service().start(&smallest(json!({ "profileId": "smallest", "codec": "av1" }))).is_err(), "H.265 only");
+    let id = h.service().start(&smallest(json!({ "profileId": "smallest", "concurrency": 2, "lanes": [{ "device": a, "concurrency": 1 }, { "device": u, "concurrency": 1 }] }))).unwrap();
+    let done = h.finish_job(&id);
+    assert_eq!(done["state"], "completed");
+    every_clip_encoded(&h, &done, 4);
+    let spawned = h.spawned();
+    assert_eq!(spawned.len(), 4);
+    for s in &spawned {
+        let at = |k: &str| s.args.iter().position(|x| x == k).unwrap();
+        assert_eq!(s.args[at("-c:v") + 1], "libx265");
+        // 4,000 bytes in 2 s: 16 kbit/s, so 9.6 kbit/s at most
+        assert_eq!(&s.args[at("-crf")..at("-crf") + 6], &["-crf", "27", "-maxrate", "9600", "-bufsize", "19200"]);
+        assert!(!s.args.iter().any(|x| x == "-bf") && s.args.iter().any(|x| x == "+negative_cts_offsets"));
+        assert_eq!(s.gpu, None, "{:?}", s.args);
+    }
+}
+
+#[test]
+fn a_running_smallest_job_refuses_lanes() {
+    if !ok_ffmpeg() {
+        return;
+    }
+    let h = Harness::new(HarnessOptions { clips: 2, ..Default::default() });
+    let mut c = h.config(json!({ "profileId": "smallest" }));
+    c.as_object_mut().unwrap().remove("bitrateKbps");
+    let id = h.service().start(&c).unwrap();
+    assert!(until(|| h.held().len() == 1), "one encode at once");
+    let refused = h.service().set_lanes(&id, &json!([{ "device": id_of(arc()), "concurrency": 1 }])).unwrap_err();
+    assert_eq!(refused.code.as_deref(), Some("INVALID_LANES"));
+    let job = h.service().set_concurrency(&id, &json!(2)).unwrap();
+    assert_eq!((&job["config"]["concurrency"], job["config"].get("lanes")), (&json!(2), None));
+    assert_eq!(h.finish_job(&id)["state"], "completed");
+}

@@ -130,7 +130,7 @@ fn expected_video(c: Codec) -> Expected {
 }
 
 fn canonical_profile_id(id: &str) -> Option<String> {
-    if id == contracts::CUSTOM_PROFILE_ID || id == contracts::QUALITY_PROFILE_ID {
+    if id == contracts::CUSTOM_PROFILE_ID || id == contracts::QUALITY_PROFILE_ID || id == contracts::SMALLEST_PROFILE_ID {
         return Some(id.into());
     }
     let c = match id {
@@ -765,6 +765,20 @@ fn frame_timing_mismatch(src: &[(i64, i64)], out: &[(i64, i64)]) -> Option<Value
     None
 }
 
+/// shownTimingMismatch: the first frame, in the order shown, whose time
+/// differs from the original's by more than 1 us (rounding between time scales)
+fn shown_timing_mismatch(src: &[(i64, i64)], out: &[(i64, i64)]) -> Option<Value> {
+    let mut shown: Vec<i64> = out.iter().map(|x| x.0).collect();
+    shown.sort_unstable();
+    for i in 0..src.len().max(shown.len()) {
+        let (s, o) = (src.get(i).map(|x| x.0), shown.get(i).copied());
+        if s.is_none() || o.is_none() || (s.unwrap() - o.unwrap()).abs() > 1 {
+            return Some(json!({ "shownIndex": i, "sourcePtsUs": s, "outputPtsUs": o }));
+        }
+    }
+    None
+}
+
 /// oneFrameOffLength: Sentry USB's rule for an encode one frame off.
 fn one_frame_off_length(src: &Timing, out: &Timing) -> Option<Value> {
     let (sf, of) = (src.samples.len() as i64, out.samples.len() as i64);
@@ -1057,6 +1071,18 @@ fn verify_owned_snapshot(o: &VerifyOptions, profile_id: &str, sb: u64, ob: u64, 
             m.insert("kind".into(), json!("source-output-frame-timing"));
             m.insert("leadInFrames".into(), json!(src.lead_in_frames));
             undecodable(&mut m);
+            m.insert("sourceFrames".into(), json!(st.samples.len()));
+            m.insert("outputFrames".into(), json!(n));
+            m.extend(mm);
+            return failure(R::DURATION_MISMATCH, s, b, Value::Object(m));
+        }
+    } else if profile_id == contracts::SMALLEST_PROFILE_ID {
+        // Smallest (CPU only) is encoded in the original's own time base: with
+        // B-frames its frames are stored out of order, but each is shown at
+        // exactly its original time
+        if let Some(Value::Object(mm)) = shown_timing_mismatch(&src.expected, &out.samples) {
+            let mut m = Map::new();
+            m.insert("kind".into(), json!("source-output-shown-timing"));
             m.insert("sourceFrames".into(), json!(st.samples.len()));
             m.insert("outputFrames".into(), json!(n));
             m.extend(mm);

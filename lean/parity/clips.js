@@ -78,10 +78,12 @@ async function teslaH264(file, { seconds = 4, fps = 12, size = '160x120', patter
 }
 
 /** The H.264 clip at `source` converted to codec ('h265' | 'av1') with its telemetry carried over; false when the encoder is missing. */
-async function converted(source, file, codec) {
+// (smallest: as the Smallest (CPU only) profile encodes, with B-frames)
+async function converted(source, file, codec, { smallest = false } = {}) {
   const encoder = codec === 'h265' ? 'libx265' : 'libsvtav1';
   const tmp = `${file}.enc.mp4`;
-  const r = await runProcess('ffmpeg', ['-nostdin', '-v', 'error', '-y', '-i', source, ...buildEncodeArgs({ codec, encoder, bitrate: 200_000 }), '-an', '-f', 'mp4', tmp]);
+  const args = smallest ? buildEncodeArgs({ codec, encoder, bitrate: null, smallest: { maxrate: 300_000 } }) : buildEncodeArgs({ codec, encoder, bitrate: 200_000 });
+  const r = await runProcess('ffmpeg', ['-nostdin', '-v', 'error', '-y', '-i', source, ...args, '-an', '-f', 'mp4', tmp]);
   if (r.status !== 0) return false;
   const bytes = fs.readFileSync(tmp);
   fs.unlinkSync(tmp);
