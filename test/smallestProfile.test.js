@@ -34,22 +34,22 @@ const needsRuntime = needsFfmpeg || (fs.existsSync(HELPER) ? false : 'needs buil
 const TAIL = ['-pix_fmt', 'yuv420p', '-force_key_frames', 'expr:gte(t,n_forced*2)', '-preset', 'veryfast'];
 
 test('arguments: CRF 27 veryfast with B-frames, peaks capped, frames shown at the original times', () => {
-  assert.deepEqual(buildEncodeArgs({ codec: 'h265', encoder: 'libx265', bitrate: null, smallest: { maxrate: 3_000_000 } }), [
+  assert.deepEqual(buildEncodeArgs({ codec: 'h265', encoder: 'libx265', bitrate: null, smallest: { maxrate: 3_000_000 }, x265Pools: 0 }), [
     '-c:v', 'libx265', '-crf', '27', '-maxrate', '3000000', '-bufsize', '6000000', ...TAIL,
     '-tag:v', 'hvc1', '-fps_mode', 'passthrough', '-enc_time_base', 'demux', '-start_at_zero', '-use_editlist', '0', '-movflags', '+negative_cts_offsets'
   ]);
   // no known bitrate: no cap; CPU_ENCODER_PRESET does not change it
-  assert.deepEqual(buildEncodeArgs({ codec: 'h265', encoder: 'libx265', bitrate: null, cpuPreset: 'faster', smallest: { maxrate: null } }), [
+  assert.deepEqual(buildEncodeArgs({ codec: 'h265', encoder: 'libx265', bitrate: null, cpuPreset: 'faster', smallest: { maxrate: null }, x265Pools: 0 }), [
     '-c:v', 'libx265', '-crf', '27', ...TAIL,
     '-tag:v', 'hvc1', '-fps_mode', 'passthrough', '-enc_time_base', 'demux', '-start_at_zero', '-use_editlist', '0', '-movflags', '+negative_cts_offsets'
   ]);
   // a retry under the original's bitrate: that bitrate, still B-frames
-  assert.deepEqual(buildEncodeArgs({ codec: 'h265', encoder: 'libx265', bitrate: 2_000_000.4, smallest: { maxrate: 3_000_000 } }), [
+  assert.deepEqual(buildEncodeArgs({ codec: 'h265', encoder: 'libx265', bitrate: 2_000_000.4, smallest: { maxrate: 3_000_000 }, x265Pools: 0 }), [
     '-c:v', 'libx265', '-b:v', '2000000', ...TAIL,
     '-tag:v', 'hvc1', '-fps_mode', 'passthrough', '-enc_time_base', 'demux', '-start_at_zero', '-use_editlist', '0', '-movflags', '+negative_cts_offsets'
   ]);
   // a clip given back the original's timing keeps its frame order
-  assert.deepEqual(buildEncodeArgs({ codec: 'h265', encoder: 'libx265', bitrate: null, holdFrames: 3, smallest: { maxrate: 3_000_000 }, keepOrder: true }), [
+  assert.deepEqual(buildEncodeArgs({ codec: 'h265', encoder: 'libx265', bitrate: null, holdFrames: 3, smallest: { maxrate: 3_000_000 }, keepOrder: true, x265Pools: 0 }), [
     '-vf', 'tpad=start=3:start_mode=clone', '-c:v', 'libx265', '-crf', '27', '-maxrate', '3000000', '-bufsize', '6000000', ...TAIL, '-bf', '0',
     '-tag:v', 'hvc1', '-fps_mode', 'passthrough', '-start_at_zero', '-avoid_negative_ts', 'make_zero', '-use_editlist', '0'
   ]);

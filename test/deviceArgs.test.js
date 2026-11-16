@@ -27,7 +27,7 @@ test('without a device every encoder gets exactly today\'s arguments', () => {
     ['-c:v', 'hevc_nvenc', ...NVENC_RATE, '-pix_fmt', 'yuv420p', ...KF, '-forced-idr', '1', '-bf', '0', ...TAIL]);
   assert.deepEqual(buildEncodeArgs({ codec: 'h265', encoder: 'hevc_nvenc', bitrate, hwFrames: true }),
     ['-c:v', 'hevc_nvenc', ...NVENC_RATE, ...KF, '-forced-idr', '1', '-bf', '0', ...TAIL]);
-  assert.deepEqual(buildEncodeArgs({ codec: 'h265', encoder: 'libx265', bitrate }),
+  assert.deepEqual(buildEncodeArgs({ codec: 'h265', encoder: 'libx265', bitrate, x265Pools: 0 }),
     ['-c:v', 'libx265', '-b:v', '1234567', '-pix_fmt', 'yuv420p', ...KF, '-preset', 'medium', '-bf', '0', ...TAIL]);
   assert.deepEqual(buildEncodeArgs({ codec: 'av1', encoder: 'av1_vaapi', quality: 'balanced' }),
     ['-vaapi_device', '/dev/dri/renderD128', '-vf', 'format=nv12,hwupload', '-c:v', 'av1_vaapi', '-rc_mode', 'CQP', '-global_quality', '112', ...KF, ...AV1_TAIL]);

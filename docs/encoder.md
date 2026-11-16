@@ -157,7 +157,12 @@ deleting just that `#` turns it on, already lined up.
 `medium` preset). `CPU_ENCODER_PRESET=fast` or `faster` in `.env` makes
 them quicker (`faster`: about a fifth to a third less time) for a little
 less detail at the same size, or a somewhat larger file with constant
-quality. GPU encoders are not affected.
+quality. GPU encoders are not affected. On Linux, libx265 is given a
+thread pool of one thread per CPU the container may use (its CPU set or
+`cpus:` limit; x265 puts at most 64 in one pool): Docker's default security
+profile blocks the calls x265 uses to find the CPUs (unless the container
+has `SYS_NICE`), and without a pool one clip at a time takes about three
+times as long, five at once about a tenth longer.
 
 ffmpeg is [jellyfin-ffmpeg](https://github.com/jellyfin/jellyfin-ffmpeg),
 which the Jellyfin team keeps on the current FFmpeg release with its own
