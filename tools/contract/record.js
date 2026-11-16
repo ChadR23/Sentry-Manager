@@ -10,6 +10,8 @@
 // tools/contract/spec.js says). A route that changes something is called
 // only when it is listed in an --allow file:
 //   [{ "method": "POST", "path": "/api/vehicles/contract-car/scan", "body": {} }]
+// (an entry may carry `normalise` rules as spec.js's: kept in its golden, so the
+// replay normalises the same way)
 //
 // Options: --user (admin), --password-env NAME (SM_PASSWORD), --cookie-env NAME
 // (a session cookie instead of a password), --ca FILE (the server's
@@ -80,8 +82,8 @@ async function record(args) {
       const res = await client.request(method, url, { body, headers: request.headers || {} });
       const snap = lib.snapshot(res, s, { replace: folders, strings: [], now: Date.now() });
       const file = lib.goldenName(method, lib.requestLabel(method, request).slice(method.length + 1));
-      fs.writeFileSync(path.join(out, file), `${JSON.stringify({ route: key, method, request, ...(body !== undefined ? { body } : {}), response: snap }, null, 2)}\n`);
-      index.goldens.push({ file, route: key, label: lib.requestLabel(method, request), status: snap.status, ...(method !== 'GET' ? { mutating: true } : {}) });
+      fs.writeFileSync(path.join(out, file), `${JSON.stringify({ route: key, method, request, ...(body !== undefined ? { body } : {}), ...(method !== 'GET' && s.normalise?.length ? { normalise: s.normalise } : {}), response: snap }, null, 2)}\n`);
+      index.goldens.push({ file, route: key, label: lib.requestLabel(method, request), status: snap.status, seq: n, ...(method !== 'GET' ? { mutating: true } : {}) });
       n++;
     };
     for (const p of routes) {

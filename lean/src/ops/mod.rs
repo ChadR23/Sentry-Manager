@@ -360,6 +360,15 @@ impl Ops {
         Some((if elapsed > 0.0 { avg * elapsed / 3600.0 } else { wh }, avg))
     }
 
+    /// nodeWorker's power(): this server's power for a main's "All servers" total. The main
+    /// asks about every 30 s: sampling holds 45 s, and the RAPL keep-alive counts it as a page
+    /// asking for the stats (statsAskedAt).
+    pub fn power_for_main(&self) -> Value {
+        *self.stats_asked_at.lock().unwrap() = store::now_ms();
+        self.stats.touch(Some(45_000));
+        node_power::power_report(&self.stats.snapshot(), store::now_ms())
+    }
+
     /// GET /api/stats (index.js): the snapshot, every node's power with this
     /// server's ("All servers"), the price now and the encoder block.
     pub fn stats_answer(&self) -> Value {

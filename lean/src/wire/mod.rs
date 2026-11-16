@@ -47,8 +47,6 @@ pub enum Area {
     Converter,
     /// the helper servers
     Nodes,
-    /// not ported yet
-    None,
 }
 
 /// Every area on core's state.
@@ -303,6 +301,15 @@ fn hooks(srv: &Arc<Server>) {
     let st = &srv.state;
     let s = srv.clone();
     st.hooks.vehicle_exists.set(Arc::new(move |id: &str| s.app().vehicle(id).is_some()));
+    // Clear jobs: the conversions' rows settled first, the ones still under way kept
+    let s = srv.clone();
+    st.hooks.settle_conversions.set(Arc::new(move || {
+        if let Some(conv) = s.converter() {
+            converter::settle(&s, conv);
+        }
+    }));
+    let s = srv.clone();
+    st.hooks.conversions_active.set(Arc::new(move || s.converter().map(|c| c.active_external()).unwrap_or_default()));
     if let Some(ops) = srv.ops().cloned() {
         // the supervisor's RAPL readings (stats.setRapl), a 500's crash note, a panic's
         let o = ops.clone();
@@ -432,6 +439,5 @@ fn answer(srv: &Arc<Server>, area: Area, c: &mut Ctx) -> Result<Reply, HttpError
         Area::Can => can::answer(srv, c),
         Area::Converter => converter::invoke(srv, c),
         Area::Nodes => nodes::answer(srv, c),
-        Area::None => Err(HttpError::new(501, "Not in this server yet.")),
     }
 }

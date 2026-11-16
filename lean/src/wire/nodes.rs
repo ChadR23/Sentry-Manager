@@ -60,10 +60,9 @@ impl NodesCtx for CoreNodes {
         }
     }
     fn own_power(&self) -> Option<Value> {
-        // the main asks about every 30 s: sampling holds 45 s and the numbers stay live
+        // (the main asks about every 30 s: sampling holds 45 s and the numbers stay live)
         let ops = self.srv.upgrade()?.ops()?.clone();
-        ops.stats.touch(Some(45_000));
-        Some(crate::ops::node_power::power_report(&ops.stats.snapshot(), crate::ops::store::now_ms()))
+        Some(ops.power_for_main())
     }
     fn own_gpus(&self) -> Option<(Option<String>, Value)> {
         // index.js ownHardware: kept 10 minutes (detectGpus runs vainfo)

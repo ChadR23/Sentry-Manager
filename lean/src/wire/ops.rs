@@ -196,6 +196,40 @@ impl OpsCtx for CoreOps {
     fn places_count(&self) -> usize {
         self.state.db.get("places").and_then(|p| p.as_array().map(|a| a.len())).unwrap_or(0)
     }
+    fn sentry_usb_infos(&self) -> Vec<(Value, f64)> {
+        // index.js sentryUsbInfos: each vehicle's Sentry USB info file, as the CAN area read it
+        let Some(s) = self.srv() else { return Vec::new() };
+        let Some(can) = s.can().cloned() else { return Vec::new() };
+        s.app()
+            .vehicles
+            .list()
+            .iter()
+            .filter_map(|v| can.usb.device(&v.id))
+            .filter(|d| crate::ops::js::truthy(&d["info"]))
+            .map(|d| (d["info"]["version"].clone(), d["info"]["writtenUnix"].as_f64().unwrap_or(f64::NAN)))
+            .collect()
+    }
+    fn driven_metres(&self) -> f64 {
+        // index.js drivenMetres: the speed index's one speed (m/s) a second, summed over every
+        // footage day of every vehicle
+        let Some(s) = self.srv() else { return 0.0 };
+        let Some(viewer) = s.viewer().cloned() else { return 0.0 };
+        let app = s.app();
+        let mut m = 0.0;
+        for v in app.vehicles.list() {
+            let Some(st) = app.state_of(&v.id).filter(|st| st.scanned) else { continue };
+            for d in crate::footage::inventory::footage_days(&st.recordings) {
+                for (_, sp) in viewer.speed_index.day(&v.id, &d) {
+                    for x in sp.as_array().into_iter().flatten() {
+                        if let Some(x) = x.as_f64().filter(|x| x.is_finite() && *x > 0.0) {
+                            m += x;
+                        }
+                    }
+                }
+            }
+        }
+        m
+    }
     fn can_status(&self) -> Value {
         self.srv().and_then(|s| s.can().map(|c| c.index.status().to_json())).unwrap_or_else(|| json!({}))
     }

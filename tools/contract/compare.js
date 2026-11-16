@@ -34,14 +34,18 @@ async function compare(args) {
     };
     // only this server's folders: the requests themselves are the recorded ones
     const folders = spec.folders(await spec.discover(get));
-    for (const g of index.goldens) {
+    // in the order they were recorded (seq): a request that changes something can change
+    // what a later one answers (a pairing code shown, then cancelled), as it did on the
+    // recorded server; older goldens without it keep the index's order
+    const order = index.goldens.map((g, i) => [g, i]).sort((a, b) => (a[0].seq ?? a[1]) - (b[0].seq ?? b[1])).map(([g]) => g);
+    for (const g of order) {
       if (only && !only.test(g.route)) continue;
       const golden = JSON.parse(fs.readFileSync(path.join(dir, g.file), 'utf8'));
       if (golden.method !== 'GET' && !args['allow-mutating']) {
         report.left.push(g.label);
         continue;
       }
-      const s = golden.method === 'GET' ? spec.ROUTES[golden.route] || {} : {};
+      const s = golden.method === 'GET' ? spec.ROUTES[golden.route] || {} : { normalise: golden.normalise || [] };
       const res = await client.request(golden.method, lib.requestUrl(golden.request, folders), { body: golden.body, headers: golden.request.headers || {} });
       const actual = lib.snapshot(res, s, { replace: folders, strings: [], now: Date.now() });
       const diffs = lib.diff(golden.response, actual);

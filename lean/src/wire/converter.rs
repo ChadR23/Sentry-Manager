@@ -35,6 +35,10 @@ pub struct Conv {
     lines: Mutex<HashMap<i64, String>>,
     /// the jobs the converter knows: id -> state
     pub jobs: Mutex<HashMap<String, String>>,
+    /// index.js converterJobs: each job's latest snapshot, slim (slimJob: its counts without its clips)
+    snaps: Mutex<HashMap<String, Value>>,
+    /// index.js converterListed: the jobs from before the start were listed
+    listed: std::sync::atomic::AtomicBool,
 }
 
 pub struct CoreConverter {
@@ -50,6 +54,10 @@ impl Conv {
     /// a conversion runs now (encoderStats.js RUNNING)
     pub fn running(&self) -> bool {
         self.jobs.lock().unwrap().values().any(|st| RUNNING.contains(&st.as_str()))
+    }
+    /// index.js keepExternal for Clear jobs: the conversions still under way (CONVERTER_ACTIVE)
+    pub fn active_external(&self) -> Vec<String> {
+        self.jobs.lock().unwrap().iter().filter(|(_, st)| ACTIVE.contains(&st.as_str())).map(|(id, _)| format!("converter:{id}")).collect()
     }
     /// index.js busyPaths: the clips of active jobs in hand (`processing`), as absolute paths
     pub fn busy_paths(&self) -> Vec<String> {
@@ -159,8 +167,22 @@ fn vehicle_of(srv: &Server, src: &str) -> Option<crate::footage::vehicles::Vehic
     srv.app().vehicles.vehicle_for_path(std::path::Path::new(src))
 }
 
-/// What index.js does with each job snapshot.
-fn on_snapshot(srv: &Server, conv: &Conv, s: &Value) {
+/// index.js slimJob: a job as kept, its counts without its clip list
+fn slim(s: &Value) -> Value {
+    let mut out = s.clone();
+    if s["items"].as_array().is_some_and(|a| !a.is_empty()) {
+        let (converted, skipped, failed) = counts(s);
+        let (clips, _) = job_progress(s);
+        out["items"] = json!([]);
+        out["itemCounts"] = json!({ "converted": converted, "skipped": skipped, "failed": failed });
+        out["progressClips"] = json!(clips);
+    }
+    out
+}
+
+/// What index.js does with each job snapshot: the savings and the stats' job mark (ops), and,
+/// for a live snapshot (not a job listed at the start), its Activity line (mirrorConverterJob).
+fn on_snapshot(srv: &Server, conv: &Conv, s: &Value, live: bool) {
     let Some(id) = s["id"].as_str() else { return };
     let st = s["state"].as_str().unwrap_or("");
     conv.jobs.lock().unwrap().insert(id.to_string(), st.to_string());
@@ -170,7 +192,49 @@ fn on_snapshot(srv: &Server, conv: &Conv, s: &Value) {
         let (clips, saved) = job_progress(s);
         ops.job_snapshot(&crate::ops::JobSnapshot { id: id.to_string(), running: RUNNING.contains(&st), vehicle_id: v.as_ref().map(|v| v.id.clone()), saved_bytes: saved, clips });
     }
-    mirror(srv, conv, s, id, st, src, v.as_ref());
+    if live {
+        mirror(srv, conv, s, id, st, src, v.as_ref());
+        conv.snaps.lock().unwrap().insert(id.to_string(), slim(s));
+    } else {
+        conv.snaps.lock().unwrap().entry(id.to_string()).or_insert_with(|| slim(s));
+    }
+}
+
+/// index.js settleConversionRows: once the converter has listed its jobs, a conversion's
+/// Activity row still "running" for a job it no longer runs gets the job's real end, or
+/// "interrupted" when the converter no longer has the job; rows of jobs under way stay.
+pub fn settle(srv: &Server, conv: &Conv) -> usize {
+    if !conv.listed.load(std::sync::atomic::Ordering::SeqCst) {
+        return 0;
+    }
+    let state = &srv.state;
+    let mut n = 0;
+    for row in state.db.jobs(500, None) {
+        let Some(ext) = row.external_id.as_deref().filter(|e| e.starts_with("converter:")) else { continue };
+        if row.kind != "conversion" || row.status != "running" {
+            continue;
+        }
+        let id = &ext["converter:".len()..];
+        let snap = conv.snaps.lock().unwrap().get(id).cloned();
+        match snap {
+            Some(s) if ACTIVE.contains(&s["state"].as_str().unwrap_or("")) => continue,
+            Some(s) => {
+                let st = s["state"].as_str().unwrap_or("").to_string();
+                let src = s["config"]["sourceRoot"].as_str().unwrap_or("").to_string();
+                let v = vehicle_of(srv, &src);
+                mirror(srv, conv, &s, id, &st, &src, v.as_ref());
+            }
+            None => {
+                let detail = format!("{}the converter no longer has this job", row.detail.as_deref().filter(|d| !d.is_empty()).map(|d| format!("{d} · ")).unwrap_or_default());
+                state.jobs.finish(row.id, Some("interrupted"), Some(detail), None);
+            }
+        }
+        n += 1;
+    }
+    if n > 0 {
+        state.log.info(format!("Jobs: {n} conversion row(s) the converter no longer runs were settled"));
+    }
+    n
 }
 
 /// index.js mirrorConverterJob: the job's line in Activity (jobs), its end, a notification for failed clips.
@@ -296,7 +360,17 @@ pub fn spawn(srv: &Arc<Server>) {
             let (get_db, set_db) = (st.db.clone(), st.db.clone());
             let mut stats = crate::converter::stats::ConvertStats::new(Some(Arc::new(move |k: &str| get_db.get(k))), Some(Arc::new(move |k: &str, v: &Value| set_db.set(k, v))));
             stats.cpu_name = Arc::new(crate::ops::diag::cpu_model);
-            let conv = Arc::new(Conv { host, runtime, bridge, convert_stats: stats, streams: Mutex::new(0), lines: Mutex::new(HashMap::new()), jobs: Mutex::new(HashMap::new()) });
+            let conv = Arc::new(Conv {
+                host,
+                runtime,
+                bridge,
+                convert_stats: stats,
+                streams: Mutex::new(0),
+                lines: Mutex::new(HashMap::new()),
+                jobs: Mutex::new(HashMap::new()),
+                snaps: Mutex::new(HashMap::new()),
+                listed: std::sync::atomic::AtomicBool::new(false),
+            });
             let (w, c) = (Arc::downgrade(&s), Arc::downgrade(&conv));
             conv.runtime.service.subscribe(Arc::new(move |event: &Value| {
                 let (Some(srv), Some(conv)) = (w.upgrade(), c.upgrade()) else { return };
@@ -307,15 +381,18 @@ pub fn spawn(srv: &Arc<Server>) {
                     return;
                 }
                 if event["type"] == "snapshot" && event["snapshot"].is_object() {
-                    on_snapshot(&srv, &conv, &event["snapshot"]);
+                    on_snapshot(&srv, &conv, &event["snapshot"], true);
                 }
             }));
             let _ = s.converter.set(conv.clone());
-            // jobs from before a restart (a paused one still owns its clips)
+            // jobs from before a restart (a paused one still owns its clips); only a list that
+            // loaded settles rows (a failed one would end them all)
             if let Ok(list) = conv.runtime.service.list_summaries() {
                 for job in list {
-                    on_snapshot(&s, &conv, &job);
+                    on_snapshot(&s, &conv, &job, false);
                 }
+                conv.listed.store(true, std::sync::atomic::Ordering::SeqCst);
+                settle(&s, &conv);
             }
         })
         .ok();

@@ -1,6 +1,6 @@
 //! Every route of server/index.js's router (docs/api-contract.json, in its order) that
 //! core does not register itself, and the area that answers it. Generated from the
-//! contract; `None`: not ported yet (answered 501 "Not in this server yet.").
+//! contract.
 
 use super::Area;
 
@@ -140,7 +140,7 @@ pub const ROUTES: [(&str, &str, Area); 140] = [
     ("POST", "/api/studio/exists", Area::Viewer),
     ("POST", "/api/studio/stat", Area::Viewer),
     ("POST", "/api/studio/thumbnail", Area::Viewer),
-    ("POST", "/api/studio/trashFolder", Area::None),
+    ("POST", "/api/studio/trashFolder", Area::Viewer),
     ("GET", "/api/studio/settings", Area::Viewer),
     ("POST", "/api/studio/settings", Area::Viewer),
     ("GET", "/api/studio/context", Area::Viewer),

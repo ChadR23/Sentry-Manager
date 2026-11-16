@@ -138,6 +138,9 @@ pub fn make(srv: &Arc<Server>) -> Arc<crate::viewer::Viewer> {
 
 /// A viewer route for core's router.
 pub fn answer(srv: &Arc<Server>, c: &mut CoreCtx) -> Result<Reply, HttpError> {
+    if c.path == "/api/studio/trashFolder" {
+        return trash_folder(srv, c);
+    }
     let Some(viewer) = srv.viewer().cloned() else { return Err(HttpError::not_found()) };
     let body = body_bytes(c);
     let req = crate::viewer::routes::Req { method: &c.method, path: &c.path, query: &c.query, headers: &c.headers, body: &body };
@@ -152,4 +155,68 @@ pub fn scrub(srv: &Arc<Server>, c: &CoreCtx) -> crate::core::http::Res {
     let Some(viewer) = srv.viewer().cloned() else { return crate::core::http::error_json(404, "Not found", None, "") };
     let req = crate::viewer::routes::Req { method: &c.method, path: "/api/scrub", query: &c.query, headers: &c.headers, body: &[] };
     as_who(Who::of(c), || viewer.route(&req)).unwrap_or_else(|| crate::core::http::error_json(404, "Not found", None, ""))
+}
+
+/// POST /api/studio/trashFolder (index.js): Studio's "delete folder" (the trash icon on an
+/// event) moves the recordings in that folder to the Recycle Bin, through the footage area,
+/// in Node's order: the path confined to `allowed` (the vehicles' folders and the output
+/// folders, the deny list, never the bin), the vehicle it is in, a scan when there is none
+/// yet, the recordings in that folder or below, then the bin's own checks (the share
+/// writable, protected, in a conversion's hands).
+pub fn trash_folder(srv: &Arc<Server>, c: &mut CoreCtx) -> Result<Reply, HttpError> {
+    let Some(viewer) = srv.viewer().cloned() else { return Err(HttpError::not_found()) };
+    let body = c.body.clone().unwrap_or(Value::Null);
+    let guard = crate::viewer::studio::allowed(viewer.ctx.as_ref());
+    let real = crate::viewer::studio::confined(&guard, &body).map_err(|(s, m)| HttpError::new(s, m))?;
+    let app = srv.app().clone();
+    // vehicleForReal: the share's real folder first, then the one it is named by
+    let found = app.vehicles.list().into_iter().find_map(|v| {
+        let real_root = std::fs::canonicalize(&v.root).unwrap_or_else(|_| v.root.clone());
+        if crate::footage::vehicles::is_inside(&real, &real_root) {
+            return Some((v, real_root));
+        }
+        if crate::footage::vehicles::is_inside(&real, &v.root) {
+            let r = v.root.clone();
+            return Some((v, r));
+        }
+        None
+    });
+    let Some((v, root)) = found else { return Err(HttpError::new(403, "Not inside a vehicle share.")) };
+    // (as the footage area's errors reach core: a status under 500 with its text)
+    let fail = |f: crate::footage::ctx::Fail| {
+        let (status, body) = f.body();
+        if status >= 500 {
+            return HttpError::internal(f.message);
+        }
+        let mut e = HttpError::new(status, body["error"].as_str().unwrap_or("Error"));
+        if let Some(code) = body["code"].as_str() {
+            e = e.code(code);
+        }
+        e
+    };
+    if !app.state_of(&v.id).is_some_and(|s| s.scanned) {
+        app.scan_now(&v.id, false).map_err(fail)?;
+    }
+    let rel = real.strip_prefix(&root).map(|r| r.to_string_lossy().into_owned()).unwrap_or_default();
+    let below = format!("{rel}/");
+    let ids: Vec<String> = app
+        .state_of(&v.id)
+        .map(|s| s.recordings.iter().filter(|x| x.folder == rel || x.folder.starts_with(&below)).map(|x| x.id.clone()).collect())
+        .unwrap_or_default();
+    if ids.is_empty() {
+        return Ok(Reply::json(serde_json::json!({ "success": false, "error": "Nothing to move to the Recycle Bin in that folder." })));
+    }
+    let out = crate::footage::bin::trash(&app, &v.id, &ids, "manual").map_err(fail)?;
+    srv.state.announce("inventory");
+    srv.state.announce("bin");
+    Ok(Reply::json(if !out.skipped.is_empty() && out.moved.is_empty() {
+        let error = match out.skipped[0].reason {
+            "protected" => "This recording is protected.",
+            "converting" => "This recording is being converted right now.",
+            _ => "Could not move it to the Recycle Bin.",
+        };
+        serde_json::json!({ "success": false, "error": error })
+    } else {
+        serde_json::json!({ "success": true })
+    }))
 }
