@@ -238,22 +238,98 @@ fn recordings(app: &App, v: &Vehicle, q: &HashMap<String, String>) -> Res {
     ok(Value::Object(out))
 }
 
+const EVENT_JSON_MAX: u64 = 64 * 1024;
+const EVENT_JSON_KEPT: usize = 512;
+
+/// event.json files read lately, by path, with the file they were then (device, inode, size, mtime, ctime)
+#[derive(Default)]
+struct EventJsonCache {
+    tick: u64,
+    kept: HashMap<PathBuf, (FileStamp, u64, Value)>,
+}
+
+impl EventJsonCache {
+    fn get(&mut self, path: &Path, stamp: &FileStamp) -> Option<Value> {
+        self.tick += 1;
+        let tick = self.tick;
+        let (was, used, info) = self.kept.get_mut(path)?;
+        if was != stamp {
+            return None;
+        }
+        *used = tick;
+        Some(info.clone())
+    }
+
+    fn keep(&mut self, path: PathBuf, stamp: FileStamp, info: Value) {
+        if self.kept.len() >= EVENT_JSON_KEPT && !self.kept.contains_key(&path) {
+            if let Some(oldest) = self.kept.iter().min_by_key(|(_, (_, used, _))| *used).map(|(p, _)| p.clone()) {
+                self.kept.remove(&oldest);
+            }
+        }
+        self.tick += 1;
+        self.kept.insert(path, (stamp, self.tick, info));
+    }
+}
+
+static EVENT_JSON: std::sync::LazyLock<std::sync::Mutex<EventJsonCache>> = std::sync::LazyLock::new(Default::default);
+
+type FileStamp = (u64, u64, u64, i64, i64, i64, i64);
+
+fn file_stamp(md: &std::fs::Metadata) -> FileStamp {
+    use std::os::unix::fs::MetadataExt;
+    (md.dev(), md.ino(), md.len(), md.mtime(), md.mtime_nsec(), md.ctime(), md.ctime_nsec())
+}
+
+/// A local disk, where a file's stamp is the kernel's own (not a network or FUSE mount's cached copy)
+fn local_disk(file: &std::fs::File) -> bool {
+    use std::os::fd::AsRawFd;
+    let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstatfs(file.as_raw_fd(), &mut st) } != 0 {
+        return false;
+    }
+    // ext2/3/4, xfs, btrfs, f2fs, fat, exfat, ntfs3, zfs, tmpfs
+    matches!(st.f_type as u32, 0xEF53 | 0x5846_5342 | 0x9123_683E | 0xF2F5_2010 | 0x4D44 | 0x2011_BAB0 | 0x7366_746E | 0x2FC1_2FC1 | 0x0102_1994)
+}
+
+/// Unchanged for the last few seconds, so a write still to come cannot keep its stamp
+fn settled(md: &std::fs::Metadata, now: std::time::SystemTime) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    now.duration_since(std::time::UNIX_EPOCH).is_ok_and(|d| md.ctime() <= d.as_secs() as i64 - 3)
+}
+
 /// event.json of a Sentry / Saved event, when present and small (inventory.js eventInfo).
 fn event_info(v: &Vehicle, rec: &Recording) -> Value {
+    event_info_at(v, rec, std::time::SystemTime::now())
+}
+
+fn event_info_at(v: &Vehicle, rec: &Recording, now: std::time::SystemTime) -> Value {
+    use std::io::Read;
     if rec.event_id.is_none() {
         return Value::Null;
     }
     let Some(rel) = rec.event_json() else { return Value::Null };
     let abs = v.root.join(rel);
-    let Ok(md) = std::fs::metadata(&abs) else { return Value::Null };
-    if md.len() > 64 * 1024 {
+    let Ok(file) = std::fs::File::open(&abs) else { return Value::Null };
+    let Ok(md) = file.metadata() else { return Value::Null };
+    if md.len() > EVENT_JSON_MAX {
         return Value::Null;
     }
-    let Ok(text) = std::fs::read_to_string(&abs) else { return Value::Null };
-    match serde_json::from_str::<Value>(&text) {
+    let stamp = (settled(&md, now) && local_disk(&file)).then(|| file_stamp(&md));
+    if let Some(info) = stamp.as_ref().and_then(|s| EVENT_JSON.lock().unwrap().get(&abs, s)) {
+        return info;
+    }
+    let mut text = String::new();
+    if (&file).take(EVENT_JSON_MAX + 1).read_to_string(&mut text).is_err() || text.len() as u64 > EVENT_JSON_MAX {
+        return Value::Null;
+    }
+    let info = match serde_json::from_str::<Value>(&text) {
         Ok(data) => inventory::event_pick(&data).map_or(Value::Null, Value::Object),
         Err(_) => Value::Null,
+    };
+    if let Some(stamp) = stamp {
+        EVENT_JSON.lock().unwrap().keep(abs, stamp, info.clone());
     }
+    info
 }
 
 fn recording(app: &App, v: &Vehicle, rid: &str) -> Res {
@@ -339,4 +415,87 @@ pub fn slice_route(app: &Arc<App>, method: &Method, raw_path: &str, q: &HashMap<
 /// /api/media: a clip's bytes with Range support, inside a vehicle's folder only.
 pub fn media_route(app: &App, method: &Method, headers: &HeaderMap, q: &HashMap<String, String>) -> Res {
     media(app, method, headers, q)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scanner::{FileEntry, FileList};
+
+    fn event_recording(root: &Path) -> (Vec<Recording>, PathBuf) {
+        let _ = std::fs::remove_dir_all(root);
+        let dir = "TeslaCam/SavedClips/2026-11-10_06-00-00";
+        std::fs::create_dir_all(root.join(dir)).unwrap();
+        let clip = format!("{dir}/2026-11-10_05-59-00-front.mp4");
+        std::fs::write(root.join(&clip), b"x").unwrap();
+        let ev = root.join(dir).join("event.json");
+        std::fs::write(&ev, r#"{"reason":"aaaa"}"#).unwrap();
+        let files: Vec<FileEntry> = [clip, format!("{dir}/event.json")]
+            .into_iter()
+            .map(|rel| {
+                let c = crate::footage::classify(&rel).unwrap();
+                FileEntry { rel, size: 1, mtime_ms: 0.0, ctime_ms: 0.0, birthtime_ms: 0.0, kind: c.kind, typ: c.typ, day: "2026-11-10".into(), camera: c.camera, event_id: c.event_id }
+            })
+            .collect();
+        (inventory::build_recordings(&Arc::new(FileList::from(files)), "v1"), ev)
+    }
+
+    fn kept(path: &Path) -> bool {
+        EVENT_JSON.lock().unwrap().kept.contains_key(path)
+    }
+
+    #[test]
+    fn an_event_json_rewritten_or_replaced_with_the_same_size_and_time_is_read_again() {
+        let root = std::env::temp_dir().join(format!("lean-event-json-{}", std::process::id()));
+        let (recs, ev) = event_recording(&root);
+        let rec = recs.iter().find(|r| r.event_id.is_some()).unwrap();
+        let v = crate::footage::vehicles::folder_vehicle("v1", "Car", "UTC", root.clone());
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(10);
+        let when = std::fs::metadata(&ev).unwrap().modified().unwrap();
+        assert_eq!(event_info_at(&v, rec, later)["reason"], json!("aaaa"));
+        assert!(kept(&ev), "a settled file on a local disk is kept");
+        assert_eq!(event_info_at(&v, rec, later)["reason"], json!("aaaa"));
+        std::fs::write(&ev, r#"{"reason":"bbbb"}"#).unwrap();
+        std::fs::File::options().write(true).open(&ev).unwrap().set_modified(when).unwrap();
+        assert_eq!(event_info_at(&v, rec, later)["reason"], json!("bbbb"), "rewritten in place");
+        let next = ev.with_file_name("event.json.new");
+        std::fs::write(&next, r#"{"reason":"cccc"}"#).unwrap();
+        std::fs::File::options().write(true).open(&next).unwrap().set_modified(when).unwrap();
+        std::fs::rename(&next, &ev).unwrap();
+        assert_eq!(event_info_at(&v, rec, later)["reason"], json!("cccc"), "replaced by another file");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_event_json_changed_in_the_last_seconds_is_read_every_time() {
+        let root = std::env::temp_dir().join(format!("lean-event-json-fresh-{}", std::process::id()));
+        let (recs, ev) = event_recording(&root);
+        let rec = recs.iter().find(|r| r.event_id.is_some()).unwrap();
+        let v = crate::footage::vehicles::folder_vehicle("v1", "Car", "UTC", root.clone());
+        assert_eq!(event_info(&v, rec)["reason"], json!("aaaa"));
+        assert!(!kept(&ev));
+        std::fs::write(&ev, &[b' '; 70 * 1024]).unwrap();
+        assert_eq!(event_info(&v, rec), Value::Null, "over 64 KiB");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_event_json_cache_lets_go_of_the_one_used_longest_ago() {
+        let mut c = EventJsonCache::default();
+        let stamp: FileStamp = (1, 2, 3, 4, 5, 6, 7);
+        let path = |i: usize| PathBuf::from(format!("/x/{i}/event.json"));
+        for i in 0..EVENT_JSON_KEPT {
+            c.keep(path(i), stamp, json!(i));
+        }
+        assert_eq!(c.get(&path(0), &stamp), Some(json!(0)));
+        assert_eq!(c.get(&path(1), &(1, 2, 3, 4, 5, 6, 8)), None);
+        c.keep(path(EVENT_JSON_KEPT), stamp, json!(EVENT_JSON_KEPT));
+        assert_eq!(c.kept.len(), EVENT_JSON_KEPT);
+        assert_eq!(c.get(&path(0), &stamp), Some(json!(0)));
+        assert_eq!(c.get(&path(1), &stamp), None);
+        assert_eq!(c.get(&path(2), &stamp), Some(json!(2)));
+        c.keep(path(2), stamp, json!("again"));
+        assert_eq!(c.kept.len(), EVENT_JSON_KEPT);
+        assert_eq!(c.get(&path(2), &stamp), Some(json!("again")));
+    }
 }

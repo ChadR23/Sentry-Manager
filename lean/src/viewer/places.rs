@@ -260,6 +260,7 @@ impl EventSpots {
 
 /// inventory.js eventInfo: the picked fields of a small event.json
 pub fn event_info(ctx: &dyn Ctx, vid: &str, rec: &Recording) -> Option<Map<String, Value>> {
+    use std::io::Read;
     rec.event_id.as_ref()?;
     let v = ctx.vehicle(vid)?;
     let rel = rec.event_json()?;
@@ -268,11 +269,16 @@ pub fn event_info(ctx: &dyn Ctx, vid: &str, rec: &Recording) -> Option<Map<Strin
     if !real.starts_with(std::fs::canonicalize(&v.root).ok()?) {
         return None;
     }
-    let md = std::fs::metadata(&real).ok()?;
-    if md.len() > 64 * 1024 {
+    let file = std::fs::File::open(&real).ok()?;
+    if file.metadata().ok()?.len() > 64 * 1024 {
         return None;
     }
-    let data: Value = serde_json::from_str(&std::fs::read_to_string(&real).ok()?).ok()?;
+    let mut text = String::new();
+    (&file).take(64 * 1024 + 1).read_to_string(&mut text).ok()?;
+    if text.len() > 64 * 1024 {
+        return None;
+    }
+    let data: Value = serde_json::from_str(&text).ok()?;
     crate::inventory::event_pick(&data)
 }
 
@@ -445,6 +451,27 @@ pub fn remove(ctx: &dyn Ctx, id: &str) -> Result<Value, (u16, String)> {
 mod tests {
     // test/places.test.js
     use super::*;
+
+    #[test]
+    fn an_event_json_is_read_only_while_it_is_64_kib_or_less() {
+        let car = crate::viewer::testkit::Car::new("event-json");
+        let dir = car.root.join("TeslaCam/SavedClips/2026-11-10_06-00-00");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("2026-11-10_05-59-00-front.mp4"), b"x").unwrap();
+        std::fs::write(dir.join("event.json"), r#"{"reason":"user_interaction_honk","est_lat":"40.5","est_lon":"-74.1"}"#).unwrap();
+        car.scan();
+        let recs = car.ctx.recordings("v1").unwrap();
+        let rec = recs.iter().find(|r| r.event_id.is_some()).unwrap();
+        assert_eq!(event_info(&*car.ctx, "v1", rec).unwrap()["reason"], json!("user_interaction_honk"));
+        let mut big = br#"{"reason":"x","pad":""#.to_vec();
+        big.resize(64 * 1024 - 2, b' ');
+        big.extend_from_slice(br#""}"#);
+        std::fs::write(dir.join("event.json"), &big).unwrap();
+        assert_eq!(event_info(&*car.ctx, "v1", rec).unwrap()["reason"], json!("x"), "64 KiB exactly");
+        big.insert(1, b' ');
+        std::fs::write(dir.join("event.json"), &big).unwrap();
+        assert_eq!(event_info(&*car.ctx, "v1", rec), None, "one byte over");
+    }
 
     #[test]
     fn each_place_has_its_own_radius() {
