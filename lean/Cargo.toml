@@ -38,6 +38,9 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 flate2 = "1"
 base64 = "0.22"
 chrono-tz = { version = "0.10", features = ["case-insensitive"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+x509-parser = { version = "0.16", features = ["verify"] }
+hmac = "0.12"
 
 [profile.release]
 opt-level = 3

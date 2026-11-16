@@ -11,6 +11,7 @@ pub mod inventory;
 pub mod jobs;
 pub mod media;
 pub mod mp4;
+pub mod nodes;
 pub mod ops;
 pub mod scanner;
 pub mod sei;
