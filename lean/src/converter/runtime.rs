@@ -31,6 +31,20 @@ pub struct RuntimeOptions {
     pub tune: Option<Box<dyn FnOnce(&mut Options)>>,
     /// kill points around job-file writes (the crash tests)
     pub hooks: Option<Arc<dyn super::jobstore::StoreHooks>>,
+    /// the encoder planner behind the device list (tests: a fake probe)
+    pub encoders: Option<Arc<dyn super::devices::Encoders>>,
+    /// where the GPUs are found (tests: a fake /dev and /sys)
+    pub discovery: Option<super::devices::Discovery>,
+    /// GPU decode (Node's gpuDecode; false: the CPU decodes)
+    pub gpu_decode: bool,
+    /// clips the host holds back for now (Sentry USB copies in progress)
+    pub hold_discovered: Option<Arc<dyn Fn(&Value, &Value) -> bool + Send + Sync>>,
+}
+
+impl RuntimeOptions {
+    pub fn new(data_path: PathBuf, temp_path: PathBuf, ffmpeg: &str, ffprobe: &str) -> RuntimeOptions {
+        RuntimeOptions { data_path, temp_path, ffmpeg: ffmpeg.into(), ffprobe: ffprobe.into(), before_replace_original: None, tools: None, tune: None, hooks: None, encoders: None, discovery: None, gpu_decode: true, hold_discovered: None }
+    }
 }
 
 pub struct Converter {
@@ -41,6 +55,8 @@ pub struct Converter {
     pub temp_path: PathBuf,
     started: Mutex<Option<Vec<Value>>>,
     pub converted_index: Arc<super::converted_index::ConvertedIndex>,
+    /// the encoding devices (the `converter:devices` channel, lanes)
+    pub devices: Arc<super::devices::Registry>,
 }
 
 impl Converter {
@@ -66,19 +82,38 @@ impl Converter {
             )
             .map_err(|e| CError::new(&e.code, e.message))?,
         );
+        let planner = Arc::new(super::planner::Planner::new(super::process::BoundedRunner::default(), "linux", &o.ffmpeg));
         let tools: Arc<dyn Tools> = match o.tools {
             Some(t) => t,
-            None => Arc::new(RealTools::new(&o.ffmpeg, &o.ffprobe, registry.clone())),
+            None => Arc::new(RealTools::with_planner(&o.ffmpeg, &o.ffprobe, registry.clone(), planner.clone())),
         };
+        let encoders: Arc<dyn super::devices::Encoders> = o.encoders.unwrap_or(planner);
+        let mut discovery = o.discovery.unwrap_or_else(|| super::devices::Discovery::new(Some(Arc::new(super::process::BoundedRunner::default()))));
+        if discovery.name_of.is_none() {
+            discovery.name_of = Some(super::devices::stats_name_of());
+        }
+        let devices = Arc::new(super::devices::Registry::new(discovery, encoders));
         // clips known to be converted already (an optimisation only)
         let converted_index = super::converted_index::ConvertedIndex::new(super::converted_index::Options::new(o.data_path.join("converter-index").join("converted-clips.json")));
         converted_index.load();
         let mut so = Options::new(store.clone(), staging.clone(), tools);
         so.converted_index = Some(converted_index.clone());
+        let d2 = devices.clone();
+        so.resolve_device = Some(Arc::new(move |id: &str| d2.resolve_device(id)));
+        let d3 = devices.clone();
+        so.default_device = Some(Arc::new(move |codec: &str| d3.default_device(codec)));
+        if o.gpu_decode {
+            so.decode_accel = Some(Arc::new(|encoder: &str, zero_copy: bool, device: Option<&super::planner::Device>| super::planner::decode_accel_args(encoder, "linux", None, zero_copy, device).ok().flatten()));
+        }
+        let hold = o.hold_discovered.clone();
+        so.skip_discovered = hold.map(|h| -> Arc<dyn Fn(&Value, &Value) -> bool + Send + Sync> { Arc::new(move |c: &Value, d: &Value| std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| h(c, d))).unwrap_or(false)) });
         if let Some(t) = o.tune {
             t(&mut so);
         }
-        Ok(Converter { service: Service::new(so), store, staging, registry, temp_path, started: Mutex::new(None), converted_index })
+        let service = Service::new(so);
+        let s2 = service.clone();
+        *devices.encoding_now.lock().unwrap() = Some(Arc::new(move || !s2.active_encodes().is_empty()));
+        Ok(Converter { service, store, staging, registry, temp_path, started: Mutex::new(None), converted_index, devices })
     }
 
     /// start(): every unfinished job reconciled, then recovered one after the other

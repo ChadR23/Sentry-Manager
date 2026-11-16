@@ -35,6 +35,9 @@ pub struct VerifyRequest<'a> {
     pub keep_off_target: bool,
     pub allow_larger: bool,
     pub cancel: Arc<AtomicBool>,
+    /// GPU decode for a Full verify (empty: the CPU)
+    pub decode_accel: Vec<String>,
+    pub on_decode_accel_fallback: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 pub trait Tools: Send + Sync {
@@ -44,6 +47,10 @@ pub trait Tools: Send + Sync {
     fn verify(&self, r: &VerifyRequest) -> Verdict;
     fn select(&self, codec: &str) -> CResult<Selected>;
     fn select_cpu_fallback(&self, codec: &str) -> CResult<Selected>;
+    /// planner.selectFor(codec, device): a lane's GPU proven with its own arguments
+    fn select_for(&self, codec: &str, _device: &super::super::planner::Device) -> CResult<Selected> {
+        self.select(codec)
+    }
     fn ffmpeg_path(&self) -> &str;
     /// network.checkPath(target, { allowAncestor })
     fn check_path(&self, target: &str, allow_ancestor: bool) -> bool {
@@ -179,13 +186,17 @@ pub struct RealTools {
     pub ffmpeg: String,
     pub ffprobe: String,
     pub registry: Arc<Registry>,
-    pub planner: Planner<BoundedRunner>,
+    pub planner: Arc<Planner<BoundedRunner>>,
     pub runner: BoundedRunner,
 }
 
 impl RealTools {
     pub fn new(ffmpeg: &str, ffprobe: &str, registry: Arc<Registry>) -> RealTools {
-        RealTools { ffmpeg: ffmpeg.into(), ffprobe: ffprobe.into(), registry, planner: Planner::new(BoundedRunner::default(), "linux", ffmpeg), runner: BoundedRunner::default() }
+        Self::with_planner(ffmpeg, ffprobe, registry, Arc::new(Planner::new(BoundedRunner::default(), "linux", ffmpeg)))
+    }
+    /// sharing the runtime's planner (its proofs serve the device list too)
+    pub fn with_planner(ffmpeg: &str, ffprobe: &str, registry: Arc<Registry>, planner: Arc<Planner<BoundedRunner>>) -> RealTools {
+        RealTools { ffmpeg: ffmpeg.into(), ffprobe: ffprobe.into(), registry, planner, runner: BoundedRunner::default() }
     }
 }
 
@@ -224,6 +235,7 @@ impl Tools for RealTools {
             Ok(c) => c,
             Err(_) => return Verdict { ok: false, reason: Some("verification-failed"), retryable: false, source_bytes: None, output_bytes: None, details: Value::Null, publication_artifact: None },
         };
+        let fallback = r.on_decode_accel_fallback.clone().map(|f| move || f());
         verifier::verify_candidate(&VerifyOptions {
             source: PathBuf::from(r.source),
             candidate: PathBuf::from(r.candidate),
@@ -234,7 +246,7 @@ impl Tools for RealTools {
             allow_larger: r.allow_larger,
             trusted_snapshot: true,
             adopt_candidate: true,
-            decode_accel: vec![],
+            decode_accel: r.decode_accel.clone(),
             source_duration_us: r.source_duration_us,
             source_timeline: Some(r.timeline),
             ffprobe_path: self.ffprobe.clone(),
@@ -242,7 +254,7 @@ impl Tools for RealTools {
             run_ffprobe: &self.runner,
             run_full_decode: &self.runner,
             registry: &self.registry,
-            on_decode_accel_fallback: None,
+            on_decode_accel_fallback: fallback.as_ref().map(|f| f as &(dyn Fn() + Sync)),
             cancel: Some(r.cancel.clone()),
         })
     }
@@ -255,6 +267,13 @@ impl Tools for RealTools {
     }
     fn select_cpu_fallback(&self, codec: &str) -> CResult<Selected> {
         self.planner.select_cpu_fallback(codec).map_err(|e| CError::new("ENCODER_UNAVAILABLE", e))
+    }
+    fn select_for(&self, codec: &str, device: &super::super::planner::Device) -> CResult<Selected> {
+        match self.planner.select_for(codec, device, true) {
+            Ok(Some(s)) => Ok(s),
+            Ok(None) => self.select_cpu_fallback(codec),
+            Err(e) => Err(CError::new("ENCODER_UNAVAILABLE", e)),
+        }
     }
     fn ffmpeg_path(&self) -> &str {
         &self.ffmpeg

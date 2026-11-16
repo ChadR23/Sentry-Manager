@@ -11,6 +11,7 @@
 //! servers are not ported yet).
 
 mod encode;
+pub mod lanes;
 mod recover;
 pub mod tools;
 mod work;
@@ -295,6 +296,15 @@ pub struct Options {
     pub converted_index: Option<Arc<super::converted_index::ConvertedIndex>>,
     /// how long one MP4 header check may take before the clip takes the normal path
     pub header_check_timeout_ms: u64,
+    /// resolveDevice(id): a lane's device from the devices the container has
+    /// now (devices.rs, plus the helper servers' when they are ported)
+    pub resolve_device: Option<Arc<dyn Fn(&str) -> Option<Value> + Send + Sync>>,
+    /// defaultDevice(codec): the device a job without lanes encodes on
+    pub default_device: Option<Arc<dyn Fn(&str) -> Option<String> + Send + Sync>>,
+    /// setNodeSlots(nodeKey, slots): a helper server told how many it converts at once
+    pub set_node_slots: Option<Arc<dyn Fn(&str, &Value) -> Result<(), String> + Send + Sync>>,
+    /// decodeAccel(encoder, zeroCopy, device): GPU decode arguments (None: CPU decode)
+    pub decode_accel: Option<Arc<dyn Fn(&str, bool, Option<&super::planner::Device>) -> Option<Vec<String>> + Send + Sync>>,
 }
 
 impl Options {
@@ -316,6 +326,10 @@ impl Options {
             on_spawn: None,
             converted_index: None,
             header_check_timeout_ms: 20_000,
+            resolve_device: None,
+            default_device: None,
+            set_node_slots: None,
+            decode_accel: None,
         }
     }
 }
@@ -365,6 +379,14 @@ pub struct RtState {
     pub snapshot_pending: bool,
     pub workers: Vec<std::thread::JoinHandle<SResult<()>>>,
     pub release_recovery: Option<bool>,
+    /// workers per lane (None: the default lane of a job without lanes): (live, retiring)
+    pub lane_counters: HashMap<Option<String>, (usize, usize)>,
+    /// the lanes whose GPUs were found, while the job runs with lanes
+    pub lane_plan: Option<lanes::LanePlan>,
+    /// the device a job without lanes encodes on, once a switch needed it (None: not looked up)
+    pub default_lane: Option<Option<String>>,
+    /// consume() runs (Node: runtime.addWorker is set)
+    pub consuming: bool,
 }
 
 pub struct Runtime {
@@ -413,6 +435,10 @@ impl Runtime {
                 snapshot_pending: false,
                 workers: vec![],
                 release_recovery: None,
+                lane_counters: HashMap::new(),
+                lane_plan: None,
+                default_lane: None,
+                consuming: false,
             }),
             cv: Condvar::new(),
             persist: Mutex::new(()),
@@ -479,6 +505,10 @@ pub struct Inner {
     pub command: Mutex<()>,
     pub owner_seq: AtomicU64,
     pub reads: Arc<(Mutex<usize>, Condvar)>,
+    /// decode tiers found broken per GPU and encoder (encodeDecodeBroken)
+    pub decode_broken: Mutex<std::collections::HashSet<String>>,
+    /// verify decodes that fell back to the CPU, per GPU and encoder
+    pub verify_fallbacks: Mutex<HashMap<String, u32>>,
 }
 
 /// createConverterJobService
@@ -500,6 +530,8 @@ impl Service {
             command: Mutex::new(()),
             owner_seq: AtomicU64::new(1),
             reads: Arc::new((Mutex::new(0), Condvar::new())),
+            decode_broken: Mutex::new(Default::default()),
+            verify_fallbacks: Mutex::new(HashMap::new()),
         }))
     }
 
@@ -1070,7 +1102,8 @@ impl Service {
         Ok(public_snapshot(&rt.manifest()))
     }
 
-    /// setConcurrency(id, value)
+    /// setConcurrency(id, value): a job with lanes gives the number to its
+    /// one GPU still here, else carries on without lanes
     pub fn set_concurrency(&self, id: &str, value: &Value) -> SResult<Value> {
         self.mutate(|| {
             if !contracts::is_valid_concurrency(value) {
@@ -1081,16 +1114,42 @@ impl Service {
                 return Err(service_error("JOB_NOT_ACTIVE"));
             }
             let n = value.as_i64().unwrap();
+            if let Some(lanes) = lanes::lanes_of(&rt.manifest()) {
+                let kept: Vec<String> = match &rt.lock().lane_plan {
+                    Some(p) if p.fallback => vec![],
+                    Some(p) => p.devices.keys().cloned().collect(),
+                    None => lanes.as_array().unwrap().iter().filter_map(|l| l["device"].as_str().map(str::to_string)).collect(),
+                };
+                if kept.len() == 1 {
+                    return self.set_lanes_now(&rt, &json!([{ "device": kept[0], "concurrency": n }]));
+                }
+                return self.drop_lanes(&rt, n);
+            }
+            if rt.lock().concurrency() as i64 == n {
+                return Ok(public_snapshot(&rt.manifest()));
+            }
             self.update(&rt, |s| {
                 let mut c = s.manifest.config().clone();
                 c["concurrency"] = json!(n);
-                if let Some(m) = c.as_object_mut() {
-                    m.shift_remove("lanes");
-                }
                 Some(Patch::new().set("config", c))
             })?;
             self.start_missing_workers(&rt);
             Ok(public_snapshot(&rt.manifest()))
+        })
+    }
+
+    /// setLanes(id, lanes): conversions at once per GPU changed while the job runs
+    pub fn set_lanes(&self, id: &str, value: &Value) -> SResult<Value> {
+        self.mutate(|| {
+            let lanes = match contracts::normalize_lanes(value) {
+                Ok(Some(l)) => l,
+                _ => return Err(service_error("INVALID_LANES")),
+            };
+            let rt = self.ensure_runtime(id)?;
+            if TERMINAL_STATES.contains(&rt.manifest().state()) {
+                return Err(service_error("JOB_NOT_ACTIVE"));
+            }
+            self.set_lanes_now(&rt, &lanes)
         })
     }
 
@@ -1130,7 +1189,13 @@ impl Service {
 
     /// slotsOf(id)
     pub fn slots_of(&self, id: &str) -> Option<usize> {
-        self.runtime_of(id).map(|rt| rt.lock().concurrency())
+        self.runtime_of(id).map(|rt| {
+            let s = rt.lock();
+            match &s.lane_plan {
+                Some(p) if !p.fallback => p.base.values().sum(),
+                _ => s.concurrency(),
+            }
+        })
     }
 
     /// shutdown()

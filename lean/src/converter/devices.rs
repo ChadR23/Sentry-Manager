@@ -6,7 +6,7 @@
 
 use super::planner::Device;
 use super::process::{RunOptions, Runner};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -227,6 +227,186 @@ pub fn device_of(v: &Value) -> Device {
     let s = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
     let encoders = v.get("encoders").and_then(Value::as_object).map(|m| m.iter().filter_map(|(k, x)| x.as_str().map(|e| (k.clone(), e.to_string()))).collect()).unwrap_or_default();
     Device { id: s("id").unwrap_or_default(), kind: s("kind").unwrap_or_default(), vendor: s("vendor"), node: s("node"), index: v.get("index").and_then(Value::as_i64), name: s("name"), encoders }
+}
+
+/// What the device list asks the encoder planner (encoderPlanner.js).
+pub trait Encoders: Send + Sync {
+    fn select(&self, family: &str, probe: bool) -> Result<Option<super::planner::Selected>, String>;
+    fn select_for(&self, family: &str, d: &Device, probe: bool) -> Result<Option<super::planner::Selected>, String>;
+    fn select_cpu_fallback(&self, family: &str) -> Result<super::planner::Selected, String>;
+}
+
+impl<R: Runner> Encoders for super::planner::Planner<R> {
+    fn select(&self, family: &str, probe: bool) -> Result<Option<super::planner::Selected>, String> {
+        super::planner::Planner::select(self, family, probe)
+    }
+    fn select_for(&self, family: &str, d: &Device, probe: bool) -> Result<Option<super::planner::Selected>, String> {
+        super::planner::Planner::select_for(self, family, d, probe)
+    }
+    fn select_cpu_fallback(&self, family: &str) -> Result<super::planner::Selected, String> {
+        super::planner::Planner::select_cpu_fallback(self, family)
+    }
+}
+
+/// The encoding devices are looked up again at most this often while a job
+/// finds its lanes' GPUs.
+pub const DEVICE_LIST_TTL_MS: u64 = 2_000;
+
+/// runtime.js listDevices / recentDevices / resolveDevice / defaultDeviceOf
+/// / devices(): this server's own devices (and the helper servers', through
+/// `remote_nodes`), one lookup at a time, an answer reused for 2 s.
+pub struct Registry {
+    pub discovery: Discovery,
+    pub encoders: Arc<dyn Encoders>,
+    /// helper servers' devices ({ kind: 'node', id: 'node:<id>@<device>', ... }); the nodes port sets it
+    pub remote_nodes: Option<Arc<dyn Fn() -> Vec<Value> + Send + Sync>>,
+    /// something converts here right now (a GPU is then not test-encoded)
+    pub encoding_now: std::sync::Mutex<Option<Arc<dyn Fn() -> bool + Send + Sync>>>,
+    cache: std::sync::Mutex<(Option<std::time::Instant>, Option<Vec<Value>>, u64)>,
+    lookup: std::sync::Mutex<()>,
+    /// lookups made (tests)
+    pub lookups: std::sync::atomic::AtomicUsize,
+}
+
+impl Registry {
+    pub fn new(discovery: Discovery, encoders: Arc<dyn Encoders>) -> Registry {
+        Registry { discovery, encoders, remote_nodes: None, encoding_now: std::sync::Mutex::new(None), cache: std::sync::Mutex::new((None, None, 0)), lookup: std::sync::Mutex::new(()), lookups: Default::default() }
+    }
+
+    /// localDevices(): this server's GPUs and CPU (never the nodes)
+    pub fn local_devices(&self) -> Vec<Value> {
+        let l = self.discovery.list();
+        if l.is_empty() {
+            vec![cpu_device()]
+        } else {
+            l
+        }
+    }
+
+    fn list_devices(&self) -> Vec<Value> {
+        let mut l = self.local_devices();
+        if let Some(r) = &self.remote_nodes {
+            l.extend(r().into_iter().filter(|d| d["kind"] == "node" && d["id"].as_str().is_some_and(super::contracts::is_device_id)));
+        }
+        l
+    }
+
+    /// lookUpDevices(): a fresh list; callers while one runs share it
+    pub fn look_up(&self) -> Vec<Value> {
+        let gen = self.cache.lock().unwrap().2;
+        let _one = self.lookup.lock().unwrap();
+        {
+            let c = self.cache.lock().unwrap();
+            if c.2 != gen {
+                return c.1.clone().unwrap_or_default();
+            }
+        }
+        self.lookups.fetch_add(1, Ordering::SeqCst);
+        let l = self.list_devices();
+        let mut c = self.cache.lock().unwrap();
+        *c = (Some(std::time::Instant::now()), Some(l.clone()), gen + 1);
+        l
+    }
+
+    /// recentDevices(): the last list while it is at most 2 s old
+    pub fn recent(&self) -> Vec<Value> {
+        {
+            let c = self.cache.lock().unwrap();
+            if let (Some(at), Some(l)) = (c.0, &c.1) {
+                if at.elapsed() <= Duration::from_millis(DEVICE_LIST_TTL_MS) {
+                    return l.clone();
+                }
+            }
+        }
+        self.look_up()
+    }
+
+    /// resolveDevice(id): a lane's device id looked up only in this list
+    pub fn resolve_device(&self, id: &str) -> Option<Value> {
+        if !super::contracts::is_device_id(id) {
+            return None;
+        }
+        let list = self.recent();
+        if let Some(d) = list.iter().find(|d| d["id"] == id) {
+            return Some(d.clone());
+        }
+        if super::contracts::node_key_of(id) != Some(id) {
+            return None;
+        }
+        list.into_iter().find(|d| d["kind"] == "node" && d["isDefault"] == true && d["id"].as_str().and_then(super::contracts::node_key_of) == Some(id))
+    }
+
+    /// defaultDeviceOf(list, family, { able, probe })
+    pub fn default_device_of(&self, list: &[Value], family: &str, able: &dyn Fn(&Value) -> bool, probe: bool) -> Option<String> {
+        let selected = self.encoders.select(family, probe).ok().flatten()?;
+        if !selected.hardware {
+            return Some("cpu".into());
+        }
+        if selected.codec.ends_with("_nvenc") {
+            let nvidia: Vec<&Value> = list.iter().filter(|d| d["kind"] == "nvidia" && able(d)).collect();
+            return if nvidia.len() == 1 { nvidia[0]["id"].as_str().map(str::to_string) } else { None };
+        }
+        list.iter().find(|d| d["kind"] == "dri" && d["node"].as_str().and_then(|n| Path::new(n).file_name()).is_some_and(|n| n == "renderD128")).and_then(|d| d["id"].as_str().map(str::to_string))
+    }
+
+    /// the device a job without lanes encodes a codec on (serviceDeps.defaultDevice)
+    pub fn default_device(&self, family: &str) -> Option<String> {
+        let list = self.recent();
+        self.default_device_of(&list, family, &|_| true, true)
+    }
+
+    /// devices(): each device with the encoder it proved per codec, and the
+    /// device a job without lanes uses
+    pub fn devices(&self) -> Value {
+        let list = self.look_up();
+        if list.iter().filter(|d| d["kind"] != "cpu").count() < 2 && !list.iter().any(|d| d["kind"] == "node") {
+            let devices: Vec<Value> = list
+                .into_iter()
+                .map(|mut d| {
+                    d["encoders"] = Value::Null;
+                    d
+                })
+                .collect();
+            return json!({ "devices": devices, "defaultDevice": null, "defaultDevices": null });
+        }
+        let busy = self.encoding_now.lock().unwrap().clone();
+        let probe = !busy.is_some_and(|f| f());
+        let encoder_for = |family: &str, d: &Value| -> Option<Value> {
+            match self.encoders.select_for(family, &device_of(d), probe) {
+                Ok(Some(c)) if !c.timed_out => Some(if c.hardware || d["kind"] == "cpu" { json!(c.codec) } else { Value::Null }),
+                Ok(_) => None,
+                Err(_) => Some(Value::Null),
+            }
+        };
+        let devices: Vec<Value> = std::thread::scope(|s| {
+            let hs: Vec<_> = list
+                .iter()
+                .map(|d| {
+                    let encoder_for = &encoder_for;
+                    s.spawn(move || {
+                        let mut out = d.clone();
+                        let mut enc = Map::new();
+                        if let Some(v) = encoder_for("h265", d) {
+                            enc.insert("h265".into(), v);
+                        }
+                        if let Some(v) = encoder_for("av1", d) {
+                            enc.insert("av1".into(), v);
+                        }
+                        out["encoders"] = Value::Object(enc);
+                        out
+                    })
+                })
+                .collect();
+            hs.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let default_for = |family: &str| {
+            let able = |d: &Value| devices.iter().find(|e| e["id"] == d["id"]).map_or(true, |e| !e["encoders"].get(family).is_some_and(Value::is_null));
+            self.default_device_of(&list, family, &able, probe)
+        };
+        let h265 = default_for("h265");
+        let av1 = default_for("av1");
+        json!({ "devices": devices, "defaultDevice": h265, "defaultDevices": { "h265": h265, "av1": av1 } })
+    }
 }
 
 #[cfg(test)]

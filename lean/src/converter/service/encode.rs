@@ -153,6 +153,10 @@ pub struct EncodeRequest<'a> {
     pub quality: Option<&'a str>,
     pub duration_us: Option<i64>,
     pub hold_frames: i64,
+    /// the decode tier's arguments (None: CPU decode)
+    pub decode: Option<&'a [String]>,
+    /// the lane (chosen GPU) this clip runs on
+    pub lane_id: Option<&'a str>,
 }
 
 impl Service {
@@ -187,13 +191,14 @@ impl Service {
             encoder: &r.encoder.codec,
             bitrate: r.bitrate,
             quality: r.quality,
-            hw_frames: false,
+            hw_frames: r.decode.is_some_and(|d| d.iter().any(|a| a == "-hwaccel_output_format")),
             device,
             hold_frames: r.hold_frames,
             ..Default::default()
         })
         .map_err(|_| "encoder-start-failed")?;
         let mut args: Vec<String> = ["-nostdin", "-hide_banner", "-loglevel", "error", "-n"].iter().map(|s| s.to_string()).collect();
+        args.extend(r.decode.unwrap_or(&[]).iter().cloned());
         args.push("-i".into());
         args.push(r.source.into());
         args.extend(encode_args.iter().cloned());
@@ -221,8 +226,9 @@ impl Service {
             let rel = s.manifest.item(item_id).and_then(|i| i.str("relativePath").map(str::to_string));
             let live = json!({
                 "jobId": s.manifest.id(), "itemId": item_id, "relativePath": rel, "encoder": r.encoder.codec,
-                "hardware": r.encoder.hardware, "decode": "cpu", "device": render_device(&encode_args), "node": null,
-                "deviceId": null, "remote": false, "started": true, "pid": pid, "fps": null, "speed": null,
+                "hardware": r.encoder.hardware, "decode": if r.decode.is_some_and(|d| !d.is_empty()) { "gpu" } else { "cpu" },
+                "device": render_device(&[r.decode.unwrap_or(&[]), encode_args.as_slice()].concat()), "node": null,
+                "deviceId": r.lane_id, "remote": false, "started": true, "pid": pid, "fps": null, "speed": null,
                 "bitrateKbps": null, "frame": null, "outTimeUs": null,
                 "durationUs": r.duration_us.filter(|d| *d > 0), "dropFrames": null, "dupFrames": null, "totalSizeB": null
             });

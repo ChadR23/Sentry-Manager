@@ -96,17 +96,12 @@ fn config(base: &Path, mode: &str, network: &str, concurrency: i64) -> Value {
 
 fn open(base: &Path, ffmpeg: &str, ffprobe: &str, hooks: Option<Arc<dyn StoreHooks>>) -> Converter {
     Converter::open(RuntimeOptions {
-        data_path: fs::canonicalize(base.join("data")).unwrap(),
-        temp_path: fs::canonicalize(base.join("temp")).unwrap(),
-        ffmpeg: ffmpeg.into(),
-        ffprobe: ffprobe.into(),
-        before_replace_original: None,
-        tools: None,
         tune: Some(Box::new(|o| {
             o.backoff_initial_ms = 50;
             o.backoff_max_ms = 200;
         })),
         hooks,
+        ..RuntimeOptions::new(fs::canonicalize(base.join("data")).unwrap(), fs::canonicalize(base.join("temp")).unwrap(), ffmpeg, ffprobe)
     })
     .unwrap()
 }

@@ -704,29 +704,52 @@ impl Service {
 
     // ---- workers
 
+    /// startMissingWorkers(runtime): the workers each lane is missing
     pub fn start_missing_workers(&self, rt: &Arc<Runtime>) {
-        let (running, want, live) = {
+        let missing: Vec<(Option<lanes::Lane>, usize)> = {
             let s = rt.lock();
-            (s.running && !s.queue_closed || s.running && !s.queue.is_empty(), s.concurrency(), s.live_workers - s.retiring)
+            let running = s.running && (!s.queue_closed || !s.queue.is_empty());
+            if !running || !s.consuming || s.cancel_requested || s.stop_requested {
+                return;
+            }
+            let list: Vec<Option<lanes::Lane>> = match &s.lane_plan {
+                Some(p) if !p.fallback => p.devices.iter().map(|(id, d)| Some(lanes::Lane { id: id.clone(), device: d.clone() })).collect(),
+                _ => vec![None],
+            };
+            list.into_iter()
+                .map(|l| {
+                    let id = l.as_ref().map(|l| l.id.clone());
+                    let n = s.lane_limit(&id).saturating_sub(s.device_active(&id));
+                    (l, n)
+                })
+                .collect()
         };
-        if !running {
-            return;
-        }
-        for _ in live..want {
-            self.add_worker(rt);
+        for (lane, n) in missing {
+            for _ in 0..n {
+                self.add_worker(rt, lane.clone());
+            }
         }
     }
 
-    fn add_worker(&self, rt: &Arc<Runtime>) {
+    fn add_worker(&self, rt: &Arc<Runtime>, lane: Option<lanes::Lane>) {
         let me = self.clone();
         let rt2 = rt.clone();
-        rt.lock().live_workers += 1;
-        let h = std::thread::spawn(move || me.work(&rt2));
+        {
+            let mut s = rt.lock();
+            s.live_workers += 1;
+            s.lane_counter(&lane.as_ref().map(|l| l.id.clone())).0 += 1;
+        }
+        let h = std::thread::spawn(move || me.work(&rt2, lane));
         rt.lock().workers.push(h);
     }
 
-    /// work(runtime): one worker (its live count already taken)
-    fn work(&self, rt: &Arc<Runtime>) -> SResult<()> {
+    /// work(runtime, lane): one worker (its live counts already taken)
+    fn work(&self, rt: &Arc<Runtime>, lane: Option<lanes::Lane>) -> SResult<()> {
+        let lane_id = lane.as_ref().map(|l| l.id.clone());
+        let over = |s: &RtState| {
+            let (live, retiring) = s.lane_counters.get(&lane_id).copied().unwrap_or((0, 0));
+            live.saturating_sub(retiring) > s.lane_limit(&lane_id)
+        };
         let mut retired = false;
         let r = (|| -> SResult<()> {
             loop {
@@ -742,7 +765,8 @@ impl Service {
                     if s.stopped() {
                         break;
                     }
-                    if s.live_workers - s.retiring > s.concurrency() {
+                    if over(&s) {
+                        s.lane_counter(&lane_id).1 += 1;
                         s.retiring += 1;
                         retired = true;
                         break;
@@ -770,8 +794,9 @@ impl Service {
                     if s.cancel_requested || s.stop_requested || s.recovery_required {
                         break;
                     }
-                    if s.live_workers - s.retiring > s.concurrency() {
+                    if over(&s) {
                         s.queue.push_front(next);
+                        s.lane_counter(&lane_id).1 += 1;
                         s.retiring += 1;
                         retired = true;
                         drop(s);
@@ -787,7 +812,7 @@ impl Service {
                 let outcome = if item["kind"] == "asset" {
                     self.process_asset(rt, &item, ("asset-retained", "copied"))
                 } else {
-                    self.keep_original_when_no_savings(rt, &item)
+                    self.keep_original_when_no_savings(rt, &item, lane.as_ref())
                 };
                 let r = match outcome {
                     Ok(()) => Ok(()),
@@ -806,23 +831,49 @@ impl Service {
         {
             let mut s = rt.lock();
             s.live_workers -= 1;
+            let c = s.lane_counter(&lane_id);
+            c.0 -= 1;
             if retired {
+                c.1 -= 1;
                 s.retiring -= 1;
             }
         }
         rt.cv.notify_all();
         if retired {
+            // its GPU may be waiting for it (a switch to or from lanes)
             self.start_missing_workers(rt);
         }
         let _ = self.persist_pause_when_parked(rt);
         r
     }
 
-    /// consume(runtime)
+    /// consume(runtime): a job with lanes first finds its GPUs (again when
+    /// the lanes changed meanwhile)
     fn consume(&self, rt: &Arc<Runtime>) -> SResult<()> {
-        let n = rt.lock().concurrency();
-        for _ in 0..n {
-            self.add_worker(rt);
+        let mut plan = None;
+        let mut current = lanes::lanes_of(&rt.manifest());
+        while let Some(l) = current {
+            let resolved = self.resolve_lanes(&l);
+            let latest = lanes::lanes_of(&rt.manifest());
+            if latest.as_ref() == Some(&l) {
+                plan = Some(resolved);
+                break;
+            }
+            current = latest;
+        }
+        let start: Vec<(Option<lanes::Lane>, usize)> = {
+            let mut s = rt.lock();
+            s.lane_plan = plan.clone();
+            s.consuming = true;
+            match &plan {
+                Some(p) if !p.fallback => p.devices.iter().map(|(id, d)| (Some(lanes::Lane { id: id.clone(), device: d.clone() }), p.limits.get(id).copied().unwrap_or(0))).collect(),
+                _ => vec![(None, s.concurrency())],
+            }
+        };
+        for (lane, n) in start {
+            for _ in 0..n {
+                self.add_worker(rt, lane.clone());
+            }
         }
         let mut first_err = None;
         loop {
@@ -834,6 +885,7 @@ impl Service {
                 Err(_) => first_err = first_err.or(Some(service_error("WORKER_PANICKED"))),
             }
         }
+        rt.lock().consuming = false;
         match first_err {
             Some(e) => Err(e),
             None => Ok(()),
@@ -1011,8 +1063,8 @@ impl Service {
         Ok(())
     }
 
-    fn keep_original_when_no_savings(&self, rt: &Arc<Runtime>, item: &Value) -> SResult<()> {
-        match self.process_video(rt, item) {
+    fn keep_original_when_no_savings(&self, rt: &Arc<Runtime>, item: &Value, lane: Option<&lanes::Lane>) -> SResult<()> {
+        match self.process_video(rt, item, lane) {
             Err(e) if e.is("KEEP_ORIGINAL") && Self::ownership_for(rt, item["id"].as_str().unwrap()).map_or(true, |o| o.paths.is_empty()) => {
                 let current = rt.lock().item(item["id"].as_str().unwrap()).unwrap_or_else(|| item.clone());
                 self.process_asset(rt, &current, ("no-savings", "no-savings"))
@@ -1022,7 +1074,7 @@ impl Service {
     }
 
     /// processVideo: network waits around processVideoOnce
-    fn process_video(&self, rt: &Arc<Runtime>, item: &Value) -> SResult<()> {
+    fn process_video(&self, rt: &Arc<Runtime>, item: &Value, lane: Option<&lanes::Lane>) -> SResult<()> {
         let id = item["id"].as_str().unwrap().to_string();
         let mut quick = 0;
         loop {
@@ -1030,7 +1082,7 @@ impl Service {
                 return Err(service_error("CANCELLED"));
             }
             let current = rt.lock().item(&id).unwrap_or_else(|| item.clone());
-            match self.process_video_once(rt, &current) {
+            match self.process_video_once(rt, &current, lane) {
                 Ok(()) => return Ok(()),
                 Err(e) => {
                     if !Self::is_retryable_network(&e) {
@@ -1063,7 +1115,7 @@ impl Service {
     }
 
     /// processVideoOnceChecked
-    fn process_video_once(&self, rt: &Arc<Runtime>, item_v: &Value) -> SResult<()> {
+    fn process_video_once(&self, rt: &Arc<Runtime>, item_v: &Value, lane: Option<&lanes::Lane>) -> SResult<()> {
         let item = Item_ { v: item_v.clone() };
         let id = item.s("id");
         let signal = rt.signal();
@@ -1088,7 +1140,7 @@ impl Service {
             self.video_source(rt, &item, &mode)?
         };
         timing.mark("source");
-        let r = self.convert(rt, &item, &source, staged_own.as_ref(), expected.as_ref(), &inspected, &mut timing);
+        let r = self.convert(rt, &item, &source, staged_own.as_ref(), expected.as_ref(), &inspected, &mut timing, lane);
         if let Err(e) = r {
             let cleanup = self.cleanup_ownership(rt, &id, staged_own.as_ref(), None, false);
             if !cleanup.cleaned {
@@ -1101,7 +1153,8 @@ impl Service {
         Ok(())
     }
 
-    fn convert(&self, rt: &Arc<Runtime>, item: &Item_, source: &str, staged_own: Option<&Own>, expected: Option<&SourceAuthority>, inspected: &tools::Inspected, timing: &mut Timing) -> SResult<()> {
+    #[allow(clippy::too_many_arguments)]
+    fn convert(&self, rt: &Arc<Runtime>, item: &Item_, source: &str, staged_own: Option<&Own>, expected: Option<&SourceAuthority>, inspected: &tools::Inspected, timing: &mut Timing, lane: Option<&lanes::Lane>) -> SResult<()> {
         let id = item.s("id");
         let signal = rt.signal();
         let m = rt.manifest();
@@ -1123,8 +1176,16 @@ impl Service {
         } else {
             Some(initial(target_bytes.unwrap_or(0.0))?)
         };
-        let mut selected: Selected = self.0.o.tools.select(&codec).map_err(Fail::from)?;
+        let mut selected: Selected = match lane {
+            Some(l) => self.0.o.tools.select_for(&codec, &super::super::devices::device_of(&l.device)),
+            None => self.0.o.tools.select(&codec),
+        }
+        .map_err(Fail::from)?;
         let mut used_cpu_fallback = !selected.hardware;
+        let zero_copy = hold_frames == 0;
+        let mut tiers = self.encode_decode_tiers(&selected, zero_copy);
+        let mut failed_tiers: Vec<String> = vec![];
+        let mut tier_retry = false;
         if selected.hardware && !no_target {
             bitrate = bitrate.map(|b| (tools::bitrate_floor(&codec) as f64).max((b * 0.93).floor()));
         }
@@ -1133,7 +1194,12 @@ impl Service {
         let mut attempts = rt.lock().item(&id).and_then(|i| i["attempts"].as_i64()).unwrap_or(0);
         let mut latest: Option<Own> = staged_own.cloned();
         while !rt.lock().stopped() {
-            attempts = (attempts + 1).min(MAX_RECORDED_ATTEMPTS);
+            // a slower decode tier with the same encoder is not a new attempt
+            if !tier_retry {
+                attempts += 1;
+            }
+            tier_retry = false;
+            attempts = attempts.min(MAX_RECORDED_ATTEMPTS);
             self.item_patch(rt, &id, vec![("attempts", Some(json!(attempts))), ("encoder", Some(json!(selected.codec)))], vec![("state", json!("encoding")), ("activeItemId", json!(id))])?;
             let persist = self.persistence(rt, &id, false);
             let mut op = self.op(rt, &id, &signal, &persist);
@@ -1146,7 +1212,8 @@ impl Service {
                 let d = contracts::js_round(inspected.duration_seconds * 1_000_000.0) as i64;
                 if d != 0 { Some(d) } else { None }
             };
-            let encoded = self.run_child(rt, &id, &EncodeRequest { source, target: &reserved.path, codec: &codec, encoder: &selected, bitrate, quality: quality.as_deref(), duration_us, hold_frames });
+            let used_tier = tiers.first().cloned();
+            let encoded = self.run_child(rt, &id, &EncodeRequest { source, target: &reserved.path, codec: &codec, encoder: &selected, bitrate, quality: quality.as_deref(), duration_us, hold_frames, decode: used_tier.as_ref().map(|t| t.1.as_slice()), lane_id: lane.map(|l| l.id.as_str()) });
             timing.mark("encode");
             if let Err(code) = encoded {
                 let settle = if code == "cancelled" { timeout_flag(15_000) } else { rt.signal() };
@@ -1167,6 +1234,13 @@ impl Service {
                 if code == "cancelled" {
                     return Err(service_error("CANCELLED"));
                 }
+                // the same GPU encoder with a slower decode before giving up on it
+                if let Some(t) = used_tier {
+                    failed_tiers.push(t.0);
+                    tiers.remove(0);
+                    tier_retry = true;
+                    continue;
+                }
                 if selected.hardware && !used_cpu_fallback {
                     selected = self.0.o.tools.select_cpu_fallback(&codec).map_err(Fail::from)?;
                     used_cpu_fallback = true;
@@ -1174,6 +1248,7 @@ impl Service {
                 }
                 return Err(service_error("ENCODER_FAILED"));
             }
+            self.mark_broken_tiers(&selected, &mut failed_tiers);
             let mut op = self.op(rt, &id, &signal, &persist);
             op.owned_paths = reserved.owned_paths.clone();
             op.owned_artifacts = reserved.owned_artifacts.clone();
@@ -1203,6 +1278,9 @@ impl Service {
             timing.mark("metadata");
             self.item_patch(rt, &id, vec![], vec![("state", json!("verifying")), ("activeItemId", json!(id))])?;
             let verify_mode = contracts::effective_verify_mode(config["verifyMode"].as_str(), config["outputMode"].as_str());
+            let verify_accel = if verify_mode == "full" { self.verify_decode_accel(&selected) } else { None };
+            let verified_key = Self::decode_key(&selected);
+            let me = self.clone();
             let verdict = self.0.o.tools.verify(&tools::VerifyRequest {
                 source,
                 candidate: &adopted.path,
@@ -1214,6 +1292,8 @@ impl Service {
                 keep_off_target: config.get("keepOffTarget") == Some(&json!(true)),
                 allow_larger: no_target && config.get("keepLarger") == Some(&json!(true)) && under_source >= UNDER_SOURCE_SHARES.len(),
                 cancel: signal.clone(),
+                decode_accel: verify_accel.unwrap_or_default(),
+                on_decode_accel_fallback: Some(Arc::new(move || me.note_verify_fallback(&verified_key))),
             });
             timing.mark("verify");
             let details = verdict.details.clone();
