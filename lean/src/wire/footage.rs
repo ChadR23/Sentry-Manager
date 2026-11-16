@@ -151,6 +151,11 @@ impl Ctx for FootageCtx {
     fn vehicle_removed(&self, vehicle_id: &str) {
         let Some(s) = self.srv() else { return };
         crate::ops::power::forget(&s.state.db.conn(), vehicle_id);
+        // archiveGapRef.forget, driveData.forget
+        if let Some(v) = s.viewer() {
+            v.archive.forget(vehicle_id);
+            v.drive_data.forget(vehicle_id);
+        }
         if let Some(can) = s.can() {
             can.usb.forget(vehicle_id);
         }

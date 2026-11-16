@@ -252,6 +252,16 @@ impl Can {
             idx.usable = Box::new(move |k, name| t2.usable(k, name));
             let w = me.clone();
             idx.on_indexed = Box::new(move |key, from, to| {
+                // index.js onIndexed: the archive gap check forgets what it read of these minutes
+                // and checks that key's cars again a little later (CAN driving with no footage)
+                if let Some(viewer) = crate::viewer::get() {
+                    viewer.archive.indexed(key, from, to);
+                    for v in viewer.ctx.vehicles() {
+                        if viewer.ctx.can_keys(&v.id).iter().any(|k| k == key) {
+                            viewer.archive.soon(&v.id);
+                        }
+                    }
+                }
                 if let (Some(c), Some(f), Some(t)) = (w.upgrade(), from, to) {
                     c.sync.indexed(key, f, t);
                 }

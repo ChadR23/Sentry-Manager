@@ -382,7 +382,18 @@ impl Viewer {
             }
             let label = label_for(page.iter().any(|d| d.from.is_some() || d.to.is_some()));
             let tags = self.drive_data.tags(&v.id);
-            let list: Vec<Value> = page.iter().map(|d| drive_data::describe_drive(d, tags.as_ref(), &|k| by_key.get(k).map(|c| (*c).clone()), &|c| stats_for(c), &label)).collect();
+            let has_can = self.ctx.has_can(&v.id);
+            let list: Vec<Value> = page
+                .iter()
+                .map(|d| {
+                    let mut out = drive_data::describe_drive(d, tags.as_ref(), &|k| by_key.get(k).map(|c| (*c).clone()), &|c| stats_for(c), &label);
+                    // (the drive's first and last minutes, as the car names its Recent clips)
+                    if let (Some(f), Some(first), Some(last)) = (has_can.as_ref(), d.keys.first(), d.keys.last()) {
+                        out["can"] = json!(f(&[format!("RecentClips/{first}-front.mp4"), format!("RecentClips/{last}-front.mp4")], Some(first)));
+                    }
+                    out
+                })
+                .collect();
             let next = if more { list.last().map(|d| d["id"].clone()).unwrap_or(Value::Null) } else { Value::Null };
             return ok(json!({ "drives": list, "more": more, "next": next, "gap": num(gap_min), "source": "sentry-usb", "driveData": dd.meta, "reading": dd.reading, "scanning": scanning, "indexing": indexing }));
         }
@@ -391,7 +402,35 @@ impl Viewer {
             stats_for(c)
         }, gap_min * 60.0, limit, before.as_deref());
         let label = label_for(found.iter().any(|d| d.clips.iter().any(|c| stats_for(c).is_some_and(|s| s.a.is_some()))));
-        let list: Vec<Value> = found.iter().map(|d| Value::Object(drives::describe(d, &|c| stats_for(c), &label))).collect();
+        let has_can = self.ctx.has_can(&v.id);
+        let mut list: Vec<Map<String, Value>> = found
+            .iter()
+            .map(|d| {
+                let mut m = drives::describe(d, &|c| stats_for(c), &label);
+                if let (Some(f), Some(first), Some(last)) = (has_can.as_ref(), d.clips.first(), d.clips.last()) {
+                    m.insert("can".into(), json!(f(&[first.rel.clone(), last.rel.clone()], Some(&first.key))));
+                }
+                m
+            })
+            .collect();
+        // where a drive with CAN Bridge data started and ended: its GPS (good fixes only) over the cameras'
+        if list.iter().any(|d| d.get("can") == Some(&json!(true))) {
+            let mut keys = self.ctx.can_keys(&v.id);
+            keys.sort();
+            let stamp = |w: &Value| w.as_str().unwrap_or("").replace(' ', "_").replace(':', "-");
+            for d in list.iter_mut().filter(|d| d.get("can") == Some(&json!(true))) {
+                let from = recording_place::utc_of(&stamp(&d["start"]), &v.timezone);
+                let to = recording_place::utc_of(&stamp(&d["end"]), &v.timezone);
+                let (a, z) = self.can_gps.ends(&keys, from, to);
+                if a.is_some() {
+                    d.insert("from".into(), drives::end_of(a, &label));
+                }
+                if z.is_some() {
+                    d.insert("to".into(), drives::end_of(z, &label));
+                }
+            }
+        }
+        let list: Vec<Value> = list.into_iter().map(Value::Object).collect();
         let next = if more { list.last().map(|d| d["id"].clone()).unwrap_or(Value::Null) } else { Value::Null };
         ok(json!({ "drives": list, "more": more, "next": next, "gap": num(gap_min), "source": "clips", "driveData": dd.meta, "reading": dd.reading, "scanning": scanning, "indexing": indexing }))
     }
@@ -418,9 +457,16 @@ impl Viewer {
             return None;
         }
         let files = self.ctx.files(vid);
+        // CAN Bridge GPS for the recordings CAN data covers (the car's keys, sorted)
+        let has_can = self.ctx.has_can(vid);
+        let mut keys = if has_can.is_some() { self.ctx.can_keys(vid) } else { Vec::new() };
+        keys.sort();
+        let tz = self.ctx.vehicle(vid).map(|v| v.timezone).unwrap_or_default();
         Some(page.iter().map(|rec| {
             let ev = if rec.event_id.is_some() { self.spots.get(&*self.ctx, vid, files.as_ref(), rec).and_then(|s| s.pos) } else { None };
-            recording_place::tag(&self.speed_index, vid, files.as_ref(), rec, ev, &list)
+            let covered = has_can.as_ref().is_some_and(|f| f(&rec.clip_rels, rec.start_key.as_deref()));
+            let side = recording_place::CanSide { gps: &self.can_gps, keys: if covered { keys.clone() } else { Vec::new() }, tz: &tz };
+            recording_place::tag(&self.speed_index, vid, files.as_ref(), rec, ev, &list, Some(&side))
         }).collect())
     }
 }

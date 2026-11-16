@@ -49,7 +49,7 @@ pub fn valid(name: &str) -> bool {
 }
 
 /// (y, m, d, h, mi, s) of a moment in the zone.
-fn parts(ms: f64, z: Zone) -> (i32, u32, u32, u32, u32, u32) {
+pub fn parts(ms: f64, z: Zone) -> (i32, u32, u32, u32, u32, u32) {
     let t = Utc.timestamp_millis_opt(ms as i64).single().unwrap_or_default();
     match z {
         Zone::Named(tz) => {

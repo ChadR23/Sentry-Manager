@@ -98,6 +98,44 @@ impl Ctx for CoreViewer {
     fn can_keys(&self, id: &str) -> Vec<String> {
         self.srv().and_then(|s| s.can().map(|c| c.keys_for(id))).unwrap_or_default()
     }
+    fn has_can(&self, id: &str) -> Option<Box<dyn Fn(&[String], Option<&str>) -> bool>> {
+        let s = self.srv()?;
+        let can = s.can()?.clone();
+        let v = s.app().vehicle(id)?;
+        let f = can.has_can(&super::footage::car_of(s.app(), &v));
+        Some(Box::new(move |rels: &[String], start: Option<&str>| f(&crate::can::ctx::Rec { id: String::new(), clip_rels: rels.to_vec(), start_key: start.map(String::from) })))
+    }
+    fn sentry_usb_pi(&self, id: &str) -> Option<crate::viewer::archive_gap::Pi> {
+        // index.js sentryUsbFor: the range Sentry USB is still copying (sentryUsb.now)
+        let can = self.srv()?.can().cloned()?;
+        let n = can.usb.now(id);
+        let (first, last) = n.range.filter(|_| n.transferring)?;
+        let stamp = crate::viewer::archive_gap::stamp_sec;
+        Some(crate::viewer::archive_gap::Pi { overdue: n.overdue, first_s: stamp(&first).unwrap_or(f64::NAN), last_s: stamp(&last) })
+    }
+    fn snapshots(&self, id: &str) -> Option<crate::viewer::archive_gap::Snaps> {
+        // sentryUsb.snapshots(vid): snapshotInfo of the last status
+        let can = self.srv()?.can().cloned()?;
+        let st = can.usb.get(id)?;
+        let snaps = st.snapshots.as_ref()?;
+        let interval = st.snapshot_interval_s.unwrap_or(crate::can::sentry_usb::DEFAULT_INTERVAL_S);
+        let gaps = crate::can::sentry_usb::snapshot_gaps(snaps, interval).into_iter().map(|g| (g.from_unix as f64, g.to_unix as f64, g.seconds as f64, g.lost_to_unix.map(|x| x as f64))).collect();
+        Some(crate::viewer::archive_gap::Snaps { interval_s: interval as f64, gaps })
+    }
+    fn car_files(&self, id: &str) -> Option<crate::viewer::archive_gap::CarFilesIn> {
+        // sentryUsb.carFiles(vid): the list, the file's time, and when the Pi last archived
+        let can = self.srv()?.can().cloned()?;
+        let cf = can.usb.car_files(id)?;
+        let archived = crate::can::sentry_usb::archived_since(can.usb.get(id).as_ref()).map(|x| x as f64);
+        Some(crate::viewer::archive_gap::CarFilesIn { list: cf.list.clone(), error: cf.error.clone(), file_unix: (cf.mtime / 1000.0).floor(), archived_unix: archived })
+    }
+    fn binned(&self, id: &str) -> Option<Vec<String>> {
+        Some(self.state.db.bin_items(Some(id)).into_iter().flat_map(|b| b.files.as_array().cloned().unwrap_or_default()).filter_map(|f| f["rel"].as_str().map(String::from)).collect())
+    }
+    fn deleted_clips(&self, id: &str) -> Option<Vec<String>> {
+        let s = self.srv()?;
+        Some(crate::footage::deleted_clips::list(s.app().core.db(), id, crate::footage::js::now()))
+    }
     fn encoded(&self, id: &str) -> HashSet<String> {
         let Some(s) = self.srv() else { return HashSet::new() };
         s.app().state_of(id).map(|st| st.codecs.iter().filter(|(_, c)| matches!(c.as_deref(), Some("h265") | Some("av1"))).map(|(r, _)| r.clone()).collect()).unwrap_or_default()

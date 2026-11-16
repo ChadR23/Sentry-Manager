@@ -166,6 +166,8 @@ fn days(app: &App, v: &Vehicle, q: &HashMap<String, String>) -> Res {
     let mut shown = slice(&all, offset, offset + limit);
     let wanted: Vec<String> = shown.iter().map(|d| d["day"].as_str().unwrap_or("").to_string()).collect();
     let idx = crate::viewer::get().map(|viewer| viewer.speed_index.progress(&v.id, &wanted)).unwrap_or_default();
+    let gaps = crate::viewer::get().map(|viewer| viewer.archive.for_days(&v.id)).unwrap_or_default();
+    let car_files = crate::viewer::get().map(|viewer| viewer.archive.car_files(&v.id)).unwrap_or(Value::Null);
     // how many of each day's recordings have CAN Bridge data (the green "CAN" tag)
     let has_can = app.core.has_can(&v.id);
     let mut can_days: HashMap<&str, u64> = HashMap::new();
@@ -179,8 +181,11 @@ fn days(app: &App, v: &Vehicle, q: &HashMap<String, String>) -> Res {
     for d in &mut shown {
         let (clips, indexed) = idx.get(d["day"].as_str().unwrap_or("")).copied().unwrap_or((0, 0));
         d.insert("speedIndex".into(), json!({ "clips": clips, "indexed": indexed }));
-        d.insert("archive".into(), Value::Null);
-        d.insert("carFiles".into(), Value::Null);
+        // footage that looks only partly copied to the share yet (the "Partly archived?" tag), and
+        // what Sentry USB's list says the car wrote that day, beside the share's own counts
+        let day = d["day"].as_str().unwrap_or("").to_string();
+        d.insert("archive".into(), gaps.get(&day).cloned().unwrap_or(Value::Null));
+        d.insert("carFiles".into(), car_files["days"].get(&day).cloned().unwrap_or(Value::Null));
         if has_can.is_some() {
             let n = can_days.get(d["day"].as_str().unwrap_or("")).copied().unwrap_or(0);
             d.insert("canRecordings".into(), json!(n));

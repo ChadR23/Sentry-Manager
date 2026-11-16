@@ -46,6 +46,8 @@ pub struct Viewer {
     pub drive_data: Arc<drive_data::DriveData>,
     pub spots: places::EventSpots,
     pub archive: Arc<archive_gap::ArchiveGap>,
+    /// CAN Bridge GPS for place tags and drive ends (the CAN index's minute files)
+    pub can_gps: recording_place::CanGps,
 }
 
 static VIEWER: OnceLock<Arc<Viewer>> = OnceLock::new();
@@ -88,7 +90,8 @@ impl Viewer {
         let drive_data = drive_data::DriveData::new(data.join("drive-data"), ctx.clone());
         let _ = std::fs::create_dir_all(data.join("converted"));
         let archive = archive_gap::ArchiveGap::new(ctx.clone(), speed_index.clone());
-        Arc::new(Viewer { ctx, resources, limits, pace, speed_index, telemetry, scrub, prepare, strips, drive_data, spots: places::EventSpots::default(), archive })
+        let can_gps = recording_place::CanGps::new(data.join("can-index"));
+        Arc::new(Viewer { ctx, resources, limits, pace, speed_index, telemetry, scrub, prepare, strips, drive_data, spots: places::EventSpots::default(), archive, can_gps })
     }
 
     /// Start the background work and make this the server's viewer: the pace's clock,

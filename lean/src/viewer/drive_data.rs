@@ -955,6 +955,12 @@ impl DriveData {
         Arc::new(DriveData { dir, ctx, cars: Mutex::new(HashMap::new()), reading: Mutex::new(()), stable_ms: 15_000.0, check_ms: 30_000.0, chunk: CHUNK })
     }
 
+    /// forget(vid): a removed vehicle's drives and its cache file go
+    pub fn forget(&self, vid: &str) {
+        self.cars.lock().unwrap().remove(vid);
+        let _ = std::fs::remove_file(self.cache_file(vid));
+    }
+
     fn cache_file(&self, vid: &str) -> PathBuf {
         self.dir.join(format!("{}.json", js::encode_component(vid)))
     }

@@ -67,6 +67,36 @@ pub trait Ctx: Send + Sync + 'static {
     fn can_keys(&self, _id: &str) -> Vec<String> {
         Vec::new()
     }
+    /// canFootage.js forVehicle: whether CAN data covers a recording (its clip rels and start key);
+    /// None without the CAN area
+    #[allow(clippy::type_complexity)]
+    fn has_can(&self, _id: &str) -> Option<Box<dyn Fn(&[String], Option<&str>) -> bool>> {
+        None
+    }
+    /// canKeyMapped(key): a CAN Bridge key mapped to a car explicitly (the `can-vehicles` setting)
+    fn can_key_mapped(&self, key: &str) -> bool {
+        self.setting("can-vehicles").is_some_and(|m| m.get(key).is_some_and(crate::ops::js::truthy))
+    }
+    /// the range Sentry USB is still copying (sentryUsb.now): None when it is not transferring
+    fn sentry_usb_pi(&self, _id: &str) -> Option<super::archive_gap::Pi> {
+        None
+    }
+    /// Sentry USB's snapshots (sentryUsb.snapshots: snapshotInfo), None when its status lists none
+    fn snapshots(&self, _id: &str) -> Option<super::archive_gap::Snaps> {
+        None
+    }
+    /// Sentry USB's list of what the car wrote (sentryUsb.carFiles), None without one
+    fn car_files(&self, _id: &str) -> Option<super::archive_gap::CarFilesIn> {
+        None
+    }
+    /// the rels of the car's clips in the Recycle Bin
+    fn binned(&self, _id: &str) -> Option<Vec<String>> {
+        None
+    }
+    /// the rels of clips Manager deleted for good lately (deletedClips.js list)
+    fn deleted_clips(&self, _id: &str) -> Option<Vec<String>> {
+        None
+    }
     /// the clips the converter rewrote (H.265 / AV1): their file times say nothing of the archive
     fn encoded(&self, _id: &str) -> std::collections::HashSet<String> {
         std::collections::HashSet::new()

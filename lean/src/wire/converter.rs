@@ -80,7 +80,8 @@ impl Conv {
 
 impl ConverterCtx for CoreConverter {
     fn data_path(&self) -> PathBuf {
-        self.state.config.data.clone()
+        // (index.js dataDir: the job store, the converted index, automatic conversion)
+        self.state.config.data.join("converter")
     }
     fn temp_path(&self) -> PathBuf {
         // index.js: path.join(DATA, 'converter-temp'), the container's own
@@ -327,9 +328,14 @@ pub fn spawn(srv: &Arc<Server>) {
             let temp = ctx.temp_path();
             let _ = std::fs::create_dir_all(&temp);
             let temp = std::fs::canonicalize(&temp).unwrap_or(temp);
+            // index.js: dataDir path.join(DATA, 'converter') (the job store, the converted
+            // index, automatic conversion's state), tempDir path.join(DATA, 'converter-temp')
+            let data = st.config.data.join("converter");
+            let _ = std::fs::create_dir_all(&data);
+            let data = std::fs::canonicalize(&data).unwrap_or(data);
             let meter: Arc<dyn crate::converter::benchmark::PowerMeter> = Arc::new(OpsMeter { srv: Arc::downgrade(&s), tokens: Mutex::new((0, HashMap::new())) });
             let open = || {
-                let mut o = RuntimeOptions::new(st.config.data.clone(), temp.clone(), &st.config.ffmpeg, &st.config.ffprobe);
+                let mut o = RuntimeOptions::new(data.clone(), temp.clone(), &st.config.ffmpeg, &st.config.ffprobe);
                 // the Sentry USB checksum record of the original, before it is replaced in place
                 o.before_replace_original = s.arrival().map(|a| a.before_replace_fn());
                 // clips Sentry USB is still copying are held back (sentryUsb.holds)

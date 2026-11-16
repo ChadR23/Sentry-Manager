@@ -2,7 +2,7 @@
 
 pub use crate::inventory::num;
 pub use crate::sei::js_round;
-use chrono::{DateTime, Datelike, NaiveDate, TimeZone, Utc};
+use chrono::{Datelike, NaiveDate, TimeZone, Utc};
 use serde_json::Value;
 
 pub fn r1(x: f64) -> f64 {
@@ -109,15 +109,9 @@ pub fn wall(s: f64) -> String {
     t.format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
-/// The day (YYYY-MM-DD) of now in a time zone; only the process's own zone (TZ) and UTC are known here.
+/// The day (YYYY-MM-DD) of now in a time zone (policies.js dayInZone: Intl's zones).
 pub fn day_in_zone(now_ms: f64, tz: &str) -> String {
-    let local_tz = std::env::var("TZ").unwrap_or_else(|_| "UTC".into());
-    if tz == "UTC" || tz == "Etc/UTC" || tz != local_tz {
-        // (another zone than the server's: UTC, until the zone table lands with core)
-        let t: DateTime<Utc> = Utc.timestamp_millis_opt(now_ms as i64).single().unwrap_or_default();
-        return t.format("%Y-%m-%d").to_string();
-    }
-    crate::footage::local_day(now_ms)
+    crate::footage::tz::day_in_zone(now_ms, tz)
 }
 
 /// The Monday (YYYY-MM-DD) of a day's week.
