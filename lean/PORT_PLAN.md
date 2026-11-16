@@ -574,7 +574,7 @@ Not done yet:
   `OpsCtx::encoder_block`) and heartbeatHardware/convertStats (converter);
   the benchmark's meter (`meter_start`/`meter_stop`: the benchmark is not
   ported);
-- `node_powers()` and `node_power` (helper servers are not ported),
+- (node power comes from the helper servers on core;)
   `sentry_usb_infos()` (CAN area's Sentry USB info files),
   `driven_metres()` (the viewer's speed index): their defaults (none, 0).
 
