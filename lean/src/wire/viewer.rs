@@ -8,17 +8,13 @@ use crate::core::{Ctx as CoreCtx, HttpError, Reply};
 use crate::inventory::Recording;
 use crate::viewer::ctx::{Ctx, Files, VehicleRef};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, Weak};
-
-type FilesCache = HashMap<String, (Weak<Vec<crate::scanner::FileEntry>>, Files)>;
+use std::sync::{Arc, Weak};
 
 pub struct CoreViewer {
     srv: Weak<Server>,
     state: Arc<crate::core::AppState>,
-    /// the last scan's files by rel, per vehicle, with the list they come from
-    files: Mutex<FilesCache>,
 }
 
 impl CoreViewer {
@@ -51,15 +47,7 @@ impl Ctx for CoreViewer {
         let s = self.srv()?;
         let st = s.app().state_of(id).filter(|st| st.scanned)?;
         st.scanned_at?;
-        let mut cache = self.files.lock().unwrap();
-        if let Some((list, f)) = cache.get(id) {
-            if Weak::as_ptr(list) == Arc::as_ptr(&st.file_list) {
-                return Some(f.clone());
-            }
-        }
-        let f: Files = Arc::new(st.file_list.iter().map(|e| (e.rel.clone(), e.clone())).collect());
-        cache.insert(id.to_string(), (Arc::downgrade(&st.file_list), f.clone()));
-        Some(f)
+        Some(st.file_list.clone())
     }
     fn recordings(&self, id: &str) -> Option<Arc<Vec<Recording>>> {
         self.srv()?.app().state_of(id).filter(|s| s.scanned).map(|s| s.recordings)
@@ -140,7 +128,7 @@ impl Ctx for CoreViewer {
     }
     fn encoded(&self, id: &str) -> HashSet<String> {
         let Some(s) = self.srv() else { return HashSet::new() };
-        s.app().state_of(id).map(|st| st.codecs.iter().filter(|(_, c)| matches!(c.as_deref(), Some("h265") | Some("av1"))).map(|(r, _)| r.clone()).collect()).unwrap_or_default()
+        s.app().state_of(id).map(|st| st.codecs.iter().filter(|(_, c)| matches!(c, Some("h265") | Some("av1"))).map(|(r, _)| r.to_string()).collect()).unwrap_or_default()
     }
     fn open_notes(&self, id: &str, kind: &str) -> Vec<String> {
         let Some(ops) = self.srv().and_then(|s| s.ops().cloned()) else { return Vec::new() };
@@ -173,7 +161,7 @@ impl Ctx for CoreViewer {
 }
 
 pub fn make(srv: &Arc<Server>) -> Arc<crate::viewer::Viewer> {
-    crate::viewer::Viewer::start(Arc::new(CoreViewer { srv: Arc::downgrade(srv), state: srv.state.clone(), files: Mutex::new(HashMap::new()) }))
+    crate::viewer::Viewer::start(Arc::new(CoreViewer { srv: Arc::downgrade(srv), state: srv.state.clone() }))
 }
 
 /// A viewer route for core's router.

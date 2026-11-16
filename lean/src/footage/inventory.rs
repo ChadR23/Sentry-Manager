@@ -11,7 +11,57 @@ use std::collections::{BTreeSet, HashMap};
 
 const SESSION_GAP_S: i64 = 90;
 
-pub type Codecs = HashMap<String, Option<String>>;
+/// Each file's codec as the catalog knows it, two bytes a file of the scan's list:
+/// 0 not read yet, 1 read without a codec, 2.. a codec name.
+#[derive(Default)]
+pub struct Codecs {
+    list: std::sync::Arc<crate::scanner::FileList>,
+    code: Vec<u16>,
+    names: Vec<String>,
+}
+
+impl Codecs {
+    /// `known`: (rel, codec) as the catalog has them; rels not in the list are left out
+    pub fn new(list: std::sync::Arc<crate::scanner::FileList>, known: impl IntoIterator<Item = (String, Option<String>)>) -> Codecs {
+        let mut code = vec![0u16; list.len()];
+        let mut names: Vec<String> = Vec::new();
+        for (rel, c) in known {
+            let Some(i) = list.position(&rel) else { continue };
+            code[i] = match c {
+                None => 1,
+                Some(c) => match names.iter().position(|n| *n == c) {
+                    Some(n) => n as u16 + 2,
+                    None => {
+                        names.push(c);
+                        names.len() as u16 + 1
+                    }
+                },
+            };
+        }
+        Codecs { list, code, names }
+    }
+
+    fn name(&self, c: u16) -> Option<&str> {
+        (c >= 2).then(|| self.names[c as usize - 2].as_str())
+    }
+
+    /// None: not read yet; Some(None): read, no codec
+    pub fn get(&self, rel: &str) -> Option<Option<&str>> {
+        match *self.code.get(self.list.position(rel)?)? {
+            0 => None,
+            c => Some(self.name(c)),
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&str, Option<&str>)> {
+        self.code.iter().enumerate().filter(|(_, &c)| c != 0).map(|(i, &c)| (self.list[i].rel.as_str(), self.name(c)))
+    }
+
+    /// the same codecs on another list of the same files (after trash or restore)
+    pub fn remap(&self, list: std::sync::Arc<crate::scanner::FileList>) -> Codecs {
+        Codecs::new(list, self.iter().map(|(r, c)| (r.to_string(), c.map(str::to_string))))
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Recording {
@@ -180,7 +230,7 @@ pub fn encoded_of(rec: &Recording, codecs: &Codecs) -> Encoded {
             None => e.unknown += 1,
             Some(Some(c)) if c == "h265" || c == "av1" => {
                 e.encoded += 1;
-                seen.insert(c.clone());
+                seen.insert(c.to_string());
             }
             _ => {}
         }
@@ -349,4 +399,31 @@ pub fn arrived_clips(files: &[FileEntry], since_ms: f64) -> (usize, usize) {
         if f.typ == "SentryClips" { sentry += 1 } else { dashcam += 1 }
     }
     (sentry, dashcam)
+}
+
+#[cfg(test)]
+mod codec_tests {
+    use super::*;
+    use crate::scanner::FileList;
+    use std::sync::Arc;
+
+    fn list(rels: &[&str]) -> Arc<FileList> {
+        Arc::new(rels.iter().map(|r| FileEntry { rel: r.to_string(), size: 1, mtime_ms: 1.0, ctime_ms: 1.0, birthtime_ms: 0.0, kind: Kind::Clip, typ: "RecentClips", day: "2026-11-16".into(), camera: None, event_id: None }).collect::<Vec<_>>().into())
+    }
+
+    #[test]
+    fn codecs_keep_not_read_read_and_named_apart() {
+        let l = list(&["a.mp4", "b.mp4", "c.mp4", "d.mp4"]);
+        let c = Codecs::new(l.clone(), [("a.mp4".to_string(), Some("h265".to_string())), ("b.mp4".into(), None), ("c.mp4".into(), Some("h264".into())), ("gone.mp4".into(), Some("av1".into())), ("d.mp4".into(), Some("h265".into()))]);
+        assert_eq!(c.get("a.mp4"), Some(Some("h265")));
+        assert_eq!(c.get("b.mp4"), Some(None));
+        assert_eq!(c.get("c.mp4"), Some(Some("h264")));
+        assert_eq!(c.get("d.mp4"), Some(Some("h265")));
+        assert_eq!(c.get("e.mp4"), None);
+        assert_eq!(c.get("gone.mp4"), None, "not in the list");
+        assert_eq!(c.iter().collect::<Vec<_>>(), [("a.mp4", Some("h265")), ("b.mp4", None), ("c.mp4", Some("h264")), ("d.mp4", Some("h265"))]);
+        let moved = c.remap(list(&["d.mp4", "x.mp4", "a.mp4"]));
+        assert_eq!((moved.get("a.mp4"), moved.get("d.mp4"), moved.get("x.mp4"), moved.get("b.mp4")), (Some(Some("h265")), Some(Some("h265")), None, None));
+        assert_eq!(Codecs::default().get("a.mp4"), None);
+    }
 }

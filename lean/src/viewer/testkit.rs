@@ -243,7 +243,7 @@ impl Car {
         for f in list {
             files.insert(f.rel.clone(), f);
         }
-        self.ctx.files.lock().unwrap().insert("v1".into(), Arc::new(files));
+        self.ctx.files.lock().unwrap().insert("v1".into(), Arc::new(files.into_iter().collect()));
         self.ctx.recs.lock().unwrap().insert("v1".into(), Arc::new(recs));
         *self.ctx.stamp.lock().unwrap() += 1.0;
     }
