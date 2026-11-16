@@ -3,6 +3,7 @@
 
 pub mod api;
 pub mod app;
+pub mod arrival;
 pub mod catalog;
 pub mod converter;
 pub mod footage;
