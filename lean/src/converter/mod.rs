@@ -43,4 +43,6 @@ pub mod verifier;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod parity_tests;
+#[cfg(test)]
 pub mod testutil;

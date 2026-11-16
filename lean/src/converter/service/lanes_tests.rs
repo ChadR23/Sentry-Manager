@@ -83,12 +83,15 @@ pub fn desktop_works() -> Works {
 pub struct FakeProbe {
     pub works: Works,
     pub calls: AtomicUsize,
+    /// what ffmpeg -encoders lists (ADVERTISED when None)
+    pub advertised: Option<Vec<String>>,
 }
 impl Runner for FakeProbe {
     fn run(&self, _c: &str, args: &[String], _o: &RunOptions) -> Result<ProcResult, String> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if args.iter().any(|a| a == "-encoders") {
-            return Ok(ProcResult { status: Some(0), stdout: ADVERTISED.iter().map(|n| format!(" V..... {n}  x")).collect::<Vec<_>>().join("\n"), ..Default::default() });
+            let list: Vec<String> = self.advertised.clone().unwrap_or_else(|| ADVERTISED.iter().map(|s| s.to_string()).collect());
+            return Ok(ProcResult { status: Some(0), stdout: list.iter().map(|n| format!(" V..... {n}  x")).collect::<Vec<_>>().join("\n"), ..Default::default() });
         }
         let enc = args.iter().position(|a| a == "-c:v").and_then(|i| args.get(i + 1)).cloned().unwrap_or_default();
         Ok(match (self.works)(&enc, args) {
@@ -233,7 +236,7 @@ impl Harness {
         for d in ["data", "temp", "out"] {
             fs::create_dir_all(dir.path().join(d)).unwrap();
         }
-        let probe = Arc::new(FakeProbe { works: o.works.clone(), calls: AtomicUsize::new(0) });
+        let probe = Arc::new(FakeProbe { works: o.works.clone(), calls: AtomicUsize::new(0), advertised: None });
         let planner = Arc::new(Planner::new(probe.clone(), "linux", "ffmpeg"));
         let tools = Arc::new(FakeTools { planner: planner.clone(), ffmpeg: ffmpeg.to_string_lossy().to_string(), verify_ok: false });
         let devices = o.devices.clone();
@@ -610,7 +613,7 @@ fn a_gpu_that_cannot_encode_the_codec_uses_the_cpu_encoder_for_its_lane() {
 // ---- the runtime's device list
 
 fn registry(devices: Vec<Value>, works: Works) -> (Registry, Arc<FakeProbe>) {
-    let probe = Arc::new(FakeProbe { works, calls: AtomicUsize::new(0) });
+    let probe = Arc::new(FakeProbe { works, calls: AtomicUsize::new(0), advertised: None });
     let planner: Arc<dyn Encoders> = Arc::new(Planner::new(probe.clone(), "linux", "ffmpeg"));
     let mut d = Discovery::new(None);
     d.fixed = Some(Arc::new(move || devices.clone()));
@@ -719,7 +722,7 @@ fn the_default_device_per_codec_and_nvenc_only_when_one_nvidia_gpu_can() {
 fn lanes_find_their_gpus_with_one_lookup_and_callers_share_it() {
     let calls = Arc::new(AtomicUsize::new(0));
     let c2 = calls.clone();
-    let probe = Arc::new(FakeProbe { works: Arc::new(|e: &str, _a: &[String]| Some(e.starts_with("lib"))), calls: AtomicUsize::new(0) });
+    let probe = Arc::new(FakeProbe { works: Arc::new(|e: &str, _a: &[String]| Some(e.starts_with("lib"))), calls: AtomicUsize::new(0), advertised: None });
     let mut d = Discovery::new(None);
     let slow = Arc::new(AtomicBool::new(true));
     let s2 = slow.clone();
