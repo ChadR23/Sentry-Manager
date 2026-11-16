@@ -243,7 +243,7 @@ fn event_info(v: &Vehicle, rec: &Recording) -> Value {
     if rec.event_id.is_none() {
         return Value::Null;
     }
-    let Some((rel, _)) = rec.files.iter().find(|(r, _)| r.to_lowercase().ends_with("/event.json")) else { return Value::Null };
+    let Some(rel) = rec.event_json() else { return Value::Null };
     let abs = v.root.join(rel);
     let Ok(md) = std::fs::metadata(&abs) else { return Value::Null };
     if md.len() > 64 * 1024 {
@@ -264,8 +264,7 @@ fn recording(app: &App, v: &Vehicle, rid: &str) -> Res {
     };
     let mut out = inventory::public(rec, &st.codecs);
     let files: Vec<Value> = rec
-        .files
-        .iter()
+        .files()
         .map(|(rel, size)| {
             let mut f = json!({ "rel": rel, "path": join(&v.root, rel), "size": size });
             if rel.to_lowercase().ends_with(".mp4") {
@@ -298,7 +297,7 @@ fn media(app: &App, method: &Method, headers: &HeaderMap, q: &HashMap<String, St
 
 fn thumbnail(app: &App, v: &Vehicle, rid: &str, method: &Method, headers: &HeaderMap) -> Res {
     let st = app.state_of(&v.id);
-    let rec = st.as_ref().and_then(|s| s.recordings.iter().find(|r| r.id == rid).cloned());
+    let rec = st.as_ref().and_then(|s| s.recordings.iter().find(|r| r.id == rid));
     let Some(rec) = rec else { return error(StatusCode::NOT_FOUND, "Not found") };
     // Tesla's own thumb.png, else one frame of the front clip (thumbnails.rs, with ffmpeg)
     let Some(source) = rec.thumb_rel.as_ref().or(rec.front_rel.as_ref()) else { return error(StatusCode::NOT_FOUND, "No thumbnail") };

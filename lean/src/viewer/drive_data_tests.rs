@@ -186,7 +186,8 @@ fn autopilot_shares_distance_top_speed_route_and_tags() {
     let tags = tag_index(Some(&json!({ "2026-10-03T07:00:00.000": ["Work", "Work", ""], key_at(d, 9, 0): ["Gym"], "junk": "x" })));
     assert_eq!(tags_of(Some(&tags), &dr), json!(["Work"]));
     assert_eq!(tags_of(Some(&tags), &drives_of(&[route(&key_at(d, 9, 0), R::default())], DEFAULT_GAP_S)[0]), json!(["Gym"]));
-    let clip = super::super::drives::Clip { key: key_at(d, 7, 0), t: js::utc_seconds(2026, 10, 3, 7, 0, 0), day: d.into(), rel: String::new(), front: true, rec_id: "r1".into(), rec_day: d.into() };
+    let key = key_at(d, 7, 0);
+    let clip = super::super::drives::Clip { key: &key, t: js::utc_seconds(2026, 10, 3, 7, 0, 0), day: d, rel: "", front: true, rec_id: "r1", rec_day: d };
     let ck = clip.key.clone();
     let none = |_: f64, _: f64| (Value::Null, Value::Null);
     let api = describe_drive(&dr, Some(&tags), &|k| (k == ck).then(|| clip.clone()), &|_| Some(super::super::speed_index::Stats { n: 1, d: 0.0, m: 0, v: 0.0, f: -1, l: -1, a: None, z: None, b: 1, t: 0 }), &none);

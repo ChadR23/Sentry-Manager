@@ -45,7 +45,7 @@ pub fn car_of(app: &App, v: &crate::footage::vehicles::Vehicle) -> crate::can::c
 
 /// A recording as the CAN area's tags read it.
 pub fn rec_of(r: &Recording) -> crate::can::ctx::Rec {
-    crate::can::ctx::Rec { id: r.id.clone(), clip_rels: r.clip_rels.clone(), start_key: r.start_key.clone() }
+    crate::can::ctx::Rec { id: r.id.clone(), clip_rels: r.clip_rels().map(String::from).collect(), start_key: r.start_key.clone() }
 }
 
 fn scope_log(state: &crate::core::AppState, scope: &str, level: Level, line: &str) {

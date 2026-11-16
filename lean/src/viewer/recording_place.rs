@@ -85,7 +85,7 @@ impl Reader<'_> {
 
 /// videoEnds: (a, z, inferred)
 fn video_ends(idx: &SpeedIndex, vid: &str, files: Option<&Files>, rec: &Recording) -> (Option<(f64, f64)>, Option<(f64, f64)>, bool) {
-    let mut clips: Vec<Front> = rec.clip_rels.iter().filter_map(|r| front_of(r, files)).collect();
+    let mut clips: Vec<Front> = rec.clip_rels().filter_map(|r| front_of(r, files)).collect();
     clips.sort_by(|a, b| super::js::locale_cmp(&a.stamp, &b.stamp));
     if clips.is_empty() {
         return (None, None, false);
@@ -295,7 +295,7 @@ pub struct CanSide<'a> {
 
 /// canEndsOf: a recording's CAN ends, from its front clips' first and last stamps
 fn can_ends_of(c: &CanSide, files: Option<&Files>, rec: &Recording) -> (Option<(f64, f64)>, Option<(f64, f64)>) {
-    let mut fronts: Vec<Front> = rec.clip_rels.iter().filter_map(|r| front_of(r, files)).collect();
+    let mut fronts: Vec<Front> = rec.clip_rels().filter_map(|r| front_of(r, files)).collect();
     fronts.sort_by(|a, b| super::js::locale_cmp(&a.stamp, &b.stamp));
     let mut stamps: Vec<String> = fronts.into_iter().map(|f| f.stamp).collect();
     if stamps.is_empty() {

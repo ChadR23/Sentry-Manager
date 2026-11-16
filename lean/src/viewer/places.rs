@@ -230,7 +230,7 @@ pub struct EventSpots {
 
 impl EventSpots {
     pub fn get(&self, ctx: &dyn Ctx, vid: &str, files: Option<&Files>, rec: &Recording) -> Option<EventSpot> {
-        let rel = rec.files.iter().map(|(r, _)| r).find(|r| r.to_lowercase().ends_with("/event.json"))?;
+        let rel = rec.event_json()?;
         let f = files?.get(rel)?;
         let key = format!("{vid}/{rel}");
         let stamp = format!("{}/{}", f.size, num(js::js_round(f.mtime_ms)));
@@ -262,7 +262,7 @@ impl EventSpots {
 pub fn event_info(ctx: &dyn Ctx, vid: &str, rec: &Recording) -> Option<Map<String, Value>> {
     rec.event_id.as_ref()?;
     let v = ctx.vehicle(vid)?;
-    let (rel, _) = rec.files.iter().find(|(r, _)| r.to_lowercase().ends_with("/event.json"))?;
+    let rel = rec.event_json()?;
     let abs = v.root.join(rel);
     let real = std::fs::canonicalize(&abs).ok()?;
     if !real.starts_with(std::fs::canonicalize(&v.root).ok()?) {

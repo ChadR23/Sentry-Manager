@@ -220,14 +220,15 @@ impl App {
         let reuse = previous.is_some();
         let res = scanner::scan(&v.root, previous.as_ref(), SCAN_THREADS);
         drop(previous);
-        let mut recs = inventory::build_recordings(&res.files, vid);
-        inventory::mark_protected(&mut recs, &self.core.db().protected_set(vid));
         if let Err(e) = self.catalog.save_scan(vid, &root, &res) {
             self.core.log("inventory", Level::Warn, &format!("Footage catalog not updated: {e}"));
         }
-        self.core.log("inventory", Level::Info, &format!("{}: {} recordings, {} files ({:.1}s{})", v.name, recs.len(), res.files.len(), res.duration_ms / 1000.0,
-            if reuse { format!(", {} unchanged{}", res.reused, if resumed { " since the last run" } else { "" }) } else { String::new() }));
+        let (n_files, took, unchanged) = (res.files.len(), res.duration_ms, res.reused);
         let files = Arc::new(FileList::from(res.files));
+        let mut recs = inventory::build_recordings(&files, vid);
+        inventory::mark_protected(&mut recs, &self.core.db().protected_set(vid));
+        self.core.log("inventory", Level::Info, &format!("{}: {} recordings, {} files ({:.1}s{})", v.name, recs.len(), n_files, took / 1000.0,
+            if reuse { format!(", {} unchanged{}", unchanged, if resumed { " since the last run" } else { "" }) } else { String::new() }));
         let codecs = self.codec_map(vid, &files);
         let entry = VehicleState {
             recordings: Arc::new(recs),

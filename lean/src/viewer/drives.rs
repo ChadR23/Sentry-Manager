@@ -14,26 +14,26 @@ pub const CLIP_S: f64 = 60.0;
 pub const DEFAULT_GAP_S: f64 = 300.0;
 
 /// One minute of the car's own recording.
-#[derive(Debug, Clone)]
-pub struct Clip {
-    pub key: String,
+#[derive(Debug, Clone, Copy)]
+pub struct Clip<'a> {
+    pub key: &'a str,
     pub t: f64,
-    pub day: String,
-    pub rel: String,
+    pub day: &'a str,
+    pub rel: &'a str,
     pub front: bool,
-    pub rec_id: String,
-    pub rec_day: String,
+    pub rec_id: &'a str,
+    pub rec_day: &'a str,
 }
 
 /// clipsOf: one per minute, oldest first, events left out.
-pub fn clips_of(recordings: &[Recording]) -> Vec<Clip> {
+pub fn clips_of(recordings: &[Recording]) -> Vec<Clip<'_>> {
     let mut out: Vec<Clip> = Vec::new();
     let mut at: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for rec in recordings {
         if rec.event_id.is_some() || rec.typ == "SentryClips" || rec.typ == "SavedClips" {
             continue;
         }
-        for rel in &rec.clip_rels {
+        for rel in rec.clip_rels() {
             let name = rel.rsplit('/').next().unwrap_or(rel);
             let Some(i) = js::stamp_at(name) else { continue };
             let key = &name[i..i + 19];
@@ -41,14 +41,14 @@ pub fn clips_of(recordings: &[Recording]) -> Vec<Clip> {
             match at.get(key) {
                 None => {
                     at.insert(key, out.len());
-                    out.push(Clip { key: key.to_string(), t: js::stamp_seconds(key), day: key[..10].to_string(), rel: rel.clone(), front, rec_id: rec.id.clone(), rec_day: rec.day.clone() });
+                    out.push(Clip { key, t: js::stamp_seconds(key), day: &key[..10], rel, front, rec_id: &rec.id, rec_day: &rec.day });
                 }
                 Some(&j) if front && !out[j].front => {
                     let c = &mut out[j];
-                    c.rel = rel.clone();
+                    c.rel = rel;
                     c.front = true;
-                    c.rec_id = rec.id.clone();
-                    c.rec_day = rec.day.clone();
+                    c.rec_id = &rec.id;
+                    c.rec_day = &rec.day;
                 }
                 Some(_) => {}
             }
@@ -67,14 +67,14 @@ pub fn activity_of(c: &Clip, s: Option<&Stats>) -> Option<(f64, f64)> {
     }
 }
 
-pub struct Drive {
-    pub clips: Vec<Clip>,
+pub struct Drive<'a> {
+    pub clips: Vec<Clip<'a>>,
     pub from: f64,
     pub to: f64,
 }
 
 /// group: drives newest first, `limit` of them, `before` a clip key; (drives, more)
-pub fn group(clips: &[Clip], stats_for: &mut dyn FnMut(&Clip) -> Option<Stats>, gap_s: f64, limit: usize, before: Option<&str>) -> (Vec<Drive>, bool) {
+pub fn group<'a>(clips: &[Clip<'a>], stats_for: &mut dyn FnMut(&Clip) -> Option<Stats>, gap_s: f64, limit: usize, before: Option<&str>) -> (Vec<Drive<'a>>, bool) {
     let mut i = clips.len() as i64 - 1;
     if let Some((_, t)) = before.and_then(js::stamp_in) {
         while i >= 0 && clips[i as usize].t >= t {
@@ -178,7 +178,7 @@ pub fn describe(d: &Drive, stats_of: &dyn Fn(&Clip) -> Option<Stats>, label: &La
     }
     let start = d.clips.iter().find(|c| c.t + CLIP_S > d.from).unwrap_or(first);
     let second = js::js_round(d.from - start.t).max(0.0);
-    let recs: HashSet<&str> = d.clips.iter().map(|c| c.rec_id.as_str()).filter(|s| !s.is_empty()).collect();
+    let recs: HashSet<&str> = d.clips.iter().map(|c| c.rec_id).filter(|s| !s.is_empty()).collect();
     let r = read > 0;
     let mut m = Map::new();
     m.insert("id".into(), json!(first.key));
@@ -216,7 +216,7 @@ mod tests {
             let c = crate::footage::classify(&rel).unwrap();
             files.push(FileEntry { rel, size: 10, mtime_ms: 0.0, ctime_ms: 0.0, birthtime_ms: 0.0, kind: c.kind, typ: c.typ, day: c.day.unwrap_or_else(|| stamp[..10].into()), camera: c.camera, event_id: c.event_id });
         }
-        crate::inventory::build_recordings(&files, "v1")
+        crate::inventory::build_recordings(&std::sync::Arc::new(crate::scanner::FileList::from(files)), "v1")
     }
 
     fn stamp(day: &str, h: u32, m: u32) -> String {
@@ -256,8 +256,9 @@ mod tests {
             let c = crate::footage::classify(&rel).unwrap();
             files.push(FileEntry { rel, size: 10, mtime_ms: 0.0, ctime_ms: 0.0, birthtime_ms: 0.0, kind: c.kind, typ: c.typ, day: d.into(), camera: c.camera, event_id: c.event_id });
         }
-        let clips = clips_of(&crate::inventory::build_recordings(&files, "v1"));
-        let got: Vec<(&str, f64, bool, &str)> = clips.iter().map(|c| (c.key.as_str(), c.t, c.front, c.rel.rsplit('/').next().unwrap())).collect();
+        let recs = crate::inventory::build_recordings(&std::sync::Arc::new(crate::scanner::FileList::from(files)), "v1");
+        let clips = clips_of(&recs);
+        let got: Vec<(&str, f64, bool, &str)> = clips.iter().map(|c| (c.key, c.t, c.front, c.rel.rsplit('/').next().unwrap())).collect();
         let t = |m: i64| js::utc_seconds(2026, 3, 1, 8, m, 0);
         assert_eq!(got, [("2026-03-01_08-00-00", t(0), false, "2026-03-01_08-00-00-left_repeater.mp4"), ("2026-03-01_08-01-00", t(1), true, "2026-03-01_08-01-00-front.mp4"), ("2026-03-01_08-02-00", t(2), true, "2026-03-01_08-02-00-FRONT.mp4")]);
         assert!(clips.iter().all(|c| c.day == d));

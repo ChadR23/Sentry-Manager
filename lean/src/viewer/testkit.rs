@@ -219,7 +219,6 @@ impl Car {
 
     /// Scan the footage again (what the scan would find: every file under the root).
     pub fn scan(&self) {
-        let mut files = HashMap::new();
         let mut list = Vec::new();
         fn walk(dir: &Path, root: &Path, out: &mut Vec<FileEntry>) {
             let Ok(rd) = std::fs::read_dir(dir) else { return };
@@ -239,11 +238,9 @@ impl Car {
         }
         walk(&self.root, &self.root, &mut list);
         list.sort_by(|a, b| a.rel.cmp(&b.rel));
+        let list = Arc::new(crate::scanner::FileList::from(list));
         let recs = inventory::build_recordings(&list, "v1");
-        for f in list {
-            files.insert(f.rel.clone(), f);
-        }
-        self.ctx.files.lock().unwrap().insert("v1".into(), Arc::new(files.into_iter().collect()));
+        self.ctx.files.lock().unwrap().insert("v1".into(), list);
         self.ctx.recs.lock().unwrap().insert("v1".into(), Arc::new(recs));
         *self.ctx.stamp.lock().unwrap() += 1.0;
     }

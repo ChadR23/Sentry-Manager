@@ -68,7 +68,7 @@ pub trait Ctx: Send + Sync + 'static {
     /// canFootage.js forVehicle: whether CAN data covers a recording (its clip rels and start key);
     /// None without the CAN area
     #[allow(clippy::type_complexity)]
-    fn has_can(&self, _id: &str) -> Option<Box<dyn Fn(&[String], Option<&str>) -> bool>> {
+    fn has_can(&self, _id: &str) -> Option<Box<dyn Fn(Vec<String>, Option<&str>) -> bool>> {
         None
     }
     /// canKeyMapped(key): a CAN Bridge key mapped to a car explicitly (the `can-vehicles` setting)
