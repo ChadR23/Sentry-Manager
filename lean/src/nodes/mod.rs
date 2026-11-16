@@ -13,6 +13,7 @@ pub mod benchmark;
 pub mod cancel;
 pub mod client;
 pub mod ctx;
+pub mod lanes;
 pub mod main_side;
 pub mod picture;
 pub mod pin;

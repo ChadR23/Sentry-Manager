@@ -453,6 +453,10 @@ impl Nodes {
         self.0.ctx.now_ms()
     }
 
+    pub fn ctx(&self) -> &dyn NodesCtx {
+        &*self.0.ctx
+    }
+
     fn work(&self, id: &str, by: i64) {
         let mut w = self.0.working.lock().unwrap();
         let n = w.get(id).copied().unwrap_or(if by < 0 { 1 } else { 0 });

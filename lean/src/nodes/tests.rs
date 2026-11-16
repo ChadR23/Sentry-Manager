@@ -348,6 +348,10 @@ fn a_removed_vehicle_leaves_every_node_list() {
     let cars: Vec<Value> = ctx.get("nodes").as_array().unwrap().iter().map(|n| n.get("cars").cloned().unwrap_or(Value::Null)).collect();
     assert_eq!(cars, vec![json!(["car-a"]), json!([]), Value::Null]);
     assert_eq!(nodes.car_lists().into_iter().collect::<Vec<_>>(), vec![("node:aaaaaaaaaaaa".to_string(), vec!["car-a".to_string()])]);
+    // the converter's priorities: each vehicle's TeslaCam folder
+    *ctx.vehicles.lock().unwrap() = vec![Vehicle { id: "car-a".into(), studio_root: Some("/cars/a/TeslaCam".into()) }];
+    let p = super::lanes::RemoteNodes::priorities(&nodes);
+    assert_eq!(p.into_iter().collect::<Vec<_>>(), vec![("node:aaaaaaaaaaaa".to_string(), vec!["/cars/a/TeslaCam".to_string()])]);
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -1289,7 +1293,7 @@ fn parity_nodes_main_pairs_with_the_rust_worker_and_both_workers_answer_alike() 
     assert_eq!(result["main"]["codec"], json!("hevc"));
     assert_eq!(result["main"]["cancel"], json!("SIGTERM"));
     assert_eq!(result["main"]["slots"], json!(3));
-    assert!(result["count"].as_u64().unwrap() >= 30, "{result}");
+    assert_eq!(result["count"], json!(35), "{result}");
     assert_eq!(result["differences"], json!([]), "{}", serde_json::to_string_pretty(&result["differences"]).unwrap());
     wait_empty(&dir);
     assert!(work_files(&dir).is_empty());

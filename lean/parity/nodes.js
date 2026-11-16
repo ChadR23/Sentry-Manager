@@ -164,7 +164,7 @@ async function script(port, code, clip, dir, label) {
   });
   await nodes.setSlots(node.id, 3);
   main.slots = (await nodes.overview())[0].slots;
-  main.overview = normal({ ...(await nodes.overview())[0], id: '<node>', address: '<address>', fingerprint: '<fp>' });
+  main.overview = normal({ ...(await nodes.overview())[0], id: '<node>', address: '<address>', fingerprint: '<fp>', defaultLane: 'node:<node>' });
   main.refused = await nodes.setSlots(node.id, 9).then(() => null, (err) => err.message);
   // the throttle: twenty wrong tokens from one address, then even the right one waits
   for (let i = 0; i < 20; i++) await call(port, { path: '/node/v1/info', token: 'y'.repeat(43) });

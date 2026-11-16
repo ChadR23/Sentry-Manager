@@ -106,6 +106,22 @@ fn one(tcp: TcpStream, config: Arc<ServerConfig>, handler: Handler, served: &[u8
         }
     }
     drop(body);
+    // (a chunked body: the worker asks for its length and never reads it; skip it)
+    if headers.iter().any(|(k, v)| k.eq_ignore_ascii_case("transfer-encoding") && v.to_ascii_lowercase().contains("chunked")) {
+        loop {
+            let mut size = String::new();
+            if r.read_line(&mut size)? == 0 {
+                break;
+            }
+            let n = u64::from_str_radix(size.trim().split(';').next().unwrap_or(""), 16).unwrap_or(0);
+            if n == 0 {
+                let mut end = String::new();
+                r.read_line(&mut end)?;
+                break;
+            }
+            io::copy(&mut (&mut r).take(n + 2), &mut io::sink())?;
+        }
+    }
     drop(r);
     if matches!(reply.body, ReplyBody::Close) {
         return Ok(());

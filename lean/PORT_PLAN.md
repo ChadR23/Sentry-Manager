@@ -83,6 +83,7 @@ folder, plus one line in `src/api.rs` (its routes) and its dependencies in
 | ops | ported; the encoder block and the wiring are the converter's and core's, see below |
 | viewer | ported except where it needs CAN, Sentry USB status, notifications or accounts; see below |
 | footage: arrival checksums | ported and tested with parity (`src/arrival/`, library, not mounted); see "Footage" below |
+| helper servers (nodes) | main side, worker, benchmark, picture check and the 19 routes ported and tested (library, not mounted); see below |
 | everything else | not started |
 
 ## Converter
@@ -244,8 +245,9 @@ Not done yet, in order:
    USB copies in progress: `Options::skip_discovered` is there for it).
    server/gpu.js and stats/gpu.js are ported in ops (`ops::gpu`,
    `ops::stats::gpu`) for the converter to call.
-4. Helper servers: server/nodes.js, nodeWorker.js, `/node/v1/*`, pinning,
-   tokens, remote encodes.
+4. Helper servers: ported in `src/nodes/` (see "Helper servers" below); the
+   converter's part is left: node lanes in jobService through
+   `nodes::lanes::RemoteNodes`, and `WorkerRuntime` on its planner.
 5. The crash points inside a file copy (temp-created, temp-torn,
    temp-complete, temp-readback, writer, staging-copy) need an fs hook in
    staging; round 1's journal crash test covers those records, not a kill.
@@ -259,6 +261,75 @@ root); io error texts are Rust's where Node logs its own; Resume of a job
 parked mid-replacement answers once that clip is settled (Node's answer
 waits for the whole relaunched job); a job file holding a lone UTF-16
 surrogate (never written from file names) is read as corrupt.
+
+## Helper servers
+
+Done (`src/nodes/`, library only; how to mount it: `src/nodes/README.md`):
+
+- the main side (nodes.js): pairing (address rules, the 12-character code,
+  8 nodes, the HMAC proofs over the certificate seen, the token's form, the
+  authority kept only when it is a CA that issued the certificate seen),
+  every connection pinned before a byte is sent (the fingerprint, or a
+  certificate the pinned authority issued and valid now; the handshake's
+  signatures checked), the token as Bearer, Node's timeouts (8 s info,
+  10 s probe, 15 s pair and job status, 60 s uploads and downloads with
+  30-minute deadlines, twice the idle timeout otherwise), at most 64 KiB of
+  an answer, the same error texts and codes (NODE_TIMEOUT, NODE_UNREACHABLE
+  with Node's errno names, NODE_CERT, NODE_CERT_CHANGED, NODE_PROTOCOL,
+  NODE_BUSY, NODE_DEVICE_GONE, CANCELLED); list (a lane per GPU/CPU,
+  `node:<id>@<device>`, or one per older node), overview (1.5 s wait, the
+  keys JSON.stringify leaves out), power / power_rows, hardware, rename,
+  Vehicles first, trust, forgetCar, remove, setSlots (a number or per device);
+  the remote encode as Node runs it (info first, 5 minutes of busy waits,
+  two uploads at once per node, the job id taken even after a cancel once
+  all is sent, `queued=1`, only real progress counts, 30-minute queue
+  limit, the output created new and never past twice the clip), devices kept
+  with the node for when it is offline, the power notes for the stats engine;
+- the worker (nodeWorker.js): one-time codes (10 minutes, 20 wrong tries, 3
+  per address), the token kept as SHA-256, the bad-token throttle (20 in
+  10 minutes), the settings in Node's key order, devices per GPU/CPU with
+  their encoders (30 s cache, no probe while encoding), slots per device and
+  the queue of 15 (64 held in all), the disk check, the MP4 check, ffmpeg
+  built from fixed choices only (`-protocol_whitelist file -f mov`, `-fs`,
+  `-t`), GPU decode then without, the stall watch, the sweeper (done 10
+  minutes, orphans 5), every answer and status code of the 7 routes;
+- the benchmark (nodeBenchmark.js), the picture check (pictureCheck.js:
+  SSIM, the offsets, the three random stretches on long clips, GPU decode
+  then CPU), the 12 `/api/nodes*` routes with their audit lines.
+
+Checked: `cargo test --lib nodes` (26 tests; the end-to-end ones need
+openssl and ffmpeg, the parity ones node too): ports of test/nodes.test.js
+(addresses, settings, pairing with a changed certificate and tokens, a real
+remote encode, an existing output, both cancels, a renewed certificate,
+refused manifests, wrong codes per address, a node that never stops
+sending, clips waiting on the node, GPU/CPU lanes and slots per device, an
+older node, the benchmark on real clips, Encode with, device attempts, the
+picture check on synthetic and real encodes, the GPU decode fallback, upload
+slots), server.test.js "a change refused part way saves none of it; a
+removed vehicle leaves every node list" (and the other refusals of the
+routes), reportsHeartbeatNodes' nodes.hardware() after a restart. Parity
+(`lean/parity/nodes.js`): the Rust main pairs with Node's worker, encodes
+there, cancels and sets its slots; Node's main pairs with the Rust worker
+and does the same; and 35 requests (pairing refusals, tokens, info, slots,
+jobs, a real encode and its output, deletes, the throttle) get the same
+status, content type and JSON from both workers.
+
+Not done yet:
+
+- the converter's part: node lanes in jobService (lanes, failover to this
+  server's GPU, the picture check unless trusted, "15 ahead", the checks
+  "a few at a time"), autoConvert's planLanes with the nodes' priorities
+  (test/nodePriority.test.js), `WorkerRuntime` on the planner;
+- core: `NodesCtx` on AppState, the routes mounted, `/node/v1/*` served from
+  its HTTPS server with the served certificate (`WorkerRequest::served_cert`),
+  `forget_vehicle` from DELETE /api/vehicles/:id, `power_rows` for
+  `OpsCtx::node_powers`, `hardware()` for the heartbeat.
+
+Proposed differences (need the owner's OK): TLS failures read "Could not
+reach the node (EPROTO)." or rustls' text where Node names OpenSSL's code;
+a name cut at 64 UTF-16 units never splits a surrogate pair; a request whose
+upload is stopped on the worker (revoked, node mode off) is closed without
+an answer (Node leaves it open until the main gives up).
 
 ## Supervisor
 
