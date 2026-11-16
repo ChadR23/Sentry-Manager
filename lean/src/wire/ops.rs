@@ -16,6 +16,7 @@ use std::sync::{Arc, MutexGuard, Weak};
 pub struct CoreOps {
     srv: Weak<Server>,
     state: Arc<crate::core::AppState>,
+    planner: std::sync::OnceLock<crate::converter::planner::Planner<crate::converter::process::BoundedRunner>>,
 }
 
 /// One vehicle as ops sees it, from the footage area.
@@ -108,15 +109,24 @@ impl OpsCtx for CoreOps {
         let running = conv.jobs.lock().unwrap().values().any(|st| super::converter::RUNNING.contains(&st.as_str()));
         ConverterInfo {
             ready: true,
-            capabilities: crate::converter::ipc::capabilities(&conv.runtime.staging.capabilities()),
+            // (runtime.js capabilities: the staging manager's, with destinationContainment)
+            capabilities: {
+                let mut c = conv.runtime.staging.capabilities();
+                c["destinationContainment"] = json!("pathname-revalidated-non-atomic");
+                c
+            },
             error: None,
             encoding_now: !conv.runtime.service.active_encodes().is_empty(),
             running,
+            // (renameat2(RENAME_NOREPLACE) is called directly: no helper program is needed)
             native_helper: true,
         }
     }
     fn select_encoder(&self) -> Option<Encoder> {
-        None
+        // rt.selectEncoder('h265'): the planner's test encodes, the choice kept (encoderPlanner.js)
+        let p = self.planner.get_or_init(|| crate::converter::planner::Planner::new(crate::converter::process::BoundedRunner::default(), "linux", &self.state.config.ffmpeg));
+        let s = p.select("h265", true).ok().flatten()?;
+        Some(Encoder { codec: s.codec, hardware: s.hardware })
     }
     fn detect_gpus(&self) -> Value {
         crate::ops::gpu::detect_gpus(&crate::ops::gpu::DetectOptions::default(), &crate::ops::gpu::run)
@@ -244,7 +254,7 @@ impl OpsCtx for CoreOps {
 }
 
 pub fn make(srv: &Arc<Server>) -> Arc<crate::ops::Ops> {
-    let ctx = Arc::new(CoreOps { srv: Arc::downgrade(srv), state: srv.state.clone() });
+    let ctx = Arc::new(CoreOps { srv: Arc::downgrade(srv), state: srv.state.clone(), planner: std::sync::OnceLock::new() });
     crate::ops::Ops::new(ctx, Arc::new(crate::ops::net::Https), crate::ops::Ops::process_env())
 }
 
