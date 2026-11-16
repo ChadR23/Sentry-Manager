@@ -192,11 +192,11 @@ pub struct RealTools {
 
 impl RealTools {
     pub fn new(ffmpeg: &str, ffprobe: &str, registry: Arc<Registry>) -> RealTools {
-        Self::with_planner(ffmpeg, ffprobe, registry, Arc::new(Planner::new(BoundedRunner::default(), "linux", ffmpeg)))
+        Self::with_planner(ffmpeg, ffprobe, registry, Arc::new(Planner::new(BoundedRunner::host(), "linux", ffmpeg)))
     }
     /// sharing the runtime's planner (its proofs serve the device list too)
     pub fn with_planner(ffmpeg: &str, ffprobe: &str, registry: Arc<Registry>, planner: Arc<Planner<BoundedRunner>>) -> RealTools {
-        RealTools { ffmpeg: ffmpeg.into(), ffprobe: ffprobe.into(), registry, planner, runner: BoundedRunner::default() }
+        RealTools { ffmpeg: ffmpeg.into(), ffprobe: ffprobe.into(), registry, planner, runner: BoundedRunner::host() }
     }
 }
 

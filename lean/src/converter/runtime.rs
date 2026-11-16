@@ -124,13 +124,13 @@ impl Converter {
             )
             .map_err(|e| CError::new(&e.code, e.message))?,
         );
-        let planner = Arc::new(super::planner::Planner::new(super::process::BoundedRunner::default(), "linux", &o.ffmpeg));
+        let planner = Arc::new(super::planner::Planner::new(super::process::BoundedRunner::host(), "linux", &o.ffmpeg));
         let tools: Arc<dyn Tools> = match o.tools {
             Some(t) => t,
             None => Arc::new(RealTools::with_planner(&o.ffmpeg, &o.ffprobe, registry.clone(), planner.clone())),
         };
         let encoders: Arc<dyn super::devices::Encoders> = o.encoders.unwrap_or(planner);
-        let mut discovery = o.discovery.unwrap_or_else(|| super::devices::Discovery::new(Some(Arc::new(super::process::BoundedRunner::default()))));
+        let mut discovery = o.discovery.unwrap_or_else(|| super::devices::Discovery::new(Some(Arc::new(super::process::BoundedRunner::host()))));
         if discovery.name_of.is_none() {
             discovery.name_of = Some(super::devices::stats_name_of());
         }
@@ -497,7 +497,7 @@ impl Converter {
     fn count_frames(&self, target: &Path) -> i64 {
         let args: Vec<String> = ["-v", "error", "-select_streams", "v:0", "-count_packets", "-show_entries", "stream=nb_read_packets", "-of", "csv=p=0"].iter().map(|s| s.to_string()).chain([target.to_string_lossy().to_string()]).collect();
         use super::process::Runner;
-        let r = super::process::BoundedRunner::default().run(&self.ffprobe, &args, &super::process::RunOptions { timeout_ms: Some(60_000), ..Default::default() });
+        let r = super::process::BoundedRunner::host().run(&self.ffprobe, &args, &super::process::RunOptions { timeout_ms: Some(60_000), ..Default::default() });
         r.ok().and_then(|r| r.stdout.trim().parse::<i64>().ok()).filter(|n| *n > 0).unwrap_or(0)
     }
 

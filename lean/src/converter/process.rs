@@ -34,9 +34,21 @@ pub struct RunOptions {
     pub cwd: Option<std::path::PathBuf>,
 }
 
+/// server/converterHost.js processTimeoutMs: a probe, verify or telemetry
+/// run still going after 30 minutes is stuck (calls that name their own
+/// limit keep it: the encoder probes, the inspection, nvidia-smi)
+pub const HOST_PROCESS_TIMEOUT_MS: u64 = 30 * 60_000;
+
 pub struct BoundedRunner {
     pub timeout_ms: u64,
     pub max_output_bytes: usize,
+}
+
+impl BoundedRunner {
+    /// the server's runner (converterHost): HOST_PROCESS_TIMEOUT_MS by default
+    pub fn host() -> BoundedRunner {
+        BoundedRunner { timeout_ms: HOST_PROCESS_TIMEOUT_MS, ..Default::default() }
+    }
 }
 
 impl Default for BoundedRunner {
