@@ -315,7 +315,14 @@ fn crash_child_entry() {
     let mode = std::env::var("LEAN_CRASH_MODE").unwrap_or_else(|_| "replace".into());
     let network = std::env::var("LEAN_CRASH_NET").unwrap_or_else(|_| "direct".into());
     let concurrency: i64 = std::env::var("LEAN_CRASH_CONCURRENCY").ok().and_then(|c| c.parse().ok()).unwrap_or(1);
-    let ffmpeg = if point == "encode" { wrapper(&base, "ffmpeg", "case \"$*\" in *-progress*) kill -9 -$(ps -o pgid= $PPID | tr -d ' ') 2>/dev/null; kill -9 $PPID; exit 1;; esac") } else { "ffmpeg".into() };
+    let ffmpeg = if point == "encode" {
+        wrapper(&base, "ffmpeg", "case \"$*\" in *-progress*) kill -9 -$(ps -o pgid= $PPID | tr -d ' ') 2>/dev/null; kill -9 $PPID; exit 1;; esac")
+    } else if point == "lowered" {
+        // every encode waits (the converter dies before any is let go)
+        wrapper(&base, "ffmpeg", &format!("case \"$*\" in *-progress*) while [ ! -f \"{}/release\" ]; do kill -0 $PPID 2>/dev/null || exit 1; sleep 0.05; done;; esac", base.display()))
+    } else {
+        "ffmpeg".into()
+    };
     let ffprobe = if point == "verify" { wrapper(&base, "ffprobe", "case \"$*\" in *sentry-six-verification-*) kill -9 $PPID; exit 1;; esac") } else { "ffprobe".into() };
     let no_links = std::env::var("LEAN_CRASH_NOLINKS").is_ok_and(|v| v == "1");
     let p2 = point.clone();
@@ -336,9 +343,35 @@ fn crash_child_entry() {
             _ => Ok(()),
         }
     }));
+    // the points inside a file copy (crashPoints.js fsOpen)
+    let p3 = point.clone();
+    *super::super::fs_hook::HOOK.write().unwrap() = Some(Arc::new(move |event: &str, path: &Path| -> Option<usize> {
+        let n = name(path);
+        let copy = n.starts_with("TEMP-H265-") || n.ends_with(".partial");
+        let staged = n.ends_with("-source.mp4");
+        match (p3.as_str(), event) {
+            ("temp-created", "open-new") if copy => die(),
+            ("temp-torn", "write") if copy => Some(0),
+            ("temp-torn", "written-part") if copy => die(),
+            ("temp-complete", "copied") if copy => die(),
+            ("temp-readback", "read-open") if copy => die(),
+            ("staging-copy", "write") if staged => Some(0),
+            ("staging-copy", "written-part") if staged => die(),
+            ("writer", "truncated") if n.ends_with("-encoded.mp4") => die(),
+            _ => None,
+        }
+    }));
     let c = open(&base, &ffmpeg, &ffprobe, Some(Arc::new(Point(point.clone()))));
     c.start().unwrap();
     let id = c.service.start(&config(&base, &mode, &network, concurrency)).unwrap();
+    if point == "lowered" {
+        // several encoding at once, then fewer at once (one), then the stop
+        while c.service.active_encodes().len() < concurrency as usize {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        c.service.set_concurrency(&id, &json!(1)).unwrap();
+        die();
+    }
     c.service.when_idle(&id).unwrap();
     eprintln!("kill point not reached");
     std::process::exit(3);
@@ -393,6 +426,39 @@ fn crash_and_recover_on(point: &str, mode: &str, network: &str, concurrency: usi
     };
     assert_recovered(&base, &job, mode, &names, &before);
     fs::remove_dir_all(&base).unwrap();
+}
+
+/// test/converterCrashReplace, converterCrashSeparate, converterCrashParallel:
+/// the points inside a file copy (and the telemetry writer)
+#[test]
+fn crash_inside_a_file_copy_finishes_by_itself() {
+    if !available() {
+        eprintln!("skipped: needs ffmpeg with libx265 and node");
+        return;
+    }
+    for point in ["writer", "temp-created", "temp-torn", "temp-complete", "temp-readback"] {
+        crash_and_recover(point, "replace", "direct", 1, false);
+        crash_and_recover(point, "separate", "direct", 1, false);
+    }
+    crash_and_recover("writer", "separate", "staging", 1, false);
+    crash_and_recover("staging-copy", "replace", "staging", 1, false);
+    crash_and_recover("writer", "replace", "staging", 1, false);
+    // several at once through staging, one copy half written or being read back
+    crash_and_recover("temp-torn", "replace", "staging", 3, false);
+    crash_and_recover("temp-readback", "separate", "staging", 3, false);
+    // and restarted by Node
+    crash_and_recover("temp-torn", "replace", "direct", 1, true);
+}
+
+/// three clips under way, lowered to one at once, then killed: all three are
+/// cleaned up and converted
+#[test]
+fn crash_after_fewer_at_once_finishes_every_clip() {
+    if !available() {
+        eprintln!("skipped: needs ffmpeg with libx265 and node");
+        return;
+    }
+    crash_and_recover("lowered", "replace", "staging", 3, false);
 }
 
 const REPLACE_POINTS: [&str; 12] = ["encode", "verify", "snapshot-unrecorded", "save-recorded", "copy-recorded", "slot-entered", "backup-recorded", "final-recorded", "before-result", "after-result", "cleanup-unrecorded", "verify"];

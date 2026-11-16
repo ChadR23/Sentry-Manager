@@ -716,6 +716,7 @@ impl Tx {
                 return Err(txe(code));
             }
             let mut f = File::open(target)?;
+            super::fs_hook::event("read-open", Path::new(target));
             let before = f.metadata()?;
             if !before.is_file() {
                 return Err(txe(code));
@@ -784,7 +785,9 @@ impl Tx {
             let tf = if a.resume.is_some() {
                 fs::OpenOptions::new().read(true).write(true).open(target)?
             } else {
-                fs::OpenOptions::new().read(true).write(true).create_new(true).mode(0o600).open(target)?
+                let f = fs::OpenOptions::new().read(true).write(true).create_new(true).mode(0o600).open(target)?;
+                super::fs_hook::event("open-new", Path::new(target));
+                f
             };
             let target_before = tf.metadata()?;
             let mut h = Sha256::new();
@@ -855,6 +858,10 @@ impl Tx {
                     cb(Event::ChunkPending, next, &next_sha, &target_before)?;
                 }
                 let mut off = 0;
+                if super::fs_hook::event("write", Path::new(target)).is_some() {
+                    tf.write_all_at(&buf[..n / 2], size)?;
+                    super::fs_hook::event("written-part", Path::new(target));
+                }
                 while off < n {
                     abort_if(a.cancel)?;
                     let w = tf.write_at(&buf[off..n], size + off as u64)?;
@@ -899,6 +906,7 @@ impl Tx {
             }
             drop(tf);
             drop(sf);
+            super::fs_hook::event("copied", Path::new(target));
             sync_directory(&dirname(target))?;
             Ok(Copied {
                 size,

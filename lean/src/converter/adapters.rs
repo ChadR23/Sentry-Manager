@@ -91,6 +91,7 @@ pub fn write_telemetry(candidate: &Path, timeline: &Timeline, codec: Codec, canc
         return Err(CError::new("CANDIDATE_CHANGED", "candidate changed"));
     }
     f.set_len(0)?;
+    super::fs_hook::event("truncated", candidate);
     f.seek(SeekFrom::Start(0))?;
     f.write_all(&output)?;
     f.sync_all()?;
