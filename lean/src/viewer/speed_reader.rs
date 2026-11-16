@@ -5,7 +5,7 @@
 //! give the same records; the speed index times both and uses the faster.
 
 use crate::mp4::{self, err, read_at, Result};
-use crate::sei::{sample_of_bytes, tesla_payload, Sample};
+use crate::sei::{hevc_sei_payload, sample_of_bytes, tesla_payload, Sample};
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
@@ -68,6 +68,8 @@ fn record_in(list: &[&[u8]], codec: &[u8; 4]) -> Option<Option<Vec<u8>>> {
             if let Some(p) = tesla_payload(&h) {
                 return Some(Some(p));
             }
+        } else if let Some(p) = hevc_sei_payload(nal) {
+            return Some(Some(p));
         }
     }
     None
@@ -172,3 +174,7 @@ pub fn read_samples(path: &Path, mode: Mode) -> Result<Option<Vec<Option<Sample>
     let out: Vec<Option<Sample>> = read_records(path, mode)?.iter().map(|r| r.as_deref().map(sample_of_bytes)).collect();
     Ok(if out.iter().any(|x| x.is_some_and(|s| s.v.is_some())) { Some(out) } else { None })
 }
+
+#[cfg(test)]
+#[path = "hevc_sei_tests.rs"]
+mod hevc_sei_tests;
