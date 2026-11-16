@@ -140,6 +140,12 @@ async function answers(client) {
     if (r?.total >= 12) break;
     await new Promise((res) => setTimeout(res, 150));
   }
+  // the speed index done with what it reads (both servers: the same clips read)
+  for (let i = 0, quiet = 0; i < 600 && quiet < 3; i++) {
+    const st = lib.parseJson((await client.request('GET', '/api/speeds/status')).body);
+    quiet = st && !st.running && st.done >= st.total ? quiet + 1 : 0;
+    await new Promise((res) => setTimeout(res, 500));
+  }
   const out = {};
   out['recordings, no places'] = await get('/api/vehicles/daily-driver/recordings');
   await client.request('POST', '/api/places', { body: { name: 'Home', ...HOME } });

@@ -14,7 +14,7 @@ use super::store::{now_ms, Note};
 use super::sys;
 use serde_json::{json, Value};
 use std::path::Path;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
 const GB: f64 = 1024.0 * 1024.0 * 1024.0;
@@ -313,6 +313,7 @@ pub fn startup_check(ctx: &dyn OpsCtx, health: &Health, notes: &Notes, snapshots
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use crate::ops::ctx::{ConverterInfo, Encoder, ShareStatus, VehicleInfo};
     use crate::ops::store;
     use crate::ops::testing::FakeCtx;

@@ -94,12 +94,13 @@ async function script(server, password, clip) {
   const hello = ev.events.slice();
   note('GET /api/events', 'open', { ...opened, first: hello[0] || null });
   const topicsOf = (list) => [...new Set(list.flatMap((e) => (e.event === 'changed' ? e.data.topics || [] : [`<${e.event}>`])))].sort();
-  // what comes by itself (the shares' health checks every 30 s, the stats): those topics are
+  // what comes by itself (the shares' health checks every 30 s, the cleanup tick's 'bin' every
+  // minute): those topics are
   // compared here, and left out of what each action brings (they land in any window)
   const quietFrom = ev.events.length;
-  await sleep(32_000);
+  await sleep(62_000);
   const background = topicsOf(ev.events.slice(quietFrom));
-  note('GET /api/events', 'background (32 s)', background);
+  note('GET /api/events', 'background (62 s)', background);
   const topicsAfter = async (label, fn, until = null) => {
     const from = ev.events.length;
     const res = await fn();
