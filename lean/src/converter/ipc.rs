@@ -43,6 +43,15 @@ fn fail<T>(code: &str) -> Result<T, IpcError> {
     Err(IpcError { code: code.into(), retryable: false, details: None, own: true })
 }
 
+fn fail_with<T>(code: &str, details: Value) -> Result<T, IpcError> {
+    Err(IpcError { code: code.into(), retryable: false, details: Some(details), own: true })
+}
+
+/// an error from automatic conversion or the benchmark (a plain code)
+fn code_err(code: String) -> IpcError {
+    IpcError { code, retryable: false, details: None, own: false }
+}
+
 impl From<Fail> for IpcError {
     fn from(f: Fail) -> IpcError {
         IpcError { code: f.code.unwrap_or_default(), retryable: f.retryable, details: None, own: false }
@@ -64,7 +73,34 @@ pub trait ServiceApi: Send + Sync {
     fn retry_failed(&self, id: &str) -> SResult<Value>;
     fn dismiss_summary(&self, id: &str) -> SResult<Value>;
     fn set_concurrency(&self, id: &str, value: &Value) -> SResult<Value>;
+    /// (Node answers OPERATION_FAILED for a service without setLanes)
+    fn set_lanes(&self, _id: &str, _lanes: &Value) -> SResult<Value> {
+        Err(Fail::code("OPERATION_FAILED"))
+    }
     fn subscribe(&self, l: Listener) -> u64;
+}
+
+/// runtime.runBenchmark / cancelBenchmark, as the channels call them
+pub trait BenchmarkApi: Send + Sync {
+    fn run(&self, req: &super::runtime::BenchRequest, on_progress: &(dyn Fn(Value) + Sync)) -> Result<Value, String>;
+    fn cancel(&self);
+}
+
+impl BenchmarkApi for super::runtime::Converter {
+    fn run(&self, req: &super::runtime::BenchRequest, on_progress: &(dyn Fn(Value) + Sync)) -> Result<Value, String> {
+        self.run_benchmark(req, on_progress)
+    }
+    fn cancel(&self) {
+        self.cancel_benchmark()
+    }
+}
+
+/// What the channels use besides the job service (set once by the integrator).
+#[derive(Default, Clone)]
+pub struct Extras {
+    pub devices: Option<Arc<dyn Fn() -> Value + Send + Sync>>,
+    pub auto: Option<Arc<super::auto_convert::Auto>>,
+    pub benchmark: Option<Arc<dyn BenchmarkApi>>,
 }
 
 impl ServiceApi for Service {
@@ -100,6 +136,9 @@ impl ServiceApi for Service {
     }
     fn set_concurrency(&self, id: &str, v: &Value) -> SResult<Value> {
         Service::set_concurrency(self, id, v)
+    }
+    fn set_lanes(&self, id: &str, l: &Value) -> SResult<Value> {
+        Service::set_lanes(self, id, l)
     }
     fn subscribe(&self, l: Listener) -> u64 {
         Service::subscribe(self, l)
@@ -506,6 +545,7 @@ pub struct Bridge {
     clients: Mutex<HashMap<String, (Arc<Sink>, Arc<std::sync::atomic::AtomicBool>)>>,
     senders: Arc<Mutex<HashMap<String, Sender>>>,
     vetted: Mutex<HashMap<String, usize>>,
+    extras: Mutex<Extras>,
 }
 
 /// validateCapabilities(staging.capabilities + destinationContainment)
@@ -524,7 +564,7 @@ pub fn capabilities(staging: &Value) -> Value {
 
 impl Bridge {
     pub fn new(service: Arc<dyn ServiceApi>, ctx: Arc<dyn ConverterCtx>, capabilities: Value) -> Arc<Bridge> {
-        let b = Arc::new(Bridge { service: service.clone(), ctx: ctx.clone(), capabilities, clients: Mutex::new(HashMap::new()), senders: Arc::new(Mutex::new(HashMap::new())), vetted: Mutex::new(HashMap::new()) });
+        let b = Arc::new(Bridge { service: service.clone(), ctx: ctx.clone(), capabilities, clients: Mutex::new(HashMap::new()), senders: Arc::new(Mutex::new(HashMap::new())), vetted: Mutex::new(HashMap::new()), extras: Mutex::new(Extras::default()) });
         let senders = b.senders.clone();
         let dropped_logged = Arc::new(std::sync::atomic::AtomicBool::new(false));
         service.subscribe(Arc::new(move |event: &Value| {
@@ -562,6 +602,22 @@ impl Bridge {
             }
         }));
         b
+    }
+
+    /// The devices, automatic conversion and the benchmark (each channel
+    /// answers DEVICES_UNAVAILABLE / AUTO_UNAVAILABLE / BENCHMARK_UNAVAILABLE without its own).
+    pub fn set_extras(&self, e: Extras) {
+        *self.extras.lock().unwrap() = e;
+    }
+
+    /// set_extras from a runtime: its devices, its automatic conversion, its benchmark
+    pub fn mount_runtime(&self, conv: &Arc<super::runtime::Converter>) {
+        let c = conv.clone();
+        self.set_extras(Extras { devices: Some(Arc::new(move || c.devices_answer())), auto: Some(conv.auto.clone()), benchmark: Some(conv.clone()) });
+    }
+
+    fn extras(&self) -> Extras {
+        self.extras.lock().unwrap().clone()
     }
 
     pub fn channels(&self) -> Vec<&'static str> {
@@ -685,6 +741,7 @@ impl Bridge {
             }
             "start" => {
                 let config = validate_start_config(p, &replacement)?;
+                self.check_lane_encoders(&config)?;
                 Ok(json!({ "jobId": safe_job_id(Some(&json!(self.service.start(&config)?)))? }))
             }
             "getCurrent" => {
@@ -699,22 +756,48 @@ impl Bridge {
                 }
                 let m = m.unwrap();
                 let id = safe_job_id(m.get("jobId"))?;
-                sanitize_snapshot(&self.service.set_concurrency(&id, &m["concurrency"])?)
+                let snap = self.service.set_concurrency(&id, &m["concurrency"])?;
+                // an automatic job's saved settings follow
+                if snap["config"]["autoConvert"] == true {
+                    if let Some(auto) = self.extras().auto {
+                        let root = snap["config"]["sourceRoot"].as_str();
+                        let lanes = snap["config"]["lanes"].as_array().filter(|a| !a.is_empty()).map(|_| snap["config"]["lanes"].clone());
+                        let _ = match lanes {
+                            Some(l) => auto.set_lanes(&l, root),
+                            None => auto.set_concurrency(&m["concurrency"], root),
+                        };
+                    }
+                }
+                sanitize_snapshot(&snap)
             }
             "setLanes" => {
                 let Some(m) = p.and_then(Value::as_object).filter(|m| m.len() == 2 && m.contains_key("jobId") && m.contains_key("lanes")) else { return fail("INVALID_REQUEST") };
-                match contracts::normalize_lanes(&m["lanes"]) {
-                    Ok(Some(_)) => {}
+                let lanes = match contracts::normalize_lanes(&m["lanes"]) {
+                    Ok(Some(l)) => l,
                     _ => return fail("INVALID_LANES"),
+                };
+                let snap = self.service.set_lanes(&safe_job_id(m.get("jobId"))?, &lanes)?;
+                if snap["config"]["autoConvert"] == true {
+                    if let Some(auto) = self.extras().auto {
+                        let _ = auto.set_lanes(&lanes, snap["config"]["sourceRoot"].as_str());
+                    }
                 }
-                // (lanes are not ported yet: Node answers this way for a service without setLanes)
-                fail("OPERATION_FAILED")
+                sanitize_snapshot(&snap)
             }
             "devices" => {
                 no_payload(p)?;
-                fail("DEVICES_UNAVAILABLE")
+                let Some(d) = self.extras().devices else { return fail("DEVICES_UNAVAILABLE") };
+                bounded(&d(), MAX_PAYLOAD_BYTES, false, true)
             }
-            "resume" => sanitize_snapshot(&self.service.resume(&job_id(p)?)?),
+            "resume" => {
+                let id = job_id(p)?;
+                let snap = self.service.resume(&id)?;
+                // resumed by the owner: "pause my own conversions" leaves it alone now
+                if let Some(auto) = self.extras().auto {
+                    auto.owner_resumed(&id);
+                }
+                sanitize_snapshot(&snap)
+            }
             "cancel" => sanitize_snapshot(&self.service.cancel(&job_id(p)?)?),
             "discard" => {
                 self.service.discard(&job_id(p)?)?;
@@ -748,22 +831,152 @@ impl Bridge {
                 }
                 Ok(Value::Null)
             }
-            "runBenchmark" => fail("BENCHMARK_UNAVAILABLE"),
+            "runBenchmark" => self.run_benchmark(p, client),
             "cancelBenchmark" => {
                 no_payload(p)?;
+                if let Some(b) = self.extras().benchmark {
+                    b.cancel();
+                }
                 Ok(Value::Null)
             }
             "getAuto" => {
                 no_payload(p)?;
-                fail("AUTO_UNAVAILABLE")
+                let Some(auto) = self.extras().auto else { return fail("AUTO_UNAVAILABLE") };
+                bounded(&auto.get_state(), MAX_PAYLOAD_BYTES, false, true)
             }
-            "setAuto" | "saveVehicle" | "forgetVehicle" => fail("AUTO_UNAVAILABLE"),
+            "setAuto" => self.set_auto(p, &replacement),
+            "saveVehicle" => {
+                let Some(auto) = self.extras().auto else { return fail("AUTO_UNAVAILABLE") };
+                let Some(m) = p.and_then(Value::as_object).filter(|m| m.len() == 1 && m.contains_key("config")) else { return fail("INVALID_REQUEST") };
+                let config = validate_start_config(m.get("config"), &replacement)?;
+                bounded(&auto.save_vehicle(&config).map_err(code_err)?, MAX_PAYLOAD_BYTES, false, true)
+            }
+            "forgetVehicle" => {
+                let Some(auto) = self.extras().auto else { return fail("AUTO_UNAVAILABLE") };
+                let Some(m) = p.and_then(Value::as_object).filter(|m| m.len() == 1) else { return fail("INVALID_REQUEST") };
+                let Some(root) = m.get("forgetSource").and_then(Value::as_str).filter(|r| !r.is_empty() && js_len(r) <= 4096) else { return fail("INVALID_REQUEST") };
+                bounded(&auto.forget_vehicle(root), MAX_PAYLOAD_BYTES, false, true)
+            }
             "checkAutoNow" => {
                 no_payload(p)?;
-                fail("AUTO_UNAVAILABLE")
+                let Some(auto) = self.extras().auto else { return fail("AUTO_UNAVAILABLE") };
+                bounded(&auto.check_now(), MAX_PAYLOAD_BYTES, false, true)
             }
             _ => fail("UNKNOWN_CHANNEL"),
         }
+    }
+}
+
+impl Bridge {
+    /// checkLaneEncoders(config, devices): a lane on a GPU that cannot encode the codec is refused
+    fn check_lane_encoders(&self, config: &Value) -> R<()> {
+        let Some(lanes) = config["lanes"].as_array() else { return Ok(()) };
+        let Some(devices) = self.extras().devices else { return Ok(()) };
+        let known = devices();
+        let list = known["devices"].as_array().cloned().unwrap_or_default();
+        for lane in lanes {
+            let Some(d) = list.iter().find(|d| d["id"] == lane["device"]) else { continue };
+            let codec = config["codec"].as_str().unwrap_or("");
+            if lane["concurrency"].as_i64().unwrap_or(0) > 0 && d["encoders"].get(codec).is_some_and(Value::is_null) {
+                let name: String = d["name"].as_str().filter(|n| !n.is_empty()).or(d["id"].as_str()).unwrap_or("").chars().take(128).collect();
+                return fail_with("DEVICE_UNSUPPORTED", json!({ "device": name, "codec": codec }));
+            }
+        }
+        Ok(())
+    }
+
+    fn run_benchmark(&self, p: Option<&Value>, client: Option<&str>) -> R<Value> {
+        let Some(bench) = self.extras().benchmark else { return fail("BENCHMARK_UNAVAILABLE") };
+        let Some(m) = p.and_then(Value::as_object).filter(|m| m.keys().all(|k| ["codec", "codecs", "sourceRoot", "profileId", "bitrateKbps", "qualityLevel", "verifyMode"].contains(&k.as_str()))) else { return fail("INVALID_REQUEST") };
+        if let Some(v) = m.get("verifyMode") {
+            if !v.as_str().is_some_and(contracts::is_valid_verify_mode) {
+                return fail("INVALID_VERIFY_MODE");
+            }
+        }
+        let codecs = match m.get("codecs") {
+            None => vec![m.get("codec").cloned().unwrap_or(Value::Null)],
+            Some(Value::Array(a)) => a.clone(),
+            Some(_) => return fail("INVALID_CODEC"),
+        };
+        let mut uniq = std::collections::HashSet::new();
+        if codecs.is_empty() || codecs.len() > 2 || !codecs.iter().all(|c| c.as_str().is_some_and(|c| (c == "h265" || c == "av1") && uniq.insert(c.to_string()))) {
+            return fail("INVALID_CODEC");
+        }
+        let profile = match m.get("profileId") {
+            None | Some(Value::Null) => "balanced".to_string(),
+            Some(v) => v.as_str().filter(|x| PROFILE_IDS.contains(x)).map(str::to_string).map_or_else(|| fail("INVALID_PROFILE"), Ok)?,
+        };
+        let bitrate_ok = m.get("bitrateKbps").and_then(super::jobstore::normalize::safe_int_of).is_some_and(|b| (contracts::CUSTOM_BITRATE_KBPS_MIN..=contracts::CUSTOM_BITRATE_KBPS_MAX).contains(&b));
+        if if profile == "custom" { !bitrate_ok } else { m.contains_key("bitrateKbps") } {
+            return fail("INVALID_BITRATE");
+        }
+        let quality_ok = m.get("qualityLevel").and_then(Value::as_str).is_some_and(|q| contracts::QUALITY_LEVELS.contains(&q));
+        if if profile == "quality" { !quality_ok } else { m.contains_key("qualityLevel") } {
+            return fail("INVALID_QUALITY");
+        }
+        let source_root = match m.get("sourceRoot") {
+            None | Some(Value::Null) => None,
+            v => Some(canonical_directory(v)?.1),
+        };
+        let req = super::runtime::BenchRequest {
+            codecs: codecs.iter().filter_map(|c| c.as_str().map(str::to_string)).collect(),
+            profile_id: profile.clone(),
+            bitrate_kbps: if profile == "custom" { m.get("bitrateKbps").cloned() } else { None },
+            quality_level: if profile == "quality" { m.get("qualityLevel").cloned() } else { None },
+            verify_mode: m.get("verifyMode").and_then(Value::as_str).unwrap_or("quick").to_string(),
+            source_root,
+        };
+        // converter:benchmarkProgress to the window that asked (best effort)
+        let sink = client.and_then(|c| self.clients.lock().unwrap().get(c).cloned());
+        let progress = move |v: Value| {
+            if let Some((sink, alive)) = &sink {
+                if alive.load(std::sync::atomic::Ordering::SeqCst) {
+                    if let Ok(b) = bounded(&v, MAX_PAYLOAD_BYTES, false, true) {
+                        sink(&format!("event: converter:benchmarkProgress\ndata: {b}\n\n"));
+                    }
+                }
+            }
+        };
+        bench.run(&req, &progress).map_err(code_err)
+    }
+
+    fn set_auto(&self, p: Option<&Value>, replacement: &str) -> R<Value> {
+        let Some(auto) = self.extras().auto else { return fail("AUTO_UNAVAILABLE") };
+        let Some(m) = p.and_then(Value::as_object).filter(|m| m.keys().all(|k| ["enabled", "intervalMinutes", "window", "holdManual", "keepRunning", "openAtLogin", "config", "removeSource"].contains(&k.as_str()))) else { return fail("INVALID_REQUEST") };
+        let interval_ok = m.get("intervalMinutes").and_then(Value::as_f64).is_some_and(|i| super::auto_convert::INTERVAL_MINUTES.iter().any(|x| *x as f64 == i));
+        if !m.get("enabled").is_some_and(Value::is_boolean) || !interval_ok || !m.get("keepRunning").is_some_and(Value::is_boolean) || !m.get("openAtLogin").is_some_and(Value::is_boolean) {
+            return fail("INVALID_REQUEST");
+        }
+        if m.get("holdManual").is_some_and(|h| !h.is_boolean()) {
+            return fail("INVALID_REQUEST");
+        }
+        if let Some(r) = m.get("removeSource") {
+            if !r.as_str().is_some_and(|r| js_len(r) <= 4096) {
+                return fail("INVALID_REQUEST");
+            }
+        }
+        let w = m.get("window").cloned().unwrap_or(Value::Null);
+        let window = if w.as_object().is_some_and(|o| o.len() == 1 && o.get("follow") == Some(&json!("off-peak"))) {
+            json!({ "follow": "off-peak" })
+        } else if !w.is_null() {
+            let hour = |k: &str| w.get(k).and_then(super::jobstore::normalize::safe_int_of).filter(|h| (0..=23).contains(h));
+            match (hour("startHour"), hour("endHour")) {
+                (Some(a), Some(b)) if a != b => json!({ "startHour": a, "endHour": b }),
+                _ => return fail("INVALID_AUTO_WINDOW"),
+            }
+        } else {
+            Value::Null
+        };
+        let enabled = m["enabled"] == true;
+        let config = if !enabled || m.get("config").map_or(true, Value::is_null) { Value::Null } else { validate_start_config(m.get("config"), replacement)? };
+        if enabled && config.is_null() && !m.contains_key("removeSource") {
+            return fail("AUTO_CONFIG_REQUIRED");
+        }
+        let mut next = json!({ "enabled": enabled, "intervalMinutes": m["intervalMinutes"], "window": window, "holdManual": m.get("holdManual") == Some(&json!(true)), "keepRunning": m["keepRunning"], "openAtLogin": m["openAtLogin"], "config": config });
+        if let Some(r) = m.get("removeSource") {
+            next["removeSource"] = r.clone();
+        }
+        bounded(&auto.configure(&next).map_err(code_err)?, MAX_PAYLOAD_BYTES, false, true)
     }
 }
 
