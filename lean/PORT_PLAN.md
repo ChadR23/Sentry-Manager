@@ -88,7 +88,7 @@ area is served through them (`src/wire/`, see "Integration" below).
 | ui (pages, static files, interface packs, exports, settings) | ported |
 | can (CAN logs, uploads, device port, Sentry USB files) | ported |
 | converter | ported and mounted: job store, scanner, job service, runtime, the 22 channels behind `/api/converter/invoke/:name` and `/api/converter/events`; lanes per GPU, auto convert, the benchmark, the converted index left (see below) |
-| helper servers (nodes) | not started: `/api/nodes*` answer 501, `/node/v1/*` 404 |
+| helper servers (nodes) | ported and mounted (main side, worker, benchmark, picture check); the converter's node lanes left (see below) |
 
 Same answers, the whole contract (`node lean/parity/contractAll.js`: the Node
 fixture and lean on copies of the same archive, both with HTTPS and a
@@ -340,6 +340,83 @@ root); io error texts are Rust's where Node logs its own; Resume of a job
 parked mid-replacement answers once that clip is settled (Node's answer
 waits for the whole relaunched job); a job file holding a lone UTF-16
 surrogate (never written from file names) is read as corrupt.
+
+## Helper servers
+
+Done (`src/nodes/`, mounted in `src/wire/nodes.rs`; `src/nodes/README.md`):
+
+- the main side (nodes.js): pairing (address rules, the 12-character code,
+  8 nodes, the HMAC proofs over the certificate seen, the token's form, the
+  authority kept only when it is a CA that issued the certificate seen),
+  every connection pinned before a byte is sent (the fingerprint, or a
+  certificate the pinned authority issued and valid now; the handshake's
+  signatures checked), the token as Bearer, Node's timeouts (8 s info,
+  10 s probe, 15 s pair and job status, 60 s uploads and downloads with
+  30-minute deadlines, twice the idle timeout otherwise), at most 64 KiB of
+  an answer, the same error texts and codes (NODE_TIMEOUT, NODE_UNREACHABLE
+  with Node's errno names, NODE_CERT, NODE_CERT_CHANGED, NODE_PROTOCOL,
+  NODE_BUSY, NODE_DEVICE_GONE, CANCELLED); list (a lane per GPU/CPU,
+  `node:<id>@<device>`, or one per older node), overview (1.5 s wait, the
+  keys JSON.stringify leaves out), power / power_rows, hardware, rename,
+  Vehicles first, trust, forgetCar, remove, setSlots (a number or per device);
+  the remote encode as Node runs it (info first, 5 minutes of busy waits,
+  two uploads at once per node, the job id taken even after a cancel once
+  all is sent, `queued=1`, only real progress counts, 30-minute queue
+  limit, the output created new and never past twice the clip), devices kept
+  with the node for when it is offline, the power notes for the stats engine;
+- the worker (nodeWorker.js): one-time codes (10 minutes, 20 wrong tries, 3
+  per address), the token kept as SHA-256, the bad-token throttle (20 in
+  10 minutes), the settings in Node's key order, devices per GPU/CPU with
+  their encoders (30 s cache, no probe while encoding), slots per device and
+  the queue of 15 (64 held in all), the disk check, the MP4 check, ffmpeg
+  built from fixed choices only (`-protocol_whitelist file -f mov`, `-fs`,
+  `-t`), GPU decode then without, the stall watch, the sweeper (done 10
+  minutes, orphans 5), every answer and status code of the 7 routes;
+- the benchmark (nodeBenchmark.js), the picture check (pictureCheck.js:
+  SSIM, the offsets, the three random stretches on long clips, GPU decode
+  then CPU), the 12 `/api/nodes*` routes with their audit lines.
+
+Checked: `cargo test --lib nodes` (26 tests; the end-to-end ones need
+openssl and ffmpeg, the parity ones node too): ports of test/nodes.test.js
+(addresses, settings, pairing with a changed certificate and tokens, a real
+remote encode, an existing output, both cancels, a renewed certificate,
+refused manifests, wrong codes per address, a node that never stops
+sending, clips waiting on the node, GPU/CPU lanes and slots per device, an
+older node, the benchmark on real clips, Encode with, device attempts, the
+picture check on synthetic and real encodes, the GPU decode fallback, upload
+slots), server.test.js "a change refused part way saves none of it; a
+removed vehicle leaves every node list" (and the other refusals of the
+routes), reportsHeartbeatNodes' nodes.hardware() after a restart. Parity
+(`lean/parity/nodes.js`): the Rust main pairs with Node's worker, encodes
+there, cancels and sets its slots; Node's main pairs with the Rust worker
+and does the same; and 35 requests (pairing refusals, tokens, info, slots,
+jobs, a real encode and its output, deletes, the throttle) get the same
+status, content type and JSON from both workers.
+
+Not done yet:
+
+- the converter's part: node lanes in jobService (lanes, failover to this
+  server's GPU, the picture check unless trusted, "15 ahead", the checks
+  "a few at a time"), autoConvert's planLanes with the nodes' priorities
+  (test/nodePriority.test.js), `WorkerRuntime` on the planner;
+- (done on core: `NodesCtx` on core's state (the `nodes` / `nodeWorker`
+  settings, audit, the `nodes` log scope, core's TLS and CA, ops'
+  `node_power`, this server's power report and GPUs, vehicles, paths, a
+  `WorkerRuntime` over the converter's planner shared with the health
+  check); `/api/nodes*` through core's router; `/node/v1/*` as core's raw
+  path on its HTTPS port with the served certificate's DER, the body read
+  on a blocking thread, a refused upload drained, `delivered()` once the
+  answer is taken; `forget_vehicle` on vehicle removal; `power_rows` for
+  `OpsCtx::node_powers`, `hardware()` in the heartbeat; `close()` at exit.)
+- an answer the worker wants to close unanswered ends the connection with an
+  error after its status line (hyper has no "no answer"); the runtime's
+  `local_devices` (lanes per GPU) is the converter's next round.
+
+Proposed differences (need the owner's OK): TLS failures read "Could not
+reach the node (EPROTO)." or rustls' text where Node names OpenSSL's code;
+a name cut at 64 UTF-16 units never splits a surrogate pair; a request whose
+upload is stopped on the worker (revoked, node mode off) is closed without
+an answer (Node leaves it open until the main gives up).
 
 ## Supervisor
 

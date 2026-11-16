@@ -16,6 +16,7 @@ pub mod arrival;
 pub mod can;
 pub mod converter;
 pub mod footage;
+pub mod nodes;
 pub mod ops;
 pub mod routes;
 pub mod ui;
@@ -44,6 +45,8 @@ pub enum Area {
     /// the first slice's day and recording lists (api.rs)
     Slice,
     Converter,
+    /// the helper servers
+    Nodes,
     /// not ported yet
     None,
 }
@@ -59,9 +62,18 @@ pub struct Server {
     can: OnceLock<Arc<crate::can::routes::Can>>,
     converter: OnceLock<Arc<converter::Conv>>,
     arrival: OnceLock<Arc<crate::arrival::Area>>,
+    nodes: OnceLock<Arc<crate::nodes::routes::NodesApi>>,
+    planner: OnceLock<crate::converter::planner::Planner<crate::converter::process::BoundedRunner>>,
 }
 
 impl Server {
+    pub fn nodes(&self) -> Option<&Arc<crate::nodes::routes::NodesApi>> {
+        self.nodes.get()
+    }
+    /// encoderPlanner.js: the encoder tests (the health check, the worker's runtime), kept once done
+    pub fn planner(&self) -> &crate::converter::planner::Planner<crate::converter::process::BoundedRunner> {
+        self.planner.get_or_init(|| nodes::planner(&self.state.config.ffmpeg))
+    }
     pub fn arrival(&self) -> Option<&Arc<crate::arrival::Area>> {
         self.arrival.get()
     }
@@ -196,6 +208,8 @@ pub fn build(state: Arc<AppState>, r: &mut Router) -> Arc<Server> {
         can: OnceLock::new(),
         converter: OnceLock::new(),
         arrival: OnceLock::new(),
+        nodes: OnceLock::new(),
+        planner: OnceLock::new(),
     });
     // footage first: every other area reads its vehicles and scans
     let _ = srv.app.set(footage::make(&srv));
@@ -208,6 +222,7 @@ pub fn build(state: Arc<AppState>, r: &mut Router) -> Arc<Server> {
     if let Some(c) = converter::make(&srv) {
         let _ = srv.converter.set(c);
     }
+    let _ = srv.nodes.set(nodes::make(&srv));
     hooks(&srv);
     register(&srv, r);
     srv
@@ -334,6 +349,9 @@ fn hooks(srv: &Arc<Server>) {
         if let Some(a) = s.arrival() {
             a.arrival.stop();
         }
+        if let Some(n) = s.nodes() {
+            n.close();
+        }
         if let Some(app) = s.app.get() {
             app.vehicles.stop_all();
         }
@@ -383,6 +401,11 @@ fn register(srv: &Arc<Server>, r: &mut Router) {
         let s = s.clone();
         Box::pin(async move { tokio::task::spawn_blocking(move || ops::metrics(&s, &q)).await.unwrap_or_else(|_| internal()) })
     });
+    let s = srv.clone();
+    r.raw("/node/v1/", move |q: RawReq| {
+        let s = s.clone();
+        Box::pin(async move { nodes::node_v1(s, q).await })
+    });
     for p in ["/api/can/logs", "/api/can/logs/"] {
         let s = srv.clone();
         r.raw(p, move |q: RawReq| {
@@ -412,6 +435,7 @@ fn answer(srv: &Arc<Server>, area: Area, c: &mut Ctx) -> Result<Reply, HttpError
         Area::Ui => ui::answer(srv, c),
         Area::Can => can::answer(srv, c),
         Area::Converter => converter::invoke(srv, c),
+        Area::Nodes => nodes::answer(srv, c),
         Area::None => Err(HttpError::new(501, "Not in this server yet.")),
     }
 }

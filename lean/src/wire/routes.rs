@@ -1,6 +1,6 @@
 //! Every route of server/index.js's router (docs/api-contract.json, in its order) that
 //! core does not register itself, and the area that answers it. Generated from the
-//! contract; `None`: not ported yet (answered 501 "Not ported yet").
+//! contract; `None`: not ported yet (answered 501 "Not in this server yet.").
 
 use super::Area;
 
@@ -33,18 +33,18 @@ pub const ROUTES: [(&str, &str, Area); 140] = [
     ("GET", "/api/exports/:id", Area::Ui),
     ("DELETE", "/api/exports/:id", Area::Ui),
     ("GET", "/api/exports/:id/file", Area::Ui),
-    ("GET", "/api/nodes", Area::None),
-    ("POST", "/api/nodes", Area::None),
-    ("GET", "/api/nodes/:id/benchmark", Area::None),
-    ("POST", "/api/nodes/:id/benchmark", Area::None),
-    ("DELETE", "/api/nodes/:id/benchmark", Area::None),
-    ("POST", "/api/nodes/:id/slots", Area::None),
-    ("PUT", "/api/nodes/:id", Area::None),
-    ("DELETE", "/api/nodes/:id", Area::None),
-    ("POST", "/api/nodes/worker", Area::None),
-    ("POST", "/api/nodes/worker/pair", Area::None),
-    ("DELETE", "/api/nodes/worker/pair", Area::None),
-    ("DELETE", "/api/nodes/worker/mains/:id", Area::None),
+    ("GET", "/api/nodes", Area::Nodes),
+    ("POST", "/api/nodes", Area::Nodes),
+    ("GET", "/api/nodes/:id/benchmark", Area::Nodes),
+    ("POST", "/api/nodes/:id/benchmark", Area::Nodes),
+    ("DELETE", "/api/nodes/:id/benchmark", Area::Nodes),
+    ("POST", "/api/nodes/:id/slots", Area::Nodes),
+    ("PUT", "/api/nodes/:id", Area::Nodes),
+    ("DELETE", "/api/nodes/:id", Area::Nodes),
+    ("POST", "/api/nodes/worker", Area::Nodes),
+    ("POST", "/api/nodes/worker/pair", Area::Nodes),
+    ("DELETE", "/api/nodes/worker/pair", Area::Nodes),
+    ("DELETE", "/api/nodes/worker/mains/:id", Area::Nodes),
     ("POST", "/api/vehicles/test-smb", Area::Footage),
     ("POST", "/api/vehicles", Area::Footage),
     ("PUT", "/api/vehicles/:id", Area::Footage),

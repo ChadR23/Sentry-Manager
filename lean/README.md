@@ -32,13 +32,13 @@ Bin, the footage catalog in its `catalog_*` tables), and Node's caches
 | ops | `src/ops/` | notifications and rules, health and the startup check, snapshots, power price and savings, image updates, metrics, the opt-in reports, system info, the server monitor (`/api/stats`: GPUs, power and RAPL, energy, data used, disks, shares, sensors, processes, alerts), the support bundle |
 | ui | `src/ui/` | every page and file as Node serves it, versioned links, the critical bar, early-data hints, interface packs, exports, settings and dashboards |
 | can | `src/can/` | CAN Bridge uploads (web port and core's device port), the CAN index, trust, search, sync, prune, downloads, Sentry USB files |
+| helper servers | `src/nodes/` | pairing with pinned certificates, remote encodes, the worker (`/node/v1/*`), the benchmark, the picture check, `/api/nodes*` |
 | converter | `src/converter/` | the job store, scanner, job service and runtime (encode, telemetry, verify, size retries, save, pause/cancel/resume, recovery after a crash), file safety (owned files, staging, recovery), MP4 writing, H.265/AV1 telemetry, verifier, planner; the 22 channels behind `/api/converter/invoke/:name` and `/api/converter/events` |
 | MP4 and telemetry readers | `src/mp4.rs`, `src/sei.rs`, `src/telemetry.rs`, `src/media.rs`, `src/thumbnails.rs` | box headers only, the quick and the full telemetry read, Range answers, thumbnails with ffmpeg |
 
-Not in it yet: the converter's lanes per GPU, auto convert, benchmark and
-converted index; the helper
-servers (`/api/nodes*` answer 501 "Not in this server yet.", `/node/v1/*`
-404); `POST /api/studio/trashFolder` (501); CAN and
+Not in it yet: the converter's lanes per GPU and per helper server, auto
+convert, benchmark and converted index; `POST /api/studio/trashFolder`
+(501); CAN and
 Sentry USB evidence in archive gaps, drives and place tags; some stats
 parts. PORT_PLAN.md lists each.
 

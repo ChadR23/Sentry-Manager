@@ -154,6 +154,9 @@ impl Ctx for FootageCtx {
         if let Some(can) = s.can() {
             can.usb.forget(vehicle_id);
         }
+        if let Some(n) = s.nodes() {
+            n.forget_vehicle(vehicle_id);
+        }
         // arrivalRef.forget and the vehicle's sentry-usb-record entry
         if let Some(a) = s.arrival() {
             let ctx = super::arrival::CoreArrival::new(&s);
