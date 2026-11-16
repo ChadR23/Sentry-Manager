@@ -222,6 +222,12 @@ impl Catalog {
         rows.collect()
     }
 
+    pub fn codec(&self, vehicle: &str, rel: &str) -> rusqlite::Result<Option<(u64, f64, Option<String>)>> {
+        self.conn()
+            .query_row("SELECT size, mtime_ms, codec FROM clip_codecs WHERE vehicle_id = ?1 AND rel = ?2", [vehicle, rel], |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, f64>(1)?, r.get::<_, Option<String>>(2)?)))
+            .optional()
+    }
+
     pub fn update_codecs(&self, vehicle: &str, set: &[(String, u64, f64, Option<String>)], gone: &[String]) -> rusqlite::Result<()> {
         self.each(gone, "DELETE FROM clip_codecs WHERE vehicle_id = ?1 AND rel = ?2", |st, rel| st.execute(params![vehicle, rel]).map(|_| ()))?;
         self.each(
@@ -235,4 +241,25 @@ impl Catalog {
 
 fn same_entry(a: &FileEntry, b: &FileEntry) -> bool {
     a.size == b.size && a.mtime_ms == b.mtime_ms && a.ctime_ms == b.ctime_ms && a.birthtime_ms == b.birthtime_ms && a.kind == b.kind && a.typ == b.typ && a.day == b.day && a.camera == b.camera && a.event_id == b.event_id
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_codec_is_the_row_the_whole_table_has() {
+        let dir = std::env::temp_dir().join(format!("catalog-codec-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cat = Catalog::open(&dir.join("manager.db")).unwrap();
+        let set = vec![("SentryClips/a/x-front.mp4".to_string(), 10, 1.5, Some("hevc".to_string())), ("RecentClips/y-front.mp4".to_string(), 20, 2.0, None)];
+        cat.update_codecs("v1", &set, &[]).unwrap();
+        let all = cat.codecs("v1").unwrap();
+        for (rel, ..) in &set {
+            assert_eq!(cat.codec("v1", rel).unwrap().as_ref(), all.get(rel));
+        }
+        assert_eq!(cat.codec("v1", "missing.mp4").unwrap(), None);
+        assert_eq!(cat.codec("v2", "RecentClips/y-front.mp4").unwrap(), None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

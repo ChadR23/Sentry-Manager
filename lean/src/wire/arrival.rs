@@ -49,7 +49,7 @@ impl ArrivalCtx for CoreArrival {
         Some(InventoryView { files, scanning: st.scanning })
     }
     fn codec(&self, vid: &str, rel: &str) -> Option<KnownCodec> {
-        let (size, mtime_ms, codec) = self.srv()?.app().catalog.codecs(vid).ok()?.remove(rel)?;
+        let (size, mtime_ms, codec) = self.srv()?.app().catalog.codec(vid, rel).ok()??;
         Some(KnownCodec { size, mtime_ms, codec })
     }
     fn holds(&self, abs: &str) -> bool {
