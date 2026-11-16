@@ -36,9 +36,9 @@ Bin, the footage catalog in its `catalog_*` tables), and Node's caches
 | converter | `src/converter/` | the job store, scanner, job service (lanes per GPU and per helper server), automatic conversion, the benchmark, the converted index, encoder and conversion stats, and runtime (encode, telemetry, verify, size retries, save, pause/cancel/resume, recovery after a crash), file safety (owned files, staging, recovery), MP4 writing, H.265/AV1 telemetry, verifier, planner; the 22 channels behind `/api/converter/invoke/:name` and `/api/converter/events` |
 | MP4 and telemetry readers | `src/mp4.rs`, `src/sei.rs`, `src/telemetry.rs`, `src/media.rs`, `src/thumbnails.rs` | box headers only, the quick and the full telemetry read, Range answers, thumbnails with ffmpeg |
 
-Not in it yet: `POST /api/studio/trashFolder` (501); CAN and
-Sentry USB evidence in archive gaps, drives and place tags; some stats
-parts. PORT_PLAN.md lists each.
+Every route of the Node server is answered. What is left (tests against a
+real helper server for the converter's node lanes, a few logged error
+texts) and the owner's accepted differences are in PORT_PLAN.md.
 
 ## How it is checked
 
@@ -46,7 +46,20 @@ On the integrated server (PORT_PLAN.md, "Integration", has the numbers):
 
 - `cargo test --release` in `lean/`;
 - `node lean/parity/contractAll.js`: the whole API contract, the Node
-  fixture against lean (both over HTTPS, signed in), every route;
+  fixture against lean (both over HTTPS, signed in), every route: goldens
+  for the GET routes and one request of each other route, then live checks
+  (`contractLive.js`) of what goldens cannot hold: the two event streams
+  (topics per action, a real conversion's updates), the token routes
+  (`/metrics`, `/api/can/logs/ping`, `/node/v1/*` paired by Node's own main
+  side) and the random or session-ending answers; the owner's accepted
+  differences are counted apart;
+- `node lean/parity/bigCompare.js`: every GET route on a generated archive
+  of 3,000 clips (six cameras, Recent, Sentry and Saved with event.json and
+  thumb.png) mounted read-only (a bind mount: root), after both servers
+  scanned and indexed;
+- `tests/archive_gap_parity.rs` (every analyze() call of Node's own archive
+  gap tests) and `node lean/parity/placeTags.js` (place tags and drives
+  with CAN GPS);
 - per area: `compare.js` (footage lists, viewer, media), `compareFootage.js`
   (the footage area's writes), `canCompare.js`, `opsCompare.js`,
   `uiCompare.js`, `contractUi.js`, `uiPages.js` (Chromium),

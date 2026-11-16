@@ -93,8 +93,9 @@ area is served through them (`src/wire/`, see "Integration" below).
 Same answers, the whole contract (`node lean/parity/contractAll.js`: the Node
 fixture and lean on copies of the same archive, both with HTTPS and a
 password; record.js goldens of every GET route and one request for each other
-route from `lean/parity/contractAllow.json`, replayed by compare.js): see
-"Integration".
+route from `lean/parity/contractAllow.json`, replayed by compare.js, then the
+live checks of `contractLive.js`): every route compared, none differs but for
+the accepted differences; see "Integration".
 
 ## Integration (`src/wire/`)
 
@@ -140,37 +141,47 @@ deleted). The stand-alone contexts are gone (ops `LeanCtx`, ui `LocalCtx`,
 viewer `AppCtx`, CAN `lean.rs` and its plain-HTTP device port, the temporary
 `/api/studio/context`); footage's `LocalCore` stays as the tests' stand-in.
 
-Checked (all on the integrated server):
+Checked (all on the integrated server, 2026-11-16):
 
-- `cargo test --release`: 498 tests pass (every area's ports of Node's
+- `cargo test --release`: 499 tests pass (every area's ports of Node's
   tests and their parity runs against the Node code, among them the
   converter's store, scanner, jobs, lanes, automatic conversion, benchmark,
-  crash suites and bridge, ops' stats replay, the arrival checksums and the
-  helper servers);
-- `lean/parity/compare.js`: 217 requests the same; `compareFootage.js`: 97
-  writing requests the same; `canCompare.js`: 151 requests, no differences;
+  crash suites and bridge, ops' stats replay, the arrival checksums, the
+  helper servers, and `tests/archive_gap_parity.rs`: the 77 analyze() calls
+  of Node's archive gap tests, every answer the same);
+- `contractAll.js` (all 189 routes): 186 answer the same, 3 the same but
+  for an accepted difference (`GET /api/speeds/status` readMode,
+  `GET /api/system` nativeHelper, the random code of
+  `POST /api/nodes/worker/pair`), 0 differ, 0 not compared. Per area: core
+  34, ops 27 + 1 accepted, ui 15, footage 30, nodes 18 + 1 accepted, viewer
+  29 + 1 accepted, CAN 31, converter 2. The replay now keeps the order the
+  requests were recorded in (the three helper-server differences of the
+  last run were the replay's file-name order: a pairing code cancelled
+  before it was shown), and an allow-file entry carries its normalisers into
+  the replay (the per-server CA in `PUT /api/security/hostnames`, the
+  archive's stamped name in `POST /api/logs/clear`). What goldens cannot
+  hold is compared live (`contractLive.js`, the same scripted requests to
+  both): `/api/events` (the topics each action brings, and those that come
+  by themselves in a quiet minute), `/api/converter/events` (hello, then a
+  real conversion of an event folder to the converted folder: its states,
+  its last snapshot's clips and counters, its Activity row), `/metrics`,
+  `/api/can/logs/ping` and `/node/v1/info`, `/jobs/:id`, `/jobs/:id/output`
+  with real tokens (node mode paired by Node's own main side), and 2fa/start,
+  logout (a session of its own), metrics/enable, snapshots,
+  updates/check, can/enable, can/tokens, nodes/worker, speeds/index with
+  their random parts normalised;
+- `bigCompare.js` (3,000 clips, six cameras, Recent/Sentry/Saved with
+  event.json and thumb.png, a read-only bind mount, the converter idle;
+  both servers scanned, indexed and scanned again): 1,210 answers of 78 GET
+  routes, 1,208 the same, the other two the accepted readMode and
+  nativeHelper;
+- `compare.js`: 217 requests the same; `compareFootage.js`: 97 writing
+  requests the same; `canCompare.js`: 151 requests, no differences;
   `uiCompare.js`: 2871 of 2871 answers the same; `contractUi.js`: 17 of 17;
   `uiPages.js` (Chromium): 30 of 30 pages load the same; `opsCompare.js`:
-  16 of 17 (`host.node`, proposed below; on another run the share's free
-  space can change between the two servers' runs);
-- `contractAll.js` (all 189 routes): 165 answer the same, 8 differ, 16 are
-  not compared. Not compared: the live streams (`/api/events`,
-  `/api/converter/events`), the token routes the recorder never calls
-  (`/metrics`, `/api/can/logs/ping`, `GET /node/v1/*` x3), and the requests
-  whose answers are random or end the session (2fa/start, logout,
-  metrics/enable, snapshots, updates/check, can/enable, can/tokens,
-  nodes/worker, speeds/index). Differ: each server's own CA in
-  `PUT /api/security/hostnames` and the archive's name in
-  `POST /api/logs/clear` (per-instance values the replay does not
-  normalise); the pairing code in `POST /api/nodes/worker/pair` (random);
-  `/api/speeds/status` `readMode` (timing, proposed below);
-  `POST /api/studio/trashFolder` (501, not ported); and three helper-server
-  answers that are the nodes area's: `DELETE /api/nodes/worker/pair` after
-  a pairing code (`enabled` false here, true on Node), `POST /node/v1/pair`
-  with no pairing open (400 "Bad pairing request." here, 403 "not waiting
-  to be paired" on Node) and `DELETE /node/v1/jobs/:id` unpaired (404 here,
-  401 "Not paired." on Node);
-- `npm test` passes.
+  15 of 17, the other two the accepted `host.node` and nativeHelper;
+  `placeTags.js`: recordings, days and drives with CAN GPS the same;
+- `npm test` passes (1,420 tests, 94 skipped).
 
 ## Converter
 
