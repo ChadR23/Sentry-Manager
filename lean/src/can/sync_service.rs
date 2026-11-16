@@ -3,7 +3,7 @@
 //! when the Viewer asks, its whole drive in the background, and what a newly
 //! indexed log covers forgotten and worked out again.
 
-use super::ctx::{CanCtx, Car};
+use super::ctx::{CanCtx, Car, Scan};
 use super::json::{self, n};
 use super::sync::{clip_duration, estimate_clip, solve_drive, telemetry_frames, DriveClip, Estimate, Series, SEARCH_MS, SYNC_FORMAT};
 use indexmap::IndexMap;
@@ -88,10 +88,12 @@ impl CanSync {
         relative(root, real).or_else(|| std::fs::canonicalize(root).ok().and_then(|r| relative(&r, real)))
     }
 
-    fn fronts_of(&self, v: &Car, clip_rels: &[String]) -> Vec<Front> {
+    fn cams(scan: &Scan) -> HashMap<&str, Option<&str>> {
+        scan.files.iter().map(|f| (f.rel.as_str(), f.camera.as_deref())).collect()
+    }
+
+    fn fronts_of(v: &Car, clip_rels: &[String], cams: &HashMap<&str, Option<&str>>) -> Vec<Front> {
         let Some(root) = v.root.as_ref() else { return Vec::new() };
-        let scan = self.ctx.scan_of(&v.id);
-        let cams: HashMap<&str, Option<&str>> = scan.as_ref().map(|s| s.files.iter().map(|f| (f.rel.as_str(), f.camera.as_deref())).collect()).unwrap_or_default();
         let mut out: Vec<Front> = clip_rels
             .iter()
             .filter(|r| cams.get(r.as_str()).copied().flatten().or_else(|| r.to_lowercase().ends_with("-front.mp4").then_some("front")) == Some("front"))
@@ -104,7 +106,7 @@ impl CanSync {
     fn recording_of(&self, v: &Car, rel: &str) -> Option<(String, Vec<Front>)> {
         let scan = self.ctx.scan_of(&v.id)?;
         let rec = scan.recordings.iter().find(|r| r.clip_rels.iter().any(|x| x == rel))?;
-        Some((rec.id.clone(), self.fronts_of(v, &rec.clip_rels)))
+        Some((rec.id.clone(), Self::fronts_of(v, &rec.clip_rels, &Self::cams(&scan))))
     }
 
     fn estimate(&self, keys: &[String], real: &Path, start: f64) -> Estimate {
@@ -175,7 +177,11 @@ impl CanSync {
     fn queue(self: &Arc<Self>, v: &Car, rel: &str) {
         let Some(scan) = self.ctx.scan_of(&v.id) else { return };
         let Some(rec) = scan.recordings.iter().find(|r| r.clip_rels.iter().any(|x| x == rel)) else { return };
-        let id = format!("{}|{}", v.id, rec.id);
+        self.enqueue(v, rel, &rec.id);
+    }
+
+    fn enqueue(self: &Arc<Self>, v: &Car, rel: &str, rec_id: &str) {
+        let id = format!("{}|{}", v.id, rec_id);
         {
             let mut t = self.todo.lock().unwrap();
             if !t.contains_key(&id) {
@@ -293,13 +299,23 @@ impl CanSync {
         }
         for v in cars {
             let Some(scan) = self.ctx.scan_of(&v.id) else { continue };
+            let cams = Self::cams(&scan);
+            let mut first: HashMap<&str, &str> = HashMap::new();
+            for r in &scan.recordings {
+                for x in &r.clip_rels {
+                    first.entry(x.as_str()).or_insert(r.id.as_str());
+                }
+            }
             for rec in &scan.recordings {
-                let fronts = self.fronts_of(&v, &rec.clip_rels);
+                let fronts = Self::fronts_of(&v, &rec.clip_rels, &cams);
                 if fronts.is_empty() || fronts[0].start > to + 60_000.0 || fronts[fronts.len() - 1].start + 60_000.0 < from {
                     continue;
                 }
-                let rel = fronts[0].rel.clone();
-                self.queue(&v, &rel);
+                let rel = &fronts[0].rel;
+                match first.get(rel.as_str()) {
+                    Some(id) if self.ctx.scan_generation(&v.id) == Some(scan.generation) => self.enqueue(&v, rel, id),
+                    _ => self.queue(&v, rel),
+                }
             }
         }
     }
