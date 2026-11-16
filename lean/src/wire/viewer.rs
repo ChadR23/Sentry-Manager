@@ -80,6 +80,10 @@ impl Ctx for CoreViewer {
     fn audit(&self, line: &str) {
         self.state.audit.info(line);
     }
+    fn busy(&self) -> bool {
+        // index.js speedIndexBusy: a conversion runs (the benchmark is not ported)
+        self.srv().and_then(|s| s.converter().map(|c| c.running())).unwrap_or(false)
+    }
     fn refuse_admin(&self, _headers: &axum::http::HeaderMap) -> Option<(u16, String)> {
         // (core refused a watch-only account, or an admin away from home where that is the
         // rule, before the route ran: accounts.js viewerMay, access.js)

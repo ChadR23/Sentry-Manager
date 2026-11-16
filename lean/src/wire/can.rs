@@ -141,10 +141,16 @@ impl CanCtx for CoreCan {
         crate::core::tls::ip_permitted(ip)
     }
     fn sentry_usb_record_view(&self, vid: &str) -> Value {
-        // arrivalChecksums.js view() of a car it has not recorded for (the arrival checksums
-        // are not in this server yet: footage area, "Left to do")
-        let older = self.state.setting("sentry-usb-record").and_then(|r| r.get(vid).and_then(|x| x.get("older")).cloned()) != Some(Value::Bool(false));
-        serde_json::json!({ "enabled": false, "today": 0, "lastAt": null, "pending": 0, "lines": 0, "windowDays": 7, "older": older, "backlog": null })
+        // arrivalRef.view(v.id) (the CAN area adds canBackfill)
+        self.srv().and_then(|s| s.arrival().map(|a| a.arrival.view(vid))).unwrap_or_else(|| serde_json::json!({}))
+    }
+    fn arrival_kick(&self) {
+        if let Some(a) = self.srv().and_then(|s| s.arrival().cloned()) {
+            a.arrival.kick();
+        }
+    }
+    fn idle(&self) -> bool {
+        !self.srv().and_then(|s| s.converter().map(|c| c.running())).unwrap_or(false)
     }
     fn client_key(&self, remote: &str) -> String {
         // (the web port: core worked it out as clientKey(req) does, TRUST_PROXY included)

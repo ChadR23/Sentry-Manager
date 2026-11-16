@@ -39,6 +39,30 @@ pub struct CoreConverter {
     state: Arc<crate::core::AppState>,
 }
 
+impl Conv {
+    /// a conversion runs now (encoderStats.js RUNNING)
+    pub fn running(&self) -> bool {
+        self.jobs.lock().unwrap().values().any(|st| RUNNING.contains(&st.as_str()))
+    }
+    /// index.js busyPaths: the clips of active jobs in hand (`processing`), as absolute paths
+    pub fn busy_paths(&self) -> Vec<String> {
+        let ids: Vec<String> = self.jobs.lock().unwrap().iter().filter(|(_, st)| ACTIVE.contains(&st.as_str())).map(|(id, _)| id.clone()).collect();
+        let mut out = Vec::new();
+        for id in ids {
+            let Ok(job) = self.runtime.service.get(&id) else { continue };
+            let root = job["config"]["sourceRoot"].as_str().unwrap_or("").to_string();
+            for it in job["items"].as_array().into_iter().flatten() {
+                if it["state"] == "processing" {
+                    if let Some(rel) = it["relativePath"].as_str() {
+                        out.push(std::path::Path::new(&root).join(rel).to_string_lossy().into_owned());
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
 impl ConverterCtx for CoreConverter {
     fn data_path(&self) -> PathBuf {
         self.state.config.data.clone()
@@ -77,8 +101,11 @@ impl ConverterCtx for CoreConverter {
         guard.resolve_with(path, must_exist).map(|p| p.to_string_lossy().into_owned())
     }
     fn clip_converted(&self, output_path: &str) {
-        // (the viewer's previews and filmstrips of that clip are made again when asked)
-        let _ = output_path;
+        // our in-place output is never hashed as an arrival (arrivalChecksums.converted); the
+        // viewer's previews and filmstrips of that clip are made again when asked
+        if let Some(a) = self.srv.upgrade().and_then(|s| s.arrival().cloned()) {
+            a.clip_converted(output_path);
+        }
         self.state.announce("inventory");
     }
     fn log_error(&self, line: &str) {
@@ -205,8 +232,8 @@ pub fn make(srv: &Arc<Server>) -> Option<Arc<Conv>> {
         temp_path: temp,
         ffmpeg: st.config.ffmpeg.clone(),
         ffprobe: st.config.ffprobe.clone(),
-        // (arrival checksums for Sentry USB are not ported: nothing to record)
-        before_replace_original: None,
+        // the Sentry USB checksum record of the original, before it is replaced in place
+        before_replace_original: srv.arrival().map(|a| a.before_replace_fn()),
         tools: None,
         tune: None,
         hooks: None,

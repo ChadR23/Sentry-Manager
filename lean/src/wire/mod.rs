@@ -12,6 +12,7 @@
 //! as a value; the viewer and ui areas ask their context, which reads it from
 //! the request this thread is answering (`Who`, set around each call).
 
+pub mod arrival;
 pub mod can;
 pub mod converter;
 pub mod footage;
@@ -57,9 +58,13 @@ pub struct Server {
     ui: OnceLock<Arc<crate::ui::Ui>>,
     can: OnceLock<Arc<crate::can::routes::Can>>,
     converter: OnceLock<Arc<converter::Conv>>,
+    arrival: OnceLock<Arc<crate::arrival::Area>>,
 }
 
 impl Server {
+    pub fn arrival(&self) -> Option<&Arc<crate::arrival::Area>> {
+        self.arrival.get()
+    }
     pub fn converter(&self) -> Option<&Arc<converter::Conv>> {
         self.converter.get()
     }
@@ -190,6 +195,7 @@ pub fn build(state: Arc<AppState>, r: &mut Router) -> Arc<Server> {
         ui: OnceLock::new(),
         can: OnceLock::new(),
         converter: OnceLock::new(),
+        arrival: OnceLock::new(),
     });
     // footage first: every other area reads its vehicles and scans
     let _ = srv.app.set(footage::make(&srv));
@@ -197,6 +203,8 @@ pub fn build(state: Arc<AppState>, r: &mut Router) -> Arc<Server> {
     let _ = srv.viewer.set(viewer::make(&srv));
     let _ = srv.can.set(can::make(&srv));
     let _ = srv.ui.set(ui::make(&srv));
+    // (before the converter: its hook records the original's checksum before a replace)
+    let _ = srv.arrival.set(arrival::make(&srv));
     if let Some(c) = converter::make(&srv) {
         let _ = srv.converter.set(c);
     }
@@ -251,6 +259,33 @@ pub fn start(srv: &Arc<Server>) {
     if let Some(conv) = srv.converter() {
         converter::start(srv, conv);
     }
+    if let Some(a) = srv.arrival() {
+        a.start();
+    }
+    // index.js onScanned: after each finished scan, Sentry USB's status read again, then the
+    // arrival checksums kicked
+    let s = srv.clone();
+    std::thread::Builder::new()
+        .name("scan-watch".into())
+        .spawn(move || {
+            let mut seen: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+            loop {
+                std::thread::sleep(Duration::from_millis(500));
+                let app = s.app();
+                for v in app.vehicles.list() {
+                    let Some(at) = app.state_of(&v.id).filter(|st| st.scanned).and_then(|st| st.scanned_at) else { continue };
+                    if seen.insert(v.id.clone(), at) != Some(at) {
+                        if let Some(can) = s.can() {
+                            can.usb.fresh(&v.id);
+                        }
+                        if let Some(a) = s.arrival() {
+                            a.scanned();
+                        }
+                    }
+                }
+            }
+        })
+        .ok();
 }
 
 fn hooks(srv: &Arc<Server>) {
@@ -295,6 +330,9 @@ fn hooks(srv: &Arc<Server>) {
         }
         if let Some(conv) = s.converter() {
             conv.runtime.shutdown();
+        }
+        if let Some(a) = s.arrival() {
+            a.arrival.stop();
         }
         if let Some(app) = s.app.get() {
             app.vehicles.stop_all();

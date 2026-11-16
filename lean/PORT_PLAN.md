@@ -82,7 +82,7 @@ area is served through them (`src/wire/`, see "Integration" below).
 | --- | --- |
 | core | ported, see below and `src/core/README.md` |
 | supervisor | ported, see below and `src/supervisor/README.md`; TLS and the fd-3 link wired by core |
-| footage (`src/footage/`, with the first slice's lists in `api.rs`) | ported; arrival checksums left (see below) |
+| footage (`src/footage/`, with the first slice's lists in `api.rs`; arrival checksums in `src/arrival/`) | ported |
 | viewer | ported except CAN and Sentry USB evidence in archive gaps, drives and place tags (see below) |
 | ops | ported, the server monitor included; the converter's encoder block, node power and a few report numbers left (see below) |
 | ui (pages, static files, interface packs, exports, settings) | ported |
@@ -165,11 +165,10 @@ yet, safePath.js realOrNearest). Every job snapshot gives Activity its line
 the job's energy, a notification for failed clips), and ops its
 `job_snapshot` (savings, the stats' job mark); `conv.shutdown()` at exit;
 ops' `converter()`, `active_encodes()`, `job_progress()`, `jobs_queued()`
-read the runtime. Not wired yet: the Sentry USB checksum hook
-(`before_replace_original`: arrival checksums are not ported, so nothing is
-recorded before a replace in place), `clip_converted` only announces
-`inventory` (the viewer's previews are made again when asked), core's
-`conversions_active` / `settle_conversions` hooks for Clear jobs.
+read the runtime; the Sentry USB checksum hook (`before_replace_original`)
+is the arrival area's and `clip_converted` goes to it. Not wired yet:
+core's `conversions_active` / `settle_conversions` hooks for Clear jobs; the
+viewer's previews of a converted clip are made again only when asked.
 
 Done, round 1 (`src/converter/`):
 
@@ -577,6 +576,64 @@ areas; `Caller` for who asks), implemented on core's state in
 `footage/routes.rs` `handle`, called through core's router; access checks
 (admin, viewer, CSRF origin) are core's, `Caller::require_confirmed` is the 🔑.
 
+### Arrival checksums (`src/arrival/`, mounted in `src/wire/arrival.rs`)
+
+Done:
+
+- `record.rs` (server/originalChecksums.js): `locate`, `line_for`,
+  `parse_record`, `Recorder::record` (the share root's
+  `.sentrymanager/original-checksums.sha256`, O_APPEND + fsync, folder fsync
+  when new, a torn last line started anew, one writer per record file, only
+  inside a vehicle's folder), the day marks sidecar
+  `original-checksums.marks.json` and the 45-day pruning (temp, fsync,
+  rename), the converter's before-replace hook (`before_replace_fn` for
+  `RuntimeOptions.before_replace_original`; an Err keeps the original, with
+  Node's log line).
+- `engine.rs` + `index.rs` (server/arrivalChecksums.js): only shares with
+  `.sentryusb/`, the same candidates (Tesla clip names in the four groups,
+  no dot paths, no converter artifacts), the same order (fresh arrivals of
+  48 h, then by clip time, then the backlog newest first), held / busy /
+  settling / unchanged / encoded skips, the codec the inventory knows, the
+  rate limit and idle pauses, the identity check after hashing, per-cycle
+  cap and the next pass 30 s on, a kick ending a backlog pass, `converted()`
+  for our own output, prune of gone clips, the index snapshot + journal
+  (same files byte for byte: JS number and key order, v1 read, torn line,
+  compaction thresholds), `view` (field for field, time zones via chrono-tz),
+  `stats`, `forget`, `start` / `stop`.
+- `holds.rs` (sentryUsb.js interpret / inRange / holds) on the status
+  file's transfer fields, parsed as parseStatus does.
+- `routes.rs`: the `record` field of GET `/api/vehicles/:id/sentry-usb`,
+  POST `/api/vehicles/:id/sentry-usb/record` (400 text, setting, kick, audit
+  line), the vehicle removal.
+
+Tests: test/arrivalChecksums.test.js (all 17) and the record tests of
+test/sentryUsb.test.js ported (`cargo test --lib arrival`), the transfer
+range test, the before-replace hook (line written; error line and Err when
+it cannot be). Parity (`cargo test --test arrival_parity`, needs node;
+`lean/parity/arrival.js`): Node's module and the Rust one in turn on the
+same generated archive (TeslaCam root, all four groups, backlog of 3 days to
+3 years, H.265 / AV1 / H.264 MP4s, converter artifacts, dot folders, a held
+clip, a converted clip, a vehicle id needing `_`), two passes (a clip gone,
+a re-upload, a new clip): the record, marks and index files byte for byte
+and the view and bytes read equal; then 60 days of record calls with
+pruning, files byte for byte.
+
+Wired on core (`src/wire/arrival.rs`): `ArrivalCtx` on core's state (the
+footage area's vehicles and scans with their birth times, the catalog's
+codecs, `holds` from the CAN area's Sentry USB status reader, the
+converter's clips in hand and its running state, the `sentry-usb-record`
+setting, audit and the `sentry-usb` / `converter` log scopes);
+`Area::open` + `start` (the 10-minute pass), `before_replace_fn` in the
+converter's `RuntimeOptions` (an Err keeps the original:
+CHECKSUM_RECORD_FAILED), `clip_converted` from the converter, `scanned()`
+after each finished scan once Sentry USB's status is read again, the
+`record` view in the CAN area's GET `/api/vehicles/:id/sentry-usb` (which
+adds `canBackfill`), its POST `…/sentry-usb/record` kicks the pass (the
+CAN area's handler stores the setting, as `routes::post_record` does), the
+vehicle removal forgets the index and the setting, `stop()` at shutdown.
+
+### Vehicles, inventory, catalog, Recycle Bin, cleanup
+
 Moved here, unchanged at first (later commits edit them in place):
 `src/footage.rs` -> `footage/names.rs` (re-exported as `crate::footage::*`),
 `src/catalog.rs`, `src/inventory.rs`, `src/scanner.rs` -> `footage/`
@@ -609,10 +666,6 @@ differences); `node lean/parity/contractFootage.js` against goldens from
 
 Left to do:
 
-- `arrivalChecksums.js`: not ported. It writes the Sentry USB checksum record
-  through `originalChecksums.js` (the converter's) and asks `sentryUsb.holds`
-  (the Sentry USB area); port it with those, on `inventory` file entries
-  (`birthtime_ms`, `arrived_clips` are there).
 - `archiveGap.js`: the viewer area's per the table above (the day list's
   `archive` and `carFiles`); `deleted_clips::list` is what it reads from here.
 - (done: the catalog is in manager.db's catalog tables; core wiring of
@@ -733,10 +786,9 @@ Not done yet:
   the device port on core's listener with TLS and its limits, the footage
   hooks `car_summary`, `has_can`, `delete_with`, `footage_gone`, Sentry USB
   in the days answer.)
-- the Sentry USB `record` part comes from arrivalChecksums.js, which is not
-  ported: it is the view of a car with no record yet; the transfer range for
-  conversions, `car_files` and the costly missed snapshots for archive gaps
-  wait for archiveGap's Sentry USB pass;
+- the transfer range for the converter's holdDiscovered, `car_files` and the
+  costly missed snapshots for archive gaps wait for archiveGap's Sentry USB
+  pass (the `record` part is the arrival area's);
 - recordingPlace.js (place tags from the CAN GPS) is the viewer area's; it
   can read the minute files with `format.rs`.
 

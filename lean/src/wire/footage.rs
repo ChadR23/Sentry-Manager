@@ -92,6 +92,9 @@ impl Ctx for FootageCtx {
             s.state.jobs.finish(id, Some(status), Some(detail.to_string()), result);
         }
     }
+    fn busy_paths(&self) -> std::collections::HashSet<PathBuf> {
+        self.srv().and_then(|s| s.converter().map(|c| c.busy_paths().into_iter().map(PathBuf::from).collect())).unwrap_or_default()
+    }
     fn mounter(&self) -> Option<Arc<dyn Mounter>> {
         self.mounter.get().cloned()
     }
@@ -150,6 +153,11 @@ impl Ctx for FootageCtx {
         crate::ops::power::forget(&s.state.db.conn(), vehicle_id);
         if let Some(can) = s.can() {
             can.usb.forget(vehicle_id);
+        }
+        // arrivalRef.forget and the vehicle's sentry-usb-record entry
+        if let Some(a) = s.arrival() {
+            let ctx = super::arrival::CoreArrival::new(&s);
+            crate::arrival::routes::vehicle_removed(&a.arrival, &ctx, vehicle_id);
         }
     }
     fn has_can(&self, vehicle_id: &str) -> Option<Box<dyn Fn(&Recording) -> bool>> {

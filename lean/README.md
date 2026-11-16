@@ -27,7 +27,7 @@ Bin, the footage catalog in its `catalog_*` tables), and Node's caches
 | --- | --- | --- |
 | core | `src/core/` | config, manager.db, accounts, two-step sign-in, sessions, access rules, the client address, HTTPS with its own CA and Let's Encrypt, logs, `/api/events`, jobs, the router and the request checks in Node's order (`src/core/README.md`) |
 | supervisor | `src/supervisor/` | the root supervisor (`sentry-lean-supervisor`): starts the app as PUID:PGID, SMB mounts, restarts, TLS export; the app takes its fd-3 link (`src/supervisor/README.md`) |
-| footage | `src/footage/`, `src/api.rs` | vehicles (several, folder and SMB), shares and their health, scans and the catalog, recordings and days, Recycle Bin, cleanup policies, protect, stars, footage check |
+| footage | `src/footage/`, `src/api.rs`, `src/arrival/` | vehicles (several, folder and SMB), shares and their health, scans and the catalog, recordings and days, Recycle Bin, cleanup policies, protect, stars, footage check, the Sentry USB checksum record (arrival checksums) |
 | viewer | `src/viewer/` | telemetry, the speed index, moments, scrub previews, filmstrips, places, the event map, drives and driving, archive gaps, work limits, the Studio file routes, `/api/media` |
 | ops | `src/ops/` | notifications and rules, health and the startup check, snapshots, power price and savings, image updates, metrics, the opt-in reports, system info, the server monitor (`/api/stats`: GPUs, power and RAPL, energy, data used, disks, shares, sensors, processes, alerts), the support bundle |
 | ui | `src/ui/` | every page and file as Node serves it, versioned links, the critical bar, early-data hints, interface packs, exports, settings and dashboards |
@@ -38,7 +38,7 @@ Bin, the footage catalog in its `catalog_*` tables), and Node's caches
 Not in it yet: the converter's lanes per GPU, auto convert, benchmark and
 converted index; the helper
 servers (`/api/nodes*` answer 501 "Not in this server yet.", `/node/v1/*`
-404); `POST /api/studio/trashFolder` (501); arrival checksums; CAN and
+404); `POST /api/studio/trashFolder` (501); CAN and
 Sentry USB evidence in archive gaps, drives and place tags; some stats
 parts. PORT_PLAN.md lists each.
 
