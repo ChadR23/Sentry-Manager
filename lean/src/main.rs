@@ -18,6 +18,12 @@ fn main() {
     // before any thread: as the top of server/index.js, and the supervisor's channel (fd 3)
     sentry_lean::supervisor::link::drop_malloc_arena_max();
     let fd = sentry_lean::supervisor::ipc::take_from_env();
+    // glibc keeps freed memory; hand it back
+    #[cfg(target_env = "gnu")]
+    std::thread::spawn(|| loop {
+        std::thread::sleep(Duration::from_secs(60));
+        unsafe { libc::malloc_trim(0) };
+    });
     tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("runtime").block_on(run(fd));
 }
 
