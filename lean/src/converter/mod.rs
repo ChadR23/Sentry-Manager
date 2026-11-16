@@ -11,6 +11,7 @@
 //!   encode, byte for byte as the Node code writes it.
 
 pub mod adapters;
+pub mod auto_convert;
 pub mod av1;
 pub mod contracts;
 pub mod converted_index;
