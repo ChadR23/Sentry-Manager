@@ -584,8 +584,12 @@ pub fn export_for_app(m: &TlsManager, out: &Path) -> Result<Material, String> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let material = m.ensure()?;
-    std::fs::DirBuilder::new().recursive(true).create(out).map_err(|e| e.to_string())?;
-    let _ = std::fs::set_permissions(out, std::fs::Permissions::from_mode(0o700));
+    // 0700 only when it is made here (fsp.mkdir's mode): a folder that exists
+    // keeps its mode, such as the supervisor's 0750 that lets the app's group in
+    if !out.is_dir() {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(out).map_err(|e| e.to_string())?;
+    }
     let status = serde_json::to_string(&m.status()?).unwrap_or_default();
     let mut files: Vec<(&str, Vec<u8>, u32)> = vec![("server.key", material.key.clone(), 0o600), ("server.crt", material.cert.clone(), 0o644), ("status.json", status.into_bytes(), 0o644)];
     if let Some(ca) = m.ca_pem() {

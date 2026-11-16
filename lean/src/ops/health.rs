@@ -310,13 +310,6 @@ pub fn startup_check(ctx: &dyn OpsCtx, health: &Health, notes: &Notes, snapshots
 }
 
 /// Starts the self-check a minute after the start.
-pub fn schedule_startup_check(ctx: Arc<dyn OpsCtx>, health: Arc<Health>, notes: Arc<Notes>, snapshots: Arc<Snapshots>) {
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(60));
-        startup_check(&*ctx, &health, &notes, Some(&snapshots));
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -203,10 +203,13 @@ impl Ops {
     /// the once-a-minute housekeeping (the update check, the stats' daily
     /// network reading), the RAPL keep-alive and the opt-in reports' timers.
     pub fn start(self: &Arc<Self>) {
-        health::schedule_startup_check(self.ctx.clone(), self.health.clone(), self.notes.clone(), self.snapshots.clone());
+        // One thread for both minute-after-start jobs, in Node's order: its
+        // snapshot timer is set before the startup check's, both for 60 s, so
+        // the first snapshot is always there when the check looks for it.
         let me = Arc::clone(self);
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_secs(60));
+            let mut first = true;
             loop {
                 let day = snapshots::utc_day(store::now_ms());
                 let r = me.snapshots.take(&me.ctx.db(), &day, false);
@@ -214,6 +217,10 @@ impl Ops {
                     Ok(Some(name)) => me.ctx.log("snapshots", Level::Info, &format!("Database snapshot {name} saved")),
                     Ok(None) => {}
                     Err(e) => me.ctx.log("snapshots", Level::Warn, &format!("Database snapshot failed: {e}")),
+                }
+                if first {
+                    first = false;
+                    health::startup_check(&*me.ctx, &me.health, &me.notes, Some(&me.snapshots));
                 }
                 std::thread::sleep(Duration::from_secs(3600));
             }

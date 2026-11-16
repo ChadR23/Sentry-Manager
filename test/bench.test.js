@@ -74,6 +74,10 @@ test('bench: which process is which', () => {
   assert.equal(lib.roleOf('/usr/bin/tini -- node /app/server/supervisor.js'), 'tini');
   assert.equal(lib.roleOf('/usr/local/bin/ffprobe -v error -show_streams x.mp4'), 'ffprobe');
   assert.equal(lib.roleOf('ffmpeg -i a.mp4'), 'ffmpeg');
+  assert.equal(lib.roleOf('/usr/local/bin/sentry-lean'), 'server');
+  assert.equal(lib.roleOf('/usr/local/bin/sentry-lean-supervisor'), 'supervisor');
+  assert.equal(lib.roleOf('', 'sentry-lean-sup'), 'supervisor');
+  assert.equal(lib.roleOf('/usr/bin/tini -- /usr/local/bin/sentry-lean-supervisor'), 'tini');
   assert.equal(lib.roleOf('node -e fetch()'), 'node-other');
   assert.equal(lib.roleOf('timeout 100 node server/index.js'), 'other', 'a wrapper is not the app');
   assert.equal(lib.roleOf('', 'sh'), 'other');
@@ -276,7 +280,7 @@ test('bench: report.js turns run folders into one markdown table', (t) => {
   assert.match(md, /^\| Image \| `sha256:b366c96f5caa` \| `sha256:111111111111` \|$/m);
   assert.match(md, /^\| Cache \| warm \| cold \|$/m);
   assert.match(md, /^\| Container memory, idle \(median\) \| 200\.0 MiB \| 150\.0 MiB \|$/m);
-  assert.match(md, /^\| server\/index\.js RSS, peak \| 900\.0 MiB \| 600\.0 MiB \|$/m);
+  assert.match(md, /^\| Server RSS, peak \| 900\.0 MiB \| 600\.0 MiB \|$/m);
   assert.match(md, /^\| First index complete \(scan \+ speed index\) \| 1 h 2 min \| 1 h 2 min \|$/m);
   assert.match(md, /^\| OOM kills \(cgroup\) \/ OOMKilled \| 0 \/ false \| 2 \/ true \|$/m);
   assert.match(md, /^\| footage-days \(median \/ p95\) \| 50 ms \/ 60 ms \| 50 ms \/ 60 ms \|$/m);

@@ -150,6 +150,10 @@ function roleOf(cmdline, comm = '') {
   const isNode = exe === 'node' || comm === 'node';
   if (isNode && /server\/index\.js(\s|$)/.test(cmd)) return 'server';
   if (isNode && /server\/supervisor\.js(\s|$)/.test(cmd)) return 'supervisor';
+  // the Rust server (Dockerfile): the supervisor and the app it starts
+  // (comm is cut to 15 characters: "sentry-lean-sup")
+  if (exe === 'sentry-lean-supervisor' || comm === 'sentry-lean-sup') return 'supervisor';
+  if (exe === 'sentry-lean' || comm === 'sentry-lean') return 'server';
   if (exe === 'ffprobe' || comm === 'ffprobe') return 'ffprobe';
   if (exe === 'ffmpeg' || comm === 'ffmpeg') return 'ffmpeg';
   if (exe === 'node' || comm === 'node') return 'node-other';
@@ -687,15 +691,15 @@ function markdownReport(runs) {
     line('Container memory, cgroup peak (incl. page cache)', (r) => fmtBytes(r.cgPeak)),
     line('Container memory, idle (median)', (r) => fmtBytes(r.memIdle)),
     line('Container memory, end of idle', (r) => fmtBytes(r.memIdleEnd)),
-    line('server/index.js RSS, peak', (r) => fmtBytes(r.rssPeak)),
-    line('server/index.js RSS, idle (median)', (r) => fmtBytes(r.rssIdle)),
-    line('server/index.js VmHWM (kernel peak)', (r) => fmtBytes(r.hwm)),
+    line('Server RSS, peak', (r) => fmtBytes(r.rssPeak)),
+    line('Server RSS, idle (median)', (r) => fmtBytes(r.rssIdle)),
+    line('Server VmHWM (kernel peak)', (r) => fmtBytes(r.hwm)),
     line('supervisor RSS (median)', (r) => fmtBytes(r.supervisorRss)),
     line('ffprobe children, peak RSS (sum) / most at once', (r) => `${fmtBytes(r.ffprobePeak)} / ${r.ffprobeMaxN ?? '–'}`),
     line('CPU, peak (100% = 1 core)', (r) => (r.cpuPeak === null ? '–' : `${r.cpuPeak}%`)),
     line('Disk read (cgroup io.stat)', (r) => fmtBytes(r.diskRead.cgroup)),
     line('Disk read (docker BlockIO)', (r) => fmtBytes(r.diskRead.docker)),
-    line('Disk read by server/index.js (/proc io)', (r) => fmtBytes(r.diskRead.server)),
+    line('Disk read by the server (/proc io)', (r) => fmtBytes(r.diskRead.server)),
     line('Inventory scan', (r) => fmtSeconds(r.index?.scanDoneS)),
     line('First index complete (scan + speed index)', (r) => fmtSeconds(r.index?.indexDoneS)),
     line('Clips speed-indexed', (r) => (r.index?.speedTotal ?? '–')),

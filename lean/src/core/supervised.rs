@@ -157,6 +157,12 @@ mod tests {
         assert_eq!(tls.parse_hostnames("A.lan, a.lan"), vec!["a.lan"]);
         tls.export_for_app(dir.join("app")).await.unwrap();
         use std::os::unix::fs::PermissionsExt;
+        // made here: 0700; the supervisor's folder (0750, the app's group may
+        // enter) keeps its mode on every export, as Node's mkdir does
+        assert_eq!(std::fs::metadata(dir.join("app")).unwrap().permissions().mode() & 0o777, 0o700);
+        std::fs::set_permissions(dir.join("app"), std::fs::Permissions::from_mode(0o750)).unwrap();
+        tls.export_for_app(dir.join("app")).await.unwrap();
+        assert_eq!(std::fs::metadata(dir.join("app")).unwrap().permissions().mode() & 0o777, 0o750);
         assert_eq!(std::fs::metadata(dir.join("app/server.key")).unwrap().permissions().mode() & 0o777, 0o600);
         for f in ["server.crt", "status.json", "ca.crt"] {
             assert!(dir.join("app").join(f).exists(), "{f}");
