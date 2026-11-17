@@ -1630,4 +1630,26 @@ mod tests {
         assert_eq!(res.signals["recent"], json!(true));
         assert!(res.stalled.is_null());
     }
+
+    #[test]
+    fn a_minute_listed_twice_is_read_as_node_reads_it() {
+        let now = js::utc_seconds(2026, 11, 10, 12, 0, 0) * 1000.0;
+        let day = "2026-11-10";
+        let at = |h: i64, m: i64| format!("{day}_{h:02}-{m:02}-00");
+        let arr = now - 6.0 * 3600.0 * 1000.0;
+        let cut = format!("TeslaCam/RecentClips/{}-front.mp4", at(6, 0));
+        let recent = format!("TeslaCam/RecentClips/{}-front.mp4", at(6, 30));
+        let saved = format!("TeslaCam/SavedClips/{}/{}-front.mp4", at(6, 31), at(6, 30));
+        // (server/archiveGap.js answers 1 and 29: the copy listed last is the one it reads)
+        for (order, minutes) in [([&recent, &saved], 1), ([&saved, &recent], 29)] {
+            let list: Vec<(&str, &str, f64)> = [&cut].into_iter().chain(order).map(|r| (r.as_str(), "front", arr)).collect();
+            let mut speeds = HashMap::new();
+            speeds.insert(cut.clone(), vec![json!(20); 60]);
+            speeds.insert(recent.clone(), vec![json!(20); 60]);
+            speeds.insert(saved.clone(), [vec![json!(0); 3], vec![json!(20); 57]].concat());
+            let res = analyze(&files(&list), &Input { now_ms: now, tz: "UTC", speeds, ..Default::default() });
+            assert_eq!(res.days[day]["cutoffs"][0]["minutes"], json!(minutes), "{order:?}");
+            assert_eq!(res.days[day]["missingMinutes"], json!(minutes));
+        }
+    }
 }

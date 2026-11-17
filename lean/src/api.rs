@@ -269,7 +269,7 @@ fn recording(app: &App, v: &Vehicle, rid: &str) -> Res {
         .map(|(rel, size)| {
             let mut f = json!({ "rel": rel, "path": join(&v.root, rel), "size": size });
             if rel.to_lowercase().ends_with(".mp4") {
-                f["codec"] = json!(st.codecs.get(rel).cloned().flatten());
+                f["codec"] = json!(st.codecs.get(rel).flatten());
             }
             f
         })

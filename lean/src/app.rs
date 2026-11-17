@@ -4,12 +4,12 @@
 use crate::catalog::Catalog;
 use crate::inventory::{self, Codecs, Recording};
 use crate::jobs::{par_each, Jobs, Priority};
-use crate::scanner::{self, FileEntry};
+use crate::scanner::{self, FileEntry, FileList};
 use crate::thumbnails::Thumbnails;
 use crate::footage::ctx::{Ctx, Fail, Level, Res};
 use crate::footage::vehicles::Vehicles;
 use crate::{footage, mp4};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
@@ -43,7 +43,7 @@ pub struct VehicleState {
     pub light_scans: u32,
     pub error_count: usize,
     /// every file of the last scan, in the scan's order (inventory.js entry.files)
-    pub file_list: Arc<Vec<FileEntry>>,
+    pub file_list: Arc<FileList>,
     pub dirs: Arc<HashMap<String, f64>>,
     pub started_at: f64,
 }
@@ -203,7 +203,7 @@ impl App {
         let mut lights = prev.light_scans;
         let mut resumed = false;
         let previous = if light && prev.scanned && lights < LIGHT_SCANS {
-            Some(scanner::Previous { files: prev.file_list.iter().map(|f| (f.rel.clone(), f.clone())).collect(), dirs: (*prev.dirs).clone(), started_ms: None })
+            Some(scanner::Previous { files: prev.file_list.clone(), dirs: (*prev.dirs).clone(), started_ms: None })
         } else if light && !prev.scanned {
             let p = self.catalog.resume(vid, &root).unwrap_or_else(|e| {
                 self.core.log("inventory", Level::Warn, &format!("Footage catalog not read: {e}"));
@@ -225,10 +225,10 @@ impl App {
         if let Err(e) = self.catalog.save_scan(vid, &root, &res) {
             self.core.log("inventory", Level::Warn, &format!("Footage catalog not updated: {e}"));
         }
-        let codecs = self.codec_map(vid);
         self.core.log("inventory", Level::Info, &format!("{}: {} recordings, {} files ({:.1}s{})", v.name, recs.len(), res.files.len(), res.duration_ms / 1000.0,
             if reuse { format!(", {} unchanged{}", res.reused, if resumed { " since the last run" } else { "" }) } else { String::new() }));
-        let files = Arc::new(res.files);
+        let files = Arc::new(FileList::from(res.files));
+        let codecs = self.codec_map(vid, &files);
         let entry = VehicleState {
             recordings: Arc::new(recs),
             generation: next_generation(),
@@ -248,7 +248,7 @@ impl App {
         lock.done.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let app = self.clone();
         let id = vid.to_string();
-        self.jobs.submit(format!("codecs:{vid}"), Priority::Normal, move || app.probe_codecs(&id, &files));
+        self.jobs.submit(format!("codecs:{vid}"), Priority::Normal, move || app.probe_codecs(&id));
         footage::integrity::resume(self, vid);
         Ok(entry)
     }
@@ -260,8 +260,9 @@ impl App {
         let mut st = self.state.write().unwrap();
         let Some(e) = st.get_mut(vid).filter(|e| e.scanned) else { return };
         if let Some(f) = files {
-            e.file_list = Arc::new(f);
+            e.file_list = Arc::new(FileList::from(f));
             e.files = e.file_list.len();
+            e.codecs = Arc::new(e.codecs.remap(e.file_list.clone()));
         }
         let mut recs = inventory::build_recordings(&e.file_list, vid);
         inventory::mark_protected(&mut recs, &protected);
@@ -274,34 +275,56 @@ impl App {
         }
     }
 
-    fn codec_map(&self, vid: &str) -> Codecs {
-        self.catalog.codecs(vid).map(|m| m.into_iter().map(|(rel, (_, _, c))| (rel, c)).collect()).unwrap_or_default()
+    fn codec_map(&self, vid: &str, list: &Arc<FileList>) -> Codecs {
+        Codecs::new(list.clone(), self.catalog.codecs(vid).map(|m| m.into_iter().map(|(rel, (_, _, c))| (rel, c)).collect::<Vec<_>>()).unwrap_or_default())
     }
 
     /// Read the codec of every clip that is new or changed since it was last read; forget clips that are gone.
-    fn probe_codecs(self: &Arc<Self>, vid: &str, files: &[FileEntry]) {
+    /// Works on the newest file list, again if a scan replaces it meanwhile, and leaves its codecs as saved.
+    fn probe_codecs(self: &Arc<Self>, vid: &str) {
         let Some(v) = self.vehicle(vid) else { return };
-        let known = self.catalog.codecs(vid).unwrap_or_default();
-        let present: HashSet<&str> = files.iter().map(|f| f.rel.as_str()).collect();
-        let gone: Vec<String> = known.keys().filter(|r| !present.contains(r.as_str())).cloned().collect();
-        let todo: Vec<&FileEntry> = files
-            .iter()
-            .filter(|f| f.kind == footage::Kind::Clip && f.rel.to_lowercase().ends_with(".mp4"))
-            .filter(|f| known.get(&f.rel).map_or(true, |(s, m, _)| *s != f.size || *m != f.mtime_ms))
-            .collect();
-        let read = par_each(&todo, PROBE_THREADS, |f| mp4::video_codec(&v.root.join(&f.rel)).ok().map(|c| (f.rel.clone(), f.size, f.mtime_ms, c)));
-        let set: Vec<_> = read.into_iter().flatten().collect();
-        if !set.is_empty() || !gone.is_empty() {
-            if let Err(e) = self.catalog.update_codecs(vid, &set, &gone) {
-                eprintln!("{}: saving clip codecs failed: {e}", v.name);
+        let mut read_any = false;
+        for _ in 0..4 {
+            let list = self.state.read().unwrap().get(vid).map(|e| e.file_list.clone());
+            let Some(list) = list else { return };
+            let known = self.catalog.codecs(vid).unwrap_or_default();
+            let gone: Vec<String> = known.keys().filter(|r| !list.contains_key(r)).cloned().collect();
+            let todo: Vec<&FileEntry> = list
+                .iter()
+                .filter(|f| f.kind == footage::Kind::Clip && f.rel.to_lowercase().ends_with(".mp4"))
+                .filter(|f| known.get(&f.rel).is_none_or(|(s, m, _)| *s != f.size || *m != f.mtime_ms))
+                .collect();
+            let read = par_each(&todo, PROBE_THREADS, |f| mp4::video_codec(&v.root.join(&f.rel)).ok().map(|c| (f.rel.clone(), f.size, f.mtime_ms, c)));
+            let set: Vec<_> = read.into_iter().flatten().collect();
+            let (codecs, known) = if set.is_empty() && gone.is_empty() {
+                (Codecs::new(list.clone(), known.into_iter().map(|(rel, (_, _, c))| (rel, c))), None)
+            } else {
+                if let Err(e) = self.catalog.update_codecs(vid, &set, &gone) {
+                    eprintln!("{}: saving clip codecs failed: {e}", v.name);
+                }
+                read_any |= !set.is_empty();
+                (self.codec_map(vid, &list), Some(known))
+            };
+            // a newer list: the rows forgotten for this one that it still holds come back first
+            let back: Option<Vec<_>> = match self.state.write().unwrap().get_mut(vid) {
+                Some(e) if !Arc::ptr_eq(&e.file_list, &list) => Some(
+                    known.map_or_else(Vec::new, |k| gone.iter().filter(|r| e.file_list.contains_key(r)).filter_map(|r| k.get(r).map(|(s, m, c)| (r.clone(), *s, *m, c.clone()))).collect()),
+                ),
+                Some(e) => {
+                    e.codecs = Arc::new(codecs);
+                    None
+                }
+                None => None,
+            };
+            let Some(back) = back else { break };
+            if !back.is_empty() {
+                if let Err(e) = self.catalog.update_codecs(vid, &back, &[]) {
+                    eprintln!("{}: saving clip codecs failed: {e}", v.name);
+                }
             }
-            let codecs = self.codec_map(vid);
-            if let Some(e) = self.state.write().unwrap().get_mut(vid) {
-                e.codecs = Arc::new(codecs);
-            }
-            if !set.is_empty() {
-                self.core.announce("inventory");
-            }
+        }
+        if read_any {
+            self.core.announce("inventory");
         }
         // (the speed index is the viewer area's: speeds in the Node server's day files)
     }

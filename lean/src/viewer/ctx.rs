@@ -3,9 +3,7 @@
 //! areas are merged. Until then `glue.rs` implements it on today's `App`.
 
 use crate::inventory::Recording;
-use crate::scanner::FileEntry;
 use serde_json::Value;
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -18,8 +16,8 @@ pub struct VehicleRef {
     pub root: PathBuf,
 }
 
-/// The scan's files of a vehicle, by rel (inventory.get(id).files).
-pub type Files = Arc<HashMap<String, FileEntry>>;
+/// The scan's files of a vehicle, by rel (inventory.get(id).files): the scan's own list.
+pub type Files = Arc<crate::scanner::FileList>;
 
 pub trait Ctx: Send + Sync + 'static {
     /// DATA_PATH
@@ -118,3 +116,4 @@ pub trait Ctx: Send + Sync + 'static {
         Some(std::env::var("FFPROBE_PATH").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "ffprobe".into()))
     }
 }
+

@@ -22,7 +22,7 @@ use crate::footage::{self, Class};
 use std::collections::{HashMap, VecDeque};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const RECENT_MS: f64 = 2.0 * 3600.0 * 1000.0;
@@ -43,9 +43,116 @@ pub struct FileEntry {
     pub event_id: Option<String>,
 }
 
+/// A scan's files with an index by rel (open addressing over their positions), so they are
+/// looked up by rel without a second copy. One file per rel, the last listed, as a map built
+/// from the list keeps.
+#[derive(Default)]
+pub struct FileList {
+    files: Vec<FileEntry>,
+    slots: Vec<u32>,
+}
+
+const EMPTY: u32 = u32::MAX;
+
+fn hash_rel(rel: &str) -> usize {
+    let mut h: u64 = 0;
+    let (chunks, rest) = rel.as_bytes().as_chunks::<8>();
+    for c in chunks {
+        h = (h.rotate_left(5) ^ u64::from_le_bytes(*c)).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+    for &b in rest {
+        h = (h.rotate_left(5) ^ b as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+    (h ^ (h >> 29)) as usize
+}
+
+impl From<Vec<FileEntry>> for FileList {
+    fn from(mut files: Vec<FileEntry>) -> FileList {
+        files.shrink_to_fit();
+        let mask = (files.len() * 2).next_power_of_two().max(2) - 1;
+        let mut slots = vec![EMPTY; mask + 1];
+        let mut repeated = false;
+        'files: for (i, f) in files.iter().enumerate() {
+            let mut at = hash_rel(&f.rel) & mask;
+            while slots[at] != EMPTY {
+                if files[slots[at] as usize].rel == f.rel {
+                    repeated = true;
+                    break 'files;
+                }
+                at = (at + 1) & mask;
+            }
+            slots[at] = i as u32;
+        }
+        if repeated {
+            return FileList::from(once_each(files));
+        }
+        FileList { files, slots }
+    }
+}
+
+/// a rel listed again takes the place of the first (as a map's set does)
+fn once_each(files: Vec<FileEntry>) -> Vec<FileEntry> {
+    let mut at: HashMap<String, usize> = HashMap::new();
+    let mut out: Vec<FileEntry> = Vec::with_capacity(files.len());
+    for f in files {
+        match at.get(&f.rel) {
+            Some(&i) => out[i] = f,
+            None => {
+                at.insert(f.rel.clone(), out.len());
+                out.push(f);
+            }
+        }
+    }
+    out
+}
+
+/// keyed entries in the order given, the key being the rel (as tests build them)
+impl FromIterator<(String, FileEntry)> for FileList {
+    fn from_iter<I: IntoIterator<Item = (String, FileEntry)>>(it: I) -> FileList {
+        FileList::from(it.into_iter().map(|(rel, f)| FileEntry { rel, ..f }).collect::<Vec<_>>())
+    }
+}
+
+impl std::ops::Deref for FileList {
+    type Target = [FileEntry];
+    fn deref(&self) -> &[FileEntry] {
+        &self.files
+    }
+}
+
+impl FileList {
+    pub fn position(&self, rel: &str) -> Option<usize> {
+        if self.files.is_empty() {
+            return None;
+        }
+        let mask = self.slots.len() - 1;
+        let mut at = hash_rel(rel) & mask;
+        loop {
+            match self.slots[at] {
+                EMPTY => return None,
+                i if self.files[i as usize].rel == rel => return Some(i as usize),
+                _ => at = (at + 1) & mask,
+            }
+        }
+    }
+
+    pub fn get(&self, rel: &str) -> Option<&FileEntry> {
+        self.position(rel).map(|i| &self.files[i])
+    }
+
+    pub fn contains_key(&self, rel: &str) -> bool {
+        self.position(rel).is_some()
+    }
+
+    /// in list order
+    pub fn values(&self) -> std::slice::Iter<'_, FileEntry> {
+        self.files.iter()
+    }
+}
+
 #[derive(Default)]
 pub struct Previous {
-    pub files: HashMap<String, FileEntry>,
+    pub files: Arc<FileList>,
     pub dirs: HashMap<String, f64>,
     /// when the scan these come from started (scanner.js previous.startedMs)
     pub started_ms: Option<f64>,
@@ -257,6 +364,30 @@ fn node_order(mut files: Vec<FileEntry>, tree: &mut HashMap<String, Vec<Child>>)
 mod tests {
     use super::*;
 
+    fn file(rel: &str, size: u64) -> FileEntry {
+        FileEntry { rel: rel.into(), size, mtime_ms: 1.0, ctime_ms: 1.0, birthtime_ms: 0.0, kind: footage::Kind::Clip, typ: "RecentClips", day: "2026-11-16".into(), camera: None, event_id: None }
+    }
+
+    #[test]
+    fn a_file_list_answers_as_a_map_of_it_does() {
+        let list = vec![file("b/2.mp4", 2), file("a/1.mp4", 1), file("c/3.mp4", 3), file("a/1.mp4", 4), file("B/0.mp4", 5)];
+        let fl = FileList::from(list.clone());
+        assert_eq!(fl.iter().map(|f| (f.rel.as_str(), f.size)).collect::<Vec<_>>(), [("b/2.mp4", 2), ("a/1.mp4", 4), ("c/3.mp4", 3), ("B/0.mp4", 5)], "a rel listed again: its last entry, at its first place (a JS Map's set)");
+        assert_eq!(fl.values().count(), fl.len());
+        for (i, f) in fl.iter().enumerate() {
+            assert_eq!(fl.position(&f.rel), Some(i));
+            assert!(fl.contains_key(&f.rel) && fl.get(&f.rel).is_some_and(|x| x.size == f.size));
+        }
+        let many: Vec<FileEntry> = (0..5000).map(|i| file(&format!("RecentClips/2026-11-{:02}/2026-11-{:02}_10-{:02}-{:02}-front.mp4", i % 28 + 1, i % 28 + 1, i / 60 % 60, i % 60), i)).collect();
+        let big = FileList::from(many.clone());
+        assert!(many.iter().enumerate().all(|(i, f)| big.position(&f.rel) == Some(i)));
+        assert!(big.get("RecentClips/2026-11-01/nope.mp4").is_none());
+        assert!(fl.get("a/0.mp4").is_none() && !fl.contains_key("z") && fl.get("").is_none());
+        let from: FileList = list.iter().map(|f| (f.rel.clone(), f.clone())).collect();
+        assert_eq!(from.iter().map(|f| f.size).collect::<Vec<_>>(), [2, 4, 3, 5], "pairs keep the order given");
+        assert!(FileList::default().is_empty());
+    }
+
     #[test]
     fn files_come_in_node_order() {
         let root = std::env::temp_dir().join(format!("lean-scan-order-{}", std::process::id()));
@@ -283,7 +414,7 @@ mod tests {
         assert_eq!(order(&first), want);
         // a light rescan: files kept from the last scan come when their folder is listed
         let prev = Previous {
-            files: first.files.iter().map(|f| (f.rel.clone(), FileEntry { mtime_ms: 0.0, ..f.clone() })).collect(),
+            files: Arc::new(first.files.iter().map(|f| FileEntry { mtime_ms: 0.0, ..f.clone() }).collect::<Vec<_>>().into()),
             dirs: first.dirs.clone(),
             started_ms: None,
         };

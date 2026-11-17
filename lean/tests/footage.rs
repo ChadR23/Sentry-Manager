@@ -479,3 +479,86 @@ fn vehicles_routes_answer_as_node() {
     assert!(call(&f, "GET", "vehicles", json!(null)).unwrap()["vehicles"].as_array().unwrap().is_empty());
     assert!(f.root.join(A).exists(), "its footage is untouched");
 }
+
+#[test]
+fn a_codec_probe_waiting_through_a_newer_scan_works_on_the_newer_list() {
+    use sentry_lean::jobs::Priority;
+    use std::sync::Condvar;
+    let a = "TeslaCam/RecentClips/2026-11-10_06-00-00-front.mp4";
+    let b = "TeslaCam/RecentClips/2026-11-10_06-01-00-front.mp4";
+    let f = fixture("codec-probe", &[(a, b"x")]);
+    wait(|| !f.app.jobs.busy("codecs:car"));
+    // b's codec saved earlier (b was there, went, and comes back unchanged)
+    let when = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    f.app.catalog.update_codecs("car", &[(b.to_string(), 1, 1_700_000_000_000.0, Some("h265".into()))], &[]).unwrap();
+    // every job worker held, so the probe queued after the next scan waits
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    for i in 0..8 {
+        let g = gate.clone();
+        f.app.jobs.submit(format!("hold:{i}"), Priority::High, move || {
+            let (open, cv) = &*g;
+            let mut o = open.lock().unwrap();
+            while !*o {
+                o = cv.wait(o).unwrap();
+            }
+        });
+    }
+    f.app.scan_now("car", false).unwrap();
+    assert!(f.app.jobs.busy("codecs:car"));
+    write(&f.root, b, b"x");
+    std::fs::File::options().write(true).open(f.root.join(b)).unwrap().set_modified(when).unwrap();
+    f.app.scan_now("car", false).unwrap();
+    {
+        let (open, cv) = &*gate;
+        *open.lock().unwrap() = true;
+        cv.notify_all();
+    }
+    wait(|| (0..8).all(|i| !f.app.jobs.busy(&format!("hold:{i}"))) && !f.app.jobs.busy("codecs:car"));
+    assert!(f.app.catalog.codec("car", b).unwrap().is_some(), "the newer list's clip kept its saved codec");
+    assert_eq!(f.app.state_of("car").unwrap().codecs.get(b), Some(Some("h265")));
+}
+
+#[test]
+fn a_codec_row_forgotten_for_an_older_list_comes_back_when_the_newer_list_holds_the_clip() {
+    use sentry_lean::jobs::Priority;
+    use sentry_lean::scanner::FileEntry;
+    use std::sync::Condvar;
+    let a = "TeslaCam/RecentClips/2026-11-10_06-00-00-front.mp4";
+    let b = "TeslaCam/RecentClips/2026-11-10_06-01-00-front.mp4";
+    let f = fixture("codec-forget", &[(a, b"x")]);
+    wait(|| !f.app.jobs.busy("codecs:car"));
+    f.app.catalog.update_codecs("car", &[(b.to_string(), 1, 1_700_000_000_000.0, Some("h265".into()))], &[]).unwrap();
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    for i in 0..8 {
+        let g = gate.clone();
+        f.app.jobs.submit(format!("hold:{i}"), Priority::High, move || {
+            let (open, cv) = &*g;
+            let mut o = open.lock().unwrap();
+            while !*o {
+                o = cv.wait(o).unwrap();
+            }
+        });
+    }
+    f.app.scan_now("car", false).unwrap();
+    // the catalog held, so the probe (b gone from its list) stops at forgetting b
+    let db = rusqlite::Connection::open(f.dir.join("data/lean-catalog.sqlite")).unwrap();
+    db.execute_batch("BEGIN IMMEDIATE").unwrap();
+    {
+        let (open, cv) = &*gate;
+        *open.lock().unwrap() = true;
+        cv.notify_all();
+    }
+    std::thread::sleep(Duration::from_millis(800));
+    // meanwhile a newer list with b (as the Recycle Bin's restore leaves it) is put in place
+    let mut files: Vec<FileEntry> = f.app.state_of("car").unwrap().file_list.to_vec();
+    let c = sentry_lean::footage::classify(b).unwrap();
+    files.push(FileEntry { rel: b.into(), size: 1, mtime_ms: 1_700_000_000_000.0, ctime_ms: 0.0, birthtime_ms: 0.0, kind: c.kind, typ: c.typ, day: "2026-11-10".into(), camera: c.camera, event_id: c.event_id });
+    let app = f.app.clone();
+    let rebuild = std::thread::spawn(move || app.rebuild("car", Some(files)));
+    wait(|| f.app.state_of("car").unwrap().file_list.contains_key(b));
+    db.execute_batch("COMMIT").unwrap();
+    rebuild.join().unwrap();
+    wait(|| (0..8).all(|i| !f.app.jobs.busy(&format!("hold:{i}"))) && !f.app.jobs.busy("codecs:car"));
+    assert!(f.app.catalog.codec("car", b).unwrap().is_some(), "b's saved codec is back");
+    assert_eq!(f.app.state_of("car").unwrap().codecs.get(b), Some(Some("h265")));
+}

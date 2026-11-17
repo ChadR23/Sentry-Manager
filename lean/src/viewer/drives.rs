@@ -27,28 +27,33 @@ pub struct Clip {
 
 /// clipsOf: one per minute, oldest first, events left out.
 pub fn clips_of(recordings: &[Recording]) -> Vec<Clip> {
-    let mut order: Vec<String> = Vec::new();
-    let mut by: std::collections::HashMap<String, Clip> = std::collections::HashMap::new();
+    let mut out: Vec<Clip> = Vec::new();
+    let mut at: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for rec in recordings {
         if rec.event_id.is_some() || rec.typ == "SentryClips" || rec.typ == "SavedClips" {
             continue;
         }
         for rel in &rec.clip_rels {
             let name = rel.rsplit('/').next().unwrap_or(rel);
-            let Some((key, t)) = js::stamp_in(name) else { continue };
-            let c = by.entry(key.clone()).or_insert_with(|| {
-                order.push(key.clone());
-                Clip { key: key.clone(), t, day: key[..10].to_string(), rel: rel.clone(), front: false, rec_id: rec.id.clone(), rec_day: rec.day.clone() }
-            });
-            if !c.front && name.to_lowercase().ends_with("-front.mp4") {
-                c.rel = rel.clone();
-                c.front = true;
-                c.rec_id = rec.id.clone();
-                c.rec_day = rec.day.clone();
+            let Some(i) = js::stamp_at(name) else { continue };
+            let key = &name[i..i + 19];
+            let front = name.len() >= 10 && name.as_bytes()[name.len() - 10..].eq_ignore_ascii_case(b"-front.mp4");
+            match at.get(key) {
+                None => {
+                    at.insert(key, out.len());
+                    out.push(Clip { key: key.to_string(), t: js::stamp_seconds(key), day: key[..10].to_string(), rel: rel.clone(), front, rec_id: rec.id.clone(), rec_day: rec.day.clone() });
+                }
+                Some(&j) if front && !out[j].front => {
+                    let c = &mut out[j];
+                    c.rel = rel.clone();
+                    c.front = true;
+                    c.rec_id = rec.id.clone();
+                    c.rec_day = rec.day.clone();
+                }
+                Some(_) => {}
             }
         }
     }
-    let mut out: Vec<Clip> = order.into_iter().map(|k| by.remove(&k).unwrap()).collect();
     out.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap());
     out
 }
@@ -240,6 +245,22 @@ mod tests {
         // a gap of exactly the limit does not split (08:03 end to 08:08 start is 5 min)
         let r = recs(&[("RecentClips", &stamp(d, 8, 0)), ("RecentClips", &stamp(d, 8, 6))]);
         assert_eq!(group(&clips_of(&r), &mut |_| None, DEFAULT_GAP_S, 50, None).0.len(), 1);
+    }
+
+    #[test]
+    fn one_clip_a_minute_its_front_where_there_is_one() {
+        let d = "2026-03-01";
+        let mut files: Vec<FileEntry> = Vec::new();
+        for (m, cam) in [(1, "back"), (1, "front"), (0, "left_repeater"), (2, "FRONT"), (2, "back")] {
+            let rel = format!("TeslaCam/RecentClips/{}-{cam}.mp4", stamp(d, 8, m));
+            let c = crate::footage::classify(&rel).unwrap();
+            files.push(FileEntry { rel, size: 10, mtime_ms: 0.0, ctime_ms: 0.0, birthtime_ms: 0.0, kind: c.kind, typ: c.typ, day: d.into(), camera: c.camera, event_id: c.event_id });
+        }
+        let clips = clips_of(&crate::inventory::build_recordings(&files, "v1"));
+        let got: Vec<(&str, f64, bool, &str)> = clips.iter().map(|c| (c.key.as_str(), c.t, c.front, c.rel.rsplit('/').next().unwrap())).collect();
+        let t = |m: i64| js::utc_seconds(2026, 3, 1, 8, m, 0);
+        assert_eq!(got, [("2026-03-01_08-00-00", t(0), false, "2026-03-01_08-00-00-left_repeater.mp4"), ("2026-03-01_08-01-00", t(1), true, "2026-03-01_08-01-00-front.mp4"), ("2026-03-01_08-02-00", t(2), true, "2026-03-01_08-02-00-FRONT.mp4")]);
+        assert!(clips.iter().all(|c| c.day == d));
     }
 
     #[test]

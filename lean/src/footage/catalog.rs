@@ -14,7 +14,7 @@ use crate::scanner::{FileEntry, Previous, ScanResult};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 pub struct Catalog {
     db: Mutex<Connection>,
@@ -147,10 +147,7 @@ impl Catalog {
                 event_id: r.get(8)?,
             })
         })?;
-        for f in rows {
-            let f = f?;
-            prev.files.insert(f.rel.clone(), f);
-        }
+        prev.files = Arc::new(rows.collect::<rusqlite::Result<Vec<_>>>()?.into());
         let mut q = c.prepare("SELECT rel, mtime_ms FROM catalog_dirs WHERE vehicle_id = ?1")?;
         for d in q.query_map([vehicle], |r| Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?)))? {
             let (rel, m) = d?;
@@ -184,7 +181,7 @@ impl Catalog {
         self.invalidate(vehicle)?;
         let known = self.previous(vehicle)?;
         let present: HashSet<&str> = scan.files.iter().map(|f| f.rel.as_str()).collect();
-        let gone: Vec<String> = known.files.keys().filter(|r| !present.contains(r.as_str())).cloned().collect();
+        let gone: Vec<String> = known.files.values().map(|f| &f.rel).filter(|r| !present.contains(r.as_str())).cloned().collect();
         let changed: Vec<&FileEntry> = scan.files.iter().filter(|f| known.files.get(&f.rel).is_none_or(|k| !same_entry(k, f))).collect();
         self.remove_files(vehicle, &gone)?;
         self.put_files(vehicle, &changed)?;

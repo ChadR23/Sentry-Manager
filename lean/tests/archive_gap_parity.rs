@@ -9,8 +9,9 @@
 
 use sentry_lean::can::sentry_usb::{CarClip, CarFiles};
 use sentry_lean::footage::Kind;
-use sentry_lean::scanner::FileEntry;
+use sentry_lean::scanner::{FileEntry, FileList};
 use sentry_lean::viewer::archive_gap::{analyze, CarFilesIn, Input, Pi, Snaps};
+use sentry_lean::viewer::ctx::Files;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -33,25 +34,22 @@ fn opt(v: &Value) -> Option<f64> {
     v.as_f64()
 }
 
-fn input_of(i: &Value) -> (Arc<HashMap<String, FileEntry>>, Input<'static>) {
-    let mut files = HashMap::new();
+fn input_of(i: &Value) -> (Files, Input<'static>) {
+    let mut files = Vec::new();
     for x in i["files"].as_array().unwrap() {
         let rel = x["rel"].as_str().unwrap().to_string();
-        files.insert(
-            rel.clone(),
-            FileEntry {
-                rel,
-                size: x["size"].as_f64().unwrap_or(0.0) as u64,
-                mtime_ms: f(&x["mtimeMs"]),
-                ctime_ms: f(&x["ctimeMs"]),
-                birthtime_ms: f(&x["birthtimeMs"]),
-                kind: if x["kind"] == json!("clip") { Kind::Clip } else { Kind::Asset },
-                typ: leak(x["type"].as_str().unwrap_or("")),
-                day: x["day"].as_str().unwrap_or("").to_string(),
-                camera: x["camera"].as_str().map(String::from),
-                event_id: None,
-            },
-        );
+        files.push(FileEntry {
+            rel,
+            size: x["size"].as_f64().unwrap_or(0.0) as u64,
+            mtime_ms: f(&x["mtimeMs"]),
+            ctime_ms: f(&x["ctimeMs"]),
+            birthtime_ms: f(&x["birthtimeMs"]),
+            kind: if x["kind"] == json!("clip") { Kind::Clip } else { Kind::Asset },
+            typ: leak(x["type"].as_str().unwrap_or("")),
+            day: x["day"].as_str().unwrap_or("").to_string(),
+            camera: x["camera"].as_str().map(String::from),
+            event_id: None,
+        });
     }
     let nums = |v: &Value| v.as_array().map(|a| a.iter().map(f).collect::<Vec<f64>>());
     let strings = |v: &Value| v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect::<Vec<String>>());
@@ -94,7 +92,7 @@ fn input_of(i: &Value) -> (Arc<HashMap<String, FileEntry>>, Input<'static>) {
         binned: strings(&i["binned"]),
         deleted: strings(&i["deleted"]),
     };
-    (Arc::new(files), input)
+    (Arc::new(FileList::from(files)), input)
 }
 
 #[test]
