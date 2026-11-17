@@ -151,6 +151,132 @@ fn device_index(d: &Device) -> Result<String, String> {
     }
 }
 
+/// above any CPU number a kernel gives (Node and Rust then count the same)
+const CPU_ID_LIMIT: u64 = 1 << 22;
+
+/// String.prototype.trim
+fn js_trim(s: &str) -> &str {
+    s.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}')
+}
+
+/// "0-3,8,10-11" -> 7; 0 when it is not a CPU list (cpuListCount)
+pub fn cpu_list_count(list: &str) -> usize {
+    let num = |t: &str| if !t.is_empty() && t.bytes().all(|c| c.is_ascii_digit()) { Some(t.parse::<u64>().unwrap_or(u64::MAX)) } else { None };
+    let mut n = 0u64;
+    for part in list.split(',') {
+        let part = js_trim(part);
+        let (lo, hi) = match part.split_once('-') {
+            Some((a, b)) => match (num(a), num(b)) {
+                (Some(a), Some(b)) => (a, b),
+                _ => return 0,
+            },
+            None => match num(part) {
+                Some(a) => (a, a),
+                None => return 0,
+            },
+        };
+        if hi < lo || hi >= CPU_ID_LIMIT {
+            return 0;
+        }
+        n += hi - lo + 1;
+    }
+    n as usize
+}
+
+/// This process's path in one cgroup hierarchy (/proc/self/cgroup lines are
+/// "id:controllers:path"), "" when it is not listed (cgroupPath)
+fn cgroup_path<'a>(file: &'a str, wanted: impl Fn(&str, &str) -> bool) -> &'a str {
+    for raw in file.split('\n') {
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        let Some(a) = line.find(':') else { continue };
+        let Some(b) = line[a + 1..].find(':').map(|i| a + 1 + i) else { continue };
+        let path = &line[b + 1..];
+        if path.starts_with('/') && wanted(&line[..a], &line[a + 1..b]) {
+            return path;
+        }
+    }
+    ""
+}
+
+/// root, then each folder down to this process's cgroup under it (cgroupDirs)
+fn cgroup_dirs(root: &str, path: &str) -> Vec<String> {
+    let mut dirs = vec![root.to_string()];
+    let mut dir = root.to_string();
+    for part in path.split('/').filter(|p| !p.is_empty()) {
+        dir = format!("{dir}/{part}");
+        dirs.push(dir.clone());
+    }
+    dirs
+}
+
+/// The smallest CPU limit (compose cpus: 2.5 -> 2.5) of this process's cgroup
+/// and every cgroup above it that it can see, or None: cgroup v2 cpu.max, v1
+/// cfs quota (cgroupCpuLimit; work_limits::cgroup_cpus reads only this one and the root)
+pub fn cgroup_cpu_limit(read: &dyn Fn(&str) -> String) -> Option<f64> {
+    use crate::viewer::js::number_str;
+    let file = read("/proc/self/cgroup");
+    let mut found = Vec::new();
+    for d in cgroup_dirs("/sys/fs/cgroup", cgroup_path(&file, |id, controllers| id == "0" && controllers.is_empty())) {
+        let v = read(&format!("{d}/cpu.max"));
+        let mut parts = js_trim(&v).split_whitespace();
+        let (q, p) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+        if !q.is_empty() && q != "max" && number_str(q) > 0.0 && number_str(p) > 0.0 {
+            found.push(number_str(q) / number_str(p));
+        }
+    }
+    let v1 = cgroup_path(&file, |id, controllers| id != "0" && controllers.split(',').any(|c| c == "cpu"));
+    for root in ["/sys/fs/cgroup/cpu", "/sys/fs/cgroup/cpu,cpuacct"] {
+        for d in cgroup_dirs(root, v1) {
+            let num = |f: &str| {
+                let v = read(&format!("{d}/{f}"));
+                let v = js_trim(&v);
+                if v.is_empty() { f64::NAN } else { number_str(v) }
+            };
+            let (q, p) = (num("cpu.cfs_quota_us"), num("cpu.cfs_period_us"));
+            if q > 0.0 && p > 0.0 {
+                found.push(q / p);
+            }
+        }
+    }
+    found.into_iter().filter(|n| n.is_finite() && *n < 9_007_199_254_740_992.0).reduce(f64::min)
+}
+
+/// Cpus_allowed_list in /proc/self/status: the CPUs this process may run on (allowedCpus)
+fn allowed_cpus(status: &str) -> usize {
+    for line in status.split('\n') {
+        let Some(list) = line.strip_prefix("Cpus_allowed_list:") else { continue };
+        let list = js_trim(list);
+        return if !list.is_empty() && !list.contains(char::is_whitespace) { cpu_list_count(list) } else { 0 };
+    }
+    0
+}
+
+/// The CPUs this process may use: its CPU affinity (a cpuset) and its
+/// cgroup CPU limit rounded up, whichever is smaller; 0 when unknown (usableCpus)
+pub fn usable_cpus(read: &dyn Fn(&str) -> String) -> usize {
+    let allowed = allowed_cpus(&read("/proc/self/status"));
+    match cgroup_cpu_limit(read) {
+        None => allowed,
+        Some(limit) => {
+            let capped = (limit.ceil() as usize).max(1);
+            if allowed > 0 { allowed.min(capped) } else { capped }
+        }
+    }
+}
+
+fn read_trimmed(p: &str) -> String {
+    std::fs::read_to_string(p).map(|s| s.trim().to_string()).unwrap_or_default()
+}
+
+/// libx265 sizes its thread pool with libnuma (defaultX265Pools). Docker's
+/// default seccomp profile blocks the calls libnuma makes (unless the
+/// container has SYS_NICE), so x265 finds no CPUs and encodes without a pool,
+/// about 3x slower. On Linux the pool is given: one thread per CPU this
+/// process may use. 0: x265's own choice.
+pub fn default_x265_pools(platform: &str, cpus: usize) -> usize {
+    if platform == "linux" { cpus } else { 0 }
+}
+
 /// The Smallest (CPU only) profile: libx265 veryfast at CRF 27 with B-frames,
 /// peaks capped at maxrate bit/s (None: no cap)
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -174,6 +300,8 @@ pub struct EncodeArgs<'a> {
     /// a clip given back the original's own timing (lead-in frames or
     /// samples no decoder outputs) is encoded without reordering
     pub keep_order: bool,
+    /// libx265's thread pool size (None: this machine's, default_x265_pools)
+    pub x265_pools: Option<usize>,
 }
 
 /// buildEncodeArgs (cpuPreset defaults to CPU_ENCODER_PRESET, as in Node)
@@ -263,6 +391,10 @@ pub fn build_encode_args(a: &EncodeArgs) -> Result<Vec<String>, String> {
     }
     if enc == "libx265" {
         args.extend(["-preset".into(), (if a.smallest.is_some() { "veryfast" } else { x265 }).into()]);
+        let pools = a.x265_pools.unwrap_or_else(|| default_x265_pools(std::env::consts::OS, usable_cpus(&read_trimmed)));
+        if pools > 0 {
+            args.extend(["-x265-params".into(), format!("pools={pools}")]);
+        }
     }
     if enc == "libsvtav1" {
         args.extend(["-preset".into(), svt.into()]);
@@ -628,6 +760,32 @@ mod tests {
     use std::process::Command;
 
     #[test]
+    fn usable_cpus_cases() {
+        // test/x265Pools.test.js checks the same cases against the Node planner
+        let cases: Vec<serde_json::Value> = serde_json::from_str(include_str!("testdata/usableCpusCases.json")).unwrap();
+        for c in &cases {
+            let files = c["files"].as_object().unwrap();
+            let read = |p: &str| files.get(p).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            assert_eq!(usable_cpus(&read), c["cpus"].as_u64().unwrap() as usize, "{}", c["name"]);
+        }
+        assert_eq!(["0-11", "5", "0-3,8,10-11", "", "3-1", "0-", "a", "0-3 5", "4194303", "4194304", "9007199254740993-9007199254740994"].map(cpu_list_count), [12, 1, 7, 0, 0, 0, 0, 0, 1, 0, 0]);
+    }
+
+    #[test]
+    fn libx265_gets_a_thread_pool_of_the_usable_cpus_on_linux() {
+        assert_eq!((default_x265_pools("linux", 12), default_x265_pools("macos", 12), default_x265_pools("windows", 8), default_x265_pools("linux", 0)), (12, 0, 0, 0));
+        let args = |enc: &str, pools: Option<usize>| build_encode_args(&EncodeArgs { codec: if enc.starts_with("lib") && enc != "libx265" { "av1" } else { "h265" }, encoder: enc, bitrate: Some(1e6), x265_pools: pools, ..Default::default() }).unwrap();
+        let x = args("libx265", Some(8));
+        let p = x.iter().position(|a| a == "-preset").unwrap();
+        assert_eq!(&x[p..p + 4], &["-preset", "medium", "-x265-params", "pools=8"]);
+        assert!(!args("libx265", Some(0)).iter().any(|a| a == "-x265-params"));
+        assert!(!args("hevc_vaapi", Some(8)).iter().any(|a| a == "-x265-params"));
+        assert!(!args("libsvtav1", Some(8)).iter().any(|a| a == "-x265-params"));
+        let here = default_x265_pools(std::env::consts::OS, usable_cpus(&read_trimmed));
+        assert_eq!(args("libx265", None).iter().any(|a| a == &format!("pools={here}")), here > 0);
+    }
+
+    #[test]
     fn a_lead_in_adds_one_clone_pad_in_front() {
         let families = [("h265", vec!["libx265", "hevc_nvenc", "hevc_qsv", "hevc_amf", "hevc_vaapi", "hevc_videotoolbox"]), ("av1", vec!["libsvtav1", "libaom-av1", "av1_nvenc", "av1_qsv", "av1_amf", "av1_vaapi", "av1_videotoolbox"])];
         let pad = "tpad=start=17:start_mode=clone";
@@ -718,6 +876,8 @@ for (const list of Object.values(encs)) for (const encoder of list) for (const p
 for (const [codec, encoder, quality] of [['h265', 'libx265', null], ['h265', 'libx265', 'small'], ['h265', 'hevc_vaapi', null], ['av1', 'libsvtav1', null]])
   for (const maxrate of [null, 0, 3000000]) for (const bitrate of [null, 1234567.5, 0]) for (const keepOrder of [false, true]) for (const holdFrames of [0, 5]) for (const cpuPreset of ['', 'faster'])
   { let r; try { r = buildEncodeArgs({ codec, encoder, bitrate, quality, holdFrames, cpuPreset, smallest: { maxrate }, keepOrder }); } catch (e) { r = 'error'; } out.push(r); }
+for (const encoder of encs.h265) for (const x265Pools of [0, 4, 64])
+  out.push(buildEncodeArgs({ codec: 'h265', encoder, bitrate: 1234567.5, x265Pools }));
 console.log(JSON.stringify(out));
 "#;
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
@@ -734,7 +894,7 @@ console.log(JSON.stringify(out));
                         for hw in [false, true] {
                             for hold in [0, 5] {
                                 for preset in ["", "fast", "faster"] {
-                                    let r = build_encode_args(&EncodeArgs { codec, encoder: enc, bitrate: Some(1_234_567.5), quality: q, device: d, hw_frames: hw, hold_frames: hold, cpu_preset: Some(preset), vaapi_device: None, smallest: None, keep_order: false });
+                                    let r = build_encode_args(&EncodeArgs { codec, encoder: enc, bitrate: Some(1_234_567.5), quality: q, device: d, hw_frames: hw, hold_frames: hold, cpu_preset: Some(preset), vaapi_device: None, smallest: None, keep_order: false, x265_pools: None });
                                     mine.push(r.map(|a| json!(a)).unwrap_or(json!("error")));
                                 }
                             }
@@ -766,6 +926,11 @@ console.log(JSON.stringify(out));
                         }
                     }
                 }
+            }
+        }
+        for enc in &encs[0].1 {
+            for pools in [0, 4, 64] {
+                mine.push(json!(build_encode_args(&EncodeArgs { codec: "h265", encoder: enc, bitrate: Some(1_234_567.5), x265_pools: Some(pools), ..Default::default() }).unwrap()));
             }
         }
         assert_eq!(mine.len(), node.len());
