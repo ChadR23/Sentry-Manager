@@ -93,21 +93,47 @@ fn u32s(v: &[u32]) -> Vec<u8> {
 
 /// A clip of `recs.len()` frames at `fps` (timescale 1000 * fps), a keyframe every `gop` frames.
 pub fn clip(path: &Path, fps: u32, recs: &[Option<Rec>], gop: usize) {
+    build(path, fps, recs, gop, None);
+}
+
+/// The same clip as H.265 with each record in a standard prefix SEI NAL (type 39), as
+/// archive converters write it; `extra` goes first in the first sample (another SEI, say).
+pub fn clip_hevc(path: &Path, fps: u32, recs: &[Option<Rec>], gop: usize, extra: Option<Vec<u8>>) {
+    build(path, fps, recs, gop, Some(extra));
+}
+
+/// sei_nal's record as an H.265 prefix SEI NAL
+pub fn hevc_sei_nal(payload: &[u8]) -> Vec<u8> {
+    let mut nal = vec![0x4e, 0x01];
+    nal.extend_from_slice(&sei_nal(payload)[1..]);
+    nal
+}
+
+fn build(path: &Path, fps: u32, recs: &[Option<Rec>], gop: usize, hevc: Option<Option<Vec<u8>>>) {
     let scale = 1000 * fps;
     let mut samples: Vec<Vec<u8>> = Vec::new();
     for (i, r) in recs.iter().enumerate() {
         let mut s = Vec::new();
+        if let (0, Some(Some(extra))) = (i, &hevc) {
+            s.extend((extra.len() as u32).to_be_bytes());
+            s.extend(extra);
+        }
         if let Some(r) = r {
-            let nal = sei_nal(&protobuf(i as u64, r));
+            let nal = if hevc.is_some() { hevc_sei_nal(&protobuf(i as u64, r)) } else { sei_nal(&protobuf(i as u64, r)) };
             s.extend((nal.len() as u32).to_be_bytes());
             s.extend(nal);
         }
-        let pic: Vec<u8> = if i % gop == 0 { vec![0x65, 0x88, 0x84, 0x00, 0x21, 0xff] } else { vec![0x41, 0x9a, 0x02, 0x04] };
+        let pic: Vec<u8> = match (hevc.is_some(), i % gop == 0) {
+            (false, true) => vec![0x65, 0x88, 0x84, 0x00, 0x21, 0xff],
+            (false, false) => vec![0x41, 0x9a, 0x02, 0x04],
+            (true, true) => vec![0x26, 0x01, 0xaf, 0x00, 0x21, 0xff],
+            (true, false) => vec![0x02, 0x01, 0xd0, 0x04],
+        };
         s.extend((pic.len() as u32).to_be_bytes());
         s.extend(pic);
         samples.push(s);
     }
-    let ftyp = bx(b"ftyp", b"isom\0\0\x02\0isomavc1");
+    let ftyp = bx(b"ftyp", if hevc.is_some() { b"isom\0\0\x02\0isomhvc1" } else { b"isom\0\0\x02\0isomavc1" });
     let mdat_body: Vec<u8> = samples.concat();
     let mdat = bx(b"mdat", &mdat_body);
     let first_offset = (ftyp.len() + 8) as u32;
@@ -147,8 +173,16 @@ pub fn clip(path: &Path, fps: u32, recs: &[Option<Rec>], gop: usize) {
     entry.extend(0x18u16.to_be_bytes());
     entry.extend((-1i16).to_be_bytes());
     assert_eq!(entry.len(), 78);
-    entry.extend(bx(b"avcC", &avcc));
-    let stsd = full(b"stsd", &[u32s(&[1]), bx(b"avc1", &entry)].concat());
+    let stsd = if hevc.is_some() {
+        let mut hvcc = vec![1u8, 1, 0x60, 0, 0, 0, 0x90, 0, 0, 0, 0, 0, 0x5d, 0xf0, 0, 0xfc, 0xfd, 0xf8, 0xf8, 0, 0];
+        hvcc.push(0x0f);
+        hvcc.push(0);
+        entry.extend(bx(b"hvcC", &hvcc));
+        full(b"stsd", &[u32s(&[1]), bx(b"hvc1", &entry)].concat())
+    } else {
+        entry.extend(bx(b"avcC", &avcc));
+        full(b"stsd", &[u32s(&[1]), bx(b"avc1", &entry)].concat())
+    };
     let stts = full(b"stts", &u32s(&[1, n, 1000]));
     let stsc = full(b"stsc", &u32s(&[1, 1, n, 1]));
     let mut stsz_b = u32s(&[0, n]);

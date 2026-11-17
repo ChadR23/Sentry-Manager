@@ -8,7 +8,7 @@
 //!
 //! The footage is only read: the file is opened read-only.
 
-use crate::sei::{js_round, speed_of_bytes, tesla_payload};
+use crate::sei::{hevc_sei_payload, js_round, speed_of_bytes, tesla_payload};
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::os::unix::fs::FileExt;
@@ -473,7 +473,7 @@ impl Parser {
             let whole = len <= 3
                 || match entry {
                     Some(Entry::Avc1) => matches!(b0 & 31, 6..=8),
-                    Some(Entry::Hvc1) => b0 == 0x66 && b1 == Some(0x01),
+                    Some(Entry::Hvc1) => (b0 == 0x66 && b1 == Some(0x01)) || matches!((b0 >> 1) & 63, 39 | 40),
                     Some(Entry::Av01) => b0 == 6 && b1 == Some(5),
                     None => true,
                 };
@@ -556,6 +556,10 @@ impl Parser {
                             let Some(p) = tesla_payload(&original) else { return bad("Invalid HEVC compatibility record") };
                             seis.push(p);
                             compatibility = true;
+                        } else if let Some(p) = hevc_sei_payload(&nal.bytes) {
+                            if !seis.contains(&p) {
+                                seis.push(p);
+                            }
                         } else if typ <= 31 {
                             picture = true;
                         }

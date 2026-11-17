@@ -58,6 +58,47 @@ pub fn tesla_payload(nal: &[u8]) -> Option<Vec<u8>> {
     Some(rbsp[i..rbsp.len() - 1].to_vec())
 }
 
+/// Tesla's record in a standard H.265 SEI NAL (prefix 39, suffix 40), as archive converters
+/// carry it: the first user-data message (type 5) with tesla_payload's 0x42..0x69 marker.
+pub fn hevc_sei_payload(nal: &[u8]) -> Option<Vec<u8>> {
+    if nal.len() < 3 || !matches!((nal[0] >> 1) & 63, 39 | 40) || nal[nal.len() - 1] != 0x80 {
+        return None;
+    }
+    let mut rbsp = Vec::with_capacity(nal.len());
+    let mut zeros = 0;
+    for &b in &nal[2..] {
+        if zeros >= 2 && b == 3 {
+            zeros = 0;
+            continue;
+        }
+        rbsp.push(b);
+        zeros = if b == 0 { zeros + 1 } else { 0 };
+    }
+    let last = rbsp.len() - 1;
+    let mut i = 0;
+    let coded = |i: &mut usize| -> Option<usize> {
+        let mut n = 0;
+        while *rbsp.get(*i)? == 255 {
+            n += 255;
+            *i += 1;
+        }
+        n += *rbsp.get(*i)? as usize;
+        *i += 1;
+        Some(n)
+    };
+    while i < last {
+        let typ = coded(&mut i)?;
+        let size = coded(&mut i)?;
+        let body = rbsp.get(i..i + size).filter(|_| i + size <= last)?;
+        i += size;
+        let marks = body.iter().take_while(|&&b| b == 0x42).count();
+        if typ == 5 && marks > 0 && body.get(marks) == Some(&0x69) && body.len() > marks + 1 {
+            return Some(body[marks + 1..].to_vec());
+        }
+    }
+    None
+}
+
 /// The length-prefixed NAL records of buf; `cut` when one runs past the end.
 fn nals(buf: &[u8], length_size: usize) -> Result<(Vec<&[u8]>, bool)> {
     let mut out = Vec::new();
@@ -104,6 +145,8 @@ fn record_in(list: &[&[u8]], codec: &[u8; 4]) -> Found {
             if let Some(p) = tesla_payload(&h264) {
                 return Found::Record(p);
             }
+        } else if let Some(p) = hevc_sei_payload(nal) {
+            return Found::Record(p);
         }
     }
     Found::Nothing
