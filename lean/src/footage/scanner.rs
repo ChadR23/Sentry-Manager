@@ -120,6 +120,12 @@ impl std::ops::Deref for FileList {
     }
 }
 
+impl std::fmt::Debug for FileList {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "FileList({} files)", self.files.len())
+    }
+}
+
 impl FileList {
     pub fn position(&self, rel: &str) -> Option<usize> {
         if self.files.is_empty() {

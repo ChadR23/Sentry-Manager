@@ -5,7 +5,8 @@
 //! after each scan) tell encoded recordings from Tesla's originals.
 
 use crate::footage::{self, Kind};
-use crate::scanner::FileEntry;
+use crate::scanner::{FileEntry, FileList};
+use std::sync::Arc;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeSet, HashMap};
 
@@ -47,7 +48,11 @@ impl Codecs {
 
     /// None: not read yet; Some(None): read, no codec
     pub fn get(&self, rel: &str) -> Option<Option<&str>> {
-        match *self.code.get(self.list.position(rel)?)? {
+        self.at(self.list.position(rel)?)
+    }
+
+    fn at(&self, i: usize) -> Option<Option<&str>> {
+        match *self.code.get(i)? {
             0 => None,
             c => Some(self.name(c)),
         }
@@ -77,17 +82,39 @@ pub struct Recording {
     pub end: Option<String>,
     pub event_at: Option<String>,
     pub day: String,
-    /// every file, sorted: (rel, size)
-    pub files: Vec<(String, u64)>,
+    /// the scan's file list, which the positions below point into
+    list: Arc<FileList>,
+    /// every file, sorted by rel
+    file_at: Box<[u32]>,
+    clip_at: Box<[u32]>,
+    event_json_at: Option<u32>,
     pub clip_count: usize,
     pub minutes: usize,
-    pub clip_rels: Vec<String>,
     pub bytes: u64,
     pub cameras: Vec<String>,
     pub thumb_rel: Option<String>,
     pub front_rel: Option<String>,
     pub protected: bool,
     pub mtime_ms: f64,
+}
+
+impl Recording {
+    /// every file, sorted: (rel, size)
+    pub fn files(&self) -> impl ExactSizeIterator<Item = (&str, u64)> + Clone + '_ {
+        self.file_at.iter().map(|&i| {
+            let f = &self.list[i as usize];
+            (f.rel.as_str(), f.size)
+        })
+    }
+
+    pub fn clip_rels(&self) -> impl ExactSizeIterator<Item = &str> + Clone + '_ {
+        self.clip_at.iter().map(|&i| self.list[i as usize].rel.as_str())
+    }
+
+    /// the first file, sorted by rel, named event.json (any case)
+    pub fn event_json(&self) -> Option<&str> {
+        self.event_json_at.map(|i| self.list[i as usize].rel.as_str())
+    }
 }
 
 fn category(typ: &str) -> &'static str {
@@ -126,16 +153,21 @@ pub fn num(x: f64) -> Value {
     }
 }
 
-fn finish(out: &mut Vec<Recording>, vehicle: &str, key: String, typ: &'static str, folder: &str, list: &[&FileEntry], start_key: Option<&str>) {
-    let clips: Vec<&&FileEntry> = list.iter().filter(|f| f.kind == Kind::Clip).collect();
+fn finish(out: &mut Vec<Recording>, files: &Arc<FileList>, vehicle: &str, key: String, folder: &str, at: &[u32], start_key: Option<&str>) {
+    let entry = |n: u32| &files[n as usize];
+    let list: Vec<&FileEntry> = at.iter().map(|&n| entry(n)).collect();
+    let clip_at: Vec<u32> = at.iter().copied().filter(|&n| entry(n).kind == Kind::Clip).collect();
+    let clips: Vec<&FileEntry> = clip_at.iter().map(|&n| entry(n)).collect();
     let mut stamps: Vec<&str> = clips.iter().filter_map(|f| footage::ts_from(basename(&f.rel))).collect();
     stamps.sort_unstable();
-    let mut files: Vec<(String, u64)> = list.iter().map(|f| (f.rel.clone(), f.size)).collect();
-    files.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut file_at: Vec<u32> = at.to_vec();
+    file_at.sort_by(|&a, &b| entry(a).rel.cmp(&entry(b).rel));
+    let event_json_at = file_at.iter().copied().find(|&n| entry(n).rel.len() >= 11 && entry(n).rel.as_bytes()[entry(n).rel.len() - 11..].eq_ignore_ascii_case(b"/event.json"));
     let cameras: BTreeSet<String> = clips.iter().filter_map(|f| f.camera.clone()).collect();
     let thumb = list.iter().find(|f| f.rel.to_lowercase().ends_with("/thumb.png"));
     let first = stamps.first().copied().or(start_key);
     let event_id = list[0].event_id.clone();
+    let typ = list[0].typ;
     out.push(Recording {
         id: hash_id(&format!("{vehicle}|{key}")),
         key,
@@ -151,54 +183,57 @@ fn finish(out: &mut Vec<Recording>, vehicle: &str, key: String, typ: &'static st
         day: first.map(|s| s[0..10].to_string()).filter(|d| !d.is_empty()).unwrap_or_else(|| list[0].day.clone()),
         clip_count: clips.len(),
         minutes: stamps.iter().collect::<BTreeSet<_>>().len(),
-        clip_rels: clips.iter().map(|f| f.rel.clone()).collect(),
         bytes: list.iter().map(|f| f.size).sum(),
         cameras: cameras.into_iter().collect(),
         thumb_rel: thumb.map(|f| f.rel.clone()),
         front_rel: clips.iter().find(|f| f.camera.as_deref() == Some("front")).or(clips.first()).map(|f| f.rel.clone()),
         protected: false,
         mtime_ms: list.iter().map(|f| f.mtime_ms).fold(f64::NEG_INFINITY, f64::max),
-        files,
+        list: files.clone(),
+        file_at: file_at.into(),
+        clip_at: clip_at.into(),
+        event_json_at,
     });
 }
 
 /// Group a scan's files into recordings, newest first (inventory.js buildRecordings).
-pub fn build_recordings(files: &[FileEntry], vehicle: &str) -> Vec<Recording> {
+pub fn build_recordings(files: &Arc<FileList>, vehicle: &str) -> Vec<Recording> {
     // (folders and files in the order the scan saw them, as Node: scanner.rs node_order)
-    let mut events: Vec<(&str, Vec<&FileEntry>)> = Vec::new();
-    let mut loose: Vec<(&str, Vec<(&FileEntry, &str)>)> = Vec::new();
+    let mut events: Vec<(&str, Vec<u32>)> = Vec::new();
+    let mut loose: Vec<(&str, Vec<(u32, &str)>)> = Vec::new();
     let mut ev_at: HashMap<&str, usize> = HashMap::new();
     let mut lo_at: HashMap<&str, usize> = HashMap::new();
-    for f in files {
+    for (n, f) in files.iter().enumerate() {
+        let n = n as u32;
         let dir = dirname(&f.rel);
         if f.event_id.is_some() && (f.typ == "SentryClips" || f.typ == "SavedClips") {
             let i = *ev_at.entry(dir).or_insert_with(|| {
                 events.push((dir, Vec::new()));
                 events.len() - 1
             });
-            events[i].1.push(f);
+            events[i].1.push(n);
         } else if let Some(ts) = footage::ts_from(basename(&f.rel)) {
             let i = *lo_at.entry(dir).or_insert_with(|| {
                 loose.push((dir, Vec::new()));
                 loose.len() - 1
             });
-            loose[i].1.push((f, ts));
+            loose[i].1.push((n, ts));
         }
     }
     let mut out = Vec::new();
     for (dir, list) in &events {
-        finish(&mut out, vehicle, format!("event:{dir}"), list[0].typ, dir, list, footage::ts_from(basename(dir)));
+        finish(&mut out, files, vehicle, format!("event:{dir}"), dir, list, footage::ts_from(basename(dir)));
     }
     for (dir, entries) in &mut loose {
         entries.sort_by(|a, b| a.1.cmp(b.1));
-        let mut session: Vec<(&FileEntry, &str)> = Vec::new();
+        let mut session: Vec<(u32, &str)> = Vec::new();
         let mut last: Option<i64> = None;
-        let flush = |session: &mut Vec<(&FileEntry, &str)>, out: &mut Vec<Recording>| {
+        let flush = |session: &mut Vec<(u32, &str)>, out: &mut Vec<Recording>| {
             if session.is_empty() {
                 return;
             }
-            let list: Vec<&FileEntry> = session.iter().map(|e| e.0).collect();
-            finish(out, vehicle, format!("session:{dir}:{}", session[0].1), session[0].0.typ, dir, &list, Some(session[0].1));
+            let list: Vec<u32> = session.iter().map(|e| e.0).collect();
+            finish(out, files, vehicle, format!("session:{dir}:{}", session[0].1), dir, &list, Some(session[0].1));
             session.clear();
         };
         for e in entries.iter() {
@@ -223,10 +258,12 @@ pub struct Encoded {
 }
 
 pub fn encoded_of(rec: &Recording, codecs: &Codecs) -> Encoded {
-    let mut e = Encoded { clips: rec.clip_rels.len(), encoded: 0, unknown: 0, codecs: Vec::new() };
+    let mut e = Encoded { clips: rec.clip_at.len(), encoded: 0, unknown: 0, codecs: Vec::new() };
     let mut seen = BTreeSet::new();
-    for rel in &rec.clip_rels {
-        match codecs.get(rel) {
+    let same = Arc::ptr_eq(&rec.list, &codecs.list);
+    for &i in rec.clip_at.iter() {
+        let i = i as usize;
+        match if same { codecs.at(i) } else { codecs.get(&rec.list[i].rel) } {
             None => e.unknown += 1,
             Some(Some(c)) if c == "h265" || c == "av1" => {
                 e.encoded += 1;
@@ -250,7 +287,7 @@ pub fn public(rec: &Recording, codecs: &Codecs) -> Map<String, Value> {
     let v = json!({
         "id": rec.id, "key": rec.key, "vehicleId": rec.vehicle_id, "type": rec.typ, "category": rec.category,
         "folder": rec.folder, "eventId": rec.event_id, "startKey": rec.start_key, "start": rec.start, "end": rec.end,
-        "eventAt": rec.event_at, "day": rec.day, "fileCount": rec.files.len(), "clipCount": rec.clip_count,
+        "eventAt": rec.event_at, "day": rec.day, "fileCount": rec.files().len(), "clipCount": rec.clip_count,
         "minutes": rec.minutes, "bytes": rec.bytes, "cameras": rec.cameras, "thumbRel": rec.thumb_rel,
         "frontRel": rec.front_rel, "protected": rec.protected, "mtimeMs": num(rec.mtime_ms),
         "encoded": encoded_of(rec, codecs).json()
@@ -383,7 +420,7 @@ pub fn event_pick(data: &Value) -> Option<Map<String, Value>> {
 /// A recording is protected when any of its files is (inventory.js buildRecordings protectedRels).
 pub fn mark_protected(recs: &mut [Recording], protected: &std::collections::HashSet<String>) {
     for r in recs {
-        r.protected = !protected.is_empty() && r.files.iter().any(|(rel, _)| protected.contains(rel));
+        r.protected = !protected.is_empty() && r.files().any(|(rel, _)| protected.contains(rel));
     }
 }
 
@@ -425,5 +462,34 @@ mod codec_tests {
         let moved = c.remap(list(&["d.mp4", "x.mp4", "a.mp4"]));
         assert_eq!((moved.get("a.mp4"), moved.get("d.mp4"), moved.get("x.mp4"), moved.get("b.mp4")), (Some(Some("h265")), Some(Some("h265")), None, None));
         assert_eq!(Codecs::default().get("a.mp4"), None);
+    }
+
+    #[test]
+    fn a_recording_finds_its_event_json_and_codecs_by_position_as_by_rel() {
+        let dir = "TeslaCam/SavedClips/2026-11-10_06-00-00";
+        let rels = [format!("{dir}/2026-11-10_05-59-00-front.mp4"), format!("{dir}/2026-11-10_05-59-00-back.mp4"), format!("{dir}/event.json"), format!("{dir}/EVENT.JSON"), "TeslaCam/RecentClips/2026-11-10_07-00-00-front.mp4".into()];
+        let files: Vec<FileEntry> = rels
+            .iter()
+            .map(|rel| {
+                let c = crate::footage::classify(rel).unwrap();
+                FileEntry { rel: rel.clone(), size: 1, mtime_ms: 0.0, ctime_ms: 0.0, birthtime_ms: 0.0, kind: c.kind, typ: c.typ, day: "2026-11-10".into(), camera: c.camera, event_id: c.event_id }
+            })
+            .collect();
+        let l = Arc::new(FileList::from(files.clone()));
+        let recs = build_recordings(&l, "v1");
+        let saved = recs.iter().find(|r| r.typ == "SavedClips").unwrap();
+        let recent = recs.iter().find(|r| r.typ == "RecentClips").unwrap();
+        for r in [saved, recent] {
+            assert_eq!(r.event_json(), r.files().map(|(f, _)| f).find(|f| f.to_lowercase().ends_with("/event.json")));
+        }
+        assert_eq!(saved.event_json(), Some(rels[3].as_str()));
+        assert_eq!(recent.event_json(), None);
+        let known = || [(rels[0].clone(), Some("h265".to_string())), (rels[1].clone(), None)];
+        for c in [Codecs::new(l.clone(), known()), Codecs::new(Arc::new(FileList::from(files.clone())), known()), Codecs::default()] {
+            let e = encoded_of(saved, &c);
+            let by_rel = saved.clip_rels().map(|r| c.get(r)).collect::<Vec<_>>();
+            assert_eq!((e.clips, e.encoded, e.unknown), (2, by_rel.iter().filter(|x| matches!(x, Some(Some("h265")))).count(), by_rel.iter().filter(|x| x.is_none()).count()));
+        }
+        assert_eq!(encoded_of(saved, &Codecs::new(l.clone(), known())).codecs, ["h265"]);
     }
 }

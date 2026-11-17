@@ -39,7 +39,7 @@ pub fn is_clip_key(s: &str) -> bool {
 }
 
 fn recording_of_clip(app: &App, vid: &str, clip: &str) -> Option<Recording> {
-    app.state_of(vid)?.recordings.iter().find(|r| r.files.iter().any(|(rel, _)| rel.contains(clip))).cloned()
+    app.state_of(vid)?.recordings.iter().find(|r| r.files().any(|(rel, _)| rel.contains(clip))).cloned()
 }
 
 fn iso_now() -> String {
@@ -84,7 +84,7 @@ pub fn add(app: &App, who: &Caller, body: &Value) -> Res<Value> {
     list.push(star.clone());
     save(app, &list);
     if star.get("protects").is_some() {
-        let rels: Vec<String> = rec.as_ref().unwrap().files.iter().map(|(r, _)| r.clone()).collect();
+        let rels: Vec<String> = rec.as_ref().unwrap().files().map(|(r, _)| r.to_string()).collect();
         super::bin::set_protected(app, &v.id, &rels, true);
         app.rebuild(&v.id, None);
         app.core.announce("inventory");
@@ -120,10 +120,10 @@ pub fn remove(app: &App, id: &str) -> Res<Value> {
         let rec = recording_of_clip(app, &vid, &clip);
         let others = rest.iter().any(|x| {
             x.get("vehicle").map(js::string).as_deref() == Some(vid.as_str())
-                && rec.as_ref().is_some_and(|r| r.files.iter().any(|(rel, _)| rel.contains(&x.get("clip").map(js::string).unwrap_or_else(|| "undefined".into()))))
+                && rec.as_ref().is_some_and(|r| r.files().any(|(rel, _)| rel.contains(&x.get("clip").map(js::string).unwrap_or_else(|| "undefined".into()))))
         });
         if let Some(r) = rec.filter(|r| r.protected && !others) {
-            let rels: Vec<String> = r.files.iter().map(|(f, _)| f.clone()).collect();
+            let rels: Vec<String> = r.files().map(|(f, _)| f.to_string()).collect();
             super::bin::set_protected(app, &vid, &rels, false);
             app.rebuild(&vid, None);
             app.core.announce("inventory");

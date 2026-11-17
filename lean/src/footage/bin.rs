@@ -201,7 +201,7 @@ pub fn trash(app: &Arc<App>, vid: &str, ids: &[String], reason: &str) -> Res<Tra
     let real_root = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
     let mut gone: HashSet<String> = HashSet::new();
     for rec in &recordings {
-        let rels: Vec<String> = rec.files.iter().map(|(r, _)| r.clone()).collect();
+        let rels: Vec<String> = rec.files().map(|(r, _)| r.to_string()).collect();
         with_lock(app, vid, || {
             // protection is read again here: it may have been set after this run started
             let protected = app.core.db().protected_set(vid);

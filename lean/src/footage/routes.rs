@@ -333,7 +333,7 @@ pub fn handle(app: &Arc<App>, who: &Caller, method: &str, seg: &[&str], query: &
             let recs: Vec<_> = b.get("ids").and_then(Value::as_array).cloned().unwrap_or_default().iter()
                 .filter_map(|x| x.as_str().and_then(|rid| st.as_ref()?.recordings.iter().find(|r| r.id == rid).cloned()))
                 .collect();
-            let rels: Vec<String> = recs.iter().flat_map(|r| r.files.iter().map(|(f, _)| f.clone())).collect();
+            let rels: Vec<String> = recs.iter().flat_map(|r| r.files().map(|(f, _)| f.to_string())).collect();
             bin::set_protected(app, &v.id, &rels, on);
             app.rebuild(&v.id, None);
             app.core.announce("inventory");
@@ -341,7 +341,7 @@ pub fn handle(app: &Arc<App>, who: &Caller, method: &str, seg: &[&str], query: &
         }
         ("POST", ["vehicles", id, "trash"]) => {
             tri!(vehicle_or_404(app, id));
-            let recs: HashMap<String, Vec<String>> = app.state_of(id).map(|s| s.recordings.iter().map(|r| (r.id.clone(), r.files.iter().map(|(f, _)| f.clone()).collect())).collect()).unwrap_or_default();
+            let recs: HashMap<String, Vec<String>> = app.state_of(id).map(|s| s.recordings.iter().map(|r| (r.id.clone(), r.files().map(|(f, _)| f.to_string()).collect())).collect()).unwrap_or_default();
             let out = tri!(bin::trash(app, id, &ids_of(b), "manual"));
             let mut v = out.json();
             // "Also delete its CAN data": the logs of the moved recordings' minutes go now, for good
@@ -360,7 +360,7 @@ pub fn handle(app: &Arc<App>, who: &Caller, method: &str, seg: &[&str], query: &
             tri!(vehicle_or_404(app, id));
             let wanted = ids_of(b);
             let recs: Vec<_> = app.state_of(id).map(|s| s.recordings.iter().filter(|r| wanted.contains(&r.id) && !r.protected).cloned().collect()).unwrap_or_default();
-            let rels: Vec<String> = recs.iter().flat_map(|r| r.files.iter().map(|(f, _)| f.clone())).collect();
+            let rels: Vec<String> = recs.iter().flat_map(|r| r.files().map(|(f, _)| f.to_string())).collect();
             let can = if recs.is_empty() { Value::Null } else { app.core.can_with(id, &rels, None).unwrap_or(Value::Null) };
             ok(json!({ "recordings": recs.len(), "can": can }))
         }
@@ -462,7 +462,7 @@ fn trash_days(app: &Arc<App>, who: &Caller, id: &str, b: &Value) -> Option<Res<R
         let n: Vec<i64> = day.split('-').map(|x| x.parse().unwrap_or(0)).collect();
         super::tz::zoned_to_utc(n[0] as i32, n[1] as u32, n[2] as u32, 23, 59, 59, &v.timezone) + 1000.0
     });
-    let rels: Vec<String> = movable.iter().flat_map(|r| r.files.iter().map(|(f, _)| f.clone())).collect();
+    let rels: Vec<String> = movable.iter().flat_map(|r| r.files().map(|(f, _)| f.to_string())).collect();
     if b.get("preview") == Some(&Value::Bool(true)) || movable.is_empty() {
         let can = if movable.is_empty() { Value::Null } else { app.core.can_with(&v.id, &rels, until).unwrap_or(Value::Null) };
         summary.insert("can".into(), can);
@@ -471,7 +471,7 @@ fn trash_days(app: &Arc<App>, who: &Caller, id: &str, b: &Value) -> Option<Res<R
     }
     let with_can = b.get("withCan") == Some(&Value::Bool(true));
     let ids: Vec<String> = movable.iter().map(|r| r.id.clone()).collect();
-    let files: HashMap<String, Vec<String>> = movable.iter().map(|r| (r.id.clone(), r.files.iter().map(|(f, _)| f.clone()).collect())).collect();
+    let files: HashMap<String, Vec<String>> = movable.iter().map(|r| (r.id.clone(), r.files().map(|(f, _)| f.to_string()).collect())).collect();
     let a = app.clone();
     let by = who.by();
     std::thread::spawn(move || {

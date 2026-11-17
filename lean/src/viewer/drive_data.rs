@@ -855,7 +855,7 @@ pub fn key_of_ms(ms: f64) -> String {
 }
 
 /// describeDrive: a drive of the Pi's data for the API
-pub fn describe_drive(d: &UsbDrive, tags: Option<&Tags>, clip_of: &dyn Fn(&str) -> Option<super::drives::Clip>, stats_of: &dyn Fn(&super::drives::Clip) -> Option<super::speed_index::Stats>, label: &super::drives::Label) -> Value {
+pub fn describe_drive<'c>(d: &UsbDrive, tags: Option<&Tags>, clip_of: &dyn Fn(&str) -> Option<super::drives::Clip<'c>>, stats_of: &dyn Fn(&super::drives::Clip) -> Option<super::speed_index::Stats>, label: &super::drives::Label) -> Value {
     let found: Vec<super::drives::Clip> = d.keys.iter().filter_map(|k| clip_of(k)).collect();
     let (mut brakes, mut swerves, mut read) = (0, 0, 0);
     for c in &found {
@@ -875,7 +875,7 @@ pub fn describe_drive(d: &UsbDrive, tags: Option<&Tags>, clip_of: &dyn Fn(&str) 
             None => Value::Null,
         },
     };
-    let recs: std::collections::HashSet<&str> = found.iter().map(|c| c.rec_id.as_str()).filter(|s| !s.is_empty()).collect();
+    let recs: std::collections::HashSet<&str> = found.iter().map(|c| c.rec_id).filter(|s| !s.is_empty()).collect();
     json!({
         "id": key_of_ms(d.start_ms), "date": wall_ms(d.start_ms)[..10], "start": wall_ms(d.start_ms), "end": wall_ms(d.end_ms),
         "seconds": num(js::js_round((d.end_ms - d.start_ms) / 1000.0).max(0.0)), "clips": d.keys.len(), "recordings": recs.len(), "footage": found.len(), "indexed": read,

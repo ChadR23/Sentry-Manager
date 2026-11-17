@@ -352,7 +352,7 @@ impl Viewer {
                 by_day.borrow_mut().insert(day.to_string(), s);
             }
         };
-        let stats_for = |c: &drives::Clip| by_day.borrow().get(&c.day).and_then(|s| s.get(&c.rel).cloned());
+        let stats_for = |c: &drives::Clip| by_day.borrow().get(c.day).and_then(|s| s.get(c.rel).cloned());
         let places_list = Arc::new(places::place_list(&*self.ctx));
         let label_for = |need: bool| {
             let spots = if need { places::drive_spots(&*self.ctx, &self.spots, &v.id) } else { Vec::new() };
@@ -372,7 +372,7 @@ impl Viewer {
             }
             let page: Vec<&drive_data::UsbDrive> = usb.iter().skip(i).take(limit).collect();
             let more = i + limit < usb.len();
-            let by_key: HashMap<&str, &drives::Clip> = clips.iter().map(|c| (c.key.as_str(), c)).collect();
+            let by_key: HashMap<&str, &drives::Clip> = clips.iter().map(|c| (c.key, c)).collect();
             for d in &page {
                 for k in &d.keys {
                     if let Some(c) = by_key.get(k.as_str()) {
@@ -386,10 +386,10 @@ impl Viewer {
             let list: Vec<Value> = page
                 .iter()
                 .map(|d| {
-                    let mut out = drive_data::describe_drive(d, tags.as_ref(), &|k| by_key.get(k).map(|c| (*c).clone()), &|c| stats_for(c), &label);
+                    let mut out = drive_data::describe_drive(d, tags.as_ref(), &|k| by_key.get(k).map(|c| **c), &|c| stats_for(c), &label);
                     // (the drive's first and last minutes, as the car names its Recent clips)
                     if let (Some(f), Some(first), Some(last)) = (has_can.as_ref(), d.keys.first(), d.keys.last()) {
-                        out["can"] = json!(f(&[format!("RecentClips/{first}-front.mp4"), format!("RecentClips/{last}-front.mp4")], Some(first)));
+                        out["can"] = json!(f(vec![format!("RecentClips/{first}-front.mp4"), format!("RecentClips/{last}-front.mp4")], Some(first)));
                     }
                     out
                 })
@@ -408,7 +408,7 @@ impl Viewer {
             .map(|d| {
                 let mut m = drives::describe(d, &|c| stats_for(c), &label);
                 if let (Some(f), Some(first), Some(last)) = (has_can.as_ref(), d.clips.first(), d.clips.last()) {
-                    m.insert("can".into(), json!(f(&[first.rel.clone(), last.rel.clone()], Some(&first.key))));
+                    m.insert("can".into(), json!(f(vec![first.rel.to_string(), last.rel.to_string()], Some(first.key))));
                 }
                 m
             })
@@ -464,7 +464,7 @@ impl Viewer {
         let tz = self.ctx.vehicle(vid).map(|v| v.timezone).unwrap_or_default();
         Some(page.iter().map(|rec| {
             let ev = if rec.event_id.is_some() { self.spots.get(&*self.ctx, vid, files.as_ref(), rec).and_then(|s| s.pos) } else { None };
-            let covered = has_can.as_ref().is_some_and(|f| f(&rec.clip_rels, rec.start_key.as_deref()));
+            let covered = has_can.as_ref().is_some_and(|f| f(rec.clip_rels().map(String::from).collect(), rec.start_key.as_deref()));
             let side = recording_place::CanSide { gps: &self.can_gps, keys: if covered { keys.clone() } else { Vec::new() }, tz: &tz };
             recording_place::tag(&self.speed_index, vid, files.as_ref(), rec, ev, &list, Some(&side))
         }).collect())
