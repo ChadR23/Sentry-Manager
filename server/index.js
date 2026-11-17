@@ -64,6 +64,7 @@ const { createConverterHost } = require('./converterHost');
 const { createStats } = require('./stats');
 const { encoderBlock, jobProgress, RUNNING: CONVERTER_RUNNING } = require('./encoderStats');
 const { createConvertStats, heartbeatHardware } = require('./convertStats');
+const canNow = require('./canNow');
 const { hostInfo } = require('./hostInfo');
 const { createSavings } = require('./savings');
 const { parsePowerSettings, priceAt, rateNameAt, isCheapest, PriceError } = require('./powerPrice');
@@ -1343,6 +1344,117 @@ async function main() {
     audit.warn(`Metrics turned off: ${by(req, user)}`);
     return { enabled: false };
   });
+  // the answers, a few seconds each (a Stream Deck asks once per key every few seconds)
+  const canNowCache = new Map(); // `${keys}|${units}` -> { at, answer }
+  const CAN_NOW_TTL_MS = 3000;
+  const canNowKeys = async () => {
+    try { return (await fs.promises.readdir(path.join(DATA, 'can-index'), { withFileTypes: true })).filter((d) => d.isDirectory()).map((d) => d.name); } catch { return []; }
+  };
+  /** GET /api/can/now[/<stat>][?token=…&car=…&units=mi|km]: the newest CAN values, or one as plain text. */
+  async function canNowAnswer(req, res, url) {
+    // read by the Stream Deck plugin from its own origin: allowed, as only the token lets it in (no cookies)
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    const cfg = db.get('can-now', null);
+    if (!cfg?.tokenHash) return sendJson(res, 404, { error: 'Not found' });
+    if (req.method !== 'GET' && req.method !== 'HEAD') return sendJson(res, 405, { error: 'GET only' });
+    // the local certificate authority's certificate (public, no token): the plugin fetches it
+    // once and keeps it only when its fingerprint is the link's pin
+    if (url.pathname === '/api/can/now/ca.crt') {
+      const pem = tlsSource?.caPem();
+      if (!pem) return sendJson(res, 404, { error: 'No local certificate authority.' });
+      res.writeHead(200, { 'Content-Type': 'application/x-x509-ca-cert', 'Cache-Control': 'no-store' });
+      return res.end(pem);
+    }
+    const given = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '') || String(url.searchParams.get('token') || '');
+    const hash = crypto.createHash('sha256').update(given).digest('hex');
+    if (!given || !crypto.timingSafeEqual(Buffer.from(hash), Buffer.from(cfg.tokenHash))) {
+      res.writeHead(401, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+      return res.end('Token required (Nerd panel → Stream Deck)');
+    }
+    const units = url.searchParams.get('units') === 'km' ? 'km' : 'mi';
+    // which car: its vehicle's id or name, or a CAN key; else the one with the newest data
+    const want = String(url.searchParams.get('car') || '').trim().toLowerCase();
+    let keys = await canNowKeys();
+    if (want) keys = keys.filter((k) => k.toLowerCase() === want || [canCarOf(k)?.id, canCarOf(k)?.name].some((x) => String(x || '').toLowerCase() === want));
+    const id = `${keys.join(',')}|${units}`;
+    let hit = canNowCache.get(id);
+    if (!hit || Date.now() - hit.at > CAN_NOW_TTL_MS) {
+      let best = null;
+      for (const key of keys) {
+        const got = await canNow.latestStats({ index: canIndex, key, units }).catch((err) => { log.warn(`Stream Deck stats: ${err.message}`); return null; });
+        if (got && (!best || got.at > best.at)) best = got;
+      }
+      const car = best ? canCarOf(best.key) : null;
+      hit = { at: Date.now(), answer: best ? {
+        car: car?.name || null, at: new Date(best.at).toISOString(), ageSec: best.ageSec, stale: best.stale, units,
+        stats: Object.fromEntries(best.stats.map(({ id: sid, ...rest }) => [sid, rest]))
+      } : null };
+      canNowCache.set(id, hit);
+      while (canNowCache.size > 16) canNowCache.delete(canNowCache.keys().next().value);
+    }
+    const stat = decodeURIComponent(url.pathname.slice('/api/can/now'.length).replace(/^\//, '').replace(/\.txt$/, '')) || url.searchParams.get('stat') || '';
+    if (stat) {
+      if (!canNow.STAT_IDS.includes(stat)) return sendJson(res, 404, { error: `No stat "${stat.slice(0, 40)}". Stats: ${canNow.STAT_IDS.join(', ')}` });
+      // plain text for a Stream Deck key: the value with its unit, "—" without one
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+      return res.end(hit.answer?.stats?.[stat]?.text ?? '—');
+    }
+    if (!hit.answer) return sendJson(res, 200, { car: null, at: null, stale: true, units, stats: {} });
+    return sendJson(res, 200, hit.answer);
+  }
+
+  // ---- Live CAN stats for a Stream Deck (server/canNow.js): GET /api/can/now with its own
+  // read-only token, made here (admins, the Nerd panel). Off until a link is made.
+  // what the plugin pins (the link's pin=): the local certificate authority while the server's
+  // certificate comes from it, else the server's own certificate; none with a certificate every
+  // computer already trusts (Let's Encrypt) or without HTTPS of its own
+  const deckPin = () => {
+    try {
+      const st = tlsSource?.status();
+      if (!st) return null;
+      const hex = (fp) => String(fp || '').replace(/:/g, '').toLowerCase();
+      if (st.mode === 'acme' && st.serving === 'acme') return null;
+      if (st.mode === 'own') return st.certificate?.fingerprint ? `cert:${hex(st.certificate.fingerprint)}` : null;
+      return st.ca?.fingerprint ? `ca:${hex(st.ca.fingerprint)}` : null;
+    } catch { return null; }
+  };
+  r.add('GET', '/api/can/stream-deck', (req, res, { user }) => {
+    if (!adminHere(req, user)) throw new HttpError(403, 'Only an admin can manage the Stream Deck link.');
+    const cfg = db.get('can-now', null);
+    return { enabled: Boolean(cfg?.tokenHash), at: cfg?.at || null, pin: deckPin(), stats: canNow.STATS.map(({ id, label }) => ({ id, label })) };
+  });
+  r.add('POST', '/api/can/stream-deck', (req, res, { user }) => {
+    if (!adminHere(req, user)) throw new HttpError(403, 'Only an admin can manage the Stream Deck link.');
+    const token = crypto.randomBytes(24).toString('base64url');
+    db.set('can-now', { tokenHash: crypto.createHash('sha256').update(token).digest('hex'), at: Date.now() });
+    canNowCache.clear();
+    audit.warn(`Stream Deck link made (new token; any older link stops working): ${by(req, user)}`);
+    return { enabled: true, token, pin: deckPin(), stats: canNow.STATS.map(({ id, label }) => ({ id, label })) };
+  });
+  // the Stream Deck plugin (assets/streamdeck), zipped as the .streamDeckPlugin file Stream Deck installs
+  r.add('GET', '/api/can/stream-deck/plugin', async (req, res, { user }) => {
+    if (!adminHere(req, user)) throw new HttpError(403, 'Only an admin can download the Stream Deck plugin.');
+    const root = path.join(APP_ROOT, 'assets', 'streamdeck');
+    const folder = 'com.sentrysix.canstats.sdPlugin';
+    const walk = async (rel) => (await fs.promises.readdir(path.join(root, rel), { withFileTypes: true })).flatMap((e) => (e.isDirectory() ? [{ dir: `${rel}/${e.name}` }] : [`${rel}/${e.name}`]));
+    const files = [];
+    const todo = [folder];
+    while (todo.length) {
+      for (const x of await walk(todo.shift())) if (typeof x === 'string') files.push(x); else todo.push(x.dir);
+    }
+    const zip = writeZip(await Promise.all(files.sort().map(async (name) => ({ name, data: await fs.promises.readFile(path.join(root, name)) }))));
+    res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': zip.length, 'Cache-Control': 'no-store', 'Content-Disposition': attachment('Sentry Six CAN Stats.streamDeckPlugin') });
+    res.end(zip);
+    return undefined;
+  });
+  r.add('DELETE', '/api/can/stream-deck', (req, res, { user }) => {
+    if (!adminHere(req, user)) throw new HttpError(403, 'Only an admin can manage the Stream Deck link.');
+    db.set('can-now', null);
+    canNowCache.clear();
+    audit.warn(`Stream Deck link turned off: ${by(req, user)}`);
+    return { enabled: false };
+  });
+
   // Notification rules: which kinds of notification are raised
   const NOTIFY_KINDS = ['share', 'storage', 'server', 'health', 'conversion', 'update', 'archive'];
   r.add('GET', '/api/notification-rules', () => {
@@ -3907,6 +4019,9 @@ async function main() {
         res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4; charset=utf-8', 'Cache-Control': 'no-store' });
         return res.end(metricsText());
       }
+      // Live CAN stats for a Stream Deck (server/canNow.js): only with the token made in the
+      // Nerd panel; read-only, no cookies
+      if (rawPath === '/api/can/now' || rawPath.startsWith('/api/can/now/')) return await canNowAnswer(req, res, url);
       // CAN Bridge uploads (docs/can-bridge-api.md): opt-in, HTTPS only, a
       // write-only token; no cookies, so the page checks below do not apply
       if (rawPath === '/api/can/logs' || rawPath.startsWith('/api/can/logs/')) return canUpload(req, res, rawPath);

@@ -1,0 +1,24 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>CAN stat</title>
+<style>
+  body { margin: 0; padding: 10px 12px; background: #2d2d2d; color: #d8d8d8; font: 13px/1.4 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+  label { display: block; margin: 0 0 10px; }
+  label span { display: block; font-size: 11.5px; color: #9a9a9a; margin-bottom: 3px; }
+  input, select { width: 100%; box-sizing: border-box; padding: 5px 7px; border-radius: 4px; border: 1px solid #555; background: #3d3d3d; color: #eee; font: inherit; }
+  h4 { margin: 14px 0 8px; font-size: 12px; color: #bbb; text-transform: uppercase; letter-spacing: .05em; }
+  p { margin: 0 0 10px; font-size: 11.5px; color: #9a9a9a; }
+  .row { display: flex; gap: 8px; } .row label { flex: 1; }
+</style></head>
+<body>
+  <label><span>This key shows</span><select id="stat"></select></label>
+  <h4>Every key (your Sentry Six Manager)</h4>
+  <label><span>Paste the link from the CAN Nerd panel → Stream Deck</span><input id="link" placeholder="https://your-server:9000/api/can/now/battery?token=…" spellcheck="false"></label>
+  <div class="row">
+    <label><span>Units</span><select id="units"><option value="mi">mph · °F · psi</option><option value="km">km/h · °C · bar</option></select></label>
+    <label><span>Every (s)</span><input id="every" type="number" min="2" max="300" value="5"></label>
+  </div>
+  <label><span>Car (optional: its name in Sentry Six Manager)</span><input id="car" spellcheck="false"></label>
+  <p id="saved"></p>
+  <p>The link carries the server's certificate fingerprint, so its own certificate is trusted without installing it.</p>
+  <script src="stats.js"></script><script src="pi.js"></script>
+</body></html>

@@ -343,6 +343,8 @@ export function openNerdPanel() {
   let token = null; // shown once, right after it is made
   let fingerprint = null;
   let st = null; // the last /api/can/settings
+  let deck = null; // the last /api/can/stream-deck (the Stream Deck link)
+  let deckToken = null; // a link's token, shown once after it is made
   let files = { logs: [] }; // the last /api/can/files
   const filter = { key: '', check: '', text: '' }; // the Received logs filter (kept across live redraws)
   const $ = (s) => body.querySelector(s);
@@ -407,6 +409,7 @@ export function openNerdPanel() {
         : `<p>Off: port ${port} is closed, and the upload address answers "not found".</p>
            <div class="nd-row"><button type="button" class="nd-btn" data-on>Turn on…</button></div>`}
       ${carDataHtml()}
+      ${deckHtml()}
       ${https || st.port?.https ? '' : '<p class="nd-warn">This page is on plain HTTP. The app only uploads over HTTPS: open Sentry Six Manager with https:// for the address and the certificate it pins.</p>'}
 
       <h3>Tokens (one per car)</h3>
@@ -455,6 +458,26 @@ export function openNerdPanel() {
     return `<h3>Car data in the Viewer</h3>
       <label class="nd-lab nd-check"><input type="checkbox" data-cardata${on ? ' checked' : ''}> Car data in the Viewer</label>
       <p class="nd-muted">Shows the CAN stats bar and the Every stat list under the cameras, in the Horizon interface only (everyone on this server who uses Horizon).</p>`;
+  }
+
+  // "Stream Deck": a read-only link to the car's newest CAN values (server/canNow.js), one stat per
+  // key as plain text, on this same address (no other port); off until a link is made
+  function deckHtml() {
+    if (!deck) return '';
+    const base = `${location.origin}/api/can/now`;
+    const tok = deckToken ? encodeURIComponent(deckToken) : '<token>';
+    // (pin=: the server's certificate, so the plugin trusts it without installing it)
+    const ex = (stat) => `${base}/${stat}?token=${tok}${deck.pin ? `&pin=${deck.pin}` : ''}`;
+    return `<h3>Stream Deck</h3>
+      <p class="nd-muted">Your car's newest CAN values on Stream Deck keys (paired with footage or not), as fresh as the CAN Bridge's last upload, from this same address: no other port. Install the plugin, make a link here, and paste the link into any key's settings; then pick a stat for each key.</p>
+      <div class="nd-row"><a class="nd-btn" href="/api/can/stream-deck/plugin" download>Download the Stream Deck plugin</a></div>
+      ${deck.enabled
+        ? `${deckToken
+            ? `<p><b>Your link</b> (the token is shown once: copy it now):</p><div class="nd-box nd-mono" data-deck-url>${esc(ex('battery'))}</div>`
+            : `<p>A link is on (made ${esc(when(deck.at))}). Its token is not shown again: make a new one to see it (the old one stops working).</p>`}
+           <p class="nd-muted">One key per stat: change <code>battery</code> to any of ${deck.stats.map((x) => `<code style="white-space:nowrap" title="${esc(x.label)}">${esc(x.id)}</code>`).join(' ')}. Add <code>&amp;units=km</code> for km/h, °C and bar, <code>&amp;car=</code> a vehicle's name for one car. Everything at once: <code>${esc(base)}?token=…</code> (JSON).</p>
+           <div class="nd-row"><button type="button" class="nd-btn" data-deck-new>New link…</button><button type="button" class="nd-btn nd-danger" data-deck-off>Turn off…</button></div>`
+        : `<div class="nd-row"><button type="button" class="nd-btn" data-deck-new>Make a link</button></div>`}`;
   }
 
   // "Delete CAN logs with their footage" (canPrune.js), and what its last look at each car did
@@ -691,7 +714,7 @@ export function openNerdPanel() {
         let f2;
         schedule.fetched();
         try {
-          [s2, f2] = await Promise.all([api('/api/can/settings'), api('/api/can/files?limit=2000')]);
+          [s2, f2, deck] = await Promise.all([api('/api/can/settings'), api('/api/can/files?limit=2000'), api('/api/can/stream-deck').catch(() => null)]);
         } catch (err) {
           // (a live update that failed keeps what is shown)
           if (!st) body.innerHTML = `<p class="nd-warn">${esc(err.status === 403 ? 'Only an admin account can change these.' : err.message)}</p>`;
@@ -763,6 +786,17 @@ export function openNerdPanel() {
   body.addEventListener('click', async (e) => {
     const b = e.target.closest('button');
     if (!b) return;
+    if (b.matches('[data-deck-new]')) {
+      if (deck?.enabled && !confirm('Make a new Stream Deck link? The current one stops working.')) return;
+      const d = await confirmThen('/api/can/stream-deck');
+      if (d) { deckToken = d.token; await draw(); }
+      return;
+    }
+    if (b.matches('[data-deck-off]')) {
+      if (!confirm('Turn the Stream Deck link off? Its address stops answering.')) return;
+      if (await confirmThen('/api/can/stream-deck', { method: 'DELETE' })) { deckToken = null; await draw(); }
+      return;
+    }
     if (b.matches('[data-on]') && !b.matches('[data-use]')) {
       const car = body.querySelector('[data-token-car]')?.value || null;
       const d = await confirmThen('/api/can/enable', post('', { vehicleId: car }));
