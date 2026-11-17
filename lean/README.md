@@ -31,7 +31,7 @@ Bin, the footage catalog in its `catalog_*` tables), and Node's caches
 | viewer | `src/viewer/` | telemetry, the speed index, moments, scrub previews, filmstrips, places, the event map, drives and driving, archive gaps, work limits, the Studio file routes, `/api/media` |
 | ops | `src/ops/` | notifications and rules, health and the startup check, snapshots, power price and savings, image updates, metrics, the opt-in reports, system info, the server monitor (`/api/stats`: GPUs, power and RAPL, energy, data used, disks, shares, sensors, processes, alerts), the support bundle |
 | ui | `src/ui/` | every page and file as Node serves it, versioned links, the critical bar, early-data hints, interface packs, exports, settings and dashboards |
-| can | `src/can/` | CAN Bridge uploads (web port and core's device port), the CAN index, trust, search, sync, prune, downloads, Sentry USB files |
+| can | `src/can/` | CAN Bridge uploads (web port and core's device port), the CAN index (the newest logs first), trust, search, sync, prune, downloads, Sentry USB files, the live stats for a Stream Deck (`/api/can/now`, its link and pin, the plugin download) |
 | helper servers | `src/nodes/` | pairing with pinned certificates, remote encodes, the worker (`/node/v1/*`), the benchmark, the picture check, `/api/nodes*` |
 | converter | `src/converter/` | the job store, scanner, job service (lanes per GPU and per helper server), automatic conversion, the benchmark, the converted index, encoder and conversion stats, and runtime (encode, telemetry, verify, size retries, save, pause/cancel/resume, recovery after a crash), file safety (owned files, staging, recovery), MP4 writing, H.265/AV1 telemetry, verifier, planner; the 22 channels behind `/api/converter/invoke/:name` and `/api/converter/events` |
 | MP4 and telemetry readers | `src/mp4.rs`, `src/sei.rs`, `src/telemetry.rs`, `src/media.rs`, `src/thumbnails.rs` | box headers only, the quick and the full telemetry read, Range answers, thumbnails with ffmpeg |
@@ -50,8 +50,8 @@ On the integrated server (PORT_PLAN.md, "Integration", has the numbers):
   for the GET routes and one request of each other route, then live checks
   (`contractLive.js`) of what goldens cannot hold: the two event streams
   (topics per action, a real conversion's updates), the token routes
-  (`/metrics`, `/api/can/logs/ping`, `/node/v1/*` paired by Node's own main
-  side) and the random or session-ending answers; the owner's accepted
+  (`/metrics`, `/api/can/logs/ping`, `/api/can/now` with a Stream Deck
+  link, `/node/v1/*` paired by Node's own main side) and the random or session-ending answers; the owner's accepted
   differences are counted apart;
 - `node lean/parity/bigCompare.js`: every GET route on a generated archive
   of 3,000 clips (six cameras, Recent, Sentry and Saved with event.json and
@@ -61,7 +61,9 @@ On the integrated server (PORT_PLAN.md, "Integration", has the numbers):
   gap tests) and `node lean/parity/placeTags.js` (place tags and drives
   with CAN GPS);
 - per area: `compare.js` (footage lists, viewer, media), `compareFootage.js`
-  (the footage area's writes), `canCompare.js`, `opsCompare.js`,
+  (the footage area's writes), `canCompare.js`, `canNow.js` (the Stream
+  Deck's live stats on the CAN fixtures, while an upload arrives),
+  `opsCompare.js`,
   `uiCompare.js`, `contractUi.js`, `uiPages.js` (Chromium),
   `contractFootage.js`. Each signs in on lean as on Node.
 

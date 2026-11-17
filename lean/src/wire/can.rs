@@ -137,6 +137,15 @@ impl CanCtx for CoreCan {
     fn tls(&self) -> bool {
         self.state.tls.is_some()
     }
+    fn tls_status(&self) -> Option<Value> {
+        self.state.tls.as_ref()?.status().ok()
+    }
+    fn ca_pem(&self) -> Option<Vec<u8>> {
+        self.state.tls.as_ref()?.ca_pem()
+    }
+    fn app_root(&self) -> PathBuf {
+        self.state.config.app_root.clone()
+    }
     fn web_secure(&self, encrypted: bool, forwarded_https: bool, from: &str) -> bool {
         encrypted || (forwarded_https && crate::core::client_addr::from_trusted_proxy(Some(from), &self.state.proxy))
     }
@@ -206,6 +215,23 @@ pub fn answer(srv: &Arc<Server>, c: &mut CoreCtx) -> Result<Reply, HttpError> {
     match super::as_who(super::Who::of(c), || can.handle(&req)) {
         Some(res) => super::raw(res, c),
         None => Err(HttpError::not_found()),
+    }
+}
+
+/// Live CAN stats for a Stream Deck (/api/can/now…): only with the token made in the Nerd
+/// panel; read-only, no cookies, before core's checks (index.js answers it before them too).
+pub async fn now(srv: Arc<Server>, q: RawReq) -> crate::core::http::Res {
+    let Some(can) = srv.can().cloned() else { return crate::core::http::error_json(404, "Not found", None, "") };
+    let method = q.req.method().clone();
+    let path = q.req.uri().path().to_string();
+    let query = q.req.uri().query().map(String::from);
+    let headers = q.req.headers().clone();
+    let auth = headers.get(axum::http::header::AUTHORIZATION).and_then(|v| v.to_str().ok()).map(String::from);
+    let accept = headers.get(axum::http::header::ACCEPT_ENCODING).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    let res = tokio::task::spawn_blocking(move || can.now_answer(&method, &path, query.as_deref(), auth.as_deref())).await;
+    match res {
+        Ok(r) => super::gzip_json(r, &accept),
+        Err(_) => crate::core::http::error_json(500, "Internal error", None, &accept),
     }
 }
 

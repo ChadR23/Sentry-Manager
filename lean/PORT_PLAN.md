@@ -16,7 +16,7 @@ from Node, Rust is wrong unless the owner says otherwise.
 
 ## Size
 
-About 50,000 lines of JavaScript (`server/`, `src/main/`), 189 server routes
+About 50,000 lines of JavaScript (`server/`, `src/main/`), 196 server routes
 (`docs/api-contract.md`, regenerate with `node tools/contract/routes.js`), two
 live-update streams, the converter's 22 IPC channels over
 `POST /api/converter/invoke/:name`.
@@ -86,7 +86,7 @@ area is served through them (`src/wire/`, see "Integration" below).
 | viewer | ported (archive gaps with CAN Bridge and Sentry USB evidence, CAN GPS in place tags and drives, Studio's trashFolder) |
 | ops | ported, the server monitor included |
 | ui (pages, static files, interface packs, exports, settings) | ported |
-| can (CAN logs, uploads, device port, Sentry USB files) | ported |
+| can (CAN logs, uploads, device port, Sentry USB files, the Stream Deck's live stats) | ported |
 | converter | ported and mounted: job store, scanner, job service, lanes per GPU and per helper server, automatic conversion, benchmark, converted index, stats, runtime, the 22 channels behind `/api/converter/invoke/:name` and `/api/converter/events` |
 | helper servers (nodes) | ported and mounted (main side, worker, benchmark, picture check, the converter's node lanes) |
 
@@ -143,18 +143,19 @@ viewer `AppCtx`, CAN `lean.rs` and its plain-HTTP device port, the temporary
 
 Checked (all on the integrated server, 2026-11-16):
 
-- `cargo test --release`: 499 tests pass (every area's ports of Node's
+- `cargo test --release`: 540 tests pass (every area's ports of Node's
   tests and their parity runs against the Node code, among them the
   converter's store, scanner, jobs, lanes, automatic conversion, benchmark,
   crash suites and bridge, ops' stats replay, the arrival checksums, the
   helper servers, and `tests/archive_gap_parity.rs`: the 77 analyze() calls
   of Node's archive gap tests, every answer the same);
-- `contractAll.js` (all 189 routes): 186 answer the same, 3 the same but
+- `contractAll.js` (all 196 routes, with the Stream Deck's seven; rerun
+  2026-11-17): 193 answer the same, 3 the same but
   for an accepted difference (`GET /api/speeds/status` readMode,
   `GET /api/system` nativeHelper, the random code of
   `POST /api/nodes/worker/pair`), 0 differ, 0 not compared. Per area: core
   34, ops 27 + 1 accepted, ui 15, footage 30, nodes 18 + 1 accepted, viewer
-  29 + 1 accepted, CAN 31, converter 2. The replay now keeps the order the
+  29 + 1 accepted, CAN 38, converter 2. The replay now keeps the order the
   requests were recorded in (the three helper-server differences of the
   last run were the replay's file-name order: a pairing code cancelled
   before it was shown), and an allow-file entry carries its normalisers into
@@ -165,10 +166,13 @@ Checked (all on the integrated server, 2026-11-16):
   by themselves in a quiet minute), `/api/converter/events` (hello, then a
   real conversion of an event folder to the converted folder: its states,
   its last snapshot's clips and counters, its Activity row), `/metrics`,
-  `/api/can/logs/ping` and `/node/v1/info`, `/jobs/:id`, `/jobs/:id/output`
+  `/api/can/logs/ping`, `/api/can/now`, `/api/can/now/:stat` and
+  `/api/can/now/ca.crt` (a Stream Deck link made, its pin against the
+  server's own CA, a new link, off) and `/node/v1/info`, `/jobs/:id`, `/jobs/:id/output`
   with real tokens (node mode paired by Node's own main side), and 2fa/start,
   logout (a session of its own), metrics/enable, snapshots,
-  updates/check, can/enable, can/tokens, nodes/worker, speeds/index with
+  updates/check, can/enable, can/tokens, can/stream-deck (POST, DELETE),
+  nodes/worker, speeds/index with
   their random parts normalised;
 - `bigCompare.js` (3,000 clips, six cameras, Recent/Sentry/Saved with
   event.json and thumb.png, a read-only bind mount, the converter idle;
@@ -177,11 +181,12 @@ Checked (all on the integrated server, 2026-11-16):
   nativeHelper;
 - `compare.js`: 217 requests the same; `compareFootage.js`: 97 writing
   requests the same; `canCompare.js`: 151 requests, no differences;
+  `canNow.js` (the Stream Deck, CAN section): 423 answers, no differences;
   `uiCompare.js`: 2871 of 2871 answers the same; `contractUi.js`: 17 of 17;
   `uiPages.js` (Chromium): 30 of 30 pages load the same; `opsCompare.js`:
   15 of 17, the other two the accepted `host.node` and nativeHelper;
   `placeTags.js`: recordings, days and drives with CAN GPS the same;
-- `npm test` passes (1,420 tests, 94 skipped).
+- `npm test` passes (1,446 tests, 94 skipped; rerun 2026-11-17).
 
 ## Converter
 
@@ -938,7 +943,7 @@ Node quirks kept as they are: a board without an id gets the id
 export that is rendering (its folder name is not an export id).
 ## CAN (`src/can/`)
 
-Done: every route of the "CAN logs" (28) and "Sentry USB" (3) groups and
+Done: every route of the "CAN logs" (35, with the Stream Deck's seven) and "Sentry USB" (3) groups and
 the CAN Bridge upload API (`/api/can/logs`: ping, status, chunked uploads
 with their checks, token binding, wrong-token and per-token limits), on the
 web port and on the device port (`port.rs`, CAN_PORT, opened and closed with
@@ -974,8 +979,51 @@ Sentry USB's files on the share: 151 requests, the same answers; the
 server's own times, per-instance data folders, and the Sentry USB `record`
 part are normalised).
 
+Live CAN stats for a Stream Deck (Node 92ad4e1, d30853c, a9f2482, 0560668,
+edb6989): `now.rs` is canNow.js (the 32 stats with their signals, the
+coolant inlet temps included, each from the first signal with a value, the
+calc.* ones from `calc.rs`, the last minute's values looked for 5 minutes
+back, named states in words without the words every name shares, SNA left
+out, units.js canonUnit and the mi/km conversions, the digits per unit,
+Math.round then toFixed, stale past 5 minutes). `routes.rs` answers
+`GET /api/can/now[/<stat>[.txt]]` before core's checks (`wire::can::now`,
+a raw path as index.js answers it before the host and cookie checks):
+404 while no link, 405 but for GET and HEAD, `/api/can/now/ca.crt` public
+(the certificate authority, 404 "No local certificate authority." with an
+own certificate), the token by Bearer or ?token= (SHA-256, 401 plain text),
+`Access-Control-Allow-Origin: *` on every answer, units, car by its
+vehicle's id or name or a CAN key (else the newest), answers worked out at
+most every 3 s (16 kept, cleared with a new link or Turn off), plain text
+per stat ("—" without a value), 404 for an unknown stat, 500 when the stat
+does not decode; JSON gzipped over 1 KB. `GET|POST|DELETE
+/api/can/stream-deck` and `GET /api/can/stream-deck/plugin` (core's router:
+signed in, admins for POST/DELETE as viewerMay says, then adminHere with
+Node's 403 texts; the token shown once, its hash in `can-now`, the audit
+lines; the pin: `ca:` the local CA's SHA-256, `cert:` an own certificate's,
+none with Let's Encrypt serving; the plugin zipped from
+`APP_ROOT/assets/streamdeck` in name order as writeZip, deflated by
+flate2: the same files, other bytes, as original.zip). The index takes the
+logs that started in the last 15 minutes first, newest first, without
+waiting for the converter; older ones still wait for an idle moment, oldest
+first. The pages (web/nerd.js) and the plugin's files under `/assets/` are
+served by the ui area as Node serves them.
+
+Checked: `tests/can_now.rs` (test/canNow.test.js: the stats from a fake and
+a real index, the routes on the area with a stand-in for core, the pin, the
+car choice and the 3 s cache, a fresh log indexed while "converting" and
+the old one only once idle), `now.rs`'s own tests; `node
+lean/parity/canNow.js` (Node and lean on the CAN fixtures with CAR1's drive
+made 12 minutes ago, both with HTTPS: the link, its pin against each
+server's own CA, the plugin's files and bytes, every stat of every car in
+both units, the tokens, errors and headers, HEAD, gzip, then a fresh log
+uploaded through the CAN Bridge API to both and read back live once
+indexed, and web/nerd.js and the plugin's files as served: 423 answers, no differences, ageSec within 5 s); `canCompare.js`
+again (151 requests, no differences); contractAll and contractLive (the new
+routes, below).
+
 The area's needs from core are `ctx.rs` (`CanCtx`), implemented on core in
-`src/wire/can.rs`.
+`src/wire/can.rs` (`tls_status`, `ca_pem` and `app_root` for the Stream
+Deck).
 
 Not done yet:
 

@@ -250,6 +250,9 @@ pub struct Indexed {
 
 pub type ProfileOf = Box<dyn Fn(&CanIndex, &str) -> String + Send + Sync>;
 
+/// logs that started this recently are indexed at once, even while the converter runs
+pub const FRESH_MS: f64 = 15.0 * 60_000.0;
+
 pub struct CanIndex {
     pub can_dir: PathBuf,
     pub dir: PathBuf,
@@ -678,13 +681,20 @@ impl CanIndex {
         self.status.lock().unwrap().running = true;
         loop {
             self.again.store(false, Ordering::SeqCst);
-            let todo = self.pending_logs();
+            // the newest logs first, and those without waiting for the converter: they are the car
+            // now (the Stream Deck's live stats, the Nerd panel's live view), and one is a minute's
+            // work; the older ones (a catch-up) wait for an idle moment, oldest first
+            let now = (self.now)();
+            let fresh = |j: &Job| now - (j.started_at as f64) < FRESH_MS;
+            let (mut todo, older): (Vec<Job>, Vec<Job>) = self.pending_logs().into_iter().partition(|j| fresh(j));
+            todo.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+            todo.extend(older);
             self.status.lock().unwrap().pending = todo.len() as i64;
             if !todo.is_empty() {
                 self.progress();
             }
             for job in todo {
-                while !(self.idle)() {
+                while !fresh(&job) && !(self.idle)() {
                     std::thread::sleep(std::time::Duration::from_secs(2));
                 }
                 self.status.lock().unwrap().current = Some(job.name.clone());

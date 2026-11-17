@@ -4,7 +4,7 @@
 
 use super::Area;
 
-pub const ROUTES: [(&str, &str, Area); 140] = [
+pub const ROUTES: [(&str, &str, Area); 144] = [
     ("GET", "/api/system", Area::Ops),
     ("GET", "/api/ui-packs", Area::Ui),
     ("PUT", "/api/ui-packs/active", Area::Ui),
@@ -13,6 +13,10 @@ pub const ROUTES: [(&str, &str, Area); 140] = [
     ("GET", "/api/metrics/settings", Area::Ops),
     ("POST", "/api/metrics/enable", Area::Ops),
     ("POST", "/api/metrics/disable", Area::Ops),
+    ("GET", "/api/can/stream-deck", Area::Can),
+    ("POST", "/api/can/stream-deck", Area::Can),
+    ("GET", "/api/can/stream-deck/plugin", Area::Can),
+    ("DELETE", "/api/can/stream-deck", Area::Can),
     ("GET", "/api/notification-rules", Area::Ops),
     ("PUT", "/api/notification-rules", Area::Ops),
     ("GET", "/api/health", Area::Ops),

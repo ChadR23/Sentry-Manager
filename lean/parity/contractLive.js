@@ -10,12 +10,15 @@
 //     then the live updates of a real conversion of one event folder to the
 //     converted folder: the job's states in order, and its last snapshot);
 //   the token routes: GET /metrics (metrics turned on, its token), GET
-//     /api/can/logs/ping (CAN Bridge turned on, its token), GET /node/v1/info,
+//     /api/can/logs/ping (CAN Bridge turned on, its token), GET /api/can/now,
+//     /api/can/now/:stat and /api/can/now/ca.crt (a Stream Deck link made,
+//     its token, its pin, a new link, off), GET /node/v1/info,
 //     /node/v1/jobs/:id and /node/v1/jobs/:id/output (node mode on, paired by
 //     Node's own main side, server/nodes.js, with the code each server shows);
 //   the answers that are random or end the session: two-step set-up, sign-out
 //     (a fresh session of its own), metrics on, a database snapshot, the
-//     update check, CAN Bridge on and a token, node mode, the speed index kick.
+//     update check, CAN Bridge on and a token, the Stream Deck link, node mode,
+//     the speed index kick.
 //
 // Footage is never touched: the conversion writes a copy to DATA/converted.
 
@@ -220,6 +223,33 @@ async function script(server, password, clip) {
   note('GET /api/can/logs/ping', 'wrong token', snap(await bare('/api/can/logs/ping', { Authorization: 'Bearer nottheone' })));
   await c.request('POST', '/api/can/disable', { body: {} });
   note('GET /api/can/logs/ping', 'turned off', snap(await bare('/api/can/logs/ping', { Authorization: `Bearer ${canToken}` })));
+
+  // the Stream Deck link: made (its random token, each server's own pin), its read-only
+  // routes with the token, the certificate for the pin, a new link, off
+  const deckRules = [{ path: 'token', as: 'id' }, { path: 'pin', as: 'id' }];
+  const deck = await c.request('POST', '/api/can/stream-deck', { body: {} });
+  note('POST /api/can/stream-deck', 'make', snap(deck, deckRules));
+  const deckToken = encodeURIComponent(json(deck)?.token || '');
+  note('POST /api/can/stream-deck', 'pin', /^ca:[0-9a-f]{64}$/.test(json(deck)?.pin || '') && json(deck).pin.slice(3) === new crypto.X509Certificate(fs.readFileSync(server.ca)).fingerprint256.replace(/:/g, '').toLowerCase());
+  note('GET /api/can/now', 'with token', snap(await bare(`/api/can/now?token=${deckToken}`, {})));
+  note('GET /api/can/now', 'km, a car', snap(await bare(`/api/can/now?token=${deckToken}&units=km&car=contract-car`, {})));
+  note('GET /api/can/now', 'Bearer', snap(await bare('/api/can/now', { Authorization: `Bearer ${decodeURIComponent(deckToken)}` })));
+  note('GET /api/can/now', 'wrong token', snap(await bare('/api/can/now?token=nottheone', {})));
+  note('GET /api/can/now', 'any origin', await Promise.all(['/api/can/now?token=nottheone', `/api/can/now?token=${deckToken}`, '/api/can/now/ca.crt'].map(async (p) => (await bare(p, {})).headers['access-control-allow-origin'] ?? null)));
+  note('GET /api/can/now/:stat', 'with token', snap(await bare(`/api/can/now/battery?token=${deckToken}`, {})));
+  note('GET /api/can/now/:stat', '.txt', snap(await bare(`/api/can/now/speed.txt?token=${deckToken}`, {})));
+  note('GET /api/can/now/:stat', 'no such stat', snap(await bare(`/api/can/now/nope?token=${deckToken}`, {})));
+  note('GET /api/can/now/:stat', 'no token', snap(await bare('/api/can/now/battery', {})));
+  {
+    const ca = await bare('/api/can/now/ca.crt', {});
+    note('GET /api/can/now/ca.crt', 'on', { status: ca.status, type: ca.headers['content-type'], acao: ca.headers['access-control-allow-origin'], same: ca.body.equals(fs.readFileSync(server.ca)) });
+  }
+  note('GET /api/can/stream-deck', 'on', snap(await c.request('GET', '/api/can/stream-deck'), [{ path: 'pin', as: 'id' }]));
+  await c.request('POST', '/api/can/stream-deck', { body: {} });
+  note('GET /api/can/now', 'the old token', snap(await bare(`/api/can/now?token=${deckToken}`, {})));
+  note('DELETE /api/can/stream-deck', 'off', snap(await c.request('DELETE', '/api/can/stream-deck', { body: {} })));
+  note('GET /api/can/now', 'off', snap(await bare(`/api/can/now?token=${deckToken}`, {})));
+  note('GET /api/can/now/ca.crt', 'off', snap(await bare('/api/can/now/ca.crt', {})));
 
   // the speed index kick
   note('POST /api/speeds/index', 'kick', snap(await c.request('POST', '/api/speeds/index', { body: {} }), [{ path: 'readMode', as: 'drop' }]));

@@ -165,7 +165,11 @@ const ROUTES = {
   'GET /api/can/raw': { requests: (ctx) => each(ctx, (v) => v.clips.slice(0, 1).map((rel) => ({ path: '/api/can/raw', query: { path: clipPath(v, rel) } }))) },
   'GET /api/can/vehicle-signals': { requests: (ctx) => each(ctx, (v) => [{ path: '/api/can/vehicle-signals', query: { vehicle: v.id } }]) },
   'GET /api/can/files/:name/download': { requests: () => [{ path: '/api/can/files/none.log.xz/download' }] },
-  'GET /api/can/files/:name/candump': { requests: () => [{ path: '/api/can/files/none.log.xz/candump' }] }
+  'GET /api/can/files/:name/candump': { requests: () => [{ path: '/api/can/files/none.log.xz/candump' }] },
+  // the Stream Deck link (off in the fixture: /api/can/now answers 404; with a link, compared live)
+  'GET /api/can/stream-deck': { normalise: [{ path: 'pin', as: 'id' }] }, // each server's own certificate authority
+  'GET /api/can/stream-deck/plugin': { body: 'ignore' }, // the plugin's files zipped (deflated: the bytes follow the compressor)
+  'GET /api/can/now/:stat': { requests: () => [{ path: '/api/can/now/battery', query: { token: 'none' } }] }
 };
 
 module.exports = { SKIP, ROUTES, discover, folders };

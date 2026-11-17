@@ -142,6 +142,18 @@ pub trait CanCtx: Send + Sync + 'static {
     fn cert_fingerprint(&self) -> Option<String> {
         None
     }
+    /// tlsSource.status() (None without HTTPS of its own, or when it cannot be read)
+    fn tls_status(&self) -> Option<Value> {
+        None
+    }
+    /// tlsSource.caPem(): the local certificate authority's certificate (None with an own certificate)
+    fn ca_pem(&self) -> Option<Vec<u8>> {
+        None
+    }
+    /// APP_ROOT (assets/streamdeck: the Stream Deck plugin)
+    fn app_root(&self) -> PathBuf {
+        PathBuf::from(".")
+    }
     /// the server has its own HTTPS (tlsSource)
     fn tls(&self) -> bool {
         false

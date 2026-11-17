@@ -409,6 +409,13 @@ fn register(srv: &Arc<Server>, r: &mut Router) {
         let s = s.clone();
         Box::pin(async move { nodes::node_v1(s, q).await })
     });
+    for p in ["/api/can/now", "/api/can/now/"] {
+        let s = srv.clone();
+        r.raw(p, move |q: RawReq| {
+            let s = s.clone();
+            Box::pin(async move { can::now(s, q).await })
+        });
+    }
     for p in ["/api/can/logs", "/api/can/logs/"] {
         let s = srv.clone();
         r.raw(p, move |q: RawReq| {

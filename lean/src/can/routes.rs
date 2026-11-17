@@ -193,6 +193,25 @@ const CAN_DECODED_HOURS: f64 = 24.0;
 const CAN_DECODED_ROWS: usize = 5_000_000;
 const CAN_HEARTBEAT_MS: f64 = 60_000.0;
 const CAN_STALL: Duration = Duration::from_secs(60);
+/// GET /api/can/now: an answer is worked out at most this often (a Stream Deck asks once per key every few seconds)
+const NOW_TTL_MS: f64 = 3000.0;
+
+/// String(authorization).replace(/^Bearer\s+/i, '')
+fn strip_bearer(h: &str) -> String {
+    if h.get(..6).is_some_and(|p| p.eq_ignore_ascii_case("bearer")) {
+        let rest = &h[6..];
+        let t = rest.trim_start_matches(super::now::js_space);
+        if t.len() < rest.len() {
+            return t.to_string();
+        }
+    }
+    h.to_string()
+}
+
+/// crypto.timingSafeEqual for buffers of the same length
+fn same_bytes(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
 
 struct Every {
     running: usize,
@@ -228,6 +247,8 @@ pub struct Can {
     /// the device port's wish changed: (re)open or close it
     pub on_port: Mutex<Option<Box<dyn Fn(bool) + Send + Sync>>>,
     progress_due: AtomicBool,
+    /// GET /api/can/now's answers, a few seconds each: "<keys>|<units>" -> (when, answer)
+    now_cache: Mutex<indexmap::IndexMap<String, (f64, Option<Value>)>>,
 }
 
 fn can_index_dir(ctx: &dyn CanCtx) -> PathBuf {
@@ -329,6 +350,7 @@ impl Can {
                 port_state: Mutex::new(PortState { listening: false, error: None, port: ctx.can_port() }),
                 on_port: Mutex::new(None),
                 progress_due: AtomicBool::new(false),
+                now_cache: Mutex::new(indexmap::IndexMap::new()),
             }
         })
     }
@@ -613,6 +635,10 @@ impl Can {
                 Some(id) => self.sentry_usb_record(req, &id),
                 None => return None,
             },
+            ["api", "can", "stream-deck"] if get => self.deck_get(req),
+            ["api", "can", "stream-deck"] if post => self.deck_make(req),
+            ["api", "can", "stream-deck"] if del => self.deck_off(req),
+            ["api", "can", "stream-deck", "plugin"] if get => self.deck_plugin(req),
             _ => return None,
         };
         Some(match r {
@@ -1003,6 +1029,209 @@ impl Can {
         self.save_can_cfg(enabled, &at, &rest);
         self.ctx.audit("warn", &format!("CAN Bridge token \"{}\" revoked: {}", t.get("label").map(|l| json::js_str(Some(l))).unwrap_or_default(), req.who.by));
         Ok(ok(json!({ "ok": true })))
+    }
+
+    // ---- Live CAN stats for a Stream Deck (now.rs): GET /api/can/now with its own read-only
+    // token, made here (admins, the Nerd panel). Off until a link is made.
+
+    /// What the plugin pins (the link's pin=): the local certificate authority while the server's
+    /// certificate comes from it, else the server's own certificate; none with a certificate every
+    /// computer already trusts (Let's Encrypt) or without HTTPS of its own.
+    fn deck_pin(&self) -> Value {
+        let Some(st) = self.ctx.tls_status().filter(|s| json::truthy(Some(s))) else { return Value::Null };
+        let fp_of = |v: &Value| v.get("fingerprint").filter(|f| json::truthy(Some(f))).map(|f| logs::js_string(f).replace(':', "").to_lowercase());
+        let mode = st.get("mode").and_then(|m| m.as_str());
+        if mode == Some("acme") && st.get("serving").and_then(|m| m.as_str()) == Some("acme") {
+            return Value::Null;
+        }
+        if mode == Some("own") {
+            return st.get("certificate").and_then(fp_of).map_or(Value::Null, |h| Value::String(format!("cert:{}", h)));
+        }
+        st.get("ca").and_then(fp_of).map_or(Value::Null, |h| Value::String(format!("ca:{}", h)))
+    }
+    fn deck_admin(req: &Req, what: &str) -> Result<(), HttpError> {
+        if req.who.admin_here {
+            Ok(())
+        } else {
+            Err(he(403, format!("Only an admin can {} the Stream Deck {}.", what, if what == "download" { "plugin" } else { "link" })))
+        }
+    }
+    fn deck_get(&self, req: &Req) -> R {
+        Self::deck_admin(req, "manage")?;
+        let cfg = self.ctx.setting("can-now").unwrap_or(Value::Null);
+        let at = cfg.get("at").filter(|a| json::truthy(Some(a))).cloned().unwrap_or(Value::Null);
+        Ok(ok(json!({ "enabled": json::truthy(cfg.get("tokenHash")), "at": at, "pin": self.deck_pin(), "stats": super::now::stats_list() })))
+    }
+    fn deck_make(&self, req: &Req) -> R {
+        Self::deck_admin(req, "manage")?;
+        let token = util::base64url(&util::random(24));
+        self.ctx.set_setting("can-now", json!({ "tokenHash": util::sha256_hex(token.as_bytes()), "at": n(util::now_ms()) }));
+        self.now_cache.lock().unwrap().clear();
+        self.ctx.audit("warn", &format!("Stream Deck link made (new token; any older link stops working): {}", req.who.by));
+        Ok(ok(json!({ "enabled": true, "token": token, "pin": self.deck_pin(), "stats": super::now::stats_list() })))
+    }
+    fn deck_off(&self, req: &Req) -> R {
+        Self::deck_admin(req, "manage")?;
+        self.ctx.set_setting("can-now", Value::Null);
+        self.now_cache.lock().unwrap().clear();
+        self.ctx.audit("warn", &format!("Stream Deck link turned off: {}", req.who.by));
+        Ok(ok(json!({ "enabled": false })))
+    }
+    /// The Stream Deck plugin (assets/streamdeck), zipped as the .streamDeckPlugin file Stream Deck installs.
+    fn deck_plugin(&self, req: &Req) -> R {
+        Self::deck_admin(req, "download")?;
+        let root = self.ctx.app_root().join("assets").join("streamdeck");
+        let mut files: Vec<String> = Vec::new();
+        let mut todo = vec!["com.sentrysix.canstats.sdPlugin".to_string()];
+        let fail = |e: std::io::Error| {
+            self.ctx.log("error", &format!("{} {}: {}", req.method, req.path, e));
+            he(500, "Internal error")
+        };
+        while !todo.is_empty() {
+            let rel = todo.remove(0);
+            let mut list: Vec<(String, bool)> = Vec::new();
+            for e in std::fs::read_dir(root.join(&rel)).map_err(fail)? {
+                let e = e.map_err(fail)?;
+                let dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                list.push((e.file_name().to_string_lossy().into_owned(), dir));
+            }
+            list.sort();
+            for (name, dir) in list {
+                if dir {
+                    todo.push(format!("{}/{}", rel, name));
+                } else {
+                    files.push(format!("{}/{}", rel, name));
+                }
+            }
+        }
+        files.sort_by(|a, b| a.encode_utf16().cmp(b.encode_utf16()));
+        let mut entries = Vec::new();
+        for name in files {
+            let data = std::fs::read(root.join(&name)).map_err(fail)?;
+            entries.push(crate::ui::zip::Entry { name, data });
+        }
+        let zip = crate::ui::zip::write_zip(&entries);
+        Ok(Response::builder()
+            .status(200)
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header(header::CONTENT_LENGTH, zip.len())
+            .header(header::CACHE_CONTROL, "no-store")
+            .header(header::CONTENT_DISPOSITION, attachment("Sentry Six CAN Stats.streamDeckPlugin"))
+            .body(Body::from(zip))
+            .unwrap())
+    }
+
+    /// GET /api/can/now[/<stat>][?token=…&car=…&units=mi|km]: the newest CAN values, or one as
+    /// plain text; before core's checks (its own token, no cookies). JSON answers are not gzipped
+    /// here (the caller does, as sendJson).
+    pub fn now_answer(&self, method: &Method, raw_path: &str, raw_query: Option<&str>, authorization: Option<&str>) -> Res {
+        let mut res = self.now_inner(method, raw_path, raw_query, authorization);
+        // read by the Stream Deck plugin from its own origin: allowed, as only the token lets it in (no cookies)
+        res.headers_mut().insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
+        res
+    }
+    fn now_inner(&self, method: &Method, raw_path: &str, raw_query: Option<&str>, authorization: Option<&str>) -> Res {
+        let err = |status: u16, msg: &str| json_res(status, &json!({ "error": msg }));
+        let text = |status: u16, body: String| {
+            Response::builder().status(status).header(header::CONTENT_TYPE, "text/plain; charset=utf-8").header(header::CACHE_CONTROL, "no-store").body(Body::from(body)).unwrap()
+        };
+        let cfg = self.ctx.setting("can-now").unwrap_or(Value::Null);
+        if !json::truthy(cfg.get("tokenHash")) {
+            return err(404, "Not found");
+        }
+        if *method != Method::GET && *method != Method::HEAD {
+            return err(405, "GET only");
+        }
+        // the local certificate authority's certificate (public, no token): the plugin fetches it
+        // once and keeps it only when its fingerprint is the link's pin
+        if raw_path == "/api/can/now/ca.crt" {
+            let Some(pem) = self.ctx.ca_pem().filter(|p| !p.is_empty()) else { return err(404, "No local certificate authority.") };
+            return Response::builder().status(200).header(header::CONTENT_TYPE, "application/x-x509-ca-cert").header(header::CACHE_CONTROL, "no-store").body(Body::from(pem)).unwrap();
+        }
+        let param = |k: &str| -> Option<String> {
+            raw_query?.split('&').filter(|p| !p.is_empty()).find_map(|p| {
+                let (a, b) = p.split_once('=').unwrap_or((p, ""));
+                (crate::api::decode(a, true).as_deref() == Some(k)).then(|| crate::api::decode(b, true).unwrap_or_default())
+            })
+        };
+        let bearer = strip_bearer(authorization.unwrap_or(""));
+        let given = if bearer.is_empty() { param("token").unwrap_or_default() } else { bearer };
+        let want_hash = match cfg.get("tokenHash") {
+            Some(Value::String(h)) => h.clone(),
+            _ => return err(500, "Internal error"),
+        };
+        let hash = util::sha256_hex(given.as_bytes());
+        if !given.is_empty() && hash.len() != want_hash.len() {
+            // (crypto.timingSafeEqual throws on buffers of different lengths)
+            return err(500, "Internal error");
+        }
+        if given.is_empty() || !same_bytes(hash.as_bytes(), want_hash.as_bytes()) {
+            return text(401, "Token required (Nerd panel → Stream Deck)".into());
+        }
+        let km = param("units").as_deref() == Some("km");
+        let units = if km { "km" } else { "mi" };
+        // which car: its vehicle's id or name, or a CAN key; else the one with the newest data
+        let want = param("car").unwrap_or_default().trim_matches(super::now::js_space).to_lowercase();
+        let mut keys = util::subdirs(&can_index_dir(&*self.ctx));
+        if !want.is_empty() {
+            keys.retain(|k| {
+                if k.to_lowercase() == want {
+                    return true;
+                }
+                let car = self.car_of_key(k);
+                [car.as_ref().map(|c| c.id.clone()), car.as_ref().map(|c| c.name.clone())].iter().any(|x| x.clone().unwrap_or_default().to_lowercase() == want)
+            });
+        }
+        let id = format!("{}|{}", keys.join(","), units);
+        let hit = self.now_cache.lock().unwrap().get(&id).cloned();
+        let hit = match hit {
+            Some(h) if util::now_ms() - h.0 <= NOW_TTL_MS => h,
+            _ => {
+                let mut best: Option<super::now::Latest> = None;
+                for key in &keys {
+                    if let Some(got) = super::now::latest_stats(&*self.index, key, km, util::now_ms()) {
+                        if best.as_ref().is_none_or(|b| got.at > b.at) {
+                            best = Some(got);
+                        }
+                    }
+                }
+                let answer = best.map(|b| {
+                    let car = self.car_of_key(&b.key).map(|c| c.name).filter(|nm| !nm.is_empty());
+                    let mut stats = Map::new();
+                    for s in &b.stats {
+                        stats.insert(s.id.to_string(), json!({ "label": s.label, "value": s.value.clone(), "unit": s.unit.clone(), "text": s.text.clone() }));
+                    }
+                    json!({ "car": car, "at": tz::iso(b.at as i64), "ageSec": n(b.age_sec), "stale": b.stale, "units": units, "stats": stats })
+                });
+                let h = (util::now_ms(), answer);
+                let mut cache = self.now_cache.lock().unwrap();
+                cache.insert(id, h.clone());
+                while cache.len() > 16 {
+                    cache.shift_remove_index(0);
+                }
+                h
+            }
+        };
+        let tail = raw_path["/api/can/now".len()..].strip_prefix('/').unwrap_or(&raw_path["/api/can/now".len()..]);
+        let tail = tail.strip_suffix(".txt").unwrap_or(tail);
+        let Some(stat) = crate::api::decode(tail, false) else {
+            self.ctx.log("error", &format!("{} {}: URIError: URI malformed", method, raw_path));
+            return err(500, "Internal error");
+        };
+        let stat = if stat.is_empty() { param("stat").unwrap_or_default() } else { stat };
+        if !stat.is_empty() {
+            let ids = super::now::stat_ids();
+            if !ids.contains(&stat.as_str()) {
+                return err(404, &format!("No stat \"{}\". Stats: {}", util::utf16_slice(&stat, 40), ids.join(", ")));
+            }
+            // plain text for a Stream Deck key: the value with its unit, "—" without one
+            let t = hit.1.as_ref().and_then(|a| a["stats"].get(&stat)).and_then(|s| s.get("text")).and_then(|t| t.as_str()).map(String::from);
+            return text(200, t.unwrap_or_else(|| "—".into()));
+        }
+        match hit.1 {
+            None => json_res(200, &json!({ "car": null, "at": null, "stale": true, "units": units, "stats": {} })),
+            Some(a) => json_res(200, &a),
+        }
     }
 
     fn pairing(self: &Arc<Self>, req: &Req, key: &str, what: &str) -> R {

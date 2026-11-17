@@ -6,7 +6,7 @@
 // tools/contract/record.js records every GET route from Node plus one request
 // for each other route (lean/parity/contractAllow.json: refusals and checks
 // that are the same each time), tools/contract/compare.js replays them against
-// lean. Prints, for all 189 routes, which answer the same, which differ and
+// lean. Prints, for every route of the contract (196), which answer the same, which differ and
 // which are not compared, by area.
 //
 //   node lean/parity/contractAll.js [--dir /tmp/sm-all] [--settle 75] [--json out.json]

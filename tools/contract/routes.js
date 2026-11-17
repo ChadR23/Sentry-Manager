@@ -95,11 +95,15 @@ function serverRoutes() {
   // before the host and cookie checks: tokens, no cookies
   const early = [
     [/if \(rawPath === '\/metrics'\)/, 'GET', '/metrics', 'metrics-token', 'Prometheus text; Bearer token made in Health; 404 while off'],
+    [/if \(rawPath === '\/api\/can\/now'/, 'GET', '/api/can/now', 'can-now-token', 'Live CAN stats for a Stream Deck (JSON); the read-only token made in the CAN Nerd panel (?token= or Bearer); 404 while off'],
+    [/if \(rawPath === '\/api\/can\/now'/, 'GET', '/api/can/now/:stat', 'can-now-token', 'one stat as plain text (also /<stat>.txt); the Stream Deck token; 404 while off', false, 'text/plain; charset=utf-8'],
+    [/if \(url\.pathname === '\/api\/can\/now\/ca\.crt'\)/, 'GET', '/api/can/now/ca.crt', 'public', 'the local certificate authority for the Stream Deck plugin\'s pin; only while a Stream Deck link is on', true, 'application/x-x509-ca-cert'],
     [/if \(rawPath === '\/healthz'\)/, 'GET', '/healthz', 'public', 'plain "ok"']
   ];
-  for (const [r, method, p, auth, note] of early) {
-    const m = r.exec(handler);
-    if (m) routes.push(describe({ method, path: p, file, line: line(hStart + m.index), kind: 'inline', auth, note }));
+  for (const [r, method, p, auth, note, whole, type] of early) {
+    // (whole: found anywhere in index.js, e.g. inside a function the handler calls; type: a raw answer's)
+    const m = r.exec(whole ? src : handler);
+    if (m) routes.push(describe({ method, path: p, file, line: line((whole ? 0 : hStart) + m.index), kind: 'inline', auth, note, body: type ? `res.writeHead(200, { 'Content-Type': '${type}' })` : '' }));
   }
 
   // CAN Bridge uploads (docs/can-bridge-api.md): a write-only token
@@ -390,7 +394,7 @@ function build() {
     r.calledFrom = [...packs].sort();
   }
   // routes only other programs call (no page): token APIs and helpers
-  const external = (r) => r.auth !== 'session' && r.auth !== 'public' || r.path.startsWith('/node/');
+  const external = (r) => r.auth !== 'session' && r.auth !== 'public' || r.path.startsWith('/node/') || r.path === '/api/can/now/ca.crt';
   const notCalled = routes.filter((r) => !r.callSites);
   const distinct = new Set(routes.filter((r) => r.path.startsWith('/api/')).map((r) => r.path));
   const uiDistinct = new Set(calls.map((c) => `${c.method} ${c.path}`));
