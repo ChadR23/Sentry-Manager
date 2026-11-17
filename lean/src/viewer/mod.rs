@@ -20,6 +20,7 @@ pub mod places;
 pub mod recording_place;
 pub mod routes;
 pub mod scrub;
+pub mod speed_entry;
 pub mod speed_index;
 pub mod speed_reader;
 pub mod studio;

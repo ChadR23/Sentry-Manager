@@ -74,8 +74,11 @@ impl CanCtx for CoreCan {
             error_count: st.error_count,
             files,
             recordings,
-            generation: Arc::as_ptr(&st.recordings) as u64,
+            generation: st.generation,
         })
+    }
+    fn scan_generation(&self, vid: &str) -> Option<u64> {
+        Some(self.srv()?.app().state_of(vid)?.generation)
     }
     fn rescan(&self, vid: &str) -> Result<(), String> {
         let s = self.srv().ok_or("stopping")?;

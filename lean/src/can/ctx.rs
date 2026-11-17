@@ -86,6 +86,10 @@ pub trait CanCtx: Send + Sync + 'static {
         self.vehicles().into_iter().find(|v| v.id == id)
     }
     fn scan_of(&self, vid: &str) -> Option<Scan>;
+    /// Scan::generation without copying the scan
+    fn scan_generation(&self, vid: &str) -> Option<u64> {
+        self.scan_of(vid).map(|s| s.generation)
+    }
     /// inventory.scan(vid), waiting for it
     fn rescan(&self, vid: &str) -> Result<(), String>;
     /// the files of the vehicle's Recycle Bin items (rels)

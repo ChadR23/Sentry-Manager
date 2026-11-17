@@ -12,11 +12,13 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Weak};
 
+type FilesCache = HashMap<String, (Weak<Vec<crate::scanner::FileEntry>>, Files)>;
+
 pub struct CoreViewer {
     srv: Weak<Server>,
     state: Arc<crate::core::AppState>,
-    /// the last scan's files by rel, per vehicle, with the scan they come from
-    files: Mutex<HashMap<String, (f64, Files)>>,
+    /// the last scan's files by rel, per vehicle, with the list they come from
+    files: Mutex<FilesCache>,
 }
 
 impl CoreViewer {
@@ -48,15 +50,15 @@ impl Ctx for CoreViewer {
     fn files(&self, id: &str) -> Option<Files> {
         let s = self.srv()?;
         let st = s.app().state_of(id).filter(|st| st.scanned)?;
-        let stamp = st.scanned_at?;
+        st.scanned_at?;
         let mut cache = self.files.lock().unwrap();
-        if let Some((at, f)) = cache.get(id) {
-            if *at == stamp && f.len() == st.file_list.len() {
+        if let Some((list, f)) = cache.get(id) {
+            if Weak::as_ptr(list) == Arc::as_ptr(&st.file_list) {
                 return Some(f.clone());
             }
         }
         let f: Files = Arc::new(st.file_list.iter().map(|e| (e.rel.clone(), e.clone())).collect());
-        cache.insert(id.to_string(), (stamp, f.clone()));
+        cache.insert(id.to_string(), (Arc::downgrade(&st.file_list), f.clone()));
         Some(f)
     }
     fn recordings(&self, id: &str) -> Option<Arc<Vec<Recording>>> {

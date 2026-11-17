@@ -22,9 +22,17 @@ const LIGHT_SCANS: u32 = 5;
 // (vehicles live in the footage area now: footage/vehicles.rs)
 pub use crate::footage::vehicles::Vehicle;
 
+static GENERATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn next_generation() -> u64 {
+    GENERATIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+}
+
 #[derive(Default, Clone)]
 pub struct VehicleState {
     pub recordings: Arc<Vec<Recording>>,
+    /// new whenever `recordings` is replaced; never reused (an Arc's address can be)
+    pub generation: u64,
     pub codecs: Arc<Codecs>,
     pub files: usize,
     pub scanned_at: Option<f64>,
@@ -223,6 +231,7 @@ impl App {
         let files = Arc::new(res.files);
         let entry = VehicleState {
             recordings: Arc::new(recs),
+            generation: next_generation(),
             codecs: Arc::new(codecs),
             files: files.len(),
             scanned_at: Some(res.scanned_at),
@@ -257,6 +266,7 @@ impl App {
         let mut recs = inventory::build_recordings(&e.file_list, vid);
         inventory::mark_protected(&mut recs, &protected);
         e.recordings = Arc::new(recs);
+        e.generation = next_generation();
         let list = e.file_list.clone();
         drop(st);
         if let Err(err) = self.catalog.sync_files(vid, &list) {
