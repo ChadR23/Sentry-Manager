@@ -140,15 +140,30 @@ function deviceIndex(device) {
   return String(device.index);
 }
 
+// smallest: the Smallest (CPU only) profile, { maxrate } in bit/s or null: libx265
+// veryfast at CRF 27 with peaks capped at maxrate (60% of the original's
+// average bitrate) and a buffer of twice that, or a retry's bitrate under the
+// original's as for constant quality; B-frames either way. Its frames are
+// shown at the original's own times: the original's time base (two frames
+// never share a tick), no edit list, and composition offsets that may be
+// negative (ctts version 1) where the first frame would otherwise be late.
+// keepOrder: a clip given back the original's own timing (lead-in frames or
+// samples no decoder outputs, leadIn.js) is encoded without reordering, so
+// retimeToSource can pair its samples one for one.
+//
 // holdFrames: a clip that starts before its first keyframe (see leadIn.js)
 // gets the first decodable frame repeated that many times in front, so the
 // encoded file has every frame of the original. tpad clones the frame it is
 // given, so it runs on system-memory frames before any upload; GPU-resident
 // (zero-copy) frames are not used for such clips (jobService).
-function buildEncodeArgs({ codec, encoder, bitrate, quality = null, vaapiDevice = '/dev/dri/renderD128', hwFrames = false, device = null, holdFrames = 0, cpuPreset = process.env.CPU_ENCODER_PRESET }) {
+function buildEncodeArgs({ codec, encoder, bitrate, quality = null, vaapiDevice = '/dev/dri/renderD128', hwFrames = false, device = null, holdFrames = 0, cpuPreset = process.env.CPU_ENCODER_PRESET, smallest = null, keepOrder = false }) {
   const speed = CPU_PRESETS[cpuPresetFrom(cpuPreset)];
   requireFamily(codec);
-  if (quality === null) requirePositive('bitrate', bitrate);
+  if (smallest !== null) {
+    if (codec !== 'h265' || encoder !== 'libx265' || quality !== null) throw new RangeError('Smallest (CPU only) is libx265 without a quality level');
+    if (smallest.maxrate !== null && !(Number.isSafeInteger(smallest.maxrate) && smallest.maxrate > 0)) throw new RangeError('maxrate must be a positive safe integer or null');
+    if (bitrate !== null && bitrate !== undefined) requirePositive('bitrate', bitrate);
+  } else if (quality === null) requirePositive('bitrate', bitrate);
   if (typeof encoder !== 'string' || !encoderBelongsToFamily(codec, encoder)) {
     throw new RangeError(`Encoder ${encoder} is not a ${codec} candidate`);
   }
@@ -170,7 +185,12 @@ function buildEncodeArgs({ codec, encoder, bitrate, quality = null, vaapiDevice 
 
   args.push('-c:v', encoder);
   if (device && encoder.endsWith('_nvenc')) args.push('-gpu', deviceIndex(device));
-  if (quality !== null) args.push(...qualityRateArgs(codec, encoder, quality));
+  if (smallest !== null) {
+    if (bitrate === null || bitrate === undefined) {
+      args.push('-crf', '27');
+      if (smallest.maxrate !== null) args.push('-maxrate', String(smallest.maxrate), '-bufsize', String(2 * smallest.maxrate));
+    } else args.push(...bitrateArgs(encoder, bitrate));
+  } else if (quality !== null) args.push(...qualityRateArgs(codec, encoder, quality));
   else args.push(...bitrateArgs(encoder, bitrate));
 
   // GPU-resident input frames (zero-copy decode) are already 8-bit 4:2:0 and
@@ -193,17 +213,20 @@ function buildEncodeArgs({ codec, encoder, bitrate, quality = null, vaapiDevice 
   if (encoder.endsWith('_nvenc')) args.push('-forced-idr', '1');
   if (encoder.endsWith('_qsv')) args.push('-forced_idr', '1');
   if (encoder === 'libsvtav1') args.push('-svtav1-params', 'keyint=2s');
-  if (encoder === 'libx265') args.push('-preset', speed.libx265);
+  if (encoder === 'libx265') args.push('-preset', smallest !== null ? 'veryfast' : speed.libx265);
   if (encoder === 'libsvtav1') args.push('-preset', speed.libsvtav1);
   if (encoder === 'libaom-av1') args.push('-cpu-used', speed.aom, '-row-mt', '1');
-  if (codec === 'h265') args.push('-bf', '0');
+  const reorder = smallest !== null && !keepOrder;
+  if (codec === 'h265' && !reorder) args.push('-bf', '0');
 
   args.push(
     '-tag:v', codec === 'h265' ? 'hvc1' : 'av01',
     '-fps_mode', 'passthrough',
+    ...(reorder ? ['-enc_time_base', 'demux'] : []),
     '-start_at_zero',
-    '-avoid_negative_ts', 'make_zero',
-    '-use_editlist', '0'
+    ...(reorder ? [] : ['-avoid_negative_ts', 'make_zero']),
+    '-use_editlist', '0',
+    ...(reorder ? ['-movflags', '+negative_cts_offsets'] : [])
   );
   return args;
 }

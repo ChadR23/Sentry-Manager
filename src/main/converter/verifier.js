@@ -3,7 +3,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { PROFILES, CUSTOM_PROFILE_ID, QUALITY_PROFILE_ID, hasSizeTarget, targetOutputBytes, isWithinProfile } = require('./contracts');
+const { PROFILES, CUSTOM_PROFILE_ID, QUALITY_PROFILE_ID, SMALLEST_PROFILE_ID, hasSizeTarget, targetOutputBytes, isWithinProfile } = require('./contracts');
 
 // A Tesla camera file can be a very short terminal fragment (for example a
 // 1–2 second clip when the vehicle changes state). MP4/SEI/container overhead
@@ -82,7 +82,7 @@ function failure(reason, sourceBytes, outputBytes, details = {}) {
 }
 
 function canonicalProfileId(profileId) {
-  if (profileId === CUSTOM_PROFILE_ID || profileId === QUALITY_PROFILE_ID) return profileId;
+  if (profileId === CUSTOM_PROFILE_ID || profileId === QUALITY_PROFILE_ID || profileId === SMALLEST_PROFILE_ID) return profileId;
   const canonical = PROFILE_ALIASES[profileId] || profileId;
   if (!Object.prototype.hasOwnProperty.call(PROFILES, canonical)) throw new RangeError('Unknown profile');
   return canonical;
@@ -831,6 +831,21 @@ function frameTimingMismatch(sourceSamples, outputSamples) {
   return null;
 }
 
+// The first frame, in the order shown, whose time differs from the
+// original's by more than 1 us (rounding between time scales), or null.
+function shownTimingMismatch(sourceSamples, outputSamples) {
+  const shown = outputSamples.map((sample) => sample.ptsUs).sort((left, right) => left - right);
+  const count = Math.max(sourceSamples.length, shown.length);
+  for (let index = 0; index < count; index += 1) {
+    const source = sourceSamples[index]?.ptsUs;
+    const output = shown[index];
+    if (source === undefined || output === undefined || Math.abs(source - output) > 1) {
+      return { shownIndex: index, sourcePtsUs: source ?? null, outputPtsUs: output ?? null };
+    }
+  }
+  return null;
+}
+
 // Verification off: the saved file must still be exactly the encoded file and
 // smaller than its original, and a size profile's window still applies (its
 // retry keeps the promised compression); nothing about the video itself is
@@ -1001,6 +1016,19 @@ async function verifyOwnedSnapshot({ options, profileId, sourceBytes, outputByte
         kind: 'source-output-frame-timing',
         leadInFrames: source.leadInFrames,
         ...undecodable,
+        sourceFrames: source.sourceTiming.samples.length,
+        outputFrames: outputTiming.samples.length,
+        ...mismatch
+      });
+    }
+  } else if (profileId === SMALLEST_PROFILE_ID) {
+    // Smallest (CPU only) is encoded in the original's own time base: with
+    // B-frames its frames are stored out of order, but each is shown at
+    // exactly its original time.
+    const mismatch = shownTimingMismatch(source.expectedSamples, outputTiming.samples);
+    if (mismatch) {
+      return failure(VERIFICATION_REASONS.DURATION_MISMATCH, sourceBytes, outputBytes, {
+        kind: 'source-output-shown-timing',
         sourceFrames: source.sourceTiming.samples.length,
         outputFrames: outputTiming.samples.length,
         ...mismatch

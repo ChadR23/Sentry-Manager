@@ -156,6 +156,9 @@ pub struct EncodeRequest<'a> {
     pub quality: Option<&'a str>,
     pub duration_us: Option<i64>,
     pub hold_frames: i64,
+    /// Smallest (CPU only), and whether its clip keeps the original's frame order
+    pub smallest: Option<super::super::planner::Smallest>,
+    pub keep_order: bool,
     /// the decode tier's arguments (None: CPU decode)
     pub decode: Option<&'a [String]>,
     /// the lane (chosen GPU) this clip runs on
@@ -203,6 +206,8 @@ impl Service {
             hw_frames: r.decode.is_some_and(|d| d.iter().any(|a| a == "-hwaccel_output_format")),
             device,
             hold_frames: r.hold_frames,
+            smallest: r.smallest,
+            keep_order: r.smallest.is_some() && r.keep_order,
             ..Default::default()
         })
         .map_err(|_| "encoder-start-failed")?;

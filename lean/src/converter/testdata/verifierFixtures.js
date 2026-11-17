@@ -61,7 +61,7 @@ async function main() {
         const candidate = path.join(out, `${name}.${codec}.${variant}.mp4`);
         fs.writeFileSync(candidate, data);
         for (const mode of ['quick', 'full']) {
-          for (const profileId of ['custom', 'aggressive']) {
+          for (const profileId of ['custom', 'aggressive', 'smallest']) {
             const snapshots = fs.mkdtempSync(path.join(os.tmpdir(), 'verifier-fixture-'));
             const { createVerificationSnapshot } = require(path.join(REPO, 'src/main/converter/verificationSnapshot'));
             const verdict = await verifyCandidate({

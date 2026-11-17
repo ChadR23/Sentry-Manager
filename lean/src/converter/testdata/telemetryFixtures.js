@@ -66,6 +66,9 @@ async function main() {
   await add('gap', (f) => createMidGopTeslaH264Fixture({ ffmpegPath: 'ffmpeg', outputPath: f, frames: 54, gop: 18, cut: 0, size: '160x120', skip: [16], telemetryPattern: telemetryFor(54) }));
   await add('gap-leadin', (f) => createMidGopTeslaH264Fixture({ ffmpegPath: 'ffmpeg', outputPath: f, frames: 54, gop: 18, cut: 7, size: '160x120', skip: [27], telemetryPattern: telemetryFor(54) }));
   await add('gap-unknown', (f) => createMidGopTeslaH264Fixture({ ffmpegPath: 'ffmpeg', outputPath: f, frames: 54, gop: 30, cut: 0, size: '160x120', skip: [16], telemetryPattern: telemetryFor(54) }));
+  // encoded as Smallest (CPU only) encodes them (H.265 only): B-frames, and a lead-in clip that keeps its frame order
+  await add('smallest', (f) => createMidGopTeslaH264Fixture({ ffmpegPath: 'ffmpeg', outputPath: f, frames: 40, gop: 8, cut: 0, size: '160x120', telemetryPattern: telemetryFor(40) }));
+  await add('smallest-leadin', (f) => createMidGopTeslaH264Fixture({ ffmpegPath: 'ffmpeg', outputPath: f, frames: 40, gop: 8, cut: 3, size: '160x120', telemetryPattern: telemetryFor(40) }));
 
   const codecs = [];
   if (has('libx265')) codecs.push(['h265', 'libx265', injectH265Telemetry, inspectH265Telemetry]);
@@ -78,8 +81,13 @@ async function main() {
     for (const [codec, encoder, inject, inspect] of codecs) {
       // (SVT-AV1 can stall on a clip of a few frames; the H.265 case covers it)
       if (codec === 'av1' && timeline.samples.length < 10) continue;
+      const smallest = name.startsWith('smallest');
+      if (smallest && codec !== 'h265') continue;
       const enc = path.join(dir, `${name}.${codec}.enc`);
-      const args = buildEncodeArgs({ codec, encoder, bitrate: 200_000, holdFrames: leadInHoldFrames(timeline) });
+      const holdFrames = leadInHoldFrames(timeline);
+      const args = smallest
+        ? buildEncodeArgs({ codec, encoder, bitrate: null, holdFrames, smallest: { maxrate: 300_000 }, keepOrder: sourceTimingFor(timeline) !== null })
+        : buildEncodeArgs({ codec, encoder, bitrate: 200_000, holdFrames });
       const r = await runProcess('ffmpeg', ['-nostdin', '-v', 'error', '-y', '-i', file, ...args, '-an', '-f', 'mp4', enc]);
       if (r.status !== 0) throw new Error(`encode ${name} ${codec}: ${r.stderr}`);
       const bytes = fs.readFileSync(enc);

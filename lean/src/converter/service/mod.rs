@@ -1171,6 +1171,10 @@ impl Service {
             if TERMINAL_STATES.contains(&rt.manifest().state()) {
                 return Err(service_error("JOB_NOT_ACTIVE"));
             }
+            // Smallest (CPU only) has no lanes (its number at once is set_concurrency's)
+            if rt.manifest().config()["profileId"] == contracts::SMALLEST_PROFILE_ID {
+                return Err(service_error("INVALID_LANES"));
+            }
             self.set_lanes_now(&rt, &lanes)
         })
     }

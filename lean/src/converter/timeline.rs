@@ -335,6 +335,15 @@ fn copy(r: &SeiRecord) -> SeiRecord {
 }
 
 /// mapTimelineToOutput(sourceTimeline, outputSamples)
+/// The output samples in the order their pictures are shown (by time; equal
+/// times keep file order). With B-frames an encoder stores a frame before the
+/// ones shown ahead of it, so the n-th frame shown is not the n-th sample.
+fn display_order(outputs: &[OutputSample]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..outputs.len()).collect();
+    order.sort_by(|&a, &b| outputs[a].pts_us.partial_cmp(&outputs[b].pts_us).unwrap().then(a.cmp(&b)));
+    order
+}
+
 pub fn map_to_output(src: &Timeline, outputs: &[OutputSample]) -> CResult<Vec<MappedSample>> {
     for o in outputs {
         if !o.pts_us.is_finite() {
@@ -342,6 +351,7 @@ pub fn map_to_output(src: &Timeline, outputs: &[OutputSample]) -> CResult<Vec<Ma
         }
     }
     let mut mapped: Vec<MappedSample> = outputs.iter().map(|o| MappedSample { pts_us: o.pts_us, picture_marker: true, sei_nals: vec![] }).collect();
+    let shown = display_order(outputs);
     let ss = &src.samples;
     let tail = if ss.last().is_some_and(|s| s.duration_us == 0) { 1 } else { 0 };
     if undecodable_frames(Some(&src.undecodable)) > 0 {
@@ -358,7 +368,7 @@ pub fn map_to_output(src: &Timeline, outputs: &[OutputSample]) -> CResult<Vec<Ma
                         // the first): refuse the same way
                         return Err(CError::type_error("Cannot read properties of undefined (reading 'seiNals')"));
                     }
-                    mapped[out as usize].sei_nals.push(copy(r));
+                    mapped[shown[out as usize]].sei_nals.push(copy(r));
                 }
             }
             return Ok(mapped);
@@ -374,11 +384,11 @@ pub fn map_to_output(src: &Timeline, outputs: &[OutputSample]) -> CResult<Vec<Ma
     if ordinal > 0 {
         for i in 0..ordinal {
             for r in &ss[i].sei_nals {
-                mapped[i].sei_nals.push(copy(r));
+                mapped[shown[i]].sei_nals.push(copy(r));
             }
         }
         if ss.len() == ordinal + 1 && ss.last().unwrap().duration_us == 0 {
-            let last = mapped.len() - 1;
+            let last = shown[shown.len() - 1];
             for r in &ss.last().unwrap().sei_nals {
                 mapped[last].sei_nals.push(copy(r));
             }
@@ -464,6 +474,38 @@ mod tests {
         let m = map_to_output(&t, &outs(4)).unwrap();
         assert_eq!(m[1].sei_nals, vec![rec(1), rec(2)]);
         assert_eq!(m[2].sei_nals, vec![rec(3)]);
+    }
+
+    // B-frames: the encoder stores pictures 0 3 1 2 6 4 5 ... (each P before
+    // the B pictures shown ahead of it), so sample n is not the n-th picture shown
+    fn reordered(shown_at: &[usize]) -> Vec<OutputSample> {
+        shown_at.iter().map(|&k| OutputSample { pts_us: k as f64 * 33_333.0, duration_us: Some(33_333.0) }).collect()
+    }
+
+    #[test]
+    fn each_record_goes_to_the_picture_shown_in_its_place() {
+        let order = [0, 3, 1, 2, 6, 4, 5, 9, 7, 8, 11, 10];
+        let t = timeline((0..12).map(|i| (i * 33_333, 33_333, vec![rec(i as u8)])).collect());
+        let m = map_to_output(&t, &reordered(&order)).unwrap();
+        for (sample, &k) in order.iter().enumerate() {
+            assert_eq!(m[sample].sei_nals, vec![rec(k as u8)], "sample {sample} is the picture shown {k}th");
+        }
+        let mut tail = timeline((0..13).map(|i| (i * 33_333, if i == 12 { 0 } else { 33_333 }, vec![rec(i as u8)])).collect());
+        tail.samples[12].pts_us = 12 * 33_333;
+        let m = map_to_output(&tail, &reordered(&order)).unwrap();
+        assert_eq!(m[10].sei_nals, vec![rec(11), rec(12)], "the zero-duration tail goes to the last picture shown, not the last sample");
+        assert_eq!(m[11].sei_nals, vec![rec(10)]);
+    }
+
+    #[test]
+    fn a_dropped_sample_goes_to_the_picture_shown_before_it() {
+        let mut t = timeline((0..13).map(|i| (i * 33_333, 33_333, vec![rec(i as u8)])).collect());
+        t.undecodable = Undecodable { frames: Some(1), samples: vec![4], reason: None, timescale: Some(1000), duration_ticks: None };
+        let order = [0, 3, 1, 2, 6, 4, 5, 9, 7, 8, 11, 10];
+        let m = map_to_output(&t, &reordered(&order)).unwrap();
+        assert_eq!(m[1].sei_nals, vec![rec(3), rec(4)], "sample 1 is the 4th picture shown");
+        assert_eq!(m[5].sei_nals, vec![rec(5)]);
+        assert_eq!(m[4].sei_nals, vec![rec(7)]);
     }
 
     #[test]

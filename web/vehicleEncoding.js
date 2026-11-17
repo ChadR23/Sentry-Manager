@@ -50,6 +50,7 @@
       const mbps = Number(config.bitrateKbps) / 1000;
       return short ? `${mbps} Mbps` : `Custom bitrate: ${mbps} Mbps`;
     }
+    if (config.profileId === 'smallest') return short ? 'Smallest (CPU only)' : 'Smallest (CPU only): x265 with B-frames, peaks at 60% of the original (size varies by scene)';
     if (config.profileId === 'quality') {
       const level = (label(QUALITY_LEVELS, config.qualityLevel) || 'Balanced').split(' — ')[0];
       return short ? `Quality ${level}` : `Quality level: ${level} (size varies by scene)`;
@@ -58,7 +59,9 @@
     if (!p) return String(config.profileId || '—');
     return short ? p[1] : `${p[1]} — about ${p[2]}% smaller`;
   }
-  const hasTarget = (config) => !['custom', 'quality'].includes(config.profileId);
+  const NO_TARGET = ['custom', 'quality', 'smallest'];
+  const hasTarget = (config) => !NO_TARGET.includes(config.profileId);
+  const usesLanes = (config) => config.profileId !== 'smallest' && Array.isArray(config.lanes) && config.lanes.length > 0;
   function outputWords(config, { short = false } = {}) {
     if (config.outputMode === 'replace') return short ? 'Replace' : 'Replace originals (each original is backed up until its copy is checked)';
     return short ? 'Separate' : `Separate folder: ${config.destinationRoot || '—'}`;
@@ -83,11 +86,11 @@
     return String(id);
   }
   function devicesWords(config, devices) {
-    if (Array.isArray(config.lanes) && config.lanes.length) {
+    if (usesLanes(config)) {
       return config.lanes.map((l) => `${deviceName(l.device, devices)}: ${l.concurrency} at once`).join(' · ');
     }
     const n = Number(config.concurrency) || 1;
-    return `This server’s default device, ${n} clip${n === 1 ? '' : 's'} at once`;
+    return `${config.profileId === 'smallest' ? 'This server’s CPU' : 'This server’s default device'}, ${n} clip${n === 1 ? '' : 's'} at once`;
   }
   function windowWords(settings) {
     const w = settings?.window;
@@ -279,7 +282,9 @@
             <label class="${k.field} ve-field"><span>Size or quality</span><select class="${k.input}" name="profileId">
               ${SIZE_PROFILES.map(([id, t, p]) => `<option value="${id}"${sizeValue === id ? ' selected' : ''}>${t} — about ${p}% smaller</option>`).join('')}
               <option value="quality"${sizeValue === 'quality' ? ' selected' : ''}>Quality level — size varies by scene</option>
-              <option value="custom"${sizeValue === 'custom' ? ' selected' : ''}>Custom bitrate</option></select></label>
+              <option value="custom"${sizeValue === 'custom' ? ' selected' : ''}>Custom bitrate</option>
+              <option value="smallest"${sizeValue === 'smallest' ? ' selected' : ''}>Smallest (CPU only): x265 with B-frames, H.265 only</option></select></label>
+            <p class="${k.muted} ve-field" data-ve-show="smallest"${sizeValue === 'smallest' ? '' : ' hidden'} style="margin:0">On this server's CPU only (GPUs and nodes are not used): constant quality with B-frames, peaks capped at 60% of each clip's own bitrate.</p>
             <label class="${k.field} ve-field" data-ve-show="quality"${sizeValue === 'quality' ? '' : ' hidden'}><span>Quality level</span><select class="${k.input}" name="qualityLevel">${QUALITY_LEVELS.map(([id, t]) => `<option value="${id}"${(c.qualityLevel || 'balanced') === id ? ' selected' : ''}>${esc(t)}</option>`).join('')}</select></label>
             <label class="${k.field} ve-field" data-ve-show="custom"${sizeValue === 'custom' ? '' : ' hidden'}><span>Bitrate (Mbps)</span><input class="${k.input}" type="number" name="bitrate" min="0.25" max="100" step="0.25" inputmode="decimal" value="${c.bitrateKbps ? c.bitrateKbps / 1000 : 8}"></label>
             <label class="${k.check}" data-ve-show="target"${hasTarget(c) ? '' : ' hidden'}><input type="checkbox" name="keepOffTarget"${c.keepOffTarget === true ? ' checked' : ''}> Keep clips that miss the size target (otherwise the original stays)</label>
@@ -299,8 +304,8 @@
               <button type="button" class="${k.btn}" data-ve-up="${g}"${i === 0 ? ' disabled' : ''} aria-label="Earlier">↑</button><button type="button" class="${k.btn}" data-ve-down="${g}"${i === 2 ? ' disabled' : ''} aria-label="Later">↓</button></li>`).join('')}</ol>
             <p class="ve-hint">Converted in this order.</p></fieldset>
           <fieldset><legend>Devices</legend>
-            ${lanes ? `<p>${esc(devicesWords(c, devices))}</p><p class="ve-hint">Which GPUs, CPU and nodes convert, and how many clips each converts at once, are set in the Encoder under Parallel conversions. Saving here keeps them.</p>`
-              : `<label class="${k.field} ve-field"><span>Clips at once</span><input class="${k.input}" type="number" name="concurrency" min="1" max="64" inputmode="numeric" value="${Number(c.concurrency) || 1}"></label><p class="ve-hint">On this server’s default device. To use several GPUs or nodes, set them in the Encoder under Parallel conversions.</p>`}
+            ${lanes ? `<div data-ve-show="lanes"${sizeValue === 'smallest' ? ' hidden' : ''}><p>${esc(devicesWords(c, devices))}</p><p class="ve-hint">Which GPUs, CPU and nodes convert, and how many clips each converts at once, are set in the Encoder under Parallel conversions. Saving here keeps them.</p></div>` : ''}
+            <div data-ve-show="count"${lanes && sizeValue !== 'smallest' ? ' hidden' : ''}><label class="${k.field} ve-field"><span>Clips at once</span><input class="${k.input}" type="number" name="concurrency" min="1" max="64" inputmode="numeric" value="${Number(c.concurrency) || 1}"></label><p class="ve-hint" data-ve-show="notsmallest"${sizeValue === 'smallest' ? ' hidden' : ''}>On this server’s default device. To use several GPUs or nodes, set them in the Encoder under Parallel conversions.</p></div>
           </fieldset>
           <fieldset><legend>Automatic conversion</legend>
             <label class="${k.check}"><input type="checkbox" name="automatic"${draft._automatic ? ' checked' : ''}> Convert new clips of ${esc(v.name)} automatically</label>
@@ -351,7 +356,8 @@
       if (c.profileId === 'quality') out.qualityLevel = c.qualityLevel;
       if (hasTarget(c)) out.keepOffTarget = c.keepOffTarget === true;
       else out.keepLarger = c.keepLarger === true;
-      if (Array.isArray(c.lanes) && c.lanes.length) out.lanes = c.lanes.map((l) => ({ device: l.device, concurrency: l.concurrency }));
+      // (Smallest (CPU only) has no lanes: this server's CPU, the number at once)
+      if (usesLanes(c)) out.lanes = c.lanes.map((l) => ({ device: l.device, concurrency: l.concurrency }));
       else out.concurrency = c.concurrency;
       return out;
     }
@@ -373,8 +379,17 @@
       const profile = fd.get('profileId');
       show('quality', profile === 'quality');
       show('custom', profile === 'custom');
-      show('target', !['custom', 'quality'].includes(profile));
-      show('notarget', ['custom', 'quality'].includes(profile));
+      show('smallest', profile === 'smallest');
+      show('notsmallest', profile !== 'smallest');
+      // Smallest (CPU only) has no lanes: its number at once instead of the devices
+      const lanes = Boolean(form.querySelector('[data-ve-show="lanes"]'));
+      show('lanes', profile !== 'smallest');
+      show('count', !lanes || profile === 'smallest');
+      show('target', !NO_TARGET.includes(profile));
+      show('notarget', NO_TARGET.includes(profile));
+      // Smallest (CPU only) is an x265 setting: H.265 only
+      form.querySelectorAll('input[name="codec"][value="av1"]').forEach((x) => { x.disabled = profile === 'smallest'; });
+      if (profile === 'smallest') form.querySelectorAll('input[name="codec"][value="h265"]').forEach((x) => { x.checked = true; });
       const replace = fd.get('outputMode') === 'replace';
       show('replace', replace);
       show('separate', !replace);
@@ -402,7 +417,7 @@
       if (!c.includedGroups.length) return fail(form, ERRORS.INVALID_GROUP_SELECTION);
       if (c.outputMode === 'separate' && !c.destinationRoot) return fail(form, 'Enter the separate folder, or choose Replace originals.');
       if (c.profileId === 'custom' && !(Number(c._bitrate) >= 0.25 && Number(c._bitrate) <= 100)) return fail(form, ERRORS.INVALID_BITRATE);
-      if (!(Array.isArray(c.lanes) && c.lanes.length) && !(Number.isSafeInteger(c.concurrency) && c.concurrency >= 1 && c.concurrency <= 64)) return fail(form, ERRORS.INVALID_CONCURRENCY);
+      if (!usesLanes(c) && !(Number.isSafeInteger(c.concurrency) && c.concurrency >= 1 && c.concurrency <= 64)) return fail(form, ERRORS.INVALID_CONCURRENCY);
       if (c.outputMode === 'replace') {
         if (!replaceOk) return fail(form, ERRORS.REPLACEMENT_UNAVAILABLE);
         if (!c.replacementConfirmed) return fail(form, ERRORS.REPLACEMENT_CONFIRMATION_REQUIRED);

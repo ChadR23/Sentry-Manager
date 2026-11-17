@@ -33,6 +33,8 @@ function wholeRead(real) {
   }
   const records = [];
   for (const f of frames) for (const [t, sei] of Reader.recordsOf(f)) records.push([t, Buffer.from(sei).toString('base64')]);
+  // (listed in the order shown)
+  records.sort((a, b) => a[0] - b[0]);
   return { body: JSON.stringify({ v: 1, frames: records }), note };
 }
 

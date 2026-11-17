@@ -156,6 +156,28 @@ fn is_marker(nal: &[u8]) -> bool {
     nal == [0x61, 0x01, 0x80]
 }
 
+/// The first frame shown in each second, up to two hours (with B-frames a
+/// frame can be stored before frames shown ahead of it).
+pub fn first_shown_each_second(samples: &[mp4::Sample], scale: u64) -> Vec<Option<&mp4::Sample>> {
+    let mut picks: Vec<Option<&mp4::Sample>> = Vec::new();
+    for s in samples {
+        if s.pts < 0 {
+            continue;
+        }
+        let sec = (s.pts as u64 / scale) as usize;
+        if sec > 7200 {
+            continue;
+        }
+        if picks.len() <= sec {
+            picks.resize(sec + 1, None);
+        }
+        if picks[sec].is_none_or(|p| s.pts < p.pts) {
+            picks[sec] = Some(s);
+        }
+    }
+    picks
+}
+
 /// The record (protobuf bytes) of the first frame of each second; None for a
 /// second without one. Err for anything unexpected (the caller falls back).
 pub fn read_records(path: &Path) -> Result<Vec<Option<Vec<u8>>>> {
@@ -183,20 +205,7 @@ pub fn read_records(path: &Path) -> Result<Vec<Option<Vec<u8>>>> {
         return err(format!("Unsupported codec {}", String::from_utf8_lossy(&codec)));
     }
 
-    // the first frame of each second
-    let mut picks: Vec<Option<&mp4::Sample>> = Vec::new();
-    for s in &samples {
-        let sec = (s.dts / scale) as usize;
-        if sec > 7200 {
-            break;
-        }
-        if picks.len() <= sec {
-            picks.resize(sec + 1, None);
-        }
-        if picks[sec].is_none() {
-            picks[sec] = Some(s);
-        }
-    }
+    let picks = first_shown_each_second(&samples, scale);
 
     let mut carrier: Option<Vec<Option<Vec<u8>>>> = None;
     if &codec == b"av01" {
@@ -402,4 +411,22 @@ pub fn read_speeds(path: &Path) -> Result<Option<Vec<Option<f64>>>> {
 pub fn read_samples(path: &Path) -> Result<Option<Vec<Option<Sample>>>> {
     let out: Vec<Option<Sample>> = read_records(path)?.iter().map(|r| r.as_deref().map(sample_of_bytes)).collect();
     Ok(if out.iter().any(|x| x.is_some_and(|s| s.v.is_some())) { Some(out) } else { None })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(index: u32, pts: i64) -> mp4::Sample {
+        mp4::Sample { index, description: 1, offset: 0, size: 1, dts: index as u64 * 10, pts, duration: 10 }
+    }
+
+    #[test]
+    fn the_first_frame_shown_in_each_second_not_the_first_stored() {
+        // 30 ticks a second; a P frame (shown at 40) stored before the B frames
+        // shown ahead of it, one of them (30) in the same second; one before 0
+        let samples = [at(0, 0), at(1, 40), at(2, 10), at(3, 20), at(4, 30), at(5, 70), at(6, -5)];
+        let picks: Vec<Option<u32>> = first_shown_each_second(&samples, 30).iter().map(|p| p.map(|s| s.index)).collect();
+        assert_eq!(picks, vec![Some(0), Some(4), Some(5)]);
+    }
 }

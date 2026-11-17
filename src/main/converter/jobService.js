@@ -13,7 +13,9 @@ const {
   targetOutputBytes,
   hasSizeTarget,
   effectiveVerifyMode,
-  nodeKeyOf
+  nodeKeyOf,
+  SMALLEST_PROFILE_ID,
+  smallestMaxrate
 } = require('./contracts');
 const { replacementAction } = require('./jobStore');
 const { compareScanPaths } = require('./scanner');
@@ -23,7 +25,7 @@ const {
   calculateInitialBitrate,
   decideSizeRetry
 } = require('./encoderPlanner');
-const { leadInHoldFrames } = require('./leadIn');
+const { leadInHoldFrames, sourceTimingFor } = require('./leadIn');
 
 const ACTIVE_STATES = new Set([
   'discovering', 'waiting', 'staging', 'encoding', 'writing-telemetry',
@@ -585,6 +587,9 @@ function createConverterJobService(deps) {
   // default lane, the only one of a job without lanes) and takes the next
   // queued clip whenever it is free, so a faster GPU simply converts more.
   function lanesOf(manifest) {
+    // Smallest (CPU only) encodes on this server's CPU: no GPU or node lanes,
+    // the job's own number of conversions at once.
+    if (manifest?.config?.profileId === SMALLEST_PROFILE_ID) return null;
     const lanes = manifest?.config?.lanes;
     return Array.isArray(lanes) && lanes.length > 0 ? lanes : null;
   }
@@ -1275,7 +1280,7 @@ function createConverterJobService(deps) {
     emit(runtime, 'progress', { progress: { phase: 'continue', ...(runtime.lastProgress || {}), ...liveCounts(runtime) } });
   }
 
-  async function runChild(runtime, itemId, source, target, codec, encoder, { bitrate, quality = null, durationUs = null, laneId = null, holdFrames = 0 }, decodeAccel = null) {
+  async function runChild(runtime, itemId, source, target, codec, encoder, { bitrate, quality = null, durationUs = null, laneId = null, holdFrames = 0, smallest = null, keepOrder = false }, decodeAccel = null) {
     let child;
     let encodeArgs = [];
     if (encoder.remote === true) {
@@ -1295,7 +1300,8 @@ function createConverterJobService(deps) {
       const hwFrames = Array.isArray(decodeAccel) && decodeAccel.includes('-hwaccel_output_format');
       const device = encoder.hardware === true ? laneDevice(encoder) : null;
       encodeArgs = buildEncodeArgs({
-        codec, encoder: encoder.codec, bitrate, quality, hwFrames, ...(device ? { device } : {}), ...(holdFrames > 0 ? { holdFrames } : {})
+        codec, encoder: encoder.codec, bitrate, quality, hwFrames, ...(device ? { device } : {}), ...(holdFrames > 0 ? { holdFrames } : {}),
+        ...(smallest ? { smallest, keepOrder } : {})
       });
       const args = [
         '-nostdin', '-hide_banner', '-loglevel', 'error', '-n',
@@ -1754,7 +1760,8 @@ function createConverterJobService(deps) {
     return true;
   }
 
-  async function localEncoder(codec) {
+  async function localEncoder(codec, cpuOnly = false) {
+    if (cpuOnly) return planner.selectCpuFallback(codec);
     try {
       const chosen = await planner.select(codec);
       if (chosen && chosen.remote !== true) return chosen;
@@ -1810,18 +1817,25 @@ function createConverterJobService(deps) {
     const customBitrate = profileId === 'custom';
     // Constant quality: the encoder holds a quality level; no bitrate or target.
     let quality = profileId === 'quality' ? runtime.manifest.config.qualityLevel : null;
+    // Smallest (CPU only): libx265 here, peaks at 60% of this clip's own average
+    // bitrate. A clip given back the original's timing keeps its frame order.
+    const cpuOnly = profileId === SMALLEST_PROFILE_ID;
+    const smallest = cpuOnly ? { maxrate: smallestMaxrate(item.sourceBytes, inspected.durationSeconds) } : null;
+    const keepOrder = cpuOnly && sourceTimingFor(timeline) !== null;
     const noTarget = !hasSizeTarget(profileId);
     const targetBytes = noTarget ? null : targetOutputBytes(item.sourceBytes, profileId);
-    let bitrate = quality ? null : customBitrate ? runtime.manifest.config.bitrateKbps * 1000 : calculateInitialBitrate({
+    let bitrate = quality || cpuOnly ? null : customBitrate ? runtime.manifest.config.bitrateKbps * 1000 : calculateInitialBitrate({
       codec,
       targetBytes,
       durationSeconds: inspected.durationSeconds,
       containerReserveBytes: inspected.containerReserveBytes || 0,
       telemetryReserveBytes: inspected.telemetryReserveBytes || 0
     });
-    let selected = lane && typeof planner.selectFor === 'function'
-      ? await planner.selectFor(codec, lane.device)
-      : await planner.select(codec);
+    let selected = cpuOnly
+      ? await planner.selectCpuFallback(codec)
+      : lane && typeof planner.selectFor === 'function'
+        ? await planner.selectFor(codec, lane.device)
+        : await planner.select(codec);
     let usedCpuFallback = selected.hardware !== true;
     // set once a node gave the clip back (or its lane landed here because
     // the node has no encoder for the codec): its encodes here wait their turn
@@ -1869,7 +1883,7 @@ function createConverterJobService(deps) {
       let encoded;
       try {
         encoded = await runChild(runtime, item.id, staged.source, reserved.path, codec, selected,
-          { bitrate, quality, durationUs, laneId: lane ? lane.id : null, holdFrames }, usedTier?.args || null);
+          { bitrate, quality, durationUs, laneId: lane ? lane.id : null, holdFrames, smallest, keepOrder }, usedTier?.args || null);
       } finally {
         releaseFallback?.();
       }
@@ -1912,7 +1926,7 @@ function createConverterJobService(deps) {
         if (selected.remote === true) {
           if (ownLanesOff(runtime)) throw serviceError('NODE_ENCODE_FAILED');
           fromNode = true;
-          selected = await localEncoder(codec);
+          selected = await localEncoder(codec, cpuOnly);
           encodeTiers = encodeDecodeTiers(selected, { zeroCopy: holdFrames === 0 });
           usedCpuFallback = selected.hardware !== true;
           continue;
@@ -2001,7 +2015,7 @@ function createConverterJobService(deps) {
           // (encoded here now: the check slot goes to the node's next clip)
           check.release?.();
           check.release = null;
-          selected = await localEncoder(codec);
+          selected = await localEncoder(codec, cpuOnly);
           encodeTiers = encodeDecodeTiers(selected, { zeroCopy: holdFrames === 0 });
           usedCpuFallback = selected.hardware !== true;
           continue;
@@ -2116,7 +2130,7 @@ function createConverterJobService(deps) {
           fromNode = true;
           check.release?.();
           check.release = null;
-          selected = await localEncoder(codec);
+          selected = await localEncoder(codec, cpuOnly);
           encodeTiers = encodeDecodeTiers(selected, { zeroCopy: holdFrames === 0 });
           usedCpuFallback = selected.hardware !== true;
           continue;
@@ -2676,6 +2690,8 @@ function createConverterJobService(deps) {
     if (!lanes) throw serviceError('INVALID_LANES');
     const runtime = await ensureRuntime(id);
     if (TERMINAL_STATES.has(runtime.manifest.state)) throw serviceError('JOB_NOT_ACTIVE');
+    // Smallest (CPU only) has no lanes (its number at once is setConcurrency's)
+    if (runtime.manifest.config?.profileId === SMALLEST_PROFILE_ID) throw serviceError('INVALID_LANES');
     if (JSON.stringify(lanesOf(runtime.manifest)) === JSON.stringify(lanes)) return publicSnapshot(runtime.manifest);
     const running = () => typeof runtime.addWorker === 'function' && !runtime.cancelRequested && !runtime.stopRequested;
     // the GPUs are looked up first, so the new lanes start as they are saved

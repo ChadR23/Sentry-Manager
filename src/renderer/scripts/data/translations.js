@@ -132,6 +132,8 @@ const converterEnglish = Object.freeze({
     autoSoon: "Checks shortly",
     errorAutoWindow: "Choose different start and end hours for the time window.",
     profileOptionQuality: "Constant quality — size varies by scene…",
+    profileOptionSmallest: "Smallest (CPU only): x265 with B-frames, H.265 only…",
+    smallestHint: "x265 on this server's CPU at a constant quality (CRF 27, veryfast), with B-frames and peaks capped at 60% of each clip's own bitrate: the smallest files at about the same visual quality. GPUs and nodes are not used. A clip that would not get smaller is encoded again under its original bitrate.",
     qualityLevelLabel: "Quality level",
     qualityHigh: "High — keeps the most detail",
     qualityBalanced: "Balanced (recommended)",

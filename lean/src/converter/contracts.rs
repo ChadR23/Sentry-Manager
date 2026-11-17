@@ -8,6 +8,21 @@ pub struct Profile {
 
 pub const CUSTOM_PROFILE_ID: &str = "custom";
 pub const QUALITY_PROFILE_ID: &str = "quality";
+/// Smallest (CPU only): x265 on this server's CPU, veryfast at constant quality
+/// (CRF 27), peaks capped at 60% of the original's own average bitrate, with
+/// B-frames. H.265 only. Like constant quality, it has no size target.
+pub const SMALLEST_PROFILE_ID: &str = "smallest";
+pub const SMALLEST_PEAK_SHARE: f64 = 0.6;
+
+/// Smallest (CPU only)'s peak in bit/s (smallestMaxrate): 60% of a clip's own
+/// average bitrate, None when unknown
+pub fn smallest_maxrate(source_bytes: f64, duration_seconds: f64) -> Option<u64> {
+    if source_bytes.is_nan() || duration_seconds.is_nan() || source_bytes <= 0.0 || duration_seconds <= 0.0 {
+        return None;
+    }
+    let peak = ((source_bytes * 8.0) / duration_seconds * SMALLEST_PEAK_SHARE).floor();
+    (peak > 0.0 && peak <= 9_007_199_254_740_991.0).then_some(peak as u64)
+}
 pub const QUALITY_LEVELS: [&str; 3] = ["high", "balanced", "small"];
 pub const VERIFY_MODES: [&str; 3] = ["off", "quick", "full"];
 pub const DEFAULT_VERIFY_MODE: &str = "quick";
@@ -30,7 +45,7 @@ pub fn profile(name: &str) -> Option<Profile> {
 }
 
 pub fn has_size_target(profile_id: &str) -> bool {
-    profile_id != CUSTOM_PROFILE_ID && profile_id != QUALITY_PROFILE_ID
+    profile_id != CUSTOM_PROFILE_ID && profile_id != QUALITY_PROFILE_ID && profile_id != SMALLEST_PROFILE_ID
 }
 
 /// Math.round as JS does it (half up, toward +infinity).
@@ -325,12 +340,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_smallest_peak_is_60_percent_of_the_clips_own_bitrate() {
+        assert_eq!(smallest_maxrate(4_000_000.0, 2.0), Some(9_600_000));
+        assert_eq!(smallest_maxrate(37_500_000.0, 60.03), Some(2_998_500));
+        for (bytes, seconds) in [(0.0, 2.0), (4e6, 0.0), (f64::NAN, 2.0), (4e6, f64::NAN), (1.0, 1e9), (1e300, 1e-300)] {
+            assert_eq!(smallest_maxrate(bytes, seconds), None, "{bytes} B in {seconds} s");
+        }
+    }
+
+    #[test]
     fn sizes_and_ids() {
         assert_eq!(target_output_bytes(1000, "balanced"), 800.0);
         assert!(is_within_profile(1000, 820, "balanced"));
         assert!(!is_within_profile(1000, 821, "balanced"));
         assert!(is_within_profile(1000, 1, "aggressive"));
-        assert!(!has_size_target("custom") && !has_size_target("quality") && has_size_target("balanced"));
+        assert!(!has_size_target("custom") && !has_size_target("quality") && !has_size_target("smallest") && has_size_target("balanced"));
         assert_eq!(effective_verify_mode(Some("off"), Some("replace")), "quick");
         assert_eq!(effective_verify_mode(Some("off"), Some("separate")), "off");
         assert_eq!(effective_verify_mode(None, None), "full");

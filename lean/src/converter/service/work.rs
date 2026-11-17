@@ -1166,10 +1166,15 @@ impl Service {
         let profile_id = config["profileId"].as_str().unwrap_or("").to_string();
         let custom = profile_id == "custom";
         let mut quality: Option<String> = if profile_id == "quality" { config["qualityLevel"].as_str().map(str::to_string) } else { None };
+        // Smallest (CPU only): libx265 here, peaks at 60% of this clip's own average
+        // bitrate. A clip given back the original's timing keeps its frame order.
+        let cpu_only = profile_id == contracts::SMALLEST_PROFILE_ID;
+        let smallest = cpu_only.then(|| planner::Smallest { maxrate: contracts::smallest_maxrate(item.n("sourceBytes") as f64, inspected.duration_seconds) });
+        let keep_order = cpu_only && super::super::lead_in::source_timing_for(Some(&timeline.lead_in), Some(&timeline.undecodable)).is_some();
         let no_target = !contracts::has_size_target(&profile_id);
         let target_bytes = if no_target { None } else { Some(contracts::target_output_bytes(item.n("sourceBytes"), &profile_id)) };
         let initial = |target: f64| planner::calculate_initial_bitrate(&codec, target, inspected.duration_seconds, 0.0, 0.0).map(|b| b as f64).map_err(|_| service_error("INVALID_BITRATE"));
-        let mut bitrate: Option<f64> = if quality.is_some() {
+        let mut bitrate: Option<f64> = if quality.is_some() || cpu_only {
             None
         } else if custom {
             Some(config["bitrateKbps"].as_f64().unwrap_or(0.0) * 1000.0)
@@ -1177,6 +1182,7 @@ impl Service {
             Some(initial(target_bytes.unwrap_or(0.0))?)
         };
         let mut selected: Selected = match lane {
+            _ if cpu_only => self.0.o.tools.select_cpu_fallback(&codec),
             Some(l) => self.0.o.tools.select_for(&codec, &super::super::devices::device_of(&l.device)),
             None => self.0.o.tools.select(&codec),
         }
@@ -1225,7 +1231,7 @@ impl Service {
             };
             let used_tier = tiers.first().cloned();
             let fallback = if from_node { Some(self.take_fallback_slot(rt)?) } else { None };
-            let encoded = self.run_child(rt, &id, &EncodeRequest { source, target: &reserved.path, codec: &codec, encoder: &selected, bitrate, quality: quality.as_deref(), duration_us, hold_frames, decode: used_tier.as_ref().map(|t| t.1.as_slice()), lane_id: lane.map(|l| l.id.as_str()) });
+            let encoded = self.run_child(rt, &id, &EncodeRequest { source, target: &reserved.path, codec: &codec, encoder: &selected, bitrate, quality: quality.as_deref(), duration_us, hold_frames, smallest, keep_order, decode: used_tier.as_ref().map(|t| t.1.as_slice()), lane_id: lane.map(|l| l.id.as_str()) });
             drop(fallback);
             timing.mark("encode");
             if let Err(code) = encoded {
@@ -1264,7 +1270,7 @@ impl Service {
                         return Err(service_error("NODE_ENCODE_FAILED"));
                     }
                     from_node = true;
-                    selected = self.local_encoder(&codec)?;
+                    selected = self.local_encoder(&codec, cpu_only)?;
                     tiers = self.encode_decode_tiers(&selected, zero_copy);
                     used_cpu_fallback = !selected.hardware;
                     continue;
@@ -1336,7 +1342,7 @@ impl Service {
                     }
                     from_node = true;
                     drop(check.take());
-                    selected = self.local_encoder(&codec)?;
+                    selected = self.local_encoder(&codec, cpu_only)?;
                     tiers = self.encode_decode_tiers(&selected, zero_copy);
                     used_cpu_fallback = !selected.hardware;
                     continue;
@@ -1411,7 +1417,7 @@ impl Service {
                     let shown = selected.device.as_ref().and_then(|d| d.name.clone()).unwrap_or_else(|| "a node".into());
                     eprintln!("[CONVERTER] The encode from {shown} did not verify ({}); encoding it on this server instead: {} {}", verdict.reason.unwrap_or("unknown"), item.s("relativePath"), details.to_string().chars().take(300).collect::<String>());
                     from_node = true;
-                    selected = self.local_encoder(&codec)?;
+                    selected = self.local_encoder(&codec, cpu_only)?;
                     tiers = self.encode_decode_tiers(&selected, zero_copy);
                     used_cpu_fallback = !selected.hardware;
                     continue;
@@ -1918,8 +1924,11 @@ pub const NODE_FALLBACK_AT_ONCE: usize = 2;
 pub const NODE_CHECK_EXTRA: usize = 2;
 
 impl Service {
-    /// localEncoder(codec): this server's own encoder, never a node
-    fn local_encoder(&self, codec: &str) -> SResult<Selected> {
+    /// localEncoder(codec, cpuOnly): this server's own encoder, never a node
+    fn local_encoder(&self, codec: &str, cpu_only: bool) -> SResult<Selected> {
+        if cpu_only {
+            return self.0.o.tools.select_cpu_fallback(codec).map_err(Fail::from);
+        }
         match self.0.o.tools.select(codec) {
             Ok(s) if !s.remote => Ok(s),
             _ => self.0.o.tools.select_cpu_fallback(codec).map_err(Fail::from),

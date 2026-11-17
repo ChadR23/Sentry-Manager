@@ -151,6 +151,13 @@ fn device_index(d: &Device) -> Result<String, String> {
     }
 }
 
+/// The Smallest (CPU only) profile: libx265 veryfast at CRF 27 with B-frames,
+/// peaks capped at maxrate bit/s (None: no cap)
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Smallest {
+    pub maxrate: Option<u64>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct EncodeArgs<'a> {
     pub codec: &'a str,
@@ -162,6 +169,11 @@ pub struct EncodeArgs<'a> {
     pub device: Option<&'a Device>,
     pub hold_frames: i64,
     pub cpu_preset: Option<&'a str>,
+    /// Smallest (CPU only): CRF 27, or a retry's bitrate under the original's
+    pub smallest: Option<Smallest>,
+    /// a clip given back the original's own timing (lead-in frames or
+    /// samples no decoder outputs) is encoded without reordering
+    pub keep_order: bool,
 }
 
 /// buildEncodeArgs (cpuPreset defaults to CPU_ENCODER_PRESET, as in Node)
@@ -169,7 +181,17 @@ pub fn build_encode_args(a: &EncodeArgs) -> Result<Vec<String>, String> {
     let from_env = std::env::var("CPU_ENCODER_PRESET").ok();
     let (x265, svt, aom) = cpu_preset(a.cpu_preset.or(from_env.as_deref()));
     require_family(a.codec)?;
-    if a.quality.is_none() && !a.bitrate.is_some_and(|b| b.is_finite() && b > 0.0) {
+    if let Some(s) = a.smallest {
+        if a.codec != "h265" || a.encoder != "libx265" || a.quality.is_some() {
+            return Err("Smallest (CPU only) is libx265 without a quality level".into());
+        }
+        if s.maxrate.is_some_and(|m| m == 0 || m > 9_007_199_254_740_991) {
+            return Err("maxrate must be a positive safe integer or null".into());
+        }
+        if a.bitrate.is_some_and(|b| !(b.is_finite() && b > 0.0)) {
+            return Err("bitrate must be a positive finite number".into());
+        }
+    } else if a.quality.is_none() && !a.bitrate.is_some_and(|b| b.is_finite() && b > 0.0) {
         return Err("bitrate must be a positive finite number".into());
     }
     if !encoder_belongs_to_family(a.codec, a.encoder) {
@@ -209,9 +231,16 @@ pub fn build_encode_args(a: &EncodeArgs) -> Result<Vec<String>, String> {
             args.extend(["-gpu".into(), device_index(d)?]);
         }
     }
-    match a.quality {
-        Some(q) => args.extend(quality_rate_args(a.codec, enc, q)?),
-        None => args.extend(bitrate_args(enc, a.bitrate.unwrap())),
+    match (a.smallest, a.quality, a.bitrate) {
+        (Some(s), _, None) => {
+            args.extend(v(&["-crf", "27"]));
+            if let Some(m) = s.maxrate {
+                args.extend(["-maxrate".into(), m.to_string(), "-bufsize".into(), (2 * m).to_string()]);
+            }
+        }
+        (Some(_), _, Some(b)) => args.extend(bitrate_args(enc, b)),
+        (None, Some(q), _) => args.extend(quality_rate_args(a.codec, enc, q)?),
+        (None, None, b) => args.extend(bitrate_args(enc, b.unwrap())),
     }
     if a.hw_frames {
     } else if enc.ends_with("_qsv") {
@@ -233,7 +262,7 @@ pub fn build_encode_args(a: &EncodeArgs) -> Result<Vec<String>, String> {
         args.extend(v(&["-svtav1-params", "keyint=2s"]));
     }
     if enc == "libx265" {
-        args.extend(["-preset".into(), x265.into()]);
+        args.extend(["-preset".into(), (if a.smallest.is_some() { "veryfast" } else { x265 }).into()]);
     }
     if enc == "libsvtav1" {
         args.extend(["-preset".into(), svt.into()]);
@@ -241,11 +270,26 @@ pub fn build_encode_args(a: &EncodeArgs) -> Result<Vec<String>, String> {
     if enc == "libaom-av1" {
         args.extend(["-cpu-used".into(), aom.into(), "-row-mt".into(), "1".into()]);
     }
-    if a.codec == "h265" {
+    // B-frames only for Smallest (CPU only): shown at the original's own times
+    // (its time base), with composition offsets that may be negative (ctts
+    // version 1) and no edit list
+    let reorder = a.smallest.is_some() && !a.keep_order;
+    if a.codec == "h265" && !reorder {
         args.extend(v(&["-bf", "0"]));
     }
     args.extend(["-tag:v".into(), (if a.codec == "h265" { "hvc1" } else { "av01" }).into()]);
-    args.extend(v(&["-fps_mode", "passthrough", "-start_at_zero", "-avoid_negative_ts", "make_zero", "-use_editlist", "0"]));
+    args.extend(v(&["-fps_mode", "passthrough"]));
+    if reorder {
+        args.extend(v(&["-enc_time_base", "demux"]));
+    }
+    args.extend(v(&["-start_at_zero"]));
+    if !reorder {
+        args.extend(v(&["-avoid_negative_ts", "make_zero"]));
+    }
+    args.extend(v(&["-use_editlist", "0"]));
+    if reorder {
+        args.extend(v(&["-movflags", "+negative_cts_offsets"]));
+    }
     Ok(args)
 }
 
@@ -671,6 +715,9 @@ for (const [codec, list] of Object.entries(encs)) for (const encoder of list)
   { let r; try { r = buildEncodeArgs({ codec, encoder, bitrate: 1234567.5, quality, device: dev, hwFrames, holdFrames, cpuPreset }); } catch (e) { r = 'error'; } out.push(r); }
 for (const list of Object.values(encs)) for (const encoder of list) for (const platform of ['linux', 'win32', 'darwin']) for (const zeroCopy of [false, true]) for (const dev of [null, device])
   out.push(decodeAccelArgs(encoder, { platform, zeroCopy, device: dev }));
+for (const [codec, encoder, quality] of [['h265', 'libx265', null], ['h265', 'libx265', 'small'], ['h265', 'hevc_vaapi', null], ['av1', 'libsvtav1', null]])
+  for (const maxrate of [null, 0, 3000000]) for (const bitrate of [null, 1234567.5, 0]) for (const keepOrder of [false, true]) for (const holdFrames of [0, 5]) for (const cpuPreset of ['', 'faster'])
+  { let r; try { r = buildEncodeArgs({ codec, encoder, bitrate, quality, holdFrames, cpuPreset, smallest: { maxrate }, keepOrder }); } catch (e) { r = 'error'; } out.push(r); }
 console.log(JSON.stringify(out));
 "#;
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
@@ -687,7 +734,7 @@ console.log(JSON.stringify(out));
                         for hw in [false, true] {
                             for hold in [0, 5] {
                                 for preset in ["", "fast", "faster"] {
-                                    let r = build_encode_args(&EncodeArgs { codec, encoder: enc, bitrate: Some(1_234_567.5), quality: q, device: d, hw_frames: hw, hold_frames: hold, cpu_preset: Some(preset), vaapi_device: None });
+                                    let r = build_encode_args(&EncodeArgs { codec, encoder: enc, bitrate: Some(1_234_567.5), quality: q, device: d, hw_frames: hw, hold_frames: hold, cpu_preset: Some(preset), vaapi_device: None, smallest: None, keep_order: false });
                                     mine.push(r.map(|a| json!(a)).unwrap_or(json!("error")));
                                 }
                             }
@@ -702,6 +749,20 @@ console.log(JSON.stringify(out));
                     for zc in [false, true] {
                         for d in [None, Some(&dev)] {
                             mine.push(json!(decode_accel_args(enc, platform, None, zc, d).unwrap()));
+                        }
+                    }
+                }
+            }
+        }
+        for (codec, enc, q) in [("h265", "libx265", None), ("h265", "libx265", Some("small")), ("h265", "hevc_vaapi", None), ("av1", "libsvtav1", None)] {
+            for maxrate in [None, Some(0), Some(3_000_000)] {
+                for bitrate in [None, Some(1_234_567.5), Some(0.0)] {
+                    for keep_order in [false, true] {
+                        for hold in [0, 5] {
+                            for preset in ["", "faster"] {
+                                let r = build_encode_args(&EncodeArgs { codec, encoder: enc, bitrate, quality: q, hold_frames: hold, cpu_preset: Some(preset), smallest: Some(Smallest { maxrate }), keep_order, ..Default::default() });
+                                mine.push(r.map(|a| json!(a)).unwrap_or(json!("error")));
+                            }
                         }
                     }
                 }

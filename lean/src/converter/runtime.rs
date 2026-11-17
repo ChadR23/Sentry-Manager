@@ -697,14 +697,16 @@ impl Converter {
             }
             Ok(runs)
         };
+        // Smallest (CPU only) encodes on this server's CPU, so that is what it measures
+        let cpu_only = req.profile_id == super::contracts::SMALLEST_PROFILE_ID;
         // this server's own GPUs only: a helper server is not benchmarked from here
-        let gpus: Vec<Value> = self.devices.look_up().into_iter().filter(|d| d["kind"] != "cpu" && d["kind"] != "node").collect();
+        let gpus: Vec<Value> = if cpu_only { vec![] } else { self.devices.look_up().into_iter().filter(|d| d["kind"] != "cpu" && d["kind"] != "node").collect() };
         if cancel.load(Ordering::SeqCst) {
             return Err("CANCELLED".into());
         }
         if gpus.len() < 2 {
             let tools = self.template.tools.clone();
-            let runs = run_codecs(&|c: &str| tools.select(c).ok(), None, json!({}))?;
+            let runs = run_codecs(&|c: &str| if cpu_only { tools.select_cpu_fallback(c).ok() } else { tools.select(c).ok() }, None, json!({}))?;
             let first = runs.iter().find(|r| r.get("error").is_none()).or(runs.first()).cloned().unwrap_or(json!({}));
             let mut m = first.as_object().cloned().unwrap_or_default();
             m.insert("codecs".into(), Value::Array(runs));

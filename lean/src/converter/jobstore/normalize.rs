@@ -589,7 +589,8 @@ fn normalize_config(v: &Value) -> R<Value> {
     let s = |k: &str| out[k].as_str().unwrap_or("").to_string();
     let (codec, profile_id, network, output) = (s("codec"), s("profileId"), s("networkMode"), s("outputMode"));
     if !["h265", "av1"].contains(&codec.as_str())
-        || !["conservative", "balanced", "aggressive", "custom", "quality"].contains(&profile_id.as_str())
+        || !["conservative", "balanced", "aggressive", "custom", "quality", "smallest"].contains(&profile_id.as_str())
+        || (profile_id == contracts::SMALLEST_PROFILE_ID && codec != "h265")
         || !["auto", "staging", "direct"].contains(&network.as_str())
         || !["separate", "replace"].contains(&output.as_str())
         || !out["replacementConfirmed"].is_boolean()

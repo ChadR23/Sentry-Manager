@@ -56,6 +56,9 @@ function resolvePathFor(base) {
   };
 }
 
+// what the devices channel answers (lean/src/converter/ipc.rs has the same)
+const DEVICES = { devices: [{ id: 'pci:0000:01:00.0', kind: 'dri', name: 'Old GPU', encoders: { h265: null, av1: null } }] };
+
 function corpus(base) {
   const a = path.join(base, 'allowed');
   const src = path.join(a, 'TeslaCam');
@@ -74,6 +77,12 @@ function corpus(base) {
     { ...good, profileId: 'quality', qualityLevel: 'high' }, { ...good, profileId: 'quality', qualityLevel: 'x' },
     { ...good, keepOffTarget: true }, { ...good, profileId: 'custom', bitrateKbps: 300, keepOffTarget: true },
     { ...good, keepLarger: true }, { ...good, profileId: 'quality', qualityLevel: 'small', keepLarger: true },
+    { ...good, profileId: 'smallest' }, { ...good, profileId: 'smallest', codec: 'av1' }, { ...good, profileId: 'smallest', keepLarger: true },
+    { ...good, profileId: 'smallest', keepOffTarget: true }, { ...good, profileId: 'smallest', qualityLevel: 'small' },
+    { ...good, profileId: 'smallest', bitrateKbps: 2500 }, { ...good, profileId: 'smallest', codec: 'av1', keepOffTarget: true },
+    { ...good, profileId: 'smallest', lanes: [{ device: 'cpu', concurrency: 2 }] },
+    // a GPU that cannot encode H.265 (DEVICES below): refused, but not for Smallest (CPU only), which does not use its lanes
+    { ...good, lanes: [{ device: 'pci:0000:01:00.0', concurrency: 1 }] }, { ...good, profileId: 'smallest', lanes: [{ device: 'pci:0000:01:00.0', concurrency: 1 }] },
     { ...good, lanes: [{ device: 'cpu', concurrency: 2 }, { device: 'pci:0000:03:00.0', concurrency: 0 }] },
     { ...good, lanes: null }, { ...good, lanes: [] }, { ...good, codec: 'h264' }, { ...good, codec: 'av1' },
     { ...good, profileId: 'tiny' }, { ...good, networkMode: 'smb' }, { ...good, outputMode: 'both' },
@@ -109,7 +118,8 @@ async function run(base, file) {
     capabilities: { separatePublication: 'native-atomic', ownershipCleanup: 'atomic-expected-ownership', replacement: 'available', destinationContainment: 'pathname-revalidated-non-atomic' },
     runBenchmark: async () => { throw Object.assign(new Error('x'), { code: 'BENCHMARK_UNAVAILABLE' }); },
     cancelBenchmark: () => {},
-    auto: null
+    auto: null,
+    devices: async () => DEVICES
   };
   const bridge = createConverterBridge({ runtime, resolvePath: resolvePathFor(base), log: { error() {} } });
   const out = [];

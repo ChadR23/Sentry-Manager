@@ -4,7 +4,7 @@ const nodeFs = require('fs');
 const nodePath = require('path');
 const { isValidConcurrency, isValidCustomBitrate, isValidQualityLevel, isValidVerifyMode, normalizeLanes, lanesTotal } = require('./contracts');
 
-const PROFILE_IDS = Object.freeze(['conservative', 'balanced', 'aggressive', 'custom', 'quality']);
+const PROFILE_IDS = Object.freeze(['conservative', 'balanced', 'aggressive', 'custom', 'quality', 'smallest']);
 
 const CHANNELS = Object.freeze([
   'converter:chooseFolder',
@@ -329,11 +329,11 @@ async function validateStartConfig(payload, dependencies, capabilities) {
   // Keep clips that miss the size target: a boolean; only a size profile
   // has a target, so custom bitrate and constant quality must not turn it on.
   if (hasKeepOffTarget && (typeof payload.keepOffTarget !== 'boolean'
-      || (payload.keepOffTarget && (payload.profileId === 'custom' || payload.profileId === 'quality')))) fail('INVALID_KEEP_OFF_TARGET');
+      || (payload.keepOffTarget && (payload.profileId === 'custom' || payload.profileId === 'quality' || payload.profileId === 'smallest')))) fail('INVALID_KEEP_OFF_TARGET');
   // Always convert, even if larger: the other way round, only constant
   // quality and custom bitrate (no size target) may turn it on.
   if (hasKeepLarger && (typeof payload.keepLarger !== 'boolean'
-      || (payload.keepLarger && payload.profileId !== 'custom' && payload.profileId !== 'quality'))) fail('INVALID_KEEP_LARGER');
+      || (payload.keepLarger && payload.profileId !== 'custom' && payload.profileId !== 'quality' && payload.profileId !== 'smallest'))) fail('INVALID_KEEP_LARGER');
   // Conversions at once per GPU. A device id that is not in the container
   // now is kept (a saved automatic setting can outlive a GPU); the job skips
   // that lane and says so in the log.
@@ -341,10 +341,13 @@ async function validateStartConfig(payload, dependencies, capabilities) {
   if (hasLanes) {
     try { lanes = normalizeLanes(payload.lanes); } catch (_) { fail('INVALID_LANES'); }
   }
-  const laneFields = lanes ? { lanes, concurrency: lanesTotal(lanes) } : {};
+  // Smallest (CPU only) runs on this server's CPU: its lanes become their total
+  const laneFields = !lanes ? {} : payload.profileId === 'smallest' ? { concurrency: lanesTotal(lanes) } : { lanes, concurrency: lanesTotal(lanes) };
   if (hasVerify && !isValidVerifyMode(payload.verifyMode)) fail('INVALID_VERIFY_MODE');
   if (!['h265', 'av1'].includes(payload.codec)) fail('INVALID_CODEC');
   if (!PROFILE_IDS.includes(payload.profileId)) fail('INVALID_PROFILE');
+  // Smallest (CPU only) is an x265 setting: H.265 only.
+  if (payload.profileId === 'smallest' && payload.codec !== 'h265') fail('INVALID_CODEC');
   if (!['auto', 'staging', 'direct'].includes(payload.networkMode)) fail('INVALID_NETWORK_MODE');
   if (!['separate', 'replace'].includes(payload.outputMode)) fail('INVALID_OUTPUT_MODE');
   if (!Array.isArray(payload.includedGroups) || payload.includedGroups.length === 0
@@ -605,6 +608,7 @@ function registerConverterIpc(options = {}) {
           || codecs.some((entry) => !['h265', 'av1'].includes(entry))) fail('INVALID_CODEC');
       const profileId = payload.profileId ?? 'balanced';
       if (!PROFILE_IDS.includes(profileId)) fail('INVALID_PROFILE');
+      if (profileId === 'smallest' && codecs.some((entry) => entry !== 'h265')) fail('INVALID_CODEC');
       if (profileId === 'custom' ? !isValidCustomBitrate(payload.bitrateKbps) : payload.bitrateKbps !== undefined) {
         fail('INVALID_BITRATE');
       }
