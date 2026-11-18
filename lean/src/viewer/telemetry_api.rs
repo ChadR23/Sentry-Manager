@@ -30,6 +30,8 @@ struct Busy {
     now: usize,
     background: usize,
     waiting: usize,
+    /// background reads waiting for a slot
+    background_waiting: usize,
 }
 
 pub struct Slot<'a>(&'a Limiter, bool);
@@ -75,9 +77,11 @@ impl Limiter {
     /// A slot for background reading: only while nobody waits for one with take().
     pub fn take_background(&self) -> Slot<'_> {
         let mut b = self.busy.lock().unwrap();
+        b.background_waiting += 1;
         while b.now >= (self.max)().max(1) || b.waiting > 0 {
             b = self.freed.wait(b).unwrap();
         }
+        b.background_waiting -= 1;
         b.now += 1;
         b.background += 1;
         Slot(self, true)
@@ -327,7 +331,11 @@ mod tests {
                 let _s = l3.take_background();
                 g2.store(true, SeqCst);
             });
-            std::thread::sleep(Duration::from_millis(2));
+            // (the background read waits before the slots are freed: it can only get in by the
+            // notification the last waiting Viewer read sends when it gets in)
+            while l.busy.lock().unwrap().background_waiting == 0 {
+                std::thread::yield_now();
+            }
             drop(f1);
             drop(f2);
             let t = Instant::now();

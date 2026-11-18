@@ -160,15 +160,26 @@ pub fn send_media_held<H: Send + 'static>(method: &Method, headers: &HeaderMap, 
     if file.seek(SeekFrom::Start(start)).is_err() {
         return empty(StatusCode::INTERNAL_SERVER_ERROR);
     }
-    let held = hold();
     if len <= MEDIA_CHUNK {
         let mut buf = vec![0u8; len as usize];
         if file.read_exact(&mut buf).is_err() {
             return empty(StatusCode::INTERNAL_SERVER_ERROR);
         }
-        drop(held);
-        return b.body(Body::from(buf)).unwrap();
+        // (made once the bytes are read, so a read that failed makes none, and kept by the body
+        // until they went out)
+        return match hold() {
+            Some(h) => {
+                use futures_util::StreamExt;
+                let chunk = futures_util::stream::iter([Ok::<_, std::io::Error>(bytes::Bytes::from(buf))]).map(move |c| {
+                    let _kept = &h;
+                    c
+                });
+                b.body(Body::from_stream(chunk)).unwrap()
+            }
+            None => b.body(Body::from(buf)).unwrap(),
+        };
     }
+    let held = hold();
     // the whole of a big file: streamed from the descriptor that was checked
     let reader = tokio::io::AsyncReadExt::take(tokio::fs::File::from_std(file), len);
     let stream = file_stream(reader);
