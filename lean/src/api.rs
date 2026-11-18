@@ -155,15 +155,23 @@ fn state_fields(st: Option<&crate::app::VehicleState>, out: &mut Map<String, Val
     out.insert("error".into(), json!(st.and_then(|s| s.last_error.clone())));
 }
 
+/// One page of day summaries (newest day first) with how many days and recordings there are in
+/// all. Only the page's days are summed up: a day's summary is of its own recordings.
+fn day_page(list: &[&Recording], codecs: &inventory::Codecs, start: f64, end: f64) -> (Vec<Map<String, Value>>, usize, usize) {
+    let days: Vec<&str> = list.iter().map(|r| r.day.as_str()).collect::<std::collections::BTreeSet<_>>().into_iter().rev().collect();
+    let page: std::collections::HashSet<&str> = slice(&days, start, end).into_iter().collect();
+    let on_page: Vec<&Recording> = list.iter().copied().filter(|r| page.contains(r.day.as_str())).collect();
+    (inventory::summarize_days(&on_page, codecs), days.len(), list.len())
+}
+
 fn days(app: &App, v: &Vehicle, q: &HashMap<String, String>) -> Res {
     let st = app.state_of(&v.id);
     let empty = Arc::new(Vec::new());
     let recs = st.as_ref().map_or(empty, |s| s.recordings.clone());
     let codecs = st.as_ref().map(|s| s.codecs.clone()).unwrap_or_default();
     let list = filtered(&recs, q);
-    let all = inventory::summarize_days(&list, &codecs);
     let (offset, limit) = paging(q, 100.0, 30.0);
-    let mut shown = slice(&all, offset, offset + limit);
+    let (mut shown, total, recordings) = day_page(&list, &codecs, offset, offset + limit);
     let wanted: Vec<String> = shown.iter().map(|d| d["day"].as_str().unwrap_or("").to_string()).collect();
     let idx = crate::viewer::get().map(|viewer| viewer.speed_index.progress(&v.id, &wanted)).unwrap_or_default();
     let gaps = crate::viewer::get().map(|viewer| viewer.archive.for_days(&v.id)).unwrap_or_default();
@@ -194,8 +202,8 @@ fn days(app: &App, v: &Vehicle, q: &HashMap<String, String>) -> Res {
     let mut out = Map::new();
     // Sentry USB's status file on this share (as GET /api/vehicles/:id/sentry-usb)
     out.insert("sentryUsb".into(), app.core.sentry_usb(&v.id));
-    out.insert("total".into(), json!(all.len()));
-    out.insert("recordings".into(), json!(all.iter().map(|d| d["recordings"].as_u64().unwrap_or(0)).sum::<u64>()));
+    out.insert("total".into(), json!(total));
+    out.insert("recordings".into(), json!(recordings));
     out.insert("offset".into(), num(offset));
     out.insert("limit".into(), num(limit));
     state_fields(st.as_ref(), &mut out);
@@ -477,6 +485,34 @@ mod tests {
         std::fs::write(&ev, &[b' '; 70 * 1024]).unwrap();
         assert_eq!(event_info(&v, rec), Value::Null, "over 64 KiB");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_page_of_days_is_that_part_of_all_the_days_summed_up() {
+        let mut rels: Vec<(String, &str)> = Vec::new();
+        for (day, hour) in [("2026-11-01", "08"), ("2026-11-03", "08"), ("2026-11-03", "20"), ("2026-11-02", "09"), ("2026-11-05", "07"), ("2026-11-04", "10")] {
+            rels.push((format!("TeslaCam/RecentClips/{day}_{hour}-00-00-front.mp4"), day));
+        }
+        rels.push(("TeslaCam/SentryClips/2026-11-02_12-30-00/2026-11-02_12-29-00-front.mp4".into(), "2026-11-02"));
+        let files: Vec<FileEntry> = rels
+            .iter()
+            .map(|(rel, day)| {
+                let c = crate::footage::classify(rel).unwrap();
+                FileEntry { rel: rel.clone(), size: 1, mtime_ms: 0.0, ctime_ms: 0.0, birthtime_ms: 0.0, kind: c.kind, typ: c.typ, day: (*day).into(), camera: c.camera, event_id: c.event_id }
+            })
+            .collect();
+        let mut recs = inventory::build_recordings(&Arc::new(FileList::from(files)), "v1");
+        recs[0].day = String::new();
+        let list: Vec<&Recording> = recs.iter().collect();
+        let codecs = inventory::Codecs::default();
+        let all = inventory::summarize_days(&list, &codecs);
+        assert!(all.len() >= 5 && all.iter().any(|d| d["recordings"] == json!(2)) && all.iter().any(|d| d["day"] == json!("")), "{all:?}");
+        for (start, end) in [(0.0, 30.0), (0.0, 1.0), (1.0, 3.0), (2.0, 4.0), (4.0, 9.0), (9.0, 12.0), (3.0, 3.0)] {
+            let (shown, total, recordings) = day_page(&list, &codecs, start, end);
+            assert_eq!(shown, slice(&all, start, end), "days {start}..{end}");
+            assert_eq!(total, all.len());
+            assert_eq!(recordings as u64, all.iter().map(|d| d["recordings"].as_u64().unwrap()).sum::<u64>());
+        }
     }
 
     #[test]
