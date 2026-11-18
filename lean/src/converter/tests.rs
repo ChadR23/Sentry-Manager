@@ -136,7 +136,7 @@ fn verifier_matches_node() {
         let out = Command::new("node").arg(script).arg(dir).output().expect("run node");
         assert!(out.status.success(), "verifierFixtures.js failed: {}", String::from_utf8_lossy(&out.stderr));
     }
-    let runner = super::process::BoundedRunner { timeout_ms: 120_000, max_output_bytes: 4 * 1024 * 1024 };
+    let runner = super::process::BoundedRunner { timeout_ms: 120_000, max_output_bytes: 4 * 1024 * 1024, ..Default::default() };
     let snaps = std::env::temp_dir().join(format!("lean-verifier-parity-{}", std::process::id()));
     std::fs::create_dir_all(&snaps).unwrap();
     let registry = super::snapshot::Registry::new(snaps.clone());

@@ -1,8 +1,11 @@
 //! runtime.js createBoundedProcessRunner: ffmpeg / ffprobe as child
 //! processes, never through a shell, with a time limit, an output limit and
-//! cancellation; SIGTERM ends them as in Node.
+//! cancellation; SIGTERM ends them as in Node, and SIGKILL what is still there
+//! a grace later (each runs in its own process group, so what it started goes
+//! with it), so a run ends within its limit plus about two graces.
 
 use std::io::Read;
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -42,6 +45,10 @@ pub const HOST_PROCESS_TIMEOUT_MS: u64 = 30 * 60_000;
 pub struct BoundedRunner {
     pub timeout_ms: u64,
     pub max_output_bytes: usize,
+    /// after SIGTERM, how long before SIGKILL; after SIGKILL, how long it is waited for (a
+    /// process stuck on a dead share may not end even then: it is reaped when it does); and
+    /// how long the output is waited for once it ended
+    pub grace_ms: u64,
 }
 
 impl BoundedRunner {
@@ -53,7 +60,7 @@ impl BoundedRunner {
 
 impl Default for BoundedRunner {
     fn default() -> Self {
-        BoundedRunner { timeout_ms: 30_000, max_output_bytes: 1024 * 1024 }
+        BoundedRunner { timeout_ms: 30_000, max_output_bytes: 1024 * 1024, grace_ms: 5_000 }
     }
 }
 
@@ -87,7 +94,7 @@ impl Runner for BoundedRunner {
             return Ok(ProcResult { status: None, signal: Some("SIGTERM".into()), aborted: true, ..Default::default() });
         }
         let mut cmd = Command::new(command);
-        cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).process_group(0);
         if let Some(d) = &opts.cwd {
             cmd.current_dir(d);
         }
@@ -101,16 +108,14 @@ impl Runner for BoundedRunner {
         let pid = child.id() as i32;
         let cap = Arc::new(Mutex::new(Captured { stdout: vec![], stderr: vec![], total: 0, exceeded: false }));
         let max = self.max_output_bytes;
-        let term = move || {
-            // SAFETY: signalling our own child by its pid
-            unsafe {
-                libc::kill(pid, libc::SIGTERM);
-            }
-        };
+        let group = Group { pid, done: Arc::new(Mutex::new(false)) };
+        let reader_group = group.clone();
+        let term = move || reader_group.signal(libc::SIGTERM);
         let mut readers = Vec::new();
         for (is_out, stream) in [(true, child.stdout.take().map(|s| Box::new(s) as Box<dyn Read + Send>)), (false, child.stderr.take().map(|s| Box::new(s) as Box<dyn Read + Send>))] {
             let Some(mut stream) = stream else { continue };
             let cap = cap.clone();
+            let term = term.clone();
             readers.push(std::thread::spawn(move || {
                 let mut buf = [0u8; 16384];
                 loop {
@@ -139,26 +144,67 @@ impl Runner for BoundedRunner {
             }));
         }
         let start = Instant::now();
-        let (mut timed_out, mut aborted, mut termed) = (false, false, false);
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(s)) => break Some(s),
-                Ok(None) => {}
-                Err(_) => break None,
+        let grace = Duration::from_millis(self.grace_ms);
+        let (mut timed_out, mut aborted) = (false, false);
+        let (mut termed, mut killed): (Option<Instant>, Option<Instant>) = (None, None);
+        // (its end is seen without reaping it: until it is reaped its pid, the group's id, is not
+        // given to another process, so a signal to the group cannot reach another one)
+        let stuck = loop {
+            if ended(pid) {
+                break false;
             }
-            if !termed && start.elapsed() >= Duration::from_millis(timeout) {
+            if termed.is_none() && start.elapsed() >= Duration::from_millis(timeout) {
                 timed_out = true;
-                termed = true;
+                termed = Some(Instant::now());
                 term();
             }
-            if !termed && opts.cancel.as_ref().is_some_and(|c| c.load(Ordering::SeqCst)) {
+            if termed.is_none() && opts.cancel.as_ref().is_some_and(|c| c.load(Ordering::SeqCst)) {
                 aborted = true;
-                termed = true;
+                termed = Some(Instant::now());
                 term();
+            }
+            // (over the output limit a reader sent SIGTERM)
+            if termed.is_none() && cap.lock().unwrap().exceeded {
+                termed = Some(Instant::now());
+            }
+            match (termed, killed) {
+                (Some(t), None) if t.elapsed() >= grace => {
+                    group.signal(libc::SIGKILL);
+                    killed = Some(Instant::now());
+                }
+                // (stuck where even SIGKILL waits, on a dead share: not waited for)
+                (_, Some(k)) if k.elapsed() >= grace => break true,
+                _ => {}
             }
             std::thread::sleep(Duration::from_millis(10));
         };
-        for r in readers {
+        // the output ends when everything holding its pipes did (a stuck child holds them as long
+        // as it is stuck: not waited for); what the child started and left running is killed a
+        // drain later, and a reader still blocked after that is left to end
+        if !stuck {
+            let drain = grace.max(Duration::from_secs(1));
+            let waited = |until: Instant| {
+                while readers.iter().any(|r| !r.is_finished()) && Instant::now() < until {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            };
+            waited(Instant::now() + drain);
+            if readers.iter().any(|r| !r.is_finished()) && killed.is_none() {
+                group.signal(libc::SIGKILL);
+                waited(Instant::now() + drain);
+            }
+        }
+        // no signal from here on: once reaped, the group's id may be another process's
+        *group.done.lock().unwrap() = true;
+        let status = if stuck {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            None
+        } else {
+            child.wait().ok()
+        };
+        for r in readers.into_iter().filter(|r| r.is_finished()) {
             let _ = r.join();
         }
         let c = cap.lock().unwrap();
@@ -177,6 +223,45 @@ impl Runner for BoundedRunner {
             output_limit_exceeded: c.exceeded,
             error: None,
         })
+    }
+}
+
+/// The process group a child leads (its pid), signalled until `done`: the run sets it before it
+/// reaps the child, whose pid, the group's id, may then be given to another process.
+#[derive(Clone)]
+struct Group {
+    pid: i32,
+    done: Arc<Mutex<bool>>,
+}
+
+impl Group {
+    fn signal(&self, sig: i32) {
+        let done = self.done.lock().unwrap();
+        if !*done {
+            // SAFETY: signalling the process group of our own child, not yet reaped
+            unsafe {
+                libc::kill(-self.pid, sig);
+            }
+        }
+    }
+}
+
+/// Whether the child ended, leaving it to be reaped (waitid WNOWAIT). One that is not ours to
+/// wait for any more (ECHILD) counts as ended (reaping it then returns at once); after any other
+/// error it has not, and the run's limit and graces still bound the wait.
+fn ended(pid: i32) -> bool {
+    loop {
+        // SAFETY: an all-zero siginfo_t is valid; waitid only writes into it
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let r = unsafe { libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT) };
+        if r == 0 {
+            return unsafe { info.si_pid() } != 0;
+        }
+        match std::io::Error::last_os_error().raw_os_error() {
+            Some(libc::EINTR) => continue,
+            Some(libc::ECHILD) => return true,
+            _ => return false,
+        }
     }
 }
 
@@ -202,7 +287,7 @@ mod tests {
 
     #[test]
     fn runs_limits_and_cancels() {
-        let r = BoundedRunner { timeout_ms: 5_000, max_output_bytes: 1000 };
+        let r = BoundedRunner { timeout_ms: 5_000, max_output_bytes: 1000, ..Default::default() };
         let ok = r.run("sh", &s(&["-c", "echo hi; echo err >&2"]), &RunOptions::default()).unwrap();
         assert_eq!((ok.status, ok.stdout.as_str(), ok.stderr.as_str()), (Some(0), "hi\n", "err\n"));
         let t = r.run("sleep", &s(&["5"]), &RunOptions { timeout_ms: Some(100), ..Default::default() }).unwrap();
@@ -221,5 +306,45 @@ mod tests {
         assert!(a.aborted);
         assert!(r.run("a\0b", &[], &RunOptions::default()).is_err());
         assert!(cuda_by_index(&s(&["-gpu", "1"])) && !cuda_by_index(&s(&["-gpu", "any"])));
+    }
+
+    #[test]
+    fn a_child_that_ignores_sigterm_is_killed_a_grace_later() {
+        let r = BoundedRunner { grace_ms: 300, ..Default::default() };
+        let t = Instant::now();
+        // (an ignored signal stays ignored in what the shell starts)
+        let out = r.run("sh", &s(&["-c", "trap '' TERM; sleep 30"]), &RunOptions { timeout_ms: Some(100), ..Default::default() }).unwrap();
+        assert!(out.timed_out && out.status.is_none() && out.signal.as_deref() == Some("SIGKILL"), "{out:?}");
+        assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+    }
+
+    #[test]
+    fn what_a_child_left_running_does_not_hold_the_run() {
+        let r = BoundedRunner { grace_ms: 300, ..Default::default() };
+        let t = Instant::now();
+        // (the shell ends at once; the sleep it left holds the output pipes)
+        let out = r.run("sh", &s(&["-c", "echo started; sleep 30 &"]), &RunOptions::default()).unwrap();
+        assert_eq!((out.status, out.stdout.as_str(), out.timed_out), (Some(0), "started\n", false));
+        assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+    }
+
+    #[test]
+    fn with_no_grace_the_whole_output_still_comes() {
+        let r = BoundedRunner { grace_ms: 0, max_output_bytes: 1 << 20, ..Default::default() };
+        let out = r.run("sh", &s(&["-c", "head -c 200000 /dev/zero | tr '\\0' a"]), &RunOptions::default()).unwrap();
+        assert_eq!((out.status, out.stdout.len()), (Some(0), 200_000));
+    }
+
+    #[test]
+    fn a_process_in_its_own_session_holding_the_pipes_is_left_to_end_on_its_own() {
+        if !std::path::Path::new("/usr/bin/setsid").exists() && !std::path::Path::new("/bin/setsid").exists() {
+            return;
+        }
+        let r = BoundedRunner { grace_ms: 300, ..Default::default() };
+        let t = Instant::now();
+        // (out of the child's group, so no signal of the run reaches it)
+        let out = r.run("sh", &s(&["-c", "setsid sleep 30 & echo started"]), &RunOptions::default()).unwrap();
+        assert_eq!((out.status, out.stdout.as_str()), (Some(0), "started\n"));
+        assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
     }
 }
