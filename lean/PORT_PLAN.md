@@ -1097,3 +1097,22 @@ Accepted by the owner (2026-11-16), with the earlier ones:
 - the other areas' proposed differences above (helper servers' TLS error
   texts, the supervisor's logged file system errors, the encoder and stats
   details listed there).
+
+Accepted by the owner (2026-11-18), after the run on the real archive
+(1,236 of 1,247 answers the same; these are the only differences left):
+
+- footage: `frontRel` of a recording without a front-camera clip
+  (`/api/vehicles/:id/recordings` and `/recordings/:rid`). Both servers
+  answer another camera's clip, never null (the first clip of the
+  recording, inventory.js and inventory.rs alike), but which clip is first
+  differs: Node keeps each file when its stat answers, and its stats run in
+  parallel, so on a real share it is sometimes another camera; this server
+  takes them in name order (scanner.rs `node_order`), the order Node gives
+  when its stats answer in turn.
+- ops: `/api/snapshots` `bytes` of the database snapshot. The snapshot is
+  the same VACUUM INTO of manager.db with the same tables, but the catalog
+  rows in it differ when it is taken (a minute after the start, while the
+  first scan and codec reading may still run): Node writes the scan's files
+  (`catalog_files`) and the codecs (`clip_codecs`) in batches of 1,000 as it
+  goes, this server writes the files when the scan finishes and the codecs
+  when they have all been read (`src/app.rs`, catalog.rs).
