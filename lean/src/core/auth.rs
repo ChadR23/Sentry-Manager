@@ -335,8 +335,12 @@ impl Auth {
 
     /// The signed-in user name, or None.
     pub fn user(&self, r: &ReqView) -> Option<String> {
-        let t = self.token(r)?;
-        self.db.get_session(&sha256_hex(&t)).map(|s| s.username)
+        self.user_of(&self.session_hash(r)?)
+    }
+
+    /// The user of a session (by its hash), or None.
+    pub fn user_of(&self, session_hash: &str) -> Option<String> {
+        self.db.get_session(session_hash).map(|s| s.username)
     }
 
     /// Sign in: a fresh token every time. Returns the Set-Cookie value.

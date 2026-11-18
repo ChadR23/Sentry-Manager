@@ -111,7 +111,7 @@ fn server_stats(ctx: &Arc<dyn OpsCtx>, notes: &Arc<notes::Notes>, converting: &A
     o.active_encodes = Arc::new(move || c.active_encodes());
     o.ffmpeg_path = ctx.ffmpeg_path();
     let c = ctx.clone();
-    o.price_at = Arc::new(move |ms| power::price_at(&store::get(&c.db(), "power").unwrap_or(Value::Null), ms));
+    o.price_at = Arc::new(move |ms| power::price_at(&store::get(&c.read_db(), "power").unwrap_or(Value::Null), ms));
     let c = ctx.clone();
     o.job_progress = Arc::new(move |id| c.job_progress(id));
     let c = ctx.clone();
@@ -376,7 +376,7 @@ impl Ops {
         self.stats.touch(None);
         let mut snap = self.stats.snapshot();
         let ctx = &*self.ctx;
-        let pw = store::get(&ctx.db(), "power").unwrap_or(Value::Null);
+        let pw = store::get(&ctx.read_db(), "power").unwrap_or(Value::Null);
         let t = store::now_ms();
         let price_now = power::price_at(&pw, t);
         let (rows, combined) = node_power::combine(&snap["power"], &ctx.node_powers(), price_now);

@@ -117,6 +117,14 @@ pub struct TlsInfo {
 pub trait OpsCtx: Send + Sync + 'static {
     /// manager.db (same schema as server/db.js), one connection, locked.
     fn db(&self) -> MutexGuard<'_, Connection>;
+    /// manager.db for a read only (the server's reading connection).
+    fn read_db(&self) -> MutexGuard<'_, Connection> {
+        self.db()
+    }
+    /// PRAGMA quick_check's first line (the server runs it on a connection of its own).
+    fn quick_check(&self) -> Result<String, String> {
+        self.read_db().query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0)).map_err(|e| e.to_string())
+    }
     /// DATA_PATH
     fn data_dir(&self) -> PathBuf;
     /// APP_ROOT (BUILD_INFO.json, CRITICAL_UPDATE.txt)

@@ -273,19 +273,36 @@ async fn handle(state: Arc<AppState>, req: Request<Body>, conn: ConnInfo) -> Res
     let query = query_map(raw_query.as_deref());
     let cookie_header = hval(&headers, "cookie");
     let view = super::auth::ReqView { secure, cookie: &cookie_header, agent: "" };
-    let mut user = state.auth.user(&view);
     let is_api = p.starts_with("/api/");
+    // the session's user, its two-step state and (for an admin route) its role are read on a
+    // blocking thread: the async workers run no SQLite
+    let session = state.auth.session_hash(&view);
+    let (mut user, two_factor, role) = match session.clone() {
+        None => (None, None, None),
+        Some(h) => {
+            let (st, home, admin_route) = (state.clone(), state.from_home(&client), is_api && !viewer_may(method.as_str(), &p));
+            tokio::task::spawn_blocking(move || {
+                let user = st.auth.user_of(&h);
+                let two_factor = user.as_deref().map(|u| st.two_factor_state(u, home));
+                let role = user.as_deref().filter(|_| admin_route).and_then(|u| st.accounts.role_of(Some(u)));
+                (user, two_factor, role)
+            })
+            .await
+            .unwrap_or((None, None, None))
+        }
+    };
 
     // a banned address: every sign-in step (and anything else without a session) is refused
     if is_api && p != "/api/auth/me" && (user.is_none() || BAN_STEPS.contains(&p.as_str())) && state.access.banned(&client).is_some() {
         return error_json(429, BANNED_TEXT, Some("BANNED"), &accept);
     }
     let mut setup_only = false;
-    if let Some(u) = user.clone() {
-        match state.two_factor_state(&u, state.from_home(&client)) {
+    if let (Some(u), Some(two_factor)) = (user.clone(), two_factor) {
+        match two_factor {
             "out" => {
-                if let Some(h) = state.auth.session_hash(&view) {
-                    state.db.delete_session(&h);
+                if let Some(h) = session.clone() {
+                    let st = state.clone();
+                    let _ = tokio::task::spawn_blocking(move || st.db.delete_session(&h)).await;
                 }
                 state.audit.warn(format!("Signed out (no two-step sign-in, outside the home network): {u} from {client}"));
                 if is_api {
@@ -303,8 +320,8 @@ async fn handle(state: Arc<AppState>, req: Request<Body>, conn: ConnInfo) -> Res
             _ => {}
         }
     }
-    if let Some(u) = user.clone() {
-        let h = state.auth.session_hash(&view);
+    if user.is_some() {
+        let h = session.clone();
         let now = super::db::now_ms();
         if let Some(h) = &h {
             if is_api && method == Method::GET {
@@ -326,11 +343,13 @@ async fn handle(state: Arc<AppState>, req: Request<Body>, conn: ConnInfo) -> Res
                 }
             };
             if due {
-                state.db.touch_session(h, Some(&client));
+                // (a write: it waits for another connection's write, so not on one of the two async workers)
+                let (st, h, ip) = (state.clone(), h.clone(), client.clone());
+                tokio::task::spawn_blocking(move || st.db.touch_session(&h, Some(&ip)));
             }
         }
         if is_api && !viewer_may(method.as_str(), &p) {
-            if state.accounts.role_of(Some(&u)).as_deref() == Some("viewer") {
+            if role.as_deref() == Some("viewer") {
                 return error_json(403, "This account can only watch footage. An admin account can do this.", None, &accept);
             }
             let rules = state.access.get()["homeOnly"].clone();

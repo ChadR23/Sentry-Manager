@@ -81,7 +81,7 @@ pub fn checks(ctx: &dyn OpsCtx, snapshots: Option<&Snapshots>) -> Vec<Value> {
     if !cache_bad {
         out.push(check("caches", "Data folder", "Cache folders can be written", if data_err.is_some() { "skip" } else { "ok" }, "", ""));
     }
-    let quick: Result<String, String> = ctx.db().query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0)).map_err(|e| e.to_string());
+    let quick = ctx.quick_check();
     match quick {
         Ok(v) => {
             let ok = v == "ok";

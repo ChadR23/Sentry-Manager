@@ -72,6 +72,12 @@ impl OpsCtx for CoreOps {
     fn db(&self) -> MutexGuard<'_, Connection> {
         self.state.db.conn()
     }
+    fn read_db(&self) -> MutexGuard<'_, Connection> {
+        self.state.db.reader()
+    }
+    fn quick_check(&self) -> Result<String, String> {
+        self.state.db.quick_check().map_err(|e| e.to_string())
+    }
     fn data_dir(&self) -> PathBuf {
         self.state.config.data.clone()
     }

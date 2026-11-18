@@ -167,6 +167,12 @@ impl BinItem {
 
 pub struct Db {
     conn: Mutex<Connection>,
+    /// A second connection to the file, for reads: in WAL a read does not wait for a write, while
+    /// a write through `conn` holds it as long as it waits (up to the busy timeout) for another
+    /// connection's write, the footage catalog's (None: an in-memory database)
+    read: Option<Mutex<Connection>>,
+    /// the file (None: an in-memory database)
+    file: Option<std::path::PathBuf>,
     /// notify(): whether the last call changed anything (db.js lastNotifyChanged)
     last_notify_changed: Mutex<bool>,
 }
@@ -224,7 +230,13 @@ impl Db {
         if let Some(dir) = file.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        Db::from_conn(Connection::open(file)?)
+        let mut db = Db::from_conn(Connection::open(file)?)?;
+        let read = Connection::open(file)?;
+        read.busy_timeout(std::time::Duration::from_secs(5))?;
+        read.execute_batch("PRAGMA query_only = ON;")?;
+        db.read = Some(Mutex::new(read));
+        db.file = Some(file.to_path_buf());
+        Ok(db)
     }
 
     pub fn memory() -> rusqlite::Result<Db> {
@@ -240,7 +252,7 @@ impl Db {
             let _ = conn.execute_batch(&format!("ALTER TABLE sessions ADD COLUMN {col}"));
         }
         conn.execute_batch(CATALOG_SCHEMA)?;
-        Ok(Db { conn: Mutex::new(conn), last_notify_changed: Mutex::new(true) })
+        Ok(Db { conn: Mutex::new(conn), read: None, file: None, last_notify_changed: Mutex::new(true) })
     }
 
     /// The connection, for an area's own queries (keep the lock short).
@@ -248,15 +260,34 @@ impl Db {
         self.conn.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// db.js tx: BEGIN, COMMIT, or ROLLBACK when `f` fails.
+    /// The connection for a read: the reading one, when there is one.
+    pub(crate) fn reader(&self) -> MutexGuard<'_, Connection> {
+        match &self.read {
+            Some(r) => r.lock().unwrap_or_else(|e| e.into_inner()),
+            None => self.conn(),
+        }
+    }
+
+    /// PRAGMA quick_check (its first line: "ok" when intact) on a connection of its own: it reads
+    /// the whole file, a third of a second on a real install, while the shared ones go on.
+    pub fn quick_check(&self) -> rusqlite::Result<String> {
+        let Some(file) = &self.file else { return self.reader().query_row("PRAGMA quick_check", [], |r| r.get(0)) };
+        // (never made: a file gone is an error, not a new empty database that checks out)
+        let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_URI | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let c = Connection::open_with_flags(file, flags)?;
+        c.busy_timeout(std::time::Duration::from_secs(5))?;
+        c.execute_batch("PRAGMA query_only = ON;")?;
+        c.query_row("PRAGMA quick_check", [], |r| r.get(0))
+    }
+
+    /// db.js tx: BEGIN, COMMIT, or ROLLBACK when `f` (or the commit) fails. IMMEDIATE: the write
+    /// lock is waited for (busy timeout) at the start, so a transaction that reads before it writes
+    /// is not refused when another connection wrote in between.
     pub fn tx<T>(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> rusqlite::Result<T> {
         let c = self.conn();
-        c.execute_batch("BEGIN")?;
-        match f(&c) {
-            Ok(v) => {
-                c.execute_batch("COMMIT")?;
-                Ok(v)
-            }
+        c.execute_batch("BEGIN IMMEDIATE")?;
+        match f(&c).and_then(|v| c.execute_batch("COMMIT").map(|_| v)) {
+            Ok(v) => Ok(v),
             Err(e) => {
                 let _ = c.execute_batch("ROLLBACK");
                 Err(e)
@@ -268,7 +299,7 @@ impl Db {
     /// The stored value; None when there is no row or it is not JSON (db.js get's fallback).
     /// A stored `null` is Some(Value::Null), as in Node.
     pub fn get(&self, key: &str) -> Option<Value> {
-        let c = self.conn();
+        let c = self.reader();
         let text: Option<String> =
             c.prepare_cached("SELECT value FROM settings WHERE key = ?").and_then(|mut s| s.query_row([key], |r| r.get(0)).optional()).ok().flatten();
         text.and_then(|t| parse(&t))
@@ -297,7 +328,7 @@ impl Db {
 
     // ---- users / sessions
     pub fn get_user(&self, username: &str) -> Option<User> {
-        let c = self.conn();
+        let c = self.reader();
         c.prepare_cached("SELECT * FROM users WHERE username = ?")
             .and_then(|mut s| {
                 s.query_row([username], |r| Ok(User { username: r.get("username")?, salt: r.get("salt")?, hash: r.get("hash")?, created_at: r.get("created_at")? }))
@@ -308,7 +339,7 @@ impl Db {
     }
 
     pub fn user_count(&self) -> i64 {
-        self.conn().query_row("SELECT COUNT(*) AS n FROM users", [], |r| r.get(0)).unwrap_or(0)
+        self.reader().query_row("SELECT COUNT(*) AS n FROM users", [], |r| r.get(0)).unwrap_or(0)
     }
 
     pub fn put_user(&self, username: &str, salt: &str, hash: &str) {
@@ -337,7 +368,7 @@ impl Db {
     }
 
     pub fn sessions_for(&self, username: &str) -> Vec<Session> {
-        let c = self.conn();
+        let c = self.reader();
         let mut s = match c.prepare_cached(
             "SELECT token_hash, created_at, expires_at, agent, ip, seen_at FROM sessions WHERE username = ? AND expires_at > ? ORDER BY COALESCE(seen_at, created_at) DESC",
         ) {
@@ -353,7 +384,7 @@ impl Db {
 
     /// (username, created_at), oldest first
     pub fn list_users(&self) -> Vec<(String, i64)> {
-        let c = self.conn();
+        let c = self.reader();
         let mut s = match c.prepare_cached("SELECT username, created_at FROM users ORDER BY created_at") {
             Ok(s) => s,
             Err(_) => return Vec::new(),
@@ -362,14 +393,16 @@ impl Db {
         rows.map(|r| r.filter_map(Result::ok).collect()).unwrap_or_default()
     }
 
+    /// The user and their sessions, in one transaction: a read never sees a session of a user gone.
     pub fn delete_user(&self, username: &str) {
-        let c = self.conn();
-        let _ = c.execute("DELETE FROM users WHERE username = ?", [username]);
-        let _ = c.execute("DELETE FROM sessions WHERE username = ?", [username]);
+        let _ = self.tx(|c| {
+            c.execute("DELETE FROM users WHERE username = ?", [username])?;
+            c.execute("DELETE FROM sessions WHERE username = ?", [username])
+        });
     }
 
     pub fn get_session(&self, token_hash: &str) -> Option<Session> {
-        let c = self.conn();
+        let c = self.reader();
         c.prepare_cached("SELECT * FROM sessions WHERE token_hash = ? AND expires_at > ?")
             .and_then(|mut s| s.query_row(params![token_hash, now_ms()], session_row).optional())
             .ok()
@@ -390,7 +423,7 @@ impl Db {
 
     // ---- protected clips
     pub fn protected_set(&self, vehicle_id: &str) -> std::collections::HashSet<String> {
-        let c = self.conn();
+        let c = self.reader();
         let mut s = match c.prepare_cached("SELECT rel FROM protected WHERE vehicle_id = ?") {
             Ok(s) => s,
             Err(_) => return Default::default(),
@@ -426,7 +459,7 @@ impl Db {
     }
 
     pub fn bin_items(&self, vehicle_id: Option<&str>) -> Vec<BinItem> {
-        let c = self.conn();
+        let c = self.reader();
         let out = match vehicle_id {
             Some(v) if !v.is_empty() => c
                 .prepare_cached("SELECT * FROM bin_items WHERE vehicle_id = ? ORDER BY trashed_at DESC")
@@ -437,7 +470,7 @@ impl Db {
     }
 
     pub fn bin_item(&self, id: &str) -> Option<BinItem> {
-        self.conn().prepare_cached("SELECT * FROM bin_items WHERE id = ?").and_then(|mut s| s.query_row([id], bin_row).optional()).ok().flatten()
+        self.reader().prepare_cached("SELECT * FROM bin_items WHERE id = ?").and_then(|mut s| s.query_row([id], bin_row).optional()).ok().flatten()
     }
 
     pub fn remove_bin_item(&self, id: &str) {
@@ -449,20 +482,23 @@ impl Db {
     }
 
     // ---- jobs
+    /// One transaction: a read sees the job cleared or listed, never neither; 0 when it failed.
     pub fn start_job(&self, j: &NewJob) -> i64 {
-        let c = self.conn();
-        if let Some(ext) = j.external_id.as_deref().filter(|e| !e.is_empty()) {
-            if let Ok(Some(id)) = c.query_row("SELECT id FROM jobs WHERE external_id = ?", [ext], |r| r.get::<_, i64>(0)).optional() {
-                return id;
+        self.tx(|c| {
+            if let Some(ext) = j.external_id.as_deref().filter(|e| !e.is_empty()) {
+                if let Some(id) = c.query_row("SELECT id FROM jobs WHERE external_id = ?", [ext], |r| r.get::<_, i64>(0)).optional()? {
+                    return Ok(id);
+                }
+                // cleared before, running again: it is on the list once more
+                c.execute("DELETE FROM jobs_cleared WHERE external_id = ?", [ext])?;
             }
-            // cleared before, running again: it is on the list once more
-            let _ = c.execute("DELETE FROM jobs_cleared WHERE external_id = ?", [ext]);
-        }
-        let _ = c.execute(
-            "INSERT INTO jobs (type, vehicle_id, status, title, detail, started_at, external_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            params![j.kind, j.vehicle_id, "running", j.title, j.detail, now_ms(), j.external_id],
-        );
-        c.last_insert_rowid()
+            c.execute(
+                "INSERT INTO jobs (type, vehicle_id, status, title, detail, started_at, external_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                params![j.kind, j.vehicle_id, "running", j.title, j.detail, now_ms(), j.external_id],
+            )?;
+            Ok(c.last_insert_rowid())
+        })
+        .unwrap_or(0)
     }
 
     pub fn update_job(&self, id: i64, u: &JobUpdate) {
@@ -487,11 +523,11 @@ impl Db {
     }
 
     pub fn job_by_external(&self, external_id: &str) -> Option<Job> {
-        self.conn().prepare_cached("SELECT * FROM jobs WHERE external_id = ?").and_then(|mut s| s.query_row([external_id], job_row).optional()).ok().flatten()
+        self.reader().prepare_cached("SELECT * FROM jobs WHERE external_id = ?").and_then(|mut s| s.query_row([external_id], job_row).optional()).ok().flatten()
     }
 
     pub fn jobs(&self, limit: i64, vehicle_id: Option<&str>) -> Vec<Job> {
-        let c = self.conn();
+        let c = self.reader();
         let out = match vehicle_id {
             Some(v) if !v.is_empty() => c
                 .prepare_cached("SELECT * FROM jobs WHERE vehicle_id = ? OR vehicle_id IS NULL ORDER BY id DESC LIMIT ?")
@@ -509,7 +545,7 @@ impl Db {
 
     /// (id, external id) of the jobs Clear jobs takes off the list (db.js finishedJobs).
     pub fn finished_jobs(&self, vehicle_id: Option<&str>, keep_external: &[String]) -> Vec<(i64, Option<String>)> {
-        let c = self.conn();
+        let c = self.reader();
         finished_on(&c, vehicle_id, keep_external)
     }
 
@@ -537,7 +573,7 @@ impl Db {
     }
 
     pub fn job_cleared(&self, external_id: &str) -> bool {
-        self.conn().query_row("SELECT 1 AS x FROM jobs_cleared WHERE external_id = ?", [external_id], |_| Ok(())).optional().ok().flatten().is_some()
+        self.reader().query_row("SELECT 1 AS x FROM jobs_cleared WHERE external_id = ?", [external_id], |_| Ok(())).optional().ok().flatten().is_some()
     }
 
     /// At start: jobs of this process that a restart stopped are interrupted (conversions are the converter's).
@@ -639,7 +675,7 @@ impl Db {
         }
         sql.push_str(" ORDER BY (resolved_at IS NULL) DESC, updated_at DESC LIMIT ?");
         args.push(limit.into());
-        let c = self.conn();
+        let c = self.reader();
         let Ok(mut s) = c.prepare(&sql) else { return Vec::new() };
         let rows = s.query_map(rusqlite::params_from_iter(args), |r| {
             Ok(json!({
@@ -671,6 +707,94 @@ fn finished_on(c: &Connection, vehicle_id: Option<&str>, keep_external: &[String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_read_does_not_wait_for_a_write_that_waits_for_another_connection() {
+        let dir = std::env::temp_dir().join(format!("lean-db-read-{}-{}", std::process::id(), now_ms()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let db = std::sync::Arc::new(Db::open(&dir.join("manager.db")).unwrap());
+        db.put_user("a", "s", "h");
+        db.add_session("t1", "a", now_ms() + 60_000, None, None);
+        db.set("x", &json!(1));
+        // another connection (the footage catalog's) holds the write lock, and a write here waits for it
+        let other = Connection::open(dir.join("manager.db")).unwrap();
+        other.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let writer = {
+            let db = db.clone();
+            std::thread::spawn(move || db.set("x", &json!(2)))
+        };
+        let began = std::time::Instant::now();
+        while db.conn.try_lock().is_ok() {
+            assert!(began.elapsed() < std::time::Duration::from_secs(2), "the write never started");
+            std::thread::yield_now();
+        }
+        let began = std::time::Instant::now();
+        assert_eq!(db.get_session("t1").map(|s| s.username), Some("a".into()));
+        assert_eq!(db.get("x"), Some(json!(1)));
+        assert!(db.get_user("a").is_some());
+        assert_eq!((db.user_count(), db.sessions_for("a").len(), db.list_users().len()), (1, 1, 1));
+        assert!(db.jobs(10, None).is_empty() && db.notifications(true, 10, None).is_empty());
+        assert!(began.elapsed() < std::time::Duration::from_secs(1), "the reads waited {:?}", began.elapsed());
+        other.execute_batch("ROLLBACK").unwrap();
+        writer.join().unwrap();
+        assert_eq!(db.get("x"), Some(json!(2)), "the write went through once the lock was free");
+        drop(other);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_quick_check_waits_for_neither_shared_connection() {
+        let dir = std::env::temp_dir().join(format!("lean-db-quick-{}-{}", std::process::id(), now_ms()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let db = std::sync::Arc::new(Db::open(&dir.join("manager.db")).unwrap());
+        db.set("x", &json!(1));
+        let held = (db.conn.lock().unwrap(), db.read.as_ref().unwrap().lock().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        {
+            let db = db.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(db.quick_check());
+            });
+        }
+        let got = rx.recv_timeout(std::time::Duration::from_secs(3));
+        drop(held);
+        assert_eq!(got.expect("it waited for a shared connection").unwrap(), "ok");
+        // the file gone (the server's connections still open): an error, and nothing made
+        for f in ["manager.db", "manager.db-wal", "manager.db-shm"] {
+            let _ = std::fs::remove_file(dir.join(f));
+        }
+        assert!(db.quick_check().is_err());
+        assert!(!dir.join("manager.db").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_job_that_cannot_be_listed_stays_cleared() {
+        let db = Db::memory().unwrap();
+        db.conn().execute("INSERT INTO jobs_cleared (external_id, cleared_at) VALUES ('converter:1', 1)", []).unwrap();
+        // (the insert fails: the clear-marker stays, and no job id comes back)
+        db.conn().execute_batch("CREATE TEMP TRIGGER refused BEFORE INSERT ON jobs BEGIN SELECT RAISE(ABORT, 'refused'); END;").unwrap();
+        let job = NewJob { kind: "convert".into(), vehicle_id: None, title: "t".into(), detail: None, external_id: Some("converter:1".into()) };
+        assert_eq!(db.start_job(&job), 0);
+        assert!(db.job_cleared("converter:1"));
+        db.conn().execute_batch("DROP TRIGGER refused").unwrap();
+        let id = db.start_job(&job);
+        assert!(id > 0 && !db.job_cleared("converter:1") && db.job_by_external("converter:1").map(|j| j.id) == Some(id));
+    }
+
+    #[test]
+    fn a_user_and_their_sessions_go_together() {
+        let db = Db::memory().unwrap();
+        db.put_user("a", "s", "h");
+        db.add_session("t1", "a", now_ms() + 60_000, None, None);
+        // (the sessions cannot go: then the user stays too)
+        db.conn().execute_batch("CREATE TEMP TRIGGER kept BEFORE DELETE ON sessions BEGIN SELECT RAISE(ABORT, 'kept'); END;").unwrap();
+        db.delete_user("a");
+        assert!(db.get_user("a").is_some() && db.get_session("t1").is_some());
+        db.conn().execute_batch("DROP TRIGGER kept").unwrap();
+        db.delete_user("a");
+        assert!(db.get_user("a").is_none() && db.get_session("t1").is_none());
+    }
 
     #[test]
     fn settings_round_trip_and_null() {

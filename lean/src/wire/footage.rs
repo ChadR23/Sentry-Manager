@@ -112,7 +112,7 @@ impl Ctx for FootageCtx {
     }
     fn saved(&self, vehicle_id: &str) -> Value {
         match self.srv() {
-            Some(s) => crate::ops::power::for_vehicle(&s.state.db.conn(), vehicle_id),
+            Some(s) => crate::ops::power::for_vehicle(&s.state.db.reader(), vehicle_id),
             None => json!({ "bytes": 0, "clips": 0 }),
         }
     }
