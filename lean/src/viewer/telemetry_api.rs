@@ -6,6 +6,7 @@
 //! `telemetryReads` clips are read at once; the cache keeps the newest 4,000.
 
 use super::js;
+use bytes::Bytes;
 use std::collections::HashMap;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -100,7 +101,7 @@ pub fn base64(b: &[u8]) -> String {
 #[derive(Debug, Clone)]
 pub struct Refused(pub u16, pub String);
 
-type Pending = Arc<(Mutex<Option<Result<String, Refused>>>, Condvar)>;
+type Pending = Arc<(Mutex<Option<Result<Bytes, Refused>>>, Condvar)>;
 
 pub struct Telemetry {
     pub dir: PathBuf,
@@ -138,7 +139,14 @@ impl Telemetry {
     }
 
     /// (key, body) for a clip; real must already be checked.
-    pub fn for_file(&self, real: &Path) -> Result<(String, String), Refused> {
+    pub fn for_file(&self, real: &Path) -> Result<(String, Bytes), Refused> {
+        let (md, key) = self.identity(real)?;
+        self.body(real, &md, &key).map(|body| (key, body))
+    }
+
+    /// A clip's metadata and key (its ETag) after for_file's checks: what a conditional
+    /// request is answered with before anything else is read.
+    pub fn identity(&self, real: &Path) -> Result<(std::fs::Metadata, String), Refused> {
         let md = std::fs::metadata(real).map_err(|_| Refused(500, "Internal error".into()))?;
         if !md.is_file() {
             return Err(Refused(404, "Not a file".into()));
@@ -147,10 +155,17 @@ impl Telemetry {
             return Err(Refused(413, "File too large".into()));
         }
         let key = Self::key(real, &md);
+        Ok((md, key))
+    }
+
+    /// The body of a clip as identity() found it: the cached one, else read once for every
+    /// request waiting for it (they share the one body).
+    pub fn body(&self, real: &Path, md: &std::fs::Metadata, key: &str) -> Result<Bytes, Refused> {
+        let key = key.to_string();
         let cached = self.dir.join(format!("{key}.json"));
         if let Ok(body) = std::fs::read_to_string(&cached) {
             if !body.is_empty() {
-                return Ok((key, body));
+                return Ok(Bytes::from(body));
             }
         }
         let (job, mine) = {
@@ -168,8 +183,8 @@ impl Telemetry {
             let out = {
                 let _slot = self.limit.take();
                 match crate::telemetry::read_records(real, md.size()) {
-                    Ok(frames) => Ok(body_of(&frames)),
-                    Err(crate::telemetry::Fail::Parse(_)) => Ok(body_of(&[])),
+                    Ok(frames) => Ok(Bytes::from(body_of(&frames))),
+                    Err(crate::telemetry::Fail::Parse(_)) => Ok(Bytes::from(body_of(&[]))),
                     Err(crate::telemetry::Fail::Io(e)) => {
                         eprintln!("GET /api/telemetry: {e}");
                         Err(Refused(500, "Internal error".into()))
@@ -197,7 +212,7 @@ impl Telemetry {
         while r.is_none() {
             r = job.1.wait(r).unwrap();
         }
-        r.clone().unwrap().map(|b| (key, b))
+        r.clone().unwrap()
     }
 
     /// Keep the cache to the newest MAX_CACHE_FILES results.

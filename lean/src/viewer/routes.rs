@@ -130,7 +130,7 @@ impl Viewer {
     fn telemetry(&self, req: &Req) -> Res {
         let p = req.query.get("path").cloned().unwrap_or_default();
         let Some(real) = studio::readable(&*self.ctx).resolve(&p).filter(|r| !studio::hidden_path(r)) else { return error(403, "Outside the vehicle shares.") };
-        let (key, body) = match self.telemetry.for_file(&real) {
+        let (md, key) = match self.telemetry.identity(&real) {
             Ok(x) => x,
             Err(super::telemetry_api::Refused(s, m)) => return error(s, &m),
         };
@@ -141,14 +141,20 @@ impl Viewer {
             .header(header::ETAG, &etag)
             .header(header::VARY, "Accept-Encoding")
             .header("X-Content-Type-Options", "nosniff");
-        if req.headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()) == Some(etag.as_str()) {
+        // (the key is the clip's path, size and time: a matching ETag, alone or in a list as
+        // http.js splits it, is answered from those before the cached body, or the clip, is read)
+        if crate::ui::http::none_match(req.headers, &etag) {
             return b.status(StatusCode::NOT_MODIFIED).body(Body::empty()).unwrap();
         }
+        let body = match self.telemetry.body(&real, &md, &key) {
+            Ok(x) => x,
+            Err(super::telemetry_api::Refused(s, m)) => return error(s, &m),
+        };
         let accept = req.headers.get(header::ACCEPT_ENCODING).and_then(|v| v.to_str().ok()).unwrap_or("");
         let gzip = accept.split(|c: char| !c.is_ascii_alphanumeric()).any(|w| w == "gzip");
         if gzip {
             let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(6));
-            let _ = e.write_all(body.as_bytes());
+            let _ = e.write_all(&body);
             let z = e.finish().unwrap_or_default();
             return b.header(header::CONTENT_ENCODING, "gzip").body(Body::from(z)).unwrap();
         }
@@ -159,6 +165,15 @@ impl Viewer {
         let p = req.query.get("path").cloned().unwrap_or_default();
         let real = studio::readable(&*self.ctx).resolve(&p).filter(|r| !studio::hidden_path(r) && r.to_string_lossy().to_lowercase().ends_with(".mp4"));
         let Some(real) = real else { return error(403, "Outside the vehicle shares.") };
+        // (a HEAD, which core sends this raw route as it is, makes nothing: the grid's headers
+        // when it is made, else no length)
+        if req.method == Method::HEAD {
+            let b = Response::builder().header(header::CONTENT_TYPE, "image/jpeg").header("X-Content-Type-Options", "nosniff");
+            return match self.scrub.cached(&real).and_then(|g| std::fs::metadata(g).ok()) {
+                Some(md) => b.header(header::CONTENT_LENGTH, md.len()).header(header::CACHE_CONTROL, "private, max-age=86400").body(Body::empty()).unwrap(),
+                None => b.header(header::CACHE_CONTROL, "no-store").body(Body::empty()).unwrap(),
+            };
+        }
         let Some(grid) = self.scrub.get(&real, true, true, true) else { return error(404, "No previews for this clip.") };
         let Ok(bytes) = std::fs::read(&grid) else { return error(404, "No previews for this clip.") };
         let b = Response::builder()
@@ -475,5 +490,85 @@ fn with_body(req: &Req, f: impl FnOnce(&Value) -> Res) -> Res {
     match body_of(req) {
         Ok(b) => f(&b),
         Err(r) => r,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::testkit::{self, Car};
+    use super::*;
+
+    fn call(v: &Arc<Viewer>, method: Method, path: &str, clip: &Path, headers: &[(header::HeaderName, &str)]) -> Res {
+        let q = HashMap::from([("path".to_string(), clip.to_string_lossy().into_owned())]);
+        let mut h = HeaderMap::new();
+        for (k, val) in headers {
+            h.insert(k.clone(), val.parse().unwrap());
+        }
+        v.route(&Req { method: &method, path, query: &q, headers: &h, body: &[] }).expect("a viewer route")
+    }
+
+    fn bytes(r: Res) -> Vec<u8> {
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        rt.block_on(axum::body::to_bytes(r.into_body(), usize::MAX)).unwrap().to_vec()
+    }
+
+    fn front_clip(car: &Car) -> std::path::PathBuf {
+        let clip = car.root.join("TeslaCam/RecentClips/2026-01-01_08-00-00-front.mp4");
+        std::fs::create_dir_all(clip.parent().unwrap()).unwrap();
+        testkit::drive(&clip, &[10.0, 20.0], 37.0, -122.0);
+        clip
+    }
+
+    #[test]
+    fn telemetry_answers_a_matching_etag_from_the_clip_s_size_and_time_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let car = Car::new("telemetry-304");
+        let clip = front_clip(&car);
+        let v = Viewer::new(car.ctx.clone());
+        let get = call(&v, Method::GET, "/api/telemetry", &clip, &[]);
+        assert_eq!(get.status(), StatusCode::OK);
+        let etag = get.headers()[header::ETAG].to_str().unwrap().to_string();
+        let body = bytes(get);
+        assert!(body.starts_with(b"{\"v\":1,\"frames\":[["), "{}", String::from_utf8_lossy(&body));
+        // the cache swept and the clip unreadable: a matching ETag is still answered, so nothing
+        // was read
+        let cache = car.data.join("telemetry");
+        std::fs::remove_dir_all(&cache).unwrap();
+        std::fs::set_permissions(&clip, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::File::open(&clip).is_ok() {
+            // (permissions do not stop root)
+            std::fs::set_permissions(&clip, std::fs::Permissions::from_mode(0o644)).unwrap();
+            return;
+        }
+        let not_modified = call(&v, Method::GET, "/api/telemetry", &clip, &[(header::IF_NONE_MATCH, &etag)]);
+        let in_a_list = call(&v, Method::GET, "/api/telemetry", &clip, &[(header::IF_NONE_MATCH, &format!("\"another\", {etag}"))]);
+        let other = call(&v, Method::GET, "/api/telemetry", &clip, &[(header::IF_NONE_MATCH, "\"another\"")]);
+        std::fs::set_permissions(&clip, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(not_modified.headers()[header::ETAG], etag.as_str());
+        assert_eq!(in_a_list.status(), StatusCode::NOT_MODIFIED, "the ETag in a list");
+        assert_eq!(other.status(), StatusCode::INTERNAL_SERVER_ERROR, "another ETag reads the clip");
+        assert!(!cache.exists(), "nothing was cached");
+        // readable again: the same body, cached once
+        assert_eq!(bytes(call(&v, Method::GET, "/api/telemetry", &clip, &[])), body);
+        assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_head_for_scrub_previews_makes_nothing() {
+        let car = Car::new("scrub-head");
+        let clip = front_clip(&car);
+        let v = Viewer::new(car.ctx.clone());
+        let head = call(&v, Method::HEAD, "/api/scrub", &clip, &[]);
+        assert_eq!(head.status(), StatusCode::OK);
+        assert!(head.headers().get(header::CONTENT_LENGTH).is_none());
+        assert!(!car.data.join("scrub").exists(), "nothing made, queued or prepared");
+        // a grid made already: its length
+        let grid = v.scrub.cache_path_for(&clip).unwrap();
+        std::fs::create_dir_all(grid.parent().unwrap()).unwrap();
+        std::fs::write(&grid, b"jpeg").unwrap();
+        let head = call(&v, Method::HEAD, "/api/scrub", &clip, &[]);
+        assert_eq!(head.status(), StatusCode::OK);
+        assert_eq!(head.headers()[header::CONTENT_LENGTH], "4");
     }
 }
