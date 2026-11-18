@@ -14,34 +14,72 @@ use std::sync::{Arc, Condvar, Mutex};
 const MAX_FILE: u64 = 1024 * 1024 * 1024;
 const MAX_CACHE_FILES: usize = 4000;
 
-/// scanner.js limiter: at most max() at once, read each time.
+/// scanner.js limiter: at most max() at once, read each time. Background readers (the speed
+/// index's full reads) leave the way to someone waiting for a clip in the Viewer: a Viewer read
+/// may take one slot over max() while background reads hold them all, and background reads
+/// wait while a Viewer read waits.
 pub struct Limiter {
     max: Box<dyn Fn() -> usize + Send + Sync>,
-    busy: Mutex<usize>,
+    busy: Mutex<Busy>,
     freed: Condvar,
 }
 
-pub struct Slot<'a>(&'a Limiter);
+#[derive(Default)]
+struct Busy {
+    now: usize,
+    background: usize,
+    waiting: usize,
+}
+
+pub struct Slot<'a>(&'a Limiter, bool);
 
 impl Drop for Slot<'_> {
     fn drop(&mut self) {
-        *self.0.busy.lock().unwrap() -= 1;
+        let mut b = self.0.busy.lock().unwrap();
+        b.now -= 1;
+        if self.1 {
+            b.background -= 1;
+        }
+        drop(b);
         self.0.freed.notify_all();
     }
 }
 
 impl Limiter {
     pub fn new(max: impl Fn() -> usize + Send + Sync + 'static) -> Arc<Limiter> {
-        Arc::new(Limiter { max: Box::new(max), busy: Mutex::new(0), freed: Condvar::new() })
+        Arc::new(Limiter { max: Box::new(max), busy: Mutex::new(Busy::default()), freed: Condvar::new() })
     }
     /// Wait for a free slot; it is given back when the slot is dropped.
     pub fn take(&self) -> Slot<'_> {
         let mut b = self.busy.lock().unwrap();
-        while *b >= (self.max)().max(1) {
+        b.waiting += 1;
+        loop {
+            let max = (self.max)().max(1);
+            let foreground = b.now - b.background;
+            if b.now < max || (foreground < max && b.now < max + 1) {
+                break;
+            }
             b = self.freed.wait(b).unwrap();
         }
-        *b += 1;
-        Slot(self)
+        b.waiting -= 1;
+        b.now += 1;
+        let last = b.waiting == 0;
+        drop(b);
+        if last {
+            // (background readers wait for nobody to be waiting: a slot left free goes to them)
+            self.freed.notify_all();
+        }
+        Slot(self, false)
+    }
+    /// A slot for background reading: only while nobody waits for one with take().
+    pub fn take_background(&self) -> Slot<'_> {
+        let mut b = self.busy.lock().unwrap();
+        while b.now >= (self.max)().max(1) || b.waiting > 0 {
+            b = self.freed.wait(b).unwrap();
+        }
+        b.now += 1;
+        b.background += 1;
+        Slot(self, true)
     }
 }
 
@@ -198,9 +236,93 @@ mod tests {
         let l = Limiter::new(|| 2);
         let a = l.take();
         let _b = l.take();
-        assert_eq!(*l.busy.lock().unwrap(), 2);
+        assert_eq!(l.busy.lock().unwrap().now, 2);
         drop(a);
         let _c = l.take();
-        assert_eq!(*l.busy.lock().unwrap(), 2);
+        assert_eq!(l.busy.lock().unwrap().now, 2);
+    }
+
+    #[test]
+    fn a_viewer_read_does_not_wait_behind_background_reads() {
+        let l = Limiter::new(|| 2);
+        let _a = l.take_background();
+        let _b = l.take_background();
+        let v = l.take();
+        assert_eq!(l.busy.lock().unwrap().now, 3, "one over the limit for the Viewer");
+        // a second Viewer read waits for a slot, and background reads wait behind it
+        let l2 = l.clone();
+        let waiter = std::thread::spawn(move || {
+            let _s = l2.take();
+        });
+        while l.busy.lock().unwrap().waiting == 0 {
+            std::thread::yield_now();
+        }
+        drop(v);
+        waiter.join().unwrap();
+        assert_eq!(l.busy.lock().unwrap().now, 2);
+        assert_eq!(l.busy.lock().unwrap().background, 2);
+    }
+
+    #[test]
+    fn background_reads_wait_while_a_viewer_read_waits() {
+        let l = Limiter::new(|| 1);
+        let first = l.take();
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let (l2, o2) = (l.clone(), order.clone());
+        let viewer = std::thread::spawn(move || {
+            let _s = l2.take();
+            o2.lock().unwrap().push("viewer");
+        });
+        while l.busy.lock().unwrap().waiting == 0 {
+            std::thread::yield_now();
+        }
+        let (l3, o3) = (l.clone(), order.clone());
+        let background = std::thread::spawn(move || {
+            let _s = l3.take_background();
+            o3.lock().unwrap().push("background");
+        });
+        drop(first);
+        viewer.join().unwrap();
+        background.join().unwrap();
+        // (one slot: the background read gets it only after the Viewer read let it go)
+        assert_eq!(*order.lock().unwrap(), vec!["viewer", "background"]);
+    }
+
+    #[test]
+    fn a_slot_left_free_when_the_last_waiting_viewer_read_gets_in_goes_to_a_background_read() {
+        use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+        use std::time::{Duration, Instant};
+        for _ in 0..50 {
+            let l = Limiter::new(|| 2);
+            let (f1, f2) = (l.take(), l.take());
+            let (l2, l3) = (l.clone(), l.clone());
+            let (tx, rx) = std::sync::mpsc::channel::<()>();
+            // a Viewer read waits for one of the two slots and keeps it until the background read is in
+            let viewer = std::thread::spawn(move || {
+                let s = l2.take();
+                rx.recv().unwrap();
+                drop(s);
+            });
+            while l.busy.lock().unwrap().waiting == 0 {
+                std::thread::yield_now();
+            }
+            let got = Arc::new(AtomicBool::new(false));
+            let g2 = got.clone();
+            let background = std::thread::spawn(move || {
+                let _s = l3.take_background();
+                g2.store(true, SeqCst);
+            });
+            std::thread::sleep(Duration::from_millis(2));
+            drop(f1);
+            drop(f2);
+            let t = Instant::now();
+            while !got.load(SeqCst) {
+                assert!(t.elapsed() < Duration::from_secs(2), "the background read was left waiting with a slot free");
+                std::thread::yield_now();
+            }
+            tx.send(()).unwrap();
+            viewer.join().unwrap();
+            background.join().unwrap();
+        }
     }
 }

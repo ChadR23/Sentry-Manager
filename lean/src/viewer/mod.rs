@@ -86,7 +86,7 @@ impl Viewer {
         let previews = limit("scrubPreviews");
         let scrub = scrub::ScrubFrames::new(data.join("scrub"), ctx.ffmpeg(), ctx.ffprobe(), move || previews() as usize);
         let (p2, busy2) = (pace.clone(), ctx.clone());
-        let prepare = scrub::ScrubPrepare::new(ctx.clone(), scrub.clone(), scrub::ScrubPrepare::days_from_env(), move || !busy2.busy() && !p2.strained());
+        let prepare = scrub::ScrubPrepare::new(ctx.clone(), scrub.clone(), scrub::ScrubPrepare::days_from_env(), move || !busy2.busy() && !p2.strained() && !p2.viewing());
         let strips = studio::ClipStrips::new(data.join("clip-thumbnails"), ctx.ffmpeg(), ctx.ffprobe().unwrap_or_else(|| "ffprobe".into()));
         let drive_data = drive_data::DriveData::new(data.join("drive-data"), ctx.clone());
         let _ = std::fs::create_dir_all(data.join("converted"));

@@ -231,8 +231,9 @@ fn same(e: &Entry, f: Option<(f64, f64)>) -> bool {
     matches!(f, Some((s, m)) if e.num(0) == Some(s) && e.num(1) == Some(m))
 }
 
-/// speedsFor: the quick read, else the dashboard's full read (speeds only).
-pub fn speeds_for(real: &Path, size: u64, mode: Mode, full: &super::telemetry_api::Limiter) -> (Value, Value) {
+/// speedsFor: the quick read, else the dashboard's full read (speeds only). `background`: the
+/// index filling in, whose full read leaves the way to the Viewer's; else someone is waiting.
+pub fn speeds_for(real: &Path, size: u64, mode: Mode, full: &super::telemetry_api::Limiter, background: bool) -> (Value, Value) {
     match speed_reader::read_samples(real, mode) {
         Ok(None) => (Value::Null, Value::Null),
         Ok(Some(samples)) => {
@@ -240,7 +241,7 @@ pub fn speeds_for(real: &Path, size: u64, mode: Mode, full: &super::telemetry_ap
             (Value::Array(speeds), summarize(&samples))
         }
         Err(err) => {
-            let _slot = full.take();
+            let _slot = if background { full.take_background() } else { full.take() };
             match crate::telemetry::read_records(real, size) {
                 Ok(frames) => match crate::telemetry::speeds_of(&frames) {
                     Some(sp) => {
@@ -421,7 +422,7 @@ impl SpeedIndex {
         let data = self.load(&c.vid, &c.day);
         let mode = self.pick_mode();
         let t0 = Instant::now();
-        let (sp, sum) = speeds_for(&c.root.join(&c.rel), c.size, mode, &self.full_reads);
+        let (sp, sum) = speeds_for(&c.root.join(&c.rel), c.size, mode, &self.full_reads, true);
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
         self.pace.done(ms);
         self.mode_done(mode, ms);
@@ -937,7 +938,7 @@ impl SpeedIndex {
     pub fn clip(&self, vid: Option<&str>, rel: Option<&str>, real: &Path, size: u64, mtime_ms: f64) -> Value {
         let files = vid.and_then(|v| self.ctx.files(v));
         let f = rel.and_then(|r| files.as_ref().and_then(|fs| fs.get(r)).cloned());
-        let (sp, sum) = speeds_for(real, size, Mode::Short, &self.full_reads);
+        let (sp, sum) = speeds_for(real, size, Mode::Short, &self.full_reads, false);
         let (Some(vid), Some(rel)) = (vid, rel) else { return sp };
         let now = self.ctx.files(vid);
         let same = now_of(now.as_ref(), rel) == Some((size as f64, js::js_round(mtime_ms)));

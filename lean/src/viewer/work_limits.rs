@@ -38,6 +38,11 @@ impl Limits {
     pub fn get(&self, key: &str) -> u32 {
         self.limits[idx(key)]
     }
+    /// An admin set this one (Settings > Advanced > Background work); otherwise it is picked.
+    pub fn is_set(&self, key: &str) -> bool {
+        let i = idx(key);
+        self.over.iter().any(|(k, _)| *k == i)
+    }
     fn obj(vals: &[u32; 5]) -> Value {
         Value::Object(KEYS.iter().zip(vals).map(|(k, v)| (k.to_string(), json!(v))).collect())
     }
