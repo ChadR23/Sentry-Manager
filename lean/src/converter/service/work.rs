@@ -4,6 +4,8 @@
 
 use super::encode::EncodeRequest;
 use super::*;
+use super::super::jobstore::states::ArtifactState;
+use super::super::jobstore::Item;
 use super::super::planner::{self, Selected};
 use super::super::staging::{Op, SourceAuthority};
 use std::sync::atomic::AtomicBool;
@@ -151,7 +153,7 @@ impl Service {
             return Cleanup::done();
         }
         let keys: Vec<String> = own.paths.keys().cloned().collect();
-        if own.paths.contains_key("replacementBackup") && own.arts.get("replacementBackup").and_then(|a| a.get("state")) != Some(&json!("intent")) {
+        if own.paths.contains_key("replacementBackup") && own.arts.get("replacementBackup").and_then(|a| a.get("state")).and_then(Value::as_str).map(ArtifactState::parse) != Some(ArtifactState::Intent) {
             return Cleanup { cleaned: false, recovery_required: true, pending: keys, own: own.clone() };
         }
         let cancel = cancel.unwrap_or_else(|| rt.signal());
@@ -256,14 +258,14 @@ impl Service {
     }
 
     /// waitForNetwork(runtime, target, options): true after a real outage
-    pub fn wait_for_network(&self, rt: &Arc<Runtime>, target: &str, persist: bool, item_id: Option<&str>, path_role: Option<&str>, resume_state: Option<&str>, phase_opt: Option<&str>) -> SResult<bool> {
+    pub fn wait_for_network(&self, rt: &Arc<Runtime>, target: &str, persist: bool, item_id: Option<&str>, path_role: Option<&str>, resume_state: Option<JobState>, phase_opt: Option<ReplacementPhase>) -> SResult<bool> {
         let (do_persist, item, observed, phase, owner) = {
             let mut s = rt.lock();
             let do_persist = persist && s.network_pause_owner.is_none() && item_id.map_or(true, |i| s.is_lead(i));
             let pick = item_id.map(str::to_string).or_else(|| s.lead_item_id()).or_else(|| s.manifest.str("activeItemId").map(str::to_string));
             let item = pick.and_then(|i| s.item(&i));
-            let observed = resume_state.map(str::to_string).unwrap_or_else(|| s.manifest.state().to_string());
-            let phase = if observed == "replacing" || (observed == "discovering" && false) { phase_opt.map(str::to_string).or_else(|| s.manifest.str("replacementPhase").map(str::to_string)) } else { None };
+            let observed = resume_state.unwrap_or_else(|| s.manifest.state());
+            let phase = if observed == JobState::Replacing { phase_opt.or_else(|| s.manifest.replacement_phase()) } else { None };
             let owner = if do_persist {
                 let o = self.0.owner_seq.fetch_add(1, Ordering::SeqCst);
                 s.network_pause_owner = Some(o);
@@ -273,8 +275,8 @@ impl Service {
             };
             (do_persist, item, observed, phase, owner)
         };
-        let resume = if observed == "discovering" && item.is_some() { "waiting".to_string() } else { observed.clone() };
-        let phase = if resume == "replacing" { phase } else { None };
+        let resume = if observed == JobState::Discovering && item.is_some() { JobState::Waiting } else { observed.clone() };
+        let phase = if resume == JobState::Replacing { phase } else { None };
         let norm = super::super::owned::resolve(Path::new(target)).to_string_lossy().to_lowercase();
         let role = path_role.map(str::to_string).unwrap_or_else(|| match &item {
             Some(i) if super::super::owned::resolve(Path::new(i["sourcePath"].as_str().unwrap_or(""))).to_string_lossy().to_lowercase() == norm => "source".into(),
@@ -287,12 +289,12 @@ impl Service {
                 let still_lead = |s: &RtState| item_id.map_or(true, |i| s.is_lead(i));
                 let item_id_v = item.as_ref().and_then(|i| i.get("id").cloned()).unwrap_or(Value::Null);
                 let mut rec = Map::new();
-                rec.insert("fromState".into(), json!("paused_network"));
+                rec.insert("fromState".into(), JobState::PausedNetwork.into());
                 rec.insert("action".into(), json!("resume-network"));
                 rec.insert("pathRole".into(), json!(role));
-                rec.insert("resumeState".into(), json!(resume));
+                rec.insert("resumeState".into(), resume.clone().into());
                 if let Some(p) = &phase {
-                    rec.insert("phase".into(), json!(p));
+                    rec.insert("phase".into(), p.clone().into());
                 }
                 let mut did = false;
                 self.update(rt, |s| {
@@ -300,7 +302,7 @@ impl Service {
                         return Some(Patch::new());
                     }
                     did = true;
-                    Some(Patch::new().set("state", json!("paused_network")).set("activeItemId", item_id_v.clone()).set("recovery", Value::Object(rec.clone())))
+                    Some(Patch::new().state(JobState::PausedNetwork).set("activeItemId", item_id_v.clone()).set("recovery", Value::Object(rec.clone())))
                 })?;
                 persisted = did;
             }
@@ -328,9 +330,9 @@ impl Service {
                         let resume2 = resume.clone();
                         let phase2 = phase.clone();
                         self.update(rt, |s| {
-                            if item_id.map_or(true, |i| s.is_lead(i)) && s.manifest.state() == "paused_network" {
-                                let mut p = Patch::new().set("state", json!(resume2)).set("recovery", Value::Null);
-                                if resume2 == "replacing" {
+                            if item_id.map_or(true, |i| s.is_lead(i)) && s.manifest.state() == JobState::PausedNetwork {
+                                let mut p = Patch::new().state(resume2.clone()).set("recovery", Value::Null);
+                                if resume2 == JobState::Replacing {
                                     p = p.set("replacementPhase", phase2.clone().map(Value::from).unwrap_or(Value::Null));
                                 }
                                 Some(p)
@@ -410,7 +412,7 @@ impl Service {
     fn create_queue_item(rt: &Runtime, discovered: &Value, changes: Vec<(&str, Value)>) -> Value {
         let mut m = obj(Some(discovered));
         m.insert("id".into(), json!(Self::next_item_id(rt)));
-        m.insert("state".into(), json!("queued"));
+        m.insert("state".into(), ItemState::Queued.into());
         m.insert("attempts".into(), json!(0));
         for (k, v) in changes {
             m.insert(k.into(), v);
@@ -474,7 +476,7 @@ impl Service {
                 *last_flush = (self.0.o.now)();
             }
             for it in batch {
-                if it["state"] == "queued" {
+                if item_state(&it) == ItemState::Queued {
                     Self::push_queue(rt, it["id"].as_str().unwrap().to_string());
                 }
             }
@@ -535,7 +537,7 @@ impl Service {
                 self.converted_codec_of(rt, &found)
             };
             if converted.is_some() {
-                pending.push(Self::create_queue_item(rt, &d.value, vec![("state", json!("skipped")), ("eligibleVideo", json!(false)), ("resultCode", json!("already-converted"))]));
+                pending.push(Self::create_queue_item(rt, &d.value, vec![("state", ItemState::Skipped.into()), ("eligibleVideo", json!(false)), ("resultCode", json!("already-converted"))]));
             } else {
                 pending.push(Self::create_queue_item(rt, &d.value, vec![]));
                 pending_work += 1;
@@ -582,7 +584,7 @@ impl Service {
             if !controlled {
                 let code = stable_failure(&e, "discovery-failed");
                 let retryable = Self::is_retryable_network(&e);
-                self.update(rt, |_| Some(Patch::new().set("state", json!("failed")).set("activeItemId", Value::Null).set("summary", Value::Null).set("summaryDismissed", json!(false)).set("failure", json!({ "code": code, "retryable": retryable }))))?;
+                self.update(rt, |_| Some(Patch::new().state(JobState::Failed).set("activeItemId", Value::Null).set("summary", Value::Null).set("summaryDismissed", json!(false)).set("failure", json!({ "code": code, "retryable": retryable }))))?;
                 return Err(e);
             }
         }
@@ -679,7 +681,7 @@ impl Service {
             }
             s.pause_persisted = true;
         }
-        self.update(rt, |_| Some(Patch::new().set("state", json!("paused")).set("activeItemId", Value::Null)))?;
+        self.update(rt, |_| Some(Patch::new().state(JobState::Paused).set("activeItemId", Value::Null)))?;
         self.emit(rt, "paused", vec![]);
         Ok(())
     }
@@ -805,7 +807,7 @@ impl Service {
                     }
                 }
                 let Some(item) = rt.lock().item(&next) else { continue };
-                if item["state"] != "queued" {
+                if item_state(&item) != ItemState::Queued {
                     continue;
                 }
                 Self::begin_item(rt, &item);
@@ -928,14 +930,14 @@ impl Service {
             let consumed = me.consume(&rt2);
             let produced = producer.map(|h| h.join().unwrap_or_else(|_| Err(service_error("PRODUCER_PANICKED")))).unwrap_or(Ok(()));
             let rejected = produced.err().or(consumed.err());
-            let state_failed = rt2.manifest().state() == "failed";
+            let state_failed = rt2.manifest().state() == JobState::Failed;
             let controlled = {
                 let s = rt2.lock();
                 s.cancel_requested || s.stop_requested || s.recovery_required
             };
             if let (Some(e), false, false) = (&rejected, state_failed, controlled) {
                 let code = stable_failure(e, "operation-failed");
-                let _ = me.update(&rt2, |_| Some(Patch::new().set("state", json!("failed")).set("activeItemId", Value::Null).set("summary", Value::Null).set("summaryDismissed", json!(false)).set("failure", json!({ "code": code, "retryable": false }))));
+                let _ = me.update(&rt2, |_| Some(Patch::new().state(JobState::Failed).set("activeItemId", Value::Null).set("summary", Value::Null).set("summaryDismissed", json!(false)).set("failure", json!({ "code": code, "retryable": false }))));
             } else {
                 let _ = me.finalize(&rt2);
             }
@@ -1018,12 +1020,12 @@ impl Service {
         let id = item.s("id");
         let m = rt.manifest();
         if m.config()["outputMode"] == "replace" {
-            self.item_patch(rt, &id, vec![("state", Some(json!("skipped"))), ("resultCode", Some(json!(codes.0))), ("eligibleVideo", Some(json!(false)))], vec![("state", json!("waiting")), ("activeItemId", Value::Null)])?;
+            self.item_patch(rt, &id, vec![("state", Some(ItemState::Skipped.into())), ("resultCode", Some(json!(codes.0))), ("eligibleVideo", Some(json!(false)))], vec![("state", JobState::Waiting.into()), ("activeItemId", Value::Null)])?;
             return Ok(());
         }
         let destination = output_path(m.config(), item_v);
         self.acquire_commit(rt, &id)?;
-        self.item_patch(rt, &id, vec![("state", Some(json!("processing"))), ("eligibleVideo", Some(json!(false)))], vec![("state", json!("copying")), ("activeItemId", json!(id))])?;
+        self.item_patch(rt, &id, vec![("state", Some(ItemState::Processing.into())), ("eligibleVideo", Some(json!(false)))], vec![("state", JobState::Copying.into()), ("activeItemId", json!(id))])?;
         let config = m.config().clone();
         let result = self.retry_transaction(rt, &id, &destination, config["destinationRoot"].as_str().unwrap_or(""), || {
             self.prepare_destination(&config, &destination)?;
@@ -1046,7 +1048,7 @@ impl Service {
         let own = Own::from_typed(&result.owned_paths, &result.owned_artifacts);
         let cleanup = self.cleanup_ownership(rt, &id, Some(&own), None, false);
         let completed: Changes = vec![
-            ("state", Some(json!("completed"))),
+            ("state", Some(ItemState::Completed.into())),
             ("eligibleVideo", Some(json!(false))),
             ("outputPath", Some(json!(result.final_path))),
             ("outputBytes", Some(json!(result.output_bytes))),
@@ -1058,7 +1060,7 @@ impl Service {
             let finished = merge(&s.item(&id).unwrap_or(Value::Null), &completed);
             let counters = contracts::add_completed_file(s.manifest.get("counters").unwrap_or(&Value::Null), &finished);
             let items = with_item(&s.manifest, &id, |_| finished.clone());
-            Some(Patch::new().set("state", json!("waiting")).set("activeItemId", Value::Null).set("ownedPaths", Value::Null).set("ownedArtifacts", Value::Null).set("publicationArtifact", Value::Null).set("counters", counters).items(items))
+            Some(Patch::new().state(JobState::Waiting).set("activeItemId", Value::Null).set("ownedPaths", Value::Null).set("ownedArtifacts", Value::Null).set("publicationArtifact", Value::Null).set("counters", counters).items(items))
         })?;
         Ok(())
     }
@@ -1127,14 +1129,15 @@ impl Service {
             if let Some(index) = &self.0.o.converted_index {
                 index.add(&item.v, &inspected.codec);
             }
-            self.item_patch(rt, &id, vec![("state", Some(json!("skipped"))), ("eligibleVideo", Some(json!(false))), ("resultCode", Some(json!("already-converted")))], vec![("state", json!("waiting")), ("activeItemId", Value::Null)])?;
+            self.item_patch(rt, &id, vec![("state", Some(ItemState::Skipped.into())), ("eligibleVideo", Some(json!(false))), ("resultCode", Some(json!("already-converted")))], vec![("state", JobState::Waiting.into()), ("activeItemId", Value::Null)])?;
             return Ok(());
         }
         if inspected.codec != "h264" {
             return Err(service_error("UNSUPPORTED_CODEC"));
         }
         let mode = self.source_mode(rt, &item)?;
-        self.item_patch(rt, &id, vec![("state", Some(json!("processing"))), ("eligibleVideo", Some(json!(true)))], vec![("state", json!(if mode == "staging" { "staging" } else { "waiting" })), ("activeItemId", json!(id))])?;
+        let step = if mode == "staging" { JobState::Staging } else { JobState::Waiting };
+        self.item_patch(rt, &id, vec![("state", Some(ItemState::Processing.into())), ("eligibleVideo", Some(json!(true)))], vec![("state", step.into()), ("activeItemId", json!(id))])?;
         let (source, staged_own, expected) = {
             let _read = self.take_read_slot(rt)?;
             self.video_source(rt, &item, &mode)?
@@ -1213,7 +1216,7 @@ impl Service {
             }
             tier_retry = false;
             attempts = attempts.min(MAX_RECORDED_ATTEMPTS);
-            self.item_patch(rt, &id, vec![("attempts", Some(json!(attempts))), ("encoder", Some(json!(selected.codec)))], vec![("state", json!("encoding")), ("activeItemId", json!(id))])?;
+            self.item_patch(rt, &id, vec![("attempts", Some(json!(attempts))), ("encoder", Some(json!(selected.codec)))], vec![("state", JobState::Encoding.into()), ("activeItemId", json!(id))])?;
             // its node's row was set to Off while the clip was being read: back to the queue
             if selected.remote && lane.is_some_and(|l| rt.lock().lane_limit(&Some(l.id.clone())) == 0) {
                 return Err(service_error("NODE_WITHDRAWN"));
@@ -1290,7 +1293,7 @@ impl Service {
             let mut adopted_own = Own::from_typed(&adopted.owned_paths, &adopted.owned_artifacts);
             latest = Some(adopted_own.clone());
             Self::compose_into(rt, &id, &adopted_own);
-            self.item_patch(rt, &id, vec![], vec![("state", json!("writing-telemetry")), ("activeItemId", json!(id))])?;
+            self.item_patch(rt, &id, vec![], vec![("state", JobState::WritingTelemetry.into()), ("activeItemId", json!(id))])?;
             if let Err(e) = self.0.o.tools.write_telemetry(&codec, &reserved.path, &timeline, &signal) {
                 let mut op = self.op(rt, &id, &signal, &persist);
                 op.owned_paths = adopted_own.paths_typed();
@@ -1310,7 +1313,7 @@ impl Service {
             latest = Some(adopted_own.clone());
             Self::compose_into(rt, &id, &adopted_own);
             timing.mark("metadata");
-            self.item_patch(rt, &id, vec![], vec![("state", json!("verifying")), ("activeItemId", json!(id))])?;
+            self.item_patch(rt, &id, vec![], vec![("state", JobState::Verifying.into()), ("activeItemId", json!(id))])?;
             // Encoded on another server: its pictures must match the original's
             // before anything else is checked or saved (unless the node is trusted)
             let node_id = selected.device.as_ref().map(|d| d.id.clone()).unwrap_or_default();
@@ -1486,7 +1489,7 @@ impl Service {
             } else {
                 self.update(rt, |s| {
                     let e = s.item(&id).unwrap_or(Value::Null);
-                    Some(Patch::new().set("state", json!("copying")).set("activeItemId", json!(id)).set("ownedPaths", e.get("ownedPaths").cloned().unwrap_or(json!({}))).set("ownedArtifacts", e.get("ownedArtifacts").cloned().unwrap_or(json!({}))).set("publicationArtifact", e.get("publicationArtifact").cloned().unwrap_or(Value::Null)))
+                    Some(Patch::new().state(JobState::Copying).set("activeItemId", json!(id)).set("ownedPaths", e.get("ownedPaths").cloned().unwrap_or(json!({}))).set("ownedArtifacts", e.get("ownedArtifacts").cloned().unwrap_or(json!({}))).set("publicationArtifact", e.get("publicationArtifact").cloned().unwrap_or(Value::Null)))
                 })?;
                 self.prepare_destination(&config, destination)?;
                 self.0.o.staging.commit_publication(&op).map_err(Fail::from)
@@ -1506,7 +1509,7 @@ impl Service {
                             cleared = self
                                 .update(rt, |s| {
                                     if s.manifest.str("activeItemId") == Some(id.as_str()) && s.manifest.get("replacementPhase").is_some() {
-                                        Some(Patch::new().set("state", json!("waiting")).set("activeItemId", Value::Null).set("replacementPhase", Value::Null).set("ownedPaths", json!({})).set("ownedArtifacts", json!({})).set("publicationArtifact", Value::Null))
+                                        Some(Patch::new().state(JobState::Waiting).set("activeItemId", Value::Null).set("replacementPhase", Value::Null).set("ownedPaths", json!({})).set("ownedArtifacts", json!({})).set("publicationArtifact", Value::Null))
                                     } else {
                                         None
                                     }
@@ -1540,7 +1543,7 @@ impl Service {
             leftover.publication = Some(artifact_v.clone());
         }
         let mut completed: Changes = vec![
-            ("state", Some(json!("completed"))),
+            ("state", Some(ItemState::Completed.into())),
             ("eligibleVideo", Some(json!(true))),
             ("outputPath", Some(json!(published.final_path))),
             ("outputBytes", Some(json!(verdict.output_bytes.unwrap_or(0)))),
@@ -1560,7 +1563,7 @@ impl Service {
             let finished = merge(&s.item(&id).unwrap_or(Value::Null), &completed);
             let counters = contracts::add_completed_file(s.manifest.get("counters").unwrap_or(&Value::Null), &finished);
             let items = with_item(&s.manifest, &id, |_| finished.clone());
-            Some(Patch::new().set("state", json!("waiting")).set("activeItemId", Value::Null).set("ownedPaths", Value::Null).set("ownedArtifacts", Value::Null).set("publicationArtifact", Value::Null).set("replacementPhase", Value::Null).set("counters", counters).items(items))
+            Some(Patch::new().state(JobState::Waiting).set("activeItemId", Value::Null).set("ownedPaths", Value::Null).set("ownedArtifacts", Value::Null).set("publicationArtifact", Value::Null).set("replacementPhase", Value::Null).set("counters", counters).items(items))
         })?;
         Self::set_ownership(rt, &id, Some(leftover.clone()));
         timing.mark("save");
@@ -1629,12 +1632,12 @@ impl Service {
             rt.do_abort();
             self.terminate_children(rt);
             Self::wake_paused(rt);
-            let phase = rt.manifest().str("replacementPhase").unwrap_or("rollback-failed").to_string();
-            self.item_patch(rt, item_id, vec![("state", Some(json!("processing"))), ("resultCode", Some(json!("recovery-required"))), ("failure", None)], vec![
-                ("state", json!("paused")),
+            let phase = rt.manifest().replacement_phase().unwrap_or(ReplacementPhase::RollbackFailed);
+            self.item_patch(rt, item_id, vec![("state", Some(ItemState::Processing.into())), ("resultCode", Some(json!("recovery-required"))), ("failure", None)], vec![
+                ("state", JobState::Paused.into()),
                 ("activeItemId", json!(item_id)),
-                ("replacementPhase", json!(phase)),
-                ("recovery", json!({ "fromState": "replacing", "phase": phase, "action": "manual-intervention" })),
+                ("replacementPhase", phase.clone().into()),
+                ("recovery", json!({ "fromState": JobState::Replacing, "phase": phase, "action": "manual-intervention" })),
                 ("summary", Value::Null),
                 ("summaryDismissed", json!(false)),
             ])?;
@@ -1653,16 +1656,17 @@ impl Service {
         let stopped = (stop_requested || halted_by_recovery || withdrawn) && !cancel_requested;
         let terminally = cancel_requested;
         let own = ownership.clone().unwrap_or_default();
+        let next = if stopped { ItemState::Queued } else if terminally { ItemState::Cancelled } else { ItemState::Failed };
         let changes: Changes = vec![
-            ("state", Some(json!(if stopped { "queued" } else if terminally { "cancelled" } else { "failed" }))),
+            ("state", Some(next.into())),
             ("failure", if stopped || terminally { None } else { Some(json!({ "code": code, "retryable": retryable })) }),
             ("resultCode", if stopped && cleanup.cleaned { None } else { Some(json!(if !cleanup.cleaned { "cleanup-pending".to_string() } else { code.clone() })) }),
             ("ownedPaths", if !cleanup.cleaned { Some(Value::Object(own.paths.clone())) } else { None }),
             ("ownedArtifacts", if !cleanup.cleaned { Some(Value::Object(own.arts.clone())) } else { None }),
         ];
-        let phase = rt.manifest().get("replacementPhase").cloned().unwrap_or(Value::Null);
+        let phase = rt.manifest().replacement_phase().map(Value::from).unwrap_or(Value::Null);
         self.item_patch(rt, item_id, changes, vec![
-            ("state", json!(if terminally { "cancelled" } else { "waiting" })),
+            ("state", (if terminally { JobState::Cancelled } else { JobState::Waiting }).into()),
             ("activeItemId", Value::Null),
             ("ownedPaths", if !cleanup.cleaned { Value::Object(own.paths.clone()) } else { json!({}) }),
             ("ownedArtifacts", if !cleanup.cleaned { Value::Object(own.arts.clone()) } else { json!({}) }),
@@ -1697,23 +1701,22 @@ impl Service {
         if recovery_required || m.get("recovery").and_then(|r| r.get("action")) == Some(&json!("manual-intervention")) {
             return Ok(());
         }
-        let in_flight_state = |i: &Value| i["state"] == "queued" || i["state"] == "processing";
         let owns = |i: &Value| obj(i.get("ownedPaths")).len() > 0;
         if cancel {
-            if m.state() != "cancelled" || m.items.iter().any(|i| in_flight_state(i.value())) {
+            if m.state() != JobState::Cancelled || m.items.iter().any(|i| i.state().is_in_flight()) {
                 self.update(rt, |s| {
-                    let items = s.manifest.items.iter().map(|i| if in_flight_state(i.value()) { ItemIn::Raw(merge(i.value(), &vec![("state", Some(json!("cancelled"))), ("failure", None)])) } else { ItemIn::Trusted(i.clone()) }).collect();
-                    Some(Patch::new().set("state", json!("cancelled")).set("activeItemId", Value::Null).set("summary", Value::Null).set("summaryDismissed", json!(false)).set("failure", Value::Null).items(items))
+                    let items = s.manifest.items.iter().map(|i| if i.state().is_in_flight() { ItemIn::Raw(merge(i.value(), &vec![("state", Some(ItemState::Cancelled.into())), ("failure", None)])) } else { ItemIn::Trusted(i.clone()) }).collect();
+                    Some(Patch::new().state(JobState::Cancelled).set("activeItemId", Value::Null).set("summary", Value::Null).set("summaryDismissed", json!(false)).set("failure", Value::Null).items(items))
                 })?;
             }
             self.emit(rt, "cancelled", vec![]);
             return Ok(());
         }
-        let owns_in_flight = |i: &Value| in_flight_state(i) && owns(i);
-        if stop && stop_while_paused && !m.items.iter().any(|i| owns_in_flight(i.value())) {
+        let owns_in_flight = |i: &Arc<Item>| i.state().is_in_flight() && owns(i.value());
+        if stop && stop_while_paused && !m.items.iter().any(owns_in_flight) {
             self.update(rt, |s| {
-                let items = s.manifest.items.iter().map(|i| if i.state() == "processing" { ItemIn::Raw(merge(i.value(), &vec![("state", Some(json!("queued"))), ("failure", None)])) } else { ItemIn::Trusted(i.clone()) }).collect();
-                Some(Patch::new().set("state", json!("paused")).set("activeItemId", Value::Null).set("recovery", Value::Null).items(items))
+                let items = s.manifest.items.iter().map(|i| if i.state() == ItemState::Processing { ItemIn::Raw(merge(i.value(), &vec![("state", Some(ItemState::Queued.into())), ("failure", None)])) } else { ItemIn::Trusted(i.clone()) }).collect();
+                Some(Patch::new().state(JobState::Paused).set("activeItemId", Value::Null).set("recovery", Value::Null).items(items))
             })?;
             self.emit(rt, "paused", vec![]);
             return Ok(());
@@ -1722,54 +1725,54 @@ impl Service {
             self.update(rt, |s| {
                 let cur = &s.manifest;
                 let unresolved = cur.items.iter().find(|i| owns(i.value())).map(|i| i.value().clone());
-                let interrupted = cur.items.iter().find(|i| Some(i.id()) == stop_item.as_deref() && i.state() == "processing" && owns(i.value())).map(|i| i.id().to_string());
-                let mapped = match stop_phase.as_deref() {
-                    Some("copying") => "copying",
-                    Some("replacing") => "replacing",
-                    _ => "encoding",
+                let interrupted = cur.items.iter().find(|i| Some(i.id()) == stop_item.as_deref() && i.state() == ItemState::Processing && owns(i.value())).map(|i| i.id().to_string());
+                let mapped = match &stop_phase {
+                    Some(JobState::Copying) => JobState::Copying,
+                    Some(JobState::Replacing) => JobState::Replacing,
+                    _ => JobState::Encoding,
                 };
-                let phase = cur.get("replacementPhase").cloned();
-                let replacing_now = mapped == "replacing" && phase.is_some();
-                let nothing_half_done = interrupted.is_none() && !replacing_now && !cur.items.iter().any(|i| owns_in_flight(i.value()));
+                let phase = cur.replacement_phase();
+                let replacing_now = mapped == JobState::Replacing && phase.is_some();
+                let nothing_half_done = interrupted.is_none() && !replacing_now && !cur.items.iter().any(owns_in_flight);
                 let recovery = if nothing_half_done {
-                    json!({ "fromState": "waiting", "action": if cur.get("discoveryComplete") == Some(&json!(false)) { "resume-discovery" } else { "resume-queue" } })
-                } else if mapped == "copying" {
-                    json!({ "fromState": "copying", "action": if interrupted.is_some() { "manual-intervention" } else { "restart-copy" } })
-                } else if mapped == "replacing" && phase.is_some() {
-                    json!({ "fromState": "replacing", "phase": phase, "action": "manual-intervention" })
+                    json!({ "fromState": JobState::Waiting, "action": if cur.get("discoveryComplete") == Some(&json!(false)) { "resume-discovery" } else { "resume-queue" } })
+                } else if mapped == JobState::Copying {
+                    json!({ "fromState": JobState::Copying, "action": if interrupted.is_some() { "manual-intervention" } else { "restart-copy" } })
+                } else if mapped == JobState::Replacing && phase.is_some() {
+                    json!({ "fromState": JobState::Replacing, "phase": phase, "action": "manual-intervention" })
                 } else {
-                    json!({ "fromState": "encoding", "action": if interrupted.is_some() { "cleanup-and-restart-encoding" } else { "restart-encoding" } })
+                    json!({ "fromState": JobState::Encoding, "action": if interrupted.is_some() { "cleanup-and-restart-encoding" } else { "restart-encoding" } })
                 };
                 let un = unresolved.unwrap_or(json!({}));
                 let items = cur.items.iter().map(|i| {
                     if Some(i.id()) == interrupted.as_deref() {
-                        ItemIn::Raw(merge(i.value(), &vec![("state", Some(json!("processing"))), ("failure", None)]))
-                    } else if i.state() == "processing" {
-                        ItemIn::Raw(merge(i.value(), &vec![("state", Some(json!("queued"))), ("failure", None)]))
+                        ItemIn::Raw(merge(i.value(), &vec![("state", Some(ItemState::Processing.into())), ("failure", None)]))
+                    } else if i.state() == ItemState::Processing {
+                        ItemIn::Raw(merge(i.value(), &vec![("state", Some(ItemState::Queued.into())), ("failure", None)]))
                     } else {
                         ItemIn::Trusted(i.clone())
                     }
                 }).collect();
                 Some(Patch::new()
-                    .set("state", json!("paused"))
+                    .state(JobState::Paused)
                     .set("activeItemId", interrupted.map(Value::from).unwrap_or(Value::Null))
                     .set("summary", Value::Null).set("summaryDismissed", json!(false)).set("failure", Value::Null)
                     .set("recovery", recovery)
                     .set("ownedPaths", un.get("ownedPaths").cloned().unwrap_or(json!({})))
                     .set("ownedArtifacts", un.get("ownedArtifacts").cloned().unwrap_or(json!({})))
                     .set("publicationArtifact", un.get("publicationArtifact").cloned().unwrap_or(Value::Null))
-                    .set("replacementPhase", if mapped == "replacing" { phase.unwrap_or(Value::Null) } else { Value::Null })
+                    .set("replacementPhase", if mapped == JobState::Replacing { phase.map(Value::from).unwrap_or(Value::Null) } else { Value::Null })
                     .items(items))
             })?;
             self.emit(rt, "paused", vec![]);
             return Ok(());
         }
-        if m.state() == "failed" {
+        if m.state() == JobState::Failed {
             return Ok(());
         }
         if m.get("discoveryComplete") == Some(&json!(false)) {
-            let from = if m.state() == "discovering" { "discovering" } else { "waiting" };
-            self.update(rt, |_| Some(Patch::new().set("state", json!("paused")).set("activeItemId", Value::Null).set("summary", Value::Null).set("summaryDismissed", json!(false)).set("failure", Value::Null).set("recovery", json!({ "fromState": from, "action": "resume-discovery" }))))?;
+            let from = if m.state() == JobState::Discovering { JobState::Discovering } else { JobState::Waiting };
+            self.update(rt, |_| Some(Patch::new().state(JobState::Paused).set("activeItemId", Value::Null).set("summary", Value::Null).set("summaryDismissed", json!(false)).set("failure", Value::Null).set("recovery", json!({ "fromState": from, "action": "resume-discovery" }))))?;
             self.emit(rt, "paused", vec![]);
             return Ok(());
         }
@@ -1777,7 +1780,7 @@ impl Service {
         let s2 = summary.clone();
         self.update(rt, |s| {
             let un = s.manifest.items.iter().find(|i| owns(i.value())).map(|i| i.value().clone()).unwrap_or(json!({}));
-            Some(Patch::new().set("state", json!("completed")).set("activeItemId", Value::Null).set("summary", s2.clone()).set("summaryDismissed", json!(false))
+            Some(Patch::new().state(JobState::Completed).set("activeItemId", Value::Null).set("summary", s2.clone()).set("summaryDismissed", json!(false))
                 .set("ownedPaths", un.get("ownedPaths").cloned().unwrap_or(json!({})))
                 .set("ownedArtifacts", un.get("ownedArtifacts").cloned().unwrap_or(json!({})))
                 .set("publicationArtifact", un.get("publicationArtifact").cloned().unwrap_or(Value::Null))

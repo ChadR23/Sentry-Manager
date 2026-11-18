@@ -5,6 +5,7 @@
 
 use super::super::contracts::{self, GROUPS, TIMING_PHASES};
 use super::super::error::CError;
+use super::states::{ArtifactState, ItemState, JobState, ReplacementPhase};
 use serde_json::{Map, Value};
 
 pub const MANIFEST_VERSION: i64 = 1;
@@ -18,14 +19,8 @@ pub const LIMIT_NODES: u64 = 2_500_000;
 pub const LIMIT_STRING_UNITS: u64 = 32 * 1024 * 1024;
 pub const MAX_SAFE: i64 = 9_007_199_254_740_991;
 
-pub const JOB_STATES: [&str; 14] = [
-    "discovering", "waiting", "staging", "encoding", "writing-telemetry", "verifying", "copying", "replacing", "completed", "skipped", "failed", "paused", "paused_network", "cancelled",
-];
-pub const REPLACEMENT_PHASES: [&str; 8] = ["candidate-written", "original-backed-up", "candidate-promoted", "final-validated", "backup-deleted", "rollback-started", "backup-restored", "rollback-failed"];
+// (JOB_STATES, ITEM_STATES, REPLACEMENT_PHASES and the owned files' states: states.rs)
 pub const DEFAULT_GROUP_ORDER: [&str; 3] = ["SavedClips", "SentryClips", "RecentClips"];
-pub const TERMINAL_JOB_STATES: [&str; 4] = ["completed", "skipped", "failed", "cancelled"];
-pub const TRANSACTION_JOB_STATES: [&str; 6] = ["staging", "encoding", "writing-telemetry", "verifying", "copying", "replacing"];
-const ITEM_STATES: [&str; 6] = ["queued", "processing", "completed", "skipped", "failed", "cancelled"];
 
 pub const TOP_FIELDS: [&str; 22] = [
     "schemaVersion", "id", "state", "revision", "config", "items", "counters", "summary", "summaryDismissed", "discoveryComplete", "createdAt", "updatedAt", "activeItemId", "ownedPaths", "ownedArtifacts",
@@ -433,15 +428,15 @@ fn normalize_owned_artifacts(v: &Value, owned_paths: Option<&Value>) -> R<Value>
         e.insert("path".into(), abs_path(get(m, "path"))?);
         e.insert("nonce".into(), bounded_string(get(m, "nonce"), 128, Some(is_safe_id))?);
         let state = text(get(m, "state"))?;
-        let state_s = state.as_str().unwrap().to_string();
+        let art = ArtifactState::parse(state.as_str().unwrap());
         e.insert("state".into(), state);
         let recorded = owned_paths.and_then(|p| p.get(key));
-        if !["intent", "writing", "owned", "cleanup-pending"].contains(&state_s.as_str()) || recorded.is_none() || recorded != e.get("path") {
+        if !art.is_known() || recorded.is_none() || recorded != e.get("path") {
             return invalid();
         }
         let id_fields = ["size", "sha256", "device", "inode"];
         let count = id_fields.iter().filter(|f| present(m, f)).count();
-        if state_s == "intent" {
+        if art == ArtifactState::Intent {
             if count != 0 || present(m, "journal") {
                 return invalid();
             }
@@ -449,8 +444,8 @@ fn normalize_owned_artifacts(v: &Value, owned_paths: Option<&Value>) -> R<Value>
             if count != id_fields.len() {
                 return invalid();
             }
-            let zero_ok = key == "encodedCandidate" && (state_s == "owned" || state_s == "cleanup-pending");
-            let size = safe_integer(get(m, "size"), state_s != "writing" && !zero_ok)?;
+            let zero_ok = key == "encodedCandidate" && matches!(art, ArtifactState::Owned | ArtifactState::CleanupPending);
+            let size = safe_integer(get(m, "size"), art != ArtifactState::Writing && !zero_ok)?;
             let size_n = size.as_i64().unwrap();
             e.insert("size".into(), size);
             e.insert("sha256".into(), sha(get(m, "sha256"))?);
@@ -483,7 +478,7 @@ fn normalize_owned_artifacts(v: &Value, owned_paths: Option<&Value>) -> R<Value>
                 jo.insert("committed".into(), committed);
                 jo.insert("pending".into(), pending);
                 e.insert("journal".into(), Value::Object(jo));
-            } else if state_s == "writing" {
+            } else if art == ArtifactState::Writing {
                 return invalid();
             }
         }
@@ -728,9 +723,9 @@ pub fn normalize_item(v: &Value) -> R<Value> {
     out.insert("sourcePath".into(), abs_path(get(m, "sourcePath"))?);
     out.insert("sourceBytes".into(), safe_integer(get(m, "sourceBytes"), false)?);
     out.insert("mtimeMs".into(), non_negative_finite(get(m, "mtimeMs"))?);
-    let state = out["state"].as_str().unwrap().to_string();
+    let state = ItemState::parse(out["state"].as_str().unwrap());
     let kind = out["kind"].as_str().unwrap().to_string();
-    if !ITEM_STATES.contains(&state.as_str()) || !["video", "asset"].contains(&kind.as_str()) || out["group"].as_str().is_some_and(|g| !GROUPS.contains(&g)) {
+    if !state.is_known() || !["video", "asset"].contains(&kind.as_str()) || out["group"].as_str().is_some_and(|g| !GROUPS.contains(&g)) {
         return invalid();
     }
     optional(&mut out, m, "timestampKey", text)?;
@@ -787,9 +782,9 @@ pub fn normalize_item(v: &Value) -> R<Value> {
         o.insert("inode".into(), bounded_string(get(em, "inode"), 32, Some(|s| digits(s, 32)))?);
         Ok(Value::Object(o))
     })?;
-    optional(&mut out, m, "replacementPhase", |x| match x.as_str() {
-        Some(p) if REPLACEMENT_PHASES.contains(&p) => Ok(x.clone()),
-        _ => invalid(),
+    optional(&mut out, m, "replacementPhase", |x| match x.as_str().and_then(ReplacementPhase::known) {
+        Some(_) => Ok(x.clone()),
+        None => invalid(),
     })?;
     let has = |k: &str| out.get(k).is_some_and(|x| x.as_str().is_some_and(|s| !s.is_empty()));
     if kind == "video" && (!has("timestampKey") || !has("camera")) {
@@ -798,13 +793,13 @@ pub fn normalize_item(v: &Value) -> R<Value> {
     if kind == "asset" && !has("assetType") {
         return invalid();
     }
-    if state == "failed" && !out.contains_key("failure") {
+    if state == ItemState::Failed && !out.contains_key("failure") {
         return invalid();
     }
-    if state != "failed" && out.contains_key("failure") {
+    if state != ItemState::Failed && out.contains_key("failure") {
         return invalid();
     }
-    if state == "completed" && (!out.contains_key("outputBytes") || !has("outputPath")) {
+    if state == ItemState::Completed && (!out.contains_key("outputBytes") || !has("outputPath")) {
         return invalid();
     }
     check_publication(&out)?;
@@ -817,7 +812,7 @@ fn check_publication(out: &Map<String, Value>) -> R<()> {
             return invalid();
         }
         let Some(snap) = out.get("ownedArtifacts").and_then(|o| o.get("publicationSnapshot")) else { return invalid() };
-        if snap["state"] == "intent" || snap.get("size") != Some(&p["size"]) || snap.get("sha256") != Some(&p["sha256"]) {
+        if snap["state"].as_str().and_then(ArtifactState::known) == Some(ArtifactState::Intent) || snap.get("size") != Some(&p["size"]) || snap.get("sha256") != Some(&p["sha256"]) {
             return invalid();
         }
     }
@@ -826,12 +821,11 @@ fn check_publication(out: &Map<String, Value>) -> R<()> {
 
 const COPY_ACTIONS: [&str; 4] = ["restart-copy", "finalize-copy", "resume-copy", "manual-intervention"];
 const ENCODING_ACTIONS: [&str; 3] = ["restart-encoding", "cleanup-and-restart-encoding", "manual-intervention"];
-const NETWORK_RESUME_STATES: [&str; 7] = ["waiting", "staging", "encoding", "writing-telemetry", "verifying", "copying", "replacing"];
 
 /// REPLACEMENT_ACTIONS_BY_PHASE
-fn replacement_action_allowed(phase: &str, action: &str) -> bool {
+fn replacement_action_allowed(phase: &ReplacementPhase, action: &str) -> bool {
     if action == "manual-intervention" {
-        return super::super::recovery::is_replacement_phase(phase);
+        return phase.is_known();
     }
     super::super::recovery::phase_actions(phase).is_some_and(|a| a.contains(&action))
 }
@@ -844,11 +838,11 @@ fn normalize_recovery(v: &Value, manifest: &Map<String, Value>) -> R<Value> {
     out.insert("action".into(), text(get(m, "action"))?);
     if let Some(p) = m.get("phase") {
         if !p.is_null() {
-            match p.as_str() {
-                Some(x) if REPLACEMENT_PHASES.contains(&x) => {
+            match p.as_str().and_then(ReplacementPhase::known) {
+                Some(_) => {
                     out.insert("phase".into(), p.clone());
                 }
-                _ => return invalid(),
+                None => return invalid(),
             }
         }
     }
@@ -862,56 +856,56 @@ fn normalize_recovery(v: &Value, manifest: &Map<String, Value>) -> R<Value> {
             out.insert("resumeState".into(), text(p)?);
         }
     }
-    let state = manifest["state"].as_str().unwrap_or("");
-    if state != "paused" && state != "paused_network" {
+    let state = JobState::parse(manifest["state"].as_str().unwrap_or(""));
+    if !state.is_paused() {
         return invalid();
     }
-    let from = out["fromState"].as_str().unwrap().to_string();
+    let from = JobState::parse(out["fromState"].as_str().unwrap());
     let action = out["action"].as_str().unwrap().to_string();
-    let phase = out.get("phase").and_then(Value::as_str).map(str::to_string);
-    let manifest_phase = manifest.get("replacementPhase").and_then(Value::as_str);
-    match from.as_str() {
-        "encoding" => {
+    let phase = out.get("phase").and_then(Value::as_str).map(ReplacementPhase::parse);
+    let manifest_phase = manifest.get("replacementPhase").and_then(Value::as_str).map(ReplacementPhase::parse);
+    match from {
+        JobState::Encoding => {
             if phase.is_some() || !ENCODING_ACTIONS.contains(&action.as_str()) {
                 return invalid();
             }
         }
-        "copying" => {
+        JobState::Copying => {
             if phase.is_some() || !COPY_ACTIONS.contains(&action.as_str()) {
                 return invalid();
             }
         }
-        "replacing" => {
-            let Some(p) = phase.as_deref() else { return invalid() };
-            if Some(p) != manifest_phase || !replacement_action_allowed(p, &action) {
+        JobState::Replacing => {
+            let Some(p) = phase else { return invalid() };
+            if manifest_phase.as_ref() != Some(&p) || !replacement_action_allowed(&p, &action) {
                 return invalid();
             }
         }
-        "waiting" => {
+        JobState::Waiting => {
             let expected = if manifest.get("discoveryComplete") == Some(&Value::Bool(false)) { "resume-discovery" } else { "resume-queue" };
             if action != expected || phase.is_some() || out.contains_key("pathRole") {
                 return invalid();
             }
         }
-        "discovering" => {
+        JobState::Discovering => {
             if action != "resume-discovery" || phase.is_some() || out.contains_key("pathRole") {
                 return invalid();
             }
         }
-        "paused_network" => {
+        JobState::PausedNetwork => {
             if !out.contains_key("resumeState") {
-                out.insert("resumeState".into(), Value::from("waiting"));
+                out.insert("resumeState".into(), JobState::Waiting.into());
             }
-            let resume = out["resumeState"].as_str().unwrap().to_string();
+            let resume = JobState::parse(out["resumeState"].as_str().unwrap());
             let owns = |k: &str| manifest.get("ownedPaths").and_then(|o| o.get(k)).is_some_and(truthy) || manifest.get("ownedArtifacts").and_then(|o| o.get(k)).is_some_and(truthy);
             let replacement_owned = owns("replacementCandidate") || owns("replacementBackup");
             let role = out.get("pathRole").and_then(Value::as_str).unwrap_or("");
-            if action != "resume-network" || !["source", "destination", "discovery"].contains(&role) || !NETWORK_RESUME_STATES.contains(&resume.as_str()) {
+            if action != "resume-network" || !["source", "destination", "discovery"].contains(&role) || !resume.resumes_after_network() {
                 return invalid();
             }
-            if resume == "replacing" {
-                let Some(p) = phase.as_deref() else { return invalid() };
-                if Some(p) != manifest_phase || manifest["config"]["outputMode"] != "replace" {
+            if resume == JobState::Replacing {
+                let Some(p) = phase else { return invalid() };
+                if manifest_phase.as_ref() != Some(&p) || manifest["config"]["outputMode"] != "replace" {
                     return invalid();
                 }
             } else if phase.is_some() || manifest_phase.is_some() || replacement_owned {
@@ -978,14 +972,17 @@ pub fn normalize_top(top: &Map<String, Value>, items: impl FnOnce() -> R<Vec<std
         _ => return Err(se("INVALID_JOB_ID")),
     };
     assert_safe_job_id(&id)?;
-    let state = match top.get("state") {
-        Some(Value::String(s)) if JOB_STATES.contains(&s.as_str()) => s.clone(),
+    let (state, state_s) = match top.get("state") {
+        Some(Value::String(s)) => match JobState::known(s) {
+            Some(known) => (known, s.clone()),
+            None => return invalid(),
+        },
         _ => return invalid(),
     };
     let mut out = Map::new();
     out.insert("schemaVersion".into(), Value::from(MANIFEST_VERSION));
     out.insert("id".into(), Value::String(id));
-    out.insert("state".into(), Value::String(state.clone()));
+    out.insert("state".into(), Value::String(state_s));
     out.insert("revision".into(), safe_integer(get(top, "revision"), false)?);
     out.insert("config".into(), normalize_config(get(top, "config"))?);
     // (items: placed after config when written)
@@ -1027,9 +1024,9 @@ pub fn normalize_top(top: &Map<String, Value>, items: impl FnOnce() -> R<Vec<std
     let op = out.get("ownedPaths").cloned();
     optional(&mut out, top, "ownedArtifacts", |x| normalize_owned_artifacts(x, op.as_ref()))?;
     optional(&mut out, top, "publicationArtifact", normalize_publication)?;
-    optional(&mut out, top, "replacementPhase", |x| match x.as_str() {
-        Some(p) if REPLACEMENT_PHASES.contains(&p) => Ok(x.clone()),
-        _ => invalid(),
+    optional(&mut out, top, "replacementPhase", |x| match x.as_str().and_then(ReplacementPhase::known) {
+        Some(_) => Ok(x.clone()),
+        None => invalid(),
     })?;
     optional(&mut out, top, "failure", normalize_failure)?;
     optional(&mut out, top, "timings", normalize_timings)?;
@@ -1045,25 +1042,25 @@ pub fn normalize_top(top: &Map<String, Value>, items: impl FnOnce() -> R<Vec<std
             return invalid();
         }
     }
-    if TRANSACTION_JOB_STATES.contains(&state.as_str()) && active.is_none() {
+    if state.is_transaction() && active.is_none() {
         return invalid();
     }
-    let resume_state = out.get("recovery").and_then(|r| r.get("resumeState")).and_then(Value::as_str);
-    if state == "paused_network" && resume_state != Some("waiting") && active.is_none() {
+    let resume_state = out.get("recovery").and_then(|r| r.get("resumeState")).and_then(Value::as_str).map(JobState::parse);
+    if state == JobState::PausedNetwork && resume_state != Some(JobState::Waiting) && active.is_none() {
         return invalid();
     }
     let output_mode = out["config"]["outputMode"].as_str().unwrap_or("").to_string();
-    let phase = out.get("replacementPhase").and_then(Value::as_str);
-    if state == "replacing" && (phase.is_none() || output_mode != "replace") {
+    let phase = out.get("replacementPhase").and_then(Value::as_str).map(ReplacementPhase::parse);
+    if state == JobState::Replacing && (phase.is_none() || output_mode != "replace") {
         return invalid();
     }
-    if let Some(p) = phase {
-        let rec_phase = out.get("recovery").and_then(|r| r.get("phase")).and_then(Value::as_str);
-        if state != "replacing" && state != "paused" && !(state == "paused_network" && resume_state == Some("replacing") && rec_phase == Some(p)) {
+    if let Some(p) = &phase {
+        let rec_phase = out.get("recovery").and_then(|r| r.get("phase")).and_then(Value::as_str).map(ReplacementPhase::parse);
+        if state != JobState::Replacing && state != JobState::Paused && !(state == JobState::PausedNetwork && resume_state == Some(JobState::Replacing) && rec_phase.as_ref() == Some(p)) {
             return invalid();
         }
     }
-    if state == "completed" {
+    if state == JobState::Completed {
         if out.contains_key("summaryDismissed") {
             if !out["summary"].is_null() {
                 return invalid();
@@ -1074,13 +1071,13 @@ pub fn normalize_top(top: &Map<String, Value>, items: impl FnOnce() -> R<Vec<std
     } else if !out["summary"].is_null() || out.contains_key("summaryDismissed") {
         return invalid();
     }
-    if state == "failed" && !out.contains_key("failure") {
+    if state == JobState::Failed && !out.contains_key("failure") {
         return invalid();
     }
-    if state != "failed" && out.contains_key("failure") {
+    if state != JobState::Failed && out.contains_key("failure") {
         return invalid();
     }
-    if state == "paused" && out.get("recovery").and_then(|r| r.get("fromState")).and_then(Value::as_str) == Some("replacing") && output_mode != "replace" {
+    if state == JobState::Paused && out.get("recovery").and_then(|r| r.get("fromState")).and_then(Value::as_str).map(JobState::parse) == Some(JobState::Replacing) && output_mode != "replace" {
         return invalid();
     }
     check_publication(&out)?;

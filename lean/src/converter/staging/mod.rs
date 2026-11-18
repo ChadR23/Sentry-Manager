@@ -13,6 +13,7 @@
 mod ops;
 mod recover;
 
+use super::jobstore::states::{ArtifactState, ReplacementPhase};
 use super::owned::{self, errno_code, Expected};
 use super::snapshot::{Artifact, Registry, Validate};
 use indexmap::IndexMap;
@@ -73,7 +74,7 @@ pub fn message_of(code: &str) -> &'static str {
 pub struct Saved {
     pub final_path: String,
     pub output_bytes: u64,
-    pub phase: Option<&'static str>,
+    pub phase: Option<ReplacementPhase>,
     pub owned_paths: Paths,
     pub owned_artifacts: Artifacts,
     pub cleanup_pending: Vec<String>,
@@ -134,7 +135,7 @@ fn refuse(code: &str, check: &str, target: &str, detail: impl AsRef<str>) -> TxE
 fn stat_diffs(m: Option<&Meta>, st: &fs::Metadata) -> Vec<String> {
     let Some(m) = m else { return vec!["no record".into()] };
     let mut d = Vec::new();
-    if m.state == "intent" {
+    if m.state == ArtifactState::Intent {
         d.push("record state intent".into());
     }
     if m.device.as_deref() != Some(&st.dev().to_string()) {
@@ -223,7 +224,7 @@ pub struct Journal {
 pub struct Meta {
     pub path: String,
     pub nonce: String,
-    pub state: String,
+    pub state: ArtifactState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -503,9 +504,10 @@ pub fn empty_sha() -> String {
 }
 
 /// artifactMetadata(target, nonce, state, stat, sha256, size, journal)
-pub fn artifact_metadata(target: &str, nonce: &str, state: &str, stat: Option<&fs::Metadata>, sha256: Option<&str>, size: u64, journal: Option<Journal>) -> Meta {
-    let mut m = Meta { path: target.into(), nonce: nonce.into(), state: state.into(), size: None, sha256: None, device: None, inode: None, journal: None };
-    if state != "intent" {
+pub fn artifact_metadata(target: &str, nonce: &str, state: ArtifactState, stat: Option<&fs::Metadata>, sha256: Option<&str>, size: u64, journal: Option<Journal>) -> Meta {
+    let recorded = state != ArtifactState::Intent;
+    let mut m = Meta { path: target.into(), nonce: nonce.into(), state, size: None, sha256: None, device: None, inode: None, journal: None };
+    if recorded {
         let st = stat.expect("stat for a recorded file");
         m.size = Some(size);
         m.sha256 = sha256.map(String::from);
@@ -517,7 +519,7 @@ pub fn artifact_metadata(target: &str, nonce: &str, state: &str, stat: Option<&f
 }
 
 fn matches_stat(m: Option<&Meta>, st: &fs::Metadata) -> bool {
-    m.is_some_and(|m| m.state != "intent" && m.device.as_deref() == Some(&st.dev().to_string()) && m.inode.as_deref() == Some(&st.ino().to_string()) && m.size == Some(st.size()))
+    m.is_some_and(|m| m.state != ArtifactState::Intent && m.device.as_deref() == Some(&st.dev().to_string()) && m.inode.as_deref() == Some(&st.ino().to_string()) && m.size == Some(st.size()))
 }
 
 fn matches_identity(m: Option<&Meta>, st: &fs::Metadata) -> bool {
@@ -549,7 +551,7 @@ fn new_nonce() -> String {
 /// The snapshot the job store receives (transactionSnapshot).
 pub struct Snap<'a> {
     pub step: Option<&'a str>,
-    pub phase: Option<&'a str>,
+    pub phase: Option<ReplacementPhase>,
     pub owned_paths: &'a Paths,
     pub owned_artifacts: &'a Artifacts,
     pub publication_artifact: Option<&'a Artifact>,
@@ -566,8 +568,8 @@ impl<'a> Snap<'a> {
         self.step = Some(s);
         self
     }
-    pub fn phase(mut self, s: &'a str) -> Self {
-        self.phase = Some(s);
+    pub fn phase(mut self, p: ReplacementPhase) -> Self {
+        self.phase = Some(p);
         self
     }
     pub fn artifact(mut self, a: Option<&'a Artifact>) -> Self {
@@ -584,7 +586,7 @@ impl<'a> Snap<'a> {
     }
 }
 
-fn transaction_owned_keys(step: Option<&str>, phase: Option<&str>) -> &'static [&'static str] {
+fn transaction_owned_keys(step: Option<&str>, phase: Option<&ReplacementPhase>) -> &'static [&'static str] {
     if phase.is_some() {
         return &["replacementCandidate", "replacementBackup", "publicationSnapshot"];
     }
@@ -615,8 +617,8 @@ pub fn snapshot_json(sn: &Snap) -> Value {
     if let Some(f) = &sn.item_fields {
         m.insert("itemFields".into(), f.clone());
     }
-    if let Some(p) = sn.phase {
-        m.insert("phase".into(), json!(p));
+    if let Some(p) = &sn.phase {
+        m.insert("phase".into(), p.clone().into());
     }
     if let Some(a) = sn.publication_artifact {
         if sn.owned_paths.contains_key("publicationSnapshot") {
@@ -627,7 +629,7 @@ pub fn snapshot_json(sn: &Snap) -> Value {
         m.insert("cleanupPending".into(), json!(sn.cleanup_pending));
     }
     let mut clears: Vec<String> = sn.clear_owned_keys.iter().map(|s| s.to_string()).collect();
-    for k in transaction_owned_keys(sn.step, sn.phase) {
+    for k in transaction_owned_keys(sn.step, sn.phase.as_ref()) {
         if !sn.owned_paths.contains_key(*k) && !clears.iter().any(|c| c == k) {
             clears.push(k.to_string());
         }
@@ -1146,7 +1148,7 @@ impl Tx {
             return Err(unsafe_path("remove-exact-owned", target, "lstat ENOENT (missing)"));
         };
         let Some(m) = m else { return Err(unsafe_path("remove-exact-owned", target, "no record")) };
-        if (!allow_identity_alias && m.path != target) || m.nonce.is_empty() || m.state == "intent" || !matches_stat(Some(m), &st) || (!single_link(&st) && m.state != "cleanup-pending") {
+        if (!allow_identity_alias && m.path != target) || m.nonce.is_empty() || m.state == ArtifactState::Intent || !matches_stat(Some(m), &st) || (!single_link(&st) && m.state != ArtifactState::CleanupPending) {
             let mut d = Vec::new();
             if !allow_identity_alias && m.path != target {
                 d.push("record path differs from target".to_string());
@@ -1154,10 +1156,10 @@ impl Tx {
             if m.nonce.is_empty() {
                 d.push("record nonce empty".into());
             }
-            if !matches_stat(Some(m), &st) || m.state == "intent" {
+            if !matches_stat(Some(m), &st) || m.state == ArtifactState::Intent {
                 d.extend(stat_diffs(Some(m), &st));
             }
-            if !single_link(&st) && m.state != "cleanup-pending" {
+            if !single_link(&st) && m.state != ArtifactState::CleanupPending {
                 d.push(format!("nlink {} != 1 (state {})", st.nlink(), m.state));
             }
             return Err(unsafe_path("remove-exact-owned", target, d.join("; ")));
@@ -1245,7 +1247,7 @@ impl Tx {
 
     /// backupRecord: the inode now at the backup name is the verified original (no read).
     fn backup_record(&self, backup: &str, nonce: &str, source_removed: bool, e: &SourceAuthority, proven_mtime: Option<&str>) -> R<(Meta, Option<String>)> {
-        let state = if source_removed { "owned" } else { "cleanup-pending" };
+        let state = if source_removed { ArtifactState::Owned } else { ArtifactState::CleanupPending };
         let st = exact_lstat(backup).ok();
         let Some(st) = st.filter(|st| is_regular(st) && st.dev().to_string() == e.device && st.ino().to_string() == e.inode && st.size() == e.size) else {
             return Err(txe("REPLACEMENT_FAILED"));
@@ -1267,7 +1269,7 @@ impl Tx {
             }
         }
         let fe = Expected { device: st.dev().to_string(), inode: st.ino().to_string(), size: a.size, sha256: a.sha256.clone(), mtime_ns: None };
-        let fm = Meta { path: final_path.into(), nonce: String::new(), state: "owned".into(), size: Some(a.size), sha256: Some(a.sha256.clone()), device: Some(fe.device.clone()), inode: Some(fe.inode.clone()), journal: None };
+        let fm = Meta { path: final_path.into(), nonce: String::new(), state: ArtifactState::Owned, size: Some(a.size), sha256: Some(a.sha256.clone()), device: Some(fe.device.clone()), inode: Some(fe.inode.clone()), journal: None };
         let quick = if expected_final.is_some() { quick_expected(&fm, final_mtime, Some(&st)) } else { None };
         match &quick {
             Some(q) => self.remove_exact_owned(backup, m, false, false, Some((final_path, q, true)), backup_mtime),
@@ -1289,7 +1291,7 @@ impl Tx {
             Ok(_) => return Err(unsafe_path("remove-private-file", target, "folder realpath is not the temp folder")),
             Err(e) => return Err(unsafe_path("remove-private-file", target, format!("folder realpath {}", e.code))),
         }
-        if m.state != "intent" && !matches_identity(Some(m), &st) {
+        if m.state != ArtifactState::Intent && !matches_identity(Some(m), &st) {
             return Err(unsafe_path("remove-private-file", target, identity_diffs(m, &st)));
         }
         unlink_private(target)?;
@@ -1305,7 +1307,7 @@ impl Tx {
                 return Err(unsafe_path("remove-private-snapshot", &a.path, regular_single_diffs(&st).join("; ")));
             }
             if let Some(m) = m {
-                if m.state != "intent" && !matches_identity(Some(m), &st) {
+                if m.state != ArtifactState::Intent && !matches_identity(Some(m), &st) {
                     return Err(unsafe_path("remove-private-snapshot", &a.path, identity_diffs(m, &st)));
                 }
             }
@@ -1367,7 +1369,7 @@ impl Tx {
 
     /// removeQuarantined: a removal stopped between its quarantine rename and the unlink.
     fn remove_quarantined(&self, target: &str, m: Option<&Meta>, guard: Option<(&str, &Expected)>) -> bool {
-        let Some(m) = m.filter(|m| m.state != "intent") else { return false };
+        let Some(m) = m.filter(|m| m.state != ArtifactState::Intent) else { return false };
         let folder = dirname(target);
         let Ok(names) = fs::read_dir(&folder) else { return false };
         for n in names.flatten() {
@@ -1391,7 +1393,7 @@ impl Tx {
     /// removeShareCopy: an interrupted copy of the verified snapshot on the share.
     fn remove_share_copy(&self, target: &str, m: &Meta, a: Option<&Artifact>) -> R<bool> {
         let Some(st) = lstat_or_none(target)? else {
-            if m.state != "intent" {
+            if m.state != ArtifactState::Intent {
                 self.remove_quarantined(target, Some(m), None);
             }
             self.forget_owned(target);
@@ -1400,7 +1402,7 @@ impl Tx {
         if !is_regular(&st) {
             return Err(unsafe_path("remove-share-copy", target, "not a regular file"));
         }
-        if m.state == "intent" || m.state == "writing" {
+        if m.state == ArtifactState::Intent || m.state == ArtifactState::Writing {
             if !single_link(&st) {
                 return Err(unsafe_path("remove-share-copy", target, format!("nlink {} != 1 (state {})", st.nlink(), m.state)));
             }
@@ -1410,7 +1412,7 @@ impl Tx {
                 Err(e) => return Err(unsafe_path("remove-share-copy", target, format!("realpath {}", e.code))),
             }
             let size = st.size();
-            let sha = if m.state == "intent" {
+            let sha = if m.state == ArtifactState::Intent {
                 if size != 0 {
                     return Err(unsafe_path("remove-share-copy", target, format!("size {size} != 0 (state intent)")));
                 }
@@ -1461,8 +1463,8 @@ impl Tx {
             return Err(txe("PUBLICATION_ARTIFACT_CHANGED"));
         }
         let nonce = persisted.map(|p| p.nonce.clone()).unwrap_or_else(new_nonce);
-        let state = persisted.map(|p| p.state.clone()).unwrap_or_else(|| "owned".into());
-        let m = artifact_metadata(&a.path, &nonce, &state, Some(&st), Some(&a.sha256), a.size, None);
+        let state = persisted.map(|p| p.state.clone()).unwrap_or(ArtifactState::Owned);
+        let m = artifact_metadata(&a.path, &nonce, state, Some(&st), Some(&a.sha256), a.size, None);
         if st.size() != a.size {
             return Err(txe("PUBLICATION_ARTIFACT_CHANGED"));
         }

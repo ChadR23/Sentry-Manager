@@ -26,6 +26,7 @@ pub use encode::{parse_progress_line, Progress};
 
 use super::contracts;
 use super::error::CError;
+use super::jobstore::states::{ItemState, JobState, ReplacementPhase};
 use super::jobstore::{ItemIn, JobStore, Manifest, Patch};
 use super::staging::{self, Tx};
 use serde_json::{json, Map, Value};
@@ -35,9 +36,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use tools::Tools;
 
-pub const ACTIVE_STATES: [&str; 10] = ["discovering", "waiting", "staging", "encoding", "writing-telemetry", "verifying", "copying", "replacing", "paused", "paused_network"];
-pub const TERMINAL_STATES: [&str; 4] = ["completed", "failed", "cancelled", "skipped"];
-const IDLE_JOB_STATES: [&str; 6] = ["paused", "paused_network", "completed", "skipped", "failed", "cancelled"];
+// (ACTIVE_STATES, TERMINAL_STATES, IDLE_JOB_STATES: JobState::is_active, is_terminal, is_idle)
 pub const OWNED_KEYS: [&str; 6] = ["stagedSource", "encodedCandidate", "publicationSnapshot", "destinationPartial", "replacementCandidate", "replacementBackup"];
 const PRIVATE_SNAPSHOT_KEYS: [&str; 3] = ["ownedPaths", "ownedArtifacts", "publicationArtifact"];
 pub const MAX_RECORDED_ATTEMPTS: i64 = 3;
@@ -268,6 +267,16 @@ pub fn with_item(current: &Manifest, id: &str, f: impl FnOnce(&Value) -> Value) 
     current.items.iter().map(|it| if it.id() == id { ItemIn::Raw((f.take().unwrap())(it.value())) } else { ItemIn::Trusted(it.clone()) }).collect()
 }
 
+/// The state a paused job's recovery record was taken in (recovery.fromState).
+pub fn recorded_from(m: &Manifest) -> Option<JobState> {
+    m.get("recovery").and_then(|r| r.get("fromState")).and_then(Value::as_str).map(JobState::parse)
+}
+
+/// A clip's state, from a copy of the clip (`RtState::item`) or one being built.
+pub fn item_state(item: &Value) -> ItemState {
+    ItemState::parse(item["state"].as_str().unwrap_or(""))
+}
+
 fn carries_private(item: &Value, key: &str) -> bool {
     match item.get(key) {
         None | Some(Value::Null) => false,
@@ -435,7 +444,8 @@ pub struct RtState {
     pub commit_holder: Option<String>,
     pub running: bool,
     pub run_kind: Option<&'static str>,
-    pub stop_phase: Option<String>,
+    /// the step a stop interrupted (the job's state, or the one its pause recorded)
+    pub stop_phase: Option<JobState>,
     pub stop_item_id: Option<String>,
     pub stop_while_paused: bool,
     pub item_sequence: usize,
@@ -656,7 +666,7 @@ impl Service {
 
     fn snapshot_urgent(previous: &Manifest, next: &Manifest) -> bool {
         let (ps, ns) = (previous.state(), next.state());
-        if ps != ns && (IDLE_JOB_STATES.contains(&ps) || IDLE_JOB_STATES.contains(&ns)) {
+        if ps != ns && (ps.is_idle() || ns.is_idle()) {
             return true;
         }
         let same = |k: &str| previous.get(k).unwrap_or(&Value::Null) == next.get(k).unwrap_or(&Value::Null);
@@ -702,15 +712,15 @@ impl Service {
             (build(&s), s.manifest.clone())
         };
         let Some(mut patch) = patch else { return Ok(previous) };
-        let new_state = patch.top.get("state").and_then(Value::as_str).map(str::to_string);
+        let new_state = patch.top.get("state").and_then(Value::as_str).map(JobState::parse);
         if let Some(ns) = &new_state {
-            if ns != "paused" && ns != "paused_network" && !patch.top.contains_key("recovery") && previous.get("recovery").and_then(|r| r.get("fromState")).and_then(Value::as_str) == Some("paused_network") {
+            if !ns.is_paused() && !patch.top.contains_key("recovery") && recorded_from(&previous) == Some(JobState::PausedNetwork) {
                 patch.top.insert("recovery".into(), Value::Null);
             }
-            if ns != previous.state() && !patch.top.contains_key("updatedAt") {
+            if *ns != previous.state() && !patch.top.contains_key("updatedAt") {
                 let at = (self.0.o.now)();
                 patch.top.insert("updatedAt".into(), json!(at));
-                if IDLE_JOB_STATES.contains(&previous.state()) {
+                if previous.state().is_idle() {
                     if let Some(prev_at) = previous.get("updatedAt").and_then(Value::as_i64) {
                         if at > prev_at {
                             let paused = previous.get("pausedMs").and_then(Value::as_i64).unwrap_or(0);
@@ -750,7 +760,7 @@ impl Service {
         let item_id = item_id.to_string();
         move |snapshot: &Value| -> Result<(), String> {
             let clear: Vec<String> = snapshot.get("clearOwnedKeys").and_then(Value::as_array).map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default();
-            let phase = snapshot.get("phase").and_then(Value::as_str).filter(|p| super::jobstore::normalize::REPLACEMENT_PHASES.contains(p)).map(str::to_string);
+            let phase = snapshot.get("phase").and_then(Value::as_str).and_then(ReplacementPhase::known);
             let combined: Arc<Mutex<Option<Own>>> = Arc::new(Mutex::new(None));
             let c2 = combined.clone();
             me.update(&rt, |s| {
@@ -763,7 +773,7 @@ impl Service {
                 let mut changes: Changes = vec![("ownedPaths", Some(Value::Object(comb.paths.clone()))), ("ownedArtifacts", Some(Value::Object(comb.arts.clone())))];
                 changes.push(("publicationArtifact", comb.publication.clone()));
                 if let Some(p) = &phase {
-                    changes.push(("replacementPhase", Some(json!(p))));
+                    changes.push(("replacementPhase", Some(p.clone().into())));
                 }
                 if let Some(e) = snapshot.get("itemFields").and_then(|f| f.get("expectedSource")) {
                     if super::jobstore::normalize::truthy(e) {
@@ -780,7 +790,7 @@ impl Service {
                 }
                 let mut p = Patch::new();
                 if let Some(ph) = &phase {
-                    p = p.set("replacementPhase", json!(ph)).set("state", json!("replacing")).set("activeItemId", json!(item_id));
+                    p = p.set("replacementPhase", ph.clone().into()).state(JobState::Replacing).set("activeItemId", json!(item_id));
                 }
                 Some(p.set("ownedPaths", Value::Object(comb.paths.clone())).set("ownedArtifacts", Value::Object(comb.arts.clone())).set("publicationArtifact", comb.publication.clone().unwrap_or(Value::Null)).items(items))
             })
@@ -845,7 +855,7 @@ impl Service {
     fn forget_finished(&self, rt: &Arc<Runtime>) {
         let s = rt.lock();
         let id = s.manifest.id().to_string();
-        if s.running || self.0.shutting_down.load(Ordering::SeqCst) || !TERMINAL_STATES.contains(&s.manifest.state()) || s.recovery_required {
+        if s.running || self.0.shutting_down.load(Ordering::SeqCst) || !s.manifest.state().is_terminal() || s.recovery_required {
             return;
         }
         drop(s);
@@ -880,7 +890,7 @@ impl Service {
             if oc.get("autoConvert") != Some(&Value::Bool(true)) || overlaps(oc["sourceRoot"].as_str(), config["sourceRoot"].as_str()) {
                 return false;
             }
-            if other["state"] == "paused" {
+            if JobState::parse(other["state"].as_str().unwrap_or("")) == JobState::Paused {
                 continue;
             }
             taken.extend(theirs);
@@ -896,13 +906,13 @@ impl Service {
             }
             let mut active: Vec<(String, Value)> = Vec::new();
             for s in self.0.o.store.summaries().map_err(Fail::from)? {
-                if ACTIVE_STATES.contains(&s["state"].as_str().unwrap_or("")) {
+                if JobState::parse(s["state"].as_str().unwrap_or("")).is_active() {
                     active.push((s["id"].as_str().unwrap_or("").to_string(), (*s).clone()));
                 }
             }
             for rt in self.0.jobs.lock().unwrap().values() {
                 let m = rt.manifest();
-                if ACTIVE_STATES.contains(&m.state()) {
+                if m.state().is_active() {
                     active.retain(|(id, _)| id != m.id());
                     active.push((m.id().to_string(), json!({ "state": m.state(), "config": m.config() })));
                 }
@@ -913,7 +923,7 @@ impl Service {
             let now = (self.0.o.now)();
             let mut initial = Map::new();
             initial.insert("config".into(), config.clone());
-            initial.insert("state".into(), json!("discovering"));
+            initial.insert("state".into(), JobState::Discovering.into());
             initial.insert("createdAt".into(), json!(now));
             initial.insert("updatedAt".into(), json!(now));
             initial.insert("items".into(), json!([]));
@@ -985,7 +995,7 @@ impl Service {
     pub fn pause(&self, id: &str) -> SResult<Value> {
         self.mutate(|| {
             let rt = self.ensure_runtime(id)?;
-            if TERMINAL_STATES.contains(&rt.manifest().state()) {
+            if rt.manifest().state().is_terminal() {
                 return Ok(public_snapshot(&rt.manifest()));
             }
             rt.lock().pause_requested = true;
@@ -1007,17 +1017,17 @@ impl Service {
             let rt = self.live_runtime(id)?;
             let (state, pause_requested, running, from) = {
                 let s = rt.lock();
-                (s.manifest.state().to_string(), s.pause_requested, s.running, s.manifest.get("recovery").and_then(|r| r.get("fromState")).and_then(Value::as_str).map(str::to_string))
+                (s.manifest.state(), s.pause_requested, s.running, recorded_from(&s.manifest))
             };
-            if state != "paused" && !pause_requested {
+            if state != JobState::Paused && !pause_requested {
                 return Err(service_error("JOB_NOT_PAUSED"));
             }
-            if from.as_deref() == Some("replacing") && !running {
+            if from == Some(JobState::Replacing) && !running {
                 self.resolve_replacement_before_cancel(&rt, id, true)?;
                 self.emit(&rt, "resumed", vec![]);
                 return Ok(public_snapshot(&rt.manifest()));
             }
-            if state != "paused" && running {
+            if state != JobState::Paused && running {
                 {
                     let mut s = rt.lock();
                     s.pause_requested = false;
@@ -1037,7 +1047,7 @@ impl Service {
                 s.pause_requested = false;
                 s.pause_persisted = false;
             }
-            self.update(&rt, |_| Some(Patch::new().set("state", json!("waiting")).set("recovery", Value::Null)))?;
+            self.update(&rt, |_| Some(Patch::new().state(JobState::Waiting).set("recovery", Value::Null)))?;
             Self::wake_paused(&rt);
             if !rt.lock().running {
                 self.relaunch_async(&rt);
@@ -1048,7 +1058,7 @@ impl Service {
     }
 
     fn queued_ids(m: &Manifest) -> Vec<String> {
-        m.items.iter().filter(|i| i.state() == "queued").map(|i| i.id().to_string()).collect()
+        m.items.iter().filter(|i| i.state() == ItemState::Queued).map(|i| i.id().to_string()).collect()
     }
 
     /// relaunch without waiting for the run
@@ -1067,7 +1077,7 @@ impl Service {
     pub fn cancel(&self, id: &str) -> SResult<Value> {
         self.mutate(|| {
             let rt = self.live_runtime(id)?;
-            if rt.manifest().get("recovery").and_then(|r| r.get("fromState")) == Some(&json!("replacing")) {
+            if recorded_from(&rt.manifest()) == Some(JobState::Replacing) {
                 self.resolve_replacement_before_cancel(&rt, id, false)?;
             }
             self.release_interrupted_save(&rt, false)?;
@@ -1075,7 +1085,7 @@ impl Service {
             if m.get("recovery").and_then(|r| r.get("action")) == Some(&json!("manual-intervention")) && !rt.lock().running {
                 return Err(service_error("RECOVERY_REQUIRED"));
             }
-            if m.state() == "cancelled" {
+            if m.state() == JobState::Cancelled {
                 return Ok(public_snapshot(&m));
             }
             {
@@ -1126,30 +1136,30 @@ impl Service {
         self.mutate(|| {
             let rt = self.live_runtime(id)?;
             let m = rt.manifest();
-            if m.get("recovery").and_then(|r| r.get("fromState")) == Some(&json!("replacing")) {
+            if recorded_from(&m) == Some(JobState::Replacing) {
                 return Err(service_error("RECOVERY_REQUIRED"));
             }
             if rt.lock().running {
                 return Err(service_error("JOB_ACTIVE"));
             }
-            if !["completed", "failed"].contains(&m.state()) {
+            if !matches!(m.state(), JobState::Completed | JobState::Failed) {
                 return Err(service_error("JOB_NOT_RETRYABLE"));
             }
-            if !m.items.iter().any(|i| i.state() == "failed") {
+            if !m.items.iter().any(|i| i.state() == ItemState::Failed) {
                 return Err(service_error("NO_FAILED_ITEMS"));
             }
-            for item in m.items.iter().filter(|i| i.state() == "failed") {
+            for item in m.items.iter().filter(|i| i.state() == ItemState::Failed) {
                 if !self.reconcile_item_ownership(&rt, item.id(), Some(ownership_of(item.value())), false)? {
                     return Err(service_error("RECOVERY_REQUIRED"));
                 }
             }
             self.update(&rt, |s| {
-                let items = s.manifest.items.iter().map(|i| if i.state() == "failed" {
-                    ItemIn::Raw(merge(i.value(), &vec![("state", Some(json!("queued"))), ("attempts", Some(json!(0))), ("failure", None), ("resultCode", None)]))
+                let items = s.manifest.items.iter().map(|i| if i.state() == ItemState::Failed {
+                    ItemIn::Raw(merge(i.value(), &vec![("state", Some(ItemState::Queued.into())), ("attempts", Some(json!(0))), ("failure", None), ("resultCode", None)]))
                 } else {
                     ItemIn::Trusted(i.clone())
                 }).collect();
-                Some(Patch::new().set("state", json!("waiting")).set("summary", Value::Null).set("summaryDismissed", json!(false)).set("failure", Value::Null).items(items))
+                Some(Patch::new().state(JobState::Waiting).set("summary", Value::Null).set("summaryDismissed", json!(false)).set("failure", Value::Null).items(items))
             })?;
             {
                 let mut s = rt.lock();
@@ -1166,7 +1176,7 @@ impl Service {
     /// dismissSummary(id)
     pub fn dismiss_summary(&self, id: &str) -> SResult<Value> {
         let rt = self.ensure_runtime(id)?;
-        if rt.manifest().state() != "completed" {
+        if rt.manifest().state() != JobState::Completed {
             return Err(service_error("JOB_NOT_COMPLETED"));
         }
         self.update(&rt, |_| Some(Patch::new().set("summary", Value::Null).set("summaryDismissed", json!(true))))?;
@@ -1182,7 +1192,7 @@ impl Service {
                 return Err(service_error("INVALID_CONCURRENCY"));
             }
             let rt = self.ensure_runtime(id)?;
-            if TERMINAL_STATES.contains(&rt.manifest().state()) {
+            if rt.manifest().state().is_terminal() {
                 return Err(service_error("JOB_NOT_ACTIVE"));
             }
             let n = value.as_i64().unwrap();
@@ -1218,7 +1228,7 @@ impl Service {
                 _ => return Err(service_error("INVALID_LANES")),
             };
             let rt = self.ensure_runtime(id)?;
-            if TERMINAL_STATES.contains(&rt.manifest().state()) {
+            if rt.manifest().state().is_terminal() {
                 return Err(service_error("JOB_NOT_ACTIVE"));
             }
             // Smallest (CPU only) has no lanes (its number at once is set_concurrency's)
@@ -1295,20 +1305,20 @@ impl Service {
                     let me = self.clone();
                     std::thread::spawn(move || {
                         let m = rt.manifest();
-                        if TERMINAL_STATES.contains(&m.state()) {
+                        if m.state().is_terminal() {
                             return;
                         }
-                        let rec = |k: &str| m.get("recovery").and_then(|r| r.get(k)).and_then(Value::as_str).map(str::to_string);
+                        let rec = |k: &str| m.get("recovery").and_then(|r| r.get(k)).and_then(Value::as_str).map(JobState::parse);
                         let running;
                         {
                             let mut s = rt.lock();
                             s.stop_phase = match m.state() {
-                                "paused_network" => rec("resumeState"),
-                                "paused" => rec("fromState"),
-                                other => Some(other.to_string()),
+                                JobState::PausedNetwork => rec("resumeState"),
+                                JobState::Paused => rec("fromState"),
+                                other => Some(other),
                             };
                             s.stop_item_id = m.str("activeItemId").map(str::to_string).or_else(|| s.lead_item_id());
-                            s.stop_while_paused = s.pause_requested || (m.state() == "paused" && !m.get("recovery").is_some_and(super::jobstore::normalize::truthy));
+                            s.stop_while_paused = s.pause_requested || (m.state() == JobState::Paused && !m.get("recovery").is_some_and(super::jobstore::normalize::truthy));
                             s.stop_requested = true;
                             s.queue_closed = true;
                             running = s.running;
@@ -1392,5 +1402,38 @@ mod failure_detail_tests {
             m.insert(k.clone(), v.clone());
         }
         m
+    }
+}
+
+#[cfg(test)]
+mod state_tests {
+    //! A move the service never makes, tried anyway: the store refuses it,
+    //! the caller gets INVALID_STATE_TRANSITION, and neither the runtime's
+    //! copy of the job nor its file changes.
+    use super::lanes_tests::{Harness, HarnessOptions};
+    use super::*;
+
+    #[test]
+    fn a_refused_move_reaches_the_caller_and_the_job_stays_as_it_was() {
+        if !std::process::Command::new("ffmpeg").arg("-version").output().is_ok_and(|o| o.status.success()) {
+            return;
+        }
+        let h = Harness::new(HarnessOptions { clips: 2, ..Default::default() });
+        let svc = h.service();
+        let id = svc.start(&h.config(json!({}))).unwrap();
+        assert_eq!(h.finish_job(&id)["state"], "completed");
+        let rt = svc.ensure_runtime(&id).unwrap();
+        let before = rt.manifest().to_json();
+        // (a finished job reopened as paused: a valid job file, a move never made)
+        let e = svc.update(&rt, |_| Some(Patch::new().state(JobState::Paused).set("summary", Value::Null))).unwrap_err();
+        assert_eq!(e.code.as_deref(), Some("INVALID_STATE_TRANSITION"));
+        assert_eq!(rt.manifest().to_json(), before, "the runtime's copy");
+        assert_eq!(svc.store().load(&id).unwrap().unwrap().to_json(), before, "the job file");
+        // the moves a finished job does make still work: Cancel, and a cancelled job stays cancelled
+        assert_eq!(svc.cancel(&id).unwrap()["state"], "cancelled");
+        let rt = svc.ensure_runtime(&id).unwrap();
+        let e = svc.update(&rt, |_| Some(Patch::new().state(JobState::Waiting))).unwrap_err();
+        assert_eq!(e.code.as_deref(), Some("INVALID_STATE_TRANSITION"));
+        assert_eq!(svc.get(&id).unwrap()["state"], "cancelled");
     }
 }

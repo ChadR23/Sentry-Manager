@@ -6,6 +6,7 @@
 use super::work::authority_of;
 use super::*;
 use super::super::jobstore::normalize::truthy;
+use super::super::jobstore::states::ArtifactState;
 use super::super::recovery::{self, Facts};
 use super::super::staging::Op;
 
@@ -119,13 +120,13 @@ impl Service {
             };
             rt.lock().manifest = recovered.clone();
             let rec = recovered.get("recovery").cloned().unwrap_or(Value::Null);
-            if rec.get("fromState") != Some(&json!("replacing")) || rec.get("action") == Some(&json!("manual-intervention")) {
+            if recorded_from(&recovered) != Some(JobState::Replacing) || rec.get("action") == Some(&json!("manual-intervention")) {
                 return Err(service_error("RECOVERY_REQUIRED"));
             }
             // (Node awaits the relaunched job here; this returns once the
             // interrupted clip is settled and the job runs on its own thread)
             self.perform_recovery(rt, id, recovered)?;
-            if rt.manifest().get("recovery").and_then(|r| r.get("fromState")) == Some(&json!("replacing")) {
+            if recorded_from(&rt.manifest()) == Some(JobState::Replacing) {
                 return Err(service_error("RECOVERY_REQUIRED"));
             }
             Ok(())
@@ -142,13 +143,13 @@ impl Service {
             let s = rt.lock();
             (s.running, s.run_kind)
         };
-        if rec.get("action") != Some(&json!("manual-intervention")) || rec.get("fromState") == Some(&json!("replacing")) || m.get("replacementPhase").is_some() || (running && kind != Some("recovery")) {
+        if rec.get("action") != Some(&json!("manual-intervention")) || recorded_from(&m) == Some(JobState::Replacing) || m.get("replacementPhase").is_some() || (running && kind != Some("recovery")) {
             return Ok(false);
         }
-        let interrupted: Vec<Value> = m.items.iter().filter(|i| i.state() == "processing").map(|i| i.value().clone()).collect();
+        let interrupted: Vec<Value> = m.items.iter().filter(|i| i.state() == ItemState::Processing).map(|i| i.value().clone()).collect();
         for item in &interrupted {
             let Some(backup) = item.get("ownedPaths").and_then(|o| o.get("replacementBackup")).and_then(Value::as_str) else { continue };
-            if item["ownedArtifacts"]["replacementBackup"]["state"] != "intent" {
+            if item["ownedArtifacts"]["replacementBackup"]["state"].as_str().map(ArtifactState::parse) != Some(ArtifactState::Intent) {
                 return Ok(false);
             }
             match std::fs::symlink_metadata(backup) {
@@ -169,16 +170,16 @@ impl Service {
         }
         self.update(rt, |s| {
             let items = s.manifest.items.iter().map(|e| {
-                if e.state() != "processing" {
+                if e.state() != ItemState::Processing {
                     return ItemIn::Trusted(e.clone());
                 }
                 ItemIn::Raw(if pending.contains(e.id()) {
-                    merge(e.value(), &vec![("state", Some(json!("failed"))), ("resultCode", Some(json!("cleanup-pending"))), ("failure", Some(json!({ "code": "interrupted", "retryable": false })))])
+                    merge(e.value(), &vec![("state", Some(ItemState::Failed.into())), ("resultCode", Some(json!("cleanup-pending"))), ("failure", Some(json!({ "code": "interrupted", "retryable": false })))])
                 } else {
-                    merge(e.value(), &vec![("state", Some(json!("queued"))), ("failure", None), ("resultCode", None)])
+                    merge(e.value(), &vec![("state", Some(ItemState::Queued.into())), ("failure", None), ("resultCode", None)])
                 })
             }).collect();
-            Some(Patch::new().set("state", json!(if resume { "waiting" } else { "paused" })).set("activeItemId", Value::Null).set("recovery", Value::Null).set("replacementPhase", Value::Null).set("ownedPaths", json!({})).set("ownedArtifacts", json!({})).set("publicationArtifact", Value::Null).set("failure", Value::Null).items(items))
+            Some(Patch::new().state(if resume { JobState::Waiting } else { JobState::Paused }).set("activeItemId", Value::Null).set("recovery", Value::Null).set("replacementPhase", Value::Null).set("ownedPaths", json!({})).set("ownedArtifacts", json!({})).set("publicationArtifact", Value::Null).set("failure", Value::Null).items(items))
         })?;
         for item in &interrupted {
             let id = item["id"].as_str().unwrap();
@@ -195,7 +196,7 @@ impl Service {
         let private = ["stagedSource", "encodedCandidate", "publicationSnapshot"];
         let finished: Vec<Value> = rt.manifest().items.iter().filter(|e| {
             let p = obj(e.get("ownedPaths"));
-            TERMINAL_STATES.contains(&e.state()) && !p.is_empty() && p.keys().all(|k| private.contains(&k.as_str()))
+            e.state().is_terminal() && !p.is_empty() && p.keys().all(|k| private.contains(&k.as_str()))
         }).map(|e| e.value().clone()).collect();
         for item in finished {
             let id = item["id"].as_str().unwrap();
@@ -215,7 +216,7 @@ impl Service {
 
     /// releaseInterruptedItems(runtime, keepItemId)
     fn release_interrupted_items(&self, rt: &Arc<Runtime>, keep: Option<&str>) -> SResult<bool> {
-        let interrupted: Vec<Value> = rt.manifest().items.iter().filter(|e| e.state() == "processing" && Some(e.id()) != keep).map(|e| e.value().clone()).collect();
+        let interrupted: Vec<Value> = rt.manifest().items.iter().filter(|e| e.state() == ItemState::Processing && Some(e.id()) != keep).map(|e| e.value().clone()).collect();
         for item in &interrupted {
             if obj(item.get("ownedPaths")).is_empty() {
                 continue;
@@ -229,8 +230,8 @@ impl Service {
         }
         let ids: std::collections::HashSet<String> = interrupted.iter().map(|i| i["id"].as_str().unwrap().to_string()).collect();
         self.update(rt, |s| {
-            let items = s.manifest.items.iter().map(|e| if ids.contains(e.id()) && e.state() == "processing" {
-                ItemIn::Raw(merge(e.value(), &vec![("state", Some(json!("queued"))), ("failure", None), ("resultCode", None)]))
+            let items = s.manifest.items.iter().map(|e| if ids.contains(e.id()) && e.state() == ItemState::Processing {
+                ItemIn::Raw(merge(e.value(), &vec![("state", Some(ItemState::Queued.into())), ("failure", None), ("resultCode", None)]))
             } else {
                 ItemIn::Trusted(e.clone())
             }).collect();
@@ -264,14 +265,14 @@ impl Service {
                 retained = Some(compose(ownership, &cleanup_value(&cleanup), &[]));
             }
         }
-        let job = vec![("state", json!("waiting")), ("activeItemId", Value::Null), ("recovery", Value::Null), ("replacementPhase", Value::Null), ("ownedPaths", json!({})), ("ownedArtifacts", json!({})), ("publicationArtifact", Value::Null)];
+        let job = vec![("state", JobState::Waiting.into()), ("activeItemId", Value::Null), ("recovery", Value::Null), ("replacementPhase", Value::Null), ("ownedPaths", json!({})), ("ownedArtifacts", json!({})), ("publicationArtifact", Value::Null)];
         match retained {
             Some(r) => {
                 let keep = r.paths.contains_key("publicationSnapshot");
-                self.item_patch(rt, id, vec![("state", Some(json!("failed"))), ("failure", Some(json!({ "code": "interrupted", "retryable": false }))), ("resultCode", Some(json!("cleanup-pending"))), ("ownedPaths", Some(Value::Object(r.paths.clone()))), ("ownedArtifacts", Some(Value::Object(r.arts.clone()))), ("publicationArtifact", if keep { r.publication.clone() } else { None }), ("replacementPhase", None)], job)?;
+                self.item_patch(rt, id, vec![("state", Some(ItemState::Failed.into())), ("failure", Some(json!({ "code": "interrupted", "retryable": false }))), ("resultCode", Some(json!("cleanup-pending"))), ("ownedPaths", Some(Value::Object(r.paths.clone()))), ("ownedArtifacts", Some(Value::Object(r.arts.clone()))), ("publicationArtifact", if keep { r.publication.clone() } else { None }), ("replacementPhase", None)], job)?;
             }
             None => {
-                self.item_patch(rt, id, vec![("state", Some(json!("queued"))), ("failure", None), ("resultCode", None), ("ownedPaths", Some(json!({}))), ("ownedArtifacts", Some(json!({}))), ("publicationArtifact", None), ("replacementPhase", None)], job)?;
+                self.item_patch(rt, id, vec![("state", Some(ItemState::Queued.into())), ("failure", None), ("resultCode", None), ("ownedPaths", Some(json!({}))), ("ownedArtifacts", Some(json!({}))), ("publicationArtifact", None), ("replacementPhase", None)], job)?;
             }
         }
         Self::set_ownership(rt, id, None);
@@ -280,8 +281,8 @@ impl Service {
 
     fn back_to_queue(&self, rt: &Arc<Runtime>) -> SResult<()> {
         self.update(rt, |s| {
-            let items = s.manifest.items.iter().map(|e| if e.state() == "processing" { ItemIn::Raw(merge(e.value(), &vec![("state", Some(json!("queued"))), ("failure", None)])) } else { ItemIn::Trusted(e.clone()) }).collect();
-            Some(Patch::new().set("state", json!("waiting")).set("activeItemId", Value::Null).set("recovery", Value::Null).items(items))
+            let items = s.manifest.items.iter().map(|e| if e.state() == ItemState::Processing { ItemIn::Raw(merge(e.value(), &vec![("state", Some(ItemState::Queued.into())), ("failure", None)])) } else { ItemIn::Trusted(e.clone()) }).collect();
+            Some(Patch::new().state(JobState::Waiting).set("activeItemId", Value::Null).set("recovery", Value::Null).items(items))
         })?;
         Ok(())
     }
@@ -303,9 +304,9 @@ impl Service {
                 (Some(i), "source") => i["sourcePath"].as_str().unwrap_or("").to_string(),
                 _ => recovered.config()["sourceRoot"].as_str().unwrap_or("").to_string(),
             };
-            let resume = rec.get("resumeState").and_then(Value::as_str).unwrap_or("waiting").to_string();
-            self.wait_for_network(rt, &target, true, None, Some(&role), Some(&resume), rec.get("phase").and_then(Value::as_str))?;
-            if ["staging", "encoding", "writing-telemetry", "verifying", "copying", "replacing"].contains(&resume.as_str()) {
+            let resume = rec.get("resumeState").and_then(Value::as_str).map_or(JobState::Waiting, JobState::parse);
+            self.wait_for_network(rt, &target, true, None, Some(&role), Some(resume.clone()), rec.get("phase").and_then(Value::as_str).map(ReplacementPhase::parse))?;
+            if resume.is_transaction() {
                 let mut inspect = self.inspect_with_signal(rt);
                 recovered = self.0.o.store.recover(id, &mut inspect, false).map_err(Fail::from)?;
                 rt.lock().manifest = recovered.clone();
@@ -340,15 +341,15 @@ impl Service {
             return Ok(());
         }
         let item = rt.manifest().item(recovered.str("activeItemId").unwrap_or("")).map(|i| i.value().clone());
-        if item.as_ref().is_some_and(|i| i["state"] == "completed") {
+        if item.as_ref().is_some_and(|i| item_state(i) == ItemState::Completed) {
             let i = item.unwrap();
-            self.update(rt, |_| Some(Patch::new().set("state", json!("waiting")).set("activeItemId", Value::Null).set("recovery", Value::Null).set("ownedPaths", i.get("ownedPaths").cloned().unwrap_or(json!({}))).set("ownedArtifacts", i.get("ownedArtifacts").cloned().unwrap_or(json!({}))).set("publicationArtifact", i.get("publicationArtifact").cloned().unwrap_or(Value::Null)).set("replacementPhase", Value::Null)))?;
+            self.update(rt, |_| Some(Patch::new().state(JobState::Waiting).set("activeItemId", Value::Null).set("recovery", Value::Null).set("ownedPaths", i.get("ownedPaths").cloned().unwrap_or(json!({}))).set("ownedArtifacts", i.get("ownedArtifacts").cloned().unwrap_or(json!({}))).set("publicationArtifact", i.get("publicationArtifact").cloned().unwrap_or(Value::Null)).set("replacementPhase", Value::Null)))?;
             self.relaunch(rt);
             self.emit(rt, "recovered", vec![]);
             return Ok(());
         }
-        let from = rec.get("fromState").and_then(Value::as_str).unwrap_or("").to_string();
-        if action.as_deref() == Some("manual-intervention") && from != "replacing" {
+        let from = JobState::parse(rec.get("fromState").and_then(Value::as_str).unwrap_or(""));
+        if action.as_deref() == Some("manual-intervention") && from != JobState::Replacing {
             if !self.release_interrupted_save(rt, true)? {
                 return Ok(());
             }
@@ -374,7 +375,7 @@ impl Service {
                 retained = if cleanup.cleaned { (Own::default(), vec![]) } else { (if cleanup.own.paths.is_empty() { result.clone() } else { cleanup.own.clone() }, if cleanup.pending.is_empty() { pending.clone() } else { cleanup.pending.clone() }) };
             }
             let mut changes: Changes = vec![
-                ("state", Some(json!("completed"))),
+                ("state", Some(ItemState::Completed.into())),
                 ("eligibleVideo", Some(json!(true))),
                 ("outputPath", Some(json!(final_path))),
                 ("outputBytes", Some(json!(output_bytes))),
@@ -389,7 +390,7 @@ impl Service {
             let completed = merge(&item, &changes);
             self.update(rt, |s| {
                 let counters = contracts::add_completed_file(s.manifest.get("counters").unwrap_or(&Value::Null), &completed);
-                Some(Patch::new().set("state", json!("waiting")).set("activeItemId", Value::Null).set("recovery", Value::Null).set("counters", counters).set("summary", Value::Null).set("summaryDismissed", json!(false))
+                Some(Patch::new().state(JobState::Waiting).set("activeItemId", Value::Null).set("recovery", Value::Null).set("counters", counters).set("summary", Value::Null).set("summaryDismissed", json!(false))
                     .set("ownedPaths", completed["ownedPaths"].clone()).set("ownedArtifacts", completed["ownedArtifacts"].clone())
                     .set("publicationArtifact", completed.get("publicationArtifact").cloned().unwrap_or(Value::Null)).set("replacementPhase", Value::Null)
                     .items(with_item(&s.manifest, &item_id, |_| completed.clone())))
@@ -401,7 +402,7 @@ impl Service {
 
         let persist = self.persistence(rt, &item_id, false);
         let signal = rt.signal();
-        if from == "copying" {
+        if from == JobState::Copying {
             let destination = output_path(recovered.config(), &item);
             if item["kind"] == "asset" {
                 // (an asset's copy: finished or made again)
@@ -427,7 +428,7 @@ impl Service {
                     (r.final_path.clone(), r.output_bytes, if cleanup.cleaned { Own::default() } else { ro }, if cleanup.cleaned { vec![] } else if cleanup.pending.is_empty() { r.cleanup_pending.clone() } else { cleanup.pending })
                 };
                 let completed = merge(&item, &vec![
-                    ("state", Some(json!("completed"))),
+                    ("state", Some(ItemState::Completed.into())),
                     ("eligibleVideo", Some(json!(false))),
                     ("outputPath", Some(json!(final_path))),
                     ("outputBytes", Some(json!(bytes))),
@@ -438,7 +439,7 @@ impl Service {
                 ]);
                 self.update(rt, |s| {
                     let counters = contracts::add_completed_file(s.manifest.get("counters").unwrap_or(&Value::Null), &completed);
-                    Some(Patch::new().set("state", json!("waiting")).set("activeItemId", Value::Null).set("recovery", Value::Null).set("counters", counters).set("summary", Value::Null).set("summaryDismissed", json!(false))
+                    Some(Patch::new().state(JobState::Waiting).set("activeItemId", Value::Null).set("recovery", Value::Null).set("counters", counters).set("summary", Value::Null).set("summaryDismissed", json!(false))
                         .set("ownedPaths", completed["ownedPaths"].clone()).set("ownedArtifacts", completed["ownedArtifacts"].clone())
                         .set("publicationArtifact", completed.get("publicationArtifact").cloned().unwrap_or(Value::Null)).set("replacementPhase", Value::Null)
                         .items(with_item(&s.manifest, &item_id, |_| completed.clone())))
@@ -447,7 +448,7 @@ impl Service {
                 self.emit(rt, "recovered", vec![]);
                 return Ok(());
             }
-            let partial_owned = item_or_job("ownedArtifacts").get("destinationPartial").and_then(|d| d.get("state")) == Some(&json!("owned"));
+            let partial_owned = item_or_job("ownedArtifacts").get("destinationPartial").and_then(|d| d.get("state")).and_then(Value::as_str).map(ArtifactState::parse) == Some(ArtifactState::Owned);
             if action == "restart-copy" || (action == "resume-copy" && !partial_owned) {
                 if !self.requeue_recovered(rt, &item, &ownership_of(&item))? {
                     return Ok(());
@@ -468,23 +469,23 @@ impl Service {
             let r = self.0.o.staging.recover_copy(&op).map_err(Fail::from)?;
             let size = publication.as_ref().and_then(|p| p["size"].as_u64()).unwrap_or(0);
             complete_recovered(r.final_path.as_deref().unwrap_or(""), size, Own::from_typed(&r.owned_paths, &r.owned_artifacts), r.cleanup_pending.clone())?;
-        } else if from == "replacing" {
+        } else if from == JobState::Replacing {
             let expected = authority_of(item.get("expectedSource"));
             if expected.is_none() {
                 self.update(rt, |_| {
                     let mut r2 = rec.clone();
                     r2["action"] = json!("manual-intervention");
-                    Some(Patch::new().set("state", json!("paused")).set("recovery", r2))
+                    Some(Patch::new().state(JobState::Paused).set("recovery", r2))
                 })?;
                 return Ok(());
             }
-            let rec_phase = rec.get("phase").and_then(Value::as_str).map(str::to_string).or_else(|| recovered.str("replacementPhase").map(str::to_string));
-            self.update(rt, |_| Some(Patch::new().set("state", json!("replacing")).set("activeItemId", json!(item_id)).set("replacementPhase", rec_phase.clone().map(Value::from).unwrap_or(Value::Null)).set("recovery", Value::Null)))?;
-            let park = |phase: Option<String>| -> SResult<()> {
-                let rp = rec.get("phase").cloned();
+            let rec_phase = rec.get("phase").and_then(Value::as_str).map(ReplacementPhase::parse).or_else(|| recovered.replacement_phase());
+            self.update(rt, |_| Some(Patch::new().state(JobState::Replacing).set("activeItemId", json!(item_id)).set("replacementPhase", rec_phase.clone().map(Value::from).unwrap_or(Value::Null)).set("recovery", Value::Null)))?;
+            let park = |phase: Option<ReplacementPhase>| -> SResult<()> {
+                let rp = rec.get("phase").and_then(Value::as_str).map(ReplacementPhase::parse);
                 self.update(rt, |s| {
-                    let ph = phase.clone().map(Value::from).or_else(|| s.manifest.get("replacementPhase").cloned()).or(rp.clone()).unwrap_or(Value::Null);
-                    Some(Patch::new().set("state", json!("paused")).set("activeItemId", json!(item_id)).set("replacementPhase", ph.clone()).set("recovery", json!({ "fromState": "replacing", "phase": ph, "action": "manual-intervention" })))
+                    let ph = phase.clone().or_else(|| s.manifest.replacement_phase()).or(rp.clone());
+                    Some(Patch::new().state(JobState::Paused).set("activeItemId", json!(item_id)).set("replacementPhase", ph.clone().map(Value::from).unwrap_or(Value::Null)).set("recovery", json!({ "fromState": JobState::Replacing, "phase": ph, "action": "manual-intervention" })))
                 })?;
                 Ok(())
             };
@@ -502,7 +503,7 @@ impl Service {
                     return Ok(());
                 }
                 let mut size = None;
-                if phase.as_deref() == Some("backup-deleted") && action == "finish-replacement" {
+                if phase == Some(ReplacementPhase::BackupDeleted) && action == "finish-replacement" {
                     size = std::fs::metadata(item["sourcePath"].as_str().unwrap_or("")).ok().map(|m| m.len()).filter(|s| *s > 0);
                 }
                 let Some(size) = size else {
@@ -545,15 +546,15 @@ impl Service {
                     }
                 };
                 own = Own::from_typed(&r.owned_paths, &r.owned_artifacts);
-                if r.action == Some("restart-replacement") || r.phase == Some("backup-restored") {
+                if r.action == Some("restart-replacement") || r.phase == Some(ReplacementPhase::BackupRestored) {
                     outcome = Some("requeue");
-                } else if r.phase == Some("backup-deleted") {
+                } else if r.phase == Some(ReplacementPhase::BackupDeleted) {
                     outcome = Some("complete");
                 } else {
                     let mut m = rt.manifest();
-                    m.top.insert("state".into(), json!("replacing"));
-                    if let Some(p) = r.phase {
-                        m.top.insert("replacementPhase".into(), json!(p));
+                    m.top.insert("state".into(), JobState::Replacing.into());
+                    if let Some(p) = &r.phase {
+                        m.top.insert("replacementPhase".into(), p.clone().into());
                     }
                     let facts = {
                         let mut inspect = self.inspect_with_signal(rt);
@@ -562,17 +563,17 @@ impl Service {
                     let facts = match facts {
                         Ok(f) => f,
                         Err(e) => {
-                            let _ = park(r.phase.map(str::to_string));
+                            let _ = park(r.phase.clone());
                             return Err(Fail::from(e));
                         }
                     };
                     let has_expected = m.active_item().is_some_and(|i| i.get("expectedSource").is_some_and(truthy));
-                    action = recovery::replacement_action(m.str("replacementPhase"), Some(&facts), has_expected).to_string();
+                    action = recovery::replacement_action(m.replacement_phase().as_ref(), Some(&facts), has_expected).to_string();
                 }
                 result = Some(r);
                 step += 1;
             }
-            let phase_of = |r: &Option<staging::Recovered>| r.as_ref().and_then(|r| r.phase).map(str::to_string);
+            let phase_of = |r: &Option<staging::Recovered>| r.as_ref().and_then(|r| r.phase.clone());
             match outcome {
                 Some("complete") => {
                     let r = result.unwrap();
@@ -599,7 +600,7 @@ impl Service {
                     return Ok(());
                 }
             } else {
-                self.item_patch(rt, &item_id, vec![("state", Some(json!("queued"))), ("failure", None)], vec![("state", json!("waiting")), ("activeItemId", Value::Null), ("recovery", Value::Null)])?;
+                self.item_patch(rt, &item_id, vec![("state", Some(ItemState::Queued.into())), ("failure", None)], vec![("state", JobState::Waiting.into()), ("activeItemId", Value::Null), ("recovery", Value::Null)])?;
             }
             self.relaunch(rt);
         }
