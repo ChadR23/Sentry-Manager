@@ -170,7 +170,34 @@ fn identity_only_for(e: &Expected, requested: bool) -> bool {
 pub enum Opened {
     Verified(File, fs::Metadata),
     Missing,
-    Mismatch,
+    /// which check refused, and the values that did not match (observed != recorded)
+    Mismatch(String),
+}
+
+/// The fields of `st` that differ from the record, as "dev 1 != 2; ino 3 != 4; size 5 != 6"
+/// (observed != recorded); empty when all match.
+pub fn identity_diffs(st: &fs::Metadata, e: &Expected) -> String {
+    let mut d = Vec::new();
+    if st.dev().to_string() != e.device {
+        d.push(format!("dev {} != {}", st.dev(), e.device));
+    }
+    if st.ino().to_string() != e.inode {
+        d.push(format!("ino {} != {}", st.ino(), e.inode));
+    }
+    if st.size() != e.size {
+        d.push(format!("size {} != {}", st.size(), e.size));
+    }
+    d.join("; ")
+}
+
+/// "dev:ino A != B" of two stats, or None when they are the same file.
+fn dev_ino_diff(now: Option<&fs::Metadata>, want: &fs::Metadata) -> Option<String> {
+    match now {
+        None => Some("missing".into()),
+        Some(m) if !m.is_file() => Some("not a regular file".into()),
+        Some(m) if m.dev() != want.dev() || m.ino() != want.ino() => Some(format!("dev:ino {}:{} != {}:{}", m.dev(), m.ino(), want.dev(), want.ino())),
+        Some(_) => None,
+    }
 }
 
 /// SHA-256 of an open file from its start, and how many bytes were read.
@@ -199,18 +226,19 @@ pub fn open_verified(target: &Path, e: &Expected, identity_only: bool) -> io::Re
         Err(err) => {
             return match code_of(&err) {
                 "ENOENT" => Ok(Opened::Missing),
-                "ELOOP" => Ok(Opened::Mismatch),
+                "ELOOP" => Ok(Opened::Mismatch("open: symbolic link (ELOOP)".into())),
                 _ => Err(err),
             }
         }
     };
     let st = f.metadata()?;
     if !st.is_file() || !same_identity(&st, e) || st.size() != e.size {
-        return Ok(Opened::Mismatch);
+        let d = if st.is_file() { identity_diffs(&st, e) } else { "not a regular file".into() };
+        return Ok(Opened::Mismatch(format!("fstat: {d}")));
     }
     if identity_only {
         if Some(mtime_ns(&st)) != e.mtime_ns {
-            return Ok(Opened::Mismatch);
+            return Ok(Opened::Mismatch(format!("identity-only: mtime_ns {} != {}", mtime_ns(&st), e.mtime_ns.as_deref().unwrap_or("none"))));
         }
         return Ok(Opened::Verified(f, st));
     }
@@ -218,7 +246,23 @@ pub fn open_verified(target: &Path, e: &Expected, identity_only: bool) -> io::Re
     // written to while it was hashed: the hash proves nothing about it now
     let after = f.metadata()?;
     if bytes != e.size || digest != e.sha256 || mtime_ns(&after) != mtime_ns(&st) || after.size() != st.size() || !same_identity(&after, e) {
-        return Ok(Opened::Mismatch);
+        let mut d = Vec::new();
+        if bytes != e.size {
+            d.push(format!("bytes read {} != size {}", bytes, e.size));
+        }
+        if digest != e.sha256 {
+            d.push("sha256 differs from record".to_string());
+        }
+        if mtime_ns(&after) != mtime_ns(&st) {
+            d.push(format!("mtime_ns changed while hashed {} -> {}", mtime_ns(&st), mtime_ns(&after)));
+        }
+        if after.size() != st.size() {
+            d.push(format!("size changed while hashed {} -> {}", st.size(), after.size()));
+        }
+        if !same_identity(&after, e) {
+            d.push(format!("identity after hash: {}", identity_diffs(&after, e)));
+        }
+        return Ok(Opened::Mismatch(format!("full hash: {}", d.join("; "))));
     }
     Ok(Opened::Verified(f, st))
 }
@@ -245,14 +289,17 @@ pub struct RemoveResult {
     pub ownership_mismatch: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub guard_mismatch: bool,
+    /// on a mismatch: which check refused and what did not match
+    #[serde(skip)]
+    pub reason: String,
 }
 
 impl RemoveResult {
-    fn mismatch() -> Self {
-        RemoveResult { ownership_mismatch: true, ..Default::default() }
+    fn mismatch(reason: String) -> Self {
+        RemoveResult { ownership_mismatch: true, reason, ..Default::default() }
     }
-    fn guard() -> Self {
-        RemoveResult { ownership_mismatch: true, guard_mismatch: true, ..Default::default() }
+    fn guard(reason: String) -> Self {
+        RemoveResult { ownership_mismatch: true, guard_mismatch: true, reason, ..Default::default() }
     }
 }
 
@@ -265,7 +312,7 @@ pub struct Guard<'a> {
 /// removeOwned.remove({ target, expected, guard, identityOnly })
 pub fn remove(target: &Path, expected: &Expected, guard: Option<Guard>, identity_only: bool) -> io::Result<RemoveResult> {
     if !valid_path(target) || !valid_expected(expected) || guard.as_ref().is_some_and(|g| !valid_path(g.target) || !valid_expected(g.expected)) {
-        return Ok(RemoveResult::mismatch());
+        return Ok(RemoveResult::mismatch("remove: invalid target, record or guard record".into()));
     }
     let mut guarded = None;
     if let Some(g) = &guard {
@@ -274,12 +321,13 @@ pub fn remove(target: &Path, expected: &Expected, guard: Option<Guard>, identity
                 f.sync_all()?;
                 guarded = Some((f, st));
             }
-            _ => return Ok(RemoveResult::guard()),
+            Opened::Missing => return Ok(RemoveResult::guard("remove guard (kept file): missing".into())),
+            Opened::Mismatch(r) => return Ok(RemoveResult::guard(format!("remove guard (kept file): {r}"))),
         }
     }
     let victim = match open_verified(target, expected, identity_only_for(expected, identity_only))? {
         Opened::Missing => return Ok(RemoveResult { missing: true, ..Default::default() }),
-        Opened::Mismatch => return Ok(RemoveResult::mismatch()),
+        Opened::Mismatch(r) => return Ok(RemoveResult::mismatch(format!("remove victim: {r}"))),
         Opened::Verified(f, st) => (f, st),
     };
     let dir = target.parent().unwrap_or(Path::new("/"));
@@ -289,14 +337,19 @@ pub fn remove(target: &Path, expected: &Expected, guard: Option<Guard>, identity
     let moved = lstat(&quarantine);
     if !moved.as_ref().is_some_and(|m| m.is_file() && m.dev() == victim.1.dev() && m.ino() == victim.1.ino()) {
         // Something replaced the path between the check and the rename: put it back.
+        let d = dev_ino_diff(moved.as_ref(), &victim.1).unwrap_or_default();
         let _ = move_noreplace(&quarantine, target);
-        return Ok(RemoveResult::mismatch());
+        return Ok(RemoveResult::mismatch(format!("remove quarantine lstat: {d}")));
     }
     if let (Some(g), Some((_, gst))) = (&guard, &guarded) {
         let now = lstat(g.target);
         if !now.as_ref().is_some_and(|m| m.dev() == gst.dev() && m.ino() == gst.ino()) {
+            let d = match now.as_ref() {
+                None => "missing".to_string(),
+                Some(m) => format!("dev:ino {}:{} != {}:{}", m.dev(), m.ino(), gst.dev(), gst.ino()),
+            };
             let _ = move_noreplace(&quarantine, target);
-            return Ok(RemoveResult::guard());
+            return Ok(RemoveResult::guard(format!("remove guard (kept file) lstat after quarantine: {d}")));
         }
     }
     fs::remove_file(&quarantine)?;
@@ -327,6 +380,9 @@ pub struct PromoteResult {
     pub source_removed: bool,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub ownership_mismatch: bool,
+    /// on a mismatch: which check refused and what did not match
+    #[serde(skip)]
+    pub reason: String,
 }
 
 /// renameExclusive.promote({ from, to, expectedSource, removeSource, identityOnly })
@@ -364,30 +420,33 @@ fn promote_inner(from: &Path, to: &Path, expected: Option<&Expected>, remove_sou
     if !valid_path(from) || !valid_path(to) || resolve(from) == resolve(to) {
         return Err(code_err("ENOTSUP", "Promotion requires two distinct absolute paths."));
     }
-    let mismatch = PromoteResult { atomic_no_replace: true, source_removed: false, ownership_mismatch: true };
+    let mismatch = |reason: String| PromoteResult { atomic_no_replace: true, source_removed: false, ownership_mismatch: true, reason };
     if !remove_source {
         // Keep the source: publish a hard link.
         let st = fs::symlink_metadata(from)?;
         match expected {
             Some(e) if st.is_file() && same_identity(&st, e) && st.size() == e.size => {}
-            _ => return Ok(mismatch),
+            Some(e) if st.is_file() => return Ok(mismatch(format!("promote (keep source) lstat: {}", identity_diffs(&st, e)))),
+            Some(_) => return Ok(mismatch("promote (keep source) lstat: not a regular file".into())),
+            None => return Ok(mismatch("promote (keep source): no record".into())),
         }
         fs::hard_link(from, to)?;
-        return Ok(PromoteResult { atomic_no_replace: true, source_removed: false, ownership_mismatch: false });
+        return Ok(PromoteResult { atomic_no_replace: true, source_removed: false, ownership_mismatch: false, reason: String::new() });
     }
-    let Some(e) = expected.filter(|e| valid_expected(e)) else { return Ok(mismatch) };
+    let Some(e) = expected.filter(|e| valid_expected(e)) else { return Ok(mismatch("promote: no valid record".into())) };
     let (_f, st) = match open_verified(from, e, identity_only_for(e, identity_only))? {
         Opened::Missing => return Err(code_err("ENOENT", "Source is missing.")),
-        Opened::Mismatch => return Ok(mismatch),
+        Opened::Mismatch(r) => return Ok(mismatch(format!("promote source: {r}"))),
         Opened::Verified(f, st) => (f, st),
     };
     move_noreplace(from, to)?;
     let landed = fs::symlink_metadata(to)?;
     if landed.dev() != st.dev() || landed.ino() != st.ino() {
+        let d = format!("promote landed lstat: dev:ino {}:{} != {}:{}", landed.dev(), landed.ino(), st.dev(), st.ino());
         let _ = move_noreplace(to, from);
-        return Ok(mismatch);
+        return Ok(mismatch(d));
     }
-    Ok(PromoteResult { atomic_no_replace: true, source_removed: true, ownership_mismatch: false })
+    Ok(PromoteResult { atomic_no_replace: true, source_removed: true, ownership_mismatch: false, reason: String::new() })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -419,7 +478,7 @@ fn link_backup_inner(from: &Path, to: &Path, expected: &Expected, identity_only:
     }
     let (_f, st) = match open_verified(from, expected, identity_only_for(expected, identity_only))? {
         Opened::Missing => return Err(code_err("ENOENT", "Source is missing.")),
-        Opened::Mismatch => return Ok(LinkResult::OwnershipMismatch),
+        Opened::Mismatch(_) => return Ok(LinkResult::OwnershipMismatch),
         Opened::Verified(f, st) => (f, st),
     };
     if let Err(err) = fs::hard_link(from, to) {
@@ -442,10 +501,12 @@ fn link_backup_inner(from: &Path, to: &Path, expected: &Expected, identity_only:
     Ok(LinkResult::Linked)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplaceResult {
     pub replaced: bool,
     pub ownership_mismatch: bool,
+    /// on a mismatch: which check refused and what did not match
+    pub reason: String,
 }
 
 /// renameExclusive.replaceOver({ from, to, keep, expectedSource, expectedTarget, identityOnly }):
@@ -467,25 +528,38 @@ fn replace_over_inner(from: &Path, to: &Path, keep: &Path, expected: &Expected, 
     if !valid_path(from) || !valid_path(to) || !valid_path(keep) || !distinct {
         return Err(code_err("ENOTSUP", "Replacing requires three distinct absolute paths."));
     }
-    let no = ReplaceResult { replaced: false, ownership_mismatch: true };
+    let no = |reason: String| ReplaceResult { replaced: false, ownership_mismatch: true, reason };
     if !valid_expected(expected) || !digits(target_dev) || !digits(target_ino) {
-        return Ok(no);
+        return Ok(no("replace-over: invalid candidate record or original dev/ino".into()));
     }
     let (_f, st) = match open_verified(from, expected, identity_only_for(expected, identity_only))? {
         Opened::Missing => return Err(code_err("ENOENT", "Source is missing.")),
-        Opened::Mismatch => return Ok(no),
+        Opened::Mismatch(r) => return Ok(no(format!("replace-over candidate: {r}"))),
         Opened::Verified(f, st) => (f, st),
     };
-    let is_target = |m: &Option<fs::Metadata>| m.as_ref().is_some_and(|m| m.is_file() && m.dev().to_string() == target_dev && m.ino().to_string() == target_ino);
-    if !is_target(&lstat(to)) || !is_target(&lstat(keep)) {
-        return Ok(no);
+    let target_diff = |m: &Option<fs::Metadata>| match m {
+        None => Some("missing".to_string()),
+        Some(m) if !m.is_file() => Some("not a regular file".to_string()),
+        Some(m) if m.dev().to_string() != target_dev || m.ino().to_string() != target_ino => Some(format!("dev:ino {}:{} != {}:{}", m.dev(), m.ino(), target_dev, target_ino)),
+        Some(_) => None,
+    };
+    let (at_to, at_keep) = (target_diff(&lstat(to)), target_diff(&lstat(keep)));
+    if at_to.is_some() || at_keep.is_some() {
+        let mut d = Vec::new();
+        if let Some(x) = at_to {
+            d.push(format!("original name lstat: {x}"));
+        }
+        if let Some(x) = at_keep {
+            d.push(format!("backup name lstat: {x}"));
+        }
+        return Ok(no(format!("replace-over before rename: {}", d.join("; "))));
     }
     fs::rename(from, to)?;
     let landed = fs::symlink_metadata(to)?;
     if landed.dev() != st.dev() || landed.ino() != st.ino() {
-        return Ok(ReplaceResult { replaced: true, ownership_mismatch: true });
+        return Ok(ReplaceResult { replaced: true, ownership_mismatch: true, reason: format!("replace-over landed lstat: dev:ino {}:{} != {}:{}", landed.dev(), landed.ino(), st.dev(), st.ino()) });
     }
-    Ok(ReplaceResult { replaced: true, ownership_mismatch: false })
+    Ok(ReplaceResult { replaced: true, ownership_mismatch: false, reason: String::new() })
 }
 
 /// The identity record of a file as it is now (tests, and files the
@@ -512,6 +586,9 @@ mod tests {
         e.mtime_ns = None;
         e
     }
+    fn is_mismatch(r: &RemoveResult) -> bool {
+        r.ownership_mismatch && !r.guard_mismatch && !r.removed && !r.missing && !r.reason.is_empty()
+    }
     fn names(d: &Path) -> Vec<String> {
         let mut v: Vec<String> = fs::read_dir(d).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
         v.sort();
@@ -525,16 +602,19 @@ mod tests {
         fs::write(&f, "original").unwrap();
         let expected = id(&f);
         fs::write(&f, "replaced").unwrap();
-        assert_eq!(remove(&f, &expected, None, false).unwrap(), RemoveResult::mismatch());
+        let r = remove(&f, &expected, None, false).unwrap();
+        assert!(is_mismatch(&r));
+        assert!(r.reason.starts_with("remove victim: full hash: ") && r.reason.contains("sha256 differs from record"), "{}", r.reason);
         assert_eq!(fs::read_to_string(&f).unwrap(), "replaced", "a mismatching file is never deleted");
         let now = id(&f);
         assert!(remove(&f, &now, None, false).unwrap().removed);
         assert!(!f.exists());
         assert!(remove(&f, &now, None, false).unwrap().missing);
         assert!(names(&dir).is_empty(), "no quarantine file left behind");
-        assert_eq!(remove(Path::new("relative.mp4"), &now, None, false).unwrap(), RemoveResult::mismatch());
+        let r = remove(Path::new("relative.mp4"), &now, None, false).unwrap();
+        assert!(is_mismatch(&r) && r.reason.contains("invalid target, record"), "{}", r.reason);
         let bad = Expected { sha256: "x".into(), ..now };
-        assert_eq!(remove(&f, &bad, None, false).unwrap(), RemoveResult::mismatch());
+        assert!(is_mismatch(&remove(&f, &bad, None, false).unwrap()));
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -546,7 +626,8 @@ mod tests {
         fs::write(&real, "data").unwrap();
         std::os::unix::fs::symlink(&real, &link).unwrap();
         let e = id(&real);
-        assert_eq!(remove(&link, &e, None, false).unwrap(), RemoveResult::mismatch());
+        let r = remove(&link, &e, None, false).unwrap();
+        assert!(is_mismatch(&r) && r.reason == "remove victim: open: symbolic link (ELOOP)", "{}", r.reason);
         assert!(real.exists());
 
         let backup = dir.join("BACKUP-clip.mp4");
@@ -557,7 +638,8 @@ mod tests {
         let good = id(&fin);
         fs::write(&fin, "tampered").unwrap();
         let r = remove(&backup, &b, Some(Guard { target: &fin, expected: &good, identity_only: false }), false).unwrap();
-        assert_eq!(r, RemoveResult::guard(), "backup kept when the final is not the verified one");
+        assert!(r.ownership_mismatch && r.guard_mismatch && !r.removed, "backup kept when the final is not the verified one");
+        assert!(r.reason.starts_with("remove guard (kept file): fstat: ") && r.reason.contains("size 8 != 3"), "{}", r.reason);
         assert!(backup.exists());
         let fixed = id(&fin);
         assert!(remove(&backup, &b, Some(Guard { target: &fin, expected: &fixed, identity_only: false }), false).unwrap().removed);
@@ -593,7 +675,9 @@ mod tests {
         assert!(!r.source_removed && !r.ownership_mismatch);
         assert_eq!(fs::metadata(&src).unwrap().nlink(), 2);
         fs::write(&src, "changed!").unwrap();
-        assert!(promote(&src, &dir.join("out2.mp4"), Some(&i), true, false).unwrap().ownership_mismatch);
+        let r = promote(&src, &dir.join("out2.mp4"), Some(&i), true, false).unwrap();
+        assert!(r.ownership_mismatch);
+        assert_eq!(r.reason, "promote source: fstat: size 8 != 6");
         assert!(promote(&src, &src, Some(&i), true, false).is_err());
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -606,10 +690,16 @@ mod tests {
         let mut e = identity(&f).unwrap();
         e.sha256 = "0".repeat(64); // wrong hash: only the identity check can pass
         assert!(matches!(open_verified(&f, &e, true).unwrap(), Opened::Verified(..)));
-        assert!(matches!(open_verified(&f, &e, false).unwrap(), Opened::Mismatch));
+        assert!(matches!(open_verified(&f, &e, false).unwrap(), Opened::Mismatch(r) if r == "full hash: sha256 differs from record"));
+        let stale = Expected { mtime_ns: Some("123".into()), ..e.clone() };
+        let real = mtime_ns(&fs::metadata(&f).unwrap());
+        assert!(matches!(open_verified(&f, &stale, true).unwrap(), Opened::Mismatch(r) if r == format!("identity-only: mtime_ns {real} != 123")));
+        let moved = Expected { inode: "1".into(), size: 9, ..e.clone() };
+        let ino = fs::metadata(&f).unwrap().ino();
+        assert!(matches!(open_verified(&f, &moved, true).unwrap(), Opened::Mismatch(r) if r == format!("fstat: ino {ino} != 1; size 3 != 9")));
         // without a time the full check runs
         let no_time = Expected { mtime_ns: None, ..e.clone() };
-        assert_eq!(remove(&f, &no_time, None, true).unwrap(), RemoveResult::mismatch());
+        assert!(is_mismatch(&remove(&f, &no_time, None, true).unwrap()));
         assert!(remove(&f, &e, None, true).unwrap().removed);
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -629,6 +719,12 @@ mod tests {
         // the target must still be the original (same inode at both names)
         let wrong = replace_over(&cand, &orig, &backup, &ec, &eo.device, "1", false).unwrap();
         assert!(!wrong.replaced && wrong.ownership_mismatch);
+        let want = format!("dev:ino {}:{} != {}:1", eo.device, eo.inode, eo.device);
+        assert_eq!(wrong.reason, format!("replace-over before rename: original name lstat: {want}; backup name lstat: {want}"));
+        let mut stale = ec.clone();
+        stale.mtime_ns = Some("5".into());
+        let r = replace_over(&cand, &orig, &backup, &stale, &eo.device, &eo.inode, true).unwrap();
+        assert!(!r.replaced && r.reason.starts_with("replace-over candidate: identity-only: mtime_ns ") && r.reason.ends_with(" != 5"), "{}", r.reason);
         let r = replace_over(&cand, &orig, &backup, &ec, &eo.device, &eo.inode, false).unwrap();
         assert!(r.replaced && !r.ownership_mismatch);
         assert_eq!(fs::read_to_string(&orig).unwrap(), "converted");

@@ -88,17 +88,94 @@ pub struct TxError {
     pub cleanup_pending: Option<Vec<String>>,
     pub valid_final: Option<Box<Saved>>,
     pub rolled_back: Option<(Paths, Artifacts)>,
+    /// UNSAFE_OWNED_PATH only: which check refused and the values that did
+    /// not match ("check: field observed != recorded; ..."). No file
+    /// contents, no secrets; the code and message stay as they are.
+    pub detail: Option<String>,
 }
 
 impl TxError {
     pub fn new(code: &str) -> TxError {
-        TxError { code: code.into(), tx: true, message: message_of(code).into(), cleanup_pending: None, valid_final: None, rolled_back: None }
+        TxError { code: code.into(), tx: true, message: message_of(code).into(), cleanup_pending: None, valid_final: None, rolled_back: None, detail: None }
     }
+}
+
+/// The longest refusal detail kept (in bytes, cut at a character boundary).
+pub const MAX_DETAIL: usize = 600;
+
+/// An UNSAFE_OWNED_PATH refusal: `check` names the check that refused,
+/// `detail` the values that did not match. One log line per refusal, naming
+/// the file (its name only) the check was about.
+pub fn unsafe_path(check: &str, target: &str, detail: impl AsRef<str>) -> TxError {
+    let detail = detail.as_ref();
+    let mut d = if detail.is_empty() { check.to_string() } else { format!("{check}: {detail}") };
+    if d.len() > MAX_DETAIL {
+        let mut cut = MAX_DETAIL;
+        while !d.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        d.truncate(cut);
+    }
+    let name = Path::new(target).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    eprintln!("[CONVERTER] UNSAFE_OWNED_PATH refusal on {name:?}: {d}");
+    TxError { detail: Some(d), ..TxError::new("UNSAFE_OWNED_PATH") }
+}
+
+/// txe(code), with the refusal's detail when the code is UNSAFE_OWNED_PATH.
+fn refuse(code: &str, check: &str, target: &str, detail: impl AsRef<str>) -> TxError {
+    if code == "UNSAFE_OWNED_PATH" {
+        unsafe_path(check, target, detail)
+    } else {
+        txe(code)
+    }
+}
+
+/// The record's fields `st` does not match, as "dev 1 != 2; ino ...; size ..." (observed != recorded).
+fn stat_diffs(m: Option<&Meta>, st: &fs::Metadata) -> Vec<String> {
+    let Some(m) = m else { return vec!["no record".into()] };
+    let mut d = Vec::new();
+    if m.state == "intent" {
+        d.push("record state intent".into());
+    }
+    if m.device.as_deref() != Some(&st.dev().to_string()) {
+        d.push(format!("dev {} != {}", st.dev(), m.device.as_deref().unwrap_or("none")));
+    }
+    if m.inode.as_deref() != Some(&st.ino().to_string()) {
+        d.push(format!("ino {} != {}", st.ino(), m.inode.as_deref().unwrap_or("none")));
+    }
+    if m.size != Some(st.size()) {
+        d.push(format!("size {} != {}", st.size(), m.size.map(|s| s.to_string()).unwrap_or_else(|| "none".into())));
+    }
+    d
+}
+
+/// The identity fields `st` does not match ("dev ...; ino ..."), observed != recorded.
+fn identity_diffs(m: &Meta, st: &fs::Metadata) -> String {
+    let mut d = Vec::new();
+    if m.device.as_deref() != Some(&st.dev().to_string()) {
+        d.push(format!("dev {} != {}", st.dev(), m.device.as_deref().unwrap_or("none")));
+    }
+    if m.inode.as_deref() != Some(&st.ino().to_string()) {
+        d.push(format!("ino {} != {}", st.ino(), m.inode.as_deref().unwrap_or("none")));
+    }
+    d.join("; ")
+}
+
+/// What a non-regular or multi-linked file is, for a refusal: "not a regular file" / "nlink 2 != 1".
+fn regular_single_diffs(st: &fs::Metadata) -> Vec<String> {
+    let mut d = Vec::new();
+    if !is_regular(st) {
+        d.push("not a regular file".into());
+    }
+    if !single_link(st) {
+        d.push(format!("nlink {} != 1", st.nlink()));
+    }
+    d
 }
 
 impl From<io::Error> for TxError {
     fn from(e: io::Error) -> TxError {
-        TxError { code: owned::code_of(&e).into(), tx: false, message: e.to_string(), cleanup_pending: None, valid_final: None, rolled_back: None }
+        TxError { code: owned::code_of(&e).into(), tx: false, message: e.to_string(), cleanup_pending: None, valid_final: None, rolled_back: None, detail: None }
     }
 }
 
@@ -353,9 +430,9 @@ fn canonical_for_new(p: &str) -> R<String> {
         match fs::symlink_metadata(&cursor) {
             Ok(_) => break,
             Err(e) if errno_code(&e) == "ENOENT" => {
-                let Some(parent) = cursor.parent().map(Path::to_path_buf) else { return Err(txe("UNSAFE_OWNED_PATH")) };
+                let Some(parent) = cursor.parent().map(Path::to_path_buf) else { return Err(unsafe_path("canonical-for-new", p, "no existing ancestor folder")) };
                 if parent == cursor {
-                    return Err(txe("UNSAFE_OWNED_PATH"));
+                    return Err(unsafe_path("canonical-for-new", p, "no existing ancestor folder"));
                 }
                 suffix.insert(0, cursor.file_name().unwrap_or_default().to_os_string());
                 cursor = parent;
@@ -665,17 +742,18 @@ impl Tx {
     }
 
     fn assert_regular_unaliased(&self, target: &str, code: &str) -> R<fs::Metadata> {
-        let st = exact_lstat(target).map_err(|_| txe(code))?;
+        const CHECK: &str = "regular-unaliased";
+        let st = exact_lstat(target).map_err(|e| refuse(code, CHECK, target, format!("lstat {}", e.code)))?;
         if !is_regular(&st) || !single_link(&st) {
-            return Err(txe(code));
+            return Err(refuse(code, CHECK, target, regular_single_diffs(&st).join("; ")));
         }
-        let real = canonical_existing(target).map_err(|_| txe(code))?;
+        let real = canonical_existing(target).map_err(|e| refuse(code, CHECK, target, format!("realpath {}", e.code)))?;
         if !same_path(&real, target) {
-            return Err(txe(code));
+            return Err(refuse(code, CHECK, target, "realpath differs from path (linked folder)"));
         }
         if let Some(rec) = self.owned_identities.lock().unwrap().get(&lex(target)) {
             if *rec != ident(&st) {
-                return Err(txe(code));
+                return Err(refuse(code, CHECK, target, format!("dev:ino {} != {}", ident(&st), rec)));
             }
         }
         Ok(st)
@@ -707,28 +785,43 @@ impl Tx {
 
     /// readExactFile: a plain file at its real path whose bytes are `size` and `sha256`.
     fn read_exact_file(&self, target: &str, size: Option<u64>, sha256: Option<&str>, code: &str, cancel: Option<&AtomicBool>) -> R<Observed> {
+        const CHECK: &str = "read-exact";
         (|| -> R<Observed> {
             let link = exact_lstat(target)?;
             if !is_regular(&link) {
-                return Err(txe(code));
+                return Err(refuse(code, CHECK, target, "lstat: not a regular file"));
             }
             if !same_path(&canonical_existing(target)?, target) {
-                return Err(txe(code));
+                return Err(refuse(code, CHECK, target, "realpath differs from path (linked folder)"));
             }
             let mut f = File::open(target)?;
             super::fs_hook::event("read-open", Path::new(target));
             let before = f.metadata()?;
             if !before.is_file() {
-                return Err(txe(code));
+                return Err(refuse(code, CHECK, target, "fstat: not a regular file"));
             }
             let (n, sha) = self.hash_open(&mut f, cancel)?;
             let after = f.metadata()?;
             if !same_identity(&before, &after) || Some(n) != size || Some(before.size()) != size || Some(after.size()) != size || Some(sha.as_str()) != sha256 {
-                return Err(txe(code));
+                let want = size.map(|s| s.to_string()).unwrap_or_else(|| "none".into());
+                let mut d = Vec::new();
+                if !same_identity(&before, &after) {
+                    d.push(format!("dev:ino changed while read {} -> {}", ident(&before), ident(&after)));
+                }
+                if Some(n) != size {
+                    d.push(format!("bytes read {n} != size {want}"));
+                }
+                if Some(before.size()) != size || Some(after.size()) != size {
+                    d.push(format!("fstat size {}/{} != {want}", before.size(), after.size()));
+                }
+                if Some(sha.as_str()) != sha256 {
+                    d.push("sha256 differs from record".into());
+                }
+                return Err(refuse(code, CHECK, target, d.join("; ")));
             }
             Ok(Observed { size: n, sha256: sha, stat: after, stat_before: before })
         })()
-        .or_tx(code)
+        .map_err(|e| if e.tx { e } else { refuse(code, CHECK, target, format!("io {}", e.code)) })
     }
 
     fn read_exact_meta(&self, target: &str, m: &Meta, code: &str) -> R<Observed> {
@@ -932,7 +1025,7 @@ impl Tx {
                 return Err(txe("ATOMIC_PROMOTION_UNSUPPORTED"));
             }
             if res.ownership_mismatch {
-                return Err(txe("UNSAFE_OWNED_PATH"));
+                return Err(unsafe_path("promote-no-replace", from, &res.reason));
             }
             if !remove_source && res.source_removed {
                 return Err(txe("ATOMIC_PROMOTION_UNSUPPORTED"));
@@ -1022,24 +1115,38 @@ impl Tx {
                 self.forget_owned(target);
                 return Ok(false);
             }
-            return Err(txe("UNSAFE_OWNED_PATH"));
+            return Err(unsafe_path("remove-exact-owned", target, "lstat ENOENT (missing)"));
         };
-        let Some(m) = m else { return Err(txe("UNSAFE_OWNED_PATH")) };
+        let Some(m) = m else { return Err(unsafe_path("remove-exact-owned", target, "no record")) };
         if (!allow_identity_alias && m.path != target) || m.nonce.is_empty() || m.state == "intent" || !matches_stat(Some(m), &st) || (!single_link(&st) && m.state != "cleanup-pending") {
-            return Err(txe("UNSAFE_OWNED_PATH"));
+            let mut d = Vec::new();
+            if !allow_identity_alias && m.path != target {
+                d.push("record path differs from target".to_string());
+            }
+            if m.nonce.is_empty() {
+                d.push("record nonce empty".into());
+            }
+            if !matches_stat(Some(m), &st) || m.state == "intent" {
+                d.extend(stat_diffs(Some(m), &st));
+            }
+            if !single_link(&st) && m.state != "cleanup-pending" {
+                d.push(format!("nlink {} != 1 (state {})", st.nlink(), m.state));
+            }
+            return Err(unsafe_path("remove-exact-owned", target, d.join("; ")));
         }
         // the adapter hashes it (held open) against the record; the path
         // itself must still be the file's real path (no linked folder)
         match canonical_existing(target) {
             Ok(real) if same_path(&real, target) => {}
-            _ => return Err(txe("UNSAFE_OWNED_PATH")),
+            Ok(_) => return Err(unsafe_path("remove-exact-owned", target, "realpath differs from path (linked folder)")),
+            Err(e) => return Err(unsafe_path("remove-exact-owned", target, format!("realpath {}", e.code))),
         }
         let quick = quick_expected(m, mtime, Some(&st));
         let expected = quick.clone().unwrap_or_else(|| m.expected());
         let g = guard.map(|(t, e, io)| owned::Guard { target: Path::new(t), expected: e, identity_only: io });
         let r = owned::remove(Path::new(target), &expected, g, quick.is_some()).map_err(|_| txe("OWNED_CLEANUP_FAILED"))?;
         if r.ownership_mismatch {
-            return Err(txe("UNSAFE_OWNED_PATH"));
+            return Err(unsafe_path("remove-exact-owned", target, format!("{} ({})", r.reason, if quick.is_some() { "identity-only" } else { "full hash" })));
         }
         if (!r.removed && !r.missing) || (r.missing && !allow_missing) {
             return Err(txe("OWNED_CLEANUP_FAILED"));
@@ -1075,10 +1182,10 @@ impl Tx {
     fn replace_over_original(&self, candidate: &str, source: &str, backup: &str, expected_candidate: &Expected, identity_only: bool, e: &SourceAuthority) -> R<()> {
         let r = owned::replace_over(Path::new(candidate), Path::new(source), Path::new(backup), expected_candidate, &e.device, &e.inode, identity_only).map_err(|_| txe("REPLACEMENT_FAILED"))?;
         if !r.replaced {
-            return Err(txe(if r.ownership_mismatch { "UNSAFE_OWNED_PATH" } else { "REPLACEMENT_FAILED" }));
+            return Err(if r.ownership_mismatch { unsafe_path("replace-over-original", candidate, &r.reason) } else { txe("REPLACEMENT_FAILED") });
         }
         if r.ownership_mismatch {
-            return Err(txe("UNSAFE_OWNED_PATH"));
+            return Err(unsafe_path("replace-over-original", source, &r.reason));
         }
         sync_directory(&dirname(source))?;
         Ok(())
@@ -1147,14 +1254,15 @@ impl Tx {
             return Ok(false);
         };
         if !is_regular(&st) || !single_link(&st) {
-            return Err(txe("UNSAFE_OWNED_PATH"));
+            return Err(unsafe_path("remove-private-file", target, regular_single_diffs(&st).join("; ")));
         }
         match canonical_existing(&s(&dirname(target))) {
             Ok(folder) if same_path(&folder, real_temp) => {}
-            _ => return Err(txe("UNSAFE_OWNED_PATH")),
+            Ok(_) => return Err(unsafe_path("remove-private-file", target, "folder realpath is not the temp folder")),
+            Err(e) => return Err(unsafe_path("remove-private-file", target, format!("folder realpath {}", e.code))),
         }
         if m.state != "intent" && !matches_identity(Some(m), &st) {
-            return Err(txe("UNSAFE_OWNED_PATH"));
+            return Err(unsafe_path("remove-private-file", target, identity_diffs(m, &st)));
         }
         unlink_private(target)?;
         self.forget_owned(target);
@@ -1166,16 +1274,17 @@ impl Tx {
         let folder = dirname(&a.path);
         if let Some(st) = lstat_or_none(&a.path)? {
             if !is_regular(&st) || !single_link(&st) {
-                return Err(txe("UNSAFE_OWNED_PATH"));
+                return Err(unsafe_path("remove-private-snapshot", &a.path, regular_single_diffs(&st).join("; ")));
             }
             if let Some(m) = m {
                 if m.state != "intent" && !matches_identity(Some(m), &st) {
-                    return Err(txe("UNSAFE_OWNED_PATH"));
+                    return Err(unsafe_path("remove-private-snapshot", &a.path, identity_diffs(m, &st)));
                 }
             }
             match fs::canonicalize(&folder) {
                 Ok(real) if same_pathbuf(&real, &folder) => {}
-                _ => return Err(txe("UNSAFE_OWNED_PATH")),
+                Ok(_) => return Err(unsafe_path("remove-private-snapshot", &a.path, "folder realpath differs (linked folder)")),
+                Err(e) => return Err(unsafe_path("remove-private-snapshot", &a.path, format!("folder realpath {}", owned::code_of(&e)))),
             }
             // read-only (0400) as the snapshot was made: unlink needs only the folder
             unlink_private(&a.path)?;
@@ -1219,7 +1328,7 @@ impl Tx {
         let g = guard.map(|(t, e)| owned::Guard { target: Path::new(t), expected: e, identity_only: false });
         let r = owned::remove(Path::new(target), e, g, false).map_err(|_| txe("OWNED_CLEANUP_FAILED"))?;
         if r.ownership_mismatch {
-            return Err(txe("UNSAFE_OWNED_PATH"));
+            return Err(unsafe_path("adapter-remove", target, &r.reason));
         }
         if !r.removed && !r.missing {
             return Err(txe("OWNED_CLEANUP_FAILED"));
@@ -1261,24 +1370,38 @@ impl Tx {
             return Ok(false);
         };
         if !is_regular(&st) {
-            return Err(txe("UNSAFE_OWNED_PATH"));
+            return Err(unsafe_path("remove-share-copy", target, "not a regular file"));
         }
         if m.state == "intent" || m.state == "writing" {
             if !single_link(&st) {
-                return Err(txe("UNSAFE_OWNED_PATH"));
+                return Err(unsafe_path("remove-share-copy", target, format!("nlink {} != 1 (state {})", st.nlink(), m.state)));
             }
             match canonical_existing(target) {
                 Ok(real) if same_path(&real, target) => {}
-                _ => return Err(txe("UNSAFE_OWNED_PATH")),
+                Ok(_) => return Err(unsafe_path("remove-share-copy", target, "realpath differs from path (linked folder)")),
+                Err(e) => return Err(unsafe_path("remove-share-copy", target, format!("realpath {}", e.code))),
             }
             let size = st.size();
             let sha = if m.state == "intent" {
                 if size != 0 {
-                    return Err(txe("UNSAFE_OWNED_PATH"));
+                    return Err(unsafe_path("remove-share-copy", target, format!("size {size} != 0 (state intent)")));
                 }
                 empty_sha()
             } else {
-                let Some(a) = a.filter(|a| matches_identity(Some(m), &st) && size <= a.size) else { return Err(txe("UNSAFE_OWNED_PATH")) };
+                let Some(a) = a.filter(|a| matches_identity(Some(m), &st) && size <= a.size) else {
+                    let d = match a {
+                        None => "no publication artifact".to_string(),
+                        Some(a) => {
+                            let mut d = vec![identity_diffs(m, &st)];
+                            if size > a.size {
+                                d.push(format!("size {size} > snapshot size {}", a.size));
+                            }
+                            d.retain(|x| !x.is_empty());
+                            d.join("; ")
+                        }
+                    };
+                    return Err(unsafe_path("remove-share-copy", target, d));
+                };
                 // the snapshot gone (only after a power cut): nothing proves this copy is ours
                 self.hash_file_prefix(&a.path, size).map_err(|_| txe("OWNED_CLEANUP_FAILED"))?
             };

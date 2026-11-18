@@ -474,3 +474,270 @@ fn a_crash_before_any_record_of_a_replacement_recovers_safely() {
     assert!(outcomes.iter().all(|o| !o.ends_with(":park")), "{outcomes:?}");
 }
 
+
+// ---- unsafe-owned-path refusals name their check and the values that differ
+
+/// The refusal's detail; the code stays UNSAFE_OWNED_PATH.
+fn refusal(e: TxError) -> String {
+    assert_eq!(e.code, "UNSAFE_OWNED_PATH", "{e}");
+    assert_eq!(e.message, message_of("UNSAFE_OWNED_PATH"), "the message is unchanged");
+    e.detail.expect("an UNSAFE_OWNED_PATH refusal says which check refused")
+}
+
+fn owned_meta(path: &str, nonce: &str, state: &str) -> Meta {
+    let st = fs::symlink_metadata(path).unwrap();
+    let sha = sha(&fs::read(path).unwrap());
+    Meta { path: path.into(), nonce: nonce.into(), state: state.into(), size: Some(st.size()), sha256: Some(sha), device: Some(st.dev().to_string()), inode: Some(st.ino().to_string()), journal: None }
+}
+
+/// The SMB failure as the owner's share showed it: right after the
+/// candidate is renamed over the original, the backup still reports two
+/// links (the CIFS client's cached link count). The backup removal refuses,
+/// the swap rolls back to the original, and the refusal says it was the
+/// backup's link count.
+#[test]
+fn a_backup_that_still_reports_two_links_names_the_link_count() {
+    let env = setup("stale-nlink");
+    let rec = env.recorder();
+    let prepared = env.tx.prepare_replacement(&env.op(&rec)).unwrap();
+    let (source, backup) = (PathBuf::from(&env.source), PathBuf::from(&prepared.backup));
+    let extra = env.footage.join("second-link-of-backup");
+    let (b2, x2) = (backup.clone(), extra.clone());
+    *crate::converter::owned::TEST_HOOK.write().unwrap() = Some(Arc::new(move |event: &str, _from: &Path, to: &Path| {
+        if event == "replace-after" && to == source.as_path() {
+            fs::hard_link(&b2, &x2)?;
+        }
+        Ok(())
+    }));
+    let r = env.tx.swap_replacement(&Op { prepared: Some(&prepared), persist: Some(&rec), ..Default::default() });
+    *crate::converter::owned::TEST_HOOK.write().unwrap() = None;
+    let e = r.err().expect("refused");
+    assert!(e.rolled_back.is_some(), "rolled back");
+    assert_eq!(refusal(e), "remove-exact-owned: nlink 2 != 1 (state owned)");
+    assert_eq!(fs::read(&env.source).unwrap(), env.original, "the original is back");
+    assert!(!backup.exists() && !Path::new(&env.candidate()).exists());
+    assert_eq!(env.writes.lock().unwrap().last().unwrap()["phase"], "backup-restored");
+    fs::remove_file(&extra).unwrap();
+}
+
+#[test]
+fn remove_exact_owned_names_each_record_field_that_differs() {
+    let env = setup("remove-exact");
+    let f = s(&env.footage.join("BACKUP-x.mp4"));
+    fs::write(&f, "backup bytes").unwrap();
+    let m = owned_meta(&f, "n-b", "owned");
+    // missing and unrecorded
+    let gone = s(&env.footage.join("gone.mp4"));
+    assert_eq!(refusal(env.tx.remove_exact_owned(&gone, Some(&m), false, false, None, None).err().expect("refused")), "remove-exact-owned: lstat ENOENT (missing)");
+    assert_eq!(refusal(env.tx.remove_exact_owned(&f, None, false, false, None, None).err().expect("refused")), "remove-exact-owned: no record");
+    // another file at that name (new inode, new size), and a second link
+    let ino = fs::metadata(&f).unwrap().ino();
+    let other = env.footage.join("other");
+    fs::write(&other, "someone else's").unwrap();
+    let new_ino = fs::metadata(&other).unwrap().ino();
+    fs::rename(&other, &f).unwrap();
+    assert_eq!(refusal(env.tx.remove_exact_owned(&f, Some(&m), false, false, None, None).err().expect("refused")), format!("remove-exact-owned: ino {new_ino} != {ino}; size 14 != 12"));
+    let wrong_path = Meta { path: "/elsewhere".into(), nonce: String::new(), ..owned_meta(&f, "n", "owned") };
+    assert_eq!(refusal(env.tx.remove_exact_owned(&f, Some(&wrong_path), false, false, None, None).err().expect("refused")), "remove-exact-owned: record path differs from target; record nonce empty");
+    let now = owned_meta(&f, "n-b", "owned");
+    fs::hard_link(&f, env.footage.join("alias")).unwrap();
+    assert_eq!(refusal(env.tx.remove_exact_owned(&f, Some(&now), false, false, None, None).err().expect("refused")), "remove-exact-owned: nlink 2 != 1 (state owned)");
+    fs::remove_file(env.footage.join("alias")).unwrap();
+    // same inode and size, other bytes: the adapter's held-open hash refuses
+    let bad = Meta { sha256: Some("0".repeat(64)), ..now.clone() };
+    assert_eq!(refusal(env.tx.remove_exact_owned(&f, Some(&bad), false, false, None, None).err().expect("refused")), "remove-exact-owned: remove victim: full hash: sha256 differs from record (full hash)");
+    // the right record: removed, nothing refuses
+    assert!(env.tx.remove_exact_owned(&f, Some(&now), false, false, None, None).unwrap());
+    assert!(Path::new(&env.source).exists());
+}
+
+#[test]
+fn the_guard_of_a_backup_removal_names_the_final_files_mismatch() {
+    let env = setup("guard");
+    let b = s(&env.footage.join("BACKUP-x.mp4"));
+    let fin = s(&env.footage.join("x.mp4"));
+    fs::write(&b, "old").unwrap();
+    fs::write(&fin, "new").unwrap();
+    let m = owned_meta(&b, "n-b", "owned");
+    let st = fs::metadata(&fin).unwrap();
+    let wrong = Expected { device: st.dev().to_string(), inode: st.ino().to_string(), size: 3, sha256: "0".repeat(64), mtime_ns: Some("7".into()) };
+    let d = refusal(env.tx.remove_exact_owned(&b, Some(&m), false, false, Some((&fin, &wrong, true)), None).err().expect("refused"));
+    let real = st.mtime() as i128 * 1_000_000_000 + st.mtime_nsec() as i128;
+    assert_eq!(d, format!("remove-exact-owned: remove guard (kept file): identity-only: mtime_ns {real} != 7 (full hash)"));
+    assert!(Path::new(&b).exists(), "the backup is kept");
+}
+
+#[test]
+fn replace_over_original_names_the_name_that_is_no_longer_the_original() {
+    let env = setup("replace-over");
+    let cand = env.candidate();
+    fs::write(&cand, &env.conversion).unwrap();
+    let ec = crate::converter::owned::identity(Path::new(&cand)).unwrap();
+    let backup = s(&env.footage.join("BACKUP-x.mp4"));
+    // the backup name is a different file, not a second link of the original
+    fs::write(&backup, &env.original).unwrap();
+    let b = fs::metadata(&backup).unwrap();
+    let d = refusal(env.tx.replace_over_original(&cand, &env.source, &backup, &ec, false, &env.expected).err().expect("refused"));
+    assert_eq!(d, format!("replace-over-original: replace-over before rename: backup name lstat: dev:ino {}:{} != {}:{}", b.dev(), b.ino(), env.expected.device, env.expected.inode));
+    // a candidate whose recorded time is not its time now (identity-only)
+    fs::remove_file(&backup).unwrap();
+    fs::hard_link(&env.source, &backup).unwrap();
+    let stale = Expected { mtime_ns: Some("11".into()), ..ec.clone() };
+    let d = refusal(env.tx.replace_over_original(&cand, &env.source, &backup, &stale, true, &env.expected).err().expect("refused"));
+    assert!(d.starts_with("replace-over-original: replace-over candidate: identity-only: mtime_ns ") && d.ends_with(" != 11"), "{d}");
+    assert_eq!(fs::read(&env.source).unwrap(), env.original, "nothing was replaced");
+}
+
+#[test]
+fn promote_no_replace_names_the_sources_mismatch() {
+    let env = setup("promote");
+    let cand = env.candidate();
+    fs::write(&cand, &env.conversion).unwrap();
+    let mut e = crate::converter::owned::identity(Path::new(&cand)).unwrap();
+    e.size += 1;
+    let to = s(&env.footage.join("promoted.mp4"));
+    let d = refusal(env.tx.promote_no_replace(&cand, &to, "REPLACEMENT_COLLISION", Some(&e), true, false).err().expect("refused"));
+    assert_eq!(d, format!("promote-no-replace: promote source: fstat: size {} != {}", e.size - 1, e.size));
+    assert!(!Path::new(&to).exists() && Path::new(&cand).exists());
+}
+
+#[test]
+fn private_work_files_name_the_link_count_folder_or_identity() {
+    let env = setup("private");
+    let real_temp = s(&env.temp_root);
+    let enc = s(&env.temp_root.join(format!("{JOB}-{ITEM}-n-enc-encoded.mp4")));
+    fs::write(&enc, "encoded").unwrap();
+    let m = owned_meta(&enc, "n-enc", "owned");
+    fs::hard_link(&enc, env.temp_root.join("alias")).unwrap();
+    assert_eq!(refusal(env.tx.remove_private_file(&enc, &m, &real_temp).err().expect("refused")), "remove-private-file: nlink 2 != 1");
+    fs::remove_file(env.temp_root.join("alias")).unwrap();
+    assert_eq!(refusal(env.tx.remove_private_file(&enc, &m, &s(&env.footage)).err().expect("refused")), "remove-private-file: folder realpath is not the temp folder");
+    let moved = Meta { inode: Some("1".into()), ..m.clone() };
+    let ino = fs::metadata(&enc).unwrap().ino();
+    assert_eq!(refusal(env.tx.remove_private_file(&enc, &moved, &real_temp).err().expect("refused")), format!("remove-private-file: ino {ino} != 1"));
+    assert!(Path::new(&enc).exists());
+
+    // the private snapshot
+    fs::hard_link(&env.artifact.path, env.temp_root.join("snap-alias")).unwrap();
+    assert_eq!(refusal(env.tx.remove_private_snapshot(&env.artifact, None).err().expect("refused")), "remove-private-snapshot: nlink 2 != 1");
+    fs::remove_file(env.temp_root.join("snap-alias")).unwrap();
+    let snap = owned_meta(&env.artifact.path, "n-s", "owned");
+    let other = Meta { device: Some("9".into()), ..snap };
+    let dev = fs::metadata(&env.artifact.path).unwrap().dev();
+    assert_eq!(refusal(env.tx.remove_private_snapshot(&env.artifact, Some(&other)).err().expect("refused")), format!("remove-private-snapshot: dev {dev} != 9"));
+    assert!(Path::new(&env.artifact.path).exists());
+}
+
+#[test]
+fn share_copies_and_the_adapter_name_what_differs() {
+    let env = setup("share-copy");
+    let cand = env.candidate();
+    let intent = Meta { path: cand.clone(), nonce: "n-cand".into(), state: "intent".into(), size: None, sha256: None, device: None, inode: None, journal: None };
+    fs::write(&cand, "not ours").unwrap();
+    let e = env.cleanup(vec![("replacementCandidate", cand.clone())], vec![("replacementCandidate", intent.clone())]).err().unwrap();
+    assert_eq!(refusal(e), "remove-share-copy: size 8 != 0 (state intent)");
+    fs::hard_link(&cand, env.footage.join("alias")).unwrap();
+    assert_eq!(refusal(env.tx.remove_share_copy(&cand, &intent, None).err().expect("refused")), "remove-share-copy: nlink 2 != 1 (state intent)");
+    fs::remove_file(env.footage.join("alias")).unwrap();
+    // a copy in progress: larger than the snapshot, or another inode
+    fs::write(&cand, vec![1u8; env.conversion.len() + 5]).unwrap();
+    let mut writing = env.stat_meta(&cand, "n-cand", "writing", &empty_sha());
+    let big = fs::metadata(&cand).unwrap().size();
+    assert_eq!(refusal(env.tx.remove_share_copy(&cand, &writing, Some(&env.artifact)).err().expect("refused")), format!("remove-share-copy: size {big} > snapshot size {}", env.artifact.size));
+    writing.inode = Some("1".into());
+    let ino = fs::metadata(&cand).unwrap().ino();
+    assert!(refusal(env.tx.remove_share_copy(&cand, &writing, Some(&env.artifact)).err().expect("refused")).starts_with(&format!("remove-share-copy: ino {ino} != 1")));
+    assert_eq!(refusal(env.tx.remove_share_copy(&cand, &writing, None).err().expect("refused")), "remove-share-copy: no publication artifact");
+    // the adapter's own check (prefix of the conversion): its reason comes through
+    fs::write(&cand, b"xx").unwrap();
+    let st = fs::metadata(&cand).unwrap();
+    let e = Expected { device: st.dev().to_string(), inode: st.ino().to_string(), size: 2, sha256: sha(b"yy"), mtime_ns: None };
+    assert_eq!(refusal(env.tx.adapter_remove(&cand, &e, None).err().expect("refused")), "adapter-remove: remove victim: full hash: sha256 differs from record");
+    assert!(Path::new(&cand).exists());
+}
+
+#[test]
+fn encode_outputs_name_the_record_or_the_link_count() {
+    let env = setup("adopt");
+    let rec = env.recorder();
+    let r = env.tx.reserve_encode_output(&env.op(&rec)).unwrap();
+    fs::write(&r.path, "encoded").unwrap();
+    // a record that is not intent/owned
+    let mut arts = r.owned_artifacts.clone();
+    arts.get_mut("encodedCandidate").unwrap().state = "writing".into();
+    let e = env.tx.adopt_encode_output(&Op { owned_paths: r.owned_paths.clone(), owned_artifacts: arts, ..env.op(&rec) }).err().expect("refused");
+    assert_eq!(refusal(e), "adopt-encode-output: record state writing not intent/owned");
+    let e = env.tx.adopt_encode_output(&Op { owned_paths: r.owned_paths.clone(), owned_artifacts: Artifacts::new(), ..env.op(&rec) }).err().expect("refused");
+    assert_eq!(refusal(e), "adopt-encode-output: no encodedCandidate record");
+    // a second link: the unaliased check
+    fs::hard_link(&r.path, env.temp_root.join("alias")).unwrap();
+    let e = env.tx.adopt_encode_output(&Op { owned_paths: r.owned_paths.clone(), owned_artifacts: r.owned_artifacts.clone(), ..env.op(&rec) }).err().expect("refused");
+    assert_eq!(refusal(e), "regular-unaliased: nlink 2 != 1");
+    fs::remove_file(env.temp_root.join("alias")).unwrap();
+    assert!(env.tx.adopt_encode_output(&Op { owned_paths: r.owned_paths.clone(), owned_artifacts: r.owned_artifacts.clone(), ..env.op(&rec) }).is_ok());
+    // the remembered identity: another file at that name
+    let other = env.temp_root.join("other");
+    fs::write(&other, "x").unwrap();
+    let (old, new) = (ident(&fs::metadata(&r.path).unwrap()), ident(&fs::metadata(&other).unwrap()));
+    fs::rename(&other, &r.path).unwrap();
+    let e = env.tx.adopt_encode_output(&Op { owned_paths: r.owned_paths.clone(), owned_artifacts: r.owned_artifacts.clone(), ..env.op(&rec) }).err().expect("refused");
+    assert_eq!(refusal(e), format!("regular-unaliased: dev:ino {new} != {old}"));
+}
+
+#[test]
+fn a_staged_resume_or_asset_outside_its_folder_names_why() {
+    let env = setup("stage");
+    let rec = env.recorder();
+    let resume: (Paths, Artifacts) = ([("stagedSource".to_string(), "/elsewhere/x.mp4".to_string())].into_iter().collect(), Artifacts::new());
+    let e = env.tx.stage_source(&Op { resume: Some(resume), ..env.op(&rec) }).err().expect("refused");
+    assert_eq!(refusal(e), "stage-source: resume: recorded stagedSource path differs");
+    let out = env.root.join("out");
+    fs::create_dir_all(&out).unwrap();
+    let e = env.tx.copy_asset(&Op { destination_root: Some(s(&out)), destination: Some(s(&env.root.join("x.mp4"))), ..env.op(&rec) }).err().expect("refused");
+    assert_eq!(refusal(e), "copy-asset: destination is outside the destination root");
+}
+
+#[test]
+fn recorded_names_that_differ_are_named() {
+    let env = setup("names");
+    let (_, backup) = recorded_replacement_paths(&env.source, JOB, ITEM, &Artifacts::new(), Some("h265")).unwrap();
+    let e = env.tx.assert_replacement_names(&env.source, "/elsewhere/TEMP", &backup, JOB, ITEM, &Artifacts::new(), Some("h265")).err().expect("refused");
+    assert_eq!(refusal(e), "replacement-names: candidate name differs from the recorded one");
+    // cleanup of a candidate recorded at another name
+    let wrong = s(&env.footage.join("TEMP-H265-other.mp4"));
+    fs::write(&wrong, "x").unwrap();
+    let m = owned_meta(&wrong, "n", "owned");
+    let e = env.cleanup(vec![("replacementCandidate", wrong.clone())], vec![("replacementCandidate", m)]).err().unwrap();
+    assert_eq!(refusal(e), "cleanup-owned: replacementCandidate: name differs from the recorded replacement name");
+    assert!(Path::new(&wrong).exists());
+    // a work file in the temp folder without its job-item-nonce prefix
+    let stray = s(&env.temp_root.join("stray.mp4"));
+    fs::write(&stray, "x").unwrap();
+    let m = owned_meta(&stray, "n", "owned");
+    let e = env.cleanup(vec![("encodedCandidate", stray.clone())], vec![("encodedCandidate", m)]).err().unwrap();
+    assert_eq!(refusal(e), "cleanup-owned: encodedCandidate: name lacks the job-item-nonce prefix");
+}
+
+#[test]
+fn an_exact_read_for_recovery_names_the_field() {
+    let env = setup("read-exact");
+    let f = s(&env.footage.join("BACKUP-x.mp4"));
+    fs::write(&f, "abc").unwrap();
+    let m = owned_meta(&f, "n", "owned");
+    let bad = Meta { sha256: Some("0".repeat(64)), size: Some(4), ..m };
+    assert_eq!(refusal(env.tx.read_exact_meta(&f, &bad, "UNSAFE_OWNED_PATH").err().expect("refused")), "read-exact: bytes read 3 != size 4; fstat size 3/3 != 4; sha256 differs from record");
+    assert_eq!(refusal(env.tx.read_exact_meta(&s(&env.footage.join("none")), &bad, "UNSAFE_OWNED_PATH").err().expect("refused")), "read-exact: io ENOENT");
+    // any other code carries no detail
+    let e = env.tx.read_exact_meta(&f, &bad, "FINAL_VALIDATION_FAILED").err().expect("refused");
+    assert_eq!((e.code.as_str(), e.detail), ("FINAL_VALIDATION_FAILED", None));
+}
+
+#[test]
+fn a_detail_is_bounded_and_kept_through_or_tx() {
+    let long = "x".repeat(5000);
+    let e = unsafe_path("check", "/a/b.mp4", &long);
+    assert_eq!(e.detail.as_ref().unwrap().len(), MAX_DETAIL);
+    assert!(e.detail.as_ref().unwrap().starts_with("check: xxx"));
+    let kept: R<()> = Err(e.clone());
+    assert_eq!(kept.or_tx("OTHER").err().expect("refused").detail, e.detail, "a refusal keeps its detail through or_tx");
+}

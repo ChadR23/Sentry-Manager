@@ -48,7 +48,7 @@ fn snapshot_cleanup(tx: &Tx, a: Option<&Artifact>, paths: &mut Paths, arts: &mut
 impl Tx {
     /// completeRecoveredCopy: an interrupted copy of the snapshot finished from its journal, then proven.
     fn complete_recovered_copy(&self, op: &Op, artifact: &Artifact, target: &str, field: &str, prefix: &str, paths: &Paths, arts: &mut Artifacts, failure: &str) -> R<Meta> {
-        let mut m = arts.get(field).cloned().ok_or_else(|| txe("UNSAFE_OWNED_PATH"))?;
+        let mut m = arts.get(field).cloned().ok_or_else(|| unsafe_path("complete-recovered-copy", target, format!("no {field} record")))?;
         if let Some(journal) = m.journal.clone() {
             let s_reconciled = format!("{prefix}-resume-reconciled");
             let s_pending = format!("{prefix}-chunk-pending");
@@ -151,7 +151,12 @@ impl Tx {
                     return Err(txe("MANUAL_INTERVENTION"));
                 }
                 if !arts.get("replacementBackup").is_some_and(|m| m.state == "intent" && same_path(&m.path, &backup)) {
-                    return Err(txe("UNSAFE_OWNED_PATH"));
+                    let d = match arts.get("replacementBackup") {
+                        None => "no replacementBackup record".to_string(),
+                        Some(m) if m.state != "intent" => format!("backup record state {} != intent", m.state),
+                        Some(_) => "backup record path differs".to_string(),
+                    };
+                    return Err(unsafe_path("recover-backup-original", &backup, d));
                 }
                 persist(op, Snap::new(&paths, &arts).step("recovery-backup-intent").artifact(pa))?;
                 self.before_replace(&source, &source_root, &expected, &job, &item)?;
@@ -183,7 +188,7 @@ impl Tx {
             }
             "promote-candidate" => {
                 if !arts.contains_key("replacementCandidate") {
-                    return Err(txe("UNSAFE_OWNED_PATH"));
+                    return Err(unsafe_path("recover-promote-candidate", &candidate, "no replacementCandidate record"));
                 }
                 if lstat_or_none(&source)?.is_some() {
                     return Err(txe("MANUAL_INTERVENTION"));
@@ -295,7 +300,7 @@ impl Tx {
                 persist(op, Snap::new(&paths, &arts).step("recovery-finish-cleanup-intent").artifact(pa))?;
                 let mut pending = vec![];
                 if lstat_or_none(&backup)?.is_some() {
-                    let bm = arts.get("replacementBackup").cloned().ok_or_else(|| txe("UNSAFE_OWNED_PATH"))?;
+                    let bm = arts.get("replacementBackup").cloned().ok_or_else(|| unsafe_path("recover-finish-replacement", &backup, "no replacementBackup record"))?;
                     self.read_exact_meta(&backup, &bm, "UNSAFE_OWNED_PATH")?;
                     match self.remove_replacement_backup(&backup, Some(&bm), &source, &artifact, None, None, None) {
                         Ok(_) => {
@@ -322,7 +327,7 @@ impl Tx {
                     if !same_identity(&fst, &cst) {
                         return Err(txe("MANUAL_INTERVENTION"));
                     }
-                    let cm = arts.get("replacementCandidate").cloned().ok_or_else(|| txe("UNSAFE_OWNED_PATH"))?;
+                    let cm = arts.get("replacementCandidate").cloned().ok_or_else(|| unsafe_path("recover-finish-replacement", &candidate, "no replacementCandidate record"))?;
                     self.read_exact_meta(&candidate, &cm, "UNSAFE_OWNED_PATH")?;
                     match self.remove_exact_owned(&candidate, Some(&cm), false, false, None, None) {
                         Ok(_) => {
@@ -386,7 +391,20 @@ impl Tx {
         let nonce = arts.get("destinationPartial").map(|m| m.nonce.clone()).unwrap_or_else(|| "undefined".into());
         let expected_partial = publication_partial(&dest, &job, &item, &nonce);
         if !paths.get("destinationPartial").is_some_and(|p| same_path(p, &expected_partial)) || !paths.get("publicationSnapshot").is_some_and(|p| same_path(p, &artifact.path)) || !arts.contains_key("destinationPartial") || !arts.contains_key("publicationSnapshot") {
-            return Err(txe("UNSAFE_OWNED_PATH"));
+            let mut d = Vec::new();
+            if !paths.get("destinationPartial").is_some_and(|p| same_path(p, &expected_partial)) {
+                d.push("destinationPartial path differs from the expected partial name");
+            }
+            if !paths.get("publicationSnapshot").is_some_and(|p| same_path(p, &artifact.path)) {
+                d.push("publicationSnapshot path differs from the artifact");
+            }
+            if !arts.contains_key("destinationPartial") {
+                d.push("no destinationPartial record");
+            }
+            if !arts.contains_key("publicationSnapshot") {
+                d.push("no publicationSnapshot record");
+            }
+            return Err(unsafe_path("recover-copy", &expected_partial, d.join("; ")));
         }
         self.validate_publication(&artifact, Validate::Reconcile(&artifact))?;
         let mut promotion_pending = false;
@@ -536,7 +554,9 @@ impl Tx {
                 continue;
             }
             if field == "publicationSnapshot" {
-                let Some(a) = artifact.as_ref().filter(|a| same_path(&target, &a.path)) else { return Err(txe("UNSAFE_OWNED_PATH")) };
+                let Some(a) = artifact.as_ref().filter(|a| same_path(&target, &a.path)) else {
+                    return Err(unsafe_path("cleanup-owned", &target, if artifact.is_none() { "publicationSnapshot: no publication artifact" } else { "publicationSnapshot path differs from the artifact" }));
+                };
                 self.validate_publication(a, Validate::Reconcile(a))?;
                 if !self.cleanup_publication(Some(a), arts.get(field))? {
                     arts.get_mut(field).unwrap().state = "cleanup-pending".into();
@@ -550,7 +570,8 @@ impl Tx {
                 let prefix = format!("{job}-{item}-{}-", m.nonce);
                 let base = Path::new(&target).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 if !contained(Path::new(&real_temp), Path::new(&canon)) || !base.starts_with(&prefix) {
-                    return Err(txe("UNSAFE_OWNED_PATH"));
+                    let d = if !contained(Path::new(&real_temp), Path::new(&canon)) { "real path is outside the temp folder" } else { "name lacks the job-item-nonce prefix" };
+                    return Err(unsafe_path("cleanup-owned", &target, format!("{field}: {d}")));
                 }
                 match self.remove_private_file(&target, &m, &real_temp) {
                     Ok(_) => {}
@@ -564,19 +585,19 @@ impl Tx {
             } else if field == "destinationPartial" {
                 let suffix = format!(".sentry-six-{job}-{item}-{}.partial", m.nonce);
                 if !target.ends_with(&suffix) {
-                    return Err(txe("UNSAFE_OWNED_PATH"));
+                    return Err(unsafe_path("cleanup-owned", &target, "destinationPartial: name lacks the job-item-nonce suffix"));
                 }
                 let expected = publication_partial(&target[..target.len() - suffix.len()], &job, &item, &m.nonce);
                 if !same_path(&expected, &target) {
-                    return Err(txe("UNSAFE_OWNED_PATH"));
+                    return Err(unsafe_path("cleanup-owned", &target, "destinationPartial: name is not the expected partial name"));
                 }
             } else {
-                let (Some(src), Some(root)) = (&source, &source_root) else { return Err(txe("UNSAFE_OWNED_PATH")) };
+                let (Some(src), Some(root)) = (&source, &source_root) else { return Err(unsafe_path("cleanup-owned", &target, format!("{field}: no source or source root"))) };
                 self.assert_source_or_missing_contained(Some(src), Some(root))?;
                 let (c, b) = recorded_replacement_paths(src, &job, &item, &arts, op.codec.as_deref())?;
                 let expected = if field == "replacementCandidate" { c } else { b };
                 if !same_path(&expected, &target) {
-                    return Err(txe("UNSAFE_OWNED_PATH"));
+                    return Err(unsafe_path("cleanup-owned", &target, format!("{field}: name differs from the recorded replacement name")));
                 }
             }
             let res = if field == "destinationPartial" || field == "replacementCandidate" { self.remove_share_copy(&target, &m, artifact.as_ref()) } else { self.remove_exact_owned(&target, Some(&m), true, false, None, None) };

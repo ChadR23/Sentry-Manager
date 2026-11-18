@@ -1611,6 +1611,8 @@ impl Service {
     pub fn fail_item(&self, rt: &Arc<Runtime>, item_id: &str, e: &Fail) -> SResult<()> {
         let retryable = e.retryable || Self::is_retryable_network(e);
         let code = stable_failure(e, "operation-failed");
+        // why an unsafe-owned-path refusal fired, shown as failure.detail in the snapshot (never stored)
+        super::set_failure_detail(rt.manifest().id(), item_id, e.detail.as_deref().filter(|_| code == super::UNSAFE_OWNED_PATH_RESULT));
         if e.code.is_none() {
             eprintln!("[CONVERTER] Unexpected clip failure: {e:?}");
         }

@@ -57,6 +57,9 @@ pub struct Fail {
     pub rolled_back: bool,
     pub replacement_record_stale: bool,
     pub cleanup_pending: Option<Vec<String>>,
+    /// unsafe-owned-path only: which check refused and what did not match
+    /// (staging::TxError::detail)
+    pub detail: Option<String>,
 }
 
 impl Fail {
@@ -81,9 +84,55 @@ impl From<staging::TxError> for Fail {
             valid_final: e.valid_final.map(|b| *b),
             rolled_back: e.rolled_back.is_some(),
             cleanup_pending: e.cleanup_pending,
+            detail: e.detail,
             ..Default::default()
         }
     }
+}
+
+// ---- refusal details -------------------------------------------------------------
+
+/// Why a clip's unsafe-owned-path refusal fired, by (job id, item id). Kept
+/// in memory only and shown as `failure.detail` in the job snapshot of a clip
+/// whose failure is unsafe-owned-path: the job file keeps Node's format
+/// (its failure record allows only code and retryable), so the stored job,
+/// and every snapshot compared with Node's, are unchanged.
+static FAILURE_DETAILS: Mutex<Option<HashMap<(String, String), String>>> = Mutex::new(None);
+const MAX_FAILURE_DETAILS: usize = 4096;
+pub const UNSAFE_OWNED_PATH_RESULT: &str = "unsafe-owned-path";
+
+/// Record (or, with None, forget) the refusal detail of a clip's failure.
+pub fn set_failure_detail(job: &str, item: &str, detail: Option<&str>) {
+    let mut g = FAILURE_DETAILS.lock().unwrap_or_else(|p| p.into_inner());
+    let map = g.get_or_insert_with(HashMap::new);
+    let key = (job.to_string(), item.to_string());
+    match detail {
+        Some(d) => {
+            if map.len() >= MAX_FAILURE_DETAILS && !map.contains_key(&key) {
+                map.clear();
+            }
+            map.insert(key, d.to_string());
+        }
+        None => {
+            map.remove(&key);
+        }
+    }
+}
+
+pub fn failure_detail(job: &str, item: &str) -> Option<String> {
+    let g = FAILURE_DETAILS.lock().unwrap_or_else(|p| p.into_inner());
+    g.as_ref().and_then(|m| m.get(&(job.to_string(), item.to_string())).cloned())
+}
+
+/// A failed clip's snapshot with its refusal detail, if it has one.
+fn with_failure_detail(job: &str, v: &Value) -> Option<Value> {
+    if v.get("failure").and_then(|f| f.get("code")).and_then(Value::as_str) != Some(UNSAFE_OWNED_PATH_RESULT) {
+        return None;
+    }
+    let d = failure_detail(job, v.get("id")?.as_str()?)?;
+    let mut c = v.clone();
+    c["failure"]["detail"] = Value::String(d);
+    Some(c)
 }
 
 impl std::fmt::Display for Fail {
@@ -241,7 +290,8 @@ pub fn public_snapshot(m: &Manifest) -> Value {
         .items
         .iter()
         .map(|it| {
-            let v = it.value();
+            let detailed = with_failure_detail(m.id(), it.value());
+            let v = detailed.as_ref().unwrap_or_else(|| it.value());
             if !PRIVATE_SNAPSHOT_KEYS.iter().any(|k| carries_private(v, k)) {
                 return v.clone();
             }
@@ -1281,3 +1331,66 @@ impl Service {
     }
 }
 
+
+#[cfg(test)]
+mod failure_detail_tests {
+    //! An unsafe-owned-path refusal's detail reaches the clip in the job
+    //! snapshot, and only there: the stored job keeps Node's format.
+    use super::*;
+    use crate::converter::jobstore::{random_uuid, ItemIn, JobStore, Patch};
+
+    #[test]
+    fn a_refusal_detail_shows_on_the_failed_clip_and_is_never_stored() {
+        let root = std::env::temp_dir().join(format!("lean-failure-detail-{}-{}", std::process::id(), random_uuid().unwrap()));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = JobStore::new(&root).unwrap();
+        let job = format!("job-{}", random_uuid().unwrap());
+        let clip = |n: usize| {
+            let ts = format!("2026-10-0{n}_07-00-00");
+            let rel = format!("SentryClips/{ts}/{ts}-front.mp4");
+            json!({ "id": format!("item-{n:06}"), "state": "queued", "kind": "video", "group": "SentryClips", "eventId": ts, "relativePath": rel, "sourcePath": format!("/footage/TeslaCam/{rel}"), "sourceBytes": 40_000_000, "mtimeMs": 1760000000000.0, "timestampKey": ts, "camera": "front", "attempts": 0 })
+        };
+        let mut initial = Map::new();
+        initial.insert("id".into(), json!(job));
+        initial.insert("state".into(), json!("waiting"));
+        initial.insert("config".into(), json!({ "sourceRoot": "/footage/TeslaCam", "destinationRoot": null, "codec": "h265", "profileId": "balanced", "networkMode": "auto", "outputMode": "replace", "includedGroups": ["SentryClips"], "replacementConfirmed": true, "concurrency": 2, "verifyMode": "quick" }));
+        initial.insert("items".into(), json!([clip(1), clip(2)]));
+        initial.insert("discoveryComplete".into(), json!(true));
+        store.create(&initial).unwrap();
+        let failed = |code: &str| json!({ "state": "failed", "failure": { "code": code, "retryable": false }, "resultCode": code });
+        let items = vec![
+            ItemIn::Raw(Value::Object(merge_value(&clip(1), &failed("unsafe-owned-path")))),
+            ItemIn::Raw(Value::Object(merge_value(&clip(2), &failed("source-changed")))),
+        ];
+        let m = store.transition(&job, Patch::new().items(items)).unwrap();
+
+        // what fail_item records: the refusal's detail, carried from the staging error
+        let tx = staging::unsafe_path("remove-exact-owned", "/footage/TeslaCam/SentryClips/BACKUP-1-front.mp4", "nlink 2 != 1 (state owned)");
+        let fail = Fail::from(tx);
+        assert_eq!(stable_failure(&fail, "operation-failed"), UNSAFE_OWNED_PATH_RESULT);
+        set_failure_detail(&job, "item-000001", fail.detail.as_deref());
+        set_failure_detail(&job, "item-000002", Some("not shown: another code"));
+
+        let snap = public_snapshot(&m);
+        let items = snap["items"].as_array().unwrap();
+        assert_eq!(items[0]["failure"], json!({ "code": "unsafe-owned-path", "retryable": false, "detail": "remove-exact-owned: nlink 2 != 1 (state owned)" }));
+        assert_eq!(items[0]["resultCode"], "unsafe-owned-path", "the result code is unchanged");
+        assert_eq!(items[1]["failure"], json!({ "code": "source-changed", "retryable": false }), "only unsafe-owned-path shows a detail");
+        // the stored job and the manifest itself carry no detail
+        assert!(m.items[0].value()["failure"].get("detail").is_none());
+        let stored = std::fs::read_to_string(root.join(&job).join("job.json")).unwrap_or_default() + &std::fs::read_to_string(root.join(&job).join("job.journal")).unwrap_or_default();
+        assert!(stored.contains("unsafe-owned-path") && !stored.contains("nlink"), "{stored}");
+        // retried and failed with no detail: the old one is forgotten
+        set_failure_detail(&job, "item-000001", None);
+        assert!(public_snapshot(&m)["items"][0]["failure"].get("detail").is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn merge_value(a: &Value, b: &Value) -> Map<String, Value> {
+        let mut m = a.as_object().unwrap().clone();
+        for (k, v) in b.as_object().unwrap() {
+            m.insert(k.clone(), v.clone());
+        }
+        m
+    }
+}

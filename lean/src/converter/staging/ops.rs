@@ -75,7 +75,7 @@ impl Tx {
         let dest = self.staged_path(&job, &item, &nonce, &source);
         if let Some(r) = resume {
             if !r.0.get("stagedSource").is_some_and(|p| same_path(p, &dest)) {
-                return Err(txe("UNSAFE_OWNED_PATH"));
+                return Err(unsafe_path("stage-source", &dest, "resume: recorded stagedSource path differs"));
             }
         }
         self.staged.lock().unwrap().push(PathBuf::from(&dest));
@@ -85,13 +85,13 @@ impl Tx {
             let real_temp = canonical_existing(&s(&self.temp_root))?;
             let canon = canonical_for_new(&dest)?;
             if !contained(Path::new(&real_temp), Path::new(&canon)) {
-                return Err(txe("UNSAFE_OWNED_PATH"));
+                return Err(unsafe_path("stage-source", &dest, "real path is outside the temp folder"));
             }
             let mut resume_copy = None;
             if resume.is_some() {
-                let m = arts.get("stagedSource").cloned().ok_or_else(|| txe("UNSAFE_OWNED_PATH"))?;
+                let m = arts.get("stagedSource").cloned().ok_or_else(|| unsafe_path("stage-source", &dest, "resume: no stagedSource record"))?;
                 if m.journal.is_none() || m.state == "intent" {
-                    return Err(txe("UNSAFE_OWNED_PATH"));
+                    return Err(unsafe_path("stage-source", &dest, format!("resume: record {} (state {})", if m.journal.is_none() { "has no journal" } else { "not resumable" }, m.state)));
                 }
                 resume_copy = Some(m);
             } else {
@@ -193,7 +193,8 @@ impl Tx {
         let root = canonical_existing(&s(&self.temp_root))?;
         let canon = canonical_for_new(&target)?;
         if !contained(Path::new(&root), Path::new(&canon)) || lstat_or_none(&target)?.is_some() {
-            return Err(txe("UNSAFE_OWNED_PATH"));
+            let d = if !contained(Path::new(&root), Path::new(&canon)) { "real path is outside the temp folder" } else { "reserved name already exists" };
+            return Err(unsafe_path("reserve-encode-output", &target, d));
         }
         let paths: Paths = [("encodedCandidate".to_string(), target.clone())].into_iter().collect();
         let arts: Artifacts = [("encodedCandidate".to_string(), artifact_metadata(&target, &nonce, "intent", None, None, 0, None))].into_iter().collect();
@@ -209,14 +210,27 @@ impl Tx {
         let paths = op.owned_paths.clone();
         let arts = op.owned_artifacts.clone();
         let target = valid_abs(paths.get("encodedCandidate").map(String::as_str))?;
-        let Some(m) = arts.get("encodedCandidate") else { return Err(txe("UNSAFE_OWNED_PATH")) };
+        let Some(m) = arts.get("encodedCandidate") else { return Err(unsafe_path("adopt-encode-output", &target, "no encodedCandidate record")) };
         if !(m.state == "intent" || m.state == "owned") || m.path != target || m.nonce.is_empty() || (!Self::leased(&self.encoded, &target) && self.encoded.lock().unwrap().len() >= self.max_leases) {
-            return Err(txe("UNSAFE_OWNED_PATH"));
+            let mut d = Vec::new();
+            if !(m.state == "intent" || m.state == "owned") {
+                d.push(format!("record state {} not intent/owned", m.state));
+            }
+            if m.path != target {
+                d.push("record path differs from target".into());
+            }
+            if m.nonce.is_empty() {
+                d.push("record nonce empty".into());
+            }
+            if !Self::leased(&self.encoded, &target) && self.encoded.lock().unwrap().len() >= self.max_leases {
+                d.push("no lease slot".into());
+            }
+            return Err(unsafe_path("adopt-encode-output", &target, d.join("; ")));
         }
         let ext = Path::new(&target).extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
         let expected = self.encoded_path(&job, &item, &m.nonce, &ext)?;
         if !same_path(&expected, &target) {
-            return Err(txe("UNSAFE_OWNED_PATH"));
+            return Err(unsafe_path("adopt-encode-output", &target, "name is not the reserved encode name"));
         }
         let st = self.remember_owned(&target)?;
         if !Self::leased(&self.encoded, &target) {
@@ -232,10 +246,10 @@ impl Tx {
         let (source, _, _) = self.assert_source_contained(op.source.as_deref(), op.source_root.as_deref())?;
         let droot = valid_abs(op.destination_root.as_deref())?;
         let dest = valid_abs(op.destination.as_deref())?;
-        let real_droot = canonical_existing(&droot).map_err(|_| txe("UNSAFE_OWNED_PATH"))?;
-        let canon_dest = canonical_for_new(&dest).map_err(|_| txe("UNSAFE_OWNED_PATH"))?;
+        let real_droot = canonical_existing(&droot).map_err(|e| unsafe_path("copy-asset", &dest, format!("destination root realpath {}", e.code)))?;
+        let canon_dest = canonical_for_new(&dest).map_err(|e| if e.code == "UNSAFE_OWNED_PATH" { e } else { unsafe_path("copy-asset", &dest, format!("destination realpath {}", e.code)) })?;
         if !contained(Path::new(&droot), Path::new(&dest)) || !contained(Path::new(&real_droot), Path::new(&canon_dest)) {
-            return Err(txe("UNSAFE_OWNED_PATH"));
+            return Err(unsafe_path("copy-asset", &dest, "destination is outside the destination root"));
         }
         if lstat_or_none(&dest)?.is_some() {
             return Err(txe("DESTINATION_COLLISION"));
@@ -249,7 +263,7 @@ impl Tx {
         let r = (|| -> R<Saved> {
             let canon_partial = canonical_for_new(&partial)?;
             if !same_pathbuf(&dirname(&canon_partial), &dirname(&canon_dest)) {
-                return Err(txe("UNSAFE_OWNED_PATH"));
+                return Err(unsafe_path("copy-asset", &partial, "partial and destination real folders differ"));
             }
             persist(op, Snap::new(&paths, &arts).step("asset-partial-intent"))?;
             let copied = {
@@ -365,7 +379,7 @@ impl Tx {
             let cp = canonical_for_new(&partial)?;
             let cd = canonical_for_new(&dest)?;
             if !same_pathbuf(&dirname(&cp), &dirname(&cd)) {
-                return Err(txe("UNSAFE_OWNED_PATH"));
+                return Err(unsafe_path("publish-separate", &partial, "partial and destination real folders differ"));
             }
             arts.insert("destinationPartial".into(), artifact_metadata(&partial, &pn, "intent", None, None, 0, None));
             persist(op, Snap::new(&paths, &arts).step("separate-partial-intent").artifact(Some(&artifact)))?;
@@ -572,7 +586,12 @@ impl Tx {
     pub(super) fn assert_replacement_names(&self, source: &str, candidate: &str, backup: &str, job: &str, item: &str, arts: &Artifacts, codec: Option<&str>) -> R<()> {
         let (c, b) = recorded_replacement_paths(source, job, item, arts, codec)?;
         if !same_path(&c, candidate) || !same_path(&b, backup) {
-            return Err(txe("UNSAFE_OWNED_PATH"));
+            let d = match (same_path(&c, candidate), same_path(&b, backup)) {
+                (false, false) => "candidate and backup names differ from the recorded ones",
+                (false, true) => "candidate name differs from the recorded one",
+                _ => "backup name differs from the recorded one",
+            };
+            return Err(unsafe_path("replacement-names", source, d));
         }
         Ok(())
     }
@@ -843,7 +862,7 @@ impl Tx {
         let cp = canonical_for_new(&partial)?;
         let cd = canonical_for_new(&dest)?;
         if !same_pathbuf(&dirname(&cp), &dirname(&cd)) {
-            return Err(txe("UNSAFE_OWNED_PATH"));
+            return Err(unsafe_path("prepare-publication", &partial, "partial and destination real folders differ"));
         }
         let mut paths: Paths = [("publicationSnapshot".to_string(), artifact.path.clone()), ("destinationPartial".to_string(), partial.clone())].into_iter().collect();
         let mut arts: Artifacts = IndexMap::new();
