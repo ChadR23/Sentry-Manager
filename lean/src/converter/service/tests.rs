@@ -206,7 +206,10 @@ fn conversions_as_node_runs_them() {
         let e2 = events.clone();
         c.service.subscribe(Arc::new(move |e: &Value| e2.lock().unwrap().push(e["type"].as_str().unwrap_or("").to_string())));
         c.start().unwrap();
-        let id = c.service.start(&config(&rust_base, mode, network, 1)).unwrap();
+        // (libx265 on both sides: a hardware encoder's output differs from run to run)
+        let mut cfg = config(&rust_base, mode, network, 1);
+        cfg["lanes"] = json!([{ "device": "cpu", "concurrency": 1 }]);
+        let id = c.service.start(&cfg).unwrap();
         let job = c.service.when_idle(&id).unwrap();
         c.shutdown();
         assert_recovered(&rust_base, &job, mode, &names, &before);

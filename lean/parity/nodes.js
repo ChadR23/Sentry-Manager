@@ -159,9 +159,21 @@ async function script(port, code, clip, dir, label) {
   main.codec = spawnSync('ffprobe', ['-v', 'error', '-select_streams', 'v', '-show_entries', 'stream=codec_name', '-of', 'csv=p=0', path.join(dir, `${label}-main.mp4`)], { encoding: 'utf8' }).stdout.trim();
   main.cancel = await new Promise((resolve) => {
     const child = nodes.encode({ device: { id: `node:${node.id}` }, source: clip, target: path.join(dir, `${label}-cancel.mp4`), codec: 'h265', bitrate: 400000, quality: null });
-    setTimeout(() => child.kill('SIGTERM'), 30);
+    // (at its first progress: the node has the job and is encoding it, so the cancel always reaches a job there)
+    child.stdout.once('data', () => child.kill('SIGTERM'));
     child.once('close', (c, signal) => resolve(signal));
   });
+  // (the cancel's DELETE reaches the worker after the main side closes: wait for the slot to be freed there,
+  // asking the worker each time, as overview() may answer with numbers from before the encodes)
+  const freed = (i) => i?.online === true && i.busy === 0 && i.encoding === 0;
+  const until = Date.now() + 10_000;
+  let after = null;
+  do {
+    after = await nodes.refresh(node.id);
+    if (freed(after)) break;
+    await sleep(100);
+  } while (Date.now() < until);
+  main.freed = freed(after);
   await nodes.setSlots(node.id, 3);
   main.slots = (await nodes.overview())[0].slots;
   main.overview = normal({ ...(await nodes.overview())[0], id: '<node>', address: '<address>', fingerprint: '<fp>', defaultLane: 'node:<node>' });
@@ -196,6 +208,7 @@ async function main() {
     for (const k of ['paired', 'name', 'authority', 'lanes', 'encode', 'codec', 'cancel', 'slots', 'overview', 'refused']) {
       if (JSON.stringify(ours.main[k]) !== JSON.stringify(theirs.main[k])) differences.push({ main: k, node: ours.main[k], rust: theirs.main[k] });
     }
+    if (!ours.main.freed || !theirs.main.freed) differences.push({ main: 'freed', node: ours.main.freed, rust: theirs.main.freed });
     // (the cleanup on the node after the cancel: wait for it)
     for (let i = 0; i < 100 && fs.readdirSync(path.join(dir, 'node-work')).length > 0; i++) await sleep(100);
     if (fs.readdirSync(path.join(dir, 'node-work')).length) differences.push({ nodeWork: fs.readdirSync(path.join(dir, 'node-work')) });

@@ -54,7 +54,9 @@ async function run(base, mode, networkMode, helper) {
     destinationRoot: mode === 'replace' ? null : fs.realpathSync(path.join(base, 'out')),
     codec: 'h265', profileId: 'custom', bitrateKbps: 250, networkMode, outputMode: mode,
     includedGroups: ['RecentClips', 'SavedClips', 'SentryClips'], groupOrder: ['SavedClips', 'SentryClips', 'RecentClips'],
-    replacementConfirmed: mode === 'replace', concurrency: 1, verifyMode: 'quick'
+    replacementConfirmed: mode === 'replace', concurrency: 1, verifyMode: 'quick',
+    // (libx265, as on the Rust side: a hardware encoder's output differs from run to run)
+    lanes: [{ device: 'cpu', concurrency: 1 }]
   };
   const id = await runtime.service.start(config);
   const job = await runtime.service.whenIdle(id);

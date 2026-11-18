@@ -351,6 +351,12 @@ fn replay(file: &Path) -> Vec<String> {
         let mut want = want.clone();
         // (process.version: this server has no Node)
         want["host"]["node"] = Value::Null;
+        // (os.hostname() and os.machine() for a fake machine without those files: the one that recorded it; replayed here, this one)
+        for (k, here) in [("hostname", super::host::os_hostname()), ("arch", super::host::machine())] {
+            if !r.tree.0.join("proc/sys/kernel").join(k).exists() && want["host"][k].is_string() {
+                want["host"][k] = json!(here);
+            }
+        }
         diff(&format!("{name}#{p}"), &want, &r.stats.snapshot(), &mut out);
     }
     let spawned: Vec<Value> = r.launcher.calls.lock().unwrap().iter().map(|(c, a)| json!({ "cmd": c, "args": a })).collect();
