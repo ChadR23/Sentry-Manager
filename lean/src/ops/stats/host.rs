@@ -114,7 +114,7 @@ pub struct HostInfo {
 }
 
 /// os.machine(): the kernel's machine name (uname -m).
-fn machine() -> Option<String> {
+pub(super) fn machine() -> Option<String> {
     let mut u: libc::utsname = unsafe { std::mem::zeroed() };
     if unsafe { libc::uname(&mut u) } != 0 {
         return None;
@@ -123,7 +123,7 @@ fn machine() -> Option<String> {
     (!s.is_empty()).then_some(s)
 }
 
-fn os_hostname() -> Option<String> {
+pub(super) fn os_hostname() -> Option<String> {
     let mut u: libc::utsname = unsafe { std::mem::zeroed() };
     if unsafe { libc::uname(&mut u) } != 0 {
         return None;
