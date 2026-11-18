@@ -178,7 +178,7 @@ pub async fn node_v1(srv: Arc<Server>, q: RawReq) -> Res {
             Body::from_stream(parts)
         }
         ReplyBody::File(file, len) => {
-            let r = tokio_util::io::ReaderStream::new(tokio::io::AsyncReadExt::take(tokio::fs::File::from_std(file), len));
+            let r = crate::media::file_stream(tokio::io::AsyncReadExt::take(tokio::fs::File::from_std(file), len));
             Body::from_stream(r.chain(futures_util::stream::once(async move {
                 finish();
                 Ok(bytes::Bytes::new())

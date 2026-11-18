@@ -13,6 +13,36 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 pub const MEDIA_CHUNK: u64 = 1024 * 1024;
+/// A whole file (footage, an export, a node's encode) is read and sent this much at a time (Node: 64 KiB);
+/// on a mounted archive every read can be a round trip. Up to WIDE_STREAMS at once (about two such buffers
+/// each while a client is slow); any more stream in ReaderStream's default 4 KiB, as before.
+pub const STREAM_CHUNK: usize = 256 * 1024;
+const WIDE_STREAMS: usize = 16;
+static WIDE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(WIDE_STREAMS);
+
+/// The chunks of a whole file for a response body.
+pub fn file_stream<R>(reader: R) -> futures_util::stream::BoxStream<'static, std::io::Result<bytes::Bytes>>
+where
+    R: tokio::io::AsyncRead + Send + 'static,
+{
+    file_stream_with(&WIDE, reader)
+}
+
+fn file_stream_with<R>(wide: &'static tokio::sync::Semaphore, reader: R) -> futures_util::stream::BoxStream<'static, std::io::Result<bytes::Bytes>>
+where
+    R: tokio::io::AsyncRead + Send + 'static,
+{
+    use futures_util::StreamExt;
+    match wide.try_acquire() {
+        Ok(permit) => tokio_util::io::ReaderStream::with_capacity(reader, STREAM_CHUNK)
+            .map(move |chunk| {
+                let _held = &permit;
+                chunk
+            })
+            .boxed(),
+        Err(_) => tokio_util::io::ReaderStream::new(reader).boxed(),
+    }
+}
 
 fn media_type(p: &Path) -> &'static str {
     match p.extension().map(|e| e.to_string_lossy().to_lowercase()).as_deref() {
@@ -133,5 +163,35 @@ pub fn send_media(method: &Method, headers: &HeaderMap, abs: &Path, roots: &[Pat
     }
     // the whole of a big file: streamed from the descriptor that was checked
     let reader = tokio::io::AsyncReadExt::take(tokio::fs::File::from_std(file), len);
-    b.body(Body::from_stream(tokio_util::io::ReaderStream::new(reader))).unwrap()
+    b.body(Body::from_stream(file_stream(reader))).unwrap()
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+    use futures_util::StreamExt;
+
+    #[tokio::test]
+    async fn only_so_many_whole_files_stream_in_big_chunks_at_once_the_rest_as_before() {
+        static WIDE2: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+        let data = vec![7u8; 600 * 1024];
+        let open = || file_stream_with(&WIDE2, std::io::Cursor::new(data.clone()));
+        let (mut a, mut b, mut c) = (open(), open(), open());
+        assert_eq!(a.next().await.unwrap().unwrap().len(), STREAM_CHUNK);
+        assert_eq!(b.next().await.unwrap().unwrap().len(), STREAM_CHUNK);
+        assert_eq!(c.next().await.unwrap().unwrap().len(), 4096);
+        drop(a);
+        let mut d = open();
+        assert_eq!(d.next().await.unwrap().unwrap().len(), STREAM_CHUNK);
+        let mut total = STREAM_CHUNK;
+        while let Some(chunk) = d.next().await {
+            total += chunk.unwrap().len();
+        }
+        assert_eq!(total, data.len());
+        let mut rest = 4096;
+        while let Some(chunk) = c.next().await {
+            rest += chunk.unwrap().len();
+        }
+        assert_eq!(rest, data.len());
+    }
 }
