@@ -193,6 +193,10 @@ fn item_id() -> String {
 pub fn trash(app: &Arc<App>, vid: &str, ids: &[String], reason: &str) -> Res<Trashed> {
     let (vehicle, root) = root_of(app, vid)?;
     let inv = app.state_of(vid).filter(|s| s.scanned).ok_or_else(|| Fail::new(409, "Footage has not been scanned yet."))?;
+    // (the recordings of the footage the vehicle had before are not paths in this one)
+    if inv.root != vehicle.source_key() {
+        return Err(Fail::new(409, "The footage folder changed and has not been scanned yet."));
+    }
     let wanted: HashSet<&str> = ids.iter().map(String::as_str).collect();
     let recordings: Vec<_> = inv.recordings.iter().filter(|r| wanted.contains(r.id.as_str())).cloned().collect();
     let sizes: std::collections::HashMap<&str, u64> = inv.file_list.iter().map(|f| (f.rel.as_str(), f.size)).collect();
@@ -203,6 +207,11 @@ pub fn trash(app: &Arc<App>, vid: &str, ids: &[String], reason: &str) -> Res<Tra
     for rec in &recordings {
         let rels: Vec<String> = rec.files().map(|(r, _)| r.to_string()).collect();
         with_lock(app, vid, || {
+            // the footage source again: a vehicle moved to another while this ran has other files here
+            if app.vehicle(vid).map(|v| v.source_key()).as_deref() != Some(inv.root.as_str()) {
+                result.skipped.push(Skip { id: rec.id.clone(), reason: "error", message: Some("the footage folder changed".into()) });
+                return;
+            }
             // protection is read again here: it may have been set after this run started
             let protected = app.core.db().protected_set(vid);
             if rec.protected || rels.iter().any(|r| protected.contains(r)) {
@@ -255,13 +264,17 @@ pub fn trash(app: &Arc<App>, vid: &str, ids: &[String], reason: &str) -> Res<Tra
             let bytes = moved.iter().map(|m| m.size).sum();
             app.core.db().update_bin_files(&id, &moved, bytes);
             gone.extend(moved.iter().map(|m| m.rel.clone()));
+            // (a scan of this source walking now does not put them back)
+            app.footage.scan_lock(vid).moved.lock().unwrap().extend(moved.iter().map(|m| (inv.root.clone(), m.rel.clone())));
             result.moved.push(rec.id.clone());
             result.bytes += bytes;
             remove_empty_dirs(&root, &rels, &is_kept_dir);
         });
     }
-    let files = app.state_of(vid).map(|s| s.file_list.iter().filter(|f| !gone.contains(&f.rel)).cloned().collect());
-    app.rebuild(vid, files);
+    // (rebuild_without leaves in a file restored while this ran)
+    if !gone.is_empty() {
+        app.rebuild_without(vid, &gone, &inv.root);
+    }
     let failed = result.skipped.iter().any(|s| s.reason == "error");
     let skipped = if result.skipped.is_empty() { String::new() } else { format!(", {} skipped: {}", result.skipped.len(), skip_why(&result.skipped)) };
     app.core.job_finish(job, if failed { "failed" } else { "done" }, &format!("{} moved ({}){skipped}", result.moved.len(), format_bytes(result.bytes as f64)), Some(result.json()));
@@ -410,9 +423,10 @@ pub fn restore(app: &Arc<App>, item_id: &str) -> Res<Value> {
         if item.files.iter().any(|f| f.pending) {
             return Err(still_moving());
         }
-        let (_, root) = root_of(app, &item.vehicle_id)?;
+        let (vehicle, root) = root_of(app, &item.vehicle_id)?;
         let mut left: Vec<BinFile> = Vec::new();
         let mut restored = 0;
+        let mut back: Vec<String> = Vec::new();
         for f in &item.files {
             let (Ok(from), Ok(to)) = (safe_join(&root, &f.bin_rel), safe_join(&root, &f.rel)) else {
                 left.push(BinFile { conflict: true, ..f.clone() });
@@ -433,6 +447,7 @@ pub fn restore(app: &Arc<App>, item_id: &str) -> Res<Value> {
                 continue;
             }
             restored += 1;
+            back.push(f.rel.clone());
         }
         if left.is_empty() {
             app.core.db().remove_bin_item(item_id);
@@ -441,16 +456,23 @@ pub fn restore(app: &Arc<App>, item_id: &str) -> Res<Value> {
         }
         let bin_rels: Vec<String> = item.files.iter().map(|f| f.bin_rel.clone()).collect();
         remove_empty_dirs(&root, &bin_rels, &|d| d == BIN_DIR || is_kept_dir(d));
+        // (under the bin lock: a scan walking now does not leave them out as moved, and a scan that
+        // walked before this restore is not taken as the answer by one that waited)
+        let lock = app.footage.scan_lock(&item.vehicle_id);
+        let source = vehicle.source_key();
+        lock.moved.lock().unwrap().retain(|(s, r)| !(*s == source && back.contains(r)));
+        lock.restores.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let job = app.core.job_start("restore", Some(&item.vehicle_id), &format!("Restore {}", item.label));
         let detail = format!("{restored} file(s) restored{}", if left.is_empty() { String::new() } else { format!(", {} could not (a file with that name exists)", left.len()) });
         app.core.job_finish(job, if left.is_empty() { "done" } else { "failed" }, &detail, None);
         Ok((restored, left.len()))
     })?;
-    // the files are back: a full scan (as inventory.scan(id)), in the background
+    // the files are back: a full scan (as inventory.scan(id)), in the background, that walks after
+    // they are (not one that began before)
     let a = app.clone();
     let v = vid.clone();
     std::thread::spawn(move || {
-        let _ = a.scan_now(&v, false);
+        let _ = a.scan_fresh(&v, false);
         a.core.announce("inventory");
     });
     Ok(json!({ "restored": out.0, "conflicts": out.1 }))

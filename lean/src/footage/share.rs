@@ -31,6 +31,8 @@ pub fn with_timeout<T: Send + 'static>(limit: Duration, what: &str, f: impl FnOn
     }
 }
 
+use std::collections::HashSet;
+
 fn unescape_mount_path(p: &str) -> String {
     let b = p.as_bytes();
     let mut out = Vec::with_capacity(b.len());
@@ -100,6 +102,81 @@ pub fn on_read_only_mount(mountinfo: &str, p: &str) -> bool {
     }
     let ro = |o: &str| o.split(',').any(|x| x == "ro");
     best.is_some_and(|(_, own, sup)| ro(&own) || ro(&sup))
+}
+
+/// The mounts of /proc/self/mountinfo: (id, parent id, point, "fs-type source root"), the last
+/// being what a mount is: the file system, where it comes from and its folder mounted there.
+fn mount_lines(mountinfo: &str) -> Vec<(String, String, String, String)> {
+    mountinfo
+        .split('\n')
+        .filter_map(|line| {
+            let (left, right) = fields(line)?;
+            let point = unescape_mount_path(left.get(4)?);
+            let what = format!("{} {} {}", right.first().unwrap_or(&""), unescape_mount_path(right.get(1).unwrap_or(&"")), unescape_mount_path(left.get(3).unwrap_or(&"")));
+            Some((left.first()?.to_string(), left.get(1)?.to_string(), point, what))
+        })
+        .collect()
+}
+
+/// The root of a mount table this reads: its one top (a mount whose parent is itself or not in
+/// the table), at "/", with no mount over "/" on it: a process rooted at a mount's root (a
+/// container, a host). In any other table (several tops, none at "/", a mount over "/") which
+/// mount a path reaches depends on where the reader's root is in a way the table does not show
+/// (a chroot below a mount, a mount over the root folder: the root is not crossed), so it is not
+/// read: None.
+fn root_of(lines: &[(String, String, String, String)]) -> Option<usize> {
+    let ids: HashSet<&str> = lines.iter().map(|l| l.0.as_str()).collect();
+    let tops: Vec<usize> = lines.iter().enumerate().filter(|(_, l)| l.1 == l.0 || !ids.contains(l.1.as_str())).map(|(i, _)| i).collect();
+    let [top] = tops.as_slice() else { return None };
+    let over = lines.iter().enumerate().any(|(i, l)| i != *top && l.1 == lines[*top].0 && l.2 == "/");
+    (lines[*top].2 == "/" && !over).then_some(*top)
+}
+
+/// The mount `p` is on, in a table root_of reads: from its root down the tree of mounts, at each
+/// step the child mount nearest above `p` (of those at one point, the last listed). A mount below
+/// which another was mounted at a folder above it is reached by no path: hidden. None for a path
+/// not from "/" or a table root_of does not read.
+fn holder(lines: &[(String, String, String, String)], p: &str) -> Option<usize> {
+    if !p.starts_with('/') {
+        return None;
+    }
+    let holds = |point: &str| !point.is_empty() && point != "/" && (p == point || p.starts_with(&format!("{point}/")));
+    let nearest = |(i, a): &(usize, &(String, String, String, String)), (j, b): &(usize, &(String, String, String, String))| a.2.len().cmp(&b.2.len()).then(j.cmp(i));
+    let mut cur = root_of(lines)?;
+    // (a step per line at most: a mount table has no loops)
+    for _ in 0..lines.len() {
+        let next = lines.iter().enumerate().filter(|(i, l)| *i != cur && l.1 == lines[cur].0 && holds(&l.2)).min_by(nearest);
+        match next {
+            Some((i, _)) => cur = i,
+            None => break,
+        }
+    }
+    Some(cur)
+}
+
+/// The mount `p` is on (whether or not `p` exists) as "fs-type source root": the file system, where
+/// it comes from and its folder mounted there. A share mounted again is the same; a drive not
+/// mounted leaves the file system under its mount point, and a mount over a folder above hides
+/// what was mounted below it.
+pub fn mount_holding(mountinfo: &str, p: &str) -> Option<String> {
+    let lines = mount_lines(mountinfo);
+    holder(&lines, p).map(|i| lines[i].3.clone())
+}
+
+/// The mounts footage below `root` can be on: the one holding `root` (with `root` as its point),
+/// then each mount whose point lies below it that a path reaches (not hidden; the topmost at a
+/// point), as (point, mount_holding's description). None: a table root_of does not read.
+pub fn mounts_at_and_below(mountinfo: &str, root: &str) -> Option<Vec<(String, String)>> {
+    let lines = mount_lines(mountinfo);
+    let h = holder(&lines, root)?;
+    let prefix = if root.ends_with('/') { root.to_string() } else { format!("{root}/") };
+    let mut out = vec![(root.to_string(), lines[h].3.clone())];
+    for (i, l) in lines.iter().enumerate() {
+        if l.2.starts_with(&prefix) && holder(&lines, &l.2) == Some(i) && !out.iter().any(|(p, _)| *p == l.2) {
+            out.push((l.2.clone(), l.3.clone()));
+        }
+    }
+    Some(out)
 }
 
 fn mount_code(s: &str) -> Option<i64> {
@@ -722,6 +799,48 @@ mod tests {
     const INFO: &str = "22 1 0:21 / / rw,relatime - overlay overlay rw\n\
         30 22 8:1 /footage /footage ro,relatime - ext4 /dev/sda1 rw\n\
         31 22 0:50 / /mnt/nas\\040share rw - cifs //nas/cam rw,vers=3.1.1\n";
+
+    #[test]
+    fn the_mount_holding_a_path() {
+        let t = "1 0 259:2 / / rw - ext4 /dev/nvme0n1p2 rw\n36 1 8:17 / /footage/car/TeslaCam rw - ext4 /dev/sdb1 rw\n37 1 0:52 / /footage/nas rw shared:5 - cifs //nas/cam rw\n";
+        assert_eq!(mount_holding(t, "/footage/car/TeslaCam/RecentClips").as_deref(), Some("ext4 /dev/sdb1 /"));
+        assert_eq!(mount_holding(t, "/footage/car/TeslaCamX").as_deref(), Some("ext4 /dev/nvme0n1p2 /"), "a mount point is a whole name");
+        assert_eq!(mount_holding(t, "/footage/nas/x").as_deref(), Some("cifs //nas/cam /"));
+        assert_eq!(mount_holding(&t.replace("0:52", "0:58"), "/footage/nas/x"), mount_holding(t, "/footage/nas/x"), "a share mounted again is the same");
+        assert_eq!(mount_holding("", "/x"), None);
+        // a mount point with a space (\\040), two mounts stacked at one point, a folder bound
+        let more = format!("{t}40 1 8:33 / /footage/my\\040car rw - ext4 /dev/sdc1 rw\n41 1 0:53 / /footage/nas rw - cifs //nas2/cam rw\n42 1 259:2 /mnt/usb /footage/bound rw - ext4 /dev/nvme0n1p2 rw\n");
+        assert_eq!(mount_holding(&more, "/footage/my car/TeslaCam").as_deref(), Some("ext4 /dev/sdc1 /"));
+        assert_eq!(mount_holding(&more, "/footage/nas/x").as_deref(), Some("cifs //nas2/cam /"), "the topmost of two at one point");
+        assert_eq!(mount_holding(&more, "/footage/bound/TeslaCam").as_deref(), Some("ext4 /dev/nvme0n1p2 /mnt/usb"), "a bound folder is told by its folder");
+        let at = mounts_at_and_below(&more, "/footage").unwrap();
+        assert_eq!(at[0].0, "/footage", "the one holding the folder first");
+        let mut points: Vec<&str> = at.iter().map(|(p, _)| p.as_str()).collect();
+        points.sort();
+        assert_eq!(points, ["/footage", "/footage/bound", "/footage/car/TeslaCam", "/footage/my car", "/footage/nas"], "each point once");
+        assert_eq!(at.iter().find(|(p, _)| p == "/footage/nas").map(|(_, w)| w.as_str()), Some("cifs //nas2/cam /"), "the topmost at a point");
+        assert_eq!(mounts_at_and_below(&more, "/footage/car").unwrap(), vec![("/footage/car".to_string(), "ext4 /dev/nvme0n1p2 /".to_string()), ("/footage/car/TeslaCam".to_string(), "ext4 /dev/sdb1 /".to_string())]);
+        // a file system mounted over /footage after them: what was mounted below it is hidden
+        let over = format!("{more}50 1 0:60 / /footage rw - tmpfs tmpfs rw\n");
+        assert_eq!(mount_holding(&over, "/footage/car/TeslaCam/x").as_deref(), Some("tmpfs tmpfs /"));
+        assert_eq!(mounts_at_and_below(&over, "/footage").unwrap(), vec![("/footage".to_string(), "tmpfs tmpfs /".to_string())]);
+        // one mounted on it afterwards is reached
+        let on = format!("{over}51 50 8:49 / /footage/car rw - ext4 /dev/sdd1 rw\n");
+        assert_eq!(mount_holding(&on, "/footage/car/x").as_deref(), Some("ext4 /dev/sdd1 /"));
+        // a root mount that is its own parent with a namespace root on it: one top, read
+        let own = "1 1 0:1 / / rw - ext4 /dev/nvme0n1p2 rw\n36 1 8:17 / /footage/car/TeslaCam rw - ext4 /dev/sdb1 rw\n";
+        assert_eq!(mount_holding(own, "/footage/car/TeslaCam/x").as_deref(), Some("ext4 /dev/sdb1 /"));
+        // tables where the mount a path reaches depends on the reader's root, which they do not
+        // show, are not read: a mount over "/" (rootfs with the real root on it), a chroot's table
+        // without "/", several tops (a chroot below a mount with one put over its folder after)
+        let over_root = "1 1 0:1 / / rw - rootfs rootfs rw\n25 1 259:2 / / rw - ext4 /dev/nvme0n1p2 rw\n";
+        let chroot = "36 20 8:17 / /footage rw - ext4 /dev/sdb1 rw\n37 36 8:33 / /footage/car rw - ext4 /dev/sdc1 rw\n";
+        let two = "50 20 8:33 / /footage rw - ext4 /dev/sdc1 rw\n51 20 259:2 / / rw - ext4 /dev/nvme0n1p2 rw\n";
+        for t in [over_root, chroot, two] {
+            assert_eq!((mount_holding(t, "/footage/x"), mounts_at_and_below(t, "/footage")), (None, None), "{t}");
+        }
+        assert_eq!(mount_holding(&on, "relative/x"), None);
+    }
 
     #[test]
     fn mount_table() {

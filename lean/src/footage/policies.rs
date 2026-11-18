@@ -190,6 +190,10 @@ pub fn run(app: &Arc<App>, vid: &str, expect: Option<&Value>) -> Res<Value> {
     if !unchanged() {
         return Err(changed());
     }
+    // (footage kept as the last scan saw it may be gone: what is there is not known to the limits)
+    if app.state_of(vid).is_some_and(|s| s.kept > 0) {
+        return Err(Fail::new(503, "Part of the footage could not be read, so the cleanup waits until it can."));
+    }
     let ids: Vec<String> = preview(app, vid)["ids"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
     let result = if ids.is_empty() { super::bin::Trashed::default() } else { super::bin::trash(app, vid, &ids, "policy")? };
     let policy = get(app, vid);
@@ -234,8 +238,13 @@ pub fn empty_old(app: &App, vid: &str, days: f64, now_ms: f64) -> (usize, u64) {
     (deleted, bytes)
 }
 
+/// A run that met footage that cannot be reached now is tried again after this long.
+const RETRY_MS: f64 = 15.0 * 60_000.0;
+
 /// Called every minute: run the policies whose time has come (the server's local time, as Node).
-pub fn tick(app: &Arc<App>, now: chrono::DateTime<chrono::Local>) {
+/// Whether one ran (or tried to).
+pub fn tick(app: &Arc<App>, now: chrono::DateTime<chrono::Local>) -> bool {
+    let mut ran = false;
     for v in app.vehicles.list() {
         let p = get(app, &v.id);
         if !js::truthy(p.get("enabled")) {
@@ -247,16 +256,24 @@ pub fn tick(app: &Arc<App>, now: chrono::DateTime<chrono::Local>) {
             chrono::Local.timestamp_millis_opt(t as i64).single().is_some_and(|d| d.date_naive() == now.date_naive())
         });
         let run_at = p.get("runAt").map(js::string).unwrap_or_default();
-        if hhmm.as_str() >= run_at.as_str() && !ran_today {
+        let waiting = app.footage.policy_retry.lock().unwrap().get(&v.id).is_some_and(|t| js::now() < *t);
+        if hhmm.as_str() >= run_at.as_str() && !ran_today && !waiting {
+            ran = true;
             if let Err(e) = run(app, &v.id, None) {
                 app.core.log("policies", Level::Warn, &format!("Policy for {} did not run: {}", v.name, e.message));
                 let mut saved = p.as_object().cloned().unwrap_or_default();
-                saved.insert("lastRunAt".into(), json!(js::now() as i64));
+                if e.status == 503 {
+                    // (footage that cannot be reached now: tried again in 15 minutes, not tomorrow)
+                    app.footage.policy_retry.lock().unwrap().insert(v.id.clone(), js::now() + RETRY_MS);
+                } else {
+                    saved.insert("lastRunAt".into(), json!(js::now() as i64));
+                }
                 saved.insert("lastResult".into(), json!({ "error": e.message }));
                 app.core.db().set(&format!("policy:{}", v.id), &Value::Object(saved));
             }
         }
     }
+    ran
 }
 
 #[cfg(test)]

@@ -103,6 +103,11 @@ fn a_move_is_not_taken_for_a_clip_still_there() {
     let car = Car::new("si-move2");
     let day = "2026-10-11";
     write_day(&car, day, json!({ "RecentClips/a-front.mp4": [1000, 5000, [1], null] }));
+    // (clips there to read: one that is not there is no answer)
+    for rel in ["TeslaCam/RecentClips/a-front.mp4", "RecentClips/b-front.mp4"] {
+        std::fs::create_dir_all(car.root.join(rel).parent().unwrap()).unwrap();
+        std::fs::write(car.root.join(rel), vec![0u8; 1000]).unwrap();
+    }
     set_files(&car, vec![entry("RecentClips/a-front.mp4", day, 1000, 5000.0), entry("TeslaCam/RecentClips/a-front.mp4", day, 1000, 5000.0)]);
     let idx = index(&car);
     run(&idx);
@@ -117,6 +122,99 @@ fn a_move_is_not_taken_for_a_clip_still_there() {
     run(&idx);
     assert_eq!(idx.status()["total"], json!(0), "found under the old path, not read again");
     assert_eq!(idx.day("v1", day).into_iter().map(|x| x.0).collect::<Vec<_>>(), vec!["TeslaCam/RecentClips/b-front.mp4"]);
+}
+
+#[test]
+fn a_clip_that_is_there_but_cannot_be_read_is_read_again_once_it_can_be() {
+    use std::os::unix::fs::PermissionsExt;
+    let car = Car::new("si-shut");
+    let day = "2026-10-11";
+    let rel = "RecentClips/2026-10-11_10-00-11-front.mp4";
+    let shut = car.root.join("RecentClips");
+    std::fs::create_dir_all(&shut).unwrap();
+    std::fs::write(car.root.join(rel), b"no telemetry here").unwrap();
+    let mode = |m: u32| std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(m)).unwrap();
+    mode(0o000);
+    if std::fs::read_dir(&shut).is_ok() {
+        // (permissions do not stop root)
+        mode(0o755);
+        return;
+    }
+    set_files(&car, vec![entry(rel, day, 17, 5000.0)]);
+    let idx = index(&car);
+    run(&idx);
+    mode(0o755);
+    assert!(idx.day("v1", day).is_empty(), "not noted as a clip without speeds while it could not be read");
+    run(&idx);
+    assert!(idx.day("v1", day).is_empty(), "not read again within the hour");
+    // (an hour later)
+    idx.failed.lock().unwrap().clear();
+    run(&idx);
+    assert_eq!(idx.day("v1", day).into_iter().map(|x| x.0).collect::<Vec<_>>(), vec![rel.to_string()], "read once it can be");
+}
+
+#[test]
+fn a_clip_shorter_than_the_scan_saw_or_gone_is_not_noted_and_is_read_once_it_is_there() {
+    let car = Car::new("si-short");
+    let day = "2026-10-12";
+    let short = "RecentClips/2026-10-12_10-00-12-front.mp4";
+    let gone = "RecentClips/2026-10-12_10-01-12-front.mp4";
+    std::fs::create_dir_all(car.root.join("RecentClips")).unwrap();
+    std::fs::write(car.root.join(short), b"no telemetry here").unwrap();
+    // (the scan saw 1000 bytes of the one, and the other is not there)
+    set_files(&car, vec![entry(short, day, 1000, 5000.0), entry(gone, day, 17, 5000.0)]);
+    let idx = index(&car);
+    run(&idx);
+    assert!(idx.day("v1", day).is_empty(), "neither noted as a clip without speeds");
+    assert!(idx.clip(Some("v1"), Some(gone), &car.root.join(gone), 17, 5000.0).is_null());
+    assert!(idx.day("v1", day).is_empty(), "nor when the Viewer asks for it");
+    std::fs::write(car.root.join(short), vec![0u8; 1000]).unwrap();
+    std::fs::write(car.root.join(gone), b"no telemetry here").unwrap();
+    idx.failed.lock().unwrap().clear();
+    run(&idx);
+    let mut got: Vec<String> = idx.day("v1", day).into_iter().map(|x| x.0).collect();
+    got.sort();
+    assert_eq!(got, vec![short.to_string(), gone.to_string()], "both read once they are there: neither has speeds");
+}
+
+#[test]
+fn a_clip_shorter_than_the_scan_saw_is_not_noted_even_when_it_reads() {
+    let car = Car::new("si-trunc");
+    let day = "2026-10-11";
+    let rel = "RecentClips/2026-10-11_10-00-11-front.mp4";
+    let recs: Vec<Option<Rec>> = (0..24).map(|_| Some(Rec { v: 20.0, lat: None, lon: None, ax: None, ay: None })).collect();
+    let path = car.root.join(rel);
+    testkit::clip(&path, 12, &recs, 12);
+    let size = std::fs::metadata(&path).unwrap().len();
+    // (the scan saw it 1000 bytes longer: it was cut since)
+    set_files(&car, vec![entry(rel, day, size + 1000, 5000.0)]);
+    let idx = index(&car);
+    run(&idx);
+    assert!(idx.day("v1", day).is_empty(), "what it read is not that clip's");
+    set_files(&car, vec![entry(rel, day, size, 5000.0)]);
+    run(&idx);
+    assert_eq!(idx.day("v1", day)[0].1, json!([20, 20]));
+}
+
+#[test]
+fn a_clip_that_could_not_be_read_is_forgotten_once_it_is_not_listed_or_the_viewer_read_it() {
+    let car = Car::new("si-forget");
+    let day = "2026-10-13";
+    let rel = "RecentClips/2026-10-13_10-00-13-front.mp4";
+    set_files(&car, vec![entry(rel, day, 17, 5000.0)]);
+    let idx = index(&car);
+    run(&idx);
+    assert_eq!(idx.failed.lock().unwrap().len(), 1, "not there: could not be read");
+    set_files(&car, vec![]);
+    run(&idx);
+    assert!(idx.failed.lock().unwrap().is_empty(), "not listed: forgotten");
+    set_files(&car, vec![entry(rel, day, 17, 5000.0)]);
+    run(&idx);
+    assert_eq!(idx.failed.lock().unwrap().len(), 1);
+    std::fs::create_dir_all(car.root.join("RecentClips")).unwrap();
+    std::fs::write(car.root.join(rel), b"no telemetry here").unwrap();
+    idx.clip(Some("v1"), Some(rel), &car.root.join(rel), 17, 5000.0);
+    assert!(idx.failed.lock().unwrap().is_empty(), "the Viewer read it");
 }
 
 #[test]

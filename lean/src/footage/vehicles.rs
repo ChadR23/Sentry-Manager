@@ -39,6 +39,17 @@ impl Vehicle {
     pub fn is_smb(&self) -> bool {
         self.source.get("type").and_then(Value::as_str) != Some("path")
     }
+
+    /// The footage this vehicle's scans read: its folder, and for a share which share (a share is
+    /// mounted on the same folder whichever it is). What is known of one is not used for another.
+    pub fn source_key(&self) -> String {
+        let root = self.root.to_string_lossy();
+        if !self.is_smb() {
+            return root.into_owned();
+        }
+        let s = |k: &str| self.source.get(k).map_or(String::new(), |v| v.as_str().map_or_else(|| v.to_string(), String::from));
+        format!("{root} (SMB {} port {})", s("share"), s("port"))
+    }
 }
 
 /// A plain folder vehicle (tests, tools).
@@ -294,6 +305,11 @@ impl Vehicles {
         Ok(v)
     }
 
+    /// The mount table this server reads (/proc/self/mountinfo).
+    pub fn mountinfo(&self) -> &std::path::Path {
+        &self.mountinfo
+    }
+
     pub fn update(self: &Arc<Self>, id: &str, input: &Value) -> Res<Vehicle> {
         let _e = self.edit.lock().unwrap();
         let existing = self.get(id).ok_or_else(|| Fail::new(404, "No such vehicle."))?;
@@ -463,6 +479,16 @@ pub fn describe_source(src: &Value) -> String {
 mod tests {
     use super::*;
     use crate::footage::ctx::LocalCore;
+
+    #[test]
+    fn a_vehicle_s_source_is_its_folder_and_for_a_share_which_share() {
+        let folder = folder_vehicle("car", "Car", "UTC", PathBuf::from("/footage/car"));
+        assert_eq!(folder.source_key(), "/footage/car");
+        let share = |s: &str| Vehicle { source: json!({ "type": "smb", "share": s, "username": "u", "password": "secret", "port": null }), ..folder_vehicle("nas", "NAS", "UTC", PathBuf::from("/footage/nas")) };
+        assert_ne!(share("//nas/cam").source_key(), share("//nas2/cam").source_key(), "another share mounted on the same folder");
+        assert_eq!(share("//nas/cam").source_key(), share("//nas/cam").source_key());
+        assert!(!share("//nas/cam").source_key().contains("secret"));
+    }
 
     fn manager(dir: &Path) -> Arc<Vehicles> {
         let ctx: Arc<dyn Ctx> = Arc::new(LocalCore::memory());

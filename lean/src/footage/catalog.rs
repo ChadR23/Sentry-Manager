@@ -126,6 +126,19 @@ impl Catalog {
         Ok(())
     }
 
+    /// previous(), when the catalog's last scan was of `root` (in this format); else none.
+    pub fn previous_for(&self, vehicle: &str, root: &str) -> rusqlite::Result<Option<Previous>> {
+        match self.last_scan(vehicle)? {
+            Some(l) if l.format == FORMAT && l.root == root => self.previous(vehicle).map(Some),
+            _ => Ok(None),
+        }
+    }
+
+    /// The last scan of `root` found footage there.
+    pub fn saw_footage(&self, vehicle: &str, root: &str) -> rusqlite::Result<bool> {
+        Ok(self.last_scan(vehicle)?.is_some_and(|l| l.root == root && l.files > 0))
+    }
+
     fn last_scan(&self, vehicle: &str) -> rusqlite::Result<Option<LastScan>> {
         self.conn()
             .query_row("SELECT format, root, started_ms, scanned_at, files, bytes FROM catalog_scans WHERE vehicle_id = ?1", [vehicle], |r| {

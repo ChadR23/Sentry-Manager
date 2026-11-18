@@ -210,18 +210,8 @@ pub fn trash_folder(srv: &Arc<Server>, c: &mut CoreCtx) -> Result<Reply, HttpErr
         None
     });
     let Some((v, root)) = found else { return Err(HttpError::new(403, "Not inside a vehicle share.")) };
-    // (as the footage area's errors reach core: a status under 500 with its text)
-    let fail = |f: crate::footage::ctx::Fail| {
-        let (status, body) = f.body();
-        if status >= 500 {
-            return HttpError::internal(f.message);
-        }
-        let mut e = HttpError::new(status, body["error"].as_str().unwrap_or("Error"));
-        if let Some(code) = body["code"].as_str() {
-            e = e.code(code);
-        }
-        e
-    };
+    // (as the footage area's errors reach core)
+    let fail = super::footage::http_error;
     if !app.state_of(&v.id).is_some_and(|s| s.scanned) {
         app.scan_now(&v.id, false).map_err(fail)?;
     }
