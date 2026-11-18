@@ -274,3 +274,38 @@ test('the plugin end to end: Stream Deck\'s socket, Sentry Six Manager\'s own ce
     await fsp.rm(dir, { recursive: true, force: true });
   }
 });
+
+test('a fresh log is indexed at once even while the converter runs; an old one waits for an idle moment', { skip: !hasXz && 'needs xz' }, async () => {
+  const base = await fsp.mkdtemp(path.join(os.tmpdir(), 'cannow-fresh-'));
+  try {
+    await fsp.mkdir(path.join(base, 'can', 'K'), { recursive: true });
+    const now = Math.floor(Date.now() / 60_000) * 60_000 - 60_000;
+    const old = Date.UTC(2026, 0, 1, 8, 0, 0);
+    const stamp = (t) => new Date(t).toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
+    const write = async (t, n) => {
+      const lines = [];
+      for (let i = 0; i < 20; i++) lines.push(volts(t + i * 1000, 360 + n));
+      const name = `K_${stamp(t)}_${n}.log.xz`;
+      await fsp.writeFile(path.join(base, 'can', 'K', name), execFileSync('xz', ['-1', '-c'], { input: `${lines.join('\n')}\n` }));
+      return name;
+    };
+    await write(old, 1);
+    await write(now, 2);
+    let converting = true;
+    const index = createCanIndex({ canDir: path.join(base, 'can'), dir: path.join(base, 'idx'), idle: () => !converting, autoRepack: false });
+    const pass = index.kick();
+    const end = Date.now() + 20_000;
+    let got = null;
+    while (Date.now() < end) {
+      got = await latestStats({ index, key: 'K', now: Date.now() });
+      if (got) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.ok(got, 'the fresh log was indexed while "converting"');
+    assert.equal(got.stats.find((s) => s.id === 'batteryVoltage').value, 362);
+    assert.deepEqual((await index.minuteTimes('K')).filter((t) => t < now - 3600_000), [], 'the old one still waits');
+    converting = false; // the conversion done: the old one goes too
+    await pass;
+    assert.ok((await index.minuteTimes('K')).some((t) => t < now - 3600_000));
+  } finally { await fsp.rm(base, { recursive: true, force: true }); }
+});

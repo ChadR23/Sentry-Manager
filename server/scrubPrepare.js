@@ -13,15 +13,18 @@ const path = require('path');
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
 const SETTLE_MS = 2 * 60_000; // a clip changed this recently may still be copying
 
-function createScrubPrepare({ inventory, vehicles, scrubFrames, days = 2, max = 1500, idle = () => true, log, pauseMs = 50, now = Date.now }) {
+// `max` is how many of the newest clips have their preview made ahead, in all
+// (not per pass): it stays under the preview cache's size (scrubFrames.js
+// keeps 6,000), so a preview made ahead is never pruned to be made again.
+function createScrubPrepare({ inventory, vehicles, scrubFrames, days = 2, max = 5000, idle = () => true, log, pauseMs = 50, now = Date.now }) {
   let running = null;
   let again = false;
   let stopped = false;
-  const done = new Map(); // full path -> `${size}/${mtime}` already prepared this run
+  const done = new Map(); // full path -> `${size}/${mtime}` already prepared (or found prepared) this run
 
-  /** The clips to prepare: the newest `days` days of each vehicle, newest first. */
+  /** The clips still to prepare: of the newest `max` clips of the newest `days` days, newest first, those not done. */
   function todo() {
-    const out = [];
+    const all = [];
     for (const v of vehicles.list()) {
       const root = vehicles.rootOf(v);
       const files = root && inventory.get(v.id)?.files;
@@ -31,12 +34,12 @@ function createScrubPrepare({ inventory, vehicles, scrubFrames, days = 2, max = 
       const newest = [...new Set(clips.map((f) => f.day))].sort().reverse().slice(0, days);
       for (const f of clips) {
         if (!newest.includes(f.day) || now() - f.mtimeMs < SETTLE_MS) continue;
-        const real = path.join(root, f.rel);
-        if (done.get(real) === `${f.size}/${Math.round(f.mtimeMs)}`) continue;
-        out.push({ real, key: `${f.size}/${Math.round(f.mtimeMs)}`, day: f.day, rel: f.rel });
+        all.push({ real: path.join(root, f.rel), key: `${f.size}/${Math.round(f.mtimeMs)}`, day: f.day, rel: f.rel });
       }
     }
-    return out.sort((a, b) => (a.day === b.day ? b.rel.localeCompare(a.rel) : b.day.localeCompare(a.day))).slice(0, max);
+    // the set is the newest `max` (done or not), so passes never creep on to older clips
+    return all.sort((a, b) => (a.day === b.day ? b.rel.localeCompare(a.rel) : b.day.localeCompare(a.day)))
+      .slice(0, max).filter((c) => done.get(c.real) !== c.key);
   }
 
   async function pass() {
@@ -59,10 +62,11 @@ function createScrubPrepare({ inventory, vehicles, scrubFrames, days = 2, max = 
     return made;
   }
 
-  /** Prepare what is new; again after this pass if more came meanwhile. */
+  /** Prepare what is new (a scan that brought nothing new starts nothing); again after this pass if more came meanwhile. */
   function kick() {
     if (days <= 0 || stopped) return Promise.resolve();
     if (running) { again = true; return running; }
+    if (!todo().length) return Promise.resolve();
     running = (async () => {
       do {
         again = false;

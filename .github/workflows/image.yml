@@ -18,7 +18,7 @@ name: Image
 #     owner released something. Each build fetches the latest Debian, Node
 #     and ffmpeg packages (the package step is not reused from an older
 #     week's build cache).
-# The tests (in three parts) and the two images (each on its own kind of
+# The tests (Node's in three parts, and the Rust server's) and the two images (each on its own kind of
 # machine, no emulation) run at the same time. The images are pushed only by
 # digest, which nobody pulls; the tag that people pull is put on them last,
 # and only when every test passed and both images started, answered, had
@@ -140,6 +140,46 @@ jobs:
           mkdir -p build && gcc -O2 -Wall -o build/noreplace-rename native/noreplace-rename.c
           node --disable-warning=ExperimentalWarning --test --test-shard=${{ matrix.shard }}/3 "test/**/*.test.js"
 
+  # The Rust server (lean/): its own tests and its checks against the Node code,
+  # which need node and ffmpeg too.
+  rust-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+
+      - name: Cache ffmpeg packages
+        uses: actions/cache@v6
+        with:
+          path: ~/apt-archives
+          key: apt-ffmpeg-${{ runner.os }}-${{ github.run_id }}-rust
+          restore-keys: apt-ffmpeg-${{ runner.os }}-
+
+      - name: Cache the Rust build
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            lean/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('lean/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Rust tests
+        run: |
+          mkdir -p ~/apt-archives/partial
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends -o Dir::Cache::Archives="$HOME/apt-archives" ffmpeg
+          sudo chown -R "$(id -u):$(id -g)" ~/apt-archives
+          rustup toolchain install stable --profile minimal
+          cd lean && cargo test --release --locked
+
   build:
     needs: names
     runs-on: ${{ matrix.runner }}
@@ -196,8 +236,9 @@ jobs:
             grep -q " $e " encoders.txt || { echo "::error::ffmpeg has no $e encoder"; exit 1; }
           done
           # the web app: uid 1000, no capabilities, no_new_privs
-          # (only node processes: this checking shell's own command line names the file too)
-          docker exec check sh -c 'for p in /proc/[0-9]*; do tr "\0" " " < $p/cmdline 2>/dev/null | grep -qE "^[^ ]*node .*server/index\.js" && grep -E "^(Uid|CapEff|NoNewPrivs):" $p/status; done; true' | tee app.txt
+          # (the Rust app, /usr/local/bin/sentry-lean, not its supervisor; this checking
+          # shell's own command line names the file too, so the whole first word is matched)
+          docker exec check sh -c 'for p in /proc/[0-9]*; do tr "\0" " " < $p/cmdline 2>/dev/null | grep -qE "^/usr/local/bin/sentry-lean( |$)" && grep -E "^(Uid|CapEff|NoNewPrivs):" $p/status; done; true' | tee app.txt
           test "$(grep -c '^Uid:' app.txt)" -eq 1
           grep -Eq '^Uid:\s+1000\s' app.txt && grep -Eq '^CapEff:\s+0+$' app.txt && grep -Eq '^NoNewPrivs:\s+1$' app.txt
           docker rm -f check
@@ -251,7 +292,7 @@ jobs:
           retention-days: 1
 
   publish:
-    needs: [names, tests, build]
+    needs: [names, tests, rust-tests, build]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

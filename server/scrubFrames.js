@@ -17,6 +17,7 @@ const crypto = require('crypto');
 const os = require('os');
 const nodeFs = require('fs');
 const nodePath = require('path');
+const { keyframePlan } = require('./scrubKeyframes');
 
 // the grid: COLS x ROWS frames of FRAME_WIDTH pixels, frame n = second n
 const COLS = 10;
@@ -36,18 +37,20 @@ function createScrubFrames(options = {}) {
   }
   const timeoutMs = options.timeoutMs || 60_000;
   const maxCached = options.maxCached || MAX_CACHED;
-  const maxRunning = options.concurrency || 3;
+  // a number, or a function read each time (server/workLimits.js)
+  const most = typeof options.concurrency === 'function' ? options.concurrency : () => options.concurrency || 3;
   const inFlight = new Map();
   const queue = [];
   let running = 0;
   let prepared = null;
   let written = 0;
 
-  function run(args) {
+  // `feed(stdin)`, when given, writes FFmpeg's input (the keyframes, scrubKeyframes.js)
+  function run(args, feed = null) {
     return new Promise((resolve) => {
       let child;
       try {
-        child = spawn(ffmpegPath, args, { shell: false, windowsHide: true, stdio: ['ignore', 'ignore', 'ignore'] });
+        child = spawn(ffmpegPath, args, { shell: false, windowsHide: true, stdio: [feed ? 'pipe' : 'ignore', 'ignore', 'ignore'] });
       } catch (_) {
         resolve(-1);
         return;
@@ -57,6 +60,11 @@ function createScrubFrames(options = {}) {
       const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch (_) { /* gone */ } }, timeoutMs);
       child.once('error', () => { clearTimeout(timer); resolve(-1); });
       child.once('close', (status) => { clearTimeout(timer); resolve(status); });
+      if (feed) {
+        // FFmpeg may stop reading early (it has its one grid): a closed pipe is no error
+        child.stdin.on('error', () => {});
+        feed(child.stdin).catch(() => { try { child.stdin.destroy(); } catch (_) { /* gone */ } });
+      }
     });
   }
 
@@ -124,18 +132,38 @@ function createScrubFrames(options = {}) {
     try { return (await fs.stat(target)).size > 0; } catch (_) { return false; }
   }
 
-  async function generate(videoPath, target) {
+  // `ahead`: made before anyone asked (scrubPrepare.js); the grid then takes
+  // the clip's own time, so pruning drops the oldest footage's grids first
+  // and never the newest clips' made ahead (which were made first)
+  async function generate(videoPath, target, ahead = false) {
     const temporary = `${target}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp.jpg`;
     try {
       // one frame per second of the clip, laid out in the grid: from the
       // keyframes alone when there is one every second or so, else from
-      // every frame (deblocking skipped: nothing to see at this size)
-      const quick = (await keyframeGap(videoPath)) <= 1.1;
-      const status = await run(['-nostdin', '-hide_banner', '-loglevel', 'error',
-        ...(quick ? ['-skip_frame', 'nokey'] : ['-skip_loop_filter', 'all']), '-threads', '2', '-protocol_whitelist', 'file', '-i', videoPath,
-        '-an', '-sn', '-dn', '-vf', `fps=1:eof_action=pass,scale=${FRAME_WIDTH}:-2,setsar=1,tile=${COLS}x${ROWS}`,
-        '-frames:v', '1', '-q:v', '6', '-y', temporary]);
+      // every frame (deblocking skipped: nothing to see at this size). The
+      // sample table gives the keyframes (scrubKeyframes.js): an H.264 clip
+      // with one a second sends FFmpeg only those, read by offset, instead
+      // of the whole clip; the grid is the same.
+      const plan = await keyframePlan(videoPath);
+      const quick = (plan ? plan.gap : await keyframeGap(videoPath)) <= 1.1;
+      const tail = ['-an', '-sn', '-dn', '-frames:v', '1', '-q:v', '6', '-y', temporary];
+      let status;
+      if (quick && plan?.write && plan.picks.length) {
+        status = await run(['-hide_banner', '-loglevel', 'error', '-threads', '2', '-f', 'h264', '-framerate', '1', '-i', 'pipe:0',
+          '-vf', `scale=${FRAME_WIDTH}:-2,setsar=1,tile=${COLS}x${ROWS}`, ...tail], plan.write);
+      } else {
+        if (plan?.close) await plan.close();
+        status = await run(['-nostdin', '-hide_banner', '-loglevel', 'error',
+          ...(quick ? ['-skip_frame', 'nokey'] : ['-skip_loop_filter', 'all']), '-threads', '2', '-protocol_whitelist', 'file', '-i', videoPath,
+          '-vf', `fps=1:eof_action=pass,scale=${FRAME_WIDTH}:-2,setsar=1,tile=${COLS}x${ROWS}`, ...tail]);
+      }
       if (status !== 0 || !(await exists(temporary))) return null;
+      if (ahead) {
+        try {
+          const clip = await fs.stat(videoPath);
+          await fs.utimes(temporary, clip.mtime, clip.mtime);
+        } catch (_) { /* the time it was made, then */ }
+      }
       await fs.rename(temporary, target);
       if (++written % 200 === 0) void prune();
       return target;
@@ -145,7 +173,7 @@ function createScrubFrames(options = {}) {
   }
 
   function pump() {
-    while (running < maxRunning && queue.length > 0) {
+    while (running < most() && queue.length > 0) {
       const job = queue.shift();
       running += 1;
       job().finally(() => { running -= 1; pump(); });
@@ -207,7 +235,7 @@ function createScrubFrames(options = {}) {
     }
     let entry = inFlight.get(target);
     if (!entry) {
-      entry = schedule(() => generate(videoPath, target), urgent);
+      entry = schedule(() => generate(videoPath, target, !touch), urgent);
       entry.promise = entry.promise.finally(() => inFlight.delete(target));
       inFlight.set(target, entry);
     } else if (urgent) {

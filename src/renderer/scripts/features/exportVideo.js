@@ -2197,15 +2197,16 @@ export async function startExport() {
 
                                 // Convert segment-relative timestamps to absolute time
                                 for (const frame of frames) {
-                                    if (frame.sei) {
+                                    // (every record of the frame: see DashcamMP4.recordsOf)
+                                    for (const [t, sei] of DashcamMP4.recordsOf(frame)) {
                                         allSeiData.push({
-                                            timestampMs: segStartMs + frame.timestamp,
-                                            sei: frame.sei
+                                            timestampMs: segStartMs + t,
+                                            sei
                                         });
 
                                         // Extract GPS coordinates for minimap path
-                                        if (includeMinimap && hasValidGps(frame.sei)) {
-                                            allMapPath.push([frame.sei.latitude_deg, frame.sei.longitude_deg]);
+                                        if (includeMinimap && hasValidGps(sei)) {
+                                            allMapPath.push([sei.latitude_deg, sei.longitude_deg]);
                                         }
                                     }
                                 }

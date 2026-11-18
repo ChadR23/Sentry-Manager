@@ -135,7 +135,10 @@ class Notifications extends EventEmitter {
     }
 
     const roKey = `readonly:${vehicle.id}`;
-    if (status.healthy && status.writable === false) {
+    if (status.healthy && status.readOnly) {
+      // mounted read-only on purpose (docker -v …:ro): nothing is wrong, the footage is only read
+      this.raise({ kind: 'share', level: 'info', vehicleId: vehicle.id, dedupeKey: roKey, title: `${vehicle.name}: footage is mounted read-only`, message: 'It is only read: conversions, the Recycle Bin, cleanup and restore are off until it is mounted read-write.' });
+    } else if (status.healthy && status.writable === false) {
       this.raise({ kind: 'share', level: 'warning', vehicleId: vehicle.id, dedupeKey: roKey, title: `${vehicle.name}: share is read-only`, message: status.lastError || 'Conversions, trash and restore need write access.' });
     } else if (status.writable) this.resolve(roKey);
 

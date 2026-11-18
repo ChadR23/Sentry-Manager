@@ -1,0 +1,36 @@
+{
+  "route": "GET /api/vehicles/:id/speeds",
+  "method": "GET",
+  "request": {
+    "path": "/api/vehicles/contract-car/speeds",
+    "query": {
+      "date": "2024-05-01"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "speeds": {
+        "{root:contract-car}/TeslaCam/RecentClips/2024-05-01_08-00-00-front.mp4": [
+          10,
+          11,
+          12
+        ],
+        "{root:contract-car}/TeslaCam/RecentClips/2024-05-01_08-01-00-front.mp4": [
+          14,
+          15,
+          16
+        ],
+        "{root:contract-car}/TeslaCam/RecentClips/2024-05-01_17-30-00-front.mp4": [
+          0,
+          1
+        ]
+      }
+    }
+  }
+}

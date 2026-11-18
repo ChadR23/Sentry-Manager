@@ -1,0 +1,104 @@
+{
+  "note": "A sample of goldens recorded by tools/contract/record.js from tools/contract/fixture.js (the full set is ~120 answers; record it yourself).",
+  "contract": {
+    "serverRoutes": 187,
+    "serverRouterRoutes": 170,
+    "serverInlineRoutes": 17,
+    "serverApiRoutes": 178,
+    "serverDistinctApiPaths": 156,
+    "byAccess": {
+      "admin": 94,
+      "can-token": 3,
+      "metrics-token": 1,
+      "node-token": 6,
+      "public": 6,
+      "signed-in": 77
+    },
+    "uiCallSites": 789,
+    "uiDistinctCalls": 200,
+    "uiCallSitesBySource": {
+      "aurora": 104,
+      "built-in": 232,
+      "daylight": 110,
+      "flux": 113,
+      "horizon": 110,
+      "sentry-six": 117,
+      "studio": 3
+    },
+    "uiMethodUnknown": 51,
+    "liveChannels": 2,
+    "liveEventTypes": 5,
+    "converterIpcChannels": 22,
+    "uiCallsWithoutRoute": 0,
+    "routesNoUiCalls": 13,
+    "routesNoUiCallsExternal": 10,
+    "liveTopicsUiOnly": 1
+  },
+  "routes": {
+    "GET /api/auth/me": {
+      "requests": 1
+    },
+    "GET /api/media": {
+      "requests": 7
+    },
+    "GET /api/telemetry": {
+      "requests": 6
+    },
+    "GET /api/vehicles/:id/days": {
+      "requests": 2
+    },
+    "GET /api/vehicles/:id/drives": {
+      "requests": 1
+    },
+    "GET /api/vehicles/:id/recordings/:rid": {
+      "requests": 5
+    },
+    "GET /api/vehicles/:id/speeds": {
+      "requests": 3
+    }
+  },
+  "goldens": [
+    {
+      "file": "api_auth_me.22621c1c.json",
+      "route": "GET /api/auth/me",
+      "label": "GET /api/auth/me",
+      "status": 200
+    },
+    {
+      "file": "api_media_path_root_contract-car_TeslaCam_SavedClips_2024-05-03_10-00-00_2024-05-03_09-59-.6bdab282.json",
+      "route": "GET /api/media",
+      "label": "GET /api/media?path={root:contract-car}/TeslaCam/SavedClips/2024-05-03_10-00-00/2024-05-03_09-59-00-front.mp4",
+      "status": 200
+    },
+    {
+      "file": "api_telemetry_path_root_contract-car_TeslaCam_SentryClips_2024-05-02_12-30-00_2024-05-02_1.c618dc11.json",
+      "route": "GET /api/telemetry",
+      "label": "GET /api/telemetry?path={root:contract-car}/TeslaCam/SentryClips/2024-05-02_12-30-00/2024-05-02_12-29-00-front.mp4",
+      "status": 200
+    },
+    {
+      "file": "api_vehicles_contract-car_days_limit_100.a782a899.json",
+      "route": "GET /api/vehicles/:id/days",
+      "label": "GET /api/vehicles/contract-car/days?limit=100",
+      "status": 200
+    },
+    {
+      "file": "api_vehicles_contract-car_drives.c77b754a.json",
+      "route": "GET /api/vehicles/:id/drives",
+      "label": "GET /api/vehicles/contract-car/drives",
+      "status": 200
+    },
+    {
+      "file": "api_vehicles_contract-car_recordings_0000000000000000.b0513919.json",
+      "route": "GET /api/vehicles/:id/recordings/:rid",
+      "label": "GET /api/vehicles/contract-car/recordings/0000000000000000",
+      "status": 404
+    },
+    {
+      "file": "api_vehicles_contract-car_speeds_date_2024-05-01.b3b625fc.json",
+      "route": "GET /api/vehicles/:id/speeds",
+      "label": "GET /api/vehicles/contract-car/speeds?date=2024-05-01",
+      "status": 200
+    }
+  ]
+}

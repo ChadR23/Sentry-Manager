@@ -466,7 +466,7 @@ function rateRow(r = {}) {
     <div><button type="button" class="btn btn-ghost btn-sm" data-rate-del>Remove this rate</button></div></div>`;
 }
 async function system({ el }) {
-  const [sys, settings] = await Promise.all([api('/api/system').catch(() => null), api('/api/settings')]);
+  const [sys, settings, admin] = await Promise.all([api('/api/system').catch(() => null), api('/api/settings'), isAdmin()]);
   state.system = sys || state.system;
   const p = settings.power || { currency: '$', mode: 'flat', rates: [] };
   let mode = p.mode === 'tou' ? 'tou' : 'flat';
@@ -490,6 +490,7 @@ async function system({ el }) {
         ['GPU hints', (sys.gpu?.hints || []).map(esc).join('<br>')],
         ['Version', `<span${buildTip(sys.version || {}) ? ` title="${esc(buildTip(sys.version))}"` : ''}>${esc(buildText(sys.version, 'development'))}</span>`]
       ])) : ''}</div>
+    ${admin ? '<div class="card stack"><h2>Background work</h2><p class="muted">How many clips the background jobs handle at once.</p><div id="work-box"></div></div>' : ''}
     <form class="card stack" id="power" novalidate><h2>Electricity price</h2>
       <p class="muted">Shows what converting costs, next to the energy used. Leave it empty to show energy only.</p>
       <div class="seg" role="group" aria-label="Plan"><button type="button" data-mode="flat" aria-pressed="${mode === 'flat'}">One price</button><button type="button" data-mode="tou" aria-pressed="${mode === 'tou'}">Changes by time of day</button></div>
@@ -501,6 +502,13 @@ async function system({ el }) {
         <div class="stack" id="rates">${(p.rates || []).map(rateRow).join('')}</div>
         <div><button type="button" class="btn btn-sm" id="add-rate">${icon('plus')} Add a rate</button></div></div>
       <div><button class="btn btn-primary" type="submit">Save price</button></div></form></div>`;
+  // Background work (web/workLimitsSettings.js, the same in every interface; admins only)
+  const wb = el.querySelector('#work-box');
+  if (wb) {
+    import('/web/workLimitsSettings.js').then((m) => {
+      if (el.querySelector('#work-box') === wb) m.createWorkLimitsSettings(wb, { cls: { btn: 'btn btn-sm', primary: 'btn btn-primary', input: 'input' }, toast });
+    }).catch(() => { wb.textContent = 'Background work could not load. Reload the page.'; });
+  }
   const form = el.querySelector('#power');
   const list = el.querySelector('#rates');
   form.querySelectorAll('[data-mode]').forEach((b) => {

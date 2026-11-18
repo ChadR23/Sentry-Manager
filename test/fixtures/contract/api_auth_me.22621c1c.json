@@ -1,0 +1,24 @@
+{
+  "route": "GET /api/auth/me",
+  "method": "GET",
+  "request": {
+    "path": "/api/auth/me"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "fingerprint": "<id>",
+      "homeNetwork": true,
+      "needsSetup": false,
+      "role": "admin",
+      "secure": true,
+      "twoFactor": false,
+      "user": "admin"
+    }
+  }
+}

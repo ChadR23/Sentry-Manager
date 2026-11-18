@@ -1,0 +1,109 @@
+{
+  "route": "GET /api/vehicles/:id/days",
+  "method": "GET",
+  "request": {
+    "path": "/api/vehicles/contract-car/days",
+    "query": {
+      "limit": "100"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "dates": [
+        "2024-05-03",
+        "2024-05-02",
+        "2024-05-01"
+      ],
+      "days": [
+        {
+          "archive": null,
+          "byCategory": {
+            "Saved": 1
+          },
+          "bytes": 1055428,
+          "cameras": 4,
+          "canRecordings": 0,
+          "carFiles": null,
+          "clips": 4,
+          "codecs": [],
+          "day": "2024-05-03",
+          "encoded": 0,
+          "encodedRecordings": 0,
+          "minutes": 1,
+          "protected": 0,
+          "recordings": 1,
+          "speedIndex": {
+            "clips": 1,
+            "indexed": 1
+          },
+          "thumbId": "06b88a362664af5d",
+          "unknown": 0
+        },
+        {
+          "archive": null,
+          "byCategory": {
+            "Sentry": 1
+          },
+          "bytes": 1055438,
+          "cameras": 4,
+          "canRecordings": 0,
+          "carFiles": null,
+          "clips": 4,
+          "codecs": [],
+          "day": "2024-05-02",
+          "encoded": 0,
+          "encodedRecordings": 0,
+          "minutes": 1,
+          "protected": 0,
+          "recordings": 1,
+          "speedIndex": {
+            "clips": 1,
+            "indexed": 1
+          },
+          "thumbId": "3ce8681dff72e8f0",
+          "unknown": 0
+        },
+        {
+          "archive": null,
+          "byCategory": {
+            "Recent": 2
+          },
+          "bytes": 4290504,
+          "cameras": 4,
+          "canRecordings": 0,
+          "carFiles": null,
+          "clips": 12,
+          "codecs": [],
+          "day": "2024-05-01",
+          "encoded": 0,
+          "encodedRecordings": 0,
+          "minutes": 3,
+          "protected": 0,
+          "recordings": 2,
+          "speedIndex": {
+            "clips": 3,
+            "indexed": 3
+          },
+          "thumbId": "7cdb75664f3190bd",
+          "unknown": 0
+        }
+      ],
+      "error": null,
+      "limit": 100,
+      "offset": 0,
+      "recordings": 4,
+      "scannedAt": "<time>",
+      "scanning": false,
+      "sentryUsb": {
+        "present": false
+      },
+      "total": 3
+    }
+  }
+}

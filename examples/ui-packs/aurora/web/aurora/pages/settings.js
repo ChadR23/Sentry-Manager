@@ -391,7 +391,7 @@ async function security(box) {
 
 // ---------- System ----------
 async function system(box) {
-  const sys = await api('/api/system');
+  const [sys, admin] = await Promise.all([api('/api/system'), isAdmin()]);
   state.system = sys;
   const caps = sys.converter?.capabilities || {};
   const g = sys.gpu || { gpus: [], nvidia: [], hints: [] };
@@ -406,7 +406,15 @@ async function system(box) {
     ${(g.hints || []).length ? `<dt>GPU hints</dt><dd>${g.hints.map(esc).join('<br>')}</dd>` : ''}
     <dt>Data volume free</dt><dd>${bytes(sys.dataFree)}</dd>
     <dt>Server time zone</dt><dd>${esc(sys.timezone)}</dd>
-    <dt>HTTPS</dt><dd>${sys.security?.https ? 'on' : 'off'} · TLS mode ${esc(sys.security?.tlsMode || '')}${sys.security?.supervised ? ' · supervised' : ''}</dd></dl></section>`;
+    <dt>HTTPS</dt><dd>${sys.security?.https ? 'on' : 'off'} · TLS mode ${esc(sys.security?.tlsMode || '')}${sys.security?.supervised ? ' · supervised' : ''}</dd></dl></section>${
+    admin ? `<section class="panel"><div class="panel-head"><h2>Background work</h2></div><p class="lead">How many clips the background jobs handle at once.</p><div id="work-box" style="margin-top:14px"></div></section>` : ''}`;
+  // Background work (web/workLimitsSettings.js, the same in every interface; admins only)
+  if (!admin) return;
+  const wb = $('#work-box', box);
+  try {
+    const { createWorkLimitsSettings } = await import('/web/workLimitsSettings.js');
+    if ($('#work-box', box) === wb) createWorkLimitsSettings(wb, { cls: { btn: 'btn sm', primary: 'btn primary', input: 'input' }, toast });
+  } catch { wb.textContent = 'Background work could not load. Reload the page.'; }
 }
 
 // ---------- Electricity ----------

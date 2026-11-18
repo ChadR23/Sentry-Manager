@@ -195,7 +195,9 @@ const VIEWER_HIDDEN = [/^\/api\/metrics/, /^\/api\/can\/(settings|files|tokens|p
   // a Sentry USB's fetched diagnostics and its security log
   /^\/api\/sentryusb\/[^/]+\/files\//, /^\/api\/sentryusb\/security/,
   // Help & feedback: what is sent to the developers, and whether (admins only)
-  /^\/api\/reports(\/|$)/];
+  /^\/api\/reports(\/|$)/,
+  // the server's memory and CPUs, and the background work limits (Settings → Advanced)
+  /^\/api\/settings\/work-limits/];
 function viewerMay(method, p) {
   if (method === 'GET' || method === 'HEAD') return !VIEWER_HIDDEN.some((re) => re.test(p));
   return VIEWER_POSTS.some((re) => re.test(p));

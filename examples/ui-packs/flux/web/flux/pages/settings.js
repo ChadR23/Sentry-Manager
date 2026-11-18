@@ -316,7 +316,7 @@ async function security(box) {
 
 // ---------- system ----------
 async function system(box) {
-  const [sys, ctx] = await Promise.all([api('/api/system'), api('/api/stats').catch(() => ({}))]);
+  const [sys, ctx, admin] = await Promise.all([api('/api/system'), api('/api/stats').catch(() => ({})), isAdmin()]);
   const dataVol = (ctx.filesystems || []).find((f) => !f.vehicle)?.path;
   state.system = sys;
   const caps = sys.converter?.capabilities || {};
@@ -331,7 +331,14 @@ async function system(box) {
     <dt>data volume</dt><dd class="mono small">${esc(dataVol || '—')}</dd><dt>converted copies</dt><dd class="mono small">${esc(dataVol ? `${dataVol}/converted` : '—')}</dd>
     <dt>server time zone</dt><dd>${esc(sys.timezone)}</dd>
     <dt>HTTPS</dt><dd>${sys.security?.https ? 'on' : 'off'} · TLS mode ${esc(sys.security?.tlsMode)} · ${sys.security?.supervised ? 'supervised' : 'not supervised'}${fin(sys.security?.uid) ? ` · uid ${sys.security.uid}` : ''}</dd>
-  </dl></section>`;
+  </dl></section>${admin ? '<section class="card"><header class="card-h"><h2>Background work</h2></header><p class="small muted">How many clips the background jobs handle at once.</p><div id="work-box"></div></section>' : ''}`;
+  // Background work (web/workLimitsSettings.js, the same in every interface; admins only)
+  const wb = box.querySelector('#work-box');
+  if (!wb) return;
+  try {
+    const { createWorkLimitsSettings } = await import('/web/workLimitsSettings.js');
+    if (box.querySelector('#work-box') === wb) createWorkLimitsSettings(wb, { cls: { btn: 'btn sm', primary: 'btn primary', input: 'input' }, toast });
+  } catch { wb.textContent = 'Background work could not load. Reload the page.'; }
 }
 
 // ---------- electricity ----------

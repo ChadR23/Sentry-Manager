@@ -253,7 +253,8 @@ events.addEventListener('changed', (event) => {
     location.reload();
     return;
   }
-  if (topics.some((t) => ['inventory', 'notifications', 'vehicles', 'share'].includes(t)))
+  // a share's status changes come as 'vehicles'
+  if (topics.some((t) => ['inventory', 'notifications', 'vehicles'].includes(t)))
     refresh()
       .then(() => {
         window.dispatchEvent(new CustomEvent('s6:changed', { detail: topics }));

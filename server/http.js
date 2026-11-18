@@ -51,6 +51,29 @@ function sendJson(res, status, body) {
   res.end(zipped);
 }
 
+/**
+ * A JSON answer that takes minutes to make (the encoder's benchmark): the
+ * headers and a space go at once, a space every `beatMs` keeps the connection
+ * busy (the server closes one idle for 2 minutes, a reverse proxy may sooner),
+ * then the JSON. JSON parsers skip leading whitespace, so clients read the
+ * answer as before. Not compressed (a stream of spaces cannot be).
+ */
+async function sendJsonPatiently(res, work, { beatMs = 15_000 } = {}) {
+  const open = () => !res.writableEnded && !res.destroyed;
+  res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
+  res.write(' ');
+  const beat = setInterval(() => { if (open()) res.write(' '); }, beatMs);
+  beat.unref?.();
+  try {
+    const out = await work();
+    if (open()) res.end(JSON.stringify(out));
+  } catch (err) {
+    if (open()) res.end(JSON.stringify({ ok: false, error: { code: err?.code || 'INTERNAL_ERROR' } }));
+  } finally {
+    clearInterval(beat);
+  }
+}
+
 function readBody(req, limit = 1024 * 1024) {
   return new Promise((resolve, reject) => {
     let size = 0;
@@ -243,4 +266,4 @@ function sendText(req, res, body, { type, etag, cache = 'no-cache' }) {
   return res.end(req.method === 'HEAD' ? undefined : out);
 }
 
-module.exports = { Router, HttpError, sendJson, readJson, readRaw, serveFile, sendText };
+module.exports = { Router, HttpError, sendJson, sendJsonPatiently, readJson, readRaw, serveFile, sendText };

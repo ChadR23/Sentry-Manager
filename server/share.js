@@ -41,9 +41,29 @@ function findMount(mountinfo, mountPoint) {
     const left = line.slice(0, sep).split(' ');
     const right = line.slice(sep + 3).split(' ');
     if (unescapeMountPath(left[4] || '') !== mountPoint) continue;
-    found = { mountPoint, fsType: right[0], source: unescapeMountPath(right[1] || ''), options: right[2] || '' };
+    found = { mountPoint, fsType: right[0], source: unescapeMountPath(right[1] || ''), options: right[2] || '', mountOptions: left[5] || '' };
   }
   return found;
+}
+
+/**
+ * Whether `p` lies on a read-only mount: the topmost mount whose point holds it
+ * (a bind mount with :ro says so in its own options, the file system's in its
+ * super options).
+ */
+function onReadOnlyMount(mountinfo, p) {
+  let best = null;
+  for (const line of String(mountinfo).split('\n')) {
+    const sep = line.indexOf(' - ');
+    if (sep === -1) continue;
+    const left = line.slice(0, sep).split(' ');
+    const right = line.slice(sep + 3).split(' ');
+    const point = unescapeMountPath(left[4] || '');
+    if (!point || !(p === point || p.startsWith(point.endsWith('/') ? point : `${point}/`))) continue;
+    if (!best || point.length >= best.point.length) best = { point, own: left[5] || '', sup: right[2] || '' };
+  }
+  const ro = (opts) => String(opts).split(',').includes('ro');
+  return Boolean(best && (ro(best.own) || ro(best.sup)));
 }
 
 /** Map mount.cifs errors to something a person can act on. */
@@ -164,6 +184,7 @@ class ShareManager extends EventEmitter {
       source: null,
       readable: false,
       writable: null,
+      readOnly: false, // mounted read-only: only read, never written (no write test either)
       renameOverwrite: null,
       totalBytes: null,
       freeBytes: null,
@@ -231,8 +252,11 @@ class ShareManager extends EventEmitter {
 
   async currentMount() {
     try {
-      return findMount(await fsp.readFile(this.mountinfoPath, 'utf8'), this.root);
+      const info = await fsp.readFile(this.mountinfoPath, 'utf8');
+      this.readOnlyNow = onReadOnlyMount(info, this.root);
+      return findMount(info, this.root);
     } catch {
+      this.readOnlyNow = false;
       return null;
     }
   }
@@ -326,7 +350,7 @@ class ShareManager extends EventEmitter {
     if (forceWriteCheck || st.writable === null || Date.now() - (st.writeCheckedAt || 0) > WRITE_CHECK_INTERVAL_MS) {
       await this.writeCheck();
     }
-    if (st.writable !== false) {
+    if (st.writable !== false || st.readOnly) {
       st.lastError = null;
       st.hint = null;
     }
@@ -335,20 +359,41 @@ class ShareManager extends EventEmitter {
 
   /**
    * Proves the share takes the exact operations an encode needs: create,
-   * write, flush, rename onto an existing file, set mtime, delete.
+   * write, flush, rename onto an existing file, set mtime, delete. A share
+   * mounted read-only is not written at all: it is read-only, not broken.
    */
   async writeCheck() {
     const st = this.state;
     st.writeCheckedAt = Date.now();
+    if (this.readOnlyNow) {
+      this.readOnly(`${this.root} is mounted read-only`);
+      return;
+    }
     const r = await checkWritable(this.root);
     if (r.renameOverwrite !== null) st.renameOverwrite = r.renameOverwrite;
     if (r.ok) {
       if (st.writable === false) this.log.info('Share is writable again.');
       st.writable = true;
+      st.readOnly = false;
+      return;
+    }
+    // a read-only file system the mount table did not show (an NFS export, say): the same
+    if (r.step === WRITE_STEPS.write && /EROFS/.test(r.error || '')) {
+      this.readOnly(`${this.root} is on a read-only file system`);
       return;
     }
     st.writable = false;
+    st.readOnly = false;
     this.fail(`Share is not writable: ${r.step} failed (${r.error})`, r.hint);
+  }
+
+  readOnly(why) {
+    const st = this.state;
+    if (!st.readOnly) this.log.info(`${why}: footage is only read (the Recycle Bin, Protect, cleanup and replacing originals are off).`);
+    st.readOnly = true;
+    st.writable = false;
+    st.lastError = null;
+    st.hint = null;
   }
 
   updateHealthy() {
@@ -379,4 +424,4 @@ class ShareManager extends EventEmitter {
   }
 }
 
-module.exports = { ShareManager, findMount, explainMountError, withTimeout, checkWritable };
+module.exports = { ShareManager, findMount, onReadOnlyMount, explainMountError, withTimeout, checkWritable };

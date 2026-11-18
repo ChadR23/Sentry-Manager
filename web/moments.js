@@ -12,7 +12,8 @@
 //
 // Above the list, the day in numbers (distance, time driving, top speed);
 // below it, Star this moment (with a note; it also protects the recording)
-// and the vehicle's starred moments from every day (/api/stars).
+// and the vehicle's starred moments from every day (/api/stars), each with
+// its note changeable in place (✎) and its star removable (×).
 //   moments.load(vehicleId, day);
 //   moments.destroy();
 //
@@ -46,8 +47,15 @@ const CSS = `
 .sentry-moments-starbtn:hover,.sentry-moments-form button:hover{background:rgba(127,127,127,.14)}
 .sentry-moments-starbtn:focus-visible,.sentry-moments-form button:focus-visible{outline:2px solid currentColor}
 .sentry-moments-form{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+/* (hidden until Star this moment: a page without a [hidden] rule of its own still hides it) */
+.sentry-moments [hidden]{display:none !important}
 .sentry-moments-form input{flex:1 1 140px;min-width:0;padding:6px 8px;border-radius:6px;border:1px solid rgba(127,127,127,.4);background:transparent;color:inherit;font:inherit}
-.sentry-moments-starred{display:grid;grid-template-columns:1fr auto;align-items:center}
+.sentry-moments-starred{display:grid;grid-template-columns:1fr auto auto;align-items:center}
+.sentry-moments-renote{display:flex;gap:6px;flex-wrap:wrap;padding:4px 0}
+.sentry-moments-renote input{flex:1 1 140px;min-width:0;padding:6px 8px;border-radius:6px;border:1px solid rgba(127,127,127,.4);background:transparent;color:inherit;font:inherit}
+.sentry-moments-renote button{all:unset;box-sizing:border-box;cursor:pointer;padding:6px 10px;border-radius:6px;border:1px solid rgba(127,127,127,.4);font-weight:600}
+.sentry-moments-renote button:hover{background:rgba(127,127,127,.14)}
+.sentry-moments-renote button:focus-visible{outline:2px solid currentColor}
 .sentry-moments .sentry-moments-starred .sentry-moments-row{grid-template-columns:10px 1fr}
 .sentry-moments-del{all:unset;cursor:pointer;padding:4px 8px;border-radius:6px;opacity:.6;font-size:16px;line-height:1}
 .sentry-moments-del:hover,.sentry-moments-del:focus-visible{opacity:1;background:rgba(127,127,127,.14)}
@@ -120,13 +128,19 @@ export function createMoments(container, { clock = defaultClock, speedUnit = () 
     }
   }
 
+  let editing = null; // the starred moment whose note is being changed (its id)
   function drawStars() {
     starHead.hidden = !stars.length;
-    starList.innerHTML = stars.map((x, i) => `<div class="sentry-moments-starred">
+    starList.innerHTML = stars.map((x, i) => (x.id === editing ? `<form class="sentry-moments-renote" data-renote-form="${esc(x.id)}">
+      <input maxlength="200" value="${esc(x.note || '')}" placeholder="A note (optional)" aria-label="Note for this starred moment">
+      <button type="submit">Save</button><button type="button" data-renote-cancel>Cancel</button></form>` : `<div class="sentry-moments-starred">
       <button type="button" class="sentry-moments-row" data-star="${i}"><i style="background:#ffd34a"></i>
         <span class="sentry-moments-kind">${esc(x.note || 'Starred moment')}</span>
         <span class="sentry-moments-time">${esc(x.day === shownDay ? '' : `${dayText(x.day)} · `)}${esc(timeOf(x))}</span></button>
-      <button type="button" class="sentry-moments-del" data-unstar="${esc(x.id)}" aria-label="Remove the star from ${esc(x.note || 'this moment')}" title="Remove the star">×</button></div>`).join('');
+      <button type="button" class="sentry-moments-del" data-renote="${esc(x.id)}" aria-label="Change the note of ${esc(x.note || 'this moment')}" title="Change the note">✎</button>
+      <button type="button" class="sentry-moments-del" data-unstar="${esc(x.id)}" aria-label="Remove the star from ${esc(x.note || 'this moment')}" title="Remove the star">×</button></div>`)).join('');
+    const input = editing && starList.querySelector('[data-renote-form] input');
+    if (input) { input.focus(); input.select(); }
   }
 
   let starSeq = 0;
@@ -153,6 +167,9 @@ export function createMoments(container, { clock = defaultClock, speedUnit = () 
       else openAt?.(x);
       return;
     }
+    const re = e.target.closest('[data-renote]');
+    if (re) { editing = re.dataset.renote; drawStars(); return; }
+    if (e.target.closest('[data-renote-cancel]')) { editing = null; drawStars(); return; }
     const un = e.target.closest('[data-unstar]');
     if (un) {
       try { await send('DELETE', `/api/stars/${encodeURIComponent(un.dataset.unstar)}`); } catch { /* shown again below */ }
@@ -167,6 +184,28 @@ export function createMoments(container, { clock = defaultClock, speedUnit = () 
     form.hidden = false;
     form.querySelector('input').value = '';
     form.querySelector('input').focus();
+  });
+  // a starred moment's note changed in place (PATCH /api/stars/:id)
+  starList.addEventListener('submit', async (e) => {
+    const f = e.target.closest('[data-renote-form]');
+    if (!f) return;
+    e.preventDefault();
+    const input = f.querySelector('input');
+    const save = f.querySelector('[type=submit]');
+    save.disabled = true;
+    try {
+      await send('PATCH', `/api/stars/${encodeURIComponent(f.dataset.renoteForm)}`, { note: input.value });
+      editing = null;
+      loadStars();
+    } catch (err) {
+      input.setCustomValidity(err.message);
+      input.reportValidity();
+      setTimeout(() => input.setCustomValidity(''), 3000);
+      save.disabled = false;
+    }
+  });
+  starList.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && editing) { editing = null; drawStars(); }
   });
   form?.addEventListener('submit', async (e) => {
     e.preventDefault();

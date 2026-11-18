@@ -27,19 +27,43 @@ function readU64(buffer, offset) {
   return buffer.readBigUInt64BE(offset);
 }
 
-function parseRange(buffer, start, end, parent) {
+// The bytes a parse reads from: the whole file in one Buffer, or (see
+// parseMp4Parts) a few pieces of a file at their file offsets, every byte
+// between them read as zero.
+function wholeSource(buffer) {
+  return { length: buffer.length, bytes: (start, end) => buffer.subarray(start, end) };
+}
+
+function partsSource(length, parts) {
+  const bytes = (start, end) => {
+    for (const part of parts) {
+      if (start >= part.start && end <= part.start + part.bytes.length) return part.bytes.subarray(start - part.start, end - part.start);
+    }
+    const out = Buffer.alloc(end - start);
+    for (const part of parts) {
+      const from = Math.max(start, part.start);
+      const to = Math.min(end, part.start + part.bytes.length);
+      if (from < to) part.bytes.copy(out, from - start, from - part.start, to - part.start);
+    }
+    return out;
+  };
+  return { length, bytes };
+}
+
+function parseRange(source, start, end, parent) {
   const children = [];
   let cursor = start;
   while (cursor < end) {
     if (end - cursor < 8n) throw mp4Error('Truncated MP4 box header');
     const offset = toNumber(cursor, 'MP4 box offset');
-    const declaredSize = BigInt(buffer.readUInt32BE(offset));
-    const type = buffer.toString('ascii', offset + 4, offset + 8);
+    const header = source.bytes(offset, offset + (end - cursor < 16n ? 8 : 16));
+    const declaredSize = BigInt(header.readUInt32BE(0));
+    const type = header.toString('ascii', 4, 8);
     if (declaredSize === 0n) throw mp4Error(`Size-zero MP4 box is not supported: ${type}`);
     const extended = declaredSize === 1n;
     const headerSize = extended ? 16n : 8n;
     if (end - cursor < headerSize) throw mp4Error(`Truncated MP4 box header: ${type}`);
-    const size = extended ? readU64(buffer, offset + 8) : declaredSize;
+    const size = extended ? readU64(header, 8) : declaredSize;
     if (size < headerSize) throw mp4Error(`Invalid MP4 box size: ${type}`);
     const boxEnd = cursor + size;
     if (boxEnd > end) throw mp4Error(`MP4 box exceeds its containing range: ${type}`);
@@ -54,7 +78,7 @@ function parseRange(buffer, start, end, parent) {
       parent,
       children: []
     };
-    if (CONTAINER_TYPES.has(type)) node.children = parseRange(buffer, node.contentStart, node.end, node);
+    if (CONTAINER_TYPES.has(type)) node.children = parseRange(source, node.contentStart, node.end, node);
     children.push(node);
     cursor = boxEnd;
   }
@@ -62,13 +86,38 @@ function parseRange(buffer, start, end, parent) {
   return children;
 }
 
-function parseMp4(buffer) {
-  requireBuffer(buffer);
-  const root = { type: 'root', start: 0n, size: BigInt(buffer.length), headerSize: 0n, contentStart: 0n, end: BigInt(buffer.length), parent: null, children: [] };
-  root.buffer = buffer;
-  root.children = parseRange(buffer, 0n, root.end, root);
+function parseSource(source) {
+  const root = { type: 'root', start: 0n, size: BigInt(source.length), headerSize: 0n, contentStart: 0n, end: BigInt(source.length), parent: null, children: [] };
+  root.source = source;
+  root.children = parseRange(source, 0n, root.end, root);
   for (const track of findBoxes(root, 'trak')) validateSimpleEditList(root, track);
   return root;
+}
+
+function parseMp4(buffer) {
+  requireBuffer(buffer);
+  const root = parseSource(wholeSource(buffer));
+  root.buffer = buffer;
+  return root;
+}
+
+// The same tree as parseMp4 of a file of fileSize bytes that holds only
+// `parts` ([{ start, bytes }], file offsets, not overlapping) and zeros
+// elsewhere, without a buffer the size of the file: a reader passes the
+// top-level box headers and the moov, and node positions stay file offsets.
+// The tree has no .buffer, so it is for reading tables, not for rewriting.
+function parseMp4Parts(fileSize, parts) {
+  if (!Number.isSafeInteger(fileSize) || fileSize < 0) throw new TypeError('MP4 file size must be a non-negative integer');
+  for (const part of parts) {
+    requireBuffer(part.bytes);
+    if (!Number.isSafeInteger(part.start) || part.start < 0 || part.start + part.bytes.length > fileSize) throw new RangeError('MP4 part lies outside the file');
+  }
+  return parseSource(partsSource(fileSize, parts));
+}
+
+/** A box's content as bytes (from a tree made by parseMp4 or parseMp4Parts). */
+function boxContent(tree, node) {
+  return nodePayload(tree, node);
 }
 
 function validateSimpleEditList(tree, track) {
@@ -155,7 +204,13 @@ function uniqueChild(node, type, required = true) {
 }
 
 function nodePayload(tree, node) {
-  return tree.buffer.subarray(toNumber(node.contentStart, 'MP4 payload start'), toNumber(node.end, 'MP4 payload end'));
+  const start = toNumber(node.contentStart, 'MP4 payload start');
+  const end = toNumber(node.end, 'MP4 payload end');
+  return tree.source ? tree.source.bytes(start, end) : tree.buffer.subarray(start, end);
+}
+
+function isTree(tree) {
+  return Boolean(tree) && (Boolean(tree.source) || Buffer.isBuffer(tree.buffer));
 }
 
 function fullBoxData(tree, node, minimumLength) {
@@ -193,7 +248,7 @@ function tracksWithUniqueIds(tree) {
 }
 
 function selectVideoTrack(tree) {
-  if (!tree || !Buffer.isBuffer(tree.buffer)) throw new TypeError('selectVideoTrack requires a parsed MP4 tree');
+  if (!isTree(tree)) throw new TypeError('selectVideoTrack requires a parsed MP4 tree');
   const candidates = tracksWithUniqueIds(tree);
   const tracks = candidates.filter((track) => isVideoTrack(tree, track));
   if (tracks.length !== 1) throw mp4Error(tracks.length === 0 ? 'No video track found' : 'Multiple video tracks are not supported', 'UNSUPPORTED_CONTAINER');
@@ -205,7 +260,7 @@ function selectVideoTrack(tree) {
 function rootFor(node) {
   let current = node;
   while (current.parent) current = current.parent;
-  if (!Buffer.isBuffer(current.buffer)) throw new TypeError('MP4 node is detached from its parsed tree');
+  if (!isTree(current)) throw new TypeError('MP4 node is detached from its parsed tree');
   return current;
 }
 
@@ -242,7 +297,7 @@ function chunkOffsets(tree, stbl) {
 }
 
 function readChunkOffsets(tree, trackId) {
-  if (!tree || !Buffer.isBuffer(tree.buffer)) throw new TypeError('readChunkOffsets requires a parsed MP4 tree');
+  if (!isTree(tree)) throw new TypeError('readChunkOffsets requires a parsed MP4 tree');
   if (!Number.isInteger(trackId) || trackId < 0) throw new TypeError('track id must be a non-negative integer');
   const track = tracksWithUniqueIds(tree).find((candidate) => trackIdForCandidate(tree, candidate) === trackId);
   if (!track) throw mp4Error(`Track ${trackId} was not found`);
@@ -261,7 +316,7 @@ function sampleSizes(tree, stbl) {
   const count = payload.readUInt32BE(8);
   // every sample must lie inside this file's media data: a count that cannot
   // fit is refused before it becomes a multi-gigabyte array
-  if (defaultSize !== 0 && BigInt(count) * BigInt(defaultSize) > BigInt(tree.buffer.length)) throw mp4Error('stsz sample count exceeds the file');
+  if (defaultSize !== 0 && BigInt(count) * BigInt(defaultSize) > tree.end) throw mp4Error('stsz sample count exceeds the file');
   if (defaultSize !== 0) return Array.from({ length: count }, () => defaultSize);
   if (BigInt(payload.length) < 12n + BigInt(count) * 4n) throw mp4Error('Truncated stsz table');
   const sizes = [];
@@ -443,4 +498,4 @@ function rewriteChunkOffsets(buffer, tree, delta) {
   return serialize(tree);
 }
 
-module.exports = { parseMp4, findBoxes, selectVideoTrack, sampleTable, buildSampleIndex, readChunkOffsets, rewriteChunkOffsets, serializedBoxHeaderSize, makeBox, makeFullBox };
+module.exports = { parseMp4, parseMp4Parts, boxContent, findBoxes, selectVideoTrack, sampleTable, buildSampleIndex, readChunkOffsets, rewriteChunkOffsets, serializedBoxHeaderSize, makeBox, makeFullBox };

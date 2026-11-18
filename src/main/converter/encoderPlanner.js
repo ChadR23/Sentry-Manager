@@ -1,5 +1,7 @@
 'use strict';
 
+const fs = require('fs');
+
 // These conservative 8-bit 4:2:0 floors avoid known encoder initialization
 // failures at impractically low bitrates. They are the only bitrate clamps;
 // the planner deliberately has no maximum clamp that could defeat a byte target.
@@ -140,15 +142,125 @@ function deviceIndex(device) {
   return String(device.index);
 }
 
+function readTrimmed(p) {
+  try { return String(fs.readFileSync(p, 'utf8')).trim(); } catch { return ''; }
+}
+
+// above any CPU number a kernel gives (Node and Rust then count the same)
+const CPU_ID_LIMIT = 2 ** 22;
+
+// "0-3,8,10-11" -> 7; 0 when it is not a CPU list
+function cpuListCount(list) {
+  let n = 0;
+  for (const part of String(list).split(',')) {
+    const m = /^(\d+)(?:-(\d+))?$/.exec(part.trim());
+    if (!m) return 0;
+    const lo = Number(m[1]);
+    const hi = m[2] === undefined ? lo : Number(m[2]);
+    if (hi < lo || hi >= CPU_ID_LIMIT) return 0;
+    n += hi - lo + 1;
+  }
+  return n;
+}
+
+// This process's path in one cgroup hierarchy (/proc/self/cgroup lines are
+// "id:controllers:path"), '' when it is not listed
+function cgroupPath(file, wanted) {
+  for (const raw of String(file).split('\n')) {
+    const line = raw.replace(/\r$/, '');
+    const a = line.indexOf(':');
+    const b = a < 0 ? -1 : line.indexOf(':', a + 1);
+    if (b < 0) continue;
+    const path = line.slice(b + 1);
+    if (path.startsWith('/') && wanted(line.slice(0, a), line.slice(a + 1, b))) return path;
+  }
+  return '';
+}
+
+// root, then each folder down to this process's cgroup under it
+function cgroupDirs(root, path) {
+  const dirs = [root];
+  let dir = root;
+  for (const part of path.split('/').filter(Boolean)) dirs.push(dir += `/${part}`);
+  return dirs;
+}
+
+// The smallest CPU limit (compose cpus: 2.5 -> 2.5) of this process's cgroup
+// and every cgroup above it that it can see, or null: cgroup v2 cpu.max, v1
+// cfs quota (server/workLimits.js cgroupCpus reads only this one and the root)
+function cgroupCpuLimit(read) {
+  const file = read('/proc/self/cgroup');
+  const found = [];
+  for (const d of cgroupDirs('/sys/fs/cgroup', cgroupPath(file, (id, controllers) => id === '0' && controllers === ''))) {
+    const [quota, period] = read(`${d}/cpu.max`).trim().split(/\s+/);
+    if (quota && quota !== 'max' && Number(quota) > 0 && Number(period) > 0) found.push(Number(quota) / Number(period));
+  }
+  const v1 = cgroupPath(file, (id, controllers) => id !== '0' && controllers.split(',').includes('cpu'));
+  for (const root of ['/sys/fs/cgroup/cpu', '/sys/fs/cgroup/cpu,cpuacct']) {
+    for (const d of cgroupDirs(root, v1)) {
+      const quota = Number(read(`${d}/cpu.cfs_quota_us`).trim() || NaN);
+      const period = Number(read(`${d}/cpu.cfs_period_us`).trim() || NaN);
+      if (quota > 0 && period > 0) found.push(quota / period);
+    }
+  }
+  const real = found.filter((n) => Number.isFinite(n) && n < 2 ** 53);
+  return real.length ? Math.min(...real) : null;
+}
+
+// Cpus_allowed_list in /proc/self/status: the CPUs this process may run on
+function allowedCpus(status) {
+  for (const line of String(status).split('\n')) {
+    if (!line.startsWith('Cpus_allowed_list:')) continue;
+    const list = line.slice('Cpus_allowed_list:'.length).trim();
+    return list && !/\s/.test(list) ? cpuListCount(list) : 0;
+  }
+  return 0;
+}
+
+// The CPUs this process may use: its CPU affinity (a cpuset) and its
+// cgroup CPU limit rounded up, whichever is smaller; 0 when unknown
+function usableCpus(read = readTrimmed) {
+  const allowed = allowedCpus(read('/proc/self/status'));
+  const limit = cgroupCpuLimit(read);
+  if (limit === null) return allowed;
+  const capped = Math.max(1, Math.ceil(limit));
+  return allowed > 0 ? Math.min(allowed, capped) : capped;
+}
+
+// libx265 sizes its thread pool with libnuma. Docker's default seccomp
+// profile blocks the calls libnuma makes (unless the container has SYS_NICE),
+// so x265 finds no CPUs and encodes without a pool, about 3x slower. On Linux
+// the pool is given: one thread per CPU this process may use. 0: x265's own
+// choice.
+function defaultX265Pools(platform = process.platform, cpus = usableCpus()) {
+  return platform === 'linux' && Number.isSafeInteger(cpus) && cpus > 0 ? cpus : 0;
+}
+
+// smallest: the Smallest (CPU only) profile, { maxrate } in bit/s or null: libx265
+// veryfast at CRF 27 with peaks capped at maxrate (60% of the original's
+// average bitrate) and a buffer of twice that, or a retry's bitrate under the
+// original's as for constant quality; B-frames either way. Its frames are
+// shown at the original's own times: the original's time base (two frames
+// never share a tick), no edit list, and composition offsets that may be
+// negative (ctts version 1) where the first frame would otherwise be late.
+// keepOrder: a clip given back the original's own timing (lead-in frames or
+// samples no decoder outputs, leadIn.js) is encoded without reordering, so
+// retimeToSource can pair its samples one for one.
+//
 // holdFrames: a clip that starts before its first keyframe (see leadIn.js)
 // gets the first decodable frame repeated that many times in front, so the
 // encoded file has every frame of the original. tpad clones the frame it is
 // given, so it runs on system-memory frames before any upload; GPU-resident
 // (zero-copy) frames are not used for such clips (jobService).
-function buildEncodeArgs({ codec, encoder, bitrate, quality = null, vaapiDevice = '/dev/dri/renderD128', hwFrames = false, device = null, holdFrames = 0, cpuPreset = process.env.CPU_ENCODER_PRESET }) {
+function buildEncodeArgs({ codec, encoder, bitrate, quality = null, vaapiDevice = '/dev/dri/renderD128', hwFrames = false, device = null, holdFrames = 0, cpuPreset = process.env.CPU_ENCODER_PRESET, smallest = null, keepOrder = false, x265Pools = null }) {
   const speed = CPU_PRESETS[cpuPresetFrom(cpuPreset)];
   requireFamily(codec);
-  if (quality === null) requirePositive('bitrate', bitrate);
+  if (x265Pools !== null && (!Number.isSafeInteger(x265Pools) || x265Pools < 0)) throw new RangeError('x265Pools must be a non-negative integer or null');
+  if (smallest !== null) {
+    if (codec !== 'h265' || encoder !== 'libx265' || quality !== null) throw new RangeError('Smallest (CPU only) is libx265 without a quality level');
+    if (smallest.maxrate !== null && !(Number.isSafeInteger(smallest.maxrate) && smallest.maxrate > 0)) throw new RangeError('maxrate must be a positive safe integer or null');
+    if (bitrate !== null && bitrate !== undefined) requirePositive('bitrate', bitrate);
+  } else if (quality === null) requirePositive('bitrate', bitrate);
   if (typeof encoder !== 'string' || !encoderBelongsToFamily(codec, encoder)) {
     throw new RangeError(`Encoder ${encoder} is not a ${codec} candidate`);
   }
@@ -170,7 +282,12 @@ function buildEncodeArgs({ codec, encoder, bitrate, quality = null, vaapiDevice 
 
   args.push('-c:v', encoder);
   if (device && encoder.endsWith('_nvenc')) args.push('-gpu', deviceIndex(device));
-  if (quality !== null) args.push(...qualityRateArgs(codec, encoder, quality));
+  if (smallest !== null) {
+    if (bitrate === null || bitrate === undefined) {
+      args.push('-crf', '27');
+      if (smallest.maxrate !== null) args.push('-maxrate', String(smallest.maxrate), '-bufsize', String(2 * smallest.maxrate));
+    } else args.push(...bitrateArgs(encoder, bitrate));
+  } else if (quality !== null) args.push(...qualityRateArgs(codec, encoder, quality));
   else args.push(...bitrateArgs(encoder, bitrate));
 
   // GPU-resident input frames (zero-copy decode) are already 8-bit 4:2:0 and
@@ -193,17 +310,22 @@ function buildEncodeArgs({ codec, encoder, bitrate, quality = null, vaapiDevice 
   if (encoder.endsWith('_nvenc')) args.push('-forced-idr', '1');
   if (encoder.endsWith('_qsv')) args.push('-forced_idr', '1');
   if (encoder === 'libsvtav1') args.push('-svtav1-params', 'keyint=2s');
-  if (encoder === 'libx265') args.push('-preset', speed.libx265);
+  if (encoder === 'libx265') args.push('-preset', smallest !== null ? 'veryfast' : speed.libx265);
+  const pools = encoder === 'libx265' ? x265Pools ?? defaultX265Pools() : 0;
+  if (pools > 0) args.push('-x265-params', `pools=${pools}`);
   if (encoder === 'libsvtav1') args.push('-preset', speed.libsvtav1);
   if (encoder === 'libaom-av1') args.push('-cpu-used', speed.aom, '-row-mt', '1');
-  if (codec === 'h265') args.push('-bf', '0');
+  const reorder = smallest !== null && !keepOrder;
+  if (codec === 'h265' && !reorder) args.push('-bf', '0');
 
   args.push(
     '-tag:v', codec === 'h265' ? 'hvc1' : 'av01',
     '-fps_mode', 'passthrough',
+    ...(reorder ? ['-enc_time_base', 'demux'] : []),
     '-start_at_zero',
-    '-avoid_negative_ts', 'make_zero',
-    '-use_editlist', '0'
+    ...(reorder ? [] : ['-avoid_negative_ts', 'make_zero']),
+    '-use_editlist', '0',
+    ...(reorder ? ['-movflags', '+negative_cts_offsets'] : [])
   );
   return args;
 }
@@ -529,6 +651,9 @@ module.exports = {
   SAFE_VIDEO_BITRATE_FLOORS,
   CPU_PRESETS,
   cpuPresetFrom,
+  defaultX265Pools,
+  usableCpus,
+  cpuListCount,
   decodeAccelArgs,
   RETRY_REASONS,
   buildEncodeArgs,

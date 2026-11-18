@@ -383,7 +383,73 @@ function speedOffset(frames, ch, start, { center = 0, range = SEARCH_MS } = {}) 
     const den = y0 - 2 * y1 + y2;
     if (den < 0) off += (GRID_MS * (y0 - y2)) / (2 * den);
   }
+  // then where the two speeds agree best near it: a correlation peak sits where the
+  // curves' shapes match, which on a gentle highway minute can be tens of ms from
+  // where the speeds themselves are equal
+  let best2 = null;
+  for (let lag = off - 150; lag <= off + 150; lag += GRID_MS) {
+    const g = meanGap(sp.vs, cs, tsAbs, base, lag);
+    if (g && (!best2 || g.gap < best2.gap)) best2 = { lag, gap: g.gap };
+  }
+  if (best2 && Math.abs(best2.lag - off) < 150) off = best2.lag;
   return { offsetMs: off, score: fine[k].sc.s };
+}
+
+// ---- how well an offset fits a clip: what a refinement must not make worse
+const MOVING_KPH = 18;
+/** CAN speed (kph) at a CAN time, interpolated, or null outside the points. */
+function speedAt(pts, t) {
+  if (!pts.length || t < pts[0][0] || t > pts[pts.length - 1][0] + 1500) return null;
+  let lo = 0;
+  let hi = pts.length - 1;
+  while (lo < hi) { const m = (lo + hi + 1) >> 1; if (pts[m][0] <= t) lo = m; else hi = m - 1; }
+  const a = pts[lo];
+  const b = pts[lo + 1];
+  return b && b[0] - a[0] <= 1200 ? a[1] + ((t - a[0]) / (b[0] - a[0])) * (b[1] - a[1]) : a[1];
+}
+/**
+ * check(offsetMs) for a clip: { speedGap: mean |footage − CAN| speed (kph) while
+ * moving, or null; edges: footage edges with a CAN edge of their kind within
+ * 40 ms; edgeRes: their median distance (ms) }.
+ */
+function clipCheck(frames, ch, tel, can, start) {
+  const moving = frames.filter((f) => f.v > MOVING_KPH);
+  const cm = byType(can);
+  return (off) => {
+    let speedGap = null;
+    if (moving.length >= 300 && ch.speed.length >= 10) {
+      let n = 0;
+      let sum = 0;
+      for (const f of moving) { const c = speedAt(ch.speed, start + off + f.t); if (c === null) continue; n++; sum += Math.abs(f.v - c); }
+      if (n >= 0.8 * moving.length) speedGap = sum / n;
+    }
+    const res = [];
+    for (const e of tel) {
+      const list = cm.get(e.type);
+      if (!list) continue;
+      const want = start + off + e.t;
+      let lo = 0;
+      let hi = list.length;
+      while (lo < hi) { const mid = (lo + hi) >> 1; if (list[mid] < want) lo = mid + 1; else hi = mid; }
+      let d = Infinity;
+      for (const k of [lo - 1, lo]) if (k >= 0 && k < list.length) d = Math.min(d, Math.abs(list[k] - want));
+      if (d <= 40) res.push(d);
+    }
+    return { speedGap, edges: res.length, edgeRes: res.length ? median(res) : null };
+  };
+}
+/**
+ * Whether offset b fits a clip no worse than offset a (by check): not fewer
+ * matched edges (one fewer allowed when b sits within 30 ms of a: the same
+ * fit, refined), and the speeds agree no worse (10 % or 0.02 kph of slack).
+ */
+function noWorse(check, a, b) {
+  if (!check) return true;
+  const x = check(a);
+  const y = check(b);
+  if (y.edges < x.edges - (Math.abs(a - b) <= 30 ? 1 : 0)) return false;
+  if (x.speedGap !== null && (y.speedGap === null || y.speedGap > x.speedGap * 1.1 + 0.02)) return false;
+  return true;
 }
 
 /**
@@ -398,7 +464,8 @@ function estimateClip({ frames, series, start }) {
   const tel = frames?.length ? telEdges(frames) : [];
   const can = canEdges(ch);
   const clock = { offsetMs: 0, method: 'clock', matches: 0, spreadMs: null };
-  if (!frames?.length || !hasCan) return { result: clock, dur, tel, can, hasCan };
+  if (!frames?.length || !hasCan) return { result: clock, dur, tel, can, hasCan, check: null };
+  const check = clipCheck(frames, ch, tel, can, start);
   const sp = speedOffset(frames, ch, start);
   const mode = edgeMode(tel, can, start, sp ? sp.offsetMs : 0, sp ? 600 : SEARCH_MS);
   let fit = null;
@@ -410,7 +477,14 @@ function estimateClip({ frames, series, start }) {
   let result = clock;
   if (fit && fit.n >= 3) result = { offsetMs: r1(fit.a), method: 'edges', matches: fit.n, spreadMs: fit.spreadMs === null ? null : r1(fit.spreadMs) };
   else if (sp) result = { offsetMs: r1(sp.offsetMs), method: 'speed', matches: 0, spreadMs: null };
-  return { result, dur, tel, can, hasCan };
+  // edges that put the clip somewhere the speeds clearly disagree (pedal edges matched
+  // one crossing off, say) lose to the speed
+  if (result.method === 'edges' && sp && Math.abs(result.offsetMs - sp.offsetMs) > 100) {
+    const e = check(result.offsetMs);
+    const s = check(sp.offsetMs);
+    if (e.speedGap !== null && s.speedGap !== null && e.speedGap > 1.5 * s.speedGap + 0.03) result = { offsetMs: r1(sp.offsetMs), method: 'speed', matches: 0, spreadMs: null };
+  }
+  return { result, dur, tel, can, hasCan, check };
 }
 
 /**
@@ -419,23 +493,103 @@ function estimateClip({ frames, series, start }) {
  * name's second) share one time line; their edges fit one offset and drift.
  * Returns each clip's result (with `rate` for the drift).
  */
+// Tesla's clips do not always follow on exactly: on real drives the next file
+// often starts 0.2-0.7 s after the last frame of the one before. A gap the
+// clips' own offsets show is kept in the drive's time line, a gap no clip can
+// show is taken as the drive's typical one, and a gap under GAP_NONE_MS is
+// none (the clips' own offsets are that precise).
+const GAP_NONE_MS = 60;
+const SOLID = new Set(['edges', 'speed']);
+
+/** Where the footage and CAN speeds agree best within [center ± range], if clearly: offsetMs or null. */
+function speedRefine(check, center, range) {
+  if (!check || check(center).speedGap === null) return null;
+  const pts = [];
+  for (let off = center - range; off <= center + range; off += 10) { const g = check(off).speedGap; if (g !== null) pts.push({ off, g }); }
+  if (pts.length < 10) return null;
+  let best = pts[0];
+  for (const p of pts) if (p.g < best.g) best = p;
+  if (best.off <= center - range + 20 || best.off >= center + range - 20) return null; // at the window's edge: no minimum inside
+  // clearly a minimum: well under the window's typical agreement, and rising both sides
+  // (a steady cruise's speed still wobbles enough; pure noise has no such dip)
+  const around = Math.min(check(best.off - 200).speedGap ?? Infinity, check(best.off + 200).speedGap ?? Infinity);
+  if (!(around - best.g >= 0.005) || best.g > 0.7 * median(pts.map((p) => p.g))) return null;
+  let b2 = best.off;
+  let g2 = best.g;
+  for (let off = best.off - 10; off <= best.off + 10; off += 1) { const g = check(off).speedGap; if (g !== null && g < g2) { g2 = g; b2 = off; } }
+  return b2;
+}
+
 function solveDrive(clips) {
   const out = clips.map((c) => ({ ...c.est.result }));
+  const solid = (k) => SOLID.has(clips[k].est.result.method);
+  const follows = (k) => k > 0 && clips[k - 1].est.dur > 0 && clips[k].est.dur > 0 && Math.abs(clips[k].start - clips[k - 1].start - clips[k - 1].est.dur) <= 1500;
+  // the gaps between clips that each have their own offset
+  const gapOf = new Map();
+  for (let k = 1; k < clips.length; k++) {
+    if (!follows(k) || !solid(k) || !solid(k - 1)) continue;
+    const g = (clips[k].start + clips[k].est.result.offsetMs) - (clips[k - 1].start + clips[k - 1].est.result.offsetMs) - clips[k - 1].est.dur;
+    if (g > -300 && g < 1500) gapOf.set(k, Math.abs(g) < GAP_NONE_MS ? 0 : g);
+  }
+  // the typical gap: from the clips' own offsets, else from their names (the step
+  // between two names less the first clip's length: each name is off by up to a
+  // second, but over a drive the median is close)
+  const measured = [...gapOf.values()];
+  const named = [];
+  for (let k = 1; k < clips.length; k++) if (follows(k)) named.push(clips[k].start - clips[k - 1].start - clips[k - 1].est.dur);
+  const guess = measured.length >= 2 ? median(measured) : named.length >= 3 ? median(named) : 0;
+  const typical = Math.abs(guess) >= GAP_NONE_MS ? guess : 0;
   // chains of clips that follow on
   const segs = [];
   let seg = null;
   clips.forEach((c, k) => {
     const prev = clips[k - 1];
-    if (seg && prev.est.dur > 0 && c.est.dur > 0 && Math.abs(c.start - prev.start - prev.est.dur) <= 1500) {
-      seg.push({ k, C: seg[seg.length - 1].C + prev.est.dur });
+    if (seg && follows(k)) {
+      const known = gapOf.has(k);
+      seg.push({ k, C: seg[seg.length - 1].C + prev.est.dur + (known ? gapOf.get(k) : typical), guessed: seg[seg.length - 1].guessed + (known ? 0 : 1) });
     } else {
-      seg = [{ k, C: 0 }];
+      seg = [{ k, C: 0, guessed: 0 }];
       segs.push(seg);
     }
   });
   for (const s of segs) {
+    // a clip with its own offset takes the drive's only if that fits it no worse
+    const placeSolid = (i, fitted) => {
+      const { k } = s[i];
+      if (fitted && noWorse(clips[k].est.check, clips[k].est.result.offsetMs, fitted.offsetMs)) out[k] = fitted;
+    };
+    // the clips without an offset of its own, nearest to one that has one first: each
+    // chained from its nearest anchor (a clip with its own offset, or one placed here by
+    // its own speed), then where its speed agrees best near that; else the drive's line
+    const fittedOf = new Map();
+    const fill = () => {
+      const anchor = new Map();
+      s.forEach(({ k }, i) => { if (solid(k)) anchor.set(i, out[k].offsetMs); });
+      const pending = s.map((_, i) => i).filter((i) => !solid(s[i].k));
+      while (pending.length) {
+        let pick = -1;
+        let from = -1;
+        for (const i of pending) for (const j of anchor.keys()) if (pick < 0 || Math.abs(i - j) < Math.abs(pick - from)) { pick = i; from = j; }
+        if (pick < 0) { for (const i of pending) if (fittedOf.has(i)) out[s[i].k] = fittedOf.get(i); break; }
+        pending.splice(pending.indexOf(pick), 1);
+        const { k } = s[pick];
+        const near = clips[s[from].k].start + anchor.get(from) + (s[pick].C - s[from].C) - clips[k].start;
+        let guessed = 0;
+        for (let x = Math.min(pick, from) + 1; x <= Math.max(pick, from); x++) if (!gapOf.has(s[x].k)) guessed++;
+        const range = Math.min(1500, 300 + 200 * guessed);
+        const fitted = fittedOf.get(pick);
+        // clips that follow on exactly: the drive's line holds across them, as precise as it gets
+        if (fitted && typical === 0 && guessed === 0) { out[k] = fitted; continue; }
+        let refined = speedRefine(clips[k].est.check, near, range);
+        if (refined === null && fitted) refined = speedRefine(clips[k].est.check, fitted.offsetMs, range);
+        if (refined !== null) {
+          out[k] = { offsetMs: r1(refined), method: 'speed-drive', matches: 0, spreadMs: null };
+          anchor.set(pick, refined);
+        } else out[k] = { offsetMs: r1(near), method: 'drive', matches: 0, spreadMs: null };
+      }
+    };
     const live = s.filter(({ k }) => clips[k].est.hasCan && clips[k].est.tel.length);
-    if (!live.length) continue;
+    if (!live.length) { fill(); continue; }
     const collect = (predictOf, winOf, skip) => {
       const pts = [];
       for (const { k, C } of live) {
@@ -453,7 +607,7 @@ function solveDrive(clips) {
       return (t) => clips[k].start + t + r.offsetMs;
     }, (k) => (clips[k].est.result.method === 'edges' ? 60 : 250));
     let fit = robustFit(pass1, { slope: true });
-    if (!fit || fit.n < 6) continue;
+    if (!fit || fit.n < 6) { fill(); continue; }
     const outside = new Set();
     for (let round = 0; round < 2; round++) {
       const f = fit;
@@ -473,14 +627,18 @@ function solveDrive(clips) {
       if (!moved) break;
     }
     const used = new Set(fit.keep.map((p) => p.k));
-    for (const { k, C } of s) {
-      if (outside.has(k)) continue;
-      out[k] = {
-        offsetMs: r1(fit.a + (1 + fit.b) * C - clips[k].start),
+    s.forEach(({ k, C }, i) => {
+      if (outside.has(k)) return;
+      const cand = fit.a + (1 + fit.b) * C - clips[k].start;
+      const fitted = {
+        offsetMs: r1(cand),
         method: 'edges-drive', matches: fit.n, spreadMs: fit.spreadMs === null ? null : r1(fit.spreadMs),
         rate: 1 + fit.b, driftPpm: r1(fit.b * 1e6), clips: used.size
       };
-    }
+      if (solid(k)) placeSolid(i, fitted);
+      else fittedOf.set(i, fitted);
+    });
+    fill();
   }
   return out;
 }

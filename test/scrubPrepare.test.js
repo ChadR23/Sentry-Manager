@@ -37,6 +37,30 @@ test('previews of the newest days are made ahead, newest first, in the backgroun
   assert.equal(asked.length, 3, 'nothing again when nothing changed');
 });
 
+test('`max` is a total, not per pass: later scans never creep on to older clips', async () => {
+  const { asked, prep } = setup({ max: 2 });
+  await prep.kick();
+  assert.deepEqual(asked.map((a) => a.p), [
+    '/footage/RecentClips/2026-11-07_10-01-00-front.mp4',
+    '/footage/RecentClips/2026-11-07_10-00-00-front.mp4'
+  ]);
+  await prep.kick();
+  await prep.kick();
+  assert.equal(asked.length, 2, 'the older clip beyond the newest 2 is never started');
+});
+
+test('a scan that brought nothing new starts no pass', async () => {
+  const { asked, files, prep } = setup();
+  await prep.kick();
+  const n = asked.length;
+  for (let i = 0; i < 3; i++) await prep.kick();
+  assert.equal(asked.length, n);
+  // a new clip arrives: only it is prepared
+  files.set('RecentClips/2026-11-07_10-02-00-front.mp4', { rel: 'RecentClips/2026-11-07_10-02-00-front.mp4', kind: 'clip', day: '2026-11-07', size: 1000, mtimeMs: NOW - HOUR });
+  await prep.kick();
+  assert.deepEqual(asked.slice(n).map((a) => a.p), ['/footage/RecentClips/2026-11-07_10-02-00-front.mp4']);
+});
+
 test('a changed clip is prepared again; 0 days turns it off; it waits while the server is busy', async () => {
   const { asked, files, prep } = setup();
   await prep.kick();

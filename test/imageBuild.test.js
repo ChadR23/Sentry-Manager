@@ -34,7 +34,10 @@ test('the package step runs again each week instead of coming from the build cac
 
 test('nothing is tagged before every test passed and both images were checked', () => {
   const workflow = fs.readFileSync(path.join(REPO, '.github/workflows/image.yml'), 'utf8');
-  assert.match(workflow, /publish:\n\s+needs: \[names, tests, build\]/);
+  assert.match(workflow, /publish:\n\s+needs: \[names, tests, rust-tests, build\]/);
+  // the Rust server's tests (lean/) too, with their checks against the Node code
+  const rust = workflow.slice(workflow.indexOf('\n  rust-tests:'), workflow.indexOf('\n  build:'));
+  assert.match(rust, /cd lean && cargo test --release --locked/, 'the Rust tests run before anything is tagged');
   assert.match(workflow, /push-by-digest=true/, 'the builds push untagged');
   assert.equal((workflow.match(/^\s+tags:/gm) || []).length, 1, 'only the local check image has a tag in a build');
   assert.match(workflow, /--test-shard=\$\{\{ matrix\.shard \}\}\/3/);

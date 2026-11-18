@@ -1142,11 +1142,13 @@ async function createConverterRuntime(options = {}) {
           }
           return runs;
         };
+        // Smallest (CPU only) encodes on this server's CPU, so that is what it measures.
+        const cpuOnly = profileId === 'smallest';
         // this server's own GPUs only: a paired node is not benchmarked from here
-        const gpus = (await lookUpDevices()).filter((device) => device.kind !== 'cpu' && device.kind !== 'node');
+        const gpus = cpuOnly ? [] : (await lookUpDevices()).filter((device) => device.kind !== 'cpu' && device.kind !== 'node');
         if (controller.signal.aborted) throw runtimeError('CANCELLED');
         if (gpus.length < 2 || typeof planner.selectFor !== 'function') {
-          const runs = await runCodecs({ select: (current) => planner.select(current) });
+          const runs = await runCodecs({ select: (current) => (cpuOnly ? planner.selectCpuFallback(current) : planner.select(current)) });
           // Single-codec shape kept for older callers; codecs[] holds every run.
           const first = runs.find((run) => !run.error) || runs[0];
           return { ...first, codecs: runs };

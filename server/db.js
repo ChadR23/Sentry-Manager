@@ -1,12 +1,13 @@
 'use strict';
 
 // Manager state (settings, users, sessions, protected clips, Recycle Bin,
-// jobs, notifications) in one SQLite file on the local /data volume — never
-// on the SMB share, where SQLite locking is unreliable.
+// jobs, notifications, the footage catalog) in one SQLite file on the local
+// /data volume — never on the SMB share, where SQLite locking is unreliable.
 
 const fs = require('fs');
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
+const { Catalog } = require('./catalog');
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -60,6 +61,8 @@ class ManagerDB {
       try { this.db.exec(`ALTER TABLE sessions ADD COLUMN ${col}`); } catch { /* there already */ }
     }
     this.cache = new Map();
+    // the footage catalog (catalog.js): its tables are made here if missing
+    this.catalog = new Catalog(this);
   }
 
   q(sql) {
@@ -91,6 +94,10 @@ class ManagerDB {
 
   set(key, value) {
     this.q('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, JSON.stringify(value));
+  }
+
+  del(key) {
+    this.q('DELETE FROM settings WHERE key = ?').run(key);
   }
 
   // ---- users / sessions

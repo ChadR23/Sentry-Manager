@@ -108,14 +108,24 @@ with *Load these*, which fills the form only when you click it.
   driving footage; parked footage stays about 95% smaller. Clips converted
   before this keep their keyframes: they play the same, seek a little
   slower, and their previews change less often.
-- **Every clip ends up in one codec.** With *Constant quality* or a custom
-  bitrate, a clip that does not come out smaller (busy repeater footage,
-  night, rain) is encoded again at 85% of its original bitrate, then 60%,
-  instead of staying H.264. Only if even that is not smaller is the
-  original kept, unless *Always convert, even if larger* is on (off by
-  default): then that last copy is kept although it is a little bigger, as
-  long as it passed every other check. Turning it on also tries again the
-  clips automatic conversion had left as they were for this reason.
+- **Smallest (CPU only)** (H.265 only) encodes with libx265 on this server's
+  CPU at a constant quality (CRF 27, `veryfast`), with B-frames, which the
+  other profiles leave out, and peaks capped at 60% of each clip's own
+  bitrate. On ten Tesla clips it came out at 38% of the originals' size
+  (*Constant quality* Small: 41%) at about the same picture quality, and
+  took less time on the same CPU. Every frame keeps its original time
+  (checked when the clip is verified). GPUs and nodes are not used for it
+  (with several GPUs the Encoder shows one number for it instead of the
+  rows), and `CPU_ENCODER_PRESET` does not change it.
+- **Every clip ends up in one codec.** With *Constant quality*, *Smallest
+  (CPU only)* or a custom bitrate, a clip that does not come out smaller
+  (busy repeater footage, night, rain) is encoded again at 85% of its
+  original bitrate, then 60%, instead of staying H.264. Only if even that is
+  not smaller is the original kept, unless *Always convert, even if larger*
+  is on (off by default): then that last copy is kept although it is a
+  little bigger, as long as it passed every other check. Turning it on also
+  tries again the clips automatic conversion had left as they were for this
+  reason.
 - **Size profiles** (5%, 20%, 50% smaller) retry a clip that comes out too
   big at a lower bitrate; *Keep clips that can't reach the size target*
   (off by default) then keeps it anyway, if it is smaller than the original
@@ -147,7 +157,12 @@ deleting just that `#` turns it on, already lined up.
 `medium` preset). `CPU_ENCODER_PRESET=fast` or `faster` in `.env` makes
 them quicker (`faster`: about a fifth to a third less time) for a little
 less detail at the same size, or a somewhat larger file with constant
-quality. GPU encoders are not affected.
+quality. GPU encoders are not affected. On Linux, libx265 is given a
+thread pool of one thread per CPU the container may use (its CPU set or
+`cpus:` limit; x265 puts at most 64 in one pool): Docker's default security
+profile blocks the calls x265 uses to find the CPUs (unless the container
+has `SYS_NICE`), and without a pool one clip at a time takes about three
+times as long, five at once about a tenth longer.
 
 ffmpeg is [jellyfin-ffmpeg](https://github.com/jellyfin/jellyfin-ffmpeg),
 which the Jellyfin team keeps on the current FFmpeg release with its own

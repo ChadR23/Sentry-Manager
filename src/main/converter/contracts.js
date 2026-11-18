@@ -79,9 +79,22 @@ function effectiveVerifyMode(config = {}) {
   return config.outputMode === 'replace' && mode === 'off' ? 'quick' : mode;
 }
 
+// Smallest (CPU only): x265 on this server's CPU, veryfast at constant quality
+// (CRF 27), peaks capped at 60% of the original's own average bitrate, with
+// B-frames. H.265 only. Like constant quality, it has no size target.
+const SMALLEST_PROFILE_ID = 'smallest';
+const SMALLEST_PEAK_SHARE = 0.6;
+
+// Smallest (CPU only)'s peak in bit/s: 60% of a clip's own average bitrate (null: unknown).
+function smallestMaxrate(sourceBytes, durationSeconds) {
+  if (!(sourceBytes > 0) || !(durationSeconds > 0)) return null;
+  const peak = Math.floor(((sourceBytes * 8) / durationSeconds) * SMALLEST_PEAK_SHARE);
+  return Number.isSafeInteger(peak) && peak > 0 ? peak : null;
+}
+
 // Profiles without a byte target (the verifier only requires real savings).
 function hasSizeTarget(profileId) {
-  return profileId !== CUSTOM_PROFILE_ID && profileId !== QUALITY_PROFILE_ID;
+  return profileId !== CUSTOM_PROFILE_ID && profileId !== QUALITY_PROFILE_ID && profileId !== SMALLEST_PROFILE_ID;
 }
 
 function isValidConcurrency(value) {
@@ -233,4 +246,4 @@ function serializeSummary(counters) {
   };
 }
 
-module.exports = { PROFILES, CODECS, NETWORK_MODES, OUTPUT_MODES, ITEM_STATES, CONCURRENCY, TIMING_PHASES, addItemTimings, isValidConcurrency, DEVICE_ID, LOCAL_DEVICE_ID, nodeKeyOf, nodeDeviceOf, LANES, normalizeLanes, lanesTotal, CUSTOM_PROFILE_ID, CUSTOM_BITRATE_KBPS, isValidCustomBitrate, QUALITY_PROFILE_ID, QUALITY_LEVELS, isValidQualityLevel, hasSizeTarget, VERIFY_MODES, DEFAULT_VERIFY_MODE, isValidVerifyMode, effectiveVerifyMode, createEmptyCounters, targetOutputBytes, isWithinProfile, addCompletedFile, formatBytes, isTerminalState, serializeSummary };
+module.exports = { PROFILES, CODECS, NETWORK_MODES, OUTPUT_MODES, ITEM_STATES, CONCURRENCY, TIMING_PHASES, addItemTimings, isValidConcurrency, DEVICE_ID, LOCAL_DEVICE_ID, nodeKeyOf, nodeDeviceOf, LANES, normalizeLanes, lanesTotal, CUSTOM_PROFILE_ID, CUSTOM_BITRATE_KBPS, isValidCustomBitrate, QUALITY_PROFILE_ID, QUALITY_LEVELS, isValidQualityLevel, SMALLEST_PROFILE_ID, SMALLEST_PEAK_SHARE, smallestMaxrate, hasSizeTarget, VERIFY_MODES, DEFAULT_VERIFY_MODE, isValidVerifyMode, effectiveVerifyMode, createEmptyCounters, targetOutputBytes, isWithinProfile, addCompletedFile, formatBytes, isTerminalState, serializeSummary };

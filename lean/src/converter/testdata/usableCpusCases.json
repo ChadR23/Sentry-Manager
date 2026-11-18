@@ -1,0 +1,176 @@
+[
+  {
+    "name": "every CPU, no limit",
+    "cpus": 12,
+    "files": {
+      "/proc/self/status": "Name:\tffmpeg\nCpus_allowed:\tfff\nCpus_allowed_list:\t0-11\nMems_allowed_list:\t0"
+    }
+  },
+  {
+    "name": "a cpuset of two",
+    "cpus": 2,
+    "files": {
+      "/proc/self/status": "Cpus_allowed_list:\t0-1"
+    }
+  },
+  {
+    "name": "a list with gaps",
+    "cpus": 7,
+    "files": {
+      "/proc/self/status": "Cpus_allowed_list:\t0-3,8,10-11"
+    }
+  },
+  {
+    "name": "cpus: 2.5 (cgroup v2, root)",
+    "cpus": 3,
+    "files": {
+      "/proc/self/status": "Cpus_allowed_list:\t0-11",
+      "/proc/self/cgroup": "0::/",
+      "/sys/fs/cgroup/cpu.max": "250000 100000"
+    }
+  },
+  {
+    "name": "cpus: 1.5 (cgroup v2, own folder)",
+    "cpus": 2,
+    "files": {
+      "/proc/self/status": "Cpus_allowed_list:\t0-11",
+      "/proc/self/cgroup": "0::/docker/abc",
+      "/sys/fs/cgroup/docker/abc/cpu.max": "150000 100000"
+    }
+  },
+  {
+    "name": "cpus: 0.5 (cgroup v1)",
+    "cpus": 1,
+    "files": {
+      "/proc/self/status": "Cpus_allowed_list:\t0-3",
+      "/sys/fs/cgroup/cpu/cpu.cfs_quota_us": "50000",
+      "/sys/fs/cgroup/cpu/cpu.cfs_period_us": "100000"
+    }
+  },
+  {
+    "name": "cgroup v1 without a quota",
+    "cpus": 12,
+    "files": {
+      "/proc/self/status": "Cpus_allowed_list:\t0-11",
+      "/sys/fs/cgroup/cpu,cpuacct/cpu.cfs_quota_us": "-1",
+      "/sys/fs/cgroup/cpu,cpuacct/cpu.cfs_period_us": "100000"
+    }
+  },
+  {
+    "name": "cgroup v2 max",
+    "cpus": 12,
+    "files": {
+      "/proc/self/status": "Cpus_allowed_list:\t0-11",
+      "/sys/fs/cgroup/cpu.max": "max 100000"
+    }
+  },
+  {
+    "name": "a limit above the cpuset",
+    "cpus": 8,
+    "files": {
+      "/proc/self/status": "Cpus_allowed_list:\t0-7",
+      "/sys/fs/cgroup/cpu.max": "1200000 100000"
+    }
+  },
+  {
+    "name": "a limit, no status",
+    "cpus": 2,
+    "files": {
+      "/sys/fs/cgroup/cpu.max": "200000 100000"
+    }
+  },
+  {
+    "name": "not a CPU list, with a limit",
+    "cpus": 2,
+    "files": {
+      "/proc/self/status": "Cpus_allowed_list:\t3-1",
+      "/sys/fs/cgroup/cpu.max": "200000 100000"
+    }
+  },
+  {
+    "name": "a limit on a cgroup above this one",
+    "cpus": 2,
+    "files": {
+      "/proc/self/status": "Cpus_allowed_list:\t0-11",
+      "/proc/self/cgroup": "0::/system.slice/docker-abc.scope",
+      "/sys/fs/cgroup/system.slice/cpu.max": "200000 100000",
+      "/sys/fs/cgroup/system.slice/docker-abc.scope/cpu.max": "max 100000"
+    }
+  },
+  {
+    "name": "the smallest of several limits",
+    "cpus": 3,
+    "files": {
+      "/proc/self/status": "Cpus_allowed_list:\t0-11",
+      "/proc/self/cgroup": "0::/a/b",
+      "/sys/fs/cgroup/cpu.max": "max 100000",
+      "/sys/fs/cgroup/a/cpu.max": "400000 100000",
+      "/sys/fs/cgroup/a/b/cpu.max": "300000 100000"
+    }
+  },
+  {
+    "name": "files with CRLF and spaces around the values",
+    "cpus": 2,
+    "files": {
+      "/proc/self/status": "Name:\tffmpeg\r\nCpus_allowed_list:\t0-3 \r\nMems_allowed_list:\t0\r\n",
+      "/proc/self/cgroup": "0::/\r\n",
+      "/sys/fs/cgroup/cpu.max": " 200000 100000 \n"
+    }
+  },
+  {
+    "name": "a status list with a space in it",
+    "cpus": 0,
+    "files": {
+      "/proc/self/status": "Cpus_allowed_list:\t0-3 5"
+    }
+  },
+  {
+    "name": "a quota that is not a finite number",
+    "cpus": 4,
+    "files": {
+      "/proc/self/status": "Cpus_allowed_list:\t0-3",
+      "/sys/fs/cgroup/cpu.max": "Infinity 100000"
+    }
+  },
+  {
+    "name": "a cgroup path with a space",
+    "cpus": 1,
+    "files": {
+      "/proc/self/status": "Cpus_allowed_list:\t0-11",
+      "/proc/self/cgroup": "0::/my slice/x",
+      "/sys/fs/cgroup/my slice/cpu.max": "100000 100000"
+    }
+  },
+  {
+    "name": "cgroup v1: a limit on a cgroup above this one",
+    "cpus": 2,
+    "files": {
+      "/proc/self/status": "Cpus_allowed_list:\t0-11",
+      "/proc/self/cgroup": "12:cpuset:/\n4:cpu,cpuacct:/user.slice/app.service\n0::/user.slice/app.service",
+      "/sys/fs/cgroup/cpu,cpuacct/user.slice/cpu.cfs_quota_us": "200000",
+      "/sys/fs/cgroup/cpu,cpuacct/user.slice/cpu.cfs_period_us": "100000"
+    }
+  },
+  {
+    "name": "cgroup v1: only the cpu controller's path counts",
+    "cpus": 12,
+    "files": {
+      "/proc/self/status": "Cpus_allowed_list:\t0-11",
+      "/proc/self/cgroup": "3:cpuset:/limited\n4:cpu,cpuacct:/",
+      "/sys/fs/cgroup/cpu,cpuacct/limited/cpu.cfs_quota_us": "100000",
+      "/sys/fs/cgroup/cpu,cpuacct/limited/cpu.cfs_period_us": "100000"
+    }
+  },
+  {
+    "name": "CPU numbers no kernel gives",
+    "cpus": 0,
+    "files": {
+      "/proc/self/status": "Cpus_allowed_list:\t9007199254740993-9007199254740994"
+    }
+  },
+  {
+    "name": "nothing readable",
+    "cpus": 0,
+    "files": {}
+  }
+]

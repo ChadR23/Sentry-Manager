@@ -76,7 +76,7 @@ const { VERSIONS, DEFAULT_VERSION, securitySummary } = require('./mountSpec');
 const { TlsManager, localTlsSource, supervisorTlsSource, parseHostnames } = require('./tls');
 const { acmeConfigFromEnv, CHALLENGE_PREFIX } = require('./acme');
 const { canUploadSecure } = require('./canSecure');
-const { Router, HttpError, sendJson, readJson, readRaw, serveFile, sendText } = require('./http');
+const { Router, HttpError, sendJson, sendJsonPatiently, readJson, readRaw, serveFile, sendText } = require('./http');
 const { createStudioTranslations } = require('./studioTranslations');
 const { createUiPacks, originalPack, MAX_ZIP_BYTES: MAX_UI_PACK_BYTES } = require('./uiPacks');
 const { createSmbTester } = require('./smbTest');
@@ -89,6 +89,7 @@ const { run } = require('./proc');
 const { Telemetry } = require('./telemetry');
 const { createSpeedIndex } = require('./speedIndex');
 const { createBackgroundPace } = require('./backgroundPace');
+const workLimitsLib = require('./workLimits');
 const { createExporter } = require('./exporter');
 const { createCanLogs, parseName: parseCanName } = require('./canLogs');
 const { createCanIndex, CLIP_STEP_MS: CAN_CLIP_STEP_MS } = require('./canIndex');
@@ -386,20 +387,27 @@ async function main() {
   // the Pi info files read from the shares (heartbeat and diagnostics: whether any, versions)
   const sentryUsbInfos = () => vehicles.list().map((v) => sentryUsb.device(v.id)?.info).filter(Boolean);
 
+  // how much background work runs at once, from this container's memory and
+  // CPUs, or what an admin set (workLimits.js; Settings → Advanced)
+  const workResources = workLimitsLib.detectResources();
+  let work = workLimitsLib.pickLimits({ resources: workResources, override: db.get('work-limits', null) });
+  const workLimit = (key) => () => work.limits[key];
+  log.info(`Background work: ${Object.entries(work.limits).map(([k, v]) => `${k} ${v}`).join(', ')} (${(workResources.memoryBytes / 1024 ** 3).toFixed(1)} GB from the ${workResources.memoryFrom}, ${workResources.cpus} CPUs from the ${workResources.cpusFrom})`);
   const inventory = new Inventory({ vehicles, db, log: logger.scope('inventory'), onChange: () => announce('inventory'), onScanned: (vid) => {
     speedIndex?.kick(); scrubPrepare?.kick(); integrityRef?.resume(vid);
     // (the gap check and the checksum record read the status the scan just found)
     sentryUsb.refresh(vid).catch(() => null).finally(() => { archiveGapRef?.check(vid); arrivalRef?.kick(); });
     driveData?.check(vid).catch(() => null);
   } });
+  inventory.codecChecks = workLimit('codecChecks');
   // the SHA-256 of every original the converter replaces in place, for
   // Sentry USB (originalChecksums.js), written inside a vehicle's folder only
   const originalChecksums = createOriginalChecksums({
     log: logger.scope('converter'),
     allowedRoot: (dir) => Boolean(vehicles.vehicleForPath(dir))
   });
-  const thumbs = new Thumbnails({ dir: path.join(DATA, 'thumbnails'), ffmpegPath: FFMPEG });
-  const telemetry = new Telemetry({ srcRoot: SRC, cacheDir: path.join(DATA, 'telemetry'), log: logger.scope('telemetry') });
+  const thumbs = new Thumbnails({ dir: path.join(DATA, 'thumbnails'), ffmpegPath: FFMPEG, concurrency: workLimit('thumbnails') });
+  const telemetry = new Telemetry({ srcRoot: SRC, cacheDir: path.join(DATA, 'telemetry'), log: logger.scope('telemetry'), concurrency: workLimit('telemetryReads') });
   // every front clip's speed, a value a second, indexed in the background for the Viewer's speed graph
   // (not while a conversion or the benchmark runs: the speed reads share the data disk; both are declared below)
   // Sentry USB's drive-data.json on each car's share (driveData.js): read when
@@ -407,7 +415,7 @@ async function main() {
   driveData = driveDataLib.createDriveData({ dir: path.join(DATA, 'drive-data'), vehicles, log: logger.scope('drives'), idle: () => !speedIndexBusy() });
   // how many clips the speed index reads at once: more while the server keeps
   // up, fewer when it strains or the Viewer plays (backgroundPace.js)
-  const backgroundPace = createBackgroundPace({ busy: () => speedIndexBusy() });
+  const backgroundPace = createBackgroundPace({ max: workLimit('speedIndex'), busy: () => speedIndexBusy() });
   backgroundPace.start();
   speedIndex = createSpeedIndex({ dir: path.join(DATA, 'speeds'), inventory, vehicles, telemetry, log: logger.scope('speeds'), idle: () => !speedIndexBusy(), pace: backgroundPace });
   // the place search's cache, filled quietly half a minute after start
@@ -614,7 +622,7 @@ async function main() {
   const studioTranslations = createStudioTranslations(path.join(SRC, 'renderer/scripts/data/translations.js'));
   let clipThumbs = null;
   // the Viewer's scrub previews (see scrubFrames.js)
-  const scrubFrames = createScrubFrames({ directory: path.join(DATA, 'scrub'), ffmpegPath: FFMPEG, ffprobePath: FFPROBE, spawn });
+  const scrubFrames = createScrubFrames({ directory: path.join(DATA, 'scrub'), ffmpegPath: FFMPEG, ffprobePath: FFPROBE, spawn, concurrency: workLimit('scrubPreviews') });
   // the newest footage's previews, made ahead in the background (not while converting)
   const prepareDays = Number.parseInt(process.env.SCRUB_PREPARE_DAYS ?? '2', 10);
   scrubPrepare = createScrubPrepare({
@@ -770,8 +778,11 @@ async function main() {
   });
   vehicles.on('health', (id, healthy) => {
     if (!healthy) return;
-    bin.reconcile(id).catch((err) => log.warn(`Recycle Bin check of ${id}: ${err.message}`))
-      .then(() => inventory.scan(id)).then(() => announce('inventory'), () => {});
+    // footage mounted read-only has no Recycle Bin to settle: only its scan
+    const readOnly = vehicles.share(id)?.status?.()?.readOnly === true;
+    (readOnly ? Promise.resolve() : bin.reconcile(id).catch((err) => log.warn(`Recycle Bin check of ${id}: ${err.message}`)))
+      // (the first scan since the server started may start from the footage catalog's last one: inventory.scan)
+      .then(() => inventory.scan(id, { light: !inventory.get(id)?.files })).then(() => announce('inventory'), () => {});
   });
 
   // ---- routes
@@ -3843,12 +3854,34 @@ async function main() {
     db.set('appearance', next);
     return next;
   });
+  // how much background work runs at once (workLimits.js): what is in use,
+  // what would be picked automatically and why, and what an admin set; a PUT
+  // sets the numbers (null or empty for automatic) and applies at once
+  const workView = () => ({ limits: work.limits, auto: work.auto, override: work.override, tier: work.tier, resources: work.resources, max: work.max });
+  r.add('GET', '/api/settings/work-limits', () => workView());
+  r.add('PUT', '/api/settings/work-limits', (req, res, { body, user }) => {
+    let next;
+    try {
+      next = workLimitsLib.parseOverride(body || {});
+    } catch (err) {
+      throw Object.assign(new HttpError(400, err.message), { expose: true });
+    }
+    db.set('work-limits', next);
+    work = workLimitsLib.pickLimits({ resources: workResources, override: next });
+    audit.info(`Background work limits set to ${Object.keys(next).length ? Object.entries(next).map(([k, v]) => `${k} ${v}`).join(', ') : 'automatic'}: ${by(req, user)}`);
+    return workView();
+  });
   r.add('GET', '/api/updates', () => updates.status());
   r.add('POST', '/api/updates/check', () => updates.check());
 
   // Converter (Encoder tab) — the Studio converter UI talks to these.
   r.add('POST', '/api/converter/invoke/:name', async (req, res, { params, body }) => {
     if (!bridge) return { ok: false, error: { code: host.lastError?.code || 'CONVERTER_STARTING' } };
+    // the benchmark answers when it is done (minutes): kept alive meanwhile, so its result is not cut off
+    if (params.name === 'runBenchmark') {
+      await sendJsonPatiently(res, () => bridge.invoke(params.name, body, req.headers['x-client-id']));
+      return undefined;
+    }
     return bridge.invoke(params.name, body, req.headers['x-client-id']);
   });
 
