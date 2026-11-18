@@ -198,6 +198,30 @@ fn autopilot_shares_distance_top_speed_route_and_tags() {
 }
 
 #[test]
+fn a_car_forgotten_while_its_drive_data_is_read_gets_neither_its_state_nor_its_cache_back() {
+    let car = super::super::testkit::Car::new("dd-forget");
+    let file = car.root.join(FILE);
+    let routes: Vec<Value> = (0..20).map(|i| route(&key_at("2026-09-01", 6 + i / 10, i % 10), R { n: 600, ..R::default() })).collect();
+    std::fs::write(&file, json!({ "processedFiles": [], "routes": routes }).to_string()).unwrap();
+    let old = std::time::SystemTime::now() - Duration::from_secs(3600);
+    std::fs::File::options().write(true).open(&file).unwrap().set_modified(old).unwrap();
+    let mut dd = DriveData::new(car.data.join("drive-data"), car.ctx.clone());
+    // (small chunks: a read long enough to forget the car in the middle of it)
+    Arc::get_mut(&mut dd).unwrap().chunk = 256;
+    dd.check("v1", true);
+    let t = std::time::Instant::now();
+    while !dd.cars.lock().unwrap().get("v1").is_some_and(|c| c.reading) {
+        assert!(t.elapsed() < Duration::from_secs(5), "the read did not start");
+        std::thread::yield_now();
+    }
+    dd.forget("v1");
+    // (the read ends)
+    drop(dd.reading.lock().unwrap());
+    assert!(dd.cars.lock().unwrap().get("v1").is_none(), "its state is not back");
+    assert!(!car.data.join("drive-data/v1.json").exists(), "nor its cache");
+}
+
+#[test]
 fn read_in_the_background_cached_and_read_again_only_when_it_changes() {
     let car = super::super::testkit::Car::new("dd-read");
     let file = car.root.join(FILE);

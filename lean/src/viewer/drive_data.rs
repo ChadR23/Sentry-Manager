@@ -1062,7 +1062,8 @@ impl DriveData {
         let f = self.locate(vid);
         {
             let mut cars = self.cars.lock().unwrap();
-            let s = cars.entry(vid.to_string()).or_default();
+            // (a car forgotten since its read was queued is not made again)
+            let Some(s) = cars.get_mut(vid) else { return };
             s.queued = false;
             s.present = f.clone();
             let Some(f) = &f else { return };
@@ -1096,23 +1097,31 @@ impl DriveData {
             &|| false,
             self.chunk,
         );
-        let mut cars = self.cars.lock().unwrap();
-        let s = cars.entry(vid.to_string()).or_default();
-        s.reading = false;
-        s.progress = None;
+        // (a read ends, reading and its progress cleared, in the same step that shows its outcome:
+        // after its cache is written, so a read that ended has its cache; a car forgotten
+        // meanwhile, its vehicle removed, gets neither its state nor its cache back)
+        let ended = |s: &mut Car| {
+            s.reading = false;
+            s.progress = None;
+        };
         match out {
             Err(e) => {
-                eprintln!("Sentry USB drive data for {vid} ({seen} routes in): {e}; keeping the last good read");
-                s.failed = Some((stamp, e));
+                let mut cars = self.cars.lock().unwrap();
+                if let Some(s) = cars.get_mut(vid).filter(|s| s.reading) {
+                    ended(s);
+                    eprintln!("Sentry USB drive data for {vid} ({seen} routes in): {e}; keeping the last good read");
+                    s.failed = Some((stamp, e));
+                }
             }
             Ok((routes, _)) => {
-                drop(cars);
                 let after = self.locate(vid);
-                let mut cars = self.cars.lock().unwrap();
-                let s = cars.entry(vid.to_string()).or_default();
                 if after.as_ref().map(Self::stamp) != Some(stamp.clone()) {
-                    s.last_check = 0.0;
-                    eprintln!("Sentry USB drive data for {vid} changed while it was read; reading it again later");
+                    let mut cars = self.cars.lock().unwrap();
+                    if let Some(s) = cars.get_mut(vid).filter(|s| s.reading) {
+                        ended(s);
+                        s.last_check = 0.0;
+                        eprintln!("Sentry USB drive data for {vid} changed while it was read; reading it again later");
+                    }
                     return;
                 }
                 let clips = finish_clips(list);
@@ -1133,15 +1142,25 @@ impl DriveData {
                 raw.insert("clips".into(), Value::Array(clips));
                 let mut saved = raw.clone();
                 saved.insert("tags".into(), Value::Object(kept));
+                if self.cars.lock().unwrap().get(vid).is_some_and(|s| s.reading) {
+                    let _ = std::fs::create_dir_all(&self.dir);
+                    let tmp = PathBuf::from(format!("{}.tmp", self.cache_file(vid).display()));
+                    if std::fs::write(&tmp, Value::Object(saved).to_string()).is_ok() {
+                        let _ = std::fs::rename(&tmp, self.cache_file(vid));
+                    }
+                }
+                let mut cars = self.cars.lock().unwrap();
+                let Some(s) = cars.get_mut(vid).filter(|s| s.reading) else {
+                    // (forgotten while the cache was written: the cache goes too)
+                    drop(cars);
+                    let _ = std::fs::remove_file(self.cache_file(vid));
+                    return;
+                };
                 s.result = Some(Result_ { raw, tags });
                 s.failed = None;
                 s.drives.clear();
+                ended(s);
                 drop(cars);
-                let _ = std::fs::create_dir_all(&self.dir);
-                let tmp = PathBuf::from(format!("{}.tmp", self.cache_file(vid).display()));
-                if std::fs::write(&tmp, Value::Object(saved).to_string()).is_ok() {
-                    let _ = std::fs::rename(&tmp, self.cache_file(vid));
-                }
                 eprintln!("Sentry USB drive data for {vid}: {routes} routes, {used} used, read in {} s", js::js_round((js::now_ms() - started) / 1000.0));
             }
         }
