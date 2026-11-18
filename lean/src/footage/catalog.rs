@@ -23,7 +23,13 @@ pub struct Catalog {
 /// catalog.js FORMAT: what a scan row vouches for (Node's rows and these are the same).
 const FORMAT: i64 = 1;
 /// rows per transaction (catalog.js BATCH)
-const BATCH: usize = 1000;
+pub const BATCH: usize = 1000;
+
+const UPSERT_CODEC: &str = "INSERT INTO clip_codecs (vehicle_id, rel, size, mtime_ms, codec) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(vehicle_id, rel) DO UPDATE SET size = excluded.size, mtime_ms = excluded.mtime_ms, codec = excluded.codec";
+
+const INSERT_MISSING_CODEC: &str = "INSERT INTO clip_codecs (vehicle_id, rel, size, mtime_ms, codec) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(vehicle_id, rel) DO NOTHING";
 
 const UPSERT_FILE: &str = "INSERT INTO catalog_files (vehicle_id, rel, size, mtime_ms, ctime_ms, birthtime_ms, kind, type, day, camera, event_id)
       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
@@ -211,6 +217,19 @@ impl Catalog {
         Ok(())
     }
 
+    /// The clip codecs an older server kept (inventory.js codecs(), catalog.js putCodecs): each
+    /// row the catalog does not have yet is added and a row it has is kept (the catalog is the
+    /// newer), in BATCH-row transactions, so run again after a failure partway it adds the rest.
+    /// How many rows were added.
+    pub fn adopt_codecs(&self, vehicle: &str, rows: &[(String, u64, f64, Option<String>)]) -> rusqlite::Result<usize> {
+        let added = std::cell::Cell::new(0);
+        self.each(rows, INSERT_MISSING_CODEC, |st, (rel, size, m, codec)| {
+            added.set(added.get() + st.execute(params![vehicle, rel, *size as i64, m, codec])?);
+            Ok(())
+        })?;
+        Ok(added.get())
+    }
+
     /// The clip codecs read so far: rel -> (size, mtime, codec).
     pub fn codecs(&self, vehicle: &str) -> rusqlite::Result<CodecMap> {
         let c = self.conn();
@@ -227,12 +246,7 @@ impl Catalog {
 
     pub fn update_codecs(&self, vehicle: &str, set: &[(String, u64, f64, Option<String>)], gone: &[String]) -> rusqlite::Result<()> {
         self.each(gone, "DELETE FROM clip_codecs WHERE vehicle_id = ?1 AND rel = ?2", |st, rel| st.execute(params![vehicle, rel]).map(|_| ()))?;
-        self.each(
-            set,
-            "INSERT INTO clip_codecs (vehicle_id, rel, size, mtime_ms, codec) VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(vehicle_id, rel) DO UPDATE SET size = excluded.size, mtime_ms = excluded.mtime_ms, codec = excluded.codec",
-            |st, (rel, size, m, codec)| st.execute(params![vehicle, rel, *size as i64, m, codec]).map(|_| ()),
-        )
+        self.each(set, UPSERT_CODEC, |st, (rel, size, m, codec)| st.execute(params![vehicle, rel, *size as i64, m, codec]).map(|_| ()))
     }
 }
 
@@ -257,6 +271,25 @@ mod tests {
         }
         assert_eq!(cat.codec("v1", "missing.mp4").unwrap(), None);
         assert_eq!(cat.codec("v2", "RecentClips/y-front.mp4").unwrap(), None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn kept_codecs_fill_in_what_the_catalog_lacks_and_never_replace_its_rows() {
+        let dir = std::env::temp_dir().join(format!("catalog-adopt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cat = Catalog::open(&dir.join("manager.db")).unwrap();
+        let x = "SentryClips/a/x-front.mp4".to_string();
+        let y = "RecentClips/y-front.mp4".to_string();
+        cat.update_codecs("v1", &[(x.clone(), 10, 1.5, Some("h265".to_string()))], &[]).unwrap();
+        let kept = vec![(x.clone(), 99, 9.0, Some("h264".to_string())), (y.clone(), 20, 2.0, None)];
+        assert_eq!(cat.adopt_codecs("v1", &kept).unwrap(), 1, "only the row the catalog lacked");
+        assert_eq!(cat.codec("v1", &x).unwrap(), Some((10, 1.5, Some("h265".to_string()))), "the catalog's own row is kept");
+        assert_eq!(cat.codec("v1", &y).unwrap(), Some((20, 2.0, None)));
+        assert_eq!(cat.adopt_codecs("v1", &kept).unwrap(), 0, "run again, nothing more to add");
+        let many: Vec<_> = (0..BATCH + 5).map(|i| (format!("RecentClips/{i}-front.mp4"), i as u64, 1.0, Some("h264".to_string()))).collect();
+        assert_eq!(cat.adopt_codecs("v2", &many).unwrap(), BATCH + 5, "more than one batch");
+        assert_eq!(cat.codecs("v2").unwrap().len(), BATCH + 5);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
