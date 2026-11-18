@@ -870,3 +870,43 @@ test('the Start note while another job runs has its words in the translations', 
   assert.match(t, /startBusy: "A conversion is running\./);
   assert.match(t, /startBusyFor: "A conversion is running \(\{vehicle\}\)\./);
 });
+
+test('Smallest (CPU only): with several GPUs the single number instead of the rows, H.265 only; a running Smallest job is followed by the number', async () => {
+  const p = await page();
+  assert.equal(p.elements.lanes.hidden, false);
+  p.elements.profileSelect.value = 'smallest';
+  p.elements.profileSelect.fire('change');
+  assert.equal(p.elements.lanes.hidden, true, 'no rows: it runs on this server\'s CPU');
+  assert.equal(p.elements.concurrency.hidden, false, 'the single number');
+  assert.equal(p.elements.codecOptions[1].disabled, true, 'no AV1');
+  p.elements.profileSelect.value = 'balanced';
+  p.elements.profileSelect.fire('change');
+  assert.equal(p.elements.lanes.hidden, false, 'a GPU profile has its rows back');
+  assert.equal(p.elements.concurrency.hidden, true);
+  assert.equal(p.elements.codecOptions[1].disabled, false);
+  p.elements.profileSelect.value = 'smallest';
+  p.elements.profileSelect.fire('change');
+  const config = await p.start();
+  assert.deepEqual([config.profileId, config.codec, config.concurrency, 'lanes' in config], ['smallest', 'h265', 5, false]);
+
+  const q = await page({ job: running({ codec: 'h265', profileId: 'smallest', concurrency: 3 }) });
+  assert.equal(q.elements.lanes.hidden, true);
+  assert.equal(q.elements.concurrency.hidden, false);
+  assert.equal(q.elements.concurrency.value, '3');
+  q.elements.concurrency.value = '4';
+  q.elements.concurrency.fire('change');
+  await settle();
+  assert.deepEqual(q.sent.conc, [['job-1', 4]], 'changed live as the plain number');
+  assert.deepEqual(q.sent.lanes, []);
+});
+
+test('a Smallest job ending while a GPU profile is picked for the next run leaves the rows as they were', async () => {
+  const p = await page({ job: running({ codec: 'h265', profileId: 'smallest', concurrency: 3 }) });
+  p.elements.profileSelect.value = 'balanced';
+  p.elements.profileSelect.fire('change');
+  assert.equal(p.elements.lanes.hidden, true, 'the running Smallest job keeps the number');
+  p.push({ id: 'job-1', revision: 5, state: 'completed', config: { codec: 'h265', profileId: 'smallest', concurrency: 3 }, items: [] });
+  await settle();
+  assert.equal(p.elements.lanes.hidden, false, 'the rows again for the next GPU run');
+  assert.equal(p.lane(ARC.id).count, '5', "not the Smallest job's 3");
+});

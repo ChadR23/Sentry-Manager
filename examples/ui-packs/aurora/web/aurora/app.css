@@ -434,7 +434,7 @@ details.more-info summary { cursor: pointer; min-height: 44px; display: flex; al
    lay-tall (narrow portrait): mirror, front, then the four side cameras in a
    row. lay-focus: one camera. */
 .win.wide { max-width: none; }
-body[data-route="viewer"] .stage { max-width: 1600px; }
+body[data-route="viewer"] .stage { max-width: 1600px; padding-bottom: var(--ctrl-room, calc(122px + var(--safe-b))); }
 body[data-route="viewer"] .win-head { display: none; }
 body[data-route="viewer"] .win { padding: 16px 20px 24px; }
 body[data-route="viewer"] .win-body { display: flex; flex-direction: column; }

@@ -11,6 +11,8 @@
 // (`busy`), as before.
 //
 // tick() runs once a second (start() sets the timer; tests call it themselves).
+// `max` is the most at once: a number, or a function read each time (the
+// limit picked for this server, server/workLimits.js).
 
 const { monitorEventLoopDelay } = require('perf_hooks');
 
@@ -24,6 +26,7 @@ const RATE_MS = 10_000; // clips a minute, over the last this long (before the s
 const VIEWER_MS = 30_000; // one at a time until this long after the Viewer stops playing
 
 function createBackgroundPace({ max = 4, busy = () => false, now = Date.now, lag = null } = {}) {
+  const most = () => Math.max(1, Number(typeof max === 'function' ? max() : max) || 1);
   const loop = lag || monitorEventLoopDelay({ resolution: 20 });
   if (!lag) loop.enable();
   let limit = 1;
@@ -85,7 +88,8 @@ function createBackgroundPace({ max = 4, busy = () => false, now = Date.now, lag
       calmSince = t;
       return;
     }
-    if (!trial && limit < max && pending && busiest >= limit && t >= holdUntil && t - calmSince >= CALM_MS) {
+    if (limit > most()) limit = most();
+    if (!trial && limit < most() && pending && busiest >= limit && t >= holdUntil && t - calmSince >= CALM_MS) {
       trial = { from: limit, rate: rate(t, RATE_MS), until: t + TRIAL_MS };
       limit += 1;
       calmSince = t;
@@ -98,7 +102,7 @@ function createBackgroundPace({ max = 4, busy = () => false, now = Date.now, lag
     allowed(t = now()) {
       if (busy() || t < pausedUntil) return 0;
       if (viewers > 0 || t < viewerUntil) return 1;
-      return limit;
+      return Math.min(limit, most());
     },
     /** The reader's state: clips in reading, and whether more wait. */
     demand(inReading, more) {

@@ -157,6 +157,13 @@ test('plain words for a vehicle\'s settings', () => {
   const quality = Object.fromEntries(words.describe({ config: config('/a', { profileId: 'quality', qualityLevel: 'small' }), automatic: false }, {}, []));
   assert.equal('Keep clips that miss the target' in quality, false, 'no size target, no row');
   assert.match(quality['Automatic conversion'], /^Off/);
+  // Smallest (CPU only): no size target, this server's CPU (lanes it carries are not used)
+  assert.equal(words.summary(config('/a', { profileId: 'smallest' })), 'H.265 · Smallest (CPU only) · Replace · Quick');
+  const smallest = Object.fromEntries(words.describe({ config: config('/a', { profileId: 'smallest', concurrency: 2, lanes: [{ device: 'cpu', concurrency: 2 }] }), automatic: false }, {}, []));
+  assert.match(smallest.Size, /^Smallest \(CPU only\): x265 with B-frames/);
+  assert.equal(smallest.Devices, 'This server’s CPU, 2 clips at once');
+  assert.equal('Keep clips that miss the target' in smallest, false);
+  assert.match(smallest['Always convert'], /^Off/);
   const state = { settings: { configs: [config('/a')] }, saved: [config('/b', { codec: 'av1' })] };
   assert.equal(words.savedFor(state, '/a').automatic, true);
   assert.equal(words.savedFor(state, '/b').config.codec, 'av1');

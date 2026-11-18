@@ -3,8 +3,8 @@
 // A clip's speed, one value a second, without reading the whole clip.
 //
 // The viewer's speed graph needs a speed a second, not the dashboard's every
-// frame. Reading the clip for the dashboard (server/telemetry.js) loads the
-// whole file (~80 MB a minute) to pull a record out of each frame; here only
+// frame. Reading the clip for the dashboard (server/telemetry.js) walks every
+// frame's records (reading each frame's head, paged); here only
 // the file's index (moov) and the first few KB of one frame a second are read,
 // as Tesla writes each frame's telemetry record ahead of its picture. A
 // converted clip keeps the records the same way: H.265 in a compatibility
@@ -14,7 +14,7 @@
 // Anything unexpected throws, and the caller reads the clip the slow way.
 
 const fsp = require('fs/promises');
-const { parseMp4, selectVideoTrack, buildSampleIndex, findBoxes } = require('../src/main/converter/mp4');
+const { parseMp4Parts, boxContent, selectVideoTrack, buildSampleIndex, findBoxes } = require('../src/main/converter/mp4');
 
 const HEAD = 4096;
 const MAX_MOOV = 64 * 1024 * 1024;
@@ -223,20 +223,20 @@ async function readRecords(real, { mode } = {}) {
     const top = await topBoxes(fh, fileSize);
     const moov = top.find((b) => b.type === 'moov');
     if (!moov || moov.size > MAX_MOOV) throw new Error('No usable moov');
-    // the file as the parser sees it: every box header, moov whole, media left empty
-    const image = Buffer.alloc(fileSize);
-    for (const b of top) b.bytes.copy(image, b.start);
-    (await readAt(fh, moov.start, moov.size)).copy(image, moov.start);
-    const tree = parseMp4(image);
+    // the file as the parser sees it: every box header, moov whole, media left
+    // empty (read as zeros, never held in memory)
+    const parts = top.filter((b) => b !== moov).map((b) => ({ start: b.start, bytes: b.bytes }));
+    parts.push({ start: moov.start, bytes: await readAt(fh, moov.start, moov.size) });
+    const tree = parseMp4Parts(fileSize, parts);
     const track = selectVideoTrack(tree);
     const samples = buildSampleIndex(track);
     if (!samples.length) return [];
     const mdhd = findBoxes(track, 'mdhd')[0];
-    const md = image.subarray(Number(mdhd.contentStart), Number(mdhd.end));
+    const md = boxContent(tree, mdhd);
     const scale = md[0] === 1 ? md.readUInt32BE(20) : md.readUInt32BE(12);
     if (!scale) throw new Error('No timescale');
     const stsd = findBoxes(track, 'stsd')[0];
-    const desc = image.subarray(Number(stsd.contentStart), Number(stsd.end));
+    const desc = boxContent(tree, stsd);
     const codec = desc.toString('ascii', 12, 16);
     let lengthSize = 4;
     const cfgAt = desc.indexOf(codec === 'avc1' ? 'avcC' : 'hvcC');
@@ -244,12 +244,13 @@ async function readRecords(real, { mode } = {}) {
     else if (cfgAt >= 0 && (codec === 'hvc1' || codec === 'hev1')) lengthSize = (desc[cfgAt + 25] & 3) + 1;
     else if (codec !== 'av01') throw new Error(`Unsupported codec ${codec}`);
 
-    // the first frame of each second
+    // the first frame shown in each second (with B-frames a frame can be
+    // stored before frames shown ahead of it)
     const picks = [];
     for (const s of samples) {
-      const sec = Math.floor(Number(s.dts) / scale);
-      if (sec > 7200) break;
-      if (picks[sec] === undefined) picks[sec] = s;
+      const sec = Math.floor(Number(s.pts) / scale);
+      if (sec < 0 || sec > 7200) continue;
+      if (picks[sec] === undefined || s.pts < picks[sec].pts) picks[sec] = s;
     }
 
     let carrier = null;

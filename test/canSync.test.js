@@ -149,6 +149,39 @@ test('a drive of clips: one offset and drift for them all, each clip within 20 m
   assert.ok(Math.abs(out[0].driftPpm - 100) < 30, `drift ${out[0].driftPpm} ppm`);
 });
 
+test('a drive whose clips do not follow on (0.2-0.7 s between them, as real Tesla clips): no clip made worse, the quiet ones found by their speed', () => {
+  const rand = rng(21);
+  const n = 7;
+  const busy = makeDrive(8, n * 61_000 + 5000);
+  // 118-246 s into the drive: a steady cruise (under 3 km/h of wobble: no sync of a clip's own), nothing else changes
+  const state = (t) => (t >= 118_000 && t <= 246_000
+    ? { v: 100 + 0.9 * Math.sin(t / 4100) + 0.5 * Math.sin(t / 1300), acc: 0, steer: 2, brake: false, left: false, right: false }
+    : busy(t));
+  const toCan = (t) => t + OFFSET;
+  const allSeries = canSeries((t) => state(t - T0), T0 - 15_000, T0 + n * 61_000 + 20_000, toCan, rand);
+  const clips = [];
+  let carStart = T0 + 380;
+  for (let k = 0; k < n; k++) {
+    const dur = 60_000 + (rand() - 0.5) * 400;
+    const name = Math.floor(carStart / 1000) * 1000;
+    const made = clip((t) => state(t - T0), carStart, dur, rand);
+    const frames = telemetryFrames(made.body);
+    const series = Object.fromEntries(Object.entries(allSeries).map(([nm, pts]) => [nm, pts.filter((p) => p[0] >= name - 12_000 && p[0] <= name + 72_000)]));
+    clips.push({ start: name, carStart, est: estimateClip({ frames, series, start: name }) });
+    carStart = made.next + 200 + rand() * 500; // the next clip starts a fraction of a second later
+  }
+  assert.ok(clips.slice(2, 4).every((c) => c.est.result.method === 'clock'), `the cruise's clips have no sync of their own: ${clips.map((c) => c.est.result.method)}`);
+  const out = solveDrive(clips);
+  clips.forEach((c, k) => {
+    const truth = toCan(c.carStart) - c.start;
+    const own = c.est.result;
+    if (own.method !== 'clock') assert.ok(Math.abs(out[k].offsetMs - truth) <= Math.abs(own.offsetMs - truth) + 5, `clip ${k}: ${out[k].method} ${out[k].offsetMs} vs own ${own.method} ${own.offsetMs}, truth ${truth.toFixed(1)}`);
+    // a clip of its own within 60 ms; one of the cruise, placed by its gentle speed alone, within 150 ms
+    const tol = own.method === 'clock' ? 150 : 60;
+    assert.ok(Math.abs(out[k].offsetMs - truth) <= tol, `clip ${k}: ${out[k].method} ${out[k].offsetMs} vs truth ${truth.toFixed(1)} (${(out[k].offsetMs - truth).toFixed(0)} ms)`);
+  });
+});
+
 test('speed only (no edges): the speed correlation, within 60 ms', () => {
   const rand = rng(5);
   const state = makeDrive(3, 60_000, { edges: false });

@@ -108,8 +108,9 @@ function createHealth({
       if (st.healthy) {
         add({
           id: `write-${v.id}`, group, label: 'Footage share can be written', status: st.writable === false ? 'warn' : st.writable ? 'ok' : 'skip',
-          detail: st.writable === false ? (st.lastError || 'Read-only.') : '',
-          hint: st.writable === false ? 'Conversions, the Recycle Bin and restoring need write access: give the share user write permission.' : ''
+          detail: st.readOnly ? 'Mounted read-only: the footage is only read.' : st.writable === false ? (st.lastError || 'Read-only.') : '',
+          hint: st.readOnly ? 'Conversions, the Recycle Bin and restoring are off. Mount it read-write (no :ro) to use them.'
+            : st.writable === false ? 'Conversions, the Recycle Bin and restoring need write access: give the share user write permission.' : ''
         });
         const ratio = st.totalBytes ? st.freeBytes / st.totalBytes : null;
         add({

@@ -45,15 +45,17 @@ async function extractSeiFromBuffer(buffer) {
 function collectSei(frames) {
     const seiData = [];
     const mapPath = [];
+    // (every record of a frame: see DashcamMP4.recordsOf; frames made from the server's records have one each)
+    const recordsOf = window.DashcamMP4?.recordsOf || ((f) => (f.sei ? [[f.timestamp, f.sei]] : []));
     for (const frame of frames) {
-        if (frame.sei) {
-            seiData.push({ timestampMs: frame.timestamp, sei: frame.sei });
-            if (hasValidGps(frame.sei)) {
-                const lat = Number(frame.sei.latitudeDeg ?? frame.sei.latitude_deg);
-                const lon = Number(frame.sei.longitudeDeg ?? frame.sei.longitude_deg);
-                const apState = frame.sei.autopilotState ?? frame.sei.autopilot_state;
+        for (const [timestampMs, sei] of recordsOf(frame)) {
+            seiData.push({ timestampMs, sei });
+            if (hasValidGps(sei)) {
+                const lat = Number(sei.latitudeDeg ?? sei.latitude_deg);
+                const lon = Number(sei.longitudeDeg ?? sei.longitude_deg);
+                const apState = sei.autopilotState ?? sei.autopilot_state;
                 const autopilot = apState != null && apState !== 0 && apState !== 'DISABLED';
-                mapPath.push({ lat, lon, timestampMs: frame.timestamp, autopilot });
+                mapPath.push({ lat, lon, timestampMs, autopilot });
             }
         }
     }

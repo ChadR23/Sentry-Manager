@@ -1,18 +1,32 @@
 # Sentry Six Manager: the Sentry Studio viewer and converter as a web app, plus
-# footage management, on port 9000.
+# footage management, on port 9000. The server is the Rust port (lean/): two
+# binaries, the root supervisor and the app it runs unprivileged. The pages
+# (web/, the Studio pages, the interface packs) are the same files as before.
 #
 #   docker build -t ghcr.io/skittles-fivem/sentry-manager:latest .
+#
+# The Node.js image this replaces is Dockerfile.node, kept while the Rust
+# image is tested.
+#
+# Behind a proxy that inspects TLS, hand the build its certificates (used for
+# the downloads only, never kept in the image):
+#   docker build --secret id=build_ca,src=/path/to/ca-bundle.crt -t ... .
 
-# Official Node 24 build.
-FROM node:26-trixie-slim AS node
-
-# Small native helper: rename-without-replace (renameat2), used for safe
-# in-place replacement of originals on Linux / SMB.
-FROM debian:trixie-slim AS native
-RUN set -eux; export DEBIAN_FRONTEND=noninteractive; \
-    apt-get update; apt-get install -y --no-install-recommends gcc libc6-dev; rm -rf /var/lib/apt/lists/*
-COPY native/noreplace-rename.c /build/
-RUN gcc -O2 -Wall -Wextra -o /build/noreplace-rename /build/noreplace-rename.c
+# ---- the two binaries, for this machine's architecture (glibc, like the image)
+FROM rust:1.97-slim-trixie AS build
+ARG CARGO_BUILD_JOBS=4
+WORKDIR /src/lean
+COPY lean/Cargo.toml lean/Cargo.lock ./
+# the dependencies first, in a layer of their own (a change to src/ does not fetch them again)
+RUN --mount=type=secret,id=build_ca,required=false \
+    if [ -s /run/secrets/build_ca ]; then export CARGO_HTTP_CAINFO=/run/secrets/build_ca; fi \
+ && mkdir -p src/supervisor && echo 'fn main() {}' > src/main.rs && echo 'fn main() {}' > src/supervisor/bin.rs && touch src/lib.rs \
+ && cargo build --release --locked -j "$CARGO_BUILD_JOBS" \
+ && rm -rf src target/release/deps/sentry_lean* target/release/.fingerprint/sentry-lean* \
+      target/release/sentry-lean target/release/sentry-lean-supervisor
+COPY lean/src ./src
+RUN cargo build --release --locked --offline -j "$CARGO_BUILD_JOBS" \
+ && cp target/release/sentry-lean target/release/sentry-lean-supervisor /
 
 # Debian 13: every package below gets Debian security updates.
 FROM debian:trixie-slim
@@ -22,18 +36,24 @@ FROM debian:trixie-slim
 #                  its own VA-API drivers and vainfo. From Jellyfin's signed
 #                  repository; jellyfin.gpg is their key, fingerprint
 #                  4918 AABC 486C A052 358D 778D 4902 3CD0 1DE2 1A7B.
-# cifs-utils       mounting the vehicles' SMB shares
+# cifs-utils       mounting the vehicles' SMB shares (the root supervisor)
 # fonts            for burned-in timestamps / dashboards in exports
 # tini             reaps ffmpeg children and forwards signals
 # openssl          the local HTTPS certificate authority
-# util-linux       setpriv: the app runs unprivileged (supervisor.js)
+# util-linux       setpriv: the app runs unprivileged (the supervisor)
 COPY jellyfin.gpg /etc/apt/keyrings/jellyfin.gpg
 # The release build passes the week (like 2026-W43): a release in a new week
 # runs this step again instead of reusing the build cache, so it really
 # fetches the packages' latest security fixes.
 ARG APT_REFRESH=""
-RUN set -eux; \
+RUN --mount=type=secret,id=build_ca,required=false \
+    set -eux; \
     export DEBIAN_FRONTEND=noninteractive; \
+    # (apt downloads as its own user, which cannot read the secret: a copy for
+    # this step only, removed below with its setting)
+    if [ -s /run/secrets/build_ca ]; then \
+      install -m 644 /run/secrets/build_ca /tmp/build-ca.crt; \
+      printf 'Acquire::https::CaInfo "/tmp/build-ca.crt";\n' > /etc/apt/apt.conf.d/99build-ca; fi; \
     echo "packages as of ${APT_REFRESH:-now}"; \
     apt-get update; \
     # Debian security fixes released since the base image was published
@@ -45,25 +65,22 @@ RUN set -eux; \
     # FFmpeg 8 when Jellyfin publishes it for this release, else their 7.x
     ffmpeg_pkg=jellyfin-ffmpeg8; apt-cache show "$ffmpeg_pkg" >/dev/null 2>&1 || ffmpeg_pkg=jellyfin-ffmpeg7; \
     apt-get install -y --no-install-recommends "$ffmpeg_pkg" cifs-utils tini tzdata \
-      fontconfig fonts-liberation fonts-dejavu-core openssl util-linux xz-utils \
-      libatomic1; \
-    # (libatomic1: Node 26 for arm64 needs it; without it node will not start)
+      fontconfig fonts-liberation fonts-dejavu-core openssl util-linux xz-utils; \
     ln -s /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/lib/jellyfin-ffmpeg/ffprobe /usr/lib/jellyfin-ffmpeg/vainfo /usr/local/bin/; \
-    rm -rf /var/lib/apt/lists/*; \
+    rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/99build-ca /tmp/build-ca.crt; \
     # no setuid/setgid programs: nothing inside can become root again (the
     # root supervisor runs mount.cifs as root anyway)
     find / -xdev -perm /6000 -type f -exec chmod a-s {} +
 
-COPY --from=node /usr/local/bin/node /usr/local/bin/node
-COPY --from=native /build/noreplace-rename /usr/local/bin/noreplace-rename
+# the supervisor starts the app from its own folder
+COPY --from=build /sentry-lean /sentry-lean-supervisor /usr/local/bin/
 
-ENV NODE_ENV=production \
-    PORT=9000 \
+ENV PORT=9000 \
     PUID=1000 \
     PGID=1000 \
+    APP_ROOT=/app \
     DATA_PATH=/data \
     FOOTAGE_ROOT=/footage \
-    UV_THREADPOOL_SIZE=16 \
     NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
 
 WORKDIR /app
@@ -71,9 +88,12 @@ COPY version.json CRITICAL_UPDATE.txt ./
 # the license and the notices of what keeps its own license (NOTICE), with the code
 COPY LICENSE NOTICE ./
 COPY assets ./assets
-COPY src ./src
-COPY server ./server
+# the pages: the built-in interface, the Studio pages and their shared code
 COPY web ./web
+COPY src/renderer ./src/renderer
+COPY src/shared ./src/shared
+# the CAN signal sets the server decodes with
+COPY server/dbc ./server/dbc
 # the interface packs that come with the app (Settings > Interface)
 COPY examples/ui-packs ./ui-packs
 
@@ -91,11 +111,8 @@ RUN build=""; case "$BUILD_NUMBER" in ''|0*|*[!0-9]*) ;; *) build=",\"build\":$B
     printf '{"sha":"%s","branch":"%s","builtAt":"%s","image":"%s","tag":"%s"%s}\n' "$GIT_SHA" "$GIT_BRANCH" \
       "${BUILD_DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" "$IMAGE" "$IMAGE_TAG" "$build" > /app/BUILD_INFO.json
 
-# Two malloc arenas for the Node processes (the supervisor and the app):
-# with one per thread, memory freed after a large conversion job stayed with
-# the process (about 320 MB settled after three 48,000-clip jobs, 185 MB with
-# two). The app drops it from its environment at start, so ffmpeg keeps
-# glibc's default (encoding with two was about 3% slower).
+# Two malloc arenas for the server (the app drops it from its environment at
+# start, so ffmpeg keeps glibc's default).
 ENV MALLOC_ARENA_MAX=2
 
 VOLUME ["/data"]
@@ -105,7 +122,7 @@ EXPOSE 9000
 EXPOSE 10000
 # /healthz answers on plain HTTP too (everything else there redirects to HTTPS)
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s \
-  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||9000)+'/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"
+  CMD ["/usr/local/bin/sentry-lean-supervisor", "healthcheck"]
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["node", "/app/server/supervisor.js"]
+CMD ["/usr/local/bin/sentry-lean-supervisor"]

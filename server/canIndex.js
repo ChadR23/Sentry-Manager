@@ -142,6 +142,9 @@ const TRUST_RANK = { override: 0, unsigned: 1, verified: 2 };
 const worseTrust = (a, b) => (a === undefined ? b : b === undefined ? a : (TRUST_RANK[a] ?? 1) <= (TRUST_RANK[b] ?? 1) ? a : b);
 
 /** The sidecar's bus map as [interface, what it says (lower case)]. */
+// logs that started this recently are indexed at once, even while the converter runs
+const FRESH_MS = 15 * 60_000;
+
 function sideEntries(side) {
   const map = side?.bus || side?.busMap || side?.buses || null;
   if (!map || typeof map !== 'object') return [];
@@ -596,11 +599,17 @@ function createCanIndex({ canDir, dir, log = null, idle = () => true, dbc = dbcF
       status.running = true;
       do {
         again = false;
-        const todo = await pendingLogs();
+        // the newest logs first, and those without waiting for the converter: they are the car
+        // now (the Stream Deck's live stats, the Nerd panel's live view), and one is a minute's
+        // work; the older ones (a catch-up) wait for an idle moment, oldest first
+        const now = Date.now();
+        const fresh = (j) => Number.isFinite(j.startedAt) && now - j.startedAt < FRESH_MS;
+        const all = await pendingLogs();
+        const todo = [...all.filter(fresh).sort((a, b) => b.startedAt - a.startedAt), ...all.filter((j) => !fresh(j))];
         status.pending = todo.length;
         if (todo.length) progress();
         for (const job of todo) {
-          while (!idle()) await new Promise((r) => setTimeout(r, 2000));
+          while (!fresh(job) && !idle()) await new Promise((r) => setTimeout(r, 2000));
           status.current = job.name;
           progress();
           try {

@@ -7,12 +7,15 @@
 // After each scan the clips' video codecs are read from their MP4 headers
 // in the background (remembered per file size and time, so only new or
 // changed clips are read), which tells encoded recordings from originals.
+// Each scan's files and the codecs read are also kept in the database's
+// footage catalog (catalog.js), so codecs are not read again after a restart.
 
 const crypto = require('crypto');
 const fsp = require('fs/promises');
 const path = require('path');
-const { scanFootage, limiter } = require('./scanner');
-const { safeJoin } = require('./footage');
+const { scanFootage, limiter, fileEntry, interner } = require('./scanner');
+const { BATCH } = require('./catalog');
+const { safeJoin, classify } = require('./footage');
 const { videoCodec } = require('./mp4codec');
 
 const TS_RE = /(\d{4}-\d{2}-\d{2})_(\d{2})-(\d{2})-(\d{2})/;
@@ -171,15 +174,45 @@ class Inventory {
     this.scans = new Map();
     this.codecMaps = new Map(); // vehicleId -> Map(rel -> { size, mtimeMs, codec })
     this.probing = new Map();
+    this.catalogBehind = new Set(); // vehicles whose last catalog write failed
   }
 
-  /** The vehicle's clip codecs read so far (rel -> { size, mtimeMs, codec }). */
+  /** The database's footage catalog (catalog.js), when there is one (not in some tests). */
+  get catalog() {
+    return this.db?.catalog || null;
+  }
+
+  /**
+   * The vehicle's clip codecs read so far (rel -> { size, mtimeMs, codec }).
+   * Once a clip's codec is known for the size and time the scan found, its
+   * value is the scan's own file entry (which has those three), not a copy.
+   */
   codecs(vehicleId) {
     if (!this.codecMaps.has(vehicleId)) {
-      const saved = this.db.get(`codecs:${vehicleId}`, {});
       const map = new Map();
-      for (const [rel, v] of Object.entries(saved || {})) {
-        if (Array.isArray(v) && v.length === 3) map.set(rel, { size: v[0], mtimeMs: v[1], codec: v[2] });
+      const cat = this.catalog;
+      const saved = cat && cat.hasCodecs(vehicleId) ? null : this.db.get(`codecs:${vehicleId}`, {});
+      if (saved) {
+        // the map as one settings value (before the catalog): moved into the catalog once
+        for (const [rel, v] of Object.entries(saved || {})) {
+          if (Array.isArray(v) && v.length === 3) map.set(rel, { size: v[0], mtimeMs: v[1], codec: v[2] });
+        }
+        if (cat && map.size) {
+          cat.putCodecs(vehicleId, [...map].map(([rel, v]) => ({ rel, ...v })));
+          this.db.del(`codecs:${vehicleId}`);
+        }
+      } else {
+        // (a settings value an older version wrote after this one moved them: the catalog is used)
+        this.db.del(`codecs:${vehicleId}`);
+        // the same path strings as the scan's, when it has been scanned
+        const files = this.state.get(vehicleId)?.files;
+        for (const c of cat.codecs(vehicleId)) {
+          const f = files?.get(c.rel);
+          if (f && f.size === c.size && f.mtimeMs === c.mtimeMs) {
+            f.codec = c.codec;
+            map.set(f.rel, f);
+          } else map.set(f ? f.rel : c.rel, { size: c.size, mtimeMs: c.mtimeMs, codec: c.codec });
+        }
       }
       this.codecMaps.set(vehicleId, map);
     }
@@ -198,25 +231,45 @@ class Inventory {
       if (!entry?.files || !vehicle) return 0;
       const root = this.vehicles.rootOf(vehicle);
       const map = this.codecs(vehicleId);
-      let gone = 0;
-      for (const rel of map.keys()) if (!entry.files.has(rel) && map.delete(rel)) gone++;
-      const todo = [...entry.files.values()].filter((f) => f.kind === 'clip' && /\.mp4$/i.test(f.rel)
-        && !(map.get(f.rel)?.size === f.size && map.get(f.rel)?.mtimeMs === f.mtimeMs));
-      const limit = limiter(8);
-      let read = 0;
+      const cat = this.catalog;
+      const gone = [];
+      for (const rel of map.keys()) if (!entry.files.has(rel) && map.delete(rel)) gone.push(rel);
+      const todo = [];
+      for (const f of entry.files.values()) {
+        if (f.kind !== 'clip' || !/\.mp4$/i.test(f.rel)) continue;
+        const known = map.get(f.rel);
+        if (!(known?.size === f.size && known?.mtimeMs === f.mtimeMs)) todo.push(f);
+        else if (known !== f) {
+          // known for this size and time: kept on the scan's entry, the copy (and its path string) let go
+          f.codec = known.codec;
+          map.delete(f.rel);
+          map.set(f.rel, f);
+        }
+      }
+      const limit = limiter(this.codecChecks || 8); // (index.js sets it from workLimits.js)
+      const read = [];
       await Promise.all(todo.map((f) => limit(async () => {
         try {
           const codec = await videoCodec(safeJoin(root, f.rel));
-          map.set(f.rel, { size: f.size, mtimeMs: f.mtimeMs, codec });
-          read++;
+          f.codec = codec;
+          map.delete(f.rel);
+          map.set(f.rel, f);
+          read.push(f);
+          // remembered as it goes, so a restart halfway through keeps what was read
+          if (cat && read.length % BATCH === 0) cat.putCodecs(vehicleId, read.slice(-BATCH));
         } catch {
           // unreadable right now (share dropped, file being replaced): next scan
         }
       })));
-      // saved only when something changed: the map is megabytes for a big car, and most rescans change nothing
-      if (read || gone) this.db.set(`codecs:${vehicleId}`, Object.fromEntries([...map].map(([rel, v]) => [rel, [v.size, v.mtimeMs, v.codec]])));
-      if (read) this.onChange(vehicleId);
-      return read;
+      if (cat) {
+        if (read.length % BATCH) cat.putCodecs(vehicleId, read.slice(-(read.length % BATCH)));
+        cat.removeCodecs(vehicleId, gone);
+      } else if (read.length || gone.length) {
+        // no catalog (some tests): the map as one settings value, saved only when something changed
+        this.db.set(`codecs:${vehicleId}`, Object.fromEntries([...map].map(([rel, v]) => [rel, [v.size, v.mtimeMs, v.codec]])));
+      }
+      if (read.length) this.onChange(vehicleId);
+      return read.length;
     })().catch((err) => {
       this.log.warn(`Reading clip codecs failed: ${err.message}`);
       return 0;
@@ -240,7 +293,10 @@ class Inventory {
   // `light`: the background rescan (index.js, every 15 minutes) reuses what
   // the last scan knew of unchanged folders (scanner.js); every sixth, about
   // every 90 minutes, and every other scan (Refresh, a policy, a restore)
-  // looks at every file.
+  // looks at every file. A light scan with nothing in memory (the first
+  // after a restart) starts from the catalog's last finished scan of the
+  // same folder (resumed below), else it looks at every file; it counts as
+  // one of the five, so a full scan still follows within the 90 minutes.
   scan(vehicleId, { light = false } = {}) {
     if (this.scans.has(vehicleId)) return this.scans.get(vehicleId);
     const p = (async () => {
@@ -251,9 +307,18 @@ class Inventory {
       const prev = this.state.get(vehicleId);
       this.state.set(vehicleId, { ...(prev || {}), scanning: true });
       try {
-        const lights = prev?.lightScans || 0;
-        const reuse = light && prev?.files && prev?.dirs && lights < 5;
-        const res = await scanFootage(this.vehicles.rootOf(vehicle), reuse ? { previous: { files: prev.files, dirs: prev.dirs } } : {});
+        const root = this.vehicles.rootOf(vehicle);
+        let lights = prev?.lightScans || 0;
+        let previous = light && prev?.files && prev?.dirs && lights < 5 ? { files: prev.files, dirs: prev.dirs } : null;
+        const resumed = light && !prev?.files ? this.resume(vehicleId, root) : null;
+        if (resumed) {
+          previous = resumed;
+          lights = 0;
+        }
+        const reuse = Boolean(previous);
+        const toCatalog = this.catalogWriter(vehicleId, previous?.files || prev?.files, root);
+        const res = await scanFootage(root, { onFile: toCatalog?.add, ...(previous ? { previous } : {}) });
+        toCatalog?.finish(res);
         const entry = {
           files: res.files,
           dirs: res.dirs,
@@ -266,7 +331,7 @@ class Inventory {
         };
         entry.recordings = buildRecordings(res.files, { vehicleId, protectedRels: this.db.protectedSet(vehicleId) });
         this.state.set(vehicleId, entry);
-        this.log.info(`${vehicle.name}: ${entry.recordings.length} recordings, ${res.files.size} files (${(res.durationMs / 1000).toFixed(1)}s${reuse ? `, ${res.reused} unchanged` : ''})`);
+        this.log.info(`${vehicle.name}: ${entry.recordings.length} recordings, ${res.files.size} files (${(res.durationMs / 1000).toFixed(1)}s${reuse ? `, ${res.reused} unchanged${resumed ? ' since the last run' : ''}` : ''})`);
         this.probeCodecs(vehicleId);
         this.onScanned(vehicleId);
         return entry;
@@ -281,11 +346,102 @@ class Inventory {
     return p;
   }
 
+  /**
+   * The catalog's last finished scan of this root as a light rescan's
+   * `previous` (scanner.js): its files as file entries (kind, day, camera and
+   * event worked out from the path again, as a scan does) and its folders'
+   * modified times. Null, so the scan looks at every file, when there is no
+   * catalog, its last write failed, or catalog.resume finds nothing it can
+   * vouch for (another version, another folder, a write cut short).
+   */
+  resume(vehicleId, root) {
+    const cat = this.catalog;
+    if (!cat || this.catalogBehind.has(vehicleId)) return null;
+    let last;
+    try {
+      last = cat.resume(vehicleId, root);
+    } catch (err) {
+      this.log.warn(`Footage catalog not read: ${err.message}`);
+      return null;
+    }
+    if (!last) return null;
+    const files = new Map();
+    const intern = interner();
+    for (const r of last.rows) {
+      const info = classify(r.rel);
+      if (!info) continue;
+      files.set(r.rel, fileEntry(r.rel, r, info, intern));
+    }
+    return { files, dirs: last.dirs, startedMs: last.startedMs };
+  }
+
+  /**
+   * Keeps the catalog in step with a scan: the files it looks at afresh are
+   * written in batches as it goes (unless the last scan saw them just so),
+   * and at the end the files it did not find are forgotten. A failure here
+   * never fails the scan: the catalog is caught up by the next one.
+   */
+  catalogWriter(vehicleId, prevFiles, root = null) {
+    const cat = this.catalog;
+    if (!cat) return null;
+    // the last write failed: this scan writes every file, not only what changed
+    if (this.catalogBehind.has(vehicleId)) prevFiles = null;
+    let batch = [];
+    let failed = false;
+    const write = (fn) => {
+      if (failed) return;
+      try {
+        fn();
+      } catch (err) {
+        failed = true;
+        this.catalogBehind.add(vehicleId);
+        this.log.warn(`Footage catalog not updated: ${err.message}`);
+      }
+    };
+    const flush = () => {
+      const list = batch;
+      batch = [];
+      if (list.length) write(() => cat.putFiles(vehicleId, list));
+    };
+    // until this scan has finished writing, the rows vouch for no scan (resume)
+    write(() => cat.invalidate(vehicleId));
+    return {
+      add: (f) => {
+        const was = prevFiles?.get(f.rel);
+        if (was && was.size === f.size && was.mtimeMs === f.mtimeMs && was.ctimeMs === f.ctimeMs && was.birthtimeMs === f.birthtimeMs
+          && was.day === f.day && was.kind === f.kind) return;
+        batch.push(f);
+        if (batch.length >= BATCH) flush();
+      },
+      finish: (res) => {
+        const { files } = res;
+        flush();
+        write(() => cat.keepOnly(vehicleId, (rel) => files.has(rel)));
+        // (a folder or file it could not read has no row, so the next scan reads it again)
+        if (root !== null) {
+          write(() => cat.putScan(vehicleId, { root, startedMs: res.startedAt, scannedAt: res.scannedAt, dirs: res.dirs }));
+        }
+        if (!failed) this.catalogBehind.delete(vehicleId);
+      }
+    };
+  }
+
   /** Recompute recordings after files moved (trash/restore) without rescanning. */
   rebuild(vehicleId) {
     const entry = this.state.get(vehicleId);
     if (!entry?.files) return;
     entry.recordings = buildRecordings(entry.files, { vehicleId, protectedRels: this.db.protectedSet(vehicleId) });
+    // the catalog too, so it doesn't wait for the next scan (a failure only means the next scan writes every file);
+    // not while a scan runs: its rows are already that scan's, and its map replaces this one when it ends
+    const cat = this.catalog;
+    if (cat && !this.catalogBehind.has(vehicleId) && !this.scans.has(vehicleId)) {
+      try {
+        cat.syncFiles(vehicleId, entry.files);
+      } catch (err) {
+        this.catalogBehind.add(vehicleId);
+        this.log.warn(`Footage catalog not updated: ${err.message}`);
+      }
+    }
   }
 
   recording(vehicleId, id) {

@@ -307,6 +307,7 @@ function collectElements(root) {
         customBitrateRow: byId('converterCustomBitrateRow'),
         qualityLevel: byId('converterQualityLevel'),
         qualityRow: byId('converterQualityRow'),
+        smallestHint: byId('converterSmallestHint'),
         keepOffTarget: byId('converterKeepOffTarget'),
         keepOffTargetRow: byId('converterKeepOffTargetRow'),
         keepLarger: byId('converterKeepLarger'),
@@ -503,7 +504,7 @@ function createFootageConverterController(options = {}) {
 
     function selectedProfile() {
         const value = elements.profileSelect?.value;
-        return ['conservative', 'balanced', 'aggressive', 'custom', 'quality'].includes(value)
+        return ['conservative', 'balanced', 'aggressive', 'custom', 'quality', 'smallest'].includes(value)
             ? value : selected(elements.profileOptions, 'converterProfile', 'balanced');
     }
 
@@ -527,24 +528,35 @@ function createFootageConverterController(options = {}) {
         return {};
     }
 
+    // custom bitrate, constant quality and Smallest (CPU only) have no size target
+    const NO_TARGET = ['custom', 'quality', 'smallest'];
+
     function updateCustomBitrateVisibility() {
         setHidden(elements.customBitrateRow, selectedProfile() !== 'custom');
         setHidden(elements.qualityRow, selectedProfile() !== 'quality');
-        // custom bitrate and constant quality have no size target to miss
-        setHidden(elements.keepOffTargetRow, ['custom', 'quality'].includes(selectedProfile()));
+        setHidden(elements.smallestHint, selectedProfile() !== 'smallest');
+        // no size target to miss...
+        setHidden(elements.keepOffTargetRow, NO_TARGET.includes(selectedProfile()));
         // ...and only they have "Always convert, even if larger"
-        setHidden(elements.keepLargerRow, !['custom', 'quality'].includes(selectedProfile()));
+        setHidden(elements.keepLargerRow, !NO_TARGET.includes(selectedProfile()));
+        // Smallest (CPU only) is an x265 setting: H.265 only
+        const smallest = selectedProfile() === 'smallest';
+        for (const input of elements.codecOptions || []) {
+            if (input?.dataset?.converterCodec === 'av1') input.disabled = smallest;
+        }
+        if (smallest && selectedCodec() !== 'h265') selectCodec('h265');
+        updateRowsShown();
     }
 
     // "Keep clips that can't reach the size target" (size profiles only)
     function keepOffTargetSetting(profileId) {
-        if (['custom', 'quality'].includes(profileId)) return {};
+        if (NO_TARGET.includes(profileId)) return {};
         return elements.keepOffTarget?.checked === true ? { keepOffTarget: true } : {};
     }
 
-    // "Always convert, even if larger" (constant quality and custom bitrate only)
+    // "Always convert, even if larger" (profiles without a size target only)
     function keepLargerSetting(profileId) {
-        if (!['custom', 'quality'].includes(profileId)) return {};
+        if (!NO_TARGET.includes(profileId)) return {};
         return elements.keepLarger?.checked === true ? { keepLarger: true } : {};
     }
 
@@ -584,7 +596,7 @@ function createFootageConverterController(options = {}) {
     }
 
     function updateConcurrencyCustomVisibility() {
-        setHidden(elements.concurrencyCustomRow, lanesMode() || !customConcurrencySelected());
+        setHidden(elements.concurrencyCustomRow, rowsShown() || !customConcurrencySelected());
     }
 
     function setConcurrency(value) {
@@ -618,6 +630,21 @@ function createFootageConverterController(options = {}) {
 
     function lanesMode() {
         return laneDevices !== null;
+    }
+
+    // Smallest (CPU only) runs on this server's CPU: with several GPUs the
+    // page shows the single number for it, not the rows (the running job's
+    // profile while one runs, else the one picked)
+    function rowsShown() {
+        if (!lanesMode()) return false;
+        return (jobActive() ? snapshot?.config?.profileId : selectedProfile()) !== 'smallest';
+    }
+
+    function updateRowsShown() {
+        if (!lanesMode()) return;
+        setHidden(elements.lanes, !rowsShown());
+        setHidden(elements.concurrency, rowsShown());
+        updateConcurrencyCustomVisibility();
     }
 
     function selectedCodec() {
@@ -955,7 +982,8 @@ function createFootageConverterController(options = {}) {
     // Rows follow the job (its lanes, or its number on the default GPU), only
     // when that changes and not while the owner is changing them.
     function syncLanes(config, { force = false } = {}) {
-        if (!lanesMode()) return;
+        // (a Smallest (CPU only) job has no lanes: its number is no GPU's row)
+        if (!rowsShown() || config?.profileId === 'smallest') return;
         const lanes = lanesOfConfig(config);
         if (!lanes) return;
         const key = lanesKey(lanes);
@@ -975,7 +1003,7 @@ function createFootageConverterController(options = {}) {
     // single number (see liveConcurrency). A job without lanes that still
     // only uses the default GPU keeps getting a plain number.
     function liveLanes() {
-        if (!snapshot?.id || !ACTIVE_STATES.has(snapshot.state)) return;
+        if (!snapshot?.id || !ACTIVE_STATES.has(snapshot.state) || !rowsShown()) return;
         const lanes = activeLanes();
         const total = lanesSum(lanes);
         if (total === 0 || total > MAX_CONCURRENCY) return;
@@ -1040,9 +1068,7 @@ function createFootageConverterController(options = {}) {
         else firstTimeLanes();
         lanesUntouched = !remembered;
         buildLanes();
-        setHidden(elements.concurrency, true);
-        updateConcurrencyCustomVisibility();
-        setHidden(elements.lanes, false);
+        updateRowsShown();
         if (elements.benchmarkIntro) {
             elements.benchmarkIntro.setAttribute?.('data-i18n', 'ui.converter.benchmarkIntroLanes');
             setText(elements.benchmarkIntro, message('benchmarkIntroLanes', BENCHMARK_INTRO_LANES));
@@ -1085,6 +1111,8 @@ function createFootageConverterController(options = {}) {
             setConcurrency(concurrency);
         }
         syncLanes(config);
+        // (a job that started or ended can switch between the rows and the number)
+        updateRowsShown();
         // (the codec may have changed: which rows can encode it)
         renderLanes();
         updateOutputMode();
@@ -1663,7 +1691,7 @@ function createFootageConverterController(options = {}) {
             const bitrateKbps = profileId === 'custom' ? customBitrateKbps() : undefined;
             if (profileId === 'custom' && bitrateKbps === null) throw apiError('BITRATE_INVALID');
             const request = {
-                codecs: ['h265', 'av1'],
+                codecs: profileId === 'smallest' ? ['h265'] : ['h265', 'av1'],
                 verifyMode: selectedVerifyMode(),
                 profileId,
                 ...profileSettings(profileId),
@@ -1725,7 +1753,7 @@ function createFootageConverterController(options = {}) {
         setConcurrency(pick.level);
         rememberConcurrency(pick.level);
         // one GPU's result with rows per GPU: it was measured on the default GPU
-        if (lanesMode()) {
+        if (rowsShown()) {
             const target = defaultFor(pick.codec) ?? laneDevices[0].id;
             for (const device of laneDevices) laneCounts.set(device.id, device.id === target ? pick.level : 0);
             rememberLanes();
@@ -2029,7 +2057,7 @@ function createFootageConverterController(options = {}) {
         const profileId = selectedProfile();
         if (profileId === 'custom' && customBitrateKbps() === null) throw apiError('BITRATE_INVALID');
         // { concurrency } as always, or with several GPUs { concurrency, lanes }
-        const parallel = lanesMode() ? lanesConfig() : { concurrency: selectedConcurrency() };
+        const parallel = rowsShown() ? lanesConfig() : { concurrency: selectedConcurrency() };
         return {
             sourceRoot,
             destinationRoot: outputMode === 'replace' ? null : destinationRoot,

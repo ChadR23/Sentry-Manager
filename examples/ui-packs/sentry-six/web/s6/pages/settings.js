@@ -287,10 +287,17 @@ async function renderPage(el, ctx) {
         toast('Notification preferences saved.');
       });
     } else if (key === 'advanced') {
+      box.innerHTML =
+        '<div data-metrics></div><div class="card"><h2>Background work</h2><div data-work></div></div>';
+      // how much background work runs at once (web/workLimitsSettings.js, the same in every interface)
+      shared = (await ctx.scope.wait(import('/web/workLimitsSettings.js'))).createWorkLimitsSettings(
+        box.querySelector('[data-work]'),
+        { scope: ctx.scope, cls: { btn: 'btn', primary: 'btn primary', input: 'input' }, toast },
+      );
       async function draw(token) {
         const m = await api('/api/metrics/settings');
         if (!ctx.alive()) return;
-        box.innerHTML = `<div class="card"><h2>Advanced</h2><h3>Metrics for your own monitoring</h3><p>Read-only numbers for Prometheus, Grafana or Home Assistant. Off until enabled; the token is required. Uses this server's existing port.</p><p>${m.enabled ? 'On' : 'Off'}</p>${
+        box.querySelector('[data-metrics]').innerHTML = `<div class="card"><h2>Advanced</h2><h3>Metrics for your own monitoring</h3><p>Read-only numbers for Prometheus, Grafana or Home Assistant. Off until enabled; the token is required. Uses this server's existing port.</p><p>${m.enabled ? 'On' : 'Off'}</p>${
           token
             ? `<p>Token shown once. Keep it like a password.</p><code class="secret">${esc(token)}</code><pre>- job_name: sentry-six-manager
 scheme: ${location.protocol.slice(0, -1)}

@@ -453,10 +453,11 @@ async function extractSeiAndMapPath({ groups, cumStarts, nativeVideo, startTimeM
             const mp4 = new DashcamMP4(buffer);
             const frames = mp4.parseFrames(SeiMetadata);
             for (const f of frames) {
-                if (!f.sei) continue;
-                allSei.push({ timestampMs: segStartMs + f.timestamp, sei: f.sei });
-                if (wantMinimap && hasGps(f.sei)) {
-                    allMap.push([f.sei.latitude_deg, f.sei.longitude_deg]);
+                for (const [t, sei] of DashcamMP4.recordsOf(f)) {
+                    allSei.push({ timestampMs: segStartMs + t, sei });
+                    if (wantMinimap && hasGps(sei)) {
+                        allMap.push([sei.latitude_deg, sei.longitude_deg]);
+                    }
                 }
             }
         } catch (err) {

@@ -64,6 +64,7 @@ const { createConverterHost } = require('./converterHost');
 const { createStats } = require('./stats');
 const { encoderBlock, jobProgress, RUNNING: CONVERTER_RUNNING } = require('./encoderStats');
 const { createConvertStats, heartbeatHardware } = require('./convertStats');
+const canNow = require('./canNow');
 const { hostInfo } = require('./hostInfo');
 const { createSavings } = require('./savings');
 const { parsePowerSettings, priceAt, rateNameAt, isCheapest, PriceError } = require('./powerPrice');
@@ -75,7 +76,7 @@ const { VERSIONS, DEFAULT_VERSION, securitySummary } = require('./mountSpec');
 const { TlsManager, localTlsSource, supervisorTlsSource, parseHostnames } = require('./tls');
 const { acmeConfigFromEnv, CHALLENGE_PREFIX } = require('./acme');
 const { canUploadSecure } = require('./canSecure');
-const { Router, HttpError, sendJson, readJson, readRaw, serveFile, sendText } = require('./http');
+const { Router, HttpError, sendJson, sendJsonPatiently, readJson, readRaw, serveFile, sendText } = require('./http');
 const { createStudioTranslations } = require('./studioTranslations');
 const { createUiPacks, originalPack, MAX_ZIP_BYTES: MAX_UI_PACK_BYTES } = require('./uiPacks');
 const { createSmbTester } = require('./smbTest');
@@ -88,6 +89,7 @@ const { run } = require('./proc');
 const { Telemetry } = require('./telemetry');
 const { createSpeedIndex } = require('./speedIndex');
 const { createBackgroundPace } = require('./backgroundPace');
+const workLimitsLib = require('./workLimits');
 const { createExporter } = require('./exporter');
 const { createCanLogs, parseName: parseCanName } = require('./canLogs');
 const { createCanIndex, CLIP_STEP_MS: CAN_CLIP_STEP_MS } = require('./canIndex');
@@ -385,20 +387,27 @@ async function main() {
   // the Pi info files read from the shares (heartbeat and diagnostics: whether any, versions)
   const sentryUsbInfos = () => vehicles.list().map((v) => sentryUsb.device(v.id)?.info).filter(Boolean);
 
+  // how much background work runs at once, from this container's memory and
+  // CPUs, or what an admin set (workLimits.js; Settings → Advanced)
+  const workResources = workLimitsLib.detectResources();
+  let work = workLimitsLib.pickLimits({ resources: workResources, override: db.get('work-limits', null) });
+  const workLimit = (key) => () => work.limits[key];
+  log.info(`Background work: ${Object.entries(work.limits).map(([k, v]) => `${k} ${v}`).join(', ')} (${(workResources.memoryBytes / 1024 ** 3).toFixed(1)} GB from the ${workResources.memoryFrom}, ${workResources.cpus} CPUs from the ${workResources.cpusFrom})`);
   const inventory = new Inventory({ vehicles, db, log: logger.scope('inventory'), onChange: () => announce('inventory'), onScanned: (vid) => {
     speedIndex?.kick(); scrubPrepare?.kick(); integrityRef?.resume(vid);
     // (the gap check and the checksum record read the status the scan just found)
     sentryUsb.refresh(vid).catch(() => null).finally(() => { archiveGapRef?.check(vid); arrivalRef?.kick(); });
     driveData?.check(vid).catch(() => null);
   } });
+  inventory.codecChecks = workLimit('codecChecks');
   // the SHA-256 of every original the converter replaces in place, for
   // Sentry USB (originalChecksums.js), written inside a vehicle's folder only
   const originalChecksums = createOriginalChecksums({
     log: logger.scope('converter'),
     allowedRoot: (dir) => Boolean(vehicles.vehicleForPath(dir))
   });
-  const thumbs = new Thumbnails({ dir: path.join(DATA, 'thumbnails'), ffmpegPath: FFMPEG });
-  const telemetry = new Telemetry({ srcRoot: SRC, cacheDir: path.join(DATA, 'telemetry'), log: logger.scope('telemetry') });
+  const thumbs = new Thumbnails({ dir: path.join(DATA, 'thumbnails'), ffmpegPath: FFMPEG, concurrency: workLimit('thumbnails') });
+  const telemetry = new Telemetry({ srcRoot: SRC, cacheDir: path.join(DATA, 'telemetry'), log: logger.scope('telemetry'), concurrency: workLimit('telemetryReads') });
   // every front clip's speed, a value a second, indexed in the background for the Viewer's speed graph
   // (not while a conversion or the benchmark runs: the speed reads share the data disk; both are declared below)
   // Sentry USB's drive-data.json on each car's share (driveData.js): read when
@@ -406,7 +415,7 @@ async function main() {
   driveData = driveDataLib.createDriveData({ dir: path.join(DATA, 'drive-data'), vehicles, log: logger.scope('drives'), idle: () => !speedIndexBusy() });
   // how many clips the speed index reads at once: more while the server keeps
   // up, fewer when it strains or the Viewer plays (backgroundPace.js)
-  const backgroundPace = createBackgroundPace({ busy: () => speedIndexBusy() });
+  const backgroundPace = createBackgroundPace({ max: workLimit('speedIndex'), busy: () => speedIndexBusy() });
   backgroundPace.start();
   speedIndex = createSpeedIndex({ dir: path.join(DATA, 'speeds'), inventory, vehicles, telemetry, log: logger.scope('speeds'), idle: () => !speedIndexBusy(), pace: backgroundPace });
   // the place search's cache, filled quietly half a minute after start
@@ -613,7 +622,7 @@ async function main() {
   const studioTranslations = createStudioTranslations(path.join(SRC, 'renderer/scripts/data/translations.js'));
   let clipThumbs = null;
   // the Viewer's scrub previews (see scrubFrames.js)
-  const scrubFrames = createScrubFrames({ directory: path.join(DATA, 'scrub'), ffmpegPath: FFMPEG, ffprobePath: FFPROBE, spawn });
+  const scrubFrames = createScrubFrames({ directory: path.join(DATA, 'scrub'), ffmpegPath: FFMPEG, ffprobePath: FFPROBE, spawn, concurrency: workLimit('scrubPreviews') });
   // the newest footage's previews, made ahead in the background (not while converting)
   const prepareDays = Number.parseInt(process.env.SCRUB_PREPARE_DAYS ?? '2', 10);
   scrubPrepare = createScrubPrepare({
@@ -769,8 +778,11 @@ async function main() {
   });
   vehicles.on('health', (id, healthy) => {
     if (!healthy) return;
-    bin.reconcile(id).catch((err) => log.warn(`Recycle Bin check of ${id}: ${err.message}`))
-      .then(() => inventory.scan(id)).then(() => announce('inventory'), () => {});
+    // footage mounted read-only has no Recycle Bin to settle: only its scan
+    const readOnly = vehicles.share(id)?.status?.()?.readOnly === true;
+    (readOnly ? Promise.resolve() : bin.reconcile(id).catch((err) => log.warn(`Recycle Bin check of ${id}: ${err.message}`)))
+      // (the first scan since the server started may start from the footage catalog's last one: inventory.scan)
+      .then(() => inventory.scan(id, { light: !inventory.get(id)?.files })).then(() => announce('inventory'), () => {});
   });
 
   // ---- routes
@@ -1332,6 +1344,117 @@ async function main() {
     audit.warn(`Metrics turned off: ${by(req, user)}`);
     return { enabled: false };
   });
+  // the answers, a few seconds each (a Stream Deck asks once per key every few seconds)
+  const canNowCache = new Map(); // `${keys}|${units}` -> { at, answer }
+  const CAN_NOW_TTL_MS = 3000;
+  const canNowKeys = async () => {
+    try { return (await fs.promises.readdir(path.join(DATA, 'can-index'), { withFileTypes: true })).filter((d) => d.isDirectory()).map((d) => d.name); } catch { return []; }
+  };
+  /** GET /api/can/now[/<stat>][?token=…&car=…&units=mi|km]: the newest CAN values, or one as plain text. */
+  async function canNowAnswer(req, res, url) {
+    // read by the Stream Deck plugin from its own origin: allowed, as only the token lets it in (no cookies)
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    const cfg = db.get('can-now', null);
+    if (!cfg?.tokenHash) return sendJson(res, 404, { error: 'Not found' });
+    if (req.method !== 'GET' && req.method !== 'HEAD') return sendJson(res, 405, { error: 'GET only' });
+    // the local certificate authority's certificate (public, no token): the plugin fetches it
+    // once and keeps it only when its fingerprint is the link's pin
+    if (url.pathname === '/api/can/now/ca.crt') {
+      const pem = tlsSource?.caPem();
+      if (!pem) return sendJson(res, 404, { error: 'No local certificate authority.' });
+      res.writeHead(200, { 'Content-Type': 'application/x-x509-ca-cert', 'Cache-Control': 'no-store' });
+      return res.end(pem);
+    }
+    const given = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '') || String(url.searchParams.get('token') || '');
+    const hash = crypto.createHash('sha256').update(given).digest('hex');
+    if (!given || !crypto.timingSafeEqual(Buffer.from(hash), Buffer.from(cfg.tokenHash))) {
+      res.writeHead(401, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+      return res.end('Token required (Nerd panel → Stream Deck)');
+    }
+    const units = url.searchParams.get('units') === 'km' ? 'km' : 'mi';
+    // which car: its vehicle's id or name, or a CAN key; else the one with the newest data
+    const want = String(url.searchParams.get('car') || '').trim().toLowerCase();
+    let keys = await canNowKeys();
+    if (want) keys = keys.filter((k) => k.toLowerCase() === want || [canCarOf(k)?.id, canCarOf(k)?.name].some((x) => String(x || '').toLowerCase() === want));
+    const id = `${keys.join(',')}|${units}`;
+    let hit = canNowCache.get(id);
+    if (!hit || Date.now() - hit.at > CAN_NOW_TTL_MS) {
+      let best = null;
+      for (const key of keys) {
+        const got = await canNow.latestStats({ index: canIndex, key, units }).catch((err) => { log.warn(`Stream Deck stats: ${err.message}`); return null; });
+        if (got && (!best || got.at > best.at)) best = got;
+      }
+      const car = best ? canCarOf(best.key) : null;
+      hit = { at: Date.now(), answer: best ? {
+        car: car?.name || null, at: new Date(best.at).toISOString(), ageSec: best.ageSec, stale: best.stale, units,
+        stats: Object.fromEntries(best.stats.map(({ id: sid, ...rest }) => [sid, rest]))
+      } : null };
+      canNowCache.set(id, hit);
+      while (canNowCache.size > 16) canNowCache.delete(canNowCache.keys().next().value);
+    }
+    const stat = decodeURIComponent(url.pathname.slice('/api/can/now'.length).replace(/^\//, '').replace(/\.txt$/, '')) || url.searchParams.get('stat') || '';
+    if (stat) {
+      if (!canNow.STAT_IDS.includes(stat)) return sendJson(res, 404, { error: `No stat "${stat.slice(0, 40)}". Stats: ${canNow.STAT_IDS.join(', ')}` });
+      // plain text for a Stream Deck key: the value with its unit, "—" without one
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+      return res.end(hit.answer?.stats?.[stat]?.text ?? '—');
+    }
+    if (!hit.answer) return sendJson(res, 200, { car: null, at: null, stale: true, units, stats: {} });
+    return sendJson(res, 200, hit.answer);
+  }
+
+  // ---- Live CAN stats for a Stream Deck (server/canNow.js): GET /api/can/now with its own
+  // read-only token, made here (admins, the Nerd panel). Off until a link is made.
+  // what the plugin pins (the link's pin=): the local certificate authority while the server's
+  // certificate comes from it, else the server's own certificate; none with a certificate every
+  // computer already trusts (Let's Encrypt) or without HTTPS of its own
+  const deckPin = () => {
+    try {
+      const st = tlsSource?.status();
+      if (!st) return null;
+      const hex = (fp) => String(fp || '').replace(/:/g, '').toLowerCase();
+      if (st.mode === 'acme' && st.serving === 'acme') return null;
+      if (st.mode === 'own') return st.certificate?.fingerprint ? `cert:${hex(st.certificate.fingerprint)}` : null;
+      return st.ca?.fingerprint ? `ca:${hex(st.ca.fingerprint)}` : null;
+    } catch { return null; }
+  };
+  r.add('GET', '/api/can/stream-deck', (req, res, { user }) => {
+    if (!adminHere(req, user)) throw new HttpError(403, 'Only an admin can manage the Stream Deck link.');
+    const cfg = db.get('can-now', null);
+    return { enabled: Boolean(cfg?.tokenHash), at: cfg?.at || null, pin: deckPin(), stats: canNow.STATS.map(({ id, label }) => ({ id, label })) };
+  });
+  r.add('POST', '/api/can/stream-deck', (req, res, { user }) => {
+    if (!adminHere(req, user)) throw new HttpError(403, 'Only an admin can manage the Stream Deck link.');
+    const token = crypto.randomBytes(24).toString('base64url');
+    db.set('can-now', { tokenHash: crypto.createHash('sha256').update(token).digest('hex'), at: Date.now() });
+    canNowCache.clear();
+    audit.warn(`Stream Deck link made (new token; any older link stops working): ${by(req, user)}`);
+    return { enabled: true, token, pin: deckPin(), stats: canNow.STATS.map(({ id, label }) => ({ id, label })) };
+  });
+  // the Stream Deck plugin (assets/streamdeck), zipped as the .streamDeckPlugin file Stream Deck installs
+  r.add('GET', '/api/can/stream-deck/plugin', async (req, res, { user }) => {
+    if (!adminHere(req, user)) throw new HttpError(403, 'Only an admin can download the Stream Deck plugin.');
+    const root = path.join(APP_ROOT, 'assets', 'streamdeck');
+    const folder = 'com.sentrysix.canstats.sdPlugin';
+    const walk = async (rel) => (await fs.promises.readdir(path.join(root, rel), { withFileTypes: true })).flatMap((e) => (e.isDirectory() ? [{ dir: `${rel}/${e.name}` }] : [`${rel}/${e.name}`]));
+    const files = [];
+    const todo = [folder];
+    while (todo.length) {
+      for (const x of await walk(todo.shift())) if (typeof x === 'string') files.push(x); else todo.push(x.dir);
+    }
+    const zip = writeZip(await Promise.all(files.sort().map(async (name) => ({ name, data: await fs.promises.readFile(path.join(root, name)) }))));
+    res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': zip.length, 'Cache-Control': 'no-store', 'Content-Disposition': attachment('Sentry Six CAN Stats.streamDeckPlugin') });
+    res.end(zip);
+    return undefined;
+  });
+  r.add('DELETE', '/api/can/stream-deck', (req, res, { user }) => {
+    if (!adminHere(req, user)) throw new HttpError(403, 'Only an admin can manage the Stream Deck link.');
+    db.set('can-now', null);
+    canNowCache.clear();
+    audit.warn(`Stream Deck link turned off: ${by(req, user)}`);
+    return { enabled: false };
+  });
+
   // Notification rules: which kinds of notification are raised
   const NOTIFY_KINDS = ['share', 'storage', 'server', 'health', 'conversion', 'update', 'archive'];
   r.add('GET', '/api/notification-rules', () => {
@@ -3731,12 +3854,34 @@ async function main() {
     db.set('appearance', next);
     return next;
   });
+  // how much background work runs at once (workLimits.js): what is in use,
+  // what would be picked automatically and why, and what an admin set; a PUT
+  // sets the numbers (null or empty for automatic) and applies at once
+  const workView = () => ({ limits: work.limits, auto: work.auto, override: work.override, tier: work.tier, resources: work.resources, max: work.max });
+  r.add('GET', '/api/settings/work-limits', () => workView());
+  r.add('PUT', '/api/settings/work-limits', (req, res, { body, user }) => {
+    let next;
+    try {
+      next = workLimitsLib.parseOverride(body || {});
+    } catch (err) {
+      throw Object.assign(new HttpError(400, err.message), { expose: true });
+    }
+    db.set('work-limits', next);
+    work = workLimitsLib.pickLimits({ resources: workResources, override: next });
+    audit.info(`Background work limits set to ${Object.keys(next).length ? Object.entries(next).map(([k, v]) => `${k} ${v}`).join(', ') : 'automatic'}: ${by(req, user)}`);
+    return workView();
+  });
   r.add('GET', '/api/updates', () => updates.status());
   r.add('POST', '/api/updates/check', () => updates.check());
 
   // Converter (Encoder tab) — the Studio converter UI talks to these.
   r.add('POST', '/api/converter/invoke/:name', async (req, res, { params, body }) => {
     if (!bridge) return { ok: false, error: { code: host.lastError?.code || 'CONVERTER_STARTING' } };
+    // the benchmark answers when it is done (minutes): kept alive meanwhile, so its result is not cut off
+    if (params.name === 'runBenchmark') {
+      await sendJsonPatiently(res, () => bridge.invoke(params.name, body, req.headers['x-client-id']));
+      return undefined;
+    }
     return bridge.invoke(params.name, body, req.headers['x-client-id']);
   });
 
@@ -3874,6 +4019,9 @@ async function main() {
         res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4; charset=utf-8', 'Cache-Control': 'no-store' });
         return res.end(metricsText());
       }
+      // Live CAN stats for a Stream Deck (server/canNow.js): only with the token made in the
+      // Nerd panel; read-only, no cookies
+      if (rawPath === '/api/can/now' || rawPath.startsWith('/api/can/now/')) return await canNowAnswer(req, res, url);
       // CAN Bridge uploads (docs/can-bridge-api.md): opt-in, HTTPS only, a
       // write-only token; no cookies, so the page checks below do not apply
       if (rawPath === '/api/can/logs' || rawPath.startsWith('/api/can/logs/')) return canUpload(req, res, rawPath);

@@ -236,19 +236,20 @@ class DashcamMP4 {
         const carrier = this._mdats[0];
         if (!carrier || this._mdats.length < 2) throw new Error('Unsupported AV1 telemetry carrier: missing first mdat');
         if ([...this._samples, ...this._otherSamples].some(sample => sample.offset < carrier.end)) throw new Error('Invalid AV1 sample references telemetry carrier');
+        // each picture's records, in order (see readFrames)
         const groups = [];
-        let pending = null, pendingRecords = false;
+        let pending = [], pendingRecords = false;
         for (const nal of this.records(carrier.start, carrier.end, 4)) {
             if (this.isPictureMarker(nal)) {
                 if (groups.length >= this._samples.length) throw new Error('Invalid AV1 carrier marker count');
                 groups.push(pending);
-                pending = null;
+                pending = [];
                 pendingRecords = false;
             } else {
                 if (nal[0] !== 6 || nal[1] !== 5 || !this.seiPayload(nal)) throw new Error('Invalid AV1 carrier record');
-                pending = this.decodeSei(nal, SeiMetadata);
-                if (SeiMetadata && !pending) throw new Error('Invalid AV1 telemetry protobuf');
-                if (pending && messages) messages.push(pending);
+                const decoded = this.decodeSei(nal, SeiMetadata);
+                if (SeiMetadata && !decoded) throw new Error('Invalid AV1 telemetry protobuf');
+                if (decoded) { pending.push(decoded); if (messages) messages.push(decoded); }
                 pendingRecords = true;
             }
         }
@@ -270,7 +271,11 @@ class DashcamMP4 {
         const markerCounts = [];
         let hasCompatibility = false;
         for (const sample of this._samples) {
-            let sei = av1 ? av1[frames.length] : null, data = null, keyframe = false, markers = 0;
+            // every telemetry record of the frame, in order: the first is the frame's own; a
+            // converted clip's last picture also carries the record of Tesla's closing
+            // zero-length sample (which has no picture of its own), kept as `seiMore`
+            const seis = av1 ? [...(av1[frames.length] || [])] : [];
+            let data = null, keyframe = false, markers = 0;
             if (av1) data = new Uint8Array(this.buffer.slice(sample.offset, sample.offset + sample.size));
             else for (const nal of this.records(sample.offset, sample.offset + sample.size, config.lengthSize)) {
                 if (config.sampleEntry === 'avc1') {
@@ -279,7 +284,7 @@ class DashcamMP4 {
                     else if (type === 8) currentPps = nal;
                     else if (type === 6) {
                         const decoded = this.decodeSei(nal, SeiMetadata);
-                        if (decoded) { sei = decoded; if (messages) messages.push(decoded); }
+                        if (decoded) { seis.push(decoded); if (messages) messages.push(decoded); }
                     }
                     else if (type === 5 || type === 1) { if (!data) data = nal; keyframe ||= type === 5; }
                 } else {
@@ -290,20 +295,34 @@ class DashcamMP4 {
                     else if (nal[0] === 0x66 && nal[1] === 0x01) {
                         const original = DashcamMP4.concat(Uint8Array.of(6, 5), nal.subarray(2));
                         if (!this.seiPayload(original)) throw new Error('Invalid HEVC compatibility record');
-                        sei = this.decodeSei(original, SeiMetadata);
-                        if (SeiMetadata && !sei) throw new Error('Invalid HEVC telemetry protobuf');
-                        if (sei && messages) messages.push(sei);
+                        const decoded = this.decodeSei(original, SeiMetadata);
+                        if (SeiMetadata && !decoded) throw new Error('Invalid HEVC telemetry protobuf');
+                        if (decoded) { seis.push(decoded); if (messages) messages.push(decoded); }
                         hasCompatibility = true;
                     } else if (type <= 31) { if (!data) data = nal; keyframe ||= type >= 16 && type <= 23; }
                 }
             }
             if (!data) throw new Error('Invalid video sample: missing picture');
             markerCounts.push(markers);
-            frames.push({ index: frames.length, timestamp: sample.timestamp, duration: config.durations[frames.length],
-                keyframe, data, sei, sps: currentSps, pps: currentPps });
+            const frame = { index: frames.length, timestamp: sample.timestamp, duration: config.durations[frames.length],
+                keyframe, data, sei: seis.length ? seis[0] : null, sps: currentSps, pps: currentPps };
+            if (seis.length > 1) frame.seiMore = seis.slice(1);
+            frames.push(frame);
         }
         if (config.sampleEntry === 'hvc1' && (hasCompatibility || markerCounts.some(Boolean)) && markerCounts.some(count => count !== 1)) throw new Error('Invalid HEVC carrier picture marker count');
         return frames;
+    }
+
+    /**
+     * A frame's telemetry records with their times: [[ms, sei], ...]. The frame's own
+     * at its time; a record carried from Tesla's closing zero-length sample (a converted
+     * clip keeps it on the last picture) where that sample was, one frame later.
+     */
+    static recordsOf(frame) {
+        if (!frame || !frame.sei) return [];
+        const out = [[frame.timestamp, frame.sei]];
+        for (const more of frame.seiMore || []) out.push([frame.timestamp + (frame.duration || 0), more]);
+        return out;
     }
 
     // SEI Extraction

@@ -2229,12 +2229,12 @@
     if (sub === 'nodes' || sub?.startsWith('nodes/')) return pages.nodes();
     const seq = renderSeq;
     const editing = sub?.startsWith('vehicle/') ? sub.slice(8) : sub === 'vehicle-new' ? 'new' : null;
-    const [settings, upd, sys, sec, ui, bl, rep] = await Promise.all([api('/api/settings'), api('/api/updates'), api('/api/system').catch(() => null), api('/api/security').catch(() => null), api('/api/ui-packs').catch(() => null), import('/web/buildLabel.js'), api('/api/reports').catch(() => null)]);
+    const [settings, upd, sys, sec, ui, bl, rep, work] = await Promise.all([api('/api/settings'), api('/api/updates'), api('/api/system').catch(() => null), api('/api/security').catch(() => null), api('/api/ui-packs').catch(() => null), import('/web/buildLabel.js'), api('/api/reports').catch(() => null), api('/api/settings/work-limits').catch(() => null)]);
     if (seq !== renderSeq) return; // the user moved on while this loaded
     state.system = sys || state.system;
     state.power = settings.power || state.power || null;
     // (the Logs are on the Overview)
-    const sections = [['vehicles', 'Vehicles'], ['places', 'Places'], ['updates', 'Updates'], ['account', 'Account'], ui && ['interface', 'Interface'], sec && ['security', 'Security'], (sys || settings.power) && ['system', 'System'], rep && ['help', 'Help & feedback']].filter(Boolean);
+    const sections = [['vehicles', 'Vehicles'], ['places', 'Places'], ['updates', 'Updates'], ['account', 'Account'], ui && ['interface', 'Interface'], sec && ['security', 'Security'], (sys || settings.power || work) && ['system', 'System'], rep && ['help', 'Help & feedback']].filter(Boolean);
     const show = editing || !sections.some(([k]) => k === sub) ? 'vehicles' : sub;
     let html = head('Your archive workspace', 'Settings') + settingsBar('settings');
     html += `<nav class="set-tabs" aria-label="Settings sections">${sections.map(([k, label]) => `<button type="button" data-tab="${k}">${label}</button>`).join('')}</nav>`;
@@ -2270,6 +2270,8 @@
         <dt>Server time zone</dt><dd>${esc(sys.timezone)}</dd></dl></div>`;
     }
     if (settings.power) html += powerCard(settings.power, sys?.timezone);
+    // Background work (web/workLimitsSettings.js; admins only)
+    if (work) html += '<div class="card" data-section="system"><h2>Background work</h2><div id="work-box" style="margin-top:12px"></div></div>';
     // Help & feedback (web/reportsSettings.js, the same in every interface; admins only)
     if (rep) html += `<div class="card" data-section="help"><h2>Help &amp; feedback</h2><div id="rep-box" style="margin-top:14px"></div></div>`;
     page.innerHTML = html;
@@ -2283,6 +2285,12 @@
       import('/web/reportsSettings.js').then((m) => {
         if ($('rep-box') === box) m.createReportsSettings(box, { cls: { btn: 'btn sm', primary: 'btn sm solid', input: 'input' }, h24: () => clockPref.h24 });
       }).catch(() => { box.textContent = 'Help & feedback could not load. Reload the page.'; });
+    }
+    if (work && $('work-box')) {
+      const box = $('work-box');
+      import('/web/workLimitsSettings.js').then((m) => {
+        if ($('work-box') === box) m.createWorkLimitsSettings(box, { cls: { btn: 'btn sm', primary: 'btn sm solid', input: 'input' }, toast });
+      }).catch(() => { box.textContent = 'Background work could not load. Reload the page.'; });
     }
     import('/web/placesSettings.js').then((m) => {
       const box = $('places-box');

@@ -514,7 +514,8 @@ function normalizeConfig(value) {
     replacementConfirmed: value.replacementConfirmed
   };
   if (!new Set(['h265', 'av1']).has(result.codec)
-      || !new Set(['conservative', 'balanced', 'aggressive', 'custom', 'quality']).has(result.profileId)
+      || !new Set(['conservative', 'balanced', 'aggressive', 'custom', 'quality', 'smallest']).has(result.profileId)
+      || (result.profileId === 'smallest' && result.codec !== 'h265')
       || !new Set(['auto', 'staging', 'direct']).has(result.networkMode)
       || !new Set(['separate', 'replace']).has(result.outputMode)
       || typeof result.replacementConfirmed !== 'boolean') throw storeError('INVALID_MANIFEST');

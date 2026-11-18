@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
-const { ShareManager, findMount, explainMountError } = require('../server/share');
+const { ShareManager, findMount, onReadOnlyMount, explainMountError } = require('../server/share');
 const { createLocalMounter } = require('../server/mounter');
 const os = require('os');
 const { Logger } = require('../server/log');
@@ -22,10 +22,59 @@ const MOUNTINFO = [
 
 test('findMount reads /proc/self/mountinfo', () => {
   assert.deepEqual(findMount(MOUNTINFO, '/footage'), {
-    mountPoint: '/footage', fsType: 'cifs', source: '//192.168.1.50/TeslaCam', options: 'rw,vers=3.0,cache=strict'
+    mountPoint: '/footage', fsType: 'cifs', source: '//192.168.1.50/TeslaCam', options: 'rw,vers=3.0,cache=strict', mountOptions: 'rw,relatime'
   });
   assert.equal(findMount(MOUNTINFO, '/mnt/with space').fsType, 'nfs4');
   assert.equal(findMount(MOUNTINFO, '/nope'), null);
+});
+
+test('a read-only mount is seen from the mount table: the bind mount\'s own options or the file system\'s', () => {
+  const info = [
+    '22 1 0:21 / / rw,relatime - overlay overlay rw',
+    '50 22 8:17 /home/me/footage /footage/car ro,relatime - ext4 /dev/sdf rw,discard', // docker -v …:ro
+    '51 22 0:47 / /footage/nas rw,relatime - nfs4 nas:/export ro,vers=4.2' // an export mounted read-only
+  ].join('\n');
+  assert.equal(onReadOnlyMount(info, '/footage/car'), true);
+  assert.equal(onReadOnlyMount(info, '/footage/car/TeslaCam'), true, 'a folder inside it too');
+  assert.equal(onReadOnlyMount(info, '/footage/nas'), true);
+  assert.equal(onReadOnlyMount(info, '/footage/other'), false, 'the overlay root is read-write');
+  assert.equal(onReadOnlyMount(info, '/footage/carport'), false, 'not a prefix match on names');
+  assert.equal(onReadOnlyMount(MOUNTINFO, '/footage'), false);
+});
+
+test('a footage folder mounted read-only is not written at all, and is no error', async () => {
+  const dir = await tmpDir();
+  const root = path.join(dir, 'footage');
+  fs.mkdirSync(root);
+  const mountinfo = path.join(dir, 'mountinfo');
+  await fsp.writeFile(mountinfo, `22 1 0:21 / / rw - overlay overlay rw\n50 22 8:17 /x ${root} ro,relatime - ext4 /dev/sdf rw\n`);
+  const lines = [];
+  const log = { info: (m) => lines.push(['info', m]), warn: (m) => lines.push(['warn', m]), error: (m) => lines.push(['error', m]) };
+  const share = new ShareManager({ config: { footagePath: root, smb: { share: '' } }, log, mountinfoPath: mountinfo, id: 'car' });
+  // the folder itself is writable here: only the mount table says read-only, so a write test would show
+  const made = [];
+  const watcher = fs.watch(root, (_, name) => made.push(name));
+  try {
+    const st = await share.ensure({ forceWriteCheck: true });
+    await new Promise((r) => setTimeout(r, 100));
+    assert.deepEqual(made, [], 'no check file written');
+    assert.deepEqual(fs.readdirSync(root), []);
+    assert.equal(st.healthy, true);
+    assert.equal(st.readOnly, true);
+    assert.equal(st.writable, false);
+    assert.equal(st.lastError, null);
+    assert.equal(share.isWritable(), false, 'the Recycle Bin and replacing originals stay off');
+    assert.deepEqual(lines.filter(([l]) => l !== 'info'), [], 'no warning, no error');
+    assert.match(lines.map(([, m]) => m).join('\n'), /mounted read-only: footage is only read/);
+    // mounted read-write again: tested and writable, as before
+    await fsp.writeFile(mountinfo, `22 1 0:21 / / rw - overlay overlay rw\n50 22 8:17 /x ${root} rw,relatime - ext4 /dev/sdf rw\n`);
+    const again = await share.ensure({ forceWriteCheck: true });
+    assert.equal(again.readOnly, false);
+    assert.equal(again.writable, true);
+  } finally {
+    watcher.close();
+    rmrf(dir);
+  }
 });
 
 test('mount errors come with actionable hints', () => {
