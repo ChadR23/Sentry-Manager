@@ -592,7 +592,7 @@ impl Ui {
                 if req.head() {
                     b.body(Body::empty()).unwrap()
                 } else {
-                    b.body(Body::from_stream(tokio_util::io::ReaderStream::new(tokio::fs::File::from_std(f)))).unwrap()
+                    b.body(Body::from_stream(crate::media::file_stream(tokio::fs::File::from_std(f)))).unwrap()
                 }
             }
             ("GET", ["settings"]) => ok(settings::settings(self.ctx.setting("appearance"), self.ctx.setting("power"))),
