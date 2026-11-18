@@ -391,6 +391,28 @@ fn counts(pairs: &[(&str, usize)]) -> HashMap<String, usize> {
     pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
 }
 
+/// `n` encodes held here and the service listing `want`. Waits for both: a child marks itself held
+/// before the service lists it, and the service lists a clip before its child is held.
+fn settled(h: &Harness, n: usize, want: &HashMap<String, usize>) -> bool {
+    until(|| h.held().len() == n && h.running() == *want)
+}
+
+/// None of these released encodes is held any more.
+fn gone(h: &Harness, pids: &[String]) -> bool {
+    h.held().iter().all(|s| !pids.contains(&s.pid))
+}
+
+/// Releases every held encode and returns their pids.
+fn release_all_held(h: &Harness) -> Vec<String> {
+    h.held()
+        .into_iter()
+        .map(|s| {
+            h.finish(&s);
+            s.pid
+        })
+        .collect()
+}
+
 fn id_of(v: Value) -> String {
     v["id"].as_str().unwrap().to_string()
 }
@@ -413,10 +435,11 @@ fn each_lane_gets_its_own_workers_on_its_own_gpu() {
     let h = Harness::new(HarnessOptions { clips: 12, ..Default::default() });
     let (a, u) = (id_of(arc()), id_of(uhd()));
     let id = h.service().start(&h.config(json!({ "lanes": [{ "device": a, "concurrency": 3 }, { "device": u, "concurrency": 1 }] }))).unwrap();
-    assert!(until(|| h.held().len() == 4), "four encodes at once");
+    let want = counts(&[(&a, 3), (&u, 1)]);
+    assert!(settled(&h, 4, &want), "four encodes at once: {:?}", h.running());
     std::thread::sleep(Duration::from_millis(50));
     assert_eq!(h.held().len(), 4);
-    assert_eq!(h.running(), counts(&[(&a, 3), (&u, 1)]));
+    assert_eq!(h.running(), want);
     let held = h.held();
     let on_arc: Vec<&Spawned> = held.iter().filter(|s| s.gpu.as_deref() == Some(ARC_NODE)).collect();
     assert_eq!(on_arc.len(), 3);
@@ -449,26 +472,20 @@ fn lanes_change_live_higher_starts_now_removed_finishes_first() {
     assert!(until(|| h.held().len() == 2));
     let job = h.service().set_lanes(&id, &json!([{ "device": a, "concurrency": 3 }, { "device": u, "concurrency": 1 }])).unwrap();
     assert_eq!(job["config"]["concurrency"], 4);
-    assert!(until(|| h.held().len() == 4));
-    assert_eq!(h.running(), counts(&[(&a, 3), (&u, 1)]));
+    assert!(settled(&h, 4, &counts(&[(&a, 3), (&u, 1)])), "{:?}", h.running());
     let job = h.service().set_lanes(&id, &json!([{ "device": a, "concurrency": 0 }, { "device": u, "concurrency": 2 }])).unwrap();
     assert_eq!(job["config"]["lanes"], json!([{ "device": u, "concurrency": 2 }]));
     assert_eq!(job["config"]["concurrency"], 2);
-    assert!(until(|| h.held().len() == 5));
-    assert_eq!(h.running(), counts(&[(&a, 3), (&u, 2)]));
+    assert!(settled(&h, 5, &counts(&[(&a, 3), (&u, 2)])), "{:?}", h.running());
     let arc_encodes = h.spawned().iter().filter(|s| s.gpu.as_deref() == Some(ARC_NODE)).count();
-    for s in h.held() {
-        h.finish(&s);
-    }
-    assert!(until(|| h.held().len() == 2 && h.running() == counts(&[(&u, 2)])), "{:?}", h.running());
+    let released = release_all_held(&h);
+    assert!(until(|| gone(&h, &released) && h.held().len() == 2 && h.running() == counts(&[(&u, 2)])), "{:?}", h.running());
     std::thread::sleep(Duration::from_millis(50));
     assert_eq!(h.running(), counts(&[(&u, 2)]), "only the UHD converts now");
     assert_eq!(h.spawned().iter().filter(|s| s.gpu.as_deref() == Some(ARC_NODE)).count(), arc_encodes, "the Arc took no new clip");
     h.service().set_lanes(&id, &json!([{ "device": u, "concurrency": 1 }])).unwrap();
-    for s in h.held() {
-        h.finish(&s);
-    }
-    assert!(until(|| h.held().len() == 1));
+    let released = release_all_held(&h);
+    assert!(until(|| gone(&h, &released) && h.held().len() == 1 && h.running() == counts(&[(&u, 1)])), "{:?}", h.running());
     // (the worker that stays takes the next clip; the other retires)
     for _ in 0..10 {
         std::thread::sleep(Duration::from_millis(30));
@@ -489,17 +506,13 @@ fn set_lanes_on_a_job_without_lanes_and_the_default_gpu_never_runs_more_than_set
     let h = Harness::new(HarnessOptions { clips: 12, ..Default::default() });
     let (a, u) = (id_of(arc()), id_of(uhd()));
     let id = h.service().start(&h.config(json!({ "concurrency": 2 }))).unwrap();
-    assert!(until(|| h.held().len() == 2));
-    assert_eq!(h.running(), counts(&[("default", 2)]));
+    assert!(settled(&h, 2, &counts(&[("default", 2)])), "{:?}", h.running());
     assert!(h.held().iter().all(|s| s.gpu.is_none() && !s.args.iter().any(|x| x == "-init_hw_device")), "the default path names no GPU");
     assert_eq!(h.service().set_lanes(&id, &json!([{ "device": a, "concurrency": 0 }])).unwrap_err().code.as_deref(), Some("INVALID_LANES"));
     h.service().set_lanes(&id, &json!([{ "device": a, "concurrency": 2 }])).unwrap();
-    assert!(until(|| h.held().len() == 4));
-    assert_eq!(h.running(), counts(&[("default", 2), (&a, 2)]));
-    for s in h.held() {
-        h.finish(&s);
-    }
-    assert!(until(|| h.running() == counts(&[(&a, 2)]) && h.held().len() == 2), "{:?}", h.running());
+    assert!(settled(&h, 4, &counts(&[("default", 2), (&a, 2)])), "{:?}", h.running());
+    let released = release_all_held(&h);
+    assert!(until(|| gone(&h, &released) && h.running() == counts(&[(&a, 2)]) && h.held().len() == 2), "{:?}", h.running());
     let done = h.finish_job(&id);
     assert_eq!(done["state"], "completed");
     assert_eq!(done["config"]["lanes"], json!([{ "device": a, "concurrency": 2 }]));
@@ -508,20 +521,31 @@ fn set_lanes_on_a_job_without_lanes_and_the_default_gpu_never_runs_more_than_set
     let h = Harness::new(HarnessOptions { clips: 20, ..Default::default() });
     let on_uhd = || h.held().iter().filter(|s| s.gpu.is_none() || s.gpu.as_deref() == Some(UHD_NODE)).count();
     let id = h.service().start(&h.config(json!({ "concurrency": 3 }))).unwrap();
-    assert!(until(|| h.held().len() == 3));
+    assert!(settled(&h, 3, &counts(&[("default", 3)])), "{:?}", h.running());
     h.service().set_lanes(&id, &json!([{ "device": u, "concurrency": 3 }, { "device": a, "concurrency": 1 }])).unwrap();
-    assert!(until(|| h.held().len() == 4), "the Arc starts at once");
+    let want = counts(&[("default", 3), (&a, 1)]);
+    assert!(settled(&h, 4, &want), "the Arc starts at once: {:?}", h.running());
     std::thread::sleep(Duration::from_millis(50));
-    assert_eq!(h.running(), counts(&[("default", 3), (&a, 1)]));
+    assert_eq!(h.running(), want);
     assert_eq!(on_uhd(), 3);
+    let held_on = |gpu: Option<&str>| h.held().iter().filter(|s| s.gpu.as_deref() == gpu).count();
     for lane in 1..=3 {
         let old = h.held().into_iter().find(|s| s.gpu.is_none()).unwrap();
         h.finish(&old);
-        assert!(until(|| h.running().get(&u).copied().unwrap_or(0) == lane), "{lane} on the UHD lane");
+        let mut want = counts(&[(&u, lane), (&a, 1)]);
+        if lane < 3 {
+            want.insert("default".into(), 3 - lane);
+        }
+        // (the released encode gone and its slot taken on the UHD lane, as held here and as the service lists it)
+        assert!(
+            until(|| gone(&h, &[old.pid.clone()]) && held_on(Some(UHD_NODE)) == lane && held_on(None) == 3 - lane && h.running() == want),
+            "{lane} on the UHD lane: {:?}",
+            h.running()
+        );
         std::thread::sleep(Duration::from_millis(30));
         assert_eq!(on_uhd(), 3, "never more than 3 on the UHD");
+        assert_eq!(h.running(), want);
     }
-    assert_eq!(h.running(), counts(&[(&u, 3), (&a, 1)]));
     assert_eq!(h.finish_job(&id)["state"], "completed");
 }
 
@@ -538,8 +562,7 @@ fn one_number_for_a_job_with_lanes() {
     let job = h.service().set_concurrency(&id, &json!(3)).unwrap();
     assert_eq!(job["config"]["lanes"], json!([{ "device": a, "concurrency": 3 }]));
     assert_eq!(job["config"]["concurrency"], 3);
-    assert!(until(|| h.held().len() == 3));
-    assert_eq!(h.running(), counts(&[(&a, 3)]));
+    assert!(settled(&h, 3, &counts(&[(&a, 3)])), "{:?}", h.running());
     assert_eq!(h.finish_job(&id)["state"], "completed");
     drop(h);
     // both GPUs here: no lanes, the UHD (the default GPU) never runs more than 2
@@ -549,9 +572,10 @@ fn one_number_for_a_job_with_lanes() {
     let job = two.service().set_concurrency(&id, &json!(2)).unwrap();
     assert!(job["config"].get("lanes").is_none());
     assert_eq!(job["config"]["concurrency"], 2);
-    assert!(until(|| two.held().len() == 4));
+    let want = counts(&[(&u, 1), (&a, 2), ("default", 1)]);
+    assert!(settled(&two, 4, &want), "{:?}", two.running());
     std::thread::sleep(Duration::from_millis(50));
-    assert_eq!(two.running(), counts(&[(&u, 1), (&a, 2), ("default", 1)]));
+    assert_eq!(two.running(), want);
     for s in two.held().into_iter().filter(|s| s.gpu.is_some()) {
         two.finish(&s);
     }
@@ -569,7 +593,7 @@ fn a_lane_whose_gpu_is_missing_is_skipped_and_with_none_found_the_job_runs_as_be
     let h = Harness::new(HarnessOptions { clips: 8, devices: vec![arc(), cpu()], ..Default::default() });
     let a = id_of(arc());
     let id = h.service().start(&h.config(json!({ "lanes": [{ "device": a, "concurrency": 1 }, { "device": MISSING, "concurrency": 3 }] }))).unwrap();
-    assert!(until(|| h.held().len() == 1));
+    assert!(settled(&h, 1, &counts(&[(&a, 1)])), "{:?}", h.running());
     std::thread::sleep(Duration::from_millis(50));
     assert_eq!(h.running(), counts(&[(&a, 1)]));
     assert_eq!(h.service().get(&id).unwrap()["config"]["concurrency"], 4);
@@ -633,7 +657,7 @@ fn a_gpu_that_cannot_encode_the_codec_uses_the_cpu_encoder_for_its_lane() {
     let h = Harness::new(HarnessOptions { clips: 4, ..Default::default() });
     let (a, u) = (id_of(arc()), id_of(uhd()));
     let id = h.service().start(&h.config(json!({ "codec": "av1", "lanes": [{ "device": u, "concurrency": 1 }, { "device": a, "concurrency": 1 }] }))).unwrap();
-    assert!(until(|| h.held().len() == 2));
+    assert!(until(|| h.held().len() == 2 && h.service().active_encodes().len() == 2));
     let live = h.service().active_encodes();
     let on = |d: &str| live.iter().find(|e| e["deviceId"] == d).cloned().unwrap();
     let (lu, la) = (on(&u), on(&a));
