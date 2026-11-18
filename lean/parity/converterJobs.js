@@ -6,9 +6,10 @@
 //
 //   node lean/parity/converterJobs.js clip <file>
 //       one Tesla-like H.264 clip with telemetry (2 s, 12 fps, 320x240)
-//   node lean/parity/converterJobs.js run <base> <replace|separate> <direct|staging> <noreplace helper>
+//   node lean/parity/converterJobs.js run <base> <replace|separate> <direct|staging> <noreplace helper> [ffmpeg]
 //       converts <base>/footage/TeslaCam into <base>/out (separate) or in place,
-//       data in <base>/data, temp in <base>/temp; prints the job and its events
+//       data in <base>/data, temp in <base>/temp, with that ffmpeg (default: the
+//       one on PATH); prints the job and its events
 //   node lean/parity/converterJobs.js resume <base> <helper>
 //       starts the converter on <base> again (recovery) and waits for the job
 
@@ -27,7 +28,7 @@ async function clip(file) {
   return { file };
 }
 
-async function open(base, helper) {
+async function open(base, helper, ffmpegPath = 'ffmpeg') {
   process.env.SENTRY_NOREPLACE_RENAME = helper;
   const { createConverterRuntime } = require(path.join(REPO, 'src/main/converter/runtime'));
   const { createPosixOwnedFs } = require(path.join(REPO, 'server/posixOwnedFs'));
@@ -36,7 +37,7 @@ async function open(base, helper) {
   return createConverterRuntime({
     userDataPath: fs.realpathSync(path.join(base, 'data')),
     tempPath: fs.realpathSync(path.join(base, 'temp')),
-    ffmpegPath: 'ffmpeg', ffprobePath: 'ffprobe', spawn, fs, pathApi: path, platform: process.platform,
+    ffmpegPath, ffprobePath: 'ffprobe', spawn, fs, pathApi: path, platform: process.platform,
     removeOwned: owned.removeOwned, renameExclusive: owned.renameExclusive,
     network: { isRetryable: (error) => RETRYABLE.has(error?.code), checkPath: async (target) => fs.promises.access(target).then(() => true, () => false) },
     autoConvert: false, gpuDecode: false, privateTempIdentityCleanup: true,
@@ -44,8 +45,8 @@ async function open(base, helper) {
   });
 }
 
-async function run(base, mode, networkMode, helper) {
-  const runtime = await open(base, helper);
+async function run(base, mode, networkMode, helper, ffmpegPath) {
+  const runtime = await open(base, helper, ffmpegPath);
   const events = [];
   runtime.service.subscribe((event) => events.push(event));
   await runtime.start();
@@ -77,7 +78,7 @@ async function resume(base, helper) {
   const [mode, ...args] = process.argv.slice(2);
   let result;
   if (mode === 'clip') result = await clip(args[0]);
-  else if (mode === 'run') result = await run(args[0], args[1], args[2], args[3]);
+  else if (mode === 'run') result = await run(args[0], args[1], args[2], args[3], args[4]);
   else if (mode === 'resume') result = await resume(args[0], args[1]);
   else throw new Error(`unknown mode ${mode}`);
   process.stdout.write(JSON.stringify(result));

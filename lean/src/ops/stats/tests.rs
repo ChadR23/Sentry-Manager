@@ -75,6 +75,26 @@ pub struct FakeLauncher {
     /// nvidia-smi ends after printing (with this many starts failing as missing)
     pub exit_after_lines: bool,
     pub missing: bool,
+    /// what a start prints waits for print(), instead of coming from a thread a moment later
+    pub held: bool,
+    unprinted: Mutex<Vec<Unprinted>>,
+}
+
+type Unprinted = (Vec<String>, Box<dyn Fn(&str) + Send + Sync>, Option<Box<dyn FnOnce(Option<String>) + Send>>);
+
+impl FakeLauncher {
+    /// Every held start prints its lines (and ends) now, on this thread.
+    pub fn print(&self) {
+        let unprinted = std::mem::take(&mut *self.unprinted.lock().unwrap());
+        for (lines, on_line, on_exit) in unprinted {
+            for l in &lines {
+                on_line(l);
+            }
+            if let Some(f) = on_exit {
+                f(None);
+            }
+        }
+    }
 }
 
 struct FakeChild(usize, Arc<Mutex<Vec<bool>>>);
@@ -97,8 +117,13 @@ impl Launcher for FakeLauncher {
             k.len() - 1
         };
         let (lines, exit) = (self.lines.clone(), self.exit_after_lines);
+        if self.held {
+            self.unprinted.lock().unwrap().push((lines, on_line, exit.then_some(on_exit)));
+            return Ok(Box::new(FakeChild(n, self.killed.clone())));
+        }
         std::thread::spawn(move || {
-            // (a moment later, as setImmediate: never inside the sample that started it)
+            // (a moment later, as setImmediate; on a busy machine maybe still inside the
+            // sample that started it, or after the next: held where that matters)
             std::thread::sleep(Duration::from_millis(15));
             for l in lines {
                 on_line(&l);
@@ -234,7 +259,8 @@ pub fn rig(first: &Value, o: RigOptions) -> Rig {
     let tree = Tree::new();
     tree.write(first);
     let clock = FakeClock::new(o.start);
-    let launcher = Arc::new(FakeLauncher { lines: o.lines.clone(), ..Default::default() });
+    // (nvidia-smi prints when the test says: launcher.print())
+    let launcher = Arc::new(FakeLauncher { lines: o.lines.clone(), held: true, ..Default::default() });
     let shares = Arc::new(FakeShares { shares: Mutex::new(json!({})), clock: clock.0.clone(), hung: Mutex::new(Vec::new()), stat_calls: Mutex::new(Vec::new()) });
     let phase = Arc::new(AtomicI64::new(0));
     let timers: Arc<dyn Timers> = o.timers.clone().unwrap_or_else(|| Arc::new(HeldTimers::default()));
@@ -344,9 +370,9 @@ fn replay(file: &Path) -> Vec<String> {
         }
         r.stats.sample_now();
         r.stats.settle();
-        if p == 0 && !r.launcher.lines.is_empty() {
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        // nvidia-smi's lines come a moment after it started (setImmediate in Node):
+        // never inside the sample that started it, always before the next one
+        r.launcher.print();
         let Some(want) = rec["snapshots"].get(p).filter(|s| !s.is_null()) else { continue };
         let mut want = want.clone();
         // (process.version: this server has no Node)

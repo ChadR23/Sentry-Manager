@@ -34,6 +34,46 @@ struct Fixtures {
     dir: PathBuf,
     clip: PathBuf,
     helper: PathBuf,
+    /// ffmpeg for the Rust side and for the Node side: FFMPEG_ONE_FRAME_THREAD
+    ffmpeg: [PathBuf; 2],
+}
+
+/// ffmpeg with libx265 on one frame thread (added to -x265-params, or given as
+/// its own -x265-params before the output when the encode has none). It first
+/// appends the arguments it was given, as they came, to "$0.args": the count,
+/// then each argument, each one NUL-terminated.
+const FFMPEG_ONE_FRAME_THREAD: &str = r##"#!/bin/sh
+printf '%s\0' "$#" "$@" >> "$0.args"
+n=$# i=0 p= codec= params=
+for a do
+  shift
+  i=$((i + 1))
+  case $p in
+    -c:v) codec=$a ;;
+    -x265-params) params=1; a="$a:frame-threads=1" ;;
+  esac
+  if [ "$i" = "$n" ] && [ "$codec" = libx265 ] && [ -z "$params" ]; then
+    set -- "$@" -x265-params frame-threads=1
+  fi
+  set -- "$@" "$a"
+  p=$a
+done
+exec ffmpeg "$@"
+"##;
+
+/// The ffmpeg runs a FFMPEG_ONE_FRAME_THREAD copy recorded, as the converter
+/// asked for them, with the side's base folder and the random ids made alike.
+fn ffmpeg_calls(wrapper: &Path, base: &Path) -> Vec<Vec<String>> {
+    let recorded = fs::read(format!("{}.args", wrapper.display())).unwrap_or_default();
+    let mut parts = recorded.split(|b| *b == 0).map(|p| String::from_utf8_lossy(p).into_owned());
+    let bases = [fs::canonicalize(base).unwrap(), base.to_path_buf()].map(|b| b.to_string_lossy().into_owned());
+    let id = regex::Regex::new("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").unwrap();
+    let mut calls = vec![];
+    while let Some(n) = parts.next().filter(|n| !n.is_empty()) {
+        let n: usize = n.parse().unwrap();
+        calls.push(parts.by_ref().take(n).map(|a| id.replace_all(&bases.iter().fold(a, |a, b| a.replace(b.as_str(), "<base>")), "<id>").into_owned()).collect());
+    }
+    calls
 }
 
 fn fixtures() -> &'static Fixtures {
@@ -51,7 +91,20 @@ fn fixtures() -> &'static Fixtures {
             let out = Command::new("cc").args(["-O2", "-o"]).arg(&helper).arg(repo().join("native/noreplace-rename.c")).output().unwrap();
             assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         }
-        Fixtures { dir, clip, helper }
+        // libx265 encodes a few frames at once (frame threads), and the size it
+        // gives a frame can depend on whether the frames before it are done, so
+        // on a busy machine a clip now and then comes out with other bytes
+        // (frames 0 and 1 the same, every frame from 2 on another size). One
+        // frame thread gives the same bytes every time. Each side runs its own
+        // copy, so what each converter asked for can be compared.
+        // (written every time, so a folder kept with LEAN_CONVERTER_JOB_FIXTURES runs this script)
+        let ffmpeg = ["rust", "node"].map(|side| dir.join(format!("ffmpeg-{side}")));
+        for f in &ffmpeg {
+            fs::write(f, FFMPEG_ONE_FRAME_THREAD).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(f, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        Fixtures { dir, clip, helper, ffmpeg }
     })
 }
 
@@ -201,7 +254,11 @@ fn conversions_as_node_runs_them() {
         let rust_base = make_base(&format!("rust-{mode}-{network}"), 2);
         let node_base = make_base(&format!("node-{mode}-{network}"), 2);
         let (names, before) = names_and_hashes(&rust_base);
-        let c = open(&rust_base, "ffmpeg", "ffprobe", None);
+        let [rust_ffmpeg, node_ffmpeg] = &fixtures().ffmpeg;
+        for f in [rust_ffmpeg, node_ffmpeg] {
+            fs::write(format!("{}.args", f.display()), "").unwrap();
+        }
+        let c = open(&rust_base, rust_ffmpeg.to_str().unwrap(), "ffprobe", None);
         let events: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
         let e2 = events.clone();
         c.service.subscribe(Arc::new(move |e: &Value| e2.lock().unwrap().push(e["type"].as_str().unwrap_or("").to_string())));
@@ -213,18 +270,23 @@ fn conversions_as_node_runs_them() {
         let job = c.service.when_idle(&id).unwrap();
         c.shutdown();
         assert_recovered(&rust_base, &job, mode, &names, &before);
-        let theirs = node_json(&["run", node_base.to_str().unwrap(), mode, network, fixtures().helper.to_str().unwrap()]);
+        let theirs = node_json(&["run", node_base.to_str().unwrap(), mode, network, fixtures().helper.to_str().unwrap(), node_ffmpeg.to_str().unwrap()]);
         assert_eq!(shape(&job), shape(&theirs["job"]), "{mode} {network}");
         // the same events, apart from how many live updates went out
         let key = |list: Vec<String>| list.into_iter().filter(|t| t != "snapshot" && t != "progress").collect::<Vec<_>>();
         let node_events: Vec<String> = theirs["events"].as_array().unwrap().iter().map(|t| t.as_str().unwrap().to_string()).collect();
         assert_eq!(key(events.lock().unwrap().clone()), key(node_events), "{mode} {network}");
+        // the same ffmpeg runs, as each converter asked for them (before the one frame thread)
+        let ran = ffmpeg_calls(rust_ffmpeg, &rust_base);
+        let encodes = ran.iter().filter(|c| c.windows(2).any(|w| w[0] == "-i" && w[1].starts_with("<base>/")) && c.iter().any(|a| a == "libx265")).count();
+        assert_eq!(encodes, names.len(), "{mode} {network}: every clip's encode recorded: {ran:?}");
+        assert_eq!(ran, ffmpeg_calls(node_ffmpeg, &node_base), "{mode} {network}: ffmpeg as Rust and as Node ran it");
         // each converted clip passes the verifier against the original
         for name in &names {
             let a = output_of(&rust_base, mode, name);
             let b = output_of(&node_base, mode, name);
             assert_eq!(codec_of(&a), codec_of(&b));
-            // (libx265 at a set bitrate, the same telemetry writer: byte for byte)
+            // (libx265 at a set bitrate on one frame thread, the same telemetry writer: byte for byte)
             assert_eq!(sha(&a), sha(&b), "{mode} {network} {name}: the same output as Node's");
         }
         // Node reads the job Rust wrote
