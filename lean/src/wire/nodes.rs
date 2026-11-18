@@ -169,23 +169,135 @@ pub async fn node_v1(srv: Arc<Server>, q: RawReq) -> Res {
             r.delivered();
         }
     };
-    let body = match content {
+    let body = reply_body(content, finish);
+    b.body(body).unwrap_or_else(|_| not_found())
+}
+
+/// The answer body for a /node/v1 reply; `finish` (the reply's delivered()) runs when its
+/// last byte is handed to hyper.
+fn reply_body(content: ReplyBody, finish: impl FnOnce() + Send + 'static) -> Body {
+    // delivered() when the answer's last byte is handed to hyper: these answers carry a
+    // Content-Length, and hyper stops polling the body once it has that many bytes, so a
+    // marker chunk after the body is never reached (the answer then counted as unsent and
+    // its job was stopped: the main's next GET /node/v1/jobs/<id> found "No such job.").
+    // A connection gone before the last byte still drops the body unsent, as before.
+    match content {
         ReplyBody::Bytes(bytes) => {
-            let parts = futures_util::stream::iter([Ok::<_, std::io::Error>(bytes::Bytes::from(bytes))]).chain(futures_util::stream::once(async move {
-                finish();
-                Ok(bytes::Bytes::new())
-            }));
-            Body::from_stream(parts)
+            let mut finish = Some(finish);
+            let once = futures_util::stream::once(async move { Ok::<_, std::io::Error>(bytes::Bytes::from(bytes)) });
+            Body::from_stream(once.inspect(move |_| {
+                if let Some(f) = finish.take() {
+                    f();
+                }
+            }))
         }
         ReplyBody::File(file, len) => {
             let r = crate::media::file_stream(tokio::io::AsyncReadExt::take(tokio::fs::File::from_std(file), len));
-            Body::from_stream(r.chain(futures_util::stream::once(async move {
-                finish();
-                Ok(bytes::Bytes::new())
-            })))
+            let mut finish = Some(finish);
+            let mut sent: u64 = 0;
+            let mark = move |part: &std::io::Result<bytes::Bytes>| {
+                if let Ok(b) = part {
+                    sent += b.len() as u64;
+                    if sent >= len {
+                        if let Some(f) = finish.take() {
+                            f();
+                        }
+                    }
+                }
+            };
+            // (an empty file has no chunk to hand over: delivered once the stream ends)
+            let mut mark = mark;
+            if len == 0 {
+                mark(&Ok(bytes::Bytes::new()));
+            }
+            Body::from_stream(r.inspect(move |p| mark(p)))
         }
         // (Node leaves such a request unanswered: the connection is ended without an answer body)
         ReplyBody::Close => Body::from_stream(futures_util::stream::once(async { Err::<bytes::Bytes, std::io::Error>(std::io::Error::other("closed")) })),
-    };
-    b.body(body).unwrap_or_else(|_| not_found())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // The /node/v1 answers through a real hyper connection, as in production: each carries
+    // a Content-Length, and the reply must count as delivered once its last byte is out
+    // (it counted as unsent before, so every remote encode was stopped right after it began).
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// Serves one answer with this body and Content-Length; `read` bytes of it are read by the client.
+    async fn serve_one(content: ReplyBody, len: u64, read: Option<usize>) -> bool {
+        let delivered = Arc::new(AtomicBool::new(false));
+        let flag = delivered.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let slot = Arc::new(Mutex::new(Some(content)));
+        let server = tokio::spawn(async move {
+            let (sock, _) = listener.accept().await.unwrap();
+            let svc = hyper::service::service_fn(move |_req: hyper::Request<hyper::body::Incoming>| {
+                let content = slot.lock().unwrap().take().unwrap();
+                let flag = flag.clone();
+                async move {
+                    let body = reply_body(content, move || flag.store(true, Ordering::SeqCst));
+                    Ok::<_, std::convert::Infallible>(axum::http::Response::builder().status(200).header("Content-Length", len.to_string()).body(body).unwrap())
+                }
+            });
+            let _ = hyper::server::conn::http1::Builder::new().serve_connection(hyper_util::rt::TokioIo::new(sock), svc).await;
+        });
+        let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
+        // keep-alive, as the main's client: the server must not wait for the connection to end
+        c.write_all(b"POST /node/v1/jobs HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n").await.unwrap();
+        let mut got = Vec::new();
+        let mut buf = [0u8; 8192];
+        let head_and = |got: &Vec<u8>| got.windows(4).position(|w| w == b"\r\n\r\n").map(|i| got.len() - i - 4);
+        loop {
+            let want = read.map_or(len as usize, |r| r);
+            if head_and(&got).is_some_and(|n| n >= want) {
+                break;
+            }
+            let n = c.read(&mut buf).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            got.extend_from_slice(&buf[..n]);
+        }
+        if read.is_some() {
+            drop(c); // gone before the end of the answer
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let out = delivered.load(Ordering::SeqCst);
+        server.abort();
+        out
+    }
+
+    #[tokio::test]
+    async fn a_json_answer_is_delivered_once_its_bytes_are_out() {
+        let text = br#"{"id":"abc123"}"#.to_vec();
+        let len = text.len() as u64;
+        assert!(serve_one(ReplyBody::Bytes(text), len, None).await);
+    }
+
+    #[tokio::test]
+    async fn an_encoded_file_is_delivered_once_its_last_byte_is_out() {
+        let path = std::env::temp_dir().join(format!("node-reply-{}.bin", std::process::id()));
+        std::fs::write(&path, vec![7u8; 300_000]).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        assert!(serve_one(ReplyBody::File(file, 300_000), 300_000, None).await);
+        let empty = std::env::temp_dir().join(format!("node-reply-empty-{}.bin", std::process::id()));
+        std::fs::write(&empty, b"").unwrap();
+        assert!(serve_one(ReplyBody::File(std::fs::File::open(&empty).unwrap(), 0), 0, None).await);
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(empty);
+    }
+
+    #[tokio::test]
+    async fn a_file_the_main_stopped_reading_stays_unsent() {
+        let path = std::env::temp_dir().join(format!("node-reply-cut-{}.bin", std::process::id()));
+        // larger than the socket buffers, so the answer cannot all be handed over
+        std::fs::write(&path, vec![7u8; 32 * 1024 * 1024]).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        assert!(!serve_one(ReplyBody::File(file, 32 * 1024 * 1024), 32 * 1024 * 1024, Some(64 * 1024)).await);
+        let _ = std::fs::remove_file(path);
+    }
 }
