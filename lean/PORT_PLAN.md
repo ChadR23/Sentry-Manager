@@ -1116,3 +1116,16 @@ Accepted by the owner (2026-11-18), after the run on the real archive
   (`catalog_files`) and the codecs (`clip_codecs`) in batches of 1,000 as it
   goes, this server writes the files when the scan finishes and the codecs
   when they have all been read (`src/app.rs`, catalog.rs).
+
+Proposed (2026-11-18), needs the owner's OK:
+
+- converter, replace mode on an SMB (cifs) share: this server completes it,
+  Node's refuses every clip with `unsafe-owned-path` (seen on a real Samba
+  share: all 10 clips, the originals put back each time). The cause is the
+  cifs client's cached link count: after link(original, BACKUP) and the
+  rename over the original, BACKUP still reads 2 links for up to a second
+  though it is the only name left, and the one-link checks refuse. Here
+  lstat reads the attributes again from the server when it sees more than
+  one link (staging/mod.rs `fresh_lstat`, statx AT_STATX_FORCE_SYNC); the
+  checks themselves are unchanged, and a file the server says has two
+  links is still refused. Confirm on a real share before relying on it.

@@ -741,3 +741,19 @@ fn a_detail_is_bounded_and_kept_through_or_tx() {
     let kept: R<()> = Err(e.clone());
     assert_eq!(kept.or_tx("OTHER").err().expect("refused").detail, e.detail, "a refusal keeps its detail through or_tx");
 }
+
+#[test]
+fn a_link_count_read_again_never_hides_a_real_second_link() {
+    // (cifs: a cached count of 2 is read again from the server; on any file system a real
+    // second link still counts 2, so the one-link checks still refuse it)
+    let env = setup("fresh-nlink");
+    let f = env.footage.join("BACKUP-fresh.mp4");
+    fs::write(&f, "backup bytes").unwrap();
+    let link = env.footage.join("second-link");
+    fs::hard_link(&f, &link).unwrap();
+    assert_eq!(super::exact_lstat(&s(&f)).unwrap().nlink(), 2);
+    assert_eq!(super::lstat_or_none(&s(&f)).unwrap().unwrap().nlink(), 2);
+    fs::remove_file(&link).unwrap();
+    assert_eq!(super::exact_lstat(&s(&f)).unwrap().nlink(), 1);
+    assert!(super::lstat_or_none(&s(&env.footage.join("missing"))).unwrap().is_none());
+}

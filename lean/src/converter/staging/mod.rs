@@ -385,7 +385,7 @@ pub fn validate_id(v: &str) -> R<String> {
 // ---- stats
 
 pub(crate) fn lstat_or_none(p: &str) -> R<Option<fs::Metadata>> {
-    match fs::symlink_metadata(p) {
+    match fresh_lstat(p) {
         Ok(m) => Ok(Some(m)),
         Err(e) if errno_code(&e) == "ENOENT" => Ok(None),
         Err(e) => Err(e.into()),
@@ -393,7 +393,35 @@ pub(crate) fn lstat_or_none(p: &str) -> R<Option<fs::Metadata>> {
 }
 
 fn exact_lstat(p: &str) -> R<fs::Metadata> {
-    Ok(fs::symlink_metadata(p)?)
+    Ok(fresh_lstat(p)?)
+}
+
+/// lstat, with a link count the server confirms. A cifs mount keeps a file's
+/// attributes cached for up to a second, and its link count goes stale across
+/// the replace: link(original, BACKUP) counts 2 links, and the rename over the
+/// original does not count one off again (ext4 does), so a moment later BACKUP
+/// still reads 2 links though it is the only name left. Every check that wants
+/// one link then refused (unsafe-owned-path, all clips, the originals put back).
+/// When lstat says more than one link, the attributes are read again from the
+/// file system itself (statx AT_STATX_FORCE_SYNC refreshes the cached inode on
+/// cifs and NFS; a no-op on a local disk) and lstat is asked again. The checks
+/// are unchanged: a file the server says has two links is still refused.
+fn fresh_lstat(p: &str) -> std::io::Result<fs::Metadata> {
+    let st = fs::symlink_metadata(p)?;
+    if st.nlink() <= 1 {
+        return Ok(st);
+    }
+    force_sync_attributes(p);
+    fs::symlink_metadata(p)
+}
+
+fn force_sync_attributes(p: &str) {
+    let Ok(c) = std::ffi::CString::new(p) else { return };
+    let mut sx: libc::statx = unsafe { std::mem::zeroed() };
+    // (the answer is not used: the call refreshes the kernel's cached attributes)
+    unsafe {
+        libc::statx(libc::AT_FDCWD, c.as_ptr(), libc::AT_SYMLINK_NOFOLLOW | libc::AT_STATX_FORCE_SYNC, libc::STATX_BASIC_STATS, &mut sx);
+    }
 }
 
 fn is_regular(m: &fs::Metadata) -> bool {
