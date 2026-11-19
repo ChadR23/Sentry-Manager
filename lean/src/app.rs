@@ -9,11 +9,12 @@ use crate::thumbnails::Thumbnails;
 use crate::footage::ctx::{Ctx, Fail, Level, Res};
 use crate::footage::vehicles::Vehicles;
 use crate::{footage, mp4};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
-/// Clip codec reads at once (inventory.js limiter(8)); scan threads (scanner.js concurrency 16).
+/// Clip codec reads at once without a running viewer (inventory.js limiter(this.codecChecks || 8)); scan threads (scanner.js concurrency 16).
 const PROBE_THREADS: usize = 8;
 const SCAN_THREADS: usize = 16;
 /// Every sixth background rescan looks at every file (inventory.js).
@@ -229,6 +230,7 @@ impl App {
         inventory::mark_protected(&mut recs, &self.core.db().protected_set(vid));
         self.core.log("inventory", Level::Info, &format!("{}: {} recordings, {} files ({:.1}s{})", v.name, recs.len(), n_files, took / 1000.0,
             if reuse { format!(", {} unchanged{}", unchanged, if resumed { " since the last run" } else { "" }) } else { String::new() }));
+        let probe = self.adopt_saved_codecs(vid, &v.name);
         let codecs = self.codec_map(vid, &files);
         let entry = VehicleState {
             recordings: Arc::new(recs),
@@ -249,7 +251,9 @@ impl App {
         lock.done.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let app = self.clone();
         let id = vid.to_string();
-        self.jobs.submit(format!("codecs:{vid}"), Priority::Normal, move || app.probe_codecs(&id));
+        if probe {
+            self.jobs.submit(format!("codecs:{vid}"), Priority::Normal, move || app.probe_codecs(&id));
+        }
         footage::integrity::resume(self, vid);
         Ok(entry)
     }
@@ -276,6 +280,35 @@ impl App {
         }
     }
 
+    /// inventory.js codecs(): the clip codecs an older server kept as one settings value
+    /// (`codecs:<vehicle>`, rel -> [size, mtimeMs, codec]) move into the catalog, so none of those
+    /// clips is read again: the rows the catalog lacks are added (its own rows are kept), then the
+    /// value is deleted. False when the move failed: the value stays, and the codec probe waits
+    /// for the next scan to finish the move instead of reading every clip.
+    fn adopt_saved_codecs(&self, vid: &str, name: &str) -> bool {
+        let key = format!("codecs:{vid}");
+        let db = self.core.db();
+        let Some(saved) = db.get(&key) else { return true };
+        let rows = saved_codec_rows(&saved);
+        // (no entry a server wrote: left as it is, as inventory.js does)
+        if rows.is_empty() {
+            return true;
+        }
+        match self.catalog.adopt_codecs(vid, &rows) {
+            Ok(added) => {
+                db.del(&key);
+                if added > 0 {
+                    self.core.log("inventory", Level::Info, &format!("{name}: {added} clip codecs kept from before"));
+                }
+                true
+            }
+            Err(e) => {
+                self.core.log("inventory", Level::Warn, &format!("{name}: clip codecs kept from before not moved yet: {e}"));
+                false
+            }
+        }
+    }
+
     fn codec_map(&self, vid: &str, list: &Arc<FileList>) -> Codecs {
         Codecs::new(list.clone(), self.catalog.codecs(vid).map(|m| m.into_iter().map(|(rel, (_, _, c))| (rel, c)).collect::<Vec<_>>()).unwrap_or_default())
     }
@@ -295,15 +328,28 @@ impl App {
                 .filter(|f| f.kind == footage::Kind::Clip && f.rel.to_lowercase().ends_with(".mp4"))
                 .filter(|f| known.get(&f.rel).is_none_or(|(s, m, _)| *s != f.size || *m != f.mtime_ms))
                 .collect();
-            let read = par_each(&todo, PROBE_THREADS, |f| mp4::video_codec(&v.root.join(&f.rel)).ok().map(|c| (f.rel.clone(), f.size, f.mtime_ms, c)));
-            let set: Vec<_> = read.into_iter().flatten().collect();
-            let (codecs, known) = if set.is_empty() && gone.is_empty() {
+            let save = |rows: &[(String, u64, f64, Option<String>)], gone: &[String]| match self.catalog.update_codecs(vid, rows, gone) {
+                Ok(()) => true,
+                Err(e) => {
+                    eprintln!("{}: saving clip codecs failed: {e}", v.name);
+                    false
+                }
+            };
+            let (n_read, rest) = read_saving(
+                &todo,
+                most_codec_checks(),
+                codec_checks,
+                crate::catalog::BATCH,
+                |f| mp4::video_codec(&v.root.join(&f.rel)).ok().map(|c| (f.rel.clone(), f.size, f.mtime_ms, c)),
+                |rows| save(rows, &[]),
+            );
+            let (codecs, known) = if n_read == 0 && gone.is_empty() {
                 (Codecs::new(list.clone(), known.into_iter().map(|(rel, (_, _, c))| (rel, c))), None)
             } else {
-                if let Err(e) = self.catalog.update_codecs(vid, &set, &gone) {
-                    eprintln!("{}: saving clip codecs failed: {e}", v.name);
-                }
-                read_any |= !set.is_empty();
+                save(&rest, &gone);
+                // (a save that failed after committing some of its 1,000-row chunks still changed the
+                // catalog, and an extra announce only makes clients read the same rows again)
+                read_any |= n_read > 0;
                 (self.codec_map(vid, &list), Some(known))
             };
             // a newer list: the rows forgotten for this one that it still holds come back first
@@ -328,5 +374,191 @@ impl App {
             self.core.announce("inventory");
         }
         // (the speed index is the viewer area's: speeds in the Node server's day files)
+    }
+}
+
+/// index.js workLimit('codecChecks'): clip codec reads at once as Settings → Advanced →
+/// Background work has it now (inventory.js's `|| 8` before the viewer runs).
+fn codec_checks() -> usize {
+    crate::viewer::get().map_or(PROBE_THREADS, |v| v.limits.read().unwrap().get("codecChecks") as usize)
+}
+
+/// The most codecChecks may be set to (workLimits.js MAX).
+fn most_codec_checks() -> usize {
+    use crate::viewer::work_limits::{KEYS, MAX};
+    KEYS.iter().zip(MAX).find(|(k, _)| **k == "codecChecks").map_or(PROBE_THREADS, |(_, n)| n as usize)
+}
+
+/// inventory.js's codec pass: at most `limit()` reads at once, the limit read again for each
+/// item (scanner.js limiter), and what was read saved every `batch` rows as it comes, so a
+/// restart halfway through keeps it (rows whose save fails wait until another `batch` rows have
+/// been read, or for the caller). How many were read, and the rows not saved yet.
+fn read_saving<T: Sync, R: Send>(
+    items: &[T],
+    threads: usize,
+    limit: impl Fn() -> usize + Send + Sync + 'static,
+    batch: usize,
+    read: impl Fn(&T) -> Option<R> + Sync,
+    save: impl Fn(&[R]) -> bool + Sync,
+) -> (usize, Vec<R>) {
+    let slots = crate::viewer::telemetry_api::Limiter::new(limit);
+    // rows not saved yet, and how many came since the last save was tried
+    let pending = Mutex::new((Vec::new(), 0usize));
+    let done = std::sync::atomic::AtomicUsize::new(0);
+    par_each(items, threads, |item| {
+        let got = {
+            let _slot = slots.take();
+            read(item)
+        };
+        let Some(row) = got else { return };
+        done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let full = {
+            let mut p = pending.lock().unwrap();
+            p.0.push(row);
+            p.1 += 1;
+            (p.1 >= batch.max(1)).then(|| {
+                p.1 = 0;
+                std::mem::take(&mut p.0)
+            })
+        };
+        if let Some(rows) = full {
+            if !save(&rows) {
+                pending.lock().unwrap().0.extend(rows);
+            }
+        }
+    });
+    (done.into_inner(), pending.into_inner().unwrap().0)
+}
+
+/// The rows of a `codecs:<vehicle>` value: rel -> [size, mtimeMs, codec or null], as Node wrote
+/// them (an entry of another shape is left out, so its clip is read).
+fn saved_codec_rows(saved: &Value) -> Vec<(String, u64, f64, Option<String>)> {
+    let Some(m) = saved.as_object() else { return Vec::new() };
+    m.iter()
+        .filter_map(|(rel, v)| match v.as_array().map(Vec::as_slice) {
+            Some([size, mtime, codec]) => Some((
+                rel.clone(),
+                size.as_u64()?,
+                mtime.as_f64()?,
+                match codec {
+                    Value::Null => None,
+                    Value::String(c) => Some(c.clone()),
+                    _ => return None,
+                },
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn codec_reads_never_run_more_at_once_than_the_limit() {
+        for limit in [1usize, 3] {
+            let (now, most) = (AtomicUsize::new(0), AtomicUsize::new(0));
+            let items: Vec<usize> = (0..40).collect();
+            let (n, rest) = read_saving(
+                &items,
+                32,
+                move || limit,
+                1000,
+                |i| {
+                    most.fetch_max(now.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                    now.fetch_sub(1, Ordering::SeqCst);
+                    Some(*i)
+                },
+                |_| panic!("fewer rows than a batch are left to the caller"),
+            );
+            let mut rest = rest;
+            rest.sort();
+            assert_eq!(n, items.len());
+            assert_eq!(rest, items, "fewer rows than a batch all come back unsaved");
+            assert!(most.load(Ordering::SeqCst) <= limit, "{} at once with a limit of {limit}", most.load(Ordering::SeqCst));
+        }
+    }
+
+    #[test]
+    fn codecs_read_are_saved_every_batch_as_they_come_and_a_clip_not_read_is_not_saved() {
+        let started = AtomicUsize::new(0);
+        let saves: Mutex<Vec<(Vec<usize>, usize)>> = Mutex::new(Vec::new());
+        let items: Vec<usize> = (0..37).collect();
+        let (n, rest) = read_saving(
+            &items,
+            32,
+            || 2,
+            10,
+            |i| {
+                started.fetch_add(1, Ordering::SeqCst);
+                (i % 9 != 4).then_some(*i)
+            },
+            |rows| {
+                saves.lock().unwrap().push((rows.to_vec(), started.load(Ordering::SeqCst)));
+                true
+            },
+        );
+        let saves = saves.into_inner().unwrap();
+        let read: Vec<usize> = items.iter().copied().filter(|i| i % 9 != 4).collect();
+        assert_eq!(n, read.len());
+        assert_eq!(saves.iter().map(|(rows, _)| rows.len()).collect::<Vec<_>>(), vec![10, 10, 10]);
+        assert!(saves[0].1 < items.len(), "the first rows were saved while clips were still being read");
+        let mut saved: Vec<usize> = saves.iter().flat_map(|(rows, _)| rows.iter().copied()).chain(rest.iter().copied()).collect();
+        saved.sort();
+        assert_eq!(saved, read, "every row read is saved once, the last ones by the caller");
+        assert_eq!(rest.len(), 3);
+    }
+
+    #[test]
+    fn rows_whose_save_failed_are_saved_with_a_later_batch() {
+        let calls = AtomicUsize::new(0);
+        let saved: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+        let failed: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+        let items: Vec<usize> = (0..25).collect();
+        // (one thread: a failed batch is back in the queue before the next row is read)
+        let (n, rest) = read_saving(&items, 1, || 1, 10, |i| Some(*i), |rows| {
+            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                failed.lock().unwrap().extend_from_slice(rows);
+                return false;
+            }
+            saved.lock().unwrap().extend_from_slice(rows);
+            true
+        });
+        assert_eq!(n, 25);
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "tried again only after another full batch, not on every read");
+        let failed = failed.into_inner().unwrap();
+        let mut all = saved.into_inner().unwrap();
+        assert_eq!(failed.len(), 10);
+        assert!(failed.iter().all(|r| all.contains(r)), "the rows of the failed save went out with a later one");
+        all.extend(rest);
+        all.sort();
+        assert_eq!(all, items, "every row read is saved once or handed back");
+    }
+
+    #[test]
+    fn a_kept_codec_list_gives_its_rows_and_leaves_out_entries_of_another_shape() {
+        let v = json!({
+            "a.mp4": [10, 1700000000123.456, "h265"],
+            "b.mp4": [20, 1700000000000u64, null],
+            "c.mp4": [30, 1.0],
+            "d.mp4": ["30", 1.0, "h264"],
+            "e.mp4": [30, 1.0, 5],
+            "f.mp4": { "size": 1 },
+            "g.mp4": [-1, 1.0, "h264"]
+        });
+        let mut rows = saved_codec_rows(&v);
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(rows, vec![("a.mp4".to_string(), 10, 1700000000123.456, Some("h265".to_string())), ("b.mp4".to_string(), 20, 1700000000000.0, None)]);
+        assert!(saved_codec_rows(&json!([1, 2, 3])).is_empty());
+    }
+
+    #[test]
+    fn codec_checks_follow_the_work_limits_and_their_maximum() {
+        assert_eq!(most_codec_checks(), 32);
+        assert_eq!(codec_checks(), crate::viewer::get().map_or(PROBE_THREADS, |v| v.limits.read().unwrap().get("codecChecks") as usize));
     }
 }

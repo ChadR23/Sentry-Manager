@@ -481,6 +481,56 @@ fn vehicles_routes_answer_as_node() {
 }
 
 #[test]
+fn clip_codecs_an_older_server_kept_in_its_settings_move_into_the_catalog_and_are_not_read_again() {
+    let a = "TeslaCam/RecentClips/2026-11-10_06-00-00-front.mp4";
+    let b = "TeslaCam/RecentClips/2026-11-10_06-00-00-back.mp4";
+    let c = "TeslaCam/RecentClips/2026-11-10_06-01-00-front.mp4";
+    let f = fixture("codecs-kept", &[(a, b"x"), (b, b"x"), (c, b"xy")]);
+    wait(|| !f.app.jobs.busy("codecs:car"));
+    // as an older server left it: no codecs in the catalog, the list in one settings value
+    let read = f.app.catalog.codecs("car").unwrap();
+    assert_eq!(read.len(), 3);
+    f.app.catalog.update_codecs("car", &[], &read.keys().cloned().collect::<Vec<_>>()).unwrap();
+    let (sa, ma, _) = read[a].clone();
+    let (sb, mb, _) = read[b].clone();
+    let (sc, mc, _) = read[c].clone();
+    let mut kept = serde_json::Map::new();
+    // (a's file is no clip, so a read would name no codec: "h265" can only come from the list)
+    kept.insert(a.into(), json!([sa, ma, "h265"]));
+    kept.insert(b.into(), json!([sb, mb, null]));
+    kept.insert(c.into(), json!([sc + 7, mc, "h265"]));
+    f.core.db().set("codecs:car", &Value::Object(kept));
+    f.app.scan_now("car", false).unwrap();
+    wait(|| !f.app.jobs.busy("codecs:car"));
+    assert_eq!(f.app.catalog.codec("car", a).unwrap(), Some((sa, ma, Some("h265".into()))), "kept, not read again");
+    assert_eq!(f.app.catalog.codec("car", b).unwrap(), Some((sb, mb, None)));
+    assert_eq!(f.app.catalog.codec("car", c).unwrap(), Some((sc, mc, None)), "a clip whose size changed is read again");
+    assert_eq!(f.app.state_of("car").unwrap().codecs.get(a), Some(Some("h265")));
+    assert_eq!(f.core.db().get("codecs:car"), None, "the settings value is moved, not kept");
+}
+
+#[test]
+fn a_kept_codec_list_beside_codecs_the_catalog_has_only_fills_in_what_it_lacks() {
+    let a = "TeslaCam/RecentClips/2026-11-10_06-00-00-front.mp4";
+    let b = "TeslaCam/RecentClips/2026-11-10_06-01-00-front.mp4";
+    let f = fixture("codecs-kept-partial", &[(a, b"x"), (b, b"x")]);
+    wait(|| !f.app.jobs.busy("codecs:car"));
+    // as a move cut short left it: a in the catalog, b only in the kept list
+    let (sa, ma, codec_a) = f.app.catalog.codec("car", a).unwrap().unwrap();
+    let (sb, mb, _) = f.app.catalog.codec("car", b).unwrap().unwrap();
+    f.app.catalog.update_codecs("car", &[], &[b.to_string()]).unwrap();
+    let mut kept = serde_json::Map::new();
+    kept.insert(a.into(), json!([sa, ma, "h265"]));
+    kept.insert(b.into(), json!([sb, mb, "h265"]));
+    f.core.db().set("codecs:car", &Value::Object(kept));
+    f.app.scan_now("car", false).unwrap();
+    wait(|| !f.app.jobs.busy("codecs:car"));
+    assert_eq!(f.app.catalog.codec("car", a).unwrap(), Some((sa, ma, codec_a)), "the catalog's own row is kept");
+    assert_eq!(f.app.catalog.codec("car", b).unwrap(), Some((sb, mb, Some("h265".into()))), "the missing row comes from the list, not a read");
+    assert_eq!(f.core.db().get("codecs:car"), None);
+}
+
+#[test]
 fn a_codec_probe_waiting_through_a_newer_scan_works_on_the_newer_list() {
     use sentry_lean::jobs::Priority;
     use std::sync::Condvar;
