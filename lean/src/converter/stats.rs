@@ -314,7 +314,8 @@ impl Track {
     }
 }
 
-pub type DbGet = dyn Fn(&str) -> Option<Value> + Send + Sync;
+/// db.get(key): an error when it cannot be read (then nothing is written over it)
+pub type DbGet = dyn Fn(&str) -> Result<Option<Value>, String> + Send + Sync;
 pub type DbSet = dyn Fn(&str, &Value) + Send + Sync;
 
 /// createConvertStats({ db, now, everyMs, windowMs, deviceName, cpuName })
@@ -343,12 +344,15 @@ impl ConvertStats {
         }
     }
 
-    fn read(&self, key: &str) -> Option<Value> {
-        self.get.as_ref().and_then(|g| g(key)).filter(|v| super::jobstore::normalize::truthy(v))
+    fn read(&self, key: &str) -> Result<Option<Value>, String> {
+        Ok(match &self.get {
+            Some(g) => g(key)?.filter(|v| super::jobstore::normalize::truthy(v)),
+            None => None,
+        })
     }
 
-    fn kept_nodes(&self) -> Map<String, Value> {
-        self.read(NODES_KEY).and_then(|v| v.as_object().cloned()).unwrap_or_default()
+    fn kept_nodes(&self) -> Result<Map<String, Value>, String> {
+        Ok(self.read(NODES_KEY)?.and_then(|v| v.as_object().cloned()).unwrap_or_default())
     }
 
     /// sample(encodes): at most one sample every everyMs; true when this server converted
@@ -382,12 +386,16 @@ impl ConvertStats {
             }
         }
         if !by_node.is_empty() {
+            // (kept numbers that could not be read are not written over with these alone)
             let mut kept = self.kept_nodes();
             for (id, l) in by_node {
                 let track = st.2.entry(id.clone()).or_insert(Track { samples: vec![], last: None });
-                kept.insert(id, track.add(t, &l, window));
+                let last = track.add(t, &l, window);
+                if let Ok(k) = &mut kept {
+                    k.insert(id, last);
+                }
             }
-            if let Some(s) = &self.set {
+            if let (Some(s), Ok(kept)) = (&self.set, kept) {
                 s(NODES_KEY, &Value::Object(kept));
             }
         }
@@ -397,7 +405,7 @@ impl ConvertStats {
     /// summary(name): this server's { fps, encoder, device, api, codec }
     pub fn summary(&self, name: Option<&dyn Fn(&Value) -> Option<String>>) -> Value {
         let t = (self.now)();
-        let kept = self.read(KEY);
+        let kept = self.read(KEY).ok().flatten();
         let default = |r: &Value| if r["hardware"] == true { (self.device_name)(r) } else { (self.cpu_name)() };
         let st = self.st.lock().unwrap();
         st.1.summary(t, self.window_ms, kept, name.unwrap_or(&default))
@@ -406,7 +414,7 @@ impl ConvertStats {
     /// nodeSummary(id, name)
     pub fn node_summary(&self, id: &str, name: &dyn Fn(&Value) -> Option<String>) -> Value {
         let t = (self.now)();
-        let kept = self.kept_nodes().get(id).cloned();
+        let kept = self.kept_nodes().ok().and_then(|k| k.get(id).cloned());
         let mut st = self.st.lock().unwrap();
         let track = st.2.entry(id.to_string()).or_insert(Track { samples: vec![], last: None });
         track.summary(t, self.window_ms, kept, name)
@@ -415,7 +423,7 @@ impl ConvertStats {
     /// keepNodes(ids): forgets the numbers of nodes no longer paired
     pub fn keep_nodes(&self, ids: &[String]) {
         self.st.lock().unwrap().2.retain(|k, _| ids.contains(k));
-        let kept = self.kept_nodes();
+        let Ok(kept) = self.kept_nodes() else { return };
         if kept.keys().any(|k| !ids.contains(k)) {
             if let Some(s) = &self.set {
                 s(NODES_KEY, &Value::Object(kept.into_iter().filter(|(k, _)| ids.contains(k)).collect()));

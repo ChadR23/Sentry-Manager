@@ -48,8 +48,8 @@ impl ArrivalCtx for Ctx {
     fn holds(&self, abs: &str) -> bool {
         self.held.iter().any(|h| abs.ends_with(&format!("/{h}")))
     }
-    fn older_of(&self, _vid: &str) -> bool {
-        true
+    fn older_of(&self, _vid: &str) -> Result<bool, String> {
+        Ok(true)
     }
     fn log_warn(&self, line: &str) {
         panic!("unexpected warning: {line}");
@@ -102,7 +102,7 @@ fn rust_run(dir: &Path, data: &Path, phase: u32) -> Value {
     }
     arrival.kick_wait();
     arrival.stop();
-    serde_json::json!({ "view": arrival.view("car 1"), "bytes": arrival.hashed_bytes() })
+    serde_json::json!({ "view": arrival.view("car 1").unwrap(), "bytes": arrival.hashed_bytes() })
 }
 
 /// The H.265 clip Node's run calls converted() for (5340 s before the archive's now).

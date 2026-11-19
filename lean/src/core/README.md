@@ -9,7 +9,7 @@ specification.
 | File | Port of | What |
 | --- | --- | --- |
 | `config.rs` | `process.env` reads | `Config`: every variable Node reads, its default, the DATA layout (`db_file`, `log_file`, `tls_dir`, `setup_file`, ...) and `var()` for the rest |
-| `db.rs` | db.js, catalog.js schema | `Db`: the same `manager.db` (WAL, same schema, the same `ALTER TABLE sessions` columns, catalog tables): settings `get/get_or/get_as/set/del`, users, sessions, protected, bin items, jobs, notifications; `conn()` and `tx()` for an area's own queries |
+| `db.rs` | db.js, catalog.js schema | `Db`: the same `manager.db` (WAL, same schema, the same `ALTER TABLE sessions` columns, catalog tables): settings `get/get_or/get_as/set/del`, users, sessions, protected, bin items, jobs, notifications; `conn()` and `tx()` for an area's own queries. Every read and write returns `DbResult`: a `DbError` is the database failing (busy, read-only, full, damaged), never a missing row or a write that was kept |
 | `auth.rs` | auth.js | scrypt hashes (N 16384, r 8, p 1, 64 bytes, hex salt as text: Node's hashes verify), cookies (`__Host-sm_session` over HTTPS, `sm_session` on plain HTTP), setup code, sign-in throttle, the two-at-once check limiter, the 10-minute password window |
 | `accounts.rs` | accounts.js | roles (admin, viewer), TOTP and recovery codes, pending sign-ins, `viewer_may` |
 | `access.rs` | access.js | bans, two-step rules, admin only at home, the home network |
@@ -81,7 +81,8 @@ pub fn routes(r: &mut Router, me: Arc<MyArea>) {
 - **Errors.** `HttpError::new(status, msg)` answers `{ "error": msg }`;
   `.code("X")` adds `code` (Node's `expose && code`); `HttpError::internal`
   answers 500 "Internal error" and logs `METHOD path: message`.
-  `auth::Refusal` (status + message) converts with `?`.
+  `auth::Refusal` (status + message) converts with `?`, and so does
+  `db::DbError` (500 "Internal error", logged).
 - **Answers.** `Reply::json(v)`, `.cookie(set_cookie)`, `.header(name, v)`,
   `Reply::Raw(response)` for files and streams, `Reply::text_download`.
   Use `http::num(f64)` for numbers so 3.0 is written `3` as JSON.stringify does.
@@ -94,7 +95,7 @@ pub fn routes(r: &mut Router, me: Arc<MyArea>) {
 `c.state: Arc<AppState>` with `config`, `db`, `logger`, `log` (scope
 server), `audit`, `auth`, `accounts`, `access`, `hub`, `jobs`, `notes`,
 `tls`, `hooks`, `supervisor` (the link, when supervised); helpers
-`announce(topic)`, `setting(key)`, `set_setting(key, v)`, `from_home(ip)`,
+`announce(topic)`, `setting(key)`, `set_setting(key, v)` (both `DbResult`), `from_home(ip)`,
 `role_for(ip, user)`, `admin_here(ip, user)`, `two_factor_state(user, home)`.
 On the request: `method`, `raw_path`, `path` (decoded), `params`, `query`,
 `raw_query`, `headers`, `body`, `user`, `client` (clientAddress), `secure`,

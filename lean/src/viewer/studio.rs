@@ -203,11 +203,11 @@ pub fn context(ctx: &dyn Ctx) -> Value {
         "outputRoots": output_roots(ctx).iter().map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>() })
 }
 
-fn appearance(ctx: &dyn Ctx) -> serde_json::Map<String, Value> {
-    match ctx.setting("appearance") {
+fn appearance(ctx: &dyn Ctx) -> Result<serde_json::Map<String, Value>, (u16, String)> {
+    Ok(match ctx.setting("appearance").map_err(super::ctx::failed)? {
         Some(Value::Object(o)) => o,
         _ => serde_json::Map::new(),
-    }
+    })
 }
 
 fn truthy(v: Option<&Value>) -> bool {
@@ -220,13 +220,13 @@ fn truthy(v: Option<&Value>) -> bool {
     }
 }
 
-pub fn settings(ctx: &dyn Ctx) -> Value {
-    let mut out = match ctx.setting("studio-settings") {
+pub fn settings(ctx: &dyn Ctx) -> Result<Value, (u16, String)> {
+    let mut out = match ctx.setting("studio-settings").map_err(super::ctx::failed)? {
         Some(Value::Object(o)) => o,
         _ => serde_json::Map::new(),
     };
-    out.insert("timeFormat".into(), json!(if truthy(appearance(ctx).get("clock24")) { "24h" } else { "12h" }));
-    Value::Object(out)
+    out.insert("timeFormat".into(), json!(if truthy(appearance(ctx)?.get("clock24")) { "24h" } else { "12h" }));
+    Ok(Value::Object(out))
 }
 
 pub fn set_setting(ctx: &dyn Ctx, body: &Value) -> Result<Value, (u16, String)> {
@@ -235,14 +235,14 @@ pub fn set_setting(ctx: &dyn Ctx, body: &Value) -> Result<Value, (u16, String)> 
     if key == "timeFormat" {
         let mut a = serde_json::Map::new();
         a.insert("reduceEffects".into(), json!(false));
-        for (k, v) in appearance(ctx) {
+        for (k, v) in appearance(ctx)? {
             a.insert(k, v);
         }
         a.insert("clock24".into(), json!(value == Some(json!("24h"))));
-        ctx.set_setting("appearance", Value::Object(a));
+        ctx.set_setting("appearance", Value::Object(a)).map_err(super::ctx::failed)?;
         return Ok(json!({ "ok": true }));
     }
-    let mut all = match ctx.setting("studio-settings") {
+    let mut all = match ctx.setting("studio-settings").map_err(super::ctx::failed)? {
         Some(Value::Object(o)) => o,
         _ => serde_json::Map::new(),
     };
@@ -255,7 +255,7 @@ pub fn set_setting(ctx: &dyn Ctx, body: &Value) -> Result<Value, (u16, String)> 
             all.insert(key.to_string(), v);
         }
     }
-    ctx.set_setting("studio-settings", Value::Object(all));
+    ctx.set_setting("studio-settings", Value::Object(all)).map_err(super::ctx::failed)?;
     Ok(json!({ "ok": true }))
 }
 
@@ -660,13 +660,33 @@ mod tests {
     fn studio_settings_and_the_clock() {
         let car = Car::new("studio-settings");
         let ctx = &*car.ctx;
-        assert_eq!(settings(ctx), json!({ "timeFormat": "12h" }));
+        assert_eq!(settings(ctx).unwrap(), json!({ "timeFormat": "12h" }));
         assert_eq!(set_setting(ctx, &json!({ "key": "timeFormat", "value": "24h" })).unwrap(), json!({ "ok": true }));
-        assert_eq!(ctx.setting("appearance"), Some(json!({ "reduceEffects": false, "clock24": true })));
+        assert_eq!(ctx.setting("appearance").unwrap(), Some(json!({ "reduceEffects": false, "clock24": true })));
         set_setting(ctx, &json!({ "key": "speedUnit", "value": "kmh" })).unwrap();
-        assert_eq!(settings(ctx), json!({ "speedUnit": "kmh", "timeFormat": "24h" }));
+        assert_eq!(settings(ctx).unwrap(), json!({ "speedUnit": "kmh", "timeFormat": "24h" }));
         assert_eq!(set_setting(ctx, &json!({ "key": 3 })).unwrap_err(), (400, "Invalid setting".to_string()));
         assert_eq!(set_setting(ctx, &json!({ "key": "x".repeat(101) })).unwrap_err().0, 400);
+    }
+
+    #[test]
+    fn studio_settings_that_cannot_be_read_or_kept_answer_500_and_change_nothing() {
+        let car = Car::new("studio-settings-fail");
+        let ctx = &*car.ctx;
+        set_setting(ctx, &json!({ "key": "speedUnit", "value": "kmh" })).unwrap();
+        // (they cannot be read, while a write would still be kept)
+        car.ctx.reads_fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(settings(ctx).unwrap_err().0, 500, "not the defaults");
+        assert_eq!(set_setting(ctx, &json!({ "key": "timeFormat", "value": "24h" })).unwrap_err().0, 500);
+        assert_eq!(set_setting(ctx, &json!({ "key": "speedUnit", "value": "mph" })).unwrap_err().0, 500);
+        car.ctx.reads_fail.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(settings(ctx).unwrap(), json!({ "speedUnit": "kmh", "timeFormat": "12h" }), "not written over");
+        // (they read, but no change can be kept)
+        car.ctx.writes_fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(set_setting(ctx, &json!({ "key": "timeFormat", "value": "24h" })).unwrap_err().0, 500);
+        assert_eq!(settings(ctx).unwrap(), json!({ "speedUnit": "kmh", "timeFormat": "12h" }));
+        car.ctx.writes_fail.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(settings(ctx).unwrap(), json!({ "speedUnit": "kmh", "timeFormat": "12h" }));
     }
 
     #[test]

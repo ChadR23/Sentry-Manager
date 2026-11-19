@@ -98,7 +98,8 @@ impl BenchmarkApi for super::runtime::Converter {
 /// What the channels use besides the job service (set once by the integrator).
 #[derive(Default, Clone)]
 pub struct Extras {
-    pub devices: Option<Arc<dyn Fn() -> Value + Send + Sync>>,
+    /// devices(): an error when the paired nodes cannot be read
+    pub devices: Option<Arc<dyn Fn() -> Result<Value, String> + Send + Sync>>,
     pub auto: Option<Arc<super::auto_convert::Auto>>,
     pub benchmark: Option<Arc<dyn BenchmarkApi>>,
 }
@@ -797,7 +798,9 @@ impl Bridge {
             "devices" => {
                 no_payload(p)?;
                 let Some(d) = self.extras().devices else { return fail("DEVICES_UNAVAILABLE") };
-                bounded(&d(), MAX_PAYLOAD_BYTES, false, true)
+                // (a list without the paired nodes is not answered as the list: Node's thrown error)
+                let Ok(list) = d() else { return fail("OPERATION_FAILED") };
+                bounded(&list, MAX_PAYLOAD_BYTES, false, true)
             }
             "resume" => {
                 let id = job_id(p)?;
@@ -882,7 +885,8 @@ impl Bridge {
     fn check_lane_encoders(&self, config: &Value) -> R<()> {
         let Some(lanes) = config["lanes"].as_array() else { return Ok(()) };
         let Some(devices) = self.extras().devices else { return Ok(()) };
-        let known = devices();
+        // (lanes are not checked against a list without the paired nodes)
+        let Ok(known) = devices() else { return fail("OPERATION_FAILED") };
         let list = known["devices"].as_array().cloned().unwrap_or_default();
         for lane in lanes {
             let Some(d) = list.iter().find(|d| d["id"] == lane["device"]) else { continue };
@@ -1118,7 +1122,7 @@ mod tests {
         let caps = capabilities(&json!({ "separatePublication": "native-atomic", "ownershipCleanup": "atomic-expected-ownership", "replacement": "available" }));
         let bridge = Bridge::new(Arc::new(Fake::default()), Arc::new(Guard(base.clone())), caps);
         // (the DEVICES of converterBridge.js: a GPU that cannot encode H.265)
-        bridge.set_extras(Extras { devices: Some(Arc::new(|| json!({ "devices": [{ "id": "pci:0000:01:00.0", "kind": "dri", "name": "Old GPU", "encoders": { "h265": null, "av1": null } }] }))), auto: None, benchmark: None });
+        bridge.set_extras(Extras { devices: Some(Arc::new(|| Ok(json!({ "devices": [{ "id": "pci:0000:01:00.0", "kind": "dri", "name": "Old GPU", "encoders": { "h265": null, "av1": null } }] })))), auto: None, benchmark: None });
         let mut differences = vec![];
         for (n, r) in requests.as_array().unwrap().iter().enumerate() {
             let mine = bridge.invoke(r["name"].as_str().unwrap(), r.get("payload").cloned(), None);
@@ -1128,6 +1132,17 @@ mod tests {
         }
         assert!(differences.is_empty(), "{} of {} differ:\n{}", differences.len(), requests.as_array().unwrap().len(), differences.join("\n"));
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn a_device_list_that_cannot_read_the_paired_nodes_is_not_answered_as_the_list() {
+        let base = std::env::temp_dir().join(format!("lean-devices-unread-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let caps = capabilities(&json!({ "separatePublication": "native-atomic", "ownershipCleanup": "atomic-expected-ownership", "replacement": "available" }));
+        let bridge = Bridge::new(Arc::new(Fake::default()), Arc::new(Guard(base.clone())), caps);
+        bridge.set_extras(Extras { devices: Some(Arc::new(|| Err("Internal error".into()))), auto: None, benchmark: None });
+        assert_eq!(bridge.invoke("devices", None, None), json!({ "ok": false, "error": { "code": "OPERATION_FAILED", "retryable": false } }));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

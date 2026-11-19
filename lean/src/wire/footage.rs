@@ -83,13 +83,15 @@ impl Ctx for FootageCtx {
             scope_log(&s.state, scope, level, line);
         }
     }
-    fn job_start(&self, typ: &str, vehicle_id: Option<&str>, title: &str) -> i64 {
-        let Some(s) = self.srv() else { return 0 };
-        s.state.jobs.start(NewJob { kind: typ.into(), vehicle_id: vehicle_id.map(String::from), title: title.into(), detail: None, external_id: None })
+    fn job_start(&self, typ: &str, vehicle_id: Option<&str>, title: &str) -> Result<i64, String> {
+        let Some(s) = self.srv() else { return Ok(0) };
+        s.state.jobs.start(NewJob { kind: typ.into(), vehicle_id: vehicle_id.map(String::from), title: title.into(), detail: None, external_id: None }).map_err(|e| e.to_string())
     }
     fn job_finish(&self, id: i64, status: &str, detail: &str, result: Option<Value>) {
         if let Some(s) = self.srv() {
-            s.state.jobs.finish(id, Some(status), Some(detail.to_string()), result);
+            if let Err(e) = s.state.jobs.finish(id, Some(status), Some(detail.to_string()), result) {
+                scope_log(&s.state, "server", Level::Warn, &format!("The end of job {id} ({status}: {detail}) was not kept: {e}"));
+            }
         }
     }
     fn busy_paths(&self) -> std::collections::HashSet<PathBuf> {
@@ -107,42 +109,45 @@ impl Ctx for FootageCtx {
         let Some(s) = self.srv() else { return };
         let Some(ops) = s.ops().cloned() else { return };
         if let Some(v) = super::ops::vehicle_info(&s, vehicle_id) {
-            ops.notes.sync_share(&v, v.status.as_ref());
+            if let Err(e) = ops.notes.sync_share(&v, v.status.as_ref()) {
+                scope_log(&s.state, "server", Level::Warn, &format!("The share alerts of {vehicle_id} were not kept: {e}"));
+            }
         }
     }
-    fn saved(&self, vehicle_id: &str) -> Value {
+    fn saved(&self, vehicle_id: &str) -> crate::footage::ctx::Res<Value> {
         match self.srv() {
-            Some(s) => crate::ops::power::for_vehicle(&s.state.db.reader(), vehicle_id),
-            None => json!({ "bytes": 0, "clips": 0 }),
+            Some(s) => Ok(crate::ops::power::for_vehicle(&s.state.db.reader(), vehicle_id)?),
+            None => Ok(json!({ "bytes": 0, "clips": 0 })),
         }
     }
-    fn reset_saved(&self, vehicle_id: &str) {
+    fn reset_saved(&self, vehicle_id: &str) -> crate::footage::ctx::Res<()> {
         if let Some(s) = self.srv() {
-            crate::ops::power::reset(&s.state.db.conn(), vehicle_id);
+            crate::ops::power::reset(&s.state.db.conn(), vehicle_id)?;
         }
+        Ok(())
     }
-    fn car_summary(&self, vehicle: &Value) -> Value {
-        let Some(s) = self.srv() else { return Value::Null };
-        let (Some(can), Some(id)) = (s.can().cloned(), vehicle["id"].as_str()) else { return Value::Null };
+    fn car_summary(&self, vehicle: &Value) -> crate::footage::ctx::Res<Value> {
+        let Some(s) = self.srv() else { return Ok(Value::Null) };
+        let (Some(can), Some(id)) = (s.can().cloned(), vehicle["id"].as_str()) else { return Ok(Value::Null) };
         let app = s.app();
         match app.vehicle(id) {
-            Some(v) => can.car_summary(&car_of(app, &v)),
-            None => Value::Null,
+            Some(v) => can.car_summary(&car_of(app, &v)).map_err(crate::footage::ctx::Fail::internal),
+            None => Ok(Value::Null),
         }
     }
-    fn can_with(&self, vehicle_id: &str, rels: &[String], until: Option<f64>) -> Option<Value> {
+    fn can_with(&self, vehicle_id: &str, rels: &[String], until: Option<f64>) -> crate::footage::ctx::Res<Option<Value>> {
         // index.js canWith: deleteWith as a dry run; null when no key is mapped to the car
-        let can = self.srv()?.can()?.clone();
-        let r = can.prune.delete_with(vehicle_id, rels, until, "", true);
+        let Some(can) = self.srv().and_then(|s| s.can().cloned()) else { return Ok(None) };
+        let r = can.prune.preview_with(vehicle_id, rels, until).map_err(crate::footage::ctx::Fail::internal)?;
         let skip = r["skip"].as_str();
         if r.is_null() || matches!(skip, Some("no CAN Bridge key is mapped to this car" | "no such car")) {
-            return None;
+            return Ok(None);
         }
         let mut out = json!({ "logs": r.get("logs").filter(|x| !x.is_null()).cloned().unwrap_or(json!(0)), "kept": r.get("kept").filter(|x| !x.is_null()).cloned().unwrap_or(json!(0)) });
         if let Some(sk) = skip {
             out["skip"] = json!(sk);
         }
-        Some(out)
+        Ok(Some(out))
     }
     fn can_delete_with(&self, vehicle_id: &str, rels: &[String], until: Option<f64>, by: &str) -> Option<Value> {
         let can = self.srv()?.can()?.clone();
@@ -150,7 +155,10 @@ impl Ctx for FootageCtx {
     }
     fn vehicle_removed(&self, vehicle_id: &str) {
         let Some(s) = self.srv() else { return };
-        crate::ops::power::forget(&s.state.db.conn(), vehicle_id);
+        // (the vehicle is gone either way: its total stays until it can be written)
+        if let Err(e) = crate::ops::power::forget(&s.state.db.conn(), vehicle_id) {
+            scope_log(&s.state, "server", Level::Warn, &format!("Vehicle {vehicle_id} removed, its space saved stays: {e}"));
+        }
         // archiveGapRef.forget, driveData.forget
         if let Some(v) = s.viewer() {
             v.archive.forget(vehicle_id);
@@ -168,12 +176,11 @@ impl Ctx for FootageCtx {
             crate::arrival::routes::vehicle_removed(&a.arrival, &ctx, vehicle_id);
         }
     }
-    fn has_can(&self, vehicle_id: &str) -> Option<Box<dyn Fn(&Recording) -> bool>> {
-        let s = self.srv()?;
-        let can = s.can()?.clone();
-        let v = s.app().vehicle(vehicle_id)?;
-        let f = can.has_can(&car_of(s.app(), &v));
-        Some(Box::new(move |r: &Recording| f(&rec_of(r))))
+    fn has_can(&self, vehicle_id: &str) -> crate::footage::ctx::Res<Option<Box<dyn Fn(&Recording) -> bool>>> {
+        let Some(s) = self.srv() else { return Ok(None) };
+        let (Some(can), Some(v)) = (s.can().cloned(), s.app().vehicle(vehicle_id)) else { return Ok(None) };
+        let f = can.has_can(&car_of(s.app(), &v)).map_err(crate::footage::ctx::Fail::internal)?;
+        Ok(Some(Box::new(move |r: &Recording| f(&rec_of(r)))))
     }
     fn sentry_usb(&self, vehicle_id: &str) -> Value {
         match self.srv().and_then(|s| s.can().cloned()) {
@@ -216,8 +223,12 @@ pub fn answer(srv: &Arc<Server>, c: &mut CoreCtx) -> Result<Reply, HttpError> {
     let refs: Vec<&str> = parts.iter().map(String::as_str).collect();
     let m = if c.method == Method::HEAD { "GET".to_string() } else { c.method.as_str().to_string() };
     let user = c.user.clone();
+    let admin_here = match user.as_deref() {
+        Some(u) => c.state.admin_here(&c.client, u)?,
+        None => false,
+    };
     let who = Caller {
-        admin_here: user.as_deref().is_some_and(|u| c.state.admin_here(&c.client, u)),
+        admin_here,
         confirmed: c.state.auth.recently_confirmed(&c.view()),
         user,
         client: c.client.clone(),

@@ -131,24 +131,24 @@ mod tests {
         let db = Connection::open(&db_file).unwrap();
         db.execute_batch("PRAGMA journal_mode = WAL;").unwrap();
         store::ensure_schema(&db).unwrap();
-        store::set(&db, "marker", &json!("monday"));
+        store::set(&db, "marker", &json!("monday")).unwrap();
         let snaps = Snapshots { db_file: db_file.clone(), dir: dir.join("snapshots"), keep: KEEP };
         assert_eq!(snaps.take(&db, "2026-11-01", false).unwrap().as_deref(), Some("manager-2026-11-01.db"));
         assert_eq!(snaps.take(&db, "2026-11-01", false).unwrap(), None, "once a day");
         for d in 2..=9 {
-            store::set(&db, "marker", &json!(format!("day {d}")));
+            store::set(&db, "marker", &json!(format!("day {d}"))).unwrap();
             snaps.take(&db, &format!("2026-11-0{d}"), false).unwrap();
         }
         let days: Vec<String> = snaps.list().iter().map(|x| x["day"].as_str().unwrap().to_string()).collect();
         assert_eq!(days, ["2026-11-09", "2026-11-08", "2026-11-07", "2026-11-06", "2026-11-05", "2026-11-04", "2026-11-03"]);
-        store::set(&db, "marker", &json!("broken later"));
+        store::set(&db, "marker", &json!("broken later")).unwrap();
         assert!(snaps.prepare_restore("manager-2026-11-01.db").is_err(), "an old one that was pruned");
         assert!(snaps.prepare_restore("../manager.db").is_err());
         snaps.prepare_restore("manager-2026-11-05.db").unwrap();
         drop(db);
         assert!(apply_pending_restore(&db_file).unwrap());
         let db = Connection::open(&db_file).unwrap();
-        assert_eq!(store::get(&db, "marker"), Some(json!("day 5")));
+        assert_eq!(store::get(&db, "marker").unwrap(), Some(json!("day 5")));
         assert!(PathBuf::from(format!("{}.before-restore", db_file.display())).exists());
         assert!(!apply_pending_restore(&db_file).unwrap(), "nothing pending");
         drop(db);

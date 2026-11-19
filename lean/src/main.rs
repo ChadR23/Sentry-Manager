@@ -65,7 +65,13 @@ async fn run(fd: Option<std::os::fd::OwnedFd>) {
         loop {
             t.tick().await;
             let db = st.clone();
-            let _ = tokio::task::spawn_blocking(move || db.db.prune_sessions()).await;
+            // (expired sessions no longer sign in; this only tidies the table)
+            let _ = tokio::task::spawn_blocking(move || {
+                if let Err(e) = db.db.prune_sessions() {
+                    db.log.warn(format!("Expired sessions could not be removed: {e}"));
+                }
+            })
+            .await;
         }
     });
 

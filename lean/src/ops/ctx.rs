@@ -153,9 +153,10 @@ pub trait OpsCtx: Send + Sync + 'static {
     /// know: account names (core), place names and labels (viewer),
     /// FOOTAGE_ROOT. Ops adds the host name, DATA, the vehicles' names, ids,
     /// roots and shares, the paired nodes and the TLS host names itself
-    /// (ops::diag::identifiers, index.js reportIdentifiers).
-    fn identifiers(&self) -> Vec<String> {
-        Vec::new()
+    /// (ops::diag::identifiers, index.js reportIdentifiers). An error when they
+    /// cannot be read: no anonymous report is made without them.
+    fn identifiers(&self) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
     }
     /// A test hook only: when Ops runs, the report's diagnostics are built by
     /// ops::diag::diagnostics from the calls below. Null: build them.

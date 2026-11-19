@@ -333,7 +333,7 @@ fn hooks(srv: &Arc<Server>) {
             default(info);
         }));
         let o = ops.clone();
-        st.hooks.reports_configured.set(Arc::new(move || o.reports.status()["configured"] == json!(true)));
+        st.hooks.reports_configured.set(Arc::new(move || o.reports.configured));
         let o = ops.clone();
         st.hooks.reports_setup.set(Arc::new(move |share: bool, anonymous: bool| o.reports.set_settings(&json!({ "share": share, "anonymous": anonymous })).map_err(|e| e.message)));
     }

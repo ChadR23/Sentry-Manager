@@ -392,8 +392,15 @@ impl Exporter {
         Arc::new(Exporter { cfg, ffprobe, ctx, chosen: Mutex::new(None), all: Mutex::new(Vec::new()), queue: Mutex::new(VecDeque::new()), running: Mutex::new(None) })
     }
 
+    /// The clock written on an export: one that cannot be read is logged, and 12-hour then.
     fn clock24(&self) -> bool {
-        self.ctx.setting("appearance").and_then(|a| a.get("clock24").map(js::truthy)).unwrap_or(false)
+        match self.ctx.setting("appearance") {
+            Ok(a) => a.and_then(|a| a.get("clock24").map(js::truthy)).unwrap_or(false),
+            Err(e) => {
+                self.ctx.log(Level::Warn, "export", &format!("Export times in 12-hour time: the appearance could not be read: {e}"));
+                false
+            }
+        }
     }
 
     fn find(&self, id: &str) -> Option<Shared> {
@@ -401,15 +408,16 @@ impl Exporter {
     }
 
     /// Check a request, queue the export and return it (its job shows the progress).
-    pub fn start(self: &Arc<Self>, vehicle: &VehicleRef, body: &Value) -> Result<Value, ExportError> {
-        let mut req = normalize(body)?;
+    /// Err((400, refusal)), or Err((500, what failed)) when its job could not be kept.
+    pub fn start(self: &Arc<Self>, vehicle: &VehicleRef, body: &Value) -> Result<Value, (u16, String)> {
+        let mut req = normalize(body).map_err(|e| (400, e.0))?;
         // every file must be a real file of this vehicle's footage
         for clip in &mut req.clips {
             let key = clip.key.clone();
             for (cam, p) in &mut clip.files {
                 match self.ctx.resolve_footage(p) {
                     Some((real, v)) if v.id == vehicle.id => *p = real.to_string_lossy().into_owned(),
-                    _ => return Err(ExportError(format!("The {} file of the clip at {} is not in {}'s footage.", cam_name(cam), wall_at(&key, 0.0, false), vehicle.name))),
+                    _ => return Err((400, format!("The {} file of the clip at {} is not in {}'s footage.", cam_name(cam), wall_at(&key, 0.0, false), vehicle.name))),
                 }
             }
         }
@@ -422,7 +430,8 @@ impl Exporter {
         let name: String = format!("Sentry {} {}.mp4", if req.privacy { "export" } else { &vehicle.name }, from.replace(':', "-")).chars().filter(|c| !matches!(c, '\\' | '/' | '"' | '<' | '>' | '|' | '?' | '*')).collect();
         let title = format!("Export {}: {from} to {to}{}", vehicle.name, if req.camera == "grid" { String::new() } else { format!(" ({})", cam_name(&req.camera)) });
         let busy = self.running.lock().unwrap().is_some();
-        let job_id = self.ctx.job_start(json!({ "type": "export", "vehicleId": vehicle.id, "title": title, "detail": if busy { "Waiting for the export before it…" } else { "Starting…" } }));
+        // (no export without its Activity row: no made-up job id)
+        let job_id = self.ctx.job_start(json!({ "type": "export", "vehicleId": vehicle.id, "title": title, "detail": if busy { "Waiting for the export before it…" } else { "Starting…" } })).map_err(|e| (500, e))?;
         let x = Arc::new(Mutex::new(Export {
             id: id.clone(), vehicle_id: vehicle.id.clone(), req, state: "waiting".into(), done_seconds: 0.0, name, title,
             file: self.cfg.dir.join(format!("{id}.mp4")), created_at: now_ms(), finished_at: None, job_id, error: None, notes: Vec::new(), bytes: 0, cancel: false, pid: None, encoder: None,

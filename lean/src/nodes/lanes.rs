@@ -16,6 +16,10 @@ pub trait RemoteNodes: Send + Sync {
     /// index, pci, slots, online, encoders: { h265, av1 } }. Blocks while a
     /// node never asked before answers (8 s at most).
     fn list(&self) -> Vec<Value>;
+    /// list(), with an error when the paired nodes cannot be read.
+    fn list_checked(&self) -> Result<Vec<Value>, NodeError> {
+        Ok(self.list())
+    }
     /// nodes.encode(request): the remote encode. Its events are ffmpeg's
     /// -progress lines ("queued=1" while it waits on the node) and the close
     /// (0: the encoded file is at the target, created new; 1: failed, encode
@@ -34,6 +38,9 @@ pub trait RemoteNodes: Send + Sync {
 impl RemoteNodes for Nodes {
     fn list(&self) -> Vec<Value> {
         Nodes::list(self)
+    }
+    fn list_checked(&self) -> Result<Vec<Value>, NodeError> {
+        Nodes::list_checked(self)
     }
     fn encode(&self, request: EncodeRequest) -> Result<RemoteChild, NodeError> {
         Nodes::encode(self, request)

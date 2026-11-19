@@ -149,6 +149,12 @@ fn join(root: &Path, rel: &str) -> String {
     path_str(&root.join(rel))
 }
 
+/// What a page needs could not be read (manager.db): logged as "METHOD path: error", answered 500.
+fn failed(app: &App, what: &str, e: &str) -> Res {
+    app.core.log("server", crate::footage::ctx::Level::Error, &format!("{what}: {e}"));
+    error(StatusCode::INTERNAL_SERVER_ERROR, "Internal error")
+}
+
 fn state_fields(st: Option<&crate::app::VehicleState>, out: &mut Map<String, Value>) {
     out.insert("scannedAt".into(), st.and_then(|s| s.scanned_at).filter(|t| *t != 0.0).map_or(Value::Null, num));
     out.insert("scanning".into(), json!(st.is_some_and(|s| s.scanning)));
@@ -177,7 +183,10 @@ fn days(app: &App, v: &Vehicle, q: &HashMap<String, String>) -> Res {
     let gaps = crate::viewer::get().map(|viewer| viewer.archive.for_days(&v.id)).unwrap_or_default();
     let car_files = crate::viewer::get().map(|viewer| viewer.archive.car_files(&v.id)).unwrap_or(Value::Null);
     // how many of each day's recordings have CAN Bridge data (the green "CAN" tag)
-    let has_can = app.core.has_can(&v.id);
+    let has_can = match app.core.has_can(&v.id) {
+        Ok(h) => h,
+        Err(e) => return failed(app, &format!("GET /api/vehicles/{}/days", v.id), &e.message),
+    };
     let mut can_days: HashMap<&str, u64> = HashMap::new();
     if let Some(f) = &has_can {
         for r in &list {
@@ -230,16 +239,27 @@ fn recordings(app: &App, v: &Vehicle, q: &HashMap<String, String>) -> Res {
     state_fields(st.as_ref(), &mut out);
     out.insert("dates".into(), json!(dates(&recs)));
     let mut tagged: Vec<Map<String, Value>> = page.iter().map(|r| inventory::public(r, &codecs)).collect();
-    if let Some(has_can) = app.core.has_can(&v.id) {
+    let has_can = match app.core.has_can(&v.id) {
+        Ok(h) => h,
+        Err(e) => return failed(app, &format!("GET /api/vehicles/{}/recordings", v.id), &e.message),
+    };
+    if let Some(has_can) = has_can {
         for (t, r) in tagged.iter_mut().zip(page.iter()) {
             if has_can(r) {
                 t.insert("can".into(), json!(true));
             }
         }
     }
-    if let Some(tags) = crate::viewer::get().and_then(|viewer| viewer.place_tags(&v.id, &page)) {
-        for (t, extra) in tagged.iter_mut().zip(tags) {
-            t.extend(extra);
+    if let Some(viewer) = crate::viewer::get() {
+        match viewer.place_tags(&v.id, &page) {
+            Ok(Some(tags)) => {
+                for (t, extra) in tagged.iter_mut().zip(tags) {
+                    t.extend(extra);
+                }
+            }
+            Ok(None) => {}
+            // (saved places that cannot be read: not a page without them, as Node throws)
+            Err(e) => return failed(app, &format!("GET /api/vehicles/{}/recordings", v.id), &e),
         }
     }
     out.insert("recordings".into(), Value::Array(tagged.into_iter().map(Value::Object).collect()));
@@ -412,7 +432,12 @@ pub fn slice_route(app: &Arc<App>, method: &Method, raw_path: &str, q: &HashMap<
     if !matches!(rest, ["days"] | ["recordings"] | ["recordings", _] | ["recordings", _, "thumbnail"]) {
         return None;
     }
-    let Some(v) = app.vehicle(id) else { return Some(error(StatusCode::NOT_FOUND, "No such vehicle.")) };
+    let v = match app.vehicles.try_get(id) {
+        Ok(Some(v)) => v,
+        Ok(None) => return Some(error(StatusCode::NOT_FOUND, "No such vehicle.")),
+        // (the vehicles cannot be read: not "no such vehicle")
+        Err(e) => return Some(failed(app, &format!("GET {raw_path}"), &e.to_string())),
+    };
     Some(match rest {
         ["days"] => days(app, &v, q),
         ["recordings"] => recordings(app, &v, q),

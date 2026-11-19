@@ -305,15 +305,16 @@ impl Arrival {
     }
 
     /// view(vid): the `record` of GET /api/vehicles/:id/sentry-usb (without canBackfill):
-    /// { enabled, today, lastAt, pending, lines, windowDays, older, backlog }.
-    pub fn view(&self, vid: &str) -> Value {
+    /// { enabled, today, lastAt, pending, lines, windowDays, older, backlog }; an error when
+    /// the setting cannot be read.
+    pub fn view(&self, vid: &str) -> Result<Value, String> {
         let inner = &self.0;
         let v = inner.ctx.vehicle(vid);
         let tz = v.as_ref().map(|v| v.timezone.clone()).unwrap_or_default();
         let t = (inner.o.now)();
         let today = inner.day_in(t, &tz);
         let since = t - 2.0 * DAY_MS; // (today, in any zone, is within the last two days)
-        let older = inner.ctx.older_of(vid);
+        let older = inner.ctx.older_of(vid)?;
         let mut st = lock(&inner.st);
         let (mut lines, mut today_n, mut last_at) = (0u64, 0u64, None::<f64>);
         // (a day starts on a quarter hour in every zone: one look per quarter hour, not per clip)
@@ -357,7 +358,7 @@ impl Arrival {
         m.insert("windowDays".into(), num(inner.o.window_days));
         m.insert("older".into(), Value::Bool(older));
         m.insert("backlog".into(), backlog);
-        Value::Object(m)
+        Ok(Value::Object(m))
     }
 
     /// stats(): bytes hashed and the time it took (reading only), since start.
@@ -400,6 +401,15 @@ impl Inner {
     fn now(&self) -> f64 {
         (self.o.now)()
     }
+    /// olderOf for a pass: a setting that cannot be read is logged and counts as off (the
+    /// recent clips only: no extra work on a setting that may have turned it off).
+    fn older(&self, vid: &str) -> bool {
+        self.ctx.older_of(vid).unwrap_or_else(|e| {
+            self.ctx.log_warn(&format!("Checksum record of {vid}: only recent clips this pass, the setting could not be read: {e}"));
+            false
+        })
+    }
+
     fn stopped(&self) -> bool {
         self.stopped.load(Ordering::SeqCst)
     }
@@ -684,7 +694,7 @@ impl Inner {
             if self.stopped() {
                 break;
             }
-            let older = self.ctx.older_of(&v.id);
+            let older = self.older(&v.id);
             let (list, present, any, scanning) = self.candidates(&v, if older { f64::NEG_INFINITY } else { window_from });
             lock(&self.st).enabled.insert(v.id.clone(), any);
             if let Some(present) = &present {
@@ -761,7 +771,7 @@ impl Inner {
         for car in &cars {
             let has_bl = lock(&self.st).backlogs.contains_key(&car.v.id);
             for c in &car.backlog {
-                if self.stopped() || self.again.load(Ordering::SeqCst) || !self.ctx.older_of(&car.v.id) || !has_bl {
+                if self.stopped() || self.again.load(Ordering::SeqCst) || !self.older(&car.v.id) || !has_bl {
                     break;
                 }
                 if budget <= 0 {

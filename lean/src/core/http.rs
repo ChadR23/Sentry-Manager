@@ -113,7 +113,18 @@ impl HttpError {
 
 impl From<super::auth::Refusal> for HttpError {
     fn from(r: super::auth::Refusal) -> HttpError {
+        // (a 500 refusal is the database failing: logged, answered "Internal error")
+        if r.status >= 500 {
+            return HttpError::internal(r.message);
+        }
         HttpError::new(r.status, r.message)
+    }
+}
+
+/// manager.db failing: 500 "Internal error", logged with what failed.
+impl From<super::db::DbError> for HttpError {
+    fn from(e: super::db::DbError) -> HttpError {
+        HttpError::internal(e.to_string())
     }
 }
 

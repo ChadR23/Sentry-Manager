@@ -558,8 +558,8 @@ fn the_device_list_and_devices_answer_as_node_answers() {
         let list = c["devices"].as_array().unwrap().clone();
         disc.fixed = Some(Arc::new(move || list.clone()));
         let reg = super::devices::Registry::new(disc, planner);
-        let first = reg.devices();
-        let again = reg.devices();
+        let first = reg.devices().unwrap();
+        let again = reg.devices().unwrap();
         let resolved: Vec<Value> = c["resolve"].as_array().into_iter().flatten().map(|id| reg.resolve_device(id.as_str().unwrap()).unwrap_or(Value::Null)).collect();
         let mine = json!({ "first": first, "again": again, "resolved": resolved });
         if let Some(e) = diff(&mine, &theirs["answers"][i], &format!("case {i}")) {

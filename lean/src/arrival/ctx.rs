@@ -76,13 +76,17 @@ pub trait ArrivalCtx: Send + Sync + 'static {
         true
     }
     /// olderOf(vid): the "Record checksums for older clips" setting,
-    /// `(db.get('sentry-usb-record', {}) || {})[vid]?.older !== false`
-    fn older_of(&self, vid: &str) -> bool;
+    /// `(db.get('sentry-usb-record', {}) || {})[vid]?.older !== false`; an error when it cannot be read
+    fn older_of(&self, vid: &str) -> Result<bool, String>;
     /// Stores { older } for the vehicle in the `sentry-usb-record` setting
-    /// (`rec[vid] = { ...(rec[vid] || {}), older }`).
-    fn set_older(&self, _vid: &str, _older: bool) {}
+    /// (`rec[vid] = { ...(rec[vid] || {}), older }`); an error when it was not kept.
+    fn set_older(&self, _vid: &str, _older: bool) -> Result<(), String> {
+        Ok(())
+    }
     /// Removes the vehicle's entry from the `sentry-usb-record` setting.
-    fn forget_setting(&self, _vid: &str) {}
+    fn forget_setting(&self, _vid: &str) -> Result<(), String> {
+        Ok(())
+    }
     /// The day (YYYY-MM-DD) of `ms` in a time zone, as
     /// `Intl.DateTimeFormat('en-CA', { timeZone })` formats it; None for a
     /// zone Node does not know (the caller then takes the UTC day).

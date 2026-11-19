@@ -20,11 +20,15 @@ pub struct FakeCtx {
     pub tls: Mutex<Option<TlsInfo>>,
     pub ffmpeg: Mutex<String>,
     pub identifiers: Mutex<Vec<String>>,
+    /// the identifiers (read from manager.db) cannot be read
+    pub identifiers_fail: std::sync::atomic::AtomicBool,
     pub diagnostics: Mutex<Value>,
     pub heartbeat: Mutex<Value>,
     pub shutdowns: Mutex<Vec<String>>,
     pub node_powers: Mutex<Vec<super::node_power::NodeRow>>,
     pub rapl_requests: Mutex<usize>,
+    /// reads through `read_db` so far (a test can tell one has started)
+    pub reads: std::sync::atomic::AtomicUsize,
 }
 
 impl FakeCtx {
@@ -49,12 +53,14 @@ impl FakeCtx {
             tls: Mutex::new(None),
             ffmpeg: Mutex::new("/nonexistent/ffmpeg".into()),
             identifiers: Mutex::new(Vec::new()),
+            identifiers_fail: Default::default(),
             // (null: ops::diag builds them, as in the server)
             diagnostics: Mutex::new(Value::Null),
             heartbeat: Mutex::new(Value::Null),
             node_powers: Mutex::new(Vec::new()),
             rapl_requests: Mutex::new(0),
             shutdowns: Mutex::new(Vec::new()),
+            reads: Default::default(),
         })
     }
 
@@ -76,6 +82,10 @@ fn next() -> u64 {
 impl OpsCtx for FakeCtx {
     fn db(&self) -> MutexGuard<'_, Connection> {
         self.db.lock().unwrap()
+    }
+    fn read_db(&self) -> MutexGuard<'_, Connection> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.db()
     }
     fn data_dir(&self) -> PathBuf {
         self.data.clone()
@@ -119,8 +129,11 @@ impl OpsCtx for FakeCtx {
     fn ui_pack(&self) -> String {
         "original".into()
     }
-    fn identifiers(&self) -> Vec<String> {
-        self.identifiers.lock().unwrap().clone()
+    fn identifiers(&self) -> Result<Vec<String>, String> {
+        if self.identifiers_fail.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("manager.db: database disk image is malformed".into());
+        }
+        Ok(self.identifiers.lock().unwrap().clone())
     }
     fn diagnostics(&self, _kind: &str) -> Value {
         self.diagnostics.lock().unwrap().clone()

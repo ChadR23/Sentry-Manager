@@ -7,6 +7,7 @@
 use super::bin;
 use super::ctx::{Caller, Fail, Level, Res};
 use super::js;
+use super::mdb::DbResult;
 use super::vehicles::{describe_source, Vehicle, VehicleEvent};
 use crate::app::App;
 use serde_json::{json, Map, Value};
@@ -29,15 +30,16 @@ fn fail<T>(f: Fail) -> Option<Res<T>> {
     Some(Err(f))
 }
 
+/// The vehicle; 404 when there is none, an error when manager.db could not read the list.
 fn vehicle_or_404(app: &App, id: &str) -> Res<Vehicle> {
-    app.vehicle(id).ok_or_else(|| Fail::new(404, "No such vehicle."))
+    app.vehicles.try_get(id)?.ok_or_else(|| Fail::new(404, "No such vehicle."))
 }
 
 macro_rules! tri {
     ($e:expr) => {
         match $e {
             Ok(v) => v,
-            Err(e) => return Some(Err(e)),
+            Err(e) => return Some(Err(Fail::from(e))),
         }
     };
 }
@@ -81,7 +83,7 @@ pub fn wire(app: &Arc<App>) {
 }
 
 /// index.js storageOf: days until full, from the free space and the footage a day lately.
-fn storage_of(app: &App, v: &Vehicle) -> Value {
+fn storage_of(app: &App, v: &Vehicle, policy: &Value) -> Value {
     let Some(share) = app.vehicles.share(&v.id) else { return Value::Null };
     let st = share.state();
     let (Some(free), total) = (st.free_bytes, st.total_bytes) else { return Value::Null };
@@ -109,7 +111,6 @@ fn storage_of(app: &App, v: &Vehicle) -> Value {
         None => 14.0,
     };
     let per_day = bytes as f64 / if span.is_nan() { f64::NAN } else { span };
-    let policy = super::policies::get(app, &v.id);
     let capped = js::truthy(policy.get("enabled"))
         && policy.get("keepDays").and_then(Value::as_object).is_some_and(|k| k.values().all(|d| d.as_f64().is_some_and(|x| x.is_finite() && x > 0.0)));
     json!({
@@ -119,26 +120,37 @@ fn storage_of(app: &App, v: &Vehicle) -> Value {
     })
 }
 
-/// index.js withCar(vehicleSummary(v))
-pub fn vehicle_summary(app: &App, v: &Vehicle) -> Value {
+/// index.js withCar(vehicleSummary(v)); an error when manager.db could not be read
+pub fn vehicle_summary(app: &App, v: &Vehicle) -> Res<Value> {
     let mut out = app.vehicles.public_view(v);
     let security = if v.is_smb() { json!(super::smb::security_summary(v.source.get("encrypt") != Some(&Value::Bool(false)), v.source.get("version").and_then(Value::as_str).unwrap_or(""))) } else { Value::Null };
     out.insert("security".into(), security);
     let st = app.state_of(&v.id);
     out.insert("inventory".into(), st.as_ref().filter(|s| s.scanned).map_or(Value::Null, |s| super::inventory::totals(&s.recordings, s.files, s.scanned_at.unwrap_or(0.0))));
     out.insert("scanning".into(), json!(st.as_ref().is_some_and(|s| s.scanning)));
-    let items = app.core.db().bin_items(Some(&v.id));
+    let items = app.core.db().bin_items(Some(&v.id))?;
     out.insert("binBytes".into(), json!(items.iter().map(|i| i.bytes).sum::<u64>()));
     out.insert("binItems".into(), json!(items.len()));
-    out.insert("policy".into(), super::policies::get(app, &v.id));
-    out.insert("saved".into(), app.core.saved(&v.id));
-    out.insert("storage".into(), storage_of(app, v));
-    let car = match app.core.car_summary(&v.raw) {
+    let policy = super::policies::get(app, &v.id)?;
+    out.insert("policy".into(), policy.clone());
+    out.insert("saved".into(), app.core.saved(&v.id)?);
+    out.insert("storage".into(), storage_of(app, v, &policy));
+    let car = match app.core.car_summary(&v.raw)? {
         Value::Null => super::cars::default_summary(v.raw.get("car")),
         c => c,
     };
     out.insert("car".into(), car);
-    Value::Object(out)
+    Ok(Value::Object(out))
+}
+
+/// The Sentry USB record without a removed vehicle's entry.
+fn forget_sentry_usb_record(app: &App, id: &str) -> DbResult<()> {
+    if let Some(Value::Object(mut rec)) = app.core.db().get("sentry-usb-record")? {
+        if rec.shift_remove(id).is_some() {
+            app.core.db().set("sentry-usb-record", &Value::Object(rec))?;
+        }
+    }
+    Ok(())
 }
 
 fn ids_of(body: &Value) -> Vec<String> {
@@ -160,7 +172,10 @@ fn say_car(c: &Value) -> String {
 
 /// smbTest.js: mount once with the typed details, read, look for footage, try a write, unmount.
 fn test_smb(app: &App, source: Option<&Value>, vehicle_id: Option<&str>) -> Res<Value> {
-    let existing = vehicle_id.and_then(|id| app.vehicle(id)).map(|v| v.source);
+    let existing = match vehicle_id {
+        Some(id) => app.vehicles.try_get(id)?.map(|v| v.source),
+        None => None,
+    };
     let prev = existing.as_ref().filter(|s| s.get("type").and_then(Value::as_str) == Some("smb"));
     let empty = json!({});
     let smb = match super::smb::normalize_smb(source.unwrap_or(&empty), prev) {
@@ -168,7 +183,7 @@ fn test_smb(app: &App, source: Option<&Value>, vehicle_id: Option<&str>) -> Res<
         Err(e) => return Ok(json!({ "ok": false, "stage": "details", "error": e.message })),
     };
     let test_id = super::vehicles::TEST_ID;
-    if app.vehicle(test_id).is_some() {
+    if app.vehicles.try_get(test_id)?.is_some() {
         return Ok(json!({ "ok": false, "stage": "details", "error": format!("A vehicle uses the id \"{test_id}\", which the test needs. Rename that vehicle first.") }));
     }
     {
@@ -244,9 +259,10 @@ pub fn handle(app: &Arc<App>, who: &Caller, method: &str, seg: &[&str], query: &
     let qv = |k: &str| query.get(k).filter(|v| !v.is_empty()).map(String::as_str);
     match (method, seg) {
         ("GET", ["vehicles"]) => {
-            let list = app.vehicles.list();
+            let list = tri!(app.vehicles.try_list());
             let days: std::collections::BTreeSet<String> = list.iter().filter_map(|v| app.state_of(&v.id)).flat_map(|s| super::inventory::footage_days(&s.recordings)).collect();
-            ok(json!({ "vehicles": list.iter().map(|v| vehicle_summary(app, v)).collect::<Vec<_>>(), "footageDays": days.len(), "carModels": super::cars::choices() }))
+            let summaries = tri!(list.iter().map(|v| vehicle_summary(app, v)).collect::<Res<Vec<_>>>());
+            ok(json!({ "vehicles": summaries, "footageDays": days.len(), "carModels": super::cars::choices() }))
         }
         ("POST", ["vehicles", "test-smb"]) => {
             let vid = b.get("vehicleId").and_then(Value::as_str).filter(|s| !s.is_empty());
@@ -264,7 +280,7 @@ pub fn handle(app: &Arc<App>, who: &Caller, method: &str, seg: &[&str], query: &
             tri!(who.require_confirmed());
             let v = tri!(app.vehicles.add(b));
             app.core.audit(Level::Info, &format!("Vehicle \"{}\" ({}) added, {}: {}", v.name, v.id, describe_source(&v.source), who.by()));
-            ok(vehicle_summary(app, &v))
+            ok(tri!(vehicle_summary(app, &v)))
         }
         ("PUT", ["vehicles", id]) => {
             let before = tri!(vehicle_or_404(app, id));
@@ -284,26 +300,27 @@ pub fn handle(app: &Arc<App>, who: &Caller, method: &str, seg: &[&str], query: &
             if was != now {
                 app.core.audit(Level::Info, &format!("Vehicle {} car model: {} -> {}: {}", v.id, say_car(&was), say_car(&now), who.by()));
             }
-            ok(vehicle_summary(app, &v))
+            ok(tri!(vehicle_summary(app, &v)))
         }
         ("DELETE", ["vehicles", id, "saved"]) => {
             let v = tri!(vehicle_or_404(app, id));
-            let before = app.core.saved(&v.id);
-            app.core.reset_saved(&v.id);
+            let before = tri!(app.core.saved(&v.id));
+            tri!(app.core.reset_saved(&v.id));
             app.core.audit(Level::Info, &format!("Space saved of \"{}\" reset (was {}, {} clips): {}", v.name, bin::format_bytes(js::number(before.get("bytes"))), js::string_or(before.get("clips"), "undefined"), who.by()));
             app.core.announce("inventory");
-            ok(json!({ "ok": true, "saved": app.core.saved(&v.id) }))
+            ok(json!({ "ok": true, "saved": tri!(app.core.saved(&v.id)) }))
         }
         ("DELETE", ["vehicles", id]) => {
             tri!(who.require_confirmed());
             let v = tri!(vehicle_or_404(app, id));
             tri!(app.vehicles.remove(id));
-            super::deleted_clips::forget(app.core.db(), id);
+            // (the vehicle is gone either way: what else was kept of it is logged when it stays)
+            if let Err(e) = super::deleted_clips::forget(app.core.db(), id) {
+                app.core.log("server", Level::Warn, &format!("Vehicle {id} removed, its list of deleted clips stays: {e}"));
+            }
             app.core.vehicle_removed(id);
-            if let Some(Value::Object(mut rec)) = app.core.db().get("sentry-usb-record") {
-                if rec.shift_remove(*id).is_some() {
-                    app.core.db().set("sentry-usb-record", &Value::Object(rec));
-                }
+            if let Err(e) = forget_sentry_usb_record(app, id) {
+                app.core.log("server", Level::Warn, &format!("Vehicle {id} removed, its Sentry USB record stays: {e}"));
             }
             app.core.audit(Level::Info, &format!("Vehicle \"{}\" ({}) removed (its footage is untouched): {}", v.name, v.id, who.by()));
             ok(json!({ "ok": true }))
@@ -314,7 +331,7 @@ pub fn handle(app: &Arc<App>, who: &Caller, method: &str, seg: &[&str], query: &
         }
         ("POST", ["vehicles", id, "scan"]) => {
             let v = tri!(vehicle_or_404(app, id));
-            let job = app.core.job_start("scan", Some(&v.id), &format!("Refresh inventory of {}", v.name));
+            let job = tri!(app.core.job_start("scan", Some(&v.id), &format!("Refresh inventory of {}", v.name)).map_err(Fail::internal));
             let a = app.clone();
             std::thread::spawn(move || {
                 match a.scan_now(&v.id, false) {
@@ -334,7 +351,7 @@ pub fn handle(app: &Arc<App>, who: &Caller, method: &str, seg: &[&str], query: &
                 .filter_map(|x| x.as_str().and_then(|rid| st.as_ref()?.recordings.iter().find(|r| r.id == rid).cloned()))
                 .collect();
             let rels: Vec<String> = recs.iter().flat_map(|r| r.files().map(|(f, _)| f.to_string())).collect();
-            bin::set_protected(app, &v.id, &rels, on);
+            tri!(bin::set_protected(app, &v.id, &rels, on));
             app.rebuild(&v.id, None);
             app.core.announce("inventory");
             ok(json!({ "ok": true, "count": recs.len() }))
@@ -361,18 +378,18 @@ pub fn handle(app: &Arc<App>, who: &Caller, method: &str, seg: &[&str], query: &
             let wanted = ids_of(b);
             let recs: Vec<_> = app.state_of(id).map(|s| s.recordings.iter().filter(|r| wanted.contains(&r.id) && !r.protected).cloned().collect()).unwrap_or_default();
             let rels: Vec<String> = recs.iter().flat_map(|r| r.files().map(|(f, _)| f.to_string())).collect();
-            let can = if recs.is_empty() { Value::Null } else { app.core.can_with(id, &rels, None).unwrap_or(Value::Null) };
+            let can = if recs.is_empty() { Value::Null } else { tri!(app.core.can_with(id, &rels, None)).unwrap_or(Value::Null) };
             ok(json!({ "recordings": recs.len(), "can": can }))
         }
         ("GET", ["bin", item, "thumbnail"]) => {
-            let Some(it) = app.core.db().bin_item(item) else { return fail(Fail::new(404, "No thumbnail")) };
+            let Some(it) = tri!(app.core.db().bin_item(item)) else { return fail(Fail::new(404, "No thumbnail")) };
             tri!(vehicle_or_404(app, &it.vehicle_id));
-            let Some((kind, abs)) = bin::thumbnail_source(app, item) else { return fail(Fail::new(404, "No thumbnail")) };
-            let roots: Vec<PathBuf> = app.vehicles.list().into_iter().map(|v| v.root).collect();
+            let Some((kind, abs)) = tri!(bin::thumbnail_source(app, item)) else { return fail(Fail::new(404, "No thumbnail")) };
+            let roots: Vec<PathBuf> = tri!(app.vehicles.try_list()).into_iter().map(|v| v.root).collect();
             let Some(real) = crate::media::resolve_inside(&abs.to_string_lossy(), &roots) else { return fail(Fail::new(404, "No thumbnail")) };
             Some(Ok(Reply::Thumbnail { file: real, clip: kind == "clip" }))
         }
-        ("GET", ["bin"]) => ok(json!({ "items": bin::list(app, qv("vehicle")) })),
+        ("GET", ["bin"]) => ok(json!({ "items": tri!(bin::list(app, qv("vehicle"))) })),
         ("POST", ["bin", item, "restore"]) => {
             let out = tri!(bin::restore(app, item));
             app.core.announce("bin");
@@ -388,7 +405,7 @@ pub fn handle(app: &Arc<App>, who: &Caller, method: &str, seg: &[&str], query: &
             if let Some(v) = &vid {
                 tri!(vehicle_or_404(app, v));
             }
-            let out = bin::empty(app, vid.as_deref());
+            let out = tri!(bin::empty(app, vid.as_deref()));
             app.core.audit(Level::Info, &format!("Recycle Bin emptied{}: {} item(s), {}: {}", vid.as_ref().map(|v| format!(" for {v}")).unwrap_or_default(), out["deleted"], bin::format_bytes(js::number(out.get("bytes"))), who.by()));
             app.core.announce("bin");
             ok(out)
@@ -398,7 +415,7 @@ pub fn handle(app: &Arc<App>, who: &Caller, method: &str, seg: &[&str], query: &
                 return fail(Fail::new(400, "Confirm permanent deletion."));
             }
             tri!(who.require_confirmed());
-            let label = app.core.db().bin_item(item).map(|i| i.label).filter(|l| !l.is_empty()).unwrap_or_else(|| item.to_string());
+            let label = tri!(app.core.db().bin_item(item)).map(|i| i.label).filter(|l| !l.is_empty()).unwrap_or_else(|| item.to_string());
             let bytes = tri!(bin::delete_forever(app, item));
             app.core.audit(Level::Info, &format!("Deleted forever from the Recycle Bin: {label} ({}): {}", bin::format_bytes(bytes as f64), who.by()));
             app.core.announce("bin");
@@ -406,11 +423,12 @@ pub fn handle(app: &Arc<App>, who: &Caller, method: &str, seg: &[&str], query: &
         }
         ("GET", ["vehicles", id, "policy"]) => {
             let v = tri!(vehicle_or_404(app, id));
-            ok(json!({ "policy": super::policies::get(app, &v.id), "preview": super::policies::preview(app, id) }))
+            ok(json!({ "policy": tri!(super::policies::get(app, &v.id)), "preview": tri!(super::policies::preview(app, id)) }))
         }
         ("PUT", ["vehicles", id, "policy"]) => {
-            let policy = tri!(super::policies::set(app, id, b));
-            ok(json!({ "policy": policy, "preview": super::policies::preview(app, id) }))
+            let v = tri!(vehicle_or_404(app, id));
+            let policy = tri!(super::policies::set(app, &v.id, b));
+            ok(json!({ "policy": policy, "preview": tri!(super::policies::preview(app, &v.id)) }))
         }
         ("POST", ["vehicles", id, "policy", "run"]) => {
             tri!(vehicle_or_404(app, id));
@@ -433,7 +451,7 @@ pub fn handle(app: &Arc<App>, who: &Caller, method: &str, seg: &[&str], query: &
             }
             ok(super::integrity::start(app, &v.id))
         }
-        ("GET", ["stars"]) => ok(super::stars::list(app, qv("vehicle"))),
+        ("GET", ["stars"]) => Some(super::stars::list(app, qv("vehicle")).map(Reply::Json)),
         ("POST", ["stars"]) => Some(super::stars::add(app, who, b).map(Reply::Json)),
         ("PATCH", ["stars", id]) => Some(super::stars::edit(app, id, b).map(Reply::Json)),
         ("DELETE", ["stars", id]) => Some(super::stars::remove(app, id).map(Reply::Json)),
@@ -466,7 +484,7 @@ fn trash_days(app: &Arc<App>, who: &Caller, id: &str, b: &Value) -> Option<Res<R
     });
     let rels: Vec<String> = movable.iter().flat_map(|r| r.files().map(|(f, _)| f.to_string())).collect();
     if b.get("preview") == Some(&Value::Bool(true)) || movable.is_empty() {
-        let can = if movable.is_empty() { Value::Null } else { app.core.can_with(&v.id, &rels, until).unwrap_or(Value::Null) };
+        let can = if movable.is_empty() { Value::Null } else { tri!(app.core.can_with(&v.id, &rels, until)).unwrap_or(Value::Null) };
         summary.insert("can".into(), can);
         summary.insert("started".into(), json!(false));
         return ok(Value::Object(summary));

@@ -140,7 +140,7 @@ impl Converter {
         }
         let mut reg = super::devices::Registry::new(discovery, encoders);
         if let Some(n) = o.nodes.clone() {
-            reg.remote_nodes = Some(Arc::new(move || n.list()));
+            reg.remote_nodes = Some(Arc::new(move || n.list_checked()));
         }
         let devices = Arc::new(reg);
         // clips known to be converted already (an optimisation only)
@@ -218,8 +218,7 @@ impl Converter {
         let mut ao = super::auto_convert::AutoOptions::new(Arc::new(service.clone()), super::auto_convert::real_scanner(), o.data_path.join("converter-auto"));
         let (s3, b3) = (service.clone(), bench.clone());
         ao.is_busy = Arc::new(move || b3.active() || has_active_job(&s3, true));
-        let d4 = devices.clone();
-        ao.devices = Some(Arc::new(move || Ok(d4.recent())));
+        ao.devices = Some(auto_devices(devices.clone()));
         let h3 = held.clone();
         ao.hold_discovered = Some(Arc::new(move |c: &Value, d: &Value| h3(c, d)));
         if let Some(n) = o.nodes.clone() {
@@ -433,7 +432,7 @@ impl Converter {
     }
 
     /// devices(): the `converter:devices` answer
-    pub fn devices_answer(&self) -> Value {
+    pub fn devices_answer(&self) -> Result<Value, String> {
         self.devices.devices()
     }
 
@@ -700,7 +699,7 @@ impl Converter {
         // Smallest (CPU only) encodes on this server's CPU, so that is what it measures
         let cpu_only = req.profile_id == super::contracts::SMALLEST_PROFILE_ID;
         // this server's own GPUs only: a helper server is not benchmarked from here
-        let gpus: Vec<Value> = if cpu_only { vec![] } else { self.devices.look_up().into_iter().filter(|d| d["kind"] != "cpu" && d["kind"] != "node").collect() };
+        let gpus: Vec<Value> = if cpu_only { vec![] } else { self.devices.look_up().unwrap_or_else(|_| self.devices.local_devices()).into_iter().filter(|d| d["kind"] != "cpu" && d["kind"] != "node").collect() };
         if cancel.load(Ordering::SeqCst) {
             return Err("CANCELLED".into());
         }
@@ -743,4 +742,11 @@ impl crate::nodes::ctx::WorkerRuntime for Converter {
     fn encoding_now(&self) -> bool {
         Converter::encoding_now(self)
     }
+}
+
+/// The devices automatic jobs are planned on: this server's own when the paired nodes cannot be
+/// read (logged by the nodes), as a job finds its devices, so a database error pauses no local job
+/// (allocate takes a list it could not get as none, as Node does).
+pub(crate) fn auto_devices(d: Arc<super::devices::Registry>) -> Arc<dyn Fn() -> Result<Vec<Value>, String> + Send + Sync> {
+    Arc::new(move || Ok(d.recent_or_local()))
 }

@@ -168,16 +168,23 @@ impl NodesApi {
         let by = r.caller.by();
         let ctx = &*self.ctx;
         let route = |method: &str, pattern: &str| if m == method { matches(pattern, p) } else { None };
-        let fail = |e: super::NodeError| Reply::error(if e.status < 500 { e.status } else { 502 }, &e.message);
+        // (a 500 is this server's database, logged where it failed; above that, the node's)
+        let fail = |e: super::NodeError| Reply::error(if e.status <= 500 { e.status } else { 502 }, &e.message);
+        let worker_fail = |e: super::worker::WorkerError| Reply::error(e.status.unwrap_or(500), &e.message);
 
         if route("GET", "/api/nodes").is_some() {
             let mut worker = match self.worker.status() {
-                Value::Object(o) => o,
-                _ => Map::new(),
+                Ok(Value::Object(o)) => o,
+                Ok(_) => Map::new(),
+                Err(e) => return Some(worker_fail(e)),
             };
             worker.insert("available".into(), json!(ctx.tls_available()));
             worker.insert("name".into(), json!(ctx.hostname()));
-            return Some(Reply::ok(json!({ "nodes": self.nodes.overview(), "worker": worker })));
+            let nodes = match self.nodes.overview() {
+                Ok(n) => n,
+                Err(e) => return Some(fail(e)),
+            };
+            return Some(Reply::ok(json!({ "nodes": nodes, "worker": worker })));
         }
         if route("POST", "/api/nodes").is_some() {
             if let Some(no) = confirm(r.caller) {
@@ -202,7 +209,7 @@ impl NodesApi {
                     ctx.audit(Level::Info, &format!("Node mode {}: {by}", if status["enabled"] == json!(true) { "on" } else { "off" }));
                     Reply::ok(status)
                 }
-                Err(e) => Reply::error(e.status.unwrap_or(500), &e.message),
+                Err(e) => worker_fail(e),
             });
         }
         if route("POST", "/api/nodes/worker/pair").is_some() {
@@ -212,24 +219,35 @@ impl NodesApi {
             if let Some(no) = confirm(r.caller) {
                 return Some(no);
             }
-            ctx.audit(Level::Info, &format!("Node pairing code shown: {by}"));
-            return Some(Reply::ok(self.worker.start_pairing()));
+            return Some(match self.worker.start_pairing() {
+                Ok(status) => {
+                    ctx.audit(Level::Info, &format!("Node pairing code shown: {by}"));
+                    Reply::ok(status)
+                }
+                Err(e) => worker_fail(e),
+            });
         }
         if route("DELETE", "/api/nodes/worker/pair").is_some() {
-            return Some(Reply::ok(self.worker.cancel_pairing()));
+            return Some(self.worker.cancel_pairing().map_or_else(worker_fail, Reply::ok));
         }
         if let Some(params) = route("DELETE", "/api/nodes/worker/mains/:id") {
-            let Some(main) = self.worker.revoke(&params["id"]) else { return Some(Reply::error(404, "No such main server.")) };
+            let main = match self.worker.revoke(&params["id"]) {
+                Ok(Some(m)) => m,
+                Ok(None) => return Some(Reply::error(404, "No such main server.")),
+                Err(e) => return Some(worker_fail(e)),
+            };
             ctx.audit(Level::Info, &format!("Main server \"{}\" can no longer use this node: {by}", crate::ops::js::to_string(&main["name"])));
-            return Some(Reply::ok(self.worker.status()));
+            return Some(self.worker.status().map_or_else(worker_fail, Reply::ok));
         }
         if let Some(params) = route("GET", "/api/nodes/:id/benchmark") {
             return Some(Reply::ok(json!({ "benchmark": self.bench.view(&params["id"]) })));
         }
         if let Some(params) = route("POST", "/api/nodes/:id/benchmark") {
             let id = &params["id"];
-            if !self.nodes.has(id) {
-                return Some(Reply::error(404, "No such node."));
+            match self.nodes.has(id) {
+                Ok(true) => {}
+                Ok(false) => return Some(Reply::error(404, "No such node.")),
+                Err(e) => return Some(fail(e)),
             }
             let codec = if r.body["codec"] == json!("av1") { "av1" } else { "h265" };
             return Some(match self.bench.start(id, codec) {
@@ -256,7 +274,11 @@ impl NodesApi {
             return Some(self.put(&params["id"], r, &by));
         }
         if let Some(params) = route("DELETE", "/api/nodes/:id") {
-            let Some(node) = self.nodes.remove(&params["id"]) else { return Some(Reply::error(404, "No such node.")) };
+            let node = match self.nodes.remove(&params["id"]) {
+                Ok(Some(n)) => n,
+                Ok(None) => return Some(Reply::error(404, "No such node.")),
+                Err(e) => return Some(fail(e)),
+            };
             ctx.audit(Level::Info, &format!("Node \"{}\" removed: {by}", crate::ops::js::to_string(&node["name"])));
             return Some(Reply::ok(json!({ "ok": true })));
         }
@@ -267,8 +289,10 @@ impl NodesApi {
     /// before anything is saved.
     fn put(&self, id: &str, r: &Request, by: &str) -> Reply {
         let ctx = &*self.ctx;
-        if !self.nodes.has(id) {
-            return Reply::error(404, "No such node.");
+        match self.nodes.has(id) {
+            Ok(true) => {}
+            Ok(false) => return Reply::error(404, "No such node."),
+            Err(e) => return Reply::error(e.status, &e.message),
         }
         let b = r.body;
         let given = |k: &str| b.get(k).is_some();
@@ -303,7 +327,10 @@ impl NodesApi {
             }
         }
         if given("trusted") {
-            let t = self.nodes.set_trusted(id, &b["trusted"]);
+            let t = match self.nodes.set_trusted(id, &b["trusted"]) {
+                Ok(t) => t,
+                Err(e) => return Reply::error(e.status, &e.message),
+            };
             let on = t == Some(true);
             let line = format!("Node {id} {}: {by}", if on { "trusted: its encodes skip the picture check" } else { "no longer trusted: its encodes get the picture check" });
             ctx.audit(if on { Level::Warn } else { Level::Info }, &line);

@@ -119,10 +119,26 @@ fn concurrency_devices_and_clips_waiting_on_a_node() {
 }
 
 #[test]
+fn convert_stats_whose_kept_numbers_cannot_be_read_are_not_written_over() {
+    let store = Arc::new(Mutex::new(HashMap::<String, Value>::new()));
+    let kept = json!({ "other": { "fps": 9 } });
+    store.lock().unwrap().insert("convert-stats-nodes".into(), kept.clone());
+    let st = store.clone();
+    let s = ConvertStats::new(Some(Arc::new(|_k| Err("manager.db: database is locked".into()))), Some(Arc::new(move |k, v| {
+        st.lock().unwrap().insert(k.to_string(), v.clone());
+    })));
+    let remote = json!({ "encoder": "hevc_nvenc", "hardware": true, "fps": 200.0, "remote": true, "deviceId": "node:abcdefabcdef@pci:0000:01:00.0" });
+    assert!(!s.sample(&|| vec![remote.clone()]));
+    s.keep_nodes(&[]);
+    assert_eq!(store.lock().unwrap()["convert-stats-nodes"], kept, "not replaced by the live numbers alone, nor forgotten");
+    assert_eq!(s.summary(None), empty(), "nothing kept is shown when it cannot be read");
+}
+
+#[test]
 fn convert_stats_average_the_day_name_the_device_late_and_keep_nodes_apart() {
     let store = Arc::new(Mutex::new(HashMap::<String, Value>::new()));
     let (g, st) = (store.clone(), store.clone());
-    let mut s = ConvertStats::new(Some(Arc::new(move |k| g.lock().unwrap().get(k).cloned())), Some(Arc::new(move |k, v| {
+    let mut s = ConvertStats::new(Some(Arc::new(move |k| Ok(g.lock().unwrap().get(k).cloned()))), Some(Arc::new(move |k, v| {
         st.lock().unwrap().insert(k.to_string(), v.clone());
     })));
     let now = Arc::new(Mutex::new(1_000_000i64));
@@ -140,7 +156,7 @@ fn convert_stats_average_the_day_name_the_device_late_and_keep_nodes_apart() {
     assert_eq!(hw["convert"], json!({ "fps": 100, "encoder": "libx265", "device": "AMD Ryzen 5", "api": "cpu", "codec": "h265" }));
     // a restart: the latest numbers from the settings
     let (g, st) = (store.clone(), store.clone());
-    let again = ConvertStats::new(Some(Arc::new(move |k| g.lock().unwrap().get(k).cloned())), Some(Arc::new(move |k, v| {
+    let again = ConvertStats::new(Some(Arc::new(move |k| Ok(g.lock().unwrap().get(k).cloned()))), Some(Arc::new(move |k, v| {
         st.lock().unwrap().insert(k.to_string(), v.clone());
     })));
     assert_eq!(again.summary(Some(&|_r: &Value| Some("CPU X".into())))["fps"], 100);

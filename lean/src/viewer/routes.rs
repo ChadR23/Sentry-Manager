@@ -34,6 +34,12 @@ fn error(status: u16, msg: &str) -> Res {
 }
 
 fn refused((status, msg): (u16, String)) -> Res {
+    if status >= 500 {
+        // (only "Internal error" is answered; what failed is logged by route() with the request)
+        let mut r = error(status, "Internal error");
+        r.extensions_mut().insert(super::ctx::Failed(msg));
+        return r;
+    }
     error(status, &msg)
 }
 
@@ -70,8 +76,17 @@ impl Viewer {
         self.ctx.vehicle(id).ok_or_else(|| error(404, "No such vehicle."))
     }
 
-    /// The route's answer, or None when the path is not the viewer's.
+    /// The route's answer, or None when the path is not the viewer's. What failed behind a 500 is
+    /// logged here, with the request, as the other areas log theirs.
     pub fn route(self: &Arc<Self>, req: &Req) -> Option<Res> {
+        let mut res = self.answer_route(req)?;
+        if let Some(super::ctx::Failed(what)) = res.extensions_mut().remove::<super::ctx::Failed>() {
+            self.ctx.log_error(&format!("{} {}: {what}", req.method, req.path));
+        }
+        Some(res)
+    }
+
+    fn answer_route(self: &Arc<Self>, req: &Req) -> Option<Res> {
         let seg: Vec<&str> = req.path.trim_start_matches("/api/").split('/').collect();
         let m = req.method;
         let get = m == Method::GET || m == Method::HEAD;
@@ -87,16 +102,16 @@ impl Viewer {
                 v.speed_index.kick();
                 ok(v.speed_index.status())
             }),
-            ["places"] if get => ok(json!({ "places": places::place_list(ctx) })),
+            ["places"] if get => answer(places::place_list(ctx).map(|p| json!({ "places": p })).map_err(super::ctx::failed)),
             ["places"] if post => self.admin(req, |v| with_body(req, |b| answer(places::add(&*v.ctx, b)))),
             ["places", "near"] if get => self.near(req),
-            ["places", "suggestions"] if get => ok(places::suggestions(ctx, &self.spots)),
+            ["places", "suggestions"] if get => answer(places::suggestions(ctx, &self.spots)),
             ["places", id] if m == Method::PATCH => self.admin(req, |v| with_body(req, |b| answer(places::patch(&*v.ctx, &dec(id), b)))),
             ["places", id] if m == Method::DELETE => self.admin(req, |v| answer(places::remove(&*v.ctx, &dec(id)))),
             ["settings", "work-limits"] if get => self.admin(req, |v| ok(v.limits.read().unwrap().view())),
             ["settings", "work-limits"] if m == Method::PUT => self.admin(req, |v| with_body(req, |b| v.set_work_limits(b))),
             ["studio", "context"] if get => ok(studio::context(ctx)),
-            ["studio", "settings"] if get => ok(studio::settings(ctx)),
+            ["studio", "settings"] if get => answer(studio::settings(ctx)),
             ["studio", "settings"] if post => self.admin(req, |v| with_body(req, |b| answer(studio::set_setting(&*v.ctx, b)))),
             ["studio", "readDir"] if post => with_body(req, |b| answer(studio::read_dir_route(ctx, b))),
             ["studio", "readFile"] if post => with_body(req, |b| answer(studio::read_file_route(ctx, b))),
@@ -108,7 +123,7 @@ impl Viewer {
             ["vehicles", id, "moments"] if get => self.moments(&dec(id), req.query),
             ["vehicles", id, "driving"] if get => self.driving(&dec(id), req.query),
             ["vehicles", id, "event-map"] if get => match self.vehicle_or_404(&dec(id)) {
-                Ok(v) => ok(places::event_map(ctx, &self.spots, &v.id)),
+                Ok(v) => answer(places::event_map(ctx, &self.spots, &v.id)),
                 Err(r) => r,
             },
             ["vehicles", id, "drives"] if get => self.drives(&dec(id), req.query),
@@ -368,7 +383,10 @@ impl Viewer {
             }
         };
         let stats_for = |c: &drives::Clip| by_day.borrow().get(c.day).and_then(|s| s.get(c.rel).cloned());
-        let places_list = Arc::new(places::place_list(&*self.ctx));
+        let places_list = match places::place_list(&*self.ctx) {
+            Ok(p) => Arc::new(p),
+            Err(e) => return refused(super::ctx::failed(e)),
+        };
         let label_for = |need: bool| {
             let spots = if need { places::drive_spots(&*self.ctx, &self.spots, &v.id) } else { Vec::new() };
             drives::labeller(places_list.clone(), spots)
@@ -397,7 +415,10 @@ impl Viewer {
             }
             let label = label_for(page.iter().any(|d| d.from.is_some() || d.to.is_some()));
             let tags = self.drive_data.tags(&v.id);
-            let has_can = self.ctx.has_can(&v.id);
+            let has_can = match self.ctx.has_can(&v.id) {
+                Ok(h) => h,
+                Err(e) => return refused(super::ctx::failed(e)),
+            };
             let list: Vec<Value> = page
                 .iter()
                 .map(|d| {
@@ -417,7 +438,10 @@ impl Viewer {
             stats_for(c)
         }, gap_min * 60.0, limit, before.as_deref());
         let label = label_for(found.iter().any(|d| d.clips.iter().any(|c| stats_for(c).is_some_and(|s| s.a.is_some()))));
-        let has_can = self.ctx.has_can(&v.id);
+        let has_can = match self.ctx.has_can(&v.id) {
+            Ok(h) => h,
+            Err(e) => return refused(super::ctx::failed(e)),
+        };
         let mut list: Vec<Map<String, Value>> = found
             .iter()
             .map(|d| {
@@ -456,7 +480,10 @@ impl Viewer {
             Ok(n) => n,
             Err(e) => return error(400, &e),
         };
-        self.ctx.set_setting("work-limits", next.clone());
+        if let Err(e) = self.ctx.set_setting("work-limits", next.clone()) {
+            // (not in force either: the limits in force are the ones kept)
+            return refused(super::ctx::failed(e));
+        }
         let picked = work_limits::pick_limits(self.resources.clone(), Some(&next));
         *self.limits.write().unwrap() = picked;
         let set = next.as_object().unwrap();
@@ -465,24 +492,25 @@ impl Viewer {
         ok(self.limits.read().unwrap().view())
     }
 
-    /// The place fields of a page of recordings (when places are saved), to merge into each.
-    pub fn place_tags(&self, vid: &str, page: &[&crate::inventory::Recording]) -> Option<Vec<Map<String, Value>>> {
-        let list = places::place_list(&*self.ctx);
+    /// The place fields of a page of recordings (when places are saved), to merge into each; an
+    /// error when the saved places cannot be read.
+    pub fn place_tags(&self, vid: &str, page: &[&crate::inventory::Recording]) -> Result<Option<Vec<Map<String, Value>>>, String> {
+        let list = places::place_list(&*self.ctx)?;
         if list.is_empty() {
-            return None;
+            return Ok(None);
         }
         let files = self.ctx.files(vid);
         // CAN Bridge GPS for the recordings CAN data covers (the car's keys, sorted)
-        let has_can = self.ctx.has_can(vid);
+        let has_can = self.ctx.has_can(vid)?;
         let mut keys = if has_can.is_some() { self.ctx.can_keys(vid) } else { Vec::new() };
         keys.sort();
         let tz = self.ctx.vehicle(vid).map(|v| v.timezone).unwrap_or_default();
-        Some(page.iter().map(|rec| {
+        Ok(Some(page.iter().map(|rec| {
             let ev = if rec.event_id.is_some() { self.spots.get(&*self.ctx, vid, files.as_ref(), rec).and_then(|s| s.pos) } else { None };
             let covered = has_can.as_ref().is_some_and(|f| f(rec.clip_rels().map(String::from).collect(), rec.start_key.as_deref()));
             let side = recording_place::CanSide { gps: &self.can_gps, keys: if covered { keys.clone() } else { Vec::new() }, tz: &tz };
             recording_place::tag(&self.speed_index, vid, files.as_ref(), rec, ev, &list, Some(&side))
-        }).collect())
+        }).collect()))
     }
 }
 
@@ -552,6 +580,34 @@ mod tests {
         // readable again: the same body, cached once
         assert_eq!(bytes(call(&v, Method::GET, "/api/telemetry", &clip, &[])), body);
         assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn routes_whose_saved_places_cannot_be_read_answer_500_and_log_the_request() {
+        let car = Car::new("places-routes");
+        let v = Viewer::new(car.ctx.clone());
+        let none = Path::new("");
+        assert_eq!(call(&v, Method::GET, "/api/places", none, &[]).status(), StatusCode::OK);
+        car.ctx.reads_fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        for path in ["/api/places", "/api/places/suggestions", "/api/vehicles/v1/event-map", "/api/vehicles/v1/drives"] {
+            let r = call(&v, Method::GET, path, none, &[]);
+            assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR, "{path}");
+            assert_eq!(serde_json::from_slice::<Value>(&bytes(r)).unwrap(), json!({ "error": "Internal error" }), "{path}: not the database's own words");
+        }
+        let logged = car.ctx.logged.lock().unwrap().clone();
+        assert_eq!(logged.len(), 4, "one line per failed request: {logged:?}");
+        assert_eq!(logged[0], "GET /api/places: manager.db: database disk image is malformed");
+        assert!(v.place_tags("v1", &[]).is_err(), "nor a page of recordings without their places");
+    }
+
+    #[test]
+    fn drives_whose_can_tags_cannot_be_worked_out_answer_500() {
+        let car = Car::new("drives-can");
+        let v = Viewer::new(car.ctx.clone());
+        let none = Path::new("");
+        assert_eq!(call(&v, Method::GET, "/api/vehicles/v1/drives", none, &[]).status(), StatusCode::OK);
+        car.ctx.can_fails.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(call(&v, Method::GET, "/api/vehicles/v1/drives", none, &[]).status(), StatusCode::INTERNAL_SERVER_ERROR, "not drives without their CAN tags");
     }
 
     #[test]

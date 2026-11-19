@@ -19,6 +19,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -26,6 +27,10 @@ use std::time::{Duration, Instant};
 
 pub struct MemCtx {
     pub settings: Mutex<HashMap<String, Value>>,
+    /// the settings fail to read (manager.db damaged), while a write would still be kept
+    pub reads_fail: AtomicBool,
+    /// the settings fail to be kept (manager.db busy or read-only), while they still read
+    pub writes_fail: AtomicBool,
     pub audits: Mutex<Vec<String>>,
     pub logs: Mutex<Vec<String>>,
     pub runtime: Mutex<Option<Arc<dyn WorkerRuntime>>>,
@@ -37,7 +42,7 @@ pub struct MemCtx {
 
 impl MemCtx {
     pub fn new(data: &Path) -> Arc<MemCtx> {
-        Arc::new(MemCtx { settings: Mutex::new(HashMap::new()), audits: Mutex::new(vec![]), logs: Mutex::new(vec![]), runtime: Mutex::new(None), vehicles: Mutex::new(vec![]), authority: Mutex::new(None), data: data.into(), tls: true })
+        Arc::new(MemCtx { settings: Mutex::new(HashMap::new()), reads_fail: AtomicBool::new(false), writes_fail: AtomicBool::new(false), audits: Mutex::new(vec![]), logs: Mutex::new(vec![]), runtime: Mutex::new(None), vehicles: Mutex::new(vec![]), authority: Mutex::new(None), data: data.into(), tls: true })
     }
     pub fn get(&self, k: &str) -> Value {
         self.settings.lock().unwrap().get(k).cloned().unwrap_or(Value::Null)
@@ -48,11 +53,18 @@ impl MemCtx {
 }
 
 impl NodesCtx for MemCtx {
-    fn setting(&self, key: &str) -> Option<Value> {
-        self.settings.lock().unwrap().get(key).cloned()
+    fn setting(&self, key: &str) -> Result<Option<Value>, String> {
+        if self.reads_fail.load(Ordering::SeqCst) {
+            return Err("manager.db: database disk image is malformed".into());
+        }
+        Ok(self.settings.lock().unwrap().get(key).cloned())
     }
-    fn set_setting(&self, key: &str, value: &Value) {
+    fn set_setting(&self, key: &str, value: &Value) -> Result<(), String> {
+        if self.writes_fail.load(Ordering::SeqCst) {
+            return Err("manager.db: attempt to write a readonly database".into());
+        }
         self.settings.lock().unwrap().insert(key.into(), value.clone());
+        Ok(())
     }
     fn audit(&self, level: Level, line: &str) {
         self.audits.lock().unwrap().push(format!("{level:?} {line}"));
@@ -361,13 +373,49 @@ fn a_node_can_be_marked_trusted() {
     let (nodes, ctx) = main_nodes(&dir);
     seeded(&ctx, json!([{ "id": "abcdefghijkl", "name": "garage-pc", "host": "10.0.0.5", "port": 9000, "token": "t".repeat(43), "pin": { "fingerprint": "00" } }]));
     assert!(!nodes.trusted("node:abcdefghijkl"), "off by default");
-    assert_eq!(nodes.set_trusted("abcdefghijkl", &json!(true)), Some(true));
+    assert_eq!(nodes.set_trusted("abcdefghijkl", &json!(true)).unwrap(), Some(true));
     assert!(nodes.trusted("node:abcdefghijkl"));
     assert!(nodes.trusted("node:abcdefghijkl@cpu"), "any lane of the node");
-    assert_eq!(nodes.set_trusted("abcdefghijkl", &json!("yes")), Some(false), "only true trusts it");
+    assert_eq!(nodes.set_trusted("abcdefghijkl", &json!("yes")).unwrap(), Some(false), "only true trusts it");
     assert!(!nodes.trusted("abcdefghijkl"));
-    assert_eq!(nodes.set_trusted("nope", &json!(true)), None);
+    assert_eq!(nodes.set_trusted("nope", &json!(true)).unwrap(), None);
     assert!(!nodes.trusted("node:nope"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn paired_nodes_that_cannot_be_read_are_never_written_over_and_changes_answer_500() {
+    let dir = tmp("nodes-unreadable");
+    let (nodes, ctx) = main_nodes(&dir);
+    let kept = json!([{ "id": "abcdefghijkl", "name": "garage-pc", "host": "10.0.0.5", "port": 9000, "token": "t".repeat(43), "pin": { "fingerprint": "00" }, "trusted": true, "cars": ["car-a"] }]);
+    seeded(&ctx, kept.clone());
+    let failed = |e: NodeError| (e.status, e.message);
+    // (they cannot be read, while a write would still be kept)
+    ctx.reads_fail.store(true, Ordering::SeqCst);
+    assert_eq!(nodes.set_trusted("abcdefghijkl", &json!(false)).map_err(failed), Err((500, "Internal error".into())));
+    assert_eq!(nodes.rename("abcdefghijkl", &json!("x")).map_err(failed), Err((500, "Internal error".into())));
+    assert_eq!(nodes.set_cars("abcdefghijkl", &json!([])).map_err(failed), Err((500, "Internal error".into())));
+    assert_eq!(nodes.remove("abcdefghijkl").map_err(failed), Err((500, "Internal error".into())), "not \"no such node\"");
+    assert!(nodes.has("abcdefghijkl").is_err());
+    assert!(nodes.overview().is_err());
+    nodes.forget_car("car-a");
+    assert!(!nodes.trusted("node:abcdefghijkl"), "unreadable: not trusted, so its encodes get the picture check");
+    assert!(nodes.list().is_empty() && nodes.car_lists().is_empty(), "nothing planned on a guess");
+    assert!(nodes.list_checked().is_err(), "the converter's device list is not answered without them");
+    ctx.reads_fail.store(false, Ordering::SeqCst);
+    assert_eq!(ctx.get("nodes"), kept, "nothing was written over");
+    // (they read, but no change can be kept)
+    ctx.writes_fail.store(true, Ordering::SeqCst);
+    assert_eq!(nodes.set_trusted("abcdefghijkl", &json!(false)).map_err(failed), Err((500, "Internal error".into())));
+    assert_eq!(nodes.rename("abcdefghijkl", &json!("x")).map_err(failed), Err((500, "Internal error".into())));
+    assert_eq!(nodes.set_cars("abcdefghijkl", &json!([])).map_err(failed), Err((500, "Internal error".into())));
+    assert_eq!(nodes.remove("abcdefghijkl").map_err(failed), Err((500, "Internal error".into())), "not removed");
+    assert!(nodes.trusted("node:abcdefghijkl"));
+    ctx.writes_fail.store(false, Ordering::SeqCst);
+    assert_eq!(ctx.get("nodes"), kept, "nothing changed");
+    let logs = ctx.logs.lock().unwrap();
+    assert!(logs.iter().any(|l| l.contains("manager.db: database disk image is malformed")) && logs.iter().any(|l| l.contains("manager.db: attempt to write")), "the failures are logged");
+    drop(logs);
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -590,7 +638,7 @@ fn encode_with_gpu_only_by_default_the_cpu_too_when_chosen_or_the_cpu_alone() {
     *ctx.runtime.lock().unwrap() = Some(Arc::new(DeviceRuntime { gpu: true, ..Default::default() }));
     let worker = NodeWorker::new(ctx.clone(), WorkerOptions { work_dir: dir.join("work"), name: None, spawn: None });
     let encoders = || worker.attempts("h265", 0, None).unwrap().into_iter().map(|a| a.encoder).collect::<Vec<_>>();
-    assert_eq!(worker.status()["use"], json!("gpu"));
+    assert_eq!(worker.status().unwrap()["use"], json!("gpu"));
     assert!(!encoders().contains(&"libx265".to_string()), "a GPU clip that fails goes back to the main");
     assert!(encoders().iter().all(|e| e == "hevc_vaapi"));
     worker.set_enabled(true, Some(&json!(2)), Some(&json!("gpu-cpu"))).unwrap();
@@ -601,6 +649,33 @@ fn encode_with_gpu_only_by_default_the_cpu_too_when_chosen_or_the_cpu_alone() {
     *ctx.runtime.lock().unwrap() = Some(Arc::new(DeviceRuntime::default()));
     assert_eq!(encoders(), vec!["libx265"], "no GPU: the CPU");
     assert_eq!(worker.set_enabled(true, Some(&json!(2)), Some(&json!("npu"))).unwrap_err().message, "Encode with: gpu, gpu-cpu or cpu.");
+    worker.close();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn node_mode_settings_that_cannot_be_read_answer_500_and_keep_the_paired_mains() {
+    let dir = tmp("worker-unreadable");
+    let ctx = MemCtx::new(&dir);
+    let kept = json!({ "enabled": true, "slots": 2, "use": "gpu", "mains": [{ "id": "m1", "name": "main", "tokenHash": "ab".repeat(32) }] });
+    ctx.set("nodeWorker", kept.clone());
+    let worker = NodeWorker::new(ctx.clone(), WorkerOptions { work_dir: dir.join("work"), name: None, spawn: None });
+    // (they cannot be read, while a write would still be kept)
+    ctx.reads_fail.store(true, Ordering::SeqCst);
+    assert_eq!(worker.status().unwrap_err().status, Some(500));
+    assert_eq!(worker.set_enabled(false, None, None).unwrap_err().status, Some(500));
+    assert_eq!(worker.start_pairing().unwrap_err().status, Some(500));
+    assert_eq!(worker.revoke("m1").unwrap_err().status, Some(500), "not \"no such main\"");
+    ctx.reads_fail.store(false, Ordering::SeqCst);
+    assert_eq!(ctx.get("nodeWorker"), kept, "nothing was written over");
+    // (they read, but no change can be kept)
+    ctx.writes_fail.store(true, Ordering::SeqCst);
+    assert_eq!(worker.set_enabled(false, None, None).unwrap_err().status, Some(500));
+    assert_eq!(worker.revoke("m1").unwrap_err().status, Some(500), "not revoked");
+    assert_eq!(worker.status().unwrap()["enabled"], true);
+    ctx.writes_fail.store(false, Ordering::SeqCst);
+    assert_eq!(ctx.get("nodeWorker"), kept, "nothing changed");
+    assert_eq!(worker.status().unwrap()["mains"].as_array().unwrap().len(), 1);
     worker.close();
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -734,7 +809,7 @@ fn pairing_a_changed_certificate_tokens_and_a_real_remote_encode() {
     let addr = json!(format!("127.0.0.1:{}", w.port));
     // nothing answers until node mode is on and a code is shown
     assert!(nodes.add(&addr, &json!("AAAA-BBBB-CCCC")).unwrap_err().message.contains("not set up as a node"));
-    let pairing = w.worker.start_pairing()["pairing"].clone();
+    let pairing = w.worker.start_pairing().unwrap()["pairing"].clone();
     let code = pairing["code"].as_str().unwrap().to_string();
     assert!(code.len() == 14 && code.chars().enumerate().all(|(i, c)| if i == 4 || i == 9 { c == '-' } else { "ABCDEFGHJKLMNPQRSTUVWXYZ23456789".contains(c) }));
     assert_eq!(nodes.add(&addr, &json!("AAAA-BBBB-CCCC")).unwrap_err().message, "Wrong pairing code.");
@@ -745,8 +820,8 @@ fn pairing_a_changed_certificate_tokens_and_a_real_remote_encode() {
     let id = node["id"].as_str().unwrap().to_string();
     assert!(id.len() == 12 && id.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
     assert!(node["pin"]["authority"].is_string(), "the worker's authority is pinned too");
-    assert_eq!(w.worker.status()["pairing"], Value::Null, "the code is used up");
-    assert_eq!(w.worker.status()["mains"].as_array().unwrap().len(), 1);
+    assert_eq!(w.worker.status().unwrap()["pairing"], Value::Null, "the code is used up");
+    assert_eq!(w.worker.status().unwrap()["mains"].as_array().unwrap().len(), 1);
     let token = node["token"].as_str().unwrap().to_string();
     assert!(!w.ctx.get("nodeWorker").to_string().contains(&token), "the worker keeps only a hash of the token");
     assert!(w.ctx.audits.lock().unwrap().iter().any(|l| l == "Info Paired with main server \"main-nas\" at 127.0.0.1"));
@@ -811,8 +886,8 @@ fn pairing_a_changed_certificate_tokens_and_a_real_remote_encode() {
     w.close();
     w = start_worker_on(&dir, &material, port, wctx, Arc::new(SoftRuntime), false);
     assert!(nodes.refresh(&id).unwrap().online);
-    let main_id = w.worker.status()["mains"][0]["id"].as_str().unwrap().to_string();
-    w.worker.revoke(&main_id);
+    let main_id = w.worker.status().unwrap()["mains"][0]["id"].as_str().unwrap().to_string();
+    w.worker.revoke(&main_id).unwrap();
     assert!(!nodes.refresh(&id).unwrap().online);
     w.close();
     let _ = std::fs::remove_dir_all(dir);
@@ -886,16 +961,16 @@ fn the_worker_refuses_anything_but_an_mp4_limits_wrong_codes_per_address_and_a_n
     let w = start_worker(&dir, &material);
     let (nodes, _) = main_nodes(&dir);
     let addr = json!(format!("127.0.0.1:{}", w.port));
-    let code = w.worker.start_pairing()["pairing"]["code"].as_str().unwrap().to_string();
+    let code = w.worker.start_pairing().unwrap()["pairing"]["code"].as_str().unwrap().to_string();
     for _ in 0..3 {
         assert_eq!(nodes.add(&addr, &json!("AAAA-BBBB-CCCC")).unwrap_err().message, "Wrong pairing code.");
     }
     assert_eq!(nodes.add(&addr, &json!(code)).unwrap_err().message, "Too many wrong pairing codes from this address.");
-    assert!(w.worker.status()["pairing"].is_object(), "the code was not cancelled for everyone");
+    assert!(w.worker.status().unwrap()["pairing"].is_object(), "the code was not cancelled for everyone");
     assert_eq!(w.ctx.audits.lock().unwrap().iter().filter(|l| *l == "Warn Node pairing refused (wrong code or a different certificate) from 127.0.0.1").count(), 3);
 
     // a DASH manifest (which could point ffmpeg at the node's own files) is refused
-    w.worker.cancel_pairing();
+    w.worker.cancel_pairing().unwrap();
     let token = base64url(&random_bytes(32));
     let mut s = w.ctx.get("nodeWorker");
     s["enabled"] = json!(true);
@@ -942,7 +1017,7 @@ fn clips_sent_ahead_wait_on_the_node_for_a_free_slot_and_all_convert() {
     let material = certs(&dir, "worker-tls");
     let w = start_worker(&dir, &material);
     let (nodes, _) = main_nodes(&dir);
-    let code = w.worker.start_pairing()["pairing"]["code"].as_str().unwrap().to_string();
+    let code = w.worker.start_pairing().unwrap()["pairing"]["code"].as_str().unwrap().to_string();
     let node = nodes.add(&json!(format!("127.0.0.1:{}", w.port)), &json!(code)).unwrap();
     w.worker.set_enabled(true, Some(&json!(1)), None).unwrap();
     let token = node["token"].as_str().unwrap().to_string();
@@ -997,7 +1072,7 @@ fn a_nodes_gpus_and_cpu_a_lane_each_slots_per_device_a_real_encode_on_each() {
     let material = certs(&dir, "worker-tls");
     let mut w = start_device_worker(&dir, &material, 0, MemCtx::new(&dir));
     let (nodes, main_ctx) = main_nodes(&dir);
-    let code = w.worker.start_pairing()["pairing"]["code"].as_str().unwrap().to_string();
+    let code = w.worker.start_pairing().unwrap()["pairing"]["code"].as_str().unwrap().to_string();
     let node = nodes.add(&json!(format!("127.0.0.1:{}", w.port)), &json!(code)).unwrap();
     let nid = node["id"].as_str().unwrap().to_string();
     let token = node["token"].as_str().unwrap().to_string();
@@ -1119,9 +1194,9 @@ fn a_nodes_gpus_and_cpu_a_lane_each_slots_per_device_a_real_encode_on_each() {
     assert!(restarted.refresh(&nid).unwrap().online);
     assert_eq!(restarted.list().iter().map(|l| json!([l["id"], l["online"]])).collect::<Vec<_>>(), vec![json!([gpu_lane, true]), json!([cpu_lane, true])]);
     // trust and Vehicles first are the node's, whichever lane asks; the page's view
-    restarted.set_trusted(&nid, &json!(true));
+    restarted.set_trusted(&nid, &json!(true)).unwrap();
     assert!(restarted.trusted(&gpu_lane) && restarted.trusted(&cpu_lane));
-    let v = restarted.overview();
+    let v = restarted.overview().unwrap();
     assert_eq!(v[0]["defaultLane"], json!(gpu_lane));
     assert_eq!(v[0]["defaultDeviceName"], json!("Intel Arc A380"));
     assert_eq!(v[0]["slots"], json!(2));
@@ -1139,16 +1214,16 @@ fn an_older_node_is_one_lane_and_gets_the_old_single_number() {
     let material = certs(&dir, "worker-tls");
     let w = start_worker(&dir, &material);
     let (nodes, _) = main_nodes(&dir);
-    let code = w.worker.start_pairing()["pairing"]["code"].as_str().unwrap().to_string();
+    let code = w.worker.start_pairing().unwrap()["pairing"]["code"].as_str().unwrap().to_string();
     let node = nodes.add(&json!(format!("127.0.0.1:{}", w.port)), &json!(code)).unwrap();
     let nid = node["id"].as_str().unwrap().to_string();
     let lanes = nodes.list();
     assert_eq!(lanes.iter().map(|l| json!([l["id"], l["name"], l["nodeId"]])).collect::<Vec<_>>(), vec![json!([format!("node:{nid}"), "garage-pc (node)", nid])]);
-    let o = nodes.overview();
+    let o = nodes.overview().unwrap();
     assert_eq!(o[0]["devices"], Value::Null);
     assert_eq!(o[0]["defaultLane"], json!(format!("node:{nid}")));
     nodes.set_slots(&format!("node:{nid}"), &json!(4)).unwrap();
-    assert_eq!(w.worker.status()["slots"], json!(4));
+    assert_eq!(w.worker.status().unwrap()["slots"], json!(4));
     assert!(nodes.set_slots(&format!("node:{nid}"), &json!({ "cpu": 1 })).unwrap_err().message.contains("per device of this node"));
     assert_eq!(nodes.set_slots(&nid, &json!(9)).unwrap_err().message, "Clips at once: 1 to 8.");
     let source = clip(&dir, "clip.mp4", 2);
@@ -1168,7 +1243,7 @@ fn benchmark_real_clips_lent_to_a_real_node_encodes_deleted_footage_untouched() 
     let material = certs(&dir, "worker-tls");
     let w = start_worker(&dir, &material);
     let (nodes, main_ctx) = main_nodes(&dir);
-    let code = w.worker.start_pairing()["pairing"]["code"].as_str().unwrap().to_string();
+    let code = w.worker.start_pairing().unwrap()["pairing"]["code"].as_str().unwrap().to_string();
     let node = nodes.add(&json!(format!("127.0.0.1:{}", w.port)), &json!(code)).unwrap();
     let nid = node["id"].as_str().unwrap().to_string();
     let tesla = dir.join("footage").join("TeslaCam").join("RecentClips");
@@ -1203,7 +1278,7 @@ fn benchmark_real_clips_lent_to_a_real_node_encodes_deleted_footage_untouched() 
     assert!(std::fs::read_dir(&work).unwrap().next().is_none(), "every encode was deleted");
     assert_eq!(stamp(&tesla), before, "the footage is untouched");
     nodes.set_slots(&nid, &json!(3)).unwrap();
-    assert_eq!(w.worker.status()["slots"], json!(3));
+    assert_eq!(w.worker.status().unwrap()["slots"], json!(3));
     w.close();
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -1394,8 +1469,8 @@ fn worker_script(port: u16, ca: &str, code: &str, clip: &Path, dir: &Path) -> Va
     }
     main.insert("freed".into(), json!(freed));
     nodes.set_slots(&nid, &json!(3)).unwrap();
-    main.insert("slots".into(), nodes.overview()[0]["slots"].clone());
-    let mut o = nodes.overview()[0].clone();
+    main.insert("slots".into(), nodes.overview().unwrap()[0]["slots"].clone());
+    let mut o = nodes.overview().unwrap()[0].clone();
     for (k, v) in [("id", "<node>"), ("address", "<address>"), ("fingerprint", "<fp>"), ("defaultLane", "node:<node>")] {
         o[k] = json!(v);
     }
@@ -1418,7 +1493,7 @@ fn parity_the_rust_worker_answers_as_nodes_worker_answered() {
     let dir = tmp("parity-b");
     let m = certs(&dir, "rust-tls");
     let w = start_worker(&dir, &m);
-    let code = w.worker.start_pairing()["pairing"]["code"].as_str().unwrap().to_string();
+    let code = w.worker.start_pairing().unwrap()["pairing"]["code"].as_str().unwrap().to_string();
     let source = clip(&dir, "clip.mp4", 2);
     let theirs = crate::reference::answer("nodes-worker", &[], &json!("script"));
     let mine = worker_script(w.port, &m.ca, &code, &source, &dir);

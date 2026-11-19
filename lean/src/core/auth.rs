@@ -4,7 +4,7 @@
 //! other way round. The cookie holds a random token; its SHA-256 is stored.
 //! Over HTTPS the cookie is `__Host-sm_session` (Secure), else `sm_session`.
 
-use super::db::{now_ms, Db};
+use super::db::{now_ms, Db, DbError};
 use super::log::Scope;
 use base64::Engine;
 use indexmap::IndexMap;
@@ -102,12 +102,35 @@ pub fn refuse(status: u16, message: &str) -> Refusal {
     Refusal { status, message: message.to_string() }
 }
 
+/// The database failing: a 500 (Node: the error better-sqlite3 throws), answered "Internal error".
+impl From<DbError> for Refusal {
+    fn from(e: DbError) -> Refusal {
+        Refusal { status: 500, message: e.to_string() }
+    }
+}
+
 fn valid_token(t: &str) -> bool {
     (20..=100).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 fn valid_username(u: &str) -> bool {
     (1..=64).contains(&u.len()) && u.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'@' | b'-'))
+}
+
+/// (salt, hash) for a password of this account; refused for a bad name or password.
+fn salted(username: &str, password: &str) -> Result<(String, String), Refusal> {
+    if !valid_username(username) {
+        return Err(refuse(400, "User names may use letters, numbers and . _ @ -"));
+    }
+    if js_len(password) < 8 {
+        return Err(refuse(400, "Use a password of at least 8 characters."));
+    }
+    if js_len(password) > 1024 {
+        return Err(refuse(400, "That password is too long."));
+    }
+    let salt = new_salt();
+    let hash = hash_password(password, &salt);
+    Ok((salt, hash))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -155,8 +178,9 @@ impl Auth {
     }
 
     /// First start: the account from UI_USERNAME / UI_PASSWORD, or a setup code in the log.
-    pub fn bootstrap(&self, ui_username: Option<&str>, ui_password: Option<&str>) {
-        if self.db.user_count() == 0 {
+    /// An error when the accounts cannot be read (no setup code is made for an unreadable list).
+    pub fn bootstrap(&self, ui_username: Option<&str>, ui_password: Option<&str>) -> Result<(), DbError> {
+        if self.db.user_count()? == 0 {
             if let Some(pw) = ui_password.filter(|p| !p.is_empty()) {
                 let name = ui_username.filter(|u| !u.is_empty()).unwrap_or("admin");
                 match self.set_password(name, pw) {
@@ -165,7 +189,7 @@ impl Auth {
                 }
             }
         }
-        if self.needs_setup() {
+        if self.needs_setup()? {
             let code = setup_code();
             self.log.warn(format!("No account yet. To create it, open the web UI and enter the setup code {code}"));
             if let Some(f) = &self.setup_file {
@@ -184,10 +208,11 @@ impl Auth {
             }
             *self.code.lock().unwrap() = Some(code);
         }
+        Ok(())
     }
 
-    pub fn needs_setup(&self) -> bool {
-        self.db.user_count() == 0
+    pub fn needs_setup(&self) -> Result<bool, DbError> {
+        Ok(self.db.user_count()? == 0)
     }
 
     /// The setup code in force (tests, the log).
@@ -197,7 +222,7 @@ impl Auth {
 
     /// Create the first account; needs the setup code from the log.
     pub fn setup(&self, username: &str, password: &str, code: &str) -> Result<(), Refusal> {
-        if !self.needs_setup() {
+        if !self.needs_setup()? {
             return Err(refuse(409, "An account already exists."));
         }
         let given: String = code.trim().to_uppercase().chars().filter(|c| c.is_ascii_uppercase() || c.is_ascii_digit()).collect();
@@ -214,38 +239,36 @@ impl Auth {
     }
 
     pub fn set_password(&self, username: &str, password: &str) -> Result<(), Refusal> {
-        if !valid_username(username) {
-            return Err(refuse(400, "User names may use letters, numbers and . _ @ -"));
-        }
-        if js_len(password) < 8 {
-            return Err(refuse(400, "Use a password of at least 8 characters."));
-        }
-        if js_len(password) > 1024 {
-            return Err(refuse(400, "That password is too long."));
-        }
-        let salt = new_salt();
-        let hash = hash_password(password, &salt);
-        self.db.put_user(username, &salt, &hash);
+        let (salt, hash) = salted(username, password)?;
+        self.db.put_user(username, &salt, &hash)?;
+        Ok(())
+    }
+
+    /// A new account with the settings that go with it (its record): kept together or not at all.
+    pub fn add_user(&self, username: &str, password: &str, settings: &[(&str, &serde_json::Value)]) -> Result<(), Refusal> {
+        let (salt, hash) = salted(username, password)?;
+        self.db.put_user_with(username, &salt, &hash, settings)?;
         Ok(())
     }
 
     /// Whether this is the password (None: not a string, as a JSON body may send).
-    /// Hashes anyway so timing does not reveal whether the user exists.
-    pub fn check(&self, username: &str, password: Option<&str>) -> bool {
-        let Some(password) = password else { return false };
+    /// Hashes anyway so timing does not reveal whether the user exists. An error when the
+    /// account cannot be read (not a wrong password: it must not count toward a ban).
+    pub fn check(&self, username: &str, password: Option<&str>) -> Result<bool, DbError> {
+        let Some(password) = password else { return Ok(false) };
         if js_len(password) > 1024 {
-            return false;
+            return Ok(false);
         }
-        let user = self.db.get_user(username);
+        let user = self.db.get_user(username)?;
         let salt = user.as_ref().map(|u| u.salt.clone()).unwrap_or_else(|| "x".repeat(32));
         let hash = hash_password(password, &salt);
-        match user {
+        Ok(match user {
             Some(u) => match (unhex(&hash), unhex(&u.hash)) {
                 (Some(a), Some(b)) => same(&a, &b),
                 _ => false,
             },
             None => false,
-        }
+        })
     }
 
     /// Seconds still locked out for this key (0: not).
@@ -333,48 +356,51 @@ impl Auth {
         self.token(r).map(|t| sha256_hex(&t))
     }
 
-    /// The signed-in user name, or None.
-    pub fn user(&self, r: &ReqView) -> Option<String> {
-        self.user_of(&self.session_hash(r)?)
+    /// The signed-in user name, or None (an error when the sessions cannot be read: not signed out).
+    pub fn user(&self, r: &ReqView) -> Result<Option<String>, DbError> {
+        let Some(h) = self.session_hash(r) else { return Ok(None) };
+        self.user_of(&h)
     }
 
-    /// The user of a session (by its hash), or None.
-    pub fn user_of(&self, session_hash: &str) -> Option<String> {
-        self.db.get_session(session_hash).map(|s| s.username)
+    /// The user of a session (by its hash), or None; an error when the sessions cannot be read.
+    pub fn user_of(&self, session_hash: &str) -> Result<Option<String>, DbError> {
+        Ok(self.db.get_session(session_hash)?.map(|s| s.username))
     }
 
-    /// Sign in: a fresh token every time. Returns the Set-Cookie value.
-    pub fn login(&self, r: &ReqView, username: &str, ip: Option<&str>) -> String {
+    /// Sign in: a fresh token every time. Returns the Set-Cookie value; an error when the
+    /// session was not kept (its cookie would sign nobody in).
+    pub fn login(&self, r: &ReqView, username: &str, ip: Option<&str>) -> Result<String, DbError> {
         if let Some(old) = self.token(r) {
-            self.db.delete_session(&sha256_hex(&old));
+            self.db.delete_session(&sha256_hex(&old))?;
         }
         let token = base64url(&random_bytes(32));
         let token_hash = sha256_hex(&token);
         let agent: String = r.agent.chars().take(300).collect();
-        self.db.add_session(&token_hash, username, now_ms() + SESSION_MS, Some(agent.as_str()).filter(|a| !a.is_empty()), ip);
+        self.db.add_session(&token_hash, username, now_ms() + SESSION_MS, Some(agent.as_str()).filter(|a| !a.is_empty()), ip)?;
         self.confirmed.lock().unwrap().insert(token_hash, now_ms() + CONFIRM_MS);
-        format!("{}={token}; {}", self.cookie_name(r.secure), self.cookie_attrs(r.secure, SESSION_MS / 1000))
+        Ok(format!("{}={token}; {}", self.cookie_name(r.secure), self.cookie_attrs(r.secure, SESSION_MS / 1000)))
     }
 
-    /// Sign out; returns the Set-Cookie value that clears the cookie.
-    pub fn logout(&self, r: &ReqView) -> String {
+    /// Sign out; returns the Set-Cookie value that clears the cookie (an error when the
+    /// session could not be removed: it would still sign in).
+    pub fn logout(&self, r: &ReqView) -> Result<String, DbError> {
         if let Some(t) = self.token(r) {
             let h = sha256_hex(&t);
-            self.db.delete_session(&h);
+            self.db.delete_session(&h)?;
             self.confirmed.lock().unwrap().remove(&h);
         }
-        format!("{}=; {}", self.cookie_name(r.secure), self.cookie_attrs(r.secure, 0))
+        Ok(format!("{}=; {}", self.cookie_name(r.secure), self.cookie_attrs(r.secure, 0)))
     }
 
     /// Confirm the password again; opens the short window for sensitive changes.
-    pub fn confirm(&self, r: &ReqView, username: &str, password: Option<&str>) -> bool {
-        if !self.check(username, password) {
-            return false;
+    pub fn confirm(&self, r: &ReqView, username: &str, password: Option<&str>) -> Result<bool, DbError> {
+        if !self.check(username, password)? {
+            return Ok(false);
         }
         if let Some(t) = self.token(r) {
             self.confirmed.lock().unwrap().insert(sha256_hex(&t), now_ms() + CONFIRM_MS);
         }
-        true
+        Ok(true)
     }
 
     pub fn recently_confirmed(&self, r: &ReqView) -> bool {
@@ -435,16 +461,41 @@ mod tests {
         assert_eq!(a.set_password("bad name", "longenough").unwrap_err().status, 400);
         assert_eq!(a.set_password("ok", "short").unwrap_err().message, "Use a password of at least 8 characters.");
         a.set_password("ok", "correct horse").unwrap();
-        assert!(a.check("ok", Some("correct horse")));
-        assert!(!a.check("ok", Some("wrong horse")));
-        assert!(!a.check("nobody", Some("correct horse")));
-        assert!(!a.check("ok", None));
+        assert!(a.check("ok", Some("correct horse")).unwrap());
+        assert!(!a.check("ok", Some("wrong horse")).unwrap());
+        assert!(!a.check("nobody", Some("correct horse")).unwrap());
+        assert!(!a.check("ok", None).unwrap());
+    }
+
+    #[test]
+    fn an_unreadable_account_or_session_is_an_error_not_a_wrong_password_or_signed_out() {
+        let (db, a) = auth();
+        a.set_password("u", "correct horse").unwrap();
+        let none = ReqView { secure: false, cookie: "", agent: "" };
+        let set = a.login(&none, "u", None).unwrap();
+        let cookie = set.split(';').next().unwrap().to_string();
+        let r = ReqView { secure: false, cookie: &cookie, agent: "" };
+        db.conn().execute_batch("PRAGMA query_only = ON").unwrap();
+        // a password change that was not kept is a 500, not done
+        let e = a.set_password("u", "another horse").unwrap_err();
+        assert_eq!(e.status, 500);
+        assert!(e.message.starts_with("manager.db: "));
+        assert!(a.login(&none, "u", None).is_err(), "no cookie for a session that was not kept");
+        assert!(a.logout(&r).is_err(), "not signed out while the session still signs in");
+        assert_eq!(a.user(&r).unwrap().as_deref(), Some("u"));
+        db.conn().execute_batch("PRAGMA query_only = OFF; DROP TABLE users; DROP TABLE sessions").unwrap();
+        assert!(a.check("u", Some("correct horse")).is_err());
+        assert!(a.confirm(&r, "u", Some("correct horse")).is_err());
+        assert!(a.user(&r).is_err());
+        assert!(a.needs_setup().is_err(), "no accounts is not the same as unreadable accounts");
+        assert!(a.bootstrap(None, None).is_err());
+        assert_eq!(a.current_code(), None, "no setup code for an unreadable account list");
     }
 
     #[test]
     fn setup_needs_the_code() {
         let (_db, a) = auth();
-        a.bootstrap(None, None);
+        a.bootstrap(None, None).unwrap();
         let code = a.current_code().unwrap();
         assert_eq!(a.setup("admin", "correct horse", "WRONG").unwrap_err().status, 403);
         a.setup("admin", "correct horse", &code.to_lowercase().replace('-', " ")).unwrap();
@@ -482,19 +533,19 @@ mod tests {
         let (db, a) = auth();
         a.set_password("u", "correct horse").unwrap();
         let none = ReqView { secure: true, cookie: "", agent: "test agent" };
-        let set = a.login(&none, "u", Some("10.0.0.1"));
+        let set = a.login(&none, "u", Some("10.0.0.1")).unwrap();
         assert!(set.starts_with("__Host-sm_session="));
         assert!(set.ends_with("HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000; Secure"));
         let token = set.split(';').next().unwrap().split_once('=').unwrap().1.to_string();
         let cookie = format!("__Host-sm_session={token}");
         let r = ReqView { secure: true, cookie: &cookie, agent: "" };
-        assert_eq!(a.user(&r).as_deref(), Some("u"));
+        assert_eq!(a.user(&r).unwrap().as_deref(), Some("u"));
         assert!(a.recently_confirmed(&r));
         // over plain HTTP the __Host- cookie does not count
         let plain = ReqView { secure: false, cookie: &cookie, agent: "" };
-        assert_eq!(a.user(&plain), None);
-        assert_eq!(db.sessions_for("u")[0].agent.as_deref(), Some("test agent"));
-        assert_eq!(a.logout(&r), "__Host-sm_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0; Secure");
-        assert_eq!(a.user(&r), None);
+        assert_eq!(a.user(&plain).unwrap(), None);
+        assert_eq!(db.sessions_for("u").unwrap()[0].agent.as_deref(), Some("test agent"));
+        assert_eq!(a.logout(&r).unwrap(), "__Host-sm_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0; Secure");
+        assert_eq!(a.user(&r).unwrap(), None);
     }
 }

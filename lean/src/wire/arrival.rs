@@ -23,8 +23,8 @@ impl CoreArrival {
     fn srv(&self) -> Option<Arc<Server>> {
         self.srv.upgrade()
     }
-    fn record_setting(&self) -> serde_json::Map<String, Value> {
-        self.state.setting("sentry-usb-record").and_then(|r| r.as_object().cloned()).unwrap_or_default()
+    fn record_setting(&self) -> Result<serde_json::Map<String, Value>, String> {
+        Ok(self.state.setting("sentry-usb-record").map_err(|e| e.to_string())?.and_then(|r| r.as_object().cloned()).unwrap_or_default())
     }
 }
 
@@ -61,21 +61,22 @@ impl ArrivalCtx for CoreArrival {
     fn idle(&self) -> bool {
         !self.srv().and_then(|s| s.converter().map(|c| c.running())).unwrap_or(false)
     }
-    fn older_of(&self, vid: &str) -> bool {
-        self.record_setting().get(vid).and_then(|r| r.get("older")).cloned() != Some(Value::Bool(false))
+    fn older_of(&self, vid: &str) -> Result<bool, String> {
+        Ok(self.record_setting()?.get(vid).and_then(|r| r.get("older")).cloned() != Some(Value::Bool(false)))
     }
-    fn set_older(&self, vid: &str, older: bool) {
-        let mut rec = self.record_setting();
+    fn set_older(&self, vid: &str, older: bool) -> Result<(), String> {
+        let mut rec = self.record_setting()?;
         let mut mine = rec.get(vid).and_then(|r| r.as_object().cloned()).unwrap_or_default();
         mine.insert("older".into(), json!(older));
         rec.insert(vid.to_string(), Value::Object(mine));
-        self.state.set_setting("sentry-usb-record", &Value::Object(rec));
+        self.state.set_setting("sentry-usb-record", &Value::Object(rec)).map_err(|e| e.to_string())
     }
-    fn forget_setting(&self, vid: &str) {
-        let mut rec = self.record_setting();
+    fn forget_setting(&self, vid: &str) -> Result<(), String> {
+        let mut rec = self.record_setting()?;
         if rec.remove(vid).is_some() {
-            self.state.set_setting("sentry-usb-record", &Value::Object(rec));
+            self.state.set_setting("sentry-usb-record", &Value::Object(rec)).map_err(|e| e.to_string())?;
         }
+        Ok(())
     }
     fn audit(&self, line: &str) {
         self.state.audit.info(line);

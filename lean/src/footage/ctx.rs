@@ -57,6 +57,13 @@ impl From<std::io::Error> for Fail {
     }
 }
 
+/// (manager.db could not be read or written: a 500, never an empty answer)
+impl From<super::mdb::DbError> for Fail {
+    fn from(e: super::mdb::DbError) -> Fail {
+        Fail::internal(e.to_string())
+    }
+}
+
 pub type Res<T> = Result<T, Fail>;
 
 /// Who asks (core works it out: session, role, home network, a recent password).
@@ -163,9 +170,9 @@ pub trait Ctx: Send + Sync {
     fn audit(&self, level: Level, line: &str);
     /// A line in the server log under a scope ('bin', 'policies', 'share:<id>', ...).
     fn log(&self, scope: &str, level: Level, line: &str);
-    /// jobs.start: the id of a new running job.
-    fn job_start(&self, typ: &str, vehicle_id: Option<&str>, title: &str) -> i64;
-    /// jobs.finish
+    /// jobs.start: the id of a new running job; an error when it was not kept (no id is made up).
+    fn job_start(&self, typ: &str, vehicle_id: Option<&str>, title: &str) -> Result<i64, String>;
+    /// jobs.finish (one that was not kept is logged by core: the work it tells of is done)
     fn job_finish(&self, id: i64, status: &str, detail: &str, result: Option<Value>);
     /// The clips a conversion has in hand right now, as absolute paths (index.js busyPaths).
     fn busy_paths(&self) -> HashSet<PathBuf> {
@@ -179,19 +186,23 @@ pub trait Ctx: Send + Sync {
     fn on_deleted(&self, _vehicle_id: &str, _item: &Value) {}
     /// A share's status changed (notifications syncShare).
     fn share_status(&self, _vehicle_id: &str, _status: &Value) {}
-    /// Space saved by conversions (savings.js forVehicle).
-    fn saved(&self, _vehicle_id: &str) -> Value {
-        serde_json::json!({ "bytes": 0, "clips": 0 })
+    /// Space saved by conversions (savings.js forVehicle); an error when it cannot be read.
+    fn saved(&self, _vehicle_id: &str) -> Res<Value> {
+        Ok(serde_json::json!({ "bytes": 0, "clips": 0 }))
     }
-    /// Space saved starts over for a vehicle (savings.js reset).
-    fn reset_saved(&self, _vehicle_id: &str) {}
-    /// The car a vehicle is (index.js withCar's `car`), from the CAN area.
-    fn car_summary(&self, _vehicle: &Value) -> Value {
-        Value::Null
+    /// Space saved starts over for a vehicle (savings.js reset); an error when it was not kept.
+    fn reset_saved(&self, _vehicle_id: &str) -> Res<()> {
+        Ok(())
     }
-    /// The CAN logs footage would take with it (index.js canWith), None: no key mapped.
-    fn can_with(&self, _vehicle_id: &str, _rels: &[String], _until: Option<f64>) -> Option<Value> {
-        None
+    /// The car a vehicle is (index.js withCar's `car`), from the CAN area; an error when what it
+    /// needs cannot be read.
+    fn car_summary(&self, _vehicle: &Value) -> Res<Value> {
+        Ok(Value::Null)
+    }
+    /// The CAN logs footage would take with it (index.js canWith), None: no key mapped; an error
+    /// when what it needs cannot be read.
+    fn can_with(&self, _vehicle_id: &str, _rels: &[String], _until: Option<f64>) -> Res<Option<Value>> {
+        Ok(None)
     }
     /// "Also delete its CAN data" for moved recordings (canPrune deleteWith).
     fn can_delete_with(&self, _vehicle_id: &str, _rels: &[String], _until: Option<f64>, _by: &str) -> Option<Value> {
@@ -200,9 +211,10 @@ pub trait Ctx: Send + Sync {
     /// A vehicle was removed: the other areas forget it (savings, archive gaps, Sentry USB, nodes).
     fn vehicle_removed(&self, _vehicle_id: &str) {}
     /// The green "CAN" tag (canFootage.js forVehicle): which recordings have CAN Bridge data;
-    /// None without the CAN area.
-    fn has_can(&self, _vehicle_id: &str) -> Option<Box<dyn Fn(&super::inventory::Recording) -> bool>> {
-        None
+    /// None without the CAN area, an error when what it needs cannot be read.
+    #[allow(clippy::type_complexity)]
+    fn has_can(&self, _vehicle_id: &str) -> Res<Option<Box<dyn Fn(&super::inventory::Recording) -> bool>>> {
+        Ok(None)
     }
     /// sentryUsb.api(id): Sentry USB's status file on the share (the day list's `sentryUsb`).
     fn sentry_usb(&self, _vehicle_id: &str) -> Value {
@@ -217,12 +229,14 @@ pub struct LocalCore {
     mounter: Mutex<Option<Arc<dyn Mounter>>>,
     pub topics: Mutex<Vec<String>>,
     pub audits: Mutex<Vec<String>>,
+    /// the log lines, as "[scope] line"
+    pub logs: Mutex<Vec<String>>,
     quiet: bool,
 }
 
 impl LocalCore {
     pub fn open(data: &Path) -> rusqlite::Result<LocalCore> {
-        Ok(LocalCore { db: ManagerDb::open(&data.join("manager.db"))?, data: data.to_path_buf(), mounter: Mutex::new(None), topics: Mutex::new(Vec::new()), audits: Mutex::new(Vec::new()), quiet: false })
+        Ok(LocalCore::with(ManagerDb::open(&data.join("manager.db"))?, data, false))
     }
     /// The mounter SMB vehicles are mounted with (main.rs: the local one, as index.js
     /// createLocalMounter; core gives the supervisor's IpcMounter when supervised).
@@ -233,7 +247,17 @@ impl LocalCore {
     /// In memory, no log lines (tests).
     pub fn memory() -> LocalCore {
         let data = std::env::temp_dir().join(format!("lean-core-{}-{}", std::process::id(), super::random_hex(4)));
-        LocalCore { db: ManagerDb::memory(), data, mounter: Mutex::new(None), topics: Mutex::new(Vec::new()), audits: Mutex::new(Vec::new()), quiet: true }
+        LocalCore::with(ManagerDb::memory(), &data, true)
+    }
+
+    fn with(db: ManagerDb, data: &Path, quiet: bool) -> LocalCore {
+        LocalCore { db, data: data.to_path_buf(), mounter: Mutex::new(None), topics: Mutex::new(Vec::new()), audits: Mutex::new(Vec::new()), logs: Mutex::new(Vec::new()), quiet }
+    }
+
+    /// (tests) On core's database, as the server has it: reads on a connection of their own.
+    #[cfg(test)]
+    pub(crate) fn on_core(db: Arc<crate::core::db::Db>, data: &Path) -> LocalCore {
+        LocalCore::with(ManagerDb::of_core(db), data, true)
     }
 }
 
@@ -259,15 +283,18 @@ impl Ctx for LocalCore {
         self.log("audit", level, line);
     }
     fn log(&self, scope: &str, level: Level, line: &str) {
+        self.logs.lock().unwrap().push(format!("[{scope}] {line}"));
         if !self.quiet {
             eprintln!("[{scope}] {}{line}", match level { Level::Info => "", Level::Warn => "warning: ", Level::Error => "error: " });
         }
     }
-    fn job_start(&self, typ: &str, vehicle_id: Option<&str>, title: &str) -> i64 {
-        self.db.job_start(typ, vehicle_id, title)
+    fn job_start(&self, typ: &str, vehicle_id: Option<&str>, title: &str) -> Result<i64, String> {
+        self.db.job_start(typ, vehicle_id, title).map_err(|e| e.to_string())
     }
     fn job_finish(&self, id: i64, status: &str, detail: &str, result: Option<Value>) {
-        self.db.job_finish(id, status, detail, result.as_ref());
+        if let Err(e) = self.db.job_finish(id, status, detail, result.as_ref()) {
+            self.log("server", Level::Warn, &format!("The end of job {id} ({status}: {detail}) was not kept: {e}"));
+        }
     }
 }
 

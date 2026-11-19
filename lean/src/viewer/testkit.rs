@@ -228,8 +228,19 @@ pub struct TestCtx {
     pub files: Mutex<HashMap<String, Files>>,
     pub recs: Mutex<HashMap<String, Arc<Vec<Recording>>>>,
     pub settings: Mutex<Map<String, Value>>,
+    /// the settings fail to read (manager.db damaged), while a write would still be kept
+    pub reads_fail: std::sync::atomic::AtomicBool,
+    /// the settings fail to be kept (manager.db busy or read-only), while they still read
+    pub writes_fail: std::sync::atomic::AtomicBool,
     pub stamp: Mutex<f64>,
     pub announced: Mutex<Vec<String>>,
+    /// the server log's error lines
+    pub logged: Mutex<Vec<String>>,
+    /// the open notifications (dedupe keys), and whether they fail to read or to be kept (manager.db)
+    pub notes: Mutex<Vec<String>>,
+    pub notes_fail: std::sync::atomic::AtomicBool,
+    /// the CAN area's tags cannot be worked out (its key-to-car map cannot be read)
+    pub can_fails: std::sync::atomic::AtomicBool,
 }
 
 pub fn tmp(name: &str) -> PathBuf {
@@ -247,7 +258,7 @@ impl Car {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::create_dir_all(&data).unwrap();
         let v = VehicleRef { id: "v1".into(), name: "Car".into(), timezone: "UTC".into(), root: root.clone() };
-        let ctx = Arc::new(TestCtx { data: data.clone(), vehicles: vec![v], files: Mutex::new(HashMap::new()), recs: Mutex::new(HashMap::new()), settings: Mutex::new(Map::new()), stamp: Mutex::new(1.0), announced: Mutex::new(Vec::new()) });
+        let ctx = Arc::new(TestCtx { data: data.clone(), vehicles: vec![v], files: Mutex::new(HashMap::new()), recs: Mutex::new(HashMap::new()), settings: Mutex::new(Map::new()), reads_fail: Default::default(), writes_fail: Default::default(), stamp: Mutex::new(1.0), announced: Mutex::new(Vec::new()), logged: Mutex::new(Vec::new()), notes: Mutex::new(Vec::new()), notes_fail: Default::default(), can_fails: Default::default() });
         Car { ctx, root, data }
     }
 
@@ -305,14 +316,55 @@ impl Ctx for TestCtx {
     fn scan_stamp(&self, _id: &str) -> Option<f64> {
         Some(*self.stamp.lock().unwrap())
     }
-    fn setting(&self, key: &str) -> Option<Value> {
-        self.settings.lock().unwrap().get(key).cloned()
+    fn setting(&self, key: &str) -> Result<Option<Value>, String> {
+        if self.reads_fail.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("manager.db: database disk image is malformed".into());
+        }
+        Ok(self.settings.lock().unwrap().get(key).cloned())
     }
-    fn set_setting(&self, key: &str, value: Value) {
+    fn set_setting(&self, key: &str, value: Value) -> Result<(), String> {
+        if self.writes_fail.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("manager.db: attempt to write a readonly database".into());
+        }
         self.settings.lock().unwrap().insert(key.into(), value);
+        Ok(())
     }
     fn announce(&self, topic: &str) {
         self.announced.lock().unwrap().push(topic.into());
     }
     fn audit(&self, _line: &str) {}
+    fn log_error(&self, line: &str) {
+        self.logged.lock().unwrap().push(line.to_string());
+    }
+    fn open_notes(&self, _id: &str, kind: &str) -> Result<Vec<String>, String> {
+        if self.notes_fail.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("manager.db: database disk image is malformed".into());
+        }
+        Ok(self.notes.lock().unwrap().iter().filter(|k| k.starts_with(&format!("{kind}:"))).cloned().collect())
+    }
+    fn raise_note(&self, note: &Value) -> Result<bool, String> {
+        if self.notes_fail.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("manager.db: attempt to write a readonly database".into());
+        }
+        let key = note["dedupeKey"].as_str().unwrap_or("").to_string();
+        let mut open = self.notes.lock().unwrap();
+        if !open.contains(&key) {
+            open.push(key);
+        }
+        Ok(true)
+    }
+    #[allow(clippy::type_complexity)]
+    fn has_can(&self, _id: &str) -> Result<Option<Box<dyn Fn(Vec<String>, Option<&str>) -> bool>>, String> {
+        if self.can_fails.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("the CAN settings could not be read".into());
+        }
+        Ok(None)
+    }
+    fn resolve_note(&self, dedupe_key: &str) -> Result<(), String> {
+        if self.notes_fail.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("manager.db: attempt to write a readonly database".into());
+        }
+        self.notes.lock().unwrap().retain(|k| k != dedupe_key);
+        Ok(())
+    }
 }

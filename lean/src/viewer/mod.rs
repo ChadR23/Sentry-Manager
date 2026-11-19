@@ -63,7 +63,12 @@ impl Viewer {
     pub fn new(ctx: Arc<dyn Ctx>) -> Arc<Viewer> {
         let data = ctx.data_dir();
         let resources = work_limits::detect_resources();
-        let limits = Arc::new(RwLock::new(work_limits::pick_limits(resources.clone(), ctx.setting("work-limits").as_ref())));
+        // (limits that cannot be read at start: logged, and the automatic ones are in force and shown)
+        let saved = ctx.setting("work-limits").unwrap_or_else(|e| {
+            eprintln!("Background work limits: automatic, the saved ones could not be read: {e}");
+            None
+        });
+        let limits = Arc::new(RwLock::new(work_limits::pick_limits(resources.clone(), saved.as_ref())));
         let l = limits.read().unwrap().clone();
         eprintln!(
             "Background work: {} ({:.1} GB from the {}, {} CPUs from the {})",

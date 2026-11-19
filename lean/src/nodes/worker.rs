@@ -471,8 +471,16 @@ impl NodeWorker {
         self.ctx().now_ms()
     }
 
-    pub fn settings(&self) -> Settings {
-        let s = self.ctx().setting(SETTINGS_KEY).filter(|v| v.is_object()).unwrap_or_else(|| json!({}));
+    /// manager.db failing: logged here (once), a 500 to whoever asked.
+    fn db_failed(&self, e: String) -> WorkerError {
+        self.ctx().log(Level::Error, &format!("Node mode settings: {e}"));
+        status_err(500, "Internal error")
+    }
+
+    /// The settings; an error when they cannot be read (never the defaults: saved, they would
+    /// drop the paired main servers).
+    pub fn settings(&self) -> Result<Settings, WorkerError> {
+        let s = self.ctx().setting(SETTINGS_KEY).map_err(|e| self.db_failed(e))?.filter(|v| v.is_object()).unwrap_or_else(|| json!({}));
         let slots = safe_int(&s["slots"]).filter(|n| (1..=MAX_SLOTS).contains(n)).unwrap_or(DEFAULT_SLOTS);
         let use_ = s["use"].as_str().filter(|u| USES.contains(u)).unwrap_or("gpu").to_string();
         let mut device_slots = IndexMap::new();
@@ -486,17 +494,21 @@ impl NodeWorker {
             }
         }
         let mains = s["mains"].as_array().map(|a| a.iter().filter(|m| m["tokenHash"].is_string()).cloned().collect()).unwrap_or_default();
-        Settings { enabled: s["enabled"] == json!(true), slots, use_, device_slots, mains }
+        Ok(Settings { enabled: s["enabled"] == json!(true), slots, use_, device_slots, mains })
     }
 
-    fn save(&self, s: &Settings) {
-        self.ctx().set_setting(SETTINGS_KEY, &s.to_json());
+    fn save(&self, s: &Settings) -> Result<(), WorkerError> {
+        self.ctx().set_setting(SETTINGS_KEY, &s.to_json()).map_err(|e| self.db_failed(e))
     }
 
     // ---- what the Nodes page shows and changes
 
-    pub fn status(&self) -> Value {
-        let s = self.settings();
+    pub fn status(&self) -> Result<Value, WorkerError> {
+        Ok(self.status_of(&self.settings()?))
+    }
+
+    /// The status with these settings (the ones just kept: not read again).
+    fn status_of(&self, s: &Settings) -> Value {
         let now = self.now();
         let st = self.0.state.lock().unwrap();
         let busy = running(&st, None);
@@ -525,7 +537,7 @@ impl NodeWorker {
 
     /// setEnabled(enabled, slots, use): `slots` / `use` None when not given.
     pub fn set_enabled(&self, enabled: bool, slots: Option<&Value>, use_: Option<&Value>) -> Result<Value, WorkerError> {
-        let s = self.settings();
+        let s = self.settings()?;
         let mut next = s.clone();
         next.enabled = enabled;
         if let Some(u) = use_ {
@@ -540,6 +552,8 @@ impl NodeWorker {
                 None => return Err(status_err(400, &format!("Clips at once: 1 to {MAX_SLOTS}."))),
             }
         }
+        // (kept first: a change that was not kept changes nothing)
+        self.save(&next)?;
         if !next.enabled {
             let jobs: Vec<Arc<Job>> = {
                 let mut st = self.0.state.lock().unwrap();
@@ -550,43 +564,41 @@ impl NodeWorker {
                 self.stop_job(&j);
             }
         }
-        self.save(&next);
         self.pump();
-        Ok(self.status())
+        Ok(self.status_of(&next))
     }
 
     /// A new one-time code (replaces any earlier one). Worker mode turns on.
-    pub fn start_pairing(&self) -> Value {
-        let s = self.settings();
+    pub fn start_pairing(&self) -> Result<Value, WorkerError> {
+        let mut s = self.settings()?;
         if !s.enabled {
-            let mut n = s.clone();
-            n.enabled = true;
-            self.save(&n);
+            s.enabled = true;
+            self.save(&s)?;
         }
         let expires_at = self.now() + PAIR_TTL_MS;
         self.0.state.lock().unwrap().pairing = Some(Pairing { code: new_pairing_code(), expires_at, tries: 0, by_address: HashMap::new() });
-        self.status()
+        Ok(self.status_of(&s))
     }
 
-    pub fn cancel_pairing(&self) -> Value {
+    pub fn cancel_pairing(&self) -> Result<Value, WorkerError> {
         self.0.state.lock().unwrap().pairing = None;
         self.status()
     }
 
     /// revoke(id): the main removed, its jobs stopped; None when unknown.
-    pub fn revoke(&self, id: &str) -> Option<Value> {
-        let s = self.settings();
-        let main = s.mains.iter().find(|m| m["id"].as_str() == Some(id))?.clone();
+    pub fn revoke(&self, id: &str) -> Result<Option<Value>, WorkerError> {
+        let s = self.settings()?;
+        let Some(main) = s.mains.iter().find(|m| m["id"].as_str() == Some(id)).cloned() else { return Ok(None) };
         let mut n = s.clone();
         n.mains.retain(|m| m["id"].as_str() != Some(id));
-        self.save(&n);
+        self.save(&n)?;
         let jobs: Vec<Arc<Job>> = self.0.state.lock().unwrap().jobs.values().cloned().collect();
         for j in jobs {
             if j.d.lock().unwrap().main_id == id {
                 self.stop_job(&j);
             }
         }
-        Some(main)
+        Ok(Some(main))
     }
 
     pub fn close(&self) {
@@ -660,9 +672,10 @@ impl NodeWorker {
         }
     }
 
-    /// Starts waiting clips while their device has a free slot, oldest first.
+    /// Starts waiting clips while their device has a free slot, oldest first (they wait on
+    /// settings that cannot be read: logged in `settings`).
     fn pump(&self) {
-        let s = self.settings();
+        let Ok(s) = self.settings() else { return };
         let mut start = Vec::new();
         {
             let mut st = self.0.state.lock().unwrap();
@@ -786,9 +799,9 @@ impl NodeWorker {
     }
 
     /// GET /node/v1/info
-    pub fn info(&self) -> Value {
+    pub fn info(&self) -> Result<Value, WorkerError> {
         let rt = self.ctx().runtime();
-        let s = self.settings();
+        let s = self.settings()?;
         let mut encoders = Map::new();
         for family in ["h265", "av1"] {
             let chosen = match &rt {
@@ -825,7 +838,7 @@ impl NodeWorker {
             }).collect();
             out.insert("devices".into(), Value::Array(devs));
         }
-        Value::Object(out)
+        Ok(Value::Object(out))
     }
 
     /// Encode attempts, fastest first (attemptsFor).
@@ -836,7 +849,7 @@ impl NodeWorker {
         if let Some(id) = device_id {
             return self.device_attempts(&*rt, codec, id, &platform).map(with_hold);
         }
-        let use_ = self.settings().use_;
+        let use_ = self.settings()?.use_;
         let mut list = Vec::new();
         let selected = if use_ != "cpu" { rt.select_encoder(codec).ok().flatten() } else { None };
         let gpu = selected.as_ref().is_some_and(|s| s.hardware);
@@ -1077,7 +1090,10 @@ impl NodeWorker {
             }
         }
         let pool = settings_used.device.clone().unwrap_or_else(|| DEFAULT_POOL.into());
-        let s = self.settings();
+        let s = match self.settings() {
+            Ok(s) => s,
+            Err(e) => return WorkerReply::error(e.status.unwrap_or(500), &e.message),
+        };
         let slots = if benchmark { MAX_SLOTS } else { self.slots_for(&pool, &s) };
         if slots == 0 {
             return WorkerReply::error(503, "That device is set to Off on this node.");
@@ -1189,14 +1205,15 @@ impl NodeWorker {
         }
     }
 
-    fn authenticate(&self, r: &WorkerRequest) -> Option<Value> {
+    /// The main a token is of; an error when the mains cannot be read (not "not paired").
+    fn authenticate(&self, r: &WorkerRequest) -> Result<Option<Value>, WorkerError> {
         let header = r.header("authorization").unwrap_or("");
-        let token = header.strip_prefix("Bearer ")?;
+        let Some(token) = header.strip_prefix("Bearer ") else { return Ok(None) };
         if token.len() != 43 || !token.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-') {
-            return None;
+            return Ok(None);
         }
         let hash = sha256_hex(token.as_bytes());
-        self.settings().mains.into_iter().find(|m| m["tokenHash"].as_str().is_some_and(|h| same_hex(h, &hash)))
+        Ok(self.settings()?.mains.into_iter().find(|m| m["tokenHash"].as_str().is_some_and(|h| same_hex(h, &hash))))
     }
 
     fn pair(&self, r: &mut WorkerRequest) -> Result<WorkerReply, WorkerError> {
@@ -1207,7 +1224,7 @@ impl NodeWorker {
         {
             let mut st = self.0.state.lock().unwrap();
             let live = st.pairing.as_ref().is_some_and(|p| p.expires_at > now);
-            if !self.settings().enabled || !live {
+            if !self.settings()?.enabled || !live {
                 st.pairing = None;
                 return Ok(WorkerReply::error(403, "This server is not waiting to be paired. Show a pairing code under Nodes first."));
             }
@@ -1240,14 +1257,14 @@ impl NodeWorker {
         st.pairing = None;
         drop(st);
         let token = base64url(&random_bytes(32));
-        let s = self.settings();
+        let s = self.settings()?;
         let main = json!({ "id": hex(&random_bytes(6)), "name": main_name, "address": r.address, "tokenHash": sha256_hex(token.as_bytes()), "pairedAt": now });
         let mut n = s.clone();
         n.enabled = true;
         n.mains.push(main);
         let cut = n.mains.len().saturating_sub(16);
         n.mains = n.mains.split_off(cut);
-        self.save(&n);
+        self.save(&n)?;
         self.ctx().audit(Level::Info, &format!("Paired with main server \"{main_name}\" at {}", r.address));
         let ca = self.ctx().authority_pem();
         Ok(WorkerReply::json(200, &json!({ "name": self.0.name, "token": token, "proof": hmac_hex(&code, &pair_text::worker(&fingerprint, &token)), "authority": ca })))
@@ -1268,7 +1285,7 @@ impl NodeWorker {
     }
 
     fn handle_inner(&self, r: &mut WorkerRequest) -> Result<WorkerReply, WorkerError> {
-        if !self.settings().enabled {
+        if !self.settings()?.enabled {
             return Ok(WorkerReply::error(404, "Not found"));
         }
         if r.path == "/node/v1/pair" {
@@ -1277,7 +1294,7 @@ impl NodeWorker {
         if self.throttled(r.address) {
             return Ok(WorkerReply::error(429, "Too many refused requests."));
         }
-        let Some(main) = self.authenticate(r) else {
+        let Some(main) = self.authenticate(r)? else {
             self.note_bad_token(r.address);
             return Ok(WorkerReply::error(401, "Not paired."));
         };
@@ -1285,20 +1302,22 @@ impl NodeWorker {
         let main_name = main["name"].as_str().map(String::from).unwrap_or_else(|| crate::ops::js::to_string(&main["name"]));
         let now = self.now();
         if now - safe_int(&main["lastSeenAt"]).unwrap_or(0) > 60_000 {
-            let mut s = self.settings();
-            for m in s.mains.iter_mut() {
-                if m["id"] == main["id"] {
-                    if let Some(o) = m.as_object_mut() {
-                        o.insert("lastSeenAt".into(), json!(now));
-                        o.insert("address".into(), json!(r.address));
+            // (when and from where a main was last seen: a note, its failure logged in settings or save)
+            if let Ok(mut s) = self.settings() {
+                for m in s.mains.iter_mut() {
+                    if m["id"] == main["id"] {
+                        if let Some(o) = m.as_object_mut() {
+                            o.insert("lastSeenAt".into(), json!(now));
+                            o.insert("address".into(), json!(r.address));
+                        }
                     }
                 }
+                self.save(&s).ok();
             }
-            self.save(&s);
         }
         let (m, p) = (r.method, r.path);
         if p == "/node/v1/info" && m == "GET" {
-            return Ok(WorkerReply::json(200, &self.info()));
+            return Ok(WorkerReply::json(200, &self.info()?));
         }
         if p == "/node/v1/jobs" && m == "POST" {
             return Ok(self.receive(r, &main_id, &main_name));
@@ -1311,11 +1330,11 @@ impl NodeWorker {
                 if bad {
                     return Ok(WorkerReply::error(400, &format!("Clips at once per device of this node: 0 to {MAX_SLOTS}.")));
                 }
-                let mut s = self.settings();
+                let mut s = self.settings()?;
                 for (id, n) in obj {
                     s.device_slots.insert(id.clone(), safe_int(n).unwrap());
                 }
-                self.save(&s);
+                self.save(&s)?;
                 self.pump();
                 let named: Vec<String> = obj.iter().map(|(id, n)| format!("{} {}", list.iter().find(|d| &d.id == id).map(|d| d.name.as_str()).unwrap_or(""), safe_int(n).unwrap())).collect();
                 self.ctx().audit(Level::Info, &format!("Main server \"{main_name}\" set this node's clips at once: {}", named.join(", ")));
@@ -1328,9 +1347,9 @@ impl NodeWorker {
             let Some(n) = safe_int(&body["slots"]).filter(|n| (1..=MAX_SLOTS).contains(n)) else {
                 return Ok(WorkerReply::error(400, &format!("Clips at once: 1 to {MAX_SLOTS}.")));
             };
-            let mut s = self.settings();
+            let mut s = self.settings()?;
             s.slots = n;
-            self.save(&s);
+            self.save(&s)?;
             self.pump();
             self.ctx().audit(Level::Info, &format!("Main server \"{main_name}\" set this node to {n} clips at once"));
             return Ok(WorkerReply::json(200, &json!({ "slots": n })));
