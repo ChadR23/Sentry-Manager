@@ -305,4 +305,37 @@ mod tests {
         let out = with_prefetch("<!doctype html><head><title>x</title>", &["/api/vehicles".into()]);
         assert_eq!(out, "<!doctype html><head>\n<script src=\"/web/prefetch.js\" data-urls=\"[&quot;/api/vehicles&quot;]\"></script><title>x</title>");
     }
+
+    /// A collapsed clip list is only its arrow: what electronApiShim.js adds to Studio's clip
+    /// list (the moments, the vehicle picker) folds away with Studio's own parts, collapsed
+    /// (floating layout) and hidden (Classic layout), in web/studioEmbed.css and in the Sentry Six
+    /// pack's copy the default interface serves (and its .zip). The camera labels are drawn at
+    /// their exact places ("Front" read "Fro nt" with its letters snapped to whole pixels).
+    #[test]
+    fn a_collapsed_clip_list_shows_only_its_arrow() {
+        let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let read = |p: &str| std::fs::read_to_string(repo.join(p)).unwrap();
+        let shim = read("web/electronApiShim.js");
+        let at = shim.find("getElementById('clipBrowser')").expect("the shim adds to the clip list");
+        assert!(shim[at..].contains("box.className = 'sm-moments'"), "the moments go in the clip list");
+        assert!(shim.contains("select.className = 'sm-vehicle-select'"));
+        let studio = read("src/renderer/style.css");
+        let web = read("web/studioEmbed.css");
+        let pack = read("examples/ui-packs/sentry-six/web/studioEmbed.css");
+        assert!(pack.starts_with(&web), "the pack's copy starts with web/studioEmbed.css");
+        for mode in ["collapsed", "hidden"] {
+            let boxed = regex::Regex::new(&format!(r"\.clips-mode-{mode} \.clip-browser \{{[^}}]*width: 44px")).unwrap();
+            assert!(boxed.is_match(&studio), "{mode}: Studio's 44 px box");
+            for added in ["sm-moments", "sm-vehicle-select"] {
+                let gone = regex::Regex::new(&format!(r"\.clips-mode-{mode} #clipBrowser \.{added}\b[^{{]*\{{[^}}]*display:\s*none")).unwrap();
+                assert!(gone.is_match(&web), "{mode}: {added}");
+            }
+        }
+        let zip = std::fs::read(repo.join("examples/ui-packs/sentry-six.zip")).unwrap();
+        let entries = super::super::zip::read_zip(&zip, &Default::default()).unwrap();
+        let css = entries.iter().find(|e| e.name == "web/studioEmbed.css").expect("in the pack's .zip");
+        assert_eq!(css.data, pack.as_bytes(), "the .zip holds the folder's copy");
+        let label = regex::Regex::new(r"\.multi-label \{[^}]*text-rendering: geometricPrecision").unwrap();
+        assert!(label.is_match(&studio), "camera labels at their exact places");
+    }
 }
