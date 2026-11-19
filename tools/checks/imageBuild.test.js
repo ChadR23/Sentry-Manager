@@ -48,6 +48,33 @@ test('nothing is tagged before every test passed and both images were checked', 
   assert.equal((workflow.match(/^\s+tags:/gm) || []).length, 1, 'only the local check image has a tag in a build');
 });
 
+test('the image keeps ffmpeg 8: Jellyfin\'s, no fallback to an older one, and the image check fails anything else', () => {
+  const dockerfile = fs.readFileSync(path.join(REPO, 'Dockerfile'), 'utf8');
+  const run = dockerfile.slice(dockerfile.indexOf('apt-get upgrade -y'), dockerfile.indexOf('find / -xdev'));
+  assert.match(run, /apt-get install -y --no-install-recommends jellyfin-ffmpeg8 /, 'Jellyfin\'s ffmpeg 8 is installed');
+  assert.doesNotMatch(dockerfile, /jellyfin-ffmpeg[0-7]\b|apt-cache show/, 'and nothing falls back to an older one');
+  assert.doesNotMatch(run, /install[^\n]*\sffmpeg(\s|$)/m, 'nor Debian\'s own ffmpeg');
+  const workflow = fs.readFileSync(path.join(REPO, '.github/workflows/image.yml'), 'utf8');
+  const check = workflow.slice(workflow.indexOf('- name: Check the image'), workflow.indexOf('docker rm -f check'));
+  const gate = check.split('\n').map((l) => l.trim()).find((l) => l.startsWith('major="$(printf '));
+  assert.ok(gate, 'the image check looks at the ffmpeg version');
+  const fed = check.indexOf('v="$(docker exec check ffmpeg -hide_banner -version | head -1)"');
+  assert.ok(fed >= 0 && fed < check.indexOf(gate), 'of the image\'s own ffmpeg');
+  const { spawnSync } = require('child_process');
+  const passes = (v) => spawnSync('sh', ['-c', gate], { env: { ...process.env, v } }).status === 0;
+  for (const v of ['ffmpeg version 8.1.3-Jellyfin Copyright (c) 2000-2026 the FFmpeg developers', 'ffmpeg version 9.0-Jellyfin', 'ffmpeg version 10.1', 'ffmpeg version n8.0', 'ffmpeg version n10.0', 'ffmpeg version 100.1', 'ffmpeg version n100.1',
+    'ffmpeg version 8.0.1 Copyright (c) 2000-2025 the FFmpeg developers', 'ffmpeg version 8.1-1ubuntu1', 'ffmpeg version 8.1+git20260101', 'ffmpeg version 8.1~rc1']) {
+    assert.ok(passes(v), `${v}: passes`);
+  }
+  // (only a version it knows to be 8 or newer: an unknown form, like a master build's N-..., fails)
+  for (const v of ['ffmpeg version 7.1.2-Jellyfin', 'ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FFmpeg developers', 'ffmpeg version n7.1',
+    'ffmpeg version N-118000-gdeadbeef', 'ffmpeg version 7-Jellyfin', 'ffmpeg version 7:6.1.1-3ubuntu5', 'ffmpeg version 07.1', 'libva info: VA-API version 1.22.0', '',
+    'ffmpeg version 8.not-a-version', 'ffmpeg version 8.', 'ffmpeg version 10.x', 'ffmpeg version n8.x', 'ffmpeg version 8:6.1.1', 'ffmpeg version 08.1', 'ffmpeg version 8.0garbage', 'ffmpeg version 8.1.3garbage', 'ffmpeg version 8.1.x',
+    'ffmpeg version 8.1-', 'ffmpeg version 8.1+', 'ffmpeg version 8.1~', 'ffmpeg version 8.1- Copyright']) {
+    assert.ok(!passes(v), `${v || '(nothing)'}: fails the check`);
+  }
+});
+
 test('CUDA\'s GPU order is not changed for the whole container', () => {
   const dockerfile = fs.readFileSync(path.join(REPO, 'Dockerfile'), 'utf8');
   assert.doesNotMatch(dockerfile, /CUDA_DEVICE_ORDER/, 'only an ffmpeg that names an NVIDIA GPU by index gets PCI order');

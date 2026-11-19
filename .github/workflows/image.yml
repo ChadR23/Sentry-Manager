@@ -219,7 +219,11 @@ jobs:
           for i in $(seq 1 60); do curl -fs http://127.0.0.1:9000/healthz >/dev/null && break; sleep 2; done
           docker logs check 2>&1 | tail -20
           curl -fsk -o /dev/null https://127.0.0.1:9000/login
-          docker exec check ffmpeg -hide_banner -version | head -1
+          v="$(docker exec check ffmpeg -hide_banner -version | head -1)"; echo "$v"
+          # ffmpeg 8 or newer only: a whole numeric version (major.minor[.patch...], then a suffix
+          # after -, + or ~, a space or the end), its major compared as a number; any other first line fails (CI's own
+          # tests use 6.1.1 for the frozen answers; an image never does)
+          major="$(printf '%s\n' "$v" | sed -nE 's/^ffmpeg version n?([1-9][0-9]*)\.[0-9]+(\.[0-9]+)*([-+~][^ ]+)?( .*)?$/\1/p')"; [ -n "$major" ] && [ "$major" -ge 8 ] || { echo "::error::the image's ffmpeg is not 8 or newer: $v"; exit 1; }
           docker exec check ffmpeg -hide_banner -encoders > encoders.txt
           for e in ${{ matrix.encoders }}; do
             grep -q " $e " encoders.txt || { echo "::error::ffmpeg has no $e encoder"; exit 1; }
