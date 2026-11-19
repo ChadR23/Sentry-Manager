@@ -426,6 +426,9 @@ canvas,
     font-size: 11px;
     font-weight: 700;
     letter-spacing: 0.2px;
+    /* Letters at their exact places: with them snapped to whole pixels
+       (Chrome on Linux), "Front" showed as "Fro nt" */
+    text-rendering: geometricPrecision;
     z-index: 2;
 }
 
