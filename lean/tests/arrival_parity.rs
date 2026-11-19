@@ -14,6 +14,7 @@ use sentry_lean::arrival::{Arrival, ArrivalCtx, ArrivedFile, Car, InventoryView,
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -77,6 +78,9 @@ fn rust_run(dir: &Path, data: &Path, phase: u32) -> Value {
         .iter()
         .map(|c| (c["rel"].as_str().unwrap().to_string(), KnownCodec { size: c["size"].as_u64().unwrap(), mtime_ms: c["mtimeMs"].as_f64().unwrap(), codec: c["codec"].as_str().map(String::from) }))
         .collect();
+    // the ctime each file had when Node recorded it (unpacking sets it to now)
+    let ctimes: std::collections::HashMap<std::path::PathBuf, f64> =
+        given["files"].as_array().unwrap().iter().map(|f| (dir.join("car").join(f["rel"].as_str().unwrap()), f["ctimeMs"].as_f64().unwrap())).collect();
     let held = given["held"].as_array().unwrap().iter().map(|h| h.as_str().unwrap().to_string()).collect();
     let base = dir.join("car");
     let ctx = Arc::new(Ctx { base: base.clone(), inv: InventoryView { files, scanning: false }, held, codecs });
@@ -85,6 +89,7 @@ fn rust_run(dir: &Path, data: &Path, phase: u32) -> Value {
     let mut o = Options::new(data);
     o.now = Box::new(move || now);
     o.settle_ms = 0.0;
+    o.ctime_of = Box::new(move |p, md| ctimes.get(p).copied().unwrap_or_else(|| md.mtime() as f64 * 1000.0));
     o.rate = 0.0;
     o.save_every = 4;
     o.compact_min = 6;
