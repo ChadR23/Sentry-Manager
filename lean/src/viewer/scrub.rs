@@ -309,6 +309,11 @@ impl ScrubFrames {
         Some(self.dir.join(format!("{key}.jpg")))
     }
 
+    /// The grid of a clip when it is made already: nothing is made, prepared or touched.
+    pub fn cached(&self, video: &Path) -> Option<PathBuf> {
+        self.cache_path_for(video).filter(|p| std::fs::metadata(p).is_ok_and(|m| m.len() > 0))
+    }
+
     /// The longest gap between keyframes from the packets' flags (ffprobe); infinity when unknown.
     fn keyframe_gap(&self, video: &Path) -> f64 {
         let Some(probe) = &self.ffprobe else { return f64::INFINITY };
