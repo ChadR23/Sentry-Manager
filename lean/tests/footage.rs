@@ -7,7 +7,7 @@
 use sentry_lean::app::App;
 use sentry_lean::catalog::Catalog;
 use sentry_lean::footage::bin::{self, BIN_DIR};
-use sentry_lean::footage::ctx::{Caller, Ctx, Level, LocalCore};
+use sentry_lean::footage::ctx::{Caller, Ctx, Fail, Level, LocalCore};
 use sentry_lean::footage::mdb::{BinFile, BinItem, ManagerDb};
 use sentry_lean::footage::routes::{self, Reply};
 use sentry_lean::footage::vehicles::{Options, Vehicles};
@@ -81,6 +81,22 @@ fn write(root: &Path, rel: &str, data: &[u8]) {
     std::fs::write(p, data).unwrap();
 }
 
+const ROOT_MOUNT: &str = "1 0 8:1 / / rw - ext4 /dev/sda1 rw\n";
+
+/// The mount table the server reads: "/" and these (mount point, "fs-type source", minor number),
+/// each mounted in turn on what held its folder then (the deepest one listed before it).
+fn mounts(f: &Fixture, more: &[(&Path, &str, u32)]) {
+    let mut t = ROOT_MOUNT.to_string();
+    let mut done: Vec<(usize, &Path)> = Vec::new();
+    for (i, (at, what, minor)) in more.iter().enumerate() {
+        let id = 40 + i;
+        let parent = done.iter().filter(|(_, p)| at.starts_with(p)).max_by_key(|(_, p)| p.as_os_str().len()).map_or(1, |(id, _)| *id);
+        t.push_str(&format!("{id} {parent} 0:{minor} / {} rw - {what} rw\n", at.display()));
+        done.push((id, at));
+    }
+    std::fs::write(f.dir.join("mountinfo"), t).unwrap();
+}
+
 /// A folder vehicle "car" on `files` (rel -> content), scanned.
 fn fixture(name: &str, files: &[(&str, &[u8])]) -> Fixture {
     let dir = tmp(name);
@@ -93,7 +109,9 @@ fn fixture(name: &str, files: &[(&str, &[u8])]) -> Fixture {
     let data = dir.join("data");
     std::fs::create_dir_all(&data).unwrap();
     let core = Arc::new(TestCore { inner: LocalCore::open(&data).unwrap(), busy: Mutex::new(HashSet::new()), jobs: Mutex::new(Vec::new()) });
-    let vehicles = Vehicles::new(core.clone(), Options { footage_root: footage.clone(), folder_roots: vec![footage.clone()], protected_dirs: vec![data.clone()], mountinfo: dir.join("no-mountinfo"), default_tz: None });
+    // (the mount table the server reads: one file system; mounts() changes it)
+    std::fs::write(dir.join("mountinfo"), ROOT_MOUNT).unwrap();
+    let vehicles = Vehicles::new(core.clone(), Options { footage_root: footage.clone(), folder_roots: vec![footage.clone()], protected_dirs: vec![data.clone()], mountinfo: dir.join("mountinfo"), default_tz: None });
     let catalog = Catalog::open(&data.join("lean-catalog.sqlite")).unwrap();
     let app = App::new(vehicles, core.clone(), catalog, dir.clone(), Thumbnails::new(data.join("thumbnails"), "ffmpeg".into(), 1));
     app.vehicles.add(&json!({ "id": "car", "name": "Car", "source": { "type": "path", "path": root.to_string_lossy() } })).unwrap();
@@ -507,6 +525,698 @@ fn clip_codecs_an_older_server_kept_in_its_settings_move_into_the_catalog_and_ar
     assert_eq!(f.app.catalog.codec("car", c).unwrap(), Some((sc, mc, None)), "a clip whose size changed is read again");
     assert_eq!(f.app.state_of("car").unwrap().codecs.get(a), Some(Some("h265")));
     assert_eq!(f.core.db().get("codecs:car"), None, "the settings value is moved, not kept");
+}
+
+#[test]
+fn footage_a_scan_cannot_read_keeps_what_the_last_scan_saw_and_its_codecs() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |p: &Path, m: u32| std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap();
+    let a = "TeslaCam/RecentClips/2026-11-10_06-00-00-front.mp4";
+    let b = "TeslaCam/SentryClips/2026-11-10_07-00-00/2026-11-10_06-59-00-front.mp4";
+    let c = "TeslaCam/SentryClips/2026-11-10_08-00-00/2026-11-10_07-59-00-front.mp4";
+    let f = fixture("keep-unread", &[(a, b"x"), (b, b"x"), (c, b"x")]);
+    wait(|| !f.app.jobs.busy("codecs:car"));
+    let codecs = f.app.catalog.codecs("car").unwrap();
+    assert_eq!(codecs.len(), 3);
+    let event = f.root.join("TeslaCam/SentryClips/2026-11-10_07-00-00");
+    mode(&event, 0o000);
+    if std::fs::read_dir(&event).is_ok() {
+        // (permissions do not stop root)
+        mode(&event, 0o755);
+        return;
+    }
+    // b's event cannot be read while c's goes for real
+    std::fs::remove_dir_all(f.root.join("TeslaCam/SentryClips/2026-11-10_08-00-00")).unwrap();
+    f.app.scan_now("car", false).unwrap();
+    wait(|| !f.app.jobs.busy("codecs:car"));
+    let st = f.app.state_of("car").unwrap();
+    assert!(st.file_list.contains_key(a) && st.file_list.contains_key(b), "b as the last scan saw it");
+    assert!(!st.file_list.contains_key(c), "gone from a folder listed whole: gone");
+    assert!(st.last_error.as_deref().is_some_and(|e| e.contains("could not be read")), "{:?}", st.last_error);
+    let now = f.app.catalog.codecs("car").unwrap();
+    assert_eq!((now.get(b), now.get(c)), (codecs.get(b), None), "b's codec is kept, so it is not read again");
+    // the cleanup does not count footage it could not see
+    let refused = policies::run(&f.app, "car", None).unwrap_err();
+    assert_eq!(refused.status, 503, "{}", refused.message);
+    // after a restart (a new server state on the same catalog), from the catalog
+    let catalog = Catalog::open(&f.dir.join("data/lean-catalog.sqlite")).unwrap();
+    let app2 = App::new(f.app.vehicles.clone(), f.core.clone(), catalog, f.dir.clone(), Thumbnails::new(f.dir.join("data/t"), "ffmpeg".into(), 1));
+    let st2 = app2.scan_now("car", false).unwrap();
+    assert!(st2.file_list.contains_key(a) && st2.file_list.contains_key(b) && st2.kept == 1, "b as the catalog has it");
+    // the catalog cannot be read (a new server state on it, its scans table gone): nothing changes
+    let catalog = Catalog::open(&f.dir.join("data/lean-catalog.sqlite")).unwrap();
+    let app3 = App::new(f.app.vehicles.clone(), f.core.clone(), catalog, f.dir.clone(), Thumbnails::new(f.dir.join("data/t"), "ffmpeg".into(), 1));
+    let raw = rusqlite::Connection::open(f.dir.join("data/lean-catalog.sqlite")).unwrap();
+    raw.execute_batch("ALTER TABLE catalog_scans RENAME TO catalog_scans_away").unwrap();
+    let blind = app3.scan_now("car", false);
+    raw.execute_batch("ALTER TABLE catalog_scans_away RENAME TO catalog_scans").unwrap();
+    let blind = blind.err().unwrap();
+    assert!(blind.status == 503 && blind.message.contains("catalog"), "{}", blind.message);
+    // asked through the route: the 503 comes back, and the inventory is announced
+    f.core.inner.topics.lock().unwrap().clear();
+    assert_eq!(call(&f, "POST", "vehicles/car/policy/run", json!({})).err().map(|e| e.0), Some(503));
+    assert!(f.core.inner.topics.lock().unwrap().iter().any(|t| t == "inventory"));
+    mode(&event, 0o755);
+    // the footage on a drive mounted at TeslaCam (a scan notes where it found footage)
+    let drive = f.root.join("TeslaCam");
+    mounts(&f, &[(&drive, "ext4 /dev/sdb1", 17)]);
+    f.app.scan_now("car", false).unwrap();
+    wait(|| !f.app.jobs.busy("codecs:car"));
+    let now = f.app.catalog.codecs("car").unwrap();
+    // the drive not mounted, its mount point left empty: nothing changes until it is back
+    let away = f.dir.join("away");
+    std::fs::rename(&drive, &away).unwrap();
+    std::fs::create_dir(&drive).unwrap();
+    mounts(&f, &[]);
+    let empty = f.app.scan_now("car", true);
+    let st = f.app.state_of("car").unwrap();
+    assert_eq!(empty.err().map(|e| e.status), Some(503));
+    assert!(!st.scanning && st.last_error.as_deref().is_some_and(|e| e.contains("not mounted")), "{:?}", st.last_error);
+    assert!(st.file_list.contains_key(a) && st.file_list.contains_key(b));
+    assert_eq!(f.app.catalog.codecs("car").unwrap(), now, "the codecs stay");
+    // mounted again: the scan goes on from there and the warning clears
+    std::fs::remove_dir(&drive).unwrap();
+    std::fs::rename(&away, &drive).unwrap();
+    mounts(&f, &[(&drive, "ext4 /dev/sdb1", 17)]);
+    f.app.scan_now("car", true).unwrap();
+    wait(|| !f.app.jobs.busy("codecs:car"));
+    let st = f.app.state_of("car").unwrap();
+    assert!(st.last_error.is_none() && st.file_list.contains_key(b) && st.file_list.len() == 2);
+    assert_eq!(f.app.catalog.codecs("car").unwrap(), now);
+    // emptied with the drive mounted: the footage was deleted, and the scan says so
+    std::fs::rename(&drive, &away).unwrap();
+    std::fs::create_dir(&drive).unwrap();
+    let st = f.app.scan_now("car", true).unwrap();
+    assert!(st.last_error.is_none() && st.file_list.is_empty(), "{:?}", st.last_error);
+}
+
+#[test]
+fn no_footage_where_some_was_is_a_drive_gone_only_when_another_mount_holds_its_folder() {
+    let a = "TeslaCam/RecentClips/2026-11-10_06-00-00-front.mp4";
+    let f = fixture("mount-gone", &[(a, b"x")]);
+    let share = f.root.join("TeslaCam");
+    // a share mounted there, then mounted again (another device number): the same share
+    mounts(&f, &[(&share, "cifs //nas/cam", 52)]);
+    f.app.scan_now("car", false).unwrap();
+    mounts(&f, &[(&share, "cifs //nas/cam", 58)]);
+    std::fs::remove_file(f.root.join(a)).unwrap();
+    let st = f.app.scan_now("car", false).unwrap();
+    assert!(st.file_list.is_empty() && st.last_error.is_none(), "deleted on the share: {:?}", st.last_error);
+    // footage again, then the share not mounted (an empty folder left under its mount point):
+    // nothing changes until it is back
+    write(&f.root, a, b"x");
+    f.app.scan_now("car", false).unwrap();
+    std::fs::remove_file(f.root.join(a)).unwrap();
+    mounts(&f, &[]);
+    assert_eq!(f.app.scan_now("car", false).err().map(|e| e.status), Some(503));
+    assert!(f.app.state_of("car").unwrap().file_list.contains_key(a));
+    // no mount table to tell: as with no note, no footage where the catalog saw some changes nothing
+    std::fs::remove_file(f.dir.join("mountinfo")).unwrap();
+    assert_eq!(f.app.scan_now("car", false).err().map(|e| e.status), Some(503));
+    // where the footage was not noted (a server from before the notes): kept too
+    mounts(&f, &[(&share, "cifs //nas/cam", 58)]);
+    f.core.db().del("footageMount:car");
+    assert_eq!(f.app.scan_now("car", false).err().map(|e| e.status), Some(503));
+}
+
+#[test]
+fn a_drive_mounted_below_the_footage_folder_that_is_gone_changes_nothing_until_it_is_back() {
+    let r = "TeslaCam/RecentClips/2026-11-10_06-00-00-front.mp4";
+    let s = "TeslaCam/SentryClips/2026-11-10_07-00-00/2026-11-10_06-59-00-front.mp4";
+    let f = fixture("two-mounts", &[(r, b"x"), (s, b"x")]);
+    let (recent, sentry) = (f.root.join("TeslaCam/RecentClips"), f.root.join("TeslaCam/SentryClips"));
+    mounts(&f, &[(&recent, "ext4 /dev/sdb1", 17), (&sentry, "ext4 /dev/sdc1", 33)]);
+    f.app.scan_now("car", false).unwrap();
+    // the Sentry drive unplugged, an empty folder in its place; a new clip on the other one
+    let away = f.dir.join("away");
+    std::fs::rename(&sentry, &away).unwrap();
+    std::fs::create_dir(&sentry).unwrap();
+    let r2 = "TeslaCam/RecentClips/2026-11-10_06-01-00-front.mp4";
+    write(&f.root, r2, b"x");
+    mounts(&f, &[(&recent, "ext4 /dev/sdb1", 17)]);
+    let gone = f.app.scan_now("car", false).err().unwrap();
+    assert!(gone.status == 503 && gone.message.contains("TeslaCam/SentryClips is not mounted"), "{}", gone.message);
+    let st = f.app.state_of("car").unwrap();
+    assert!(st.file_list.contains_key(r) && st.file_list.contains_key(s) && !st.file_list.contains_key(r2), "nothing changes until it is back");
+    // plugged in again: read again
+    std::fs::remove_dir(&sentry).unwrap();
+    std::fs::rename(&away, &sentry).unwrap();
+    mounts(&f, &[(&recent, "ext4 /dev/sdb1", 17), (&sentry, "ext4 /dev/sdc1", 33)]);
+    let st = f.app.scan_now("car", false).unwrap();
+    assert!(st.kept == 0 && st.last_error.is_none() && st.file_list.len() == 3, "{:?}", st.last_error);
+}
+
+#[test]
+fn a_drive_inside_another_does_not_stand_for_it_and_one_mounted_at_another_folder_moved() {
+    let r = "TeslaCam/RecentClips/2026-11-10_06-00-00-front.mp4";
+    let s = "TeslaCam/SentryClips/2026-11-10_07-00-00/2026-11-10_06-59-00-front.mp4";
+    let f = fixture("nested-mounts", &[(r, b"x"), (s, b"x")]);
+    let (outer, inner) = (f.root.join("TeslaCam"), f.root.join("TeslaCam/SentryClips"));
+    mounts(&f, &[(&outer, "ext4 /dev/sdb1", 17), (&inner, "ext4 /dev/sdc1", 33)]);
+    f.app.scan_now("car", false).unwrap();
+    // the outer drive gone while the one mounted inside it is still there with its clip
+    std::fs::remove_file(f.root.join(r)).unwrap();
+    mounts(&f, &[(&inner, "ext4 /dev/sdc1", 33)]);
+    let gone = f.app.scan_now("car", false).err().unwrap();
+    assert!(gone.status == 503 && gone.message.contains("mounted at TeslaCam is not mounted"), "{}", gone.message);
+    assert!(f.app.state_of("car").unwrap().file_list.contains_key(r));
+    // both there, the inner drive mounted at SavedClips instead: moved, read where it is now
+    write(&f.root, r, b"x");
+    let saved = f.root.join("TeslaCam/SavedClips");
+    std::fs::rename(&inner, &saved).unwrap();
+    mounts(&f, &[(&outer, "ext4 /dev/sdb1", 17), (&saved, "ext4 /dev/sdc1", 33)]);
+    let st = f.app.scan_now("car", false).unwrap();
+    let moved = "TeslaCam/SavedClips/2026-11-10_07-00-00/2026-11-10_06-59-00-front.mp4";
+    assert!(st.file_list.contains_key(moved) && !st.file_list.contains_key(s) && st.last_error.is_none(), "{:?}", st.last_error);
+}
+
+#[test]
+fn two_mounts_that_look_the_same_are_told_apart_by_their_folders() {
+    let r = "TeslaCam/RecentClips/2026-11-10_06-00-00-front.mp4";
+    let s = "TeslaCam/SentryClips/2026-11-10_07-00-00/2026-11-10_06-59-00-front.mp4";
+    let f = fixture("same-mounts", &[(r, b"x"), (s, b"x")]);
+    let (recent, sentry, outer) = (f.root.join("TeslaCam/RecentClips"), f.root.join("TeslaCam/SentryClips"), f.root.join("TeslaCam"));
+    let away = f.dir.join("away");
+    // one share mounted at two folders; the one at SentryClips gone: not taken for it moving
+    mounts(&f, &[(&recent, "cifs //nas/cam", 52), (&sentry, "cifs //nas/cam", 53)]);
+    f.app.scan_now("car", false).unwrap();
+    // (a note from before the mounts seen were kept never tells a move)
+    let mut note = f.core.db().get("footageMount:car").unwrap();
+    note.as_object_mut().unwrap().remove("seen");
+    f.core.db().set("footageMount:car", &note);
+    std::fs::rename(&sentry, &away).unwrap();
+    std::fs::create_dir(&sentry).unwrap();
+    mounts(&f, &[(&recent, "cifs //nas/cam", 52)]);
+    let gone = f.app.scan_now("car", false).err().unwrap();
+    assert!(gone.status == 503 && gone.message.contains("SentryClips is not mounted"), "{}", gone.message);
+    // mounted at TeslaCam and inside it at SentryClips; the inner one gone: what holds its folder
+    // looks the same, and it is still gone
+    std::fs::remove_dir(&sentry).unwrap();
+    std::fs::rename(&away, &sentry).unwrap();
+    mounts(&f, &[(&outer, "cifs //nas/cam", 51), (&sentry, "cifs //nas/cam", 53)]);
+    f.app.scan_now("car", false).unwrap();
+    std::fs::rename(&sentry, &away).unwrap();
+    std::fs::create_dir(&sentry).unwrap();
+    mounts(&f, &[(&outer, "cifs //nas/cam", 51)]);
+    let gone = f.app.scan_now("car", false).err().unwrap();
+    assert!(gone.status == 503 && gone.message.contains("SentryClips is not mounted"), "{}", gone.message);
+    assert!(f.app.state_of("car").unwrap().file_list.contains_key(s));
+}
+
+#[test]
+fn the_footage_folder_s_drive_and_one_below_it_that_look_the_same_are_told_apart() {
+    let r = "TeslaCam/RecentClips/2026-11-10_06-00-00-front.mp4";
+    let s = "TeslaCam/SentryClips/2026-11-10_07-00-00/2026-11-10_06-59-00-front.mp4";
+    let f = fixture("root-same", &[(r, b"x"), (s, b"x")]);
+    let sentry = f.root.join("TeslaCam/SentryClips");
+    let both = |f: &Fixture| mounts(f, &[(&f.root, "cifs //nas/cam", 51), (&sentry, "cifs //nas/cam", 53)]);
+    both(&f);
+    f.app.scan_now("car", false).unwrap();
+    // the lower one gone, its folder left empty: the one holding it looks the same, and it is gone
+    let away = f.dir.join("away");
+    std::fs::rename(&sentry, &away).unwrap();
+    std::fs::create_dir(&sentry).unwrap();
+    mounts(&f, &[(&f.root, "cifs //nas/cam", 51)]);
+    let gone = f.app.scan_now("car", false).err().unwrap();
+    assert!(gone.status == 503 && gone.message.contains("SentryClips is not mounted"), "{}", gone.message);
+    // back; then the footage folder's own gone (its clip with it) while the lower one stays
+    std::fs::remove_dir(&sentry).unwrap();
+    std::fs::rename(&away, &sentry).unwrap();
+    both(&f);
+    f.app.scan_now("car", false).unwrap();
+    std::fs::remove_file(f.root.join(r)).unwrap();
+    mounts(&f, &[(&sentry, "cifs //nas/cam", 53)]);
+    let gone = f.app.scan_now("car", false).err().unwrap();
+    assert!(gone.status == 503 && gone.message.contains("footage folder is on is not mounted"), "{}", gone.message);
+}
+
+#[test]
+fn a_drive_mounted_where_another_one_was_is_read_there() {
+    let saved = "TeslaCam/SavedClips/2026-11-10_07-00-00/2026-11-10_06-59-00-front.mp4";
+    let sentry = "TeslaCam/SentryClips/2026-11-11_07-00-00/2026-11-11_06-59-00-front.mp4";
+    let f = fixture("swap", &[(saved, b"x"), (sentry, b"x")]);
+    let (a, b) = (f.root.join("TeslaCam/SavedClips"), f.root.join("TeslaCam/SentryClips"));
+    mounts(&f, &[(&a, "ext4 /dev/sdb1", 17), (&b, "ext4 /dev/sdc1", 33)]);
+    f.app.scan_now("car", false).unwrap();
+    // the SentryClips drive unplugged, and the SavedClips drive mounted in its place: its footage
+    // is what that folder holds now
+    std::fs::rename(&b, f.dir.join("b-away")).unwrap();
+    std::fs::rename(&a, &b).unwrap();
+    std::fs::create_dir(&a).unwrap();
+    mounts(&f, &[(&b, "ext4 /dev/sdb1", 17)]);
+    let st = f.app.scan_now("car", false).unwrap();
+    let now = "TeslaCam/SentryClips/2026-11-10_07-00-00/2026-11-10_06-59-00-front.mp4";
+    assert!(st.file_list.contains_key(now) && !st.file_list.contains_key(saved) && !st.file_list.contains_key(sentry), "{:?}", st.last_error);
+}
+
+#[test]
+fn a_recycle_bin_move_s_rebuild_leaves_in_a_file_back_at_its_place_and_other_sources_alone() {
+    use std::os::unix::fs::PermissionsExt;
+    let sv = "TeslaCam/SavedClips/2020-01-03_10-00-00/2020-01-03_09-59-00-front.mp4";
+    let f = fixture("rebuild-back", &[(A, b"clip"), (B, b"clip"), (EV, b"clip"), (sv, b"clip")]);
+    let key = f.root.to_string_lossy().into_owned();
+    let gone: HashSet<String> = [A, B, EV, sv].iter().map(|r| r.to_string()).collect();
+    // sv is in the Recycle Bin and its folder is now a link to one holding a file of its name:
+    // that file is not it (the scan does not follow links either)
+    let sv_dir = f.root.join(sv).parent().unwrap().to_path_buf();
+    let other = f.dir.join("other-event");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(other.join(Path::new(sv).file_name().unwrap()), b"clip").unwrap();
+    std::fs::remove_dir_all(&sv_dir).unwrap();
+    std::os::unix::fs::symlink(&other, &sv_dir).unwrap();
+    // the run moved all three; A came back (restored while it went on), B is in the Recycle Bin,
+    // and EV's folder cannot be looked at now
+    std::fs::rename(f.root.join(A), f.dir.join("a-binned")).unwrap();
+    std::fs::rename(f.dir.join("a-binned"), f.root.join(A)).unwrap();
+    std::fs::rename(f.root.join(B), f.dir.join("b-binned")).unwrap();
+    let event = f.root.join(EV).parent().unwrap().to_path_buf();
+    std::fs::set_permissions(&event, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let shut = std::fs::read_dir(&event).is_err();
+    // a move in the footage source the vehicle had before, or a state of another source: nothing
+    f.app.rebuild_without("car", &gone, "/elsewhere");
+    let was = f.app.state_of("car").unwrap().root;
+    f.app.state.write().unwrap().get_mut("car").unwrap().root = "/elsewhere".into();
+    f.app.rebuild_without("car", &gone, &key);
+    f.app.state.write().unwrap().get_mut("car").unwrap().root = was;
+    assert!(f.app.state_of("car").unwrap().file_list.contains_key(B));
+    f.app.rebuild_without("car", &gone, &key);
+    std::fs::set_permissions(&event, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let st = f.app.state_of("car").unwrap();
+    let catalog = f.app.catalog.previous("car").unwrap().files;
+    assert!(st.file_list.contains_key(A) && catalog.contains_key(A), "back at its place: in");
+    assert!(!st.file_list.contains_key(B) && !catalog.contains_key(B), "in the Recycle Bin: out");
+    assert!(!st.file_list.contains_key(sv) && !catalog.contains_key(sv), "reached through a link: out");
+    if shut {
+        assert!(st.file_list.contains_key(EV) && catalog.contains_key(EV), "its place not to be looked at: kept");
+    }
+}
+
+#[test]
+fn a_drive_the_recycle_bin_took_the_last_clip_from_is_not_noted_and_may_go() {
+    let r = "TeslaCam/RecentClips/2026-11-10_06-00-00-front.mp4";
+    let s = "TeslaCam/SentryClips/2026-11-10_07-00-00/2026-11-10_06-59-00-front.mp4";
+    let f = fixture("bin-last", &[(r, b"x"), (s, b"x")]);
+    let sentry = f.root.join("TeslaCam/SentryClips");
+    mounts(&f, &[(&sentry, "ext4 /dev/sdc1", 33)]);
+    f.app.scan_now("car", false).unwrap();
+    let id = f.app.state_of("car").unwrap().recordings.iter().find(|x| x.files().any(|(rel, _)| rel == s)).unwrap().id.clone();
+    bin::trash(&f.app, "car", &[id], "trash").unwrap();
+    let noted = f.core.db().get("footageMount:car").unwrap();
+    assert!(!noted["mounts"].as_array().unwrap().iter().any(|m| m["at"] == "TeslaCam/SentryClips"), "{noted}");
+    // then unplugged: nothing of it is left, so the scan goes on
+    mounts(&f, &[]);
+    let st = f.app.scan_now("car", false).unwrap();
+    assert!(st.file_list.contains_key(r) && st.last_error.is_none(), "{:?}", st.last_error);
+}
+
+#[test]
+fn with_a_mount_table_it_cannot_read_a_noted_drive_s_folder_without_footage_changes_nothing() {
+    let r = "TeslaCam/RecentClips/2026-11-10_06-00-00-front.mp4";
+    let s = "TeslaCam/SentryClips/2026-11-10_07-00-00/2026-11-10_06-59-00-front.mp4";
+    let f = fixture("unread-table", &[(r, b"x"), (s, b"x")]);
+    let (recent, sentry) = (f.root.join("TeslaCam/RecentClips"), f.root.join("TeslaCam/SentryClips"));
+    mounts(&f, &[(&recent, "ext4 /dev/sdb1", 17), (&sentry, "ext4 /dev/sdc1", 33)]);
+    f.app.scan_now("car", false).unwrap();
+    // a mount over "/" now (a table it does not read), and the Sentry drive's folder without
+    // footage while the other has some: nothing changes
+    let mut table = std::fs::read_to_string(f.dir.join("mountinfo")).unwrap();
+    table.push_str("70 1 0:70 / / rw - tmpfs tmpfs rw\n");
+    std::fs::write(f.dir.join("mountinfo"), table).unwrap();
+    let away = f.dir.join("away");
+    std::fs::rename(&sentry, &away).unwrap();
+    std::fs::create_dir(&sentry).unwrap();
+    let gone = f.app.scan_now("car", false).err().unwrap();
+    assert!(gone.status == 503 && gone.message.contains("SentryClips is not mounted"), "{}", gone.message);
+    assert!(f.app.state_of("car").unwrap().file_list.contains_key(s));
+    // its footage there again: read
+    std::fs::remove_dir(&sentry).unwrap();
+    std::fs::rename(&away, &sentry).unwrap();
+    assert_eq!(f.app.scan_now("car", false).unwrap().file_list.len(), 2);
+}
+
+/// The fixture's mount table with a mount over "/" added: a table the server does not read.
+fn unreadable_table(f: &Fixture) {
+    let mut table = std::fs::read_to_string(f.dir.join("mountinfo")).unwrap();
+    table.push_str("70 1 0:70 / / rw - tmpfs tmpfs rw\n");
+    std::fs::write(f.dir.join("mountinfo"), table).unwrap();
+}
+
+#[test]
+fn with_a_mount_table_it_cannot_read_footage_on_a_drive_mounted_deeper_does_not_stand_for_the_one_above() {
+    let r = "TeslaCam/RecentClips/2026-11-10_06-00-00-front.mp4";
+    let s = "TeslaCam/SentryClips/2026-11-10_07-00-00/2026-11-10_06-59-00-front.mp4";
+    let f = fixture("unread-nested", &[(r, b"x"), (s, b"x")]);
+    let (tesla, sentry) = (f.root.join("TeslaCam"), f.root.join("TeslaCam/SentryClips"));
+    mounts(&f, &[(&tesla, "ext4 /dev/sdb1", 17), (&sentry, "ext4 /dev/sdc1", 33)]);
+    f.app.scan_now("car", false).unwrap();
+    // the TeslaCam drive's footage gone while the Sentry drive below it still has some: nothing changes
+    unreadable_table(&f);
+    let (recent, away) = (f.root.join("TeslaCam/RecentClips"), f.dir.join("away"));
+    std::fs::rename(&recent, &away).unwrap();
+    let gone = f.app.scan_now("car", false).err().unwrap();
+    assert!(gone.status == 503 && gone.message.contains("mounted at TeslaCam is not mounted"), "{}", gone.message);
+    assert!(f.app.state_of("car").unwrap().file_list.contains_key(r));
+    std::fs::rename(&away, &recent).unwrap();
+    assert_eq!(f.app.scan_now("car", false).unwrap().file_list.len(), 2);
+}
+
+#[test]
+fn with_a_mount_table_it_cannot_read_a_drive_the_recycle_bin_took_the_last_clip_from_is_not_noted_either() {
+    let r = "TeslaCam/RecentClips/2026-11-10_06-00-00-front.mp4";
+    let s = "TeslaCam/SentryClips/2026-11-10_07-00-00/2026-11-10_06-59-00-front.mp4";
+    let f = fixture("unread-bin", &[(r, b"x"), (s, b"x")]);
+    let (tesla, sentry) = (f.root.join("TeslaCam"), f.root.join("TeslaCam/SentryClips"));
+    mounts(&f, &[(&tesla, "ext4 /dev/sdb1", 17), (&sentry, "ext4 /dev/sdc1", 33)]);
+    f.app.scan_now("car", false).unwrap();
+    // the Recycle Bin takes the TeslaCam drive's only clip (the Sentry drive below it keeps its own)
+    unreadable_table(&f);
+    let id = f.app.state_of("car").unwrap().recordings.iter().find(|x| x.files().any(|(rel, _)| rel == r)).unwrap().id.clone();
+    bin::trash(&f.app, "car", &[id], "trash").unwrap();
+    let noted = f.core.db().get("footageMount:car").unwrap();
+    let ats: Vec<&str> = noted["mounts"].as_array().unwrap().iter().filter_map(|m| m["at"].as_str()).collect();
+    assert_eq!(ats, ["TeslaCam/SentryClips"], "{noted}");
+    // the next scans go on
+    let st = f.app.scan_now("car", false).unwrap();
+    assert!(st.file_list.contains_key(s) && !st.file_list.contains_key(r) && st.last_error.is_none(), "{:?}", st.last_error);
+}
+
+#[test]
+fn with_a_mount_table_it_cannot_read_a_noted_drive_whose_footage_could_only_be_kept_is_not_gone() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |p: &Path, m: u32| std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap();
+    let r = "TeslaCam/RecentClips/2026-11-10_06-00-00-front.mp4";
+    let r2 = "TeslaCam/RecentClips/2026-11-10_06-01-00-front.mp4";
+    let s = "TeslaCam/SentryClips/2026-11-10_07-00-00/2026-11-10_06-59-00-front.mp4";
+    let f = fixture("unread-kept", &[(r, b"x"), (s, b"x")]);
+    let (recent, sentry) = (f.root.join("TeslaCam/RecentClips"), f.root.join("TeslaCam/SentryClips"));
+    mounts(&f, &[(&recent, "ext4 /dev/sdb1", 17), (&sentry, "ext4 /dev/sdc1", 33)]);
+    f.app.scan_now("car", false).unwrap();
+    // a table it does not read, the Sentry drive's only event cannot be read and a new clip on the
+    // other drive: the scan goes on, the event kept
+    unreadable_table(&f);
+    let event = sentry.join("2026-11-10_07-00-00");
+    mode(&event, 0o000);
+    if std::fs::read_dir(&event).is_ok() {
+        // (permissions do not stop root)
+        mode(&event, 0o755);
+        return;
+    }
+    write(&f.root, r2, b"x");
+    let st = f.app.scan_now("car", false);
+    mode(&event, 0o755);
+    let st = st.unwrap();
+    assert_eq!(st.kept, 1);
+    assert!(st.file_list.contains_key(s) && st.file_list.contains_key(r2));
+}
+
+#[test]
+fn not_noted_no_footage_found_but_some_kept_is_not_a_drive_gone() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |p: &Path, m: u32| std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap();
+    let s = "TeslaCam/SentryClips/2026-11-10_07-00-00/2026-11-10_06-59-00-front.mp4";
+    let f = fixture("unread-unnoted", &[(s, b"x")]);
+    // never a table it reads (nothing noted), and the only event cannot be read: kept
+    unreadable_table(&f);
+    f.core.db().del("footageMount:car");
+    let event = f.root.join("TeslaCam/SentryClips/2026-11-10_07-00-00");
+    mode(&event, 0o000);
+    if std::fs::read_dir(&event).is_ok() {
+        // (permissions do not stop root)
+        mode(&event, 0o755);
+        return;
+    }
+    let st = f.app.scan_now("car", false);
+    mode(&event, 0o755);
+    assert_eq!(st.unwrap().kept, 1);
+    assert!(f.core.db().get("footageMount:car").is_none());
+}
+
+#[test]
+fn a_mount_over_the_footage_folder_hides_the_drives_mounted_below_it() {
+    let s = "TeslaCam/SentryClips/2026-11-10_07-00-00/2026-11-10_06-59-00-front.mp4";
+    let f = fixture("hidden", &[(s, b"x")]);
+    let event = f.root.join("TeslaCam/SentryClips/2026-11-10_07-00-00");
+    mounts(&f, &[(&event, "ext4 /dev/sdd1", 49)]);
+    f.app.scan_now("car", false).unwrap();
+    // an empty file system mounted over the footage folder after it: the event's drive is still in
+    // the mount table, but no path reaches it
+    let mut table = std::fs::read_to_string(f.dir.join("mountinfo")).unwrap();
+    table.push_str(&format!("60 1 0:61 / {} rw - tmpfs tmpfs rw\n", f.root.display()));
+    std::fs::write(f.dir.join("mountinfo"), table).unwrap();
+    let away = f.dir.join("away");
+    std::fs::rename(f.root.join("TeslaCam"), &away).unwrap();
+    let gone = f.app.scan_now("car", false).err();
+    std::fs::rename(&away, f.root.join("TeslaCam")).unwrap();
+    assert_eq!(gone.map(|e| e.status), Some(503));
+    assert!(f.app.state_of("car").unwrap().file_list.contains_key(s));
+}
+
+#[test]
+fn a_drive_whose_footage_could_only_be_kept_stays_noted_and_its_going_changes_nothing() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |p: &Path, m: u32| std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap();
+    let r = "TeslaCam/RecentClips/2026-11-10_06-00-00-front.mp4";
+    let s = "TeslaCam/SentryClips/2026-11-10_07-00-00/2026-11-10_06-59-00-front.mp4";
+    let f = fixture("kept-mount", &[(r, b"x"), (s, b"x")]);
+    let sentry = f.root.join("TeslaCam/SentryClips");
+    mounts(&f, &[(&sentry, "ext4 /dev/sdc1", 33)]);
+    f.app.scan_now("car", false).unwrap();
+    // its only event cannot be read: kept, and the drive stays noted
+    let event = sentry.join("2026-11-10_07-00-00");
+    mode(&event, 0o000);
+    if std::fs::read_dir(&event).is_ok() {
+        // (permissions do not stop root)
+        mode(&event, 0o755);
+        return;
+    }
+    let st = f.app.scan_now("car", false);
+    mode(&event, 0o755);
+    assert_eq!(st.unwrap().kept, 1);
+    let noted = f.core.db().get("footageMount:car").unwrap();
+    assert!(noted["mounts"].as_array().unwrap().iter().any(|m| m["at"] == "TeslaCam/SentryClips"), "{noted}");
+    // then unplugged: nothing changes
+    std::fs::rename(&sentry, f.dir.join("away")).unwrap();
+    std::fs::create_dir(&sentry).unwrap();
+    mounts(&f, &[]);
+    assert_eq!(f.app.scan_now("car", false).err().map(|e| e.status), Some(503));
+    assert!(f.app.state_of("car").unwrap().file_list.contains_key(s));
+}
+
+#[test]
+fn the_footage_folder_s_own_drive_gone_while_one_below_stays_and_a_mount_folder_gone_with_its_drive() {
+    let r = "TeslaCam/RecentClips/2026-11-10_06-00-00-front.mp4";
+    let s = "TeslaCam/SentryClips/2026-11-10_07-00-00/2026-11-10_06-59-00-front.mp4";
+    let f = fixture("root-gone", &[(r, b"x"), (s, b"x")]);
+    let sentry = f.root.join("TeslaCam/SentryClips");
+    mounts(&f, &[(&f.root, "ext4 /dev/sdb1", 17), (&sentry, "ext4 /dev/sdc1", 33)]);
+    f.app.scan_now("car", false).unwrap();
+    // the footage folder's drive gone (its clip with it), the one below it still there
+    std::fs::remove_file(f.root.join(r)).unwrap();
+    mounts(&f, &[(&sentry, "ext4 /dev/sdc1", 33)]);
+    let gone = f.app.scan_now("car", false).err().unwrap();
+    assert!(gone.status == 503 && gone.message.contains("The drive the footage folder is on is not mounted"), "{}", gone.message);
+    // both back; then the lower one gone, its folder with it
+    write(&f.root, r, b"x");
+    mounts(&f, &[(&f.root, "ext4 /dev/sdb1", 17), (&sentry, "ext4 /dev/sdc1", 33)]);
+    f.app.scan_now("car", false).unwrap();
+    std::fs::rename(&sentry, f.dir.join("away")).unwrap();
+    mounts(&f, &[(&f.root, "ext4 /dev/sdb1", 17)]);
+    let gone = f.app.scan_now("car", false).err().unwrap();
+    assert!(gone.status == 503 && gone.message.contains("SentryClips is not mounted"), "{}", gone.message);
+}
+
+#[test]
+fn a_scan_that_waited_behind_one_that_walked_before_a_restore_does_not_take_its_answer() {
+    let f = fixture("restore-waiter", &[(A, b"clip")]);
+    let lock = f.app.footage.scan_lock("car");
+    let writing = lock.writing.lock().unwrap();
+    let app = f.app.clone();
+    let before = std::thread::spawn(move || app.scan_now("car", false));
+    // (it walked; then a file is put back and counted, as a restore does)
+    std::thread::sleep(Duration::from_millis(300));
+    write(&f.root, B, b"clip");
+    lock.restores.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    // someone asks for a scan now: it waits behind the one that walked before the restore
+    let app = f.app.clone();
+    let asked = std::thread::spawn(move || app.scan_now("car", false));
+    std::thread::sleep(Duration::from_millis(300));
+    drop(writing);
+    assert!(!before.join().unwrap().unwrap().file_list.contains_key(B), "(it walked before)");
+    assert!(asked.join().unwrap().unwrap().file_list.contains_key(B), "its answer has the restored file");
+}
+
+#[test]
+fn a_recycle_bin_run_skips_what_is_left_once_the_vehicle_s_footage_folder_changes() {
+    let f = fixture("bin-midrun", &[(A, b"clip"), (B, b"clip")]);
+    let id = f.app.state_of("car").unwrap().recordings.iter().find(|r| r.files().any(|(rel, _)| rel == B)).unwrap().id.clone();
+    // the run waits for the Recycle Bin's lock; meanwhile the vehicle moves to another folder
+    let held = f.app.footage.bin_lock("car");
+    let guard = held.lock().unwrap();
+    let app = f.app.clone();
+    let run = std::thread::spawn(move || bin::trash(&app, "car", &[id], "trash"));
+    std::thread::sleep(Duration::from_millis(300));
+    let other = f.dir.join("footage").join("other");
+    write(&other, B, b"clip");
+    f.app.vehicles.update("car", &json!({ "name": "Car", "source": { "type": "path", "path": other.to_string_lossy() } })).unwrap();
+    drop(guard);
+    let out = run.join().unwrap().unwrap();
+    assert!(out.moved.is_empty() && out.skipped.len() == 1, "nothing moved");
+    assert!(other.join(B).exists() && f.root.join(B).exists());
+}
+
+#[test]
+fn a_restore_while_a_scan_runs_is_followed_by_a_scan_that_walks_after_it() {
+    let f = fixture("restore-midscan", &[(A, b"clip"), (B, b"clip")]);
+    let id = f.app.state_of("car").unwrap().recordings.iter().find(|r| r.files().any(|(rel, _)| rel == B)).unwrap().id.clone();
+    bin::trash(&f.app, "car", &[id], "trash").unwrap();
+    let item = f.core.db().bin_items(Some("car"))[0].id.clone();
+    // a scan that walked before the restore waits to write
+    let lock = f.app.footage.scan_lock("car");
+    let writing = lock.writing.lock().unwrap();
+    let app = f.app.clone();
+    let before = std::thread::spawn(move || app.scan_now("car", false));
+    std::thread::sleep(Duration::from_millis(300));
+    let key = f.root.to_string_lossy().into_owned();
+    lock.moved.lock().unwrap().extend([("/elsewhere".to_string(), B.to_string()), (key.clone(), B.to_string())]);
+    bin::restore(&f.app, &item).unwrap();
+    assert_eq!(lock.restores.load(std::sync::atomic::Ordering::SeqCst), 1, "the restore is counted");
+    let marks = lock.moved.lock().unwrap().clone();
+    assert!(marks.contains(&("/elsewhere".to_string(), B.to_string())) && !marks.contains(&(key, B.to_string())), "only its own source's mark is taken off");
+    drop(writing);
+    assert!(!before.join().unwrap().unwrap().file_list.contains_key(B), "(it walked before the restore)");
+    wait(|| f.app.state_of("car").unwrap().file_list.contains_key(B));
+}
+
+#[test]
+fn a_cleanup_that_meets_footage_it_cannot_read_is_tried_again_soon_not_tomorrow() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |p: &Path, m: u32| std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap();
+    let a = "TeslaCam/RecentClips/2026-11-10_06-00-00-front.mp4";
+    let b = "TeslaCam/SentryClips/2026-11-10_07-00-00/2026-11-10_06-59-00-front.mp4";
+    let f = fixture("policy-retry", &[(a, b"x"), (b, b"x")]);
+    policies::set(&f.app, "car", &json!({ "enabled": true, "runAt": "00:00" })).unwrap();
+    let event = f.root.join("TeslaCam/SentryClips/2026-11-10_07-00-00");
+    mode(&event, 0o000);
+    if std::fs::read_dir(&event).is_ok() {
+        // (permissions do not stop root)
+        mode(&event, 0o755);
+        return;
+    }
+    let ran = policies::tick(&f.app, chrono::Local::now());
+    mode(&event, 0o755);
+    let saved = || policies::get(&f.app, "car");
+    assert!(ran && saved()["lastRunAt"].is_null(), "tried, and not the day's run");
+    assert!(saved()["lastResult"]["error"].as_str().is_some_and(|e| e.contains("could not be read")), "{}", saved());
+    assert!(!policies::tick(&f.app, chrono::Local::now()), "not again right away");
+    // (15 minutes later)
+    f.app.footage.policy_retry.lock().unwrap().clear();
+    assert!(policies::tick(&f.app, chrono::Local::now()));
+    assert!(saved()["lastRunAt"].is_number(), "{}", saved());
+    assert!(!policies::tick(&f.app, chrono::Local::now()), "once a day");
+}
+
+#[test]
+fn the_recycle_bin_moves_only_recordings_of_the_vehicle_s_footage_and_a_scan_after_it_took_all_is_empty() {
+    let f = fixture("bin-source", &[(A, b"clip"), (A2, b"clip")]);
+    let id = f.app.state_of("car").unwrap().recordings[0].id.clone();
+    // the state still of the footage the vehicle had before (its new one not scanned yet)
+    f.app.state.write().unwrap().get_mut("car").unwrap().root = "/elsewhere".into();
+    assert_eq!(bin::trash(&f.app, "car", &[id], "trash").err().map(|e| e.status), Some(409));
+    f.app.scan_now("car", false).unwrap();
+    let id = f.app.state_of("car").unwrap().recordings[0].id.clone();
+    assert_eq!(bin::trash(&f.app, "car", &[id], "trash").unwrap().moved.len(), 1);
+    // all of it in the Recycle Bin: the scan finds no footage, and that is what there is
+    let st = f.app.scan_now("car", false).unwrap();
+    assert!(st.file_list.is_empty() && st.last_error.is_none(), "{:?}", st.last_error);
+}
+
+#[test]
+fn files_the_recycle_bin_moves_while_a_scan_walks_are_not_put_back_by_it() {
+    let f = fixture("moved-while-walking", &[(A, b"clip"), (B, b"clip")]);
+    let lock = f.app.footage.scan_lock("car");
+    let writing = lock.writing.lock().unwrap();
+    let app = f.app.clone();
+    let scan = std::thread::spawn(move || app.scan_now("car", false));
+    // (the walk is done and the scan waits to write; the Recycle Bin moves B now)
+    std::thread::sleep(Duration::from_millis(300));
+    std::fs::rename(f.root.join(B), f.dir.join("b-moved")).unwrap();
+    lock.moved.lock().unwrap().insert((f.root.to_string_lossy().into_owned(), B.to_string()));
+    // (a mark from another source the vehicle had does not take A out)
+    lock.moved.lock().unwrap().insert(("/elsewhere".to_string(), A.to_string()));
+    drop(writing);
+    let st = scan.join().unwrap().unwrap();
+    assert!(st.file_list.contains_key(A) && !st.file_list.contains_key(B), "B is not put back");
+    assert!(!f.app.catalog.previous("car").unwrap().files.contains_key(B));
+}
+
+#[test]
+fn a_vehicle_moved_to_another_footage_folder_keeps_nothing_of_the_old_one() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |p: &Path, m: u32| std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap();
+    let a = "TeslaCam/RecentClips/2026-11-10_06-00-00-front.mp4";
+    let b = "TeslaCam/SentryClips/2026-11-10_07-00-00/2026-11-10_06-59-00-front.mp4";
+    let c = "TeslaCam/RecentClips/2026-11-11_06-00-00-front.mp4";
+    let f = fixture("keep-unread-moved", &[(a, b"x"), (b, b"x")]);
+    wait(|| !f.app.jobs.busy("codecs:car"));
+    // the new folder has the same event, unreadable there
+    let other = f.dir.join("footage").join("other");
+    write(&other, c, b"x");
+    write(&other, b, b"x");
+    let shut = other.join("TeslaCam/SentryClips/2026-11-10_07-00-00");
+    mode(&shut, 0o000);
+    if std::fs::read_dir(&shut).is_ok() {
+        // (permissions do not stop root)
+        mode(&shut, 0o755);
+        return;
+    }
+    f.app.vehicles.update("car", &json!({ "name": "Car", "source": { "type": "path", "path": other.to_string_lossy() } })).unwrap();
+    wait(|| f.app.vehicles.share("car").is_some_and(|s| s.is_healthy()));
+    let st = f.app.scan_now("car", false);
+    mode(&shut, 0o755);
+    let st = st.unwrap();
+    assert!(st.file_list.contains_key(c), "the new folder's own clip");
+    assert!(!st.file_list.contains_key(a) && !st.file_list.contains_key(b), "nothing of the old folder, not even where the new one could not be read");
+}
+
+#[test]
+fn a_scan_that_waited_behind_one_of_the_old_footage_folder_reads_the_new_one() {
+    let a = "TeslaCam/RecentClips/2026-11-10_06-00-00-front.mp4";
+    let c = "TeslaCam/RecentClips/2026-11-11_06-00-00-front.mp4";
+    let f = fixture("waiter-moved", &[(a, b"x")]);
+    wait(|| !f.app.jobs.busy("codecs:car"));
+    let other = f.dir.join("footage").join("other");
+    write(&other, c, b"x");
+    // a scan of the old folder is running: the vehicle moves, and a scan of the new one waits for it
+    let lock = f.app.footage.scan_lock("car");
+    let running = lock.running.lock().unwrap();
+    f.app.vehicles.update("car", &json!({ "name": "Car", "source": { "type": "path", "path": other.to_string_lossy() } })).unwrap();
+    wait(|| f.app.vehicles.share("car").is_some_and(|s| s.is_healthy()));
+    let app = f.app.clone();
+    let waiter = std::thread::spawn(move || app.scan_now("car", false));
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    // (the old folder's scan ends: what it left is the old folder's)
+    lock.done.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    drop(running);
+    let st = waiter.join().unwrap().unwrap();
+    assert!(st.file_list.contains_key(c) && !st.file_list.contains_key(a), "the new folder's clips, not the old one's");
+    // one that waited behind a scan of this folder that saw nothing gets that answer
+    let running = lock.running.lock().unwrap();
+    let app = f.app.clone();
+    let waiter = std::thread::spawn(move || app.scan_now("car", false));
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    *lock.failed.lock().unwrap() = Some((other.to_string_lossy().into_owned(), Fail::new(503, "not this time")));
+    lock.done.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    drop(running);
+    assert_eq!(waiter.join().unwrap().err().map(|e| e.message), Some("not this time".to_string()));
+    // one that walks itself (after a restore) does not take that answer
+    let running = lock.running.lock().unwrap();
+    let app = f.app.clone();
+    let fresh = std::thread::spawn(move || app.scan_fresh("car", false));
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    *lock.failed.lock().unwrap() = Some((other.to_string_lossy().into_owned(), Fail::new(503, "not this time")));
+    lock.done.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    drop(running);
+    assert!(fresh.join().unwrap().unwrap().file_list.contains_key(c));
 }
 
 #[test]

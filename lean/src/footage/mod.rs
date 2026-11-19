@@ -37,6 +37,20 @@ use std::sync::{Arc, Mutex};
 pub struct ScanLock {
     pub running: Mutex<()>,
     pub done: AtomicU64,
+    /// why the last scan saw nothing, and the footage source it read, for a scan that waited for it
+    pub failed: Mutex<Option<(String, ctx::Fail)>>,
+    /// held while a scan's or a Recycle Bin move's files go into the state and the catalog, so
+    /// neither writes over the other's newer files
+    pub writing: Mutex<()>,
+    /// files the Recycle Bin moved since the running scan began its walk, by footage source: not
+    /// put back by a scan of that source
+    pub moved: Mutex<std::collections::HashSet<(String, String)>>,
+    /// Recycle Bin restores so far; and how many there had been when the running scan, and the
+    /// last finished one, began walking: a scan that waited does not take the answer of one that
+    /// walked before a restore
+    pub restores: AtomicU64,
+    pub walking_from: AtomicU64,
+    pub walk_restores: AtomicU64,
 }
 
 /// The footage area's own state in the server (App.footage).
@@ -48,6 +62,8 @@ pub struct State {
     pub integrity: integrity::Runs,
     /// smbTest.js: whether one runs, and when the last minute's started
     pub smb_test: Mutex<(bool, Vec<f64>)>,
+    /// cleanups that met footage that cannot be read now: when each is tried again
+    pub policy_retry: Mutex<HashMap<String, f64>>,
 }
 
 impl State {

@@ -259,7 +259,10 @@ pub fn start(srv: &Arc<Server>) {
             tick.tick().await;
             let a = policies.clone();
             let _ = tokio::task::spawn_blocking(move || {
-                crate::footage::policies::tick(&a, chrono::Local::now());
+                // (a run changes the vehicle's state too, its error if it met unreachable footage)
+                if crate::footage::policies::tick(&a, chrono::Local::now()) {
+                    a.core.announce("inventory");
+                }
                 a.core.announce("bin");
             })
             .await;

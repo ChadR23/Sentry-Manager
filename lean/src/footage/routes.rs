@@ -71,9 +71,9 @@ pub fn wire(app: &Arc<App>) {
                         }
                     }
                     let light = !a.state_of(&id).is_some_and(|s| s.scanned);
-                    if a.scan_now(&id, light).is_ok() {
-                        a.core.announce("inventory");
-                    }
+                    // (a scan that failed changed the vehicle's state too: its error)
+                    let _ = a.scan_now(&id, light);
+                    a.core.announce("inventory");
                 });
             }
         }
@@ -415,8 +415,10 @@ pub fn handle(app: &Arc<App>, who: &Caller, method: &str, seg: &[&str], query: &
         ("POST", ["vehicles", id, "policy", "run"]) => {
             tri!(vehicle_or_404(app, id));
             let expect = b.get("expect").filter(|e| e.is_object() || e.is_array());
-            let out = tri!(super::policies::run(app, id, expect));
+            let out = super::policies::run(app, id, expect);
+            // (a run that stopped at its scan changed the vehicle's state too: its error)
             app.core.announce("inventory");
+            let out = tri!(out);
             app.core.announce("bin");
             ok(out)
         }

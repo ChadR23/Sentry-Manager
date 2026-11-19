@@ -10,7 +10,7 @@ use crate::footage::ctx::{Ctx, Fail, Level, Res};
 use crate::footage::vehicles::Vehicles;
 use crate::{footage, mp4};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -24,6 +24,65 @@ const LIGHT_SCANS: u32 = 5;
 pub use crate::footage::vehicles::Vehicle;
 
 static GENERATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Whether a regular file is at `rel` under `root`, looked at without following any symlink on
+/// the way (as the scan, which skips them): Ok(false) when it is not there (NotFound), is not a
+/// file, or is reached through a symlink; Err when a part of the way cannot be looked at.
+fn file_at(root: &Path, rel: &str) -> std::io::Result<bool> {
+    let parts: Vec<&str> = rel.split('/').filter(|p| !p.is_empty()).collect();
+    let mut p = root.to_path_buf();
+    for (i, part) in parts.iter().enumerate() {
+        p.push(part);
+        match std::fs::symlink_metadata(&p) {
+            Ok(m) if i + 1 == parts.len() => return Ok(m.is_file()),
+            Ok(m) if m.is_dir() => {}
+            Ok(_) => return Ok(false),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(false)
+}
+
+/// The mounts at and below a footage folder (share::mounts_at_and_below) by the folder of their
+/// point under it ("" for the one holding it), deepest first.
+struct Mounts(Vec<(String, String, String)>);
+
+impl Mounts {
+    /// None: a mount table share::mounts_at_and_below does not read.
+    fn of(table: &str, root: &Path) -> Option<Mounts> {
+        let r = root.to_string_lossy();
+        let mut at: Vec<(String, String, String)> = footage::share::mounts_at_and_below(table, &r)?
+            .into_iter()
+            .map(|(point, what)| {
+                let folder = point.strip_prefix(&*r).unwrap_or("").trim_start_matches('/').to_string();
+                let below = format!("{folder}/");
+                (folder, below, what)
+            })
+            .collect();
+        at.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        Some(Mounts(at))
+    }
+
+    /// The mount holding `rel` (a file or a folder): (the folder of its point, what it is).
+    fn holding(&self, rel: &str) -> Option<(&str, &str)> {
+        self.0.iter().find(|(folder, below, _)| folder.is_empty() || rel == folder || rel.starts_with(below.as_str())).map(|(f, _, w)| (f.as_str(), w.as_str()))
+    }
+
+    /// The mount at `folder` ("" the one holding the footage folder).
+    fn at(&self, folder: &str) -> Option<&str> {
+        self.0.iter().find(|(f, _, _)| f == folder).map(|(_, _, w)| w.as_str())
+    }
+}
+
+/// The noted mount folders (drive_gone; "" the footage folder's own) footage is found on: each
+/// file counts for the deepest one above it only.
+fn noted_on<'a, 'f>(ats: &'a [String], files: impl Iterator<Item = &'f FileEntry>) -> HashSet<&'a str> {
+    files
+        .filter_map(|f| ats.iter().filter(|at| at.is_empty() || f.rel.strip_prefix(at.as_str()).is_some_and(|r| r.starts_with('/'))).max_by_key(|at| at.len()))
+        .map(String::as_str)
+        .collect()
+}
 
 fn next_generation() -> u64 {
     GENERATIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
@@ -47,6 +106,11 @@ pub struct VehicleState {
     pub file_list: Arc<FileList>,
     pub dirs: Arc<HashMap<String, f64>>,
     pub started_at: f64,
+    /// the footage source the scan read (Vehicle::source_key): what is known of another one is
+    /// not carried over
+    pub root: String,
+    /// files the scan could not read, kept as the scan before saw them
+    pub kept: usize,
 }
 
 pub struct App {
@@ -183,6 +247,16 @@ impl App {
     /// full); the first light scan after a start begins from the catalog's last scan of the
     /// same folder.
     pub fn scan_now(self: &Arc<Self>, vid: &str, light: bool) -> Res<VehicleState> {
+        self.scan_with(vid, light, true)
+    }
+
+    /// scan_now, walking the footage again even when a scan finished while this one waited: after
+    /// files were put back, which that scan may have walked before.
+    pub fn scan_fresh(self: &Arc<Self>, vid: &str, light: bool) -> Res<VehicleState> {
+        self.scan_with(vid, light, false)
+    }
+
+    fn scan_with(self: &Arc<Self>, vid: &str, light: bool, share_answer: bool) -> Res<VehicleState> {
         let v = self.vehicle(vid).ok_or_else(|| Fail::new(404, "No such vehicle."))?;
         if self.vehicles.share(vid).is_some_and(|s| !s.is_healthy()) {
             return Err(Fail::new(503, format!("{}: the share is not available.", v.name)));
@@ -190,9 +264,26 @@ impl App {
         let lock = self.footage.scan_lock(vid);
         let asked = lock.done.load(std::sync::atomic::Ordering::SeqCst);
         let _one = lock.running.lock().unwrap();
-        if lock.done.load(std::sync::atomic::Ordering::SeqCst) != asked {
-            // (one finished while this waited: its answer is this one's)
-            return self.state_of(vid).ok_or_else(|| Fail::internal("no scan"));
+        // (the vehicle as it is now: its footage source, and its share, may have changed while this waited)
+        let v = self.vehicle(vid).ok_or_else(|| Fail::new(404, "No such vehicle."))?;
+        if self.vehicles.share(vid).is_some_and(|s| !s.is_healthy()) {
+            return Err(Fail::new(503, format!("{}: the share is not available.", v.name)));
+        }
+        let key = v.source_key();
+        let fresh = lock.restores.load(std::sync::atomic::Ordering::SeqCst) == lock.walk_restores.load(std::sync::atomic::Ordering::SeqCst);
+        if share_answer && fresh && lock.done.load(std::sync::atomic::Ordering::SeqCst) != asked {
+            // (one finished while this waited: its answer is this one's, when it read this footage
+            // source; one of a source the vehicle had before is not, and this one scans)
+            let failed = lock.failed.lock().unwrap().clone();
+            match failed {
+                Some((r, f)) if r == key => return Err(f),
+                Some(_) => {}
+                None => {
+                    if let Some(s) = self.state_of(vid).filter(|s| s.root == key) {
+                        return Ok(s);
+                    }
+                }
+            }
         }
         let prev = {
             let mut st = self.state.write().unwrap();
@@ -200,13 +291,14 @@ impl App {
             e.scanning = true;
             e.clone()
         };
-        let root = v.root.to_string_lossy().into_owned();
+        // (what is known of another footage source this vehicle had is not this one's)
+        let same_source = prev.scanned && prev.root == key;
         let mut lights = prev.light_scans;
         let mut resumed = false;
-        let previous = if light && prev.scanned && lights < LIGHT_SCANS {
+        let previous = if light && same_source && lights < LIGHT_SCANS {
             Some(scanner::Previous { files: prev.file_list.clone(), dirs: (*prev.dirs).clone(), started_ms: None })
-        } else if light && !prev.scanned {
-            let p = self.catalog.resume(vid, &root).unwrap_or_else(|e| {
+        } else if light && !same_source {
+            let p = self.catalog.resume(vid, &key).unwrap_or_else(|e| {
                 self.core.log("inventory", Level::Warn, &format!("Footage catalog not read: {e}"));
                 None
             });
@@ -219,9 +311,69 @@ impl App {
             None
         };
         let reuse = previous.is_some();
-        let res = scanner::scan(&v.root, previous.as_ref(), SCAN_THREADS);
-        drop(previous);
-        if let Err(e) = self.catalog.save_scan(vid, &root, &res) {
+        lock.moved.lock().unwrap().clear();
+        lock.walking_from.store(lock.restores.load(std::sync::atomic::Ordering::SeqCst), std::sync::atomic::Ordering::SeqCst);
+        let mut res = scanner::scan(&v.root, previous.as_ref(), SCAN_THREADS);
+        // a footage folder that cannot be listed says nothing about the footage: what was known stays
+        if res.unread.root {
+            return self.unseen(vid, &v.name, &key, &lock, &prev, format!("The footage folder could not be read ({}).", res.first_error()));
+        }
+        // (what the scan found; keep_unread adds after it what the last scan saw where this one
+        // could not look)
+        let n_found = res.files.len();
+        let kept = if res.unread.is_empty() {
+            0
+        } else {
+            let last = match previous {
+                Some(p) => Ok(Some(p)),
+                None if same_source => Ok(Some(scanner::Previous { files: prev.file_list.clone(), dirs: (*prev.dirs).clone(), started_ms: None })),
+                None => self.catalog.previous_for(vid, &key),
+            };
+            match last {
+                Ok(l) => l.map_or(0, |l| res.keep_unread(&l)),
+                // (without it, what could not be read would be taken for gone)
+                Err(e) => {
+                    let msg = format!("Part of the footage could not be read ({}), and neither could the footage catalog ({e}): nothing changes until one of them can.", res.first_error());
+                    return self.unseen(vid, &v.name, &key, &lock, &prev, msg);
+                }
+            }
+        };
+        // nor does a drive footage was on that is not mounted now (unplugged, or not mounted yet:
+        // its mount point empty, or a folder made in its place)
+        let (found, kept_files) = res.files.split_at(n_found);
+        match self.drive_gone(vid, &key, &v.root, found, kept_files) {
+            Ok(None) => {}
+            Ok(Some(at)) => {
+                let which = if at.is_empty() { "The drive the footage folder is on".to_string() } else { format!("The drive mounted at {at}") };
+                let msg = format!("{which} is not mounted. If it is unplugged or not mounted yet, plug it in: what it held is kept until it is back.");
+                return self.unseen(vid, &v.name, &key, &lock, &prev, msg);
+            }
+            Err(e) => {
+                let msg = format!("No footage was found, and the footage catalog could not be read ({e}): nothing changes until it can.");
+                return self.unseen(vid, &v.name, &key, &lock, &prev, msg);
+            }
+        }
+        let unread = (kept > 0).then(|| {
+            let msg = format!(
+                "{} folders and {} files could not be read ({}): {kept} files are kept as the last scan saw them.",
+                res.unread.dirs.len(),
+                res.unread.files.len(),
+                res.first_error()
+            );
+            if prev.last_error.as_ref() != Some(&msg) {
+                self.core.log("inventory", Level::Warn, &format!("{}: {msg}", v.name));
+            }
+            msg
+        });
+        let writing = lock.writing.lock().unwrap();
+        // (files the Recycle Bin moved in this source while this scan walked are not put back)
+        let moved: HashSet<String> = std::mem::take(&mut *lock.moved.lock().unwrap()).into_iter().filter(|(s, _)| *s == key).map(|(_, r)| r).collect();
+        if !moved.is_empty() {
+            res.files.retain(|f| !moved.contains(&f.rel));
+        }
+        // (the mounts footage is on, and all mounts here, noted for the next scans)
+        let found_on = self.footage_mounts(&v.root, &res.files);
+        if let Err(e) = self.catalog.save_scan(vid, &key, &res) {
             self.core.log("inventory", Level::Warn, &format!("Footage catalog not updated: {e}"));
         }
         let (n_files, took, unchanged) = (res.files.len(), res.duration_ms, res.reused);
@@ -239,15 +391,23 @@ impl App {
             files: files.len(),
             scanned_at: Some(res.scanned_at),
             scanning: false,
-            last_error: None,
+            last_error: unread,
             scanned: true,
             light_scans: if reuse { lights + 1 } else { 0 },
             error_count: res.errors.len(),
             file_list: files.clone(),
             dirs: Arc::new(res.dirs),
             started_at: res.started_at,
+            root: key.clone(),
+            kept,
         };
         self.state.write().unwrap().insert(vid.to_string(), entry.clone());
+        if let Some((found, seen)) = found_on {
+            self.note_mounts(vid, &key, found, seen);
+        }
+        drop(writing);
+        *lock.failed.lock().unwrap() = None;
+        lock.walk_restores.store(lock.walking_from.load(std::sync::atomic::Ordering::SeqCst), std::sync::atomic::Ordering::SeqCst);
         lock.done.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let app = self.clone();
         let id = vid.to_string();
@@ -258,25 +418,179 @@ impl App {
         Ok(entry)
     }
 
+    /// A scan that saw nothing of the footage (its folder unreadable, or gone with its drive): what
+    /// is known of this footage folder stays, the reason is shown, and a scan that waited gets it.
+    fn unseen(&self, vid: &str, name: &str, key: &str, lock: &footage::ScanLock, prev: &VehicleState, msg: String) -> Res<VehicleState> {
+        if prev.last_error.as_ref() != Some(&msg) {
+            self.core.log("inventory", Level::Warn, &format!("{name}: {msg}"));
+        }
+        {
+            let mut st = self.state.write().unwrap();
+            if prev.scanned && prev.root == key {
+                if let Some(e) = st.get_mut(vid) {
+                    e.scanning = false;
+                    e.last_error = Some(msg.clone());
+                }
+            } else {
+                // (the recordings of another footage folder are not shown as this one's)
+                st.insert(vid.to_string(), VehicleState { generation: next_generation(), last_error: Some(msg.clone()), ..VehicleState::default() });
+            }
+        }
+        let fail = Fail::new(503, format!("{name}: {msg}"));
+        *lock.failed.lock().unwrap() = Some((key.to_string(), fail.clone()));
+        lock.walk_restores.store(lock.walking_from.load(std::sync::atomic::Ordering::SeqCst), std::sync::atomic::Ordering::SeqCst);
+        lock.done.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(fail)
+    }
+
+    /// A drive footage was on that is not mounted now: the folder it was mounted at ("" the footage
+    /// folder itself), from the mounts the last scans found footage on (footageMount:<vehicle>), in
+    /// a mount table share::mounts_at_and_below reads.
+    /// One is gone when it is not mounted at its folder now (an empty mount point, the file system
+    /// under it, or another mount that looks the same deeper or higher up), it is not mounted at a
+    /// folder here where it was not at the last scan (moved: not gone), and no footage is found
+    /// on what holds its folder now (footage on a drive mounted deeper does not count, nor footage
+    /// only kept: with a mount table, the drive's mount decides). With a note but no mount table
+    /// it reads now: a noted drive's folder where no footage is found or kept (noted_on). Not noted
+    /// yet (a server from before the notes, or never a table it reads): no footage found or kept
+    /// where the catalog's last scan of this source found some. `found`: the files the scan found;
+    /// `kept`: what keep_unread put back. Err: the catalog could not be read.
+    fn drive_gone(&self, vid: &str, key: &str, root: &Path, found: &[FileEntry], kept: &[FileEntry]) -> Result<Option<String>, String> {
+        let noted = self.core.db().get(&format!("footageMount:{vid}")).filter(|n| n["source"].as_str() == Some(key));
+        let now = std::fs::read_to_string(self.vehicles.mountinfo()).ok().and_then(|t| Mounts::of(&t, root));
+        let Some(noted) = noted else {
+            let saw = found.is_empty() && kept.is_empty() && self.catalog.saw_footage(vid, key).map_err(|e| e.to_string())?;
+            return Ok(saw.then(String::new));
+        };
+        let pairs = |key: &str| -> Vec<(String, String)> {
+            noted[key].as_array().into_iter().flatten().filter_map(|m| Some((m["at"].as_str()?.to_string(), m["mount"].as_str()?.to_string()))).collect()
+        };
+        let below = |at: &str, f: &FileEntry| at.is_empty() || f.rel.starts_with(&format!("{at}/"));
+        let Some(now) = now else {
+            // (no mount table it reads now: a noted drive's folder where no footage is found or
+            // kept is taken for that drive gone; footage below a noted drive deeper is that one's)
+            let ats: Vec<String> = pairs("mounts").into_iter().map(|(at, _)| at).collect();
+            let on = noted_on(&ats, found.iter().chain(kept));
+            return Ok(ats.iter().find(|at| !on.contains(at.as_str())).cloned());
+        };
+        let seen = pairs("seen");
+        // (a note without the mounts it saw, from before they were kept, never tells a move)
+        let knows_moves = noted["seen"].is_array();
+        for (at, then) in pairs("mounts") {
+            if now.at(&at) == Some(then.as_str()) || (knows_moves && now.0.iter().any(|(p, _, w)| *w == then && !seen.iter().any(|(sp, sw)| sp == p && *sw == then))) {
+                continue;
+            }
+            let held_at = now.holding(&at).map_or("", |(h, _)| h);
+            if !found.iter().any(|f| below(&at, f) && now.holding(&f.rel).is_some_and(|(h, _)| h == held_at)) {
+                return Ok(Some(at));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The mounts the files are on, and all the mounts here, as (the folder of its mount point
+    /// under `root`, "" for the one holding `root`; share::mount_holding's description). None: no
+    /// mount table.
+    #[allow(clippy::type_complexity)]
+    fn footage_mounts(&self, root: &Path, files: &[FileEntry]) -> Option<(Vec<(String, String)>, Vec<(String, String)>)> {
+        let table = std::fs::read_to_string(self.vehicles.mountinfo()).ok()?;
+        let now = Mounts::of(&table, root)?;
+        let mut found: Vec<(String, String)> = Vec::new();
+        for f in files {
+            let Some((at, what)) = now.holding(&f.rel) else { continue };
+            if !found.iter().any(|(a, _)| a == at) {
+                found.push((at.to_string(), what.to_string()));
+            }
+        }
+        let seen = now.0.iter().map(|(at, _, what)| (at.clone(), what.clone())).collect();
+        Some((found, seen))
+    }
+
+    /// Note the mounts footage was found on and all the mounts here (drive_gone); written only
+    /// when it changed.
+    fn note_mounts(&self, vid: &str, key: &str, found: Vec<(String, String)>, seen: Vec<(String, String)>) {
+        let k = format!("footageMount:{vid}");
+        let list = |v: Vec<(String, String)>| -> Vec<Value> { v.into_iter().map(|(at, mount)| serde_json::json!({ "at": at, "mount": mount })).collect() };
+        let want = serde_json::json!({ "source": key, "mounts": list(found), "seen": list(seen) });
+        let db = self.core.db();
+        if db.get(&k).as_ref() != Some(&want) {
+            db.set(&k, &want);
+        }
+    }
+
+    /// With no mount table it reads (footage_mounts None): the noted mounts no footage in `files`
+    /// is on now (noted_on) are not noted any more, so a drive the Recycle Bin emptied is not
+    /// taken for gone.
+    fn unnote_emptied(&self, vid: &str, key: &str, files: &[FileEntry]) {
+        let k = format!("footageMount:{vid}");
+        let db = self.core.db();
+        let Some(mut noted) = db.get(&k).filter(|n| n["source"].as_str() == Some(key)) else { return };
+        let mounts: Vec<Value> = noted["mounts"].as_array().cloned().unwrap_or_default();
+        let ats: Vec<String> = mounts.iter().filter_map(|m| m["at"].as_str().map(String::from)).collect();
+        let on = noted_on(&ats, files.iter());
+        let keep: Vec<Value> = mounts.iter().filter(|m| m["at"].as_str().is_some_and(|at| on.contains(at))).cloned().collect();
+        if keep.len() != mounts.len() {
+            noted["mounts"] = Value::Array(keep);
+            db.set(&k, &noted);
+        }
+    }
+
     /// inventory.js rebuild: the recordings again after files moved (trash, restore, protect),
-    /// without a scan; the catalog follows.
+    /// without a scan; the catalog follows (under the scans' write lock: ScanLock.writing).
     pub fn rebuild(&self, vid: &str, files: Option<Vec<FileEntry>>) {
+        self.rebuild_by(vid, |_| files);
+    }
+
+    /// rebuild() after a Recycle Bin move in footage source `source`: the files it took away, out
+    /// of the files as they are then (a scan may have finished since the move began), but not one
+    /// that is back at its place as a file (restored meanwhile; file_at), nor one whose place
+    /// cannot be looked at; nothing when the state is of another source now. (The move marks them
+    /// in ScanLock.moved itself.)
+    pub fn rebuild_without(&self, vid: &str, gone: &HashSet<String>, source: &str) {
+        let lock = self.footage.scan_lock(vid);
+        let writing = lock.writing.lock().unwrap();
+        let Some(root) = self.vehicle(vid).filter(|v| v.source_key() == source).map(|v| v.root) else { return };
+        let away: HashSet<&String> = gone.iter().filter(|rel| matches!(file_at(&root, rel), Ok(false))).collect();
+        self.rebuild_locked(vid, writing, |e| (e.root == source).then(|| e.file_list.iter().filter(|f| !away.contains(&f.rel)).cloned().collect()));
+    }
+
+    fn rebuild_by(&self, vid: &str, files: impl FnOnce(&VehicleState) -> Option<Vec<FileEntry>>) {
+        let lock = self.footage.scan_lock(vid);
+        let writing = lock.writing.lock().unwrap();
+        self.rebuild_locked(vid, writing, files);
+    }
+
+    /// rebuild_by with the scans' write lock held (dropped at the end).
+    fn rebuild_locked(&self, vid: &str, _writing: std::sync::MutexGuard<'_, ()>, files: impl FnOnce(&VehicleState) -> Option<Vec<FileEntry>>) {
         let protected = self.core.db().protected_set(vid);
         let mut st = self.state.write().unwrap();
         let Some(e) = st.get_mut(vid).filter(|e| e.scanned) else { return };
-        if let Some(f) = files {
-            e.file_list = Arc::new(FileList::from(f));
-            e.files = e.file_list.len();
-            e.codecs = Arc::new(e.codecs.remap(e.file_list.clone()));
-        }
+        let changed = match files(e) {
+            Some(f) => {
+                e.file_list = Arc::new(FileList::from(f));
+                e.files = e.file_list.len();
+                e.codecs = Arc::new(e.codecs.remap(e.file_list.clone()));
+                true
+            }
+            None => false,
+        };
         let mut recs = inventory::build_recordings(&e.file_list, vid);
         inventory::mark_protected(&mut recs, &protected);
         e.recordings = Arc::new(recs);
         e.generation = next_generation();
-        let list = e.file_list.clone();
+        let (list, source) = (e.file_list.clone(), e.root.clone());
         drop(st);
         if let Err(err) = self.catalog.sync_files(vid, &list) {
             self.core.log("inventory", Level::Warn, &format!("Footage catalog not updated: {err}"));
+        }
+        // (the mounts footage is on now: one the Recycle Bin took the last clip from is not noted)
+        if changed {
+            if let Some(v) = self.vehicle(vid).filter(|v| v.source_key() == source) {
+                match self.footage_mounts(&v.root, &list) {
+                    Some((found, seen)) => self.note_mounts(vid, &source, found, seen),
+                    None => self.unnote_emptied(vid, &source, &list),
+                }
+            }
         }
     }
 

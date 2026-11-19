@@ -238,16 +238,36 @@ pub fn answer(srv: &Arc<Server>, c: &mut CoreCtx) -> Result<Reply, HttpError> {
             };
             raw(res, c)
         }
-        Err(f) => {
-            let (status, v) = f.body();
-            if status >= 500 {
-                return Err(HttpError::internal(f.message));
-            }
-            let mut e = HttpError::new(status, v["error"].as_str().unwrap_or("Error"));
-            if let Some(code) = v["code"].as_str() {
-                e = e.code(code);
-            }
-            Err(e)
-        }
+        Err(f) => Err(http_error(f)),
+    }
+}
+
+/// The footage area's error as it reaches a person: its status and text under 500, and 503 (the
+/// footage cannot be reached right now, which they can act on); any other a plain internal error.
+pub(super) fn http_error(f: crate::footage::ctx::Fail) -> HttpError {
+    let (status, v) = f.body();
+    if status >= 500 && status != 503 {
+        return HttpError::internal(f.message);
+    }
+    let mut e = HttpError::new(status, v["error"].as_str().unwrap_or("Error"));
+    if let Some(code) = v["code"].as_str() {
+        e = e.code(code);
+    }
+    e
+}
+
+#[cfg(test)]
+mod http_error_tests {
+    use super::http_error;
+    use crate::footage::ctx::Fail;
+
+    #[test]
+    fn a_footage_error_keeps_its_status_and_text_under_500_and_at_503() {
+        let unread = http_error(Fail::new(503, "Car: the footage folder could not be read."));
+        assert_eq!((unread.status, unread.message.as_str(), unread.explicit), (503, "Car: the footage folder could not be read.", true));
+        let missing = http_error(Fail::new(404, "No such vehicle."));
+        assert_eq!((missing.status, missing.message.as_str()), (404, "No such vehicle."));
+        let internal = http_error(Fail::new(500, "a stack trace"));
+        assert_eq!((internal.status, internal.explicit), (500, false), "answered as Internal error, its text only logged");
     }
 }

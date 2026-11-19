@@ -19,7 +19,7 @@
 //! they answer in turn, which is what it gives most of the time.
 
 use crate::footage::{self, Class};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex};
@@ -168,10 +168,78 @@ pub struct ScanResult {
     pub files: Vec<FileEntry>,
     pub dirs: HashMap<String, f64>,
     pub errors: Vec<(String, String)>,
+    pub unread: Unread,
+    /// the folders listed whole
+    listed: HashSet<String>,
+    /// files listed whose stat found them gone
+    gone: HashSet<String>,
     pub reused: usize,
     pub started_at: f64,
     pub scanned_at: f64,
     pub duration_ms: f64,
+}
+
+/// What a walk could not read: folders it could not list, or not list whole, and files it
+/// could not stat ("" is the root).
+#[derive(Default, Debug)]
+pub struct Unread {
+    pub dirs: HashSet<String>,
+    pub files: HashSet<String>,
+    /// the root itself could not be listed: the walk saw nothing
+    pub root: bool,
+}
+
+impl Unread {
+    pub fn is_empty(&self) -> bool {
+        self.dirs.is_empty() && self.files.is_empty()
+    }
+}
+
+impl ScanResult {
+    /// What an earlier scan saw where this one could not look comes back: the files below a
+    /// folder it could not list whole, and the files it could not stat. A file whose nearest
+    /// folder this walk listed whole, and did not find, is gone and stays out, as is a file its
+    /// stat found gone. The files that come back go at the end, in their earlier order; their
+    /// folders' times do not (the next walk lists those folders and stats the files again). How
+    /// many came back.
+    pub fn keep_unread(&mut self, last: &Previous) -> usize {
+        if self.unread.is_empty() {
+            return 0;
+        }
+        let back: Vec<FileEntry> = {
+            let have: HashSet<&str> = self.files.iter().map(|f| f.rel.as_str()).collect();
+            last.files
+                .values()
+                .filter(|f| !have.contains(f.rel.as_str()) && !self.gone.contains(&f.rel) && (self.unread.files.contains(&f.rel) || self.below_unread(parent(&f.rel))))
+                .cloned()
+                .collect()
+        };
+        let n = back.len();
+        self.files.extend(back);
+        n
+    }
+
+    /// The first error, by path (the walk's threads finish in no set order).
+    pub fn first_error(&self) -> &str {
+        self.errors.iter().min_by(|a, b| a.0.cmp(&b.0)).map_or("", |(_, e)| e.as_str())
+    }
+
+    /// The nearest folder at or above `dir` this walk reached is one it could not list whole.
+    fn below_unread(&self, mut dir: &str) -> bool {
+        loop {
+            if self.unread.dirs.contains(dir) {
+                return true;
+            }
+            if self.listed.contains(dir) || dir.is_empty() {
+                return false;
+            }
+            dir = parent(dir);
+        }
+    }
+}
+
+fn parent(rel: &str) -> &str {
+    rel.rfind('/').map_or("", |i| &rel[..i])
 }
 
 pub fn now_ms() -> f64 {
@@ -206,6 +274,9 @@ struct Out {
     tree: HashMap<String, Vec<Child>>,
     dirs: HashMap<String, f64>,
     errors: Vec<(String, String)>,
+    unread: Unread,
+    listed: HashSet<String>,
+    gone: HashSet<String>,
     reused: usize,
 }
 
@@ -234,23 +305,40 @@ pub fn scan(root: &Path, previous: Option<&Previous>, concurrency: usize) -> Sca
         let list = match std::fs::read_dir(&abs) {
             Ok(l) => l,
             Err(e) => {
-                out.lock().unwrap().errors.push((if rel.is_empty() { ".".into() } else { rel }, e.to_string()));
+                let mut o = out.lock().unwrap();
+                o.errors.push((if rel.is_empty() { ".".into() } else { rel.clone() }, e.to_string()));
+                o.unread.root |= rel.is_empty();
+                o.unread.dirs.insert(rel);
                 return;
             }
         };
-        if let Some(m) = mtime {
-            out.lock().unwrap().dirs.insert(rel.clone(), m);
-        }
         let unchanged = previous.filter(|p| mtime.is_some() && p.dirs.get(&rel) == mtime.as_ref());
         let mut batch = Vec::new();
         let mut kept = Vec::new();
         let mut children = Vec::new();
-        let mut list: Vec<(String, std::fs::DirEntry)> = list.flatten().filter_map(|e| e.file_name().into_string().ok().map(|n| (n, e))).collect();
+        // (a listing that breaks off, or an entry it cannot tell the type of, reads the folder in part)
+        let mut broke: Option<String> = None;
+        let mut entries = Vec::new();
+        for e in list {
+            match e {
+                Ok(e) => entries.push(e),
+                Err(e) => {
+                    broke.get_or_insert(e.to_string());
+                }
+            }
+        }
+        let mut list: Vec<(String, std::fs::DirEntry)> = entries.into_iter().filter_map(|e| e.file_name().into_string().ok().map(|n| (n, e))).collect();
         // (libuv: strcmp, the bytes of the names)
         list.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
         for (name, ent) in list {
             let child = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
-            let Ok(ft) = ent.file_type() else { continue };
+            let ft = match ent.file_type() {
+                Ok(ft) => ft,
+                Err(e) => {
+                    broke.get_or_insert(e.to_string());
+                    continue;
+                }
+            };
             if ft.is_symlink() {
                 continue;
             }
@@ -282,6 +370,18 @@ pub fn scan(root: &Path, previous: Option<&Previous>, concurrency: usize) -> Sca
             more.push(Task::Stat(batch));
         }
         let mut o = out.lock().unwrap();
+        match broke {
+            None => {
+                if let Some(m) = mtime {
+                    o.dirs.insert(rel.clone(), m);
+                }
+                o.listed.insert(rel.clone());
+            }
+            Some(e) => {
+                o.errors.push((if rel.is_empty() { ".".into() } else { rel.clone() }, e));
+                o.unread.dirs.insert(rel.clone());
+            }
+        }
         o.tree.insert(rel, children);
         if !kept.is_empty() {
             o.reused += kept.len();
@@ -291,15 +391,18 @@ pub fn scan(root: &Path, previous: Option<&Previous>, concurrency: usize) -> Sca
     let stat_files = |batch: Vec<(String, Class)>| {
         let mut done = Vec::with_capacity(batch.len());
         let mut errors = Vec::new();
+        let mut gone = Vec::new();
         for (rel, class) in batch {
             match std::fs::metadata(root.join(&rel)) {
                 Ok(md) => done.push(entry(rel, &md, class)),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => gone.push(rel),
                 Err(e) => errors.push((rel, e.to_string())),
             }
         }
         let mut o = out.lock().unwrap();
         o.files.extend(done);
+        o.gone.extend(gone);
+        o.unread.files.extend(errors.iter().map(|(r, _)| r.clone()));
         o.errors.extend(errors);
     };
 
@@ -337,8 +440,24 @@ pub fn scan(root: &Path, previous: Option<&Previous>, concurrency: usize) -> Sca
     });
 
     let mut o = out.into_inner().unwrap();
+    // a folder holding a file whose stat failed is listed and the file stat'ed again next time:
+    // its time is not kept for a light scan to trust
+    for rel in &o.unread.files {
+        o.dirs.remove(parent(rel));
+    }
     let files = node_order(o.files, &mut o.tree);
-    ScanResult { files, dirs: o.dirs, errors: o.errors, reused: o.reused, started_at: started, scanned_at: now_ms(), duration_ms: now_ms() - started }
+    ScanResult {
+        files,
+        dirs: o.dirs,
+        errors: o.errors,
+        unread: o.unread,
+        listed: o.listed,
+        gone: o.gone,
+        reused: o.reused,
+        started_at: started,
+        scanned_at: now_ms(),
+        duration_ms: now_ms() - started,
+    }
 }
 
 /// The files in the order the Node server's scan sees them (see the top of this file).
@@ -427,6 +546,100 @@ mod tests {
         let again = scan(&root, Some(&prev), 4);
         assert_eq!(again.reused, 6);
         assert_eq!(order(&again), want);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    fn walked(files: &[&str], listed: &[&str], unread_dirs: &[&str], unread_files: &[&str]) -> ScanResult {
+        ScanResult {
+            files: files.iter().map(|r| file(r, 1)).collect(),
+            dirs: listed.iter().map(|d| (d.to_string(), 9.0)).collect(),
+            errors: Vec::new(),
+            unread: Unread { dirs: unread_dirs.iter().map(|d| d.to_string()).collect(), files: unread_files.iter().map(|f| f.to_string()).collect(), root: false },
+            listed: listed.iter().map(|d| d.to_string()).collect(),
+            gone: HashSet::new(),
+            reused: 0,
+            started_at: 0.0,
+            scanned_at: 0.0,
+            duration_ms: 0.0,
+        }
+    }
+
+    #[test]
+    fn what_a_scan_could_not_read_comes_back_as_the_last_scan_saw_it_and_what_went_stays_gone() {
+        let last = Previous {
+            files: Arc::new(
+                ["R/a.mp4", "R/gone.mp4", "S/E1/front.mp4", "S/E1/sub/x.mp4", "S/E2/front.mp4", "S/E3/front.mp4", "V/S1/back.mp4", "V/S1/left.mp4"]
+                    .iter()
+                    .map(|r| file(r, 2))
+                    .collect::<Vec<_>>()
+                    .into(),
+            ),
+            dirs: [("", 1.0), ("R", 1.0), ("S", 1.0), ("S/E1", 2.0), ("S/E1/sub", 3.0), ("S/E2", 4.0), ("S/E3", 1.0), ("V", 1.0), ("V/S1", 1.0)].iter().map(|(d, m)| (d.to_string(), *m)).collect(),
+            started_ms: None,
+        };
+        // S/E1 could not be listed, V/S1/back.mp4 not stat'ed, S/E2 is gone from S, R/gone.mp4 and V/S1/left.mp4 from theirs
+        let mut res = walked(&["R/a.mp4", "S/E3/front.mp4"], &["", "R", "S", "S/E3", "V", "V/S1"], &["S/E1"], &["V/S1/back.mp4"]);
+        assert_eq!(res.keep_unread(&last), 3);
+        let rels: Vec<&str> = res.files.iter().map(|f| f.rel.as_str()).collect();
+        assert_eq!(rels, ["R/a.mp4", "S/E3/front.mp4", "S/E1/front.mp4", "S/E1/sub/x.mp4", "V/S1/back.mp4"], "after what this scan found, in their earlier order");
+        assert_eq!(res.files[0].size, 1, "what this scan read stays as it read it");
+        assert!(["S/E1", "S/E1/sub", "S/E2"].iter().all(|d| !res.dirs.contains_key(*d)), "no earlier folder times: the next walk lists those folders again");
+        let mut whole = walked(&["R/a.mp4"], &["", "R"], &[], &[]);
+        assert_eq!(whole.keep_unread(&last), 0, "a walk that read everything keeps nothing back");
+        assert_eq!((whole.files.len(), whole.dirs.len()), (1, 2));
+        let mut blind = walked(&[], &[], &[""], &[]);
+        assert_eq!(blind.keep_unread(&last), 8, "a root not listed keeps everything");
+        assert!(blind.dirs.is_empty());
+        // a file its stat found gone stays gone, even in a folder listed in part
+        let mut part = walked(&[], &["", "R", "S", "V", "V/S1"], &["S/E1"], &[]);
+        part.gone.insert("S/E1/front.mp4".into());
+        assert_eq!(part.keep_unread(&last), 1);
+        assert_eq!(part.files.iter().map(|f| f.rel.as_str()).collect::<Vec<_>>(), ["S/E1/sub/x.mp4"]);
+        let mut err = walked(&[], &[""], &["b", "a"], &[]);
+        err.errors = vec![("b".into(), "second".into()), ("a".into(), "first".into())];
+        assert_eq!(err.first_error(), "first", "the first error by path, whatever order the threads finished in");
+    }
+
+    #[test]
+    fn a_folder_or_file_it_cannot_read_an_unreadable_root_and_an_empty_one_are_told_apart() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path, m: u32| std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap();
+        let root = std::env::temp_dir().join(format!("lean-scan-unread-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let empty = scan(&root, None, 2);
+        assert!(empty.unread.is_empty() && !empty.unread.root && empty.files.is_empty());
+        let shut = root.join("TeslaCam/SentryClips/2026-11-10_07-00-00");
+        let blind = root.join("TeslaCam/SavedClips/2026-11-10_09-00-00");
+        for (dir, name) in [(&shut, "2026-11-10_06-59-00-front.mp4"), (&blind, "2026-11-10_08-59-00-front.mp4"), (&root.join("TeslaCam/RecentClips"), "2026-11-10_06-00-00-front.mp4")] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        mode(&shut, 0o000);
+        // (listed but not searchable: its file's stat fails)
+        mode(&blind, 0o444);
+        if std::fs::read_dir(&shut).is_ok() {
+            // (permissions do not stop root)
+            mode(&shut, 0o755);
+            mode(&blind, 0o755);
+            std::fs::remove_dir_all(&root).unwrap();
+            return;
+        }
+        let res = scan(&root, None, 2);
+        assert!(!res.unread.root);
+        assert_eq!(res.unread.dirs.iter().collect::<Vec<_>>(), ["TeslaCam/SentryClips/2026-11-10_07-00-00"]);
+        assert_eq!(res.unread.files.iter().collect::<Vec<_>>(), ["TeslaCam/SavedClips/2026-11-10_09-00-00/2026-11-10_08-59-00-front.mp4"]);
+        assert_eq!(res.files.iter().map(|f| f.rel.as_str()).collect::<Vec<_>>(), ["TeslaCam/RecentClips/2026-11-10_06-00-00-front.mp4"]);
+        assert!(!res.dirs.contains_key("TeslaCam/SentryClips/2026-11-10_07-00-00") && res.dirs.contains_key("TeslaCam/SentryClips"));
+        assert!(!res.dirs.contains_key("TeslaCam/SavedClips/2026-11-10_09-00-00"), "a folder with a file not stat'ed is not trusted by its time next scan");
+        assert_eq!(res.errors.len(), 2);
+        mode(&shut, 0o755);
+        mode(&blind, 0o755);
+        mode(&root, 0o000);
+        let res = scan(&root, None, 2);
+        mode(&root, 0o755);
+        assert!(res.unread.root && res.files.is_empty() && res.dirs.is_empty());
+        assert_eq!(scan(&root, None, 2).files.len(), 3);
         std::fs::remove_dir_all(&root).unwrap();
     }
 }
