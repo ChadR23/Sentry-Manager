@@ -382,6 +382,36 @@ mod tests {
     /// answered: tests/fixtures/node-reference/converter-scan.json. Every
     /// file gets a fixed time; the inode numbers are this run's, put into
     /// Node's answer for the same file.
+    /// SentryClips and sentryclips are one group, so they are walked in the
+    /// order the disk lists them (Node's stable sort does the same): Node's
+    /// answer has the recording disk's order. Put in this disk's, and the
+    /// pairwise comparisons in the same order; nothing else moves.
+    fn listing_order(root: &Path, theirs: &mut Value) {
+        let listed: Vec<String> = fs::read_dir(root).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        let tied = ["SentryClips", "sentryclips"];
+        let top = |i: &Value| i.get("relativePath").and_then(Value::as_str).map(|p| p.split('/').next().unwrap().to_string());
+        let place = |i: &Value| top(i).filter(|t| tied.contains(&t.as_str())).and_then(|t| listed.iter().position(|l| *l == t));
+        let paths = |items: &[Value]| -> Vec<String> { items.iter().filter_map(|i| i.get("relativePath").and_then(Value::as_str).map(String::from)).collect() };
+        let mut items = theirs["items"].as_array().unwrap().clone();
+        let before = paths(&items);
+        // the tied folders' items are one run (the same rank): sort that run by the listing, stably
+        let Some(start) = items.iter().position(|i| place(i).is_some()) else { return };
+        let end = start + items[start..].iter().take_while(|i| place(i).is_some()).count();
+        assert!(items[end..].iter().all(|i| place(i).is_none()), "the tied folders' items are together");
+        items[start..end].sort_by_key(|i| place(i).unwrap());
+        let after = paths(&items);
+        if after == before {
+            return;
+        }
+        let n = before.len();
+        let compared = theirs["compared"].as_array().unwrap();
+        assert_eq!(compared.len(), n * n);
+        let at = |p: &String| before.iter().position(|b| b == p).unwrap();
+        let reordered: Vec<Value> = after.iter().flat_map(|a| after.iter().map(move |b| (a, b))).map(|(a, b)| compared[at(a) * n + at(b)].clone()).collect();
+        theirs["items"] = Value::Array(items);
+        theirs["compared"] = Value::Array(reordered);
+    }
+
     #[test]
     fn parity_with_node_scanner() {
         let base = std::env::temp_dir().join(format!("lean-scan-{}", std::process::id()));
@@ -442,6 +472,7 @@ mod tests {
             let places = [("{BASE}", base.to_string_lossy().into_owned())];
             let mut theirs = crate::reference::answer("converter-scan", &places, config);
             ino_of(&mut theirs["items"]);
+            listing_order(&root, &mut theirs);
             let mut mine = Vec::new();
             let r = scan(config, None, None, &mut |d| {
                 let mut v = d.value.clone();
