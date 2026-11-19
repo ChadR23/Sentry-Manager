@@ -40,6 +40,9 @@ test('nothing is tagged before every test passed and both images were checked', 
   assert.match(rust, /cd lean && LEAN_NEED_NODE=1 cargo test --release --locked/, 'the Rust tests run before anything is tagged');
   assert.match(rust, /node tools\/contract\/frozen\.js --bin lean\/target\/release\/sentry-lean/, 'and the whole contract against the frozen answers');
   assert.match(rust, /node --test "tools\/\*\*\/\*\.test\.js"/, 'and these checks');
+  // on the ffmpeg the frozen answers were recorded with (not ubuntu-latest's), and it says so if not
+  assert.match(rust, /^    runs-on: ubuntu-24\.04$/m, 'the Ubuntu whose ffmpeg recorded the answers');
+  assert.match(rust, /"ffmpeg version 6\.1\.1-"\*\) ;;/, 'a different ffmpeg fails the job');
   assert.doesNotMatch(workflow, /npm test|server\/index\.js|test\/\*\*/, 'nothing of the Node server is left');
   assert.match(workflow, /push-by-digest=true/, 'the builds push untagged');
   assert.equal((workflow.match(/^\s+tags:/gm) || []).length, 1, 'only the local check image has a tag in a build');

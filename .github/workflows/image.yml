@@ -112,8 +112,11 @@ jobs:
   # check, the dev tools' own tests and the tests' stand-ins for outside
   # services (a fake ACME server, the reports receiver); nothing of the Node
   # server is left.
+  # Ubuntu 24.04, not ubuntu-latest: the frozen answers were recorded with its
+  # ffmpeg (6.1.1-3ubuntu5), and ffprobe's verdicts and the encodes' bytes
+  # differ in another release (26.04's ffmpeg 8 exits 0 where 6.1 exits 1).
   rust-tests:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
@@ -128,8 +131,8 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/apt-archives
-          key: apt-ffmpeg-${{ runner.os }}-${{ github.run_id }}-rust
-          restore-keys: apt-ffmpeg-${{ runner.os }}-
+          key: apt-ffmpeg-ubuntu-24.04-${{ github.run_id }}-rust
+          restore-keys: apt-ffmpeg-ubuntu-24.04-
 
       - name: Cache the Rust build
         uses: actions/cache@v6
@@ -138,8 +141,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             lean/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('lean/Cargo.lock') }}
-          restore-keys: cargo-${{ runner.os }}-
+          key: cargo-ubuntu-24.04-${{ hashFiles('lean/Cargo.lock') }}
+          restore-keys: cargo-ubuntu-24.04-
 
       - name: Rust tests
         run: |
@@ -147,6 +150,14 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends -o Dir::Cache::Archives="$HOME/apt-archives" ffmpeg
           sudo chown -R "$(id -u):$(id -g)" ~/apt-archives
+          # the ffmpeg the frozen answers were recorded with, or the checks
+          # that depend on it would compare less (or differ) without saying so
+          v="$(ffmpeg -hide_banner -version | head -n 1)"
+          echo "$v"
+          case "$v" in
+            "ffmpeg version 6.1.1-"*) ;;
+            *) echo "::error::$v is not the ffmpeg 6.1.1 the frozen answers were recorded with"; exit 1 ;;
+          esac
           rustup toolchain install stable --profile minimal
           cd lean && LEAN_NEED_NODE=1 cargo test --release --locked
 

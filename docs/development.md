@@ -13,6 +13,11 @@ You need Rust (stable) and ffmpeg. Node.js 22 or newer runs the API contract
 check, the dev tools' tests and two test stand-ins (no packages, nothing of
 the old server).
 
+The frozen answers were recorded with Ubuntu 24.04's ffmpeg 6.1.1, and CI runs
+the Rust tests there. With another ffmpeg the conversion test leaves out the
+output digests, and the verifier test can differ where ffprobe does (ffmpeg 8's
+exits 0 on a damaged file where 6.1's exits 1).
+
 ```bash
 cd lean && cargo test --release --locked     # before every push
 cd lean && cargo build --release
