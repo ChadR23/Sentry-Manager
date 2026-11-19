@@ -7,7 +7,7 @@
 use super::*;
 
 pub struct Recovered {
-    pub phase: Option<&'static str>,
+    pub phase: Option<ReplacementPhase>,
     pub action: Option<&'static str>,
     pub final_path: Option<String>,
     pub owned_paths: Paths,
@@ -17,7 +17,7 @@ pub struct Recovered {
 }
 
 impl Recovered {
-    fn phase(phase: &'static str, paths: Paths, arts: Artifacts, pending: Vec<String>) -> Recovered {
+    fn phase(phase: ReplacementPhase, paths: Paths, arts: Artifacts, pending: Vec<String>) -> Recovered {
         Recovered { phase: Some(phase), action: None, final_path: None, owned_paths: paths, owned_artifacts: arts, cleanup_pending: pending, publication_artifact: None }
     }
 }
@@ -38,7 +38,7 @@ fn snapshot_cleanup(tx: &Tx, a: Option<&Artifact>, paths: &mut Paths, arts: &mut
         arts.shift_remove("publicationSnapshot");
     } else {
         if let Some(m) = arts.get_mut("publicationSnapshot") {
-            m.state = "cleanup-pending".into();
+            m.state = ArtifactState::CleanupPending;
         }
         pending.push("publicationSnapshot".into());
     }
@@ -63,12 +63,12 @@ impl Tx {
                     &mut |ev, size, sha, _| {
                         if ev == Event::ChunkPending {
                             let f = ar.get_mut(field).unwrap();
-                            f.state = "writing".into();
+                            f.state = ArtifactState::Writing;
                             f.journal.get_or_insert_with(Journal::default).pending = Some(Mark { size, sha256: sha.into() });
                             return persist(op, Snap::new(paths, ar).step(&s_pending).artifact(Some(artifact)));
                         }
                         let mut p = ar[field].clone();
-                        p.state = "writing".into();
+                        p.state = ArtifactState::Writing;
                         p.size = Some(size);
                         p.sha256 = Some(sha.into());
                         p.journal = Some(Journal { committed: Some(Mark { size, sha256: sha.into() }), pending: None });
@@ -82,7 +82,7 @@ impl Tx {
                 )?
             };
             let j = arts[field].journal.clone();
-            arts.insert(field.into(), artifact_metadata(target, &m.nonce, "owned", Some(&copied.stat), Some(&copied.sha256), copied.size, j));
+            arts.insert(field.into(), artifact_metadata(target, &m.nonce, ArtifactState::Owned, Some(&copied.stat), Some(&copied.sha256), copied.size, j));
             let step = format!("{prefix}-owned");
             persist(op, Snap::new(paths, arts).step(&step).artifact(Some(artifact)))?;
             m = arts[field].clone();
@@ -125,18 +125,18 @@ impl Tx {
         // A stop between linking the backup name and renaming the copy over the original.
         if self.drop_backup_alias(&source, &backup)? {
             if let Some(b) = arts.get("replacementBackup").cloned() {
-                arts.insert("replacementBackup".into(), artifact_metadata(&backup, &b.nonce, "intent", None, None, 0, None));
+                arts.insert("replacementBackup".into(), artifact_metadata(&backup, &b.nonce, ArtifactState::Intent, None, None, 0, None));
                 persist(op, Snap::new(&paths, &arts).step("recovery-backup-alias-dropped").artifact(pa))?;
             }
         }
         // A stop between moving the original to its backup name and recording it.
-        if action != "backup-original" && arts.get("replacementBackup").is_some_and(|m| m.state == "intent") {
+        if action != "backup-original" && arts.get("replacementBackup").is_some_and(|m| m.state == ArtifactState::Intent) {
             if let Some(bst) = lstat_or_none(&backup)? {
                 if !is_regular(&bst) || !single_link(&bst) || bst.dev().to_string() != expected.device || bst.ino().to_string() != expected.inode || bst.size() != expected.size {
                     return Err(txe("MANUAL_INTERVENTION"));
                 }
                 let n = arts["replacementBackup"].nonce.clone();
-                arts.insert("replacementBackup".into(), artifact_metadata(&backup, &n, "owned", Some(&bst), Some(&expected.sha256), expected.size, None));
+                arts.insert("replacementBackup".into(), artifact_metadata(&backup, &n, ArtifactState::Owned, Some(&bst), Some(&expected.sha256), expected.size, None));
                 persist(op, Snap::new(&paths, &arts).step("recovery-backup-adopted").artifact(pa))?;
             }
         }
@@ -150,10 +150,10 @@ impl Tx {
                 if lstat_or_none(&source)?.is_none() || lstat_or_none(&backup)?.is_some() {
                     return Err(txe("MANUAL_INTERVENTION"));
                 }
-                if !arts.get("replacementBackup").is_some_and(|m| m.state == "intent" && same_path(&m.path, &backup)) {
+                if !arts.get("replacementBackup").is_some_and(|m| m.state == ArtifactState::Intent && same_path(&m.path, &backup)) {
                     let d = match arts.get("replacementBackup") {
                         None => "no replacementBackup record".to_string(),
-                        Some(m) if m.state != "intent" => format!("backup record state {} != intent", m.state),
+                        Some(m) if m.state != ArtifactState::Intent => format!("backup record state {} != intent", m.state),
                         Some(_) => "backup record path differs".to_string(),
                     };
                     return Err(unsafe_path("recover-backup-original", &backup, d));
@@ -165,26 +165,26 @@ impl Tx {
                     if self.link_backup_aside(&source, &backup, &expected)? {
                         let linked = exact_lstat(&backup)?;
                         let n = arts["replacementBackup"].nonce.clone();
-                        arts.insert("replacementBackup".into(), artifact_metadata(&backup, &n, "owned", Some(&linked), Some(&expected.sha256), expected.size, None));
-                        persist(op, Snap::new(&paths, &arts).phase("original-backed-up").artifact(pa))?;
+                        arts.insert("replacementBackup".into(), artifact_metadata(&backup, &n, ArtifactState::Owned, Some(&linked), Some(&expected.sha256), expected.size, None));
+                        persist(op, Snap::new(&paths, &arts).phase(ReplacementPhase::OriginalBackedUp).artifact(pa))?;
                         if let Err(e) = self.replace_over_original(&candidate, &source, &backup, &arts["replacementCandidate"].expected(), false, &expected) {
                             if self.drop_backup_alias(&source, &backup).unwrap_or(false) {
                                 let n = arts["replacementBackup"].nonce.clone();
-                                arts.insert("replacementBackup".into(), artifact_metadata(&backup, &n, "intent", None, None, 0, None));
-                                let _ = persist(op, Snap::new(&paths, &arts).phase("candidate-written").artifact(pa));
+                                arts.insert("replacementBackup".into(), artifact_metadata(&backup, &n, ArtifactState::Intent, None, None, 0, None));
+                                let _ = persist(op, Snap::new(&paths, &arts).phase(ReplacementPhase::CandidateWritten).artifact(pa));
                             }
                             return Err(e);
                         }
-                        persist(op, Snap::new(&paths, &arts).phase("candidate-promoted").artifact(pa))?;
-                        return Ok(Recovered::phase("candidate-promoted", paths, arts, vec![]));
+                        persist(op, Snap::new(&paths, &arts).phase(ReplacementPhase::CandidatePromoted).artifact(pa))?;
+                        return Ok(Recovered::phase(ReplacementPhase::CandidatePromoted, paths, arts, vec![]));
                     }
                 }
                 let (_, removed) = self.promote_no_replace(&source, &backup, "REPLACEMENT_COLLISION", Some(&expected.expected()), true, false)?;
                 let o = self.inspect_exact_file(&backup, op.cancel, "REPLACEMENT_FAILED")?;
                 let n = arts["replacementBackup"].nonce.clone();
-                arts.insert("replacementBackup".into(), artifact_metadata(&backup, &n, if removed { "owned" } else { "cleanup-pending" }, Some(&o.stat), Some(&o.sha256), o.size, None));
-                persist(op, Snap::new(&paths, &arts).phase("original-backed-up").artifact(pa))?;
-                Ok(Recovered::phase("original-backed-up", paths, arts, vec![]))
+                arts.insert("replacementBackup".into(), artifact_metadata(&backup, &n, if removed { ArtifactState::Owned } else { ArtifactState::CleanupPending }, Some(&o.stat), Some(&o.sha256), o.size, None));
+                persist(op, Snap::new(&paths, &arts).phase(ReplacementPhase::OriginalBackedUp).artifact(pa))?;
+                Ok(Recovered::phase(ReplacementPhase::OriginalBackedUp, paths, arts, vec![]))
             }
             "promote-candidate" => {
                 if !arts.contains_key("replacementCandidate") {
@@ -198,13 +198,13 @@ impl Tx {
                 self.before_replace(&source, &source_root, &expected, &job, &item)?;
                 let (_, removed) = self.promote_no_replace(&candidate, &source, "REPLACEMENT_COLLISION", Some(&arts["replacementCandidate"].expected()), true, false)?;
                 if !removed {
-                    arts.get_mut("replacementCandidate").unwrap().state = "cleanup-pending".into();
+                    arts.get_mut("replacementCandidate").unwrap().state = ArtifactState::CleanupPending;
                 }
-                persist(op, Snap::new(&paths, &arts).phase("candidate-promoted").artifact(pa))?;
-                Ok(Recovered::phase("candidate-promoted", paths, arts, vec![]))
+                persist(op, Snap::new(&paths, &arts).phase(ReplacementPhase::CandidatePromoted).artifact(pa))?;
+                Ok(Recovered::phase(ReplacementPhase::CandidatePromoted, paths, arts, vec![]))
             }
-            "validate-final" => match self.validate_readable(&source, &artifact, op.verify_readable, "FINAL_VALIDATION_FAILED").and_then(|_| persist(op, Snap::new(&paths, &arts).phase("final-validated").artifact(pa))) {
-                Ok(()) => Ok(Recovered::phase("final-validated", paths, arts, vec![])),
+            "validate-final" => match self.validate_readable(&source, &artifact, op.verify_readable, "FINAL_VALIDATION_FAILED").and_then(|_| persist(op, Snap::new(&paths, &arts).phase(ReplacementPhase::FinalValidated).artifact(pa))) {
+                Ok(()) => Ok(Recovered::phase(ReplacementPhase::FinalValidated, paths, arts, vec![])),
                 Err(e) => {
                     let rop = self.rollback_op(op, &source, &source_root, &paths, &arts, &artifact);
                     self.rollback_replacement(&rop)?;
@@ -222,7 +222,7 @@ impl Tx {
                         arts.shift_remove("replacementBackup");
                     }
                     Err(e) if e.tx && e.code == "OWNED_CLEANUP_FAILED" => {
-                        arts.get_mut("replacementBackup").unwrap().state = "cleanup-pending".into();
+                        arts.get_mut("replacementBackup").unwrap().state = ArtifactState::CleanupPending;
                         pending.push("replacementBackup".into());
                     }
                     Err(e) => return Err(e),
@@ -230,14 +230,14 @@ impl Tx {
                 snapshot_cleanup(self, pa, &mut paths, &mut arts, &mut pending)?;
                 paths.shift_remove("replacementCandidate");
                 arts.shift_remove("replacementCandidate");
-                let phase = if arts.contains_key("replacementBackup") { "final-validated" } else { "backup-deleted" };
-                persist(op, Snap::new(&paths, &arts).phase(phase).artifact(pa).pending(&pending))?;
+                let phase = if arts.contains_key("replacementBackup") { ReplacementPhase::FinalValidated } else { ReplacementPhase::BackupDeleted };
+                persist(op, Snap::new(&paths, &arts).phase(phase.clone()).artifact(pa).pending(&pending))?;
                 Ok(Recovered::phase(phase, paths, arts, pending))
             }
             "restore-backup" => {
                 let rop = self.rollback_op(op, &source, &source_root, &paths, &arts, &artifact);
                 let r = self.rollback_replacement(&rop)?;
-                Ok(Recovered::phase("backup-restored", r.owned_paths, r.owned_artifacts, r.cleanup_pending))
+                Ok(Recovered::phase(ReplacementPhase::BackupRestored, r.owned_paths, r.owned_artifacts, r.cleanup_pending))
             }
             "restart-replacement" => {
                 persist(op, Snap::new(&paths, &arts).step("restart-replacement-cleanup-intent").artifact(pa))?;
@@ -249,7 +249,7 @@ impl Tx {
                             arts.shift_remove("replacementCandidate");
                         }
                         Err(e) if e.tx && e.code == "OWNED_CLEANUP_FAILED" => {
-                            arts.get_mut("replacementCandidate").unwrap().state = "cleanup-pending".into();
+                            arts.get_mut("replacementCandidate").unwrap().state = ArtifactState::CleanupPending;
                             pending.push("replacementCandidate".into());
                         }
                         Err(e) => return Err(e),
@@ -281,7 +281,7 @@ impl Tx {
                     match self.remove_exact_owned(&candidate, arts.get("replacementCandidate"), false, false, None, None) {
                         Ok(_) => {}
                         Err(e) if e.tx && e.code == "OWNED_CLEANUP_FAILED" => {
-                            arts.get_mut("replacementCandidate").unwrap().state = "cleanup-pending".into();
+                            arts.get_mut("replacementCandidate").unwrap().state = ArtifactState::CleanupPending;
                             pending.push("replacementCandidate".into());
                         }
                         Err(e) => return Err(e),
@@ -292,8 +292,8 @@ impl Tx {
                     paths.shift_remove("replacementCandidate");
                     arts.shift_remove("replacementCandidate");
                 }
-                persist(op, Snap::new(&paths, &arts).phase("backup-restored").artifact(pa).pending(&pending))?;
-                Ok(Recovered::phase("backup-restored", paths, arts, pending))
+                persist(op, Snap::new(&paths, &arts).phase(ReplacementPhase::BackupRestored).artifact(pa).pending(&pending))?;
+                Ok(Recovered::phase(ReplacementPhase::BackupRestored, paths, arts, pending))
             }
             "finish-replacement" => {
                 self.validate_readable(&source, &artifact, op.verify_readable, "FINAL_VALIDATION_FAILED")?;
@@ -308,7 +308,7 @@ impl Tx {
                             arts.shift_remove("replacementBackup");
                         }
                         Err(e) if e.tx && e.code == "OWNED_CLEANUP_FAILED" => {
-                            arts.get_mut("replacementBackup").unwrap().state = "cleanup-pending".into();
+                            arts.get_mut("replacementBackup").unwrap().state = ArtifactState::CleanupPending;
                             pending.push("replacementBackup".into());
                         }
                         Err(e) => return Err(e),
@@ -335,7 +335,7 @@ impl Tx {
                             arts.shift_remove("replacementCandidate");
                         }
                         Err(e) if e.tx && e.code == "OWNED_CLEANUP_FAILED" => {
-                            arts.get_mut("replacementCandidate").unwrap().state = "cleanup-pending".into();
+                            arts.get_mut("replacementCandidate").unwrap().state = ArtifactState::CleanupPending;
                             pending.push("replacementCandidate".into());
                         }
                         Err(e) => return Err(e),
@@ -345,8 +345,8 @@ impl Tx {
                     arts.shift_remove("replacementCandidate");
                 }
                 snapshot_cleanup(self, pa, &mut paths, &mut arts, &mut pending)?;
-                persist(op, Snap::new(&paths, &arts).phase("backup-deleted").artifact(pa).pending(&pending))?;
-                Ok(Recovered::phase("backup-deleted", paths, arts, pending))
+                persist(op, Snap::new(&paths, &arts).phase(ReplacementPhase::BackupDeleted).artifact(pa).pending(&pending))?;
+                Ok(Recovered::phase(ReplacementPhase::BackupDeleted, paths, arts, pending))
             }
             _ => unreachable!(),
         }
@@ -419,7 +419,7 @@ impl Tx {
             let (_, removed) = self.promote_no_replace(&expected_partial, &dest, "DESTINATION_COLLISION", Some(&arts["destinationPartial"].expected()), false, false)?;
             promoted = true;
             if !removed {
-                arts.get_mut("destinationPartial").unwrap().state = "cleanup-pending".into();
+                arts.get_mut("destinationPartial").unwrap().state = ArtifactState::CleanupPending;
                 promotion_pending = true;
             }
         } else {
@@ -431,7 +431,7 @@ impl Tx {
                     return Err(txe("MANUAL_INTERVENTION"));
                 }
                 // the partial name is a second link of the verified destination
-                arts.get_mut("destinationPartial").unwrap().state = "cleanup-pending".into();
+                arts.get_mut("destinationPartial").unwrap().state = ArtifactState::CleanupPending;
             }
         }
         let r = (|| -> R<Recovered> {
@@ -444,7 +444,7 @@ impl Tx {
                 match self.remove_exact_owned(&expected_partial, Some(&pm), false, false, None, None) {
                     Ok(_) => {}
                     Err(e) if e.tx && e.code == "OWNED_CLEANUP_FAILED" => {
-                        arts.get_mut("destinationPartial").unwrap().state = "cleanup-pending".into();
+                        arts.get_mut("destinationPartial").unwrap().state = ArtifactState::CleanupPending;
                         promotion_pending = true;
                     }
                     Err(e) => return Err(e),
@@ -458,7 +458,7 @@ impl Tx {
                 paths.shift_remove("publicationSnapshot");
                 arts.shift_remove("publicationSnapshot");
             } else {
-                arts.get_mut("publicationSnapshot").unwrap().state = "cleanup-pending".into();
+                arts.get_mut("publicationSnapshot").unwrap().state = ArtifactState::CleanupPending;
             }
             let mut pending = vec![];
             if promotion_pending {
@@ -475,7 +475,7 @@ impl Tx {
         let mut failed: Vec<String> = vec![];
         if promoted && !final_verified {
             if self.remove_exact_owned(&dest, arts.get("destinationPartial"), true, true, None, None).is_err() {
-                arts.get_mut("destinationPartial").unwrap().state = "cleanup-pending".into();
+                arts.get_mut("destinationPartial").unwrap().state = ArtifactState::CleanupPending;
                 failed.push("destinationPartial".into());
             }
             if !failed.iter().any(|f| f == "destinationPartial") && lstat_or_none(&expected_partial)?.is_some() {
@@ -485,7 +485,7 @@ impl Tx {
                         arts.shift_remove("destinationPartial");
                     }
                     Err(_) => {
-                        arts.get_mut("destinationPartial").unwrap().state = "cleanup-pending".into();
+                        arts.get_mut("destinationPartial").unwrap().state = ArtifactState::CleanupPending;
                         failed.push("destinationPartial".into());
                     }
                 }
@@ -496,7 +496,7 @@ impl Tx {
             arts.shift_remove("publicationSnapshot");
         } else {
             if let Some(m) = arts.get_mut("publicationSnapshot") {
-                m.state = "cleanup-pending".into();
+                m.state = ArtifactState::CleanupPending;
             }
             failed.push("publicationSnapshot".into());
         }
@@ -545,7 +545,7 @@ impl Tx {
             let target = valid_abs(Some(&raw))?;
             if field == "replacementBackup" {
                 // possibly the last original: only replacement recovery may remove it
-                if arts.get(field).is_some_and(|m| m.state == "intent") && lstat_or_none(&target)?.is_none() {
+                if arts.get(field).is_some_and(|m| m.state == ArtifactState::Intent) && lstat_or_none(&target)?.is_none() {
                     paths.shift_remove(field);
                     arts.shift_remove(field);
                     continue;
@@ -559,7 +559,7 @@ impl Tx {
                 };
                 self.validate_publication(a, Validate::Reconcile(a))?;
                 if !self.cleanup_publication(Some(a), arts.get(field))? {
-                    arts.get_mut(field).unwrap().state = "cleanup-pending".into();
+                    arts.get_mut(field).unwrap().state = ArtifactState::CleanupPending;
                     pending.push(field.into());
                 }
                 continue;
@@ -576,7 +576,7 @@ impl Tx {
                 match self.remove_private_file(&target, &m, &real_temp) {
                     Ok(_) => {}
                     Err(e) if e.tx && e.code == "OWNED_CLEANUP_FAILED" => {
-                        arts.get_mut(field).unwrap().state = "cleanup-pending".into();
+                        arts.get_mut(field).unwrap().state = ArtifactState::CleanupPending;
                         pending.push(field.into());
                     }
                     Err(e) => return Err(e),
@@ -604,7 +604,7 @@ impl Tx {
             match res {
                 Ok(_) => {}
                 Err(e) if e.tx && e.code == "OWNED_CLEANUP_FAILED" => {
-                    arts.get_mut(field).unwrap().state = "cleanup-pending".into();
+                    arts.get_mut(field).unwrap().state = ArtifactState::CleanupPending;
                     pending.push(field.into());
                 }
                 Err(e) => return Err(e),

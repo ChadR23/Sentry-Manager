@@ -208,7 +208,7 @@ fn recover_takes_the_recorded_step() {
         .unwrap();
     let facts = Facts { candidate_exists: true, backup_exists: true, ..Default::default() };
     let r = store.recover("job-f", &mut |_| Ok(facts), false).unwrap();
-    assert_eq!(r.state(), "paused");
+    assert_eq!(r.state(), JobState::Paused);
     assert_eq!(r.get("recovery").unwrap(), &json!({ "fromState": "replacing", "phase": "original-backed-up", "action": "promote-candidate" }));
     // recorded once: a second recover returns it unchanged
     let again = store.recover("job-f", &mut |_| panic!("not inspected again"), false).unwrap();
@@ -454,3 +454,377 @@ fn parity_damaged_manifests() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
+
+// ---- states and their moves -------------------------------------------------------
+
+/// Every state and phase as the job file holds it: read, written as JSON
+/// and read back, each the string it was.
+fn same_strings<T>(list: &[&str], all: &[T], parse: fn(&str) -> T, text: fn(&T) -> &str)
+where
+    T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug + Clone + Into<Value>,
+{
+    assert_eq!(all.iter().map(text).collect::<Vec<_>>(), list, "in Node's order");
+    for s in list {
+        let v = parse(s);
+        assert_eq!(text(&v), *s);
+        assert_eq!(serde_json::to_string(&v).unwrap(), format!("\"{s}\""));
+        assert_eq!(v.clone().into(), json!(s));
+        assert_eq!(serde_json::from_value::<T>(json!(s)).unwrap(), v);
+    }
+}
+
+#[test]
+fn every_state_and_phase_is_the_string_node_lists() {
+    // jobStore.js JOB_STATES, ITEM_STATES, REPLACEMENT_PHASES and normalizeOwnedArtifacts' states
+    let jobs = ["discovering", "waiting", "staging", "encoding", "writing-telemetry", "verifying", "copying", "replacing", "completed", "skipped", "failed", "paused", "paused_network", "cancelled"];
+    let items = ["queued", "processing", "completed", "skipped", "failed", "cancelled"];
+    let phases = ["candidate-written", "original-backed-up", "candidate-promoted", "final-validated", "backup-deleted", "rollback-started", "backup-restored", "rollback-failed"];
+    let artifacts = ["intent", "writing", "owned", "cleanup-pending"];
+    same_strings(&jobs, JobState::ALL, JobState::parse, JobState::as_str);
+    same_strings(&items, ItemState::ALL, ItemState::parse, ItemState::as_str);
+    same_strings(&phases, ReplacementPhase::ALL, ReplacementPhase::parse, ReplacementPhase::as_str);
+    same_strings(&artifacts, states::ArtifactState::ALL, states::ArtifactState::parse, states::ArtifactState::as_str);
+    // the groups Node names
+    let names = |f: fn(&JobState) -> bool| JobState::ALL.iter().filter(|s| f(s)).map(JobState::as_str).collect::<Vec<_>>();
+    assert_eq!(names(JobState::is_terminal), ["completed", "skipped", "failed", "cancelled"]);
+    assert_eq!(names(JobState::is_transaction), ["staging", "encoding", "writing-telemetry", "verifying", "copying", "replacing"]);
+    assert_eq!(names(JobState::is_idle), ["completed", "skipped", "failed", "paused", "paused_network", "cancelled"]);
+    assert_eq!(names(JobState::is_active), ["discovering", "waiting", "staging", "encoding", "writing-telemetry", "verifying", "copying", "replacing", "paused", "paused_network"]);
+    assert_eq!(names(JobState::resumes_after_network), ["waiting", "staging", "encoding", "writing-telemetry", "verifying", "copying", "replacing"]);
+    assert_eq!(names(JobState::is_encoding_step), ["staging", "encoding", "writing-telemetry", "verifying"]);
+}
+
+#[test]
+fn a_string_no_list_knows_is_kept_as_read_and_never_moves() {
+    let j = JobState::parse("frozen");
+    assert_eq!(j, JobState::Unknown("frozen".into()));
+    assert!(!j.is_known() && !j.is_active() && !j.is_terminal() && !j.is_idle());
+    assert_eq!(j.as_str(), "frozen");
+    assert_eq!(serde_json::to_value(&j).unwrap(), json!("frozen"));
+    assert_eq!(serde_json::from_value::<JobState>(json!("frozen")).unwrap(), j);
+    assert!(!j.can_become(&JobState::Waiting) && !JobState::Waiting.can_become(&j) && !j.can_become(&j));
+    let i = ItemState::parse("half-done");
+    assert_eq!(i.as_str(), "half-done");
+    assert!(!i.can_become(&ItemState::Queued) && !ItemState::Queued.can_become(&i));
+    assert_eq!(ReplacementPhase::parse("candidate-dreamt").as_str(), "candidate-dreamt");
+    assert!(ReplacementPhase::known("candidate-dreamt").is_none());
+    // (an owned file's record keeps its state when typed, as the staging area reads it)
+    let meta: super::super::staging::Meta = serde_json::from_value(json!({ "path": "/x", "nonce": "n", "state": "borrowed" })).unwrap();
+    assert_eq!(meta.state, states::ArtifactState::Unknown("borrowed".into()));
+    assert_eq!(serde_json::to_value(&meta).unwrap(), json!({ "path": "/x", "nonce": "n", "state": "borrowed" }));
+}
+
+#[test]
+fn a_job_moves_only_the_ways_the_service_moves_it() {
+    use JobState::*;
+    // (the moves the service makes: discovery, a clip's steps, the network,
+    // pause, stop, recovery, the end, Retry and Cancel of a finished job)
+    let made = [
+        (Discovering, Waiting), (Discovering, Staging), (Discovering, Encoding), (Waiting, Staging), (Staging, Encoding), (Encoding, WritingTelemetry), (WritingTelemetry, Verifying),
+        (Verifying, Copying), (Verifying, Replacing), (Copying, Waiting), (Replacing, Waiting), (Encoding, PausedNetwork), (PausedNetwork, Encoding), (PausedNetwork, Replacing),
+        (PausedNetwork, Copying), (Waiting, Paused), (Discovering, Paused), (Replacing, Paused), (Paused, Waiting), (Paused, Replacing), (Paused, PausedNetwork), (PausedNetwork, Paused),
+        (Waiting, Completed), (Discovering, Completed), (Waiting, Failed), (Paused, Failed), (Encoding, Cancelled), (Paused, Cancelled), (Completed, Waiting), (Failed, Waiting),
+        (Completed, Cancelled), (Failed, Cancelled), (Skipped, Cancelled),
+    ];
+    for (a, b) in made {
+        assert_eq!(a.to(b.clone()).unwrap(), b, "{a} to {b}");
+    }
+    let refused = [
+        // (only a new job starts discovering)
+        (Waiting, Discovering), (Paused, Discovering), (Completed, Discovering),
+        // (Node lists skipped as a job state and never sets it)
+        (Waiting, Skipped), (Encoding, Skipped),
+        // (cancelled is final; skipped is only cancelled)
+        (Cancelled, Waiting), (Cancelled, Paused), (Cancelled, Completed), (Skipped, Waiting), (Skipped, Completed),
+        // (a finished job is only retried or cancelled)
+        (Completed, Encoding), (Completed, Replacing), (Failed, Copying), (Completed, Failed), (Failed, Completed), (Completed, Paused), (Failed, Paused), (Failed, PausedNetwork),
+    ];
+    for (a, b) in refused {
+        let e = a.to(b.clone()).unwrap_err();
+        assert_eq!(e.code, "INVALID_STATE_TRANSITION", "{a} to {b}");
+        assert_eq!(e.message, format!("The job cannot move from {a} to {b}."));
+    }
+    // the whole table: a job not finished goes anywhere but discovering and
+    // skipped, a completed or failed one only to waiting or cancelled, a
+    // skipped one only to cancelled, and every state may be written again as
+    // it is
+    for a in JobState::ALL {
+        assert!(a.can_become(a), "{a} again");
+        let reached: Vec<&str> = JobState::ALL.iter().filter(|b| *b != a && a.can_become(b)).map(JobState::as_str).collect();
+        let expected: Vec<&str> = match a {
+            _ if a.is_active() => JobState::ALL.iter().filter(|b| *b != a && !matches!(b, Discovering | Skipped)).map(JobState::as_str).collect(),
+            Completed | Failed => vec!["waiting", "cancelled"],
+            Skipped => vec!["cancelled"],
+            _ => vec![],
+        };
+        assert_eq!(reached, expected, "from {a}");
+    }
+}
+
+#[test]
+fn a_clip_moves_only_the_ways_the_service_moves_it() {
+    use ItemState::*;
+    // (started, ended any way, back to the queue on a stop, a failed one retried)
+    let made = [(Queued, Processing), (Queued, Skipped), (Queued, Failed), (Queued, Cancelled), (Queued, Completed), (Processing, Completed), (Processing, Skipped), (Processing, Failed), (Processing, Cancelled), (Processing, Queued), (Failed, Queued)];
+    for (a, b) in made {
+        assert_eq!(a.to(b.clone()).unwrap(), b, "{a} to {b}");
+    }
+    let refused = [(Completed, Queued), (Completed, Processing), (Completed, Failed), (Skipped, Queued), (Skipped, Processing), (Cancelled, Queued), (Cancelled, Processing), (Failed, Processing), (Failed, Completed), (Failed, Cancelled)];
+    for (a, b) in refused {
+        let e = a.to(b.clone()).unwrap_err();
+        assert_eq!(e.code, "INVALID_STATE_TRANSITION", "{a} to {b}");
+        assert_eq!(e.message, format!("A clip cannot move from {a} to {b}."));
+    }
+    for a in ItemState::ALL {
+        assert!(a.can_become(a), "{a} again");
+        let reached: Vec<&str> = ItemState::ALL.iter().filter(|b| *b != a && a.can_become(b)).map(ItemState::as_str).collect();
+        let expected: Vec<&str> = match a {
+            Queued => vec!["processing", "completed", "skipped", "failed", "cancelled"],
+            Processing => vec!["queued", "completed", "skipped", "failed", "cancelled"],
+            Failed => vec!["queued"],
+            _ => vec![],
+        };
+        assert_eq!(reached, expected, "from {a}");
+    }
+    // discovery adds a clip queued, or skipped when it is converted already
+    assert_eq!(ItemState::ALL.iter().filter(|s| s.is_initial()).map(ItemState::as_str).collect::<Vec<_>>(), ["queued", "skipped"]);
+}
+
+#[test]
+fn a_skipped_job_is_cancelled_as_node_cancels_every_job_not_cancelled_yet() {
+    let root = tmp("skipped");
+    let store = quiet(&root);
+    let mut job = initial("job-s", (0..2).map(clip).collect());
+    job.insert("state".into(), json!("skipped"));
+    store.create(&job).unwrap();
+    let e = store.transition("job-s", Patch::new().state(JobState::Waiting)).unwrap_err();
+    assert_eq!(e.message, "The job cannot move from skipped to waiting.");
+    let m = store.transition("job-s", Patch::new().state(JobState::Cancelled)).unwrap();
+    assert_eq!(m.state(), JobState::Cancelled);
+    assert_eq!(quiet(&root).load("job-s").unwrap().unwrap().state(), JobState::Cancelled);
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn a_refused_move_writes_nothing_and_the_job_carries_on() {
+    let root = tmp("moves");
+    let store = quiet(&root);
+    store.create(&initial("job-m", (0..3).map(clip).collect())).unwrap();
+    // (the first change after create is a full write; the ones after it journal lines)
+    let m = store.transition("job-m", Patch::new()).unwrap();
+    let done = |it: &Arc<Item>| changed(it, json!({ "state": "completed", "outputPath": it.str("sourcePath").unwrap(), "outputBytes": 1000, "resultCode": "converted" }));
+    let m = store.transition("job-m", Patch::new().items(vec![changed(&m.items[0], json!({ "state": "processing" })), ItemIn::Trusted(m.items[1].clone()), ItemIn::Trusted(m.items[2].clone())])).unwrap();
+    let m = store.transition("job-m", Patch::new().items(vec![done(&m.items[0]), ItemIn::Trusted(m.items[1].clone()), ItemIn::Trusted(m.items[2].clone())])).unwrap();
+    let files = || (fs::read(root.join("job-m/job.json")).unwrap(), fs::read(root.join("job-m/job.journal")).ok());
+    let before = files();
+    let trusted = |m: &Manifest| m.items.iter().cloned().map(ItemIn::Trusted).collect::<Vec<_>>();
+    // the job back to discovering
+    let e = store.transition("job-m", Patch::new().state(JobState::Discovering)).unwrap_err();
+    assert_eq!((e.code.as_str(), e.message.as_str()), ("INVALID_STATE_TRANSITION", "The job cannot move from waiting to discovering."));
+    // a completed clip queued again: the clip is named
+    let mut items = trusted(&m);
+    items[0] = changed(&m.items[0], json!({ "state": "queued", "outputPath": null, "outputBytes": null, "resultCode": null }));
+    let e = store.transition("job-m", Patch::new().items(items)).unwrap_err();
+    assert_eq!((e.code.as_str(), e.message.as_str(), e.path.as_deref()), ("INVALID_STATE_TRANSITION", "A clip cannot move from completed to queued.", Some("item-000001")));
+    // a clip added finished
+    let mut items = trusted(&m);
+    let mut finished = clip(3);
+    finished["state"] = json!("completed");
+    finished["outputPath"] = finished["sourcePath"].clone();
+    finished["outputBytes"] = json!(1);
+    items.push(ItemIn::Raw(finished));
+    let e = store.transition("job-m", Patch::new().items(items)).unwrap_err();
+    assert_eq!((e.code.as_str(), e.message.as_str(), e.path.as_deref()), ("INVALID_STATE_TRANSITION", "A clip cannot be added as completed.", Some("item-000004")));
+    // nothing was written, and the job as read again is the one before
+    assert_eq!(files(), before);
+    assert_eq!(quiet(&root).load("job-m").unwrap().unwrap().to_json(), m.to_json());
+    // the job carries on: a legal move is written one revision on
+    let mut items = trusted(&m);
+    items[1] = changed(&m.items[1], json!({ "state": "failed", "failure": { "code": "x" } }));
+    items.push(ItemIn::Raw(clip(3)));
+    let next = store.transition("job-m", Patch::new().state(JobState::Paused).items(items)).unwrap();
+    assert_eq!((next.revision(), next.state(), next.items[1].state(), next.items[3].state()), (m.revision() + 1, JobState::Paused, ItemState::Failed, ItemState::Queued));
+    // a finished job is not reopened: failed stays failed until Retry takes it to waiting
+    let failed = store.transition("job-m", Patch::new().state(JobState::Failed).set("failure", json!({ "code": "x" }))).unwrap();
+    let e = store.transition("job-m", Patch::new().state(JobState::Paused).set("failure", Value::Null)).unwrap_err();
+    assert_eq!(e.message, "The job cannot move from failed to paused.");
+    let retried = store.transition("job-m", Patch::new().state(JobState::Waiting).set("failure", Value::Null)).unwrap();
+    assert_eq!((retried.revision(), retried.state()), (failed.revision() + 1, JobState::Waiting));
+    fs::remove_dir_all(&root).unwrap();
+}
+
+/// A job file in Node's form (as this store writes it) with `edit` applied.
+fn job_file(base: &Value, id: &str, edit: impl FnOnce(&mut Value)) -> String {
+    let mut v = base.clone();
+    v["id"] = json!(id);
+    edit(&mut v);
+    normalize_manifest(&v).unwrap_or_else(|e| panic!("{id}: {e:?}")).to_json()
+}
+
+#[test]
+fn every_state_string_in_a_job_file_reads_and_writes_back_byte_for_byte() {
+    let root = tmp("state-bytes");
+    let store = quiet(&root);
+    let base = store.create(&initial("job-base", (0..14).map(clip).collect())).unwrap().to_value();
+    let sha = |c: char| c.to_string().repeat(64);
+    let mut files: Vec<(String, String)> = vec![];
+    // each job state, with what it needs
+    for (n, s) in JobState::ALL.iter().enumerate() {
+        let id = format!("job-state-{n}");
+        files.push((id.clone(), job_file(&base, &id, |v| {
+            v["state"] = json!(s);
+            if s.is_transaction() || *s == JobState::PausedNetwork {
+                v["activeItemId"] = json!("item-000001");
+            }
+            match s {
+                JobState::Replacing => v["replacementPhase"] = json!("candidate-written"),
+                JobState::Completed => v["summary"] = super::super::contracts::serialize_summary(&v["counters"]),
+                JobState::Failed => v["failure"] = json!({ "code": "x" }),
+                _ => {}
+            }
+        })));
+    }
+    // each clip state, each phase on a clip, each owned file state
+    files.push(("job-clips".into(), job_file(&base, "job-clips", |v| {
+        for (n, s) in ItemState::ALL.iter().enumerate() {
+            let it = &mut v["items"][n];
+            it["state"] = json!(s);
+            match s {
+                ItemState::Completed => {
+                    it["outputPath"] = it["sourcePath"].clone();
+                    it["outputBytes"] = json!(1000);
+                }
+                ItemState::Failed => it["failure"] = json!({ "code": "x" }),
+                _ => {}
+            }
+        }
+        for (n, p) in ReplacementPhase::ALL.iter().enumerate() {
+            let it = &mut v["items"][6 + n];
+            it["state"] = json!("processing");
+            it["replacementPhase"] = json!(p);
+        }
+        let id = |p: &str| json!({ "size": 10, "sha256": sha('a'), "device": "2049", "inode": p });
+        let mut writing = id("12");
+        writing["journal"] = json!({ "committed": { "size": 5, "sha256": sha('b') }, "pending": null });
+        v["items"][0]["ownedPaths"] = json!({ "stagedSource": "/data/tmp/s.mp4", "encodedCandidate": "/data/tmp/e.mp4", "destinationPartial": "/out/p.mp4", "replacementBackup": "/footage/b.mp4" });
+        let art = |path: &str, state: &str, mut fields: Value| {
+            fields["path"] = json!(path);
+            fields["nonce"] = json!("n1");
+            fields["state"] = json!(state);
+            fields
+        };
+        v["items"][0]["ownedArtifacts"] = json!({
+            "stagedSource": art("/data/tmp/s.mp4", "intent", json!({})),
+            "encodedCandidate": art("/data/tmp/e.mp4", "writing", writing),
+            "destinationPartial": art("/out/p.mp4", "owned", id("13")),
+            "replacementBackup": art("/footage/b.mp4", "cleanup-pending", id("14")),
+        });
+    })));
+    // each phase on a paused job, and the recovery records that name states
+    for (n, p) in ReplacementPhase::ALL.iter().enumerate() {
+        let id = format!("job-phase-{n}");
+        files.push((id.clone(), job_file(&base, &id, |v| {
+            v["state"] = json!("paused");
+            v["activeItemId"] = json!("item-000001");
+            v["replacementPhase"] = json!(p);
+            v["recovery"] = json!({ "fromState": "replacing", "phase": p, "action": "manual-intervention" });
+        })));
+    }
+    for (n, (from, action)) in [("encoding", "restart-encoding"), ("copying", "restart-copy"), ("waiting", "resume-queue"), ("discovering", "resume-discovery")].iter().enumerate() {
+        let id = format!("job-from-{n}");
+        files.push((id.clone(), job_file(&base, &id, |v| {
+            v["state"] = json!("paused");
+            v["recovery"] = json!({ "fromState": from, "action": action });
+        })));
+    }
+    for (n, s) in JobState::ALL.iter().filter(|s| s.resumes_after_network()).enumerate() {
+        let id = format!("job-network-{n}");
+        files.push((id.clone(), job_file(&base, &id, |v| {
+            v["state"] = json!("paused_network");
+            v["activeItemId"] = json!("item-000001");
+            v["recovery"] = json!({ "fromState": "paused_network", "action": "resume-network", "pathRole": "source", "resumeState": s });
+            if *s == JobState::Replacing {
+                v["replacementPhase"] = json!("candidate-promoted");
+                v["recovery"]["phase"] = json!("candidate-promoted");
+            }
+        })));
+    }
+    let strings = files.iter().map(|(_, f)| f.as_str()).collect::<String>();
+    for s in JobState::ALL.iter().map(JobState::as_str).chain(ItemState::ALL.iter().map(ItemState::as_str)).chain(ReplacementPhase::ALL.iter().map(ReplacementPhase::as_str)).chain(states::ArtifactState::ALL.iter().map(states::ArtifactState::as_str)) {
+        assert!(strings.contains(&format!("\"{s}\"")), "{s} is in one of the job files");
+    }
+    for (id, file) in &files {
+        fs::create_dir_all(root.join(id)).unwrap();
+        fs::write(root.join(id).join(MANIFEST_NAME), format!("{file}\n")).unwrap();
+        // read: the same job, each string as it was
+        let m = store.load(id).unwrap().unwrap_or_else(|| panic!("{id}"));
+        assert_eq!(&m.to_json(), file, "{id}");
+        // written again one revision on: only the revision differs
+        store.transition(id, Patch::new()).unwrap_or_else(|e| panic!("{id}: {e:?}"));
+        let again = fs::read_to_string(root.join(id).join(MANIFEST_NAME)).unwrap();
+        assert_eq!(again, format!("{}\n", file.replacen("\"revision\":0,", "\"revision\":1,", 1)), "{id}");
+    }
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn an_old_job_file_with_a_state_no_list_knows_is_set_aside_whole_and_the_others_still_load() {
+    let root = tmp("unknown-states");
+    let store = quiet(&root);
+    let good = store.create(&initial("job-good", vec![clip(0)])).unwrap();
+    let base = good.to_value();
+    let mut processing = base.clone();
+    processing["items"][0]["state"] = json!("processing");
+    processing["items"][0]["replacementPhase"] = json!("candidate-written");
+    let owning = job_file(&base, "job-x", |v| {
+        v["items"][0]["ownedPaths"] = json!({ "stagedSource": "/data/tmp/s.mp4" });
+        v["items"][0]["ownedArtifacts"] = json!({ "stagedSource": { "path": "/data/tmp/s.mp4", "nonce": "n1", "state": "intent" } });
+    });
+    let paused = job_file(&base, "job-x", |v| {
+        v["state"] = json!("paused");
+        v["recovery"] = json!({ "fromState": "waiting", "action": "resume-queue" });
+    });
+    // (each a job file Node or this store wrote, with one state string no list knows)
+    let damaged = [
+        ("job-u-job", job_file(&base, "job-x", |_| {}).replace("\"state\":\"waiting\"", "\"state\":\"frozen\"")),
+        ("job-u-clip", job_file(&base, "job-x", |_| {}).replace("\"state\":\"queued\"", "\"state\":\"half-done\"")),
+        ("job-u-phase", job_file(&processing, "job-x", |_| {}).replace("candidate-written", "candidate-dreamt")),
+        ("job-u-artifact", owning.replace("\"state\":\"intent\"", "\"state\":\"borrowed\"")),
+        ("job-u-recovery", paused.replace("\"fromState\":\"waiting\"", "\"fromState\":\"napping\"")),
+    ];
+    for (id, text) in &damaged {
+        let text = text.replace("\"id\":\"job-x\"", &format!("\"id\":\"{id}\""));
+        fs::create_dir_all(root.join(id)).unwrap();
+        fs::write(root.join(id).join(MANIFEST_NAME), &text).unwrap();
+        // refused, never read as some other state, and its bytes kept beside it
+        assert_eq!(store.load(id).unwrap_err().code, "CORRUPT_MANIFEST", "{id}");
+        let aside: Vec<Vec<u8>> = fs::read_dir(root.join(id)).unwrap().map(|e| e.unwrap()).filter(|e| e.file_name().to_string_lossy().starts_with("job.json.corrupt-")).map(|e| fs::read(e.path()).unwrap()).collect();
+        assert_eq!(aside, vec![text.as_bytes().to_vec()], "{id}");
+        assert_eq!(fs::read(root.join(id).join(MANIFEST_NAME)).unwrap(), text.as_bytes(), "{id}: the job file itself is left as it was");
+    }
+    // a journal line with one: the job file is kept, the line's bytes set aside
+    let m = store.transition("job-good", Patch::new()).unwrap();
+    store.transition("job-good", Patch::new().items(vec![changed(&m.items[0], json!({ "state": "processing" }))])).unwrap();
+    let journal = root.join("job-good/job.journal");
+    let line = fs::read_to_string(&journal).unwrap().replace("\"state\":\"processing\"", "\"state\":\"half-done\"");
+    fs::write(&journal, &line).unwrap();
+    let job_file_before = fs::read(root.join("job-good").join(MANIFEST_NAME)).unwrap();
+    assert_eq!(quiet(&root).load("job-good").unwrap_err().code, "CORRUPT_MANIFEST");
+    let aside: Vec<Vec<u8>> = fs::read_dir(root.join("job-good")).unwrap().map(|e| e.unwrap()).filter(|e| e.file_name().to_string_lossy().starts_with("job.json.corrupt-")).map(|e| fs::read(e.path()).unwrap()).collect();
+    assert_eq!(aside, vec![line.as_bytes().to_vec()], "the line's bytes are kept beside the job");
+    assert_eq!(fs::read(root.join("job-good").join(MANIFEST_NAME)).unwrap(), job_file_before, "the job file is kept");
+    fs::remove_file(&journal).unwrap();
+    // the other jobs still load
+    store.create(&initial("job-other", vec![clip(1)])).unwrap();
+    let ids: Vec<String> = store.list().unwrap().iter().map(|m| m.id().to_string()).collect();
+    assert_eq!(ids, ["job-good", "job-other"]);
+    // a saved summary is read as it was, a state no list knows included (not active, not finished)
+    let stamp = store.stamp_of("job-other").unwrap();
+    fs::write(root.join("job-other").join(SUMMARY_NAME), json!({ "v": 1, "stamp": stamp, "summary": { "id": "job-other", "state": "frozen", "items": [] } }).to_string()).unwrap();
+    let s = store.summaries().unwrap();
+    let other = s.iter().find(|s| s["id"] == "job-other").unwrap();
+    assert_eq!(other["state"], "frozen");
+    let st = JobState::parse(other["state"].as_str().unwrap());
+    assert!(!st.is_active() && !st.is_terminal());
+    fs::remove_dir_all(&root).unwrap();
+}

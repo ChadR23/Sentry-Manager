@@ -2,6 +2,7 @@
 //! REPLACEMENT_TRUTH_TABLES / replacementAction, from the files on disk
 //! (runtime.js createRecoveryInspector) and the last phase recorded.
 
+use super::jobstore::states::ReplacementPhase;
 use super::snapshot::Artifact;
 use super::tesla_sei::hex;
 use sha2::{Digest, Sha256};
@@ -21,9 +22,10 @@ pub struct Facts {
     pub partial_final_same_identity: bool,
 }
 
-fn table(phase: &str) -> Option<&'static [(&'static str, &'static str)]> {
+fn table(phase: &ReplacementPhase) -> Option<&'static [(&'static str, &'static str)]> {
+    use ReplacementPhase::*;
     Some(match phase {
-        "candidate-written" => &[
+        CandidateWritten => &[
             ("1100", "backup-original"),
             ("1110", "backup-original"),
             ("1010", "promote-candidate"),
@@ -33,28 +35,23 @@ fn table(phase: &str) -> Option<&'static [(&'static str, &'static str)]> {
             ("0111", "delete-backup"),
             ("0101", "finish-replacement"),
         ],
-        "original-backed-up" => &[("1110", "backup-original"), ("1010", "promote-candidate"), ("0110", "validate-final"), ("0010", "restore-backup"), ("0111", "delete-backup"), ("0101", "finish-replacement")],
-        "candidate-promoted" => &[("1010", "promote-candidate"), ("0110", "validate-final"), ("0010", "restore-backup"), ("0111", "delete-backup"), ("0101", "finish-replacement")],
-        "final-validated" => &[("0111", "delete-backup"), ("0101", "finish-replacement"), ("0010", "restore-backup")],
-        "backup-deleted" => &[("0111", "delete-backup"), ("0101", "finish-replacement"), ("0100", "finish-replacement"), ("0010", "restore-backup")],
-        "rollback-started" | "backup-restored" | "rollback-failed" => &[("0100", "rollback-complete"), ("0010", "restore-backup"), ("1010", "restore-backup"), ("1110", "restore-backup")],
-        _ => return None,
+        OriginalBackedUp => &[("1110", "backup-original"), ("1010", "promote-candidate"), ("0110", "validate-final"), ("0010", "restore-backup"), ("0111", "delete-backup"), ("0101", "finish-replacement")],
+        CandidatePromoted => &[("1010", "promote-candidate"), ("0110", "validate-final"), ("0010", "restore-backup"), ("0111", "delete-backup"), ("0101", "finish-replacement")],
+        FinalValidated => &[("0111", "delete-backup"), ("0101", "finish-replacement"), ("0010", "restore-backup")],
+        BackupDeleted => &[("0111", "delete-backup"), ("0101", "finish-replacement"), ("0100", "finish-replacement"), ("0010", "restore-backup")],
+        RollbackStarted | BackupRestored | RollbackFailed => &[("0100", "rollback-complete"), ("0010", "restore-backup"), ("1010", "restore-backup"), ("1110", "restore-backup")],
+        Unknown(_) => return None,
     })
 }
 
 /// The actions recovery may record for a phase (REPLACEMENT_ACTIONS_BY_PHASE,
 /// without 'manual-intervention', which every phase allows).
-pub fn phase_actions(phase: &str) -> Option<Vec<&'static str>> {
+pub fn phase_actions(phase: &ReplacementPhase) -> Option<Vec<&'static str>> {
     table(phase).map(|t| t.iter().map(|(_, a)| *a).collect())
 }
 
-/// The phases a replacing job may record.
-pub fn is_replacement_phase(p: &str) -> bool {
-    table(p).is_some()
-}
-
 /// replacementAction(manifest, facts)
-pub fn replacement_action(phase: Option<&str>, facts: Option<&Facts>, has_expected_source: bool) -> &'static str {
+pub fn replacement_action(phase: Option<&ReplacementPhase>, facts: Option<&Facts>, has_expected_source: bool) -> &'static str {
     let Some(f) = facts else { return "manual-intervention" };
     if !has_expected_source || f.partial_exists || f.final_exists {
         return "manual-intervention";
@@ -151,16 +148,17 @@ mod tests {
     #[test]
     fn truth_tables() {
         let f = |c, s, b, v| Facts { candidate_exists: c, source_exists: s, backup_exists: b, final_valid: v, ..Default::default() };
-        assert_eq!(replacement_action(Some("candidate-written"), Some(&f(true, true, true, false)), true), "backup-original");
-        assert_eq!(replacement_action(Some("original-backed-up"), Some(&f(true, false, true, false)), true), "promote-candidate");
-        assert_eq!(replacement_action(Some("candidate-promoted"), Some(&f(false, true, true, true)), true), "delete-backup");
-        assert_eq!(replacement_action(Some("backup-deleted"), Some(&f(false, true, false, false)), true), "finish-replacement");
-        assert_eq!(replacement_action(Some("rollback-started"), Some(&f(true, true, true, false)), true), "restore-backup");
-        assert_eq!(replacement_action(Some("final-validated"), Some(&f(true, true, true, true)), true), "manual-intervention");
-        assert_eq!(replacement_action(Some("candidate-written"), Some(&f(true, true, true, false)), false), "manual-intervention", "no recorded original");
+        let p = ReplacementPhase::parse;
+        assert_eq!(replacement_action(Some(&p("candidate-written")), Some(&f(true, true, true, false)), true), "backup-original");
+        assert_eq!(replacement_action(Some(&p("original-backed-up")), Some(&f(true, false, true, false)), true), "promote-candidate");
+        assert_eq!(replacement_action(Some(&p("candidate-promoted")), Some(&f(false, true, true, true)), true), "delete-backup");
+        assert_eq!(replacement_action(Some(&p("backup-deleted")), Some(&f(false, true, false, false)), true), "finish-replacement");
+        assert_eq!(replacement_action(Some(&p("rollback-started")), Some(&f(true, true, true, false)), true), "restore-backup");
+        assert_eq!(replacement_action(Some(&p("final-validated")), Some(&f(true, true, true, true)), true), "manual-intervention");
+        assert_eq!(replacement_action(Some(&p("candidate-written")), Some(&f(true, true, true, false)), false), "manual-intervention", "no recorded original");
         let partial = Facts { partial_exists: true, ..f(true, true, false, false) };
-        assert_eq!(replacement_action(Some("candidate-written"), Some(&partial), true), "manual-intervention");
-        assert_eq!(replacement_action(Some("nonsense"), Some(&f(true, true, false, false)), true), "manual-intervention");
-        assert_eq!(replacement_action(Some("candidate-written"), None, true), "manual-intervention");
+        assert_eq!(replacement_action(Some(&p("candidate-written")), Some(&partial), true), "manual-intervention");
+        assert_eq!(replacement_action(Some(&p("nonsense")), Some(&f(true, true, false, false)), true), "manual-intervention");
+        assert_eq!(replacement_action(Some(&p("candidate-written")), None, true), "manual-intervention");
     }
 }

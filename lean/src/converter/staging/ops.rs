@@ -53,7 +53,7 @@ fn journal_mark(size: u64, sha: &str) -> Journal {
 }
 
 fn cleanup_pending_of(arts: &Artifacts) -> Vec<String> {
-    arts.iter().filter(|(_, m)| m.state == "cleanup-pending").map(|(k, _)| k.clone()).collect()
+    arts.iter().filter(|(_, m)| m.state == ArtifactState::CleanupPending).map(|(k, _)| k.clone()).collect()
 }
 
 impl Tx {
@@ -80,7 +80,7 @@ impl Tx {
         }
         self.staged.lock().unwrap().push(PathBuf::from(&dest));
         let paths: Paths = resume.map(|r| r.0.clone()).unwrap_or_else(|| [("stagedSource".to_string(), dest.clone())].into_iter().collect());
-        let mut arts: Artifacts = resume.map(|r| r.1.clone()).unwrap_or_else(|| [("stagedSource".to_string(), artifact_metadata(&dest, &nonce, "intent", None, None, 0, None))].into_iter().collect());
+        let mut arts: Artifacts = resume.map(|r| r.1.clone()).unwrap_or_else(|| [("stagedSource".to_string(), artifact_metadata(&dest, &nonce, ArtifactState::Intent, None, None, 0, None))].into_iter().collect());
         let r = (|| -> R<Staged> {
             let real_temp = canonical_existing(&s(&self.temp_root))?;
             let canon = canonical_for_new(&dest)?;
@@ -90,7 +90,7 @@ impl Tx {
             let mut resume_copy = None;
             if resume.is_some() {
                 let m = arts.get("stagedSource").cloned().ok_or_else(|| unsafe_path("stage-source", &dest, "resume: no stagedSource record"))?;
-                if m.journal.is_none() || m.state == "intent" {
+                if m.journal.is_none() || m.state == ArtifactState::Intent {
                     return Err(unsafe_path("stage-source", &dest, format!("resume: record {} (state {})", if m.journal.is_none() { "has no journal" } else { "not resumable" }, m.state)));
                 }
                 resume_copy = Some(m);
@@ -122,7 +122,7 @@ impl Tx {
                         Event::ResumeReconciled | Event::ChunkCommitted => {
                             let mut p = arts_ref["stagedSource"].clone();
                             if ev == Event::ResumeReconciled {
-                                p.state = "writing".into();
+                                p.state = ArtifactState::Writing;
                             }
                             p.size = Some(size);
                             p.sha256 = Some(sha.into());
@@ -135,7 +135,7 @@ impl Tx {
                         }
                         Event::Created => {
                             let n = arts_ref["stagedSource"].nonce.clone();
-                            arts_ref.insert("stagedSource".into(), artifact_metadata(dest_ref, &n, "writing", Some(st), Some(sha), size, Some(journal_mark(0, sha))));
+                            arts_ref.insert("stagedSource".into(), artifact_metadata(dest_ref, &n, ArtifactState::Writing, Some(st), Some(sha), size, Some(journal_mark(0, sha))));
                             persist(op, Snap::new(paths_ref, arts_ref).step("staged-source-writing"))?;
                         }
                         Event::ChunkPending => {
@@ -150,7 +150,7 @@ impl Tx {
             };
             let n = arts["stagedSource"].nonce.clone();
             let j = arts["stagedSource"].journal.clone();
-            arts.insert("stagedSource".into(), artifact_metadata(&dest, &n, "owned", Some(&copied.stat), Some(&copied.sha256), copied.size, j));
+            arts.insert("stagedSource".into(), artifact_metadata(&dest, &n, ArtifactState::Owned, Some(&copied.stat), Some(&copied.sha256), copied.size, j));
             let mut sn = Snap::new(&paths, &arts).step("staged-source-owned");
             if op.record_expected_source {
                 sn.item_fields = Some(json!({ "expectedSource": copied.expected_source }));
@@ -165,7 +165,7 @@ impl Tx {
                 Self::release_lease(&self.staged, &dest);
                 if lstat_or_none(&dest).ok().flatten().is_some() {
                     if let Some(m) = arts.get_mut("stagedSource") {
-                        m.state = "cleanup-pending".into();
+                        m.state = ArtifactState::CleanupPending;
                     }
                     let pending = vec!["stagedSource".to_string()];
                     let _ = persist(op, Snap::new(&paths, &arts).step("staged-source-cleanup-pending").pending(&pending));
@@ -197,7 +197,7 @@ impl Tx {
             return Err(unsafe_path("reserve-encode-output", &target, d));
         }
         let paths: Paths = [("encodedCandidate".to_string(), target.clone())].into_iter().collect();
-        let arts: Artifacts = [("encodedCandidate".to_string(), artifact_metadata(&target, &nonce, "intent", None, None, 0, None))].into_iter().collect();
+        let arts: Artifacts = [("encodedCandidate".to_string(), artifact_metadata(&target, &nonce, ArtifactState::Intent, None, None, 0, None))].into_iter().collect();
         persist(op, Snap::new(&paths, &arts).step("encoded-candidate-intent"))?;
         self.encoded.lock().unwrap().push(PathBuf::from(&target));
         Ok(Reserved { path: target, nonce, owned_paths: paths, owned_artifacts: arts })
@@ -211,9 +211,9 @@ impl Tx {
         let arts = op.owned_artifacts.clone();
         let target = valid_abs(paths.get("encodedCandidate").map(String::as_str))?;
         let Some(m) = arts.get("encodedCandidate") else { return Err(unsafe_path("adopt-encode-output", &target, "no encodedCandidate record")) };
-        if !(m.state == "intent" || m.state == "owned") || m.path != target || m.nonce.is_empty() || (!Self::leased(&self.encoded, &target) && self.encoded.lock().unwrap().len() >= self.max_leases) {
+        if !(m.state == ArtifactState::Intent || m.state == ArtifactState::Owned) || m.path != target || m.nonce.is_empty() || (!Self::leased(&self.encoded, &target) && self.encoded.lock().unwrap().len() >= self.max_leases) {
             let mut d = Vec::new();
-            if !(m.state == "intent" || m.state == "owned") {
+            if !(m.state == ArtifactState::Intent || m.state == ArtifactState::Owned) {
                 d.push(format!("record state {} not intent/owned", m.state));
             }
             if m.path != target {
@@ -257,7 +257,7 @@ impl Tx {
         let nonce = new_nonce();
         let partial = publication_partial(&dest, &job, &item, &nonce);
         let mut paths: Paths = [("destinationPartial".to_string(), partial.clone())].into_iter().collect();
-        let mut arts: Artifacts = [("destinationPartial".to_string(), artifact_metadata(&partial, &nonce, "intent", None, None, 0, None))].into_iter().collect();
+        let mut arts: Artifacts = [("destinationPartial".to_string(), artifact_metadata(&partial, &nonce, ArtifactState::Intent, None, None, 0, None))].into_iter().collect();
         let mut final_created = false;
         let mut final_verified = false;
         let r = (|| -> R<Saved> {
@@ -275,7 +275,7 @@ impl Tx {
                     &mut |ev, size, sha, st| {
                         match ev {
                             Event::Created => {
-                                ar.insert("destinationPartial".into(), artifact_metadata(part, &nonce, "writing", Some(st), Some(sha), size, Some(journal_mark(0, sha))));
+                                ar.insert("destinationPartial".into(), artifact_metadata(part, &nonce, ArtifactState::Writing, Some(st), Some(sha), size, Some(journal_mark(0, sha))));
                                 persist(op, Snap::new(pr, ar).step("asset-partial-writing"))
                             }
                             Event::ChunkPending => {
@@ -299,7 +299,7 @@ impl Tx {
                 )?
             };
             let j = arts["destinationPartial"].journal.clone();
-            arts.insert("destinationPartial".into(), artifact_metadata(&partial, &nonce, "owned", Some(&copied.stat), Some(&copied.sha256), copied.size, j));
+            arts.insert("destinationPartial".into(), artifact_metadata(&partial, &nonce, ArtifactState::Owned, Some(&copied.stat), Some(&copied.sha256), copied.size, j));
             persist(op, Snap::new(&paths, &arts).step("asset-partial-owned"))?;
             self.validate_readable_meta(&partial, &arts["destinationPartial"], op.verify_readable, "DESTINATION_VALIDATION_FAILED")?;
             persist(op, Snap::new(&paths, &arts).step("asset-promotion-intent"))?;
@@ -309,7 +309,7 @@ impl Tx {
             if removed {
                 return Err(txe("ATOMIC_PROMOTION_UNSUPPORTED"));
             }
-            arts.get_mut("destinationPartial").unwrap().state = "cleanup-pending".into();
+            arts.get_mut("destinationPartial").unwrap().state = ArtifactState::CleanupPending;
             self.validate_readable_meta(&dest, &arts["destinationPartial"], op.verify_readable, "DESTINATION_VALIDATION_FAILED")?;
             final_verified = true;
             let pending = vec!["destinationPartial".to_string()];
@@ -318,7 +318,7 @@ impl Tx {
         })();
         let Err(mut error) = r else { return r };
         if final_created && !final_verified {
-            arts.get_mut("destinationPartial").unwrap().state = "cleanup-pending".into();
+            arts.get_mut("destinationPartial").unwrap().state = ArtifactState::CleanupPending;
             match self.remove_exact_owned(&dest, arts.get("destinationPartial"), false, true, None, None) {
                 Ok(_) => final_created = false,
                 Err(_) => {
@@ -328,14 +328,14 @@ impl Tx {
                 }
             }
         }
-        if !final_created && arts.get("destinationPartial").is_some_and(|m| m.state != "intent") {
+        if !final_created && arts.get("destinationPartial").is_some_and(|m| m.state != ArtifactState::Intent) {
             match self.remove_exact_owned(&partial, arts.get("destinationPartial"), true, false, None, None) {
                 Ok(_) => {
                     paths.shift_remove("destinationPartial");
                     arts.shift_remove("destinationPartial");
                 }
                 Err(_) => {
-                    arts.get_mut("destinationPartial").unwrap().state = "cleanup-pending".into();
+                    arts.get_mut("destinationPartial").unwrap().state = ArtifactState::CleanupPending;
                     if error.tx {
                         error.cleanup_pending = Some(vec!["destinationPartial".into()]);
                     }
@@ -343,13 +343,13 @@ impl Tx {
             }
         }
         if final_created && !final_verified {
-            arts.get_mut("destinationPartial").unwrap().state = "cleanup-pending".into();
+            arts.get_mut("destinationPartial").unwrap().state = ArtifactState::CleanupPending;
             if error.tx {
                 error.cleanup_pending = Some(vec!["destinationPartial".into()]);
             }
         }
         if final_created && final_verified && error.tx {
-            arts.get_mut("destinationPartial").unwrap().state = "cleanup-pending".into();
+            arts.get_mut("destinationPartial").unwrap().state = ArtifactState::CleanupPending;
             error.cleanup_pending = Some(vec!["destinationPartial".into()]);
             error.valid_final = Some(Box::new(Saved { final_path: dest.clone(), output_bytes: arts["destinationPartial"].size.unwrap_or(0), phase: None, owned_paths: paths.clone(), owned_artifacts: arts.clone(), cleanup_pending: vec!["destinationPartial".into()] }));
         }
@@ -381,7 +381,7 @@ impl Tx {
             if !same_pathbuf(&dirname(&cp), &dirname(&cd)) {
                 return Err(unsafe_path("publish-separate", &partial, "partial and destination real folders differ"));
             }
-            arts.insert("destinationPartial".into(), artifact_metadata(&partial, &pn, "intent", None, None, 0, None));
+            arts.insert("destinationPartial".into(), artifact_metadata(&partial, &pn, ArtifactState::Intent, None, None, 0, None));
             persist(op, Snap::new(&paths, &arts).step("separate-partial-intent").artifact(Some(&artifact)))?;
             let copied = {
                 let (pr, ar, part, art) = (&paths, &mut arts, &partial, &artifact);
@@ -392,7 +392,7 @@ impl Tx {
                     &mut |ev, size, sha, st| match ev {
                         Event::Created => {
                             let n = ar["destinationPartial"].nonce.clone();
-                            ar.insert("destinationPartial".into(), artifact_metadata(part, &n, "writing", Some(st), Some(sha), size, Some(journal_mark(0, sha))));
+                            ar.insert("destinationPartial".into(), artifact_metadata(part, &n, ArtifactState::Writing, Some(st), Some(sha), size, Some(journal_mark(0, sha))));
                             persist(op, Snap::new(pr, ar).step("separate-partial-writing").artifact(Some(art)))
                         }
                         Event::ChunkPending => {
@@ -416,7 +416,7 @@ impl Tx {
                 )?
             };
             let (n, j) = (arts["destinationPartial"].nonce.clone(), arts["destinationPartial"].journal.clone());
-            arts.insert("destinationPartial".into(), artifact_metadata(&partial, &n, "owned", Some(&copied.stat), Some(&copied.sha256), copied.size, j));
+            arts.insert("destinationPartial".into(), artifact_metadata(&partial, &n, ArtifactState::Owned, Some(&copied.stat), Some(&copied.sha256), copied.size, j));
             persist(op, Snap::new(&paths, &arts).step("separate-partial-owned").artifact(Some(&artifact)))?;
             abort_if(op.cancel)?;
             self.validate_readable(&partial, &artifact, op.verify_readable, "DESTINATION_VALIDATION_FAILED")?;
@@ -426,7 +426,7 @@ impl Tx {
             let (_, removed) = self.promote_no_replace(&partial, &dest, "DESTINATION_COLLISION", Some(&e), false, false)?;
             final_created = true;
             if !removed {
-                arts.get_mut("destinationPartial").unwrap().state = "cleanup-pending".into();
+                arts.get_mut("destinationPartial").unwrap().state = ArtifactState::CleanupPending;
                 pending.push("destinationPartial".into());
             }
             self.validate_readable(&dest, &artifact, op.verify_readable, "DESTINATION_VALIDATION_FAILED")?;
@@ -440,7 +440,7 @@ impl Tx {
                 paths.shift_remove("publicationSnapshot");
                 arts.shift_remove("publicationSnapshot");
             } else {
-                arts.get_mut("publicationSnapshot").unwrap().state = "cleanup-pending".into();
+                arts.get_mut("publicationSnapshot").unwrap().state = ArtifactState::CleanupPending;
                 pending.push("publicationSnapshot".into());
             }
             let step = if pending.is_empty() { "separate-complete" } else { "separate-complete-cleanup-pending" };
@@ -451,18 +451,18 @@ impl Tx {
         let mut failed: Vec<String> = Vec::new();
         if final_created && !final_verified && arts.contains_key("destinationPartial") {
             if self.remove_exact_owned(&dest, arts.get("destinationPartial"), true, true, None, None).is_err() {
-                arts.get_mut("destinationPartial").unwrap().state = "cleanup-pending".into();
+                arts.get_mut("destinationPartial").unwrap().state = ArtifactState::CleanupPending;
                 failed.push("destinationPartial".into());
             }
         }
-        if arts.get("destinationPartial").is_some_and(|m| m.state != "intent") && !failed.iter().any(|f| f == "destinationPartial") {
+        if arts.get("destinationPartial").is_some_and(|m| m.state != ArtifactState::Intent) && !failed.iter().any(|f| f == "destinationPartial") {
             match self.remove_exact_owned(&partial, arts.get("destinationPartial"), true, false, None, None) {
                 Ok(_) => {
                     paths.shift_remove("destinationPartial");
                     arts.shift_remove("destinationPartial");
                 }
                 Err(_) => {
-                    arts.get_mut("destinationPartial").unwrap().state = "cleanup-pending".into();
+                    arts.get_mut("destinationPartial").unwrap().state = ArtifactState::CleanupPending;
                     failed.push("destinationPartial".into());
                 }
             }
@@ -475,7 +475,7 @@ impl Tx {
                 }
                 Ok(false) => {
                     if let Some(m) = arts.get_mut("publicationSnapshot") {
-                        m.state = "cleanup-pending".into();
+                        m.state = ArtifactState::CleanupPending;
                     }
                     failed.push("publicationSnapshot".into());
                 }
@@ -514,7 +514,7 @@ impl Tx {
             if let Some(a) = &persisted {
                 self.validate_publication(a, Validate::Reconcile(a))?;
             }
-            persist(op, Snap::new(&paths, &arts).phase("rollback-started").artifact(persisted.as_ref()))?;
+            persist(op, Snap::new(&paths, &arts).phase(ReplacementPhase::RollbackStarted).artifact(persisted.as_ref()))?;
             // stopped between linking the backup and the rename over the original
             self.drop_backup_alias(&source, &backup)?;
             let ss = lstat_or_none(&source)?;
@@ -526,7 +526,7 @@ impl Tx {
                 }
                 if let Err(e) = self.remove_exact_owned(&source, cm.as_ref(), false, true, None, None) {
                     if e.tx && e.code == "OWNED_CLEANUP_FAILED" {
-                        arts.get_mut("replacementCandidate").unwrap().state = "cleanup-pending".into();
+                        arts.get_mut("replacementCandidate").unwrap().state = ArtifactState::CleanupPending;
                     }
                     return Err(e);
                 }
@@ -539,7 +539,7 @@ impl Tx {
                 self.read_exact_meta(&backup, &bm, "ROLLBACK_FAILED")?;
                 let (_, removed) = self.promote_no_replace(&backup, &source, "ROLLBACK_FAILED", Some(&bm.expected()), true, false)?;
                 if !removed {
-                    arts.get_mut("replacementBackup").unwrap().state = "cleanup-pending".into();
+                    arts.get_mut("replacementBackup").unwrap().state = ArtifactState::CleanupPending;
                 } else {
                     paths.shift_remove("replacementBackup");
                     arts.shift_remove("replacementBackup");
@@ -551,7 +551,7 @@ impl Tx {
             if lstat_or_none(&candidate)?.is_some() {
                 if let Err(e) = self.remove_exact_owned(&candidate, arts.get("replacementCandidate"), false, false, None, None) {
                     if e.tx && e.code == "OWNED_CLEANUP_FAILED" {
-                        arts.get_mut("replacementCandidate").unwrap().state = "cleanup-pending".into();
+                        arts.get_mut("replacementCandidate").unwrap().state = ArtifactState::CleanupPending;
                     }
                     return Err(e);
                 }
@@ -567,16 +567,16 @@ impl Tx {
                     paths.shift_remove("publicationSnapshot");
                     arts.shift_remove("publicationSnapshot");
                 } else if let Some(m) = arts.get_mut("publicationSnapshot") {
-                    m.state = "cleanup-pending".into();
+                    m.state = ArtifactState::CleanupPending;
                 }
             }
             let pending = cleanup_pending_of(&arts);
-            persist(op, Snap::new(&paths, &arts).phase("backup-restored").artifact(persisted.as_ref()).pending(&pending))?;
-            Ok(Saved { final_path: source.clone(), output_bytes: 0, phase: Some("backup-restored"), owned_paths: paths.clone(), owned_artifacts: arts.clone(), cleanup_pending: pending })
+            persist(op, Snap::new(&paths, &arts).phase(ReplacementPhase::BackupRestored).artifact(persisted.as_ref()).pending(&pending))?;
+            Ok(Saved { final_path: source.clone(), output_bytes: 0, phase: Some(ReplacementPhase::BackupRestored), owned_paths: paths.clone(), owned_artifacts: arts.clone(), cleanup_pending: pending })
         })();
         r.map_err(|_| {
             let pending = cleanup_pending_of(&arts);
-            let _ = persist(op, Snap::new(&paths, &arts).phase("rollback-failed").artifact(persisted.as_ref()).pending(&pending));
+            let _ = persist(op, Snap::new(&paths, &arts).phase(ReplacementPhase::RollbackFailed).artifact(persisted.as_ref()).pending(&pending));
             let mut f = txe("ROLLBACK_FAILED");
             f.cleanup_pending = Some(pending);
             f
@@ -598,7 +598,7 @@ impl Tx {
 
     /// dropUnfinishedCopy: a copy prepare could not finish, removed if provably the snapshot's prefix.
     fn drop_unfinished_copy(&self, op: &Op, target: &str, field: &str, paths: &mut Paths, arts: &mut Artifacts, artifact: &Artifact, error: &mut TxError) {
-        if arts.get(field).is_some_and(|m| m.state == "intent") && lstat_or_none(target).ok().flatten().is_none() {
+        if arts.get(field).is_some_and(|m| m.state == ArtifactState::Intent) && lstat_or_none(target).ok().flatten().is_none() {
             paths.shift_remove(field);
             arts.shift_remove(field);
         } else {
@@ -610,8 +610,8 @@ impl Tx {
                 }
                 _ => {
                     if let Some(m) = arts.get_mut(field) {
-                        if m.state == "owned" {
-                            m.state = "cleanup-pending".into();
+                        if m.state == ArtifactState::Owned {
+                            m.state = ArtifactState::CleanupPending;
                         }
                     }
                     if error.tx {
@@ -648,7 +648,7 @@ impl Tx {
         let mut paths: Paths = [("publicationSnapshot".to_string(), artifact.path.clone()), ("replacementCandidate".to_string(), candidate.clone())].into_iter().collect();
         let mut arts: Artifacts = IndexMap::new();
         arts.insert("publicationSnapshot".into(), self.capture_publication(&artifact, None)?);
-        arts.insert("replacementCandidate".into(), artifact_metadata(&candidate, &cn, "intent", None, None, 0, None));
+        arts.insert("replacementCandidate".into(), artifact_metadata(&candidate, &cn, ArtifactState::Intent, None, None, 0, None));
         persist(op, Snap::new(&paths, &arts).step("replacement-prepare").artifact(Some(&artifact)))?;
         let r = (|| -> R<Option<String>> {
             let copied = {
@@ -658,7 +658,7 @@ impl Tx {
                     &candidate,
                     CopyArgs { expected: Some((artifact.size, artifact.sha256.clone(), None)), cancel: op.cancel, collision: "REPLACEMENT_COLLISION", failure: "PUBLICATION_ARTIFACT_CHANGED", resume: None, hooks: Hooks { created: true, ..Default::default() } },
                     &mut |_, _, sha, st| {
-                        ar.insert("replacementCandidate".into(), artifact_metadata(cand, &cn, "writing", Some(st), Some(sha), 0, Some(journal_mark(0, sha))));
+                        ar.insert("replacementCandidate".into(), artifact_metadata(cand, &cn, ArtifactState::Writing, Some(st), Some(sha), 0, Some(journal_mark(0, sha))));
                         persist(op, Snap::new(pr, ar).step("replacement-candidate-writing").artifact(Some(art)))
                     },
                 )?
@@ -667,7 +667,7 @@ impl Tx {
             use std::os::unix::fs::PermissionsExt;
             let _ = fs::set_permissions(&candidate, fs::Permissions::from_mode(original.mode() & 0o777));
             let mt = self.prove_copy(&candidate, &artifact, &copied.stat, "PUBLICATION_ARTIFACT_CHANGED")?;
-            arts.insert("replacementCandidate".into(), artifact_metadata(&candidate, &cn, "owned", Some(&copied.stat), Some(&artifact.sha256), artifact.size, None));
+            arts.insert("replacementCandidate".into(), artifact_metadata(&candidate, &cn, ArtifactState::Owned, Some(&copied.stat), Some(&artifact.sha256), artifact.size, None));
             persist(op, Snap::new(&paths, &arts).step("replacement-candidate-owned").artifact(Some(&artifact)))?;
             Ok(mt)
         })();
@@ -710,8 +710,8 @@ impl Tx {
         let mut paths = p.owned_paths.clone();
         paths.insert("replacementBackup".into(), backup.clone());
         let mut arts = p.owned_artifacts.clone();
-        arts.insert("replacementBackup".into(), artifact_metadata(backup, &p.backup_nonce, "intent", None, None, 0, None));
-        persist(op, Snap::new(&paths, &arts).phase("candidate-written").artifact(Some(artifact)))?;
+        arts.insert("replacementBackup".into(), artifact_metadata(backup, &p.backup_nonce, ArtifactState::Intent, None, None, 0, None));
+        persist(op, Snap::new(&paths, &arts).phase(ReplacementPhase::CandidateWritten).artifact(Some(artifact)))?;
         let mut backup_deleted = false;
         let r = (|| -> R<Saved> {
             // still the same original, and the same complete copy beside it
@@ -738,12 +738,12 @@ impl Tx {
                 let (rec, mt) = self.backup_record(backup, &p.backup_nonce, true, &expected, proven_backup.as_deref())?;
                 arts.insert("replacementBackup".into(), rec);
                 backup_mtime = mt;
-                persist(op, Snap::new(&paths, &arts).phase("original-backed-up").artifact(Some(artifact)))?;
+                persist(op, Snap::new(&paths, &arts).phase(ReplacementPhase::OriginalBackedUp).artifact(Some(artifact)))?;
                 let ec = quick.clone().unwrap_or_else(|| arts["replacementCandidate"].expected());
                 if let Err(e) = self.replace_over_original(&candidate, source, backup, &ec, quick.is_some(), &expected) {
                     // still the original at its name: only the backup name goes
                     if self.drop_backup_alias(source, backup).unwrap_or(false) {
-                        arts.insert("replacementBackup".into(), artifact_metadata(backup, &p.backup_nonce, "intent", None, None, 0, None));
+                        arts.insert("replacementBackup".into(), artifact_metadata(backup, &p.backup_nonce, ArtifactState::Intent, None, None, 0, None));
                     }
                     return Err(e);
                 }
@@ -755,7 +755,7 @@ impl Tx {
                 arts.insert("replacementBackup".into(), rec);
                 backup_mtime = mt;
                 let pend: Vec<String> = if removed { vec![] } else { vec!["replacementBackup".into()] };
-                persist(op, Snap::new(&paths, &arts).phase("original-backed-up").artifact(Some(artifact)).pending(&pend))?;
+                persist(op, Snap::new(&paths, &arts).phase(ReplacementPhase::OriginalBackedUp).artifact(Some(artifact)).pending(&pend))?;
                 if !removed {
                     return Err(txe("REPLACEMENT_FAILED"));
                 }
@@ -764,13 +764,13 @@ impl Tx {
                 source_removed = r2;
             }
             if !source_removed {
-                arts.get_mut("replacementCandidate").unwrap().state = "cleanup-pending".into();
+                arts.get_mut("replacementCandidate").unwrap().state = ArtifactState::CleanupPending;
             }
             let pend: Vec<String> = if source_removed { vec![] } else { vec!["replacementCandidate".into()] };
-            persist(op, Snap::new(&paths, &arts).phase("candidate-promoted").artifact(Some(artifact)).pending(&pend))?;
+            persist(op, Snap::new(&paths, &arts).phase(ReplacementPhase::CandidatePromoted).artifact(Some(artifact)).pending(&pend))?;
             if op.verify_readable.is_some() {
                 self.validate_readable(source, artifact, op.verify_readable, "FINAL_VALIDATION_FAILED")?;
-                persist(op, Snap::new(&paths, &arts).phase("final-validated").artifact(Some(artifact)))?;
+                persist(op, Snap::new(&paths, &arts).phase(ReplacementPhase::FinalValidated).artifact(Some(artifact)))?;
             }
             let ef = if source_removed { arts.get("replacementCandidate").cloned() } else { None };
             self.remove_replacement_backup(backup, arts.get("replacementBackup"), source, artifact, ef.as_ref(), quick.as_ref().and_then(|q| q.mtime_ns.as_deref()), backup_mtime.as_deref())?;
@@ -778,13 +778,13 @@ impl Tx {
             arts.shift_remove("replacementBackup");
             backup_deleted = true;
             let mut pending = vec![];
-            if arts.get("replacementCandidate").is_some_and(|m| m.state == "cleanup-pending") {
+            if arts.get("replacementCandidate").is_some_and(|m| m.state == ArtifactState::CleanupPending) {
                 pending.push("replacementCandidate".to_string());
             } else {
                 paths.shift_remove("replacementCandidate");
                 arts.shift_remove("replacementCandidate");
             }
-            Ok(Saved { final_path: source.clone(), output_bytes: artifact.size, phase: Some("backup-deleted"), owned_paths: paths.clone(), owned_artifacts: arts.clone(), cleanup_pending: pending })
+            Ok(Saved { final_path: source.clone(), output_bytes: artifact.size, phase: Some(ReplacementPhase::BackupDeleted), owned_paths: paths.clone(), owned_artifacts: arts.clone(), cleanup_pending: pending })
         })();
         let Err(error) = r else { return r };
         if !backup_deleted {
@@ -819,7 +819,7 @@ impl Tx {
             return Err(f);
         }
         let mut f = if error.tx { error } else { txe("REPLACEMENT_FAILED") };
-        f.valid_final = Some(Box::new(Saved { final_path: source.clone(), output_bytes: artifact.size, phase: Some("backup-deleted"), owned_paths: paths.clone(), owned_artifacts: arts.clone(), cleanup_pending: cleanup_pending_of(&arts) }));
+        f.valid_final = Some(Box::new(Saved { final_path: source.clone(), output_bytes: artifact.size, phase: Some(ReplacementPhase::BackupDeleted), owned_paths: paths.clone(), owned_artifacts: arts.clone(), cleanup_pending: cleanup_pending_of(&arts) }));
         Err(f)
     }
 
@@ -839,12 +839,12 @@ impl Tx {
                 result.owned_paths.shift_remove("publicationSnapshot");
                 result.owned_artifacts.shift_remove("publicationSnapshot");
             } else {
-                result.owned_artifacts.get_mut("publicationSnapshot").unwrap().state = "cleanup-pending".into();
+                result.owned_artifacts.get_mut("publicationSnapshot").unwrap().state = ArtifactState::CleanupPending;
                 result.cleanup_pending.push("publicationSnapshot".into());
             }
         }
-        persist(op, Snap::new(&result.owned_paths, &result.owned_artifacts).phase("backup-deleted").artifact(Some(&prepared.artifact)).pending(&result.cleanup_pending))?;
-        result.phase = Some("backup-deleted");
+        persist(op, Snap::new(&result.owned_paths, &result.owned_artifacts).phase(ReplacementPhase::BackupDeleted).artifact(Some(&prepared.artifact)).pending(&result.cleanup_pending))?;
+        result.phase = Some(ReplacementPhase::BackupDeleted);
         Ok(result)
     }
 
@@ -867,7 +867,7 @@ impl Tx {
         let mut paths: Paths = [("publicationSnapshot".to_string(), artifact.path.clone()), ("destinationPartial".to_string(), partial.clone())].into_iter().collect();
         let mut arts: Artifacts = IndexMap::new();
         arts.insert("publicationSnapshot".into(), self.capture_publication(&artifact, None)?);
-        arts.insert("destinationPartial".into(), artifact_metadata(&partial, &pn, "intent", None, None, 0, None));
+        arts.insert("destinationPartial".into(), artifact_metadata(&partial, &pn, ArtifactState::Intent, None, None, 0, None));
         persist(op, Snap::new(&paths, &arts).step("separate-prepare").artifact(Some(&artifact)))?;
         let r = (|| -> R<Option<String>> {
             let copied = {
@@ -877,13 +877,13 @@ impl Tx {
                     &partial,
                     CopyArgs { expected: Some((artifact.size, artifact.sha256.clone(), None)), cancel: op.cancel, collision: "PARTIAL_COLLISION", failure: "PUBLICATION_ARTIFACT_CHANGED", resume: None, hooks: Hooks { created: true, ..Default::default() } },
                     &mut |_, _, sha, st| {
-                        ar.insert("destinationPartial".into(), artifact_metadata(part, &pn, "writing", Some(st), Some(sha), 0, Some(journal_mark(0, sha))));
+                        ar.insert("destinationPartial".into(), artifact_metadata(part, &pn, ArtifactState::Writing, Some(st), Some(sha), 0, Some(journal_mark(0, sha))));
                         persist(op, Snap::new(pr, ar).step("separate-partial-writing").artifact(Some(art)))
                     },
                 )?
             };
             let mt = self.prove_copy(&partial, &artifact, &copied.stat, "PUBLICATION_ARTIFACT_CHANGED")?;
-            arts.insert("destinationPartial".into(), artifact_metadata(&partial, &pn, "owned", Some(&copied.stat), Some(&artifact.sha256), artifact.size, None));
+            arts.insert("destinationPartial".into(), artifact_metadata(&partial, &pn, ArtifactState::Owned, Some(&copied.stat), Some(&artifact.sha256), artifact.size, None));
             persist(op, Snap::new(&paths, &arts).step("separate-partial-owned").artifact(Some(&artifact)))?;
             Ok(mt)
         })();
@@ -931,7 +931,7 @@ impl Tx {
             paths.shift_remove("destinationPartial");
             arts.shift_remove("destinationPartial");
         } else {
-            arts.get_mut("destinationPartial").unwrap().state = "cleanup-pending".into();
+            arts.get_mut("destinationPartial").unwrap().state = ArtifactState::CleanupPending;
             pending.push("destinationPartial".into());
         }
         Ok(Saved { final_path: p.destination.clone(), output_bytes: p.artifact.size, phase: None, owned_paths: paths, owned_artifacts: arts, cleanup_pending: pending })

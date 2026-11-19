@@ -9,12 +9,14 @@
 //! again (Node: its frozen, trusted items).
 
 pub mod normalize;
+pub mod states;
 #[cfg(test)]
 mod tests;
 
 use super::error::CError;
 use super::recovery::{self, Facts};
-use normalize::{assert_safe_job_id, is_safe_id, is_sensitive_field, is_windows_reserved, se, Budget, TERMINAL_JOB_STATES, TOP_FIELDS};
+use normalize::{assert_safe_job_id, is_safe_id, is_sensitive_field, is_windows_reserved, se, Budget, TOP_FIELDS};
+use states::{ItemState, JobState, ReplacementPhase};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -33,7 +35,6 @@ pub const SUMMARY_NAME: &str = "summary.json";
 pub const JOURNAL_LIMIT_RECORDS: u64 = 1000;
 pub const JOURNAL_LIMIT_BYTES: u64 = 16 * 1024 * 1024;
 const DIRECTORY_SYNC_UNSUPPORTED: [&str; 6] = ["EISDIR", "EINVAL", "EPERM", "EACCES", "ENOSYS", "ENOTSUP"];
-const ENCODING_RECOVERY_STATES: [&str; 4] = ["encoding", "staging", "writing-telemetry", "verifying"];
 
 /// One clip of a job, normalized by this store.
 #[derive(Debug, PartialEq)]
@@ -57,8 +58,9 @@ impl Item {
     pub fn id(&self) -> &str {
         self.value["id"].as_str().unwrap_or("")
     }
-    pub fn state(&self) -> &str {
-        self.value["state"].as_str().unwrap_or("")
+    /// Its state, as the store validated it.
+    pub fn state(&self) -> ItemState {
+        ItemState::parse(self.value["state"].as_str().unwrap_or(""))
     }
     pub fn str(&self, key: &str) -> Option<&str> {
         self.value.get(key).and_then(Value::as_str)
@@ -124,8 +126,12 @@ impl Manifest {
     pub fn id(&self) -> &str {
         self.str("id").unwrap_or("")
     }
-    pub fn state(&self) -> &str {
-        self.str("state").unwrap_or("")
+    /// Its state, as the store validated it.
+    pub fn state(&self) -> JobState {
+        JobState::parse(self.str("state").unwrap_or(""))
+    }
+    pub fn replacement_phase(&self) -> Option<ReplacementPhase> {
+        self.str("replacementPhase").map(ReplacementPhase::parse)
     }
     pub fn revision(&self) -> i64 {
         self.top.get("revision").and_then(Value::as_i64).unwrap_or(0)
@@ -202,6 +208,10 @@ impl Patch {
     pub fn set(mut self, k: &str, v: Value) -> Patch {
         self.top.insert(k.to_string(), v);
         self
+    }
+    /// The job's next state.
+    pub fn state(self, s: JobState) -> Patch {
+        self.set("state", s.into())
     }
     pub fn items(mut self, items: Vec<ItemIn>) -> Patch {
         self.items = Some(items);
@@ -285,6 +295,36 @@ fn normalize_parts(top: &Map<String, Value>, items: &[ItemIn]) -> R<Manifest> {
     }
     let (top, items) = normalize::normalize_top(top, || items.iter().map(ItemIn::resolve).collect())?;
     Ok(Manifest { top, items })
+}
+
+/// The moves a change makes (`JobState::to`, `ItemState::to`): the job's
+/// state, each clip it changes, and each clip it adds (queued, or skipped
+/// when it is converted already). A clip handed back unchanged is not
+/// looked at again. The refused clip's id is in `path`.
+fn check_moves(current: &Manifest, next: &Manifest) -> R<()> {
+    current.state().to(next.state())?;
+    let mut by_id: Option<HashMap<&str, &Arc<Item>>> = None;
+    for (i, item) in next.items.iter().enumerate() {
+        let at = current.items.get(i).filter(|c| c.id() == item.id());
+        if at.is_some_and(|c| Arc::ptr_eq(c, item)) {
+            continue;
+        }
+        let before = match at {
+            Some(c) => Some(c),
+            None => by_id.get_or_insert_with(|| current.items.iter().map(|c| (c.id(), c)).collect()).get(item.id()).copied(),
+        };
+        let to = item.state();
+        let refusal = match before {
+            Some(b) => b.state().to(to).err(),
+            None if to.is_initial() => None,
+            None => Some(CError::new(states::INVALID_STATE_TRANSITION, format!("A clip cannot be added as {to}."))),
+        };
+        if let Some(mut e) = refusal {
+            e.path = Some(item.id().to_string());
+            return Err(e);
+        }
+    }
+    Ok(())
 }
 
 // ---- files -------------------------------------------------------------------
@@ -902,7 +942,7 @@ impl JobStore {
     }
 
     fn save_summary(&self, id: &str, stamp: &str, summary: &Value) {
-        if !TERMINAL_JOB_STATES.contains(&summary["state"].as_str().unwrap_or("")) {
+        if !JobState::parse(summary["state"].as_str().unwrap_or("")).is_terminal() {
             return;
         }
         let Ok(paths) = self.job_paths(id) else { return };
@@ -1070,6 +1110,10 @@ impl JobStore {
                 None => current.items.iter().cloned().map(ItemIn::Trusted).collect(),
             };
             let next = normalize_parts(&top, &items)?;
+            if let Err(e) = check_moves(&current, &next) {
+                eprintln!("[CONVERTER] A change of job {} was refused: {}{}", id, e.message, e.path.as_deref().map(|p| format!(" (clip {p})")).unwrap_or_default());
+                return Err(e);
+            }
             let paths = self.ensure_job_directory(id)?;
             let line = journal.filter(|j| j.records < JOURNAL_LIMIT_RECORDS).and_then(|_| Self::journal_record(&current, &next));
             let written = match (&line, journal) {
@@ -1086,7 +1130,7 @@ impl JobStore {
                 }
             };
             match written {
-                Some(w) if !TERMINAL_JOB_STATES.contains(&next.state()) => self.remember_written(id, &paths, &next, w),
+                Some(w) if !next.state().is_terminal() => self.remember_written(id, &paths, &next, w),
                 _ => {
                     self.last_written.lock().unwrap().remove(id);
                 }
@@ -1101,41 +1145,41 @@ impl JobStore {
     }
 
     fn recovery_action(current: &Manifest, facts: &Facts) -> &'static str {
-        let state = current.state();
-        if ENCODING_RECOVERY_STATES.contains(&state) {
-            if facts.backup_exists || facts.final_valid {
-                return "manual-intervention";
+        use JobState::*;
+        match current.state() {
+            Staging | Encoding | WritingTelemetry | Verifying => {
+                if facts.backup_exists || facts.final_valid {
+                    return "manual-intervention";
+                }
+                let item = current.active_item();
+                let nonempty = |v: Option<&Value>| v.and_then(Value::as_object).is_some_and(|o| !o.is_empty());
+                let owns = nonempty(current.get("ownedPaths")) || nonempty(item.and_then(|i| i.get("ownedPaths")));
+                if facts.candidate_exists || facts.partial_exists || owns { "cleanup-and-restart-encoding" } else { "restart-encoding" }
             }
-            let item = current.active_item();
-            let nonempty = |v: Option<&Value>| v.and_then(Value::as_object).is_some_and(|o| !o.is_empty());
-            let owns = nonempty(current.get("ownedPaths")) || nonempty(item.and_then(|i| i.get("ownedPaths")));
-            return if facts.candidate_exists || facts.partial_exists || owns { "cleanup-and-restart-encoding" } else { "restart-encoding" };
-        }
-        if state == "waiting" {
-            return if current.get("discoveryComplete") == Some(&Value::Bool(false)) { "resume-discovery" } else { "resume-queue" };
-        }
-        if state == "discovering" {
-            return "resume-discovery";
-        }
-        if state == "copying" {
-            if facts.candidate_exists || facts.source_exists || facts.backup_exists {
-                return "manual-intervention";
+            Waiting => {
+                if current.get("discoveryComplete") == Some(&Value::Bool(false)) { "resume-discovery" } else { "resume-queue" }
             }
-            if facts.partial_exists && facts.final_exists && facts.final_valid && facts.partial_final_same_identity {
-                return "finalize-copy";
+            Discovering => "resume-discovery",
+            Copying => {
+                if facts.candidate_exists || facts.source_exists || facts.backup_exists {
+                    return "manual-intervention";
+                }
+                if facts.partial_exists && facts.final_exists && facts.final_valid && facts.partial_final_same_identity {
+                    return "finalize-copy";
+                }
+                match (facts.partial_exists, facts.final_exists, facts.final_valid) {
+                    (false, false, false) => "restart-copy",
+                    (false, true, true) => "finalize-copy",
+                    (true, false, false) => "resume-copy",
+                    _ => "manual-intervention",
+                }
             }
-            return match (facts.partial_exists, facts.final_exists, facts.final_valid) {
-                (false, false, false) => "restart-copy",
-                (false, true, true) => "finalize-copy",
-                (true, false, false) => "resume-copy",
-                _ => "manual-intervention",
-            };
+            Replacing => {
+                let has_expected = current.active_item().is_some_and(|i| i.get("expectedSource").is_some_and(normalize::truthy));
+                recovery::replacement_action(current.replacement_phase().as_ref(), Some(facts), has_expected)
+            }
+            Completed | Skipped | Failed | Paused | PausedNetwork | Cancelled | Unknown(_) => "manual-intervention",
         }
-        if state == "replacing" {
-            let has_expected = current.active_item().is_some_and(|i| i.get("expectedSource").is_some_and(normalize::truthy));
-            return recovery::replacement_action(current.str("replacementPhase"), Some(facts), has_expected);
-        }
-        "manual-intervention"
     }
 
     /// recover(id, inspectPaths, { reinspectReplacement })
@@ -1144,30 +1188,31 @@ impl JobStore {
         let out = self.exclusive(id, || {
             let Some(stored) = self.read_manifest(id)? else { return Err(se("JOB_NOT_FOUND")) };
             let recovery_v = stored.get("recovery").cloned();
-            let phase = stored.str("replacementPhase").map(str::to_string).or_else(|| recovery_v.as_ref().and_then(|r| r.get("phase")).and_then(Value::as_str).map(str::to_string));
-            let state = stored.state().to_string();
+            let recorded = |k: &str| recovery_v.as_ref().and_then(|r| r.get(k)).and_then(Value::as_str);
+            let phase = stored.replacement_phase().or_else(|| recorded("phase").map(ReplacementPhase::parse));
+            let state = stored.state();
             let has_recovery = recovery_v.as_ref().is_some_and(normalize::truthy);
             let reinspect = reinspect_replacement
-                && state == "paused"
-                && recovery_v.as_ref().and_then(|r| r.get("fromState")).and_then(Value::as_str) == Some("replacing")
+                && state == JobState::Paused
+                && recorded("fromState").map(JobState::parse) == Some(JobState::Replacing)
                 && stored.str("activeItemId").is_some()
-                && phase.as_deref().is_some_and(recovery::is_replacement_phase);
-            if !reinspect && (TERMINAL_JOB_STATES.contains(&state.as_str()) || ((state == "paused" || state == "paused_network") && has_recovery)) {
+                && phase.as_ref().is_some_and(ReplacementPhase::is_known);
+            if !reinspect && (state.is_terminal() || (state.is_paused() && has_recovery)) {
                 return Ok(stored);
             }
             let nonempty = |v: Option<&Value>| v.and_then(Value::as_object).is_some_and(|o| !o.is_empty());
-            let owns_files = |i: &Arc<Item>| (i.state() == "queued" || i.state() == "processing") && nonempty(i.get("ownedPaths"));
+            let owns_files = |i: &Arc<Item>| i.state().is_in_flight() && nonempty(i.get("ownedPaths"));
             let job_owns = stored.str("activeItemId").is_some() && nonempty(stored.get("ownedPaths"));
-            if !reinspect && state == "paused" && !has_recovery && !job_owns && !stored.items.iter().any(owns_files) {
+            if !reinspect && state == JobState::Paused && !has_recovery && !job_owns && !stored.items.iter().any(owns_files) {
                 return Ok(stored);
             }
             let mut current = stored.clone();
             if reinspect {
-                current.top.insert("state".into(), Value::from("replacing"));
-                current.top.insert("replacementPhase".into(), Value::from(phase.clone().unwrap()));
+                current.top.insert("state".into(), JobState::Replacing.into());
+                current.top.insert("replacementPhase".into(), phase.clone().unwrap().into());
                 current.top.insert("recovery".into(), Value::Null);
-            } else if (state == "paused" && !has_recovery) || (state == "copying" && current.config()["outputMode"] == "replace") {
-                current.top.insert("state".into(), Value::from("encoding"));
+            } else if (state == JobState::Paused && !has_recovery) || (state == JobState::Copying && current.config()["outputMode"] == "replace") {
+                current.top.insert("state".into(), JobState::Encoding.into());
             }
             let facts = match inspect(&current) {
                 Ok(f) => f,
@@ -1176,19 +1221,19 @@ impl JobStore {
                     return Err(se("INSPECTION_FAILED"));
                 }
             };
-            let cstate = current.state().to_string();
+            let cstate = current.state();
             let mut rec = Map::new();
-            rec.insert("fromState".into(), Value::from(if ENCODING_RECOVERY_STATES.contains(&cstate.as_str()) { "encoding" } else { cstate.as_str() }));
-            if cstate == "replacing" {
+            rec.insert("fromState".into(), Value::from(if cstate.is_encoding_step() { JobState::Encoding } else { cstate.clone() }));
+            if cstate == JobState::Replacing {
                 rec.insert("phase".into(), current.get("replacementPhase").cloned().unwrap_or(Value::Null));
             }
             rec.insert("action".into(), Value::from(Self::recovery_action(&current, &facts)));
             let mut top = stored.top.clone();
-            top.insert("state".into(), Value::from("paused"));
+            top.insert("state".into(), state.to(JobState::Paused)?.into());
             top.insert("revision".into(), Value::from(stored.revision() + 1));
             top.insert("recovery".into(), Value::Object(rec));
             if reinspect {
-                top.insert("replacementPhase".into(), Value::from(phase.unwrap()));
+                top.insert("replacementPhase".into(), phase.unwrap().into());
             }
             let items: Vec<ItemIn> = stored.items.iter().cloned().map(ItemIn::Trusted).collect();
             let recovered = normalize_parts(&top, &items)?;
@@ -1245,12 +1290,12 @@ pub fn summarize(m: &Manifest) -> Value {
             continue;
         }
         match item.state() {
-            "completed" if item.get("eligibleVideo") != Some(&Value::Bool(false)) => {
+            ItemState::Completed if item.get("eligibleVideo") != Some(&Value::Bool(false)) => {
                 converted += 1;
                 progress += 1;
             }
-            "skipped" => skipped += 1,
-            "failed" => failed += 1,
+            ItemState::Skipped => skipped += 1,
+            ItemState::Failed => failed += 1,
             _ => {}
         }
     }
