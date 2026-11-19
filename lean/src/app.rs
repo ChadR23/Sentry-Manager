@@ -717,26 +717,19 @@ fn codec_limit(limit: u32, set: bool, spinning: bool, viewing: bool) -> usize {
     }
 }
 
-/// Whether `path` is on a local spinning disk: sysfs calls its block device (or the disk a
-/// partition is on) rotational. A network share, tmpfs, an SSD, or a device sysfs does not
-/// show, is not.
-fn on_spinning_disk(path: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(path).is_ok_and(|md| {
-        let (major, minor) = dev_numbers(md.dev());
-        rotational_in(Path::new("/sys"), major, minor)
-    })
-}
-
-fn rotational_in(sys: &Path, major: u64, minor: u64) -> bool {
+/// The disk a block device is on, as sysfs shows it: (its folder there, the same for every
+/// partition of it; whether sysfs calls it rotational, a spinning disk). None: a device sysfs
+/// does not show (a network share or tmpfs: major 0).
+fn disk_in(sys: &Path, major: u64, minor: u64) -> Option<(String, bool)> {
     if major == 0 {
-        return false;
+        return None;
     }
-    let Ok(dev) = std::fs::canonicalize(sys.join(format!("dev/block/{major}:{minor}"))) else { return false };
-    [dev.join("queue/rotational"), dev.join("../queue/rotational")]
-        .iter()
-        .find_map(|q| std::fs::read_to_string(q).ok())
-        .is_some_and(|s| s.trim() == "1")
+    let mut dir = std::fs::canonicalize(sys.join(format!("dev/block/{major}:{minor}"))).ok()?;
+    if dir.join("partition").exists() {
+        dir.pop();
+    }
+    let spinning = std::fs::read_to_string(dir.join("queue/rotational")).is_ok_and(|s| s.trim() == "1");
+    Some((dir.to_string_lossy().into_owned(), spinning))
 }
 
 /// A Linux dev_t's major and minor numbers (glibc gnu_dev_major and gnu_dev_minor).
@@ -746,20 +739,26 @@ fn dev_numbers(dev: u64) -> (u64, u64) {
     (major, minor)
 }
 
-/// The codec checks of every vehicle on one disk share one limit, so two vehicles on the same
-/// drive do not each read while footage plays (or each add seeks on a spinning disk).
+/// The codec checks of every vehicle on one disk share one limit (two partitions of a disk are
+/// one disk), so two vehicles on the same drive do not each read while footage plays (or each
+/// add seeks on a spinning disk). The disk and whether it spins come from one stat of the
+/// footage folder, looked at again each pass: another drive may come to have the same numbers.
 fn codec_slots(root: &Path) -> Arc<crate::viewer::telemetry_api::Limiter> {
     use std::os::unix::fs::MetadataExt;
-    static SLOTS: std::sync::OnceLock<Mutex<std::collections::HashMap<u64, Arc<crate::viewer::telemetry_api::Limiter>>>> = std::sync::OnceLock::new();
+    use std::sync::atomic::{AtomicBool, Ordering};
+    type Slot = (Arc<AtomicBool>, Arc<crate::viewer::telemetry_api::Limiter>);
+    static SLOTS: std::sync::OnceLock<Mutex<std::collections::HashMap<String, Slot>>> = std::sync::OnceLock::new();
     let dev = std::fs::metadata(root).map_or(0, |m| m.dev());
+    let (major, minor) = dev_numbers(dev);
+    let (disk, spinning) = disk_in(Path::new("/sys"), major, minor).unwrap_or_else(|| (format!("device {dev}"), false));
     let mut slots = SLOTS.get_or_init(Default::default).lock().unwrap();
-    slots
-        .entry(dev)
-        .or_insert_with(|| {
-            let spinning = on_spinning_disk(root);
-            crate::viewer::telemetry_api::Limiter::new(move || codec_checks(spinning))
-        })
-        .clone()
+    let (flag, limiter) = slots.entry(disk).or_insert_with(|| {
+        let flag = Arc::new(AtomicBool::new(spinning));
+        let f = flag.clone();
+        (flag, crate::viewer::telemetry_api::Limiter::new(move || codec_checks(f.load(Ordering::Relaxed))))
+    });
+    flag.store(spinning, Ordering::Relaxed);
+    limiter.clone()
 }
 
 /// The most codecChecks may be set to (workLimits.js MAX).
@@ -962,25 +961,40 @@ mod tests {
     }
 
     #[test]
-    fn a_disk_or_its_partition_is_spinning_when_sysfs_says_rotational() {
+    fn a_disk_and_each_of_its_partitions_are_one_disk_spinning_when_sysfs_says_rotational() {
         let sys = std::env::temp_dir().join(format!("sysfs-{}", std::process::id()));
         let disk = sys.join("devices/usb/sdd");
         std::fs::create_dir_all(disk.join("queue")).unwrap();
-        std::fs::create_dir_all(disk.join("sdd1")).unwrap();
         std::fs::write(disk.join("queue/rotational"), "1\n").unwrap();
+        for p in ["sdd1", "sdd2"] {
+            std::fs::create_dir_all(disk.join(p)).unwrap();
+            std::fs::write(disk.join(p).join("partition"), "1\n").unwrap();
+        }
         let ssd = sys.join("devices/pci/nvme0n1");
         std::fs::create_dir_all(ssd.join("queue")).unwrap();
         std::fs::write(ssd.join("queue/rotational"), "0\n").unwrap();
         std::fs::create_dir_all(sys.join("dev/block")).unwrap();
         std::os::unix::fs::symlink(&disk, sys.join("dev/block/8:48")).unwrap();
         std::os::unix::fs::symlink(disk.join("sdd1"), sys.join("dev/block/8:49")).unwrap();
+        std::os::unix::fs::symlink(disk.join("sdd2"), sys.join("dev/block/8:50")).unwrap();
         std::os::unix::fs::symlink(&ssd, sys.join("dev/block/259:0")).unwrap();
-        assert!(rotational_in(&sys, 8, 48));
-        assert!(rotational_in(&sys, 8, 49), "a partition: the disk it is on");
-        assert!(!rotational_in(&sys, 259, 0));
-        assert!(!rotational_in(&sys, 0, 51), "a network share or tmpfs");
-        assert!(!rotational_in(&sys, 7, 7), "a device sysfs does not show");
-        assert!(!on_spinning_disk(Path::new("/no/such/footage")));
+        let sdd = disk_in(&sys, 8, 48).unwrap();
+        assert!(sdd.1, "a spinning disk");
+        assert_eq!(disk_in(&sys, 8, 49), Some(sdd.clone()), "a partition: the disk it is on");
+        assert_eq!(disk_in(&sys, 8, 50), Some(sdd.clone()), "another partition of it: the same disk");
+        assert_eq!(disk_in(&sys, 259, 0).map(|d| d.1), Some(false));
+        assert_eq!(disk_in(&sys, 0, 51), None, "a network share or tmpfs");
+        assert_eq!(disk_in(&sys, 7, 7), None, "a device sysfs does not show");
         std::fs::remove_dir_all(sys).unwrap();
+    }
+
+    #[test]
+    fn footage_folders_on_one_disk_share_one_codec_limiter() {
+        let base = std::env::temp_dir().join(format!("codec-slots-{}", std::process::id()));
+        let (a, b) = (base.join("a"), base.join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        assert!(Arc::ptr_eq(&codec_slots(&a), &codec_slots(&b)));
+        std::fs::remove_dir_all(base).unwrap();
     }
 }
