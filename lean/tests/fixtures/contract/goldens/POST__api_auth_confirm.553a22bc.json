@@ -1,0 +1,21 @@
+{
+  "route": "POST /api/auth/confirm",
+  "method": "POST",
+  "request": {
+    "path": "/api/auth/confirm"
+  },
+  "body": {
+    "password": "not it"
+  },
+  "response": {
+    "status": 401,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "That password is not right."
+    }
+  }
+}

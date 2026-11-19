@@ -1,0 +1,19 @@
+{
+  "route": "POST /api/bin/:item/restore",
+  "method": "POST",
+  "request": {
+    "path": "/api/bin/no-such-item/restore"
+  },
+  "body": {},
+  "response": {
+    "status": 404,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "Not in the Recycle Bin."
+    }
+  }
+}

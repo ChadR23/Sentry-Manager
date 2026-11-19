@@ -1,0 +1,21 @@
+{
+  "route": "POST /api/security/unban",
+  "method": "POST",
+  "request": {
+    "path": "/api/security/unban"
+  },
+  "body": {
+    "key": "no-such-key"
+  },
+  "response": {
+    "status": 404,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "That address is not banned."
+    }
+  }
+}

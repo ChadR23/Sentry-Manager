@@ -48,7 +48,9 @@ async function compare(args) {
       const s = golden.method === 'GET' ? spec.ROUTES[golden.route] || {} : { normalise: golden.normalise || [] };
       const res = await client.request(golden.method, lib.requestUrl(golden.request, folders), { body: golden.body, headers: golden.request.headers || {} });
       const actual = lib.snapshot(res, s, { replace: folders, strings: [], now: Date.now() });
-      const diffs = lib.diff(golden.response, actual);
+      // (args.machine: what is this machine's, not the server's, taken out of both: frozen.js)
+      const fix = args.machine || ((x) => x);
+      const diffs = lib.diff(fix(golden.response, golden.route), fix(actual, golden.route));
       const r = (report.byRoute[golden.route] ||= { same: 0, different: 0, answers: [] });
       if (diffs.length) {
         report.different++;
@@ -77,7 +79,7 @@ async function compare(args) {
   }
   if (report.left.length) console.log(`left out (they change something; --allow-mutating replays them): ${report.left.join(', ')}`);
   const routes = Object.values(report.byRoute);
-  console.log(`${report.different ? 'FAIL' : 'PASS'}: ${report.same} of ${report.same + report.different} answers the same; ${routes.filter((r) => r.different).length} of ${routes.length} routes differ.`);
+  if (!args['no-verdict']) console.log(`${report.different ? 'FAIL' : 'PASS'}: ${report.same} of ${report.same + report.different} answers the same; ${routes.filter((r) => r.different).length} of ${routes.length} routes differ.`);
   if (args.json) fs.writeFileSync(args.json, `${JSON.stringify(report, null, 2)}\n`);
   return report;
 }

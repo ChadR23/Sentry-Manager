@@ -348,7 +348,7 @@ Passwords, tokens, keys, cookies, link keys, webhook URLs, share credentials
 and TLS private keys are never in a report, anonymous or not.
 
 Reports go to the developers' private receiver (`https://reports.skittles.live`,
-set in `server/reportsConfig.js`). From there a short notice of each report
+set in `lean/src/ops/reports/mod.rs`). From there a short notice of each report
 (and a support report in full, secrets stripped again) goes to a private
 staff channel on Discord, a support assistant built on Anthropic's Claude
 triages support reports, and staff may file a public GitHub issue with the

@@ -1,0 +1,19 @@
+{
+  "route": "POST /api/auth/sessions/:id/end",
+  "method": "POST",
+  "request": {
+    "path": "/api/auth/sessions/no-such-session/end"
+  },
+  "body": {},
+  "response": {
+    "status": 404,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "No such session."
+    }
+  }
+}

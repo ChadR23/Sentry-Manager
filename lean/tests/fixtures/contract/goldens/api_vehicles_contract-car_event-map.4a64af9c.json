@@ -1,0 +1,48 @@
+{
+  "route": "GET /api/vehicles/:id/event-map",
+  "method": "GET",
+  "request": {
+    "path": "/api/vehicles/contract-car/event-map"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "events": [
+        {
+          "at": "2024-05-03T10:00:00",
+          "category": "Saved",
+          "city": "Austin",
+          "day": "2024-05-03",
+          "lat": 30.3,
+          "lon": -97.8,
+          "place": null,
+          "reason": "user_interaction_honk",
+          "recording": "06b88a362664af5d",
+          "start": "2024-05-03 09:59:00",
+          "startKey": "2024-05-03_09-59-00",
+          "street": null
+        },
+        {
+          "at": "2024-05-02T12:30:00",
+          "category": "Sentry",
+          "city": "Austin",
+          "day": "2024-05-02",
+          "lat": 30.25,
+          "lon": -97.75,
+          "place": null,
+          "reason": "sentry_aware_object_detection",
+          "recording": "3ce8681dff72e8f0",
+          "start": "2024-05-02 12:29:00",
+          "startKey": "2024-05-02_12-29-00",
+          "street": null
+        }
+      ],
+      "withoutPosition": 0
+    }
+  }
+}

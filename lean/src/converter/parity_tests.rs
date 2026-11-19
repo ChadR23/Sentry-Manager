@@ -3,7 +3,8 @@
 //! (every state, every call to the job service, every ticks' decisions and
 //! the files written, byte for byte), the benchmark (its progress events and
 //! result) and the device list (discovery over a fake /dev and /sys,
-//! nvidia-smi, and devices() over fake test encodes). Skipped without node.
+//! nvidia-smi, and devices() over fake test encodes). Node's answers are
+//! frozen in tests/fixtures/node-reference/converter-{auto,bench,devices}.json.
 
 use super::auto_convert::{Auto, AutoOptions, AutoService, Scanner};
 use super::service::{Fail, SResult};
@@ -11,21 +12,14 @@ use super::testutil::tempdir;
 use indexmap::IndexMap;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-fn have_node() -> bool {
-    Command::new("node").arg("--version").output().is_ok_and(|o| o.status.success())
-}
-
+/// Node's answer (lean/parity/converterAuto.js <mode> <scenario.json>, over
+/// src/main/converter), frozen in tests/fixtures/node-reference/converter-<mode>.json.
 fn node(mode: &str, scenario: &Value, dir: &Path) -> Value {
-    let file = dir.join(format!("{mode}-scenario.json"));
-    std::fs::write(&file, scenario.to_string()).unwrap();
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("parity/converterAuto.js");
-    let out = Command::new("node").arg(script).arg(mode).arg(&file).output().unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    serde_json::from_slice(&out.stdout).unwrap()
+    let places = [("{DIR}", dir.to_string_lossy().into_owned())];
+    crate::reference::answer(&format!("converter-{mode}"), &places, scenario)
 }
 
 /// first difference between two values, as a path
@@ -365,10 +359,6 @@ fn auto_scenario(dir: &Path) -> Value {
 
 #[test]
 fn automatic_conversion_decides_as_node_decides() {
-    if !have_node() {
-        eprintln!("skipped: needs node");
-        return;
-    }
     let d = tempdir().unwrap();
     let (nd, rd) = (d.path().join("node"), d.path().join("rust"));
     std::fs::create_dir_all(&nd).unwrap();
@@ -456,10 +446,6 @@ fn run_bench(s: &Value) -> Value {
 
 #[test]
 fn the_benchmark_reports_as_node_reports() {
-    if !have_node() {
-        eprintln!("skipped: needs node");
-        return;
-    }
     let d = tempdir().unwrap();
     let names = ["2026-10-20_17-00-00-front.mp4", "2026-10-20_17-00-00-back.mp4", "2026-10-20_17-00-00-left_repeater.mp4", "odd-name.mp4"];
     for (i, n) in names.iter().enumerate() {
@@ -519,10 +505,6 @@ fn machine(root: &Path) -> (PathBuf, PathBuf) {
 
 #[test]
 fn the_device_list_and_devices_answer_as_node_answers() {
-    if !have_node() {
-        eprintln!("skipped: needs node");
-        return;
-    }
     let d = tempdir().unwrap();
     let (dev, sys) = machine(d.path());
     let nvidia = [

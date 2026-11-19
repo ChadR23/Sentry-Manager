@@ -1,0 +1,41 @@
+{
+  "route": "PUT /api/vehicles/:id/policy",
+  "method": "PUT",
+  "request": {
+    "path": "/api/vehicles/contract-car/policy"
+  },
+  "body": {
+    "keepDays": "x"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "policy": {
+        "binDays": null,
+        "enabled": false,
+        "keepDays": {
+          "Other": null,
+          "Recent": null,
+          "Saved": null,
+          "Sentry": null
+        },
+        "lastResult": null,
+        "lastRunAt": null,
+        "maxGB": null,
+        "runAt": "03:30"
+      },
+      "preview": {
+        "byCategory": {},
+        "bytes": 0,
+        "ids": [],
+        "overLimit": 0,
+        "recordings": 0
+      }
+    }
+  }
+}

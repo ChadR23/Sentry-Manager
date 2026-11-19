@@ -1,9 +1,13 @@
-//! The CAN index answers as the Node code does: lean/parity/canFixtures.js
-//! makes CAN Bridge logs (both formats, broken ones, an internal GPS bus, a
-//! VIN, a legacy Model S, the bridge's own test file), indexes them with
-//! server/canIndex.js and stores its files and answers. The Rust index reads
-//! the same logs: every index file must be the same (unpacked), and every
-//! answer the same JSON, before and after a log is taken out again.
+//! The CAN index answers as the Node code did: CAN Bridge logs (both
+//! formats, broken ones, an internal GPS bus, a VIN, a legacy Model S, the
+//! bridge's own test file), indexed by server/canIndex.js, with its files and
+//! answers, frozen in tests/fixtures/node-reference/can-index.tar.xz (made by
+//! the former lean/parity/canFixtures.js). The Rust index reads the same
+//! logs: every index file must be the same (unpacked), and every answer the
+//! same JSON, before and after a log is taken out again.
+
+#[path = "support/reference.rs"]
+mod reference;
 
 use sentry_lean::can::format;
 use sentry_lean::can::index::CanIndex;
@@ -11,12 +15,7 @@ use sentry_lean::can::json::{self, n};
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
-
-fn repo() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
-}
 
 /// The first place two JSON values differ, or None.
 pub fn diff(a: &Value, b: &Value, at: &str) -> Option<String> {
@@ -187,13 +186,7 @@ fn same_files(node: &Path, lean: &Path) -> Vec<String> {
 
 #[test]
 fn can_index_matches_node() {
-    if Command::new("xz").arg("--version").output().is_err() || Command::new("node").arg("--version").output().is_err() {
-        eprintln!("skipped: needs xz and node");
-        return;
-    }
-    let work = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("can-parity");
-    let st = Command::new("node").arg(repo().join("lean/parity/canFixtures.js")).arg(&work).status().unwrap();
-    assert!(st.success(), "canFixtures.js failed");
+    let work = reference::unpack("can-index", "parity");
     let answers: Value = serde_json::from_slice(&std::fs::read(work.join("answers.json")).unwrap()).unwrap();
     let t = answers["T"].as_f64().unwrap();
     let lean = work.join("lean");

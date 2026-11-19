@@ -1,0 +1,126 @@
+{
+  "route": "POST /api/health/run",
+  "method": "POST",
+  "request": {
+    "path": "/api/health/run"
+  },
+  "body": {},
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "at": "<time>",
+      "checks": [
+        {
+          "detail": "",
+          "group": "Data folder",
+          "hint": "",
+          "id": "data-writable",
+          "label": "The data folder can be written",
+          "status": "ok"
+        },
+        {
+          "detail": "7.8 GB free",
+          "group": "Data folder",
+          "hint": "",
+          "id": "data-space",
+          "label": "Free space for the data folder",
+          "status": "ok"
+        },
+        {
+          "detail": "",
+          "group": "Data folder",
+          "hint": "",
+          "id": "caches",
+          "label": "Cache folders can be written",
+          "status": "ok"
+        },
+        {
+          "detail": "",
+          "group": "Data folder",
+          "hint": "",
+          "id": "database",
+          "label": "Database is intact",
+          "status": "ok"
+        },
+        {
+          "detail": "Newest: 2026-11-19",
+          "group": "Data folder",
+          "hint": "",
+          "id": "snapshots",
+          "label": "Daily database snapshot",
+          "status": "ok"
+        },
+        {
+          "detail": "",
+          "group": "Vehicle: Contract Car",
+          "hint": "",
+          "id": "share-contract-car",
+          "label": "Footage can be read",
+          "status": "ok"
+        },
+        {
+          "detail": "",
+          "group": "Vehicle: Contract Car",
+          "hint": "",
+          "id": "write-contract-car",
+          "label": "Footage share can be written",
+          "status": "ok"
+        },
+        {
+          "detail": "7.8 GB free of 252.0 GB",
+          "group": "Vehicle: Contract Car",
+          "hint": "Empty the Recycle Bin, convert footage, or set a policy to move old footage out.",
+          "id": "space-contract-car",
+          "label": "Free space on the share",
+          "status": "bad"
+        },
+        {
+          "detail": "Nothing is mounted at {root:contract-car}, so the manager is looking at the container's own disk. Set SMB_SHARE or add a volume for {root:contract-car}.",
+          "group": "Vehicle: Contract Car",
+          "hint": "",
+          "id": "warning-contract-car",
+          "label": "Share set-up",
+          "status": "warn"
+        },
+        {
+          "detail": "ffmpeg version 6.1.1-3ubuntu5",
+          "group": "Video",
+          "hint": "",
+          "id": "ffmpeg",
+          "label": "ffmpeg runs",
+          "status": "ok"
+        },
+        {
+          "detail": "",
+          "group": "Video",
+          "hint": "",
+          "id": "ffprobe",
+          "label": "ffprobe runs",
+          "status": "ok"
+        },
+        {
+          "detail": "Converting on the CPU with libx265",
+          "group": "Video",
+          "hint": "",
+          "id": "encoder",
+          "label": "Encoder",
+          "status": "ok"
+        },
+        {
+          "detail": "",
+          "group": "Access",
+          "hint": "",
+          "id": "https",
+          "label": "HTTPS",
+          "status": "ok"
+        }
+      ],
+      "startup": false
+    }
+  }
+}

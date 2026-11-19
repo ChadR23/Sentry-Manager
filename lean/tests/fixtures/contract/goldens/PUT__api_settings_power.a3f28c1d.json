@@ -1,0 +1,25 @@
+{
+  "route": "PUT /api/settings/power",
+  "method": "PUT",
+  "request": {
+    "path": "/api/settings/power"
+  },
+  "body": {
+    "price": "x"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "currency": "$",
+      "defaultPrice": null,
+      "mode": "flat",
+      "pricePerKwh": null,
+      "rates": []
+    }
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "route": "POST /api/logs/clear",
+  "method": "POST",
+  "request": {
+    "path": "/api/logs/clear"
+  },
+  "body": {},
+  "normalise": [
+    {
+      "strings": [
+        [
+          "^manager-\\d{4}-\\d{2}-\\d{2}T\\d{2}-\\d{2}-\\d{2}-\\d{3}Z\\.log$",
+          "manager-<stamp>.log"
+        ]
+      ]
+    }
+  ],
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "archived": "manager-<stamp>.log",
+      "ok": true
+    }
+  }
+}

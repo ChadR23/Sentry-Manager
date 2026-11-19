@@ -1,0 +1,19 @@
+{
+  "route": "PATCH /api/places/:id",
+  "method": "PATCH",
+  "request": {
+    "path": "/api/places/no-such-place"
+  },
+  "body": {},
+  "response": {
+    "status": 404,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "No such place."
+    }
+  }
+}

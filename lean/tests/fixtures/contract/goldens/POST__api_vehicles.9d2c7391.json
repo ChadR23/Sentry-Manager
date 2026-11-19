@@ -1,0 +1,19 @@
+{
+  "route": "POST /api/vehicles",
+  "method": "POST",
+  "request": {
+    "path": "/api/vehicles"
+  },
+  "body": {},
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "Give the vehicle a name."
+    }
+  }
+}

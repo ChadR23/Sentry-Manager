@@ -1,14 +1,19 @@
-//! The Rust report client against the Node code it ports, on the same input:
+//! The Rust report client against the Node code it ports, on the same input
+//! (Node's answers frozen in tests/fixtures/node-reference/reports-*.json):
 //!   - the scrubber (server/reportsScrub.js cleanReport), anonymous or not;
 //!   - the payload schema (reportsProtocol.js validatePayload);
 //!   - the heartbeat block (reports.js normalizeHeartbeat);
-//!   - and the whole round trip against the tests' local fake receiver
-//!     (test/fixtures/reportsReceiver.js, on 127.0.0.1): it checks the body,
+//!   - and the whole round trip against the tests' local stand-in receiver
+//!     (tests/fixtures/js/receiver.js, on 127.0.0.1): it checks the body,
 //!     the proof of work and the signature, opens the sealed report with the
-//!     Node code and validates it, so a report the Rust client makes is one
-//!     the developers' receiver takes.
+//!     protocol's JavaScript and validates it, so a report the Rust client
+//!     makes is one the developers' receiver takes.
 //!
-//! Nothing is ever sent anywhere but 127.0.0.1. Skipped when node is missing.
+//! Nothing is ever sent anywhere but 127.0.0.1. The round trips need node
+//! (skipped with a note without it, failed when LEAN_NEED_NODE=1).
+
+#[path = "support/reference.rs"]
+mod reference;
 
 use sentry_lean::ops::net::{HttpReq, HttpRes, Https, Transport};
 use sentry_lean::ops::reports::{scrub, Reports};
@@ -20,31 +25,28 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 
+/// node, for the stand-in receiver.
 fn node() -> bool {
     let ok = Command::new("node").arg("--version").output().map(|o| o.status.success()).unwrap_or(false);
     if !ok {
-        eprintln!("skipped: node is needed for the Node side");
+        assert!(std::env::var("LEAN_NEED_NODE").is_err(), "node is needed for the stand-in receiver (LEAN_NEED_NODE is set)");
+        eprintln!("skipped: node is needed for the stand-in receiver");
     }
     ok
 }
 
-fn script() -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("parity/reports.js")
+fn receiver_script() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/js/receiver.js")
 }
 
+/// What the Node code answered (lean/parity/reports.js <mode>, frozen).
 fn node_says(mode: &str, input: &Value) -> Value {
-    let mut c = Command::new("node").arg(script()).arg(mode).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
-    c.stdin.take().unwrap().write_all(input.to_string().as_bytes()).unwrap();
-    let out = c.wait_with_output().unwrap();
-    assert!(out.status.success());
-    serde_json::from_slice(&out.stdout).unwrap()
+    let key = json!({ "mode": mode, "cases": input });
+    reference::answer(&format!("reports-{mode}"), &[], &key)
 }
 
 #[test]
 fn the_scrubber_answers_as_node() {
-    if !node() {
-        return;
-    }
     let ids: Vec<Value> = ["tower", "Daily Driver", "veh-abc123", "/footage/daily", "bob", "SentryPi", "Home WiFi", "Mom's house", "nas", "ab", "x.y"].iter().map(|s| json!(s)).collect();
     let texts = [
         "from 192.168.1.50:445 ok",
@@ -97,9 +99,6 @@ fn the_scrubber_answers_as_node() {
 
 #[test]
 fn the_payload_schema_and_the_heartbeat_answer_as_node() {
-    if !node() {
-        return;
-    }
     let base = json!({ "kind": "feedback", "sentAt": "2026-11-15T10:00:00.000Z", "install": "a".repeat(32), "anonymous": false, "build": { "build": 130, "sha": "1345348", "builtAt": null, "tag": null }, "ui": "original", "message": "hello" });
     let with = |patch: Value| {
         let mut p = base.clone();
@@ -153,7 +152,7 @@ struct Receiver {
 impl Receiver {
     fn start(difficulty: u32, moved_to: Option<&str>) -> Receiver {
         let mut cmd = Command::new("node");
-        cmd.arg(script()).arg("receiver").arg(difficulty.to_string());
+        cmd.arg(receiver_script()).arg(difficulty.to_string());
         if let Some(m) = moved_to {
             cmd.arg(m);
         }

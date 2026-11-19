@@ -1,0 +1,18 @@
+{
+  "route": "GET /api/can/search",
+  "method": "GET",
+  "request": {
+    "path": "/api/can/search"
+  },
+  "response": {
+    "status": 404,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "No such vehicle."
+    }
+  }
+}

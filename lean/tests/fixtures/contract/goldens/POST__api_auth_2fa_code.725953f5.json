@@ -1,0 +1,21 @@
+{
+  "route": "POST /api/auth/2fa/code",
+  "method": "POST",
+  "request": {
+    "path": "/api/auth/2fa/code"
+  },
+  "body": {
+    "code": "000000"
+  },
+  "response": {
+    "status": 401,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "The sign-in waited too long: sign in again."
+    }
+  }
+}

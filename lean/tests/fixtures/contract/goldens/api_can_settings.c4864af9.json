@@ -1,0 +1,56 @@
+{
+  "route": "GET /api/can/settings",
+  "method": "GET",
+  "request": {
+    "path": "/api/can/settings"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "bytes": 0,
+      "enabled": false,
+      "index": {
+        "current": null,
+        "indexed": 0,
+        "lastAt": "<time>",
+        "lastError": null,
+        "pending": 0,
+        "running": false
+      },
+      "keep": {
+        "cars": {
+          "contract-car": null
+        },
+        "deleteUnlinked": true,
+        "unlinkedDays": 7,
+        "withFootage": true
+      },
+      "keys": [],
+      "logs": 0,
+      "map": {},
+      "port": {
+        "error": null,
+        "https": true,
+        "listening": false,
+        "port": 37477
+      },
+      "since": null,
+      "tokens": [],
+      "trust": [],
+      "vehicles": [
+        {
+          "id": "contract-car",
+          "name": "Contract Car"
+        }
+      ],
+      "viewerCarData": {
+        "enabled": false
+      }
+    }
+  }
+}

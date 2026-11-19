@@ -4,7 +4,6 @@
 
 use super::*;
 use serde_json::json;
-use std::process::Command;
 
 fn tmp(tag: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("lean-jobstore-{tag}-{}-{}", std::process::id(), random_uuid().unwrap()));
@@ -237,18 +236,60 @@ fn ordering_and_numbers() {
 
 // ---- parity with the Node store -------------------------------------------------
 
-fn node_available() -> bool {
-    Command::new("node").arg("--version").output().is_ok_and(|o| o.status.success())
+/// The folders of the parity runs: `{T}-<tag>` in the reference.
+fn prefix() -> String {
+    std::env::temp_dir().join(format!("lean-jobstore-parity-{}", std::process::id())).to_string_lossy().into_owned()
 }
 
-fn script() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("parity/converterStore.js")
+fn ptmp(tag: &str) -> PathBuf {
+    let d = PathBuf::from(format!("{}-{tag}", prefix()));
+    let _ = fs::remove_dir_all(&d);
+    fs::create_dir_all(&d).unwrap();
+    d
 }
 
+/// What the files and folders a command line names hold (their digests; a
+/// summary.json without its stamp, the moment's file sizes and times).
+fn args_state(args: &[&str]) -> Value {
+    use sha2::{Digest, Sha256};
+    Value::Array(args.iter().map(|a| {
+        let p = Path::new(a);
+        if p.is_dir() {
+            let snap = crate::reference::snapshot(p);
+            let files: Map<String, Value> = snap.as_object().unwrap().iter().map(|(k, v)| {
+                let text = match (k.ends_with(SUMMARY_NAME), v.as_str().and_then(|t| serde_json::from_str::<Value>(t).ok())) {
+                    (true, Some(mut j)) => {
+                        j.as_object_mut().map(|o| o.remove("stamp"));
+                        j.to_string()
+                    }
+                    _ => v.to_string(),
+                };
+                (k.clone(), json!(format!("{:x}", Sha256::digest(text.as_bytes()))))
+            }).collect();
+            json!({ "dir": files })
+        } else if p.is_file() {
+            json!({ "file": format!("{:x}", Sha256::digest(fs::read(p).unwrap())) })
+        } else {
+            Value::Null
+        }
+    }).collect())
+}
+
+/// Node's store (lean/parity/converterStore.js <args>, over
+/// src/main/converter/jobStore.js), frozen in
+/// tests/fixtures/node-reference/converter-store.json: its answer to the
+/// same command on folders that hold the same files, and, for the commands
+/// that write (run, step, recover), the folders as Node left them, put back
+/// here.
 fn node(args: &[&str]) -> Value {
-    let out = Command::new("node").arg(script()).args(args).output().expect("run node");
-    assert!(out.status.success(), "node {:?}: {}", args, String::from_utf8_lossy(&out.stderr));
-    serde_json::from_slice(&out.stdout).unwrap()
+    let places = [("{T}", prefix())];
+    let input = json!({ "args": args, "state": args_state(args) });
+    let writes = matches!(args[0], "run" | "step" | "recover");
+    let out = crate::reference::answer("converter-store", &places, &input);
+    if writes {
+        crate::reference::restore(Path::new(args[1]), &out["after"]);
+    }
+    out["stdout"].clone()
 }
 
 fn apply_step(store: &JobStore, prev: &Manifest, step: &Value) -> R<Manifest> {
@@ -293,13 +334,9 @@ fn run_scenarios(root: &Path, scenarios: &Value) -> Map<String, Value> {
 
 #[test]
 fn parity_with_node_store() {
-    if !node_available() {
-        eprintln!("skipped: node is not installed");
-        return;
-    }
     let scenarios = node(&["scenarios"]);
-    let node_dir = tmp("node");
-    let rust_dir = tmp("rust");
+    let node_dir = ptmp("node");
+    let rust_dir = ptmp("rust");
     let node_out = node(&["run", node_dir.to_str().unwrap()]);
     let rust_out = run_scenarios(&rust_dir, &scenarios);
     // the same jobs, the same files, byte for byte
@@ -369,8 +406,8 @@ fn parity_with_node_store() {
         json!({}),
     ];
     for (n, f) in fact_cases.iter().enumerate() {
-        let a = tmp(&format!("rec-node-{n}"));
-        let b = tmp(&format!("rec-rust-{n}"));
+        let a = ptmp(&format!("rec-node-{n}"));
+        let b = ptmp(&format!("rec-rust-{n}"));
         node(&["run", a.to_str().unwrap()]);
         run_scenarios(&b, &scenarios);
         let ids = ["job-separate", "job-replace", "job-failed", "job-interrupted-replace", "job-interrupted-encode"];
@@ -397,12 +434,8 @@ fn parity_with_node_store() {
 
 #[test]
 fn parity_damaged_manifests() {
-    if !node_available() {
-        eprintln!("skipped: node is not installed");
-        return;
-    }
     let corpus = node(&["corpus"]);
-    let dir = tmp("corpus");
+    let dir = ptmp("corpus");
     let file = dir.join("corpus.json");
     fs::write(&file, corpus.to_string()).unwrap();
     let theirs = node(&["check", dir.join("node").to_str().unwrap(), file.to_str().unwrap()]);
