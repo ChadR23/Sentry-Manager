@@ -335,10 +335,11 @@ impl App {
                     false
                 }
             };
+            let slots = codec_slots(&v.root);
             let (n_read, rest) = read_saving(
                 &todo,
                 most_codec_checks(),
-                codec_checks,
+                &slots,
                 crate::catalog::BATCH,
                 |f| mp4::video_codec(&v.root.join(&f.rel)).ok().map(|c| (f.rel.clone(), f.size, f.mtime_ms, c)),
                 |rows| save(rows, &[]),
@@ -377,10 +378,74 @@ impl App {
     }
 }
 
-/// index.js workLimit('codecChecks'): clip codec reads at once as Settings → Advanced →
-/// Background work has it now (inventory.js's `|| 8` before the viewer runs).
-fn codec_checks() -> usize {
-    crate::viewer::get().map_or(PROBE_THREADS, |v| v.limits.read().unwrap().get("codecChecks") as usize)
+/// Clip codecs read at once now: index.js workLimit('codecChecks') as Settings > Advanced >
+/// Background work has it (inventory.js's `|| 8` before the viewer runs), but see codec_limit.
+fn codec_checks(spinning: bool) -> usize {
+    let Some(v) = crate::viewer::get() else { return codec_limit(PROBE_THREADS as u32, false, spinning, false) };
+    // (the limits' lock is let go before the pace's is taken)
+    let (limit, set) = {
+        let l = v.limits.read().unwrap();
+        (l.get("codecChecks"), l.is_set("codecChecks"))
+    };
+    codec_limit(limit, set, spinning, v.pace.viewing())
+}
+
+/// One at a time while footage plays in the Viewer (as the speed index reads), and, unless an
+/// admin set the number, when the footage is on a spinning disk: a check is a few small reads
+/// at both ends of a file, so checks at once only add seeks there. On a USB hard drive, 8 at
+/// once read 42 to 65 clips a second and 1 at once 66 to 73, and four videos read next to 8 at
+/// once waited twice as long (p95 200 to 215 ms against 91 to 108 with 1).
+fn codec_limit(limit: u32, set: bool, spinning: bool, viewing: bool) -> usize {
+    if viewing || (spinning && !set) {
+        1
+    } else {
+        limit.max(1) as usize
+    }
+}
+
+/// Whether `path` is on a local spinning disk: sysfs calls its block device (or the disk a
+/// partition is on) rotational. A network share, tmpfs, an SSD, or a device sysfs does not
+/// show, is not.
+fn on_spinning_disk(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).is_ok_and(|md| {
+        let (major, minor) = dev_numbers(md.dev());
+        rotational_in(Path::new("/sys"), major, minor)
+    })
+}
+
+fn rotational_in(sys: &Path, major: u64, minor: u64) -> bool {
+    if major == 0 {
+        return false;
+    }
+    let Ok(dev) = std::fs::canonicalize(sys.join(format!("dev/block/{major}:{minor}"))) else { return false };
+    [dev.join("queue/rotational"), dev.join("../queue/rotational")]
+        .iter()
+        .find_map(|q| std::fs::read_to_string(q).ok())
+        .is_some_and(|s| s.trim() == "1")
+}
+
+/// A Linux dev_t's major and minor numbers (glibc gnu_dev_major and gnu_dev_minor).
+fn dev_numbers(dev: u64) -> (u64, u64) {
+    let major = ((dev >> 8) & 0xfff) | (((dev >> 32) as u32 & !0xfff) as u64);
+    let minor = (dev & 0xff) | (((dev >> 12) as u32 & !0xff) as u64);
+    (major, minor)
+}
+
+/// The codec checks of every vehicle on one disk share one limit, so two vehicles on the same
+/// drive do not each read while footage plays (or each add seeks on a spinning disk).
+fn codec_slots(root: &Path) -> Arc<crate::viewer::telemetry_api::Limiter> {
+    use std::os::unix::fs::MetadataExt;
+    static SLOTS: std::sync::OnceLock<Mutex<std::collections::HashMap<u64, Arc<crate::viewer::telemetry_api::Limiter>>>> = std::sync::OnceLock::new();
+    let dev = std::fs::metadata(root).map_or(0, |m| m.dev());
+    let mut slots = SLOTS.get_or_init(Default::default).lock().unwrap();
+    slots
+        .entry(dev)
+        .or_insert_with(|| {
+            let spinning = on_spinning_disk(root);
+            crate::viewer::telemetry_api::Limiter::new(move || codec_checks(spinning))
+        })
+        .clone()
 }
 
 /// The most codecChecks may be set to (workLimits.js MAX).
@@ -389,19 +454,18 @@ fn most_codec_checks() -> usize {
     KEYS.iter().zip(MAX).find(|(k, _)| **k == "codecChecks").map_or(PROBE_THREADS, |(_, n)| n as usize)
 }
 
-/// inventory.js's codec pass: at most `limit()` reads at once, the limit read again for each
-/// item (scanner.js limiter), and what was read saved every `batch` rows as it comes, so a
+/// inventory.js's codec pass: at most as many reads at once as `slots` allows (its limit read again
+/// for each item, scanner.js limiter), and what was read saved every `batch` rows as it comes, so a
 /// restart halfway through keeps it (rows whose save fails wait until another `batch` rows have
 /// been read, or for the caller). How many were read, and the rows not saved yet.
 fn read_saving<T: Sync, R: Send>(
     items: &[T],
     threads: usize,
-    limit: impl Fn() -> usize + Send + Sync + 'static,
+    slots: &crate::viewer::telemetry_api::Limiter,
     batch: usize,
     read: impl Fn(&T) -> Option<R> + Sync,
     save: impl Fn(&[R]) -> bool + Sync,
 ) -> (usize, Vec<R>) {
-    let slots = crate::viewer::telemetry_api::Limiter::new(limit);
     // rows not saved yet, and how many came since the last save was tried
     let pending = Mutex::new((Vec::new(), 0usize));
     let done = std::sync::atomic::AtomicUsize::new(0);
@@ -465,7 +529,7 @@ mod tests {
             let (n, rest) = read_saving(
                 &items,
                 32,
-                move || limit,
+                &crate::viewer::telemetry_api::Limiter::new(move || limit),
                 1000,
                 |i| {
                     most.fetch_max(now.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
@@ -491,7 +555,7 @@ mod tests {
         let (n, rest) = read_saving(
             &items,
             32,
-            || 2,
+            &crate::viewer::telemetry_api::Limiter::new(|| 2),
             10,
             |i| {
                 started.fetch_add(1, Ordering::SeqCst);
@@ -520,7 +584,7 @@ mod tests {
         let failed: Mutex<Vec<usize>> = Mutex::new(Vec::new());
         let items: Vec<usize> = (0..25).collect();
         // (one thread: a failed batch is back in the queue before the next row is read)
-        let (n, rest) = read_saving(&items, 1, || 1, 10, |i| Some(*i), |rows| {
+        let (n, rest) = read_saving(&items, 1, &crate::viewer::telemetry_api::Limiter::new(|| 1), 10, |i| Some(*i), |rows| {
             if calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 failed.lock().unwrap().extend_from_slice(rows);
                 return false;
@@ -559,6 +623,50 @@ mod tests {
     #[test]
     fn codec_checks_follow_the_work_limits_and_their_maximum() {
         assert_eq!(most_codec_checks(), 32);
-        assert_eq!(codec_checks(), crate::viewer::get().map_or(PROBE_THREADS, |v| v.limits.read().unwrap().get("codecChecks") as usize));
+        if crate::viewer::get().is_none() {
+            assert_eq!(codec_checks(false), PROBE_THREADS);
+            assert_eq!(codec_checks(true), 1);
+        }
+    }
+
+    #[test]
+    fn one_codec_read_at_a_time_while_footage_plays_or_on_a_spinning_disk_nobody_tuned() {
+        assert_eq!(codec_limit(8, false, false, false), 8);
+        assert_eq!(codec_limit(8, false, false, true), 1, "footage playing");
+        assert_eq!(codec_limit(8, false, true, false), 1, "spinning disk");
+        assert_eq!(codec_limit(6, true, true, false), 6, "an admin's number wins on a spinning disk");
+        assert_eq!(codec_limit(6, true, true, true), 1, "but not while footage plays");
+        assert_eq!(codec_limit(0, true, false, false), 1);
+    }
+
+    #[test]
+    fn dev_numbers_as_glibc_splits_them() {
+        assert_eq!(dev_numbers(0x830), (8, 48));
+        assert_eq!(dev_numbers(0x10301), (259, 1));
+        assert_eq!(dev_numbers(0x11ff2c), (511, 300));
+        assert_eq!(dev_numbers(0x1000_0002_3400), (0x1234, 0), "a major past 12 bits");
+    }
+
+    #[test]
+    fn a_disk_or_its_partition_is_spinning_when_sysfs_says_rotational() {
+        let sys = std::env::temp_dir().join(format!("sysfs-{}", std::process::id()));
+        let disk = sys.join("devices/usb/sdd");
+        std::fs::create_dir_all(disk.join("queue")).unwrap();
+        std::fs::create_dir_all(disk.join("sdd1")).unwrap();
+        std::fs::write(disk.join("queue/rotational"), "1\n").unwrap();
+        let ssd = sys.join("devices/pci/nvme0n1");
+        std::fs::create_dir_all(ssd.join("queue")).unwrap();
+        std::fs::write(ssd.join("queue/rotational"), "0\n").unwrap();
+        std::fs::create_dir_all(sys.join("dev/block")).unwrap();
+        std::os::unix::fs::symlink(&disk, sys.join("dev/block/8:48")).unwrap();
+        std::os::unix::fs::symlink(disk.join("sdd1"), sys.join("dev/block/8:49")).unwrap();
+        std::os::unix::fs::symlink(&ssd, sys.join("dev/block/259:0")).unwrap();
+        assert!(rotational_in(&sys, 8, 48));
+        assert!(rotational_in(&sys, 8, 49), "a partition: the disk it is on");
+        assert!(!rotational_in(&sys, 259, 0));
+        assert!(!rotational_in(&sys, 0, 51), "a network share or tmpfs");
+        assert!(!rotational_in(&sys, 7, 7), "a device sysfs does not show");
+        assert!(!on_spinning_disk(Path::new("/no/such/footage")));
+        std::fs::remove_dir_all(sys).unwrap();
     }
 }

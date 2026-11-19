@@ -369,12 +369,14 @@ fn roots(app: &App) -> Vec<PathBuf> {
 }
 
 fn media(app: &App, method: &Method, headers: &HeaderMap, q: &HashMap<String, String>) -> Res {
-    // footage playing: background reading slows to one clip at a time
-    let _watching = crate::viewer::get().map(|viewer| viewer.watching());
     let p = q.get("path").cloned().unwrap_or_default();
     let roots = roots(app);
     match media::resolve_inside(&p, &roots) {
-        Some(real) if !media::hidden_path(&path_str(&real)) => media::send_media(method, headers, &real, &roots),
+        // footage playing (bytes of a clip sent, not a HEAD or a refusal): background reading
+        // slows to one clip at a time while they go out, and for a while after
+        Some(real) if !media::hidden_path(&path_str(&real)) => media::send_media_held(method, headers, &real, &roots, || {
+            (method == Method::GET).then(|| crate::viewer::get().map(|viewer| viewer.watching())).flatten()
+        }),
         _ => error(StatusCode::FORBIDDEN, "Outside the vehicle shares."),
     }
 }

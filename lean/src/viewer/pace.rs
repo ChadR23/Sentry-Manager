@@ -277,6 +277,17 @@ impl Pace {
         Watching(self.clone())
     }
 
+    /// Footage plays in the Viewer, or did less than VIEWER_MS ago: background reading that
+    /// would compete with it waits (scrub previews made ahead) or reads one clip at a time.
+    pub fn viewing(&self) -> bool {
+        self.viewing_at((self.now)())
+    }
+
+    pub fn viewing_at(&self, t: f64) -> bool {
+        let s = self.st.lock().unwrap();
+        s.viewers > 0 || t < s.viewer_until
+    }
+
     /// Under strain right now: other background work waits too.
     pub fn strained(&self) -> bool {
         if self.fixed {
@@ -462,9 +473,13 @@ mod tests {
             s.run(21, Run { every, ..ALL });
         }
         assert!(s.pace.allowed() >= 2);
+        assert!(!s.pace.viewing());
         let w = s.pace.viewer();
         assert_eq!(s.pace.allowed(), 1);
+        assert!(s.pace.viewing());
         drop(w);
+        assert!(s.pace.viewing_at(s.now() + 29_000.0), "a while after the Viewer stopped");
+        assert!(!s.pace.viewing_at(s.now() + 31_000.0));
         assert_eq!(s.pace.status().1, 0);
         assert_eq!(s.pace.allowed_at(s.now()), 1);
         assert!(s.pace.allowed_at(s.now() + 31_000.0) >= 2);

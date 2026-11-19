@@ -61,7 +61,7 @@ fn rust_side(file: &Path) -> Value {
         Ok(r) => json!(r.iter().map(|(t, rec)| json!([t, rec.iter().map(|b| format!("{b:02x}")).collect::<String>()])).collect::<Vec<_>>()),
         Err(_) => error(),
     };
-    let (sp, sum) = speeds_for(file, size, Mode::Short, &Limiter::new(|| 1));
+    let (sp, sum) = speeds_for(file, size, Mode::Short, &Limiter::new(|| 1), false);
     let index = json!([sp, sum]);
     json!({ "codec": codec, "samples": samples, "summary": summary, "speeds": speeds, "info": info, "records": records, "index": index })
 }

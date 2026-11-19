@@ -104,6 +104,12 @@ fn open_confined(abs: &Path, roots: &[PathBuf]) -> Option<(File, std::fs::Metada
 
 /// A footage file with Range support (studioApi.js sendMedia).
 pub fn send_media(method: &Method, headers: &HeaderMap, abs: &Path, roots: &[PathBuf]) -> Response<Body> {
+    send_media_held::<()>(method, headers, abs, roots, || None)
+}
+
+/// send_media, and while bytes of the file are sent, what `hold` makes is kept: made only for a
+/// file found and a range that can be answered, kept until a whole file streamed out is done.
+pub fn send_media_held<H: Send + 'static>(method: &Method, headers: &HeaderMap, abs: &Path, roots: &[PathBuf], hold: impl FnOnce() -> Option<H>) -> Response<Body> {
     let Some((mut file, md)) = open_confined(abs, roots) else { return empty(StatusCode::NOT_FOUND) };
     let size = md.size();
     let mtime_ms = crate::scanner::ms_of(md.mtime(), md.mtime_nsec());
@@ -154,16 +160,31 @@ pub fn send_media(method: &Method, headers: &HeaderMap, abs: &Path, roots: &[Pat
     if file.seek(SeekFrom::Start(start)).is_err() {
         return empty(StatusCode::INTERNAL_SERVER_ERROR);
     }
+    let held = hold();
     if len <= MEDIA_CHUNK {
         let mut buf = vec![0u8; len as usize];
         if file.read_exact(&mut buf).is_err() {
             return empty(StatusCode::INTERNAL_SERVER_ERROR);
         }
+        drop(held);
         return b.body(Body::from(buf)).unwrap();
     }
     // the whole of a big file: streamed from the descriptor that was checked
     let reader = tokio::io::AsyncReadExt::take(tokio::fs::File::from_std(file), len);
-    b.body(Body::from_stream(file_stream(reader))).unwrap()
+    let stream = file_stream(reader);
+    let stream = match held {
+        Some(h) => {
+            use futures_util::StreamExt;
+            stream
+                .map(move |chunk| {
+                    let _kept = &h;
+                    chunk
+                })
+                .boxed()
+        }
+        None => stream,
+    };
+    b.body(Body::from_stream(stream)).unwrap()
 }
 
 #[cfg(test)]
@@ -193,5 +214,54 @@ mod stream_tests {
             rest += chunk.unwrap().len();
         }
         assert_eq!(rest, data.len());
+    }
+
+    struct Held(std::sync::Arc<std::sync::atomic::AtomicIsize>);
+    impl Drop for Held {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn what_a_request_holds_is_made_only_for_bytes_sent_and_kept_until_a_whole_file_has_streamed() {
+        use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
+        let dir = std::env::temp_dir().join(format!("lean-media-held-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = dir.join("clip.mp4");
+        std::fs::write(&clip, vec![1u8; (MEDIA_CHUNK as usize) * 3]).unwrap();
+        let roots = vec![dir.clone()];
+        let (live, made) = (std::sync::Arc::new(AtomicIsize::new(0)), AtomicUsize::new(0));
+        let hold = || {
+            made.fetch_add(1, Ordering::SeqCst);
+            live.fetch_add(1, Ordering::SeqCst);
+            Some(Held(live.clone()))
+        };
+        let range = |r: &str| {
+            let mut h = HeaderMap::new();
+            h.insert(header::RANGE, r.parse().unwrap());
+            h
+        };
+        // a HEAD, a missing file and a range past the end send no footage: nothing is made
+        assert_eq!(send_media_held(&Method::HEAD, &HeaderMap::new(), &clip, &roots, hold).status(), StatusCode::OK);
+        assert_eq!(send_media_held(&Method::GET, &HeaderMap::new(), &dir.join("gone.mp4"), &roots, hold).status(), StatusCode::NOT_FOUND);
+        assert_eq!(send_media_held(&Method::GET, &range("bytes=99999999-"), &clip, &roots, hold).status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(made.load(Ordering::SeqCst), 0);
+        // a range is sent at once: made, and let go with the answer
+        assert_eq!(send_media_held(&Method::GET, &range("bytes=0-"), &clip, &roots, hold).status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!((made.load(Ordering::SeqCst), live.load(Ordering::SeqCst)), (1, 0));
+        // the whole file streams out: kept until the last bytes went
+        let res = send_media_held(&Method::GET, &HeaderMap::new(), &clip, &roots, hold);
+        assert_eq!((res.status(), live.load(Ordering::SeqCst)), (StatusCode::OK, 1));
+        let mut body = res.into_body().into_data_stream();
+        let mut sent = 0;
+        while let Some(chunk) = body.next().await {
+            assert_eq!(live.load(Ordering::SeqCst), 1, "kept while bytes go out");
+            sent += chunk.unwrap().len();
+        }
+        drop(body);
+        assert_eq!((sent, live.load(Ordering::SeqCst)), (clip.metadata().unwrap().len() as usize, 0));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
