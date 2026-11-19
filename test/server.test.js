@@ -371,6 +371,22 @@ test('Studio is served with the web shim; converter bridge enforces Quick and al
     assert.doesNotMatch(shellCsp, /unsafe-eval/, 'the shell does not');
     assert.match(shellCsp, /connect-src 'self' https:\/\/tiles\.openfreemap\.org https:\/\/\*\.google\.com;/, 'an interface pack draws the map in the main page');
     assert.doesNotMatch((await s.call('GET', '/login', undefined, { raw: true })).headers.get('content-security-policy'), /openfreemap/, 'the sign-in page has no map');
+    // a versioned link gets its file's policy: the map's worker is started by
+    // a versioned Studio script and takes the policy it came with
+    const worker = await s.call('GET', '/v/abc123/studio/vendor/maplibre/maplibre-gl-worker.mjs?v=6.17.0', undefined, { raw: true });
+    assert.equal(worker.status, 200);
+    assert.equal(worker.headers.get('content-security-policy'), studioRes.headers.get('content-security-policy'), 'the map worker may fetch the tiles');
+    assert.equal((await s.call('GET', '/v/abc123/', undefined, { raw: true })).headers.get('content-security-policy'), shellCsp);
+    assert.doesNotMatch((await s.call('GET', '/v/abc123/studio/encoder.html', undefined, { raw: true })).headers.get('content-security-policy'), /openfreemap/, 'the Encoder page has no map');
+    assert.doesNotMatch((await s.call('GET', '/v/abc123/api/vehicles', undefined, { raw: true })).headers.get('content-security-policy'), /openfreemap/);
+    // the path as the handler decodes it: an encoded name gets the policy of the file it names
+    const plainCsp = (await s.call('GET', '/studio/encoder.html', undefined, { raw: true })).headers.get('content-security-policy');
+    assert.equal((await s.call('GET', '/v/abc123/studio/encoder%2ehtml', undefined, { raw: true })).headers.get('content-security-policy'), plainCsp);
+    assert.equal((await s.call('GET', '/studio/%65ncoder.html', undefined, { raw: true })).headers.get('content-security-policy'), plainCsp);
+    assert.equal((await s.call('GET', '/v/abc123/%73tudio/vendor/maplibre/maplibre-gl-worker.mjs', undefined, { raw: true })).headers.get('content-security-policy'), studioRes.headers.get('content-security-policy'));
+    const refused = await s.call('GET', '/studio/%zz.js', undefined, { raw: true });
+    assert.equal(refused.status, 400);
+    assert.doesNotMatch(refused.headers.get('content-security-policy'), /unsafe-eval|openfreemap/, 'a path the handler refuses gets the plain policy');
     const html = await studioRes.text();
     assert.match(html, /webFlag\.js[\s\S]*electronApiShim\.js/);
     assert.ok(!/<script>/.test(html.split('</head>')[0].split('<head>')[1].split('<title>')[0]), 'nothing inline is injected');

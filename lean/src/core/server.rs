@@ -100,7 +100,7 @@ fn acme_answer(state: &AppState, method: &Method, path: &str) -> Option<Res> {
 }
 
 /// One decoded, normalized path for every decision (no %2F tricks).
-fn clean_path(raw: &str) -> Option<String> {
+pub(super) fn clean_path(raw: &str) -> Option<String> {
     let p = crate::api::decode(raw, false)?;
     if p.contains('\0') || p.contains('\\') || p.contains("//") || p.split('/').any(|s| s == "." || s == "..") || !p.starts_with('/') {
         return None;
@@ -118,7 +118,7 @@ fn query_map(q: Option<&str>) -> HashMap<String, String> {
 }
 
 /// /v/<version>/<path> (VERSIONED in index.js): (path, version)
-fn unversion(mut p: String) -> (String, Option<String>) {
+pub(super) fn unversion(mut p: String) -> (String, Option<String>) {
     if p.starts_with("/v/assets/") {
         p = p[2..].to_string();
     }

@@ -288,7 +288,21 @@ function securityHeaders(req, res, pathname = '') {
   res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
   res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), usb=(), serial=(), payment=(), fullscreen=(self)');
-  const page = pathname.split('?')[0];
+  // The policy of the file the request is answered with: the path decoded,
+  // checked and unversioned as the handler does it (a path it refuses gets
+  // the plain policy). A versioned link (/v/<version>/<path>) is <path>'s
+  // file: a worker takes the policy its script came with, and the map's
+  // worker comes from a versioned Studio script and fetches the tiles.
+  let page;
+  try {
+    page = decodeURIComponent(pathname.split('?')[0]);
+  } catch {
+    page = '';
+  }
+  if (page.includes('\0') || page.includes('\\') || path.posix.normalize(page) !== page) page = '';
+  if (page.startsWith('/v/assets/')) page = page.slice(2);
+  const versioned = VERSIONED.exec(page);
+  if (versioned && !versioned[2].startsWith('/api/') && !versioned[2].startsWith('/v/')) page = versioned[2];
   res.setHeader('Content-Security-Policy', page.startsWith('/studio/') && page !== ENCODER_PAGE ? STUDIO_CSP
     : page === '/' || page === '/index.html' ? SHELL_CSP : CSP);
   // No HSTS: with Manager's own certificate it takes the browser's "continue"

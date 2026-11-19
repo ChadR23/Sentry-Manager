@@ -240,7 +240,13 @@ pub fn security_headers(h: &mut HeaderMap, pathname: &str) {
     set(h, "cross-origin-opener-policy", "same-origin".into());
     set(h, "cross-origin-resource-policy", "same-origin".into());
     set(h, "permissions-policy", "camera=(), microphone=(), geolocation=(), usb=(), serial=(), payment=(), fullscreen=(self)".into());
-    let page = pathname.split('?').next().unwrap_or("");
+    // The policy of the file the request is answered with: the path decoded,
+    // checked and unversioned as the handler does it (a path it refuses gets
+    // the plain policy). A versioned link (/v/<version>/<path>) is <path>'s
+    // file: a worker takes the policy its script came with, and the map's
+    // worker comes from a versioned Studio script and fetches the tiles.
+    let page = super::server::clean_path(pathname.split('?').next().unwrap_or("")).map(|p| super::server::unversion(p).0).unwrap_or_default();
+    let page = page.as_str();
     let img_maps = format!("'self' data: blob: {MAP_HOSTS}");
     let connect_maps = format!("'self' {MAP_HOSTS}");
     let csp = if page.starts_with("/studio/") && page != ENCODER_PAGE {
@@ -539,6 +545,38 @@ mod tests {
         assert!(r.find(&Method::GET, "/api/accounts/%zz").is_none());
         assert!(r.find(&Method::GET, "/api/accounts/a/b").is_none());
         assert!(r.find(&Method::HEAD, "/api/accounts/x").is_none());
+    }
+
+    #[test]
+    fn a_versioned_link_gets_the_policy_of_its_file() {
+        let csp = |p: &str| {
+            let mut h = HeaderMap::new();
+            security_headers(&mut h, p);
+            h["content-security-policy"].to_str().unwrap().to_string()
+        };
+        // the map's worker, started by a versioned Studio script: it may fetch the tiles
+        let worker = csp("/v/abc123/studio/vendor/maplibre/maplibre-gl-worker.mjs?v=6.17.0");
+        assert!(worker.contains("connect-src 'self' https://tiles.openfreemap.org https://*.google.com;"), "{worker}");
+        assert_eq!(worker, csp("/studio/vendor/maplibre/maplibre-gl-worker.mjs"));
+        assert_eq!(csp("/v/abc123/"), csp("/"));
+        assert_eq!(csp("/v/abc123/index.html"), csp("/index.html"));
+        assert_eq!(csp("/v/abc123/web/app.js"), csp("/web/app.js"));
+        // the Encoder page stays without the map, versioned or not
+        assert_eq!(csp("/v/abc123/studio/encoder.html"), csp("/studio/encoder.html"));
+        assert!(!csp("/studio/encoder.html").contains("openfreemap"));
+        // not a versioned file: the plain policy, as before
+        for p in ["/v/abc123/api/vehicles", "/v/a/v/b/studio/index.html", "/v/assets/icon.png", "/v/studio/x"] {
+            assert!(!csp(p).contains("openfreemap"), "{p}");
+        }
+        // the path as the handler decodes it: an encoded name is the file it names
+        assert_eq!(csp("/v/abc123/studio/encoder%2ehtml"), csp("/studio/encoder.html"));
+        assert_eq!(csp("/studio/%65ncoder.html"), csp("/studio/encoder.html"));
+        assert_eq!(csp("/v/abc123/%73tudio/vendor/maplibre/maplibre-gl-worker.mjs"), worker);
+        assert_eq!(csp("/v/%61bc123/studio/index.html"), csp("/studio/index.html"));
+        // a path the handler refuses: the plain policy
+        for p in ["/studio/%zz.js", "/studio/a%00.js", "/studio/x/%2e%2e/index.html", "/studio//index.html"] {
+            assert_eq!(csp(p), csp("/web/app.js"), "{p}");
+        }
     }
 
     #[test]
