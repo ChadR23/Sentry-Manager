@@ -104,7 +104,7 @@ fn ffmpeg_first_line(ctx: &dyn OpsCtx) -> String {
 }
 
 fn setting(ctx: &dyn OpsCtx, key: &str) -> Value {
-    store::get(&ctx.db(), key).unwrap_or(Value::Null)
+    store::get(&ctx.read_db(), key).unwrap_or(Value::Null)
 }
 
 fn opt_env(k: &str) -> Value {
@@ -155,7 +155,7 @@ pub fn diagnostics(ops: &Ops) -> Value {
         let n = by_status.get(&k).and_then(Value::as_f64).unwrap_or(0.0) + 1.0;
         by_status.insert(k, num(n));
     }
-    let open = store::list(&ctx.db(), true, 1000, None).len();
+    let open = store::list(&ctx.read_db(), true, 1000, None).len();
     out.insert(
         "counts".into(),
         json!({
@@ -215,7 +215,7 @@ pub fn heartbeat(ops: &Ops) -> Value {
     let (platform, arch) = super::build::platform_arch();
     let (os, docker) = super::build::host_info();
     let saved = {
-        let db = ctx.db();
+        let db = ctx.read_db();
         list.iter().map(|v| super::power::for_vehicle(&db, &v.id)["bytes"].as_f64().filter(|x| x.is_finite()).unwrap_or(0.0)).sum::<f64>()
     };
     let mut out = Map::new();

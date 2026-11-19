@@ -48,7 +48,7 @@ impl CanCtx for CoreCan {
         self.state.set_setting(key, &value);
     }
     fn has_dashboards(&self) -> bool {
-        let c = self.state.db.conn();
+        let c = self.state.db.reader();
         c.query_row("SELECT 1 FROM settings WHERE key LIKE 'dash:%' LIMIT 1", [], |_| Ok(())).is_ok()
     }
     fn vehicles(&self) -> Vec<Car> {

@@ -56,13 +56,16 @@ async fn run(fd: Option<std::os::fd::OwnedFd>) {
     sentry_lean::wire::start(&server);
     core::server::sync_device_port(&state);
 
-    // housekeeping (index.js): expired sessions go every minute
+    // housekeeping (index.js): expired sessions go every minute, on a blocking thread: the
+    // database may wait for another connection's write (up to its busy timeout), and the server
+    // has only two async workers
     let st = state.clone();
     tokio::spawn(async move {
         let mut t = tokio::time::interval(Duration::from_secs(60));
         loop {
             t.tick().await;
-            st.db.prune_sessions();
+            let db = st.clone();
+            let _ = tokio::task::spawn_blocking(move || db.db.prune_sessions()).await;
         }
     });
 

@@ -211,7 +211,7 @@ impl Ops {
             return Some(Reply::ok(json!({ "ok": true, "restarting": true })));
         }
         if route("GET", "/api/metrics/settings").is_some() {
-            let cfg = store::get(&ctx.db(), "metrics").unwrap_or(Value::Null);
+            let cfg = store::get(&ctx.read_db(), "metrics").unwrap_or(Value::Null);
             return Some(Reply::ok(json!({ "enabled": truthy(&cfg["enabled"]) })));
         }
         if route("POST", "/api/metrics/enable").is_some() {
@@ -318,7 +318,7 @@ impl Ops {
             if !ctx.vehicles().iter().any(|v| v.id == *id) {
                 return Some(Reply::error(404, "No such vehicle.", None));
             }
-            return Some(Reply::ok(power::savings_by_month(&ctx.db(), id, r.query.get("months").map(String::as_str))));
+            return Some(Reply::ok(power::savings_by_month(&ctx.read_db(), id, r.query.get("months").map(String::as_str))));
         }
         if route("GET", "/api/updates").is_some() {
             return Some(Reply::ok(self.updates.status()));
@@ -351,7 +351,7 @@ impl Ops {
     /// GET /metrics: Prometheus text, only with the token made in Health.
     fn metrics(&self, authorization: Option<&str>) -> Reply {
         let ctx = &*self.ctx;
-        let cfg = store::get(&ctx.db(), "metrics").unwrap_or(Value::Null);
+        let cfg = store::get(&ctx.read_db(), "metrics").unwrap_or(Value::Null);
         let hash = cfg["tokenHash"].as_str().unwrap_or("");
         if !truthy(&cfg["enabled"]) || hash.is_empty() {
             return Reply::error(404, "Not found", None);
@@ -387,7 +387,7 @@ impl Ops {
         metric("sentry_footage_bytes", "Footage size", per(&|v| v.footage_bytes));
         metric("sentry_recordings", "Recordings", per(&|v| v.recordings));
         metric("sentry_recycle_bin_bytes", "Bytes in the Recycle Bin", per(&|v| v.bin_bytes));
-        let db = ctx.db();
+        let db = ctx.read_db();
         let saved: Vec<(String, Option<f64>)> = list.iter().map(|v| (lab(&v.id), Some(number_opt(power::for_vehicle(&db, &v.id).get("bytes"))))).collect();
         let open = store::list(&db, true, 1000, None);
         drop(db);
