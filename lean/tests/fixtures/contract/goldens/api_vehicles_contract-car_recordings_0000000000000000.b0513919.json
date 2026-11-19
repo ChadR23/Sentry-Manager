@@ -1,0 +1,18 @@
+{
+  "route": "GET /api/vehicles/:id/recordings/:rid",
+  "method": "GET",
+  "request": {
+    "path": "/api/vehicles/contract-car/recordings/0000000000000000"
+  },
+  "response": {
+    "status": 404,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "Recording not found (it may have moved; refresh the inventory)."
+    }
+  }
+}

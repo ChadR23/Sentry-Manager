@@ -1,0 +1,21 @@
+{
+  "route": "POST /api/ui-packs/upload",
+  "method": "POST",
+  "request": {
+    "path": "/api/ui-packs/upload"
+  },
+  "body": {
+    "not": "a zip"
+  },
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "That is not a .zip file."
+    }
+  }
+}

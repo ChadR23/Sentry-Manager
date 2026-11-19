@@ -1,9 +1,10 @@
 'use strict';
 
-// The routes record.js / compare.js cannot replay from goldens, compared live:
-// the same scripted requests go to the Node server and to lean, each answer is
-// normalised where it is random or the moment's (tokens, codes, the session's
-// own ids, times), and the two are compared. Used by contractAll.js.
+// The routes record.js / compare.js cannot replay from goldens, asked live:
+// scripted requests to a server, each answer normalised where it is random or
+// the moment's (tokens, codes, the session's own ids, times). The Node
+// server's answers are frozen in lean/tests/fixtures/contract/live.json;
+// frozen.js asks the Rust server the same and compares.
 //
 //   the live streams: GET /api/events (the `changed` topics each scripted
 //     action brings, action by action) and GET /api/converter/events (hello,
@@ -13,8 +14,8 @@
 //     /api/can/logs/ping (CAN Bridge turned on, its token), GET /api/can/now,
 //     /api/can/now/:stat and /api/can/now/ca.crt (a Stream Deck link made,
 //     its token, its pin, a new link, off), GET /node/v1/info,
-//     /node/v1/jobs/:id and /node/v1/jobs/:id/output (node mode on, paired by
-//     Node's own main side, server/nodes.js, with the code each server shows);
+//     /node/v1/jobs/:id and /node/v1/jobs/:id/output (node mode on, paired as
+//     a main pairs, pairMain() below, with the code each server shows);
 //   the answers that are random or end the session: two-step set-up, sign-out
 //     (a fresh session of its own), metrics on, a database snapshot, the
 //     update check, CAN Bridge on and a token, the Stream Deck link, node mode,
@@ -27,15 +28,43 @@ const fs = require('fs');
 const https = require('https');
 const path = require('path');
 
-const REPO = path.join(__dirname, '..', '..');
-const lib = require(path.join(REPO, 'tools', 'contract', 'lib'));
-const { createNodes } = require(path.join(REPO, 'server', 'nodes'));
+const tls = require('tls');
+const lib = require('./lib');
 
-const quiet = { info() {}, warn() {}, error() {} };
-const memDb = () => {
-  const m = new Map();
-  return { get: (k, f = null) => (m.has(k) ? structuredClone(m.get(k)) : f), set: (k, v) => m.set(k, structuredClone(v)) };
-};
+/**
+ * Pairs with a server showing a pairing code, as a main does (the helper
+ * servers' protocol, docs/nodes.md): the code proves both sides saw the same
+ * certificate. Returns { name, token } or throws.
+ */
+async function pairMain(base, code, myName) {
+  const { hostname: host, port } = new URL(base);
+  const key = String(code || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const hmac = (text) => crypto.createHmac('sha256', key).update(text).digest('hex');
+  const fingerprint = await new Promise((resolve, reject) => {
+    const s = tls.connect({ host, port: Number(port), rejectUnauthorized: false, servername: undefined }, () => {
+      const raw = s.getPeerCertificate(false)?.raw;
+      s.destroy();
+      resolve(raw ? crypto.createHash('sha256').update(raw).digest('hex') : null);
+    });
+    s.on('error', reject);
+  });
+  const body = JSON.stringify({ name: myName, proof: hmac(`sentry-six-node|v1|pair|${fingerprint}|${myName}`) });
+  const r = await new Promise((resolve) => {
+    const req = https.request({ host, port: Number(port), path: '/node/v1/pair', method: 'POST', rejectUnauthorized: false, headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => resolve({ status: res.statusCode, json: lib.parseJson(Buffer.concat(chunks)) }));
+    });
+    req.on('error', (err) => resolve({ status: 0, json: { error: err.message } }));
+    req.end(body);
+  });
+  const token = r.json?.token;
+  if (r.status !== 200 || typeof token !== 'string' || r.json.proof !== hmac(`sentry-six-node|v1|paired|${fingerprint}|${token}`)) {
+    throw new Error(`pairing refused (${r.status}): ${JSON.stringify(r.json)}`);
+  }
+  return { name: r.json.name, token };
+}
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** A server event stream (SSE) with this client's cookie: every event as { event, data }. */
@@ -259,10 +288,9 @@ async function script(server, password, clip) {
   note('POST /api/nodes/worker', 'on', snap(await c.request('POST', '/api/nodes/worker', { body: { enabled: true } }), nodeRules));
   await confirm();
   const code = json(await c.request('POST', '/api/nodes/worker/pair', { body: {} }))?.pairing?.code;
-  const nodes = createNodes({ db: memDb(), log: quiet, audit: quiet, name: 'live-main', pollMs: 100 });
   let node = null;
   try {
-    node = await nodes.add({ address: new URL(server.base).host, code });
+    node = await pairMain(server.base, code, 'live-main');
   } catch (err) {
     note('GET /node/v1/info', 'paired', { error: err.message });
   }
@@ -283,7 +311,6 @@ async function script(server, password, clip) {
     note('GET /node/v1/jobs/:id/output', 'unknown job', snap(await nodeCall('/node/v1/jobs/0123456789abcdef0123456789abcdef/output')));
     note('GET /node/v1/info', 'nodes page', snap(await c.request('GET', '/api/nodes'), [{ path: 'worker.name', as: 'id' }, { path: 'worker.mains.*.id', as: 'id' }, { path: 'worker.mains.*.address', as: 'id' }]));
   }
-  nodes.close?.();
   note('POST /api/nodes/worker', 'off', snap(await c.request('POST', '/api/nodes/worker', { body: { enabled: false } }), nodeRules));
   if (node) {
     const off = await new Promise((resolve) => {
@@ -300,22 +327,21 @@ async function script(server, password, clip) {
 }
 
 /**
- * Both servers, one after the other (each is the only one asked while it runs);
- * returns { byRoute: { route: { same, different, answers: [{ label, diffs }] } } }.
+ * The frozen answers (`golden`: what script() answered on the Node server)
+ * against a server's; returns { byRoute: { route: { same, different,
+ * answers: [{ label, diffs }] } } }.
  */
-async function live({ node, lean, password }) {
-  const a = await script(node, password);
-  const b = await script(lean, password);
+function compareLive(a, b, fix = (x) => x) {
   const byRoute = {};
   const n = Math.max(a.length, b.length);
   for (let i = 0; i < n; i++) {
     const [route, label, golden] = a[i] || b[i];
     const actual = b[i] && b[i][0] === route && b[i][1] === label ? b[i][2] : '<missing>';
-    const diffs = lib.diff(golden, actual);
+    const diffs = lib.diff(fix(golden, route), fix(actual, route));
     const r = (byRoute[route] ||= { same: 0, different: 0, answers: [] });
     if (diffs.length) { r.different++; r.answers.push({ label: `${route} ${label}`, diffs }); } else r.same++;
   }
-  return { byRoute, node: a, lean: b };
+  return { byRoute };
 }
 
-module.exports = { live, script };
+module.exports = { script, compareLive, pairMain };

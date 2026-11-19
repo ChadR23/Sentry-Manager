@@ -1,0 +1,22 @@
+{
+  "route": "POST /api/vehicles/:id/protect",
+  "method": "POST",
+  "request": {
+    "path": "/api/vehicles/contract-car/protect"
+  },
+  "body": {
+    "ids": []
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "count": 0,
+      "ok": true
+    }
+  }
+}

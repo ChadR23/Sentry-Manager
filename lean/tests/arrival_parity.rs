@@ -1,6 +1,10 @@
-//! Parity of the arrival checksums with Node (lean/parity/arrival.js; needs
-//! node): the same archive, inventory, clock and options through Node's
-//! hasher and the Rust one, in turn, on the same files. The share's record
+//! Parity of the arrival checksums with Node: the same archive, inventory,
+//! clock and options through Node's hasher (server/arrivalChecksums.js,
+//! server/originalChecksums.js, run by the former lean/parity/arrival.js) and
+//! the Rust one, on the same files. Node's runs are frozen in
+//! tests/fixtures/node-reference/arrival-phase1.tar.xz, arrival-phase2.tar.xz
+//! (the share, Node's index and record after each pass) and
+//! arrival-records.tar.xz. The share's record
 //! and marks, and the index (snapshot and journal), must be byte for byte
 //! Node's; the view field for field. Then a second pass after a clip went,
 //! one was uploaded again and a new one came; then 60 days of record()
@@ -14,10 +18,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
-fn node_available() -> bool {
-    Command::new("node").arg("--version").output().is_ok_and(|o| o.status.success())
-}
+#[path = "support/reference.rs"]
+mod reference;
+#[path = "support/record.rs"]
+mod record;
 
+/// RECORDING ONLY
 fn node(args: &[&str]) {
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("parity/arrival.js");
     let out = Command::new("node").arg(script).args(args).output().expect("run node");
@@ -133,6 +139,46 @@ fn assert_same(what: &str, a: &BTreeMap<String, Vec<u8>>, b: &BTreeMap<String, V
     }
 }
 
+/// Each file's inode under `dir` (relative path -> inode).
+fn inodes(dir: &Path) -> BTreeMap<String, u64> {
+    fn walk(base: &Path, d: &Path, out: &mut BTreeMap<String, u64>) {
+        for e in fs::read_dir(d).unwrap().flatten() {
+            let ft = e.file_type().unwrap();
+            if ft.is_dir() {
+                walk(base, &e.path(), out);
+            } else if ft.is_file() {
+                use std::os::unix::fs::MetadataExt;
+                out.insert(e.path().strip_prefix(base).unwrap().to_string_lossy().into_owned(), e.metadata().unwrap().ino());
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    walk(dir, dir, &mut out);
+    out
+}
+
+fn read_inodes(p: &Path) -> BTreeMap<String, u64> {
+    serde_json::from_slice(&fs::read(p).unwrap()).unwrap()
+}
+
+/// Puts this run's inodes into Node's index (car_1.json: [size, mtime, ino, ...]
+/// per file; car_1.log: [path, size, mtime, ino, ...] per line), as text, so
+/// the rest stays byte for byte as Node wrote it.
+fn reinode(nd: &Path, map: &BTreeMap<u64, u64>) {
+    for name in ["car_1.json", "car_1.log"] {
+        let p = nd.join(name);
+        let Ok(mut t) = fs::read_to_string(&p) else { continue };
+        for old in map.keys() {
+            t = t.replace(&format!(",{old},"), &format!(",\u{0}{old},"));
+        }
+        for (old, new) in map {
+            t = t.replace(&format!(",\u{0}{old},"), &format!(",{new},"));
+        }
+        assert!(!t.contains('\u{0}'));
+        fs::write(&p, t).unwrap();
+    }
+}
+
 /// The share's .sentrymanager/ in and out of a store, so each side starts from its own.
 fn swap(from: &Path, to: &Path) {
     if from.exists() {
@@ -142,25 +188,76 @@ fn swap(from: &Path, to: &Path) {
 
 #[test]
 fn arrival_parity_with_node() {
-    if !node_available() {
-        eprintln!("skipped: node is not installed");
-        return;
-    }
-    let dir = std::env::temp_dir().join(format!("lean-arrival-parity-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    let dir = fs::canonicalize(&dir).unwrap();
-    node(&["make", &dir.to_string_lossy()]);
+    let rec = record::recording();
+    let mut recorded: BTreeMap<String, u64> = BTreeMap::new();
+    let dir = if rec {
+        let dir = std::env::temp_dir().join(format!("lean-arrival-parity-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let dir = fs::canonicalize(&dir).unwrap();
+        node(&["make", &dir.to_string_lossy()]);
+        dir
+    } else {
+        reference::unpack("arrival-phase1", "parity")
+    };
     let sm = dir.join("car/TeslaCam/.sentrymanager");
     let (nd, rd) = (dir.join("node-data"), dir.join("rust-data"));
     let (nsm, rsm) = (dir.join("node-sm"), dir.join("rust-sm"));
     for phase in [1u32, 2] {
-        if phase == 2 {
-            node(&["mutate", &dir.to_string_lossy()]);
+        if rec {
+            if phase == 2 {
+                node(&["mutate", &dir.to_string_lossy()]);
+            }
+            swap(&nsm, &sm);
+            node(&["run", &dir.to_string_lossy(), &nd.to_string_lossy(), &phase.to_string()]);
+            swap(&sm, &nsm);
+            // the share, Node's index and its record, as this pass left them
+            let keep = std::env::temp_dir().join(format!("lean-arrival-keep-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&keep);
+            fs::create_dir_all(&keep).unwrap();
+            for n in ["car", "node-data", "node-sm", "now.json"] {
+                let _ = Command::new("cp").arg("-a").arg(dir.join(n)).arg(&keep).status();
+            }
+            fs::write(keep.join("inodes.json"), serde_json::to_string(&inodes(&dir.join("car"))).unwrap()).unwrap();
+            record::pack(&format!("arrival-phase{phase}"), &keep);
+            let _ = fs::remove_dir_all(&keep);
+        } else if phase == 1 {
+            recorded = read_inodes(&dir.join("inodes.json"));
+        } else {
+            // Node's second pass, after a clip went, one was uploaded again and a
+            // new one came: the files Node's pass found unchanged stay as they are
+            // here (the same inode), the others come from the recording
+            let p2 = reference::unpack("arrival-phase2", "parity");
+            let then = read_inodes(&p2.join("inodes.json"));
+            let car = dir.join("car");
+            let here = inodes(&car);
+            for rel in here.keys() {
+                if !then.contains_key(rel) {
+                    fs::remove_file(car.join(rel)).unwrap();
+                }
+            }
+            for (rel, ino) in &then {
+                if recorded.get(rel) == Some(ino) {
+                    assert_eq!(fs::read(car.join(rel)).unwrap(), fs::read(p2.join("car").join(rel)).unwrap(), "{rel} was unchanged");
+                } else {
+                    fs::create_dir_all(car.join(rel).parent().unwrap()).unwrap();
+                    fs::rename(p2.join("car").join(rel), car.join(rel)).unwrap();
+                }
+            }
+            for n in ["node-data", "node-sm", "now.json"] {
+                let _ = fs::remove_dir_all(dir.join(n));
+                let _ = fs::remove_file(dir.join(n));
+                fs::rename(p2.join(n), dir.join(n)).unwrap();
+            }
+            let _ = fs::remove_dir_all(&p2);
+            recorded = then;
         }
-        swap(&nsm, &sm);
-        node(&["run", &dir.to_string_lossy(), &nd.to_string_lossy(), &phase.to_string()]);
-        swap(&sm, &nsm);
+        if !rec {
+            // Node's index names each file's inode as it was when recorded: this run's instead
+            let now = inodes(&dir.join("car"));
+            let map: BTreeMap<u64, u64> = recorded.iter().filter_map(|(rel, old)| now.get(rel).map(|n| (*old, *n))).collect();
+            reinode(&nd, &map);
+        }
         swap(&rsm, &sm);
         let answers = rust_run(&dir, &rd, phase);
         swap(&sm, &rsm);
@@ -176,7 +273,13 @@ fn arrival_parity_with_node() {
 
     // 60 days of lines, pruned
     let (nrec, rrec) = (dir.join("rec-node"), dir.join("rec-rust"));
-    node(&["records", &nrec.to_string_lossy()]);
+    if rec {
+        node(&["records", &nrec.to_string_lossy()]);
+        record::pack("arrival-records", &nrec);
+    } else {
+        let r = reference::unpack("arrival-records", "parity");
+        fs::rename(&r, &nrec).unwrap();
+    }
     fs::create_dir_all(rrec.join("RecentClips")).unwrap();
     let clock = Arc::new(std::sync::Mutex::new(0.0f64));
     let c = clock.clone();

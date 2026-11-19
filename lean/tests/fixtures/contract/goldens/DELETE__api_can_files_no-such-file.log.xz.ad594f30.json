@@ -1,0 +1,18 @@
+{
+  "route": "DELETE /api/can/files/:name",
+  "method": "DELETE",
+  "request": {
+    "path": "/api/can/files/no-such-file.log.xz"
+  },
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "That is not a CAN Bridge log name."
+    }
+  }
+}

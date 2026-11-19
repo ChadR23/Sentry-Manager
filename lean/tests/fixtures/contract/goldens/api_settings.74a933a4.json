@@ -1,0 +1,28 @@
+{
+  "route": "GET /api/settings",
+  "method": "GET",
+  "request": {
+    "path": "/api/settings"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "appearance": {
+        "clock24": false,
+        "reduceEffects": false
+      },
+      "power": {
+        "currency": "$",
+        "defaultPrice": null,
+        "mode": "flat",
+        "pricePerKwh": null,
+        "rates": []
+      }
+    }
+  }
+}

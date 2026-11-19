@@ -859,10 +859,6 @@ mod tests {
     /// buildEncodeArgs / decodeAccelArgs of the Node planner.
     #[test]
     fn arguments_match_node() {
-        if !Command::new("node").arg("--version").output().is_ok_and(|o| o.status.success()) {
-            eprintln!("skipped: node is needed");
-            return;
-        }
         let script = r#"
 const { buildEncodeArgs, decodeAccelArgs } = require(process.argv[1] + '/src/main/converter/encoderPlanner');
 const out = [];
@@ -880,10 +876,15 @@ for (const encoder of encs.h265) for (const x265Pools of [0, 4, 64])
   out.push(buildEncodeArgs({ codec: 'h265', encoder, bitrate: 1234567.5, x265Pools }));
 console.log(JSON.stringify(out));
 "#;
-        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-        let o = Command::new("node").arg("-e").arg(script).arg(repo).output().unwrap();
-        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
-        let node: Vec<Value> = serde_json::from_slice(&o.stdout).unwrap();
+        if crate::record::recording() {
+            let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+            let o = Command::new("node").arg("-e").arg(script).arg(repo).output().unwrap();
+            assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+            let node: Vec<Value> = serde_json::from_slice(&o.stdout).unwrap();
+            let doc = json!({ "recorded": "src/main/converter/encoderPlanner.js buildEncodeArgs / decodeAccelArgs, 2026-11-18, by the script below (argv[1]: the repository)", "script": script, "answers": node });
+            std::fs::write(crate::reference::dir().join("planner-args.json"), serde_json::to_string(&doc).unwrap()).unwrap();
+        }
+        let node: Vec<Value> = serde_json::from_value(crate::reference::json("planner-args.json")["answers"].clone()).unwrap();
         let encs = [("h265", vec!["libx265", "hevc_nvenc", "hevc_qsv", "hevc_amf", "hevc_vaapi", "hevc_videotoolbox"]), ("av1", vec!["libsvtav1", "libaom-av1", "av1_nvenc", "av1_qsv", "av1_amf", "av1_vaapi", "av1_videotoolbox"])];
         let dev = Device { node: Some("/dev/dri/renderD129".into()), index: Some(1), ..Default::default() };
         let mut mine: Vec<Value> = vec![];

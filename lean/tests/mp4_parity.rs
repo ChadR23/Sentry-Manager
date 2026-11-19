@@ -1,34 +1,23 @@
 //! The Rust MP4 and telemetry readers against the Node ones, on the same
-//! files: lean/parity/mp4Fixtures.js writes the fixtures (real ffmpeg
+//! files, frozen in tests/fixtures/node-reference/mp4.tar.xz: the former
+//! lean/parity/mp4Fixtures.js wrote the fixtures (real ffmpeg
 //! encodes and synthetic ones from test/fixtures/fixtureBuilders.js) and
-//! what server/mp4codec.js, server/speedReader.js, src/main/converter/mp4.js and
+//! expected.json, what server/mp4codec.js, server/speedReader.js, src/main/converter/mp4.js and
 //! server/telemetry.js (the full read) get from each, and what server/speedIndex.js keeps
 //! for it (the quick read, else the full one) and its summarize of the samples;
 //! every value here must match exactly.
-//!
-//! Skipped (with a note) when node or ffmpeg is not installed.
+
+#[path = "support/reference.rs"]
+mod reference;
 
 use sentry_lean::viewer::speed_index::{speeds_for, summarize};
 use sentry_lean::viewer::{speed_reader::Mode, telemetry_api::Limiter};
 use sentry_lean::{mp4, sei, telemetry};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-
-fn have(cmd: &str, arg: &str) -> bool {
-    Command::new(cmd).arg(arg).output().map(|o| o.status.success()).unwrap_or(false)
-}
 
 fn fixtures() -> Option<PathBuf> {
-    if !have("node", "--version") || !have("ffmpeg", "-version") {
-        eprintln!("skipped: node and ffmpeg are needed to make the fixtures");
-        return None;
-    }
-    let dir = std::env::temp_dir().join(format!("lean-mp4-parity-{}", std::process::id()));
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("parity/mp4Fixtures.js");
-    let out = Command::new("node").arg(script).arg(&dir).output().expect("run node");
-    assert!(out.status.success(), "mp4Fixtures.js failed: {}", String::from_utf8_lossy(&out.stderr));
-    Some(dir)
+    Some(reference::unpack("mp4", "parity"))
 }
 
 /// Numbers as f64 everywhere: Node writes 12 where serde writes 12.0.

@@ -1,0 +1,21 @@
+{
+  "route": "POST /api/jobs/clear",
+  "method": "POST",
+  "request": {
+    "path": "/api/jobs/clear"
+  },
+  "body": {
+    "vehicleId": "no-such-car"
+  },
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "Confirm clearing the finished jobs."
+    }
+  }
+}

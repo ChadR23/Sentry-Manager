@@ -194,6 +194,17 @@ async function main() {
     process.stdin.on('end', () => { w.server.close(); w.worker.close(); process.exit(0); });
     return;
   }
+  if (mode === 'record') {
+    // Node's worker asked by Node's main: what lean/src/nodes/tests.rs freezes
+    const [clip] = rest;
+    const w = await startWorker(dir, tlsDir, 'garage-pc');
+    const { pairing } = w.worker.startPairing();
+    const ours = await script(w.port, pairing.code, clip, dir, 'node');
+    w.server.close();
+    w.worker.close();
+    process.stdout.write(JSON.stringify(ours));
+    process.exit(0);
+  }
   if (mode === 'compare') {
     const [rustPort, rustCode, clip] = rest;
     const w = await startWorker(dir, tlsDir, 'garage-pc');

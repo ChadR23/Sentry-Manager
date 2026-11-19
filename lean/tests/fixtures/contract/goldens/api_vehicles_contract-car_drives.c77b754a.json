@@ -1,0 +1,95 @@
+{
+  "route": "GET /api/vehicles/:id/drives",
+  "method": "GET",
+  "request": {
+    "path": "/api/vehicles/contract-car/drives"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "driveData": null,
+      "drives": [
+        {
+          "can": false,
+          "clips": 1,
+          "date": "2024-05-01",
+          "distance": 1,
+          "end": "2024-05-01 17:30:02",
+          "from": {
+            "label": null,
+            "lat": 30.4,
+            "lon": -97.7,
+            "place": null
+          },
+          "hardBrakes": 0,
+          "id": "2024-05-01_17-30-00",
+          "indexed": 1,
+          "moving": 1,
+          "open": {
+            "clip": "2024-05-01_17-30-00",
+            "day": "2024-05-01",
+            "recording": "f11ef172e32dd02d",
+            "second": 1
+          },
+          "recordings": 1,
+          "seconds": 1,
+          "start": "2024-05-01 17:30:01",
+          "swerves": 0,
+          "to": {
+            "label": null,
+            "lat": 30.4,
+            "lon": -97.7,
+            "place": null
+          },
+          "top": 1
+        },
+        {
+          "can": false,
+          "clips": 2,
+          "date": "2024-05-01",
+          "distance": 78,
+          "end": "2024-05-01 08:01:03",
+          "from": {
+            "label": "Austin",
+            "lat": 30.2672,
+            "lon": -97.7431,
+            "place": null
+          },
+          "hardBrakes": 0,
+          "id": "2024-05-01_08-00-00",
+          "indexed": 2,
+          "moving": 6,
+          "open": {
+            "clip": "2024-05-01_08-00-00",
+            "day": "2024-05-01",
+            "recording": "7cdb75664f3190bd",
+            "second": 0
+          },
+          "recordings": 1,
+          "seconds": 63,
+          "start": "2024-05-01 08:00:00",
+          "swerves": 0,
+          "to": {
+            "label": "Austin",
+            "lat": 30.269,
+            "lon": -97.741,
+            "place": null
+          },
+          "top": 16
+        }
+      ],
+      "gap": 5,
+      "indexing": false,
+      "more": false,
+      "next": null,
+      "reading": false,
+      "scanning": false,
+      "source": "clips"
+    }
+  }
+}

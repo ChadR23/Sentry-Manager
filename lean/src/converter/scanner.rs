@@ -377,13 +377,13 @@ mod tests {
         assert_eq!(compare_scan_paths("x", "x", &order), Ordering::Equal);
     }
 
-    /// The same folder scanned by Node's scanner and this one (needs node).
+    /// The same folder scanned by this scanner answers as Node's scanner
+    /// (src/main/converter/scanner.js, through lean/parity/converterScan.js)
+    /// answered: tests/fixtures/node-reference/converter-scan.json. Every
+    /// file gets a fixed time; the inode numbers are this run's, put into
+    /// Node's answer for the same file.
     #[test]
     fn parity_with_node_scanner() {
-        if !std::process::Command::new("node").arg("--version").output().is_ok_and(|o| o.status.success()) {
-            eprintln!("skipped: node is not installed");
-            return;
-        }
         let base = std::env::temp_dir().join(format!("lean-scan-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         let root = base.join("TeslaCam");
@@ -411,14 +411,25 @@ mod tests {
             "2026-10-16_01-00-00-front.mp4",
             ".hidden/2026-10-16_01-00-00-front.mp4",
         ];
-        for f in files {
+        for (n, f) in files.iter().enumerate() {
             let p = root.join(f);
             fs::create_dir_all(p.parent().unwrap()).unwrap();
             fs::write(&p, f.as_bytes()).unwrap();
+            // a fixed time, with a fraction of a millisecond
+            let t = std::time::UNIX_EPOCH + std::time::Duration::from_nanos(1_792_000_000_000_000_000 + n as u64 * 61_000_123_457);
+            fs::File::options().write(true).open(&p).unwrap().set_modified(t).unwrap();
         }
         std::os::unix::fs::symlink(root.join("RecentClips/2026-10-20_07-44-14-front.mp4"), root.join("RecentClips/2026-10-20_07-44-15-front.mp4")).unwrap();
         std::os::unix::fs::symlink(&root, root.join("SavedClips/loop")).unwrap();
-        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("parity/converterScan.js");
+        let ino_of = |v: &mut Value| {
+            for i in v.as_array_mut().into_iter().flatten() {
+                if let (Some(p), Some(_)) = (i.get("sourcePath").and_then(Value::as_str), i.get("ino")) {
+                    use std::os::unix::fs::MetadataExt;
+                    let ino = fs::metadata(p).unwrap().ino();
+                    i["ino"] = json!(ino);
+                }
+            }
+        };
         let configs = [
             json!({ "sourceRoot": root, "destinationRoot": base.join("out") }),
             json!({ "sourceRoot": root, "includedGroups": ["SentryClips", "RecentClips"], "groupOrder": ["RecentClips", "SentryClips", "SavedClips"] }),
@@ -428,11 +439,23 @@ mod tests {
             json!({ "sourceRoot": root, "destinationRoot": root }),
         ];
         for (n, config) in configs.iter().enumerate() {
-            let file = base.join(format!("config-{n}.json"));
-            fs::write(&file, config.to_string()).unwrap();
-            let out = std::process::Command::new("node").arg(&script).arg(&file).output().unwrap();
-            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-            let theirs: Value = serde_json::from_slice(&out.stdout).unwrap();
+            let places = [("{BASE}", base.to_string_lossy().into_owned())];
+            if crate::record::recording() {
+                let file = base.join(format!("config-{n}.json"));
+                fs::write(&file, config.to_string()).unwrap();
+                let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("parity/converterScan.js");
+                let out = std::process::Command::new("node").arg(&script).arg(&file).output().unwrap();
+                assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+                let mut theirs: Value = serde_json::from_slice(&out.stdout).unwrap();
+                for i in theirs["items"].as_array_mut().into_iter().flatten() {
+                    if i.get("ino").is_some() {
+                        i["ino"] = json!(0);
+                    }
+                }
+                crate::record::record("converter-scan", "src/main/converter/scanner.js by lean/parity/converterScan.js <config>, 2026-11-19 (ino: 0, this run's put in)", &places, config, &theirs);
+            }
+            let mut theirs = crate::reference::answer("converter-scan", &places, config);
+            ino_of(&mut theirs["items"]);
             let mut mine = Vec::new();
             let r = scan(config, None, None, &mut |d| {
                 let mut v = d.value.clone();

@@ -1,0 +1,19 @@
+{
+  "route": "POST /api/auth/setup",
+  "method": "POST",
+  "request": {
+    "path": "/api/auth/setup"
+  },
+  "body": {},
+  "response": {
+    "status": 409,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "An account already exists."
+    }
+  }
+}

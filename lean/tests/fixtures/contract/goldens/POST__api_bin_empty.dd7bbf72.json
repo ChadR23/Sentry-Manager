@@ -1,0 +1,21 @@
+{
+  "route": "POST /api/bin/empty",
+  "method": "POST",
+  "request": {
+    "path": "/api/bin/empty"
+  },
+  "body": {
+    "vehicleId": "no-such-car"
+  },
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "Confirm emptying the Recycle Bin."
+    }
+  }
+}

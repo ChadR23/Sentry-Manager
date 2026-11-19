@@ -1,0 +1,18 @@
+{
+  "route": "DELETE /node/v1/jobs/:id",
+  "method": "DELETE",
+  "request": {
+    "path": "/node/v1/jobs/no-such-job"
+  },
+  "response": {
+    "status": 401,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "Not paired."
+    }
+  }
+}

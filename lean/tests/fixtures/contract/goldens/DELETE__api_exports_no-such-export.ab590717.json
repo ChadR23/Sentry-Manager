@@ -1,0 +1,18 @@
+{
+  "route": "DELETE /api/exports/:id",
+  "method": "DELETE",
+  "request": {
+    "path": "/api/exports/no-such-export"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "ok": false
+    }
+  }
+}

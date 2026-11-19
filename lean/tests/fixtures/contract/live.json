@@ -1,0 +1,1295 @@
+{
+ "recorded": "tools/contract/live.js script() on the Node server (tools/contract/fixture.js over server/index.js), 2026-11-19",
+ "answers": [
+  [
+   "GET /api/events",
+   "open",
+   {
+    "status": 200,
+    "type": "text/event-stream",
+    "first": {
+     "event": "hello",
+     "data": {}
+    }
+   }
+  ],
+  [
+   "GET /api/events",
+   "background (62 s)",
+   [
+    "bin",
+    "notifications",
+    "vehicles"
+   ]
+  ],
+  [
+   "GET /api/events",
+   "appearance",
+   {
+    "status": 200,
+    "topics": []
+   }
+  ],
+  [
+   "GET /api/events",
+   "appearance back",
+   {
+    "status": 200,
+    "topics": []
+   }
+  ],
+  [
+   "GET /api/events",
+   "place added",
+   {
+    "status": 200,
+    "topics": []
+   }
+  ],
+  [
+   "GET /api/events",
+   "place removed",
+   {
+    "status": 200,
+    "topics": []
+   }
+  ],
+  [
+   "GET /api/events",
+   "dashboards",
+   {
+    "status": 400,
+    "topics": []
+   }
+  ],
+  [
+   "GET /api/events",
+   "notifications read",
+   {
+    "status": 200,
+    "topics": []
+   }
+  ],
+  [
+   "GET /api/events",
+   "work limits",
+   {
+    "status": 200,
+    "topics": []
+   }
+  ],
+  [
+   "GET /api/events",
+   "notification rules",
+   {
+    "status": 200,
+    "topics": []
+   }
+  ],
+  [
+   "GET /api/converter/events",
+   "open",
+   {
+    "status": 200,
+    "type": "text/event-stream",
+    "first": {
+     "event": "hello",
+     "data": {}
+    }
+   }
+  ],
+  [
+   "GET /api/converter/events",
+   "subscribe",
+   {
+    "status": 200,
+    "headers": {
+     "content-type": "application/json; charset=utf-8",
+     "cache-control": "no-store",
+     "x-content-type-options": "nosniff"
+    },
+    "body": {
+     "ok": true,
+     "value": null
+    }
+   }
+  ],
+  [
+   "GET /api/events",
+   "conversion",
+   {
+    "status": 200,
+    "topics": [
+     "jobs"
+    ]
+   }
+  ],
+  [
+   "GET /api/converter/events",
+   "start",
+   {
+    "ok": true,
+    "error": null,
+    "jobId": "string"
+   }
+  ],
+  [
+   "GET /api/converter/events",
+   "job states",
+   {
+    "events": [
+     "converter:progress",
+     "hello"
+    ],
+    "encoded": true,
+    "ended": "completed",
+    "idle": [
+     "completed"
+    ]
+   }
+  ],
+  [
+   "GET /api/converter/events",
+   "last snapshot",
+   {
+    "keys": [
+     "config",
+     "counters",
+     "createdAt",
+     "discoveryComplete",
+     "id",
+     "items",
+     "revision",
+     "schemaVersion",
+     "state",
+     "summary",
+     "updatedAt"
+    ],
+    "items": [
+     {
+      "kind": "video",
+      "state": "failed",
+      "relativePath": "2024-05-03_10-00-00/2024-05-03_09-59-00-back.mp4",
+      "reason": null
+     },
+     {
+      "kind": "video",
+      "state": "failed",
+      "relativePath": "2024-05-03_10-00-00/2024-05-03_09-59-00-front.mp4",
+      "reason": null
+     },
+     {
+      "kind": "video",
+      "state": "failed",
+      "relativePath": "2024-05-03_10-00-00/2024-05-03_09-59-00-left_repeater.mp4",
+      "reason": null
+     },
+     {
+      "kind": "video",
+      "state": "failed",
+      "relativePath": "2024-05-03_10-00-00/2024-05-03_09-59-00-right_repeater.mp4",
+      "reason": null
+     },
+     {
+      "kind": "asset",
+      "state": "completed",
+      "relativePath": "2024-05-03_10-00-00/event.json",
+      "reason": null
+     }
+    ],
+    "config": {
+     "codec": "h265",
+     "destinationRoot": "{data}/converted/live-check",
+     "groupOrder": [
+      "SavedClips",
+      "SentryClips",
+      "RecentClips"
+     ],
+     "includedGroups": [
+      "SavedClips"
+     ],
+     "networkMode": "auto",
+     "outputMode": "separate",
+     "profileId": "balanced",
+     "replacementConfirmed": false,
+     "sourceRoot": "{root}/TeslaCam/SavedClips"
+    },
+    "counters": {
+     "files": 0,
+     "sourceVideoBytes": "number",
+     "outputVideoBytes": "number",
+     "savedBytes": "number",
+     "copiedAssetBytes": "number",
+     "groups": {
+      "RecentClips": {
+       "files": 0,
+       "sourceBytes": 0,
+       "outputBytes": 0,
+       "savedBytes": 0
+      },
+      "SavedClips": {
+       "files": 0,
+       "sourceBytes": 0,
+       "outputBytes": 0,
+       "savedBytes": 0
+      },
+      "SentryClips": {
+       "files": 0,
+       "sourceBytes": 0,
+       "outputBytes": 0,
+       "savedBytes": 0
+      }
+     }
+    }
+   }
+  ],
+  [
+   "GET /api/converter/events",
+   "activity row",
+   {
+    "title": "Convert Contract Car to H.265",
+    "status": "failed",
+    "detail": "0 converted, 0 skipped, 4 failed"
+   }
+  ],
+  [
+   "POST /api/auth/2fa/start",
+   "start",
+   {
+    "status": 200,
+    "headers": {
+     "content-type": "application/json; charset=utf-8",
+     "cache-control": "no-store",
+     "x-content-type-options": "nosniff"
+    },
+    "body": {
+     "secret": "<id>",
+     "uri": "otpauth://totp/Sentry%20Six%20Manager%3Aadmin?secret=<secret>&issuer=Sentry%20Six%20Manager&algorithm=SHA1&digits=6&period=30"
+    }
+   }
+  ],
+  [
+   "POST /api/auth/logout",
+   "logout",
+   {
+    "status": 200,
+    "headers": {
+     "content-type": "application/json; charset=utf-8",
+     "cache-control": "no-store",
+     "x-content-type-options": "nosniff"
+    },
+    "body": {
+     "ok": true
+    },
+    "cookie": [
+     "__Host-sm_session=<value>; HttpOnly; SameSite=Strict; Path=/; Max-Age=0; Secure"
+    ]
+   }
+  ],
+  [
+   "POST /api/auth/logout",
+   "after",
+   {
+    "status": 200,
+    "headers": {
+     "content-type": "application/json; charset=utf-8",
+     "cache-control": "no-store",
+     "x-content-type-options": "nosniff"
+    },
+    "body": {
+     "fingerprint": "<id>",
+     "homeNetwork": true,
+     "needsSetup": false,
+     "role": null,
+     "secure": true,
+     "twoFactor": false,
+     "user": null
+    }
+   }
+  ],
+  [
+   "POST /api/auth/logout",
+   "others stay",
+   200
+  ],
+  [
+   "POST /api/metrics/enable",
+   "enable",
+   {
+    "status": 200,
+    "headers": {
+     "content-type": "application/json; charset=utf-8",
+     "cache-control": "no-store",
+     "x-content-type-options": "nosniff"
+    },
+    "body": {
+     "enabled": true,
+     "token": "<id>"
+    }
+   }
+  ],
+  [
+   "GET /metrics",
+   "with token",
+   {
+    "status": 200,
+    "type": "text/plain; version=0.0.4; charset=utf-8",
+    "lines": [
+     "# HELP sentry_up The app is running",
+     "# TYPE sentry_up gauge",
+     "sentry_up <value>",
+     "# HELP sentry_uptime_seconds Seconds since the app started",
+     "# TYPE sentry_uptime_seconds gauge",
+     "sentry_uptime_seconds <value>",
+     "# HELP sentry_process_resident_bytes Memory the app uses",
+     "# TYPE sentry_process_resident_bytes gauge",
+     "sentry_process_resident_bytes <value>",
+     "# HELP sentry_share_up The footage share can be read (1) or not (0)",
+     "# TYPE sentry_share_up gauge",
+     "sentry_share_up{vehicle=\"contract-car\"} <value>",
+     "# HELP sentry_share_writable The footage share can be written",
+     "# TYPE sentry_share_writable gauge",
+     "sentry_share_writable{vehicle=\"contract-car\"} <value>",
+     "# HELP sentry_share_free_bytes Free space on the footage share",
+     "# TYPE sentry_share_free_bytes gauge",
+     "sentry_share_free_bytes{vehicle=\"contract-car\"} <value>",
+     "# HELP sentry_share_total_bytes Size of the footage share",
+     "# TYPE sentry_share_total_bytes gauge",
+     "sentry_share_total_bytes{vehicle=\"contract-car\"} <value>",
+     "# HELP sentry_footage_bytes Footage size",
+     "# TYPE sentry_footage_bytes gauge",
+     "sentry_footage_bytes{vehicle=\"contract-car\"} <value>",
+     "# HELP sentry_recordings Recordings",
+     "# TYPE sentry_recordings gauge",
+     "sentry_recordings{vehicle=\"contract-car\"} <value>",
+     "# HELP sentry_recycle_bin_bytes Bytes in the Recycle Bin",
+     "# TYPE sentry_recycle_bin_bytes gauge",
+     "sentry_recycle_bin_bytes{vehicle=\"contract-car\"} <value>",
+     "# HELP sentry_saved_bytes Space saved by conversions",
+     "# TYPE sentry_saved_bytes gauge",
+     "sentry_saved_bytes{vehicle=\"contract-car\"} <value>",
+     "# HELP sentry_days_until_full Days until the share is full at the last 14 days' rate",
+     "# TYPE sentry_days_until_full gauge",
+     "# HELP sentry_conversion_running A conversion is running",
+     "# TYPE sentry_conversion_running gauge",
+     "sentry_conversion_running <value>",
+     "# HELP sentry_notifications_open Open notifications",
+     "# TYPE sentry_notifications_open gauge",
+     "sentry_notifications_open{level=\"critical\"} <value>",
+     "sentry_notifications_open{level=\"warning\"} <value>",
+     "sentry_notifications_open{level=\"info\"} <value>",
+     "# HELP sentry_health_checks_failing Health checks failing at the last run",
+     "# TYPE sentry_health_checks_failing gauge",
+     "sentry_health_checks_failing <value>"
+    ]
+   }
+  ],
+  [
+   "GET /metrics",
+   "wrong token",
+   {
+    "status": 401,
+    "headers": {
+     "content-type": "text/plain",
+     "cache-control": "no-store",
+     "x-content-type-options": "nosniff",
+     "www-authenticate": "Bearer"
+    },
+    "body": "Bearer token required"
+   }
+  ],
+  [
+   "GET /metrics",
+   "no token",
+   {
+    "status": 401,
+    "headers": {
+     "content-type": "text/plain",
+     "cache-control": "no-store",
+     "x-content-type-options": "nosniff",
+     "www-authenticate": "Bearer"
+    },
+    "body": "Bearer token required"
+   }
+  ],
+  [
+   "GET /metrics",
+   "turned off",
+   {
+    "status": 404,
+    "headers": {
+     "content-type": "application/json; charset=utf-8",
+     "cache-control": "no-store",
+     "x-content-type-options": "nosniff"
+    },
+    "body": {
+     "error": "Not found"
+    }
+   }
+  ],
+  [
+   "POST /api/snapshots",
+   "take",
+   {
+    "status": 200,
+    "headers": {
+     "content-type": "application/json; charset=utf-8",
+     "cache-control": "no-store",
+     "x-content-type-options": "nosniff"
+    },
+    "body": {
+     "snapshots": [
+      {
+       "at": "<time>",
+       "bytes": "<bytes>",
+       "day": "2026-11-19",
+       "name": "<id>"
+      }
+     ]
+    }
+   }
+  ],
+  [
+   "POST /api/updates/check",
+   "check",
+   {
+    "status": 200,
+    "headers": {
+     "content-type": "application/json; charset=utf-8",
+     "cache-control": "no-store",
+     "x-content-type-options": "nosniff"
+    },
+    "body": {
+     "buildsBehind": null,
+     "checkedAt": null,
+     "critical": null,
+     "current": {
+      "build": "<value>",
+      "builtAt": "<value>",
+      "sha": "<value>"
+     },
+     "enabled": false,
+     "error": null,
+     "image": null,
+     "latest": "<value>",
+     "tag": null,
+     "updateAvailable": false
+    }
+   }
+  ],
+  [
+   "POST /api/can/enable",
+   "enable",
+   {
+    "status": 200,
+    "headers": {
+     "content-type": "application/json; charset=utf-8",
+     "cache-control": "no-store",
+     "x-content-type-options": "nosniff"
+    },
+    "body": {
+     "enabled": true,
+     "fingerprint": "<id>",
+     "port": "<number>",
+     "token": "<id>",
+     "tokenId": "<id>"
+    }
+   }
+  ],
+  [
+   "POST /api/can/tokens",
+   "token",
+   {
+    "status": 200,
+    "headers": {
+     "content-type": "application/json; charset=utf-8",
+     "cache-control": "no-store",
+     "x-content-type-options": "nosniff"
+    },
+    "body": {
+     "fingerprint": "<id>",
+     "id": "<id>",
+     "port": "<number>",
+     "token": "<id>"
+    }
+   }
+  ],
+  [
+   "GET /api/can/logs/ping",
+   "with token",
+   {
+    "status": 200,
+    "headers": {
+     "content-type": "application/json; charset=utf-8",
+     "cache-control": "no-store",
+     "x-content-type-options": "nosniff"
+    },
+    "body": {
+     "api": 1,
+     "formats": [
+      "canbridge-candump-xz/1",
+      "canbridge-columns-xz/2"
+     ],
+     "maxChunk": 16777216,
+     "maxFile": 1073741824,
+     "maxSidecar": 1048576,
+     "ok": true,
+     "vehicleKey": null
+    }
+   }
+  ],
+  [
+   "GET /api/can/logs/ping",
+   "wrong token",
+   {
+    "status": 401,
+    "headers": {
+     "content-type": "application/json; charset=utf-8",
+     "cache-control": "no-store",
+     "x-content-type-options": "nosniff",
+     "www-authenticate": "Bearer"
+    },
+    "body": {
+     "code": "bad_token",
+     "error": "A valid CAN Bridge token is needed."
+    }
+   }
+  ],
+  [
+   "GET /api/can/logs/ping",
+   "turned off",
+   {
+    "status": 404,
+    "headers": {
+     "content-type": "application/json; charset=utf-8",
+     "cache-control": "no-store",
+     "x-content-type-options": "nosniff"
+    },
+    "body": {
+     "code": "off",
+     "error": "Not found"
+    }
+   }
+  ],
+  [
+   "POST /api/can/stream-deck",
+   "make",
+   {
+    "status": 200,
+    "headers": {
+     "content-type": "application/json; charset=utf-8",
+     "cache-control": "no-store",
+     "x-content-type-options": "nosniff"
+    },
+    "body": {
+     "enabled": true,
+     "pin": "<id>",
+     "stats": [
+      {
+       "id": "speed",
+       "label": "Speed"
+      },
+      {
+       "id": "battery",
+       "label": "Battery"
+      },
+      {
+       "id": "range",
+       "label": "Range"
+      },
+      {
+       "id": "batteryPower",
+       "label": "Battery power"
+      },
+      {
+       "id": "gear",
+       "label": "Gear"
+      },
+      {
+       "id": "batteryVoltage",
+       "label": "Battery voltage"
+      },
+      {
+       "id": "batteryCurrent",
+       "label": "Battery current"
+      },
+      {
+       "id": "batteryTemp",
+       "label": "Battery temp"
+      },
+      {
+       "id": "outsideTemp",
+       "label": "Outside temp"
+      },
+      {
+       "id": "cabinTemp",
+       "label": "Cabin temp"
+      },
+      {
+       "id": "batteryInletTemp",
+       "label": "Battery inlet temp"
+      },
+      {
+       "id": "powertrainInletTemp",
+       "label": "Powertrain inlet temp"
+      },
+      {
+       "id": "rearMotorPower",
+       "label": "Rear motor power"
+      },
+      {
+       "id": "frontMotorPower",
+       "label": "Front motor power"
+      },
+      {
+       "id": "rearMotorTemp",
+       "label": "Rear motor temp"
+      },
+      {
+       "id": "frontMotorTemp",
+       "label": "Front motor temp"
+      },
+      {
+       "id": "lv12Current",
+       "label": "12V system current"
+      },
+      {
+       "id": "lv12Power",
+       "label": "12V system power"
+      },
+      {
+       "id": "lv12Voltage",
+       "label": "12V battery"
+      },
+      {
+       "id": "lv12State",
+       "label": "12V battery state"
+      },
+      {
+       "id": "tire1",
+       "label": "Tire 1"
+      },
+      {
+       "id": "tire2",
+       "label": "Tire 2"
+      },
+      {
+       "id": "tire3",
+       "label": "Tire 3"
+      },
+      {
+       "id": "tire4",
+       "label": "Tire 4"
+      },
+      {
+       "id": "charging",
+       "label": "Charging"
+      },
+      {
+       "id": "chargingPower",
+       "label": "Charging power"
+      },
+      {
+       "id": "chargeTimeLeft",
+       "label": "Charge time left"
+      },
+      {
+       "id": "energyRemaining",
+       "label": "Energy remaining"
+      },
+      {
+       "id": "odometer",
+       "label": "Odometer"
+      },
+      {
+       "id": "setSpeed",
+       "label": "Set speed"
+      },
+      {
+       "id": "speedLimit",
+       "label": "Speed limit"
+      },
+      {
+       "id": "elevation",
+       "label": "Elevation"
+      }
+     ],
+     "token": "<id>"
+    }
+   }
+  ],
+  [
+   "POST /api/can/stream-deck",
+   "pin",
+   true
+  ],
+  [
+   "GET /api/can/now",
+   "with token",
+   {
+    "status": 200,
+    "headers": {
+     "content-type": "application/json; charset=utf-8",
+     "cache-control": "no-store",
+     "x-content-type-options": "nosniff"
+    },
+    "body": {
+     "at": null,
+     "car": null,
+     "stale": true,
+     "stats": {},
+     "units": "mi"
+    }
+   }
+  ],
+  [
+   "GET /api/can/now",
+   "km, a car",
+   {
+    "status": 200,
+    "headers": {
+     "content-type": "application/json; charset=utf-8",
+     "cache-control": "no-store",
+     "x-content-type-options": "nosniff"
+    },
+    "body": {
+     "at": null,
+     "car": null,
+     "stale": true,
+     "stats": {},
+     "units": "km"
+    }
+   }
+  ],
+  [
+   "GET /api/can/now",
+   "Bearer",
+   {
+    "status": 200,
+    "headers": {
+     "content-type": "application/json; charset=utf-8",
+     "cache-control": "no-store",
+     "x-content-type-options": "nosniff"
+    },
+    "body": {
+     "at": null,
+     "car": null,
+     "stale": true,
+     "stats": {},
+     "units": "mi"
+    }
+   }
+  ],
+  [
+   "GET /api/can/now",
+   "wrong token",
+   {
+    "status": 401,
+    "headers": {
+     "content-type": "text/plain; charset=utf-8",
+     "cache-control": "no-store",
+     "x-content-type-options": "nosniff"
+    },
+    "body": "Token required (Nerd panel → Stream Deck)"
+   }
+  ],
+  [
+   "GET /api/can/now",
+   "any origin",
+   [
+    "*",
+    "*",
+    "*"
+   ]
+  ],
+  [
+   "GET /api/can/now/:stat",
+   "with token",
+   {
+    "status": 200,
+    "headers": {
+     "content-type": "text/plain; charset=utf-8",
+     "cache-control": "no-store",
+     "x-content-type-options": "nosniff"
+    },
+    "body": "—"
+   }
+  ],
+  [
+   "GET /api/can/now/:stat",
+   ".txt",
+   {
+    "status": 200,
+    "headers": {
+     "content-type": "text/plain; charset=utf-8",
+     "cache-control": "no-store",
+     "x-content-type-options": "nosniff"
+    },
+    "body": "—"
+   }
+  ],
+  [
+   "GET /api/can/now/:stat",
+   "no such stat",
+   {
+    "status": 404,
+    "headers": {
+     "content-type": "application/json; charset=utf-8",
+     "cache-control": "no-store",
+     "x-content-type-options": "nosniff"
+    },
+    "body": {
+     "error": "No stat \"nope\". Stats: speed, battery, range, batteryPower, gear, batteryVoltage, batteryCurrent, batteryTemp, outsideTemp, cabinTemp, batteryInletTemp, powertrainInletTemp, rearMotorPower, frontMotorPower, rearMotorTemp, frontMotorTemp, lv12Current, lv12Power, lv12Voltage, lv12State, tire1, tire2, tire3, tire4, charging, chargingPower, chargeTimeLeft, energyRemaining, odometer, setSpeed, speedLimit, elevation"
+    }
+   }
+  ],
+  [
+   "GET /api/can/now/:stat",
+   "no token",
+   {
+    "status": 401,
+    "headers": {
+     "content-type": "text/plain; charset=utf-8",
+     "cache-control": "no-store",
+     "x-content-type-options": "nosniff"
+    },
+    "body": "Token required (Nerd panel → Stream Deck)"
+   }
+  ],
+  [
+   "GET /api/can/now/ca.crt",
+   "on",
+   {
+    "status": 200,
+    "type": "application/x-x509-ca-cert",
+    "acao": "*",
+    "same": true
+   }
+  ],
+  [
+   "GET /api/can/stream-deck",
+   "on",
+   {
+    "status": 200,
+    "headers": {
+     "content-type": "application/json; charset=utf-8",
+     "cache-control": "no-store",
+     "x-content-type-options": "nosniff"
+    },
+    "body": {
+     "at": "<time>",
+     "enabled": true,
+     "pin": "<id>",
+     "stats": [
+      {
+       "id": "speed",
+       "label": "Speed"
+      },
+      {
+       "id": "battery",
+       "label": "Battery"
+      },
+      {
+       "id": "range",
+       "label": "Range"
+      },
+      {
+       "id": "batteryPower",
+       "label": "Battery power"
+      },
+      {
+       "id": "gear",
+       "label": "Gear"
+      },
+      {
+       "id": "batteryVoltage",
+       "label": "Battery voltage"
+      },
+      {
+       "id": "batteryCurrent",
+       "label": "Battery current"
+      },
+      {
+       "id": "batteryTemp",
+       "label": "Battery temp"
+      },
+      {
+       "id": "outsideTemp",
+       "label": "Outside temp"
+      },
+      {
+       "id": "cabinTemp",
+       "label": "Cabin temp"
+      },
+      {
+       "id": "batteryInletTemp",
+       "label": "Battery inlet temp"
+      },
+      {
+       "id": "powertrainInletTemp",
+       "label": "Powertrain inlet temp"
+      },
+      {
+       "id": "rearMotorPower",
+       "label": "Rear motor power"
+      },
+      {
+       "id": "frontMotorPower",
+       "label": "Front motor power"
+      },
+      {
+       "id": "rearMotorTemp",
+       "label": "Rear motor temp"
+      },
+      {
+       "id": "frontMotorTemp",
+       "label": "Front motor temp"
+      },
+      {
+       "id": "lv12Current",
+       "label": "12V system current"
+      },
+      {
+       "id": "lv12Power",
+       "label": "12V system power"
+      },
+      {
+       "id": "lv12Voltage",
+       "label": "12V battery"
+      },
+      {
+       "id": "lv12State",
+       "label": "12V battery state"
+      },
+      {
+       "id": "tire1",
+       "label": "Tire 1"
+      },
+      {
+       "id": "tire2",
+       "label": "Tire 2"
+      },
+      {
+       "id": "tire3",
+       "label": "Tire 3"
+      },
+      {
+       "id": "tire4",
+       "label": "Tire 4"
+      },
+      {
+       "id": "charging",
+       "label": "Charging"
+      },
+      {
+       "id": "chargingPower",
+       "label": "Charging power"
+      },
+      {
+       "id": "chargeTimeLeft",
+       "label": "Charge time left"
+      },
+      {
+       "id": "energyRemaining",
+       "label": "Energy remaining"
+      },
+      {
+       "id": "odometer",
+       "label": "Odometer"
+      },
+      {
+       "id": "setSpeed",
+       "label": "Set speed"
+      },
+      {
+       "id": "speedLimit",
+       "label": "Speed limit"
+      },
+      {
+       "id": "elevation",
+       "label": "Elevation"
+      }
+     ]
+    }
+   }
+  ],
+  [
+   "GET /api/can/now",
+   "the old token",
+   {
+    "status": 401,
+    "headers": {
+     "content-type": "text/plain; charset=utf-8",
+     "cache-control": "no-store",
+     "x-content-type-options": "nosniff"
+    },
+    "body": "Token required (Nerd panel → Stream Deck)"
+   }
+  ],
+  [
+   "DELETE /api/can/stream-deck",
+   "off",
+   {
+    "status": 200,
+    "headers": {
+     "content-type": "application/json; charset=utf-8",
+     "cache-control": "no-store",
+     "x-content-type-options": "nosniff"
+    },
+    "body": {
+     "enabled": false
+    }
+   }
+  ],
+  [
+   "GET /api/can/now",
+   "off",
+   {
+    "status": 404,
+    "headers": {
+     "content-type": "application/json; charset=utf-8",
+     "cache-control": "no-store",
+     "x-content-type-options": "nosniff"
+    },
+    "body": {
+     "error": "Not found"
+    }
+   }
+  ],
+  [
+   "GET /api/can/now/ca.crt",
+   "off",
+   {
+    "status": 404,
+    "headers": {
+     "content-type": "application/json; charset=utf-8",
+     "cache-control": "no-store",
+     "x-content-type-options": "nosniff"
+    },
+    "body": {
+     "error": "Not found"
+    }
+   }
+  ],
+  [
+   "POST /api/speeds/index",
+   "kick",
+   {
+    "status": 200,
+    "headers": {
+     "content-type": "application/json; charset=utf-8",
+     "cache-control": "no-store",
+     "x-content-type-options": "nosniff"
+    },
+    "body": {
+     "day": "2024-05-01",
+     "done": 5,
+     "finishedAt": "<time>",
+     "last": 5,
+     "limit": 1,
+     "readMode": "<dropped>",
+     "running": true,
+     "total": 5
+    }
+   }
+  ],
+  [
+   "POST /api/nodes/worker",
+   "on",
+   {
+    "status": 200,
+    "headers": {
+     "content-type": "application/json; charset=utf-8",
+     "cache-control": "no-store",
+     "x-content-type-options": "nosniff"
+    },
+    "body": {
+     "busy": 0,
+     "enabled": true,
+     "mains": [],
+     "pairing": null,
+     "slots": 2,
+     "use": "gpu"
+    }
+   }
+  ],
+  [
+   "GET /node/v1/info",
+   "paired",
+   {
+    "name": "this server"
+   }
+  ],
+  [
+   "GET /node/v1/info",
+   "info",
+   {
+    "status": 200,
+    "headers": {
+     "content-type": "application/json; charset=utf-8",
+     "cache-control": "no-store",
+     "x-content-type-options": "nosniff"
+    },
+    "body": {
+     "busy": 0,
+     "capacity": 17,
+     "defaultDevice": "cpu",
+     "devices": [
+      {
+       "busy": 0,
+       "capacity": 17,
+       "encoders": {
+        "av1": "libsvtav1",
+        "h265": "libx265"
+       },
+       "encoding": 0,
+       "id": "cpu",
+       "kind": "cpu",
+       "name": "CPU (software encoder)",
+       "slots": 2
+      }
+     ],
+     "encoders": {
+      "av1": "libsvtav1",
+      "h265": "libx265"
+     },
+     "encoding": 0,
+     "hardware": {
+      "cpu": "<id>",
+      "devices": [
+       {
+        "id": "cpu",
+        "name": "Intel(R) Xeon(R) Processor @ 2.10GHz"
+       }
+      ],
+      "gpus": []
+     },
+     "name": "<id>",
+     "power": {
+      "at": "<value>",
+      "cpuUnavailable": "<value>",
+      "cpuW": "<value>",
+      "gpuW": "<value>",
+      "gpus": [],
+      "todayWh": "<value>",
+      "totalW": "<value>",
+      "weekWh": "<value>"
+     },
+     "slots": 2,
+     "use": "gpu"
+    }
+   }
+  ],
+  [
+   "GET /node/v1/jobs/:id",
+   "unknown job",
+   {
+    "status": 404,
+    "headers": {
+     "content-type": "application/json; charset=utf-8",
+     "cache-control": "no-store",
+     "x-content-type-options": "nosniff"
+    },
+    "body": {
+     "error": "No such job."
+    }
+   }
+  ],
+  [
+   "GET /node/v1/jobs/:id",
+   "bad id",
+   {
+    "status": 404,
+    "headers": {
+     "content-type": "application/json; charset=utf-8",
+     "cache-control": "no-store",
+     "x-content-type-options": "nosniff"
+    },
+    "body": {
+     "error": "No such job."
+    }
+   }
+  ],
+  [
+   "GET /node/v1/jobs/:id/output",
+   "unknown job",
+   {
+    "status": 404,
+    "headers": {
+     "content-type": "application/json; charset=utf-8",
+     "cache-control": "no-store",
+     "x-content-type-options": "nosniff"
+    },
+    "body": {
+     "error": "No such job."
+    }
+   }
+  ],
+  [
+   "GET /node/v1/info",
+   "nodes page",
+   {
+    "status": 200,
+    "headers": {
+     "content-type": "application/json; charset=utf-8",
+     "cache-control": "no-store",
+     "x-content-type-options": "nosniff"
+    },
+    "body": {
+     "nodes": [],
+     "worker": {
+      "available": true,
+      "busy": 0,
+      "enabled": true,
+      "mains": [
+       {
+        "address": "<id>",
+        "id": "<id>",
+        "lastSeenAt": "<time>",
+        "name": "live-main",
+        "pairedAt": "<time>"
+       }
+      ],
+      "name": "<id>",
+      "pairing": null,
+      "slots": 2,
+      "use": "gpu"
+     }
+    }
+   }
+  ],
+  [
+   "POST /api/nodes/worker",
+   "off",
+   {
+    "status": 200,
+    "headers": {
+     "content-type": "application/json; charset=utf-8",
+     "cache-control": "no-store",
+     "x-content-type-options": "nosniff"
+    },
+    "body": {
+     "busy": 0,
+     "enabled": false,
+     "mains": [
+      {
+       "address": "127.0.0.1",
+       "id": "<id>",
+       "lastSeenAt": "<time>",
+       "name": "live-main",
+       "pairedAt": "<time>"
+      }
+     ],
+     "pairing": null,
+     "slots": 2,
+     "use": "gpu"
+    }
+   }
+  ],
+  [
+   "GET /node/v1/info",
+   "node mode off",
+   404
+  ]
+ ]
+}
