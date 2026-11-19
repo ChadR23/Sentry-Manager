@@ -1,0 +1,18 @@
+{
+  "route": "GET /api/bin/:item/thumbnail",
+  "method": "GET",
+  "request": {
+    "path": "/api/bin/0000000000000000/thumbnail"
+  },
+  "response": {
+    "status": 404,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "No thumbnail"
+    }
+  }
+}

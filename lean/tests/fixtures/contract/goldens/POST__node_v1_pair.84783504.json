@@ -1,0 +1,19 @@
+{
+  "route": "POST /node/v1/pair",
+  "method": "POST",
+  "request": {
+    "path": "/node/v1/pair"
+  },
+  "body": {},
+  "response": {
+    "status": 403,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "This server is not waiting to be paired. Show a pairing code under Nodes first."
+    }
+  }
+}

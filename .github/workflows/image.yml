@@ -15,10 +15,10 @@ name: Image
 #     (no `build-N` tag: those are only for releases from main).
 #   - Nothing is built on a timer: a new image only ever comes from a push
 #     to main or a run by hand, so an "update available" always means the
-#     owner released something. Each build fetches the latest Debian, Node
+#     owner released something. Each build fetches the latest Debian
 #     and ffmpeg packages (the package step is not reused from an older
 #     week's build cache).
-# The tests (Node's in three parts, and the Rust server's) and the two images (each on its own kind of
+# The tests (the Rust server's, with the frozen API contract) and the two images (each on its own kind of
 # machine, no emulation) run at the same time. The images are pushed only by
 # digest, which nobody pulls; the tag that people pull is put on them last,
 # and only when every test passed and both images started, answered, had
@@ -105,45 +105,18 @@ jobs:
           echo "critical_level=$level" >> "$GITHUB_OUTPUT"
           echo "critical=$reason" >> "$GITHUB_OUTPUT"
 
-  tests:
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    strategy:
-      fail-fast: true
-      matrix:
-        shard: [1, 2, 3]
-    steps:
-      # (the tests never see a token)
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 26
-
-      # The ffmpeg packages the tests need (63 MB) are kept between runs: the
-      # Ubuntu mirror once took 21 minutes to send them.
-      - name: Cache ffmpeg packages
-        uses: actions/cache@v6
-        with:
-          path: ~/apt-archives
-          key: apt-ffmpeg-${{ runner.os }}-${{ github.run_id }}-${{ matrix.shard }}
-          restore-keys: apt-ffmpeg-${{ runner.os }}-
-
-      - name: Tests (part ${{ matrix.shard }} of 3)
-        run: |
-          mkdir -p ~/apt-archives/partial
-          sudo apt-get update -q
-          sudo apt-get install -y -q --no-install-recommends -o Dir::Cache::Archives="$HOME/apt-archives" ffmpeg
-          sudo chown -R "$(id -u):$(id -g)" ~/apt-archives
-          mkdir -p build && gcc -O2 -Wall -o build/noreplace-rename native/noreplace-rename.c
-          node --disable-warning=ExperimentalWarning --test --test-shard=${{ matrix.shard }}/3 "test/**/*.test.js"
-
-  # The Rust server (lean/): its own tests and its checks against the Node code,
-  # which need node and ffmpeg too.
+  # The Rust server (lean/): its own tests (with the Node server's answers,
+  # frozen under lean/tests/fixtures when Node was removed), then the whole API
+  # contract against the frozen answers (tools/contract/frozen.js: the release
+  # binary on the contract's fixture archive). Plain node runs the contract
+  # check, the dev tools' own tests and the tests' stand-ins for outside
+  # services (a fake ACME server, the reports receiver); nothing of the Node
+  # server is left.
+  # Ubuntu 24.04, not ubuntu-latest: the frozen answers were recorded with its
+  # ffmpeg (6.1.1-3ubuntu5), and ffprobe's verdicts and the encodes' bytes
+  # differ in another release (26.04's ffmpeg 8 exits 0 where 6.1 exits 1).
   rust-tests:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
@@ -158,8 +131,8 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/apt-archives
-          key: apt-ffmpeg-${{ runner.os }}-${{ github.run_id }}-rust
-          restore-keys: apt-ffmpeg-${{ runner.os }}-
+          key: apt-ffmpeg-ubuntu-24.04-${{ github.run_id }}-rust
+          restore-keys: apt-ffmpeg-ubuntu-24.04-
 
       - name: Cache the Rust build
         uses: actions/cache@v6
@@ -168,8 +141,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             lean/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('lean/Cargo.lock') }}
-          restore-keys: cargo-${{ runner.os }}-
+          key: cargo-ubuntu-24.04-${{ hashFiles('lean/Cargo.lock') }}
+          restore-keys: cargo-ubuntu-24.04-
 
       - name: Rust tests
         run: |
@@ -177,8 +150,24 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends -o Dir::Cache::Archives="$HOME/apt-archives" ffmpeg
           sudo chown -R "$(id -u):$(id -g)" ~/apt-archives
+          # the ffmpeg the frozen answers were recorded with, or the checks
+          # that depend on it would compare less (or differ) without saying so
+          v="$(ffmpeg -hide_banner -version | head -n 1)"
+          echo "$v"
+          case "$v" in
+            "ffmpeg version 6.1.1-"*) ;;
+            *) echo "::error::$v is not the ffmpeg 6.1.1 the frozen answers were recorded with"; exit 1 ;;
+          esac
           rustup toolchain install stable --profile minimal
-          cd lean && cargo test --release --locked
+          cd lean && LEAN_NEED_NODE=1 cargo test --release --locked
+
+      - name: The dev tools' tests (tools/)
+        run: node --test "tools/**/*.test.js"
+
+      - name: The API contract against the Node server's frozen answers
+        run: |
+          cd lean && cargo build --release --locked
+          cd .. && node tools/contract/frozen.js --bin lean/target/release/sentry-lean
 
   build:
     needs: names
@@ -292,7 +281,7 @@ jobs:
           retention-days: 1
 
   publish:
-    needs: [names, tests, rust-tests, build]
+    needs: [names, rust-tests, build]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

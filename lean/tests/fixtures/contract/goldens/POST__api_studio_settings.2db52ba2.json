@@ -1,0 +1,21 @@
+{
+  "route": "POST /api/studio/settings",
+  "method": "POST",
+  "request": {
+    "path": "/api/studio/settings"
+  },
+  "body": {
+    "key": 5
+  },
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "Invalid setting"
+    }
+  }
+}

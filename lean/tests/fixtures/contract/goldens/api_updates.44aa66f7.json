@@ -1,0 +1,31 @@
+{
+  "route": "GET /api/updates",
+  "method": "GET",
+  "request": {
+    "path": "/api/updates"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "buildsBehind": null,
+      "checkedAt": null,
+      "critical": null,
+      "current": {
+        "build": null,
+        "builtAt": null,
+        "sha": null
+      },
+      "enabled": false,
+      "error": null,
+      "image": null,
+      "latest": null,
+      "tag": null,
+      "updateAvailable": false
+    }
+  }
+}

@@ -1,0 +1,90 @@
+{
+  "route": "GET /api/vehicles/:id/recordings/:rid",
+  "method": "GET",
+  "request": {
+    "path": "/api/vehicles/contract-car/recordings/3ce8681dff72e8f0"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "bytes": 1055438,
+      "cameras": [
+        "back",
+        "front",
+        "left_repeater",
+        "right_repeater"
+      ],
+      "category": "Sentry",
+      "clipCount": 4,
+      "day": "2024-05-02",
+      "encoded": {
+        "clips": 4,
+        "codecs": [],
+        "encoded": 0,
+        "unknown": 0
+      },
+      "end": "2024-05-02 12:29:00",
+      "event": {
+        "camera": "0",
+        "city": "Austin",
+        "est_lat": "30.25",
+        "est_lon": "-97.75",
+        "reason": "sentry_aware_object_detection",
+        "timestamp": "2024-05-02T12:30:00"
+      },
+      "eventAt": "2024-05-02 12:30:00",
+      "eventId": "2024-05-02_12-30-00",
+      "fileCount": 5,
+      "files": [
+        {
+          "codec": "h264",
+          "path": "{root:contract-car}/TeslaCam/SentryClips/2024-05-02_12-30-00/2024-05-02_12-29-00-back.mp4",
+          "rel": "TeslaCam/SentryClips/2024-05-02_12-30-00/2024-05-02_12-29-00-back.mp4",
+          "size": 263824
+        },
+        {
+          "codec": "h264",
+          "path": "{root:contract-car}/TeslaCam/SentryClips/2024-05-02_12-30-00/2024-05-02_12-29-00-front.mp4",
+          "rel": "TeslaCam/SentryClips/2024-05-02_12-30-00/2024-05-02_12-29-00-front.mp4",
+          "size": 263824
+        },
+        {
+          "codec": "h264",
+          "path": "{root:contract-car}/TeslaCam/SentryClips/2024-05-02_12-30-00/2024-05-02_12-29-00-left_repeater.mp4",
+          "rel": "TeslaCam/SentryClips/2024-05-02_12-30-00/2024-05-02_12-29-00-left_repeater.mp4",
+          "size": 263824
+        },
+        {
+          "codec": "h264",
+          "path": "{root:contract-car}/TeslaCam/SentryClips/2024-05-02_12-30-00/2024-05-02_12-29-00-right_repeater.mp4",
+          "rel": "TeslaCam/SentryClips/2024-05-02_12-30-00/2024-05-02_12-29-00-right_repeater.mp4",
+          "size": 263824
+        },
+        {
+          "path": "{root:contract-car}/TeslaCam/SentryClips/2024-05-02_12-30-00/event.json",
+          "rel": "TeslaCam/SentryClips/2024-05-02_12-30-00/event.json",
+          "size": 142
+        }
+      ],
+      "folder": "TeslaCam/SentryClips/2024-05-02_12-30-00",
+      "folderPath": "{root:contract-car}/TeslaCam/SentryClips/2024-05-02_12-30-00",
+      "frontRel": "TeslaCam/SentryClips/2024-05-02_12-30-00/2024-05-02_12-29-00-front.mp4",
+      "id": "3ce8681dff72e8f0",
+      "key": "event:TeslaCam/SentryClips/2024-05-02_12-30-00",
+      "minutes": 1,
+      "mtimeMs": "<time>",
+      "protected": false,
+      "root": "{root:contract-car}",
+      "start": "2024-05-02 12:29:00",
+      "startKey": "2024-05-02_12-29-00",
+      "thumbRel": null,
+      "type": "SentryClips",
+      "vehicleId": "contract-car"
+    }
+  }
+}

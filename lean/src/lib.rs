@@ -21,5 +21,10 @@ pub mod ui;
 pub mod viewer;
 pub mod wire;
 
+/// Node's answers, frozen (tests/fixtures/node-reference), for the unit tests.
+#[cfg(test)]
+#[path = "../tests/support/reference.rs"]
+pub(crate) mod reference;
+
 // (moved into footage/; the old paths still work)
 pub use footage::{catalog, inventory, scanner};

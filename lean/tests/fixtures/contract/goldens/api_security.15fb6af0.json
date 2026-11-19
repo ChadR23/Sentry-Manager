@@ -1,0 +1,55 @@
+{
+  "route": "GET /api/security",
+  "method": "GET",
+  "request": {
+    "path": "/api/security"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "confirmed": true,
+      "currentHost": "<id>",
+      "https": true,
+      "runningAsRoot": true,
+      "supervised": false,
+      "tls": {
+        "ca": {
+          "expiresAt": "<value>",
+          "fingerprint": "<value>",
+          "issuer": "<value>",
+          "names": [],
+          "subject": "<value>",
+          "validFrom": "<value>",
+          "validTo": "<value>"
+        },
+        "certificate": {
+          "expiresAt": "<value>",
+          "fingerprint": "<value>",
+          "issuer": "<value>",
+          "names": [
+            "<value>"
+          ],
+          "subject": "<value>",
+          "validFrom": "<value>",
+          "validTo": "<value>"
+        },
+        "containerHostname": "<id>",
+        "editable": [],
+        "fromEnv": [],
+        "hostnames": [
+          "localhost",
+          "127.0.0.1",
+          "::1"
+        ],
+        "mode": "local-ca"
+      },
+      "tlsMode": "auto",
+      "trustProxy": false
+    }
+  }
+}

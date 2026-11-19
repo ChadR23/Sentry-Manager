@@ -1,0 +1,19 @@
+{
+  "route": "POST /api/bin/:item/delete",
+  "method": "POST",
+  "request": {
+    "path": "/api/bin/no-such-item/delete"
+  },
+  "body": {},
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "Confirm permanent deletion."
+    }
+  }
+}

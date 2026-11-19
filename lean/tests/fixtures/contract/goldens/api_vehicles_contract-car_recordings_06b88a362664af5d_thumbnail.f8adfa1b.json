@@ -1,0 +1,17 @@
+{
+  "route": "GET /api/vehicles/:id/recordings/:rid/thumbnail",
+  "method": "GET",
+  "request": {
+    "path": "/api/vehicles/contract-car/recordings/06b88a362664af5d/thumbnail"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "image/jpeg",
+      "cache-control": "no-cache",
+      "accept-ranges": "bytes",
+      "x-content-type-options": "nosniff"
+    },
+    "body": "<ignored>"
+  }
+}

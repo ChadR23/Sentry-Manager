@@ -1,0 +1,20 @@
+{
+  "route": "GET /api/can/files",
+  "method": "GET",
+  "request": {
+    "path": "/api/can/files"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "bytes": 0,
+      "count": 0,
+      "logs": []
+    }
+  }
+}

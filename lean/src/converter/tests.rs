@@ -1,11 +1,14 @@
-//! Parity with the Node converter on real encodes: testdata/telemetryFixtures.js
-//! makes Tesla-like originals (keyframe first, lead-in, frame_num gaps, no
-//! keyframe), encodes them with the converter's arguments and stores what the
-//! Node code reads and writes. The Rust timeline must read the same, and the
-//! Rust writer must produce the same bytes (or refuse with the same code).
+//! Parity with the Node converter on real encodes, frozen in
+//! tests/fixtures/node-reference/converter-telemetry.tar.xz: Tesla-like
+//! originals (keyframe first, lead-in, frame_num gaps, no keyframe), encoded
+//! with the converter's arguments, and what the Node code read and wrote
+//! (made by testdata/telemetryFixtures.js and verifierFixtures.js over
+//! src/main/converter before it was removed). The Rust timeline must read
+//! the same, and the Rust writer must produce the same bytes (or refuse with
+//! the same code).
 //!
-//! Skipped (with a note) without node and ffmpeg. Set
-//! LEAN_CONVERTER_FIXTURES=<dir> to reuse fixtures made earlier.
+//! The verifier needs ffprobe (skipped with a note without it). Set
+//! LEAN_CONVERTER_FIXTURES=<dir> to use another unpacked copy.
 
 use super::adapters::{telemetry_bytes, Codec};
 use super::lead_in::{hold_frames, source_timing_for};
@@ -28,15 +31,7 @@ pub fn fixtures() -> Option<&'static PathBuf> {
                 return Some(d);
             }
         }
-        if !have("node", "--version") || !have("ffmpeg", "-version") {
-            eprintln!("skipped: node and ffmpeg are needed to make the fixtures");
-            return None;
-        }
-        let dir = std::env::temp_dir().join(format!("lean-converter-parity-{}", std::process::id()));
-        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/converter/testdata/telemetryFixtures.js");
-        let out = Command::new("node").arg(script).arg(&dir).output().expect("run node");
-        assert!(out.status.success(), "telemetryFixtures.js failed: {}", String::from_utf8_lossy(&out.stderr));
-        Some(dir)
+        Some(crate::reference::unpack("converter-telemetry", "fixtures"))
     })
     .as_ref()
 }
@@ -123,19 +118,18 @@ fn timeline_and_writers_match_node() {
     eprintln!("telemetry parity: {checked} outputs byte-identical to Node's");
 }
 
-/// testdata/verifierFixtures.js: the Node verifier's verdict on good,
+/// (frozen from testdata/verifierFixtures.js) the Node verifier's verdict on good,
 /// raw (no telemetry), truncated and tampered candidates, Quick and Full,
 /// with and without a size profile. The Rust verifier must decide the same,
 /// reason and details included.
 #[test]
 fn verifier_matches_node() {
+    if !have("ffprobe", "-version") {
+        eprintln!("skipped: the verifier needs ffprobe");
+        return;
+    }
     let Some(dir) = fixtures() else { return };
     let vdir = dir.join("verify");
-    if !vdir.join("list.json").exists() {
-        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/converter/testdata/verifierFixtures.js");
-        let out = Command::new("node").arg(script).arg(dir).output().expect("run node");
-        assert!(out.status.success(), "verifierFixtures.js failed: {}", String::from_utf8_lossy(&out.stderr));
-    }
     let runner = super::process::BoundedRunner { timeout_ms: 120_000, max_output_bytes: 4 * 1024 * 1024 };
     let snaps = std::env::temp_dir().join(format!("lean-verifier-parity-{}", std::process::id()));
     std::fs::create_dir_all(&snaps).unwrap();

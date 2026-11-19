@@ -1,0 +1,50 @@
+{
+  "route": "PUT /api/notification-rules",
+  "method": "PUT",
+  "request": {
+    "path": "/api/notification-rules"
+  },
+  "body": {
+    "rules": {}
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "rules": [
+        {
+          "kind": "share",
+          "on": true
+        },
+        {
+          "kind": "storage",
+          "on": true
+        },
+        {
+          "kind": "server",
+          "on": true
+        },
+        {
+          "kind": "health",
+          "on": true
+        },
+        {
+          "kind": "conversion",
+          "on": true
+        },
+        {
+          "kind": "update",
+          "on": true
+        },
+        {
+          "kind": "archive",
+          "on": true
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "route": "POST /api/can/pairing/:key/could-not-sign",
+  "method": "POST",
+  "request": {
+    "path": "/api/can/pairing/no-such-key/could-not-sign"
+  },
+  "body": {},
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "Send { \"use\": true | false }."
+    }
+  }
+}

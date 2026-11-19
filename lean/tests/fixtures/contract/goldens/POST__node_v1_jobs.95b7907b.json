@@ -1,0 +1,19 @@
+{
+  "route": "POST /node/v1/jobs",
+  "method": "POST",
+  "request": {
+    "path": "/node/v1/jobs"
+  },
+  "body": {},
+  "response": {
+    "status": 401,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "Not paired."
+    }
+  }
+}

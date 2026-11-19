@@ -1,0 +1,21 @@
+{
+  "route": "PUT /api/settings/work-limits",
+  "method": "PUT",
+  "request": {
+    "path": "/api/settings/work-limits"
+  },
+  "body": {
+    "speedIndex": "x"
+  },
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "speedIndex must be a whole number from 1 to 8, or empty for automatic."
+    }
+  }
+}

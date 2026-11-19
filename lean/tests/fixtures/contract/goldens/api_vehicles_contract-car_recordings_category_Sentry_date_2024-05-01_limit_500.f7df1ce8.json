@@ -1,0 +1,34 @@
+{
+  "route": "GET /api/vehicles/:id/recordings",
+  "method": "GET",
+  "request": {
+    "path": "/api/vehicles/contract-car/recordings",
+    "query": {
+      "category": "Sentry",
+      "date": "2024-05-01",
+      "limit": "500"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "dates": [
+        "2024-05-03",
+        "2024-05-02",
+        "2024-05-01"
+      ],
+      "error": null,
+      "limit": 500,
+      "offset": 0,
+      "recordings": [],
+      "scannedAt": "<time>",
+      "scanning": false,
+      "total": 0
+    }
+  }
+}

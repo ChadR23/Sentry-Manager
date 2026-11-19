@@ -377,13 +377,43 @@ mod tests {
         assert_eq!(compare_scan_paths("x", "x", &order), Ordering::Equal);
     }
 
-    /// The same folder scanned by Node's scanner and this one (needs node).
-    #[test]
-    fn parity_with_node_scanner() {
-        if !std::process::Command::new("node").arg("--version").output().is_ok_and(|o| o.status.success()) {
-            eprintln!("skipped: node is not installed");
+    /// The same folder scanned by this scanner answers as Node's scanner
+    /// (src/main/converter/scanner.js, through lean/parity/converterScan.js)
+    /// answered: tests/fixtures/node-reference/converter-scan.json. Every
+    /// file gets a fixed time; the inode numbers are this run's, put into
+    /// Node's answer for the same file.
+    /// SentryClips and sentryclips are one group, so they are walked in the
+    /// order the disk lists them (Node's stable sort does the same): Node's
+    /// answer has the recording disk's order. Put in this disk's, and the
+    /// pairwise comparisons in the same order; nothing else moves.
+    fn listing_order(root: &Path, theirs: &mut Value) {
+        let listed: Vec<String> = fs::read_dir(root).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        let tied = ["SentryClips", "sentryclips"];
+        let top = |i: &Value| i.get("relativePath").and_then(Value::as_str).map(|p| p.split('/').next().unwrap().to_string());
+        let place = |i: &Value| top(i).filter(|t| tied.contains(&t.as_str())).and_then(|t| listed.iter().position(|l| *l == t));
+        let paths = |items: &[Value]| -> Vec<String> { items.iter().filter_map(|i| i.get("relativePath").and_then(Value::as_str).map(String::from)).collect() };
+        let mut items = theirs["items"].as_array().unwrap().clone();
+        let before = paths(&items);
+        // the tied folders' items are one run (the same rank): sort that run by the listing, stably
+        let Some(start) = items.iter().position(|i| place(i).is_some()) else { return };
+        let end = start + items[start..].iter().take_while(|i| place(i).is_some()).count();
+        assert!(items[end..].iter().all(|i| place(i).is_none()), "the tied folders' items are together");
+        items[start..end].sort_by_key(|i| place(i).unwrap());
+        let after = paths(&items);
+        if after == before {
             return;
         }
+        let n = before.len();
+        let compared = theirs["compared"].as_array().unwrap();
+        assert_eq!(compared.len(), n * n);
+        let at = |p: &String| before.iter().position(|b| b == p).unwrap();
+        let reordered: Vec<Value> = after.iter().flat_map(|a| after.iter().map(move |b| (a, b))).map(|(a, b)| compared[at(a) * n + at(b)].clone()).collect();
+        theirs["items"] = Value::Array(items);
+        theirs["compared"] = Value::Array(reordered);
+    }
+
+    #[test]
+    fn parity_with_node_scanner() {
         let base = std::env::temp_dir().join(format!("lean-scan-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         let root = base.join("TeslaCam");
@@ -411,14 +441,25 @@ mod tests {
             "2026-10-16_01-00-00-front.mp4",
             ".hidden/2026-10-16_01-00-00-front.mp4",
         ];
-        for f in files {
+        for (n, f) in files.iter().enumerate() {
             let p = root.join(f);
             fs::create_dir_all(p.parent().unwrap()).unwrap();
             fs::write(&p, f.as_bytes()).unwrap();
+            // a fixed time, with a fraction of a millisecond
+            let t = std::time::UNIX_EPOCH + std::time::Duration::from_nanos(1_792_000_000_000_000_000 + n as u64 * 61_000_123_457);
+            fs::File::options().write(true).open(&p).unwrap().set_modified(t).unwrap();
         }
         std::os::unix::fs::symlink(root.join("RecentClips/2026-10-20_07-44-14-front.mp4"), root.join("RecentClips/2026-10-20_07-44-15-front.mp4")).unwrap();
         std::os::unix::fs::symlink(&root, root.join("SavedClips/loop")).unwrap();
-        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("parity/converterScan.js");
+        let ino_of = |v: &mut Value| {
+            for i in v.as_array_mut().into_iter().flatten() {
+                if let (Some(p), Some(_)) = (i.get("sourcePath").and_then(Value::as_str), i.get("ino")) {
+                    use std::os::unix::fs::MetadataExt;
+                    let ino = fs::metadata(p).unwrap().ino();
+                    i["ino"] = json!(ino);
+                }
+            }
+        };
         let configs = [
             json!({ "sourceRoot": root, "destinationRoot": base.join("out") }),
             json!({ "sourceRoot": root, "includedGroups": ["SentryClips", "RecentClips"], "groupOrder": ["RecentClips", "SentryClips", "SavedClips"] }),
@@ -428,11 +469,10 @@ mod tests {
             json!({ "sourceRoot": root, "destinationRoot": root }),
         ];
         for (n, config) in configs.iter().enumerate() {
-            let file = base.join(format!("config-{n}.json"));
-            fs::write(&file, config.to_string()).unwrap();
-            let out = std::process::Command::new("node").arg(&script).arg(&file).output().unwrap();
-            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-            let theirs: Value = serde_json::from_slice(&out.stdout).unwrap();
+            let places = [("{BASE}", base.to_string_lossy().into_owned())];
+            let mut theirs = crate::reference::answer("converter-scan", &places, config);
+            ino_of(&mut theirs["items"]);
+            listing_order(&root, &mut theirs);
             let mut mine = Vec::new();
             let r = scan(config, None, None, &mut |d| {
                 let mut v = d.value.clone();

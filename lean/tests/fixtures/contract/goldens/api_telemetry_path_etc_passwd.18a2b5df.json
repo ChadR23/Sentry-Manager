@@ -1,0 +1,21 @@
+{
+  "route": "GET /api/telemetry",
+  "method": "GET",
+  "request": {
+    "path": "/api/telemetry",
+    "query": {
+      "path": "/etc/passwd"
+    }
+  },
+  "response": {
+    "status": 403,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "Outside the vehicle shares."
+    }
+  }
+}

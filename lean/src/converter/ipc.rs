@@ -1006,7 +1006,6 @@ pub fn clamp_verify(v: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
 
     /// The stand-in job service of lean/parity/converterBridge.js.
     #[derive(Default)]
@@ -1100,12 +1099,11 @@ mod tests {
         }
     }
 
+    /// Every request of lean/parity/converterBridge.js's corpus answers as
+    /// server/converterBridge.js (over src/main/converter/ipc.js) answered
+    /// it: tests/fixtures/node-reference/converter-bridge.json.
     #[test]
     fn channels_answer_as_node_answers() {
-        if !Command::new("node").arg("--version").output().is_ok_and(|o| o.status.success()) {
-            eprintln!("skipped: node is not installed");
-            return;
-        }
         let base = std::env::temp_dir().join(format!("lean-bridge-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         for d in ["allowed/TeslaCam/SentryClips", "allowed/out", "outside"] {
@@ -1113,15 +1111,10 @@ mod tests {
         }
         std::fs::write(base.join("allowed/file.txt"), b"x").unwrap();
         std::os::unix::fs::symlink(base.join("outside"), base.join("allowed/link")).unwrap();
-        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("parity/converterBridge.js");
-        let corpus = Command::new("node").arg(&script).arg("corpus").arg(&base).output().unwrap();
-        assert!(corpus.status.success(), "{}", String::from_utf8_lossy(&corpus.stderr));
-        let file = base.join("corpus.json");
-        std::fs::write(&file, &corpus.stdout).unwrap();
-        let theirs = Command::new("node").arg(&script).arg("run").arg(&base).arg(&file).output().unwrap();
-        assert!(theirs.status.success(), "{}", String::from_utf8_lossy(&theirs.stderr));
-        let theirs: Value = serde_json::from_slice(&theirs.stdout).unwrap();
-        let requests: Value = serde_json::from_slice(&corpus.stdout).unwrap();
+        let places = [("{BASE}", base.to_string_lossy().into_owned())];
+        let frozen = crate::reference::answer("converter-bridge", &places, &json!("corpus"));
+        let (requests, theirs) = (frozen["requests"].clone(), frozen["answers"].clone());
+        assert!(requests.as_array().unwrap().len() > 100);
         let caps = capabilities(&json!({ "separatePublication": "native-atomic", "ownershipCleanup": "atomic-expected-ownership", "replacement": "available" }));
         let bridge = Bridge::new(Arc::new(Fake::default()), Arc::new(Guard(base.clone())), caps);
         // (the DEVICES of converterBridge.js: a GPU that cannot encode H.265)

@@ -1,0 +1,95 @@
+{
+  "route": "GET /api/stats",
+  "method": "GET",
+  "request": {
+    "path": "/api/stats"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "alerts": "<value>",
+      "at": "<value>",
+      "cpu": {
+        "app": "<value>",
+        "cores": "<value>",
+        "freqMHz": "<value>",
+        "load": "<value>",
+        "model": "<value>",
+        "perCore": "<value>",
+        "perSocket": "<value>",
+        "sockets": "<value>",
+        "tempC": "<value>",
+        "threads": "<value>",
+        "throttling": "<value>",
+        "usage": "<value>"
+      },
+      "disks": "<value>",
+      "encoder": "<value>",
+      "filesystems": "<value>",
+      "gpus": "<value>",
+      "host": {
+        "appUptimeS": "<value>",
+        "arch": "<value>",
+        "ffmpeg": "<value>",
+        "hostname": "<value>",
+        "kernel": "<value>",
+        "node": "<value>",
+        "os": "<value>",
+        "uptimeS": "<value>",
+        "version": "<value>"
+      },
+      "intervalMs": "<value>",
+      "memory": {
+        "appB": "<value>",
+        "availableB": "<value>",
+        "cacheB": "<value>",
+        "swapTotalB": "<value>",
+        "swapUsedB": "<value>",
+        "totalB": "<value>",
+        "usedB": "<value>"
+      },
+      "network": {
+        "interfaces": "<value>",
+        "month": "<value>",
+        "scope": "<value>",
+        "today": "<value>",
+        "week": "<value>"
+      },
+      "power": {
+        "chipW": "<value>",
+        "cpuSource": "<value>",
+        "cpuUnavailable": "<value>",
+        "cpuW": "<value>",
+        "discreteW": "<value>",
+        "gpuSource": "<value>",
+        "gpuW": "<value>",
+        "peakW": "<value>",
+        "priceNow": "<value>",
+        "todayCost": "<value>",
+        "todayWh": "<value>",
+        "totalW": "<value>",
+        "weekCost": "<value>",
+        "weekWh": "<value>"
+      },
+      "price": "<value>",
+      "processes": {
+        "scope": "<value>",
+        "top": "<value>"
+      },
+      "sensors": "<value>",
+      "sparks": {
+        "cpu": "<value>",
+        "gpuBusy": "<value>",
+        "gpuVideo": "<value>",
+        "rxBps": "<value>",
+        "txBps": "<value>"
+      },
+      "unlock": "<value>"
+    }
+  }
+}

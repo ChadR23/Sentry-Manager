@@ -1,0 +1,34 @@
+{
+  "route": "GET /api/vehicles/:id/archive-gaps",
+  "method": "GET",
+  "request": {
+    "path": "/api/vehicles/contract-car/archive-gaps"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "carFiles": null,
+      "checkedAt": "<time>",
+      "days": [],
+      "signals": {
+        "arrival": false,
+        "can": false,
+        "carfiles": false,
+        "catchingUp": true,
+        "receivedAt": "<time>",
+        "recent": true,
+        "sentryUsb": null,
+        "speed": false,
+        "tzShift": []
+      },
+      "stalled": null,
+      "timezone": "UTC",
+      "vehicleId": "contract-car"
+    }
+  }
+}

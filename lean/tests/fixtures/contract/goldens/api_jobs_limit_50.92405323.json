@@ -1,0 +1,21 @@
+{
+  "route": "GET /api/jobs",
+  "method": "GET",
+  "request": {
+    "path": "/api/jobs",
+    "query": {
+      "limit": "50"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "jobs": []
+    }
+  }
+}

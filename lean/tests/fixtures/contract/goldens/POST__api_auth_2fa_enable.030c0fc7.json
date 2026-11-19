@@ -1,0 +1,21 @@
+{
+  "route": "POST /api/auth/2fa/enable",
+  "method": "POST",
+  "request": {
+    "path": "/api/auth/2fa/enable"
+  },
+  "body": {
+    "code": "1"
+  },
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "Start again: the set-up waited too long."
+    }
+  }
+}

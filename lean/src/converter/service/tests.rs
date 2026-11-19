@@ -1,13 +1,17 @@
 //! The job service end to end on Tesla-like clips (needs ffmpeg with
-//! libx265, and node for the fixture and the parity runs):
+//! libx265):
 //! - conversions in place (direct and through local staging) and to a
-//!   separate folder, as Node runs them, compared with Node's run;
+//!   separate folder, compared with how the Node converter ran the same job
+//!   (frozen in tests/fixtures/node-reference/converter-jobs.json: the job's
+//!   shape, its events, each output's codec and digest);
 //! - the crash suites (test/converterCrashReplace, converterCrashSeparate,
 //!   fixtures/crashPoints.js): the converter killed with SIGKILL at each
 //!   point of a conversion, started again, and the job finishes by itself
 //!   with every clip converted and nothing left behind; the original is never
-//!   lost. Some restarts are made by the Node converter (each reads the
-//!   other's interrupted jobs).
+//!   lost.
+//!
+//! The clip (node-reference/job-clip.mp4: 2 s, 12 fps, 320x240 H.264 with
+//! Tesla telemetry) was made by lean/parity/converterJobs.js clip.
 
 use super::super::jobstore::{Manifest, Patch, StoreHooks};
 use super::super::runtime::{Converter, RuntimeOptions};
@@ -23,57 +27,12 @@ fn ok(cmd: &str, args: &[&str]) -> bool {
 }
 
 fn available() -> bool {
-    ok("ffmpeg", &["-version"]) && ok("node", &["--version"]) && Command::new("ffmpeg").args(["-hide_banner", "-encoders"]).output().is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("libx265"))
-}
-
-fn repo() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
+    ok("ffmpeg", &["-version"]) && Command::new("ffmpeg").args(["-hide_banner", "-encoders"]).output().is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("libx265"))
 }
 
 struct Fixtures {
     dir: PathBuf,
     clip: PathBuf,
-    helper: PathBuf,
-    /// ffmpeg for the Rust side and for the Node side: FFMPEG_ONE_FRAME_THREAD
-    ffmpeg: [PathBuf; 2],
-}
-
-/// ffmpeg with libx265 on one frame thread (added to -x265-params, or given as
-/// its own -x265-params before the output when the encode has none). It first
-/// appends the arguments it was given, as they came, to "$0.args": the count,
-/// then each argument, each one NUL-terminated.
-const FFMPEG_ONE_FRAME_THREAD: &str = r##"#!/bin/sh
-printf '%s\0' "$#" "$@" >> "$0.args"
-n=$# i=0 p= codec= params=
-for a do
-  shift
-  i=$((i + 1))
-  case $p in
-    -c:v) codec=$a ;;
-    -x265-params) params=1; a="$a:frame-threads=1" ;;
-  esac
-  if [ "$i" = "$n" ] && [ "$codec" = libx265 ] && [ -z "$params" ]; then
-    set -- "$@" -x265-params frame-threads=1
-  fi
-  set -- "$@" "$a"
-  p=$a
-done
-exec ffmpeg "$@"
-"##;
-
-/// The ffmpeg runs a FFMPEG_ONE_FRAME_THREAD copy recorded, as the converter
-/// asked for them, with the side's base folder and the random ids made alike.
-fn ffmpeg_calls(wrapper: &Path, base: &Path) -> Vec<Vec<String>> {
-    let recorded = fs::read(format!("{}.args", wrapper.display())).unwrap_or_default();
-    let mut parts = recorded.split(|b| *b == 0).map(|p| String::from_utf8_lossy(p).into_owned());
-    let bases = [fs::canonicalize(base).unwrap(), base.to_path_buf()].map(|b| b.to_string_lossy().into_owned());
-    let id = regex::Regex::new("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").unwrap();
-    let mut calls = vec![];
-    while let Some(n) = parts.next().filter(|n| !n.is_empty()) {
-        let n: usize = n.parse().unwrap();
-        calls.push(parts.by_ref().take(n).map(|a| id.replace_all(&bases.iter().fold(a, |a, b| a.replace(b.as_str(), "<base>")), "<id>").into_owned()).collect());
-    }
-    calls
 }
 
 fn fixtures() -> &'static Fixtures {
@@ -83,28 +42,9 @@ fn fixtures() -> &'static Fixtures {
         fs::create_dir_all(&dir).unwrap();
         let clip = dir.join("clip.mp4");
         if !clip.exists() {
-            let out = Command::new("node").arg(repo().join("lean/parity/converterJobs.js")).arg("clip").arg(&clip).output().unwrap();
-            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            fs::copy(crate::reference::dir().join("job-clip.mp4"), &clip).unwrap();
         }
-        let helper = dir.join("noreplace-rename");
-        if !helper.exists() {
-            let out = Command::new("cc").args(["-O2", "-o"]).arg(&helper).arg(repo().join("native/noreplace-rename.c")).output().unwrap();
-            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-        }
-        // libx265 encodes a few frames at once (frame threads), and the size it
-        // gives a frame can depend on whether the frames before it are done, so
-        // on a busy machine a clip now and then comes out with other bytes
-        // (frames 0 and 1 the same, every frame from 2 on another size). One
-        // frame thread gives the same bytes every time. Each side runs its own
-        // copy, so what each converter asked for can be compared.
-        // (written every time, so a folder kept with LEAN_CONVERTER_JOB_FIXTURES runs this script)
-        let ffmpeg = ["rust", "node"].map(|side| dir.join(format!("ffmpeg-{side}")));
-        for f in &ffmpeg {
-            fs::write(f, FFMPEG_ONE_FRAME_THREAD).unwrap();
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(f, fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        Fixtures { dir, clip, helper, ffmpeg }
+        Fixtures { dir, clip }
     })
 }
 
@@ -125,6 +65,12 @@ fn make_base(tag: &str, clips: usize) -> PathBuf {
         fs::create_dir_all(base.join(d)).unwrap();
     }
     base
+}
+
+/// The first line of `ffmpeg -version`.
+fn ffmpeg_version() -> String {
+    let o = Command::new("ffmpeg").arg("-version").output().unwrap();
+    String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or("").split(" Copyright").next().unwrap_or("").to_string()
 }
 
 fn sha(p: &Path) -> String {
@@ -229,11 +175,6 @@ fn names_and_hashes(base: &Path) -> (Vec<String>, Vec<String>) {
     (names, hashes)
 }
 
-fn node_json(args: &[&str]) -> Value {
-    let out = Command::new("node").arg(repo().join("lean/parity/converterJobs.js")).args(args).output().unwrap();
-    assert!(out.status.success(), "node {:?}: {}", args, String::from_utf8_lossy(&out.stderr));
-    serde_json::from_slice(&out.stdout).unwrap()
-}
 
 /// What two runs of the same job must share.
 fn shape(job: &Value) -> Value {
@@ -254,11 +195,7 @@ fn conversions_as_node_runs_them() {
         let rust_base = make_base(&format!("rust-{mode}-{network}"), 2);
         let node_base = make_base(&format!("node-{mode}-{network}"), 2);
         let (names, before) = names_and_hashes(&rust_base);
-        let [rust_ffmpeg, node_ffmpeg] = &fixtures().ffmpeg;
-        for f in [rust_ffmpeg, node_ffmpeg] {
-            fs::write(format!("{}.args", f.display()), "").unwrap();
-        }
-        let c = open(&rust_base, rust_ffmpeg.to_str().unwrap(), "ffprobe", None);
+        let c = open(&rust_base, "ffmpeg", "ffprobe", None);
         let events: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
         let e2 = events.clone();
         c.service.subscribe(Arc::new(move |e: &Value| e2.lock().unwrap().push(e["type"].as_str().unwrap_or("").to_string())));
@@ -270,29 +207,26 @@ fn conversions_as_node_runs_them() {
         let job = c.service.when_idle(&id).unwrap();
         c.shutdown();
         assert_recovered(&rust_base, &job, mode, &names, &before);
-        let theirs = node_json(&["run", node_base.to_str().unwrap(), mode, network, fixtures().helper.to_str().unwrap(), node_ffmpeg.to_str().unwrap()]);
-        assert_eq!(shape(&job), shape(&theirs["job"]), "{mode} {network}");
-        // the same events, apart from how many live updates went out
         let key = |list: Vec<String>| list.into_iter().filter(|t| t != "snapshot" && t != "progress").collect::<Vec<_>>();
-        let node_events: Vec<String> = theirs["events"].as_array().unwrap().iter().map(|t| t.as_str().unwrap().to_string()).collect();
-        assert_eq!(key(events.lock().unwrap().clone()), key(node_events), "{mode} {network}");
-        // the same ffmpeg runs, as each converter asked for them (before the one frame thread)
-        let ran = ffmpeg_calls(rust_ffmpeg, &rust_base);
-        let encodes = ran.iter().filter(|c| c.windows(2).any(|w| w[0] == "-i" && w[1].starts_with("<base>/")) && c.iter().any(|a| a == "libx265")).count();
-        assert_eq!(encodes, names.len(), "{mode} {network}: every clip's encode recorded: {ran:?}");
-        assert_eq!(ran, ffmpeg_calls(node_ffmpeg, &node_base), "{mode} {network}: ffmpeg as Rust and as Node ran it");
-        // each converted clip passes the verifier against the original
-        for name in &names {
-            let a = output_of(&rust_base, mode, name);
-            let b = output_of(&node_base, mode, name);
-            assert_eq!(codec_of(&a), codec_of(&b));
-            // (libx265 at a set bitrate on one frame thread, the same telemetry writer: byte for byte)
-            assert_eq!(sha(&a), sha(&b), "{mode} {network} {name}: the same output as Node's");
+        let theirs = crate::reference::answer("converter-jobs", &[], &json!({ "mode": mode, "network": network }));
+        assert_eq!(shape(&job), theirs["shape"], "{mode} {network}");
+        // the same events, apart from how many live updates went out
+        assert_eq!(json!(key(events.lock().unwrap().clone())), theirs["events"], "{mode} {network}");
+        // (libx265 at a set bitrate, the same telemetry writer: byte for byte
+        // with the same ffmpeg; another ffmpeg encodes other bytes)
+        let same_ffmpeg = theirs["ffmpeg"] == json!(ffmpeg_version());
+        if !same_ffmpeg {
+            eprintln!("note: {} is not the ffmpeg Node's outputs were made with ({}): their digests are not compared", ffmpeg_version(), theirs["ffmpeg"]);
         }
-        // Node reads the job Rust wrote
-        let store = Command::new("node").arg(repo().join("lean/parity/converterStore.js")).arg("read").arg(c.store.root()).output().unwrap();
-        let read: Value = serde_json::from_slice(&store.stdout).unwrap();
-        assert_eq!(read["ids"], json!([id]));
+        for (n, name) in names.iter().enumerate() {
+            let a = output_of(&rust_base, mode, name);
+            let b = &theirs["outputs"][n];
+            assert_eq!(b["name"], json!(name));
+            assert_eq!(json!(codec_of(&a)), b["codec"]);
+            if same_ffmpeg {
+                assert_eq!(json!(sha(&a)), b["sha256"], "{mode} {network} {name}: the same output as Node's");
+            }
+        }
         fs::remove_dir_all(&rust_base).unwrap();
         fs::remove_dir_all(&node_base).unwrap();
     }
@@ -456,12 +390,12 @@ fn crash(base: &Path, point: &str, mode: &str, network: &str, concurrency: usize
         .unwrap()
 }
 
-fn crash_and_recover(point: &str, mode: &str, network: &str, concurrency: usize, by_node: bool) {
-    crash_and_recover_on(point, mode, network, concurrency, by_node, false)
+fn crash_and_recover(point: &str, mode: &str, network: &str, concurrency: usize) {
+    crash_and_recover_on(point, mode, network, concurrency, false)
 }
 
-fn crash_and_recover_on(point: &str, mode: &str, network: &str, concurrency: usize, by_node: bool, no_links: bool) {
-    eprintln!("kill point {point} ({mode}, {network}, {concurrency} at once, {} restarts it)", if by_node { "Node" } else { "Rust" });
+fn crash_and_recover_on(point: &str, mode: &str, network: &str, concurrency: usize, no_links: bool) {
+    eprintln!("kill point {point} ({mode}, {network}, {concurrency} at once)");
     let base = make_base(&format!("crash-{point}"), concurrency.max(1));
     let (names, before) = names_and_hashes(&base);
     let died = crash(&base, point, mode, network, concurrency, no_links);
@@ -477,9 +411,7 @@ fn crash_and_recover_on(point: &str, mode: &str, network: &str, concurrency: usi
             assert!(at_name || backup, "{point}: {name} is at its name or kept as its backup");
         }
     }
-    let job = if by_node {
-        node_json(&["resume", base.to_str().unwrap(), fixtures().helper.to_str().unwrap()])["job"].clone()
-    } else {
+    let job = {
         let c = open(&base, "ffmpeg", "ffprobe", None);
         c.start().unwrap();
         let id = c.store.list().unwrap()[0].id().to_string();
@@ -502,17 +434,17 @@ fn crash_inside_a_file_copy_finishes_by_itself() {
         return;
     }
     for point in ["writer", "temp-created", "temp-torn", "temp-complete", "temp-readback"] {
-        crash_and_recover(point, "replace", "direct", 1, false);
-        crash_and_recover(point, "separate", "direct", 1, false);
+        crash_and_recover(point, "replace", "direct", 1);
+        crash_and_recover(point, "separate", "direct", 1);
     }
-    crash_and_recover("writer", "separate", "staging", 1, false);
-    crash_and_recover("staging-copy", "replace", "staging", 1, false);
-    crash_and_recover("writer", "replace", "staging", 1, false);
+    crash_and_recover("writer", "separate", "staging", 1);
+    crash_and_recover("staging-copy", "replace", "staging", 1);
+    crash_and_recover("writer", "replace", "staging", 1);
     // several at once through staging, one copy half written or being read back
-    crash_and_recover("temp-torn", "replace", "staging", 3, false);
-    crash_and_recover("temp-readback", "separate", "staging", 3, false);
-    // and restarted by Node
-    crash_and_recover("temp-torn", "replace", "direct", 1, true);
+    crash_and_recover("temp-torn", "replace", "staging", 3);
+    crash_and_recover("temp-readback", "separate", "staging", 3);
+    // and one at a time, in place
+    crash_and_recover("temp-torn", "replace", "direct", 1);
 }
 
 /// three clips under way, lowered to one at once, then killed: all three are
@@ -523,7 +455,7 @@ fn crash_after_fewer_at_once_finishes_every_clip() {
         eprintln!("skipped: needs ffmpeg with libx265 and node");
         return;
     }
-    crash_and_recover("lowered", "replace", "staging", 3, false);
+    crash_and_recover("lowered", "replace", "staging", 3);
 }
 
 const REPLACE_POINTS: [&str; 12] = ["encode", "verify", "snapshot-unrecorded", "save-recorded", "copy-recorded", "slot-entered", "backup-recorded", "final-recorded", "before-result", "after-result", "cleanup-unrecorded", "verify"];
@@ -535,7 +467,7 @@ fn crash_replacing_originals_finishes_by_itself() {
         return;
     }
     for point in &REPLACE_POINTS[..11] {
-        crash_and_recover(point, "replace", "direct", 1, false);
+        crash_and_recover(point, "replace", "direct", 1);
     }
 }
 
@@ -546,14 +478,14 @@ fn crash_in_the_moves_of_a_replacement() {
         return;
     }
     for point in ["backup-renamed", "before-final", "after-final", "quarantined", "rolled-back"] {
-        crash_and_recover(point, "replace", "direct", 1, false);
+        crash_and_recover(point, "replace", "direct", 1);
     }
     // a share without hard links: the original moved aside, the copy moved in
     for point in ["backup-renamed", "before-final", "rolled-back"] {
-        crash_and_recover_on(point, "replace", "direct", 1, false, true);
+        crash_and_recover_on(point, "replace", "direct", 1, true);
     }
-    crash_and_recover("after-final", "replace", "staging", 1, false);
-    crash_and_recover("before-final", "replace", "direct", 1, true);
+    crash_and_recover("after-final", "replace", "staging", 1);
+    crash_and_recover("before-final", "replace", "direct", 1);
 }
 
 #[test]
@@ -563,10 +495,10 @@ fn crash_through_local_staging_and_separately() {
         return;
     }
     for point in ["encode", "copy-recorded", "final-recorded"] {
-        crash_and_recover(point, "replace", "staging", 1, false);
+        crash_and_recover(point, "replace", "staging", 1);
     }
     for point in ["encode", "verify", "save-recorded", "copy-recorded", "slot-entered", "after-result"] {
-        crash_and_recover(point, "separate", "direct", 1, false);
+        crash_and_recover(point, "separate", "direct", 1);
     }
 }
 
@@ -577,18 +509,22 @@ fn crash_with_several_at_once() {
         return;
     }
     for point in ["encode", "backup-recorded", "after-result"] {
-        crash_and_recover(point, "replace", "direct", 3, false);
+        crash_and_recover(point, "replace", "direct", 3);
     }
 }
 
+/// (These points were restarted by the Node converter while it was still
+/// in the repository, each reading the other's interrupted jobs; now the
+/// Rust converter restarts them. That both write the same job files is
+/// checked by jobstore's parity with the frozen Node store.)
 #[test]
-fn crash_in_rust_recovered_by_node() {
+fn crash_at_each_point_of_one_clip_finishes_by_itself() {
     if !available() {
-        eprintln!("skipped: needs ffmpeg with libx265 and node");
+        eprintln!("skipped: needs ffmpeg with libx265");
         return;
     }
     for point in ["encode", "copy-recorded", "backup-recorded", "final-recorded", "after-result"] {
-        crash_and_recover(point, "replace", "direct", 1, true);
+        crash_and_recover(point, "replace", "direct", 1);
     }
 }
 

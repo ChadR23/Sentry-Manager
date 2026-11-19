@@ -1,0 +1,22 @@
+{
+  "route": "POST /api/converter/invoke/:name",
+  "method": "POST",
+  "request": {
+    "path": "/api/converter/invoke/getStatus"
+  },
+  "body": {},
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": {
+        "code": "UNKNOWN_CHANNEL"
+      },
+      "ok": false
+    }
+  }
+}

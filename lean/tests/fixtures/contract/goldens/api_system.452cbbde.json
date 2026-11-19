@@ -1,0 +1,51 @@
+{
+  "route": "GET /api/system",
+  "method": "GET",
+  "request": {
+    "path": "/api/system"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "converter": {
+        "capabilities": {
+          "destinationContainment": "pathname-revalidated-non-atomic",
+          "ownershipCleanup": "atomic-expected-ownership",
+          "privateTempCleanup": "identity",
+          "replacement": "available",
+          "separatePublication": "native-atomic",
+          "splitSave": true
+        },
+        "ready": true
+      },
+      "dataFree": "<bytes>",
+      "gpu": {
+        "gpus": [],
+        "hints": [],
+        "nvidia": []
+      },
+      "nativeHelper": true,
+      "security": {
+        "https": true,
+        "runningAsRoot": true,
+        "supervised": false,
+        "tlsMode": "auto",
+        "uid": 0
+      },
+      "smbDefaultVersion": "3.1.1",
+      "smbVersions": {
+        "3": "SMB 3.0 or newer (best the server offers)",
+        "3.0": "SMB 3.0",
+        "3.02": "SMB 3.02",
+        "3.1.1": "SMB 3.1.1 (recommended)"
+      },
+      "timezone": "UTC",
+      "version": {}
+    }
+  }
+}
