@@ -161,14 +161,21 @@ impl Ui {
             let _ = every.tidy();
         });
         let mut prefetch = Prefetch::default();
-        if let Some(Value::Object(m)) = ctx.setting("prefetch") {
-            for (k, v) in m {
-                prefetch.learnt.push((k, list_of(v.get("last")), list_of(v.get("hints"))));
+        // (what pages asked for at their start: hints only; unreadable, it is learnt again)
+        match ctx.setting("prefetch") {
+            Ok(Some(Value::Object(m))) => {
+                for (k, v) in m {
+                    prefetch.learnt.push((k, list_of(v.get("last")), list_of(v.get("hints"))));
+                }
             }
+            Ok(_) => {}
+            Err(e) => ctx.log(Level::Warn, "ui", &format!("Page start hints learnt again: they could not be read: {e}")),
         }
         let boot_id = cfg.build_sha.clone().unwrap_or_else(|| format!("start-{}", chrono::Utc::now().timestamp_millis()));
         // (index.js works out once at start whether the Viewer shows car data)
-        ctx.viewer_car_data();
+        if let Err(e) = ctx.viewer_car_data() {
+            ctx.log(Level::Warn, "ui", &format!("Car data in the Viewer: not worked out at start: {e}"));
+        }
         Arc::new(Ui {
             translations: translations::Translations::new(cfg.app_root.join("src/renderer/scripts/data/translations.js")),
             cfg,
@@ -301,7 +308,9 @@ impl Ui {
                 for (k, last, hints) in &g.learnt {
                     m.insert(k.clone(), json!({ "last": last, "hints": hints }));
                 }
-                ctx.set_setting("prefetch", &Value::Object(m));
+                if let Err(e) = ctx.set_setting("prefetch", &Value::Object(m)) {
+                    ctx.log(Level::Warn, "ui", &format!("Page start hints were not kept: {e}"));
+                }
             }
         });
     }
@@ -399,6 +408,14 @@ impl Ui {
     fn internal(&self, req: &Req, e: &str) -> Res {
         self.ctx.log(Level::Warn, "server", &format!("{} {}: {e}", req.method, req.raw_path));
         error(&req.headers, StatusCode::INTERNAL_SERVER_ERROR, "Internal error")
+    }
+
+    /// A change that was not made: a refusal as written (400), or what failed (500, logged).
+    fn not_done(&self, req: &Req, (status, msg): (u16, String)) -> Res {
+        if status >= 500 {
+            return self.internal(req, &msg);
+        }
+        error(&req.headers, StatusCode::BAD_REQUEST, &msg)
     }
 
     /// The options of one serveFile call, with versionedScript applied.
@@ -499,7 +516,11 @@ impl Ui {
         let ok = |v: Value| send_json(h, StatusCode::OK, &v);
         let bad = |msg: &str| error(h, StatusCode::BAD_REQUEST, msg);
         Some(match (m.as_str(), seg.as_slice()) {
-            ("GET", ["ui-packs"]) => ok(json!({ "active": self.packs.active(), "packs": self.packs.list(), "original": self.original_only(req) })),
+            // (a choice that cannot be read is a 500 here; only serving pages falls back to the default)
+            ("GET", ["ui-packs"]) => match self.packs.chosen() {
+                Ok(active) => ok(json!({ "active": active, "packs": self.packs.list(), "original": self.original_only(req) })),
+                Err(e) => self.not_done(req, (500, e)),
+            },
             ("PUT", ["ui-packs", "active"]) => {
                 let id = body.as_ref().and_then(|b| b.as_object()).and_then(|b| b.get("id")).cloned().unwrap_or(Value::Null);
                 if !id.is_null() && !id.is_string() {
@@ -509,10 +530,13 @@ impl Ui {
                 if !id.is_null() && !self.ctx.recently_confirmed(&info) {
                     return Some(confirm_required(h));
                 }
-                let before = self.packs.active();
+                let before = match self.packs.chosen() {
+                    Ok(b) => b,
+                    Err(e) => return Some(self.not_done(req, (500, e))),
+                };
                 let now = match self.packs.set_active(id.as_str()) {
                     Ok(n) => n,
-                    Err(e) => return Some(bad(&e.0)),
+                    Err(e) => return Some(self.not_done(req, e)),
                 };
                 let mut res = ok(json!({ "ok": true, "active": now }));
                 // and this browser leaves /original, to see the choice
@@ -545,21 +569,27 @@ impl Ui {
             ("DELETE", ["ui-packs", _]) => {
                 let id = param(1).unwrap();
                 let name = self.packs.name_of(&id).unwrap_or_else(|| "undefined".into());
-                let was_active = self.packs.active().as_deref() == Some(id.as_str());
+                let was_active = match self.packs.chosen() {
+                    Ok(a) => a.as_deref() == Some(id.as_str()),
+                    Err(e) => return Some(self.not_done(req, (500, e))),
+                };
                 if let Err(e) = self.packs.remove(&id) {
-                    return Some(bad(&e.0));
+                    return Some(self.not_done(req, e));
                 }
                 if was_active {
                     self.ctx.announce("interface");
                 }
                 self.ctx.audit(Level::Info, &format!("Interface \"{name}\" ({id}) deleted: {}", self.by(req)));
-                ok(json!({ "ok": true, "active": self.packs.active() }))
+                match self.packs.chosen() {
+                    Ok(active) => ok(json!({ "ok": true, "active": active })),
+                    Err(e) => self.not_done(req, (500, e)),
+                }
             }
             ("POST", ["vehicles", _, "exports"]) => {
                 let Some(v) = self.ctx.vehicle(&param(1).unwrap()) else { return Some(error(h, StatusCode::NOT_FOUND, "No such vehicle.")) };
                 match self.exporter.start(&v, body.as_ref().unwrap_or(&Value::Null)) {
                     Ok(x) => ok(x),
-                    Err(e) => bad(&e.0),
+                    Err(e) => self.not_done(req, e),
                 }
             }
             ("POST", ["exports"]) => {
@@ -568,7 +598,7 @@ impl Ui {
                 let Some((_, v)) = owner else { return Some(bad("These clips are not in any vehicle's footage.")) };
                 match self.exporter.start(&v, &b) {
                     Ok(x) => ok(x),
-                    Err(e) => bad(&e.0),
+                    Err(e) => self.not_done(req, e),
                 }
             }
             ("GET", ["exports"]) => ok(json!({ "exports": self.exporter.list(req.query.get("vehicle").filter(|v| !v.is_empty()).map(String::as_str)) })),
@@ -595,20 +625,27 @@ impl Ui {
                     b.body(Body::from_stream(crate::media::file_stream(tokio::fs::File::from_std(f)))).unwrap()
                 }
             }
-            ("GET", ["settings"]) => ok(settings::settings(self.ctx.setting("appearance"), self.ctx.setting("power"))),
-            ("PUT", ["settings", "appearance"]) => match settings::put_appearance(self.ctx.setting("appearance"), body.as_ref()) {
-                Ok(next) => {
-                    self.ctx.set_setting("appearance", &next);
-                    ok(next)
-                }
-                Err(()) => self.internal(req, "appearance: not an object"),
+            ("GET", ["settings"]) => match (self.ctx.setting("appearance"), self.ctx.setting("power")) {
+                (Ok(appearance), Ok(power)) => ok(settings::settings(appearance, power)),
+                (Err(e), _) | (_, Err(e)) => self.internal(req, &e),
             },
-            ("GET", ["dashboards"]) => ok(settings::dashboards(self.ctx.setting(&format!("dash:{user}")), self.ctx.viewer_car_data())),
+            ("PUT", ["settings", "appearance"]) => match self.ctx.setting("appearance").map(|a| settings::put_appearance(a, body.as_ref())) {
+                Ok(Ok(next)) => match self.ctx.set_setting("appearance", &next) {
+                    Ok(()) => ok(next),
+                    Err(e) => self.internal(req, &e),
+                },
+                Ok(Err(())) => self.internal(req, "appearance: not an object"),
+                Err(e) => self.internal(req, &e),
+            },
+            ("GET", ["dashboards"]) => match (self.ctx.setting(&format!("dash:{user}")), self.ctx.viewer_car_data()) {
+                (Ok(boards), Ok(car_data)) => ok(settings::dashboards(boards, car_data)),
+                (Err(e), _) | (_, Err(e)) => self.internal(req, &e),
+            },
             ("PUT", ["dashboards"]) => match settings::clean_boards(body.as_ref()) {
-                Ok(clean) => {
-                    self.ctx.set_setting(&format!("dash:{user}"), &clean);
-                    ok(clean)
-                }
+                Ok(clean) => match self.ctx.set_setting(&format!("dash:{user}"), &clean) {
+                    Ok(()) => ok(clean),
+                    Err(e) => self.internal(req, &e),
+                },
                 Err(e) => bad(&e),
             },
             _ => not_found(h),
@@ -701,4 +738,33 @@ pub fn base64url(b: &[u8]) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::packs::tests::MemCtx;
+    use super::*;
+    use axum::body::Bytes;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn the_interface_routes_answer_500_when_the_choice_cannot_be_read_and_pages_keep_the_default() {
+        let dir = std::env::temp_dir().join(format!("lean-ui-choice-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = Arc::new(MemCtx::default());
+        let cfg = UiConfig { app_root: dir.join("app"), data: dir.join("data"), default_ui: None, app_version: String::new(), ffmpeg: "ffmpeg".into(), ffprobe: None, export_gpu: false, build_sha: None };
+        let ui = Ui::new(cfg, ctx.clone());
+        let ask = |method: Method, path: &str, body: &str| {
+            let req = Req { method, raw_path: path.into(), search: String::new(), query: HashMap::new(), headers: HeaderMap::new(), body: Bytes::from(body.to_string()), peer: None };
+            ui.api(&req, path).expect("a route of this area").status().as_u16()
+        };
+        assert_eq!(ask(Method::GET, "/api/ui-packs", ""), 200);
+        ctx.1.store(true, Ordering::SeqCst);
+        assert_eq!(ask(Method::GET, "/api/ui-packs", ""), 500, "not the default answered as the choice");
+        assert_eq!(ask(Method::DELETE, "/api/ui-packs/night-viewer", ""), 500);
+        assert_eq!(ask(Method::PUT, "/api/ui-packs/active", r#"{"id":null}"#), 500);
+        assert_eq!(ui.packs.active(), None, "serving pages falls back to the default (Original here)");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

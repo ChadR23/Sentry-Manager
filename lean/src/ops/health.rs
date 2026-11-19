@@ -287,19 +287,29 @@ pub fn startup_check(ctx: &dyn OpsCtx, health: &Health, notes: &Notes, snapshots
     let checks = res["checks"].as_array().cloned().unwrap_or_default();
     let s = |c: &Value, k: &str| c[k].as_str().unwrap_or("").to_string();
     let mut bad = Vec::new();
+    // (the check's result is logged either way; a notification not kept is logged once for the run)
+    let mut unkept = None;
     for c in &checks {
-        if c["status"] == "bad" {
+        let kept = if c["status"] == "bad" {
             let detail = s(c, "detail");
             let hint = s(c, "hint");
-            notes.raise(
-                &Note::new("health", "critical", format!("Startup check: {}{}", s(c, "label"), if detail.is_empty() { String::new() } else { format!(": {detail}") }))
-                    .key(format!("health:{}", s(c, "id")))
-                    .message(if hint.is_empty() { "Settings → Health has the details.".to_string() } else { hint }),
-            );
             bad.push(c.clone());
+            notes
+                .raise(
+                    &Note::new("health", "critical", format!("Startup check: {}{}", s(c, "label"), if detail.is_empty() { String::new() } else { format!(": {detail}") }))
+                        .key(format!("health:{}", s(c, "id")))
+                        .message(if hint.is_empty() { "Settings → Health has the details.".to_string() } else { hint }),
+                )
+                .map(|_| ())
         } else {
-            notes.resolve(&format!("health:{}", s(c, "id")));
+            notes.resolve(&format!("health:{}", s(c, "id")))
+        };
+        if let Err(e) = kept {
+            unkept.get_or_insert(e);
         }
+    }
+    if let Some(e) = unkept {
+        ctx.log("health", Level::Error, &format!("Startup check: its notifications were not kept: {e}"));
     }
     if !bad.is_empty() {
         let text: Vec<String> = bad.iter().map(|c| format!("{}{}", s(c, "label"), if s(c, "detail").is_empty() { String::new() } else { format!(" ({})", s(c, "detail")) })).collect();
@@ -378,7 +388,7 @@ mod tests {
         let notes = Notes::new(ctx.clone());
         let h = Health::default();
         startup_check(&*ctx, &h, &notes, None);
-        let open = store::list(&ctx.db(), true, 200, None);
+        let open = store::list(&ctx.db(), true, 200, None).unwrap();
         let titles: Vec<&str> = open.iter().map(|n| n["title"].as_str().unwrap()).collect();
         assert!(titles.contains(&"Startup check: ffmpeg runs: spawn /nonexistent/ffmpeg ENOENT"), "{titles:?}");
         assert_eq!(open.iter().find(|n| n["dedupeKey"] == "health:ffmpeg").unwrap()["message"], "The image is damaged: pull it again (docker compose pull && docker compose up -d).");
@@ -386,6 +396,6 @@ mod tests {
         // a fixed ffmpeg clears it at the next start
         *ctx.ffmpeg.lock().unwrap() = "true".into();
         startup_check(&*ctx, &h, &notes, None);
-        assert!(store::list(&ctx.db(), true, 200, None).iter().all(|n| n["dedupeKey"] != "health:ffmpeg"));
+        assert!(store::list(&ctx.db(), true, 200, None).unwrap().iter().all(|n| n["dedupeKey"] != "health:ffmpeg"));
     }
 }

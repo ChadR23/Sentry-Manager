@@ -24,6 +24,8 @@ pub mod mdb;
 pub mod safe_fs;
 pub mod share;
 pub mod smb;
+#[cfg(test)]
+pub(crate) mod testing;
 pub mod tz;
 pub mod vehicles;
 
@@ -64,6 +66,8 @@ pub struct State {
     pub smb_test: Mutex<(bool, Vec<f64>)>,
     /// cleanups that met footage that cannot be read now: when each is tried again
     pub policy_retry: Mutex<HashMap<String, f64>>,
+    /// what manager.db could not read lately (a policy, a check to go on with): logged once until it can
+    pub unread: crate::core::db::LogOnce,
 }
 
 impl State {

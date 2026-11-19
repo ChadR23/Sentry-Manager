@@ -87,6 +87,11 @@ fn body_json(req: &Req) -> Result<Value, HttpError> {
 fn q<'a>(req: &'a Req, k: &str) -> Option<&'a str> {
     req.query.get(k).map(|s| s.as_str())
 }
+/// manager.db failing in a route: the line logged, a 500 "Internal error" answered.
+fn failed(ctx: &dyn CanCtx, e: &str) -> HttpError {
+    ctx.log("error", e);
+    he(500, "Internal error")
+}
 
 // ---- streamed bodies: a channel from a worker thread
 struct ChanStream(tokio::sync::mpsc::Receiver<Bytes>);
@@ -359,7 +364,9 @@ impl Can {
     /// and every 5 minutes, stale uploads every hour, the prune sweep after 10 minutes and hourly,
     /// the Sentry USB poll every minute, the progress announcements at most once a second.
     pub fn start(self: &Arc<Self>) {
-        self.viewer_car_data();
+        if let Err(e) = self.viewer_car_data() {
+            self.ctx.log("warn", &format!("Car data in the Viewer: not worked out at start: {e}"));
+        }
         let me = self.clone();
         std::thread::spawn(move || {
             let t0 = std::time::Instant::now();
@@ -396,24 +403,41 @@ impl Can {
                 }
             }
         });
-        if self.port_wanted() {
+        if self.port_wanted().unwrap_or(true) {
             self.sync_port();
         }
     }
 
     // ---- which car each key is
-    pub fn can_map(&self) -> Map<String, Value> {
-        self.ctx.setting("can-vehicles").filter(|v| json::truthy(Some(v))).and_then(|v| v.as_object().cloned()).unwrap_or_default()
+    /// The `can-vehicles` setting (an error when it cannot be read: never written over then).
+    pub fn can_map(&self) -> Result<Map<String, Value>, String> {
+        Ok(self.ctx.setting("can-vehicles")?.filter(|v| json::truthy(Some(v))).and_then(|v| v.as_object().cloned()).unwrap_or_default())
+    }
+    /// The map where nothing answers a request (the sync, the index, other areas' tags and car
+    /// summaries): one that cannot be read is logged and none is used.
+    fn shown_map(&self) -> Map<String, Value> {
+        self.can_map().unwrap_or_else(|e| {
+            self.ctx.log("warn", &format!("CAN Bridge keys shown without their cars: {e}"));
+            Map::new()
+        })
+    }
+    /// The map for a route's answer: one that cannot be read is a 500 (as Node).
+    fn route_map(&self) -> Result<Map<String, Value>, HttpError> {
+        self.can_map().map_err(|e| failed(&*self.ctx, &e))
     }
     /// canKeysFor(vid): the keys the Viewer reads for a car (mapped to it, or unmapped with one car).
     pub fn keys_for(&self, vid: &str) -> Vec<String> {
-        let map = self.can_map();
+        self.keys_in(&self.shown_map(), vid)
+    }
+    fn keys_in(&self, map: &Map<String, Value>, vid: &str) -> Vec<String> {
         let keys = util::subdirs(&can_index_dir(&*self.ctx));
         let single = self.ctx.vehicles().len() == 1;
         keys.into_iter().filter(|k| map.get(k).and_then(|v| v.as_str()) == Some(vid) || (!json::truthy(map.get(k)) && single)).collect()
     }
     fn car_of_key(&self, key: &str) -> Option<Car> {
-        let map = self.can_map();
+        self.car_in(&self.shown_map(), key)
+    }
+    fn car_in(&self, map: &Map<String, Value>, key: &str) -> Option<Car> {
         let vid = map.get(key).filter(|v| json::truthy(Some(v))).map(|v| logs::js_string(v));
         let list = self.ctx.vehicles();
         match vid {
@@ -423,16 +447,7 @@ impl Can {
         }
     }
     fn detected_car_of(&self, index: &CanIndex, vid: &str) -> Option<Value> {
-        let mut best: Option<Value> = None;
-        for k in self.keys_for(vid) {
-            if let Some(c) = index.car_of(&k) {
-                let seen = |v: &Value| v.get("seenAt").and_then(|x| x.as_f64()).unwrap_or(0.0);
-                if best.as_ref().is_none_or(|b| seen(&c) > seen(b)) {
-                    best = Some(c);
-                }
-            }
-        }
-        best
+        detected_in(index, &self.keys_for(vid))
     }
     fn car_for_key_with(&self, index: &CanIndex, key: &str) -> models::Resolved {
         let v = self.car_of_key(key);
@@ -440,9 +455,10 @@ impl Can {
         let det = own.as_ref().and_then(models::vin_of_json);
         models::resolve_car(v.as_ref().and_then(|v| v.car.as_ref()), det.as_ref())
     }
-    /// carSummary(v): the vehicle's `car` in GET /api/vehicles.
-    pub fn car_summary(&self, v: &Car) -> Value {
-        let det = self.detected_car_of(&self.index, &v.id);
+    /// carSummary(v): the vehicle's `car` in GET /api/vehicles (an error when the key-to-car map
+    /// cannot be read: not a car shown without what was detected of it).
+    pub fn car_summary(&self, v: &Car) -> Result<Value, String> {
+        let det = detected_in(&self.index, &self.keys_in(&self.can_map()?, &v.id));
         let (model, generation) = models::normalize_car(v.car.as_ref());
         let vin = det.as_ref().and_then(models::vin_of_json);
         let mut o = Map::new();
@@ -456,34 +472,42 @@ impl Can {
                 o.insert(k, x);
             }
         }
-        Value::Object(o)
+        Ok(Value::Object(o))
     }
-    /// The green "CAN" tag: a test for the recordings of a car.
-    pub fn has_can(&self, v: &Car) -> impl Fn(&Rec) -> bool {
-        let keys = self.keys_for(&v.id);
+    /// The green "CAN" tag: a test for the recordings of a car (an error when the key-to-car map
+    /// cannot be read: not recordings shown without their tags).
+    pub fn has_can(&self, v: &Car) -> Result<impl Fn(&Rec) -> bool, String> {
+        let keys = self.keys_in(&self.can_map()?, &v.id);
         let ix = self.index.clone();
-        self.tags.for_vehicle(v, &keys, self.index.generation(), &move |k| ix.minute_times(k, f64::NEG_INFINITY, f64::INFINITY))
+        Ok(self.tags.for_vehicle(v, &keys, self.index.generation(), &move |k| ix.minute_times(k, f64::NEG_INFINITY, f64::INFINITY)))
     }
 
     // ---- the upload config ('can')
-    fn can_cfg(&self) -> (bool, Value, Vec<Value>) {
-        let c = self.ctx.setting("can").filter(|v| json::truthy(Some(v))).unwrap_or(json!({ "enabled": false }));
+    fn can_cfg(&self) -> Result<(bool, Value, Vec<Value>), String> {
+        let c = self.ctx.setting("can")?.filter(|v| json::truthy(Some(v))).unwrap_or(json!({ "enabled": false }));
         let enabled = json::truthy(c.get("enabled"));
         let at = c.get("at").cloned().unwrap_or(Value::Null);
         if json::truthy(c.get("tokenHash")) && !c.get("tokens").is_some_and(|t| t.is_array()) {
             let t = json!({ "id": "first", "hash": c["tokenHash"], "vehicleId": null, "key": null, "label": "First token", "createdAt": if json::truthy(Some(&at)) { at.clone() } else { Value::Null }, "lastUsedAt": null });
-            return (enabled, at, vec![t]);
+            return Ok((enabled, at, vec![t]));
         }
-        (enabled, at, c.get("tokens").and_then(|t| t.as_array()).cloned().unwrap_or_default())
+        Ok((enabled, at, c.get("tokens").and_then(|t| t.as_array()).cloned().unwrap_or_default()))
     }
-    fn save_can_cfg(&self, enabled: bool, at: &Value, tokens: &[Value]) {
-        self.ctx.set_setting("can", json!({ "enabled": enabled, "at": if json::truthy(Some(at)) { at.clone() } else { Value::Null }, "tokens": tokens }));
+    fn save_can_cfg(&self, enabled: bool, at: &Value, tokens: &[Value]) -> Result<(), String> {
+        self.ctx.set_setting("can", json!({ "enabled": enabled, "at": if json::truthy(Some(at)) { at.clone() } else { Value::Null }, "tokens": tokens }))
     }
-    fn port_wanted(&self) -> bool {
-        self.ctx.setting("can").is_some_and(|c| json::truthy(c.get("enabled")))
+    fn port_wanted(&self) -> Result<bool, String> {
+        Ok(self.ctx.setting("can")?.is_some_and(|c| json::truthy(c.get("enabled"))))
     }
     fn sync_port(&self) {
-        let on = self.port_wanted();
+        let on = match self.port_wanted() {
+            Ok(on) => on,
+            Err(e) => {
+                // (whether uploads are on is not known: the port stays as it is)
+                self.ctx.log("warn", &format!("CAN device port left as it is: {e}"));
+                return;
+            }
+        };
         if let Some(f) = self.on_port.lock().unwrap().as_ref() {
             f(on);
         }
@@ -493,28 +517,31 @@ impl Can {
         let root = self.ctx.data_dir().join("can");
         util::subdirs(&root).iter().any(|d| util::names(&root.join(d)).unwrap_or_default().iter().any(|f| f.ends_with(".log.xz")))
     }
-    /// viewerCarData(): { enabled }, turned on once for a server that already has CAN data.
-    pub fn viewer_car_data(&self) -> Value {
-        if let Some(c) = self.ctx.setting("viewerCarData") {
+    /// viewerCarData(): { enabled }, turned on once for a server that already has CAN data;
+    /// an error when it cannot be read (the choice is never worked out again over one kept).
+    pub fn viewer_car_data(&self) -> Result<Value, String> {
+        if let Some(c) = self.ctx.setting("viewerCarData")? {
             if let Some(b) = c.get("enabled").and_then(|e| e.as_bool()) {
-                return json!({ "enabled": b });
+                return Ok(json!({ "enabled": b }));
             }
         }
         let mut why = Vec::new();
         if self.has_can_logs() {
             why.push("CAN Bridge logs");
         }
-        if !self.can_cfg().2.is_empty() {
+        if !self.can_cfg()?.2.is_empty() {
             why.push("a CAN Bridge token");
         }
-        if self.ctx.has_dashboards() {
+        if self.ctx.has_dashboards()? {
             why.push("saved car-data dashboards");
         }
-        self.ctx.set_setting("viewerCarData", json!({ "enabled": !why.is_empty(), "at": n(util::now_ms()), "migrated": true }));
-        if !why.is_empty() {
-            self.ctx.log("info", &format!("Car data in the Viewer: on (this server has {})", why.join(", ")));
+        // (not kept: worked out the same way again next time)
+        match self.ctx.set_setting("viewerCarData", json!({ "enabled": !why.is_empty(), "at": n(util::now_ms()), "migrated": true })) {
+            Ok(()) if !why.is_empty() => self.ctx.log("info", &format!("Car data in the Viewer: on (this server has {})", why.join(", "))),
+            Ok(()) => {}
+            Err(e) => self.ctx.log("warn", &format!("Car data in the Viewer: the first choice was not kept: {e}")),
         }
-        json!({ "enabled": !why.is_empty() })
+        Ok(json!({ "enabled": !why.is_empty() }))
     }
 
     // ---- trust and the index
@@ -561,7 +588,7 @@ impl Can {
             .ok_or_else(|| he(404, "Not a clip of a vehicle."))?;
         let base = p.rsplit('/').next().unwrap_or(p);
         let start = prune::start_of(&v, base).ok_or_else(|| he(400, "Not a TeslaCam clip name."))?;
-        let keys = self.keys_for(&v.id);
+        let keys = self.keys_in(&self.route_map()?, &v.id);
         Ok((v, keys, start))
     }
 
@@ -592,7 +619,7 @@ impl Can {
             ["api", "can", "id-events"] if get => self.search_run(req, true),
             ["api", "can", "raw"] if get => self.raw(req),
             ["api", "can", "vehicle-map"] if post => self.vehicle_map(req),
-            ["api", "can", "settings"] if get => Ok(ok(self.settings())),
+            ["api", "can", "settings"] if get => self.settings().map(ok),
             ["api", "can", "viewer-car-data"] if post => self.set_viewer_car_data(req),
             ["api", "can", "keep"] if post => self.keep(req),
             ["api", "can", "enable"] if post => self.enable(req),
@@ -607,7 +634,7 @@ impl Can {
                 Some(key) => self.pairing(req, &key, what),
                 None => return None,
             },
-            ["api", "can", "files"] if get => Ok(ok(self.files(req))),
+            ["api", "can", "files"] if get => self.files(req).map(ok),
             ["api", "can", "files", name] if del => match dec(name) {
                 Some(name) => self.delete_file(req, &name),
                 None => return None,
@@ -751,7 +778,7 @@ impl Can {
 
     fn vehicle_signals(&self, req: &Req) -> R {
         let v = self.vehicle_or_404(q(req, "vehicle").unwrap_or(""))?;
-        Ok(ok(json!({ "signals": self.index.signals(&self.keys_for(&v.id)) })))
+        Ok(ok(json!({ "signals": self.index.signals(&self.keys_in(&self.route_map()?, &v.id)) })))
     }
 
     fn raw(self: &Arc<Self>, req: &Req) -> R {
@@ -777,7 +804,7 @@ impl Can {
 
     fn search_run(self: &Arc<Self>, req: &Req, ids: bool) -> R {
         let v = self.vehicle_or_404(q(req, "vehicle").unwrap_or(""))?;
-        let keys = self.keys_for(&v.id);
+        let keys = self.keys_in(&self.route_map()?, &v.id);
         let zone = if v.timezone.is_empty() { "UTC".to_string() } else { v.timezone.clone() };
         let z2 = zone.clone();
         let to_utc = move |y, mo, d, h, mi, s| tz::zoned_to_utc(y, mo, d, h, mi, s, &z2) as f64;
@@ -890,7 +917,7 @@ impl Can {
             Some(id) => Some(self.vehicle_or_404(&logs::js_string(id))?.id),
             None => None,
         };
-        let mut map = self.can_map();
+        let mut map = self.can_map().map_err(|e| failed(&*self.ctx, &e))?;
         match &vid {
             Some(id) => {
                 map.insert(key.clone(), json!(id));
@@ -899,15 +926,18 @@ impl Can {
                 map.shift_remove(&key);
             }
         }
-        self.ctx.set_setting("can-vehicles", Value::Object(map.clone()));
+        self.ctx.set_setting("can-vehicles", Value::Object(map.clone())).map_err(|e| failed(&*self.ctx, &e))?;
         self.ctx.audit("info", &format!("CAN car {} is {}: {}", key, vid.as_deref().unwrap_or("no vehicle"), req.who.by));
         self.index.kick();
         Ok(ok(json!({ "map": map })))
     }
 
     // ---- the Nerd settings
-    pub fn settings(&self) -> Value {
-        let (enabled, at, tokens) = self.can_cfg();
+    pub fn settings(&self) -> Result<Value, HttpError> {
+        let db = |e: String| failed(&*self.ctx, &e);
+        let (enabled, at, tokens) = self.can_cfg().map_err(db)?;
+        let map = self.can_map().map_err(db)?;
+        let viewer = self.viewer_car_data().map_err(db)?;
         let (bytes, count, log_keys) = self.logs.summary();
         let mut keys: Vec<String> = log_keys;
         for t in &tokens {
@@ -920,25 +950,25 @@ impl Can {
         keys.sort();
         keys.dedup();
         let ps = self.port_state.lock().unwrap().clone();
-        json!({
+        Ok(json!({
             "enabled": enabled, "since": if json::truthy(Some(&at)) { at } else { Value::Null }, "logs": count, "bytes": n(bytes),
             "port": { "listening": ps.listening, "error": ps.error, "port": ps.port, "https": self.ctx.tls() },
-            "keys": keys, "map": self.can_map(), "vehicles": self.ctx.vehicles().iter().map(|v| json!({ "id": v.id, "name": v.name })).collect::<Vec<_>>(),
+            "keys": keys, "map": map, "vehicles": self.ctx.vehicles().iter().map(|v| json!({ "id": v.id, "name": v.name })).collect::<Vec<_>>(),
             "index": self.index.status().to_json(),
             "tokens": tokens.iter().map(|t| json!({ "id": t.get("id"), "label": t.get("label"), "vehicleId": t.get("vehicleId"), "key": t.get("key"), "createdAt": t.get("createdAt"), "lastUsedAt": t.get("lastUsedAt") })).collect::<Vec<_>>(),
             "trust": keys.iter().map(|k| self.trust.summary(k)).collect::<Vec<_>>(),
-            "keep": self.prune.status(),
-            "viewerCarData": self.viewer_car_data()
-        })
+            "keep": self.prune.status().map_err(db)?,
+            "viewerCarData": viewer
+        }))
     }
 
     fn set_viewer_car_data(&self, req: &Req) -> R {
         let body = body_json(req)?;
         let Some(on) = body.get("enabled").and_then(|e| e.as_bool()) else { return Err(he(400, "Send { \"enabled\": true | false }.")) };
-        self.ctx.set_setting("viewerCarData", json!({ "enabled": on, "at": n(util::now_ms()) }));
+        self.ctx.set_setting("viewerCarData", json!({ "enabled": on, "at": n(util::now_ms()) })).map_err(|e| failed(&*self.ctx, &e))?;
         self.ctx.audit("info", &format!("Car data in the Viewer turned {}: {}", if on { "on" } else { "off" }, req.who.by));
         self.ctx.announce("carData");
-        Ok(ok(self.viewer_car_data()))
+        Ok(ok(self.viewer_car_data().map_err(|e| failed(&*self.ctx, &e))?))
     }
 
     fn keep(&self, req: &Req) -> R {
@@ -950,7 +980,7 @@ impl Can {
         if !okay || !days_ok {
             return Err(he(400, "Send { \"withFootage\": true | false, \"deleteUnlinked\": true | false, \"unlinkedDays\": 1-365 } (any of them)."));
         }
-        let out = self.prune.set(&body);
+        let out = self.prune.set(&body).map_err(|e| failed(&*self.ctx, &e))?;
         let (wf, du, ud) = (json::truthy(out.get("withFootage")), json::truthy(out.get("deleteUnlinked")), json::num_str(out["unlinkedDays"].as_f64().unwrap_or(7.0)));
         self.ctx.audit(
             "warn",
@@ -974,7 +1004,10 @@ impl Can {
                 if l.len() == 1 { l.into_iter().next() } else { None }
             }
         };
-        let known: Vec<String> = v.as_ref().map(|v| self.prune.keys_of(&v.id)).unwrap_or_default();
+        let known: Vec<String> = match v.as_ref() {
+            Some(v) => self.prune.keys_of(&v.id).map_err(|e| failed(&*self.ctx, &e))?,
+            None => Vec::new(),
+        };
         let lab = label.filter(|x| json::truthy(Some(x))).map(|x| logs::js_string(x)).unwrap_or_default();
         let lab: String = lab.chars().map(|c| if (c as u32) < 0x20 { ' ' } else { c }).collect();
         let lab = util::utf16_slice(lab.trim(), 40);
@@ -993,10 +1026,10 @@ impl Can {
     fn enable(&self, req: &Req) -> R {
         confirmed(req)?;
         let body = body_json(req)?;
-        let (_, at, mut tokens) = self.can_cfg();
+        let (_, at, mut tokens) = self.can_cfg().map_err(|e| failed(&*self.ctx, &e))?;
         let at = if json::truthy(Some(&at)) { at } else { n(util::now_ms()) };
         let made = if tokens.is_empty() { Some(self.new_token_entry(&mut tokens, body.get("vehicleId"), None)?) } else { None };
-        self.save_can_cfg(true, &at, &tokens);
+        self.save_can_cfg(true, &at, &tokens).map_err(|e| failed(&*self.ctx, &e))?;
         self.ctx.audit("warn", &format!("CAN Bridge uploads turned on{}: {}", made.as_ref().map(|m| format!(" (token \"{}\")", m.1["label"].as_str().unwrap_or(""))).unwrap_or_default(), req.who.by));
         self.sync_port();
         Ok(ok(json!({ "enabled": true, "token": made.as_ref().map(|m| m.0.clone()), "tokenId": made.as_ref().map(|m| m.1["id"].clone()), "fingerprint": self.ctx.cert_fingerprint(), "port": self.ctx.can_port() })))
@@ -1004,8 +1037,8 @@ impl Can {
 
     fn disable(&self, req: &Req) -> R {
         confirmed(req)?;
-        let (_, at, tokens) = self.can_cfg();
-        self.save_can_cfg(false, &at, &tokens);
+        let (_, at, tokens) = self.can_cfg().map_err(|e| failed(&*self.ctx, &e))?;
+        self.save_can_cfg(false, &at, &tokens).map_err(|e| failed(&*self.ctx, &e))?;
         self.ctx.audit("warn", &format!("CAN Bridge uploads turned off: {}", req.who.by));
         self.sync_port();
         Ok(ok(json!({ "enabled": false })))
@@ -1014,19 +1047,19 @@ impl Can {
     fn new_token(&self, req: &Req) -> R {
         confirmed(req)?;
         let body = body_json(req)?;
-        let (enabled, at, mut tokens) = self.can_cfg();
+        let (enabled, at, mut tokens) = self.can_cfg().map_err(|e| failed(&*self.ctx, &e))?;
         let (token, entry) = self.new_token_entry(&mut tokens, body.get("vehicleId"), body.get("label"))?;
-        self.save_can_cfg(enabled, &at, &tokens);
+        self.save_can_cfg(enabled, &at, &tokens).map_err(|e| failed(&*self.ctx, &e))?;
         self.ctx.audit("warn", &format!("CAN Bridge token \"{}\" made: {}", entry["label"].as_str().unwrap_or(""), req.who.by));
         Ok(ok(json!({ "token": token, "id": entry["id"], "fingerprint": self.ctx.cert_fingerprint(), "port": self.ctx.can_port() })))
     }
 
     fn revoke(&self, req: &Req, id: &str) -> R {
         confirmed(req)?;
-        let (enabled, at, tokens) = self.can_cfg();
+        let (enabled, at, tokens) = self.can_cfg().map_err(|e| failed(&*self.ctx, &e))?;
         let Some(t) = tokens.iter().find(|x| x.get("id").and_then(|i| i.as_str()) == Some(id)).cloned() else { return Err(he(404, "No such token.")) };
         let rest: Vec<Value> = tokens.into_iter().filter(|x| x.get("id").and_then(|i| i.as_str()) != Some(id)).collect();
-        self.save_can_cfg(enabled, &at, &rest);
+        self.save_can_cfg(enabled, &at, &rest).map_err(|e| failed(&*self.ctx, &e))?;
         self.ctx.audit("warn", &format!("CAN Bridge token \"{}\" revoked: {}", t.get("label").map(|l| json::js_str(Some(l))).unwrap_or_default(), req.who.by));
         Ok(ok(json!({ "ok": true })))
     }
@@ -1058,21 +1091,21 @@ impl Can {
     }
     fn deck_get(&self, req: &Req) -> R {
         Self::deck_admin(req, "manage")?;
-        let cfg = self.ctx.setting("can-now").unwrap_or(Value::Null);
+        let cfg = self.ctx.setting("can-now").map_err(|e| failed(&*self.ctx, &e))?.unwrap_or(Value::Null);
         let at = cfg.get("at").filter(|a| json::truthy(Some(a))).cloned().unwrap_or(Value::Null);
         Ok(ok(json!({ "enabled": json::truthy(cfg.get("tokenHash")), "at": at, "pin": self.deck_pin(), "stats": super::now::stats_list() })))
     }
     fn deck_make(&self, req: &Req) -> R {
         Self::deck_admin(req, "manage")?;
         let token = util::base64url(&util::random(24));
-        self.ctx.set_setting("can-now", json!({ "tokenHash": util::sha256_hex(token.as_bytes()), "at": n(util::now_ms()) }));
+        self.ctx.set_setting("can-now", json!({ "tokenHash": util::sha256_hex(token.as_bytes()), "at": n(util::now_ms()) })).map_err(|e| failed(&*self.ctx, &e))?;
         self.now_cache.lock().unwrap().clear();
         self.ctx.audit("warn", &format!("Stream Deck link made (new token; any older link stops working): {}", req.who.by));
         Ok(ok(json!({ "enabled": true, "token": token, "pin": self.deck_pin(), "stats": super::now::stats_list() })))
     }
     fn deck_off(&self, req: &Req) -> R {
         Self::deck_admin(req, "manage")?;
-        self.ctx.set_setting("can-now", Value::Null);
+        self.ctx.set_setting("can-now", Value::Null).map_err(|e| failed(&*self.ctx, &e))?;
         self.now_cache.lock().unwrap().clear();
         self.ctx.audit("warn", &format!("Stream Deck link turned off: {}", req.who.by));
         Ok(ok(json!({ "enabled": false })))
@@ -1135,7 +1168,14 @@ impl Can {
         let text = |status: u16, body: String| {
             Response::builder().status(status).header(header::CONTENT_TYPE, "text/plain; charset=utf-8").header(header::CACHE_CONTROL, "no-store").body(Body::from(body)).unwrap()
         };
-        let cfg = self.ctx.setting("can-now").unwrap_or(Value::Null);
+        let cfg = match self.ctx.setting("can-now") {
+            Ok(c) => c.unwrap_or(Value::Null),
+            // (not "off": the link's setting could not be read)
+            Err(e) => {
+                self.ctx.log("error", &e);
+                return err(500, "Internal error");
+            }
+        };
         if !json::truthy(cfg.get("tokenHash")) {
             return err(404, "Not found");
         }
@@ -1172,13 +1212,26 @@ impl Can {
         let units = if km { "km" } else { "mi" };
         // which car: its vehicle's id or name, or a CAN key; else the one with the newest data
         let want = param("car").unwrap_or_default().trim_matches(super::now::js_space).to_lowercase();
+        // (the key-to-car map, read only when a car filter or the answer's car name needs it: one that
+        // cannot be read is a 500, not an answer for another car or without its name)
+        let read_map = || {
+            self.can_map().map_err(|e| {
+                self.ctx.log("error", &e);
+                err(500, "Internal error")
+            })
+        };
         let mut keys = util::subdirs(&can_index_dir(&*self.ctx));
+        let mut map = None;
         if !want.is_empty() {
+            let map = map.insert(match read_map() {
+                Ok(m) => m,
+                Err(r) => return r,
+            });
             keys.retain(|k| {
                 if k.to_lowercase() == want {
                     return true;
                 }
-                let car = self.car_of_key(k);
+                let car = self.car_in(&map, k);
                 [car.as_ref().map(|c| c.id.clone()), car.as_ref().map(|c| c.name.clone())].iter().any(|x| x.clone().unwrap_or_default().to_lowercase() == want)
             });
         }
@@ -1195,14 +1248,21 @@ impl Can {
                         }
                     }
                 }
-                let answer = best.map(|b| {
-                    let car = self.car_of_key(&b.key).map(|c| c.name).filter(|nm| !nm.is_empty());
-                    let mut stats = Map::new();
-                    for s in &b.stats {
-                        stats.insert(s.id.to_string(), json!({ "label": s.label, "value": s.value.clone(), "unit": s.unit.clone(), "text": s.text.clone() }));
+                let answer = match best {
+                    None => None,
+                    Some(b) => {
+                        let map = match map.take().map_or_else(read_map, Ok) {
+                            Ok(m) => m,
+                            Err(r) => return r,
+                        };
+                        let car = self.car_in(&map, &b.key).map(|c| c.name).filter(|nm| !nm.is_empty());
+                        let mut stats = Map::new();
+                        for s in &b.stats {
+                            stats.insert(s.id.to_string(), json!({ "label": s.label, "value": s.value.clone(), "unit": s.unit.clone(), "text": s.text.clone() }));
+                        }
+                        Some(json!({ "car": car, "at": tz::iso(b.at as i64), "ageSec": n(b.age_sec), "stale": b.stale, "units": units, "stats": stats }))
                     }
-                    json!({ "car": car, "at": tz::iso(b.at as i64), "ageSec": n(b.age_sec), "stale": b.stale, "units": units, "stats": stats })
-                });
+                };
                 let h = (util::now_ms(), answer);
                 let mut cache = self.now_cache.lock().unwrap();
                 cache.insert(id, h.clone());
@@ -1300,7 +1360,7 @@ impl Can {
         Ok(ok(json!({ "ok": true })))
     }
 
-    fn files(&self, req: &Req) -> Value {
+    fn files(&self, req: &Req) -> Result<Value, HttpError> {
         let lim = q(req, "limit").map(json::str_number).filter(|x| *x != 0.0 && !x.is_nan()).unwrap_or(200.0);
         let mut out = self.logs.list(lim);
         let mut pairs: HashMap<String, Option<HashMap<String, &'static str>>> = HashMap::new();
@@ -1317,12 +1377,12 @@ impl Can {
                 };
                 l["check"] = check;
                 if !pairs.contains_key(&key) {
-                    pairs.insert(key.clone(), self.prune.pairing(&key));
+                    pairs.insert(key.clone(), self.prune.pairing(&key).map_err(|e| failed(&*self.ctx, &e))?);
                 }
                 l["footage"] = pairs[&key].as_ref().and_then(|p| p.get(&name)).map(|x| json!(x)).unwrap_or(Value::Null);
             }
         }
-        out
+        Ok(out)
     }
 
     fn delete_file(self: &Arc<Self>, req: &Req, name: &str) -> R {
@@ -1527,12 +1587,14 @@ impl Can {
         }
         Ok(key)
     }
-    fn zone_of_key(&self, key: &str) -> String {
-        self.car_of_key(key).map(|v| v.timezone).filter(|z| !z.is_empty()).unwrap_or_else(|| "UTC".into())
+    /// The time zone a key's times are read in (its car's): a 500 when the map cannot be read,
+    /// never UTC on a guess.
+    fn zone_of_key(&self, key: &str) -> Result<String, HttpError> {
+        Ok(self.car_in(&self.route_map()?, key).map(|v| v.timezone).filter(|z| !z.is_empty()).unwrap_or_else(|| "UTC".into()))
     }
     /// canRange: from/to of a query, both needed, in order, at most max_ms apart.
     fn range(&self, key: &str, req: &Req, max_ms: f64, what: &str) -> Result<(f64, f64), HttpError> {
-        let zone = self.zone_of_key(key);
+        let zone = self.zone_of_key(key)?;
         let to_utc = |y, mo, d, h, mi, s| tz::zoned_to_utc(y, mo, d, h, mi, s, &zone) as f64;
         let from = search::parse_when(q(req, "from"), &to_utc, false).map_err(|e| he(400, e.message))?;
         let to = search::parse_when(q(req, "to"), &to_utc, true).map_err(|e| he(400, e.message))?;
@@ -1808,7 +1870,7 @@ impl Can {
 
     fn new_ids(&self, req: &Req) -> R {
         let key = Self::key_or_400(q(req, "key"))?;
-        let zone = self.zone_of_key(&key);
+        let zone = self.zone_of_key(&key)?;
         let to_utc = |y, mo, d, h, mi, s| tz::zoned_to_utc(y, mo, d, h, mi, s, &zone) as f64;
         let since = search::parse_when(q(req, "since"), &to_utc, false).map_err(|e| he(400, e.message))?.ok_or_else(|| he(400, "Give the date to look from (since)."))?;
         let closed = req.closed.clone();
@@ -1869,9 +1931,9 @@ impl Can {
         json!({ "devices": out, "now": n(util::now_ms()) })
     }
 
-    fn usb_view(&self, v: &Car, req: &Req) -> Value {
+    fn usb_view(&self, v: &Car, req: &Req) -> Result<Value, HttpError> {
         let mut view = self.usb.api(&v.id);
-        let mut record = self.ctx.sentry_usb_record_view(&v.id);
+        let mut record = self.ctx.sentry_usb_record_view(&v.id).map_err(|e| failed(&*self.ctx, &e))?;
         if let Value::Object(m) = &mut record {
             m.insert("canBackfill".into(), json!(req.who.admin_here));
         }
@@ -1887,13 +1949,13 @@ impl Can {
             snaps.insert("missed".into(), Value::Array(kept));
             snaps.insert("missedIdle".into(), json!(idle));
         }
-        view
+        Ok(view)
     }
 
     fn sentry_usb_view(&self, req: &Req, id: &str) -> R {
         let v = self.vehicle_or_404(id)?;
         self.usb.fresh(&v.id);
-        let mut view = self.usb_view(&v, req);
+        let mut view = self.usb_view(&v, req)?;
         if view.get("transfer").is_some_and(|t| !t.is_null()) && view.get("state").and_then(|s| s.as_str()) == Some("transferring") {
             view["transfer"]["arrived"] = self.usb.arrived(&v.id);
         }
@@ -1906,14 +1968,14 @@ impl Can {
         let Some(older) = body.get("older").and_then(|o| o.as_bool()) else {
             return Err(he(400, "Send { \"older\": true } or { \"older\": false }: every clip is recorded, newest first, unless older clips are turned off."));
         };
-        let mut rec = self.ctx.setting("sentry-usb-record").and_then(|r| r.as_object().cloned()).unwrap_or_default();
+        let mut rec = self.ctx.setting("sentry-usb-record").map_err(|e| failed(&*self.ctx, &e))?.and_then(|r| r.as_object().cloned()).unwrap_or_default();
         let mut mine = rec.get(&v.id).and_then(|r| r.as_object().cloned()).unwrap_or_default();
         mine.insert("older".into(), json!(older));
         rec.insert(v.id.clone(), Value::Object(mine));
-        self.ctx.set_setting("sentry-usb-record", Value::Object(rec));
+        self.ctx.set_setting("sentry-usb-record", Value::Object(rec)).map_err(|e| failed(&*self.ctx, &e))?;
         self.ctx.arrival_kick();
         self.ctx.audit("info", &format!("Checksum record of \"{}\": older clips {}: {}", v.name, if older { "on" } else { "off" }, req.who.by));
-        Ok(ok(self.usb_view(&v, req)))
+        Ok(ok(self.usb_view(&v, req)?))
     }
 
     // ---- the CAN Bridge upload API (can-token)
@@ -1969,37 +2031,54 @@ impl Can {
         found
     }
 
-    /// claimToken/bindToken: the car key a token is for (tied now when it is not yet).
-    fn claim(&self, tok_id: &str, key: &str, bind: bool) -> Option<String> {
-        let (enabled, at, mut tokens) = self.can_cfg();
-        let t = tokens.iter_mut().find(|x| x.get("id").and_then(|i| i.as_str()) == Some(tok_id))?;
+    /// claimToken/bindToken: the car key a token is for (tied now when it is not yet); an error
+    /// when the settings cannot be read or the tie was not kept (a token is tied to one car once).
+    fn claim(&self, tok_id: &str, key: &str, bind: bool) -> Result<Option<String>, String> {
+        let (enabled, at, mut tokens) = self.can_cfg()?;
+        let Some(t) = tokens.iter_mut().find(|x| x.get("id").and_then(|i| i.as_str()) == Some(tok_id)) else { return Ok(None) };
+        let mut tied = None;
         if !json::truthy(t.get("key")) {
             t["key"] = json!(key);
-            self.ctx.log("info", &format!("CAN Bridge token \"{}\" is now for car key {}", t.get("label").map(|l| json::js_str(Some(l))).unwrap_or_default(), key));
+            tied = Some(format!("CAN Bridge token \"{}\" is now for car key {}", t.get("label").map(|l| json::js_str(Some(l))).unwrap_or_default(), key));
             if let Some(vid) = t.get("vehicleId").filter(|v| json::truthy(Some(v))).cloned() {
-                let mut map = self.can_map();
+                let mut map = self.can_map()?;
                 if !json::truthy(map.get(key)) {
                     map.insert(key.to_string(), vid);
-                    self.ctx.set_setting("can-vehicles", Value::Object(map));
+                    self.ctx.set_setting("can-vehicles", Value::Object(map))?;
                 }
             }
             if !bind {
                 let k = t["key"].as_str().map(String::from);
-                self.save_can_cfg(enabled, &at, &tokens);
-                return k;
+                self.save_can_cfg(enabled, &at, &tokens)?;
+                if let Some(line) = tied {
+                    self.ctx.log("info", &line);
+                }
+                return Ok(k);
             }
         }
         if bind {
             t["lastUsedAt"] = n(util::now_ms());
             let k = t["key"].as_str().map(String::from);
-            self.save_can_cfg(enabled, &at, &tokens);
-            return k;
+            self.save_can_cfg(enabled, &at, &tokens)?;
+            if let Some(line) = tied {
+                self.ctx.log("info", &line);
+            }
+            return Ok(k);
         }
-        t.get("key").and_then(|k| k.as_str()).map(String::from)
+        Ok(t.get("key").and_then(|k| k.as_str()).map(String::from))
+    }
+
+    /// The upload API's answer when manager.db fails (the CAN Bridge tries again later).
+    fn upload_failed(&self, e: &str) -> Res {
+        self.ctx.log("error", &format!("CAN Bridge upload: {e}"));
+        Self::fail(500, "error", "Internal error", None)
     }
 
     pub fn upload(self: &Arc<Self>, req: &Req, raw_path: &str) -> Res {
-        let (enabled, _, tokens) = self.can_cfg();
+        let (enabled, _, tokens) = match self.can_cfg() {
+            Ok(c) => c,
+            Err(e) => return self.upload_failed(&e),
+        };
         if !enabled || tokens.is_empty() {
             return Self::fail(404, "off", "Not found", None);
         }
@@ -2064,7 +2143,10 @@ impl Can {
                         return Self::fail(400, "mixed_cars", "A token is for one car: ask about one car key's files.", None);
                     }
                     if keys.len() == 1 {
-                        key = self.claim(&tok_id, &keys[0], false);
+                        key = match self.claim(&tok_id, &keys[0], false) {
+                            Ok(k) => k,
+                            Err(e) => return self.upload_failed(&e),
+                        };
                     }
                 }
             }
@@ -2083,7 +2165,10 @@ impl Can {
         };
         let parsed = parse_name(&name);
         if let (true, Some(nm)) = (req.method == Method::POST, parsed) {
-            let key = self.claim(&tok_id, &nm.vehicle_key, false);
+            let key = match self.claim(&tok_id, &nm.vehicle_key, false) {
+                Ok(k) => k,
+                Err(e) => return self.upload_failed(&e),
+            };
             if key.as_deref() != Some(nm.vehicle_key.as_str()) {
                 return Self::fail(403, "wrong_car", &format!("This token is for car key {}, not {}.", key.unwrap_or_else(|| "null".into()), nm.vehicle_key), None);
             }
@@ -2099,7 +2184,10 @@ impl Can {
             let sha = req.headers.get("upload-sha256").and_then(|v| v.to_str().ok()).unwrap_or("").to_lowercase();
             return match self.logs.receive(&name, &req.body, num("upload-offset"), num("upload-length"), &sha) {
                 Ok(out) => {
-                    self.claim(&tok_id, &nm.vehicle_key, true);
+                    // (the part was taken: only the token's last use was not noted)
+                    if let Err(e) = self.claim(&tok_id, &nm.vehicle_key, true) {
+                        self.ctx.log("warn", &format!("CAN Bridge token's last use was not kept: {e}"));
+                    }
                     let complete = out.get("complete") == Some(&Value::Bool(true));
                     if complete && !json::truthy(out.get("already")) {
                         self.ctx.log("info", &format!("CAN Bridge: received {} ({} bytes)", name, json::num_str(out["length"].as_f64().unwrap_or(0.0))));
@@ -2180,3 +2268,16 @@ fn decoded_rows(d: &super::format::Minute, t: f64, from: f64, to: f64, only: Opt
     all
 }
 
+/// What the CAN logs of these keys detected of their car, the newest seen.
+fn detected_in(index: &CanIndex, keys: &[String]) -> Option<Value> {
+    let mut best: Option<Value> = None;
+    for k in keys {
+        if let Some(c) = index.car_of(k) {
+            let seen = |v: &Value| v.get("seenAt").and_then(|x| x.as_f64()).unwrap_or(0.0);
+            if best.as_ref().is_none_or(|b| seen(&c) > seen(b)) {
+                best = Some(c);
+            }
+        }
+    }
+    best
+}

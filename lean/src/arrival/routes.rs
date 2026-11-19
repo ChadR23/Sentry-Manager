@@ -16,14 +16,15 @@ pub struct ApiError {
     pub message: String,
 }
 
-/// `record: { ...arrivalRef.view(v.id), canBackfill: adminHere(req, user) }`
-pub fn record_view(a: &Arrival, vid: &str, can_backfill: bool) -> Value {
-    let mut m: Map<String, Value> = match a.view(vid) {
+/// `record: { ...arrivalRef.view(v.id), canBackfill: adminHere(req, user) }` (an error when
+/// the setting cannot be read)
+pub fn record_view(a: &Arrival, vid: &str, can_backfill: bool) -> Result<Value, String> {
+    let mut m: Map<String, Value> = match a.view(vid)? {
         Value::Object(m) => m,
         _ => Map::new(),
     };
     m.insert("canBackfill".into(), Value::Bool(can_backfill));
-    Value::Object(m)
+    Ok(Value::Object(m))
 }
 
 pub const OLDER_REQUIRED: &str = "Send { \"older\": true } or { \"older\": false }: every clip is recorded, newest first, unless older clips are turned off.";
@@ -36,7 +37,10 @@ pub fn post_record(a: &Arrival, ctx: &dyn ArrivalCtx, vid: &str, vehicle_name: &
     let Some(older) = body.get("older").and_then(Value::as_bool) else {
         return Err(ApiError { status: 400, message: OLDER_REQUIRED.into() });
     };
-    ctx.set_older(vid, older);
+    if let Err(e) = ctx.set_older(vid, older) {
+        ctx.log_warn(&format!("The checksum record setting of \"{vehicle_name}\" was not kept: {e}"));
+        return Err(ApiError { status: 500, message: "Internal error".into() });
+    }
     a.kick();
     ctx.audit(&format!("Checksum record of \"{vehicle_name}\": older clips {}: {by}", if older { "on" } else { "off" }));
     Ok(())
@@ -46,5 +50,8 @@ pub fn post_record(a: &Arrival, ctx: &dyn ArrivalCtx, vid: &str, vehicle_name: &
 /// entry of the `sentry-usb-record` setting removed.
 pub fn vehicle_removed(a: &Arrival, ctx: &dyn ArrivalCtx, vid: &str) {
     a.forget(vid);
-    ctx.forget_setting(vid);
+    // (the vehicle is gone either way; its leftover entry is only tidied)
+    if let Err(e) = ctx.forget_setting(vid) {
+        ctx.log_warn(&format!("The checksum record setting of removed vehicle {vid} was not tidied: {e}"));
+    }
 }

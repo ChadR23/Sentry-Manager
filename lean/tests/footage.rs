@@ -24,6 +24,8 @@ struct TestCore {
     inner: LocalCore,
     busy: Mutex<HashSet<PathBuf>>,
     jobs: Mutex<Vec<(String, String)>>,
+    /// what the CAN area answers with cannot be read (its key-to-car map)
+    can_unread: std::sync::atomic::AtomicBool,
 }
 
 impl Ctx for TestCore {
@@ -42,7 +44,7 @@ impl Ctx for TestCore {
     fn log(&self, scope: &str, level: Level, line: &str) {
         self.inner.log(scope, level, line)
     }
-    fn job_start(&self, typ: &str, vid: Option<&str>, title: &str) -> i64 {
+    fn job_start(&self, typ: &str, vid: Option<&str>, title: &str) -> Result<i64, String> {
         self.inner.job_start(typ, vid, title)
     }
     fn job_finish(&self, id: i64, status: &str, detail: &str, result: Option<Value>) {
@@ -51,6 +53,28 @@ impl Ctx for TestCore {
     }
     fn busy_paths(&self) -> HashSet<PathBuf> {
         self.busy.lock().unwrap().clone()
+    }
+    fn car_summary(&self, _vehicle: &Value) -> Result<Value, Fail> {
+        self.can()?;
+        Ok(Value::Null)
+    }
+    fn can_with(&self, _vid: &str, _rels: &[String], _until: Option<f64>) -> Result<Option<Value>, Fail> {
+        self.can()?;
+        Ok(None)
+    }
+    #[allow(clippy::type_complexity)]
+    fn has_can(&self, _vid: &str) -> Result<Option<Box<dyn Fn(&sentry_lean::footage::inventory::Recording) -> bool>>, Fail> {
+        self.can()?;
+        Ok(None)
+    }
+}
+
+impl TestCore {
+    fn can(&self) -> Result<(), Fail> {
+        if self.can_unread.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(Fail::internal("the CAN settings could not be read"));
+        }
+        Ok(())
     }
 }
 
@@ -108,7 +132,7 @@ fn fixture(name: &str, files: &[(&str, &[u8])]) -> Fixture {
     }
     let data = dir.join("data");
     std::fs::create_dir_all(&data).unwrap();
-    let core = Arc::new(TestCore { inner: LocalCore::open(&data).unwrap(), busy: Mutex::new(HashSet::new()), jobs: Mutex::new(Vec::new()) });
+    let core = Arc::new(TestCore { inner: LocalCore::open(&data).unwrap(), busy: Mutex::new(HashSet::new()), jobs: Mutex::new(Vec::new()), can_unread: Default::default() });
     // (the mount table the server reads: one file system; mounts() changes it)
     std::fs::write(dir.join("mountinfo"), ROOT_MOUNT).unwrap();
     let vehicles = Vehicles::new(core.clone(), Options { footage_root: footage.clone(), folder_roots: vec![footage.clone()], protected_dirs: vec![data.clone()], mountinfo: dir.join("mountinfo"), default_tz: None });
@@ -183,7 +207,7 @@ fn trash_restore_and_delete_forever() {
     let r = call(&f, "POST", &format!("bin/{id}/restore"), json!({})).unwrap();
     assert_eq!(r, json!({ "restored": 1, "conflicts": 1 }));
     assert_eq!(std::fs::read(f.root.join(A)).unwrap(), b"clip");
-    let left = f.core.db().bin_item(&id).unwrap();
+    let left = f.core.db().bin_item(&id).unwrap().unwrap();
     assert_eq!(left.files, vec![BinFile { rel: A2.into(), bin_rel: format!("{BIN_DIR}/{id}/{A2}.binned"), size: 5, pending: false, conflict: true }]);
     assert_eq!(left.bytes, 5);
 
@@ -197,13 +221,13 @@ fn trash_restore_and_delete_forever() {
     assert_eq!(call(&f, "POST", &format!("bin/{id}/delete"), json!({ "confirm": true })).unwrap_err(), (404, json!({ "error": "Not in the Recycle Bin." })));
     assert_eq!(call(&f, "POST", "bin/nope/restore", json!({})).unwrap_err(), (404, json!({ "error": "Not in the Recycle Bin." })));
     // a clip deleted for good is remembered for the archive check (an old one is not)
-    assert_eq!(f.core.db().get("deleted-clips:car"), None);
+    assert_eq!(f.core.db().get("deleted-clips:car").unwrap(), None);
     assert!(f.core.inner.audits.lock().unwrap().iter().any(|l| l == "Deleted forever from the Recycle Bin: Recent 2020-01-01 08:00:00 (5 B): admin from 127.0.0.1"));
 
     // an event with its thumbnail: the bin shows the picture
     let ev = id_at(&f.app, "2020-01-02 12:29:00");
     call(&f, "POST", "vehicles/car/trash", json!({ "ids": [ev] })).unwrap();
-    let item = f.core.db().bin_items(Some("car"))[0].clone();
+    let item = f.core.db().bin_items(Some("car")).unwrap()[0].clone();
     let thumb = call(&f, "GET", &format!("bin/{}/thumbnail", item.id), json!(null)).unwrap();
     assert!(thumb["file"].as_str().unwrap().ends_with("thumb.png.binned"));
     assert!(!f.root.join("TeslaCam/SentryClips/2020-01-02_12-30-00").exists(), "the emptied event folder goes");
@@ -211,7 +235,7 @@ fn trash_restore_and_delete_forever() {
     // empty the bin
     assert_eq!(call(&f, "POST", "bin/empty", json!({ "confirm": true, "vehicle": "nope" })).unwrap_err().0, 404);
     assert_eq!(call(&f, "POST", "bin/empty", json!({ "confirm": true })).unwrap(), json!({ "deleted": 1, "failed": 0, "bytes": 8 }));
-    assert_eq!(f.core.db().bin_items(None).len(), 0);
+    assert_eq!(f.core.db().bin_items(None).unwrap().len(), 0);
     assert_eq!(f.core.jobs.lock().unwrap().last().unwrap(), &("done".to_string(), "8 B freed".to_string()));
 }
 
@@ -259,7 +283,7 @@ fn a_folder_swapped_for_a_link_cannot_redirect_a_move() {
     assert_eq!(out.skipped[0].reason, "error");
     assert!(out.skipped[0].message.as_deref().unwrap().starts_with("Refusing to follow a link out of the share"));
     assert_eq!(std::fs::read(outside.join("2020-01-01_08-00-00-front.mp4")).unwrap(), b"NOT THE SHARE");
-    assert!(f.core.db().bin_items(Some("car")).is_empty(), "no bin item left behind");
+    assert!(f.core.db().bin_items(Some("car")).unwrap().is_empty(), "no bin item left behind");
     let _ = std::fs::remove_dir_all(outside);
 }
 
@@ -273,7 +297,7 @@ fn a_move_that_fails_half_way_is_put_back() {
     assert_eq!(out.skipped[0].reason, "missing");
     assert!(f.root.join(A).exists(), "the file that moved is back");
     assert!(!f.root.join(BIN_DIR).join("x").exists());
-    assert!(f.core.db().bin_items(None).is_empty());
+    assert!(f.core.db().bin_items(None).unwrap().is_empty());
 }
 
 #[test]
@@ -281,7 +305,7 @@ fn an_interrupted_move_is_settled_and_unlisted_folders_recovered() {
     let f = fixture("reconcile", &[(A, b"clip"), (A2, b"clip")]);
     let id = "mvh7aaaa-0badf00d";
     let files: Vec<BinFile> = [A, A2].iter().map(|rel| BinFile { rel: rel.to_string(), bin_rel: format!("{BIN_DIR}/{id}/{rel}.binned"), size: 4, pending: true, conflict: false }).collect();
-    f.core.db().add_bin_item(&BinItem { id: id.into(), vehicle_id: "car".into(), label: "Recent".into(), category: "Recent".into(), start_at: None, bytes: 8, files: files.clone(), trashed_at: 1.0, reason: "manual".into() });
+    f.core.db().add_bin_item(&BinItem { id: id.into(), vehicle_id: "car".into(), label: "Recent".into(), category: "Recent".into(), start_at: None, bytes: 8, files: files.clone(), trashed_at: 1.0, reason: "manual".into() }).unwrap();
     // a crash after the first of two files moved
     std::fs::create_dir_all(f.root.join(&files[0].bin_rel).parent().unwrap()).unwrap();
     std::fs::rename(f.root.join(A), f.root.join(&files[0].bin_rel)).unwrap();
@@ -292,16 +316,16 @@ fn an_interrupted_move_is_settled_and_unlisted_folders_recovered() {
     // a restore of a pending item is refused
     assert_eq!(bin::restore(&f.app, id).unwrap_err().status, 409);
     assert_eq!(bin::reconcile(&f.app, "car").unwrap(), (1, 1));
-    let settled = f.core.db().bin_item(id).unwrap();
+    let settled = f.core.db().bin_item(id).unwrap().unwrap();
     assert_eq!(settled.files.iter().map(|f| f.rel.as_str()).collect::<Vec<_>>(), vec![A]);
     assert!(!settled.files.iter().any(|f| f.pending));
-    let recovered = f.core.db().bin_item("mvh7bbbb-deadbeef").unwrap();
+    let recovered = f.core.db().bin_item("mvh7bbbb-deadbeef").unwrap().unwrap();
     assert_eq!((recovered.category.as_str(), recovered.label.as_str(), recovered.files[0].rel.as_str()), ("Sentry", "Sentry (recovered after a restart)", EV));
     assert!(!f.root.join(format!("{BIN_DIR}/mvh7cccc-00000000")).exists(), "an item folder with nothing binned goes");
     bin::restore(&f.app, id).unwrap();
     bin::restore(&f.app, "mvh7bbbb-deadbeef").unwrap();
     assert!(f.root.join(A).exists() && f.root.join(A2).exists() && f.root.join(EV).exists());
-    assert!(f.core.db().bin_items(None).is_empty());
+    assert!(f.core.db().bin_items(None).unwrap().is_empty());
 }
 
 #[test]
@@ -332,15 +356,15 @@ fn policies_preview_run_and_empty_the_bin_after_days() {
     assert!(f.root.join(A).exists());
     // an old item in the bin goes for good at the run; a new one stays
     let old = BinItem { id: "old-00000000".into(), vehicle_id: "car".into(), label: "old".into(), category: "Recent".into(), start_at: None, bytes: 100, files: vec![], trashed_at: 1.0, reason: "manual".into() };
-    f.core.db().add_bin_item(&old);
+    f.core.db().add_bin_item(&old).unwrap();
     let out = call(&f, "POST", "vehicles/car/policy/run", json!({ "expect": { "keepDays": { "Recent": 30, "Sentry": null }, "binDays": 10 } })).unwrap();
     assert_eq!(out["moved"].as_array().unwrap().len(), 2);
     assert!(!f.root.join(A).exists() && f.root.join(EV).exists());
-    let after = policies::get(&f.app, "car");
+    let after = policies::get(&f.app, "car").unwrap();
     assert_eq!(after["lastResult"], json!({ "moved": 2, "skipped": 0, "bytes": 9, "emptied": 1, "freed": 0 }));
     assert!(after["lastRunAt"].as_f64().unwrap() > 0.0);
-    assert!(f.core.db().bin_item("old-00000000").is_none());
-    assert_eq!(f.core.db().bin_items(Some("car")).len(), 2);
+    assert!(f.core.db().bin_item("old-00000000").unwrap().is_none());
+    assert_eq!(f.core.db().bin_items(Some("car")).unwrap().len(), 2);
 }
 
 #[test]
@@ -447,7 +471,7 @@ fn the_footage_check_finds_broken_clips_and_goes_on_after_a_restart() {
     let cut = mp4(&[(b"ftyp", 16), (b"mdat", 100), (b"moov", 40)])[..60].to_vec();
     let f = fixture("integrity", &[(A, &good), (B, &cut), ("TeslaCam/RecentClips/2020-01-01_10-00-00-front.mp4", b""), ("TeslaCam/RecentClips/2020-01-01_11-00-00-front.mp4", b"text, not a video")]);
     // it was running when the server stopped: the scan goes on with it
-    f.core.db().set("integrity-running:car", &json!(true));
+    f.core.db().set("integrity-running:car", &json!(true)).unwrap();
     integrity::resume(&f.app, "car");
     wait(|| integrity::status(&f.app, "car")["running"] == false && integrity::status(&f.app, "car")["total"] == 4);
     let res = call(&f, "GET", "vehicles/car/integrity", json!(null)).unwrap();
@@ -458,7 +482,7 @@ fn the_footage_check_finds_broken_clips_and_goes_on_after_a_restart() {
         ("10-00-00".to_string(), "empty file".to_string()),
         ("09-00-00".to_string(), "cut off while recording (no index): it will not play".to_string()),
     ]);
-    assert_eq!(f.core.db().get("integrity-running:car"), Some(json!(false)));
+    assert_eq!(f.core.db().get("integrity-running:car").unwrap(), Some(json!(false)));
     // unchanged files are not read again
     let again = call(&f, "POST", "vehicles/car/integrity", json!(null)).unwrap();
     assert_eq!(again["running"], true);
@@ -517,14 +541,14 @@ fn clip_codecs_an_older_server_kept_in_its_settings_move_into_the_catalog_and_ar
     kept.insert(a.into(), json!([sa, ma, "h265"]));
     kept.insert(b.into(), json!([sb, mb, null]));
     kept.insert(c.into(), json!([sc + 7, mc, "h265"]));
-    f.core.db().set("codecs:car", &Value::Object(kept));
+    f.core.db().set("codecs:car", &Value::Object(kept)).unwrap();
     f.app.scan_now("car", false).unwrap();
     wait(|| !f.app.jobs.busy("codecs:car"));
     assert_eq!(f.app.catalog.codec("car", a).unwrap(), Some((sa, ma, Some("h265".into()))), "kept, not read again");
     assert_eq!(f.app.catalog.codec("car", b).unwrap(), Some((sb, mb, None)));
     assert_eq!(f.app.catalog.codec("car", c).unwrap(), Some((sc, mc, None)), "a clip whose size changed is read again");
     assert_eq!(f.app.state_of("car").unwrap().codecs.get(a), Some(Some("h265")));
-    assert_eq!(f.core.db().get("codecs:car"), None, "the settings value is moved, not kept");
+    assert_eq!(f.core.db().get("codecs:car").unwrap(), None, "the settings value is moved, not kept");
 }
 
 #[test]
@@ -635,7 +659,7 @@ fn no_footage_where_some_was_is_a_drive_gone_only_when_another_mount_holds_its_f
     assert_eq!(f.app.scan_now("car", false).err().map(|e| e.status), Some(503));
     // where the footage was not noted (a server from before the notes): kept too
     mounts(&f, &[(&share, "cifs //nas/cam", 58)]);
-    f.core.db().del("footageMount:car");
+    f.core.db().del("footageMount:car").unwrap();
     assert_eq!(f.app.scan_now("car", false).err().map(|e| e.status), Some(503));
 }
 
@@ -701,9 +725,9 @@ fn two_mounts_that_look_the_same_are_told_apart_by_their_folders() {
     mounts(&f, &[(&recent, "cifs //nas/cam", 52), (&sentry, "cifs //nas/cam", 53)]);
     f.app.scan_now("car", false).unwrap();
     // (a note from before the mounts seen were kept never tells a move)
-    let mut note = f.core.db().get("footageMount:car").unwrap();
+    let mut note = f.core.db().get("footageMount:car").unwrap().unwrap();
     note.as_object_mut().unwrap().remove("seen");
-    f.core.db().set("footageMount:car", &note);
+    f.core.db().set("footageMount:car", &note).unwrap();
     std::fs::rename(&sentry, &away).unwrap();
     std::fs::create_dir(&sentry).unwrap();
     mounts(&f, &[(&recent, "cifs //nas/cam", 52)]);
@@ -821,7 +845,7 @@ fn a_drive_the_recycle_bin_took_the_last_clip_from_is_not_noted_and_may_go() {
     f.app.scan_now("car", false).unwrap();
     let id = f.app.state_of("car").unwrap().recordings.iter().find(|x| x.files().any(|(rel, _)| rel == s)).unwrap().id.clone();
     bin::trash(&f.app, "car", &[id], "trash").unwrap();
-    let noted = f.core.db().get("footageMount:car").unwrap();
+    let noted = f.core.db().get("footageMount:car").unwrap().unwrap();
     assert!(!noted["mounts"].as_array().unwrap().iter().any(|m| m["at"] == "TeslaCam/SentryClips"), "{noted}");
     // then unplugged: nothing of it is left, so the scan goes on
     mounts(&f, &[]);
@@ -892,7 +916,7 @@ fn with_a_mount_table_it_cannot_read_a_drive_the_recycle_bin_took_the_last_clip_
     unreadable_table(&f);
     let id = f.app.state_of("car").unwrap().recordings.iter().find(|x| x.files().any(|(rel, _)| rel == r)).unwrap().id.clone();
     bin::trash(&f.app, "car", &[id], "trash").unwrap();
-    let noted = f.core.db().get("footageMount:car").unwrap();
+    let noted = f.core.db().get("footageMount:car").unwrap().unwrap();
     let ats: Vec<&str> = noted["mounts"].as_array().unwrap().iter().filter_map(|m| m["at"].as_str()).collect();
     assert_eq!(ats, ["TeslaCam/SentryClips"], "{noted}");
     // the next scans go on
@@ -937,7 +961,7 @@ fn not_noted_no_footage_found_but_some_kept_is_not_a_drive_gone() {
     let f = fixture("unread-unnoted", &[(s, b"x")]);
     // never a table it reads (nothing noted), and the only event cannot be read: kept
     unreadable_table(&f);
-    f.core.db().del("footageMount:car");
+    f.core.db().del("footageMount:car").unwrap();
     let event = f.root.join("TeslaCam/SentryClips/2026-11-10_07-00-00");
     mode(&event, 0o000);
     if std::fs::read_dir(&event).is_ok() {
@@ -948,7 +972,7 @@ fn not_noted_no_footage_found_but_some_kept_is_not_a_drive_gone() {
     let st = f.app.scan_now("car", false);
     mode(&event, 0o755);
     assert_eq!(st.unwrap().kept, 1);
-    assert!(f.core.db().get("footageMount:car").is_none());
+    assert!(f.core.db().get("footageMount:car").unwrap().is_none());
 }
 
 #[test]
@@ -992,7 +1016,7 @@ fn a_drive_whose_footage_could_only_be_kept_stays_noted_and_its_going_changes_no
     let st = f.app.scan_now("car", false);
     mode(&event, 0o755);
     assert_eq!(st.unwrap().kept, 1);
-    let noted = f.core.db().get("footageMount:car").unwrap();
+    let noted = f.core.db().get("footageMount:car").unwrap().unwrap();
     assert!(noted["mounts"].as_array().unwrap().iter().any(|m| m["at"] == "TeslaCam/SentryClips"), "{noted}");
     // then unplugged: nothing changes
     std::fs::rename(&sentry, f.dir.join("away")).unwrap();
@@ -1069,7 +1093,7 @@ fn a_restore_while_a_scan_runs_is_followed_by_a_scan_that_walks_after_it() {
     let f = fixture("restore-midscan", &[(A, b"clip"), (B, b"clip")]);
     let id = f.app.state_of("car").unwrap().recordings.iter().find(|r| r.files().any(|(rel, _)| rel == B)).unwrap().id.clone();
     bin::trash(&f.app, "car", &[id], "trash").unwrap();
-    let item = f.core.db().bin_items(Some("car"))[0].id.clone();
+    let item = f.core.db().bin_items(Some("car")).unwrap()[0].id.clone();
     // a scan that walked before the restore waits to write
     let lock = f.app.footage.scan_lock("car");
     let writing = lock.writing.lock().unwrap();
@@ -1104,7 +1128,7 @@ fn a_cleanup_that_meets_footage_it_cannot_read_is_tried_again_soon_not_tomorrow(
     }
     let ran = policies::tick(&f.app, chrono::Local::now());
     mode(&event, 0o755);
-    let saved = || policies::get(&f.app, "car");
+    let saved = || policies::get(&f.app, "car").unwrap();
     assert!(ran && saved()["lastRunAt"].is_null(), "tried, and not the day's run");
     assert!(saved()["lastResult"]["error"].as_str().is_some_and(|e| e.contains("could not be read")), "{}", saved());
     assert!(!policies::tick(&f.app, chrono::Local::now()), "not again right away");
@@ -1232,12 +1256,12 @@ fn a_kept_codec_list_beside_codecs_the_catalog_has_only_fills_in_what_it_lacks()
     let mut kept = serde_json::Map::new();
     kept.insert(a.into(), json!([sa, ma, "h265"]));
     kept.insert(b.into(), json!([sb, mb, "h265"]));
-    f.core.db().set("codecs:car", &Value::Object(kept));
+    f.core.db().set("codecs:car", &Value::Object(kept)).unwrap();
     f.app.scan_now("car", false).unwrap();
     wait(|| !f.app.jobs.busy("codecs:car"));
     assert_eq!(f.app.catalog.codec("car", a).unwrap(), Some((sa, ma, codec_a)), "the catalog's own row is kept");
     assert_eq!(f.app.catalog.codec("car", b).unwrap(), Some((sb, mb, Some("h265".into()))), "the missing row comes from the list, not a read");
-    assert_eq!(f.core.db().get("codecs:car"), None);
+    assert_eq!(f.core.db().get("codecs:car").unwrap(), None);
 }
 
 #[test]
@@ -1321,4 +1345,170 @@ fn a_codec_row_forgotten_for_an_older_list_comes_back_when_the_newer_list_holds_
     wait(|| (0..8).all(|i| !f.app.jobs.busy(&format!("hold:{i}"))) && !f.app.jobs.busy("codecs:car"));
     assert!(f.app.catalog.codec("car", b).unwrap().is_some(), "b's saved codec is back");
     assert_eq!(f.app.state_of("car").unwrap().codecs.get(b), Some(Some("h265")));
+}
+
+/// manager.db as a failing disk leaves it: `sql` (a trigger that refuses a write, a table read
+/// through a view of one that is gone) run on a connection of its own.
+fn manager_db(f: &Fixture, sql: &str) {
+    rusqlite::Connection::open(f.dir.join("data/manager.db")).unwrap().execute_batch(sql).unwrap();
+}
+
+/// Reads (and writes) of `table` fail until `mend_in_db`.
+fn unreadable_in_db(f: &Fixture, table: &str) {
+    manager_db(f, &format!("CREATE TABLE gone (x); ALTER TABLE {table} RENAME TO {table}_kept; CREATE VIEW {table} AS SELECT * FROM gone; DROP TABLE gone;"));
+}
+
+fn mend_in_db(f: &Fixture, table: &str) {
+    manager_db(f, &format!("DROP VIEW {table}; ALTER TABLE {table}_kept RENAME TO {table};"));
+}
+
+fn internal() -> (u16, Value) {
+    (500, json!({ "error": "Internal error" }))
+}
+
+#[test]
+fn a_recycle_bin_move_whose_protected_clips_cannot_be_read_moves_nothing_and_answers_500() {
+    let f = fixture("bin-unread", &[(A, b"clip"), (B, b"clip")]);
+    let a = id_at(&f.app, "2020-01-01 08:00:00");
+    unreadable_in_db(&f, "protected");
+    assert_eq!(call(&f, "POST", "vehicles/car/trash", json!({ "ids": [a] })).unwrap_err(), internal());
+    assert!(f.root.join(A).exists(), "nothing moved");
+    assert!(f.core.db().bin_items(None).unwrap().is_empty());
+    assert_eq!(f.core.jobs.lock().unwrap().last().unwrap().0, "failed");
+}
+
+#[test]
+fn a_recycle_bin_move_whose_item_cannot_be_kept_moves_nothing_and_one_not_settled_stays_listed_as_moving() {
+    let f = fixture("bin-unkept", &[(A, b"clip"), (B, b"clip")]);
+    let (a, b) = (id_at(&f.app, "2020-01-01 08:00:00"), id_at(&f.app, "2020-01-01 09:00:00"));
+    manager_db(&f, "CREATE TRIGGER refused BEFORE INSERT ON bin_items BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;");
+    assert_eq!(call(&f, "POST", "vehicles/car/trash", json!({ "ids": [a.clone(), b.clone()] })).unwrap_err(), internal());
+    assert!(f.root.join(A).exists() && f.root.join(B).exists(), "nothing moves without its item");
+    // the files moved and their item was not settled: a 500, the run stops there, the item stays
+    // listed as still moving, and a restart's settling lists what is in the bin
+    manager_db(&f, "DROP TRIGGER refused; CREATE TRIGGER refused BEFORE UPDATE ON bin_items BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;");
+    assert_eq!(call(&f, "POST", "vehicles/car/trash", json!({ "ids": [a.clone(), b.clone()] })).unwrap_err(), internal());
+    assert_eq!([A, B].iter().filter(|r| f.root.join(r).exists()).count(), 1, "stopped after the first");
+    let items = f.core.db().bin_items(None).unwrap();
+    assert!(items.len() == 1 && items[0].files.iter().all(|x| x.pending));
+    let moved = if f.root.join(A).exists() { b } else { a };
+    assert!(!ids(&f.app).iter().any(|(i, _)| *i == moved), "the inventory follows what moved");
+    manager_db(&f, "DROP TRIGGER refused;");
+    assert_eq!(bin::reconcile(&f.app, "car").unwrap(), (1, 0));
+    assert!(!f.core.db().bin_items(None).unwrap()[0].files.iter().any(|x| x.pending));
+}
+
+#[test]
+fn a_restore_whose_bin_list_cannot_be_written_answers_500_with_the_files_back() {
+    let f = fixture("restore-unkept", &[(A, b"clip"), (B, b"clip")]);
+    let a = id_at(&f.app, "2020-01-01 08:00:00");
+    call(&f, "POST", "vehicles/car/trash", json!({ "ids": [a] })).unwrap();
+    let id = f.core.db().bin_items(None).unwrap()[0].id.clone();
+    manager_db(&f, "CREATE TRIGGER refused BEFORE DELETE ON bin_items BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;");
+    assert_eq!(call(&f, "POST", &format!("bin/{id}/restore"), json!({})).unwrap_err(), internal());
+    assert!(f.root.join(A).exists(), "the files are back");
+    assert_eq!(f.core.db().bin_items(None).unwrap().len(), 1, "listed until it can be written");
+}
+
+#[test]
+fn emptying_the_bin_stops_at_the_first_item_whose_removal_cannot_be_written() {
+    let f = fixture("empty-unkept", &[(A, b"clip"), (B, b"clip")]);
+    let (a, b) = (id_at(&f.app, "2020-01-01 08:00:00"), id_at(&f.app, "2020-01-01 09:00:00"));
+    call(&f, "POST", "vehicles/car/trash", json!({ "ids": [a, b] })).unwrap();
+    manager_db(&f, "CREATE TRIGGER refused BEFORE DELETE ON bin_items BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;");
+    assert_eq!(call(&f, "POST", "bin/empty", json!({ "confirm": true })).unwrap_err(), internal());
+    let folders = std::fs::read_dir(f.root.join(BIN_DIR)).unwrap().filter(|e| e.as_ref().unwrap().file_type().unwrap().is_dir()).count();
+    assert_eq!(folders, 1, "the second item stays, files and all");
+    assert_eq!(f.core.db().bin_items(None).unwrap().len(), 2);
+    assert_eq!(f.core.jobs.lock().unwrap().last().unwrap().0, "failed");
+}
+
+#[test]
+fn a_recycle_bin_vehicle_or_star_list_that_cannot_be_read_answers_500_not_an_empty_one() {
+    let f = fixture("lists-unread", &[(A, b"clip")]);
+    unreadable_in_db(&f, "bin_items");
+    assert_eq!(call(&f, "GET", "bin", json!(null)).unwrap_err(), internal());
+    assert_eq!(call(&f, "GET", "vehicles", json!(null)).unwrap_err(), internal(), "a vehicle's bin numbers");
+    mend_in_db(&f, "bin_items");
+    unreadable_in_db(&f, "settings");
+    assert_eq!(call(&f, "GET", "vehicles", json!(null)).unwrap_err(), internal());
+    assert_eq!(call(&f, "GET", "vehicles/car/policy", json!(null)).unwrap_err(), internal(), "not \"no such vehicle\"");
+    assert_eq!(call(&f, "GET", "stars", json!(null)).unwrap_err(), internal());
+    mend_in_db(&f, "settings");
+    assert_eq!(call(&f, "GET", "vehicles", json!(null)).unwrap()["vehicles"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn what_the_can_area_cannot_read_is_a_500_for_the_vehicle_list_and_a_recycle_bin_preview() {
+    let f = fixture("can-unread", &[(A, b"clip")]);
+    let a = id_at(&f.app, "2020-01-01 08:00:00");
+    f.core.can_unread.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(call(&f, "GET", "vehicles", json!(null)).unwrap_err(), internal(), "not a car without its summary");
+    assert_eq!(call(&f, "POST", "vehicles/car/trash-preview", json!({ "ids": [a] })).unwrap_err(), internal());
+    assert_eq!(call(&f, "POST", "vehicles/car/trash-days", json!({ "day": "2020-01-01", "preview": true })).unwrap_err(), internal());
+}
+
+#[test]
+fn protected_clips_that_cannot_be_read_change_no_scan_and_a_rebuild_keeps_the_protection() {
+    let f = fixture("protect-unread", &[(A, b"clip"), (B, b"clip")]);
+    let a = id_at(&f.app, "2020-01-01 08:00:00");
+    call(&f, "POST", "vehicles/car/protect", json!({ "ids": [a] })).unwrap();
+    let protected = |f: &Fixture| f.app.state_of("car").unwrap().recordings.iter().find(|r| r.id == a).is_some_and(|r| r.protected);
+    write(&f.root, "TeslaCam/RecentClips/2020-01-01_10-00-00-front.mp4", b"new");
+    unreadable_in_db(&f, "protected");
+    assert_eq!(f.app.scan_now("car", false).err().map(|e| e.status), Some(503));
+    assert_eq!(ids(&f.app).len(), 2, "nothing changes until they can be read");
+    assert!(protected(&f));
+    f.app.rebuild("car", None);
+    assert!(protected(&f), "a rebuild keeps the protection it had");
+    mend_in_db(&f, "protected");
+    f.app.scan_now("car", false).unwrap();
+    assert_eq!(ids(&f.app).len(), 3);
+    assert!(protected(&f));
+}
+
+#[test]
+fn days_and_recordings_answer_500_when_their_can_tags_or_the_vehicles_cannot_be_read() {
+    let f = fixture("slice-unread", &[(A, b"clip")]);
+    let get = |path: &str| sentry_lean::api::slice_route(&f.app, &axum::http::Method::GET, path, &HashMap::new(), &axum::http::HeaderMap::new()).unwrap().status().as_u16();
+    assert_eq!((get("/api/vehicles/car/days"), get("/api/vehicles/car/recordings"), get("/api/vehicles/nope/days")), (200, 200, 404));
+    f.core.can_unread.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(get("/api/vehicles/car/days"), 500, "not days without their CAN tags");
+    assert_eq!(get("/api/vehicles/car/recordings"), 500);
+    f.core.can_unread.store(false, std::sync::atomic::Ordering::SeqCst);
+    unreadable_in_db(&f, "settings");
+    assert_eq!(get("/api/vehicles/car/days"), 500, "not \"no such vehicle\"");
+}
+
+#[test]
+fn a_policy_save_restore_or_deletion_whose_vehicle_list_cannot_be_read_answers_500_not_no_such_vehicle() {
+    let f = fixture("vehicles-unread", &[(A, b"clip"), (B, b"clip")]);
+    let (a, b) = (id_at(&f.app, "2020-01-01 08:00:00"), id_at(&f.app, "2020-01-01 09:00:00"));
+    call(&f, "POST", "vehicles/car/trash", json!({ "ids": [a, b] })).unwrap();
+    let items: Vec<String> = f.core.db().bin_items(None).unwrap().into_iter().map(|i| i.id).collect();
+    unreadable_in_db(&f, "settings");
+    assert_eq!(call(&f, "PUT", "vehicles/car/policy", json!({ "enabled": true })).unwrap_err(), internal());
+    assert_eq!(call(&f, "POST", &format!("bin/{}/restore", items[0]), json!({})).unwrap_err(), internal());
+    assert_eq!(call(&f, "POST", &format!("bin/{}/delete", items[1]), json!({ "confirm": true })).unwrap_err(), internal());
+    mend_in_db(&f, "settings");
+    assert_eq!(f.core.db().bin_items(None).unwrap().len(), 2, "both stay in the bin, files and all");
+    assert!(!f.root.join(A).exists() && !f.root.join(B).exists());
+}
+
+#[test]
+fn a_recycle_bin_run_whose_vehicle_cannot_be_read_again_moves_nothing_and_is_an_error_not_a_skip() {
+    let f = fixture("bin-midrun-unread", &[(A, b"clip"), (B, b"clip")]);
+    let id = id_at(&f.app, "2020-01-01 09:00:00");
+    // the run waits for the Recycle Bin's lock; meanwhile manager.db stops giving the vehicles
+    let held = f.app.footage.bin_lock("car");
+    let guard = held.lock().unwrap();
+    let app = f.app.clone();
+    let run = std::thread::spawn(move || bin::trash(&app, "car", &[id], "trash"));
+    std::thread::sleep(Duration::from_millis(300));
+    unreadable_in_db(&f, "settings");
+    drop(guard);
+    assert_eq!(run.join().unwrap().err().map(|e| e.status), Some(0));
+    mend_in_db(&f, "settings");
+    assert!(f.root.join(B).exists(), "nothing moved");
+    assert!(f.core.db().bin_items(None).unwrap().is_empty());
 }

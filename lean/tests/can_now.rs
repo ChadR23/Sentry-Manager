@@ -117,6 +117,10 @@ fn a_fresh_log_goes_first_and_does_not_wait_for_the_converter() {
 struct TestCtx {
     data: PathBuf,
     settings: Mutex<HashMap<String, Value>>,
+    /// the settings fail to read and to keep (manager.db busy, read-only or damaged)
+    fail: AtomicBool,
+    /// only the key-to-car map (can-vehicles) fails to read
+    fail_map: AtomicBool,
     audit: Mutex<Vec<String>>,
     tls: Option<Value>,
 }
@@ -124,11 +128,18 @@ impl CanCtx for TestCtx {
     fn data_dir(&self) -> PathBuf {
         self.data.clone()
     }
-    fn setting(&self, key: &str) -> Option<Value> {
-        self.settings.lock().unwrap().get(key).cloned().filter(|v| !v.is_null())
+    fn setting(&self, key: &str) -> Result<Option<Value>, String> {
+        if self.fail.load(Ordering::SeqCst) || (self.fail_map.load(Ordering::SeqCst) && key == "can-vehicles") {
+            return Err("manager.db: database is locked".into());
+        }
+        Ok(self.settings.lock().unwrap().get(key).cloned().filter(|v| !v.is_null()))
     }
-    fn set_setting(&self, key: &str, value: Value) {
+    fn set_setting(&self, key: &str, value: Value) -> Result<(), String> {
+        if self.fail.load(Ordering::SeqCst) {
+            return Err("manager.db: attempt to write a readonly database".into());
+        }
         self.settings.lock().unwrap().insert(key.to_string(), value);
+        Ok(())
     }
     fn vehicles(&self) -> Vec<Car> {
         vec![Car { id: "daily-driver".into(), name: "Daily Driver".into(), timezone: String::new(), root: None, studio_root: None, car: None }]
@@ -183,7 +194,7 @@ fn json_of(b: &[u8]) -> Value {
 #[test]
 fn the_link_off_until_made_only_with_its_token_plain_text_per_stat() {
     let data = tmp("routes");
-    let ctx = Arc::new(TestCtx { data: data.clone(), settings: Mutex::new(HashMap::new()), audit: Mutex::new(Vec::new()), tls: None });
+    let ctx = Arc::new(TestCtx { data: data.clone(), settings: Mutex::new(HashMap::new()), audit: Mutex::new(Vec::new()), tls: None, fail: AtomicBool::new(false), fail_map: AtomicBool::new(false) });
     let can = Can::new(ctx.clone());
     let now = |path: &str, query: Option<&str>, auth: Option<&str>| body(can.now_answer(&Method::GET, path, query, auth));
     let (s, h, b) = now("/api/can/now", Some("token=x"), None);
@@ -247,7 +258,7 @@ fn the_link_off_until_made_only_with_its_token_plain_text_per_stat() {
 fn the_pin_follows_the_certificate() {
     let pin = |tls: Value| {
         let data = tmp("pin");
-        let ctx = Arc::new(TestCtx { data: data.clone(), settings: Mutex::new(HashMap::new()), audit: Mutex::new(Vec::new()), tls: Some(tls) });
+        let ctx = Arc::new(TestCtx { data: data.clone(), settings: Mutex::new(HashMap::new()), audit: Mutex::new(Vec::new()), tls: Some(tls), fail: AtomicBool::new(false), fail_map: AtomicBool::new(false) });
         let can = Can::new(ctx);
         let got = json_of(&body(can.handle(&req(Method::GET, "/api/can/stream-deck", true)).unwrap()).2);
         let _ = std::fs::remove_dir_all(&data);
@@ -270,7 +281,7 @@ fn answers_from_the_index_with_the_car_and_the_cache() {
     std::fs::create_dir_all(data.join("can/K")).unwrap();
     let lines: Vec<String> = (0..10).map(|i| volts(T0 + i as f64 * 1000.0, 380.0)).collect();
     std::fs::write(data.join("can/K").join(name), xz(&format!("{}\n", lines.join("\n")))).unwrap();
-    let ctx = Arc::new(TestCtx { data: data.clone(), settings: Mutex::new(HashMap::new()), audit: Mutex::new(Vec::new()), tls: None });
+    let ctx = Arc::new(TestCtx { data: data.clone(), settings: Mutex::new(HashMap::new()), audit: Mutex::new(Vec::new()), tls: None, fail: AtomicBool::new(false), fail_map: AtomicBool::new(false) });
     let can = Can::new(ctx.clone());
     can.index.index_log("K", name, false, None, None).unwrap();
     let token = json_of(&body(can.handle(&req(Method::POST, "/api/can/stream-deck", true)).unwrap()).2)["token"].as_str().unwrap().to_string();
@@ -297,5 +308,101 @@ fn answers_from_the_index_with_the_car_and_the_cache() {
     assert_eq!(String::from_utf8(ask("stat=batteryVoltage").2).unwrap(), "380 V", "from the cache");
     std::thread::sleep(std::time::Duration::from_millis(3100));
     assert_eq!(String::from_utf8(ask("stat=batteryVoltage").2).unwrap(), "390 V");
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+#[test]
+fn a_link_setting_that_cannot_be_read_or_kept_answers_500_not_off_and_is_not_made() {
+    let data = tmp("unreadable");
+    let ctx = Arc::new(TestCtx { data: data.clone(), settings: Mutex::new(HashMap::new()), audit: Mutex::new(Vec::new()), tls: None, fail: AtomicBool::new(false), fail_map: AtomicBool::new(false) });
+    let can = Can::new(ctx.clone());
+    let token = json_of(&body(can.handle(&req(Method::POST, "/api/can/stream-deck", true)).unwrap()).2)["token"].as_str().unwrap().to_string();
+    let audits = ctx.audit.lock().unwrap().len();
+    ctx.fail.store(true, Ordering::SeqCst);
+    let (s, _, b) = body(can.now_answer(&Method::GET, "/api/can/now", Some(&format!("token={token}")), None));
+    assert_eq!((s, json_of(&b)), (500, json!({ "error": "Internal error" })), "not 404 (off)");
+    for (method, what) in [(Method::POST, "made"), (Method::DELETE, "turned off"), (Method::GET, "shown")] {
+        let (s, _, b) = body(can.handle(&req(method, "/api/can/stream-deck", true)).unwrap());
+        assert_eq!((s, json_of(&b)), (500, json!({ "error": "Internal error" })), "{what}");
+    }
+    assert_eq!(ctx.audit.lock().unwrap().len(), audits, "no audit line for a change that was not made");
+    ctx.fail.store(false, Ordering::SeqCst);
+    let (s, _, _) = body(can.now_answer(&Method::GET, "/api/can/now", Some(&format!("token={token}")), None));
+    assert_eq!(s, 200, "the link made before still works");
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+#[test]
+fn routes_that_need_the_key_to_car_map_answer_500_when_it_cannot_be_read() {
+    if !has_xz() {
+        eprintln!("skipped: needs xz");
+        return;
+    }
+    let data = tmp("unmapped");
+    let name = "K_20261116T180000Z_1.log.xz";
+    std::fs::create_dir_all(data.join("can/K")).unwrap();
+    let lines: Vec<String> = (0..10).map(|i| volts(T0 + i as f64 * 1000.0, 380.0)).collect();
+    std::fs::write(data.join("can/K").join(name), xz(&format!("{}\n", lines.join("\n")))).unwrap();
+    let ctx = Arc::new(TestCtx { data: data.clone(), settings: Mutex::new(HashMap::new()), audit: Mutex::new(Vec::new()), tls: None, fail: AtomicBool::new(false), fail_map: AtomicBool::new(false) });
+    let can = Can::new(ctx.clone());
+    can.index.index_log("K", name, false, None, None).unwrap();
+    let token = json_of(&body(can.handle(&req(Method::POST, "/api/can/stream-deck", true)).unwrap()).2)["token"].as_str().unwrap().to_string();
+    let get = |path: &str, query: &[(&str, &str)]| {
+        let mut r = req(Method::GET, path, true);
+        r.query = query.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        body(can.handle(&r).unwrap())
+    };
+    let routes: Vec<(&str, Vec<(&str, &str)>)> = vec![
+        ("/api/can/vehicle-signals", vec![("vehicle", "daily-driver")]),
+        ("/api/can/search", vec![("vehicle", "daily-driver")]),
+        ("/api/can/id-events", vec![("vehicle", "daily-driver")]),
+        ("/api/can/files", vec![]),
+        ("/api/can/export/new-ids", vec![("key", "K"), ("since", "2026-11-16")]),
+    ];
+    let now = || body(can.now_answer(&Method::GET, "/api/can/now", Some(&format!("token={token}&car=daily-driver")), None));
+    for (path, q) in &routes {
+        assert_ne!(get(path, q).0, 500, "{path} while the map reads");
+    }
+    assert_eq!(json_of(&now().2)["car"], "Daily Driver");
+    ctx.fail_map.store(true, Ordering::SeqCst);
+    for (path, q) in &routes {
+        let (s, _, b) = get(path, q);
+        assert_eq!((s, json_of(&b)), (500, json!({ "error": "Internal error" })), "{path}: not an answer worked out without the map");
+    }
+    let (s, _, b) = now();
+    assert_eq!((s, json_of(&b)), (500, json!({ "error": "Internal error" })), "not another car's numbers, nor without its name");
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+#[test]
+fn without_a_car_filter_or_numbers_to_name_a_car_for_the_map_is_not_read() {
+    let data = tmp("now-no-map");
+    let ctx = Arc::new(TestCtx { data: data.clone(), settings: Mutex::new(HashMap::new()), audit: Mutex::new(Vec::new()), tls: None, fail: AtomicBool::new(false), fail_map: AtomicBool::new(false) });
+    let can = Can::new(ctx.clone());
+    let token = json_of(&body(can.handle(&req(Method::POST, "/api/can/stream-deck", true)).unwrap()).2)["token"].as_str().unwrap().to_string();
+    ctx.fail_map.store(true, Ordering::SeqCst);
+    let now = |path: &str, more: &str| body(can.now_answer(&Method::GET, path, Some(&format!("token={token}{more}")), None));
+    let (s, _, b) = now("/api/can/now", "");
+    assert_eq!((s, json_of(&b)), (200, json!({ "car": null, "at": null, "stale": true, "units": "mi", "stats": {} })), "no CAN data: nothing to name");
+    assert_eq!(now("/api/can/now/nope", "").0, 404, "an unknown stat");
+    assert_eq!(now("/api/can/now", "&car=daily-driver").0, 500, "a car filter needs the map");
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+#[test]
+fn tags_a_car_summary_and_a_preview_are_errors_without_the_map_and_a_real_delete_says_why_it_skipped() {
+    let data = tmp("map-unread");
+    let ctx = Arc::new(TestCtx { data: data.clone(), settings: Mutex::new(HashMap::new()), audit: Mutex::new(Vec::new()), tls: None, fail: AtomicBool::new(false), fail_map: AtomicBool::new(false) });
+    let can = Can::new(ctx.clone());
+    let car = ctx.vehicles().remove(0);
+    let rels = vec!["TeslaCam/RecentClips/2026-11-16_18-00-00-front.mp4".to_string()];
+    assert!(can.has_can(&car).is_ok() && can.car_summary(&car).is_ok());
+    assert!(can.prune.preview_with("daily-driver", &rels, None).is_ok());
+    ctx.fail_map.store(true, Ordering::SeqCst);
+    assert!(can.has_can(&car).is_err(), "not recordings shown without their tags");
+    assert!(can.car_summary(&car).is_err(), "not a car shown without what was detected of it");
+    assert!(can.prune.preview_with("daily-driver", &rels, None).is_err(), "not a count worked out without the keys");
+    let real = can.prune.delete_with("daily-driver", &rels, None, "admin", false);
+    assert_eq!(real["skip"], "the CAN settings could not be read", "the footage moved already: its answer says why the logs stay");
     let _ = std::fs::remove_dir_all(&data);
 }

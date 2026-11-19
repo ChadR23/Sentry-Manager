@@ -103,8 +103,32 @@ fn ffmpeg_first_line(ctx: &dyn OpsCtx) -> String {
         .clone()
 }
 
-fn setting(ctx: &dyn OpsCtx, key: &str) -> Value {
-    store::get(&ctx.read_db(), key).unwrap_or(Value::Null)
+/// What a report shows of manager.db: null when not set, and when it cannot be read (unknown,
+/// never "off" or 0; the first such error is logged once the report is built).
+struct Unread<'a> {
+    ctx: &'a dyn OpsCtx,
+    failed: std::cell::RefCell<Option<String>>,
+}
+
+impl<'a> Unread<'a> {
+    fn new(ctx: &'a dyn OpsCtx) -> Unread<'a> {
+        Unread { ctx, failed: std::cell::RefCell::new(None) }
+    }
+    fn or_null<T>(&self, r: store::DbResult<T>) -> Option<T> {
+        r.map_err(|e| self.failed.borrow_mut().get_or_insert(e.to_string()).clone()).ok()
+    }
+    /// A setting: Null when not set, None when it cannot be read.
+    fn get(&self, key: &str) -> Option<Value> {
+        self.or_null(store::get(&self.ctx.read_db(), key)).map(|v| v.unwrap_or(Value::Null))
+    }
+    fn setting(&self, key: &str) -> Value {
+        self.get(key).unwrap_or(Value::Null)
+    }
+    fn log(self, what: &str) {
+        if let Some(e) = self.failed.into_inner() {
+            self.ctx.log("reports", Level::Warn, &format!("{what}: what manager.db could not give is left out: {e}"));
+        }
+    }
 }
 
 fn opt_env(k: &str) -> Value {
@@ -114,6 +138,7 @@ fn opt_env(k: &str) -> Value {
 /// index.js reportDiagnostics(): what a support report or a crash report carries.
 pub fn diagnostics(ops: &Ops) -> Value {
     let ctx = &*ops.ctx;
+    let db = Unread::new(ctx);
     let list = ctx.vehicles();
     let mut out = Map::new();
     let mut system = match ctx.system_summary(false) {
@@ -155,7 +180,7 @@ pub fn diagnostics(ops: &Ops) -> Value {
         let n = by_status.get(&k).and_then(Value::as_f64).unwrap_or(0.0) + 1.0;
         by_status.insert(k, num(n));
     }
-    let open = store::list(&ctx.read_db(), true, 1000, None).len();
+    let open = db.or_null(store::list(&ctx.read_db(), true, 1000, None)).map(|l| l.len());
     out.insert(
         "counts".into(),
         json!({
@@ -169,23 +194,24 @@ pub fn diagnostics(ops: &Ops) -> Value {
         json!(ctx.recent_jobs(25).iter().map(|j| json!({ "type": j["type"], "status": j["status"], "title": s(&j["title"], 200), "detail": s(&j["detail"], 400), "startedAt": j["startedAt"], "finishedAt": j["finishedAt"] })).collect::<Vec<_>>()),
     );
     let conv = ctx.converter();
-    out.insert("converter".into(), json!({ "ready": conv.ready, "running": conv.running, "capabilities": if conv.ready { conv.capabilities.clone() } else { Value::Null }, "error": conv.error, "settings": setting(ctx, "studio-settings") }));
+    out.insert("converter".into(), json!({ "ready": conv.ready, "running": conv.running, "capabilities": if conv.ready { conv.capabilities.clone() } else { Value::Null }, "error": conv.error, "settings": db.setting("studio-settings") }));
     out.insert(
         "settings".into(),
         json!({
-            "appearance": setting(ctx, "appearance"), "power": setting(ctx, "power"), "prefetch": setting(ctx, "prefetch"), "notifyMuted": setting(ctx, "notify-muted"),
-            "imageUpdates": setting(ctx, "image-updates"), "canKeep": setting(ctx, "can-keep"), "access": ctx.access_settings(),
+            "appearance": db.setting("appearance"), "power": db.setting("power"), "prefetch": db.setting("prefetch"), "notifyMuted": db.setting("notify-muted"),
+            "imageUpdates": db.setting("image-updates"), "canKeep": db.setting("can-keep"), "access": ctx.access_settings(),
             "policies": list.iter().map(|v| (v.id.clone(), v.policy.clone())).collect::<Map<_, _>>(), "placesCount": ctx.places_count()
         }),
     );
-    let can = setting(ctx, "can");
+    // (what cannot be read is null: never a feature shown off, or none of it)
+    let can = db.get("can");
     let devs = ctx.sentry_usb_infos();
     out.insert(
         "features".into(),
         json!({
-            "can": { "enabled": truthy(&can["enabled"]), "vehicles": setting(ctx, "can-vehicles").as_object().map_or(0, |o| o.len()) },
+            "can": { "enabled": can.as_ref().map(|c| truthy(&c["enabled"])), "vehicles": db.get("can-vehicles").map(|v| v.as_object().map_or(0, |o| o.len())) },
             "sentryUsb": { "found": !devs.is_empty(), "devices": devs.iter().map(|(v, w)| json!({ "version": v, "written": iso((w * 1000.0) as i64) })).collect::<Vec<_>>() },
-            "uiPack": ctx.ui_pack(), "metrics": truthy(&setting(ctx, "metrics")["enabled"]), "nodes": setting(ctx, "nodes").as_array().map_or(0, |a| a.len()),
+            "uiPack": ctx.ui_pack(), "metrics": db.get("metrics").map(|m| truthy(&m["enabled"])), "nodes": db.get("nodes").map(|n| n.as_array().map_or(0, |a| a.len())),
             "tls": { "mode": ctx.tls_mode(), "trustProxy": ctx.trust_proxy(), "hostnames": opt_env("TLS_HOSTNAMES"), "acme": opt_env("TLS_ACME_DOMAIN") }
         }),
     );
@@ -197,11 +223,13 @@ pub fn diagnostics(ops: &Ops) -> Value {
     );
     out.insert("crashes".into(), json!(ops.reports.recent_crashes()));
     out.insert("can".into(), ctx.can_status());
+    db.log("Diagnostics");
     Value::Object(out)
 }
 
 /// index.js reportHeartbeat(): numbers and yes/no, nothing that names anything (normalised by reports).
-pub fn heartbeat(ops: &Ops) -> Value {
+/// (an error when manager.db cannot give part of it)
+pub fn heartbeat(ops: &Ops) -> Result<Value, String> {
     let ctx = &*ops.ctx;
     let list = ctx.vehicles();
     let (sentry, dashcam) = ctx.clips_arrived(store::now_ms() - 86_400_000);
@@ -214,10 +242,13 @@ pub fn heartbeat(ops: &Ops) -> Value {
     let gpu = ctx.detect_gpus();
     let (platform, arch) = super::build::platform_arch();
     let (os, docker) = super::build::host_info();
+    // (its numbers and switches cannot say "unknown": no heartbeat while manager.db cannot give them)
     let saved = {
         let db = ctx.read_db();
-        list.iter().map(|v| super::power::for_vehicle(&db, &v.id)["bytes"].as_f64().filter(|x| x.is_finite()).unwrap_or(0.0)).sum::<f64>()
-    };
+        list.iter().map(|v| super::power::for_vehicle(&db, &v.id).map(|s| s["bytes"].as_f64().filter(|x| x.is_finite()).unwrap_or(0.0))).sum::<store::DbResult<f64>>()
+    }
+    .map_err(|e| e.to_string())?;
+    let can = store::get(&ctx.read_db(), "can").map_err(|e| e.to_string())?.unwrap_or(Value::Null);
     let mut out = Map::new();
     out.insert("footageSeconds".into(), num(sum(&|v| v.footage_minutes) * 60.0));
     out.insert("platform".into(), json!(platform));
@@ -242,8 +273,8 @@ pub fn heartbeat(ops: &Ops) -> Value {
     out.insert("converting".into(), json!(ctx.converter().running));
     out.insert("jobsQueued".into(), json!(ctx.jobs_queued()));
     let gpu_ok = gpu["gpus"].as_array().into_iter().flatten().any(|g| truthy(&g["passedThrough"]) && !truthy(&g["virtual"])) || gpu["nvidia"].as_array().is_some_and(|a| !a.is_empty());
-    out.insert("features".into(), json!({ "can": truthy(&setting(ctx, "can")["enabled"]), "sentryUsbPaired": !ctx.sentry_usb_infos().is_empty(), "gpu": gpu_ok }));
-    Value::Object(out)
+    out.insert("features".into(), json!({ "can": truthy(&can["enabled"]), "sentryUsbPaired": !ctx.sentry_usb_infos().is_empty(), "gpu": gpu_ok }));
+    Ok(Value::Object(out))
 }
 
 /// tls.js parseHostnames, leniently: the names in TLS_HOSTNAMES (bad ones are left out here).
@@ -258,8 +289,9 @@ fn hostnames(v: &str) -> Vec<String> {
     out
 }
 
-/// index.js reportIdentifiers(): what an anonymous report must not contain.
-pub fn identifiers(ctx: &dyn OpsCtx) -> Vec<String> {
+/// index.js reportIdentifiers(): what an anonymous report must not contain (an error when
+/// part of it cannot be read).
+pub fn identifiers(ctx: &dyn OpsCtx) -> Result<Vec<String>, String> {
     let mut ids = vec![hostname(), ctx.data_dir().to_string_lossy().into_owned()];
     for v in ctx.vehicles() {
         ids.push(v.id.clone());
@@ -270,21 +302,21 @@ pub fn identifiers(ctx: &dyn OpsCtx) -> Vec<String> {
             ids.push(host);
         }
     }
-    for n in setting(ctx, "nodes").as_array().into_iter().flatten() {
+    for n in store::get(&ctx.read_db(), "nodes").map_err(|e| e.to_string())?.unwrap_or(Value::Null).as_array().into_iter().flatten() {
         for k in ["name", "host"] {
             if let Some(s) = n[k].as_str() {
                 ids.push(s.to_string());
             }
         }
     }
-    ids.extend(ctx.identifiers());
+    ids.extend(ctx.identifiers()?);
     ids.extend(hostnames(&std::env::var("TLS_HOSTNAMES").unwrap_or_default()));
     for k in ["TLS_ACME_DOMAIN", "TLS_ACME_EMAIL"] {
         if let Ok(v) = std::env::var(k) {
             ids.push(v);
         }
     }
-    ids.into_iter().filter(|s| s.encode_utf16().count() >= 3).collect()
+    Ok(ids.into_iter().filter(|s| s.encode_utf16().count() >= 3).collect())
 }
 
 #[cfg(test)]
@@ -317,12 +349,21 @@ mod tests {
     fn identifiers_from_every_part() {
         let ctx = crate::ops::testing::FakeCtx::new();
         *ctx.vehicles.lock().unwrap() = vec![VehicleInfo { id: "v1".into(), name: "Daily Driver".into(), roots: vec!["/footage/tesla".into()], share: Some("//nas-box/TeslaCam".into()), username: Some("me".into()), ..Default::default() }];
-        crate::ops::store::set(&ctx.db(), "nodes", &json!([{ "name": "garage-pc", "host": "10.0.0.7" }]));
-        let ids = identifiers(&*ctx);
+        crate::ops::store::set(&ctx.db(), "nodes", &json!([{ "name": "garage-pc", "host": "10.0.0.7" }])).unwrap();
+        let ids = identifiers(&*ctx).unwrap();
         for x in ["Daily Driver", "/footage/tesla", "//nas-box/TeslaCam", "nas-box", "garage-pc", "10.0.0.7"] {
             assert!(ids.contains(&x.to_string()), "{x}");
         }
         assert!(!ids.contains(&"me".to_string()), "shorter than 3: left out");
         assert_eq!(hostnames("A.example, [::1] b.example a.example"), vec!["a.example", "::1", "b.example"]);
+    }
+
+    #[test]
+    fn what_an_anonymous_report_leaves_out_is_an_error_when_the_nodes_cannot_be_read() {
+        let ctx = crate::ops::testing::FakeCtx::new();
+        crate::ops::store::set(&ctx.db(), "nodes", &json!([{ "name": "garage-pc", "host": "10.0.0.7" }])).unwrap();
+        assert!(identifiers(&*ctx).unwrap().contains(&"garage-pc".to_string()));
+        ctx.db().execute_batch("CREATE TABLE gone (x); ALTER TABLE settings RENAME TO settings_kept; CREATE VIEW settings AS SELECT * FROM gone; DROP TABLE gone;").unwrap();
+        assert!(identifiers(&*ctx).is_err(), "not a list without the nodes' names");
     }
 }

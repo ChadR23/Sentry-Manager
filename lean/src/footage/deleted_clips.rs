@@ -5,7 +5,7 @@
 //! named at most RECENT_DAYS before the delete, entries dropped KEEP_MS after
 //! it, at most MAX_ENTRIES (the newest).
 
-use super::mdb::ManagerDb;
+use super::mdb::{DbResult, ManagerDb};
 use serde_json::{json, Value};
 
 pub const KEEP_MS: f64 = 8.0 * 24.0 * 3600.0 * 1000.0;
@@ -39,8 +39,8 @@ fn clip_day_ms(rel: &str) -> Option<f64> {
     Some(date.and_hms_opt(0, 0, 0)?.and_utc().timestamp_millis() as f64)
 }
 
-fn read(db: &ManagerDb, vid: &str) -> Vec<(String, f64)> {
-    match db.get(&key(vid)) {
+fn read(db: &ManagerDb, vid: &str) -> DbResult<Vec<(String, f64)>> {
+    Ok(match db.get(&key(vid))? {
         Some(Value::Array(a)) => a
             .iter()
             .filter_map(|e| {
@@ -49,7 +49,7 @@ fn read(db: &ManagerDb, vid: &str) -> Vec<(String, f64)> {
             })
             .collect(),
         _ => Vec::new(),
-    }
+    })
 }
 
 fn pruned(mut list: Vec<(String, f64)>, now: f64) -> Vec<(String, f64)> {
@@ -62,34 +62,35 @@ fn pruned(mut list: Vec<(String, f64)>, now: f64) -> Vec<(String, f64)> {
     list
 }
 
-fn write(db: &ManagerDb, vid: &str, list: &[(String, f64)]) {
-    db.set(&key(vid), &Value::Array(list.iter().map(|(r, t)| json!([r, super::js::num(*t)])).collect()));
+fn write(db: &ManagerDb, vid: &str, list: &[(String, f64)]) -> DbResult<()> {
+    db.set(&key(vid), &Value::Array(list.iter().map(|(r, t)| json!([r, super::js::num(*t)])).collect()))
 }
 
-/// Clip rels deleted for good just now; how many were recorded.
-pub fn add(db: &ManagerDb, vid: &str, rels: &[String], now: f64) -> usize {
+/// Clip rels deleted for good just now; how many were recorded. An error when the list could
+/// not be read (nothing is written over it) or written.
+pub fn add(db: &ManagerDb, vid: &str, rels: &[String], now: f64) -> DbResult<usize> {
     if vid.is_empty() {
-        return 0;
+        return Ok(0);
     }
     let oldest = now - RECENT_DAYS * 86_400_000.0;
     let fresh: Vec<(String, f64)> = rels.iter().filter(|r| clip_day_ms(r).is_some_and(|d| d >= oldest - 86_400_000.0)).map(|r| (r.clone(), now)).collect();
-    let before = read(db, vid);
+    let before = read(db, vid)?;
     let n = before.len();
     let added = fresh.len();
     let next = pruned(before.into_iter().chain(fresh).collect(), now);
     if added > 0 || next.len() != n {
-        write(db, vid, &next);
+        write(db, vid, &next)?;
     }
-    added
+    Ok(added)
 }
 
 /// The rels deleted for good in the last KEEP_MS.
-pub fn list(db: &ManagerDb, vid: &str, now: f64) -> Vec<String> {
-    pruned(read(db, vid), now).into_iter().map(|e| e.0).collect()
+pub fn list(db: &ManagerDb, vid: &str, now: f64) -> DbResult<Vec<String>> {
+    Ok(pruned(read(db, vid)?, now).into_iter().map(|e| e.0).collect())
 }
 
-pub fn forget(db: &ManagerDb, vid: &str) {
-    db.set(&key(vid), &json!([]));
+pub fn forget(db: &ManagerDb, vid: &str) -> DbResult<()> {
+    db.set(&key(vid), &json!([]))
 }
 
 #[cfg(test)]
@@ -103,12 +104,29 @@ mod tests {
         let rels: Vec<String> = ["TeslaCam/RecentClips/2025-03-19_10-00-00-front.mp4", "TeslaCam/RecentClips/2025-03-01_10-00-00-front.mp4", "TeslaCam/SentryClips/x/event.json", "TeslaCam/RecentClips/2025-03-11_10-00-00-back.mp4", "TeslaCam/RecentClips/2025-03-10_10-00-00-back.mp4"]
             .iter().map(|s| s.to_string()).collect();
         // (the 11th is within 9 days and one more of the 20th at noon; the 10th and the 1st are not)
-        assert_eq!(add(&db, "car", &rels, now), 2);
-        assert_eq!(list(&db, "car", now).len(), 2);
-        assert_eq!(list(&db, "car", now + KEEP_MS + 1.0).len(), 0);
-        assert_eq!(add(&db, "car", &[], now + KEEP_MS + 1.0), 0);
-        assert_eq!(db.get("deleted-clips:car").unwrap(), json!([]));
-        forget(&db, "car");
-        assert_eq!(add(&db, "", &rels, now), 0);
+        assert_eq!(add(&db, "car", &rels, now).unwrap(), 2);
+        assert_eq!(list(&db, "car", now).unwrap().len(), 2);
+        assert_eq!(list(&db, "car", now + KEEP_MS + 1.0).unwrap().len(), 0);
+        assert_eq!(add(&db, "car", &[], now + KEEP_MS + 1.0).unwrap(), 0);
+        assert_eq!(db.get("deleted-clips:car").unwrap().unwrap(), json!([]));
+        forget(&db, "car").unwrap();
+        assert_eq!(add(&db, "", &rels, now).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_list_that_cannot_be_read_is_never_written_over() {
+        let dir = std::env::temp_dir().join(format!("lean-deleted-clips-{}-{}", std::process::id(), super::super::random_hex(3)));
+        let core = std::sync::Arc::new(crate::core::db::Db::open(&dir.join("manager.db")).unwrap());
+        let db = ManagerDb::of_core(core.clone());
+        let now = chrono::NaiveDate::from_ymd_opt(2025, 3, 20).unwrap().and_hms_opt(12, 0, 0).unwrap().and_utc().timestamp_millis() as f64;
+        let rel = |t: &str| vec![format!("TeslaCam/RecentClips/2025-03-19_{t}-front.mp4")];
+        assert_eq!(add(&db, "car", &rel("10-00-00"), now).unwrap(), 1);
+        let before = db.get("deleted-clips:car").unwrap();
+        core.fail_setting_reads("deleted-clips:car");
+        assert!(add(&db, "car", &rel("11-00-00"), now).is_err());
+        assert!(list(&db, "car", now).is_err(), "not an empty list");
+        core.mend_reads();
+        assert_eq!(db.get("deleted-clips:car").unwrap(), before);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -37,14 +37,16 @@ fn refuse_banned(c: &Ctx) -> Result<(), HttpError> {
 }
 
 /// One failed attempt from this address; a ban it brings from a signed-in session signs that session out.
-fn failed_attempt(c: &Ctx, reason: &str, session: bool) -> bool {
-    let b = c.state.access.fail(&c.client, reason);
-    if b.is_some() && session {
+/// A 500 when that ban could not be saved (it holds in memory; the session stays, as Node stops at the
+/// failed save) or that session could not be signed out (it would still work from another address).
+fn failed_attempt(c: &Ctx, reason: &str, session: bool) -> Result<bool, HttpError> {
+    let banned = c.state.access.fail(&c.client, reason)?.is_some();
+    if banned && session {
         if let Some(h) = c.state.auth.session_hash(&c.view()) {
-            c.state.db.delete_session(&h);
+            c.state.db.delete_session(&h)?;
         }
     }
-    b.is_some()
+    Ok(banned)
 }
 
 fn too_many(wait: i64) -> HttpError {
@@ -64,11 +66,15 @@ fn cut(s: &str, n: usize) -> String {
 
 fn me(c: &mut Ctx) -> Result<Reply, HttpError> {
     let st = &c.state;
-    let user = st.auth.user(&c.view());
+    let user = st.auth.user(&c.view())?;
     let home = st.from_home(&c.client);
     let rules = st.access.get();
+    let admin = match &user {
+        Some(u) => st.accounts.is_admin(u)?,
+        None => false,
+    };
     let limited = match &user {
-        Some(u) if st.accounts.is_admin(u) && !home => {
+        Some(_) if admin && !home => {
             if truthy(&rules["homeOnly"]["adminPages"]) {
                 Some("pages")
             } else if truthy(&rules["homeOnly"]["adminChanges"]) {
@@ -81,9 +87,15 @@ fn me(c: &mut Ctx) -> Result<Reply, HttpError> {
     };
     let mut out = Map::new();
     out.insert("user".into(), json!(user));
-    out.insert("role".into(), json!(user.as_ref().and_then(|u| st.role_for(&c.client, u))));
-    out.insert("twoFactor".into(), json!(user.as_ref().is_some_and(|u| st.accounts.two_factor_on(u))));
-    let needs = st.auth.needs_setup();
+    out.insert("role".into(), json!(match &user {
+        Some(u) => st.role_for(&c.client, u)?,
+        None => None,
+    }));
+    out.insert("twoFactor".into(), json!(match &user {
+        Some(u) => st.accounts.two_factor_on(u)?,
+        None => false,
+    }));
+    let needs = st.auth.needs_setup()?;
     out.insert("needsSetup".into(), json!(needs));
     out.insert("secure".into(), json!(c.secure));
     out.insert("fingerprint".into(), json!(if c.conn.encrypted { st.cert_fingerprint() } else { None }));
@@ -98,8 +110,10 @@ fn me(c: &mut Ctx) -> Result<Reply, HttpError> {
     if let Some(l) = limited {
         out.insert("adminLimited".into(), json!(l));
     }
-    if user.as_ref().is_some_and(|u| st.two_factor_state(u, home) == "setup") {
-        out.insert("twoFactorSetupRequired".into(), json!(true));
+    if let Some(u) = &user {
+        if st.two_factor_state(u, home)? == "setup" {
+            out.insert("twoFactorSetupRequired".into(), json!(true));
+        }
     }
     Ok(Reply::json(Value::Object(out)))
 }
@@ -114,13 +128,14 @@ fn login(c: &mut Ctx) -> Result<Reply, HttpError> {
         return Err(too_many(wait));
     }
     let password = c.field("password").and_then(Value::as_str).map(String::from);
-    let ok = guarded(c, &keys, || st.auth.check(&name, password.as_deref()))?;
+    // (an account that cannot be read is a 500, never a wrong password toward a ban)
+    let ok = guarded(c, &keys, || st.auth.check(&name, password.as_deref()))??;
     if !ok {
         for k in &keys {
             st.auth.note_failure(k);
         }
         st.audit.warn(format!("Sign-in failed for \"{}\" from {}", cut(&name, 64), c.client));
-        if failed_attempt(c, "wrong password", false) {
+        if failed_attempt(c, "wrong password", false)? {
             return Err(banned());
         }
         return Err(HttpError::new(401, "Wrong user name or password."));
@@ -129,18 +144,18 @@ fn login(c: &mut Ctx) -> Result<Reply, HttpError> {
         st.auth.note_success(k);
     }
     let username = js_string(c.field("username"));
-    let rule = st.two_factor_state(&username, st.from_home(&c.client));
+    let rule = st.two_factor_state(&username, st.from_home(&c.client))?;
     if rule == "out" {
         st.audit.warn(format!("Sign-in refused (no two-step sign-in, outside the home network): {}", c.by(Some(&username))));
         let everyone = truthy(&st.access.get()["twoFactor"]["everyone"]);
         return Err(HttpError::new(403, if everyone { super::server::TWO_FACTOR_EVERYONE_TEXT } else { super::server::TWO_FACTOR_OUTSIDE_TEXT }).code("TWO_FACTOR_REQUIRED"));
     }
-    if st.accounts.two_factor_on(&username) {
+    if st.accounts.two_factor_on(&username)? {
         let cookie = pending_cookie(c, &st.accounts.start_pending(&username), 300);
         st.audit.info(format!("Password right, waiting for the two-step code: {}", c.by(Some(&username))));
         return Ok(Reply::json(json!({ "ok": true, "twoFactor": true, "next": "/login/code" })).cookie(&cookie));
     }
-    let cookie = st.auth.login(&c.view(), &username, Some(&c.client));
+    let cookie = st.auth.login(&c.view(), &username, Some(&c.client))?;
     if rule == "setup" {
         st.audit.info(format!("Signed in to set up two-step sign-in (every account needs it): {}", c.by(Some(&username))));
         return Ok(Reply::json(json!({ "ok": true, "twoFactorSetup": true, "next": "/login/two-factor" })).cookie(&cookie));
@@ -160,19 +175,21 @@ fn two_factor_code(c: &mut Ctx) -> Result<Reply, HttpError> {
     let code = js_string(c.field("code"));
     let username = match st.accounts.finish_pending(pending_token(c).as_deref(), &code) {
         Ok(u) => u,
+        // (a code that could not be checked is not a wrong one)
+        Err((e, _)) if e.status >= 500 => return Err(e.into()),
         Err((e, expired)) => {
             st.auth.note_failure(&key);
             st.audit.warn(format!("Two-step code wrong from {}", c.client));
             let clear = pending_cookie(c, "", 0);
             let with = |err: HttpError| if expired { err.with_cookie(&clear) } else { err };
-            if failed_attempt(c, "wrong two-step code", false) {
+            if failed_attempt(c, "wrong two-step code", false).map_err(&with)? {
                 return Err(with(banned()));
             }
             return Err(with(HttpError::new(e.status, e.message)));
         }
     };
     st.auth.note_success(&key);
-    let cookie = st.auth.login(&c.view(), &username, Some(&c.client));
+    let cookie = st.auth.login(&c.view(), &username, Some(&c.client))?;
     st.audit.info(format!("Signed in with a two-step code: {}", c.by(Some(&username))));
     Ok(Reply::json(json!({ "ok": true })).cookie(&cookie).cookie(&pending_cookie(c, "", 0)))
 }
@@ -207,14 +224,14 @@ fn setup(c: &mut Ctx) -> Result<Reply, HttpError> {
         if e.status == 403 {
             st.auth.note_failure(&key);
             st.audit.warn(format!("Account setup with a wrong setup code from {}", c.client));
-            if failed_attempt(c, "wrong setup code", false) {
+            if failed_attempt(c, "wrong setup code", false)? {
                 return Err(banned());
             }
         }
         return Err(e.into());
     }
     let username = js_string(c.field("username"));
-    let cookie = st.auth.login(&c.view(), &username, Some(&c.client));
+    let cookie = st.auth.login(&c.view(), &username, Some(&c.client))?;
     st.audit.info(format!("Account \"{username}\" created with the setup code: {}", c.by(Some(&username))));
     if let (Some((share, anonymous)), Some(f)) = (opt_in, st.hooks.reports_setup.get()) {
         let configured = st.hooks.reports_configured.get().is_none_or(|g| g());
@@ -237,7 +254,7 @@ fn setup(c: &mut Ctx) -> Result<Reply, HttpError> {
 }
 
 fn logout(c: &mut Ctx) -> Result<Reply, HttpError> {
-    let cookie = c.state.auth.logout(&c.view());
+    let cookie = c.state.auth.logout(&c.view())?;
     c.state.audit.info(format!("Signed out: {}", c.by(c.user.as_deref())));
     Ok(Reply::json(json!({ "ok": true })).cookie(&cookie))
 }
@@ -252,11 +269,11 @@ fn confirm(c: &mut Ctx) -> Result<Reply, HttpError> {
         return Err(too_many(wait));
     }
     let password = c.field("password").and_then(Value::as_str).map(String::from);
-    let ok = guarded(c, std::slice::from_ref(&key), || st.auth.confirm(&c.view(), &user, password.as_deref()))?;
+    let ok = guarded(c, std::slice::from_ref(&key), || st.auth.confirm(&c.view(), &user, password.as_deref()))??;
     if !ok {
         st.auth.note_failure(&key);
         st.audit.warn(format!("Password confirmation failed: {}", c.by(Some(&user))));
-        if failed_attempt(c, "wrong password confirmation", true) {
+        if failed_attempt(c, "wrong password confirmation", true)? {
             return Err(banned());
         }
         return Err(HttpError::new(401, "That password is not right."));
@@ -276,34 +293,35 @@ fn change_password(c: &mut Ctx) -> Result<Reply, HttpError> {
         return Err(too_many(wait));
     }
     let current = c.field("current").and_then(Value::as_str).map(String::from);
-    let ok = guarded(c, std::slice::from_ref(&key), || st.auth.check(&user, current.as_deref()))?;
+    let ok = guarded(c, std::slice::from_ref(&key), || st.auth.check(&user, current.as_deref()))??;
     if !ok {
         st.auth.note_failure(&key);
         st.audit.warn(format!("Password change with a wrong current password: {}", c.by(Some(&user))));
-        if failed_attempt(c, "wrong current password", true) {
+        if failed_attempt(c, "wrong current password", true)? {
             return Err(banned());
         }
         return Err(HttpError::new(401, "The current password is wrong."));
     }
     st.auth.note_success(&key);
     st.auth.set_password(&user, &c.field_str("next"))?;
-    st.db.delete_sessions_for(&user);
+    st.db.delete_sessions_for(&user)?;
     st.auth.forget_confirmations();
-    let cookie = st.auth.login(&c.view(), &user, Some(&c.client));
+    let cookie = st.auth.login(&c.view(), &user, Some(&c.client))?;
     st.audit.info(format!("Password changed (all other sessions signed out): {}", c.by(Some(&user))));
     Ok(Reply::json(json!({ "ok": true })).cookie(&cookie))
 }
 
-fn access_view(c: &Ctx) -> Value {
+fn access_view(c: &Ctx) -> Result<Value, HttpError> {
     let st = &c.state;
     let ip = &c.client;
-    let me = st.auth.user(&c.view()).unwrap_or_else(|| "null".into());
-    json!({
+    let me = st.auth.user(&c.view())?.unwrap_or_else(|| "null".into());
+    let without: Vec<Value> = st.accounts.list()?.into_iter().filter(|a| a["twoFactor"] != true).map(|a| a["username"].clone()).collect();
+    Ok(json!({
         "settings": st.access.get(), "bans": st.access.list(), "watching": st.access.watching(),
         "you": { "address": ip, "banKey": ban_key(ip), "home": st.access.is_home(ip) },
         "trustProxy": st.config.trust_proxy, "trustedProxies": st.config.trusted_proxies,
-        "twoFactor": { "yours": st.accounts.two_factor_on(&me), "without": st.accounts.list().into_iter().filter(|a| a["twoFactor"] != true).map(|a| a["username"].clone()).collect::<Vec<_>>() }
-    })
+        "twoFactor": { "yours": st.accounts.two_factor_on(&me)?, "without": without }
+    }))
 }
 
 fn running_as_root() -> bool {
@@ -372,7 +390,7 @@ fn put_access(c: &mut Ctx) -> Result<Reply, HttpError> {
         None => Value::Null,
     };
     let next = validate_access(&input, &before)?;
-    let mine = st.accounts.two_factor_on(&user);
+    let mine = st.accounts.two_factor_on(&user)?;
     let home = st.access.is_home(&c.client);
     if truthy(&next["twoFactor"]["everyone"]) && !truthy(&before["twoFactor"]["everyone"]) && !mine {
         return Err(HttpError::new(409, "Turn on two-step sign-in for your own account first (Account), then every account can be made to need it."));
@@ -380,7 +398,7 @@ fn put_access(c: &mut Ctx) -> Result<Reply, HttpError> {
     if truthy(&next["twoFactor"]["outside"]) && !truthy(&before["twoFactor"]["outside"]) && !mine && !home {
         return Err(HttpError::new(409, "You are outside the home network without two-step sign-in: this would sign you out. Turn it on for your account first (Account)."));
     }
-    st.access.set(&next);
+    st.access.set(&next)?;
     let mut changes = Vec::new();
     if let Value::Object(parts) = &next {
         for (part, v) in parts {
@@ -398,13 +416,13 @@ fn put_access(c: &mut Ctx) -> Result<Reply, HttpError> {
     if !changes.is_empty() {
         st.audit.warn(format!("Security settings changed ({}): {}", changes.join(", "), c.by(Some(&user))));
     }
-    Ok(Reply::json(access_view(c)))
+    Ok(Reply::json(access_view(c)?))
 }
 
 fn unban(c: &mut Ctx) -> Result<Reply, HttpError> {
     let addr = cut(&c.field_str("address"), 64);
     c.state.access.unban(&addr, &c.by(c.user.as_deref()))?;
-    Ok(Reply::json(access_view(c)))
+    Ok(Reply::json(access_view(c)?))
 }
 
 fn sessions(c: &mut Ctx) -> Result<Reply, HttpError> {
@@ -412,7 +430,7 @@ fn sessions(c: &mut Ctx) -> Result<Reply, HttpError> {
     let list: Vec<Value> = c
         .state
         .db
-        .sessions_for(c.user())
+        .sessions_for(c.user())?
         .into_iter()
         .map(|x| json!({ "id": &x.token_hash[..16.min(x.token_hash.len())], "current": Some(&x.token_hash) == mine.as_ref(), "agent": x.agent, "ip": x.ip, "createdAt": x.created_at, "seenAt": x.seen_at }))
         .collect();
@@ -421,9 +439,9 @@ fn sessions(c: &mut Ctx) -> Result<Reply, HttpError> {
 
 fn end_session(c: &mut Ctx) -> Result<Reply, HttpError> {
     let id = c.params.get("id").cloned().unwrap_or_default();
-    let hit = c.state.db.sessions_for(c.user()).into_iter().find(|x| x.token_hash.get(..16) == Some(id.as_str()));
+    let hit = c.state.db.sessions_for(c.user())?.into_iter().find(|x| x.token_hash.get(..16) == Some(id.as_str()));
     let Some(hit) = hit else { return Err(HttpError::new(404, "No such session.")) };
-    c.state.db.delete_session(&hit.token_hash);
+    c.state.db.delete_session(&hit.token_hash)?;
     c.state.audit.info(format!("Signed out a device: {}", c.by(c.user.as_deref())));
     Ok(Reply::json(json!({ "ok": true })))
 }
@@ -431,13 +449,22 @@ fn end_session(c: &mut Ctx) -> Result<Reply, HttpError> {
 fn end_others(c: &mut Ctx) -> Result<Reply, HttpError> {
     let mine = c.state.auth.session_hash(&c.view());
     let mut n = 0;
-    for x in c.state.db.sessions_for(c.user()) {
+    let mut failed = None;
+    for x in c.state.db.sessions_for(c.user())? {
         if Some(&x.token_hash) != mine.as_ref() {
-            c.state.db.delete_session(&x.token_hash);
+            if let Err(e) = c.state.db.delete_session(&x.token_hash) {
+                failed = Some(e);
+                break;
+            }
             n += 1;
         }
     }
-    c.state.audit.warn(format!("Signed out everywhere else ({n} session{}): {}", if n == 1 { "" } else { "s" }, c.by(c.user.as_deref())));
+    // (the ones that did end are in the audit log even when the rest could not be)
+    let rest = if failed.is_some() { "; the others could not be signed out" } else { "" };
+    c.state.audit.warn(format!("Signed out everywhere else ({n} session{}{rest}): {}", if n == 1 { "" } else { "s" }, c.by(c.user.as_deref())));
+    if let Some(e) = failed {
+        return Err(e.into());
+    }
     Ok(Reply::json(json!({ "ended": n })))
 }
 
@@ -445,14 +472,15 @@ fn add_account(c: &mut Ctx) -> Result<Reply, HttpError> {
     c.require_confirmed()?;
     let st = c.state.clone();
     let name = c.field_str("username");
-    if st.db.get_user(&name).is_some() {
+    if st.db.get_user(&name)?.is_some() {
         return Err(HttpError::new(409, "There is an account with that name already."));
     }
-    st.auth.set_password(&name, &c.field_str("password"))?;
     let role = if c.field("role") == Some(&json!("admin")) { "admin" } else { "viewer" };
-    st.accounts.set_role(&name, role)?;
-    st.audit.warn(format!("Account \"{name}\" ({}) created: {}", st.accounts.role_of(Some(&name)).unwrap_or_default(), c.by(c.user.as_deref())));
-    Ok(Reply::json(json!({ "accounts": st.accounts.list() })))
+    // (the account and its role are kept together: never an account without its role, which would be an admin)
+    let (key, record) = st.accounts.first_record(&name, role)?;
+    st.auth.add_user(&name, &c.field_str("password"), &[(&key, &record)])?;
+    st.audit.warn(format!("Account \"{name}\" ({}) created: {}", st.accounts.role_of(Some(&name))?.unwrap_or_default(), c.by(c.user.as_deref())));
+    Ok(Reply::json(json!({ "accounts": st.accounts.list()? })))
 }
 
 fn patch_account(c: &mut Ctx) -> Result<Reply, HttpError> {
@@ -465,7 +493,7 @@ fn patch_account(c: &mut Ctx) -> Result<Reply, HttpError> {
     };
     st.accounts.set_role(&name, &role)?;
     st.audit.warn(format!("Account \"{name}\" is now {role}: {}", c.by(c.user.as_deref())));
-    Ok(Reply::json(json!({ "accounts": st.accounts.list() })))
+    Ok(Reply::json(json!({ "accounts": st.accounts.list()? })))
 }
 
 fn delete_account(c: &mut Ctx) -> Result<Reply, HttpError> {
@@ -477,7 +505,7 @@ fn delete_account(c: &mut Ctx) -> Result<Reply, HttpError> {
     }
     st.accounts.remove(&name)?;
     st.audit.warn(format!("Account \"{name}\" removed: {}", c.by(c.user.as_deref())));
-    Ok(Reply::json(json!({ "accounts": st.accounts.list() })))
+    Ok(Reply::json(json!({ "accounts": st.accounts.list()? })))
 }
 
 fn logs(c: &mut Ctx) -> Result<Reply, HttpError> {
@@ -530,7 +558,7 @@ fn jobs(c: &mut Ctx) -> Result<Reply, HttpError> {
     let list: Vec<Value> = c
         .state
         .jobs
-        .list(limit.trunc() as i64, vehicle.as_deref())
+        .list(limit.trunc() as i64, vehicle.as_deref())?
         .into_iter()
         .map(|j| {
             let mut v = j.to_json();
@@ -575,9 +603,9 @@ fn jobs_clear(c: &mut Ctx) -> Result<Reply, HttpError> {
     }
     let keep = st.hooks.conversions_active.get().map(|f| f()).unwrap_or_default();
     if preview {
-        return Ok(Reply::json(json!({ "jobs": st.jobs.finished(vehicle_id.as_deref(), &keep) })));
+        return Ok(Reply::json(json!({ "jobs": st.jobs.finished(vehicle_id.as_deref(), &keep)? })));
     }
-    let cleared = st.jobs.clear(vehicle_id.as_deref(), &keep);
+    let cleared = st.jobs.clear(vehicle_id.as_deref(), &keep)?;
     st.audit.info(format!("Jobs cleared: {cleared} finished job(s){}: {}", vehicle_id.as_ref().map(|v| format!(" of {v}")).unwrap_or_default(), c.by(c.user.as_deref())));
     Ok(Reply::json(json!({ "cleared": cleared })))
 }
@@ -589,11 +617,11 @@ pub fn register(r: &mut Router) {
     r.add(Method::POST, "/api/auth/2fa/code", Access::Public, two_factor_code);
     r.get("/api/auth/2fa", |c| {
         let u = c.user().to_string();
-        Ok(Reply::json(json!({ "enabled": c.state.accounts.two_factor_on(&u), "recoveryLeft": c.state.accounts.recovery_left(&u) })))
+        Ok(Reply::json(json!({ "enabled": c.state.accounts.two_factor_on(&u)?, "recoveryLeft": c.state.accounts.recovery_left(&u)? })))
     });
     r.post("/api/auth/2fa/start", |c| {
         c.require_confirmed()?;
-        Ok(Reply::json(c.state.accounts.start_totp(c.user())))
+        Ok(Reply::json(c.state.accounts.start_totp(c.user())?))
     });
     r.post("/api/auth/2fa/enable", |c| {
         let recovery = c.state.accounts.enable_totp(c.user(), &js_string(c.field("code")))?;
@@ -602,14 +630,14 @@ pub fn register(r: &mut Router) {
     });
     r.post("/api/auth/2fa/disable", |c| {
         c.require_confirmed()?;
-        c.state.accounts.disable_totp(c.user());
+        c.state.accounts.disable_totp(c.user())?;
         c.state.audit.warn(format!("Two-step sign-in turned off: {}", c.by(c.user.as_deref())));
         Ok(Reply::json(json!({ "ok": true })))
     });
     r.get("/api/auth/sessions", sessions);
     r.post("/api/auth/sessions/:id/end", end_session);
     r.post("/api/auth/sessions-end-others", end_others);
-    r.get("/api/accounts", |c| Ok(Reply::json(json!({ "accounts": c.state.accounts.list() }))));
+    r.get("/api/accounts", |c| Ok(Reply::json(json!({ "accounts": c.state.accounts.list()? }))));
     r.post("/api/accounts", add_account);
     r.add(Method::PATCH, "/api/accounts/:name", Access::SignedIn, patch_account);
     r.add(Method::DELETE, "/api/accounts/:name", Access::SignedIn, delete_account);
@@ -620,7 +648,7 @@ pub fn register(r: &mut Router) {
     r.get("/api/security", security);
     r.add(Method::PUT, "/api/security/hostnames", Access::SignedIn, set_hostnames);
     r.get("/api/security/ca.crt", ca_crt);
-    r.get("/api/security/access", |c| Ok(Reply::json(access_view(c))));
+    r.get("/api/security/access", |c| Ok(Reply::json(access_view(c)?)));
     r.add(Method::PUT, "/api/security/access", Access::SignedIn, put_access);
     r.post("/api/security/unban", unban);
     r.get("/api/logs", logs);
@@ -638,4 +666,194 @@ pub fn register(r: &mut Router) {
     r.get("/api/logs/search", logs_search);
     r.get("/api/jobs", jobs);
     r.post("/api/jobs/clear", jobs_clear);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::http::ConnInfo;
+    use crate::core::state::AppState;
+    use http_body_util::BodyExt;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    /// A server of its own (DATA in a temporary folder, HTTPS off) with its admin signed in:
+    /// the state, the session cookie and the folder.
+    fn server(name: &str) -> (Arc<AppState>, String, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("lean-routes-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let env = [("DATA_PATH", dir.to_string_lossy().into_owned()), ("TLS_MODE", "off".into()), ("UI_USERNAME", "admin".into()), ("UI_PASSWORD", "correct horse".into())];
+        let config = crate::core::Config::from_map(env.into_iter().map(|(k, v)| (k.to_string(), v)).collect());
+        let st = AppState::open_with(config, super::super::log::Logger::with("error", 100, true, None, 1)).unwrap();
+        super::super::server::install(&st, crate::core::router());
+        let set = st.auth.login(&super::super::auth::ReqView { secure: false, cookie: "", agent: "" }, "admin", None).unwrap();
+        (st, set.split(';').next().unwrap().to_string(), dir)
+    }
+
+    fn put(st: &Arc<AppState>, cookie: &str, path: &str, body: Value) -> Ctx {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(header::COOKIE, cookie.parse().unwrap());
+        let conn = ConnInfo { peer: None, encrypted: false, device: false };
+        Ctx { state: st.clone(), method: Method::PUT, raw_path: path.into(), path: path.into(), params: HashMap::new(), query: HashMap::new(), raw_query: None, headers, body: Some(body), user: Some("admin".into()), conn, client: "127.0.0.1".into(), secure: false }
+    }
+
+    /// A request from `client` (an address outside the home network can be banned), signed in
+    /// as admin with `cookie` when given.
+    fn from(st: &Arc<AppState>, cookie: Option<&str>, method: Method, path: &str, body: Value, client: &str) -> Ctx {
+        let mut headers = axum::http::HeaderMap::new();
+        if let Some(c) = cookie {
+            headers.insert(header::COOKIE, c.parse().unwrap());
+        }
+        let conn = ConnInfo { peer: None, encrypted: false, device: false };
+        let user = cookie.map(|_| "admin".to_string());
+        Ctx { state: st.clone(), method, raw_path: path.into(), path: path.into(), params: HashMap::new(), query: HashMap::new(), raw_query: None, headers, body: Some(body), user, conn, client: client.into(), secure: false }
+    }
+
+    /// Writes matching `when` fail inside manager.db (as a failing disk would), every other write is kept.
+    fn failing(st: &Arc<AppState>, name: &str, when: &str) {
+        st.db.conn().execute_batch(&format!("CREATE TEMP TRIGGER {name} {when} BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;")).unwrap();
+    }
+
+    #[test]
+    fn a_security_settings_save_that_was_not_kept_answers_500_and_changes_nothing() {
+        let (st, cookie, dir) = server("access");
+        let mut c = put(&st, &cookie, "/api/security/access", json!({ "bans": { "maxFailures": 5 } }));
+        st.db.conn().execute_batch("PRAGMA query_only = ON").unwrap();
+        let e = put_access(&mut c).err().expect("an error answer, not success");
+        assert_eq!((e.status, e.explicit), (500, false), "500 Internal error, logged");
+        assert_eq!(st.access.get()["bans"]["maxFailures"], 10, "the rules in force are the ones kept");
+        st.db.conn().execute_batch("PRAGMA query_only = OFF").unwrap();
+        assert_eq!(st.db.get(super::super::access::KEY_SETTINGS).unwrap(), None, "nothing was written");
+        assert!(put_access(&mut c).is_ok());
+        assert_eq!(st.access.get()["bans"]["maxFailures"], 5);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_session_that_cannot_be_read_answers_500_not_signed_out() {
+        let (st, cookie, dir) = server("session");
+        let me = || {
+            let req = axum::http::Request::builder().uri("/api/auth/me").header(header::HOST, "127.0.0.1:9000").header(header::COOKIE, cookie.as_str()).body(axum::body::Body::empty()).unwrap();
+            super::super::server::dispatch(st.clone(), req, ConnInfo { peer: None, encrypted: false, device: false })
+        };
+        let body = |r: axum::http::Response<axum::body::Body>| async move { serde_json::from_slice::<Value>(&r.into_body().collect().await.unwrap().to_bytes()).unwrap() };
+        let ok = me().await;
+        assert_eq!(ok.status(), 200);
+        assert_eq!(body(ok).await["user"], "admin");
+        st.db.conn().execute_batch("DROP TABLE sessions").unwrap();
+        let failed = me().await;
+        assert_eq!(failed.status(), 500);
+        assert_eq!(body(failed).await, json!({ "error": "Internal error" }), "not a signed-out answer (user null): the sessions could not be read");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_account_whose_role_cannot_be_kept_is_not_made_at_all() {
+        let (st, cookie, dir) = server("add-account");
+        // (its record cannot be written, nor can an account be deleted afterwards)
+        failing(&st, "no_record", "BEFORE INSERT ON settings WHEN NEW.key = 'account:watcher'");
+        failing(&st, "no_delete", "BEFORE DELETE ON users");
+        let mut c = from(&st, Some(&cookie), Method::POST, "/api/accounts", json!({ "username": "watcher", "password": "correct horse", "role": "viewer" }), "127.0.0.1");
+        let e = add_account(&mut c).err().expect("an error answer");
+        assert_eq!(e.status, 500);
+        assert!(st.db.get_user("watcher").unwrap().is_none(), "no account without its role (it would be an admin)");
+        assert_eq!(st.accounts.list().unwrap().len(), 1);
+        st.db.conn().execute_batch("DROP TRIGGER no_record; DROP TRIGGER no_delete").unwrap();
+        add_account(&mut c).unwrap();
+        assert_eq!(st.accounts.role_of(Some("watcher")).unwrap().as_deref(), Some("viewer"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_removed_account_takes_its_record_with_it_or_stays_whole() {
+        let (st, cookie, dir) = server("remove-account");
+        add_account(&mut from(&st, Some(&cookie), Method::POST, "/api/accounts", json!({ "username": "watcher", "password": "correct horse", "role": "viewer" }), "127.0.0.1")).unwrap();
+        st.auth.login(&super::super::auth::ReqView { secure: false, cookie: "", agent: "" }, "watcher", None).unwrap();
+        // (the record cannot be cleared)
+        failing(&st, "no_clear", "BEFORE UPDATE ON settings WHEN NEW.key = 'account:watcher'");
+        let mut c = from(&st, Some(&cookie), Method::DELETE, "/api/accounts/watcher", Value::Null, "127.0.0.1");
+        c.params.insert("name".into(), "watcher".into());
+        assert_eq!(delete_account(&mut c).err().expect("an error answer").status, 500);
+        assert!(st.db.get_user("watcher").unwrap().is_some(), "not gone without its record");
+        assert_eq!(st.db.sessions_for("watcher").unwrap().len(), 1);
+        assert_eq!(st.db.get("account:watcher").unwrap(), Some(json!({ "role": "viewer" })));
+        st.db.conn().execute_batch("DROP TRIGGER no_clear").unwrap();
+        delete_account(&mut c).unwrap();
+        assert!(st.db.get_user("watcher").unwrap().is_none());
+        assert_eq!(st.db.get("account:watcher").unwrap(), Some(Value::Null), "the record goes with it: an account made later of that name starts fresh");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_ban_that_cannot_be_saved_answers_500_and_holds_until_a_restart() {
+        let (st, _cookie, dir) = server("ban-unsaved");
+        st.access.set(&super::super::access::validate(&json!({ "bans": { "maxFailures": 3 } }), &st.access.get()).unwrap()).unwrap();
+        st.db.conn().execute_batch("PRAGMA query_only = ON").unwrap();
+        let wrong = || from(&st, None, Method::POST, "/api/auth/login", json!({ "username": "admin", "password": "wrong horse" }), "203.0.113.7");
+        for _ in 0..2 {
+            assert_eq!(login(&mut wrong()).err().unwrap().status, 401);
+        }
+        let e = login(&mut wrong()).err().unwrap();
+        assert_eq!(e.status, 500, "not the ban answer (429) for a ban that was not saved");
+        assert!(st.access.banned("203.0.113.7").is_some(), "it holds in memory");
+        assert_eq!(login(&mut wrong()).err().unwrap().status, 429);
+        st.db.conn().execute_batch("PRAGMA query_only = OFF").unwrap();
+        let restarted = super::super::access::Access::new(st.db.clone(), None).unwrap();
+        assert!(restarted.banned("203.0.113.7").is_none(), "what a restart would know");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_banned_session_that_cannot_be_signed_out_answers_500() {
+        let (st, cookie, dir) = server("ban-session");
+        st.access.set(&super::super::access::validate(&json!({ "bans": { "maxFailures": 3 } }), &st.access.get()).unwrap()).unwrap();
+        // (the ban is saved; the session cannot be removed)
+        failing(&st, "no_signout", "BEFORE DELETE ON sessions");
+        let wrong = || from(&st, Some(&cookie), Method::POST, "/api/auth/confirm", json!({ "password": "wrong horse" }), "203.0.113.8");
+        for _ in 0..2 {
+            assert_eq!(confirm(&mut wrong()).err().unwrap().status, 401);
+        }
+        let e = confirm(&mut wrong()).err().unwrap();
+        assert_eq!(e.status, 500, "not the ban answer while the session still works from another address");
+        assert!(st.access.banned("203.0.113.8").is_some());
+        assert_eq!(st.db.sessions_for("admin").unwrap().len(), 1);
+        st.db.conn().execute_batch("DROP TRIGGER no_signout").unwrap();
+        let restarted = super::super::access::Access::new(st.db.clone(), None).unwrap();
+        assert!(restarted.banned("203.0.113.8").is_some(), "the ban itself was saved");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_session_whose_ban_could_not_be_saved_is_not_signed_out() {
+        let (st, cookie, dir) = server("ban-unsaved-session");
+        st.access.set(&super::super::access::validate(&json!({ "bans": { "maxFailures": 3 } }), &st.access.get()).unwrap()).unwrap();
+        // (the ban cannot be saved; sessions can still be removed)
+        failing(&st, "no_ban_insert", "BEFORE INSERT ON settings WHEN NEW.key = 'security:bans'");
+        failing(&st, "no_ban_update", "BEFORE UPDATE ON settings WHEN NEW.key = 'security:bans'");
+        let wrong = || from(&st, Some(&cookie), Method::POST, "/api/auth/confirm", json!({ "password": "wrong horse" }), "203.0.113.9");
+        for _ in 0..2 {
+            assert_eq!(confirm(&mut wrong()).err().unwrap().status, 401);
+        }
+        assert_eq!(confirm(&mut wrong()).err().unwrap().status, 500);
+        assert!(st.access.banned("203.0.113.9").is_some(), "it holds in memory");
+        assert_eq!(st.db.sessions_for("admin").unwrap().len(), 1, "not signed out for a ban that was not saved");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_start_whose_accounts_or_security_settings_cannot_be_read_names_them_and_stops() {
+        let (st, _cookie, dir) = server("start-unreadable");
+        let reopen = || {
+            let env = [("DATA_PATH", dir.to_string_lossy().into_owned()), ("TLS_MODE", "off".into())];
+            let config = crate::core::Config::from_map(env.into_iter().map(|(k, v)| (k.to_string(), v)).collect());
+            AppState::open_with(config, super::super::log::Logger::with("error", 100, true, None, 1)).err()
+        };
+        // (a view of a table that is gone: CREATE TABLE IF NOT EXISTS leaves it, and every read fails)
+        st.db.conn().execute_batch("ALTER TABLE users RENAME TO users_kept; CREATE TABLE gone (x); CREATE VIEW users AS SELECT * FROM gone; DROP TABLE gone;").unwrap();
+        assert_eq!(reopen().as_deref(), Some("The accounts could not be read: manager.db: no such table: main.gone"), "no setup code, no start");
+        st.db.conn().execute_batch("DROP VIEW users; ALTER TABLE users_kept RENAME TO users; ALTER TABLE settings RENAME TO settings_kept; CREATE TABLE gone (x); CREATE VIEW settings AS SELECT * FROM gone; DROP TABLE gone;").unwrap();
+        assert_eq!(reopen().as_deref(), Some("The security settings could not be read: manager.db: no such table: main.gone"), "no start without its bans and rules");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

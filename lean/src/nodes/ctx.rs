@@ -24,10 +24,11 @@ pub struct Vehicle {
 }
 
 pub trait NodesCtx: Send + Sync {
-    /// db.get(key) from manager.db's settings (`nodes`, `nodeWorker`); None when unset.
-    fn setting(&self, key: &str) -> Option<Value>;
-    /// db.set(key, value)
-    fn set_setting(&self, key: &str, value: &Value);
+    /// db.get(key) from manager.db's settings (`nodes`, `nodeWorker`); None when unset, an
+    /// error when it cannot be read.
+    fn setting(&self, key: &str) -> Result<Option<Value>, String>;
+    /// db.set(key, value): an error when it was not kept
+    fn set_setting(&self, key: &str, value: &Value) -> Result<(), String>;
     /// logger.scope('audit')
     fn audit(&self, _level: Level, line: &str) {
         eprintln!("[audit] {line}");

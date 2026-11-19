@@ -201,7 +201,7 @@ fn a_report_from_the_rust_client_is_taken_by_the_receiver() {
     }
     let r = Receiver::start(6, None);
     let (ctx, rep) = client(&r);
-    assert_eq!(rep.status()["configured"], true);
+    assert_eq!(rep.status().unwrap()["configured"], true);
     let pv = rep.preview(&json!({ "kind": "feedback", "message": "Love it", "contact": "me@example.org", "attach": true })).unwrap();
     let sent = rep.send_preview(&pv["previewId"]).unwrap();
     assert_eq!(sent["result"], "sent", "{sent}");
@@ -216,9 +216,9 @@ fn a_report_from_the_rust_client_is_taken_by_the_receiver() {
     let sp = rep.preview(&json!({ "kind": "support", "message": "Encoder stuck" })).unwrap();
     assert_eq!(rep.send_preview(&sp["previewId"]).unwrap()["result"], "sent");
     assert_eq!(r.index()[1]["trust"], "verified");
-    let refs: Vec<Value> = rep.status()["sentRefs"].as_array().unwrap().iter().map(|x| x["kind"].clone()).collect();
+    let refs: Vec<Value> = rep.status().unwrap()["sentRefs"].as_array().unwrap().iter().map(|x| x["kind"].clone()).collect();
     assert_eq!(refs, [json!("support"), json!("feedback")]);
-    assert_eq!(rep.status()["installCode"], json!(&pv["payload"]["install"].as_str().unwrap()[..8]));
+    assert_eq!(rep.status().unwrap()["installCode"], json!(&pv["payload"]["install"].as_str().unwrap()[..8]));
 
     // anonymous: ANON install, a key of its own
     let rep = Arc::clone(&rep);
@@ -253,7 +253,7 @@ fn a_report_from_the_rust_client_is_taken_by_the_receiver() {
     let res = rep.enqueue(&pl).unwrap();
     assert_eq!(res["result"], "retry");
     assert_eq!(res["status"], 429);
-    assert!(rep.status()["lastError"]["message"].as_str().unwrap().contains("busy"));
+    assert!(rep.status().unwrap()["lastError"]["message"].as_str().unwrap().contains("busy"));
     assert_eq!(rep.outbox().len(), 1);
     assert!(ctx.data.join("reports/install-key.pem").exists() && ctx.data.join("reports/anon-key.pem").exists());
 }
@@ -286,19 +286,19 @@ fn a_signed_move_is_followed_and_a_forged_one_is_not() {
     let env: HashMap<String, String> = [("NODE_ENV", "test"), ("REPORTS_PUBLIC_KEY", moved.line.as_str())].iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
     let map = Mapped(vec![("https://reports.skittles.live".into(), moved.url.clone()), ("https://reports2.example.org".into(), target.url.clone())]);
     let rep = Reports::new(ctx.clone(), env.clone(), json!({}), Arc::new(map), None);
-    assert_eq!(rep.endpoint(), "https://reports.skittles.live");
+    assert_eq!(rep.endpoint().unwrap(), "https://reports.skittles.live");
     rep.remote_config(true).unwrap();
-    assert_eq!(rep.endpoint(), "https://reports2.example.org");
-    assert_eq!(sentry_lean::ops::store::get(&ctx.db.lock().unwrap(), "reports-state").unwrap()["moved"]["url"], "https://reports2.example.org");
+    assert_eq!(rep.endpoint().unwrap(), "https://reports2.example.org");
+    assert_eq!(sentry_lean::ops::store::get(&ctx.db.lock().unwrap(), "reports-state").unwrap().unwrap()["moved"]["url"], "https://reports2.example.org");
 
     // REPORTS_URL set by hand is never moved
     let fixed = Reports::new(FakeCtx::new(), env_for(&moved), json!({}), Arc::new(Https), None);
     fixed.remote_config(true).unwrap();
-    assert_eq!(fixed.endpoint(), moved.url);
+    assert_eq!(fixed.endpoint().unwrap(), moved.url);
 
     // a move signed by another receiver's key is ignored
     let forged = Receiver::start(4, Some("https://evil.example.org"));
     let other = Reports::new(FakeCtx::new(), env, json!({}), Arc::new(Mapped(vec![("https://reports.skittles.live".into(), forged.url.clone())])), None);
     other.remote_config(true).unwrap();
-    assert_eq!(other.endpoint(), "https://reports.skittles.live");
+    assert_eq!(other.endpoint().unwrap(), "https://reports.skittles.live");
 }

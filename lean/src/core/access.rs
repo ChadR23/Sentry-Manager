@@ -4,7 +4,7 @@
 //! `security:bans`, as Node keeps them.
 
 use super::client_addr::{ban_key, home_matcher, parse_cidr, Matcher};
-use super::db::{now_ms, Db};
+use super::db::{now_ms, Db, DbError};
 use super::log::Scope;
 use indexmap::IndexMap;
 use serde_json::{json, Map, Value};
@@ -157,14 +157,16 @@ fn f(v: &Value) -> f64 {
 }
 
 impl Access {
-    pub fn new(db: Arc<Db>, audit: Option<Scope>) -> Access {
+    /// An error naming what could not be read, the settings or the bans (not the defaults: they
+    /// would lift the bans and the two-step and home-only rules).
+    pub fn new(db: Arc<Db>, audit: Option<Scope>) -> Result<Access, String> {
         Access::with_clock(db, audit, Box::new(now_ms))
     }
 
-    pub fn with_clock(db: Arc<Db>, audit: Option<Scope>, now: Box<dyn Fn() -> i64 + Send + Sync>) -> Access {
-        let settings = with_defaults(db.get(KEY_SETTINGS).as_ref());
+    pub fn with_clock(db: Arc<Db>, audit: Option<Scope>, now: Box<dyn Fn() -> i64 + Send + Sync>) -> Result<Access, String> {
+        let settings = with_defaults(db.get(KEY_SETTINGS).map_err(|e| format!("The security settings could not be read: {e}"))?.as_ref());
         let mut bans = IndexMap::new();
-        if let Some(Value::Array(list)) = db.get(KEY_BANS) {
+        if let Some(Value::Array(list)) = db.get(KEY_BANS).map_err(|e| format!("The bans could not be read: {e}"))? {
             for b in list {
                 if let Value::Object(b) = b {
                     if let (Some(k), Some(u)) = (b.get("key").and_then(Value::as_str), b.get("until").and_then(Value::as_f64)) {
@@ -176,10 +178,10 @@ impl Access {
             }
         }
         let home = home_of(&settings);
-        Access { db, audit, st: Mutex::new(State { settings, home, failures: IndexMap::new(), bans }), now }
+        Ok(Access { db, audit, st: Mutex::new(State { settings, home, failures: IndexMap::new(), bans }), now })
     }
 
-    fn save(&self, st: &mut State) {
+    fn save(&self, st: &mut State) -> Result<(), DbError> {
         let t = (self.now)() as f64;
         st.bans.retain(|_, b| f(&b["until"]) + REPEAT_MS >= t);
         if st.bans.len() > MAX_BANS {
@@ -190,19 +192,21 @@ impl Access {
                 st.bans.shift_remove(&k);
             }
         }
-        self.db.set(KEY_BANS, &Value::Array(st.bans.values().cloned().map(Value::Object).collect()));
+        self.db.set(KEY_BANS, &Value::Array(st.bans.values().cloned().map(Value::Object).collect()))
     }
 
     pub fn get(&self) -> Value {
         self.st.lock().unwrap().settings.clone()
     }
 
-    pub fn set(&self, next: &Value) -> Value {
+    /// The settings in force once they are kept; an error (and the settings as they were) when not.
+    pub fn set(&self, next: &Value) -> Result<Value, DbError> {
         let mut st = self.st.lock().unwrap();
-        st.settings = with_defaults(Some(next));
-        st.home = home_of(&st.settings);
-        self.db.set(KEY_SETTINGS, &st.settings);
-        st.settings.clone()
+        let settings = with_defaults(Some(next));
+        self.db.set(KEY_SETTINGS, &settings)?;
+        st.home = home_of(&settings);
+        st.settings = settings;
+        Ok(st.settings.clone())
     }
 
     pub fn is_home(&self, ip: &str) -> bool {
@@ -222,15 +226,16 @@ impl Access {
         Some(Value::Object(b.clone()))
     }
 
-    /// One failed attempt from this address; the ban, when it was the one too many.
-    pub fn fail(&self, ip: &str, reason: &str) -> Option<Value> {
+    /// One failed attempt from this address; the ban, when it was the one too many. An error
+    /// when that ban could not be saved (it holds in memory all the same, as in Node).
+    pub fn fail(&self, ip: &str, reason: &str) -> Result<Option<Value>, DbError> {
         let mut st = self.st.lock().unwrap();
         let cfg = st.settings["bans"].clone();
         if !super::accounts::truthy(&cfg["enabled"]) {
-            return None;
+            return Ok(None);
         }
         if super::accounts::truthy(&cfg["exemptHome"]) && st.home.check(ip) {
-            return None;
+            return Ok(None);
         }
         let key = ban_key(ip);
         let t = (self.now)();
@@ -244,12 +249,12 @@ impl Access {
             st.failures.shift_remove_index(0);
         }
         if (count as f64) < f(&cfg["maxFailures"]) {
-            return None;
+            return Ok(None);
         }
-        Some(self.ban(&mut st, &key, reason, count))
+        self.ban(&mut st, &key, reason, count).map(Some)
     }
 
-    fn ban(&self, st: &mut State, key: &str, reason: &str, count: usize) -> Value {
+    fn ban(&self, st: &mut State, key: &str, reason: &str, count: usize) -> Result<Value, DbError> {
         let cfg = st.settings["bans"].clone();
         let t = (self.now)();
         let prev = st.bans.get(key);
@@ -273,17 +278,19 @@ impl Access {
         st.bans.shift_remove(key);
         st.bans.insert(key.to_string(), b.clone());
         st.failures.shift_remove(key);
-        self.save(st);
+        // (the ban holds in memory either way; one that was not saved is the request's error)
+        let saved = self.save(st);
         if let Some(a) = &self.audit {
             let len = if minutes >= 60.0 && minutes % 60.0 == 0.0 { format!("{} h", super::http::num_text(minutes / 60.0)) } else { format!("{} min", super::http::num_text(minutes)) };
             let repeat = if offences > 1.0 { format!(", ban number {} this week", super::http::num_text(offences)) } else { String::new() };
             a.warn(format!(
-                "Banned {key} for {len} (until {}) after {count} failed attempts in {} min (last: {reason_text}){repeat}",
+                "Banned {key} for {len} (until {}) after {count} failed attempts in {} min (last: {reason_text}){repeat}{}",
                 super::log::iso(until),
-                super::http::num_text(f(&cfg["windowMinutes"]))
+                super::http::num_text(f(&cfg["windowMinutes"])),
+                if saved.is_err() { " (not saved: a restart forgets it)" } else { "" }
             ));
         }
-        Value::Object(b)
+        saved.map(|_| Value::Object(b))
     }
 
     /// Lift a ban (and forget its history and failures).
@@ -292,9 +299,14 @@ impl Access {
         let mut st = self.st.lock().unwrap();
         let hit = st.bans.get(k).or_else(|| st.bans.get(&ban_key(k))).and_then(|b| b.get("key").and_then(Value::as_str)).map(String::from);
         let Some(hit) = hit else { return Err(super::auth::refuse(404, "That address is not banned.")) };
+        let before = st.bans.clone();
         st.bans.shift_remove(&hit);
+        if let Err(e) = self.save(&mut st) {
+            // (not lifted: it stays as it is kept)
+            st.bans = before;
+            return Err(e.into());
+        }
         st.failures.shift_remove(&hit);
-        self.save(&mut st);
         if let Some(a) = &self.audit {
             a.warn(format!("Unbanned {hit}{}", if who.is_empty() { String::new() } else { format!(": {who}") }));
         }
@@ -333,7 +345,7 @@ mod tests {
     fn access(clock: Arc<AtomicI64>) -> (Arc<Db>, Access) {
         let db = Arc::new(Db::memory().unwrap());
         let c = clock.clone();
-        let a = Access::with_clock(db.clone(), None, Box::new(move || c.load(Ordering::SeqCst)));
+        let a = Access::with_clock(db.clone(), None, Box::new(move || c.load(Ordering::SeqCst))).unwrap();
         (db, a)
     }
 
@@ -358,12 +370,12 @@ mod tests {
     fn node_repeat_offenders() {
         let clock = Arc::new(AtomicI64::new(1_794_225_600_000));
         let (_db, a) = access(clock.clone());
-        a.set(&validate(&json!({ "bans": { "maxFailures": 3, "banMinutes": 60, "maxBanHours": 3 } }), &a.get()).unwrap());
+        a.set(&validate(&json!({ "bans": { "maxFailures": 3, "banMinutes": 60, "maxBanHours": 3 } }), &a.get()).unwrap()).unwrap();
         let mut lengths = Vec::new();
         for _ in 0..4 {
             let mut b = None;
             for _ in 0..3 {
-                b = a.fail("203.0.113.9", "wrong two-step code");
+                b = a.fail("203.0.113.9", "wrong two-step code").unwrap();
             }
             let b = b.unwrap();
             lengths.push((b["until"].as_i64().unwrap() - b["at"].as_i64().unwrap()) / 60_000);
@@ -373,7 +385,7 @@ mod tests {
         clock.fetch_add(8 * 24 * 3_600_000, Ordering::SeqCst);
         let mut b = None;
         for _ in 0..3 {
-            b = a.fail("203.0.113.9", "x");
+            b = a.fail("203.0.113.9", "x").unwrap();
         }
         let b = b.unwrap();
         assert_eq!((b["until"].as_i64().unwrap() - b["at"].as_i64().unwrap()) / 60_000, 60);
@@ -383,38 +395,38 @@ mod tests {
     fn node_home_exempt_and_off() {
         let (_db, a) = access(Arc::new(AtomicI64::new(1_794_225_600_000)));
         for _ in 0..30 {
-            assert!(a.fail("192.168.1.5", "wrong password").is_none());
+            assert!(a.fail("192.168.1.5", "wrong password").unwrap().is_none());
         }
-        a.set(&validate(&json!({ "bans": { "exemptHome": false } }), &a.get()).unwrap());
+        a.set(&validate(&json!({ "bans": { "exemptHome": false } }), &a.get()).unwrap()).unwrap();
         let mut b = None;
         for _ in 0..10 {
-            b = a.fail("192.168.1.5", "wrong password");
+            b = a.fail("192.168.1.5", "wrong password").unwrap();
         }
         assert!(b.is_some());
         assert!(a.banned("192.168.1.5").is_some());
-        a.set(&validate(&json!({ "bans": { "exemptHome": true } }), &a.get()).unwrap());
+        a.set(&validate(&json!({ "bans": { "exemptHome": true } }), &a.get()).unwrap()).unwrap();
         assert!(a.banned("192.168.1.5").is_none());
-        a.set(&validate(&json!({ "home": { "extra": ["198.51.100.0/24"] } }), &a.get()).unwrap());
+        a.set(&validate(&json!({ "home": { "extra": ["198.51.100.0/24"] } }), &a.get()).unwrap()).unwrap();
         for _ in 0..20 {
-            assert!(a.fail("198.51.100.9", "x").is_none());
+            assert!(a.fail("198.51.100.9", "x").unwrap().is_none());
         }
-        a.set(&validate(&json!({ "bans": { "enabled": false } }), &a.get()).unwrap());
+        a.set(&validate(&json!({ "bans": { "enabled": false } }), &a.get()).unwrap()).unwrap();
         for _ in 0..20 {
-            assert!(a.fail("203.0.113.50", "x").is_none());
+            assert!(a.fail("203.0.113.50", "x").unwrap().is_none());
         }
     }
 
     #[test]
     fn node_store_bounded() {
         let (db, a) = access(Arc::new(AtomicI64::new(1_794_225_600_000)));
-        a.set(&validate(&json!({ "bans": { "maxFailures": 3 } }), &a.get()).unwrap());
+        a.set(&validate(&json!({ "bans": { "maxFailures": 3 } }), &a.get()).unwrap()).unwrap();
         for n in 0..2100 {
             let ip = format!("198.18.{}.{}", n >> 8, n & 255);
             for _ in 0..3 {
-                a.fail(&ip, "x");
+                a.fail(&ip, "x").unwrap();
             }
         }
-        assert!(db.get(KEY_BANS).unwrap().as_array().unwrap().len() <= 2000);
+        assert!(db.get(KEY_BANS).unwrap().unwrap().as_array().unwrap().len() <= 2000);
         assert!(a.banned("198.18.8.51").is_some());
     }
 
@@ -449,14 +461,14 @@ mod tests {
     fn node_unban_audit_line() {
         let db = Arc::new(Db::memory().unwrap());
         let logger = super::super::log::Logger::with("debug", 100, true, None, 1);
-        let a = Access::new(db.clone(), Some(logger.scope("audit")));
+        let a = Access::new(db.clone(), Some(logger.scope("audit"))).unwrap();
         for _ in 0..10 {
-            a.fail("2001:db8:5:6::1", "wrong password");
+            a.fail("2001:db8:5:6::1", "wrong password").unwrap();
         }
         let line = logger.recent(1.0, "debug")[0].message.clone();
         let re = regex::Regex::new(r"^Banned 2001:db8:5:6::/64 for 1 h \(until .*\) after 10 failed attempts in 60 min \(last: wrong password\)$").unwrap();
         assert!(re.is_match(&line), "{line}");
-        let again = Access::new(db, Some(logger.scope("audit")));
+        let again = Access::new(db, Some(logger.scope("audit"))).unwrap();
         assert!(again.banned("2001:db8:5:6:ffff::2").is_some());
         assert_eq!(again.list()[0]["key"], "2001:db8:5:6::/64");
         assert!(again.unban("203.0.113.1", "").unwrap_err().message.contains("not banned"));
@@ -469,23 +481,23 @@ mod tests {
         let clock = Arc::new(AtomicI64::new(1_000_000_000_000));
         let (db, a) = access(clock.clone());
         for _ in 0..9 {
-            assert!(a.fail("8.8.8.8", "wrong password").is_none());
+            assert!(a.fail("8.8.8.8", "wrong password").unwrap().is_none());
         }
-        let b = a.fail("::ffff:8.8.8.8", "wrong password").unwrap();
+        let b = a.fail("::ffff:8.8.8.8", "wrong password").unwrap().unwrap();
         assert_eq!(b["until"].as_i64().unwrap() - b["at"].as_i64().unwrap(), 3_600_000);
         assert!(a.banned("8.8.8.8").is_some());
         // home addresses are never banned
         for _ in 0..20 {
-            assert!(a.fail("192.168.1.2", "x").is_none());
+            assert!(a.fail("192.168.1.2", "x").unwrap().is_none());
         }
         // a restart keeps it
         let c = clock.clone();
-        let again = Access::with_clock(db.clone(), None, Box::new(move || c.load(Ordering::SeqCst)));
+        let again = Access::with_clock(db.clone(), None, Box::new(move || c.load(Ordering::SeqCst))).unwrap();
         assert!(again.banned("8.8.8.8").is_some());
         clock.fetch_add(3_600_001, Ordering::SeqCst);
         assert!(a.banned("8.8.8.8").is_none());
         for _ in 0..10 {
-            a.fail("8.8.8.8", "x");
+            a.fail("8.8.8.8", "x").unwrap();
         }
         let b2 = a.banned("8.8.8.8").unwrap();
         assert_eq!(b2["offences"], 2);
@@ -495,8 +507,32 @@ mod tests {
         assert_eq!(a.unban("8.8.8.8", "").unwrap_err().status, 404);
         // IPv6 by its /64
         for _ in 0..10 {
-            a.fail("2001:db8:0:1::5", "x");
+            a.fail("2001:db8:0:1::5", "x").unwrap();
         }
         assert!(a.banned("2001:db8:0:1::99").is_some());
+    }
+
+    #[test]
+    fn settings_and_unbans_that_were_not_kept_are_errors_and_change_nothing() {
+        let clock = Arc::new(AtomicI64::new(1_000_000_000_000));
+        let (db, a) = access(clock.clone());
+        for _ in 0..10 {
+            a.fail("8.8.8.8", "wrong password").unwrap();
+        }
+        db.conn().execute_batch("PRAGMA query_only = ON").unwrap();
+        let next = validate(&json!({ "twoFactor": { "everyone": true } }), &a.get()).unwrap();
+        assert!(a.set(&next).is_err());
+        assert_eq!(a.get()["twoFactor"]["everyone"], false, "the rule in force is the one kept");
+        assert_eq!(a.unban("8.8.8.8", "admin").unwrap_err().status, 500);
+        assert!(a.banned("8.8.8.8").is_some(), "the ban that was not lifted in the database holds");
+        // a new ban that cannot be kept is an error, and holds in memory all the same
+        for _ in 0..9 {
+            assert!(a.fail("9.9.9.9", "wrong password").unwrap().is_none());
+        }
+        assert!(a.fail("9.9.9.9", "wrong password").is_err(), "not a ban answered as kept");
+        assert!(a.banned("9.9.9.9").is_some());
+        db.conn().execute_batch("PRAGMA query_only = OFF; DROP TABLE settings").unwrap();
+        let e = Access::with_clock(db, None, Box::new(|| 0)).err().expect("unreadable rules are not the defaults");
+        assert_eq!(e, "The security settings could not be read: manager.db: no such table: settings");
     }
 }

@@ -162,12 +162,14 @@ pub struct Packs {
     builtin: BTreeMap<String, Builtin>,
     default_id: Option<String>,
     installing: AtomicBool,
+    /// the choice could not be read last time (logged once, not on every file served)
+    unread: AtomicBool,
 }
 
 impl Packs {
     pub fn new(dir: PathBuf, db: Arc<dyn UiCtx>, builtin_dir: Option<&Path>, default_id: Option<String>) -> Packs {
         let builtin = builtin_dir.map(read_builtin).unwrap_or_default();
-        Packs { dir, db, builtin, default_id, installing: AtomicBool::new(false) }
+        Packs { dir, db, builtin, default_id, installing: AtomicBool::new(false), unread: AtomicBool::new(false) }
     }
 
     fn meta_file(&self, id: &str) -> PathBuf {
@@ -208,21 +210,42 @@ impl Packs {
     }
 
     /// The chosen pack's id, or the default (Sentry Six) when none is chosen; None for Original.
+    /// A choice that cannot be read is logged (once until it reads again) and the default is shown.
     pub fn active(&self) -> Option<String> {
-        let saved = self.db.setting("ui-pack");
-        let saved = saved.as_ref().and_then(Value::as_str).map(str::to_string);
+        match self.chosen() {
+            Ok(id) => {
+                self.unread.store(false, Ordering::SeqCst);
+                id
+            }
+            Err(e) => {
+                if !self.unread.swap(true, Ordering::SeqCst) {
+                    self.db.log(super::ctx::Level::Warn, "ui", &format!("The default interface is shown: the chosen one could not be read: {e}"));
+                }
+                self.pick(None)
+            }
+        }
+    }
+
+    /// active(), with an error when the choice cannot be read (what the ui-packs routes answer).
+    pub(crate) fn chosen(&self) -> Result<Option<String>, String> {
+        let saved = self.db.setting("ui-pack")?;
+        Ok(self.pick(saved.as_ref().and_then(Value::as_str).map(str::to_string)))
+    }
+
+    fn pick(&self, saved: Option<String>) -> Option<String> {
         [saved, self.default_id.clone()].into_iter().flatten().find(|id| valid_id(id) && self.read_meta(id).is_some())
     }
 
-    pub fn set_active(&self, id: Option<&str>) -> Result<Option<String>, PackError> {
+    /// The choice kept; Err((400, refusal)), or Err((500, what failed)) when it was not kept.
+    pub fn set_active(&self, id: Option<&str>) -> Result<Option<String>, (u16, String)> {
         let Some(id) = id else {
-            self.db.set_setting("ui-pack", &Value::Null);
+            self.db.set_setting("ui-pack", &Value::Null).map_err(|e| (500, e))?;
             return Ok(None);
         };
         if !valid_id(id) || self.read_meta(id).is_none() {
-            return Err(PackError("No such interface.".into()));
+            return Err((400, "No such interface.".into()));
         }
-        self.db.set_setting("ui-pack", &json!(id));
+        self.db.set_setting("ui-pack", &json!(id)).map_err(|e| (500, e))?;
         Ok(Some(id.to_string()))
     }
 
@@ -352,27 +375,74 @@ impl Packs {
         Ok(meta)
     }
 
-    pub fn remove(&self, id: &str) -> Result<(), PackError> {
+    /// Err((400, refusal)), or Err((500, what failed)) when the pack could not be removed or the
+    /// choice could not be read or kept.
+    pub fn remove(&self, id: &str) -> Result<(), (u16, String)> {
         if !valid_id(id) || self.read_meta(id).is_none() {
-            return Err(PackError("No such interface.".into()));
+            return Err((400, "No such interface.".into()));
         }
         if self.builtin.contains_key(id) {
-            return Err(PackError("This interface comes with Sentry Six Manager and cannot be deleted.".into()));
+            return Err((400, "This interface comes with Sentry Six Manager and cannot be deleted.".into()));
         }
-        if self.active().as_deref() == Some(id) {
-            self.db.set_setting("ui-pack", &Value::Null);
+        let was_chosen = self.chosen().map_err(|e| (500, e))?.as_deref() == Some(id);
+        // (moved out of the packs first, in one step: one that cannot be moved stays installed, and
+        // chosen when it was; one moved away is never shown)
+        let gone = self.dir.join(format!(".deleting-{id}"));
+        // (what an earlier delete of this id left, which would stand in the way)
+        let _ = std::fs::remove_dir_all(&gone);
+        std::fs::rename(self.dir.join(id), &gone).map_err(|e| (500, format!("The interface {id} could not be deleted: {e}")))?;
+        if was_chosen {
+            if let Err(e) = self.db.set_setting("ui-pack", &Value::Null) {
+                // (its choice was not cleared: the pack goes back, still installed and chosen)
+                if let Err(back) = std::fs::rename(&gone, self.dir.join(id)) {
+                    self.db.log(super::ctx::Level::Warn, "ui", &format!("The interface {id} stays aside in {} (its choice was not cleared; the next start puts it back): {back}", gone.display()));
+                }
+                return Err((500, e));
+            }
         }
-        let _ = std::fs::remove_dir_all(self.dir.join(id));
+        // (the files go only once the choice is gone)
+        if let Err(e) = std::fs::remove_dir_all(&gone) {
+            self.db.log(super::ctx::Level::Warn, "ui", &format!("The files of the deleted interface {id} stay in {} until the next start: {e}", gone.display()));
+        }
         Ok(())
     }
 
-    /// Leftovers of an install a restart cut short.
+    /// Leftovers of an install a restart cut short, and of a delete. A delete's leftover whose pack
+    /// is still chosen (the delete could neither clear the choice nor put the pack back) is put
+    /// back, or kept while its place is taken; one whose choice cannot be read is kept until it can.
     pub fn tidy(&self) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.dir)?;
+        let saved = self.db.setting("ui-pack");
         for e in std::fs::read_dir(&self.dir)?.flatten() {
-            if e.file_name().to_string_lossy().starts_with(".incoming-") {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with(".incoming-") {
                 let _ = std::fs::remove_dir_all(e.path());
+                continue;
             }
+            let Some(id) = name.strip_prefix(".deleting-") else { continue };
+            let aside = e.path();
+            let chosen = match &saved {
+                Ok(v) => valid_id(id) && v.as_ref().and_then(Value::as_str) == Some(id),
+                Err(err) => {
+                    self.db.log(super::ctx::Level::Warn, "ui", &format!("The interface {id} left aside by a delete stays in {} until the chosen one can be read: {err}", aside.display()));
+                    continue;
+                }
+            };
+            if !chosen {
+                let _ = std::fs::remove_dir_all(&aside);
+                continue;
+            }
+            let place = self.dir.join(id);
+            // (anything there, even a link to nothing, takes its place)
+            let said = if std::fs::symlink_metadata(&place).is_ok() {
+                format!("The interface {id} left aside by a delete stays in {}: it is still chosen and {} is taken", aside.display(), place.display())
+            } else {
+                match std::fs::rename(&aside, &place) {
+                    Ok(()) => format!("The interface {id} is put back: a delete left it aside while it was still chosen"),
+                    Err(err) => format!("The interface {id} left aside by a delete stays in {}: it is still chosen and could not be put back: {err}", aside.display()),
+                }
+            };
+            self.db.log(super::ctx::Level::Warn, "ui", &said);
         }
         Ok(())
     }
@@ -446,22 +516,32 @@ pub mod tests {
     use std::collections::HashMap;
     use std::sync::Mutex;
 
-    /// A settings table in memory, for tests.
+    /// A settings table in memory, for tests (its reads fail while the first switch is on, its
+    /// writes while the second is), and the lines logged.
     #[derive(Default)]
-    pub struct MemCtx(pub Mutex<HashMap<String, Value>>);
+    pub struct MemCtx(pub Mutex<HashMap<String, Value>>, pub std::sync::atomic::AtomicBool, pub std::sync::atomic::AtomicBool, pub Mutex<Vec<String>>);
     impl UiCtx for MemCtx {
-        fn setting(&self, key: &str) -> Option<Value> {
-            self.0.lock().unwrap().get(key).cloned()
+        fn setting(&self, key: &str) -> Result<Option<Value>, String> {
+            if self.1.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("manager.db: database disk image is malformed".into());
+            }
+            Ok(self.0.lock().unwrap().get(key).cloned())
         }
-        fn set_setting(&self, key: &str, value: &Value) {
+        fn set_setting(&self, key: &str, value: &Value) -> Result<(), String> {
+            if self.2.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("manager.db: attempt to write a readonly database".into());
+            }
             self.0.lock().unwrap().insert(key.into(), value.clone());
+            Ok(())
         }
-        fn has_setting_prefix(&self, p: &str) -> bool {
-            self.0.lock().unwrap().keys().any(|k| k.starts_with(p))
+        fn has_setting_prefix(&self, p: &str) -> Result<bool, String> {
+            Ok(self.0.lock().unwrap().keys().any(|k| k.starts_with(p)))
         }
         fn announce(&self, _: &str) {}
         fn audit(&self, _: Level, _: &str) {}
-        fn log(&self, _: Level, _: &str, _: &str) {}
+        fn log(&self, _: Level, _: &str, line: &str) {
+            self.3.lock().unwrap().push(line.to_string());
+        }
         fn user(&self, _: &ReqInfo) -> Option<String> {
             Some("admin".into())
         }
@@ -483,8 +563,8 @@ pub mod tests {
         fn setup_only(&self, _: &ReqInfo) -> bool {
             false
         }
-        fn job_start(&self, _: Value) -> Value {
-            json!(1)
+        fn job_start(&self, _: Value) -> Result<Value, String> {
+            Ok(json!(1))
         }
         fn job_update(&self, _: &Value, _: Value) {}
         fn job_finish(&self, _: &Value, _: Value) {}
@@ -497,8 +577,8 @@ pub mod tests {
         fn speeds_for(&self, _: &Path) -> Option<Vec<Option<f64>>> {
             None
         }
-        fn viewer_car_data(&self) -> Value {
-            json!({ "enabled": false })
+        fn viewer_car_data(&self) -> Result<Value, String> {
+            Ok(json!({ "enabled": false }))
         }
     }
 
@@ -560,8 +640,8 @@ pub mod tests {
         assert_eq!(packs.active().as_deref(), Some(id.as_str()));
         assert_eq!(std::fs::read_to_string(packs.root("web").unwrap().join("shell.css")).unwrap(), "body{background:#012}");
         assert_eq!(packs.root("studio"), None);
-        assert!(packs.set_active(Some("nope")).unwrap_err().0.contains("No such"));
-        assert!(packs.set_active(Some("../x")).unwrap_err().0.contains("No such"));
+        assert!(packs.set_active(Some("nope")).unwrap_err().1.contains("No such"));
+        assert!(packs.set_active(Some("../x")).unwrap_err().1.contains("No such"));
         let second = packs.install(&zip(&[("studio/styles/x.css", b"a{}")]), "Night Viewer.zip").unwrap();
         assert_eq!(second["name"], "Night Viewer");
         assert!(packs.install(&zip(&[("web/../../evil.js", b"x")]), "").unwrap_err().0.contains("not a path"));
@@ -573,10 +653,90 @@ pub mod tests {
         assert_eq!(names(&dir), both, "no half-unpacked pack is left");
         packs.remove(&id).unwrap();
         assert_eq!(packs.active(), None);
-        assert!(packs.remove(&id).unwrap_err().0.contains("No such"));
+        assert!(packs.remove(&id).unwrap_err().1.contains("No such"));
         std::fs::create_dir_all(dir.join(".incoming-abcd")).unwrap();
         packs.tidy().unwrap();
         assert_eq!(names(&dir), [second["id"].as_str().unwrap()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_pack_that_cannot_be_removed_stays_installed_and_chosen_and_is_an_error() {
+        // (permissions do not stop root)
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let dir = tmp();
+        let packs = Packs::new(dir.clone(), Arc::new(MemCtx::default()), None, None);
+        let id = packs.install(&zip(&[("web/shell.css", b"body{}")]), "Mine.zip").unwrap()["id"].as_str().unwrap().to_string();
+        packs.set_active(Some(&id)).unwrap();
+        let mode = |m: u32| std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(m)).unwrap();
+        mode(0o555);
+        let refused = packs.remove(&id);
+        mode(0o755);
+        assert_eq!(refused.unwrap_err().0, 500);
+        assert_eq!(packs.active().as_deref(), Some(id.as_str()), "still installed, still chosen");
+        assert!(packs.list().iter().any(|m| m["id"] == json!(id)));
+        packs.remove(&id).unwrap();
+        assert_eq!((packs.active(), names(&dir)), (None, Vec::<String>::new()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_chosen_pack_whose_choice_cannot_be_cleared_stays_installed_and_chosen() {
+        let dir = tmp();
+        let ctx = Arc::new(MemCtx::default());
+        let packs = Packs::new(dir.clone(), ctx.clone(), None, None);
+        let id = packs.install(&zip(&[("web/shell.css", b"body{}")]), "Mine.zip").unwrap()["id"].as_str().unwrap().to_string();
+        packs.set_active(Some(&id)).unwrap();
+        ctx.2.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(packs.remove(&id).unwrap_err().0, 500);
+        ctx.2.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(packs.active().as_deref(), Some(id.as_str()), "still installed, still chosen");
+        assert_eq!(names(&dir), [id.clone()], "its files are back in place");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What a delete leaves when it could neither clear the pack's choice nor put the pack back.
+    fn left_aside(dir: &Path, packs: &Packs) -> String {
+        let id = packs.install(&zip(&[("web/shell.css", b"body{}")]), "Mine.zip").unwrap()["id"].as_str().unwrap().to_string();
+        packs.set_active(Some(&id)).unwrap();
+        std::fs::rename(dir.join(&id), dir.join(format!(".deleting-{id}"))).unwrap();
+        id
+    }
+
+    #[test]
+    fn a_chosen_pack_a_delete_left_aside_is_put_back_at_the_start_never_swept() {
+        let dir = tmp();
+        let ctx = Arc::new(MemCtx::default());
+        let packs = Packs::new(dir.clone(), ctx.clone(), None, None);
+        let id = left_aside(&dir, &packs);
+        // (what is not chosen still goes)
+        std::fs::create_dir_all(dir.join(".deleting-other-abc123")).unwrap();
+        std::fs::create_dir_all(dir.join(".incoming-abcd")).unwrap();
+        packs.tidy().unwrap();
+        assert_eq!(names(&dir), [id.clone()]);
+        assert_eq!(packs.active().as_deref(), Some(id.as_str()), "installed and chosen again");
+        assert!(ctx.3.lock().unwrap().iter().any(|l| l.starts_with(&format!("The interface {id} is put back"))));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_chosen_pack_a_delete_left_aside_is_kept_while_its_place_is_taken_or_its_choice_cannot_be_read() {
+        let dir = tmp();
+        let ctx = Arc::new(MemCtx::default());
+        let packs = Packs::new(dir.clone(), ctx.clone(), None, None);
+        let id = left_aside(&dir, &packs);
+        let aside = format!(".deleting-{id}");
+        ctx.1.store(true, std::sync::atomic::Ordering::SeqCst);
+        packs.tidy().unwrap();
+        ctx.1.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(names(&dir), [aside.clone()], "not known to be unchosen: it stays");
+        std::fs::create_dir_all(dir.join(&id)).unwrap();
+        packs.tidy().unwrap();
+        assert_eq!(names(&dir), [aside.clone(), id.clone()], "its place taken: it stays aside");
+        let said = ctx.3.lock().unwrap().iter().filter(|l| l.starts_with(&format!("The interface {id} left aside by a delete stays"))).count();
+        assert_eq!(said, 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -612,7 +772,7 @@ pub mod tests {
         assert_eq!(packs.active().as_deref(), Some("sentry-six"), "Original saved: Sentry Six all the same");
         packs.set_active(Some("horizon")).unwrap();
         assert_eq!(packs.active().as_deref(), Some("horizon"));
-        assert!(packs.remove("flux").unwrap_err().0.contains("comes with"));
+        assert!(packs.remove("flux").unwrap_err().1.contains("comes with"));
         assert_eq!(Packs::new(dir.clone(), Arc::new(MemCtx::default()), Some(&builtin), Some("nope".into())).active(), None);
         assert_eq!(Packs::new(dir.clone(), Arc::new(MemCtx::default()), Some(&builtin), None).active(), None);
         let _ = std::fs::remove_dir_all(&dir);

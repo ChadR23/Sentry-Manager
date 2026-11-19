@@ -27,11 +27,11 @@ pub struct CoreNodes {
 }
 
 impl NodesCtx for CoreNodes {
-    fn setting(&self, key: &str) -> Option<Value> {
-        self.state.setting(key)
+    fn setting(&self, key: &str) -> Result<Option<Value>, String> {
+        self.state.setting(key).map_err(|e| e.to_string())
     }
-    fn set_setting(&self, key: &str, value: &Value) {
-        self.state.set_setting(key, value);
+    fn set_setting(&self, key: &str, value: &Value) -> Result<(), String> {
+        self.state.set_setting(key, value).map_err(|e| e.to_string())
     }
     fn audit(&self, level: Level, line: &str) {
         match level {

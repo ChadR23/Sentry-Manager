@@ -19,6 +19,16 @@ pub struct VehicleRef {
 /// The scan's files of a vehicle, by rel (inventory.get(id).files): the scan's own list.
 pub type Files = Arc<crate::scanner::FileList>;
 
+/// A setting that could not be read or kept, in a route: 500 "Internal error" answered (as Node
+/// answers the error better-sqlite3 throws), what failed logged by the route with its request.
+pub fn failed(e: String) -> (u16, String) {
+    (500, e)
+}
+
+/// What failed behind a 500 answer, for the route to log with its request.
+#[derive(Clone, Debug)]
+pub struct Failed(pub String);
+
 pub trait Ctx: Send + Sync + 'static {
     /// DATA_PATH
     fn data_dir(&self) -> PathBuf;
@@ -37,13 +47,18 @@ pub trait Ctx: Send + Sync + 'static {
     fn scanning(&self, id: &str) -> bool;
     /// changes each time a scan of the vehicle finished (inventory onScanned)
     fn scan_stamp(&self, id: &str) -> Option<f64>;
-    /// a setting from manager.db (db.get(key)); None when not set
-    fn setting(&self, key: &str) -> Option<Value>;
-    fn set_setting(&self, key: &str, value: Value);
+    /// a setting from manager.db (db.get(key)); None when not set, an error when it cannot be read
+    fn setting(&self, key: &str) -> Result<Option<Value>, String>;
+    /// db.set(key, value): an error when it was not kept
+    fn set_setting(&self, key: &str, value: Value) -> Result<(), String>;
     /// the live-update hub (/api/events `changed` topics)
     fn announce(&self, topic: &str);
     /// an audit line (audit.info)
     fn audit(&self, line: &str);
+    /// a line for the server log (Logs) at error level
+    fn log_error(&self, line: &str) {
+        eprintln!("{line}");
+    }
     /// a conversion or the benchmark runs (index.js speedIndexBusy): background reading waits
     fn busy(&self) -> bool {
         false
@@ -66,14 +81,14 @@ pub trait Ctx: Send + Sync + 'static {
         Vec::new()
     }
     /// canFootage.js forVehicle: whether CAN data covers a recording (its clip rels and start key);
-    /// None without the CAN area
+    /// None without the CAN area, an error when what it needs cannot be read
     #[allow(clippy::type_complexity)]
-    fn has_can(&self, _id: &str) -> Option<Box<dyn Fn(Vec<String>, Option<&str>) -> bool>> {
-        None
+    fn has_can(&self, _id: &str) -> Result<Option<Box<dyn Fn(Vec<String>, Option<&str>) -> bool>>, String> {
+        Ok(None)
     }
     /// canKeyMapped(key): a CAN Bridge key mapped to a car explicitly (the `can-vehicles` setting)
-    fn can_key_mapped(&self, key: &str) -> bool {
-        self.setting("can-vehicles").is_some_and(|m| m.get(key).is_some_and(crate::ops::js::truthy))
+    fn can_key_mapped(&self, key: &str) -> Result<bool, String> {
+        Ok(self.setting("can-vehicles")?.is_some_and(|m| m.get(key).is_some_and(crate::ops::js::truthy)))
     }
     /// the range Sentry USB is still copying (sentryUsb.now): None when it is not transferring
     fn sentry_usb_pi(&self, _id: &str) -> Option<super::archive_gap::Pi> {
@@ -87,27 +102,31 @@ pub trait Ctx: Send + Sync + 'static {
     fn car_files(&self, _id: &str) -> Option<super::archive_gap::CarFilesIn> {
         None
     }
-    /// the rels of the car's clips in the Recycle Bin
-    fn binned(&self, _id: &str) -> Option<Vec<String>> {
-        None
+    /// the rels of the car's clips in the Recycle Bin (an error when they cannot be read)
+    fn binned(&self, _id: &str) -> Result<Option<Vec<String>>, String> {
+        Ok(None)
     }
-    /// the rels of clips Manager deleted for good lately (deletedClips.js list)
-    fn deleted_clips(&self, _id: &str) -> Option<Vec<String>> {
-        None
+    /// the rels of clips Manager deleted for good lately (deletedClips.js list; an error when they
+    /// cannot be read)
+    fn deleted_clips(&self, _id: &str) -> Result<Option<Vec<String>>, String> {
+        Ok(None)
     }
     /// the clips the converter rewrote (H.265 / AV1): their file times say nothing of the archive
     fn encoded(&self, _id: &str) -> std::collections::HashSet<String> {
         std::collections::HashSet::new()
     }
-    /// the dedupe keys of a car's open notifications of a kind (notes.list({ open, vehicleId }))
-    fn open_notes(&self, _id: &str, _kind: &str) -> Vec<String> {
-        Vec::new()
+    /// the dedupe keys of a car's open notifications of a kind (notes.list({ open, vehicleId }));
+    /// an error when they cannot be read (and for the two below: when it was not kept)
+    fn open_notes(&self, _id: &str, _kind: &str) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
     }
     /// raise or update a notification; false when it is muted (or there are none yet)
-    fn raise_note(&self, _note: &Value) -> bool {
-        false
+    fn raise_note(&self, _note: &Value) -> Result<bool, String> {
+        Ok(false)
     }
-    fn resolve_note(&self, _dedupe_key: &str) {}
+    fn resolve_note(&self, _dedupe_key: &str) -> Result<(), String> {
+        Ok(())
+    }
     /// ffmpeg and ffprobe (FFMPEG_PATH, FFPROBE_PATH)
     fn ffmpeg(&self) -> String {
         std::env::var("FFMPEG_PATH").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "ffmpeg".into())

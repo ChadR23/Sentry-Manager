@@ -366,6 +366,14 @@ impl App {
             msg
         });
         let writing = lock.writing.lock().unwrap();
+        // (the protected clips, which cleanup goes by: recordings that cannot be marked are not shown)
+        let protected = match self.core.db().protected_set(vid) {
+            Ok(p) => p,
+            Err(e) => {
+                let msg = format!("The protected clips could not be read ({e}): nothing changes until they can.");
+                return self.unseen(vid, &v.name, &key, &lock, &prev, msg);
+            }
+        };
         // (files the Recycle Bin moved in this source while this scan walked are not put back)
         let moved: HashSet<String> = std::mem::take(&mut *lock.moved.lock().unwrap()).into_iter().filter(|(s, _)| *s == key).map(|(_, r)| r).collect();
         if !moved.is_empty() {
@@ -379,7 +387,7 @@ impl App {
         let (n_files, took, unchanged) = (res.files.len(), res.duration_ms, res.reused);
         let files = Arc::new(FileList::from(res.files));
         let mut recs = inventory::build_recordings(&files, vid);
-        inventory::mark_protected(&mut recs, &self.core.db().protected_set(vid));
+        inventory::mark_protected(&mut recs, &protected);
         self.core.log("inventory", Level::Info, &format!("{}: {} recordings, {} files ({:.1}s{})", v.name, recs.len(), n_files, took / 1000.0,
             if reuse { format!(", {} unchanged{}", unchanged, if resumed { " since the last run" } else { "" }) } else { String::new() }));
         let probe = self.adopt_saved_codecs(vid, &v.name);
@@ -456,7 +464,7 @@ impl App {
     /// where the catalog's last scan of this source found some. `found`: the files the scan found;
     /// `kept`: what keep_unread put back. Err: the catalog could not be read.
     fn drive_gone(&self, vid: &str, key: &str, root: &Path, found: &[FileEntry], kept: &[FileEntry]) -> Result<Option<String>, String> {
-        let noted = self.core.db().get(&format!("footageMount:{vid}")).filter(|n| n["source"].as_str() == Some(key));
+        let noted = self.core.db().get(&format!("footageMount:{vid}")).map_err(|e| e.to_string())?.filter(|n| n["source"].as_str() == Some(key));
         let now = std::fs::read_to_string(self.vehicles.mountinfo()).ok().and_then(|t| Mounts::of(&t, root));
         let Some(noted) = noted else {
             let saw = found.is_empty() && kept.is_empty() && self.catalog.saw_footage(vid, key).map_err(|e| e.to_string())?;
@@ -513,8 +521,10 @@ impl App {
         let list = |v: Vec<(String, String)>| -> Vec<Value> { v.into_iter().map(|(at, mount)| serde_json::json!({ "at": at, "mount": mount })).collect() };
         let want = serde_json::json!({ "source": key, "mounts": list(found), "seen": list(seen) });
         let db = self.core.db();
-        if db.get(&k).as_ref() != Some(&want) {
-            db.set(&k, &want);
+        // (a note for the next scans: one not read or kept is logged, and noted again by the next)
+        let noted = db.get(&k).and_then(|n| if n.as_ref() != Some(&want) { db.set(&k, &want) } else { Ok(()) });
+        if let Err(e) = noted {
+            self.core.log("inventory", Level::Warn, &format!("The mounts footage of {vid} is on were not noted: {e}"));
         }
     }
 
@@ -524,14 +534,23 @@ impl App {
     fn unnote_emptied(&self, vid: &str, key: &str, files: &[FileEntry]) {
         let k = format!("footageMount:{vid}");
         let db = self.core.db();
-        let Some(mut noted) = db.get(&k).filter(|n| n["source"].as_str() == Some(key)) else { return };
+        let noted = match db.get(&k) {
+            Ok(n) => n,
+            Err(e) => {
+                self.core.log("inventory", Level::Warn, &format!("The mounts footage of {vid} is on were not updated: {e}"));
+                return;
+            }
+        };
+        let Some(mut noted) = noted.filter(|n| n["source"].as_str() == Some(key)) else { return };
         let mounts: Vec<Value> = noted["mounts"].as_array().cloned().unwrap_or_default();
         let ats: Vec<String> = mounts.iter().filter_map(|m| m["at"].as_str().map(String::from)).collect();
         let on = noted_on(&ats, files.iter());
         let keep: Vec<Value> = mounts.iter().filter(|m| m["at"].as_str().is_some_and(|at| on.contains(at))).cloned().collect();
         if keep.len() != mounts.len() {
             noted["mounts"] = Value::Array(keep);
-            db.set(&k, &noted);
+            if let Err(e) = db.set(&k, &noted) {
+                self.core.log("inventory", Level::Warn, &format!("The mounts footage of {vid} is on were not updated: {e}"));
+            }
         }
     }
 
@@ -562,9 +581,17 @@ impl App {
 
     /// rebuild_by with the scans' write lock held (dropped at the end).
     fn rebuild_locked(&self, vid: &str, _writing: std::sync::MutexGuard<'_, ()>, files: impl FnOnce(&VehicleState) -> Option<Vec<FileEntry>>) {
-        let protected = self.core.db().protected_set(vid);
+        let read = self.core.db().protected_set(vid);
         let mut st = self.state.write().unwrap();
         let Some(e) = st.get_mut(vid).filter(|e| e.scanned) else { return };
+        // (protected clips that cannot be read: the recordings keep the protection they had, which cleanup goes by)
+        let protected = match read {
+            Ok(p) => p,
+            Err(err) => {
+                self.core.log("inventory", Level::Warn, &format!("Recordings of {vid} keep the protection they had: the protected clips could not be read: {err}"));
+                e.recordings.iter().filter(|r| r.protected).flat_map(|r| r.files().map(|(rel, _)| rel.to_string())).collect()
+            }
+        };
         let changed = match files(e) {
             Some(f) => {
                 e.file_list = Arc::new(FileList::from(f));
@@ -602,7 +629,15 @@ impl App {
     fn adopt_saved_codecs(&self, vid: &str, name: &str) -> bool {
         let key = format!("codecs:{vid}");
         let db = self.core.db();
-        let Some(saved) = db.get(&key) else { return true };
+        let saved = match db.get(&key) {
+            Ok(s) => s,
+            Err(e) => {
+                // (not read: the probe waits, as when the move fails)
+                self.core.log("inventory", Level::Warn, &format!("{name}: clip codecs kept from before not read yet: {e}"));
+                return false;
+            }
+        };
+        let Some(saved) = saved else { return true };
         let rows = saved_codec_rows(&saved);
         // (no entry a server wrote: left as it is, as inventory.js does)
         if rows.is_empty() {
@@ -610,7 +645,10 @@ impl App {
         }
         match self.catalog.adopt_codecs(vid, &rows) {
             Ok(added) => {
-                db.del(&key);
+                // (left: moved again next time, the rows the catalog has kept as they are)
+                if let Err(e) = db.del(&key) {
+                    self.core.log("inventory", Level::Warn, &format!("{name}: clip codecs kept from before were moved but their old copy stays: {e}"));
+                }
                 if added > 0 {
                     self.core.log("inventory", Level::Info, &format!("{name}: {added} clip codecs kept from before"));
                 }

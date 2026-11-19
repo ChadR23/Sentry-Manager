@@ -210,7 +210,15 @@ pub fn settle(srv: &Server, conv: &Conv) -> usize {
     }
     let state = &srv.state;
     let mut n = 0;
-    for row in state.db.jobs(500, None) {
+    let rows = match state.db.jobs(500, None) {
+        Ok(r) => r,
+        Err(e) => {
+            // (settled on a later call)
+            state.logger.scope("converter").warn(format!("Conversion rows were not settled: {e}"));
+            return 0;
+        }
+    };
+    for row in rows {
         let Some(ext) = row.external_id.as_deref().filter(|e| e.starts_with("converter:")) else { continue };
         if row.kind != "conversion" || row.status != "running" {
             continue;
@@ -227,7 +235,10 @@ pub fn settle(srv: &Server, conv: &Conv) -> usize {
             }
             None => {
                 let detail = format!("{}the converter no longer has this job", row.detail.as_deref().filter(|d| !d.is_empty()).map(|d| format!("{d} · ")).unwrap_or_default());
-                state.jobs.finish(row.id, Some("interrupted"), Some(detail), None);
+                if let Err(e) = state.jobs.finish(row.id, Some("interrupted"), Some(detail), None) {
+                    state.logger.scope("converter").warn(format!("The Activity row of conversion {id} was not settled: {e}"));
+                    continue;
+                }
             }
         }
         n += 1;
@@ -246,9 +257,18 @@ fn mirror(srv: &Server, conv: &Conv, s: &Value, id: &str, st: &str, src: &str, v
     let saved = s["counters"]["savedBytes"].as_f64().unwrap_or(0.0);
     let detail = format!("{ok} converted, {skipped} skipped, {failed} failed{}", if saved > 0.0 { format!(" · {} saved", crate::footage::bin::format_bytes(saved)) } else { String::new() });
     let terminal = !ACTIVE.contains(&st);
-    let mut job = state.db.job_by_external(&external);
-    if job.is_none() && terminal && state.db.job_cleared(&external) {
-        return;
+    // (the Activity row is kept on the next snapshot when the database fails now; never a second row)
+    let failed_row = |what: &str, e: crate::core::db::DbError| state.logger.scope("converter").warn(format!("The Activity row of conversion {id} was not {what}: {e}"));
+    let mut job = match state.db.job_by_external(&external) {
+        Ok(j) => j,
+        Err(e) => return failed_row("read", e),
+    };
+    if job.is_none() && terminal {
+        match state.db.job_cleared(&external) {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(e) => return failed_row("read", e),
+        }
     }
     if job.is_none() {
         let codec = s["config"]["codec"].as_str().unwrap_or("");
@@ -259,16 +279,23 @@ fn mirror(srv: &Server, conv: &Conv, s: &Value, id: &str, st: &str, src: &str, v
         };
         let part = s["config"]["part"].as_f64().filter(|p| *p > 1.0).map(|p| format!(" (part {p})")).unwrap_or_default();
         let title = format!("Convert {} to {label}{part}", v.map_or(src.to_string(), |v| v.name.clone()));
-        state.jobs.start(NewJob { kind: "conversion".into(), vehicle_id: v.map(|v| v.id.clone()), title, detail: None, external_id: Some(external.clone()) });
-        job = state.db.job_by_external(&external);
+        if let Err(e) = state.jobs.start(NewJob { kind: "conversion".into(), vehicle_id: v.map(|v| v.id.clone()), title, detail: None, external_id: Some(external.clone()) }) {
+            return failed_row("made", e);
+        }
+        job = match state.db.job_by_external(&external) {
+            Ok(j) => j,
+            Err(e) => return failed_row("read", e),
+        };
     }
     let Some(job) = job else { return };
     if terminal && job.status == "running" {
         let status = if failed > 0 || st == "failed" { "failed" } else if st == "cancelled" { "cancelled" } else { "done" };
         let energy = srv.ops().map(|o| o.job_energy(id)).filter(|e| !e.is_null());
-        state.jobs.finish(job.id, Some(status), Some(detail), energy.map(|e| json!({ "energy": e })));
+        if let Err(e) = state.jobs.finish(job.id, Some(status), Some(detail), energy.map(|e| json!({ "energy": e }))) {
+            return failed_row("finished", e);
+        }
         if failed > 0 {
-            state.notes.raise(NewNotification {
+            let raised = state.notes.raise(NewNotification {
                 kind: "conversion".into(),
                 level: Some("warning".into()),
                 vehicle_id: v.map(|v| v.id.clone()),
@@ -276,6 +303,9 @@ fn mirror(srv: &Server, conv: &Conv, s: &Value, id: &str, st: &str, src: &str, v
                 message: Some("The originals were kept. Open the Encoder tab for details and Retry failed.".into()),
                 dedupe_key: Some(format!("conversion-failed:{id}")),
             });
+            if let Err(e) = raised {
+                state.logger.scope("converter").warn(format!("The notification of conversion {id}'s failed clips was not kept: {e}"));
+            }
         }
     } else if !terminal {
         let line = format!("{st}: {detail}");
@@ -283,7 +313,11 @@ fn mirror(srv: &Server, conv: &Conv, s: &Value, id: &str, st: &str, src: &str, v
         if lines.get(&job.id) != Some(&line) {
             lines.insert(job.id, line.clone());
             drop(lines);
-            state.jobs.update(job.id, JobUpdate { detail: Some(line), ..Default::default() });
+            if let Err(e) = state.jobs.update(job.id, JobUpdate { detail: Some(line), ..Default::default() }) {
+                // (written again with the next snapshot)
+                conv.lines.lock().unwrap().remove(&job.id);
+                failed_row("updated", e);
+            }
         }
     }
     if terminal {
@@ -344,8 +378,7 @@ pub fn spawn(srv: &Arc<Server>) {
                     w.upgrade().is_some_and(|srv| super::arrival::holds(&srv, discovered["sourcePath"].as_str().unwrap_or("")))
                 }));
                 o.power_meter = Some(meter.clone());
-                let db = st.db.clone();
-                o.is_cheap_now = Some(Arc::new(move |ms: i64| crate::ops::power::is_cheapest(&db.get("power").unwrap_or(Value::Null), ms)));
+                o.is_cheap_now = Some(cheap_now(st.db.clone(), st.logger.scope("converter")));
                 o.nodes = s.nodes().map(|n| {
                     let remote: Arc<dyn crate::nodes::lanes::RemoteNodes> = Arc::new(n.nodes.clone());
                     Arc::new(crate::converter::service::lanes::FromNodes(remote)) as Arc<dyn crate::converter::service::lanes::NodeLanes>
@@ -363,8 +396,22 @@ pub fn spawn(srv: &Arc<Server>) {
             let caps = crate::converter::ipc::capabilities(&runtime.staging.capabilities());
             let bridge = Bridge::new(Arc::new(runtime.service.clone()), ctx, caps);
             bridge.mount_runtime(&runtime);
+            // (the conversion speed notes: best effort, each failure logged; a failed read is not written over)
             let (get_db, set_db) = (st.db.clone(), st.db.clone());
-            let mut stats = crate::converter::stats::ConvertStats::new(Some(Arc::new(move |k: &str| get_db.get(k))), Some(Arc::new(move |k: &str, v: &Value| set_db.set(k, v))));
+            let (get_log, set_log) = (st.logger.scope("converter"), st.logger.scope("converter"));
+            let mut stats = crate::converter::stats::ConvertStats::new(
+                Some(Arc::new(move |k: &str| {
+                    get_db.get(k).map_err(|e| {
+                        get_log.warn(format!("Conversion speed notes ({k}) could not be read: {e}"));
+                        e.to_string()
+                    })
+                })),
+                Some(Arc::new(move |k: &str, v: &Value| {
+                    if let Err(e) = set_db.set(k, v) {
+                        set_log.warn(format!("Conversion speed notes ({k}) were not kept: {e}"));
+                    }
+                })),
+            );
             stats.cpu_name = Arc::new(crate::ops::diag::cpu_model);
             let conv = Arc::new(Conv {
                 host,
@@ -452,4 +499,41 @@ pub async fn events(srv: Arc<Server>, a: ApiRaw) -> Res {
         .header("x-accel-buffering", "no")
         .body(Body::from_stream(body))
         .unwrap()
+}
+
+/// Off-peak only: whether power is cheapest now. Rates that cannot be read are not "cheap now", so
+/// automatic conversion waits; said once until they can be read (the scheduler asks every 30 s).
+fn cheap_now(db: Arc<crate::core::db::Db>, log: crate::core::log::Scope) -> Arc<dyn Fn(i64) -> Option<bool> + Send + Sync> {
+    let unread = crate::core::db::LogOnce::default();
+    Arc::new(move |ms: i64| {
+        let p = db.get("power");
+        if let (true, Err(e)) = (unread.first("power", p.is_err()), &p) {
+            log.warn(format!("Automatic conversion waits: the power rates could not be read: {e}"));
+        }
+        match p {
+            Ok(p) => crate::ops::power::is_cheapest(&p.unwrap_or(Value::Null), ms),
+            Err(_) => Some(false),
+        }
+    })
+}
+
+#[cfg(test)]
+mod cheap_now_tests {
+    use super::*;
+
+    #[test]
+    fn rates_that_cannot_be_read_are_not_cheap_and_are_said_once_until_they_can() {
+        let db = Arc::new(crate::core::db::Db::memory().unwrap());
+        let logger = crate::core::log::Logger::with("info", 100, true, None, 1);
+        let cheap = cheap_now(db.clone(), logger.scope("converter"));
+        let said = || logger.recent(100.0, "warn").iter().filter(|e| e.message.starts_with("Automatic conversion waits")).count();
+        db.conn().execute_batch("CREATE TABLE gone (x); ALTER TABLE settings RENAME TO settings_kept; CREATE VIEW settings AS SELECT * FROM gone; DROP TABLE gone;").unwrap();
+        assert_eq!((cheap(0), cheap(30_000)), (Some(false), Some(false)), "it waits");
+        assert_eq!(said(), 1, "once, not every tick");
+        db.conn().execute_batch("DROP VIEW settings; ALTER TABLE settings_kept RENAME TO settings;").unwrap();
+        cheap(60_000);
+        db.conn().execute_batch("CREATE TABLE gone (x); ALTER TABLE settings RENAME TO settings_kept; CREATE VIEW settings AS SELECT * FROM gone; DROP TABLE gone;").unwrap();
+        cheap(90_000);
+        assert_eq!(said(), 2, "again after it could be read");
+    }
 }

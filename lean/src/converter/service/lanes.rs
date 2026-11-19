@@ -24,6 +24,10 @@ pub struct RemoteEncode {
 /// `FromNodes` adapts `nodes::lanes::RemoteNodes`; tests stand in their own.
 pub trait NodeLanes: Send + Sync {
     fn list(&self) -> Vec<Value>;
+    /// list(), with an error when the paired nodes cannot be read.
+    fn list_checked(&self) -> Result<Vec<Value>, String> {
+        Ok(self.list())
+    }
     fn encode(&self, request: crate::nodes::main_side::EncodeRequest) -> Result<RemoteEncode, String>;
     fn trusted(&self, device: &str) -> bool;
     fn set_slots(&self, device: &str, slots: &Value) -> Result<(), String>;
@@ -36,6 +40,9 @@ pub struct FromNodes(pub Arc<dyn crate::nodes::lanes::RemoteNodes>);
 impl NodeLanes for FromNodes {
     fn list(&self) -> Vec<Value> {
         self.0.list()
+    }
+    fn list_checked(&self) -> Result<Vec<Value>, String> {
+        self.0.list_checked().map_err(|e| e.message)
     }
     fn encode(&self, request: crate::nodes::main_side::EncodeRequest) -> Result<RemoteEncode, String> {
         let child = self.0.encode(request).map_err(|e| e.code.to_string())?;
