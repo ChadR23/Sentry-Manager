@@ -3,7 +3,10 @@
 //! - conversions in place (direct and through local staging) and to a
 //!   separate folder, compared with how the Node converter ran the same job
 //!   (frozen in tests/fixtures/node-reference/converter-jobs.json: the job's
-//!   shape, its events, each output's codec and digest);
+//!   shape, its events, each output's codec and digest, the ffmpeg runs it
+//!   asked for; both sides run libx265 on one frame thread through
+//!   FFMPEG_ONE_FRAME_THREAD, so the bytes are the same however busy the
+//!   machine is);
 //! - the crash suites (test/converterCrashReplace, converterCrashSeparate,
 //!   fixtures/crashPoints.js): the converter killed with SIGKILL at each
 //!   point of a conversion, started again, and the job finishes by itself
@@ -33,6 +36,50 @@ fn available() -> bool {
 struct Fixtures {
     dir: PathBuf,
     clip: PathBuf,
+    /// the ffmpeg the converter runs: FFMPEG_ONE_FRAME_THREAD
+    ffmpeg: PathBuf,
+}
+
+/// ffmpeg with libx265 on one frame thread (added to -x265-params, or given as
+/// its own -x265-params before the output when the encode has none), and a
+/// pool of 4 threads (the converter's pools=<usable CPUs>, run as pools=4: the
+/// pool Node's frozen outputs were encoded with; its size changes the bytes,
+/// so they are the same on a machine with other CPUs). It first appends the
+/// arguments it was given, as they came, to "$0.args": the count, then each
+/// argument, each one NUL-terminated.
+const FFMPEG_ONE_FRAME_THREAD: &str = r##"#!/bin/sh
+printf '%s\0' "$#" "$@" >> "$0.args"
+n=$# i=0 p= codec= params=
+for a do
+  shift
+  i=$((i + 1))
+  case $p in
+    -c:v) codec=$a ;;
+    -x265-params) params=1; a="$(printf '%s' "$a" | sed 's/\(^\|:\)pools=[0-9]*/\1pools=4/'):frame-threads=1" ;;
+  esac
+  if [ "$i" = "$n" ] && [ "$codec" = libx265 ] && [ -z "$params" ]; then
+    set -- "$@" -x265-params frame-threads=1
+  fi
+  set -- "$@" "$a"
+  p=$a
+done
+exec ffmpeg "$@"
+"##;
+
+/// The ffmpeg runs a FFMPEG_ONE_FRAME_THREAD copy recorded, as the converter
+/// asked for them, with the base folder and the random ids made alike (as
+/// Node's were when they were recorded: converter-jobs.json "ffmpegCalls").
+fn ffmpeg_calls(wrapper: &Path, base: &Path) -> Vec<Vec<String>> {
+    let recorded = fs::read(format!("{}.args", wrapper.display())).unwrap_or_default();
+    let mut parts = recorded.split(|b| *b == 0).map(|p| String::from_utf8_lossy(p).into_owned());
+    let bases = [fs::canonicalize(base).unwrap(), base.to_path_buf()].map(|b| b.to_string_lossy().into_owned());
+    let id = regex::Regex::new("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").unwrap();
+    let mut calls = vec![];
+    while let Some(n) = parts.next().filter(|n| !n.is_empty()) {
+        let n: usize = n.parse().unwrap();
+        calls.push(parts.by_ref().take(n).map(|a| id.replace_all(&bases.iter().fold(a, |a, b| a.replace(b.as_str(), "<base>")), "<id>").into_owned()).collect());
+    }
+    calls
 }
 
 fn fixtures() -> &'static Fixtures {
@@ -44,7 +91,18 @@ fn fixtures() -> &'static Fixtures {
         if !clip.exists() {
             fs::copy(crate::reference::dir().join("job-clip.mp4"), &clip).unwrap();
         }
-        Fixtures { dir, clip }
+        // libx265 encodes a few frames at once (frame threads), and the size it
+        // gives a frame can depend on whether the frames before it are done, so
+        // on a busy machine a clip now and then comes out with other bytes
+        // (frames 0 and 1 the same, every frame from 2 on another size). One
+        // frame thread gives the same bytes every time; Node's frozen outputs
+        // and ffmpeg runs were recorded through this same script.
+        // (written every time, so a folder kept with LEAN_CONVERTER_JOB_FIXTURES runs this script)
+        let ffmpeg = dir.join("ffmpeg-one-frame-thread");
+        fs::write(&ffmpeg, FFMPEG_ONE_FRAME_THREAD).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&ffmpeg, fs::Permissions::from_mode(0o755)).unwrap();
+        Fixtures { dir, clip, ffmpeg }
     })
 }
 
@@ -195,7 +253,9 @@ fn conversions_as_node_runs_them() {
         let rust_base = make_base(&format!("rust-{mode}-{network}"), 2);
         let node_base = make_base(&format!("node-{mode}-{network}"), 2);
         let (names, before) = names_and_hashes(&rust_base);
-        let c = open(&rust_base, "ffmpeg", "ffprobe", None);
+        let ffmpeg = &fixtures().ffmpeg;
+        fs::write(format!("{}.args", ffmpeg.display()), "").unwrap();
+        let c = open(&rust_base, ffmpeg.to_str().unwrap(), "ffprobe", None);
         let events: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
         let e2 = events.clone();
         c.service.subscribe(Arc::new(move |e: &Value| e2.lock().unwrap().push(e["type"].as_str().unwrap_or("").to_string())));
@@ -212,11 +272,23 @@ fn conversions_as_node_runs_them() {
         assert_eq!(shape(&job), theirs["shape"], "{mode} {network}");
         // the same events, apart from how many live updates went out
         assert_eq!(json!(key(events.lock().unwrap().clone())), theirs["events"], "{mode} {network}");
-        // (libx265 at a set bitrate, the same telemetry writer: byte for byte
-        // with the same ffmpeg; another ffmpeg encodes other bytes)
+        // (libx265 at a set bitrate on one frame thread, the same telemetry
+        // writer: byte for byte with the same ffmpeg; another ffmpeg encodes
+        // other bytes, and may be asked other things)
         let same_ffmpeg = theirs["ffmpeg"] == json!(ffmpeg_version());
         if !same_ffmpeg {
-            eprintln!("note: {} is not the ffmpeg Node's outputs were made with ({}): their digests are not compared", ffmpeg_version(), theirs["ffmpeg"]);
+            eprintln!("note: {} is not the ffmpeg Node's outputs were made with ({}): their digests and ffmpeg runs are not compared", ffmpeg_version(), theirs["ffmpeg"]);
+        }
+        // the same ffmpeg runs, as each converter asked for them (before the one frame thread)
+        let ran = ffmpeg_calls(&fixtures().ffmpeg, &rust_base);
+        let encodes = ran.iter().filter(|c| c.windows(2).any(|w| w[0] == "-i" && w[1].starts_with("<base>/")) && c.iter().any(|a| a == "libx265")).count();
+        assert_eq!(encodes, names.len(), "{mode} {network}: every clip's encode recorded: {ran:?}");
+        if same_ffmpeg {
+            // (libx265's pool: one thread per usable CPU, on Node's machine then and on this one now)
+            let read = |p: &str| fs::read_to_string(p).map(|s| s.trim().to_string()).unwrap_or_default();
+            let pools = super::super::planner::default_x265_pools(std::env::consts::OS, super::super::planner::usable_cpus(&read));
+            let node_ran = crate::reference::subst(&theirs["ffmpegCalls"], &[("pools=<cpus>".into(), format!("pools={pools}"))]);
+            assert_eq!(json!(ran), node_ran, "{mode} {network}: ffmpeg as Rust and as Node ran it");
         }
         for (n, name) in names.iter().enumerate() {
             let a = output_of(&rust_base, mode, name);
