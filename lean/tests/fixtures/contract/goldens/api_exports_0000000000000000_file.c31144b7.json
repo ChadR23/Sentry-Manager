@@ -1,0 +1,18 @@
+{
+  "route": "GET /api/exports/:id/file",
+  "method": "GET",
+  "request": {
+    "path": "/api/exports/0000000000000000/file"
+  },
+  "response": {
+    "status": 404,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "This export is not ready, or it was removed after a day."
+    }
+  }
+}

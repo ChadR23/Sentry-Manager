@@ -1,0 +1,26 @@
+{
+  "route": "GET /api/snapshots",
+  "method": "GET",
+  "request": {
+    "path": "/api/snapshots"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "keep": 7,
+      "snapshots": [
+        {
+          "at": "<time>",
+          "bytes": 102400,
+          "day": "2026-11-19",
+          "name": "manager-2026-11-19.db"
+        }
+      ]
+    }
+  }
+}

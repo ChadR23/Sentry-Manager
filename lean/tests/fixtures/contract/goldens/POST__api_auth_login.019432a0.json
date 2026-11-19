@@ -1,0 +1,22 @@
+{
+  "route": "POST /api/auth/login",
+  "method": "POST",
+  "request": {
+    "path": "/api/auth/login"
+  },
+  "body": {
+    "username": "admin",
+    "password": "not it"
+  },
+  "response": {
+    "status": 401,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "Wrong user name or password."
+    }
+  }
+}

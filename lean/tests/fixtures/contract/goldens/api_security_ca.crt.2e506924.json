@@ -1,0 +1,17 @@
+{
+  "route": "GET /api/security/ca.crt",
+  "method": "GET",
+  "request": {
+    "path": "/api/security/ca.crt"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/x-x509-ca-cert",
+      "content-disposition": "attachment; filename=\"sentry-six-manager-ca.crt\"",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": "<ignored>"
+  }
+}

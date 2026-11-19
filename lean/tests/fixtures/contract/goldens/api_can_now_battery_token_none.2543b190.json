@@ -1,0 +1,21 @@
+{
+  "route": "GET /api/can/now/:stat",
+  "method": "GET",
+  "request": {
+    "path": "/api/can/now/battery",
+    "query": {
+      "token": "none"
+    }
+  },
+  "response": {
+    "status": 404,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "Not found"
+    }
+  }
+}

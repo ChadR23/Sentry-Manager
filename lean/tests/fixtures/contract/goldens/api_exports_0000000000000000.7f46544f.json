@@ -1,0 +1,18 @@
+{
+  "route": "GET /api/exports/:id",
+  "method": "GET",
+  "request": {
+    "path": "/api/exports/0000000000000000"
+  },
+  "response": {
+    "status": 404,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "No such export (exports are kept for a day)."
+    }
+  }
+}

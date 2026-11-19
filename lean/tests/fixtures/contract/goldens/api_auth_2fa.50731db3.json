@@ -1,0 +1,19 @@
+{
+  "route": "GET /api/auth/2fa",
+  "method": "GET",
+  "request": {
+    "path": "/api/auth/2fa"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "enabled": false,
+      "recoveryLeft": 0
+    }
+  }
+}

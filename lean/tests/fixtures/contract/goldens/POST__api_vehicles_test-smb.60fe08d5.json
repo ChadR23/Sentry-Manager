@@ -1,0 +1,26 @@
+{
+  "route": "POST /api/vehicles/test-smb",
+  "method": "POST",
+  "request": {
+    "path": "/api/vehicles/test-smb"
+  },
+  "body": {
+    "source": {
+      "type": "smb",
+      "share": ""
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "The SMB share must look like //192.168.1.50/TeslaCam (optionally //server/share/folder).",
+      "ok": false,
+      "stage": "details"
+    }
+  }
+}

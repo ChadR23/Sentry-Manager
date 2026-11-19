@@ -1,0 +1,21 @@
+{
+  "route": "POST /api/studio/readFile",
+  "method": "POST",
+  "request": {
+    "path": "/api/studio/readFile"
+  },
+  "body": {
+    "path": "/etc/hostname"
+  },
+  "response": {
+    "status": 403,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "That path is outside the vehicle shares."
+    }
+  }
+}

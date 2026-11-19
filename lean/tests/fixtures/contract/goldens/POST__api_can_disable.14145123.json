@@ -1,0 +1,19 @@
+{
+  "route": "POST /api/can/disable",
+  "method": "POST",
+  "request": {
+    "path": "/api/can/disable"
+  },
+  "body": {},
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "enabled": false
+    }
+  }
+}

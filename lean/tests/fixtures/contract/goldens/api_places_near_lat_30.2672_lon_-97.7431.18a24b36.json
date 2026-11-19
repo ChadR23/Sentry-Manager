@@ -1,0 +1,33 @@
+{
+  "route": "GET /api/places/near",
+  "method": "GET",
+  "request": {
+    "path": "/api/places/near",
+    "query": {
+      "lat": "30.2672",
+      "lon": "-97.7431"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "radius": 150,
+      "results": [
+        {
+          "clip": "2024-05-01_08-00-00",
+          "day": "2024-05-01",
+          "metres": 0,
+          "path": "{root:contract-car}/TeslaCam/RecentClips/2024-05-01_08-00-00-front.mp4",
+          "second": 0,
+          "vehicle": "contract-car",
+          "vehicleName": "Contract Car"
+        }
+      ]
+    }
+  }
+}

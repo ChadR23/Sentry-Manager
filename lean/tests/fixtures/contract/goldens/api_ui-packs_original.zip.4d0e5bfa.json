@@ -1,0 +1,17 @@
+{
+  "route": "GET /api/ui-packs/original.zip",
+  "method": "GET",
+  "request": {
+    "path": "/api/ui-packs/original.zip"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/zip",
+      "content-disposition": "attachment; filename=\"sentry-six-manager-interface.zip\"",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": "<ignored>"
+  }
+}

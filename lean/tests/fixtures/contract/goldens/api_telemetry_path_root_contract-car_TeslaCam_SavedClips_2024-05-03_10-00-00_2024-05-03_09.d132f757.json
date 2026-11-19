@@ -1,0 +1,119 @@
+{
+  "route": "GET /api/telemetry",
+  "method": "GET",
+  "request": {
+    "path": "/api/telemetry",
+    "query": {
+      "path": "{root:contract-car}/TeslaCam/SavedClips/2024-05-03_10-00-00/2024-05-03_09-59-00-front.mp4"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "private, no-cache",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "frames": [
+        [
+          0,
+          "CAEQARgAJQAAoEFZzczMzMxMPkBhMzMzMzNzWMBpAAAAAACAVkA="
+        ],
+        [
+          83.33333333333333,
+          "CAEQARgBJauqoEFZFHmSdM1MPkBhIchBCTNzWMBpAAAAAACAVkA="
+        ],
+        [
+          166.66666666666666,
+          "CAEQARgCJVVVoUFZWyVYHM5MPkBhD11Q3zJzWMBpAAAAAACAVkA="
+        ],
+        [
+          250,
+          "CAEQARgDJQAAokFZotEdxM5MPkBh/vFetTJzWMBpAAAAAACAVkA="
+        ],
+        [
+          333.3333333333333,
+          "CAEQARgEJauqokFZ6X3ja89MPkBh7IZtizJzWMBpAAAAAACAVkA="
+        ],
+        [
+          416.6666666666667,
+          "CAEQARgFJVVVo0FZMSqpE9BMPkBh2ht8YTJzWMBpAAAAAACAVkA="
+        ],
+        [
+          500,
+          "CAEQARgGJQAApEFZeNZuu9BMPkBhyLCKNzJzWMBpAAAAAACAVkA="
+        ],
+        [
+          583.3333333333334,
+          "CAEQARgHJauqpEFZv4I0Y9FMPkBht0WZDTJzWMBpAAAAAACAVkA="
+        ],
+        [
+          666.6666666666666,
+          "CAEQARgIJVVVpUFZBi/6CtJMPkBhpdqn4zFzWMBpAAAAAACAVkA="
+        ],
+        [
+          750,
+          "CAEQARgJJQAApkFZTdu/stJMPkBhk2+2uTFzWMBpAAAAAACAVkA="
+        ],
+        [
+          833.3333333333334,
+          "CAEQARgKJauqpkFZlIeFWtNMPkBhgQTFjzFzWMBpAAAAAACAVkA="
+        ],
+        [
+          916.6666666666666,
+          "CAEQARgLJVVVp0FZ2zNLAtRMPkBhb5nTZTFzWMBpAAAAAACAVkA="
+        ],
+        [
+          1000,
+          "CAEQARgMJQAAqEFZIuAQqtRMPkBhXi7iOzFzWMBpAAAAAACAVkA="
+        ],
+        [
+          1083.3333333333333,
+          "CAEQARgNJauqqEFZaYzWUdVMPkBhTMPwETFzWMBpAAAAAACAVkA="
+        ],
+        [
+          1166.6666666666667,
+          "CAEQARgOJVVVqUFZsDic+dVMPkBhOlj/5zBzWMBpAAAAAACAVkA="
+        ],
+        [
+          1250,
+          "CAEQARgPJQAAqkFZ+ORhodZMPkBhKO0NvjBzWMBpAAAAAACAVkA="
+        ],
+        [
+          1333.3333333333333,
+          "CAEQARgQJauqqkFZP5EnSddMPkBhF4IclDBzWMBpAAAAAACAVkA="
+        ],
+        [
+          1416.6666666666667,
+          "CAEQARgRJVVVq0FZhj3t8NdMPkBhBRcrajBzWMBpAAAAAACAVkA="
+        ],
+        [
+          1500,
+          "CAEQARgSJQAArEFZzemymNhMPkBh86s5QDBzWMBpAAAAAACAVkA="
+        ],
+        [
+          1583.3333333333333,
+          "CAEQARgTJauqrEFZFJZ4QNlMPkBh4UBIFjBzWMBpAAAAAACAVkA="
+        ],
+        [
+          1666.6666666666667,
+          "CAEQARgUJVVVrUFZW0I+6NlMPkBhz9VW7C9zWMBpAAAAAACAVkA="
+        ],
+        [
+          1750,
+          "CAEQARgVJQAArkFZou4DkNpMPkBhvmplwi9zWMBpAAAAAACAVkA="
+        ],
+        [
+          1833.3333333333333,
+          "CAEQARgWJauqrkFZ6ZrJN9tMPkBhrP9zmC9zWMBpAAAAAACAVkA="
+        ],
+        [
+          1916.6666666666667,
+          "CAEQARgXJVVVr0FZMEeP39tMPkBhmpSCbi9zWMBpAAAAAACAVkA="
+        ]
+      ],
+      "v": 1
+    }
+  }
+}

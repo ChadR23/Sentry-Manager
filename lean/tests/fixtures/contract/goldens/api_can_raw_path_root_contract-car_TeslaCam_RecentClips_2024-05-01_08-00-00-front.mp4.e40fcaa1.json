@@ -1,0 +1,25 @@
+{
+  "route": "GET /api/can/raw",
+  "method": "GET",
+  "request": {
+    "path": "/api/can/raw",
+    "query": {
+      "path": "{root:contract-car}/TeslaCam/RecentClips/2024-05-01_08-00-00-front.mp4"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "from": 1714550398000,
+      "ids": [],
+      "start": 1714550400000,
+      "sync": null,
+      "to": 1714550470000
+    }
+  }
+}

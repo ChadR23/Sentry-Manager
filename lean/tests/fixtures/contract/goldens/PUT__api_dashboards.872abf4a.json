@@ -1,0 +1,21 @@
+{
+  "route": "PUT /api/dashboards",
+  "method": "PUT",
+  "request": {
+    "path": "/api/dashboards"
+  },
+  "body": {
+    "boards": "not a list"
+  },
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "Send at least one dashboard."
+    }
+  }
+}

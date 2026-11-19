@@ -4,37 +4,34 @@
 
 The server is written in Rust (`lean/`): two programs, the root supervisor
 (`sentry-lean-supervisor`) and the app it runs unprivileged (`sentry-lean`).
-The pages it serves are the same files as before (`web/`, `src/renderer`,
-`examples/ui-packs`). The Node.js server it replaced (`server/`, `src/main/`)
-is still in the repository while the Rust one settles in: it is the reference
-the Rust server is checked against, and `Dockerfile.node` still builds it.
+The pages it serves are plain JavaScript files (`web/`, `src/renderer`,
+`src/shared`, `examples/ui-packs`), served as they are. The Node.js server
+the Rust one replaced was removed once its answers were frozen as reference
+files, which the tests now compare with (`lean/PORT_PLAN.md`, "Node removed").
 
-You need Rust (stable), ffmpeg, and Node.js 22.13 or newer for the checks
-against the Node code.
+You need Rust (stable) and ffmpeg. Node.js 22 or newer runs the API contract
+check, the dev tools' tests and two test stand-ins (no packages, nothing of
+the old server).
+
+The frozen answers were recorded with Ubuntu 24.04's ffmpeg 6.1.1, and CI runs
+the Rust tests there. With another ffmpeg the conversion test leaves out the
+output digests, and the verifier test can differ where ffprobe does (ffmpeg 8's
+exits 0 on a damaged file where 6.1's exits 1).
 
 ```bash
-cd lean && cargo test --release
+cd lean && cargo test --release --locked     # before every push
 cd lean && cargo build --release
+node tools/contract/frozen.js                # the whole API contract against the frozen answers
+node --test "tools/**/*.test.js"             # the dev tools and the image workflow
 DATA_PATH=./data FOOTAGE_PATH=/path/to/TeslaCam APP_ROOT=$PWD/.. lean/target/release/sentry-lean
 docker build -t ghcr.io/skittles-fivem/sentry-manager:latest .
 ```
 
-The Node server and its tests:
-
-```bash
-mkdir -p build && gcc -O2 -o build/noreplace-rename native/noreplace-rename.c
-npm test
-DATA_PATH=./data FOOTAGE_PATH=/path/to/TeslaCam SENTRY_NOREPLACE_RENAME=build/noreplace-rename npm start
-docker build -f Dockerfile.node -t sentry-manager:node .
-```
-
 | Folder | |
 | --- | --- |
-| `lean/` | The Rust server: one module per area (core, footage, viewer, converter, CAN, ops, ui, helper servers, supervisor); `lean/PORT_PLAN.md` says what each holds and how it was checked, `lean/parity/` the scripts that compare it with the Node server |
+| `lean/` | The Rust server: one module per area (core, footage, viewer, converter, CAN, ops, ui, helper servers, supervisor); `lean/PORT_PLAN.md` says what each holds and how it was checked; `lean/tests/fixtures/` the Node server's frozen answers |
 | `web/` | The web pages, and the shim that runs Sentry Studio in the browser |
-| `src/` | Sentry Studio's viewer (`renderer`, `shared`), served as they are; the Node converter (`main/converter`) |
-| `server/` | The Node.js server (the reference the Rust server is checked against) |
-| `native/` | The no-replace rename helper the Node server uses for safe replacement (the Rust server calls renameat2 itself) |
-| `test/` | The Node tests (`node --test`), including real conversions with telemetry checks |
-| `tools/contract/` | The API contract ([`api-contract.md`](api-contract.md)): every route and page call read from the source, and goldens recorded from a running server to check another one answers the same ([how](../tools/contract/README.md)) |
+| `src/` | Sentry Studio's viewer (`renderer`, `shared`), served as they are |
+| `dbc/` | The CAN signal sets the server decodes CAN Bridge logs with |
+| `tools/contract/` | The API contract ([`api-contract.md`](api-contract.md)) and the check against the frozen answers, or between two running servers ([how](../tools/contract/README.md)) |
 | `tools/bench/` | Measurement runs of an image on a real archive, read-only ([how](../tools/bench/README.md)) |

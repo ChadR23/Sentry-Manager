@@ -1,11 +1,19 @@
-//! Parity of the archive gap check with Node (lean/parity/archiveGap.js;
-//! needs node): every analyze() call Node's own tests make (test/archiveGap,
+//! Parity of the archive gap check with Node: every analyze() call Node's own
+//! tests made (test/archiveGap,
 //! carFiles, deletedClips, sentryUsb, snapshotGaps: CAN Bridge driving and
 //! Sentry minutes, wrong time zones, cut-off drives, partial minutes, late
 //! clips, Sentry USB's transfer, its missed snapshots and its list of what the
 //! car wrote, the Recycle Bin and deleted clips, other time zones) is given to
 //! the Rust analyze() too, and the answers must be Node's: every day, the
 //! stalled share, the signals and the car-files pass, field for field.
+//!
+//! Node's calls and answers are frozen in
+//! tests/fixtures/node-reference/archive-gap.json.gz, recorded on 2026-11-18
+//! by the former lean/parity/archiveGap.js, which watched
+//! server/archiveGap.js's analyze() while Node's own tests ran.
+
+#[path = "support/reference.rs"]
+mod reference;
 
 use sentry_lean::can::sentry_usb::{CarClip, CarFiles};
 use sentry_lean::footage::Kind;
@@ -14,13 +22,7 @@ use sentry_lean::viewer::archive_gap::{analyze, CarFilesIn, Input, Pi, Snaps};
 use sentry_lean::viewer::ctx::Files;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
-
-fn node_available() -> bool {
-    Command::new("node").arg("--version").output().is_ok_and(|o| o.status.success())
-}
 
 fn leak(s: &str) -> &'static str {
     Box::leak(s.to_string().into_boxed_str())
@@ -97,16 +99,7 @@ fn input_of(i: &Value) -> (Files, Input<'static>) {
 
 #[test]
 fn every_analysis_of_nodes_tests_answers_as_node() {
-    if !node_available() {
-        eprintln!("node not found: skipped");
-        return;
-    }
-    let out = std::env::temp_dir().join(format!("lean-archive-gap-parity-{}.json", std::process::id()));
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("parity/archiveGap.js");
-    let run = Command::new("node").arg(script).arg(&out).output().expect("run node");
-    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
-    let calls: Vec<Value> = serde_json::from_slice(&std::fs::read(&out).unwrap()).unwrap();
-    let _ = std::fs::remove_file(&out);
+    let calls: Vec<Value> = serde_json::from_value(reference::json("archive-gap.json")).unwrap();
     assert!(calls.len() >= 70, "only {} calls", calls.len());
     let mut differ = Vec::new();
     for (n, c) in calls.iter().enumerate() {

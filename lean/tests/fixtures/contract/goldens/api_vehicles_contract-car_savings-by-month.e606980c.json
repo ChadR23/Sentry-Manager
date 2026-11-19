@@ -1,0 +1,83 @@
+{
+  "route": "GET /api/vehicles/:id/savings-by-month",
+  "method": "GET",
+  "request": {
+    "path": "/api/vehicles/contract-car/savings-by-month"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "months": [
+        {
+          "bytes": 0,
+          "clips": 0,
+          "month": "<time>"
+        },
+        {
+          "bytes": 0,
+          "clips": 0,
+          "month": "<time>"
+        },
+        {
+          "bytes": 0,
+          "clips": 0,
+          "month": "<time>"
+        },
+        {
+          "bytes": 0,
+          "clips": 0,
+          "month": "<time>"
+        },
+        {
+          "bytes": 0,
+          "clips": 0,
+          "month": "<time>"
+        },
+        {
+          "bytes": 0,
+          "clips": 0,
+          "month": "<time>"
+        },
+        {
+          "bytes": 0,
+          "clips": 0,
+          "month": "<time>"
+        },
+        {
+          "bytes": 0,
+          "clips": 0,
+          "month": "<time>"
+        },
+        {
+          "bytes": 0,
+          "clips": 0,
+          "month": "<time>"
+        },
+        {
+          "bytes": 0,
+          "clips": 0,
+          "month": "<time>"
+        },
+        {
+          "bytes": 0,
+          "clips": 0,
+          "month": "<time>"
+        },
+        {
+          "bytes": 0,
+          "clips": 0,
+          "month": "<time>"
+        }
+      ],
+      "total": {
+        "bytes": 0,
+        "clips": 0
+      }
+    }
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "route": "POST /api/telemetry/speeds",
+  "method": "POST",
+  "request": {
+    "path": "/api/telemetry/speeds"
+  },
+  "body": {
+    "paths": []
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "speeds": []
+    }
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "route": "POST /api/can/viewer-car-data",
+  "method": "POST",
+  "request": {
+    "path": "/api/can/viewer-car-data"
+  },
+  "body": {
+    "enabled": "yes"
+  },
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "Send { \"enabled\": true | false }."
+    }
+  }
+}

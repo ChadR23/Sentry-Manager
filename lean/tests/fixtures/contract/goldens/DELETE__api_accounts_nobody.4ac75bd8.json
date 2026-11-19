@@ -1,0 +1,18 @@
+{
+  "route": "DELETE /api/accounts/:name",
+  "method": "DELETE",
+  "request": {
+    "path": "/api/accounts/nobody"
+  },
+  "response": {
+    "status": 404,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "No such account."
+    }
+  }
+}

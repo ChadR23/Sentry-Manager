@@ -1,0 +1,102 @@
+{
+  "route": "GET /api/vehicles/:id/recordings/:rid",
+  "method": "GET",
+  "request": {
+    "path": "/api/vehicles/contract-car/recordings/7cdb75664f3190bd"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "bytes": 3235208,
+      "cameras": [
+        "back",
+        "front",
+        "left_repeater",
+        "right_repeater"
+      ],
+      "category": "Recent",
+      "clipCount": 8,
+      "day": "2024-05-01",
+      "encoded": {
+        "clips": 8,
+        "codecs": [],
+        "encoded": 0,
+        "unknown": 0
+      },
+      "end": "2024-05-01 08:01:00",
+      "event": null,
+      "eventAt": null,
+      "eventId": null,
+      "fileCount": 8,
+      "files": [
+        {
+          "codec": "h264",
+          "path": "{root:contract-car}/TeslaCam/RecentClips/2024-05-01_08-00-00-back.mp4",
+          "rel": "TeslaCam/RecentClips/2024-05-01_08-00-00-back.mp4",
+          "size": 404401
+        },
+        {
+          "codec": "h264",
+          "path": "{root:contract-car}/TeslaCam/RecentClips/2024-05-01_08-00-00-front.mp4",
+          "rel": "TeslaCam/RecentClips/2024-05-01_08-00-00-front.mp4",
+          "size": 404401
+        },
+        {
+          "codec": "h264",
+          "path": "{root:contract-car}/TeslaCam/RecentClips/2024-05-01_08-00-00-left_repeater.mp4",
+          "rel": "TeslaCam/RecentClips/2024-05-01_08-00-00-left_repeater.mp4",
+          "size": 404401
+        },
+        {
+          "codec": "h264",
+          "path": "{root:contract-car}/TeslaCam/RecentClips/2024-05-01_08-00-00-right_repeater.mp4",
+          "rel": "TeslaCam/RecentClips/2024-05-01_08-00-00-right_repeater.mp4",
+          "size": 404401
+        },
+        {
+          "codec": "h264",
+          "path": "{root:contract-car}/TeslaCam/RecentClips/2024-05-01_08-01-00-back.mp4",
+          "rel": "TeslaCam/RecentClips/2024-05-01_08-01-00-back.mp4",
+          "size": 404401
+        },
+        {
+          "codec": "h264",
+          "path": "{root:contract-car}/TeslaCam/RecentClips/2024-05-01_08-01-00-front.mp4",
+          "rel": "TeslaCam/RecentClips/2024-05-01_08-01-00-front.mp4",
+          "size": 404401
+        },
+        {
+          "codec": "h264",
+          "path": "{root:contract-car}/TeslaCam/RecentClips/2024-05-01_08-01-00-left_repeater.mp4",
+          "rel": "TeslaCam/RecentClips/2024-05-01_08-01-00-left_repeater.mp4",
+          "size": 404401
+        },
+        {
+          "codec": "h264",
+          "path": "{root:contract-car}/TeslaCam/RecentClips/2024-05-01_08-01-00-right_repeater.mp4",
+          "rel": "TeslaCam/RecentClips/2024-05-01_08-01-00-right_repeater.mp4",
+          "size": 404401
+        }
+      ],
+      "folder": "TeslaCam/RecentClips",
+      "folderPath": "{root:contract-car}/TeslaCam/RecentClips",
+      "frontRel": "TeslaCam/RecentClips/2024-05-01_08-00-00-front.mp4",
+      "id": "7cdb75664f3190bd",
+      "key": "session:TeslaCam/RecentClips:2024-05-01_08-00-00",
+      "minutes": 2,
+      "mtimeMs": 1714550460000,
+      "protected": false,
+      "root": "{root:contract-car}",
+      "start": "2024-05-01 08:00:00",
+      "startKey": "2024-05-01_08-00-00",
+      "thumbRel": null,
+      "type": "RecentClips",
+      "vehicleId": "contract-car"
+    }
+  }
+}
