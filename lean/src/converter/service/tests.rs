@@ -30,10 +30,6 @@ fn available() -> bool {
     ok("ffmpeg", &["-version"]) && Command::new("ffmpeg").args(["-hide_banner", "-encoders"]).output().is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("libx265"))
 }
 
-fn repo() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
-}
-
 struct Fixtures {
     dir: PathBuf,
     clip: PathBuf,
@@ -179,12 +175,6 @@ fn names_and_hashes(base: &Path) -> (Vec<String>, Vec<String>) {
     (names, hashes)
 }
 
-/// RECORDING ONLY: the Node converter (lean/parity/converterJobs.js).
-fn node_json(args: &[&str]) -> Value {
-    let out = Command::new("node").arg(repo().join("lean/parity/converterJobs.js")).args(args).output().unwrap();
-    assert!(out.status.success(), "node {:?}: {}", args, String::from_utf8_lossy(&out.stderr));
-    serde_json::from_slice(&out.stdout).unwrap()
-}
 
 /// What two runs of the same job must share.
 fn shape(job: &Value) -> Value {
@@ -218,18 +208,6 @@ fn conversions_as_node_runs_them() {
         c.shutdown();
         assert_recovered(&rust_base, &job, mode, &names, &before);
         let key = |list: Vec<String>| list.into_iter().filter(|t| t != "snapshot" && t != "progress").collect::<Vec<_>>();
-        if crate::record::recording() {
-            let helper = fixtures().dir.join("noreplace-rename");
-            if !helper.exists() {
-                let out = Command::new("cc").args(["-O2", "-o"]).arg(&helper).arg(repo().join("native/noreplace-rename.c")).output().unwrap();
-                assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-            }
-            let theirs = node_json(&["run", node_base.to_str().unwrap(), mode, network, helper.to_str().unwrap()]);
-            let node_events: Vec<String> = theirs["events"].as_array().unwrap().iter().map(|t| t.as_str().unwrap().to_string()).collect();
-            let outputs: Vec<Value> = names.iter().map(|name| { let b = output_of(&node_base, mode, name); json!({ "name": name, "codec": codec_of(&b), "sha256": sha(&b) }) }).collect();
-            let doc = json!({ "ffmpeg": ffmpeg_version(), "shape": shape(&theirs["job"]), "events": key(node_events), "outputs": outputs });
-            crate::record::record("converter-jobs", "src/main/converter/runtime.js by lean/parity/converterJobs.js run, on job-clip.mp4, 2026-11-19", &[], &json!({ "mode": mode, "network": network }), &doc);
-        }
         let theirs = crate::reference::answer("converter-jobs", &[], &json!({ "mode": mode, "network": network }));
         assert_eq!(shape(&job), theirs["shape"], "{mode} {network}");
         // the same events, apart from how many live updates went out

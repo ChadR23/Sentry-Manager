@@ -4,7 +4,6 @@
 
 use super::*;
 use serde_json::json;
-use std::process::Command;
 
 fn tmp(tag: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("lean-jobstore-{tag}-{}-{}", std::process::id(), random_uuid().unwrap()));
@@ -286,13 +285,6 @@ fn node(args: &[&str]) -> Value {
     let places = [("{T}", prefix())];
     let input = json!({ "args": args, "state": args_state(args) });
     let writes = matches!(args[0], "run" | "step" | "recover");
-    if crate::record::recording() {
-        let out = Command::new("node").arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("parity/converterStore.js")).args(args).output().expect("run node");
-        assert!(out.status.success(), "node {:?}: {}", args, String::from_utf8_lossy(&out.stderr));
-        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
-        let after = if writes { crate::reference::snapshot(Path::new(args[1])) } else { Value::Null };
-        crate::record::record("converter-store", "src/main/converter/jobStore.js by lean/parity/converterStore.js, 2026-11-19", &places, &input, &json!({ "stdout": v, "after": after }));
-    }
     let out = crate::reference::answer("converter-store", &places, &input);
     if writes {
         crate::reference::restore(Path::new(args[1]), &out["after"]);

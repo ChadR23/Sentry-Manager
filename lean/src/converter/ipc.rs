@@ -1006,7 +1006,6 @@ pub fn clamp_verify(v: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
 
     /// The stand-in job service of lean/parity/converterBridge.js.
     #[derive(Default)]
@@ -1113,18 +1112,6 @@ mod tests {
         std::fs::write(base.join("allowed/file.txt"), b"x").unwrap();
         std::os::unix::fs::symlink(base.join("outside"), base.join("allowed/link")).unwrap();
         let places = [("{BASE}", base.to_string_lossy().into_owned())];
-        if crate::record::recording() {
-            let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("parity/converterBridge.js");
-            let corpus = Command::new("node").arg(&script).arg("corpus").arg(&base).output().unwrap();
-            assert!(corpus.status.success(), "{}", String::from_utf8_lossy(&corpus.stderr));
-            let file = base.join("corpus.json");
-            std::fs::write(&file, &corpus.stdout).unwrap();
-            let theirs = Command::new("node").arg(&script).arg("run").arg(&base).arg(&file).output().unwrap();
-            assert!(theirs.status.success(), "{}", String::from_utf8_lossy(&theirs.stderr));
-            let theirs: Value = serde_json::from_slice(&theirs.stdout).unwrap();
-            let requests: Value = serde_json::from_slice(&corpus.stdout).unwrap();
-            crate::record::record("converter-bridge", "server/converterBridge.js by lean/parity/converterBridge.js corpus/run <base>, 2026-11-19", &places, &json!("corpus"), &json!({ "requests": requests, "answers": theirs }));
-        }
         let frozen = crate::reference::answer("converter-bridge", &places, &json!("corpus"));
         let (requests, theirs) = (frozen["requests"].clone(), frozen["answers"].clone());
         assert!(requests.as_array().unwrap().len() > 100);

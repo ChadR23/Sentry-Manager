@@ -25,9 +25,6 @@ pub mod wire;
 #[cfg(test)]
 #[path = "../tests/support/reference.rs"]
 pub(crate) mod reference;
-#[cfg(test)]
-#[path = "../tests/support/record.rs"]
-pub(crate) mod record;
 
 // (moved into footage/; the old paths still work)
 pub use footage::{catalog, inventory, scanner};

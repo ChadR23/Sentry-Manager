@@ -1219,10 +1219,6 @@ fn benchmark_real_clips_lent_to_a_real_node_encodes_deleted_footage_untouched() 
 // tests/fixtures/node-reference/nodes-worker.json. The Rust worker, paired
 // by the Rust main, must answer them the same.
 
-fn repo() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
-}
-
 /// One HTTPS/1.1 request to the worker on 127.0.0.1 (its certificate checked
 /// against `ca`), as nodes.js's call(): { status, type, length, json, bytes }.
 fn call(port: u16, ca: &str, method: &str, path: &str, token: Option<&str>, headers: &[(&str, String)], body: Option<&[u8]>, chunked: bool) -> Value {
@@ -1424,13 +1420,6 @@ fn parity_the_rust_worker_answers_as_nodes_worker_answered() {
     let w = start_worker(&dir, &m);
     let code = w.worker.start_pairing()["pairing"]["code"].as_str().unwrap().to_string();
     let source = clip(&dir, "clip.mp4", 2);
-    if crate::record::recording() {
-        let _ = certs(&dir, "node-tls");
-        let out = Command::new("node").arg(repo().join("lean/parity/nodes.js")).arg("record").arg(&dir).arg(dir.join("node-tls")).arg(&source).output().unwrap();
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-        let theirs: Value = serde_json::from_slice(&out.stdout).unwrap();
-        crate::record::record("nodes-worker", "server/nodeWorker.js asked by server/nodes.js, by lean/parity/nodes.js record (2 s 320x240 testsrc2 clip), 2026-11-19", &[], &json!("script"), &theirs);
-    }
     let theirs = crate::reference::answer("nodes-worker", &[], &json!("script"));
     let mine = worker_script(w.port, &m.ca, &code, &source, &dir);
     let (a, b) = (theirs["out"].as_array().unwrap(), mine["out"].as_array().unwrap());

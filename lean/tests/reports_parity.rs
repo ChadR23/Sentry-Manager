@@ -14,8 +14,6 @@
 
 #[path = "support/reference.rs"]
 mod reference;
-#[path = "support/record.rs"]
-mod record;
 
 use sentry_lean::ops::net::{HttpReq, HttpRes, Https, Transport};
 use sentry_lean::ops::reports::{scrub, Reports};
@@ -44,15 +42,6 @@ fn receiver_script() -> std::path::PathBuf {
 /// What the Node code answered (lean/parity/reports.js <mode>, frozen).
 fn node_says(mode: &str, input: &Value) -> Value {
     let key = json!({ "mode": mode, "cases": input });
-    if record::recording() {
-        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("parity/reports.js");
-        let mut c = Command::new("node").arg(script).arg(mode).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
-        c.stdin.take().unwrap().write_all(input.to_string().as_bytes()).unwrap();
-        let out = c.wait_with_output().unwrap();
-        assert!(out.status.success());
-        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
-        record::record(&format!("reports-{mode}"), &format!("lean/parity/reports.js {mode} (server/reportsScrub.js, reportsProtocol.js, reports.js), 2026-11-19"), &[], &key, &v);
-    }
     reference::answer(&format!("reports-{mode}"), &[], &key)
 }
 

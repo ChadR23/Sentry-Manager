@@ -5,9 +5,6 @@
 #
 #   docker build -t ghcr.io/skittles-fivem/sentry-manager:latest .
 #
-# The Node.js image this replaces is Dockerfile.node, kept while the Rust
-# image is tested.
-#
 # Behind a proxy that inspects TLS, hand the build its certificates (used for
 # the downloads only, never kept in the image):
 #   docker build --secret id=build_ca,src=/path/to/ca-bundle.crt -t ... .

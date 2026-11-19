@@ -440,20 +440,6 @@ mod tests {
         ];
         for (n, config) in configs.iter().enumerate() {
             let places = [("{BASE}", base.to_string_lossy().into_owned())];
-            if crate::record::recording() {
-                let file = base.join(format!("config-{n}.json"));
-                fs::write(&file, config.to_string()).unwrap();
-                let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("parity/converterScan.js");
-                let out = std::process::Command::new("node").arg(&script).arg(&file).output().unwrap();
-                assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-                let mut theirs: Value = serde_json::from_slice(&out.stdout).unwrap();
-                for i in theirs["items"].as_array_mut().into_iter().flatten() {
-                    if i.get("ino").is_some() {
-                        i["ino"] = json!(0);
-                    }
-                }
-                crate::record::record("converter-scan", "src/main/converter/scanner.js by lean/parity/converterScan.js <config>, 2026-11-19 (ino: 0, this run's put in)", &places, config, &theirs);
-            }
             let mut theirs = crate::reference::answer("converter-scan", &places, config);
             ino_of(&mut theirs["items"]);
             let mut mine = Vec::new();

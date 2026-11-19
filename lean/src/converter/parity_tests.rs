@@ -19,15 +19,6 @@ use std::sync::{Arc, Mutex};
 /// src/main/converter), frozen in tests/fixtures/node-reference/converter-<mode>.json.
 fn node(mode: &str, scenario: &Value, dir: &Path) -> Value {
     let places = [("{DIR}", dir.to_string_lossy().into_owned())];
-    if crate::record::recording() {
-        let file = dir.join(format!("{mode}-scenario.json"));
-        std::fs::write(&file, scenario.to_string()).unwrap();
-        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("parity/converterAuto.js");
-        let out = std::process::Command::new("node").arg(script).arg(mode).arg(&file).output().unwrap();
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
-        crate::record::record(&format!("converter-{mode}"), &format!("lean/parity/converterAuto.js {mode} (src/main/converter), 2026-11-19"), &places, scenario, &v);
-    }
     crate::reference::answer(&format!("converter-{mode}"), &places, scenario)
 }
 

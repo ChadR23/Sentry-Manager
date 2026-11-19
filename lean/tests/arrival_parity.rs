@@ -15,20 +15,10 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 
 #[path = "support/reference.rs"]
 mod reference;
-#[path = "support/record.rs"]
-mod record;
-
-/// RECORDING ONLY
-fn node(args: &[&str]) {
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("parity/arrival.js");
-    let out = Command::new("node").arg(script).args(args).output().expect("run node");
-    assert!(out.status.success(), "node {args:?}: {}", String::from_utf8_lossy(&out.stderr));
-}
 
 struct Ctx {
     base: PathBuf,
@@ -188,40 +178,13 @@ fn swap(from: &Path, to: &Path) {
 
 #[test]
 fn arrival_parity_with_node() {
-    let rec = record::recording();
     let mut recorded: BTreeMap<String, u64> = BTreeMap::new();
-    let dir = if rec {
-        let dir = std::env::temp_dir().join(format!("lean-arrival-parity-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        let dir = fs::canonicalize(&dir).unwrap();
-        node(&["make", &dir.to_string_lossy()]);
-        dir
-    } else {
-        reference::unpack("arrival-phase1", "parity")
-    };
+    let dir = reference::unpack("arrival-phase1", "parity");
     let sm = dir.join("car/TeslaCam/.sentrymanager");
     let (nd, rd) = (dir.join("node-data"), dir.join("rust-data"));
     let (nsm, rsm) = (dir.join("node-sm"), dir.join("rust-sm"));
     for phase in [1u32, 2] {
-        if rec {
-            if phase == 2 {
-                node(&["mutate", &dir.to_string_lossy()]);
-            }
-            swap(&nsm, &sm);
-            node(&["run", &dir.to_string_lossy(), &nd.to_string_lossy(), &phase.to_string()]);
-            swap(&sm, &nsm);
-            // the share, Node's index and its record, as this pass left them
-            let keep = std::env::temp_dir().join(format!("lean-arrival-keep-{}", std::process::id()));
-            let _ = fs::remove_dir_all(&keep);
-            fs::create_dir_all(&keep).unwrap();
-            for n in ["car", "node-data", "node-sm", "now.json"] {
-                let _ = Command::new("cp").arg("-a").arg(dir.join(n)).arg(&keep).status();
-            }
-            fs::write(keep.join("inodes.json"), serde_json::to_string(&inodes(&dir.join("car"))).unwrap()).unwrap();
-            record::pack(&format!("arrival-phase{phase}"), &keep);
-            let _ = fs::remove_dir_all(&keep);
-        } else if phase == 1 {
+        if phase == 1 {
             recorded = read_inodes(&dir.join("inodes.json"));
         } else {
             // Node's second pass, after a clip went, one was uploaded again and a
@@ -252,7 +215,7 @@ fn arrival_parity_with_node() {
             let _ = fs::remove_dir_all(&p2);
             recorded = then;
         }
-        if !rec {
+        {
             // Node's index names each file's inode as it was when recorded: this run's instead
             let now = inodes(&dir.join("car"));
             let map: BTreeMap<u64, u64> = recorded.iter().filter_map(|(rel, old)| now.get(rel).map(|n| (*old, *n))).collect();
@@ -273,13 +236,8 @@ fn arrival_parity_with_node() {
 
     // 60 days of lines, pruned
     let (nrec, rrec) = (dir.join("rec-node"), dir.join("rec-rust"));
-    if rec {
-        node(&["records", &nrec.to_string_lossy()]);
-        record::pack("arrival-records", &nrec);
-    } else {
-        let r = reference::unpack("arrival-records", "parity");
-        fs::rename(&r, &nrec).unwrap();
-    }
+    let r = reference::unpack("arrival-records", "parity");
+    fs::rename(&r, &nrec).unwrap();
     fs::create_dir_all(rrec.join("RecentClips")).unwrap();
     let clock = Arc::new(std::sync::Mutex::new(0.0f64));
     let c = clock.clone();

@@ -5,12 +5,8 @@
 
 #[path = "support/reference.rs"]
 mod reference;
-#[path = "support/record.rs"]
-mod record;
 
 use sentry_lean::app::{slug, vehicle_name};
-use serde_json::Value;
-use std::path::Path;
 
 const NAMES: &[&str] = &[
     "Daily Driver",
@@ -51,30 +47,6 @@ const NAMES: &[&str] = &[
 fn vehicle_ids_match_node() {
     let places: [(&str, String); 0] = [];
     let input = serde_json::json!(NAMES);
-    if record::recording() {
-        let vehicles = Path::new(env!("CARGO_MANIFEST_DIR")).join("../server/vehicles.js");
-        let script = r#"
-const { slug, normalizeVehicle } = require(process.argv[1]);
-const names = JSON.parse(require('fs').readFileSync(0, 'utf8'));
-console.log(JSON.stringify(names.map((raw) => {
-  let name = null;
-  try { name = normalizeVehicle({ name: raw || 'My car', timezone: 'UTC', source: { type: 'path', path: '/footage' } }).name; } catch {}
-  return [name, name === null ? null : slug(name)];
-})));
-"#;
-        let mut child = std::process::Command::new("node")
-            .args(["-e", script, vehicles.to_str().unwrap()])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .expect("node");
-        use std::io::Write;
-        child.stdin.take().unwrap().write_all(serde_json::to_string(NAMES).unwrap().as_bytes()).unwrap();
-        let out = child.wait_with_output().unwrap();
-        assert!(out.status.success(), "node failed");
-        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
-        record::record("slug", "server/vehicles.js normalizeVehicle (the name kept, \"My car\" for an empty one) and slug (the id), 2026-11-19: [name, id] per name", &places, &input, &v);
-    }
     let want: Vec<(Option<String>, Option<String>)> = serde_json::from_value(reference::answer("slug", &places, &input)).unwrap();
     let mut bad = Vec::new();
     for (raw, w) in NAMES.iter().zip(want) {
