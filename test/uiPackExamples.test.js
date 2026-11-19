@@ -198,6 +198,23 @@ test('the built-in Viewer\'s Export button opens the shared panel in the web ver
   assert.doesNotMatch(css, /#exportBtn[^{]*\{[^}]*display:\s*none/, 'the button is no longer hidden');
 });
 
+// A collapsed clip list is only its arrow: what the shim adds to the panel
+// (the moments, the vehicle picker) folds away with Studio's own parts, in
+// the floating layout (collapsed) and in the Classic one (hidden).
+test('the built-in Viewer\'s collapsed clip list shows only its arrow', () => {
+  const shim = fs.readFileSync(path.join(__dirname, '..', 'web', 'electronApiShim.js'), 'utf8');
+  assert.match(shim, /getElementById\('clipBrowser'\)[\s\S]*box\.className = 'sm-moments'/, 'the moments go in the clip list');
+  assert.match(shim, /select\.className = 'sm-vehicle-select'/);
+  const studio = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'style.css'), 'utf8');
+  const css = fs.readFileSync(path.join(__dirname, '..', 'web', 'studioEmbed.css'), 'utf8');
+  for (const mode of ['collapsed', 'hidden']) {
+    assert.match(studio, new RegExp(`\\.clips-mode-${mode} \\.clip-browser \\{[^}]*width: 44px`), `${mode}: Studio's 44 px box`);
+    for (const added of ['sm-moments', 'sm-vehicle-select']) {
+      assert.match(css, new RegExp(`\\.clips-mode-${mode} #clipBrowser \\.${added}\\b[^{]*\\{[^}]*display:\\s*none`), `${mode}: ${added}`);
+    }
+  }
+});
+
 // HW3 or HW4 from the footage, as the built-in Viewer does: only HW4 cars
 // record the pillar cameras, so without them a pack shows no pillar tiles.
 for (const [pack, mod] of [['horizon', 'hz'], ['flux', 'flux'], ['aurora', 'aurora']]) {

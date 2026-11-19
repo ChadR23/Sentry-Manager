@@ -11,6 +11,15 @@ html[data-embed="viewer"] #dropOverlay .drop-actions:empty {
   display: none !important;
 }
 html[data-embed="viewer"] #dropOverlay { cursor: default; }
+/* A collapsed clip list (hidden, in the Classic layout) is only its arrow:
+   the moments and the vehicle picker added to it (electronApiShim.js) fold
+   away with Studio's own parts. */
+.clips-mode-collapsed #clipBrowser .sm-moments,
+.clips-mode-collapsed #clipBrowser .sm-vehicle-select,
+.clips-mode-hidden #clipBrowser .sm-moments,
+.clips-mode-hidden #clipBrowser .sm-vehicle-select {
+  display: none !important;
+}
 
 /* Encoder tab: the source is a vehicle's footage, picked from the vehicles
    (electronApiShim.js), not a folder. */
