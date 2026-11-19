@@ -203,8 +203,8 @@ pub fn make(srv: &Arc<Server>) -> Arc<App> {
     let core: Arc<dyn Ctx> = ctx;
     let vehicles = Vehicles::new(core.clone(), options);
     let catalog = crate::catalog::Catalog::open(&cfg.db_file()).expect("manager.db (footage catalog)");
-    // (two at once, as the Node server's default)
-    let thumbnails = Thumbnails::new(cfg.data.join("thumbnails"), cfg.ffmpeg.clone(), 2);
+    // (as many at once as the thumbnails work limit, clip strips included; two before the Viewer starts)
+    let thumbnails = Thumbnails::with_slots(cfg.data.join("thumbnails"), cfg.ffmpeg.clone(), crate::thumbnails::server_slots());
     App::new(vehicles, core, catalog, cfg.app_root.clone(), thumbnails)
 }
 
