@@ -34,7 +34,7 @@ pub struct Notes {
 }
 
 fn muted(ctx: &dyn OpsCtx) -> Vec<String> {
-    let v = store::get_or(&ctx.db(), "notify-muted", json!([]));
+    let v = store::get_or(&ctx.read_db(), "notify-muted", json!([]));
     v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default()
 }
 
@@ -75,7 +75,7 @@ impl Notes {
     }
 
     pub fn list(&self, open: bool, vehicle: Option<&str>) -> Vec<Value> {
-        store::list(&self.ctx.db(), open, 200, vehicle)
+        store::list(&self.ctx.read_db(), open, 200, vehicle)
     }
 
     /// GET and PUT /api/notification-rules

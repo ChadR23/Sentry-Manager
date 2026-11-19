@@ -329,7 +329,7 @@ impl Reports {
 
     pub fn settings(&self) -> Value {
         let mut s = json!({ "share": false, "anonymous": false });
-        if let Some(Value::Object(o)) = store::get(&self.ctx.db(), "reports-settings") {
+        if let Some(Value::Object(o)) = store::get(&self.ctx.read_db(), "reports-settings") {
             for (k, v) in o {
                 s[k] = v;
             }
@@ -338,7 +338,7 @@ impl Reports {
     }
 
     fn state(&self) -> Value {
-        match store::get(&self.ctx.db(), "reports-state") {
+        match store::get(&self.ctx.read_db(), "reports-state") {
             Some(v) if truthy(&v) => v,
             _ => json!({}),
         }

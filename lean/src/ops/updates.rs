@@ -171,7 +171,7 @@ impl ImageUpdates {
         let or_null = |v: &Value| if truthy(v) { v.clone() } else { Value::Null };
         let current = json!({ "sha": or_null(&build_info["sha"]), "build": clean_build(&build_info["build"]), "builtAt": or_null(&build_info["builtAt"]) });
         let enabled = enabled && registry.is_some() && repo.is_some() && tag.is_some();
-        let state = store::get_or(&ctx.db(), "image-updates", json!({ "latest": null, "checkedAt": 0, "error": null }));
+        let state = store::get_or(&ctx.read_db(), "image-updates", json!({ "latest": null, "checkedAt": 0, "error": null }));
         ImageUpdates { ctx, notes, transport, registry, repo, tag, current, enabled, state: Mutex::new(state), last_check: Mutex::new(0), started_at: now_ms(), own_level }
     }
 

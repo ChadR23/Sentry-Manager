@@ -238,11 +238,16 @@ pub fn start(srv: &Arc<Server>) {
         tick.tick().await;
         loop {
             tick.tick().await;
-            for v in every.vehicles.list() {
-                if every.vehicles.share(&v.id).is_some_and(|s| s.is_healthy()) {
-                    every.scan(&v.id, true);
+            // (the vehicles are read from the database: on a blocking thread)
+            let a = every.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                for v in a.vehicles.list() {
+                    if a.vehicles.share(&v.id).is_some_and(|s| s.is_healthy()) {
+                        a.scan(&v.id, true);
+                    }
                 }
-            }
+            })
+            .await;
         }
     });
     // the cleanup policies whose time has come, every minute

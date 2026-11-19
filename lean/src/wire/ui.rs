@@ -37,7 +37,7 @@ impl UiCtx for CoreUi {
         self.state.set_setting(key, value);
     }
     fn has_setting_prefix(&self, prefix: &str) -> bool {
-        let c = self.state.db.conn();
+        let c = self.state.db.reader();
         c.query_row("SELECT 1 FROM settings WHERE substr(key, 1, ?1) = ?2 LIMIT 1", rusqlite::params![prefix.encode_utf16().count() as i64, prefix], |_| Ok(())).is_ok()
     }
     fn announce(&self, topic: &str) {

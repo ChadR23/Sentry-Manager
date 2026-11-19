@@ -146,8 +146,19 @@ impl ManagerDb {
         }
     }
 
+    /// The connection for a read: core's reading one in the server.
+    fn read_lock(&self) -> std::sync::MutexGuard<'_, Connection> {
+        match &self.conn {
+            Conn::Own(c) => c.lock().unwrap_or_else(|e| e.into_inner()),
+            Conn::Core(db) => db.reader(),
+        }
+    }
+
     // ---- settings (db.js get / set / del)
     pub fn get(&self, key: &str) -> Option<Value> {
+        if let Conn::Core(db) = &self.conn {
+            return db.get(key);
+        }
         let c = self.lock();
         let text: Option<String> = c.query_row("SELECT value FROM settings WHERE key = ?", [key], |r| r.get(0)).optional().ok().flatten();
         text.and_then(|t| serde_json::from_str(&t).ok())
@@ -165,7 +176,7 @@ impl ManagerDb {
 
     // ---- protected clips
     pub fn protected_set(&self, vehicle: &str) -> HashSet<String> {
-        let c = self.lock();
+        let c = self.read_lock();
         let mut q = c.prepare_cached("SELECT rel FROM protected WHERE vehicle_id = ?").unwrap();
         q.query_map([vehicle], |r| r.get::<_, String>(0)).map(|rows| rows.flatten().collect()).unwrap_or_default()
     }
@@ -193,7 +204,7 @@ impl ManagerDb {
     }
 
     pub fn bin_items(&self, vehicle: Option<&str>) -> Vec<BinItem> {
-        let c = self.lock();
+        let c = self.read_lock();
         let rows = match vehicle {
             Some(v) => c.prepare_cached("SELECT * FROM bin_items WHERE vehicle_id = ? ORDER BY trashed_at DESC").and_then(|mut q| q.query_map([v], bin_row)?.collect()),
             None => c.prepare_cached("SELECT * FROM bin_items ORDER BY trashed_at DESC").and_then(|mut q| q.query_map([], bin_row)?.collect()),
@@ -202,7 +213,7 @@ impl ManagerDb {
     }
 
     pub fn bin_item(&self, id: &str) -> Option<BinItem> {
-        let c = self.lock();
+        let c = self.read_lock();
         c.query_row("SELECT * FROM bin_items WHERE id = ?", [id], bin_row).optional().ok().flatten()
     }
 
@@ -233,7 +244,7 @@ impl ManagerDb {
 
     /// (tests) the jobs as (type, status, title, detail)
     pub fn jobs(&self) -> Vec<(String, String, String, Option<String>)> {
-        let c = self.lock();
+        let c = self.read_lock();
         let mut q = c.prepare("SELECT type, status, title, detail FROM jobs ORDER BY id").unwrap();
         q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).unwrap().flatten().collect()
     }
