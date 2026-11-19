@@ -87,7 +87,7 @@ impl Viewer {
         let scrub = scrub::ScrubFrames::new(data.join("scrub"), ctx.ffmpeg(), ctx.ffprobe(), move || previews() as usize);
         let (p2, busy2) = (pace.clone(), ctx.clone());
         let prepare = scrub::ScrubPrepare::new(ctx.clone(), scrub.clone(), scrub::ScrubPrepare::days_from_env(), move || !busy2.busy() && !p2.strained() && !p2.viewing());
-        let strips = studio::ClipStrips::new(data.join("clip-thumbnails"), ctx.ffmpeg(), ctx.ffprobe().unwrap_or_else(|| "ffprobe".into()));
+        let strips = studio::ClipStrips::new(data.join("clip-thumbnails"), ctx.ffmpeg(), ctx.ffprobe().unwrap_or_else(|| "ffprobe".into()), crate::thumbnails::server_slots());
         let drive_data = drive_data::DriveData::new(data.join("drive-data"), ctx.clone());
         let _ = std::fs::create_dir_all(data.join("converted"));
         let archive = archive_gap::ArchiveGap::new(ctx.clone(), speed_index.clone());
@@ -134,5 +134,37 @@ impl Viewer {
     /// Footage is playing in the Viewer while this lives: background reading slows to one clip.
     pub fn watching(&self) -> pace::Watching {
         self.pace.viewer()
+    }
+
+    /// How many recording card thumbnails and clip strips are made at once, together.
+    pub fn thumbnails_at_once(&self) -> usize {
+        thumbnails_at_once(&self.limits, &self.pace)
+    }
+}
+
+/// The `thumbnails` work limit, or one while footage plays: each is an ffmpeg run that seeks in a
+/// clip, maybe on the disk the footage plays from.
+fn thumbnails_at_once(limits: &RwLock<work_limits::Limits>, pace: &pace::Pace) -> usize {
+    if pace.viewing() {
+        1
+    } else {
+        limits.read().unwrap().get("thumbnails").max(1) as usize
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thumbnails_are_made_one_at_a_time_while_footage_plays() {
+        let r = work_limits::Resources { memory_bytes: 16.0 * 1024f64.powi(3), memory_from: "test", cpus: 8.0, cpus_from: "test" };
+        let limits = RwLock::new(work_limits::pick_limits(r, Some(&serde_json::json!({ "thumbnails": 3 }))));
+        let pace = Arc::new(pace::Pace::fixed(|| false));
+        assert_eq!(thumbnails_at_once(&limits, &pace), 3);
+        let playing = pace.viewer();
+        assert_eq!(thumbnails_at_once(&limits, &pace), 1);
+        drop(playing);
+        assert_eq!(thumbnails_at_once(&limits, &pace), 1, "and for a while after it stopped");
     }
 }
