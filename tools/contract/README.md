@@ -25,12 +25,13 @@ or a live check.
 cd lean && cargo build --release && cd ..
 node tools/contract/frozen.js                 # about 3 minutes: 75 s to settle, a minute of live updates
 
-# against the image: the fixture archive unpacked, mounted as the footage
+# against the image: the fixture archive unpacked (a copy: the share must be
+# writable, as it was when recorded; chown it and the data folder to 1000)
 node tools/contract/frozen.js --unpack /tmp/sm-footage     # prints the environment the server needs
-docker run -d -p 127.0.0.1:19443:9000 -v /tmp/sm-footage:/footage:ro -v /tmp/sm-data:/data \
+docker run -d -p 127.0.0.1:19443:9000 -v /tmp/sm-footage:/footage -v /tmp/sm-data:/data \
   -e FOOTAGE_PATH=/footage -e VEHICLE_NAME='Contract Car' -e TZ=UTC -e CAN_PORT=<printed> \
   -e UI_PASSWORD='contract fixture password' sentry-manager:latest
-node tools/contract/frozen.js --base https://127.0.0.1:19443 --ca /tmp/sm-data/tls/ca.crt --other-machine
+node tools/contract/frozen.js --base https://127.0.0.1:19443 --ca /tmp/sm-data/tls/ca.crt --settle 75 --other-machine
 ```
 
 What is the machine's and not the server's is taken out of both sides: the

@@ -18,7 +18,7 @@
 //
 //   node tools/contract/frozen.js [--bin lean/target/release/sentry-lean] [--dir DIR] [--settle 75] [--keep] [--json out.json]
 //   node tools/contract/frozen.js --base https://127.0.0.1:PORT --ca DATA/tls/ca.crt
-//        [--other-machine] (a server started elsewhere, e.g. the image, on the
+//        [--settle 75] [--other-machine] (a server started elsewhere, e.g. the image, on the
 //         unpacked fixture archive: --unpack DIR unpacks it, prints the
 //         environment the server needs, and exits)
 //
@@ -68,16 +68,31 @@ const AREAS = [
  * out of both the frozen answer and this one before they are compared. The
  * disk's free space (its figures, and the low-space check, banner and
  * notification it raises on a nearly full disk: the answers were recorded on
- * one), the ffmpeg build, and with --other-machine (a container: its footage
- * is a mounted volume) the "Share set-up" note about an unmounted share.
+ * one), the ffmpeg build, and with --other-machine (the image: the answers
+ * were recorded from a server run by hand as root, on loopback, from a
+ * checkout) what the container changes: the "Share set-up" note about an
+ * unmounted share, the share's mount and file system, who the app runs as
+ * (uid 1000 under the supervisor), the client's address (Docker's gateway)
+ * and the build's branch and time.
  */
+const CONTAINER_KEYS = [
+  ['mounted', ['mounted', 'fsType', 'source', 'renameOverwrite', 'warning']], // a share's status (its note about an unmounted share)
+  ['builtAt', ['branch', 'builtAt', 'image', 'sha', 'tag']], // the build (BUILD_INFO.json)
+  ['runningAsRoot', ['runningAsRoot', 'supervised', 'uid']], // who the app runs as
+  ['banKey', ['address', 'banKey']], // the client's address
+  ['lastSeenAt', ['address']] // a main's address, as the worker saw it
+];
+const containerDrop = (o) => new Set(CONTAINER_KEYS.filter(([has]) => has in o).flatMap(([, keys]) => keys));
 function machine(v, route, other = flag('other-machine')) {
   const space = (x) => x && typeof x === 'object' && (/^space-/.test(x.id || '') || /^(health:space-|space:)/.test(x.dedupeKey || '') || /Free space on the share/.test(`${x.label || ''} ${x.title || ''}`) || (other && /^warning-/.test(x.id || '')));
   if (typeof v === 'string') {
     return v.replace(/\d+(\.\d+)? [KMGT]?B free( of \d+(\.\d+)? [KMGT]?B)?/g, '<space> free').replace(/\b(ffmpeg|ffprobe) version \S+/g, '$1 version <version>');
   }
   if (Array.isArray(v)) return v.filter((x) => !space(x)).map((x) => machine(x, route, other));
-  if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, machine(x, route, other)]));
+  if (v && typeof v === 'object') {
+    const drop = other ? containerDrop(v) : new Set();
+    return Object.fromEntries(Object.entries(v).filter(([k]) => !drop.has(k)).map(([k, x]) => [k, machine(x, route, other)]));
+  }
   return v;
 }
 
@@ -144,6 +159,8 @@ async function main() {
   if (arg('base')) {
     server = { base: arg('base'), ca: path.resolve(arg('ca')), child: null };
     if (!server.base.startsWith('https://')) throw new Error('--base must be https:// (a password is sent)');
+    // (--settle N: the seconds the server still needs to settle, counted from now)
+    if (arg('settle')) await new Promise((r) => setTimeout(r, Number(arg('settle')) * 1000));
   } else {
     const bin = path.resolve(arg('bin', process.env.LEAN_BIN || path.join(REPO, 'lean', 'target', 'release', 'sentry-lean')));
     server = await startLean(bin, dir, Number(arg('settle', 75)) * 1000);
