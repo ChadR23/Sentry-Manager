@@ -39,7 +39,7 @@ const ROWS = [
   ['codecChecks', 'Codec checks', 'Clips whose video format is read at once after a scan.'],
   ['scrubPreviews', 'Scrub previews', 'Viewer timeline previews made at once.'],
   ['telemetryReads', 'Car data reads', 'Clips whose car data (every frame) is read at once for the dashboard.'],
-  ['thumbnails', 'Thumbnails', 'Recording card pictures made at once.'],
+  ['thumbnails', 'Thumbnails', 'Recording card pictures and Studio clip previews made at once.'],
 ];
 const SIZES = { small: 'a small server', medium: 'a mid-size server', big: 'a full-size server' };
 const gb = (b) => `${(b / 1024 ** 3).toFixed(1)} GB`;
