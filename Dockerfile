@@ -93,7 +93,7 @@ COPY web ./web
 COPY src/renderer ./src/renderer
 COPY src/shared ./src/shared
 # the CAN signal sets the server decodes with
-COPY server/dbc ./server/dbc
+COPY dbc ./dbc
 # the interface packs that come with the app (Settings > Interface)
 COPY examples/ui-packs ./ui-packs
 

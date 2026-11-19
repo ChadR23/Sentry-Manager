@@ -25,7 +25,7 @@
   const MODELS = { 3: 'Model 3', Y: 'Model Y', S: 'Model S', X: 'Model X' };
   // the generations people tell apart, by model year (the VIN's), each with its DBC set. The
   // Model 3/Y set is the same for every 3/Y generation: no public source has a layout that
-  // differs by generation, and the firmware overrides (server/dbc/override.dbc) follow the
+  // differs by generation, and the firmware overrides (dbc/override.dbc) follow the
   // software, not the year. A set of its own for a generation is a new PROFILES entry there.
   const GENERATIONS = {
     3: [
