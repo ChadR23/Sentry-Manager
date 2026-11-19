@@ -1,0 +1,19 @@
+{
+  "route": "POST /api/can/pairing/:key/trust",
+  "method": "POST",
+  "request": {
+    "path": "/api/can/pairing/no-such-key/trust"
+  },
+  "body": {},
+  "response": {
+    "status": 404,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "No such new key for this car."
+    }
+  }
+}

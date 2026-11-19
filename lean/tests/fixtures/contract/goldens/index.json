@@ -1,0 +1,2312 @@
+{
+  "contract": {
+    "serverRoutes": 196,
+    "serverRouterRoutes": 176,
+    "serverInlineRoutes": 20,
+    "serverApiRoutes": 187,
+    "serverDistinctApiPaths": 162,
+    "byAccess": {
+      "admin": 98,
+      "can-now-token": 2,
+      "can-token": 3,
+      "metrics-token": 1,
+      "node-token": 6,
+      "public": 7,
+      "signed-in": 79
+    },
+    "uiCallSites": 798,
+    "uiDistinctCalls": 208,
+    "uiCallSitesBySource": {
+      "aurora": 104,
+      "built-in": 241,
+      "daylight": 110,
+      "flux": 113,
+      "horizon": 110,
+      "sentry-six": 117,
+      "studio": 3
+    },
+    "uiMethodUnknown": 52,
+    "liveChannels": 2,
+    "liveEventTypes": 5,
+    "converterIpcChannels": 22,
+    "uiCallsWithoutRoute": 0,
+    "routesNoUiCalls": 14,
+    "routesNoUiCallsExternal": 12,
+    "liveTopicsUiOnly": 0
+  },
+  "routes": {
+    "GET /api/auth/me": {
+      "requests": 1
+    },
+    "GET /api/auth/2fa": {
+      "requests": 1
+    },
+    "GET /api/auth/sessions": {
+      "requests": 1
+    },
+    "GET /api/accounts": {
+      "requests": 1
+    },
+    "GET /api/system": {
+      "requests": 1
+    },
+    "GET /api/security": {
+      "requests": 1
+    },
+    "GET /api/security/ca.crt": {
+      "requests": 1
+    },
+    "GET /api/security/access": {
+      "requests": 1
+    },
+    "GET /api/logs": {
+      "requests": 2
+    },
+    "GET /api/ui-packs": {
+      "requests": 1
+    },
+    "GET /api/ui-packs/original.zip": {
+      "requests": 1
+    },
+    "GET /api/logs/archive": {
+      "requests": 1
+    },
+    "GET /api/logs/archive/:name": {
+      "requests": 1
+    },
+    "GET /api/logs/download": {
+      "requests": 1
+    },
+    "GET /api/metrics/settings": {
+      "requests": 1
+    },
+    "GET /api/can/stream-deck": {
+      "requests": 1
+    },
+    "GET /api/can/stream-deck/plugin": {
+      "requests": 1
+    },
+    "GET /api/notification-rules": {
+      "requests": 1
+    },
+    "GET /api/health": {
+      "requests": 1
+    },
+    "GET /api/health/banner": {
+      "requests": 1
+    },
+    "GET /api/snapshots": {
+      "requests": 1
+    },
+    "GET /api/logs/search": {
+      "requests": 1
+    },
+    "GET /api/support-bundle": {
+      "requests": 1
+    },
+    "GET /api/reports": {
+      "requests": 1
+    },
+    "GET /api/vehicles": {
+      "requests": 1
+    },
+    "GET /api/exports": {
+      "requests": 2
+    },
+    "GET /api/exports/:id": {
+      "requests": 1
+    },
+    "GET /api/exports/:id/file": {
+      "requests": 1
+    },
+    "GET /api/nodes": {
+      "requests": 1
+    },
+    "GET /api/nodes/:id/benchmark": {
+      "requests": 1
+    },
+    "GET /api/vehicles/:id/days": {
+      "requests": 2
+    },
+    "GET /api/vehicles/:id/recordings": {
+      "requests": 11
+    },
+    "GET /api/telemetry": {
+      "requests": 6
+    },
+    "GET /api/vehicles/:id/speeds": {
+      "requests": 3
+    },
+    "GET /api/vehicles/:id/moments": {
+      "requests": 3
+    },
+    "GET /api/stars": {
+      "requests": 2
+    },
+    "GET /api/vehicles/:id/driving": {
+      "requests": 1
+    },
+    "GET /api/vehicles/:id/event-map": {
+      "requests": 1
+    },
+    "GET /api/vehicles/:id/drives": {
+      "requests": 1
+    },
+    "GET /api/dashboards": {
+      "requests": 1
+    },
+    "GET /api/places": {
+      "requests": 1
+    },
+    "GET /api/places/suggestions": {
+      "requests": 1
+    },
+    "GET /api/vehicles/:id/integrity": {
+      "requests": 1
+    },
+    "GET /api/vehicles/:id/sentry-usb": {
+      "requests": 1
+    },
+    "GET /api/vehicles/:id/archive-gaps": {
+      "requests": 1
+    },
+    "GET /api/can/signals": {
+      "requests": 1
+    },
+    "GET /api/can/clip": {
+      "requests": 1
+    },
+    "GET /api/can/vehicle-signals": {
+      "requests": 1
+    },
+    "GET /api/can/search": {
+      "requests": 1
+    },
+    "GET /api/can/id-events": {
+      "requests": 1
+    },
+    "GET /api/can/raw": {
+      "requests": 1
+    },
+    "GET /api/can/settings": {
+      "requests": 1
+    },
+    "GET /api/sentryusb": {
+      "requests": 1
+    },
+    "GET /api/can/files": {
+      "requests": 1
+    },
+    "GET /api/can/files/:name/download": {
+      "requests": 1
+    },
+    "GET /api/can/files/:name/candump": {
+      "requests": 1
+    },
+    "GET /api/can/export/bundle": {
+      "requests": 1
+    },
+    "GET /api/can/export/decoded": {
+      "requests": 1
+    },
+    "GET /api/can/export/new-ids": {
+      "requests": 1
+    },
+    "GET /api/vehicles/:id/savings-by-month": {
+      "requests": 1
+    },
+    "GET /api/places/near": {
+      "requests": 2
+    },
+    "GET /api/speeds/status": {
+      "requests": 1
+    },
+    "GET /api/vehicles/:id/recordings/:rid": {
+      "requests": 5
+    },
+    "GET /api/vehicles/:id/recordings/:rid/thumbnail": {
+      "requests": 4
+    },
+    "GET /api/bin/:item/thumbnail": {
+      "requests": 1
+    },
+    "GET /api/bin": {
+      "requests": 2
+    },
+    "GET /api/vehicles/:id/policy": {
+      "requests": 1
+    },
+    "GET /api/jobs": {
+      "requests": 1
+    },
+    "GET /api/stats": {
+      "requests": 1
+    },
+    "GET /api/stats/history": {
+      "requests": 1
+    },
+    "GET /api/stats/export.csv": {
+      "requests": 1
+    },
+    "GET /api/notifications": {
+      "requests": 2
+    },
+    "GET /api/settings": {
+      "requests": 1
+    },
+    "GET /api/settings/work-limits": {
+      "requests": 1
+    },
+    "GET /api/updates": {
+      "requests": 1
+    },
+    "GET /api/studio/settings": {
+      "requests": 1
+    },
+    "GET /api/studio/context": {
+      "requests": 1
+    },
+    "GET /api/events": {
+      "skipped": "live stream (Server-Sent Events): see docs/api-contract.md \"Live updates\""
+    },
+    "GET /api/converter/events": {
+      "skipped": "live stream (Server-Sent Events): see docs/api-contract.md \"Live updates\""
+    },
+    "GET /api/media": {
+      "requests": 7
+    },
+    "GET /api/scrub": {
+      "requests": 2
+    },
+    "GET /metrics": {
+      "skipped": "needs the metrics token (off by default); not called by the recorder"
+    },
+    "GET /api/can/now": {
+      "requests": 1
+    },
+    "GET /api/can/now/:stat": {
+      "requests": 1
+    },
+    "GET /api/can/now/ca.crt": {
+      "requests": 1
+    },
+    "GET /healthz": {
+      "requests": 1
+    },
+    "GET /api/can/logs/ping": {
+      "skipped": "CAN Bridge token API (off by default); not called by the recorder"
+    },
+    "GET /node/v1/info": {
+      "skipped": "node token API: only a paired main server calls it"
+    },
+    "GET /node/v1/jobs/:id": {
+      "skipped": "node token API: only a paired main server calls it"
+    },
+    "GET /node/v1/jobs/:id/output": {
+      "skipped": "node token API: only a paired main server calls it"
+    },
+    "POST /api/auth/2fa/code": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/auth/2fa/enable": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/auth/2fa/disable": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/auth/sessions/:id/end": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/auth/sessions-end-others": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/accounts": {
+      "requests": 1,
+      "mutating": true
+    },
+    "PATCH /api/accounts/:name": {
+      "requests": 1,
+      "mutating": true
+    },
+    "DELETE /api/accounts/:name": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/auth/setup": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/auth/password": {
+      "requests": 1,
+      "mutating": true
+    },
+    "PUT /api/security/hostnames": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/security/unban": {
+      "requests": 1,
+      "mutating": true
+    },
+    "PUT /api/ui-packs/active": {
+      "requests": 1,
+      "mutating": true
+    },
+    "DELETE /api/ui-packs/:id": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/metrics/disable": {
+      "requests": 1,
+      "mutating": true
+    },
+    "PUT /api/security/access": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/health/run": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/logs/clear": {
+      "requests": 1,
+      "mutating": true
+    },
+    "PUT /api/notification-rules": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/snapshots/:name/restore": {
+      "requests": 1,
+      "mutating": true
+    },
+    "PUT /api/reports/settings": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/reports/preview": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/reports/send": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/vehicles/:id/exports": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/exports": {
+      "requests": 1,
+      "mutating": true
+    },
+    "DELETE /api/exports/:id": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/nodes": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/nodes/:id/benchmark": {
+      "requests": 1,
+      "mutating": true
+    },
+    "DELETE /api/nodes/:id/benchmark": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/nodes/:id/slots": {
+      "requests": 1,
+      "mutating": true
+    },
+    "PUT /api/nodes/:id": {
+      "requests": 1,
+      "mutating": true
+    },
+    "DELETE /api/nodes/:id": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/nodes/worker/pair": {
+      "requests": 1,
+      "mutating": true
+    },
+    "DELETE /api/nodes/worker/pair": {
+      "requests": 1,
+      "mutating": true
+    },
+    "DELETE /api/nodes/worker/mains/:id": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/vehicles/test-smb": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/vehicles": {
+      "requests": 1,
+      "mutating": true
+    },
+    "PUT /api/vehicles/:id": {
+      "requests": 1,
+      "mutating": true
+    },
+    "DELETE /api/vehicles/:id/saved": {
+      "requests": 1,
+      "mutating": true
+    },
+    "DELETE /api/vehicles/:id": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/vehicles/:id/reconnect": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/vehicles/:id/scan": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/vehicles/:id/trash-days": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/stars": {
+      "requests": 1,
+      "mutating": true
+    },
+    "PATCH /api/stars/:id": {
+      "requests": 1,
+      "mutating": true
+    },
+    "DELETE /api/stars/:id": {
+      "requests": 1,
+      "mutating": true
+    },
+    "PUT /api/dashboards": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/places": {
+      "requests": 1,
+      "mutating": true
+    },
+    "PATCH /api/places/:id": {
+      "requests": 1,
+      "mutating": true
+    },
+    "DELETE /api/places/:id": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/vehicles/:id/integrity": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/vehicles/:id/sentry-usb/record": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/can/vehicle-map": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/can/viewer-car-data": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/can/keep": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/can/disable": {
+      "requests": 1,
+      "mutating": true
+    },
+    "DELETE /api/can/tokens/:id": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/can/pairing/:key/trust": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/can/pairing/:key/forget": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/can/pairing/:key/could-not-sign": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/can/files/:name/use": {
+      "requests": 1,
+      "mutating": true
+    },
+    "DELETE /api/can/files/:name": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/telemetry/speeds": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/vehicles/:id/protect": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/vehicles/:id/trash": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/vehicles/:id/trash-preview": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/bin/:item/restore": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/bin/:item/delete": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/bin/empty": {
+      "requests": 1,
+      "mutating": true
+    },
+    "PUT /api/vehicles/:id/policy": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/vehicles/:id/policy/run": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/jobs/clear": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/notifications/:id/dismiss": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/notifications/read": {
+      "requests": 1,
+      "mutating": true
+    },
+    "PUT /api/settings/power": {
+      "requests": 1,
+      "mutating": true
+    },
+    "PUT /api/settings/appearance": {
+      "requests": 1,
+      "mutating": true
+    },
+    "PUT /api/settings/work-limits": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/converter/invoke/:name": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/studio/readDir": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/studio/readFile": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/studio/exists": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/studio/stat": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/studio/thumbnail": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/studio/trashFolder": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/studio/settings": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/studio/browse": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/ui-packs/upload": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/can/logs/status": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/can/logs/:name": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /node/v1/pair": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /node/v1/jobs": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /node/v1/slots": {
+      "requests": 1,
+      "mutating": true
+    },
+    "DELETE /node/v1/jobs/:id": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/auth/confirm": {
+      "requests": 1,
+      "mutating": true
+    },
+    "POST /api/auth/login": {
+      "requests": 1,
+      "mutating": true
+    }
+  },
+  "goldens": [
+    {
+      "file": "api_accounts.d7efa45b.json",
+      "route": "GET /api/accounts",
+      "label": "GET /api/accounts",
+      "status": 200,
+      "seq": 3
+    },
+    {
+      "file": "api_auth_2fa.50731db3.json",
+      "route": "GET /api/auth/2fa",
+      "label": "GET /api/auth/2fa",
+      "status": 200,
+      "seq": 1
+    },
+    {
+      "file": "api_auth_me.22621c1c.json",
+      "route": "GET /api/auth/me",
+      "label": "GET /api/auth/me",
+      "status": 200,
+      "seq": 0
+    },
+    {
+      "file": "api_auth_sessions.967a0ab1.json",
+      "route": "GET /api/auth/sessions",
+      "label": "GET /api/auth/sessions",
+      "status": 200,
+      "seq": 2
+    },
+    {
+      "file": "api_bin_0000000000000000_thumbnail.f1580df1.json",
+      "route": "GET /api/bin/:item/thumbnail",
+      "label": "GET /api/bin/0000000000000000/thumbnail",
+      "status": 404,
+      "seq": 95
+    },
+    {
+      "file": "api_bin_vehicle_contract-car.4be68abf.json",
+      "route": "GET /api/bin",
+      "label": "GET /api/bin?vehicle=contract-car",
+      "status": 200,
+      "seq": 97
+    },
+    {
+      "file": "api_bin.168130ea.json",
+      "route": "GET /api/bin",
+      "label": "GET /api/bin",
+      "status": 200,
+      "seq": 96
+    },
+    {
+      "file": "api_can_clip_path_root_contract-car_TeslaCam_RecentClips_2024-05-01_08-00-00-front.mp4.eac80112.json",
+      "route": "GET /api/can/clip",
+      "label": "GET /api/can/clip?path={root:contract-car}/TeslaCam/RecentClips/2024-05-01_08-00-00-front.mp4",
+      "status": 200,
+      "seq": 69
+    },
+    {
+      "file": "api_can_export_bundle.dd0a2ab3.json",
+      "route": "GET /api/can/export/bundle",
+      "label": "GET /api/can/export/bundle",
+      "status": 400,
+      "seq": 79
+    },
+    {
+      "file": "api_can_export_decoded.8b0334ec.json",
+      "route": "GET /api/can/export/decoded",
+      "label": "GET /api/can/export/decoded",
+      "status": 400,
+      "seq": 80
+    },
+    {
+      "file": "api_can_export_new-ids.ec3213e2.json",
+      "route": "GET /api/can/export/new-ids",
+      "label": "GET /api/can/export/new-ids",
+      "status": 400,
+      "seq": 81
+    },
+    {
+      "file": "api_can_files_none.log.xz_candump.17b9cdb6.json",
+      "route": "GET /api/can/files/:name/candump",
+      "label": "GET /api/can/files/none.log.xz/candump",
+      "status": 400,
+      "seq": 78
+    },
+    {
+      "file": "api_can_files_none.log.xz_download.47eccee4.json",
+      "route": "GET /api/can/files/:name/download",
+      "label": "GET /api/can/files/none.log.xz/download",
+      "status": 400,
+      "seq": 77
+    },
+    {
+      "file": "api_can_files.4f7763b0.json",
+      "route": "GET /api/can/files",
+      "label": "GET /api/can/files",
+      "status": 200,
+      "seq": 76
+    },
+    {
+      "file": "api_can_id-events.a1dcda44.json",
+      "route": "GET /api/can/id-events",
+      "label": "GET /api/can/id-events",
+      "status": 404,
+      "seq": 72
+    },
+    {
+      "file": "api_can_now_battery_token_none.2543b190.json",
+      "route": "GET /api/can/now/:stat",
+      "label": "GET /api/can/now/battery?token=none",
+      "status": 404,
+      "seq": 120
+    },
+    {
+      "file": "api_can_now_ca.crt.41681f87.json",
+      "route": "GET /api/can/now/ca.crt",
+      "label": "GET /api/can/now/ca.crt",
+      "status": 404,
+      "seq": 121
+    },
+    {
+      "file": "api_can_now.7873c653.json",
+      "route": "GET /api/can/now",
+      "label": "GET /api/can/now",
+      "status": 404,
+      "seq": 119
+    },
+    {
+      "file": "api_can_raw_path_root_contract-car_TeslaCam_RecentClips_2024-05-01_08-00-00-front.mp4.e40fcaa1.json",
+      "route": "GET /api/can/raw",
+      "label": "GET /api/can/raw?path={root:contract-car}/TeslaCam/RecentClips/2024-05-01_08-00-00-front.mp4",
+      "status": 200,
+      "seq": 73
+    },
+    {
+      "file": "api_can_search.1ec106fb.json",
+      "route": "GET /api/can/search",
+      "label": "GET /api/can/search",
+      "status": 404,
+      "seq": 71
+    },
+    {
+      "file": "api_can_settings.c4864af9.json",
+      "route": "GET /api/can/settings",
+      "label": "GET /api/can/settings",
+      "status": 200,
+      "seq": 74
+    },
+    {
+      "file": "api_can_signals_path_root_contract-car_TeslaCam_RecentClips_2024-05-01_08-00-00-front.mp4.317046fe.json",
+      "route": "GET /api/can/signals",
+      "label": "GET /api/can/signals?path={root:contract-car}/TeslaCam/RecentClips/2024-05-01_08-00-00-front.mp4",
+      "status": 200,
+      "seq": 68
+    },
+    {
+      "file": "api_can_stream-deck_plugin.e7e3edbb.json",
+      "route": "GET /api/can/stream-deck/plugin",
+      "label": "GET /api/can/stream-deck/plugin",
+      "status": 200,
+      "seq": 17
+    },
+    {
+      "file": "api_can_stream-deck.c127b18f.json",
+      "route": "GET /api/can/stream-deck",
+      "label": "GET /api/can/stream-deck",
+      "status": 200,
+      "seq": 16
+    },
+    {
+      "file": "api_can_vehicle-signals_vehicle_contract-car.dcdd22e1.json",
+      "route": "GET /api/can/vehicle-signals",
+      "label": "GET /api/can/vehicle-signals?vehicle=contract-car",
+      "status": 200,
+      "seq": 70
+    },
+    {
+      "file": "api_dashboards.0a641ade.json",
+      "route": "GET /api/dashboards",
+      "label": "GET /api/dashboards",
+      "status": 200,
+      "seq": 62
+    },
+    {
+      "file": "api_exports_0000000000000000_file.c31144b7.json",
+      "route": "GET /api/exports/:id/file",
+      "label": "GET /api/exports/0000000000000000/file",
+      "status": 404,
+      "seq": 29
+    },
+    {
+      "file": "api_exports_0000000000000000.7f46544f.json",
+      "route": "GET /api/exports/:id",
+      "label": "GET /api/exports/0000000000000000",
+      "status": 404,
+      "seq": 28
+    },
+    {
+      "file": "api_exports_vehicle_contract-car.a692258a.json",
+      "route": "GET /api/exports",
+      "label": "GET /api/exports?vehicle=contract-car",
+      "status": 200,
+      "seq": 27
+    },
+    {
+      "file": "api_exports.8d138dee.json",
+      "route": "GET /api/exports",
+      "label": "GET /api/exports",
+      "status": 200,
+      "seq": 26
+    },
+    {
+      "file": "api_health_banner.3fc115d7.json",
+      "route": "GET /api/health/banner",
+      "label": "GET /api/health/banner",
+      "status": 200,
+      "seq": 20
+    },
+    {
+      "file": "api_health.2f4bdbfc.json",
+      "route": "GET /api/health",
+      "label": "GET /api/health",
+      "status": 200,
+      "seq": 19
+    },
+    {
+      "file": "api_jobs_limit_50.92405323.json",
+      "route": "GET /api/jobs",
+      "label": "GET /api/jobs?limit=50",
+      "status": 200,
+      "seq": 99
+    },
+    {
+      "file": "api_logs_archive_none.log.b404c1dd.json",
+      "route": "GET /api/logs/archive/:name",
+      "label": "GET /api/logs/archive/none.log",
+      "status": 404,
+      "seq": 13
+    },
+    {
+      "file": "api_logs_archive.90125dce.json",
+      "route": "GET /api/logs/archive",
+      "label": "GET /api/logs/archive",
+      "status": 200,
+      "seq": 12
+    },
+    {
+      "file": "api_logs_download.52a70901.json",
+      "route": "GET /api/logs/download",
+      "label": "GET /api/logs/download",
+      "status": 200,
+      "seq": 14
+    },
+    {
+      "file": "api_logs_level_all.9212f614.json",
+      "route": "GET /api/logs",
+      "label": "GET /api/logs?level=all",
+      "status": 200,
+      "seq": 9
+    },
+    {
+      "file": "api_logs_search.9bd46f0b.json",
+      "route": "GET /api/logs/search",
+      "label": "GET /api/logs/search",
+      "status": 200,
+      "seq": 22
+    },
+    {
+      "file": "api_logs.32425923.json",
+      "route": "GET /api/logs",
+      "label": "GET /api/logs",
+      "status": 200,
+      "seq": 8
+    },
+    {
+      "file": "api_media_path_etc_passwd.971e8a69.json",
+      "route": "GET /api/media",
+      "label": "GET /api/media?path=/etc/passwd",
+      "status": 403,
+      "seq": 116
+    },
+    {
+      "file": "api_media_path_root_contract-car_TeslaCam_RecentClips_2024-05-01_08-00-00-front.mp4_Range_.f809cd5c.json",
+      "route": "GET /api/media",
+      "label": "GET /api/media?path={root:contract-car}/TeslaCam/RecentClips/2024-05-01_08-00-00-front.mp4 [Range bytes=0-99]",
+      "status": 206,
+      "seq": 115
+    },
+    {
+      "file": "api_media_path_root_contract-car_TeslaCam_RecentClips_2024-05-01_08-00-00-front.mp4.b47ba209.json",
+      "route": "GET /api/media",
+      "label": "GET /api/media?path={root:contract-car}/TeslaCam/RecentClips/2024-05-01_08-00-00-front.mp4",
+      "status": 200,
+      "seq": 110
+    },
+    {
+      "file": "api_media_path_root_contract-car_TeslaCam_RecentClips_2024-05-01_08-01-00-front.mp4.739caa2b.json",
+      "route": "GET /api/media",
+      "label": "GET /api/media?path={root:contract-car}/TeslaCam/RecentClips/2024-05-01_08-01-00-front.mp4",
+      "status": 200,
+      "seq": 111
+    },
+    {
+      "file": "api_media_path_root_contract-car_TeslaCam_RecentClips_2024-05-01_17-30-00-front.mp4.90a6d93f.json",
+      "route": "GET /api/media",
+      "label": "GET /api/media?path={root:contract-car}/TeslaCam/RecentClips/2024-05-01_17-30-00-front.mp4",
+      "status": 200,
+      "seq": 112
+    },
+    {
+      "file": "api_media_path_root_contract-car_TeslaCam_SavedClips_2024-05-03_10-00-00_2024-05-03_09-59-.6bdab282.json",
+      "route": "GET /api/media",
+      "label": "GET /api/media?path={root:contract-car}/TeslaCam/SavedClips/2024-05-03_10-00-00/2024-05-03_09-59-00-front.mp4",
+      "status": 200,
+      "seq": 113
+    },
+    {
+      "file": "api_media_path_root_contract-car_TeslaCam_SentryClips_2024-05-02_12-30-00_2024-05-02_12-29.5bce5f54.json",
+      "route": "GET /api/media",
+      "label": "GET /api/media?path={root:contract-car}/TeslaCam/SentryClips/2024-05-02_12-30-00/2024-05-02_12-29-00-front.mp4",
+      "status": 200,
+      "seq": 114
+    },
+    {
+      "file": "api_metrics_settings.c1cd1196.json",
+      "route": "GET /api/metrics/settings",
+      "label": "GET /api/metrics/settings",
+      "status": 200,
+      "seq": 15
+    },
+    {
+      "file": "api_nodes_none_benchmark.c9be0eb6.json",
+      "route": "GET /api/nodes/:id/benchmark",
+      "label": "GET /api/nodes/none/benchmark",
+      "status": 200,
+      "seq": 31
+    },
+    {
+      "file": "api_nodes.4325d1f0.json",
+      "route": "GET /api/nodes",
+      "label": "GET /api/nodes",
+      "status": 200,
+      "seq": 30
+    },
+    {
+      "file": "api_notification-rules.023e315d.json",
+      "route": "GET /api/notification-rules",
+      "label": "GET /api/notification-rules",
+      "status": 200,
+      "seq": 18
+    },
+    {
+      "file": "api_notifications_open_1.fe05035f.json",
+      "route": "GET /api/notifications",
+      "label": "GET /api/notifications?open=1",
+      "status": 200,
+      "seq": 104
+    },
+    {
+      "file": "api_notifications.50dfd790.json",
+      "route": "GET /api/notifications",
+      "label": "GET /api/notifications",
+      "status": 200,
+      "seq": 103
+    },
+    {
+      "file": "api_places_near_lat_30.2672_lon_-97.7431.18a24b36.json",
+      "route": "GET /api/places/near",
+      "label": "GET /api/places/near?lat=30.2672&lon=-97.7431",
+      "status": 200,
+      "seq": 83
+    },
+    {
+      "file": "api_places_near.ca22707d.json",
+      "route": "GET /api/places/near",
+      "label": "GET /api/places/near",
+      "status": 400,
+      "seq": 84
+    },
+    {
+      "file": "api_places_suggestions.52e90dd4.json",
+      "route": "GET /api/places/suggestions",
+      "label": "GET /api/places/suggestions",
+      "status": 200,
+      "seq": 64
+    },
+    {
+      "file": "api_places.f6d72dcf.json",
+      "route": "GET /api/places",
+      "label": "GET /api/places",
+      "status": 200,
+      "seq": 63
+    },
+    {
+      "file": "api_reports.6a7e95e3.json",
+      "route": "GET /api/reports",
+      "label": "GET /api/reports",
+      "status": 200,
+      "seq": 24
+    },
+    {
+      "file": "api_scrub_path_etc_passwd.8fbf6395.json",
+      "route": "GET /api/scrub",
+      "label": "GET /api/scrub?path=/etc/passwd",
+      "status": 403,
+      "seq": 118
+    },
+    {
+      "file": "api_scrub_path_root_contract-car_TeslaCam_RecentClips_2024-05-01_08-00-00-front.mp4.1186759b.json",
+      "route": "GET /api/scrub",
+      "label": "GET /api/scrub?path={root:contract-car}/TeslaCam/RecentClips/2024-05-01_08-00-00-front.mp4",
+      "status": 200,
+      "seq": 117
+    },
+    {
+      "file": "api_security_access.4aa032b5.json",
+      "route": "GET /api/security/access",
+      "label": "GET /api/security/access",
+      "status": 200,
+      "seq": 7
+    },
+    {
+      "file": "api_security_ca.crt.2e506924.json",
+      "route": "GET /api/security/ca.crt",
+      "label": "GET /api/security/ca.crt",
+      "status": 200,
+      "seq": 6
+    },
+    {
+      "file": "api_security.15fb6af0.json",
+      "route": "GET /api/security",
+      "label": "GET /api/security",
+      "status": 200,
+      "seq": 5
+    },
+    {
+      "file": "api_sentryusb.cceeffef.json",
+      "route": "GET /api/sentryusb",
+      "label": "GET /api/sentryusb",
+      "status": 200,
+      "seq": 75
+    },
+    {
+      "file": "api_settings_work-limits.2ebc8b86.json",
+      "route": "GET /api/settings/work-limits",
+      "label": "GET /api/settings/work-limits",
+      "status": 200,
+      "seq": 106
+    },
+    {
+      "file": "api_settings.74a933a4.json",
+      "route": "GET /api/settings",
+      "label": "GET /api/settings",
+      "status": 200,
+      "seq": 105
+    },
+    {
+      "file": "api_snapshots.8a5f7c35.json",
+      "route": "GET /api/snapshots",
+      "label": "GET /api/snapshots",
+      "status": 200,
+      "seq": 21
+    },
+    {
+      "file": "api_speeds_status.3b97b27b.json",
+      "route": "GET /api/speeds/status",
+      "label": "GET /api/speeds/status",
+      "status": 200,
+      "seq": 85
+    },
+    {
+      "file": "api_stars_vehicle_contract-car.4b9f8b0f.json",
+      "route": "GET /api/stars",
+      "label": "GET /api/stars?vehicle=contract-car",
+      "status": 200,
+      "seq": 58
+    },
+    {
+      "file": "api_stars.bea58be0.json",
+      "route": "GET /api/stars",
+      "label": "GET /api/stars",
+      "status": 200,
+      "seq": 57
+    },
+    {
+      "file": "api_stats_export.csv_range_24h.426b142d.json",
+      "route": "GET /api/stats/export.csv",
+      "label": "GET /api/stats/export.csv?range=24h",
+      "status": 200,
+      "seq": 102
+    },
+    {
+      "file": "api_stats_history_range_15m.91029570.json",
+      "route": "GET /api/stats/history",
+      "label": "GET /api/stats/history?range=15m",
+      "status": 200,
+      "seq": 101
+    },
+    {
+      "file": "api_stats.dbf40d26.json",
+      "route": "GET /api/stats",
+      "label": "GET /api/stats",
+      "status": 200,
+      "seq": 100
+    },
+    {
+      "file": "api_studio_context.779aadaa.json",
+      "route": "GET /api/studio/context",
+      "label": "GET /api/studio/context",
+      "status": 200,
+      "seq": 109
+    },
+    {
+      "file": "api_studio_settings.54323a8c.json",
+      "route": "GET /api/studio/settings",
+      "label": "GET /api/studio/settings",
+      "status": 200,
+      "seq": 108
+    },
+    {
+      "file": "api_support-bundle.5ea5b567.json",
+      "route": "GET /api/support-bundle",
+      "label": "GET /api/support-bundle",
+      "status": 200,
+      "seq": 23
+    },
+    {
+      "file": "api_system.452cbbde.json",
+      "route": "GET /api/system",
+      "label": "GET /api/system",
+      "status": 200,
+      "seq": 4
+    },
+    {
+      "file": "api_telemetry_path_etc_passwd.18a2b5df.json",
+      "route": "GET /api/telemetry",
+      "label": "GET /api/telemetry?path=/etc/passwd",
+      "status": 403,
+      "seq": 50
+    },
+    {
+      "file": "api_telemetry_path_root_contract-car_TeslaCam_RecentClips_2024-05-01_08-00-00-front.mp4.e30302de.json",
+      "route": "GET /api/telemetry",
+      "label": "GET /api/telemetry?path={root:contract-car}/TeslaCam/RecentClips/2024-05-01_08-00-00-front.mp4",
+      "status": 200,
+      "seq": 45
+    },
+    {
+      "file": "api_telemetry_path_root_contract-car_TeslaCam_RecentClips_2024-05-01_08-01-00-front.mp4.03a297a2.json",
+      "route": "GET /api/telemetry",
+      "label": "GET /api/telemetry?path={root:contract-car}/TeslaCam/RecentClips/2024-05-01_08-01-00-front.mp4",
+      "status": 200,
+      "seq": 46
+    },
+    {
+      "file": "api_telemetry_path_root_contract-car_TeslaCam_RecentClips_2024-05-01_17-30-00-front.mp4.29857975.json",
+      "route": "GET /api/telemetry",
+      "label": "GET /api/telemetry?path={root:contract-car}/TeslaCam/RecentClips/2024-05-01_17-30-00-front.mp4",
+      "status": 200,
+      "seq": 47
+    },
+    {
+      "file": "api_telemetry_path_root_contract-car_TeslaCam_SavedClips_2024-05-03_10-00-00_2024-05-03_09.d132f757.json",
+      "route": "GET /api/telemetry",
+      "label": "GET /api/telemetry?path={root:contract-car}/TeslaCam/SavedClips/2024-05-03_10-00-00/2024-05-03_09-59-00-front.mp4",
+      "status": 200,
+      "seq": 48
+    },
+    {
+      "file": "api_telemetry_path_root_contract-car_TeslaCam_SentryClips_2024-05-02_12-30-00_2024-05-02_1.c618dc11.json",
+      "route": "GET /api/telemetry",
+      "label": "GET /api/telemetry?path={root:contract-car}/TeslaCam/SentryClips/2024-05-02_12-30-00/2024-05-02_12-29-00-front.mp4",
+      "status": 200,
+      "seq": 49
+    },
+    {
+      "file": "api_ui-packs_original.zip.4d0e5bfa.json",
+      "route": "GET /api/ui-packs/original.zip",
+      "label": "GET /api/ui-packs/original.zip",
+      "status": 200,
+      "seq": 11
+    },
+    {
+      "file": "api_ui-packs.f3e254e8.json",
+      "route": "GET /api/ui-packs",
+      "label": "GET /api/ui-packs",
+      "status": 200,
+      "seq": 10
+    },
+    {
+      "file": "api_updates.44aa66f7.json",
+      "route": "GET /api/updates",
+      "label": "GET /api/updates",
+      "status": 200,
+      "seq": 107
+    },
+    {
+      "file": "api_vehicles_contract-car_archive-gaps.a4bf35df.json",
+      "route": "GET /api/vehicles/:id/archive-gaps",
+      "label": "GET /api/vehicles/contract-car/archive-gaps",
+      "status": 200,
+      "seq": 67
+    },
+    {
+      "file": "api_vehicles_contract-car_days_limit_1_offset_1.f770eaa3.json",
+      "route": "GET /api/vehicles/:id/days",
+      "label": "GET /api/vehicles/contract-car/days?limit=1&offset=1",
+      "status": 200,
+      "seq": 33
+    },
+    {
+      "file": "api_vehicles_contract-car_days_limit_100.a782a899.json",
+      "route": "GET /api/vehicles/:id/days",
+      "label": "GET /api/vehicles/contract-car/days?limit=100",
+      "status": 200,
+      "seq": 32
+    },
+    {
+      "file": "api_vehicles_contract-car_drives.c77b754a.json",
+      "route": "GET /api/vehicles/:id/drives",
+      "label": "GET /api/vehicles/contract-car/drives",
+      "status": 200,
+      "seq": 61
+    },
+    {
+      "file": "api_vehicles_contract-car_driving_weeks_12.92a817d3.json",
+      "route": "GET /api/vehicles/:id/driving",
+      "label": "GET /api/vehicles/contract-car/driving?weeks=12",
+      "status": 200,
+      "seq": 59
+    },
+    {
+      "file": "api_vehicles_contract-car_event-map.4a64af9c.json",
+      "route": "GET /api/vehicles/:id/event-map",
+      "label": "GET /api/vehicles/contract-car/event-map",
+      "status": 200,
+      "seq": 60
+    },
+    {
+      "file": "api_vehicles_contract-car_integrity.d6713d5a.json",
+      "route": "GET /api/vehicles/:id/integrity",
+      "label": "GET /api/vehicles/contract-car/integrity",
+      "status": 200,
+      "seq": 65
+    },
+    {
+      "file": "api_vehicles_contract-car_moments_date_2024-05-01.0a9eb828.json",
+      "route": "GET /api/vehicles/:id/moments",
+      "label": "GET /api/vehicles/contract-car/moments?date=2024-05-01",
+      "status": 200,
+      "seq": 56
+    },
+    {
+      "file": "api_vehicles_contract-car_moments_date_2024-05-02.6c108aa2.json",
+      "route": "GET /api/vehicles/:id/moments",
+      "label": "GET /api/vehicles/contract-car/moments?date=2024-05-02",
+      "status": 200,
+      "seq": 55
+    },
+    {
+      "file": "api_vehicles_contract-car_moments_date_2024-05-03.57f5fa5b.json",
+      "route": "GET /api/vehicles/:id/moments",
+      "label": "GET /api/vehicles/contract-car/moments?date=2024-05-03",
+      "status": 200,
+      "seq": 54
+    },
+    {
+      "file": "api_vehicles_contract-car_policy.e72d2099.json",
+      "route": "GET /api/vehicles/:id/policy",
+      "label": "GET /api/vehicles/contract-car/policy",
+      "status": 200,
+      "seq": 98
+    },
+    {
+      "file": "api_vehicles_contract-car_recordings_0000000000000000.b0513919.json",
+      "route": "GET /api/vehicles/:id/recordings/:rid",
+      "label": "GET /api/vehicles/contract-car/recordings/0000000000000000",
+      "status": 404,
+      "seq": 90
+    },
+    {
+      "file": "api_vehicles_contract-car_recordings_06b88a362664af5d_thumbnail.f8adfa1b.json",
+      "route": "GET /api/vehicles/:id/recordings/:rid/thumbnail",
+      "label": "GET /api/vehicles/contract-car/recordings/06b88a362664af5d/thumbnail",
+      "status": 200,
+      "seq": 91
+    },
+    {
+      "file": "api_vehicles_contract-car_recordings_06b88a362664af5d.95ee2c34.json",
+      "route": "GET /api/vehicles/:id/recordings/:rid",
+      "label": "GET /api/vehicles/contract-car/recordings/06b88a362664af5d",
+      "status": 200,
+      "seq": 86
+    },
+    {
+      "file": "api_vehicles_contract-car_recordings_3ce8681dff72e8f0_thumbnail.437535ca.json",
+      "route": "GET /api/vehicles/:id/recordings/:rid/thumbnail",
+      "label": "GET /api/vehicles/contract-car/recordings/3ce8681dff72e8f0/thumbnail",
+      "status": 200,
+      "seq": 92
+    },
+    {
+      "file": "api_vehicles_contract-car_recordings_3ce8681dff72e8f0.9bf5f50d.json",
+      "route": "GET /api/vehicles/:id/recordings/:rid",
+      "label": "GET /api/vehicles/contract-car/recordings/3ce8681dff72e8f0",
+      "status": 200,
+      "seq": 87
+    },
+    {
+      "file": "api_vehicles_contract-car_recordings_7cdb75664f3190bd_thumbnail.87e0457d.json",
+      "route": "GET /api/vehicles/:id/recordings/:rid/thumbnail",
+      "label": "GET /api/vehicles/contract-car/recordings/7cdb75664f3190bd/thumbnail",
+      "status": 200,
+      "seq": 94
+    },
+    {
+      "file": "api_vehicles_contract-car_recordings_7cdb75664f3190bd.a53a49a3.json",
+      "route": "GET /api/vehicles/:id/recordings/:rid",
+      "label": "GET /api/vehicles/contract-car/recordings/7cdb75664f3190bd",
+      "status": 200,
+      "seq": 89
+    },
+    {
+      "file": "api_vehicles_contract-car_recordings_category_Recent_date_2024-05-01_limit_500.8db71c25.json",
+      "route": "GET /api/vehicles/:id/recordings",
+      "label": "GET /api/vehicles/contract-car/recordings?category=Recent&date=2024-05-01&limit=500",
+      "status": 200,
+      "seq": 42
+    },
+    {
+      "file": "api_vehicles_contract-car_recordings_category_Recent_date_2024-05-02_limit_500.cf65cc9d.json",
+      "route": "GET /api/vehicles/:id/recordings",
+      "label": "GET /api/vehicles/contract-car/recordings?category=Recent&date=2024-05-02&limit=500",
+      "status": 200,
+      "seq": 39
+    },
+    {
+      "file": "api_vehicles_contract-car_recordings_category_Recent_date_2024-05-03_limit_500.248aade9.json",
+      "route": "GET /api/vehicles/:id/recordings",
+      "label": "GET /api/vehicles/contract-car/recordings?category=Recent&date=2024-05-03&limit=500",
+      "status": 200,
+      "seq": 36
+    },
+    {
+      "file": "api_vehicles_contract-car_recordings_category_Saved_date_2024-05-01_limit_500.77855863.json",
+      "route": "GET /api/vehicles/:id/recordings",
+      "label": "GET /api/vehicles/contract-car/recordings?category=Saved&date=2024-05-01&limit=500",
+      "status": 200,
+      "seq": 43
+    },
+    {
+      "file": "api_vehicles_contract-car_recordings_category_Saved_date_2024-05-02_limit_500.67b6fa05.json",
+      "route": "GET /api/vehicles/:id/recordings",
+      "label": "GET /api/vehicles/contract-car/recordings?category=Saved&date=2024-05-02&limit=500",
+      "status": 200,
+      "seq": 40
+    },
+    {
+      "file": "api_vehicles_contract-car_recordings_category_Saved_date_2024-05-03_limit_500.df5edbeb.json",
+      "route": "GET /api/vehicles/:id/recordings",
+      "label": "GET /api/vehicles/contract-car/recordings?category=Saved&date=2024-05-03&limit=500",
+      "status": 200,
+      "seq": 37
+    },
+    {
+      "file": "api_vehicles_contract-car_recordings_category_Sentry_date_2024-05-01_limit_500.f7df1ce8.json",
+      "route": "GET /api/vehicles/:id/recordings",
+      "label": "GET /api/vehicles/contract-car/recordings?category=Sentry&date=2024-05-01&limit=500",
+      "status": 200,
+      "seq": 44
+    },
+    {
+      "file": "api_vehicles_contract-car_recordings_category_Sentry_date_2024-05-02_limit_500.554371ea.json",
+      "route": "GET /api/vehicles/:id/recordings",
+      "label": "GET /api/vehicles/contract-car/recordings?category=Sentry&date=2024-05-02&limit=500",
+      "status": 200,
+      "seq": 41
+    },
+    {
+      "file": "api_vehicles_contract-car_recordings_category_Sentry_date_2024-05-03_limit_500.f3dbc372.json",
+      "route": "GET /api/vehicles/:id/recordings",
+      "label": "GET /api/vehicles/contract-car/recordings?category=Sentry&date=2024-05-03&limit=500",
+      "status": 200,
+      "seq": 38
+    },
+    {
+      "file": "api_vehicles_contract-car_recordings_f11ef172e32dd02d_thumbnail.719b9af7.json",
+      "route": "GET /api/vehicles/:id/recordings/:rid/thumbnail",
+      "label": "GET /api/vehicles/contract-car/recordings/f11ef172e32dd02d/thumbnail",
+      "status": 200,
+      "seq": 93
+    },
+    {
+      "file": "api_vehicles_contract-car_recordings_f11ef172e32dd02d.08ffb7d0.json",
+      "route": "GET /api/vehicles/:id/recordings/:rid",
+      "label": "GET /api/vehicles/contract-car/recordings/f11ef172e32dd02d",
+      "status": 200,
+      "seq": 88
+    },
+    {
+      "file": "api_vehicles_contract-car_recordings_limit_1.c4c660d3.json",
+      "route": "GET /api/vehicles/:id/recordings",
+      "label": "GET /api/vehicles/contract-car/recordings?limit=1",
+      "status": 200,
+      "seq": 35
+    },
+    {
+      "file": "api_vehicles_contract-car_recordings_limit_500.ec39605e.json",
+      "route": "GET /api/vehicles/:id/recordings",
+      "label": "GET /api/vehicles/contract-car/recordings?limit=500",
+      "status": 200,
+      "seq": 34
+    },
+    {
+      "file": "api_vehicles_contract-car_savings-by-month.e606980c.json",
+      "route": "GET /api/vehicles/:id/savings-by-month",
+      "label": "GET /api/vehicles/contract-car/savings-by-month",
+      "status": 200,
+      "seq": 82
+    },
+    {
+      "file": "api_vehicles_contract-car_sentry-usb.2e8b0a91.json",
+      "route": "GET /api/vehicles/:id/sentry-usb",
+      "label": "GET /api/vehicles/contract-car/sentry-usb",
+      "status": 200,
+      "seq": 66
+    },
+    {
+      "file": "api_vehicles_contract-car_speeds_date_2024-05-01.b3b625fc.json",
+      "route": "GET /api/vehicles/:id/speeds",
+      "label": "GET /api/vehicles/contract-car/speeds?date=2024-05-01",
+      "status": 200,
+      "seq": 53
+    },
+    {
+      "file": "api_vehicles_contract-car_speeds_date_2024-05-02.b277c256.json",
+      "route": "GET /api/vehicles/:id/speeds",
+      "label": "GET /api/vehicles/contract-car/speeds?date=2024-05-02",
+      "status": 200,
+      "seq": 52
+    },
+    {
+      "file": "api_vehicles_contract-car_speeds_date_2024-05-03.aa8face8.json",
+      "route": "GET /api/vehicles/:id/speeds",
+      "label": "GET /api/vehicles/contract-car/speeds?date=2024-05-03",
+      "status": 200,
+      "seq": 51
+    },
+    {
+      "file": "api_vehicles.f4b0d8f8.json",
+      "route": "GET /api/vehicles",
+      "label": "GET /api/vehicles",
+      "status": 200,
+      "seq": 25
+    },
+    {
+      "file": "DELETE__api_accounts_nobody.4ac75bd8.json",
+      "route": "DELETE /api/accounts/:name",
+      "label": "DELETE /api/accounts/nobody",
+      "status": 404,
+      "seq": 130,
+      "mutating": true
+    },
+    {
+      "file": "DELETE__api_can_files_no-such-file.log.xz.ad594f30.json",
+      "route": "DELETE /api/can/files/:name",
+      "label": "DELETE /api/can/files/no-such-file.log.xz",
+      "status": 400,
+      "seq": 184,
+      "mutating": true
+    },
+    {
+      "file": "DELETE__api_can_tokens_no-such-token.d59a37b3.json",
+      "route": "DELETE /api/can/tokens/:id",
+      "label": "DELETE /api/can/tokens/no-such-token",
+      "status": 404,
+      "seq": 179,
+      "mutating": true
+    },
+    {
+      "file": "DELETE__api_exports_no-such-export.ab590717.json",
+      "route": "DELETE /api/exports/:id",
+      "label": "DELETE /api/exports/no-such-export",
+      "status": 200,
+      "seq": 148,
+      "mutating": true
+    },
+    {
+      "file": "DELETE__api_nodes_no-such-node_benchmark.c9036858.json",
+      "route": "DELETE /api/nodes/:id/benchmark",
+      "label": "DELETE /api/nodes/no-such-node/benchmark",
+      "status": 200,
+      "seq": 151,
+      "mutating": true
+    },
+    {
+      "file": "DELETE__api_nodes_no-such-node.017c7c38.json",
+      "route": "DELETE /api/nodes/:id",
+      "label": "DELETE /api/nodes/no-such-node",
+      "status": 404,
+      "seq": 154,
+      "mutating": true
+    },
+    {
+      "file": "DELETE__api_nodes_worker_mains_no-such-main.9a147711.json",
+      "route": "DELETE /api/nodes/worker/mains/:id",
+      "label": "DELETE /api/nodes/worker/mains/no-such-main",
+      "status": 404,
+      "seq": 157,
+      "mutating": true
+    },
+    {
+      "file": "DELETE__api_nodes_worker_pair.c59b32e7.json",
+      "route": "DELETE /api/nodes/worker/pair",
+      "label": "DELETE /api/nodes/worker/pair",
+      "status": 200,
+      "seq": 156,
+      "mutating": true
+    },
+    {
+      "file": "DELETE__api_places_no-such-place.adb17351.json",
+      "route": "DELETE /api/places/:id",
+      "label": "DELETE /api/places/no-such-place",
+      "status": 404,
+      "seq": 172,
+      "mutating": true
+    },
+    {
+      "file": "DELETE__api_stars_no-such-star.1749d619.json",
+      "route": "DELETE /api/stars/:id",
+      "label": "DELETE /api/stars/no-such-star",
+      "status": 404,
+      "seq": 168,
+      "mutating": true
+    },
+    {
+      "file": "DELETE__api_ui-packs_no-such-pack.1e98080f.json",
+      "route": "DELETE /api/ui-packs/:id",
+      "label": "DELETE /api/ui-packs/no-such-pack",
+      "status": 400,
+      "seq": 136,
+      "mutating": true
+    },
+    {
+      "file": "DELETE__api_vehicles_no-such-car_saved.38f48665.json",
+      "route": "DELETE /api/vehicles/:id/saved",
+      "label": "DELETE /api/vehicles/no-such-car/saved",
+      "status": 404,
+      "seq": 161,
+      "mutating": true
+    },
+    {
+      "file": "DELETE__api_vehicles_no-such-car.4661ec46.json",
+      "route": "DELETE /api/vehicles/:id",
+      "label": "DELETE /api/vehicles/no-such-car",
+      "status": 404,
+      "seq": 162,
+      "mutating": true
+    },
+    {
+      "file": "DELETE__node_v1_jobs_no-such-job.46f8af08.json",
+      "route": "DELETE /node/v1/jobs/:id",
+      "label": "DELETE /node/v1/jobs/no-such-job",
+      "status": 401,
+      "seq": 215,
+      "mutating": true
+    },
+    {
+      "file": "healthz.56f31f7e.json",
+      "route": "GET /healthz",
+      "label": "GET /healthz",
+      "status": 200,
+      "seq": 122
+    },
+    {
+      "file": "PATCH__api_accounts_nobody.57dd3f0d.json",
+      "route": "PATCH /api/accounts/:name",
+      "label": "PATCH /api/accounts/nobody",
+      "status": 404,
+      "seq": 129,
+      "mutating": true
+    },
+    {
+      "file": "PATCH__api_places_no-such-place.2eb67315.json",
+      "route": "PATCH /api/places/:id",
+      "label": "PATCH /api/places/no-such-place",
+      "status": 404,
+      "seq": 171,
+      "mutating": true
+    },
+    {
+      "file": "PATCH__api_stars_no-such-star.52564f62.json",
+      "route": "PATCH /api/stars/:id",
+      "label": "PATCH /api/stars/no-such-star",
+      "status": 404,
+      "seq": 167,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_accounts.8510d4e4.json",
+      "route": "POST /api/accounts",
+      "label": "POST /api/accounts",
+      "status": 400,
+      "seq": 128,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_auth_2fa_code.725953f5.json",
+      "route": "POST /api/auth/2fa/code",
+      "label": "POST /api/auth/2fa/code",
+      "status": 401,
+      "seq": 123,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_auth_2fa_disable.6af96383.json",
+      "route": "POST /api/auth/2fa/disable",
+      "label": "POST /api/auth/2fa/disable",
+      "status": 200,
+      "seq": 125,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_auth_2fa_enable.030c0fc7.json",
+      "route": "POST /api/auth/2fa/enable",
+      "label": "POST /api/auth/2fa/enable",
+      "status": 400,
+      "seq": 124,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_auth_confirm.553a22bc.json",
+      "route": "POST /api/auth/confirm",
+      "label": "POST /api/auth/confirm",
+      "status": 401,
+      "seq": 216,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_auth_login.019432a0.json",
+      "route": "POST /api/auth/login",
+      "label": "POST /api/auth/login",
+      "status": 401,
+      "seq": 217,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_auth_password.f67fcf70.json",
+      "route": "POST /api/auth/password",
+      "label": "POST /api/auth/password",
+      "status": 401,
+      "seq": 132,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_auth_sessions_no-such-session_end.fcbe49c3.json",
+      "route": "POST /api/auth/sessions/:id/end",
+      "label": "POST /api/auth/sessions/no-such-session/end",
+      "status": 404,
+      "seq": 126,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_auth_sessions-end-others.e03a8cb0.json",
+      "route": "POST /api/auth/sessions-end-others",
+      "label": "POST /api/auth/sessions-end-others",
+      "status": 200,
+      "seq": 127,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_auth_setup.7519aaea.json",
+      "route": "POST /api/auth/setup",
+      "label": "POST /api/auth/setup",
+      "status": 409,
+      "seq": 131,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_bin_empty.dd7bbf72.json",
+      "route": "POST /api/bin/empty",
+      "label": "POST /api/bin/empty",
+      "status": 400,
+      "seq": 191,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_bin_no-such-item_delete.8f1eea0f.json",
+      "route": "POST /api/bin/:item/delete",
+      "label": "POST /api/bin/no-such-item/delete",
+      "status": 400,
+      "seq": 190,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_bin_no-such-item_restore.c78c848e.json",
+      "route": "POST /api/bin/:item/restore",
+      "label": "POST /api/bin/no-such-item/restore",
+      "status": 404,
+      "seq": 189,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_can_disable.14145123.json",
+      "route": "POST /api/can/disable",
+      "label": "POST /api/can/disable",
+      "status": 200,
+      "seq": 178,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_can_files_no-such-file.log.xz_use.1d77bf58.json",
+      "route": "POST /api/can/files/:name/use",
+      "label": "POST /api/can/files/no-such-file.log.xz/use",
+      "status": 400,
+      "seq": 183,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_can_keep.87983363.json",
+      "route": "POST /api/can/keep",
+      "label": "POST /api/can/keep",
+      "status": 400,
+      "seq": 177,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_can_logs_no-such-file.log.xz.5d8e8153.json",
+      "route": "POST /api/can/logs/:name",
+      "label": "POST /api/can/logs/no-such-file.log.xz",
+      "status": 404,
+      "seq": 211,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_can_logs_status.65275559.json",
+      "route": "POST /api/can/logs/status",
+      "label": "POST /api/can/logs/status",
+      "status": 404,
+      "seq": 210,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_can_pairing_no-such-key_could-not-sign.9a387c1e.json",
+      "route": "POST /api/can/pairing/:key/could-not-sign",
+      "label": "POST /api/can/pairing/no-such-key/could-not-sign",
+      "status": 400,
+      "seq": 182,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_can_pairing_no-such-key_forget.e88db42e.json",
+      "route": "POST /api/can/pairing/:key/forget",
+      "label": "POST /api/can/pairing/no-such-key/forget",
+      "status": 200,
+      "seq": 181,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_can_pairing_no-such-key_trust.3d2a78a3.json",
+      "route": "POST /api/can/pairing/:key/trust",
+      "label": "POST /api/can/pairing/no-such-key/trust",
+      "status": 404,
+      "seq": 180,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_can_vehicle-map.f30703a9.json",
+      "route": "POST /api/can/vehicle-map",
+      "label": "POST /api/can/vehicle-map",
+      "status": 400,
+      "seq": 175,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_can_viewer-car-data.d1e66ccf.json",
+      "route": "POST /api/can/viewer-car-data",
+      "label": "POST /api/can/viewer-car-data",
+      "status": 400,
+      "seq": 176,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_converter_invoke_getStatus.d076729c.json",
+      "route": "POST /api/converter/invoke/:name",
+      "label": "POST /api/converter/invoke/getStatus",
+      "status": 200,
+      "seq": 200,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_exports.de61ea33.json",
+      "route": "POST /api/exports",
+      "label": "POST /api/exports",
+      "status": 400,
+      "seq": 147,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_health_run.f15e534f.json",
+      "route": "POST /api/health/run",
+      "label": "POST /api/health/run",
+      "status": 200,
+      "seq": 139,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_jobs_clear.1a5c237d.json",
+      "route": "POST /api/jobs/clear",
+      "label": "POST /api/jobs/clear",
+      "status": 400,
+      "seq": 194,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_logs_clear.a380e0f9.json",
+      "route": "POST /api/logs/clear",
+      "label": "POST /api/logs/clear",
+      "status": 200,
+      "seq": 140,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_metrics_disable.6e4f5ba2.json",
+      "route": "POST /api/metrics/disable",
+      "label": "POST /api/metrics/disable",
+      "status": 200,
+      "seq": 137,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_nodes_no-such-node_benchmark.c25f2595.json",
+      "route": "POST /api/nodes/:id/benchmark",
+      "label": "POST /api/nodes/no-such-node/benchmark",
+      "status": 404,
+      "seq": 150,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_nodes_no-such-node_slots.d1a1c35e.json",
+      "route": "POST /api/nodes/:id/slots",
+      "label": "POST /api/nodes/no-such-node/slots",
+      "status": 404,
+      "seq": 152,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_nodes_worker_pair.8fd43eb2.json",
+      "route": "POST /api/nodes/worker/pair",
+      "label": "POST /api/nodes/worker/pair",
+      "status": 200,
+      "seq": 155,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_nodes.809ebfaf.json",
+      "route": "POST /api/nodes",
+      "label": "POST /api/nodes",
+      "status": 400,
+      "seq": 149,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_notifications_999999_dismiss.751a6b17.json",
+      "route": "POST /api/notifications/:id/dismiss",
+      "label": "POST /api/notifications/999999/dismiss",
+      "status": 200,
+      "seq": 195,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_notifications_read.22efedde.json",
+      "route": "POST /api/notifications/read",
+      "label": "POST /api/notifications/read",
+      "status": 200,
+      "seq": 196,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_places.3412c97f.json",
+      "route": "POST /api/places",
+      "label": "POST /api/places",
+      "status": 400,
+      "seq": 170,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_reports_preview.351cd0c2.json",
+      "route": "POST /api/reports/preview",
+      "label": "POST /api/reports/preview",
+      "status": 400,
+      "seq": 144,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_reports_send.781f01ea.json",
+      "route": "POST /api/reports/send",
+      "label": "POST /api/reports/send",
+      "status": 409,
+      "seq": 145,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_security_unban.fc412555.json",
+      "route": "POST /api/security/unban",
+      "label": "POST /api/security/unban",
+      "status": 404,
+      "seq": 134,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_snapshots_no-such-snapshot_restore.628e18ab.json",
+      "route": "POST /api/snapshots/:name/restore",
+      "label": "POST /api/snapshots/no-such-snapshot/restore",
+      "status": 404,
+      "seq": 142,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_stars.73e53dc2.json",
+      "route": "POST /api/stars",
+      "label": "POST /api/stars",
+      "status": 404,
+      "seq": 166,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_studio_browse.eece34e5.json",
+      "route": "POST /api/studio/browse",
+      "label": "POST /api/studio/browse",
+      "status": 403,
+      "seq": 208,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_studio_exists.dc2185d7.json",
+      "route": "POST /api/studio/exists",
+      "label": "POST /api/studio/exists",
+      "status": 200,
+      "seq": 203,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_studio_readDir.db648f24.json",
+      "route": "POST /api/studio/readDir",
+      "label": "POST /api/studio/readDir",
+      "status": 403,
+      "seq": 201,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_studio_readFile.35588d17.json",
+      "route": "POST /api/studio/readFile",
+      "label": "POST /api/studio/readFile",
+      "status": 403,
+      "seq": 202,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_studio_settings.2db52ba2.json",
+      "route": "POST /api/studio/settings",
+      "label": "POST /api/studio/settings",
+      "status": 400,
+      "seq": 207,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_studio_stat.5ded64db.json",
+      "route": "POST /api/studio/stat",
+      "label": "POST /api/studio/stat",
+      "status": 200,
+      "seq": 204,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_studio_thumbnail.c6ceb2ce.json",
+      "route": "POST /api/studio/thumbnail",
+      "label": "POST /api/studio/thumbnail",
+      "status": 200,
+      "seq": 205,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_studio_trashFolder.22badfa3.json",
+      "route": "POST /api/studio/trashFolder",
+      "label": "POST /api/studio/trashFolder",
+      "status": 403,
+      "seq": 206,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_telemetry_speeds.b6d77d32.json",
+      "route": "POST /api/telemetry/speeds",
+      "label": "POST /api/telemetry/speeds",
+      "status": 200,
+      "seq": 185,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_ui-packs_upload.72668314.json",
+      "route": "POST /api/ui-packs/upload",
+      "label": "POST /api/ui-packs/upload",
+      "status": 400,
+      "seq": 209,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_vehicles_contract-car_protect.9cce16cc.json",
+      "route": "POST /api/vehicles/:id/protect",
+      "label": "POST /api/vehicles/contract-car/protect",
+      "status": 200,
+      "seq": 186,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_vehicles_contract-car_trash-days.de1483b2.json",
+      "route": "POST /api/vehicles/:id/trash-days",
+      "label": "POST /api/vehicles/contract-car/trash-days",
+      "status": 400,
+      "seq": 165,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_vehicles_contract-car_trash-preview.33e0dd9a.json",
+      "route": "POST /api/vehicles/:id/trash-preview",
+      "label": "POST /api/vehicles/contract-car/trash-preview",
+      "status": 200,
+      "seq": 188,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_vehicles_contract-car_trash.19eba02c.json",
+      "route": "POST /api/vehicles/:id/trash",
+      "label": "POST /api/vehicles/contract-car/trash",
+      "status": 200,
+      "seq": 187,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_vehicles_no-such-car_exports.461e7ca2.json",
+      "route": "POST /api/vehicles/:id/exports",
+      "label": "POST /api/vehicles/no-such-car/exports",
+      "status": 404,
+      "seq": 146,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_vehicles_no-such-car_integrity.03c8d1b7.json",
+      "route": "POST /api/vehicles/:id/integrity",
+      "label": "POST /api/vehicles/no-such-car/integrity",
+      "status": 404,
+      "seq": 173,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_vehicles_no-such-car_policy_run.22e346d3.json",
+      "route": "POST /api/vehicles/:id/policy/run",
+      "label": "POST /api/vehicles/no-such-car/policy/run",
+      "status": 404,
+      "seq": 193,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_vehicles_no-such-car_reconnect.6e1c697a.json",
+      "route": "POST /api/vehicles/:id/reconnect",
+      "label": "POST /api/vehicles/no-such-car/reconnect",
+      "status": 404,
+      "seq": 163,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_vehicles_no-such-car_scan.59e95798.json",
+      "route": "POST /api/vehicles/:id/scan",
+      "label": "POST /api/vehicles/no-such-car/scan",
+      "status": 404,
+      "seq": 164,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_vehicles_no-such-car_sentry-usb_record.02e2102b.json",
+      "route": "POST /api/vehicles/:id/sentry-usb/record",
+      "label": "POST /api/vehicles/no-such-car/sentry-usb/record",
+      "status": 404,
+      "seq": 174,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_vehicles_test-smb.60fe08d5.json",
+      "route": "POST /api/vehicles/test-smb",
+      "label": "POST /api/vehicles/test-smb",
+      "status": 200,
+      "seq": 158,
+      "mutating": true
+    },
+    {
+      "file": "POST__api_vehicles.9d2c7391.json",
+      "route": "POST /api/vehicles",
+      "label": "POST /api/vehicles",
+      "status": 400,
+      "seq": 159,
+      "mutating": true
+    },
+    {
+      "file": "POST__node_v1_jobs.95b7907b.json",
+      "route": "POST /node/v1/jobs",
+      "label": "POST /node/v1/jobs",
+      "status": 401,
+      "seq": 213,
+      "mutating": true
+    },
+    {
+      "file": "POST__node_v1_pair.84783504.json",
+      "route": "POST /node/v1/pair",
+      "label": "POST /node/v1/pair",
+      "status": 403,
+      "seq": 212,
+      "mutating": true
+    },
+    {
+      "file": "POST__node_v1_slots.dcaf8607.json",
+      "route": "POST /node/v1/slots",
+      "label": "POST /node/v1/slots",
+      "status": 401,
+      "seq": 214,
+      "mutating": true
+    },
+    {
+      "file": "PUT__api_dashboards.872abf4a.json",
+      "route": "PUT /api/dashboards",
+      "label": "PUT /api/dashboards",
+      "status": 400,
+      "seq": 169,
+      "mutating": true
+    },
+    {
+      "file": "PUT__api_nodes_no-such-node.61330f2a.json",
+      "route": "PUT /api/nodes/:id",
+      "label": "PUT /api/nodes/no-such-node",
+      "status": 404,
+      "seq": 153,
+      "mutating": true
+    },
+    {
+      "file": "PUT__api_notification-rules.81c23277.json",
+      "route": "PUT /api/notification-rules",
+      "label": "PUT /api/notification-rules",
+      "status": 200,
+      "seq": 141,
+      "mutating": true
+    },
+    {
+      "file": "PUT__api_reports_settings.51ad88cd.json",
+      "route": "PUT /api/reports/settings",
+      "label": "PUT /api/reports/settings",
+      "status": 400,
+      "seq": 143,
+      "mutating": true
+    },
+    {
+      "file": "PUT__api_security_access.d31e2d8a.json",
+      "route": "PUT /api/security/access",
+      "label": "PUT /api/security/access",
+      "status": 200,
+      "seq": 138,
+      "mutating": true
+    },
+    {
+      "file": "PUT__api_security_hostnames.59fbf867.json",
+      "route": "PUT /api/security/hostnames",
+      "label": "PUT /api/security/hostnames",
+      "status": 200,
+      "seq": 133,
+      "mutating": true
+    },
+    {
+      "file": "PUT__api_settings_appearance.b23e2841.json",
+      "route": "PUT /api/settings/appearance",
+      "label": "PUT /api/settings/appearance",
+      "status": 200,
+      "seq": 198,
+      "mutating": true
+    },
+    {
+      "file": "PUT__api_settings_power.a3f28c1d.json",
+      "route": "PUT /api/settings/power",
+      "label": "PUT /api/settings/power",
+      "status": 200,
+      "seq": 197,
+      "mutating": true
+    },
+    {
+      "file": "PUT__api_settings_work-limits.dea59acb.json",
+      "route": "PUT /api/settings/work-limits",
+      "label": "PUT /api/settings/work-limits",
+      "status": 400,
+      "seq": 199,
+      "mutating": true
+    },
+    {
+      "file": "PUT__api_ui-packs_active.5d35fb06.json",
+      "route": "PUT /api/ui-packs/active",
+      "label": "PUT /api/ui-packs/active",
+      "status": 400,
+      "seq": 135,
+      "mutating": true
+    },
+    {
+      "file": "PUT__api_vehicles_contract-car_policy.730693da.json",
+      "route": "PUT /api/vehicles/:id/policy",
+      "label": "PUT /api/vehicles/contract-car/policy",
+      "status": 200,
+      "seq": 192,
+      "mutating": true
+    },
+    {
+      "file": "PUT__api_vehicles_no-such-car.a73c37a8.json",
+      "route": "PUT /api/vehicles/:id",
+      "label": "PUT /api/vehicles/no-such-car",
+      "status": 404,
+      "seq": 160,
+      "mutating": true
+    }
+  ]
+}

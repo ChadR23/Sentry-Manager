@@ -1,0 +1,36 @@
+{
+  "route": "GET /api/reports",
+  "method": "GET",
+  "request": {
+    "path": "/api/reports"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "configured": true,
+      "endpoint": "https://reports.skittles.live",
+      "installCode": "<id>",
+      "kid": "208993f9bb2c38d1",
+      "lastError": null,
+      "lastHeartbeat": null,
+      "lastSent": null,
+      "manualPerHour": 5,
+      "nextHeartbeatAt": null,
+      "notSetUpText": null,
+      "outbox": {
+        "bytes": 0,
+        "count": 0
+      },
+      "sentRefs": [],
+      "settings": {
+        "anonymous": false,
+        "share": false
+      }
+    }
+  }
+}

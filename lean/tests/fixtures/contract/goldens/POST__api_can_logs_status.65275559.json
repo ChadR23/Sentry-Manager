@@ -1,0 +1,20 @@
+{
+  "route": "POST /api/can/logs/status",
+  "method": "POST",
+  "request": {
+    "path": "/api/can/logs/status"
+  },
+  "body": {},
+  "response": {
+    "status": 404,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "code": "off",
+      "error": "Not found"
+    }
+  }
+}

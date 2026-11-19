@@ -1,0 +1,19 @@
+{
+  "route": "POST /api/places",
+  "method": "POST",
+  "request": {
+    "path": "/api/places"
+  },
+  "body": {},
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "Give the place a name."
+    }
+  }
+}

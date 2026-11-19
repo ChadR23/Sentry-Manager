@@ -1,0 +1,29 @@
+{
+  "route": "GET /api/vehicles/:id/sentry-usb",
+  "method": "GET",
+  "request": {
+    "path": "/api/vehicles/contract-car/sentry-usb"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "present": false,
+      "record": {
+        "backlog": null,
+        "canBackfill": true,
+        "enabled": false,
+        "lastAt": null,
+        "lines": 0,
+        "older": true,
+        "pending": 0,
+        "today": 0,
+        "windowDays": 7
+      }
+    }
+  }
+}

@@ -6,7 +6,7 @@ const ACTIVE_STATES = new Set([
 const PIPELINE_ORDER = ['discover', 'encode', 'verify', 'save'];
 const GROUPS = ['RecentClips', 'SavedClips', 'SentryClips'];
 const DEFAULT_GROUP_ORDER = ['SavedClips', 'SentryClips', 'RecentClips'];
-// Mirrors CONCURRENCY in src/main/converter/contracts.js (not loadable here).
+// Mirrors CONCURRENCY_MIN/MAX/FALLBACK in lean/src/converter/contracts.rs (the server).
 const MIN_CONCURRENCY = 1;
 const MAX_CONCURRENCY = 64;
 const LISTED_CONCURRENCY = 10; // higher values use the Custom box

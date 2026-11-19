@@ -1,0 +1,21 @@
+{
+  "route": "POST /api/vehicles/:id/trash-days",
+  "method": "POST",
+  "request": {
+    "path": "/api/vehicles/contract-car/trash-days"
+  },
+  "body": {
+    "day": "not a day"
+  },
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "Choose a day."
+    }
+  }
+}

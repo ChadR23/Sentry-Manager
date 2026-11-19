@@ -460,7 +460,7 @@ read anything, and watch-only accounts get 403.
 **Decoding.** Each car with the DBC set of its model and year (below, "Car
 models and years"). A Model 3 or Y (every year, and the default when nothing
 is known): model3dbc's `Model3CAN.dbc`, then the messages it lacks from opendbc
-that checked out on a Model Y (`server/dbc/model3y-opendbc.dbc`), and over them `server/dbc/override.dbc`:
+that checked out on a Model Y (`dbc/model3y-opendbc.dbc`), and over them `dbc/override.dbc`:
 the messages whose layout changed in newer Tesla firmware, checked against a
 real car's logs (a message there with no signals has a layout not known yet and
 is not decoded; it shows as `unknown`). A frame is decoded only on a bus the
@@ -512,7 +512,7 @@ VIN too (`vin`, or `car.vin`); the CAN Bridge sends none today.
 | Model X | 2016-2020 | `tesla-sx-legacy` | No: community sources only |
 | Model X | 2021 and later (refresh) | `tesla-3y` | No (as the Model S refresh) |
 
-The sets (`server/canDbc.js` PROFILES; files in `server/dbc/`, each source's
+The sets (`server/canDbc.js` PROFILES; files in `dbc/`, each source's
 license beside it):
 
 - `tesla-3y`: [model3dbc](https://github.com/joshwardell/model3dbc) `Model3CAN.dbc`

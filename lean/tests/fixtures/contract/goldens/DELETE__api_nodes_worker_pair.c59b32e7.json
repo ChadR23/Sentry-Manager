@@ -1,0 +1,23 @@
+{
+  "route": "DELETE /api/nodes/worker/pair",
+  "method": "DELETE",
+  "request": {
+    "path": "/api/nodes/worker/pair"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "busy": 0,
+      "enabled": true,
+      "mains": [],
+      "pairing": null,
+      "slots": 2,
+      "use": "gpu"
+    }
+  }
+}

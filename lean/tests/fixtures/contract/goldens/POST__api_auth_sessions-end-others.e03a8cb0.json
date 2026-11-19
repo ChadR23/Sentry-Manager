@@ -1,0 +1,19 @@
+{
+  "route": "POST /api/auth/sessions-end-others",
+  "method": "POST",
+  "request": {
+    "path": "/api/auth/sessions-end-others"
+  },
+  "body": {},
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "ended": 0
+    }
+  }
+}

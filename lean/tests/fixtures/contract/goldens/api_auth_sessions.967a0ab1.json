@@ -1,0 +1,27 @@
+{
+  "route": "GET /api/auth/sessions",
+  "method": "GET",
+  "request": {
+    "path": "/api/auth/sessions"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "sessions": [
+        {
+          "agent": "<value>",
+          "createdAt": "<value>",
+          "current": "<value>",
+          "id": "<value>",
+          "ip": "<value>",
+          "seenAt": "<value>"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "route": "POST /api/reports/send",
+  "method": "POST",
+  "request": {
+    "path": "/api/reports/send"
+  },
+  "body": {
+    "previewId": "no-such-preview"
+  },
+  "response": {
+    "status": 409,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "The preview is too old: look at what will be sent again."
+    }
+  }
+}

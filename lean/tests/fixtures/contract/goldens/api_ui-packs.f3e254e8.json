@@ -1,0 +1,86 @@
+{
+  "route": "GET /api/ui-packs",
+  "method": "GET",
+  "request": {
+    "path": "/api/ui-packs"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "active": "sentry-six",
+      "original": false,
+      "packs": [
+        {
+          "author": "Sentry Six Manager",
+          "builtin": true,
+          "bytes": 529811,
+          "description": "The Sentry family: what matters first, with Liquid Glass and details one tap away.",
+          "files": 37,
+          "id": "sentry-six",
+          "name": "Sentry Six",
+          "replaces": [
+            "web"
+          ],
+          "uploadedAt": null
+        },
+        {
+          "author": "Aurora",
+          "builtin": true,
+          "bytes": 404215,
+          "description": "A night sky with drifting northern lights behind a frosted-glass, spatial interface: a floating dock, glass windows, a Sky home with a glowing storage ring, a filmstrip of days, a cockpit-style six-camera Viewer and an orbiting Encoder.",
+          "files": 31,
+          "id": "aurora",
+          "name": "Aurora",
+          "replaces": [
+            "web"
+          ],
+          "uploadedAt": null
+        },
+        {
+          "author": "Daylight pack",
+          "builtin": true,
+          "bytes": 385913,
+          "description": "A calm, friendly interface: a Today page that answers your questions first, a calendar of footage, a big six-camera Viewer, guided conversions, light and dark looks.",
+          "files": 32,
+          "id": "daylight",
+          "name": "Daylight",
+          "replaces": [
+            "web"
+          ],
+          "uploadedAt": null
+        },
+        {
+          "author": "Flux",
+          "builtin": true,
+          "bytes": 402624,
+          "description": "A dense, dark control console for people who want every number: live canvas telemetry, a command palette (Ctrl/Cmd+K), keyboard shortcuts everywhere, sortable tables, a six-camera synced viewer with telemetry and a lane-level encoder view.",
+          "files": 29,
+          "id": "flux",
+          "name": "Flux",
+          "replaces": [
+            "web"
+          ],
+          "uploadedAt": null
+        },
+        {
+          "author": "Sentry Six Manager examples",
+          "builtin": true,
+          "bytes": 412006,
+          "description": "Retro-futuristic synthwave cockpit: neon HUD panels over an endless grid that runs toward a setting sun. Dashboard instrument cluster, track-list footage, heads-up Viewer and a dyno-room Encoder.",
+          "files": 28,
+          "id": "horizon",
+          "name": "Horizon",
+          "replaces": [
+            "web"
+          ],
+          "uploadedAt": null
+        }
+      ]
+    }
+  }
+}

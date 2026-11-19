@@ -1,0 +1,36 @@
+{
+  "route": "GET /api/vehicles/:id/moments",
+  "method": "GET",
+  "request": {
+    "path": "/api/vehicles/contract-car/moments",
+    "query": {
+      "date": "2024-05-02"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "clips": 1,
+      "indexed": 1,
+      "moments": [
+        {
+          "clip": "2024-05-02_12-30-00",
+          "kind": "speed",
+          "path": "{root:contract-car}/TeslaCam/SentryClips/2024-05-02_12-30-00/2024-05-02_12-29-00-front.mp4",
+          "second": 1,
+          "value": 1
+        }
+      ],
+      "summary": {
+        "distance": 1,
+        "driving": 1,
+        "top": 1
+      }
+    }
+  }
+}

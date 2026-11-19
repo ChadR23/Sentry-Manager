@@ -1,0 +1,19 @@
+{
+  "route": "POST /api/snapshots/:name/restore",
+  "method": "POST",
+  "request": {
+    "path": "/api/snapshots/no-such-snapshot/restore"
+  },
+  "body": {},
+  "response": {
+    "status": 404,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "No such snapshot."
+    }
+  }
+}

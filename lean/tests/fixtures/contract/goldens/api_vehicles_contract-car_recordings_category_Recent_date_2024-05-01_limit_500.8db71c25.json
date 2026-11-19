@@ -1,0 +1,103 @@
+{
+  "route": "GET /api/vehicles/:id/recordings",
+  "method": "GET",
+  "request": {
+    "path": "/api/vehicles/contract-car/recordings",
+    "query": {
+      "category": "Recent",
+      "date": "2024-05-01",
+      "limit": "500"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "dates": [
+        "2024-05-03",
+        "2024-05-02",
+        "2024-05-01"
+      ],
+      "error": null,
+      "limit": 500,
+      "offset": 0,
+      "recordings": [
+        {
+          "bytes": 1055296,
+          "cameras": [
+            "back",
+            "front",
+            "left_repeater",
+            "right_repeater"
+          ],
+          "category": "Recent",
+          "clipCount": 4,
+          "day": "2024-05-01",
+          "encoded": {
+            "clips": 4,
+            "codecs": [],
+            "encoded": 0,
+            "unknown": 0
+          },
+          "end": "2024-05-01 17:30:00",
+          "eventAt": null,
+          "eventId": null,
+          "fileCount": 4,
+          "folder": "TeslaCam/RecentClips",
+          "frontRel": "TeslaCam/RecentClips/2024-05-01_17-30-00-front.mp4",
+          "id": "f11ef172e32dd02d",
+          "key": "session:TeslaCam/RecentClips:2024-05-01_17-30-00",
+          "minutes": 1,
+          "mtimeMs": 1714584600000,
+          "protected": false,
+          "start": "2024-05-01 17:30:00",
+          "startKey": "2024-05-01_17-30-00",
+          "thumbRel": null,
+          "type": "RecentClips",
+          "vehicleId": "contract-car"
+        },
+        {
+          "bytes": 3235208,
+          "cameras": [
+            "back",
+            "front",
+            "left_repeater",
+            "right_repeater"
+          ],
+          "category": "Recent",
+          "clipCount": 8,
+          "day": "2024-05-01",
+          "encoded": {
+            "clips": 8,
+            "codecs": [],
+            "encoded": 0,
+            "unknown": 0
+          },
+          "end": "2024-05-01 08:01:00",
+          "eventAt": null,
+          "eventId": null,
+          "fileCount": 8,
+          "folder": "TeslaCam/RecentClips",
+          "frontRel": "TeslaCam/RecentClips/2024-05-01_08-00-00-front.mp4",
+          "id": "7cdb75664f3190bd",
+          "key": "session:TeslaCam/RecentClips:2024-05-01_08-00-00",
+          "minutes": 2,
+          "mtimeMs": 1714550460000,
+          "protected": false,
+          "start": "2024-05-01 08:00:00",
+          "startKey": "2024-05-01_08-00-00",
+          "thumbRel": null,
+          "type": "RecentClips",
+          "vehicleId": "contract-car"
+        }
+      ],
+      "scannedAt": "<time>",
+      "scanning": false,
+      "total": 2
+    }
+  }
+}

@@ -1,11 +1,12 @@
 //! Vehicle names and ids against the Node code: server/vehicles.js
-//! normalizeVehicle (the name kept) and slug (the id made from it), run by
-//! node on the same names. Skipped (with a note) when node is not installed.
+//! normalizeVehicle (the name kept) and slug (the id made from it), on the
+//! same names; Node's answers are frozen in
+//! tests/fixtures/node-reference/slug.json.
+
+#[path = "support/reference.rs"]
+mod reference;
 
 use sentry_lean::app::{slug, vehicle_name};
-use serde_json::Value;
-use std::path::Path;
-use std::process::Command;
 
 const NAMES: &[&str] = &[
     "Daily Driver",
@@ -44,33 +45,9 @@ const NAMES: &[&str] = &[
 
 #[test]
 fn vehicle_ids_match_node() {
-    if !Command::new("node").arg("--version").output().is_ok_and(|o| o.status.success()) {
-        eprintln!("skipped: node is needed");
-        return;
-    }
-    let vehicles = Path::new(env!("CARGO_MANIFEST_DIR")).join("../server/vehicles.js");
-    let script = r#"
-const { slug, normalizeVehicle } = require(process.argv[1]);
-const names = JSON.parse(require('fs').readFileSync(0, 'utf8'));
-console.log(JSON.stringify(names.map((raw) => {
-  let name = null;
-  try { name = normalizeVehicle({ name: raw || 'My car', timezone: 'UTC', source: { type: 'path', path: '/footage' } }).name; } catch {}
-  return [name, name === null ? null : slug(name)];
-})));
-"#;
-    let mut child = Command::new("node")
-        .args(["-e", script, vehicles.to_str().unwrap()])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .expect("node");
-    use std::io::Write;
-    child.stdin.take().unwrap().write_all(serde_json::to_string(NAMES).unwrap().as_bytes()).unwrap();
-    let out = child.wait_with_output().unwrap();
-    assert!(out.status.success(), "node failed");
-    let want: Vec<(Option<String>, Option<String>)> = serde_json::from_slice::<Value>(&out.stdout)
-        .map(|v| serde_json::from_value(v).unwrap())
-        .unwrap();
+    let places: [(&str, String); 0] = [];
+    let input = serde_json::json!(NAMES);
+    let want: Vec<(Option<String>, Option<String>)> = serde_json::from_value(reference::answer("slug", &places, &input)).unwrap();
     let mut bad = Vec::new();
     for (raw, w) in NAMES.iter().zip(want) {
         // (VEHICLE_NAME empty: "My car", as both servers read the environment)

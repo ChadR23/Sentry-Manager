@@ -1,0 +1,18 @@
+{
+  "route": "GET /api/logs/archive/:name",
+  "method": "GET",
+  "request": {
+    "path": "/api/logs/archive/none.log"
+  },
+  "response": {
+    "status": 404,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "No such archived log."
+    }
+  }
+}

@@ -60,6 +60,10 @@ pub struct Options {
     pub now: Box<dyn Fn() -> f64 + Send + Sync>,
     /// videoCodec (mp4codec.js)
     pub codec_of: CodecOf,
+    /// A clip's ctime in ms (its path, its lstat). The file's own; a test
+    /// that replays recorded files gives the ctime they had when recorded,
+    /// which unpacking cannot restore.
+    pub ctime_of: Box<dyn Fn(&Path, &std::fs::Metadata) -> f64 + Send + Sync>,
 }
 
 impl Options {
@@ -78,6 +82,7 @@ impl Options {
             compact_min: COMPACT_MIN,
             now: Box::new(js::now_ms),
             codec_of: Box::new(|p| crate::mp4::video_codec(p).map_err(|e| e.to_string())),
+            ctime_of: Box::new(|_, md| js::stat_ms(md.ctime(), md.ctime_nsec())),
         }
     }
 }
@@ -622,7 +627,7 @@ impl Inner {
         }
         // (renamed into place just now: ctime; still being written: mtime; in
         // whole milliseconds, as now(): a file time has a fraction of one)
-        let ctime = js::stat_ms(md.ctime(), md.ctime_nsec());
+        let ctime = (self.o.ctime_of)(Path::new(&c.abs), &md);
         if self.now() - id.1.max(ctime).floor() < self.o.settle_ms {
             return Outcome::Settling;
         }

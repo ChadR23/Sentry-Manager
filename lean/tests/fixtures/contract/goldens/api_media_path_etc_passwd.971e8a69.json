@@ -1,0 +1,20 @@
+{
+  "route": "GET /api/media",
+  "method": "GET",
+  "request": {
+    "path": "/api/media",
+    "query": {
+      "path": "/etc/passwd"
+    }
+  },
+  "response": {
+    "status": 403,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "Outside the vehicle shares."
+    }
+  }
+}

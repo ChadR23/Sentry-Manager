@@ -1,0 +1,16 @@
+{
+  "route": "GET /healthz",
+  "method": "GET",
+  "request": {
+    "path": "/healthz"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "text/plain",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": "ok"
+  }
+}

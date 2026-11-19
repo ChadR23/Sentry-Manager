@@ -454,7 +454,7 @@ const hasKeys = (o) => Boolean(o && Object.keys(o).length);
 // stat, else the CAN signal; a car whose DBC names differ still gets the
 // stat from the next id). The one chosen is shown once, at the top, and not
 // again below; the others stay in their own group. Ids from model3dbc's
-// Model3CAN.dbc with the firmware overrides (server/dbc), checked against a
+// Model3CAN.dbc with the firmware overrides (dbc), checked against a
 // 2026 Model Y's logs: a signal whose layout is not known on newer firmware
 // (the 0x312 pack temperatures, the 0x3FE brake temperatures) is not here,
 // nor is the GPS position (0x04F, on the Model Y from the Screenmate's can3):
@@ -463,7 +463,7 @@ const hasKeys = (o) => Boolean(o && Object.keys(o).length);
 // Battery power, efficiency, charging power and the like have no one signal:
 // they are worked out from others (calc.*, web/carCalc.js).
 // A legacy Model S or X (2012-2020) has other messages for the same stats
-// (server/dbc/sx-legacy.dbc, opendbc's): each stat lists them after the Model
+// (dbc/sx-legacy.dbc, opendbc's): each stat lists them after the Model
 // 3/Y ones, so the first one a car has is the one shown (DI_vehicleSpeed_116:
 // the powertrain bus's, then the chassis bus's copy).
 const POPULAR = [

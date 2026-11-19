@@ -3,7 +3,7 @@
 // The pure parts of the measurement harness (tools/bench): parsing what
 // `docker stats`, `docker inspect`, /proc and the container's cgroup files
 // print, CSV in and out, and the numbers report.js puts in its table. No
-// Docker, no network and no clock here, so test/bench.test.js can feed it
+// Docker, no network and no clock here, so bench.test.js can feed it
 // sample text.
 
 const path = require('path');

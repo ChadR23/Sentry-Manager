@@ -18,8 +18,7 @@ its normal web API over HTTPS. Nothing is sent anywhere else.
 | `latency.js` | Signs in over HTTPS; times the Footage, event, Driving and Encoder API calls → `latency.csv`; watches the first index → `index.csv`, `index.json` |
 | `memlog.js` | Diagnostic run only: preload that logs `process.memoryUsage()` every 5 s; heap snapshots on `SIGUSR2` |
 | `report.js` | Run folders → one markdown table |
-| `clipMemory.js` | No Docker: peak memory of `server/speedReader.js` and `server/telemetry.js` reading 10/30/60 MB synthetic clips |
-| `lib.js` | The parsing and checks the others share (tested in `test/bench.test.js`) |
+| `lib.js` | The parsing and checks the others share (tested in `bench.test.js`) |
 
 ## What a run does
 
@@ -206,22 +205,8 @@ node tools/bench/report.js bench-runs/baseline-<stock cold> bench-runs/baseline-
 Each column's "Image" row says which is which. Compare like with like:
 same cache state, same limits, nothing else running.
 
-## Without Docker: clipMemory.js
-
-```sh
-node tools/bench/clipMemory.js [--sizes 10,30,60] [--concurrency 1,4] [--json out.json]
-```
-
-Makes three synthetic Tesla-like front-camera clips once (60 s, 36 fps,
-1280×960, a telemetry record per frame; about 10, 30 and 60 MB) and runs
-`readSamples` (speed index) and the telemetry reader (full read in a worker
-thread) on each, one at a time and four at once, each case in its own
-process. It prints peak rss, arrayBuffers and heapUsed (and the telemetry
-worker's heap and external memory). Run it before and after a change to
-those two files.
-
 ## Tests
 
-`test/bench.test.js` runs with `npm test`: the parsing of `docker stats`,
+`bench.test.js` (`node --test "tools/**/*.test.js"`, run by CI) covers the parsing of `docker stats`,
 `/proc` and cgroup (v2 and v1) output, CSV, the report, the first-index
 rule, and `run.sh`'s refusals in dry-run mode. None of it needs Docker.
