@@ -179,3 +179,23 @@ test('record and compare against a fake server: the same passes, a changed speed
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('frozen: the host\'s own facts are kept as their type, nothing else', () => {
+  const { machine } = require('./frozen');
+  const recorded = { body: { runningAsRoot: true, other: 1 } };
+  const here = { body: { runningAsRoot: false, other: 1 } };
+  assert.deepEqual(machine(recorded, 'GET /api/security', false), machine(here, 'GET /api/security', false));
+  assert.deepEqual(machine(here, 'GET /api/security', false), { body: { runningAsRoot: '<boolean>', other: 1 } });
+  assert.deepEqual(here.body.runningAsRoot, false, 'the answer itself is not changed');
+  // a missing field, or one of another type, still differs
+  assert.notDeepEqual(machine(recorded, 'GET /api/security', false), machine({ body: { other: 1 } }, 'GET /api/security', false));
+  assert.notDeepEqual(machine(recorded, 'GET /api/security', false), machine({ body: { runningAsRoot: 'yes', other: 1 } }, 'GET /api/security', false));
+  // only on its route and at its place
+  assert.deepEqual(machine({ body: { runningAsRoot: true } }, 'GET /api/system', false), { body: { runningAsRoot: true } });
+  const info = (name) => ({ body: { hardware: { devices: [{ id: 'cpu', name }] }, name: 'main' } });
+  assert.deepEqual(machine(info('Intel Xeon'), 'GET /node/v1/info', false), machine(info('AMD EPYC'), 'GET /node/v1/info', false));
+  assert.equal(machine(info('Intel Xeon'), 'GET /node/v1/info', false).body.name, 'main');
+  const limits = (memoryBytes, tier) => ({ body: { resources: { memoryBytes, cpus: 4 }, tier } });
+  assert.deepEqual(machine(limits(16869126144, 'a'), 'GET /api/settings/work-limits', false), machine(limits(16760344576, 'a'), 'GET /api/settings/work-limits', false));
+  assert.notDeepEqual(machine(limits(16869126144, 'a'), 'GET /api/settings/work-limits', false), machine(limits(16869126144, 'b'), 'GET /api/settings/work-limits', false), 'what the memory decides still counts');
+});

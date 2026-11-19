@@ -68,7 +68,7 @@ const AREAS = [
  * out of both the frozen answer and this one before they are compared. The
  * disk's free space (its figures, and the low-space check, banner and
  * notification it raises on a nearly full disk: the answers were recorded on
- * one), the ffmpeg build, and with --other-machine (the image: the answers
+ * one), the ffmpeg build, the host's own facts (HOST_FACTS), and with --other-machine (the image: the answers
  * were recorded from a server run by hand as root, on loopback, from a
  * checkout) what the container changes: the "Share set-up" note about an
  * unmounted share, the share's mount and file system, who the app runs as
@@ -83,15 +83,45 @@ const CONTAINER_KEYS = [
   ['lastSeenAt', ['address']] // a main's address, as the worker saw it
 ];
 const containerDrop = (o) => new Set(CONTAINER_KEYS.filter(([has]) => has in o).flatMap(([, keys]) => keys));
+/**
+ * The host's own facts, on any machine but the one that recorded the answers
+ * (CI's runner, a developer's PC): who runs the server, the memory it has and
+ * its CPU's name. Each is kept as its type, so a missing field or one of
+ * another type still differs. (Route, the field's path, `*` for each item.)
+ */
+const HOST_FACTS = [
+  ['GET /api/security', ['body', 'runningAsRoot']],
+  ['GET /api/system', ['body', 'security', 'runningAsRoot']],
+  ['GET /api/system', ['body', 'security', 'uid']],
+  ['GET /api/settings/work-limits', ['body', 'resources', 'memoryBytes']],
+  ['GET /node/v1/info', ['body', 'hardware', 'devices', '*', 'name']]
+];
+const typeOf = (x) => `<${x === null ? 'null' : Array.isArray(x) ? 'array' : typeof x}>`;
+function hostFacts(v, route) {
+  const rules = HOST_FACTS.filter(([r]) => r === route);
+  if (!rules.length || !v || typeof v !== 'object') return v;
+  const out = structuredClone(v);
+  const put = (o, [k, ...rest]) => {
+    if (!o || typeof o !== 'object') return;
+    if (k === '*') { if (Array.isArray(o)) o.forEach((x) => put(x, rest)); return; }
+    if (!(k in o)) return;
+    if (rest.length) put(o[k], rest); else o[k] = typeOf(o[k]);
+  };
+  for (const [, at] of rules) put(out, at);
+  return out;
+}
 function machine(v, route, other = flag('other-machine')) {
+  return machineOf(hostFacts(v, route), route, other);
+}
+function machineOf(v, route, other) {
   const space = (x) => x && typeof x === 'object' && (/^space-/.test(x.id || '') || /^(health:space-|space:)/.test(x.dedupeKey || '') || /Free space on the share/.test(`${x.label || ''} ${x.title || ''}`) || (other && /^warning-/.test(x.id || '')));
   if (typeof v === 'string') {
     return v.replace(/\d+(\.\d+)? [KMGT]?B free( of \d+(\.\d+)? [KMGT]?B)?/g, '<space> free').replace(/\b(ffmpeg|ffprobe) version \S+/g, '$1 version <version>');
   }
-  if (Array.isArray(v)) return v.filter((x) => !space(x)).map((x) => machine(x, route, other));
+  if (Array.isArray(v)) return v.filter((x) => !space(x)).map((x) => machineOf(x, route, other));
   if (v && typeof v === 'object') {
     const drop = other ? containerDrop(v) : new Set();
-    return Object.fromEntries(Object.entries(v).filter(([k]) => !drop.has(k)).map(([k, x]) => [k, machine(x, route, other)]));
+    return Object.fromEntries(Object.entries(v).filter(([k]) => !drop.has(k)).map(([k, x]) => [k, machineOf(x, route, other)]));
   }
   return v;
 }
@@ -237,4 +267,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { ACCEPTED, AREAS, areaOf, unpack };
+module.exports = { ACCEPTED, AREAS, areaOf, unpack, machine };
