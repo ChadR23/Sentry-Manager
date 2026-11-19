@@ -18,10 +18,10 @@ protocol the Manager speaks to it. What the user sees is in
 
 | Piece | Where |
 |---|---|
-| The endpoint and the receiver's key | `server/reportsConfig.js` (the one place to change them) |
-| The protocol (sealing, signing, proof of work, schema) | `server/reportsProtocol.js` (the receiver keeps its own copy; both change together) |
-| The sender: outbox, retries, crash notes, daily summary, hourly heartbeat | `server/reports.js` |
-| Secrets out, identifiers to ANON | `server/reportsScrub.js` |
+| The endpoint and the receiver's key | `lean/src/ops/reports/mod.rs` (`DEFAULT_ENDPOINT`, `RECEIVER_KEYS`: the one place to change them) |
+| The protocol (sealing, signing, proof of work, schema) | `lean/src/ops/reports/protocol.rs` (the receiver keeps its own copy; both change together) |
+| The sender: outbox, retries, crash notes, daily summary, hourly heartbeat | `lean/src/ops/reports/mod.rs` |
+| Secrets out, identifiers to ANON | `lean/src/ops/reports/scrub.rs` |
 
 ## Endpoints
 
@@ -302,7 +302,7 @@ visible and unable to impersonate anyone:
 
 ## Changing the domain
 
-Everything is in `server/reportsConfig.js`: `DEFAULT_ENDPOINT` and
+Everything is in `lean/src/ops/reports/mod.rs`: `DEFAULT_ENDPOINT` and
 `RECEIVER_KEYS`. For a single server, `REPORTS_URL` (https only) and
 `REPORTS_PUBLIC_KEY` override them without a new build; a `REPORTS_URL` set
 by hand is never moved.

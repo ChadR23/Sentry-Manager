@@ -757,7 +757,6 @@ mod tests {
     //! and parity with the Node planner over every encoder and option.
     use super::*;
     use crate::converter::process::ProcResult;
-    use std::process::Command;
 
     #[test]
     fn usable_cpus_cases() {
@@ -856,34 +855,12 @@ mod tests {
     }
 
     /// Every encoder, quality, device, hold and zero-copy choice against
-    /// buildEncodeArgs / decodeAccelArgs of the Node planner.
+    /// buildEncodeArgs / decodeAccelArgs of the Node planner
+    /// (src/main/converter/encoderPlanner.js, removed), frozen in
+    /// tests/fixtures/node-reference/planner-args.json with the script that asked it.
     #[test]
     fn arguments_match_node() {
-        if !Command::new("node").arg("--version").output().is_ok_and(|o| o.status.success()) {
-            eprintln!("skipped: node is needed");
-            return;
-        }
-        let script = r#"
-const { buildEncodeArgs, decodeAccelArgs } = require(process.argv[1] + '/src/main/converter/encoderPlanner');
-const out = [];
-const encs = { h265: ['libx265', 'hevc_nvenc', 'hevc_qsv', 'hevc_amf', 'hevc_vaapi', 'hevc_videotoolbox'], av1: ['libsvtav1', 'libaom-av1', 'av1_nvenc', 'av1_qsv', 'av1_amf', 'av1_vaapi', 'av1_videotoolbox'] };
-const device = { node: '/dev/dri/renderD129', index: 1 };
-for (const [codec, list] of Object.entries(encs)) for (const encoder of list)
-  for (const quality of [null, 'high', 'balanced', 'small']) for (const dev of [null, device]) for (const hwFrames of [false, true]) for (const holdFrames of [0, 5]) for (const cpuPreset of ['', 'fast', 'faster'])
-  { let r; try { r = buildEncodeArgs({ codec, encoder, bitrate: 1234567.5, quality, device: dev, hwFrames, holdFrames, cpuPreset }); } catch (e) { r = 'error'; } out.push(r); }
-for (const list of Object.values(encs)) for (const encoder of list) for (const platform of ['linux', 'win32', 'darwin']) for (const zeroCopy of [false, true]) for (const dev of [null, device])
-  out.push(decodeAccelArgs(encoder, { platform, zeroCopy, device: dev }));
-for (const [codec, encoder, quality] of [['h265', 'libx265', null], ['h265', 'libx265', 'small'], ['h265', 'hevc_vaapi', null], ['av1', 'libsvtav1', null]])
-  for (const maxrate of [null, 0, 3000000]) for (const bitrate of [null, 1234567.5, 0]) for (const keepOrder of [false, true]) for (const holdFrames of [0, 5]) for (const cpuPreset of ['', 'faster'])
-  { let r; try { r = buildEncodeArgs({ codec, encoder, bitrate, quality, holdFrames, cpuPreset, smallest: { maxrate }, keepOrder }); } catch (e) { r = 'error'; } out.push(r); }
-for (const encoder of encs.h265) for (const x265Pools of [0, 4, 64])
-  out.push(buildEncodeArgs({ codec: 'h265', encoder, bitrate: 1234567.5, x265Pools }));
-console.log(JSON.stringify(out));
-"#;
-        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-        let o = Command::new("node").arg("-e").arg(script).arg(repo).output().unwrap();
-        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
-        let node: Vec<Value> = serde_json::from_slice(&o.stdout).unwrap();
+        let node: Vec<Value> = serde_json::from_value(crate::reference::json("planner-args.json")["answers"].clone()).unwrap();
         let encs = [("h265", vec!["libx265", "hevc_nvenc", "hevc_qsv", "hevc_amf", "hevc_vaapi", "hevc_videotoolbox"]), ("av1", vec!["libsvtav1", "libaom-av1", "av1_nvenc", "av1_qsv", "av1_amf", "av1_vaapi", "av1_videotoolbox"])];
         let dev = Device { node: Some("/dev/dri/renderD129".into()), index: Some(1), ..Default::default() };
         let mut mine: Vec<Value> = vec![];

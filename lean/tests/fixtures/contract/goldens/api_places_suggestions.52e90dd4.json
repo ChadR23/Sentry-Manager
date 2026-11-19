@@ -1,0 +1,22 @@
+{
+  "route": "GET /api/places/suggestions",
+  "method": "GET",
+  "request": {
+    "path": "/api/places/suggestions"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "counts": {},
+      "days": 90,
+      "events": 0,
+      "suggestions": [],
+      "withPosition": 0
+    }
+  }
+}

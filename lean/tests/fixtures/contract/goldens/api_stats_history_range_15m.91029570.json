@@ -1,0 +1,48 @@
+{
+  "route": "GET /api/stats/history",
+  "method": "GET",
+  "request": {
+    "path": "/api/stats/history",
+    "query": {
+      "range": "15m"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "series": {
+        "cpu": [
+          "<value>"
+        ],
+        "gpuBusy": [
+          "<value>"
+        ],
+        "gpuVideo": [
+          "<value>"
+        ],
+        "memory": [
+          "<value>"
+        ],
+        "powerW": [
+          "<value>"
+        ],
+        "rxBps": [
+          "<value>"
+        ],
+        "tempMax": [
+          "<value>"
+        ],
+        "txBps": [
+          "<value>"
+        ]
+      },
+      "start": "<time>",
+      "step": "<number>"
+    }
+  }
+}

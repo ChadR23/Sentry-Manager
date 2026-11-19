@@ -1,0 +1,22 @@
+{
+  "route": "POST /api/accounts",
+  "method": "POST",
+  "request": {
+    "path": "/api/accounts"
+  },
+  "body": {
+    "username": "",
+    "password": ""
+  },
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "User names may use letters, numbers and . _ @ -"
+    }
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "route": "POST /api/can/pairing/:key/forget",
+  "method": "POST",
+  "request": {
+    "path": "/api/can/pairing/no-such-key/forget"
+  },
+  "body": {},
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "chain": {
+        "count": 0,
+        "first": null,
+        "issues": [],
+        "last": null,
+        "restarts": [],
+        "segments": []
+      },
+      "couldNotSign": {
+        "count": 0,
+        "used": 0
+      },
+      "counts": {
+        "failed": 0,
+        "unsigned": 0,
+        "verified": 0,
+        "waiting": 0
+      },
+      "key": "no-such-key",
+      "newKey": null,
+      "pin": null
+    }
+  }
+}

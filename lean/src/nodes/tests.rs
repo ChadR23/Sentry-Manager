@@ -1208,93 +1208,236 @@ fn benchmark_real_clips_lent_to_a_real_node_encodes_deleted_footage_untouched() 
     let _ = std::fs::remove_dir_all(dir);
 }
 
-// ---- parity with Node (lean/parity/nodes.js)
+// ---- parity with Node's helper server (frozen)
+//
+// lean/parity/nodes.js sent the same requests to Node's worker
+// (server/nodeWorker.js), paired by Node's main (server/nodes.js): the
+// pairing refusals, a pairing, tokens, info, slots, jobs, a real encode, its
+// output, deletes and the throttle, each answer normalised where it is the
+// moment's; then the main's own view: its lanes, an encode there, a cancel,
+// Use 3 and its refusal of 9. Node's answers are frozen in
+// tests/fixtures/node-reference/nodes-worker.json. The Rust worker, paired
+// by the Rust main, must answer them the same.
 
-fn repo() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
+/// One HTTPS/1.1 request to the worker on 127.0.0.1 (its certificate checked
+/// against `ca`), as nodes.js's call(): { status, type, length, json, bytes }.
+fn call(port: u16, ca: &str, method: &str, path: &str, token: Option<&str>, headers: &[(&str, String)], body: Option<&[u8]>, chunked: bool) -> Value {
+    use rustls::pki_types::pem::PemObject;
+    use std::io::{Read, Write};
+    let mut roots = rustls::RootCertStore::empty();
+    for c in rustls::pki_types::CertificateDer::pem_slice_iter(ca.as_bytes()) {
+        roots.add(c.unwrap()).unwrap();
+    }
+    let config = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider())).with_safe_default_protocol_versions().unwrap().with_root_certificates(roots).with_no_client_auth();
+    let name = rustls::pki_types::ServerName::IpAddress(std::net::IpAddr::from([127, 0, 0, 1]).into());
+    let conn = rustls::ClientConnection::new(Arc::new(config), name).unwrap();
+    let Ok(tcp) = std::net::TcpStream::connect(("127.0.0.1", port)) else { return json!({ "status": 0, "error": "ECONNREFUSED" }) };
+    tcp.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
+    let mut tls = rustls::StreamOwned::new(conn, tcp);
+    let mut head = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n");
+    if let Some(t) = token {
+        head.push_str(&format!("Authorization: Bearer {t}\r\n"));
+    }
+    for (k, v) in headers {
+        head.push_str(&format!("{k}: {v}\r\n"));
+    }
+    match (body, chunked) {
+        (Some(b), false) => head.push_str(&format!("Content-Length: {}\r\n", b.len())),
+        (Some(_), true) => head.push_str("Transfer-Encoding: chunked\r\n"),
+        (None, _) => {}
+    }
+    head.push_str("\r\n");
+    let mut out = head.into_bytes();
+    if let Some(b) = body {
+        if chunked {
+            out.extend(format!("{:x}\r\n", b.len()).as_bytes());
+            out.extend(b);
+            out.extend(b"\r\n0\r\n\r\n");
+        } else {
+            out.extend(b);
+        }
+    }
+    if tls.write_all(&out).and_then(|_| tls.flush()).is_err() {
+        return json!({ "status": 0, "error": "EPIPE" });
+    }
+    let mut raw = Vec::new();
+    let _ = tls.read_to_end(&mut raw);
+    let split = raw.windows(4).position(|w| w == b"\r\n\r\n").expect("an HTTP answer");
+    let head = String::from_utf8_lossy(&raw[..split]).to_string();
+    let mut data = raw[split + 4..].to_vec();
+    let mut lines = head.split("\r\n");
+    let status: u16 = lines.next().unwrap().split(' ').nth(1).unwrap().parse().unwrap();
+    let hs: HashMap<String, String> = lines.filter_map(|l| l.split_once(':').map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_string()))).collect();
+    if hs.get("transfer-encoding").is_some_and(|t| t.contains("chunked")) {
+        let mut plain = Vec::new();
+        let mut rest = &data[..];
+        while let Some(i) = rest.windows(2).position(|w| w == b"\r\n") {
+            let n = usize::from_str_radix(String::from_utf8_lossy(&rest[..i]).split(';').next().unwrap().trim(), 16).unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            plain.extend(&rest[i + 2..i + 2 + n]);
+            rest = &rest[i + 2 + n + 2..];
+        }
+        data = plain;
+    }
+    let length = hs.get("content-length").and_then(|l| l.parse::<i64>().ok()).unwrap_or(-1);
+    let parsed = serde_json::from_slice::<Value>(&data).unwrap_or(Value::Null);
+    json!({ "status": status, "type": hs.get("content-type"), "length": length, "json": parsed, "bytes": data.len() })
 }
 
-fn has_node() -> bool {
-    has_tools() && ok("node", &["--version"])
-}
-
-/// A child process of this test, killed by its own PID when dropped.
-struct Kid(std::process::Child);
-impl Drop for Kid {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+/// nodes.js's normal(): what is the moment's, not the server's (ids, numbers that move).
+fn normal(v: &Value) -> Value {
+    match v {
+        Value::String(t) if t.len() == 32 && t.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)) => json!("<id>"),
+        Value::Array(a) => Value::Array(a.iter().map(normal).collect()),
+        Value::Object(o) => Value::Object(o.iter().map(|(k, x)| {
+            let moving = ["outTimeUs", "fps", "speed", "outputBytes", "pairedAt", "lastSeenAt", "at"].contains(&k.as_str());
+            let typeof_ = |x: &Value| json!(match x { Value::Number(_) => "number", Value::String(_) => "string", Value::Bool(_) => "boolean", _ => "object" });
+            (k.clone(), if moving { if x.is_null() { Value::Null } else { typeof_(x) } } else { normal(x) })
+        }).collect()),
+        other => other.clone(),
     }
 }
 
-#[test]
-fn parity_a_rust_main_pairs_with_and_encodes_on_nodes_worker() {
-    if !has_node() {
-        eprintln!("skipped: needs node, openssl and ffmpeg");
-        return;
-    }
-    use std::io::BufRead;
-    let dir = tmp("parity-a");
-    let m = certs(&dir, "node-tls");
-    let mut kid = Kid(Command::new("node").arg(repo().join("lean/parity/nodes.js")).args(["worker"]).arg(&dir).arg(dir.join("node-tls"))
-        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap());
-    let mut line = String::new();
-    std::io::BufReader::new(kid.0.stdout.as_mut().unwrap()).read_line(&mut line).unwrap();
-    let hello: Value = serde_json::from_str(&line).unwrap();
-    let port = hello["port"].as_u64().unwrap() as u16;
-    let (nodes, main_ctx) = main_nodes(&dir);
-    let node = nodes.add(&json!(format!("127.0.0.1:{port}")), &hello["code"]).unwrap();
+/// nodes.js's script(), on the Rust worker with the Rust main.
+fn worker_script(port: u16, ca: &str, code: &str, clip: &Path, dir: &Path) -> Value {
+    let mut out: Vec<Value> = vec![];
+    let note = |out: &mut Vec<Value>, name: &str, r: &Value| out.push(json!({ "name": name, "status": r["status"], "type": r["type"], "json": normal(&r["json"]) }));
+    let j = || vec![("Content-Type", "application/json".to_string())];
+    let c = |m: &str, p: &str, t: Option<&str>, h: &[(&str, String)], b: Option<&[u8]>| call(port, ca, m, p, t, h, b, false);
+    note(&mut out, "pair GET", &c("GET", "/node/v1/pair", None, &[], None));
+    note(&mut out, "pair bad JSON", &c("POST", "/node/v1/pair", None, &j(), Some(b"not json")));
+    note(&mut out, "pair too large", &c("POST", "/node/v1/pair", None, &j(), Some(json!({ "name": "x".repeat(5000) }).to_string().as_bytes())));
+    note(&mut out, "pair empty", &c("POST", "/node/v1/pair", None, &j(), Some(b"{}")));
+    note(&mut out, "pair no proof", &c("POST", "/node/v1/pair", None, &j(), Some(json!({ "name": "m", "proof": 5 }).to_string().as_bytes())));
+    let wrong = hmac_hex("AAAABBBBCCCC", &pair_text::main(&"00".repeat(32), "m"));
+    note(&mut out, "pair wrong", &c("POST", "/node/v1/pair", None, &j(), Some(json!({ "name": "m", "proof": wrong }).to_string().as_bytes())));
+    // the main pairs
+    let (nodes, _main_ctx) = main_nodes(dir);
+    let mut main = serde_json::Map::new();
+    let node = match nodes.add(&json!(format!("127.0.0.1:{port}")), &json!(code)) {
+        Ok(n) => n,
+        Err(e) => return json!({ "out": out, "main": { "error": e.message } }),
+    };
     let nid = node["id"].as_str().unwrap().to_string();
-    assert_eq!(node["name"], json!("node-garage"));
-    assert_eq!(node["pin"]["authority"].as_str().map(|a| a.trim()), Some(m.ca.trim()), "Node's authority, kept as Node writes it");
-    let lanes = nodes.list();
-    assert_eq!(lanes[0]["id"], json!(format!("node:{nid}")));
-    assert_eq!(lanes[0]["encoders"], json!({ "h265": "libx265", "av1": "libsvtav1" }));
-    let source = clip(&dir, "clip.mp4", 2);
-    let mut progress = String::new();
-    let (code, _) = nodes.encode(enc(&format!("node:{nid}"), &source, &dir.join("out.mp4"))).unwrap().wait_with(|s| progress.push_str(s));
-    assert_eq!(code, Some(0), "{:?}", main_ctx.logs.lock().unwrap());
-    assert!(progress.contains("progress=end"));
-    assert_eq!(codec_of(&dir.join("out.mp4")), "hevc");
-    let child = nodes.encode(enc(&format!("node:{nid}"), &source, &dir.join("out2.mp4"))).unwrap();
+    main.insert("paired".into(), json!(nid.len() == 12 && nid.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())));
+    main.insert("name".into(), node["name"].clone());
+    main.insert("authority".into(), json!(node["pin"]["authority"].as_str().is_some_and(|a| !a.is_empty())));
+    let token = node["token"].as_str().unwrap().to_string();
+    let t = Some(token.as_str());
+    note(&mut out, "pair again", &c("POST", "/node/v1/pair", None, &j(), Some(b"{}")));
+    note(&mut out, "info without token", &c("GET", "/node/v1/info", None, &[], None));
+    note(&mut out, "info wrong token", &c("GET", "/node/v1/info", Some(&"x".repeat(43)), &[], None));
+    note(&mut out, "info malformed token", &c("GET", "/node/v1/info", Some("short"), &[], None));
+    note(&mut out, "info", &c("GET", "/node/v1/info", t, &[], None));
+    note(&mut out, "info POST", &c("POST", "/node/v1/info", t, &[], Some(b"")));
+    for (name, body) in [("slots 3", json!({ "slots": 3 }).to_string()), ("slots 9", json!({ "slots": 9 }).to_string()), ("slots text", json!({ "slots": "3" }).to_string()), ("slots per device", json!({ "slots": { "cpu": 1 } }).to_string()), ("slots bad JSON", "{".to_string()), ("slots empty", String::new())] {
+        note(&mut out, name, &c("POST", "/node/v1/slots", t, &j(), Some(body.as_bytes())));
+    }
+    let bytes = std::fs::read(clip).unwrap();
+    let job = |s: Value| vec![("X-Node-Job", s.to_string())];
+    note(&mut out, "job no settings", &c("POST", "/node/v1/jobs", t, &[], Some(&bytes)));
+    note(&mut out, "job bad settings", &c("POST", "/node/v1/jobs", t, &job(json!({ "codec": "h264", "bitrate": 3e6 as i64 })), Some(&bytes)));
+    note(&mut out, "job ffmpeg args", &c("POST", "/node/v1/jobs", t, &job(json!({ "codec": "h265", "bitrate": 3e6 as i64, "args": ["-f", "lavfi"] })), Some(&bytes)));
+    note(&mut out, "job without length", &call(port, ca, "POST", "/node/v1/jobs", t, &job(json!({ "codec": "h265", "bitrate": 400000 })), Some(&bytes), true));
+    note(&mut out, "job unknown device", &c("POST", "/node/v1/jobs", t, &job(json!({ "codec": "h265", "bitrate": 400000, "device": "pci:0000:09:00.0" })), Some(&bytes)));
+    note(&mut out, "job cpu without devices", &c("POST", "/node/v1/jobs", t, &job(json!({ "codec": "h265", "bitrate": 400000, "device": "cpu" })), Some(&bytes)));
+    note(&mut out, "job manifest", &c("POST", "/node/v1/jobs", t, &job(json!({ "codec": "h265", "bitrate": 400000 })), Some(b"<?xml version=\"1.0\"?><MPD></MPD>")));
+    let sent = c("POST", "/node/v1/jobs", t, &job(json!({ "codec": "h265", "bitrate": 400000, "holdFrames": 0, "durationUs": 2000000 })), Some(&bytes));
+    note(&mut out, "job", &sent);
+    let id = sent["json"]["id"].as_str().unwrap_or("").to_string();
+    let mut last = Value::Null;
+    for _ in 0..600 {
+        std::thread::sleep(Duration::from_millis(50));
+        last = c("GET", &format!("/node/v1/jobs/{id}"), t, &[], None);
+        if matches!(last["json"]["state"].as_str(), Some("done") | Some("failed")) {
+            break;
+        }
+    }
+    note(&mut out, "job done", &last);
+    let output = c("GET", &format!("/node/v1/jobs/{id}/output"), t, &[], None);
+    out.push(json!({ "name": "job output", "status": output["status"], "type": output["type"], "whole": output["length"] == output["bytes"] && output["bytes"].as_u64().unwrap_or(0) > 0 }));
+    note(&mut out, "job PATCH", &c("PATCH", &format!("/node/v1/jobs/{id}"), t, &[], None));
+    note(&mut out, "job delete", &c("DELETE", &format!("/node/v1/jobs/{id}"), t, &[], None));
+    note(&mut out, "job gone", &c("GET", &format!("/node/v1/jobs/{id}"), t, &[], None));
+    note(&mut out, "job bad id", &c("GET", "/node/v1/jobs/zz", t, &[], None));
+    note(&mut out, "other path", &c("GET", "/node/v1/other", t, &[], None));
+    note(&mut out, "info after", &c("GET", "/node/v1/info", t, &[], None));
+
+    // the main: lanes, a real encode, a cancel, Use 3
+    let lanes: Vec<Value> = nodes.list().into_iter().map(|mut l| {
+        l["id"] = json!(l["id"].as_str().unwrap().replace(&nid, "<node>"));
+        l["nodeId"] = json!("<node>");
+        l
+    }).collect();
+    main.insert("lanes".into(), json!(lanes));
+    let (code, _) = nodes.encode(enc(&format!("node:{nid}"), clip, &dir.join("rust-main.mp4"))).unwrap().wait();
+    main.insert("encode".into(), json!(code));
+    main.insert("codec".into(), json!(codec_of(&dir.join("rust-main.mp4"))));
+    let mut r = enc(&format!("node:{nid}"), clip, &dir.join("rust-cancel.mp4"));
+    r.duration_us = None;
+    let child = nodes.encode(r).unwrap();
     std::thread::sleep(Duration::from_millis(30));
     child.kill("SIGTERM");
-    assert_eq!(child.wait().1.as_deref(), Some("SIGTERM"));
-    nodes.set_slots(&nid, &json!(3)).unwrap();
-    assert_eq!(nodes.overview()[0]["slots"], json!(3));
-    assert!(nodes.set_slots(&nid, &json!(9)).unwrap_err().message.contains("1 to 8"));
-    for _ in 0..100 {
-        if std::fs::read_dir(dir.join("node-work")).map(|r| r.count()).unwrap_or(0) == 0 {
-            break;
+    main.insert("cancel".into(), json!(child.wait().1));
+    let until = Instant::now() + Duration::from_secs(10);
+    let mut freed = false;
+    while Instant::now() < until {
+        if let Some(i) = nodes.refresh(&nid) {
+            if i.online && i.busy == Some(0) && i.encoding == Some(0) {
+                freed = true;
+                break;
+            }
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert_eq!(std::fs::read_dir(dir.join("node-work")).unwrap().count(), 0, "Node's worker keeps nothing");
-    drop(kid);
-    let _ = std::fs::remove_dir_all(dir);
+    main.insert("freed".into(), json!(freed));
+    nodes.set_slots(&nid, &json!(3)).unwrap();
+    main.insert("slots".into(), nodes.overview()[0]["slots"].clone());
+    let mut o = nodes.overview()[0].clone();
+    for (k, v) in [("id", "<node>"), ("address", "<address>"), ("fingerprint", "<fp>"), ("defaultLane", "node:<node>")] {
+        o[k] = json!(v);
+    }
+    main.insert("overview".into(), normal(&o));
+    main.insert("refused".into(), match nodes.set_slots(&nid, &json!(9)) { Ok(_) => Value::Null, Err(e) => json!(e.message) });
+    // the throttle: twenty wrong tokens from one address, then even the right one waits
+    for _ in 0..20 {
+        c("GET", "/node/v1/info", Some(&"y".repeat(43)), &[], None);
+    }
+    note(&mut out, "throttled", &c("GET", "/node/v1/info", t, &[], None));
+    json!({ "out": out, "main": main })
 }
 
 #[test]
-fn parity_nodes_main_pairs_with_the_rust_worker_and_both_workers_answer_alike() {
-    if !has_node() {
-        eprintln!("skipped: needs node, openssl and ffmpeg");
+fn parity_the_rust_worker_answers_as_nodes_worker_answered() {
+    if !has_tools() {
+        eprintln!("skipped: needs openssl and ffmpeg");
         return;
     }
     let dir = tmp("parity-b");
     let m = certs(&dir, "rust-tls");
-    let _ = certs(&dir, "node-tls");
     let w = start_worker(&dir, &m);
     let code = w.worker.start_pairing()["pairing"]["code"].as_str().unwrap().to_string();
     let source = clip(&dir, "clip.mp4", 2);
-    let out = Command::new("node").arg(repo().join("lean/parity/nodes.js")).arg("compare").arg(&dir).arg(dir.join("node-tls")).arg(w.port.to_string()).arg(&code).arg(&source).output().unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(result["main"]["encode"], json!(0), "Node's main encoded on the Rust worker: {result}");
-    assert_eq!(result["main"]["codec"], json!("hevc"));
-    assert_eq!(result["main"]["cancel"], json!("SIGTERM"));
-    assert_eq!(result["main"]["slots"], json!(3));
-    assert_eq!(result["count"], json!(35), "{result}");
-    assert_eq!(result["differences"], json!([]), "{}", serde_json::to_string_pretty(&result["differences"]).unwrap());
+    let theirs = crate::reference::answer("nodes-worker", &[], &json!("script"));
+    let mine = worker_script(w.port, &m.ca, &code, &source, &dir);
+    let (a, b) = (theirs["out"].as_array().unwrap(), mine["out"].as_array().unwrap());
+    assert_eq!(a.len(), 35);
+    let mut differences = vec![];
+    for i in 0..a.len().max(b.len()) {
+        if a.get(i) != b.get(i) {
+            differences.push(format!("node {}\nrust {}", a.get(i).unwrap_or(&Value::Null), b.get(i).unwrap_or(&Value::Null)));
+        }
+    }
+    for k in ["paired", "name", "authority", "lanes", "encode", "codec", "cancel", "slots", "overview", "refused"] {
+        if theirs["main"][k] != mine["main"][k] {
+            differences.push(format!("main {k}: node {} rust {}", theirs["main"][k], mine["main"][k]));
+        }
+    }
+    assert_eq!(theirs["main"]["freed"], json!(true));
+    assert_eq!(mine["main"]["freed"], json!(true), "the slot is freed after the cancel");
+    assert!(differences.is_empty(), "{} difference(s):\n{}", differences.len(), differences.join("\n"));
     wait_empty(&dir);
     assert!(work_files(&dir).is_empty());
     w.close();

@@ -1,0 +1,21 @@
+{
+  "route": "POST /api/studio/trashFolder",
+  "method": "POST",
+  "request": {
+    "path": "/api/studio/trashFolder"
+  },
+  "body": {
+    "path": "/etc"
+  },
+  "response": {
+    "status": 403,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "That path is outside the vehicle shares."
+    }
+  }
+}

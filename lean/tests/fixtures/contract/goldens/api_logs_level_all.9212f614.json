@@ -1,0 +1,28 @@
+{
+  "route": "GET /api/logs",
+  "method": "GET",
+  "request": {
+    "path": "/api/logs",
+    "query": {
+      "level": "all"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "lines": [
+        {
+          "at": "<value>",
+          "level": "<value>",
+          "message": "<value>",
+          "scope": "<value>"
+        }
+      ]
+    }
+  }
+}

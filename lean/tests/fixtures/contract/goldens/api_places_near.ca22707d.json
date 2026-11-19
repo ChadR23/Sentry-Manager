@@ -1,0 +1,18 @@
+{
+  "route": "GET /api/places/near",
+  "method": "GET",
+  "request": {
+    "path": "/api/places/near"
+  },
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "Give a place (lat, lon)."
+    }
+  }
+}

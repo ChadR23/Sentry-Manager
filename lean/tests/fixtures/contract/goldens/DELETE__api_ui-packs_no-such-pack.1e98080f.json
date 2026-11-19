@@ -1,0 +1,18 @@
+{
+  "route": "DELETE /api/ui-packs/:id",
+  "method": "DELETE",
+  "request": {
+    "path": "/api/ui-packs/no-such-pack"
+  },
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "No such interface."
+    }
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "route": "GET /api/stats/export.csv",
+  "method": "GET",
+  "request": {
+    "path": "/api/stats/export.csv",
+    "query": {
+      "range": "24h"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "text/csv; charset=utf-8",
+      "content-disposition": "attachment; filename=\"sentry-six-manager-stats-24h.csv\"",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": "time,cpu,memory,gpuBusy,gpuVideo,powerW,rxBps,txBps,tempMax"
+  }
+}

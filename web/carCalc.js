@@ -52,7 +52,7 @@
   // the 12 V system: what the DC-DC converter gives it, at its 12 V bus (else the battery's volts)
   const SYS_VOLTS = ['PCS_dcdcLvBusVolt', 'v12vBattVoltage261'];
   const SYS_AMPS = ['PCS_dcdcLvOutputCurrent'];
-  // (a legacy Model S/X's after the Model 3/Y one: server/dbc/sx-legacy.dbc, in km/h too)
+  // (a legacy Model S/X's after the Model 3/Y one: dbc/sx-legacy.dbc, in km/h too)
   const SPEED = ['DI_vehicleSpeed', 'DI_vehicleSpeed_116', 'DI_vehicleSpeed_118']; // km/h
   const KMH_PER_MPH = 1.609344;
 

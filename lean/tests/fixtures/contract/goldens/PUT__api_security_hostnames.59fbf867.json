@@ -1,0 +1,70 @@
+{
+  "route": "PUT /api/security/hostnames",
+  "method": "PUT",
+  "request": {
+    "path": "/api/security/hostnames"
+  },
+  "body": {
+    "hostnames": 5
+  },
+  "normalise": [
+    {
+      "path": "tls.ca",
+      "as": "shape"
+    },
+    {
+      "path": "tls.certificate",
+      "as": "shape"
+    },
+    {
+      "path": "tls.containerHostname",
+      "as": "id"
+    }
+  ],
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "caReplaced": true,
+      "ok": true,
+      "tls": {
+        "ca": {
+          "expiresAt": "<value>",
+          "fingerprint": "<value>",
+          "issuer": "<value>",
+          "names": [],
+          "subject": "<value>",
+          "validFrom": "<value>",
+          "validTo": "<value>"
+        },
+        "certificate": {
+          "expiresAt": "<value>",
+          "fingerprint": "<value>",
+          "issuer": "<value>",
+          "names": [
+            "<value>"
+          ],
+          "subject": "<value>",
+          "validFrom": "<value>",
+          "validTo": "<value>"
+        },
+        "containerHostname": "<id>",
+        "editable": [
+          "5"
+        ],
+        "fromEnv": [],
+        "hostnames": [
+          "localhost",
+          "127.0.0.1",
+          "::1",
+          "5"
+        ],
+        "mode": "local-ca"
+      }
+    }
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "route": "GET /api/settings/work-limits",
+  "method": "GET",
+  "request": {
+    "path": "/api/settings/work-limits"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "auto": {
+        "codecChecks": 8,
+        "scrubPreviews": 3,
+        "speedIndex": 4,
+        "telemetryReads": 2,
+        "thumbnails": 2
+      },
+      "limits": {
+        "codecChecks": 8,
+        "scrubPreviews": 3,
+        "speedIndex": 4,
+        "telemetryReads": 2,
+        "thumbnails": 2
+      },
+      "max": {
+        "codecChecks": 32,
+        "scrubPreviews": 8,
+        "speedIndex": 8,
+        "telemetryReads": 8,
+        "thumbnails": 8
+      },
+      "override": {},
+      "resources": {
+        "cpus": 4,
+        "cpusFrom": "host",
+        "memoryBytes": 16869126144,
+        "memoryFrom": "host"
+      },
+      "tier": "big"
+    }
+  }
+}

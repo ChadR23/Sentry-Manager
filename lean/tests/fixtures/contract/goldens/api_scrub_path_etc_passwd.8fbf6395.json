@@ -1,0 +1,19 @@
+{
+  "route": "GET /api/scrub",
+  "method": "GET",
+  "request": {
+    "path": "/api/scrub",
+    "query": {
+      "path": "/etc/passwd"
+    }
+  },
+  "response": {
+    "status": 403,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": "<ignored>"
+  }
+}

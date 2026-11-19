@@ -1,0 +1,19 @@
+{
+  "route": "POST /api/exports",
+  "method": "POST",
+  "request": {
+    "path": "/api/exports"
+  },
+  "body": {},
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "These clips are not in any vehicle's footage."
+    }
+  }
+}

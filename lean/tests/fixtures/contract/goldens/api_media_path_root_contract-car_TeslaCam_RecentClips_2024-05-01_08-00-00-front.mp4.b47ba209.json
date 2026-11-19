@@ -1,0 +1,22 @@
+{
+  "route": "GET /api/media",
+  "method": "GET",
+  "request": {
+    "path": "/api/media",
+    "query": {
+      "path": "{root:contract-car}/TeslaCam/RecentClips/2024-05-01_08-00-00-front.mp4"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "video/mp4",
+      "accept-ranges": "bytes",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "bytes": 404401,
+      "sha256": "489483f5302407d2ba7c6267e7710e7c64917394b0f79f9a23c2deaf3cda8a3e"
+    }
+  }
+}

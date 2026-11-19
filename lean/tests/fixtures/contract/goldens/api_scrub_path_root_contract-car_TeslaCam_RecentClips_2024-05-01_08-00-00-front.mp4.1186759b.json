@@ -1,0 +1,19 @@
+{
+  "route": "GET /api/scrub",
+  "method": "GET",
+  "request": {
+    "path": "/api/scrub",
+    "query": {
+      "path": "{root:contract-car}/TeslaCam/RecentClips/2024-05-01_08-00-00-front.mp4"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "image/jpeg",
+      "cache-control": "private, max-age=86400",
+      "x-content-type-options": "nosniff"
+    },
+    "body": "<ignored>"
+  }
+}

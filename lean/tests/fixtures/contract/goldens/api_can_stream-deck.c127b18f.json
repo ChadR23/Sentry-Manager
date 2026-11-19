@@ -1,0 +1,150 @@
+{
+  "route": "GET /api/can/stream-deck",
+  "method": "GET",
+  "request": {
+    "path": "/api/can/stream-deck"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "at": null,
+      "enabled": false,
+      "pin": "<id>",
+      "stats": [
+        {
+          "id": "speed",
+          "label": "Speed"
+        },
+        {
+          "id": "battery",
+          "label": "Battery"
+        },
+        {
+          "id": "range",
+          "label": "Range"
+        },
+        {
+          "id": "batteryPower",
+          "label": "Battery power"
+        },
+        {
+          "id": "gear",
+          "label": "Gear"
+        },
+        {
+          "id": "batteryVoltage",
+          "label": "Battery voltage"
+        },
+        {
+          "id": "batteryCurrent",
+          "label": "Battery current"
+        },
+        {
+          "id": "batteryTemp",
+          "label": "Battery temp"
+        },
+        {
+          "id": "outsideTemp",
+          "label": "Outside temp"
+        },
+        {
+          "id": "cabinTemp",
+          "label": "Cabin temp"
+        },
+        {
+          "id": "batteryInletTemp",
+          "label": "Battery inlet temp"
+        },
+        {
+          "id": "powertrainInletTemp",
+          "label": "Powertrain inlet temp"
+        },
+        {
+          "id": "rearMotorPower",
+          "label": "Rear motor power"
+        },
+        {
+          "id": "frontMotorPower",
+          "label": "Front motor power"
+        },
+        {
+          "id": "rearMotorTemp",
+          "label": "Rear motor temp"
+        },
+        {
+          "id": "frontMotorTemp",
+          "label": "Front motor temp"
+        },
+        {
+          "id": "lv12Current",
+          "label": "12V system current"
+        },
+        {
+          "id": "lv12Power",
+          "label": "12V system power"
+        },
+        {
+          "id": "lv12Voltage",
+          "label": "12V battery"
+        },
+        {
+          "id": "lv12State",
+          "label": "12V battery state"
+        },
+        {
+          "id": "tire1",
+          "label": "Tire 1"
+        },
+        {
+          "id": "tire2",
+          "label": "Tire 2"
+        },
+        {
+          "id": "tire3",
+          "label": "Tire 3"
+        },
+        {
+          "id": "tire4",
+          "label": "Tire 4"
+        },
+        {
+          "id": "charging",
+          "label": "Charging"
+        },
+        {
+          "id": "chargingPower",
+          "label": "Charging power"
+        },
+        {
+          "id": "chargeTimeLeft",
+          "label": "Charge time left"
+        },
+        {
+          "id": "energyRemaining",
+          "label": "Energy remaining"
+        },
+        {
+          "id": "odometer",
+          "label": "Odometer"
+        },
+        {
+          "id": "setSpeed",
+          "label": "Set speed"
+        },
+        {
+          "id": "speedLimit",
+          "label": "Speed limit"
+        },
+        {
+          "id": "elevation",
+          "label": "Elevation"
+        }
+      ]
+    }
+  }
+}

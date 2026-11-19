@@ -1,0 +1,17 @@
+{
+  "route": "GET /api/support-bundle",
+  "method": "GET",
+  "request": {
+    "path": "/api/support-bundle"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/zip",
+      "content-disposition": "attachment; filename=\"sentry-six-manager-support-2026-11-19.zip\"",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": "<ignored>"
+  }
+}
