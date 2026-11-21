@@ -110,6 +110,7 @@ A logger scope of your own: `c.state.logger.scope("vehicles")`.
 | Hook | Set by | Used for |
 | --- | --- | --- |
 | `vehicle_exists` | footage | `POST /api/jobs/clear` (vehicleOr404) |
+| `can_token_valid` | can | the device port: a connection past an address's first 6 is served only with a valid CAN Bridge token |
 | `conversions_active`, `settle_conversions` | converter | Clear jobs keeps conversions still going |
 | `reports_configured`, `reports_setup` | ops | `/api/auth/me` on the first-run page; the setup opt-in |
 | `note_start_call` | ui | web/prefetch.js learning |

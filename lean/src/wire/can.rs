@@ -248,7 +248,11 @@ pub async fn upload(srv: Arc<Server>, q: RawReq) -> crate::core::http::Res {
     // and its connection closes, instead of holding the connection for ever)
     let body = match crate::core::body::collect(body, limit).await {
         Ok(b) => b,
-        Err(crate::core::body::BodyError::TimedOut) => return crate::core::body::timed_out(""),
+        Err(crate::core::body::BodyError::TimedOut) => {
+            let mut r = crate::can::routes::json_res(408, &serde_json::json!({ "error": crate::core::body::TIMED_OUT_TEXT, "code": "timed_out" }));
+            crate::core::body::close_after(&mut r);
+            return r;
+        }
         Err(_) => return crate::can::routes::json_res(413, &serde_json::json!({ "error": "That file is too large.", "code": "error" })),
     };
     let device = q.conn.device;
@@ -273,5 +277,5 @@ pub async fn upload(srv: Arc<Server>, q: RawReq) -> crate::core::http::Res {
         confirmed: false,
         closed: Arc::new(AtomicBool::new(false)),
     };
-    tokio::task::spawn_blocking(move || super::as_who(who, || can.upload(&req, &path))).await.unwrap_or_else(|_| crate::core::http::error_json(500, "Internal error", None, ""))
+    tokio::task::spawn_blocking(move || super::as_who(who, || can.upload(&req, &path))).await.unwrap_or_else(|_| crate::can::routes::json_res(500, &serde_json::json!({ "error": "Internal error", "code": "server_error" })))
 }

@@ -50,6 +50,9 @@ pub struct Hooks {
     pub server_error: Hook<dyn Fn(&str, &str, &str) + Send + Sync>,
     /// ops: a `rapl-reading` from the supervisor (stats.setRapl)
     pub rapl_reading: Hook<dyn Fn(&serde_json::Value) + Send + Sync>,
+    /// can: whether request headers carry a valid CAN Bridge token (the device port lets such a
+    /// request use a connection past an address's first 6). Unset: none is valid.
+    pub can_token_valid: Hook<dyn Fn(&axum::http::HeaderMap) -> bool + Send + Sync>,
     /// shutdown work of the areas, run in order before the process ends
     pub on_shutdown: Mutex<Vec<Box<dyn FnOnce() + Send>>>,
 }

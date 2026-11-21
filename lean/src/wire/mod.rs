@@ -309,6 +309,8 @@ fn hooks(srv: &Arc<Server>) {
     let st = &srv.state;
     let s = srv.clone();
     st.hooks.vehicle_exists.set(Arc::new(move |id: &str| s.app().vehicle(id).is_some()));
+    let s = srv.clone();
+    st.hooks.can_token_valid.set(Arc::new(move |h: &axum::http::HeaderMap| s.can().is_some_and(|c| c.token_valid(h))));
     // Clear jobs: the conversions' rows settled first, the ones still under way kept
     let s = srv.clone();
     st.hooks.settle_conversions.set(Arc::new(move || {

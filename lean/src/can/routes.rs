@@ -2003,7 +2003,21 @@ impl Can {
     }
 
     fn token_of(&self, req: &Req, tokens: &[Value]) -> Option<Value> {
-        let auth = req.headers.get(header::AUTHORIZATION).and_then(|h| h.to_str().ok()).unwrap_or("");
+        Self::token_in(&req.headers, tokens)
+    }
+
+    /// Whether a request carries a CAN Bridge token that the upload API would take (uploads
+    /// on, the token one of the current ones): the device port lets such a request use a
+    /// connection past the first 6 from its address.
+    pub fn token_valid(&self, headers: &HeaderMap) -> bool {
+        match self.can_cfg() {
+            Ok((enabled, _, tokens)) => enabled && Self::token_in(headers, &tokens).is_some(),
+            Err(_) => false,
+        }
+    }
+
+    fn token_in(headers: &HeaderMap, tokens: &[Value]) -> Option<Value> {
+        let auth = headers.get(header::AUTHORIZATION).and_then(|h| h.to_str().ok()).unwrap_or("");
         let given = {
             let b = auth.as_bytes();
             if b.len() >= 6 && auth[..6].eq_ignore_ascii_case("bearer") && b.get(6).is_some_and(|c| c.is_ascii_whitespace()) {
@@ -2280,4 +2294,25 @@ fn detected_in(index: &CanIndex, keys: &[String]) -> Option<Value> {
         }
     }
     best
+}
+
+#[cfg(test)]
+mod token_tests {
+    use super::*;
+
+    #[test]
+    fn a_token_is_found_as_the_upload_api_finds_it() {
+        let tokens = vec![json!({ "id": "a", "hash": util::sha256_hex(b"right") }), json!({ "id": "b", "hash": "short" })];
+        let with = |auth: &str| {
+            let mut h = HeaderMap::new();
+            h.insert(header::AUTHORIZATION, HeaderValue::from_str(auth).unwrap());
+            Can::token_in(&h, &tokens).and_then(|t| t["id"].as_str().map(String::from))
+        };
+        assert_eq!(with("Bearer right").as_deref(), Some("a"));
+        assert_eq!(with("bearer   right").as_deref(), Some("a"));
+        assert_eq!(with("right").as_deref(), Some("a"));
+        assert_eq!(with("Bearer wrong"), None);
+        assert_eq!(with("Bearer "), None);
+        assert_eq!(Can::token_in(&HeaderMap::new(), &tokens), None);
+    }
 }
