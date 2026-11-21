@@ -113,10 +113,20 @@ function hostFacts(v, route) {
 function machine(v, route, other = flag('other-machine')) {
   return machineOf(hostFacts(v, route), route, other);
 }
+/**
+ * The day the answers were recorded, and the day they are compared on: the
+ * server names its log, snapshot and support bundle after today (UTC: the
+ * server runs with TZ=UTC), so both read as <today>. Yesterday too, for a
+ * run that crosses midnight. The fixture's footage is from 2024, so no
+ * footage day is touched.
+ */
+const RECORDED_DAY = '2026-11-19';
+const utcDay = (ms) => new Date(ms).toISOString().slice(0, 10);
+const TODAY = new RegExp([...new Set([RECORDED_DAY, utcDay(Date.now()), utcDay(Date.now() - 864e5)])].join('|'), 'g');
 function machineOf(v, route, other) {
   const space = (x) => x && typeof x === 'object' && (/^space-/.test(x.id || '') || /^(health:space-|space:)/.test(x.dedupeKey || '') || /Free space on the share/.test(`${x.label || ''} ${x.title || ''}`) || (other && /^warning-/.test(x.id || '')));
   if (typeof v === 'string') {
-    return v.replace(/\d+(\.\d+)? [KMGT]?B free( of \d+(\.\d+)? [KMGT]?B)?/g, '<space> free').replace(/\b(ffmpeg|ffprobe) version \S+/g, '$1 version <version>');
+    return v.replace(/\d+(\.\d+)? [KMGT]?B free( of \d+(\.\d+)? [KMGT]?B)?/g, '<space> free').replace(/\b(ffmpeg|ffprobe) version \S+/g, '$1 version <version>').replace(TODAY, '<today>');
   }
   if (Array.isArray(v)) return v.filter((x) => !space(x)).map((x) => machineOf(x, route, other));
   if (v && typeof v === 'object') {
