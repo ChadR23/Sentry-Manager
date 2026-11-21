@@ -174,7 +174,7 @@ pub async fn upload(srv: Arc<Server>, a: ApiRaw) -> crate::core::http::Res {
         if declared.is_some_and(|d| d > max as u64) {
             return crate::core::http::error_json(413, "That file is too large.", None, c.accept_encoding());
         }
-        body = match crate::core::body::collect(a.body, max).await {
+        body = match crate::core::body::collect_idle(a.body, max).await {
             Ok(b) => b,
             Err(crate::core::body::BodyError::TimedOut) => return crate::core::body::timed_out(c.accept_encoding()),
             Err(_) => return crate::core::http::error_json(413, "That file is too large.", None, c.accept_encoding()),

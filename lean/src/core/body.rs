@@ -34,11 +34,30 @@ where
     B: hyper::body::Body<Data = Bytes>,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
-    let whole = Instant::now() + WHOLE;
+    collect_within(body, limit, Some(WHOLE)).await
+}
+
+/// The whole body, up to `limit` bytes, within IDLE only: a web-port upload (an interface
+/// pack) may take as long as it keeps sending, as on Node's web port.
+pub async fn collect_idle<B>(body: B, limit: usize) -> Result<Bytes, BodyError>
+where
+    B: hyper::body::Body<Data = Bytes>,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    collect_within(body, limit, None).await
+}
+
+async fn collect_within<B>(body: B, limit: usize, whole: Option<Duration>) -> Result<Bytes, BodyError>
+where
+    B: hyper::body::Body<Data = Bytes>,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    let whole = whole.map(|w| Instant::now() + w);
     let mut b = std::pin::pin!(http_body_util::Limited::new(body, limit));
     let mut parts: Vec<Bytes> = Vec::new();
     loop {
-        let until = (Instant::now() + IDLE).min(whole);
+        let idle = Instant::now() + IDLE;
+        let until = whole.map_or(idle, |w| idle.min(w));
         match tokio::time::timeout_at(until, b.frame()).await {
             Err(_) => return Err(BodyError::TimedOut),
             Ok(None) => break,
@@ -135,6 +154,22 @@ mod tests {
         assert!(matches!(r, Ok(Err(BodyError::TimedOut))), "{r:?}");
         assert_eq!(began.elapsed(), IDLE);
         drop(tx);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_interface_pack_upload_may_take_past_the_whole_limit() {
+        let (tx, body) = channel();
+        let sender = tokio::spawn(async move {
+            for _ in 0..15 {
+                tx.send(data(b"x")).await.unwrap();
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        });
+        // fifteen bytes over 14 minutes, never silent for IDLE: all of it arrives
+        let began = Instant::now();
+        assert_eq!(collect_idle(body, 1024).await.unwrap().len(), 15);
+        assert!(began.elapsed() > WHOLE);
+        sender.await.unwrap();
     }
 
     #[tokio::test(start_paused = true)]
