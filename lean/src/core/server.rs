@@ -11,7 +11,6 @@ use super::http::{error_json, security_headers, send_json, status, ConnInfo, Ctx
 use super::state::AppState;
 use axum::body::Body;
 use axum::http::{header, HeaderMap, HeaderValue, Method, Request, Response};
-use http_body_util::BodyExt;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -134,15 +133,11 @@ pub(super) fn unversion(mut p: String) -> (String, Option<String>) {
 }
 
 async fn read_json(body: Body, limit: usize) -> Result<Option<serde_json::Value>, HttpError> {
-    let limited = http_body_util::Limited::new(body, limit);
-    let bytes = match limited.collect().await {
-        Ok(c) => c.to_bytes(),
-        Err(e) => {
-            if e.downcast_ref::<http_body_util::LengthLimitError>().is_some() {
-                return Err(HttpError::new(413, "Request body too large"));
-            }
-            return Err(HttpError::internal(e.to_string()));
-        }
+    let bytes = match super::body::collect(body, limit).await {
+        Ok(b) => b,
+        Err(super::body::BodyError::TooLarge) => return Err(HttpError::new(413, "Request body too large")),
+        Err(super::body::BodyError::TimedOut) => return Err(HttpError::new(408, super::body::TIMED_OUT_TEXT)),
+        Err(super::body::BodyError::Failed(e)) => return Err(HttpError::internal(e)),
     };
     let text = String::from_utf8_lossy(&bytes);
     if text.trim().is_empty() {
@@ -179,6 +174,10 @@ fn error_response(state: &AppState, e: &HttpError, method: &Method, raw_path: &s
         if let Ok(v) = HeaderValue::from_str(c) {
             r.headers_mut().append(header::SET_COOKIE, v);
         }
+    }
+    if e.status == 408 {
+        // (the rest of that body is not read: the connection closes)
+        super::body::close_after(&mut r);
     }
     r
 }
@@ -627,6 +626,40 @@ async fn device_request(state: Arc<AppState>, req: Request<Body>, conn: ConnInfo
     r
 }
 
+/// Connections one address may hold open on the device port (the bridge uses one or two).
+const PER_ADDRESS: usize = 6;
+
+/// One of an address's connections on the device port: given back when dropped, however
+/// the connection ended (index.js: on the socket's 'close').
+struct AddressSlot {
+    open: Arc<std::sync::Mutex<HashMap<std::net::IpAddr, usize>>>,
+    ip: std::net::IpAddr,
+}
+
+impl AddressSlot {
+    fn take(open: &Arc<std::sync::Mutex<HashMap<std::net::IpAddr, usize>>>, ip: std::net::IpAddr) -> Option<AddressSlot> {
+        let mut m = open.lock().unwrap();
+        let n = m.entry(ip).or_insert(0);
+        if *n >= PER_ADDRESS {
+            return None;
+        }
+        *n += 1;
+        Some(AddressSlot { open: open.clone(), ip })
+    }
+}
+
+impl Drop for AddressSlot {
+    fn drop(&mut self) {
+        let mut m = self.open.lock().unwrap();
+        if let Some(n) = m.get_mut(&self.ip) {
+            *n -= 1;
+            if *n == 0 {
+                m.remove(&self.ip);
+            }
+        }
+    }
+}
+
 async fn device_listen(state: Arc<AppState>) {
     let (host, port) = (state.config.host.clone(), state.config.can_port);
     let listener = match tokio::net::TcpListener::bind((host.as_str(), port)).await {
@@ -638,23 +671,30 @@ async fn device_listen(state: Arc<AppState>) {
     };
     let scheme = if state.tls.is_some() { "https" } else { "http" };
     state.log.info(format!("Device port on {scheme}://{host}:{port} (CAN Bridge uploads at /api/can/logs)"));
+    device_serve(state, listener).await
+}
+
+async fn device_serve(state: Arc<AppState>, listener: tokio::net::TcpListener) {
     let slots = Arc::new(tokio::sync::Semaphore::new(256));
     let per_address: Arc<std::sync::Mutex<HashMap<std::net::IpAddr, usize>>> = Default::default();
+    // when each address was last named in the log for being refused (once a minute at most)
+    let mut warned: HashMap<std::net::IpAddr, tokio::time::Instant> = HashMap::new();
     loop {
         let Ok((sock, peer)) = listener.accept().await else { continue };
         let Ok(permit) = slots.clone().try_acquire_owned() else { continue };
-        {
-            let mut m = per_address.lock().unwrap();
-            let n = m.entry(peer.ip()).or_insert(0);
-            if *n >= 6 {
-                continue;
+        let Some(slot) = AddressSlot::take(&per_address, peer.ip()) else {
+            let now = tokio::time::Instant::now();
+            warned.retain(|_, at| now.duration_since(*at) < Duration::from_secs(60));
+            if !warned.contains_key(&peer.ip()) {
+                warned.insert(peer.ip(), now);
+                state.log.warn(format!("Device port: {} already has {PER_ADDRESS} connections open; refusing more", peer.ip()));
             }
-            *n += 1;
-        }
+            continue;
+        };
         let st = state.clone();
-        let pa = per_address.clone();
         tokio::spawn(async move {
             let _permit = permit;
+            let _slot = slot;
             let svc = {
                 let st = st.clone();
                 move |encrypted: bool| {
@@ -665,6 +705,8 @@ async fn device_listen(state: Arc<AppState>) {
                     })
                 }
             };
+            // (header_read_timeout also bounds a connection idle between requests: hyper starts
+            // it when it waits for the next request's first line)
             let mut b = hyper::server::conn::http1::Builder::new();
             b.timer(hyper_util::rt::TokioTimer::new()).header_read_timeout(Duration::from_secs(20));
             // a connection that has not sent a request within 15 s is closed
@@ -683,13 +725,6 @@ async fn device_listen(state: Arc<AppState>) {
                 }
             } else {
                 let _ = b.serve_connection(hyper_util::rt::TokioIo::new(sock), svc(false)).await;
-            }
-            let mut m = pa.lock().unwrap();
-            if let Some(n) = m.get_mut(&peer.ip()) {
-                *n -= 1;
-                if *n == 0 {
-                    m.remove(&peer.ip());
-                }
             }
         });
     }
@@ -753,6 +788,199 @@ mod tests {
         for (p, want) in [("/web/%2e%2e/x", "/x"), ("/a/.", "/a/"), ("/a/..", "/"), ("/..", "/"), ("/a\\b", "/a/b"), ("/a/%2E/b", "/a/b"), ("/a//b/../c", "/a//c"), ("/", "/"), ("/x", "/x")] {
             assert_eq!(whatwg_path(p), want, "{p}");
         }
+    }
+
+    // ---- the device port: a CAN Bridge that went away mid-upload (Wi-Fi or power lost)
+
+    use std::sync::Mutex;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+    use tokio::time::Instant;
+
+    /// A device port of its own (HTTPS off) on a free port, whose /api/can/logs reads the body
+    /// as the CAN upload does and answers how much arrived, and whose /api/can/logs/long
+    /// answers a byte a minute for 15 minutes. Its address, the warnings logged, the folder.
+    async fn device_port(name: &str) -> (std::net::SocketAddr, Arc<Mutex<Vec<String>>>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("lean-device-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let env = [("DATA_PATH", dir.to_string_lossy().into_owned()), ("TLS_MODE", "off".into())];
+        let config = crate::core::Config::from_map(env.into_iter().map(|(k, v)| (k.to_string(), v)).collect());
+        let logger = super::super::log::Logger::with("info", 100, true, None, 1);
+        // (only the device port's warnings: a new server also says how to make its account)
+        let warnings: Arc<Mutex<Vec<String>>> = Default::default();
+        let w = warnings.clone();
+        logger.on_line(move |e| {
+            if e.level == "warn" && e.message.starts_with("Device port") {
+                w.lock().unwrap().push(e.message.clone());
+            }
+        });
+        let st = AppState::open_with(config, logger).unwrap();
+        let mut r = Router::new();
+        r.raw("/api/can/logs", |q: RawReq| {
+            Box::pin(async move {
+                match super::super::body::collect(q.req.into_body(), 1024).await {
+                    Ok(b) => text(200, &format!("got {}", b.len()), &[]),
+                    Err(super::super::body::BodyError::TimedOut) => super::super::body::timed_out(""),
+                    Err(e) => text(500, &format!("{e:?}"), &[]),
+                }
+            })
+        });
+        r.raw("/api/can/logs/long", |_q: RawReq| {
+            Box::pin(async move {
+                let s = futures_util::stream::unfold(0, |i| async move {
+                    if i == 15 {
+                        return None;
+                    }
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    Some((Ok::<_, std::io::Error>(bytes::Bytes::from_static(b"x")), i + 1))
+                });
+                Response::builder().status(200).body(Body::from_stream(s)).unwrap()
+            })
+        });
+        install(&st, r);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(device_serve(st, listener));
+        (addr, warnings, dir)
+    }
+
+    /// An upload whose body (of `length` bytes) starts with `sent` and then stops.
+    async fn upload(addr: std::net::SocketAddr, length: usize, sent: &[u8]) -> TcpStream {
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        s.write_all(format!("POST /api/can/logs HTTP/1.1\r\nHost: x\r\nContent-Length: {length}\r\n\r\n").as_bytes()).await.unwrap();
+        s.write_all(sent).await.unwrap();
+        s
+    }
+
+    /// Everything the server sends until it closes the connection (or nothing in an hour).
+    async fn answer(s: &mut TcpStream) -> String {
+        let mut got = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_secs(3600), s.read_to_end(&mut got)).await;
+        String::from_utf8_lossy(&got).into_owned()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_bridge_whose_uploads_stalled_is_answered_again() {
+        let (addr, _, dir) = device_port("stalled").await;
+        let mut stalled = Vec::new();
+        for _ in 0..6 {
+            stalled.push(upload(addr, 100, b"part").await);
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        // the seventh is refused while the six are open
+        let mut seventh = upload(addr, 2, b"ok").await;
+        assert_eq!(answer(&mut seventh).await, "", "refused");
+        // the six end (408) once they have sent nothing for 2 minutes: their connections close
+        for s in &mut stalled {
+            let a = answer(s).await;
+            assert!(a.starts_with("HTTP/1.1 408"), "{a}");
+        }
+        let mut next = upload(addr, 2, b"ok").await;
+        let a = answer(&mut next).await;
+        assert!(a.starts_with("HTTP/1.1 200") && a.ends_with("got 2"), "a new upload is answered: {a:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_body_that_sends_nothing_for_2_minutes_gets_408_and_the_connection_closes() {
+        let (addr, _, dir) = device_port("silent").await;
+        let mut s = upload(addr, 100, b"part").await;
+        let began = Instant::now();
+        let a = answer(&mut s).await;
+        let took = began.elapsed();
+        assert!(a.starts_with("HTTP/1.1 408"), "{a:?}");
+        assert!(a.to_ascii_lowercase().contains("connection: close"), "{a}");
+        assert!((Duration::from_secs(120)..Duration::from_secs(121)).contains(&took), "{took:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_but_steady_body_is_received_and_one_past_10_minutes_is_not() {
+        let (addr, _, dir) = device_port("steady").await;
+        // a byte a minute, 9 bytes: answered once it is all there
+        let mut s = upload(addr, 9, b"").await;
+        let began = Instant::now();
+        for _ in 0..9 {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            s.write_all(b"x").await.unwrap();
+        }
+        let mut head = [0u8; 12];
+        s.read_exact(&mut head).await.unwrap();
+        assert_eq!(&head, b"HTTP/1.1 200", "after {:?}", began.elapsed());
+        // a byte a minute, 20 bytes: 408 at 10 minutes
+        let mut s = upload(addr, 20, b"").await;
+        let began = Instant::now();
+        let writer = tokio::spawn(async move {
+            for _ in 0..20 {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                if s.write_all(b"x").await.is_err() {
+                    break;
+                }
+            }
+            s
+        });
+        let mut s = writer.await.unwrap();
+        let a = answer(&mut s).await;
+        assert!(a.starts_with("HTTP/1.1 408"), "{a:?}");
+        assert!(began.elapsed() >= Duration::from_secs(600), "{:?}", began.elapsed());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_long_answer_is_not_cut_off() {
+        let (addr, _, dir) = device_port("long").await;
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        s.write_all(b"GET /api/can/logs/long HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await.unwrap();
+        let began = Instant::now();
+        let a = answer(&mut s).await;
+        assert!(a.starts_with("HTTP/1.1 200"), "{a:?}");
+        // (chunked: 15 chunks of "x", then the last chunk)
+        assert_eq!(a.matches("1\r\nx\r\n").count(), 15, "{a:?}");
+        assert!(a.ends_with("\r\n0\r\n\r\n"), "{a:?}");
+        assert!(began.elapsed() >= Duration::from_secs(900), "{:?}", began.elapsed());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_idle_connection_is_closed() {
+        let (addr, _, dir) = device_port("idle").await;
+        // after an answer, kept alive: closed when no next request starts within 20 s
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        s.write_all(b"GET /nothing HTTP/1.1\r\nHost: x\r\n\r\n").await.unwrap();
+        let began = Instant::now();
+        let a = answer(&mut s).await;
+        assert!(a.starts_with("HTTP/1.1 404"), "{a:?}");
+        assert!(began.elapsed() <= Duration::from_secs(21), "{:?}", began.elapsed());
+        // nothing sent at all: closed after 15 s
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        let began = Instant::now();
+        assert_eq!(answer(&mut s).await, "");
+        assert!(began.elapsed() <= Duration::from_secs(16), "{:?}", began.elapsed());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_address_is_logged_once_a_minute() {
+        let (addr, warnings, dir) = device_port("refused").await;
+        let mut held = Vec::new();
+        for _ in 0..6 {
+            held.push(upload(addr, 100, b"part").await);
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let refused = |n: usize| async move {
+            for _ in 0..n {
+                let mut s = upload(addr, 2, b"ok").await;
+                assert_eq!(answer(&mut s).await, "");
+            }
+        };
+        refused(3).await;
+        let want = "Device port: 127.0.0.1 already has 6 connections open; refusing more";
+        assert_eq!(*warnings.lock().unwrap(), vec![want.to_string()]);
+        tokio::time::sleep(Duration::from_secs(61)).await;
+        refused(2).await;
+        assert_eq!(*warnings.lock().unwrap(), vec![want.to_string(), want.to_string()]);
+        drop(held);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

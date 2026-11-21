@@ -571,10 +571,12 @@ with a `# Sentry Six Manager: cut here: …` line (download it alone for all of 
 are kept in `<data>/can/<vehicleKey>/trust.json`.
 
 **TLS.** Port 10000 takes TLS 1.3 (the bridge uses only 1.3) and 1.2; older
-versions are refused. A client that sends its headers slower than 20 s, or
-one request longer than 10 minutes, is cut off. One address may hold at most
-6 connections at once (256 in all), and a connection that sends no request
-within 15 s is closed.
+versions are refused. A client that sends its headers slower than 20 s is cut
+off. An upload whose body sends nothing for 2 minutes, or is not all there
+within 10 minutes, is answered 408 and its connection closed. One address may
+hold at most 6 connections at once (256 in all; more are refused, and logged
+once a minute), and a connection that sends no request within 15 s, or nothing
+for 20 s between requests, is closed.
 
 Port 10000 can be opened to the internet on its own (for a bridge that
 uploads over LTE; the web port, 9000, only as described in

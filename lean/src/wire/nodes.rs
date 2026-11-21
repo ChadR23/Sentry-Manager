@@ -129,12 +129,8 @@ pub async fn node_v1(srv: Arc<Server>, q: RawReq) -> Res {
     let headers: Vec<(String, String)> = parts.headers.iter().map(|(k, v)| (k.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).into_owned())).collect();
     let address = q.client.clone();
     let https = q.conn.encrypted;
-    let stream = http_body_util::BodyStream::new(body).filter_map(|f| async move {
-        match f {
-            Ok(frame) => frame.into_data().ok().map(Ok::<_, std::io::Error>),
-            Err(e) => Some(Err(std::io::Error::other(e))),
-        }
-    });
+    // (a main that stops sending for 2 minutes is given up: the reader sees an error)
+    let stream = crate::core::body::idle_bounded(body);
     let reader = tokio_util::io::StreamReader::new(Box::pin(stream));
     let (tx, rx) = tokio::sync::oneshot::channel();
     let tls = srv.clone();

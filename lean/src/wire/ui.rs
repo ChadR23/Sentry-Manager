@@ -9,7 +9,6 @@ use crate::core::http::{ApiRaw, WebReq};
 use crate::core::{Ctx as CoreCtx, HttpError, Reply};
 use crate::ui::ctx::{Level, ReqInfo, UiCtx, VehicleRef};
 use axum::http::Method;
-use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
@@ -175,8 +174,9 @@ pub async fn upload(srv: Arc<Server>, a: ApiRaw) -> crate::core::http::Res {
         if declared.is_some_and(|d| d > max as u64) {
             return crate::core::http::error_json(413, "That file is too large.", None, c.accept_encoding());
         }
-        body = match http_body_util::Limited::new(a.body, max).collect().await {
-            Ok(b) => b.to_bytes(),
+        body = match crate::core::body::collect(a.body, max).await {
+            Ok(b) => b,
+            Err(crate::core::body::BodyError::TimedOut) => return crate::core::body::timed_out(c.accept_encoding()),
             Err(_) => return crate::core::http::error_json(413, "That file is too large.", None, c.accept_encoding()),
         };
     }
