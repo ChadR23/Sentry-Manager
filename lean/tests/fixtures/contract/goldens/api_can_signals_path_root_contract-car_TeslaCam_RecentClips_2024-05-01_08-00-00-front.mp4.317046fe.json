@@ -1,0 +1,21 @@
+{
+  "route": "GET /api/can/signals",
+  "method": "GET",
+  "request": {
+    "path": "/api/can/signals",
+    "query": {
+      "path": "{root:contract-car}/TeslaCam/RecentClips/2024-05-01_08-00-00-front.mp4"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "signals": {}
+    }
+  }
+}

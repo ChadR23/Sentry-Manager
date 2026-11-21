@@ -1,0 +1,28 @@
+{
+  "route": "GET /api/nodes",
+  "method": "GET",
+  "request": {
+    "path": "/api/nodes"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "nodes": [],
+      "worker": {
+        "available": true,
+        "busy": 0,
+        "enabled": false,
+        "mains": [],
+        "name": "<id>",
+        "pairing": null,
+        "slots": 2,
+        "use": "gpu"
+      }
+    }
+  }
+}

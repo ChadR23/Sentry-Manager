@@ -131,11 +131,12 @@ impl ArrivalCtx for TestCtx {
             None => self.idle_flag.load(Ordering::SeqCst),
         }
     }
-    fn older_of(&self, _vid: &str) -> bool {
-        self.older.as_ref().is_none_or(|o| o.load(Ordering::SeqCst))
+    fn older_of(&self, _vid: &str) -> Result<bool, String> {
+        Ok(self.older.as_ref().is_none_or(|o| o.load(Ordering::SeqCst)))
     }
-    fn set_older(&self, vid: &str, older: bool) {
+    fn set_older(&self, vid: &str, older: bool) -> Result<(), String> {
         self.settings.lock().unwrap().insert(vid.into(), older);
+        Ok(())
     }
     fn audit(&self, line: &str) {
         self.audits.lock().unwrap().push(line.into());
@@ -242,7 +243,7 @@ impl S {
         self.arrival.kick_wait();
     }
     pub fn view(&self) -> Value {
-        self.arrival.view("car1")
+        self.arrival.view("car1").unwrap()
     }
     /// A hasher on the same index, whose record must not be called.
     pub fn again(&self, now: Option<f64>) -> Arrival {
@@ -608,7 +609,7 @@ fn an_unchanged_clip_keeps_its_entry_past_45_days_gone_clips_lose_theirs() {
     assert_eq!(n(&s.view(), "lines"), 1.0);
     s.arrival.stop();
     let third = s.again(Some(later));
-    assert_eq!(n(&third.view("car1"), "lines"), 1.0);
+    assert_eq!(n(&third.view("car1").unwrap(), "lines"), 1.0);
 }
 
 #[test]
@@ -759,7 +760,7 @@ fn the_index_is_compact_and_written_in_batches_a_v1_index_is_read() {
     let entry = json!([md.size(), super::js::stat_ms(md.mtime(), md.mtime_nsec()), md.ino(), start_now(), "h"]);
     fs::write(v1dir.join("car1.json"), json!({ "v": 1, "files": { one.rel.clone(): entry } }).to_string()).unwrap();
     let reread = s.again(None);
-    assert_eq!(n(&reread.view("car1"), "lines"), 40.0);
+    assert_eq!(n(&reread.view("car1").unwrap(), "lines"), 40.0);
     struct Count(AtomicUsize);
     impl super::RecordSink for Count {
         fn record(&self, _: &str, _: &str, _: &str) -> Result<(), super::RecordError> {
@@ -773,7 +774,7 @@ fn the_index_is_compact_and_written_in_batches_a_v1_index_is_read() {
     o.rate = 0.0;
     o.codec_of = Box::new(|_| Ok(Some("h264".into())));
     let from_v1 = Arrival::new(s.ctx.clone(), count.clone(), o);
-    assert_eq!(n(&from_v1.view("car1"), "lines"), 1.0);
+    assert_eq!(n(&from_v1.view("car1").unwrap(), "lines"), 1.0);
     from_v1.kick_wait();
     assert_eq!(count.0.load(Ordering::SeqCst), 39, "the clip the v1 index knew is not read again");
     let v: Value = serde_json::from_str(&fs::read_to_string(v1dir.join("car1.json")).unwrap()).unwrap();
@@ -798,7 +799,7 @@ fn index_entries_of_gone_clips_are_dropped_and_the_route_logic() {
     s.arrival.settled();
     assert_eq!(s.ctx.settings.lock().unwrap().get("car1"), Some(&false));
     assert_eq!(s.ctx.audits.lock().unwrap().as_slice(), ["Checksum record of \"Car\": older clips off: admin (from 10.0.0.2)"]);
-    let v = routes::record_view(&s.arrival, "car1", true);
+    let v = routes::record_view(&s.arrival, "car1", true).unwrap();
     let keys: Vec<&String> = v.as_object().unwrap().keys().collect();
     assert_eq!(keys, ["enabled", "today", "lastAt", "pending", "lines", "windowDays", "older", "backlog", "canBackfill"]);
     assert_eq!(v["windowDays"], json!(7));

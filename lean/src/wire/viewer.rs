@@ -58,17 +58,20 @@ impl Ctx for CoreViewer {
     fn scan_stamp(&self, id: &str) -> Option<f64> {
         self.srv()?.app().state_of(id).filter(|s| s.scanned).and_then(|s| s.scanned_at)
     }
-    fn setting(&self, key: &str) -> Option<Value> {
-        self.state.setting(key)
+    fn setting(&self, key: &str) -> Result<Option<Value>, String> {
+        self.state.setting(key).map_err(|e| e.to_string())
     }
-    fn set_setting(&self, key: &str, value: Value) {
-        self.state.set_setting(key, &value);
+    fn set_setting(&self, key: &str, value: Value) -> Result<(), String> {
+        self.state.set_setting(key, &value).map_err(|e| e.to_string())
     }
     fn announce(&self, topic: &str) {
         self.state.announce(topic);
     }
     fn audit(&self, line: &str) {
         self.state.audit.info(line);
+    }
+    fn log_error(&self, line: &str) {
+        self.state.log.error(line);
     }
     fn busy(&self) -> bool {
         // index.js speedIndexBusy: a conversion runs (the benchmark is not ported)
@@ -88,12 +91,11 @@ impl Ctx for CoreViewer {
     fn can_keys(&self, id: &str) -> Vec<String> {
         self.srv().and_then(|s| s.can().map(|c| c.keys_for(id))).unwrap_or_default()
     }
-    fn has_can(&self, id: &str) -> Option<Box<dyn Fn(Vec<String>, Option<&str>) -> bool>> {
-        let s = self.srv()?;
-        let can = s.can()?.clone();
-        let v = s.app().vehicle(id)?;
-        let f = can.has_can(&super::footage::car_of(s.app(), &v));
-        Some(Box::new(move |rels: Vec<String>, start: Option<&str>| f(&crate::can::ctx::Rec { id: String::new(), clip_rels: rels, start_key: start.map(String::from) })))
+    fn has_can(&self, id: &str) -> Result<Option<Box<dyn Fn(Vec<String>, Option<&str>) -> bool>>, String> {
+        let Some(s) = self.srv() else { return Ok(None) };
+        let (Some(can), Some(v)) = (s.can().cloned(), s.app().vehicle(id)) else { return Ok(None) };
+        let f = can.has_can(&super::footage::car_of(s.app(), &v))?;
+        Ok(Some(Box::new(move |rels: Vec<String>, start: Option<&str>| f(&crate::can::ctx::Rec { id: String::new(), clip_rels: rels, start_key: start.map(String::from) }))))
     }
     fn sentry_usb_pi(&self, id: &str) -> Option<crate::viewer::archive_gap::Pi> {
         // index.js sentryUsbFor: the range Sentry USB is still copying (sentryUsb.now)
@@ -119,23 +121,25 @@ impl Ctx for CoreViewer {
         let archived = crate::can::sentry_usb::archived_since(can.usb.get(id).as_ref()).map(|x| x as f64);
         Some(crate::viewer::archive_gap::CarFilesIn { list: cf.list.clone(), error: cf.error.clone(), file_unix: (cf.mtime / 1000.0).floor(), archived_unix: archived })
     }
-    fn binned(&self, id: &str) -> Option<Vec<String>> {
-        Some(self.state.db.bin_items(Some(id)).into_iter().flat_map(|b| b.files.as_array().cloned().unwrap_or_default()).filter_map(|f| f["rel"].as_str().map(String::from)).collect())
+    fn binned(&self, id: &str) -> Result<Option<Vec<String>>, String> {
+        let items = self.state.db.bin_items(Some(id)).map_err(|e| e.to_string())?;
+        Ok(Some(items.into_iter().flat_map(|b| b.files.as_array().cloned().unwrap_or_default()).filter_map(|f| f["rel"].as_str().map(String::from)).collect()))
     }
-    fn deleted_clips(&self, id: &str) -> Option<Vec<String>> {
-        let s = self.srv()?;
-        Some(crate::footage::deleted_clips::list(s.app().core.db(), id, crate::footage::js::now()))
+    fn deleted_clips(&self, id: &str) -> Result<Option<Vec<String>>, String> {
+        let Some(s) = self.srv() else { return Ok(None) };
+        Ok(Some(crate::footage::deleted_clips::list(s.app().core.db(), id, crate::footage::js::now()).map_err(|e| e.to_string())?))
     }
     fn encoded(&self, id: &str) -> HashSet<String> {
         let Some(s) = self.srv() else { return HashSet::new() };
         s.app().state_of(id).map(|st| st.codecs.iter().filter(|(_, c)| matches!(c, Some("h265") | Some("av1"))).map(|(r, _)| r.to_string()).collect()).unwrap_or_default()
     }
-    fn open_notes(&self, id: &str, kind: &str) -> Vec<String> {
-        let Some(ops) = self.srv().and_then(|s| s.ops().cloned()) else { return Vec::new() };
-        ops.notes.list(true, Some(id)).into_iter().filter(|n| n["kind"].as_str() == Some(kind)).filter_map(|n| n["dedupeKey"].as_str().map(String::from)).collect()
+    fn open_notes(&self, id: &str, kind: &str) -> Result<Vec<String>, String> {
+        let Some(ops) = self.srv().and_then(|s| s.ops().cloned()) else { return Ok(Vec::new()) };
+        let list = ops.notes.list(true, Some(id)).map_err(|e| e.to_string())?;
+        Ok(list.into_iter().filter(|n| n["kind"].as_str() == Some(kind)).filter_map(|n| n["dedupeKey"].as_str().map(String::from)).collect())
     }
-    fn raise_note(&self, note: &Value) -> bool {
-        let Some(ops) = self.srv().and_then(|s| s.ops().cloned()) else { return false };
+    fn raise_note(&self, note: &Value) -> Result<bool, String> {
+        let Some(ops) = self.srv().and_then(|s| s.ops().cloned()) else { return Ok(false) };
         let s = |k: &str| note.get(k).and_then(Value::as_str).map(String::from);
         let n = crate::ops::store::Note {
             kind: s("kind").unwrap_or_default(),
@@ -145,11 +149,12 @@ impl Ctx for CoreViewer {
             message: s("message"),
             dedupe_key: s("dedupeKey"),
         };
-        ops.notes.raise(&n).is_some()
+        Ok(ops.notes.raise(&n).map_err(|e| e.to_string())?.is_some())
     }
-    fn resolve_note(&self, dedupe_key: &str) {
-        if let Some(ops) = self.srv().and_then(|s| s.ops().cloned()) {
-            ops.notes.resolve(dedupe_key);
+    fn resolve_note(&self, dedupe_key: &str) -> Result<(), String> {
+        match self.srv().and_then(|s| s.ops().cloned()) {
+            Some(ops) => ops.notes.resolve(dedupe_key).map_err(|e| e.to_string()),
+            None => Ok(()),
         }
     }
     fn ffmpeg(&self) -> String {
@@ -210,18 +215,8 @@ pub fn trash_folder(srv: &Arc<Server>, c: &mut CoreCtx) -> Result<Reply, HttpErr
         None
     });
     let Some((v, root)) = found else { return Err(HttpError::new(403, "Not inside a vehicle share.")) };
-    // (as the footage area's errors reach core: a status under 500 with its text)
-    let fail = |f: crate::footage::ctx::Fail| {
-        let (status, body) = f.body();
-        if status >= 500 {
-            return HttpError::internal(f.message);
-        }
-        let mut e = HttpError::new(status, body["error"].as_str().unwrap_or("Error"));
-        if let Some(code) = body["code"].as_str() {
-            e = e.code(code);
-        }
-        e
-    };
+    // (as the footage area's errors reach core)
+    let fail = super::footage::http_error;
     if !app.state_of(&v.id).is_some_and(|s| s.scanned) {
         app.scan_now(&v.id, false).map_err(fail)?;
     }

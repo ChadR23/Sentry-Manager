@@ -1,0 +1,21 @@
+{
+  "route": "PUT /api/reports/settings",
+  "method": "PUT",
+  "request": {
+    "path": "/api/reports/settings"
+  },
+  "body": {
+    "share": "yes"
+  },
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "share is on or off."
+    }
+  }
+}

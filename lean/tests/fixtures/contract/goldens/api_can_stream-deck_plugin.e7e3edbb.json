@@ -1,0 +1,17 @@
+{
+  "route": "GET /api/can/stream-deck/plugin",
+  "method": "GET",
+  "request": {
+    "path": "/api/can/stream-deck/plugin"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/octet-stream",
+      "content-disposition": "attachment; filename=\"Sentry_Six_CAN_Stats.streamDeckPlugin\"",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": "<ignored>"
+  }
+}

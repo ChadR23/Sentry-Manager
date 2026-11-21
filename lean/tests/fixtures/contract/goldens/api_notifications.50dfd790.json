@@ -1,0 +1,45 @@
+{
+  "route": "GET /api/notifications",
+  "method": "GET",
+  "request": {
+    "path": "/api/notifications"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "notifications": [
+        {
+          "createdAt": "<time>",
+          "dedupeKey": "health:space-contract-car",
+          "id": 2,
+          "kind": "health",
+          "level": "critical",
+          "message": "Empty the Recycle Bin, convert footage, or set a policy to move old footage out.",
+          "readAt": null,
+          "resolvedAt": null,
+          "title": "Startup check: Free space on the share: 7.8 GB free of 252.0 GB",
+          "updatedAt": "<time>",
+          "vehicleId": null
+        },
+        {
+          "createdAt": "<time>",
+          "dedupeKey": "space:contract-car",
+          "id": 1,
+          "kind": "storage",
+          "level": "critical",
+          "message": "3.1% free.",
+          "readAt": null,
+          "resolvedAt": null,
+          "title": "Contract Car: share almost full",
+          "updatedAt": "<time>",
+          "vehicleId": "contract-car"
+        }
+      ]
+    }
+  }
+}

@@ -22,7 +22,7 @@ pub mod scrub;
 use super::ctx::{Level, OpsCtx};
 use super::js::{iso, truthy};
 use super::net::{HttpReq, HttpRes, Transport};
-use super::store;
+use super::store::{self, DbError, DbResult};
 use ed25519_dalek::SigningKey;
 use protocol::{self as p, ReceiverKey};
 use rand_core::{OsRng, RngCore};
@@ -66,6 +66,13 @@ pub struct ReportError {
 
 fn err(status: u16, message: impl Into<String>) -> ReportError {
     ReportError { status, message: message.into(), code: None }
+}
+
+/// (manager.db failed: a 500, its text in the log)
+impl From<DbError> for ReportError {
+    fn from(e: DbError) -> ReportError {
+        err(500, e.to_string())
+    }
 }
 
 // ---- the endpoint and keys (reportsConfig.js)
@@ -210,14 +217,16 @@ pub struct Reports {
     flushing: Mutex<()>,
     sched: Mutex<Sched>,
     sources: std::sync::OnceLock<Sources>,
+    /// what manager.db could not give the timers lately: logged once until it can
+    unread: crate::core::db::LogOnce,
 }
 
 /// Where a report's diagnostics, heartbeat and identifiers come from: set by
 /// `Ops` (ops::diag); without them, the context's test hooks answer.
 pub struct Sources {
     pub diagnostics: Box<dyn Fn(&str) -> Value + Send + Sync>,
-    pub heartbeat: Box<dyn Fn() -> Value + Send + Sync>,
-    pub identifiers: Box<dyn Fn() -> Vec<String> + Send + Sync>,
+    pub heartbeat: Box<dyn Fn() -> Result<Value, String> + Send + Sync>,
+    pub identifiers: Box<dyn Fn() -> Result<Vec<String>, String> + Send + Sync>,
 }
 
 fn rand_hex(n: usize) -> String {
@@ -311,6 +320,7 @@ impl Reports {
             flushing: Mutex::new(()),
             sched: Mutex::new(Sched::default()),
             sources: std::sync::OnceLock::new(),
+            unread: crate::core::db::LogOnce::default(),
         })
     }
 
@@ -327,42 +337,55 @@ impl Reports {
         ReportError { status: 409, message: self.off_text.clone(), code: Some("NOT_SET_UP") }
     }
 
-    pub fn settings(&self) -> Value {
+    /// The settings over their defaults; an error when they cannot be read (never taken as "not
+    /// anonymous").
+    pub fn settings(&self) -> DbResult<Value> {
         let mut s = json!({ "share": false, "anonymous": false });
-        if let Some(Value::Object(o)) = store::get(&self.ctx.db(), "reports-settings") {
+        if let Some(Value::Object(o)) = store::get(&self.ctx.read_db(), "reports-settings")? {
             for (k, v) in o {
                 s[k] = v;
             }
         }
-        s
+        Ok(s)
     }
 
-    fn state(&self) -> Value {
-        match store::get(&self.ctx.db(), "reports-state") {
+    fn state(&self) -> DbResult<Value> {
+        Ok(match store::get(&self.ctx.read_db(), "reports-state")? {
             Some(v) if truthy(&v) => v,
             _ => json!({}),
-        }
+        })
     }
 
-    fn set_state(&self, patch: Value) {
-        let mut s = self.state();
+    /// `patch` over the kept state (one that could not be read is never written over).
+    fn set_state(&self, patch: Value) -> DbResult<()> {
+        let mut s = self.state()?;
         if !s.is_object() {
             s = json!({});
         }
         for (k, v) in patch.as_object().unwrap() {
             s[k] = v.clone();
         }
-        store::set(&self.ctx.db(), "reports-state", &s);
+        store::set(&self.ctx.db(), "reports-state", &s)
     }
 
-    pub fn install_id(&self) -> String {
-        let id = self.state()["installId"].as_str().unwrap_or("").to_string();
+    pub fn install_id(&self) -> DbResult<String> {
+        let id = self.state()?["installId"].as_str().unwrap_or("").to_string();
         if id.len() == 32 && id.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)) {
-            return id;
+            return Ok(id);
         }
         let id = rand_hex(16);
-        self.set_state(json!({ "installId": id }));
-        id
+        self.set_state(json!({ "installId": id }))?;
+        Ok(id)
+    }
+
+    /// For a timer: the state when sharing is on; None when it is off, and when manager.db
+    /// cannot give them (nothing goes then; logged once until it can).
+    fn shared(&self, what: &str) -> Option<Value> {
+        let r = self.settings().and_then(|s| if truthy(&s["share"]) { self.state().map(Some) } else { Ok(None) });
+        if let (true, Err(e)) = (self.unread.first(what, r.is_err()), &r) {
+            self.ctx.log("reports", Level::Warn, &format!("Reports: the {what} waits until manager.db can be read: {e}"));
+        }
+        r.ok().flatten()
     }
 
     /// The install's signing key (or the anonymous one), made once, mode 600.
@@ -378,16 +401,16 @@ impl Reports {
         k
     }
 
-    pub fn endpoint(&self) -> String {
+    pub fn endpoint(&self) -> DbResult<String> {
         if self.cfg.from_env_url {
-            return self.cfg.endpoint.clone();
+            return Ok(self.cfg.endpoint.clone());
         }
-        if let Some(u) = self.state()["moved"]["url"].as_str().filter(|s| !s.is_empty()) {
+        if let Some(u) = self.state()?["moved"]["url"].as_str().filter(|s| !s.is_empty()) {
             if let Ok(e) = check_endpoint(u, &self.env) {
-                return e;
+                return Ok(e);
             }
         }
-        self.cfg.endpoint.clone()
+        Ok(self.cfg.endpoint.clone())
     }
 
     // ---- the outbox: sealed envelopes only
@@ -476,30 +499,37 @@ impl Reports {
         }
     }
 
+    /// The outcome kept for the page (one not kept is logged once until one is).
     fn note_outcome(&self, e: &Value, sent: Option<&Value>, error: Option<&str>) {
+        let r = self.keep_outcome(e, sent, error);
+        if let (true, Err(err)) = (self.unread.first("outcome", r.is_err()), &r) {
+            self.ctx.log("reports", Level::Warn, &format!("Reports: how a report went is not kept until manager.db can be written: {err}"));
+        }
+    }
+
+    fn keep_outcome(&self, e: &Value, sent: Option<&Value>, error: Option<&str>) -> DbResult<()> {
         if e["kind"] == "heartbeat" {
-            let prev = self.state()["lastHeartbeat"].clone();
+            let prev = self.state()?["lastHeartbeat"].clone();
             let v = match sent {
                 Some(s) => json!({ "at": s["at"], "error": null }),
                 None => json!({ "at": if truthy(&prev["at"]) { prev["at"].clone() } else { Value::Null }, "error": error.map(|m| json!({ "at": self.now(), "message": m })) }),
             };
-            self.set_state(json!({ "lastHeartbeat": v }));
-            return;
+            return self.set_state(json!({ "lastHeartbeat": v }));
         }
         let Some(sent) = sent else {
-            self.set_state(json!({ "lastError": { "at": self.now(), "message": error } }));
-            return;
+            return self.set_state(json!({ "lastError": { "at": self.now(), "message": error } }));
         };
         let mut patch = json!({ "lastSent": sent, "lastError": null });
+        let st = self.state()?;
         if truthy(&sent["ref"]) {
             let mut refs = vec![json!({ "at": sent["at"], "kind": e["kind"], "ref": sent["ref"], "anonymous": truthy(&e["anonymous"]) })];
-            refs.extend(self.state()["sentRefs"].as_array().cloned().unwrap_or_default());
+            refs.extend(st["sentRefs"].as_array().cloned().unwrap_or_default());
             refs.truncate(SENT_REFS_KEPT);
             patch["sentRefs"] = json!(refs);
-        } else if let Some(r) = self.state().get("sentRefs") {
+        } else if let Some(r) = st.get("sentRefs") {
             patch["sentRefs"] = r.clone();
         }
-        self.set_state(patch);
+        self.set_state(patch)
     }
 
     fn transport(&self, method: &str, url: &str, body: Option<Vec<u8>>) -> Result<HttpRes, String> {
@@ -514,7 +544,7 @@ impl Reports {
 
     /// Err: (message, retry)
     pub fn remote_config(&self, force: bool) -> Result<Value, String> {
-        let ep = self.endpoint();
+        let ep = self.endpoint().map_err(|e| e.to_string())?;
         if !force {
             if let Some(r) = self.remote.lock().unwrap().as_ref() {
                 if r.endpoint == ep && self.now() - r.at < CONFIG_TTL_MS {
@@ -535,12 +565,12 @@ impl Reports {
             *self.clock_offset.lock().unwrap() = if off.abs() > 60_000 { off } else { 0 };
         }
         if truthy(&data["moved"]) && !self.cfg.from_env_url {
-            let prev_at = self.state()["moved"]["at"].as_f64();
+            let prev_at = self.state().map_err(|e| e.to_string())?["moved"]["at"].as_f64();
             let signed = p::verify_moved(&data["moved"], &self.cfg.keys);
             if signed && !prev_at.is_some_and(|a| a >= data["moved"]["at"].as_f64().unwrap_or(f64::NAN)) {
                 match check_endpoint(data["moved"]["url"].as_str().unwrap_or(""), &self.env) {
                     Ok(url) if url != ep => {
-                        self.set_state(json!({ "moved": { "url": url, "at": data["moved"]["at"] } }));
+                        self.set_state(json!({ "moved": { "url": url, "at": data["moved"]["at"] } })).map_err(|e| e.to_string())?;
                         self.ctx.log("reports", Level::Warn, &format!("Reports: the receiver moved to {url} (signed by its key)"));
                         *self.remote.lock().unwrap() = None;
                         return self.remote_config(true);
@@ -572,12 +602,12 @@ impl Reports {
         let pow = self.pow.lock().unwrap().clone();
         let stamp = pow(&p::envelope_hash(&env0), &nonce, bits)?;
         // sharing turned off meanwhile: an automatic report does not go after all
-        if auto_kind(e["kind"].as_str().unwrap_or("")) && !truthy(&self.settings()["share"]) {
+        if auto_kind(e["kind"].as_str().unwrap_or("")) && !truthy(&self.settings().map_err(|e| e.to_string())?["share"]) {
             self.drop_entry(e);
             return Ok(json!({ "result": "dropped", "message": "Sharing is off." }));
         }
         let body = p::sign(&env0, &self.signing_key(truthy(&e["anonymous"])), ts, &nonce, &stamp, bits);
-        let res = self.transport("POST", &format!("{}/v1/report", self.endpoint()), Some(body.to_string().into_bytes()))?;
+        let res = self.transport("POST", &format!("{}/v1/report", self.endpoint().map_err(|e| e.to_string())?), Some(body.to_string().into_bytes()))?;
         let d = obj(&res.body);
         if res.status == 202 && truthy(&d["ok"]) {
             self.drop_entry(e);
@@ -642,9 +672,15 @@ impl Reports {
             return Vec::new();
         }
         let _one = self.flushing.lock().unwrap();
+        // (sharing not known now: what waits stays for later; logged once until it can be read)
+        let settings = self.settings();
+        if let (true, Err(e)) = (self.unread.first("flush", settings.is_err()), &settings) {
+            self.ctx.log("reports", Level::Warn, &format!("Reports: what waits to be sent stays until manager.db can be read: {e}"));
+        }
+        let Ok(settings) = settings else { return Vec::new() };
         let mut out = Vec::new();
         for mut e in self.trim_outbox() {
-            if auto_kind(e["kind"].as_str().unwrap_or("")) && !truthy(&self.settings()["share"]) {
+            if auto_kind(e["kind"].as_str().unwrap_or("")) && !truthy(&settings["share"]) {
                 self.drop_entry(&e);
                 continue;
             }
@@ -666,13 +702,15 @@ impl Reports {
         json!({ "build": build, "sha": sha, "builtAt": st(&b["builtAt"], 40), "tag": st(&b["tag"], 120) })
     }
 
-    fn identifiers(&self) -> Vec<String> {
-        let mut ids = vec![self.install_id()];
-        match self.sources.get() {
-            Some(s) => ids.extend((s.identifiers)()),
-            None => ids.extend(self.ctx.identifiers()),
-        }
-        ids
+    fn identifiers(&self) -> Result<Vec<String>, ReportError> {
+        let mut ids = vec![self.install_id()?];
+        let more = match self.sources.get() {
+            Some(s) => (s.identifiers)(),
+            None => self.ctx.identifiers(),
+        };
+        // (no anonymous report without all of what it must leave out)
+        ids.extend(more.map_err(|e| err(500, format!("What an anonymous report leaves out could not be read: {e}")))?);
+        Ok(ids)
     }
 
     /// Where diagnostics, the heartbeat and the identifiers come from (once).
@@ -689,12 +727,12 @@ impl Reports {
         }
     }
 
-    fn heartbeat_of(&self) -> Value {
+    fn heartbeat_of(&self) -> Result<Value, String> {
         let hook = self.ctx.heartbeat();
         match (self.sources.get(), hook.is_null()) {
             (Some(s), true) => (s.heartbeat)(),
-            (_, false) => hook,
-            (None, true) => json!({}),
+            (_, false) => Ok(hook),
+            (None, true) => Ok(json!({})),
         }
     }
 
@@ -703,10 +741,12 @@ impl Reports {
         if !self.configured {
             return Err(self.not_set_up());
         }
-        let anonymous = truthy(&self.settings()["anonymous"]);
+        // (not read: no report, never one that is not anonymous when it should be)
+        let anonymous = truthy(&self.settings()?["anonymous"]);
+        let install = if anonymous { p::ANON.to_string() } else { self.install_id()? };
         let ui = self.ctx.ui_pack();
         let mut pl = json!({
-            "kind": kind, "sentAt": iso(self.now()), "install": if anonymous { p::ANON.to_string() } else { self.install_id() }, "anonymous": anonymous,
+            "kind": kind, "sentAt": iso(self.now()), "install": install, "anonymous": anonymous,
             "build": self.build_block(), "ui": cut(if ui.is_empty() { "original" } else { &ui }, p::LIMIT_UI)
         });
         if kind == "feedback" {
@@ -738,7 +778,7 @@ impl Reports {
             pl["crash"] = c;
         }
         if kind == "heartbeat" {
-            let mut raw = match self.heartbeat_of() {
+            let mut raw = match self.heartbeat_of().map_err(|e| err(500, format!("The heartbeat could not be made: {e}")))? {
                 Value::Object(o) => Value::Object(o),
                 _ => json!({}),
             };
@@ -748,7 +788,7 @@ impl Reports {
                     text.insert(k.to_string(), v.clone());
                 }
             }
-            let cleaned = scrub::clean_report(&Value::Object(text), true, &self.identifiers());
+            let cleaned = scrub::clean_report(&Value::Object(text), true, &self.identifiers()?);
             for (k, v) in cleaned.as_object().unwrap() {
                 raw[k] = v.clone();
             }
@@ -763,7 +803,7 @@ impl Reports {
         if kind != "feedback" || attach {
             pl["diagnostics"] = self.diagnostics_of(kind);
         }
-        let ids = if anonymous { self.identifiers() } else { Vec::new() };
+        let ids = if anonymous { self.identifiers()? } else { Vec::new() };
         for k in ["message", "crash", "diagnostics"] {
             if pl.get(k).is_some() {
                 pl[k] = scrub::clean_report(&pl[k], anonymous, &ids);
@@ -800,7 +840,7 @@ impl Reports {
 
     fn take_manual(&self, kind: &str) -> Result<(), ReportError> {
         let t = self.now();
-        let mut all = self.state()["manual"].clone();
+        let mut all = self.state()?["manual"].clone();
         if !all.is_object() {
             all = json!({});
         }
@@ -811,7 +851,8 @@ impl Reports {
         }
         list.push(t);
         all[kind] = json!(list);
-        self.set_state(json!({ "manual": all }));
+        // (a send that cannot be counted does not go)
+        self.set_state(json!({ "manual": all }))?;
         Ok(())
     }
 
@@ -869,12 +910,13 @@ impl Reports {
 
     /// Sends what was noted and not sent yet: at most one report an hour for the same error, 6 a day.
     pub fn send_crashes(&self) -> Vec<Value> {
-        if !self.configured || !truthy(&self.settings()["share"]) {
+        if !self.configured {
             return Vec::new();
         }
+        let Some(state) = self.shared("crash report") else { return Vec::new() };
         let now = self.now();
         let mut list = self.read_crashes();
-        let mut sent_log: Vec<Value> = self.state()["crashSent"].as_array().cloned().unwrap_or_default().into_iter().filter(|x| now - x["at"].as_f64().unwrap_or(0.0) as i64 > -1 && now - (x["at"].as_f64().unwrap_or(0.0) as i64) < DAY_MS).collect();
+        let mut sent_log: Vec<Value> = state["crashSent"].as_array().cloned().unwrap_or_default().into_iter().filter(|x| now - x["at"].as_f64().unwrap_or(0.0) as i64 > -1 && now - (x["at"].as_f64().unwrap_or(0.0) as i64) < DAY_MS).collect();
         let mut out = Vec::new();
         for c in list.iter_mut() {
             if truthy(&c["sent"]) {
@@ -895,19 +937,26 @@ impl Reports {
             }
         }
         let _ = write_private(&self.crash_file, Value::Array(list).to_string().as_bytes());
-        self.set_state(json!({ "crashSent": sent_log }));
+        if let Err(e) = self.set_state(json!({ "crashSent": sent_log })) {
+            self.ctx.log("reports", Level::Warn, &format!("Reports: the crash reports sent were not counted: {e}"));
+        }
         out
     }
 
     pub fn daily_if_due(&self) -> Option<Value> {
-        if !self.configured || !truthy(&self.settings()["share"]) {
+        if !self.configured {
             return None;
         }
-        let last = self.state()["lastDailyAt"].as_f64().unwrap_or(0.0) as i64;
+        let state = self.shared("daily summary")?;
+        let last = state["lastDailyAt"].as_f64().unwrap_or(0.0) as i64;
         if self.now() - last < DAY_MS - 60_000 {
             return None;
         }
-        self.set_state(json!({ "lastDailyAt": self.now() }));
+        // (one that cannot be noted is not sent: it would go again every hour)
+        if let Err(e) = self.set_state(json!({ "lastDailyAt": self.now() })) {
+            self.ctx.log("reports", Level::Warn, &format!("Reports: the daily summary waits, its time was not kept: {e}"));
+            return None;
+        }
         match self.build_payload("daily", None, None, true, None).and_then(|pl| self.enqueue(&pl)) {
             Ok(r) => Some(r),
             Err(e) => {
@@ -919,9 +968,10 @@ impl Reports {
 
     /// Sends one heartbeat now when sharing is on; the one still waiting is replaced.
     pub fn send_heartbeat(&self) -> Option<Value> {
-        if !self.configured || !truthy(&self.settings()["share"]) {
+        if !self.configured {
             return None;
         }
+        self.shared("heartbeat")?;
         let payload = match self.build_payload("heartbeat", None, None, true, None) {
             Ok(p) => p,
             Err(e) => {
@@ -929,7 +979,7 @@ impl Reports {
                 return None;
             }
         };
-        if !truthy(&self.settings()["share"]) {
+        if !self.settings().is_ok_and(|s| truthy(&s["share"])) {
             return None;
         }
         for e in self.outbox() {
@@ -946,16 +996,18 @@ impl Reports {
 
     // ---- what the routes call
 
-    pub fn status(&self) -> Value {
+    pub fn status(&self) -> Result<Value, ReportError> {
         let list = if self.configured { self.outbox() } else { Vec::new() };
-        let s = self.state();
-        let settings = self.settings();
+        let s = self.state()?;
+        let settings = self.settings()?;
+        let endpoint = if self.configured { json!(self.endpoint()?) } else { Value::Null };
+        let install = self.install_id()?;
         let sched = self.sched.lock().unwrap();
         let or_null = |k: &str| if truthy(&s[k]) { s[k].clone() } else { Value::Null };
-        json!({
+        Ok(json!({
             "configured": self.configured,
             "notSetUpText": if self.configured { Value::Null } else { json!(self.off_text) },
-            "endpoint": if self.configured { json!(self.endpoint()) } else { Value::Null },
+            "endpoint": endpoint,
             "kid": self.cfg.keys.first().map(|k| k.kid.clone()),
             "settings": settings,
             "lastSent": or_null("lastSent"),
@@ -964,9 +1016,9 @@ impl Reports {
             "nextHeartbeatAt": if self.configured && truthy(&settings["share"]) && sched.started { json!(sched.hb_next_at) } else { Value::Null },
             "outbox": { "count": list.len(), "bytes": list.iter().map(|e| e["bytes"].as_u64().unwrap_or(0)).sum::<u64>() },
             "manualPerHour": MANUAL_PER_HOUR,
-            "installCode": self.install_id()[..8],
+            "installCode": install[..8],
             "sentRefs": s["sentRefs"].as_array().cloned().unwrap_or_default()
-        })
+        }))
     }
 
     /// PUT /api/reports/settings: (before, after).
@@ -974,7 +1026,7 @@ impl Reports {
         if !self.configured {
             return Err(self.not_set_up());
         }
-        let before = self.settings();
+        let before = self.settings()?;
         let mut next = before.clone();
         for k in ["share", "anonymous"] {
             match patch.get(k) {
@@ -984,7 +1036,12 @@ impl Reports {
             }
         }
         next["changedAt"] = json!(self.now());
-        store::set(&self.ctx.db(), "reports-settings", &next);
+        let turned_on = !truthy(&before["share"]) && truthy(&next["share"]);
+        // (the daily summary's clock first: a write that fails then leaves sharing off)
+        if turned_on {
+            self.set_state(json!({ "lastDailyAt": self.now() }))?;
+        }
+        store::set(&self.ctx.db(), "reports-settings", &next)?;
         if truthy(&before["share"]) && !truthy(&next["share"]) {
             for e in self.outbox() {
                 if auto_kind(e["kind"].as_str().unwrap_or("")) {
@@ -992,8 +1049,7 @@ impl Reports {
                 }
             }
         }
-        if !truthy(&before["share"]) && truthy(&next["share"]) {
-            self.set_state(json!({ "lastDailyAt": self.now() }));
+        if turned_on {
             if self.sched.lock().unwrap().started {
                 self.schedule_heartbeat(HEARTBEAT_EVERY_MS + jitter(HEARTBEAT_JITTER_MS));
                 let me = Arc::clone(self);
@@ -1036,7 +1092,7 @@ impl Reports {
                 _ => return Err(err(409, "The preview is too old: look at what will be sent again.")),
             }
         };
-        if payload["anonymous"].as_bool() != Some(truthy(&self.settings()["anonymous"])) {
+        if payload["anonymous"].as_bool() != Some(truthy(&self.settings()?["anonymous"])) {
             return Err(err(409, "\"Send anonymously\" changed since the preview: look at what will be sent again."));
         }
         self.take_manual(payload["kind"].as_str().unwrap_or(""))?;
@@ -1326,7 +1382,7 @@ mod tests {
         let ctx = FakeCtx::new();
         let t = Arc::new(Counting(M::new(Vec::new())));
         let rep = Reports::new(ctx, env(&[("REPORTS", "off")]), json!({}), t.clone(), None);
-        let s = rep.status();
+        let s = rep.status().unwrap();
         assert_eq!(s["configured"], false);
         assert_eq!(s["notSetUpText"], "Reporting is turned off on this server (REPORTS=off).");
         assert!(rep.preview(&json!({ "kind": "feedback", "message": "x" })).unwrap_err().message.contains("turned off"));
@@ -1366,7 +1422,7 @@ mod tests {
         assert_eq!(pv["payload"]["diagnostics"]["system"]["hostname"], "tower");
         assert!(pv["payload"]["diagnostics"]["system"]["note"].as_str().unwrap().contains("password=[removed]"));
         assert_eq!(pv["payload"]["build"], json!({ "build": 130, "sha": "1345348abcdef0", "builtAt": "2026-11-11T00:00:00Z", "tag": "latest" }));
-        let install = rep.install_id();
+        let install = rep.install_id().unwrap();
         rep.set_settings(&json!({ "anonymous": true })).unwrap();
         let pv = rep.preview(&json!({ "kind": "feedback", "message": "from tower, my Daily Driver at 192.168.1.9", "contact": "me@example.org", "attach": true })).unwrap();
         assert_eq!(pv["payload"]["install"], "ANON");
@@ -1411,10 +1467,10 @@ mod tests {
             let pl = rep.build_payload("feedback", Some(&json!(format!("m{i}"))), None, false, None).unwrap();
             rep.enqueue(&pl).unwrap();
         }
-        assert_eq!(rep.status()["outbox"]["count"], OUTBOX_MAX);
+        assert_eq!(rep.status().unwrap()["outbox"]["count"], OUTBOX_MAX);
         *clock.lock().unwrap() += 8 * DAY_MS;
         rep.trim_outbox();
-        assert_eq!(rep.status()["outbox"]["count"], 0);
+        assert_eq!(rep.status().unwrap()["outbox"]["count"], 0);
         // the per-hour limit on manual reports
         *clock.lock().unwrap() -= 8 * DAY_MS;
         for _ in 0..4 {
@@ -1451,5 +1507,53 @@ mod tests {
         let mut pl = json!({ "kind": "heartbeat", "sentAt": "2026-11-15T10:00:00.000Z", "install": "a".repeat(32), "anonymous": false, "build": { "build": null, "sha": null, "builtAt": null, "tag": null }, "ui": "original" });
         pl["heartbeat"] = h;
         assert_eq!(p::validate_payload(&pl), Vec::<String>::new());
+    }
+
+    #[test]
+    fn settings_or_state_that_cannot_be_read_or_kept_send_nothing_never_a_report_that_is_not_anonymous() {
+        let ctx = FakeCtx::new();
+        let t = Arc::new(Counting(M::new(Vec::new())));
+        let rep = Reports::new(ctx.clone(), env(&[("REPORTS_PUBLIC_KEY", &key_line())]), json!({}), t.clone(), None);
+        rep.set_settings(&json!({ "share": true, "anonymous": true })).unwrap();
+        // the daily summary is due; one whose time cannot be noted does not go (it would every hour);
+        // (the install's id is kept already: nothing else needs writing to build it)
+        store::set(&ctx.db(), "reports-state", &json!({ "lastDailyAt": 0, "installId": "0123456789abcdef0123456789abcdef" })).unwrap();
+        ctx.db().execute_batch("CREATE TEMP TRIGGER refused BEFORE UPDATE ON settings WHEN NEW.key = 'reports-state' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;").unwrap();
+        assert_eq!(rep.daily_if_due(), None);
+        assert!(rep.outbox().is_empty() && t.0.lock().unwrap().is_empty());
+        // settings that cannot be read: no report, never one that is not anonymous; the timers wait
+        ctx.db().execute_batch("CREATE TABLE gone (x); ALTER TABLE settings RENAME TO settings_kept; CREATE VIEW settings AS SELECT * FROM gone; DROP TABLE gone;").unwrap();
+        let refused = rep.preview(&json!({ "kind": "feedback", "message": "x", "attach": false })).unwrap_err();
+        assert_eq!(refused.status, 500);
+        assert!(rep.status().is_err());
+        assert!(rep.send_heartbeat().is_none() && rep.send_heartbeat().is_none() && rep.send_crashes().is_empty());
+        let waits = |what: &str| ctx.logs.lock().unwrap().iter().filter(|(_, _, l)| l.starts_with(&format!("Reports: the {what} waits"))).count();
+        assert_eq!((waits("heartbeat"), waits("crash report")), (1, 1), "said once until it can be read");
+        assert!(rep.outbox().is_empty() && t.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn sharing_turned_on_whose_daily_clock_cannot_be_kept_stays_off() {
+        let ctx = FakeCtx::new();
+        let rep = Reports::new(ctx.clone(), env(&[("REPORTS_PUBLIC_KEY", &key_line())]), json!({}), Arc::new(Counting(M::new(Vec::new()))), None);
+        for when in ["INSERT", "UPDATE"] {
+            ctx.db().execute_batch(&format!("CREATE TEMP TRIGGER refused_{when} BEFORE {when} ON settings WHEN NEW.key = 'reports-state' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;")).unwrap();
+        }
+        assert_eq!(rep.set_settings(&json!({ "share": true })).unwrap_err().status, 500);
+        assert_eq!(rep.settings().unwrap()["share"], false, "a 500 that leaves sharing off");
+    }
+
+    #[test]
+    fn a_heartbeat_that_cannot_be_made_is_not_sent_and_its_preview_is_a_500() {
+        let ctx = FakeCtx::new();
+        let t = Arc::new(Counting(M::new(Vec::new())));
+        let rep = Reports::new(ctx.clone(), env(&[("REPORTS_PUBLIC_KEY", &key_line())]), json!({}), t.clone(), None);
+        rep.set_settings(&json!({ "share": true })).unwrap();
+        rep.set_sources(Sources { diagnostics: Box::new(|_| json!({})), heartbeat: Box::new(|| Err("manager.db: database disk image is malformed".into())), identifiers: Box::new(|| Ok(Vec::new())) });
+        assert_eq!(rep.preview(&json!({ "kind": "heartbeat" })).unwrap_err().status, 500);
+        assert!(rep.send_heartbeat().is_none());
+        assert!(rep.outbox().is_empty() && t.0.lock().unwrap().is_empty());
+        let said = "Reports: the heartbeat was not made: The heartbeat could not be made: manager.db: database disk image is malformed";
+        assert!(ctx.logs.lock().unwrap().iter().any(|(_, _, l)| l == said));
     }
 }

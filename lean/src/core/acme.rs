@@ -1145,13 +1145,14 @@ mod live {
         port
     }
 
-    /// Against test/fixtures/fakeAcme.js (Node's own test server for acme.js): a real order, start to finish.
+    /// Against tests/fixtures/js/fakeAcme.js (a small ACME v2 server in plain
+    /// Node, once the Node tests' own for acme.js): a real order, start to finish.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn issues_against_the_fake_acme_server() {
-        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
-        let fixture = repo.join("test/fixtures/fakeAcme.js");
-        if !fixture.exists() || std::process::Command::new("node").arg("--version").output().is_err() {
-            eprintln!("skipped: no node or no fake ACME server");
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/js/fakeAcme.js");
+        if std::process::Command::new("node").arg("--version").output().is_err() {
+            assert!(std::env::var("LEAN_NEED_NODE").is_err(), "node is needed for the fake ACME server (LEAN_NEED_NODE is set)");
+            eprintln!("skipped: the fake ACME server needs node");
             return;
         }
         let dir = std::env::temp_dir().join(format!("lean-acme-{}", std::process::id()));

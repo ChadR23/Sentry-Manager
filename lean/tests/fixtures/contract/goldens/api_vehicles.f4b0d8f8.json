@@ -1,0 +1,183 @@
+{
+  "route": "GET /api/vehicles",
+  "method": "GET",
+  "request": {
+    "path": "/api/vehicles"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "carModels": [
+        {
+          "generations": [
+            {
+              "id": "3-2017",
+              "label": "2017-2023"
+            },
+            {
+              "id": "3-2024",
+              "label": "2024 and later (Highland)"
+            }
+          ],
+          "id": "3",
+          "label": "Model 3"
+        },
+        {
+          "generations": [
+            {
+              "id": "Y-2020",
+              "label": "2020-2024"
+            },
+            {
+              "id": "Y-2025",
+              "label": "2025 and later (Juniper)"
+            }
+          ],
+          "id": "Y",
+          "label": "Model Y"
+        },
+        {
+          "generations": [
+            {
+              "id": "S-2012",
+              "label": "2012-2014 (before Autopilot hardware)"
+            },
+            {
+              "id": "S-2015",
+              "label": "2015-2020"
+            },
+            {
+              "id": "S-2021",
+              "label": "2021 and later (refresh)"
+            }
+          ],
+          "id": "S",
+          "label": "Model S"
+        },
+        {
+          "generations": [
+            {
+              "id": "X-2016",
+              "label": "2016-2020"
+            },
+            {
+              "id": "X-2021",
+              "label": "2021 and later (refresh)"
+            }
+          ],
+          "id": "X",
+          "label": "Model X"
+        }
+      ],
+      "footageDays": 3,
+      "vehicles": [
+        {
+          "binBytes": 0,
+          "binItems": 0,
+          "car": {
+            "detected": null,
+            "generation": null,
+            "generationLabel": null,
+            "legacy": false,
+            "model": null,
+            "modelLabel": null,
+            "profile": "tesla-3y",
+            "setting": {
+              "generation": "auto",
+              "model": "auto"
+            },
+            "source": "default",
+            "year": null
+          },
+          "id": "contract-car",
+          "inventory": {
+            "byCategory": {
+              "Recent": {
+                "bytes": 4290504,
+                "recordings": 2
+              },
+              "Saved": {
+                "bytes": 1055428,
+                "recordings": 1
+              },
+              "Sentry": {
+                "bytes": 1055438,
+                "recordings": 1
+              }
+            },
+            "bytes": 6401370,
+            "days": 3,
+            "files": 22,
+            "firstDay": "2024-05-01",
+            "lastDay": "2024-05-03",
+            "minutes": 5,
+            "recordings": 4,
+            "scannedAt": "<time>"
+          },
+          "name": "Contract Car",
+          "policy": {
+            "binDays": null,
+            "enabled": false,
+            "keepDays": {
+              "Other": null,
+              "Recent": null,
+              "Saved": null,
+              "Sentry": null
+            },
+            "lastResult": null,
+            "lastRunAt": null,
+            "maxGB": null,
+            "runAt": "03:30"
+          },
+          "root": "{root:contract-car}",
+          "saved": {
+            "bytes": 0,
+            "clips": 0
+          },
+          "scanning": false,
+          "security": null,
+          "share": {
+            "checkedAt": "<time>",
+            "freeBytes": "<bytes>",
+            "fsType": null,
+            "healthy": true,
+            "hint": null,
+            "lastError": null,
+            "mode": "local",
+            "mounted": false,
+            "mountedAt": null,
+            "network": false,
+            "path": "{root:contract-car}",
+            "readOnly": false,
+            "readable": true,
+            "renameOverwrite": true,
+            "share": null,
+            "source": null,
+            "totalBytes": "<bytes>",
+            "warning": "Nothing is mounted at {root:contract-car}, so the manager is looking at the container's own disk. Set SMB_SHARE or add a volume for {root:contract-car}.",
+            "writable": true,
+            "writeCheckedAt": "<time>"
+          },
+          "source": {
+            "path": "{root:contract-car}",
+            "type": "path"
+          },
+          "storage": {
+            "capped": false,
+            "daysLeft": null,
+            "free": "<bytes>",
+            "perDay": 0,
+            "total": "<bytes>"
+          },
+          "studioRoot": "{root:contract-car}/TeslaCam",
+          "timezone": "UTC"
+        }
+      ]
+    }
+  }
+}

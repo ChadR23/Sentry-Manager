@@ -1,14 +1,19 @@
-//! The Rust report client against the Node code it ports, on the same input:
+//! The Rust report client against the Node code it ports, on the same input
+//! (Node's answers frozen in tests/fixtures/node-reference/reports-*.json):
 //!   - the scrubber (server/reportsScrub.js cleanReport), anonymous or not;
 //!   - the payload schema (reportsProtocol.js validatePayload);
 //!   - the heartbeat block (reports.js normalizeHeartbeat);
-//!   - and the whole round trip against the tests' local fake receiver
-//!     (test/fixtures/reportsReceiver.js, on 127.0.0.1): it checks the body,
+//!   - and the whole round trip against the tests' local stand-in receiver
+//!     (tests/fixtures/js/receiver.js, on 127.0.0.1): it checks the body,
 //!     the proof of work and the signature, opens the sealed report with the
-//!     Node code and validates it, so a report the Rust client makes is one
-//!     the developers' receiver takes.
+//!     protocol's JavaScript and validates it, so a report the Rust client
+//!     makes is one the developers' receiver takes.
 //!
-//! Nothing is ever sent anywhere but 127.0.0.1. Skipped when node is missing.
+//! Nothing is ever sent anywhere but 127.0.0.1. The round trips need node
+//! (skipped with a note without it, failed when LEAN_NEED_NODE=1).
+
+#[path = "support/reference.rs"]
+mod reference;
 
 use sentry_lean::ops::net::{HttpReq, HttpRes, Https, Transport};
 use sentry_lean::ops::reports::{scrub, Reports};
@@ -20,31 +25,28 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 
+/// node, for the stand-in receiver.
 fn node() -> bool {
     let ok = Command::new("node").arg("--version").output().map(|o| o.status.success()).unwrap_or(false);
     if !ok {
-        eprintln!("skipped: node is needed for the Node side");
+        assert!(std::env::var("LEAN_NEED_NODE").is_err(), "node is needed for the stand-in receiver (LEAN_NEED_NODE is set)");
+        eprintln!("skipped: node is needed for the stand-in receiver");
     }
     ok
 }
 
-fn script() -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("parity/reports.js")
+fn receiver_script() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/js/receiver.js")
 }
 
+/// What the Node code answered (lean/parity/reports.js <mode>, frozen).
 fn node_says(mode: &str, input: &Value) -> Value {
-    let mut c = Command::new("node").arg(script()).arg(mode).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
-    c.stdin.take().unwrap().write_all(input.to_string().as_bytes()).unwrap();
-    let out = c.wait_with_output().unwrap();
-    assert!(out.status.success());
-    serde_json::from_slice(&out.stdout).unwrap()
+    let key = json!({ "mode": mode, "cases": input });
+    reference::answer(&format!("reports-{mode}"), &[], &key)
 }
 
 #[test]
 fn the_scrubber_answers_as_node() {
-    if !node() {
-        return;
-    }
     let ids: Vec<Value> = ["tower", "Daily Driver", "veh-abc123", "/footage/daily", "bob", "SentryPi", "Home WiFi", "Mom's house", "nas", "ab", "x.y"].iter().map(|s| json!(s)).collect();
     let texts = [
         "from 192.168.1.50:445 ok",
@@ -97,9 +99,6 @@ fn the_scrubber_answers_as_node() {
 
 #[test]
 fn the_payload_schema_and_the_heartbeat_answer_as_node() {
-    if !node() {
-        return;
-    }
     let base = json!({ "kind": "feedback", "sentAt": "2026-11-15T10:00:00.000Z", "install": "a".repeat(32), "anonymous": false, "build": { "build": 130, "sha": "1345348", "builtAt": null, "tag": null }, "ui": "original", "message": "hello" });
     let with = |patch: Value| {
         let mut p = base.clone();
@@ -153,7 +152,7 @@ struct Receiver {
 impl Receiver {
     fn start(difficulty: u32, moved_to: Option<&str>) -> Receiver {
         let mut cmd = Command::new("node");
-        cmd.arg(script()).arg("receiver").arg(difficulty.to_string());
+        cmd.arg(receiver_script()).arg(difficulty.to_string());
         if let Some(m) = moved_to {
             cmd.arg(m);
         }
@@ -201,7 +200,7 @@ fn a_report_from_the_rust_client_is_taken_by_the_receiver() {
     }
     let r = Receiver::start(6, None);
     let (ctx, rep) = client(&r);
-    assert_eq!(rep.status()["configured"], true);
+    assert_eq!(rep.status().unwrap()["configured"], true);
     let pv = rep.preview(&json!({ "kind": "feedback", "message": "Love it", "contact": "me@example.org", "attach": true })).unwrap();
     let sent = rep.send_preview(&pv["previewId"]).unwrap();
     assert_eq!(sent["result"], "sent", "{sent}");
@@ -216,9 +215,9 @@ fn a_report_from_the_rust_client_is_taken_by_the_receiver() {
     let sp = rep.preview(&json!({ "kind": "support", "message": "Encoder stuck" })).unwrap();
     assert_eq!(rep.send_preview(&sp["previewId"]).unwrap()["result"], "sent");
     assert_eq!(r.index()[1]["trust"], "verified");
-    let refs: Vec<Value> = rep.status()["sentRefs"].as_array().unwrap().iter().map(|x| x["kind"].clone()).collect();
+    let refs: Vec<Value> = rep.status().unwrap()["sentRefs"].as_array().unwrap().iter().map(|x| x["kind"].clone()).collect();
     assert_eq!(refs, [json!("support"), json!("feedback")]);
-    assert_eq!(rep.status()["installCode"], json!(&pv["payload"]["install"].as_str().unwrap()[..8]));
+    assert_eq!(rep.status().unwrap()["installCode"], json!(&pv["payload"]["install"].as_str().unwrap()[..8]));
 
     // anonymous: ANON install, a key of its own
     let rep = Arc::clone(&rep);
@@ -253,7 +252,7 @@ fn a_report_from_the_rust_client_is_taken_by_the_receiver() {
     let res = rep.enqueue(&pl).unwrap();
     assert_eq!(res["result"], "retry");
     assert_eq!(res["status"], 429);
-    assert!(rep.status()["lastError"]["message"].as_str().unwrap().contains("busy"));
+    assert!(rep.status().unwrap()["lastError"]["message"].as_str().unwrap().contains("busy"));
     assert_eq!(rep.outbox().len(), 1);
     assert!(ctx.data.join("reports/install-key.pem").exists() && ctx.data.join("reports/anon-key.pem").exists());
 }
@@ -286,19 +285,19 @@ fn a_signed_move_is_followed_and_a_forged_one_is_not() {
     let env: HashMap<String, String> = [("NODE_ENV", "test"), ("REPORTS_PUBLIC_KEY", moved.line.as_str())].iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
     let map = Mapped(vec![("https://reports.skittles.live".into(), moved.url.clone()), ("https://reports2.example.org".into(), target.url.clone())]);
     let rep = Reports::new(ctx.clone(), env.clone(), json!({}), Arc::new(map), None);
-    assert_eq!(rep.endpoint(), "https://reports.skittles.live");
+    assert_eq!(rep.endpoint().unwrap(), "https://reports.skittles.live");
     rep.remote_config(true).unwrap();
-    assert_eq!(rep.endpoint(), "https://reports2.example.org");
-    assert_eq!(sentry_lean::ops::store::get(&ctx.db.lock().unwrap(), "reports-state").unwrap()["moved"]["url"], "https://reports2.example.org");
+    assert_eq!(rep.endpoint().unwrap(), "https://reports2.example.org");
+    assert_eq!(sentry_lean::ops::store::get(&ctx.db.lock().unwrap(), "reports-state").unwrap().unwrap()["moved"]["url"], "https://reports2.example.org");
 
     // REPORTS_URL set by hand is never moved
     let fixed = Reports::new(FakeCtx::new(), env_for(&moved), json!({}), Arc::new(Https), None);
     fixed.remote_config(true).unwrap();
-    assert_eq!(fixed.endpoint(), moved.url);
+    assert_eq!(fixed.endpoint().unwrap(), moved.url);
 
     // a move signed by another receiver's key is ignored
     let forged = Receiver::start(4, Some("https://evil.example.org"));
     let other = Reports::new(FakeCtx::new(), env, json!({}), Arc::new(Mapped(vec![("https://reports.skittles.live".into(), forged.url.clone())])), None);
     other.remote_config(true).unwrap();
-    assert_eq!(other.endpoint(), "https://reports.skittles.live");
+    assert_eq!(other.endpoint().unwrap(), "https://reports.skittles.live");
 }

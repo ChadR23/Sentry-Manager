@@ -161,6 +161,8 @@ pub struct SpeedIndex {
     names: Mutex<HashMap<String, (u64, HashMap<String, Vec<String>>)>>,
     /// the telemetry limiter (telemetry.limit): full reads at once
     full_reads: Arc<super::telemetry_api::Limiter>,
+    /// clips that could not be read: vehicle/rel -> (size, mtime, when)
+    failed: Mutex<HashMap<String, (u64, f64, Instant)>>,
 }
 
 fn key_of(vid: &str, day: &str) -> String {
@@ -231,32 +233,49 @@ fn same(e: &Entry, f: Option<(f64, f64)>) -> bool {
     matches!(f, Some((s, m)) if e.num(0) == Some(s) && e.num(1) == Some(m))
 }
 
-/// speedsFor: the quick read, else the dashboard's full read (speeds only).
-pub fn speeds_for(real: &Path, size: u64, mode: Mode, full: &super::telemetry_api::Limiter) -> (Value, Value) {
-    match speed_reader::read_samples(real, mode) {
-        Ok(None) => (Value::Null, Value::Null),
+/// speedsFor: the quick read, else the dashboard's full read (speeds only). `background`: the
+/// index filling in, whose full read leaves the way to the Viewer's; else someone is waiting.
+pub fn speeds_for(real: &Path, size: u64, mode: Mode, full: &super::telemetry_api::Limiter, background: bool) -> (Value, Value) {
+    speeds_read(real, size, mode, full, background).unwrap_or((Value::Null, Value::Null))
+}
+
+/// speeds_for, or None when the clip could not be read (gone, its folder shut, a read error, a
+/// clip shorter than the scan saw): no answer, so nothing is noted for it. A clip read whole
+/// without speeds in it is an answer (null).
+pub fn speeds_read(real: &Path, size: u64, mode: Mode, full: &super::telemetry_api::Limiter, background: bool) -> Option<(Value, Value)> {
+    let quick = speed_reader::read_samples(real, mode);
+    // (shorter than the scan saw: changed since, so what was read is not that clip's)
+    if quick.is_ok() && std::fs::metadata(real).map_or(true, |m| m.len() < size) {
+        return None;
+    }
+    match quick {
+        Ok(None) => Some((Value::Null, Value::Null)),
         Ok(Some(samples)) => {
             let speeds: Vec<Value> = samples.iter().map(|x| x.and_then(|x| x.v).map_or(Value::Null, |v| num(r2(v)))).collect();
-            (Value::Array(speeds), summarize(&samples))
+            Some((Value::Array(speeds), summarize(&samples)))
         }
         Err(err) => {
-            let _slot = full.take();
+            let _slot = if background { full.take_background() } else { full.take() };
+            // (the full read tells a read error from a clip without telemetry: telemetry::Fail)
             match crate::telemetry::read_records(real, size) {
-                Ok(frames) => match crate::telemetry::speeds_of(&frames) {
+                Ok(frames) => Some(match crate::telemetry::speeds_of(&frames) {
                     Some(sp) => {
                         let samples: Vec<Option<Sample>> = sp.iter().map(|&v| Some(Sample { v, ..Sample::default() })).collect();
                         (Value::Array(sp.iter().map(|v| v.map_or(Value::Null, num)).collect()), summarize(&samples))
                     }
                     None => (Value::Null, Value::Null),
-                },
+                }),
                 Err(_) => {
-                    eprintln!("Speed index: no speeds in {} ({})", name_of(&real.to_string_lossy()), err);
-                    (Value::Null, Value::Null)
+                    eprintln!("Speed index: {} could not be read ({}), read again later", name_of(&real.to_string_lossy()), err);
+                    None
                 }
             }
         }
     }
 }
+
+/// A clip the speed index could not read is read again after this long (or once it changed).
+const RETRY_AFTER: Duration = Duration::from_secs(3600);
 
 struct Todo {
     vid: String,
@@ -283,6 +302,7 @@ impl SpeedIndex {
             stopped: AtomicBool::new(false),
             names: Mutex::new(HashMap::new()),
             full_reads,
+            failed: Mutex::new(HashMap::new()),
         })
     }
 
@@ -421,16 +441,28 @@ impl SpeedIndex {
         let data = self.load(&c.vid, &c.day);
         let mode = self.pick_mode();
         let t0 = Instant::now();
-        let (sp, sum) = speeds_for(&c.root.join(&c.rel), c.size, mode, &self.full_reads);
+        let path = c.root.join(&c.rel);
+        let read = speeds_read(&path, c.size, mode, &self.full_reads, true);
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
         self.pace.done(ms);
         self.mode_done(mode, ms);
-        // changed while it was read (converted, say): the next pass reads it again
+        // changed while it was read (converted, say): the next pass reads it again; could not be
+        // read (a clip kept from the last scan while its folder cannot be, a read error): again
+        // after RETRY_AFTER
         let files = self.ctx.files(&c.vid);
-        if now_of(files.as_ref(), &c.rel) == Some((c.size as f64, c.mtime)) {
-            data.lock().unwrap().insert(c.rel.clone(), Entry::from_value(json!([c.size, num(c.mtime), sp, sum])));
-            let mut inner = self.inner.lock().unwrap();
-            Self::touch(&mut inner, &key);
+        let failed_key = format!("{}/{}", c.vid, c.rel);
+        match read {
+            Some((sp, sum)) => {
+                self.failed.lock().unwrap().remove(&failed_key);
+                if now_of(files.as_ref(), &c.rel) == Some((c.size as f64, c.mtime)) {
+                    data.lock().unwrap().insert(c.rel.clone(), Entry::from_value(json!([c.size, num(c.mtime), sp, sum])));
+                    let mut inner = self.inner.lock().unwrap();
+                    Self::touch(&mut inner, &key);
+                }
+            }
+            None => {
+                self.failed.lock().unwrap().insert(failed_key, (c.size, c.mtime, Instant::now()));
+            }
         }
         {
             let mut p = self.progress.lock().unwrap();
@@ -440,6 +472,8 @@ impl SpeedIndex {
     }
 
     fn pass(&self) -> usize {
+        // (clips that could not be read and are no longer there are forgotten)
+        self.failed.lock().unwrap().retain(|k, _| k.split_once('/').is_some_and(|(vid, rel)| self.ctx.files(vid).is_some_and(|f| f.get(rel).is_some())));
         let mut todo: Vec<Todo> = Vec::new();
         let (mut upgraded, mut relocated) = (0, 0);
         for v in self.ctx.vehicles() {
@@ -464,6 +498,9 @@ impl SpeedIndex {
                     }
                 }
                 drop(d);
+                if self.failed.lock().unwrap().get(&format!("{}/{rel}", v.id)).is_some_and(|(s, m, at)| *s == size && *m == mtime && at.elapsed() < RETRY_AFTER) {
+                    continue;
+                }
                 todo.push(Todo { vid: v.id.clone(), day, rel, size, mtime, root: v.root.clone() });
             }
         }
@@ -937,8 +974,10 @@ impl SpeedIndex {
     pub fn clip(&self, vid: Option<&str>, rel: Option<&str>, real: &Path, size: u64, mtime_ms: f64) -> Value {
         let files = vid.and_then(|v| self.ctx.files(v));
         let f = rel.and_then(|r| files.as_ref().and_then(|fs| fs.get(r)).cloned());
-        let (sp, sum) = speeds_for(real, size, Mode::Short, &self.full_reads);
+        // (could not be read: no answer, and nothing noted)
+        let Some((sp, sum)) = speeds_read(real, size, Mode::Short, &self.full_reads, false) else { return Value::Null };
         let (Some(vid), Some(rel)) = (vid, rel) else { return sp };
+        self.failed.lock().unwrap().remove(&format!("{vid}/{rel}"));
         let now = self.ctx.files(vid);
         let same = now_of(now.as_ref(), rel) == Some((size as f64, js::js_round(mtime_ms)));
         if let Some(f) = f.filter(|f| same && is_day_shape(&f.day) && f.camera.as_deref() == Some("front")) {

@@ -463,24 +463,37 @@ impl Nodes {
         w.insert(id.into(), (n + by).max(0));
     }
 
-    /// The paired nodes as stored (each with an id and a token).
-    pub fn stored(&self) -> Vec<Value> {
-        let v = self.0.ctx.setting(SETTINGS_KEY).unwrap_or_else(|| json!([]));
-        v.as_array().map(|a| a.iter().filter(|n| n["id"].is_string() && n["token"].is_string()).cloned().collect()).unwrap_or_default()
+    /// manager.db failing: logged here (once), a 500 to whoever asked.
+    fn db_failed(&self, e: String) -> NodeError {
+        self.0.ctx.log(Level::Error, &format!("Paired nodes: {e}"));
+        NodeError::new("Internal error", 500, "NODE_ERROR")
     }
 
-    fn save(&self, list: &[Value]) {
-        self.0.ctx.set_setting(SETTINGS_KEY, &Value::Array(list.to_vec()));
+    /// The paired nodes as stored (each with an id and a token); an error when they cannot be
+    /// read (never none: saved, that would unpair every node).
+    pub fn stored(&self) -> Result<Vec<Value>, NodeError> {
+        let v = self.0.ctx.setting(SETTINGS_KEY).map_err(|e| self.db_failed(e))?.unwrap_or_else(|| json!([]));
+        Ok(v.as_array().map(|a| a.iter().filter(|n| n["id"].is_string() && n["token"].is_string()).cloned().collect()).unwrap_or_default())
     }
 
-    fn by_id(&self, id: &str) -> Option<Value> {
-        self.stored().into_iter().find(|n| n["id"].as_str() == Some(id))
+    /// The nodes for what is only planned around or shown (lanes, power, hardware, the vehicles
+    /// lists): none when they cannot be read (logged in `stored`).
+    fn known(&self) -> Vec<Value> {
+        self.stored().unwrap_or_default()
+    }
+
+    fn save(&self, list: &[Value]) -> Result<(), NodeError> {
+        self.0.ctx.set_setting(SETTINGS_KEY, &Value::Array(list.to_vec())).map_err(|e| self.db_failed(e))
+    }
+
+    fn by_id(&self, id: &str) -> Result<Option<Value>, NodeError> {
+        Ok(self.stored()?.into_iter().find(|n| n["id"].as_str() == Some(id)))
     }
 
     /// stored().map(n => n.id === id ? change(n) : n), saved
-    fn update(&self, id: &str, change: impl Fn(&mut Map<String, Value>)) {
+    fn update(&self, id: &str, change: impl Fn(&mut Map<String, Value>)) -> Result<(), NodeError> {
         let _g = self.0.saving.lock().unwrap();
-        let list: Vec<Value> = self.stored().into_iter().map(|mut n| {
+        let list: Vec<Value> = self.stored()?.into_iter().map(|mut n| {
             if n["id"].as_str() == Some(id) {
                 if let Some(o) = n.as_object_mut() {
                     change(o);
@@ -488,7 +501,7 @@ impl Nodes {
             }
             n
         }).collect();
-        self.save(&list);
+        self.save(&list)
     }
 
     fn target(node: &Value) -> Target {
@@ -543,31 +556,34 @@ impl Nodes {
             };
             self.0.info.lock().unwrap().insert(id.clone(), info);
             self.note_power(&id, j);
-            // remembered with the node when they change, for when it does not answer
+            // remembered with the node when they change, for when it does not answer (a list that
+            // cannot be read or kept is logged in stored or save: the node still answered)
             let _g = self.0.saving.lock().unwrap();
-            if let Some(current) = self.by_id(&id) {
+            if let Ok(Some(current)) = self.by_id(&id) {
                 let now_listed = devices.as_deref().map(listed_of).unwrap_or(Value::Null);
                 let kept = current.get("devices").cloned().filter(|d| crate::ops::js::truthy(d)).unwrap_or(Value::Null);
                 if kept.to_string() != now_listed.to_string() {
-                    let list: Vec<Value> = self.stored().into_iter().map(|mut n| {
-                        if n["id"].as_str() == Some(&id) {
-                            if let Some(o) = n.as_object_mut() {
-                                o.shift_remove("devices");
-                                if !now_listed.is_null() {
-                                    o.insert("devices".into(), now_listed.clone());
+                    if let Ok(stored) = self.stored() {
+                        let list: Vec<Value> = stored.into_iter().map(|mut n| {
+                            if n["id"].as_str() == Some(&id) {
+                                if let Some(o) = n.as_object_mut() {
+                                    o.shift_remove("devices");
+                                    if !now_listed.is_null() {
+                                        o.insert("devices".into(), now_listed.clone());
+                                    }
                                 }
                             }
-                        }
-                        n
-                    }).collect();
-                    self.save(&list);
+                            n
+                        }).collect();
+                        self.save(&list).ok();
+                    }
                 }
             }
             Ok(())
         })();
         if let Err(e) = result {
             // offline: its devices as last known, so their lanes stay
-            let known = before.as_ref().and_then(|b| b.devices.clone()).or_else(|| self.by_id(&id).and_then(|n| stored_devices(&n)));
+            let known = before.as_ref().and_then(|b| b.devices.clone()).or_else(|| self.by_id(&id).ok().flatten().and_then(|n| stored_devices(&n)));
             let info = Info { at: self.now(), online: false, error: Some(e.message), name: None, encoders: json!({}), slots: None, busy: None, encoding: None, devices: known, hardware: before.map(|b| b.hardware).unwrap_or(Value::Null) };
             self.0.info.lock().unwrap().insert(id.clone(), info);
         }
@@ -634,19 +650,26 @@ impl Nodes {
         Nodes::wait(&p, None)
     }
 
-    /// refresh(id) as nodes.js exports it: None when there is no such node.
+    /// refresh(id) as nodes.js exports it: None when there is no such node (or the nodes
+    /// cannot be read, logged in `stored`).
     pub fn refresh(&self, id: &str) -> Option<Info> {
-        let node = self.by_id(id)?;
+        let node = self.by_id(id).ok()??;
         Some(self.refresh_now(&node))
     }
 
-    pub fn has(&self, id: &str) -> bool {
-        self.by_id(id).is_some()
+    pub fn has(&self, id: &str) -> Result<bool, NodeError> {
+        Ok(self.by_id(id)?.is_some())
     }
 
-    /// The paired nodes as encoding devices for the converter's lanes.
+    /// The paired nodes as encoding devices for the converter's lanes (none when the nodes cannot
+    /// be read, logged in `stored`).
     pub fn list(&self) -> Vec<Value> {
-        let nodes = self.stored();
+        self.list_checked().unwrap_or_default()
+    }
+
+    /// list(), with an error when the paired nodes cannot be read (an answer never leaves them out).
+    pub fn list_checked(&self) -> Result<Vec<Value>, NodeError> {
+        let nodes = self.stored()?;
         let infos: Vec<Option<Info>> = std::thread::scope(|s| {
             let hs: Vec<_> = nodes.iter().map(|n| s.spawn(|| self.fresh(n, true))).collect();
             hs.into_iter().map(|h| h.join().ok().flatten()).collect()
@@ -676,13 +699,13 @@ impl Nodes {
                 }));
             }
         }
-        out
+        Ok(out)
     }
 
     /// Each paired node's power for "All servers": [{ id, name, online, power }]. Never waits.
     pub fn power(&self) -> Vec<Value> {
         let t = self.now();
-        self.stored().iter().map(|node| {
+        self.known().iter().map(|node| {
             self.fresh(node, false);
             let id = super::js_text(&node["id"]);
             let online = self.0.info.lock().unwrap().get(&id).is_some_and(|i| i.online);
@@ -702,7 +725,7 @@ impl Nodes {
 
     /// Each paired node's hardware as it last named it, for the heartbeat. Never waits.
     pub fn hardware(&self) -> Vec<Value> {
-        self.stored().iter().map(|node| {
+        self.known().iter().map(|node| {
             self.fresh(node, false);
             let id = super::js_text(&node["id"]);
             let i = self.0.info.lock().unwrap().get(&id).cloned();
@@ -713,14 +736,14 @@ impl Nodes {
     }
 
     /// What the Nodes page shows (a node slow to answer is shown as last known after 1.5 s).
-    pub fn overview(&self) -> Vec<Value> {
-        let nodes = self.stored();
+    pub fn overview(&self) -> Result<Vec<Value>, NodeError> {
+        let nodes = self.stored()?;
         let pending: Vec<Arc<Pending>> = nodes.iter().map(|n| self.start_refresh(n)).collect();
         let end = std::time::Instant::now() + Duration::from_millis(1500);
         for p in &pending {
             Nodes::wait(p, Some(end.saturating_duration_since(std::time::Instant::now())));
         }
-        nodes.iter().map(|node| {
+        Ok(nodes.iter().map(|node| {
             let id = super::js_text(&node["id"]);
             let i = self.0.info.lock().unwrap().get(&id).cloned();
             let devices = i.as_ref().and_then(|i| i.devices.clone());
@@ -762,7 +785,7 @@ impl Nodes {
             o.insert("cars".into(), if node["cars"].is_array() { node["cars"].clone() } else { json!([]) });
             o.insert("trusted".into(), json!(node["trusted"] == json!(true)));
             Value::Object(o)
-        }).collect()
+        }).collect())
     }
 
     /// Pairs with a node that is showing a pairing code.
@@ -772,7 +795,7 @@ impl Nodes {
         if key.chars().count() != 12 {
             return Err(NodeError::bad("Enter the 12-character pairing code shown on the node."));
         }
-        let nodes = self.stored();
+        let nodes = self.stored()?;
         if nodes.len() >= MAX_NODES {
             return Err(NodeError::bad(format!("At most {MAX_NODES} nodes.")));
         }
@@ -814,9 +837,9 @@ impl Nodes {
         let node = json!({ "id": id, "name": name, "host": host, "port": port, "token": token, "pin": { "fingerprint": probe.fingerprint, "authority": authority }, "pairedAt": self.now() });
         {
             let _g = self.0.saving.lock().unwrap();
-            let mut list = self.stored();
+            let mut list = self.stored()?;
             list.push(node.clone());
-            self.save(&list);
+            self.save(&list)?;
         }
         self.refresh_now(&node);
         Ok(node)
@@ -824,7 +847,7 @@ impl Nodes {
 
     /// A name of your own for the node: Ok(None) when there is no such node.
     pub fn rename(&self, id: &str, new_name: &Value) -> Result<Option<(Value, String)>, NodeError> {
-        let Some(node) = self.by_id(id) else { return Ok(None) };
+        let Some(node) = self.by_id(id)? else { return Ok(None) };
         let Some(s) = new_name.as_str() else { return Err(NodeError::bad("Enter a name.")) };
         let clean = peer_str(s, 64);
         if clean.is_empty() {
@@ -832,13 +855,13 @@ impl Nodes {
         }
         self.update(id, |o| {
             o.insert("name".into(), json!(clean));
-        });
+        })?;
         Ok(Some((node["name"].clone(), clean)))
     }
 
     /// The vehicles a node converts for first, in order (at most 64).
     pub fn set_cars(&self, id: &str, cars: &Value) -> Result<Option<Vec<String>>, NodeError> {
-        if self.by_id(id).is_none() {
+        if self.by_id(id)?.is_none() {
             return Ok(None);
         }
         let ok = |c: &Value| c.as_str().is_some_and(|s| {
@@ -856,18 +879,20 @@ impl Nodes {
         let v = json!(list);
         self.update(id, |o| {
             o.insert("cars".into(), v.clone());
-        });
+        })?;
         Ok(Some(list))
     }
 
     /// Trusted: its encodes skip the picture check here. None when there is no such node.
-    pub fn set_trusted(&self, id: &str, trusted: &Value) -> Option<bool> {
-        self.by_id(id)?;
+    pub fn set_trusted(&self, id: &str, trusted: &Value) -> Result<Option<bool>, NodeError> {
+        if self.by_id(id)?.is_none() {
+            return Ok(None);
+        }
         let t = trusted == &json!(true);
         self.update(id, |o| {
             o.insert("trusted".into(), json!(t));
-        });
-        Some(t)
+        })?;
+        Ok(Some(t))
     }
 
     /// The node of any lane ("node:<id>@<device>", "node:<id>" or a plain id).
@@ -878,14 +903,16 @@ impl Nodes {
         }
     }
 
+    /// (a node that cannot be read is not trusted: its encodes get the picture check)
     pub fn trusted(&self, id: &str) -> bool {
-        self.by_id(&Nodes::node_id_of(id)).is_some_and(|n| n["trusted"] == json!(true))
+        self.by_id(&Nodes::node_id_of(id)).ok().flatten().is_some_and(|n| n["trusted"] == json!(true))
     }
 
-    /// A vehicle removed: out of every node's Vehicles first list.
+    /// A vehicle removed: out of every node's Vehicles first list (a list that cannot be read
+    /// or kept is logged in stored or save).
     pub fn forget_car(&self, car: &str) {
         let _g = self.0.saving.lock().unwrap();
-        let all = self.stored();
+        let Ok(all) = self.stored() else { return };
         let has = |n: &Value| n["cars"].as_array().is_some_and(|a| a.iter().any(|c| c.as_str() == Some(car)));
         if !all.iter().any(has) {
             return;
@@ -897,28 +924,28 @@ impl Nodes {
             }
             n
         }).collect();
-        self.save(&list);
+        self.save(&list).ok();
     }
 
     /// { 'node:<id>': [vehicle id, ...] } for the nodes that have a list.
     pub fn car_lists(&self) -> IndexMap<String, Vec<String>> {
-        self.stored().iter().filter_map(|n| {
+        self.known().iter().filter_map(|n| {
             let a = n["cars"].as_array().filter(|a| !a.is_empty())?;
             Some((format!("node:{}", super::js_text(&n["id"])), a.iter().map(super::js_text).collect()))
         }).collect()
     }
 
-    pub fn remove(&self, id: &str) -> Option<Value> {
-        let node = self.by_id(id)?;
+    pub fn remove(&self, id: &str) -> Result<Option<Value>, NodeError> {
+        let Some(node) = self.by_id(id)? else { return Ok(None) };
         {
             let _g = self.0.saving.lock().unwrap();
-            let list: Vec<Value> = self.stored().into_iter().filter(|n| n["id"].as_str() != Some(id)).collect();
-            self.save(&list);
+            let list: Vec<Value> = self.stored()?.into_iter().filter(|n| n["id"].as_str() != Some(id)).collect();
+            self.save(&list)?;
         }
         self.0.info.lock().unwrap().remove(id);
         self.0.powers.lock().unwrap().remove(id);
         self.0.working.lock().unwrap().remove(id);
-        Some(node)
+        Ok(Some(node))
     }
 
     fn known_devices(&self, node: &Value) -> Option<Vec<NodeDevice>> {
@@ -929,7 +956,7 @@ impl Nodes {
     /// The converter's remoteEncode: sends `source` to the node, follows its
     /// progress and writes the encoded file to `target` (created new).
     pub fn encode(&self, req: EncodeRequest) -> Result<RemoteChild, NodeError> {
-        let Some(node) = self.by_id(&Nodes::node_id_of(&req.device)) else { return Err(NodeError::new("No such node.", 404, "NODE_ERROR")) };
+        let Some(node) = self.by_id(&Nodes::node_id_of(&req.device))? else { return Err(NodeError::new("No such node.", 404, "NODE_ERROR")) };
         let node_id = super::js_text(&node["id"]);
         let on_device = node_device_of(&req.device).map(String::from).or_else(|| default_device_of(self.known_devices(&node).as_ref()));
         let (tx, rx) = mpsc::channel();
@@ -1189,7 +1216,7 @@ impl Nodes {
     /// Sets how many clips the node converts at once: a number (its default
     /// device, or the whole node of an older version), or { lane or device id: 0..8 }.
     pub fn set_slots(&self, id: &str, slots: &Value) -> Result<Option<Info>, NodeError> {
-        let Some(node) = self.by_id(&Nodes::node_id_of(id)) else { return Err(NodeError::new("No such node.", 404, "NODE_ERROR")) };
+        let Some(node) = self.by_id(&Nodes::node_id_of(id))? else { return Err(NodeError::new("No such node.", 404, "NODE_ERROR")) };
         let body = if let Some(o) = slots.as_object() {
             let entries: Vec<(String, &Value)> = o.iter().map(|(k, n)| (node_device_of(k).map(String::from).unwrap_or_else(|| k.clone()), n)).collect();
             if entries.is_empty() || entries.len() > MAX_NODE_DEVICES || entries.iter().any(|(k, n)| !is_local_device(k) || safe_int(n).is_none_or(|n| !(0..=MAX_SLOTS).contains(&n))) {

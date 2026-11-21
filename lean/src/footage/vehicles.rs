@@ -10,6 +10,7 @@
 //! share or nest inside each other's folders.
 
 use super::ctx::{Ctx, Fail, Level, Res};
+use super::mdb::DbResult;
 use super::js;
 use super::share::{Share, ShareEvent};
 use serde_json::{json, Map, Value};
@@ -38,6 +39,17 @@ pub struct Vehicle {
 impl Vehicle {
     pub fn is_smb(&self) -> bool {
         self.source.get("type").and_then(Value::as_str) != Some("path")
+    }
+
+    /// The footage this vehicle's scans read: its folder, and for a share which share (a share is
+    /// mounted on the same folder whichever it is). What is known of one is not used for another.
+    pub fn source_key(&self) -> String {
+        let root = self.root.to_string_lossy();
+        if !self.is_smb() {
+            return root.into_owned();
+        }
+        let s = |k: &str| self.source.get(k).map_or(String::new(), |v| v.as_str().map_or_else(|| v.to_string(), String::from));
+        format!("{root} (SMB {} port {})", s("share"), s("port"))
     }
 }
 
@@ -118,6 +130,21 @@ pub struct Vehicles {
     events: OnceLock<Box<dyn Fn(VehicleEvent) + Send + Sync>>,
     /// one add / update / remove at a time
     edit: Mutex<()>,
+    /// the list could not be read the last time: logged once until it can
+    unread: std::sync::atomic::AtomicBool,
+}
+
+/// Refused when `root` overlaps the footage of one of `list` (other than `ignore`).
+fn overlap(list: &[Vehicle], root: &Path, ignore: Option<&str>) -> Res<()> {
+    for v in list {
+        if Some(v.id.as_str()) == ignore {
+            continue;
+        }
+        if is_inside(root, &v.root) || is_inside(&v.root, root) {
+            return Err(bad(format!("That folder overlaps the footage of {} ({}).", v.name, v.root.display())));
+        }
+    }
+    Ok(())
 }
 
 fn of_raw(raw: &Value, footage_root: &Path) -> Option<Vehicle> {
@@ -153,6 +180,7 @@ impl Vehicles {
             studio_roots: Mutex::new(HashMap::new()),
             events: OnceLock::new(),
             edit: Mutex::new(()),
+            unread: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -171,23 +199,52 @@ impl Vehicles {
         &self.footage_root
     }
 
-    fn raw_list(&self) -> Vec<Value> {
-        match self.ctx.db().get("vehicles") {
+    /// The list as kept; an error when manager.db could not read it.
+    fn raw_list(&self) -> DbResult<Vec<Value>> {
+        Ok(match self.ctx.db().get("vehicles")? {
             Some(Value::Array(a)) => a,
             _ => Vec::new(),
-        }
+        })
     }
 
+    fn of_list(&self, raw: &[Value]) -> Vec<Vehicle> {
+        raw.iter().filter_map(|r| of_raw(r, &self.footage_root)).collect()
+    }
+
+    /// The vehicles; an error when manager.db could not read them (a page's list, every change).
+    pub fn try_list(&self) -> DbResult<Vec<Vehicle>> {
+        Ok(self.of_list(&self.raw_list()?))
+    }
+
+    /// One vehicle (None: no such vehicle); an error when manager.db could not read the list.
+    pub fn try_get(&self, id: &str) -> DbResult<Option<Vehicle>> {
+        Ok(self.try_list()?.into_iter().find(|v| v.id == id))
+    }
+
+    /// The vehicles for work in the background: none while manager.db cannot read them
+    /// (logged once until it can).
     pub fn list(&self) -> Vec<Vehicle> {
-        self.raw_list().iter().filter_map(|r| of_raw(r, &self.footage_root)).collect()
+        use std::sync::atomic::Ordering;
+        match self.try_list() {
+            Ok(list) => {
+                self.unread.store(false, Ordering::Relaxed);
+                list
+            }
+            Err(e) => {
+                if !self.unread.swap(true, Ordering::Relaxed) {
+                    self.ctx.log("vehicles", Level::Error, &format!("The vehicles could not be read (none is seen until they can): {e}"));
+                }
+                Vec::new()
+            }
+        }
     }
 
     pub fn get(&self, id: &str) -> Option<Vehicle> {
         self.list().into_iter().find(|v| v.id == id)
     }
 
-    fn save(&self, list: &[Value]) {
-        self.ctx.db().set("vehicles", &Value::Array(list.to_vec()));
+    fn save(&self, list: &[Value]) -> DbResult<()> {
+        self.ctx.db().set("vehicles", &Value::Array(list.to_vec()))
     }
 
     /// checkFolder: refused unless a folder vehicle at `p` is allowed (see the top).
@@ -210,15 +267,7 @@ impl Vehicles {
     }
 
     fn check_overlap(&self, root: &Path, ignore: Option<&str>) -> Res<()> {
-        for v in self.list() {
-            if Some(v.id.as_str()) == ignore {
-                continue;
-            }
-            if is_inside(root, &v.root) || is_inside(&v.root, root) {
-                return Err(bad(format!("That folder overlaps the footage of {} ({}).", v.name, v.root.display())));
-            }
-        }
-        Ok(())
+        overlap(&self.try_list()?, root, ignore)
     }
 
     /// normalizeVehicle: { name, timezone, source, car } from what the page sent.
@@ -259,9 +308,12 @@ impl Vehicles {
         if is_path {
             self.check_folder(vehicle["source"]["path"].as_str().unwrap_or(""), None)?;
         }
-        let mut taken: Vec<String> = self.list().into_iter().map(|v| v.id).collect();
+        // (a list that could not be read is never written over)
+        let mut list = self.raw_list()?;
+        let known = self.of_list(&list);
+        let mut taken: Vec<String> = known.iter().map(|v| v.id.clone()).collect();
         taken.push(TEST_ID.into());
-        let free = |id: &str| !taken.iter().any(|t| t == id) && (is_path || self.check_overlap(&self.footage_root.join(id), None).is_ok());
+        let free = |id: &str| !taken.iter().any(|t| t == id) && (is_path || overlap(&known, &self.footage_root.join(id), None).is_ok());
         let name = vehicle["name"].as_str().unwrap_or("").to_string();
         let from = if js::truthy(input.get("id")) { js::string(&input["id"]) } else { name.clone() };
         let mut id = crate::app::slug(&from);
@@ -285,18 +337,24 @@ impl Vehicles {
         full.extend(vehicle);
         full.insert("createdAt".into(), json!(js::now() as i64));
         let full = Value::Object(full);
-        let mut list = self.raw_list();
         list.push(full.clone());
-        self.save(&list);
+        self.save(&list)?;
         let v = of_raw(&full, &self.footage_root).unwrap();
         self.start_share(&v);
         self.emit(VehicleEvent::Changed);
         Ok(v)
     }
 
+    /// The mount table this server reads (/proc/self/mountinfo).
+    pub fn mountinfo(&self) -> &std::path::Path {
+        &self.mountinfo
+    }
+
     pub fn update(self: &Arc<Self>, id: &str, input: &Value) -> Res<Vehicle> {
         let _e = self.edit.lock().unwrap();
-        let existing = self.get(id).ok_or_else(|| Fail::new(404, "No such vehicle."))?;
+        // (a list that could not be read is never written over)
+        let list = self.raw_list()?;
+        let existing = self.of_list(&list).into_iter().find(|v| v.id == id).ok_or_else(|| Fail::new(404, "No such vehicle."))?;
         let mut next = existing.raw.as_object().cloned().unwrap_or_default();
         next.extend(self.normalize(input, Some(&existing.raw))?);
         if next["source"]["type"] == "path" {
@@ -305,8 +363,8 @@ impl Vehicles {
             self.check_overlap(&self.footage_root.join(id), Some(id))?;
         }
         let next = Value::Object(next);
-        let list: Vec<Value> = self.raw_list().into_iter().map(|v| if v.get("id").and_then(Value::as_str) == Some(id) { next.clone() } else { v }).collect();
-        self.save(&list);
+        let list: Vec<Value> = list.into_iter().map(|v| if v.get("id").and_then(Value::as_str) == Some(id) { next.clone() } else { v }).collect();
+        self.save(&list)?;
         let v = of_raw(&next, &self.footage_root).unwrap();
         if next["source"].to_string() != existing.source.to_string() {
             self.stop_share(id);
@@ -319,12 +377,15 @@ impl Vehicles {
     /// Forget a vehicle. Its footage is never touched.
     pub fn remove(&self, id: &str) -> Res<()> {
         let _e = self.edit.lock().unwrap();
-        if self.get(id).is_none() {
+        // (a list that could not be read is never written over)
+        let list = self.raw_list()?;
+        if !self.of_list(&list).iter().any(|v| v.id == id) {
             return Err(Fail::new(404, "No such vehicle."));
         }
+        let list: Vec<Value> = list.into_iter().filter(|v| v.get("id").and_then(Value::as_str) != Some(id)).collect();
+        // (the share stops only once the list without it is kept)
+        self.save(&list)?;
         self.stop_share(id);
-        let list: Vec<Value> = self.raw_list().into_iter().filter(|v| v.get("id").and_then(Value::as_str) != Some(id)).collect();
-        self.save(&list);
         self.emit(VehicleEvent::Changed);
         Ok(())
     }
@@ -372,8 +433,13 @@ impl Vehicles {
 
     /// Create the vehicle of SMB_SHARE / FOOTAGE_PATH on the first start.
     pub fn bootstrap_from_env(self: &Arc<Self>) {
-        if !self.raw_list().is_empty() {
-            return;
+        match self.raw_list() {
+            Ok(list) if list.is_empty() => {}
+            Ok(_) => return,
+            Err(e) => {
+                self.ctx.log("vehicles", Level::Error, &format!("The vehicle from the environment was not checked for: the vehicles could not be read: {e}"));
+                return;
+            }
         }
         let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
         let name = env("VEHICLE_NAME").unwrap_or_else(|| "My car".into());
@@ -464,6 +530,16 @@ mod tests {
     use super::*;
     use crate::footage::ctx::LocalCore;
 
+    #[test]
+    fn a_vehicle_s_source_is_its_folder_and_for_a_share_which_share() {
+        let folder = folder_vehicle("car", "Car", "UTC", PathBuf::from("/footage/car"));
+        assert_eq!(folder.source_key(), "/footage/car");
+        let share = |s: &str| Vehicle { source: json!({ "type": "smb", "share": s, "username": "u", "password": "secret", "port": null }), ..folder_vehicle("nas", "NAS", "UTC", PathBuf::from("/footage/nas")) };
+        assert_ne!(share("//nas/cam").source_key(), share("//nas2/cam").source_key(), "another share mounted on the same folder");
+        assert_eq!(share("//nas/cam").source_key(), share("//nas/cam").source_key());
+        assert!(!share("//nas/cam").source_key().contains("secret"));
+    }
+
     fn manager(dir: &Path) -> Arc<Vehicles> {
         let ctx: Arc<dyn Ctx> = Arc::new(LocalCore::memory());
         Vehicles::new(ctx, Options {
@@ -511,5 +587,27 @@ mod tests {
         assert_eq!(m.remove("nas").unwrap_err().message, "No such vehicle.");
         m.stop_all();
         assert_eq!(describe_source(&s.source), "SMB //nas/cam as u (SMB 3.1.1, encrypted)");
+    }
+
+    #[test]
+    fn a_vehicle_list_that_cannot_be_read_is_never_written_over_and_background_work_sees_none_logged_once() {
+        let f = crate::footage::testing::on_core("vehicles");
+        let v = &f.app.vehicles;
+        let before = f.kept("vehicles");
+        f.db.fail_setting_reads("vehicles");
+        // every change reads the list first: refused (a 500, not "no such vehicle"), the list as it was
+        assert_eq!(v.add(&json!({ "name": "NAS", "source": { "share": "//nas/cam", "username": "u", "password": "secret" } })).unwrap_err().status, 0);
+        assert_eq!(v.update("car", &json!({ "name": "Renamed" })).unwrap_err().status, 0);
+        assert_eq!(v.remove("car").unwrap_err().status, 0);
+        assert_eq!(f.kept("vehicles"), before);
+        assert!(v.try_list().is_err() && v.try_get("car").is_err());
+        // background work sees none, and says so once until the list can be read again
+        assert!(v.list().is_empty() && v.get("car").is_none());
+        assert_eq!(f.logged("The vehicles could not be read"), 1);
+        f.db.mend_reads();
+        assert_eq!(v.list().len(), 1);
+        f.db.fail_setting_reads("vehicles");
+        assert!(v.list().is_empty());
+        assert_eq!(f.logged("The vehicles could not be read"), 2, "said again after it could be read");
     }
 }

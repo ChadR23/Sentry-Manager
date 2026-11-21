@@ -5,9 +5,6 @@
 #
 #   docker build -t ghcr.io/skittles-fivem/sentry-manager:latest .
 #
-# The Node.js image this replaces is Dockerfile.node, kept while the Rust
-# image is tested.
-#
 # Behind a proxy that inspects TLS, hand the build its certificates (used for
 # the downloads only, never kept in the image):
 #   docker build --secret id=build_ca,src=/path/to/ca-bundle.crt -t ... .
@@ -62,9 +59,9 @@ RUN --mount=type=secret,id=build_ca,required=false \
     printf 'Types: deb\nURIs: https://repo.jellyfin.org/debian\nSuites: trixie\nComponents: main\nSigned-By: /etc/apt/keyrings/jellyfin.gpg\n' \
       > /etc/apt/sources.list.d/jellyfin.sources; \
     apt-get update; \
-    # FFmpeg 8 when Jellyfin publishes it for this release, else their 7.x
-    ffmpeg_pkg=jellyfin-ffmpeg8; apt-cache show "$ffmpeg_pkg" >/dev/null 2>&1 || ffmpeg_pkg=jellyfin-ffmpeg7; \
-    apt-get install -y --no-install-recommends "$ffmpeg_pkg" cifs-utils tini tzdata \
+    # FFmpeg 8 (no fallback to an older one: without it the build fails; CI's
+    # own tests use Ubuntu's 6.1.1 for the frozen answers, an image never does)
+    apt-get install -y --no-install-recommends jellyfin-ffmpeg8 cifs-utils tini tzdata \
       fontconfig fonts-liberation fonts-dejavu-core openssl util-linux xz-utils; \
     ln -s /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/lib/jellyfin-ffmpeg/ffprobe /usr/lib/jellyfin-ffmpeg/vainfo /usr/local/bin/; \
     rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/99build-ca /tmp/build-ca.crt; \
@@ -93,7 +90,7 @@ COPY web ./web
 COPY src/renderer ./src/renderer
 COPY src/shared ./src/shared
 # the CAN signal sets the server decodes with
-COPY server/dbc ./server/dbc
+COPY dbc ./dbc
 # the interface packs that come with the app (Settings > Interface)
 COPY examples/ui-packs ./ui-packs
 

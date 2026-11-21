@@ -13,7 +13,7 @@
 //! one file fails, so a recording is never split.
 
 use super::ctx::{Fail, Level, Res};
-use super::mdb::{BinFile, BinItem};
+use super::mdb::{BinFile, BinItem, DbError, DbResult};
 use super::safe_fs::{self, safe_join};
 use super::share::errno_name;
 use crate::app::{App, Vehicle};
@@ -167,13 +167,13 @@ pub fn with_lock<T>(app: &App, vid: &str, f: impl FnOnce() -> T) -> T {
 }
 
 /// Protect or unprotect files, never in the middle of moving one of their recordings.
-pub fn set_protected(app: &App, vid: &str, rels: &[String], on: bool) {
-    with_lock(app, vid, || app.core.db().set_protected(vid, rels, on));
+pub fn set_protected(app: &App, vid: &str, rels: &[String], on: bool) -> Res<()> {
+    Ok(with_lock(app, vid, || app.core.db().set_protected(vid, rels, on))?)
 }
 
 /// recycleBin.js rootOf: the vehicle and its folder, refused while its share is not writable.
 fn root_of(app: &App, vid: &str) -> Res<(Vehicle, PathBuf)> {
-    let v = app.vehicle(vid).ok_or_else(|| Fail::new(404, "No such vehicle."))?;
+    let v = app.vehicles.try_get(vid)?.ok_or_else(|| Fail::new(404, "No such vehicle."))?;
     if app.vehicles.share(vid).is_some_and(|s| !s.is_writable()) {
         return Err(Fail::new(503, format!("{}: the share is not writable right now.", v.name)));
     }
@@ -193,18 +193,43 @@ fn item_id() -> String {
 pub fn trash(app: &Arc<App>, vid: &str, ids: &[String], reason: &str) -> Res<Trashed> {
     let (vehicle, root) = root_of(app, vid)?;
     let inv = app.state_of(vid).filter(|s| s.scanned).ok_or_else(|| Fail::new(409, "Footage has not been scanned yet."))?;
+    // (the recordings of the footage the vehicle had before are not paths in this one)
+    if inv.root != vehicle.source_key() {
+        return Err(Fail::new(409, "The footage folder changed and has not been scanned yet."));
+    }
     let wanted: HashSet<&str> = ids.iter().map(String::as_str).collect();
     let recordings: Vec<_> = inv.recordings.iter().filter(|r| wanted.contains(r.id.as_str())).cloned().collect();
     let sizes: std::collections::HashMap<&str, u64> = inv.file_list.iter().map(|f| (f.rel.as_str(), f.size)).collect();
     let mut result = Trashed::default();
-    let job = app.core.job_start(if reason == "policy" { "policy" } else { "trash" }, Some(vid), &format!("Move {} recording(s) to the Recycle Bin", recordings.len()));
+    // (nothing moves without its Activity row: no made-up job id)
+    let job = app.core.job_start(if reason == "policy" { "policy" } else { "trash" }, Some(vid), &format!("Move {} recording(s) to the Recycle Bin", recordings.len())).map_err(Fail::internal)?;
     let real_root = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
     let mut gone: HashSet<String> = HashSet::new();
+    // (manager.db failed: nothing more moves, and the run answers with the error)
+    let mut db_failed: Option<DbError> = None;
     for rec in &recordings {
         let rels: Vec<String> = rec.files().map(|(r, _)| r.to_string()).collect();
         with_lock(app, vid, || {
+            // the footage source again: a vehicle moved to another while this ran has other files here
+            let source = match app.vehicles.try_get(vid) {
+                Ok(v) => v.map(|v| v.source_key()),
+                Err(e) => {
+                    db_failed = Some(e);
+                    return;
+                }
+            };
+            if source.as_deref() != Some(inv.root.as_str()) {
+                result.skipped.push(Skip { id: rec.id.clone(), reason: "error", message: Some("the footage folder changed".into()) });
+                return;
+            }
             // protection is read again here: it may have been set after this run started
-            let protected = app.core.db().protected_set(vid);
+            let protected = match app.core.db().protected_set(vid) {
+                Ok(p) => p,
+                Err(e) => {
+                    db_failed = Some(e);
+                    return;
+                }
+            };
             if rec.protected || rels.iter().any(|r| protected.contains(r)) {
                 result.skipped.push(Skip { id: rec.id.clone(), reason: "protected", message: None });
                 return;
@@ -222,7 +247,10 @@ pub fn trash(app: &Arc<App>, vid: &str, ids: &[String], reason: &str) -> Res<Tra
                 id: id.clone(), vehicle_id: vid.to_string(), label, category: rec.category.to_string(), start_at: rec.start.clone(),
                 bytes: planned.iter().map(|f| f.size).sum(), files: planned.clone(), trashed_at: super::js::now().trunc(), reason: reason.to_string(),
             };
-            app.core.db().add_bin_item(&record);
+            if let Err(e) = app.core.db().add_bin_item(&record) {
+                db_failed = Some(e);
+                return;
+            }
             let mut moved: Vec<BinFile> = Vec::new();
             let step = |f: &BinFile, moved: &mut Vec<BinFile>| -> std::io::Result<()> {
                 let from = safe_join(&root, &f.rel)?;
@@ -247,34 +275,56 @@ pub fn trash(app: &Arc<App>, vid: &str, ids: &[String], reason: &str) -> Res<Tra
                 if let Ok(dir) = safe_join(&root, &format!("{BIN_DIR}/{id}")) {
                     let _ = safe_fs::rmrf_inside(&root, &dir);
                 }
-                app.core.db().remove_bin_item(&id);
+                // (left listed, its files still to move: a restart's settling drops it)
+                if let Err(e) = app.core.db().remove_bin_item(&id) {
+                    db_failed = Some(e);
+                }
                 let missing = err.kind() == std::io::ErrorKind::NotFound;
                 result.skipped.push(Skip { id: rec.id.clone(), reason: if missing { "missing" } else { "error" }, message: Some(err.to_string()) });
                 return;
             }
             let bytes = moved.iter().map(|m| m.size).sum();
-            app.core.db().update_bin_files(&id, &moved, bytes);
+            // (the files moved either way; not kept, the item stays listed as still moving until a
+            // restart's settling finds them in the bin)
+            if let Err(e) = app.core.db().update_bin_files(&id, &moved, bytes) {
+                db_failed = Some(e);
+            }
             gone.extend(moved.iter().map(|m| m.rel.clone()));
+            // (a scan of this source walking now does not put them back)
+            app.footage.scan_lock(vid).moved.lock().unwrap().extend(moved.iter().map(|m| (inv.root.clone(), m.rel.clone())));
             result.moved.push(rec.id.clone());
             result.bytes += bytes;
             remove_empty_dirs(&root, &rels, &is_kept_dir);
         });
+        if db_failed.is_some() {
+            break;
+        }
     }
-    let files = app.state_of(vid).map(|s| s.file_list.iter().filter(|f| !gone.contains(&f.rel)).cloned().collect());
-    app.rebuild(vid, files);
-    let failed = result.skipped.iter().any(|s| s.reason == "error");
+    // (rebuild_without leaves in a file restored while this ran)
+    if !gone.is_empty() {
+        app.rebuild_without(vid, &gone, &inv.root);
+    }
+    let failed = db_failed.is_some() || result.skipped.iter().any(|s| s.reason == "error");
     let skipped = if result.skipped.is_empty() { String::new() } else { format!(", {} skipped: {}", result.skipped.len(), skip_why(&result.skipped)) };
-    app.core.job_finish(job, if failed { "failed" } else { "done" }, &format!("{} moved ({}){skipped}", result.moved.len(), format_bytes(result.bytes as f64)), Some(result.json()));
+    let stopped = db_failed.as_ref().map(|e| format!(", stopped: {e}")).unwrap_or_default();
+    app.core.job_finish(job, if failed { "failed" } else { "done" }, &format!("{} moved ({}){skipped}{stopped}", result.moved.len(), format_bytes(result.bytes as f64)), Some(result.json()));
     if !result.skipped.is_empty() {
         log(app, Level::Warn, &format!("{}: {} recording(s) not moved to the Recycle Bin: {}", vehicle.name, result.skipped.len(), skip_why(&result.skipped)));
+    }
+    if let Some(e) = db_failed {
+        return Err(Fail::internal(format!("the Recycle Bin run stopped after {} recording(s): {e}", result.moved.len())));
     }
     log(app, Level::Info, &format!("{}: {} recording(s) moved to the Recycle Bin ({reason})", vehicle.name, result.moved.len()));
     Ok(result)
 }
 
 /// A readable thumbnail of a bin item, without needing write access: ("image" | "clip", path).
-pub fn thumbnail_source(app: &App, item_id: &str) -> Option<(&'static str, PathBuf)> {
-    let item = app.core.db().bin_item(item_id)?;
+/// An error when manager.db could not be read.
+pub fn thumbnail_source(app: &App, item_id: &str) -> Res<Option<(&'static str, PathBuf)>> {
+    Ok(app.core.db().bin_item(item_id)?.and_then(|item| thumbnail_of(app, &item)))
+}
+
+fn thumbnail_of(app: &App, item: &BinItem) -> Option<(&'static str, PathBuf)> {
     let v = app.vehicle(&item.vehicle_id)?;
     let root = &v.root;
     let item_root = safe_join(root, &format!("{BIN_DIR}/{}", item.id)).ok()?;
@@ -303,12 +353,12 @@ pub fn thumbnail_source(app: &App, item_id: &str) -> Option<(&'static str, PathB
     None
 }
 
-pub fn list(app: &App, vid: Option<&str>) -> Vec<Value> {
-    app.core.db().bin_items(vid).iter().map(BinItem::json).collect()
+pub fn list(app: &App, vid: Option<&str>) -> Res<Vec<Value>> {
+    Ok(app.core.db().bin_items(vid)?.iter().map(BinItem::json).collect())
 }
 
-pub fn bin_bytes(app: &App, vid: &str) -> u64 {
-    app.core.db().bin_items(Some(vid)).iter().map(|i| i.bytes).sum()
+pub fn bin_bytes(app: &App, vid: &str) -> DbResult<u64> {
+    Ok(app.core.db().bin_items(Some(vid))?.iter().map(|i| i.bytes).sum())
 }
 
 fn walk_binned(root: &Path, rel_dir: &str, item_prefix: &str, out: &mut Vec<BinFile>) {
@@ -341,10 +391,10 @@ fn adoptable(name: &str) -> bool {
 pub fn reconcile(app: &App, vid: &str) -> Res<(usize, usize)> {
     let (_, root) = root_of(app, vid)?;
     let db = app.core.db();
-    Ok(with_lock(app, vid, || {
+    with_lock(app, vid, || {
         let mut fixed = 0;
         let mut adopted = 0;
-        for item in db.bin_items(Some(vid)) {
+        for item in db.bin_items(Some(vid))? {
             if !item.files.iter().any(|f| f.pending) {
                 continue;
             }
@@ -353,13 +403,14 @@ pub fn reconcile(app: &App, vid: &str) -> Res<(usize, usize)> {
                 st.is_file().then(|| BinFile { rel: f.rel.clone(), bin_rel: f.bin_rel.clone(), size: st.len(), pending: false, conflict: false })
             }).collect();
             if moved.is_empty() {
-                db.remove_bin_item(&item.id);
+                db.remove_bin_item(&item.id)?;
             } else {
-                db.update_bin_files(&item.id, &moved, moved.iter().map(|m| m.size).sum());
+                db.update_bin_files(&item.id, &moved, moved.iter().map(|m| m.size).sum())?;
             }
             fixed += 1;
         }
-        let known: HashSet<String> = db.bin_items(Some(vid)).into_iter().map(|i| i.id).collect();
+        // (a list that could not be read is not taken for an empty one: every folder would be adopted again)
+        let known: HashSet<String> = db.bin_items(Some(vid))?.into_iter().map(|i| i.id).collect();
         let bin_root = safe_join(&root, BIN_DIR).unwrap_or_else(|_| root.join(BIN_DIR));
         let mut dirs: Vec<_> = std::fs::read_dir(&bin_root).map(|l| l.flatten().collect()).unwrap_or_default();
         dirs.sort_by_key(|e: &std::fs::DirEntry| e.file_name());
@@ -382,14 +433,14 @@ pub fn reconcile(app: &App, vid: &str) -> Res<(usize, usize)> {
             db.add_bin_item(&BinItem {
                 id: name.clone(), vehicle_id: vid.to_string(), label: format!("{category} (recovered after a restart)"), category: category.into(), start_at: None,
                 bytes: files.iter().map(|f| f.size).sum(), files, trashed_at: super::js::now().trunc(), reason: "recovered".into(),
-            });
+            })?;
             adopted += 1;
         }
         if fixed > 0 || adopted > 0 {
             log(app, Level::Warn, &format!("Recycle Bin: settled {fixed} interrupted move(s), recovered {adopted} unlisted item(s)"));
         }
-        (fixed, adopted)
-    }))
+        Ok((fixed, adopted))
+    })
 }
 
 fn not_in_bin() -> Fail {
@@ -403,16 +454,17 @@ fn still_moving() -> Fail {
 /// Put an item back where it was; files whose spot is taken stay in the bin.
 /// { restored, conflicts }; a full scan follows in the background.
 pub fn restore(app: &Arc<App>, item_id: &str) -> Res<Value> {
-    let item = app.core.db().bin_item(item_id).ok_or_else(not_in_bin)?;
+    let item = app.core.db().bin_item(item_id)?.ok_or_else(not_in_bin)?;
     let vid = item.vehicle_id.clone();
-    let out = with_lock(app, &vid, || -> Res<(usize, usize)> {
-        let item = app.core.db().bin_item(item_id).ok_or_else(not_in_bin)?;
+    let (out, kept) = with_lock(app, &vid, || -> Res<((usize, usize), DbResult<()>)> {
+        let item = app.core.db().bin_item(item_id)?.ok_or_else(not_in_bin)?;
         if item.files.iter().any(|f| f.pending) {
             return Err(still_moving());
         }
-        let (_, root) = root_of(app, &item.vehicle_id)?;
+        let (vehicle, root) = root_of(app, &item.vehicle_id)?;
         let mut left: Vec<BinFile> = Vec::new();
         let mut restored = 0;
+        let mut back: Vec<String> = Vec::new();
         for f in &item.files {
             let (Ok(from), Ok(to)) = (safe_join(&root, &f.bin_rel), safe_join(&root, &f.rel)) else {
                 left.push(BinFile { conflict: true, ..f.clone() });
@@ -433,35 +485,52 @@ pub fn restore(app: &Arc<App>, item_id: &str) -> Res<Value> {
                 continue;
             }
             restored += 1;
+            back.push(f.rel.clone());
         }
-        if left.is_empty() {
-            app.core.db().remove_bin_item(item_id);
-        } else {
-            app.core.db().update_bin_files(item_id, &left, left.iter().map(|f| f.size).sum());
-        }
+        // (the files are back either way: a list that was not updated is the answer once the rest is done)
+        let kept = if left.is_empty() { app.core.db().remove_bin_item(item_id) } else { app.core.db().update_bin_files(item_id, &left, left.iter().map(|f| f.size).sum()) };
         let bin_rels: Vec<String> = item.files.iter().map(|f| f.bin_rel.clone()).collect();
         remove_empty_dirs(&root, &bin_rels, &|d| d == BIN_DIR || is_kept_dir(d));
-        let job = app.core.job_start("restore", Some(&item.vehicle_id), &format!("Restore {}", item.label));
+        // (under the bin lock: a scan walking now does not leave them out as moved, and a scan that
+        // walked before this restore is not taken as the answer by one that waited)
+        let lock = app.footage.scan_lock(&item.vehicle_id);
+        let source = vehicle.source_key();
+        lock.moved.lock().unwrap().retain(|(s, r)| !(*s == source && back.contains(r)));
+        lock.restores.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let detail = format!("{restored} file(s) restored{}", if left.is_empty() { String::new() } else { format!(", {} could not (a file with that name exists)", left.len()) });
-        app.core.job_finish(job, if left.is_empty() { "done" } else { "failed" }, &detail, None);
-        Ok((restored, left.len()))
+        // (the files are back either way: an Activity row that was not kept is only logged)
+        match app.core.job_start("restore", Some(&item.vehicle_id), &format!("Restore {}", item.label)) {
+            Ok(job) => app.core.job_finish(job, if left.is_empty() { "done" } else { "failed" }, &detail, None),
+            Err(e) => log(app, Level::Warn, &format!("Restore of {} ({detail}): its Activity row was not kept: {e}", item.label)),
+        }
+        Ok(((restored, left.len()), kept))
     })?;
-    // the files are back: a full scan (as inventory.scan(id)), in the background
+    // the files are back: a full scan (as inventory.scan(id)), in the background, that walks after
+    // they are (not one that began before)
     let a = app.clone();
     let v = vid.clone();
     std::thread::spawn(move || {
-        let _ = a.scan_now(&v, false);
+        let _ = a.scan_fresh(&v, false);
         a.core.announce("inventory");
     });
+    kept?;
     Ok(json!({ "restored": out.0, "conflicts": out.1 }))
 }
 
 /// Delete one item for good (someone's action, or the bin emptied after N days). { bytes }
 pub fn delete_forever(app: &App, item_id: &str) -> Res<u64> {
-    let item = app.core.db().bin_item(item_id).ok_or_else(not_in_bin)?;
+    let (bytes, kept) = delete_files(app, item_id)?;
+    kept?;
+    Ok(bytes)
+}
+
+/// delete_forever's work: the bytes freed once the files are gone, and whether the bin's list
+/// was then written (an error there leaves the item listed, its files gone).
+pub fn delete_files(app: &App, item_id: &str) -> Res<(u64, DbResult<()>)> {
+    let item = app.core.db().bin_item(item_id)?.ok_or_else(not_in_bin)?;
     let vid = item.vehicle_id.clone();
     with_lock(app, &vid, || {
-        let item = app.core.db().bin_item(item_id).ok_or_else(not_in_bin)?;
+        let item = app.core.db().bin_item(item_id)?.ok_or_else(not_in_bin)?;
         if item.files.iter().any(|f| f.pending) {
             return Err(still_moving());
         }
@@ -478,33 +547,47 @@ pub fn delete_forever(app: &App, item_id: &str) -> Res<u64> {
         }
         let dir = safe_join(&root, &format!("{BIN_DIR}/{item_id}")).map_err(|e| Fail::internal(e.to_string()))?;
         safe_fs::rmrf_inside(&root, &dir).map_err(|e| Fail::internal(e.to_string()))?;
-        app.core.db().remove_bin_item(item_id);
+        let kept = app.core.db().remove_bin_item(item_id);
         let rels: Vec<String> = item.files.iter().map(|f| f.rel.clone()).collect();
-        super::deleted_clips::add(app.core.db(), &item.vehicle_id, &rels, super::js::now());
+        // (a note not kept: the footage check may count these clips as missing from the archive)
+        if let Err(e) = super::deleted_clips::add(app.core.db(), &item.vehicle_id, &rels, super::js::now()) {
+            log(app, Level::Warn, &format!("{}: the clips deleted for good were not noted: {e}", item.label));
+        }
         // every delete for good comes here (by hand, emptying the bin, the bin emptied after N days)
         app.core.on_deleted(&item.vehicle_id, &item.json());
-        Ok(bytes)
+        Ok((bytes, kept))
     })
 }
 
 /// Empty the bin (of one vehicle, or all): { deleted, failed, bytes }
-pub fn empty(app: &App, vid: Option<&str>) -> Value {
-    let items = app.core.db().bin_items(vid);
-    let job = app.core.job_start("empty-bin", vid, &format!("Empty the Recycle Bin ({} item(s))", items.len()));
+pub fn empty(app: &App, vid: Option<&str>) -> Res<Value> {
+    let items = app.core.db().bin_items(vid)?;
+    let job = app.core.job_start("empty-bin", vid, &format!("Empty the Recycle Bin ({} item(s))", items.len())).map_err(Fail::internal)?;
     let mut bytes = 0;
     let mut failed = 0;
+    // (manager.db failed: what is left stays in the bin, files and list alike)
+    let mut stopped = None;
     for item in &items {
-        match delete_forever(app, &item.id) {
-            Ok(b) => bytes += b,
+        match delete_files(app, &item.id) {
+            Ok((b, kept)) => {
+                bytes += b;
+                if let Err(e) = kept {
+                    stopped = Some(e);
+                    break;
+                }
+            }
             Err(e) => {
                 failed += 1;
                 log(app, Level::Warn, &format!("Could not delete {}: {}", item.label, e.message));
             }
         }
     }
-    let detail = format!("{} freed{}", format_bytes(bytes as f64), if failed > 0 { format!(", {failed} failed") } else { String::new() });
-    app.core.job_finish(job, if failed > 0 { "failed" } else { "done" }, &detail, None);
-    json!({ "deleted": items.len() - failed, "failed": failed, "bytes": bytes })
+    let detail = format!("{} freed{}{}", format_bytes(bytes as f64), if failed > 0 { format!(", {failed} failed") } else { String::new() }, stopped.as_ref().map(|e| format!(", stopped: {e}")).unwrap_or_default());
+    app.core.job_finish(job, if failed > 0 || stopped.is_some() { "failed" } else { "done" }, &detail, None);
+    if let Some(e) = stopped {
+        return Err(e.into());
+    }
+    Ok(json!({ "deleted": items.len() - failed, "failed": failed, "bytes": bytes }))
 }
 
 #[cfg(test)]

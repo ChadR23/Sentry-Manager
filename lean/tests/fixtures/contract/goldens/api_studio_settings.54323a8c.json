@@ -1,0 +1,18 @@
+{
+  "route": "GET /api/studio/settings",
+  "method": "GET",
+  "request": {
+    "path": "/api/studio/settings"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "timeFormat": "12h"
+    }
+  }
+}

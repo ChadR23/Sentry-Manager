@@ -1,0 +1,23 @@
+{
+  "route": "GET /api/health/banner",
+  "method": "GET",
+  "request": {
+    "path": "/api/health/banner"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "problems": [
+        {
+          "detail": "7.8 GB free of 252.0 GB",
+          "label": "Contract Car: Free space on the share"
+        }
+      ]
+    }
+  }
+}

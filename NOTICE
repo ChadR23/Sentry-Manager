@@ -59,16 +59,16 @@ Scott Vandereems, and remain under the MIT License reproduced in section 1.
 3. CAN databases  --  MIT License
 ================================================================================
 
-The CAN signal databases under server/dbc/ come from other projects and
+The CAN signal databases under dbc/ come from other projects and
 remain under their own MIT licenses, each kept beside them:
 
-  server/dbc/Model3CAN.dbc             model3dbc, Copyright (c) 2019 Josh Wardell
-                                       (server/dbc/LICENSE-model3dbc.txt)
-  server/dbc/opendbc-tesla_can.dbc     commaai/opendbc, Copyright (c) 2020 Comma.ai, Inc.
-  server/dbc/opendbc-tesla_powertrain.dbc
-  server/dbc/model3y-opendbc.dbc       (server/dbc/LICENSE-opendbc.txt)
-  server/dbc/sx-legacy.dbc             Open Vehicle Monitoring System (OVMS)
-                                       (server/dbc/LICENSE-ovms.txt)
+  dbc/Model3CAN.dbc             model3dbc, Copyright (c) 2019 Josh Wardell
+                                (dbc/LICENSE-model3dbc.txt)
+  dbc/opendbc-tesla_can.dbc     commaai/opendbc, Copyright (c) 2020 Comma.ai, Inc.
+  dbc/opendbc-tesla_powertrain.dbc
+  dbc/model3y-opendbc.dbc       (dbc/LICENSE-opendbc.txt)
+  dbc/sx-legacy.dbc             Open Vehicle Monitoring System (OVMS)
+                                (dbc/LICENSE-ovms.txt)
 
 ================================================================================
 4. Google Material Symbols  --  Apache License 2.0

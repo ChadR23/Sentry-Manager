@@ -49,11 +49,34 @@ function badgeSvg(label, value) {
 `;
 }
 
+/**
+ * The package page, asked again a little later when GitHub answers with a
+ * server error (5xx), 429 or not at all: those pass on their own. Any other
+ * answer (404 for a private package, say) is final at once.
+ */
+async function fetchPage(url, { get = fetch, waits = [10_000, 30_000, 60_000], sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+  for (let attempt = 0; ; attempt++) {
+    let res = null;
+    let failure;
+    try {
+      res = await get(url, { headers: { 'User-Agent': 'sentry-six-manager-badge' } });
+      if (res.ok) return res.text();
+      failure = `HTTP ${res.status}`;
+    } catch (err) {
+      failure = err.message;
+    }
+    const passing = !res || res.status >= 500 || res.status === 429;
+    if (!passing || attempt >= waits.length) {
+      throw new Error(`${url}: ${failure}${res && res.status < 500 && res.status !== 429 ? ' (is the package public?)' : ` (after ${attempt + 1} tries)`}`);
+    }
+    console.error(`${url}: ${failure}, trying again in ${waits[attempt] / 1000} s`);
+    await sleep(waits[attempt]);
+  }
+}
+
 async function main([owner, repo, pkg, out]) {
   const url = `https://github.com/${owner}/${repo}/pkgs/container/${pkg}`;
-  const res = await fetch(url, { headers: { 'User-Agent': 'sentry-six-manager-badge' } });
-  if (!res.ok) throw new Error(`${url}: HTTP ${res.status} (is the package public?)`);
-  const total = parseTotal(await res.text());
+  const total = parseTotal(await fetchPage(url));
   if (!Number.isSafeInteger(total) || total < 0) throw new Error(`${url}: no "Total downloads" number on the page`);
   const svg = badgeSvg('downloads', shortCount(total));
   const before = fs.existsSync(out) ? fs.readFileSync(out, 'utf8') : '';
@@ -65,4 +88,4 @@ if (require.main === module) {
   main(process.argv.slice(2)).catch((err) => { console.error(err.message); process.exit(1); });
 }
 
-module.exports = { parseTotal, shortCount, badgeSvg };
+module.exports = { parseTotal, shortCount, badgeSvg, fetchPage };

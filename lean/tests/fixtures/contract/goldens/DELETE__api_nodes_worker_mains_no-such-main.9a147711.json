@@ -1,0 +1,18 @@
+{
+  "route": "DELETE /api/nodes/worker/mains/:id",
+  "method": "DELETE",
+  "request": {
+    "path": "/api/nodes/worker/mains/no-such-main"
+  },
+  "response": {
+    "status": 404,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "No such main server."
+    }
+  }
+}

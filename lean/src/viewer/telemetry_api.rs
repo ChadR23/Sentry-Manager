@@ -6,6 +6,7 @@
 //! `telemetryReads` clips are read at once; the cache keeps the newest 4,000.
 
 use super::js;
+use bytes::Bytes;
 use std::collections::HashMap;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -14,34 +15,76 @@ use std::sync::{Arc, Condvar, Mutex};
 const MAX_FILE: u64 = 1024 * 1024 * 1024;
 const MAX_CACHE_FILES: usize = 4000;
 
-/// scanner.js limiter: at most max() at once, read each time.
+/// scanner.js limiter: at most max() at once, read each time. Background readers (the speed
+/// index's full reads) leave the way to someone waiting for a clip in the Viewer: a Viewer read
+/// may take one slot over max() while background reads hold them all, and background reads
+/// wait while a Viewer read waits.
 pub struct Limiter {
     max: Box<dyn Fn() -> usize + Send + Sync>,
-    busy: Mutex<usize>,
+    busy: Mutex<Busy>,
     freed: Condvar,
 }
 
-pub struct Slot<'a>(&'a Limiter);
+#[derive(Default)]
+struct Busy {
+    now: usize,
+    background: usize,
+    waiting: usize,
+    /// background reads waiting for a slot
+    background_waiting: usize,
+}
+
+pub struct Slot<'a>(&'a Limiter, bool);
 
 impl Drop for Slot<'_> {
     fn drop(&mut self) {
-        *self.0.busy.lock().unwrap() -= 1;
+        let mut b = self.0.busy.lock().unwrap();
+        b.now -= 1;
+        if self.1 {
+            b.background -= 1;
+        }
+        drop(b);
         self.0.freed.notify_all();
     }
 }
 
 impl Limiter {
     pub fn new(max: impl Fn() -> usize + Send + Sync + 'static) -> Arc<Limiter> {
-        Arc::new(Limiter { max: Box::new(max), busy: Mutex::new(0), freed: Condvar::new() })
+        Arc::new(Limiter { max: Box::new(max), busy: Mutex::new(Busy::default()), freed: Condvar::new() })
     }
     /// Wait for a free slot; it is given back when the slot is dropped.
     pub fn take(&self) -> Slot<'_> {
         let mut b = self.busy.lock().unwrap();
-        while *b >= (self.max)().max(1) {
+        b.waiting += 1;
+        loop {
+            let max = (self.max)().max(1);
+            let foreground = b.now - b.background;
+            if b.now < max || (foreground < max && b.now < max + 1) {
+                break;
+            }
             b = self.freed.wait(b).unwrap();
         }
-        *b += 1;
-        Slot(self)
+        b.waiting -= 1;
+        b.now += 1;
+        let last = b.waiting == 0;
+        drop(b);
+        if last {
+            // (background readers wait for nobody to be waiting: a slot left free goes to them)
+            self.freed.notify_all();
+        }
+        Slot(self, false)
+    }
+    /// A slot for background reading: only while nobody waits for one with take().
+    pub fn take_background(&self) -> Slot<'_> {
+        let mut b = self.busy.lock().unwrap();
+        b.background_waiting += 1;
+        while b.now >= (self.max)().max(1) || b.waiting > 0 {
+            b = self.freed.wait(b).unwrap();
+        }
+        b.background_waiting -= 1;
+        b.now += 1;
+        b.background += 1;
+        Slot(self, true)
     }
 }
 
@@ -62,7 +105,7 @@ pub fn base64(b: &[u8]) -> String {
 #[derive(Debug, Clone)]
 pub struct Refused(pub u16, pub String);
 
-type Pending = Arc<(Mutex<Option<Result<String, Refused>>>, Condvar)>;
+type Pending = Arc<(Mutex<Option<Result<Bytes, Refused>>>, Condvar)>;
 
 pub struct Telemetry {
     pub dir: PathBuf,
@@ -100,7 +143,14 @@ impl Telemetry {
     }
 
     /// (key, body) for a clip; real must already be checked.
-    pub fn for_file(&self, real: &Path) -> Result<(String, String), Refused> {
+    pub fn for_file(&self, real: &Path) -> Result<(String, Bytes), Refused> {
+        let (md, key) = self.identity(real)?;
+        self.body(real, &md, &key).map(|body| (key, body))
+    }
+
+    /// A clip's metadata and key (its ETag) after for_file's checks: what a conditional
+    /// request is answered with before anything else is read.
+    pub fn identity(&self, real: &Path) -> Result<(std::fs::Metadata, String), Refused> {
         let md = std::fs::metadata(real).map_err(|_| Refused(500, "Internal error".into()))?;
         if !md.is_file() {
             return Err(Refused(404, "Not a file".into()));
@@ -109,10 +159,17 @@ impl Telemetry {
             return Err(Refused(413, "File too large".into()));
         }
         let key = Self::key(real, &md);
+        Ok((md, key))
+    }
+
+    /// The body of a clip as identity() found it: the cached one, else read once for every
+    /// request waiting for it (they share the one body).
+    pub fn body(&self, real: &Path, md: &std::fs::Metadata, key: &str) -> Result<Bytes, Refused> {
+        let key = key.to_string();
         let cached = self.dir.join(format!("{key}.json"));
         if let Ok(body) = std::fs::read_to_string(&cached) {
             if !body.is_empty() {
-                return Ok((key, body));
+                return Ok(Bytes::from(body));
             }
         }
         let (job, mine) = {
@@ -130,8 +187,8 @@ impl Telemetry {
             let out = {
                 let _slot = self.limit.take();
                 match crate::telemetry::read_records(real, md.size()) {
-                    Ok(frames) => Ok(body_of(&frames)),
-                    Err(crate::telemetry::Fail::Parse(_)) => Ok(body_of(&[])),
+                    Ok(frames) => Ok(Bytes::from(body_of(&frames))),
+                    Err(crate::telemetry::Fail::Parse(_)) => Ok(Bytes::from(body_of(&[]))),
                     Err(crate::telemetry::Fail::Io(e)) => {
                         eprintln!("GET /api/telemetry: {e}");
                         Err(Refused(500, "Internal error".into()))
@@ -159,7 +216,7 @@ impl Telemetry {
         while r.is_none() {
             r = job.1.wait(r).unwrap();
         }
-        r.clone().unwrap().map(|b| (key, b))
+        r.clone().unwrap()
     }
 
     /// Keep the cache to the newest MAX_CACHE_FILES results.
@@ -198,9 +255,97 @@ mod tests {
         let l = Limiter::new(|| 2);
         let a = l.take();
         let _b = l.take();
-        assert_eq!(*l.busy.lock().unwrap(), 2);
+        assert_eq!(l.busy.lock().unwrap().now, 2);
         drop(a);
         let _c = l.take();
-        assert_eq!(*l.busy.lock().unwrap(), 2);
+        assert_eq!(l.busy.lock().unwrap().now, 2);
+    }
+
+    #[test]
+    fn a_viewer_read_does_not_wait_behind_background_reads() {
+        let l = Limiter::new(|| 2);
+        let _a = l.take_background();
+        let _b = l.take_background();
+        let v = l.take();
+        assert_eq!(l.busy.lock().unwrap().now, 3, "one over the limit for the Viewer");
+        // a second Viewer read waits for a slot, and background reads wait behind it
+        let l2 = l.clone();
+        let waiter = std::thread::spawn(move || {
+            let _s = l2.take();
+        });
+        while l.busy.lock().unwrap().waiting == 0 {
+            std::thread::yield_now();
+        }
+        drop(v);
+        waiter.join().unwrap();
+        assert_eq!(l.busy.lock().unwrap().now, 2);
+        assert_eq!(l.busy.lock().unwrap().background, 2);
+    }
+
+    #[test]
+    fn background_reads_wait_while_a_viewer_read_waits() {
+        let l = Limiter::new(|| 1);
+        let first = l.take();
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let (l2, o2) = (l.clone(), order.clone());
+        let viewer = std::thread::spawn(move || {
+            let _s = l2.take();
+            o2.lock().unwrap().push("viewer");
+        });
+        while l.busy.lock().unwrap().waiting == 0 {
+            std::thread::yield_now();
+        }
+        let (l3, o3) = (l.clone(), order.clone());
+        let background = std::thread::spawn(move || {
+            let _s = l3.take_background();
+            o3.lock().unwrap().push("background");
+        });
+        drop(first);
+        viewer.join().unwrap();
+        background.join().unwrap();
+        // (one slot: the background read gets it only after the Viewer read let it go)
+        assert_eq!(*order.lock().unwrap(), vec!["viewer", "background"]);
+    }
+
+    #[test]
+    fn a_slot_left_free_when_the_last_waiting_viewer_read_gets_in_goes_to_a_background_read() {
+        use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+        use std::time::{Duration, Instant};
+        for _ in 0..50 {
+            let l = Limiter::new(|| 2);
+            let (f1, f2) = (l.take(), l.take());
+            let (l2, l3) = (l.clone(), l.clone());
+            let (tx, rx) = std::sync::mpsc::channel::<()>();
+            // a Viewer read waits for one of the two slots and keeps it until the background read is in
+            let viewer = std::thread::spawn(move || {
+                let s = l2.take();
+                rx.recv().unwrap();
+                drop(s);
+            });
+            while l.busy.lock().unwrap().waiting == 0 {
+                std::thread::yield_now();
+            }
+            let got = Arc::new(AtomicBool::new(false));
+            let g2 = got.clone();
+            let background = std::thread::spawn(move || {
+                let _s = l3.take_background();
+                g2.store(true, SeqCst);
+            });
+            // (the background read waits before the slots are freed: it can only get in by the
+            // notification the last waiting Viewer read sends when it gets in)
+            while l.busy.lock().unwrap().background_waiting == 0 {
+                std::thread::yield_now();
+            }
+            drop(f1);
+            drop(f2);
+            let t = Instant::now();
+            while !got.load(SeqCst) {
+                assert!(t.elapsed() < Duration::from_secs(2), "the background read was left waiting with a slot free");
+                std::thread::yield_now();
+            }
+            tx.send(()).unwrap();
+            viewer.join().unwrap();
+            background.join().unwrap();
+        }
     }
 }

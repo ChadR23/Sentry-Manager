@@ -4,7 +4,7 @@
 //! `handle` checks itself from `Caller::confirmed`, as Node's
 //! requireConfirmed does inside the handler.
 
-use super::ctx::{Caller, Level};
+use super::ctx::{Caller, Level, OpsCtx};
 use super::js::{num, number_opt, truthy};
 use super::power;
 use super::store::{self, now_ms};
@@ -127,8 +127,20 @@ fn confirm(c: &Caller) -> Option<Reply> {
     (!c.confirmed).then(|| Reply::error(403, CONFIRM_TEXT, Some("CONFIRM_PASSWORD")))
 }
 
-fn report_err(e: super::reports::ReportError) -> Reply {
+/// A report route's error; one of 500 or more is logged and answered "Internal error" (its text,
+/// a database error among them, stays in the log).
+fn report_err(ctx: &dyn OpsCtx, r: &Request, e: super::reports::ReportError) -> Reply {
+    if e.status >= 500 {
+        ctx.log("server", Level::Error, &format!("{} {}: {}", r.method, r.path, e.message));
+        return Reply::error(500, "Internal error", None);
+    }
     Reply::error(e.status, &e.message, e.code)
+}
+
+/// manager.db failed: logged as "METHOD path: error", answered "Internal error".
+fn db_failed(ctx: &dyn OpsCtx, r: &Request, e: store::DbError) -> Reply {
+    ctx.log("server", Level::Error, &format!("{} {}: {e}", r.method, r.path));
+    Reply::error(500, "Internal error", None)
 }
 
 fn rss_bytes() -> Option<f64> {
@@ -144,28 +156,31 @@ impl Ops {
         let by = r.caller.by();
         let ctx = &*self.ctx;
         let route = |method: &str, pattern: &str| if m == method { matches(pattern, p) } else { None };
+        // (the answer, or a 500 when manager.db failed)
+        let checked = |v: store::DbResult<Value>| Some(v.map_or_else(|e| db_failed(ctx, r, e), Reply::ok));
 
         if route("GET", "/api/notification-rules").is_some() {
-            return Some(Reply::ok(self.notes.rules()));
+            return checked(self.notes.rules());
         }
         if route("PUT", "/api/notification-rules").is_some() {
-            let muted = self.notes.set_rules(r.body);
+            let muted = match self.notes.set_rules(r.body) {
+                Ok(m) => m,
+                Err(e) => return Some(db_failed(ctx, r, e)),
+            };
             ctx.audit(Level::Info, &format!("Notification rules: {}: {by}", if muted.is_empty() { "all on".to_string() } else { format!("off for {}", muted.join(", ")) }));
-            return Some(Reply::ok(self.notes.rules()));
+            return checked(self.notes.rules());
         }
         if route("GET", "/api/notifications").is_some() {
             let open = r.query.get("open").is_some_and(|v| v == "1");
             let vehicle = r.query.get("vehicle").filter(|v| !v.is_empty()).map(String::as_str);
-            return Some(Reply::ok(json!({ "notifications": self.notes.list(open, vehicle) })));
+            return checked(self.notes.list(open, vehicle).map(|n| json!({ "notifications": n })));
         }
         if let Some(params) = route("POST", "/api/notifications/:id/dismiss") {
-            self.notes.dismiss(super::js::number_str(&params["id"]));
-            return Some(Reply::ok(json!({ "ok": true })));
+            return checked(self.notes.dismiss(super::js::number_str(&params["id"])).map(|_| json!({ "ok": true })));
         }
         if route("POST", "/api/notifications/read").is_some() {
             let ids: Vec<f64> = r.body["ids"].as_array().map(|a| a.iter().map(super::js::number).filter(|x| x.is_finite()).collect()).unwrap_or_default();
-            self.notes.mark_read(&ids);
-            return Some(Reply::ok(json!({ "ok": true })));
+            return checked(self.notes.mark_read(&ids).map(|_| json!({ "ok": true })));
         }
         if route("GET", "/api/health").is_some() {
             return Some(Reply::ok(self.health.last().unwrap_or_else(|| self.health.run(ctx, Some(&self.snapshots), false))));
@@ -211,8 +226,7 @@ impl Ops {
             return Some(Reply::ok(json!({ "ok": true, "restarting": true })));
         }
         if route("GET", "/api/metrics/settings").is_some() {
-            let cfg = store::get(&ctx.db(), "metrics").unwrap_or(Value::Null);
-            return Some(Reply::ok(json!({ "enabled": truthy(&cfg["enabled"]) })));
+            return checked(store::get(&ctx.read_db(), "metrics").map(|cfg| json!({ "enabled": truthy(&cfg.unwrap_or(Value::Null)["enabled"]) })));
         }
         if route("POST", "/api/metrics/enable").is_some() {
             if let Some(no) = confirm(r.caller) {
@@ -222,7 +236,9 @@ impl Ops {
             rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut b);
             let token = base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, b);
             let hash: String = Sha256::digest(token.as_bytes()).iter().map(|x| format!("{x:02x}")).collect();
-            store::set(&ctx.db(), "metrics", &json!({ "enabled": true, "tokenHash": hash, "at": now_ms() }));
+            if let Err(e) = store::set(&ctx.db(), "metrics", &json!({ "enabled": true, "tokenHash": hash, "at": now_ms() })) {
+                return Some(db_failed(ctx, r, e));
+            }
             ctx.audit(Level::Warn, &format!("Metrics turned on (new token): {by}"));
             return Some(Reply::ok(json!({ "enabled": true, "token": token })));
         }
@@ -230,15 +246,17 @@ impl Ops {
             if let Some(no) = confirm(r.caller) {
                 return Some(no);
             }
-            store::set(&ctx.db(), "metrics", &json!({ "enabled": false }));
+            if let Err(e) = store::set(&ctx.db(), "metrics", &json!({ "enabled": false })) {
+                return Some(db_failed(ctx, r, e));
+            }
             ctx.audit(Level::Warn, &format!("Metrics turned off: {by}"));
             return Some(Reply::ok(json!({ "enabled": false })));
         }
         if route("GET", "/metrics").is_some() {
-            return Some(self.metrics(r.authorization));
+            return Some(self.metrics(r));
         }
         if route("GET", "/api/stats").is_some() {
-            return Some(Reply::ok(self.stats_answer()));
+            return checked(self.stats_answer());
         }
         if route("GET", "/api/stats/history").is_some() {
             self.stats.touch(None);
@@ -256,7 +274,7 @@ impl Ops {
             return Some(self.support_bundle());
         }
         if route("GET", "/api/reports").is_some() {
-            return Some(Reply::ok(self.reports.status()));
+            return Some(self.reports.status().map_or_else(|e| report_err(ctx, r, e), Reply::ok));
         }
         if route("PUT", "/api/reports/settings").is_some() {
             let patch = json!({ "share": r.body["share"], "anonymous": r.body["anonymous"] });
@@ -276,15 +294,15 @@ impl Ops {
                     if before["anonymous"] != after["anonymous"] {
                         ctx.audit(Level::Warn, &format!("Send reports anonymously turned {}: {by}", word(&after["anonymous"])));
                     }
-                    Reply::ok(self.reports.status())
+                    self.reports.status().map_or_else(|e| report_err(ctx, r, e), Reply::ok)
                 }
-                Err(e) => report_err(e),
+                Err(e) => report_err(ctx, r, e),
             });
         }
         if route("POST", "/api/reports/preview").is_some() {
             return Some(match self.reports.preview(r.body) {
                 Ok(v) => Reply::ok(v),
-                Err(e) => report_err(e),
+                Err(e) => report_err(ctx, r, e),
             });
         }
         if route("POST", "/api/reports/send").is_some() {
@@ -297,19 +315,24 @@ impl Ops {
                     let rf = out["ref"].as_str().filter(|s| !s.is_empty()).map(|s| format!(" ({s})")).unwrap_or_default();
                     let res = if out["result"] != "sent" { format!(" ({})", super::js::to_string(&out["result"])) } else { String::new() };
                     ctx.audit(Level::Warn, &format!("{what}{rf}{res}: {by}"));
-                    out["status"] = self.reports.status();
-                    Reply::ok(out)
+                    match self.reports.status() {
+                        Ok(s) => {
+                            out["status"] = s;
+                            Reply::ok(out)
+                        }
+                        Err(e) => report_err(ctx, r, e),
+                    }
                 }
-                Err(e) => report_err(e),
+                Err(e) => report_err(ctx, r, e),
             });
         }
         if route("PUT", "/api/settings/power").is_some() {
             let body = if r.body.is_null() { json!({}) } else { r.body.clone() };
             return Some(match power::parse_power_settings(&body) {
-                Ok(next) => {
-                    store::set(&ctx.db(), "power", &next);
-                    Reply::ok(next)
-                }
+                Ok(next) => match store::set(&ctx.db(), "power", &next) {
+                    Ok(()) => Reply::ok(next),
+                    Err(e) => db_failed(ctx, r, e),
+                },
                 Err(e) => Reply::error(400, &e.0, None),
             });
         }
@@ -318,13 +341,13 @@ impl Ops {
             if !ctx.vehicles().iter().any(|v| v.id == *id) {
                 return Some(Reply::error(404, "No such vehicle.", None));
             }
-            return Some(Reply::ok(power::savings_by_month(&ctx.db(), id, r.query.get("months").map(String::as_str))));
+            return checked(power::savings_by_month(&ctx.read_db(), id, r.query.get("months").map(String::as_str)));
         }
         if route("GET", "/api/updates").is_some() {
-            return Some(Reply::ok(self.updates.status()));
+            return checked(self.updates.status());
         }
         if route("POST", "/api/updates/check").is_some() {
-            return Some(Reply::ok(self.updates.check()));
+            return checked(self.updates.check());
         }
         None
     }
@@ -348,15 +371,19 @@ impl Ops {
         })
     }
 
-    /// GET /metrics: Prometheus text, only with the token made in Health.
-    fn metrics(&self, authorization: Option<&str>) -> Reply {
+    /// GET /metrics: Prometheus text, only with the token made in Health (a 500 when that cannot be
+    /// read; a figure manager.db cannot give is left out, as unknown).
+    fn metrics(&self, r: &Request) -> Reply {
         let ctx = &*self.ctx;
-        let cfg = store::get(&ctx.db(), "metrics").unwrap_or(Value::Null);
+        let cfg = match store::get(&ctx.read_db(), "metrics") {
+            Ok(c) => c.unwrap_or(Value::Null),
+            Err(e) => return db_failed(ctx, r, e),
+        };
         let hash = cfg["tokenHash"].as_str().unwrap_or("");
         if !truthy(&cfg["enabled"]) || hash.is_empty() {
             return Reply::error(404, "Not found", None);
         }
-        let a = authorization.unwrap_or("");
+        let a = r.authorization.unwrap_or("");
         let given = if a.len() >= 6 && a[..6].eq_ignore_ascii_case("bearer") && a[6..].starts_with(char::is_whitespace) { a[6..].trim_start() } else { a };
         let mine: String = Sha256::digest(given.as_bytes()).iter().map(|x| format!("{x:02x}")).collect();
         // (constant time over equal lengths, as timingSafeEqual)
@@ -387,14 +414,21 @@ impl Ops {
         metric("sentry_footage_bytes", "Footage size", per(&|v| v.footage_bytes));
         metric("sentry_recordings", "Recordings", per(&|v| v.recordings));
         metric("sentry_recycle_bin_bytes", "Bytes in the Recycle Bin", per(&|v| v.bin_bytes));
-        let db = ctx.db();
-        let saved: Vec<(String, Option<f64>)> = list.iter().map(|v| (lab(&v.id), Some(number_opt(power::for_vehicle(&db, &v.id).get("bytes"))))).collect();
-        let open = store::list(&db, true, 1000, None);
+        let db = ctx.read_db();
+        let mut unread = None;
+        let saved: Vec<(String, Option<f64>)> = list
+            .iter()
+            .map(|v| (lab(&v.id), power::for_vehicle(&db, &v.id).map_err(|e| unread.get_or_insert(e.to_string()).clone()).ok().map(|s| number_opt(s.get("bytes")))))
+            .collect();
+        let open = store::list(&db, true, 1000, None).map_err(|e| unread.get_or_insert(e.to_string()).clone()).ok();
         drop(db);
+        if self.unread.first("metrics", unread.is_some()) {
+            ctx.log("server", Level::Warn, &format!("GET /metrics: what manager.db could not give is left out: {}", unread.unwrap_or_default()));
+        }
         metric("sentry_saved_bytes", "Space saved by conversions", saved);
         metric("sentry_days_until_full", "Days until the share is full at the last 14 days' rate", per(&|v| v.days_left));
         metric("sentry_conversion_running", "A conversion is running", vec![(String::new(), Some(if ctx.converter().running { 1.0 } else { 0.0 }))]);
-        metric("sentry_notifications_open", "Open notifications", ["critical", "warning", "info"].iter().map(|l| (format!("{{level=\"{l}\"}}"), Some(open.iter().filter(|n| n["level"] == *l).count() as f64))).collect());
+        metric("sentry_notifications_open", "Open notifications", ["critical", "warning", "info"].iter().map(|l| (format!("{{level=\"{l}\"}}"), open.as_ref().map(|o| o.iter().filter(|n| n["level"] == *l).count() as f64))).collect());
         let last = self.health.last();
         metric("sentry_health_checks_failing", "Health checks failing at the last run", vec![(String::new(), last.map(|l| l["checks"].as_array().map_or(0, |c| c.iter().filter(|x| x["status"] == "bad").count()) as f64))]);
         let text = format!("{}\n", lines.join("\n"));
@@ -519,8 +553,8 @@ mod tests {
     #[test]
     fn notifications_rules_dismiss_and_read() {
         let (ctx, o) = ops();
-        o.notes.raise(&store::Note::new("share", "warning", "A").key("k1"));
-        o.notes.raise(&store::Note::new("update", "info", "B").key("k2"));
+        o.notes.raise(&store::Note::new("share", "warning", "A").key("k1")).unwrap();
+        o.notes.raise(&store::Note::new("update", "info", "B").key("k2")).unwrap();
         let all = call(&o, "GET", "/api/notifications", &[], Value::Null, false).body_json();
         assert_eq!(all["notifications"].as_array().unwrap().len(), 2);
         let id = all["notifications"][0]["id"].as_i64().unwrap();
@@ -605,6 +639,17 @@ mod tests {
     }
 
     #[test]
+    fn a_report_that_cannot_read_what_it_leaves_out_answers_internal_error_and_logs_why() {
+        let (ctx, o) = ops();
+        call(&o, "PUT", "/api/reports/settings", &[], json!({ "anonymous": true }), false);
+        ctx.identifiers_fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        let r = call(&o, "POST", "/api/reports/preview", &[], json!({ "kind": "feedback", "message": "hi" }), false);
+        assert_eq!((r.status, r.body_json()), (500, json!({ "error": "Internal error" })), "not the database's own words");
+        let logs = ctx.logs.lock().unwrap();
+        assert!(logs.iter().any(|(scope, level, line)| scope == "server" && *level == Level::Error && line.starts_with("POST /api/reports/preview: ") && line.contains("manager.db: database disk image is malformed")), "{logs:?}");
+    }
+
+    #[test]
     fn snapshots_and_health_routes() {
         let (ctx, o) = ops();
         let r = call(&o, "POST", "/api/snapshots", &[], Value::Null, false).body_json();
@@ -617,5 +662,63 @@ mod tests {
         let h = call(&o, "GET", "/api/health", &[], Value::Null, false).body_json();
         assert!(h["checks"].as_array().unwrap().iter().any(|c| c["id"] == "snapshots" && c["status"] == "ok"));
         assert!(!call(&o, "GET", "/api/health/banner", &[], Value::Null, false).body_json()["problems"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn what_manager_db_cannot_give_answers_500_logged_and_metrics_leave_it_out() {
+        let (ctx, o) = ops();
+        o.notes.raise(&store::Note::new("share", "warning", "A").key("k1")).unwrap();
+        let on = call(&o, "POST", "/api/metrics/enable", &[], Value::Null, true).body_json();
+        let token = format!("Bearer {}", on["token"].as_str().unwrap());
+        ctx.db().execute_batch("CREATE TEMP TRIGGER refused BEFORE UPDATE ON notifications BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;").unwrap();
+        let read = call(&o, "POST", "/api/notifications/read", &[], json!({ "ids": [1] }), false);
+        assert_eq!((read.status, read.body_json()), (500, json!({ "error": "Internal error" })));
+        assert_eq!(call(&o, "POST", "/api/notifications/1/dismiss", &[], Value::Null, false).status, 500);
+        assert!(ctx.logs.lock().unwrap().iter().any(|(s, _, t)| s == "server" && t.starts_with("POST /api/notifications/read: manager.db:")));
+        ctx.db().execute_batch("DROP TRIGGER refused; CREATE TABLE gone (x); ALTER TABLE notifications RENAME TO notifications_kept; CREATE VIEW notifications AS SELECT * FROM gone; DROP TABLE gone;").unwrap();
+        assert_eq!(call(&o, "GET", "/api/notifications", &[], Value::Null, false).status, 500, "not an empty list");
+        // /metrics leaves out what it could not read (unknown, not 0)
+        let (q, caller) = (HashMap::new(), Caller::default());
+        let m = o.handle(&Request { method: "GET", path: "/metrics", query: &q, body: &Value::Null, caller: &caller, authorization: Some(&token) }).unwrap();
+        let text = String::from_utf8(m.body).unwrap();
+        assert!(m.status == 200 && text.contains("sentry_up 1") && !text.contains("sentry_notifications_open{"), "{text}");
+        ctx.db().execute_batch("CREATE TABLE gone (x); ALTER TABLE settings RENAME TO settings_kept; CREATE VIEW settings AS SELECT * FROM gone; DROP TABLE gone;").unwrap();
+        for p in ["/api/vehicles/car/savings-by-month", "/api/metrics/settings", "/api/notification-rules"] {
+            assert_eq!(call(&o, "GET", p, &[], Value::Null, false).status, 500, "{p}");
+        }
+        assert_eq!(call(&o, "PUT", "/api/settings/power", &[], json!({ "pricePerKwh": 0.2 }), false).status, 500);
+    }
+
+    #[test]
+    fn report_settings_that_cannot_be_kept_answer_500_before_anything_changes() {
+        let (ctx, o) = ops();
+        assert_eq!(call(&o, "PUT", "/api/reports/settings", &[], json!({ "share": true }), false).status, 200);
+        // a heartbeat waits in the outbox (no network): turning sharing off would drop it
+        o.reports.send_heartbeat();
+        let waiting = o.reports.outbox().len();
+        assert!(waiting > 0);
+        let audits = ctx.audit_lines().len();
+        ctx.db().execute_batch("PRAGMA query_only = ON").unwrap();
+        let off = call(&o, "PUT", "/api/reports/settings", &[], json!({ "share": false }), false);
+        ctx.db().execute_batch("PRAGMA query_only = OFF").unwrap();
+        assert_eq!((off.status, off.body_json()), (500, json!({ "error": "Internal error" })));
+        assert_eq!(ctx.audit_lines().len(), audits, "no \"turned off\" for what was not kept");
+        assert_eq!(o.reports.outbox().len(), waiting, "the waiting reports stay");
+        assert_eq!(o.reports.settings().unwrap()["share"], true);
+    }
+
+    #[test]
+    fn update_state_that_cannot_be_read_at_the_start_answers_500_until_it_can_never_no_update() {
+        let ctx = FakeCtx::new();
+        store::set(&ctx.db(), "image-updates", &json!({ "latest": { "build": 999 }, "checkedAt": 1, "error": null })).unwrap();
+        ctx.db().execute_batch("CREATE TABLE gone (x); ALTER TABLE settings RENAME TO settings_kept; CREATE VIEW settings AS SELECT * FROM gone; DROP TABLE gone;").unwrap();
+        let o = Ops::new(ctx.clone(), Arc::new(crate::ops::reports::NoNetwork), HashMap::new());
+        for (method, path) in [("GET", "/api/updates"), ("POST", "/api/updates/check")] {
+            let r = call(&o, method, path, &[], Value::Null, true);
+            assert_eq!((r.status, r.body_json()), (500, json!({ "error": "Internal error" })), "{method} {path}");
+        }
+        ctx.db().execute_batch("DROP VIEW settings; ALTER TABLE settings_kept RENAME TO settings;").unwrap();
+        assert_eq!(call(&o, "GET", "/api/updates", &[], Value::Null, false).body_json()["latest"]["build"], 999);
+        o.stop();
     }
 }

@@ -107,7 +107,7 @@ impl Env {
     }
     fn stat_meta(&self, path: &str, nonce: &str, state: &str, sha256: &str) -> Meta {
         let st = fs::symlink_metadata(path).unwrap();
-        Meta { path: path.into(), nonce: nonce.into(), state: state.into(), size: Some(st.size()), sha256: Some(sha256.into()), device: Some(st.dev().to_string()), inode: Some(st.ino().to_string()), journal: None }
+        Meta { path: path.into(), nonce: nonce.into(), state: ArtifactState::parse(state), size: Some(st.size()), sha256: Some(sha256.into()), device: Some(st.dev().to_string()), inode: Some(st.ino().to_string()), journal: None }
     }
     fn cleanup(&self, paths: Vec<(&str, String)>, arts: Vec<(&str, Meta)>) -> R<recover::Cleaned> {
         let rec = self.recorder();
@@ -140,7 +140,7 @@ fn prepare_copies_beside_the_original_and_swap_puts_it_in_place() {
     assert!(prepared.candidate_mtime_ns.is_some());
     env.writes.lock().unwrap().clear();
     let result = env.tx.swap_replacement(&Op { prepared: Some(&prepared), persist: Some(&rec), ..Default::default() }).unwrap();
-    assert_eq!(result.phase, Some("backup-deleted"));
+    assert_eq!(result.phase, Some(ReplacementPhase::BackupDeleted));
     let phases: Vec<String> = env.writes.lock().unwrap().iter().map(|w| w["phase"].as_str().unwrap().to_string()).collect();
     assert_eq!(phases, ["candidate-written", "original-backed-up", "candidate-promoted"]);
     assert_eq!(env.writes.lock().unwrap()[0]["ownedArtifacts"]["replacementBackup"]["state"], "intent");
@@ -292,7 +292,7 @@ fn a_copy_that_is_not_the_conversion_or_another_file_is_never_removed() {
 fn a_copy_only_announced_is_removed_while_empty_and_kept_once_it_holds_anything() {
     let env = setup("intent");
     let cand = env.candidate();
-    let intent = Meta { path: cand.clone(), nonce: "n-cand".into(), state: "intent".into(), size: None, sha256: None, device: None, inode: None, journal: None };
+    let intent = Meta { path: cand.clone(), nonce: "n-cand".into(), state: ArtifactState::Intent, size: None, sha256: None, device: None, inode: None, journal: None };
     fs::write(&cand, b"").unwrap();
     assert!(env.cleanup(vec![("replacementCandidate", cand.clone())], vec![("replacementCandidate", intent.clone())]).unwrap().cleaned);
     assert!(!Path::new(&cand).exists());
@@ -323,7 +323,7 @@ fn an_encode_output_the_writer_changed_is_removed_by_name_and_identity() {
 fn a_backup_only_announced_is_forgotten_and_kept_when_it_is_there() {
     let env = setup("backup");
     let backup = s(&env.footage.join(format!("BACKUP-{}", Path::new(&env.source).file_name().unwrap().to_string_lossy())));
-    let intent = Meta { path: backup.clone(), nonce: "n-back".into(), state: "intent".into(), size: None, sha256: None, device: None, inode: None, journal: None };
+    let intent = Meta { path: backup.clone(), nonce: "n-back".into(), state: ArtifactState::Intent, size: None, sha256: None, device: None, inode: None, journal: None };
     assert!(env.cleanup(vec![("replacementBackup", backup.clone())], vec![("replacementBackup", intent.clone())]).unwrap().cleaned);
     fs::rename(&env.source, &backup).unwrap();
     let kept = env.cleanup(vec![("replacementBackup", backup.clone())], vec![("replacementBackup", intent)]).unwrap();
@@ -432,7 +432,7 @@ fn a_crash_before_any_record_of_a_replacement_recovers_safely() {
                         None,
                     )
                     .ok();
-                    let action = replacement_action(Some(&phase), facts.as_ref(), true);
+                    let action = replacement_action(Some(&ReplacementPhase::parse(&phase)), facts.as_ref(), true);
                     if action == "manual-intervention" {
                         break;
                     }
@@ -440,7 +440,7 @@ fn a_crash_before_any_record_of_a_replacement_recovers_safely() {
                     let Ok(r) = fresh.recover_replacement(&op) else { break };
                     paths = r.owned_paths.clone();
                     arts = r.owned_artifacts.clone();
-                    if r.action == Some("restart-replacement") || r.phase == Some("backup-restored") {
+                    if r.action == Some("restart-replacement") || r.phase == Some(ReplacementPhase::BackupRestored) {
                         let op = Op { owned_paths: paths.clone(), owned_artifacts: arts.clone(), publication_artifact: r.publication_artifact.clone().or(Some(a.clone())), ..env.op(&rec) };
                         out = match fresh.cleanup_owned_artifacts(&op) {
                             Ok(c) if c.cleaned => "requeue",
@@ -448,11 +448,11 @@ fn a_crash_before_any_record_of_a_replacement_recovers_safely() {
                         };
                         break;
                     }
-                    if r.phase == Some("backup-deleted") {
+                    if r.phase == Some(ReplacementPhase::BackupDeleted) {
                         out = "complete";
                         break;
                     }
-                    phase = r.phase.unwrap_or("").to_string();
+                    phase = r.phase.map(|p| p.to_string()).unwrap_or_default();
                 }
                 out
             }
@@ -487,7 +487,7 @@ fn refusal(e: TxError) -> String {
 fn owned_meta(path: &str, nonce: &str, state: &str) -> Meta {
     let st = fs::symlink_metadata(path).unwrap();
     let sha = sha(&fs::read(path).unwrap());
-    Meta { path: path.into(), nonce: nonce.into(), state: state.into(), size: Some(st.size()), sha256: Some(sha), device: Some(st.dev().to_string()), inode: Some(st.ino().to_string()), journal: None }
+    Meta { path: path.into(), nonce: nonce.into(), state: ArtifactState::parse(state), size: Some(st.size()), sha256: Some(sha), device: Some(st.dev().to_string()), inode: Some(st.ino().to_string()), journal: None }
 }
 
 /// The SMB failure as the owner's share showed it: right after the
@@ -632,7 +632,7 @@ fn private_work_files_name_the_link_count_folder_or_identity() {
 fn share_copies_and_the_adapter_name_what_differs() {
     let env = setup("share-copy");
     let cand = env.candidate();
-    let intent = Meta { path: cand.clone(), nonce: "n-cand".into(), state: "intent".into(), size: None, sha256: None, device: None, inode: None, journal: None };
+    let intent = Meta { path: cand.clone(), nonce: "n-cand".into(), state: ArtifactState::Intent, size: None, sha256: None, device: None, inode: None, journal: None };
     fs::write(&cand, "not ours").unwrap();
     let e = env.cleanup(vec![("replacementCandidate", cand.clone())], vec![("replacementCandidate", intent.clone())]).err().unwrap();
     assert_eq!(refusal(e), "remove-share-copy: size 8 != 0 (state intent)");
@@ -664,7 +664,7 @@ fn encode_outputs_name_the_record_or_the_link_count() {
     fs::write(&r.path, "encoded").unwrap();
     // a record that is not intent/owned
     let mut arts = r.owned_artifacts.clone();
-    arts.get_mut("encodedCandidate").unwrap().state = "writing".into();
+    arts.get_mut("encodedCandidate").unwrap().state = ArtifactState::Writing;
     let e = env.tx.adopt_encode_output(&Op { owned_paths: r.owned_paths.clone(), owned_artifacts: arts, ..env.op(&rec) }).err().expect("refused");
     assert_eq!(refusal(e), "adopt-encode-output: record state writing not intent/owned");
     let e = env.tx.adopt_encode_output(&Op { owned_paths: r.owned_paths.clone(), owned_artifacts: Artifacts::new(), ..env.op(&rec) }).err().expect("refused");

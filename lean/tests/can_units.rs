@@ -183,7 +183,7 @@ fn columns_sample_decodes_to_the_candump_text() {
     if std::process::Command::new("xz").arg("--version").output().is_err() {
         return;
     }
-    let fx = Path::new(env!("CARGO_MANIFEST_DIR")).join("../test/fixtures");
+    let fx = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/can");
     let text = |f: &str| {
         let mut out = Vec::new();
         let mut found = reader::Found::default();

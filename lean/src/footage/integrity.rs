@@ -133,7 +133,10 @@ fn fresh(had: Option<&Value>, f: &FileEntry) -> bool {
 }
 
 fn mark(app: &App, vid: &str, on: bool) {
-    app.core.db().set(&format!("integrity-running:{vid}"), &json!(on));
+    // (not kept: a check that was running does not go on after a restart, or one that ended does)
+    if let Err(e) = app.core.db().set(&format!("integrity-running:{vid}"), &json!(on)) {
+        app.core.log("integrity", super::ctx::Level::Warn, &format!("Footage check of {vid}: whether it runs was not noted: {e}"));
+    }
 }
 
 /// Check what is new or changed; one run per vehicle at a time. The status.
@@ -259,7 +262,20 @@ pub fn results(app: &App, vid: &str) -> Value {
 
 /// After a scan: a check that was running when the server stopped goes on.
 pub fn resume(app: &Arc<App>, vid: &str) {
-    let marked = app.core.db().get(&format!("integrity-running:{vid}")) == Some(Value::Bool(true));
+    let key = format!("integrity-running:{vid}");
+    let marked = match app.core.db().get(&key) {
+        Ok(v) => {
+            app.footage.unread.first(&key, false);
+            v == Some(Value::Bool(true))
+        }
+        Err(e) => {
+            // (logged once until it can be read)
+            if app.footage.unread.first(&key, true) {
+                app.core.log("integrity", super::ctx::Level::Warn, &format!("Footage check of {vid}: whether one was running is not known, so none goes on: {e}"));
+            }
+            return;
+        }
+    };
     let running = app.footage.integrity.runs.lock().unwrap().get(vid).is_some_and(|r| r.running);
     if marked && !running && app.state_of(vid).is_some_and(|s| s.scanned) {
         app.core.log("integrity", super::ctx::Level::Info, &format!("Footage check of {vid}: going on after the restart"));

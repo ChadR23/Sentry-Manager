@@ -34,6 +34,12 @@ fn error(status: u16, msg: &str) -> Res {
 }
 
 fn refused((status, msg): (u16, String)) -> Res {
+    if status >= 500 {
+        // (only "Internal error" is answered; what failed is logged by route() with the request)
+        let mut r = error(status, "Internal error");
+        r.extensions_mut().insert(super::ctx::Failed(msg));
+        return r;
+    }
     error(status, &msg)
 }
 
@@ -70,8 +76,17 @@ impl Viewer {
         self.ctx.vehicle(id).ok_or_else(|| error(404, "No such vehicle."))
     }
 
-    /// The route's answer, or None when the path is not the viewer's.
+    /// The route's answer, or None when the path is not the viewer's. What failed behind a 500 is
+    /// logged here, with the request, as the other areas log theirs.
     pub fn route(self: &Arc<Self>, req: &Req) -> Option<Res> {
+        let mut res = self.answer_route(req)?;
+        if let Some(super::ctx::Failed(what)) = res.extensions_mut().remove::<super::ctx::Failed>() {
+            self.ctx.log_error(&format!("{} {}: {what}", req.method, req.path));
+        }
+        Some(res)
+    }
+
+    fn answer_route(self: &Arc<Self>, req: &Req) -> Option<Res> {
         let seg: Vec<&str> = req.path.trim_start_matches("/api/").split('/').collect();
         let m = req.method;
         let get = m == Method::GET || m == Method::HEAD;
@@ -87,16 +102,16 @@ impl Viewer {
                 v.speed_index.kick();
                 ok(v.speed_index.status())
             }),
-            ["places"] if get => ok(json!({ "places": places::place_list(ctx) })),
+            ["places"] if get => answer(places::place_list(ctx).map(|p| json!({ "places": p })).map_err(super::ctx::failed)),
             ["places"] if post => self.admin(req, |v| with_body(req, |b| answer(places::add(&*v.ctx, b)))),
             ["places", "near"] if get => self.near(req),
-            ["places", "suggestions"] if get => ok(places::suggestions(ctx, &self.spots)),
+            ["places", "suggestions"] if get => answer(places::suggestions(ctx, &self.spots)),
             ["places", id] if m == Method::PATCH => self.admin(req, |v| with_body(req, |b| answer(places::patch(&*v.ctx, &dec(id), b)))),
             ["places", id] if m == Method::DELETE => self.admin(req, |v| answer(places::remove(&*v.ctx, &dec(id)))),
             ["settings", "work-limits"] if get => self.admin(req, |v| ok(v.limits.read().unwrap().view())),
             ["settings", "work-limits"] if m == Method::PUT => self.admin(req, |v| with_body(req, |b| v.set_work_limits(b))),
             ["studio", "context"] if get => ok(studio::context(ctx)),
-            ["studio", "settings"] if get => ok(studio::settings(ctx)),
+            ["studio", "settings"] if get => answer(studio::settings(ctx)),
             ["studio", "settings"] if post => self.admin(req, |v| with_body(req, |b| answer(studio::set_setting(&*v.ctx, b)))),
             ["studio", "readDir"] if post => with_body(req, |b| answer(studio::read_dir_route(ctx, b))),
             ["studio", "readFile"] if post => with_body(req, |b| answer(studio::read_file_route(ctx, b))),
@@ -108,7 +123,7 @@ impl Viewer {
             ["vehicles", id, "moments"] if get => self.moments(&dec(id), req.query),
             ["vehicles", id, "driving"] if get => self.driving(&dec(id), req.query),
             ["vehicles", id, "event-map"] if get => match self.vehicle_or_404(&dec(id)) {
-                Ok(v) => ok(places::event_map(ctx, &self.spots, &v.id)),
+                Ok(v) => answer(places::event_map(ctx, &self.spots, &v.id)),
                 Err(r) => r,
             },
             ["vehicles", id, "drives"] if get => self.drives(&dec(id), req.query),
@@ -130,7 +145,7 @@ impl Viewer {
     fn telemetry(&self, req: &Req) -> Res {
         let p = req.query.get("path").cloned().unwrap_or_default();
         let Some(real) = studio::readable(&*self.ctx).resolve(&p).filter(|r| !studio::hidden_path(r)) else { return error(403, "Outside the vehicle shares.") };
-        let (key, body) = match self.telemetry.for_file(&real) {
+        let (md, key) = match self.telemetry.identity(&real) {
             Ok(x) => x,
             Err(super::telemetry_api::Refused(s, m)) => return error(s, &m),
         };
@@ -141,14 +156,20 @@ impl Viewer {
             .header(header::ETAG, &etag)
             .header(header::VARY, "Accept-Encoding")
             .header("X-Content-Type-Options", "nosniff");
-        if req.headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()) == Some(etag.as_str()) {
+        // (the key is the clip's path, size and time: a matching ETag, alone or in a list as
+        // http.js splits it, is answered from those before the cached body, or the clip, is read)
+        if crate::ui::http::none_match(req.headers, &etag) {
             return b.status(StatusCode::NOT_MODIFIED).body(Body::empty()).unwrap();
         }
+        let body = match self.telemetry.body(&real, &md, &key) {
+            Ok(x) => x,
+            Err(super::telemetry_api::Refused(s, m)) => return error(s, &m),
+        };
         let accept = req.headers.get(header::ACCEPT_ENCODING).and_then(|v| v.to_str().ok()).unwrap_or("");
         let gzip = accept.split(|c: char| !c.is_ascii_alphanumeric()).any(|w| w == "gzip");
         if gzip {
             let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(6));
-            let _ = e.write_all(body.as_bytes());
+            let _ = e.write_all(&body);
             let z = e.finish().unwrap_or_default();
             return b.header(header::CONTENT_ENCODING, "gzip").body(Body::from(z)).unwrap();
         }
@@ -159,6 +180,15 @@ impl Viewer {
         let p = req.query.get("path").cloned().unwrap_or_default();
         let real = studio::readable(&*self.ctx).resolve(&p).filter(|r| !studio::hidden_path(r) && r.to_string_lossy().to_lowercase().ends_with(".mp4"));
         let Some(real) = real else { return error(403, "Outside the vehicle shares.") };
+        // (a HEAD, which core sends this raw route as it is, makes nothing: the grid's headers
+        // when it is made, else no length)
+        if req.method == Method::HEAD {
+            let b = Response::builder().header(header::CONTENT_TYPE, "image/jpeg").header("X-Content-Type-Options", "nosniff");
+            return match self.scrub.cached(&real).and_then(|g| std::fs::metadata(g).ok()) {
+                Some(md) => b.header(header::CONTENT_LENGTH, md.len()).header(header::CACHE_CONTROL, "private, max-age=86400").body(Body::empty()).unwrap(),
+                None => b.header(header::CACHE_CONTROL, "no-store").body(Body::empty()).unwrap(),
+            };
+        }
         let Some(grid) = self.scrub.get(&real, true, true, true) else { return error(404, "No previews for this clip.") };
         let Ok(bytes) = std::fs::read(&grid) else { return error(404, "No previews for this clip.") };
         let b = Response::builder()
@@ -353,7 +383,10 @@ impl Viewer {
             }
         };
         let stats_for = |c: &drives::Clip| by_day.borrow().get(c.day).and_then(|s| s.get(c.rel).cloned());
-        let places_list = Arc::new(places::place_list(&*self.ctx));
+        let places_list = match places::place_list(&*self.ctx) {
+            Ok(p) => Arc::new(p),
+            Err(e) => return refused(super::ctx::failed(e)),
+        };
         let label_for = |need: bool| {
             let spots = if need { places::drive_spots(&*self.ctx, &self.spots, &v.id) } else { Vec::new() };
             drives::labeller(places_list.clone(), spots)
@@ -382,7 +415,10 @@ impl Viewer {
             }
             let label = label_for(page.iter().any(|d| d.from.is_some() || d.to.is_some()));
             let tags = self.drive_data.tags(&v.id);
-            let has_can = self.ctx.has_can(&v.id);
+            let has_can = match self.ctx.has_can(&v.id) {
+                Ok(h) => h,
+                Err(e) => return refused(super::ctx::failed(e)),
+            };
             let list: Vec<Value> = page
                 .iter()
                 .map(|d| {
@@ -402,7 +438,10 @@ impl Viewer {
             stats_for(c)
         }, gap_min * 60.0, limit, before.as_deref());
         let label = label_for(found.iter().any(|d| d.clips.iter().any(|c| stats_for(c).is_some_and(|s| s.a.is_some()))));
-        let has_can = self.ctx.has_can(&v.id);
+        let has_can = match self.ctx.has_can(&v.id) {
+            Ok(h) => h,
+            Err(e) => return refused(super::ctx::failed(e)),
+        };
         let mut list: Vec<Map<String, Value>> = found
             .iter()
             .map(|d| {
@@ -441,7 +480,10 @@ impl Viewer {
             Ok(n) => n,
             Err(e) => return error(400, &e),
         };
-        self.ctx.set_setting("work-limits", next.clone());
+        if let Err(e) = self.ctx.set_setting("work-limits", next.clone()) {
+            // (not in force either: the limits in force are the ones kept)
+            return refused(super::ctx::failed(e));
+        }
         let picked = work_limits::pick_limits(self.resources.clone(), Some(&next));
         *self.limits.write().unwrap() = picked;
         let set = next.as_object().unwrap();
@@ -450,24 +492,25 @@ impl Viewer {
         ok(self.limits.read().unwrap().view())
     }
 
-    /// The place fields of a page of recordings (when places are saved), to merge into each.
-    pub fn place_tags(&self, vid: &str, page: &[&crate::inventory::Recording]) -> Option<Vec<Map<String, Value>>> {
-        let list = places::place_list(&*self.ctx);
+    /// The place fields of a page of recordings (when places are saved), to merge into each; an
+    /// error when the saved places cannot be read.
+    pub fn place_tags(&self, vid: &str, page: &[&crate::inventory::Recording]) -> Result<Option<Vec<Map<String, Value>>>, String> {
+        let list = places::place_list(&*self.ctx)?;
         if list.is_empty() {
-            return None;
+            return Ok(None);
         }
         let files = self.ctx.files(vid);
         // CAN Bridge GPS for the recordings CAN data covers (the car's keys, sorted)
-        let has_can = self.ctx.has_can(vid);
+        let has_can = self.ctx.has_can(vid)?;
         let mut keys = if has_can.is_some() { self.ctx.can_keys(vid) } else { Vec::new() };
         keys.sort();
         let tz = self.ctx.vehicle(vid).map(|v| v.timezone).unwrap_or_default();
-        Some(page.iter().map(|rec| {
+        Ok(Some(page.iter().map(|rec| {
             let ev = if rec.event_id.is_some() { self.spots.get(&*self.ctx, vid, files.as_ref(), rec).and_then(|s| s.pos) } else { None };
             let covered = has_can.as_ref().is_some_and(|f| f(rec.clip_rels().map(String::from).collect(), rec.start_key.as_deref()));
             let side = recording_place::CanSide { gps: &self.can_gps, keys: if covered { keys.clone() } else { Vec::new() }, tz: &tz };
             recording_place::tag(&self.speed_index, vid, files.as_ref(), rec, ev, &list, Some(&side))
-        }).collect())
+        }).collect()))
     }
 }
 
@@ -475,5 +518,113 @@ fn with_body(req: &Req, f: impl FnOnce(&Value) -> Res) -> Res {
     match body_of(req) {
         Ok(b) => f(&b),
         Err(r) => r,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::testkit::{self, Car};
+    use super::*;
+
+    fn call(v: &Arc<Viewer>, method: Method, path: &str, clip: &Path, headers: &[(header::HeaderName, &str)]) -> Res {
+        let q = HashMap::from([("path".to_string(), clip.to_string_lossy().into_owned())]);
+        let mut h = HeaderMap::new();
+        for (k, val) in headers {
+            h.insert(k.clone(), val.parse().unwrap());
+        }
+        v.route(&Req { method: &method, path, query: &q, headers: &h, body: &[] }).expect("a viewer route")
+    }
+
+    fn bytes(r: Res) -> Vec<u8> {
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        rt.block_on(axum::body::to_bytes(r.into_body(), usize::MAX)).unwrap().to_vec()
+    }
+
+    fn front_clip(car: &Car) -> std::path::PathBuf {
+        let clip = car.root.join("TeslaCam/RecentClips/2026-01-01_08-00-00-front.mp4");
+        std::fs::create_dir_all(clip.parent().unwrap()).unwrap();
+        testkit::drive(&clip, &[10.0, 20.0], 37.0, -122.0);
+        clip
+    }
+
+    #[test]
+    fn telemetry_answers_a_matching_etag_from_the_clip_s_size_and_time_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let car = Car::new("telemetry-304");
+        let clip = front_clip(&car);
+        let v = Viewer::new(car.ctx.clone());
+        let get = call(&v, Method::GET, "/api/telemetry", &clip, &[]);
+        assert_eq!(get.status(), StatusCode::OK);
+        let etag = get.headers()[header::ETAG].to_str().unwrap().to_string();
+        let body = bytes(get);
+        assert!(body.starts_with(b"{\"v\":1,\"frames\":[["), "{}", String::from_utf8_lossy(&body));
+        // the cache swept and the clip unreadable: a matching ETag is still answered, so nothing
+        // was read
+        let cache = car.data.join("telemetry");
+        std::fs::remove_dir_all(&cache).unwrap();
+        std::fs::set_permissions(&clip, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::File::open(&clip).is_ok() {
+            // (permissions do not stop root)
+            std::fs::set_permissions(&clip, std::fs::Permissions::from_mode(0o644)).unwrap();
+            return;
+        }
+        let not_modified = call(&v, Method::GET, "/api/telemetry", &clip, &[(header::IF_NONE_MATCH, &etag)]);
+        let in_a_list = call(&v, Method::GET, "/api/telemetry", &clip, &[(header::IF_NONE_MATCH, &format!("\"another\", {etag}"))]);
+        let other = call(&v, Method::GET, "/api/telemetry", &clip, &[(header::IF_NONE_MATCH, "\"another\"")]);
+        std::fs::set_permissions(&clip, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(not_modified.headers()[header::ETAG], etag.as_str());
+        assert_eq!(in_a_list.status(), StatusCode::NOT_MODIFIED, "the ETag in a list");
+        assert_eq!(other.status(), StatusCode::INTERNAL_SERVER_ERROR, "another ETag reads the clip");
+        assert!(!cache.exists(), "nothing was cached");
+        // readable again: the same body, cached once
+        assert_eq!(bytes(call(&v, Method::GET, "/api/telemetry", &clip, &[])), body);
+        assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn routes_whose_saved_places_cannot_be_read_answer_500_and_log_the_request() {
+        let car = Car::new("places-routes");
+        let v = Viewer::new(car.ctx.clone());
+        let none = Path::new("");
+        assert_eq!(call(&v, Method::GET, "/api/places", none, &[]).status(), StatusCode::OK);
+        car.ctx.reads_fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        for path in ["/api/places", "/api/places/suggestions", "/api/vehicles/v1/event-map", "/api/vehicles/v1/drives"] {
+            let r = call(&v, Method::GET, path, none, &[]);
+            assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR, "{path}");
+            assert_eq!(serde_json::from_slice::<Value>(&bytes(r)).unwrap(), json!({ "error": "Internal error" }), "{path}: not the database's own words");
+        }
+        let logged = car.ctx.logged.lock().unwrap().clone();
+        assert_eq!(logged.len(), 4, "one line per failed request: {logged:?}");
+        assert_eq!(logged[0], "GET /api/places: manager.db: database disk image is malformed");
+        assert!(v.place_tags("v1", &[]).is_err(), "nor a page of recordings without their places");
+    }
+
+    #[test]
+    fn drives_whose_can_tags_cannot_be_worked_out_answer_500() {
+        let car = Car::new("drives-can");
+        let v = Viewer::new(car.ctx.clone());
+        let none = Path::new("");
+        assert_eq!(call(&v, Method::GET, "/api/vehicles/v1/drives", none, &[]).status(), StatusCode::OK);
+        car.ctx.can_fails.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(call(&v, Method::GET, "/api/vehicles/v1/drives", none, &[]).status(), StatusCode::INTERNAL_SERVER_ERROR, "not drives without their CAN tags");
+    }
+
+    #[test]
+    fn a_head_for_scrub_previews_makes_nothing() {
+        let car = Car::new("scrub-head");
+        let clip = front_clip(&car);
+        let v = Viewer::new(car.ctx.clone());
+        let head = call(&v, Method::HEAD, "/api/scrub", &clip, &[]);
+        assert_eq!(head.status(), StatusCode::OK);
+        assert!(head.headers().get(header::CONTENT_LENGTH).is_none());
+        assert!(!car.data.join("scrub").exists(), "nothing made, queued or prepared");
+        // a grid made already: its length
+        let grid = v.scrub.cache_path_for(&clip).unwrap();
+        std::fs::create_dir_all(grid.parent().unwrap()).unwrap();
+        std::fs::write(&grid, b"jpeg").unwrap();
+        let head = call(&v, Method::HEAD, "/api/scrub", &clip, &[]);
+        assert_eq!(head.status(), StatusCode::OK);
+        assert_eq!(head.headers()[header::CONTENT_LENGTH], "4");
     }
 }

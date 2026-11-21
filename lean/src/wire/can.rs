@@ -41,15 +41,17 @@ impl CanCtx for CoreCan {
     fn can_port(&self) -> u16 {
         self.state.config.can_port
     }
-    fn setting(&self, key: &str) -> Option<Value> {
-        self.state.setting(key)
+    fn setting(&self, key: &str) -> Result<Option<Value>, String> {
+        self.state.setting(key).map_err(|e| e.to_string())
     }
-    fn set_setting(&self, key: &str, value: Value) {
-        self.state.set_setting(key, &value);
+    fn set_setting(&self, key: &str, value: Value) -> Result<(), String> {
+        self.state.set_setting(key, &value).map_err(|e| e.to_string())
     }
-    fn has_dashboards(&self) -> bool {
-        let c = self.state.db.conn();
-        c.query_row("SELECT 1 FROM settings WHERE key LIKE 'dash:%' LIMIT 1", [], |_| Ok(())).is_ok()
+    fn has_dashboards(&self) -> Result<bool, String> {
+        use rusqlite::OptionalExtension;
+        let c = self.state.db.reader();
+        let hit = c.query_row("SELECT 1 FROM settings WHERE key LIKE 'dash:%' LIMIT 1", [], |_| Ok(())).optional();
+        hit.map(|h| h.is_some()).map_err(|e| format!("manager.db: {e}"))
     }
     fn vehicles(&self) -> Vec<Car> {
         let Some(s) = self.srv() else { return Vec::new() };
@@ -84,11 +86,12 @@ impl CanCtx for CoreCan {
         let s = self.srv().ok_or("stopping")?;
         s.app().scan_now(vid, false).map(|_| ()).map_err(|e| e.message)
     }
-    fn bin_rels(&self, vid: &str) -> Vec<String> {
-        self.state.db.bin_items(Some(vid)).into_iter().flat_map(|b| b.files.as_array().cloned().unwrap_or_default()).filter_map(|f| f["rel"].as_str().map(String::from)).collect()
+    fn bin_rels(&self, vid: &str) -> Result<Vec<String>, String> {
+        let items = self.state.db.bin_items(Some(vid)).map_err(|e| e.to_string())?;
+        Ok(items.into_iter().flat_map(|b| b.files.as_array().cloned().unwrap_or_default()).filter_map(|f| f["rel"].as_str().map(String::from)).collect())
     }
-    fn protected_rels(&self, vid: &str) -> Vec<String> {
-        self.state.db.protected_set(vid).into_iter().collect()
+    fn protected_rels(&self, vid: &str) -> Result<Vec<String>, String> {
+        Ok(self.state.db.protected_set(vid).map_err(|e| e.to_string())?.into_iter().collect())
     }
     fn share_healthy(&self, vid: &str) -> bool {
         self.srv().is_none_or(|s| s.app().vehicles.share(vid).is_none_or(|sh| sh.is_healthy()))
@@ -152,9 +155,9 @@ impl CanCtx for CoreCan {
     fn local_address(&self, ip: &str) -> bool {
         crate::core::tls::ip_permitted(ip)
     }
-    fn sentry_usb_record_view(&self, vid: &str) -> Value {
+    fn sentry_usb_record_view(&self, vid: &str) -> Result<Value, String> {
         // arrivalRef.view(v.id) (the CAN area adds canBackfill)
-        self.srv().and_then(|s| s.arrival().map(|a| a.arrival.view(vid))).unwrap_or_else(|| serde_json::json!({}))
+        self.srv().and_then(|s| s.arrival().map(|a| a.arrival.view(vid))).unwrap_or_else(|| Ok(serde_json::json!({})))
     }
     fn arrival_kick(&self) {
         if let Some(a) = self.srv().and_then(|s| s.arrival().cloned()) {
@@ -187,13 +190,13 @@ pub fn make(srv: &Arc<Server>) -> Arc<Can> {
     can
 }
 
-fn who_of(c: &CoreCtx) -> Who {
+fn who_of(c: &CoreCtx) -> Result<Who, HttpError> {
     let w = super::Who::of(c);
-    Who {
-        by: w.by(),
-        owner: c.user.clone().filter(|u| !u.is_empty()).unwrap_or_else(|| c.client.clone()),
-        admin_here: c.user.as_deref().is_some_and(|u| c.state.admin_here(&c.client, u)),
-    }
+    let admin_here = match c.user.as_deref() {
+        Some(u) => c.state.admin_here(&c.client, u)?,
+        None => false,
+    };
+    Ok(Who { by: w.by(), owner: c.user.clone().filter(|u| !u.is_empty()).unwrap_or_else(|| c.client.clone()), admin_here })
 }
 
 /// A CAN route for core's router.
@@ -208,7 +211,7 @@ pub fn answer(srv: &Arc<Server>, c: &mut CoreCtx) -> Result<Reply, HttpError> {
         remote: c.conn.peer_ip().unwrap_or_default(),
         local_port: c.state.config.port,
         encrypted: c.conn.encrypted,
-        who: who_of(c),
+        who: who_of(c)?,
         confirmed: c.state.auth.recently_confirmed(&c.view()),
         closed: Arc::new(AtomicBool::new(false)),
     };

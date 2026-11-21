@@ -108,16 +108,17 @@ impl CanPrune {
         CanPrune { ctx, logs, trust, drop, on_change, now: Box::new(super::util::now_ms), batch: BATCH, fresh_ms: FRESH_MS, soon_ms: 30_000.0, running: Mutex::new(HashMap::new()), timers: Mutex::new(HashMap::new()), covers: Mutex::new(HashMap::new()) }
     }
 
+    // (a setting that cannot be read is an error here: nothing is deleted, nor written over, on a guess)
     /// The keys mapped to a car in the Nerd settings (keysOf).
-    pub fn keys_of(&self, vid: &str) -> Vec<String> {
-        let map = self.ctx.setting("can-vehicles").filter(|v| json::truthy(Some(v))).unwrap_or(json!({}));
-        let Value::Object(m) = map else { return Vec::new() };
-        json::ordered_keys(&m).into_iter().filter(|k| m[*k].as_str() == Some(vid)).cloned().collect()
+    pub fn keys_of(&self, vid: &str) -> Result<Vec<String>, String> {
+        let map = self.ctx.setting("can-vehicles")?.filter(|v| json::truthy(Some(v))).unwrap_or(json!({}));
+        let Value::Object(m) = map else { return Ok(Vec::new()) };
+        Ok(json::ordered_keys(&m).into_iter().filter(|k| m[*k].as_str() == Some(vid)).cloned().collect())
     }
 
-    pub fn settings(&self) -> Keep {
+    pub fn settings(&self) -> Result<Keep, String> {
         let mut k = Keep { with_footage: true, delete_unlinked: true, unlinked_days: UNLINKED_DAYS };
-        if let Some(Value::Object(m)) = self.ctx.setting("can-keep").filter(|v| json::truthy(Some(v))) {
+        if let Some(Value::Object(m)) = self.ctx.setting("can-keep")?.filter(|v| json::truthy(Some(v))) {
             if let Some(v) = m.get("withFootage") {
                 k.with_footage = json::truthy(Some(v));
             }
@@ -128,33 +129,33 @@ impl CanPrune {
                 k.unlinked_days = v.as_f64().unwrap_or(f64::NAN);
             }
         }
-        k
+        Ok(k)
     }
-    fn settings_json(&self) -> Map<String, Value> {
+    fn settings_json(&self) -> Result<Map<String, Value>, String> {
         let mut o = Map::new();
         o.insert("withFootage".into(), json!(true));
         o.insert("deleteUnlinked".into(), json!(true));
         o.insert("unlinkedDays".into(), json!(7));
-        if let Some(Value::Object(m)) = self.ctx.setting("can-keep").filter(|v| json::truthy(Some(v))) {
+        if let Some(Value::Object(m)) = self.ctx.setting("can-keep")?.filter(|v| json::truthy(Some(v))) {
             for (k, v) in m {
                 o.insert(k, v);
             }
         }
-        o
+        Ok(o)
     }
     fn any_on(c: &Keep) -> bool {
         c.with_footage || c.delete_unlinked
     }
-    fn load_state(&self, vid: &str) -> Map<String, Value> {
+    fn load_state(&self, vid: &str) -> Result<Map<String, Value>, String> {
         let mut o = Map::new();
         o.insert("gone".into(), json!([]));
         o.insert("last".into(), Value::Null);
-        if let Some(Value::Object(m)) = self.ctx.setting(&format!("can-prune:{}", vid)).filter(|v| json::truthy(Some(v))) {
+        if let Some(Value::Object(m)) = self.ctx.setting(&format!("can-prune:{}", vid))?.filter(|v| json::truthy(Some(v))) {
             for (k, v) in m {
                 o.insert(k, v);
             }
         }
-        o
+        Ok(o)
     }
     fn gone_of(st: &Map<String, Value>) -> Vec<(f64, f64, f64)> {
         st.get("gone").and_then(|g| g.as_array()).map(|a| a.iter().filter_map(|g| g.as_array().map(|x| (x.first().and_then(|v| v.as_f64()).unwrap_or(f64::NAN), x.get(1).and_then(|v| v.as_f64()).unwrap_or(f64::NAN), x.get(2).and_then(|v| v.as_f64()).unwrap_or(f64::NAN)))).collect()).unwrap_or_default()
@@ -163,7 +164,7 @@ impl CanPrune {
         Value::Array(g.iter().map(|x| json!([n(x.0), n(x.1), n(x.2)])).collect())
     }
 
-    fn footage_of(&self, v: &Car) -> Vec<f64> {
+    fn footage_of(&self, v: &Car) -> Result<Vec<f64>, String> {
         let mut set: HashSet<i64> = HashSet::new();
         let mut add = |rel: &str| {
             if let Some(t) = clip_start(v, rel) {
@@ -175,29 +176,30 @@ impl CanPrune {
                 add(&f.rel);
             }
         }
-        for rel in self.ctx.bin_rels(&v.id).iter().filter(|r| is_mp4(r)) {
+        // (the Recycle Bin and protected clips are footage too: unreadable, they are an error, never none)
+        for rel in self.ctx.bin_rels(&v.id)?.iter().filter(|r| is_mp4(r)) {
             add(rel);
         }
-        for rel in self.ctx.protected_rels(&v.id).iter().filter(|r| is_mp4(r)) {
+        for rel in self.ctx.protected_rels(&v.id)?.iter().filter(|r| is_mp4(r)) {
             add(rel);
         }
         let mut out: Vec<f64> = set.into_iter().map(|x| x as f64).collect();
         out.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        out
+        Ok(out)
     }
 
-    fn starts_of(&self, v: &Car) -> Arc<Vec<f64>> {
+    fn starts_of(&self, v: &Car) -> Result<Arc<Vec<f64>>, String> {
         let s = self.ctx.scan_of(&v.id);
-        let bin = self.ctx.bin_rels(&v.id);
-        let sig = format!("{:?}|{}|{}|{}|{}|{}", s.as_ref().and_then(|x| x.scanned_at), s.as_ref().map_or(0, |x| x.files.len()), s.as_ref().map_or(0, |x| x.generation), bin.len(), self.ctx.protected_rels(&v.id).len(), v.timezone);
+        let bin = self.ctx.bin_rels(&v.id)?;
+        let sig = format!("{:?}|{}|{}|{}|{}|{}", s.as_ref().and_then(|x| x.scanned_at), s.as_ref().map_or(0, |x| x.files.len()), s.as_ref().map_or(0, |x| x.generation), bin.len(), self.ctx.protected_rels(&v.id)?.len(), v.timezone);
         if let Some((sg, starts)) = self.covers.lock().unwrap().get(&v.id) {
             if *sg == sig {
-                return starts.clone();
+                return Ok(starts.clone());
             }
         }
-        let starts = Arc::new(self.footage_of(v));
+        let starts = Arc::new(self.footage_of(v)?);
         self.covers.lock().unwrap().insert(v.id.clone(), (sig, starts.clone()));
-        starts
+        Ok(starts)
     }
 
     /// Why this car's footage cannot be trusted right now (None: it can).
@@ -218,18 +220,26 @@ impl CanPrune {
         None
     }
 
-    fn car_of_key(&self, key: &str) -> Option<Car> {
-        self.ctx.vehicles().into_iter().find(|v| self.keys_of(&v.id).iter().any(|k| k == key))
+    fn car_of_key(&self, key: &str) -> Result<Option<Car>, String> {
+        let mut found = None;
+        for v in self.ctx.vehicles() {
+            if self.keys_of(&v.id)?.iter().any(|k| k == key) {
+                found = Some(v);
+                break;
+            }
+        }
+        Ok(found)
     }
 
-    /// pairing(key): name -> 'paired' | 'none' for one key's logs, or None (not mapped).
-    pub fn pairing(&self, key: &str) -> Option<HashMap<String, &'static str>> {
-        let v = self.car_of_key(key)?;
+    /// pairing(key): name -> 'paired' | 'none' for one key's logs, or None (not mapped, or its car
+    /// not scanned yet); an error when what it needs cannot be read (GET /api/can/files answers it).
+    pub fn pairing(&self, key: &str) -> Result<Option<HashMap<String, &'static str>>, String> {
+        let Some(v) = self.car_of_key(key)? else { return Ok(None) };
         if !self.ctx.scan_of(&v.id).is_some_and(|s| s.scanned) {
-            return None;
+            return Ok(None);
         }
-        let starts = self.starts_of(&v);
-        Some(spans(&self.logs.rows_of(key)).into_iter().map(|s| (s.row.name.clone(), if overlaps(&starts, s.from, s.to) { "paired" } else { "none" })).collect())
+        let starts = self.starts_of(&v)?;
+        Ok(Some(spans(&self.logs.rows_of(key)).into_iter().map(|s| (s.row.name.clone(), if overlaps(&starts, s.from, s.to) { "paired" } else { "none" })).collect()))
     }
 
     fn pending_log(&self, key: &str, name: &str) -> bool {
@@ -238,39 +248,65 @@ impl CanPrune {
         rec.is_none() || rec.as_ref().and_then(|r| r.get("status")).and_then(|s| s.as_str()) == Some("waiting") || side == "partial"
     }
 
-    /// deleteWith: "Also delete its CAN data" (dryRun: only counted).
+    /// deleteWith: "Also delete its CAN data" (dryRun: only counted). The footage moved already:
+    /// settings that cannot be read are logged and are its answer's `skip`.
     pub fn delete_with(&self, vid: &str, rels: &[String], until: Option<f64>, by: &str, dry_run: bool) -> Value {
         let Some(v) = self.ctx.vehicle(vid) else { return json!({ "removed": 0, "kept": 0, "pending": 0, "skip": "no such car" }) };
-        let keys = self.keys_of(vid);
+        self.with_footage(&v, rels, until, by, dry_run).unwrap_or_else(|e| {
+            if !dry_run {
+                self.ctx.log("warn", &format!("CAN logs of {} not deleted with its footage: the settings could not be read: {e}", v.name));
+            }
+            let why = "the CAN settings could not be read";
+            if dry_run { json!({ "logs": 0, "kept": 0, "skip": why }) } else { json!({ "removed": 0, "kept": 0, "pending": 0, "skip": why }) }
+        })
+    }
+
+    /// The dry run a Recycle Bin preview shows ({ logs, kept[, skip] }); an error when the settings
+    /// it needs cannot be read (the preview answers 500, not a count without them).
+    pub fn preview_with(&self, vid: &str, rels: &[String], until: Option<f64>) -> Result<Value, String> {
+        let Some(v) = self.ctx.vehicle(vid) else { return Ok(json!({ "removed": 0, "kept": 0, "pending": 0, "skip": "no such car" })) };
+        self.with_footage(&v, rels, until, "", true)
+    }
+
+    fn with_footage(&self, v: &Car, rels: &[String], until: Option<f64>, by: &str, dry_run: bool) -> Result<Value, String> {
+        let vid = v.id.as_str();
+        let keys = self.keys_of(vid)?;
         if keys.is_empty() {
-            return json!({ "removed": 0, "kept": 0, "pending": 0, "skip": "no CAN Bridge key is mapped to this car" });
+            return Ok(json!({ "removed": 0, "kept": 0, "pending": 0, "skip": "no CAN Bridge key is mapped to this car" }));
         }
         let limit = until.filter(|x| x.is_finite());
         let going: HashSet<&String> = rels.iter().collect();
-        let mut asked: Vec<f64> = rels.iter().filter_map(|r| clip_start(&v, r)).map(|t| t as i64).collect::<HashSet<_>>().into_iter().map(|t| t as f64).collect();
+        let mut asked: Vec<f64> = rels.iter().filter_map(|r| clip_start(v, r)).map(|t| t as i64).collect::<HashSet<_>>().into_iter().map(|t| t as f64).collect();
         asked.sort_by(|a, b| a.partial_cmp(b).unwrap());
         if asked.is_empty() && limit.is_none() {
-            return if dry_run { json!({ "logs": 0, "kept": 0 }) } else { json!({ "removed": 0, "kept": 0, "pending": 0 }) };
+            return Ok(if dry_run { json!({ "logs": 0, "kept": 0 }) } else { json!({ "removed": 0, "kept": 0, "pending": 0 }) });
         }
-        let mut result = Value::Null;
+        let mut result = Ok(Value::Null);
         self.ctx.with_bin_lock(vid, &mut || {
-            if let Some(why) = self.untrusted(&v) {
+            if let Some(why) = self.untrusted(v) {
                 if !dry_run {
                     self.ctx.log("warn", &format!("CAN logs of {} not deleted with its footage: {}", v.name, why));
                 }
-                result = if dry_run { json!({ "logs": 0, "kept": 0, "skip": why }) } else { json!({ "removed": 0, "kept": 0, "pending": 0, "skip": why }) };
+                result = Ok(if dry_run { json!({ "logs": 0, "kept": 0, "skip": why }) } else { json!({ "removed": 0, "kept": 0, "pending": 0, "skip": why }) });
                 return;
             }
             let mut stay: HashSet<i64> = HashSet::new();
             if let Some(s) = self.ctx.scan_of(vid) {
                 for f in s.files.iter().filter(|f| f.kind == "clip" && !going.contains(&f.rel)) {
-                    if let Some(t) = clip_start(&v, &f.rel) {
+                    if let Some(t) = clip_start(v, &f.rel) {
                         stay.insert(t as i64);
                     }
                 }
             }
-            for rel in self.ctx.protected_rels(vid).iter().filter(|r| is_mp4(r)) {
-                if let Some(t) = clip_start(&v, rel) {
+            let protected = match self.ctx.protected_rels(vid) {
+                Ok(p) => p,
+                Err(e) => {
+                    result = Err(e);
+                    return;
+                }
+            };
+            for rel in protected.iter().filter(|r| is_mp4(r)) {
+                if let Some(t) = clip_start(v, rel) {
                     stay.insert(t as i64);
                 }
             }
@@ -309,7 +345,7 @@ impl CanPrune {
                 }
             }
             if dry_run {
-                result = json!({ "logs": logs, "kept": kept });
+                result = Ok(json!({ "logs": logs, "kept": kept }));
                 return;
             }
             if removed > 0 {
@@ -328,7 +364,7 @@ impl CanPrune {
                 );
                 (self.on_change)(vid);
             }
-            result = json!({ "removed": removed, "kept": kept, "pending": pending });
+            result = Ok(json!({ "removed": removed, "kept": kept, "pending": pending }));
         });
         result
     }
@@ -336,7 +372,14 @@ impl CanPrune {
     /// footageGone: footage deleted for good; its minutes are remembered and the car looked at soon.
     pub fn footage_gone(&self, vid: &str, rels: &[String]) {
         let Some(v) = self.ctx.vehicle(vid) else { return };
-        let mut st = self.load_state(vid);
+        let mut st = match self.load_state(vid) {
+            Ok(st) => st,
+            Err(e) => {
+                // (its logs stay until another rule takes them)
+                self.ctx.log("warn", &format!("CAN logs of {}: footage deleted for good was not noted: {e}", v.name));
+                return;
+            }
+        };
         let at = (self.now)();
         let mut starts: Vec<f64> = rels.iter().filter_map(|r| clip_start(&v, r)).map(|t| t as i64).collect::<HashSet<_>>().into_iter().map(|t| t as f64).collect();
         starts.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -351,7 +394,9 @@ impl CanPrune {
             gone = gone[gone.len() - 50_000..].to_vec();
         }
         st.insert("gone".into(), Self::gone_value(&gone));
-        self.ctx.set_setting(&format!("can-prune:{}", vid), Value::Object(st));
+        if let Err(e) = self.ctx.set_setting(&format!("can-prune:{}", vid), Value::Object(st)) {
+            self.ctx.log("warn", &format!("CAN logs of {}: footage deleted for good was not noted: {e}", v.name));
+        }
         self.soon(vid, self.soon_ms);
     }
 
@@ -377,7 +422,7 @@ impl CanPrune {
     }
 
     fn plan(&self, v: &Car, gone_in: &[(f64, f64, f64)], cfg: &Keep) -> Result<Plan, String> {
-        let keys = self.keys_of(&v.id);
+        let keys = self.keys_of(&v.id).map_err(|e| format!("the CAN settings could not be read ({e})"))?;
         if keys.is_empty() {
             return Err("no CAN Bridge key is mapped to this car".into());
         }
@@ -401,7 +446,13 @@ impl CanPrune {
                 out = Some(Err(again));
                 return;
             }
-            let starts = self.footage_of(v);
+            let starts = match self.footage_of(v) {
+                Ok(s) => s,
+                Err(e) => {
+                    out = Some(Err(format!("the Recycle Bin or the protected clips could not be read ({e})")));
+                    return;
+                }
+            };
             if starts.is_empty() {
                 out = Some(Err("the car has no footage at all (a share outage looks the same): nothing is deleted".into()));
                 return;
@@ -453,22 +504,33 @@ impl CanPrune {
     }
 
     fn done(&self, vid: &str, last: Map<String, Value>) -> Value {
-        let mut s = self.load_state(vid);
         let mut l = Map::new();
         l.insert("at".into(), n((self.now)()));
         for (k, v) in last {
             l.insert(k, v);
         }
-        s.insert("last".into(), Value::Object(l.clone()));
-        self.ctx.set_setting(&format!("can-prune:{}", vid), Value::Object(s));
+        // (the last run is a note for the Nerd settings: one that was not kept is logged)
+        let kept = self.load_state(vid).and_then(|mut s| {
+            s.insert("last".into(), Value::Object(l.clone()));
+            self.ctx.set_setting(&format!("can-prune:{}", vid), Value::Object(s))
+        });
+        if let Err(e) = kept {
+            self.ctx.log("warn", &format!("CAN logs of {vid}: the last run was not noted: {e}"));
+        }
         (self.on_change)(vid);
         Value::Object(l)
     }
 
     fn run(&self, vid: &str) -> Option<Value> {
         let v = self.ctx.vehicle(vid)?;
-        let st = self.load_state(vid);
-        let cfg = self.settings();
+        let (st, cfg) = match (self.load_state(vid), self.settings()) {
+            (Ok(st), Ok(cfg)) => (st, cfg),
+            (Err(e), _) | (_, Err(e)) => {
+                // (looked at again on the next run)
+                self.ctx.log("warn", &format!("CAN logs of {}: not looked at now, the settings could not be read: {e}", v.name));
+                return Some(json!({ "removed": 0, "skip": "the settings could not be read" }));
+            }
+        };
         let skip = |why: &str| {
             let mut m = Map::new();
             m.insert("removed".into(), json!(0));
@@ -496,7 +558,7 @@ impl CanPrune {
             if i > 0 && i % 50 == 0 && self.untrusted(&v).is_some() {
                 break;
             }
-            if !Self::any_on(&self.settings()) {
+            if !self.settings().is_ok_and(|c| Self::any_on(&c)) {
                 break;
             }
             if let Err(e) = self.logs.remove(&t.1) {
@@ -512,18 +574,23 @@ impl CanPrune {
             *by_why.entry(t.4).or_default() += 1;
         }
         let more = p.todo.len() as i64 - removed as i64;
-        let mut s = self.load_state(vid);
         let at = (self.now)();
         let seen: HashSet<String> = gone.iter().map(|g| format!("{},{},{}", json::num_str(g.0), json::num_str(g.1), json::num_str(g.2))).collect();
-        if more <= 0 && cfg.with_footage {
-            let cur = Self::gone_of(&s);
-            let kept: Vec<(f64, f64, f64)> = cur
-                .into_iter()
-                .filter(|g| !seen.contains(&format!("{},{},{}", json::num_str(g.0), json::num_str(g.1), json::num_str(g.2))) || (at - g.2 < GONE_KEEP_MS && p.held.iter().any(|(a, b)| g.0 < *b && g.1 > *a)))
-                .collect();
-            s.insert("gone".into(), Self::gone_value(&kept));
+        // (gone footage that was not tidied away is only looked at again)
+        let tidied = self.load_state(vid).and_then(|mut s| {
+            if more <= 0 && cfg.with_footage {
+                let cur = Self::gone_of(&s);
+                let kept: Vec<(f64, f64, f64)> = cur
+                    .into_iter()
+                    .filter(|g| !seen.contains(&format!("{},{},{}", json::num_str(g.0), json::num_str(g.1), json::num_str(g.2))) || (at - g.2 < GONE_KEEP_MS && p.held.iter().any(|(a, b)| g.0 < *b && g.1 > *a)))
+                    .collect();
+                s.insert("gone".into(), Self::gone_value(&kept));
+            }
+            self.ctx.set_setting(&format!("can-prune:{}", vid), Value::Object(s))
+        });
+        if let Err(e) = tidied {
+            self.ctx.log("warn", &format!("CAN logs of {}: the gone footage was not tidied: {e}", v.name));
         }
-        self.ctx.set_setting(&format!("can-prune:{}", vid), Value::Object(s));
         let (f, o, u) = (*by_why.get("footage").unwrap_or(&0), *by_why.get("old").unwrap_or(&0), *by_why.get("unlinked").unwrap_or(&0));
         if removed > 0 {
             let parts: Vec<String> = [
@@ -577,17 +644,22 @@ impl CanPrune {
 
     /// sweep(): every car (the hourly look).
     pub fn sweep(&self) {
-        if !Self::any_on(&self.settings()) {
-            return;
+        match self.settings() {
+            Ok(c) if Self::any_on(&c) => {}
+            Ok(_) => return,
+            Err(e) => {
+                self.ctx.log("warn", &format!("CAN logs: the hourly look waits, the settings could not be read: {e}"));
+                return;
+            }
         }
         for v in self.ctx.vehicles() {
             self.check(&v.id);
         }
     }
 
-    /// set(input): the "Keeping logs" settings.
-    pub fn set(&self, input: &Value) -> Value {
-        let cur = self.settings();
+    /// set(input): the "Keeping logs" settings; an error when they could not be read or kept.
+    pub fn set(&self, input: &Value) -> Result<Value, String> {
+        let cur = self.settings()?;
         let days = input.get("unlinkedDays").map(|d| json::js_number(Some(d))).unwrap_or(f64::NAN);
         let next = Keep {
             with_footage: input.get("withFootage").and_then(|v| v.as_bool()).unwrap_or(cur.with_footage),
@@ -595,19 +667,23 @@ impl CanPrune {
             unlinked_days: if days.fract() == 0.0 && (1.0..=365.0).contains(&days) { days } else { cur.unlinked_days },
         };
         let v = json!({ "withFootage": next.with_footage, "deleteUnlinked": next.delete_unlinked, "unlinkedDays": n(next.unlinked_days) });
-        self.ctx.set_setting("can-keep", v.clone());
+        self.ctx.set_setting("can-keep", v.clone())?;
         if Self::any_on(&next) {
             for car in self.ctx.vehicles() {
                 self.soon(&car.id, 5000.0);
             }
         }
-        v
+        Ok(v)
     }
 
-    pub fn status(&self) -> Value {
-        let mut o = self.settings_json();
-        let cars: Map<String, Value> = self.ctx.vehicles().into_iter().map(|v| (v.id.clone(), self.load_state(&v.id).get("last").cloned().unwrap_or(Value::Null))).collect();
+    pub fn status(&self) -> Result<Value, String> {
+        let mut o = self.settings_json()?;
+        let mut cars = Map::new();
+        for v in self.ctx.vehicles() {
+            let last = self.load_state(&v.id)?.get("last").cloned().unwrap_or(Value::Null);
+            cars.insert(v.id.clone(), last);
+        }
         o.insert("cars".into(), Value::Object(cars));
-        Value::Object(o)
+        Ok(Value::Object(o))
     }
 }

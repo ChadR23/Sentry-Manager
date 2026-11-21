@@ -1,0 +1,167 @@
+{
+  "route": "GET /api/telemetry",
+  "method": "GET",
+  "request": {
+    "path": "/api/telemetry",
+    "query": {
+      "path": "{root:contract-car}/TeslaCam/RecentClips/2024-05-01_08-00-00-front.mp4"
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "private, no-cache",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "frames": [
+        [
+          0,
+          "CAEQARgAJQAAIEFZv30dOGdEPkBhFmpN845vWMBpAAAAAACAVkA="
+        ],
+        [
+          83.33333333333333,
+          "CAEQARgBJVVVIUFZBirj32dEPkBhBP9byY5vWMBpAAAAAACAVkA="
+        ],
+        [
+          166.66666666666666,
+          "CAEQARgCJauqIkFZTdaoh2hEPkBh8pNqn45vWMBpAAAAAACAVkA="
+        ],
+        [
+          250,
+          "CAEQARgDJQAAJEFZlIJuL2lEPkBh4Sh5dY5vWMBpAAAAAACAVkA="
+        ],
+        [
+          333.3333333333333,
+          "CAEQARgEJVVVJUFZ2y4012lEPkBhz72HS45vWMBpAAAAAACAVkA="
+        ],
+        [
+          416.6666666666667,
+          "CAEQARgFJauqJkFZI9v5fmpEPkBhvVKWIY5vWMBpAAAAAACAVkA="
+        ],
+        [
+          500,
+          "CAEQARgGJQAAKEFZaoe/JmtEPkBhq+ek941vWMBpAAAAAACAVkA="
+        ],
+        [
+          583.3333333333334,
+          "CAEQARgHJVVVKUFZsTOFzmtEPkBhmnyzzY1vWMBpAAAAAACAVkA="
+        ],
+        [
+          666.6666666666666,
+          "CAEQARgIJauqKkFZ+N9KdmxEPkBhiBHCo41vWMBpAAAAAACAVkA="
+        ],
+        [
+          750,
+          "CAEQARgJJQAALEFZP4wQHm1EPkBhdqbQeY1vWMBpAAAAAACAVkA="
+        ],
+        [
+          833.3333333333334,
+          "CAEQARgKJVVVLUFZhjjWxW1EPkBhZDvfT41vWMBpAAAAAACAVkA="
+        ],
+        [
+          916.6666666666666,
+          "CAEQARgLJauqLkFZzeSbbW5EPkBhUtDtJY1vWMBpAAAAAACAVkA="
+        ],
+        [
+          1000,
+          "CAEQARgMJQAAMEFZFJFhFW9EPkBhQWX8+4xvWMBpAAAAAACAVkA="
+        ],
+        [
+          1083.3333333333333,
+          "CAEQARgNJVVVMUFZWz0nvW9EPkBhL/oK0oxvWMBpAAAAAACAVkA="
+        ],
+        [
+          1166.6666666666667,
+          "CAEQARgOJauqMkFZounsZHBEPkBhHY8ZqIxvWMBpAAAAAACAVkA="
+        ],
+        [
+          1250,
+          "CAEQARgPJQAANEFZ6pWyDHFEPkBhCyQofoxvWMBpAAAAAACAVkA="
+        ],
+        [
+          1333.3333333333333,
+          "CAEQARgQJVVVNUFZMUJ4tHFEPkBh+rg2VIxvWMBpAAAAAACAVkA="
+        ],
+        [
+          1416.6666666666667,
+          "CAEQARgRJauqNkFZeO49XHJEPkBh6E1FKoxvWMBpAAAAAACAVkA="
+        ],
+        [
+          1500,
+          "CAEQARgSJQAAOEFZv5oDBHNEPkBh1uJTAIxvWMBpAAAAAACAVkA="
+        ],
+        [
+          1583.3333333333333,
+          "CAEQARgTJVVVOUFZBkfJq3NEPkBhxHdi1otvWMBpAAAAAACAVkA="
+        ],
+        [
+          1666.6666666666667,
+          "CAEQARgUJauqOkFZTfOOU3REPkBhsgxxrItvWMBpAAAAAACAVkA="
+        ],
+        [
+          1750,
+          "CAEQARgVJQAAPEFZlJ9U+3REPkBhoaF/gotvWMBpAAAAAACAVkA="
+        ],
+        [
+          1833.3333333333333,
+          "CAEQARgWJVVVPUFZ20sao3VEPkBhjzaOWItvWMBpAAAAAACAVkA="
+        ],
+        [
+          1916.6666666666667,
+          "CAEQARgXJauqPkFZIvjfSnZEPkBhfcucLotvWMBpAAAAAACAVkA="
+        ],
+        [
+          2000,
+          "CAEQARgYJQAAQEFZaqSl8nZEPkBha2CrBItvWMBpAAAAAACAVkA="
+        ],
+        [
+          2083.3333333333335,
+          "CAEQARgZJVVVQUFZsVBrmndEPkBhWvW52opvWMBpAAAAAACAVkA="
+        ],
+        [
+          2166.6666666666665,
+          "CAEQARgaJauqQkFZ+PwwQnhEPkBhSIrIsIpvWMBpAAAAAACAVkA="
+        ],
+        [
+          2250,
+          "CAEQARgbJQAAREFZP6n26XhEPkBhNh/XhopvWMBpAAAAAACAVkA="
+        ],
+        [
+          2333.3333333333335,
+          "CAEQARgcJVVVRUFZhlW8kXlEPkBhJLTlXIpvWMBpAAAAAACAVkA="
+        ],
+        [
+          2416.6666666666665,
+          "CAEQARgdJauqRkFZzQGCOXpEPkBhEkn0MopvWMBpAAAAAACAVkA="
+        ],
+        [
+          2500,
+          "CAEQARgeJQAASEFZFK5H4XpEPkBhAd4CCYpvWMBpAAAAAACAVkA="
+        ],
+        [
+          2583.3333333333335,
+          "CAEQARgfJVVVSUFZW1oNiXtEPkBh73IR34lvWMBpAAAAAACAVkA="
+        ],
+        [
+          2666.6666666666665,
+          "CAEQARggJauqSkFZogbTMHxEPkBh3QcgtYlvWMBpAAAAAACAVkA="
+        ],
+        [
+          2750,
+          "CAEQARghJQAATEFZ6rKY2HxEPkBhy5wui4lvWMBpAAAAAACAVkA="
+        ],
+        [
+          2833.3333333333335,
+          "CAEQARgiJVVVTUFZMV9egH1EPkBhujE9YYlvWMBpAAAAAACAVkA="
+        ],
+        [
+          2916.6666666666665,
+          "CAEQARgjJauqTkFZeAskKH5EPkBhqMZLN4lvWMBpAAAAAACAVkA="
+        ]
+      ],
+      "v": 1
+    }
+  }
+}

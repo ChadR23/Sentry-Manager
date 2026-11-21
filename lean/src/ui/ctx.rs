@@ -30,12 +30,12 @@ pub struct ReqInfo<'a> {
 
 pub trait UiCtx: Send + Sync + 'static {
     // ---- the settings table of manager.db (server/db.js get / set)
-    /// db.get(key): the saved value, or None when there is none.
-    fn setting(&self, key: &str) -> Option<Value>;
-    /// db.set(key, value)
-    fn set_setting(&self, key: &str, value: &Value);
+    /// db.get(key): the saved value, or None when there is none; an error when it cannot be read.
+    fn setting(&self, key: &str) -> Result<Option<Value>, String>;
+    /// db.set(key, value): an error when it was not kept
+    fn set_setting(&self, key: &str, value: &Value) -> Result<(), String>;
     /// Whether any setting's key starts with `prefix` (index.js hasDashboards: `dash:%`).
-    fn has_setting_prefix(&self, prefix: &str) -> bool;
+    fn has_setting_prefix(&self, prefix: &str) -> Result<bool, String>;
 
     // ---- live updates, logs and the audit log
     /// announce(topic): the /api/events hub batches it (400 ms) to every open page.
@@ -62,11 +62,12 @@ pub trait UiCtx: Send + Sync + 'static {
     fn setup_only(&self, req: &ReqInfo) -> bool;
 
     // ---- the jobs list (server/jobs.js)
-    /// jobs.start({ type, vehicleId, title, detail }): its id.
-    fn job_start(&self, fields: Value) -> Value;
-    /// jobs.update(id, fields)
+    /// jobs.start({ type, vehicleId, title, detail }): its id; an error when it was not kept
+    /// (no id is made up).
+    fn job_start(&self, fields: Value) -> Result<Value, String>;
+    /// jobs.update(id, fields) (one that was not kept is logged by core: it tells of work going on)
     fn job_update(&self, id: &Value, fields: Value);
-    /// jobs.finish(id, fields)
+    /// jobs.finish(id, fields) (one that was not kept is logged by core: the work it tells of is done)
     fn job_finish(&self, id: &Value, fields: Value);
 
     // ---- footage (studioReadable, vehicleForReal, speedIndex)
@@ -77,8 +78,9 @@ pub trait UiCtx: Send + Sync + 'static {
     fn resolve_footage(&self, p: &str) -> Option<(PathBuf, VehicleRef)>;
     /// The speed (m/s) of each second of a clip, from the speed index.
     fn speeds_for(&self, real: &Path) -> Option<Vec<Option<f64>>>;
-    /// Whether the Viewer shows car data at all (index.js viewerCarData: CAN area).
-    fn viewer_car_data(&self) -> Value;
+    /// Whether the Viewer shows car data at all (index.js viewerCarData: CAN area); an error
+    /// when it cannot be read.
+    fn viewer_car_data(&self) -> Result<Value, String>;
     /// The background work limits changed (Settings → Advanced): apply them.
     fn work_limits_changed(&self, _limits: &Value) {}
 }

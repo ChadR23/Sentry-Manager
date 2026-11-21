@@ -188,12 +188,13 @@ pub fn count_at_places(spots: &[Spot], places: &[Value]) -> Value {
     Value::Object(out)
 }
 
-/// db.get('places', []) when it is a list
-pub fn place_list(ctx: &dyn Ctx) -> Vec<Value> {
-    match ctx.setting("places") {
+/// db.get('places', []) when it is a list (an error when it cannot be read: never written over
+/// then, and never answered as no places)
+pub fn place_list(ctx: &dyn Ctx) -> Result<Vec<Value>, String> {
+    Ok(match ctx.setting("places")? {
         Some(Value::Array(a)) => a,
         _ => Vec::new(),
-    }
+    })
 }
 
 /// placeName: String(n ?? '') without control characters, trimmed, at most 60
@@ -298,11 +299,11 @@ fn events_of(recs: &[Recording], n: usize) -> Vec<&Recording> {
 }
 
 /// /api/vehicles/:id/event-map
-pub fn event_map(ctx: &dyn Ctx, spots: &EventSpots, vid: &str) -> Value {
+pub fn event_map(ctx: &dyn Ctx, spots: &EventSpots, vid: &str) -> Result<Value, (u16, String)> {
+    let places = place_list(ctx).map_err(super::ctx::failed)?;
     let recs = ctx.recordings(vid).unwrap_or_default();
     let files = ctx.files(vid);
     let list = events_of(&recs, 1000);
-    let places = place_list(ctx);
     let mut out = Vec::new();
     for rec in &list {
         let Some(spot) = spots.get(ctx, vid, files.as_ref(), rec) else { continue };
@@ -316,7 +317,7 @@ pub fn event_map(ctx: &dyn Ctx, spots: &EventSpots, vid: &str) -> Value {
     }
     out.sort_by(|a, b| js::locale_cmp(&b.0, &a.0));
     let n = out.len();
-    json!({ "events": out.into_iter().map(|x| x.1).collect::<Vec<_>>(), "withoutPosition": list.len() - n })
+    Ok(json!({ "events": out.into_iter().map(|x| x.1).collect::<Vec<_>>(), "withoutPosition": list.len() - n }))
 }
 
 /// The spots of a car's events with a street or town (the drives' labeller), newest 3,000.
@@ -336,7 +337,8 @@ pub fn drive_spots(ctx: &dyn Ctx, spots: &EventSpots, vid: &str) -> Vec<(f64, f6
 }
 
 /// /api/places/suggestions
-pub fn suggestions(ctx: &dyn Ctx, spots: &EventSpots) -> Value {
+pub fn suggestions(ctx: &dyn Ctx, spots: &EventSpots) -> Result<Value, (u16, String)> {
+    let places = place_list(ctx).map_err(super::ctx::failed)?;
     let since = js::iso(js::now_ms() - 90.0 * 86400000.0)[..10].to_string();
     let mut recs: Vec<(String, String, Recording)> = Vec::new();
     for v in ctx.vehicles() {
@@ -361,8 +363,7 @@ pub fn suggestions(ctx: &dyn Ctx, spots: &EventSpots) -> Value {
         };
         list.push(Spot { lat: pos.0, lon: pos.1, key: json!(rec.start_key), at, city: text_or_null(info, "city"), street: text_or_null(info, "street"), vehicle: json!(name) });
     }
-    let places = place_list(ctx);
-    json!({ "days": 90, "events": recs.len(), "withPosition": list.len(), "suggestions": suggest_places(&list, &places), "counts": count_at_places(&list, &places) })
+    Ok(json!({ "days": 90, "events": recs.len(), "withPosition": list.len(), "suggestions": suggest_places(&list, &places), "counts": count_at_places(&list, &places) }))
 }
 
 fn random_hex(n: usize) -> String {
@@ -385,14 +386,14 @@ pub fn add(ctx: &dyn Ctx, body: &Value) -> Result<Value, (u16, String)> {
         None | Some(Value::Null) => DEFAULT_RADIUS,
         Some(r) => radius_or_400(r)?,
     };
-    let list = place_list(ctx);
+    let list = place_list(ctx).map_err(super::ctx::failed)?;
     if list.len() >= 200 {
         return Err((400, "There are 200 saved places already: remove some first.".into()));
     }
     let place = json!({ "id": random_hex(5), "name": name, "lat": num(lat), "lon": num(lon), "radius": num(radius) });
     let mut next = list;
     next.push(place.clone());
-    ctx.set_setting("places", Value::Array(next));
+    ctx.set_setting("places", Value::Array(next)).map_err(super::ctx::failed)?;
     Ok(json!({ "place": place }))
 }
 
@@ -410,7 +411,7 @@ fn pos_of(b: &Value) -> Result<(f64, f64), (u16, String)> {
 }
 
 pub fn patch(ctx: &dyn Ctx, id: &str, body: &Value) -> Result<Value, (u16, String)> {
-    let mut list = place_list(ctx);
+    let mut list = place_list(ctx).map_err(super::ctx::failed)?;
     let Some(i) = list.iter().position(|p| p.get("id").and_then(Value::as_str) == Some(id)) else { return Err((404, "No such place.".into())) };
     let has_name = body.get("name").is_some();
     let has_radius = body.get("radius").is_some();
@@ -434,16 +435,16 @@ pub fn patch(ctx: &dyn Ctx, id: &str, body: &Value) -> Result<Value, (u16, Strin
         place.insert("lon".into(), num(lon));
     }
     let out = json!({ "place": list[i].clone() });
-    ctx.set_setting("places", Value::Array(list));
+    ctx.set_setting("places", Value::Array(list)).map_err(super::ctx::failed)?;
     Ok(out)
 }
 
 pub fn remove(ctx: &dyn Ctx, id: &str) -> Result<Value, (u16, String)> {
-    let list = place_list(ctx);
+    let list = place_list(ctx).map_err(super::ctx::failed)?;
     if !list.iter().any(|p| p.get("id").and_then(Value::as_str) == Some(id)) {
         return Err((404, "No such place.".into()));
     }
-    ctx.set_setting("places", Value::Array(list.into_iter().filter(|p| p.get("id").and_then(Value::as_str) != Some(id)).collect()));
+    ctx.set_setting("places", Value::Array(list.into_iter().filter(|p| p.get("id").and_then(Value::as_str) != Some(id)).collect())).map_err(super::ctx::failed)?;
     Ok(json!({ "ok": true }))
 }
 
@@ -451,6 +452,30 @@ pub fn remove(ctx: &dyn Ctx, id: &str) -> Result<Value, (u16, String)> {
 mod tests {
     // test/places.test.js
     use super::*;
+
+    #[test]
+    fn places_that_cannot_be_read_or_kept_answer_500_and_are_never_written_over() {
+        let car = crate::viewer::testkit::Car::new("places-unreadable");
+        let ctx = &*car.ctx;
+        let kept = add(ctx, &json!({ "name": "Home", "lat": 40.5, "lon": -74.1 })).unwrap()["place"].clone();
+        let id = kept["id"].as_str().unwrap().to_string();
+        let status = |r: Result<Value, (u16, String)>| r.map_err(|e| e.0);
+        // (they cannot be read, while a write would still be kept)
+        car.ctx.reads_fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(place_list(ctx).is_err(), "not an empty list");
+        assert_eq!(status(add(ctx, &json!({ "name": "Work", "lat": 40.6, "lon": -74.2 }))), Err(500));
+        assert_eq!(status(patch(ctx, &id, &json!({ "name": "Cabin" }))), Err(500));
+        assert_eq!(status(remove(ctx, &id)), Err(500), "not \"no such place\"");
+        car.ctx.reads_fail.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(place_list(ctx).unwrap(), vec![kept.clone()], "the saved place was not written over");
+        // (they read, but no change can be kept)
+        car.ctx.writes_fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(status(add(ctx, &json!({ "name": "Work", "lat": 40.6, "lon": -74.2 }))), Err(500));
+        assert_eq!(status(patch(ctx, &id, &json!({ "name": "Cabin" }))), Err(500));
+        assert_eq!(status(remove(ctx, &id)), Err(500), "not removed");
+        car.ctx.writes_fail.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(place_list(ctx).unwrap(), vec![kept], "the saved place is as it was");
+    }
 
     #[test]
     fn an_event_json_is_read_only_while_it_is_64_kib_or_less() {

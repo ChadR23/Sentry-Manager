@@ -1169,19 +1169,19 @@ impl ArchiveGap {
         Arc::new(ArchiveGap { ctx, speed_index, results: Mutex::new(HashMap::new()), running: Mutex::new(()), can_cache: Mutex::new(HashMap::new()), generation: Mutex::new(HashMap::new()), soon: Mutex::new(HashMap::new()) })
     }
 
-    fn clock24(&self) -> bool {
-        self.ctx.setting("appearance").and_then(|a| a.get("clock24").cloned()).is_some_and(|v| crate::ops::js::truthy(&v))
+    fn clock24(&self) -> Result<bool, String> {
+        Ok(self.ctx.setting("appearance")?.and_then(|a| a.get("clock24").cloned()).is_some_and(|v| crate::ops::js::truthy(&v)))
     }
 
     /// loadState: the state kept between checks, with Node's defaults (and the first
-    /// version's, which kept only the days at the top level)
-    fn load_state(&self, vid: &str) -> Map<String, Value> {
-        let raw = self.ctx.setting(&format!("archive-gap:{vid}")).filter(|v| crate::ops::js::truthy(v)).unwrap_or(json!({}));
+    /// version's, which kept only the days at the top level); an error when it cannot be read
+    fn load_state(&self, vid: &str) -> Result<Map<String, Value>, String> {
+        let raw = self.ctx.setting(&format!("archive-gap:{vid}"))?.filter(|v| crate::ops::js::truthy(v)).unwrap_or(json!({}));
         let mut st = Map::new();
         for (k, v) in [("days", json!({})), ("rx", Value::Null), ("lastRecentS", Value::Null), ("sentry", json!(false)), ("matched", json!([]))] {
             st.insert(k.into(), v);
         }
-        let Value::Object(raw) = raw else { return st };
+        let Value::Object(raw) = raw else { return Ok(st) };
         if raw.get("days").is_some_and(crate::ops::js::truthy) {
             for (k, v) in &raw {
                 st.insert(k.clone(), v.clone());
@@ -1192,11 +1192,11 @@ impl ArchiveGap {
                 st.insert("sentry".into(), json!(false));
                 st.insert("matched".into(), json!([]));
             }
-            return st;
+            return Ok(st);
         }
         let days: Map<String, Value> = raw.into_iter().filter(|(_, v)| v.is_object() && v.get("day").is_some_and(crate::ops::js::truthy)).collect();
         st.insert("days".into(), Value::Object(days));
-        st
+        Ok(st)
     }
 
     fn minute_kind(&self, dir: &std::path::Path, key: &str, name: &str) -> &'static str {
@@ -1228,12 +1228,13 @@ impl ArchiveGap {
         kind
     }
 
-    /// canActivityOf: CAN minutes with no footage, on the car's clock (seconds), or None without CAN data.
-    fn can_activity_of(&self, v: &super::ctx::VehicleRef, files: &Files, now_ms: f64, st: &Map<String, Value>) -> Option<CanActivity> {
+    /// canActivityOf: CAN minutes with no footage, on the car's clock (seconds), or None without CAN data
+    /// (an error when the keys' cars cannot be read).
+    fn can_activity_of(&self, v: &super::ctx::VehicleRef, files: &Files, now_ms: f64, st: &Map<String, Value>) -> Result<Option<CanActivity>, String> {
         let dir = self.ctx.data_dir().join("can-index");
         let keys: Vec<String> = self.ctx.can_keys(&v.id).into_iter().filter(|k| key_ok(k)).collect();
         if keys.is_empty() {
-            return None;
+            return Ok(None);
         }
         let tz = if v.timezone.is_empty() { "UTC" } else { v.timezone.as_str() };
         let mut starts: Vec<f64> = files.values().filter(|f| f.kind == crate::footage::Kind::Clip).filter_map(|f| stamp_sec(basename(&f.rel))).collect();
@@ -1245,6 +1246,7 @@ impl ArchiveGap {
         let (mut read, mut learned, mut sentry_covered, mut sentry_bare) = (0usize, 0usize, 0usize, 0usize);
         struct K {
             key: String,
+            mapped: bool,
             driving: Vec<f64>,
             sentry: Vec<f64>,
             minutes: Vec<f64>,
@@ -1252,9 +1254,9 @@ impl ArchiveGap {
         let mut per_key: Vec<K> = Vec::new();
         for key in keys {
             let Ok(rd) = std::fs::read_dir(dir.join(&key)) else { continue };
-            let mapped = self.ctx.can_key_mapped(&key);
+            let mapped = self.ctx.can_key_mapped(&key)?;
             let trusted = mapped || matched.contains(&key);
-            let mut k = K { key: key.clone(), driving: vec![], sentry: vec![], minutes: vec![] };
+            let mut k = K { key: key.clone(), mapped, driving: vec![], sentry: vec![], minutes: vec![] };
             let mut covered_active = 0usize;
             let mut names: Vec<String> = rd.filter_map(|e| e.ok()).filter_map(|e| e.file_name().into_string().ok()).filter(|x| js::slice_units(x, 13).as_str() >= from_key.as_str() && minute_file_ms(x).is_some()).collect();
             names.sort();
@@ -1310,15 +1312,15 @@ impl ArchiveGap {
             per_key.push(k);
         }
         let sentry = st_sentry || (sentry_covered >= LEARN_MIN && sentry_covered >= sentry_bare);
-        let used: Vec<&K> = per_key.iter().filter(|k| self.ctx.can_key_mapped(&k.key) || matched.contains(&k.key)).collect();
-        Some(CanActivity {
+        let used: Vec<&K> = per_key.iter().filter(|k| k.mapped || matched.contains(&k.key)).collect();
+        Ok(Some(CanActivity {
             driving: used.iter().flat_map(|k| k.driving.iter().copied()).collect(),
             sentry: if sentry { used.iter().flat_map(|k| k.sentry.iter().copied()).collect() } else { Vec::new() },
             minutes: used.iter().flat_map(|k| k.minutes.iter().copied()).collect(),
             learned_sentry: sentry,
             learned_matched: matched,
             used: !used.is_empty(),
-        })
+        }))
     }
 
     /// One check of a car (one at a time); its result, or None before the first scan.
@@ -1330,7 +1332,15 @@ impl ArchiveGap {
         let now_ms = js::now_ms();
         let tz = if v.timezone.is_empty() { "UTC".to_string() } else { v.timezone.clone() };
         let key = format!("archive-gap:{vid}");
-        let mut st = self.load_state(vid);
+        // (what the check needs cannot be read: no check now, nothing raised or cleared on a guess)
+        let unread = |e: String| -> Option<Value> {
+            eprintln!("Archive gaps of {}: not checked now, a setting could not be read: {e}", v.name);
+            None
+        };
+        let mut st = match self.load_state(vid) {
+            Ok(st) => st,
+            Err(e) => return unread(e),
+        };
         // received(): the clips from a fixed start went up in number
         let from = stamp_sec(&format!("{}_00-00-00", day_of_sec(wall_sec(now_ms, &tz) - (WINDOW_DAYS + 1.0) * 86400.0))).unwrap_or(0.0);
         let count_from = |f0: f64| files.values().filter(|f| f.kind == crate::footage::Kind::Clip && f.size > 0).filter_map(|f| stamp_sec(basename(&f.rel))).filter(|s| *s >= f0).count();
@@ -1338,7 +1348,10 @@ impl ArchiveGap {
         let grew = rx.as_ref().is_none_or(|r| count_from(js::number(r.get("from"))) as f64 > js::number(r.get("count")));
         let at = if grew { now_ms } else { js::number(rx.as_ref().and_then(|r| r.get("at"))) };
         st.insert("rx".into(), json!({ "from": num(from), "count": count_from(from), "at": num(at) }));
-        let can = self.can_activity_of(&v, &files, now_ms, &st);
+        let can = match self.can_activity_of(&v, &files, now_ms, &st) {
+            Ok(c) => c,
+            Err(e) => return unread(e),
+        };
         let mut speeds = HashMap::new();
         let today = wall_sec(now_ms, &tz);
         for i in 0..WINDOW_DAYS as i64 {
@@ -1350,6 +1363,10 @@ impl ArchiveGap {
         }
         let last_recent = st.get("lastRecentS").and_then(Value::as_f64);
         let used = can.as_ref().is_some_and(|c| c.used);
+        let (clock24, binned, deleted) = match (self.clock24(), self.ctx.binned(vid), self.ctx.deleted_clips(vid)) {
+            (Ok(c), Ok(b), Ok(d)) => (c, b, d),
+            (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => return unread(e),
+        };
         let input = Input {
             now_ms,
             tz: &tz,
@@ -1362,10 +1379,10 @@ impl ArchiveGap {
             last_recent_s: last_recent,
             sentry_usb: self.ctx.sentry_usb_pi(vid),
             snapshots: self.ctx.snapshots(vid),
-            clock24: self.clock24(),
+            clock24,
             car_files: self.ctx.car_files(vid),
-            binned: self.ctx.binned(vid),
-            deleted: self.ctx.deleted_clips(vid),
+            binned,
+            deleted,
         };
         let res = analyze(&files, &input);
         // the car was removed while this ran: nothing of it is kept or raised
@@ -1380,8 +1397,15 @@ impl ArchiveGap {
         if let Some(n) = res.newest_recent {
             st.insert("lastRecentS".into(), num(n.max(last_recent.unwrap_or(0.0))));
         }
-        self.sync(&v, &res, &mut st, &files, now_ms, &tz);
-        self.ctx.set_setting(&key, Value::Object(st));
+        // (stopped at a notification manager.db did not give or keep: the days stay as they were, so
+        // the next check goes on from there, and a note's being open is never guessed)
+        if let Err(e) = self.sync(&v, &res, &mut st, &files, now_ms, &tz) {
+            eprintln!("Archive gaps of {}: the notifications were not brought up to date: {e}", v.name);
+        }
+        // (a note for the next check: one that was not kept is learned again)
+        if let Err(e) = self.ctx.set_setting(&key, Value::Object(st)) {
+            eprintln!("Archive gaps of {}: what this check learned was not kept: {e}", v.name);
+        }
         let out = json!({ "days": res.days, "stalled": res.stalled, "signals": res.signals, "carFiles": res.car_files, "checkedAt": num(now_ms) });
         self.results.lock().unwrap().insert(vid.to_string(), out.clone());
         Some(out)
@@ -1421,12 +1445,13 @@ impl ArchiveGap {
         *self.generation.lock().unwrap().entry(vid.to_string()).or_insert(0) += 1;
         self.soon.lock().unwrap().remove(vid);
         self.results.lock().unwrap().remove(vid);
-        for k in self.ctx.open_notes(vid, "archive") {
-            if k.starts_with(&format!("archive:{vid}:")) {
-                self.ctx.resolve_note(&k);
-            }
+        let resolved = self.ctx.open_notes(vid, "archive").and_then(|keys| keys.iter().filter(|k| k.starts_with(&format!("archive:{vid}:"))).try_for_each(|k| self.ctx.resolve_note(k)));
+        if let Err(e) = resolved {
+            eprintln!("Archive gaps of removed vehicle {vid}: its notifications were not resolved: {e}");
         }
-        self.ctx.set_setting(&format!("archive-gap:{vid}"), json!({}));
+        if let Err(e) = self.ctx.set_setting(&format!("archive-gap:{vid}"), json!({})) {
+            eprintln!("Archive gaps of removed vehicle {vid}: its notes were not cleared: {e}");
+        }
         self.ctx.announce("notifications");
     }
 
@@ -1455,9 +1480,10 @@ impl ArchiveGap {
         self.results.lock().unwrap().get(vid).map(|r| r["carFiles"].clone()).filter(|v| !v.is_null()).unwrap_or(Value::Null)
     }
 
-    /// Raise, update or resolve the car's archive notifications.
-    fn sync(&self, v: &super::ctx::VehicleRef, res: &Analysis, st: &mut Map<String, Value>, files: &Files, now_ms: f64, tz: &str) {
-        let open: HashSet<String> = self.ctx.open_notes(&v.id, "archive").into_iter().collect();
+    /// Raise, update or resolve the car's archive notifications (`st`'s days change only when all of
+    /// it went through).
+    fn sync(&self, v: &super::ctx::VehicleRef, res: &Analysis, st: &mut Map<String, Value>, files: &Files, now_ms: f64, tz: &str) -> Result<(), String> {
+        let open: HashSet<String> = self.ctx.open_notes(&v.id, "archive")?.into_iter().collect();
         let first_day = day_of_sec(wall_sec(now_ms, tz) - (WINDOW_DAYS - 1.0) * 86400.0);
         let mut per_day: HashMap<String, usize> = HashMap::new();
         for f in files.values().filter(|f| f.kind == crate::footage::Kind::Clip && f.size > 0) {
@@ -1486,7 +1512,7 @@ impl ArchiveGap {
             }
             if day < first_day {
                 if p.as_ref().is_some_and(|p| flag(p, "raised") && !flag(p, "resolved")) && is_open {
-                    self.ctx.resolve_note(&key);
+                    self.ctx.resolve_note(&key)?;
                 }
                 continue;
             }
@@ -1504,7 +1530,7 @@ impl ArchiveGap {
                 let note = json!({ "kind": "archive", "level": "warning", "vehicleId": v.id, "dedupeKey": key,
                     "title": format!("{}: {} looks only partly archived", v.name, day_label(&day)), "message": format!("{} {ADVICE}", f["summary"].as_str().unwrap_or("")) });
                 let clips = per_day.get(&day).copied().unwrap_or(0);
-                if self.ctx.raise_note(&note) {
+                if self.ctx.raise_note(&note)? {
                     next.insert(key, json!({ "day": day, "score": num(score), "raised": true, "resolved": false, "dismissed": false, "clips": clips, "sources": f["sources"], "absentSince": null }));
                 } else {
                     let mut e = p.unwrap_or_else(|| json!({ "day": day, "score": num(score), "raised": false, "clips": clips, "sources": f["sources"] }).as_object().unwrap().clone());
@@ -1519,7 +1545,7 @@ impl ArchiveGap {
                 let arrived = p.get("clips").is_none() || per_day.get(&day).copied().unwrap_or(0) as f64 > js::number(p.get("clips"));
                 let ran = p.get("sources").and_then(Value::as_array).map_or(true, |s| s.iter().all(|x| x == "partial" || res.signals.get(x.as_str().unwrap_or("")) == Some(&json!(true))));
                 if arrived || (ran && now_ms - absent >= ABSENT_MS) {
-                    self.ctx.resolve_note(&key);
+                    self.ctx.resolve_note(&key)?;
                     p.insert("resolved".into(), json!(true));
                     p.insert("absentSince".into(), num(absent));
                     next.insert(key, Value::Object(p));
@@ -1530,6 +1556,7 @@ impl ArchiveGap {
             next.insert(key, Value::Object(p));
         }
         st.insert("days".into(), Value::Object(next));
+        Ok(())
     }
 
     /// /api/vehicles/:id/archive-gaps
@@ -1651,5 +1678,28 @@ mod tests {
             assert_eq!(res.days[day]["cutoffs"][0]["minutes"], json!(minutes), "{order:?}");
             assert_eq!(res.days[day]["missingMinutes"], json!(minutes));
         }
+    }
+
+    #[test]
+    fn notifications_that_cannot_be_read_leave_the_days_as_they_were_never_taken_as_dismissed() {
+        let car = crate::viewer::testkit::Car::new("gap-notes");
+        let pace = Arc::new(crate::viewer::pace::Pace::fixed(|| false));
+        let idx = crate::viewer::speed_index::SpeedIndex::new(car.data.join("speeds"), car.ctx.clone(), pace, 0, crate::viewer::telemetry_api::Limiter::new(|| 1));
+        let gap = ArchiveGap::new(car.ctx.clone(), idx);
+        let v = car.ctx.vehicles[0].clone();
+        let now = crate::footage::js::now();
+        let day = day_of_sec(wall_sec(now, "UTC"));
+        let key = format!("archive:v1:{day}");
+        let mut st = Map::new();
+        st.insert("days".into(), json!({ &key: { "day": day, "score": 20, "raised": true, "resolved": false, "dismissed": false, "clips": 3, "sources": ["partial"], "absentSince": null } }));
+        car.ctx.notes.lock().unwrap().push(key.clone());
+        let res = Analysis { days: BTreeMap::new(), stalled: Value::Null, signals: json!({}), newest_recent: None, received: 0.0, car_files: Value::Null };
+        car.ctx.notes_fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        let before = st.clone();
+        assert!(gap.sync(&v, &res, &mut st, &files(&[]), now, "UTC").is_err());
+        assert_eq!(st, before, "the open note is not taken as dismissed");
+        car.ctx.notes_fail.store(false, std::sync::atomic::Ordering::SeqCst);
+        gap.sync(&v, &res, &mut st, &files(&[]), now, "UTC").unwrap();
+        assert_eq!(st["days"][&key]["dismissed"], false, "still open, so still raised");
     }
 }

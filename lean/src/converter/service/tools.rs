@@ -11,6 +11,7 @@ use super::super::snapshot::{Artifact, Registry};
 use super::super::timeline::{self, Timeline};
 use super::super::verifier::{self, Verdict, VerifyOptions};
 use super::super::adapters::{self, Codec};
+use super::super::jobstore::states::JobState;
 use super::super::jobstore::Manifest;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -125,9 +126,9 @@ pub fn probe_args(source: &str) -> Vec<String> {
 /// createRecoveryInspector(manifest): the facts of the job's active clip.
 pub fn inspect_recovery(m: &Manifest, cancel: &AtomicBool) -> CResult<Facts> {
     let item = m.active_item();
-    let recovery_from = m.get("recovery").and_then(|r| r.get("fromState")).and_then(Value::as_str);
-    let replacing = m.state() == "replacing" || recovery_from == Some("replacing");
-    let copying = m.state() == "copying" || recovery_from == Some("copying");
+    let recovery_from = super::recorded_from(m);
+    let replacing = m.state() == JobState::Replacing || recovery_from == Some(JobState::Replacing);
+    let copying = m.state() == JobState::Copying || recovery_from == Some(JobState::Copying);
     // item.ownedPaths || manifest.ownedPaths || {}
     let owned = item.and_then(|i| i.get("ownedPaths")).filter(|v| v.is_object()).or_else(|| m.get("ownedPaths").filter(|v| v.is_object()));
     let path_of = |k: &str| owned.and_then(|o| o.get(k)).and_then(Value::as_str).map(str::to_string);

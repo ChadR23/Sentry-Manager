@@ -1,0 +1,17 @@
+{
+  "route": "GET /api/logs/download",
+  "method": "GET",
+  "request": {
+    "path": "/api/logs/download"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "text/plain; charset=utf-8",
+      "content-disposition": "attachment; filename=\"sentry-six-manager-2026-11-19.log\"",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": "<ignored>"
+  }
+}

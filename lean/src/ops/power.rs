@@ -3,7 +3,7 @@
 //! GET /api/vehicles/:id/savings-by-month.
 
 use super::js::{num, number, truthy};
-use super::store;
+use super::store::{self, DbResult};
 use chrono::{Datelike, Local, TimeZone, Timelike};
 use rusqlite::Connection;
 use serde_json::{json, Map, Value};
@@ -189,7 +189,7 @@ pub fn is_cheapest(settings: &Value, ms: i64) -> Option<bool> {
 }
 
 /// index.js GET /api/settings `power` default.
-pub fn power_settings(db: &Connection) -> Value {
+pub fn power_settings(db: &Connection) -> DbResult<Value> {
     store::get_or(db, "power", json!({ "currency": "$", "mode": "flat", "pricePerKwh": null, "defaultPrice": null, "rates": [] }))
 }
 
@@ -197,14 +197,15 @@ pub fn power_settings(db: &Connection) -> Value {
 
 const KEY: &str = "savings";
 
-fn load(db: &Connection) -> Value {
-    let s = store::get_or(db, KEY, Value::Null);
+/// The totals (an error when manager.db could not read them: never written over then).
+fn load(db: &Connection) -> DbResult<Value> {
+    let s = store::get_or(db, KEY, Value::Null)?;
     let pick = |k: &str| if truthy(&s[k]) { s[k].clone() } else { json!({}) };
-    if s.is_object() {
+    Ok(if s.is_object() {
         json!({ "vehicles": pick("vehicles"), "jobs": pick("jobs"), "months": pick("months"), "monthsSince": if truthy(&s["monthsSince"]) { s["monthsSince"].clone() } else { Value::Null } })
     } else {
         json!({ "vehicles": {}, "jobs": {}, "months": {}, "monthsSince": null })
-    }
+    })
 }
 
 fn month_of(ms: i64) -> String {
@@ -228,18 +229,18 @@ fn f(v: &Value) -> f64 {
 }
 
 /// A converter job's totals so far; only what it adds since its last call counts.
-pub fn record(db: &Connection, job: &str, vehicle: &str, bytes: f64, clips: f64) -> bool {
+pub fn record(db: &Connection, job: &str, vehicle: &str, bytes: f64, clips: f64) -> DbResult<bool> {
     if job.is_empty() || vehicle.is_empty() {
-        return false;
+        return Ok(false);
     }
     let bytes = if bytes.is_finite() { bytes.round().max(0.0) } else { 0.0 };
     let clips = if clips.is_finite() && clips.fract() == 0.0 && clips.abs() < 9.007_199_254_740_992e15 { clips.max(0.0) } else { 0.0 };
-    let mut s = load(db);
+    let mut s = load(db)?;
     let seen = if s["jobs"][job].is_object() { s["jobs"][job].clone() } else { json!({ "vehicleId": vehicle, "bytes": 0, "clips": 0 }) };
     let add_b = bytes - f(&seen["bytes"]);
     let add_c = clips - f(&seen["clips"]);
     if add_b <= 0.0 && add_c <= 0.0 {
-        return false;
+        return Ok(false);
     }
     let vid = seen["vehicleId"].as_str().unwrap_or(vehicle).to_string();
     let mut v = if s["vehicles"][&vid].is_object() { s["vehicles"][&vid].clone() } else { json!({ "bytes": 0, "clips": 0 }) };
@@ -248,47 +249,48 @@ pub fn record(db: &Connection, job: &str, vehicle: &str, bytes: f64, clips: f64)
     s["vehicles"][&vid] = v;
     add_month(&mut s, &vid, &month_of(store::now_ms()), add_b, add_c);
     s["jobs"][job] = json!({ "vehicleId": vid, "bytes": num(bytes.max(f(&seen["bytes"]))), "clips": num(clips.max(f(&seen["clips"]))) });
-    store::set(db, KEY, &s);
-    true
+    store::set(db, KEY, &s)?;
+    Ok(true)
 }
 
 /// One vehicle's total: { bytes, clips }.
-pub fn for_vehicle(db: &Connection, vehicle: &str) -> Value {
-    let v = &load(db)["vehicles"][vehicle];
+pub fn for_vehicle(db: &Connection, vehicle: &str) -> DbResult<Value> {
+    let v = &load(db)?["vehicles"][vehicle];
     let pick = |k: &str| if truthy(&v[k]) { v[k].clone() } else { json!(0) };
-    json!({ "bytes": pick("bytes"), "clips": pick("clips") })
+    Ok(json!({ "bytes": pick("bytes"), "clips": pick("clips") }))
 }
 
 /// A removed vehicle's total goes with it.
-pub fn forget(db: &Connection, vehicle: &str) {
-    let mut s = load(db);
+pub fn forget(db: &Connection, vehicle: &str) -> DbResult<()> {
+    let mut s = load(db)?;
     if !truthy(&s["vehicles"][vehicle]) {
-        return;
+        return Ok(());
     }
     s["vehicles"].as_object_mut().unwrap().remove(vehicle);
     s["months"].as_object_mut().unwrap().remove(vehicle);
     s["jobs"].as_object_mut().unwrap().retain(|_, j| j["vehicleId"] != vehicle);
-    store::set(db, KEY, &s);
+    store::set(db, KEY, &s)
 }
 
 /// Starts a vehicle's total over; the jobs it has seen stay remembered.
-pub fn reset(db: &Connection, vehicle: &str) -> bool {
-    let mut s = load(db);
+pub fn reset(db: &Connection, vehicle: &str) -> DbResult<bool> {
+    let mut s = load(db)?;
     let v = &s["vehicles"][vehicle];
     if !truthy(v) || (!truthy(&v["bytes"]) && !truthy(&v["clips"])) {
-        return false;
+        return Ok(false);
     }
     s["vehicles"][vehicle] = json!({ "bytes": 0, "clips": 0 });
     s["months"].as_object_mut().unwrap().remove(vehicle);
-    store::set(db, KEY, &s);
-    true
+    store::set(db, KEY, &s)?;
+    Ok(true)
 }
 
-/// Once: the jobs counted before months were kept go to the month they finished in.
-pub fn backfill(db: &Connection, month_of_job: impl Fn(&str) -> Option<String>) -> bool {
-    let mut s = load(db);
+/// Once: the jobs counted before months were kept go to the month they finished in (nothing is
+/// written when a job's month could not be read: tried again at the next start).
+pub fn backfill(db: &Connection, month_of_job: impl Fn(&str) -> DbResult<Option<String>>) -> DbResult<bool> {
+    let mut s = load(db)?;
     if truthy(&s["monthsSince"]) {
-        return false;
+        return Ok(false);
     }
     let jobs: Vec<(String, Value)> = s["jobs"].as_object().unwrap().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     for (id, j) in jobs {
@@ -296,17 +298,17 @@ pub fn backfill(db: &Connection, month_of_job: impl Fn(&str) -> Option<String>) 
         if !truthy(&s["vehicles"][&vid]) {
             continue;
         }
-        let month = month_of_job(&id).filter(|m| !m.is_empty()).unwrap_or_else(|| month_of(store::now_ms()));
+        let month = month_of_job(&id)?.filter(|m| !m.is_empty()).unwrap_or_else(|| month_of(store::now_ms()));
         add_month(&mut s, &vid, &month, f(&j["bytes"]), f(&j["clips"]));
     }
     s["monthsSince"] = json!(store::now_ms());
-    store::set(db, KEY, &s);
-    true
+    store::set(db, KEY, &s)?;
+    Ok(true)
 }
 
 /// One vehicle's savings by month, oldest first, the last `count` months (empty ones too).
-pub fn by_month(db: &Connection, vehicle: &str, count: f64, now_ms: i64) -> Vec<Value> {
-    let s = load(db);
+pub fn by_month(db: &Connection, vehicle: &str, count: f64, now_ms: i64) -> DbResult<Vec<Value>> {
+    let s = load(db)?;
     let m = &s["months"][vehicle];
     let now = local(now_ms);
     let mut out = Vec::new();
@@ -319,14 +321,14 @@ pub fn by_month(db: &Connection, vehicle: &str, count: f64, now_ms: i64) -> Vec<
         let pick = |k: &str| if truthy(&m[&key][k]) { m[&key][k].clone() } else { json!(0) };
         out.push(json!({ "month": key, "bytes": pick("bytes"), "clips": pick("clips") }));
     }
-    out
+    Ok(out)
 }
 
 /// GET /api/vehicles/:id/savings-by-month (the vehicle is known)
-pub fn savings_by_month(db: &Connection, vehicle: &str, months_q: Option<&str>) -> Value {
+pub fn savings_by_month(db: &Connection, vehicle: &str, months_q: Option<&str>) -> DbResult<Value> {
     let n = months_q.map(super::js::number_str).filter(|x| truthy(&num(*x))).unwrap_or(12.0);
     let months = n.clamp(3.0, 36.0);
-    json!({ "months": by_month(db, vehicle, months, store::now_ms()), "total": for_vehicle(db, vehicle) })
+    Ok(json!({ "months": by_month(db, vehicle, months, store::now_ms())?, "total": for_vehicle(db, vehicle)? }))
 }
 
 #[cfg(test)]
@@ -421,36 +423,36 @@ mod tests {
     #[test]
     fn each_job_adds_only_what_it_adds() {
         let db = mem();
-        record(&db, "j1", "car", 100.0, 1.0);
-        record(&db, "j1", "car", 100.0, 1.0);
-        record(&db, "j1", "car", 250.0, 3.0);
-        record(&db, "j2", "car", 50.0, 1.0);
-        record(&db, "j3", "other", 7.0, 1.0);
-        assert_eq!(for_vehicle(&db, "car"), json!({ "bytes": 300, "clips": 4 }));
-        assert_eq!(for_vehicle(&db, "other"), json!({ "bytes": 7, "clips": 1 }));
-        assert_eq!(for_vehicle(&db, "none"), json!({ "bytes": 0, "clips": 0 }));
-        record(&db, "j1", "car", 250.0, 3.0);
-        assert_eq!(for_vehicle(&db, "car"), json!({ "bytes": 300, "clips": 4 }));
-        record(&db, "j1", "car", -5.0, f64::NAN);
-        assert_eq!(for_vehicle(&db, "car"), json!({ "bytes": 300, "clips": 4 }));
-        forget(&db, "car");
-        assert_eq!(for_vehicle(&db, "car"), json!({ "bytes": 0, "clips": 0 }));
-        assert_eq!(for_vehicle(&db, "other"), json!({ "bytes": 7, "clips": 1 }));
+        record(&db, "j1", "car", 100.0, 1.0).unwrap();
+        record(&db, "j1", "car", 100.0, 1.0).unwrap();
+        record(&db, "j1", "car", 250.0, 3.0).unwrap();
+        record(&db, "j2", "car", 50.0, 1.0).unwrap();
+        record(&db, "j3", "other", 7.0, 1.0).unwrap();
+        assert_eq!(for_vehicle(&db, "car").unwrap(), json!({ "bytes": 300, "clips": 4 }));
+        assert_eq!(for_vehicle(&db, "other").unwrap(), json!({ "bytes": 7, "clips": 1 }));
+        assert_eq!(for_vehicle(&db, "none").unwrap(), json!({ "bytes": 0, "clips": 0 }));
+        record(&db, "j1", "car", 250.0, 3.0).unwrap();
+        assert_eq!(for_vehicle(&db, "car").unwrap(), json!({ "bytes": 300, "clips": 4 }));
+        record(&db, "j1", "car", -5.0, f64::NAN).unwrap();
+        assert_eq!(for_vehicle(&db, "car").unwrap(), json!({ "bytes": 300, "clips": 4 }));
+        forget(&db, "car").unwrap();
+        assert_eq!(for_vehicle(&db, "car").unwrap(), json!({ "bytes": 0, "clips": 0 }));
+        assert_eq!(for_vehicle(&db, "other").unwrap(), json!({ "bytes": 7, "clips": 1 }));
     }
 
     #[test]
     fn a_reset_starts_one_vehicle_over() {
         let db = mem();
-        record(&db, "j1", "car", 400.0, 4.0);
-        record(&db, "j2", "other", 9.0, 1.0);
-        assert!(reset(&db, "car"));
-        assert_eq!(for_vehicle(&db, "car"), json!({ "bytes": 0, "clips": 0 }));
-        assert_eq!(for_vehicle(&db, "other"), json!({ "bytes": 9, "clips": 1 }));
-        record(&db, "j1", "car", 400.0, 4.0);
-        assert_eq!(for_vehicle(&db, "car"), json!({ "bytes": 0, "clips": 0 }));
-        record(&db, "j1", "car", 450.0, 5.0);
-        assert_eq!(for_vehicle(&db, "car"), json!({ "bytes": 50, "clips": 1 }));
-        assert!(!reset(&db, "none"));
+        record(&db, "j1", "car", 400.0, 4.0).unwrap();
+        record(&db, "j2", "other", 9.0, 1.0).unwrap();
+        assert!(reset(&db, "car").unwrap());
+        assert_eq!(for_vehicle(&db, "car").unwrap(), json!({ "bytes": 0, "clips": 0 }));
+        assert_eq!(for_vehicle(&db, "other").unwrap(), json!({ "bytes": 9, "clips": 1 }));
+        record(&db, "j1", "car", 400.0, 4.0).unwrap();
+        assert_eq!(for_vehicle(&db, "car").unwrap(), json!({ "bytes": 0, "clips": 0 }));
+        record(&db, "j1", "car", 450.0, 5.0).unwrap();
+        assert_eq!(for_vehicle(&db, "car").unwrap(), json!({ "bytes": 50, "clips": 1 }));
+        assert!(!reset(&db, "none").unwrap());
     }
 
     // test/savingsByMonth.test.js
@@ -458,36 +460,49 @@ mod tests {
     fn savings_by_month_backfilled_once() {
         let db = mem();
         let gb = 1024f64.powi(3);
-        store::set(&db, "savings", &json!({ "vehicles": { "car": { "bytes": num(5.0 * gb), "clips": 50 } }, "jobs": { "j1": { "vehicleId": "car", "bytes": num(3.0 * gb), "clips": 30 }, "j2": { "vehicleId": "car", "bytes": num(2.0 * gb), "clips": 20 } } }));
+        store::set(&db, "savings", &json!({ "vehicles": { "car": { "bytes": num(5.0 * gb), "clips": 50 } }, "jobs": { "j1": { "vehicleId": "car", "bytes": num(3.0 * gb), "clips": 30 }, "j2": { "vehicleId": "car", "bytes": num(2.0 * gb), "clips": 20 } } })).unwrap();
         let now = store::now_ms();
         let this = month_of(now);
         let d = local(now);
         let lm = i64::from(d.year()) * 12 + i64::from(d.month0()) - 1;
         let last = format!("{}-{:02}", lm.div_euclid(12), lm.rem_euclid(12) + 1);
         let l2 = last.clone();
-        assert!(backfill(&db, move |id| (id == "j1").then(|| l2.clone())));
-        assert!(!backfill(&db, |_| None), "only once");
-        let months = by_month(&db, "car", 12.0, now);
+        assert!(backfill(&db, move |id| Ok((id == "j1").then(|| l2.clone()))).unwrap());
+        assert!(!backfill(&db, |_| Ok(None)).unwrap(), "only once");
+        let months = by_month(&db, "car", 12.0, now).unwrap();
         assert_eq!(months.len(), 12);
         assert_eq!(months[11]["month"], json!(this));
         assert_eq!(months[10], json!({ "month": last, "bytes": num(3.0 * gb), "clips": 30 }));
         assert_eq!(months[11], json!({ "month": this, "bytes": num(2.0 * gb), "clips": 20 }));
-        record(&db, "j3", "car", gb, 5.0);
-        record(&db, "j3", "car", 1.5 * gb, 8.0);
-        let months = by_month(&db, "car", 12.0, now);
+        record(&db, "j3", "car", gb, 5.0).unwrap();
+        record(&db, "j3", "car", 1.5 * gb, 8.0).unwrap();
+        let months = by_month(&db, "car", 12.0, now).unwrap();
         assert_eq!(months[11], json!({ "month": this, "bytes": num(3.5 * gb), "clips": 28 }));
-        assert_eq!(for_vehicle(&db, "car")["bytes"], num(6.5 * gb));
-        reset(&db, "car");
-        assert!(by_month(&db, "car", 12.0, now).iter().all(|m| m["bytes"] == 0));
+        assert_eq!(for_vehicle(&db, "car").unwrap()["bytes"], num(6.5 * gb));
+        reset(&db, "car").unwrap();
+        assert!(by_month(&db, "car", 12.0, now).unwrap().iter().all(|m| m["bytes"] == 0));
     }
 
     #[test]
     fn savings_by_month_route_clamps_the_count() {
         let db = mem();
-        assert_eq!(savings_by_month(&db, "car", None)["months"].as_array().unwrap().len(), 12);
-        assert_eq!(savings_by_month(&db, "car", Some("1"))["months"].as_array().unwrap().len(), 3);
-        assert_eq!(savings_by_month(&db, "car", Some("99"))["months"].as_array().unwrap().len(), 36);
-        assert_eq!(savings_by_month(&db, "car", Some("abc"))["months"].as_array().unwrap().len(), 12);
-        assert_eq!(savings_by_month(&db, "car", None)["total"], json!({ "bytes": 0, "clips": 0 }));
+        assert_eq!(savings_by_month(&db, "car", None).unwrap()["months"].as_array().unwrap().len(), 12);
+        assert_eq!(savings_by_month(&db, "car", Some("1")).unwrap()["months"].as_array().unwrap().len(), 3);
+        assert_eq!(savings_by_month(&db, "car", Some("99")).unwrap()["months"].as_array().unwrap().len(), 36);
+        assert_eq!(savings_by_month(&db, "car", Some("abc")).unwrap()["months"].as_array().unwrap().len(), 12);
+        assert_eq!(savings_by_month(&db, "car", None).unwrap()["total"], json!({ "bytes": 0, "clips": 0 }));
+    }
+
+    #[test]
+    fn savings_not_kept_are_an_error_and_counted_at_the_next_snapshot() {
+        let db = mem();
+        record(&db, "j1", "car", 100.0, 1.0).unwrap();
+        db.execute_batch("CREATE TEMP TRIGGER refused BEFORE UPDATE ON settings BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;").unwrap();
+        assert!(record(&db, "j1", "car", 250.0, 3.0).is_err());
+        assert!(reset(&db, "car").is_err() && forget(&db, "car").is_err());
+        db.execute_batch("DROP TRIGGER refused;").unwrap();
+        assert_eq!(for_vehicle(&db, "car").unwrap(), json!({ "bytes": 100, "clips": 1 }));
+        assert!(record(&db, "j1", "car", 250.0, 3.0).unwrap(), "what the job added since is counted then");
+        assert_eq!(for_vehicle(&db, "car").unwrap(), json!({ "bytes": 250, "clips": 3 }));
     }
 }

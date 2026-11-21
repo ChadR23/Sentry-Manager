@@ -1,0 +1,29 @@
+{
+  "route": "GET /api/studio/context",
+  "method": "GET",
+  "request": {
+    "path": "/api/studio/context"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "outputRoots": [
+        "{data}/converted"
+      ],
+      "vehicles": [
+        {
+          "id": "contract-car",
+          "name": "Contract Car",
+          "root": "{root:contract-car}",
+          "timezone": "UTC"
+        }
+      ],
+      "version": "<id>"
+    }
+  }
+}

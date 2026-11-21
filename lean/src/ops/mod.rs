@@ -96,11 +96,13 @@ pub struct Ops {
     /// when a page last asked for /api/stats (the RAPL keep-alive)
     stats_asked_at: Mutex<i64>,
     converting: Arc<Mutex<Converting>>,
+    /// what manager.db failed lately in the background (a price, a job's savings): logged once until it works
+    unread: Arc<crate::core::db::LogOnce>,
 }
 
 /// The stats engine as index.js sets it up: the data folder and the shares,
 /// the running ffmpegs, prices, job progress, alerts as notifications.
-fn server_stats(ctx: &Arc<dyn OpsCtx>, notes: &Arc<notes::Notes>, converting: &Arc<Mutex<Converting>>, version: Value) -> Arc<stats::Stats> {
+fn server_stats(ctx: &Arc<dyn OpsCtx>, notes: &Arc<notes::Notes>, converting: &Arc<Mutex<Converting>>, unread: &Arc<crate::core::db::LogOnce>, version: Value) -> Arc<stats::Stats> {
     let mut o = stats::StatsOptions::server(Some(ctx.data_dir()), version);
     let c = ctx.clone();
     let conv = converting.clone();
@@ -111,7 +113,15 @@ fn server_stats(ctx: &Arc<dyn OpsCtx>, notes: &Arc<notes::Notes>, converting: &A
     o.active_encodes = Arc::new(move || c.active_encodes());
     o.ffmpeg_path = ctx.ffmpeg_path();
     let c = ctx.clone();
-    o.price_at = Arc::new(move |ms| power::price_at(&store::get(&c.db(), "power").unwrap_or(Value::Null), ms));
+    let u = unread.clone();
+    // (a price that cannot be read is no price: the cost is unknown, logged once until it can)
+    o.price_at = Arc::new(move |ms| {
+        let pw = store::get(&c.read_db(), "power");
+        if let (true, Err(e)) = (u.first("power", pw.is_err()), &pw) {
+            c.log("stats", Level::Warn, &format!("The electricity price could not be read (costs are not counted until it can): {e}"));
+        }
+        power::price_at(&pw.ok().flatten().unwrap_or(Value::Null), ms)
+    });
     let c = ctx.clone();
     o.job_progress = Arc::new(move |id| c.job_progress(id));
     let c = ctx.clone();
@@ -119,12 +129,16 @@ fn server_stats(ctx: &Arc<dyn OpsCtx>, notes: &Arc<notes::Notes>, converting: &A
     let (c, n) = (ctx.clone(), notes.clone());
     o.on_alert = Some(Box::new(move |key, level, message| {
         c.log("stats", if level == "error" { Level::Error } else { Level::Warn }, message);
-        n.raise(&store::Note::new("server", if level == "error" { "critical" } else { "warning" }, message).key(format!("server:{key}")).message("Overview > Server shows the live numbers."));
+        if let Err(e) = n.raise(&store::Note::new("server", if level == "error" { "critical" } else { "warning" }, message).key(format!("server:{key}")).message("Overview > Server shows the live numbers.")) {
+            c.log("stats", Level::Error, &format!("The alert {key} was not kept as a notification: {e}"));
+        }
     }));
     let (c, n) = (ctx.clone(), notes.clone());
     o.on_alert_clear = Some(Box::new(move |key| {
         c.log("stats", Level::Info, &format!("Back to normal: {key}"));
-        n.resolve(&format!("server:{key}"));
+        if let Err(e) = n.resolve(&format!("server:{key}")) {
+            c.log("stats", Level::Error, &format!("The notification of the alert {key} was not cleared: {e}"));
+        }
     }));
     // CPU power right away when sampling starts (the keep-alive follows)
     let c = ctx.clone();
@@ -156,9 +170,12 @@ impl Ops {
         // (the server line's version: stats/host.js appVersion)
         let version = build::app_version(&ctx.app_root()).map_or(Value::Null, Value::String);
         // Server alerts from before a restart: the new run raises them again if they still hold
-        store::resolve_prefix(&ctx.db(), "server:");
+        if let Err(e) = store::resolve_prefix(&ctx.db(), "server:") {
+            ctx.log("server", Level::Warn, &format!("Server alerts from before the restart were not cleared: {e}"));
+        }
         let converting = Arc::new(Mutex::new(Converting::default()));
-        let stats = stats.unwrap_or_else(|| server_stats(&ctx, &notes, &converting, version));
+        let unread = Arc::new(crate::core::db::LogOnce::default());
+        let stats = stats.unwrap_or_else(|| server_stats(&ctx, &notes, &converting, &unread, version));
         let ops = Arc::new(Ops {
             snapshots: Arc::new(snapshots::Snapshots::new(&ctx.data_dir())),
             stats,
@@ -170,20 +187,23 @@ impl Ops {
             started_at: store::now_ms(),
             stats_asked_at: Mutex::new(0),
             converting,
+            unread,
             ctx,
         });
         let weak = Arc::downgrade(&ops);
         let (w1, w2, w3) = (weak.clone(), weak.clone(), weak);
         ops.reports.set_sources(reports::Sources {
             diagnostics: Box::new(move |_| w1.upgrade().map_or(json!({}), |o| diag::diagnostics(&o))),
-            heartbeat: Box::new(move || w2.upgrade().map_or(json!({}), |o| diag::heartbeat(&o))),
-            identifiers: Box::new(move || w3.upgrade().map_or_else(Vec::new, |o| diag::identifiers(&*o.ctx))),
+            heartbeat: Box::new(move || w2.upgrade().map_or(Ok(json!({})), |o| diag::heartbeat(&o))),
+            identifiers: Box::new(move || w3.upgrade().map_or_else(|| Ok(Vec::new()), |o| diag::identifiers(&*o.ctx))),
         });
         // savings by month: what was counted before months were kept goes to
         // the month its conversion finished (the job history)
         {
             let db = ops.ctx.db();
-            power::backfill(&db, |job| month_of_job(&db, job));
+            if let Err(e) = power::backfill(&db, |job| month_of_job(&db, job)) {
+                ops.ctx.log("server", Level::Warn, &format!("Space saved by month was not filled in from the job history (tried again at the next start): {e}"));
+            }
         }
         ops
     }
@@ -308,7 +328,11 @@ impl Ops {
     pub fn record_savings(&self, s: &JobSnapshot) {
         let Some(v) = &s.vehicle_id else { return };
         let bytes = if s.saved_bytes.is_finite() { s.saved_bytes } else { 0.0 };
-        power::record(&self.ctx.db(), &s.id, v, bytes, s.clips);
+        // (not kept: the next snapshot adds it, since what a job added is kept with the totals)
+        let r = power::record(&self.ctx.db(), &s.id, v, bytes, s.clips);
+        if let (true, Err(e)) = (self.unread.first("savings", r.is_err()), &r) {
+            self.ctx.log("server", Level::Warn, &format!("Space saved by conversions is not counted until manager.db can be written: {e}"));
+        }
     }
 
     /// The energy measured for a job (stats.energy().byJob[id]) as Jobs keeps it
@@ -370,13 +394,14 @@ impl Ops {
     }
 
     /// GET /api/stats (index.js): the snapshot, every node's power with this
-    /// server's ("All servers"), the price now and the encoder block.
-    pub fn stats_answer(&self) -> Value {
+    /// server's ("All servers"), the price now and the encoder block (an error when the
+    /// price could not be read).
+    pub fn stats_answer(&self) -> store::DbResult<Value> {
         *self.stats_asked_at.lock().unwrap() = store::now_ms();
         self.stats.touch(None);
         let mut snap = self.stats.snapshot();
         let ctx = &*self.ctx;
-        let pw = store::get(&ctx.db(), "power").unwrap_or(Value::Null);
+        let pw = store::get(&ctx.read_db(), "power")?.unwrap_or(Value::Null);
         let t = store::now_ms();
         let price_now = power::price_at(&pw, t);
         let (rows, combined) = node_power::combine(&snap["power"], &ctx.node_powers(), price_now);
@@ -400,19 +425,18 @@ impl Ops {
         };
         let energy = self.stats.energy();
         snap["encoder"] = ctx.encoder_block(&snap, &energy);
-        snap
+        Ok(snap)
     }
 }
 
 /// The month ('YYYY-MM', local time) a converter job finished in, from the
 /// job history (db.jobByExternal(`converter:<id>`)); None without one.
-pub fn month_of_job(db: &rusqlite::Connection, job: &str) -> Option<String> {
-    let row: Option<(Option<i64>, Option<i64>)> = db
-        .query_row("SELECT finished_at, started_at FROM jobs WHERE external_id = ?", [format!("converter:{job}")], |r| Ok((r.get(0)?, r.get(1)?)))
-        .ok();
-    let (f, s) = row?;
-    let t = f.filter(|x| *x != 0).or(s.filter(|x| *x != 0))?;
+pub fn month_of_job(db: &rusqlite::Connection, job: &str) -> store::DbResult<Option<String>> {
+    let row: Option<(Option<i64>, Option<i64>)> =
+        crate::core::db::one(db.query_row("SELECT finished_at, started_at FROM jobs WHERE external_id = ?", [format!("converter:{job}")], |r| Ok((r.get(0)?, r.get(1)?))))?;
+    let Some((f, s)) = row else { return Ok(None) };
+    let Some(t) = f.filter(|x| *x != 0).or(s.filter(|x| *x != 0)) else { return Ok(None) };
     use chrono::Datelike;
     let d = stats::energy::local_date(t);
-    Some(format!("{:04}-{:02}", d.year(), d.month()))
+    Ok(Some(format!("{:04}-{:02}", d.year(), d.month())))
 }

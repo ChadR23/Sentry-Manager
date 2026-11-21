@@ -98,7 +98,8 @@ impl BenchmarkApi for super::runtime::Converter {
 /// What the channels use besides the job service (set once by the integrator).
 #[derive(Default, Clone)]
 pub struct Extras {
-    pub devices: Option<Arc<dyn Fn() -> Value + Send + Sync>>,
+    /// devices(): an error when the paired nodes cannot be read
+    pub devices: Option<Arc<dyn Fn() -> Result<Value, String> + Send + Sync>>,
     pub auto: Option<Arc<super::auto_convert::Auto>>,
     pub benchmark: Option<Arc<dyn BenchmarkApi>>,
 }
@@ -797,7 +798,9 @@ impl Bridge {
             "devices" => {
                 no_payload(p)?;
                 let Some(d) = self.extras().devices else { return fail("DEVICES_UNAVAILABLE") };
-                bounded(&d(), MAX_PAYLOAD_BYTES, false, true)
+                // (a list without the paired nodes is not answered as the list: Node's thrown error)
+                let Ok(list) = d() else { return fail("OPERATION_FAILED") };
+                bounded(&list, MAX_PAYLOAD_BYTES, false, true)
             }
             "resume" => {
                 let id = job_id(p)?;
@@ -882,7 +885,8 @@ impl Bridge {
     fn check_lane_encoders(&self, config: &Value) -> R<()> {
         let Some(lanes) = config["lanes"].as_array() else { return Ok(()) };
         let Some(devices) = self.extras().devices else { return Ok(()) };
-        let known = devices();
+        // (lanes are not checked against a list without the paired nodes)
+        let Ok(known) = devices() else { return fail("OPERATION_FAILED") };
         let list = known["devices"].as_array().cloned().unwrap_or_default();
         for lane in lanes {
             let Some(d) = list.iter().find(|d| d["id"] == lane["device"]) else { continue };
@@ -1006,7 +1010,6 @@ pub fn clamp_verify(v: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
 
     /// The stand-in job service of lean/parity/converterBridge.js.
     #[derive(Default)]
@@ -1100,12 +1103,11 @@ mod tests {
         }
     }
 
+    /// Every request of lean/parity/converterBridge.js's corpus answers as
+    /// server/converterBridge.js (over src/main/converter/ipc.js) answered
+    /// it: tests/fixtures/node-reference/converter-bridge.json.
     #[test]
     fn channels_answer_as_node_answers() {
-        if !Command::new("node").arg("--version").output().is_ok_and(|o| o.status.success()) {
-            eprintln!("skipped: node is not installed");
-            return;
-        }
         let base = std::env::temp_dir().join(format!("lean-bridge-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         for d in ["allowed/TeslaCam/SentryClips", "allowed/out", "outside"] {
@@ -1113,19 +1115,14 @@ mod tests {
         }
         std::fs::write(base.join("allowed/file.txt"), b"x").unwrap();
         std::os::unix::fs::symlink(base.join("outside"), base.join("allowed/link")).unwrap();
-        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("parity/converterBridge.js");
-        let corpus = Command::new("node").arg(&script).arg("corpus").arg(&base).output().unwrap();
-        assert!(corpus.status.success(), "{}", String::from_utf8_lossy(&corpus.stderr));
-        let file = base.join("corpus.json");
-        std::fs::write(&file, &corpus.stdout).unwrap();
-        let theirs = Command::new("node").arg(&script).arg("run").arg(&base).arg(&file).output().unwrap();
-        assert!(theirs.status.success(), "{}", String::from_utf8_lossy(&theirs.stderr));
-        let theirs: Value = serde_json::from_slice(&theirs.stdout).unwrap();
-        let requests: Value = serde_json::from_slice(&corpus.stdout).unwrap();
+        let places = [("{BASE}", base.to_string_lossy().into_owned())];
+        let frozen = crate::reference::answer("converter-bridge", &places, &json!("corpus"));
+        let (requests, theirs) = (frozen["requests"].clone(), frozen["answers"].clone());
+        assert!(requests.as_array().unwrap().len() > 100);
         let caps = capabilities(&json!({ "separatePublication": "native-atomic", "ownershipCleanup": "atomic-expected-ownership", "replacement": "available" }));
         let bridge = Bridge::new(Arc::new(Fake::default()), Arc::new(Guard(base.clone())), caps);
         // (the DEVICES of converterBridge.js: a GPU that cannot encode H.265)
-        bridge.set_extras(Extras { devices: Some(Arc::new(|| json!({ "devices": [{ "id": "pci:0000:01:00.0", "kind": "dri", "name": "Old GPU", "encoders": { "h265": null, "av1": null } }] }))), auto: None, benchmark: None });
+        bridge.set_extras(Extras { devices: Some(Arc::new(|| Ok(json!({ "devices": [{ "id": "pci:0000:01:00.0", "kind": "dri", "name": "Old GPU", "encoders": { "h265": null, "av1": null } }] })))), auto: None, benchmark: None });
         let mut differences = vec![];
         for (n, r) in requests.as_array().unwrap().iter().enumerate() {
             let mine = bridge.invoke(r["name"].as_str().unwrap(), r.get("payload").cloned(), None);
@@ -1135,6 +1132,17 @@ mod tests {
         }
         assert!(differences.is_empty(), "{} of {} differ:\n{}", differences.len(), requests.as_array().unwrap().len(), differences.join("\n"));
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn a_device_list_that_cannot_read_the_paired_nodes_is_not_answered_as_the_list() {
+        let base = std::env::temp_dir().join(format!("lean-devices-unread-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let caps = capabilities(&json!({ "separatePublication": "native-atomic", "ownershipCleanup": "atomic-expected-ownership", "replacement": "available" }));
+        let bridge = Bridge::new(Arc::new(Fake::default()), Arc::new(Guard(base.clone())), caps);
+        bridge.set_extras(Extras { devices: Some(Arc::new(|| Err("Internal error".into()))), auto: None, benchmark: None });
+        assert_eq!(bridge.invoke("devices", None, None), json!({ "ok": false, "error": { "code": "OPERATION_FAILED", "retryable": false } }));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

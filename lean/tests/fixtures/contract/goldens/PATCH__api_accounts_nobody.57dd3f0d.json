@@ -1,0 +1,21 @@
+{
+  "route": "PATCH /api/accounts/:name",
+  "method": "PATCH",
+  "request": {
+    "path": "/api/accounts/nobody"
+  },
+  "body": {
+    "role": "viewer"
+  },
+  "response": {
+    "status": 404,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "No such account."
+    }
+  }
+}

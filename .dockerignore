@@ -2,7 +2,7 @@
 .git
 .github
 docs
-test
+lean/tests
 build
 data
 node_modules

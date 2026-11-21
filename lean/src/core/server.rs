@@ -100,7 +100,7 @@ fn acme_answer(state: &AppState, method: &Method, path: &str) -> Option<Res> {
 }
 
 /// One decoded, normalized path for every decision (no %2F tricks).
-fn clean_path(raw: &str) -> Option<String> {
+pub(super) fn clean_path(raw: &str) -> Option<String> {
     let p = crate::api::decode(raw, false)?;
     if p.contains('\0') || p.contains('\\') || p.contains("//") || p.split('/').any(|s| s == "." || s == "..") || !p.starts_with('/') {
         return None;
@@ -118,7 +118,7 @@ fn query_map(q: Option<&str>) -> HashMap<String, String> {
 }
 
 /// /v/<version>/<path> (VERSIONED in index.js): (path, version)
-fn unversion(mut p: String) -> (String, Option<String>) {
+pub(super) fn unversion(mut p: String) -> (String, Option<String>) {
     if p.starts_with("/v/assets/") {
         p = p[2..].to_string();
     }
@@ -273,19 +273,51 @@ async fn handle(state: Arc<AppState>, req: Request<Body>, conn: ConnInfo) -> Res
     let query = query_map(raw_query.as_deref());
     let cookie_header = hval(&headers, "cookie");
     let view = super::auth::ReqView { secure, cookie: &cookie_header, agent: "" };
-    let mut user = state.auth.user(&view);
     let is_api = p.starts_with("/api/");
+    // the session's user, its two-step state and (for an admin route) its role are read on a
+    // blocking thread: the async workers run no SQLite. A read that fails, or the step itself, is a
+    // 500: never signed out
+    let session = state.auth.session_hash(&view);
+    let (mut user, two_factor, role) = match session.clone() {
+        None => (None, None, None),
+        Some(h) => {
+            let (st, home, admin_route) = (state.clone(), state.from_home(&client), is_api && !viewer_may(method.as_str(), &p));
+            let read = tokio::task::spawn_blocking(move || -> Result<_, super::db::DbError> {
+                let user = st.auth.user_of(&h)?;
+                let two_factor = match user.as_deref() {
+                    Some(u) => Some(st.two_factor_state(u, home)?),
+                    None => None,
+                };
+                let role = match user.as_deref() {
+                    Some(u) if admin_route => st.accounts.role_of(Some(u))?,
+                    _ => None,
+                };
+                Ok((user, two_factor, role))
+            })
+            .await;
+            match read {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => return error_response(&state, &HttpError::from(e), &method, &raw_path, &accept),
+                Err(e) => return error_response(&state, &HttpError::internal(format!("the session could not be read: {e}")), &method, &raw_path, &accept),
+            }
+        }
+    };
 
     // a banned address: every sign-in step (and anything else without a session) is refused
     if is_api && p != "/api/auth/me" && (user.is_none() || BAN_STEPS.contains(&p.as_str())) && state.access.banned(&client).is_some() {
         return error_json(429, BANNED_TEXT, Some("BANNED"), &accept);
     }
     let mut setup_only = false;
-    if let Some(u) = user.clone() {
-        match state.two_factor_state(&u, state.from_home(&client)) {
+    if let (Some(u), Some(two_factor)) = (user.clone(), two_factor) {
+        match two_factor {
             "out" => {
-                if let Some(h) = state.auth.session_hash(&view) {
-                    state.db.delete_session(&h);
+                if let Some(h) = session.clone() {
+                    // (refused either way; a session that stays is refused again while the rule holds)
+                    let st = state.clone();
+                    let gone = tokio::task::spawn_blocking(move || st.db.delete_session(&h).map_err(|e| e.to_string())).await;
+                    if let Err(e) = gone.unwrap_or_else(|e| Err(e.to_string())) {
+                        state.log.warn(format!("A session the two-step rule signed out could not be removed: {e}"));
+                    }
                 }
                 state.audit.warn(format!("Signed out (no two-step sign-in, outside the home network): {u} from {client}"));
                 if is_api {
@@ -303,8 +335,8 @@ async fn handle(state: Arc<AppState>, req: Request<Body>, conn: ConnInfo) -> Res
             _ => {}
         }
     }
-    if let Some(u) = user.clone() {
-        let h = state.auth.session_hash(&view);
+    if user.is_some() {
+        let h = session.clone();
         let now = super::db::now_ms();
         if let Some(h) = &h {
             if is_api && method == Method::GET {
@@ -326,11 +358,18 @@ async fn handle(state: Arc<AppState>, req: Request<Body>, conn: ConnInfo) -> Res
                 }
             };
             if due {
-                state.db.touch_session(h, Some(&client));
+                // (a write: it waits for another connection's write, so not on one of the two async workers;
+                // when and where a session was last used is shown on the signed-in devices list)
+                let (st, h, ip) = (state.clone(), h.clone(), client.clone());
+                tokio::task::spawn_blocking(move || {
+                    if let Err(e) = st.db.touch_session(&h, Some(&ip)) {
+                        st.log.warn(format!("A session's last use could not be noted: {e}"));
+                    }
+                });
             }
         }
         if is_api && !viewer_may(method.as_str(), &p) {
-            if state.accounts.role_of(Some(&u)).as_deref() == Some("viewer") {
+            if role.as_deref() == Some("viewer") {
                 return error_json(403, "This account can only watch footage. An admin account can do this.", None, &accept);
             }
             let rules = state.access.get()["homeOnly"].clone();
@@ -569,8 +608,8 @@ pub async fn serve(state: Arc<AppState>) -> std::io::Result<()> {
 // ---- the device port (CAN_PORT): only /api/can/logs…, while CAN uploads are on
 
 /// Whether the device port should listen (the `can` setting's `enabled`).
-pub fn device_port_wanted(state: &AppState) -> bool {
-    state.db.get("can").is_some_and(|c| super::accounts::truthy(&c["enabled"]))
+pub fn device_port_wanted(state: &AppState) -> Result<bool, super::db::DbError> {
+    Ok(state.db.get("can")?.is_some_and(|c| super::accounts::truthy(&c["enabled"])))
 }
 
 async fn device_request(state: Arc<AppState>, req: Request<Body>, conn: ConnInfo) -> Res {
@@ -658,7 +697,14 @@ async fn device_listen(state: Arc<AppState>) {
 
 /// Open or close the device port to match the setting (call after changing `can.enabled`).
 pub fn sync_device_port(state: &Arc<AppState>) {
-    let wanted = device_port_wanted(state);
+    let wanted = match device_port_wanted(state) {
+        Ok(w) => w,
+        Err(e) => {
+            // (whether CAN uploads are on is not known: the port stays as it is)
+            state.log.warn(format!("Device port left as it is: {e}"));
+            return;
+        }
+    };
     let mut h = state.device_port.lock().unwrap();
     if wanted && h.as_ref().is_none_or(|j| j.is_finished()) {
         if let Ok(rt) = tokio::runtime::Handle::try_current() {

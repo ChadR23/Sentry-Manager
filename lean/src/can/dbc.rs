@@ -1,7 +1,8 @@
 //! DBC files: what each CAN message means, and decoding frames with them
 //! (server/canDbc.js): messages (BO_), signals (SG_, multiplexed ones too),
 //! value names (VAL_) and comments (CM_), the DBC sets per kind of car
-//! (PROFILES) read from server/dbc/, and each signal's series name (its name,
+//! (PROFILES) read from `<APP_ROOT>/dbc/` (the repository's dbc/, /app/dbc in
+//! the image), and each signal's series name (its name,
 //! or name_ID when two messages share it).
 
 use regex::bytes::Regex;
@@ -260,14 +261,16 @@ fn profile_files(name: &str) -> (Vec<(&'static str, Option<&'static str>)>, Vec<
 }
 
 fn dbc_dir() -> PathBuf {
-    if let Ok(d) = std::env::var("CAN_DBC_DIR") {
+    dbc_dir_of(std::env::var("CAN_DBC_DIR").ok(), std::env::var("APP_ROOT").ok())
+}
+
+/// CAN_DBC_DIR, else `<APP_ROOT>/dbc` (APP_ROOT unset: the repository this crate is in).
+fn dbc_dir_of(dir: Option<String>, app_root: Option<String>) -> PathBuf {
+    if let Some(d) = dir {
         return PathBuf::from(d);
     }
-    let root = std::env::var("APP_ROOT").ok().filter(|s| !s.is_empty()).map(PathBuf::from).unwrap_or_else(|| {
-        // (tests: the repository this crate is in)
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
-    });
-    root.join("server").join("dbc")
+    let root = app_root.filter(|s| !s.is_empty()).map(PathBuf::from).unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join(".."));
+    root.join("dbc")
 }
 
 /// A DBC set by its name, parsed once; an unknown name is the default set.
@@ -322,6 +325,25 @@ mod tests {
         decode_frame(msg, &[0xFF], &mut out);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].1, -1.0);
+    }
+
+    /// The sets live in the repository's dbc/ (moved there from the Node
+    /// server's server/dbc/), and the image copies them to /app/dbc, which
+    /// APP_ROOT=/app points at.
+    #[test]
+    fn the_sets_are_read_from_the_app_roots_dbc_folder() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        assert_eq!(dbc_dir_of(None, Some("/app".into())), PathBuf::from("/app/dbc"));
+        assert_eq!(dbc_dir_of(Some("/x".into()), Some("/app".into())), PathBuf::from("/x"));
+        assert_eq!(dbc_dir_of(None, None), repo.join("dbc"));
+        for p in PROFILES {
+            for (file, _) in profile_files(p).0 {
+                assert!(repo.join("dbc").join(file).is_file(), "dbc/{file} ({p})");
+            }
+        }
+        let dockerfile = std::fs::read_to_string(repo.join("Dockerfile")).unwrap();
+        assert!(dockerfile.lines().any(|l| l.trim() == "COPY dbc ./dbc"), "the image copies dbc/ to /app/dbc");
+        assert!(dockerfile.contains("APP_ROOT=/app") || dockerfile.contains("WORKDIR /app"), "the image's app root is /app");
     }
 
     #[test]

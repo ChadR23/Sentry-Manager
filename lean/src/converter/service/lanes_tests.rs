@@ -677,10 +677,28 @@ fn registry(devices: Vec<Value>, works: Works) -> (Registry, Arc<FakeProbe>) {
 }
 
 #[test]
+fn a_device_list_without_the_paired_nodes_is_an_error_and_never_kept_as_the_list() {
+    let (mut r, _) = registry(vec![uhd(), cpu()], desktop_works());
+    let unreadable = Arc::new(AtomicBool::new(true));
+    let u = unreadable.clone();
+    let node = json!({ "id": "node:abcdefabcdef@cpu", "kind": "node", "nodeId": "abcdefabcdef", "name": "garage · CPU", "slots": 1, "online": true, "encoders": { "h265": "libx265", "av1": null } });
+    r.remote_nodes = Some(Arc::new(move || if u.load(Ordering::SeqCst) { Err("Internal error".into()) } else { Ok(vec![node.clone()]) }));
+    assert!(r.devices().is_err(), "not this server's devices alone, answered as the list");
+    assert!(r.recent().is_err());
+    assert_eq!(r.resolve_device(uhd()["id"].as_str().unwrap()), Some(uhd()), "a job still finds this server's own devices");
+    let r = Arc::new(r);
+    let auto = crate::converter::runtime::auto_devices(r.clone())().unwrap();
+    assert_eq!(auto.iter().map(|d| d["id"].clone()).collect::<Vec<_>>(), [uhd()["id"].clone(), cpu()["id"].clone()], "automatic jobs keep this server's own devices");
+    unreadable.store(false, Ordering::SeqCst);
+    let ids: Vec<Value> = r.recent().unwrap().iter().map(|d| d["id"].clone()).collect();
+    assert!(ids.contains(&json!("node:abcdefabcdef@cpu")), "the failed look-up kept nothing: {ids:?}");
+}
+
+#[test]
 fn devices_list_each_device_with_its_proved_encoder_and_the_default_device() {
     let (r, probe) = registry(vec![uhd(), arc(), t400(), cpu()], desktop_works());
     assert_eq!(probe.calls.load(Ordering::SeqCst), 0, "nothing is probed until something asks");
-    let out = r.devices();
+    let out = r.devices().unwrap();
     let got: Vec<Value> = out["devices"].as_array().unwrap().iter().map(|d| json!([d["id"], d["name"], d["encoders"]])).collect();
     assert_eq!(got, vec![
         json!([uhd()["id"], uhd()["name"], { "h265": "hevc_qsv", "av1": null }]),
@@ -692,7 +710,7 @@ fn devices_list_each_device_with_its_proved_encoder_and_the_default_device() {
     assert_eq!(out["defaultDevice"], uhd()["id"]);
     assert_eq!(out["defaultDevices"], json!({ "h265": uhd()["id"], "av1": "cpu" }));
     let probed = probe.calls.load(Ordering::SeqCst);
-    r.devices();
+    r.devices().unwrap();
     assert_eq!(probe.calls.load(Ordering::SeqCst), probed, "later calls are instant");
     assert_eq!(r.lookups.load(Ordering::SeqCst), 2, "looked up again each time");
     assert_eq!(r.resolve_device(arc()["id"].as_str().unwrap()), Some(arc()));
@@ -701,11 +719,11 @@ fn devices_list_each_device_with_its_proved_encoder_and_the_default_device() {
 
     let works: Works = { let d = desktop_works(); Arc::new(move |e: &str, a: &[String]| if e.ends_with("_nvenc") { Some(true) } else { d(e, a) }) };
     let (r, _) = registry(vec![arc(), t400(), cpu()], works);
-    assert_eq!(r.devices()["defaultDevice"], t400()["id"], "NVENC without a device is index 0");
+    assert_eq!(r.devices().unwrap()["defaultDevice"], t400()["id"], "NVENC without a device is index 0");
     let (r, probe) = registry(vec![cpu()], Arc::new(|e: &str, _a: &[String]| Some(e.starts_with("lib"))));
     let mut c = cpu();
     c["encoders"] = Value::Null;
-    assert_eq!(r.devices(), json!({ "devices": [c], "defaultDevice": null, "defaultDevices": null }));
+    assert_eq!(r.devices().unwrap(), json!({ "devices": [c], "defaultDevice": null, "defaultDevices": null }));
     assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
 }
 
@@ -715,19 +733,19 @@ fn devices_with_one_gpu_test_nothing_and_a_busy_or_slow_gpu_is_not_ruled_out() {
     let (mut a, mut b) = (uhd(), cpu());
     a["encoders"] = Value::Null;
     b["encoders"] = Value::Null;
-    assert_eq!(r.devices(), json!({ "devices": [a, b], "defaultDevice": null, "defaultDevices": null }));
+    assert_eq!(r.devices().unwrap(), json!({ "devices": [a, b], "defaultDevice": null, "defaultDevices": null }));
     assert_eq!(probe.calls.load(Ordering::SeqCst), 0);
 
     let (r, probe) = registry(vec![uhd(), arc(), cpu()], desktop_works());
     let busy = Arc::new(AtomicBool::new(true));
     let b2 = busy.clone();
     *r.encoding_now.lock().unwrap() = Some(Arc::new(move || b2.load(Ordering::SeqCst)));
-    let out = r.devices();
+    let out = r.devices().unwrap();
     assert_eq!(probe.calls.load(Ordering::SeqCst), 0, "a GPU converting now is not tested");
     assert_eq!(out["devices"].as_array().unwrap().iter().map(|d| d["encoders"].clone()).collect::<Vec<_>>(), vec![json!({}), json!({}), json!({})]);
     assert_eq!(out["defaultDevices"], json!({ "h265": null, "av1": null }));
     busy.store(false, Ordering::SeqCst);
-    let out = r.devices();
+    let out = r.devices().unwrap();
     assert_eq!(out["devices"].as_array().unwrap().iter().map(|d| d["encoders"].clone()).collect::<Vec<_>>(), vec![json!({ "h265": "hevc_qsv", "av1": null }), json!({ "h265": "hevc_qsv", "av1": "av1_qsv" }), json!({ "h265": "libx265", "av1": "libsvtav1" })]);
 
     let slow = Arc::new(AtomicBool::new(true));
@@ -741,9 +759,9 @@ fn devices_with_one_gpu_test_nothing_and_a_busy_or_slow_gpu_is_not_ruled_out() {
         }
     });
     let (r, _) = registry(vec![uhd(), arc(), cpu()], works);
-    assert_eq!(r.devices()["devices"][1]["encoders"], json!({ "av1": "av1_qsv" }), "H.265 on the Arc: not known yet");
+    assert_eq!(r.devices().unwrap()["devices"][1]["encoders"], json!({ "av1": "av1_qsv" }), "H.265 on the Arc: not known yet");
     slow.store(false, Ordering::SeqCst);
-    assert_eq!(r.devices()["devices"][1]["encoders"], json!({ "h265": "hevc_qsv", "av1": "av1_qsv" }));
+    assert_eq!(r.devices().unwrap()["devices"][1]["encoders"], json!({ "h265": "hevc_qsv", "av1": "av1_qsv" }));
 }
 
 #[test]
@@ -762,16 +780,16 @@ fn the_default_device_per_codec_and_nvenc_only_when_one_nvidia_gpu_can() {
         Some(e == "hevc_nvenc" && (g.is_none() || g.as_deref() == Some("nvidia0")))
     });
     let (r, _) = registry(vec![arc0.clone(), t400(), cpu()], works);
-    let out = r.devices();
+    let out = r.devices().unwrap();
     assert_eq!(out["defaultDevices"], json!({ "h265": t400()["id"], "av1": arc0["id"] }));
     let mut rtx = t400();
     rtx["id"] = json!("pci:0000:02:00.0");
     rtx["pci"] = json!("0000:02:00.0");
     rtx["index"] = json!(1);
     let (r, _) = registry(vec![t400(), rtx.clone(), cpu()], Arc::new(|e: &str, _a: &[String]| Some(e.starts_with("lib") || e == "hevc_nvenc")));
-    assert_eq!(r.devices()["defaultDevices"]["h265"], Value::Null);
+    assert_eq!(r.devices().unwrap()["defaultDevices"]["h265"], Value::Null);
     let (r, _) = registry(vec![t400(), rtx.clone(), cpu()], Arc::new(|e: &str, a: &[String]| Some(e.starts_with("lib") || (e == "hevc_nvenc" && gpu_of(a).as_deref() != Some("nvidia0")))));
-    assert_eq!(r.devices()["defaultDevices"]["h265"], rtx["id"]);
+    assert_eq!(r.devices().unwrap()["defaultDevices"]["h265"], rtx["id"]);
 }
 
 #[test]
@@ -799,8 +817,8 @@ fn lanes_find_their_gpus_with_one_lookup_and_callers_share_it() {
         let r1 = r.clone();
         let r2 = r.clone();
         let r3 = r.clone();
-        s.spawn(move || r1.devices());
-        s.spawn(move || r2.devices());
+        s.spawn(move || r1.devices().unwrap());
+        s.spawn(move || r2.devices().unwrap());
         s.spawn(move || r3.resolve_device(arc()["id"].as_str().unwrap()));
     });
     assert!(calls.load(Ordering::SeqCst) <= 2);

@@ -263,8 +263,9 @@ pub const DEVICE_LIST_TTL_MS: u64 = 2_000;
 pub struct Registry {
     pub discovery: Discovery,
     pub encoders: Arc<dyn Encoders>,
-    /// helper servers' devices ({ kind: 'node', id: 'node:<id>@<device>', ... }); the nodes port sets it
-    pub remote_nodes: Option<Arc<dyn Fn() -> Vec<Value> + Send + Sync>>,
+    /// helper servers' devices ({ kind: 'node', id: 'node:<id>@<device>', ... }), an error when the
+    /// paired nodes cannot be read; the nodes port sets it
+    pub remote_nodes: Option<Arc<dyn Fn() -> Result<Vec<Value>, String> + Send + Sync>>,
     /// something converts here right now (a GPU is then not test-encoded)
     pub encoding_now: std::sync::Mutex<Option<Arc<dyn Fn() -> bool + Send + Sync>>>,
     cache: std::sync::Mutex<(Option<std::time::Instant>, Option<Vec<Value>>, u64)>,
@@ -288,42 +289,49 @@ impl Registry {
         }
     }
 
-    fn list_devices(&self) -> Vec<Value> {
+    fn list_devices(&self) -> Result<Vec<Value>, String> {
         let mut l = self.local_devices();
         if let Some(r) = &self.remote_nodes {
-            l.extend(r().into_iter().filter(|d| d["kind"] == "node" && d["id"].as_str().is_some_and(super::contracts::is_device_id)));
+            l.extend(r()?.into_iter().filter(|d| d["kind"] == "node" && d["id"].as_str().is_some_and(super::contracts::is_device_id)));
         }
-        l
+        Ok(l)
     }
 
-    /// lookUpDevices(): a fresh list; callers while one runs share it
-    pub fn look_up(&self) -> Vec<Value> {
+    /// lookUpDevices(): a fresh list; callers while one runs share it. An error (nothing kept)
+    /// when the paired nodes cannot be read.
+    pub fn look_up(&self) -> Result<Vec<Value>, String> {
         let gen = self.cache.lock().unwrap().2;
         let _one = self.lookup.lock().unwrap();
         {
             let c = self.cache.lock().unwrap();
             if c.2 != gen {
-                return c.1.clone().unwrap_or_default();
+                return Ok(c.1.clone().unwrap_or_default());
             }
         }
         self.lookups.fetch_add(1, Ordering::SeqCst);
-        let l = self.list_devices();
+        let l = self.list_devices()?;
         let mut c = self.cache.lock().unwrap();
         *c = (Some(std::time::Instant::now()), Some(l.clone()), gen + 1);
-        l
+        Ok(l)
     }
 
     /// recentDevices(): the last list while it is at most 2 s old
-    pub fn recent(&self) -> Vec<Value> {
+    pub fn recent(&self) -> Result<Vec<Value>, String> {
         {
             let c = self.cache.lock().unwrap();
             if let (Some(at), Some(l)) = (c.0, &c.1) {
                 if at.elapsed() <= Duration::from_millis(DEVICE_LIST_TTL_MS) {
-                    return l.clone();
+                    return Ok(l.clone());
                 }
             }
         }
         self.look_up()
+    }
+
+    /// recent() for a job finding its devices: this server's own when the nodes cannot be read
+    /// (that failure is logged by the nodes).
+    pub fn recent_or_local(&self) -> Vec<Value> {
+        self.recent().unwrap_or_else(|_| self.local_devices())
     }
 
     /// resolveDevice(id): a lane's device id looked up only in this list
@@ -331,7 +339,7 @@ impl Registry {
         if !super::contracts::is_device_id(id) {
             return None;
         }
-        let list = self.recent();
+        let list = self.recent_or_local();
         if let Some(d) = list.iter().find(|d| d["id"] == id) {
             return Some(d.clone());
         }
@@ -356,14 +364,14 @@ impl Registry {
 
     /// the device a job without lanes encodes a codec on (serviceDeps.defaultDevice)
     pub fn default_device(&self, family: &str) -> Option<String> {
-        let list = self.recent();
+        let list = self.recent_or_local();
         self.default_device_of(&list, family, &|_| true, true)
     }
 
     /// devices(): each device with the encoder it proved per codec, and the
-    /// device a job without lanes uses
-    pub fn devices(&self) -> Value {
-        let list = self.look_up();
+    /// device a job without lanes uses (an error when the paired nodes cannot be read)
+    pub fn devices(&self) -> Result<Value, String> {
+        let list = self.look_up()?;
         if list.iter().filter(|d| d["kind"] != "cpu").count() < 2 && !list.iter().any(|d| d["kind"] == "node") {
             let devices: Vec<Value> = list
                 .into_iter()
@@ -372,7 +380,7 @@ impl Registry {
                     d
                 })
                 .collect();
-            return json!({ "devices": devices, "defaultDevice": null, "defaultDevices": null });
+            return Ok(json!({ "devices": devices, "defaultDevice": null, "defaultDevices": null }));
         }
         let busy = self.encoding_now.lock().unwrap().clone();
         let probe = !busy.is_some_and(|f| f());
@@ -410,7 +418,7 @@ impl Registry {
         };
         let h265 = default_for("h265");
         let av1 = default_for("av1");
-        json!({ "devices": devices, "defaultDevice": h265, "defaultDevices": { "h265": h265, "av1": av1 } })
+        Ok(json!({ "devices": devices, "defaultDevice": h265, "defaultDevices": { "h265": h265, "av1": av1 } }))
     }
 }
 

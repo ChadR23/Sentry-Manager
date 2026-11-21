@@ -1,0 +1,54 @@
+{
+  "route": "GET /api/security/access",
+  "method": "GET",
+  "request": {
+    "path": "/api/security/access"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "bans": [],
+      "settings": {
+        "bans": {
+          "banMinutes": 60,
+          "enabled": true,
+          "exemptHome": true,
+          "maxBanHours": 24,
+          "maxFailures": 10,
+          "windowMinutes": 60
+        },
+        "home": {
+          "extra": [],
+          "tailscale": false
+        },
+        "homeOnly": {
+          "adminChanges": false,
+          "adminPages": false
+        },
+        "twoFactor": {
+          "everyone": false,
+          "outside": false
+        }
+      },
+      "trustProxy": false,
+      "trustedProxies": null,
+      "twoFactor": {
+        "without": [
+          "admin"
+        ],
+        "yours": false
+      },
+      "watching": 0,
+      "you": {
+        "address": "<value>",
+        "banKey": "<value>",
+        "home": "<value>"
+      }
+    }
+  }
+}

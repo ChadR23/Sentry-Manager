@@ -6,7 +6,7 @@ use super::activity::{Jobs, Notifications};
 use super::auth::Auth;
 use super::client_addr::{proxy_matcher, Proxy};
 use super::config::Config;
-use super::db::Db;
+use super::db::{Db, DbResult};
 use super::events::Hub;
 use super::log::{Logger, Scope};
 use super::tls::{TlsManager, TlsSource};
@@ -103,20 +103,28 @@ impl AppState {
         let _ = std::fs::remove_dir_all(config.data.join("sentryusb"));
         let auth = Auth::new(db.clone(), logger.scope("auth"), Some(config.setup_file()));
         let accounts = Accounts::new(db.clone());
-        auth.bootstrap(config.ui_username.as_deref(), config.ui_password.as_deref());
+        auth.bootstrap(config.ui_username.as_deref(), config.ui_password.as_deref()).map_err(|e| format!("The accounts could not be read: {e}"))?;
         let hub = Hub::new();
         let jobs = Jobs::new(db.clone(), hub.clone());
-        let stopped = jobs.interrupt_leftovers();
-        if stopped > 0 {
-            log.info(format!("{stopped} job(s) were stopped by the restart; Jobs shows them as interrupted"));
+        match jobs.interrupt_leftovers() {
+            Ok(0) => {}
+            Ok(stopped) => log.info(format!("{stopped} job(s) were stopped by the restart; Jobs shows them as interrupted")),
+            Err(e) => log.warn(format!("Jobs stopped by the restart could not be marked interrupted: {e}")),
         }
-        let notes = Notifications::new(db.clone(), hub.clone());
+        let notes = Notifications::new(db.clone(), hub.clone(), Some(log.clone()));
         let audit = logger.scope("audit");
-        let access = Access::new(db.clone(), Some(audit.clone()));
+        // (unreadable security settings stop the start: the defaults would lift bans and rules)
+        let access = Access::new(db.clone(), Some(audit.clone()))?;
         let proxy = Proxy { trust_proxy: config.trust_proxy, trusted: proxy_matcher(config.trusted_proxies.as_deref())? };
         // the support chat is gone; its ticket is not kept
-        if db.get("supportTicket").is_some_and(|v| !v.is_null()) {
-            db.set("supportTicket", &serde_json::Value::Null);
+        match db.get("supportTicket") {
+            Ok(Some(v)) if !v.is_null() => {
+                if let Err(e) = db.set("supportTicket", &serde_json::Value::Null) {
+                    log.warn(format!("The old support ticket could not be cleared: {e}"));
+                }
+            }
+            Ok(_) => {}
+            Err(e) => log.warn(format!("The old support ticket could not be read: {e}")),
         }
         let tls = if !config.tls_on() {
             None
@@ -165,13 +173,13 @@ impl AppState {
         self.hub.announce(topic);
     }
 
-    /// A setting (db.js get); None when missing or not JSON.
-    pub fn setting(&self, key: &str) -> Option<serde_json::Value> {
+    /// A setting (db.js get); None when missing or not JSON, an error when it cannot be read.
+    pub fn setting(&self, key: &str) -> DbResult<Option<serde_json::Value>> {
         self.db.get(key)
     }
 
-    pub fn set_setting(&self, key: &str, value: &serde_json::Value) {
-        self.db.set(key, value);
+    pub fn set_setting(&self, key: &str, value: &serde_json::Value) -> DbResult<()> {
+        self.db.set(key, value)
     }
 
     /// Whether this address is on the home network (Settings → Security).
@@ -180,34 +188,34 @@ impl AppState {
     }
 
     /// An admin outside the home network with "admin pages only at home" on counts as a viewer there.
-    pub fn role_for(&self, client: &str, user: &str) -> Option<String> {
-        let role = self.accounts.role_of(Some(user));
+    pub fn role_for(&self, client: &str, user: &str) -> DbResult<Option<String>> {
+        let role = self.accounts.role_of(Some(user))?;
         if role.as_deref() == Some("admin") && super::accounts::truthy(&self.access.get()["homeOnly"]["adminPages"]) && !self.from_home(client) {
-            return Some("viewer".into());
+            return Ok(Some("viewer".into()));
         }
-        role
+        Ok(role)
     }
 
     /// An admin who may make admin changes from where this request comes.
-    pub fn admin_here(&self, client: &str, user: &str) -> bool {
-        if !self.accounts.is_admin(user) {
-            return false;
+    pub fn admin_here(&self, client: &str, user: &str) -> DbResult<bool> {
+        if !self.accounts.is_admin(user)? {
+            return Ok(false);
         }
         let rules = self.access.get()["homeOnly"].clone();
-        !((super::accounts::truthy(&rules["adminChanges"]) || super::accounts::truthy(&rules["adminPages"])) && !self.from_home(client))
+        Ok(!((super::accounts::truthy(&rules["adminChanges"]) || super::accounts::truthy(&rules["adminPages"])) && !self.from_home(client)))
     }
 
     /// The two-step rules for a signed-in account here: "ok", "out" (signed out) or "setup" (only setting it up is open).
-    pub fn two_factor_state(&self, user: &str, home: bool) -> &'static str {
+    pub fn two_factor_state(&self, user: &str, home: bool) -> DbResult<&'static str> {
         let rules = self.access.get()["twoFactor"].clone();
         let (outside, everyone) = (super::accounts::truthy(&rules["outside"]), super::accounts::truthy(&rules["everyone"]));
-        if user.is_empty() || (!outside && !everyone) || self.accounts.two_factor_on(user) {
-            return "ok";
+        if user.is_empty() || (!outside && !everyone) || self.accounts.two_factor_on(user)? {
+            return Ok("ok");
         }
         if !home {
-            return "out";
+            return Ok("out");
         }
-        if everyone { "setup" } else { "ok" }
+        Ok(if everyone { "setup" } else { "ok" })
     }
 
     /// The certificate's fingerprint (the sign-in page shows it).

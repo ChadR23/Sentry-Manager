@@ -27,11 +27,11 @@ pub struct CoreNodes {
 }
 
 impl NodesCtx for CoreNodes {
-    fn setting(&self, key: &str) -> Option<Value> {
-        self.state.setting(key)
+    fn setting(&self, key: &str) -> Result<Option<Value>, String> {
+        self.state.setting(key).map_err(|e| e.to_string())
     }
-    fn set_setting(&self, key: &str, value: &Value) {
-        self.state.set_setting(key, value);
+    fn set_setting(&self, key: &str, value: &Value) -> Result<(), String> {
+        self.state.set_setting(key, value).map_err(|e| e.to_string())
     }
     fn audit(&self, level: Level, line: &str) {
         match level {
@@ -123,8 +123,6 @@ pub fn answer(srv: &Arc<Server>, c: &mut CoreCtx) -> Result<Reply, HttpError> {
 pub async fn node_v1(srv: Arc<Server>, q: RawReq) -> Res {
     let not_found = || crate::core::http::error_json(404, "Not found", None, "");
     let Some(api) = srv.nodes().cloned() else { return not_found() };
-    // the DER of the certificate this connection was served with (what the main pinned)
-    let served: Option<Vec<u8>> = if q.conn.encrypted { srv.state.tls.as_ref().and_then(|t| t.load().ok()).and_then(|m| crate::core::tls::pem_ders(&m.cert).into_iter().next()) } else { None };
     let (parts, body) = q.req.into_parts();
     let method = parts.method.as_str().to_string();
     let path = parts.uri.path().to_string();
@@ -139,7 +137,10 @@ pub async fn node_v1(srv: Arc<Server>, q: RawReq) -> Res {
     });
     let reader = tokio_util::io::StreamReader::new(Box::pin(stream));
     let (tx, rx) = tokio::sync::oneshot::channel();
+    let tls = srv.clone();
     tokio::task::spawn_blocking(move || {
+        // the DER of the certificate this connection was served with (what the main pinned): read here, it is a file
+        let served: Option<Vec<u8>> = if https { tls.state.tls.as_ref().and_then(|t| t.load().ok()).and_then(|m| crate::core::tls::pem_ders(&m.cert).into_iter().next()) } else { None };
         let mut body = tokio_util::io::SyncIoBridge::new(reader);
         let reply = {
             let mut req = WorkerRequest { method: &method, path: &path, headers: &headers, address: &address, served_cert: served.as_deref(), body: &mut body };

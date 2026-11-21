@@ -1,0 +1,19 @@
+{
+  "route": "POST /api/vehicles/:id/policy/run",
+  "method": "POST",
+  "request": {
+    "path": "/api/vehicles/no-such-car/policy/run"
+  },
+  "body": {},
+  "response": {
+    "status": 404,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "No such vehicle."
+    }
+  }
+}

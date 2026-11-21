@@ -104,7 +104,7 @@ impl Config {
         let list = |k: &str| get(k).map(|v| v.split(':').filter(|s| !s.is_empty()).map(String::from).collect()).unwrap_or_default();
         let default_root = std::env::current_exe()
             .ok()
-            .and_then(|e| e.ancestors().find(|a| a.join("server").join("index.js").exists()).map(Path::to_path_buf))
+            .and_then(|e| e.ancestors().find(|a| a.join("version.json").is_file() && a.join("web").is_dir()).map(Path::to_path_buf))
             .unwrap_or_else(|| PathBuf::from("/app"));
         let num = |k: &str, d: f64| get(k).map(|v| v.trim().parse::<f64>().unwrap_or(f64::NAN)).unwrap_or(d);
         Config {

@@ -238,11 +238,16 @@ pub fn start(srv: &Arc<Server>) {
         tick.tick().await;
         loop {
             tick.tick().await;
-            for v in every.vehicles.list() {
-                if every.vehicles.share(&v.id).is_some_and(|s| s.is_healthy()) {
-                    every.scan(&v.id, true);
+            // (the vehicles are read from the database: on a blocking thread)
+            let a = every.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                for v in a.vehicles.list() {
+                    if a.vehicles.share(&v.id).is_some_and(|s| s.is_healthy()) {
+                        a.scan(&v.id, true);
+                    }
                 }
-            }
+            })
+            .await;
         }
     });
     // the cleanup policies whose time has come, every minute
@@ -254,7 +259,10 @@ pub fn start(srv: &Arc<Server>) {
             tick.tick().await;
             let a = policies.clone();
             let _ = tokio::task::spawn_blocking(move || {
-                crate::footage::policies::tick(&a, chrono::Local::now());
+                // (a run changes the vehicle's state too, its error if it met unreachable footage)
+                if crate::footage::policies::tick(&a, chrono::Local::now()) {
+                    a.core.announce("inventory");
+                }
                 a.core.announce("bin");
             })
             .await;
@@ -325,7 +333,7 @@ fn hooks(srv: &Arc<Server>) {
             default(info);
         }));
         let o = ops.clone();
-        st.hooks.reports_configured.set(Arc::new(move || o.reports.status()["configured"] == json!(true)));
+        st.hooks.reports_configured.set(Arc::new(move || o.reports.configured));
         let o = ops.clone();
         st.hooks.reports_setup.set(Arc::new(move |share: bool, anonymous: bool| o.reports.set_settings(&json!({ "share": share, "anonymous": anonymous })).map_err(|e| e.message)));
     }

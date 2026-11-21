@@ -1,0 +1,25 @@
+{
+  "route": "GET /api/speeds/status",
+  "method": "GET",
+  "request": {
+    "path": "/api/speeds/status"
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "day": "2024-05-01",
+      "done": 5,
+      "finishedAt": "<time>",
+      "last": 5,
+      "limit": 1,
+      "readMode": "straight",
+      "running": false,
+      "total": 5
+    }
+  }
+}

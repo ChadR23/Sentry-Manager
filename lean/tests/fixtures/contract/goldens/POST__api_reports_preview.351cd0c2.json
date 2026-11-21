@@ -1,0 +1,21 @@
+{
+  "route": "POST /api/reports/preview",
+  "method": "POST",
+  "request": {
+    "path": "/api/reports/preview"
+  },
+  "body": {
+    "kind": "no-such-kind"
+  },
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "Write a message first."
+    }
+  }
+}

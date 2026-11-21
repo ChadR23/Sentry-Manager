@@ -203,11 +203,11 @@ pub fn context(ctx: &dyn Ctx) -> Value {
         "outputRoots": output_roots(ctx).iter().map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>() })
 }
 
-fn appearance(ctx: &dyn Ctx) -> serde_json::Map<String, Value> {
-    match ctx.setting("appearance") {
+fn appearance(ctx: &dyn Ctx) -> Result<serde_json::Map<String, Value>, (u16, String)> {
+    Ok(match ctx.setting("appearance").map_err(super::ctx::failed)? {
         Some(Value::Object(o)) => o,
         _ => serde_json::Map::new(),
-    }
+    })
 }
 
 fn truthy(v: Option<&Value>) -> bool {
@@ -220,13 +220,13 @@ fn truthy(v: Option<&Value>) -> bool {
     }
 }
 
-pub fn settings(ctx: &dyn Ctx) -> Value {
-    let mut out = match ctx.setting("studio-settings") {
+pub fn settings(ctx: &dyn Ctx) -> Result<Value, (u16, String)> {
+    let mut out = match ctx.setting("studio-settings").map_err(super::ctx::failed)? {
         Some(Value::Object(o)) => o,
         _ => serde_json::Map::new(),
     };
-    out.insert("timeFormat".into(), json!(if truthy(appearance(ctx).get("clock24")) { "24h" } else { "12h" }));
-    Value::Object(out)
+    out.insert("timeFormat".into(), json!(if truthy(appearance(ctx)?.get("clock24")) { "24h" } else { "12h" }));
+    Ok(Value::Object(out))
 }
 
 pub fn set_setting(ctx: &dyn Ctx, body: &Value) -> Result<Value, (u16, String)> {
@@ -235,14 +235,14 @@ pub fn set_setting(ctx: &dyn Ctx, body: &Value) -> Result<Value, (u16, String)> 
     if key == "timeFormat" {
         let mut a = serde_json::Map::new();
         a.insert("reduceEffects".into(), json!(false));
-        for (k, v) in appearance(ctx) {
+        for (k, v) in appearance(ctx)? {
             a.insert(k, v);
         }
         a.insert("clock24".into(), json!(value == Some(json!("24h"))));
-        ctx.set_setting("appearance", Value::Object(a));
+        ctx.set_setting("appearance", Value::Object(a)).map_err(super::ctx::failed)?;
         return Ok(json!({ "ok": true }));
     }
-    let mut all = match ctx.setting("studio-settings") {
+    let mut all = match ctx.setting("studio-settings").map_err(super::ctx::failed)? {
         Some(Value::Object(o)) => o,
         _ => serde_json::Map::new(),
     };
@@ -255,7 +255,7 @@ pub fn set_setting(ctx: &dyn Ctx, body: &Value) -> Result<Value, (u16, String)> 
             all.insert(key.to_string(), v);
         }
     }
-    ctx.set_setting("studio-settings", Value::Object(all));
+    ctx.set_setting("studio-settings", Value::Object(all)).map_err(super::ctx::failed)?;
     Ok(json!({ "ok": true }))
 }
 
@@ -331,12 +331,15 @@ const STRIP_FRAMES: usize = 6;
 const STRIP_WIDTH: u32 = 160;
 const STRIPS_KEPT: usize = 20_000;
 const STRIPS_QUEUED: usize = 2_000;
+/// The newest request goes first (the clips in view), but one that has waited this long goes next.
+const OLDEST_FIRST_AFTER: Duration = Duration::from_secs(10);
 
 type Waiter = Arc<(Mutex<Option<Option<PathBuf>>>, Condvar)>;
 
 #[derive(Default)]
 struct StripQueue {
-    jobs: VecDeque<(PathBuf, PathBuf)>,
+    /// (clip, strip, asked at), newest first
+    jobs: VecDeque<(PathBuf, PathBuf, Instant)>,
     running: usize,
     in_flight: HashMap<PathBuf, Waiter>,
     prepared: bool,
@@ -347,6 +350,9 @@ pub struct ClipStrips {
     ffmpeg: String,
     ffprobe: String,
     q: Mutex<StripQueue>,
+    /// runs take their place here (shared with the recording thumbnails in the server)
+    slots: Arc<crate::thumbnails::Slots>,
+    oldest_first_after: Duration,
 }
 
 fn run(cmd: &str, args: &[String], limit: Duration) -> (i32, String) {
@@ -374,8 +380,8 @@ fn run(cmd: &str, args: &[String], limit: Duration) -> (i32, String) {
 }
 
 impl ClipStrips {
-    pub fn new(dir: PathBuf, ffmpeg: String, ffprobe: String) -> Arc<ClipStrips> {
-        Arc::new(ClipStrips { dir, ffmpeg, ffprobe, q: Mutex::new(StripQueue::default()) })
+    pub fn new(dir: PathBuf, ffmpeg: String, ffprobe: String, slots: Arc<crate::thumbnails::Slots>) -> Arc<ClipStrips> {
+        Arc::new(ClipStrips { dir, ffmpeg, ffprobe, q: Mutex::new(StripQueue::default()), slots, oldest_first_after: OLDEST_FIRST_AFTER })
     }
 
     fn prepare(&self) {
@@ -446,13 +452,18 @@ impl ClipStrips {
     }
 
     fn pump(self: &Arc<Self>) {
+        let most = self.slots.limit();
         let mut q = self.q.lock().unwrap();
-        while q.running < 2 {
-            let Some((video, target)) = q.jobs.pop_front() else { break };
+        while q.running < most {
+            let waited = q.jobs.back().is_some_and(|j| j.2.elapsed() >= self.oldest_first_after);
+            let Some((video, target, _)) = (if waited { q.jobs.pop_back() } else { q.jobs.pop_front() }) else { break };
             q.running += 1;
             let me = self.clone();
             std::thread::spawn(move || {
-                let out = me.generate(&video, &target);
+                let out = {
+                    let _place = me.slots.take();
+                    me.generate(&video, &target)
+                };
                 let w = {
                     let mut q = me.q.lock().unwrap();
                     q.running -= 1;
@@ -485,7 +496,7 @@ impl ClipStrips {
                     if q.jobs.len() >= STRIPS_QUEUED {
                         return None;
                     }
-                    q.jobs.push_front((video.to_path_buf(), target.clone()));
+                    q.jobs.push_front((video.to_path_buf(), target.clone(), Instant::now()));
                     let w: Waiter = Arc::new((Mutex::new(None), Condvar::new()));
                     q.in_flight.insert(target.clone(), w.clone());
                     w
@@ -514,6 +525,108 @@ pub fn thumbnail_route(ctx: &dyn Ctx, strips: &Arc<ClipStrips>, body: &Value) ->
 mod tests {
     use super::*;
     use crate::viewer::testkit::Car;
+
+    #[test]
+    fn recording_thumbnails_and_strips_share_one_count() {
+        use crate::thumbnails::{fake, Slots, Thumbnails};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = std::env::temp_dir().join(format!("lean-shared-slots-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("runs.log");
+        let ffmpeg = fake::ffmpeg(&dir, &log);
+        let limit = Arc::new(AtomicUsize::new(1));
+        let l = limit.clone();
+        let slots = Slots::new(move || l.load(Ordering::SeqCst));
+        let thumbs = Arc::new(Thumbnails::with_slots(dir.join("thumbs"), ffmpeg.clone(), slots.clone()));
+        let strips = ClipStrips::new(dir.join("strips"), ffmpeg, fake::ffprobe(&dir), slots);
+        let make = |names: &[&str]| {
+            let runs: Vec<_> = names
+                .iter()
+                .enumerate()
+                .map(|(i, n)| {
+                    let clip = dir.join(n);
+                    std::fs::write(&clip, n.as_bytes()).unwrap();
+                    let (t, s) = (thumbs.clone(), strips.clone());
+                    std::thread::spawn(move || if i % 2 == 0 { t.for_clip(&clip).unwrap().is_some() } else { s.get(&clip).is_some() })
+                })
+                .collect();
+            runs.into_iter().all(|r| r.join().unwrap())
+        };
+        assert!(make(&["a.mp4", "b.mp4", "c.mp4", "d.mp4"]));
+        assert_eq!(fake::most_at_once(&log), 1, "one place for both");
+        std::fs::remove_file(&log).unwrap();
+        limit.store(4, Ordering::SeqCst);
+        assert!(make(&["e.mp4", "f.mp4", "g.mp4", "h.mp4"]));
+        assert!(fake::most_at_once(&log) >= 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_strip_asked_long_ago_goes_next_while_newer_ones_keep_coming() {
+        use crate::thumbnails::{fake, Slots};
+        let dir = std::env::temp_dir().join(format!("lean-strips-oldest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("runs.log");
+        let mut strips = ClipStrips::new(dir.join("strips"), fake::ffmpeg(&dir, &log), fake::ffprobe(&dir), Slots::new(|| 1));
+        Arc::get_mut(&mut strips).unwrap().oldest_first_after = Duration::from_millis(500);
+        let began = Instant::now();
+        let ask = |name: String| {
+            let clip = dir.join(&name);
+            std::fs::write(&clip, name.as_bytes()).unwrap();
+            let s = strips.clone();
+            std::thread::spawn(move || {
+                assert!(s.get(&clip).is_some());
+                began.elapsed()
+            })
+        };
+        let first = ask("x.mp4".into());
+        std::thread::sleep(Duration::from_millis(50));
+        let old = ask("old.mp4".into());
+        let mut newer = Vec::new();
+        for i in 0..10 {
+            std::thread::sleep(Duration::from_millis(150));
+            newer.push(ask(format!("new{i}.mp4")));
+        }
+        let old_done = old.join().unwrap();
+        first.join().unwrap();
+        let last_new = newer.into_iter().map(|t| t.join().unwrap()).max().unwrap();
+        assert!(old_done < Duration::from_millis(1600), "the oldest went next once it had waited: {old_done:?} (the newer ones until {last_new:?})");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn strips_follow_the_limit_asked_each_time_one_would_start() {
+        use crate::thumbnails::fake;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = std::env::temp_dir().join(format!("lean-strips-limit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("runs.log");
+        let limit = Arc::new(AtomicUsize::new(1));
+        let l = limit.clone();
+        let strips = ClipStrips::new(dir.join("strips"), fake::ffmpeg(&dir, &log), fake::ffprobe(&dir), crate::thumbnails::Slots::new(move || l.load(Ordering::SeqCst)));
+        let make = |names: &[&str]| {
+            let runs: Vec<_> = names
+                .iter()
+                .map(|n| {
+                    let clip = dir.join(n);
+                    std::fs::write(&clip, n.as_bytes()).unwrap();
+                    let s = strips.clone();
+                    std::thread::spawn(move || s.get(&clip).is_some())
+                })
+                .collect();
+            runs.into_iter().all(|r| r.join().unwrap())
+        };
+        assert!(make(&["a.mp4", "b.mp4", "c.mp4"]));
+        assert_eq!(fake::most_at_once(&log), 1);
+        std::fs::remove_file(&log).unwrap();
+        limit.store(3, Ordering::SeqCst);
+        assert!(make(&["d.mp4", "e.mp4", "f.mp4"]));
+        assert!(fake::most_at_once(&log) >= 2, "a raised limit runs more at once");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn the_guard_follows_links_and_keeps_to_the_roots() {
@@ -547,13 +660,33 @@ mod tests {
     fn studio_settings_and_the_clock() {
         let car = Car::new("studio-settings");
         let ctx = &*car.ctx;
-        assert_eq!(settings(ctx), json!({ "timeFormat": "12h" }));
+        assert_eq!(settings(ctx).unwrap(), json!({ "timeFormat": "12h" }));
         assert_eq!(set_setting(ctx, &json!({ "key": "timeFormat", "value": "24h" })).unwrap(), json!({ "ok": true }));
-        assert_eq!(ctx.setting("appearance"), Some(json!({ "reduceEffects": false, "clock24": true })));
+        assert_eq!(ctx.setting("appearance").unwrap(), Some(json!({ "reduceEffects": false, "clock24": true })));
         set_setting(ctx, &json!({ "key": "speedUnit", "value": "kmh" })).unwrap();
-        assert_eq!(settings(ctx), json!({ "speedUnit": "kmh", "timeFormat": "24h" }));
+        assert_eq!(settings(ctx).unwrap(), json!({ "speedUnit": "kmh", "timeFormat": "24h" }));
         assert_eq!(set_setting(ctx, &json!({ "key": 3 })).unwrap_err(), (400, "Invalid setting".to_string()));
         assert_eq!(set_setting(ctx, &json!({ "key": "x".repeat(101) })).unwrap_err().0, 400);
+    }
+
+    #[test]
+    fn studio_settings_that_cannot_be_read_or_kept_answer_500_and_change_nothing() {
+        let car = Car::new("studio-settings-fail");
+        let ctx = &*car.ctx;
+        set_setting(ctx, &json!({ "key": "speedUnit", "value": "kmh" })).unwrap();
+        // (they cannot be read, while a write would still be kept)
+        car.ctx.reads_fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(settings(ctx).unwrap_err().0, 500, "not the defaults");
+        assert_eq!(set_setting(ctx, &json!({ "key": "timeFormat", "value": "24h" })).unwrap_err().0, 500);
+        assert_eq!(set_setting(ctx, &json!({ "key": "speedUnit", "value": "mph" })).unwrap_err().0, 500);
+        car.ctx.reads_fail.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(settings(ctx).unwrap(), json!({ "speedUnit": "kmh", "timeFormat": "12h" }), "not written over");
+        // (they read, but no change can be kept)
+        car.ctx.writes_fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(set_setting(ctx, &json!({ "key": "timeFormat", "value": "24h" })).unwrap_err().0, 500);
+        assert_eq!(settings(ctx).unwrap(), json!({ "speedUnit": "kmh", "timeFormat": "12h" }));
+        car.ctx.writes_fail.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(settings(ctx).unwrap(), json!({ "speedUnit": "kmh", "timeFormat": "12h" }));
     }
 
     #[test]

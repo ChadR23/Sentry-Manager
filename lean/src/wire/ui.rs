@@ -30,15 +30,17 @@ fn job_fields(fields: &Value) -> (Option<String>, Option<Value>) {
 }
 
 impl UiCtx for CoreUi {
-    fn setting(&self, key: &str) -> Option<Value> {
-        self.state.setting(key)
+    fn setting(&self, key: &str) -> Result<Option<Value>, String> {
+        self.state.setting(key).map_err(|e| e.to_string())
     }
-    fn set_setting(&self, key: &str, value: &Value) {
-        self.state.set_setting(key, value);
+    fn set_setting(&self, key: &str, value: &Value) -> Result<(), String> {
+        self.state.set_setting(key, value).map_err(|e| e.to_string())
     }
-    fn has_setting_prefix(&self, prefix: &str) -> bool {
-        let c = self.state.db.conn();
-        c.query_row("SELECT 1 FROM settings WHERE substr(key, 1, ?1) = ?2 LIMIT 1", rusqlite::params![prefix.encode_utf16().count() as i64, prefix], |_| Ok(())).is_ok()
+    fn has_setting_prefix(&self, prefix: &str) -> Result<bool, String> {
+        use rusqlite::OptionalExtension;
+        let c = self.state.db.reader();
+        let hit = c.query_row("SELECT 1 FROM settings WHERE substr(key, 1, ?1) = ?2 LIMIT 1", rusqlite::params![prefix.encode_utf16().count() as i64, prefix], |_| Ok(())).optional();
+        hit.map(|h| h.is_some()).map_err(|e| format!("manager.db: {e}"))
     }
     fn announce(&self, topic: &str) {
         self.state.announce(topic);
@@ -79,19 +81,24 @@ impl UiCtx for CoreUi {
         // (core sends an account that must set up two-step sign-in to /login/two-factor first)
         false
     }
-    fn job_start(&self, fields: Value) -> Value {
+    fn job_start(&self, fields: Value) -> Result<Value, String> {
         let s = |k: &str| fields.get(k).and_then(Value::as_str).map(String::from);
-        json!(self.state.jobs.start(NewJob { kind: s("type").unwrap_or_default(), vehicle_id: s("vehicleId"), title: s("title").unwrap_or_default(), detail: s("detail"), external_id: None }))
+        let id = self.state.jobs.start(NewJob { kind: s("type").unwrap_or_default(), vehicle_id: s("vehicleId"), title: s("title").unwrap_or_default(), detail: s("detail"), external_id: None });
+        id.map(|id| json!(id)).map_err(|e| e.to_string())
     }
     fn job_update(&self, id: &Value, fields: Value) {
         let Some(id) = id.as_i64() else { return };
         let (detail, result) = job_fields(&fields);
-        self.state.jobs.update(id, JobUpdate { status: fields.get("status").and_then(Value::as_str).map(String::from), detail, result, finished: false });
+        if let Err(e) = self.state.jobs.update(id, JobUpdate { status: fields.get("status").and_then(Value::as_str).map(String::from), detail, result, finished: false }) {
+            self.state.logger.scope("export").warn(format!("Job {id} was not updated: {e}"));
+        }
     }
     fn job_finish(&self, id: &Value, fields: Value) {
         let Some(id) = id.as_i64() else { return };
         let (detail, result) = job_fields(&fields);
-        self.state.jobs.finish(id, fields.get("status").and_then(Value::as_str), detail, result);
+        if let Err(e) = self.state.jobs.finish(id, fields.get("status").and_then(Value::as_str), detail, result) {
+            self.state.logger.scope("export").warn(format!("The end of job {id} was not kept: {e}"));
+        }
     }
     fn vehicle(&self, id: &str) -> Option<VehicleRef> {
         self.srv()?.app().vehicle(id).map(|v| VehicleRef { id: v.id, name: v.name })
@@ -119,10 +126,10 @@ impl UiCtx for CoreUi {
         let sp = viewer.speed_index.clip(Some(&v.id), Some(&rel), real, md.len(), mtime);
         Some(sp.as_array()?.iter().map(Value::as_f64).collect())
     }
-    fn viewer_car_data(&self) -> Value {
+    fn viewer_car_data(&self) -> Result<Value, String> {
         match self.srv().and_then(|s| s.can().cloned()) {
             Some(can) => can.viewer_car_data(),
-            None => json!({ "enabled": false }),
+            None => Ok(json!({ "enabled": false })),
         }
     }
 }

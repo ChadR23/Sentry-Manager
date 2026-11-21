@@ -146,6 +146,11 @@ pub fn critical_from_file(text: &str) -> (u64, Option<String>) {
     }
 }
 
+/// The state before any check.
+fn fresh_state() -> Value {
+    json!({ "latest": null, "checkedAt": 0, "error": null })
+}
+
 pub struct ImageUpdates {
     ctx: Arc<dyn OpsCtx>,
     notes: Option<Arc<Notes>>,
@@ -156,6 +161,9 @@ pub struct ImageUpdates {
     current: Value,
     pub enabled: bool,
     state: Mutex<Value>,
+    /// the kept state has been read: until it is, nothing is answered, checked, written or
+    /// announced (it holds the critical fix seen, which a later image without one must not clear)
+    read: std::sync::atomic::AtomicBool,
     last_check: Mutex<i64>,
     started_at: i64,
     own_level: u64,
@@ -171,8 +179,30 @@ impl ImageUpdates {
         let or_null = |v: &Value| if truthy(v) { v.clone() } else { Value::Null };
         let current = json!({ "sha": or_null(&build_info["sha"]), "build": clean_build(&build_info["build"]), "builtAt": or_null(&build_info["builtAt"]) });
         let enabled = enabled && registry.is_some() && repo.is_some() && tag.is_some();
-        let state = store::get_or(&ctx.db(), "image-updates", json!({ "latest": null, "checkedAt": 0, "error": null }));
-        ImageUpdates { ctx, notes, transport, registry, repo, tag, current, enabled, state: Mutex::new(state), last_check: Mutex::new(0), started_at: now_ms(), own_level }
+        let (state, read) = match store::get_or(&ctx.read_db(), "image-updates", fresh_state()) {
+            Ok(s) => (s, true),
+            Err(e) => {
+                ctx.log("updates", Level::Error, &format!("The last update check could not be read (updates are not shown or checked until it can): {e}"));
+                (fresh_state(), false)
+            }
+        };
+        ImageUpdates { ctx, notes, transport, registry, repo, tag, current, enabled, state: Mutex::new(state), read: read.into(), last_check: Mutex::new(0), started_at: now_ms(), own_level }
+    }
+
+    /// The kept state, read again while it could not be read before; an error while it cannot be.
+    /// (read under the state's lock: a check that wrote a newer one meanwhile is never undone)
+    fn kept(&self) -> store::DbResult<()> {
+        use std::sync::atomic::Ordering::SeqCst;
+        if self.read.load(SeqCst) {
+            return Ok(());
+        }
+        let mut st = self.state.lock().unwrap();
+        if self.read.load(SeqCst) {
+            return Ok(());
+        }
+        *st = store::get_or(&self.ctx.read_db(), "image-updates", fresh_state())?;
+        self.read.store(true, SeqCst);
+        Ok(())
     }
 
     /// Allows a test to start the minute between checks over.
@@ -184,9 +214,11 @@ impl ImageUpdates {
         self.transport = t;
     }
 
-    pub fn status(&self) -> Value {
+    /// An error while the kept state cannot be read (not "no update").
+    pub fn status(&self) -> store::DbResult<Value> {
+        self.kept()?;
         let st = self.state.lock().unwrap().clone();
-        json!({
+        Ok(json!({
             "enabled": self.enabled,
             "image": self.repo.as_ref().map(|r| format!("{}/{}", self.registry.as_deref().unwrap_or(""), r)),
             "tag": self.tag,
@@ -197,7 +229,7 @@ impl ImageUpdates {
             "updateAvailable": self.update_available(),
             "buildsBehind": self.builds_behind(),
             "critical": self.critical()
-        })
+        }))
     }
 
     /// While an image with a critical fix this one lacks is out: { level, reason, created }.
@@ -240,18 +272,21 @@ impl ImageUpdates {
     }
 
     pub fn tick(&self) {
-        if !self.enabled {
+        // (a kept state that cannot be read: said at the start, tried again at the next tick)
+        if !self.enabled || self.kept().is_err() {
             return;
         }
         let checked = self.state.lock().unwrap()["checkedAt"].as_f64().unwrap_or(0.0) as i64;
         let since = now_ms() - checked;
         let first_since_start = checked < self.started_at;
         if since >= CHECK_MS || (first_since_start && since >= STARTUP_CHECK_MS) {
-            self.check();
+            let _ = self.check();
         }
     }
 
-    pub fn check(&self) -> Value {
+    /// An error while the kept state cannot be read: no check runs over it.
+    pub fn check(&self) -> store::DbResult<Value> {
+        self.kept()?;
         if !self.enabled {
             return self.status();
         }
@@ -286,27 +321,38 @@ impl ImageUpdates {
                     st = self.state.lock().unwrap();
                 }
             }
-            store::set(&self.ctx.db(), "image-updates", &st);
+            if let Err(e) = store::set(&self.ctx.db(), "image-updates", &st) {
+                self.ctx.log("updates", Level::Warn, &format!("The update check was not kept: {e}"));
+            }
         }
         self.announce();
         self.status()
     }
 
-    /// Raises the notification while an update is out, clears it once installed.
+    /// Raises the notification while an update is out, clears it once installed (what was not
+    /// kept is logged); nothing while the kept state cannot be read.
     pub fn announce(&self) {
-        let Some(notes) = &self.notes else { return };
+        if self.kept().is_err() {
+            return;
+        }
+        if let Err(e) = self.notify() {
+            self.ctx.log("updates", Level::Warn, &format!("The update notification was not kept: {e}"));
+        }
+    }
+
+    fn notify(&self) -> super::store::DbResult<()> {
+        let Some(notes) = &self.notes else { return Ok(()) };
         let critical = self.critical();
         if truthy(&critical) {
             notes.raise(&Note::new("update", "critical", "Critical update: install now").key("image-update-critical").message(format!(
                 "{} To install it, run \"docker compose pull && docker compose up -d\" where you set up Sentry Six Manager (TrueNAS: see Updates in the README).",
                 critical["reason"].as_str().unwrap_or("")
-            )));
+            )))?;
         } else {
-            notes.resolve("image-update-critical");
+            notes.resolve("image-update-critical")?;
         }
         if !self.update_available() {
-            notes.resolve("image-update");
-            return;
+            return notes.resolve("image-update");
         }
         let l = self.state.lock().unwrap()["latest"].clone();
         let build = clean_build(&l["build"]).map(|b| format!(" (Build {b})")).unwrap_or_default();
@@ -314,7 +360,8 @@ impl ImageUpdates {
         notes.raise(&Note::new("update", "info", "An update is available").key("image-update").message(format!(
             "A newer {} image{build} was published{on}. To install it, run \"docker compose pull && docker compose up -d\" where you set up Sentry Six Manager.",
             self.tag.as_deref().unwrap_or("")
-        )));
+        )))?;
+        Ok(())
     }
 
     fn request(&self, url: &str, headers: Vec<(String, String)>) -> Result<HttpRes, String> {
@@ -515,7 +562,7 @@ mod tests {
     }
 
     fn open_keys(ctx: &FakeCtx) -> Vec<String> {
-        store::list(&ctx.db(), true, 200, None).iter().map(|n| n["dedupeKey"].as_str().unwrap_or("").to_string()).collect()
+        store::list(&ctx.db(), true, 200, None).unwrap().iter().map(|n| n["dedupeKey"].as_str().unwrap_or("").to_string()).collect()
     }
 
     #[test]
@@ -524,12 +571,12 @@ mod tests {
         let notes = Notes::new(ctx.clone());
         let r = reg(Release::default());
         let u = ImageUpdates::new(ctx.clone(), Some(notes), r.clone(), &build(json!({})), true, 0);
-        let st = u.check();
+        let st = u.check().unwrap();
         assert_eq!(st["error"], Value::Null);
         assert_eq!(st["updateAvailable"], true);
         assert_eq!(st["latest"]["revision"], "c".repeat(40));
         assert_eq!(st["latest"]["digest"], digest(if arch() == "amd64" { '1' } else { '2' }));
-        let n = store::list(&ctx.db(), true, 200, None);
+        let n = store::list(&ctx.db(), true, 200, None).unwrap();
         assert!(n[0]["message"].as_str().unwrap().contains("docker compose pull && docker compose up -d"));
     }
 
@@ -537,15 +584,15 @@ mod tests {
     fn the_running_image_is_not_an_update_and_an_old_notice_is_cleared() {
         let ctx = FakeCtx::new();
         let notes = Notes::new(ctx.clone());
-        notes.raise(&Note::new("update", "info", "old").key("image-update"));
+        notes.raise(&Note::new("update", "info", "old").key("image-update")).unwrap();
         let r = reg(Release { revision: Some("b".repeat(40)), created: Some("2026-10-13T04:00:00Z".into()), ..Default::default() });
         let u = ImageUpdates::new(ctx.clone(), Some(notes), r, &build(json!({})), true, 0);
-        assert_eq!(u.check()["updateAvailable"], false);
+        assert_eq!(u.check().unwrap()["updateAvailable"], false);
         assert!(open_keys(&ctx).is_empty());
         // the weekly rebuild of the same commit is an update
         let ctx = FakeCtx::new();
         let u = ImageUpdates::new(ctx, None, reg(Release { revision: Some("b".repeat(40)), ..Default::default() }), &build(json!({})), true, 0);
-        assert_eq!(u.check()["updateAvailable"], true);
+        assert_eq!(u.check().unwrap()["updateAvailable"], true);
     }
 
     #[test]
@@ -553,23 +600,23 @@ mod tests {
         for over in [json!({ "image": "", "tag": "" }), json!({ "image": "http://evil/x" }), json!({ "tag": "../../x" }), json!({ "image": "ghcr.io/Owner/X" })] {
             let r = reg(Release::default());
             let u = ImageUpdates::new(FakeCtx::new(), None, r.clone(), &build(over.clone()), true, 0);
-            assert_eq!(u.check()["enabled"], false, "{over}");
+            assert_eq!(u.check().unwrap()["enabled"], false, "{over}");
             assert!(r.calls.lock().unwrap().is_empty());
         }
         let u = ImageUpdates::new(FakeCtx::new(), None, reg(Release::default()), &build(json!({})), false, 0);
-        assert_eq!(u.check()["enabled"], false);
+        assert_eq!(u.check().unwrap()["enabled"], false);
     }
 
     #[test]
     fn registry_problems_are_reported() {
         let u = ImageUpdates::new(FakeCtx::new(), None, reg(Release { token_status: Some(403), ..Default::default() }), &build(json!({})), true, 0);
-        let st = u.check();
+        let st = u.check().unwrap();
         assert!(st["error"].as_str().unwrap().contains("is the image public"));
         assert_eq!(st["updateAvailable"], false);
         let u = ImageUpdates::new(FakeCtx::new(), None, reg(Release { realm: Some("http://ghcr.io/token".into()), ..Default::default() }), &build(json!({})), true, 0);
-        assert!(u.check()["error"].as_str().unwrap().contains("without HTTPS"));
+        assert!(u.check().unwrap()["error"].as_str().unwrap().contains("without HTTPS"));
         let u = ImageUpdates::new(FakeCtx::new(), None, reg(Release::default()), &build(json!({ "tag": "nope" })), true, 0);
-        assert!(u.check()["error"].as_str().unwrap().contains("no image tagged nope"));
+        assert!(u.check().unwrap()["error"].as_str().unwrap().contains("no image tagged nope"));
     }
 
     #[test]
@@ -577,12 +624,12 @@ mod tests {
         let ctx = FakeCtx::new();
         let r = reg(Release::default());
         let u = ImageUpdates::new(ctx.clone(), None, r.clone(), &build(json!({})), true, 0);
-        u.check();
+        u.check().unwrap();
         let n = r.calls.lock().unwrap().len();
-        u.check();
+        u.check().unwrap();
         assert_eq!(r.calls.lock().unwrap().len(), n);
         let after = ImageUpdates::new(ctx.clone(), None, r.clone(), &build(json!({})), true, 0);
-        assert_eq!(after.status()["updateAvailable"], true);
+        assert_eq!(after.status().unwrap()["updateAvailable"], true);
         after.tick();
         assert_eq!(r.calls.lock().unwrap().len(), n);
     }
@@ -592,25 +639,25 @@ mod tests {
         let ctx = FakeCtx::new();
         let notes = Notes::new(ctx.clone());
         let u = ImageUpdates::new(ctx.clone(), Some(notes), reg(Release { version: Some("build-131".into()), ..Default::default() }), &build(json!({ "build": 128 })), true, 0);
-        let st = u.check();
+        let st = u.check().unwrap();
         assert_eq!(st["current"], json!({ "sha": "b".repeat(40), "build": 128, "builtAt": "2026-10-13T04:00:00Z" }));
         assert_eq!(st["latest"]["build"], 131);
         assert_eq!(st["buildsBehind"], 3);
-        assert!(store::list(&ctx.db(), true, 200, None)[0]["message"].as_str().unwrap().contains("A newer latest image (Build 131) was published"));
+        assert!(store::list(&ctx.db(), true, 200, None).unwrap()[0]["message"].as_str().unwrap().contains("A newer latest image (Build 131) was published"));
         for v in ["build-128", "build-120"] {
             let ctx = FakeCtx::new();
             let u = ImageUpdates::new(ctx.clone(), Some(Notes::new(ctx.clone())), reg(Release { version: Some(v.into()), created: Some("2026-10-30T04:00:00Z".into()), ..Default::default() }), &build(json!({ "build": 128 })), true, 0);
-            let st = u.check();
+            let st = u.check().unwrap();
             assert_eq!(st["buildsBehind"], 0);
             assert_eq!(st["updateAvailable"], false);
             assert!(open_keys(&ctx).is_empty());
         }
         for v in ["131", "build-", "build-1x", "v2026.1", "build-0"] {
             let u = ImageUpdates::new(FakeCtx::new(), None, reg(Release { version: Some(v.into()), ..Default::default() }), &build(json!({ "build": 128 })), true, 0);
-            assert_eq!(u.check()["latest"]["build"], Value::Null, "{v}");
+            assert_eq!(u.check().unwrap()["latest"]["build"], Value::Null, "{v}");
         }
         let old = ImageUpdates::new(FakeCtx::new(), None, reg(Release { version: Some("build-131".into()), ..Default::default() }), &build(json!({})), true, 0);
-        let st = old.check();
+        let st = old.check().unwrap();
         assert_eq!(st["buildsBehind"], Value::Null);
         assert_eq!(st["updateAvailable"], true);
     }
@@ -631,7 +678,7 @@ mod tests {
         assert_eq!(critical_from_file(&format!("level: 0012\r\nreason: {}\r\n", "y".repeat(400))).1.unwrap().len(), 300);
         for (c, l) in [("", Some("1")), ("   ", Some("1")), ("Fix", None), ("Fix", Some("x")), ("Fix", Some("-1")), ("Fix", Some("1e3")), ("Fix", Some("0"))] {
             let u = ImageUpdates::new(FakeCtx::new(), None, reg(Release { critical: Some(c.into()), level: l.map(String::from), ..Default::default() }), &build(json!({})), true, 0);
-            assert_eq!(u.check()["critical"], Value::Null, "{c:?} {l:?}");
+            assert_eq!(u.check().unwrap()["critical"], Value::Null, "{c:?} {l:?}");
         }
     }
 
@@ -643,7 +690,7 @@ mod tests {
         let at = |u: &mut ImageUpdates, r: &Release| {
             u.set_transport(reg(r.clone()));
             u.forget_last_check();
-            u.check()
+            u.check().unwrap()
         };
         // (1) an older server sees A, with a notification of its own
         let ctx = FakeCtx::new();
@@ -655,11 +702,11 @@ mod tests {
         // (2) a bug fix B after A does not cancel it; (3) nor B without labels, also after a restart
         assert_eq!(at(&mut u, &b)["critical"]["level"], 1);
         assert_eq!(at(&mut u, &Release { revision: b.revision.clone(), created: b.created.clone(), ..Default::default() })["critical"]["level"], 1);
-        assert_eq!(ImageUpdates::new(ctx.clone(), None, reg(Release::default()), &build(json!({})), true, 0).status()["critical"]["level"], 1);
+        assert_eq!(ImageUpdates::new(ctx.clone(), None, reg(Release::default()), &build(json!({})), true, 0).status().unwrap()["critical"]["level"], 1);
         // (4) installing B clears it and its notification
         let mut after = ImageUpdates::new(ctx.clone(), Some(Notes::new(ctx.clone())), reg(Release::default()), &build(json!({ "sha": "d".repeat(40), "builtAt": "2026-10-22T04:00:00Z" })), true, 1);
         after.announce();
-        assert_eq!(after.status()["critical"], Value::Null);
+        assert_eq!(after.status().unwrap()["critical"], Value::Null);
         assert!(!open_keys(&ctx).contains(&"image-update-critical".to_string()));
         let st = at(&mut after, &b);
         assert_eq!(st["updateAvailable"], false);
@@ -672,7 +719,7 @@ mod tests {
     #[test]
     fn the_first_check_after_a_start_comes_within_minutes() {
         let ctx = FakeCtx::new();
-        store::set(&ctx.db(), "image-updates", &json!({ "latest": null, "checkedAt": now_ms() - 11 * 60 * 1000, "error": null }));
+        store::set(&ctx.db(), "image-updates", &json!({ "latest": null, "checkedAt": now_ms() - 11 * 60 * 1000, "error": null })).unwrap();
         let r = reg(Release::default());
         let u = ImageUpdates::new(ctx, None, r.clone(), &build(json!({})), true, 0);
         u.tick();
@@ -689,5 +736,54 @@ mod tests {
         let text = std::fs::read_to_string(root.join("CRITICAL_UPDATE.txt")).unwrap();
         let (level, reason) = critical_from_file(&text);
         assert_eq!(level > 0, reason.is_some());
+    }
+
+    #[test]
+    fn a_kept_check_that_cannot_be_read_is_an_error_until_it_can_never_no_update() {
+        let ctx = FakeCtx::new();
+        let notes = Notes::new(ctx.clone());
+        let seen = json!({ "latest": null, "critical": { "level": 2, "reason": "Closes a sign-in hole", "created": "2026-10-25T04:00:00Z" }, "checkedAt": 1, "error": null });
+        store::set(&ctx.db(), "image-updates", &seen).unwrap();
+        notes.raise(&Note::new("update", "critical", "Critical update: install now").key("image-update-critical")).unwrap();
+        ctx.db().execute_batch("CREATE TABLE gone (x); ALTER TABLE settings RENAME TO settings_kept; CREATE VIEW settings AS SELECT * FROM gone; DROP TABLE gone;").unwrap();
+        let r = reg(Release::default());
+        let u = ImageUpdates::new(ctx.clone(), Some(notes), r.clone(), &build(json!({})), true, 0);
+        assert!(u.status().is_err(), "not \"no update\"");
+        assert!(u.check().is_err(), "no check over what could not be read");
+        u.announce();
+        u.tick();
+        assert!(r.calls.lock().unwrap().is_empty(), "nothing asked of the registry meanwhile");
+        assert_eq!(open_keys(&ctx), ["image-update-critical"], "its notice is not cleared meanwhile");
+        ctx.db().execute_batch("DROP VIEW settings; ALTER TABLE settings_kept RENAME TO settings;").unwrap();
+        assert_eq!(store::get(&ctx.db(), "image-updates").unwrap(), Some(seen), "never written over meanwhile");
+        assert_eq!(u.status().unwrap()["critical"]["level"], 2, "the critical fix seen, once it can be read");
+        assert_eq!(ctx.logs.lock().unwrap().iter().filter(|(s, _, t)| s == "updates" && t.starts_with("The last update check could not be read")).count(), 1);
+    }
+
+    #[test]
+    fn a_kept_state_read_again_never_goes_over_a_newer_one_a_check_wrote_meanwhile() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let ctx = FakeCtx::new();
+        let state = |build: u64| json!({ "latest": { "build": build }, "checkedAt": build, "error": null });
+        store::set(&ctx.db(), "image-updates", &state(1)).unwrap();
+        ctx.db().execute_batch("CREATE TABLE gone (x); ALTER TABLE settings RENAME TO settings_kept; CREATE VIEW settings AS SELECT * FROM gone; DROP TABLE gone;").unwrap();
+        let u = Arc::new(ImageUpdates::new(ctx.clone(), None, reg(Release::default()), &build(json!({})), true, 0));
+        ctx.db().execute_batch("DROP VIEW settings; ALTER TABLE settings_kept RENAME TO settings;").unwrap();
+        // a check holds the state (it writes what it found under its lock) while the status reads it again
+        let mut held = u.state.lock().unwrap();
+        let reads = ctx.reads.load(SeqCst);
+        let u2 = u.clone();
+        let status = std::thread::spawn(move || u2.status().unwrap()["latest"]["build"].clone());
+        // (a read that does not wait for the lock starts at once: this waits for it to be done)
+        let t = std::time::Instant::now();
+        while ctx.reads.load(SeqCst) == reads && t.elapsed() < std::time::Duration::from_secs(1) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        *held = state(2);
+        u.read.store(true, SeqCst);
+        store::set(&ctx.db(), "image-updates", &state(2)).unwrap();
+        drop(held);
+        assert_eq!(status.join().unwrap(), 2, "not the older state read before the check wrote");
+        assert_eq!(u.status().unwrap()["latest"]["build"], 2);
     }
 }

@@ -12,7 +12,12 @@ The owner's decisions (2026-11-15):
 - **The converter is ported early**, with every safety check it has today.
 
 The Node code is the specification. Where the Rust code answers differently
-from Node, Rust is wrong unless the owner says otherwise.
+from Node, Rust is wrong unless the owner says otherwise. Since Node was
+removed (below, "Node removed"), its frozen answers are that specification.
+
+The sections below were written while Node was in the repository: the
+`server/`, `src/main/`, `test/` and `lean/parity/*.js` they name are in the
+git history (before the commit that removed them).
 
 ## Size
 
@@ -71,7 +76,69 @@ folder, plus its dependencies in `Cargo.toml`; the coordinator wires it in
   (`https://reports.skittles.live`), only when an admin turns it on or presses
   Send (docs/security.md, docs/reports-api.md).
 - No co-author trailers, no model names in code or commits.
-- `npm test` keeps passing while Node is still the shipped app.
+- `cargo test --release --locked` in lean/ passes before every push (it was
+  `npm test` while Node was in the repository).
+
+## Node removed (2026-11-19)
+
+The owner's decision: record Node's answers as fixed reference files, then
+delete Node. Removed: `server/` (its CAN signal sets moved to `dbc/`, read
+from `<APP_ROOT>/dbc`, `/app/dbc` in the image), `src/main/` (the Node
+converter), `test/` (the Node tests), `native/`, `Dockerfile.node`,
+`package.json`, `lean/parity/*.js`, the generators in
+`src/converter/testdata/*.js`, `tools/contract/{fixture,routes,lexjs}.js`,
+`tools/inventoryMemory.js`, `tools/bench/clipMemory.js`. Nothing of the
+image, the pages or the Rust server loaded any of it.
+
+How the references were frozen: each check that ran Node code was run once
+against the Node code still in the repository (`LEAN_RECORD_NODE=1`, one
+test thread), with the Rust side compared at the same time (all the same),
+and Node's answers were stored under `lean/tests/fixtures/node-reference/`
+(5.8 MB in all with the contract's):
+
+| Reference | From | Checked by |
+| --- | --- | --- |
+| `archive-gap.json.gz` | every `server/archiveGap.js` analyze() call of Node's own tests | `tests/archive_gap_parity.rs` |
+| `arrival-phase1/2.tar.xz`, `arrival-records.tar.xz` | the share, Node's index and record after each pass of `server/arrivalChecksums.js` (and the files' inodes then; this run's inodes are put into Node's index) | `tests/arrival_parity.rs` |
+| `can-index.tar.xz` | the CAN Bridge logs, `server/canIndex.js`'s index files and answers | `tests/can_parity.rs` |
+| `mp4.tar.xz` | 49 MP4 fixtures and what the Node readers got from each | `tests/mp4_parity.rs` |
+| `slug.json`, `reports-{scrub,validate,heartbeat}.json` | `server/vehicles.js`, `reportsScrub.js`, `reportsProtocol.js`, `reports.js` | `tests/slug_parity.rs`, `tests/reports_parity.rs` |
+| `converter-telemetry.tar.xz` | the telemetry and verifier fixtures (encodes, Node's writer output, inspections, verdicts) | `src/converter/tests.rs` |
+| `converter-scan.json` | `src/main/converter/scanner.js` on six configs (files with fixed times; this run's inodes put in) | `scanner.rs` |
+| `converter-bridge.json` | every channel request of the corpus, `server/converterBridge.js`'s answers | `ipc.rs` |
+| `converter-{auto,bench,devices}.json` | automatic conversion, the benchmark, the device list | `parity_tests.rs` |
+| `converter-store.json.gz` | the job store: each command with digests of the folders it was given, Node's answer and the folders as it left them | `jobstore/tests.rs` |
+| `planner-args.json` | buildEncodeArgs / decodeAccelArgs, with the script that asked | `planner.rs` |
+| `converter-jobs.json`, `job-clip.mp4` | three real conversions by `src/main/converter/runtime.js` (the job's shape, events, outputs' codec and digest, the ffmpeg build and the ffmpeg runs it asked for, base folder as `<base>`, ids as `<id>`, libx265's pool of the recording machine's usable CPUs as `pools=<cpus>`, compared with this machine's); re-recorded for PR #40 from that PR's head (ae830e9: Node with its `lean/parity/converterJobs.js` taking an ffmpeg path), with Node's ffmpeg the FFMPEG_ONE_FRAME_THREAD script of `service/tests.rs` (libx265 on one frame thread: the same bytes on a busy machine; the pool run as `pools=4`, the 4 usable CPUs it was recorded on: the same bytes on a machine with other CPUs), on the same `job-clip.mp4` | `service/tests.rs`, the Rust converter through the same script (digests and ffmpeg runs compared with the same ffmpeg build; another build encodes other bytes) |
+| `nodes-worker.json` | Node's worker asked by Node's main (35 requests, then the main's lanes, encode, cancel, slots) | `nodes/tests.rs`: the Rust worker, paired by the Rust main, the same requests |
+
+The contract: the fixture archive (`lean/tests/fixtures/contract/footage.tar.xz`),
+record.js goldens of every GET route and of `tools/contract/allow.json` from
+the Node fixture server, and the live checks' answers (`live.json`,
+`tools/contract/live.js`, which now pairs as a main itself instead of loading
+`server/nodes.js`); `routes.json` lists which routes they cover (all 196).
+`node tools/contract/frozen.js` starts the Rust release binary on the same
+archive and compares; CI's rust-tests job runs it. On this machine: 196
+routes, 194 the same, 2 the same but for an accepted difference, none differ.
+
+Retired with Node, as they cannot exist without it: Rust and Node reading
+each other's interrupted conversions (`crash_in_rust_recovered_by_node`; the
+same kill points are now restarted by the Rust converter, and the frozen
+store checks both write the same files), the Rust main pairing with Node's
+worker (the Rust worker answers as Node's, frozen), and the manual
+Node-against-lean scripts per area (`compare.js`, `compareFootage.js`,
+`canCompare.js`, `canNow.js`, `placeTags.js`, `opsCompare.js`,
+`uiCompare.js`, `contractUi.js`, `uiPages.js`, `bigCompare.js`,
+`measure.js`): their routes are covered by the frozen contract, not their
+extra depth (uiCompare's sweep of every file compressed and with its ETag,
+compareFootage's writing routes on copies, the bigger archives).
+
+Still plain Node (no packages, nothing of the old server):
+`tools/contract/frozen.js`, the dev tools and their tests (`node --test
+"tools/**/*.test.js"`: bench, contract, the image workflow and compose
+files), and two stand-ins for outside services in `lean/tests/fixtures/js/`
+(a fake ACME server, the reports receiver: `LEAN_NEED_NODE=1` makes their
+tests fail without node, as CI sets).
 
 ## Status
 
@@ -90,7 +157,8 @@ area is served through them (`src/wire/`, see "Integration" below).
 | converter | ported and mounted: job store, scanner, job service, lanes per GPU and per helper server, automatic conversion, benchmark, converted index, stats, runtime, the 22 channels behind `/api/converter/invoke/:name` and `/api/converter/events` |
 | helper servers (nodes) | ported and mounted (main side, worker, benchmark, picture check, the converter's node lanes) |
 
-Same answers, the whole contract (`node lean/parity/contractAll.js`: the Node
+Same answers, the whole contract (now `node tools/contract/frozen.js` against
+the frozen answers; before, `node lean/parity/contractAll.js`: the Node
 fixture and lean on copies of the same archive, both with HTTPS and a
 password; record.js goldens of every GET route and one request for each other
 route from `lean/parity/contractAllow.json`, replayed by compare.js, then the

@@ -73,13 +73,13 @@ pub trait CanCtx: Send + Sync + 'static {
     fn can_port(&self) -> u16 {
         10000
     }
-    /// db.get(key)
-    fn setting(&self, key: &str) -> Option<Value>;
-    /// db.set(key, value)
-    fn set_setting(&self, key: &str, value: Value);
+    /// db.get(key): None when not set, an error when it cannot be read
+    fn setting(&self, key: &str) -> Result<Option<Value>, String>;
+    /// db.set(key, value): an error when it was not kept
+    fn set_setting(&self, key: &str, value: Value) -> Result<(), String>;
     /// a saved car-data dashboard of any account ('dash:%' in the settings)
-    fn has_dashboards(&self) -> bool {
-        false
+    fn has_dashboards(&self) -> Result<bool, String> {
+        Ok(false)
     }
     fn vehicles(&self) -> Vec<Car>;
     fn vehicle(&self, id: &str) -> Option<Car> {
@@ -92,15 +92,15 @@ pub trait CanCtx: Send + Sync + 'static {
     }
     /// inventory.scan(vid), waiting for it
     fn rescan(&self, vid: &str) -> Result<(), String>;
-    /// the files of the vehicle's Recycle Bin items (rels)
-    fn bin_rels(&self, vid: &str) -> Vec<String> {
+    /// the files of the vehicle's Recycle Bin items (rels); an error when they cannot be read
+    fn bin_rels(&self, vid: &str) -> Result<Vec<String>, String> {
         let _ = vid;
-        Vec::new()
+        Ok(Vec::new())
     }
-    /// the protected clips (rels)
-    fn protected_rels(&self, vid: &str) -> Vec<String> {
+    /// the protected clips (rels); an error when they cannot be read
+    fn protected_rels(&self, vid: &str) -> Result<Vec<String>, String> {
         let _ = vid;
-        Vec::new()
+        Ok(Vec::new())
     }
     /// the vehicle's share is reachable (vehicles.share(vid).isHealthy(); true without a share)
     fn share_healthy(&self, vid: &str) -> bool {
@@ -176,9 +176,10 @@ pub trait CanCtx: Send + Sync + 'static {
         remote.to_string()
     }
     /// sentryUsb.holds etc. live with the footage area; the CAN area reads the files itself
-    fn sentry_usb_record_view(&self, vid: &str) -> Value {
+    /// (an error when the record's setting cannot be read)
+    fn sentry_usb_record_view(&self, vid: &str) -> Result<Value, String> {
         let _ = vid;
-        serde_json::json!({})
+        Ok(serde_json::json!({}))
     }
     /// archiveGap.forDays(vid): the missed snapshots that cost footage (Unix ms of their start)
     fn costly_snapshot_starts(&self, vid: &str) -> Vec<f64> {

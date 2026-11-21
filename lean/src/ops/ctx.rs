@@ -117,6 +117,14 @@ pub struct TlsInfo {
 pub trait OpsCtx: Send + Sync + 'static {
     /// manager.db (same schema as server/db.js), one connection, locked.
     fn db(&self) -> MutexGuard<'_, Connection>;
+    /// manager.db for a read only (the server's reading connection).
+    fn read_db(&self) -> MutexGuard<'_, Connection> {
+        self.db()
+    }
+    /// PRAGMA quick_check's first line (the server runs it on a connection of its own).
+    fn quick_check(&self) -> Result<String, String> {
+        self.read_db().query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0)).map_err(|e| e.to_string())
+    }
     /// DATA_PATH
     fn data_dir(&self) -> PathBuf;
     /// APP_ROOT (BUILD_INFO.json, CRITICAL_UPDATE.txt)
@@ -145,9 +153,10 @@ pub trait OpsCtx: Send + Sync + 'static {
     /// know: account names (core), place names and labels (viewer),
     /// FOOTAGE_ROOT. Ops adds the host name, DATA, the vehicles' names, ids,
     /// roots and shares, the paired nodes and the TLS host names itself
-    /// (ops::diag::identifiers, index.js reportIdentifiers).
-    fn identifiers(&self) -> Vec<String> {
-        Vec::new()
+    /// (ops::diag::identifiers, index.js reportIdentifiers). An error when they
+    /// cannot be read: no anonymous report is made without them.
+    fn identifiers(&self) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
     }
     /// A test hook only: when Ops runs, the report's diagnostics are built by
     /// ops::diag::diagnostics from the calls below. Null: build them.

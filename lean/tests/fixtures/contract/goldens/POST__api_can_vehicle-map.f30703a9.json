@@ -1,0 +1,19 @@
+{
+  "route": "POST /api/can/vehicle-map",
+  "method": "POST",
+  "request": {
+    "path": "/api/can/vehicle-map"
+  },
+  "body": {},
+  "response": {
+    "status": 400,
+    "headers": {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    },
+    "body": {
+      "error": "Give the CAN Bridge car key."
+    }
+  }
+}

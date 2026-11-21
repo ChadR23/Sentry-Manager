@@ -37,7 +37,14 @@ pub fn vehicle_info(srv: &Server, id: &str) -> Option<VehicleInfo> {
             warning: x.warning,
         }
     });
+    // (diagnostics: what manager.db could not give is unknown, not 0; logged once until it can)
     let summary = crate::footage::routes::vehicle_summary(app, &v);
+    let items = app.core.db().bin_items(Some(&v.id));
+    let policy = crate::footage::policies::get(app, &v.id);
+    let unread = [summary.as_ref().err().map(|e| e.message.clone()), items.as_ref().err().map(|e| e.to_string()), policy.as_ref().err().map(|e| e.message.clone())].into_iter().flatten().next();
+    if app.footage.unread.first(&format!("diagnostics:{}", v.id), unread.is_some()) {
+        srv.state.log.warn(format!("Diagnostics of {}: part of what manager.db keeps could not be read: {}", v.id, unread.unwrap_or_default()));
+    }
     let src = |k: &str| v.source.get(k).and_then(Value::as_str).map(String::from);
     let smb = v.is_smb();
     Some(VehicleInfo {
@@ -54,11 +61,11 @@ pub fn vehicle_info(srv: &Server, id: &str) -> Option<VehicleInfo> {
         status,
         footage_bytes: totals.as_ref().and_then(|t| t["bytes"].as_f64()),
         recordings: totals.as_ref().and_then(|t| t["recordings"].as_f64()),
-        bin_bytes: Some(crate::footage::bin::bin_bytes(app, &v.id) as f64),
-        days_left: summary["storage"]["daysLeft"].as_f64(),
-        policy: crate::footage::policies::get(app, &v.id),
+        bin_bytes: items.as_ref().ok().map(|i| i.iter().map(|x| x.bytes).sum::<u64>() as f64),
+        days_left: summary.as_ref().ok().and_then(|s| s["storage"]["daysLeft"].as_f64()),
+        policy: policy.unwrap_or(Value::Null),
         footage_minutes: totals.as_ref().and_then(|t| t["minutes"].as_f64()),
-        bin_items: Some(srv.state.db.bin_items(Some(&v.id)).len() as f64),
+        bin_items: items.as_ref().ok().map(|i| i.len() as f64),
     })
 }
 
@@ -71,6 +78,12 @@ impl CoreOps {
 impl OpsCtx for CoreOps {
     fn db(&self) -> MutexGuard<'_, Connection> {
         self.state.db.conn()
+    }
+    fn read_db(&self) -> MutexGuard<'_, Connection> {
+        self.state.db.reader()
+    }
+    fn quick_check(&self) -> Result<String, String> {
+        self.state.db.quick_check().map_err(|e| e.to_string())
     }
     fn data_dir(&self) -> PathBuf {
         self.state.config.data.clone()
@@ -149,11 +162,11 @@ impl OpsCtx for CoreOps {
     fn ui_pack(&self) -> String {
         self.srv().and_then(|s| s.ui().and_then(|u| u.packs.active())).unwrap_or_else(|| "original".into())
     }
-    fn identifiers(&self) -> Vec<String> {
+    fn identifiers(&self) -> Result<Vec<String>, String> {
         // (what only other areas know: account names, place names and labels, FOOTAGE_ROOT;
         // ops::diag::identifiers adds the rest)
-        let mut ids: Vec<String> = self.state.db.list_users().into_iter().map(|(n, _)| n).collect();
-        if let Some(Value::Array(places)) = self.state.db.get("places") {
+        let mut ids: Vec<String> = self.state.db.list_users().map_err(|e| e.to_string())?.into_iter().map(|(n, _)| n).collect();
+        if let Some(Value::Array(places)) = self.state.db.get("places").map_err(|e| e.to_string())? {
             for p in places {
                 for k in ["name", "label"] {
                     if let Some(x) = p[k].as_str() {
@@ -165,7 +178,7 @@ impl OpsCtx for CoreOps {
         if let Some(r) = self.state.config.env.get("FOOTAGE_ROOT").filter(|r| !r.is_empty()) {
             ids.push(r.clone());
         }
-        ids
+        Ok(ids)
     }
     fn jobs_queued(&self) -> usize {
         self.srv().and_then(|s| s.converter().map(|c| c.jobs.lock().unwrap().values().filter(|st| st.as_str() == "waiting").count())).unwrap_or(0)
@@ -188,13 +201,26 @@ impl OpsCtx for CoreOps {
         }
     }
     fn recent_jobs(&self, limit: usize) -> Vec<Value> {
-        self.state.db.jobs(limit as i64, None).into_iter().map(|j| json!({ "type": j.kind, "status": j.status, "title": j.title, "detail": j.detail, "startedAt": j.started_at, "finishedAt": j.finished_at })).collect()
+        // (diagnostics: the failure is logged, and so in the report's own log lines)
+        match self.state.db.jobs(limit as i64, None) {
+            Ok(jobs) => jobs.into_iter().map(|j| json!({ "type": j.kind, "status": j.status, "title": j.title, "detail": j.detail, "startedAt": j.started_at, "finishedAt": j.finished_at })).collect(),
+            Err(e) => {
+                self.state.log.warn(format!("Recent jobs not read for the diagnostics: {e}"));
+                Vec::new()
+            }
+        }
     }
     fn access_settings(&self) -> Value {
         self.state.access.get()
     }
     fn places_count(&self) -> usize {
-        self.state.db.get("places").and_then(|p| p.as_array().map(|a| a.len())).unwrap_or(0)
+        match self.state.db.get("places") {
+            Ok(p) => p.and_then(|p| p.as_array().map(|a| a.len())).unwrap_or(0),
+            Err(e) => {
+                self.state.log.warn(format!("Saved places not counted for the diagnostics: {e}"));
+                0
+            }
+        }
     }
     fn sentry_usb_infos(&self) -> Vec<(Value, f64)> {
         // index.js sentryUsbInfos: each vehicle's Sentry USB info file, as the CAN area read it
@@ -236,7 +262,15 @@ impl OpsCtx for CoreOps {
     fn car_models(&self) -> Vec<Option<String>> {
         let Some(s) = self.srv() else { return Vec::new() };
         let app = s.app();
-        app.vehicles.list().iter().map(|v| s.can().and_then(|c| c.car_summary(&super::footage::car_of(app, v))["modelLabel"].as_str().map(String::from))).collect()
+        // (a model that cannot be worked out now is unknown, and said)
+        app.vehicles
+            .list()
+            .iter()
+            .map(|v| {
+                let c = s.can()?.car_summary(&super::footage::car_of(app, v));
+                c.map_err(|e| self.state.log.warn(format!("The car model of {} is left out of the report: {e}", v.id))).ok()?["modelLabel"].as_str().map(String::from)
+            })
+            .collect()
     }
     fn clips_arrived(&self, since_ms: i64) -> (f64, f64) {
         let Some(s) = self.srv() else { return (0.0, 0.0) };

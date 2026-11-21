@@ -29,7 +29,7 @@ fn ops() -> (Arc<FakeCtx>, Arc<Ops>) {
 fn stats_with_the_nodes_power_and_peaks() {
     let (ctx, o) = ops();
     *ctx.node_powers.lock().unwrap() = vec![node_power::NodeRow { id: "n1".into(), name: "Garage".into(), online: true, power: node_power::clean_report(&json!({ "cpuW": 20, "gpuW": 180, "totalW": 200, "todayWh": 250, "weekWh": 1000 })) }];
-    let s = o.stats_answer();
+    let s = o.stats_answer().unwrap();
     assert_eq!(s["power"]["nodes"][0]["name"], "Garage");
     assert_eq!(s["power"]["nodes"][0]["peakW"], 200);
     assert_eq!(s["power"]["combined"]["servers"], 2);
@@ -38,7 +38,7 @@ fn stats_with_the_nodes_power_and_peaks() {
     assert_eq!(s["encoder"], Value::Null);
     // no nodes: the power block as it is
     ctx.node_powers.lock().unwrap().clear();
-    assert!(o.stats_answer()["power"].get("combined").is_none());
+    assert!(o.stats_answer().unwrap()["power"].get("combined").is_none());
     o.stop();
 }
 
@@ -51,11 +51,11 @@ fn job_snapshots_record_savings_and_mark_the_job() {
     assert!(o.stats.sampling(), "a running job keeps the monitor sampling");
     o.job_snapshot(&snap(true, 5000.0, 4.0));
     o.job_snapshot(&snap(false, 5000.0, 4.0));
-    let v = power::for_vehicle(&ctx.db(), "car");
+    let v = power::for_vehicle(&ctx.db(), "car").unwrap();
     assert_eq!((v["bytes"].as_f64(), v["clips"].as_f64()), (Some(5000.0), Some(4.0)), "each job adds only what it adds");
     // a job of no vehicle saves nothing anywhere
     o.job_snapshot(&JobSnapshot { id: "j2".into(), vehicle_id: None, saved_bytes: 99.0, ..Default::default() });
-    assert_eq!(power::for_vehicle(&ctx.db(), "car")["bytes"].as_f64(), Some(5000.0));
+    assert_eq!(power::for_vehicle(&ctx.db(), "car").unwrap()["bytes"].as_f64(), Some(5000.0));
     assert_eq!(o.job_energy("nothing"), Value::Null);
     // the benchmark's meter: nothing measured in no time
     let t = o.meter_start();
@@ -72,14 +72,14 @@ fn savings_backfill_at_the_start() {
         let db = ctx.db();
         db.execute_batch("CREATE TABLE jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT NOT NULL, vehicle_id TEXT, status TEXT NOT NULL, title TEXT NOT NULL, detail TEXT, started_at INTEGER NOT NULL, finished_at INTEGER, result TEXT, external_id TEXT);").unwrap();
         db.execute("INSERT INTO jobs (type, status, title, started_at, finished_at, external_id) VALUES ('conversion', 'done', 't', ?1, ?2, 'converter:old')", [1_767_000_000_000i64, finished]).unwrap();
-        store::set(&db, "savings", &json!({ "vehicles": { "car": { "bytes": 10, "clips": 1 } }, "jobs": { "old": { "vehicleId": "car", "bytes": 10, "clips": 1 } } }));
+        store::set(&db, "savings", &json!({ "vehicles": { "car": { "bytes": 10, "clips": 1 } }, "jobs": { "old": { "vehicleId": "car", "bytes": 10, "clips": 1 } } })).unwrap();
         use chrono::Datelike;
         let d = stats::energy::local_date(finished);
-        assert_eq!(month_of_job(&db, "old"), Some(format!("{:04}-{:02}", d.year(), d.month())));
-        assert_eq!(month_of_job(&db, "none"), None);
+        assert_eq!(month_of_job(&db, "old").unwrap(), Some(format!("{:04}-{:02}", d.year(), d.month())));
+        assert_eq!(month_of_job(&db, "none").unwrap(), None);
     }
     let o = Ops::new(ctx.clone(), Arc::new(reports::NoNetwork), HashMap::new());
-    let s = store::get(&ctx.db(), "savings").unwrap();
+    let s = store::get(&ctx.db(), "savings").unwrap().unwrap();
     assert!(s["monthsSince"].as_f64().is_some(), "backfilled once");
     assert_eq!(s["months"]["car"].as_object().unwrap().values().map(|m| m["bytes"].as_f64().unwrap()).sum::<f64>(), 10.0);
     o.stop();
@@ -89,7 +89,7 @@ fn savings_backfill_at_the_start() {
 #[test]
 fn diagnostics_and_heartbeat_from_the_parts() {
     let (ctx, o) = ops();
-    store::set(&ctx.db(), "can", &json!({ "enabled": true }));
+    store::set(&ctx.db(), "can", &json!({ "enabled": true })).unwrap();
     let pl = o.reports.build_payload("heartbeat", None, None, false, None).unwrap();
     let h = &pl["heartbeat"];
     assert_eq!(h["vehicles"], 1);
@@ -128,5 +128,48 @@ fn rapl_keepalive_and_readings() {
     o.rapl_keepalive();
     assert_eq!(*ctx.rapl_requests.lock().unwrap(), 0, "not supervised: nothing to ask");
     o.rapl_reading(&json!({ "at": 1, "packages": [{ "name": "package-0", "energyUj": 5 }] }));
+    o.stop();
+}
+
+// savings that cannot be kept are said once; what a report or the stats cannot read is unknown
+#[test]
+fn savings_not_kept_are_said_once_and_unread_settings_are_unknown_or_an_error() {
+    let (ctx, o) = ops();
+    ctx.db().execute_batch("CREATE TEMP TRIGGER refused BEFORE INSERT ON settings WHEN NEW.key = 'savings' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;").unwrap();
+    let snap = |bytes: f64| JobSnapshot { id: "j1".into(), running: false, vehicle_id: Some("car".into()), saved_bytes: bytes, clips: 1.0 };
+    o.job_snapshot(&snap(1000.0));
+    o.job_snapshot(&snap(2000.0));
+    let said = ctx.logs.lock().unwrap().iter().filter(|(_, _, t)| t.starts_with("Space saved by conversions is not counted")).count();
+    assert_eq!(said, 1);
+    ctx.db().execute_batch("DROP TRIGGER refused;").unwrap();
+    o.job_snapshot(&snap(3000.0));
+    assert_eq!(power::for_vehicle(&ctx.db(), "car").unwrap()["bytes"].as_f64(), Some(3000.0));
+    let features = |d: &Value| json!([d["features"]["can"]["enabled"], d["features"]["can"]["vehicles"], d["features"]["metrics"], d["features"]["nodes"]]);
+    assert_eq!(features(&diag::diagnostics(&o)), json!([false, 0, false, 0]), "not set: off, none");
+    ctx.db().execute_batch("CREATE TABLE gone (x); ALTER TABLE settings RENAME TO settings_kept; CREATE VIEW settings AS SELECT * FROM gone; DROP TABLE gone;").unwrap();
+    assert!(o.stats_answer().is_err(), "no answer without the price it could not read");
+    let d = diag::diagnostics(&o);
+    assert_eq!(d["settings"]["appearance"], Value::Null);
+    assert_eq!(features(&d), json!([null, null, null, null]), "not read: unknown, never off or none");
+    assert!(ctx.logs.lock().unwrap().iter().any(|(_, _, t)| t.starts_with("Diagnostics: what manager.db could not give is left out")));
+    o.stop();
+}
+
+// a heartbeat cannot say "unknown" (its numbers and switches go out as 0 or off): none is made
+// while manager.db cannot give its savings or the CAN switch
+#[test]
+fn a_heartbeat_whose_savings_or_can_switch_cannot_be_read_is_an_error_never_nothing_saved_or_can_off() {
+    let (ctx, o) = ops();
+    o.job_snapshot(&JobSnapshot { id: "j1".into(), running: false, vehicle_id: Some("car".into()), saved_bytes: 1000.0, clips: 1.0 });
+    store::set(&ctx.db(), "can", &json!({ "enabled": true })).unwrap();
+    let h = diag::heartbeat(&o).unwrap();
+    assert_eq!((h["spaceSavedBytes"].as_f64(), &h["features"]["can"]), (Some(1000.0), &json!(true)));
+    let unreadable = |key: &str| ctx.db().execute_batch(&format!("DROP VIEW IF EXISTS temp.settings; CREATE TEMP VIEW settings AS SELECT key, CASE WHEN key = '{key}' THEN json('{{') ELSE value END AS value FROM main.settings;")).unwrap();
+    unreadable("savings");
+    assert!(diag::heartbeat(&o).is_err(), "not nothing saved");
+    unreadable("can");
+    assert!(diag::heartbeat(&o).is_err(), "not CAN off");
+    ctx.db().execute_batch("DROP VIEW temp.settings;").unwrap();
+    assert!(diag::heartbeat(&o).is_ok());
     o.stop();
 }

@@ -119,34 +119,35 @@ pub fn select_expired<'a>(recs: &'a [Recording], policy: &Value, now_ms: f64, tz
         .collect()
 }
 
-/// The vehicle's policy: the default with what was saved over it.
-pub fn get(app: &App, vid: &str) -> Value {
+/// The vehicle's policy: the default with what was saved over it (an error when it could not be read).
+pub fn get(app: &App, vid: &str) -> Res<Value> {
     let mut out = default_policy().as_object().cloned().unwrap_or_default();
-    if let Some(Value::Object(saved)) = app.core.db().get(&format!("policy:{vid}")) {
+    if let Some(Value::Object(saved)) = app.core.db().get(&format!("policy:{vid}"))? {
         out.extend(saved);
     }
-    Value::Object(out)
+    Ok(Value::Object(out))
 }
 
 pub fn set(app: &App, vid: &str, input: &Value) -> Res<Value> {
-    if app.vehicle(vid).is_none() {
+    // (a vehicle list that cannot be read is an error, not "no such vehicle")
+    if app.vehicles.try_get(vid)?.is_none() {
         return Err(Fail::new(404, "No such vehicle."));
     }
-    let next = normalize(input, &get(app, vid))?;
-    app.core.db().set(&format!("policy:{vid}"), &next);
+    let next = normalize(input, &get(app, vid)?)?;
+    app.core.db().set(&format!("policy:{vid}"), &next)?;
     Ok(next)
 }
 
 /// What a run would move now: { recordings, bytes, byCategory, overLimit, ids }
-pub fn preview(app: &App, vid: &str) -> Value {
+pub fn preview(app: &App, vid: &str) -> Res<Value> {
     preview_at(app, vid, js::now())
 }
 
-pub fn preview_at(app: &App, vid: &str, now_ms: f64) -> Value {
-    let (Some(v), Some(inv)) = (app.vehicle(vid), app.state_of(vid).filter(|s| s.scanned)) else {
-        return json!({ "recordings": 0, "bytes": 0, "byCategory": {} });
+pub fn preview_at(app: &App, vid: &str, now_ms: f64) -> Res<Value> {
+    let (Some(v), Some(inv)) = (app.vehicles.try_get(vid)?, app.state_of(vid).filter(|s| s.scanned)) else {
+        return Ok(json!({ "recordings": 0, "bytes": 0, "byCategory": {} }));
     };
-    let policy = get(app, vid);
+    let policy = get(app, vid)?;
     let recs = &inv.recordings;
     let mut hit: Vec<&Recording> = select_expired(recs, &policy, now_ms, &v.timezone);
     let mut over_limit = 0;
@@ -172,7 +173,7 @@ pub fn preview_at(app: &App, vid: &str, now_ms: f64) -> Value {
         e["recordings"] = json!(e["recordings"].as_u64().unwrap_or(0) + 1);
         e["bytes"] = json!(e["bytes"].as_u64().unwrap_or(0) + r.bytes);
     }
-    json!({ "recordings": hit.len(), "bytes": hit.iter().map(|r| r.bytes).sum::<u64>(), "byCategory": by, "overLimit": over_limit, "ids": hit.iter().map(|r| r.id.clone()).collect::<Vec<_>>() })
+    Ok(json!({ "recordings": hit.len(), "bytes": hit.iter().map(|r| r.bytes).sum::<u64>(), "byCategory": by, "overLimit": over_limit, "ids": hit.iter().map(|r| r.id.clone()).collect::<Vec<_>>() }))
 }
 
 fn changed() -> Fail {
@@ -182,23 +183,32 @@ fn changed() -> Fail {
 /// Run the vehicle's policy now. `expect`: the policy the person confirmed; when the saved
 /// one has changed since, nothing runs. The answer is the Recycle Bin move's.
 pub fn run(app: &Arc<App>, vid: &str, expect: Option<&Value>) -> Res<Value> {
-    let unchanged = || expect.map_or(true, |e| rule_key(&get(app, vid)) == rule_key(e));
-    if !unchanged() {
+    let unchanged = || -> Res<bool> {
+        Ok(match expect {
+            Some(e) => rule_key(&get(app, vid)?) == rule_key(e),
+            None => true,
+        })
+    };
+    if !unchanged()? {
         return Err(changed());
     }
     app.scan_now(vid, false)?;
-    if !unchanged() {
+    if !unchanged()? {
         return Err(changed());
     }
-    let ids: Vec<String> = preview(app, vid)["ids"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+    // (footage kept as the last scan saw it may be gone: what is there is not known to the limits)
+    if app.state_of(vid).is_some_and(|s| s.kept > 0) {
+        return Err(Fail::new(503, "Part of the footage could not be read, so the cleanup waits until it can."));
+    }
+    let ids: Vec<String> = preview(app, vid)?["ids"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
     let result = if ids.is_empty() { super::bin::Trashed::default() } else { super::bin::trash(app, vid, &ids, "policy")? };
-    let policy = get(app, vid);
+    let policy = get(app, vid)?;
     // checked again right before anything is deleted for good
-    if !unchanged() {
+    if !unchanged()? {
         return Err(changed());
     }
     let bin_days = js::number(policy.get("binDays"));
-    let emptied = (js::truthy(policy.get("binDays")) && bin_days.is_finite()).then(|| empty_old(app, vid, bin_days, js::now()));
+    let emptied = if js::truthy(policy.get("binDays")) && bin_days.is_finite() { Some(empty_old(app, vid, bin_days, js::now())?) } else { None };
     let mut last = json!({ "moved": result.moved.len(), "skipped": result.skipped.len(), "bytes": result.bytes });
     if let Some((deleted, freed)) = emptied {
         last["emptied"] = json!(deleted);
@@ -207,22 +217,32 @@ pub fn run(app: &Arc<App>, vid: &str, expect: Option<&Value>) -> Res<Value> {
     let mut saved = policy.as_object().cloned().unwrap_or_default();
     saved.insert("lastRunAt".into(), json!(js::now() as i64));
     saved.insert("lastResult".into(), last);
-    app.core.db().set(&format!("policy:{vid}"), &Value::Object(saved));
+    // (the run is done either way; not noted, it would run again at the next minute: in 15)
+    if let Err(e) = app.core.db().set(&format!("policy:{vid}"), &Value::Object(saved)) {
+        app.core.log("policies", Level::Warn, &format!("The cleanup of {vid} ran, but its last run was not noted (tried again in 15 minutes): {e}"));
+        app.footage.policy_retry.lock().unwrap().insert(vid.to_string(), js::now() + RETRY_MS);
+    }
     Ok(result.json())
 }
 
-/// Delete for good what has been in the vehicle's Recycle Bin longer than `days`: (deleted, bytes)
-pub fn empty_old(app: &App, vid: &str, days: f64, now_ms: f64) -> (usize, u64) {
+/// Delete for good what has been in the vehicle's Recycle Bin longer than `days`: (deleted, bytes).
+/// An error when manager.db failed (what is left stays in the bin).
+pub fn empty_old(app: &App, vid: &str, days: f64, now_ms: f64) -> Res<(usize, u64)> {
     let before = now_ms - days * 86_400_000.0;
     let mut deleted = 0;
     let mut bytes = 0;
-    for item in app.core.db().bin_items(Some(vid)) {
+    let mut stopped = None;
+    for item in app.core.db().bin_items(Some(vid))? {
         if !(item.trashed_at < before) {
             continue;
         }
-        match super::bin::delete_forever(app, &item.id) {
-            Ok(b) => {
+        match super::bin::delete_files(app, &item.id) {
+            Ok((b, kept)) => {
                 bytes += b;
+                if let Err(e) = kept {
+                    stopped = Some(e);
+                    break;
+                }
                 deleted += 1;
             }
             Err(e) => app.core.log("policies", Level::Warn, &format!("Recycle Bin: could not empty {}: {}", item.label, e.message)),
@@ -231,13 +251,34 @@ pub fn empty_old(app: &App, vid: &str, days: f64, now_ms: f64) -> (usize, u64) {
     if deleted > 0 {
         app.core.log("policies", Level::Info, &format!("Recycle Bin of {vid}: {deleted} item(s) older than {} days deleted", js::num_string(days)));
     }
-    (deleted, bytes)
+    if let Some(e) = stopped {
+        return Err(e.into());
+    }
+    Ok((deleted, bytes))
 }
 
+/// A run that met footage that cannot be reached now is tried again after this long.
+const RETRY_MS: f64 = 15.0 * 60_000.0;
+
 /// Called every minute: run the policies whose time has come (the server's local time, as Node).
-pub fn tick(app: &Arc<App>, now: chrono::DateTime<chrono::Local>) {
+/// Whether one ran (or tried to).
+pub fn tick(app: &Arc<App>, now: chrono::DateTime<chrono::Local>) -> bool {
+    let mut ran = false;
     for v in app.vehicles.list() {
-        let p = get(app, &v.id);
+        let key = format!("policy:{}", v.id);
+        let p = match get(app, &v.id) {
+            Ok(p) => {
+                app.footage.unread.first(&key, false);
+                p
+            }
+            Err(e) => {
+                // (not run while it cannot be read; logged once until it can)
+                if app.footage.unread.first(&key, true) {
+                    app.core.log("policies", Level::Warn, &format!("Policy for {} could not be read, so it does not run: {}", v.name, e.message));
+                }
+                continue;
+            }
+        };
         if !js::truthy(p.get("enabled")) {
             continue;
         }
@@ -247,16 +288,28 @@ pub fn tick(app: &Arc<App>, now: chrono::DateTime<chrono::Local>) {
             chrono::Local.timestamp_millis_opt(t as i64).single().is_some_and(|d| d.date_naive() == now.date_naive())
         });
         let run_at = p.get("runAt").map(js::string).unwrap_or_default();
-        if hhmm.as_str() >= run_at.as_str() && !ran_today {
+        let waiting = app.footage.policy_retry.lock().unwrap().get(&v.id).is_some_and(|t| js::now() < *t);
+        if hhmm.as_str() >= run_at.as_str() && !ran_today && !waiting {
+            ran = true;
             if let Err(e) = run(app, &v.id, None) {
                 app.core.log("policies", Level::Warn, &format!("Policy for {} did not run: {}", v.name, e.message));
                 let mut saved = p.as_object().cloned().unwrap_or_default();
-                saved.insert("lastRunAt".into(), json!(js::now() as i64));
+                if e.status == 503 {
+                    // (footage that cannot be reached now: tried again in 15 minutes, not tomorrow)
+                    app.footage.policy_retry.lock().unwrap().insert(v.id.clone(), js::now() + RETRY_MS);
+                } else {
+                    saved.insert("lastRunAt".into(), json!(js::now() as i64));
+                }
                 saved.insert("lastResult".into(), json!({ "error": e.message }));
-                app.core.db().set(&format!("policy:{}", v.id), &Value::Object(saved));
+                // (not noted, it would run again at the next minute: in 15)
+                if let Err(e) = app.core.db().set(&format!("policy:{}", v.id), &Value::Object(saved)) {
+                    app.core.log("policies", Level::Warn, &format!("Policy for {}: the failed run was not noted (tried again in 15 minutes): {e}", v.name));
+                    app.footage.policy_retry.lock().unwrap().insert(v.id.clone(), js::now() + RETRY_MS);
+                }
             }
         }
     }
+    ran
 }
 
 #[cfg(test)]
@@ -275,5 +328,54 @@ mod tests {
         assert_eq!(rule_key(&p), rule_key(&json!({ "keepDays": { "Recent": "7" }, "binDays": "30", "maxGB": 12.3, "enabled": false })));
         assert_ne!(rule_key(&p), rule_key(&json!({ "keepDays": { "Recent": 8 }, "binDays": 30, "maxGB": 12.3 })));
         assert_eq!(days_between("2025-03-01", "2025-03-08"), 7.0);
+    }
+
+    fn with_a_clip(name: &str) -> crate::footage::testing::OnCore {
+        let f = crate::footage::testing::on_core(name);
+        let clip = f.dir.join("footage/car/TeslaCam/RecentClips/2020-01-01_08-00-00-front.mp4");
+        std::fs::create_dir_all(clip.parent().unwrap()).unwrap();
+        std::fs::write(clip, b"clip").unwrap();
+        f.app.scan_now("car", false).unwrap();
+        f
+    }
+
+    #[test]
+    fn a_policy_that_cannot_be_read_is_not_written_over_nor_run_and_is_said_once() {
+        let f = with_a_clip("policy-read");
+        set(&f.app, "car", &json!({ "enabled": true, "runAt": "00:00", "keepDays": { "Recent": 30 }, "maxGB": 100 })).unwrap();
+        let before = f.kept("policy:car");
+        f.db.fail_setting_reads("policy:car");
+        assert_eq!(set(&f.app, "car", &json!({ "keepDays": { "Sentry": 7 } })).unwrap_err().status, 0);
+        assert_eq!(f.kept("policy:car"), before, "the rest of the policy is not lost");
+        assert_eq!(preview(&f.app, "car").unwrap_err().status, 0);
+        let now = chrono::Local::now();
+        assert!(!tick(&f.app, now) && !tick(&f.app, now), "not run while it cannot be read");
+        assert_eq!(f.logged("Policy for Car could not be read"), 1);
+        assert_eq!(f.kept("policy:car"), before);
+    }
+
+    #[test]
+    fn a_vehicle_list_that_cannot_be_read_is_an_error_for_a_policy_save_and_preview_never_no_such_vehicle() {
+        let f = with_a_clip("policy-vehicles");
+        set(&f.app, "car", &json!({ "enabled": true, "keepDays": { "Recent": 1 } })).unwrap();
+        let before = f.kept("policy:car");
+        assert_eq!(preview(&f.app, "car").unwrap()["recordings"], 1);
+        f.db.fail_setting_reads("vehicles");
+        assert_eq!(set(&f.app, "car", &json!({ "enabled": false })).unwrap_err().status, 0, "not a 404");
+        assert_eq!(preview(&f.app, "car").unwrap_err().status, 0, "not a preview that moves nothing");
+        assert_eq!(f.kept("policy:car"), before);
+        f.db.mend_reads();
+        assert_eq!(set(&f.app, "nope", &json!({})).unwrap_err().status, 404);
+    }
+
+    #[test]
+    fn a_cleanup_whose_run_cannot_be_noted_is_tried_again_in_15_minutes_not_at_every_minute() {
+        let f = with_a_clip("policy-noted");
+        set(&f.app, "car", &json!({ "enabled": true, "runAt": "00:00" })).unwrap();
+        f.db.conn().execute_batch("CREATE TEMP TRIGGER refused BEFORE UPDATE ON settings WHEN NEW.key = 'policy:car' BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;").unwrap();
+        let now = chrono::Local::now();
+        assert!(tick(&f.app, now), "the day's run");
+        assert_eq!(f.logged("its last run was not noted"), 1);
+        assert!(!tick(&f.app, now), "not again at the next minute");
     }
 }

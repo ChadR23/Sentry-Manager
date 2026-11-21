@@ -9,7 +9,7 @@ These are ranked by the gain you would actually see, divided by effort and risk.
 - Effort: S means hours, M means a day or more.
 - Risk means the chance of breaking conversions or data safety. "UI only" means only the pages are affected.
 - All files are under the repository root.
-- Under your rule, every item goes on a `release/` branch, passes `npm test`, and gets your screenshot check before it goes to `main`.
+- Under your rule, every item goes on a `release/` branch, passes `cargo test --release --locked` in lean/, and gets your screenshot check before it goes to `main`.
 
 **Duplicates that were merged**
 - "Each clip is hashed ~14 times" and "Replacing an original reads it 7 times" became #3. The riskier part of the second one is #23.
