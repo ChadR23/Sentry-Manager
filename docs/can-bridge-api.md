@@ -229,13 +229,31 @@ should use port 10000.
 
 `GET /api/can/logs/ping`
 
-`200 { "ok": true, "api": 1, "vehicleKey": "MY-car", "maxChunk": 16777216, "maxFile": 1073741824, "maxSidecar": 1048576, "formats": ["canbridge-candump-xz/1", "canbridge-columns-xz/2"] }`
+`200 { "ok": true, "api": 1, "vehicleKey": "MY-car", "maxChunk": 16777216, "maxParallel": 8, "maxFile": 1073741824, "maxSidecar": 1048576, "formats": ["canbridge-candump-xz/1", "canbridge-columns-xz/2"] }`
 
 Use it to test the address, token and pinned certificate, and read the limits.
 `formats` lists the log formats this server reads (see Log formats). The
 bridge writes `canbridge-columns-xz/2` only while it is listed, and goes back
 to candump text if a later `ping` stops listing it (an older server, which
 answers no `formats`, gets candump text).
+
+`maxParallel` (8) is how many uploads the bridge should send at once. It is
+half of the 16 unfinished uploads a car may have (`429 too_many_partial`), so
+even 8 uploads cut off earlier and not resumed yet leave room for 8 new ones,
+and 8 uploads with a `status` or `ping` beside them stay far under the 32
+connections one address may hold with a token (see Connection limits). An
+older server answers no `maxParallel`.
+
+### Connection limits
+
+A recap of Limits above, for the bridge:
+
+- **6** connections at once from one address without a valid token, **32**
+  with one (every bridge request carries it), **256** on port 10000 in all
+  (1024 on the web port, with no limit per address).
+- Past a limit the request is answered, never dropped:
+  `503 { "code": "too_many_connections" }` with `Retry-After: 5` and
+  `Connection: close`. Wait 5 seconds, then send again on a new connection.
 
 ## 2. Which files are already here
 
@@ -245,19 +263,55 @@ answers no `formats`, gets candump text).
 { "names": ["MY-car_20261108T143000Z_1.log.xz", "MY-car_20261108T143000Z_1.log.xz.json"] }
 ```
 
-Up to 2000 names per request. Answer `200`:
+Up to 2000 names per request (the app asks about up to 500). Answer `200`:
 
 ```json
 { "files": {
-  "MY-car_20261108T143000Z_1.log.xz":      { "state": "partial",  "received": 4194304, "length": 17825792 },
-  "MY-car_20261108T143000Z_1.log.xz.json": { "state": "missing",  "received": 0,       "length": null }
+  "MY-car_20261108T143000Z_1.log.xz":      { "state": "complete", "received": 1834221, "length": 1834221, "size": 1834221, "check": "verified" },
+  "MY-car_20261108T143000Z_1.log.xz.json": { "state": "complete", "received": 2310,    "length": 2310,    "size": 2310,    "check": "verified" },
+  "MY-car_20261108T143100Z_2.log.xz":      { "state": "complete", "received": 1790112, "length": 1790112, "size": 1790112, "check": "failed", "check_reason": "mismatch" },
+  "MY-car_20261108T143200Z_3.log.xz":      { "state": "partial",  "received": 4194304, "length": 17825792 },
+  "MY-car_20261108T143200Z_3.log.xz.json": { "state": "missing",  "received": 0,       "length": null }
 } }
 ```
 
-- `complete`: here and checked; do not send again.
-- `partial`: an upload was started; resume at `received`.
+- `complete`: all here, its SHA-256 matched; do not send again (but see
+  `check`). `size` is its size in bytes (the same as `received` and `length`).
+- `partial`: an upload was started; resume at `received`. A new copy of a
+  failed log that is still arriving is `partial` too (see below).
 - `missing`: send it from offset 0.
 - `invalid`: the name is not a CAN Bridge log name (see Names).
+- `forbidden`: another car key's file (a token is for one car).
+
+**`check`** (only on `complete` files) says whether the log was received
+intact and verified (see Signatures and pairing). A sidecar answers its log's
+check.
+
+| `check` | Meaning | `check_reason` |
+|---|---|---|
+| `verified` | the stored log's whole-file SHA-256 and length are the sidecar's, the ECDSA P-256 signature is valid for the car's paired key, and its chain link fits: `prev_name` `-` only at index 0 with `prev_sha256` 64 zeros, otherwise the log it names, when that is here, has that SHA-256 and the index before, by the same key | none |
+| `failed` | any of those failed | `mismatch`: the stored log's SHA-256 or length is not what was signed; `bad_signature`: a bad signature, signed by a key this car is not paired with or for another car key, or unknown version, algorithm or key; `chain_break`: the chain link does not fit (or the chain fields are bad); `unsigned`: not signed (`"signed": false`, or no `integrity`, or no sidecar after 10 minutes), also from a car that is not paired yet |
+| `pending` | not checked yet: its sidecar has not arrived, the check is still running (it starts as the log or its sidecar is complete), a new copy waits to be checked, or the log it names as its previous is here but not checked yet. Ask again on the next round | none |
+
+The check is made once, when the log or its sidecar is complete (and again
+when the car's key is trusted, or a failed log is replaced), and kept in the
+car's `trust.json`; `status` reads it, so asking about 500 names never hashes
+a file. A previous log that is not here (not sent yet, or lost on the bridge)
+or that failed its own check does not make the next one fail: the Nerd
+settings report gaps, duplicates and reorders in the chain.
+
+**Replacing a failed log.** A log whose check is `failed` stays on the car,
+and the app's *Resend all* sends it (and its sidecar) again under the same
+name. While the stored log's check is `failed`, a different copy of the log
+or of its sidecar is taken in its place: it is uploaded as usual (offset 0,
+then resumed; `status` answers `partial` meanwhile), the old copy stays until
+the new one is all here and its SHA-256 matched, then the new one replaces it
+(`201` with `"replaced": true`), its check is `pending` and it is checked
+again. The log's data is taken out of the index first (it was only indexed if
+the owner used it anyway; that choice is dropped with the old copy). A log
+whose check is `verified` or `pending` is never replaced: a different copy
+gets `409 exists_different`. Sending the same bytes again answers `201` with
+`"already": true`, as before, for any check.
 
 ## 3. Upload a file (in chunks, resumable)
 
@@ -451,7 +505,7 @@ mismatch at that log. It never changes a log's check.
 | 404 | `off` / `not_found` | Uploads are turned off, or an unknown address. Try again later (hours). |
 | 409 | `offset_mismatch` | `Upload-Offset` is not what the server has: resume at `received`. |
 | 409 | `length_changed` | A different `Upload-Length` than the upload already started. |
-| 409 | `exists_different` | A different file with this name is complete here: rename (next `seq`) and report it. |
+| 409 | `exists_different` | A different file with this name is complete here and its check is not `failed` (a failed log is replaced instead; see "Which files are already here"): rename (next `seq`) and report it. |
 | 409 | `busy` | Another request is uploading the same file: wait and resume. |
 | 413 | `too_large` | Over `maxFile`/`maxSidecar`. |
 | 413 | `error` | A chunk over `maxChunk` (16 MiB), a body over 17 MiB, or a `status` body over 1 MiB. Send smaller chunks. |
@@ -464,7 +518,8 @@ mismatch at that log. It never changes a log's check.
 ## What happens to the files
 
 Kept under `<data>/can/<vehicleKey>/`, exactly as received; a finished file
-cannot be replaced (`409 exists_different`), only added. The Nerd panel lists
+cannot be replaced (`409 exists_different`), only added, but for a log whose
+check failed, which a resent copy replaces (see "Which files are already here"). The Nerd panel lists
 them (start, car key, check, size, format and why it was closed, frames and
 dropped from the sidecar, in a
 box of its own height with a filter by car key, check and text), follows new

@@ -406,3 +406,46 @@ fn tags_a_car_summary_and_a_preview_are_errors_without_the_map_and_a_real_delete
     assert_eq!(real["skip"], "the CAN settings could not be read", "the footage moved already: its answer says why the logs stay");
     let _ = std::fs::remove_dir_all(&data);
 }
+
+// ---- the CAN Bridge upload API: ping's maxParallel, and status's check through the routes
+#[test]
+fn ping_caps_parallel_uploads_and_status_answers_the_check() {
+    let data = tmp("upload");
+    let ctx = Arc::new(TestCtx { data: data.clone(), settings: Mutex::new(HashMap::new()), audit: Mutex::new(Vec::new()), tls: None, fail: AtomicBool::new(false), fail_map: AtomicBool::new(false) });
+    let tok_hash = sentry_lean::can::util::sha256_hex(b"the bridge token");
+    ctx.settings.lock().unwrap().insert("can".into(), json!({ "enabled": true, "at": null, "tokens": [{ "id": "t1", "hash": tok_hash, "key": "K", "vehicleId": null }] }));
+    let can = Can::new(ctx.clone());
+    let call = |method: Method, path: &str, body_: &[u8], extra: &[(&'static str, String)]| {
+        let mut r = req(method, path, false);
+        r.local_port = 10000;
+        r.headers.insert("authorization", "Bearer the bridge token".parse().unwrap());
+        for (k, v) in extra {
+            r.headers.insert(axum::http::HeaderName::from_static(k), v.parse().unwrap());
+        }
+        r.body = Bytes::from(body_.to_vec());
+        let (s, _, b) = body(can.upload(&r, path));
+        (s, json_of(&b))
+    };
+    let (s, ping) = call(Method::GET, "/api/can/logs/ping", b"", &[]);
+    assert_eq!(s, 200);
+    assert_eq!(ping["maxParallel"], 8, "half of the 16 unfinished uploads a car may have");
+    assert_eq!(ping["maxChunk"], 16 * 1024 * 1024);
+    // an unsigned log (no sidecar yet): pending, then (its sidecar says it was not signed) failed
+    let name = "K_20261122T101500Z_42.log.xz";
+    let up = |n: &str, b: &[u8]| {
+        let sha = sentry_lean::can::util::sha256_hex(b);
+        call(Method::POST, &format!("/api/can/logs/{n}"), b, &[("upload-offset", "0".into()), ("upload-length", b.len().to_string()), ("upload-sha256", sha)])
+    };
+    assert_eq!(up(name, b"twelve bytes").0, 201);
+    let status = || call(Method::POST, "/api/can/logs/status", json!({ "names": [name] }).to_string().as_bytes(), &[]).1["files"][name].clone();
+    let first = status();
+    assert_eq!((first["state"].clone(), first["size"].clone()), (json!("complete"), json!(12)));
+    assert_eq!(first["check"], "pending");
+    assert_eq!(up(&format!("{name}.json"), br#"{"integrity":{"signed":false,"error":"no key"}}"#).0, 201);
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while status()["check"] == "pending" && std::time::Instant::now() < end {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(status(), json!({ "state": "complete", "received": 12, "length": 12, "size": 12, "check": "failed", "check_reason": "unsigned" }));
+    let _ = std::fs::remove_dir_all(&data);
+}

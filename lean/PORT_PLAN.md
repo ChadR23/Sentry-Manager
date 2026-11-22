@@ -1166,6 +1166,14 @@ Accepted by the owner (2026-11-16), with the earlier ones:
   texts, the supervisor's logged file system errors, the encoder and stats
   details listed there).
 
+Proposed, waiting for the owner's OK:
+
+- can: `GET /api/can/logs/ping` answers `"maxParallel": 8` (the CAN Bridge
+  asked for it, 2026-11-22; docs/can-bridge-api.md): a new field Node never
+  answered, so the frozen live answer lacks it. (`POST /api/can/logs/status`
+  also answers `size`, `check` and `check_reason` for complete files now, but
+  its frozen answer is the `404 off` one, which is unchanged.)
+
 Accepted by the owner (2026-11-18), after the run on the real archive
 (1,236 of 1,247 answers the same; these are the only differences left):
 

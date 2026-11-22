@@ -50,7 +50,9 @@ const ACCEPTED = [
   ['GET /api/speeds/status', /^body\.readMode$/, 'readMode follows each server\'s own timing'],
   ['POST /api/speeds/index', /^body\.readMode$/, 'readMode follows each server\'s own timing'],
   ['GET /api/system', /^body\.nativeHelper$/, 'nativeHelper is true: renameat2 is called directly'],
-  ['POST /api/nodes/worker/pair', /^body\.pairing\.code$/, 'a new random pairing code each time']
+  ['POST /api/nodes/worker/pair', /^body\.pairing\.code$/, 'a new random pairing code each time'],
+  // proposed 2026-11-22, waiting for the owner's OK (PORT_PLAN.md "Known differences")
+  ['GET /api/can/logs/ping', /^body\.maxParallel$/, 'maxParallel is new (the CAN Bridge asked for it): Node never answered it']
 ];
 
 const AREAS = [

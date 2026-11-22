@@ -365,6 +365,75 @@ impl CanTrust {
         Value::Object(rec)
     }
 
+    /// checks(key, logs): the upload API's `check` for each (log name, its size here):
+    /// ("verified" | "failed" | "pending", reason when failed). Read from the stored records
+    /// (judged when the log or its sidecar arrived), never by hashing a file again.
+    pub fn checks(&self, key: &str, logs: &[(String, f64)]) -> Vec<(&'static str, Option<&'static str>)> {
+        let tf = self.load(key);
+        let t = tf.lock().unwrap();
+        logs.iter().map(|(name, size)| Self::check_answer(&t, name, *size)).collect()
+    }
+
+    fn check_answer(t: &TrustFile, name: &str, size: f64) -> (&'static str, Option<&'static str>) {
+        let Some(r) = t.logs.get(name) else { return ("pending", None) };
+        let st = r.get("status").and_then(|s| s.as_str()).unwrap_or("");
+        // a record of another copy of this name (replaced, not judged again yet)
+        if st == "waiting" || r.get("length").and_then(|l| l.as_f64()) != Some(size) {
+            return ("pending", None);
+        }
+        match st {
+            "verified" => match Self::link_fits(t, r) {
+                Some(true) => ("verified", None),
+                Some(false) => ("failed", Some("chain_break")),
+                None => ("pending", None),
+            },
+            "unsigned" => ("failed", Some("unsigned")),
+            "failed" => ("failed", Some(fault_of(r))),
+            _ => ("pending", None),
+        }
+    }
+
+    /// Whether a verified log's chain link fits the log it names as its previous one: None
+    /// while that one is here but not judged yet. A previous log that is not here (not sent
+    /// yet, or lost on the bridge: a gap) or that failed its own check is not this log's fault.
+    fn link_fits(t: &TrustFile, r: &Value) -> Option<bool> {
+        let s = |r: &Value, k: &str| r.get(k).and_then(|v| v.as_str()).map(String::from);
+        let index = r.get("index").and_then(|x| x.as_f64())?;
+        let prev_name = s(r, "prevName").unwrap_or_default();
+        let prev_sha = s(r, "prevSha256").unwrap_or_default();
+        if prev_name == "-" {
+            return Some(index == 0.0 && prev_sha == ZERO);
+        }
+        if index < 1.0 {
+            return Some(false);
+        }
+        let Some(p) = t.logs.get(&prev_name) else { return Some(true) };
+        match p.get("status").and_then(|x| x.as_str()) {
+            Some("failed") => return Some(true),
+            Some("waiting") | None => return None,
+            _ => {}
+        }
+        let same_key = match (s(p, "fingerprint"), s(r, "fingerprint")) {
+            (Some(a), Some(b)) => same_fingerprint(&a, &b),
+            _ => false,
+        };
+        Some(same_key && s(p, "sha256").as_deref() == Some(prev_sha.as_str()) && p.get("index").and_then(|x| x.as_f64()) == Some(index - 1.0))
+    }
+
+    /// recheck(key, name): a new copy of this log is about to take the place of one whose check
+    /// failed: its record waits to be judged again (its override and deleted marks dropped).
+    pub fn recheck(&self, key: &str, name: &str) {
+        let tf = self.load(key);
+        let mut t = tf.lock().unwrap();
+        if let Some(r) = t.logs.get_mut(name).and_then(|r| r.as_object_mut()) {
+            r.insert("status".into(), json!("waiting"));
+            r.insert("reason".into(), json!("replaced by a new copy; checking it again"));
+            r.remove("override");
+            r.remove("deleted");
+            self.save(key, &t);
+        }
+    }
+
     /// usable(key, name): (use, trust).
     pub fn usable(&self, key: &str, name: &str) -> (bool, Option<&'static str>) {
         let tf = self.load(key);
@@ -662,6 +731,20 @@ impl CanTrust {
             }
         }
         out
+    }
+}
+
+/// What a failed record's check failed on, for the upload API's `check_reason`.
+fn fault_of(r: &Value) -> &'static str {
+    let reason = r.get("reason").and_then(|x| x.as_str()).unwrap_or("");
+    if r.get("signed") == Some(&Value::Bool(false)) || r.get("kind").and_then(|k| k.as_str()) == Some(COULD_NOT_SIGN) {
+        "unsigned"
+    } else if reason.contains("(SHA-256 differs)") || reason.contains("(length differs)") {
+        "mismatch"
+    } else if reason.starts_with("bad chain") {
+        "chain_break"
+    } else {
+        "bad_signature"
     }
 }
 
