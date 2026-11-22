@@ -297,7 +297,7 @@ check.
 |---|---|---|
 | `verified` | the stored log's whole-file SHA-256 and length are the sidecar's, the ECDSA P-256 signature is valid for the car's paired key, and its chain link fits: `prev_name` `-` only at index 0 with `prev_sha256` 64 zeros, otherwise the log it names, when that is here, has that SHA-256 and the index before, by the same key | none |
 | `failed` | any of those failed | `mismatch`: the stored log's SHA-256 or length is not what was signed; `bad_signature`: a bad signature, signed by a key this car is not paired with or for another car key, or unknown version, algorithm or key; `chain_break`: the chain link does not fit (or the chain fields are bad); `unsigned`: not signed (its sidecar is here and says `"signed": false`, or has no `integrity`), also from a car that is not paired yet |
-| `pending` | not checked yet: its sidecar has not arrived (however long ago the log came: the server itself treats a log with no sidecar after 10 minutes as not signed, but tells the bridge `pending` until the sidecar is here), the check is still running (it starts as the log or its sidecar is complete), a new copy waits to be checked, or the log it names as its previous is here but not checked yet. Ask again on the next round | none |
+| `pending` | not checked yet: its sidecar has not arrived (however long ago the log came: the server itself treats a log with no sidecar after 10 minutes as not signed, but tells the bridge `pending` until the sidecar is here), the check is still running (it starts as the log or its sidecar is complete), a new copy waits to be checked, or the log it names as its previous is here but not checked yet (or its sidecar has not arrived: unsigned logs are not part of the chain, so its link is checked once that sidecar is here). Ask again on the next round | none |
 
 The check is made once, when the log or its sidecar is complete (and again
 when the car's key is trusted, or a failed log is replaced), and kept in the
@@ -324,13 +324,16 @@ sidecar is taken in its place: it is uploaded as usual (offset 0, then
 resumed; `status` answers `partial` meanwhile), the old copy stays until the
 new one is all here and its SHA-256 matched, then the new one replaces it
 (`201` with `"replaced": true`), its check is `pending` and it is checked
-again. Until that check is made, the other half of the pair (the sidecar
-after its log, or the log after its sidecar, sent right after or at the same
-time) and the same file again are still taken in place of the old ones, so
-send both halves; once checked, the same rules apply again. Whether the old
-copy may be replaced is decided again, at the moment of the swap, from the
-stored check: if it was verified meanwhile (the owner trusted the car's new
-key), the new copy is dropped and the answer is `409 exists_different`. The
+again. Until that check is made, only the other half of the pair (the
+sidecar after its log, or the log after its sidecar, sent right after or at
+the same time) is still taken in place of the old one, once, so send both
+halves; the half already replaced answers `201` `"already": true` for the
+same bytes and `409 exists_different` for any other copy. If the new copy
+cannot be read when it is checked, its check stays `pending` and neither
+half is taken until it is checked again; once checked, the same rules apply
+again. Whether the old copy may be replaced is decided again, at the moment
+of the swap, from the stored check: if it was verified meanwhile (the owner
+trusted the car's new key), the new copy is dropped and the answer is `409 exists_different`. The
 log's data is taken out of the index first (it was only indexed if the owner
 used it anyway; that choice is dropped with the old copy). A log whose check
 is `verified`, `pending` for any other reason, or `failed` only by a

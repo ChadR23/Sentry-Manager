@@ -22,6 +22,25 @@ pub const JUDGE_V: i64 = 2;
 pub const COULD_NOT_SIGN: &str = "bridge-could-not-sign";
 /// The reason of a record whose log (or sidecar) was just replaced by a new copy.
 const REPLACED: &str = "replaced by a new copy; checking it again";
+/// The reason of a replaced record whose new copy could not be read when judged: it waits to be
+/// judged again (pending()), and is not open to another copy meanwhile.
+const UNREAD: &str = "replaced by a new copy; it could not be read yet, checking it again";
+
+/// Which half of a log's pair a new copy is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Half {
+    Log,
+    Sidecar,
+}
+
+impl Half {
+    fn word(self) -> &'static str {
+        match self {
+            Half::Log => "log",
+            Half::Sidecar => "sidecar",
+        }
+    }
+}
 const ZERO: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 /// SHA-256 of a public key's DER, hex in pairs with colons.
@@ -302,6 +321,8 @@ impl CanTrust {
         let side_here = side.is_some();
         let now = (self.now)();
         let mut rec = had.clone();
+        // judged (or waiting for its sidecar) from here on: no half is open to a new copy
+        rec.remove("replaced");
         set(&mut rec, "checkedAt", n(now));
         let first_seen = had.get("firstSeen").filter(|v| json::truthy(Some(v))).cloned().unwrap_or(n(now));
         set(&mut rec, "firstSeen", first_seen.clone());
@@ -314,7 +335,19 @@ impl CanTrust {
         }
         let c = match check_signature(&file, name, side.as_ref()) {
             Ok(c) => c,
-            Err(_) => return Value::Object(had),
+            Err(_) => {
+                // a just-replaced copy that could not be read stays waiting (judged again by the
+                // pending pass), but is no longer open to a new copy of either half
+                if had.get("reason").and_then(|x| x.as_str()) == Some(REPLACED) {
+                    let mut r = had;
+                    r.remove("replaced");
+                    r.insert("reason".into(), json!(UNREAD));
+                    t.logs.insert(name.to_string(), Value::Object(r.clone()));
+                    self.save(key, t);
+                    return Value::Object(r);
+                }
+                return Value::Object(had);
+            }
         };
         set(&mut rec, "v", json!(JUDGE_V));
         set(&mut rec, "kind", Value::Null);
@@ -373,7 +406,8 @@ impl CanTrust {
     pub fn checks(&self, key: &str, logs: &[(String, f64)]) -> Vec<(&'static str, Option<&'static str>)> {
         let tf = self.load(key);
         let t = tf.lock().unwrap();
-        logs.iter().map(|(name, size)| Self::check_answer(&t, name, *size, self.sidecar_here(key, name))).collect()
+        let side_here = |name: &str| self.sidecar_here(key, name);
+        logs.iter().map(|(name, size)| Self::check_answer(&t, name, *size, &side_here)).collect()
     }
 
     /// Whether the log's sidecar is here (all of it: one still arriving is a `.part`).
@@ -386,7 +420,7 @@ impl CanTrust {
         r.get("signed") == Some(&Value::Bool(false)) || r.get("kind").and_then(|k| k.as_str()) == Some(COULD_NOT_SIGN)
     }
 
-    fn check_answer(t: &TrustFile, name: &str, size: f64, side_here: bool) -> (&'static str, Option<&'static str>) {
+    fn check_answer(t: &TrustFile, name: &str, size: f64, side_here: &dyn Fn(&str) -> bool) -> (&'static str, Option<&'static str>) {
         let Some(r) = t.logs.get(name) else { return ("pending", None) };
         let st = r.get("status").and_then(|s| s.as_str()).unwrap_or("");
         // a record of another copy of this name (replaced, not judged again yet)
@@ -395,11 +429,11 @@ impl CanTrust {
         }
         // judged not signed for want of a sidecar (10 minutes without one): for the bridge the
         // sidecar has not arrived yet (the server itself still goes by the record)
-        if Self::not_signed(r) && !side_here {
+        if Self::not_signed(r) && !side_here(name) {
             return ("pending", None);
         }
         match st {
-            "verified" => match Self::link_fits(t, r) {
+            "verified" => match Self::link_fits(t, r, side_here) {
                 Some(true) => ("verified", None),
                 Some(false) => ("failed", Some("chain_break")),
                 None => ("pending", None),
@@ -411,9 +445,12 @@ impl CanTrust {
     }
 
     /// Whether a verified log's chain link fits the log it names as its previous one: None
-    /// while that one is here but not judged yet. A previous log that is not here (not sent
-    /// yet, or lost on the bridge: a gap) or that failed its own check is not this log's fault.
-    fn link_fits(t: &TrustFile, r: &Value) -> Option<bool> {
+    /// while that one is here but not judged yet, or judged not signed for want of its sidecar
+    /// (unsigned logs are not part of the chain, so a signed log never names one: its sidecar
+    /// has not arrived yet). A previous log that is not here (not sent yet, or lost on the
+    /// bridge: a gap) or that failed its own check (not signed by the sidecar that is here
+    /// included) is not this log's fault.
+    fn link_fits(t: &TrustFile, r: &Value, side_here: &dyn Fn(&str) -> bool) -> Option<bool> {
         let s = |r: &Value, k: &str| r.get(k).and_then(|v| v.as_str()).map(String::from);
         let index = r.get("index").and_then(|x| x.as_f64())?;
         let prev_name = s(r, "prevName").unwrap_or_default();
@@ -425,6 +462,9 @@ impl CanTrust {
             return Some(false);
         }
         let Some(p) = t.logs.get(&prev_name) else { return Some(true) };
+        if Self::not_signed(p) {
+            return if side_here(&prev_name) { Some(true) } else { None };
+        }
         match p.get("status").and_then(|x| x.as_str()) {
             Some("failed") => return Some(true),
             Some("waiting") | None => return None,
@@ -440,39 +480,49 @@ impl CanTrust {
     /// Whether a new copy of this log (or of its sidecar) may take the stored one's place, from
     /// the stored record alone: its own check failed (mismatch, bad signature, bad chain
     /// fields, or not signed by the sidecar that is here), for this copy (`size`: the log's size
-    /// here); or it waits to be judged again after a replacement (the other half of the pair,
-    /// or the same file again, may still come). Never for a chain break worked out at status
+    /// here); or it waits to be judged again after one half of the pair was replaced (`half`:
+    /// the half this copy is for): then only the other half may come, once (the half already
+    /// replaced keeps its new copy until judged). Never for a chain break worked out at status
     /// time from the previous log: this log's own copy is good.
-    fn replaceable(r: &Value, size: f64, side_here: bool) -> bool {
+    fn replaceable(r: &Value, size: f64, side_here: bool, half: Half) -> bool {
         match r.get("status").and_then(|s| s.as_str()) {
-            Some("waiting") => r.get("reason").and_then(|x| x.as_str()) == Some(REPLACED),
+            Some("waiting") => {
+                let other = match half {
+                    Half::Log => Half::Sidecar,
+                    Half::Sidecar => Half::Log,
+                };
+                r.get("reason").and_then(|x| x.as_str()) == Some(REPLACED) && r.get("replaced").and_then(|x| x.as_str()) == Some(other.word())
+            }
             Some("failed") | Some("unsigned") => r.get("length").and_then(|l| l.as_f64()) == Some(size) && (!Self::not_signed(r) || side_here),
             _ => false,
         }
     }
 
-    /// replaceable_now(key, name, size): see `replaceable` (a first look, before a copy arrives).
-    pub fn replaceable_now(&self, key: &str, name: &str, size: f64) -> bool {
+    /// replaceable_now(key, name, size, half): see `replaceable` (a first look, before a copy arrives).
+    pub fn replaceable_now(&self, key: &str, name: &str, size: f64, half: Half) -> bool {
         let side_here = self.sidecar_here(key, name);
         let tf = self.load(key);
         let t = tf.lock().unwrap();
-        t.logs.get(name).is_some_and(|r| Self::replaceable(r, size, side_here))
+        t.logs.get(name).is_some_and(|r| Self::replaceable(r, size, side_here, half))
     }
 
-    /// replace_if_failed(key, name, size, swap): under the one lock on this car's records, and
+    /// replace_if_failed(key, name, size, half, swap): under the one lock on this car's records, and
     /// only if the stored record may still be replaced (see `replaceable`; an owner's "trust
     /// key" may have verified it meanwhile): `swap` puts the new copy in place, then the record
-    /// waits to be judged again (its override and deleted marks dropped). Ok(false): nothing
-    /// was done.
-    pub fn replace_if_failed(&self, key: &str, name: &str, size: f64, swap: impl FnOnce() -> std::io::Result<()>) -> std::io::Result<bool> {
+    /// waits to be judged again (its override and deleted marks dropped), with the half it
+    /// replaced (`replaced`: "log" or "sidecar", "both" after the other one too). Ok(false):
+    /// nothing was done.
+    pub fn replace_if_failed(&self, key: &str, name: &str, size: f64, half: Half, swap: impl FnOnce() -> std::io::Result<()>) -> std::io::Result<bool> {
         let side_here = self.sidecar_here(key, name);
         let tf = self.load(key);
         let mut t = tf.lock().unwrap();
         let Some(r) = t.logs.get_mut(name).and_then(|r| r.as_object_mut()) else { return Ok(false) };
-        if !Self::replaceable(&Value::Object(r.clone()), size, side_here) {
+        if !Self::replaceable(&Value::Object(r.clone()), size, side_here, half) {
             return Ok(false);
         }
+        let first = r.get("status").and_then(|s| s.as_str()) != Some("waiting");
         swap()?;
+        r.insert("replaced".into(), json!(if first { half.word() } else { "both" }));
         r.insert("status".into(), json!("waiting"));
         r.insert("reason".into(), json!(REPLACED));
         r.remove("override");
@@ -481,10 +531,10 @@ impl CanTrust {
         Ok(true)
     }
 
-    /// recheck_if_failed(key, name, size): `replace_if_failed` with nothing to swap: the record
+    /// recheck_if_failed(key, name, size, half): `replace_if_failed` with nothing to swap: the record
     /// waits to be judged again, only if it may still be replaced.
-    pub fn recheck_if_failed(&self, key: &str, name: &str, size: f64) -> bool {
-        self.replace_if_failed(key, name, size, || Ok(())).unwrap_or(false)
+    pub fn recheck_if_failed(&self, key: &str, name: &str, size: f64, half: Half) -> bool {
+        self.replace_if_failed(key, name, size, half, || Ok(())).unwrap_or(false)
     }
 
     /// usable(key, name): (use, trust).

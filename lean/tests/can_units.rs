@@ -8,7 +8,7 @@ use p256::ecdsa::{signature::Signer, Signature, SigningKey};
 
 use sentry_lean::can::json::stringify;
 use sentry_lean::can::logs::{parse_name, CanLogs, Row};
-use sentry_lean::can::trust::{base64, fingerprint_of, signed_message, CanTrust};
+use sentry_lean::can::trust::{base64, fingerprint_of, signed_message, CanTrust, Half};
 use sentry_lean::can::{prune, reader, search, sentry_usb, tz, util};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -553,10 +553,12 @@ fn both_halves_of_a_failed_pair_are_taken_while_the_first_waits() {
     assert_eq!(t.check(KEY, &nm(0))["status"], "failed");
     // "Resend all": the log first (its record now waits to be judged again), then its sidecar,
     // sent before the judge has run
-    assert_eq!(send(&logs, &nm(0), b"a first resent copy", 1).unwrap()["replaced"], true);
+    assert_eq!(send(&logs, &nm(0), &body, 1).unwrap()["replaced"], true);
     assert_eq!(t.record(KEY, &nm(0)).unwrap()["status"], "waiting");
-    assert_eq!(send(&logs, &nm(0), &body, 2).unwrap()["replaced"], true, "and the log itself again");
+    assert_eq!(t.record(KEY, &nm(0)).unwrap()["replaced"], "log");
+    assert_eq!(send(&logs, &nm(0), &body, 2).unwrap()["already"], true, "the log itself again");
     assert_eq!(send(&logs, &sname, &side, 1).unwrap()["replaced"], true, "the other half of the pair");
+    assert_eq!(t.record(KEY, &nm(0)).unwrap()["replaced"], "both");
     assert_eq!(std::fs::read(dir.join(KEY).join(&sname)).unwrap(), side);
     assert_eq!(check_of(&ask(&logs, &[nm(0)]), &nm(0)), pair("pending", "-"));
     t.check(KEY, &nm(0));
@@ -687,16 +689,134 @@ fn recheck_if_failed_goes_by_the_stored_record_alone() {
         t.check(KEY, &nm(i));
     }
     assert_eq!(check_of(&ask(&logs, &[nm(1)]), &nm(1)), pair("failed", "chain_break"));
-    assert!(!t.recheck_if_failed(KEY, &nm(0), 8.0), "verified");
-    assert!(!t.recheck_if_failed(KEY, &nm(1), 8.0), "a chain break worked out from the previous log");
-    assert!(!t.recheck_if_failed(KEY, &nm(2), 9.0), "a record of another size");
-    assert!(!t.recheck_if_failed(KEY, &nm(5), 8.0), "no record");
-    assert!(t.recheck_if_failed(KEY, &nm(2), 8.0), "mismatch");
+    assert!(!t.recheck_if_failed(KEY, &nm(0), 8.0, Half::Log), "verified");
+    assert!(!t.recheck_if_failed(KEY, &nm(1), 8.0, Half::Log), "a chain break worked out from the previous log");
+    assert!(!t.recheck_if_failed(KEY, &nm(2), 9.0, Half::Log), "a record of another size");
+    assert!(!t.recheck_if_failed(KEY, &nm(5), 8.0, Half::Log), "no record");
+    assert!(t.recheck_if_failed(KEY, &nm(2), 8.0, Half::Log), "mismatch");
     assert_eq!(status(&t.record(KEY, &nm(2)).unwrap()), ("waiting".into(), "replaced by a new copy; checking it again".into()));
-    assert!(t.recheck_if_failed(KEY, &nm(2), 123.0), "waiting after a replacement: either half may come again");
+    assert!(!t.recheck_if_failed(KEY, &nm(2), 8.0, Half::Log), "waiting after a replacement: not the same half again");
+    assert!(t.recheck_if_failed(KEY, &nm(2), 123.0, Half::Sidecar), "the other half, of any size");
+    assert!(!t.recheck_if_failed(KEY, &nm(2), 8.0, Half::Sidecar), "only once");
     t.check(KEY, &nm(2));
+    assert!(t.record(KEY, &nm(2)).unwrap().get("replaced").is_none(), "judged: no half replaced any more");
     // a swap that fails leaves the record as it was
-    let e = t.replace_if_failed(KEY, &nm(2), 8.0, || Err(std::io::Error::other("disk full"))).unwrap_err();
+    let e = t.replace_if_failed(KEY, &nm(2), 8.0, Half::Log, || Err(std::io::Error::other("disk full"))).unwrap_err();
     assert_eq!(e.to_string(), "disk full");
     assert_eq!(t.record(KEY, &nm(2)).unwrap()["status"], "failed");
+}
+
+#[test]
+fn a_replaced_half_is_not_replaced_again_before_its_check() {
+    let src = tmp("half-bridge");
+    let dir = tmp("half");
+    let (logs, t) = checked(&dir);
+    let mut b = Bridge::new(31);
+    b.log(&src, &nm(0), b"the log as the bridge wrote it", KEY);
+    let body = std::fs::read(src.join(KEY).join(nm(0))).unwrap();
+    let side = std::fs::read(src.join(KEY).join(format!("{}.json", nm(0)))).unwrap();
+    let sname = format!("{}.json", nm(0));
+    let mut bad = body.clone();
+    bad[2] ^= 0x20;
+    send(&logs, &nm(0), &bad, 1).unwrap();
+    send(&logs, &sname, &side, 1).unwrap();
+    assert_eq!(t.check(KEY, &nm(0))["status"], "failed");
+    // the log is resent: its record waits to be judged again
+    assert_eq!(send(&logs, &nm(0), &body, 1).unwrap()["replaced"], true);
+    // the same log again is already here; any other copy, of any size, is refused
+    assert_eq!(send(&logs, &nm(0), &body, 2).unwrap()["already"], true);
+    let e = send(&logs, &nm(0), b"a copy of another size entirely", 1).unwrap_err();
+    assert_eq!((e.status, e.code.as_str()), (409, "exists_different"));
+    assert_eq!(send(&logs, &nm(0), &bad, 1).unwrap_err().code, "exists_different");
+    assert_eq!(std::fs::read(dir.join(KEY).join(nm(0))).unwrap(), body, "the resent copy is kept");
+    // the other half, once
+    let mut s2: Value = serde_json::from_slice(&side).unwrap();
+    s2["frames"] = json!(11);
+    assert_eq!(send(&logs, &sname, stringify(&s2).as_bytes(), 1).unwrap()["replaced"], true);
+    assert_eq!(send(&logs, &sname, stringify(&s2).as_bytes(), 1).unwrap()["already"], true);
+    assert_eq!(send(&logs, &sname, &side, 1).unwrap_err().code, "exists_different", "both halves replaced: nothing more");
+    assert_eq!(send(&logs, &nm(0), &bad, 1).unwrap_err().code, "exists_different");
+    t.check(KEY, &nm(0));
+    assert_eq!(check_of(&ask(&logs, &[nm(0)]), &nm(0)), pair("verified", "-"));
+    // the sidecar first: then only the log may follow
+    let dir = tmp("half-side-first");
+    let (logs, t) = checked(&dir);
+    send(&logs, &nm(0), &bad, 1).unwrap();
+    send(&logs, &sname, &side, 1).unwrap();
+    assert_eq!(t.check(KEY, &nm(0))["status"], "failed");
+    assert_eq!(send(&logs, &sname, stringify(&s2).as_bytes(), 1).unwrap()["replaced"], true);
+    assert_eq!(send(&logs, &sname, &side, 1).unwrap_err().code, "exists_different");
+    assert_eq!(send(&logs, &nm(0), &body, 1).unwrap()["replaced"], true);
+    assert_eq!(send(&logs, &nm(0), &bad, 1).unwrap_err().code, "exists_different");
+    t.check(KEY, &nm(0));
+    assert_eq!(check_of(&ask(&logs, &[nm(0)]), &nm(0)), pair("verified", "-"));
+}
+
+#[test]
+fn a_replaced_log_that_could_not_be_read_is_not_replaceable_until_judged() {
+    let src = tmp("io-bridge");
+    let dir = tmp("io");
+    let (logs, t) = checked(&dir);
+    let mut b = Bridge::new(33);
+    b.log(&src, &nm(0), b"the log as the bridge wrote it", KEY);
+    let body = std::fs::read(src.join(KEY).join(nm(0))).unwrap();
+    let side = std::fs::read(src.join(KEY).join(format!("{}.json", nm(0)))).unwrap();
+    let sname = format!("{}.json", nm(0));
+    let mut bad = body.clone();
+    bad[2] ^= 0x20;
+    send(&logs, &nm(0), &bad, 1).unwrap();
+    send(&logs, &sname, &side, 1).unwrap();
+    assert_eq!(t.check(KEY, &nm(0))["status"], "failed");
+    assert_eq!(send(&logs, &nm(0), &body, 1).unwrap()["replaced"], true);
+    // the judge cannot read the log (here: a folder where the file was)
+    let file = dir.join(KEY).join(nm(0));
+    std::fs::remove_file(&file).unwrap();
+    std::fs::create_dir(&file).unwrap();
+    t.check(KEY, &nm(0));
+    let r = t.record(KEY, &nm(0)).unwrap();
+    assert_eq!(r["status"], "waiting", "still to be judged");
+    assert_ne!(r["reason"], "replaced by a new copy; checking it again", "but no longer open to a new copy");
+    assert!(t.pending().contains(&(KEY.to_string(), nm(0))), "judged again by the pending pass");
+    std::fs::remove_dir(&file).unwrap();
+    std::fs::write(&file, &body).unwrap();
+    let mut s2: Value = serde_json::from_slice(&side).unwrap();
+    s2["frames"] = json!(11);
+    assert_eq!(send(&logs, &sname, stringify(&s2).as_bytes(), 1).unwrap_err().code, "exists_different");
+    assert_eq!(check_of(&ask(&logs, &[nm(0)]), &nm(0)), pair("pending", "-"));
+    t.check(KEY, &nm(0));
+    assert_eq!(check_of(&ask(&logs, &[nm(0)]), &nm(0)), pair("verified", "-"));
+}
+
+#[test]
+fn a_previous_log_not_signed_for_want_of_its_sidecar_leaves_the_link_pending() {
+    let start = 1_800_000_000_000u64;
+    let src = tmp("prev-unsigned-bridge");
+    let dir = tmp("prev-unsigned");
+    let clock = Arc::new(AtomicU64::new(start));
+    let c = clock.clone();
+    let logs = CanLogs::new(dir.to_path_buf(), Box::new(|| f64::INFINITY), Box::new(util::now_ms));
+    let t = CanTrust::new(dir.to_path_buf(), Box::new(move || c.load(Ordering::SeqCst) as f64));
+    logs.set_trust(t.clone());
+    let mut b = Bridge::new(35);
+    b.log(&src, &nm(0), b"log zero", KEY);
+    b.log(&src, &nm(1), b"log one!", KEY);
+    let file = |i: usize, side: bool| std::fs::read(src.join(KEY).join(if side { format!("{}.json", nm(i)) } else { nm(i) })).unwrap();
+    // log 0 arrives without its sidecar, and after 10 minutes is judged not signed
+    send(&logs, &nm(0), &file(0, false), 1).unwrap();
+    t.check(KEY, &nm(0));
+    clock.store(start + 11 * 60_000, Ordering::SeqCst);
+    assert_eq!(t.check(KEY, &nm(0))["status"], "unsigned");
+    // log 1 arrives whole and well signed, naming log 0
+    send(&logs, &nm(1), &file(1, false), 1).unwrap();
+    send(&logs, &format!("{}.json", nm(1)), &file(1, true), 1).unwrap();
+    assert_eq!(t.check(KEY, &nm(1))["status"], "verified");
+    let f = ask(&logs, &[nm(0), nm(1)]);
+    assert_eq!(check_of(&f, &nm(0)), pair("pending", "-"));
+    assert_eq!(check_of(&f, &nm(1)), pair("pending", "-"), "not a chain break while log 0 waits for its sidecar");
+    // log 0's sidecar arrives: judged, and the link is checked as usual
+    send(&logs, &format!("{}.json", nm(0)), &file(0, true), 1).unwrap();
+    t.check(KEY, &nm(0));
+    let f = ask(&logs, &[nm(0), nm(1)]);
+    assert_eq!(check_of(&f, &nm(0)), pair("verified", "-"));
+    assert_eq!(check_of(&f, &nm(1)), pair("verified", "-"));
 }

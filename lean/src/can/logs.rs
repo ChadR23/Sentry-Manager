@@ -12,7 +12,7 @@
 //! check failed (the bridge's "Resend all"): the old copy stays until the new one is all here.
 
 use super::json::{self, n};
-use super::trust::CanTrust;
+use super::trust::{CanTrust, Half};
 use super::tz;
 use super::util::{self, mtime_ms};
 use serde_json::{json, Map, Value};
@@ -347,10 +347,11 @@ impl CanLogs {
     #[allow(clippy::too_many_arguments)]
     fn receive_locked(&self, nm: &Name, name: &str, file: &Path, body: &[u8], offset: f64, length: f64, sha256: &str) -> Result<Value, CanError> {
         let log_name = if nm.sidecar { &name[..name.len() - 5] } else { name };
+        let half = if nm.sidecar { Half::Sidecar } else { Half::Log };
         // a new copy may take the stored one's place only while its stored record says so (see
         // CanTrust::replaceable): never without the checks
         let replaceable = || match (self.trust.get(), self.log_size(&nm.vehicle_key, log_name)) {
-            (Some(t), Some(size)) => t.replaceable_now(&nm.vehicle_key, log_name, size),
+            (Some(t), Some(size)) => t.replaceable_now(&nm.vehicle_key, log_name, size, half),
             _ => false,
         };
         let mut had = self.state_of(name)?;
@@ -431,7 +432,7 @@ impl CanLogs {
             // checked again and swapped under the one lock on the car's records: the old copy may
             // have been verified meanwhile (e.g. its key trusted), and then it stays
             let swapped = match (self.trust.get(), self.log_size(&nm.vehicle_key, log_name)) {
-                (Some(t), Some(size)) => t.replace_if_failed(&nm.vehicle_key, log_name, size, || fs::rename(&part, file)).map_err(io)?,
+                (Some(t), Some(size)) => t.replace_if_failed(&nm.vehicle_key, log_name, size, half, || fs::rename(&part, file)).map_err(io)?,
                 _ => false,
             };
             if !swapped {
