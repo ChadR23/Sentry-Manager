@@ -462,13 +462,16 @@ impl CanTrust {
             return Some(false);
         }
         let Some(p) = t.logs.get(&prev_name) else { return Some(true) };
+        // a previous log waiting to be judged (again) is not known yet, whatever its old
+        // record says
+        if matches!(p.get("status").and_then(|x| x.as_str()), Some("waiting") | None) {
+            return None;
+        }
         if Self::not_signed(p) {
             return if side_here(&prev_name) { Some(true) } else { None };
         }
-        match p.get("status").and_then(|x| x.as_str()) {
-            Some("failed") => return Some(true),
-            Some("waiting") | None => return None,
-            _ => {}
+        if p.get("status").and_then(|x| x.as_str()) == Some("failed") {
+            return Some(true);
         }
         let same_key = match (s(p, "fingerprint"), s(r, "fingerprint")) {
             (Some(a), Some(b)) => same_fingerprint(&a, &b),

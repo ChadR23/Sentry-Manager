@@ -815,6 +815,11 @@ fn a_previous_log_not_signed_for_want_of_its_sidecar_leaves_the_link_pending() {
     assert_eq!(check_of(&f, &nm(1)), pair("pending", "-"), "not a chain break while log 0 waits for its sidecar");
     // log 0's sidecar arrives: judged, and the link is checked as usual
     send(&logs, &format!("{}.json", nm(0)), &file(0, true), 1).unwrap();
+    // while log 0 waits to be judged again (it still carries its old signed:false), log 1's
+    // link is not known yet: pending, not verified
+    assert!(t.recheck_if_failed(KEY, &nm(0), 8.0, Half::Sidecar));
+    let f = ask(&logs, &[nm(1)]);
+    assert_eq!(check_of(&f, &nm(1)), pair("pending", "-"), "not verified while log 0 waits to be judged");
     t.check(KEY, &nm(0));
     let f = ask(&logs, &[nm(0), nm(1)]);
     assert_eq!(check_of(&f, &nm(0)), pair("verified", "-"));
