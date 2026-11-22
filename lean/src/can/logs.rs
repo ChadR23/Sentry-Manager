@@ -168,6 +168,8 @@ pub struct CanLogs {
     loading: Mutex<()>,
     /// the checks (set once): status answers `check`, and a failed log may be replaced
     trust: OnceLock<Arc<CanTrust>>,
+    /// (tests) run as a new copy is about to take a failed one's place
+    before_swap: OnceLock<Box<dyn Fn() + Send + Sync>>,
 }
 
 fn stat(p: &Path) -> Option<fs::Metadata> {
@@ -176,10 +178,10 @@ fn stat(p: &Path) -> Option<fs::Metadata> {
 
 impl CanLogs {
     pub fn new(dir: PathBuf, free_bytes: Box<dyn Fn() -> f64 + Send + Sync>, now: Box<dyn Fn() -> f64 + Send + Sync>) -> Arc<CanLogs> {
-        Arc::new(CanLogs { dir, free_bytes, now, max_files_per_car: MAX_LOGS_PER_CAR, min_free: 2.0 * 1024f64.powi(3), busy: Mutex::new(HashSet::new()), cats: Mutex::new(HashMap::new()), loading: Mutex::new(()), trust: OnceLock::new() })
+        Arc::new(CanLogs { dir, free_bytes, now, max_files_per_car: MAX_LOGS_PER_CAR, min_free: 2.0 * 1024f64.powi(3), busy: Mutex::new(HashSet::new()), cats: Mutex::new(HashMap::new()), loading: Mutex::new(()), trust: OnceLock::new(), before_swap: OnceLock::new() })
     }
     pub fn with_limits(dir: PathBuf, max_files_per_car: usize, min_free: f64, free_bytes: Box<dyn Fn() -> f64 + Send + Sync>, now: Box<dyn Fn() -> f64 + Send + Sync>) -> Arc<CanLogs> {
-        Arc::new(CanLogs { dir, free_bytes, now, max_files_per_car, min_free, busy: Mutex::new(HashSet::new()), cats: Mutex::new(HashMap::new()), loading: Mutex::new(()), trust: OnceLock::new() })
+        Arc::new(CanLogs { dir, free_bytes, now, max_files_per_car, min_free, busy: Mutex::new(HashSet::new()), cats: Mutex::new(HashMap::new()), loading: Mutex::new(()), trust: OnceLock::new(), before_swap: OnceLock::new() })
     }
 
     /// The checks the status answers and replacements go by.
@@ -187,12 +189,16 @@ impl CanLogs {
         let _ = self.trust.set(trust);
     }
 
-    /// The `check` of a finished log (or of the log a sidecar is for): None without checks.
-    fn check_of(&self, log_name: &str) -> Option<(&'static str, Option<&'static str>)> {
-        let trust = self.trust.get()?;
-        let nm = parse_name(log_name)?;
-        let size = stat(&self.dir.join(&nm.vehicle_key).join(log_name)).filter(|s| s.is_file())?.len() as f64;
-        trust.checks(&nm.vehicle_key, &[(log_name.to_string(), size)]).pop()
+    /// (tests) f runs as a new copy is about to take a failed one's place, after the copy is
+    /// all here and its SHA-256 matched: where an owner's "trust key" may come in.
+    #[doc(hidden)]
+    pub fn set_before_swap(&self, f: Box<dyn Fn() + Send + Sync>) {
+        let _ = self.before_swap.set(f);
+    }
+
+    /// The size of a finished log here (the one a sidecar is for), or None.
+    fn log_size(&self, key: &str, log_name: &str) -> Option<f64> {
+        stat(&self.dir.join(key).join(log_name)).filter(|s| s.is_file()).map(|s| s.len() as f64)
     }
 
     fn file_of(&self, name: &str) -> Result<PathBuf, CanError> {
@@ -216,11 +222,15 @@ impl CanLogs {
         Ok(("missing".into(), 0.0, None))
     }
 
+    /// One status entry. `size`: the whole file's size once known (its `length`), the bytes
+    /// received so far while an upload's length is not known, 0 for a file not here.
     fn state_json(s: &(String, f64, Option<f64>)) -> Value {
-        if s.0 == "complete" {
-            return json!({ "state": s.0, "received": n(s.1), "length": s.2.map(n), "size": n(s.1) });
-        }
-        json!({ "state": s.0, "received": n(s.1), "length": s.2.map(n) })
+        let size = match s.0.as_str() {
+            "complete" => s.1,
+            "partial" => s.2.unwrap_or(s.1),
+            _ => 0.0,
+        };
+        json!({ "state": s.0, "received": n(s.1), "length": s.2.map(n), "size": n(size) })
     }
 
     /// status(names, { key }): many at once; only `key`'s names are answered.
@@ -236,13 +246,13 @@ impl CanLogs {
             let parsed = parse_name(&name);
             if let (Some(p), Some(k)) = (&parsed, key) {
                 if p.vehicle_key != k {
-                    files.insert(name, json!({ "state": "forbidden", "received": 0, "length": null }));
+                    files.insert(name, json!({ "state": "forbidden", "received": 0, "length": null, "size": 0 }));
                     continue;
                 }
             }
             let st = match self.state_of(&name) {
                 Ok(s) => Self::state_json(&s),
-                Err(_) => json!({ "state": "invalid", "received": 0, "length": null }),
+                Err(_) => json!({ "state": "invalid", "received": 0, "length": null, "size": 0 }),
             };
             if st["state"] == "complete" {
                 if let Some(nm) = parsed.filter(|_| self.trust.get().is_some()) {
@@ -337,15 +347,20 @@ impl CanLogs {
     #[allow(clippy::too_many_arguments)]
     fn receive_locked(&self, nm: &Name, name: &str, file: &Path, body: &[u8], offset: f64, length: f64, sha256: &str) -> Result<Value, CanError> {
         let log_name = if nm.sidecar { &name[..name.len() - 5] } else { name };
-        let failed = || self.check_of(log_name).is_some_and(|c| c.0 == "failed");
+        // a new copy may take the stored one's place only while its stored record says so (see
+        // CanTrust::replaceable): never without the checks
+        let replaceable = || match (self.trust.get(), self.log_size(&nm.vehicle_key, log_name)) {
+            (Some(t), Some(size)) => t.replaceable_now(&nm.vehicle_key, log_name, size),
+            _ => false,
+        };
         let mut had = self.state_of(name)?;
-        // a new copy for a finished one: only in place of a log whose check failed
+        // a new copy for a finished one: only in place of a log whose stored check failed
         let replacing = stat(file).is_some();
         if had.0 == "complete" {
             if had.2 == Some(length) && util::hash_file(file).map(|h| h.0).ok().as_deref() == Some(sha256) {
                 return Ok(json!({ "received": n(length), "length": n(length), "complete": true, "already": true }));
             }
-            if !failed() {
+            if !replaceable() {
                 return Err(can_error(409, "exists_different", "A different file with this name is already here."));
             }
             had = ("missing".into(), 0.0, None);
@@ -410,17 +425,24 @@ impl CanLogs {
             }
         }
         if replacing {
-            // (checked again: the old copy may have been verified meanwhile, e.g. its key trusted)
-            if !failed() {
+            if let Some(f) = self.before_swap.get() {
+                f();
+            }
+            // checked again and swapped under the one lock on the car's records: the old copy may
+            // have been verified meanwhile (e.g. its key trusted), and then it stays
+            let swapped = match (self.trust.get(), self.log_size(&nm.vehicle_key, log_name)) {
+                (Some(t), Some(size)) => t.replace_if_failed(&nm.vehicle_key, log_name, size, || fs::rename(&part, file)).map_err(io)?,
+                _ => false,
+            };
+            if !swapped {
+                // the new copy is dropped, as when the first look refused it
                 let _ = fs::remove_file(&part);
                 let _ = fs::remove_file(&part_json);
                 return Err(can_error(409, "exists_different", "A different file with this name is already here."));
             }
-            if let Some(t) = self.trust.get() {
-                t.recheck(&nm.vehicle_key, log_name);
-            }
+        } else {
+            fs::rename(&part, file).map_err(io)?;
         }
-        fs::rename(&part, file).map_err(io)?;
         let _ = fs::remove_file(&part_json);
         self.note_changed(&nm.vehicle_key, log_name);
         if replacing {

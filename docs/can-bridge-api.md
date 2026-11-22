@@ -270,18 +270,24 @@ Up to 2000 names per request (the app asks about up to 500). Answer `200`:
   "MY-car_20261108T143000Z_1.log.xz":      { "state": "complete", "received": 1834221, "length": 1834221, "size": 1834221, "check": "verified" },
   "MY-car_20261108T143000Z_1.log.xz.json": { "state": "complete", "received": 2310,    "length": 2310,    "size": 2310,    "check": "verified" },
   "MY-car_20261108T143100Z_2.log.xz":      { "state": "complete", "received": 1790112, "length": 1790112, "size": 1790112, "check": "failed", "check_reason": "mismatch" },
-  "MY-car_20261108T143200Z_3.log.xz":      { "state": "partial",  "received": 4194304, "length": 17825792 },
-  "MY-car_20261108T143200Z_3.log.xz.json": { "state": "missing",  "received": 0,       "length": null }
+  "MY-car_20261108T143200Z_3.log.xz":      { "state": "partial",  "received": 4194304, "length": 17825792, "size": 17825792 },
+  "MY-car_20261108T143200Z_3.log.xz.json": { "state": "missing",  "received": 0,       "length": null,     "size": 0 }
 } }
 ```
 
 - `complete`: all here, its SHA-256 matched; do not send again (but see
-  `check`). `size` is its size in bytes (the same as `received` and `length`).
+  `check`).
 - `partial`: an upload was started; resume at `received`. A new copy of a
   failed log that is still arriving is `partial` too (see below).
 - `missing`: send it from offset 0.
 - `invalid`: the name is not a CAN Bridge log name (see Names).
 - `forbidden`: another car key's file (a token is for one car).
+
+Every entry has `size`: the whole file's size in bytes once it is known (the
+same as `length`: a `complete` file, or a `partial` one whose upload said its
+`Upload-Length`), the bytes received so far for a `partial` upload whose
+length is not known (`length` null), and `0` for a `missing`, `invalid` or
+`forbidden` one.
 
 **`check`** (only on `complete` files) says whether the log was received
 intact and verified (see Signatures and pairing). A sidecar answers its log's
@@ -290,8 +296,8 @@ check.
 | `check` | Meaning | `check_reason` |
 |---|---|---|
 | `verified` | the stored log's whole-file SHA-256 and length are the sidecar's, the ECDSA P-256 signature is valid for the car's paired key, and its chain link fits: `prev_name` `-` only at index 0 with `prev_sha256` 64 zeros, otherwise the log it names, when that is here, has that SHA-256 and the index before, by the same key | none |
-| `failed` | any of those failed | `mismatch`: the stored log's SHA-256 or length is not what was signed; `bad_signature`: a bad signature, signed by a key this car is not paired with or for another car key, or unknown version, algorithm or key; `chain_break`: the chain link does not fit (or the chain fields are bad); `unsigned`: not signed (`"signed": false`, or no `integrity`, or no sidecar after 10 minutes), also from a car that is not paired yet |
-| `pending` | not checked yet: its sidecar has not arrived, the check is still running (it starts as the log or its sidecar is complete), a new copy waits to be checked, or the log it names as its previous is here but not checked yet. Ask again on the next round | none |
+| `failed` | any of those failed | `mismatch`: the stored log's SHA-256 or length is not what was signed; `bad_signature`: a bad signature, signed by a key this car is not paired with or for another car key, or unknown version, algorithm or key; `chain_break`: the chain link does not fit (or the chain fields are bad); `unsigned`: not signed (its sidecar is here and says `"signed": false`, or has no `integrity`), also from a car that is not paired yet |
+| `pending` | not checked yet: its sidecar has not arrived (however long ago the log came: the server itself treats a log with no sidecar after 10 minutes as not signed, but tells the bridge `pending` until the sidecar is here), the check is still running (it starts as the log or its sidecar is complete), a new copy waits to be checked, or the log it names as its previous is here but not checked yet. Ask again on the next round | none |
 
 The check is made once, when the log or its sidecar is complete (and again
 when the car's key is trusted, or a failed log is replaced), and kept in the
@@ -300,18 +306,37 @@ a file. A previous log that is not here (not sent yet, or lost on the bridge)
 or that failed its own check does not make the next one fail: the Nerd
 settings report gaps, duplicates and reorders in the chain.
 
+**A chain break from the previous log.** `chain_break` is also answered for
+a log whose own copy is good (its SHA-256, length and signature check out)
+when the log it names as its previous is here with another SHA-256 or index:
+the fault may be the previous log's. That log is never replaced (resending it
+answers `201` `"already": true` for the same bytes, `409 exists_different`
+for others: the good copy is kept). Its `chain_break` clears once the
+previous log here is replaced by the copy it names (or that previous log's
+own check fails, which never makes the next one fail).
+
 **Replacing a failed log.** A log whose check is `failed` stays on the car,
 and the app's *Resend all* sends it (and its sidecar) again under the same
-name. While the stored log's check is `failed`, a different copy of the log
-or of its sidecar is taken in its place: it is uploaded as usual (offset 0,
-then resumed; `status` answers `partial` meanwhile), the old copy stays until
-the new one is all here and its SHA-256 matched, then the new one replaces it
+name. While the stored log's own check is failed (`mismatch`,
+`bad_signature`, a `chain_break` from its own bad chain fields, or
+`unsigned` with its sidecar here), a different copy of the log or of its
+sidecar is taken in its place: it is uploaded as usual (offset 0, then
+resumed; `status` answers `partial` meanwhile), the old copy stays until the
+new one is all here and its SHA-256 matched, then the new one replaces it
 (`201` with `"replaced": true`), its check is `pending` and it is checked
-again. The log's data is taken out of the index first (it was only indexed if
-the owner used it anyway; that choice is dropped with the old copy). A log
-whose check is `verified` or `pending` is never replaced: a different copy
-gets `409 exists_different`. Sending the same bytes again answers `201` with
-`"already": true`, as before, for any check.
+again. Until that check is made, the other half of the pair (the sidecar
+after its log, or the log after its sidecar, sent right after or at the same
+time) and the same file again are still taken in place of the old ones, so
+send both halves; once checked, the same rules apply again. Whether the old
+copy may be replaced is decided again, at the moment of the swap, from the
+stored check: if it was verified meanwhile (the owner trusted the car's new
+key), the new copy is dropped and the answer is `409 exists_different`. The
+log's data is taken out of the index first (it was only indexed if the owner
+used it anyway; that choice is dropped with the old copy). A log whose check
+is `verified`, `pending` for any other reason, or `failed` only by a
+`chain_break` worked out from the previous log (above) is never replaced: a
+different copy gets `409 exists_different`. Sending the same bytes again
+answers `201` with `"already": true`, as before, for any check.
 
 ## 3. Upload a file (in chunks, resumable)
 
@@ -505,7 +530,7 @@ mismatch at that log. It never changes a log's check.
 | 404 | `off` / `not_found` | Uploads are turned off, or an unknown address. Try again later (hours). |
 | 409 | `offset_mismatch` | `Upload-Offset` is not what the server has: resume at `received`. |
 | 409 | `length_changed` | A different `Upload-Length` than the upload already started. |
-| 409 | `exists_different` | A different file with this name is complete here and its check is not `failed` (a failed log is replaced instead; see "Which files are already here"): rename (next `seq`) and report it. |
+| 409 | `exists_different` | A different file with this name is complete here and its stored check did not fail (a failed log is replaced instead; see "Which files are already here"; a `chain_break` from the previous log is not this log's failure): rename (next `seq`) and report it. |
 | 409 | `busy` | Another request is uploading the same file: wait and resume. |
 | 413 | `too_large` | Over `maxFile`/`maxSidecar`. |
 | 413 | `error` | A chunk over `maxChunk` (16 MiB), a body over 17 MiB, or a `status` body over 1 MiB. Send smaller chunks. |
