@@ -1,13 +1,13 @@
 {
-  "generatedFrom": "tools/contract/routes.js (static reading of the source; regenerate with `node tools/contract/routes.js`)",
+  "generatedFrom": "Originally tools/contract/routes.js (former Node source); new Rust routes maintained by hand with lean/src/wire/routes.rs. See tools/contract/README.md.",
   "totals": {
-    "serverRoutes": 196,
-    "serverRouterRoutes": 176,
+    "serverRoutes": 197,
+    "serverRouterRoutes": 177,
     "serverInlineRoutes": 20,
-    "serverApiRoutes": 187,
-    "serverDistinctApiPaths": 162,
+    "serverApiRoutes": 188,
+    "serverDistinctApiPaths": 163,
     "byAccess": {
-      "admin": 98,
+      "admin": 99,
       "can-now-token": 2,
       "can-token": 3,
       "metrics-token": 1,
@@ -3152,6 +3152,20 @@
         "horizon",
         "sentry-six"
       ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/converter/previews/:id/images/:asset",
+      "area": "Converter and encoder",
+      "auth": "session",
+      "access": "admin",
+      "confirmPassword": false,
+      "kind": "router",
+      "response": "binary",
+      "query": [],
+      "source": "lean/src/wire/converter_preview.rs:image",
+      "callSites": 1,
+      "calledFrom": ["sentry-six"]
     },
     {
       "method": "POST",

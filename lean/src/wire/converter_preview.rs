@@ -25,8 +25,8 @@ pub struct Inventory<'a> {
 /// clip is a last resort, never a second pick beside an event. Event ids are
 /// Recording::event_id; Recent drives use Recording::id (they have no event id).
 /// The preview runner, not this selector, decides the actual six-second window.
-pub fn pick_clips(inv: &Inventory<'_>, vehicle_tz: &str, exclude: &[String], want: usize) -> Vec<PreviewClip> {
-    pick_clips_with(inv, vehicle_tz, exclude, want, &|path, at| frame_lumas(inv.ffmpeg, path, at))
+pub fn pick_clips(inv: &Inventory<'_>, vehicle_tz: &str, exclude: &[String], want: usize, cancel: &Arc<AtomicBool>) -> Vec<PreviewClip> {
+    pick_clips_with(inv, vehicle_tz, exclude, want, cancel, &|path, at| frame_lumas(inv.ffmpeg, path, at, cancel))
 }
 
 type Decode<'a> = dyn Fn(&Path, [i64; 3]) -> Option<[f64; 3]> + 'a;
@@ -81,12 +81,13 @@ fn visible(source: &Source, center_ms: i64, decode: &Decode<'_>) -> bool {
 
 struct Event<'a> { rec: &'a Recording, id: &'a str, when: String, at: i64, kind: &'static str }
 
-fn event_clip(inv: &Inventory<'_>, event: &Event<'_>, zone: &str, decode: &Decode<'_>) -> Option<PreviewClip> {
+fn event_clip(inv: &Inventory<'_>, event: &Event<'_>, zone: &str, cancel: &AtomicBool, decode: &Decode<'_>) -> Option<PreviewClip> {
     let mut clips: Vec<_> = event.rec.clip_rels().filter(|rel| original_front(inv, rel))
         .filter_map(|rel| Some((rel, local_ms(clip_time(rel)?, zone))))
         .filter(|(_, start)| *start <= event.at).collect();
     clips.sort_by_key(|(_, start)| std::cmp::Reverse(*start));
     for (rel, start) in clips {
+        if cancel.load(Ordering::SeqCst) { return None; }
         let Some(src) = source(inv, rel) else { continue };
         let center_ms = event.at - start;
         if visible(&src, center_ms, decode) {
@@ -96,11 +97,11 @@ fn event_clip(inv: &Inventory<'_>, event: &Event<'_>, zone: &str, decode: &Decod
     None
 }
 
-fn pick_clips_with(inv: &Inventory<'_>, vehicle_tz: &str, exclude: &[String], want: usize, decode: &Decode<'_>) -> Vec<PreviewClip> {
+fn pick_clips_with(inv: &Inventory<'_>, vehicle_tz: &str, exclude: &[String], want: usize, cancel: &AtomicBool, decode: &Decode<'_>) -> Vec<PreviewClip> {
     let zone = if vehicle_tz.is_empty() { "UTC" } else { vehicle_tz };
-    if want == 0 || !tz::valid(zone) || !inv.state.scanned || inv.state.root != inv.vehicle.source_key() { return Vec::new(); }
+    if cancel.load(Ordering::SeqCst) || want == 0 || !tz::valid(zone) || !inv.state.scanned || inv.state.root != inv.vehicle.source_key() { return Vec::new(); }
     let recordings: Vec<_> = inv.state.recordings.iter().filter(|r| r.vehicle_id == inv.vehicle.id).collect();
-    let mut events: Vec<_> = recordings.iter().filter_map(|&rec| {
+    let mut events: Vec<_> = recordings.iter().take_while(|_| !cancel.load(Ordering::SeqCst)).filter_map(|&rec| {
         let kind = match rec.typ { "SavedClips" => "saved", "SentryClips" => "sentry", _ => return None };
         let id = rec.event_id.as_deref()?;
         if exclude.iter().any(|x| x == id) { return None; }
@@ -110,16 +111,17 @@ fn pick_clips_with(inv: &Inventory<'_>, vehicle_tz: &str, exclude: &[String], wa
         Some(Event { rec, id, at: event_ms(&when, zone)?, when, kind })
     }).collect();
     events.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| a.rec.id.cmp(&b.rec.id)));
-    let mut saved = events.iter().filter(|e| e.kind == "saved");
-    let mut sentry = events.iter().filter(|e| e.kind == "sentry");
+    let mut saved = events.iter().filter(|e| e.kind == "saved").take(8);
+    let mut sentry = events.iter().filter(|e| e.kind == "sentry").take(8);
     let mut picks: Vec<PreviewClip> = Vec::new();
     loop {
         let before = picks.len();
         for events in [&mut saved as &mut dyn Iterator<Item = &Event<'_>>, &mut sentry] {
             if picks.len() == want { return picks; }
             for event in events {
+                if cancel.load(Ordering::SeqCst) { return Vec::new(); }
                 if picks.iter().any(|p| p.event_id == event.id) { continue; }
-                if let Some(clip) = event_clip(inv, event, zone, decode) { picks.push(clip); break; }
+                if let Some(clip) = event_clip(inv, event, zone, cancel, decode) { picks.push(clip); break; }
             }
         }
         if picks.len() == before { break; }
@@ -134,7 +136,10 @@ fn pick_clips_with(inv: &Inventory<'_>, vehicle_tz: &str, exclude: &[String], wa
         .collect();
     recent.sort_by_key(|(_, _, time)| std::cmp::Reverse(local_ms(*time, zone)));
     let mut days: HashMap<String, HashMap<String, Value>> = HashMap::new();
+    let mut checked = 0;
     for (rec, rel, time) in recent {
+        if cancel.load(Ordering::SeqCst) { return Vec::new(); }
+        if checked == 8 { break; }
         let day = &inv.state.file_list.get(rel).unwrap().day;
         let speeds = days.entry(day.clone()).or_insert_with(|| index.day(&inv.vehicle.id, day).into_iter().collect());
         let Some(speeds) = speeds.get(rel).and_then(Value::as_array) else { continue };
@@ -142,6 +147,7 @@ fn pick_clips_with(inv: &Inventory<'_>, vehicle_tz: &str, exclude: &[String], wa
         let Some(second) = speeds.iter().position(|s| s.as_f64().is_some_and(|s| s.is_finite() && s > 10.0 / 3.6)) else { continue };
         let Some(src) = source(inv, rel) else { continue };
         let center_ms = second as i64 * 1000;
+        checked += 1;
         if visible(&src, center_ms, decode) {
             picks.push(PreviewClip { source: src.path, center_ms, kind: "recent", event_id: rec.id.clone(),
                 when: (time + chrono::Duration::seconds(second as i64)).format("%Y-%m-%dT%H:%M:%S").to_string() });
@@ -151,17 +157,18 @@ fn pick_clips_with(inv: &Inventory<'_>, vehicle_tz: &str, exclude: &[String], wa
     picks
 }
 
-fn frame_lumas(ffmpeg: &str, path: &Path, at: [i64; 3]) -> Option<[f64; 3]> {
+fn frame_lumas(ffmpeg: &str, path: &Path, at: [i64; 3], cancel: &Arc<AtomicBool>) -> Option<[f64; 3]> {
     let runner = BoundedRunner { timeout_ms: 10_000, max_output_bytes: 16 * 1024, grace_ms: 200 };
     let mut means = [0.0; 3];
     for (mean, ms) in means.iter_mut().zip(at) {
+        if cancel.load(Ordering::SeqCst) { return None; }
         // Expand limited-range video to 0..255 before measuring: nominal black
         // at Y=16 must be rejected. Only text statistics leave the tiny filter.
         let seek = format!("{:.3}", ms as f64 / 1000.0);
         let args = ["-nostdin", "-v", "error", "-ss", &seek, "-i", path.to_str()?, "-map", "0:v:0", "-an", "-sn", "-dn",
             "-vf", "scale=64:-2:out_range=full,format=yuv444p,signalstats,metadata=mode=print:key=lavfi.signalstats.YAVG:file=-",
             "-frames:v", "1", "-f", "null", "-"].map(String::from);
-        let r = runner.run(ffmpeg, &args, &RunOptions::default()).ok()?;
+        let r = runner.run(ffmpeg, &args, &RunOptions { cancel: Some(cancel.clone()), ..Default::default() }).ok()?;
         if r.status != Some(0) || r.error.is_some() || r.timed_out || r.aborted || r.output_limit_exceeded { return None; }
         *mean = r.stdout.lines().find_map(|l| l.strip_prefix("lavfi.signalstats.YAVG="))?.trim().parse().ok()?;
     }
@@ -227,7 +234,7 @@ mod tests {
     }
     fn bright(_: &Path, _: [i64; 3]) -> Option<[f64; 3]> { Some([60.0; 3]) }
     fn select(v: &Vehicle, state: &VehicleState, speed_index: Option<&SpeedIndex>, exclude: &[String], want: usize) -> Vec<PreviewClip> {
-        pick_clips_with(&Inventory { vehicle: v, state, speed_index, ffmpeg: "ffmpeg" }, &v.timezone, exclude, want, &bright)
+        pick_clips_with(&Inventory { vehicle: v, state, speed_index, ffmpeg: "ffmpeg" }, &v.timezone, exclude, want, &AtomicBool::new(false), &bright)
     }
     fn ids(picks: &[PreviewClip]) -> Vec<&str> { picks.iter().map(|p| p.event_id.as_str()).collect() }
 
@@ -362,12 +369,79 @@ mod tests {
         let dim = f.event("SavedClips", "2026-06-02", Some("2026-06-02T21:25:30"));
         let (v, st) = f.snapshot();
         let inv = Inventory { vehicle: &v, state: &st, speed_index: None, ffmpeg: "ffmpeg" };
-        let picks = pick_clips_with(&inv, &v.timezone, &[], 2, &|p, at| {
+        let picks = pick_clips_with(&inv, &v.timezone, &[], 2, &AtomicBool::new(false), &|p, at| {
             assert_eq!(at, [29000, 30000, 31000]);
             Some(if p.to_str().unwrap().contains(&dark) { [15.9; 3] } else { [16.0; 3] })
         });
         assert_eq!(ids(&picks), [dim]);
-        assert!(pick_clips_with(&inv, &v.timezone, &[], 2, &|_, _| None).is_empty());
+        assert!(pick_clips_with(&inv, &v.timezone, &[], 2, &AtomicBool::new(false), &|_, _| None).is_empty());
+    }
+
+    #[test]
+    fn near_black_candidates_are_bounded_per_kind() {
+        let f = Fixture::new("preview-bounded-black");
+        for kind in ["SavedClips", "SentryClips"] {
+            for day in 1..=12 {
+                let date = format!("2026-06-{day:02}");
+                f.event(kind, &date, Some(&format!("{date}T21:25:30")));
+            }
+        }
+        let (v, st) = f.snapshot();
+        let inv = Inventory { vehicle: &v, state: &st, speed_index: None, ffmpeg: "ffmpeg" };
+        let mut counts = std::collections::HashMap::new();
+        let counts = std::cell::RefCell::new(&mut counts);
+        assert!(pick_clips_with(&inv, &v.timezone, &[], 2, &AtomicBool::new(false), &|path, _| {
+            let kind = if path.to_str().unwrap().contains("SavedClips") { "saved" } else { "sentry" };
+            *counts.borrow_mut().entry(kind).or_insert(0) += 1;
+            Some([0.0; 3])
+        }).is_empty());
+        assert_eq!(counts.borrow().get("saved"), Some(&8));
+        assert_eq!(counts.borrow().get("sentry"), Some(&8));
+    }
+
+    #[test]
+    fn selection_observes_cancel_before_and_between_candidates() {
+        let f = Fixture::new("preview-cancel-selection");
+        for day in 1..=3 {
+            let date = format!("2026-06-{day:02}");
+            f.event("SavedClips", &date, Some(&format!("{date}T21:25:30")));
+        }
+        let (v, st) = f.snapshot();
+        let inv = Inventory { vehicle: &v, state: &st, speed_index: None, ffmpeg: "ffmpeg" };
+        let cancel = AtomicBool::new(true);
+        let count = std::cell::Cell::new(0);
+        let decode = |_: &Path, _: [i64; 3]| {
+            count.set(count.get() + 1);
+            cancel.store(true, Ordering::SeqCst);
+            Some([0.0; 3])
+        };
+        assert!(pick_clips_with(&inv, &v.timezone, &[], 2, &cancel, &decode).is_empty());
+        assert_eq!(count.get(), 0);
+        cancel.store(false, Ordering::SeqCst);
+        assert!(pick_clips_with(&inv, &v.timezone, &[], 2, &cancel, &decode).is_empty());
+        assert_eq!(count.get(), 1);
+    }
+
+    #[test]
+    fn cancelling_near_black_decode_stops_the_child_process() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = crate::converter::testutil::tempdir().unwrap();
+        let decoder = dir.path().join("decode");
+        let reached = dir.path().join("reached");
+        fs::write(&decoder, format!("#!/bin/sh\ntouch '{}'\nexec sleep 30\n", reached.display())).unwrap();
+        fs::set_permissions(&decoder, fs::Permissions::from_mode(0o755)).unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let signal = cancel.clone();
+        let started = Instant::now();
+        let monitor = std::thread::spawn(move || {
+            while !reached.exists() && started.elapsed() < Duration::from_secs(3) { std::thread::sleep(Duration::from_millis(10)); }
+            let spawned = reached.exists();
+            signal.store(true, Ordering::SeqCst);
+            assert!(spawned, "the decoder actually started before cancellation");
+        });
+        assert!(frame_lumas(decoder.to_str().unwrap(), Path::new("synthetic.mp4"), [0, 1000, 2000], &cancel).is_none());
+        monitor.join().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(4), "cancellation must not wait for the 10-second decode timeout");
     }
 
     #[test]
@@ -382,8 +456,8 @@ mod tests {
             assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
             outputs.push(path);
         }
-        let dark = frame_lumas(&ffmpeg, &outputs[0], [1000, 2000, 3000]).unwrap();
-        let detail = frame_lumas(&ffmpeg, &outputs[1], [1000, 2000, 3000]).unwrap();
+        let dark = frame_lumas(&ffmpeg, &outputs[0], [1000, 2000, 3000], &Arc::new(AtomicBool::new(false))).unwrap();
+        let detail = frame_lumas(&ffmpeg, &outputs[1], [1000, 2000, 3000], &Arc::new(AtomicBool::new(false))).unwrap();
         assert!(dark.iter().all(|v| *v < 16.0), "{dark:?}");
         assert!(detail.iter().all(|v| *v > 16.0), "{detail:?}");
     }
@@ -399,7 +473,7 @@ type Progress = Arc<dyn Fn(Value) + Send + Sync>;
 enum Blocker { Conversion(String), Benchmark }
 
 trait PreviewBackend: Send + Sync {
-    fn pick(&self, vehicle: &str, exclude: &[String], want: usize) -> PreviewResult<Vec<PreviewClip>>;
+    fn pick(&self, vehicle: &str, exclude: &[String], want: usize, cancel: &Arc<AtomicBool>) -> PreviewResult<Vec<PreviewClip>>;
     fn run(&self, clip: &PreviewClip, levels: &[(&str, Value)], work: &Path, cancel: &AtomicBool,
         cached_only: bool, progress: &dyn Fn(Value)) -> PreviewResult<Option<Vec<LevelResult>>>;
     fn blocker(&self) -> PreviewResult<Option<Blocker>>;
@@ -428,6 +502,8 @@ struct PreviewJob {
     request: Value,
     assets: HashMap<String, PathBuf>,
     created: Instant,
+    waiting_only: bool,
+    finished: bool,
 }
 struct Request { vehicle: String, levels: Levels, exclude: Vec<String>, pause: bool }
 
@@ -492,11 +568,11 @@ impl Previews {
                 }
                 return Err("PREVIEW_ACTIVE".into());
             }
-            jobs.entries.retain(|_, j| j.created.elapsed() < Duration::from_secs(86_400));
+            jobs.entries.retain(|_, j| !j.finished || j.created.elapsed() < Duration::from_secs(86_400));
             if jobs.entries.len() >= 32 {
-                if let Some(old) = jobs.entries.iter().min_by_key(|(_, j)| j.created).map(|(id, _)| id.clone()) { jobs.entries.remove(&old); }
+                if let Some(old) = jobs.entries.iter().filter(|(_, j)| j.finished).min_by_key(|(_, j)| j.created).map(|(id, _)| id.clone()) { jobs.entries.remove(&old); }
             }
-            jobs.entries.insert(id.clone(), PreviewJob { answer: json!({"state":"running", "clips":[]}), cancel: cancel.clone(), pause: pause.clone(), request: identity, assets: HashMap::new(), created: Instant::now() });
+            jobs.entries.insert(id.clone(), PreviewJob { answer: json!({"state":"running", "clips":[]}), cancel: cancel.clone(), pause: pause.clone(), request: identity, assets: HashMap::new(), created: Instant::now(), waiting_only: true, finished: false });
             jobs.active = Some(id.clone());
         }
         // A cache lookup never falls through to extraction/encoding. Complete a
@@ -522,9 +598,9 @@ impl Previews {
         Ok(json!({"id":id}))
     }
 
-    fn prepare(&self, id: &str, req: &Request, cancel: &AtomicBool) -> PreviewResult<(Vec<(PreviewClip, Option<Vec<LevelResult>>)>, Vec<String>)> {
+    fn prepare(&self, id: &str, req: &Request, cancel: &Arc<AtomicBool>) -> PreviewResult<(Vec<(PreviewClip, Option<Vec<LevelResult>>)>, Vec<String>)> {
         let mut exclude = req.exclude.clone();
-        let picks = self.backend.pick(&req.vehicle, &exclude, 2)?;
+        let picks = self.backend.pick(&req.vehicle, &exclude, 2, cancel)?;
         let mut events = picks.iter().filter(|p| p.kind != "recent").count();
         exclude.extend(picks.iter().map(|p| p.event_id.clone()));
         let mut clips = vec![];
@@ -534,7 +610,7 @@ impl Previews {
                 match self.backend.run(&clip, &req.levels, &self.work, cancel, true, &|e| self.event(id, &clip, e)) {
                     Err(e) if e == "PREVIEW_EVENT_OUTSIDE_WINDOW" => {
                         if clip.kind != "recent" { events -= 1; }
-                        let Some(next) = self.backend.pick(&req.vehicle, &exclude, 1)?.pop() else { break };
+                        let Some(next) = self.backend.pick(&req.vehicle, &exclude, 1, cancel)?.pop() else { break };
                         // Excluding the other reserved event can make the picker
                         // offer Recent. It is still a last resort for the pair.
                         if next.kind == "recent" && events > 0 { break; }
@@ -556,7 +632,10 @@ impl Previews {
             let waiting = match &blocker { Blocker::Conversion(_) => "conversion", Blocker::Benchmark => "benchmark" };
             self.state(id, "waiting", Some(waiting));
             if let Blocker::Conversion(job) = blocker {
-                if pause.load(Ordering::SeqCst) && paused.is_none() && self.backend.pause(&job)? { *paused = Some(job); }
+                if pause.load(Ordering::SeqCst) && paused.is_none() {
+                    self.begin_work(id)?;
+                    if self.backend.pause(&job)? { *paused = Some(job); }
+                }
             }
             // pause() is a request. Do not begin until all workers have parked.
             let guard = self.jobs.0.lock().unwrap();
@@ -564,7 +643,17 @@ impl Previews {
         }
     }
 
-    fn run(&self, id: &str, req: Request, clips: Vec<(PreviewClip, Option<Vec<LevelResult>>)>, mut exclude: Vec<String>, cancel: &AtomicBool, pause: &AtomicBool) {
+    // Serialize cancellation with leaving a pure wait. Once encoding or a pause
+    // can own resources, keep the slot until cleanup/resume has finished.
+    fn begin_work(&self, id: &str) -> PreviewResult<()> {
+        let mut jobs = self.jobs.0.lock().unwrap();
+        let job = jobs.entries.get_mut(id).ok_or("PREVIEW_NOT_FOUND")?;
+        if job.cancel.load(Ordering::SeqCst) { return Err("CANCELLED".into()); }
+        job.waiting_only = false;
+        Ok(())
+    }
+
+    fn run(&self, id: &str, req: Request, clips: Vec<(PreviewClip, Option<Vec<LevelResult>>)>, mut exclude: Vec<String>, cancel: &Arc<AtomicBool>, pause: &AtomicBool) {
         let mut paused = None;
         let mut made = vec![];
         let mut events = clips.iter().filter(|(clip, _)| clip.kind != "recent").count();
@@ -573,11 +662,12 @@ impl Previews {
                 if cached.is_some() { continue; }
                 loop {
                     self.wait(id, cancel, pause, &mut paused)?;
+                    self.begin_work(id)?;
                     match self.backend.run(&clip, &req.levels, &self.work, cancel, false, &|e| self.event(id, &clip, e)) {
                         Err(e) if e == "PREVIEW_BUSY" => continue, // a job won admission after the idle check
                         Err(e) if e == "PREVIEW_EVENT_OUTSIDE_WINDOW" => {
                             if clip.kind != "recent" { events -= 1; }
-                            let Some(next) = self.backend.pick(&req.vehicle, &exclude, 1)?.pop() else { break };
+                            let Some(next) = self.backend.pick(&req.vehicle, &exclude, 1, cancel)?.pop() else { break };
                             if next.kind == "recent" && events > 0 { break; }
                             if next.kind != "recent" { events += 1; }
                             exclude.push(next.event_id.clone()); clip = next;
@@ -662,7 +752,10 @@ impl Previews {
             job.answer["state"] = json!(state); job.answer.as_object_mut().unwrap().remove("waitingFor");
             if let Err(e) = result { if state != "cancelled" { job.answer["error"] = json!(public_error(&e)); } }
             if state != "done" { job.assets.clear(); job.answer["clips"] = json!([]); }
-            let answer = job.answer.clone(); jobs.active = None; self.jobs.1.notify_all(); answer
+            job.finished = true;
+            let answer = job.answer.clone();
+            if jobs.active.as_deref() == Some(id) { jobs.active = None; }
+            self.jobs.1.notify_all(); answer
         };
         let mut event = answer; event["type"] = json!("preview"); event["id"] = json!(id); (self.progress)(event);
     }
@@ -679,9 +772,12 @@ impl Previews {
             let mut jobs = self.jobs.0.lock().unwrap();
             let job = jobs.entries.get_mut(id).ok_or("PREVIEW_NOT_FOUND")?;
             if ["running", "waiting"].contains(&job.answer["state"].as_str().unwrap_or("")) {
+                let release = job.answer["state"] == "waiting" && job.waiting_only;
                 job.cancel.store(true, Ordering::SeqCst); job.answer["state"] = json!("cancelled");
                 job.created = Instant::now();
-                job.answer.as_object_mut().unwrap().remove("waitingFor"); job.answer["clips"] = json!([]); job.assets.clear(); true
+                job.answer.as_object_mut().unwrap().remove("waitingFor"); job.answer["clips"] = json!([]); job.assets.clear();
+                if release && jobs.active.as_deref() == Some(id) { jobs.active = None; }
+                true
             } else { false }
         };
         self.jobs.1.notify_all();
@@ -693,7 +789,7 @@ impl Previews {
         let mut jobs = self.jobs.0.lock().unwrap(); jobs.shut = true;
         for job in jobs.entries.values() { job.cancel.store(true, Ordering::SeqCst); }
         self.jobs.1.notify_all();
-        while jobs.active.is_some() { jobs = self.jobs.1.wait(jobs).unwrap(); }
+        while jobs.entries.values().any(|j| !j.finished) { jobs = self.jobs.1.wait(jobs).unwrap(); }
     }
 
     fn image(&self, id: &str, asset: &str) -> PreviewResult<Vec<u8>> {
@@ -722,14 +818,14 @@ struct HostPreview {
 }
 
 impl PreviewBackend for HostPreview {
-    fn pick(&self, vehicle: &str, exclude: &[String], want: usize) -> PreviewResult<Vec<PreviewClip>> {
+    fn pick(&self, vehicle: &str, exclude: &[String], want: usize, cancel: &Arc<AtomicBool>) -> PreviewResult<Vec<PreviewClip>> {
         let srv = self.srv.upgrade().ok_or("PREVIEW_UNAVAILABLE")?;
         let vehicle = srv.app().vehicle(vehicle).ok_or("VEHICLE_NOT_FOUND")?;
         self.ctx.resolve_path(&vehicle.root.to_string_lossy(), true).ok_or("PATH_NOT_ALLOWED")?;
         let Some(state) = srv.app().state_of(&vehicle.id) else { return Ok(vec![]) };
         let speed_index = srv.viewer().map(|v| v.speed_index.as_ref());
         let inv = Inventory { vehicle: &vehicle, state: &state, speed_index, ffmpeg: &srv.state.config.ffmpeg };
-        Ok(pick_clips(&inv, &vehicle.timezone, exclude, want))
+        Ok(pick_clips(&inv, &vehicle.timezone, exclude, want, cancel))
     }
     fn run(&self, clip: &PreviewClip, levels: &[(&str, Value)], work: &Path, cancel: &AtomicBool,
         cached_only: bool, progress: &dyn Fn(Value)) -> PreviewResult<Option<Vec<LevelResult>>> {
@@ -837,7 +933,8 @@ mod channel_tests {
         fail: AtomicBool,
     }
     impl PreviewBackend for FakeBackend {
-        fn pick(&self, vehicle: &str, exclude: &[String], want: usize) -> PreviewResult<Vec<PreviewClip>> {
+        fn pick(&self, vehicle: &str, exclude: &[String], want: usize, cancel: &Arc<AtomicBool>) -> PreviewResult<Vec<PreviewClip>> {
+            if cancel.load(Ordering::SeqCst) { return Err("CANCELLED".into()); }
             if vehicle != "car" { return Err("VEHICLE_NOT_FOUND".into()); }
             let mut ids = ["saved", "sentry", "next"].into_iter()
                 .filter(|id| !exclude.iter().any(|e| e == id) && (*id != "next" || !self.recent_fallback.load(Ordering::SeqCst)))
@@ -1033,6 +1130,29 @@ mod channel_tests {
         assert_eq!(h.previews.start(&json!({"vehicleId":"car"})).unwrap_err(), "PREVIEW_ACTIVE");
         h.previews.cancel(&id).unwrap(); h.until(&id, "cancelled");
         assert_eq!(h.backend.entered.load(Ordering::SeqCst), 0); assert!(h.backend.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn cancelling_waiting_preview_releases_slot_before_worker_finishes() {
+        let h = Harness::new();
+        *h.backend.busy.lock().unwrap() = Some(Blocker::Benchmark);
+        // Freeze the old worker before its finish callback, without a timing race.
+        {
+            let mut jobs = h.previews.jobs.0.lock().unwrap();
+            jobs.active = Some("old".into());
+            jobs.entries.insert("old".into(), PreviewJob { answer: json!({"state":"waiting", "clips":[]}),
+                cancel: Arc::new(AtomicBool::new(false)), pause: Arc::new(AtomicBool::new(false)),
+                request: Value::Null, assets: HashMap::new(), created: Instant::now(), waiting_only: true, finished: false });
+        }
+        h.previews.cancel(&json!({"id":"old"})).unwrap();
+        let free = h.previews.jobs.0.lock().unwrap().active.is_none();
+        // Finish even on RED so the harness shutdown cannot wait for this synthetic worker.
+        if !free { h.previews.finish("old", Err("CANCELLED".into())); }
+        assert!(free, "waiting cancellation releases admission immediately");
+        let next = h.start(false);
+        h.previews.finish("old", Err("CANCELLED".into()));
+        assert_eq!(h.previews.jobs.0.lock().unwrap().active.as_deref(), next["id"].as_str(), "old finish must not clear the new preview");
+        h.previews.cancel(&next).unwrap();
     }
     #[test]
     fn retries_outside_window_for_that_slot() {

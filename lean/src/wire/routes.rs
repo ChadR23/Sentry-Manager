@@ -1,6 +1,6 @@
-//! Every route of server/index.js's router (docs/api-contract.json, in its order) that
-//! core does not register itself, and the area that answers it. Generated from the
-//! contract.
+//! Routes from docs/api-contract.json, in its order, that core does not register
+//! itself, and the area that answers each. Originally generated from the Node
+//! contract; new Rust routes are maintained here and in the contract together.
 
 use super::Area;
 

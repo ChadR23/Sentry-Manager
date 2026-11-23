@@ -89,7 +89,7 @@ pub(super) fn save(ffmpeg: &str, video: &Path, probe: &Probe, index: usize, crop
     let frame = video.with_extension("jpg");
     let zoom = video.with_file_name(format!("{}-zoom.jpg", video.file_stem().unwrap().to_string_lossy()));
     for (target, filter) in [(&frame, "null".into()), (&zoom, format!("crop={}:{}:{}:{}:exact=1", crop.width, crop.height, crop.x, crop.y))] {
-        // Controller ruling: FFmpeg MJPEG qscale 2 is the accepted quality-90 equivalent.
+        // FFmpeg MJPEG qscale 2 preserves fine detail at roughly JPEG quality 90.
         // Both images come from raw pixels; the zoom never recompresses the full JPEG.
         command(ffmpeg, &words(&["-nostdin", "-v", "error", "-n", "-f", "rawvideo", "-pixel_format", "rgb24", "-video_size", &format!("{}x{}", probe.width, probe.height),
             "-i", raw.to_str().unwrap(), "-vf", &filter, "-frames:v", "1", "-c:v", "mjpeg", "-q:v", "2", "-pix_fmt", "yuvj444p", target.to_str().unwrap()]), cancel)?;
